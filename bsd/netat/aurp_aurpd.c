@@ -139,6 +139,7 @@ aurpd_start()
 		sopt.sopt_level   = SOL_SOCKET;
 		sopt.sopt_name    = SO_RCVBUF;
 		sopt.sopt_dir     = SOPT_SET;
+		sopt.sopt_p		  = NULL;
 		if ((error = sosetopt(so, &sopt)) != 0)
 			goto out;
 	}
@@ -158,6 +159,7 @@ aurpd_start()
 		sopt.sopt_level   = SOL_SOCKET;
 		sopt.sopt_name    = SO_SNDBUF;
 		sopt.sopt_dir     = SOPT_SET;
+		sopt.sopt_p		  = NULL;
 		if ((error = sosetopt(so, &sopt)) != 0)
 			goto out;
 	}

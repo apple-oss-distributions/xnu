@@ -68,8 +68,8 @@
 #include <kern/spl.h>
 #include <kern/syscall_subr.h>
 #include <kern/sync_lock.h>
-#include <kern/sf.h>
 #include <kern/mk_sp.h>	/*** ??? fix so this can be removed ***/
+#include <kern/processor.h>
 #include <mach_prof.h>
 #include <mach/rpc.h>
 
@@ -124,9 +124,6 @@ thread_terminate_internal(
 	task_t		task;
 	struct ipc_port	*iplock;
 	kern_return_t	ret;
-#if	NCPUS > 1
-	boolean_t	held;
-#endif	/* NCPUS > 1 */
 
 #if	THREAD_SWAPPER
 	thread_swap_disable(thr_act);
@@ -138,6 +135,9 @@ thread_terminate_internal(
 		return(KERN_TERMINATED);
 	}
 
+	act_disable_task_locked(thr_act);
+	ret = act_abort(thr_act,FALSE);
+
 #if	NCPUS > 1
 	/* 
 	 * Make sure this thread enters the kernel
@@ -146,34 +146,17 @@ thread_terminate_internal(
 		thread_hold(thr_act);
 		act_unlock_thread(thr_act);
 
-		if (!thread_stop_wait(thread)) {
+		if (thread_stop_wait(thread))
+			thread_unstop(thread);
+		else
 			ret = KERN_ABORTED;
-			(void)act_lock_thread(thr_act);
-			thread_release(thr_act);
-			act_unlock_thread(thr_act);
-			return (ret);
-		}
 
-		held = TRUE;
-		(void)act_lock_thread(thr_act);
-	} else {
-		held = FALSE;
-	}
-#endif	/* NCPUS > 1 */
-
-	assert(thr_act->active);
-	act_disable_task_locked(thr_act);
-	ret = act_abort(thr_act,FALSE);
-	act_unlock_thread(thr_act);
-
-#if	NCPUS > 1
-	if (held) {
-		thread_unstop(thread);
 		(void)act_lock_thread(thr_act);
 		thread_release(thr_act);
-		act_unlock_thread(thr_act);
 	}
 #endif	/* NCPUS > 1 */
+
+	act_unlock_thread(thr_act);
 	return(ret);
 }
 
@@ -211,9 +194,10 @@ thread_terminate(
 	 * code - and all threads finish their own termination in the
 	 * special handler APC.
 	 */
-	if (((thr_act->task == kernel_task) || (thr_act->kernel_loaded == TRUE))
-	    && (current_act() == thr_act)) {
-		ast_taken(FALSE, AST_APC, 0);
+	if (	(	thr_act->task == kernel_task	||
+				thr_act->kernel_loaded == TRUE	) 	&& 
+			current_act() == thr_act					) {
+		ast_taken(AST_APC, FALSE);
 		panic("thread_terminate(): returning from ast_taken() for %x kernel activation\n", thr_act);
         }
 
@@ -364,8 +348,6 @@ thread_depress_abort(
 {
     register thread_t		thread;
 	kern_return_t			result;
-    sched_policy_t			*policy;
-    spl_t					s;
 
     if (thr_act == THR_ACT_NULL)
 		return (KERN_INVALID_ARGUMENT);
@@ -378,13 +360,7 @@ thread_depress_abort(
 		return (KERN_TERMINATED);
     }
 
-    s = splsched();
-    thread_lock(thread);
-    policy = &sched_policy[thread->policy];
-    thread_unlock(thread);
-    splx(s);
-
-    result = policy->sp_ops.sp_thread_depress_abort(policy, thread);
+    result = _mk_sp_thread_depress_abort(thread, FALSE);
 
     act_unlock_thread(thr_act);
 
@@ -509,8 +485,7 @@ act_abort( thread_act_t thr_act, int chain_break )
 	thread_lock(thr_act->thread);
 	if (thr_act->thread->top_act == thr_act) {
 	    thr_act->thread->state |= TH_ABORT;
-	    if (thr_act->thread->state & TH_ABORT)
-	    	clear_wait_internal(thr_act->thread, THREAD_INTERRUPTED);
+	    clear_wait_internal(thr_act->thread, THREAD_INTERRUPTED);
 	    thread_unlock(thr_act->thread);
 	    splx(spl);
 	    install_special_handler(thr_act);
@@ -750,11 +725,7 @@ thread_get_state(
 	kern_return_t		ret;
 	thread_t		thread, nthread;
 
-#if 0 /* Grenoble - why?? */
 	if (thr_act == THR_ACT_NULL || thr_act == current_act())
-#else
-	if (thr_act == THR_ACT_NULL)
-#endif
 		return (KERN_INVALID_ARGUMENT);
 
 	thread = act_lock_thread(thr_act);
@@ -765,7 +736,7 @@ thread_get_state(
 
 	thread_hold(thr_act);
 	while (1) {
-	    	if (!thread || thr_act != thread->top_act)
+		if (!thread || thr_act != thread->top_act)
 			break;
 		act_unlock_thread(thr_act);
 		(void)thread_stop_wait(thread);
@@ -799,11 +770,7 @@ thread_set_state(
 	kern_return_t		ret;
 	thread_t		thread, nthread;
 
-#if 0 /* Grenoble - why?? */
 	if (thr_act == THR_ACT_NULL || thr_act == current_act())
-#else
-	if (thr_act == THR_ACT_NULL)
-#endif
 		return (KERN_INVALID_ARGUMENT);
 	/*
 	 * We have no kernel activations, so Utah's MO fails for signals etc.
@@ -820,7 +787,7 @@ thread_set_state(
 
 	thread_hold(thr_act);
 	while (1) {
-	    	if (!thread || thr_act != thread->top_act)
+		if (!thread || thr_act != thread->top_act)
 			break;
 		act_unlock_thread(thr_act);
 		(void)thread_stop_wait(thread);
@@ -1459,12 +1426,9 @@ install_special_handler(
 #endif	/* MACH_ASSERT */
 
 	spl = splsched();
-	if (thread)
-		thread_lock(thread);
+	thread_lock(thread);
 	install_special_handler_locked(thr_act);
-	act_set_apc(thr_act);
-	if (thread)
-		thread_unlock(thread);
+	thread_unlock(thread);
 	splx(spl);
 }
 
@@ -2246,12 +2210,34 @@ act_get_state(thread_act_t thr_act, int flavor, thread_state_t state,
 void
 act_set_apc(thread_act_t thr_act)
 {
+
+	processor_t prssr;
+	thread_t thread;
+	
+	mp_disable_preemption();
+	
 	thread_ast_set(thr_act, AST_APC);
 	if (thr_act == current_act()) {
-		mp_disable_preemption();
 		ast_propagate(thr_act->ast);
 		mp_enable_preemption();
+		return;							/* If we are current act, we can't be on the other processor so leave now */
 	}
+
+/*
+ *	Here we want to make sure that the apc is taken quickly.  Therefore, we check
+ *	if, and where, the activation is running.  If it is not running, we don't need to do 
+ *	anything.  If it is, we need to signal the other processor to trigger it to 
+ *	check the asts.  Note that there is a race here and we may end up sending a signal
+ *	after the thread has been switched off.  Hopefully this is no big deal.
+ */
+
+	thread = thr_act->thread;			/* Get the thread for the signaled activation */
+	prssr = thread->last_processor;		/* get the processor it was last on */
+	if(prssr && (cpu_data[prssr->slot_num].active_thread == thread)) {	/* Is the thread active on its processor? */
+		cause_ast_check(prssr);			/* Yes, kick it */
+	}
+	
+	mp_enable_preemption();
 }
 
 void

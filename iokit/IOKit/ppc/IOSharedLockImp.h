@@ -72,20 +72,34 @@
 
 #ifndef KERNEL
 LEAF(_ev_lock)
-LEAF(_IOSpinLock)
-	li	a6,1		// lock value
-	lwarx	a7,0,a0		// CEMV10
+	li	a6,1			// lock value
+	lwarx	a7,0,a0			// CEMV10
 9:
 	sync
-	lwarx	a7,0,a0		// read the lock
-	cmpwi	cr0,a7,0	// is it busy?
-	bne-	9b		// yes, spin
+	lwarx	a7,0,a0			// read the lock
+	cmpwi	cr0,a7,0		// is it busy?
+	bne-	9b 			// yes, spin
 	sync
-	stwcx.	a6,0,a0		// try to get the lock
-	bne-	9b		// failed, try again
+	stwcx.	a6,0,a0			// try to get the lock
+	bne-	9b 			// failed, try again
 	isync
-	blr			// got it, return
+	blr				// got it, return
 END(_ev_lock)
+
+LEAF(_IOSpinLock)
+	li	a6,1			// lock value
+	lwarx	a7,0,a0			// CEMV10
+9:
+	sync
+	lwarx	a7,0,a0			// read the lock
+	cmpwi	cr0,a7,0		// is it busy?
+	bne-	9b			// yes, spin
+	sync
+	stwcx.	a6,0,a0			// try to get the lock
+	bne-	9b			// failed, try again
+	isync
+	blr				// got it, return
+END(_IOSpinLock)
 #endif
 
 /*
@@ -97,13 +111,20 @@ END(_ev_lock)
  */
 
 LEAF(_ev_unlock)
-LEAF(_IOSpinUnlock)
 	sync
 	li	a7,0
 	stw	a7,0(a0)
 	ENABLE_PREEMPTION()
 	blr
 END(_ev_unlock)
+
+LEAF(_IOSpinUnlock)
+	sync
+	li	a7,0
+	stw	a7,0(a0)
+	ENABLE_PREEMPTION()
+	blr
+END(_IOSpinUnlock)
 
 
 /*
@@ -114,25 +135,45 @@ END(_ev_unlock)
  */
 
 LEAF(_ev_try_lock)
-LEAF(_IOTrySpinLock)
-	li	a6,1		// lock value
+	li	a6,1			// lock value
         DISABLE_PREEMPTION()
-	lwarx	a7,0,a0		// CEMV10
+	lwarx	a7,0,a0			// CEMV10
 8:
 	sync
-	lwarx	a7,0,a0		// read the lock
-	cmpwi	cr0,a7,0	// is it busy?
-	bne-	9f		// yes, give up
+	lwarx	a7,0,a0			// read the lock
+	cmpwi	cr0,a7,0		// is it busy?
+	bne-	9f			// yes, give up
 	sync
-	stwcx.	a6,0,a0		// try to get the lock
-	bne-	8b		// failed, try again
-	li	a0,1		// return TRUE
+	stwcx.	a6,0,a0			// try to get the lock
+	bne-	8b			// failed, try again
+	li	a0,1			// return TRUE
 	isync
 	blr
 9:
 	ENABLE_PREEMPTION()
-	li	a0,0		// return FALSE
+	li	a0,0			// return FALSE
 	blr
 END(_ev_try_lock)
+
+LEAF(_IOTrySpinLock)
+	li	a6,1			// lock value
+        DISABLE_PREEMPTION()
+	lwarx	a7,0,a0			// CEMV10
+8:
+	sync
+	lwarx	a7,0,a0			// read the lock
+	cmpwi	cr0,a7,0		// is it busy?
+	bne-	9f			// yes, give up
+	sync
+	stwcx.	a6,0,a0			// try to get the lock
+	bne-	8b			// failed, try again
+	li	a0,1			// return TRUE
+	isync
+	blr
+9:
+	ENABLE_PREEMPTION()
+	li	a0,0			// return FALSE
+	blr
+END(_IOTrySpinLock)
 
 #endif /* ! _IOKIT_IOSHAREDLOCKIMP_H */
