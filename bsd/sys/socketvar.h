@@ -1,21 +1,24 @@
 /*
- * Copyright (c) 2000-2002 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2003 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -159,9 +162,9 @@ struct socket {
 #define	SB_ASYNC		0x10		/* ASYNC I/O, need signals */
 #define	SB_UPCALL		0x20		/* someone wants an upcall */
 #define	SB_NOINTR		0x40		/* operations not interruptible */
+#define SB_KNOTE		0x100	/* kernel note attached */
 #ifndef __APPLE__
 #define SB_AIO		0x80		/* AIO operations queued */
-#define SB_KNOTE		0x100	/* kernel note attached */
 #else
 #define	SB_NOTIFY	(SB_WAIT|SB_SEL|SB_ASYNC)
 #define SB_RECV		0x8000		/* this is rcv sb */
@@ -194,6 +197,7 @@ struct socket {
 	struct	kextcb *so_ext;		/* NKE hook */
 	u_long	so_flags;		/* Flags */
 #define SOF_NOSIGPIPE	0x00000001
+#define SOF_NOADDRAVAIL	0x00000002	/* returns EADDRNOTAVAIL if src address is gone */
 	void	*reserved2;
 	void	*reserved3;
 	void	*reserved4;
@@ -337,9 +341,7 @@ struct sockaddr;
 struct stat;
 struct ucred;
 struct uio;
-#ifndef __APPLE
 struct knote;
-#endif
 
 /*
  * File operations on sockets.
@@ -353,6 +355,8 @@ int	soo_ioctl __P((struct file *fp, u_long cmd, caddr_t data,
 	    struct proc *p));
 int	soo_stat __P((struct socket *so, struct stat *ub));
 int	soo_select __P((struct file *fp, int which, void * wql, struct proc *p));
+int     soo_kqfilter __P((struct file *fp, struct knote *kn, struct proc *p));
+
 
 /*
  * From uipc_socket and friends

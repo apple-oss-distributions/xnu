@@ -1,21 +1,24 @@
 /*
- * Copyright (c) 2000 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2003 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -40,6 +43,8 @@
 
 #include <sys/filedesc.h>
 #include <sys/file.h>
+#include <sys/kern_audit.h>
+#include <sys/sysctl.h>
 
 /*#include <sys/sysproto.h>*/
 /*#include <sys/sysent.h>*/
@@ -570,7 +575,7 @@ semundo_adjust(p, supptr, semid, semnum, adjval)
 	/* Didn't find the right entry - create it */
 	if (adjval == 0)
 		return(0);
-	if (suptr->un_cnt != seminfo.semume) {
+	if (suptr->un_cnt != limitseminfo.semume) {
 		sunptr = &suptr->un_ent[suptr->un_cnt];
 		suptr->un_cnt++;
 		sunptr->un_adjval = adjval;
@@ -638,13 +643,15 @@ semctl(p, uap, retval)
 	struct semid_ds sbuf;
 	register struct semid_ds *semaptr;
 
+	AUDIT_ARG(svipc_cmd, cmd);
+	AUDIT_ARG(svipc_id, semid);
 	SUBSYSTEM_LOCK_AQUIRE(p);
 #ifdef SEM_DEBUG
 	printf("call to semctl(%d, %d, %d, 0x%x)\n", semid, semnum, cmd, arg);
 #endif
 
 	semid = IPCID_TO_IX(semid);
-	if (semid < 0 || semid >= seminfo.semmsl)
+	if (semid < 0 || semid >= seminfo.semmni)
 {
 #ifdef SEM_DEBUG
 		printf("Invalid semid\n");
@@ -861,7 +868,7 @@ semget(p, uap, retval)
 	printf("need to allocate an id for the request\n");
 #endif
 	if (key == IPC_PRIVATE || (semflg & IPC_CREAT)) {
-		if (nsems <= 0 || nsems > seminfo.semmsl) {
+		if (nsems <= 0 || nsems > limitseminfo.semmsl) {
 #ifdef SEM_DEBUG
 			printf("nsems out of range (0<%d<=%d)\n", nsems,
 			    seminfo.semmsl);
@@ -928,6 +935,7 @@ semget(p, uap, retval)
 
 found:
 	*retval = IXSEQ_TO_IPCID(semid, sema[semid].sem_perm);
+	AUDIT_ARG(svipc_id, *retval);
 #ifdef SEM_DEBUG
 	printf("semget is done, returning %d\n", *retval);
 #endif
@@ -960,6 +968,7 @@ semop(p, uap, retval)
 	int i, j, eval;
 	int do_wakeup, do_undos;
 
+	AUDIT_ARG(svipc_id, uap->semid);
 	SUBSYSTEM_LOCK_AQUIRE(p);
 #ifdef SEM_DEBUG
 	printf("call to semop(%d, 0x%x, %d)\n", semid, sops, nsops);
@@ -967,7 +976,7 @@ semop(p, uap, retval)
 
 	semid = IPCID_TO_IX(semid);	/* Convert back to zero origin */
 
-	if (semid < 0 || semid >= seminfo.semmsl)
+	if (semid < 0 || semid >= seminfo.semmni)
 		UNLOCK_AND_RETURN(EINVAL);
 
 	semaptr = &sema[semid];
@@ -1363,4 +1372,49 @@ unlock:
 
 	SUBSYSTEM_LOCK_RELEASE;
 }
+/* (struct sysctl_oid *oidp, void *arg1, int arg2, \
+        struct sysctl_req *req) */
+static int
+sysctl_seminfo SYSCTL_HANDLER_ARGS
+{
+	int error = 0;
+
+	error = SYSCTL_OUT(req, arg1, sizeof(int));
+	if (error || !req->newptr)
+		return(error);
+
+	SUBSYSTEM_LOCK_AQUIRE(current_proc());
+	/* Set the values only if shared memory is not initialised */
+	if ((sem == (struct sem *) 0) && 
+		(sema == (struct semid_ds *) 0) && 
+		(semu == (struct semid_ds *) 0) && 
+		(semu_list == (struct sem_undo *) 0)) {
+			if (error = SYSCTL_IN(req, arg1, sizeof(int))) {
+				goto out;
+			}
+	} else 
+		error = EINVAL;
+out:
+	SUBSYSTEM_LOCK_RELEASE;
+	return(error);
+	
+}
+
+/* SYSCTL_NODE(_kern, KERN_SYSV, sysv, CTLFLAG_RW, 0, "SYSV"); */
+extern struct sysctl_oid_list sysctl__kern_sysv_children;
+SYSCTL_PROC(_kern_sysv, KSYSV_SEMMNI, semmni, CTLTYPE_INT | CTLFLAG_RW,
+    &limitseminfo.semmni, 0, &sysctl_seminfo ,"I","semmni");
+
+SYSCTL_PROC(_kern_sysv, KSYSV_SEMMNS, semmns, CTLTYPE_INT | CTLFLAG_RW,
+    &limitseminfo.semmns, 0, &sysctl_seminfo ,"I","semmns");
+
+SYSCTL_PROC(_kern_sysv, KSYSV_SEMMNU, semmnu, CTLTYPE_INT | CTLFLAG_RW,
+    &limitseminfo.semmnu, 0, &sysctl_seminfo ,"I","semmnu");
+
+SYSCTL_PROC(_kern_sysv, KSYSV_SEMMSL, semmsl, CTLTYPE_INT | CTLFLAG_RW,
+    &limitseminfo.semmsl, 0, &sysctl_seminfo ,"I","semmsl");
+    
+SYSCTL_PROC(_kern_sysv, KSYSV_SEMUNE, semume, CTLTYPE_INT | CTLFLAG_RW,
+    &limitseminfo.semume, 0, &sysctl_seminfo ,"I","semume");
+
 

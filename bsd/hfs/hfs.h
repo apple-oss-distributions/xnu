@@ -1,27 +1,32 @@
 /*
- * Copyright (c) 2000-2002 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2003 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
 
 #ifndef __HFS__
 #define __HFS__
+
+#define HFS_SPARSE_DEV 1
 
 #include <sys/appleapiopts.h>
 
@@ -35,12 +40,16 @@
 #include <sys/vnode.h>
 #include <sys/quota.h>
 #include <sys/dirent.h>
+#include <sys/event.h>
+
+#include <vfs/vfs_journal.h>
 
 #include <hfs/hfs_format.h>
 #include <hfs/hfs_catalog.h>
 #include <hfs/hfs_cnode.h>
 #include <hfs/hfs_macos_defs.h>
 #include <hfs/hfs_encodings.h>
+#include <hfs/hfs_hotfiles.h>
 
 
 struct uio;		// This is more effective than #include <sys/uio.h> in case KERNEL is undefined...
@@ -54,6 +63,11 @@ struct hfslockf;	/* For advisory locking */
 #define HFS_LINK_MAX	32767
 
 #define HFS_MAX_DEFERED_ALLOC	(1024*1024)
+
+// 32 gigs is a "big" file (i.e. one that when deleted
+// would touch enough data that we should break it into
+// multiple separate transactions
+#define HFS_BIGFILE_SIZE (32LL * 1024LL * 1024LL * 1024LL)
 
 
 enum { kMDBSize = 512 };				/* Size of I/O transfer to read entire MDB */
@@ -99,7 +113,24 @@ extern struct timezone gTimeZone;
  * superuser may continue to allocate blocks.
  */
 #define HFS_MINFREE		1
-#define HFS_MAXRESERVE		(u_int64_t)(250*1024*1024)
+#define HFS_MAXRESERVE		((u_int64_t)(250*1024*1024))
+
+/*
+ * The system distinguishes between the desirable low-disk
+ * notifiaction levels for root volumes and non-root volumes.
+ * The various thresholds are computed as a fraction of the
+ * volume size, all capped at a certain fixed level
+ */
+ 
+#define HFS_ROOTLOWDISKTRIGGERFRACTION 5
+#define HFS_ROOTLOWDISKTRIGGERLEVEL ((u_int64_t)(250*1024*1024))
+#define HFS_ROOTLOWDISKSHUTOFFFRACTION 6
+#define HFS_ROOTLOWDISKSHUTOFFLEVEL ((u_int64_t)(375*1024*1024))
+
+#define HFS_LOWDISKTRIGGERFRACTION 1
+#define HFS_LOWDISKTRIGGERLEVEL ((u_int64_t)(50*1024*1024))
+#define HFS_LOWDISKSHUTOFFFRACTION 2
+#define HFS_LOWDISKSHUTOFFLEVEL ((u_int64_t)(75*1024*1024))
 
 /* Internal Data structures*/
 
@@ -108,6 +139,7 @@ struct vcb_t {
     int16_t 			vcbAtrb;
     int16_t			vcbFlags;
     int16_t 			vcbspare;
+    u_int32_t 			vcbJinfoBlock;
 
     u_int32_t 			vcbCrDate;
     u_int32_t 			vcbLsMod;
@@ -177,9 +209,7 @@ typedef struct vfsVCB {
 
 /* This structure describes the HFS specific mount structure data. */
 typedef struct hfsmount {
-	u_int8_t			hfs_fs_ronly;			/* Whether this was mounted as read-initially  */
-	u_int8_t			hfs_unknownpermissions;	/* Whether this was mounted with MNT_UNKNOWNPERMISSIONS */
-	u_int8_t			hfs_media_writeable;
+	u_int32_t		hfs_flags;	/* see below */
 	
 	/* Physical Description */
 	u_long				hfs_phys_block_count;	/* Num of PHYSICAL blocks of volume */
@@ -199,9 +229,6 @@ typedef struct hfsmount {
 	mode_t				hfs_file_mask;			/* mask to and with file protection bits */
 	u_long				hfs_encoding;			/* Defualt encoding for non hfs+ volumes */	
 
-	/* simple lock for shared meta renaming */
-	simple_lock_data_t	hfs_renamelock;
-
 	/* HFS Specific */
 	struct vfsVCB		hfs_vcb;
 	struct cat_desc		hfs_privdir_desc;
@@ -210,10 +237,102 @@ typedef struct hfsmount {
 	hfs_to_unicode_func_t	hfs_get_unicode;
 	unicode_to_hfs_func_t	hfs_get_hfsname;
  
+	/* Quota variables: */
 	struct quotafile	hfs_qfiles[MAXQUOTAS];    /* quota files */
+
+	/* Journaling variables: */
+	void                *jnl;           // the journal for this volume (if one exists)
+	struct vnode        *jvp;           // device where the journal lives (may be equal to devvp)
+	u_int32_t            jnl_start;     // start block of the journal file (so we don't delete it)
+	u_int32_t            jnl_size;
+	u_int32_t            hfs_jnlfileid;
+	u_int32_t            hfs_jnlinfoblkid;
+	volatile int         readers;
+	volatile int         blocker;
+	
+	/* Notification variables: */
+	unsigned long		hfs_notification_conditions;
+	u_int32_t		hfs_freespace_notify_warninglimit;
+	u_int32_t		hfs_freespace_notify_desiredlevel;
+
+	/* Metadata allocation zone variables: */
+	u_int32_t	hfs_metazone_start;
+	u_int32_t	hfs_metazone_end;
+	u_int32_t	hfs_hotfile_start;
+	u_int32_t	hfs_hotfile_end;
+	int		hfs_hotfile_freeblks;
+	int		hfs_hotfile_maxblks;
+	int		hfs_overflow_maxblks;
+	int		hfs_catalog_maxblks;
+
+	/* Hot File Clustering variables: */
+	enum hfc_stage  hfc_stage;      /* what are we up to... */
+	time_t		hfc_timebase;   /* recording period start time */
+	time_t		hfc_timeout;    /* recording period stop time */
+	void *		hfc_recdata;    /* recording data (opaque) */
+	int		hfc_maxfiles;   /* maximum files to track */
+	struct vnode *  hfc_filevp;
+
+#ifdef HFS_SPARSE_DEV
+	/* Sparse device variables: */
+	struct vnode * hfs_backingfs_rootvp;
+	int            hfs_sparsebandblks;
+#endif
 } hfsmount_t;
 
-#define hfs_private_metadata_dir	hfs_privdir_desc.cd_cnid
+
+/* HFS mount point flags */
+#define HFS_READ_ONLY             0x001
+#define HFS_UNKNOWN_PERMS         0x002
+#define HFS_WRITEABLE_MEDIA       0x004
+#define HFS_CLEANED_ORPHANS       0x008
+#define HFS_X                     0x010
+#define HFS_CASE_SENSITIVE        0x020
+#define HFS_STANDARD              0x040
+#define HFS_METADATA_ZONE         0x080
+#define HFS_FRAGMENTED_FREESPACE  0x100
+#define HFS_NEED_JNL_RESET        0x200
+
+#ifdef HFS_SPARSE_DEV
+#define HFS_HAS_SPARSE_DEVICE     0x400
+#endif
+
+
+#define hfs_global_shared_lock_acquire(hfsmp)    \
+    do { \
+       if (hfsmp->blocker) { \
+	       tsleep((caddr_t)&hfsmp->blocker, PRIBIO, "journal_blocker", 0); \
+           continue; \
+	   } \
+	   hfsmp->readers++; \
+       break; \
+	} while (1)
+
+#define hfs_global_shared_lock_release(hfsmp)    \
+    do { \
+	    hfsmp->readers--; \
+	    if (hfsmp->readers == 0) { \
+	        wakeup((caddr_t)&hfsmp->readers); \
+        } \
+    } while (0)
+
+#define hfs_global_exclusive_lock_acquire(hfsmp) \
+    do { \
+       if (hfsmp->blocker) { \
+	       tsleep((caddr_t)&hfsmp->blocker, PRIBIO, "journal_blocker", 0); \
+           continue; \
+	   } \
+       if (hfsmp->readers != 0) { \
+	       tsleep((caddr_t)&hfsmp->readers, PRIBIO, "journal_enable/disble", 0); \
+           continue; \
+       } \
+       hfsmp->blocker = 1; \
+       break; \
+	} while (1)
+     
+#define hfs_global_exclusive_lock_release(hfsmp) \
+    hfsmp->blocker = 0; \
+	wakeup((caddr_t)&hfsmp->blocker)
 
 #define MAXHFSVNODELEN		31
 
@@ -224,16 +343,6 @@ typedef struct filefork FCB;
 #define MAKE_INODE_NAME(name,linkno) \
 	    (void) sprintf((name), "%s%d", HFS_INODE_PREFIX, (linkno))
 
-/*
- *	Write check macro
- */
-#define	WRITE_CK(VNODE, FUNC_NAME)	{				\
-    if ((VNODE)->v_mount->mnt_flag & MNT_RDONLY) {			\
-        DBG_ERR(("%s: ATTEMPT TO WRITE A READONLY VOLUME\n", 	\
-                 FUNC_NAME));	\
-                     return(EROFS);							\
-    }									\
-}
 
 /* structure to hold a "." or ".." directory entry (12 bytes) */
 typedef struct hfsdotentry {
@@ -250,55 +359,6 @@ typedef struct hfsdotentry {
 
 #define DIRENTRY_SIZE(namlen) \
     ((sizeof(struct dirent) - (NAME_MAX+1)) + (((namlen)+1 + 3) &~ 3))
-
-
-enum {
-	kCatalogFolderNode = 1,
-	kCatalogFileNode = 2
-};
-
-/* 
- * CatalogNodeData has same layout as the on-disk HFS Plus file/dir records.
- * Classic hfs file/dir records are converted to match this layout.
- * 
- * The cnd_extra padding allows big hfs plus thread records (520 bytes max)
- * to be read onto this stucture during a cnid lookup.
- *
- */
-struct CatalogNodeData {
-	int16_t			cnd_type;
-	u_int16_t		cnd_flags;
-	u_int32_t		cnd_valence;	/* dirs only */
-	u_int32_t		cnd_nodeID;
-	u_int32_t		cnd_createDate;
-	u_int32_t		cnd_contentModDate;
-	u_int32_t		cnd_attributeModDate;
-	u_int32_t		cnd_accessDate;
-	u_int32_t		cnd_backupDate;
-	u_int32_t 		cnd_ownerID;
-	u_int32_t 		cnd_groupID;
-	u_int8_t 		cnd_adminFlags;  /* super-user changeable flags */
-	u_int8_t 		cnd_ownerFlags;  /* owner changeable flags */
-	u_int16_t 		cnd_mode;        /* file type + permission bits */
-	union {
-	    u_int32_t	cndu_iNodeNum;   /* indirect links only */
-	    u_int32_t	cndu_linkCount;  /* indirect nodes only */
-	    u_int32_t 	cndu_rawDevice;  /* special files (FBLK and FCHR) only */
-	} cnd_un;
-	u_int8_t		cnd_finderInfo[32];
-	u_int32_t 		cnd_textEncoding;
-	u_int32_t		cnd_reserved;
-	HFSPlusForkData	cnd_datafork;
-	HFSPlusForkData	cnd_rsrcfork;
-	u_int32_t	cnd_iNodeNumCopy;
-	u_int32_t	cnd_linkCNID;	/* for hard links only */
-	u_int8_t	cnd_extra[264];	/* make struct at least 520 bytes long */
-};
-typedef struct CatalogNodeData CatalogNodeData;
-
-#define	cnd_iNodeNum		cnd_un.cndu_iNodeNum
-#define	cnd_linkCount		cnd_un.cndu_linkCount
-#define	cnd_rawDevice		cnd_un.cndu_rawDevice
 
 
 
@@ -325,6 +385,7 @@ enum { kdirentMaxNameBytes = NAME_MAX };
 #define VTOHFS(VP) ((struct hfsmount *)((VP)->v_mount->mnt_data))
 #define	VFSTOHFS(MP) ((struct hfsmount *)(MP)->mnt_data)	
 #define VCBTOHFS(VCB) (((struct vfsVCB *)(VCB))->vcb_hfsmp)
+#define FCBTOHFS(FCB) ((struct hfsmount *)(FCB)->ff_cp->c_vp->v_mount->mnt_data)
 
 /*
  * Various ways to acquire a VCB pointer:
@@ -332,6 +393,10 @@ enum { kdirentMaxNameBytes = NAME_MAX };
 #define VTOVCB(VP) (&(((struct hfsmount *)((VP)->v_mount->mnt_data))->hfs_vcb.vcb_vcb))
 #define VFSTOVCB(MP) (&(((struct hfsmount *)(MP)->mnt_data)->hfs_vcb.vcb_vcb))
 #define HFSTOVCB(HFSMP) (&(HFSMP)->hfs_vcb.vcb_vcb)
+#define FCBTOVCB(FCB) (&(((struct hfsmount *)((FCB)->ff_cp->c_vp->v_mount->mnt_data))->hfs_vcb.vcb_vcb))
+
+
+#define HFS_KNOTE(vp, hint) KNOTE(&VTOC(vp)->c_knotes, (hint))
 
 
 #define E_NONE	0
@@ -357,11 +422,10 @@ enum { kdirentMaxNameBytes = NAME_MAX };
 u_int32_t to_bsd_time(u_int32_t hfs_time);
 u_int32_t to_hfs_time(u_int32_t bsd_time);
 
-int hfs_flushfiles(struct mount *mp, int flags, struct proc *p);
 int hfs_flushvolumeheader(struct hfsmount *hfsmp, int waitfor, int altflush);
 #define HFS_ALTFLUSH	1
 
-short hfsUnmount(struct hfsmount *hfsmp, struct proc *p);
+extern int hfsUnmount(struct hfsmount *hfsmp, struct proc *p);
 
 
 extern int hfs_getcnode(struct hfsmount *hfsmp, cnid_t cnid, struct cat_desc *descp,
@@ -376,6 +440,8 @@ extern int hfs_metafilelocking(struct hfsmount *hfsmp, u_long fileID, u_int flag
 
 extern u_int32_t hfs_freeblks(struct hfsmount * hfsmp, int wantreserve);
 
+extern void hfs_remove_orphans(struct hfsmount *);
+
 
 short MacToVFSError(OSErr err);
 
@@ -388,6 +454,8 @@ u_long FindMetaDataDirectory(ExtendedVCB *vcb);
 #define  HFS_SYNCTRANS		1
 
 extern int hfs_btsync(struct vnode *vp, int sync_transaction);
+// used as a callback by the journaling code
+extern void hfs_sync_metadata(void *arg);
 
 short make_dir_entry(FCB **fileptr, char *name, u_int32_t fileID);
 
@@ -399,7 +467,13 @@ unsigned long BestBlockSizeFit(unsigned long allocationBlockSize,
 OSErr	hfs_MountHFSVolume(struct hfsmount *hfsmp, HFSMasterDirectoryBlock *mdb,
 		struct proc *p);
 OSErr	hfs_MountHFSPlusVolume(struct hfsmount *hfsmp, HFSPlusVolumeHeader *vhp,
-		off_t embeddedOffset, u_int64_t disksize, struct proc *p);
+		off_t embeddedOffset, u_int64_t disksize, struct proc *p, void *args);
+
+extern int     hfs_early_journal_init(struct hfsmount *hfsmp, HFSPlusVolumeHeader *vhp,
+							   void *_args, int embeddedOffset, int mdb_offset,
+							   HFSMasterDirectoryBlock *mdbp, struct ucred *cred);
+extern u_long  GetFileInfo(ExtendedVCB *vcb, u_int32_t dirid, char *name,
+					struct cat_attr *fattr, struct cat_fork *forkinfo);
 
 int hfs_getconverter(u_int32_t encoding, hfs_to_unicode_func_t *get_unicode,
 		     unicode_to_hfs_func_t *get_hfsname);
@@ -427,6 +501,13 @@ extern void hfs_setencodingbits(struct hfsmount *hfsmp, u_int32_t encoding);
 
 
 extern void replace_desc(struct cnode *cp, struct cat_desc *cdp);
+
+extern int hfs_namecmp(const char *, size_t, const char *, size_t);
+
+extern int  hfs_virtualmetafile(struct cnode *);
+
+void hfs_generate_volume_notifications(struct hfsmount *hfsmp);
+
 
 #endif /* __APPLE_API_PRIVATE */
 #endif /* KERNEL */

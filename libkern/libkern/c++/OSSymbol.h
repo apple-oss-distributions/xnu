@@ -3,19 +3,22 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -57,13 +60,28 @@ private:
 
 protected:
     /*!
+        @function taggedRelease
+        @abstract Overriden super class release method so we can synchronise with the symbol pool.
+        @discussion When we release an symbol we need to synchronise the destruction of the object with any potential searches that may be occuring through the family factor methods.  See OSObject::taggedRelease
+    */
+    virtual void taggedRelease(const void *tag, const int when) const;
+
+    /*!
         @function free
-        @abstract A member function to release all resources created or used by the OSString object.
-        @discussion This function should not be called directly, use release() instead.
+        @abstract Overriden super class release method so we can synchronise with the symbol pool.
+        @discussion When we release an symbol we need to synchronise the destruction of the object with any potential searches that may be occuring through the family factor methods.  See OSObject::free
     */
     virtual void free();
 
 public:
+    /*!
+        @function taggedRelease
+        @abstract Release a tag.
+        @discussion The C++ language has forced me to override this method even though I have implemented it as { super::taggedRelease(tag) }. It seems that C++ is confused about the appearance of the protected taggedRelease with 2 args and refuses to only inherit one function.  See OSObject::taggedRelease
+    */
+    virtual void taggedRelease(const void *tag) const;
+
+
     /*!
         @function withString
         @abstract A static constructor function to create an OSSymbol instance from an OSString object or returns an existing OSSymbol object based on the OSString object given.

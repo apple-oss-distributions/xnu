@@ -3,19 +3,22 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -44,7 +47,6 @@ extern void initialize_screen(void *, unsigned int);
 static vm_offset_t mapframebuffer(caddr_t,int);
 static vm_offset_t PE_fb_vaddr = 0;
 static int         PE_fb_mode  = TEXT_MODE;
-static KERNBOOTSTRUCT * PE_kbp = 0;
 
 /* private globals */
 PE_state_t  PE_state;
@@ -108,6 +110,7 @@ void PE_init_iokit(void)
 {
     long * dt;
     int    i;
+    KernelBootArgs_t *kap = (KernelBootArgs_t *)PE_state.bootArgs;
         
     typedef struct {
         char            name[32];
@@ -115,12 +118,15 @@ void PE_init_iokit(void)
         unsigned long   value[2];
     } DriversPackageProp;
 
+    PE_init_kprintf(TRUE);
+    PE_init_printf(TRUE);
+
     /*
      * Update the fake device tree with the driver information provided by
      * the booter.
      */
 
-	gDriversProp.length   = PE_kbp->numBootDrivers * sizeof(DriversPackageProp);
+    gDriversProp.length   = kap->numBootDrivers * sizeof(DriversPackageProp);
     gMemoryMapNode.length = 2 * sizeof(long);
 
     dt = (long *) createdt( fakePPCDeviceTree,
@@ -132,28 +138,28 @@ void PE_init_iokit(void)
 
         /* Copy driver info in kernBootStruct to fake device tree */
 
-        for ( i = 0; i < PE_kbp->numBootDrivers; i++, prop++ )
+        for ( i = 0; i < kap->numBootDrivers; i++, prop++ )
         {
-            switch ( PE_kbp->driverConfig[i].type )
+            switch ( kap->driverConfig[i].type )
             {
                 case kBootDriverTypeKEXT:
-                    sprintf(prop->name, "Driver-%lx", PE_kbp->driverConfig[i].address);
+                    sprintf(prop->name, "Driver-%lx", kap->driverConfig[i].address);
                     break;
                 
                  case kBootDriverTypeMKEXT:
-                    sprintf(prop->name, "DriversPackage-%lx", PE_kbp->driverConfig[i].address);
+                    sprintf(prop->name, "DriversPackage-%lx", kap->driverConfig[i].address);
                     break;
 
                 default:
-                    sprintf(prop->name, "DriverBogus-%lx", PE_kbp->driverConfig[i].address);
+                    sprintf(prop->name, "DriverBogus-%lx", kap->driverConfig[i].address);
                     break;
             }
             prop->length   = sizeof(prop->value);
-            prop->value[0] = PE_kbp->driverConfig[i].address;
-            prop->value[1] = PE_kbp->driverConfig[i].size;
+            prop->value[0] = kap->driverConfig[i].address;
+            prop->value[1] = kap->driverConfig[i].size;
         }
 
-        *gMemoryMapNode.address = PE_kbp->numBootDrivers + 1;
+        *gMemoryMapNode.address = kap->numBootDrivers + 1;
     }
 
     /* Setup powermac_info and powermac_machine_info structures */
@@ -171,13 +177,18 @@ void PE_init_iokit(void)
     /*
      * Fetch the CLUT and the noroot image.
      */
-    bcopy( bootClut, appleClut8, sizeof(appleClut8) );
+    bcopy( (void *) bootClut, appleClut8, sizeof(appleClut8) );
 
     default_noroot.width  = kFailedBootWidth;
     default_noroot.height = kFailedBootHeight;
     default_noroot.dx     = 0;
     default_noroot.dy     = kFailedBootOffset;
     default_noroot_data   = failedBootPict;
+    
+    /*
+     * Initialize the panic UI
+     */
+    panic_ui_initialize( (unsigned char *) appleClut8 );
 
     /*
      * Initialize the spinning wheel (progress indicator).
@@ -185,26 +196,24 @@ void PE_init_iokit(void)
     vc_progress_initialize( &default_progress, default_progress_data,
                             (unsigned char *) appleClut8 );
 
-    PE_initialize_console( (PE_Video *) 0, kPEAcquireScreen );
-
-    (void) StartIOKit( (void*)dt, (void*)PE_state.fakePPCBootArgs, 0, 0);
+    (void) StartIOKit( (void*)dt, PE_state.bootArgs, 0, 0);
 }
 
 void PE_init_platform(boolean_t vm_initialized, void * args)
 {
 	if (PE_state.initialized == FALSE)
 	{
-        PE_kbp = (KERNBOOTSTRUCT *) args;
+	    KernelBootArgs_t *kap = (KernelBootArgs_t *) args;
 
 	    PE_state.initialized        = TRUE;
 	    PE_state.bootArgs           = args;
-	    PE_state.video.v_baseAddr   = PE_kbp->video.v_baseAddr;
-	    PE_state.video.v_rowBytes   = PE_kbp->video.v_rowBytes;
-	    PE_state.video.v_height     = PE_kbp->video.v_height;
-	    PE_state.video.v_width      = PE_kbp->video.v_width;
-	    PE_state.video.v_depth      = PE_kbp->video.v_depth;
-        PE_state.video.v_display    = PE_kbp->video.v_display;
-        PE_fb_mode                  = PE_kbp->graphicsMode;
+	    PE_state.video.v_baseAddr   = kap->video.v_baseAddr;
+	    PE_state.video.v_rowBytes   = kap->video.v_rowBytes;
+	    PE_state.video.v_height     = kap->video.v_height;
+	    PE_state.video.v_width      = kap->video.v_width;
+	    PE_state.video.v_depth      = kap->video.v_depth;
+	    PE_state.video.v_display    = kap->video.v_display;
+	    PE_fb_mode                  = kap->graphicsMode;
 	    PE_state.fakePPCBootArgs    = (boot_args *)&fakePPCBootArgs;
 	    ((boot_args *)PE_state.fakePPCBootArgs)->machineType	= 386;
 
@@ -217,20 +226,18 @@ void PE_init_platform(boolean_t vm_initialized, void * args)
         }
     }
 
-	if (!vm_initialized)
-	{
+    if (!vm_initialized)
+    {
 		/* Hack! FIXME.. */ 
         outb(0x21, 0xff);   /* Maskout all interrupts Pic1 */
         outb(0xa1, 0xff);   /* Maskout all interrupts Pic2 */
  
         pe_identify_machine(args);
-	}
-	else
-	{
+    }
+    else
+    {
         pe_init_debug();
-
-        PE_create_console();
-	}
+    }
 }
 
 void PE_create_console( void )
@@ -244,7 +251,7 @@ void PE_create_console( void )
                                         PE_state.video.v_height);
     }
 
-	if (PE_state.video.v_display)
+    if ( PE_state.video.v_display )
         PE_initialize_console( &PE_state.video, kPEGraphicsMode );
     else
         PE_initialize_console( &PE_state.video, kPETextMode );
@@ -330,7 +337,6 @@ mapframebuffer( caddr_t physaddr,  /* start of framebuffer */
 
 	if (physaddr != (caddr_t)trunc_page(physaddr))
         panic("Framebuffer not on page boundary");
-
 	vmaddr = io_map((vm_offset_t)physaddr, length);
 	if (vmaddr == 0)
         panic("can't alloc VM for framebuffer");
@@ -355,3 +361,6 @@ PE_stub_poll_input(unsigned int options, char * c)
  */
 int (*PE_poll_input)(unsigned int options, char * c)
 	= PE_stub_poll_input;
+
+
+

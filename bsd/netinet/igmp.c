@@ -3,19 +3,22 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -141,31 +144,35 @@ static struct router_info *
 find_rti(ifp)
 	struct ifnet *ifp;
 {
-        register struct router_info *rti = Head;
-
+	register struct router_info *rti = Head;
+	
+	
 #if IGMP_DEBUG
 	printf("[igmp.c, _find_rti] --> entering \n");
 #endif
-        while (rti) {
-                if (rti->rti_ifp == ifp) {
+	while (rti) {
+		if (rti->rti_ifp == ifp) {
 #if IGMP_DEBUG
 			printf("[igmp.c, _find_rti] --> found old entry \n");
 #endif
-                        return rti;
-                }
-                rti = rti->rti_next;
-        }
-
+			return rti;
+		}
+		rti = rti->rti_next;
+	}
+	
 	MALLOC(rti, struct router_info *, sizeof *rti, M_IGMP, M_NOWAIT);
-        rti->rti_ifp = ifp;
-        rti->rti_type = IGMP_V2_ROUTER;
-        rti->rti_time = 0;
-        rti->rti_next = Head;
-        Head = rti;
+	if (rti != NULL)
+	{
+		rti->rti_ifp = ifp;
+		rti->rti_type = IGMP_V2_ROUTER;
+		rti->rti_time = 0;
+		rti->rti_next = Head;
+		Head = rti;
+	}
 #if IGMP_DEBUG
-	printf("[igmp.c, _find_rti] --> created an entry \n");
+	if (rti) printf("[igmp.c, _find_rti] --> created an entry \n");
 #endif
-        return rti;
+	return rti;
 }
 
 void
@@ -224,6 +231,10 @@ igmp_input(m, iphlen)
 	if (timer == 0)
 		timer = 1;
 	rti = find_rti(ifp);
+	if (rti == NULL) {
+		m_freem(m);
+		return;
+	}
 
 	/*
 	 * In the IGMPv2 specification, there are 3 states and a flag.
@@ -361,7 +372,7 @@ igmp_input(m, iphlen)
 	rip_input(m, iphlen);
 }
 
-void
+int
 igmp_joingroup(inm)
 	struct in_multi *inm;
 {
@@ -373,12 +384,14 @@ igmp_joingroup(inm)
 		inm->inm_state = IGMP_OTHERMEMBER;
 	} else {
 		inm->inm_rti = find_rti(inm->inm_ifp);
+		if (inm->inm_rti == NULL) return ENOMEM;
 		igmp_sendpkt(inm, inm->inm_rti->rti_type, 0);
 		inm->inm_timer = IGMP_RANDOM_DELAY(
 					IGMP_MAX_HOST_REPORT_DELAY*PR_FASTHZ);
 		inm->inm_state = IGMP_IREPORTEDLAST;
 		igmp_timers_are_running = 1;
 	}
+	return 0;
 	splx(s);
 }
 

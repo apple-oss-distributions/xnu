@@ -3,19 +3,22 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -71,6 +74,7 @@
 #include <kern/cpu_number.h>	/* before tcp_seq.h, for tcp_random18() */
 
 #include <net/if.h>
+#include <net/if_types.h>
 #include <net/route.h>
 
 #include <netinet/in.h>
@@ -153,10 +157,15 @@ SYSCTL_INT(_net_inet_tcp, OID_AUTO, tcp_lq_overflow, CTLFLAG_RW,
     "Listen Queue Overflow");
 
 #if TCP_DROP_SYNFIN
-static int drop_synfin = 0;
+static int drop_synfin = 1;
 SYSCTL_INT(_net_inet_tcp, OID_AUTO, drop_synfin, CTLFLAG_RW,
     &drop_synfin, 0, "Drop TCP packets with SYN+FIN set");
 #endif
+
+__private_extern__ int slowlink_wsize = 8192;
+SYSCTL_INT(_net_inet_tcp, OID_AUTO, slowlink_wsize, CTLFLAG_RW,
+	&slowlink_wsize, 0, "Maximum advertised window size for slowlink");
+
 
 u_long tcp_now;
 struct inpcbhead tcb;
@@ -356,9 +365,9 @@ present:
  */
 #if INET6
 int
-tcp6_input(mp, offp, proto)
+tcp6_input(mp, offp)
 	struct mbuf **mp;
-	int *offp, proto;
+	int *offp;
 {
 	register struct mbuf *m = *mp;
 	struct in6_ifaddr *ia6;
@@ -460,7 +469,7 @@ tcp_input(m, off0)
 		}
 	} else
 #endif /* INET6 */
-      {
+	{
 	/*
 	 * Get IP and TCP header together in first mbuf.
 	 * Note: IP leaves IP header in first mbuf.
@@ -490,10 +499,20 @@ tcp_input(m, off0)
 	if (m->m_pkthdr.csum_flags & CSUM_DATA_VALID) {
 		if (apple_hwcksum_rx && (m->m_pkthdr.csum_flags & CSUM_TCP_SUM16)) {
 			u_short pseudo;
+			char b[9];
+			*(uint32_t*)&b[0] = *(uint32_t*)&ipov->ih_x1[0];
+			*(uint32_t*)&b[4] = *(uint32_t*)&ipov->ih_x1[4];
+			*(uint8_t*)&b[8] = *(uint8_t*)&ipov->ih_x1[8];
+			
 			bzero(ipov->ih_x1, sizeof(ipov->ih_x1));
 			ipov->ih_len = (u_short)tlen;
 			HTONS(ipov->ih_len);
 			pseudo = in_cksum(m, sizeof (struct ip));
+			
+			*(uint32_t*)&ipov->ih_x1[0] = *(uint32_t*)&b[0];
+			*(uint32_t*)&ipov->ih_x1[4] = *(uint32_t*)&b[4];
+			*(uint8_t*)&ipov->ih_x1[8] = *(uint8_t*)&b[8];
+			
 			th->th_sum = in_addword(pseudo, (m->m_pkthdr.csum_data & 0xFFFF));
 		} else {
 			if (m->m_pkthdr.csum_flags & CSUM_PSEUDO_HDR)
@@ -505,14 +524,23 @@ tcp_input(m, off0)
 		}
 		th->th_sum ^= 0xffff;
 	} else {
+		char b[9];
 		/*
 		 * Checksum extended TCP header and data.
 		 */
+		*(uint32_t*)&b[0] = *(uint32_t*)&ipov->ih_x1[0];
+		*(uint32_t*)&b[4] = *(uint32_t*)&ipov->ih_x1[4];
+		*(uint8_t*)&b[8] = *(uint8_t*)&ipov->ih_x1[8];
+		
 		len = sizeof (struct ip) + tlen;
 		bzero(ipov->ih_x1, sizeof(ipov->ih_x1));
 		ipov->ih_len = (u_short)tlen;
 		HTONS(ipov->ih_len);
 		th->th_sum = in_cksum(m, len);
+		
+		*(uint32_t*)&ipov->ih_x1[0] = *(uint32_t*)&b[0];
+		*(uint32_t*)&ipov->ih_x1[4] = *(uint32_t*)&b[4];
+		*(uint8_t*)&ipov->ih_x1[8] = *(uint8_t*)&b[8];
 	}
 	if (th->th_sum) {
 		tcpstat.tcps_rcvbadsum++;
@@ -522,7 +550,7 @@ tcp_input(m, off0)
 	/* Re-initialization for later version check */
 	ip->ip_v = IPVERSION;
 #endif
-      }
+	}
 
 	/*
 	 * Check that TCP offset makes sense,
@@ -772,6 +800,7 @@ findpcb:
 #if INET6
 			struct inpcb *oinp = sotoinpcb(so);
 #endif /* INET6 */
+			int ogencnt = so->so_gencnt;
 
 #if !IPSEC
 			/*
@@ -851,6 +880,12 @@ findpcb:
 				if (!so2)
 					goto drop;
 			}
+			/*
+			 * Make sure listening socket did not get closed during socket allocation,
+                         * not only this is incorrect but it is know to cause panic
+                         */
+			if (so->so_gencnt != ogencnt)
+				goto drop;
 #if IPSEC
 			oso = so;
 #endif
@@ -972,7 +1007,7 @@ findpcb:
 	 */
 	tp->t_rcvtime = 0;
 	if (TCPS_HAVEESTABLISHED(tp->t_state))
-		tp->t_timer[TCPT_KEEP] = tcp_keepidle;
+		tp->t_timer[TCPT_KEEP] = TCP_KEEPIDLE(tp);
 
 	/*
 	 * Process options if not in LISTEN state,
@@ -1046,7 +1081,7 @@ findpcb:
 					tp->snd_nxt = tp->snd_max;
 					tp->t_badrxtwin = 0;
 				}
-				if ((to.to_flag & TOF_TS) != 0)
+				if (((to.to_flag & TOF_TS) != 0) && (to.to_tsecr != 0)) /* Makes sure we already have a TS */
 					tcp_xmit_timer(tp,
 					    tcp_now - to.to_tsecr + 1);
 				else if (tp->t_rtttime &&
@@ -1135,6 +1170,10 @@ findpcb:
 	win = sbspace(&so->so_rcv);
 	if (win < 0)
 		win = 0;
+	else {	/* clip rcv window to 4K for modems */
+		if (tp->t_flags & TF_SLOWLINK && slowlink_wsize > 0)
+			win = min(win, slowlink_wsize);
+	}
 	tp->rcv_wnd = imax(win, (int)(tp->rcv_adv - tp->rcv_nxt));
 	}
 
@@ -1317,7 +1356,10 @@ findpcb:
 			 * here.  Even if we requested window scaling, it will
 			 * become effective only later when our SYN is acked.
 			 */
-			tp->rcv_adv += min(tp->rcv_wnd, TCP_MAXWIN);
+			if (tp->t_flags & TF_SLOWLINK && slowlink_wsize > 0) /* clip window size for for slow link */
+				tp->rcv_adv += min(tp->rcv_wnd, slowlink_wsize);
+			else 
+				tp->rcv_adv += min(tp->rcv_wnd, TCP_MAXWIN);
 			tcpstat.tcps_connects++;
 			soisconnected(so);
 			tp->t_timer[TCPT_KEEP] = tcp_keepinit;
@@ -1464,7 +1506,7 @@ findpcb:
 				thflags &= ~TH_SYN;
 			} else {
 				tp->t_state = TCPS_ESTABLISHED;
-				tp->t_timer[TCPT_KEEP] = tcp_keepidle;
+				tp->t_timer[TCPT_KEEP] = TCP_KEEPIDLE(tp);
 			}
 		} else {
 		/*
@@ -1492,7 +1534,7 @@ findpcb:
 						tp->t_flags &= ~TF_NEEDFIN;
 					} else {
 						tp->t_state = TCPS_ESTABLISHED;
-						tp->t_timer[TCPT_KEEP] = tcp_keepidle;
+						tp->t_timer[TCPT_KEEP] = TCP_KEEPIDLE(tp);
 					}
 					tp->t_flags |= TF_NEEDSYN;
 				} else
@@ -1563,6 +1605,16 @@ trimthenstep6:
 				goto drop;
 		}
  		break;  /* continue normal processing */
+
+	/* Received a SYN while connection is already established.
+	 * This is a "half open connection and other anomalies" described
+	 * in RFC793 page 34, send an ACK so the remote reset the connection
+	 * or recovers by adjusting its sequence numberering 
+	 */
+	case TCPS_ESTABLISHED:
+		if (thflags & TH_SYN)  
+			goto dropafterack; 
+		break;
 	}
 
 	/*
@@ -1883,7 +1935,7 @@ trimthenstep6:
 			tp->t_flags &= ~TF_NEEDFIN;
 		} else {
 			tp->t_state = TCPS_ESTABLISHED;
-			tp->t_timer[TCPT_KEEP] = tcp_keepidle;
+			tp->t_timer[TCPT_KEEP] = TCP_KEEPIDLE(tp);
 		}
 		/*
 		 * If segment contains data or ACK, will call tcp_reass()
@@ -2060,8 +2112,9 @@ process_ACK:
 		 * Since we now have an rtt measurement, cancel the
 		 * timer backoff (cf., Phil Karn's retransmit alg.).
 		 * Recompute the initial retransmit timer.
+		 * Also makes sure we have a valid time stamp in hand
 		 */
-		if (to.to_flag & TOF_TS)
+		if (((to.to_flag & TOF_TS) != 0) && (to.to_tsecr != 0))
 			tcp_xmit_timer(tp, tcp_now - to.to_tsecr + 1);
 		else if (tp->t_rtttime && SEQ_GT(th->th_ack, tp->t_rtseq))
 			tcp_xmit_timer(tp, tp->t_rtttime);
@@ -2115,10 +2168,10 @@ process_ACK:
 			tp->snd_wnd -= acked;
 			ourfinisacked = 0;
 		}
-		sowwakeup(so);
 		tp->snd_una = th->th_ack;
 		if (SEQ_LT(tp->snd_nxt, tp->snd_una))
 			tp->snd_nxt = tp->snd_una;
+		sowwakeup(so);
 
 		switch (tp->t_state) {
 
@@ -2840,6 +2893,16 @@ tcp_mss(tp, offer)
 		return;
 	}
 	ifp = rt->rt_ifp;
+	/*
+	 * Slower link window correction:
+	 * If a value is specificied for slowlink_wsize use it for PPP links
+	 * believed to be on a serial modem (speed <128Kbps). Excludes 9600bps as
+	 * it is the default value adversized by pseudo-devices over ppp.
+	 */
+	if (ifp->if_type == IFT_PPP && slowlink_wsize > 0 && 
+	    ifp->if_baudrate > 9600 && ifp->if_baudrate <= 128000) {
+		tp->t_flags |= TF_SLOWLINK;
+	}
 	so = inp->inp_socket;
 
 	taop = rmx_taop(rt->rt_rmx);
@@ -2946,21 +3009,16 @@ tcp_mss(tp, offer)
 	     (tp->t_flags & TF_RCVD_CC) == TF_RCVD_CC))
 		mss -= TCPOLEN_CC_APPA;
 
-#if	(MCLBYTES & (MCLBYTES - 1)) == 0
-		if (mss > MCLBYTES)
-			mss &= ~(MCLBYTES-1);
-#else
-		if (mss > MCLBYTES)
-			mss = mss / MCLBYTES * MCLBYTES;
-#endif
 	/*
-	 * If there's a pipesize, change the socket buffer
-	 * to that size.  Make the socket buffers an integral
+	 * If there's a pipesize (ie loopback), change the socket
+	 * buffer to that size only if it's bigger than the current
+	 * sockbuf size.  Make the socket buffers an integral
 	 * number of mss units; if the mss is larger than
 	 * the socket buffer, decrease the mss.
 	 */
 #if RTV_SPIPE
-	if ((bufsize = rt->rt_rmx.rmx_sendpipe) == 0)
+	bufsize = rt->rt_rmx.rmx_sendpipe;
+	if (bufsize < so->so_snd.sb_hiwat)
 #endif
 		bufsize = so->so_snd.sb_hiwat;
 	if (bufsize < mss)
@@ -2974,7 +3032,8 @@ tcp_mss(tp, offer)
 	tp->t_maxseg = mss;
 
 #if RTV_RPIPE
-	if ((bufsize = rt->rt_rmx.rmx_recvpipe) == 0)
+	bufsize = rt->rt_rmx.rmx_recvpipe;
+	if (bufsize < so->so_rcv.sb_hiwat)
 #endif
 		bufsize = so->so_rcv.sb_hiwat;
 	if (bufsize > mss) {
@@ -3046,6 +3105,16 @@ tcp_mssopt(tp)
 			isipv6 ? tcp_v6mssdflt :
 #endif /* INET6 */
 			tcp_mssdflt;
+	/*
+	 * Slower link window correction:
+	 * If a value is specificied for slowlink_wsize use it for PPP links
+	 * believed to be on a serial modem (speed <128Kbps). Excludes 9600bps as
+	 * it is the default value adversized by pseudo-devices over ppp.
+	 */
+	if (rt->rt_ifp->if_type == IFT_PPP && slowlink_wsize > 0 && 
+	    rt->rt_ifp->if_baudrate > 9600 && rt->rt_ifp->if_baudrate <= 128000) {
+		tp->t_flags |= TF_SLOWLINK;
+	}
 
 	return rt->rt_ifp->if_mtu - min_protoh;
 }

@@ -3,19 +3,22 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -77,7 +80,12 @@ PE_parse_boot_arg(
 				args = cp+1;
 				goto gotit;
 			}
-
+			if ('_' == *arg_string) /* Force a string copy if the argument name begins with an underscore */
+			  {
+			    argstrcpy2 (++cp, (char *)arg_ptr, 16); /* Hack - terminate after 16 characters */
+			    arg_found = TRUE;
+			    break;
+			  }
 			switch (getval(cp, &val)) 
 			{
 				case NUM:
@@ -119,6 +127,22 @@ argstrcpy(
 	int i = 0;
 
 	while (!isargsep(*from)) {
+		i++;
+		*to++ = *from++;
+	}
+	*to = 0;
+	return(i);
+}
+
+int
+argstrcpy2(
+	char *from, 
+	char *to,
+	unsigned maxlen)
+{
+	int i = 0;
+
+	while (!isargsep(*from) && i < maxlen) {
 		i++;
 		*to++ = *from++;
 	}
@@ -172,6 +196,12 @@ getval(
 				c -= 'a' - 10;
 			else if ((c >= 'A') && (c <= 'F'))
 				c -= 'A' - 10;
+			else if (c == 'k' || c == 'K')
+				{ sign *= 1024; break; }
+			else if (c == 'm' || c == 'M')
+				{ sign *= 1024 * 1024; break; }
+			else if (c == 'g' || c == 'G')
+				{ sign *= 1024 * 1024 * 1024; break; }
 			else if (isargsep(c))
 				break;
 			else

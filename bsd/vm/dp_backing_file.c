@@ -3,19 +3,22 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -64,6 +67,65 @@ struct bs_map		bs_port_table[MAX_BACKING_STORE] = {
 
 
 #include <kern/assert.h>
+
+/*
+ *	Routine:	macx_backing_store_recovery
+ *	Function:
+ *		Syscall interface to set a tasks privilege
+ *		level so that it is not subject to 
+ *		macx_backing_store_suspend
+ */
+int
+macx_backing_store_recovery(
+	int		pid)
+{
+	int		error;
+	struct proc	*p =  current_proc();
+	boolean_t	funnel_state;
+
+	funnel_state = thread_funnel_set(kernel_flock, TRUE);
+	if ((error = suser(p->p_ucred, &p->p_acflag)))
+		goto backing_store_recovery_return;
+
+	/* for now restrict backing_store_recovery */
+	/* usage to only present task */
+	if(pid != p->p_pid) {
+		error = EINVAL;
+		goto backing_store_recovery_return;
+	}
+
+	task_backing_store_privileged(p->task);
+
+backing_store_recovery_return:
+	(void) thread_funnel_set(kernel_flock, FALSE);
+	return(error);
+}
+
+/*
+ *	Routine:	macx_backing_store_suspend
+ *	Function:
+ *		Syscall interface to stop new demand for 
+ *		backing store when backing store is low
+ */
+
+int
+macx_backing_store_suspend(
+	boolean_t	suspend)
+{
+	int		error;
+	struct proc	*p =  current_proc();
+	boolean_t	funnel_state;
+
+	funnel_state = thread_funnel_set(kernel_flock, TRUE);
+	if ((error = suser(p->p_ucred, &p->p_acflag)))
+		goto backing_store_suspend_return;
+
+	vm_backing_store_disable(suspend);
+
+backing_store_suspend_return:
+	(void) thread_funnel_set(kernel_flock, FALSE);
+	return(error);
+}
 
 /*
  *	Routine:	macx_swapon
@@ -201,6 +263,8 @@ macx_swapon(
 
 	/* Mark this vnode as being used for swapfile */
 	SET(vp->v_flag, VSWAP);
+
+	ubc_setcred(vp, p);
 
 	/*
 	 * take an extra reference on the vnode to keep

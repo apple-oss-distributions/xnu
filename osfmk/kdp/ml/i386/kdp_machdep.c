@@ -3,19 +3,22 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -24,6 +27,7 @@
 #include <mach/machine.h>
 #include <mach/exception_types.h>
 #include <i386/trap.h>
+#include <i386/mp.h>
 #include <kdp/kdp_internal.h>
 
 #define KDP_TEST_HARNESS 0
@@ -337,7 +341,7 @@ kdp_i386_backtrace(void	*_frame, int nframes)
 	}
 	return;
 invalid:
-	printf("invalid frame pointer %x\n",frame->prev);
+	printf("invalid frame pointer %x\n",frame);
 }
 
 void
@@ -349,6 +353,8 @@ kdp_i386_trap(
 )
 {
     unsigned int exception, subcode = 0, code;
+
+    mp_kdp_enter();
 
     if (trapno != T_INT3 && trapno != T_DEBUG)
     	printf("unexpected kernel trap %x eip %x\n", trapno, saved_state->eip);
@@ -416,9 +422,11 @@ kdp_i386_trap(
 	break;
     }
 
-    kdp_i386_backtrace((void *) saved_state->ebp, 10);
+//    kdp_i386_backtrace((void *) saved_state->ebp, 10);
 
     kdp_raise_exception(exception, code, subcode, saved_state);
+
+    mp_kdp_exit();
 }
 
 boolean_t 

@@ -4,19 +4,22 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -37,19 +40,25 @@
 #include <kern/timer_call.h>
 #include <kern/call_entry.h>
 
+#ifdef i386
+/*
+ * Until we arrange for per-cpu timers, use the master cpus queues only.
+ * Fortunately, the timer_call_lock synchronizes access to all queues.
+ */
+#undef	cpu_number()
+#define cpu_number() 0
+#endif /* i386 */
+  
 decl_simple_lock_data(static,timer_call_lock)
 
 static
 queue_head_t
-	delayed_call_queues[NCPUS];
+	timer_call_queues[NCPUS];
 
 static struct {
 	int		delayed_num,
 			delayed_hiwat;
-} timer_calls;
-
-static boolean_t
-	timer_call_initialized = FALSE;
+} timer_call_vars;
 
 static void
 timer_call_interrupt(
@@ -64,20 +73,15 @@ timer_call_initialize(void)
 	spl_t				s;
 	int					i;
 
-	if (timer_call_initialized)
-		panic("timer_call_initialize");
-
 	simple_lock_init(&timer_call_lock, ETAP_MISC_TIMER);
 
 	s = splclock();
 	simple_lock(&timer_call_lock);
 
 	for (i = 0; i < NCPUS; i++)
-		queue_init(&delayed_call_queues[i]);
+		queue_init(&timer_call_queues[i]);
 
 	clock_set_timer_func((clock_timer_func_t)timer_call_interrupt);
-
-	timer_call_initialized = TRUE;
 
 	simple_unlock(&timer_call_lock);
 	splx(s);
@@ -113,8 +117,8 @@ _delayed_call_enqueue(
 	}
 
 	insque(qe(call), qe(current));
-	if (++timer_calls.delayed_num > timer_calls.delayed_hiwat)
-		timer_calls.delayed_hiwat = timer_calls.delayed_num;
+	if (++timer_call_vars.delayed_num > timer_call_vars.delayed_hiwat)
+		timer_call_vars.delayed_hiwat = timer_call_vars.delayed_num;
 
 	call->state = DELAYED;
 }
@@ -125,7 +129,7 @@ _delayed_call_dequeue(
 	timer_call_t			call)
 {
 	(void)remque(qe(call));
-	timer_calls.delayed_num--;
+	timer_call_vars.delayed_num--;
 
 	call->state = IDLE;
 }
@@ -144,7 +148,7 @@ timer_call_enter(
 	uint64_t				deadline)
 {
 	boolean_t		result = TRUE;
-	queue_t			delayed;
+	queue_t			queue;
 	spl_t			s;
 
 	s = splclock();
@@ -158,11 +162,11 @@ timer_call_enter(
 	call->param1	= 0;
 	call->deadline	= deadline;
 
-	delayed = &delayed_call_queues[cpu_number()];
+	queue = &timer_call_queues[cpu_number()];
 
-	_delayed_call_enqueue(delayed, call);
+	_delayed_call_enqueue(queue, call);
 
-	if (queue_first(delayed) == qe(call))
+	if (queue_first(queue) == qe(call))
 		_set_delayed_call_timer(call);
 
 	simple_unlock(&timer_call_lock);
@@ -178,7 +182,7 @@ timer_call_enter1(
 	uint64_t				deadline)
 {
 	boolean_t		result = TRUE;
-	queue_t			delayed;
+	queue_t			queue;
 	spl_t			s;
 
 	s = splclock();
@@ -192,11 +196,11 @@ timer_call_enter1(
 	call->param1	= param1;
 	call->deadline	= deadline;
 
-	delayed = &delayed_call_queues[cpu_number()];
+	queue = &timer_call_queues[cpu_number()];
 
-	_delayed_call_enqueue(delayed, call);
+	_delayed_call_enqueue(queue, call);
 
-	if (queue_first(delayed) == qe(call))
+	if (queue_first(queue) == qe(call))
 		_set_delayed_call_timer(call);
 
 	simple_unlock(&timer_call_lock);
@@ -258,28 +262,28 @@ timer_call_shutdown(
 	processor_t			processor)
 {
 	timer_call_t		call;
-	queue_t				delayed, delayed1;
+	queue_t				queue, myqueue;
 
 	assert(processor != current_processor());
 
-	delayed = &delayed_call_queues[processor->slot_num];
-	delayed1 = &delayed_call_queues[cpu_number()];
+	queue = &timer_call_queues[processor->slot_num];
+	myqueue = &timer_call_queues[cpu_number()];
 
 	simple_lock(&timer_call_lock);
 
-	call = TC(queue_first(delayed));
+	call = TC(queue_first(queue));
 
-	while (!queue_end(delayed, qe(call))) {
+	while (!queue_end(queue, qe(call))) {
 		_delayed_call_dequeue(call);
 
-		_delayed_call_enqueue(delayed1, call);
+		_delayed_call_enqueue(myqueue, call);
 
-		call = TC(queue_first(delayed));
+		call = TC(queue_first(queue));
 	}
 
-	call = TC(queue_first(delayed1));
+	call = TC(queue_first(myqueue));
 
-	if (!queue_end(delayed1, qe(call)))
+	if (!queue_end(myqueue, qe(call)))
 		_set_delayed_call_timer(call);
 
 	simple_unlock(&timer_call_lock);
@@ -291,13 +295,13 @@ timer_call_interrupt(
 	uint64_t				timestamp)
 {
 	timer_call_t		call;
-	queue_t				delayed = &delayed_call_queues[cpu_number()];
+	queue_t				queue = &timer_call_queues[cpu_number()];
 
 	simple_lock(&timer_call_lock);
 
-	call = TC(queue_first(delayed));
+	call = TC(queue_first(queue));
 
-	while (!queue_end(delayed, qe(call))) {
+	while (!queue_end(queue, qe(call))) {
 		if (call->deadline <= timestamp) {
 			timer_call_func_t		func;
 			timer_call_param_t		param0, param1;
@@ -317,10 +321,10 @@ timer_call_interrupt(
 		else
 			break;
 
-		call = TC(queue_first(delayed));
+		call = TC(queue_first(queue));
 	}
 
-	if (!queue_end(delayed, qe(call)))
+	if (!queue_end(queue, qe(call)))
 		_set_delayed_call_timer(call);
 
 	simple_unlock(&timer_call_lock);

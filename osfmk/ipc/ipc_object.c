@@ -3,19 +3,22 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -517,7 +520,8 @@ ipc_object_copyin(
  *		Copyin a naked capability from the kernel.
  *
  *		MACH_MSG_TYPE_MOVE_RECEIVE
- *			The receiver must be ipc_space_kernel.
+ *			The receiver must be ipc_space_kernel
+ *			or the receive right must already be in limbo.
  *			Consumes the naked receive right.
  *		MACH_MSG_TYPE_COPY_SEND
  *			A naked send right must be supplied.
@@ -551,14 +555,15 @@ ipc_object_copyin_from_kernel(
 
 		ip_lock(port);
 		assert(ip_active(port));
-		assert(port->ip_receiver_name != MACH_PORT_NULL);
-		assert(port->ip_receiver == ipc_space_kernel);
+		if (port->ip_destination != IP_NULL) {
+			assert(port->ip_receiver == ipc_space_kernel);
 
-		/* relevant part of ipc_port_clear_receiver */
-		ipc_port_set_mscount(port, 0);
+			/* relevant part of ipc_port_clear_receiver */
+			ipc_port_set_mscount(port, 0);
 
-		port->ip_receiver_name = MACH_PORT_NULL;
-		port->ip_destination = IP_NULL;
+			port->ip_receiver_name = MACH_PORT_NULL;
+			port->ip_destination = IP_NULL;
+		}
 		ip_unlock(port);
 		break;
 	    }
@@ -591,9 +596,12 @@ ipc_object_copyin_from_kernel(
 		break;
 	    }
 
-	    case MACH_MSG_TYPE_MOVE_SEND:
+	    case MACH_MSG_TYPE_MOVE_SEND: {
 		/* move naked send right into the message */
+		ipc_port_t port = (ipc_port_t) object;
+		assert(port->ip_srights);
 		break;
+	    }
 
 	    case MACH_MSG_TYPE_MAKE_SEND_ONCE: {
 		ipc_port_t port = (ipc_port_t) object;
@@ -608,9 +616,12 @@ ipc_object_copyin_from_kernel(
 		break;
 	    }
 
-	    case MACH_MSG_TYPE_MOVE_SEND_ONCE:
+	    case MACH_MSG_TYPE_MOVE_SEND_ONCE: {
 		/* move naked send-once right into the message */
+		ipc_port_t port = (ipc_port_t) object;
+	    	assert(port->ip_sorights);
 		break;
+	    }
 
 	    default:
 		panic("ipc_object_copyin_from_kernel: strange rights");

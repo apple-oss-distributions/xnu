@@ -1,27 +1,33 @@
 /*
- * Copyright (c) 2000 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2003 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
 #ifndef __HFS_FORMAT__
 #define __HFS_FORMAT__
 
+#ifndef __HFSVOLUMES__
+
+#include <sys/types.h>
 #include <sys/appleapiopts.h>
 
 /*
@@ -45,9 +51,13 @@ extern "C" {
 enum {
 	kHFSSigWord		= 0x4244,	/* 'BD' in ASCII */
 	kHFSPlusSigWord		= 0x482B,	/* 'H+' in ASCII */
-	kHFSPlusVersion		= 0x0004,	/* will change as format changes */
-						/* version 4 shipped with Mac OS 8.1 */
-	kHFSPlusMountVersion	= 0x31302E30	/* '10.0' for Mac OS X */
+	kHFSXSigWord		= 0x4858,	/* 'HX' in ASCII */
+
+	kHFSPlusVersion		= 0x0004,	/* 'H+' volumes are version 4 only */
+	kHFSXVersion		= 0x0005,	/* 'HX' volumes start with version 5 */
+
+	kHFSPlusMountVersion	= 0x31302E30,	/* '10.0' for Mac OS X */
+	kHFSJMountVersion	= 0x4846534a	/* 'HFSJ' for journaled HFS+ on OS X */
 };
 
 
@@ -84,6 +94,7 @@ enum {
 };
 
 
+#ifndef __FILES__
 /* Unicode strings are used for HFS Plus file and folder names */
 struct HFSUniStr255 {
 	u_int16_t	length;		/* number of unicode characters */
@@ -91,6 +102,7 @@ struct HFSUniStr255 {
 };
 typedef struct HFSUniStr255 HFSUniStr255;
 typedef const HFSUniStr255 *ConstHFSUniStr255Param;
+#endif /* __FILES__ */
 
 enum {
 	kHFSMaxVolumeNameChars		= 27,
@@ -223,6 +235,7 @@ enum {
 	kHFSAllocationFileID		= 6,	/* File ID of the allocation file (HFS Plus only) */
 	kHFSStartupFileID		= 7,	/* File ID of the startup file (HFS Plus only) */
 	kHFSAttributesFileID		= 8,	/* File ID of the attribute file (HFS Plus only) */
+	kHFSRepairCatalogFileID		= 14,	/* Used when rebuilding Catalog B-tree */
 	kHFSBogusExtentFileID		= 15,	/* Used for exchanging extents in extents file */
 	kHFSFirstUserCatalogNodeID	= 16
 };
@@ -452,7 +465,8 @@ enum {
 	kHFSVolumeNoCacheRequiredBit = 10,		/* don't cache volume blocks (i.e. RAM or ROM disk) */
 	kHFSBootVolumeInconsistentBit = 11,		/* boot volume is inconsistent (System 7.6 and later) */
 	kHFSCatalogNodeIDsReusedBit = 12,
-							/* Bits 13-14 are reserved for future use */
+	kHFSVolumeJournaledBit = 13,			/* this volume has a journal on it */
+	kHFSVolumeInconsistentBit = 14,			/* serious inconsistencies detected at runtime */
 	kHFSVolumeSoftwareLockBit	= 15,		/* volume is locked by software */
 
 	kHFSVolumeHardwareLockMask	= 1 << kHFSVolumeHardwareLockBit,
@@ -461,6 +475,8 @@ enum {
 	kHFSVolumeNoCacheRequiredMask = 1 << kHFSVolumeNoCacheRequiredBit,
 	kHFSBootVolumeInconsistentMask = 1 << kHFSBootVolumeInconsistentBit,
 	kHFSCatalogNodeIDsReusedMask = 1 << kHFSCatalogNodeIDsReusedBit,
+	kHFSVolumeJournaledMask	= 1 << kHFSVolumeJournaledBit,
+	kHFSVolumeInconsistentMask = 1 << kHFSVolumeInconsistentBit,
 	kHFSVolumeSoftwareLockMask	= 1 << kHFSVolumeSoftwareLockBit,
 	kHFSMDBAttributesMask		= 0x8380
 };
@@ -502,6 +518,14 @@ struct HFSMasterDirectoryBlock {
 typedef struct HFSMasterDirectoryBlock	HFSMasterDirectoryBlock;
 
 
+#ifdef __APPLE_API_UNSTABLE
+#define SET_HFS_TEXT_ENCODING(hint)  \
+	(0x656e6300 | ((hint) & 0xff))
+#define GET_HFS_TEXT_ENCODING(hint)  \
+	(((hint) & 0xffffff00) == 0x656e6300 ? (hint) & 0x000000ff : 0xffffffffU)
+#endif /* __APPLE_API_UNSTABLE */
+
+
 /* HFS Plus Volume Header - 512 bytes */
 /* Stored at sector #2 (3rd sector) and second-to-last sector. */
 struct HFSPlusVolumeHeader {
@@ -509,7 +533,7 @@ struct HFSPlusVolumeHeader {
 	u_int16_t 	version;		/* == kHFSPlusVersion */
 	u_int32_t 	attributes;		/* volume attributes */
 	u_int32_t 	lastMountedVersion;	/* implementation version which last mounted volume */
-	u_int32_t 	reserved;		/* reserved - initialized as zero */
+	u_int32_t 	journalInfoBlock;	/* block addr of journal info (if volume is journaled, zero otherwise) */
 
 	u_int32_t 	createDate;		/* date and time of volume creation */
 	u_int32_t 	modifyDate;		/* date and time of last modification */
@@ -588,7 +612,7 @@ struct BTHeaderRec {
 	u_int16_t 	reserved1;		/* unused */
 	u_int32_t 	clumpSize;		/* reserved */
 	u_int8_t 	btreeType;		/* reserved */
-	u_int8_t 	reserved2;		/* reserved */
+	u_int8_t 	keyCompareType;		/* Key string Comparison Type */
 	u_int32_t 	attributes;		/* persistent attributes about the tree */
 	u_int32_t 	reserved3[16];		/* reserved */
 };
@@ -601,10 +625,38 @@ enum {
 	kBTVariableIndexKeysMask = 0x00000004	/* keys in index nodes are variable length */
 };
 
+
+/* Catalog Key Name Comparison Type */
+enum {
+	kHFSCaseFolding   = 0xCF,  /* case folding (case-insensitive) */
+	kHFSBinaryCompare = 0xBC,  /* binary compare (case-sensitive) */
+};
+
+/* JournalInfoBlock - Structure that describes where our journal lives */
+struct JournalInfoBlock {
+	u_int32_t	flags;
+    	u_int32_t       device_signature[8];  // signature used to locate our device.
+	u_int64_t       offset;               // byte offset to the journal on the device
+	u_int64_t       size;                 // size in bytes of the journal
+	u_int32_t 	reserved[32];
+};
+typedef struct JournalInfoBlock JournalInfoBlock;
+
+enum {
+    kJIJournalInFSMask          = 0x00000001,
+    kJIJournalOnOtherDeviceMask = 0x00000002,
+    kJIJournalNeedInitMask      = 0x00000004
+};
+
+
 #pragma options align=reset
 
 #ifdef __cplusplus
 }
 #endif
+
+#else
+#warning    hfs_format.h is not compatible with HFSVolumes.h (include only one)
+#endif /* __HFSVOLUMES__ */
 
 #endif /* __HFS_FORMAT__ */

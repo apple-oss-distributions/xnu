@@ -3,19 +3,22 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -101,6 +104,8 @@
 #if IPSEC
 extern int ipsec_bypass;
 #endif
+
+extern u_long  route_generation;
 
 #define DBG_FNC_PCB_LOOKUP	NETDBG_CODE(DBG_NETTCP, (6 << 8))
 #define DBG_FNC_PCB_HLOOKUP	NETDBG_CODE(DBG_NETTCP, ((6 << 8) | 1))
@@ -448,12 +453,16 @@ in_pcbladdr(inp, nam, plocal_sin)
 		/*
 		 * If route is known or can be allocated now,
 		 * our src addr is taken from the i/f, else punt.
+		 * Note that we should check the address family of the cached
+		 * destination, in case of sharing the cache with IPv6.
 		 */
 		ro = &inp->inp_route;
 		if (ro->ro_rt &&
-		    (satosin(&ro->ro_dst)->sin_addr.s_addr !=
+			(ro->ro_dst.sa_family != AF_INET ||
+			satosin(&ro->ro_dst)->sin_addr.s_addr !=
 			sin->sin_addr.s_addr ||
-		    inp->inp_socket->so_options & SO_DONTROUTE)) {
+		    inp->inp_socket->so_options & SO_DONTROUTE || 
+		    ro->ro_rt->generation_id != route_generation)) {
 			rtfree(ro->ro_rt);
 			ro->ro_rt = (struct rtentry *)0;
 		}
@@ -461,6 +470,7 @@ in_pcbladdr(inp, nam, plocal_sin)
 		    (ro->ro_rt == (struct rtentry *)0 ||
 		    ro->ro_rt->rt_ifp == (struct ifnet *)0)) {
 			/* No route yet, so try to acquire one */
+			bzero(&ro->ro_dst, sizeof(struct sockaddr_in));
 			ro->ro_dst.sa_family = AF_INET;
 			ro->ro_dst.sa_len = sizeof(struct sockaddr_in);
 			((struct sockaddr_in *) &ro->ro_dst)->sin_addr =
@@ -554,6 +564,7 @@ in_pcbconnect(inp, nam, p)
 			    return (error);
 		}
 		inp->inp_laddr = ifaddr->sin_addr;
+		inp->inp_flags |= INP_INADDR_ANY;
 	}
 	inp->inp_faddr = sin->sin_addr;
 	inp->inp_fport = sin->sin_port;
@@ -611,8 +622,10 @@ in_pcbdetach(inp)
 				  rt->rt_gateway, rt_mask(rt),
 				  rt->rt_flags, (struct rtentry **)0);
 		}
-		else
+		else {
 			rtfree(rt);
+			inp->inp_route.ro_rt = 0;
+		}
 	}
 	ip_freemoptions(inp->inp_moptions);
 	inp->inp_vflag = 0;
@@ -1112,7 +1125,7 @@ in_pcbremlists(inp)
 
 		LIST_REMOVE(inp, inp_hash);
 		LIST_REMOVE(inp, inp_portlist);
-		if (LIST_FIRST(&phd->phd_pcblist) == NULL) {
+		if (phd != NULL && (LIST_FIRST(&phd->phd_pcblist) == NULL)) {
 			LIST_REMOVE(phd, phd_hash);
 			FREE(phd, M_PCB);
 		}

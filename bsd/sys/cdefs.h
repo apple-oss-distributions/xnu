@@ -3,19 +3,22 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -130,10 +133,18 @@
  */
 #if defined(__MWERKS__) && (__MWERKS__ > 0x2400)
 	/* newer Metrowerks compilers support __attribute__() */
-#elif !defined(__GNUC__) || __GNUC__ < 2 || \
-	(__GNUC__ == 2 && __GNUC_MINOR__ < 5)
+#elif __GNUC__ > 2 || __GNUC__ == 2 && __GNUC_MINOR__ >= 5
+#define	__dead2		__attribute__((__noreturn__))
+#define	__pure2		__attribute__((__const__))
+#if __GNUC__ == 2 && __GNUC_MINOR__ >= 5 && __GNUC_MINOR__ < 7
+#define	__unused	/* no attribute */
+#else
+#define	__unused	__attribute__((__unused__))
+#endif
+#else
 #define	__attribute__(x)	/* delete __attribute__ if non-gcc or gcc1 */
 #if defined(__GNUC__) && !defined(__STRICT_ANSI__)
+/* __dead and __pure are depreciated.  Use __dead2 and __pure2 instead */
 #define	__dead		__volatile
 #define	__pure		__const
 #endif
@@ -144,9 +155,13 @@
 #define	__dead
 #define	__pure
 #endif
+#ifndef __dead2
+#define	__dead2
+#define	__pure2
+#define	__unused
+#endif
 
-#define __IDSTRING(name,string) \
-     static const char name[] __attribute__((__unused__)) = string
+#define __IDSTRING(name,string) static const char name[] __unused = string
 
 #ifndef __COPYRIGHT
 #define __COPYRIGHT(s) __IDSTRING(copyright,s)

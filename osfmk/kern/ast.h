@@ -3,19 +3,22 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -79,24 +82,24 @@ typedef uint32_t		ast_t;
 /*
  *      Bits for reasons
  */
-#define AST_BLOCK       0x01
-#define AST_QUANTUM     0x02
-#define AST_HANDOFF		0x04
-#define AST_YIELD		0x08
-#define	AST_URGENT		0x10
+#define AST_PREEMPT		0x01
+#define AST_QUANTUM		0x02
+#define AST_URGENT		0x04
+#define AST_HANDOFF		0x08
+#define AST_YIELD		0x10
 #define AST_APC			0x20	/* migration APC hook */
 /*
  * JMM - This is here temporarily. AST_BSD is used to simulate a
  * general purpose mechanism for setting asynchronous procedure calls
  * from the outside.
  */
-#define	AST_BSD			0x80
+#define AST_BSD			0x80
 
 #define AST_NONE		0x00
-#define	AST_ALL			(~AST_NONE)
+#define AST_ALL			(~AST_NONE)
 
-#define AST_SCHEDULING	(AST_PREEMPT | AST_YIELD | AST_HANDOFF)
-#define	AST_PREEMPT		(AST_BLOCK | AST_QUANTUM | AST_URGENT)
+#define AST_SCHEDULING	(AST_PREEMPTION | AST_YIELD | AST_HANDOFF)
+#define AST_PREEMPTION	(AST_PREEMPT | AST_QUANTUM | AST_URGENT)
 
 extern volatile ast_t	need_ast[NCPUS];
 
@@ -177,11 +180,5 @@ MACRO_END
  *	NOTE: if thread is the current thread, thread_ast_set() should
  *  be followed by ast_propagate().
  */
-
-#ifdef MACH_KERNEL_PRIVATE
-
-#define ast_urgency()		(need_ast[cpu_number()] & AST_URGENT)
-
-#endif /* MACH_KERNEL_PRIVATE */
 
 #endif  /* _KERN_AST_H_ */

@@ -3,19 +3,22 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -86,6 +89,8 @@
 /* Initialize scheduler module */
 extern void		sched_init(void);
 
+extern void		sched_timebase_init(void);
+
 /*
  * Set up thread timeout element(s) when thread is created.
  */
@@ -93,9 +98,6 @@ extern void		thread_timer_setup(
 					thread_t		thread);
 
 extern void		thread_timer_terminate(void);
-
-#define thread_bind_locked(thread, processor)	\
-		(thread)->bound_processor = (processor)
 
 /*
  * Stop a thread and wait for it to stop running.
@@ -187,41 +189,10 @@ extern void		thread_exception_return(void);
 extern void     thread_syscall_return(
                         kern_return_t   ret);
 
-extern thread_t	switch_context(
-						thread_t	old_thread,
-						thread_continue_t continuation,
-						thread_t	new_thread);
-
-/* Attach stack to thread */
-extern void		machine_kernel_stack_init(
-						thread_t	thread,
-						void		(*start_pos)(thread_t));
-
-extern void		load_context(
-						thread_t	thread);
-
-extern thread_act_t		switch_act(
-							thread_act_t	act);
-
-extern void		machine_switch_act(
-							thread_t		thread,
-							thread_act_t	old,
-							thread_act_t	new,
-							int				cpu);
-
 /*
  *	These functions are either defined in kern/thread.c
  *	or are defined directly by machine-dependent code.
  */
-
-/* Allocate an activation stack */
-extern vm_offset_t	stack_alloc(thread_t thread, void (*start_pos)(thread_t));
-
-/* Free an activation stack */
-extern void		stack_free(thread_t thread);
-
-/* Collect excess kernel stacks */
-extern void		stack_collect(void);
 
 /* Block current thread, indicating reason */
 extern wait_result_t	thread_block_reason(
@@ -231,15 +202,16 @@ extern wait_result_t	thread_block_reason(
 /* Dispatch a thread for execution */
 extern void		thread_setrun(
 					thread_t	thread,
-					boolean_t	tail);
+					integer_t	options);
 
-#define HEAD_Q		0		/* FALSE */
-#define TAIL_Q		1		/* TRUE */
+#define SCHED_TAILQ		0
+#define SCHED_HEADQ		1
+#define SCHED_PREEMPT	2
 
 /* Bind thread to a particular processor */
-extern void		thread_bind(
-						thread_t		thread,
-						processor_t		processor);
+extern processor_t		thread_bind(
+							thread_t		thread,
+							processor_t		processor);
 
 /* Set the maximum interrupt level for the thread */
 __private_extern__ wait_interrupt_t thread_interrupt_level(
@@ -260,7 +232,17 @@ __private_extern__ kern_return_t clear_wait_internal(
 						thread_t		thread,
 						wait_result_t	result);
 
+__private_extern__
+	wait_queue_t	wait_event_wait_queue(
+						event_t			event);
+
 #endif /* MACH_KERNEL_PRIVATE */
+
+extern wait_result_t	assert_wait_prim(
+							event_t				event,
+							thread_roust_t		roust_hint,
+							uint64_t			deadline,
+							wait_interrupt_t	interruptible);
 
 /*
  ****************** Only exported until BSD stops using ********************

@@ -3,19 +3,22 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -100,8 +103,8 @@ struct	icmp6_filter;
 
 struct inpcb {
 	LIST_ENTRY(inpcb) inp_hash;	/* hash list */
-	struct	in_addr inp_faddr;	/* foreign host table entry */
-	struct	in_addr inp_laddr;	/* local host table entry */
+	struct	in_addr reserved1;	/* APPLE reserved: inp_faddr defined in protcol indep. part */
+	struct	in_addr reserved2; /* APPLE reserved */
 	u_short	inp_fport;		/* foreign port */
 	u_short	inp_lport;		/* local port */
 	LIST_ENTRY(inpcb) inp_list;	/* list for all PCBs of this proto */
@@ -270,7 +273,10 @@ struct inpcbinfo {		/* XXX documentation, prefixes */
 #ifdef __APPLE__
 #define INP_STRIPHDR	0x200	/* Strip headers in raw_ip, for OT support */
 #endif
-#define	INP_FAITH		0x400	/* accept FAITH'ed connections */
+#define  INP_FAITH			0x400   /* accept FAITH'ed connections */
+#define  INP_INADDR_ANY 	0x800   /* local address wasn't specified */
+
+#define INP_RECVTTL			0x1000
 
 #define IN6P_IPV6_V6ONLY	0x008000 /* restrict AF_INET6 socket for v6 */
 
@@ -287,7 +293,7 @@ struct inpcbinfo {		/* XXX documentation, prefixes */
 					INP_RECVIF|\
 				 IN6P_PKTINFO|IN6P_HOPLIMIT|IN6P_HOPOPTS|\
 				 IN6P_DSTOPTS|IN6P_RTHDR|IN6P_RTHDRDSTOPTS|\
-				 IN6P_AUTOFLOWLABEL)
+				 IN6P_AUTOFLOWLABEL|INP_RECVTTL)
 #define	INP_UNMAPPABLEOPTS	(IN6P_HOPOPTS|IN6P_DSTOPTS|IN6P_RTHDR|\
 				 IN6P_AUTOFLOWLABEL)
 

@@ -3,19 +3,22 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -36,6 +39,7 @@ __BEGIN_DECLS
 #ifdef __APPLE_API_UNSTABLE
 
 #include <mach/clock_types.h>
+#include <stdint.h>
 #if	defined(KERNEL_BUILD)
 #include <kdebug.h>
 #endif /* KERNEL_BUILD */
@@ -76,6 +80,7 @@ __BEGIN_DECLS
 #define DBG_DLIL	        8
 #define DBG_MISC		20
 #define DBG_DYLD                31
+#define DBG_QT                  32
 #define DBG_MIG			255
 
 /* **** The Kernel Debug Sub Classes for Mach (DBG_MACH) **** */
@@ -88,6 +93,7 @@ __BEGIN_DECLS
 #define	DBG_MACH_EXCP_DECI	0x09	/* Decrementer Interrupt */
 #define	DBG_MACH_EXCP_SC	0x0C	/* System Calls */
 #define	DBG_MACH_EXCP_TRACE	0x0D	/* Trace exception */
+#define	DBG_MACH_EXCP_EMUL	0x0E	/* Instruction emulated */
 #define	DBG_MACH_IHDLR		0x10	/* Interrupt Handlers */
 #define	DBG_MACH_IPC		0x20	/* Inter Process Comm */
 #define	DBG_MACH_VM		0x30	/* Virtual Memory */
@@ -104,6 +110,7 @@ __BEGIN_DECLS
 #define MACH_MAKE_RUNNABLE      0x6     /* make thread runnable */
 #define	MACH_PROMOTE			0x7		/* promoted due to resource */
 #define	MACH_DEMOTE				0x8		/* promotion undone */
+#define MACH_PREBLOCK_MUTEX		0x9		/* preblocking on mutex */
 
 /* **** The Kernel Debug Sub Classes for Network (DBG_NETWORK) **** */
 #define DBG_NETIP	1	/* Internet Protocol */
@@ -129,6 +136,7 @@ __BEGIN_DECLS
 #define	DBG_NETAFP	107	/* Apple Filing Protocol */
 #define	DBG_NETRTMP	108	/* Routing Table Maintenance Protocol */
 #define	DBG_NETAURP	109	/* Apple Update Routing Protocol */
+#define	DBG_NETIPSEC	128	/* IPsec Protocol  */
 
 /* **** The Kernel Debug Sub Classes for IOKIT (DBG_IOKIT) **** */
 #define DBG_IOSCSI	1	/* SCSI */
@@ -169,9 +177,13 @@ __BEGIN_DECLS
 /* The Kernel Debug Sub Classes for File System */
 #define DBG_FSRW      1       /* reads and writes to the filesystem */
 #define DBG_DKRW      2       /* reads and writes to the disk */
+#define DBG_FSVN      3       /* vnode operations (inc. locking/unlocking) */
+#define DBG_FSLOOOKUP 4       /* namei and other lookup-related operations */
 
 /* The Kernel Debug Sub Classes for BSD */
 #define	DBG_BSD_EXCP_SC	0x0C	/* System Calls */
+#define	DBG_BSD_AIO		0x0D	/* aio (POSIX async IO) */
+#define DBG_BSD_SC_EXTENDED_INFO 0x0E    /* System Calls, extended info */
 
 /* The Kernel Debug Sub Classes for DBG_TRACE */
 #define DBG_TRACE_DATA      0
@@ -203,6 +215,7 @@ __BEGIN_DECLS
 #define MISCDBG_CODE(SubClass,code) KDBG_CODE(DBG_MISC, SubClass, code)
 #define DLILDBG_CODE(SubClass,code) KDBG_CODE(DBG_DLIL, SubClass, code)
 #define DYLDDBG_CODE(SubClass,code) KDBG_CODE(DBG_DYLD, SubClass, code)
+#define QTDBG_CODE(SubClass,code) KDBG_CODE(DBG_QT, SubClass, code)
 
 /*   Usage:
 * kernel_debug((KDBG_CODE(DBG_NETWORK, DNET_PROTOCOL, 51) | DBG_FUNC_START), 
@@ -284,7 +297,7 @@ __END_DECLS
  */
 
 typedef struct {
-mach_timespec_t	timestamp;
+uint64_t	timestamp;
 unsigned int	arg1;
 unsigned int	arg2;
 unsigned int	arg3;

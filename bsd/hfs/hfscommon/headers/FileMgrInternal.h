@@ -3,19 +3,22 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -115,6 +118,7 @@ enum {
 	kEFReserveMask  = 0x04,   /* keep block reserve */
 	kEFDeferMask    = 0x08,   /* defer file block allocations */
 	kEFNoClumpMask  = 0x10,   /* don't round up to clump size */
+	kEFMetadataMask  = 0x20,  /* metadata allocation */
 
 	kTFTrunExtBit				= 0,							/*	truncate to the extent containing new PEOF*/
 	kTFTrunExtMask				= 1
@@ -286,9 +290,10 @@ ReplaceBTreeRecord				(FileReference 				refNum,
 EXTERN_API_C( OSErr )
 BlockAllocate					(ExtendedVCB *			vcb,
 								 UInt32 				startingBlock,
-								 SInt64 				bytesRequested,
-								 SInt64 				bytesMaximum,
+								 UInt32 				minBlocks,
+								 UInt32 				maxBlocks,
 								 Boolean 				forceContiguous,
+								 Boolean				useMetaZone,
 								 UInt32 *				startBlock,
 								 UInt32 *				actualBlocks);
 
@@ -297,9 +302,18 @@ BlockDeallocate					(ExtendedVCB *			vcb,
 								 UInt32 				firstBlock,
 								 UInt32 				numBlocks);
 
+EXTERN_API_C( OSErr )
+BlockMarkAllocated(ExtendedVCB *vcb, UInt32 startingBlock, UInt32 numBlocks);
+
+EXTERN_API_C( OSErr )
+BlockMarkFree( ExtendedVCB *vcb, UInt32 startingBlock, UInt32 numBlocks);
+
 EXTERN_API_C( UInt32 )
 FileBytesToBlocks				(SInt64 				numerator,
 								 UInt32 				denominator);
+
+EXTERN_API_C( UInt32 )
+MetaZoneFreeBlocks(ExtendedVCB *vcb);
 
 /*	File Extent Mapping routines*/
 EXTERN_API_C( OSErr )
@@ -334,6 +348,9 @@ MapFileBlockC					(ExtendedVCB *			vcb,
 								 off_t 					offset,
 								 daddr_t *				startBlock,
 								 size_t *				availableBytes);
+
+EXTERN_API_C( int )
+AddFileExtent (ExtendedVCB *vcb, FCB *fcb, UInt32 startBlock, UInt32 blockCount);
 
 #if TARGET_API_MACOS_X
 EXTERN_API_C( Boolean )

@@ -3,19 +3,22 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -61,6 +64,18 @@ IOMemoryCursor::initWithSpecification(SegmentFunction  inSegFunc,
                                       IOPhysicalLength inMaxTransferSize,
                                       IOPhysicalLength inAlignment)
 {
+// @@@ gvdl: Remove me
+#if 1
+static UInt sMaxDBDMASegment;
+if (!sMaxDBDMASegment) {
+    sMaxDBDMASegment = (UInt) -1;
+    if (PE_parse_boot_arg("mseg", &sMaxDBDMASegment))
+        IOLog("Setting MaxDBDMASegment to %d\n", sMaxDBDMASegment);
+}
+
+if (inMaxSegmentSize > sMaxDBDMASegment) inMaxSegmentSize = sMaxDBDMASegment;
+#endif
+
     if (!super::init())
         return false;
 
@@ -104,21 +119,65 @@ IOMemoryCursor::genPhysicalSegments(IOMemoryDescriptor *inDescriptor,
      * If we finished cleanly return number of segments found
      * and update the position in the descriptor.
      */
+    PhysicalSegment curSeg = { 0 };
     UInt curSegIndex = 0;
     UInt curTransferSize = 0;
-    PhysicalSegment seg;
+    IOByteCount inDescriptorLength = inDescriptor->getLength();
+    PhysicalSegment seg = { 0 };
 
-    while ((curSegIndex < inMaxSegments)
-    &&  (curTransferSize < inMaxTransferSize)
-    &&  (seg.location = inDescriptor->getPhysicalSegment(
-                            fromPosition + curTransferSize, &seg.length)))
+    while ((seg.location) || (fromPosition < inDescriptorLength)) 
     {
-        assert(seg.length);
-        seg.length = min(inMaxTransferSize-curTransferSize,
-                         (min(seg.length, maxSegmentSize)));
-        (*outSeg)(seg, inSegments, curSegIndex++);
-        curTransferSize += seg.length;
+        if (!seg.location)
+        {
+            seg.location = inDescriptor->getPhysicalSegment(
+                               fromPosition, &seg.length);
+            assert(seg.location);
+            assert(seg.length);
+            fromPosition += seg.length;
+        }
+
+        if (!curSeg.location)
+        {
+            curTransferSize += seg.length;
+            curSeg = seg;
+            seg.location = 0;
+        }
+        else if ((curSeg.location + curSeg.length == seg.location))
+        {
+            curTransferSize += seg.length;
+            curSeg.length += seg.length;
+            seg.location = 0;
+        }
+
+        if (!seg.location)
+        {
+            if ((curSeg.length > maxSegmentSize))
+            {
+                seg.location = curSeg.location + maxSegmentSize;
+                seg.length = curSeg.length - maxSegmentSize;
+                curTransferSize -= seg.length;
+                curSeg.length -= seg.length;
+            }
+
+            if ((curTransferSize >= inMaxTransferSize))
+            {
+                curSeg.length -= curTransferSize - inMaxTransferSize;
+                curTransferSize = inMaxTransferSize;
+                break;
+            }
+        }
+
+        if (seg.location)
+        {
+            if ((curSegIndex + 1 == inMaxSegments))
+                break;
+            (*outSeg)(curSeg, inSegments, curSegIndex++);
+            curSeg.location = 0;
+        }
     }
+
+    if (curSeg.location)
+        (*outSeg)(curSeg, inSegments, curSegIndex++);
 
     if (outTransferSize)
         *outTransferSize = curTransferSize;

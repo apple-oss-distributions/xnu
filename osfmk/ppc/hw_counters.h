@@ -3,19 +3,22 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -30,6 +33,7 @@
 #error This file is only useful on PowerPC.
 #endif
 
+#pragma pack(4)								/* Make sure the structure stays as we defined it */
 
 typedef struct hw_counters {	
 
@@ -55,8 +59,9 @@ typedef struct hw_counters {
 	unsigned int hw_rsvd3; 					/* Reserved */
 	unsigned int hw_InstBreakpoints; 		/* Instruction breakpoint */
 	unsigned int hw_SystemManagements; 		/* System management */
-	unsigned int hw_rsvd4; 					/* Reserved */
-	unsigned int hw_AltivecAssists;			/* Altivec Assist */
+	unsigned int hw_AltivecAssists; 		/* Altivec Assist */
+	unsigned int hw_Thermal;				/* Thermals */
+	unsigned int hw_rsvd5; 					/* Reserved */
 	unsigned int hw_rsvd6; 					/* Reserved */
 	unsigned int hw_rsvd7; 					/* Reserved */
 	unsigned int hw_rsvd8;					/* Reserved */
@@ -65,15 +70,23 @@ typedef struct hw_counters {
 	unsigned int hw_rsvd11; 				/* Reserved */
 	unsigned int hw_rsvd12; 				/* Reserved */
 	unsigned int hw_rsvd13; 				/* Reserved */
-	unsigned int hw_rsvd14; 				/* Reserved */
 	unsigned int hw_Trace601;				/* Trace */
 	unsigned int hw_SIGPs; 					/* SIGP */
 	unsigned int hw_Preemptions; 			/* Preemption */
 	unsigned int hw_ContextSwitchs;			/* Context switch */
+	unsigned int hw_Shutdowns;				/* Shutdowns */
+	unsigned int hw_Chokes;					/* System ABENDs */
+	unsigned int hw_DataSegments;			/* Data Segment Interruptions */
+	unsigned int hw_InstructionSegments;	/* Instruction Segment Interruptions */
+	unsigned int hw_SoftPatches;			/* Soft Patch interruptions */
+	unsigned int hw_Maintenances;			/* Maintenance interruptions */
+	unsigned int hw_Instrumentations;		/* Instrumentation interruptions */
+	unsigned int hw_rsvd14;					/* Reswerved */
 	
-	unsigned int hw_spare[27];				/* Pad to 256 bytes */
+	unsigned int hw_spare[19];				/* Pad to 256 bytes */
 
 } hw_counters;
+#pragma pack()
 
 extern hw_counters hw_counts(NCPUS);
 

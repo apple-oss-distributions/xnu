@@ -3,19 +3,22 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -72,16 +75,15 @@
 #ifndef KERNEL
 LEAF(_ev_lock, 0)
 LEAF(_IOSpinLock, 0)
-	push 	%eax
-	push	%ecx
-	movl	$1, %ecx
-	movl	12(%esp), %eax	
-_spin:
-	xchgl	%ecx,0(%eax)
-	cmp	$0, %ecx
-	jne	_spin
-	pop	%ecx
-	pop	%eax
+	movl		4(%esp), %ecx
+0:
+	xorl		%eax, %eax
+	rep
+	nop		/* pause for hyperthreaded CPU's */
+	lock
+	cmpxchgl	%ecx, (%ecx)
+	jne		0b
+	ret
 END(_ev_lock)
 #endif
 
@@ -94,11 +96,10 @@ END(_ev_lock)
  */
 LEAF(_ev_unlock, 0)
 LEAF(_IOSpinUnlock, 0)
-	push	%eax
-	movl	8(%esp),%eax
-	movl	$0,0(%eax)
+	movl		4(%esp), %ecx
+	movl		$0, (%ecx)
 	ENABLE_PREEMPTION()
-	pop	%eax
+	ret
 END(_ev_unlock)
 
 
@@ -114,9 +115,11 @@ END(_ev_unlock)
 LEAF(_ev_try_lock, 0)
 LEAF(_IOTrySpinLock, 0)
         DISABLE_PREEMPTION()
-	movl	4(%esp), %eax
-   lock;bts	$0, 0(%eax)
-	jb	1f
+        movl            4(%esp), %ecx 
+	xorl		%eax, %eax
+        lock
+        cmpxchgl        %ecx, (%ecx)
+	jne	1f
 	movl	$1, %eax		/* yes */
 	ret
 1:

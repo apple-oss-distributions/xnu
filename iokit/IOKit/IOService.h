@@ -3,19 +3,22 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -1792,30 +1795,38 @@ private:
     IOReturn notifyAll ( bool is_prechange );
     bool notifyChild ( IOPowerConnection * nextObject, bool is_prechange );
     bool inform ( IOPMinformee * nextObject, bool is_prechange );
-    void our_prechange_03 ( void );
-    void our_prechange_04 ( void );
-    void our_prechange_05 ( void );
-    void our_prechange_1 ( void );
-    void our_prechange_2 ( void );
-    void our_prechange_3 ( void );
-    void our_prechange_4 ( void );
-    IOReturn parent_down_0 ( void );
-    IOReturn parent_down_02 ( void );
-    void parent_down_04 ( void );
-    void parent_down_05 ( void );
-    IOReturn parent_down_1 ( void );
-    IOReturn parent_down_2 ( void );
-    void parent_down_3 ( void );
-    void parent_down_4 ( void );
-    void parent_down_5 ( void );
-    void parent_down_6 ( void );
-    void parent_up_0 ( void );
-    IOReturn parent_up_1 ( void );
-    IOReturn parent_up_2 ( void );
-    IOReturn parent_up_3 ( void );
-    void parent_up_4 ( void );
-    void parent_up_5 ( void );
-    void parent_up_6 ( void );
+    
+    // Power Management state machine
+    // power change initiated by driver
+    void OurChangeTellClientsPowerDown ( void );
+    void OurChangeTellPriorityClientsPowerDown ( void );
+    void OurChangeNotifyInterestedDriversWillChange ( void );
+    void OurChangeSetPowerState ( void );
+    void OurChangeWaitForPowerSettle ( void );
+    void OurChangeNotifyInterestedDriversDidChange ( void );
+    void OurChangeFinish ( void );
+    
+    // downward power change initiated by a power parent
+    IOReturn ParentDownTellPriorityClientsPowerDown_Immediate ( void );
+    IOReturn ParentDownNotifyInterestedDriversWillChange_Immediate ( void );
+    void ParentDownTellPriorityClientsPowerDown_Delayed ( void );
+    void ParentDownNotifyInterestedDriversWillChange_Delayed ( void );
+    IOReturn ParentDownSetPowerState_Immediate ( void );
+    IOReturn ParentDownWaitForPowerSettleAndNotifyDidChange_Immediate ( void );
+    void ParentDownNotifyDidChangeAndAcknowledgeChange_Delayed ( void );
+    void ParentDownSetPowerState_Delayed ( void );
+    void ParentDownWaitForPowerSettle_Delayed ( void );
+    void ParentDownAcknowledgeChange_Delayed ( void );
+    
+    // upward power change initiated by a power parent
+    void ParentUpSetPowerState_Delayed ( void );
+    IOReturn ParentUpSetPowerState_Immediate ( void );
+    IOReturn ParentUpWaitForSettleTime_Immediate ( void );
+    IOReturn ParentUpNotifyInterestedDriversDidChange_Immediate ( void );
+    void ParentUpWaitForSettleTime_Delayed ( void );
+    void ParentUpNotifyInterestedDriversDidChange_Delayed ( void );
+    void ParentUpAcknowledgePowerChange_Delayed ( void );
+    
     void all_done ( void );
     void all_acked ( void );
     void driver_acked ( void );
@@ -1835,6 +1846,7 @@ private:
     bool responseValid ( unsigned long x );
     IOReturn allowCancelCommon ( void );
     void computeDesiredState ( void );
+    void rebuildChildClampBits ( void );
 };
 
 #endif /* ! _IOKIT_IOSERVICE_H */

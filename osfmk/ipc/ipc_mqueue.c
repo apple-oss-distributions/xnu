@@ -3,19 +3,22 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -346,6 +349,7 @@ ipc_mqueue_send(
 		imq_unlock(mqueue);
 		splx(s);
 	} else {
+		thread_t cur_thread = current_thread();
 
 		/* 
 		 * We have to wait for space to be granted to us.
@@ -356,12 +360,14 @@ ipc_mqueue_send(
 			return MACH_SEND_TIMED_OUT;
 		}
 		mqueue->imq_fullwaiters = TRUE;
+		thread_lock(cur_thread);
 		wresult = wait_queue_assert_wait64_locked(
 						&mqueue->imq_wait_queue,
 						IPC_MQUEUE_FULL,
 						THREAD_ABORTSAFE,
-						TRUE); /* unlock? */
-		/* wait/mqueue is unlocked */
+						cur_thread);
+		thread_unlock(cur_thread);
+		imq_unlock(mqueue);
 		splx(s);
 		
 		if (wresult == THREAD_WAITING) {
@@ -730,15 +736,17 @@ ipc_mqueue_receive(
 		}
 	}
 
+	thread_lock(self);
 	self->ith_state = MACH_RCV_IN_PROGRESS;
 	self->ith_option = option;
 	self->ith_msize = max_size;
-		
+
 	wresult = wait_queue_assert_wait64_locked(&mqueue->imq_wait_queue,
 						IPC_MQUEUE_RECEIVE,
 						interruptible,
-						TRUE); /* unlock? */
-	/* mqueue/waitq is unlocked */
+						self);
+	thread_unlock(self);
+	imq_unlock(mqueue);
 	splx(s);
 
 	if (wresult == THREAD_WAITING) {

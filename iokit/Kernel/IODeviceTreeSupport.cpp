@@ -3,19 +3,22 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -37,7 +40,8 @@
 #include <IOKit/IOLib.h>
 #include <IOKit/IOKitKeys.h>
 
-#include <DeviceTree.h>
+#include <pexpert/device_tree.h>
+
 extern "C" {
     #include <machine/machine_routines.h>
     void DTInit( void * data );
@@ -96,8 +100,6 @@ IODeviceTreeAlloc( void * dtTop )
     bool				intMap;
     bool				freeDT;
 
-    IOLog("IODeviceTreeSupport ");
-
     gIODTPlane = IORegistryEntry::makePlane( kIODeviceTreePlane );
 
     gIODTNameKey 		= OSSymbol::withCStringNoCopy( "name" );
@@ -148,7 +150,7 @@ IODeviceTreeAlloc( void * dtTop )
 
     parent = MakeReferenceTable( (DTEntry)dtTop, freeDT );
 
-    stack = OSArray::withObjects( & (const OSObject *) parent, 1, 10 );
+    stack = OSArray::withObjects( (const OSObject **) &parent, 1, 10 );
     DTCreateEntryIterator( (DTEntry)dtTop, &iter );
 
     do {
@@ -193,7 +195,7 @@ IODeviceTreeAlloc( void * dtTop )
         // free original device tree
         DTInit(0);
         IODTFreeLoaderInfo( "DeviceTree",
-			(void *)dtMap[0], round_page(dtMap[1]) );
+			(void *)dtMap[0], round_page_32(dtMap[1]) );
     }
 
     // adjust tree
@@ -231,8 +233,6 @@ IODeviceTreeAlloc( void * dtTop )
         // set a key in the root to indicate we found NW interrupt mapping
         parent->setProperty( gIODTNWInterruptMappingKey,
                 (OSObject *) gIODTNWInterruptMappingKey );
-
-    IOLog("done\n");
 
     return( parent);
 }

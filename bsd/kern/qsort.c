@@ -3,19 +3,22 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -58,7 +61,7 @@
 
 
 #include <sys/types.h>
-#include <stdlib.h>
+//#include <stdlib.h>
 
 static inline char	*med3 __P((char *, char *, char *, int (*)()));
 static inline void	 swapfunc __P((char *, char *, int, int));
@@ -113,6 +116,7 @@ med3(a, b, c, cmp)
               :(cmp(b, c) > 0 ? b : (cmp(a, c) < 0 ? a : c ));
 }
 
+__private_extern__
 void
 qsort(a, n, es, cmp)
 	void *a;
@@ -125,16 +129,16 @@ qsort(a, n, es, cmp)
 loop:	SWAPINIT(a, es);
 	swap_cnt = 0;
 	if (n < 7) {
-		for (pm = a + es; pm < (char *) a + n * es; pm += es)
+		for (pm = (char *)a + es; pm < (char *) a + n * es; pm += es)
 			for (pl = pm; pl > (char *) a && cmp(pl - es, pl) > 0;
 			     pl -= es)
 				swap(pl, pl - es);
 		return;
 	}
-	pm = a + (n / 2) * es;
+	pm = (char *)a + (n / 2) * es;
 	if (n > 7) {
 		pl = a;
-		pn = a + (n - 1) * es;
+		pn = (char *)a + (n - 1) * es;
 		if (n > 40) {
 			d = (n / 8) * es;
 			pl = med3(pl, pl + d, pl + 2 * d, cmp);
@@ -144,9 +148,9 @@ loop:	SWAPINIT(a, es);
 		pm = med3(pl, pm, pn, cmp);
 	}
 	swap(a, pm);
-	pa = pb = a + es;
+	pa = pb = (char *)a + es;
 
-	pc = pd = a + (n - 1) * es;
+	pc = pd = (char *)a + (n - 1) * es;
 	for (;;) {
 		while (pb <= pc && (r = cmp(pb, a)) <= 0) {
 			if (r == 0) {
@@ -172,14 +176,14 @@ loop:	SWAPINIT(a, es);
 		pc -= es;
 	}
 	if (swap_cnt == 0) {  /* Switch to insertion sort */
-		for (pm = a + es; pm < (char *) a + n * es; pm += es)
+		for (pm = (char *)a + es; pm < (char *) a + n * es; pm += es)
 			for (pl = pm; pl > (char *) a && cmp(pl - es, pl) > 0; 
 			     pl -= es)
 				swap(pl, pl - es);
 		return;
 	}
 
-	pn = a + n * es;
+	pn = (char *)a + n * es;
 	r = min(pa - (char *)a, pb - pa);
 	vecswap(a, pb - r, r);
 	r = min(pd - pc, pn - pd - es);

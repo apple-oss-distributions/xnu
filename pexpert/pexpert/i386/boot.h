@@ -3,19 +3,22 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -107,12 +110,94 @@ typedef struct boot_video  boot_video;
 #define GRAPHICS_MODE     1
 #define TEXT_MODE         0
 
-#define BOOT_STRING_LEN   160
+
+/*
+ * INT15, E820h - Query System Address Map.
+ *
+ * Documented in ACPI Specification Rev 2.0,
+ * Chapter 15 (System Address Map Interfaces).
+ */
+
+/*
+ * ACPI defined memory range types.
+ */
+enum {
+    kMemoryRangeUsable   = 1,    // RAM usable by the OS.
+    kMemoryRangeReserved = 2,    // Reserved. (Do not use)
+    kMemoryRangeACPI     = 3,    // ACPI tables. Can be reclaimed.
+    kMemoryRangeNVS      = 4,    // ACPI NVS memory. (Do not use)
+
+    /* Undefined types should be treated as kMemoryRangeReserved */
+};
+
+/*
+ * Memory range descriptor.
+ */
+typedef struct MemoryRange {
+    unsigned long long base;     // 64-bit base address
+    unsigned long long length;   // 64-bit length in bytes
+    unsigned long      type;     // type of memory range
+    unsigned long      reserved;
+} MemoryRange;
+
+#define kMemoryMapCountMax 40
+
+/*
+ * BIOS drive information.
+ */
+struct boot_drive_info {
+    struct drive_params {
+	unsigned short buf_size;
+	unsigned short info_flags;
+	unsigned long  phys_cyls;
+	unsigned long  phys_heads;
+	unsigned long  phys_spt;
+	unsigned long long phys_sectors;
+	unsigned short phys_nbps;
+	unsigned short dpte_offset;
+	unsigned short dpte_segment;
+	unsigned short key;
+	unsigned char  path_len;
+	unsigned char  reserved1;
+	unsigned short reserved2;
+	unsigned char  bus_type[4];
+	unsigned char  interface_type[8];
+	unsigned char  interface_path[8];
+	unsigned char  dev_path[8];
+	unsigned char  reserved3;
+	unsigned char  checksum;
+    } params __attribute__((packed));
+    struct drive_dpte {
+	unsigned short io_port_base;
+	unsigned short control_port_base;
+	unsigned char  head_flags;
+	unsigned char  vendor_info;
+	unsigned char  irq         : 4;
+	unsigned char  irq_unused  : 4;
+	unsigned char  block_count;
+	unsigned char  dma_channel : 4;
+	unsigned char  dma_type    : 4;
+	unsigned char  pio_type    : 4;
+	unsigned char  pio_unused  : 4;
+	unsigned short option_flags;
+	unsigned short reserved;
+	unsigned char  revision;
+	unsigned char  checksum;
+    } dpte __attribute__((packed));
+} __attribute__((packed));
+typedef struct boot_drive_info boot_drive_info_t;
+
+#define MAX_BIOS_DEVICES 8
+
+#define OLD_BOOT_STRING_LEN   160
+#define BOOT_STRING_LEN   1024
 #define CONFIG_SIZE       (12 * 4096)
+
+/* Old structure for compatibility */
 
 typedef struct {
     short            version;
-    char             bootString[BOOT_STRING_LEN];  // boot arguments
+    char             bootString[OLD_BOOT_STRING_LEN];  // boot arguments
     int              magicCookie;                  // KERNBOOTMAGIC
     int              numIDEs;                      // number of IDE drives
     int              rootdev;                      // root device
@@ -137,10 +222,6 @@ typedef struct {
 
 #define KERNSTRUCT_ADDR   ((KERNBOOTSTRUCT *) 0x11000)
 #define KERNBOOTMAGIC     0xa7a7a7a7
-
-#ifndef KERNEL
-extern KERNBOOTSTRUCT *   kernBootStruct;
-#endif
 
 #define BOOT_LINE_LENGTH        256
 
@@ -189,6 +270,40 @@ typedef struct boot_args {
 } boot_args;
 
 extern boot_args passed_args;
+
+/* New structures */
+
+
+#define KERNEL_BOOT_MAGIC    0xa5b6d7e8
+
+typedef struct KernelBootArgs {
+    unsigned int     magicCookie;                  // KERNEL_BOOT_MAGIC
+    unsigned short   version;
+    unsigned short   revision;
+    unsigned int     size;                         // size of KernelBootArgs structure
+    int              numDrives;                    // number of BIOS drives
+    int              rootdev;                      // root device
+    int              convmem;                      // conventional memory
+    int              extmem;                       // extended memory
+    unsigned int     firstAddr0;                   // first address for kern convmem
+    int              graphicsMode;                 // booted in graphics mode?
+    int              kernDev;                      // device kernel was fetched from
+    int              numBootDrivers;               // number of drivers loaded
+    char *           configEnd;                    // pointer to end of config files
+    unsigned int     kaddr;                        // kernel load address
+    unsigned int     ksize;                        // size of kernel
+    char             bootFile[128];                // kernel file name
+    char             bootString[BOOT_STRING_LEN];  // boot arguments
+    driver_config_t  driverConfig[NDRIVERS];
+    unsigned long    memoryMapCount;
+    MemoryRange      memoryMap[kMemoryMapCountMax];
+    boot_drive_info_t  driveInfo[MAX_BIOS_DEVICES];
+    boot_video       video;
+    PCI_bus_info_t   pciInfo;
+    APM_config_t     apmConfig;
+    char             config[CONFIG_SIZE];
+} KernelBootArgs_t;
+
 
 #endif /* _PEXPERT_I386_BOOT_H */
 

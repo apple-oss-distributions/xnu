@@ -3,19 +3,22 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -79,7 +82,7 @@ SYSCTL_STRUCT(_net_appletalk, OID_AUTO, debug, CTLFLAG_WR,
 	      &dbgBits, dbgBits, "AppleTalk Debug Flags");
 volatile int RouterMix = RT_MIX_DEFAULT; /* default for nbr of ppsec */
 SYSCTL_INT(_net_appletalk, OID_AUTO, routermix, CTLFLAG_WR, 
-	   &RouterMix, 0, "Appletalk RouterMix");
+	   (int *)&RouterMix, 0, "Appletalk RouterMix");
 at_ddp_stats_t at_ddp_stats;		/* DDP statistics */
 SYSCTL_STRUCT(_net_appletalk, OID_AUTO, ddpstats, CTLFLAG_RD,
 	      &at_ddp_stats, at_ddp_stats, "AppleTalk DDP Stats");
@@ -632,6 +635,14 @@ int _ATselect(fp, which, wql, proc)
 	return rc;
 }
 
+int _ATkqfilter(fp, kn, p)
+	struct file *fp;
+	struct knote *kn;
+	struct proc *p;
+{
+	return (EOPNOTSUPP);
+}
+
 void atalk_putnext(gref, m)
 	gref_t *gref;
 	gbuf_t *m;
@@ -922,9 +933,9 @@ int gref_close(gref_t *gref)
 
 struct mbuf *m_clattach(extbuf, extfree, extsize, extarg, wait)
 	caddr_t extbuf;	
-	int (*extfree)();
-	int extsize;
-	int extarg;
+	void (*extfree)(caddr_t , u_int, caddr_t);
+	u_int extsize;
+	caddr_t extarg;
 	int wait;
 {
         struct mbuf *m;
@@ -982,8 +993,9 @@ void atp_delete_free_clusters()
 */
 
 void m_lgbuf_free(buf, size, arg)
-     void *buf;
-     int size, arg; /* not needed, but they're in m_free() */
+     caddr_t buf;
+     u_int size;
+     caddr_t arg; /* not needed, but they're in m_free() */
 {
 	/* FREE(buf, M_MCLUST); - can't free here - called from m_free while under lock */
 	
@@ -1027,7 +1039,7 @@ struct mbuf *m_lgbuf_alloc(size, wait)
 		if (NULL == 
 		    (m = m_clattach(buf, m_lgbuf_free, size, 0, 
 				    (wait)? M_WAIT: M_DONTWAIT))) {
-			m_lgbuf_free(buf);
+			m_lgbuf_free(buf, 0, 0);
 			return(NULL);
 		}
 	} else {

@@ -4,19 +4,22 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -477,6 +480,42 @@ static __inline int _VOP_EXCHANGE(struct vnode *fvp, struct vnode *tvp, struct u
 	a.a_cred = cred;
 	a.a_p = p;
 	return (VCALL(fvp, VOFFSET(vop_exchange), &a));
+}
+
+struct vop_kqfilt_add_args {
+	struct vnodeop_desc *a_desc;
+	struct vnode *a_vp;
+	struct knote *a_kn;
+	struct proc *a_p;
+};
+extern struct vnodeop_desc vop_kqfilt_add_desc;
+#define VOP_KQFILT_ADD(vp, kn, p) _VOP_KQFILT_ADD(vp, kn, p)
+static __inline int _VOP_KQFILT_ADD(struct vnode *vp, struct knote *kn, struct proc *p)
+{
+	struct vop_kqfilt_add_args a;
+	a.a_desc = VDESC(vop_kqfilt_add);
+	a.a_vp = vp;
+	a.a_kn = kn;
+	a.a_p = p;
+	return (VCALL(vp, VOFFSET(vop_kqfilt_add), &a));
+}
+
+struct vop_kqfilt_remove_args {
+	struct vnodeop_desc *a_desc;
+	struct vnode *a_vp;
+	uintptr_t a_ident;
+	struct proc *a_p;
+};
+extern struct vnodeop_desc vop_kqfilt_remove_desc;
+#define VOP_KQFILT_REMOVE(vp, ident, p) _VOP_KQFILT_REMOVE(vp, ident, p)
+static __inline int _VOP_KQFILT_REMOVE(struct vnode *vp, uintptr_t ident, struct proc *p)
+{
+	struct vop_kqfilt_remove_args a;
+	a.a_desc = VDESC(vop_kqfilt_remove);
+	a.a_vp = vp;
+	a.a_ident = ident;
+	a.a_p = p;
+	return (VCALL(vp, VOFFSET(vop_kqfilt_remove), &a));
 }
 
 struct vop_revoke_args {

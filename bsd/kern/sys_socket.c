@@ -3,19 +3,22 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -57,6 +60,7 @@
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/file.h>
+#include <sys/event.h>
 #include <sys/protosw.h>
 #include <sys/socket.h>
 #include <sys/socketvar.h>
@@ -77,8 +81,10 @@ int soo_close __P((struct file *fp, struct proc *p));
 
 int soo_select __P((struct file *fp, int which, void * wql, struct proc *p));
 
+int soo_kqfilter __P((struct file *fp, struct knote *kn, struct proc *p));
+
 struct	fileops socketops =
-    { soo_read, soo_write, soo_ioctl, soo_select, soo_close };
+    { soo_read, soo_write, soo_ioctl, soo_select, soo_close, soo_kqfilter };
 
 /* ARGSUSED */
 int
@@ -343,6 +349,7 @@ soo_select(fp, which, wql, p)
 	register int s = splnet();
 	int retnum=0;
 
+	if (so == NULL || so == (struct socket*)-1) goto done;
 
 	switch (which) {
 
@@ -411,14 +418,17 @@ soo_close(fp, p)
 	struct proc *p;
 {
 	int error = 0;
+	struct socket *sp;
+
+	sp = (struct socket *)fp->f_data;
+	fp->f_data = NULL;
 
 	thread_funnel_switch(KERNEL_FUNNEL, NETWORK_FUNNEL);
 
-	if (fp->f_data)
-	     error = soclose((struct socket *)fp->f_data);
+	if (sp)
+	     error = soclose(sp);
 
 	thread_funnel_switch(NETWORK_FUNNEL, KERNEL_FUNNEL);
 
-	fp->f_data = 0;
 	return (error);
 }

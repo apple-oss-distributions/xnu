@@ -3,19 +3,22 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -262,12 +265,13 @@ struct vm_object {
 						   request queue */
 
 	vm_object_offset_t	last_alloc;	/* last allocation offset */
+	vm_object_offset_t	sequential;	/* sequential access size */
 	vm_size_t		cluster_size;	/* size of paging cluster */
 #if	MACH_PAGEMAP
 	vm_external_map_t	existence_map;	/* bitmap of pages written to
 						 * backing storage */
 #endif	/* MACH_PAGEMAP */
-	int			cow_hint;	/* last page present in     */
+	vm_offset_t		cow_hint;	/* last page present in     */
 						/* shadow but not in object */
 #if	MACH_ASSERT
 	struct vm_object	*paging_object;	/* object which pages to be
@@ -421,7 +425,8 @@ __private_extern__ boolean_t	vm_object_shadow(
 					vm_object_size_t	length);
 
 __private_extern__ void		vm_object_collapse(
-					vm_object_t	object);
+					vm_object_t		object,
+					vm_object_offset_t	offset);
 
 __private_extern__ boolean_t	vm_object_copy_quickly(
 				vm_object_t		*_object,

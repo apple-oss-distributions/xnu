@@ -3,19 +3,22 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -118,6 +121,7 @@ bsd_hardclock(usermode, pc, numticks)
 	register struct proc *p;
 	register thread_t	thread;
 	int nusecs = numticks * tick;
+	struct timeval		tv;
 
 	if (!bsd_hardclockinit)
 		return;
@@ -125,13 +129,14 @@ bsd_hardclock(usermode, pc, numticks)
 	/*
 	 * Increment the time-of-day.
 	 */
-	microtime(&time);
+	microtime(&tv);
+	time = tv;
 
 	if (bsd_hardclockinit < 0) {
 	    return;
 	}
 
-	thread = current_thread();
+	thread = current_act();
 	/*
 	 * Charge the time out based on the mode the cpu is in.
 	 * Here again we fudge for the lack of proper interval timers
@@ -157,7 +162,7 @@ bsd_hardclock(usermode, pc, numticks)
 				extern void psignal_vtalarm(struct proc *);
                         
 				/* does psignal(p, SIGVTALRM) in a thread context */
-				thread_call_func(psignal_vtalarm, p, FALSE);
+				thread_call_func((thread_call_func_t)psignal_vtalarm, p, FALSE);
 			}
 		}
 
@@ -180,7 +185,7 @@ bsd_hardclock(usermode, pc, numticks)
 					extern void psignal_xcpu(struct proc *);
                         
 					/* does psignal(p, SIGXCPU) in a thread context */
-					thread_call_func(psignal_xcpu, p, FALSE);
+					thread_call_func((thread_call_func_t)psignal_xcpu, p, FALSE);
 
 					if (p->p_limit->pl_rlimit[RLIMIT_CPU].rlim_cur <
 						p->p_limit->pl_rlimit[RLIMIT_CPU].rlim_max)
@@ -192,7 +197,7 @@ bsd_hardclock(usermode, pc, numticks)
 				extern void psignal_sigprof(struct proc *);
                         
 				/* does psignal(p, SIGPROF) in a thread context */
-				thread_call_func(psignal_sigprof, p, FALSE);
+				thread_call_func((thread_call_func_t)psignal_sigprof, p, FALSE);
 			}
 		}
 	}

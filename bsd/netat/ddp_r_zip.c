@@ -3,19 +3,22 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -89,8 +92,8 @@ extern short	ErrorZIPoverflow;
 static	int	netinfo_reply_pending;
 static	void	zip_netinfo_reply(at_x_zip_t *, at_ifaddr_t *);
 static	void	zip_getnetinfo(at_ifaddr_t *);
-static	void	zip_getnetinfo_funnel(at_ifaddr_t *);
-static	void	send_phony_reply(gbuf_t *);
+static	void	zip_getnetinfo_funnel(void *);
+static	void	send_phony_reply(void *);
 
 /*
  * zip_send_getnetinfo_reply: we received a GetNetInfo packet, we need to reply
@@ -989,9 +992,10 @@ int zip_control (ifID, control)
 }
 
 /* funnel version of zip_getnetinfo */
-static void zip_getnetinfo_funnel(ifID)
-     register at_ifaddr_t       *ifID;
+static void zip_getnetinfo_funnel(arg)
+     void       *arg;
 {
+	at_ifaddr_t       *ifID = (at_ifaddr_t *)arg;
         thread_funnel_set(network_flock, TRUE);
 	zip_getnetinfo(ifID);
         thread_funnel_set(network_flock, FALSE);
@@ -1258,9 +1262,10 @@ int zip_handle_getmyzone(ifID, m)
 }
 
 static	void
-send_phony_reply(rm)
-	gbuf_t	*rm;
+send_phony_reply(arg)
+	void	*arg;
 {
+	gbuf_t  *rm = (gbuf_t *)arg;
 	boolean_t 	funnel_state;
 
 	funnel_state = thread_funnel_set(network_flock, TRUE);

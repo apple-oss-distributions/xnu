@@ -1,21 +1,24 @@
 /*
- * Copyright (c) 2000 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2003 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -100,6 +103,17 @@ cd9660_bmap(ap)
 		return (0);
 
 	/*
+	 * Associated files have an Apple Double header
+	 */
+	if ((ip->i_flag & ISO_ASSOCIATED) && (lblkno > (ADH_BLKS - 1))) {
+		lblkno -= ADH_BLKS;
+		*ap->a_bnp = (ip->iso_start + lblkno);
+		if (ap->a_runp)
+			*ap->a_runp = 0;
+		return (0);
+	}
+
+	/*
 	 * Compute the requested block number
 	 */
 	bshift = ip->i_mnt->im_bshift;
@@ -134,7 +148,7 @@ cd9660_blktooff(ap)
 	} */ *ap;
 {
 	register struct iso_node *ip;
-    register struct iso_mnt *imp;
+	register struct iso_mnt *imp;
 
 	if (ap->a_vp == NULL)
 		return (EINVAL);
@@ -182,6 +196,7 @@ struct vop_cmap_args /* {
 	struct iso_node *ip = VTOI(ap->a_vp);
 	size_t cbytes;
 	int devBlockSize = 0;
+	off_t offset = ap->a_foffset;
 
 	/*
 	 * Check for underlying vnode requests and ensure that logical
@@ -192,15 +207,29 @@ struct vop_cmap_args /* {
 
 	VOP_DEVBLOCKSIZE(ip->i_devvp, &devBlockSize);
 
-	*ap->a_bpn = (daddr_t)(ip->iso_start + lblkno(ip->i_mnt, ap->a_foffset));
+	/*
+	 * Associated files have an Apple Double header
+	 */
+	if (ip->i_flag & ISO_ASSOCIATED) {
+		if (offset < ADH_SIZE) {
+			if (ap->a_run)
+				*ap->a_run = 0;
+			*ap->a_bpn = -1;
+			goto out;
+		} else {
+			offset -= ADH_SIZE;
+		}
+	}
+
+	*ap->a_bpn = (daddr_t)(ip->iso_start + lblkno(ip->i_mnt, offset));
 
 	/*
 	 * Determine maximum number of contiguous bytes following the
 	 * requested offset.
 	 */
 	if (ap->a_run) {
-		if (ip->i_size > ap->a_foffset)
-			cbytes = ip->i_size - ap->a_foffset;
+		if (ip->i_size > offset)
+			cbytes = ip->i_size - offset;
 		else
 			cbytes = 0;
 
@@ -208,9 +237,9 @@ struct vop_cmap_args /* {
 
 		*ap->a_run = MIN(cbytes, ap->a_size);
 	};
-
+out:
 	if (ap->a_poff)
-		*(int *)ap->a_poff = (long)ap->a_foffset & (devBlockSize - 1);
+		*(int *)ap->a_poff = (long)offset & (devBlockSize - 1);
 
 	return (0);	
 }

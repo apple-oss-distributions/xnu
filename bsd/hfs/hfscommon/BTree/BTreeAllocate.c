@@ -1,21 +1,24 @@
 /*
- * Copyright (c) 2000 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2003 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -125,12 +128,16 @@ OSStatus	AllocateNode (BTreeControlBlockPtr		btreePtr, UInt32	*nodeNum)
 	nodeNumber		= 0;				// first node number of header map record
 	node.buffer		= nil;				// clear node.buffer to get header node
 										//	- and for ErrorExit
+	node.blockHeader = nil;
 	
 	while (true)
 	{
 		err = GetMapNode (btreePtr, &node, &mapPtr, &mapSize);
 		M_ExitOnError (err);
 		
+		// XXXdbg
+		ModifyBlockStart(btreePtr->fileRefNum, &node);
+								
 	//////////////////////// Find Word with Free Bit ////////////////////////////
 
 		pos		= mapPtr;
@@ -186,6 +193,10 @@ OSStatus	AllocateNode (BTreeControlBlockPtr		btreePtr, UInt32	*nodeNum)
 	
 	--btreePtr->freeNodes;
 	btreePtr->flags |= kBTHeaderDirty;
+	
+	/* Account for allocations from node reserve */
+	BTUpdateReserve(btreePtr, 1);
+
 	*nodeNum = nodeNumber;
 	
 	return noErr;
@@ -233,6 +244,7 @@ OSStatus	FreeNode (BTreeControlBlockPtr		btreePtr, UInt32	nodeNum)
 	//////////////////////////// Find Map Record ////////////////////////////////
 	nodeIndex			= 0;				// first node number of header map record
 	node.buffer			= nil;				// invalidate node.buffer to get header node
+	node.blockHeader    = nil;
 	
 	while (nodeNum >= nodeIndex)
 	{
@@ -244,6 +256,9 @@ OSStatus	FreeNode (BTreeControlBlockPtr		btreePtr, UInt32	nodeNum)
 	
 	//////////////////////////// Mark Node Free /////////////////////////////////
 
+	// XXXdbg
+	ModifyBlockStart(btreePtr->fileRefNum, &node);
+								
 	nodeNum -= (nodeIndex - (mapSize << 3));			// relative to this map record
 	bitOffset = 15 - (nodeNum & 0x0000000F);			// last 4 bits are bit offset
 	mapPos += nodeNum >> 4;								// point to word containing map bit
@@ -319,7 +334,9 @@ OSStatus	ExtendBTree	(BTreeControlBlockPtr	btreePtr,
 	filePtr				= GetFileControlBlock(btreePtr->fileRefNum);
 	
 	mapNode.buffer		= nil;
+	mapNode.blockHeader = nil;
 	newNode.buffer		= nil;
+	newNode.blockHeader = nil;
 
 	mapNodeRecSize	= nodeSize - sizeof(BTNodeDescriptor) - 6;	// 2 bytes of free space (see note)
 
@@ -379,6 +396,8 @@ OSStatus	ExtendBTree	(BTreeControlBlockPtr	btreePtr,
 	
 
 	/////////////////////// Initialize New Map Nodes ////////////////////////////
+	// XXXdbg - this is the correct place for this:
+	ModifyBlockStart(btreePtr->fileRefNum, &mapNode);
 
 	((BTNodeDescriptor*)mapNode.buffer)->fLink = firstNewMapNodeNum;
 
@@ -388,6 +407,9 @@ OSStatus	ExtendBTree	(BTreeControlBlockPtr	btreePtr,
 		err = GetNewNode (btreePtr, nodeNum, &newNode);
 		M_ExitOnError (err);
 		
+		// XXXdbg
+		ModifyBlockStart(btreePtr->fileRefNum, &newNode);
+
 		((NodeDescPtr)newNode.buffer)->numRecords	= 1;
 		((NodeDescPtr)newNode.buffer)->kind = kBTMapNode;
 		
@@ -428,6 +450,9 @@ OSStatus	ExtendBTree	(BTreeControlBlockPtr	btreePtr,
 			err = GetNode (btreePtr, nextNodeNum, &mapNode);
 			M_ExitOnError (err);
 			
+			// XXXdbg
+			ModifyBlockStart(btreePtr->fileRefNum, &mapNode);
+
 			mapIndex = 0;
 			
 			mapStart	 = (UInt16 *) GetRecordAddress (btreePtr, mapNode.buffer, mapIndex);
@@ -476,7 +501,7 @@ Success:
 	////////////////////////////// Error Exit ///////////////////////////////////
 
 ErrorExit:
-
+	
 	(void) ReleaseNode (btreePtr, &mapNode);
 	(void) ReleaseNode (btreePtr, &newNode);
 	

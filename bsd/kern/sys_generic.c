@@ -3,19 +3,22 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -84,6 +87,7 @@
 #include <sys/socket.h>
 #include <sys/socketvar.h>
 #include <sys/errno.h>
+#include <sys/syscall.h>
 
 #include <net/if.h>
 #include <net/route.h>
@@ -106,13 +110,10 @@
 #if KTRACE 
 #include <sys/ktrace.h>
 #endif
+#include <sys/vnode.h>
 
-static int	dofileread __P((struct proc *, struct file *, int, void *,
-		size_t, off_t, int, int*));
-static int	dofilewrite __P((struct proc *, struct file *, int,
-		const void *, size_t, off_t, int, int*));
 
-static struct file*
+__private_extern__ struct file*
 holdfp(fdp, fd, flag) 
 	struct filedesc* fdp;
 	int fd, flag;
@@ -124,7 +125,8 @@ holdfp(fdp, fd, flag)
 		(fp->f_flag & flag) == 0) {
 			return (NULL);
 	}
-	fref(fp);
+	if (fref(fp) == -1)
+		return (NULL);
 	return (fp);   
 }
 
@@ -187,13 +189,18 @@ pread(p, uap, retval)
 				uap->offset, FOF_OFFSET, retval);
 	}
 	frele(fp);
+	
+	if (!error)
+	    KERNEL_DEBUG_CONSTANT((BSDDBG_CODE(DBG_BSD_SC_EXTENDED_INFO, SYS_pread) | DBG_FUNC_NONE),
+	      uap->fd, uap->nbyte, (unsigned int)((uap->offset >> 32)), (unsigned int)(uap->offset), 0);
+	
 	return(error);
 }
 
 /*
  * Code common for read and pread
  */
-int
+__private_extern__ int
 dofileread(p, fp, fd, buf, nbyte, offset, flags, retval)
 	struct proc *p;
 	struct file *fp;
@@ -353,10 +360,15 @@ pwrite(p, uap, retval)
                 uap->offset, FOF_OFFSET, retval);
         }
         frele(fp);
+
+	if (!error)
+	    KERNEL_DEBUG_CONSTANT((BSDDBG_CODE(DBG_BSD_SC_EXTENDED_INFO, SYS_pwrite) | DBG_FUNC_NONE),
+	      uap->fd, uap->nbyte, (unsigned int)((uap->offset >> 32)), (unsigned int)(uap->offset), 0);
+	
         return(error);
 }
 
-static int                  
+__private_extern__ int                  
 dofilewrite(p, fp, fd, buf, nbyte, offset, flags, retval)
 	struct proc *p;
 	struct file *fp; 
@@ -403,8 +415,9 @@ dofilewrite(p, fp, fd, buf, nbyte, offset, flags, retval)
 		if (auio.uio_resid != cnt && (error == ERESTART ||
 			error == EINTR || error == EWOULDBLOCK))
 			error = 0;
-	if (error == EPIPE)
-		psignal(p, SIGPIPE);
+		/* The socket layer handles SIGPIPE */
+		if (error == EPIPE && fp->f_type != DTYPE_SOCKET)
+			psignal(p, SIGPIPE);
 	}
 	cnt -= auio.uio_resid;
 #if KTRACE 
@@ -1027,6 +1040,7 @@ selscan(p, sel, nfd, retval, sel_pass)
 	int nfunnel = 0;
 	int count, nfcount;
 	char * wql_ptr;
+	struct vnode *vp;
 
 	/*
 	 * Problems when reboot; due to MacOSX signal probs
@@ -1068,7 +1082,18 @@ selscan(p, sel, nfd, retval, sel_pass)
 						wql_ptr = (char *)0;
 					else
 						wql_ptr = (wql+ nc * SIZEOF_WAITQUEUE_LINK);
-					if (fp->f_ops && (fp->f_type != DTYPE_SOCKET) 
+					/*
+					 * Merlot: need to remove the bogus f_data check
+					 * from the following "if" statement.  It's there
+					 * because of various problems stemming from 
+					 * races due to the split-funnels and lack of real
+					 * referencing on sockets...
+					 */
+					if (fp->f_ops && (fp->f_type != DTYPE_SOCKET)
+					        && (fp->f_data != (caddr_t)-1) 
+						&& !(fp->f_type == DTYPE_VNODE 
+							&& (vp = (struct vnode *)fp->f_data) 
+							&& vp->v_type == VFIFO)
 						&& fo_select(fp, flag[msk], wql_ptr, p)) {
 						optr[fd/NFDBITS] |= (1 << (fd % NFDBITS));
 						n++;
@@ -1101,8 +1126,13 @@ selscan(p, sel, nfd, retval, sel_pass)
 						wql_ptr = (char *)0;
 					else
 						wql_ptr = (wql+ nc * SIZEOF_WAITQUEUE_LINK);
-					if (fp->f_ops && (fp->f_type == DTYPE_SOCKET) &&
-						fo_select(fp, flag[msk], wql_ptr, p)) {
+					if (fp->f_ops 
+						&& (fp->f_type == DTYPE_SOCKET
+							|| (fp->f_type == DTYPE_VNODE 
+					        	&& (vp = (struct vnode *)fp->f_data)  
+							&& vp != (struct vnode *)-1 
+							&& vp->v_type == VFIFO))
+						&& fo_select(fp, flag[msk], wql_ptr, p)) {
 						optr[fd/NFDBITS] |= (1 << (fd % NFDBITS));
 						n++;
 					}
@@ -1146,6 +1176,7 @@ selcount(p, ibits, obits, nfd, count, nfcount)
 	static int flag[3] = { FREAD, FWRITE, 0 };
 	u_int32_t *iptr, *fptr, *fbits;
 	u_int nw;
+	struct vnode *vp;
 
 	/*
 	 * Problems when reboot; due to MacOSX signal probs
@@ -1173,7 +1204,10 @@ selcount(p, ibits, obits, nfd, count, nfcount)
 						*nfcount=0;
 						return(EBADF);
 				}
-				if (fp->f_type == DTYPE_SOCKET)
+				if (fp->f_type == DTYPE_SOCKET || 
+					(fp->f_type == DTYPE_VNODE 
+						&& (vp = (struct vnode *)fp->f_data)  
+						&& vp->v_type == VFIFO))
 					nfc++;
 				n++;
 			}
@@ -1208,7 +1242,7 @@ selrecord(selector, sip, p_wql)
 	}
 
 	if ((sip->si_flags & SI_INITED) == 0) {
-		wait_queue_init(&sip->wait_queue, SYNC_POLICY_FIFO);
+		wait_queue_init(&sip->si_wait_queue, SYNC_POLICY_FIFO);
 		sip->si_flags |= SI_INITED;
 		sip->si_flags &= ~SI_CLEAR;
 	}
@@ -1219,8 +1253,8 @@ selrecord(selector, sip, p_wql)
 		sip->si_flags &= ~SI_COLL;
 
 	sip->si_flags |= SI_RECORDED;
-	if (!wait_queue_member(&sip->wait_queue, ut->uu_wqsub))
-		wait_queue_link_noalloc(&sip->wait_queue, ut->uu_wqsub, (wait_queue_link_t)p_wql);
+	if (!wait_queue_member(&sip->si_wait_queue, ut->uu_wqsub))
+		wait_queue_link_noalloc(&sip->si_wait_queue, ut->uu_wqsub, (wait_queue_link_t)p_wql);
 
 	return;
 }
@@ -1244,7 +1278,7 @@ selwakeup(sip)
 	}
 
 	if (sip->si_flags & SI_RECORDED) {
-		wait_queue_wakeup_all(&sip->wait_queue, &selwait, THREAD_AWAKENED);
+		wait_queue_wakeup_all(&sip->si_wait_queue, &selwait, THREAD_AWAKENED);
 		sip->si_flags &= ~SI_RECORDED;
 	}
 
@@ -1263,7 +1297,7 @@ selthreadclear(sip)
 			sip->si_flags &= ~(SI_RECORDED | SI_COLL);
 	}
 	sip->si_flags |= SI_CLEAR;
-	wait_queue_unlinkall_nofree(&sip->wait_queue);
+	wait_queue_unlinkall_nofree(&sip->si_wait_queue);
 }
 
 
@@ -1640,7 +1674,7 @@ retry:
 		}
 
 		if (interval != 0)
-			clock_absolutetime_interval_to_deadline(interval, &abstime)
+			clock_absolutetime_interval_to_deadline(interval, &abstime);
 
 		KERNEL_DEBUG(DBG_MISC_WAIT, 1,&p->p_evlist,0,0,0);
 		error = tsleep1(&p->p_evlist, PSOCK | PCATCH,
@@ -1698,8 +1732,10 @@ modwatch(p, uap, retval)
     return(EBADF);
   if (fp->f_type != DTYPE_SOCKET) return(EINVAL); // for now must be sock
   sp = (struct socket *)fp->f_data;
-  assert(sp != NULL);
 
+  /* soo_close sets f_data to 0 before switching funnel */
+  if (sp == (struct socket *)0) 
+    return(EBADF);
 
   // locate event if possible
   for (evq = sp->so_evlist.tqh_first;

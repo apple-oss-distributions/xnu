@@ -31,6 +31,8 @@ ALL_SUBDIRS = \
 	libkern \
 	libsa
 
+CONFIG_SUBDIRS = config
+
 INSTINC_SUBDIRS = $(ALL_SUBDIRS)
 
 INSTINC_SUBDIRS_PPC = $(INSTINC_SUBDIRS)
@@ -45,12 +47,14 @@ EXPINC_SUBDIRS_I386 = $(EXPINC_SUBDIRS)
 
 COMP_SUBDIRS = $(ALL_SUBDIRS)
 
+
 INST_SUBDIRS =	\
 	libkern	\
 	libsa   \
 	iokit	\
 	osfmk	\
-	bsd
+	bsd	\
+	config
 
 INSTALL_FILE_LIST= \
 	mach_kernel

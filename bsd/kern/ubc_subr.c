@@ -1,21 +1,24 @@
 /*
- * Copyright (c) 1999-2001 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 1999-2002 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -79,6 +82,62 @@ ubc_unlock(struct vnode *vp)
 }
 
 /*
+ * Serialize the requests to the VM
+ * Returns:
+ *		0	-	Failure
+ *		1	-	Sucessful in acquiring the lock
+ *		2	-	Sucessful in acquiring the lock recursively
+ *				do not call ubc_unbusy()
+ *				[This is strange, but saves 4 bytes in struct ubc_info]
+ */
+static int
+ubc_busy(struct vnode *vp)
+{
+	register struct ubc_info	*uip;
+
+	if (!UBCINFOEXISTS(vp))
+		return (0);
+
+	uip = vp->v_ubcinfo;
+
+	while (ISSET(uip->ui_flags, UI_BUSY)) {
+
+		if (uip->ui_owner == (void *)current_act())
+			return (2);
+
+		SET(uip->ui_flags, UI_WANTED);
+		(void) tsleep((caddr_t)&vp->v_ubcinfo, PINOD, "ubcbusy", 0);
+
+		if (!UBCINFOEXISTS(vp))
+			return (0);
+	}
+	uip->ui_owner = (void *)current_act();
+
+	SET(uip->ui_flags, UI_BUSY);
+
+	return (1);
+}
+
+static void
+ubc_unbusy(struct vnode *vp)
+{
+	register struct ubc_info	*uip;
+
+	if (!UBCINFOEXISTS(vp)) {
+		wakeup((caddr_t)&vp->v_ubcinfo);
+		return;
+	}
+	uip = vp->v_ubcinfo;
+	CLR(uip->ui_flags, UI_BUSY);
+	uip->ui_owner = (void *)NULL;
+
+	if (ISSET(uip->ui_flags, UI_WANTED)) {
+		CLR(uip->ui_flags, UI_WANTED);
+		wakeup((caddr_t)&vp->v_ubcinfo);
+	}
+}
+
+/*
  *	Initialization of the zone for Unified Buffer Cache.
  */
 __private_extern__ void
@@ -139,6 +198,7 @@ ubc_info_init(struct vnode *vp)
 		uip->ui_refcount = 1;
 		uip->ui_size = 0;
 		uip->ui_mapped = 0;
+		uip->ui_owner = (void *)NULL;
 		ubc_lock(vp);
 	}
 #if DIAGNOSTIC
@@ -232,10 +292,20 @@ ubc_info_free(struct ubc_info *uip)
 void
 ubc_info_deallocate(struct ubc_info *uip)
 {
+
 	assert(uip->ui_refcount > 0);
 
-    if (uip->ui_refcount-- == 1)
+    if (uip->ui_refcount-- == 1) {
+		struct vnode *vp;
+
+		vp = uip->ui_vnode;
+		if (ISSET(uip->ui_flags, UI_WANTED)) {
+			CLR(uip->ui_flags, UI_WANTED);
+			wakeup((caddr_t)&vp->v_ubcinfo);
+		}
+
 		ubc_info_free(uip);
+	}
 }
 
 /*
@@ -251,7 +321,8 @@ ubc_setsize(struct vnode *vp, off_t nsize)
 	memory_object_control_t control;
 	kern_return_t kret;
 
-	assert(nsize >= (off_t)0);
+	if (nsize < (off_t)0)
+		return (0);
 
 	if (UBCINVALID(vp))
 		return (0);
@@ -339,10 +410,14 @@ ubc_uncache(struct vnode *vp)
 {
 	kern_return_t kret;
 	struct ubc_info *uip;
+	int    recursed;
 	memory_object_control_t control;
 	memory_object_perf_info_data_t   perf;
 
 	if (!UBCINFOEXISTS(vp))
+		return (0);
+
+	if ((recursed = ubc_busy(vp)) == 0)
 		return (0);
 
 	uip = vp->v_ubcinfo;
@@ -372,11 +447,15 @@ ubc_uncache(struct vnode *vp)
 	if (kret != KERN_SUCCESS) {
 		printf("ubc_uncache: memory_object_change_attributes_named "
 			"kret = %d", kret);
+		if (recursed == 1)
+			ubc_unbusy(vp);
 		return (0);
 	}
 
 	ubc_release_named(vp);
 
+	if (recursed == 1)
+		ubc_unbusy(vp);
 	return (1);
 }
 
@@ -506,15 +585,19 @@ memory_object_control_t
 ubc_getobject(struct vnode *vp, int flags)
 {
 	struct ubc_info *uip;
+	int    recursed;
 	memory_object_control_t control;
-
-	uip = vp->v_ubcinfo;
 
 	if (UBCINVALID(vp))
 		return (0);
 
-	ubc_lock(vp);
+	if (flags & UBC_FOR_PAGEOUT)
+	        return(vp->v_ubcinfo->ui_control);
 
+	if ((recursed = ubc_busy(vp)) == 0)
+		return (0);
+
+	uip = vp->v_ubcinfo;
 	control = uip->ui_control;
 
 	if ((flags & UBC_HOLDOBJECT) && (!ISSET(uip->ui_flags, UI_HASOBJREF))) {
@@ -523,19 +606,21 @@ ubc_getobject(struct vnode *vp, int flags)
 		 * Take a temporary reference on the ubc info so that it won't go
 		 * away during our recovery attempt.
 		 */
+		ubc_lock(vp);
 		uip->ui_refcount++;
 		ubc_unlock(vp);
 		if (memory_object_recover_named(control, TRUE) == KERN_SUCCESS) {
-			ubc_lock(vp);
 			SET(uip->ui_flags, UI_HASOBJREF);
-			ubc_unlock(vp);
 		} else {
 			control = MEMORY_OBJECT_CONTROL_NULL;
 		}
+		if (recursed == 1)
+			ubc_unbusy(vp);
 		ubc_info_deallocate(uip);
 
 	} else {
-		ubc_unlock(vp);
+		if (recursed == 1)
+			ubc_unbusy(vp);
 	}
 
 	return (control);
@@ -666,7 +751,7 @@ ubc_clean(struct vnode *vp, int invalidate)
 	control = uip->ui_control;
 	assert(control);
 
-	vp->v_flag &= ~VHASDIRTY;
+	cluster_release(vp);
 	vp->v_clen = 0;
 
 	/* Write the dirty data in the file and discard cached pages */
@@ -770,15 +855,35 @@ int
 ubc_hold(struct vnode *vp)
 {
 	struct ubc_info *uip;
+	int    recursed;
 	memory_object_control_t object;
+
+retry:
 
 	if (UBCINVALID(vp))
 		return (0);
 
-	if (!UBCINFOEXISTS(vp)) {
+	ubc_lock(vp);
+	if (ISSET(vp->v_flag,  VUINIT)) {
+		/*
+		 * other thread is not done initializing this
+		 * yet, wait till it's done and try again
+		 */
+		while (ISSET(vp->v_flag,  VUINIT)) {
+			SET(vp->v_flag, VUWANT); /* XXX overloaded! */
+			ubc_unlock(vp);
+			(void) tsleep((caddr_t)vp, PINOD, "ubchold", 0);
+			ubc_lock(vp);
+		}
+		ubc_unlock(vp);
+		goto retry;
+	}
+	ubc_unlock(vp);
+
+	if ((recursed = ubc_busy(vp)) == 0) {
 		/* must be invalid or dying vnode */
 		assert(UBCINVALID(vp) ||
-			   ((vp->v_flag & VXLOCK) || (vp->v_flag & VTERMINATE)));
+			((vp->v_flag & VXLOCK) || (vp->v_flag & VTERMINATE)));
 		return (0);
 	}
 
@@ -787,21 +892,23 @@ ubc_hold(struct vnode *vp)
 
 	ubc_lock(vp);
 	uip->ui_refcount++;
+	ubc_unlock(vp);
 
 	if (!ISSET(uip->ui_flags, UI_HASOBJREF)) {
-		ubc_unlock(vp);
-		if (memory_object_recover_named(uip->ui_control, TRUE) != KERN_SUCCESS) {
+		if (memory_object_recover_named(uip->ui_control, TRUE)
+			!= KERN_SUCCESS) {
+			if (recursed == 1)
+				ubc_unbusy(vp);
 			ubc_info_deallocate(uip);
 			return (0);
 		}
-		ubc_lock(vp);
 		SET(uip->ui_flags, UI_HASOBJREF);
-		ubc_unlock(vp);
-	} else {
-		ubc_unlock(vp);
 	}
+	if (recursed == 1)
+		ubc_unbusy(vp);
 
 	assert(uip->ui_refcount > 0);
+
 	return (1);
 }
 
@@ -872,28 +979,36 @@ int
 ubc_release_named(struct vnode *vp)
 {
 	struct ubc_info *uip;
+	int    recursed;
 	memory_object_control_t control;
-	kern_return_t kret;
+	kern_return_t kret = KERN_FAILURE;
 
 	if (UBCINVALID(vp))
 		return (0);
 
-	if (!UBCINFOEXISTS(vp))
+	if ((recursed = ubc_busy(vp)) == 0)
 		return (0);
-
 	uip = vp->v_ubcinfo;
 
 	/* can not release held or mapped vnodes */
 	if (ISSET(uip->ui_flags, UI_HASOBJREF) && 
-	    (uip->ui_refcount == 1) && !uip->ui_mapped) {
+		(uip->ui_refcount == 1) && !uip->ui_mapped) {
 		control = uip->ui_control;
 		assert(control);
+
+		// XXXdbg
+		if (vp->v_flag & VDELETED) {
+		    ubc_setsize(vp, (off_t)0);
+		}
+
 		CLR(uip->ui_flags, UI_HASOBJREF);
 		kret = memory_object_release_name(control,
 				MEMORY_OBJECT_RESPECT_CACHE);
-		return ((kret != KERN_SUCCESS) ? 0 : 1);
-	} else 
-		return (0);
+	}
+
+	if (recursed == 1)
+		ubc_unbusy(vp);
+	return ((kret != KERN_SUCCESS) ? 0 : 1);
 }
 
 /*
@@ -1016,24 +1131,22 @@ ubc_invalidate(struct vnode *vp, off_t offset, size_t size)
  * Returns 1 if file is in use by UBC, 0 if not
  */
 int
-ubc_isinuse(struct vnode *vp, int tookref)
+ubc_isinuse(struct vnode *vp, int busycount)
 {
-	int busycount = tookref ? 2 : 1;
-
 	if (!UBCINFOEXISTS(vp))
 		return (0);
 
-	if (tookref == 0) {
+	if (busycount == 0) {
 		printf("ubc_isinuse: called without a valid reference"
 		    ": v_tag = %d\v", vp->v_tag);
 		vprint("ubc_isinuse", vp);
 		return (0);
 	}
 
-	if (vp->v_usecount > busycount)
+	if (vp->v_usecount > busycount+1)
 		return (1);
 
-	if ((vp->v_usecount == busycount)
+	if ((vp->v_usecount == busycount+1)
 		&& (vp->v_ubcinfo->ui_mapped == 1))
 		return (1);
 	else
@@ -1080,7 +1193,7 @@ ubc_page_op(
 	struct vnode 	*vp,
 	off_t		f_offset,
 	int		ops,
-	vm_offset_t	*phys_entryp,
+	ppnum_t	*phys_entryp,
 	int		*flagsp)
 {
 	memory_object_control_t		control;
@@ -1096,6 +1209,42 @@ ubc_page_op(
 				      flagsp));
 }
 				      
+__private_extern__ kern_return_t
+ubc_page_op_with_control(
+	memory_object_control_t	 control,
+	off_t		         f_offset,
+	int		         ops,
+	ppnum_t	                 *phys_entryp,
+	int		         *flagsp)
+{
+	return (memory_object_page_op(control,
+				      (memory_object_offset_t)f_offset,
+				      ops,
+				      phys_entryp,
+				      flagsp));
+}
+				      
+kern_return_t
+ubc_range_op(
+	struct vnode 	*vp,
+	off_t		f_offset_beg,
+	off_t		f_offset_end,
+	int             ops,
+	int             *range)
+{
+	memory_object_control_t		control;
+
+	control = ubc_getobject(vp, UBC_FLAGS_NONE);
+	if (control == MEMORY_OBJECT_CONTROL_NULL)
+		return KERN_INVALID_ARGUMENT;
+
+	return (memory_object_range_op(control,
+				      (memory_object_offset_t)f_offset_beg,
+				      (memory_object_offset_t)f_offset_end,
+				      ops,
+				      range));
+}
+				      
 kern_return_t
 ubc_create_upl(
 	struct vnode	*vp,
@@ -1106,18 +1255,29 @@ ubc_create_upl(
 	int				uplflags)
 {
 	memory_object_control_t		control;
-	int							count;
-	off_t						file_offset;
-	kern_return_t				kr;
+	int				count;
+	int                             ubcflags;
+	off_t				file_offset;
+	kern_return_t			kr;
 	
 	if (bufsize & 0xfff)
 		return KERN_INVALID_ARGUMENT;
 
-	control = ubc_getobject(vp, UBC_FLAGS_NONE);
+	if (uplflags & UPL_FOR_PAGEOUT) {
+		uplflags &= ~UPL_FOR_PAGEOUT;
+	        ubcflags  =  UBC_FOR_PAGEOUT;
+	} else
+	        ubcflags = UBC_FLAGS_NONE;
+
+	control = ubc_getobject(vp, ubcflags);
 	if (control == MEMORY_OBJECT_CONTROL_NULL)
 		return KERN_INVALID_ARGUMENT;
 
-	uplflags |= (UPL_NO_SYNC|UPL_CLEAN_IN_PLACE|UPL_SET_INTERNAL);
+	if (uplflags & UPL_WILL_BE_DUMPED) {
+	        uplflags &= ~UPL_WILL_BE_DUMPED;
+		uplflags |= (UPL_NO_SYNC|UPL_SET_INTERNAL);
+	} else
+	        uplflags |= (UPL_NO_SYNC|UPL_CLEAN_IN_PLACE|UPL_SET_INTERNAL);
 	count = 0;
 	kr = memory_object_upl_request(control, f_offset, bufsize,
 								   uplp, NULL, &count, uplflags);

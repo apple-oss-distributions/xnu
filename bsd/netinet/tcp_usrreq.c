@@ -3,19 +3,22 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -259,7 +262,7 @@ tcp6_usr_bind(struct socket *so, struct sockaddr *nam, struct proc *p)
 	}
 	inp->inp_vflag &= ~INP_IPV4;
 	inp->inp_vflag |= INP_IPV6;
-	if (ip6_mapped_addr_on && (inp->inp_flags & IN6P_IPV6_V6ONLY) == 0) {
+	if ((inp->inp_flags & IN6P_IPV6_V6ONLY) == 0) {
 		if (IN6_IS_ADDR_UNSPECIFIED(&sin6p->sin6_addr))
 			inp->inp_vflag |= INP_IPV4;
 		else if (IN6_IS_ADDR_V4MAPPED(&sin6p->sin6_addr)) {
@@ -310,8 +313,7 @@ tcp6_usr_listen(struct socket *so, struct proc *p)
 	COMMON_START();
 	if (inp->inp_lport == 0) {
 		inp->inp_vflag &= ~INP_IPV4;
-		if (ip6_mapped_addr_on &&
-		    (inp->inp_flags & IN6P_IPV6_V6ONLY) == 0)
+		if ((inp->inp_flags & IN6P_IPV6_V6ONLY) == 0)
 			inp->inp_vflag |= INP_IPV4;
 		error = in6_pcbbind(inp, (struct sockaddr *)0, p);
 	}
@@ -384,9 +386,8 @@ tcp6_usr_connect(struct socket *so, struct sockaddr *nam, struct proc *p)
 	if (IN6_IS_ADDR_V4MAPPED(&sin6p->sin6_addr)) {
 		struct sockaddr_in sin;
 
-		if (!ip6_mapped_addr_on ||
-		    (inp->inp_flags & IN6P_IPV6_V6ONLY))
-			return(EINVAL);
+		if ((inp->inp_flags & IN6P_IPV6_V6ONLY) != 0)
+			return (EINVAL);
 
 		in6_sin6_2_sin(&sin, sin6p);
 		inp->inp_vflag |= INP_IPV4;
@@ -990,6 +991,17 @@ tcp_ctloutput(so, sopt)
 				error = EINVAL;
 			break;
 
+                case TCP_KEEPALIVE:
+                        error = sooptcopyin(sopt, &optval, sizeof optval,
+                                            sizeof optval);
+                        if (error)
+                                break;
+                        if (optval < 0)
+                                error = EINVAL;
+			else
+				tp->t_keepidle = optval * PR_SLOWHZ;
+                        break;
+		
 		default:
 			error = ENOPROTOOPT;
 			break;
@@ -1003,6 +1015,9 @@ tcp_ctloutput(so, sopt)
 			break;
 		case TCP_MAXSEG:
 			optval = tp->t_maxseg;
+			break;
+		case TCP_KEEPALIVE:
+			optval = tp->t_keepidle / PR_SLOWHZ;
 			break;
 		case TCP_NOOPT:
 			optval = tp->t_flags & TF_NOOPT;
@@ -1034,6 +1049,11 @@ u_long	tcp_recvspace = 1024*16;
 SYSCTL_INT(_net_inet_tcp, TCPCTL_RECVSPACE, recvspace, CTLFLAG_RW, 
     &tcp_recvspace , 0, "Maximum incoming TCP datagram size");
 
+__private_extern__ int	tcp_sockthreshold = 256;
+SYSCTL_INT(_net_inet_tcp, OID_AUTO, sockthreshold, CTLFLAG_RW, 
+    &tcp_sockthreshold , 0, "TCP Socket size increased if less than threshold");
+
+#define TCP_INCREASED_SPACE	65535	/* Automatically increase tcp send/rcv space to this value */
 /*
  * Attach TCP protocol to socket, allocating
  * internet protocol control block, tcp control block,
@@ -1051,15 +1071,28 @@ tcp_attach(so, p)
 	int isipv6 = INP_CHECK_SOCKAF(so, AF_INET6) != NULL;
 #endif
 
-	if (so->so_snd.sb_hiwat == 0 || so->so_rcv.sb_hiwat == 0) {
-		error = soreserve(so, tcp_sendspace, tcp_recvspace);
-		if (error)
-			return (error);
-	}
 	error = in_pcballoc(so, &tcbinfo, p);
 	if (error)
 		return (error);
+
 	inp = sotoinpcb(so);
+
+	if (so->so_snd.sb_hiwat == 0 || so->so_rcv.sb_hiwat == 0) {
+		/*
+		 * The goal is to let clients have large send/rcv default windows (TCP_INCREASED_SPACE)
+		 * while not hogging mbuf space for servers. This is done by watching a threshold
+		 * of tcpcbs in use and bumping the default send and rcvspace only if under that threshold.
+		 * The theory being that busy servers have a lot more active tcpcbs and don't want the potential
+		 * memory penalty of having much larger sockbuffs. The sysctl allows to fine tune that threshold value.		 */
+
+		if (inp->inp_pcbinfo->ipi_count < tcp_sockthreshold)
+			error = soreserve(so, MAX(TCP_INCREASED_SPACE, tcp_sendspace), MAX(TCP_INCREASED_SPACE,tcp_recvspace));
+		else	
+			error = soreserve(so, tcp_sendspace, tcp_recvspace);
+		if (error)
+			return (error);
+	}
+
 #if INET6
 	if (isipv6) {
 		inp->inp_vflag |= INP_IPV6;

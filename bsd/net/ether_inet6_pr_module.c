@@ -3,19 +3,22 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -254,7 +257,7 @@ inet6_ether_pre_output(ifp, m0, dst_netaddr, route, type, edst, dl_tag )
         if (!nd6_storelladdr(&ac->ac_if, rt, m, dst_netaddr, (u_char *)edst)) {
              /* this must be impossible, so we bark */
              printf("nd6_storelladdr failed\n");
-             return(0);
+             return(EADDRNOTAVAIL); /* dlil_output will free the mbuf */
                 }
        *(u_short *)type = htons(ETHERTYPE_IPV6);
        break;
@@ -263,6 +266,7 @@ inet6_ether_pre_output(ifp, m0, dst_netaddr, route, type, edst, dl_tag )
 	printf("%s%d: can't handle af%d\n", ifp->if_name, ifp->if_unit,
 	       dst_netaddr->sa_family);
 
+	/* dlil_output will free the mbuf */
         return EAFNOSUPPORT;
     }
 
@@ -369,19 +373,18 @@ ether_inet6_prmod_ioctl(dl_tag, ifp, command, data)
 
 
 
-u_long  ether_attach_inet6(struct ifnet *ifp)
+int  ether_attach_inet6(struct ifnet *ifp, u_long *dl_tag)
 {
     struct dlil_proto_reg_str   reg;
     struct dlil_demux_desc      desc;
-    u_long			ip_dl_tag=0;
     u_short en_6native=ETHERTYPE_IPV6;
     int   stat;
     int i;
 
 
-    stat = dlil_find_dltag(ifp->if_family, ifp->if_unit, PF_INET6, &ip_dl_tag);
+    stat = dlil_find_dltag(ifp->if_family, ifp->if_unit, PF_INET6, dl_tag);
     if (stat == 0)
-	 return ip_dl_tag;
+	 return stat;
 
     TAILQ_INIT(&reg.demux_desc_head);
     desc.type = DLIL_DESC_RAW;
@@ -400,23 +403,21 @@ u_long  ether_attach_inet6(struct ifnet *ifp)
     reg.default_proto    = 0;
     reg.protocol_family  = PF_INET6;
 
-    stat = dlil_attach_protocol(&reg, &ip_dl_tag);
+    stat = dlil_attach_protocol(&reg, dl_tag);
     if (stat) {
 	printf("WARNING: ether_attach_inet6 can't attach ip to interface\n");
-	return stat;
     }
 
-    return ip_dl_tag;
+    return stat;
 }
 
-int  ether_detach_inet6(struct ifnet *ifp)
+int  ether_detach_inet6(struct ifnet *ifp, u_long dl_tag)
 {
-    u_long      ip_dl_tag = 0;
     int         stat;
 
-    stat = dlil_find_dltag(ifp->if_family, ifp->if_unit, PF_INET6, &ip_dl_tag);
+    stat = dlil_find_dltag(ifp->if_family, ifp->if_unit, PF_INET6, &dl_tag);
     if (stat == 0) {
-        stat = dlil_detach_protocol(ip_dl_tag);
+        stat = dlil_detach_protocol(dl_tag);
         if (stat) {
             printf("WARNING: ether_detach_inet6 can't detach ip6 from interface\n");
         }

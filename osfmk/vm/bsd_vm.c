@@ -3,19 +3,22 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -281,20 +284,24 @@ macx_triggers(
 	/*
 	 * Set thread scheduling priority and policy for the current thread
 	 * it is assumed for the time being that the thread setting the alert
-	 * is the same one which will be servicing it. 
+	 * is the same one which will be servicing it.
+	 *
+	 * XXX This does not belong in the kernel XXX
 	 */
 	{
-		struct policy_timeshare_base	 fifo_base;
-		struct policy_timeshare_limit fifo_limit;
-		policy_base_t 	base;
-		processor_set_t	pset;
-		policy_limit_t	limit;
+		thread_precedence_policy_data_t		pre;
+		thread_extended_policy_data_t		ext;
 
-		pset = (current_thread())->processor_set;  
-		base = (policy_base_t) &fifo_base;
-		limit = (policy_limit_t) &fifo_limit;
-		fifo_limit.max_priority = fifo_base.base_priority = MAXPRI_STANDARD;
-		thread_set_policy((current_thread())->top_act, pset, POLICY_FIFO, base, POLICY_TIMESHARE_BASE_COUNT, limit, POLICY_TIMESHARE_LIMIT_COUNT);
+		ext.timeshare = FALSE;
+		pre.importance = INT32_MAX;
+
+		thread_policy_set(current_act(),
+							THREAD_EXTENDED_POLICY, (thread_policy_t)&ext,
+									THREAD_EXTENDED_POLICY_COUNT);
+
+		thread_policy_set(current_act(),
+							THREAD_PRECEDENCE_POLICY, (thread_policy_t)&pre,
+									THREAD_PRECEDENCE_POLICY_COUNT);
 	}
  
 	current_thread()->vm_privilege = TRUE;

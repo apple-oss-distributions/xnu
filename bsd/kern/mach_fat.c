@@ -3,19 +3,22 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -40,33 +43,36 @@
 #include <kern/mach_loader.h>
 #include <architecture/byte_order.h>
 
+#define CPU_TYPE_NATIVE		(machine_slot[cpu_number()].cpu_type)
+#define CPU_TYPE_CLASSIC	CPU_TYPE_POWERPC
 
 /**********************************************************************
- * Routine:	fatfile_getarch()
+ * Routine:	fatfile_getarch2()
  *
  * Function:	Locate the architecture-dependant contents of a fat
  *		file that match this CPU.
  *
  * Args:	vp:		The vnode for the fat file.
  *		header:		A pointer to the fat file header.
+ *		cpu_type:	The required cpu type.
  *		archret (out):	Pointer to fat_arch structure to hold
  *				the results.
  *
  * Returns:	KERN_SUCCESS:	Valid architecture found.
  *		KERN_FAILURE:	No valid architecture found.
  **********************************************************************/
-load_return_t
-fatfile_getarch(
-	struct vnode		*vp,
-	vm_offset_t 	data_ptr,
-	struct fat_arch		*archret)
+static load_return_t
+fatfile_getarch2(
+	struct vnode	*vp,
+	vm_offset_t	data_ptr,
+	cpu_type_t	cpu_type,
+	struct fat_arch	*archret)
 {
 	/* vm_pager_t		pager; */
 	vm_offset_t		addr;
 	vm_size_t		size;
 	kern_return_t		kret;
 	load_return_t		lret;
-	struct machine_slot	*ms;
 	struct fat_arch		*arch;
 	struct fat_arch		*best_arch;
 	int			grade;
@@ -104,7 +110,7 @@ fatfile_getarch(
 	/*
 	 * 	Round size of fat_arch structures up to page boundry.
 	 */
-	size = round_page(end_of_archs);
+	size = round_page_32(end_of_archs);
 	if (size <= 0)
 		return(LOAD_BADMACHO);
 
@@ -112,7 +118,6 @@ fatfile_getarch(
 	 * Scan the fat_arch's looking for the best one.
 	 */
 	addr = data_ptr;
-	ms = &machine_slot[cpu_number()];
 	best_arch = NULL;
 	best_grade = 0;
 	arch = (struct fat_arch *) (addr + sizeof(struct fat_header));
@@ -121,7 +126,7 @@ fatfile_getarch(
 		/*
 		 *	Check to see if right cpu type.
 		 */
-		if(NXSwapBigIntToHost(arch->cputype) != ms->cpu_type)
+		if(NXSwapBigIntToHost(arch->cputype) != cpu_type)
 			continue;
 
 		/*
@@ -165,4 +170,54 @@ fatfile_getarch(
 	return(lret);
 }
 
+extern char classichandler[];
+
+load_return_t
+fatfile_getarch_affinity(
+		struct vnode		*vp,
+		vm_offset_t		data_ptr,
+		struct fat_arch	*archret,
+		int 				affinity)
+{
+		load_return_t lret;
+		int handler = (classichandler[0] != 0);
+		cpu_type_t primary_type, fallback_type;
+
+		if (handler && affinity) {
+				primary_type = CPU_TYPE_CLASSIC;
+				fallback_type = CPU_TYPE_NATIVE;
+		} else {
+				primary_type = CPU_TYPE_NATIVE;
+				fallback_type = CPU_TYPE_CLASSIC;
+		}
+		lret = fatfile_getarch2(vp, data_ptr, primary_type, archret);
+		if ((lret != 0) && handler) {
+			lret = fatfile_getarch2(vp, data_ptr, fallback_type,
+						archret);
+		}
+		return lret;
+}
+
+/**********************************************************************
+ * Routine:	fatfile_getarch()
+ *
+ * Function:	Locate the architecture-dependant contents of a fat
+ *		file that match this CPU.
+ *
+ * Args:	vp:		The vnode for the fat file.
+ *		header:		A pointer to the fat file header.
+ *		archret (out):	Pointer to fat_arch structure to hold
+ *				the results.
+ *
+ * Returns:	KERN_SUCCESS:	Valid architecture found.
+ *		KERN_FAILURE:	No valid architecture found.
+ **********************************************************************/
+load_return_t
+fatfile_getarch(
+	struct vnode		*vp,
+	vm_offset_t 	data_ptr,
+	struct fat_arch		*archret)
+{
+	return fatfile_getarch2(vp, data_ptr, CPU_TYPE_NATIVE, archret);
+}
 

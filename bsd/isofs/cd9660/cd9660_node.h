@@ -1,21 +1,24 @@
 /*
- * Copyright (c) 2000-2002 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2003 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -111,6 +114,7 @@ struct iso_node {
 	struct	iso_node *i_next, **i_prev;	/* hash chain */
 	struct	vnode *i_vnode;	/* vnode associated with this inode */
 	struct	vnode *i_devvp;	/* vnode for block I/O */
+	u_int32_t i_flag;	/* flags, see below */
 	dev_t	i_dev;		/* device where inode resides */
 	ino_t	i_number;	/* the identity of the inode */
 				/* we use the actual starting block of the file */
@@ -137,11 +141,15 @@ struct iso_node {
 	u_int16_t	i_FinderFlags;	/* MacOS finder flags */
 
 	u_int16_t	i_entries;	/* count of directory entries */
+	
+	struct riff_header *i_riff;
 };
 
 #define	i_forw		i_chain[0]
 #define	i_back		i_chain[1]
 
+/* These flags are kept in i_flag. */
+#define	ISO_ASSOCIATED	0x0001		/* node is an associated file. */
 
 /* <ufs/inode.h> defines VTOI and ITOV macros */
 #undef VTOI
@@ -159,13 +167,13 @@ int cd9660_close __P((struct vop_close_args *));
 int cd9660_access __P((struct vop_access_args *));
 int cd9660_getattr __P((struct vop_getattr_args *));
 int cd9660_read __P((struct vop_read_args *));
+int cd9660_xa_read __P((struct vop_read_args *));
 int cd9660_ioctl __P((struct vop_ioctl_args *));
 int cd9660_select __P((struct vop_select_args *));
 int cd9660_mmap __P((struct vop_mmap_args *));
 int cd9660_seek __P((struct vop_seek_args *));
 int cd9660_readdir __P((struct vop_readdir_args *));
 int cd9660_readlink __P((struct vop_readlink_args *));
-int cd9660_abortop __P((struct vop_abortop_args *));
 int cd9660_inactive __P((struct vop_inactive_args *));
 int cd9660_reclaim __P((struct vop_reclaim_args *));
 int cd9660_bmap __P((struct vop_bmap_args *));

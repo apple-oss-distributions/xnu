@@ -3,19 +3,22 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -448,6 +451,37 @@ routine io_registry_entry_get_property_recursively(
 	in  options		: int;
 	out properties		: io_buf_ptr_t, physicalcopy
 	);
+
+
+routine io_service_get_state(
+	    service		: io_object_t;
+	out state		: uint64_t
+	);
+
+routine io_service_get_matching_services_ool(
+	    master_port		: mach_port_t;
+	in  matching		: io_buf_ptr_t, physicalcopy;
+        out result		: natural_t;
+	out existing		: io_object_t
+	);
+
+routine io_service_match_property_table_ool(
+	    service		: io_object_t;
+	in  matching		: io_buf_ptr_t, physicalcopy;
+        out result		: natural_t;
+	out matches		: boolean_t
+	);
+
+routine io_service_add_notification_ool(
+	    master_port		: mach_port_t;
+	in  notification_type	: io_name_t;
+	in  matching		: io_buf_ptr_t, physicalcopy;
+	in  wake_port		: mach_port_make_send_t;
+	in  reference		: io_async_ref_t;
+        out result		: natural_t;
+	out notification	: io_object_t
+	);
+
 
 #endif
 

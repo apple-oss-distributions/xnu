@@ -3,19 +3,22 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -129,10 +132,13 @@ typedef struct clock		clock_data_t;
  * Configure the clock system.
  */
 extern void		clock_config(void);
+
 /*
  * Initialize the clock system.
  */
 extern void		clock_init(void);
+
+extern void		clock_timebase_init(void);
 
 /*
  * Initialize the clock ipc service facility.
@@ -169,22 +175,45 @@ extern void			mk_timebase_info(
 						uint32_t			*proc_to_abs_numer,
 						uint32_t			*proc_to_abs_denom);
 
-extern void			clock_adjust_calendar(
-						clock_res_t			nsec);
+extern uint32_t		clock_set_calendar_adjtime(
+						int32_t				*secs,
+						int32_t				*microsecs);
 
-extern mach_timespec_t
-					clock_get_calendar_offset(void);
+extern uint32_t		clock_adjust_calendar(void);
 
 #endif /* MACH_KERNEL_PRIVATE */
 
-extern void			clock_set_calendar_value(
-						mach_timespec_t		value);
+extern void			clock_get_calendar_microtime(
+						uint32_t			*secs,
+						uint32_t			*microsecs);
 
-extern int64_t		clock_set_calendar_adjtime(
-						int64_t				total,
-						uint32_t			delta);
+extern void			clock_get_calendar_nanotime(
+						uint32_t			*secs,
+						uint32_t			*nanosecs);
+
+extern void			clock_set_calendar_microtime(
+						uint32_t			secs,
+						uint32_t			microsecs);
+
+extern void			clock_get_system_microtime(
+						uint32_t			*secs,
+						uint32_t			*microsecs);
+
+extern void			clock_get_system_nanotime(
+						uint32_t			*secs,
+						uint32_t			*nanosecs);
+
+extern void			clock_adjtime(
+						int32_t		*secs,
+						int32_t		*microsecs);
 
 extern void			clock_initialize_calendar(void);
+
+extern void			clock_wakeup_calendar(void);
+
+extern void			clock_gettimeofday(
+                        uint32_t			*secs,
+                        uint32_t			*microsecs);
 
 #endif	/* __APPLE_API_PRIVATE */
 

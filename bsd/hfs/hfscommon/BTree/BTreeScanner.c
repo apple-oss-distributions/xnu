@@ -3,25 +3,29 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  *
  *	@(#)BTreeScanner.c
  */
 #include <sys/kernel.h>
+#include "../../hfs_endian.h"
 
 #include "../headers/BTreeScanner.h"
 
@@ -179,6 +183,23 @@ static int FindNextLeafNode(	BTScanState *scanState, Boolean avoidIO )
 			(u_int8_t *) scanState->currentNodePtr += scanState->btcb->nodeSize;
 		}
 		
+#if BYTE_ORDER == LITTLE_ENDIAN
+		{
+		BlockDescriptor block;
+		FileReference fref;
+
+		/* Fake a BlockDescriptor */
+		block.buffer = scanState->currentNodePtr;
+		block.blockSize = scanState->btcb->nodeSize;
+		block.blockReadFromDisk = 1;
+		block.isModified = 0;
+		
+		fref = scanState->btcb->fileRefNum;
+		
+		SWAP_BT_NODE(&block, ISHFSPLUS(VTOVCB(fref)), VTOC(fref)->c_fileid, 0);
+		}
+#endif
+
 		// Make sure this is a valid node
 		if ( CheckNode( scanState->btcb, scanState->currentNodePtr ) != noErr )
 		{
@@ -221,7 +242,7 @@ static int ReadMultipleNodes( BTScanState *theScanStatePtr )
 	// release old buffer if we have one
 	if ( theScanStatePtr->bufferPtr != NULL )
 	{
-		theScanStatePtr->bufferPtr->b_flags |= (B_INVAL | B_AGE);
+	    theScanStatePtr->bufferPtr->b_flags |= (B_INVAL | B_AGE);
 		brelse( theScanStatePtr->bufferPtr );
 		theScanStatePtr->bufferPtr = NULL;
 		theScanStatePtr->currentNodePtr = NULL;
@@ -249,10 +270,10 @@ static int ReadMultipleNodes( BTScanState *theScanStatePtr )
 	
 	// now read blocks from the device 
 	myErr = bread( 	myDevPtr, 
-					myPhyBlockNum, 
-					myBufferSize,  
-					NOCRED, 
-					&theScanStatePtr->bufferPtr );
+							myPhyBlockNum, 
+							myBufferSize,  
+							NOCRED, 
+							&theScanStatePtr->bufferPtr );
 	if ( myErr != E_NONE )
 	{
 		goto ExitThisRoutine;
@@ -374,7 +395,7 @@ int	 BTScanTerminate(	BTScanState *		scanState,
 	if ( scanState->bufferPtr != NULL )
 	{
 		scanState->bufferPtr->b_flags |= (B_INVAL | B_AGE);
-		brelse( scanState->bufferPtr ); 
+		brelse( scanState->bufferPtr );
 		scanState->bufferPtr = NULL;
 		scanState->currentNodePtr = NULL;
 	}

@@ -3,19 +3,22 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -60,11 +63,12 @@ int (*sys_ATPgetrsp)() = 0;
 extern at_state_t at_state;	/* global state of AT network */
 extern at_ifaddr_t *ifID_home;	/* default interface */
 
+struct ATsocket_args {
+    int proto;
+};
 int ATsocket(proc, uap, retval)
 	void *proc;
-	struct {
-	  int proto;
-	} *uap;
+	struct ATsocket_args *uap;
 	int *retval;
 {
 	int err;
@@ -84,14 +88,15 @@ int ATsocket(proc, uap, retval)
 	return err;
 }
 
+struct ATgetmsg_args {
+    int fd;
+    void *ctlptr;
+    void *datptr;
+    int *flags;
+};
 int ATgetmsg(proc, uap, retval)
 	void *proc;
-	struct {
-	  int fd;
-	  void *ctlptr;
-	  void *datptr;
-	  int *flags;
-	} *uap;
+	struct ATgetmsg_args *uap;
 	int *retval;
 {
 	int err;
@@ -113,14 +118,15 @@ int ATgetmsg(proc, uap, retval)
 	return err;
 }
 
-int ATputmsg(proc, uap, retval)
-	void *proc;
-	struct {
+struct ATputmsg_args {
 	int fd;
 	void *ctlptr;
 	void *datptr;
 	int flags;
-	} *uap;
+};
+int ATputmsg(proc, uap, retval)
+	void *proc;
+	struct ATputmsg_args *uap;
 	int *retval;
 {
 	int err;
@@ -142,14 +148,15 @@ int ATputmsg(proc, uap, retval)
 	return err;
 }
 
+struct ATPsndreq_args {
+    int fd;
+    unsigned char *buf;
+    int len;
+    int nowait;
+};
 int ATPsndreq(proc, uap, retval)
 	void *proc;
-	struct {
-	  int fd;
-	  unsigned char *buf;
-	  int len;
-	  int nowait;
-	} *uap;
+	struct ATPsndreq_args *uap;
 	int *retval;
 {
 	int err;
@@ -171,14 +178,15 @@ int ATPsndreq(proc, uap, retval)
 	return err;
 }
 
-int ATPsndrsp(proc, uap, retval)
-	void *proc;
-	struct {
+struct ATPsndrsp_args {
 	  int fd;
 	  unsigned char *respbuff;
 	  int resplen;
 	  int datalen;
-	} *uap;
+};
+int ATPsndrsp(proc, uap, retval)
+	void *proc;
+	struct ATPsndrsp_args *uap;
 	int *retval;
 {
 	int err;
@@ -200,13 +208,14 @@ int ATPsndrsp(proc, uap, retval)
 	return err;
 }
 
-int ATPgetreq(proc, uap, retval)
-	void *proc;
-	struct {
+struct ATPgetreq_args {
 	  int fd;
 	  unsigned char *buf;
 	  int buflen;
-	} *uap;
+};
+int ATPgetreq(proc, uap, retval)
+	void *proc;
+	struct ATPgetreq_args *uap;
 	int *retval;
 {
 	int err;
@@ -228,12 +237,13 @@ int ATPgetreq(proc, uap, retval)
 	return err;
 }
 
-int ATPgetrsp(proc, uap, retval)
-	void *proc;
-	struct {
+struct ATPgetrsp_args {
 	  int fd;
 	  unsigned char *bdsp;
-	} *uap;
+};
+int ATPgetrsp(proc, uap, retval)
+	void *proc;
+	struct ATPgetrsp_args *uap;
 	int *retval;
 {
 	int err = 0;
@@ -274,9 +284,9 @@ int atalk_openref(gref, retfd, proc)
 	int *retfd;
 	struct proc *proc;
 {
-	extern int _ATread(), _ATwrite(),_ATioctl(), _ATselect(), _ATclose();
+	extern int _ATread(), _ATwrite(),_ATioctl(), _ATselect(), _ATclose(), _ATkqfilter();
 	static struct fileops fileops = 
-		{_ATread, _ATwrite, _ATioctl, _ATselect, _ATclose};
+		{_ATread, _ATwrite, _ATioctl, _ATselect, _ATclose, _ATkqfilter};
 	int err, fd;
 	struct file *fp;
 
@@ -321,7 +331,8 @@ struct proc *proc;
 	       return EBADF;
 	  }
      }
-     if ((*grefp = (gref_t *)fp->f_data) == 0) {
+     *grefp = (gref_t *)fp->f_data;
+     if (*grefp == 0 || *grefp == (gref_t *)(-1)) {
 	  thread_funnel_switch(KERNEL_FUNNEL, NETWORK_FUNNEL);
 	  return EBADF;
      }

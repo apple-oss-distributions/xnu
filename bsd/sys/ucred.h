@@ -3,19 +3,22 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -71,6 +74,17 @@ struct ucred {
 	short	cr_ngroups;		/* number of groups */
 	gid_t	cr_groups[NGROUPS];	/* groups */
 };
+/*
+ * This is the external representation of struct ucred.
+ */
+struct xucred {
+        u_int   cr_version;             /* structure layout version */
+        uid_t   cr_uid;                 /* effective user id */
+        short   cr_ngroups;             /* number of groups */
+        gid_t   cr_groups[NGROUPS];     /* groups */
+};
+#define XUCRED_VERSION  0
+
 #define cr_gid cr_groups[0]
 #define NOCRED ((struct ucred *)0)	/* no credential available */
 #define FSCRED ((struct ucred *)-1)	/* filesystem credential */
@@ -86,7 +100,9 @@ struct ucred	*crcopy __P((struct ucred *cr));
 struct ucred	*crdup __P((struct ucred *cr));
 void		crfree __P((struct ucred *cr));
 struct ucred	*crget __P((void));
+int		crcmp __P((struct ucred *cr1, struct ucred *cr2));
 int		suser __P((struct ucred *cred, u_short *acflag));
+void		cru2x __P((struct ucred *cr, struct xucred *xcr));
 
 #endif /* KERNEL */
 #endif /* __APPLE_API_UNSTABLE */

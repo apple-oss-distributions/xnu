@@ -1,21 +1,24 @@
 /*
- * Copyright (c) 2000-2002 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2003 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -136,7 +139,9 @@
 #define	SYS_getpriority	100
 				/* 101 is old send */
 				/* 102 is old recv */
+#ifndef __ppc__
 #define	SYS_sigreturn	103
+#endif
 #define	SYS_bind	104
 #define	SYS_setsockopt	105
 #define	SYS_listen	106
@@ -217,7 +222,9 @@
 #define	SYS_setgid	181
 #define	SYS_setegid	182
 #define	SYS_seteuid	183
-				/* 184 is unused */
+#ifdef __ppc__
+#define	SYS_sigreturn	184
+#endif
 				/* 185 is unused */
 				/* 186 is unused */
 				/* 187 is unused */
@@ -248,7 +255,9 @@
 #define	SYS_ATPsndrsp	210
 #define	SYS_ATPgetreq	211
 #define	SYS_ATPgetrsp	212
-				/* 213-215 are reserved for AppleTalk */
+				/* 213 is reserved for AppleTalk */
+#define SYS_kqueue_from_portset_np 214
+#define SYS_kqueue_portset_np	215
 #define SYS_mkcomplex	216 
 #define SYS_statv	217		
 #define SYS_lstatv	218 			
@@ -261,7 +270,12 @@
 #define SYS_searchfs	 225
 
 				/* 226 - 230 are reserved for HFS expansion */
-				/* 231 - 249 are reserved  */
+				/* 231 - 241 are reserved  */
+#define	SYS_fsctl	242
+				/* 243 - 246 are reserved  */
+#define	SYS_nfsclnt	247	/* from freebsd, for lockd */
+#define	SYS_fhopen	248	/* from freebsd, for lockd */
+				/* 249 is reserved  */
 #define SYS_minherit	 250
 #define	SYS_semsys	251
 #define	SYS_msgsys	252
@@ -295,7 +309,16 @@
 #define SYS_new_system_shared_regions 298
 				/* 299 - 309 are reserved  */
 #define	SYS_getsid	310
-				/* 311 - 323 are reserved */
+				/* 311 - 312 are reserved */
+#define	SYS_aio_fsync	313
+#define	SYS_aio_return	314
+#define	SYS_aio_suspend	315
+#define	SYS_aio_cancel	316
+#define	SYS_aio_error	317
+#define	SYS_aio_read	318
+#define	SYS_aio_write	319
+#define	SYS_lio_listio	320
+				/* 321 - 323 are reserved */
 #define SYS_mlockall	 324
 #define SYS_munlockall	 325
 				/* 326 is reserved */
@@ -303,5 +326,19 @@
 #define SYS___pthread_kill    328
 #define SYS_pthread_sigmask    329
 #define SYS_sigwait    330
+
+#define SYS_audit		350	/* submit user space audit records */
+#define SYS_auditon		351	/* audit subsystem control */
+#define SYS_auditsvc		352	/* audit file control */
+#define SYS_getauid		353
+#define SYS_setauid		354
+#define SYS_getaudit		355
+#define SYS_setaudit		356
+#define SYS_getaudit_addr	357
+#define SYS_setaudit_addr	358
+#define SYS_auditctl		359	/* audit control */
+
+#define SYS_kqueue    362
+#define SYS_kevent    363
 #endif /* __APPLE_API_PRIVATE */
 

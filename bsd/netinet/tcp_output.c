@@ -3,19 +3,22 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -113,7 +116,7 @@ int ss_fltsz = 1;
 SYSCTL_INT(_net_inet_tcp, OID_AUTO, slowstart_flightsize, CTLFLAG_RW,
 	&ss_fltsz, 1, "Slow start flight size");
 
-int ss_fltsz_local = TCP_MAXWIN;               /* something large */
+int ss_fltsz_local = 4; /* starts with four segments max */
 SYSCTL_INT(_net_inet_tcp, OID_AUTO, local_slowstart_flightsize, CTLFLAG_RW,
 	&ss_fltsz_local, 1, "Slow start flight size for local networks");
 
@@ -128,6 +131,10 @@ struct	mbuf *m_copym_with_hdrs __P((struct mbuf*, int, int, int, struct mbuf**, 
 #if IPSEC
 extern int ipsec_bypass;
 #endif
+
+extern int slowlink_wsize;	/* window correction for slow links */
+extern u_long  route_generation;
+
 
 /*
  * Tcp output routine: figure out what should be sent and send it.
@@ -152,35 +159,15 @@ tcp_output(tp)
 	int maxburst = TCP_MAXBURST;
 	struct rmxp_tao *taop;
 	struct rmxp_tao tao_noncached;
-#if INET6
-	int isipv6;
-#endif
-	int    last_off;
+	int    last_off = 0;
 	int    m_off;
 	struct mbuf *m_last = 0;
 	struct mbuf *m_head = 0;
-
-
-	KERNEL_DEBUG(DBG_FNC_TCP_OUTPUT | DBG_FUNC_START, 0,0,0,0,0);
 #if INET6
-	if (isipv6 = ((tp->t_inpcb->inp_vflag & INP_IPV6) != 0)) {
-	
-		KERNEL_DEBUG(DBG_LAYER_BEG,
-		     ((tp->t_inpcb->inp_fport << 16) | tp->t_inpcb->inp_lport),
-		     (((tp->t_inpcb->in6p_laddr.s6_addr16[0] & 0xffff) << 16) |
-		      (tp->t_inpcb->in6p_faddr.s6_addr16[0] & 0xffff)),
-		     0,0,0);
-	}
-	else
+	int isipv6 = tp->t_inpcb->inp_vflag & INP_IPV6 ;
 #endif
 
-	{
-		KERNEL_DEBUG(DBG_LAYER_BEG,
-		     ((tp->t_inpcb->inp_fport << 16) | tp->t_inpcb->inp_lport),
-		     (((tp->t_inpcb->inp_laddr.s_addr & 0xffff) << 16) |
-		      (tp->t_inpcb->inp_faddr.s_addr & 0xffff)),
-		     0,0,0);
-	}
+
 	/*
 	 * Determine length of data that should be transmitted,
 	 * and flags that will be used.
@@ -215,10 +202,73 @@ tcp_output(tp)
 		else     
 			tp->snd_cwnd = tp->t_maxseg * ss_fltsz;
 	}
+
 again:
+	KERNEL_DEBUG(DBG_FNC_TCP_OUTPUT | DBG_FUNC_START, 0,0,0,0,0);
+
+#if INET6
+	if (isipv6) {
+	
+		KERNEL_DEBUG(DBG_LAYER_BEG,
+		     ((tp->t_inpcb->inp_fport << 16) | tp->t_inpcb->inp_lport),
+		     (((tp->t_inpcb->in6p_laddr.s6_addr16[0] & 0xffff) << 16) |
+		      (tp->t_inpcb->in6p_faddr.s6_addr16[0] & 0xffff)),
+		     sendalot,0,0);
+	}
+	else
+#endif
+
+	{
+		KERNEL_DEBUG(DBG_LAYER_BEG,
+		     ((tp->t_inpcb->inp_fport << 16) | tp->t_inpcb->inp_lport),
+		     (((tp->t_inpcb->inp_laddr.s_addr & 0xffff) << 16) |
+		      (tp->t_inpcb->inp_faddr.s_addr & 0xffff)),
+		     sendalot,0,0);
+	/*
+	 * If the route generation id changed, we need to check that our
+	 * local (source) IP address is still valid. If it isn't either
+	 * return error or silently do nothing (assuming the address will
+	 * come back before the TCP connection times out).
+	 */
+
+       if (tp->t_inpcb->inp_route.ro_rt != NULL &&
+           (tp->t_inpcb->inp_route.ro_rt->generation_id != route_generation)) {
+		/* check that the source address is still valid */
+		if (ifa_foraddr(tp->t_inpcb->inp_laddr.s_addr) == NULL) {
+			if (tp->t_state >= TCPS_CLOSE_WAIT) {
+				tcp_close(tp);
+				return(EADDRNOTAVAIL);
+			}
+
+			/* set Retransmit  timer if it wasn't set
+			 * reset Persist timer and shift register as the
+			 * adversed peer window may not be valid anymore
+			 */
+
+                        if (!tp->t_timer[TCPT_REXMT]) {
+                                tp->t_timer[TCPT_REXMT] = tp->t_rxtcur;
+				if (tp->t_timer[TCPT_PERSIST]) {
+					tp->t_timer[TCPT_PERSIST] = 0;
+					tp->t_rxtshift = 0;
+				}
+			}
+
+			if (so->so_flags & SOF_NOADDRAVAIL)
+				return(EADDRNOTAVAIL);
+			else
+				return(0); /* silently ignore and keep data in socket */
+		}
+		else  { /* Clear the cached route, will be reacquired later */
+			rtfree(tp->t_inpcb->inp_route.ro_rt);
+			tp->t_inpcb->inp_route.ro_rt = (struct rtentry *)0;
+		}
+        }
+	}
 	sendalot = 0;
 	off = tp->snd_nxt - tp->snd_una;
 	win = min(tp->snd_wnd, tp->snd_cwnd);
+	if (tp->t_flags & TF_SLOWLINK && slowlink_wsize > 0)
+		win = min(win, slowlink_wsize);
 
 	flags = tcp_outflags[tp->t_state];
 	/*
@@ -325,7 +375,10 @@ again:
 	if (SEQ_LT(tp->snd_nxt + len, tp->snd_una + so->so_snd.sb_cc))
 		flags &= ~TH_FIN;
 
-	win = sbspace(&so->so_rcv);
+	if (tp->t_flags & TF_SLOWLINK && slowlink_wsize > 0 )	/* Clips window size for slow links */
+		win = min(sbspace(&so->so_rcv), slowlink_wsize);
+	else
+		win = sbspace(&so->so_rcv);
 
 	/*
 	 * Sender silly window avoidance.  If connection is idle
@@ -668,6 +721,12 @@ send:
 				m->m_data += max_linkhdr;
 				m->m_len = hdrlen;
 			}
+			/* makes sure we still have data left to be sent at this point */
+			if (so->so_snd.sb_mb == NULL || off == -1) {
+				if (m != NULL) 	m_freem(m);
+				error = 0; /* should we return an error? */
+				goto out;
+			}
 			m_copydata(so->so_snd.sb_mb, off, (int) len,
 			    mtod(m, caddr_t) + hdrlen);
 			m->m_len += len;
@@ -694,7 +753,13 @@ send:
 				        m_last = NULL;
 				last_off = off + len;
 				m_head = so->so_snd.sb_mb;
-
+	
+				/* makes sure we still have data left to be sent at this point */
+				if (m_head == NULL) {
+					error = 0; /* should we return an error? */
+					goto out;
+				}
+				
 				/*
 				 * m_copym_with_hdrs will always return the last mbuf pointer and the offset into it that
 				 * it acted on to fullfill the current request, whether a valid 'hint' was passed in or not
@@ -795,9 +860,17 @@ send:
 		win = 0;
 	if (win < (long)(tp->rcv_adv - tp->rcv_nxt))
 		win = (long)(tp->rcv_adv - tp->rcv_nxt);
-	if (win > (long)TCP_MAXWIN << tp->rcv_scale)
+	if (tp->t_flags & TF_SLOWLINK && slowlink_wsize > 0) {
+		if (win > (long)slowlink_wsize) 
+			win = slowlink_wsize;
+		th->th_win = htons((u_short) (win>>tp->rcv_scale));
+	}
+	else {
+
+		if (win > (long)TCP_MAXWIN << tp->rcv_scale)
 		win = (long)TCP_MAXWIN << tp->rcv_scale;
-	th->th_win = htons((u_short) (win>>tp->rcv_scale));
+		th->th_win = htons((u_short) (win>>tp->rcv_scale));
+	}
 	if (SEQ_GT(tp->snd_up, tp->snd_nxt)) {
 		th->th_urp = htons((u_short)(tp->snd_up - tp->snd_nxt));
 		th->th_flags |= TH_URG;
@@ -938,7 +1011,7 @@ send:
 	struct rtentry *rt;
 	ip->ip_len = m->m_pkthdr.len;
 #if INET6
- 	if (INP_CHECK_SOCKAF(so, AF_INET6))
+ 	if (isipv6)
  		ip->ip_ttl = in6_selecthlim(tp->t_inpcb,
  					    tp->t_inpcb->in6p_route.ro_rt ?
  					    tp->t_inpcb->in6p_route.ro_rt->rt_ifp
@@ -1042,9 +1115,10 @@ out:
 		tp->rcv_adv = tp->rcv_nxt + win;
 	tp->last_ack_sent = tp->rcv_nxt;
 	tp->t_flags &= ~(TF_ACKNOW|TF_DELACK);
+
+	KERNEL_DEBUG(DBG_FNC_TCP_OUTPUT | DBG_FUNC_END, 0,0,0,0,0);
 	if (sendalot)
 		goto again;
-	KERNEL_DEBUG(DBG_FNC_TCP_OUTPUT | DBG_FUNC_END, 0,0,0,0,0);
 	return (0);
 }
 

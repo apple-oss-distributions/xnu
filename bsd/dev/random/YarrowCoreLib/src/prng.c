@@ -3,19 +3,22 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -340,8 +343,8 @@ prngForceReseed(PRNG *p, LONGLONG ticks)
 #if	defined(macintosh) || defined(__APPLE__)
 	#if		(defined(TARGET_API_MAC_OSX) || defined(KERNEL_BUILD))
 		struct timeval 	tv;		
-		int32_t			endTime;
-	#else	TARGET_API_MAC_CARBON
+		int64_t			endTime, curTime;
+	#else	/* TARGET_API_MAC_CARBON */
 		UnsignedWide 	uwide;		/* struct needed for Microseconds() */
 		LONGLONG 		start;
 		LONGLONG 		now;
@@ -357,15 +360,11 @@ prngForceReseed(PRNG *p, LONGLONG ticks)
 		#if		(defined(TARGET_API_MAC_OSX) || defined(KERNEL_BUILD))
 			/* note we can't loop for more than a million microseconds */
             #ifdef KERNEL_BUILD
-                microtime (&tv);
+                microuptime (&tv);
             #else
                 gettimeofday(&tv, NULL);
             #endif
-			endTime = tv.tv_usec + ticks;
-			if(endTime > 1000000) {
-				/* handle rollover now */ 
-				endTime -= 1000000;
-			}
+			endTime = (int64_t)tv.tv_sec*1000000LL + (int64_t)tv.tv_usec + ticks;
 		#else	/* TARGET_API_MAC_OSX */
 			Microseconds(&uwide);
 			start = UnsignedWideToUInt64(uwide);
@@ -390,9 +389,10 @@ prngForceReseed(PRNG *p, LONGLONG ticks)
         #ifdef TARGET_API_MAC_OSX
             gettimeofday(&tv, NULL);
         #else
-            microtime (&tv);
+            microuptime (&tv);
+	    curTime = (int64_t)tv.tv_sec*1000000LL + (int64_t)tv.tv_usec;
         #endif
-	} while(tv.tv_usec < endTime);
+	} while(curTime < endTime);
 	#else
 		Microseconds(&uwide);
 		now = UnsignedWideToUInt64(uwide);

@@ -3,19 +3,22 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -179,6 +182,7 @@
  */
 
 #include <profiling/profile-internal.h>
+#include <vm/vm_kern.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -189,8 +193,6 @@
 #define DEBUG_PROFILE 1
 #endif
 
-extern int printf(const char *, ...);
-extern void panic(const char *);
 #else
 #include <assert.h>
 #define panic(str) exit(1)
@@ -235,6 +237,59 @@ static void _profile_reset_alloc(struct profile_vars *,
 				 acontext_type_t);
 
 extern void _bogus_function(void);
+
+
+#if NCPUS > 1
+struct profile_vars *_profile_vars_cpus[NCPUS] = { &_profile_vars };
+struct profile_vars _profile_vars_aux[NCPUS-1];
+#define PROFILE_VARS(cpu) (_profile_vars_cpus[(cpu)])
+#else
+#define PROFILE_VARS(cpu) (&_profile_vars)
+#endif
+
+void *
+_profile_alloc_pages (size_t size)
+{
+	vm_offset_t addr;
+
+	/*
+	 * For the MK, we can't support allocating pages at runtime, because we
+	 * might be at interrupt level, so abort if we didn't size the table
+	 * properly.
+	 */
+
+	if (PROFILE_VARS(0)->active) {
+		panic("Call to _profile_alloc_pages while profiling is running.");
+	}
+
+	if (kmem_alloc(kernel_map, &addr, size)) {
+		panic("Could not allocate memory for profiling");
+	}
+
+	memset((void *)addr, '\0', size);
+	if (PROFILE_VARS(0)->debug) {
+		printf("Allocated %d bytes for profiling, address 0x%x\n", (int)size, (int)addr);
+	}
+
+	return((caddr_t)addr);
+}
+
+void
+_profile_free_pages(void *addr, size_t size)
+{
+	if (PROFILE_VARS(0)->debug) {
+		printf("Freed %d bytes for profiling, address 0x%x\n", (int)size, (int)addr);
+	}
+
+	kmem_free(kernel_map, (vm_offset_t)addr, size);
+	return;
+}
+
+void _profile_error(struct profile_vars *pv)
+{
+	panic("Fatal error in profiling");
+}
+
 
 /*
  * Function to set up the initial allocation for a context block.

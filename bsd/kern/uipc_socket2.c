@@ -3,19 +3,22 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -453,6 +456,9 @@ sowakeup(so, sb)
 	}
 	if (sb->sb_flags & SB_UPCALL)
 		(*so->so_upcall)(so, so->so_upcallarg, M_DONTWAIT);
+	if (sb->sb_flags & SB_KNOTE &&
+		!(sb->sb_sel.si_flags & SI_INITED))
+		KNOTE(&sb->sb_sel.si_note, 0);
 }
 
 /*
@@ -604,8 +610,10 @@ sbappend(sb, m)
 	kp = sotokextcb(sbtoso(sb));
 	while (kp) {
 		if (kp->e_sout && kp->e_sout->su_sbappend) {
-			if ((*kp->e_sout->su_sbappend)(sb, m, kp))
+			if ((*kp->e_sout->su_sbappend)(sb, m, kp)) {
+				KERNEL_DEBUG((DBG_FNC_SBAPPEND | DBG_FUNC_END), sb, sb->sb_cc, kp, 0, 0);
 				return;
+			}
 		}
 		kp = kp->e_next;
 	}
@@ -616,6 +624,7 @@ sbappend(sb, m)
 		do {
 			if (n->m_flags & M_EOR) {
 				sbappendrecord(sb, m); /* XXXXXX!!!! */
+				KERNEL_DEBUG((DBG_FNC_SBAPPEND | DBG_FUNC_END), sb, sb->sb_cc, 0, 0, 0);
 				return;
 			}
 		} while (n->m_next && (n = n->m_next));
@@ -942,8 +951,7 @@ sbflush(sb)
 		kp = kp->e_next;
 	}
 
-	if (sb->sb_flags & SB_LOCK)
-		sb_lock(sb);
+	(void)sblock(sb, M_WAIT);
 	while (sb->sb_mbcnt) {
 		/*
 		 * Don't call sbdrop(sb, 0) if the leading mbuf is non-empty:
@@ -955,6 +963,9 @@ sbflush(sb)
 	}
 	if (sb->sb_cc || sb->sb_mb || sb->sb_mbcnt)
 		panic("sbflush: cc %ld || mb %p || mbcnt %ld", sb->sb_cc, (void *)sb->sb_mb, sb->sb_mbcnt);
+
+	sbunlock(sb);
+
 	postevent(0, sb, EV_RWBYTES);
 }
 
@@ -983,8 +994,10 @@ sbdrop(sb, len)
 	kp = sotokextcb(sbtoso(sb));
 	while (kp) {
 		if (kp->e_sout && kp->e_sout->su_sbdrop) {
-			if ((*kp->e_sout->su_sbdrop)(sb, len, kp))
+			if ((*kp->e_sout->su_sbdrop)(sb, len, kp)) {
+				KERNEL_DEBUG((DBG_FNC_SBDROP | DBG_FUNC_END), sb, len, kp, 0, 0);
 				return;
+			}
 		}
 		kp = kp->e_next;
 	}
@@ -1275,7 +1288,7 @@ int	pru_sopoll_notsupp(struct socket *so, int events,
 int 
 sb_notify(struct sockbuf *sb)
 {
-	return ((sb->sb_flags & (SB_WAIT|SB_SEL|SB_ASYNC|SB_UPCALL)) != 0); 
+	return ((sb->sb_flags & (SB_WAIT|SB_SEL|SB_ASYNC|SB_UPCALL|SB_KNOTE)) != 0); 
 }
 
 /*

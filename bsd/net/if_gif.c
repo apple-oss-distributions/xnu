@@ -3,19 +3,22 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -293,16 +296,54 @@ u_long  gif_detach_proto_family(struct ifnet *ifp, int af)
     return (stat);
 }
 
+int gif_attach_inet(struct ifnet *ifp, u_long *dl_tag) {
+	*dl_tag = gif_attach_proto_family(ifp, AF_INET);
+	return 0;
+}
+
+int gif_detach_inet(struct ifnet *ifp, u_long dl_tag) {
+	gif_detach_proto_family(ifp, AF_INET);
+	return 0;
+}
+
+int gif_attach_inet6(struct ifnet *ifp, u_long *dl_tag) {
+	*dl_tag = gif_attach_proto_family(ifp, AF_INET6);
+	return 0;
+}
+
+int gif_detach_inet6(struct ifnet *ifp, u_long dl_tag) {
+	gif_detach_proto_family(ifp, AF_INET6);
+	return 0;
+}
 #endif
 
 /* Function to setup the first gif interface */
 void
 gifattach(void)
 {
+     	struct dlil_protomod_reg_str gif_protoreg;
+	int error;
+
 	/* Init the list of interfaces */
 	TAILQ_INIT(&gifs);
 
 	gif_reg_if_mods(); /* DLIL modules */
+
+	/* Register protocol registration functions */
+
+	bzero(&gif_protoreg, sizeof(gif_protoreg));
+	gif_protoreg.attach_proto = gif_attach_inet;
+	gif_protoreg.detach_proto = gif_detach_inet;
+	
+	if ( error = dlil_reg_proto_module(AF_INET, APPLE_IF_FAM_GIF, &gif_protoreg) != 0)
+		printf("dlil_reg_proto_module failed for AF_INET error=%d\n", error);
+
+	gif_protoreg.attach_proto = gif_attach_inet6;
+	gif_protoreg.detach_proto = gif_detach_inet6;
+	
+	if ( error = dlil_reg_proto_module(AF_INET6, APPLE_IF_FAM_GIF, &gif_protoreg) != 0)
+		printf("dlil_reg_proto_module failed for AF_INET6 error=%d\n", error);
+
 
 	/* Create first device */
 	gif_create_dev();
@@ -460,6 +501,7 @@ gif_pre_output(ifp, m0, dst, rt, frame, address, dl_tag)
 		log(LOG_NOTICE,
 		    "gif_output: recursively called too many times(%d)\n",
 		    called);
+		m_freem(m);	/* free it here not in dlil_output*/
 		error = EIO;	/* is there better errno? */
 		goto end;
 	}
@@ -468,6 +510,7 @@ gif_pre_output(ifp, m0, dst, rt, frame, address, dl_tag)
 	m->m_flags &= ~(M_BCAST|M_MCAST);
 	if (!(ifp->if_flags & IFF_UP) ||
 	    sc->gif_psrc == NULL || sc->gif_pdst == NULL) {
+		m_freem(m);	/* free it here not in dlil_output */
 		error = ENETDOWN;
 		goto end;
 	}
@@ -515,8 +558,11 @@ gif_pre_output(ifp, m0, dst, rt, frame, address, dl_tag)
 
   end:
 	called = 0;		/* reset recursion counter */
-	if (error)
+	if (error) {
+		/* the mbuf was freed either by in_gif_output or in here */
+		*m0 = NULL; /* avoid getting dlil_output freeing it */
 		ifp->if_oerrors++;
+	}
 	if (error == 0) 
 		error = EJUSTRETURN; /* if no error, packet got sent already */
 	return error;

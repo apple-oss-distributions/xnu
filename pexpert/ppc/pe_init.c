@@ -3,19 +3,22 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -119,16 +122,11 @@ void PE_init_iokit(void)
     kern_return_t	ret;
     DTEntry		entry;
     int			size;
-    int			i;
     void **		map;
 
     PE_init_kprintf(TRUE);
     PE_init_printf(TRUE);
 
-    // init this now to get mace debugger for iokit startup
-    PE_init_ethernet_debugger();
-
-    
     if( kSuccess == DTLookupEntry(0, "/chosen/memory-map", &entry)) {
 
 	boot_progress_element * bootPict;
@@ -146,12 +144,10 @@ void PE_init_iokit(void)
 	    default_noroot_data   = &bootPict->data[0];
 	}
     }
+    panic_ui_initialize( (unsigned char *) appleClut8 );
     vc_progress_initialize( &default_progress, default_progress_data, (unsigned char *) appleClut8 );
 
-    PE_initialize_console( (PE_Video *) 0, kPEAcquireScreen );
-
-    ret = StartIOKit( PE_state.deviceTreeHead, PE_state.bootArgs,
-			(void *)0, (void *)0);
+    ret = StartIOKit( PE_state.deviceTreeHead, PE_state.bootArgs, (void *)0, (void *)0);
 }
 
 void PE_init_platform(boolean_t vm_initialized, void *_args)
@@ -192,15 +188,16 @@ void PE_init_platform(boolean_t vm_initialized, void *_args)
 
 void PE_create_console( void )
 {
-  if (PE_state.video.v_display)
-    PE_initialize_console( &PE_state.video, kPEGraphicsMode );
-  else
-    PE_initialize_console( &PE_state.video, kPETextMode );
+    if ( PE_state.video.v_display )
+        PE_initialize_console( &PE_state.video, kPEGraphicsMode );
+    else
+        PE_initialize_console( &PE_state.video, kPETextMode );
 }
 
 int PE_current_console( PE_Video * info )
 {
     *info = PE_state.video;
+    info->v_baseAddr = 0;
     return( 0);
 }
 
@@ -245,8 +242,8 @@ void PE_call_timebase_callback(void)
   struct timebase_freq_t timebase_freq;
   unsigned long          num, den, cnt;
   
-  num = gPEClockFrequencyInfo.bus_clock_rate_num * gPEClockFrequencyInfo.bus_to_dec_rate_num;
-  den = gPEClockFrequencyInfo.bus_clock_rate_den * gPEClockFrequencyInfo.bus_to_dec_rate_den;
+  num = gPEClockFrequencyInfo.timebase_frequency_num;
+  den = gPEClockFrequencyInfo.timebase_frequency_den;
   
   cnt = 2;
   while (cnt <= den) {

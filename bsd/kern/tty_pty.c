@@ -1,21 +1,24 @@
 /*
- * Copyright (c) 2000 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2002 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -81,14 +84,13 @@
 #include <machine/spl.h>
 
 #define FREE_BSDSTATIC __private_extern__
-#define d_open_t        open_close_fcn_t
-#define d_close_t       open_close_fcn_t
 #define d_devtotty_t    struct tty **
-#define d_ioctl_t       ioctl_fcn_t
-#define d_read_t        read_write_fcn_t 
-#define d_write_t       read_write_fcn_t
-#define d_select_t      select_fcn_t
+
+#ifdef d_stop_t
+#undef d_stop_t
+#endif
 typedef void d_stop_t	__P((struct tty *tp, int rw));
+
 #endif /* NeXT */
 
 #ifdef notyet
@@ -235,7 +237,7 @@ int pty_init(int n_ptys)
  done:
     return (0);
 }
-#endif DEVFS
+#endif /* DEVFS */
 
 /*ARGSUSED*/
 FREE_BSDSTATIC int

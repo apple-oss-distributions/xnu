@@ -3,19 +3,22 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -91,46 +94,49 @@ static uint32_t		fract[3] = {
 void
 compute_mach_factor(void)
 {
-	register processor_set_t	pset;
+	register processor_set_t	pset = &default_pset;
 	register int				ncpus;
-	register int				nthreads;
+	register int				nthreads, nshared;
 	register uint32_t			factor_now = 0;
 	register uint32_t			average_now = 0;
 	register uint32_t			load_now = 0;
 
-	pset = &default_pset;
 	if ((ncpus = pset->processor_count) > 0) {
 		/*
-		 *	Number of threads running in pset.
+		 *	Retrieve thread counts.
 		 */
 		nthreads = pset->run_count;
+		nshared = pset->share_count;
 
 		/*
-		 *	The current thread (running this calculation)
-		 *	doesn't count; it's always in the default pset.
+		 *	Don't include the current thread.
 		 */
-		if (pset == &default_pset)
-			nthreads -= 1;
-
-		if (nthreads > ncpus) {
-			factor_now = (ncpus * LOAD_SCALE) / (nthreads + 1);
-			load_now = (nthreads << SCHED_SHIFT) / ncpus;
-		}
-		else
-			factor_now = (ncpus - nthreads) * LOAD_SCALE;
+		nthreads -= 1;
 
 		/*
 		 *	Load average and mach factor calculations for
-		 *	those that ask about these things.
+		 *	those which ask about these things.
 		 */
 		average_now = nthreads * LOAD_SCALE;
+
+		if (nthreads > ncpus)
+			factor_now = (ncpus * LOAD_SCALE) / (nthreads + 1);
+		else
+			factor_now = (ncpus - nthreads) * LOAD_SCALE;
 
 		pset->mach_factor =	((pset->mach_factor << 2) + factor_now) / 5;
 		pset->load_average = ((pset->load_average << 2) + average_now) / 5;
 
 		/*
-		 *	sched_load is used by the timesharing algorithm.
+		 *	Compute the load factor used by the timesharing
+		 *	algorithm.
 		 */
+		if (nshared > nthreads)
+			nshared = nthreads;
+
+		if (nshared > ncpus)
+			load_now = (nshared << SCHED_SHIFT) / ncpus;
+
 		pset->sched_load = (pset->sched_load + load_now) >> 1;
 	}
 	else {

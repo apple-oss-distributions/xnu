@@ -1,21 +1,24 @@
 /*
- * Copyright (c) 2000-2002 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2003 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -125,7 +128,11 @@ char *syscallnames[] = {
 	"getpriority",		/* 100 = getpriority */
 	"old_send",			/* 101 = old send */
 	"old_recv",			/* 102 = old recv */
+#ifdef __ppc__
+	"osigreturn",		/* 103 = sigreturn */
+#else
 	"sigreturn",		/* 103 = sigreturn */
+#endif
 	"bind",				/* 104 = bind */
 	"setsockopt",		/* 105 = setsockopt */
 	"listen",			/* 106 = listen */
@@ -206,7 +213,11 @@ char *syscallnames[] = {
 	"setgid",			/* 181 = setgid */
 	"setegid",			/* 182 = setegid */
 	"seteuid",			/* 183 = seteuid */
+#ifdef __ppc__
+	"sigreturn",			/* 184 = sigreturn */
+#else
 	"#184",				/* 184 = nosys */
+#endif
 	"#185",				/* 185 = nosys */
 	"#186",				/* 186 = nosys */
 	"#187",				/* 187 = nosys */
@@ -236,8 +247,8 @@ char *syscallnames[] = {
 	"ATPgetreq",		/* 211 = ATPgetreq */
 	"ATPgetrsp",		/* 212 = ATPgetrsp */
 	"#213",				/* 213 = Reserved for AppleTalk */
-	"#214",				/* 214 = Reserved for AppleTalk */
-	"#215",				/* 215 = Reserved for AppleTalk */
+	"kqueue_from_portset_np",	/* 214 = kqueue_from_portset_np */
+	"kqueue_portset_np",		/* 215 = kqueue_portset_np */
 	"#216",				/* 216 = Reserved */
 	"#217",				/* 217 = Reserved */
 	"#218",				/* 218 = Reserved */
@@ -269,8 +280,8 @@ char *syscallnames[] = {
 	"#244",				/* 244 = nosys */
 	"#245",				/* 245 = nosys */
 	"#246",				/* 246 = nosys */
-	"#247",				/* 247 = nosys */
-	"#248",				/* 248 = nosys */
+	"nfsclnt",			/* 247 = nfsclnt */
+	"fhopen",			/* 248 = fhopen */
 	"#249",				/* 249 = nosys */
 	"minherit",			/* 250 = minherit */
 	"semsys",			/* 251 = semsys */
@@ -335,41 +346,61 @@ char *syscallnames[] = {
 	"getsid",			/* 310 = getsid */
 	"#311",				/* 311 = setresuid */
 	"#312",				/* 312 = setresgid */
-	"#313",				/* 313 = obsolete signanosleep */
-	"#314",				/* 314 = aio_return */
-	"#315",				/* 315 = aio_suspend */
-	"#316",				/* 316 = aio_cancel */
-	"#317",				/* 317 = aio_error */
-	"#318",				/* 318 = aio_read */
-	"#319",				/* 319 = aio_write */
-	"#320",				/* 320 = lio_listio */
+	"aio_fsync",		/* 313 = aio_fsync */
+	"aio_return",		/* 314 = aio_return */
+	"aio_suspend",		/* 315 = aio_suspend */
+	"aio_cancel",		/* 316 = aio_cancel */
+	"aio_error",		/* 317 = aio_error */
+	"aio_read",			/* 318 = aio_read */
+	"aio_write",		/* 319 = aio_write */
+	"lio_listio",		/* 320 = lio_listio */
 	"#321",				/* 321 = yield */
 	"#322",				/* 322 = thr_sleep */
 	"#323",				/* 323 = thr_wakeup */
 	"mlockall",			/* 324 = mlockall */
 	"munlockall",		/* 325 = munlockall */
-	"#326",				/* 326 */
+	"#326",			/* 326 */
 	"issetugid",		/* 327 = issetugid */
 	"__pthread_kill",	/* 328  = __pthread_kill */
 	"pthread_sigmask",	/* 329  = pthread_sigmask */
-	"sigwait",			/* 330 = sigwait */
-	"#331",				/* 331 */
-	"#332",				/* 332 */
-	"#333",				/* 333 */
-	"#334",				/* 334 */
-	"utrace",			/* 335 = utrace */
-	"#336",				/* 336 */
-	"#337",				/* 337 */
-	"#338",				/* 338 */
-	"#339",				/* 339 */
-	"#340",				/* 340 */
-	"#341",				/* 341 */
-	"#342",				/* 342 */
-	"#343",				/* 343 */
-	"#344",				/* 344 */
-	"#345",				/* 345 */
-	"#346",				/* 346 */
-	"#347",				/* 347 */
-	"#348",				/* 348 */
-	"#349"				/* 349 */
+	"sigwait",		/* 330 = sigwait */
+	"#331",			/* 331 */
+	"#332",			/* 332 */
+	"#333",			/* 333 */
+	"#334",			/* 334 */
+	"utrace",		/* 335 = utrace */
+	"#336",			/* 336 */
+	"#337",			/* 337 */
+	"#338",			/* 338 */
+	"#339",			/* 339 */
+	"#340",			/* 340 = TBD sigprocmask */
+	"#341",			/* 341 = TBD sigsuspend */
+	"#342",			/* 342 = TBD sigaction */
+	"#343",			/* 343 = TBD sigpending */
+	"#344",			/* 344 = TBD sigreturn */
+	"#345",			/* 345 = TBD sigtimedwait */
+	"#346",			/* 346 = TBD sigwaitinfo */
+	"#347",			/* 347 */
+	"#348",			/* 348 */
+	"#349"			/* 349 */
+	"audit",		/* 350 */
+	"auditon",		/* 351 */
+	"auditsvc",		/* 352 */
+	"getauid",		/* 353 */
+	"setauid",		/* 354 */
+	"getaudit",		/* 355 */
+	"setaudit",		/* 356 */
+	"getaudit_addr",	/* 357 */
+	"setaudit_addr",	/* 358 */
+	"auditctl",		/* 359 */
+	"#360",			/* 360 */
+	"#361",			/* 361 */
+	"kqueue",		/* 362 = kqueue */
+	"kevent",		/* 363 = kevent */
+	"#364",			/* 364 */
+	"#365",			/* 365 */
+	"#366",			/* 366 */
+	"#367",			/* 367 */
+	"#368",			/* 368 */
+	"#369"			/* 369 */
 };

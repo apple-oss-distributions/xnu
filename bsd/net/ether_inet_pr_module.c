@@ -3,19 +3,22 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -362,19 +365,6 @@ ether_inet_prmod_ioctl(dl_tag, ifp, command, data)
 	    if (ifp->if_init)
 		ifp->if_init(ifp->if_softc);	/* before arpwhohas */
 
-	    //
-	    // See if another station has *our* IP address.
-	    // i.e.: There is an address conflict! If a
-	    // conflict exists, a message is sent to the
-	    // console.
-	    //
-	    if (IA_SIN(ifa)->sin_addr.s_addr != 0)
-	    {
-		 /* don't bother for 0.0.0.0 */
-		 ac->ac_ipaddr = IA_SIN(ifa)->sin_addr;
-		 arpwhohas(ac, &IA_SIN(ifa)->sin_addr);
-	    }
-
 	    arp_ifinit(IFP2AC(ifp), ifa);
 
 	    /*
@@ -422,22 +412,21 @@ ether_inet_prmod_ioctl(dl_tag, ifp, command, data)
 
 
 
-u_long
-ether_attach_inet(struct ifnet *ifp)
+int
+ether_attach_inet(struct ifnet *ifp, u_long *dl_tag)
 {
     struct dlil_proto_reg_str   reg;
     struct dlil_demux_desc      desc;
     struct dlil_demux_desc      desc2;
-    u_long			ip_dl_tag=0;
     u_short en_native=ETHERTYPE_IP;
     u_short arp_native=ETHERTYPE_ARP;
     int   stat;
     int i;
 
 
-    stat = dlil_find_dltag(ifp->if_family, ifp->if_unit, PF_INET, &ip_dl_tag);
+    stat = dlil_find_dltag(ifp->if_family, ifp->if_unit, PF_INET, dl_tag);
     if (stat == 0)
-	 return ip_dl_tag;
+	 return (stat);
 
     TAILQ_INIT(&reg.demux_desc_head);
     desc.type = DLIL_DESC_RAW;
@@ -460,22 +449,21 @@ ether_attach_inet(struct ifnet *ifp)
     desc2.native_type = (char *) &arp_native;
     TAILQ_INSERT_TAIL(&reg.demux_desc_head, &desc2, next);
 
-    stat = dlil_attach_protocol(&reg, &ip_dl_tag);
+    stat = dlil_attach_protocol(&reg, dl_tag);
     if (stat) {
 	printf("WARNING: ether_attach_inet can't attach ip to interface\n");
 	return stat;
     }
-    return ip_dl_tag;
+    return (0);
 }
 
-int  ether_detach_inet(struct ifnet *ifp)
+int  ether_detach_inet(struct ifnet *ifp, u_long dl_tag)
 {
-    u_long      ip_dl_tag = 0;
     int         stat;
 
-    stat = dlil_find_dltag(ifp->if_family, ifp->if_unit, PF_INET, &ip_dl_tag);
+    stat = dlil_find_dltag(ifp->if_family, ifp->if_unit, PF_INET, &dl_tag);
     if (stat == 0) {
-        stat = dlil_detach_protocol(ip_dl_tag);
+        stat = dlil_detach_protocol(dl_tag);
         if (stat) {
             printf("WARNING: ether_detach_inet can't detach ip from interface\n");
         }

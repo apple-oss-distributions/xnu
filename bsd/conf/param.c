@@ -3,19 +3,22 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -74,16 +77,19 @@
 #include <ufs/ufs/inode.h>
 #include <miscfs/fifofs/fifo.h>
 #include <sys/shm.h>
+#include <sys/aio_kern.h>
 
 struct	timezone tz = { TIMEZONE, PST };
 
 #define	NPROC (20 + 16 * MAXUSERS)
+#define HNPROC (20 + 64 * MAXUSERS)
 int	maxproc = NPROC;
+__private_extern__ int hard_maxproc = HNPROC;	/* hardcoded limit */
 int nprocs = 0; /* XXX */
 
 #define	NTEXT (80 + NPROC / 8)			/* actually the object cache */
 #define	NVNODE (NPROC + NTEXT + 300)
-int	desiredvnodes = NVNODE + 350;
+int	desiredvnodes = NVNODE + 700;
 
 #define MAXFILES (OPEN_MAX + 2048)
 int	maxfiles = MAXFILES;
@@ -94,6 +100,16 @@ int	nport = NPROC / 2;
 
 #define MAXSOCKETS NMBCLUSTERS
 int	maxsockets = MAXSOCKETS;
+
+/*
+ *  async IO (aio) configurable limits
+ */
+#define AIO_MAX				90	/* system wide limit of async IO requests */
+#define AIO_PROCESS_MAX		AIO_LISTIO_MAX 	/* process limit of async IO requests */
+#define AIO_THREAD_COUNT	4	/* number of async IO worker threads created */
+int aio_max_requests = AIO_MAX;
+int aio_max_requests_per_process = AIO_PROCESS_MAX;
+int aio_worker_threads = AIO_THREAD_COUNT;
 
 /*
  * These have to be allocated somewhere; allocating

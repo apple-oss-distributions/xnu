@@ -3,19 +3,22 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -52,6 +55,7 @@
 
 #include <mach_kdb.h>
 
+#include <mach/mach_types.h>
 #include <mach/boolean.h>
 #include <mach/kern_return.h>
 #include <mach/message.h>
@@ -167,7 +171,7 @@ exception_deliver(
 	switch (behavior) {
 	case EXCEPTION_STATE: {
 		mach_msg_type_number_t state_cnt;
-		natural_t state[ THREAD_MACHINE_STATE_MAX ];
+		thread_state_data_t state;
 
 		c_thr_exc_raise_state++;
 		state_cnt = state_count[flavor];
@@ -207,7 +211,7 @@ exception_deliver(
 
 	case EXCEPTION_STATE_IDENTITY: {
 		mach_msg_type_number_t state_cnt;
-		natural_t state[ THREAD_MACHINE_STATE_MAX ];
+		thread_state_data_t state;
 
 		c_thr_exc_raise_state_id++;
 		state_cnt = state_count[flavor];
@@ -376,7 +380,7 @@ bsd_exception(
 	switch (behavior) {
 	case EXCEPTION_STATE: {
 		mach_msg_type_number_t state_cnt;
-		natural_t state[ THREAD_MACHINE_STATE_MAX ];
+		thread_state_data_t state;
 
 		c_thr_exc_raise_state++;
 		state_cnt = state_count[flavor];
@@ -415,7 +419,7 @@ bsd_exception(
 
 	case EXCEPTION_STATE_IDENTITY: {
 		mach_msg_type_number_t state_cnt;
-		natural_t state[ THREAD_MACHINE_STATE_MAX ];
+		thread_state_data_t state;
 
 		c_thr_exc_raise_state_id++;
 		state_cnt = state_count[flavor];
@@ -447,5 +451,69 @@ bsd_exception(
 		return(KERN_FAILURE);
 	}/* switch */
 	return(KERN_FAILURE);
+}
+
+
+
+
+/*
+ *	Handle interface for special perfomance monitoring
+ *	This is a special case of the host exception handler
+ */
+
+kern_return_t sys_perf_notify(struct task *task,
+	exception_data_t code,
+	mach_msg_type_number_t codeCnt)
+{
+	host_priv_t		hostp;
+	struct exception_action *excp;
+	thread_act_t	act = current_act();
+	thread_t		thr = current_thread();
+	ipc_port_t		xport;
+	kern_return_t	ret;
+	int				abrt;
+	spl_t			ints;
+	wait_interrupt_t	wsave;
+
+	hostp = host_priv_self();				/* Get the host privileged ports */
+	excp = &hostp->exc_actions[EXC_RPC_ALERT];	/* Point to the RPC_ALERT action */
+
+	mutex_lock(&hostp->lock);				/* Lock the priv port */
+	xport = excp->port;						/* Get the port for this exception */
+	if (!IP_VALID(xport)) {					/* Is it valid? */
+		mutex_unlock(&hostp->lock);			/* Unlock */
+		return(KERN_FAILURE);				/* Go away... */
+	}
+
+	ip_lock(xport);							/* Lock the exception port */
+	if (!ip_active(xport)) {				/* and is it active? */
+		ip_unlock(xport);					/* Nope, fail */
+		mutex_unlock(&hostp->lock);			/* Unlock */
+		return(KERN_FAILURE);				/* Go away... */
+	}
+
+	if (task->itk_space == xport->data.receiver) {	/* Are we trying to send to ourselves? */
+		ip_unlock(xport);					/* Yes, fail */
+		mutex_unlock(&hostp->lock);			/* Unlock */
+		return(KERN_FAILURE);				/* Go away... */
+	}
+	
+	ip_reference(xport);					/* Bump reference so it doesn't go away */
+	xport->ip_srights++;					/* Bump send rights */
+	ip_unlock(xport);						/* We can unlock it now */
+
+	mutex_unlock(&hostp->lock);				/* All done with the lock */
+
+	wsave = thread_interrupt_level(THREAD_UNINT);	/* Make sure we aren't aborted here */
+	
+	ret = exception_raise(xport,			/* Send the exception to the perf handler */
+		retrieve_act_self_fast(act),		/* Not always the dying guy */
+		retrieve_task_self_fast(act->task),	/* Not always the dying guy */
+		EXC_RPC_ALERT,						/* Unused exception type until now */
+		code, codeCnt);	
+		
+	(void)thread_interrupt_level(wsave);	/* Restore interrupt level */			
+
+	return(ret);							/* Tell caller how it went */
 }
 

@@ -3,19 +3,22 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -153,15 +156,36 @@ typedef struct {
 #define	decl_mutex_data(class,name)	class mutex_t name;
 #define mutex_addr(m)			(&(m))
 
-extern void	mutex_init		(mutex_t*, etap_event_t);
-extern void	mutex_lock_wait		(mutex_t *, thread_act_t);
-extern int	mutex_lock_acquire	(mutex_t *);
-extern void	mutex_unlock_wakeup	(mutex_t*, thread_act_t);
-extern void	interlock_unlock	(hw_lock_t);
+extern void		mutex_init(
+					mutex_t			*mutex,
+					etap_event_t	tag);
+
+extern void		mutex_lock_wait(
+					mutex_t			*mutex,
+					thread_t		holder);
+
+extern int		mutex_lock_acquire(
+					mutex_t			*mutex);
+
+extern void		mutex_unlock_wakeup(
+					mutex_t			*mutex,
+					thread_t		holder);
+
+extern boolean_t	mutex_preblock(
+						mutex_t			*mutex,
+						thread_t		thread);
+
+extern boolean_t	mutex_preblock_wait(
+						mutex_t			*mutex,
+						thread_t		thread,
+						thread_t		holder);
+
+extern void		interlock_unlock(
+					hw_lock_t		lock);
 
 #endif	/* MACH_KERNEL_PRIVATE */
 
-extern void	mutex_pause		(void);
+extern void		mutex_pause(void);
 
 #endif	/* __APPLE_API_PRIVATE */
 
@@ -171,11 +195,20 @@ typedef struct __mutex__ mutex_t;
 
 #endif	/* MACH_KERNEL_PRIVATE */
 
-extern mutex_t *mutex_alloc		(etap_event_t);
-extern void	mutex_free		(mutex_t*);
-extern void	mutex_lock		(mutex_t*);
-extern void	mutex_unlock		(mutex_t*);
-extern boolean_t mutex_try		(mutex_t*);
+extern mutex_t	*mutex_alloc(
+					etap_event_t	tag);
+
+extern void		mutex_free(
+					mutex_t			*mutex);
+
+extern void		mutex_lock(
+					mutex_t			*mutex);
+
+extern void		mutex_unlock(
+					mutex_t			*mutex);
+
+extern boolean_t	mutex_try(
+						mutex_t		*mutex);
 
 #ifdef	__APPLE_API_PRIVATE
 

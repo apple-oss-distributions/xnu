@@ -3,19 +3,22 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -78,7 +81,6 @@
 
 #ifdef __ppc__
 #include <ppc/Firmware.h>
-#include <ppc/POWERMAC/mp/MPPlugIn.h>
 #endif
 
 #include <sys/kdebug.h>
@@ -213,9 +215,13 @@ usimple_lock_init(
 	usimple_lock_t	l,
 	etap_event_t	event)
 {
+#ifndef	MACHINE_SIMPLE_LOCK
 	USLDBG(usld_lock_init(l, event));
 	ETAPCALL(etap_simplelock_init((l),(event)));
 	hw_lock_init(&l->interlock);
+#else
+	simple_lock_init((simple_lock_t)l,event);
+#endif
 }
 
 
@@ -230,6 +236,7 @@ void
 usimple_lock(
 	usimple_lock_t	l)
 {
+#ifndef	MACHINE_SIMPLE_LOCK
 	int i;
 	pc_t		pc;
 #if	ETAP_LOCK_TRACE
@@ -251,6 +258,9 @@ usimple_lock(
 
 	ETAPCALL(etap_simplelock_hold(l, pc, start_wait_time));
 	USLDBG(usld_lock_post(l, pc));
+#else
+	simple_lock((simple_lock_t)l);
+#endif
 }
 
 
@@ -265,6 +275,7 @@ void
 usimple_unlock(
 	usimple_lock_t	l)
 {
+#ifndef	MACHINE_SIMPLE_LOCK
 	pc_t	pc;
 
 //	checkNMI();										/* (TEST/DEBUG) */
@@ -272,7 +283,13 @@ usimple_unlock(
 	OBTAIN_PC(pc, l);
 	USLDBG(usld_unlock(l, pc));
 	ETAPCALL(etap_simplelock_unlock(l));
+#ifdef  __ppc__
+	sync();
+#endif
 	hw_lock_unlock(&l->interlock);
+#else
+	simple_unlock_rwmb((simple_lock_t)l);
+#endif
 }
 
 
@@ -292,6 +309,7 @@ unsigned int
 usimple_lock_try(
 	usimple_lock_t	l)
 {
+#ifndef	MACHINE_SIMPLE_LOCK
 	pc_t		pc;
 	unsigned int	success;
 	etap_time_t	zero_time;
@@ -304,6 +322,9 @@ usimple_lock_try(
 		ETAPCALL(etap_simplelock_hold(l, pc, zero_time));
 	}
 	return success;
+#else
+	return(simple_lock_try((simple_lock_t)l));
+#endif
 }
 
 #if ETAP_LOCK_TRACE
@@ -1699,14 +1720,14 @@ mutex_free(
 void
 mutex_lock_wait (
 	mutex_t			*mutex,
-	thread_act_t	holder)
+	thread_t		holder)
 {
-	thread_t		thread, self = current_thread();
+	thread_t		self = current_thread();
 #if		!defined(i386)
 	integer_t		priority;
 	spl_t			s = splsched();
 
-	priority = self->last_processor->current_pri;
+	priority = self->sched_pri;
 	if (priority < self->priority)
 		priority = self->priority;
 	if (priority > MINPRI_KERNEL)
@@ -1715,23 +1736,22 @@ mutex_lock_wait (
 	if (priority < BASEPRI_DEFAULT)
 		priority = BASEPRI_DEFAULT;
 
-	thread = holder->thread;
-	assert(thread->top_act == holder);	/* XXX */
-	thread_lock(thread);
+	assert(holder->thread == holder);	/* XXX */
+	thread_lock(holder);
 	if (mutex->promoted_pri == 0)
-		thread->promotions++;
-	if (thread->priority < MINPRI_KERNEL) {
-		thread->sched_mode |= TH_MODE_PROMOTED;
+		holder->promotions++;
+	if (holder->priority < MINPRI_KERNEL) {
+		holder->sched_mode |= TH_MODE_PROMOTED;
 		if (	mutex->promoted_pri < priority	&&
-				thread->sched_pri < priority		) {
+				holder->sched_pri < priority		) {
 			KERNEL_DEBUG_CONSTANT(
 				MACHDBG_CODE(DBG_MACH_SCHED,MACH_PROMOTE) | DBG_FUNC_NONE,
-					thread->sched_pri, priority, (int)thread, (int)mutex, 0);
+					holder->sched_pri, priority, (int)holder, (int)mutex, 0);
 
-			set_sched_pri(thread, priority);
+			set_sched_pri(holder, priority);
 		}
 	}
-	thread_unlock(thread);
+	thread_unlock(holder);
 	splx(s);
 
 	if (mutex->promoted_pri < priority)
@@ -1814,7 +1834,7 @@ mutex_lock_acquire(
 void
 mutex_unlock_wakeup (
 	mutex_t			*mutex,
-	thread_act_t	holder)
+	thread_t		holder)
 {
 #if		!defined(i386)
 	thread_t		thread = current_thread();
@@ -1855,6 +1875,79 @@ mutex_unlock_wakeup (
 
 	assert(mutex->waiters > 0);
 	thread_wakeup_one(mutex);
+}
+
+boolean_t
+mutex_preblock_wait(
+	mutex_t			*mutex,
+	thread_t		thread,
+	thread_t		holder)
+{
+	wait_result_t	wresult;
+	integer_t		priority;
+	wait_queue_t	wq;
+
+	assert(holder == NULL || holder->thread == holder);
+
+	wq = wait_event_wait_queue((event_t)mutex);
+	if (!wait_queue_lock_try(wq))
+		return (FALSE);
+
+	if (holder != NULL && !thread_lock_try(holder)) {
+		wait_queue_unlock(wq);
+		return (FALSE);
+	}
+
+	wresult = wait_queue_assert_wait64_locked(wq, (uint32_t)mutex,
+													THREAD_UNINT, thread);
+	wait_queue_unlock(wq);
+	assert(wresult == THREAD_WAITING);
+
+	priority = thread->sched_pri;
+	if (priority < thread->priority)
+		priority = thread->priority;
+	if (priority > MINPRI_KERNEL)
+		priority = MINPRI_KERNEL;
+	else
+	if (priority < BASEPRI_DEFAULT)
+		priority = BASEPRI_DEFAULT;
+
+	if (holder != NULL) {
+		if (mutex->promoted_pri == 0)
+			holder->promotions++;
+		if (holder->priority < MINPRI_KERNEL) {
+			holder->sched_mode |= TH_MODE_PROMOTED;
+			if (	mutex->promoted_pri < priority	&&
+					holder->sched_pri < priority		) {
+				KERNEL_DEBUG_CONSTANT(
+					MACHDBG_CODE(DBG_MACH_SCHED,MACH_PROMOTE) | DBG_FUNC_NONE,
+                    	holder->sched_pri, priority,
+								(int)holder, (int)mutex, 0);
+
+				set_sched_pri(holder, priority);
+			}
+		}
+		thread_unlock(holder);
+	}
+
+	if (mutex->promoted_pri < priority)
+		mutex->promoted_pri = priority;
+
+    if (thread->pending_promoter[thread->pending_promoter_index] == NULL) {
+        thread->pending_promoter[thread->pending_promoter_index] = mutex;
+        mutex->waiters++;
+    }
+    else
+    if (thread->pending_promoter[thread->pending_promoter_index] != mutex) {
+        thread->pending_promoter[++thread->pending_promoter_index] = mutex;
+        mutex->waiters++;
+    }
+
+	KERNEL_DEBUG_CONSTANT(
+		MACHDBG_CODE(DBG_MACH_SCHED,MACH_PREBLOCK_MUTEX) | DBG_FUNC_NONE,
+			(int)thread, thread->sched_pri, (int)mutex, 0, 0);
+
+	return (TRUE);
 }
 
 /*

@@ -3,19 +3,22 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -132,6 +135,15 @@ struct buf {
 #define b_trans_head b_freelist.tqe_prev
 #define b_trans_next b_freelist.tqe_next
 #define b_real_bp    b_saveaddr
+#define b_iostate    b_rcred
+
+/* journaling uses this cluster i/o field for its own
+ * purposes because meta data buf's should never go
+ * through the clustering code.
+ */
+#define b_transaction b_vectorlist
+
+   
 
 /*
  * These flags are kept in b_flags.
@@ -163,7 +175,7 @@ struct buf {
 #define	B_WRITE		0x00000000	/* Write buffer (pseudo flag). */
 #define	B_WRITEINPROG	0x01000000	/* Write in progress. */
 #define	B_HDRALLOC	0x02000000	/* zone allocated buffer header */
-#define	B_UNUSED1	0x04000000	/* Unused bit */
+#define	B_NORELSE	0x04000000	/* don't brelse() in bwrite() */
 #define B_NEED_IODONE   0x08000000
 								/* need to do a biodone on the */
 								/* real_bp associated with a cluster_io */
@@ -238,6 +250,8 @@ int	meta_bread __P((struct vnode *, daddr_t, int,
 int	breada __P((struct vnode *, daddr_t, int, daddr_t, int,
 	    struct ucred *, struct buf **));
 int	breadn __P((struct vnode *, daddr_t, int, daddr_t *, int *, int,
+	    struct ucred *, struct buf **));
+int	meta_breadn __P((struct vnode *, daddr_t, int, daddr_t *, int *, int,
 	    struct ucred *, struct buf **));
 void	brelse __P((struct buf *));
 void	bremfree __P((struct buf *));

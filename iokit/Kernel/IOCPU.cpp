@@ -3,19 +3,22 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -142,7 +145,7 @@ void IOCPU::initCPUs(void)
 
 bool IOCPU::start(IOService *provider)
 {
-  OSData *busFrequency, *cpuFrequency, *decFrequency;
+  OSData *busFrequency, *cpuFrequency, *timebaseFrequency;
   
   if (!super::start(provider)) return false;
   
@@ -153,16 +156,24 @@ bool IOCPU::start(IOService *provider)
   
   gIOCPUs->setObject(this);
   
-  // Correct the bus, cpu and dec frequencies in the device tree.
-  busFrequency = OSData::withBytesNoCopy((void *)&gPEClockFrequencyInfo.bus_clock_rate_hz, 4);
-  cpuFrequency = OSData::withBytesNoCopy((void *)&gPEClockFrequencyInfo.cpu_clock_rate_hz, 4);
-  decFrequency = OSData::withBytesNoCopy((void *)&gPEClockFrequencyInfo.dec_clock_rate_hz, 4);
+  // Correct the bus, cpu and timebase frequencies in the device tree.
+  if (gPEClockFrequencyInfo.bus_frequency_hz < 0x100000000ULL) 
+    busFrequency = OSData::withBytesNoCopy((void *)((char *)&gPEClockFrequencyInfo.bus_frequency_hz + 4), 4);
+  else
+    busFrequency = OSData::withBytesNoCopy((void *)&gPEClockFrequencyInfo.bus_clock_rate_hz, 8);
   provider->setProperty("bus-frequency", busFrequency);
-  provider->setProperty("clock-frequency", cpuFrequency);
-  provider->setProperty("timebase-frequency", decFrequency);
   busFrequency->release();
+    
+  if (gPEClockFrequencyInfo.cpu_frequency_hz < 0x100000000ULL) 
+    cpuFrequency = OSData::withBytesNoCopy((void *)((char *)&gPEClockFrequencyInfo.cpu_frequency_hz + 4), 4);
+  else
+    cpuFrequency = OSData::withBytesNoCopy((void *)&gPEClockFrequencyInfo.cpu_clock_rate_hz, 8);
+  provider->setProperty("clock-frequency", cpuFrequency);
   cpuFrequency->release();
-  decFrequency->release();
+  
+  timebaseFrequency = OSData::withBytesNoCopy((void *)&gPEClockFrequencyInfo.timebase_frequency_hz, 4);
+  provider->setProperty("timebase-frequency", timebaseFrequency);
+  timebaseFrequency->release();
   
   setProperty("IOCPUID", (UInt32)this, 32);
   
@@ -176,13 +187,14 @@ IOReturn IOCPU::setProperties(OSObject *properties)
 {
   OSDictionary *dict = OSDynamicCast(OSDictionary, properties);
   OSString     *stateStr;
+  IOReturn     result;
   
   if (dict == 0) return kIOReturnUnsupported;
   
   stateStr = OSDynamicCast(OSString, dict->getObject(gIOCPUStateKey));
   if (stateStr != 0) {
-    if (!IOUserClient::clientHasPrivilege(current_task(), "root"))
-      return kIOReturnNotPrivileged;
+    result = IOUserClient::clientHasPrivilege(current_task(), kIOClientPrivilegeAdministrator);
+    if (result != kIOReturnSuccess) return result;
     
     if (_cpuNumber == 0) return kIOReturnUnsupported;
     
@@ -300,6 +312,8 @@ IOReturn IOCPUInterruptController::initCPUInterruptController(int sources)
       return kIOReturnNoResources;
     }
   }
+  
+  ml_init_max_cpus(numCPUs);
   
   return kIOReturnSuccess;
 }

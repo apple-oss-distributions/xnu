@@ -3,19 +3,22 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -78,7 +81,6 @@ aarp_amt_array *aarp_table[IF_TOTAL_MAX];
 
 int aarp_init1(), aarp_init2();
 int aarp_send_data();
-int aarp_sched_probe();
 
 StaticProc int aarp_req_cmd_in();
 StaticProc int aarp_resp_cmd_in();
@@ -90,7 +92,7 @@ StaticProc aarp_amt_t *aarp_lru_entry();
 StaticProc int aarp_glean_info();
 StaticProc int aarp_delete_amt_info();
 StaticProc void aarp_build_pkt();
-StaticProc int aarp_sched_req();
+StaticProc void aarp_sched_req(void *);
 StaticProc int aarp_get_rand_node();
 StaticProc int aarp_get_next_node();
 StaticProc int aarp_get_rand_net();
@@ -764,13 +766,14 @@ register aarp_amt_t	*amt_ptr;
  *
  ****************************************************************************/
 
-int  aarp_sched_probe()
+void  aarp_sched_probe(void *arg)
 {
 	boolean_t 	funnel_state;
 
 	funnel_state = thread_funnel_set(network_flock, TRUE);
 
-	if (probe_cb.no_of_retries != AARP_MAX_PROBE_RETRIES) {
+	if (probe_cb.elapp->aa_ifp != 0 &&
+            probe_cb.no_of_retries != AARP_MAX_PROBE_RETRIES) {
 		if (aarp_send_probe() == -1)
 			AARPwakeup(&probe_cb);
 	} else {
@@ -779,7 +782,6 @@ int  aarp_sched_probe()
 	}
 
 	(void) thread_funnel_set(network_flock, FALSE);
-	return(0);
 }
 
 
@@ -807,11 +809,12 @@ StaticProc void aarp_build_pkt(pkt, elapp)
  *
  ****************************************************************************/
 
-StaticProc int	aarp_sched_req(amt_ptr)
-     register aarp_amt_t *amt_ptr;
+StaticProc void	aarp_sched_req(arg)
+     void *arg;
 {
 	int s, i;
 	boolean_t 	funnel_state;
+	aarp_amt_t *amt_ptr = (aarp_amt_t *)arg;
 
 	funnel_state = thread_funnel_set(network_flock, TRUE);
 
@@ -821,7 +824,8 @@ StaticProc int	aarp_sched_req(amt_ptr)
 	 * into one of the amt arrays.
 	 */
 	for (i = 0; i < IF_TOTAL_MAX; i++) {
-	    if (aarp_table[i] == NULL || amt_ptr < aarp_table[i] || amt_ptr >= (aarp_table[i] + 1))
+	    if (aarp_table[i] == NULL || (void *)amt_ptr < (void *)aarp_table[i] || 
+		(void *)amt_ptr >= (void *)(aarp_table[i] + 1))
 	        continue;  /* no match - try next entry */
 		
 	    /*
@@ -831,13 +835,13 @@ StaticProc int	aarp_sched_req(amt_ptr)
 	    if (amt_ptr->tmo == 0) {
 	        ATENABLE(s, arpinp_lock);
 	        (void) thread_funnel_set(network_flock, FALSE);
-	        return(0);
+	        return;
 	    }
 	    if (amt_ptr->no_of_retries < AARP_MAX_REQ_RETRIES) {
 	        ATENABLE(s, arpinp_lock);
 	        if (aarp_send_req(amt_ptr) == 0) {
 	            (void) thread_funnel_set(network_flock, FALSE);
-	            return(0);
+	            return;
 	        }
 	        ATDISABLE(s, arpinp_lock);
 	    }
@@ -847,7 +851,7 @@ StaticProc int	aarp_sched_req(amt_ptr)
 	}	
 	(void) thread_funnel_set(network_flock, FALSE);
 
-	return(0);
+	return;
 }
 
 

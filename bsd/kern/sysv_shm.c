@@ -1,21 +1,24 @@
 /*
- * Copyright (c) 2000 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2003 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -62,6 +65,7 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/sysctl.h>
+#include <sys/kern_audit.h>
 
 #include <mach/mach_types.h>
 #include <mach/vm_inherit.h>
@@ -117,7 +121,7 @@ struct shmmap_state {
 static void shm_deallocate_segment __P((struct shmid_ds *));
 static int shm_find_segment_by_key __P((key_t));
 static struct shmid_ds *shm_find_segment_by_shmid __P((int));
-static int shm_delete_mapping __P((struct proc *, struct shmmap_state *));
+static int shm_delete_mapping __P((struct proc *, struct shmmap_state *, int));
 
 #ifdef __APPLE_API_PRIVATE
 struct  shminfo shminfo = {
@@ -170,7 +174,7 @@ shm_deallocate_segment(shmseg)
 	char * ptr;
 
 	shm_handle = shmseg->shm_internal;
-	size = round_page(shmseg->shm_segsz);
+	size = round_page_32(shmseg->shm_segsz);
 	mach_destroy_memory_entry(shm_handle->shm_object);
 	FREE((caddr_t)shm_handle, M_SHM);
 	shmseg->shm_internal = NULL;
@@ -180,9 +184,10 @@ shm_deallocate_segment(shmseg)
 }
 
 static int
-shm_delete_mapping(p, shmmap_s)
+shm_delete_mapping(p, shmmap_s, deallocate)
 	struct proc *p;
 	struct shmmap_state *shmmap_s;
+	int deallocate;
 {
 	struct shmid_ds *shmseg;
 	int segnum, result;
@@ -190,10 +195,12 @@ shm_delete_mapping(p, shmmap_s)
 
 	segnum = IPCID_TO_IX(shmmap_s->shmid);
 	shmseg = &shmsegs[segnum];
-	size = round_page(shmseg->shm_segsz);
+	size = round_page_32(shmseg->shm_segsz);
+	if (deallocate) {
 	result = vm_deallocate(current_map(), shmmap_s->va, size);
 	if (result != KERN_SUCCESS)
 		return EINVAL;
+	}
 	shmmap_s->shmid = -1;
 	shmseg->shm_dtime = time_second;
 	if ((--shmseg->shm_nattch <= 0) &&
@@ -217,6 +224,7 @@ shmdt(p, uap, retval)
 	struct shmmap_state *shmmap_s;
 	int i;
 
+	AUDIT_ARG(svipc_addr, uap->shmaddr);
 	if (!shm_inited)
 		return(EINVAL);
 	shmmap_s = (struct shmmap_state *)p->vm_shm;
@@ -228,7 +236,7 @@ shmdt(p, uap, retval)
 			break;
 	if (i == shminfo.shmseg)
 		return EINVAL;
-	return shm_delete_mapping(p, shmmap_s);
+	return shm_delete_mapping(p, shmmap_s, 1);
 }
 
 #ifndef _SYS_SYSPROTO_H_
@@ -255,6 +263,8 @@ shmat(p, uap, retval)
 	vm_size_t size;
 	kern_return_t rv;
 
+	AUDIT_ARG(svipc_id, uap->shmid);
+	AUDIT_ARG(svipc_addr, uap->shmaddr);
 	if (!shm_inited)
 		return(EINVAL);
 	shmmap_s = (struct shmmap_state *)p->vm_shm;
@@ -268,6 +278,8 @@ shmat(p, uap, retval)
 	shmseg = shm_find_segment_by_shmid(uap->shmid);
 	if (shmseg == NULL)
 		return EINVAL;
+
+	AUDIT_ARG(svipc_perm, &shmseg->shm_perm);
 	error = ipcperm(cred, &shmseg->shm_perm,
 	    (uap->shmflg & SHM_RDONLY) ? IPC_R : IPC_R|IPC_W);
 	if (error)
@@ -279,7 +291,7 @@ shmat(p, uap, retval)
 	}
 	if (i >= shminfo.shmseg)
 		return EMFILE;
-	size = round_page(shmseg->shm_segsz);
+	size = round_page_32(shmseg->shm_segsz);
 	prot = VM_PROT_READ;
 	if ((uap->shmflg & SHM_RDONLY) == 0)
 		prot |= VM_PROT_WRITE;
@@ -293,7 +305,7 @@ shmat(p, uap, retval)
 		else
 			return EINVAL;
 	} else {
-		attach_va = round_page(uap->shmaddr);
+		attach_va = round_page_32((unsigned int)uap->shmaddr);
 	}
 
 	shm_handle = shmseg->shm_internal;
@@ -410,11 +422,18 @@ shmctl(p, uap, 	retval)
 	struct shmid_ds inbuf;
 	struct shmid_ds *shmseg;
 
+	AUDIT_ARG(svipc_cmd, uap->cmd);
+	AUDIT_ARG(svipc_id, uap->shmid);
 	if (!shm_inited)
 		return(EINVAL);
 	shmseg = shm_find_segment_by_shmid(uap->shmid);
 	if (shmseg == NULL)
 		return EINVAL;
+	/* XXAUDIT: This is the perms BEFORE any change by this call. This 
+	 * may not be what is desired.
+	 */
+	AUDIT_ARG(svipc_perm, &shmseg->shm_perm);
+
 	switch (uap->cmd) {
 	case IPC_STAT:
 		error = ipcperm(cred, &shmseg->shm_perm, IPC_R);
@@ -522,7 +541,7 @@ shmget_allocate_segment(p, uap, mode, retval)
 		return EINVAL;
 	if (shm_nused >= shminfo.shmmni) /* any shmids left? */
 		return ENOSPC;
-	size = round_page(uap->size);
+	size = round_page_32(uap->size);
 	if (shm_committed + btoc(size) > shminfo.shmall)
 		return ENOMEM;
 	if (shm_last_free < 0) {
@@ -570,6 +589,7 @@ shmget_allocate_segment(p, uap, mode, retval)
 	shmseg->shm_ctime = time_second;
 	shm_committed += btoc(size);
 	shm_nused++;
+	AUDIT_ARG(svipc_perm, &shmseg->shm_perm);
 	if (shmseg->shm_perm.mode & SHMSEG_WANTED) {
 		/*
 		 * Somebody else wanted this key while we were asleep.  Wake
@@ -579,6 +599,7 @@ shmget_allocate_segment(p, uap, mode, retval)
 		wakeup((caddr_t)shmseg);
 	}
 	*retval = shmid;
+	AUDIT_ARG(svipc_id, shmid);
 	return 0;
 out: 
 	switch (kret) {
@@ -601,6 +622,7 @@ shmget(p, uap, retval)
 {
 	int segnum, mode, error;
 
+	/* Auditing is actually done in shmget_allocate_segment() */
 	if (!shm_inited)
 		return(EINVAL);
 
@@ -673,7 +695,28 @@ shmexit(p)
 	shmmap_s = (struct shmmap_state *)p->vm_shm;
 	for (i = 0; i < shminfo.shmseg; i++, shmmap_s++)
 		if (shmmap_s->shmid != -1)
-			shm_delete_mapping(p, shmmap_s);
+			shm_delete_mapping(p, shmmap_s, 1);
+	FREE((caddr_t)p->vm_shm, M_SHM);
+	p->vm_shm = NULL;
+}
+
+/*
+ * shmexec() is like shmexit(), only it doesn't delete the mappings,
+ * since the old address space has already been destroyed and the new
+ * one instantiated.  Instead, it just does the housekeeping work we
+ * need to do to keep the System V shared memory subsystem sane.
+ */
+__private_extern__ void
+shmexec(p)
+	struct proc *p;
+{
+	struct shmmap_state *shmmap_s;
+	int i;
+
+	shmmap_s = (struct shmmap_state *)p->vm_shm;
+	for (i = 0; i < shminfo.shmseg; i++, shmmap_s++)
+		if (shmmap_s->shmid != -1)
+			shm_delete_mapping(p, shmmap_s, 0);
 	FREE((caddr_t)p->vm_shm, M_SHM);
 	p->vm_shm = NULL;
 }
@@ -729,7 +772,7 @@ sysctl_shminfo SYSCTL_HANDLER_ARGS
 			(shminfo.shmmni != -1) &&
 			(shminfo.shmseg != -1) &&
 			(shminfo.shmall != -1)) {
-				shminit();
+				shminit(NULL);
 		}
 	}
 	return(0);

@@ -1,21 +1,24 @@
 /*
- * Copyright (c) 2000-2001 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2003 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -61,12 +64,7 @@
  *	from: @(#)ufs_lookup.c	7.33 (Berkeley) 5/19/91
  *
  *	@(#)cd9660_lookup.c	8.5 (Berkeley) 12/5/94
-
-
-
- * HISTORY
- * 22-Jan-98	radar 1669467 - ISO 9660 CD support - jwc
-
+ *
  */
 
 #include <sys/param.h>
@@ -76,7 +74,6 @@
 #include <sys/buf.h>
 #include <sys/file.h>
 #include <sys/utfconv.h>
-#include <sys/paths.h>
 
 #include <isofs/cd9660/iso.h>
 #include <isofs/cd9660/cd9660_node.h>
@@ -134,7 +131,7 @@ cd9660_lookup(ap)
 	struct buf *bp;			/* a buffer of directory entries */
 	struct iso_directory_record *ep = NULL;/* the current directory entry */
 	int entryoffsetinblock;		/* offset of ep in bp's buffer */
-	int saveoffset = 0;			/* offset of last directory entry in dir */
+	int saveoffset = 0;		/* offset of last directory entry in dir */
 	int numdirpasses;		/* strategy for directory search */
 	doff_t endsearch;		/* offset to end directory search */
 	struct vnode *pdp;		/* saved dp during symlink work */
@@ -142,23 +139,22 @@ cd9660_lookup(ap)
 	u_long bmask;			/* block offset mask */
 	int lockparent;			/* 1 => lockparent flag is set */
 	int wantparent;			/* 1 => wantparent or lockparent flag */
-	int wantrsrc;			/* 1 => looking for resource fork */
+	int wantassoc;
 	int error;
 	ino_t ino = 0;
 	int reclen;
 	u_short namelen;
+	int isoflags;
 	char altname[ISO_RRIP_NAMEMAX];
 	int res;
 	int len;
 	char *name;
 	struct vnode **vpp = ap->a_vpp;
 	struct componentname *cnp = ap->a_cnp;
-	struct ucred *cred = cnp->cn_cred;
 	int flags = cnp->cn_flags;
 	int nameiop = cnp->cn_nameiop;
 	struct proc *p = cnp->cn_proc;
 	int devBlockSize=0;
-	long rsrcsize;
 	size_t altlen;
 	
 	bp = NULL;
@@ -168,45 +164,29 @@ cd9660_lookup(ap)
 	imp = dp->i_mnt;
 	lockparent = flags & LOCKPARENT;
 	wantparent = flags & (LOCKPARENT|WANTPARENT);
-	wantrsrc = 0;
+	wantassoc = 0;
+
 	
 	/*
 	 * Check accessiblity of directory.
 	 */
 	if (vdp->v_type != VDIR)
 		return (ENOTDIR);
-	if ( (error = VOP_ACCESS(vdp, VEXEC, cred, p)) )
+	if ( (error = VOP_ACCESS(vdp, VEXEC, cnp->cn_cred, p)) )
 		return (error);
 	
-	/*
-	 * Determine if we're looking for a resource fork
-	 * note: this could cause a read off the end of the
-	 *       component name buffer in some rare cases.
-	 */
-	if ((flags & ISLASTCN) == 0 &&
-	    bcmp(&cnp->cn_nameptr[cnp->cn_namelen],
-	         _PATH_RSRCFORKSPEC, sizeof(_PATH_RSRCFORKSPEC) - 1) == 0) {
-		flags |= ISLASTCN;
-		cnp->cn_consume = sizeof(_PATH_RSRCFORKSPEC) - 1;
-		wantrsrc = 1;
-	}
 	/*
 	 * We now have a segment name to search for, and a directory to search.
 	 *
 	 * Before tediously performing a linear scan of the directory,
 	 * check the name cache to see if the directory/name pair
 	 * we are looking for is known already.
-	 * Note: resource forks are never in the name cache
 	 */
-	if ((error = cache_lookup(vdp, vpp, cnp)) && !wantrsrc) {
+	if ((error = cache_lookup(vdp, vpp, cnp))) {
 		int vpid;	/* capability number of vnode */
 
 		if (error == ENOENT)
 			return (error);
-#ifdef PARANOID
-		if ((vdp->v_flag & VROOT) && (flags & ISDOTDOT))
-			panic("cd9660_lookup: .. through root");
-#endif
 		/*
 		 * Get the next vnode in the path.
 		 * See comment below starting `Step through' for
@@ -250,8 +230,15 @@ cd9660_lookup(ap)
 	len = cnp->cn_namelen;
 	name = cnp->cn_nameptr;
 	altname[0] = '\0';
-	rsrcsize = 0;
-
+	/*
+	 * A "._" prefix means, we are looking for an associated file
+	 */
+	if (imp->iso_ftype != ISO_FTYPE_RRIP &&
+	    *name == ASSOCCHAR1 && *(name+1) == ASSOCCHAR2) {
+		wantassoc = 1;
+		len -= 2;
+		name += 2;
+	}
 	/*
 	 * Decode search name into UCS-2 (Unicode)
 	 */
@@ -278,7 +265,7 @@ cd9660_lookup(ap)
 	 * profiling time and hence has been removed in the interest
 	 * of simplicity.
 	 */
-	bmask = imp->im_bmask;
+	bmask = imp->im_sector_size - 1;
 	if (nameiop != LOOKUP || dp->i_diroff == 0 ||
 	    dp->i_diroff > dp->i_size) {
 		entryoffsetinblock = 0;
@@ -288,7 +275,7 @@ cd9660_lookup(ap)
 		dp->i_offset = dp->i_diroff;
 		
 		if ((entryoffsetinblock = dp->i_offset & bmask) &&
-		    (error = VOP_BLKATOFF(vdp, (off_t)dp->i_offset, NULL, &bp)))
+		    (error = VOP_BLKATOFF(vdp, SECTOFF(imp, dp->i_offset), NULL, &bp)))
 				return (error);
 		numdirpasses = 2;
 		iso_nchstats.ncs_2passes++;
@@ -305,7 +292,7 @@ searchloop:
 		if ((dp->i_offset & bmask) == 0) {
 			if (bp != NULL)
 				brelse(bp);
-			if ( (error = VOP_BLKATOFF(vdp, (off_t)dp->i_offset, NULL, &bp)) )
+			if ( (error = VOP_BLKATOFF(vdp, SECTOFF(imp,dp->i_offset), NULL, &bp)) )
 				return (error);
 			entryoffsetinblock = 0;
 		}
@@ -319,38 +306,29 @@ searchloop:
 		if (reclen == 0) {
 			/* skip to next block, if any */
 			dp->i_offset =
-			    (dp->i_offset & ~bmask) + imp->logical_block_size;
+			    (dp->i_offset & ~bmask) + imp->im_sector_size;
 			continue;
 		}
 		
-		if (reclen < ISO_DIRECTORY_RECORD_SIZE)
+		if (reclen < ISO_DIRECTORY_RECORD_SIZE) {
 			/* illegal entry, stop */
 			break;
-		
-		if (entryoffsetinblock + reclen > imp->logical_block_size)
-			/* entries are not allowed to cross boundaries */
+		}
+		if (entryoffsetinblock + reclen > imp->im_sector_size) {
+			/* entries are not allowed to cross sector boundaries */
 			break;
-		
+		}
 		namelen = isonum_711(ep->name_len);
+		isoflags = isonum_711(ep->flags);
 		
 		if (reclen < ISO_DIRECTORY_RECORD_SIZE + namelen)
 			/* illegal entry, stop */
 			break;
-		
-		/* remember the size of resource forks (associated files) */
-		if ((isonum_711(ep->flags) & (directoryBit | associatedBit)) == associatedBit) {
-			if (namelen < sizeof(altname) && ino == 0) {
-				rsrcsize = isonum_733(ep->size);
-				bcopy(ep->name, altname, namelen);
-				altname[namelen] = '\0';
-				altlen = namelen;
-			}
-		}
 		/*
 		 * Check for a name match.
 		 */
 		if (imp->iso_ftype == ISO_FTYPE_RRIP) {
-			if ( isonum_711(ep->flags) & directoryBit )
+			if (isoflags & directoryBit)
 				ino = isodirino(ep, imp);
 			else
 				ino = (bp->b_blkno << imp->im_bshift) + entryoffsetinblock;
@@ -361,7 +339,7 @@ searchloop:
 				goto found;
 			ino = 0;
 		} else {
-			if ((!(isonum_711(ep->flags) & associatedBit)) == !wantrsrc) {
+			if ((!(isoflags & associatedBit)) == !wantassoc) {
 				if ((len == 1
 				     && *name == '.')
 				    || (flags & ISDOTDOT)) {
@@ -379,14 +357,14 @@ searchloop:
 						goto notfound;
 				} else if (imp->iso_ftype != ISO_FTYPE_JOLIET && !(res = isofncmp(name,len,
 							    ep->name,namelen))) {
-					if ( isonum_711(ep->flags) & directoryBit )
+					if ( isoflags & directoryBit )
 						ino = isodirino(ep, imp);
 					else
 						ino = (bp->b_blkno << imp->im_bshift) + entryoffsetinblock;
 					saveoffset = dp->i_offset;
 				} else if (imp->iso_ftype == ISO_FTYPE_JOLIET && !(res = ucsfncmp((u_int16_t*)name, len,
 							    (u_int16_t*) ep->name, namelen))) {
-					if ( isonum_711(ep->flags) & directoryBit )
+					if ( isoflags & directoryBit )
 						ino = isodirino(ep, imp);
 					else
 						ino = (bp->b_blkno << imp->im_bshift) + entryoffsetinblock;
@@ -413,7 +391,7 @@ foundino:
 			    lblkno(imp, saveoffset)) {
 				if (bp != NULL)
 					brelse(bp);
-				if ( (error = VOP_BLKATOFF(vdp, (off_t)saveoffset, NULL, &bp)) )
+				if ( (error = VOP_BLKATOFF(vdp, SECTOFF(imp, saveoffset), NULL, &bp)) )
 					return (error);
 			}
 			entryoffsetinblock = saveoffset & bmask;
@@ -440,7 +418,7 @@ notfound:
 	/*
 	 * Insert name into cache (as non-existent) if appropriate.
 	 */
-	if ((cnp->cn_flags & MAKEENTRY) && !wantrsrc)
+	if (cnp->cn_flags & MAKEENTRY)
 		cache_enter(vdp, *vpp, cnp);
 	if (nameiop == CREATE || nameiop == RENAME) {
 		/*
@@ -449,11 +427,7 @@ notfound:
 		 */
 		return (EROFS);
 	}
-
-    if (wantrsrc)
-        return (ENOTDIR);
-    else
-        return (ENOENT);
+	return (ENOENT);
 	
 found:
 	if (numdirpasses == 2)
@@ -516,10 +490,6 @@ found:
 					     dp->i_ino != ino, ep, p);
 		/* save parent inode number */
 		VTOI(tdp)->i_parent = VTOI(pdp)->i_number;
-		if (!wantrsrc && (tdp->v_type == VREG) && (rsrcsize > 0)) {
-			if (bcmp(ep->name, altname, altlen) == 0)
-				VTOI(tdp)->i_rsrcsize = rsrcsize;
-		}
 		brelse(bp);
 		if (error)
 			return (error);
@@ -531,7 +501,7 @@ found:
 	/*
 	 * Insert name into cache if appropriate.
 	 */
-	if ((cnp->cn_flags & MAKEENTRY) && !wantrsrc)
+	if (cnp->cn_flags & MAKEENTRY)
 		cache_enter(vdp, *vpp, cnp);
 	
 	return (0);
@@ -562,7 +532,11 @@ cd9660_blkatoff(ap)
 	imp = ip->i_mnt;
 	lbn = lblkno(imp, ap->a_offset);
 	bsize = blksize(imp, ip, lbn);
-	
+	if ((bsize != imp->im_sector_size) &&
+	    (ap->a_offset & (imp->im_sector_size - 1)) == 0) {
+		bsize = imp->im_sector_size;
+	}
+
 	if ( (error = bread(ap->a_vp, lbn, bsize, NOCRED, &bp)) ) {
 		brelse(bp);
 		*ap->a_bpp = NULL;

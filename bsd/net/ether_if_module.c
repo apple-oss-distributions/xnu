@@ -3,19 +3,22 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -135,6 +138,10 @@ struct ether_desc_blk_str {
 
 static struct ether_desc_blk_str ether_desc_blk[MAX_INTERFACES];
 
+
+/* from if_ethersubr.c */
+int ether_resolvemulti __P((struct ifnet *, struct sockaddr **,
+                                    struct sockaddr *));
 
 /*
  * Release all descriptor entries owned by this dl_tag (there may be several).
@@ -332,6 +339,24 @@ int ether_demux(ifp, m, frame_header, proto)
             m->m_flags |= M_BCAST;
         else
             m->m_flags |= M_MCAST;
+    } else {
+        /*
+         * When the driver is put into promiscuous mode we may receive unicast
+         * frames that are not intended for our interfaces.  They are filtered
+         * here to keep them from traveling further up the stack to code that
+         * is not expecting them or prepared to deal with them.  In the near
+         * future, the filtering done here will be moved even further down the
+         * stack into the IONetworkingFamily, preventing even interface
+         * filter NKE's from receiving promiscuous packets.  Please use BPF.
+         */
+        #define ETHER_CMP(x, y) ( ((u_int16_t *) x)[0] != ((u_int16_t *) y)[0] || \
+                                  ((u_int16_t *) x)[1] != ((u_int16_t *) y)[1] || \
+                                  ((u_int16_t *) x)[2] != ((u_int16_t *) y)[2] )
+    
+        if (ETHER_CMP(eh->ether_dhost, ((struct arpcom *) ifp)->ac_enaddr)) {
+            m_freem(m);
+            return EJUSTRETURN;
+        }
     }
     
     data = mtod(m, u_int8_t*);
@@ -479,6 +504,7 @@ int  ether_add_if(struct ifnet *ifp)
     ifp->if_framer = ether_frameout;
     ifp->if_demux  = ether_demux;
     ifp->if_event  = 0;
+    ifp->if_resolvemulti = ether_resolvemulti;
 
     for (i=0; i < MAX_INTERFACES; i++)
         if (ether_desc_blk[i].n_count == 0)
@@ -584,10 +610,15 @@ ether_ifmod_ioctl(ifp, command, data)
 }
 
 
+extern int ether_attach_inet(struct ifnet *ifp, u_long *dl_tag);
+extern int ether_detach_inet(struct ifnet *ifp, u_long dl_tag);
+extern int ether_attach_inet6(struct ifnet *ifp, u_long *dl_tag);
+extern int ether_detach_inet6(struct ifnet *ifp, u_long dl_tag);
 int ether_family_init()
 {
-    int  i;
+    int  i, error=0;
     struct dlil_ifmod_reg_str  ifmod_reg;
+    struct dlil_protomod_reg_str enet_protoreg;
 
     /* ethernet family is built-in, called from bsd_init */
     thread_funnel_switch(KERNEL_FUNNEL, NETWORK_FUNNEL);
@@ -609,7 +640,23 @@ int ether_family_init()
     for (i=0; i < MAX_INTERFACES; i++)
         ether_desc_blk[i].n_count = 0;
 
+	/* Register protocol registration functions */
+
+	bzero(&enet_protoreg, sizeof(enet_protoreg));
+	enet_protoreg.attach_proto = ether_attach_inet;
+	enet_protoreg.detach_proto = ether_detach_inet;
+	
+	if ( error = dlil_reg_proto_module(PF_INET, APPLE_IF_FAM_ETHERNET, &enet_protoreg) != 0)
+		kprintf("dlil_reg_proto_module failed for AF_INET6 error=%d\n", error);
+
+
+	enet_protoreg.attach_proto = ether_attach_inet6;
+	enet_protoreg.detach_proto = ether_detach_inet6;
+	
+	if ( error = dlil_reg_proto_module(PF_INET6, APPLE_IF_FAM_ETHERNET, &enet_protoreg) != 0)
+		kprintf("dlil_reg_proto_module failed for AF_INET6 error=%d\n", error);
+
     thread_funnel_switch(NETWORK_FUNNEL, KERNEL_FUNNEL);
 
-    return 0;
+    return (error);
 }

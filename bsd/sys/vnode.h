@@ -3,19 +3,22 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -140,11 +143,12 @@ struct vnode {
 		struct socket	*vu_socket;	/* unix ipc (VSOCK) */
 		struct specinfo	*vu_specinfo;	/* device (VCHR, VBLK) */
 		struct fifoinfo	*vu_fifoinfo;	/* fifo (VFIFO) */
+		char            *vu_name;       /* name (only for VREG) */
 	} v_un;
 	struct ubc_info *v_ubcinfo;	/* valid for (VREG) */
 	struct	nqlease *v_lease;		/* Soft reference to lease */
-	daddr_t	v_lastw;			/* last write (write cluster) */
-	daddr_t	v_cstart;			/* start block of cluster */
+        void   *v_scmap;			/* pointer to sparse cluster map */
+        int 	v_scdirty;			/* number of dirty pages in the sparse cluster map */
 	daddr_t	v_ciosiz;			/* real size of I/O for cluster */
 	int	v_clen;				/* length of current cluster */
 	int	v_ralen;			/* Read-ahead length */
@@ -165,6 +169,11 @@ struct vnode {
 #define	v_socket	v_un.vu_socket
 #define	v_specinfo	v_un.vu_specinfo
 #define	v_fifoinfo	v_un.vu_fifoinfo
+
+// NOTE: Do not use these macros.  They are for vfs internal use only.
+#define VNAME(vp)   ((char *)((vp)->v_type == VREG ? (vp)->v_un.vu_name : (vp)->v_scmap))
+#define VPARENT(vp) ((struct vnode *)((vp)->v_type == VREG ? (vp)->v_un1.v_cl.v_pad : (vp)->v_scdirty))
+
 
 /*
  * Vnode flags.
@@ -195,7 +204,9 @@ struct vnode {
 #define	VTHROTTLED	0x400000	/* writes or pageouts have been throttled */
 		/* wakeup tasks waiting when count falls below threshold */
 #define	VNOFLUSH	0x800000	/* don't vflush() if SKIPSYSTEM */
-
+#define VDELETED       0x1000000        /* this vnode is being deleted */
+#define VFULLFSYNC     0x2000000	/* ask the drive to write the data to the media */
+#define VHASBEENPAGED  0x4000000        /* vnode has been recently paged to */
 
 /*
  * Vnode attributes.  A field value of VNOVAL represents a field whose value
@@ -502,6 +513,10 @@ int 	vn_close __P((struct vnode *vp,
 	    int flags, struct ucred *cred, struct proc *p));
 int	vn_lock __P((struct vnode *vp, int flags, struct proc *p));
 int 	vn_open __P((struct nameidata *ndp, int fmode, int cmode));
+#ifndef __APPLE_API_PRIVATE
+__private_extern__ int
+	vn_open_modflags __P((struct nameidata *ndp, int *fmode, int cmode));
+#endif /* __APPLE_API_PRIVATE */
 int 	vn_rdwr __P((enum uio_rw rw, struct vnode *vp, caddr_t base,
 	    int len, off_t offset, enum uio_seg segflg, int ioflg,
 	    struct ucred *cred, int *aresid, struct proc *p));
@@ -517,7 +532,7 @@ void 	vrele __P((struct vnode *vp));
 int	vaccess __P((mode_t file_mode, uid_t uid, gid_t gid,
 	    mode_t acc_mode, struct ucred *cred));
 int	getvnode __P((struct proc *p, int fd, struct file **fpp));
-#endif __APPLE_API_EVOLVING
+#endif /* __APPLE_API_EVOLVING */
 
 #endif /* KERNEL */
 

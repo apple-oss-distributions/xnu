@@ -3,19 +3,22 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -60,7 +63,6 @@
 #include <kern/cpu_data.h>
 #include <kern/kern_types.h>
 #include <platforms.h>
-#include <mp_v1_1.h>
 #include <mach_kprof.h>
 #include <mach_mp_debug.h>
 #include <mach/std_types.h>
@@ -73,6 +75,7 @@
 #include <kern/misc_protos.h>
 #include <i386/misc_protos.h>
 #include <kern/time_out.h>
+#include <kern/processor.h>
 
 #include <i386/ipl.h>
 
@@ -157,42 +160,6 @@ hardclock(struct i386_interrupt_state	*regs) /* saved registers */
 	}
 #endif	/* PARANOID_KDB */
 
-#if 0
-#if	MACH_MP_DEBUG
-	/*
-	 * Increments counter of clock ticks handled under a masked state.
-	 * Debugger() is called if masked state is kept during 1 sec.
-	 * The counter is reset by splx() when ipl mask is set back to SPL0,
-	 * and by spl0().
-	 */
-	if (SPL_CMP_GT((old_ipl & 0xFF), SPL0)) {
-		if (masked_state_cnt[mycpu]++ >= masked_state_max) {
-			int max_save = masked_state_max;
-
-			masked_state_cnt[mycpu] = 0;
-			masked_state_max = 0x7fffffff;
-
-			if (ret_addr == return_to_iret) {
-				usermode = (regs->efl & EFL_VM) ||
-						((regs->cs & 0x03) != 0);
-				pc = (unsigned)regs->eip;
-			} else {
-				usermode = FALSE;
-				pc = (unsigned)
-				((struct i386_interrupt_state *)&old_ipl)->eip;
-			}
-			printf("looping at high IPL, usermode=%d pc=0x%x\n",
-					usermode, pc);
-			Debugger("");
-
-			masked_state_cnt[mycpu] = 0;
-			masked_state_max = max_save;
-		}
-	} else
-		masked_state_cnt[mycpu] = 0;
-#endif	/* MACH_MP_DEBUG */
-#endif
-
 #if	MACH_KPROF
 	/*
 	 * If we were masked against the clock skip call
@@ -200,7 +167,14 @@ hardclock(struct i386_interrupt_state	*regs) /* saved registers */
 	 * clock frequency of the master-cpu is confined
 	 * to the HZ rate.
 	 */
-	if (SPL_CMP_LT(old_ipl & 0xFF, SPL7))
+	if (SPL_CMP_GE((old_ipl & 0xFF), SPL7)) {
+		usermode = (regs->efl & EFL_VM) || ((regs->cs & 0x03) != 0);
+		pc = (unsigned)regs->eip;
+		assert(!usermode);
+		if (missed_clock[mycpu]++ && detect_lost_tick > 1)
+			Debugger("Mach_KPROF");
+		masked_pc[mycpu] = pc;
+	} else
 #endif	/* MACH_KPROF */
 	/*
 	 * The master processor executes the rtclock_intr() routine
@@ -208,10 +182,14 @@ hardclock(struct i386_interrupt_state	*regs) /* saved registers */
 	 * a zero value on a HZ tick boundary.
 	 */
 	if (mycpu == master_cpu) {
-		if (rtclock_intr() != 0) {
+		if (rtclock_intr(regs) != 0) {
 			mp_enable_preemption();
 			return;
 		}
+	} else {
+		usermode = (regs->efl & EFL_VM) || ((regs->cs & 0x03) != 0);
+		pc = (unsigned)regs->eip;
+		hertz_tick(usermode, pc);
 	}
 
 	/*
@@ -221,42 +199,6 @@ hardclock(struct i386_interrupt_state	*regs) /* saved registers */
 	 */
 
 	time_stamp_stat();
-
-#if 0
-	if (ret_addr == return_to_iret) {
-		/*
-		 * A kernel-loaded task executing within itself will look like
-		 * "kernel mode", here.  This is correct with syscalls
-		 * implemented using migrating threads, because it means that  
-		 * the time spent in the server by a client thread will be
-		 * treated as "system" time for the client thread (and nothing
-		 * for the server).  This conforms to the CPU reporting for an
-		 * integrated kernel.
-		 */
-#endif
-		usermode = (regs->efl & EFL_VM) || ((regs->cs & 0x03) != 0);
-		pc = (unsigned)regs->eip;
-#if 0
-	} else {
-		usermode = FALSE;
-		pc = (unsigned)((struct i386_interrupt_state *)&old_ipl)->eip;
-	}
-#endif
-
-#if	MACH_KPROF
-	/*
-	 * If we were masked against the clock, just memorize pc
-	 * and the fact that the clock interrupt is delayed
-	 */
-	if (SPL_CMP_GE((old_ipl & 0xFF), SPL7)) {
-		assert(!usermode);
-		if (missed_clock[mycpu]++ && detect_lost_tick > 1)
-			Debugger("Mach_KPROF");
-		masked_pc[mycpu] = pc;
-	} else
-#endif	/* MACH_KPROF */
-
-	hertz_tick(usermode, pc);
 
 #if	NCPUS >1 
 	/*

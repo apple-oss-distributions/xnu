@@ -3,19 +3,22 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -283,6 +286,9 @@ void	ipintr __P((void));
 extern u_short ip_id;
 #endif
 
+extern u_long  route_generation;
+extern int apple_hwcksum_rx;
+
 /*
  * IP initialization: fill in IP protocol switch table.
  * All protocols not implemented in kernel go to raw IP protocol handler.
@@ -360,7 +366,7 @@ ip_input(struct mbuf *m)
 	u_int16_t divert_cookie;		/* firewall cookie */
 	struct in_addr pkt_dst;
 #if IPDIVERT
-	u_int32_t divert_info = 0;		/* packet divert/tee info */
+	u_int16_t divert_info = 0;		/* packet divert/tee info */
 #endif
 	struct ip_fw_chain *rule = NULL;
 
@@ -447,11 +453,9 @@ ip_input(struct mbuf *m)
 				goto bad;
 		}
 	}
-	if (m->m_pkthdr.rcvif->if_hwassist == 0)
-		m->m_pkthdr.csum_flags = 0;
-
-	if ((m->m_pkthdr.csum_flags & CSUM_TCP_SUM16) && ip->ip_p != IPPROTO_TCP)
-		m->m_pkthdr.csum_flags = 0;
+	if ((m->m_pkthdr.rcvif->if_hwassist == 0) || (apple_hwcksum_rx == 0) ||
+	   ((m->m_pkthdr.csum_flags & CSUM_TCP_SUM16) && ip->ip_p != IPPROTO_TCP))
+		m->m_pkthdr.csum_flags = 0; /* invalidate HW generated checksum flags */
 
 	if (m->m_pkthdr.csum_flags & CSUM_IP_CHECKED) {
 		sum = !(m->m_pkthdr.csum_flags & CSUM_IP_VALID);
@@ -655,7 +659,7 @@ pass:
 		 * ether_output() with the loopback into the stack for
 		 * SIMPLEX interfaces handled by ether_output().
 		 */
-		if (ia->ia_ifp == m->m_pkthdr.rcvif &&
+		if ((!checkif || ia->ia_ifp == m->m_pkthdr.rcvif) &&
 		    ia->ia_ifp && ia->ia_ifp->if_flags & IFF_BROADCAST) {
 			if (satosin(&ia->ia_broadaddr)->sin_addr.s_addr ==
 			    pkt_dst.s_addr)
@@ -682,7 +686,7 @@ pass:
 			}
 
 			/*
-			 * The process-level routing demon needs to receive
+			 * The process-level routing daemon needs to receive
 			 * all multicast IGMP packets, whether or not this
 			 * host belongs to their destination groups.
 			 */
@@ -833,6 +837,9 @@ found:
 				goto bad;
 			}
 			m->m_flags |= M_FRAG;
+		} else {
+			/* Clear the flag in case packet comes from loopback */
+			m->m_flags &= ~M_FRAG;
 		}
 		ip->ip_off <<= 3;
 
@@ -1564,7 +1571,8 @@ ip_rtaddr(dst)
 
 	sin = (struct sockaddr_in *) &ipforward_rt.ro_dst;
 
-	if (ipforward_rt.ro_rt == 0 || dst.s_addr != sin->sin_addr.s_addr) {
+	if (ipforward_rt.ro_rt == 0 || dst.s_addr != sin->sin_addr.s_addr ||
+		ipforward_rt.ro_rt->generation_id != route_generation) {
 		if (ipforward_rt.ro_rt) {
 			rtfree(ipforward_rt.ro_rt);
 			ipforward_rt.ro_rt = 0;
@@ -1766,7 +1774,8 @@ ip_forward(m, srcrt)
 
 	sin = (struct sockaddr_in *)&ipforward_rt.ro_dst;
 	if ((rt = ipforward_rt.ro_rt) == 0 ||
-	    ip->ip_dst.s_addr != sin->sin_addr.s_addr) {
+	    ip->ip_dst.s_addr != sin->sin_addr.s_addr ||
+	    ipforward_rt.ro_rt->generation_id != route_generation) {
 		if (ipforward_rt.ro_rt) {
 			rtfree(ipforward_rt.ro_rt);
 			ipforward_rt.ro_rt = 0;
@@ -2029,6 +2038,10 @@ makedummy:
 			IP_RECVIF, IPPROTO_IP);
 		if (*mp)
 			mp = &(*mp)->m_next;
+	}
+	if (inp->inp_flags & INP_RECVTTL) {
+		*mp = sbcreatecontrol((caddr_t)&ip->ip_ttl, sizeof(ip->ip_ttl), IP_RECVTTL, IPPROTO_IP);
+		if (*mp) mp = &(*mp)->m_next;
 	}
 }
 

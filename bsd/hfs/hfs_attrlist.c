@@ -1,21 +1,24 @@
 /*
- * Copyright (c) 2000-2002 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2003 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -42,9 +45,6 @@
 
 
 
-extern uid_t console_user;
-
-
 /* Routines that are shared by hfs_setattr: */
 extern int hfs_write_access(struct vnode *vp, struct ucred *cred,
 			struct proc *p, Boolean considerFlags);
@@ -68,22 +68,22 @@ extern void   hfs_relnamehint(struct cnode *dcp, int index);
 
 
 static void packvolcommonattr(struct attrblock *abp, struct hfsmount *hfsmp,
-			struct vnode *vp);
+			struct vnode *vp, struct proc *p);
 
 static void packvolattr(struct attrblock *abp, struct hfsmount *hfsmp,
-			struct vnode *vp);
+			struct vnode *vp, struct proc *p);
 
 static void packcommonattr(struct attrblock *abp, struct hfsmount *hfsmp,
 			struct vnode *vp, struct cat_desc * cdp,
-			struct cat_attr * cap);
+			struct cat_attr * cap, struct proc *p);
 
 static void packfileattr(struct attrblock *abp, struct hfsmount *hfsmp,
 			struct cat_attr *cattrp, struct cat_fork *datafork,
-			struct cat_fork *rsrcfork);
+			struct cat_fork *rsrcfork, struct proc *p);
 
 static void packdirattr(struct attrblock *abp, struct hfsmount *hfsmp,
 			struct vnode *vp, struct cat_desc * descp,
-			struct cat_attr * cattrp);
+			struct cat_attr * cattrp, struct proc *p);
 
 static void unpackattrblk(struct attrblock *abp, struct vnode *vp);
 
@@ -189,20 +189,35 @@ hfs_getattrlist(ap)
 	    (alist->commonattr & ATTR_CMN_OBJPERMANENTID) &&
 	    (VTOVCB(vp)->vcbSigWord != kHFSPlusSigWord)) {
 
-		if (VTOVFS(vp)->mnt_flag & MNT_RDONLY)
+	    	cat_cookie_t cookie = {0};
+
+		if (hfsmp->hfs_flags & HFS_READ_ONLY)
 			return (EROFS);
 		if ((error = hfs_write_access(vp, ap->a_cred, ap->a_p, false)) != 0)
         		return (error);
 
-		/* Lock catalog b-tree */
-		error = hfs_metafilelocking(hfsmp, kHFSCatalogFileID, LK_SHARED, ap->a_p);
+		/*
+		 * Reserve some space in the Catalog file.
+		 */
+		error = cat_preflight(hfsmp, CAT_CREATE, &cookie, ap->a_p);
 		if (error)
-			return (error);
+        		return (error);
+
+		/* Lock catalog b-tree */
+		error = hfs_metafilelocking(hfsmp, kHFSCatalogFileID,
+		                            LK_EXCLUSIVE, ap->a_p);
+		if (error) {
+			cat_postflight(hfsmp, &cookie, ap->a_p);
+       			return (error);
+		}
 
 		error = cat_insertfilethread(hfsmp, &cp->c_desc);
 
-		/* Unlock catalog b-tree */
-		(void) hfs_metafilelocking(hfsmp, kHFSCatalogFileID, LK_RELEASE, ap->a_p);
+		(void) hfs_metafilelocking(hfsmp, kHFSCatalogFileID, LK_RELEASE,
+		                           ap->a_p);
+
+		cat_postflight(hfsmp, &cookie, ap->a_p);
+
 		if (error)
 			return (error);
 	}
@@ -268,7 +283,7 @@ hfs_getattrlist(ap)
 	attrblk.ab_blocksize = attrblocksize;
 
 	hfs_packattrblk(&attrblk, hfsmp, vp, &cp->c_desc, &cp->c_attr,
-			datafp, rsrcfp);
+			datafp, rsrcfp, ap->a_p);
 
 	/* Don't copy out more data than was generated */
 	attrbufsize = MIN(attrbufsize, (u_int)varptr - (u_int)attrbufptr);
@@ -323,7 +338,7 @@ hfs_setattrlist(ap)
 	u_long saved_flags;
 	int error = 0;
 
-	if (VTOVFS(vp)->mnt_flag & MNT_RDONLY)
+	if (hfsmp->hfs_flags & HFS_READ_ONLY)
 		return (EROFS);
 	if ((alist->bitmapcount != ATTR_BIT_MAP_COUNT)     ||
 	    ((alist->commonattr & ~ATTR_CMN_SETMASK) != 0) ||
@@ -350,6 +365,17 @@ hfs_setattrlist(ap)
 	}
 	if (cp->c_flag & (C_NOEXISTS | C_DELETED))
 		return (ENOENT);
+
+	// XXXdbg - don't allow modifying the journal or journal_info_block
+	if (hfsmp->jnl && cp->c_datafork) {
+		struct HFSPlusExtentDescriptor *extd;
+		
+		extd = &cp->c_datafork->ff_extents[0];
+		if (extd->startBlock == HFSTOVCB(hfsmp)->vcbJinfoBlock || extd->startBlock == hfsmp->jnl_start) {
+			return EPERM;
+		}
+	}
+
 	/*
 	 * Ownership of a file is required in one of two classes of calls:
 	 *
@@ -447,14 +473,12 @@ hfs_setattrlist(ap)
 	 * If any cnode attributes changed then do an update.
 	 */
 	if (alist->volattr == 0) {
-		struct timeval atime, mtime;
+		struct timeval tv;
 
-		atime.tv_sec = cp->c_atime;
-		atime.tv_usec = 0;
-		mtime.tv_sec = cp->c_mtime;
-		mtime.tv_usec = cp->c_mtime_nsec / 1000;
 		cp->c_flag |= C_MODIFIED;
-		if ((error = VOP_UPDATE(vp, &atime, &mtime, 1)))
+		tv = time;
+		CTIMES(cp, &tv, &tv);
+		if ((error = VOP_UPDATE(vp, &tv, &tv, 1)))
 			goto ErrorExit;
 	}
 	/* Volume Rename */
@@ -471,6 +495,10 @@ hfs_setattrlist(ap)
 			struct cat_desc to_desc = {0};
 			struct cat_desc todir_desc = {0};
 			struct cat_desc new_desc = {0};
+			cat_cookie_t cookie = {0};
+			int catreserve = 0;
+			int catlocked = 0;
+			int started_tr = 0;
 
 			todir_desc.cd_parentcnid = kRootParID;
 			todir_desc.cd_cnid = kRootParID;
@@ -482,20 +510,44 @@ hfs_setattrlist(ap)
 			to_desc.cd_cnid = cp->c_cnid;
 			to_desc.cd_flags = CD_ISDIR;
 
+			// XXXdbg
+			hfs_global_shared_lock_acquire(hfsmp);
+			if (hfsmp->jnl) {
+				if ((error = journal_start_transaction(hfsmp->jnl) != 0)) {
+					goto rename_out;
+				}
+				started_tr = 1;
+			}
+
+			/*
+			 * Reserve some space in the Catalog file.
+			 */
+			error = cat_preflight(hfsmp, CAT_RENAME, &cookie, p);
+			if (error) {
+				goto rename_out;
+			}
+			catreserve = 1;
+
 			/* Lock catalog b-tree */
 			error = hfs_metafilelocking(hfsmp, kHFSCatalogFileID, LK_EXCLUSIVE, p);
 			if (error) {
-				/* Restore the old name in the VCB */
-				copystr(cp->c_desc.cd_nameptr, vcb->vcbVN, sizeof(vcb->vcbVN), NULL);
-				vcb->vcbFlags |= 0xFF00;
-				goto ErrorExit;
+				goto rename_out;
 			}
+			catlocked = 1;
 
 			error = cat_rename(hfsmp, &cp->c_desc, &todir_desc, &to_desc, &new_desc);
-
-			/* Unlock the Catalog */
-			(void) hfs_metafilelocking(hfsmp, kHFSCatalogFileID, LK_RELEASE, p);
-
+rename_out:			
+			if (catlocked) {
+				(void) hfs_metafilelocking(hfsmp, kHFSCatalogFileID, LK_RELEASE, p);
+			}
+			if (catreserve) {
+				cat_postflight(hfsmp, &cookie, p);
+			}
+			if (started_tr) {
+				journal_end_transaction(hfsmp->jnl);
+			}
+			hfs_global_shared_lock_release(hfsmp);
+			
 			if (error) {
 				/* Restore the old name in the VCB */
 				copystr(cp->c_desc.cd_nameptr, vcb->vcbVN, sizeof(vcb->vcbVN), NULL);
@@ -509,7 +561,7 @@ hfs_setattrlist(ap)
 				cp->c_desc.cd_nameptr = 0;
 				cp->c_desc.cd_namelen = 0;
 				cp->c_desc.cd_flags &= ~CD_HASBUF;
-				FREE(name, M_TEMP);
+				remove_name(name);
 			}			
 			/* Update cnode's catalog descriptor */
 			replace_desc(cp, &new_desc);
@@ -601,11 +653,16 @@ hfs_readdirattr(ap)
 	int error = 0;
 	int depleted = 0;
 	int index, startindex;
-	int i;
+	int i, dir_entries;
 	struct cat_desc *lastdescp = NULL;
 	struct cat_desc prevdesc;
 	char * prevnamebuf = NULL;
 	struct cat_entrylist *ce_list = NULL;
+
+	dir_entries = dcp->c_entries;
+	if (dcp->c_attr.ca_fileid == kHFSRootFolderID && hfsmp->jnl) {
+		dir_entries -= 3;
+	}
 
 	*(ap->a_actualcount) = 0;
 	*(ap->a_eofflag) = 0;
@@ -639,7 +696,7 @@ hfs_readdirattr(ap)
 
 	/* Convert uio_offset into a directory index. */
 	startindex = index = uio->uio_offset / sizeof(struct dirent);
-	if ((index + 1) > dcp->c_entries) {
+	if ((index + 1) > dir_entries) {
 		*(ap->a_eofflag) = 1;
 		error = 0;
 		goto exit;
@@ -727,14 +784,12 @@ hfs_readdirattr(ap)
 						cdescp = &cp->c_desc;
 					cattrp = &cp->c_attr;
 					if (cp->c_datafork) {
-						c_datafork.cf_size   = cp->c_datafork->ff_data.cf_size;
-						c_datafork.cf_clump  = cp->c_datafork->ff_data.cf_clump;
-						c_datafork.cf_blocks = cp->c_datafork->ff_data.cf_blocks;
+						c_datafork.cf_size   = cp->c_datafork->ff_size;
+						c_datafork.cf_blocks = cp->c_datafork->ff_blocks;
 					}
 					if (cp->c_rsrcfork) {
-						c_rsrcfork.cf_size   = cp->c_rsrcfork->ff_data.cf_size;
-						c_rsrcfork.cf_clump  = cp->c_rsrcfork->ff_data.cf_clump;
-						c_rsrcfork.cf_blocks = cp->c_rsrcfork->ff_data.cf_blocks;
+						c_rsrcfork.cf_size   = cp->c_rsrcfork->ff_size;
+						c_rsrcfork.cf_blocks = cp->c_rsrcfork->ff_blocks;
 					}
 				}
 			}
@@ -747,7 +802,7 @@ hfs_readdirattr(ap)
 
 			/* Pack catalog entries into attribute buffer. */
 			hfs_packattrblk(&attrblk, hfsmp, vp, cdescp, cattrp,
-					&c_datafork, &c_rsrcfork);
+					&c_datafork, &c_rsrcfork, p);
 			currattrbufsize = ((char *)varptr - (char *)attrbufptr);
 		
 			/* All done with cnode. */
@@ -781,7 +836,7 @@ hfs_readdirattr(ap)
 				/* Termination checks */
 				if ((--maxcount <= 0) ||
 				    (uio->uio_resid < (fixedblocksize + HFS_AVERAGE_NAME_SIZE)) ||
-				    (index >= dcp->c_entries)) {
+				    (index >= dir_entries)) {
 					depleted = 1;
 					break;
 				}
@@ -789,7 +844,7 @@ hfs_readdirattr(ap)
 		} /* for each catalog entry */
 
 		/* If there are more entries then save the last name. */
-		if (index < dcp->c_entries
+		if (index < dir_entries
 		&&  !(*(ap->a_eofflag))
 		&&  lastdescp != NULL) {
 			if (prevnamebuf == NULL)
@@ -849,25 +904,26 @@ hfs_packattrblk(struct attrblock *abp,
 		struct cat_desc *descp,
 		struct cat_attr *attrp,
 		struct cat_fork *datafork,
-		struct cat_fork *rsrcfork)
+		struct cat_fork *rsrcfork,
+		struct proc *p)
 {
 	struct attrlist *attrlistp = abp->ab_attrlist;
 
 	if (attrlistp->volattr) {
 		if (attrlistp->commonattr)
-			packvolcommonattr(abp, hfsmp, vp);
+			packvolcommonattr(abp, hfsmp, vp, p);
 
 		if (attrlistp->volattr & ~ATTR_VOL_INFO)
-			packvolattr(abp, hfsmp, vp);
+			packvolattr(abp, hfsmp, vp, p);
 	} else {
 		if (attrlistp->commonattr)
-			packcommonattr(abp, hfsmp, vp, descp, attrp);
+			packcommonattr(abp, hfsmp, vp, descp, attrp, p);
 	
 		if (attrlistp->dirattr && S_ISDIR(attrp->ca_mode))
-			packdirattr(abp, hfsmp, vp, descp,attrp);
+			packdirattr(abp, hfsmp, vp, descp,attrp, p);
 	
 		if (attrlistp->fileattr && !S_ISDIR(attrp->ca_mode))
-			packfileattr(abp, hfsmp, attrp, datafork, rsrcfork);
+			packfileattr(abp, hfsmp, attrp, datafork, rsrcfork, p);
 	}
 }
 
@@ -905,7 +961,8 @@ packnameattr(
 	struct attrblock *abp,
 	struct vnode *vp,
 	char *name,
-	int namelen)
+	int namelen,
+	struct proc *p)
 {
 	void *varbufptr;
 	struct attrreference * attr_refptr;
@@ -961,7 +1018,7 @@ packnameattr(
  * Pack common volume attributes.
  */
 static void
-packvolcommonattr(struct attrblock *abp, struct hfsmount *hfsmp, struct vnode *vp)
+packvolcommonattr(struct attrblock *abp, struct hfsmount *hfsmp, struct vnode *vp, struct proc *p)
 {
 	attrgroup_t attr;
 	void *attrbufptr = *abp->ab_attrbufpp;
@@ -974,7 +1031,7 @@ packvolcommonattr(struct attrblock *abp, struct hfsmount *hfsmp, struct vnode *v
 	attr = abp->ab_attrlist->commonattr;
 
 	if (ATTR_CMN_NAME & attr) {
-		packnameattr(abp, vp, cp->c_desc.cd_nameptr, cp->c_desc.cd_namelen);
+		packnameattr(abp, vp, cp->c_desc.cd_nameptr, cp->c_desc.cd_namelen, p);
 		attrbufptr = *abp->ab_attrbufpp;
 		varbufptr = *abp->ab_varbufpp;
 	}
@@ -1046,7 +1103,7 @@ packvolcommonattr(struct attrblock *abp, struct hfsmount *hfsmp, struct vnode *v
 	}
 	if (ATTR_CMN_OWNERID & attr) {
 		if (cp->c_uid == UNKNOWNUID)
-			*((uid_t *)attrbufptr)++ = console_user;
+			*((uid_t *)attrbufptr)++ = p->p_ucred->cr_uid;
 		else
 			*((uid_t *)attrbufptr)++ = cp->c_uid;
 	}
@@ -1093,7 +1150,7 @@ packvolcommonattr(struct attrblock *abp, struct hfsmount *hfsmp, struct vnode *v
 
 
 static void
-packvolattr(struct attrblock *abp, struct hfsmount *hfsmp, struct vnode *vp)
+packvolattr(struct attrblock *abp, struct hfsmount *hfsmp, struct vnode *vp, struct proc *p)
 {
 	attrgroup_t attr;
 	void *attrbufptr = *abp->ab_attrbufpp;
@@ -1118,7 +1175,6 @@ packvolattr(struct attrblock *abp, struct hfsmount *hfsmp, struct vnode *vp)
 	if (ATTR_VOL_SPACEFREE & attr) {
 		*((off_t *)attrbufptr)++ = (off_t)hfs_freeblks(hfsmp, 0) *
 		                           (off_t)vcb->blockSize;
-		
 	}
 	if (ATTR_VOL_SPACEAVAIL & attr) {
 		*((off_t *)attrbufptr)++ = (off_t)hfs_freeblks(hfsmp, 1) *
@@ -1202,31 +1258,70 @@ packvolattr(struct attrblock *abp, struct hfsmount *hfsmp, struct vnode *vp)
 		vcapattrptr = (vol_capabilities_attr_t *)attrbufptr;
 
 		if (vcb->vcbSigWord == kHFSPlusSigWord) {
+			u_int32_t journal_active;
+			u_int32_t case_sensitive;
+			
+			if (hfsmp->jnl)
+				journal_active = VOL_CAP_FMT_JOURNAL_ACTIVE;
+			else
+				journal_active = 0;
+
+			if (hfsmp->hfs_flags & HFS_CASE_SENSITIVE)
+				case_sensitive = VOL_CAP_FMT_CASE_SENSITIVE;
+			else
+				case_sensitive = 0;
+			
 			vcapattrptr->capabilities[VOL_CAPABILITIES_FORMAT] =
 					VOL_CAP_FMT_PERSISTENTOBJECTIDS |
 					VOL_CAP_FMT_SYMBOLICLINKS |
-					VOL_CAP_FMT_HARDLINKS;
+					VOL_CAP_FMT_HARDLINKS |
+					VOL_CAP_FMT_JOURNAL |
+					journal_active |
+					case_sensitive |
+					VOL_CAP_FMT_CASE_PRESERVING |
+					VOL_CAP_FMT_FAST_STATFS ;
 		} else { /* Plain HFS */
 			vcapattrptr->capabilities[VOL_CAPABILITIES_FORMAT] =
-					VOL_CAP_FMT_PERSISTENTOBJECTIDS;
+					VOL_CAP_FMT_PERSISTENTOBJECTIDS |
+					VOL_CAP_FMT_CASE_PRESERVING |
+					VOL_CAP_FMT_FAST_STATFS ;
 		}
         	vcapattrptr->capabilities[VOL_CAPABILITIES_INTERFACES] =
         				VOL_CAP_INT_SEARCHFS |
         				VOL_CAP_INT_ATTRLIST |
         				VOL_CAP_INT_NFSEXPORT |
-        				VOL_CAP_INT_READDIRATTR ;
+        				VOL_CAP_INT_READDIRATTR |
+        				VOL_CAP_INT_EXCHANGEDATA |
+        				VOL_CAP_INT_ALLOCATE |
+        				VOL_CAP_INT_VOL_RENAME |
+        				VOL_CAP_INT_ADVLOCK |
+        				VOL_CAP_INT_FLOCK ;
         	vcapattrptr->capabilities[VOL_CAPABILITIES_RESERVED1] = 0;
         	vcapattrptr->capabilities[VOL_CAPABILITIES_RESERVED2] = 0;
 
 		vcapattrptr->valid[VOL_CAPABILITIES_FORMAT] =
 					VOL_CAP_FMT_PERSISTENTOBJECTIDS |
 					VOL_CAP_FMT_SYMBOLICLINKS |
-					VOL_CAP_FMT_HARDLINKS;
+					VOL_CAP_FMT_HARDLINKS |
+					VOL_CAP_FMT_JOURNAL |
+					VOL_CAP_FMT_JOURNAL_ACTIVE |
+					VOL_CAP_FMT_NO_ROOT_TIMES |
+					VOL_CAP_FMT_SPARSE_FILES |
+					VOL_CAP_FMT_ZERO_RUNS |
+					VOL_CAP_FMT_CASE_SENSITIVE |
+					VOL_CAP_FMT_CASE_PRESERVING |
+					VOL_CAP_FMT_FAST_STATFS ;
         	vcapattrptr->valid[VOL_CAPABILITIES_INTERFACES] =
         				VOL_CAP_INT_SEARCHFS |
         				VOL_CAP_INT_ATTRLIST |
         				VOL_CAP_INT_NFSEXPORT |
-        				VOL_CAP_INT_READDIRATTR ;
+        				VOL_CAP_INT_READDIRATTR |
+        				VOL_CAP_INT_EXCHANGEDATA |
+        				VOL_CAP_INT_COPYFILE |
+        				VOL_CAP_INT_ALLOCATE |
+        				VOL_CAP_INT_VOL_RENAME |
+        				VOL_CAP_INT_ADVLOCK |
+        				VOL_CAP_INT_FLOCK ;
         	vcapattrptr->valid[VOL_CAPABILITIES_RESERVED1] = 0;
         	vcapattrptr->valid[VOL_CAPABILITIES_RESERVED2] = 0;
 
@@ -1261,7 +1356,8 @@ packcommonattr(
 	struct hfsmount *hfsmp,
 	struct vnode *vp,
 	struct cat_desc * cdp,
-	struct cat_attr * cap)
+	struct cat_attr * cap,
+	struct proc *p)
 {
 	attrgroup_t attr = abp->ab_attrlist->commonattr;
 	struct mount *mp = HFSTOVFS(hfsmp);
@@ -1270,7 +1366,7 @@ packcommonattr(
 	u_long attrlength = 0;
 	
 	if (ATTR_CMN_NAME & attr) {
-		packnameattr(abp, vp, cdp->cd_nameptr, cdp->cd_namelen);
+		packnameattr(abp, vp, cdp->cd_nameptr, cdp->cd_namelen, p);
 		attrbufptr = *abp->ab_attrbufpp;
 		varbufptr = *abp->ab_varbufpp;
 	}
@@ -1348,7 +1444,7 @@ packcommonattr(
 	}
 	if (ATTR_CMN_OWNERID & attr) {
 		*((uid_t *)attrbufptr)++ =
-			(cap->ca_uid == UNKNOWNUID) ? console_user : cap->ca_uid;
+			(cap->ca_uid == UNKNOWNUID) ? p->p_ucred->cr_uid : cap->ca_uid;
 	}
 	if (ATTR_CMN_GRPID & attr) {
 		*((gid_t *)attrbufptr)++ = cap->ca_gid;
@@ -1398,7 +1494,8 @@ packdirattr(
 	struct hfsmount *hfsmp,
 	struct vnode *vp,
 	struct cat_desc * descp,
-	struct cat_attr * cattrp)
+	struct cat_attr * cattrp,
+	struct proc *p)
 {
 	attrgroup_t attr = abp->ab_attrlist->dirattr;
 	void *attrbufptr = *abp->ab_attrbufpp;
@@ -1408,9 +1505,12 @@ packdirattr(
 	if (ATTR_DIR_ENTRYCOUNT & attr) {
 		u_long entries = cattrp->ca_entries;
 
-		if ((descp->cd_parentcnid == kRootParID) &&
-		    (hfsmp->hfs_private_metadata_dir != 0))
-			--entries;	/* hide private dir */
+		if (descp->cd_parentcnid == kRootParID) {
+			if (hfsmp->hfs_privdir_desc.cd_cnid != 0)
+				--entries;	    /* hide private dir */
+			if (hfsmp->jnl)
+				entries -= 2;	/* hide the journal files */
+		}
 
 		*((u_long *)attrbufptr)++ = entries;
 	}
@@ -1429,7 +1529,8 @@ packfileattr(
 	struct hfsmount *hfsmp,
 	struct cat_attr *cattrp,
 	struct cat_fork *datafork,
-	struct cat_fork *rsrcfork)
+	struct cat_fork *rsrcfork,
+	struct proc *p)
 {
 	attrgroup_t attr = abp->ab_attrlist->fileattr;
 	void *attrbufptr = *abp->ab_attrbufpp;
@@ -1453,7 +1554,7 @@ packfileattr(
 		*((u_long *)attrbufptr)++ = hfsmp->hfs_logBlockSize;
 	}
 	if (ATTR_FILE_CLUMPSIZE & attr) {
-		*((u_long *)attrbufptr)++ = datafork->cf_clump;  /* XXX ambiguity */
+		*((u_long *)attrbufptr)++ = HFSTOVCB(hfsmp)->vcbClpSiz;
 	}
 	if (ATTR_FILE_DEVTYPE & attr) {
 		if (S_ISBLK(cattrp->ca_mode) || S_ISCHR(cattrp->ca_mode))
@@ -1806,7 +1907,7 @@ DerivePermissionSummary(uid_t obj_uid, gid_t obj_gid, mode_t obj_mode,
 	int i;
 
 	if (obj_uid == UNKNOWNUID)
-		obj_uid = console_user;
+		obj_uid = p->p_ucred->cr_uid;
 
 	/* User id 0 (root) always gets access. */
 	if (cred->cr_uid == 0) {

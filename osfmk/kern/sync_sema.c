@@ -3,19 +3,22 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -557,7 +560,7 @@ semaphore_wait_internal(
 	void 			(*caller_cont)(kern_return_t))
 {
 	void			(*continuation)(void);
-	uint64_t		abstime, nsinterval;
+	uint64_t		abstime;
 	boolean_t		nonblocking;
 	int			wait_result;
 	spl_t			spl_level;
@@ -580,13 +583,17 @@ semaphore_wait_internal(
 		kr = KERN_SUCCESS;
 	} else if (nonblocking) {
 		kr = KERN_OPERATION_TIMED_OUT;
-	} else {		
+	} else {
+		thread_t self = current_thread();
+
 		wait_semaphore->count = -1;  /* we don't keep an actual count */
+		thread_lock(self);
 		(void)wait_queue_assert_wait64_locked(
 					&wait_semaphore->wait_queue,
 					SEMAPHORE_EVENT,
 					THREAD_ABORTSAFE,
-					FALSE); /* unlock? */
+					self);
+		thread_unlock(self);
 	}
 	semaphore_unlock(wait_semaphore);
 	splx(spl_level);
@@ -643,13 +650,8 @@ semaphore_wait_internal(
 	 * If it is a timed wait, go ahead and set up the timer.
 	 */
 	if (wait_timep != (mach_timespec_t *)0) {
-		clock_interval_to_absolutetime_interval(wait_timep->tv_sec,
-							NSEC_PER_SEC,
-							&abstime);
-		clock_interval_to_absolutetime_interval(wait_timep->tv_nsec,
-							1,
-							&nsinterval);
-		abstime += nsinterval;
+		nanoseconds_to_absolutetime((uint64_t)wait_timep->tv_sec *
+										NSEC_PER_SEC + wait_timep->tv_nsec, &abstime);
 		clock_absolutetime_interval_to_deadline(abstime, &abstime);
 		thread_set_timer_deadline(abstime);
 		continuation = semaphore_timedwait_continue;

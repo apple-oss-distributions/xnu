@@ -3,19 +3,22 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -59,8 +62,8 @@ kmod_start_or_stop(
 extern kern_return_t kmod_retain(kmod_t id);
 extern kern_return_t kmod_release(kmod_t id);
 
-extern void flush_dcache(vm_offset_t addr, unsigned cnt, int phys);
-extern void invalidate_icache(vm_offset_t addr, unsigned cnt, int phys);
+extern void flush_dcache64(addr64_t addr, unsigned cnt, int phys);
+extern void invalidate_icache64(addr64_t addr, unsigned cnt, int phys);
 };
 
 
@@ -168,6 +171,72 @@ bool verifyCompatibility(OSString * extName, OSString * requiredVersion)
 }
 
 /*********************************************************************
+*********************************************************************/
+static
+Boolean kextIsADependency(OSString * name) {
+    Boolean result = true;
+    OSDictionary * extensionsDict = 0;    // don't release
+    OSDictionary * extDict = 0;           // don't release
+    OSDictionary * extPlist = 0;          // don't release
+    OSBoolean * isKernelResourceObj = 0;  // don't release
+    OSData * driverCode = 0;              // don't release
+    OSData * compressedCode = 0;          // don't release
+
+    extensionsDict = getStartupExtensions();
+    if (!extensionsDict) {
+        IOLog("kextIsADependency(): No extensions dictionary.\n");
+        LOG_DELAY();
+        result = false;
+        goto finish;
+    }
+    
+
+    extDict = OSDynamicCast(OSDictionary,
+        extensionsDict->getObject(name));
+    if (!extDict) {
+        IOLog("kextIsADependency(): "
+           "Extension \"%s\" cannot be found.\n",
+           name->getCStringNoCopy());
+        LOG_DELAY();
+        result = false;
+        goto finish;
+    }
+
+    extPlist = OSDynamicCast(OSDictionary, extDict->getObject("plist"));
+    if (!extPlist) {
+        IOLog("getDependencyListForKmod(): "
+            "Extension \"%s\" has no property list.\n",
+            name->getCStringNoCopy());
+        LOG_DELAY();
+        result = false;
+        goto finish;
+    }
+
+   /* A kext that is a kernel component is still a dependency, as there
+    * are fake kmod entries for them.
+    */
+    isKernelResourceObj = OSDynamicCast(OSBoolean,
+        extPlist->getObject("OSKernelResource"));
+    if (isKernelResourceObj && isKernelResourceObj->isTrue()) {
+        result = true;
+        goto finish;
+    }
+
+    driverCode = OSDynamicCast(OSData, extDict->getObject("code"));
+    compressedCode = OSDynamicCast(OSData,
+        extDict->getObject("compressedCode"));
+
+    if (!driverCode && !compressedCode) {
+        result = false;
+        goto finish;
+    }
+
+finish:
+
+    return result;
+}
+
+/*********************************************************************
 * This function builds a uniqued, in-order list of modules that need
 * to be loaded in order for kmod_name to be successfully loaded. This
 * list ends with kmod_name itself.
@@ -182,9 +251,6 @@ OSArray * getDependencyListForKmod(const char * kmod_name) {
     OSDictionary * extPlist;       // don't release
     OSString     * extName;        // don't release
     OSArray      * dependencyList = NULL; // return value, caller releases
-    OSBoolean * isKernelResourceObj = 0; // don't release
-    bool isKernelResource = false;
-    bool declaresExecutable = false;
     unsigned int   i;
 
    /* These are used to remove duplicates from the dependency list.
@@ -255,27 +321,6 @@ OSArray * getDependencyListForKmod(const char * kmod_name) {
         goto finish;
     }
 
-   /* A kext that's not a kernel extension and declares no executable has nothing
-    * to load, so just return an empty array.
-    */
-    isKernelResourceObj = OSDynamicCast(OSBoolean,
-        extPlist->getObject("OSKernelResource"));
-    if (isKernelResourceObj && isKernelResourceObj->isTrue()) {
-        isKernelResource = true;
-    } else {
-        isKernelResource = false;
-    }
-
-    if (extPlist->getObject("CFBundleExecutable")) {
-        declaresExecutable = true;
-    } else {
-        declaresExecutable = false;
-    }
-
-    if (!isKernelResource && !declaresExecutable) {
-        error = 0;
-        goto finish;
-    }
 
    /* Okay, let's get started.
     */
@@ -368,28 +413,6 @@ OSArray * getDependencyListForKmod(const char * kmod_name) {
                     goto finish;
                 }
 
-               /* Don't add any entries that are not kernel resources and that declare no
-                * executable. Such kexts have nothing to load and so don't belong in the
-                * dependency list. Entries that are kernel resource *do* get added,
-                * however, because such kexts get fake kmod entries for reference counting.
-                */
-                isKernelResourceObj = OSDynamicCast(OSBoolean,
-                    curExtPlist->getObject("OSKernelResource"));
-                if (isKernelResourceObj && isKernelResourceObj->isTrue()) {
-                    isKernelResource = true;
-                } else {
-                    isKernelResource = false;
-                }
-                if (curExtPlist->getObject("CFBundleExecutable")) {
-                    declaresExecutable = true;
-                } else {
-                    declaresExecutable = false;
-                }
-
-                if (!isKernelResource && !declaresExecutable) {
-                    continue;
-                }
-
                 dependencyList->setObject(curDepName);
             }
 
@@ -426,7 +449,9 @@ OSArray * getDependencyListForKmod(const char * kmod_name) {
 
    /* Go backward through the original list, using the encounteredNames
     * dictionary to check for duplicates. We put originalList in as the
-    * value because we need some non-NULL value.
+    * value because we need some non-NULL value. Here we also drop any
+    * extensions that aren't proper dependencies (that is, any that are
+    * nonkernel kexts without code).
     */
     i = originalList->getCount();
 
@@ -437,7 +462,9 @@ OSArray * getDependencyListForKmod(const char * kmod_name) {
             OSString * item = OSDynamicCast(OSString,
                 originalList->getObject(i));
 
-            if ( ! encounteredNames->getObject(item) ) {
+            if ( (!encounteredNames->getObject(item)) &&
+                 kextIsADependency(item)) {
+
                 encounteredNames->setObject(item, originalList);
                 dependencyList->setObject(item);
             }
@@ -522,7 +549,7 @@ unsigned long address_for_loaded_kmod(
         return 0;
     }
 
-    round_headers_size = round_page(headers_size);
+    round_headers_size = round_page_32(headers_size);
     headers_pad = round_headers_size - headers_size;
 
     link_load_address = (unsigned long)g_current_kmod_info->address +
@@ -558,8 +585,8 @@ unsigned long alloc_for_kmod(
     unsigned long round_size;
     unsigned long headers_pad;
 
-    round_headers_size  = round_page(headers_size);
-    round_segments_size = round_page(size - headers_size);
+    round_headers_size  = round_page_32(headers_size);
+    round_segments_size = round_page_32(size - headers_size);
     round_size  = round_headers_size + round_segments_size;
     headers_pad = round_headers_size - headers_size;
 
@@ -993,7 +1020,7 @@ kern_return_t load_kmod(OSArray * dependencyList) {
     // bcopy() is (from, to, length)
     bcopy((char *)kmod_header, (char *)link_buffer_address, link_header_size);
     bcopy((char *)kmod_header + link_header_size,
-        (char *)link_buffer_address + round_page(link_header_size),
+        (char *)link_buffer_address + round_page_32(link_header_size),
         link_load_size - link_header_size);
 
 
@@ -1021,13 +1048,13 @@ kern_return_t load_kmod(OSArray * dependencyList) {
     */
     kmod_info->address = link_buffer_address;
     kmod_info->size = link_buffer_size;
-    kmod_info->hdr_size = round_page(link_header_size);
+    kmod_info->hdr_size = round_page_32(link_header_size);
 
    /* We've written data and instructions, so *flush* the data cache
     * and *invalidate* the instruction cache.
     */
-    flush_dcache(link_buffer_address, link_buffer_size, false);
-    invalidate_icache(link_buffer_address, link_buffer_size, false);
+    flush_dcache64((addr64_t)link_buffer_address, link_buffer_size, false);
+    invalidate_icache64((addr64_t)link_buffer_address, link_buffer_size, false);
 
 
    /* Register the new kmod with the kernel proper.
@@ -1044,7 +1071,7 @@ kern_return_t load_kmod(OSArray * dependencyList) {
     IOLog("kmod id %d successfully created at 0x%lx, size %ld.\n",
         (unsigned int)kmod_id, link_buffer_address, link_buffer_size);
     LOG_DELAY();
-#endif DEBUG
+#endif /* DEBUG */
 
    /* Record dependencies for the newly-loaded kmod.
     */
@@ -1079,7 +1106,7 @@ kern_return_t load_kmod(OSArray * dependencyList) {
 finish:
 
     if (kmod_info_freeme) {
-        kfree(kmod_info_freeme, sizeof(kmod_info_t));
+        kfree((unsigned int)kmod_info_freeme, sizeof(kmod_info_t));
     }
 
    /* Only do a kld_unload_all() if at least one load happened.
@@ -1097,7 +1124,7 @@ finish:
     if (kmod_dependencies) {
         for (i = 0; i < num_dependencies; i++) {
             if (kmod_dependencies[i]) {
-                kfree(kmod_dependencies[i], sizeof(kmod_info_t));
+                kfree((unsigned int)kmod_dependencies[i], sizeof(kmod_info_t));
             }
         }
         kfree((unsigned int)kmod_dependencies,
@@ -1191,7 +1218,7 @@ kern_return_t load_kernel_extension(char * kmod_name) {
 finish:
 
     if (kmod_info) {
-        kfree(kmod_info, sizeof(kmod_info_t));
+        kfree((unsigned int)kmod_info, sizeof(kmod_info_t));
     }
 
     if (dependencyList) {

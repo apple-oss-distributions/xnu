@@ -3,19 +3,22 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -122,7 +125,7 @@ mk_timer_port_destroy(
 }
 
 void
-mk_timer_initialize(void)
+mk_timer_init(void)
 {
 	int			s = sizeof (mk_timer_data_t);
 
@@ -136,11 +139,8 @@ mk_timer_expire(
 	void			*p0,
 	void			*p1)
 {
-	uint64_t			time_of_posting;
 	mk_timer_t			timer = p0;
 	ipc_port_t			port;
-
-	clock_get_uptime(&time_of_posting);
 
 	simple_lock(&timer->lock);
 
@@ -152,23 +152,20 @@ mk_timer_expire(
 
 	port = timer->port;
 	assert(port != IP_NULL);
+	assert(timer->active == 1);
 
-	while (		timer->is_armed										&&
-				!thread_call_is_delayed(&timer->call_entry, NULL)		) {
+	while (timer->is_armed && timer->active == 1) {
 		mk_timer_expire_msg_t		msg;
 
 		timer->is_armed = FALSE;
-
-		msg.time_of_arming = timer->time_of_arming;
-		msg.armed_time = timer->call_entry.deadline;
-		msg.time_of_posting = time_of_posting;
-
 		simple_unlock(&timer->lock);
 
 		msg.header.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
 		msg.header.msgh_remote_port = port;
 		msg.header.msgh_local_port = MACH_PORT_NULL;
 		msg.header.msgh_reserved = msg.header.msgh_id = 0;
+
+		msg.unused[0] = msg.unused[1] = msg.unused[2] = 0;
 
 		(void) mach_msg_send_from_kernel(&msg.header, sizeof (msg));
 
@@ -234,11 +231,14 @@ mk_timer_arm(
 		assert(timer->port == port);
 		ip_unlock(port);
 
-		timer->time_of_arming = time_of_arming;
-		timer->is_armed = TRUE;
+		if (!timer->is_dead) {
+			timer->time_of_arming = time_of_arming;
+			timer->is_armed = TRUE;
 
-		if (!thread_call_enter_delayed(&timer->call_entry, expire_time))
-			timer->active++;
+			if (!thread_call_enter_delayed(&timer->call_entry, expire_time))
+				timer->active++;
+		}
+
 		simple_unlock(&timer->lock);
 	}
 	else {

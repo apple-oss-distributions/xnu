@@ -3,19 +3,22 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -101,8 +104,6 @@ extern int ipsec_bypass;
 #define DBG_FNC_UDP_INPUT	NETDBG_CODE(DBG_NETUDP, (5 << 8))
 #define DBG_FNC_UDP_OUTPUT	NETDBG_CODE(DBG_NETUDP, (6 << 8) | 1)
 
-
-#define __STDC__ 1
 /*
  * UDP protocol implementation.
  * Per RFC 768, August, 1980.
@@ -132,6 +133,8 @@ struct	inpcbinfo udbinfo;
 #endif
 
 extern  int apple_hwcksum_rx;
+extern	int	esp_udp_encap_port;
+extern	u_long  route_generation;
 
 struct	udpstat udpstat;	/* from udp_var.h */
 SYSCTL_STRUCT(_net_inet_udp, UDPCTL_STATS, stats, CTLFLAG_RD,
@@ -289,17 +292,26 @@ udp_input(m, iphlen)
 	 * Checksum extended UDP header and data.
 	 */
 	if (uh->uh_sum) {
-               if (m->m_pkthdr.csum_flags & CSUM_DATA_VALID) {
-                        if (m->m_pkthdr.csum_flags & CSUM_PSEUDO_HDR)
-                                uh->uh_sum = m->m_pkthdr.csum_data;
-                        else
-			    goto doudpcksum;
-                      uh->uh_sum ^= 0xffff;
-                } else {
+		if (m->m_pkthdr.csum_flags & CSUM_DATA_VALID) {
+			if (m->m_pkthdr.csum_flags & CSUM_PSEUDO_HDR)
+				uh->uh_sum = m->m_pkthdr.csum_data;
+			else
+				goto doudpcksum;
+			uh->uh_sum ^= 0xffff;
+		} else {
+			char b[9];
 doudpcksum:
+			*(uint32_t*)&b[0] = *(uint32_t*)&((struct ipovly *)ip)->ih_x1[0];
+			*(uint32_t*)&b[4] = *(uint32_t*)&((struct ipovly *)ip)->ih_x1[4];
+			*(uint8_t*)&b[8] = *(uint8_t*)&((struct ipovly *)ip)->ih_x1[8];
+			
 			bzero(((struct ipovly *)ip)->ih_x1, 9);
 			((struct ipovly *)ip)->ih_len = uh->uh_ulen;
 			uh->uh_sum = in_cksum(m, len + sizeof (struct ip));
+			
+			*(uint32_t*)&((struct ipovly *)ip)->ih_x1[0] = *(uint32_t*)&b[0];
+			*(uint32_t*)&((struct ipovly *)ip)->ih_x1[4] = *(uint32_t*)&b[4];
+			*(uint8_t*)&((struct ipovly *)ip)->ih_x1[8] = *(uint8_t*)&b[8];
 		}
 		if (uh->uh_sum) {
 			udpstat.udps_badsum++;
@@ -417,6 +429,53 @@ doudpcksum:
 		udp_append(last, ip, m, iphlen + sizeof(struct udphdr));
 		return;
 	}
+
+	/*
+	 * UDP to port 4500 with a payload where the first four bytes are
+	 * not zero is a UDP encapsulated IPSec packet. Packets where
+	 * the payload is one byte and that byte is 0xFF are NAT keepalive
+	 * packets. Decapsulate the ESP packet and carry on with IPSec input
+	 * or discard the NAT keep-alive.
+	 */
+	if (ipsec_bypass == 0 && (esp_udp_encap_port & 0xFFFF) != 0 &&
+		uh->uh_dport == ntohs((u_short)esp_udp_encap_port)) {
+		int	payload_len = len - sizeof(struct udphdr) > 4 ? 4 : len - sizeof(struct udphdr);
+		if (m->m_len < iphlen + sizeof(struct udphdr) + payload_len) {
+			if ((m = m_pullup(m, iphlen + sizeof(struct udphdr) + payload_len)) == 0) {
+				udpstat.udps_hdrops++;
+				KERNEL_DEBUG(DBG_FNC_UDP_INPUT | DBG_FUNC_END, 0,0,0,0,0);
+				return;
+			}
+			ip = mtod(m, struct ip *);
+			uh = (struct udphdr *)((caddr_t)ip + iphlen);
+		}
+		/* Check for NAT keepalive packet */
+		if (payload_len == 1 && *(u_int8_t*)((caddr_t)uh + sizeof(struct udphdr)) == 0xFF) {
+			m_freem(m);
+			KERNEL_DEBUG(DBG_FNC_UDP_INPUT | DBG_FUNC_END, 0,0,0,0,0);
+			return;
+		}
+		else if (payload_len == 4 && *(u_int32_t*)((caddr_t)uh + sizeof(struct udphdr)) != 0) {
+			/* UDP encapsulated IPSec packet to pass through NAT */
+			size_t stripsiz;
+
+			stripsiz = sizeof(struct udphdr);
+
+			ip = mtod(m, struct ip *);
+			ovbcopy((caddr_t)ip, (caddr_t)(((u_char *)ip) + stripsiz), iphlen);
+			m->m_data += stripsiz;
+			m->m_len -= stripsiz;
+			m->m_pkthdr.len -= stripsiz;
+			ip = mtod(m, struct ip *);
+			ip->ip_len = ip->ip_len - stripsiz;
+			ip->ip_p = IPPROTO_ESP;
+
+			KERNEL_DEBUG(DBG_FNC_UDP_INPUT | DBG_FUNC_END, 0,0,0,0,0);
+			esp4_input(m, iphlen);
+			return;
+		}
+	}
+
 	/*
 	 * Locate pcb for datagram.
 	 */
@@ -745,6 +804,24 @@ udp_output(inp, m, addr, control, p)
 		goto release;
 	}
 
+	/* If there was a routing change, discard cached route and check
+	 * that we have a valid source address. 
+	 * Reacquire a new source address if INADDR_ANY was specified
+	 */
+
+	if (inp->inp_route.ro_rt && inp->inp_route.ro_rt->generation_id != route_generation) {
+		if (ifa_foraddr(inp->inp_laddr.s_addr) == NULL) { /* src address is gone */
+			if (inp->inp_flags & INP_INADDR_ANY)
+				inp->inp_faddr.s_addr = INADDR_ANY; /* new src will be set later */
+			else {
+				error = EADDRNOTAVAIL;
+				goto release;
+			}
+		}
+		rtfree(inp->inp_route.ro_rt);
+		inp->inp_route.ro_rt = (struct rtentry *)0;
+	}
+
 	if (addr) {
 		laddr = inp->inp_laddr;
 		if (inp->inp_faddr.s_addr != INADDR_ANY) {
@@ -766,6 +843,8 @@ udp_output(inp, m, addr, control, p)
 			goto release;
 		}
 	}
+
+
 	/*
 	 * Calculate data length and get a mbuf
 	 * for UDP and IP headers.
@@ -773,9 +852,7 @@ udp_output(inp, m, addr, control, p)
 	M_PREPEND(m, sizeof(struct udpiphdr), M_DONTWAIT);
 	if (m == 0) {
 		error = ENOBUFS;
-		if (addr)
-			splx(s);
-		goto release;
+		goto abort;
 	}
 
 	/*
@@ -813,7 +890,7 @@ udp_output(inp, m, addr, control, p)
 #if IPSEC
 	if (ipsec_bypass == 0 && ipsec_setsocket(m, inp->inp_socket) != 0) {
 		error = ENOBUFS;
-		goto release;
+		goto abort;
 	}
 #endif /*IPSEC*/
 	error = ip_output(m, inp->inp_options, &inp->inp_route,
@@ -827,6 +904,13 @@ udp_output(inp, m, addr, control, p)
 	}
 	KERNEL_DEBUG(DBG_FNC_UDP_OUTPUT | DBG_FUNC_END, error, 0,0,0,0);
 	return (error);
+
+abort:
+        if (addr) {
+                in_pcbdisconnect(inp);
+                inp->inp_laddr = laddr; /* XXX rehash? */
+                splx(s);
+        }
 
 release:
 	m_freem(m);

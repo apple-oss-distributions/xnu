@@ -57,7 +57,7 @@
 #define _PATH_VNTAB	"/etc/vntab"	/* default config file */
 
 typedef enum {
-	vncontrol_readwrite_io_e = 0,
+	vncontrol_readwrite_io_e = 0
 } vncontrol_t;
 
 struct vn_ioctl {
@@ -89,6 +89,6 @@ struct vn_ioctl {
 
 #endif /* __APPLE_API_PRIVATE */
 
-#endif KERNEL_PRIVATE
+#endif /* KERNEL_PRIVATE */
 
 #endif	/* _SYS_VNIOCTL_H_*/

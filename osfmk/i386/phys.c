@@ -3,19 +3,22 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -60,9 +63,11 @@
  */
 void
 pmap_zero_page(
-	vm_offset_t p)
+	       ppnum_t pn)
 {
-	assert(p != vm_page_fictitious_addr);
+        vm_offset_t p;
+	assert(pn != vm_page_fictitious_addr);
+	p = (vm_offset_t)i386_ptob(pn);
 	bzero((char *)phystokv(p), PAGE_SIZE);
 }
 
@@ -72,14 +77,13 @@ pmap_zero_page(
  */
 void
 pmap_zero_part_page(
-	vm_offset_t	p,
+        ppnum_t         pn,
 	vm_offset_t     offset,
 	vm_size_t       len)
 {
-	assert(p != vm_page_fictitious_addr);
+	assert(pn != vm_page_fictitious_addr);
 	assert(offset + len <= PAGE_SIZE);
-
-	bzero((char *)phystokv(p) + offset, len);
+	bzero((char *)phystokv(i386_ptob(pn)) + offset, len);
 }
 
 /*
@@ -87,11 +91,16 @@ pmap_zero_part_page(
  */
 void
 pmap_copy_page(
-	vm_offset_t src,
-	vm_offset_t dst)
+       ppnum_t  psrc,
+       ppnum_t  pdst)
+
 {
-	assert(src != vm_page_fictitious_addr);
-	assert(dst != vm_page_fictitious_addr);
+        vm_offset_t src,dst;
+
+	assert(psrc != vm_page_fictitious_addr);
+	assert(pdst != vm_page_fictitious_addr);
+	src = (vm_offset_t)i386_ptob(psrc);
+	dst = (vm_offset_t)i386_ptob(pdst);
 
 	memcpy((void *)phystokv(dst), (void *)phystokv(src), PAGE_SIZE);
 }
@@ -101,14 +110,18 @@ pmap_copy_page(
  */
 void
 pmap_copy_part_page(
-	vm_offset_t	src,
+	ppnum_t 	psrc,
 	vm_offset_t	src_offset,
-	vm_offset_t	dst,
+	ppnum_t	        pdst,
 	vm_offset_t	dst_offset,
 	vm_size_t	len)
 {
-	assert(src != vm_page_fictitious_addr);
-	assert(dst != vm_page_fictitious_addr);
+        vm_offset_t  src, dst;
+
+	assert(psrc != vm_page_fictitious_addr);
+	assert(pdst != vm_page_fictitious_addr);
+	src = (vm_offset_t)i386_ptob(psrc);
+	dst = (vm_offset_t)i386_ptob(pdst);
 	assert(((dst & PAGE_MASK) + dst_offset + len) <= PAGE_SIZE);
 	assert(((src & PAGE_MASK) + src_offset + len) <= PAGE_SIZE);
 
@@ -122,13 +135,16 @@ pmap_copy_part_page(
  */
 void
 pmap_copy_part_lpage(
-	vm_offset_t	src,
-	vm_offset_t	dst,
+	vm_offset_t 	src,
+	ppnum_t 	pdst,
 	vm_offset_t	dst_offset,
 	vm_size_t	len)
 {
+        vm_offset_t dst;
+
 	assert(src != vm_page_fictitious_addr);
-	assert(dst != vm_page_fictitious_addr);
+	assert(pdst != vm_page_fictitious_addr);
+	dst = (vm_offset_t)i386_ptob(pdst);
 	assert(((dst & PAGE_MASK) + dst_offset + len) <= PAGE_SIZE);
 
         memcpy((void *)(phystokv(dst) + dst_offset), (void *)src, len);
@@ -140,13 +156,16 @@ pmap_copy_part_lpage(
  */
 void
 pmap_copy_part_rpage(
-	vm_offset_t	src,
+	ppnum_t	        psrc,
 	vm_offset_t	src_offset,
 	vm_offset_t	dst,
 	vm_size_t	len)
 {
-	assert(src != vm_page_fictitious_addr);
+        vm_offset_t src;
+
+	assert(psrc != vm_page_fictitious_addr);
 	assert(dst != vm_page_fictitious_addr);
+	src = (vm_offset_t)i386_ptob(psrc);
 	assert(((src & PAGE_MASK) + src_offset + len) <= PAGE_SIZE);
 
         memcpy((void *)dst, (void *)(phystokv(src) + src_offset), len);

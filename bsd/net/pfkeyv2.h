@@ -3,19 +3,22 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -124,6 +127,15 @@ struct sadb_sa {
   u_int8_t sadb_sa_encrypt;
   u_int32_t sadb_sa_flags;
 };
+
+#ifdef __APPLE_API_PRIVATE
+struct sadb_sa_2 {
+	struct sadb_sa	sa;
+	u_int16_t		sadb_sa_natt_port;
+	u_int16_t		sadb_reserved0;
+	u_int32_t		sadb_reserved1;
+};
+#endif
 
 struct sadb_lifetime {
   u_int16_t sadb_lifetime_len;
@@ -234,7 +246,7 @@ struct sadb_x_sa2 {
   u_int8_t sadb_x_sa2_mode;
   u_int8_t sadb_x_sa2_reserved1;
   u_int16_t sadb_x_sa2_reserved2;
-  u_int32_t sadb_x_sa2_reserved3;
+  u_int32_t sadb_x_sa2_sequence;
   u_int32_t sadb_x_sa2_reqid;
 };
 
@@ -364,6 +376,11 @@ struct sadb_x_ipsecrequest {
 /* `flags' in sadb_sa structure holds followings */
 #define SADB_X_EXT_NONE		0x0000	/* i.e. new format. */
 #define SADB_X_EXT_OLD		0x0001	/* old format. */
+#ifdef __APPLE_API_PRIVATE
+#define SADB_X_EXT_NATT				0x0002	/* Use UDP encapsulation to traverse NAT */
+#define SADB_X_EXT_NATT_KEEPALIVE	0x0004	/* Local node is behind NAT, send keepalives */
+											/* Should only be set for outbound SAs */
+#endif
 
 #define SADB_X_EXT_IV4B		0x0010	/* IV length of 4 bytes in use */
 #define SADB_X_EXT_DERIV	0x0020	/* DES derived */

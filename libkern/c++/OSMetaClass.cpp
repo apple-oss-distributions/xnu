@@ -3,19 +3,22 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this
+ * file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -551,6 +554,8 @@ void OSMetaClass::reportModInstances(const char *kmodName)
     iter->release();
 }
 
+extern "C" kern_return_t kmod_unload_cache(void);
+
 static void _OSMetaClassConsiderUnloads(thread_call_param_t p0,
                                         thread_call_param_t p1)
 {
@@ -575,7 +580,7 @@ static void _OSMetaClassConsiderUnloads(thread_call_param_t p0,
         while ( (kmodName = (OSSymbol *) kmods->getNextObject()) ) {
 
             if (ki) {
-                kfree(ki, sizeof(kmod_info_t));
+                kfree((vm_offset_t) ki, sizeof(kmod_info_t));
                 ki = 0;
             }
 
@@ -611,6 +616,8 @@ static void _OSMetaClassConsiderUnloads(thread_call_param_t p0,
     } while (didUnload);
 
     mutex_unlock(loadLock);
+
+    kmod_unload_cache();
 }
 
 void OSMetaClass::considerUnloads()
@@ -798,31 +805,50 @@ void OSMetaClass::printInstanceCounts()
 
 OSDictionary * OSMetaClass::getClassDictionary()
 {
-    return sAllClassesDict;
+    panic("OSMetaClass::getClassDictionary(): Obsoleted\n");
+    return 0;
 }
 
 bool OSMetaClass::serialize(OSSerialize *s) const
 {
-    OSDictionary *	dict;
-    OSNumber *		off;
-    bool		ok = false;
-
-    if (s->previouslySerialized(this)) return true;
-
-    dict = 0;// IODictionary::withCapacity(2);
-    off = OSNumber::withNumber(getInstanceCount(), 32);
-
-    if (dict) {
-	dict->setObject("InstanceCount", off );
-	ok = dict->serialize(s);
-    } else if( off)
-	ok = off->serialize(s);
-
-    if (dict)
-	dict->release();
-    if (off)
-	off->release();
-
-    return ok;
+    panic("OSMetaClass::serialize(): Obsoleted\n");
+    return false;
 }
 
+void OSMetaClass::serializeClassDictionary(OSDictionary *serializeDictionary)
+{
+    OSDictionary *classDict;
+
+    classDict = OSDictionary::withCapacity(sAllClassesDict->getCount());
+    if (!classDict)
+        return;
+
+    mutex_lock(loadLock);
+    do {
+        OSCollectionIterator *classes;
+        const OSSymbol *className;
+
+        classes = OSCollectionIterator::withCollection(sAllClassesDict);
+        if (!classes)
+            break;
+    
+        while ((className = (const OSSymbol *) classes->getNextObject())) {
+            const OSMetaClass *meta;
+            OSNumber *count;
+
+            meta = (OSMetaClass *) sAllClassesDict->getObject(className);
+            count = OSNumber::withNumber(meta->getInstanceCount(), 32);
+            if (count) {
+                classDict->setObject(className, count);
+                count->release();
+            }
+        }
+        classes->release();
+
+        serializeDictionary->setObject("Classes", classDict);
+    } while (0);
+
+    mutex_unlock(loadLock);
+
+    classDict->release();
+}
