@@ -32,7 +32,7 @@
 #include <IOKit/IOKitDebug.h>
 #include <IOKit/IOWorkLoop.h>
 #include <IOKit/pwr_mgt/RootDomain.h>
-
+#include <IOKit/IOMessage.h>
 #include <libkern/c++/OSContainers.h>
 
 
@@ -50,7 +50,8 @@ static void getCStringForObject (OSObject * inObj, char * outStr);
 
 OSDefineMetaClassAndStructors(IOPlatformExpert, IOService)
 
-OSMetaClassDefineReservedUnused(IOPlatformExpert,  0);
+OSMetaClassDefineReservedUsed(IOPlatformExpert,  0);
+
 OSMetaClassDefineReservedUnused(IOPlatformExpert,  1);
 OSMetaClassDefineReservedUnused(IOPlatformExpert,  2);
 OSMetaClassDefineReservedUnused(IOPlatformExpert,  3);
@@ -64,6 +65,8 @@ OSMetaClassDefineReservedUnused(IOPlatformExpert, 10);
 OSMetaClassDefineReservedUnused(IOPlatformExpert, 11);
 
 static IOPlatformExpert * gIOPlatform;
+static OSDictionary * gIOInterruptControllers;
+static IOLock * gIOInterruptControllersLock;
 
 OSSymbol * gPlatformInterruptControllerName;
 
@@ -85,6 +88,9 @@ bool IOPlatformExpert::start( IOService * provider )
     
     if (!super::start(provider))
       return false;
+    
+    gIOInterruptControllers = OSDictionary::withCapacity(1);
+    gIOInterruptControllersLock = IOLockAlloc();
     
     // Correct the bus frequency in the device tree.
     busFrequency = OSData::withBytesNoCopy((void *)&gPEClockFrequencyInfo.bus_clock_rate_hz, 4);
@@ -206,6 +212,8 @@ int (*PE_halt_restart)(unsigned int type) = 0;
 
 int IOPlatformExpert::haltRestart(unsigned int type)
 {
+  if (type == kPEHangCPU) while (1);
+  
   if (PE_halt_restart) return (*PE_halt_restart)(type);
   else return -1;
 }
@@ -255,21 +263,36 @@ IOReturn IOPlatformExpert::setConsoleInfo( PE_Video * consoleInfo,
 
 IOReturn IOPlatformExpert::registerInterruptController(OSSymbol *name, IOInterruptController *interruptController)
 {
-  publishResource(name, interruptController);
+  IOLockLock(gIOInterruptControllersLock);
+  
+  gIOInterruptControllers->setObject(name, interruptController);
+  
+  IOLockWakeup(gIOInterruptControllersLock,
+		gIOInterruptControllers, /* one-thread */ false);
+
+  IOLockUnlock(gIOInterruptControllersLock);
   
   return kIOReturnSuccess;
 }
 
 IOInterruptController *IOPlatformExpert::lookUpInterruptController(OSSymbol *name)
 {
-  IOInterruptController *interruptController;
-  IOService             *service;
+  OSObject              *object;
   
-  service = waitForService(resourceMatching(name));
+  IOLockLock(gIOInterruptControllersLock);
+  while (1) {
+    
+    object = gIOInterruptControllers->getObject(name);
+    
+    if (object != 0)
+	break;
+    
+    IOLockSleep(gIOInterruptControllersLock,
+		gIOInterruptControllers, THREAD_UNINT);
+  }
   
-  interruptController = OSDynamicCast(IOInterruptController, service->getProperty(name));  
-  
-  return interruptController;
+  IOLockUnlock(gIOInterruptControllersLock);
+  return OSDynamicCast(IOInterruptController, object);
 }
 
 
@@ -628,6 +651,18 @@ static void getCStringForObject (OSObject * inObj, char * outStr)
    }
 }
 
+/* IOPMPanicOnShutdownHang
+ * - Called from a timer installed by PEHaltRestart
+ */
+static void IOPMPanicOnShutdownHang(thread_call_param_t p0, thread_call_param_t p1)
+{
+    int type = (int)p0;
+
+    /* 30 seconds has elapsed - resume shutdown */
+    gIOPlatform->haltRestart(type);
+}
+
+
 extern "C" {
 
 /*
@@ -660,8 +695,46 @@ int PEGetPlatformEpoch(void)
 
 int PEHaltRestart(unsigned int type)
 {
+  IOPMrootDomain    *pmRootDomain = IOService::getPMRootDomain();
+  bool              noWaitForResponses;
+  AbsoluteTime      deadline;
+  thread_call_t     shutdown_hang;
+  
+  if(type == kPEHaltCPU || type == kPERestartCPU)
+  {
+    /* Notify IOKit PM clients of shutdown/restart
+       Clients subscribe to this message with a call to
+       IOService::registerInterest()
+    */
+    
+    /* Spawn a thread that will panic in 30 seconds. 
+       If all goes well the machine will be off by the time
+       the timer expires.
+     */
+    shutdown_hang = thread_call_allocate( &IOPMPanicOnShutdownHang, (thread_call_param_t) type);
+    clock_interval_to_deadline( 30, kSecondScale, &deadline );
+    thread_call_enter1_delayed( shutdown_hang, 0, deadline );
+    
+    noWaitForResponses = pmRootDomain->tellChangeDown2(type); 
+    /* This notification should have few clients who all do 
+       their work synchronously.
+             
+       In this "shutdown notification" context we don't give
+       drivers the option of working asynchronously and responding 
+       later. PM internals make it very hard to wait for asynchronous
+       replies. In fact, it's a bad idea to even be calling
+       tellChangeDown2 from here at all.
+     */
+   }
+
   if (gIOPlatform) return gIOPlatform->haltRestart(type);
   else return -1;
+}
+
+UInt32 PESavePanicInfo(UInt8 *buffer, UInt32 length)
+{
+  if (gIOPlatform != 0) return gIOPlatform->savePanicInfo(buffer, length);
+  else return 0;
 }
 
 long PEGetGMTTimeOfDay(void)
@@ -706,6 +779,10 @@ IOReturn IOPlatformExpert::callPlatformFunction(const OSSymbol *functionName,
 				       param1, param2, param3, param4);
 }
 
+IOByteCount IOPlatformExpert::savePanicInfo(UInt8 *buffer, IOByteCount length)
+{
+  return 0;
+}
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
@@ -932,6 +1009,41 @@ IOReturn IODTPlatformExpert::writeNVRAMProperty(
 {
   if (dtNVRAM) return dtNVRAM->writeNVRAMProperty(entry, name, value);
   else return kIOReturnNotReady;
+}
+
+OSDictionary *IODTPlatformExpert::getNVRAMPartitions(void)
+{
+  if (dtNVRAM) return dtNVRAM->getNVRAMPartitions();
+  else return 0;
+}
+
+IOReturn IODTPlatformExpert::readNVRAMPartition(const OSSymbol * partitionID,
+						IOByteCount offset, UInt8 * buffer,
+						IOByteCount length)
+{
+  if (dtNVRAM) return dtNVRAM->readNVRAMPartition(partitionID, offset,
+						  buffer, length);
+  else return kIOReturnNotReady;
+}
+
+IOReturn IODTPlatformExpert::writeNVRAMPartition(const OSSymbol * partitionID,
+						 IOByteCount offset, UInt8 * buffer,
+						 IOByteCount length)
+{
+  if (dtNVRAM) return dtNVRAM->writeNVRAMPartition(partitionID, offset,
+						   buffer, length);
+  else return kIOReturnNotReady;
+}
+
+IOByteCount IODTPlatformExpert::savePanicInfo(UInt8 *buffer, IOByteCount length)
+{
+  IOByteCount lengthSaved = 0;
+  
+  if (dtNVRAM) lengthSaved = dtNVRAM->savePanicInfo(buffer, length);
+  
+  if (lengthSaved == 0) lengthSaved = super::savePanicInfo(buffer, length);
+  
+  return lengthSaved;
 }
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */

@@ -28,6 +28,7 @@
 #include <mach_kgdb.h>
 #include <ppc/asm.h>
 #include <ppc/proc_reg.h>
+#include <ppc/spec_reg.h>
 #include <mach/ppc/vm_param.h>
 #include <assym.s>
 	
@@ -54,11 +55,13 @@
 #define PROCESSOR_VERSION_604		4
 #define PROCESSOR_VERSION_603e		6
 #define PROCESSOR_VERSION_750		8
+#define PROCESSOR_VERSION_750FX		0x7000  /* ? */
 #define PROCESSOR_VERSION_604e		9
 #define PROCESSOR_VERSION_604ev		10	/* ? */
 #define PROCESSOR_VERSION_7400		12	/* ? */
 #define PROCESSOR_VERSION_7410		0x800C	/* ? */
 #define PROCESSOR_VERSION_7450		0x8000	/* ? */
+#define PROCESSOR_VERSION_7455		0x8001	/* ? */
 
 /*
  * Interrupt and bootup stack for initial processor
@@ -436,40 +439,92 @@ callcpu:
 ;			Specific processor initialization routines
 ;
 
-;			750CX
-
-init750CX:	bflr	firstBoot							; No init for wakeup....
-			mfspr	r13,hid1							; Get HID1
-			li		r14,lo16(0xFD5F)					; Get valid
-			rlwinm	r13,r13,4,28,31						; Isolate
-			slw		r14,r14,r13							; Position
-			rlwimi	r17,r14,15-pfCanNapb,pfCanNapb,pfCanNapb	; Set it			
-			b		init750com							; Join common...
-
 ;			750
 
-init750:	bflr	firstBoot							; No init for wakeup....
+init750:
+			bf	firstBoot, init750nb						; No init for wakeup....
 
-init750com:	mfspr	r13,l2cr							; Get the L2CR
+			mfspr	r13,l2cr							; Get the L2CR
 			rlwinm.	r0,r13,0,l2e,l2e					; Any L2?
 			bne+	i750hl2								; Yes...
 			rlwinm	r17,r17,0,pfL2b+1,pfL2b-1			; No L2, turn off feature
 			
-i750hl2:	lis		r14,hi16(256*1024)					; Base L2 size
-			addis	r15,r13,0x3000						; Hah... Figure this one out...
-			rlwinm	r15,r15,4,30,31						; Isolate
-			rlwinm.	r8,r13,0,l2siz,l2sizf				; Was size valid?
-			slw		r14,r14,r15							; Set 256KB, 512KB, or 1MB
-			beq-	init750none							; Not a valid setting...
+i750hl2:
+			lis	r14,hi16(256*1024)						; Base L2 size
+			addis	r15,r13,0x3000							; Hah... Figure this one out...
+			rlwinm	r15,r15,4,30,31							; Isolate
+			rlwinm.	r8,r13,0,l2siz,l2sizf						; Was size valid?
+			slw	r14,r14,r15							; Set 256KB, 512KB, or 1MB
+			beq-	init750l2none							; Not a valid setting...
 			
-			stw		r13,pfl2cr(r30)						; Shadow the L2CR
-			stw		r14,pfl2Size(r30)					; Set the L2 size
-			blr											; Return....
+			stw	r13,pfl2crOriginal(r30)						; Shadow the L2CR
+			stw	r13,pfl2cr(r30)							; Shadow the L2CR
+			stw	r14,pfl2Size(r30)						; Set the L2 size
+			b	init750l2done							; Done with L2
 			
-init750none:
-			rlwinm	r17,r17,0,pfL2b+1,pfL2b-1			; No level 2 cache
-			blr											; Return...
+init750l2none:
+			rlwinm	r17,r17,0,pfL2b+1,pfL2b-1					; No level 2 cache
+			
+init750l2done:
+			mfspr	r11,hid0							; Get the current HID0
+			stw	r11,pfHID0(r30)							; Save the HID0 value
+			blr									; Return...
+			
+init750nb:
+			lwz	r11,pfHID0(r30)							; Get HID0
+			sync
+			mtspr	hid0,r11							; Set the HID
+			isync
+			sync
+			blr
 
+;			750CX
+
+init750CX:
+			bf	firstBoot, init750						; No init for wakeup....
+			mfspr	r13,hid1							; Get HID1
+			li	r14,lo16(0xFD5F)						; Get valid
+			rlwinm	r13,r13,4,28,31							; Isolate
+			slw	r14,r14,r13							; Position
+			rlwimi	r17,r14,15-pfCanNapb,pfCanNapb,pfCanNapb			; Set it			
+			b	init750								; Join common...
+
+
+;			750FX
+
+init750FX:
+			bf	firstBoot, init750FXnb
+			mfspr	r11, hid1
+			stw	r11, pfHID1(r30)						; Save the HID1 value
+			b	init750
+
+init750FXnb:
+			lwz	r13, pfHID0(r30)						; Get HID0
+			lwz	r11, pfHID1(r30)						; Get HID1
+
+			rlwinm.	r0, r11, 0, hid1ps, hid1ps					; Isolate the hid1ps bit
+			beq	init750FXnb2							; Clear BTIC if hid1ps set
+			rlwinm	r13, r13, 0, btic+1, btic-1					; Clear the BTIC bit
+
+init750FXnb2:
+			sync
+			mtspr	hid0, r13							; Set the HID
+			isync
+			sync
+
+			rlwinm  r12, r11, 0, hid1ps+1, hid1ps-1					; Select PLL0
+			mtspr	hid1, r12							; Restore PLL config
+			mftb	r13								; Wait 5000 ticks (> 200 us)
+
+init750FXnbloop:
+			mftb	r14
+			sub	r14, r14, r13
+			cmpli	cr0, r14, 5000
+			ble	init750FXnbloop
+			mtspr	hid1, r11							; Select the desired PLL
+			blr
+
+;			7400
 
 init7400:	bf		firstBoot,i7400nb					; Do different if not initial boot...
 			mfspr	r13,l2cr							; Get the L2CR
@@ -482,6 +537,7 @@ i7400hl2:	lis		r14,hi16(256*1024)					; Base L2 size
 			rlwinm	r15,r15,4,30,31						 
 			slw		r14,r14,r15							; Set 256KB, 512KB, 1MB, or 2MB
 			
+			stw		r13,pfl2crOriginal(r30)					; Shadow the L2CR
 			stw		r13,pfl2cr(r30)						; Shadow the L2CR
 			stw		r14,pfl2Size(r30)					; Set the L2 size
 			
@@ -497,9 +553,14 @@ i7400hl2:	lis		r14,hi16(256*1024)					; Base L2 size
 			stw		r11,pfMSSCR1(r30)					; Save the MSSCR1 value
 			blr											; Return...
 			
-i7400nb:	lwz		r11,pfHID0(r30)						; Get HID0
+i7400nb:
+			li		r11,0
+			mtspr		l2cr,r11						; Make sure L2CR is zero
+			lwz		r11,pfHID0(r30)						; Get HID0
 			sync
 			mtspr	hid0,r11							; Set the HID
+			isync
+			sync			
 			lwz		r11,pfMSSCR0(r30)					; Get MSSCR0
 			isync
 			sync
@@ -511,54 +572,68 @@ i7400nb:	lwz		r11,pfHID0(r30)						; Get HID0
 			isync
 			sync
 			blr
-				
+
+;			7400 (ver 2.0 - ver 2.7)
+
+init7400v2_7:
+			bf	firstBoot, init7400
+			mfspr	r13, hid0							; Get the HID0
+			ori	r13, r13, nopdstm						; ?
+			mtspr	hid0, r13							; Set the HID0
+			isync
+			sync
+			b	init7400
+
 ;			7410
 ;			Note that this is the same as 7400 except we initialize the l2cr2 register
 
 init7410:	li		r13,0								; Clear
 			mtspr	1016,r13							; Turn off direct cache
 			b		init7400							; Join up with common....
-			
-;			7450
 
-init7450:	bf		firstBoot,i7450nb					; Do different if not initial boot...
-			oris	r17,r17,hi16(pfAvJava)				; Show that we do Java mode in non-open source version
+
+;			745X - Any 7450 family processor
+
+init745X:
+			bf		firstBoot,init745Xnb					; Do different if not initial boot...
 
 			mfspr	r13,l2cr							; Get the L2CR
 			rlwinm.	r0,r13,0,l2e,l2e					; Any L2?
-			bne+	i7450hl2							; Yes...
+			bne+	init745Xhl2							; Yes...
 			rlwinm	r17,r17,0,pfL2b+1,pfL2b-1			; No L2, turn off feature
 			
-i7450hl2:	lis		r14,hi16(256*1024)					; Base L2 size
+init745Xhl2:	lis		r14,hi16(256*1024)					; Base L2 size
 			rlwinm	r15,r13,22,12,13					; Convert to 256k, 512k, or 768k
 			add		r14,r14,r15							; Add in minimum
 			
+			stw		r13,pfl2crOriginal(r30)					; Shadow the L2CR
 			stw		r13,pfl2cr(r30)						; Shadow the L2CR
 			stw		r14,pfl2Size(r30)					; Set the L2 size
 				
 ;			Take care of level 3 cache
 
 			mfspr	r13,l3cr							; Get the L3CR
-			rlwinm.	r0,r13,0,l3e,l3e					; Any L2?
-			bne+	i7450hl3							; Yes...
-			rlwinm	r17,r17,0,pfL3b+1,pfL3b-1			; No L2, turn off feature
+			rlwinm.	r0,r13,0,l3e,l3e					; Any L3?
+			bne+	init745Xhl3							; Yes...
+			rlwinm	r17,r17,0,pfL3b+1,pfL3b-1			; No L3, turn off feature
 
-i7450hl3:	cmplwi	cr0,r13,0							; No L3 if L3CR is zero
-			beq-	init7450none							; Go turn off the features...
+init745Xhl3:	cmplwi	cr0,r13,0							; No L3 if L3CR is zero
+			beq-	init745Xnone							; Go turn off the features...
 			lis		r14,hi16(1024*1024)					; Base L3 size
 			rlwinm	r15,r13,4,31,31						; Get size multiplier
 			slw		r14,r14,r15							; Set 1 or 2MB
 			
+			stw		r13,pfl3crOriginal(r30)					; Shadow the L3CR
 			stw		r13,pfl3cr(r30)						; Shadow the L3CR
 			stw		r14,pfl3Size(r30)					; Set the L3 size
-			b		init7450fin							; Return....
+			b		init745Xfin							; Return....
 				
-init7450none:
+init745Xnone:
 			rlwinm	r17,r17,0,pfL3fab+1,pfL3b-1					; No 3rd level cache or assist
 			rlwinm	r11,r17,pfWillNapb-pfCanNapb,pfCanNapb,pfCanNapb		; Set pfCanNap if pfWillNap is set
 			or	r17,r17,r11
 
-init7450fin:
+init745Xfin:
 			rlwinm	r17,r17,0,pfWillNapb+1,pfWillNapb-1				; Make sure pfWillNap is not set
 
 			mfspr	r11,hid0							; Get the current HID0
@@ -575,10 +650,12 @@ init7450fin:
 			stw		r11,pfLDSTCR(r30)					; Save the LDSTCR value
 			mfspr	r11,ldstdb							; Get the ldstdb register
 			stw		r11,pfLDSTDB(r30)					; Save the LDSTDB value
+			mfspr	r11,pir								; Get the pir register
+			stw		r11,pfBootConfig(r30)					; Save the BootConfig value
 			blr											; Return....
 
 
-i7450nb:	lwz		r11,pfHID0(r30)						; Get HID0
+init745Xnb:	lwz		r11,pfHID0(r30)						; Get HID0
 			sync
 			mtspr	hid0,r11							; Set the HID
 			isync
@@ -607,6 +684,21 @@ i7450nb:	lwz		r11,pfHID0(r30)						; Get HID0
 			isync
 			sync
 			blr
+
+;			7450 - Specific
+
+init7450:
+			bf	firstBoot, init745X						; Not boot, use standard init
+			
+			mfspr	r13, pir							; Get BootConfig from PIR
+			rlwinm.	r14, r13, 0, 20, 23						; Is the pdet value zero
+			bne	init7450done							; No, done for now
+			
+			ori	r13, r13, 0x0400						; Force pdet value to 4
+			mtspr	pir, r13							; Write back the BootConfig
+			
+init7450done:
+			b	init745X							; Continue with standard init
 
 
 ;
@@ -765,7 +857,36 @@ processor_types:
 	.long	32*1024
 	.long	32*1024
 	
+;       750FX (generic)
 
+        .align  2
+        .long   0xFFFF0000              ; All revisions
+        .short  PROCESSOR_VERSION_750FX
+        .short  0
+        .long   pfFloat | pfCanSleep | pfCanNap | pfCanDoze | pfSlowNap | pfNoMuMMCK | pfL1i | pfL1d | pfL2
+        .long   init750FX
+        .long   CPU_SUBTYPE_POWERPC_750
+        .long   105
+        .long   90
+        .long   32
+        .long   32*1024
+        .long   32*1024
+	
+;	7400 (ver 2.0 - ver 2.7)
+
+	.align	2
+	.long	0xFFFFFFF8		; All revisions
+	.short	PROCESSOR_VERSION_7400
+	.short	0x0200
+	.long	pfFloat | pfAltivec | pfSMPcap | pfCanSleep | pfCanNap | pfCanDoze | pfThermal | pfL1i | pfL1d | pfL1fa | pfL2 | pfL2fa
+	.long	init7400v2_7
+	.long	CPU_SUBTYPE_POWERPC_7400
+	.long	105
+	.long	90
+	.long	32
+	.long	32*1024
+	.long	32*1024
+	
 ;	7400 (generic)
 
 	.align	2
@@ -817,7 +938,7 @@ processor_types:
 	.long	0xFFFFFF00		; Just revisions 1.xx
 	.short	PROCESSOR_VERSION_7450
 	.short	0x0100
-	.long	pfFloat | pfAltivec | pfSMPcap | pfCanSleep | pfNoMSRir | pfLClck | pfL1nnc | pfL1i | pfL1d | pfL2 | pfL2fa | pfL2i | pfL3 | pfL3fa
+	.long	pfFloat | pfAltivec | pfSMPcap | pfCanSleep | pfNoMSRir | pfNoL2PFNap | pfLClck | pfL1i | pfL1d | pfL2 | pfL2fa | pfL2i | pfL3 | pfL3fa
 	.long	init7450
 	.long	CPU_SUBTYPE_POWERPC_7450
 	.long	105
@@ -832,7 +953,7 @@ processor_types:
 	.long	0xFFFFFFFF		; Just revision 2.0
 	.short	PROCESSOR_VERSION_7450
 	.short	0x0200
-	.long	pfFloat | pfAltivec | pfSMPcap | pfCanSleep | pfNoMSRir | pfLClck | pfL1i | pfL1d | pfL2 | pfL2fa | pfL2i | pfL3 | pfL3fa
+	.long	pfFloat | pfAltivec | pfSMPcap | pfCanSleep | pfNoMSRir | pfNoL2PFNap | pfLClck | pfL1i | pfL1d | pfL2 | pfL2fa | pfL2i | pfL3 | pfL3fa
 	.long	init7450
 	.long	CPU_SUBTYPE_POWERPC_7450
 	.long	105
@@ -847,7 +968,7 @@ processor_types:
 	.long	0xFFFF0000		; All other revisions
 	.short	PROCESSOR_VERSION_7450
 	.short	0
-	.long	pfFloat | pfAltivec | pfSMPcap | pfCanSleep | pfNoMSRir | pfWillNap | pfLClck | pfL1i | pfL1d | pfL2 | pfL2fa | pfL2i | pfL3 | pfL3fa
+	.long	pfFloat | pfAltivec | pfSMPcap | pfCanSleep | pfWillNap | pfNoMSRir | pfNoL2PFNap | pfLClck | pfL1i | pfL1d | pfL2 | pfL2fa | pfL2i | pfL3 | pfL3fa
 	.long	init7450
 	.long	CPU_SUBTYPE_POWERPC_7450
 	.long	105
@@ -856,6 +977,50 @@ processor_types:
 	.long	32*1024
 	.long	32*1024
 
+;	7455 (1.xx)  Just like 7450 2.0
+
+	.align	2
+	.long	0xFFFFFF00		; Just revisions 1.xx
+	.short	PROCESSOR_VERSION_7455
+	.short	0x0100
+	.long	pfFloat | pfAltivec | pfSMPcap | pfCanSleep | pfNoMSRir | pfNoL2PFNap | pfLClck | pfL1i | pfL1d | pfL2 | pfL2fa | pfL2i | pfL3 | pfL3fa
+	.long	init745X
+	.long	CPU_SUBTYPE_POWERPC_7450
+	.long	105
+	.long	90
+	.long	32
+	.long	32*1024
+	.long	32*1024
+
+;	7455 (2.0)
+
+	.align	2
+	.long	0xFFFFFFFF		; Just revision 2.0
+	.short	PROCESSOR_VERSION_7455
+	.short	0x0200
+	.long	pfFloat | pfAltivec | pfSMPcap | pfCanSleep | pfWillNap | pfNoMSRir | pfNoL2PFNap | pfLClck | pfL1i | pfL1d | pfL2 | pfL2fa | pfL2i | pfL3 | pfL3fa
+	.long	init745X
+	.long	CPU_SUBTYPE_POWERPC_7450
+	.long	105
+	.long	90
+	.long	32
+	.long	32*1024
+	.long	32*1024
+
+;	7455 (2.1)
+
+	.align	2
+	.long	0xFFFF0000		; All other revisions
+	.short	PROCESSOR_VERSION_7455
+	.short	0
+	.long	pfFloat | pfAltivec | pfSMPcap | pfCanSleep | pfCanNap | pfNoMSRir | pfNoL2PFNap | pfLClck | pfL1i | pfL1d | pfL2 | pfL2fa | pfL2i | pfL3 | pfL3fa
+	.long	init745X
+	.long	CPU_SUBTYPE_POWERPC_7450
+	.long	105
+	.long	90
+	.long	32
+	.long	32*1024
+	.long	32*1024
 
 ;	Default dumb loser machine
 

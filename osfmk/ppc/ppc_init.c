@@ -41,6 +41,7 @@
 #include <ppc/savearea.h>
 #include <ppc/low_trace.h>
 #include <ppc/Diagnostics.h>
+#include <ppc/mem.h>
 
 #include <pexpert/pexpert.h>
 
@@ -112,6 +113,7 @@ void ppc_init(boot_args *args)
 	char *str;
 	unsigned long	addr, videoAddr;
 	unsigned int	maxmem;
+	unsigned int	cputrace;
 	bat_t		    bat;
 	extern vm_offset_t static_memory_end;
 	
@@ -128,16 +130,19 @@ void ppc_init(boot_args *args)
 	per_proc_info[0].interrupts_enabled = 0;
 	per_proc_info[0].active_kloaded = (unsigned int)
 		&active_kloaded[0];
-	per_proc_info[0].cpu_data = (unsigned int)
-		&cpu_data[0];
+	set_machine_current_thread(&pageout_thread);
+	set_machine_current_act(&pageout_act);
+	pageout_thread.top_act = &pageout_act;
+	pageout_act.thread = &pageout_thread;
+	per_proc_info[0].pp_preemption_count = 1;
+	per_proc_info[0].pp_simple_lock_count = 0;
+	per_proc_info[0].pp_interrupt_level = 0;
 	per_proc_info[0].active_stacks = (unsigned int)
 		&active_stacks[0];
 	per_proc_info[0].need_ast = (unsigned int)
 		&need_ast[0];
-	per_proc_info[0].FPU_thread = 0;
-	per_proc_info[0].FPU_vmmCtx = 0;
-	per_proc_info[0].VMX_thread = 0;
-	per_proc_info[0].VMX_vmmCtx = 0;
+	per_proc_info[0].FPU_owner = 0;
+	per_proc_info[0].VMX_owner = 0;
 
 	machine_slot[0].is_cpu = TRUE;
 
@@ -169,50 +174,83 @@ void ppc_init(boot_args *args)
 	/* DBAT[2] maps the I/O Segment 1:1 */
 	/* DBAT[3] maps the Video Segment 1:1 */
 
+
+	/* Initialize shadow IBATs */
+	shadow_BAT.IBATs[0].upper=BAT_INVALID;
+	shadow_BAT.IBATs[0].lower=BAT_INVALID;
+	shadow_BAT.IBATs[1].upper=BAT_INVALID;
+	shadow_BAT.IBATs[1].lower=BAT_INVALID;
+	shadow_BAT.IBATs[2].upper=BAT_INVALID;
+	shadow_BAT.IBATs[2].lower=BAT_INVALID;
+	shadow_BAT.IBATs[3].upper=BAT_INVALID;
+	shadow_BAT.IBATs[3].lower=BAT_INVALID;
+
+	/* Initialize shadow DBATs */
+	shadow_BAT.DBATs[0].upper=BAT_INVALID;
+	shadow_BAT.DBATs[0].lower=BAT_INVALID;
+	shadow_BAT.DBATs[1].upper=BAT_INVALID;
+	shadow_BAT.DBATs[1].lower=BAT_INVALID;
+	shadow_BAT.DBATs[2].upper=BAT_INVALID;
+	shadow_BAT.DBATs[2].lower=BAT_INVALID;
+	shadow_BAT.DBATs[3].upper=BAT_INVALID;
+	shadow_BAT.DBATs[3].lower=BAT_INVALID;
+
+
 	/* If v_baseAddr is non zero, use DBAT3 to map the video segment */
 	videoAddr = args->Video.v_baseAddr & 0xF0000000;
 	if (videoAddr) {
-	  /* start off specifying 1-1 mapping of video seg */
-	  bat.upper.word	     = videoAddr;
-	  bat.lower.word	     = videoAddr;
-	  
-	  bat.upper.bits.bl    = 0x7ff;	/* size = 256M */
-	  bat.upper.bits.vs    = 1;
-	  bat.upper.bits.vp    = 0;
-	  
-	  bat.lower.bits.wimg  = PTE_WIMG_IO;
-	  bat.lower.bits.pp    = 2;	/* read/write access */
-	  
-	  sync();isync();
-	  mtdbatu(3, BAT_INVALID); /* invalidate old mapping */
-	  mtdbatl(3, bat.lower.word);
-	  mtdbatu(3, bat.upper.word);
-	  sync();isync();
+		/* start off specifying 1-1 mapping of video seg */
+		bat.upper.word	     = videoAddr;
+		bat.lower.word	     = videoAddr;
+		
+		bat.upper.bits.bl    = 0x7ff;	/* size = 256M */
+		bat.upper.bits.vs    = 1;
+		bat.upper.bits.vp    = 0;
+		
+		bat.lower.bits.wimg  = PTE_WIMG_IO;
+		bat.lower.bits.pp    = 2;	/* read/write access */
+				
+		shadow_BAT.DBATs[3].upper = bat.upper.word;
+		shadow_BAT.DBATs[3].lower = bat.lower.word;
+		
+		sync();isync();
+		
+		mtdbatu(3, BAT_INVALID); /* invalidate old mapping */
+		mtdbatl(3, bat.lower.word);
+		mtdbatu(3, bat.upper.word);
+		sync();isync();
 	}
 	
 	/* Use DBAT2 to map the io segment */
 	addr = get_io_base_addr() & 0xF0000000;
 	if (addr != videoAddr) {
-	  /* start off specifying 1-1 mapping of io seg */
-	  bat.upper.word	     = addr;
-	  bat.lower.word	     = addr;
-	  
-	  bat.upper.bits.bl    = 0x7ff;	/* size = 256M */
-	  bat.upper.bits.vs    = 1;
-	  bat.upper.bits.vp    = 0;
-	  
-	  bat.lower.bits.wimg  = PTE_WIMG_IO;
-	  bat.lower.bits.pp    = 2;	/* read/write access */
-	  
-	  sync();isync();
-	  mtdbatu(2, BAT_INVALID); /* invalidate old mapping */
-	  mtdbatl(2, bat.lower.word);
-	  mtdbatu(2, bat.upper.word);
-	  sync();isync();
+		/* start off specifying 1-1 mapping of io seg */
+		bat.upper.word	     = addr;
+		bat.lower.word	     = addr;
+		
+		bat.upper.bits.bl    = 0x7ff;	/* size = 256M */
+		bat.upper.bits.vs    = 1;
+		bat.upper.bits.vp    = 0;
+		
+		bat.lower.bits.wimg  = PTE_WIMG_IO;
+		bat.lower.bits.pp    = 2;	/* read/write access */
+				
+		shadow_BAT.DBATs[2].upper = bat.upper.word;
+		shadow_BAT.DBATs[2].lower = bat.lower.word;
+		
+		sync();isync();
+		mtdbatu(2, BAT_INVALID); /* invalidate old mapping */
+		mtdbatl(2, bat.lower.word);
+		mtdbatu(2, bat.upper.word);
+		sync();isync();
 	}
 
 	if (!PE_parse_boot_arg("diag", &dgWork.dgFlags)) dgWork.dgFlags=0;	/* Set diagnostic flags */
 	if(dgWork.dgFlags & enaExpTrace) trcWork.traceMask = 0xFFFFFFFF;	/* If tracing requested, enable it */
+
+	if(PE_parse_boot_arg("ctrc", &cputrace)) {							/* See if tracing is limited to a specific cpu */
+		trcWork.traceMask = (trcWork.traceMask & 0xFFFFFFF0) | (cputrace & 0xF);	/* Limit to 4 */
+	}
 
 #if 0
 	GratefulDebInit((bootBumbleC *)&(args->Video));	/* Initialize the GratefulDeb debugger */
@@ -271,19 +309,16 @@ ppc_init_cpu(
 	struct per_proc_info *proc_info)
 {
 	int i;
-	unsigned int gph;
-	savectl *sctl;							/* Savearea controls */
 
-	if(proc_info->savedSave) {				/* Do we have a savearea set up already? */
-		mtsprg(1, proc_info->savedSave);	/* Set saved address of savearea */
-	}
-	else {
-		gph = (unsigned int)save_get_phys();	/* Get a savearea (physical addressing) */
-		mtsprg(1, gph);						/* Set physical address of savearea */
-	}
+	if(!(proc_info->next_savearea)) 		/* Do we have a savearea set up already? */
+		proc_info->next_savearea = (savearea *)save_get_init();	/* Get a savearea  */
 	
 	cpu_init();
-	
+
+	proc_info->pp_preemption_count = 1;
+	proc_info->pp_simple_lock_count = 0;
+	proc_info->pp_interrupt_level = 0;
+
 	proc_info->Lastpmap = 0;				/* Clear last used space */
 
 	/* Set up segment registers as VM through space 0 */

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2001 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
@@ -73,6 +73,7 @@
 #include <miscfs/specfs/specdev.h>
 #include <vfs/vfs_support.h>
 
+#include <sys/kdebug.h>
 
 struct vnode *speclisth[SPECHSZ];
 
@@ -589,8 +590,28 @@ spec_strategy(ap)
 		struct buf *a_bp;
 	} */ *ap;
 {
-	(*bdevsw[major(ap->a_bp->b_dev)].d_strategy)(ap->a_bp);
-	return (0);
+        struct buf *bp;
+
+        bp = ap->a_bp;
+
+        if (kdebug_enable) {
+            int    code = 0;
+
+            if (bp->b_flags & B_READ)
+                code |= DKIO_READ;
+            if (bp->b_flags & B_ASYNC)
+                code |= DKIO_ASYNC;
+
+            if (bp->b_flags & B_META)
+                code |= DKIO_META;
+            else if (bp->b_flags & (B_PGIN | B_PAGEOUT))
+                code |= DKIO_PAGING;
+
+            KERNEL_DEBUG_CONSTANT(FSDBG_CODE(DBG_DKRW, code) | DBG_FUNC_NONE,
+                                bp, bp->b_dev, bp->b_blkno, bp->b_bcount, 0);
+        }
+        (*bdevsw[major(bp->b_dev)].d_strategy)(bp);
+        return (0);
 }
 
 /*
@@ -663,8 +684,8 @@ spec_close(ap)
 		 */
 		if (vcount(vp) == 2 && ap->a_p &&
 		    vp == ap->a_p->p_session->s_ttyvp) {
-			vrele(vp);
 			ap->a_p->p_session->s_ttyvp = NULL;
+			vrele(vp);
 		}
 		/*
 		 * If the vnode is locked, then we are in the midst

@@ -27,6 +27,14 @@
 #include <IOKit/IODeviceTreeSupport.h>
 #include <IOKit/nvram/IONVRAMController.h>
 
+
+#define kIODTNVRAMOFPartitionName       "common"
+#define kIODTNVRAMXPRAMPartitionName    "APL,MacOS75"
+#define kIODTNVRAMPanicInfoPartitonName "APL,OSXPanic"
+#define kIODTNVRAMFreePartitionName     "wwwwwwwwwwww"
+
+#define kIODTNVRAMPanicInfoKey "aapl,panic-info"
+
 enum {
   kIODTNVRAMImageSize        = 0x2000,
   kIODTNVRAMXPRAMSize        = 0x0100,
@@ -60,13 +68,20 @@ private:
   UInt8             *_ofImage;
   bool              _ofImageDirty;
   OSDictionary      *_ofDict;
+  OSDictionary      *_nvramPartitionOffsets;
+  OSDictionary      *_nvramPartitionLengths;
   UInt32            _xpramPartitionOffset;
   UInt32            _xpramPartitionSize;
   UInt8             *_xpramImage;
   UInt32            _nrPartitionOffset;
   UInt32            _nrPartitionSize;
   UInt8             *_nrImage;
+  UInt32            _piPartitionOffset;
+  UInt32            _piPartitionSize;
+  UInt8             *_piImage;
+  bool              _systemPaniced;
   
+  virtual UInt8 calculatePartitionChecksum(UInt8 *partitionHeader);
   virtual IOReturn initOFVariables(void);
   virtual IOReturn syncOFVariables(void);
   virtual UInt32 getOFVariableType(const OSSymbol *propSymbol) const;
@@ -126,6 +141,18 @@ public:
   virtual IOReturn writeNVRAMProperty(IORegistryEntry *entry,
 				      const OSSymbol *name,
 				      OSData *value);
+  
+  virtual OSDictionary *getNVRAMPartitions(void);
+  
+  virtual IOReturn readNVRAMPartition(const OSSymbol *partitionID,
+				      IOByteCount offset, UInt8 *buffer,
+				      IOByteCount length);
+  
+  virtual IOReturn writeNVRAMPartition(const OSSymbol *partitionID,
+				       IOByteCount offset, UInt8 *buffer,
+				       IOByteCount length);  
+  
+  virtual IOByteCount savePanicInfo(UInt8 *buffer, IOByteCount length);
 };
 
 #endif /* !_IOKIT_IONVRAM_H */

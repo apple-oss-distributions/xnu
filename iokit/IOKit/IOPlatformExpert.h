@@ -45,10 +45,14 @@ extern int PEGetPlatformEpoch( void );
 
 enum {
   kPEHaltCPU,
-  kPERestartCPU
+  kPERestartCPU,
+  kPEHangCPU
 };
 extern int (*PE_halt_restart)(unsigned int type);
 extern int PEHaltRestart(unsigned int type);
+
+// Save the Panic Info.  Returns the number of bytes saved.
+extern unsigned long PESavePanicInfo(unsigned char *buffer, unsigned long  length);
 
 extern long PEGetGMTTimeOfDay( void );
 extern void PESetGMTTimeOfDay( long secs );
@@ -143,7 +147,10 @@ public:
     virtual bool hasPrivPMFeature (unsigned long privFeatureMask);
     virtual int  numBatteriesSupported (void);
 
-    OSMetaClassDeclareReservedUnused(IOPlatformExpert,  0);
+    virtual IOByteCount savePanicInfo(UInt8 *buffer, IOByteCount length);
+
+    OSMetaClassDeclareReservedUsed(IOPlatformExpert,  0);
+
     OSMetaClassDeclareReservedUnused(IOPlatformExpert,  1);
     OSMetaClassDeclareReservedUnused(IOPlatformExpert,  2);
     OSMetaClassDeclareReservedUnused(IOPlatformExpert,  3);
@@ -196,6 +203,7 @@ public:
 
     /* virtual */ IOReturn readXPRAM(IOByteCount offset, UInt8 * buffer,
 				     IOByteCount length);
+
     /* virtual */ IOReturn writeXPRAM(IOByteCount offset, UInt8 * buffer,
 				      IOByteCount length);
 
@@ -207,6 +215,20 @@ public:
 	IORegistryEntry * entry,
 	const OSSymbol * name, OSData * value );
 
+    // This returns a dictionary describing all the NVRAM partitions.
+    // The keys will be the partitionIDs of the form "0x52,nvram".
+    // The values will be OSNumbers of the partition's byte count.
+    /* virtual */ OSDictionary *getNVRAMPartitions(void);
+
+    /* virtual */ IOReturn readNVRAMPartition(const OSSymbol * partitionID,
+					      IOByteCount offset, UInt8 * buffer,
+					      IOByteCount length);
+
+    /* virtual */ IOReturn writeNVRAMPartition(const OSSymbol * partitionID,
+					       IOByteCount offset, UInt8 * buffer,
+					       IOByteCount length);
+
+    virtual IOByteCount savePanicInfo(UInt8 *buffer, IOByteCount length);
 
     OSMetaClassDeclareReservedUnused(IODTPlatformExpert,  0);
     OSMetaClassDeclareReservedUnused(IODTPlatformExpert,  1);

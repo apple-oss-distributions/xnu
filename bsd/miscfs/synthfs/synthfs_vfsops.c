@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2001 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
@@ -34,7 +34,6 @@
 #include <sys/proc.h>
 #include <sys/kernel.h>
 #include <mach/machine/vm_types.h>
-//#include <mach/mach_init.h>
 #include <sys/vnode.h>
 #include <sys/socket.h>
 #include <sys/mount.h>
@@ -281,8 +280,8 @@ synthfs_mount(mp, path, data, ndp, p)
 {
 	size_t size;
 
-    (void) copyinstr(path, mp->mnt_stat.f_mntonname, sizeof(mp->mnt_stat.f_mntonname) - 1, &size);
-	synthfs_mount_fs(mp, path, data, ndp, p);
+	(void) copyinstr(path, mp->mnt_stat.f_mntonname, sizeof(mp->mnt_stat.f_mntonname) - 1, &size);
+	return (synthfs_mount_fs(mp, path, data, ndp, p));
 }
 
 

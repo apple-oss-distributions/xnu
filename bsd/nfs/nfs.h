@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2002 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
@@ -62,6 +62,9 @@
 #ifndef _NFS_NFS_H_
 #define _NFS_NFS_H_
 
+#include <sys/appleapiopts.h>
+
+#ifdef __APPLE_API_PRIVATE
 /*
  * Tunable constants for nfs
  */
@@ -638,9 +641,9 @@ void	nfsm_srvpostopattr __P((struct nfsrv_descript *, int, struct vattr *,
 int	netaddr_match __P((int, union nethostaddr *, struct mbuf *));
 int	nfs_request __P((struct vnode *, struct mbuf *, int, struct proc *,
 			 struct ucred *, struct mbuf **, struct mbuf **,
-			 caddr_t *));
+			 caddr_t *, u_int64_t *));
 int	nfs_loadattrcache __P((struct vnode **, struct mbuf **, caddr_t *,
-			       struct vattr *));
+			       struct vattr *, int, u_int64_t *));
 int	nfs_namei __P((struct nameidata *, fhandle_t *, int,
 		       struct nfssvc_sock *, struct mbuf *, struct mbuf **,
 		       caddr_t *, struct vnode **, struct proc *, int, int));
@@ -747,6 +750,11 @@ int	nfsrv_write __P((struct nfsrv_descript *nfsd, struct nfssvc_sock *slp,
 void	nfsrv_rcv __P((struct socket *so, caddr_t arg, int waitflag));
 void	nfsrv_slpderef __P((struct nfssvc_sock *slp));
 
+/*
+ * NFSTRACE points were changed to FSDBG (KERNEL_DEBUG)
+ * But some of this code may prove useful someday...
+ */
+#undef NFSDIAG
 #if NFSDIAG
 
 extern int nfstraceindx;
@@ -837,5 +845,6 @@ extern uint nfstracemask; /* 32 bits - trace points over 31 are unconditional */
 #endif	/* NFSDIAG */
 
 #endif	/* KERNEL */
+#endif /* __APPLE_API_PRIVATE */
 
 #endif

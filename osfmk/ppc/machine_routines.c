@@ -121,6 +121,8 @@ void ml_install_interrupt_handler(
 
 	per_proc_info[current_cpu].interrupts_enabled = TRUE;  
 	(void) ml_set_interrupts_enabled(current_state);
+
+	initialize_screen(0, kPEAcquireScreen);
 }
 
 /* Initialize Interrupts */
@@ -190,6 +192,28 @@ boolean_t ml_at_interrupt_context(void)
 void ml_cause_interrupt(void)
 {
 	CreateFakeIO();
+}
+
+void ml_thread_policy(
+	thread_t thread,
+	unsigned policy_id,
+	unsigned policy_info)
+{
+	if ((policy_id == MACHINE_GROUP) &&
+		((per_proc_info[0].pf.Available) & pfSMPcap))
+			thread_bind(thread, master_processor);
+
+	if (policy_info & MACHINE_NETWORK_WORKLOOP) {
+		spl_t		s = splsched();
+
+		thread_lock(thread);
+
+		thread->sched_mode |= TH_MODE_FORCEDPREEMPT;
+		set_priority(thread, thread->priority + 1);
+
+		thread_unlock(thread);
+		splx(s);
+	}
 }
 
 void machine_idle(void)
@@ -302,15 +326,60 @@ ml_ppc_get_info(ml_ppc_cpu_info_t *cpu_info)
   }
 }
 
+#define l2em 0x80000000
+#define l3em 0x80000000
+
+extern int real_ncpus;
+
+int
+ml_enable_cache_level(int cache_level, int enable)
+{
+  int old_mode;
+  unsigned long available, ccr;
+  
+  if (real_ncpus != 1) return -1;
+  
+  available = per_proc_info[0].pf.Available;
+  
+  if ((cache_level == 2) && (available & pfL2)) {
+    ccr = per_proc_info[0].pf.l2cr;
+    old_mode = (ccr & l2em) ? TRUE : FALSE;
+    if (old_mode != enable) {
+      if (enable) ccr = per_proc_info[0].pf.l2crOriginal;
+      else ccr = 0;
+      per_proc_info[0].pf.l2cr = ccr;
+      cacheInit();
+    }
+    
+    return old_mode;
+  }
+  
+  if ((cache_level == 3) && (available & pfL3)) {
+    ccr = per_proc_info[0].pf.l3cr;
+    old_mode = (ccr & l3em) ? TRUE : FALSE;
+    if (old_mode != enable) {
+      if (enable) ccr = per_proc_info[0].pf.l3crOriginal;
+      else ccr = 0;
+      per_proc_info[0].pf.l3cr = ccr;
+      cacheInit();
+    }
+    
+    return old_mode;
+  }
+  
+  return -1;
+}
+
 void
 init_ast_check(processor_t processor)
 {}
                 
 void
-cause_ast_check(processor_t processor)
+cause_ast_check(
+	processor_t		processor)
 {
-	if ((processor != current_processor())
-	    && (per_proc_info[processor->slot_num].interrupts_enabled == TRUE))
+	if (	processor != current_processor()								&&
+	    	per_proc_info[processor->slot_num].interrupts_enabled == TRUE	)
 		cpu_signal(processor->slot_num, SIGPast, NULL, NULL);
 }
               
@@ -320,9 +389,7 @@ switch_to_shutdown_context(
 	void		(*doshutdown)(processor_t),
 	processor_t	processor)
 {
-	disable_preemption();
 	CreateShutdownCTX();   
-	enable_preemption();
 	return((thread_t)(per_proc_info[cpu_number()].old_thread));
 }
 

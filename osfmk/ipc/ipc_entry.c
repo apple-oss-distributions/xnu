@@ -654,10 +654,7 @@ ipc_entry_grow_table(
 			 *	We just wait for them to finish.
 			 */
 
-			assert_wait((event_t) space, THREAD_UNINT);
-			is_write_unlock(space);
-			thread_block((void (*)(void)) 0);
-			is_write_lock(space);
+			is_write_sleep(space);
 			return KERN_SUCCESS;
 		}
 
@@ -695,14 +692,15 @@ ipc_entry_grow_table(
 				return KERN_NO_SPACE;
 			}
 		}
-		nits = its + 1;
-		nsize = nits->its_size;
 
 		if (osize == size) {
 			is_write_unlock(space);
 			return KERN_NO_SPACE;
 		}
  
+		nits = its + 1;
+		nsize = nits->its_size;
+
 		assert((osize < size) && (size <= nsize));
 
 		/*

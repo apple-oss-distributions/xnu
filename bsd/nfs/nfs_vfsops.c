@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2001 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
@@ -57,14 +57,6 @@
  *
  *	@(#)nfs_vfsops.c	8.12 (Berkeley) 5/20/95
  * FreeBSD-Id: nfs_vfsops.c,v 1.52 1997/11/12 05:42:21 julian Exp $
- *
- *  History:
- *
- *
- *  23-May-97  Umesh Vaishampayan  (umeshv@apple.com)
- *	Added the ability to mount "/private" separately.
- *	Fixed bug which caused incorrect reporting of "mounted on"
- *	directory name in case of nfs root.
  */
 
 #include <sys/param.h>
@@ -228,12 +220,8 @@ static int nfs_iosize(nmp)
 	 * space.
 	 */
 	iosize = max(nmp->nm_rsize, nmp->nm_wsize);
-	if (iosize < PAGE_SIZE) iosize = PAGE_SIZE;
-#if 0
-	/* XXX UPL changes for UBC do not support multiple pages */
-	iosize = PAGE_SIZE; /* XXX FIXME */
-#endif
-        /* return iosize; */
+	if (iosize < PAGE_SIZE)
+		iosize = PAGE_SIZE;
 	return (trunc_page(iosize));
 }
 
@@ -282,12 +270,14 @@ nfs_statfs(mp, sbp, p)
 	struct ucred *cred;
 	u_quad_t tquad;
 	extern int nfs_mount_type;
+	u_int64_t xid;
 
 #ifndef nolint
 	sfp = (struct nfs_statfs *)0;
 #endif
 	vp = nmp->nm_dvp;
-	vn_lock(vp, LK_EXCLUSIVE | LK_RETRY, p);
+	if (error = vn_lock(vp, LK_EXCLUSIVE | LK_RETRY, p))
+		return(error);
 	cred = crget();
 	cred->cr_ngroups = 1;
 	if (v3 && (nmp->nm_flag & NFSMNT_GOTFSINFO) == 0)
@@ -295,9 +285,9 @@ nfs_statfs(mp, sbp, p)
 	nfsstats.rpccnt[NFSPROC_FSSTAT]++;
 	nfsm_reqhead(vp, NFSPROC_FSSTAT, NFSX_FH(v3));
 	nfsm_fhtom(vp, v3);
-	nfsm_request(vp, NFSPROC_FSSTAT, p, cred);
+	nfsm_request(vp, NFSPROC_FSSTAT, p, cred, &xid);
 	if (v3)
-		nfsm_postop_attr(vp, retattr);
+		nfsm_postop_attr(vp, retattr, &xid);
 	nfsm_dissect(sfp, struct nfs_statfs *, NFSX_STATFS(v3));
 
 /* XXX CSM 12/2/97 Cleanup when/if we integrate FreeBSD mount.h */
@@ -355,12 +345,13 @@ nfs_fsinfo(nmp, vp, cred, p)
 	caddr_t bpos, dpos, cp2;
 	int error = 0, retattr;
 	struct mbuf *mreq, *mrep, *md, *mb, *mb2;
+	u_int64_t xid;
 
 	nfsstats.rpccnt[NFSPROC_FSINFO]++;
 	nfsm_reqhead(vp, NFSPROC_FSINFO, NFSX_FH(1));
 	nfsm_fhtom(vp, 1);
-	nfsm_request(vp, NFSPROC_FSINFO, p, cred);
-	nfsm_postop_attr(vp, retattr);
+	nfsm_request(vp, NFSPROC_FSINFO, p, cred, &xid);
+	nfsm_postop_attr(vp, retattr, &xid);
 	if (!error) {
 		nfsm_dissect(fsp, struct nfsv3_fsinfo *, NFSX_V3FSINFO);
 		pref = fxdr_unsigned(u_long, fsp->fs_wtpref);
@@ -427,10 +418,14 @@ nfs_mountroot()
 
 	/*
 	 * Call nfs_boot_init() to fill in the nfs_diskless struct.
-	 * Side effect:  Finds and configures a network interface.
+	 * Note: networking must already have been configured before
+	 * we're called.
 	 */
 	bzero((caddr_t) &nd, sizeof(nd));
-	nfs_boot_init(&nd, procp);
+	error = nfs_boot_init(&nd, procp);
+	if (error) {
+		panic("nfs_boot_init failed with %d\n", error);
+	}
 
 	/*
 	 * Create the root mount point.
@@ -440,7 +435,7 @@ nfs_mountroot()
 #else
 	if (error = nfs_mount_diskless(&nd.nd_root, "/", NULL, &vp, &mp)) {
 #endif /* NO_MOUNT_PRIVATE */
-		return(error);
+		panic("nfs_mount_diskless failed with %d\n", error);
 	}
 	printf("root on %s\n", (char *)&nd.nd_root.ndm_host);
 
@@ -454,8 +449,9 @@ nfs_mountroot()
 	if (nd.nd_private.ndm_saddr.sin_addr.s_addr) {
 	    error = nfs_mount_diskless_private(&nd.nd_private, "/private",
 					       NULL, &vppriv, &mppriv);
-	    if (error)
-		return(error);
+	    if (error) {
+		panic("nfs_mount_diskless failed with %d\n", error);
+	    }
 	    printf("private on %s\n", (char *)&nd.nd_private.ndm_host);
 	    
 	    simple_lock(&mountlist_slock);
@@ -505,7 +501,7 @@ nfs_mount_diskless(ndmntp, mntname, mntflag, vpp, mpp)
 	args.addrlen  = args.addr->sa_len;
 	args.sotype   = SOCK_DGRAM;
 	args.fh       = ndmntp->ndm_fh;
-	args.fhsize   = NFSX_V2FH;
+	args.fhsize   = NFSX_V2FH; /* need to try v3, then v2 */
 	args.hostname = ndmntp->ndm_host;
 	args.flags    = NFSMNT_RESVPORT;
 
@@ -562,8 +558,8 @@ nfs_mount_diskless_private(ndmntp, mntname, mntflag, vpp, mpp)
 		/* Get the vnode for '/'. Set fdp->fd_cdir to reference it. */
 		if (VFS_ROOT(mountlist.cqh_first, &rootvnode))
 			panic("cannot find root vnode");
+		VREF(rootvnode);
 		fdp->fd_cdir = rootvnode;
-		VREF(fdp->fd_cdir);
 		VOP_UNLOCK(rootvnode, 0, procp);
 		fdp->fd_rdir = NULL;
 	}
@@ -947,13 +943,8 @@ nfs_unmount(mp, mntflags, p)
 	 * - Decrement reference on the vnode representing remote root.
 	 * - Close the socket
 	 * - Free up the data structures
-	 *
-	 * We need to decrement the ref. count on the nfsnode representing
-	 * the remote root.  See comment in mountnfs().  The VFS unmount()
-	 * has done vput on this vnode, otherwise we would get deadlock!
 	 */
 	vp = nmp->nm_dvp;
-	vn_lock(vp, LK_EXCLUSIVE | LK_RETRY, p);
 	
 	/*
 	 * Must handshake with nqnfs_clientd() if it is active.
@@ -968,10 +959,9 @@ nfs_unmount(mp, mntflags, p)
 	 */
 	error = vflush(mp, vp, SKIPSWAP | flags);
 	if (mntflags & MNT_FORCE) 
-		error = vflush(mp, NULLVP, flags);
+		error = vflush(mp, NULLVP, flags); /* locks vp in the process */
 	else {
 		if (vp->v_usecount > 1) {
-			VOP_UNLOCK(vp, 0, p);
 			nmp->nm_flag &= ~NFSMNT_DISMINPROG;
 			return (EBUSY);
 		}
@@ -979,7 +969,6 @@ nfs_unmount(mp, mntflags, p)
 	}
 
 	if (error) {
-		VOP_UNLOCK(vp, 0, p);
 		nmp->nm_flag &= ~NFSMNT_DISMINPROG;
 		return (error);
 	}
@@ -993,10 +982,11 @@ nfs_unmount(mp, mntflags, p)
 
 	/*
 	 * Release the root vnode reference held by mountnfs()
-	 * Note: vflush would have done the vgone for us if we
-	 * didn't skip over it due to mount reference held.
+	 * vflush did the vgone for us when we didn't skip over
+	 * it in the MNT_FORCE case. (Thus vp can't be locked when
+	 * called vflush in non-skip vp case.)
 	 */
-	vput(vp);
+	vrele(vp);
 	if (!(mntflags & MNT_FORCE))
 		vgone(vp);
 	mp->mnt_data = 0; /* don't want to end up using stale vp */
@@ -1076,6 +1066,7 @@ loop:
 	for (vp = mp->mnt_vnodelist.lh_first;
 	     vp != NULL;
 	     vp = vp->v_mntvnodes.le_next) {
+		 int didhold = 0;
 		/*
 		 * If the vnode that we are about to sync is no longer
 		 * associated with this mount point, start over.
@@ -1086,10 +1077,14 @@ loop:
 			continue;
 		if (vget(vp, LK_EXCLUSIVE, p))
 			goto loop;
+		didhold = ubc_hold(vp);
 		error = VOP_FSYNC(vp, cred, waitfor, p);
 		if (error)
 			allerror = error;
-		vput(vp);
+		VOP_UNLOCK(vp, 0, p);
+		if (didhold)
+			ubc_rele(vp);
+		vrele(vp);
 	}
 	return (allerror);
 }

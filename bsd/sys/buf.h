@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2002 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
@@ -62,14 +62,18 @@
 
 #ifndef _SYS_BUF_H_
 #define	_SYS_BUF_H_
+
+#include <sys/appleapiopts.h>
+
+#ifdef KERNEL
 #include <sys/queue.h>
 #include <sys/errno.h>
-
 #include <sys/vm.h>
+#include <sys/cdefs.h>
+
+#ifdef __APPLE_API_PRIVATE
 
 #define NOLIST ((struct buf *)0x87654321)
-
-#include <sys/cdefs.h>
 
 /*
  * The buffer header describes an I/O operation in the kernel.
@@ -158,7 +162,7 @@ struct buf {
 #define	B_WANTED	0x00800000	/* Process wants this buffer. */
 #define	B_WRITE		0x00000000	/* Write buffer (pseudo flag). */
 #define	B_WRITEINPROG	0x01000000	/* Write in progress. */
-#define	B_UNUSED0	0x02000000	/* Unused bit */
+#define	B_HDRALLOC	0x02000000	/* zone allocated buffer header */
 #define	B_UNUSED1	0x04000000	/* Unused bit */
 #define B_NEED_IODONE   0x08000000
 								/* need to do a biodone on the */
@@ -193,27 +197,35 @@ struct buf {
 #define	BLK_CLREAD	0x20	/* buffer for cluster read */
 #define	BLK_CLWRITE	0x40	/* buffer for cluster write */
 
-#ifdef KERNEL
 extern int nbuf;			/* The number of buffer headers */
 extern struct buf *buf;		/* The buffer headers. */
 
+#endif /* __APPLE_API_PRIVATE */
+
+
+#ifdef __APPLE_API_UNSTABLE
 /* Macros to clear/set/test flags. */
 #define	SET(t, f)	(t) |= (f)
 #define	CLR(t, f)	(t) &= ~(f)
 #define	ISSET(t, f)	((t) & (f))
+#endif /* __APPLE_API_UNSTABLE */
 
+#ifdef __APPLE_API_PRIVATE
 /*
  * Definitions for the buffer free lists.
  */
-#define	BQUEUES		5		/* number of free buffer queues */
+#define	BQUEUES		6		/* number of free buffer queues */
 
 #define	BQ_LOCKED	0		/* super-blocks &c */
 #define	BQ_LRU		1		/* lru, useful buffers */
 #define	BQ_AGE		2		/* rubbish */
 #define	BQ_EMPTY	3		/* buffer headers with no memory */
 #define BQ_META		4		/* buffer containing metadata */
+#define BQ_LAUNDRY	5		/* buffers that need cleaning */
+#endif /* __APPLE_API_PRIVATE */
 
 __BEGIN_DECLS
+#ifdef __APPLE_API_UNSTABLE
 int	allocbuf __P((struct buf *, int));
 void	bawrite __P((struct buf *));
 void	bdwrite __P((struct buf *));
@@ -230,6 +242,7 @@ int	breadn __P((struct vnode *, daddr_t, int, daddr_t *, int *, int,
 void	brelse __P((struct buf *));
 void	bremfree __P((struct buf *));
 void	bufinit __P((void));
+void	bwillwrite __P((void));
 int	bwrite __P((struct buf *));
 struct buf *getblk __P((struct vnode *, daddr_t, int, int, int, int));
 struct buf *geteblk __P((int));
@@ -239,8 +252,11 @@ int physio __P((void (*)(struct buf *), struct buf *, dev_t, int ,  u_int (*)(st
 int count_busy_buffers __P((void));
 struct buf *alloc_io_buf __P((struct vnode *, int));
 void free_io_buf __P((struct buf *));
+void reassignbuf __P((struct buf *, struct vnode *));
+#endif /* __APPLE_API_UNSTABLE */
 __END_DECLS
 
+#ifdef __APPLE_API_PRIVATE
 /*
  *	Stats on usefulness of the buffer cache
  */
@@ -255,6 +271,7 @@ struct bufstats {
 	long	bufs_iobufinuse;	/* number of IO buffers in use */
 	long	bufs_iobufsleeps;	/* IO buffer starvation */
 };
+#endif /* __APPLE_API_PRIVATE */
 
 #endif /* KERNEL */
 #endif /* !_SYS_BUF_H_ */

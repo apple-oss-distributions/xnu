@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 1997-2002 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
@@ -18,14 +18,8 @@
  * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
- */
-/*	@(#)hfs_search.c
  *
- *	(c) 1997-2000	Apple Computer, Inc.  All Rights Reserved
- *	
- *
- *	MODIFICATION HISTORY:
- *      04-May-1999	Don Brady		Split off from hfs_vnodeops.c.
+ *	@(#)hfs_search.c
  */
 
 #include <sys/param.h>
@@ -44,35 +38,70 @@
 
 #include "hfs.h"
 #include "hfs_dbg.h"
+#include "hfs_catalog.h"
+#include "hfs_attrlist.h"
+#include "hfs_endian.h"
+
 #include "hfscommon/headers/FileMgrInternal.h"
 #include "hfscommon/headers/CatalogPrivate.h"
 #include "hfscommon/headers/HFSUnicodeWrappers.h"
+#include "hfscommon/headers/BTreesPrivate.h"
+#include "hfscommon/headers/BTreeScanner.h"
 
 
-/* Private description used in hfs_search */
-/*
- * ============ W A R N I N G ! ============
- * DO NOT INCREASE THE SIZE OF THIS STRUCT!
- * It must match the size of the opaque
- * searchstate struct (in sys/attr.h).
- */
-struct SearchState {
-	long		searchBits;
-	BTreeIterator	btreeIterator;
+/* Search criterea. */
+struct directoryInfoSpec
+{
+	u_long		numFiles;
 };
-typedef struct SearchState SearchState;
+
+struct fileInfoSpec
+{
+	off_t		dataLogicalLength;
+	off_t		dataPhysicalLength;
+	off_t		resourceLogicalLength;
+	off_t		resourcePhysicalLength;
+};
+
+struct searchinfospec
+{
+	u_char			name[kHFSPlusMaxFileNameBytes];
+	u_long			nameLength;
+	char			attributes;		// see IM:Files 2-100
+	u_long			nodeID;
+	u_long			parentDirID;
+	struct timespec		creationDate;		
+	struct timespec		modificationDate;		
+	struct timespec		changeDate;	
+	struct timespec		accessDate;		
+	struct timespec		lastBackupDate;	
+	u_long			finderInfo[8];
+	uid_t			uid;	
+	gid_t			gid;
+	mode_t			mask;
+	struct fileInfoSpec	f;
+	struct directoryInfoSpec d;
+};
+typedef struct searchinfospec searchinfospec_t;
+
+static void ResolveHardlink(ExtendedVCB *vcb, HFSPlusCatalogFile *recp);
 
 
-static int UnpackSearchAttributeBlock(struct vnode *vp, struct attrlist	*alist, searchinfospec_t *searchInfo, void *attributeBuffer);
+static int UnpackSearchAttributeBlock(struct vnode *vp, struct attrlist	*alist,
+		searchinfospec_t *searchInfo, void *attributeBuffer);
 
-Boolean CheckCriteria(ExtendedVCB *vcb, const SearchState *searchState,
-			u_long searchBits, struct attrlist *attrList,
-			CatalogNodeData *cnp, CatalogKey *key,
-			searchinfospec_t *searchInfo1, searchinfospec_t *searchInfo2);
+static int CheckCriteria(	ExtendedVCB *vcb, 
+							u_long searchBits,
+							struct attrlist *attrList, 
+							CatalogRecord *rec,
+							CatalogKey *key, 
+							searchinfospec_t *searchInfo1,
+							searchinfospec_t *searchInfo2,
+							Boolean lookForDup );
 
-static int CheckAccess(CatalogNodeData *cnp, CatalogKey *key, struct proc *p);
+static int CheckAccess(ExtendedVCB *vcb, CatalogKey *key, struct proc *p);
 
-static int InsertMatch(struct vnode *vp, struct uio *a_uio, CatalogNodeData *cnp,
+static int InsertMatch(struct vnode *vp, struct uio *a_uio, CatalogRecord *rec,
 			CatalogKey *key, struct attrlist *returnAttrList,
 			void *attributesBuffer, void *variableBuffer,
 			u_long bufferSize, u_long * nummatches );
@@ -90,11 +119,29 @@ static Boolean CompareWideRange( u_int64_t val, u_int64_t low, u_int64_t high )
 	return( (val >= low) && (val <= high) );
 }
 //#define CompareRange(val, low, high)	((val >= low) && (val <= high))
+			
+#if 1 // Installer workaround (2940423)
+static Boolean IsTargetName( searchinfospec_t * searchInfoPtr, Boolean isHFSPlus );
+#endif // Installer workaround
 
+extern int cat_convertkey(
+			struct hfsmount *hfsmp,
+			CatalogKey *key,
+			CatalogRecord * recp,
+			struct cat_desc *descp);
 
+extern void cat_convertattr(
+			struct hfsmount *hfsmp,
+			CatalogRecord * recp,
+			struct cat_attr *attrp,
+			struct cat_fork *datafp,
+			struct cat_fork *rsrcfp);
+
+extern int resolvelink(struct hfsmount *hfsmp, u_long linkref,
+			struct HFSPlusCatalogFile *recp);
 
 /************************************************************************/
-/*	Entry for searchfs() 		  										*/
+/* Entry for searchfs()                                                 */
 /************************************************************************/
 
 #define	errSearchBufferFull	101	/* Internal search errors */
@@ -113,86 +160,63 @@ vop_searchfs {
 
 int
 hfs_search( ap )
-struct vop_searchfs_args *ap; /*
- struct vnodeop_desc *a_desc;
- struct vnode *a_vp;
- void *a_searchparams1;
- void *a_searchparams2;
- struct attrlist *a_searchattrs;
- u_long a_maxmatches;
- struct timeval *a_timelimit;
- struct attrlist *a_returnattrs;
- u_long *a_nummatches;
- u_long a_scriptcode;
- u_long a_options;
- struct uio *a_uio;
- struct searchstate *a_searchstate;
-*/
+	struct vop_searchfs_args *ap; /*
+		struct vnodeop_desc *a_desc;
+		struct vnode *a_vp;
+		void *a_searchparams1;
+		void *a_searchparams2;
+		struct attrlist *a_searchattrs;
+		u_long a_maxmatches;
+		struct timeval *a_timelimit;
+		struct attrlist *a_returnattrs;
+		u_long *a_nummatches;
+		u_long a_scriptcode;
+		u_long a_options;
+		struct uio *a_uio;
+		struct searchstate *a_searchstate;
+	*/
 {
-	CatalogNodeData		cnode;
-	BTreeKey			*key;
-	FSBufferDescriptor	btRecord;
-	FCB*				catalogFCB;
-	SearchState			*searchState;
-	searchinfospec_t	searchInfo1;
-	searchinfospec_t	searchInfo2;
-	void				*attributesBuffer;
-	void				*variableBuffer;
-	short				recordSize;
-	short				operation;
-	u_long				fixedBlockSize;
-	u_long				eachReturnBufferSize;
-	struct proc			*p = current_proc();
-	u_long				nodesToCheck = 30;	/* After we search 30 nodes we must give up time */
-	u_long				lastNodeNum = 0XFFFFFFFF;
-	ExtendedVCB			*vcb = VTOVCB(ap->a_vp);
-	int					err = E_NONE;
-	int					isHFSPlus;
+	ExtendedVCB *vcb = VTOVCB(ap->a_vp);
+	FCB * catalogFCB;
+	searchinfospec_t searchInfo1;
+	searchinfospec_t searchInfo2;
+	void *attributesBuffer;
+	void *variableBuffer;
+	u_long fixedBlockSize;
+	u_long eachReturnBufferSize;
+	struct proc *p = current_proc();
+	int err = E_NONE;
+	int isHFSPlus;
+	int timerExpired = false;
+	int doQuickExit = false;
+	CatalogKey * myCurrentKeyPtr;
+	CatalogRecord * myCurrentDataPtr;
+	CatPosition * myCatPositionPtr;
+	BTScanState myBTScanState;
 
 	/* XXX Parameter check a_searchattrs? */
 
 	*(ap->a_nummatches) = 0;
 
-	if ( ap->a_options & ~SRCHFS_VALIDOPTIONSMASK )
-		return( EINVAL );
+	if (ap->a_options & ~SRCHFS_VALIDOPTIONSMASK)
+		return (EINVAL);
 
 	if (ap->a_uio->uio_resid <= 0)
 		return (EINVAL);
 
 	isHFSPlus = (vcb->vcbSigWord == kHFSPlusSigWord);
-	searchState = (SearchState *)ap->a_searchstate;
-
-	/*
-	 * Check if this is the first time we are being called.
-	 * If it is, allocate SearchState and we'll move it to the users space on exit
-	 */
-	if ( ap->a_options & SRCHFS_START ) {
-		bzero( (caddr_t)searchState, sizeof(SearchState) );
-		operation = kBTreeFirstRecord;
-		ap->a_options &= ~SRCHFS_START;
-	} else {
-		operation = kBTreeCurrentRecord;
-	}
 
 	/* UnPack the search boundries, searchInfo1, searchInfo2 */
-	err = UnpackSearchAttributeBlock( ap->a_vp, ap->a_searchattrs, &searchInfo1, ap->a_searchparams1 );
+	err = UnpackSearchAttributeBlock(ap->a_vp, ap->a_searchattrs,
+				&searchInfo1, ap->a_searchparams1);
 	if (err) return err;
-	err = UnpackSearchAttributeBlock( ap->a_vp, ap->a_searchattrs, &searchInfo2, ap->a_searchparams2 );
+	err = UnpackSearchAttributeBlock(ap->a_vp, ap->a_searchattrs,
+				&searchInfo2, ap->a_searchparams2);
 	if (err) return err;
 
-	btRecord.itemCount = 1;
-	if (isHFSPlus) {
-		btRecord.itemSize = sizeof(cnode);
-		btRecord.bufferAddress = &cnode;
-	} else {
-		btRecord.itemSize = sizeof(HFSCatalogFile);
-		btRecord.bufferAddress = &cnode.cnd_extra;
-	}
-	catalogFCB = VTOFCB( vcb->catalogRefNum );
-	key = (BTreeKey*) &(searchState->btreeIterator.key);
-	fixedBlockSize = sizeof(u_long) + AttributeBlockSize( ap->a_returnattrs );	/* u_long for length longword */
+	fixedBlockSize = sizeof(u_long) + hfs_attrblksize(ap->a_returnattrs);	/* u_long for length longword */
 	eachReturnBufferSize = fixedBlockSize;
-	
+
 	if ( ap->a_returnattrs->commonattr & ATTR_CMN_NAME )	/* XXX should be more robust! */
 		eachReturnBufferSize += kHFSPlusMaxFileNameBytes + 1;
 
@@ -200,46 +224,148 @@ struct vop_searchfs_args *ap; /*
 	variableBuffer = (void*)((char*) attributesBuffer + fixedBlockSize);
 
 	/* Lock catalog b-tree */
-	err = hfs_metafilelocking( VTOHFS(ap->a_vp), kHFSCatalogFileID, LK_SHARED, p );
-	if ( err != E_NONE ) {
+	err = hfs_metafilelocking(VTOHFS(ap->a_vp), kHFSCatalogFileID, LK_SHARED, p);
+	if (err)
 		goto ExitThisRoutine;
-	};
 
-	/*
-	 * Iterate over all the catalog btree records
-	 */
-	
-	err = BTIterateRecord( catalogFCB, operation, &(searchState->btreeIterator), &btRecord, &recordSize );
+	catalogFCB = GetFileControlBlock(vcb->catalogRefNum);
+	myCurrentKeyPtr = NULL;
+	myCurrentDataPtr = NULL;
+	myCatPositionPtr = (CatPosition *)ap->a_searchstate;
 
-	while( err == E_NONE ) {
-		if (!isHFSPlus)
-			CopyCatalogNodeData(vcb, (CatalogRecord*)&cnode.cnd_extra, &cnode);
-	
-		if ( CheckCriteria( vcb, searchState, ap->a_options, ap->a_searchattrs, &cnode,
-							(CatalogKey *)key, &searchInfo1, &searchInfo2 ) &&
-			 CheckAccess(&cnode, (CatalogKey *)key, ap->a_uio->uio_procp)) {
-			err = InsertMatch(ap->a_vp, ap->a_uio, &cnode, (CatalogKey *)key,
-					  ap->a_returnattrs, attributesBuffer, variableBuffer,
-					  eachReturnBufferSize, ap->a_nummatches);
-			if ( err != E_NONE )
-				break;
-		}
-
-		err = BTIterateRecord( catalogFCB, kBTreeNextRecord, &(searchState->btreeIterator), &btRecord, &recordSize );
+	if (ap->a_options & SRCHFS_START) {
+		/* Starting a new search. */
+		/* Make sure the on-disk Catalog file is current */
+		(void) VOP_FSYNC(vcb->catalogRefNum, NOCRED, MNT_WAIT, p);
+		ap->a_options &= ~SRCHFS_START;
+		bzero( (caddr_t)myCatPositionPtr, sizeof( *myCatPositionPtr ) );
+		err = BTScanInitialize(catalogFCB, 0, 0, 0, kCatSearchBufferSize, &myBTScanState);
 		
-			if  ( *(ap->a_nummatches) >= ap->a_maxmatches )
-				break;
+#if 1 // Installer workaround (2940423)
+		// hack to get around installer problems when the installer expects search results 
+		// to be in key order.  At this point the problem appears to be limited to 
+		// searches for "Library".  The idea here is to go get the "Library" at root
+		// and return it first to the caller then continue the search as normal with
+		// the exception of taking care not to return a duplicate hit (see CheckCriteria) 
+		if ( err == E_NONE &&
+			 (ap->a_searchattrs->commonattr & ATTR_CMN_NAME) != 0 &&
+			 IsTargetName( &searchInfo1, isHFSPlus )  )
+		{
+			CatalogRecord		rec;
+			BTreeIterator       iterator;
+			FSBufferDescriptor  btrec;
+			CatalogKey *		keyp;
+			UInt16              reclen;
+			OSErr				result;
+		
+			bzero( (caddr_t)&iterator, sizeof( iterator ) );
+			keyp = (CatalogKey *) &iterator.key;
+			(void) BuildCatalogKeyUTF8(vcb, kRootDirID, "Library", kUndefinedStrLen, keyp, NULL);
 
-  		if ( searchState->btreeIterator.hint.nodeNum != lastNodeNum ) {
-			lastNodeNum = searchState->btreeIterator.hint.nodeNum;
-			if ( --nodesToCheck == 0 )
-				break;	/* We must leave the kernel to give up time */
+			btrec.bufferAddress = &rec;
+			btrec.itemCount = 1;
+			btrec.itemSize = sizeof( rec );
+
+			result = BTSearchRecord( catalogFCB, &iterator, &btrec, &reclen, &iterator );
+			if ( result == E_NONE ) {
+				if (CheckCriteria(vcb, ap->a_options, ap->a_searchattrs, &rec,
+								  keyp, &searchInfo1, &searchInfo2, false) &&
+					CheckAccess(vcb, keyp, ap->a_uio->uio_procp)) {
+		
+					result = InsertMatch(ap->a_vp, ap->a_uio, &rec, 
+									  keyp, ap->a_returnattrs,
+									  attributesBuffer, variableBuffer,
+									  eachReturnBufferSize, ap->a_nummatches);
+					if (result == E_NONE && *(ap->a_nummatches) >= ap->a_maxmatches)
+						doQuickExit = true;
+				}
+			}
+		}
+#endif // Installer workaround
+	} else {
+		/* Resuming a search. */
+		err = BTScanInitialize(catalogFCB, myCatPositionPtr->nextNode, 
+					myCatPositionPtr->nextRecord, 
+					myCatPositionPtr->recordsFound,
+					kCatSearchBufferSize, 
+					&myBTScanState);
+		/* Make sure Catalog hasn't changed. */
+		if (err == 0
+		&&  myCatPositionPtr->writeCount != myBTScanState.btcb->writeCount) {
+			myCatPositionPtr->writeCount = myBTScanState.btcb->writeCount;
+			err = EBUSY; /* catChangedErr */
 		}
 	}
 
 	/* Unlock catalog b-tree */
-	(void) hfs_metafilelocking( VTOHFS(ap->a_vp), kHFSCatalogFileID, LK_RELEASE, p );
+	(void) hfs_metafilelocking(VTOHFS(ap->a_vp), kHFSCatalogFileID, LK_RELEASE, p);
+	if (err)
+		goto ExitThisRoutine;
+#if 1 // Installer workaround (2940423)
+	if ( doQuickExit )
+		goto QuickExit;
+#endif // Installer workaround
 
+	/*
+	 * Check all the catalog btree records...
+	 *   return the attributes for matching items
+	 */
+	for (;;) {
+		struct timeval myCurrentTime;
+		struct timeval myElapsedTime;
+		
+		err = BTScanNextRecord(&myBTScanState, timerExpired, 
+			(void **)&myCurrentKeyPtr, (void **)&myCurrentDataPtr, 
+			NULL);
+		if (err)
+			break;
+
+		/* Resolve any hardlinks */
+		if (isHFSPlus)
+			ResolveHardlink(vcb, (HFSPlusCatalogFile *) myCurrentDataPtr);
+
+		if (CheckCriteria( vcb, ap->a_options, ap->a_searchattrs, myCurrentDataPtr,
+				myCurrentKeyPtr, &searchInfo1, &searchInfo2, true )
+		&&  CheckAccess(vcb, myCurrentKeyPtr, ap->a_uio->uio_procp)) {
+			err = InsertMatch(ap->a_vp, ap->a_uio, myCurrentDataPtr, 
+					myCurrentKeyPtr, ap->a_returnattrs,
+					attributesBuffer, variableBuffer,
+					eachReturnBufferSize, ap->a_nummatches);
+			if (err) {
+				/*
+				 * The last match didn't fit so come back
+				 * to this record on the next trip.
+				 */
+				--myBTScanState.recordsFound;
+				--myBTScanState.recordNum;
+				break;
+			}
+
+			if (*(ap->a_nummatches) >= ap->a_maxmatches)
+				break;
+		}
+
+		/*
+		 * Check our elapsed time and bail if we've hit the max.
+		 * The idea here is to throttle the amount of time we
+		 * spend in the kernel.
+		 */
+		myCurrentTime = time;
+		timersub(&myCurrentTime, &myBTScanState.startTime, &myElapsedTime);
+		/* Note: assumes kMaxMicroSecsInKernel is less than 1,000,000 */
+		if (myElapsedTime.tv_sec > 0
+		||  myElapsedTime.tv_usec >= kMaxMicroSecsInKernel) {
+			timerExpired = true;
+		}
+	}
+
+QuickExit:
+	/* Update catalog position */
+	myCatPositionPtr->writeCount = myBTScanState.btcb->writeCount;
+
+	BTScanTerminate(&myBTScanState, &myCatPositionPtr->nextNode, 
+			&myCatPositionPtr->nextRecord, 
+			&myCatPositionPtr->recordsFound);
 
 	if ( err == E_NONE ) {
 		err = EAGAIN;	/* signal to the user to call searchfs again */
@@ -250,18 +376,33 @@ struct vop_searchfs_args *ap; /*
 			err = ENOBUFS;
 	} else if ( err == btNotFound ) {
 		err = E_NONE;	/* the entire disk has been searched */
+	} else if ( err == fsBTTimeOutErr ) {
+		err = EAGAIN;
 	}
 
 ExitThisRoutine:
         FREE( attributesBuffer, M_TEMP );
 
-	return( err );
+	return (MacToVFSError(err));
+}
+
+
+static void
+ResolveHardlink(ExtendedVCB *vcb, HFSPlusCatalogFile *recp)
+{
+	if ((recp->recordType == kHFSPlusFileRecord)
+	&&  (SWAP_BE32(recp->userInfo.fdType) == kHardLinkFileType)
+	&&  (SWAP_BE32(recp->userInfo.fdCreator) == kHFSPlusCreator)
+	&&  ((to_bsd_time(recp->createDate) == vcb->vcbCrDate) ||
+	     (to_bsd_time(recp->createDate) == VCBTOHFS(vcb)->hfs_metadata_createdate))) {
+		(void) resolvelink(VCBTOHFS(vcb), recp->bsdInfo.special.iNodeNum, recp);
+	}
 }
 
 
 static Boolean
 CompareMasked(const UInt32 *thisValue, const UInt32 *compareData,
-							 const UInt32 *compareMask, UInt32 count)
+		const UInt32 *compareMask, UInt32 count)
 {
 	Boolean	matched;
 	UInt32	i;
@@ -323,32 +464,94 @@ ComparePartialPascalName ( register ConstStr31Param str, register ConstStr31Para
 /*
  * Check to see if caller has access rights to this item
  */
+
 static int
-CheckAccess(CatalogNodeData *cnp, CatalogKey *key, struct proc *p)
+CheckAccess(ExtendedVCB *theVCBPtr, CatalogKey *theKeyPtr, struct proc *theProcPtr)
 {
-	return (1);
+	Boolean			isHFSPlus;
+	int			myErr;
+	int			myResult; 	
+	HFSCatalogNodeID 	myNodeID;
+	unsigned long		myPerms;
+	hfsmount_t *		my_hfsmountPtr;
+	struct cat_desc 	my_cat_desc;
+	struct cat_attr 	my_cat_attr;
+	
+	myResult = 0;	/* default to "no access" */
+	my_cat_desc.cd_nameptr = NULL;
+	my_cat_desc.cd_namelen = 0;
+		
+	if ( theProcPtr->p_ucred->cr_uid == 0 ) {
+		myResult = 1;	/* allow access */
+		goto ExitThisRoutine; /* root always has access */
+	}
+
+	my_hfsmountPtr = VCBTOHFS( theVCBPtr );
+	isHFSPlus = ( theVCBPtr->vcbSigWord == kHFSPlusSigWord );
+	if ( isHFSPlus )
+		myNodeID = theKeyPtr->hfsPlus.parentID;
+	else
+		myNodeID = theKeyPtr->hfs.parentID;
+	
+	while ( myNodeID >= kRootDirID ) {
+		/* now go get catalog data for this directory */
+		myErr = hfs_metafilelocking( my_hfsmountPtr, kHFSCatalogFileID, LK_SHARED, theProcPtr );
+		if ( myErr )
+			goto ExitThisRoutine;	/* no access */
+	
+		myErr = cat_idlookup( my_hfsmountPtr, myNodeID, &my_cat_desc, &my_cat_attr, NULL );
+		(void) hfs_metafilelocking( my_hfsmountPtr, kHFSCatalogFileID, LK_RELEASE, theProcPtr );
+		if ( myErr )
+			goto ExitThisRoutine;	/* no access */
+
+		myNodeID = my_cat_desc.cd_parentcnid;	/* move up the hierarchy */
+		myPerms = DerivePermissionSummary(my_cat_attr.ca_uid, my_cat_attr.ca_gid, 
+						my_cat_attr.ca_mode, my_hfsmountPtr->hfs_mp,
+						theProcPtr->p_ucred, theProcPtr  );
+		cat_releasedesc( &my_cat_desc );
+		
+		if ( (myPerms & X_OK) == 0 )
+			goto ExitThisRoutine;	/* no access */
+	}
+	
+	myResult = 1;	/* allow access */
+
+ExitThisRoutine:
+	cat_releasedesc( &my_cat_desc );
+	return ( myResult );
+	
 }
 
-Boolean
-CheckCriteria( ExtendedVCB *vcb, const SearchState *searchState, u_long searchBits,
-		struct attrlist *attrList, CatalogNodeData *cnp, CatalogKey *key,
-		searchinfospec_t  *searchInfo1, searchinfospec_t *searchInfo2 )
+static int
+CheckCriteria(	ExtendedVCB *vcb, 
+				u_long searchBits,
+				struct attrlist *attrList, 
+				CatalogRecord *rec, 
+				CatalogKey *key,
+				searchinfospec_t  *searchInfo1, 
+				searchinfospec_t *searchInfo2,
+				Boolean lookForDup )
 {
 	Boolean matched, atleastone;
 	Boolean isHFSPlus;
 	attrgroup_t searchAttributes;
+	struct cat_attr c_attr = {0};
+	struct cat_fork datafork;
+	struct cat_fork rsrcfork;
 	
 	isHFSPlus = (vcb->vcbSigWord == kHFSPlusSigWord);
 
-	switch (cnp->cnd_type) {
-	case kCatalogFolderNode:
+	switch (rec->recordType) {
+	case kHFSFolderRecord:
+	case kHFSPlusFolderRecord:
 		if ( (searchBits & SRCHFS_MATCHDIRS) == 0 ) {	/* If we are NOT searching folders */
 			matched = false;
 			goto TestDone;
 		}
 		break;
 			
-	case kCatalogFileNode:
+	case kHFSFileRecord:
+	case kHFSPlusFileRecord:
 		if ( (searchBits & SRCHFS_MATCHFILES) == 0 ) {	/* If we are NOT searching files */
 			matched = false;
 			goto TestDone;
@@ -386,26 +589,44 @@ CheckCriteria( ExtendedVCB *vcb, const SearchState *searchState, u_long searchBi
 			else /* full HFS name match */
 				matched = (FastRelString(key->hfs.nodeName, (u_char*)searchInfo1->name) == 0);
 		}
-		
+
+#if 1 // Installer workaround (2940423)
+		if ( lookForDup ) {
+			HFSCatalogNodeID parentID;
+			if (isHFSPlus)
+				parentID = key->hfsPlus.parentID;
+			else
+				parentID = key->hfs.parentID;
+	
+			if ( matched && parentID == kRootDirID && 
+				 IsTargetName( searchInfo1, isHFSPlus )  )
+				matched = false;
+		}
+#endif // Installer workaround
+
 		if ( matched == false || (searchBits & ~SRCHFS_MATCHPARTIALNAMES) == 0 )
 			goto TestDone;	/* no match, or nothing more to compare */
 
 		atleastone = true;
 	}
+
+	/* Convert catalog record into cat_attr format. */
+	cat_convertattr(VCBTOHFS(vcb), rec, &c_attr, &datafork, &rsrcfork);
 	
 	/* Now that we have a record worth searching, see if it matches the search attributes */
-	if (cnp->cnd_type == kCatalogFileNode) {
-		if ((attrList->dirattr & ~ATTR_FILE_VALIDMASK) != 0) {	/* attr we do know about  */
+	if (rec->recordType == kHFSFileRecord ||
+	    rec->recordType == kHFSPlusFileRecord) {
+		if ((attrList->fileattr & ~ATTR_FILE_VALIDMASK) != 0) {	/* attr we do know about  */
 			matched = false;
 			goto TestDone;
 		}
-		else if ((attrList->dirattr & ATTR_FILE_VALIDMASK) != 0) {
+		else if ((attrList->fileattr & ATTR_FILE_VALIDMASK) != 0) {
 		searchAttributes = attrList->fileattr;
 	
 		/* File logical length (data fork) */
 		if ( searchAttributes & ATTR_FILE_DATALENGTH ) {
 			matched = CompareWideRange(
-			    cnp->cnd_datafork.logicalSize,
+			    datafork.cf_size,
 			    searchInfo1->f.dataLogicalLength,
 			    searchInfo2->f.dataLogicalLength);
 			if (matched == false) goto TestDone;
@@ -415,7 +636,7 @@ CheckCriteria( ExtendedVCB *vcb, const SearchState *searchState, u_long searchBi
 		/* File physical length (data fork) */
 		if ( searchAttributes & ATTR_FILE_DATAALLOCSIZE ) {
 			matched = CompareWideRange(
-			    cnp->cnd_datafork.totalBlocks * vcb->blockSize,
+			    (u_int64_t)datafork.cf_blocks * (u_int64_t)vcb->blockSize,
 			    searchInfo1->f.dataPhysicalLength,
 			    searchInfo2->f.dataPhysicalLength);
 			if (matched == false) goto TestDone;
@@ -425,7 +646,7 @@ CheckCriteria( ExtendedVCB *vcb, const SearchState *searchState, u_long searchBi
 		/* File logical length (resource fork) */
 		if ( searchAttributes & ATTR_FILE_RSRCLENGTH ) {
 			matched = CompareWideRange(
-			    cnp->cnd_rsrcfork.logicalSize,
+			    rsrcfork.cf_size,
 			    searchInfo1->f.resourceLogicalLength,
 			    searchInfo2->f.resourceLogicalLength);
 			if (matched == false) goto TestDone;
@@ -435,7 +656,7 @@ CheckCriteria( ExtendedVCB *vcb, const SearchState *searchState, u_long searchBi
 		/* File physical length (resource fork) */
 		if ( searchAttributes & ATTR_FILE_RSRCALLOCSIZE ) {
 			matched = CompareWideRange(
-			    cnp->cnd_rsrcfork.totalBlocks * vcb->blockSize,
+			    (u_int64_t)rsrcfork.cf_blocks * (u_int64_t)vcb->blockSize,
 			    searchInfo1->f.resourcePhysicalLength,
 			    searchInfo2->f.resourcePhysicalLength);
 			if (matched == false) goto TestDone;
@@ -443,13 +664,14 @@ CheckCriteria( ExtendedVCB *vcb, const SearchState *searchState, u_long searchBi
 			}
 		}
 		else {
-			atleastone = true;		/* to match SRCHFS_MATCHDIRS */
+			atleastone = true;	/* to match SRCHFS_MATCHFILES */
 		}
 	}
 	/*
 	 * Check the directory attributes
 	 */
-	else if (cnp->cnd_type == kCatalogFolderNode) {
+	else if (rec->recordType == kHFSFolderRecord ||
+	         rec->recordType == kHFSPlusFolderRecord) {
 		if ((attrList->dirattr & ~ATTR_DIR_VALIDMASK) != 0) {	/* attr we do know about  */
 			matched = false;
 			goto TestDone;
@@ -459,7 +681,9 @@ CheckCriteria( ExtendedVCB *vcb, const SearchState *searchState, u_long searchBi
 		
 		/* Directory valence */
 		if ( searchAttributes & ATTR_DIR_ENTRYCOUNT ) {
-			matched = CompareRange(cnp->cnd_valence, searchInfo1->d.numFiles, searchInfo2->d.numFiles );
+			matched = CompareRange(c_attr.ca_entries,
+					searchInfo1->d.numFiles,
+					searchInfo2->d.numFiles );
 			if (matched == false) goto TestDone;
 				atleastone = true;
 			}
@@ -474,10 +698,11 @@ CheckCriteria( ExtendedVCB *vcb, const SearchState *searchState, u_long searchBi
 	 */
 	searchAttributes = attrList->commonattr;
 	if ( (searchAttributes & ATTR_CMN_VALIDMASK) != 0 ) {
-
 		/* node ID */
 		if ( searchAttributes & ATTR_CMN_OBJID ) {
-			matched = CompareRange( cnp->cnd_nodeID, searchInfo1->nodeID, searchInfo2->nodeID );
+			matched = CompareRange(c_attr.ca_fileid,
+					searchInfo1->nodeID,
+					searchInfo2->nodeID );
 			if (matched == false) goto TestDone;
 			atleastone = true;
 		}
@@ -491,7 +716,8 @@ CheckCriteria( ExtendedVCB *vcb, const SearchState *searchState, u_long searchBi
 			else
 				parentID = key->hfs.parentID;
 				
-			matched = CompareRange( parentID, searchInfo1->parentDirID, searchInfo2->parentDirID );
+			matched = CompareRange(parentID, searchInfo1->parentDirID,
+					searchInfo2->parentDirID );
 			if (matched == false) goto TestDone;
 			atleastone = true;
 		}
@@ -499,72 +725,88 @@ CheckCriteria( ExtendedVCB *vcb, const SearchState *searchState, u_long searchBi
 		/* Finder Info & Extended Finder Info where extFinderInfo is last 32 bytes */
 		if ( searchAttributes & ATTR_CMN_FNDRINFO ) {
 			UInt32 *thisValue;
-			thisValue = (UInt32 *) &cnp->cnd_finderInfo;
+			thisValue = (UInt32 *) &c_attr.ca_finderinfo;
 
 			/* 
 			 * Note: ioFlFndrInfo and ioDrUsrWds have the same offset in search info, so
 			 * no need to test the object type here.
 			 */
-			matched = CompareMasked( thisValue, (UInt32 *) &searchInfo1->finderInfo,
-				(UInt32 *) &searchInfo2->finderInfo, 8 ); /* 8 * UInt32 */
+			matched = CompareMasked(thisValue,
+					(UInt32 *)&searchInfo1->finderInfo,
+					(UInt32 *) &searchInfo2->finderInfo, 8);
 			if (matched == false) goto TestDone;
 			atleastone = true;
 		}
 
 		/* Create date */
 		if ( searchAttributes & ATTR_CMN_CRTIME ) {
-			matched = CompareRange(to_bsd_time(cnp->cnd_createDate),
-			    searchInfo1->creationDate.tv_sec,  searchInfo2->creationDate.tv_sec );
+			matched = CompareRange(c_attr.ca_itime,
+					searchInfo1->creationDate.tv_sec,
+					searchInfo2->creationDate.tv_sec);
 			if (matched == false) goto TestDone;
 			atleastone = true;
 		}
 	
 		/* Mod date */
 		if ( searchAttributes & ATTR_CMN_MODTIME ) {
-			matched = CompareRange(to_bsd_time(cnp->cnd_contentModDate),
-			    searchInfo1->modificationDate.tv_sec, searchInfo2->modificationDate.tv_sec );
+			matched = CompareRange(c_attr.ca_mtime,
+					searchInfo1->modificationDate.tv_sec,
+					searchInfo2->modificationDate.tv_sec);
 			if (matched == false) goto TestDone;
 			atleastone = true;
 		}
 	
 		/* Change Time */
 		if ( searchAttributes & ATTR_CMN_CHGTIME ) {
-			matched = CompareRange(to_bsd_time(cnp->cnd_attributeModDate),
-			    searchInfo1->changeDate.tv_sec, searchInfo2->changeDate.tv_sec );
+			matched = CompareRange(c_attr.ca_ctime,
+					searchInfo1->changeDate.tv_sec,
+					searchInfo2->changeDate.tv_sec);
 			if (matched == false) goto TestDone;
 			atleastone = true;
 		}
 	
+		/* Access date */
+		if ( searchAttributes & ATTR_CMN_ACCTIME ) {
+			matched = CompareRange(c_attr.ca_atime,
+					searchInfo1->accessDate.tv_sec,
+					searchInfo2->accessDate.tv_sec);
+			if (matched == false) goto TestDone;
+			atleastone = true;
+		}
+
 		/* Backup date */
 		if ( searchAttributes & ATTR_CMN_BKUPTIME ) {
-			matched = CompareRange(to_bsd_time(cnp->cnd_backupDate),
-			    searchInfo1->lastBackupDate.tv_sec, searchInfo2->lastBackupDate.tv_sec );
+			matched = CompareRange(c_attr.ca_btime,
+					searchInfo1->lastBackupDate.tv_sec,
+					searchInfo2->lastBackupDate.tv_sec);
 			if (matched == false) goto TestDone;
 			atleastone = true;
 		}
 	
 		/* User ID */
 		if ( searchAttributes & ATTR_CMN_OWNERID ) {
-			matched = CompareRange( cnp->cnd_ownerID, searchInfo1->uid, searchInfo2->uid );
+			matched = CompareRange(c_attr.ca_uid,
+					searchInfo1->uid, searchInfo2->uid);
 			if (matched == false) goto TestDone;
 			atleastone = true;
 		}
 
 		/* Group ID */
 		if ( searchAttributes & ATTR_CMN_GRPID ) {
-			matched = CompareRange( cnp->cnd_groupID, searchInfo1->gid, searchInfo2->gid );
+			matched = CompareRange(c_attr.ca_gid,
+					searchInfo1->gid, searchInfo2->gid);
 			if (matched == false) goto TestDone;
 			atleastone = true;
 		}
 
 		/* mode */
 		if ( searchAttributes & ATTR_CMN_ACCESSMASK ) {
-			matched = CompareRange( (u_long)cnp->cnd_mode, 
-				(u_long)searchInfo1->mask, (u_long)searchInfo2->mask );
+			matched = CompareRange((u_long)c_attr.ca_mode, 
+					(u_long)searchInfo1->mask,
+					(u_long)searchInfo2->mask);
 			if (matched == false) goto TestDone;
 			atleastone = true;
 		}
-
 	}
 
 	/* If we got here w/o matching any, then set to false */
@@ -587,98 +829,58 @@ TestDone:
  * Adds another record to the packed array for output
  */
 static int
-InsertMatch( struct vnode *root_vp, struct uio *a_uio, CatalogNodeData *cnp,
+InsertMatch( struct vnode *root_vp, struct uio *a_uio, CatalogRecord *rec,
 		CatalogKey *key, struct attrlist *returnAttrList, void *attributesBuffer,
 		void *variableBuffer, u_long bufferSize, u_long * nummatches )
 {
 	int err;
 	void *rovingAttributesBuffer;
 	void *rovingVariableBuffer;
-	struct hfsCatalogInfo catalogInfo;
 	u_long packedBufferSize;
 	ExtendedVCB *vcb = VTOVCB(root_vp);
 	Boolean isHFSPlus = vcb->vcbSigWord == kHFSPlusSigWord;
 	u_long privateDir = VTOHFS(root_vp)->hfs_private_metadata_dir;
+	struct attrblock attrblk;
+	struct cat_desc c_desc = {0};
+	struct cat_attr c_attr = {0};
+	struct cat_fork datafork;
+	struct cat_fork rsrcfork;
 
 	rovingAttributesBuffer = (char*)attributesBuffer + sizeof(u_long); /* Reserve space for length field */
 	rovingVariableBuffer = variableBuffer;
-	
-	INIT_CATALOGDATA(&catalogInfo.nodeData, 0);
 
-	/* The packing call below expects a struct hfsCatalogInfo */
-	bcopy(cnp, &catalogInfo.nodeData, (cnp->cnd_type == kCatalogFileNode) ?
-	      sizeof(HFSPlusCatalogFile) : sizeof(HFSPlusCatalogFolder));
-
-	catalogInfo.nodeData.cnm_parID = isHFSPlus ? key->hfsPlus.parentID : key->hfs.parentID;
-
-	/* hide open files that have been deleted */
-	if ((privateDir != 0) && (catalogInfo.nodeData.cnm_parID == privateDir))
-		return (0);
+	/* Convert catalog record into cat_attr format. */
+	cat_convertattr(VTOHFS(root_vp), rec, &c_attr, &datafork, &rsrcfork);
 
 	/* hide our private meta data directory */
-	if ((privateDir != 0) && (catalogInfo.nodeData.cnd_nodeID == privateDir))
-		return (0);
-
-	if ( returnAttrList->commonattr & ATTR_CMN_NAME ) {
-		size_t utf8len = 0;
-
-		catalogInfo.nodeData.cnm_nameptr = catalogInfo.nodeData.cnm_namespace;
-
-		/* Return result in UTF-8 */
-		if ( isHFSPlus ) {
-			err = utf8_encodestr(key->hfsPlus.nodeName.unicode,
-					key->hfsPlus.nodeName.length * sizeof(UniChar),
-					catalogInfo.nodeData.cnm_namespace,
-					&utf8len,
-					MAXHFSVNODELEN + 1, ':', 0);
-			if (err == ENAMETOOLONG) {
-				utf8len = utf8_encodelen(key->hfsPlus.nodeName.unicode,
-						key->hfsPlus.nodeName.length * sizeof(UniChar), ':', 0);
-				MALLOC(catalogInfo.nodeData.cnm_nameptr, char *, utf8len+1, M_TEMP, M_WAITOK);
-				catalogInfo.nodeData.cnm_flags |= kCatNameIsAllocated;
-				err = utf8_encodestr(key->hfsPlus.nodeName.unicode,
-						key->hfsPlus.nodeName.length * sizeof(UniChar),
-						catalogInfo.nodeData.cnm_nameptr,
-						&utf8len,
-						utf8len + 1, ':', 0);
-			}
-		 } else {
-			err = hfs_to_utf8(vcb, 
-					key->hfs.nodeName,
-					MAXHFSVNODELEN + 1,
-					(ByteCount*) &utf8len, 
-					catalogInfo.nodeData.cnm_namespace);
-			if (err == ENAMETOOLONG) {
-				MALLOC(catalogInfo.nodeData.cnm_nameptr, char *, utf8len+1, M_TEMP, M_WAITOK);
-				catalogInfo.nodeData.cnm_flags |= kCatNameIsAllocated;
-				err = hfs_to_utf8(vcb, 
-						key->hfs.nodeName, 
-						utf8len + 1, 
-						(ByteCount*) &utf8len, 
-						catalogInfo.nodeData.cnm_nameptr);
-			} else if (err) {
-				/*
-				 * When an HFS name cannot be encoded with the current
-				 * volume encoding we use MacRoman as a fallback.
-				 */
-				err = mac_roman_to_utf8(key->hfs.nodeName, MAXHFSVNODELEN + 1,
-				                        (ByteCount*) &utf8len,
-				                         catalogInfo.nodeData.cnm_namespace);
-			}
-		}
-		catalogInfo.nodeData.cnm_length = utf8len;
-		if (err && (catalogInfo.nodeData.cnm_flags & kCatNameIsAllocated))
-		{
-			DisposePtr(catalogInfo.nodeData.cnm_nameptr);
-			catalogInfo.nodeData.cnm_flags &= ~kCatNameIsAllocated;
-                        catalogInfo.nodeData.cnm_nameptr = catalogInfo.nodeData.cnm_namespace;
-                        catalogInfo.nodeData.cnm_namespace[0] = 0;
-		}
+	if ((privateDir != 0) && (c_attr.ca_fileid == privateDir)) {
+		err = 0;
+		goto exit;
 	}
 
-	PackCatalogInfoAttributeBlock( returnAttrList,root_vp, &catalogInfo, &rovingAttributesBuffer, &rovingVariableBuffer );
+	if (returnAttrList->commonattr & ATTR_CMN_NAME) {
+		cat_convertkey(VTOHFS(root_vp), key, rec, &c_desc);
+	} else {
+		c_desc.cd_cnid = c_attr.ca_fileid;
+		if (isHFSPlus)
+			c_desc.cd_parentcnid = key->hfsPlus.parentID;
+		else
+			c_desc.cd_parentcnid = key->hfs.parentID;
+	}
 
-	CLEAN_CATALOGDATA(&catalogInfo.nodeData);
+	/* hide open files that have been deleted */
+	if ((privateDir != 0) && (c_desc.cd_parentcnid == privateDir)) {
+		err = 0;
+		goto exit;
+	}
+
+	attrblk.ab_attrlist = returnAttrList;
+	attrblk.ab_attrbufpp = &rovingAttributesBuffer;
+	attrblk.ab_varbufpp = &rovingVariableBuffer;
+	attrblk.ab_flags = 0;
+	attrblk.ab_blocksize = 0;
+
+	hfs_packattrblk(&attrblk, VTOHFS(root_vp), NULL, &c_desc, &c_attr, &datafork, &rsrcfork);
 
 	packedBufferSize = (char*)rovingVariableBuffer - (char*)attributesBuffer;
 
@@ -690,6 +892,8 @@ InsertMatch( struct vnode *root_vp, struct uio *a_uio, CatalogNodeData *cnp,
 	*((u_long *)attributesBuffer) = packedBufferSize;	/* Store length of fixed + var block */
 	
 	err = uiomove( (caddr_t)attributesBuffer, packedBufferSize, a_uio );	/* XXX should be packedBufferSize */
+exit:
+	cat_releasedesc(&c_desc);
 	
 	return( err );
 }
@@ -770,6 +974,10 @@ UnpackSearchAttributeBlock( struct vnode *vp, struct attrlist	*alist, searchinfo
 			searchInfo->changeDate = *((struct timespec *)attributeBuffer);
 			++((struct timespec *)attributeBuffer);
 		}
+		if ( a & ATTR_CMN_ACCTIME ) {
+			searchInfo->accessDate = *((struct timespec *)attributeBuffer);
+			++((struct timespec *)attributeBuffer);
+		}
 		if ( a & ATTR_CMN_BKUPTIME ) {
 			searchInfo->lastBackupDate = *((struct timespec *)attributeBuffer);
 			++((struct timespec *)attributeBuffer);
@@ -827,4 +1035,40 @@ UnpackSearchAttributeBlock( struct vnode *vp, struct attrlist	*alist, searchinfo
 	return (0);
 }
 
+
+#if 1 // Installer workaround (2940423)
+/* this routine was added as part of the work around where some installers would fail */
+/* because they incorrectly assumed search results were in some kind of order.  */
+/* This routine is used to indentify the problematic target.  At this point we */
+/* only know of one.  This routine could be modified for more (I hope not). */
+static Boolean IsTargetName( searchinfospec_t * searchInfoPtr, Boolean isHFSPlus )
+{
+	if ( searchInfoPtr->name == NULL )
+		return( false );
+		
+	if (isHFSPlus) {
+		HFSUniStr255 myName = {
+			7, 	/* number of unicode characters */
+			{
+				'L','i','b','r','a','r','y'
+			}
+		};		
+		if ( FastUnicodeCompare( myName.unicode, myName.length,
+								 (UniChar*)searchInfoPtr->name,
+								 searchInfoPtr->nameLength ) == 0 )  {
+			return( true );
+		}
+						  
+	} else {
+		u_char		myName[32] = {
+			0x07,'L','i','b','r','a','r','y'
+		};
+		if ( FastRelString(myName, (u_char*)searchInfoPtr->name) == 0 )  {
+			return( true );
+		}
+	}
+	return( false );
+	
+} /* IsTargetName */
+#endif // Installer workaround
 

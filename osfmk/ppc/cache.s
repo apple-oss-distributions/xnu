@@ -46,6 +46,8 @@ ENTRY(sync_cache, TAG_NO_FRAME_USED)
 
 	/* Switch off data translations */
 	mfmsr	r6
+	rlwinm	r6,r6,0,MSR_FP_BIT+1,MSR_FP_BIT-1	; Force floating point off
+	rlwinm	r6,r6,0,MSR_VEC_BIT+1,MSR_VEC_BIT-1	; Force vectors off
 	rlwinm	r7,	r6,	0,	MSR_DR_BIT+1,	MSR_DR_BIT-1
 	mtmsr	r7
 	isync
@@ -71,7 +73,7 @@ ENTRY(sync_cache, TAG_NO_FRAME_USED)
 	/* loop to flush the data cache */
 .L_sync_data_loop:
 	subic	r4,	r4,	CACHE_LINE_SIZE
-	dcbst	r3,	r4
+	dcbf	r3,	r4
 	bdnz	.L_sync_data_loop
 	
 	sync
@@ -90,7 +92,7 @@ ENTRY(sync_cache, TAG_NO_FRAME_USED)
 	blr
 
 .L_sync_one_line:
-	dcbst	0,r3
+	dcbf	0,r3
 	sync
 	icbi	0,r3
 	b	.L_sync_cache_done
@@ -114,6 +116,8 @@ ENTRY(flush_dcache, TAG_NO_FRAME_USED)
 	cmpwi	r5,	0
 	mfmsr	r6
 	beq+	0f
+	rlwinm	r6,r6,0,MSR_FP_BIT+1,MSR_FP_BIT-1	; Force floating point off
+	rlwinm	r6,r6,0,MSR_VEC_BIT+1,MSR_VEC_BIT-1	; Force vectors off
 	rlwinm	r7,	r6,	0,	MSR_DR_BIT+1,	MSR_DR_BIT-1
 	mtmsr	r7
 	isync
@@ -174,6 +178,8 @@ ENTRY(invalidate_dcache, TAG_NO_FRAME_USED)
 	cmpwi	r5,	0
 	mfmsr	r6
 	beq+	0f
+	rlwinm	r6,r6,0,MSR_FP_BIT+1,MSR_FP_BIT-1	; Force floating point off
+	rlwinm	r6,r6,0,MSR_VEC_BIT+1,MSR_VEC_BIT-1	; Force vectors off
 	rlwinm	r7,	r6,	0,	MSR_DR_BIT+1,	MSR_DR_BIT-1
 	mtmsr	r7
 	isync
@@ -232,6 +238,8 @@ ENTRY(invalidate_icache, TAG_NO_FRAME_USED)
 	cmpwi	r5,	0
 	mfmsr	r6
 	beq+	0f
+	rlwinm	r6,r6,0,MSR_FP_BIT+1,MSR_FP_BIT-1	; Force floating point off
+	rlwinm	r6,r6,0,MSR_VEC_BIT+1,MSR_VEC_BIT-1	; Force vectors off
 	rlwinm	r7,	r6,	0,	MSR_DR_BIT+1,	MSR_DR_BIT-1
 	mtmsr	r7
 	isync

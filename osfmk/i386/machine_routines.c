@@ -22,6 +22,7 @@
 #include <i386/machine_routines.h>
 #include <i386/io_map_entries.h>
 #include <kern/cpu_data.h>
+#include <kern/thread_act.h>
 
 /* IO memory map services */
 
@@ -100,6 +101,14 @@ void ml_cause_interrupt(void)
 	panic("ml_cause_interrupt not defined yet on Intel");
 }
 
+void ml_thread_policy(
+	thread_t thread,
+	unsigned policy_id,
+	unsigned policy_info)
+{
+	return;
+}
+
 /* Initialize Interrupts */
 void ml_install_interrupt_handler(
 	void *nub,
@@ -146,3 +155,10 @@ be_tracing()
 {
   return(0);
 }
+
+#undef current_act
+thread_act_t
+current_act(void)
+{               
+        return(current_act_fast());
+} 

@@ -55,7 +55,7 @@
 #undef assert()
 #endif
 #define assert(cond)    \
-    if (!(cond)) panic("%s:%d (%s)", __FILE__, __LINE__, # cond)
+    ((void) ((cond) ? 0 : panic("%s:%d (%s)", __FILE__, __LINE__, # cond)))
 #else
 #include <kern/assert.h>
 #endif /* DIAGNOSTIC */
@@ -322,13 +322,10 @@ ubc_setsize(struct vnode *vp, off_t nsize)
 
 /*
  * Get the size of the file
- * For local file systems the size is locally cached. For NFS
- * there might be a network transaction for this.
  */
 off_t
 ubc_getsize(struct vnode *vp)
 {
-	/* XXX deal with NFS */
 	return (vp->v_ubcinfo->ui_size);
 }
 
@@ -1025,6 +1022,13 @@ ubc_isinuse(struct vnode *vp, int tookref)
 
 	if (!UBCINFOEXISTS(vp))
 		return (0);
+
+	if (tookref == 0) {
+		printf("ubc_isinuse: called without a valid reference"
+		    ": v_tag = %d\v", vp->v_tag);
+		vprint("ubc_isinuse", vp);
+		return (0);
+	}
 
 	if (vp->v_usecount > busycount)
 		return (1);

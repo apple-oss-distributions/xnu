@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2001 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
@@ -502,7 +502,7 @@ unp_attach(so)
 		if (error)
 			return (error);
 	}
-	unp = zalloc(unp_zone);
+	unp = (struct unpcb*)zalloc(unp_zone);
 	if (unp == NULL)
 		return (ENOBUFS);
 	bzero(unp, sizeof *unp);
@@ -524,11 +524,12 @@ unp_detach(unp)
 	unp->unp_gencnt = ++unp_gencnt;
 	--unp_count;
 	if (unp->unp_vnode) {
+		struct vnode *tvp = unp->unp_vnode;
 		unp->unp_vnode->v_socket = 0;
-		thread_funnel_switch(NETWORK_FUNNEL, KERNEL_FUNNEL);
-		vrele(unp->unp_vnode);
-		thread_funnel_switch(KERNEL_FUNNEL, NETWORK_FUNNEL);
 		unp->unp_vnode = 0;
+		thread_funnel_switch(NETWORK_FUNNEL, KERNEL_FUNNEL);
+		vrele(tvp);
+		thread_funnel_switch(KERNEL_FUNNEL, NETWORK_FUNNEL);
 	}
 	if (unp->unp_conn)
 		unp_disconnect(unp);
@@ -549,7 +550,7 @@ unp_detach(unp)
 	}
 	if (unp->unp_addr)
 		FREE(unp->unp_addr, M_SONAME);
-	zfree(unp_zone, unp);
+	zfree(unp_zone, (vm_offset_t)unp);
 }
 
 static int
@@ -567,7 +568,6 @@ unp_bind(unp, nam, p)
 
 	if (unp->unp_vnode != NULL)
 		return (EINVAL);
-#define offsetof(s, e) ((char *)&((s *)0)->e - (char *)((s *)0))
 	namelen = soun->sun_len - offsetof(struct sockaddr_un, sun_path);
 	if (namelen <= 0)
 		return EINVAL;
@@ -883,7 +883,7 @@ unp_drop(unp, errno)
 		so->so_pcb = (caddr_t) 0;
 		if (unp->unp_addr)
 			FREE(unp->unp_addr, M_SONAME);
-		zfree(unp_zone, unp);
+		zfree(unp_zone, (vm_offset_t)unp);
 		sofree(so);
 	}
 }

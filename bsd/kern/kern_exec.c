@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2001 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
@@ -94,6 +94,7 @@
 
 #include <vm/vm_map.h>
 #include <vm/vm_kern.h>
+#include <vm/vm_shared_memory_server.h>
 
 #include <kern/thread.h>
 #include <kern/task.h>
@@ -103,6 +104,11 @@
 #include <mach-o/fat.h>
 #include <mach-o/loader.h>
 #include <machine/vmparam.h>
+#if KTRACE   
+#include <sys/ktrace.h>
+#endif
+
+int	app_profile = 0;
 
 extern vm_map_t bsd_pageable_map;
 
@@ -112,6 +118,8 @@ extern vm_map_t bsd_pageable_map;
 
 static int load_return_to_errno(load_return_t lrtn);
 int execve(struct proc *p, struct execve_args *uap, register_t *retval);
+static int execargs_alloc(vm_offset_t *addrp);
+static int execargs_free(vm_offset_t addr);
 
 int
 execv(p, args, retval)
@@ -158,6 +166,7 @@ execve(p, uap, retval)
 	vm_map_t old_map;
 	vm_map_t map;
 	int i;
+	boolean_t		new_shared_regions = FALSE;
 	union {
 		/* #! and name of interpreter */
 		char			ex_shell[SHSIZE];
@@ -179,6 +188,7 @@ execve(p, uap, retval)
 	int vfexec=0;
 	unsigned long arch_offset =0;
 	unsigned long arch_size = 0;
+        char		*ws_cache_name = NULL;	/* used for pre-heat */
 
 	task = current_task();
 	thr_act = current_act();
@@ -197,9 +207,9 @@ execve(p, uap, retval)
 		}
 	}
 
-	ret = kmem_alloc_pageable(bsd_pageable_map, &execargs, NCARGS);
-	if (ret != KERN_SUCCESS)
-		return(ENOMEM);
+	error = execargs_alloc(&execargs);
+	if (error)
+		return(error);
 
 	savedpath = execargs;
 
@@ -212,7 +222,7 @@ execve(p, uap, retval)
 	 * We have to do this before namei() because in case of
 	 * symbolic links, namei() would overwrite the original "path".
 	 * In case the last symbolic link resolved was a relative pathname
-	 * we would loose the original "path", which could be an
+	 * we would lose the original "path", which could be an
 	 * absolute pathname. This might be unacceptable for dyld.
 	 */
 	/* XXX We could optimize to avoid copyinstr in the namei() */
@@ -224,6 +234,22 @@ execve(p, uap, retval)
 	 * copyinstr will put in savedpathlen, the count of
 	 * characters (including NULL) in the path.
 	 */
+
+	if(app_profile != 0) {
+
+		/* grab the name of the file out of its path */
+		/* we will need this for lookup within the   */
+		/* name file */
+		ws_cache_name = savedpath + savedpathlen;
+               	while (ws_cache_name[0] != '/') {
+               		if(ws_cache_name == savedpath) {
+               	        	ws_cache_name--;
+               	         	break;
+                      	}
+               		ws_cache_name--;
+               	}
+               	ws_cache_name++;
+	}
 	
 	/* Save the name aside for future use */
 	execargsp = (vm_offset_t *)((char *)(execargs) + savedpathlen);
@@ -487,6 +513,8 @@ again:
 	    	printf("execve: task_create failed. Code: 0x%x\n", result);
 		p->task = new_task;
 		set_bsdtask_info(new_task, p);
+		if (p->p_nice != 0)
+			resetpriority(p);
 		task = new_task;
 		map = get_task_map(new_task);
 		result = thread_create(new_task, &thr_act);
@@ -502,6 +530,23 @@ again:
 	 *	Load the Mach-O file.
 	 */
 	VOP_UNLOCK(vp, 0, p);
+	if(ws_cache_name) {
+		tws_handle_startup_file(task, cred->cr_uid, 
+			ws_cache_name, vp, &new_shared_regions);
+	}
+	if (new_shared_regions) {
+		shared_region_mapping_t	new_shared_region;
+		shared_region_mapping_t	old_shared_region;
+	
+		if (shared_file_create_system_region(&new_shared_region))
+			panic("couldn't create system_shared_region\n");
+
+		vm_get_shared_region(task, &old_shared_region);
+		vm_set_shared_region(task, new_shared_region);
+
+		shared_region_mapping_dealloc(old_shared_region);
+	}
+
 	lret = load_machfile(vp, mach_header, arch_offset,
 				arch_size, &load_result, thr_act, map);
 
@@ -528,9 +573,10 @@ again:
 		 * root set it.
 		 */
 		if (p->p_tracep && !(p->p_traceflag & KTRFAC_ROOT)) {
-			vrele(p->p_tracep);
+			struct vnode *tvp = p->p_tracep;
 			p->p_tracep = NULL;
 			p->p_traceflag = 0;
+			vrele(tvp);
 		}
 #endif
 		if (origvattr.va_mode & VSUID)
@@ -577,10 +623,8 @@ again:
 	p->p_cred->p_svuid = p->p_ucred->cr_uid;
 	p->p_cred->p_svgid = p->p_ucred->cr_gid;
 
-	if (!vfexec && (p->p_flag & P_TRACED)) {
+	if (!vfexec && (p->p_flag & P_TRACED))
 		psignal(p, SIGTRAP);
-		ast_on(AST_BSD);
-	}
 
 	if (error) {
 		goto badtoolate;
@@ -644,7 +688,11 @@ again:
 		 * and NBPW for the NULL after pointer to path.
 		 */
 		ap = ucp - na*NBPW - 3*NBPW - savedpathlen - 2*NBPW;
+#if defined(ppc)
+		thread_setuserstack(thr_act, ap);	/* Set the stack */
+#else
 		uthread->uu_ar0[SP] = ap;
+#endif
 		(void) suword((caddr_t)ap, na-ne); /* argc */
 		nc = 0;
 		cc = 0;
@@ -679,14 +727,20 @@ again:
 	}
 	
 	if (load_result.dynlinker) {
+#if defined(ppc)
+		ap = thread_adjuserstack(thr_act, -4);	/* Adjust the stack */
+#else
 		ap = uthread->uu_ar0[SP] -= 4;
+#endif
 		(void) suword((caddr_t)ap, load_result.mach_header);
 	}
 
 	if (vfexec) {
 		vm_map_switch(old_map);
 	}
-#if defined(i386) || defined(ppc)
+#if defined(ppc)
+	thread_setentrypoint(thr_act, load_result.entry_point);	/* Set the entry point */
+#elif defined(i386) 
  	uthread->uu_ar0[PC] = load_result.entry_point;
 #else
 #error architecture not implemented!
@@ -698,7 +752,7 @@ again:
 	/*
 	 * Reset signal state.
 	 */
-	execsigs(p);
+	execsigs(p, thr_act);
 
 	/*
 	 * Close file descriptors
@@ -706,8 +760,10 @@ again:
 	 */
 	fdexec(p);
 	/* FIXME: Till vmspace inherit is fixed: */
-	if (p->vm_shm)
+	if (!vfexec && p->vm_shm)
 		shmexit(p);
+	/* Clean up the semaphores */
+	semexit(p);
 
 	/*
 	 * Remember file name for accounting.
@@ -750,7 +806,6 @@ again:
 
 badtoolate:
 	if (vfexec) {
-		(void) thread_resume(thr_act);
 		task_deallocate(new_task);
 		act_deallocate(thr_act);
 		if (error)
@@ -762,9 +817,10 @@ bad:
 		vput(vp);
 bad1:
 	if (execargs)
-		kmem_free(bsd_pageable_map, execargs, NCARGS);
+		execargs_free(execargs);
 	if (!error && vfexec) {
 			vfork_return(current_act(), p->p_pptr, p, retval);
+			(void) thread_resume(thr_act);
 			return(0);
 	}
 	return(error);
@@ -812,8 +868,6 @@ load_init_program(p)
 	int		error;
 	register_t retval[2];
 	struct uthread * ut;
-
-	unix_master();
 
 	error = 0;
 
@@ -907,8 +961,6 @@ load_init_program(p)
 
 		error = execve(p,&init_exec_args,retval);
 	} while (error);
-
-	unix_release();
 }
 
 /*
@@ -960,5 +1012,63 @@ check_exec_access(p, vp, vap)
 	    (vap->va_mode & (S_IXUSR | S_IXGRP | S_IXOTH)) == 0)
 		return (EACCES);
 	return (0);
+}
+
+#include <mach/mach_types.h>
+#include <mach/vm_prot.h>
+#include <mach/semaphore.h>
+#include <mach/sync_policy.h>
+#include <kern/clock.h>
+#include <mach/kern_return.h>
+
+extern semaphore_t execve_semaphore;
+
+static int
+execargs_alloc(addrp)
+	vm_offset_t	*addrp;
+{
+	kern_return_t kret;
+
+	kret = semaphore_wait(execve_semaphore);
+	if (kret != KERN_SUCCESS)
+		switch (kret) {
+		default:
+			return (EINVAL);
+		case KERN_INVALID_ADDRESS:
+		case KERN_PROTECTION_FAILURE:
+			return (EACCES);
+		case KERN_ABORTED:
+		case KERN_OPERATION_TIMED_OUT:
+			return (EINTR);
+		}
+
+	kret = kmem_alloc_pageable(bsd_pageable_map, addrp, NCARGS);
+	if (kret != KERN_SUCCESS)
+		return (ENOMEM);
+
+	return (0);
+}
+
+static int
+execargs_free(addr)
+	vm_offset_t	addr;
+{
+	kern_return_t kret;
+
+	kmem_free(bsd_pageable_map, addr, NCARGS);
+
+	kret = semaphore_signal(execve_semaphore);
+	switch (kret) { 
+	case KERN_INVALID_ADDRESS:
+	case KERN_PROTECTION_FAILURE:
+		return (EINVAL);
+	case KERN_ABORTED:
+	case KERN_OPERATION_TIMED_OUT:
+		return (EINTR);
+	case KERN_SUCCESS:
+		return(0);
+	default:
+		return (EINVAL);
+	}
 }
 

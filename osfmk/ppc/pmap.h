@@ -116,6 +116,17 @@ extern pmap_t	cursor_pmap;			/* The pmap to start allocations with */
 #define pmap_phys_address(x)	((x) << PPC_PGSHIFT)
 #define pmap_phys_to_frame(x)	((x) >> PPC_PGSHIFT)
 
+#define PMAP_DEFAULT_CACHE	0
+#define PMAP_INHIBIT_CACHE	1
+#define PMAP_GUARDED_CACHE	2
+#define PMAP_ACTIVATE_CACHE	4
+#define PMAP_NO_GUARD_CACHE	8
+
+/* corresponds to cached, coherent, not writethru, not guarded */
+#define VM_WIMG_DEFAULT		VM_MEM_COHERENT
+#define VM_WIMG_IO		VM_MEM_COHERENT | 	\
+				VM_MEM_NOT_CACHEABLE | VM_MEM_GUARDED
+
 /* 
  * prototypes.
  */
@@ -154,6 +165,7 @@ extern void sync_cache(vm_offset_t pa, unsigned length);
 extern void flush_dcache(vm_offset_t va, unsigned length, boolean_t phys);
 extern void invalidate_dcache(vm_offset_t va, unsigned length, boolean_t phys);
 extern void invalidate_icache(vm_offset_t va, unsigned length, boolean_t phys);
+extern void pmap_sync_caches_phys(vm_offset_t pa);
 extern void invalidate_cache_for_io(vm_offset_t va, unsigned length, boolean_t phys);
 extern void pmap_map_block(pmap_t pmap, vm_offset_t va, vm_offset_t pa, vm_size_t size,
 	 vm_prot_t prot, int attr, unsigned int flags);	/* Map a block */

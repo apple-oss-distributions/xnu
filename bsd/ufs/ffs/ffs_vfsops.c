@@ -72,6 +72,7 @@
 #include <sys/errno.h>
 #include <sys/malloc.h>
 #include <sys/ubc.h>
+#include <sys/quota.h>
 
 #include <miscfs/specfs/specdev.h>
 
@@ -126,8 +127,10 @@ ffs_mountroot()
 		printf("ffs_mountroot: can't setup bdevvp");
 		return (error);
 	}
-	if (error = vfs_rootmountalloc("ufs", "root_device", &mp))
+	if (error = vfs_rootmountalloc("ufs", "root_device", &mp)) {
+		vrele(rootvp); /* release the reference from bdevvp() */
 		return (error);
+	}
 
 	/* Must set the MNT_ROOTFS flag before doing the actual mount */
 	mp->mnt_flag |= MNT_ROOTFS;
@@ -135,6 +138,7 @@ ffs_mountroot()
 	if (error = ffs_mountfs(rootvp, mp, p)) {
 		mp->mnt_vfc->vfc_refcount--;
 		vfs_unbusy(mp, p);
+		vrele(rootvp); /* release the reference from bdevvp() */
 		_FREE_ZONE(mp, sizeof (struct mount), M_MOUNT);
 		return (error);
 	}
@@ -325,7 +329,7 @@ ffs_reload(mountp, cred, p)
 {
 	register struct vnode *vp, *nvp, *devvp;
 	struct inode *ip;
-	struct csum *space;
+	void *space;
 	struct buf *bp;
 	struct fs *fs, *newfs;
 	int i, blks, size, error;
@@ -374,7 +378,7 @@ ffs_reload(mountp, cred, p)
 	 * new superblock. These should really be in the ufsmount.	XXX
 	 * Note that important parameters (eg fs_ncg) are unchanged.
 	 */
-	bcopy(&fs->fs_csp[0], &newfs->fs_csp[0], sizeof(fs->fs_csp));
+	newfs->fs_csp = fs->fs_csp;
 	newfs->fs_maxcluster = fs->fs_maxcluster;
 	bcopy(newfs, fs, (u_int)fs->fs_sbsize);
 	if (fs->fs_sbsize < SBSIZE)
@@ -393,7 +397,7 @@ ffs_reload(mountp, cred, p)
 	 * Step 3: re-read summary information from disk.
 	 */
 	blks = howmany(fs->fs_cssize, fs->fs_fsize);
-	space = fs->fs_csp[0];
+	space = fs->fs_csp;
 	for (i = 0; i < blks; i += fs->fs_frag) {
 		size = fs->fs_bsize;
 		if (i + fs->fs_frag > blks)
@@ -409,7 +413,7 @@ ffs_reload(mountp, cred, p)
 			byte_swap_ints((int *)bp->b_data, size / sizeof(int));
 		}
 #endif /* REV_ENDIAN_FS */
-		bcopy(bp->b_data, fs->fs_csp[fragstoblks(fs, i)], (u_int)size);
+		bcopy(bp->b_data, space, (u_int)size);
 #if REV_ENDIAN_FS
 		if (rev_endian) {
 			/* csum swaps */
@@ -496,7 +500,7 @@ ffs_mountfs(devvp, mp, p)
 	struct buf *cgbp;
 	struct cg *cgp;
 	int32_t clustersumoff;
-	caddr_t base, space;
+	void *space;
 	int error, i, blks, size, ronly;
 	int32_t *lp;
 	struct ucred *cred;
@@ -683,15 +687,15 @@ ffs_mountfs(devvp, mp, p)
 	blks = howmany(size, fs->fs_fsize);
 	if (fs->fs_contigsumsize > 0)
 		size += fs->fs_ncg * sizeof(int32_t);
-	base = space = _MALLOC((u_long)size, M_UFSMNT, M_WAITOK);
-	base = space;
+	space = _MALLOC((u_long)size, M_UFSMNT, M_WAITOK);
+	fs->fs_csp = space;
 	for (i = 0; i < blks; i += fs->fs_frag) {
 		size = fs->fs_bsize;
 		if (i + fs->fs_frag > blks)
 			size = (blks - i) * fs->fs_fsize;
 		if (error = bread(devvp, fsbtodb(fs, fs->fs_csaddr + i), size,
 		    cred, &bp)) {
-			_FREE(base, M_UFSMNT);
+			_FREE(fs->fs_csp, M_UFSMNT);
 			goto out;
 		}
 		bcopy(bp->b_data, space, (u_int)size);
@@ -699,13 +703,12 @@ ffs_mountfs(devvp, mp, p)
 		if (rev_endian)
 			byte_swap_ints((int *) space, size / sizeof(int));
 #endif /* REV_ENDIAN_FS */
-		fs->fs_csp[fragstoblks(fs, i)] = (struct csum *)space;
-		space += size;
+		space = (char *)space + size;
 		brelse(bp);
 		bp = NULL;
 	}
 	if (fs->fs_contigsumsize > 0) {
-		fs->fs_maxcluster = lp = (int32_t *)space;
+		fs->fs_maxcluster = lp = space;
 		for (i = 0; i < fs->fs_ncg; i++)
 			*lp++ = fs->fs_contigsumsize;
 	}
@@ -725,7 +728,7 @@ ffs_mountfs(devvp, mp, p)
 	ump->um_bptrtodb = fs->fs_fsbtodb;
 	ump->um_seqinc = fs->fs_frag;
 	for (i = 0; i < MAXQUOTAS; i++)
-		ump->um_quotas[i] = NULLVP;
+		ump->um_qfiles[i].qf_vp = NULLVP;
 	devvp->v_specflags |= SI_MOUNTEDON;
 	ffs_oldfscompat(fs);
 	ump->um_savedmaxfilesize = fs->fs_maxfilesize;		/* XXX */
@@ -792,10 +795,15 @@ ffs_unmount(mp, mntflags, p)
 	register struct ufsmount *ump;
 	register struct fs *fs;
 	int error, flags;
+	int force;
+
 	flags = 0;
-	if (mntflags & MNT_FORCE)
+	force = 0;
+	if (mntflags & MNT_FORCE) {
 		flags |= FORCECLOSE;
-	if (error = ffs_flushfiles(mp, flags, p))
+		force = 1;
+	}
+	if ( (error = ffs_flushfiles(mp, flags, p)) && !force )
 		return (error);
 	ump = VFSTOUFS(mp);
 	fs = ump->um_fs;
@@ -816,16 +824,18 @@ ffs_unmount(mp, mntflags, p)
 	ump->um_devvp->v_specflags &= ~SI_MOUNTEDON;
 	error = VOP_CLOSE(ump->um_devvp, fs->fs_ronly ? FREAD : FREAD|FWRITE,
 		NOCRED, p);
+	if (error && !force)
+		return (error);
 	vrele(ump->um_devvp);
 
-	_FREE(fs->fs_csp[0], M_UFSMNT);
+	_FREE(fs->fs_csp, M_UFSMNT);
 	_FREE(fs, M_UFSMNT);
 	_FREE(ump, M_UFSMNT);
 	mp->mnt_data = (qaddr_t)0;
 #if REV_ENDIAN_FS
 	mp->mnt_flag &= ~MNT_REVEND;
 #endif /* REV_ENDIAN_FS */
-	return (error);
+	return (0);
 }
 
 /*
@@ -845,7 +855,7 @@ ffs_flushfiles(mp, flags, p)
 		if (error = vflush(mp, NULLVP, SKIPSYSTEM|flags))
 			return (error);
 		for (i = 0; i < MAXQUOTAS; i++) {
-			if (ump->um_quotas[i] == NULLVP)
+			if (ump->um_qfiles[i].qf_vp == NULLVP)
 				continue;
 			quotaoff(p, mp, i);
 		}
@@ -1020,29 +1030,57 @@ ffs_vget(mp, ino, vpp)
 	/* Allocate a new vnode/inode. */
 	type = ump->um_devvp->v_tag == VT_MFS ? M_MFSNODE : M_FFSNODE; /* XXX */
 	MALLOC_ZONE(ip, struct inode *, sizeof(struct inode), type, M_WAITOK);
-	if (error = getnewvnode(VT_UFS, mp, ffs_vnodeop_p, &vp)) {
-		FREE_ZONE(ip, sizeof(struct inode), type);
-		*vpp = NULL;
-		return (error);
-	}
 	bzero((caddr_t)ip, sizeof(struct inode));
 	lockinit(&ip->i_lock, PINOD, "inode", 0, 0);
-	vp->v_data = ip;
-	ip->i_vnode = vp;
+	/* lock the inode */
+	lockmgr(&ip->i_lock, LK_EXCLUSIVE, (struct slock *)0, p);
+
 	ip->i_fs = fs = ump->um_fs;
 	ip->i_dev = dev;
 	ip->i_number = ino;
+	ip->i_flag |= IN_ALLOC;
 #if QUOTA
 	for (i = 0; i < MAXQUOTAS; i++)
 		ip->i_dquot[i] = NODQUOT;
 #endif
+
 	/*
-	 * Put it onto its hash chain and lock it so that other requests for
+	 * MALLOC_ZONE is blocking call. Check for race.
+	 */
+	if ((*vpp = ufs_ihashget(dev, ino)) != NULL) {
+		/* Clean up */
+		FREE_ZONE(ip, sizeof(struct inode), type);
+		vp = *vpp;
+		UBCINFOCHECK("ffs_vget", vp);
+		return (0);
+	}
+
+	/*
+	 * Put it onto its hash chain locked so that other requests for
 	 * this inode will block if they arrive while we are sleeping waiting
 	 * for old data structures to be purged or for the contents of the
 	 * disk portion of this inode to be read.
 	 */
 	ufs_ihashins(ip);
+
+	if (error = getnewvnode(VT_UFS, mp, ffs_vnodeop_p, &vp)) {
+		ufs_ihashrem(ip);
+		if (ISSET(ip->i_flag, IN_WALLOC))
+			wakeup(ip);
+		FREE_ZONE(ip, sizeof(struct inode), type);
+		*vpp = NULL;
+		return (error);
+	}
+	vp->v_data = ip;
+	ip->i_vnode = vp;
+
+	/*
+	 * A vnode is associated with the inode now,
+	 * vget() can deal with the serialization.
+	 */
+	CLR(ip->i_flag, IN_ALLOC);
+	if (ISSET(ip->i_flag, IN_WALLOC))
+		wakeup(ip);
 
 	/* Read in the disk contents for the inode, copy into the inode. */
 	if (error = bread(ump->um_devvp, fsbtodb(fs, ino_to_fsba(fs, ino)),
@@ -1216,7 +1254,7 @@ ffs_sbupdate(mp, waitfor)
 	register struct fs *dfs, *fs = mp->um_fs;
 	register struct buf *bp;
 	int blks;
-	caddr_t space;
+	void *space;
 	int i, size, error, allerror = 0;
 	int devBlockSize=0;
 #if REV_ENDIAN_FS
@@ -1227,7 +1265,7 @@ ffs_sbupdate(mp, waitfor)
 	 * First write back the summary information.
 	 */
 	blks = howmany(fs->fs_cssize, fs->fs_fsize);
-	space = (caddr_t)fs->fs_csp[0];
+	space = fs->fs_csp;
 	for (i = 0; i < blks; i += fs->fs_frag) {
 		size = fs->fs_bsize;
 		if (i + fs->fs_frag > blks)
@@ -1240,7 +1278,7 @@ ffs_sbupdate(mp, waitfor)
 			byte_swap_ints((int *)bp->b_data, size / sizeof(int));
 		}
 #endif /* REV_ENDIAN_FS */
-		space += size;
+		space = (char *)space + size;
 		if (waitfor != MNT_WAIT)
 			bawrite(bp);
 		else if (error = bwrite(bp))

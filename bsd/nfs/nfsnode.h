@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2002 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
@@ -63,9 +63,14 @@
 #ifndef _NFS_NFSNODE_H_
 #define _NFS_NFSNODE_H_
 
+#include <sys/appleapiopts.h>
+
+#ifdef __APPLE_API_PRIVATE
 #ifndef _NFS_NFS_H_
 #include <nfs/nfs.h>
 #endif
+#include <sys/lock.h>
+
 
 /*
  * Silly rename structure that hangs off the nfsnode until the name
@@ -108,6 +113,7 @@ struct nfsdmap {
  *     be well aligned and, therefore, tightly packed.
  */
 struct nfsnode {
+	struct lock__bsd__	n_lock;	/* the vnode lock */
 	LIST_ENTRY(nfsnode)	n_hash;		/* Hash chain */
 	CIRCLEQ_ENTRY(nfsnode)	n_timer;	/* Nqnfs timer chain */
 	u_quad_t		n_size;		/* Current size of file */
@@ -140,6 +146,7 @@ struct nfsnode {
 	short			n_fhsize;	/* size in bytes, of fh */
 	short			n_flag;		/* Flag for locking.. */
 	nfsfh_t			n_fh;		/* Small File Handle */
+	u_int64_t		n_xid;		/* last xid to loadattr */
 };
 
 #define n_atim		n_un1.nf_atim
@@ -179,6 +186,7 @@ extern struct proc *nfs_iodwant[NFS_MAXASYNCDAEMON];
 extern struct nfsmount *nfs_iodmount[NFS_MAXASYNCDAEMON];
 
 #if defined(KERNEL)
+
 typedef int     vop_t __P((void *));
 extern	vop_t	**fifo_nfsv2nodeop_p;
 extern	vop_t	**nfsv2_vnodeop_p;
@@ -196,9 +204,10 @@ int	nqnfs_vop_lease_check __P((struct vop_lease_args *));
 int	nfs_abortop __P((struct vop_abortop_args *));
 int	nfs_inactive __P((struct vop_inactive_args *));
 int	nfs_reclaim __P((struct vop_reclaim_args *));
-#define nfs_lock ((int (*) __P((struct vop_lock_args *)))vop_nolock)
-#define nfs_unlock ((int (*) __P((struct vop_unlock_args *)))vop_nounlock)
-#define nfs_islocked ((int (*) __P((struct vop_islocked_args *)))vop_noislocked)
+int nfs_lock __P((struct vop_lock_args *));
+int nfs_unlock __P((struct vop_unlock_args *));
+int nfs_islocked __P((struct vop_islocked_args *));
+
 #define nfs_reallocblks \
 	((int (*) __P((struct  vop_reallocblks_args *)))eopnotsupp)
 
@@ -212,4 +221,5 @@ void nfs_invaldir __P((struct vnode *));
 
 #endif /* KERNEL */
 
-#endif
+#endif /* __APPLE_API_PRIVATE */
+#endif /* _NFS_NFSNODE_H_ */
