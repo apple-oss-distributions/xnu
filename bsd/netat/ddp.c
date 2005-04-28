@@ -3,22 +3,19 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -384,10 +381,10 @@ void  ddp_rem_if(ifID)
 
 	/* un-do processing done in SIOCSIFADDR */
 	if (ifa->ifa_addr) {
-		int s = splnet();
-		TAILQ_REMOVE(&ifID->aa_ifp->if_addrhead, ifa, ifa_link);
+		ifnet_lock_exclusive(ifID->aa_ifp);
+		if_detach_ifa(ifID->aa_ifp, ifa);
 		ifa->ifa_addr = NULL;
-		splx(s);
+		ifnet_lock_done(ifID->aa_ifp);
 	}
 	if (ifID->at_dl_tag) {
 /*		dlil_detach_protocol(ifID->at_dl_tag); */
@@ -1083,10 +1080,9 @@ void ddp_input(mp, ifID)
 
 				if (sbappendaddr(&((gref->atpcb_socket)->so_rcv), 
 						 (struct sockaddr *)&ddp_in,
-						 mp, 0) == 0)
-					gbuf_freem(mp);
-				else
+						 mp, 0, NULL) != 0) {
 				 	sorwakeup(gref->atpcb_socket);
+				 }
 			} else {
 				atalk_putnext(gref, mp);
 			}

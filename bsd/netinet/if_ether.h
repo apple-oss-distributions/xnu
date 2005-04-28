@@ -3,22 +3,19 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -68,52 +65,6 @@
 #include <net/if_arp.h>
 #define ea_byte	ether_addr_octet
 
-#ifdef __APPLE__
-#ifdef __APPLE_API_UNSTABLE
-/*
- * Macro for looking up the ether_multi record for a given range of Ethernet
- * multicast addresses connected to a given arpcom structure.  If no matching
- * record is found, "enm" returns NULL.
- */
-#define ETHER_LOOKUP_MULTI(addrlo, addrhi, ac, enm) \
-	/* u_char addrlo[6]; */ \
-	/* u_char addrhi[6]; */ \
-	/* struct arpcom *ac; */ \
-	/* struct ether_multi *enm; */ \
-{ \
-	for ((enm) = (ac)->ac_multiaddrs; \
-	    (enm) != NULL && \
-	    (bcmp((enm)->enm_addrlo, (addrlo), 6) != 0 || \
-	     bcmp((enm)->enm_addrhi, (addrhi), 6) != 0); \
-		(enm) = (enm)->enm_next); \
-}
-
-/*
- * Macro to step through all of the ether_multi records, one at a time.
- * The current position is remembered in "step", which the caller must
- * provide.  ETHER_FIRST_MULTI(), below, must be called to initialize "step"
- * and get the first record.  Both macros return a NULL "enm" when there
- * are no remaining records.
- */
-#define ETHER_NEXT_MULTI(step, enm) \
-	/* struct ether_multistep step; */  \
-	/* struct ether_multi *enm; */  \
-{ \
-	if (((enm) = (step).e_enm) != NULL) \
-		(step).e_enm = (enm)->enm_next; \
-}
-
-#define ETHER_FIRST_MULTI(step, ac, enm) \
-	/* struct ether_multistep step; */ \
-	/* struct arpcom *ac; */ \
-	/* struct ether_multi *enm; */ \
-{ \
-	(step).e_enm = (ac)->ac_multiaddrs; \
-	ETHER_NEXT_MULTI((step), (enm)); \
-}
-#endif /* __APPLE_API_UNSTABLE */
-#endif /* __APPLE__ */
-
 /*
  * Macro to map an IP multicast address to an Ethernet multicast address.
  * The high-order 25 bits of the Ethernet address are statically assigned,
@@ -126,9 +77,9 @@
 	(enaddr)[0] = 0x01; \
 	(enaddr)[1] = 0x00; \
 	(enaddr)[2] = 0x5e; \
-	(enaddr)[3] = ((u_char *)ipaddr)[1] & 0x7f; \
-	(enaddr)[4] = ((u_char *)ipaddr)[2]; \
-	(enaddr)[5] = ((u_char *)ipaddr)[3]; \
+	(enaddr)[3] = ((const u_char *)ipaddr)[1] & 0x7f; \
+	(enaddr)[4] = ((const u_char *)ipaddr)[2]; \
+	(enaddr)[5] = ((const u_char *)ipaddr)[3]; \
 }
 /*
  * Macro to map an IP6 multicast address to an Ethernet multicast address.
@@ -141,10 +92,10 @@
 {                                                                       \
 	(enaddr)[0] = 0x33;						\
 	(enaddr)[1] = 0x33;						\
-	(enaddr)[2] = ((u_char *)ip6addr)[12];				\
-	(enaddr)[3] = ((u_char *)ip6addr)[13];				\
-	(enaddr)[4] = ((u_char *)ip6addr)[14];				\
-	(enaddr)[5] = ((u_char *)ip6addr)[15];				\
+	(enaddr)[2] = ((const u_char *)ip6addr)[12];				\
+	(enaddr)[3] = ((const u_char *)ip6addr)[13];				\
+	(enaddr)[4] = ((const u_char *)ip6addr)[14];				\
+	(enaddr)[5] = ((const u_char *)ip6addr)[15];				\
 }
 
 /*
@@ -183,18 +134,14 @@ struct sockaddr_inarp {
 #define	RTF_USETRAILERS	RTF_PROTO1	/* use trailers */
 #define RTF_ANNOUNCE	RTF_PROTO2	/* announce new arp entry */
 
-#ifdef	KERNEL
-#ifdef __APPLE_API_PRIVATE
+#ifdef KERNEL_PRIVATE
 extern u_char	ether_ipmulticast_min[ETHER_ADDR_LEN];
 extern u_char	ether_ipmulticast_max[ETHER_ADDR_LEN];
 extern struct	ifqueue arpintrq;
 
-int	arpresolve __P((struct arpcom *, struct rtentry *, struct mbuf *,
-			struct sockaddr *, u_char *, struct rtentry *));
-#endif /* __APPLE_API_PRIVATE */
-#ifdef __APPLE_API_UNSTABLE
-void	arp_ifinit __P((struct arpcom *, struct ifaddr *));
-#endif /* __APPLE_API_UNSTABLE */
-#endif
+int	arpresolve(struct ifnet *, struct rtentry *, struct mbuf *,
+			struct sockaddr *, u_char *, struct rtentry *);
+void	arp_ifinit(struct ifnet *, struct ifaddr *);
+#endif KERNEL_PRIVATE
 
-#endif
+#endif _NETINET_IF_ETHER_H_

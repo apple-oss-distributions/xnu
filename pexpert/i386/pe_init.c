@@ -3,22 +3,19 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -44,14 +41,14 @@ extern void pe_identify_machine(void * args);
 extern void initialize_screen(void *, unsigned int);
 
 /* Local references */
-static vm_offset_t mapframebuffer(caddr_t,int);
-static vm_offset_t PE_fb_vaddr = 0;
 static int         PE_fb_mode  = TEXT_MODE;
 
 /* private globals */
 PE_state_t  PE_state;
 dt_data     gMemoryMapNode;
 dt_data     gDriversProp;
+dt_data     gRootpathProp;
+dt_data     gCompatibleProp;
 
 /* Clock Frequency Info */
 clock_frequency_info_t gPEClockFrequencyInfo;
@@ -66,15 +63,19 @@ int PE_initialize_console( PE_Video * info, int op )
      * Refuse changes from outside pexpert.
      * The video mode setup by the booter cannot be changed.
      */
-    if ( info && (info == &PE_state.video) )
+    if ( info )
     {
-        bootInfo.v_baseAddr	 = PE_fb_vaddr;
+        bootInfo.v_baseAddr = info->v_baseAddr;
         bootInfo.v_rowBytes	 = info->v_rowBytes;
         bootInfo.v_width     = info->v_width;
         bootInfo.v_height    = info->v_height;
         bootInfo.v_depth     = info->v_depth;
-        bootInfo.v_display   = PE_fb_mode;
         bInfo = &bootInfo;
+        if (info == &PE_state.video) {
+            bootInfo.v_display  = PE_fb_mode;
+        } else {
+            bootInfo.v_display  = GRAPHICS_MODE;
+        }
     }
     else
         bInfo = 0;
@@ -111,6 +112,8 @@ void PE_init_iokit(void)
     long * dt;
     int    i;
     KernelBootArgs_t *kap = (KernelBootArgs_t *)PE_state.bootArgs;
+    enum { kMaxBootVar = 128 };
+    char *rdValue, *platformValue;
         
     typedef struct {
         char            name[32];
@@ -129,8 +132,34 @@ void PE_init_iokit(void)
     gDriversProp.length   = kap->numBootDrivers * sizeof(DriversPackageProp);
     gMemoryMapNode.length = 2 * sizeof(long);
 
+    rdValue = kalloc(kMaxBootVar);
+    if ( PE_parse_boot_arg("rd", rdValue) ) {
+        if (*rdValue == '*') {
+            gRootpathProp.address = (rdValue + 1);
+        } else {
+            gRootpathProp.address = rdValue;
+        }
+        strcat(rdValue, ",");
+    } else {
+        gRootpathProp.address = rdValue;
+        rdValue[0] = '\0';
+    }
+    strcat(rdValue, kap->bootFile);
+    gRootpathProp.length = strlen(rdValue) + 1;
+
+    platformValue = kalloc(kMaxBootVar);
+    if ( ! PE_parse_boot_arg("platform", platformValue) ) {
+        strcpy(platformValue, kDefaultPlatformName);
+    }
+    gCompatibleProp.address = platformValue;
+    gCompatibleProp.length = strlen(platformValue) + 1;
+
     dt = (long *) createdt( fakePPCDeviceTree,
             	  &((boot_args*)PE_state.fakePPCBootArgs)->deviceTreeLength );
+
+    kfree(rdValue, kMaxBootVar);
+    kfree(platformValue, kMaxBootVar);
+
 
     if ( dt )
     {
@@ -159,13 +188,13 @@ void PE_init_iokit(void)
             prop->value[1] = kap->driverConfig[i].size;
         }
 
-        *gMemoryMapNode.address = kap->numBootDrivers + 1;
+        *((long *)gMemoryMapNode.address) = kap->numBootDrivers + 1;
     }
 
     /* Setup powermac_info and powermac_machine_info structures */
 
     ((boot_args*)PE_state.fakePPCBootArgs)->deviceTreeP	= (unsigned long *) dt;
-    ((boot_args*)PE_state.fakePPCBootArgs)->topOfKernelData	= (unsigned int) kalloc(0x2000);
+    ((boot_args*)PE_state.fakePPCBootArgs)->topOfKernelData = (unsigned long) kalloc(0x2000);
 
     /* 
      * Setup the OpenFirmware Device Tree routines
@@ -177,7 +206,7 @@ void PE_init_iokit(void)
     /*
      * Fetch the CLUT and the noroot image.
      */
-    bcopy( (void *) bootClut, appleClut8, sizeof(appleClut8) );
+    bcopy( (void *) (uintptr_t) bootClut, (void *) appleClut8, sizeof(appleClut8) );
 
     default_noroot.width  = kFailedBootWidth;
     default_noroot.height = kFailedBootHeight;
@@ -242,15 +271,6 @@ void PE_init_platform(boolean_t vm_initialized, void * args)
 
 void PE_create_console( void )
 {
-    if ( (PE_fb_vaddr == 0) && (PE_state.video.v_baseAddr != 0) )
-    {
-        PE_fb_vaddr = mapframebuffer((caddr_t) PE_state.video.v_baseAddr,
-                                     (PE_fb_mode == TEXT_MODE)  ?
-                      /* text mode */	PE_state.video.v_rowBytes :
-                      /* grfx mode */	PE_state.video.v_rowBytes *
-                                        PE_state.video.v_height);
-    }
-
     if ( PE_state.video.v_display )
         PE_initialize_console( &PE_state.video, kPEGraphicsMode );
     else
@@ -280,13 +300,13 @@ int PE_current_console( PE_Video * info )
     return (0);
 }
 
-void PE_display_icon( unsigned int flags, const char * name )
+void PE_display_icon( __unused unsigned int flags, __unused const char * name )
 {
     if ( default_noroot_data )
         vc_display_icon( &default_noroot, default_noroot_data );
 }
 
-extern boolean_t PE_get_hotkey( unsigned char key )
+extern boolean_t PE_get_hotkey( __unused unsigned char key )
 {
     return (FALSE);
 }
@@ -326,29 +346,10 @@ void PE_call_timebase_callback(void)
 }
 
 /*
- * map the framebuffer into kernel vm and return the (virtual)
- * address.
- */
-static vm_offset_t
-mapframebuffer( caddr_t physaddr,  /* start of framebuffer */
-                int     length)    /* num bytes to map */
-{
-    vm_offset_t vmaddr;
-
-	if (physaddr != (caddr_t)trunc_page(physaddr))
-        panic("Framebuffer not on page boundary");
-	vmaddr = io_map((vm_offset_t)physaddr, length);
-	if (vmaddr == 0)
-        panic("can't alloc VM for framebuffer");
-
-    return vmaddr;
-}
-
-/*
  * The default (non-functional) PE_poll_input handler.
  */
 static int
-PE_stub_poll_input(unsigned int options, char * c)
+PE_stub_poll_input(__unused unsigned int options, char * c)
 {
     *c = 0xff;
     return 1;  /* 0 for success, 1 for unsupported */

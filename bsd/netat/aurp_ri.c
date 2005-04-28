@@ -3,22 +3,19 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -89,13 +86,13 @@ void AURPsndRIAck(state, m, flags)
 	AURPsend(m, AUD_AURP, state->rem_node);
 }
 
-/* funneled version of AURPsndRIReq */
-void AURPsndRIReq_funnel(state)
+/* locked version of AURPsndRIReq */
+void AURPsndRIReq_locked(state)
 	aurp_state_t *state;
 {
-        thread_funnel_set(network_flock, TRUE);
+	atalk_lock();
 	AURPsndRIReq(state);
-        thread_funnel_set(network_flock, FALSE);
+	atalk_unlock();
 }
 
 /* */
@@ -135,17 +132,17 @@ void AURPsndRIReq(state)
 	}
 
 	/* start the retry timer */
-	timeout(AURPsndRIReq_funnel, state, AURP_RetryInterval*HZ);
+	timeout(AURPsndRIReq_locked, state, AURP_RetryInterval*HZ);
 	state->rcv_tmo = 1;
 }
 
-/* funneled version of AURPsndRIRsp */
-void AURPsndRIRsp_funnel(state)
+/* locked version of AURPsndRIRsp */
+void AURPsndRIRsp_locked(state)
 	aurp_state_t *state;
 {
-        thread_funnel_set(network_flock, TRUE);
+	atalk_lock();
 	AURPsndRIRsp(state);
-        thread_funnel_set(network_flock, FALSE);
+	atalk_unlock();
 }
 
 /* */
@@ -173,7 +170,7 @@ void AURPsndRIRsp(state)
 		ATENABLE(s, aurpgen_lock);
 		msize = sizeof(aurp_hdr_t);
 		if ((m = (gbuf_t *)gbuf_alloc(msize+AURP_MaxPktSize, PRI_MED)) == 0) {
-			timeout(AURPsndRIRsp_funnel, state, AURP_RetryInterval*HZ);
+			timeout(AURPsndRIRsp_locked, state, AURP_RetryInterval*HZ);
 			state->snd_tmo = 1;
 			return;
 		}
@@ -201,7 +198,7 @@ void AURPsndRIRsp(state)
 	m = (gbuf_t *)gbuf_dupb(state->rsp_m);
 
 	/* start the retry timer */
-	timeout(AURPsndRIRsp_funnel, state, AURP_RetryInterval*HZ);
+	timeout(AURPsndRIRsp_locked, state, AURP_RetryInterval*HZ);
 	state->snd_tmo = 1;
 
 	if (msize == 0)
@@ -215,12 +212,12 @@ void AURPsndRIRsp(state)
         
 }
 
-void AURPsndRIUpd_funnel(state)
+void AURPsndRIUpd_locked(state)
 	aurp_state_t *state;
 {
-        thread_funnel_set(network_flock, TRUE);
+	atalk_lock();
 	AURPsndRIUpd(state);
-        thread_funnel_set(network_flock, FALSE);
+	atalk_unlock();
 }
 
 /* */
@@ -264,7 +261,7 @@ void AURPsndRIUpd(state)
 	m = (gbuf_t *)gbuf_dupb(state->upd_m);
 
 	/* start the retry timer */
-	timeout(AURPsndRIUpd_funnel, state, AURP_RetryInterval*HZ);
+	timeout(AURPsndRIUpd_locked, state, AURP_RetryInterval*HZ);
 	state->snd_tmo = 1;
 
 	if (msize == 0)
@@ -372,7 +369,7 @@ void AURPrcvRIRsp(state, m)
 	dPrintf(D_M_AURP, D_L_INFO, ("AURPrcvRIRsp: len=%ld\n", gbuf_len(m)));
 
 	/* cancel the retry timer */
-	untimeout(AURPsndRIReq_funnel, state);
+	untimeout(AURPsndRIReq_locked, state);
 	state->rcv_tmo = 0;
 
 	/* send RI ack */
@@ -475,13 +472,13 @@ void AURPrcvRIAck(state, m)
 
 		if (snd_state == AURPSTATE_WaitingForRIAck1) {
 			/* ack from the tunnel peer to our RI response */
-			untimeout(AURPsndRIRsp_funnel, state);
+			untimeout(AURPsndRIRsp_locked, state);
 			dat_m = state->rsp_m;
 			state->rsp_m = 0;
 			flag = 1;
 		} else {
 			/* ack from the tunnel peer to our RI update */
-			untimeout(AURPsndRIUpd_funnel, state);
+			untimeout(AURPsndRIUpd_locked, state);
 			dat_m = state->upd_m;
 			state->upd_m = 0;
 			flag = 2;

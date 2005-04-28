@@ -1,24 +1,21 @@
 /*
- * Copyright (c) 2000 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2004 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -63,14 +60,22 @@
 #include <mach_debug.h>
 #include <mach_rt.h>
 
+#include <mach/port.h>
 #include <mach/kern_return.h>
+
+#include <kern/kern_types.h>
+#include <kern/kalloc.h>
 #include <kern/mach_param.h>
 #include <kern/ipc_host.h>
+#include <kern/ipc_mig.h>
 #include <kern/host_notify.h>
 #include <kern/mk_timer.h>
 #include <kern/misc_protos.h>
+#include <kern/sync_lock.h>
+#include <kern/sync_sema.h>
 #include <vm/vm_map.h>
 #include <vm/vm_kern.h>
+
 #include <ipc/ipc_entry.h>
 #include <ipc/ipc_space.h>
 #include <ipc/ipc_object.h>
@@ -80,6 +85,8 @@
 #include <ipc/ipc_kmsg.h>
 #include <ipc/ipc_hash.h>
 #include <ipc/ipc_init.h>
+#include <ipc/ipc_table.h>
+
 #include <mach/machine/ndr_def.h>   /* NDR_record */
 
 vm_map_t ipc_kernel_map;
@@ -95,7 +102,6 @@ int ipc_tree_entry_max = ITE_MAX;
 int ipc_port_max = PORT_MAX;
 int ipc_pset_max = SET_MAX;
 
-extern void mig_init(void);
 extern void ikm_cache_init(void);
 
 /*
@@ -158,6 +164,16 @@ ipc_bootstrap(void)
 	/* make it exhaustible */
 	zone_change(ipc_object_zones[IOT_PORT_SET], Z_EXHAUST, TRUE);
 
+	/*
+	 * Create the basic ipc_kmsg_t zone (the one we also cache)
+	 * elements at the processor-level to avoid the locking.
+	 */
+	ipc_kmsg_zone = zinit(IKM_SAVED_KMSG_SIZE,
+			      ipc_port_max * MACH_PORT_QLIMIT_MAX *
+			      IKM_SAVED_KMSG_SIZE,
+			      IKM_SAVED_KMSG_SIZE,
+			      "ipc kmsgs");
+
 	/* create special spaces */
 
 	kr = ipc_space_create_special(&ipc_space_kernel);
@@ -175,7 +191,6 @@ ipc_bootstrap(void)
 	mig_init();
 	ipc_table_init();
 	ipc_hash_init();
-	ipc_kmsg_init();
 	semaphore_init();
 	lock_set_init();
 	mk_timer_init();
@@ -198,16 +213,17 @@ void
 ipc_init(void)
 {
 	kern_return_t retval;
-	vm_offset_t min, max;
-	extern vm_size_t kalloc_max_prerounded;
+	vm_offset_t min;
 
 	retval = kmem_suballoc(kernel_map, &min, ipc_kernel_map_size,
-			       TRUE, TRUE, &ipc_kernel_map);
+			       TRUE, VM_FLAGS_ANYWHERE, &ipc_kernel_map);
+
 	if (retval != KERN_SUCCESS)
 		panic("ipc_init: kmem_suballoc of ipc_kernel_map failed");
 
 	retval = kmem_suballoc(kernel_map, &min, ipc_kernel_copy_map_size,
-			       TRUE, TRUE, &ipc_kernel_copy_map);
+			       TRUE, VM_FLAGS_ANYWHERE, &ipc_kernel_copy_map);
+
 	if (retval != KERN_SUCCESS)
 		panic("ipc_init: kmem_suballoc of ipc_kernel_copy_map failed");
 

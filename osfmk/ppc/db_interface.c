@@ -1,24 +1,21 @@
 /*
- * Copyright (c) 2000 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2004 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -26,7 +23,6 @@
  * @OSF_COPYRIGHT@
  */
 
-#include <cpus.h>
 #include <platforms.h>
 #include <time_stamp.h>
 #include <mach_mp_debug.h>
@@ -40,12 +36,12 @@
 #include <vm/pmap.h>
 
 #include <ppc/mem.h>
-#include <ppc/thread.h>
 #include <ppc/db_machdep.h>
 #include <ppc/trap.h>
 #include <ppc/setjmp.h>
 #include <ppc/pmap.h>
 #include <ppc/misc_protos.h>
+#include <ppc/cpu_internal.h>
 #include <ppc/exception.h>
 #include <ppc/db_machdep.h>
 #include <ppc/mappings.h>
@@ -57,6 +53,8 @@
 #include <kern/thread.h>
 #include <kern/task.h>
 #include <kern/debug.h>
+#include <pexpert/pexpert.h>
+#include <IOKit/IOPlatformExpert.h>
 
 #include <ddb/db_command.h>
 #include <ddb/db_task_thread.h>
@@ -72,7 +70,6 @@ struct	 savearea *ppc_last_saved_statep;
 struct	 savearea ppc_nested_saved_state;
 unsigned ppc_last_kdb_sp;
 
-extern int debugger_active[NCPUS];		/* Debugger active on CPU */
 extern int debugger_cpu;				/* Current cpu running debugger	*/
 
 int		db_all_set_up = 0;
@@ -146,8 +143,6 @@ void kdp_register_send_receive(void) {}
 #endif
 
 extern jmp_buf_t *db_recover;
-spl_t	saved_ipl[NCPUS];	/* just to know what IPL was before trap */
-struct savearea *saved_state[NCPUS];
 
 /*
  *  kdb_trap - field a TRACE or BPT trap
@@ -180,7 +175,7 @@ kdb_trap(
 			db_printf("type %d", type);
 		    else
 			db_printf("%s", trap_type[type]);
-		    db_printf(" trap, pc = %x\n",
+		    db_printf(" trap, pc = %llx\n",
 			      regs->save_srr0);
 		    db_error("");
 		    /*NOTREACHED*/
@@ -188,7 +183,7 @@ kdb_trap(
 		kdbprinttrap(type, code, (int *)&regs->save_srr0, regs->save_r1);
 	}
 
-	saved_state[cpu_number()] = regs;
+	getPerProc()->db_saved_state = regs;
 
 	ppc_last_saved_statep = regs;
 	ppc_last_kdb_sp = (unsigned) &type;
@@ -212,13 +207,13 @@ kdb_trap(
 	    (db_get_task_value(regs->save_srr0,
 			       BKPT_SIZE,
 			       FALSE,
-			       db_target_space(current_act(),
+			       db_target_space(current_thread(),
 					       trap_from_user))
 	                      == BKPT_INST))
 	    regs->save_srr0 += BKPT_SIZE;
 
 kdb_exit:
-	saved_state[cpu_number()] = 0;
+	getPerProc()->db_saved_state = 0;
 	switch_to_old_console(previous_console_device);
 
 }
@@ -391,8 +386,8 @@ db_check_access(
 	    if (kernel_task == TASK_NULL)  return(TRUE);
 	    task = kernel_task;
 	} else if (task == TASK_NULL) {
-	    if (current_act() == THR_ACT_NULL) return(FALSE);
-	    task = current_act()->task;
+	    if (current_thread() == THR_ACT_NULL) return(FALSE);
+	    task = current_thread()->task;
 	}
 
 	while (size > 0) {
@@ -419,9 +414,9 @@ db_phys_eq(
 		return FALSE;
 
 	if (task1 == TASK_NULL) {						/* See if there is a task active */
-		if (current_act() == THR_ACT_NULL)			/* See if there is a current task */
+		if (current_thread() == THR_ACT_NULL)		/* See if there is a current task */
 			return FALSE;
-		task1 = current_act()->task;				/* If so, use that one */
+		task1 = current_thread()->task;				/* If so, use that one */
 	}
 	
 	if(!(physa = db_vtophys(task1->map->pmap, (vm_offset_t)trunc_page_32(addr1)))) return FALSE;	/* Get real address of the first */
@@ -546,7 +541,7 @@ kdb_on(
 	int		cpu)
 {
 	KDB_SAVE_CTXT();
-	if (cpu < 0 || cpu >= NCPUS || !debugger_active[cpu])
+	if (cpu < 0 || cpu >= real_ncpus || !PerProcTable[cpu].ppe_vaddr->debugger_active)
 		return;
 	db_set_breakpoints();
 	db_set_watchpoints();
@@ -565,6 +560,9 @@ kdb_on(
 /*
  * system reboot
  */
+
+extern int (*PE_halt_restart)(unsigned int type);
+
 void db_reboot(
 	db_expr_t	addr,
 	boolean_t	have_addr,
@@ -581,7 +579,11 @@ void db_reboot(
 		if (c == 'h')	/* halt */
 			reboot = FALSE;
 	}
-	halt_all_cpus(reboot);
+	if(!reboot) halt_all_cpus(FALSE);	/* If no reboot, try to be clean about it */
+
+	if (PE_halt_restart) return (*PE_halt_restart)(kPERestartCPU);
+	db_printf("Sorry, system can't reboot automatically yet...  You need to do it by hand...\n");
+
 }
 
 /*

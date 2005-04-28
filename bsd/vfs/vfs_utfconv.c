@@ -3,22 +3,19 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -454,6 +451,91 @@ invalid:
 toolong:
 	result = ENAMETOOLONG;
 	goto exit;
+}
+
+
+/*
+ * utf8_validatestr - Check for a valid UTF-8 string.
+ */
+int
+utf8_validatestr(const u_int8_t* utf8p, size_t utf8len)
+{
+	unsigned int byte;
+	u_int32_t ch;
+	unsigned int ucs_ch;
+	size_t extrabytes;
+
+	while (utf8len-- > 0 && (byte = *utf8p++) != '\0') {
+		if (byte < 0x80)
+			continue;  /* plain ascii */
+
+		extrabytes = utf_extrabytes[byte >> 3];
+
+		if (utf8len < extrabytes)
+			goto invalid;
+		utf8len -= extrabytes;
+
+		switch (extrabytes) {
+		case 1:
+			ch = byte; ch <<= 6;   /* 1st byte */
+			byte = *utf8p++;       /* 2nd byte */
+			if ((byte >> 6) != 2)
+				goto invalid;
+			ch += byte;
+			ch -= 0x00003080UL;
+			if (ch < 0x0080)
+				goto invalid;
+			break;
+		case 2:
+			ch = byte; ch <<= 6;   /* 1st byte */
+			byte = *utf8p++;       /* 2nd byte */
+			if ((byte >> 6) != 2)
+				goto invalid;
+			ch += byte; ch <<= 6;
+			byte = *utf8p++;       /* 3rd byte */
+			if ((byte >> 6) != 2)
+				goto invalid;
+			ch += byte;
+			ch -= 0x000E2080UL;
+			if (ch < 0x0800)
+				goto invalid;
+			if (ch >= 0xD800) {
+				if (ch <= 0xDFFF)
+					goto invalid;
+				if (ch == 0xFFFE || ch == 0xFFFF)
+					goto invalid;
+			}
+			break;
+		case 3:
+			ch = byte; ch <<= 6;   /* 1st byte */
+			byte = *utf8p++;       /* 2nd byte */
+			if ((byte >> 6) != 2)
+				goto invalid;
+			ch += byte; ch <<= 6;
+			byte = *utf8p++;       /* 3rd byte */
+			if ((byte >> 6) != 2)
+				goto invalid;
+			ch += byte; ch <<= 6;
+			byte = *utf8p++;       /* 4th byte */
+			if ((byte >> 6) != 2)
+				goto invalid;
+			ch += byte;
+			ch -= 0x03C82080UL + SP_HALF_BASE;
+			ucs_ch = (ch >> SP_HALF_SHIFT) + SP_HIGH_FIRST;
+			if (ucs_ch < SP_HIGH_FIRST || ucs_ch > SP_HIGH_LAST)
+				goto invalid;
+			ucs_ch = (ch & SP_HALF_MASK) + SP_LOW_FIRST;
+			if (ucs_ch < SP_LOW_FIRST || ucs_ch > SP_LOW_LAST)
+				goto invalid;
+			break;
+		default:
+			goto invalid;
+		}
+		
+	}
+	return (0);
+invalid:
+	return (EINVAL);
 }
 
 

@@ -3,22 +3,19 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -30,9 +27,7 @@
 
 #ifndef _NET_NDRV_VAR_H
 #define _NET_NDRV_VAR_H
-#include <sys/appleapiopts.h>
-#ifdef KERNEL
-#ifdef __APPLE_API_PRIVATE
+#ifdef PRIVATE
 
 /*
  * structure for storing a linked list of multicast addresses
@@ -42,6 +37,7 @@
 struct ndrv_multiaddr
 {
     struct ndrv_multiaddr*	next;
+    struct if_multiaddr*	ifma;
     struct sockaddr			addr;
 };
 
@@ -52,8 +48,7 @@ struct ndrv_multiaddr
  */
 struct ndrv_cb
 {
-    struct ndrv_cb *nd_next;	/* Doubly-linked list */
-	struct ndrv_cb *nd_prev;
+	TAILQ_ENTRY(ndrv_cb)	nd_next;
 	struct socket *nd_socket;	/* Back to the socket */
 	u_int32_t nd_signature;	/* Just double-checking */
 	struct sockaddr_ndrv *nd_faddr;
@@ -62,8 +57,7 @@ struct ndrv_cb
 	int nd_descrcnt;		/* # elements in nd_dlist - Obsolete */
 	TAILQ_HEAD(dlist, dlil_demux_desc) nd_dlist; /* Descr. list */
 	struct ifnet *nd_if; /* obsolete, maintained for binary compatibility */
-    u_long	nd_send_tag;
-    u_long	nd_tag;
+    u_long	nd_proto_family;
     u_long	nd_family;
     struct ndrv_multiaddr*	nd_multiaddrs;
     short	nd_unit;
@@ -76,7 +70,5 @@ struct ndrv_cb
 #define NDRVSNDQ	 8192
 #define NDRVRCVQ	 8192
 
-extern struct ndrv_cb ndrvl;		/* Head of controlblock list */
-#endif /* __APPLE_API_PRIVATE */
-#endif	/* KERNEL */
+#endif /* PRIVATE */
 #endif	/* _NET_NDRV_VAR_H */

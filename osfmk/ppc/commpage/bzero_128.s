@@ -3,22 +3,19 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -31,12 +28,26 @@
 
         .text
         .align	2
-        .globl	EXT(bzero_128)
-        
+/*
+ * WARNING: this code is written for 32-bit mode, and ported by the kernel if necessary
+ * to 64-bit mode for use in the 64-bit commpage.  This "port" consists of the following
+ * simple transformations:
+ *      - all word compares are changed to doubleword
+ *      - all "srwi[.]" opcodes are changed to "srdi[.]"                      
+ * Nothing else is done.  For this to work, the following rules must be
+ * carefully followed:
+ *      - do not use carry or overflow
+ *      - only use record mode if you are sure the results are mode-invariant
+ *        for example, all "andi." and almost all "rlwinm." are fine
+ *      - do not use "slwi", "slw", or "srw"
+ * An imaginative programmer could break the porting model in other ways, but the above
+ * are the most likely problem areas.  It is perhaps surprising how well in practice
+ * this simple method works.
+ */        
 
-// *********************
-// * B Z E R O _ 1 2 8 *
-// *********************
+// **********************
+// * B Z E R O _ 1 2 8  *
+// **********************
 //
 // For 64-bit processors with a 128-byte cache line.
 //
@@ -45,7 +56,7 @@
 //		r3 = original ptr, not changed since memset returns it
 //		r4 = count of bytes to set
 //		r9 = working operand ptr
-// We do not touch r2 and r10-r12, which some callers depend on.
+// WARNING: We do not touch r2 and r10-r12, which some callers depend on.
 
         .align	5
 bzero_128:						// void	bzero(void *b, size_t len);
@@ -153,4 +164,5 @@ Ltail:
         stb		r0,0(r9)
         blr
 
-        COMMPAGE_DESCRIPTOR(bzero_128,_COMM_PAGE_BZERO,kCache128+k64Bit,0,kCommPageMTCRF)
+	COMMPAGE_DESCRIPTOR(bzero_128,_COMM_PAGE_BZERO,kCache128+k64Bit,0, \
+				kCommPageMTCRF+kCommPageBoth+kPort32to64)

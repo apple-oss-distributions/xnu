@@ -3,22 +3,19 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -177,10 +174,15 @@ void trackrouter(ifID, net, node)
 void ddp_age_router(deadrouter)
      register struct routerinfo *deadrouter;
 {
-	register at_ifaddr_t *ourrouter = deadrouter->ifID;
-	boolean_t 	funnel_state;
+	register at_ifaddr_t *ourrouter;
 
-	funnel_state = thread_funnel_set(network_flock, TRUE);
+	atalk_lock();
+			
+	ourrouter = deadrouter->ifID;
+	if (ourrouter == NULL) {
+		atalk_unlock();
+		return;
+	}
         
 	dPrintf(D_M_RTMP, D_L_INFO, 
 		("ddp_age_router called deadrouter=%d:%d\n", NODE(deadrouter), NET(deadrouter)));
@@ -241,7 +243,7 @@ void ddp_age_router(deadrouter)
 	} else
 	        bzero((caddr_t) deadrouter, sizeof(struct routerinfo));
 
-        (void) thread_funnel_set(network_flock, FALSE);
+	atalk_unlock();
         
 } /* ddp_age_router */
 

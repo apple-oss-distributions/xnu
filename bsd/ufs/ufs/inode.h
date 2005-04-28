@@ -3,22 +3,19 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -70,6 +67,7 @@
 #ifdef __APPLE_API_PRIVATE
 #include <ufs/ufs/dir.h>
 #include <ufs/ufs/dinode.h>
+#include <sys/queue.h>
 #include <sys/event.h>
 #include <sys/lock.h>
 #include <sys/quota.h>
@@ -99,8 +97,8 @@ struct inode {
 	struct	 klist i_knotes;	/* knotes attached to this vnode */
 	struct	 dquot *i_dquot[MAXQUOTAS]; /* Dquot structures. */
 	u_quad_t i_modrev;	/* Revision level for NFS lease. */
-	struct	 lockf *i_lockf;/* Head of byte-level lock list. */
-	struct	 lock__bsd__ i_lock;	/* Inode lock. */
+	void	 *i_lockf;	/* DEPRECATED */
+
 	/*
 	 * Side effects; used during directory lookup.
 	 */
@@ -110,6 +108,7 @@ struct inode {
 	doff_t	  i_offset;	/* Offset of free space in directory. */
 	ino_t	  i_ino;	/* Inode number of found directory. */
 	u_int32_t i_reclen;	/* Size of found directory entry. */
+        daddr_t	  i_lastr;	/* last read... read-ahead */
 	/*
 	 * The on-disk dinode itself.
 	 */
@@ -176,17 +175,15 @@ struct indir {
 			(ip)->i_modrev++;				\
 		}							\
 		if ((ip)->i_flag & IN_CHANGE)				\
-			(ip)->i_ctime = time.tv_sec;			\
+			(ip)->i_ctime = (t2)->tv_sec;			\
 		(ip)->i_flag &= ~(IN_ACCESS | IN_CHANGE | IN_UPDATE);	\
 	}								\
 }
 
 #define VN_KNOTE(vp, hint) KNOTE(&VTOI(vp)->i_knotes, (hint))
 
-/* This overlays the fid structure (see mount.h). */
+/* This overlays the FileID portion of NFS file handles. */
 struct ufid {
-	u_int16_t ufid_len;	/* Length of structure. */
-	u_int16_t ufid_pad;	/* Force 32-bit alignment. */
 	ino_t	  ufid_ino;	/* File number (ino). */
 	int32_t	  ufid_gen;	/* Generation number. */
 };

@@ -3,22 +3,19 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -30,6 +27,8 @@
  */
 
 
+#define	IOLOCKS_CPP	1
+
 #include <IOKit/system.h>
 
 #include <IOKit/IOReturn.h>
@@ -37,27 +36,49 @@
 #include <IOKit/assert.h>
 
 extern "C" {
-#include <kern/simple_lock.h>
-#include <machine/machine_routines.h>
-
-IOLock * IOLockAlloc( void )
-{
-    return( mutex_alloc(ETAP_IO_AHA) );
-}
-
-void	IOLockFree( IOLock * lock)
-{
-    mutex_free( lock );
-}
+#include <kern/locks.h>
 
 void	IOLockInitWithState( IOLock * lock, IOLockState state)
 {
     if( state == kIOLockStateLocked)
-        IOLockLock( lock);
+        lck_mtx_lock( lock);
 }
 
+IOLock * IOLockAlloc( void )
+{
+    return( lck_mtx_alloc_init(IOLockGroup, LCK_ATTR_NULL) );
+}
+
+void	IOLockFree( IOLock * lock)
+{
+    lck_mtx_free( lock, IOLockGroup);
+}
+
+lck_mtx_t * IOLockGetMachLock( IOLock * lock)
+{
+    return( (lck_mtx_t *)lock);
+}
+
+int	IOLockSleep( IOLock * lock, void *event, UInt32 interType)
+{
+    return (int) lck_mtx_sleep(lock, LCK_SLEEP_DEFAULT, (event_t) event, (wait_interrupt_t) interType);
+}
+
+int	IOLockSleepDeadline( IOLock * lock, void *event,
+                                AbsoluteTime deadline, UInt32 interType)
+{
+    return (int) lck_mtx_sleep_deadline(lock, LCK_SLEEP_DEFAULT, (event_t) event,
+    					(wait_interrupt_t) interType, __OSAbsoluteTime(deadline));
+}
+
+void	IOLockWakeup(IOLock * lock, void *event, bool oneThread)
+{   
+	thread_wakeup_prim((event_t) event, oneThread, THREAD_AWAKENED);
+}   
+
+
 struct _IORecursiveLock {
-    mutex_t  *	mutex;
+    lck_mtx_t   *mutex;
     thread_t	thread;
     UInt32	count;
 };
@@ -70,7 +91,7 @@ IORecursiveLock * IORecursiveLockAlloc( void )
     if( !lock)
         return( 0 );
 
-    lock->mutex = mutex_alloc(ETAP_IO_AHA);
+    lock->mutex = lck_mtx_alloc_init(IOLockGroup, LCK_ATTR_NULL);
     if( lock->mutex) {
         lock->thread = 0;
         lock->count  = 0;
@@ -86,8 +107,13 @@ void IORecursiveLockFree( IORecursiveLock * _lock )
 {
     _IORecursiveLock * lock = (_IORecursiveLock *)_lock;
 
-    mutex_free( lock->mutex );
+    lck_mtx_free( lock->mutex , IOLockGroup);
     IODelete( lock, _IORecursiveLock, 1);
+}
+
+lck_mtx_t * IORecursiveLockGetMachLock( IORecursiveLock * lock)
+{
+    return( lock->mutex);
 }
 
 void IORecursiveLockLock( IORecursiveLock * _lock)
@@ -97,7 +123,7 @@ void IORecursiveLockLock( IORecursiveLock * _lock)
     if( lock->thread == IOThreadSelf())
         lock->count++;
     else {
-        mutex_lock( lock->mutex );
+        lck_mtx_lock( lock->mutex );
         assert( lock->thread == 0 );
         assert( lock->count == 0 );
         lock->thread = IOThreadSelf();
@@ -113,7 +139,7 @@ boolean_t IORecursiveLockTryLock( IORecursiveLock * _lock)
         lock->count++;
 	return( true );
     } else {
-        if( mutex_try( lock->mutex )) {
+        if( lck_mtx_try_lock( lock->mutex )) {
             assert( lock->thread == 0 );
             assert( lock->count == 0 );
             lock->thread = IOThreadSelf();
@@ -132,7 +158,7 @@ void IORecursiveLockUnlock( IORecursiveLock * _lock)
 
     if( 0 == (--lock->count)) {
         lock->thread = 0;
-        mutex_unlock( lock->mutex );
+        lck_mtx_unlock( lock->mutex );
     }
 }
 
@@ -154,7 +180,7 @@ int IORecursiveLockSleep(IORecursiveLock *_lock, void *event, UInt32 interType)
     
     lock->count = 0;
     lock->thread = 0;
-    res = thread_sleep_mutex((event_t) event, lock->mutex, (int) interType);
+    res = lck_mtx_sleep(lock->mutex, LCK_SLEEP_DEFAULT, (event_t) event, (wait_interrupt_t) interType);
 
     // Must re-establish the recursive lock no matter why we woke up
     // otherwise we would potentially leave the return path corrupted.
@@ -176,16 +202,17 @@ void IORecursiveLockWakeup(IORecursiveLock *, void *event, bool oneThread)
 
 IORWLock * IORWLockAlloc( void )
 {
-    IORWLock * lock;
-
-    lock = lock_alloc( true, ETAP_IO_AHA, ETAP_IO_AHA);
-
-    return( lock);
+    return(  lck_rw_alloc_init(IOLockGroup, LCK_ATTR_NULL)  );
 }
 
 void	IORWLockFree( IORWLock * lock)
 {
-    lock_free( lock );
+    lck_rw_free( lock, IOLockGroup);
+}
+
+lck_rw_t * IORWLockGetMachLock( IORWLock * lock)
+{
+    return( (lck_rw_t *)lock);
 }
 
 
@@ -195,23 +222,22 @@ void	IORWLockFree( IORWLock * lock)
 
 IOSimpleLock * IOSimpleLockAlloc( void )
 {
-    IOSimpleLock *	lock;
-
-    lock = (IOSimpleLock *) IOMalloc( sizeof(IOSimpleLock));
-    if( lock)
-	IOSimpleLockInit( lock );
-
-    return( lock );
+    return( lck_spin_alloc_init( IOLockGroup, LCK_ATTR_NULL) );
 }
 
 void IOSimpleLockInit( IOSimpleLock * lock)
 {
-    simple_lock_init( (simple_lock_t) lock, ETAP_IO_AHA );
+    lck_spin_init( lock, IOLockGroup, LCK_ATTR_NULL);
 }
 
 void IOSimpleLockFree( IOSimpleLock * lock )
 {
-    IOFree( lock, sizeof(IOSimpleLock));
+    lck_spin_free( lock, IOLockGroup);
+}
+
+lck_spin_t * IOSimpleLockGetMachLock( IOSimpleLock * lock)
+{
+    return( (lck_spin_t *)lock);
 }
 
 } /* extern "C" */

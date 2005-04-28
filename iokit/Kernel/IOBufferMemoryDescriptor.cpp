@@ -3,22 +3,19 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -27,6 +24,8 @@
 
 #include <IOKit/IOLib.h>
 #include <IOKit/IOBufferMemoryDescriptor.h>
+
+#include "IOKitKernelInternal.h"
 
 __BEGIN_DECLS
 void ipc_port_release_send(ipc_port_t port);
@@ -89,8 +88,9 @@ bool IOBufferMemoryDescriptor::initWithOptions(
                                vm_offset_t  alignment,
 			       task_t	    inTask)
 {
-    vm_map_t map = 0;
-    IOOptionBits iomdOptions = kIOMemoryAsReference | kIOMemoryTypeVirtual;
+    kern_return_t 	kr;
+    vm_map_t 		vmmap = 0;
+    IOOptionBits	iomdOptions = kIOMemoryAsReference | kIOMemoryTypeVirtual;
 
     if (!capacity)
         return false;
@@ -114,34 +114,77 @@ bool IOBufferMemoryDescriptor::initWithOptions(
     if (options & kIOMemoryPageable)
     {
         iomdOptions |= kIOMemoryBufferPageable;
-	if (inTask == kernel_task)
+
+        ipc_port_t sharedMem;
+        vm_size_t size = round_page_32(capacity);
+
+        // must create the entry before any pages are allocated
+
+	// set flags for entry + object create
+	vm_prot_t memEntryCacheMode = VM_PROT_READ | VM_PROT_WRITE
+				    | MAP_MEM_NAMED_CREATE;
+
+        if (options & kIOMemoryPurgeable)
+            memEntryCacheMode |= MAP_MEM_PURGABLE;
+
+	// set memory entry cache mode
+	switch (options & kIOMapCacheMask)
 	{
-	    /* Allocate some kernel address space. */
-	    _buffer = IOMallocPageable(capacity, alignment);
-	    if (_buffer)
-		map = IOPageableMapForAddress((vm_address_t) _buffer);
+	    case kIOMapInhibitCache:
+		SET_MAP_MEM(MAP_MEM_IO, memEntryCacheMode);
+		break;
+    
+	    case kIOMapWriteThruCache:
+		SET_MAP_MEM(MAP_MEM_WTHRU, memEntryCacheMode);
+		break;
+
+	    case kIOMapWriteCombineCache:
+		SET_MAP_MEM(MAP_MEM_WCOMB, memEntryCacheMode);
+		break;
+
+	    case kIOMapCopybackCache:
+		SET_MAP_MEM(MAP_MEM_COPYBACK, memEntryCacheMode);
+		break;
+
+	    case kIOMapDefaultCache:
+	    default:
+		SET_MAP_MEM(MAP_MEM_NOOP, memEntryCacheMode);
+		break;
+	}
+
+	kr = mach_make_memory_entry( vmmap,
+		    &size, 0,
+		    memEntryCacheMode, &sharedMem,
+		    NULL );
+
+	if( (KERN_SUCCESS == kr) && (size != round_page_32(capacity))) {
+	    ipc_port_release_send( sharedMem );
+	    kr = kIOReturnVMError;
+	}
+	if( KERN_SUCCESS != kr)
+	    return( false );
+
+	_memEntry = (void *) sharedMem;
+#if IOALLOCDEBUG
+       debug_iomallocpageable_size += size;
+#endif
+	if ((NULL == inTask) && (options & kIOMemoryPageable))
+	    inTask = kernel_task;
+	else if (inTask == kernel_task)
+	{
+	    vmmap = kernel_map;
 	}
 	else
 	{
-	    kern_return_t kr;
 
 	    if( !reserved) {
 		reserved = IONew( ExpansionData, 1 );
 		if( !reserved)
 		    return( false );
 	    }
-	    map = get_task_map(inTask);
-	    vm_map_reference(map);
-	    reserved->map = map;
-	    kr = vm_allocate( map, (vm_address_t *) &_buffer, round_page_32(capacity),
-				VM_FLAGS_ANYWHERE | VM_MAKE_TAG(VM_MEMORY_IOKIT) );
-	    if( KERN_SUCCESS != kr)
-		return( false );
-
-	    // we have to make sure that these pages don't get copied on fork.
-	    kr = vm_inherit( map, (vm_address_t) _buffer, round_page_32(capacity), VM_INHERIT_NONE);
-	    if( KERN_SUCCESS != kr)
-		return( false );
+	    vmmap = get_task_map(inTask);
+	    vm_map_reference(vmmap);
+	    reserved->map = vmmap;
 	}
     }
     else 
@@ -158,10 +201,10 @@ bool IOBufferMemoryDescriptor::initWithOptions(
 	    _buffer = IOMallocAligned(capacity, alignment);
 	else
 	    _buffer = IOMalloc(capacity);
-    }
 
-    if (!_buffer)
-	return false;
+	if (!_buffer)
+	    return false;
+    }
 
     _singleRange.v.address = (vm_address_t) _buffer;
     _singleRange.v.length  = capacity;
@@ -170,53 +213,20 @@ bool IOBufferMemoryDescriptor::initWithOptions(
                                inTask, iomdOptions, /* System mapper */ 0))
 	return false;
 
-    if (options & kIOMemoryPageable) {
+    if (options & kIOMemoryPageable)
+    {
         kern_return_t kr;
-        ipc_port_t sharedMem = (ipc_port_t) _memEntry;
-        vm_size_t size = round_page_32(_ranges.v[0].length);
 
-        // must create the entry before any pages are allocated
-        if( 0 == sharedMem) {
-
-            // set memory entry cache
-            vm_prot_t memEntryCacheMode = VM_PROT_READ | VM_PROT_WRITE;
-            switch (options & kIOMapCacheMask)
-            {
-		case kIOMapInhibitCache:
-                    SET_MAP_MEM(MAP_MEM_IO, memEntryCacheMode);
-                    break;
-	
-		case kIOMapWriteThruCache:
-                    SET_MAP_MEM(MAP_MEM_WTHRU, memEntryCacheMode);
-                    break;
-
-		case kIOMapWriteCombineCache:
-                    SET_MAP_MEM(MAP_MEM_WCOMB, memEntryCacheMode);
-                    break;
-
-		case kIOMapCopybackCache:
-                    SET_MAP_MEM(MAP_MEM_COPYBACK, memEntryCacheMode);
-                    break;
-
-		case kIOMapDefaultCache:
-		default:
-                    SET_MAP_MEM(MAP_MEM_NOOP, memEntryCacheMode);
-                    break;
-            }
-
-            kr = mach_make_memory_entry( map,
-                        &size, _ranges.v[0].address,
-                        memEntryCacheMode, &sharedMem,
-                        NULL );
-
-            if( (KERN_SUCCESS == kr) && (size != round_page_32(_ranges.v[0].length))) {
-                ipc_port_release_send( sharedMem );
-                kr = kIOReturnVMError;
-            }
-            if( KERN_SUCCESS != kr)
-                sharedMem = 0;
-            _memEntry = (void *) sharedMem;
-        }
+	if (vmmap)
+	{
+	    kr = doMap(vmmap, (IOVirtualAddress *) &_buffer, kIOMapAnywhere, 0, round_page_32(capacity));
+	    if (KERN_SUCCESS != kr)
+	    {
+		_buffer = 0;
+		return( false );
+	    }
+	    _singleRange.v.address = (vm_address_t) _buffer;
+	}
     }
 
     setLength(capacity);
@@ -338,39 +348,43 @@ void IOBufferMemoryDescriptor::free()
     IOOptionBits options   = _options;
     vm_size_t    size	   = _capacity;
     void *       buffer	   = _buffer;
-    vm_map_t	 map	   = 0;
+    vm_map_t	 vmmap	   = 0;
     vm_offset_t  alignment = _alignment;
 
     if (reserved)
     {
-	map = reserved->map;
+	vmmap = reserved->map;
         IODelete( reserved, ExpansionData, 1 );
     }
 
     /* super::free may unwire - deallocate buffer afterwards */
     super::free();
 
-    if (buffer)
+    if (options & kIOMemoryPageable)
     {
-        if (options & kIOMemoryPageable)
-	{
-	    if (map)
-		vm_deallocate(map, (vm_address_t) buffer, round_page_32(size));
-	    else
-	       IOFreePageable(buffer, size);
-	}
-        else
-	{
-            if (options & kIOMemoryPhysicallyContiguous)
-                IOFreeContiguous(buffer, size);
-            else if (alignment > 1)
-                IOFreeAligned(buffer, size);
+#if IOALLOCDEBUG
+        if (!buffer || vmmap)
+            debug_iomallocpageable_size -= round_page_32(size);
+#endif
+        if (buffer)
+        {
+            if (vmmap)
+                vm_deallocate(vmmap, (vm_address_t) buffer, round_page_32(size));
             else
-                IOFree(buffer, size);
+                IOFreePageable(buffer, size);
         }
     }
-    if (map)
-	vm_map_deallocate(map);
+    else if (buffer)
+    {
+        if (options & kIOMemoryPhysicallyContiguous)
+            IOFreeContiguous(buffer, size);
+        else if (alignment > 1)
+            IOFreeAligned(buffer, size);
+        else
+            IOFree(buffer, size);
+    }
+    if (vmmap)
+	vm_map_deallocate(vmmap);
 }
 
 /*

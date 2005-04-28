@@ -3,22 +3,19 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -39,7 +36,6 @@
 
 */
 
-#include <cpus.h>
 #include <ppc/asm.h>
 #include <ppc/proc_reg.h>
 #include <ppc/spec_reg.h>
@@ -2177,9 +2173,11 @@ LEXT(stSpecrs)
 			ori		r2,r2,lo16(MASK(MSR_FP))		; Get the FP enable 
 			ori		r4,r4,lo16(MASK(MSR_EE))		; Get the EE bit
 
+ 			mfsprg	r9,2							; Get feature flags 
+			mtcrf	0x02,r9							; move pf64Bit cr6
 
-			mfmsr	r0					; Save the MSR
-			andc	r0,r0,r2			; Turn of VEC and FP
+			mfmsr	r0								; Save the MSR
+			andc	r0,r0,r2						; Turn off VEC and FP
 			andc	r4,r0,r4			; And EE
 			mtmsr	r4
 			isync
@@ -2187,6 +2185,8 @@ LEXT(stSpecrs)
 			mfpvr	r12
 			stw		r12,4(r3)
 			rlwinm	r12,r12,16,16,31
+
+			bt++	pf64Bitb,stsSF1					; skip if 64-bit (only they take the hint)
 
 			mfdbatu	r4,0
 			mfdbatl	r5,0
@@ -2308,6 +2308,45 @@ nnmax:		stw		r4,(48*4)(r3)
 
 			blr
 
+stsSF1:		mfsprg	r4,0
+			mfsprg	r5,1
+			mfsprg	r6,2
+			mfsprg	r7,3
+			std		r4,(18*4)(r3)
+			std		r5,(20*4)(r3)
+			std		r6,(22*4)(r3)
+			std		r7,(24*4)(r3)
+			
+			mfsdr1	r4
+			std		r4,(26*4)(r3)
+
+			mfspr	r4,hid0
+			std		r4,(28*4)(r3)
+			mfspr	r4,hid1
+			std		r4,(30*4)(r3)
+			mfspr	r4,hid4
+			std		r4,(32*4)(r3)
+			mfspr	r4,hid5
+			std		r4,(34*4)(r3)
+
+
+stsSF2:		li		r5,0
+			la		r4,(80*4)(r3)
+			
+stsslbm:	slbmfee	r6,r5
+			slbmfev	r7,r5
+			std		r6,0(r4)
+			std		r7,8(r4)
+			addi	r5,r5,1
+			cmplwi	r5,64
+			addi	r4,r4,16
+			blt		stsslbm
+
+			
+			mtmsr	r0
+			isync
+
+			blr
 
 ;
 ;			fwEmMck - this forces the hardware to emulate machine checks

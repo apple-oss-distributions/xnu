@@ -3,30 +3,28 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
 /* IOSet.m created by rsulack on Thu 11-Jun-1998 */
 
-#include <libkern/c++/OSSet.h>
+#include <libkern/c++/OSDictionary.h>
 #include <libkern/c++/OSArray.h>
 #include <libkern/c++/OSSerialize.h>
+#include <libkern/c++/OSSet.h>
 
 #define super OSCollection
 
@@ -39,6 +37,9 @@ OSMetaClassDefineReservedUnused(OSSet, 4);
 OSMetaClassDefineReservedUnused(OSSet, 5);
 OSMetaClassDefineReservedUnused(OSSet, 6);
 OSMetaClassDefineReservedUnused(OSSet, 7);
+
+#define EXT_CAST(obj) \
+    reinterpret_cast<OSObject *>(const_cast<OSMetaClassBase *>(obj))
 
 bool OSSet::initWithCapacity(unsigned int inCapacity)
 {
@@ -148,6 +149,7 @@ OSSet *OSSet::withSet(const OSSet *set,
 
 void OSSet::free()
 {
+    (void) members->super::setOptions(0, kImmutable);
     if (members)
         members->release();
 
@@ -209,7 +211,7 @@ bool OSSet::merge(const OSArray *array)
 
 bool OSSet::merge(const OSSet *set)
 {
-    return setObject(set->members);
+    return merge(set->members);
 }
 
 void OSSet::removeObject(const OSMetaClassBase *anObject)
@@ -323,4 +325,72 @@ bool OSSet::serialize(OSSerialize *s) const
     }   
 
     return s->addXMLEndTag("set");
+}
+
+unsigned OSSet::setOptions(unsigned options, unsigned mask, void *)
+{
+    unsigned old = super::setOptions(options, mask);
+    if ((old ^ options) & mask)
+	members->setOptions(options, mask);
+
+    return old;
+}
+
+OSCollection * OSSet::copyCollection(OSDictionary *cycleDict)
+{
+    bool allocDict = !cycleDict;
+    OSCollection *ret = 0;
+    OSSet *newSet = 0;
+
+    if (allocDict) {
+	cycleDict = OSDictionary::withCapacity(16);
+	if (!cycleDict)
+	    return 0;
+    }
+
+    do {
+	// Check for a cycle
+	ret = super::copyCollection(cycleDict);
+	if (ret)
+	    continue;	// Found it
+
+	newSet = OSSet::withCapacity(members->capacity);
+	if (!newSet)
+	    continue;	// Couldn't create new set abort
+
+	// Insert object into cycle Dictionary
+	cycleDict->setObject((const OSSymbol *) this, newSet);
+
+	OSArray *newMembers = newSet->members;
+	newMembers->capacityIncrement = members->capacityIncrement;
+
+	// Now copy over the contents into the new duplicate
+	for (unsigned int i = 0; i < members->count; i++) {
+	    OSObject *obj = EXT_CAST(members->array[i]);
+	    OSCollection *coll = OSDynamicCast(OSCollection, obj);
+	    if (coll) {
+		OSCollection *newColl = coll->copyCollection(cycleDict);
+		if (newColl) {
+		    obj = newColl;	// Rely on cycleDict ref for a bit
+		    newColl->release();
+		}
+		else
+		    goto abortCopy;
+	    };
+	    newMembers->setObject(obj);
+	};
+
+	ret = newSet;
+	newSet = 0;
+
+    } while(false);
+
+abortCopy:
+    if (newSet)
+	newSet->release();
+
+    if (allocDict)
+	cycleDict->release();
+
+    return ret;
 }

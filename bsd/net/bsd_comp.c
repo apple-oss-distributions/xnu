@@ -3,22 +3,19 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -149,26 +146,27 @@ struct bsd_db {
 #define BSD_OVHD	2		/* BSD compress overhead/packet */
 #define BSD_INIT_BITS	BSD_MIN_BITS
 
-static void	bsd_clear __P((struct bsd_db *db));
-static int	bsd_check __P((struct bsd_db *db));
-static void	*bsd_alloc __P((u_char *options, int opt_len, int decomp));
-static int	bsd_init_comp_db __P((struct bsd_db *db, u_char *options, int opt_len,
+static void	bsd_clear(struct bsd_db *db);
+static int	bsd_check(struct bsd_db *db);
+static void	*bsd_alloc(u_char *options, int opt_len, int decomp);
+static int	bsd_init_comp_db(struct bsd_db *db, u_char *options,
+			      int opt_len,
 			      int unit, int hdrlen, int mru, int debug,
-			      int decomp));
-static void	*bsd_comp_alloc __P((u_char *options, int opt_len));
-static void	*bsd_decomp_alloc __P((u_char *options, int opt_len));
-static void	bsd_free __P((void *state));
-static int	bsd_comp_init __P((void *state, u_char *options, int opt_len,
-				   int unit, int hdrlen, int debug));
-static int	bsd_decomp_init __P((void *state, u_char *options, int opt_len,
-				     int unit, int hdrlen, int mru, int debug));
-static int	bsd_compress __P((void *state, struct mbuf **mret,
-				  struct mbuf *mp, int slen, int maxolen));
-static void	bsd_incomp __P((void *state, struct mbuf *dmsg));
-static int	bsd_decompress __P((void *state, struct mbuf *cmp,
-				    struct mbuf **dmpp));
-static void	bsd_reset __P((void *state));
-static void	bsd_comp_stats __P((void *state, struct compstat *stats));
+			      int decomp);
+static void	*bsd_comp_alloc(u_char *options, int opt_len);
+static void	*bsd_decomp_alloc(u_char *options, int opt_len);
+static void	bsd_free(void *state);
+static int	bsd_comp_init(void *state, u_char *options, int opt_len,
+				   int unit, int hdrlen, int debug);
+static int	bsd_decomp_init(void *state, u_char *options, int opt_len,
+				     int unit, int hdrlen, int mru, int debug);
+static int	bsd_compress(void *state, struct mbuf **mret,
+				  struct mbuf *mp, int slen, int maxolen);
+static void	bsd_incomp(void *state, struct mbuf *dmsg);
+static int	bsd_decompress(void *state, struct mbuf *cmp,
+				    struct mbuf **dmpp);
+static void	bsd_reset(void *state);
+static void	bsd_comp_stats(void *state, struct compstat *stats);
 
 /*
  * Procedures exported to if_ppp.c.

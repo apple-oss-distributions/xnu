@@ -3,22 +3,19 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -41,6 +38,8 @@
 
 #include <sys/types.h>
 #include <sys/uio.h>
+
+#ifdef __APPLE_API_OBSOLETE
 
 /* 
    Non-aligned types are used in packet headers. 
@@ -284,19 +283,18 @@ typedef struct at_state {
 #define AT_ST_ZT_CHANGED 	0x0800  /* zone table changed (for SNMP) */
 #define AT_ST_NBP_CHANGED	0x1000  /* if nbp table changed (for SNMP)*/
 
-#ifdef KERNEL
-#ifdef __APPLE_API_PRIVATE
+#ifdef KERNEL_PRIVATE
 extern at_state_t at_state;		/* global state of AT network */
 
 #define ROUTING_MODE	(at_state.flags & AT_ST_ROUTER)
 #define MULTIHOME_MODE	(at_state.flags & AT_ST_MULTIHOME)
 #define MULTIPORT_MODE (ROUTING_MODE || MULTIHOME_MODE)
-#endif /* __APPLE_API_PRIVATE */
-#endif /* KERNEL */
+#endif /* KERNEL_PRIVATE */
 
 /* defines originally from h/at_elap.h */
 #define AT_ADDR			0
 #define ET_ADDR			1
 #define AT_ADDR_NO_LOOP		2	/* disables packets from looping back */
 
+#endif /* __APPLE_API_OBSOLETE */
 #endif /* _NETAT_APPLETALK_H_ */

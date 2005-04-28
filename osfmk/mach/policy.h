@@ -1,24 +1,21 @@
 /*
- * Copyright (c) 2000 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2005 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -60,14 +57,15 @@
  *	mach/policy.h
  *
  *	Definitions for scheduing policy.
- *
- *  N.B. The interfaces defined here are all obsolete!!
+ */
+
+/*
+ *  All interfaces defined here are obsolete.
  */
 
 #include <mach/boolean.h>
+#include <mach/message.h>
 #include <mach/vm_types.h>
-
-#include <sys/appleapiopts.h>
 
 /*
  *	Old scheduling control interface
@@ -76,8 +74,6 @@ typedef int 				policy_t;
 typedef integer_t			*policy_info_t;
 typedef integer_t			*policy_base_t;
 typedef integer_t			*policy_limit_t;
-
-#ifdef	__APPLE_API_UNSTABLE
 
 /*
  *	Policy definitions.  Policies should be powers of 2,
@@ -131,12 +127,12 @@ typedef struct policy_timeshare_limit	policy_timeshare_limit_data_t;
 typedef struct policy_timeshare_info	policy_timeshare_info_data_t;
 
 
-#define POLICY_TIMESHARE_BASE_COUNT		\
-	(sizeof(struct policy_timeshare_base)/sizeof(integer_t))
-#define POLICY_TIMESHARE_LIMIT_COUNT		\
-	(sizeof(struct policy_timeshare_limit)/sizeof(integer_t))
-#define POLICY_TIMESHARE_INFO_COUNT		\
-	(sizeof(struct policy_timeshare_info)/sizeof(integer_t))
+#define POLICY_TIMESHARE_BASE_COUNT	((mach_msg_type_number_t) \
+	(sizeof(struct policy_timeshare_base)/sizeof(integer_t)))
+#define POLICY_TIMESHARE_LIMIT_COUNT	((mach_msg_type_number_t) \
+	(sizeof(struct policy_timeshare_limit)/sizeof(integer_t)))
+#define POLICY_TIMESHARE_INFO_COUNT	((mach_msg_type_number_t) \
+	(sizeof(struct policy_timeshare_info)/sizeof(integer_t)))
 
 
 /*
@@ -165,12 +161,12 @@ typedef struct policy_rr_base		policy_rr_base_data_t;
 typedef struct policy_rr_limit		policy_rr_limit_data_t;
 typedef struct policy_rr_info		policy_rr_info_data_t;
 
-#define POLICY_RR_BASE_COUNT		\
-	(sizeof(struct policy_rr_base)/sizeof(integer_t))
-#define POLICY_RR_LIMIT_COUNT		\
-	(sizeof(struct policy_rr_limit)/sizeof(integer_t))
-#define POLICY_RR_INFO_COUNT		\
-	(sizeof(struct policy_rr_info)/sizeof(integer_t))
+#define POLICY_RR_BASE_COUNT	((mach_msg_type_number_t)	\
+	(sizeof(struct policy_rr_base)/sizeof(integer_t)))
+#define POLICY_RR_LIMIT_COUNT	((mach_msg_type_number_t)	\
+	(sizeof(struct policy_rr_limit)/sizeof(integer_t)))
+#define POLICY_RR_INFO_COUNT	((mach_msg_type_number_t)	\
+	(sizeof(struct policy_rr_info)/sizeof(integer_t)))
 
 
 /*
@@ -197,12 +193,12 @@ typedef struct policy_fifo_base		policy_fifo_base_data_t;
 typedef struct policy_fifo_limit	policy_fifo_limit_data_t;
 typedef struct policy_fifo_info		policy_fifo_info_data_t;
 
-#define POLICY_FIFO_BASE_COUNT		\
-	(sizeof(struct policy_fifo_base)/sizeof(integer_t))
-#define POLICY_FIFO_LIMIT_COUNT		\
-	(sizeof(struct policy_fifo_limit)/sizeof(integer_t))
-#define POLICY_FIFO_INFO_COUNT		\
-	(sizeof(struct policy_fifo_info)/sizeof(integer_t))
+#define POLICY_FIFO_BASE_COUNT	((mach_msg_type_number_t)	\
+	(sizeof(struct policy_fifo_base)/sizeof(integer_t)))
+#define POLICY_FIFO_LIMIT_COUNT	((mach_msg_type_number_t)	\
+	(sizeof(struct policy_fifo_limit)/sizeof(integer_t)))
+#define POLICY_FIFO_INFO_COUNT	((mach_msg_type_number_t)	\
+	(sizeof(struct policy_fifo_info)/sizeof(integer_t)))
 
 /*
  * 	Aggregate policy types
@@ -230,6 +226,4 @@ typedef struct policy_bases		policy_base_data_t;
 typedef struct policy_limits		policy_limit_data_t;
 typedef struct policy_infos		policy_info_data_t;
 
-#endif	/* __APPLE_API_UNSTABLE */
-
-#endif /* _MACH_POLICY_H_ */
+#endif	/* _MACH_POLICY_H_ */

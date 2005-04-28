@@ -3,22 +3,19 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -61,12 +58,13 @@
  * net/if_atm.h
  */
 
+#ifdef KERNEL_PRIVATE
 #if defined(__NetBSD__) || defined(__OpenBSD__) || defined(__bsdi__)
 #define RTALLOC1(A,B)		rtalloc1((A),(B))
 #elif defined(__FreeBSD__) || defined(__APPLE__)
 #define RTALLOC1(A,B)		rtalloc1((A),(B),0UL)
 #endif
-
+#endif /* KERNEL_PRIVATE */
 
 /*
  * pseudo header for packet transmission
@@ -122,13 +120,11 @@ struct atmllc {
 	(X)->type[0] = ((V) & 0xff); \
 }
 
-#ifdef KERNEL
-#ifdef __APPLE_API_PRIVATE
-void	atm_ifattach __P((struct ifnet *));
-void	atm_input __P((struct ifnet *, struct atm_pseudohdr *,
-		struct mbuf *, void *));
-int	atm_output __P((struct ifnet *, struct mbuf *, struct sockaddr *, 
-		struct rtentry *));
-#endif /* __APPLE_API_PRIVATE */
-#endif
+#ifdef KERNEL_PRIVATE
+void	atm_ifattach(struct ifnet *);
+void	atm_input(struct ifnet *, struct atm_pseudohdr *,
+		struct mbuf *, void *);
+int	atm_output(struct ifnet *, struct mbuf *, struct sockaddr *, 
+		struct rtentry *);
+#endif /* KERNEL_PRIVATE */
 

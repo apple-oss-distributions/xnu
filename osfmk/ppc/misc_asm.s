@@ -3,22 +3,19 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -48,46 +45,6 @@ ENTRY(getrpc, TAG_NO_FRAME_USED)
 	blr					/* And return */
 
 
-/* Mask and unmask interrupts at the processor level */	
-ENTRY(interrupt_disable, TAG_NO_FRAME_USED)
-			lis		r8,hi16(MASK(MSR_VEC))			; Get the vector flag
-			mfmsr	r0								; Save the MSR 
-			ori		r8,r8,lo16(MASK(MSR_EE)|MASK(MSR_FP))	; Add the FP flag
-			andc	r0,r0,r8						; Clear VEC, FP, DR, and EE
-			mtmsr	r0
-			isync
-			blr
-
-ENTRY(interrupt_enable, TAG_NO_FRAME_USED)
-
-	mfmsr	r0
-	ori		r0,	r0,	MASK(MSR_EE)
-	mtmsr	r0
-	blr
-
-#if	MACH_KDB
-/*
- * Kernel debugger versions of the spl*() functions.  This allows breakpoints
- * in the spl*() functions.
- */
-
-/* Mask and unmask interrupts at the processor level */	
-ENTRY(db_interrupt_disable, TAG_NO_FRAME_USED)
-			lis		r8,hi16(MASK(MSR_VEC))			; Get the vector flag
-			mfmsr	r0								; Save the MSR 
-			ori		r8,r8,lo16(MASK(MSR_EE)|MASK(MSR_FP))	; Add the FP flag
-			andc	r0,r0,r8						; Clear VEC, FP, DR, and EE
-			mtmsr	r0
-			isync
-			blr
-
-ENTRY(db_interrupt_enable, TAG_NO_FRAME_USED)
-	mfmsr	r0
-	ori	r0,	r0,	MASK(MSR_EE)
-	mtmsr	r0
-	blr
-#endif	/* MACH_KDB */
-
 /*
  *	General entry for all debuggers.  This gets us onto the debug stack and
  *	then back off at exit. We need to pass back R3 to caller.
@@ -103,7 +60,8 @@ ENTRY(Call_Debugger, TAG_NO_FRAME_USED)
 			andc	r7,r7,r8						; Clear VEC and FP
 			mtmsr	r7				; Do it 
 			isync
-			mfsprg	r8,0			; Get the per_proc block
+			mfsprg	r8,1					; Get the current activation
+			lwz		r8,ACT_PER_PROC(r8)		; Get the per_proc block
 			stw		r0,FM_LR_SAVE(r1)	; Save return on current stack
 			
 			lwz		r9,PP_DEBSTACKPTR(r8)	; Get the debug stack
@@ -130,7 +88,8 @@ cdNewDeb:	li		r0,0			; Clear this out
 			andc	r0,r0,r8		; Turn off all the interesting stuff
 			mtmsr	r0
 		
-			mfsprg	r8,0			; Get the per_proc block address
+			mfsprg	r8,1					; Get the current activation
+			lwz		r8,ACT_PER_PROC(r8)		; Get the per_proc block
 			
 			lwz		r9,PP_DEBSTACK_TOP_SS(r8)	; Get the top of the stack
 			cmplw	r1,r9			; Have we hit the bottom of the debug stack?
@@ -299,10 +258,18 @@ ENTRY(mfsda, TAG_NO_FRAME_USED)
 	blr
 
 	.globl	EXT(hid0get64)
-	
 LEXT(hid0get64)
 
 	mfspr	r4,hid0					; Get the HID0
 	srdi	r3,r4,32				; Move top down
 	rlwinm	r4,r4,0,0,31			; Clean top
+	blr
+
+	.globl	EXT(hid5set64)
+LEXT(hid5set64)
+
+	rlwinm	r3,r3,0,1,0				; Copy low 32 int high 32
+	rlwimi	r3,r4,0,0,31			; Inser the low part behind top
+	mtspr	hid5,r3					; Set it
+	isync							; Wait for it
 	blr

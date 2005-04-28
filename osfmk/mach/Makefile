@@ -31,6 +31,7 @@ MIG_TYPES = \
 	std_types.defs
 
 MIG_DEFS =	\
+	audit_triggers.defs \
 	clock.defs \
 	clock_priv.defs \
 	clock_reply.defs \
@@ -42,26 +43,28 @@ MIG_DEFS =	\
 	lock_set.defs \
 	mach_host.defs \
 	mach_port.defs \
+	mach_vm.defs \
 	notify.defs \
 	processor.defs \
 	processor_set.defs \
 	task.defs \
 	thread_act.defs \
-	vm_map.defs \
-	upl.defs
+	vm_map.defs
 
 MACH_PRIVATE_DEFS = \
 	mach_notify.defs \
 	memory_object.defs \
 	memory_object_control.defs \
 	memory_object_default.defs \
-	memory_object_name.defs
+	memory_object_name.defs \
+	upl.defs
 
 #
 # MIG-generated headers that are traditionally used by user
 # level code.
 #
 MIG_USHDRS = \
+	audit_triggers_server.h \
 	clock_reply_server.h \
 	exc_server.h \
 	memory_object_server.h \
@@ -77,6 +80,7 @@ MIG_UUHDRS = \
 	lock_set.h \
 	mach_host.h \
 	mach_port.h \
+	mach_vm.h \
 	memory_object_control.h \
 	memory_object_name.h \
 	processor.h \
@@ -90,8 +94,6 @@ MIGINCLUDES = ${MIG_UUHDRS} ${MIG_USHDRS}
 
 DATAFILES = \
         boolean.h \
-	boot_info.h \
-	bootstrap.h \
         clock_types.h \
         error.h \
 	exception.h \
@@ -138,6 +140,7 @@ DATAFILES = \
 	vm_inherit.h \
 	vm_param.h \
         vm_prot.h \
+	vm_purgable.h \
         vm_region.h \
 	vm_statistics.h \
 	vm_sync.h \
@@ -146,7 +149,16 @@ DATAFILES = \
 	${MIG_DEFS}
 
 INSTALL_MI_LIST	= \
+	bootstrap.h \
 	${DATAFILES}
+
+INSTALL_KF_MI_LIST = \
+	mach_interface.h \
+	$(filter-out mach_traps.h mach_syscalls.h thread_switch.h, ${DATAFILES})
+
+INSTALL_KF_MI_LCL_LIST = \
+	mach_interface.h \
+	$(filter-out mach_traps.h mach_syscalls.h thread_switch.h, ${DATAFILES})
 
 INSTALL_MI_GEN_LIST =
 
@@ -154,7 +166,6 @@ INSTALL_MI_DIR = mach
 
 EXPORT_MI_LIST	= \
 	mach_interface.h \
-        etap.h etap_events.h \
 	${DATAFILES}
 
 EXPORT_MI_GEN_LIST = \
@@ -202,6 +213,7 @@ MIGKUFLAGS      = -DMACH_KERNEL_PRIVATE -DKERNEL_USER=1 -maxonstack 1024
 # level code.
 #
 MIG_KUHDRS = \
+	audit_triggers.h \
 	clock_reply.h \
 	exc.h \
 	host_notify_reply.h \
@@ -213,6 +225,7 @@ MIG_KUHDRS = \
 	vm_map.h
 
 MIG_KUSRC = \
+	audit_triggers_user.c \
 	clock_reply_user.c \
 	exc_user.c \
 	host_notify_reply_user.c \
@@ -234,6 +247,7 @@ MIG_KSHDRS = \
 	mach_host_server.h \
 	mach_notify_server.h \
 	mach_port_server.h \
+	mach_vm_server.h \
 	memory_object_server.h \
 	memory_object_control_server.h \
 	memory_object_default_server.h \
@@ -257,6 +271,7 @@ MIG_KSSRC = \
 	mach_host_server.c \
 	mach_notify_server.c \
 	mach_port_server.c \
+	mach_vm_server.c \
 	memory_object_server.c \
 	memory_object_control_server.c \
 	memory_object_default_server.c \

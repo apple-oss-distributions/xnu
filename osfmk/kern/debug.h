@@ -1,24 +1,21 @@
 /*
- * Copyright (c) 2000 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2005 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -26,9 +23,9 @@
 #ifndef	_KERN_DEBUG_H_
 #define _KERN_DEBUG_H_
 
-#include <sys/appleapiopts.h>
+#include <sys/cdefs.h>
 
-#ifdef	__APPLE_API_PRIVATE
+#ifdef	KERNEL_PRIVATE
 
 extern unsigned int	systemLogDiags;
 
@@ -63,9 +60,8 @@ extern int db_run_mode;
 #define	STEP_COUNT	6
 #define STEP_TRACE	7	/* Show all calls to functions and returns */
 
-extern char	*panicstr;
-
-extern unsigned int	nestedpanic;
+extern const char		*panicstr;
+extern volatile unsigned int	nestedpanic;
 
 extern char *debug_buf;
 extern char *debug_buf_ptr;
@@ -73,6 +69,8 @@ extern unsigned int debug_buf_size;
 
 extern void	debug_log_init(void);
 extern void	debug_putc(char);
+
+extern void	panic_init(void);
 
 #endif /* MACH_KERNEL_PRIVATE */
 
@@ -91,6 +89,13 @@ extern void	debug_putc(char);
 #define DB_KERN_DUMP_ON_NMI         0x800 /* Trigger core dump on NMI */
 #define DB_DBG_POST_CORE            0x1000 /*Wait in debugger after NMI core */
 #define DB_PANICLOG_DUMP            0x2000 /* Send paniclog on panic,not core*/
-#endif	/* __APPLE_API_PRIVATE */
+
+#endif	/* KERNEL_PRIVATE */
+
+__BEGIN_DECLS
+
+extern void	panic(const char	*string, ...);
+
+__END_DECLS
 
 #endif	/* _KERN_DEBUG_H_ */

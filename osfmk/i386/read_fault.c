@@ -1,24 +1,21 @@
 /*
- * Copyright (c) 2000 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2004 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -87,20 +84,19 @@ intel_read_fault(
 	vm_object_offset_t	offset;		/* Top-level offset */
 	vm_prot_t		prot;		/* Protection for mapping */
 	vm_behavior_t		behavior;	/* Expected paging behavior */
-	vm_object_offset_t	lo_offset, hi_offset;
+	vm_map_offset_t		lo_offset, hi_offset;
 	vm_page_t		result_page;	/* Result of vm_fault_page */
 	vm_page_t		top_page;	/* Placeholder page */
 	boolean_t		wired;		/* Is map region wired? */
 	kern_return_t		result;
 	register vm_page_t	m;
-	vm_map_t		pmap_map;
+	vm_map_t		map_pmap;
 	vm_map_t                original_map = map;
 	thread_t                cur_thread;
 	boolean_t               funnel_set;
-	funnel_t                *curflock;
+	funnel_t                *curflock = NULL;
 
 	cur_thread = current_thread();
-
 	if ((cur_thread->funnel_state & TH_FN_OWNED) == TH_FN_OWNED) {
 		funnel_set = TRUE;
 		curflock = cur_thread->funnel_lock;
@@ -121,7 +117,7 @@ intel_read_fault(
 	result = vm_map_lookup_locked(&map, vaddr, VM_PROT_READ, &version,
 				      &object, &offset, &prot, &wired,
 				      &behavior, &lo_offset, 
-				      &hi_offset, &pmap_map);
+				      &hi_offset, &map_pmap);
 	
 	vm_map_unlock_read(map);
 
@@ -131,9 +127,9 @@ intel_read_fault(
 		return (result);
 	}
 
-	if(pmap_map != map) {
-		vm_map_reference(pmap_map);
-		vm_map_unlock_read(pmap_map);
+	if(map_pmap != map) {
+		vm_map_reference(map_pmap);
+		vm_map_unlock_read(map_pmap);
 	}
 
 	/*
@@ -153,8 +149,8 @@ intel_read_fault(
 
 	if (result != VM_FAULT_SUCCESS) {
 	    vm_object_deallocate(object);
-	    if(pmap_map != map) {
-			vm_map_deallocate(pmap_map);
+	    if(map_pmap != map) {
+			vm_map_deallocate(map_pmap);
 	   }
 
 	    switch (result) {
@@ -212,8 +208,8 @@ intel_read_fault(
 	    vm_object_offset_t	retry_offset;
 	    vm_prot_t		retry_prot;
 
-		if (map != pmap_map) {
-			vm_map_deallocate(pmap_map);
+		if (map != map_pmap) {
+			vm_map_deallocate(map_pmap);
 		}
 	    
 		map = original_map;
@@ -222,7 +218,7 @@ intel_read_fault(
 	    result = vm_map_lookup_locked(&map, vaddr, VM_PROT_READ, &version,
 				&retry_object, &retry_offset, &retry_prot,
 				&wired, &behavior, &lo_offset, 
-				&hi_offset, &pmap_map);
+				&hi_offset, &map_pmap);
 
 	    if (result != KERN_SUCCESS) {
 	        vm_map_unlock_read(map);
@@ -234,8 +230,8 @@ intel_read_fault(
 			return (result);
 	    }
 
-		if (map != pmap_map) {
-			vm_map_reference(pmap_map);
+		if (map != map_pmap) {
+			vm_map_reference(map_pmap);
 		}
 
 	    vm_object_unlock(retry_object);
@@ -244,9 +240,9 @@ intel_read_fault(
 			vm_object_lock(m->object);
 			RELEASE_PAGE(m);
 	        vm_map_unlock_read(map);
-	        if(pmap_map != map) {
-		   		vm_map_unlock_read(pmap_map);
-		   		vm_map_deallocate(pmap_map);
+	        if(map_pmap != map) {
+		   		vm_map_unlock_read(map_pmap);
+		   		vm_map_deallocate(map_pmap);
 			}
 			UNLOCK_AND_DEALLOCATE;
 			goto RetryFault;
@@ -257,11 +253,11 @@ intel_read_fault(
 	 *	Put the page in the physical map.
 	 */
 
-	PMAP_ENTER(pmap_map->pmap, vaddr, m, VM_PROT_READ, PMAP_DEFAULT_CACHE, wired);
+	PMAP_ENTER(map_pmap->pmap, vaddr, m, VM_PROT_READ, PMAP_DEFAULT_CACHE, wired);
 
-	if(pmap_map != map) {
-		vm_map_unlock_read(pmap_map);
-		vm_map_deallocate(pmap_map);
+	if(map_pmap != map) {
+		vm_map_unlock_read(map_pmap);
+		vm_map_deallocate(map_pmap);
 	}
 	
 	vm_object_lock(m->object);

@@ -1,24 +1,21 @@
 /*
- * Copyright (c) 2000 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2004 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -31,10 +28,19 @@ extern int getval(char *s, int *val);
 #define	NUM	0
 #define	STR	1
 
-boolean_t
+boolean_t 
 PE_parse_boot_arg(
-	char	*arg_string,
-	void	*arg_ptr)
+	const char  *arg_string,
+	void		*arg_ptr)
+{
+	return PE_parse_boot_argn(arg_string, arg_ptr, -1);
+}
+
+boolean_t
+PE_parse_boot_argn(
+	const char	*arg_string,
+	void		*arg_ptr,
+	int			max_len)
 {
 	char *args;
 	char *cp, c;
@@ -81,11 +87,12 @@ PE_parse_boot_arg(
 				goto gotit;
 			}
 			if ('_' == *arg_string) /* Force a string copy if the argument name begins with an underscore */
-			  {
-			    argstrcpy2 (++cp, (char *)arg_ptr, 16); /* Hack - terminate after 16 characters */
-			    arg_found = TRUE;
-			    break;
-			  }
+			{
+				int hacklen = 16 > max_len ? 16 : max_len;
+				argstrcpy2 (++cp, (char *)arg_ptr, hacklen); /* Hack - terminate after 16 characters */
+				arg_found = TRUE;
+				break;
+			}
 			switch (getval(cp, &val)) 
 			{
 				case NUM:
@@ -93,7 +100,10 @@ PE_parse_boot_arg(
 					arg_found = TRUE;
 					break;
 				case STR:
-					argstrcpy(++cp, (char *)arg_ptr);
+					if(max_len > 0) //max_len of 0 performs no copy at all
+						argstrcpy2(++cp, (char *)arg_ptr, max_len);
+					else if(max_len == -1)
+						argstrcpy(++cp, (char *)arg_ptr);
 					arg_found = TRUE;
 					break;
 			}

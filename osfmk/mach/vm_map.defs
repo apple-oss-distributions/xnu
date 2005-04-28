@@ -1,24 +1,21 @@
 /*
- * Copyright (c) 2000 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2004 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -53,10 +50,9 @@
 /*
  */
 /*
- *	File:	mach/mach_port.defs
- *	Author:	Rich Draves
+ *	File:	mach/vm_map.defs
  *
- *	Exported kernel calls.
+ *	Exported (native-sized) kernel VM calls.
  */
 
 subsystem
@@ -321,7 +317,7 @@ routine mach_make_memory_entry(
 	inout	size		:vm_size_t;
 		offset		:vm_offset_t;
 		permission	:vm_prot_t;
-	out	object_handle	:mach_port_move_send_t;
+	out	object_handle	:mem_entry_name_port_move_send_t;
 		parent_entry	:mem_entry_name_port_t);
 
 /*
@@ -350,6 +346,7 @@ routine	vm_mapped_pages_info(
 		task		: vm_map_t;
 	out	pages		: page_address_array_t);
 
+#if 0
 /*
  *    Allow application level processes to create named entries which
  *    are backed by sub-maps which describe regions of address space.
@@ -357,11 +354,13 @@ routine	vm_mapped_pages_info(
  *    in turn, can be mapped into target address spaces 
  */
 
-
 routine	vm_region_object_create(
 		target_task	:vm_map_t;
 	in	size		:vm_size_t;
 	out	region_object	:mach_port_move_send_t);
+#else
+skip; /* was vm_region_object_create */
+#endif
 
 /*
  *	A recursive form of vm_region which probes submaps withint the
@@ -386,7 +385,7 @@ routine vm_region_recurse_64(
 	inout	address		: vm_address_t;
         out     size            : vm_size_t;
 	inout	nesting_depth	: natural_t;
-	out	info		: vm_region_recurse_info_64_t,CountInOut);
+	out	info		: vm_region_recurse_info_t,CountInOut);
 
 routine mach_vm_region_info_64(
 		task		: vm_map_t;
@@ -399,7 +398,7 @@ routine vm_region_64(
 	inout	address		: vm_address_t;
         out     size            : vm_size_t;
 		flavor		: vm_region_flavor_t;
-	out	info		: vm_region_info_64_t, CountInOut;
+	out	info		: vm_region_info_t, CountInOut;
         out     object_name     : memory_object_name_t =
                                         MACH_MSG_TYPE_MOVE_SEND
                                         ctype: mach_port_t);
@@ -427,6 +426,10 @@ routine vm_map_64(
 		max_protection	: vm_prot_t;
 		inheritance	: vm_inherit_t);
 
+#if 0
+/*
+ * The UPL interfaces are not ready for user-level export.
+ */
 routine vm_map_get_upl(
 		target_task	: vm_map_t;
 		address		: vm_address_t;
@@ -444,5 +447,23 @@ routine vm_upl_map(
 routine vm_upl_unmap(
 		target_task	: vm_map_t;
 		upl		: upl_t);
-		
+#else
+skip; /* was vm_map_get_upl */
+skip; /* was vm_upl_map */
+skip; /* was vm_upl_unmap */
+#endif		
+
+/*
+ *	Control behavior and investigate state of a "purgable" object in
+ *	the virtual address space of the target task.  A purgable object is
+ *	created via a call to vm_allocate() with VM_FLAGS_PURGABLE
+ *	specified.  See the routine implementation for a complete
+ *	definition of the routine.
+ */
+routine vm_purgable_control(
+		target_task	: vm_map_t;
+		address		: vm_address_t;
+		control		: vm_purgable_t;
+	inout	state		: int);
+
 

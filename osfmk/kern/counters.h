@@ -1,111 +1,27 @@
 /*
- * Copyright (c) 2000 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2004 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
 /*
  * @OSF_COPYRIGHT@
  */
-/*
- * HISTORY
- * 
- * Revision 1.1.1.1  1998/09/22 21:05:35  wsanchez
- * Import of Mac OS X kernel (~semeria)
- *
- * Revision 1.1.1.1  1998/03/07 02:25:54  wsanchez
- * Import of OSF Mach kernel (~mburg)
- *
- * Revision 1.1.13.7  1995/02/24  15:19:14  alanl
- * 	Merge with DIPC2_SHARED.
- * 	[1995/02/22  20:19:55  alanl]
- *
- * Revision 1.1.19.4  1994/11/04  10:16:23  dwm
- * 	mk6 CR668 - 1.3b26 merge
- * 	add counters, then remove unused items
- * 	[1994/11/04  09:45:39  dwm]
- * 
- * Revision 1.1.13.5  1994/09/23  02:16:08  ezf
- * 	change marker to not FREE
- * 	[1994/09/22  21:32:13  ezf]
- * 
- * Revision 1.1.13.4  1994/09/16  06:29:25  dwm
- * 	mk6 CR551 - remove unused SAFE_VM_FAULT pseudo-continuation,
- * 	remove unused args from vm_page_wait, vm_fault(_page).
- * 	Fix vm_page_wait counters, and rm thread_handoff counter.
- * 	[1994/09/16  06:23:26  dwm]
- * 
- * Revision 1.1.13.3  1994/09/10  21:45:55  bolinger
- * 	Merge up to NMK17.3
- * 	[1994/09/08  19:57:29  bolinger]
- * 
- * Revision 1.1.13.2  1994/06/21  17:28:43  dlb
- * 	Add two vm_fault counters from NMK17.
- * 	[94/06/17            dlb]
- * 
- * Revision 1.1.10.3  1994/06/15  09:12:05  paire
- * 	Corrected spelling of c_vm_fault_wait_on_unlock variable.
- * 	[94/06/15            paire]
- * 
- * Revision 1.1.13.1  1994/06/14  17:00:01  bolinger
- * 	Merge up to NMK17.2.
- * 	[1994/06/14  16:53:41  bolinger]
- * 
- * Revision 1.1.10.2  1994/05/30  07:37:03  bernadat
- * 	Added new c_vm_fault_retry_on_unlock and c_vm_fault_retry_on_w_prot.
- * 	Sorted the whole list of counters.
- * 	[paire@gr.osf.org]
- * 	[94/05/26            bernadat]
- * 
- * Revision 1.1.10.1  1994/02/11  14:25:21  paire
- * 	Added missing c_exception_raise_state_block and
- * 	c_exception_raise_state_identity_block counters.
- * 	Change from NMK16.1 [93/08/09            paire]
- * 	[94/02/04            paire]
- * 
- * Revision 1.1.2.3  1993/06/07  22:12:36  jeffc
- * 	CR9176 - ANSI C violations: trailing tokens on CPP
- * 	directives, extra semicolons after decl_ ..., asm keywords
- * 	[1993/06/07  19:04:11  jeffc]
- * 
- * Revision 1.1.2.2  1993/06/02  23:35:54  jeffc
- * 	Added to OSF/1 R1.3 from NMK15.0.
- * 	[1993/06/02  21:12:09  jeffc]
- * 
- * Revision 1.1  1992/09/30  02:29:32  robert
- * 	Initial revision
- * 
- * $EndLog$
- */
-/* CMU_HIST */
-/*
- * Revision 2.3  91/05/14  16:40:30  mrt
- * 	Correcting copyright
- * 
- * Revision 2.2  91/03/16  15:16:06  rpd
- * 	Created.
- * 	[91/03/13            rpd]
- * 
- */
-/* CMU_ENDHIST */
 /* 
  * Mach Operating System
  * Copyright (c) 1991,1990,1989,1988,1987 Carnegie Mellon University
@@ -202,14 +118,12 @@ extern mach_counter_t c_vm_fault_page_block_backoff_kernel;
 extern mach_counter_t c_vm_fault_page_block_busy_kernel;
 extern mach_counter_t c_vm_fault_retry_on_w_prot;
 extern mach_counter_t c_vm_fault_wait_on_unlock;
-extern mach_counter_t c_vm_map_simplified_lower;
-extern mach_counter_t c_vm_map_simplified_upper;
+extern mach_counter_t c_vm_map_simplified;
 extern mach_counter_t c_vm_map_simplify_called;
+extern mach_counter_t c_vm_map_simplify_entry_called;
 extern mach_counter_t c_vm_page_wait_block;
 extern mach_counter_t c_vm_pageout_block;
 extern mach_counter_t c_vm_pageout_scan_block;
-extern mach_counter_t c_vm_fault_retry_on_w_prot;
-extern mach_counter_t c_vm_fault_wait_on_unlock;
 #endif	/* MACH_COUNTERS */
 
 #endif	/* _KERN_COUNTERS_ */

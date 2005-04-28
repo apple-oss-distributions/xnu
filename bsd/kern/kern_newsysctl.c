@@ -3,22 +3,19 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -69,8 +66,10 @@
 #include <sys/kernel.h>
 #include <sys/sysctl.h>
 #include <sys/malloc.h>
-#include <sys/proc.h>
+#include <sys/proc_internal.h>
 #include <sys/systm.h>
+
+#include <bsm/audit_kernel.h>
 
 /*
 struct sysctl_oid_list sysctl__debug_children;
@@ -308,15 +307,15 @@ sysctl_sysctl_name SYSCTL_HANDLER_ARGS
 	int error = 0;
 	struct sysctl_oid *oid;
 	struct sysctl_oid_list *lsp = &sysctl__children, *lsp2;
-	char buf[10];
+	char tempbuf[10];
 
 	while (namelen) {
 		if (!lsp) {
-			snprintf(buf,sizeof(buf),"%d",*name);
+			snprintf(tempbuf,sizeof(tempbuf),"%d",*name);
 			if (req->oldidx)
 				error = SYSCTL_OUT(req, ".", 1);
 			if (!error)
-				error = SYSCTL_OUT(req, buf, strlen(buf));
+				error = SYSCTL_OUT(req, tempbuf, strlen(tempbuf));
 			if (error)
 				return (error);
 			namelen--;
@@ -498,8 +497,7 @@ sysctl_sysctl_name2oid SYSCTL_HANDLER_ARGS
 	if (req->newlen >= MAXPATHLEN)	/* XXX arbitrary, undocumented */
 		return (ENAMETOOLONG);
 
-	p = _MALLOC(req->newlen+1, M_TEMP, M_WAITOK);
-
+	MALLOC(p, char *,req->newlen+1, M_TEMP, M_WAITOK);
 	if (!p)
 	    return ENOMEM;
 
@@ -522,7 +520,7 @@ sysctl_sysctl_name2oid SYSCTL_HANDLER_ARGS
 	return (error);
 }
 
-SYSCTL_PROC(_sysctl, 3, name2oid, CTLFLAG_RW|CTLFLAG_ANYBODY, 0, 0, 
+SYSCTL_PROC(_sysctl, 3, name2oid, CTLFLAG_RW|CTLFLAG_ANYBODY|CTLFLAG_KERN, 0, 0, 
 	sysctl_sysctl_name2oid, "I", "");
 
 static int
@@ -599,6 +597,9 @@ sysctl_handle_int SYSCTL_HANDLER_ARGS
 		error = EPERM;
 	else
 		error = SYSCTL_IN(req, arg1, sizeof(int));
+
+	if (error == 0)
+		AUDIT_ARG(value, *(int *)arg1);
 	return (error);
 }
 
@@ -735,14 +736,13 @@ static int
 sysctl_old_kernel(struct sysctl_req *req, const void *p, size_t l)
 {
 	size_t i = 0;
-	int error = 0;
 
 	if (req->oldptr) {
 		i = l;
 		if (i > req->oldlen - req->oldidx)
 			i = req->oldlen - req->oldidx;
 		if (i > 0)
-			bcopy((void*)p, (char *)req->oldptr + req->oldidx, i);
+			bcopy((void*)p, CAST_DOWN(char *, (req->oldptr + req->oldidx)), i);
 	}
 	req->oldidx += l;
 	if (req->oldptr && i != l)
@@ -757,7 +757,7 @@ sysctl_new_kernel(struct sysctl_req *req, void *p, size_t l)
 		return 0;
 	if (req->newlen - req->newidx < l)
 		return (EINVAL);
-	bcopy((char *)req->newptr + req->newidx, p, l);
+	bcopy(CAST_DOWN(char *, (req->newptr + req->newidx)), p, l);
 	req->newidx += l;
 	return (0);
 }
@@ -777,10 +777,10 @@ kernel_sysctl(struct proc *p, int *name, u_int namelen, void *old, size_t *oldle
 	if (oldlenp)
 		req.oldlen = *oldlenp;
 	if (old)
-		req.oldptr= old;
+		req.oldptr = CAST_USER_ADDR_T(old);
 	if (newlen) {
 		req.newlen = newlen;
-		req.newptr = new;
+		req.newptr = CAST_USER_ADDR_T(new);
 	}
 	req.oldfunc = sysctl_old_kernel;
 	req.newfunc = sysctl_new_kernel;
@@ -804,7 +804,7 @@ kernel_sysctl(struct proc *p, int *name, u_int namelen, void *old, size_t *oldle
 
 	/* unlock memory if required */
 	if (req.lock == 2)
-		vsunlock(req.oldptr, req.oldlen, B_WRITE);
+		vsunlock(req.oldptr, (user_size_t)req.oldlen, B_WRITE);
 
 	memlock.sl_lock = 0;
 
@@ -843,8 +843,7 @@ sysctl_old_user(struct sysctl_req *req, const void *p, size_t l)
 		if (i > req->oldlen - req->oldidx)
 			i = req->oldlen - req->oldidx;
 		if (i > 0)
-			error = copyout((void*)p, (char *)req->oldptr + req->oldidx,
-					i);
+			error = copyout((void*)p, (req->oldptr + req->oldidx), i);
 	}
 	req->oldidx += l;
 	if (error)
@@ -863,7 +862,7 @@ sysctl_new_user(struct sysctl_req *req, void *p, size_t l)
 		return 0;
 	if (req->newlen - req->newidx < l)
 		return (EINVAL);
-	error = copyin((char *)req->newptr + req->newidx, p, l);
+	error = copyin((req->newptr + req->newidx), p, l);
 	req->newidx += l;
 	return (error);
 }
@@ -932,13 +931,6 @@ found:
 	    return EINVAL;
 	}
 
-	/*
-	 * Switch to the NETWORK funnel for CTL_NET and KERN_IPC sysctls
-	 */
-
-	if (((name[0] == CTL_NET) || ((name[0] == CTL_KERN) &&
-						       (name[1] == KERN_IPC))))
-	     thread_funnel_switch(KERNEL_FUNNEL, NETWORK_FUNNEL);
 
 	if ((oid->oid_kind & CTLTYPE) == CTLTYPE_NODE) {
 		i = (oid->oid_handler) (oid,
@@ -949,14 +941,6 @@ found:
 					oid->oid_arg1, oid->oid_arg2,
 					req);
 	}
-
-	/*
-	 * Switch back to the KERNEL funnel, if necessary
-	 */
-
-	if (((name[0] == CTL_NET) || ((name[0] == CTL_KERN) &&
-						       (name[1] == KERN_IPC))))
-	     thread_funnel_switch(NETWORK_FUNNEL, KERNEL_FUNNEL);
 
 	return (i);
 }
@@ -982,17 +966,17 @@ new_sysctl(struct proc *p, struct sysctl_args *uap)
 	if (uap->namelen > CTL_MAXNAME || uap->namelen < 2)
 		return (EINVAL);
 
- 	error = copyin(uap->name, &name, uap->namelen * sizeof(int));
+ 	error = copyin(CAST_USER_ADDR_T(uap->name), &name, uap->namelen * sizeof(int));
  	if (error)
 		return (error);
 
 	error = userland_sysctl(p, name, uap->namelen,
-		uap->old, uap->oldlenp, 0,
-		uap->new, uap->newlen, &j);
+		                    CAST_USER_ADDR_T(uap->old), uap->oldlenp, 0,
+		                    CAST_USER_ADDR_T(uap->new), uap->newlen, &j);
 	if (error && error != ENOMEM)
 		return (error);
 	if (uap->oldlenp) {
-		i = copyout(&j, uap->oldlenp, sizeof(j));
+		i = copyout(&j, CAST_USER_ADDR_T(uap->oldlenp), sizeof(j));
 		if (i)
 			return (i);
 	}
@@ -1004,7 +988,9 @@ new_sysctl(struct proc *p, struct sysctl_args *uap)
  * must be in kernel space.
  */
 int
-userland_sysctl(struct proc *p, int *name, u_int namelen, void *old, size_t *oldlenp, int inkernel, void *new, size_t newlen, size_t *retval)
+userland_sysctl(struct proc *p, int *name, u_int namelen, user_addr_t oldp, 
+                size_t *oldlenp, int inkernel, user_addr_t newp, size_t newlen, 
+                size_t *retval)
 {
 	int error = 0;
 	struct sysctl_req req, req2;
@@ -1017,19 +1003,19 @@ userland_sysctl(struct proc *p, int *name, u_int namelen, void *old, size_t *old
 		if (inkernel) {
 			req.oldlen = *oldlenp;
 		} else {
-			error = copyin(oldlenp, &req.oldlen, sizeof(*oldlenp));
+			error = copyin(CAST_USER_ADDR_T(oldlenp), &req.oldlen, sizeof(*oldlenp));
 			if (error)
 				return (error);
 		}
 	}
 
-	if (old) {
-		req.oldptr= old;
+	if (oldp) {
+		req.oldptr = oldp;
 	}
 
 	if (newlen) {
 		req.newlen = newlen;
-		req.newptr = new;
+		req.newptr = newp;
 	}
 
 	req.oldfunc = sysctl_old_user;

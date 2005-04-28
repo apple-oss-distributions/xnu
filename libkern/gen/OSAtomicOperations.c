@@ -3,22 +3,19 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -42,6 +39,11 @@ enum {
  *	which I wrote for NuKernel in a previous life with a different last name...)
  *
  * native Boolean	CompareAndSwap(UInt32 oldValue, UInt32 newValue, UInt32 * oldValuePtr);
+ *
+ * We've since implemented a few more of these -- OSAddAtomic, OSDequeueAtomic,
+ * OSEnqueueAtomic etc -- in assembler, either for speed or correctness.  See also the
+ * commpage atomic operations, and the platform specific versions.
+ * Like standards, there are a lot of atomic ops to choose from!
  */
 
 #ifndef __ppc__
@@ -67,6 +69,37 @@ SInt32	OSIncrementAtomic(SInt32 * value)
 SInt32	OSDecrementAtomic(SInt32 * value)
 {
 	return OSAddAtomic(-1, value);
+}
+
+void *	OSDequeueAtomic(void ** inList, SInt32 inOffset)
+{
+	void *	oldListHead;
+	void *	newListHead;
+	
+	do {
+		oldListHead = *inList;
+		if (oldListHead == NULL) {
+			break;
+		}
+		
+		newListHead = *(void **) (((char *) oldListHead) + inOffset);
+	} while (! OSCompareAndSwap((UInt32)oldListHead,
+					(UInt32)newListHead, (UInt32 *)inList));
+	
+	return oldListHead;
+}
+
+void	OSEnqueueAtomic(void ** inList, void * inNewLink, SInt32 inOffset)
+{
+	void *	oldListHead;
+	void *	newListHead = inNewLink;
+	void **	newLinkNextPtr = (void **) (((char *) inNewLink) + inOffset);
+	
+	do {
+		oldListHead = *inList;
+		*newLinkNextPtr = oldListHead;
+	} while (! OSCompareAndSwap((UInt32)oldListHead, (UInt32)newListHead,
+					(UInt32 *)inList));
 }
 
 #endif	/* !__ppc__ */
@@ -146,37 +179,6 @@ Boolean	OSTestAndSet(UInt32 bit, UInt8 * startAddress)
 Boolean	OSTestAndClear(UInt32 bit, UInt8 * startAddress)
 {
 	return OSTestAndSetClear(bit, false, startAddress);
-}
-
-void *	OSDequeueAtomic(void ** inList, SInt32 inOffset)
-{
-	void *	oldListHead;
-	void *	newListHead;
-	
-	do {
-		oldListHead = *inList;
-		if (oldListHead == NULL) {
-			break;
-		}
-		
-		newListHead = *(void **) (((char *) oldListHead) + inOffset);
-	} while (! OSCompareAndSwap((UInt32)oldListHead,
-					(UInt32)newListHead, (UInt32 *)inList));
-	
-	return oldListHead;
-}
-
-void	OSEnqueueAtomic(void ** inList, void * inNewLink, SInt32 inOffset)
-{
-	void *	oldListHead;
-	void *	newListHead = inNewLink;
-	void **	newLinkNextPtr = (void **) (((char *) inNewLink) + inOffset);
-	
-	do {
-		oldListHead = *inList;
-		*newLinkNextPtr = oldListHead;
-	} while (! OSCompareAndSwap((UInt32)oldListHead, (UInt32)newListHead,
-					(UInt32 *)inList));
 }
 
 /*

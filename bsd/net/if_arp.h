@@ -3,22 +3,19 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -116,59 +113,5 @@ struct arpreq {
 #define	ATF_PERM	0x04	/* permanent entry */
 #define	ATF_PUBL	0x08	/* publish entry (respond for other host) */
 #define	ATF_USETRAILERS	0x10	/* has requested trailers */
-
-#ifdef __APPLE_API_UNSTABLE
-
-#ifdef __APPLE__
-/*
- * Ethernet multicast address structure.  There is one of these for each
- * multicast address or range of multicast addresses that we are supposed
- * to listen to on a particular interface.  They are kept in a linked list,
- * rooted in the interface's arpcom structure.  (This really has nothing to
- * do with ARP, or with the Internet address family, but this appears to be
- * the minimally-disrupting place to put it.)
- */
-struct ether_multi {
-	u_char	enm_addrlo[6];		/* low  or only address of range */
-	u_char	enm_addrhi[6];		/* high or only address of range */
-	struct	arpcom *enm_ac;		/* back pointer to arpcom */
-	u_int	enm_refcount;		/* no. claims to this addr/range */
-	struct	ether_multi *enm_next;	/* ptr to next ether_multi */
-};
-
-/*
- * Structure used by macros below to remember position when stepping through
- * all of the ether_multi records.
- */
-struct ether_multistep {
-	struct ether_multi  *e_enm;
-};
-#endif /* __APPLE__ */
-
-#ifdef KERNEL
-/*
- * Structure shared between the ethernet driver modules and
- * the address resolution code.  For example, each ec_softc or il_softc
- * begins with this structure.
- */
-struct	arpcom {
-	/*
-	 * The ifnet struct _must_ be at the head of this structure.
-	 */
-	struct 	ifnet ac_if;		/* network-visible interface */
-	u_char	ac_enaddr[6];		/* ethernet hardware address */
-#ifdef __APPLE__
-	struct	in_addr ac_ipaddr;	/* copy of ip address- XXX */
-	struct	ether_multi *ac_multiaddrs; /* list of ether multicast addrs */
-#endif
-	int	ac_multicnt;		/* length of ac_multiaddrs list */
-#ifndef __APPLE__
-	void	*ac_netgraph;		/* ng_ether(4) netgraph node info */
-#endif
-};
-
-
-#endif
-#endif /* __APPLE_API_UNSTABLE */
 
 #endif /* !_NET_IF_ARP_H_ */

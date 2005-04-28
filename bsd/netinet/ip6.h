@@ -3,22 +3,19 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -240,8 +237,7 @@ struct ip6_frag {
 #define IPV6_MMTU	1280	/* minimal MTU and reassembly. 1024 + 256 */
 #define IPV6_MAXPACKET	65535	/* ip6 max packet size without Jumbo payload*/
 
-#ifdef KERNEL
-#ifdef __APPLE_API_PRIVATE
+#ifdef KERNEL_PRIVATE
 /*
  * IP6_EXTHDR_CHECK ensures that region between the IP6 header and the
  * target header (including IPv6 itself, extension headers and
@@ -251,25 +247,25 @@ struct ip6_frag {
  * supposed to never be matched but is prepared just in case.
  */
 
-#define IP6_EXTHDR_CHECK(m, off, hlen, ret)				\
+#define IP6_EXTHDR_CHECK(m, off, hlen, action)				\
 do {									\
     if ((m)->m_next != NULL) {						\
 	if (((m)->m_flags & M_LOOP) &&					\
 	    ((m)->m_len < (off) + (hlen)) &&				\
 	    (((m) = m_pullup((m), (off) + (hlen))) == NULL)) {		\
 		ip6stat.ip6s_exthdrtoolong++;				\
-		return ret;						\
+		action;							\
 	} else if ((m)->m_flags & M_EXT) {				\
 		if ((m)->m_len < (off) + (hlen)) {			\
 			ip6stat.ip6s_exthdrtoolong++;			\
 			m_freem(m);					\
-			return ret;					\
+			action;						\
 		}							\
 	} else {							\
 		if ((m)->m_len < (off) + (hlen)) {			\
 			ip6stat.ip6s_exthdrtoolong++;			\
 			m_freem(m);					\
-			return ret;					\
+			action;						\
 		}							\
 	}								\
     } else {								\
@@ -277,7 +273,7 @@ do {									\
 		ip6stat.ip6s_tooshort++;				\
 		in6_ifstat_inc(m->m_pkthdr.rcvif, ifs6_in_truncated);	\
 		m_freem(m);						\
-		return ret;						\
+		action;							\
 	}								\
     }									\
 } while (0)
@@ -328,7 +324,6 @@ do {									\
 		}							\
 	}								\
 } while (0)
-#endif /* __APPLE_API_PRIVATE */
-#endif /*KERNEL*/
 
-#endif /* not _NETINET_IP6_H_ */
+#endif KERNEL_PRIVATE
+#endif !_NETINET_IP6_H_

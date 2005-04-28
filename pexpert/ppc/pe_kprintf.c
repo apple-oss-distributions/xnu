@@ -3,22 +3,19 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -31,6 +28,7 @@
 #include <pexpert/protos.h>
 #include <pexpert/pexpert.h>
 #include <pexpert/ppc/powermac.h>
+#include <pexpert/device_tree.h>
 #include <kern/debug.h>
 #include <kern/simple_lock.h>
 
@@ -55,16 +53,48 @@ struct slock kprintf_lock;
 void PE_init_kprintf(boolean_t vm_initialized)
 {
 	unsigned int	boot_arg;
+	int32_t			cnt, size, serial_baud = -1;
+	DTEntry         options;
+	char            *str, baud[7];
 
 	if (PE_state.initialized == FALSE)
 		panic("Platform Expert not initialized");
 
-	if (PE_parse_boot_arg("debug", &boot_arg)) 
+	if (PE_parse_boot_arg("debug", &boot_arg))
 		if(boot_arg & DB_KPRT) disableSerialOuput = FALSE; 
 
+	if (DTLookupEntry(0, "/options", &options) == kSuccess) {
+	  if (DTGetProperty(options, "input-device", &str, &size) == kSuccess) {
+		if ((size > 5) && !strncmp("scca:", str, 5)) {
+		  size -= 5;
+		  str += 5;
+		  if (size <= 6) {
+			strncpy(baud, str, size);
+			baud[size] = '\0';
+			gPESerialBaud = strtol(baud, 0, 0);
+		  }
+		}
+	  }
+	  if (DTGetProperty(options, "output-device", &str, &size) == kSuccess) {
+		if ((size > 5) && !strncmp("scca:", str, 5)) {
+		  size -= 5;
+		  str += 5;
+		  if (size <= 6) {
+			strncpy(baud, str, size);
+			baud[size] = '\0';
+			gPESerialBaud = strtol(baud, 0, 0);
+		  }
+		}
+	  }	  
+	}
+
+	/* Check the boot-args for new serial baud. */
+	if (PE_parse_boot_arg("serialbaud", &serial_baud))
+		if (serial_baud != -1) gPESerialBaud = serial_baud; 
+
 	if( (scc = PE_find_scc())) {				/* See if we can find the serial port */
-		scc = io_map_spec(scc, 0x1000);			/* Map it in */
-		initialize_serial((void *)scc);			/* Start up the serial driver */
+		scc = io_map_spec(scc, 0x1000);				 /* Map it in */
+		initialize_serial((void *)scc, gPESerialBaud); /* Start up the serial driver */
 		PE_kputc = serial_putc;
 
 		simple_lock_init(&kprintf_lock, 0);

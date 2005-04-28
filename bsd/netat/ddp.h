@@ -3,22 +3,19 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -34,6 +31,8 @@
 #ifndef _NETAT_DDP_H_
 #define _NETAT_DDP_H_
 #include <sys/appleapiopts.h>
+
+#ifdef __APPLE_API_OBSOLETE
 
 /* Header and data sizes */
 
@@ -77,10 +76,8 @@ typedef struct {
         char       data[DDP_DATA_SIZE];
 } at_ddp_t;
 
-
 #define	DDPLEN_ASSIGN(ddp, len)		ddp->length = len
 #define	DDPLEN_VALUE(ddp)		ddp->length
-
 
 /* DDP module statistics and configuration */
 
@@ -105,6 +102,7 @@ typedef struct at_ddp_stats {
 	u_int	xmit_dropped_nobuf;
 } at_ddp_stats_t;
 
+
 /* DDP streams module ioctls */
 
 #define	AT_MID_DDP	203
@@ -127,8 +125,7 @@ typedef struct at_ddp_stats {
 #define DDP_IOC_SET_PROTO	((AT_MID_DDP<<8) | 13)
 #endif
 
-#ifdef KERNEL
-#ifdef __APPLE_API_PRIVATE
+#ifdef KERNEL_PRIVATE
 
 #define DDP_MIN_NETWORK		0x0001
 #define	DDP_MAX_NETWORK		0xfffe
@@ -187,6 +184,6 @@ void ddp_bit_reverse(unsigned char *);
 /* in ddp_lap.c */
 int ddp_shutdown(int);
 
-#endif /* __APPLE_API_PRIVATE */
-#endif /* KERNEL */
+#endif /* KERNEL_PRIVATE */
+#endif /* __APPLE_API_OBSOLETE */
 #endif /* _NETAT_DDP_H_ */

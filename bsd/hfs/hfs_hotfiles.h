@@ -3,22 +3,19 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -42,7 +39,7 @@
 #define HFC_CUMULATIVE_CYCLES	 4
 #define HFC_MAXIMUM_FILE_COUNT	 5000
 #define HFC_MAXIMUM_FILESIZE	 (10 * 1024 * 1024)
-#define HFC_MINIMUM_TEMPERATURE  16
+#define HFC_MINIMUM_TEMPERATURE  24
 
 
 /*
@@ -110,14 +107,14 @@ struct vnode;
  */
 int  hfs_hotfilesync (struct hfsmount *, struct proc *);
 
-int  hfs_recording_init(struct hfsmount *, struct proc *);
-int  hfs_recording_start (struct hfsmount *, struct proc *);
-int  hfs_recording_stop (struct hfsmount *, struct proc *);
-int  hfs_recording_suspend (struct hfsmount *, struct proc *);
-int  hfs_recording_abort (struct hfsmount *, struct proc *);
+int  hfs_recording_init(struct hfsmount *);
+int  hfs_recording_suspend (struct hfsmount *);
 
 int  hfs_addhotfile (struct vnode *);
 int  hfs_removehotfile (struct vnode *);
+
+int  hfs_relocate(struct  vnode *, u_int32_t, kauth_cred_t, struct  proc *);
+
 
 #endif /* __APPLE_API_PRIVATE */
 #endif /* KERNEL */

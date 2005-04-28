@@ -1,24 +1,21 @@
 /*
- * Copyright (c) 2000-2003 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2004 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -64,14 +61,19 @@
 
 #include <sys/appleapiopts.h>
 
-#define KMEMSTATS
 
+#ifdef KERNEL
 /*
  * flags to malloc
  */
 #define	M_WAITOK	0x0000
 #define	M_NOWAIT	0x0001
 #define M_ZERO          0x0004          /* bzero the allocation */
+
+
+#ifdef BSD_KERNEL_PRIVATE
+
+#define KMEMSTATS
 
 /*
  * Types of memory to be allocated (not all are used by us)
@@ -95,7 +97,7 @@
 #define	M_CRED		16	/* credentials */
 #define	M_PGRP		17	/* process group header */
 #define	M_SESSION	18	/* session header */
-#define	M_IOV		19	/* large iov's */
+#define	M_IOV32		19	/* large iov's for 32 bit process */
 #define	M_MOUNT		20	/* vfs mount struct */
 #define	M_FHANDLE	21	/* network file handle */
 #define	M_NFSREQ	22	/* NFS request header */
@@ -114,7 +116,7 @@
 #define	M_VMPVENT	35	/* VM phys-virt mapping entry */
 #define	M_VMPAGER	36	/* XXX: VM pager struct */
 #define	M_VMPGDATA	37	/* XXX: VM pager private data */
-#define	M_FILE		38	/* Open file structure */
+#define	M_FILEPROC	38	/* Open file structure */
 #define	M_FILEDESC	39	/* Open file descriptor table */
 #define	M_LOCKF		40	/* Byte-range locking structures */
 #define	M_PROC		41	/* Proc structures */
@@ -123,8 +125,8 @@
 #define	M_LFSNODE	44	/* LFS vnode private part */
 #define	M_FFSNODE	45	/* FFS vnode private part */
 #define	M_MFSNODE	46	/* MFS vnode private part */
-#define	M_NQLEASE	47	/* Nqnfs lease */
-#define	M_NQMHOST	48	/* Nqnfs host address table */
+#define	M_NQLEASE	47	/* XXX: Nqnfs lease */
+#define	M_NQMHOST	48	/* XXX: Nqnfs host address table */
 #define	M_NETADDR	49	/* Export host address structure */
 #define	M_NFSSVC	50	/* Nfs server structure */
 #define	M_NFSUID	51	/* Nfs uid mapping structure */
@@ -172,8 +174,34 @@
 #define M_JNL_TR    92  /* Journaling: "struct transaction" */ 
 #define	M_SPECINFO	93	/* special file node */
 #define M_KQUEUE	94	/* kqueue */
+#define	M_HFSDIRHINT	95	/* HFS directory hint */
+#define M_CLRDAHEAD	96	/* storage for cluster read-ahead state */
+#define M_CLWRBEHIND	97	/* storage for cluster write-behind state */
+#define	M_IOV64		98	/* large iov's for 64 bit process */
+#define M_FILEGLOB	99	/* fileglobal */
+#define M_KAUTH		100	/* kauth subsystem */
+#define M_DUMMYNET	101	/* dummynet */
+#define M_UNSAFEFS	102	/* storage for vnode lock state for unsafe FS */
 
-#define	M_LAST		95	/* Must be last type + 1 */
+#else /* BSD_KERNEL_PRIVATE */
+
+#define	M_RTABLE	5	/* routing tables */
+#define	M_IFADDR	9	/* interface address (IOFireWireIP)*/
+#define	M_LOCKF		40	/* Byte-range locking structures (msdos) */ 
+#define	M_TEMP		80	/* misc temporary data buffers */
+#define	M_HFSMNT	75	/* HFS mount structure (afpfs) */
+#define M_KAUTH		100	/* kauth subsystem (smb) */
+#define	M_SONAME	11	/* socket name (smb) */
+#define	M_PCB		4	/* protocol control block (smb) */
+#define M_UDFNODE	84	/* UDF inodes (udf)*/
+#define M_UDFMNT	85	/* UDF mount structures (udf)*/
+
+#endif /* BSD_KERNEL_PRIVATE */
+
+#ifdef BSD_KERNEL_PRIVATE
+
+
+#define	M_LAST		103	/* Must be last type + 1 */
 
 /* Strings corresponding to types of memory */
 /* Must be in synch with the #defines above */
@@ -197,7 +225,7 @@
 	"cred",		/* 16 M_CRED */ \
 	"pgrp",		/* 17 M_PGRP */ \
 	"session",	/* 18 M_SESSION */ \
-	"iov",		/* 19 M_IOV */ \
+	"iov32",	/* 19 M_IOV32 */ \
 	"mount",	/* 20 M_MOUNT */ \
 	"fhandle",	/* 21 M_FHANDLE */ \
 	"NFS req",	/* 22 M_NFSREQ */ \
@@ -216,7 +244,7 @@
 	"VM pvmap",	/* 35 M_VMPVENT */ \
 	"VM pager",	/* 36 M_VMPAGER */ \
 	"VM pgdata",	/* 37 M_VMPGDATA */ \
-	"file",		/* 38 M_FILE */ \
+	"fileproc",	/* 38 M_FILEPROC */ \
 	"file desc",	/* 39 M_FILEDESC */ \
 	"lockf",	/* 40 M_LOCKF */ \
 	"proc",		/* 41 M_PROC */ \
@@ -272,7 +300,15 @@
 	"Journal",    /* 91 M_JNL_JNL */\
 	"Transaction",    /* 92 M_JNL_TR */\
 	"specinfo",		/* 93 M_SPECINFO */\
-	"kqueue"		/* 94 M_KQUEUE */\
+	"kqueue",	/* 94 M_KQUEUE */\
+	"HFS dirhint",	/* 95 M_HFSDIRHINT */ \
+        "cluster_read",	/* 96 M_CLRDAHEAD */ \
+        "cluster_write",/* 97 M_CLWRBEHIND */ \
+	"iov64",	/* 98 M_IOV64 */ \
+	"fileglob",	/* 99 M_FILEGLOB */ \
+	"kauth",		/* 100 M_KAUTH */ \
+	"dummynet",		/* 101 M_DUMMYNET */ \
+        "unsafe_fsnode"	/* 102 M_UNSAFEFS */ \
 }
 
 struct kmemstats {
@@ -288,10 +324,9 @@ struct kmemstats {
 	long	ks_spare;
 };
 
-#ifdef	KERNEL
-#ifdef __APPLE_API_PRIVATE
 extern struct kmemstats kmemstats[];
-#endif /* __APPLE_API_PRIVATE */
+
+#endif /* BSD_KERNEL_PRIVATE */
 
 /*
  * The malloc/free primatives used
@@ -309,24 +344,24 @@ extern struct kmemstats kmemstats[];
 #define FREE_ZONE(addr, size, type) \
 	_FREE_ZONE((void *)addr, size, type)
 
-extern void	*_MALLOC __P((
+extern void	*_MALLOC(
 			size_t		size,
 			int		type,
-			int		flags));
+			int		flags);
 
-extern void	_FREE __P((
+extern void	_FREE(
 			void		*addr,
-			int		type));
+			int		type);
 
-extern void	*_MALLOC_ZONE __P((
+extern void	*_MALLOC_ZONE(
 			size_t		size,
 			int		type,
-			int		flags));
+			int		flags);
 
-extern void	_FREE_ZONE __P((
+extern void	_FREE_ZONE(
 			void		*elem,
 			size_t		size,
-			int		type));
+			int		type);
 
 #endif	/* KERNEL */
 

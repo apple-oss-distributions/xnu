@@ -3,22 +3,19 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -94,6 +91,8 @@ public:
                                      IOOptionBits            options =
                                         kIORegistryIterateRecursively |
                                         kIORegistryIterateParents) const;
+    OSMetaClassDeclareReservedUsed(IORegistryEntry, 0);
+
 /*! @function copyProperty
     @abstract Synchronized method to obtain a property from a registry entry or one of its parents (or children) in the hierarchy. Available in Mac OS X 10.1 or later.
     @discussion This method will search for a property, starting first with this registry entry's property table, then iterating recusively through either the parent registry entries or the child registry entries of this entry. Once the first occurrence is found, it will lookup and return the value of the property, using the OSDictionary::getObject semantics. The iteration keeps track of entries that have been recursed into previously to avoid loops. This method is synchronized with other IORegistryEntry accesses to the property table(s).
@@ -107,6 +106,7 @@ public:
                                      IOOptionBits            options =
                                         kIORegistryIterateRecursively |
                                         kIORegistryIterateParents) const;
+    OSMetaClassDeclareReservedUsed(IORegistryEntry, 1);
 
 /*! @function copyProperty
     @abstract Synchronized method to obtain a property from a registry entry or one of its parents (or children) in the hierarchy. Available in Mac OS X 10.1 or later.
@@ -121,6 +121,7 @@ public:
                                      IOOptionBits            options =
                                         kIORegistryIterateRecursively |
                                         kIORegistryIterateParents) const;
+    OSMetaClassDeclareReservedUsed(IORegistryEntry, 2);
 
 /*! @function copyParentEntry
     @abstract Returns an registry entry's first parent entry in a plane. Available in Mac OS X 10.1 or later.
@@ -129,6 +130,7 @@ public:
     @result Returns the first parent of the registry entry, or zero if the entry is not attached into the registry in that plane. A reference on the entry is returned to caller, which should be released. */
 
     virtual IORegistryEntry * copyParentEntry( const IORegistryPlane * plane ) const;
+    OSMetaClassDeclareReservedUsed(IORegistryEntry, 3);
 
 /*! @function copyChildEntry
     @abstract Returns an registry entry's first child entry in a plane. Available in Mac OS X 10.1 or later.
@@ -137,16 +139,44 @@ public:
     @result Returns the first child of the registry entry, or zero if the entry is not attached into the registry in that plane. A reference on the entry is returned to caller, which should be released. */
 
     virtual IORegistryEntry * copyChildEntry( const IORegistryPlane * plane ) const;
+    OSMetaClassDeclareReservedUsed(IORegistryEntry, 4);
+
+    /* method available in Mac OS X 10.4 or later */
+/*!
+    @typedef Action
+    @discussion Type and arguments of callout C function that is used when
+a runCommand is executed by a client.  Cast to this type when you want a C++
+member function to be used.  Note the arg1 - arg3 parameters are passed straight pass through to the action callout.
+    @param target
+	Target of the function, can be used as a refcon.  Note if a C++ function
+was specified, this parameter is implicitly the first parameter in the target
+member function's parameter list.
+    @param arg0 Argument to action from run operation.
+    @param arg1 Argument to action from run operation.
+    @param arg2 Argument to action from run operation.
+    @param arg3 Argument to action from run operation.
+*/
+    typedef IOReturn (*Action)(OSObject *target,
+			       void *arg0, void *arg1,
+			       void *arg2, void *arg3);
+
+/*! @function runPropertyAction
+    @abstract Single thread a call to an action w.r.t. the property lock
+    @discussion Client function that causes the given action to be called in a manner that syncrhonises with the registry iterators and serialisers.  This functin can be used to synchronously manipulate the property table of this nub
+    @param action Pointer to function to be executed in work-loop context.
+    @param arg0 Parameter for action parameter, defaults to 0.
+    @param arg1 Parameter for action parameter, defaults to 0.
+    @param arg2 Parameter for action parameter, defaults to 0.
+    @param arg3 Parameter for action parameter, defaults to 0.
+    @result Returns the value of the Action callout.
+*/
+    virtual IOReturn runPropertyAction(Action action, OSObject *target,
+			       void *arg0 = 0, void *arg1 = 0,
+			       void *arg2 = 0, void *arg3 = 0);
+    OSMetaClassDeclareReservedUsed(IORegistryEntry, 5);
 
 private:
 
-    OSMetaClassDeclareReservedUsed(IORegistryEntry, 0);
-    OSMetaClassDeclareReservedUsed(IORegistryEntry, 1);
-    OSMetaClassDeclareReservedUsed(IORegistryEntry, 2);
-    OSMetaClassDeclareReservedUsed(IORegistryEntry, 3);
-    OSMetaClassDeclareReservedUsed(IORegistryEntry, 4);
-
-    OSMetaClassDeclareReservedUnused(IORegistryEntry, 5);
     OSMetaClassDeclareReservedUnused(IORegistryEntry, 6);
     OSMetaClassDeclareReservedUnused(IORegistryEntry, 7);
     OSMetaClassDeclareReservedUnused(IORegistryEntry, 8);
@@ -508,11 +538,11 @@ public:
 
 /*! @function inPlane
     @abstract Determines whether a registry entry is attached in a plane.
-    @discussion This method determines if the entry is attached in a plane to any other entry.
-    @param plane The plane object.
-    @result If the entry has a parent in the plane, true is returned, otherwise false is returned. */
+    @discussion This method determines if the entry is attached in a plane to any other entry.  It can also be used to determine if the entry is a member of any plane.
+    @param plane The plane object, 0 indicates any plane.
+    @result If the entry has a parent in the given plane or if plane = 0 then if entry has any parent; return true, otherwise false. */
 
-    virtual bool inPlane( const IORegistryPlane * plane ) const;
+    virtual bool inPlane( const IORegistryPlane * plane = 0) const;
 
 /*! @function getDepth
     @abstract Counts the maximum number of entries between an entry and the registry root, in a plane.

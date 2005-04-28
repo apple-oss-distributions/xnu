@@ -3,22 +3,19 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -54,6 +51,8 @@ WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 #include <kern/spl.h>
 #include <kern/processor.h>
 #include <kern/misc_protos.h>
+#include <i386/cpu_data.h>
+#include <i386/cpu_number.h>
 #include <i386/pio.h>
 #include <i386/AT386/rtc.h>
 #include <i386/AT386/bbclock_entries.h>
@@ -84,13 +83,12 @@ bbc_config(void)
 	int		BbcFlag;
 	struct rtc_st	rtclk;
 
-#if	NCPUS > 1 && AT386
 	mp_disable_preemption();
 	if (cpu_number() != master_cpu) {
 		mp_enable_preemption();
 		return(1);
 	}
-#endif
+
 	/*
 	 * Setup device.
 	 */
@@ -107,9 +105,7 @@ bbc_config(void)
 		printf("battery clock configured\n");
 	else
 		printf("WARNING: Battery Clock Failure!\n");
-#if	NCPUS > 1 && AT386
 	mp_enable_preemption();
-#endif
 	return (BbcFlag);
 }
 
@@ -127,7 +123,6 @@ bbc_gettime(
 	spl_t		s;
 	thread_t	thread;
 
-#if 	NCPUS > 1 && AT386
 	if ((thread = current_thread()) != THREAD_NULL) {
 		thread_bind(thread, master_processor);
 		mp_disable_preemption();
@@ -138,7 +133,7 @@ bbc_gettime(
 			mp_enable_preemption();
 		}
 	}
-#endif
+
 	s = LOCK_BBC();
 	rtcget(&rtclk);
 	sec = hexdectodec(rtclk.rtc_sec);
@@ -162,10 +157,8 @@ bbc_gettime(
 	cur_time->tv_nsec = 0;
 	UNLOCK_BBC(s);
 
-#if	NCPUS > 1 && AT386
 	if (thread != THREAD_NULL)
 		thread_bind(thread, PROCESSOR_NULL);
-#endif
 	return (KERN_SUCCESS);
 }
 
@@ -182,7 +175,6 @@ bbc_settime(
 	spl_t		s;
 	thread_t	thread;
 
-#if	NCPUS > 1 && AT386
 	if ((thread = current_thread()) != THREAD_NULL) {
 		thread_bind(thread, master_processor);
 		mp_disable_preemption();
@@ -193,7 +185,7 @@ bbc_settime(
 			mp_enable_preemption();
 		}
 	}
-#endif
+
 	s = LOCK_BBC();
 	rtcget(&rtclk);
 	diff = 0;
@@ -217,39 +209,9 @@ bbc_settime(
 	rtcput(&rtclk);
 	UNLOCK_BBC(s);
 
-#if	NCPUS > 1 && AT386
 	if (thread != THREAD_NULL)
 		thread_bind(current_thread(), PROCESSOR_NULL);
-#endif
-	return (KERN_SUCCESS);
-}
 
-/*
- * Get clock device attributes.
- */
-kern_return_t
-bbc_getattr(
-	clock_flavor_t		flavor,
-	clock_attr_t		attr,		/* OUT */
-	mach_msg_type_number_t	*count)		/* IN/OUT */
-{
-	if (*count != 1)
-		return (KERN_FAILURE);
-	switch (flavor) {
-
-	case CLOCK_GET_TIME_RES:	/* >0 res */
-		*(clock_res_t *) attr = NSEC_PER_SEC;
-		break;
-
-	case CLOCK_ALARM_CURRES:	/* =0 no alarm */
-	case CLOCK_ALARM_MINRES:
-	case CLOCK_ALARM_MAXRES:
-		*(clock_res_t *) attr = 0;
-		break;
-
-	default:
-		return (KERN_INVALID_VALUE);
-	}
 	return (KERN_SUCCESS);
 }
 
@@ -261,7 +223,7 @@ rtcget(
 	struct rtc_st	* regs)
 {
 	outb(RTC_ADDR, RTC_D); 
-	if (inb(RTC_DATA) & RTC_VRT == 0)
+	if ((inb(RTC_DATA) & RTC_VRT) == 0)
 		return (-1);
 	outb(RTC_ADDR, RTC_A);	
 	while (inb(RTC_DATA) & RTC_UIP)		/* busy wait */

@@ -1,24 +1,21 @@
 /*
- * Copyright (c) 2000 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2004 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -52,6 +49,7 @@
 #include <sys/vnode.h>
 #include <sys/socket.h>
 #include <sys/socketvar.h>
+#include <sys/uio_internal.h>
 #include <net/if.h>
 #include <net/if_dl.h>
 #include <net/if_types.h>
@@ -69,11 +67,21 @@
 #include <sys/malloc.h>
 #include <netinet/dhcp_options.h>
 
+#include <kern/kern_types.h>
+#include <kern/kalloc.h>
+
 #ifdef	BOOTP_DEBUG
 #define	dprintf(x) printf x;
 #else	/* !BOOTP_DEBUG */
 #define	dprintf(x)
 #endif	/* BOOTP_DEBUG */
+
+int bootp(struct ifnet * ifp, struct in_addr * iaddr_p, int max_try,
+	  struct in_addr * netmask_p, struct in_addr * router_p,
+	  struct proc * procp);
+struct mbuf * ip_pkt_to_mbuf(caddr_t pkt, int pktsize);
+int receive_packet(struct socket * so, caddr_t pp, int psize, int * actual_size);
+
 
 /* ip address formatting macros */
 #define IP_FORMAT	"%d.%d.%d.%d"
@@ -88,7 +96,7 @@ blank_sin()
 }
 
 static __inline__ void
-print_reply(struct bootp *bp, int bp_len)
+print_reply(struct bootp *bp, __unused int bp_len)
 {
 	int i, j, len;
 
@@ -133,7 +141,7 @@ print_reply(struct bootp *bp, int bp_len)
 }
 
 static __inline__ void
-print_reply_short(struct bootp *bp, int bp_len)
+print_reply_short(struct bootp *bp, __unused int bp_len)
 {
 	printf("bp_yiaddr = " IP_FORMAT "\n", IP_LIST(&bp->bp_yiaddr));
 	printf("bp_sname = %s\n", bp->bp_sname);
@@ -243,13 +251,16 @@ link_from_ifnet(struct ifnet * ifp)
 
 /*    for (addr = ifp->if_addrlist; addr; addr = addr->ifa_next) */
 
+	ifnet_lock_shared(ifp);
     TAILQ_FOREACH(addr, &ifp->if_addrhead, ifa_link) {
 	if (addr->ifa_addr->sa_family == AF_LINK) {
 	    struct sockaddr_dl * dl_p = (struct sockaddr_dl *)(addr->ifa_addr);
 	    
+	    ifnet_lock_done(ifp);
 	    return (dl_p);
 	}
     }
+    ifnet_lock_done(ifp);
     return (NULL);
 }
 
@@ -260,7 +271,7 @@ link_from_ifnet(struct ifnet * ifp)
  *     bypassing routing code.
  */
 static int
-send_bootp_request(struct ifnet * ifp, struct socket * so,
+send_bootp_request(struct ifnet * ifp, __unused struct socket * so,
 		   struct bootp_packet * pkt)
 {
     struct mbuf	*	m;
@@ -272,7 +283,7 @@ send_bootp_request(struct ifnet * ifp, struct socket * so,
     sin.sin_addr.s_addr = INADDR_BROADCAST;
     
     m = ip_pkt_to_mbuf((caddr_t)pkt, sizeof(*pkt));
-    return (dlil_output(ifptodlt(ifp, PF_INET), m, 0, (struct sockaddr *)&sin, 0));
+    return dlil_output(ifp, PF_INET, m, 0, (struct sockaddr *)&sin, 0);
 }
 
 /*
@@ -283,23 +294,18 @@ send_bootp_request(struct ifnet * ifp, struct socket * so,
 int
 receive_packet(struct socket * so, caddr_t pp, int psize, int * actual_size)
 {
-    struct iovec	aiov;
-    struct uio		auio;
+    uio_t		auio;
     int			rcvflg;
     int			error;
+	char		uio_buf[ UIO_SIZEOF(1) ];
 
-    aiov.iov_base = pp;
-    aiov.iov_len = psize;
-    auio.uio_iov = &aiov;
-    auio.uio_iovcnt = 1;
-    auio.uio_segflg = UIO_SYSSPACE;
-    auio.uio_offset = 0;
-    auio.uio_resid = psize;
-    auio.uio_rw = UIO_READ;
+ 	auio = uio_createwithbuffer(1, 0, UIO_SYSSPACE, UIO_READ, 
+								  &uio_buf[0], sizeof(uio_buf));
+	uio_addiov(auio, CAST_USER_ADDR_T(pp), psize);
     rcvflg = MSG_WAITALL;
     
-    error = soreceive(so, (struct sockaddr **) 0, &auio, 0, 0, &rcvflg);
-    *actual_size = psize - auio.uio_resid;
+    error = soreceive(so, (struct sockaddr **) 0, auio, 0, 0, &rcvflg);
+    *actual_size = psize - uio_resid(auio);
     return (error);
 }
 
@@ -313,14 +319,13 @@ bootp_timeout(void * arg)
 {
     struct socket * * socketflag = (struct socket * *)arg;
     struct socket * so = *socketflag;
-    boolean_t 	funnel_state;
     
     dprintf(("bootp: timeout\n"));
 
-    funnel_state = thread_funnel_set(network_flock,TRUE);
     *socketflag = NULL;
+    socket_lock(so, 1);
     sowakeup(so, &so->so_rcv);
-    (void) thread_funnel_set(network_flock, FALSE);
+    socket_unlock(so, 1);
     return;
 }
 
@@ -334,7 +339,7 @@ bootp_timeout(void * arg)
  */
 #define GOOD_RATING	3
 static __inline__ int 
-rate_packet(struct bootp * pkt, int pkt_size, dhcpol_t * options_p)
+rate_packet(__unused struct bootp * pkt, __unused int pkt_size, dhcpol_t * options_p)
 {
     int		len;
     int 	rating = 1;
@@ -504,8 +509,11 @@ bootp_loop(struct socket * so, struct ifnet * ifp, int max_try,
 		}
 		break; /* retry */
 	    }
-	    else
-		sbwait(&so->so_rcv);
+	    else {
+		socket_lock(so, 1);
+		error = sbwait(&so->so_rcv);
+		socket_unlock(so, 1);
+	    }
 	}
 	if (error && (error != EWOULDBLOCK)) {
 	    dprintf(("bootp: failed to receive packets: %d\n", error));
@@ -526,9 +534,9 @@ bootp_loop(struct socket * so, struct ifnet * ifp, int max_try,
 
  cleanup:
     if (request)
-	kfree((caddr_t)request, sizeof (*request));
+	kfree(request, sizeof (*request));
     if (reply)
-	kfree((caddr_t)reply, reply_size);
+	kfree(reply, reply_size);
     return (error);
 }
 
@@ -586,7 +594,9 @@ int bootp(struct ifnet * ifp, struct in_addr * iaddr_p, int max_try,
 	    dprintf(("bootp: sobind failed, %d\n", error));
 	    goto cleanup;
 	}
+	socket_lock(so, 1);
 	so->so_state |= SS_NBIO;
+	socket_unlock(so, 1);
     }
     /* do the protocol */
     error = bootp_loop(so, ifp, max_try, iaddr_p, netmask_p, router_p);

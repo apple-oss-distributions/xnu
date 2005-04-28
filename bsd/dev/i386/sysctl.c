@@ -3,26 +3,24 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
 
+#include <string.h>
 #include <sys/param.h>
 #include <sys/kernel.h>
 #include <sys/sysctl.h>
@@ -31,31 +29,38 @@
 static int
 hw_cpu_sysctl SYSCTL_HANDLER_ARGS
 {
-    i386_cpu_info_t cpu_info;
-    void *ptr = (uint8_t *)&cpu_info + (uint32_t)arg1;
+    __unused struct sysctl_oid *unused_oidp = oidp;
+    i386_cpu_info_t *cpu_info = cpuid_info();
+    void *ptr = (uint8_t *)cpu_info + (uint32_t)arg1;
     int value;
 
-    cpuid_get_info(&cpu_info);
+    if (arg2 == -1) {
+        ptr = *(char **)ptr;
+        arg2 = 0;
+    }
+
+    if (arg2 == 0 && ((char *)ptr)[0] == '\0') {
+        return ENOENT;
+    }
 
     if (arg2 == sizeof(uint8_t)) {
 	value = (uint32_t) *(uint8_t *)ptr;
 	ptr = &value;
 	arg2 = sizeof(uint32_t);
     }
-    return SYSCTL_OUT(req, ptr, arg2 ? arg2 : strlen((char *)ptr)+1);
-    return 0;
+    return SYSCTL_OUT(req, ptr, arg2 ? (size_t) arg2 : strlen((char *)ptr)+1);
 }
 
 static int
 hw_cpu_features SYSCTL_HANDLER_ARGS
 {
-    i386_cpu_info_t cpu_info;
+    __unused struct sysctl_oid *unused_oidp = oidp;
+    __unused void *unused_arg1 = arg1;
+    __unused int unused_arg2 = arg2; 
     char buf[256];
-    vm_size_t size;
 
-    cpuid_get_info(&cpu_info);
     buf[0] = '\0';
-    cpuid_get_feature_names(cpu_info.cpuid_features, buf, sizeof(buf));
+    cpuid_get_feature_names(cpuid_features(), buf, sizeof(buf));
 
     return SYSCTL_OUT(req, buf, strlen(buf) + 1);
 }
@@ -70,6 +75,10 @@ SYSCTL_PROC(_machdep_cpu, OID_AUTO, vendor, CTLTYPE_STRING | CTLFLAG_RD,
 SYSCTL_PROC(_machdep_cpu, OID_AUTO, brand_string, CTLTYPE_STRING | CTLFLAG_RD, 
 	    (void *)offsetof(i386_cpu_info_t, cpuid_brand_string), 0,
 	    hw_cpu_sysctl, "A", "CPU brand string");
+
+SYSCTL_PROC(_machdep_cpu, OID_AUTO, model_string, CTLTYPE_STRING | CTLFLAG_RD, 
+	    (void *)offsetof(i386_cpu_info_t, cpuid_model_string), -1,
+	    hw_cpu_sysctl, "A", "CPU model string");
 
 SYSCTL_PROC(_machdep_cpu, OID_AUTO, value, CTLTYPE_INT | CTLFLAG_RD, 
 	    (void *)offsetof(i386_cpu_info_t, cpuid_value), sizeof(uint32_t),
@@ -107,12 +116,6 @@ SYSCTL_PROC(_machdep_cpu, OID_AUTO, brand, CTLTYPE_INT | CTLFLAG_RD,
 	    (void *)offsetof(i386_cpu_info_t, cpuid_brand), sizeof(uint8_t),
 	    hw_cpu_sysctl, "I", "CPU brand");
 
-#if 0
-SYSCTL_PROC(_machdep_cpu, OID_AUTO, model_string, CTLTYPE_STRING | CTLFLAG_RD, 
-	    (void *)offsetof(i386_cpu_info_t, model_string), 0,
-	    hw_cpu_sysctl, "A", "CPU model string");
-#endif
-
 SYSCTL_PROC(_machdep_cpu, OID_AUTO, features, CTLTYPE_STRING | CTLFLAG_RD, 
 	    0, 0,
 	    hw_cpu_features, "A", "CPU feature names");
@@ -123,6 +126,7 @@ struct sysctl_oid *machdep_sysctl_list[] =
     &sysctl__machdep_cpu,
     &sysctl__machdep_cpu_vendor,
     &sysctl__machdep_cpu_brand_string,
+    &sysctl__machdep_cpu_model_string,
     &sysctl__machdep_cpu_value,
     &sysctl__machdep_cpu_family,
     &sysctl__machdep_cpu_model,

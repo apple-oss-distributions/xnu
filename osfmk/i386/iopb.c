@@ -3,22 +3,19 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -84,7 +81,7 @@ iopb_init(void)
 
 
 void
-iopb_destroy(iopb_tss_t      io_tss)
+iopb_destroy(__unused iopb_tss_t      io_tss)
 {
 }
 
@@ -148,7 +145,7 @@ void
 iopb_init(void)
 {
 	queue_init(&device_to_io_port_list);
-	simple_lock_init(&iopb_lock, ETAP_IO_IOPB);
+	simple_lock_init(&iopb_lock, 0);
 }
 
 /*
@@ -301,7 +298,7 @@ io_tss_init(
 	io_bitmap_init(io_tss->bitmap);
 	io_tss->barrier = ~0;
 	queue_init(&io_tss->io_port_list);
-	addr += LINEAR_KERNEL_ADDRESS;
+	addr |= LINEAR_KERNEL_ADDRESS;
 	io_tss->iopb_desc[0] = ((size-1) & 0xffff)
 		| ((addr & 0xffff) << 16);
 	io_tss->iopb_desc[1] = ((addr & 0x00ff0000) >> 16)
@@ -371,7 +368,7 @@ i386_io_port_add(
 	 || device == DEVICE_NULL)
 	    return KERN_INVALID_ARGUMENT;
 
-	pcb = thread->top_act->mact.pcb;
+	pcb = thread->machine.pcb;
 
 	new_io_tss = 0;
 	iu = (io_use_t) kalloc(sizeof(struct io_use));
@@ -470,7 +467,7 @@ i386_io_port_remove(
 	 || device == DEVICE_NULL)
 	    return KERN_INVALID_ARGUMENT;
 
-	pcb = thread->top_act->mact.pcb;
+	pcb = thread->machine.pcb;
 
 	simple_lock(&iopb_lock);
 
@@ -542,7 +539,7 @@ i386_io_port_list(thread, list, list_count)
 	if (thread == THREAD_NULL)
 	    return KERN_INVALID_ARGUMENT;
 
-	pcb = thread->top_act->mact.pcb;
+	pcb = thread->machine.pcb;
 
 	alloc_count = 16;		/* a guess */
 
@@ -636,7 +633,7 @@ iopb_check_mapping(
 	io_port_t	io_port;
 	io_use_t	iu;
 
-	pcb = thread->top_act->mact.pcb;
+	pcb = thread->machine.pcb;
 
 	simple_lock(&iopb_lock);
 

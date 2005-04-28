@@ -1,38 +1,38 @@
 /*
- * Copyright (c) 2000 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2005 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
+
 /*
  *	File:	mach/ppc/processor_info.h
  *
  *	Data structure definitions for ppc specific processor control
  */
 
-
 #ifndef	_MACH_PPC_PROCESSOR_INFO_H_
 #define _MACH_PPC_PROCESSOR_INFO_H_
 
 #include <mach/machine.h>
+#include <mach/message.h>
+
+#ifdef	PRIVATE
 
 /* processor_control command operations */
 #define PROCESSOR_PM_SET_REGS     1     /* Set Performance Monitor Registers  */
@@ -41,6 +41,8 @@
 
 /* 
  * Performance Monitor Register structures
+ *
+ * XXX - These have not been updated for ppc64.
  */
 
 typedef union {
@@ -104,19 +106,14 @@ struct processor_pm_regs {
 
 typedef struct processor_pm_regs processor_pm_regs_data_t;
 typedef struct processor_pm_regs *processor_pm_regs_t;
-#define PROCESSOR_PM_REGS_COUNT \
-        (sizeof(processor_pm_regs_data_t) / sizeof (unsigned int))
+#define PROCESSOR_PM_REGS_COUNT ((mach_msg_type_number_t) \
+        (sizeof(processor_pm_regs_data_t) / sizeof (unsigned int)))
 
 #define PROCESSOR_PM_REGS_COUNT_POWERPC_750 \
             (PROCESSOR_PM_REGS_COUNT * 2 )
 
 #define PROCESSOR_PM_REGS_COUNT_POWERPC_7400 \
             (PROCESSOR_PM_REGS_COUNT * 3 )
-
-typedef unsigned int processor_temperature_data_t;
-typedef unsigned int *processor_temperature_t;
-
-#define PROCESSOR_TEMPERATURE_COUNT 1
 
 union processor_control_data {
         processor_pm_regs_data_t cmd_pm_regs[3];
@@ -134,9 +131,9 @@ typedef struct processor_control_cmd   *processor_control_cmd_t;
 #define cmd_pm_regs u.cmd_pm_regs;
 #define cmd_pm_ctls u.cmd_pm_ctls;
 
-#define PROCESSOR_CONTROL_CMD_COUNT \
+#define PROCESSOR_CONTROL_CMD_COUNT ((mach_msg_type_number_t) \
     (((sizeof(processor_control_cmd_data_t)) - \
-      (sizeof(union processor_control_data))) / sizeof (integer_t))
+      (sizeof(union processor_control_data))) / sizeof (integer_t)))
 
      /* x should be a processor_pm_regs_t */
 #define PERFMON_MMCR0(x)    ((x)[0].u.mmcr0.word)
@@ -163,5 +160,11 @@ typedef struct processor_control_cmd   *processor_control_cmd_t;
 #define PERFMON_PMC3_CV(x)       ((x)[1].u.pmc[0].bits.cv)
 #define PERFMON_PMC4_CV(x)       ((x)[1].u.pmc[1].bits.cv)
 
-#endif	/* _MACH_PPC_PROCESSOR_INFO_H_ */
+typedef unsigned int processor_temperature_data_t;
+typedef unsigned int *processor_temperature_t;
 
+#define PROCESSOR_TEMPERATURE_COUNT 1
+
+#endif	/* PRIVATE */
+
+#endif	/* _MACH_PPC_PROCESSOR_INFO_H_ */

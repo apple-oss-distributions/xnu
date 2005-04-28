@@ -3,22 +3,19 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -54,6 +51,9 @@ extern "C" {
 #else
 #define ACCUMSIZE(s)
 #endif
+
+#define EXT_CAST(obj) \
+    reinterpret_cast<OSObject *>(const_cast<OSMetaClassBase *>(obj))
 
 bool OSDictionary::initWithCapacity(unsigned int inCapacity)
 {
@@ -231,6 +231,7 @@ OSDictionary *OSDictionary::withDictionary(const OSDictionary *dict,
 
 void OSDictionary::free()
 {
+    (void) super::setOptions(0, kImmutable);
     flushCollection();
     if (dictionary) {
         kfree((vm_offset_t)dictionary, capacity * sizeof(dictEntry));
@@ -307,10 +308,10 @@ setObject(const OSSymbol *aKey, const OSMetaClassBase *anObject)
         if (aKey == dictionary[i].key) {
             const OSMetaClassBase *oldObject = dictionary[i].value;
 
+            haveUpdated();
+
             anObject->taggedRetain(OSTypeID(OSCollection));
             dictionary[i].value = anObject;
-
-            haveUpdated();
 
             oldObject->taggedRelease(OSTypeID(OSCollection));
             return true;
@@ -321,13 +322,13 @@ setObject(const OSSymbol *aKey, const OSMetaClassBase *anObject)
     if (count >= capacity && count >= ensureCapacity(count+1))
         return 0;
 
+    haveUpdated();
+
     aKey->taggedRetain(OSTypeID(OSCollection));
     anObject->taggedRetain(OSTypeID(OSCollection));
     dictionary[count].key = aKey;
     dictionary[count].value = anObject;
     count++;
-
-    haveUpdated();
 
     return true;
 }
@@ -571,3 +572,77 @@ bool OSDictionary::serialize(OSSerialize *s) const
 
     return s->addXMLEndTag("dict");
 }
+
+unsigned OSDictionary::setOptions(unsigned options, unsigned mask, void *)
+{
+    unsigned old = super::setOptions(options, mask);
+    if ((old ^ options) & mask) {
+
+	// Value changed need to recurse over all of the child collections
+	for ( unsigned i = 0; i < count; i++ ) {
+	    OSCollection *v = OSDynamicCast(OSCollection, dictionary[i].value);
+	    if (v)
+		v->setOptions(options, mask);
+	}
+    }
+
+    return old;
+}
+
+OSCollection * OSDictionary::copyCollection(OSDictionary *cycleDict)
+{
+    bool allocDict = !cycleDict;
+    OSCollection *ret = 0;
+    OSDictionary *newDict = 0;
+
+    if (allocDict) {
+	cycleDict = OSDictionary::withCapacity(16);
+	if (!cycleDict)
+	    return 0;
+    }
+
+    do {
+	// Check for a cycle
+	ret = super::copyCollection(cycleDict);
+	if (ret)
+	    continue;
+	
+	newDict = OSDictionary::withDictionary(this);
+	if (!newDict)
+	    continue;
+
+	// Insert object into cycle Dictionary
+	cycleDict->setObject((const OSSymbol *) this, newDict);
+
+	for (unsigned int i = 0; i < count; i++) {
+	    const OSMetaClassBase *obj = dictionary[i].value;
+	    OSCollection *coll = OSDynamicCast(OSCollection, EXT_CAST(obj));
+
+	    if (coll) {
+		OSCollection *newColl = coll->copyCollection(cycleDict);
+		if (!newColl)
+		    goto abortCopy;
+
+		newDict->dictionary[i].value = newColl;
+
+		coll->taggedRelease(OSTypeID(OSCollection));
+		newColl->taggedRetain(OSTypeID(OSCollection));
+		newColl->release();
+	    };
+	}
+
+	ret = newDict;
+	newDict = 0;
+
+    } while (false);
+
+abortCopy:
+    if (newDict)
+	newDict->release();
+
+    if (allocDict)
+	cycleDict->release();
+
+    return ret;
+}
+

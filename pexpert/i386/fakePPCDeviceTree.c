@@ -3,22 +3,19 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -27,21 +24,12 @@
 
 #include "fakePPCStructs.h"
 
-boot_args fakePPCBootArgs = {
-    0,                // Revision
-    kBootArgsVersion, // Version
-    "",               // CommandLine
-    {{0}},            // PhysicalDRAM
-    {0},              // machine_type
-    0,                // deviceTreeP
-    0,                // deviceTreeLength
-    0,                // topOfKernelData
-};
+boot_args fakePPCBootArgs = { .Version = kBootArgsVersion };
 
 void * createdt(dt_init * template, long * retSize)
 {
     dt_init *    next;
-    int          size, allocSize;
+    size_t       size, allocSize;
     vm_address_t out, saveout;
     void *       source;
     
@@ -59,12 +47,17 @@ void * createdt(dt_init * template, long * retSize)
         {
             allocSize += *(next->dataInit.length);
         }
+        else if ( next->stringInit.two == 2 )
+        {
+            dt_data *dp = (dt_data *)(next->stringInit.data);
+            allocSize += (32 + 4 + 3 + dp->length) & (-4);
+        }
         else
         {
             allocSize += (32 + 4 + 3 + next->propInit.length) & (-4);
         }
     }
-    saveout = out = kalloc(allocSize);
+    saveout = out = (vm_address_t) kalloc(allocSize);
     if ( out == 0 ) return 0;
 
     // copy out
@@ -78,13 +71,24 @@ void * createdt(dt_init * template, long * retSize)
         }
         else if ( next->dataInit.one == 1 )
         {
-            *(next->dataInit.address) = out;
+            *((long *)next->dataInit.address) = out;
             source = 0;
             size   = *(next->dataInit.length);
         }
+        else if ( next->stringInit.two == 2 )
+        {
+            dt_data *dp = (dt_data *)next->stringInit.data;
+            bcopy( (void *)(uintptr_t)next->stringInit.name, (void *)out, 32);
+            out += 32;
+            size = dp->length;
+            *(long *)out = size;
+            out += sizeof(long);
+            source = (char *)dp->address;
+            size = (size + 3) & (-4);
+        }
         else
         {
-            bcopy( next->propInit.name, (void *)out, 32);
+            bcopy( (void *)(uintptr_t)next->propInit.name, (void *)out, 32);
             out += 32;
             size = next->propInit.length;
             *(long *)out = size;
@@ -128,14 +132,14 @@ typedef struct node_t {
 } node_t;
 
 
-int indent = 0;
+unsigned int indent = 0;
 
 void printdt()
 {
     node_t *nodeptr = (node_t *)nptr;
-    long num_props    = nodeptr->nProperties;
-    long len;
-    int i, j;
+    unsigned long num_props    = nodeptr->nProperties;
+    unsigned long len;
+    unsigned int i, j;
     unsigned char *sptr;
 
     nptr = (unsigned char *)&nodeptr->props;
@@ -146,7 +150,7 @@ void printdt()
         printf("'");
         printf("%s", nptr);
         nptr+=32;
-        len = *((long*)nptr);
+        len = *((unsigned long*)nptr);
         nptr += 4;
         printf("'\t\t(%ld)  '", len);
         sptr = nptr;

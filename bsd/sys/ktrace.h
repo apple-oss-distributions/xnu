@@ -1,24 +1,21 @@
 /*
- * Copyright (c) 2000-2002 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2005 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -64,15 +61,12 @@
 
 #include <sys/appleapiopts.h>
 
-#if defined(MACH_KERNEL_PRIVATE)
+#ifdef MACH_KERNEL_PRIVATE
 
-#ifdef __APPLE_API_PRIVATE
-void ktrsyscall(void *, int, int, void *, int);
+void ktrsyscall(void *, int, int, u_int64_t *, int);
 void ktrsysret(void *, int, int, int, int);
-#endif /* __APPLE_API_PRIVATE */
 
 #else
-
 #ifdef __APPLE_API_UNSTABLE
 /*
  * operations to ktrace system call  (KTROP(op))
@@ -88,6 +82,8 @@ void ktrsysret(void *, int, int, int, int);
 
 /*
  * ktrace record header
+ *
+ * LP64todo: not 64-bit safe
  */
 struct ktr_header {
 	int	ktr_len;		/* length of buf */
@@ -118,7 +114,7 @@ struct ktr_syscall {
 	/*
 	 * followed by ktr_narg register_t
 	 */
-	register_t	ktr_args[1];
+	u_int64_t	ktr_args[1];
 };
 
 /*
@@ -197,21 +193,20 @@ struct ktr_csw {
 
 #ifdef	KERNEL
 #ifdef __APPLE_API_PRIVATE
-void	ktrnamei __P((struct vnode *,char *));
-void	ktrcsw __P((struct vnode *, int, int, int));
-void	ktrpsig __P((struct vnode *, int, sig_t, sigset_t *, int, int));
-void	ktrgenio __P((struct vnode *, int, enum uio_rw,
-	    struct uio *, int, int));
-void	ktrsyscall __P((struct proc *, int, int, register_t args[], int));
-void	ktrsysret __P((struct proc *, int, int, register_t, int));
+void	ktrnamei(struct vnode *,char *);
+void	ktrcsw(struct vnode *, int, int);
+void	ktrpsig(struct vnode *, int, sig_t, sigset_t *, int);
+void	ktrgenio(struct vnode *, int, enum uio_rw, struct uio *, int);
+void	ktrsyscall(struct proc *, int, int, u_int64_t args[]);
+void	ktrsysret(struct proc *, int, int, register_t);
 #endif /* __APPLE_API_PRIVATE */
 #else
 
 #include <sys/cdefs.h>
 
 __BEGIN_DECLS
-int	ktrace __P((const char *, int, int, pid_t));
-int	utrace __P((const void *, size_t));
+int	ktrace(const char *, int, int, pid_t);
+int	utrace(const void *, size_t);
 __END_DECLS
 
 #endif	/* !KERNEL */

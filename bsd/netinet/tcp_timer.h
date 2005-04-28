@@ -3,22 +3,19 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -109,10 +106,11 @@
  * amount of time probing, then we drop the connection.
  */
 
+#ifdef PRIVATE
+
 /*
  * Time constants.
  */
-#ifdef __APPLE_API_PRIVATE
 #define	TCPTV_MSL	( 30*PR_SLOWHZ)		/* max seg lifetime (hah!) */
 #define	TCPTV_SRTTBASE	0			/* base roundtrip time;
 						   if 0, no idea yet */
@@ -143,6 +141,7 @@ static char *tcptimers[] =
     { "REXMT", "PERSIST", "KEEP", "2MSL" };
 #endif
 
+#ifdef KERNEL
 /*
  * Force a time value to be in a certain range.
  */
@@ -153,8 +152,6 @@ static char *tcptimers[] =
 	else if ((u_long)(tv) > (u_long)(tvmax)) \
 		(tv) = (tvmax); \
 } while(0)
-
-#ifdef KERNEL
 
 #define TCP_KEEPIDLE(tp) \
 	(tp->t_keepidle && (tp->t_inpcb->inp_socket->so_options & SO_KEEPALIVE) ? \
@@ -170,13 +167,13 @@ extern int tcp_msl;
 extern int tcp_ttl;			/* time to live for TCP segs */
 extern int tcp_backoff[];
 
-void	tcp_timer_2msl __P((void *xtp));
-void	tcp_timer_keep __P((void *xtp));
-void	tcp_timer_persist __P((void *xtp));
-void	tcp_timer_rexmt __P((void *xtp));
-void	tcp_timer_delack __P((void *xtp));
+void	tcp_timer_2msl(void *xtp);
+void	tcp_timer_keep(void *xtp);
+void	tcp_timer_persist(void *xtp);
+void	tcp_timer_rexmt(void *xtp);
+void	tcp_timer_delack(void *xtp);
 
 #endif /* KERNEL */
-#endif /* __APPLE_API_PRIVATE */
-
+#endif /* PRIVATE */
 #endif /* !_NETINET_TCP_TIMER_H_ */
+

@@ -1,24 +1,21 @@
 /*
- * Copyright (c) 2000 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2004 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -62,8 +59,17 @@
 #include <zone_debug.h>
 #include <norma_vm.h>
 #include <mach_kdb.h>
-#include <kern/ast.h>
+
+#include <mach/mach_types.h>
+#include <mach/vm_param.h>
+#include <mach/kern_return.h>
+#include <mach/mach_host_server.h>
+#include <mach/machine/vm_types.h>
+#include <mach_debug/zone_info.h>
+
+#include <kern/kern_types.h>
 #include <kern/assert.h>
+#include <kern/host.h>
 #include <kern/macro_help.h>
 #include <kern/sched.h>
 #include <kern/lock.h>
@@ -71,10 +77,20 @@
 #include <kern/misc_protos.h>
 #include <kern/thread_call.h>
 #include <kern/zalloc.h>
-#include <mach/vm_param.h>
+#include <kern/kalloc.h>
+
+#include <vm/pmap.h>
+#include <vm/vm_map.h>
 #include <vm/vm_kern.h>
+#include <vm/vm_page.h>
+
 #include <machine/machparam.h>
 
+#if defined(__ppc__)
+/* for fake zone stat routines */
+#include <ppc/savearea.h>
+#include <ppc/mappings.h>
+#endif
 
 #if	MACH_ASSERT
 /* Detect use of zone elt after freeing it by two methods:
@@ -86,12 +102,12 @@
 #if defined(__alpha)
 
 #define is_kernel_data_addr(a)						\
-		(!(a) || IS_SYS_VA(a) && !((a) & (sizeof(long)-1)))
+  (!(a) || (IS_SYS_VA(a) && !((a) & (sizeof(long)-1))))
 
 #else /* !defined(__alpha) */
 
 #define is_kernel_data_addr(a)						\
-		(!(a) || (a) >= VM_MIN_KERNEL_ADDRESS && !((a) & 0x3))
+  (!(a) || ((a) >= VM_MIN_KERNEL_ADDRESS && !((a) & 0x3)))
 
 #endif /* defined(__alpha) */
 
@@ -104,7 +120,7 @@ boolean_t zfree_clear = FALSE;
 #define ADD_TO_ZONE(zone, element)					\
 MACRO_BEGIN								\
 		if (zfree_clear)					\
-		{   int i;						\
+		{   unsigned int i;						\
 		    for (i=1;						\
 			 i < zone->elem_size/sizeof(vm_offset_t) - 1;	\
 			 i++)						\
@@ -214,26 +230,26 @@ vm_size_t	zdata_size;
 
 #define lock_zone(zone)					\
 MACRO_BEGIN						\
-	simple_lock(&(zone)->lock);			\
+	mutex_lock(&(zone)->lock);			\
 MACRO_END
 
 #define unlock_zone(zone)				\
 MACRO_BEGIN						\
-	simple_unlock(&(zone)->lock);			\
+	mutex_unlock(&(zone)->lock);			\
 MACRO_END
 
 #define zone_wakeup(zone) thread_wakeup((event_t)(zone))
 #define zone_sleep(zone)				\
-	thread_sleep_simple_lock((event_t)(zone),	\
+	thread_sleep_mutex((event_t)(zone),	\
 				&(zone)->lock,		\
 				THREAD_UNINT)
 
 #define lock_zone_init(zone)				\
 MACRO_BEGIN						\
-	simple_lock_init(&zone->lock, ETAP_MISC_ZONE);	\
+	mutex_init(&zone->lock, 0);	\
 MACRO_END
 
-#define lock_try_zone(zone)	simple_lock_try(&zone->lock)
+#define lock_try_zone(zone)	mutex_try(&zone->lock)
 
 kern_return_t		zget_space(
 				vm_offset_t size,
@@ -250,7 +266,7 @@ vm_size_t	zalloc_wasted_space;
 struct zone_page_table_entry *	zone_page_table;
 vm_offset_t			zone_map_min_address;
 vm_offset_t			zone_map_max_address;
-integer_t			zone_pages;
+unsigned int			zone_pages;
 
 /*
  *	Exclude more than one concurrent garbage collection
@@ -272,7 +288,7 @@ decl_mutex_data(,		zone_gc_lock)
 decl_simple_lock_data(,	all_zones_lock)
 zone_t			first_zone;
 zone_t			*last_zone;
-int			num_zones;
+unsigned int		num_zones;
 
 boolean_t zone_gc_allowed = TRUE;
 boolean_t zone_gc_forced = FALSE;
@@ -290,7 +306,7 @@ zinit(
 	vm_size_t	size,		/* the size of an element */
 	vm_size_t	max,		/* maximum memory to use */
 	vm_size_t	alloc,		/* allocation size */
-	char		*name)		/* a name for the zone */
+	const char	*name)		/* a name for the zone */
 {
 	zone_t		z;
 
@@ -312,18 +328,29 @@ zinit(
 		((size-1) % sizeof(z->free_elements));
  	if (alloc == 0)
 		alloc = PAGE_SIZE;
-	alloc = round_page_32(alloc);
-	max   = round_page_32(max);
+	alloc = round_page(alloc);
+	max   = round_page(max);
 	/*
-	 * We look for an allocation size with least fragmentation
-	 * in the range of 1 - 5 pages.  This size will be used unless
+	 * we look for an allocation size with less than 1% waste
+	 * up to 5 pages in size...
+	 * otherwise, we look for an allocation size with least fragmentation
+	 * in the range of 1 - 5 pages
+	 * This size will be used unless
 	 * the user suggestion is larger AND has less fragmentation
 	 */
 	{	vm_size_t best, waste; unsigned int i;
 		best  = PAGE_SIZE;
 		waste = best % size;
-		for (i = 2; i <= 5; i++){	vm_size_t tsize, twaste;
-			tsize  = i * PAGE_SIZE;
+
+		for (i = 1; i <= 5; i++) {
+		        vm_size_t tsize, twaste;
+
+			tsize = i * PAGE_SIZE;
+
+			if ((tsize % size) < (tsize / 100)) {
+			        alloc = tsize;
+				goto use_this_allocation;
+			}
 			twaste = tsize % size;
 			if (twaste < waste)
 				best = tsize, waste = twaste;
@@ -331,6 +358,7 @@ zinit(
 		if (alloc <= best || (alloc % size >= waste))
 			alloc = best;
 	}
+use_this_allocation:
 	if (max && (max < alloc))
 		max = alloc;
 
@@ -342,6 +370,7 @@ zinit(
 	z->zone_name = name;
 	z->count = 0;
 	z->doing_alloc = FALSE;
+	z->doing_gc = FALSE;
 	z->exhaustible = FALSE;
 	z->collectable = TRUE;
 	z->allows_foreign = FALSE;
@@ -376,10 +405,11 @@ zinit(
 void
 zcram(
 	register zone_t		zone,
-	vm_offset_t		newmem,
+	void			*newaddr,
 	vm_size_t		size)
 {
 	register vm_size_t	elem_size;
+	vm_offset_t		newmem = (vm_offset_t) newaddr;
 
 	/* Basic sanity checks */
 	assert(zone != ZONE_NULL && newmem != (vm_offset_t)0);
@@ -412,7 +442,7 @@ zget_space(
 	vm_offset_t *result)
 {
 	vm_offset_t	new_space = 0;
-	vm_size_t	space_to_add;
+	vm_size_t	space_to_add = 0;
 
 	simple_lock(&zget_space_lock);
 	while ((zalloc_next_space + size) > zalloc_end_of_space) {
@@ -420,7 +450,7 @@ zget_space(
 		 *	Add at least one page to allocation area.
 		 */
 
-		space_to_add = round_page_32(size);
+		space_to_add = round_page(size);
 
 		if (new_space == 0) {
 			kern_return_t retval;
@@ -489,8 +519,8 @@ zget_space(
 void
 zone_steal_memory(void)
 {
-	zdata_size = round_page_32(128*sizeof(struct zone));
-	zdata = pmap_steal_memory(zdata_size);
+	zdata_size = round_page(128*sizeof(struct zone));
+	zdata = (vm_offset_t)((char *)pmap_steal_memory(zdata_size) - (char *)0);
 }
 
 
@@ -515,13 +545,13 @@ zfill(
 	if (nelem <= 0)
 		return 0;
 	size = nelem * zone->elem_size;
-	size = round_page_32(size);
+	size = round_page(size);
 	kr = kmem_alloc_wired(kernel_map, &memory, size);
 	if (kr != KERN_SUCCESS)
 		return 0;
 
 	zone_change(zone, Z_FOREIGN, TRUE);
-	zcram(zone, memory, size);
+	zcram(zone, (void *)memory, size);
 	nalloc = size / zone->elem_size;
 	assert(nalloc >= nelem);
 
@@ -539,13 +569,13 @@ zone_bootstrap(void)
 	vm_size_t zone_zone_size;
 	vm_offset_t zone_zone_space;
 
-	simple_lock_init(&all_zones_lock, ETAP_MISC_ZONE_ALL);
+	simple_lock_init(&all_zones_lock, 0);
 
 	first_zone = ZONE_NULL;
 	last_zone = &first_zone;
 	num_zones = 0;
 
-	simple_lock_init(&zget_space_lock, ETAP_MISC_ZONE_GET);
+	simple_lock_init(&zget_space_lock, 0);
 	zalloc_next_space = zdata;
 	zalloc_end_of_space = zdata + zdata_size;
 	zalloc_wasted_space = 0;
@@ -557,7 +587,7 @@ zone_bootstrap(void)
 	zone_change(zone_zone, Z_COLLECT, FALSE);
 	zone_zone_size = zalloc_end_of_space - zalloc_next_space;
 	zget_space(zone_zone_size, &zone_zone_space);
-	zcram(zone_zone, zone_zone_space, zone_zone_size);
+	zcram(zone_zone, (void *)zone_zone_space, zone_zone_size);
 }
 
 void
@@ -570,10 +600,11 @@ zone_init(
 	vm_size_t	zone_table_size;
 
 	retval = kmem_suballoc(kernel_map, &zone_min, max_zonemap_size,
-						FALSE, TRUE, &zone_map);
+						FALSE, VM_FLAGS_ANYWHERE, &zone_map);
+
 	if (retval != KERN_SUCCESS)
 		panic("zone_init: kmem_suballoc failed");
-	zone_max = zone_min + round_page_32(max_zonemap_size);
+	zone_max = zone_min + round_page(max_zonemap_size);
 	/*
 	 * Setup garbage collection information:
 	 */
@@ -582,11 +613,11 @@ zone_init(
 	if (kmem_alloc_wired(zone_map, (vm_offset_t *) &zone_page_table,
 			     zone_table_size) != KERN_SUCCESS)
 		panic("zone_init");
-	zone_min = (vm_offset_t)zone_page_table + round_page_32(zone_table_size);
+	zone_min = (vm_offset_t)zone_page_table + round_page(zone_table_size);
 	zone_pages = atop_32(zone_max - zone_min);
 	zone_map_min_address = zone_min;
 	zone_map_max_address = zone_max;
-	mutex_init(&zone_gc_lock, ETAP_NO_TRACE);
+	mutex_init(&zone_gc_lock, 0);
 	zone_page_init(zone_min, zone_max - zone_min, ZONE_PAGE_UNUSED);
 }
 
@@ -594,7 +625,7 @@ zone_init(
 /*
  *	zalloc returns an element from the specified zone.
  */
-vm_offset_t
+void *
 zalloc_canblock(
 	register zone_t	zone,
 	boolean_t canblock)
@@ -603,11 +634,16 @@ zalloc_canblock(
 	kern_return_t retval;
 
 	assert(zone != ZONE_NULL);
-	check_simple_locks();
 
 	lock_zone(zone);
 
 	REMOVE_FROM_ZONE(zone, addr, vm_offset_t);
+
+	while ((addr == 0) && canblock && (zone->doing_gc)) {
+		zone->waiting = TRUE;
+		zone_sleep(zone);
+		REMOVE_FROM_ZONE(zone, addr, vm_offset_t);
+	}
 
 	while ((addr == 0) && canblock) {
 		/*
@@ -656,7 +692,7 @@ zalloc_canblock(
 
 				        if (vm_pool_low() || retry == TRUE)
 					        alloc_size = 
-						  round_page_32(zone->elem_size);
+						  round_page(zone->elem_size);
 					else
 					        alloc_size = zone->alloc_size;
 
@@ -666,14 +702,16 @@ zalloc_canblock(
 					if (retval == KERN_SUCCESS) {
 					        zone_page_init(space, alloc_size,
 							       ZONE_PAGE_USED);
-						zcram(zone, space, alloc_size);
+						zcram(zone, (void *)space, alloc_size);
 
 						break;
 					} else if (retval != KERN_RESOURCE_SHORTAGE) {
 					        /* would like to cause a zone_gc() */
 					        if (retry == TRUE)
-						        panic("zalloc");
+						        panic("zalloc: \"%s\" (%d elements) retry fail %d", zone->zone_name, zone->count, retval);
 						retry = TRUE;
+					} else {
+					        break;
 					}
 				}
 				lock_zone(zone);
@@ -714,7 +752,7 @@ zalloc_canblock(
 					if (zone_debug_enabled(zone))
 						space += ZONE_DEBUG_OFFSET;
 #endif
-					return(space);
+					return((void *)space);
 				}
 				if (retval == KERN_RESOURCE_SHORTAGE) {
 					unlock_zone(zone);
@@ -722,7 +760,7 @@ zalloc_canblock(
 					VM_PAGE_WAIT();
 					lock_zone(zone);
 				} else {
-					panic("zalloc");
+					panic("zalloc: \"%s\" (%d elements) zget_space returned %d", zone->zone_name, zone->count, retval);
 				}
 			}
 		}
@@ -747,18 +785,18 @@ zalloc_canblock(
 
 	unlock_zone(zone);
 
-	return(addr);
+	return((void *)addr);
 }
 
 
-vm_offset_t
+void *
 zalloc(
        register zone_t zone)
 {
   return( zalloc_canblock(zone, TRUE) );
 }
 
-vm_offset_t
+void *
 zalloc_noblock(
 	       register zone_t zone)
 {
@@ -767,10 +805,10 @@ zalloc_noblock(
 
 void
 zalloc_async(
-	thread_call_param_t	p0,
-	thread_call_param_t	p1)
+	thread_call_param_t          p0,
+	__unused thread_call_param_t p1)
 {
-	vm_offset_t	elt;
+	void *elt;
 
 	elt = zalloc_canblock((zone_t)p0, TRUE);
 	zfree((zone_t)p0, elt);
@@ -787,7 +825,7 @@ zalloc_async(
  *	This form should be used when you can not block (like when
  *	processing an interrupt).
  */
-vm_offset_t
+void *
 zget(
 	register zone_t	zone)
 {
@@ -796,7 +834,7 @@ zget(
 	assert( zone != ZONE_NULL );
 
 	if (!lock_try_zone(zone))
-	    return ((vm_offset_t)0);
+		return NULL;
 
 	REMOVE_FROM_ZONE(zone, addr, vm_offset_t);
 #if	ZONE_DEBUG
@@ -807,7 +845,7 @@ zget(
 #endif	/* ZONE_DEBUG */
 	unlock_zone(zone);
 
-	return(addr);
+	return((void *) addr);
 }
 
 /* Keep this FALSE by default.  Large memory machine run orders of magnitude
@@ -820,8 +858,9 @@ static vm_offset_t zone_last_bogus_elem = 0;
 void
 zfree(
 	register zone_t	zone,
-	vm_offset_t	elem)
+	void 		*addr)
 {
+	vm_offset_t	elem = (vm_offset_t) addr;
 
 #if MACH_ASSERT
 	/* Basic sanity checks */
@@ -836,11 +875,10 @@ zfree(
 	    !from_zone_map(elem, zone->elem_size)) {
 #if MACH_ASSERT
 		panic("zfree: non-allocated memory in collectable zone!");
-#else
+#endif
 		zone_last_bogus_zone = zone;
 		zone_last_bogus_elem = elem;
 		return;
-#endif
 	}
 
 	lock_zone(zone);
@@ -959,7 +997,7 @@ zprealloc(
 		if (kmem_alloc_wired(zone_map, &addr, size) != KERN_SUCCESS)
 		  panic("zprealloc");
 		zone_page_init(addr, size, ZONE_PAGE_USED);
-		zcram(zone, addr, size);
+		zcram(zone, (void *)addr, size);
 	}
 }
 
@@ -1156,9 +1194,9 @@ zone_gc(void)
 	zone_free_pages = NULL;
 
 	for (i = 0; i < max_zones; i++, z = z->next_zone) {
-		unsigned int				n;
+		unsigned int				n, m;
 		vm_size_t					elt_size, size_freed;
-		struct zone_free_element	*elt, *prev, *scan, *keep, *tail;
+		struct zone_free_element	*elt, *base_elt, *base_prev, *prev, *scan, *keep, *tail;
 
 		assert(z != ZONE_NULL);
 
@@ -1171,12 +1209,18 @@ zone_gc(void)
 
 		/*
 		 * Do a quick feasability check before we scan the zone: 
-		 * skip unless there is likelihood of getting 1+ pages back.
+		 * skip unless there is likelihood of getting pages back
+		 * (i.e we need a whole allocation block's worth of free
+		 * elements before we can garbage collect) and
+		 * the zone has more than 10 percent of it's elements free
 		 */
-		if (z->cur_size - z->count * elt_size <= 2 * PAGE_SIZE){
+		if (((z->cur_size - z->count * elt_size) <= (2 * z->alloc_size)) ||
+		    ((z->cur_size - z->count * elt_size) <= (z->cur_size / 10))) {
 			unlock_zone(z);		
 			continue;
 		}
+
+		z->doing_gc = TRUE;
 
 		/*
 		 * Snatch all of the free elements away from the zone.
@@ -1221,15 +1265,38 @@ zone_gc(void)
 			 * Dribble back the elements we are keeping.
 			 */
 
-			if (++n >= 50 && keep != NULL) {
-				lock_zone(z);
+			if (++n >= 50) {
+				if (z->waiting == TRUE) {
+					lock_zone(z);
 
-				tail->next = (void *)z->free_elements;
-				(void *)z->free_elements = keep;
+					if (keep != NULL) {
+						tail->next = (void *)z->free_elements;
+						(void *)z->free_elements = keep;
+						tail = keep = NULL;
+					} else {
+						m =0;
+						base_elt = elt;
+						base_prev = prev;
+						while ((elt != NULL) && (++m < 50)) { 
+							prev = elt;
+							elt = elt->next;
+						}
+						if (m !=0 ) {
+							prev->next = (void *)z->free_elements;
+							(void *)z->free_elements = (void *)base_elt;
+							base_prev->next = elt;
+							prev = base_prev;
+						}
+					}
 
-				unlock_zone(z);
+					if (z->waiting) {
+						z->waiting = FALSE;
+						zone_wakeup(z);
+					}
 
-				n = 0; tail = keep = NULL;
+					unlock_zone(z);
+				}
+				n =0;
 			}
 		}
 
@@ -1286,14 +1353,21 @@ zone_gc(void)
 			 * and update the zone size info.
 			 */
 
-			if (++n >= 50 && keep != NULL) {
+			if (++n >= 50) {
 				lock_zone(z);
 
 				z->cur_size -= size_freed;
 				size_freed = 0;
 
-				tail->next = (void *)z->free_elements;
-				(void *)z->free_elements = keep;
+				if (keep != NULL) {
+					tail->next = (void *)z->free_elements;
+					(void *)z->free_elements = keep;
+				}
+
+				if (z->waiting) {
+					z->waiting = FALSE;
+					zone_wakeup(z);
+				}
 
 				unlock_zone(z);
 
@@ -1306,8 +1380,9 @@ zone_gc(void)
 		 * the zone size info.
 		 */
 
+		lock_zone(z);
+
 		if (size_freed > 0 || keep != NULL) {
-			lock_zone(z);
 
 			z->cur_size -= size_freed;
 
@@ -1316,8 +1391,14 @@ zone_gc(void)
 				(void *)z->free_elements = keep;
 			}
 
-			unlock_zone(z);
 		}
+
+		z->doing_gc = FALSE;
+		if (z->waiting) {
+			z->waiting = FALSE;
+			zone_wakeup(z);
+		}
+		unlock_zone(z);
 	}
 
 	/*
@@ -1345,11 +1426,11 @@ consider_zone_gc(void)
 {
 	/*
 	 *	By default, don't attempt zone GC more frequently
-	 *	than once / 2 seconds.
+	 *	than once / 1 minutes.
 	 */
 
 	if (zone_gc_max_rate == 0)
-		zone_gc_max_rate = (2 << SCHED_TICK_SHIFT) + 1;
+		zone_gc_max_rate = (60 << SCHED_TICK_SHIFT) + 1;
 
 	if (zone_gc_allowed &&
 	    ((sched_tick > (zone_gc_last_tick + zone_gc_max_rate)) ||
@@ -1360,14 +1441,6 @@ consider_zone_gc(void)
 	}
 }
 
-#include <mach/kern_return.h>
-#include <mach/machine/vm_types.h>
-#include <mach_debug/zone_info.h>
-#include <kern/host.h>
-#include <vm/vm_map.h>
-#include <vm/vm_kern.h>
-
-#include <mach/mach_host_server.h>
 
 kern_return_t
 host_zone_info(
@@ -1408,10 +1481,10 @@ host_zone_info(
 
 	if (max_zones <= *namesCntp) {
 		/* use in-line memory */
-
+		names_size = *namesCntp * sizeof *names;
 		names = *namesp;
 	} else {
-		names_size = round_page_32(max_zones * sizeof *names);
+		names_size = round_page(max_zones * sizeof *names);
 		kr = kmem_alloc_pageable(ipc_kernel_map,
 					 &names_addr, names_size);
 		if (kr != KERN_SUCCESS)
@@ -1421,10 +1494,10 @@ host_zone_info(
 
 	if (max_zones <= *infoCntp) {
 		/* use in-line memory */
-
+	  	info_size = *infoCntp * sizeof *info;
 		info = *infop;
 	} else {
-		info_size = round_page_32(max_zones * sizeof *info);
+		info_size = round_page(max_zones * sizeof *info);
 		kr = kmem_alloc_pageable(ipc_kernel_map,
 					 &info_addr, info_size);
 		if (kr != KERN_SUCCESS) {
@@ -1498,8 +1571,8 @@ host_zone_info(
 		if (used != names_size)
 			bzero((char *) (names_addr + used), names_size - used);
 
-		kr = vm_map_copyin(ipc_kernel_map, names_addr, names_size,
-				   TRUE, &copy);
+		kr = vm_map_copyin(ipc_kernel_map, (vm_map_address_t)names_addr,
+				   (vm_map_size_t)names_size, TRUE, &copy);
 		assert(kr == KERN_SUCCESS);
 
 		*namesp = (zone_name_t *) copy;
@@ -1515,8 +1588,8 @@ host_zone_info(
 		if (used != info_size)
 			bzero((char *) (info_addr + used), info_size - used);
 
-		kr = vm_map_copyin(ipc_kernel_map, info_addr, info_size,
-				   TRUE, &copy);
+		kr = vm_map_copyin(ipc_kernel_map, (vm_map_address_t)info_addr,
+				   (vm_map_size_t)info_size, TRUE, &copy);
 		assert(kr == KERN_SUCCESS);
 
 		*infop = (zone_info_t *) copy;
@@ -1570,12 +1643,12 @@ db_print_zone(
 /*ARGSUSED*/
 void
 db_show_one_zone(
-        db_expr_t       addr,
-        int		have_addr,
-        db_expr_t	count,
-        char *          modif)
+        db_expr_t       	addr,
+        int			have_addr,
+        __unused db_expr_t	count,
+        __unused char *	modif)
 {
-	struct zone *z = (zone_t)addr;
+	struct zone *z = (zone_t)((char *)0 + addr);
 
 	if (z == ZONE_NULL || !have_addr){
 		db_error("No Zone\n");
@@ -1589,10 +1662,10 @@ db_show_one_zone(
 /*ARGSUSED*/
 void
 db_show_all_zones(
-        db_expr_t	addr,
-        int		have_addr,
-        db_expr_t	count,
-        char *		modif)
+        __unused db_expr_t	addr,
+        int			have_addr,
+        db_expr_t		count,
+        __unused char *	modif)
 {
 	zone_t		z;
 	unsigned total = 0;
@@ -1739,32 +1812,34 @@ db_zone_print_free(
 /* should we care about locks here ? */
 
 #if	MACH_KDB
-vm_offset_t
+void *
 next_element(
 	zone_t		z,
-	vm_offset_t	elt)
+	void		*prev)
 {
+	char		*elt = (char *)prev;
+
 	if (!zone_debug_enabled(z))
 		return(0);
 	elt -= ZONE_DEBUG_OFFSET;
-	elt = (vm_offset_t) queue_next((queue_t) elt);
+	elt = (char *) queue_next((queue_t) elt);
 	if ((queue_t) elt == &z->active_zones)
 		return(0);
 	elt += ZONE_DEBUG_OFFSET;
 	return(elt);
 }
 
-vm_offset_t
+void *
 first_element(
 	zone_t		z)
 {
-	vm_offset_t	elt;
+	char 		*elt;
 
 	if (!zone_debug_enabled(z))
 		return(0);
 	if (queue_empty(&z->active_zones))
 		return(0);
-	elt = (vm_offset_t) queue_first(&z->active_zones);
+	elt = (char *)queue_first(&z->active_zones);
 	elt += ZONE_DEBUG_OFFSET;
 	return(elt);
 }
@@ -1780,7 +1855,7 @@ zone_count(
 	zone_t		z,
 	int		tail)
 {
-	vm_offset_t	elt;
+	void		*elt;
 	int		count = 0;
 	boolean_t	print = (tail != 0);
 

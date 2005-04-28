@@ -3,22 +3,19 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -34,6 +31,10 @@
 #ifndef _NETAT_ADSP_H_
 #define _NETAT_ADSP_H_
 #include <sys/appleapiopts.h>
+#include <netat/appletalk.h>
+
+#ifdef __APPLE_API_OBSOLETE
+
 /* ADSP flags for read, write, and close routines */
 
 #define	ADSP_EOM	0x01	/* Sent or received EOM with data */
@@ -272,7 +273,7 @@ struct tpb {
 #endif
 */
 
-typedef long (*ProcPtr)();
+typedef long (*ProcPtr)();	/* XXX */
 typedef ProcPtr *ProcHandle;
 typedef char *Ptr;
 typedef Ptr *Handle;
@@ -666,8 +667,7 @@ typedef struct {
 #define ADSPGETSOCK	((AT_MID_ADSP<<8) | 239)
 #define ADSPGETPEER	((AT_MID_ADSP<<8) | 238)
 
-#ifdef KERNEL
-#ifdef __APPLE_API_PRIVATE
+#ifdef KERNEL_PRIVATE
 
 /* from h/adsp_adsp.h */
 
@@ -677,19 +677,22 @@ typedef struct {
 #define STR_PUTBACK	2
 #define STR_QTIME	(HZ >> 3)
 
-extern int adspInit();
-extern int adspOpen();
-extern int adspCLListen();
-extern int adspClose();
-extern int adspCLDeny();
-extern int adspStatus();
-extern int adspRead();
-extern int adspWrite();
-extern int adspAttention();
-extern int adspOptions();
-extern int adspReset();
-extern int adspNewCID();
-extern int adspPacket();
+struct ccb;
+#define CCBPtr	 struct ccb *
+extern int adspInit(CCBPtr sp, struct adspcmd *ap);
+extern int adspOpen(register CCBPtr sp, register struct adspcmd *pb);
+extern int adspCLListen( register CCBPtr sp, register struct adspcmd *pb);
+extern int adspClose(register CCBPtr sp, register struct adspcmd *pb);
+extern int adspCLDeny(struct adspcmd *pb, CCBPtr sp);
+extern int adspStatus(CCBPtr sp, register struct adspcmd *pb);
+extern int adspRead(register CCBPtr sp, register struct adspcmd *pb);
+extern int adspWrite(CCBPtr sp, struct adspcmd *pb);
+extern int adspAttention(register struct adspcmd *pb, register CCBPtr sp);
+extern int adspOptions(CCBPtr sp, struct adspcmd *pb);
+extern int adspReset(CCBPtr sp, struct adspcmd *pb);
+extern int adspNewCID(CCBPtr sp, struct adspcmd *pb);
+extern int adspPacket(gref_t *gref, gbuf_t *mp);
+#undef CCBPtr
 
 
 struct adsp_debug {
@@ -704,6 +707,6 @@ struct adsp_debug {
     int ad_sendWdwSeq;
 };
 
-#endif /* __APPLE_API_PRIVATE */
-#endif /* KERNEL */
+#endif /* KERNEL_PRIVATE */
+#endif /* __APPLE_API_OBSOLETE */
 #endif /* _NETAT_ADSP_H_ */

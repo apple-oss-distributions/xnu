@@ -3,22 +3,19 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -243,9 +240,9 @@ OSErr BlockAllocate (
 	//	next block to allocate from.
 	//
 	if (startingBlock == 0) {
-		VCB_LOCK(vcb);
+		HFS_MOUNT_LOCK(vcb, TRUE);
 		startingBlock = vcb->nextAllocation;
-		VCB_UNLOCK(vcb);
+		HFS_MOUNT_UNLOCK(vcb, TRUE);
 		updateAllocPtr = true;
 	}
 	if (startingBlock >= vcb->totalBlocks) {
@@ -267,7 +264,9 @@ OSErr BlockAllocate (
 		    (*actualStartBlock > startingBlock) &&
 		    ((*actualStartBlock < VCBTOHFS(vcb)->hfs_metazone_start) ||
 	    	     (*actualStartBlock > VCBTOHFS(vcb)->hfs_metazone_end))) {
-			vcb->nextAllocation = *actualStartBlock;	/* XXX */
+			HFS_MOUNT_LOCK(vcb, TRUE);
+			vcb->nextAllocation = *actualStartBlock;
+			HFS_MOUNT_UNLOCK(vcb, TRUE);
 		}
 	} else {
 		/*
@@ -288,7 +287,13 @@ OSErr BlockAllocate (
 			                       actualNumBlocks);
 	}
 
-	if (err == noErr) {
+Exit:
+	// if we actually allocated something then go update the
+	// various bits of state that we maintain regardless of
+	// whether there was an error (i.e. partial allocations
+	// still need to update things like the free block count).
+	//
+	if (*actualNumBlocks != 0) {
 		//
 		//	If we used the volume's roving allocation pointer, then we need to update it.
 		//	Adding in the length of the current allocation might reduce the next allocate
@@ -297,7 +302,7 @@ OSErr BlockAllocate (
 		//	the file is closed or its EOF changed.  Leaving the allocation pointer at the
 		//	start of the last allocation will avoid unnecessary fragmentation in this case.
 		//
-		VCB_LOCK(vcb);
+		HFS_MOUNT_LOCK(vcb, TRUE);
 
 		if (updateAllocPtr &&
 		    ((*actualStartBlock < VCBTOHFS(vcb)->hfs_metazone_start) ||
@@ -308,14 +313,12 @@ OSErr BlockAllocate (
 		//	Update the number of free blocks on the volume
 		//
 		vcb->freeBlocks -= *actualNumBlocks;
-		hfs_generate_volume_notifications(VCBTOHFS(vcb));
-		VCB_UNLOCK(vcb);
-
 		MarkVCBDirty(vcb);
+		HFS_MOUNT_UNLOCK(vcb, TRUE);
+
+		hfs_generate_volume_notifications(VCBTOHFS(vcb));
 	}
 	
-Exit:
-
 	return err;
 }
 
@@ -366,14 +369,14 @@ OSErr BlockDeallocate (
 	//
 	//	Update the volume's free block count, and mark the VCB as dirty.
 	//
-	VCB_LOCK(vcb);
+	HFS_MOUNT_LOCK(vcb, TRUE);
 	vcb->freeBlocks += numBlocks;
-	hfs_generate_volume_notifications(VCBTOHFS(vcb));
 	if (vcb->nextAllocation == (firstBlock + numBlocks))
 		vcb->nextAllocation -= numBlocks;
-	VCB_UNLOCK(vcb);
 	MarkVCBDirty(vcb);
-    
+  	HFS_MOUNT_UNLOCK(vcb, TRUE); 
+
+	hfs_generate_volume_notifications(VCBTOHFS(vcb));
 Exit:
 
 	return err;
@@ -398,8 +401,10 @@ MetaZoneFreeBlocks(ExtendedVCB *vcb)
 	int bytesperblock;
 	UInt8 byte;
 	UInt8 *buffer;
+
 	blockRef = 0;
 	bytesleft = freeblocks = 0;
+	buffer = NULL;
 	bit = VCBTOHFS(vcb)->hfs_metazone_start;
 	if (bit == 1)
 		bit = 0;
@@ -487,35 +492,35 @@ static OSErr ReadBitmapBlock(
 	OSErr			err;
 	struct buf *bp = NULL;
 	struct vnode *vp = NULL;
-	UInt32 block;
+	daddr64_t block;
 	UInt32 blockSize;
 
 	/*
-	 * volume bitmap blocks are protected by the Extents B-tree lock
+	 * volume bitmap blocks are protected by the allocation file lock
 	 */
-	REQUIRE_FILE_LOCK(vcb->extentsRefNum, false);	
+	REQUIRE_FILE_LOCK(vcb->hfs_allocation_vp, false);	
 
 	blockSize = (UInt32)vcb->vcbVBMIOSize;
-	block = bit / (blockSize * kBitsPerByte);
+	block = (daddr64_t)(bit / (blockSize * kBitsPerByte));
 
 	if (vcb->vcbSigWord == kHFSPlusSigWord) {
-		vp = vcb->allocationsRefNum;	/* use allocation file vnode */
+		vp = vcb->hfs_allocation_vp;	/* use allocation file vnode */
 
 	} else /* hfs */ {
 		vp = VCBTOHFS(vcb)->hfs_devvp;	/* use device I/O vnode */
 		block += vcb->vcbVBMSt;			/* map to physical block */
 	}
 
-	err = meta_bread(vp, block, blockSize, NOCRED, &bp);
+	err = (int)buf_meta_bread(vp, block, blockSize, NOCRED, &bp);
 
 	if (bp) {
 		if (err) {
-			brelse(bp);
+			buf_brelse(bp);
 			*blockRef = NULL;
 			*buffer = NULL;
 		} else {
 			*blockRef = (UInt32)bp;
-			*buffer = (UInt32 *)bp->b_data;
+			*buffer = (UInt32 *)buf_dataptr(bp);
 		}
 	}
 
@@ -557,10 +562,10 @@ static OSErr ReleaseBitmapBlock(
 			if (hfsmp->jnl) {
 				journal_modify_block_end(hfsmp->jnl, bp);
 			} else {
-				bdwrite(bp);
+				buf_bdwrite(bp);
 			}
 		} else {
-			brelse(bp);
+			buf_brelse(bp);
 		}
 	}
 
@@ -1348,6 +1353,15 @@ static OSErr BlockFindContiguous(
 	UInt32  blockRef;
 	UInt32  wordsPerBlock;
 
+	if (!useMetaZone) {
+		struct hfsmount *hfsmp = VCBTOHFS(vcb);
+
+		
+		if ((hfsmp->hfs_flags & HFS_METADATA_ZONE) &&
+		    (startingBlock <= hfsmp->hfs_metazone_end))
+			startingBlock = hfsmp->hfs_metazone_end + 1;
+	}
+
 	if ((endingBlock - startingBlock) < minBlocks)
 	{
 		//	The set of blocks we're checking is smaller than the minimum number
@@ -1428,8 +1442,9 @@ static OSErr BlockFindContiguous(
 				 */
 				if (!useMetaZone) {
 					currentBlock = NextBitmapBlock(vcb, currentBlock);
-					if (currentBlock >= stopBlock)
-						break;
+					if (currentBlock >= stopBlock) {
+						goto LoopExit;
+					}
 				}
 
 				err = ReadBitmapBlock(vcb, currentBlock, &buffer, &blockRef);
@@ -1516,7 +1531,7 @@ FoundUnused:
 
 					nextBlock = NextBitmapBlock(vcb, currentBlock);
 					if (nextBlock != currentBlock) {
-						break;  /* allocation gap, so stop */
+						goto LoopExit;  /* allocation gap, so stop */
 					}
 				}
 
@@ -1585,7 +1600,7 @@ FoundUsed:
 				++vcb->vcbFreeExtCnt;
 		}
 	} while (currentBlock < stopBlock);
-
+LoopExit:
 
 	//	Return the outputs.
 	if (foundBlocks < minBlocks)
@@ -1607,6 +1622,127 @@ ErrorExit:
 		(void) ReleaseBitmapBlock(vcb, blockRef, false);
 
 	return err;
+}
+
+/*
+ * Test to see if any blocks in a range are allocated.
+ *
+ * The journal or allocation file lock must be held.
+ */
+__private_extern__
+int 
+hfs_isallocated(struct hfsmount *hfsmp, u_long startingBlock, u_long numBlocks)
+{
+	UInt32  *currentWord;   // Pointer to current word within bitmap block
+	UInt32  wordsLeft;      // Number of words left in this bitmap block
+	UInt32  bitMask;        // Word with given bits already set (ready to test)
+	UInt32  firstBit;       // Bit index within word of first bit to allocate
+	UInt32  numBits;        // Number of bits in word to allocate
+	UInt32  *buffer = NULL;
+	UInt32  blockRef;
+	UInt32  bitsPerBlock;
+	UInt32  wordsPerBlock;
+	int  inuse = 0;
+	int  error;
+
+	/*
+	 * Pre-read the bitmap block containing the first word of allocation
+	 */
+	error = ReadBitmapBlock(hfsmp, startingBlock, &buffer, &blockRef);
+	if (error)
+		return (error);
+
+	/*
+	 * Initialize currentWord, and wordsLeft.
+	 */
+	{
+		UInt32 wordIndexInBlock;
+		
+		bitsPerBlock  = hfsmp->vcbVBMIOSize * kBitsPerByte;
+		wordsPerBlock = hfsmp->vcbVBMIOSize / kBytesPerWord;
+
+		wordIndexInBlock = (startingBlock & (bitsPerBlock-1)) / kBitsPerWord;
+		currentWord = buffer + wordIndexInBlock;
+		wordsLeft = wordsPerBlock - wordIndexInBlock;
+	}
+	
+	/*
+	 * First test any non word aligned bits.
+	 */
+	firstBit = startingBlock % kBitsPerWord;
+	if (firstBit != 0) {
+		bitMask = kAllBitsSetInWord >> firstBit;
+		numBits = kBitsPerWord - firstBit;
+		if (numBits > numBlocks) {
+			numBits = numBlocks;
+			bitMask &= ~(kAllBitsSetInWord >> (firstBit + numBits));
+		}
+		if ((*currentWord & SWAP_BE32 (bitMask)) != 0) {
+			inuse = 1;
+			goto Exit;
+		}
+		numBlocks -= numBits;
+		++currentWord;
+		--wordsLeft;
+	}
+
+	/*
+	 * Test whole words (32 blocks) at a time.
+	 */
+	while (numBlocks >= kBitsPerWord) {
+		if (wordsLeft == 0) {
+			/* Read in the next bitmap block. */
+			startingBlock += bitsPerBlock;
+			
+			buffer = NULL;
+			error = ReleaseBitmapBlock(hfsmp, blockRef, false);
+			if (error) goto Exit;
+
+			error = ReadBitmapBlock(hfsmp, startingBlock, &buffer, &blockRef);
+			if (error) goto Exit;
+
+			/* Readjust currentWord and wordsLeft. */
+			currentWord = buffer;
+			wordsLeft = wordsPerBlock;
+		}
+		if (*currentWord != 0) {
+			inuse = 1;
+			goto Exit;
+		}
+		numBlocks -= kBitsPerWord;
+		++currentWord;
+		--wordsLeft;
+	}
+	
+	/*
+	 * Test any remaining blocks.
+	 */
+	if (numBlocks != 0) {
+		bitMask = ~(kAllBitsSetInWord >> numBlocks);
+		if (wordsLeft == 0) {
+			/* Read in the next bitmap block */
+			startingBlock += bitsPerBlock;
+			
+			buffer = NULL;
+			error = ReleaseBitmapBlock(hfsmp, blockRef, false);
+			if (error) goto Exit;
+
+			error = ReadBitmapBlock(hfsmp, startingBlock, &buffer, &blockRef);
+			if (error) goto Exit;
+
+			currentWord = buffer;
+			wordsLeft = wordsPerBlock;
+		}
+		if ((*currentWord & SWAP_BE32 (bitMask)) != 0) {
+			inuse = 1;
+			goto Exit;
+		}
+	}
+Exit:
+	if (buffer) {
+		(void)ReleaseBitmapBlock(hfsmp, blockRef, false);
+	}
+	return (inuse);
 }
 
 

@@ -1,24 +1,21 @@
 /*
- * Copyright (c) 2000-2003 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2004 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -264,7 +261,6 @@ struct iso_mnt {
 	int im_sector_size;
 	
 	int volume_space_size;
-	struct netexport im_export;
 	
 	char root[ISODCL (157, 190)];
 	int root_extent;
@@ -294,7 +290,7 @@ struct iso_mnt {
 /* CD is Video CD (version < 2.0) */
 #define IMF2_IS_VCD		0x00000002
 
-#define VFSTOISOFS(mp)	((struct iso_mnt *)((mp)->mnt_data))
+#define VFSTOISOFS(mp)	((struct iso_mnt *)(vfs_fsprivate(mp)))
 
 #define blkoff(imp, loc)	((loc) & (imp)->im_bmask)
 #define lblktosize(imp, blk)	((blk) << (imp)->im_bshift)
@@ -305,23 +301,22 @@ struct iso_mnt {
 	(off_t)(((off) / (imp)->im_sector_size) * (imp)->im_sector_size)
 
 
-int cd9660_mount __P((struct mount *,
-	    char *, caddr_t, struct nameidata *, struct proc *));
-int cd9660_start __P((struct mount *, int, struct proc *));
-int cd9660_unmount __P((struct mount *, int, struct proc *));
-int cd9660_root __P((struct mount *, struct vnode **));
-int cd9660_quotactl __P((struct mount *, int, uid_t, caddr_t, struct proc *));
-int cd9660_statfs __P((struct mount *, struct statfs *, struct proc *));
-int cd9660_sync __P((struct mount *, int, struct ucred *, struct proc *));
-int cd9660_vget __P((struct mount *, void *, struct vnode **));
-int cd9660_fhtovp __P((struct mount *, struct fid *, struct mbuf *,
-	    struct vnode **, int *, struct ucred **));
-int cd9660_vptofh __P((struct vnode *, struct fid *));
-int cd9660_init __P(());
+int cd9660_mount(struct mount *, vnode_t, user_addr_t, vfs_context_t);
+int cd9660_start(struct mount *, int, vfs_context_t);
+int cd9660_unmount(struct mount *, int, vfs_context_t);
+int cd9660_root(struct mount *, struct vnode **, vfs_context_t);
+int cd9660_statfs(struct mount *, struct vfsstatfs *, vfs_context_t);
+int cd9660_vfs_getattr(struct mount *mp, struct vfs_attr *fsap, vfs_context_t context);
+int cd9660_sync(struct mount *, int, vfs_context_t);
+int cd9660_vget(struct mount *, ino64_t, struct vnode **, vfs_context_t);
+int cd9660_fhtovp(struct mount *, int, unsigned char *, struct vnode **, vfs_context_t);
+int cd9660_vptofh(struct vnode *, int *, unsigned char *, vfs_context_t);
+int cd9660_init(struct vfsconf *);
+int cd9660_mountroot(mount_t, vnode_t, vfs_context_t); 
+int cd9660_sysctl(int *, u_int, user_addr_t, size_t *, user_addr_t, size_t, vfs_context_t);
 
-int cd9660_mountroot __P((void)); 
-
-int cd9660_sysctl __P((int *, u_int, void *, size_t *, void *, size_t, struct proc *));
+int cd9660_vget_internal(mount_t, ino_t, vnode_t *, vnode_t, struct componentname *,
+			 int, struct iso_directory_record *, proc_t);
 
 extern int (**cd9660_vnodeop_p)(void *);
 extern int (**cd9660_specop_p)(void *);
@@ -331,15 +326,13 @@ extern int (**cd9660_fifoop_p)(void *);
 extern int (**cd9660_cdxaop_p)(void *);
 
 static __inline int
-isonum_711(p)
-	u_char *p;
+isonum_711(u_char *p)
 {
 	return *p;
 }
 
 static __inline int
-isonum_712(p)
-	char *p;
+isonum_712(char *p)
 {
 	return *p;
 }
@@ -347,15 +340,13 @@ isonum_712(p)
 #ifndef UNALIGNED_ACCESS
 
 static __inline int
-isonum_723(p)
-	u_char *p;
+isonum_723(u_char *p)
 {
 	return *p|(p[1] << 8);
 }
 
 static __inline int
-isonum_733(p)
-	u_char *p;
+isonum_733(u_char *p)
 {
 	return *p|(p[1] << 8)|(p[2] << 16)|(p[3] << 24);
 }
@@ -365,15 +356,13 @@ isonum_733(p)
 #if BYTE_ORDER == LITTLE_ENDIAN
 
 static __inline int
-isonum_723(p)
-	u_char *p
+isonum_723(u_char *p)
 {
 	return *(u_int16t *)p;
 }
 
 static __inline int
-isonum_733(p)
-	u_char *p;
+isonum_733(u_char *p)
 {
 	return *(u_int32t *)p;
 }
@@ -383,15 +372,13 @@ isonum_733(p)
 #if BYTE_ORDER == BIG_ENDIAN
 
 static __inline int
-isonum_723(p)
-	u_char *p
+isonum_723(u_char *p)
 {
 	return *(u_int16t *)(p + 2);
 }
 
 static __inline int
-isonum_733(p)
-	u_char *p;
+isonum_733(u_char *p)
 {
 	return *(u_int32t *)(p + 4);
 }
@@ -400,14 +387,21 @@ isonum_733(p)
 
 #endif /* UNALIGNED_ACCESS */
 
-int isofncmp __P((u_char *, int, u_char *, int));
-int ucsfncmp __P((u_int16_t *, int, u_int16_t *, int));
-void isofntrans __P((u_char *, int, u_char *, u_short *, int, int));
-void ucsfntrans __P((u_int16_t *, int, u_char *, u_short *, int, int));
-ino_t isodirino __P((struct iso_directory_record *, struct iso_mnt *));
-int attrcalcsize __P((struct attrlist *attrlist));
-void packattrblk __P((struct attrlist *alist, struct vnode *vp,
-					  void **attrbufptrptr, void **varbufptrptr));
+int isofncmp(u_char *fn, int fnlen, u_char *isofn, int isolen);
+int ucsfncmp(u_int16_t *, int, u_int16_t *, int);
+void isofntrans(u_char *infn, int infnlen, u_char *outfn, u_short *outfnlen,
+		int original, int assoc);
+void ucsfntrans(u_int16_t *, int, u_char *, u_short *, int, int);
+int attrcalcsize(struct attrlist *attrlist);
+struct iso_node;
+void packcommonattr(struct attrlist *alist, struct iso_node *ip,
+		    void **attrbufptrptr, void **varbufptrptr);
+void packdirattr(struct attrlist *alist, struct iso_node *ip,
+		 void **attrbufptrptr, void **varbufptrptr);
+void packfileattr(struct attrlist *alist, struct iso_node *ip,
+		  void **attrbufptrptr, void **varbufptrptr);
+void packattrblk(struct attrlist *alist, struct vnode *vp,
+				  void **attrbufptrptr, void **varbufptrptr);
 
 
 /*

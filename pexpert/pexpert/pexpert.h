@@ -1,24 +1,21 @@
 /*
- * Copyright (c) 2000 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2004 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -56,6 +53,8 @@ void PE_init_platform(
 
 void PE_init_kprintf(
 	boolean_t vm_initialized);
+
+extern int32_t gPESerialBaud;
 
 unsigned int PE_init_taproot(vm_offset_t *taddr);
 
@@ -109,8 +108,10 @@ void PE_install_interrupt_handler(
 	void *nub, int source,
         void *target, IOInterruptHandler handler, void *refCon);
 
-void kprintf(
-	const char *fmt, ...);
+#ifndef _FN_KPRINTF
+#define	_FN_KPRINTF
+void kprintf(const char *fmt, ...);
+#endif
 
 void init_display_putc(unsigned char *baseaddr, int rowbytes, int height);
 void display_putc(char c);
@@ -193,8 +194,13 @@ extern char * PE_boot_args(
 	void);
 
 extern boolean_t PE_parse_boot_arg(
-	char    *arg_string,
-	void    *arg_ptr);
+	const char	*arg_string,
+	void    	*arg_ptr);
+
+extern boolean_t PE_parse_boot_argn(
+	const char	*arg_string,
+	void    	*arg_ptr,
+	int			max_arg);
 
 enum {
     kPEOptionKey	= 0x3a,

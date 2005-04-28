@@ -1,24 +1,21 @@
 /*
- * Copyright (c) 2000 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2004 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -83,6 +80,12 @@
 #include <vm/vm_debug.h>
 #endif
 
+#if !MACH_VM_DEBUG
+#define __DEBUG_ONLY __unused
+#else /* !MACH_VM_DEBUG */
+#define __DEBUG_ONLY
+#endif /* !MACH_VM_DEBUG */
+
 /*
  *	Routine:	mach_vm_region_info [kernel call]
  *	Purpose:
@@ -99,11 +102,11 @@
 
 kern_return_t
 mach_vm_region_info(
-	vm_map_t		map,
-	vm_offset_t		address,
-	vm_info_region_t	*regionp,
-	vm_info_object_array_t	*objectsp,
-	mach_msg_type_number_t	*objectsCntp)
+	__DEBUG_ONLY vm_map_t			map,
+	__DEBUG_ONLY vm_offset_t		address,
+	__DEBUG_ONLY vm_info_region_t		*regionp,
+	__DEBUG_ONLY vm_info_object_array_t	*objectsp,
+	__DEBUG_ONLY mach_msg_type_number_t	*objectsCntp)
 {
 #if !MACH_VM_DEBUG
         return KERN_FAILURE;
@@ -133,7 +136,9 @@ mach_vm_region_info(
 		for (cmap = map;; cmap = nmap) {
 			/* cmap is read-locked */
 
-			if (!vm_map_lookup_entry(cmap, address, &entry)) {
+			if (!vm_map_lookup_entry(cmap, 
+				(vm_map_address_t)address, &entry)) {
+
 				entry = entry->vme_next;
 				if (entry == vm_map_to_entry(cmap)) {
 					vm_map_unlock_read(cmap);
@@ -226,10 +231,11 @@ mach_vm_region_info(
 					cobject->temporary;
 				vio->vio_alive =
 					cobject->alive;
-				vio->vio_lock_in_progress =
-					cobject->lock_in_progress;
-				vio->vio_lock_restart =
-					cobject->lock_restart;
+				vio->vio_purgable =
+					(cobject->purgable != VM_OBJECT_NONPURGABLE);
+				vio->vio_purgable_volatile =
+					(cobject->purgable == VM_OBJECT_PURGABLE_VOLATILE ||
+					 cobject->purgable == VM_OBJECT_PURGABLE_EMPTY);
 			}
 
 			used++;
@@ -254,12 +260,13 @@ mach_vm_region_info(
 			kmem_free(ipc_kernel_map, addr, size);
 		size = round_page_32(2 * used * sizeof(vm_info_object_t));
 
-		kr = vm_allocate(ipc_kernel_map, &addr, size, TRUE);
+		kr = vm_allocate(ipc_kernel_map, &addr, size, VM_FLAGS_ANYWHERE);
 		if (kr != KERN_SUCCESS)
 			return KERN_RESOURCE_SHORTAGE;
 
-		kr = vm_map_wire(ipc_kernel_map, addr, addr + size,
-				     VM_PROT_READ|VM_PROT_WRITE, FALSE);
+		kr = vm_map_wire(ipc_kernel_map, vm_map_trunc_page(addr),
+				 vm_map_round_page(addr + size),
+				 VM_PROT_READ|VM_PROT_WRITE, FALSE);
 		assert(kr == KERN_SUCCESS);
 	}
 
@@ -274,11 +281,12 @@ mach_vm_region_info(
 		vm_size_t size_used =
 			round_page_32(used * sizeof(vm_info_object_t));
 
-		kr = vm_map_unwire(ipc_kernel_map, addr, addr + size_used, FALSE);
+		kr = vm_map_unwire(ipc_kernel_map, vm_map_trunc_page(addr),
+				   vm_map_round_page(addr + size_used), FALSE);
 		assert(kr == KERN_SUCCESS);
 
-		kr = vm_map_copyin(ipc_kernel_map, addr, size_used,
-				   TRUE, &copy);
+		kr = vm_map_copyin(ipc_kernel_map, (vm_map_address_t)addr,
+				   (vm_map_size_t)size_used, TRUE, &copy);
 		assert(kr == KERN_SUCCESS);
 
 		if (size != size_used)
@@ -292,17 +300,18 @@ mach_vm_region_info(
 	return KERN_SUCCESS;
 #endif /* MACH_VM_DEBUG */
 }
+
 /*
  *  Temporary call for 64 bit data path interface transiotion
  */
 
 kern_return_t
 mach_vm_region_info_64(
-	vm_map_t		map,
-	vm_offset_t		address,
-	vm_info_region_64_t	*regionp,
-	vm_info_object_array_t	*objectsp,
-	mach_msg_type_number_t	*objectsCntp)
+	__DEBUG_ONLY vm_map_t			map,
+	__DEBUG_ONLY vm_offset_t		address,
+	__DEBUG_ONLY vm_info_region_64_t	*regionp,
+	__DEBUG_ONLY vm_info_object_array_t	*objectsp,
+	__DEBUG_ONLY mach_msg_type_number_t	*objectsCntp)
 {
 #if !MACH_VM_DEBUG
         return KERN_FAILURE;
@@ -425,10 +434,11 @@ mach_vm_region_info_64(
 					cobject->temporary;
 				vio->vio_alive =
 					cobject->alive;
-				vio->vio_lock_in_progress =
-					cobject->lock_in_progress;
-				vio->vio_lock_restart =
-					cobject->lock_restart;
+				vio->vio_purgable =
+					(cobject->purgable != VM_OBJECT_NONPURGABLE);
+				vio->vio_purgable_volatile =
+					(cobject->purgable == VM_OBJECT_PURGABLE_VOLATILE ||
+					 cobject->purgable == VM_OBJECT_PURGABLE_EMPTY);
 			}
 
 			used++;
@@ -453,12 +463,13 @@ mach_vm_region_info_64(
 			kmem_free(ipc_kernel_map, addr, size);
 		size = round_page_32(2 * used * sizeof(vm_info_object_t));
 
-		kr = vm_allocate(ipc_kernel_map, &addr, size, TRUE);
+		kr = vm_allocate(ipc_kernel_map, &addr, size, VM_FLAGS_ANYWHERE);
 		if (kr != KERN_SUCCESS)
 			return KERN_RESOURCE_SHORTAGE;
 
-		kr = vm_map_wire(ipc_kernel_map, addr, addr + size,
-				     VM_PROT_READ|VM_PROT_WRITE, FALSE);
+		kr = vm_map_wire(ipc_kernel_map, vm_map_trunc_page(addr),
+				 vm_map_round_page(addr + size),
+				 VM_PROT_READ|VM_PROT_WRITE, FALSE);
 		assert(kr == KERN_SUCCESS);
 	}
 
@@ -473,11 +484,12 @@ mach_vm_region_info_64(
 		vm_size_t size_used =
 			round_page_32(used * sizeof(vm_info_object_t));
 
-		kr = vm_map_unwire(ipc_kernel_map, addr, addr + size_used, FALSE);
+		kr = vm_map_unwire(ipc_kernel_map, vm_map_trunc_page(addr),
+				   vm_map_round_page(addr + size_used), FALSE);
 		assert(kr == KERN_SUCCESS);
 
-		kr = vm_map_copyin(ipc_kernel_map, addr, size_used,
-				   TRUE, &copy);
+		kr = vm_map_copyin(ipc_kernel_map, (vm_map_address_t)addr,
+				   (vm_map_size_t)size_used, TRUE, &copy);
 		assert(kr == KERN_SUCCESS);
 
 		if (size != size_used)
@@ -496,9 +508,9 @@ mach_vm_region_info_64(
  */
 kern_return_t
 vm_mapped_pages_info(
-	vm_map_t		map,
-	page_address_array_t	*pages,
-	mach_msg_type_number_t  *pages_count)
+	__DEBUG_ONLY vm_map_t			map,
+	__DEBUG_ONLY page_address_array_t	*pages,
+	__DEBUG_ONLY mach_msg_type_number_t	*pages_count)
 {
 #if !MACH_VM_DEBUG
         return KERN_FAILURE;
@@ -517,8 +529,9 @@ vm_mapped_pages_info(
 	size = round_page_32(size);
 
 	for (;;) {
-	    (void) vm_allocate(ipc_kernel_map, &addr, size, TRUE);
-	    (void) vm_map_unwire(ipc_kernel_map, addr, addr + size, FALSE);
+	    (void) vm_allocate(ipc_kernel_map, &addr, size, VM_FLAGS_ANYWHERE);
+	    (void) vm_map_unwire(ipc_kernel_map, vm_map_trunc_page(addr),
+				 vm_map_round_page(addr + size), FALSE);
 
 	    list = (page_address_array_t) addr;
 	    space = size / sizeof(vm_offset_t);
@@ -547,13 +560,12 @@ vm_mapped_pages_info(
 	else {
 	    *pages_count = actual;
 	    size_used = round_page_32(actual * sizeof(vm_offset_t));
-	    (void) vm_map_wire(ipc_kernel_map,
-				addr, addr + size, 
+	    (void) vm_map_wire(ipc_kernel_map, vm_map_trunc_page(addr),
+				vm_map_round_page(addr + size), 
 				VM_PROT_READ|VM_PROT_WRITE, FALSE);
-	    (void) vm_map_copyin(
-				ipc_kernel_map,
-				addr,
-				size_used,
+	    (void) vm_map_copyin(ipc_kernel_map,
+				(vm_map_address_t)addr,
+				(vm_map_size_t)size_used,
 				TRUE,
 				(vm_map_copy_t *)pages);
 	    if (size_used != size) {
@@ -581,15 +593,15 @@ vm_mapped_pages_info(
 
 kern_return_t
 host_virtual_physical_table_info(
-	host_t				host,
-	hash_info_bucket_array_t	*infop,
-	mach_msg_type_number_t 		*countp)
+	__DEBUG_ONLY host_t			host,
+	__DEBUG_ONLY hash_info_bucket_array_t	*infop,
+	__DEBUG_ONLY mach_msg_type_number_t 	*countp)
 {
 #if !MACH_VM_DEBUG
         return KERN_FAILURE;
 #else
 	vm_offset_t addr;
-	vm_size_t size;
+	vm_size_t size = 0;
 	hash_info_bucket_t *info;
 	unsigned int potential, actual;
 	kern_return_t kr;
@@ -638,8 +650,8 @@ host_virtual_physical_table_info(
 		if (used != size)
 			kmem_free(ipc_kernel_map, addr + used, size - used);
 
-		kr = vm_map_copyin(ipc_kernel_map, addr, used,
-				   TRUE, &copy);
+		kr = vm_map_copyin(ipc_kernel_map, (vm_map_address_t)addr,
+				   (vm_map_size_t)used, TRUE, &copy);
 		assert(kr == KERN_SUCCESS);
 
 		*infop = (hash_info_bucket_t *) copy;

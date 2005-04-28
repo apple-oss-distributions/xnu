@@ -3,22 +3,19 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -68,7 +65,6 @@
 #include <sys/sysctl.h>
 
 #include <net/if.h>
-#include <net/netisr.h>
 #include <net/route.h>
 #include <net/if_llc.h>
 #include <net/if_dl.h>
@@ -104,47 +100,16 @@ extern struct ifqueue pkintrq;
 
 extern u_char	etherbroadcastaddr[];
 #define senderr(e) do { error = (e); goto bad;} while (0)
-#define IFP2AC(IFP) ((struct arpcom *)IFP)
 
 /*
  * Perform common duties while attaching to interface list
  */
 
-
-/* 
-    IONetworkingFamily should call dlil_if_attach
-    ether_ifattach becomes obsolete, but remains for
-    temporary compatibility with third parties extensions
-*/
-void
-ether_ifattach(ifp)
-	register struct ifnet *ifp;
-{
-	boolean_t funnel_state;
-
-	funnel_state = thread_funnel_set(network_flock, TRUE);
-
-	ifp->if_name = "en";
-	ifp->if_family = APPLE_IF_FAM_ETHERNET;
-	ifp->if_type = IFT_ETHER;
-	ifp->if_addrlen = 6;
-	ifp->if_hdrlen = 14;
-	ifp->if_mtu = ETHERMTU;
-	if (ifp->if_baudrate == 0)
-	    ifp->if_baudrate = 10000000;
-
-	dlil_if_attach(ifp);
-	(void) thread_funnel_set(network_flock, funnel_state);
-}
-
-SYSCTL_DECL(_net_link);
-SYSCTL_NODE(_net_link, IFT_ETHER, ether, CTLFLAG_RW, 0, "Ethernet");
-
 int
-ether_resolvemulti(ifp, llsa, sa)
-	struct ifnet *ifp;
-	struct sockaddr **llsa;
-	struct sockaddr *sa;
+ether_resolvemulti(
+	struct ifnet *ifp,
+	struct sockaddr **llsa,
+	struct sockaddr *sa)
 {
 	struct sockaddr_dl *sdl;
 	struct sockaddr_in *sin;
@@ -234,185 +199,6 @@ ether_resolvemulti(ifp, llsa, sa)
 	}
 }
 
-
-
-
-
-u_char	ether_ipmulticast_min[6] = { 0x01, 0x00, 0x5e, 0x00, 0x00, 0x00 };
-u_char	ether_ipmulticast_max[6] = { 0x01, 0x00, 0x5e, 0x7f, 0xff, 0xff };
-/*
- * Add an Ethernet multicast address or range of addresses to the list for a
- * given interface.
- */
-int
-ether_addmulti(ifr, ac)
-	struct ifreq *ifr;
-	register struct arpcom *ac;
-{
-	register struct ether_multi *enm;
-	struct sockaddr_in *sin;
-	u_char addrlo[6];
-	u_char addrhi[6];
-	int s = splimp();
-
-	switch (ifr->ifr_addr.sa_family) {
-
-	case AF_UNSPEC:
-		bcopy(ifr->ifr_addr.sa_data, addrlo, 6);
-		bcopy(addrlo, addrhi, 6);
-		break;
-
-#if INET
-	case AF_INET:
-		sin = (struct sockaddr_in *)&(ifr->ifr_addr);
-		if (sin->sin_addr.s_addr == INADDR_ANY) {
-			/*
-			 * An IP address of INADDR_ANY means listen to all
-			 * of the Ethernet multicast addresses used for IP.
-			 * (This is for the sake of IP multicast routers.)
-			 */
-			bcopy(ether_ipmulticast_min, addrlo, 6);
-			bcopy(ether_ipmulticast_max, addrhi, 6);
-		}
-		else {
-			ETHER_MAP_IP_MULTICAST(&sin->sin_addr, addrlo);
-			bcopy(addrlo, addrhi, 6);
-		}
-		break;
-#endif
-
-	default:
-		splx(s);
-		return (EAFNOSUPPORT);
-	}
-
-	/*
-	 * Verify that we have valid Ethernet multicast addresses.
-	 */
-	if ((addrlo[0] & 0x01) != 1 || (addrhi[0] & 0x01) != 1) {
-		splx(s);
-		return (EINVAL);
-	}
-	/*
-	 * See if the address range is already in the list.
-	 */
-	ETHER_LOOKUP_MULTI(addrlo, addrhi, ac, enm);
-	if (enm != NULL) {
-		/*
-		 * Found it; just increment the reference count.
-		 */
-		++enm->enm_refcount;
-		splx(s);
-		return (0);
-	}
-	/*
-	 * New address or range; malloc a new multicast record
-	 * and link it into the interface's multicast list.
-	 */
-	enm = (struct ether_multi *)_MALLOC(sizeof(*enm), M_IFMADDR, M_WAITOK);
-	if (enm == NULL) {
-		splx(s);
-		return (ENOBUFS);
-	}
-	bcopy(addrlo, enm->enm_addrlo, 6);
-	bcopy(addrhi, enm->enm_addrhi, 6);
-	enm->enm_ac = ac;
-	enm->enm_refcount = 1;
-	enm->enm_next = ac->ac_multiaddrs;
-	ac->ac_multiaddrs = enm;
-	splx(s);
-	/*
-	 * Return ENETRESET to inform the driver that the list has changed
-	 * and its reception filter should be adjusted accordingly.
-	 */
-	return (ENETRESET);
-}
-
-/*
- * Delete a multicast address record.
- */
-int
-ether_delmulti(ifr, ac, ret_mca)
-	struct ifreq *ifr;
-	register struct arpcom *ac;
-	struct ether_addr * ret_mca;
-{
-	register struct ether_multi *enm;
-	register struct ether_multi **p;
-	struct sockaddr_in *sin;
-	u_char addrlo[6];
-	u_char addrhi[6];
-	int s = splimp();
-
-	switch (ifr->ifr_addr.sa_family) {
-
-	case AF_UNSPEC:
-		bcopy(ifr->ifr_addr.sa_data, addrlo, 6);
-		bcopy(addrlo, addrhi, 6);
-		break;
-
-#if INET
-	case AF_INET:
-		sin = (struct sockaddr_in *)&(ifr->ifr_addr);
-		if (sin->sin_addr.s_addr == INADDR_ANY) {
-			/*
-			 * An IP address of INADDR_ANY means stop listening
-			 * to the range of Ethernet multicast addresses used
-			 * for IP.
-			 */
-			bcopy(ether_ipmulticast_min, addrlo, 6);
-			bcopy(ether_ipmulticast_max, addrhi, 6);
-		}
-		else {
-			ETHER_MAP_IP_MULTICAST(&sin->sin_addr, addrlo);
-			bcopy(addrlo, addrhi, 6);
-		}
-		break;
-#endif
-
-	default:
-		splx(s);
-		return (EAFNOSUPPORT);
-	}
-
-	/*
-	 * Look up the address in our list.
-	 */
-	ETHER_LOOKUP_MULTI(addrlo, addrhi, ac, enm);
-	if (enm == NULL) {
-		splx(s);
-		return (ENXIO);
-	}
-	if (--enm->enm_refcount != 0) {
-		/*
-		 * Still some claims to this record.
-		 */
-		splx(s);
-		return (0);
-	}
-
-	/* save the low and high address of the range before deletion */
-	if (ret_mca) {
-	   	*ret_mca	= *((struct ether_addr *)addrlo);
-	   	*(ret_mca + 1)	= *((struct ether_addr *)addrhi);
-	}
-
-	/*
-	 * No remaining claims to this record; unlink and free it.
-	 */
-	for (p = &enm->enm_ac->ac_multiaddrs;
-	     *p != enm;
-	     p = &(*p)->enm_next)
-		continue;
-	*p = (*p)->enm_next;
-	FREE(enm, M_IFMADDR);
-	splx(s);
-	/*
-	 * Return ENETRESET to inform the driver that the list has changed
-	 * and its reception filter should be adjusted accordingly.
-	 */
-	return (ENETRESET);
-}
 
 /*
  * Convert Ethernet address to printable (loggable) representation.

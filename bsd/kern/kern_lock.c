@@ -3,22 +3,19 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -63,7 +60,7 @@
  */
 
 #include <sys/param.h>
-#include <sys/proc.h>
+#include <sys/proc_internal.h>
 #include <sys/lock.h>
 #include <kern/cpu_number.h>
 #include <kern/thread.h>
@@ -94,11 +91,9 @@ int lock_wait_time = 100;
 		if (lock_wait_time > 0) {				\
 			int i;						\
 									\
-			simple_unlock(&lkp->lk_interlock);		\
 			for (i = lock_wait_time; i > 0; i--)		\
 				if (!(wanted))				\
 					break;				\
-			simple_lock(&lkp->lk_interlock);		\
 		}							\
 		if (!(wanted))						\
 			break;
@@ -120,10 +115,8 @@ int lock_wait_time = 100;
 	PAUSE(lkp, wanted);						\
 	for (error = 0; wanted; ) {					\
 		(lkp)->lk_waitcount++;					\
-		simple_unlock(&(lkp)->lk_interlock);			\
 		error = tsleep((void *)lkp, (lkp)->lk_prio,		\
 		    (lkp)->lk_wmesg, (lkp)->lk_timo);			\
-		simple_lock(&(lkp)->lk_interlock);			\
 		(lkp)->lk_waitcount--;					\
 		if (error)						\
 			break;						\
@@ -140,13 +133,12 @@ void
 lockinit(lkp, prio, wmesg, timo, flags)
 	struct lock__bsd__ *lkp;
 	int prio;
-	char *wmesg;
+	const char *wmesg;
 	int timo;
 	int flags;
 {
 
 	bzero(lkp, sizeof(struct lock__bsd__));
-	simple_lock_init(&lkp->lk_interlock);
 	lkp->lk_flags = flags & LK_EXTFLG_MASK;
 	lkp->lk_prio = prio;
 	lkp->lk_timo = timo;
@@ -164,12 +156,10 @@ lockstatus(lkp)
 {
 	int lock_type = 0;
 
-	simple_lock(&lkp->lk_interlock);
 	if (lkp->lk_exclusivecount != 0)
 		lock_type = LK_EXCLUSIVE;
 	else if (lkp->lk_sharecount != 0)
 		lock_type = LK_SHARED;
-	simple_unlock(&lkp->lk_interlock);
 	return (lock_type);
 }
 
@@ -184,7 +174,7 @@ int
 lockmgr(lkp, flags, interlkp, p)
 	struct lock__bsd__ *lkp;
 	u_int flags;
-	simple_lock_t interlkp;
+	void * interlkp;
 	struct proc *p;
 {
 	int error;
@@ -192,14 +182,11 @@ lockmgr(lkp, flags, interlkp, p)
 	int extflags;
 	void *self;
 
-	error = 0; self = current_act();
+	error = 0; self = current_thread();
 	if (p)
 		pid = p->p_pid;
 	else
 		pid = LK_KERNPROC;
-	simple_lock(&lkp->lk_interlock);
-	if (flags & LK_INTERLOCK)
-		simple_unlock(interlkp);
 	extflags = (flags | lkp->lk_flags) & LK_EXTFLG_MASK;
 #if 0
 	/*
@@ -432,13 +419,11 @@ lockmgr(lkp, flags, interlkp, p)
 		     (LK_HAVE_EXCL | LK_WANT_EXCL | LK_WANT_UPGRADE)) ||
 		     lkp->lk_sharecount != 0 || lkp->lk_waitcount != 0); ) {
 			lkp->lk_flags |= LK_WAITDRAIN;
-			simple_unlock(&lkp->lk_interlock);
 			if (error = tsleep((void *)&lkp->lk_flags, lkp->lk_prio,
 			    lkp->lk_wmesg, lkp->lk_timo))
 				return (error);
 			if ((extflags) & LK_SLEEPFAIL)
 				return (ENOLCK);
-			simple_lock(&lkp->lk_interlock);
 		}
 		lkp->lk_flags |= LK_DRAINING | LK_HAVE_EXCL;
 		lkp->lk_lockholder = pid;
@@ -448,7 +433,6 @@ lockmgr(lkp, flags, interlkp, p)
 		break;
 
 	default:
-		simple_unlock(&lkp->lk_interlock);
 		panic("lockmgr: unknown locktype request %d",
 		    flags & LK_TYPE_MASK);
 		/* NOTREACHED */
@@ -459,7 +443,6 @@ lockmgr(lkp, flags, interlkp, p)
 		lkp->lk_flags &= ~LK_WAITDRAIN;
 		wakeup((void *)&lkp->lk_flags);
 	}
-	simple_unlock(&lkp->lk_interlock);
 	return (error);
 }
 
@@ -467,6 +450,7 @@ lockmgr(lkp, flags, interlkp, p)
  * Print out information about state of a lock. Used by VOP_PRINT
  * routines to display ststus about contained locks.
  */
+void
 lockmgr_printinfo(lkp)
 	struct lock__bsd__ *lkp;
 {

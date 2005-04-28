@@ -1,24 +1,21 @@
 /*
- * Copyright (c) 2000 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2005 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -63,51 +60,68 @@
 #ifndef _SYS_DOMAIN_H_
 #define _SYS_DOMAIN_H_
 
-#include <sys/appleapiopts.h>
+#ifdef PRIVATE
 
+#include <sys/appleapiopts.h>
+#ifdef KERNEL
+#include <kern/locks.h>
+#endif /* KERNEL */
 /*
  * Structure per communications domain.
  */
 
+#include <sys/cdefs.h>
+
 /*
  * Forward structure declarations for function prototypes [sic].
  */
-#ifdef __APPLE_API_UNSTABLE
 struct	mbuf;
+#define DOM_REENTRANT	0x01
+
+#if __DARWIN_ALIGN_POWER
+#pragma options align=power
+#endif
 
 struct	domain {
 	int	dom_family;		/* AF_xxx */
 	char	*dom_name;
-	void	(*dom_init)		/* initialize domain data structures */
-		__P((void));
-	int	(*dom_externalize)	/* externalize access rights */
-		__P((struct mbuf *));
-	void	(*dom_dispose)		/* dispose of internalized rights */
-		__P((struct mbuf *));
+	void	(*dom_init)(void);	/* initialize domain data structures */
+	int	(*dom_externalize)(struct mbuf *);
+					/* externalize access rights */
+	void	(*dom_dispose)(struct mbuf *);
+					/* dispose of internalized rights */
 	struct	protosw *dom_protosw;	/* Chain of protosw's for AF */
 	struct	domain *dom_next;
-	int	(*dom_rtattach)		/* initialize routing table */
-		__P((void **, int));
+	int	(*dom_rtattach)(void **, int);
+					/* initialize routing table */
 	int	dom_rtoffset;		/* an arg to rtattach, in bits */
 	int	dom_maxrtkey;		/* for routing layer */
 	int	dom_protohdrlen;	/* Let the protocol tell us */
 	int	dom_refs;		/* # socreates outstanding */
-	u_long	reserved[4];
+#ifdef _KERN_LOCKS_H_
+	lck_mtx_t 	*dom_mtx;		/* domain global mutex */
+#else
+	void 	*dom_mtx;		/* domain global mutex */
+#endif
+	u_long		dom_flags;
+	u_long		reserved[2];
 };
+
+#if __DARWIN_ALIGN_POWER
+#pragma options align=reset
+#endif
 
 #ifdef KERNEL
 extern struct	domain *domains;
 extern struct	domain localdomain;
+
+__BEGIN_DECLS
 extern void	net_add_domain(struct domain *dp);
 extern int	net_del_domain(struct domain *);
+__END_DECLS
 
 #define DOMAIN_SET(domain_set) 
 
-/*
-#define DOMAIN_SET(name) \
-	DATA_SET(domain_set, name ## domain)
-*/
-
-#endif
-#endif /* __APPLE_API_UNSTABLE */
+#endif /* KERNEL */
+#endif /* PRIVATE */
 #endif	/* _SYS_DOMAIN_H_ */

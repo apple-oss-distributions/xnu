@@ -1,24 +1,21 @@
 /*
- * Copyright (c) 2000 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2004 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -106,7 +103,7 @@ routine	host_kernel_version(
  */
 routine host_page_size(
 		host		: host_t;
-	out	page_size	: vm_size_t);
+	out	out_page_size	: vm_size_t);
 
 /*
  *	Allow pagers to create named entries that point to un-mapped
@@ -127,10 +124,10 @@ routine mach_memory_object_memory_entry(
  *	The returned data is an OOL array of processor info.
  */
 routine host_processor_info(
-		host		: host_t;
-                flavor          : processor_flavor_t;
-	out	processor_count : natural_t;
-        out     processor_info  : processor_info_array_t);
+		host			: host_t;
+                flavor          	: processor_flavor_t;
+	out	out_processor_count 	: natural_t;
+        out     out_processor_info  	: processor_info_array_t);
 
 /*
  * 	Return host IO master access port
@@ -241,3 +238,9 @@ routine host_request_notification(
 		host		: host_t;
 		notify_type	: host_flavor_t;
 		notify_port	: mach_port_make_send_once_t);
+
+routine host_lockgroup_info(
+		host		: host_t;
+	out	lockgroup_info	: lockgroup_info_array_t,
+					Dealloc);
+

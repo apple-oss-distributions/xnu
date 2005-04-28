@@ -3,22 +3,19 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -82,6 +79,12 @@ enum {
 #define kIOClientPrivilegeAdministrator	"root"
 #define kIOClientPrivilegeLocalUser	"local"
 
+/*!
+    @class IOUserClient
+    @abstract   Provides a basis for communication between client applications and I/O Kit objects.
+*/
+
+
 class IOUserClient : public IOService
 {
     OSDeclareAbstractStructors(IOUserClient)
@@ -89,11 +92,12 @@ class IOUserClient : public IOService
 protected:
 /*! @struct ExpansionData
     @discussion This structure will be used to expand the capablilties of this class in the future.
-    */    
+*/    
     struct ExpansionData { };
 
 /*! @var reserved
-    Reserved for future use.  (Internal use only)  */
+    Reserved for future use.  (Internal use only) 
+*/
     ExpansionData * reserved;
 
 public:
@@ -165,12 +169,21 @@ public:
                                     task_t task,
                                     IOOptionBits mapFlags = kIOMapAnywhere,
 				    IOVirtualAddress atAddress = 0 );
+
+    /*!
+        @function removeMappingForDescriptor
+        Remove the first mapping created from the memory descriptor returned by clientMemoryForType() from IOUserClient's list of mappings. If such a mapping exists, it is retained and the reference currently held by IOUserClient is returned to the caller.
+        @param memory The memory descriptor instance previously returned by the implementation of clientMemoryForType().
+        @result A reference to the first IOMemoryMap instance found in the list of mappings created by IOUserClient from that passed memory descriptor is returned, or zero if none exist. The caller should release this reference.
+    */
+    IOMemoryMap * removeMappingForDescriptor(IOMemoryDescriptor * memory);
+
     /*!
         @function exportObjectToClient
         Make an arbitrary OSObject available to the client task.
-        @param task The task
-        @param obj The object we want to export to the client
-        @param clientObj returned value is the client's port name.
+        @param task The task.
+        @param obj The object we want to export to the client.
+        @param clientObj Returned value is the client's port name.
     */
     virtual IOReturn exportObjectToClient(task_t task,
 				OSObject *obj, io_object_t *clientObj);

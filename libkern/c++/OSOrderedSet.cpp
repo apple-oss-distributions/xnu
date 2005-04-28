@@ -3,26 +3,24 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
 
+#include <libkern/c++/OSDictionary.h>
 #include <libkern/c++/OSOrderedSet.h>
 #include <libkern/c++/OSLib.h>
 
@@ -52,6 +50,8 @@ struct _Element {
 //    unsigned int	pri;
 };
 
+#define EXT_CAST(obj) \
+    reinterpret_cast<OSObject *>(const_cast<OSMetaClassBase *>(obj))
 
 bool OSOrderedSet::
 initWithCapacity(unsigned int inCapacity,
@@ -95,6 +95,7 @@ withCapacity(unsigned int capacity,
 
 void OSOrderedSet::free()
 {
+    (void) super::setOptions(0, kImmutable);
     flushCollection();
 
     if (array) {
@@ -222,15 +223,14 @@ void OSOrderedSet::removeObject(const OSMetaClassBase *anObject)
         if( deleted)
             array[i-1] = array[i];
         else if( (array[i].obj == anObject)) {
-            array[i].obj->taggedRelease(OSTypeID(OSCollection));
             deleted = true;
+	    haveUpdated();	// Pity we can't flush the log
+            array[i].obj->taggedRelease(OSTypeID(OSCollection));
         }
     }
 
-    if( deleted) {
-        count--;
-        haveUpdated();
-    }
+    if (deleted)
+	count--;
 }
 
 bool OSOrderedSet::containsObject(const OSMetaClassBase *anObject) const
@@ -343,3 +343,78 @@ getNextObjectForIterator(void *inIterator, OSObject **ret) const
     return (*ret != 0);
 }
 
+
+unsigned OSOrderedSet::setOptions(unsigned options, unsigned mask, void *)
+{
+    unsigned old = super::setOptions(options, mask);
+    if ((old ^ options) & mask) {
+
+	// Value changed need to recurse over all of the child collections
+	for ( unsigned i = 0; i < count; i++ ) {
+	    OSCollection *coll = OSDynamicCast(OSCollection, array[i].obj);
+	    if (coll)
+		coll->setOptions(options, mask);
+	}
+    }
+
+    return old;
+}
+
+OSCollection * OSOrderedSet::copyCollection(OSDictionary *cycleDict)
+{
+    bool allocDict = !cycleDict;
+    OSCollection *ret = 0;
+    OSOrderedSet *newSet = 0;
+
+    if (allocDict) {
+	cycleDict = OSDictionary::withCapacity(16);
+	if (!cycleDict)
+	    return 0;
+    }
+
+    do {
+	// Check for a cycle
+	ret = super::copyCollection(cycleDict);
+	if (ret)
+	    continue;
+	
+	// Duplicate the set with no contents
+	newSet = OSOrderedSet::withCapacity(capacity, ordering, orderingRef);
+	if (!newSet)
+	    continue;
+
+	// Insert object into cycle Dictionary
+	cycleDict->setObject((const OSSymbol *) this, newSet);
+
+	newSet->capacityIncrement = capacityIncrement;
+
+	// Now copy over the contents to the new duplicate
+	for (unsigned int i = 0; i < count; i++) {
+	    OSObject *obj = EXT_CAST(array[i].obj);
+	    OSCollection *coll = OSDynamicCast(OSCollection, obj);
+	    if (coll) {
+		OSCollection *newColl = coll->copyCollection(cycleDict);
+		if (newColl) {
+		    obj = newColl;	// Rely on cycleDict ref for a bit
+		    newColl->release();
+		}
+		else
+		    goto abortCopy;
+	    };
+	    newSet->setLastObject(obj);
+	};
+
+	ret = newSet;
+	newSet = 0;
+
+    } while (false);
+
+abortCopy:
+    if (newSet)
+	newSet->release();
+
+    if (allocDict)
+	cycleDict->release();
+
+    return ret;
+}

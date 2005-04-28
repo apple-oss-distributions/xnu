@@ -3,22 +3,19 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -42,18 +39,21 @@ extern "C" {
 typedef	kern_return_t		IOReturn;
 
 #ifndef sys_iokit
-#define sys_iokit                    err_system(0x38)
+#define sys_iokit                         err_system(0x38)
 #endif /* sys_iokit */
-#define sub_iokit_common             err_sub(0)
-#define sub_iokit_usb                err_sub(1)
-#define sub_iokit_firewire           err_sub(2)
-#define sub_iokit_block_storage      err_sub(4)
-#define sub_iokit_graphics           err_sub(5)
-#define sub_iokit_bluetooth          err_sub(8)
-#define sub_iokit_pmu                err_sub(9)
-#define sub_iokit_reserved           err_sub(-1)
-#define	iokit_common_err(return)     (sys_iokit|sub_iokit_common|return)
-#define	iokit_family_err(sub,return) (sys_iokit|sub|return)
+#define sub_iokit_common                  err_sub(0)
+#define sub_iokit_usb                     err_sub(1)
+#define sub_iokit_firewire                err_sub(2)
+#define sub_iokit_block_storage           err_sub(4)
+#define sub_iokit_graphics                err_sub(5)
+#define sub_iokit_bluetooth               err_sub(8)
+#define sub_iokit_pmu                     err_sub(9)
+#define sub_iokit_vendor_specific         err_sub(-2)
+#define sub_iokit_reserved                err_sub(-1)
+
+#define	iokit_common_err(return)          (sys_iokit|sub_iokit_common|return)
+#define	iokit_family_err(sub,return)      (sys_iokit|sub|return)
+#define iokit_vendor_specific_err(return) (sys_iokit|sub_iokit_vendor_specific|return)
 
 #define kIOReturnSuccess         KERN_SUCCESS            // OK
 #define kIOReturnError           iokit_common_err(0x2bc) // general error 	

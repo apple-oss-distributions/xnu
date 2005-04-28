@@ -1,33 +1,34 @@
 /*
- * Copyright (c) 2000 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2004 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
 #include <string.h>
 
+#include <mach/mach_types.h>
+
+#include <kern/kern_types.h>
 #include <kern/queue.h>
 #include <kern/kalloc.h>
 #include <kern/lock.h>
 #include <kern/assert.h> 
+
 #include <vm/vm_kern.h>
 
 #include "libsa/malloc.h"
@@ -44,8 +45,8 @@ typedef struct malloc_block {
 
 	struct malloc_block	*malFwd;
 	struct malloc_block	*malBwd;
+	void			*malActl;
 	unsigned int		malSize;
-	unsigned int		malActl;
 } malloc_block;
 
 static malloc_block malAnchor = {&malAnchor, &malAnchor, 0, 0};
@@ -71,7 +72,7 @@ void * malloc(size_t size) {
 	
 	rmem = (nmem + 15) & -16;					/* Round to 16 byte boundary */
 	amem = (malloc_block *)rmem;				/* Point to the block */
-	amem->malActl = (unsigned int)nmem;			/* Set the actual address */
+	amem->malActl = nmem;					/* Set the actual address */
 	amem->malSize = nsize;						/* Size */
 	
 	mutex_lock(malloc_lock);
@@ -126,7 +127,7 @@ void free(void * address) {
 __private_extern__ void
 malloc_init(void)
 {
-    malloc_lock = mutex_alloc(ETAP_IO_AHA);
+    malloc_lock = mutex_alloc(0);
     malInited = 1;
 }
 
@@ -145,13 +146,13 @@ void malloc_reset(void) {
 
  	mutex_lock(malloc_lock);
 	
-	amem = malAnchor.malFwd;					/* Get the first one */
+	amem = malAnchor.malFwd;				/* Get the first one */
 	
-	while(amem != &malAnchor) {					/* Go until we hit the anchor */
+	while(amem != &malAnchor) {				/* Go until we hit the anchor */
 	
-		bmem = amem->malFwd;					/* Next one */
- 		kfree(amem->malActl, amem->malSize);	/* Toss it */
- 		amem = bmem;							/* Skip to it */
+		bmem = amem->malFwd;				/* Next one */
+ 		kfree(amem->malActl, amem->malSize);		/* Toss it */
+ 		amem = bmem;					/* Skip to it */
 	
 	} 
 

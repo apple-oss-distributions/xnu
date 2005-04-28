@@ -3,22 +3,19 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -70,11 +67,13 @@
 #include <sys/domain.h>
 #endif
 #include <sys/proc.h>
+#include <sys/kauth.h>
 #include <sys/socket.h>
 #include <sys/socketvar.h>
 #include <sys/protosw.h>
 #include <sys/random.h>
 #include <sys/syslog.h>
+#include <kern/locks.h>
 
 
 
@@ -123,10 +122,12 @@
 
 #define DBG_FNC_TCP_CLOSE	NETDBG_CODE(DBG_NETTCP, ((5 << 8) | 2))
 
+extern int tcp_lq_overflow;
 
 /* temporary: for testing */
 #if IPSEC
 extern int ipsec_bypass;
+extern lck_mtx_t *sadb_mutex;
 #endif
 
 int 	tcp_mssdflt = TCP_MSS;
@@ -140,6 +141,35 @@ SYSCTL_INT(_net_inet_tcp, TCPCTL_V6MSSDFLT, v6mssdflt,
 	"Default TCP Maximum Segment Size for IPv6");
 #endif
 
+/*
+ * Minimum MSS we accept and use. This prevents DoS attacks where
+ * we are forced to a ridiculous low MSS like 20 and send hundreds
+ * of packets instead of one. The effect scales with the available
+ * bandwidth and quickly saturates the CPU and network interface
+ * with packet generation and sending. Set to zero to disable MINMSS
+ * checking. This setting prevents us from sending too small packets.
+ */
+int	tcp_minmss = TCP_MINMSS;
+SYSCTL_INT(_net_inet_tcp, OID_AUTO, minmss, CTLFLAG_RW,
+    &tcp_minmss , 0, "Minmum TCP Maximum Segment Size");
+
+/*
+ * Number of TCP segments per second we accept from remote host
+ * before we start to calculate average segment size. If average
+ * segment size drops below the minimum TCP MSS we assume a DoS
+ * attack and reset+drop the connection. Care has to be taken not to
+ * set this value too small to not kill interactive type connections
+ * (telnet, SSH) which send many small packets.
+ */
+#ifdef FIX_WORKAROUND_FOR_3894301
+__private_extern__ int     tcp_minmssoverload = TCP_MINMSSOVERLOAD;
+#else
+__private_extern__ int     tcp_minmssoverload = 0;
+#endif
+SYSCTL_INT(_net_inet_tcp, OID_AUTO, minmssoverload, CTLFLAG_RW,
+    &tcp_minmssoverload , 0, "Number of TCP Segments per Second allowed to"
+    "be under the MINMSS Size");
+
 static int	tcp_do_rfc1323 = 1;
 SYSCTL_INT(_net_inet_tcp, TCPCTL_DO_RFC1323, rfc1323, CTLFLAG_RW, 
     &tcp_do_rfc1323 , 0, "Enable rfc1323 (high performance TCP) extensions");
@@ -152,7 +182,7 @@ static int	tcp_tcbhashsize = 0;
 SYSCTL_INT(_net_inet_tcp, OID_AUTO, tcbhashsize, CTLFLAG_RD,
      &tcp_tcbhashsize, 0, "Size of TCP control-block hashtable");
 
-static int	do_tcpdrain = 1;
+static int	do_tcpdrain = 0;
 SYSCTL_INT(_net_inet_tcp, OID_AUTO, do_tcpdrain, CTLFLAG_RW, &do_tcpdrain, 0,
      "Enable tcp_drain routine for extra help when low on mbufs");
 
@@ -171,8 +201,8 @@ static int	tcp_isn_reseed_interval = 0;
 SYSCTL_INT(_net_inet_tcp, OID_AUTO, isn_reseed_interval, CTLFLAG_RW,
     &tcp_isn_reseed_interval, 0, "Seconds between reseeding of ISN secret");
 
-static void	tcp_cleartaocache __P((void));
-static void	tcp_notify __P((struct inpcb *, int));
+static void	tcp_cleartaocache(void);
+static void	tcp_notify(struct inpcb *, int);
 
 /*
  * Target size of TCP PCB hash tables. Must be a power of two.
@@ -228,7 +258,7 @@ int  get_tcp_str_size()
 	return sizeof(struct tcpcb);
 }
 
-int	tcp_freeq __P((struct tcpcb *tp));
+int	tcp_freeq(struct tcpcb *tp);
 
 
 /*
@@ -240,6 +270,7 @@ tcp_init()
 	int hashsize = TCBHASHSIZE;
 	vm_size_t       str_size;
 	int i;
+    	struct inpcbinfo *pcbinfo;
 	
 	tcp_ccgen = 1;
 	tcp_cleartaocache();
@@ -251,11 +282,12 @@ tcp_init()
 	tcp_maxpersistidle = TCPTV_KEEP_IDLE;
 	tcp_msl = TCPTV_MSL;
 	read_random(&tcp_now, sizeof(tcp_now));
-	tcp_now  = tcp_now & 0x7fffffffffffffff; /* Starts tcp internal 500ms clock at a random value */
+	tcp_now  = tcp_now & 0x7fffffff; /* Starts tcp internal 500ms clock at a random value */
 
 
 	LIST_INIT(&tcb);
 	tcbinfo.listhead = &tcb;
+	pcbinfo = &tcbinfo;
 #ifndef __APPLE__
 	TUNABLE_INT_FETCH("net.inet.tcp.tcbhashsize", &hashsize);
 #endif
@@ -275,6 +307,13 @@ tcp_init()
 	tcbinfo.ipi_zone = zinit("tcpcb", sizeof(struct inp_tp), maxsockets,
 				 ZONE_INTERRUPT, 0);
 #endif
+
+	tcp_reass_maxseg = nmbclusters / 16;
+#ifndef __APPLE__
+	TUNABLE_INT_FETCH("net.inet.tcp.reass.maxsegments",
+	    &tcp_reass_maxseg);
+#endif
+
 #if INET6
 #define TCP_MINPROTOHDR (sizeof(struct ip6_hdr) + sizeof(struct tcphdr))
 #else /* INET6 */
@@ -285,10 +324,29 @@ tcp_init()
 	if (max_linkhdr + TCP_MINPROTOHDR > MHLEN)
 		panic("tcp_init");
 #undef TCP_MINPROTOHDR
-	tcbinfo.last_pcb = 0;
 	dummy_tcb.t_state = TCP_NSTATES;
 	dummy_tcb.t_flags = 0;
 	tcbinfo.dummy_cb = (caddr_t) &dummy_tcb;
+
+        /*
+	 * allocate lock group attribute and group for tcp pcb mutexes
+	 */
+     pcbinfo->mtx_grp_attr = lck_grp_attr_alloc_init();
+	lck_grp_attr_setdefault(pcbinfo->mtx_grp_attr);
+	pcbinfo->mtx_grp = lck_grp_alloc_init("tcppcb", pcbinfo->mtx_grp_attr);
+		
+	/*
+	 * allocate the lock attribute for tcp pcb mutexes
+	 */
+	pcbinfo->mtx_attr = lck_attr_alloc_init();
+	lck_attr_setdefault(pcbinfo->mtx_attr);
+
+	if ((pcbinfo->mtx = lck_rw_alloc_init(pcbinfo->mtx_grp, pcbinfo->mtx_attr)) == NULL) {
+		printf("tcp_init: mutex not alloced!\n");
+		return;	/* pretty much dead if this fails... */
+	}
+
+
 	in_pcb_nat_init(&tcbinfo, AF_INET, IPPROTO_TCP, SOCK_STREAM);
 
 	delack_bitmask = _MALLOC((4 * hashsize)/32, M_PCB, M_WAITOK);
@@ -514,7 +572,7 @@ tcp_respond(tp, ipgen, th, m, ack, seq, flags)
       }
 	m->m_len = tlen;
 	m->m_pkthdr.len = tlen;
-	m->m_pkthdr.rcvif = (struct ifnet *) 0;
+	m->m_pkthdr.rcvif = 0;
 	nth->th_seq = htonl(seq);
 	nth->th_ack = htonl(ack);
 	nth->th_x2 = 0;
@@ -555,7 +613,7 @@ tcp_respond(tp, ipgen, th, m, ack, seq, flags)
 #endif
 #if INET6
 	if (isipv6) {
-		(void)ip6_output(m, NULL, ro6, ipflags, NULL, NULL);
+		(void)ip6_output(m, NULL, ro6, ipflags, NULL, NULL, 0);
 		if (ro6 == &sro6 && ro6->ro_rt) {
 			rtfree(ro6->ro_rt);
 			ro6->ro_rt = NULL;
@@ -563,7 +621,7 @@ tcp_respond(tp, ipgen, th, m, ack, seq, flags)
 	} else
 #endif /* INET6 */
 	{
-		(void) ip_output(m, NULL, ro, ipflags, NULL);
+		(void) ip_output_list(m, 0, NULL, ro, ipflags, NULL);
 		if (ro == &sro && ro->ro_rt) {
 			rtfree(ro->ro_rt);
 			ro->ro_rt = NULL;
@@ -692,6 +750,9 @@ tcp_close(tp)
 #endif /* INET6 */
 	register struct rtentry *rt;
 	int dosavessthresh;
+
+	if ( inp->inp_ppcb == NULL) /* tcp_close was called previously, bail */
+		return;
 
 #ifndef __APPLE__
 	/*
@@ -839,7 +900,7 @@ tcp_close(tp)
 		 * mark route for deletion if no information is
 		 * cached.
 		 */
-		if ((tp->t_flags & TF_LQ_OVERFLOW) &&
+		if ((tp->t_flags & TF_LQ_OVERFLOW) && tcp_lq_overflow && 
 		    ((rt->rt_rmx.rmx_locks & RTV_RTT) == 0)){
 			if (rt->rt_rmx.rmx_rtt == 0)
 				rt->rt_flags |= RTF_DELCLONE;
@@ -854,7 +915,6 @@ tcp_close(tp)
 	    inp->inp_saved_ppcb = (caddr_t) tp;
 #endif
 
-	inp->inp_ppcb = NULL;
 	soisdisconnected(so);
 #if INET6
 	if (INP_CHECK_SOCKAF(so, AF_INET6))
@@ -879,6 +939,7 @@ tcp_freeq(tp)
 		LIST_REMOVE(q, tqe_q);
 		m_freem(q->tqe_m);
 		FREE(q, M_TSEGQ);
+		tcp_reass_qsize--;
 		rv = 1;
 	}
 	return (rv);
@@ -887,6 +948,9 @@ tcp_freeq(tp)
 void
 tcp_drain()
 {
+/*
+ * ###LD 05/19/04 locking issue, tcpdrain is disabled, deadlock situation with tcbinfo.mtx
+ */
 	if (do_tcpdrain)
 	{
 		struct inpcb *inpb;
@@ -901,6 +965,7 @@ tcp_drain()
 	 * 	where we're really low on mbufs, this is potentially
 	 *  	usefull.	
 	 */
+		lck_rw_lock_exclusive(tcbinfo.mtx);
 		for (inpb = LIST_FIRST(tcbinfo.listhead); inpb;
 	    		inpb = LIST_NEXT(inpb, inp_list)) {
 				if ((tcpb = intotcpcb(inpb))) {
@@ -909,9 +974,11 @@ tcp_drain()
 					LIST_REMOVE(te, tqe_q);
 					m_freem(te->tqe_m);
 					FREE(te, M_TSEGQ);
+					tcp_reass_qsize--;
 				}
 			}
 		}
+		lck_rw_done(tcbinfo.mtx);
 
 	}
 }
@@ -931,7 +998,7 @@ tcp_notify(inp, error)
 {
 	struct tcpcb *tp;
 
-	if (inp == NULL)
+	if (inp == NULL || (inp->inp_state == INPCB_STATE_DEAD)) 
 		return; /* pcb is gone already */
 
 	tp = (struct tcpcb *)inp->inp_ppcb;
@@ -971,66 +1038,73 @@ tcp_pcblist SYSCTL_HANDLER_ARGS
 	 * The process of preparing the TCB list is too time-consuming and
 	 * resource-intensive to repeat twice on every request.
 	 */
-	if (req->oldptr == 0) {
+	lck_rw_lock_shared(tcbinfo.mtx);
+	if (req->oldptr == USER_ADDR_NULL) {
 		n = tcbinfo.ipi_count;
 		req->oldidx = 2 * (sizeof xig)
 			+ (n + n/8) * sizeof(struct xtcpcb);
+		lck_rw_done(tcbinfo.mtx);
 		return 0;
 	}
 
-	if (req->newptr != 0)
+	if (req->newptr != USER_ADDR_NULL) {
+		lck_rw_done(tcbinfo.mtx);
 		return EPERM;
+	}
 
 	/*
 	 * OK, now we're committed to doing something.
 	 */
-	s = splnet();
 	gencnt = tcbinfo.ipi_gencnt;
 	n = tcbinfo.ipi_count;
-	splx(s);
 
 	xig.xig_len = sizeof xig;
 	xig.xig_count = n;
 	xig.xig_gen = gencnt;
 	xig.xig_sogen = so_gencnt;
 	error = SYSCTL_OUT(req, &xig, sizeof xig);
-	if (error)
+	if (error) {
+		lck_rw_done(tcbinfo.mtx);
 		return error;
+	}
         /*
          * We are done if there is no pcb
          */
-        if (n == 0)  
+        if (n == 0) {
+	    lck_rw_done(tcbinfo.mtx);
             return 0; 
+	}
 
 	inp_list = _MALLOC(n * sizeof *inp_list, M_TEMP, M_WAITOK);
-	if (inp_list == 0)
+	if (inp_list == 0) {
+		lck_rw_done(tcbinfo.mtx);
 		return ENOMEM;
+	}
 	
-	s = splnet();
 	for (inp = LIST_FIRST(tcbinfo.listhead), i = 0; inp && i < n;
 	     inp = LIST_NEXT(inp, inp_list)) {
 #ifdef __APPLE__
-		if (inp->inp_gencnt <= gencnt)
+		if (inp->inp_gencnt <= gencnt && inp->inp_state != INPCB_STATE_DEAD)
 #else
 		if (inp->inp_gencnt <= gencnt && !prison_xinpcb(req->p, inp))
 #endif
 			inp_list[i++] = inp;
 	}
-	splx(s);
 	n = i;
 
 	error = 0;
 	for (i = 0; i < n; i++) {
 		inp = inp_list[i];
-		if (inp->inp_gencnt <= gencnt) {
+		if (inp->inp_gencnt <= gencnt && inp->inp_state != INPCB_STATE_DEAD) {
 			struct xtcpcb xt;
 			caddr_t inp_ppcb;
 			xt.xt_len = sizeof xt;
 			/* XXX should avoid extra copy */
-			bcopy(inp, &xt.xt_inp, sizeof *inp);
+			inpcb_to_compat(inp, &xt.xt_inp);
 			inp_ppcb = inp->inp_ppcb;
-			if (inp_ppcb != NULL)
+			if (inp_ppcb != NULL) {
 				bcopy(inp_ppcb, &xt.xt_tp, sizeof xt.xt_tp);
+			}
 			else
 				bzero((char *) &xt.xt_tp, sizeof xt.xt_tp);
 			if (inp->inp_socket)
@@ -1046,14 +1120,13 @@ tcp_pcblist SYSCTL_HANDLER_ARGS
 		 * while we were processing this request, and it
 		 * might be necessary to retry.
 		 */
-		s = splnet();
 		xig.xig_gen = tcbinfo.ipi_gencnt;
 		xig.xig_sogen = so_gencnt;
 		xig.xig_count = tcbinfo.ipi_count;
-		splx(s);
 		error = SYSCTL_OUT(req, &xig, sizeof xig);
 	}
 	FREE(inp_list, M_TEMP);
+	lck_rw_done(tcbinfo.mtx);
 	return error;
 }
 
@@ -1081,7 +1154,7 @@ tcp_getcred(SYSCTL_HANDLER_ARGS)
 		error = ENOENT;
 		goto out;
 	}
-	error = SYSCTL_OUT(req, inp->inp_socket->so_cred, sizeof(struct ucred));
+	error = SYSCTL_OUT(req, inp->inp_socket->so_cred, sizeof(*(kauth_cred_t)0);
 out:
 	splx(s);
 	return (error);
@@ -1128,7 +1201,7 @@ tcp6_getcred(SYSCTL_HANDLER_ARGS)
 		goto out;
 	}
 	error = SYSCTL_OUT(req, inp->inp_socket->so_cred, 
-			   sizeof(struct ucred));
+			   sizeof(*(kauth_cred_t)0);
 out:
 	splx(s);
 	return (error);
@@ -1151,7 +1224,7 @@ tcp_ctlinput(cmd, sa, vip)
 	struct in_addr faddr;
 	struct inpcb *inp;
 	struct tcpcb *tp;
-	void (*notify) __P((struct inpcb *, int)) = tcp_notify;
+	void (*notify)(struct inpcb *, int) = tcp_notify;
 	tcp_seq icmp_seq;
 	int s;
 
@@ -1174,21 +1247,25 @@ tcp_ctlinput(cmd, sa, vip)
 	else if ((unsigned)cmd > PRC_NCMDS || inetctlerrmap[cmd] == 0)
 		return;
 	if (ip) {
-		s = splnet();
 		th = (struct tcphdr *)((caddr_t)ip 
 				       + (IP_VHL_HL(ip->ip_vhl) << 2));
 		inp = in_pcblookup_hash(&tcbinfo, faddr, th->th_dport,
 		    ip->ip_src, th->th_sport, 0, NULL);
 		if (inp != NULL && inp->inp_socket != NULL) {
+			tcp_lock(inp->inp_socket, 1, 0);
+			if (in_pcb_checkstate(inp, WNT_RELEASE, 1) == WNT_STOPUSING) {
+				tcp_unlock(inp->inp_socket, 1, 0);
+				return;
+			}
 			icmp_seq = htonl(th->th_seq);
 			tp = intotcpcb(inp);
 			if (SEQ_GEQ(icmp_seq, tp->snd_una) &&
 			    SEQ_LT(icmp_seq, tp->snd_max))
 				(*notify)(inp, inetctlerrmap[cmd]);
+			tcp_unlock(inp->inp_socket, 1, 0);
 		}
-		splx(s);
 	} else
-		in_pcbnotifyall(&tcb, faddr, inetctlerrmap[cmd], notify);
+		in_pcbnotifyall(&tcbinfo, faddr, inetctlerrmap[cmd], notify);
 }
 
 #if INET6
@@ -1199,7 +1276,7 @@ tcp6_ctlinput(cmd, sa, d)
 	void *d;
 {
 	struct tcphdr th;
-	void (*notify) __P((struct inpcb *, int)) = tcp_notify;
+	void (*notify)(struct inpcb *, int) = tcp_notify;
 	struct ip6_hdr *ip6;
 	struct mbuf *m;
 	struct ip6ctlparam *ip6cp = NULL;
@@ -1249,11 +1326,11 @@ tcp6_ctlinput(cmd, sa, d)
 		bzero(&th, sizeof(th));
 		m_copydata(m, off, sizeof(*thp), (caddr_t)&th);
 
-		in6_pcbnotify(&tcb, sa, th.th_dport,
+		in6_pcbnotify(&tcbinfo, sa, th.th_dport,
 		    (struct sockaddr *)ip6cp->ip6c_src,
 		    th.th_sport, cmd, notify);
 	} else
-		in6_pcbnotify(&tcb, sa, 0, (struct sockaddr *)sa6_src,
+		in6_pcbnotify(&tcbinfo, sa, 0, (struct sockaddr *)sa6_src,
 			      0, cmd, notify);
 }
 #endif /* INET6 */
@@ -1564,6 +1641,7 @@ ipsec_hdrsiz_tcp(tp)
 	if (!m)
 		return 0;
 
+	lck_mtx_lock(sadb_mutex);
 #if INET6
 	if ((inp->inp_vflag & INP_IPV6) != 0) {
 		ip6 = mtod(m, struct ip6_hdr *);
@@ -1581,7 +1659,7 @@ ipsec_hdrsiz_tcp(tp)
 	tcp_fillheaders(tp, ip, th);
 	hdrsiz = ipsec4_hdrsiz(m, IPSEC_DIR_OUTBOUND, inp);
       }
-
+	lck_mtx_unlock(sadb_mutex);
 	m_free(m);
 	return hdrsiz;
 }
@@ -1624,4 +1702,89 @@ tcp_gettaocache(inp)
 static void
 tcp_cleartaocache()
 {
+}
+
+int
+tcp_lock(so, refcount, lr)
+	struct socket *so;
+	int refcount;
+	int lr;
+{
+	int lr_saved;
+#ifdef __ppc__
+	if (lr == 0) {
+		__asm__ volatile("mflr %0" : "=r" (lr_saved));
+	}
+	else lr_saved = lr;
+#endif
+
+	if (so->so_pcb) {
+		lck_mtx_lock(((struct inpcb *)so->so_pcb)->inpcb_mtx);
+	}
+	else  {
+		panic("tcp_lock: so=%x NO PCB! lr=%x\n", so, lr_saved);
+		lck_mtx_lock(so->so_proto->pr_domain->dom_mtx);
+	}
+
+	if (so->so_usecount < 0)
+		panic("tcp_lock: so=%x so_pcb=%x lr=%x ref=%x\n",
+	 	so, so->so_pcb, lr_saved, so->so_usecount);
+
+	if (refcount)
+		so->so_usecount++;
+	so->reserved3 = (void *)lr_saved;
+	return (0);
+}
+
+int
+tcp_unlock(so, refcount, lr)
+	struct socket *so;
+	int refcount;
+	int lr;
+{
+	int lr_saved;
+#ifdef __ppc__
+	if (lr == 0) {
+		__asm__ volatile("mflr %0" : "=r" (lr_saved));
+	}
+	else lr_saved = lr;
+#endif
+
+#ifdef MORE_TCPLOCK_DEBUG
+	printf("tcp_unlock: so=%x sopcb=%x lock=%x ref=%x lr=%x\n", 
+		so, so->so_pcb, ((struct inpcb *)so->so_pcb)->inpcb_mtx, so->so_usecount, lr_saved);
+#endif
+	if (refcount)
+		so->so_usecount--;
+
+	if (so->so_usecount < 0)
+		panic("tcp_unlock: so=%x usecount=%x\n", so, so->so_usecount);	
+	if (so->so_pcb == NULL) {
+		panic("tcp_unlock: so=%x NO PCB usecount=%x lr=%x\n", so, so->so_usecount, lr_saved);
+		lck_mtx_unlock(so->so_proto->pr_domain->dom_mtx);
+	}
+	else {
+		lck_mtx_assert(((struct inpcb *)so->so_pcb)->inpcb_mtx, LCK_MTX_ASSERT_OWNED);
+		lck_mtx_unlock(((struct inpcb *)so->so_pcb)->inpcb_mtx);
+	}
+	so->reserved4 = (void *)lr_saved;
+	return (0);
+}
+
+lck_mtx_t *
+tcp_getlock(so, locktype)
+	struct socket *so;
+	int locktype;
+{
+	struct inpcb *inp = sotoinpcb(so);
+
+	if (so->so_pcb)  {
+		if (so->so_usecount < 0)
+			panic("tcp_getlock: so=%x usecount=%x\n", so, so->so_usecount);	
+		return(inp->inpcb_mtx);
+	}
+	else {
+		panic("tcp_getlock: so=%x NULL so_pcb\n", so);
+		return (so->so_proto->pr_domain->dom_mtx);
+	}
 }

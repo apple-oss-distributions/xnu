@@ -1,24 +1,21 @@
 /*
- * Copyright (c) 2000-2003 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2005 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -88,6 +85,7 @@
 #define	NFS_VER3	3
 #define NFS_V2MAXDATA	8192
 #define	NFS_MAXDGRAMDATA 16384
+#define	NFS_PREFDGRAMDATA 8192
 #define	NFS_MAXDATA	(60*1024) // XXX not ready for 64K-128K
 #define	NFS_MAXPATHLEN	1024
 #define	NFS_MAXNAMLEN	255
@@ -148,11 +146,9 @@
 #define NFSX_V2STATFS	20
 
 /* specific to NFS Version 3 */
-#define NFSX_V3FH		(sizeof (fhandle_t)) /* size this server uses */
 #define	NFSX_V3FHMAX		64	/* max. allowed by protocol */
 #define NFSX_V3FATTR		84
 #define NFSX_V3SATTR		60	/* max. all fields filled in */
-#define NFSX_V3SRVSATTR		(sizeof (struct nfsv3_sattr))
 #define NFSX_V3POSTOPATTR	(NFSX_V3FATTR + NFSX_UNSIGNED)
 #define NFSX_V3WCCDATA		(NFSX_V3POSTOPATTR + 8 * NFSX_UNSIGNED)
 #define NFSX_V3COOKIEVERF 	8
@@ -165,7 +161,7 @@
 /* variants for both versions */
 #define NFSX_FH(v3)		((v3) ? (NFSX_V3FHMAX + NFSX_UNSIGNED) : \
 					NFSX_V2FH)
-#define NFSX_SRVFH(v3)		((v3) ? NFSX_V3FH : NFSX_V2FH)
+#define NFSX_SRVFH(v3,FH)	((v3) ? (FH)->nfh_len : NFSX_V2FH)
 #define	NFSX_FATTR(v3)		((v3) ? NFSX_V3FATTR : NFSX_V2FATTR)
 #define NFSX_PREOPATTR(v3)	((v3) ? (7 * NFSX_UNSIGNED) : 0)
 #define NFSX_POSTOPATTR(v3)	((v3) ? (NFSX_V3FATTR + NFSX_UNSIGNED) : 0)
@@ -209,13 +205,8 @@
 
 #endif /* !NFS_PROGRAM */
 
-/* And leasing (nqnfs) procedure numbers (must be last) */
-#define	NQNFSPROC_GETLEASE	22
-#define	NQNFSPROC_VACATED	23
-#define	NQNFSPROC_EVICTED	24
-
-#define NFSPROC_NOOP		25
-#define	NFS_NPROCS		26
+#define NFSPROC_NOOP		22
+#define	NFS_NPROCS		23
 
 /* Actual Version 2 procedure numbers */
 #define	NFSV2PROC_NULL		0
@@ -267,8 +258,8 @@
 
 /* Conversion macros */
 #define	vtonfsv2_mode(t,m) \
-		txdr_unsigned(((t) == VFIFO) ? MAKEIMODE(VCHR, (m)) : \
-				MAKEIMODE((t), (m)))
+		txdr_unsigned(((t) == VFIFO) ? vnode_makeimode(VCHR, (m)) : \
+				vnode_makeimode((t), (m)))
 #define vtonfsv3_mode(m)	txdr_unsigned((m) & 07777)
 #define	nfstov_mode(a)		(fxdr_unsigned(u_short, (a))&07777)
 #define	vtonfsv2_type(a)	txdr_unsigned(nfsv2_type[((long)(a))])
@@ -295,11 +286,6 @@ typedef enum { NFNON=0, NFREG=1, NFDIR=2, NFBLK=3, NFCHR=4, NFLNK=5,
 #ifndef NFS_SMALLFH
 #define NFS_SMALLFH	64
 #endif
-union nfsfh {
-	fhandle_t	fh_generic;
-	u_char		fh_bytes[NFS_SMALLFH];
-};
-typedef union nfsfh nfsfh_t;
 
 struct nfsv2_time {
 	u_long	nfsv2_sec;
@@ -406,21 +392,6 @@ struct nfsv2_sattr {
 	u_long		sa_size;
 	nfstime2	sa_atime;
 	nfstime2	sa_mtime;
-};
-
-/*
- * NFS Version 3 sattr structure for the new node creation case.
- */
-struct nfsv3_sattr {
-	u_long		sa_modetrue;
-	u_long		sa_mode;
-	u_long		sa_uidtrue;
-	u_long		sa_uid;
-	u_long		sa_gidtrue;
-	u_long		sa_gid;
-	u_long		sa_sizefalse;
-	u_long		sa_atimetype;
-	u_long		sa_mtimetype;
 };
 
 struct nfs_statfs {

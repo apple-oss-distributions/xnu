@@ -1,24 +1,21 @@
 /*
- * Copyright (c) 2000 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2004 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -31,33 +28,41 @@
 #include <stdlib.h>
 #endif /* KERNEL */
 
+#define BASE 65521L /* largest prime smaller than 65536 */
+#define NMAX 5000  
+// NMAX (was 5521) the largest n such that 255n(n+1)/2 + (n+1)(BASE-1) <= 2^32-1
+
+#define DO1(buf,i)  {s1 += buf[i]; s2 += s1;}
+#define DO2(buf,i)  DO1(buf,i); DO1(buf,i+1);
+#define DO4(buf,i)  DO2(buf,i); DO2(buf,i+2);
+#define DO8(buf,i)  DO4(buf,i); DO4(buf,i+4);
+#define DO16(buf)   DO8(buf,0); DO8(buf,8);
 
 __private_extern__ u_int32_t
-adler32(u_int8_t *buffer, int32_t length)
+adler32(uint8_t *buf, int32_t len)
 {
-    int32_t cnt;
-    u_int32_t  result, lowHalf, highHalf;
-    
-    lowHalf = 1;
-    highHalf = 0;
-    
-    for (cnt = 0; cnt < length; cnt++) {
-        if ((cnt % 5000) == 0) {
-            lowHalf  %= 65521L;
-            highHalf %= 65521L;
+    unsigned long s1 = 1; // adler & 0xffff;
+    unsigned long s2 = 0; // (adler >> 16) & 0xffff;
+    int k;
+
+    while (len > 0) {
+        k = len < NMAX ? len : NMAX;
+        len -= k;
+        while (k >= 16) {
+            DO16(buf);
+	    buf += 16;
+            k -= 16;
         }
-        
-        lowHalf += buffer[cnt];
-        highHalf += lowHalf;
+        if (k != 0) do {
+            s1 += *buf++;
+	    s2 += s1;
+        } while (--k);
+        s1 %= BASE;
+        s2 %= BASE;
     }
-    
-    lowHalf  %= 65521L;
-    highHalf %= 65521L;
-    
-    result = (highHalf << 16) | lowHalf;
-    
-    return result;
+    return (s2 << 16) | s1;
 }
+
 
 /**************************************************************
  LZSS.C -- A Data Compression Program

@@ -3,22 +3,19 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -56,33 +53,6 @@
 #undef END
 #include <mach/ppc/asm.h>
 #endif
-
-.macro DISABLE_PREEMPTION
-#ifdef KERNEL
-	stwu	r1,-(FM_SIZE)(r1)
-	mflr	r0
-	stw		r3,FM_ARG0(r1)
-	stw		r0,(FM_SIZE+FM_LR_SAVE)(r1)
-	bl		EXT(_disable_preemption)
-	lwz		r3,FM_ARG0(r1)
-	lwz		r1,0(r1)
-	lwz		r0,FM_LR_SAVE(r1)
-	mtlr	r0
-#endif
-.endmacro
-.macro ENABLE_PREEMPTION
-#ifdef KERNEL
-	stwu	r1,-(FM_SIZE)(r1)
-	mflr	r0
-	stw		r3,FM_ARG0(r1)
-	stw		r0,(FM_SIZE+FM_LR_SAVE)(r1)
-	bl		EXT(_enable_preemption)
-	lwz		r3,FM_ARG0(r1)
-	lwz		r1,0(r1)
-	lwz		r0,FM_LR_SAVE(r1)
-	mtlr	r0
-#endif
-.endmacro
 
 /*
  *	void
@@ -152,7 +122,6 @@ LEAF(_ev_unlock)
 	sync
 	li	a7,0
 	stw	a7,0(a0)
-	ENABLE_PREEMPTION()
 	blr
 END(_ev_unlock)
 
@@ -160,7 +129,6 @@ LEAF(_IOSpinUnlock)
 	sync
 	li	a7,0
 	stw	a7,0(a0)
-	ENABLE_PREEMPTION()
 	blr
 END(_IOSpinUnlock)
 
@@ -173,9 +141,6 @@ END(_IOSpinUnlock)
  */
 
 LEAF(_ev_try_lock)
-	
-		DISABLE_PREEMPTION()
-
 		li		a6,1			// lock value
 		
 		lwz		a7,0(a0)		// Get lock word
@@ -195,16 +160,12 @@ LEAF(_ev_try_lock)
 		stwcx.	a7,a7,r1		// Kill reservation
 
 6:
-		ENABLE_PREEMPTION()
 		li	a0,0				// return FALSE
 		blr
 		
 END(_ev_try_lock)
 
 LEAF(_IOTrySpinLock)
-	
-		DISABLE_PREEMPTION()
-
 		li		a6,1			// lock value
 		
 		lwz		a7,0(a0)		// Get lock word
@@ -224,7 +185,6 @@ LEAF(_IOTrySpinLock)
 		stwcx.	a7,a7,r1		// Kill reservation
 
 6:
-		ENABLE_PREEMPTION()
 		li	a0,0				// return FALSE
 		blr
 		

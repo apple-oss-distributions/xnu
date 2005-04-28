@@ -3,22 +3,19 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -45,9 +42,9 @@ struct sockaddr_ndrv
  * Support for user-mode protocol handlers
  */
 
-#define NDRV_DEMUXTYPE_ETHERTYPE	DLIL_DESC_ETYPE2
-#define	NDRV_DEMUXTYPE_SAP			DLIL_DESC_SAP
-#define NDRV_DEMUXTYPE_SNAP			DLIL_DESC_SNAP
+#define NDRV_DEMUXTYPE_ETHERTYPE	4
+#define	NDRV_DEMUXTYPE_SAP			5
+#define NDRV_DEMUXTYPE_SNAP			6
 
 #define	NDRVPROTO_NDRV				0
 
@@ -118,9 +115,7 @@ struct ndrv_protocol_desc
 };
 
 #define SOL_NDRVPROTO		NDRVPROTO_NDRV	/* Use this socket level */
-/*		NDRV_DMXSPEC		0x01		   	   Obsolete */
 #define NDRV_DELDMXSPEC		0x02			/* Delete the registered protocol */
-/*		NDRV_DMXSPECCNT		0x03			   Obsolete */
 #define NDRV_SETDMXSPEC		0x04			/* Set the protocol spec */
 #define	NDRV_ADDMULTICAST	0x05			/* Add a physical multicast address */
 #define NDRV_DELMULTICAST	0x06			/* Delete a phyiscal multicast */
@@ -147,12 +142,5 @@ struct ndrv_protocol_desc
  * If you need a chance to do something, please file a bug and we can give
  * you a second or two.
  */
-
-#ifdef KERNEL
-#ifdef __APPLE_API_UNSTABLE
-/* Additional Kernel APIs */
-struct ifnet*	ndrv_get_ifp(caddr_t ndrv_pcb);
-#endif /* __APPLE_API_UNSTABLE */
-#endif
 
 #endif	/* _NET_NDRV_H */

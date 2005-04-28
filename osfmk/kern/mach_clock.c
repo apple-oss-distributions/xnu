@@ -1,24 +1,21 @@
 /*
- * Copyright (c) 2000 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2004 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -59,8 +56,6 @@
  *
  *	Clock primitives.
  */
-#include <cpus.h>
-#include <stat_time.h>
 #include <mach_prof.h>
 #include <gprof.h>
 
@@ -82,10 +77,7 @@
 #include <kern/sched_prim.h>
 #include <kern/spl.h>
 #include <kern/thread.h>
-#include <kern/thread_swap.h>
-#include <kern/time_out.h>
 #include <vm/vm_kern.h>					/* kernel_map */
-#include <machine/mach_param.h>			/* HZ */
 
 #include <mach/clock_server.h>
 #include <mach/clock_priv_server.h>
@@ -93,15 +85,16 @@
 
 #include <profiling/profile-mk.h>
 
-#if	STAT_TIME
-#define	TICKBUMP(t)	timer_bump(t, (1000000/HZ))
-#else
-#define	TICKBUMP(t)
-#endif
-
 boolean_t	profile_kernel_services = TRUE;	/* Indicates wether or not we
 											 * account kernel services 
+
 											 * samples for user task */
+#ifdef MACH_BSD
+extern void	bsd_hardclock(
+			boolean_t	usermode,
+			natural_t	pc,
+			int		numticks);
+#endif /* MACH_BSD */
 
 /*
  * Hertz rate clock interrupt servicing. Primarily used to
@@ -110,22 +103,24 @@ boolean_t	profile_kernel_services = TRUE;	/* Indicates wether or not we
  */
 void
 hertz_tick(
-	boolean_t			usermode,	/* executing user code */
-	natural_t			pc)
+#if	STAT_TIME
+	natural_t		ticks,
+#endif	/* STAT_TIME */
+	boolean_t		usermode,
+	natural_t		pc)
 {
-	thread_act_t		thr_act;
-	register int		my_cpu;
-	register thread_t	thread = current_thread();
-	int					state;
+	processor_t		processor = current_processor();
+	thread_t		thread = current_thread();
+	int				state;
 #if		MACH_PROF
 #ifdef	__MACHO__
-#define	ETEXT			etext
-	extern long			etext;
+#define	ETEXT		etext
+	extern long		etext;
 #else
-#define	ETEXT			&etext
-	extern char			etext;
+#define	ETEXT		&etext
+	extern char		etext;
 #endif
-	boolean_t			inkernel;
+	boolean_t		inkernel;
 #endif	/* MACH_PROF */
 #if GPROF
 	struct profile_vars	*pv;
@@ -135,8 +130,6 @@ hertz_tick(
 #ifdef	lint
 	pc++;
 #endif	/* lint */
-
-	my_cpu = cpu_number();
 
 	/*
 	 *	The system startup sequence initializes the clock
@@ -159,11 +152,11 @@ hertz_tick(
 	counter(c_clock_ticks++);
 
 #if     GPROF
-	pv = PROFILE_VARS(my_cpu);
+	pv = PROFILE_VARS(cpu_number());
 #endif
 
 	if (usermode) {
-		TICKBUMP(&thread->user_timer);
+		TIMER_BUMP(&thread->user_timer, ticks);
 		if (thread->priority < BASEPRI_DEFAULT)
 			state = CPU_STATE_NICE;
 		else
@@ -174,11 +167,14 @@ hertz_tick(
 #endif
 	}
 	else {
-		TICKBUMP(&thread->system_timer);
+		TIMER_BUMP(&thread->system_timer, ticks);
 
-		state = processor_ptr[my_cpu]->state;
+		state = processor->state;
 		if (	state == PROCESSOR_IDLE			||
-				state == PROCESSOR_DISPATCHING	)
+				state == PROCESSOR_DISPATCHING)
+			state = CPU_STATE_IDLE;
+		else
+		if (thread->options & TH_OPT_DELAYIDLE)
 			state = CPU_STATE_IDLE;
 		else
 			state = CPU_STATE_SYSTEM;
@@ -204,35 +200,25 @@ hertz_tick(
 #endif
 	}
 
-	machine_slot[my_cpu].cpu_ticks[state]++;
+	PROCESSOR_DATA(processor, cpu_ticks[state]++);
 
-	/*
-	 * Hertz processing performed by the master-cpu
-	 * exclusively.
-	 */
-	if (my_cpu == master_cpu) {
 #ifdef MACH_BSD
-		{
-			extern void	bsd_hardclock(
-								boolean_t	usermode,
-								natural_t	pc,
-								int			ticks);
-
-			bsd_hardclock(usermode, pc, 1);
-		}
-#endif /* MACH_BSD */
+	/*XXX*/
+	if (processor == master_processor) {
+		bsd_hardclock(usermode, pc, 1);
 	}
+	/*XXX*/
+#endif /* MACH_BSD */
 
 #if	MACH_PROF
-	thr_act = thread->top_act;
-	if (thr_act->act_profiled) {
-		if (inkernel && thr_act->map != kernel_map) {
+	if (thread->act_profiled) {
+		if (inkernel && thread->map != kernel_map) {
 			/* 
 			 * Non-kernel thread running in kernel
 			 * Register user pc (mach_msg, vm_allocate ...)
 			 */
 		  	if (profile_kernel_services)
-		  		profile(user_pc(thr_act), thr_act->profil_buffer);
+		  		profile(user_pc(thread), thread->profil_buffer);
 		}
 		else
 			/*
@@ -241,10 +227,10 @@ hertz_tick(
 			 * kernel thread and kernel mode
 			 * register interrupted pc
 			 */
-			profile(pc, thr_act->profil_buffer);
+			profile(pc, thread->profil_buffer);
 	}
 	if (kernel_task->task_profiled) {
-		if (inkernel && thr_act->map != kernel_map)
+		if (inkernel && thread->map != kernel_map)
 		  	/*
 			 * User thread not profiled in kernel mode,
 			 * kernel task profiled, register kernel pc

@@ -1,24 +1,21 @@
 /*
- * Copyright (c) 2000 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2004 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -76,7 +73,7 @@ static int db_delete_thread_breakpoint(
 
 static db_thread_breakpoint_t db_find_thread_breakpoint(
 	db_breakpoint_t	bkpt,
-	thread_act_t	thr_act);
+	thread_t	thr_act);
 
 static void db_force_delete_breakpoint(
 	db_breakpoint_t	bkpt,
@@ -195,11 +192,11 @@ db_delete_thread_breakpoint(
 static db_thread_breakpoint_t
 db_find_thread_breakpoint(
 	db_breakpoint_t	bkpt,
-	thread_act_t	thr_act)
+	thread_t	thr_act)
 {
 	register db_thread_breakpoint_t tp;
 	register task_t task =
-			(thr_act == THR_ACT_NULL)
+			(thr_act == THREAD_NULL)
 					? TASK_NULL : thr_act->task;
 
 	for (tp = bkpt->threads; tp; tp = tp->tb_next) {
@@ -289,7 +286,7 @@ db_check_breakpoint_valid(void)
 		    if ((tbp->tb_is_task && 
 			 db_lookup_task((task_t)(tbp->tb_task_thd)) < 0) ||
 			(!tbp->tb_is_task && 
-			 db_lookup_act((thread_act_t)(tbp->tb_task_thd)) < 0)) {
+			 db_lookup_act((thread_t)(tbp->tb_task_thd)) < 0)) {
 			db_force_delete_breakpoint(bkpt, 
 					tbp->tb_task_thd, tbp->tb_is_task);
 		    }
@@ -311,7 +308,7 @@ db_set_breakpoint(
 	task_t		task,
 	db_addr_t	addr,
 	int		count,
-	thread_act_t	thr_act,
+	thread_t	thr_act,
 	boolean_t	task_bpt)
 {
 	register db_breakpoint_t bkpt;
@@ -320,7 +317,7 @@ db_set_breakpoint(
 
 	bkpt = db_find_breakpoint(task, addr);
 	if (bkpt) {
-	    if (thr_act == THR_ACT_NULL
+	    if (thr_act == THREAD_NULL
 		|| db_find_thread_breakpoint(bkpt, thr_act)) {
 		db_printf("Already set.\n");
 		return;
@@ -328,12 +325,12 @@ db_set_breakpoint(
 	} else {
 	    if (!DB_CHECK_ACCESS(addr, BKPT_SIZE, task)) {
 		if (task) {
-		    db_printf("Warning: non-resident page for breakpoint at %lX",
-			      addr);
+		    db_printf("Warning: non-resident page for breakpoint at %llX",
+			      (unsigned long long)addr);
 		    db_printf(" in task %lX.\n", task);
 		} else {
-		    db_printf("Cannot set breakpoint at %lX in kernel space.\n",
-			      addr);
+		    db_printf("Cannot set breakpoint at %llX in kernel space.\n",
+			      (unsigned long long)addr);
 		    return;
 		}
 	    }
@@ -343,7 +340,7 @@ db_set_breakpoint(
 		return;
 	    }
 	    bkpt->task = task;
-	    bkpt->flags = (task && thr_act == THR_ACT_NULL)?
+	    bkpt->flags = (task && thr_act == THREAD_NULL)?
 				(BKPT_USR_GLOBAL|BKPT_1ST_SET): 0;
 	    bkpt->address = addr;
 	    bkpt->threads = 0;
@@ -439,7 +436,7 @@ db_set_breakpoints(void)
 	register db_breakpoint_t bkpt;
 	register task_t	task;
 	db_expr_t	inst;
-	thread_act_t	cur_act = current_act();
+	thread_t	cur_act = current_act();
 	task_t		cur_task =
 				(cur_act) ?
 					cur_act->task : TASK_NULL;
@@ -482,7 +479,7 @@ db_clear_breakpoints(void)
 	register db_breakpoint_t bkpt, *bkptp;
 	register task_t	 task;
 	db_expr_t inst;
-	thread_act_t	 cur_act = current_act();
+	thread_t	 cur_act = current_act();
 	task_t	 cur_task = (cur_act) ?
 			cur_act->task: TASK_NULL;
 
@@ -609,7 +606,7 @@ db_list_breakpoints(void)
 			    else
 				db_printf("task%03d     ", task_id);
 			} else {
-			    thread_act_t thd = (thread_act_t)(tp->tb_task_thd);
+			    thread_t thd = (thread_t)(tp->tb_task_thd);
 			    task_id = db_lookup_task(thd->task);
 			    act_id = db_lookup_task_act(thd->task, thd);
 			    if (task_id < 0 || act_id < 0)
@@ -664,7 +661,7 @@ void
 db_delete_cmd(void)
 {
 	register int n;
-	thread_act_t 	 thr_act;
+	thread_t 	 thr_act;
 	vm_offset_t task_thd;
 	boolean_t user_global = FALSE;
 	boolean_t task_bpt = FALSE;
@@ -721,13 +718,13 @@ db_delete_cmd(void)
 		user_space = TRUE;
 	}
 	if (!DB_VALID_ADDRESS(addr, user_space)) {
-	    db_printf("Address %#X is not in %s space\n", addr, 
+	    db_printf("Address %#llX is not in %s space\n", (unsigned long long)addr, 
 			(user_space)? "user": "kernel");
 	    db_error(0);
 	}
 	if (thd_bpt || task_bpt) {
 	    for (n = 0; db_get_next_act(&thr_act, n); n++) {
-		if (thr_act == THR_ACT_NULL)
+		if (thr_act == THREAD_NULL)
 		    db_error("No active thr_act\n");
 		if (task_bpt) {
 		    if (thr_act->task == TASK_NULL)
@@ -739,7 +736,7 @@ db_delete_cmd(void)
 					(db_addr_t)addr, task_thd);
 	    }
 	} else {
-	    db_delete_breakpoint(db_target_space(THR_ACT_NULL, user_space),
+	    db_delete_breakpoint(db_target_space(THREAD_NULL, user_space),
 					 (db_addr_t)addr, 0);
 	}
 }
@@ -755,7 +752,7 @@ db_breakpoint_cmd(
 	char *		modif)
 {
 	register int n;
-	thread_act_t thr_act;
+	thread_t thr_act;
 	boolean_t user_global = db_option(modif, 'U');
 	boolean_t task_bpt = db_option(modif, 'T');
 	boolean_t user_space;
@@ -779,7 +776,7 @@ db_breakpoint_cmd(
 	    if (user_space)
 	      db_error("Invalid user space address\n");
 	    user_space = TRUE;
-	    db_printf("%#X is in user space\n", addr);
+	    db_printf("%#llX is in user space\n", (unsigned long long)addr);
 #ifdef ppc
 	    db_printf("kernel is from %#X to %#x\n", VM_MIN_KERNEL_ADDRESS, vm_last_addr);
 #else
@@ -788,7 +785,7 @@ db_breakpoint_cmd(
 	}
 	if (db_option(modif, 't') || task_bpt) {
 	    for (n = 0; db_get_next_act(&thr_act, n); n++) {
-		if (thr_act == THR_ACT_NULL)
+		if (thr_act == THREAD_NULL)
 		    db_error("No active thr_act\n");
 		if (task_bpt && thr_act->task == TASK_NULL)
 		    db_error("No task\n");
@@ -797,13 +794,13 @@ db_breakpoint_cmd(
 		    db_error("Cannot set break point in inactive user space\n");
 		db_set_breakpoint(db_target_space(thr_act, user_space), 
 					(db_addr_t)addr, count,
-					(user_global)? THR_ACT_NULL: thr_act,
+					(user_global)? THREAD_NULL: thr_act,
 					task_bpt);
 	    }
 	} else {
-	    db_set_breakpoint(db_target_space(THR_ACT_NULL, user_space),
+	    db_set_breakpoint(db_target_space(THREAD_NULL, user_space),
 				 (db_addr_t)addr,
-				 count, THR_ACT_NULL, FALSE);
+				 count, THREAD_NULL, FALSE);
 	}
 }
 

@@ -3,29 +3,25 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
 /* OSMetaClass.cpp created by gvdl on Fri 1998-11-17 */
 
 #include <string.h>
-#include <sys/systm.h>
 
 #include <libkern/OSReturn.h>
 
@@ -44,8 +40,8 @@
 
 __BEGIN_DECLS
 
+#include <sys/systm.h>
 #include <mach/mach_types.h>
-#include <mach/etap_events.h>
 #include <kern/lock.h>
 #include <kern/clock.h>
 #include <kern/thread_call.h>
@@ -72,7 +68,7 @@ static enum {
 
 static const int kClassCapacityIncrement = 40;
 static const int kKModCapacityIncrement = 10;
-static OSDictionary *sAllClassesDict, *sKModClassesDict;
+static OSDictionary *sAllClassesDict, *sKModClassesDict, *sSortedByClassesDict;
 
 static mutex_t *loadLock;
 static struct StalledData {
@@ -289,8 +285,10 @@ OSMetaClass::~OSMetaClass()
     do {
 	OSCollectionIterator *iter;
 
-	if (sAllClassesDict)
+	if (sAllClassesDict) {
 	    sAllClassesDict->removeObject(className);
+	    className->release();
+	}
 
 	iter = OSCollectionIterator::withCollection(sKModClassesDict);
 	if (!iter)
@@ -322,7 +320,6 @@ OSMetaClass::~OSMetaClass()
 		memmove(&sStalled->classes[i], &sStalled->classes[i+1],
 			    (sStalled->count - i) * sizeof(OSMetaClass *));
 	}
-	return;
     }
 }
 
@@ -348,7 +345,7 @@ unsigned int OSMetaClass::getClassSize() const
 void *OSMetaClass::preModLoad(const char *kmodName)
 {
     if (!loadLock) {
-        loadLock = mutex_alloc(ETAP_IO_AHA);
+        loadLock = mutex_alloc(0);
 	mutex_lock(loadLock);
     }
     else
@@ -384,6 +381,7 @@ OSReturn OSMetaClass::postModLoad(void *loadHandle)
 {
     OSReturn result = kOSReturnSuccess;
     OSSet *kmodSet = 0;
+    OSSymbol *myname = 0;
 
     if (!sStalled || loadHandle != sStalled) {
 	logError(kOSMetaClassInternal);
@@ -400,7 +398,8 @@ OSReturn OSMetaClass::postModLoad(void *loadHandle)
     case kMakingDictionaries:
 	sKModClassesDict = OSDictionary::withCapacity(kKModCapacityIncrement);
 	sAllClassesDict = OSDictionary::withCapacity(kClassCapacityIncrement);
-	if (!sAllClassesDict || !sKModClassesDict) {
+	sSortedByClassesDict = OSDictionary::withCapacity(kClassCapacityIncrement);
+	if (!sAllClassesDict || !sKModClassesDict || !sSortedByClassesDict) {
 	    result = kOSMetaClassNoDicts;
 	    break;
 	}
@@ -409,6 +408,7 @@ OSReturn OSMetaClass::postModLoad(void *loadHandle)
     case kCompletedBootstrap:
     {
         unsigned int i;
+        myname = OSSymbol::withCStringNoCopy(sStalled->kmodName);
 
 	if (!sStalled->count)
 	    break;	// Nothing to do so just get out
@@ -432,19 +432,20 @@ OSReturn OSMetaClass::postModLoad(void *loadHandle)
 	    break;
 	}
 
-	if (!sKModClassesDict->setObject(sStalled->kmodName, kmodSet)) {
+	if (!sKModClassesDict->setObject(myname, kmodSet)) {
 	    result = kOSMetaClassNoInsKModSet;
 	    break;
 	}
 
 	// Second pass symbolling strings and inserting classes in dictionary
-	for (unsigned int i = 0; i < sStalled->count; i++) {
+	for (i = 0; i < sStalled->count; i++) {
 	    OSMetaClass *me = sStalled->classes[i];
 	    me->className = 
                 OSSymbol::withCStringNoCopy((const char *) me->className);
 
 	    sAllClassesDict->setObject(me->className, me);
 	    kmodSet->setObject(me);
+	    sSortedByClassesDict->setObject((const OSSymbol *)me, myname);
 	}
 	sBootstrapState = kCompletedBootstrap;
 	break;
@@ -457,6 +458,9 @@ OSReturn OSMetaClass::postModLoad(void *loadHandle)
 
     if (kmodSet)
 	kmodSet->release();
+
+	if (myname)
+	myname->release();
 
     if (sStalled) {
 	ACCUMSIZE(-(sStalled->capacity * sizeof(OSMetaClass *)
@@ -494,7 +498,7 @@ bool OSMetaClass::modHasInstance(const char *kmodName)
     bool result = false;
 
     if (!loadLock) {
-        loadLock = mutex_alloc(ETAP_IO_AHA);
+        loadLock = mutex_alloc(0);
 	mutex_lock(loadLock);
     }
     else
@@ -772,6 +776,11 @@ void OSMetaClass::reservedCalled(int ind) const
 const OSMetaClass *OSMetaClass::getSuperClass() const
 {
     return superClassLink;
+}
+
+const OSSymbol *OSMetaClass::getKmodName() const
+{	
+    return sSortedByClassesDict->getObject((const OSSymbol *)this);
 }
 
 unsigned int OSMetaClass::getInstanceCount() const

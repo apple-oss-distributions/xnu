@@ -3,22 +3,19 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -310,6 +307,24 @@ public:
         @result Returns true if serialization was successful, false if not.
     */
     virtual bool serialize(OSSerialize *s) const;
+
+    /*!
+        @function setOptions
+        @abstract This function is used to recursively set option bits in this dictionary and all child collections.
+	@param options Set the (options & mask) bits.
+        @param mask The mask of bits which need to be set, 0 to get the current value.
+        @result The options before the set operation, NB setOptions(?,0) returns the current value of this collection.
+     */
+    virtual unsigned setOptions(unsigned options, unsigned mask, void * = 0);
+
+    /*!
+        @function copyCollection
+        @abstract Do a deep copy of this dictionary and its collections.
+	@discussion This function copies this dictionary and all included collections recursively.  Objects that don't derive from OSContainter are NOT copied, that is objects like OSString and OSData.
+        @param cycleDict Is a dictionary of all of the collections that have been, to start the copy at the top level just leave this field 0.
+        @result The newly copied collecton or 0 if insufficient memory
+    */
+    OSCollection *copyCollection(OSDictionary *cycleDict = 0);
 
 
     OSMetaClassDeclareReservedUnused(OSDictionary, 0);

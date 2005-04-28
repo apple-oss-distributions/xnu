@@ -3,22 +3,19 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -58,6 +55,7 @@
 #include <sys/param.h>
 #include <sys/ipc.h>
 #include <sys/ucred.h>
+#include <sys/kauth.h>
 
 
 /*
@@ -68,23 +66,22 @@
  */
 
 int
-ipcperm(cred, perm, mode)
-	struct ucred *cred;
-	struct ipc_perm *perm;
-	int mode;
+ipcperm(kauth_cred_t cred, struct ipc_perm *perm, int mode)
 {
 
 	if (!suser(cred, (u_short *)NULL))
 		return (0);
 
 	/* Check for user match. */
-	if (cred->cr_uid != perm->cuid && cred->cr_uid != perm->uid) {
+	if (kauth_cred_getuid(cred) != perm->cuid && kauth_cred_getuid(cred) != perm->uid) {
+		int is_member;
+
 		if (mode & IPC_M)
 			return (EPERM);
 		/* Check for group match. */
 		mode >>= 3;
-		if (!groupmember(perm->gid, cred) &&
-		    !groupmember(perm->cgid, cred))
+		if ((kauth_cred_ismember_gid(cred, perm->gid, &is_member) || !is_member) &&
+		    (kauth_cred_ismember_gid(cred, perm->cgid, &is_member) || !is_member))
 			/* Check for `other' match. */
 			mode >>= 3;
 	}
@@ -93,70 +90,3 @@ ipcperm(cred, perm, mode)
 		return (0);
 	return ((mode & perm->mode) == mode ? 0 : EACCES);
 }
-
-
-
-/*
- * SYSVMSG stubs
- */
-
-int
-msgsys(p, uap)
-	struct proc *p;
-	/* XXX actually varargs. */
-#if 0
-	struct msgsys_args *uap;
-#else
-	void *uap;
-#endif
-{
-	return(EOPNOTSUPP);
-};
-
-int
-msgctl(p, uap)
-	struct proc *p;
-#if 0
-	register struct msgctl_args *uap;
-#else
-	void *uap;
-#endif
-{
-	return(EOPNOTSUPP);
-};
-
-int
-msgget(p, uap)
-	struct proc *p;
-#if 0
-	register struct msgget_args *uap;
-#else
-	void *uap;
-#endif
-{
-	return(EOPNOTSUPP);
-};
-
-int
-msgsnd(p, uap)
-	struct proc *p;
-#if 0
-	register struct msgsnd_args *uap;
-#else
-	void *uap;
-#endif
-{
-	return(EOPNOTSUPP);
-};
-
-int
-msgrcv(p, uap)
-	struct proc *p;
-#if 0
-	register struct msgrcv_args *uap;
-#else
-	void *uap;
-#endif
-{
-	return(EOPNOTSUPP);
-};

@@ -1,24 +1,21 @@
 /*
- * Copyright (c) 2000 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2004 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -37,12 +34,12 @@
 
 #ifndef ASSEMBLER
 
-#include <cpus.h>
 #include <mach_kdb.h>
 #include <mach_kdp.h>
 
 #include <mach/machine/vm_types.h>
 #include <mach/boolean.h>
+#include <kern/ast.h>
 #include <kern/cpu_data.h>
 #include <pexpert/pexpert.h>
 #include <IOKit/IOInterrupts.h>
@@ -66,10 +63,6 @@ struct procFeatures {
 #define pfCanNapb	5
 #define pfCanDoze	0x02000000
 #define pfCanDozeb	6
-#define pfThermal	0x01000000
-#define pfThermalb	7
-#define pfThermInt	0x00800000
-#define pfThermIntb	8
 #define pfSlowNap	0x00400000
 #define pfSlowNapb	9
 #define pfNoMuMMCK	0x00200000
@@ -132,25 +125,24 @@ struct procFeatures {
 	uint64_t		pfHID5;				/* 0x068 */
 	unsigned int	l2crOriginal;		/* 0x070 */
 	unsigned int	l3crOriginal;		/* 0x074 */
-	unsigned int	pfBootConfig;		/* 0x07C */
-	unsigned int	reserved[1];		/* 0x80 */
+	unsigned int	pfBootConfig;		/* 0x078 */
+	unsigned int	pfPowerModes;		/* 0x07C */
+#define pmDPLLVmin		0x00010000
+#define pmDPLLVminb		15
+#define pmPowerTune		0x00000004
+#define pmPowerTuneb	29
+#define pmDFS			0x00000002
+#define pmDFSb			30
+#define pmDualPLL		0x00000001
+#define pmDualPLLb		31
+	unsigned int	pfPowerTune0;		/* 0x080 */
+	unsigned int	pfPowerTune1;		/* 0x084 */
+	unsigned int	rsrvd88[6];			/* 0x088 */
 };
 #pragma pack()
 
 typedef struct procFeatures procFeatures;
 
-#pragma pack(4)							/* Make sure the structure stays as we defined it */
-struct thrmControl {
-	unsigned int	maxTemp;			/* Maximum temprature before damage */
-	unsigned int	throttleTemp;		/* Temprature at which to throttle down */
-	unsigned int	lowTemp;			/* Interrupt when temprature drops below */
-	unsigned int	highTemp;			/* Interrupt when temprature exceeds this */
-	unsigned int	thrm3val;			/* Value for thrm3 register */
-	unsigned int	rsvd[3];			/* Pad to cache line */
-};
-#pragma pack()
-
-typedef struct thrmControl thrmControl;
 
 /*
  *
@@ -203,13 +195,18 @@ struct hwCtrs {
 	unsigned int	hwSoftPatches;			/* Soft Patch interruptions */
 	unsigned int	hwMaintenances;			/* Maintenance interruptions */
 	unsigned int	hwInstrumentations;		/* Instrumentation interruptions */
-	unsigned int	hwrsvd14;				/* Reswerved */
-/*											0x0B4 */
+	unsigned int	hwrsvd14;				/* Reserved */
+	unsigned int 	hwhdec;					/* 0B4 Hypervisor decrementer */
 
-	unsigned int	hwspare0[17];			/* Reserved */
-	unsigned int	hwRedrives;				/* Number of redriven interrupts */
-	unsigned int	hwSteals;				/* PTE Steals */
-/*											0x100 */
+	unsigned int	hwspare0[11];			/* 0B8 Reserved */
+	unsigned int	hwspare0a;				/* 0E4 Reserved */
+	unsigned int	hwspare0b;				/* 0E8 Reserved */
+	unsigned int	hwspare0c;				/* 0EC Reserved */
+	unsigned int	hwspare0d;				/* 0F0 Reserved */
+	unsigned int	hwIgnored;				/* 0F4 Interruptions ignored */
+	unsigned int	hwRedrives;				/* 0F8 Number of redriven interrupts */
+	unsigned int	hwSteals;				/* 0FC Steals */
+/*											   100 */
 
 	unsigned int 	hwMckHang;				/* ? */
 	unsigned int 	hwMckSLBPE;				/* ? */
@@ -241,7 +238,13 @@ struct hwCtrs {
 	unsigned int	numSIGPmast;			/* Number of SIGPast messages merged */
 	unsigned int	numSIGPmwake;			/* Number of SIGPwake messages merged */
 	
-	unsigned int	hwspare3[21];			/* Pad to 512 */
+	unsigned int	hwWalkPhys;				/* Number of entries to hw_walk_phys */
+	unsigned int	hwWalkFull;				/* Full purge of connected PTE's */
+	unsigned int	hwWalkMerge;			/* RC merge of connected PTE's */
+	unsigned int	hwWalkQuick;			/* Quick scan of connected PTE's */
+	unsigned int	numSIGPcall;			/* Number of SIGPcall messages received */
+	
+	unsigned int	hwspare3[16];			/* Pad to 512 */
 	
 };
 #pragma pack()
@@ -260,8 +263,7 @@ typedef struct patch_entry patch_entry_t;
 #define	PATCH_INVALID		0
 #define	PATCH_PROCESSOR		1
 #define	PATCH_FEATURE		2
-
-#define PATCH_TABLE_SIZE	12
+#define PATCH_END_OF_TABLE  3
 
 #define PatchExt32		0x80000000
 #define PatchExt32b		0
@@ -282,13 +284,14 @@ struct per_proc_info {
 	vm_offset_t  	debstack_top_ss;
 
 	unsigned int 	spcFlags;			/* Special thread flags */
-	unsigned int 	Uassist;			/* User Assist Word */
 	unsigned int	old_thread;
+	ast_t			pending_ast;		/* mask of pending ast(s) */
 
 	/* PPC cache line boundary here - 020 */
 
-	unsigned int	rsrvd020[2];
-	unsigned int	need_ast;			/* pointer to need_ast[CPU_NO] */
+	int				cpu_type;
+	int				cpu_subtype;
+	int				cpu_threadtype;
 /*
  *	Note: the following two pairs of words need to stay in order and each pair must
  *	be in the same reservation (line) granule 
@@ -296,16 +299,15 @@ struct per_proc_info {
 	struct facility_context	*FPU_owner;	/* Owner of the FPU on this cpu */
 	unsigned int 	liveVRSave;			/* VRSave assiciated with live vector registers */
 	struct facility_context	*VMX_owner;	/* Owner of the VMX on this cpu */
-	unsigned int 	holdQFret;			/* Hold off releasing quickfret list */
-	unsigned int 	save_exception_type;
+	unsigned int	spcTRc;				/* Special trace count */
+	unsigned int	spcTRp;				/* Special trace buffer pointer */
 
 	/* PPC cache line boundary here - 040 */
 	addr64_t		quickfret;			/* List of saveareas to release */
 	addr64_t		lclfree;			/* Pointer to local savearea list */
 	unsigned int	lclfreecnt;			/* Entries in local savearea list */
-	unsigned int	spcTRc;				/* Special trace count */
-	unsigned int	spcTRp;				/* Special trace buffer pointer */
-	unsigned int	ppbbTaskEnv;		/* BlueBox Task Environment */
+	unsigned int 	holdQFret;			/* Hold off releasing quickfret list */
+	uint64_t		rtcPop;				/* Real Time Clock pop */
 
 	/* PPC cache line boundary here - 060 */
 	boolean_t		interrupts_enabled;
@@ -328,15 +330,6 @@ struct per_proc_info {
 #define MPsigpFunc		0x0000FF00		/* Current function */
 #define MPsigpIdle		0x00			/* No function pending */
 #define MPsigpSigp		0x04			/* Signal a processor */
-#define SIGPast		0					/* Requests an ast on target processor */
-#define SIGPcpureq	1					/* Requests CPU specific function */
-#define SIGPdebug	2					/* Requests a debugger entry */
-#define SIGPwake	3					/* Wake up a sleeping processor */
-#define CPRQtemp	0					/* Get temprature of processor */
-#define CPRQtimebase	1					/* Get timebase of processor */
-#define CPRQsegload	2					/* Segment registers reload */
-#define CPRQscom	3					/* SCOM */
-#define CPRQchud	4					/* CHUD perfmon */
 	unsigned int	MPsigpParm0;		/* SIGP parm 0 */
 	unsigned int	MPsigpParm1;		/* SIGP parm 1 */
 	unsigned int	MPsigpParm2;		/* SIGP parm 2 */
@@ -347,19 +340,31 @@ struct per_proc_info {
 	/* PPC cache line boundary here - 0A0 */
 	procFeatures 	pf;					/* Processor features */
 	
-	/* PPC cache line boundary here - 120 */
-	thrmControl		thrm;				/* Thermal controls */
-	
 	/* PPC cache line boundary here - 140 */
-	unsigned int	ppRsvd140[8];		/* Reserved */
-	
+	void *			pp_cbfr;
+	void *			pp_chud;
+	uint64_t		rtclock_tick_deadline;
+	struct rtclock_timer {
+		uint64_t		deadline;
+		uint32_t
+		/*boolean_t*/	is_set:1,
+						has_expired:1,
+				  		:0;
+	}				rtclock_timer;
+	unsigned int	ppbbTaskEnv;		/* BlueBox Task Environment */
+    
 	/* PPC cache line boundary here - 160 */
+	struct savearea *	db_saved_state;
 	time_base_enable_t	time_base_enable;
-	unsigned int	ppRsvd164[4];		/* Reserved */
-	cpu_data_t		pp_cpu_data;		/* cpu data info */
+	int				ppXFlags;
+	int				running;
+	int				debugger_is_slave;
+	int				debugger_active;
+	int				debugger_pending;
+	int				debugger_holdoff;
 	
 	/* PPC cache line boundary here - 180 */
-	unsigned int	ppRsvd180[2];		/* Reserved */
+    uint64_t        Uassist;            /* User Assist DoubleWord */
 	uint64_t		validSegs;			/* Valid SR/STB slots */
 	addr64_t		ppUserPmap;			/* Current user state pmap (physical address) */
 	unsigned int	ppUserPmapVirt;		/* Current user state pmap (virtual address) */
@@ -372,10 +377,12 @@ struct per_proc_info {
 	ppnum_t			VMMareaPhys;		/* vmm state page physical addr */
 	unsigned int	VMMXAFlgs;			/* vmm extended flags */
 	unsigned int	FAMintercept;		/* vmm FAM Exceptions to intercept */
-	unsigned int	rsrvd1B4[3];		/* Reserved slots */
+	unsigned int	ppinfo_reserved1;
+	uint32_t		save_tbl;
+	uint32_t		save_tbu;
 	
 	/* PPC cache line boundary here - 1C0 */
-	unsigned int	ppCIOmp[16];		/* Linkage mapping for copyin/out - 64 bytes */
+	unsigned int	ppUMWmp[16];		/* Linkage mapping for user memory window - 64 bytes */
 	
 	/* PPC cache line boundary here - 200 */
 	uint64_t		tempr0;				/* temporary savearea */
@@ -512,20 +519,33 @@ struct per_proc_info {
 	hwCtrs			hwCtr;					/* Hardware exception counters */
 /*								   - A00 */
 
-	unsigned int	pppadpage[384];			/* Pad to end of page */
+	unsigned int	processor[384];			/* processor structure */
 /*								   - 1000 */
 
 
 };
 
-#define	pp_preemption_count	pp_cpu_data.preemption_level
-#define	pp_simple_lock_count	pp_cpu_data.simple_lock_count
-#define	pp_interrupt_level	pp_cpu_data.interrupt_level
-
 #pragma pack()
 
 
-extern struct per_proc_info per_proc_info[NCPUS];
+/*
+ * Macro to conver a processor_t processor to its attached per_proc_info_t per_proc
+ */
+#define PROCESSOR_TO_PER_PROC(x)										\
+			((struct per_proc_info*)((unsigned int)(x)					\
+			- (unsigned int)(((struct per_proc_info *)0)->processor)))
+
+extern struct per_proc_info BootProcInfo;
+
+#define	MAX_CPUS	256
+
+struct per_proc_entry {
+	addr64_t				ppe_paddr;
+	unsigned int			ppe_pad4[1];
+	struct per_proc_info	*ppe_vaddr;
+};
+
+extern	struct per_proc_entry PerProcTable[MAX_CPUS-1];
 
 
 extern char *trap_type[];
@@ -544,6 +564,9 @@ extern char *trap_type[];
 #define SignalReady	0x0200
 #define BootDone	0x0100
 #define loadMSR		0x7FF4
+
+/* ppXFlags defs */
+#define SignalReadyWait	0x00000001
 
 #define T_VECTOR_SIZE	4					/* function pointer size */
 
@@ -598,6 +621,7 @@ extern char *trap_type[];
 #define T_MAINTENANCE			(0x2A * T_VECTOR_SIZE)
 #define T_INSTRUMENTATION		(0x2B * T_VECTOR_SIZE)
 #define T_ARCHDEP0				(0x2C * T_VECTOR_SIZE)
+#define T_HDEC					(0x2D * T_VECTOR_SIZE)
 
 #define T_AST					(0x100 * T_VECTOR_SIZE) 
 #define T_MAX					T_CHOKE		 /* Maximum exception no */
@@ -619,9 +643,10 @@ extern char *trap_type[];
 #define failBadLiveContext 6
 #define	failSkipLists 7
 #define	failUnalignedStk 8
+#define	failPmap 9
 
 /* Always must be last - update failNames table in model_dep.c as well */
-#define failUnknown 9
+#define failUnknown 10
 
 #ifndef ASSEMBLER
 

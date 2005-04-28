@@ -1,24 +1,21 @@
 /*
- * Copyright (c) 2000 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2004 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -60,11 +57,9 @@
 #ifndef _KERN_AST_H_
 #define _KERN_AST_H_
 
-#include <cpus.h>
 #include <platforms.h>
 
 #include <kern/assert.h>
-#include <kern/cpu_number.h>
 #include <kern/macro_help.h>
 #include <kern/lock.h>
 #include <kern/spl.h>
@@ -101,8 +96,6 @@ typedef uint32_t		ast_t;
 #define AST_SCHEDULING	(AST_PREEMPTION | AST_YIELD | AST_HANDOFF)
 #define AST_PREEMPTION	(AST_PREEMPT | AST_QUANTUM | AST_URGENT)
 
-extern volatile ast_t	need_ast[NCPUS];
-
 #ifdef  MACHINE_AST
 /*
  *      machine/ast.h is responsible for defining aston and astoff.
@@ -126,6 +119,9 @@ extern void		ast_taken(
 extern void    	ast_check(
 					processor_t		processor);
 
+/* Pending ast mask for the current processor */
+extern ast_t 	*ast_pending(void);
+
 /*
  * Per-thread ASTs are reset at context-switch time.
  */
@@ -135,40 +131,45 @@ extern void    	ast_check(
 
 #define AST_PER_THREAD	(AST_APC | AST_BSD | MACHINE_AST_PER_THREAD)
 /*
- *	ast_needed(), ast_on(), ast_off(), ast_context(), and ast_propagate()
+ *	ast_pending(), ast_on(), ast_off(), ast_context(), and ast_propagate()
  *	assume splsched.
  */
-#define ast_needed(mycpu)			(need_ast[mycpu] != AST_NONE)
 
-#define ast_on_fast(reasons)							\
-MACRO_BEGIN												\
-	int		mycpu = cpu_number();						\
-	if ((need_ast[mycpu] |= (reasons)) != AST_NONE)		\
-		{ aston(mycpu); }								\
+#define ast_on_fast(reasons)					\
+MACRO_BEGIN										\
+	ast_t	*myast = ast_pending();				\
+												\
+	if ((*myast |= (reasons)) != AST_NONE)		\
+		{ aston(myast); }						\
 MACRO_END
 
-#define ast_off_fast(reasons)							\
-MACRO_BEGIN												\
-	int		mycpu = cpu_number();						\
-	if ((need_ast[mycpu] &= ~(reasons)) == AST_NONE)	\
-		{ astoff(mycpu); }				 				\
+#define ast_off_fast(reasons)					\
+MACRO_BEGIN										\
+	ast_t	*myast = ast_pending();				\
+												\
+	if ((*myast &= ~(reasons)) == AST_NONE)		\
+		{ astoff(myast); }						\
 MACRO_END
 
 #define ast_propagate(reasons)		ast_on(reasons)
 
-#define ast_context(act, mycpu)							\
-MACRO_BEGIN												\
-	assert((mycpu) == cpu_number());					\
-	if ((need_ast[mycpu] =								\
-			((need_ast[mycpu] &~ AST_PER_THREAD) | (act)->ast)) != AST_NONE) \
-		{ aston(mycpu);	}								\
-	else												\
-		{ astoff(mycpu); }								\
+#define ast_context(act)													\
+MACRO_BEGIN																	\
+	ast_t	*myast = ast_pending();											\
+																			\
+	if ((*myast = ((*myast &~ AST_PER_THREAD) | (act)->ast)) != AST_NONE)	\
+		{ aston(myast);	}													\
+	else																	\
+		{ astoff(myast); }													\
 MACRO_END
 
 #define ast_on(reason)			     ast_on_fast(reason)
 #define ast_off(reason)			     ast_off_fast(reason)
 
+/*
+ *	NOTE: if thread is the current thread, thread_ast_set() should
+ *  be followed by ast_propagate().
+ */
 #define thread_ast_set(act, reason)		\
 						(hw_atomic_or(&(act)->ast, (reason)))
 #define thread_ast_clear(act, reason)	\
@@ -176,9 +177,12 @@ MACRO_END
 #define thread_ast_clear_all(act)		\
 						(hw_atomic_and(&(act)->ast, AST_NONE))
 
-/*
- *	NOTE: if thread is the current thread, thread_ast_set() should
- *  be followed by ast_propagate().
- */
+#ifdef MACH_BSD
+
+extern void astbsd_on(void);
+extern void act_set_astbsd(thread_t);
+extern void bsd_ast(thread_t);
+
+#endif /* MACH_BSD */
 
 #endif  /* _KERN_AST_H_ */

@@ -1,24 +1,21 @@
 /*
- * Copyright (c) 2000-2002 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2004 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -46,7 +43,11 @@ struct timezone gTimeZone = {8*60,1};
  */
 UInt32 GetTimeUTC(void)
 {
-    return (time.tv_sec + MAC_GMT_FACTOR);
+	struct timeval tv;
+
+	microtime(&tv);
+
+	return (tv.tv_sec + MAC_GMT_FACTOR);
 }
 
 
@@ -96,7 +97,7 @@ UInt32 UTCToLocal(UInt32 utcTime)
  * to_bsd_time - convert from Mac OS time (seconds since 1/1/1904)
  *		 to BSD time (seconds since 1/1/1970)
  */
-u_int32_t to_bsd_time(u_int32_t hfs_time)
+time_t to_bsd_time(u_int32_t hfs_time)
 {
 	u_int32_t gmt = hfs_time;
 
@@ -105,16 +106,16 @@ u_int32_t to_bsd_time(u_int32_t hfs_time)
 	else
 		gmt = 0;	/* don't let date go negative! */
 
-	return gmt;
+	return (time_t)gmt;
 }
 
 /*
  * to_hfs_time - convert from BSD time (seconds since 1/1/1970)
  *		 to Mac OS time (seconds since 1/1/1904)
  */
-u_int32_t to_hfs_time(u_int32_t bsd_time)
+u_int32_t to_hfs_time(time_t bsd_time)
 {
-	u_int32_t hfs_time = bsd_time;
+	u_int32_t hfs_time = (u_int32_t)bsd_time;
 
 	/* don't adjust zero - treat as uninitialzed */
 	if (hfs_time != 0)

@@ -3,22 +3,19 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -30,6 +27,8 @@
 #include <kdp/kdp_private.h>
 
 #include <libsa/types.h>
+
+#include <string.h> /* bcopy */
 
 int kdp_vm_read( caddr_t, caddr_t, unsigned int);
 int kdp_vm_write( caddr_t, caddr_t, unsigned int);
@@ -44,7 +43,7 @@ int kdp_vm_write( caddr_t, caddr_t, unsigned int);
 #endif
 
 static kdp_dispatch_t
-    dispatch_table[KDP_REATTACH - KDP_CONNECT +1] =
+    dispatch_table[KDP_HOSTREBOOT - KDP_CONNECT +1] =
     {
 /* 0 */	kdp_connect,
 /* 1 */	kdp_disconnect,
@@ -64,7 +63,8 @@ static kdp_dispatch_t
 /* F */ kdp_breakpoint_set,
 /*10 */ kdp_breakpoint_remove,
 /*11 */	kdp_regions,
-/*12 */ kdp_reattach
+/*12 */ kdp_reattach,
+/*13 */ kdp_reboot
     };
     
 kdp_glob_t	kdp;
@@ -121,7 +121,7 @@ kdp_packet(
     }
     
     req = rd->hdr.request;
-    if ((req < KDP_CONNECT) || (req > KDP_REATTACH)) {
+    if ((req < KDP_CONNECT) || (req > KDP_HOSTREBOOT)) {
 	printf("kdp_packet bad request %x len %d seq %x key %x\n",
 	    rd->hdr.request, rd->hdr.len, rd->hdr.seq, rd->hdr.key);
 

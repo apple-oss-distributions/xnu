@@ -3,22 +3,19 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -27,7 +24,6 @@
 
 #include <assym.s>
 #include <debug.h>
-#include <cpus.h>
 #include <db_machine_commands.h>
 #include <mach_rt.h>
 	
@@ -52,7 +48,170 @@
  * there are parallel paths for 32- and 64-bit machines.
  */
  
- 
+
+/*
+ * *****************************
+ * * s a v e _ s n a p s h o t *
+ * *****************************
+ *
+ *	void save_snapshot();
+ *
+ *			Link the current free list & processor local list on an independent list.
+ */
+			.align	5
+			.globl	EXT(save_snapshot)
+
+LEXT(save_snapshot)
+            mflr	r9							; get return address
+            bl		saveSetup					; turn translation off, 64-bit on, load many regs
+            bf--	pf64Bitb,save_snapshot32 	; skip if 32-bit processor
+
+            ; Handle 64-bit processor.
+
+save_snapshot64:
+
+			ld		r8,next_savearea(r10)		; Start with the current savearea
+			std		r8,SVsavefreesnapshot(0)	; Make it the restore list anchor
+			ld		r5,SVfree(0)				; Get free save area list anchor 
+
+save_snapshot64nextfree:
+            mr		r7,r5
+			std		r7,savemisc1(r8)  			; Link this one
+			ld		r5,SAVprev(r7)				; Get the next 
+            mr		r8,r7
+            mr.		r0,r5
+            bne		save_snapshot64nextfree
+
+			lwz		r6,SVinuse(0)				; Get inuse count
+			ld		r5,lclfree(r10)				; Get the local savearea list
+            subi	r6,r6,1						; Count the first as free
+
+save_snapshot64nextlocalfree:
+            subi	r6,r6,1						; Count as free
+            mr		r7,r5
+			std		r7,savemisc1(r8)	 		; Link this one
+			ld		r5,SAVprev(r7)				; Get the next 
+            mr		r8,r7
+            mr.		r0,r5
+            bne		save_snapshot64nextlocalfree
+
+			std		r5,savemisc1(r8)	   		; End the list
+			stw		r6,SVsaveinusesnapshot(0)	; Save the new number of inuse saveareas
+
+			mtlr	r9							; Restore the return
+            b		saveRestore64				; Restore interrupts and translation
+
+            ; Handle 32-bit processor.
+
+save_snapshot32:
+			lwz		r8,next_savearea+4(r10)		; Start with the current savearea
+			stw		r8,SVsavefreesnapshot+4(0)	; Make it the restore list anchor
+			lwz		r5,SVfree+4(0)				; Get free save area list anchor 
+
+save_snapshot32nextfree:
+            mr		r7,r5
+			stw		r7,savemisc1+4(r8)  		; Link this one
+			lwz		r5,SAVprev+4(r7)			; Get the next 
+            mr		r8,r7
+            mr.		r0,r5
+            bne		save_snapshot32nextfree
+
+			lwz		r6,SVinuse(0)				; Get inuse count
+			lwz		r5,lclfree+4(r10)			; Get the local savearea list
+            subi	r6,r6,1						; Count the first as free
+
+save_snapshot32nextlocalfree:
+            subi	r6,r6,1						; Count as free
+            mr		r7,r5
+			stw		r7,savemisc1+4(r8)	 		; Link this one
+			lwz		r5,SAVprev+4(r7)			; Get the next 
+            mr		r8,r7
+            mr.		r0,r5
+            bne		save_snapshot32nextlocalfree
+
+			stw		r5,savemisc1+4(r8)	   		; End the list
+			stw		r6,SVsaveinusesnapshot(0)	; Save the new number of inuse saveareas
+
+			mtlr	r9							; Restore the return
+            b		saveRestore32				; Restore interrupts and translation
+
+/*
+ * *********************************************
+ * * s a v e _ s n a p s h o t _ r e s t o r e *
+ * *********************************************
+ *
+ *	void save_snapshot_restore();
+ *
+ *			Restore the free list from the snapshot list, and reset the processors next savearea.
+ */
+			.align	5
+			.globl	EXT(save_snapshot_restore)
+
+LEXT(save_snapshot_restore)
+            mflr	r9							; get return address
+            bl		saveSetup					; turn translation off, 64-bit on, load many regs
+            bf--	pf64Bitb,save_snapshot_restore32 	; skip if 32-bit processor
+
+            ; Handle 64-bit processor.
+
+save_snapshot_restore64:
+  			lwz		r7,SVsaveinusesnapshot(0)
+			stw		r7,SVinuse(0)				; Set the new inuse count
+
+            li		r6,0
+            stw		r6,lclfreecnt(r10)			; None local now
+			std		r6,lclfree(r10)				; None local now
+
+			ld		r8,SVsavefreesnapshot(0)	; Get the restore list anchor 
+			std		r8,SVfree(0)				; Make it the free list anchor
+			li		r5,SAVempty					; Get marker for free savearea
+
+save_snapshot_restore64nextfree:
+            addi	r6,r6,1						; Count as free
+			stb		r5,SAVflags+2(r8)			; Mark savearea free
+			ld		r7,savemisc1(r8)			; Get the next 
+			std		r7,SAVprev(r8)		   		; Set the next in free list
+            mr.		r8,r7
+            bne		save_snapshot_restore64nextfree
+
+            stw		r6,SVfreecnt(0)				; Set the new free count
+
+            bl		saveGet64
+            std		r3,next_savearea(r10)		; Get the next savearea 
+
+			mtlr	r9							; Restore the return
+            b		saveRestore64				; Restore interrupts and translation
+
+            ; Handle 32-bit processor.
+
+save_snapshot_restore32:
+  			lwz		r7,SVsaveinusesnapshot(0)
+			stw		r7,SVinuse(0)				; Set the new inuse count
+
+            li		r6,0
+            stw		r6,lclfreecnt(r10)			; None local now
+			stw		r6,lclfree+4(r10)			; None local now
+
+			lwz		r8,SVsavefreesnapshot+4(0)	; Get the restore list anchor 
+			stw		r8,SVfree+4(0)				; Make it the free list anchor
+			li		r5,SAVempty					; Get marker for free savearea
+
+save_snapshot_restore32nextfree:
+            addi	r6,r6,1						; Count as free
+			stb		r5,SAVflags+2(r8)			; Mark savearea free
+			lwz		r7,savemisc1+4(r8)			; Get the next 
+			stw		r7,SAVprev+4(r8)	   		; Set the next in free list
+            mr.		r8,r7
+            bne		save_snapshot_restore32nextfree
+
+            stw		r6,SVfreecnt(0)				; Set the new free count
+
+            bl		saveGet32
+            stw		r3,next_savearea+4(r10)		; Get the next savearea 
+
+			mtlr	r9							; Restore the return
+            b		saveRestore32				; Restore interrupts and translation
+
 /*
  * ***********************
  * * s a v e _ q u e u e *

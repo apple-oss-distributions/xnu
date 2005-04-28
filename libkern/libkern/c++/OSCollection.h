@@ -3,22 +3,19 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -28,6 +25,8 @@
 #define _OS_OSCOLLECTION_H
 
 #include <libkern/c++/OSObject.h>
+
+class OSDictionary;
 
 /*!
     @class OSCollection
@@ -39,17 +38,19 @@ class OSCollection : public OSObject
 {
     friend class OSCollectionIterator;
 
-    OSDeclareAbstractStructors(OSCollection)
-
-protected:
-    unsigned int updateStamp;
+    OSDeclareAbstractStructors(OSCollection);
 
     struct ExpansionData { };
     
-    /*! @var reserved
-        Reserved for future use.  (Internal use only)  */
-    ExpansionData *reserved;
+protected:
+    unsigned int updateStamp;
 
+private:
+    /* Reserved for future use.  (Internal use only)  */
+    // ExpansionData *reserved;
+    unsigned int fOptions;
+
+protected:
     // Member functions used by the OSCollectionIterator class.
     /*
         @function iteratorSize
@@ -87,11 +88,16 @@ protected:
     virtual bool init();
 
 public:
+    enum {
+	kImmutable = 0x00000001,
+	kMASK	   = (unsigned) -1
+    };
+
     /*
         @function haveUpdated
         @abstract A member function to track of all updates to the collection.
     */
-    void haveUpdated() { updateStamp++; };
+    void haveUpdated();
 
     /*
         @function getCount
@@ -133,8 +139,84 @@ public:
      */
     virtual void flushCollection() = 0;
 
-    OSMetaClassDeclareReservedUnused(OSCollection, 0);
-    OSMetaClassDeclareReservedUnused(OSCollection, 1);
+    /*!
+        @function setOptions
+        @abstract This function is used to recursively set option bits in this collection and all child collections.
+	@discussion setOptions is a recursive function but the OSCollection class itself does not know the structure of the particular collection.  This means that all derived classes are expected to override this method and recurse if the old value of the option was NOT set, which is why the old value is returned.  As this function is a reserved function override it is very multi purpose.  It can be used to get & set the options,
+        @param options Set the (options & mask) bits.
+        @param mask The mask of bits which need to be set, 0 to get the current value.
+        @result The options before the set operation, NB setOptions(?,0) returns the current value of this collection.
+     */
+    OSMetaClassDeclareReservedUsed(OSCollection, 0);
+    virtual unsigned setOptions(unsigned options, unsigned mask, void * = 0);
+
+    /*!
+        @function copyCollection
+        @abstract Do a deep copy of a collection tree.
+	@discussion This function copies this collection and all of the contained collections recursively.  Objects that don't derive from OSContainter are NOT copied, that is objects like OSString and OSData.  To a derive from OSConnection::copyCollection some code is required to be implemented in the derived class, below is the skeleton pseudo code to copy a collection.
+
+OSCollection * <MyCollection>::copyCollection(OSDictionary *inCycleDict)
+{
+    bool allocDict = !cycleDict;
+    OSCollection *ret = 0;
+    <MyCollection> *newMyColl = 0;
+
+    if (allocDict)
+	cycleDict = OSDictionary::withCapacity(16);
+    if (!cycleDict)
+	return 0;
+
+    do {
+	// Check to see if we already have a copy of the new dictionary
+	ret = super::copyCollection(cycleDict);
+	if (ret)
+	    continue;
+	
+	// Your code goes here to copy your collection,
+	// see OSArray & OSDictionary for examples.
+	newMyColl = <MyCollection>::with<MyCollection>(this);
+	if (!newMyColl)
+	    continue;
+
+	// Insert object into cycle Dictionary
+	cycleDict->setObject((const OSSymbol *) this, newMyColl);
+
+	// Duplicate any collections in us
+	for (unsigned int i = 0; i < count; i++) {
+	    OSObject *obj = getObject(i);
+	    OSCollection *coll = OSDynamicCast(OSCollection, obj);
+
+	    if (coll) {
+		OSCollection *newColl = coll->copyCollection(cycleDict);
+		if (!newColl)
+		    goto abortCopy;
+
+		newMyColl->replaceObject(i, newColl);
+		newColl->release();
+	    };
+	};
+
+	ret = newMyColl;
+	newMyColl = 0;
+
+    } while (false);
+
+abortCopy:
+    if (newMyColl)
+	newMyColl->release();
+
+    if (allocDict)
+	cycleDict->release();
+
+    return ret;
+}
+
+	@param cycleDict Is a dictionary of all of the collections that have been, to start the copy at the top level just leave this field 0.
+	@result The newly copied collecton or 0 if insufficient memory
+    */
+    virtual OSCollection *copyCollection(OSDictionary *cycleDict = 0);
+    OSMetaClassDeclareReservedUsed(OSCollection, 1);
+
     OSMetaClassDeclareReservedUnused(OSCollection, 2);
     OSMetaClassDeclareReservedUnused(OSCollection, 3);
     OSMetaClassDeclareReservedUnused(OSCollection, 4);

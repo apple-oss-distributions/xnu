@@ -2,29 +2,25 @@
  * Copyright (c) 2000 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
- * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
- * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ *
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
+ *
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
- * 
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
+ *
  * @APPLE_LICENSE_HEADER_END@
  */
 #include <ppc/asm.h>
 #include <ppc/proc_reg.h>
-#include <cpus.h>
 #include <assym.s>
 #include <debug.h>
 #include <mach/ppc/vm_param.h>
@@ -53,7 +49,8 @@ mcount:
 		rlwinm	r8,r9,0,MSR_EE_BIT+1,MSR_EE_BIT-1	; Turn off interruptions
 		mtmsr	r8									; Update msr	
 		isync		
-		mfsprg	r7,0								; Get per_proc
+		mfsprg	r7,1								; Get the current activation
+		lwz		r7,ACT_PER_PROC(r7)					; Get the per_proc block
 		lhz		r6,PP_CPU_FLAGS(r7)					; Get  cpu flags 
 		ori		r5,r6,mcountOff						; 
 		cmplw	r5,r6								; is mount off
@@ -63,7 +60,8 @@ mcount:
 		mr r4, r0
 		bl	_mcount									; Call the C routine
 		lwz	r9,FM_ARG0(r1)
-		mfsprg	r7,0								; Get per-proc block
+		mfsprg	r7,1								; Get the current activation
+		lwz		r7,ACT_PER_PROC(r7)					; Get the per_proc block
 		lhz		r6,PP_CPU_FLAGS(r7)					; Get CPU number 
 		li		r5,mcountOff						; 
 		andc		r6,r6,r5						; Clear mcount_off

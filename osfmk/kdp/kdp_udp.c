@@ -3,22 +3,19 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -45,6 +42,8 @@
 #include <kdp/kdp_core.h>
 
 #include <vm/vm_map.h>
+#include <vm/vm_protos.h>
+
 #include <mach/memory_object_types.h>
 
 #include <string.h>
@@ -102,6 +101,7 @@ static kdp_receive_t kdp_en_recv_pkt = 0;
 
 static u_long kdp_current_ip_address = 0;
 static struct ether_addr kdp_current_mac_address = {{0, 0, 0, 0, 0, 0}};
+static void *kdp_current_ifp = 0;
 
 static void kdp_handler( void *);
 
@@ -127,15 +127,18 @@ static char router_ip_str[20];
 
 static unsigned int panic_block = 0;
 static volatile unsigned int kdp_trigger_core_dump = 0;
+static volatile unsigned int flag_kdp_trigger_reboot = 0;
 
 extern unsigned int not_in_kdp;
+
+extern int kdp_vm_read( caddr_t, caddr_t, unsigned int);
 
 void
 kdp_register_send_receive(
 	kdp_send_t	send, 
 	kdp_receive_t	receive)
 {
-	unsigned int	debug;
+	unsigned int	debug=0;
 
 	kdp_en_send_pkt = send;
 	kdp_en_recv_pkt = receive;
@@ -349,14 +352,25 @@ kdp_send(
     (*kdp_en_send_pkt)(&pkt.data[pkt.off], pkt.len);
 }
 
+/* We don't interpret this pointer, we just give it to the
+bsd stack so it can decide when to set the MAC and IP info. */
+void
+kdp_set_interface(void *ifp)
+{
+	kdp_current_ifp = ifp;
+}
+
+void *
+kdp_get_interface()
+{
+	return kdp_current_ifp;
+}
 
 void 
 kdp_set_ip_and_mac_addresses(
 	struct in_addr		*ipaddr, 
 	struct ether_addr	*macaddr)
 {
-	unsigned int debug = 0;
-
 	kdp_current_ip_address = ipaddr->s_addr;
 	kdp_current_mac_address = *macaddr;
 }
@@ -365,6 +379,7 @@ void
 kdp_set_gateway_mac(void *gatewaymac)
 {
   router_mac = *(struct ether_addr *)gatewaymac;
+  flag_router_mac_initialized = 1;
 } 
 
 struct ether_addr 
@@ -739,8 +754,7 @@ kdp_raise_exception(
 {
     int			index;
 
-    extern unsigned int disableDebugOuput;
-    extern unsigned int disableConsoleOutput;
+    extern unsigned int	disableConsoleOutput;
 
     disable_preemption();
 
@@ -809,17 +823,30 @@ kdp_raise_exception(
      * Continuing after setting kdp_trigger_core_dump should do the
      * trick.
      */
+
     if (1 == kdp_trigger_core_dump) {
 	kdp_flag &= ~PANIC_LOG_DUMP;
 	kdp_flag |= KDP_PANIC_DUMP_ENABLED;
 	kdp_panic_dump();
       }
 
+/* Trigger a reboot if the user has set this flag through the
+ * debugger.Ideally, this would be done through the HOSTREBOOT packet
+ * in the protocol,but that will need gdb support,and when it's
+ * available, it should work automatically.
+ */
+    if (1 == flag_kdp_trigger_reboot) {
+	    kdp_reboot();
+	    /* If we're still around, reset the flag */
+	    flag_kdp_trigger_reboot = 0;
+    }
+	    
     kdp_sync_cache();
 
     if (reattach_wait == 1)
       goto again;
- exit_raise_exception:
+
+exit_raise_exception:
     enable_preemption();
 }
 
@@ -941,6 +968,7 @@ int kdp_send_panic_packets (unsigned int request, char *corename,
 	kdp_send_panic_pkt(request, corename, (txend - txstart), (caddr_t) txstart);
       }
     }
+  return 0;
 }
 
 int 
@@ -1107,6 +1135,7 @@ kdp_get_xnu_version(char *versionbuf)
    strcpy(versionbuf, vstr);
    return retval;
 }
+
 /* Primary dispatch routine for the system dump */
 void 
 kdp_panic_dump()
@@ -1114,13 +1143,11 @@ kdp_panic_dump()
   char corename[50];
   char coreprefix[10];
   int panic_error;
-  extern char *debug_buf;
+
   extern vm_map_t kernel_map;
 
   extern char *inet_aton(const char *cp, struct in_addr *pin);
 
-  extern char *debug_buf;
-  extern char *debug_buf_ptr;
   uint64_t abstime;
 
   printf ("Entering system dump routine\n");
@@ -1175,7 +1202,7 @@ kdp_panic_dump()
 	   */
 	}
     }
-  /* These & 0xffs aren't necessary,but cut&paste is ever so convenient */
+
   printf("Routing via router MAC address: %02x:%02x:%02x:%02x:%02x:%02x\n",
 	  router_mac.ether_addr_octet[0] & 0xff,
 	  router_mac.ether_addr_octet[1] & 0xff,
@@ -1184,10 +1211,10 @@ kdp_panic_dump()
 	  router_mac.ether_addr_octet[4] & 0xff,
 	  router_mac.ether_addr_octet[5] & 0xff);
 
-  printf("Kernel map size is %d\n", get_vmmap_size(kernel_map));
+  printf("Kernel map size is %llu\n", (unsigned long long) get_vmmap_size(kernel_map));
   printf ("Sending write request for %s\n", corename);  
 
-  if ((panic_error = kdp_send_panic_pkt (KDP_WRQ, corename, 0 , NULL) < 0)) {
+  if ((panic_error = kdp_send_panic_pkt (KDP_WRQ, corename, 0 , NULL)) < 0) {
       printf ("kdp_send_panic_pkt failed with error %d\n", panic_error);
       goto panic_dump_exit;
     }

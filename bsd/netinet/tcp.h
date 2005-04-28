@@ -1,24 +1,21 @@
 /*
- * Copyright (c) 2000 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2004 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -61,9 +58,12 @@
 #ifndef _NETINET_TCP_H_
 #define _NETINET_TCP_H_
 #include <sys/appleapiopts.h>
+#include <sys/_types.h>
+#include <machine/endian.h>
 
-typedef	u_int32_t tcp_seq;
-typedef u_int32_t tcp_cc;		/* connection count per rfc1644 */
+#ifndef _POSIX_C_SOURCE
+typedef	__uint32_t tcp_seq;
+typedef __uint32_t tcp_cc;		/* connection count per rfc1644 */
 
 #define tcp6_seq	tcp_seq	/* for KAME src sync over BSD*'s */
 #define tcp6hdr		tcphdr	/* for KAME src sync over BSD*'s */
@@ -73,19 +73,19 @@ typedef u_int32_t tcp_cc;		/* connection count per rfc1644 */
  * Per RFC 793, September, 1981.
  */
 struct tcphdr {
-	u_short	th_sport;		/* source port */
-	u_short	th_dport;		/* destination port */
+	unsigned short	th_sport;	/* source port */
+	unsigned short	th_dport;	/* destination port */
 	tcp_seq	th_seq;			/* sequence number */
 	tcp_seq	th_ack;			/* acknowledgement number */
-#if BYTE_ORDER == LITTLE_ENDIAN
-	u_int	th_x2:4,		/* (unused) */
-		th_off:4;		/* data offset */
+#if __DARWIN_BYTE_ORDER == __DARWIN_LITTLE_ENDIAN
+	unsigned int	th_x2:4,	/* (unused) */
+			th_off:4;	/* data offset */
 #endif
-#if BYTE_ORDER == BIG_ENDIAN
-	u_int	th_off:4,		/* data offset */
-		th_x2:4;		/* (unused) */
+#if __DARWIN_BYTE_ORDER == __DARWIN_BIG_ENDIAN
+	unsigned int	th_off:4,	/* data offset */
+			th_x2:4;	/* (unused) */
 #endif
-	u_char	th_flags;
+	unsigned char	th_flags;
 #define	TH_FIN	0x01
 #define	TH_SYN	0x02
 #define	TH_RST	0x04
@@ -96,9 +96,9 @@ struct tcphdr {
 #define	TH_CWR	0x80
 #define	TH_FLAGS	(TH_FIN|TH_SYN|TH_RST|TH_ACK|TH_URG|TH_ECE|TH_CWR)
 
-	u_short	th_win;			/* window */
-	u_short	th_sum;			/* checksum */
-	u_short	th_urp;			/* urgent pointer */
+	unsigned short	th_win;		/* window */
+	unsigned short	th_sum;		/* checksum */
+	unsigned short	th_urp;		/* urgent pointer */
 };
 
 #define	TCPOPT_EOL		0
@@ -126,11 +126,31 @@ struct tcphdr {
 
 /*
  * Default maximum segment size for TCP.
- * With an IP MSS of 576, this is 536,
+ * With an IP MTU of 576, this is 536,
  * but 512 is probably more convenient.
  * This should be defined as MIN(512, IP_MSS - sizeof (struct tcpiphdr)).
  */
 #define	TCP_MSS	512
+
+/*
+ * TCP_MINMSS is defined to be 216 which is fine for the smallest
+ * link MTU (256 bytes, SLIP interface) in the Internet.
+ * However it is very unlikely to come across such low MTU interfaces
+ * these days (anno dato 2004).
+ * Probably it can be set to 512 without ill effects. But we play safe.
+ * See tcp_subr.c tcp_minmss SYSCTL declaration for more comments.
+ * Setting this to "0" disables the minmss check.
+ */
+#define	TCP_MINMSS 216
+
+/*
+ * TCP_MINMSSOVERLOAD is defined to be 1000 which should cover any type
+ * of interactive TCP session.
+ * See tcp_subr.c tcp_minmssoverload SYSCTL declaration and tcp_input.c
+ * for more comments.
+ * Setting this to "0" disables the minmssoverload check.
+ */
+#define	TCP_MINMSSOVERLOAD 1000
 
 /*
  * Default maximum segment size for TCP6.
@@ -150,14 +170,17 @@ struct tcphdr {
 #define TCP_MAXHLEN	(0xf<<2)	/* max length of header in bytes */
 #define TCP_MAXOLEN	(TCP_MAXHLEN - sizeof(struct tcphdr))
 					/* max space left for options */
+#endif /* _POSIX_C_SOURCE */
 
 /*
  * User-settable options (used with setsockopt).
  */
 #define	TCP_NODELAY	0x01	/* don't delay send to coalesce packets */
+#ifndef _POSIX_C_SOURCE
 #define	TCP_MAXSEG	0x02	/* set maximum segment size */
 #define TCP_NOPUSH	0x04	/* don't push last block of write */
 #define TCP_NOOPT	0x08	/* don't use TCP options */
 #define TCP_KEEPALIVE	0x10	/* idle time used when SO_KEEPALIVE is enabled */
+#endif /* _POSIX_C_SOURCE */
 
 #endif

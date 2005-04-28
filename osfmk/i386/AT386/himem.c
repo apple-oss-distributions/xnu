@@ -3,22 +3,19 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -141,6 +138,7 @@
 #include <mach/boolean.h>
 #include <kern/misc_protos.h>
 #include <i386/AT386/misc_protos.h>
+#include <i386/pmap.h>
 
 hil_t		hil_head;
 decl_simple_lock_data(,hil_lock)
@@ -154,7 +152,7 @@ void
 himem_init(
 	void)
 {
-	simple_lock_init(&hil_lock, ETAP_VM_HIMEM);
+	simple_lock_init(&hil_lock, 0);
 }
 
 /* 
@@ -171,10 +169,11 @@ himem_reserve(
 	vm_page_t		low;
 	hil_t			hil;
 	spl_t			ipl;
-	extern vm_offset_t	avail_end;
+	extern pmap_paddr_t_t	avail_end;
 
 	if (avail_end <= HIGH_MEM)
 		return;
+	kprintf("looking for low mem pages\n");
 	hil = (hil_t)kalloc(npages*sizeof(struct himem_link));
 	if (hil == (hil_t)0) 
 		panic("himem_reserve: kalloc failed\n");
@@ -198,7 +197,7 @@ himem_reserve(
 			i++;
 		}
 	}
-
+	kprintf("freeing high pages back\n");
 	for (low = free_head; low; low = free_head) {
 		free_head = (vm_page_t) low->pageq.next;
 		VM_PAGE_FREE(low);
@@ -251,7 +250,7 @@ himem_convert(
 	h->high_addr = phys_addr;
 
 	if (io_op == D_WRITE) {
-	  bcopy((char *)phystokv(phys_addr), (char *)phystokv(h->low_page + offset),
+	  bcopy_phys((addr64_t)phys_addr, (addr64_t)(h->low_page + offset),
 		length);
 	  h->length = 0;
 	} else {
@@ -282,8 +281,8 @@ himem_revert(
 
 	while(hil) {
 		if (hil->length) {
-			bcopy((char *)phystokv(hil->low_page + hil->offset),
-				(char *)phystokv(hil->high_addr),
+			bcopy_phys((addr64_t)hil->low_page + hil->offset),
+				(addr64_t)(hil->high_addr),
 			      hil->length);
 		}
 		hil->high_addr = 0;

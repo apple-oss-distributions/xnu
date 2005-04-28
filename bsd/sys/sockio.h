@@ -3,22 +3,19 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -61,6 +58,8 @@
 #ifndef	_SYS_SOCKIO_H_
 #define	_SYS_SOCKIO_H_
 
+#include <sys/appleapiopts.h>
+
 #include <sys/ioccom.h>
 
 /* Socket ioctl's. */
@@ -72,8 +71,10 @@
 #define	SIOCSPGRP	 _IOW('s',  8, int)		/* set process group */
 #define	SIOCGPGRP	 _IOR('s',  9, int)		/* get process group */
 
-#define	SIOCADDRT	 _IOW('r', 10, struct ortentry)	/* add route */
-#define	SIOCDELRT	 _IOW('r', 11, struct ortentry)	/* delete route */
+#if 0
+#define        SIOCADDRT        _IOW('r', 10, struct ortentry) /* add route */
+#define        SIOCDELRT        _IOW('r', 11, struct ortentry) /* delete route */
+#endif
 
 #define	SIOCSIFADDR	_IOW('i', 12, struct ifreq)	/* set ifnet address */
 #define	OSIOCGIFADDR	_IOWR('i', 13, struct ifreq)	/* get ifnet address */
@@ -101,9 +102,13 @@
 #define	SIOCGIFDSTADDR	_IOWR('i', 34, struct ifreq)	/* get p-p address */
 #define	SIOCGIFBRDADDR	_IOWR('i', 35, struct ifreq)	/* get broadcast addr */
 #define	SIOCGIFCONF	_IOWR('i', 36, struct ifconf)	/* get ifnet list */
+#ifdef KERNEL_PRIVATE
+#define	SIOCGIFCONF64	_IOWR('i', 36, struct ifconf64)	/* get ifnet list */
+#endif KERNEL_PRIVATE
 #define	SIOCGIFNETMASK	_IOWR('i', 37, struct ifreq)	/* get net addr mask */
 #define SIOCAUTOADDR	_IOWR('i', 38, struct ifreq)	/* autoconf address */
 #define SIOCAUTONETMASK	_IOW('i', 39, struct ifreq)	/* autoconf netmask */
+#define SIOCARPIPLL		_IOWR('i', 40, struct ifreq)	/* arp for IPv4LL address */
 
 
 #define	SIOCADDMULTI	 _IOW('i', 49, struct ifreq)	/* add m'cast addr */
@@ -114,6 +119,9 @@
 #define	SIOCSIFPHYS	 _IOW('i', 54, struct ifreq)	/* set IF wire */
 #define	SIOCSIFMEDIA	_IOWR('i', 55, struct ifreq)	/* set net media */
 #define	SIOCGIFMEDIA	_IOWR('i', 56, struct ifmediareq) /* get net media */
+#ifdef KERNEL_PRIVATE
+#define	SIOCGIFMEDIA64	_IOWR('i', 56, struct ifmediareq64) /* get net media (64-bit) */
+#endif KERNEL_PRIVATE
 #define	SIOCSIFGENERIC	 _IOW('i', 57, struct ifreq)	/* generic IF set op */
 #define	SIOCGIFGENERIC	_IOWR('i', 58, struct ifreq)	/* generic IF get op */
 #define SIOCRSLVMULTI   _IOWR('i', 59, struct rslvmulti_req)
@@ -127,25 +135,40 @@
 #define	SIOCSLIFPHYADDR	 _IOW('i', 66, struct if_laddrreq) /* set gif addrs */
 #define	SIOCGLIFPHYADDR	_IOWR('i', 67, struct if_laddrreq) /* get gif addrs */
 
-
-
-
-
-
-
+#define	SIOCGIFDEVMTU	_IOWR('i', 68, struct ifreq) 	/* get if ifdevmtu */
+#define	SIOCSIFALTMTU	 _IOW('i', 69, struct ifreq)	/* set if alternate mtu */
+#define SIOCGIFALTMTU	_IOWR('i', 72, struct ifreq) 	/* get if alternate mtu */
+#define SIOCSIFBOND	 _IOW('i', 70, struct ifreq)	/* set bond if config */
+#define SIOCGIFBOND	_IOWR('i', 71, struct ifreq)	/* get bond if config */
+#define	SIOCIFCREATE	_IOWR('i', 120, struct ifreq)	/* create clone if */
+#define	SIOCIFDESTROY	 _IOW('i', 121, struct ifreq)	/* destroy clone if */
+#define	SIOCSIFVLAN	 _IOW('i', 126, struct ifreq)	/* set VLAN config */
+#define	SIOCGIFVLAN	_IOWR('i', 127, struct ifreq)	/* get VLAN config */
+#define	SIOCSETVLAN	SIOCSIFVLAN
+#define	SIOCGETVLAN	SIOCGIFVLAN
 #ifdef KERNEL_PRIVATE
+#define	SIOCSIFDEVMTU	 SIOCSIFALTMTU			/* deprecated */
+#endif KERNEL_PRIVATE
+
+#ifdef PRIVATE
+#ifdef KERNEL
+#define	SIOCIFGCLONERS	_IOWR('i', 129, struct if_clonereq) /* get cloners */
+#define	SIOCIFGCLONERS64 _IOWR('i', 129, struct if_clonereq64) /* get cloners */
+#endif KERNEL
+
 /* 
  * temporary control calls to attach/detach IP to/from an ethernet interface
  */
 #define	SIOCPROTOATTACH	_IOWR('i', 80, struct ifreq)	/* attach proto to interface */
 #define	SIOCPROTODETACH	_IOWR('i', 81, struct ifreq)	/* detach proto from interface */
-#endif /* KERNEL_PRIVATE */
+#endif /* PRIVATE */
 
 #define	SIOCGIFASYNCMAP _IOWR('i', 124, struct ifreq)	/* get ppp asyncmap */
 #define	SIOCSIFASYNCMAP _IOW('i', 125, struct ifreq)	/* set ppp asyncmap */
 
 
+#ifdef PRIVATE
 #define SIOCSETOT     _IOW('s', 128, int)             /* set socket for LibOT */
-                             
+#endif /* PRIVATE */
 
 #endif /* !_SYS_SOCKIO_H_ */

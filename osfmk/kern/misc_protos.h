@@ -1,24 +1,21 @@
 /*
- * Copyright (c) 2000 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2004 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -36,6 +33,7 @@
 #include <mach/message.h>
 #include <mach/machine/vm_types.h>
 #include <ipc/ipc_types.h>
+#include <kern/debug.h>
 
 /* Set a bit in a bit array */
 extern void setbit(
@@ -60,58 +58,35 @@ extern int testbit(
 	int		which,
 	int		*bitmap);
 
-/* Move arbitrarily-aligned data from one array to another */
-extern void bcopy(
-	const char	*from,
-	char		*to,
-	vm_size_t	nbytes);
-
-/* Move overlapping, arbitrarily aligned data from one array to another */
-/* Not present on all ports */
-extern void ovbcopy(
-	const char	*from,
-	char		*to,
-	vm_size_t	nbytes);
-
-extern int bcmp(
-		const char *a,
-		const char *b,
-		vm_size_t len);
-
-/* Zero an arbitrarily aligned array */
-extern void bzero(
-	char	*from,
-	vm_size_t	nbytes);
-
 /* Move arbitrarily-aligned data from a user space to kernel space */
-extern boolean_t copyin(
-	const char	*user_addr,
-	char		*kernel_addr,
-	vm_size_t	nbytes);
+extern int copyin(
+	const user_addr_t   user_addr,
+	char                *kernel_addr,
+	vm_size_t           nbytes);
 
 /* Move a NUL-terminated string from a user space to kernel space */
-extern boolean_t copyinstr(
-	const char	*user_addr,
-	char		*kernel_addr,
-	vm_size_t	max,
-	vm_size_t	*actual);
+extern int copyinstr(
+	const user_addr_t   user_addr,
+	char                *kernel_addr,
+	vm_size_t           max,
+	vm_size_t           *actual);
 
 /* Move arbitrarily-aligned data from a user space to kernel space */
-extern boolean_t copyinmsg(
-	const char	*user_addr,
-	char		*kernel_addr,
-	mach_msg_size_t nbytes);
+extern int copyinmsg(
+	const user_addr_t   user_addr,
+	char                *kernel_addr,
+	mach_msg_size_t     nbytes);
 
 /* Move arbitrarily-aligned data from a kernel space to user space */
-extern boolean_t copyout(
-	const char	*kernel_addr,
-	char		*user_addr,
-	vm_size_t	 nbytes);
+extern int copyout(
+	const char      *kernel_addr,
+	user_addr_t     user_addr,
+	vm_size_t       nbytes);
 
 /* Move arbitrarily-aligned data from a kernel space to user space */
-extern boolean_t copyoutmsg(
-	const char	*kernel_addr,
-	char		*user_addr,
+extern int copyoutmsg(
+	const char      *kernel_addr,
+	user_addr_t     user_addr,
 	mach_msg_size_t nbytes);
 
 extern int sscanf(const char *input, const char *fmt, ...);
@@ -125,10 +100,6 @@ extern void dbugprintf(const char *format, ...);
 extern void kdp_printf(const char *format, ...);
 
 extern void printf_init(void);
-
-extern void panic(const char *string, ...);
-
-extern void panic_init(void);
 
 extern void log(int level, char *fmt, ...);
 
@@ -171,30 +142,12 @@ extern int _longjmp(
 
 extern void bootstrap_create(void);
 
-extern void halt_cpu(void);
-
-extern void halt_all_cpus(
-		boolean_t	reboot);
-
 extern void Debugger(
 		const char	* message);
 
 extern void delay(
 		int		n);
 
-extern char *machine_boot_info(
-		char		*buf,
-		vm_size_t	buf_len);
-
-/*
- * Machine-dependent routine to fill in an array with up to callstack_max
- * levels of return pc information.
- */
-extern void machine_callstack(
-		natural_t	*buf,
-		vm_size_t	callstack_max);
-
-extern void consider_machine_collect(void);
 
 extern void norma_bootstrap(void);
 

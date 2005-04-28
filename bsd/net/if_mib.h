@@ -3,22 +3,19 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -57,16 +54,15 @@
 #define	_NET_IF_MIB_H	1
 #include <sys/appleapiopts.h>
 
-#ifdef __APPLE_API_UNSTABLE
 struct ifmibdata {
-	char	ifmd_name[IFNAMSIZ]; /* name of interface */
-	int	ifmd_pcount;	/* number of promiscuous listeners */
-	int	ifmd_flags;	/* interface flags */
-	int	ifmd_snd_len;	/* instantaneous length of send queue */
-	int	ifmd_snd_maxlen; /* maximum length of send queue */
-	int	ifmd_snd_drops;	/* number of drops in send queue */
-	int	ifmd_filler[4];	/* for future expansion */
-	struct	if_data ifmd_data; /* generic information and statistics */
+	char				ifmd_name[IFNAMSIZ]; /* name of interface */
+	unsigned int		ifmd_pcount;	/* number of promiscuous listeners */
+	unsigned int		ifmd_flags;	/* interface flags */
+	unsigned int		ifmd_snd_len;	/* instantaneous length of send queue */
+	unsigned int		ifmd_snd_maxlen; /* maximum length of send queue */
+	unsigned int		ifmd_snd_drops;	/* number of drops in send queue */
+	unsigned int		ifmd_filler[4];	/* for future expansion */
+	struct if_data64	ifmd_data; /* generic information and statistics */
 };
 
 /*
@@ -74,12 +70,15 @@ struct ifmibdata {
  */
 #define	IFMIB_SYSTEM	1	/* non-interface-specific */
 #define	IFMIB_IFDATA	2	/* per-interface data table */
+#define IFMIB_IFALLDATA	3	/* all interfaces data at once */
 
 /*
  * MIB tags for the various net.link.generic.ifdata tables
  */
-#define	IFDATA_GENERAL	1	/* generic stats for all kinds of ifaces */
-#define	IFDATA_LINKSPECIFIC	2 /* specific to the type of interface */
+#define	IFDATA_GENERAL		1	/* generic stats for all kinds of ifaces */
+#define	IFDATA_LINKSPECIFIC	2	/* specific to the type of interface */
+#define	IFDATA_ADDRS		3	/* addresses assigned to interface */
+#define	IFDATA_MULTIADDRS	4	/* multicast addresses assigned to interface */
 
 /*
  * MIB tags at the net.link.generic.system level
@@ -108,7 +107,7 @@ struct ifmibdata {
  */
 
 /* For IFT_ETHER, IFT_ISO88023, and IFT_STARLAN, as used by RFC 1650 */
-struct ifmib_iso_8802_3 {
+struct ifs_iso_8802_3 {
 	u_int32_t	dot3StatsAlignmentErrors;
 	u_int32_t	dot3StatsFCSErrors;
 	u_int32_t	dot3StatsSingleCollisionFrames;
@@ -193,5 +192,4 @@ enum {
  * Put other types of interface MIBs here, or in interface-specific
  * header files if convenient ones already exist.
  */
-#endif /* __APPLE_API_UNSTABLE */
 #endif /* _NET_IF_MIB_H */

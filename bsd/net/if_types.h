@@ -3,22 +3,19 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -66,6 +63,8 @@
  * Interface types for benefit of parsing media address headers.
  * This list is derived from the SNMP list of ifTypes, currently
  * documented in RFC1573.
+ * The current list of assignments is maintained at:
+ * 	http://www.iana.org/assignments/smi-numbers
  */
 
 #define	IFT_OTHER	0x1		/* none of the following */
@@ -126,7 +125,14 @@
 #define	IFT_FAITH	0x38		/*0xf2*/
 #define	IFT_STF		0x39		/*0xf3*/
 #define	IFT_L2VLAN	0x87		/* Layer 2 Virtual LAN using 802.1Q */
-
+#define IFT_IEEE8023ADLAG 0x88		/* IEEE802.3ad Link Aggregate */
 #define	IFT_IEEE1394	0x90		/* IEEE1394 High Performance SerialBus*/
 
+/*
+ * These are not based on IANA assignments:
+ * Note: IFT_STF has a defined ifType: 0xd7 (215), but we use 0x39.
+ */
+#define	IFT_GIF		0x37		/*0xf0*/
+#define	IFT_FAITH	0x38		/*0xf2*/
+#define	IFT_STF		0x39		/*0xf3*/
 #endif

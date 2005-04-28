@@ -3,22 +3,19 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -66,8 +63,8 @@
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/proc.h>
-#include <sys/vnode.h>
-#include <sys/mount.h>
+#include <sys/vnode_internal.h>
+#include <sys/mount_internal.h>
 #include <sys/kernel.h>
 #include <sys/malloc.h>
 #include <sys/quota.h>
@@ -85,14 +82,14 @@ extern int prtactive;
  */
 int
 ufs_inactive(ap)
-	struct vop_inactive_args /* {
+	struct vnop_inactive_args /* {
 		struct vnode *a_vp;
-		struct proc *a_p;
+		vfs_context_t a_context;
 	} */ *ap;
 {
 	struct vnode *vp = ap->a_vp;
 	struct inode *ip = VTOI(vp);
-	struct proc *p = ap->a_p;
+	struct proc *p = vfs_context_proc(ap->a_context);
 	struct timeval tv;
 	int mode, error = 0;
 	extern int prtactive;
@@ -115,25 +112,24 @@ ufs_inactive(ap)
 		 * inode from inodecache
 		 */
 		SET(ip->i_flag, IN_TRANSIT);
-		error = VOP_TRUNCATE(vp, (off_t)0, 0, NOCRED, p);
+		error = ffs_truncate_internal(vp, (off_t)0, 0, NOCRED);
 		ip->i_rdev = 0;
 		mode = ip->i_mode;
 		ip->i_mode = 0;
 		ip->i_flag |= IN_CHANGE | IN_UPDATE;
-		VOP_VFREE(vp, ip->i_number, mode);
+		ffs_vfree(vp, ip->i_number, mode);
 	}
 	if (ip->i_flag & (IN_ACCESS | IN_CHANGE | IN_MODIFIED | IN_UPDATE)) {
-		tv = time;
-		VOP_UPDATE(vp, &tv, &tv, 0);
+		microtime(&tv);
+		ffs_update(vp, &tv, &tv, 0);
 	}
 out:
-	VOP_UNLOCK(vp, 0, p);
 	/*
 	 * If we are done with the inode, reclaim it
 	 * so that it can be reused immediately.
 	 */
 	if (ip->i_mode == 0)
-		vrecycle(vp, (struct slock *)0, p);
+		vnode_recycle(vp);
 	return (error);
 }
 
@@ -151,24 +147,23 @@ ufs_reclaim(vp, p)
 
 	if (prtactive && vp->v_usecount != 0)
 		vprint("ufs_reclaim: pushing active", vp);
+
+	vnode_removefsref(vp);
 	/*
 	 * Remove the inode from its hash chain.
 	 */
 	ip = VTOI(vp);
 	ufs_ihashrem(ip);
-	/*
-	 * Purge old data structures associated with the inode.
-	 */
-	cache_purge(vp);
+
 	if (ip->i_devvp) {
 		struct vnode *tvp = ip->i_devvp;
 		ip->i_devvp = NULL;
-		vrele(tvp);
+		vnode_rele(tvp);
 	}
 #if QUOTA
 	for (i = 0; i < MAXQUOTAS; i++) {
 		if (ip->i_dquot[i] != NODQUOT) {
-			dqrele(vp, ip->i_dquot[i]);
+			dqrele(ip->i_dquot[i]);
 			ip->i_dquot[i] = NODQUOT;
 		}
 	}

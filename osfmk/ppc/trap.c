@@ -1,24 +1,21 @@
 /*
- * Copyright (c) 2000 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2004 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -29,15 +26,21 @@
 #include <mach_kdb.h>
 #include <mach_kdp.h>
 #include <debug.h>
-#include <cpus.h>
+
+#include <mach/mach_types.h>
+#include <mach/mach_traps.h>
+#include <mach/thread_status.h>
+
+#include <kern/processor.h>
 #include <kern/thread.h>
 #include <kern/exception.h>
 #include <kern/syscall_sw.h>
 #include <kern/cpu_data.h>
 #include <kern/debug.h>
-#include <mach/thread_status.h>
+
 #include <vm/vm_fault.h>
 #include <vm/vm_kern.h> 	/* For kernel_map */
+
 #include <ppc/misc_protos.h>
 #include <ppc/trap.h>
 #include <ppc/exception.h>
@@ -52,7 +55,8 @@
 
 #include <sys/kdebug.h>
 
-perfTrap perfTrapHook = 0;							/* Pointer to performance trap hook routine */
+perfCallback perfTrapHook = 0; /* Pointer to CHUD trap hook routine */
+perfCallback perfASTHook = 0;  /* Pointer to CHUD AST hook routine */
 
 #if	MACH_KDB
 #include <ddb/db_watch.h>
@@ -70,7 +74,6 @@ extern boolean_t db_breakpoints_inserted;
 
 #endif	/* MACH_KDB */
 
-extern int debugger_active[NCPUS];
 extern task_t bsd_init_task;
 extern char init_task_failure_data[];
 extern int not_in_kdp;
@@ -83,17 +86,25 @@ extern int not_in_kdp;
  * before calling doexception
  */
 #define UPDATE_PPC_EXCEPTION_STATE {							\
-	thread_act_t thr_act = current_act();						\
-	thr_act->mact.pcb->save_dar = (uint64_t)dar;				\
-	thr_act->mact.pcb->save_dsisr = dsisr;						\
-	thr_act->mact.pcb->save_exception = trapno / T_VECTOR_SIZE;	/* back to powerpc */ \
+	thread_t _thread = current_thread();							\
+	_thread->machine.pcb->save_dar = (uint64_t)dar;					\
+	_thread->machine.pcb->save_dsisr = dsisr;						\
+	_thread->machine.pcb->save_exception = trapno / T_VECTOR_SIZE;	/* back to powerpc */ \
 }
 
-static void unresolved_kernel_trap(int trapno,
+void unresolved_kernel_trap(int trapno,
 				   struct savearea *ssp,
 				   unsigned int dsisr,
 				   addr64_t dar,
-				   char *message);
+				   const char *message);
+
+static void handleMck(struct savearea *ssp);		/* Common machine check handler */
+
+#ifdef MACH_BSD
+extern void get_procrustime(time_value_t *);
+extern void bsd_uprofil(time_value_t *, user_addr_t);
+#endif /* MACH_BSD */
+
 
 struct savearea *trap(int trapno,
 			     struct savearea *ssp,
@@ -106,13 +117,23 @@ struct savearea *trap(int trapno,
 	vm_map_t map;
     unsigned int sp;
 	unsigned int space, space2;
-	unsigned int offset;
-	thread_act_t thr_act;
+	vm_map_offset_t offset;
+	thread_t thread = current_thread();
 	boolean_t intr;
+	ast_t *myast;
 	
 #ifdef MACH_BSD
 	time_value_t tv;
 #endif /* MACH_BSD */
+
+	myast = ast_pending();
+	if(perfASTHook) {
+		if(*myast & AST_PPC_CHUD_ALL) {
+			perfASTHook(trapno, ssp, dsisr, (unsigned int)dar);
+		}
+	} else {
+		*myast &= ~AST_PPC_CHUD_ALL;
+	}
 
 	if(perfTrapHook) {							/* Is there a hook? */
 		if(perfTrapHook(trapno, ssp, dsisr, (unsigned int)dar) == KERN_SUCCESS) return ssp;	/* If it succeeds, we are done... */
@@ -125,7 +146,6 @@ struct savearea *trap(int trapno,
 	}
 #endif
 
-	thr_act = current_act();					/* Get current activation */
 	exception = 0;								/* Clear exception for now */
 
 /*
@@ -167,7 +187,6 @@ struct savearea *trap(int trapno,
 		 */
 		case T_DECREMENTER:
 		case T_IN_VAIN:			/* Shouldn't ever see this, lowmem_vectors eats it */
-		case T_MACHINE_CHECK:
 		case T_SYSTEM_MANAGEMENT:
 		case T_ALTIVEC_ASSIST:
 		case T_INTERRUPT:
@@ -179,6 +198,15 @@ struct savearea *trap(int trapno,
 			break;
 
 
+/*
+ *			Here we handle a machine check in the kernel
+ */
+
+		case T_MACHINE_CHECK:
+			handleMck(ssp);						/* Common to both user and kernel */
+			break;
+
+
 		case T_ALIGNMENT:
 /*
 *			If enaNotifyEMb is set, we get here, and
@@ -187,6 +215,10 @@ struct savearea *trap(int trapno,
 *			tracing of unaligned accesses.  
 */
 			
+			if(ssp->save_hdr.save_misc3) {				/* Was it a handled exception? */
+				unresolved_kernel_trap(trapno, ssp, dsisr, dar, NULL);	/* Go panic */
+				break;
+			}
 			KERNEL_DEBUG_CONSTANT(
 				MACHDBG_CODE(DBG_MACH_EXCP_ALNG, 0) | DBG_FUNC_NONE,
 				(int)ssp->save_srr0 - 4, (int)dar, (int)dsisr, (int)ssp->save_lr, 0);
@@ -230,7 +262,7 @@ struct savearea *trap(int trapno,
 #if	MACH_KDB
 			mp_disable_preemption();
 			if (debug_mode
-			    && debugger_active[cpu_number()]
+			    && getPerProc()->debugger_active
 			    && !let_ddb_vm_fault) {
 				/*
 				 * Force kdb to handle this one.
@@ -241,7 +273,7 @@ struct savearea *trap(int trapno,
 #endif	/* MACH_KDB */
 			/* can we take this during normal panic dump operation? */
 			if (debug_mode
-			    && debugger_active[cpu_number()]
+			    && getPerProc()->debugger_active
 			    && !not_in_kdp) {
 			        /* 
 				 * Access fault while in kernel core dump.
@@ -256,9 +288,9 @@ struct savearea *trap(int trapno,
 
 			if(intr) ml_set_interrupts_enabled(TRUE);	/* Enable if we were */
 			
-			if(((dar >> 28) < 0xE) | ((dar >> 28) > 0xF))  {	/* Is this a copy in/out? */
+			if(((dar >> 28) < 0xE) | ((dar >> 28) > 0xF))  {	/* User memory window access? */
 			
-				offset = (unsigned int)dar;				/* Set the failing address */
+				offset = (vm_map_offset_t)dar;				/* Set the failing address */
 				map = kernel_map;						/* No, this is a normal kernel access */
 				
 /*
@@ -267,14 +299,14 @@ struct savearea *trap(int trapno,
  *	opened, it will clear the flag.
  */
 				if((0 == (offset & -PAGE_SIZE)) && 		/* Check for access of page 0 and */
-				  ((thr_act->mact.specFlags) & ignoreZeroFault)) {	/* special case of ignoring page zero faults */
+				  ((thread->machine.specFlags) & ignoreZeroFault)) {	/* special case of ignoring page zero faults */
 					ssp->save_srr0 += 4;				/* Point to next instruction */
 					break;
 				}
 
-				code = vm_fault(map, trunc_page_32(offset),
+				code = vm_fault(map, vm_map_trunc_page(offset),
 						dsisr & MASK(DSISR_WRITE) ? PROT_RW : PROT_RO,
-						FALSE, THREAD_UNINT, NULL, 0);
+						FALSE, THREAD_UNINT, NULL, vm_map_trunc_page(0));
 
 				if (code != KERN_SUCCESS) {
 					unresolved_kernel_trap(trapno, ssp, dsisr, dar, NULL);
@@ -286,28 +318,23 @@ struct savearea *trap(int trapno,
 				break;
 			}
 
-			/* If we get here, the fault was due to a copyin/out */
+			/* If we get here, the fault was due to a user memory window access */
 
-			map = thr_act->map;
+			map = thread->map;
 			
-			offset = (unsigned int)(thr_act->mact.cioRelo + dar);	/* Compute the user space address */
+			offset = (vm_map_offset_t)(thread->machine.umwRelo + dar);	/* Compute the user space address */
 
-			code = vm_fault(map, trunc_page_32(offset),
+			code = vm_fault(map, vm_map_trunc_page(offset),
 					dsisr & MASK(DSISR_WRITE) ? PROT_RW : PROT_RO,
-					FALSE, THREAD_UNINT, NULL, 0);
+					FALSE, THREAD_UNINT, NULL, vm_map_trunc_page(0));
 
 			/* If we failed, there should be a recovery
 			 * spot to rfi to.
 			 */
 			if (code != KERN_SUCCESS) {
-
-				if (thr_act->thread->recover) {
-				
-					act_lock_thread(thr_act);
-					ssp->save_srr0 = thr_act->thread->recover;
-					thr_act->thread->recover =
-							(vm_offset_t)NULL;
-					act_unlock_thread(thr_act);
+				if (thread->recover) {
+					ssp->save_srr0 = thread->recover;
+					thread->recover = (vm_offset_t)NULL;
 				} else {
 					unresolved_kernel_trap(trapno, ssp, dsisr, dar, "copyin/out has no recovery point");
 				}
@@ -324,7 +351,7 @@ struct savearea *trap(int trapno,
 
 #if	MACH_KDB
 			if (debug_mode
-			    && debugger_active[cpu_number()]
+			    && getPerProc()->debugger_active
 			    && !let_ddb_vm_fault) {
 				/*
 				 * Force kdb to handle this one.
@@ -341,8 +368,8 @@ struct savearea *trap(int trapno,
 
 			map = kernel_map;
 			
-			code = vm_fault(map, trunc_page_64(ssp->save_srr0),
-					PROT_EXEC, FALSE, THREAD_UNINT, NULL, 0);
+			code = vm_fault(map, vm_map_trunc_page(ssp->save_srr0),
+					PROT_EXEC, FALSE, THREAD_UNINT, NULL, vm_map_trunc_page(0));
 
 			if (code != KERN_SUCCESS) {
 				unresolved_kernel_trap(trapno, ssp, dsisr, dar, NULL);
@@ -368,12 +395,15 @@ struct savearea *trap(int trapno,
 		}
 	} else {
 
-		ml_set_interrupts_enabled(TRUE);	/* Processing for user state traps is always enabled */
+		/* 
+		 * Processing for user state traps with interrupt enabled
+		 * For T_AST, interrupts are enabled in the AST delivery
+		 */
+		if (trapno != T_AST) 
+			ml_set_interrupts_enabled(TRUE);
 
 #ifdef MACH_BSD
 		{
-		void get_procrustime(time_value_t *);
-
 			get_procrustime(&tv);
 		}
 #endif /* MACH_BSD */
@@ -401,7 +431,6 @@ struct savearea *trap(int trapno,
 			 */
 		case T_DECREMENTER:
 		case T_IN_VAIN:								/* Shouldn't ever see this, lowmem_vectors eats it */
-		case T_MACHINE_CHECK:
 		case T_INTERRUPT:
 		case T_FP_UNAVAILABLE:
 		case T_SYSTEM_MANAGEMENT:
@@ -414,6 +443,15 @@ struct savearea *trap(int trapno,
 
 			panic("Unexpected user state trap(cpu %d): 0x%08X DSISR=0x%08X DAR=0x%016llX PC=0x%016llX, MSR=0x%016llX\n",
 			       cpu_number(), trapno, dsisr, dar, ssp->save_srr0, ssp->save_srr1);
+			break;
+
+
+/*
+ *			Here we handle a machine check in user state
+ */
+
+		case T_MACHINE_CHECK:
+			handleMck(ssp);						/* Common to both user and kernel */
 			break;
 
 		case T_RESET:
@@ -434,6 +472,12 @@ struct savearea *trap(int trapno,
 			KERNEL_DEBUG_CONSTANT(
 				MACHDBG_CODE(DBG_MACH_EXCP_ALNG, 0) | DBG_FUNC_NONE,
 				(int)ssp->save_srr0 - 4, (int)dar, (int)dsisr, (int)ssp->save_lr, 0);
+			
+			if(ssp->save_hdr.save_misc3) {				/* Was it a handled exception? */
+				exception = EXC_BAD_ACCESS;				/* Yes, throw exception */
+				code = EXC_PPC_UNALIGNED;
+				subcode = (unsigned int)dar;
+			}
 			break;
 
 		case T_EMULATE:
@@ -464,7 +508,7 @@ struct savearea *trap(int trapno,
 
 		case T_PROGRAM:
 			if (ssp->save_srr1 & MASK(SRR1_PRG_FE)) {
-				fpu_save(thr_act->mact.curctx);
+				fpu_save(thread->machine.curctx);
 				UPDATE_PPC_EXCEPTION_STATE;
 				exception = EXC_ARITHMETIC;
 				code = EXC_ARITHMETIC;
@@ -487,10 +531,10 @@ struct savearea *trap(int trapno,
 				subcode = (unsigned int)ssp->save_srr0;
 			} else if (ssp->save_srr1 & MASK(SRR1_PRG_TRAP)) {
 				unsigned int inst;
-				char *iaddr;
+				//char *iaddr;
 				
-				iaddr = CAST_DOWN(char *, ssp->save_srr0);		/* Trim from long long and make a char pointer */ 
-				if (copyin(iaddr, (char *) &inst, 4 )) panic("copyin failed\n");
+				//iaddr = CAST_DOWN(char *, ssp->save_srr0);		/* Trim from long long and make a char pointer */ 
+				if (copyin(ssp->save_srr0, (char *) &inst, 4 )) panic("copyin failed\n");
 				
 				if(dgWork.dgFlags & enaDiagTrap) {	/* Is the diagnostic trap enabled? */
 					if((inst & 0xFFFFFFF0) == 0x0FFFFFF0) {	/* Is this a TWI 31,R31,0xFFFx? */
@@ -523,7 +567,7 @@ struct savearea *trap(int trapno,
 			break;
 
 		case T_DATA_ACCESS:
-			map = thr_act->map;
+			map = thread->map;
 
 			if(ssp->save_dsisr & dsiInvMode) {			/* Did someone try to reserve cache inhibited? */
 				UPDATE_PPC_EXCEPTION_STATE;				/* Don't even bother VM with this one */
@@ -532,9 +576,9 @@ struct savearea *trap(int trapno,
 				break;
 			}
 			
-			code = vm_fault(map, trunc_page_64(dar),
+			code = vm_fault(map, vm_map_trunc_page(dar),
 				 dsisr & MASK(DSISR_WRITE) ? PROT_RW : PROT_RO,
-				 FALSE, THREAD_ABORTSAFE, NULL, 0);
+				 FALSE, THREAD_ABORTSAFE, NULL, vm_map_trunc_page(0));
 
 			if ((code != KERN_SUCCESS) && (code != KERN_ABORTED)) {
 				UPDATE_PPC_EXCEPTION_STATE;
@@ -551,10 +595,10 @@ struct savearea *trap(int trapno,
 			/* Same as for data access, except fault type
 			 * is PROT_EXEC and addr comes from srr0
 			 */
-			map = thr_act->map;
+			map = thread->map;
 			
-			code = vm_fault(map, trunc_page_64(ssp->save_srr0),
-					PROT_EXEC, FALSE, THREAD_ABORTSAFE, NULL, 0);
+			code = vm_fault(map, vm_map_trunc_page(ssp->save_srr0),
+				PROT_EXEC, FALSE, THREAD_ABORTSAFE, NULL, vm_map_trunc_page(0));
 
 			if ((code != KERN_SUCCESS) && (code != KERN_ABORTED)) {
 				UPDATE_PPC_EXCEPTION_STATE;
@@ -568,15 +612,12 @@ struct savearea *trap(int trapno,
 			break;
 
 		case T_AST:
-			ml_set_interrupts_enabled(FALSE);
-			ast_taken(AST_ALL, intr);
+			/* AST delivery is done below */
 			break;
 			
 		}
 #ifdef MACH_BSD
 		{
-		void bsd_uprofil(time_value_t *, unsigned int);
-
 		bsd_uprofil(&tv, ssp->save_srr0);
 		}
 #endif /* MACH_BSD */
@@ -623,7 +664,7 @@ struct savearea *trap(int trapno,
                 	   for (i = 0; i < 8; i++) {
                         	if (addr == (char*)NULL)
                                		break;
-                        	if (!copyin(addr,(char*)stack_buf, 
+                        	if (!copyin(ssp->save_r1,(char*)stack_buf, 
 							3 * sizeof(int))) {
                                		buf += sprintf(buf, "0x%08X : 0x%08X\n"
 						,addr,stack_buf[2]);
@@ -642,11 +683,15 @@ struct savearea *trap(int trapno,
 	 * Check to see if we need an AST, if so take care of it here
 	 */
 	ml_set_interrupts_enabled(FALSE);
-	if (USER_MODE(ssp->save_srr1))
-		while (ast_needed(cpu_number())) {
+
+	if (USER_MODE(ssp->save_srr1)) {
+		myast = ast_pending();
+		while (*myast & AST_ALL) {
 			ast_taken(AST_ALL, intr);
 			ml_set_interrupts_enabled(FALSE);
+			myast = ast_pending();
 		}
+	}
 
 	return ssp;
 }
@@ -733,7 +778,7 @@ doexception(
 
 	codes[0] = code;	
 	codes[1] = sub;
-	exception(exc, codes, 2);
+	exception_triage(exc, codes, 2);
 }
 
 char *trap_type[] = {
@@ -783,18 +828,19 @@ void unresolved_kernel_trap(int trapno,
 			    struct savearea *ssp,
 			    unsigned int dsisr,
 			    addr64_t dar,
-			    char *message)
+			    const char *message)
 {
 	char *trap_name;
 	extern void print_backtrace(struct savearea *);
 	extern unsigned int debug_mode, disableDebugOuput;
+	extern unsigned long panic_caller;
 
 	ml_set_interrupts_enabled(FALSE);					/* Turn off interruptions */
 	lastTrace = LLTraceSet(0);							/* Disable low-level tracing */
 
 	if( logPanicDataToScreen )
 		disableDebugOuput = FALSE;
-	
+
 	debug_mode++;
 	if ((unsigned)trapno <= T_MAX)
 		trap_name = trap_type[trapno / T_VECTOR_SIZE];
@@ -808,6 +854,7 @@ void unresolved_kernel_trap(int trapno,
 
 	print_backtrace(ssp);
 
+	panic_caller = (0xFFFF0000 | (trapno / T_VECTOR_SIZE) );
 	draw_panic_dialog();
 		
 	if( panicDebugging )
@@ -815,12 +862,36 @@ void unresolved_kernel_trap(int trapno,
 	panic(message);
 }
 
+const char *corr[2] = {"uncorrected", "corrected  "};
+
+void handleMck(struct savearea *ssp) {					/* Common machine check handler */
+
+	int cpu;
+	
+	cpu = cpu_number();
+
+	printf("Machine check (%d) - %s - pc = %016llX, msr = %016llX, dsisr = %08X, dar = %016llX\n",
+		cpu, corr[ssp->save_hdr.save_misc3], ssp->save_srr0, ssp->save_srr1, ssp->save_dsisr, ssp->save_dar);		/* Tell us about it */
+	printf("Machine check (%d) -   AsyncSrc = %016llX, CoreFIR = %016llx\n", cpu, ssp->save_xdat0, ssp->save_xdat1);
+	printf("Machine check (%d) -      L2FIR = %016llX,  BusFir = %016llx\n", cpu, ssp->save_xdat2, ssp->save_xdat3);
+	
+	if(ssp->save_hdr.save_misc3) return;				/* Leave the the machine check was recovered */
+
+	panic("Uncorrectable machine check: pc = %016llX, msr = %016llX, dsisr = %08X, dar = %016llX\n"
+	      "  AsyncSrc = %016llX, CoreFIR = %016llx\n"
+	      "     L2FIR = %016llX,  BusFir = %016llx\n",
+		  ssp->save_srr0, ssp->save_srr1, ssp->save_dsisr, ssp->save_dar, 
+		  ssp->save_xdat0, ssp->save_xdat1, ssp->save_xdat2, ssp->save_xdat3);
+	
+	return;
+}
+
 void
 thread_syscall_return(
         kern_return_t ret)
 {
-        register thread_act_t   thr_act = current_act();
-        register struct savearea *regs = USER_REGS(thr_act);
+        register thread_t   thread = current_thread();
+        register struct savearea *regs = USER_REGS(thread);
 
 	if (kdebug_enable && ((unsigned int)regs->save_r0 & 0x80000000)) {
 	  /* Mach trap */
@@ -838,15 +909,10 @@ thread_syscall_return(
 void
 thread_kdb_return(void)
 {
-	register thread_act_t	thr_act = current_act();
-	register thread_t	cur_thr = current_thread();
-	register struct savearea *regs = USER_REGS(thr_act);
+	register thread_t	thread = current_thread();
+	register struct savearea *regs = USER_REGS(thread);
 
-	Call_Debugger(thr_act->mact.pcb->save_exception, regs);
-#if		MACH_LDEBUG
-	assert(cur_thr->mutex_count == 0); 
-#endif		/* MACH_LDEBUG */
-	check_simple_locks();
+	Call_Debugger(thread->machine.pcb->save_exception, regs);
 	thread_exception_return();
 	/*NOTREACHED*/
 }

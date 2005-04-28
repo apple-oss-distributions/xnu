@@ -3,22 +3,19 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -97,7 +94,7 @@ static MALLOC_DEFINE(M_IGMP, "igmp", "igmp state");
 #endif
 
 static struct router_info *
-		find_rti __P((struct ifnet *ifp));
+		find_rti(struct ifnet *ifp);
 
 static struct igmpstat igmpstat;
 
@@ -110,7 +107,7 @@ static u_long igmp_all_rtrs_group;
 static struct mbuf *router_alert;
 static struct router_info *Head;
 
-static void igmp_sendpkt __P((struct in_multi *, int, unsigned long));
+static void igmp_sendpkt(struct in_multi *, int, unsigned long);
 
 void
 igmp_init()
@@ -141,10 +138,10 @@ igmp_init()
 }
 
 static struct router_info *
-find_rti(ifp)
-	struct ifnet *ifp;
+find_rti(
+	struct ifnet *ifp)
 {
-	register struct router_info *rti = Head;
+	struct router_info *rti = Head;
 	
 	
 #if IGMP_DEBUG
@@ -176,17 +173,17 @@ find_rti(ifp)
 }
 
 void
-igmp_input(m, iphlen)
-	register struct mbuf *m;
-	register int iphlen;
+igmp_input(
+	struct mbuf *m,
+	int iphlen)
 {
-	register struct igmp *igmp;
-	register struct ip *ip;
-	register int igmplen;
-	register struct ifnet *ifp = m->m_pkthdr.rcvif;
-	register int minlen;
-	register struct in_multi *inm;
-	register struct in_ifaddr *ia;
+	struct igmp *igmp;
+	struct ip *ip;
+	int igmplen;
+	struct ifnet *ifp = m->m_pkthdr.rcvif;
+	int minlen;
+	struct in_multi *inm;
+	struct in_ifaddr *ia;
 	struct in_multistep step;
 	struct router_info *rti;
 	
@@ -296,6 +293,7 @@ igmp_input(m, iphlen)
 		 * - Use the value specified in the query message as
 		 *   the maximum timeout.
 		 */
+		lck_mtx_lock(rt_mtx);
 		IN_FIRST_MULTI(step, inm);
 		while (inm != NULL) {
 			if (inm->inm_ifp == ifp &&
@@ -311,6 +309,7 @@ igmp_input(m, iphlen)
 			}
 			IN_NEXT_MULTI(step, inm);
 		}
+		lck_mtx_unlock(rt_mtx);
 
 		break;
 
@@ -353,7 +352,9 @@ igmp_input(m, iphlen)
 		 * If we belong to the group being reported, stop
 		 * our timer for that group.
 		 */
+		ifnet_lock_shared(ifp);
 		IN_LOOKUP_MULTI(igmp->igmp_group, ifp, inm);
+		ifnet_lock_done(ifp);
 
 		if (inm != NULL) {
 			inm->inm_timer = 0;
@@ -376,7 +377,6 @@ int
 igmp_joingroup(inm)
 	struct in_multi *inm;
 {
-	int s = splnet();
 
 	if (inm->inm_addr.s_addr == igmp_all_hosts_group
 	    || inm->inm_ifp->if_flags & IFF_LOOPBACK) {
@@ -392,7 +392,6 @@ igmp_joingroup(inm)
 		igmp_timers_are_running = 1;
 	}
 	return 0;
-	splx(s);
 }
 
 void
@@ -409,9 +408,8 @@ igmp_leavegroup(inm)
 void
 igmp_fasttimo()
 {
-	register struct in_multi *inm;
+	struct in_multi *inm;
 	struct in_multistep step;
-	int s;
 
 	/*
 	 * Quick check to see if any work needs to be done, in order
@@ -421,7 +419,6 @@ igmp_fasttimo()
 	if (!igmp_timers_are_running)
 		return;
 
-	s = splnet();
 	igmp_timers_are_running = 0;
 	IN_FIRST_MULTI(step, inm);
 	while (inm != NULL) {
@@ -435,14 +432,12 @@ igmp_fasttimo()
 		}
 		IN_NEXT_MULTI(step, inm);
 	}
-	splx(s);
 }
 
 void
 igmp_slowtimo()
 {
-	int s = splnet();
-	register struct router_info *rti =  Head;
+	struct router_info *rti =  Head;
 
 #if IGMP_DEBUG
 	printf("[igmp.c,_slowtimo] -- > entering \n");
@@ -459,7 +454,6 @@ igmp_slowtimo()
 #if IGMP_DEBUG	
 	printf("[igmp.c,_slowtimo] -- > exiting \n");
 #endif
-	splx(s);
 }
 
 static struct route igmprt;

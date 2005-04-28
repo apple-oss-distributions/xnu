@@ -1,24 +1,21 @@
 /*
- * Copyright (c) 2000 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2004 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -33,13 +30,12 @@
 #include <sys/systm.h>
 #include <sys/kernel.h>
 #include <sys/vm.h>
-#include <sys/proc.h>
+#include <sys/proc_internal.h>
 #include <sys/user.h>
-#include <sys/buf.h>
 #include <sys/reboot.h>
 #include <sys/conf.h>
-#include <sys/vnode.h>
-#include <sys/file.h>
+#include <sys/vnode_internal.h>
+#include <sys/file_internal.h>
 #include <sys/clist.h>
 #include <sys/callout.h>
 #include <sys/mbuf.h>
@@ -58,8 +54,10 @@
 #include <vm/vm_kern.h>
 #include <mach/vm_param.h>
 #include <sys/filedesc.h>
+#include <mach/host_priv.h>
 #include <mach/host_reboot.h>
-#include <sys/kern_audit.h>
+
+#include <bsm/audit_kernel.h>
 
 int	waittime = -1;
 
@@ -73,6 +71,7 @@ boot(paniced, howto, command)
 	struct proc *p = current_proc();	/* XXX */
 	int hostboot_option=0;
 	int funnel_state;
+	struct proc  *launchd_proc;
 
 	static void proc_shutdown();
     extern void md_prepare_for_shutdown(int paniced, int howto, char * command);
@@ -99,24 +98,28 @@ boot(paniced, howto, command)
 
 		sync(p, (void *)NULL, (int *)NULL);
 
-		/* Release vnodes from the VM object cache */	 
-		ubc_unmountall();
+		/*
+		 * Now that all processes have been  termianted and system is sync'ed up, 
+		 * suspend launchd
+		 */
 
-		IOSleep( 1 * 1000 );
+		launchd_proc = pfind(1);
+		if (launchd_proc && p != launchd_proc) {
+			task_suspend(launchd_proc->task);
+		}
 
 		/*
 		 * Unmount filesystems
 		 */
-		if (panicstr == 0)
-			vfs_unmountall();
+		vfs_unmountall();
 
 		/* Wait for the buffer cache to clean remaining dirty buffers */
-		for (iter = 0; iter < 20; iter++) {
+		for (iter = 0; iter < 100; iter++) {
 			nbusy = count_busy_buffers();
 			if (nbusy == 0)
 				break;
 			printf("%d ", nbusy);
-			IOSleep( 4 * nbusy );
+			IOSleep( 1 * nbusy );
 		}
 		if (nbusy)
 			printf("giving up\n");
@@ -138,6 +141,16 @@ boot(paniced, howto, command)
 	if (paniced == RB_PANIC)
 		hostboot_option = HOST_REBOOT_HALT;
 
+	/*
+	 * if we're going to power down due to a halt,
+	 * give the disks a chance to finish getting
+	 * the track cache flushed to the media... 
+	 * unfortunately, some of our earlier drives
+	 * don't properly hold off on returning 
+	 * from the track flush command (issued by
+	 * the unmounts) until it's actully fully
+	 * committed.
+	 */
 	if (hostboot_option == HOST_REBOOT_HALT)
 	        IOSleep( 1 * 1000 );
 
@@ -164,6 +177,7 @@ proc_shutdown()
 	struct proc	*p, *self;
 	struct vnode	**cdirp, **rdirp, *vp;
 	int		restart, i, TERM_catch;
+	int delayterm = 0;
 
 	/*
 	 *	Kill as many procs as we can.  (Except ourself...)
@@ -171,22 +185,33 @@ proc_shutdown()
 	self = (struct proc *)current_proc();
 	
 	/*
-	 * Suspend /etc/init
+	 * Signal the init with SIGTERM so that he does not launch
+	 * new processes 
 	 */
 	p = pfind(1);
-	if (p && p != self)
-		task_suspend(p->task);		/* stop init */
+	if (p && p != self) {
+		psignal(p, SIGTERM);
+	}
 
 	printf("Killing all processes ");
 
 	/*
 	 * send SIGTERM to those procs interested in catching one
 	 */
+sigterm_loop:
 	for (p = allproc.lh_first; p; p = p->p_list.le_next) {
-	        if (((p->p_flag&P_SYSTEM) == 0) && (p->p_pptr->p_pid != 0) && (p != self)) {
-		        if (p->p_sigcatch & sigmask(SIGTERM))
+	        if (((p->p_flag&P_SYSTEM) == 0) && (p->p_pptr->p_pid != 0) && (p != self) && (p->p_stat != SZOMB) && (p->p_shutdownstate == 0)) {
+
+			if ((delayterm == 0) && ((p->p_lflag& P_LDELAYTERM) == P_LDELAYTERM)) {
+				continue;
+			}
+		        if (p->p_sigcatch & sigmask(SIGTERM)) {
+					p->p_shutdownstate = 1;
 			        psignal(p, SIGTERM);
+
+				goto sigterm_loop;
 		}
+	}
 	}
 	/*
 	 * now wait for up to 30 seconds to allow those procs catching SIGTERM
@@ -199,26 +224,24 @@ proc_shutdown()
 		 * and then check to see if the tasks that were sent a
 		 * SIGTERM have exited
 		 */
-	        IOSleep(100);   
+		IOSleep(100);   
 		TERM_catch = 0;
 
-	        for (p = allproc.lh_first; p; p = p->p_list.le_next) {
-		        if (((p->p_flag&P_SYSTEM) == 0) && (p->p_pptr->p_pid != 0) && (p != self)) {
-			        if (p->p_sigcatch & sigmask(SIGTERM))
-				        TERM_catch++;
+		for (p = allproc.lh_first; p; p = p->p_list.le_next) {
+			if (p->p_shutdownstate == 1) {
+				TERM_catch++;
 			}
 		}
 		if (TERM_catch == 0)
 		        break;
 	}
 	if (TERM_catch) {
-	        /*
+		/*
 		 * log the names of the unresponsive tasks
 		 */
 
 	        for (p = allproc.lh_first; p; p = p->p_list.le_next) {
-		        if (((p->p_flag&P_SYSTEM) == 0) && (p->p_pptr->p_pid != 0) && (p != self)) {
-			        if (p->p_sigcatch & sigmask(SIGTERM))
+			if (p->p_shutdownstate == 1) {
 				  printf("%s[%d]: didn't act on SIGTERM\n", p->p_comm, p->p_pid);
 			}
 		}
@@ -228,9 +251,17 @@ proc_shutdown()
 	/*
 	 * send a SIGKILL to all the procs still hanging around
 	 */
+sigkill_loop:
 	for (p = allproc.lh_first; p; p = p->p_list.le_next) {
-	        if (((p->p_flag&P_SYSTEM) == 0) && (p->p_pptr->p_pid != 0) && (p != self))
-		        psignal(p, SIGKILL);
+	        if (((p->p_flag&P_SYSTEM) == 0) && (p->p_pptr->p_pid != 0) && (p != self) && (p->p_stat != SZOMB) && (p->p_shutdownstate != 2)) {
+
+			if ((delayterm == 0) && ((p->p_lflag& P_LDELAYTERM) == P_LDELAYTERM)) {
+				continue;
+			}
+			psignal(p, SIGKILL);
+			p->p_shutdownstate = 2;
+			goto sigkill_loop;
+		}
 	}
 	/*
 	 * wait for up to 60 seconds to allow these procs to exit normally
@@ -239,7 +270,7 @@ proc_shutdown()
 		IOSleep(200);  /* double the time from 100 to 200 for NFS requests in particular */
 
 	        for (p = allproc.lh_first; p; p = p->p_list.le_next) {
-		        if (((p->p_flag&P_SYSTEM) == 0) && (p->p_pptr->p_pid != 0) && (p != self))
+				if (p->p_shutdownstate == 2)
 			        break;
 		}
 		if (!p)
@@ -251,7 +282,8 @@ proc_shutdown()
 	 */
 	p = allproc.lh_first;
 	while (p) {
-	        if ((p->p_flag&P_SYSTEM) || (p->p_pptr->p_pid == 0) || (p == self)) {
+	        if ((p->p_flag&P_SYSTEM) || (!delayterm && ((p->p_lflag& P_LDELAYTERM))) 
+				|| (p->p_pptr->p_pid == 0) || (p == self)) {
 		        p = p->p_list.le_next;
 		}
 		else {
@@ -262,12 +294,11 @@ proc_shutdown()
 			 * understand the sig_lock.  This needs to be fixed.
 			 * XXX
 			 */
-		        if (p->exit_thread) {	/* someone already doing it */
-						/* give him a chance */
-			        thread_block(THREAD_CONTINUE_NULL);
-			}
-			else {
-			        p->exit_thread = current_act();
+			if (p->exit_thread) {	/* someone already doing it */
+				/* give him a chance */
+				thread_block(THREAD_CONTINUE_NULL);
+			} else {
+				p->exit_thread = current_thread();
 				printf(".");
 				exit1(p, 1, (int *)NULL);
 			}
@@ -275,27 +306,13 @@ proc_shutdown()
 		}
 	}
 	printf("\n");
-	/*
-	 *	Forcibly free resources of what's left.
-	 */
-	p = allproc.lh_first;
-	while (p) {
-	/*
-	 * Close open files and release open-file table.
-	 * This may block!
-	 */
-#ifdef notyet
-	/* panics on reboot due to "zfree: non-allocated memory in collectable zone" message */
-	fdfree(p);
-#endif /* notyet */
-	p = p->p_list.le_next;
+
+
+	/* Now start the termination of processes that are marked for delayed termn */
+	if (delayterm == 0) {
+		delayterm = 1;
+		goto  sigterm_loop;
 	}
-	/* Wait for the reaper thread to run, and clean up what we have done 
-	 * before we proceed with the hardcore shutdown. This reduces the race
-	 * between kill_tasks and the reaper thread.
-	 */
-	/* thread_wakeup(&reaper_queue); */
-	/*	IOSleep( 1 * 1000);      */
 	printf("continuing\n");
 }
 

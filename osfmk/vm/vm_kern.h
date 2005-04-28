@@ -1,24 +1,21 @@
 /*
- * Copyright (c) 2000 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2004 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -63,14 +60,11 @@
 #ifndef	_VM_VM_KERN_H_
 #define _VM_VM_KERN_H_
 
+#include <mach/mach_types.h>
 #include <mach/boolean.h>
 #include <mach/kern_return.h>
-#include <mach/machine/vm_types.h>
-#include <vm/vm_map.h>
 
-extern void		kmem_init(
-				vm_offset_t	start,
-				vm_offset_t	end);
+#ifdef	KERNEL_PRIVATE
 
 extern kern_return_t	kernel_memory_allocate(
 				vm_map_t	map,
@@ -101,11 +95,6 @@ extern kern_return_t	kmem_alloc_pageable(
 				vm_offset_t	*addrp,
 				vm_size_t	size);
 
-extern kern_return_t	kmem_alloc_wired(
-				vm_map_t	map,
-				vm_offset_t	*addrp,
-				vm_size_t	size);
-
 extern kern_return_t	kmem_alloc_aligned(
 				vm_map_t	map,
 				vm_offset_t	*addrp,
@@ -123,6 +112,17 @@ extern void		kmem_free(
 				vm_offset_t	addr,
 				vm_size_t	size);
 
+#ifdef	MACH_KERNEL_PRIVATE
+
+extern void		kmem_init(
+					vm_offset_t	start,
+					vm_offset_t	end);
+
+extern kern_return_t	kmem_alloc_wired(
+				vm_map_t	map,
+				vm_offset_t	*addrp,
+				vm_size_t	size);
+
 extern kern_return_t	kmem_suballoc(
 				vm_map_t	parent,
 				vm_offset_t	*addr,
@@ -131,34 +131,31 @@ extern kern_return_t	kmem_suballoc(
 				boolean_t	anywhere,
 				vm_map_t	*new_map);
 
-extern void		kmem_io_object_deallocate(
-				vm_map_copy_t	copy);
-
-extern kern_return_t	kmem_io_object_trunc(
-				vm_map_copy_t	copy,
-				vm_size_t	new_size);
-
-extern boolean_t	copyinmap(
+extern kern_return_t	copyinmap(
 				vm_map_t	map,
-				vm_offset_t	fromaddr,
-				vm_offset_t	toaddr,
+				vm_map_offset_t	fromaddr,
+				void		*todata,
 				vm_size_t	length);
 
-extern boolean_t	copyoutmap(
+extern kern_return_t	copyoutmap(
 				vm_map_t	map,
-				vm_offset_t	fromaddr,
-				vm_offset_t	toaddr,
+				void		*fromdata,
+				vm_map_offset_t	toaddr,
 				vm_size_t	length);
 
 extern kern_return_t	vm_conflict_check(
 				vm_map_t		map,
-				vm_offset_t		off,
-				vm_size_t		len,
+				vm_map_offset_t		off,
+				vm_map_size_t		len,
 				memory_object_t		pager,
 				vm_object_offset_t	file_off);
+
+#endif	/* MACH_KERNEL_PRIVATE */
 
 extern vm_map_t	kernel_map;
 extern vm_map_t	kernel_pageable_map;
 extern vm_map_t ipc_kernel_map;
+
+#endif	/* KERNEL_PRIVATE */
 
 #endif	/* _VM_VM_KERN_H_ */

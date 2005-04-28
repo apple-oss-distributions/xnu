@@ -1,24 +1,21 @@
 /*
- * Copyright (c) 2000-2002 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2004 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -66,13 +63,35 @@ typedef enum {
  * to the handler to allow it to properly restore state if
  * a non-standard exit is performed.
  */
+struct sigcontext32 {
+    int		sc_onstack;     /* sigstack state to restore */
+    int		sc_mask;        /* signal mask to restore */
+    int		sc_ir;			/* pc */
+    int		sc_psw;         /* processor status word */
+    int		sc_sp;      	/* stack pointer if sc_regs == NULL */
+    void	*sc_regs;		/* (kernel private) saved state */
+};
+
+struct sigcontext64 {
+    int		sc_onstack;     /* sigstack state to restore */
+    int		sc_mask;        /* signal mask to restore */
+    long long	sc_ir;		/* pc */
+    long long	sc_psw;         /* processor status word */
+    long long	sc_sp;      	/* stack pointer if sc_regs == NULL */
+    void	*sc_regs;	/* (kernel private) saved state */
+};
+
+/*
+ * LP64todo - Have to decide how to handle this.
+ * For now, just duplicate the 32-bit context as the generic one.
+ */
 struct sigcontext {
     int		sc_onstack;     /* sigstack state to restore */
     int		sc_mask;        /* signal mask to restore */
-	int		sc_ir;			/* pc */
+    int		sc_ir;			/* pc */
     int		sc_psw;         /* processor status word */
     int		sc_sp;      	/* stack pointer if sc_regs == NULL */
-	void	*sc_regs;		/* (kernel private) saved state */
+    void	*sc_regs;		/* (kernel private) saved state */
 };
 
 #endif /* __APPLE_API_OBSOLETE */

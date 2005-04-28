@@ -1,24 +1,21 @@
 /*
- * Copyright (c) 2000-2002 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2005 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -65,6 +62,7 @@
 #define __UNION_UNION_H__
 
 #include  <sys/appleapiopts.h>
+#include  <sys/cdefs.h>
 
 #ifdef __APPLE_API_PRIVATE
 struct union_args {
@@ -86,6 +84,24 @@ struct union_mount {
 };
 
 #ifdef KERNEL
+/* LP64 version of union_args.  all pointers 
+ * grow when we're dealing with a 64-bit process.
+ * WARNING - keep in sync with union_args
+ */
+/* LP64todo - should this move? */
+
+#if __DARWIN_ALIGN_NATURAL
+#pragma options align=natural
+#endif
+
+struct user_union_args {
+	user_addr_t	target;		/* Target of loopback  */
+	int			mntflags;	/* Options on the mount */
+};
+
+#if __DARWIN_ALIGN_NATURAL
+#pragma options align=reset
+#endif
 
 /*
  * DEFDIRMODE is the mode bits used to create a shadow directory.
@@ -123,29 +139,26 @@ struct union_node {
 #define UN_KLOCK	0x08		/* Keep upper node locked on vput */
 #define UN_CACHED	0x10		/* In union cache */
 
-extern int union_allocvp __P((struct vnode **, struct mount *,
+extern int union_allocvp(struct vnode **, struct mount *,
 				struct vnode *, struct vnode *,
 				struct componentname *, struct vnode *,
-				struct vnode *, int));
-extern int union_copyfile __P((struct vnode *, struct vnode *,
-					struct ucred *, struct proc *));
-extern int union_copyup __P((struct union_node *, int, struct ucred *,
-				struct proc *));
-extern int union_dowhiteout __P((struct union_node *, struct ucred *,
-					struct proc *));
-extern int union_mkshadow __P((struct union_mount *, struct vnode *,
-				struct componentname *, struct vnode **));
-extern int union_mkwhiteout __P((struct union_mount *, struct vnode *,
-				struct componentname *, char *));
-extern int union_vn_create __P((struct vnode **, struct union_node *,
-				struct proc *));
-extern int union_cn_close __P((struct vnode *, int, struct ucred *,
-				struct proc *));
-extern void union_removed_upper __P((struct union_node *un));
-extern struct vnode *union_lowervp __P((struct vnode *));
-extern void union_newlower __P((struct union_node *, struct vnode *));
-extern void union_newupper __P((struct union_node *, struct vnode *));
-extern void union_newsize __P((struct vnode *, off_t, off_t));
+				struct vnode *, int);
+extern int union_copyfile(struct vnode *, struct vnode *,
+					struct ucred *, struct proc *);
+extern int union_copyup(struct union_node *, int, struct ucred *,
+				struct proc *);
+extern int union_dowhiteout(struct union_node *, vfs_context_t);
+extern int union_mkshadow(struct union_mount *, struct vnode *,
+				struct componentname *, struct vnode **);
+extern int union_mkwhiteout(struct union_mount *, struct vnode *,
+				struct componentname *, char *);
+extern int union_vn_create(struct vnode **, struct union_node *, struct proc *);
+extern int union_cn_close(struct vnode *, int, struct ucred *, struct proc *);
+extern void union_removed_upper(struct union_node *un);
+extern struct vnode *union_lowervp(struct vnode *);
+extern void union_newlower(struct union_node *, struct vnode *);
+extern void union_newupper(struct union_node *, struct vnode *);
+extern void union_newsize(struct vnode *, off_t, off_t);
 
 #define	MOUNTTOUNIONMOUNT(mp) ((struct union_mount *)((mp)->mnt_data))
 #define	VTOUNION(vp) ((struct union_node *)(vp)->v_data)

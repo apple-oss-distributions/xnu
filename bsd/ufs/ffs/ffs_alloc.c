@@ -3,22 +3,19 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -62,10 +59,11 @@
 
 #include <sys/param.h>
 #include <sys/systm.h>
-#include <sys/buf.h>
+#include <sys/buf_internal.h>
 #include <sys/proc.h>
-#include <sys/vnode.h>
-#include <sys/mount.h>
+#include <sys/kauth.h>
+#include <sys/vnode_internal.h>
+#include <sys/mount_internal.h>
 #include <sys/kernel.h>
 #include <sys/syslog.h>
 #include <sys/quota.h>
@@ -85,18 +83,18 @@
 
 extern u_long nextgennumber;
 
-static ufs_daddr_t ffs_alloccg __P((struct inode *, int, ufs_daddr_t, int));
-static ufs_daddr_t ffs_alloccgblk __P((struct fs *, struct cg *, ufs_daddr_t));
-static ufs_daddr_t ffs_clusteralloc __P((struct inode *, int, ufs_daddr_t,
-	    int));
-static ino_t	ffs_dirpref __P((struct inode *));
-static ufs_daddr_t ffs_fragextend __P((struct inode *, int, long, int, int));
-static void	ffs_fserr __P((struct fs *, u_int, char *));
+static ufs_daddr_t ffs_alloccg(struct inode *, int, ufs_daddr_t, int);
+static ufs_daddr_t ffs_alloccgblk(struct fs *, struct cg *, ufs_daddr_t);
+static ufs_daddr_t ffs_clusteralloc(struct inode *, int, ufs_daddr_t, int);
+static ino_t	ffs_dirpref(struct inode *);
+static ufs_daddr_t ffs_fragextend(struct inode *, int, long, int, int);
+static void	ffs_fserr(struct fs *, u_int, char *);
 static u_long	ffs_hashalloc
-		    __P((struct inode *, int, long, int, u_int32_t (*)()));
-static ino_t	ffs_nodealloccg __P((struct inode *, int, ufs_daddr_t, int));
-static ufs_daddr_t ffs_mapsearch __P((struct fs *, struct cg *, ufs_daddr_t,
-	    int));
+		   (struct inode *, int, long, int, u_int32_t (*)());
+static ino_t	ffs_nodealloccg(struct inode *, int, ufs_daddr_t, int);
+static ufs_daddr_t ffs_mapsearch(struct fs *, struct cg *, ufs_daddr_t, int);
+static void ffs_clusteracct
+		(struct fs *fs, struct cg *cgp, ufs_daddr_t blkno, int cnt);
 
 /*
  * Allocate a block in the file system.
@@ -121,7 +119,7 @@ ffs_alloc(ip, lbn, bpref, size, cred, bnp)
 	register struct inode *ip;
 	ufs_daddr_t lbn, bpref;
 	int size;
-	struct ucred *cred;
+	kauth_cred_t cred;
 	ufs_daddr_t *bnp;
 {
 	register struct fs *fs;
@@ -141,9 +139,9 @@ ffs_alloc(ip, lbn, bpref, size, cred, bnp)
 #endif /* DIAGNOSTIC */
 	if (size == fs->fs_bsize && fs->fs_cstotal.cs_nbfree == 0)
 		goto nospace;
-	if (cred->cr_uid != 0 && freespace(fs, fs->fs_minfree) <= 0)
+	if (suser(cred, NULL) && freespace(fs, fs->fs_minfree) <= 0)
 		goto nospace;
-	VOP_DEVBLOCKSIZE(ip->i_devvp,&devBlockSize);
+	devBlockSize = vfs_devblocksize(vnode_mount(ITOV(ip)));
 #if QUOTA
 	if (error = chkdq(ip, (int64_t)size, cred, 0))
 		return (error);
@@ -169,7 +167,7 @@ ffs_alloc(ip, lbn, bpref, size, cred, bnp)
 	(void) chkdq(ip, (int64_t)-size, cred, FORCE);
 #endif /* QUOTA */
 nospace:
-	ffs_fserr(fs, cred->cr_uid, "file system full");
+	ffs_fserr(fs, kauth_cred_getuid(cred), "file system full");
 	uprintf("\n%s: write failed, file system is full\n", fs->fs_fsmnt);
 	return (ENOSPC);
 }
@@ -187,7 +185,7 @@ ffs_realloccg(ip, lbprev, bpref, osize, nsize, cred, bpp)
 	ufs_daddr_t lbprev;
 	ufs_daddr_t bpref;
 	int osize, nsize;
-	struct ucred *cred;
+	kauth_cred_t cred;
 	struct buf **bpp;
 {
 	register struct fs *fs;
@@ -209,7 +207,7 @@ ffs_realloccg(ip, lbprev, bpref, osize, nsize, cred, bpp)
 	if (cred == NOCRED)
 		panic("ffs_realloccg: missing credential\n");
 #endif /* DIAGNOSTIC */
-	if (cred->cr_uid != 0 && freespace(fs, fs->fs_minfree) <= 0)
+	if (suser(cred, NULL) != 0 && freespace(fs, fs->fs_minfree) <= 0)
 		goto nospace;
 	if ((bprev = ip->i_db[lbprev]) == 0) {
 		printf("dev = 0x%x, bsize = %d, bprev = %d, fs = %s\n",
@@ -219,16 +217,16 @@ ffs_realloccg(ip, lbprev, bpref, osize, nsize, cred, bpp)
 	/*
 	 * Allocate the extra space in the buffer.
 	 */
-	if (error = bread(ITOV(ip), lbprev, osize, NOCRED, &bp)) {
-		brelse(bp);
+	if (error = (int)buf_bread(ITOV(ip), (daddr64_t)((unsigned)lbprev), osize, NOCRED, &bp)) {
+		buf_brelse(bp);
 		return (error);
 	}
-	VOP_DEVBLOCKSIZE(ip->i_devvp,&devBlockSize);
+	devBlockSize = vfs_devblocksize(vnode_mount(ITOV(ip)));
 
 #if QUOTA
 	if (error = chkdq(ip, (int64_t)(nsize - osize), cred, 0))
 	{
-		brelse(bp);
+		buf_brelse(bp);
 		return (error);
 	}
 #endif /* QUOTA */
@@ -237,13 +235,13 @@ ffs_realloccg(ip, lbprev, bpref, osize, nsize, cred, bpp)
 	 */
 	cg = dtog(fs, bprev);
 	if (bno = ffs_fragextend(ip, cg, (long)bprev, osize, nsize)) {
-		if (bp->b_blkno != fsbtodb(fs, bno))
+		if ((ufs_daddr_t)buf_blkno(bp) != fsbtodb(fs, bno))
 			panic("bad blockno");
 		ip->i_blocks += btodb(nsize - osize, devBlockSize);
 		ip->i_flag |= IN_CHANGE | IN_UPDATE;
 		allocbuf(bp, nsize);
-		bp->b_flags |= B_DONE;
-		bzero((char *)bp->b_data + osize, (u_int)bp->b_bufsize - osize);
+		buf_setflags(bp, B_DONE);
+		bzero((char *)buf_dataptr(bp) + osize, (u_int)buf_size(bp) - osize);
 		*bpp = bp;
 		return (0);
 	}
@@ -298,7 +296,7 @@ ffs_realloccg(ip, lbprev, bpref, osize, nsize, cred, bpp)
 	bno = (ufs_daddr_t)ffs_hashalloc(ip, cg, (long)bpref, request,
 	    (u_int32_t (*)())ffs_alloccg);
 	if (bno > 0) {
-		bp->b_blkno = fsbtodb(fs, bno);
+	        buf_setblkno(bp, (daddr64_t)((unsigned)fsbtodb(fs, bno)));
 		ffs_blkfree(ip, bprev, (long)osize);
 		if (nsize < request)
 			ffs_blkfree(ip, bno + numfrags(fs, nsize),
@@ -306,8 +304,8 @@ ffs_realloccg(ip, lbprev, bpref, osize, nsize, cred, bpp)
 		ip->i_blocks += btodb(nsize - osize, devBlockSize);
 		ip->i_flag |= IN_CHANGE | IN_UPDATE;
 		allocbuf(bp, nsize);
-		bp->b_flags |= B_DONE;
-		bzero((char *)bp->b_data + osize, (u_int)bp->b_bufsize - osize);
+		buf_setflags(bp, B_DONE);
+		bzero((char *)buf_dataptr(bp) + osize, (u_int)buf_size(bp) - osize);
 		*bpp = bp;
 		return (0);
 	}
@@ -317,12 +315,12 @@ ffs_realloccg(ip, lbprev, bpref, osize, nsize, cred, bpp)
 	 */
 	(void) chkdq(ip, (int64_t)-(nsize - osize), cred, FORCE);
 #endif /* QUOTA */
-	brelse(bp);
+	buf_brelse(bp);
 nospace:
 	/*
 	 * no space available
 	 */
-	ffs_fserr(fs, cred->cr_uid, "file system full");
+	ffs_fserr(fs, kauth_cred_getuid(cred), "file system full");
 	uprintf("\n%s: write failed, file system is full\n", fs->fs_fsmnt);
 	return (ENOSPC);
 }
@@ -346,12 +344,6 @@ nospace:
 int doasyncfree = 1;
 int doreallocblks = 1;
 
-int
-ffs_reallocblks(ap)
-	struct vop_reallocblks_args *ap;
-{
-	return (ENOSPC);
-}
 
 /*
  * Allocate an inode in the file system.
@@ -369,23 +361,21 @@ ffs_reallocblks(ap)
  *      available inode is located.
  */
 int
-ffs_valloc(ap)
-	struct vop_valloc_args /* {
-		struct vnode *a_pvp;
-		int a_mode;
-		struct ucred *a_cred;
-		struct vnode **a_vpp;
-	} */ *ap;
+ffs_valloc(
+		struct vnode *pvp,
+		mode_t mode,
+		kauth_cred_t cred,
+		struct vnode **vpp)
+
 {
-	register struct vnode *pvp = ap->a_pvp;
 	register struct inode *pip;
 	register struct fs *fs;
 	register struct inode *ip;
-	mode_t mode = ap->a_mode;
+	struct timeval tv;
 	ino_t ino, ipref;
 	int cg, error;
 	
-	*ap->a_vpp = NULL;
+	*vpp = NULL;
 	pip = VTOI(pvp);
 	fs = pip->i_fs;
 	if (fs->fs_cstotal.cs_nifree == 0)
@@ -412,12 +402,14 @@ ffs_valloc(ap)
 	ino = (ino_t)ffs_hashalloc(pip, cg, (long)ipref, mode, ffs_nodealloccg);
 	if (ino == 0)
 		goto noinodes;
-	error = VFS_VGET(pvp->v_mount, (void *)ino, ap->a_vpp);
+
+        error = ffs_vget_internal(pvp->v_mount, ino, vpp, NULL, NULL, mode, 0);
 	if (error) {
-		VOP_VFREE(pvp, ino, mode);
+		ffs_vfree(pvp, ino, mode);
 		return (error);
 	}
-	ip = VTOI(*ap->a_vpp);
+	ip = VTOI(*vpp);
+
 	if (ip->i_mode) {
 		printf("mode = 0%o, inum = %d, fs = %s\n",
 		    ip->i_mode, ip->i_number, fs->fs_fsmnt);
@@ -432,12 +424,13 @@ ffs_valloc(ap)
 	/*
 	 * Set up a new generation number for this inode.
 	 */
-	if (++nextgennumber < (u_long)time.tv_sec)
-		nextgennumber = time.tv_sec;
+	microtime(&tv);
+	if (++nextgennumber < (u_long)tv.tv_sec)
+		nextgennumber = tv.tv_sec;
 	ip->i_gen = nextgennumber;
 	return (0);
 noinodes:
-	ffs_fserr(fs, ap->a_cred->cr_uid, "out of inodes");
+	ffs_fserr(fs, kauth_cred_getuid(cred), "out of inodes");
 	uprintf("\n%s: create/symlink failed, no inodes free\n", fs->fs_fsmnt);
 	return (ENOSPC);
 }
@@ -756,6 +749,7 @@ ffs_fragextend(ip, cg, bprev, osize, nsize)
 	register struct fs *fs;
 	register struct cg *cgp;
 	struct buf *bp;
+	struct timeval tv;
 	long bno;
 	int frags, bbase;
 	int i, error;
@@ -775,13 +769,13 @@ ffs_fragextend(ip, cg, bprev, osize, nsize)
 		return (NULL);
 	}
 	/* read corresponding cylinder group info */
-	error = bread(ip->i_devvp, fsbtodb(fs, cgtod(fs, cg)),
-		(int)fs->fs_cgsize, NOCRED, &bp);
+	error = (int)buf_bread(ip->i_devvp, (daddr64_t)((unsigned)fsbtodb(fs, cgtod(fs, cg))),
+			       (int)fs->fs_cgsize, NOCRED, &bp);
 	if (error) {
-		brelse(bp);
+		buf_brelse(bp);
 		return (NULL);
 	}
-	cgp = (struct cg *)bp->b_data;
+	cgp = (struct cg *)buf_dataptr(bp);
 #if REV_ENDIAN_FS
 	if (rev_endian) {
 		byte_swap_cgin(cgp, fs);
@@ -793,10 +787,11 @@ ffs_fragextend(ip, cg, bprev, osize, nsize)
 		if (rev_endian)
 			byte_swap_cgout(cgp,fs);
 #endif /* REV_ENDIAN_FS */
-		brelse(bp);
+		buf_brelse(bp);
 		return (NULL);
 	}
-	cgp->cg_time = time.tv_sec;
+	microtime(&tv);
+	cgp->cg_time = tv.tv_sec;
 	bno = dtogd(fs, bprev);
 	for (i = numfrags(fs, osize); i < frags; i++)
 		if (isclr(cg_blksfree(cgp), bno + i)) {
@@ -804,7 +799,7 @@ ffs_fragextend(ip, cg, bprev, osize, nsize)
 			if (rev_endian)
 				byte_swap_cgout(cgp,fs);
 #endif /* REV_ENDIAN_FS */
-			brelse(bp);
+			buf_brelse(bp);
 			return (NULL);
 		}
 	/*
@@ -830,7 +825,7 @@ ffs_fragextend(ip, cg, bprev, osize, nsize)
 	if (rev_endian)
 		byte_swap_cgout(cgp,fs);
 #endif /* REV_ENDIAN_FS */
-	bdwrite(bp);
+	buf_bdwrite(bp);
 	return (bprev);
 }
 
@@ -850,6 +845,7 @@ ffs_alloccg(ip, cg, bpref, size)
 	register struct fs *fs;
 	register struct cg *cgp;
 	struct buf *bp;
+	struct timeval tv;
 	register int i;
 	int error, bno, frags, allocsiz;
 #if REV_ENDIAN_FS
@@ -861,13 +857,13 @@ ffs_alloccg(ip, cg, bpref, size)
 	fs = ip->i_fs;
 	if (fs->fs_cs(fs, cg).cs_nbfree == 0 && size == fs->fs_bsize)
 		return (NULL);
-	error = bread(ip->i_devvp, fsbtodb(fs, cgtod(fs, cg)),
-		(int)fs->fs_cgsize, NOCRED, &bp);
+	error = (int)buf_bread(ip->i_devvp, (daddr64_t)((unsigned)fsbtodb(fs, cgtod(fs, cg))),
+			       (int)fs->fs_cgsize, NOCRED, &bp);
 	if (error) {
-		brelse(bp);
+		buf_brelse(bp);
 		return (NULL);
 	}
-	cgp = (struct cg *)bp->b_data;
+	cgp = (struct cg *)buf_dataptr(bp);
 #if REV_ENDIAN_FS
 	if (rev_endian)
 		byte_swap_cgin(cgp,fs);
@@ -878,17 +874,18 @@ ffs_alloccg(ip, cg, bpref, size)
 		if (rev_endian)
 			byte_swap_cgout(cgp,fs);
 #endif /* REV_ENDIAN_FS */
-		brelse(bp);
+		buf_brelse(bp);
 		return (NULL);
 	}
-	cgp->cg_time = time.tv_sec;
+	microtime(&tv);
+	cgp->cg_time = tv.tv_sec;
 	if (size == fs->fs_bsize) {
 		bno = ffs_alloccgblk(fs, cgp, bpref);
 #if REV_ENDIAN_FS
 		if (rev_endian)
 			byte_swap_cgout(cgp,fs);
 #endif /* REV_ENDIAN_FS */
-		bdwrite(bp);
+		buf_bdwrite(bp);
 		return (bno);
 	}
 	/*
@@ -910,7 +907,7 @@ ffs_alloccg(ip, cg, bpref, size)
 			if (rev_endian)
 				byte_swap_cgout(cgp,fs);
 #endif	/* REV_ENDIAN_FS */
-			brelse(bp);
+			buf_brelse(bp);
 			return (NULL);
 		}
 		bno = ffs_alloccgblk(fs, cgp, bpref);
@@ -927,7 +924,7 @@ ffs_alloccg(ip, cg, bpref, size)
 		if (rev_endian)
 			byte_swap_cgout(cgp,fs);
 #endif	/* REV_ENDIAN_FS */
-		bdwrite(bp);
+		buf_bdwrite(bp);
 		return (bno);
 	}
 	bno = ffs_mapsearch(fs, cgp, bpref, allocsiz);
@@ -936,7 +933,7 @@ ffs_alloccg(ip, cg, bpref, size)
 		if (rev_endian)
 			byte_swap_cgout(cgp,fs);
 #endif	/* REV_ENDIAN_FS */
-		brelse(bp);
+		buf_brelse(bp);
 		return (NULL);
 	}
 	for (i = 0; i < frags; i++)
@@ -952,7 +949,7 @@ ffs_alloccg(ip, cg, bpref, size)
 	if (rev_endian)
 		byte_swap_cgout(cgp,fs);
 #endif	/* REV_ENDIAN_FS */
-	bdwrite(bp);
+	buf_bdwrite(bp);
 	return (cg * fs->fs_fpg + bno);
 }
 
@@ -1100,10 +1097,10 @@ ffs_clusteralloc(ip, cg, bpref, len)
 	fs = ip->i_fs;
 	if (fs->fs_maxcluster[cg] < len)
 		return (NULL);
-	if (bread(ip->i_devvp, fsbtodb(fs, cgtod(fs, cg)), (int)fs->fs_cgsize,
-	    NOCRED, &bp))
+	if (buf_bread(ip->i_devvp, (daddr64_t)((unsigned)fsbtodb(fs, cgtod(fs, cg))), (int)fs->fs_cgsize,
+		      NOCRED, &bp))
 		goto fail;
-	cgp = (struct cg *)bp->b_data;
+	cgp = (struct cg *)buf_dataptr(bp);
 #if	REV_ENDIAN_FS
 	if (rev_endian)
 		byte_swap_cgin(cgp,fs);
@@ -1199,11 +1196,11 @@ ffs_clusteralloc(ip, cg, bpref, len)
 	if (rev_endian)
 		byte_swap_cgout(cgp,fs);
 #endif	/* REV_ENDIAN_FS */
-	bdwrite(bp);
+	buf_bdwrite(bp);
 	return (bno);
 
 fail:
-	brelse(bp);
+	buf_brelse(bp);
 	return (0);
 }
 
@@ -1226,6 +1223,7 @@ ffs_nodealloccg(ip, cg, ipref, mode)
 	register struct fs *fs;
 	register struct cg *cgp;
 	struct buf *bp;
+	struct timeval tv;
 	int error, start, len, loc, map, i;
 #if REV_ENDIAN_FS
 	struct vnode *vp=ITOV(ip);
@@ -1236,13 +1234,13 @@ ffs_nodealloccg(ip, cg, ipref, mode)
 	fs = ip->i_fs;
 	if (fs->fs_cs(fs, cg).cs_nifree == 0)
 		return (NULL);
-	error = bread(ip->i_devvp, fsbtodb(fs, cgtod(fs, cg)),
-		(int)fs->fs_cgsize, NOCRED, &bp);
+	error = (int)buf_bread(ip->i_devvp, (daddr64_t)((unsigned)fsbtodb(fs, cgtod(fs, cg))),
+			       (int)fs->fs_cgsize, NOCRED, &bp);
 	if (error) {
-		brelse(bp);
+		buf_brelse(bp);
 		return (NULL);
 	}
-	cgp = (struct cg *)bp->b_data;
+	cgp = (struct cg *)buf_dataptr(bp);
 #if REV_ENDIAN_FS
 	if (rev_endian)
 		byte_swap_cgin(cgp,fs);
@@ -1252,11 +1250,12 @@ ffs_nodealloccg(ip, cg, ipref, mode)
 		if (rev_endian)
 			byte_swap_cgout(cgp,fs);
 #endif /* REV_ENDIAN_FS */
-		brelse(bp);
+		buf_brelse(bp);
 		return (NULL);
 	}
 
-	cgp->cg_time = time.tv_sec;
+	microtime(&tv);
+	cgp->cg_time = tv.tv_sec;
 	if (ipref) {
 		ipref %= fs->fs_ipg;
 		if (isclr(cg_inosused(cgp), ipref))
@@ -1303,7 +1302,7 @@ gotit:
 	if (rev_endian)
 		byte_swap_cgout(cgp,fs);
 #endif /* REV_ENDIAN_FS */
-	bdwrite(bp);
+	buf_bdwrite(bp);
 	return (cg * fs->fs_ipg + ipref);
 }
 
@@ -1314,6 +1313,7 @@ gotit:
  * free map. If a fragment is deallocated, a possible 
  * block reassembly is checked.
  */
+void
 ffs_blkfree(ip, bno, size)
 	register struct inode *ip;
 	ufs_daddr_t bno;
@@ -1322,6 +1322,7 @@ ffs_blkfree(ip, bno, size)
 	register struct fs *fs;
 	register struct cg *cgp;
 	struct buf *bp;
+	struct timeval tv;
 	ufs_daddr_t blkno;
 	int i, error, cg, blk, frags, bbase;
 #if REV_ENDIAN_FS
@@ -1329,6 +1330,7 @@ ffs_blkfree(ip, bno, size)
 	struct mount *mp=vp->v_mount;
 	int rev_endian=(mp->mnt_flag & MNT_REVEND);
 #endif /* REV_ENDIAN_FS */
+
 	fs = ip->i_fs;
 	if ((u_int)size > fs->fs_bsize || fragoff(fs, size) != 0) {
 		printf("dev = 0x%x, bsize = %d, size = %d, fs = %s\n",
@@ -1341,13 +1343,13 @@ ffs_blkfree(ip, bno, size)
 		ffs_fserr(fs, ip->i_uid, "bad block");
 		return;
 	}
-	error = bread(ip->i_devvp, fsbtodb(fs, cgtod(fs, cg)),
-		(int)fs->fs_cgsize, NOCRED, &bp);
+	error = (int)buf_bread(ip->i_devvp, (daddr64_t)((unsigned)fsbtodb(fs, cgtod(fs, cg))),
+			       (int)fs->fs_cgsize, NOCRED, &bp);
 	if (error) {
-		brelse(bp);
+		buf_brelse(bp);
 		return;
 	}
-	cgp = (struct cg *)bp->b_data;
+	cgp = (struct cg *)buf_dataptr(bp);
 #if REV_ENDIAN_FS
 	if (rev_endian)
 		byte_swap_cgin(cgp,fs);
@@ -1357,10 +1359,11 @@ ffs_blkfree(ip, bno, size)
 		if (rev_endian)
 			byte_swap_cgout(cgp,fs);
 #endif /* REV_ENDIAN_FS */
-		brelse(bp);
+		buf_brelse(bp);
 		return;
 	}
-	cgp->cg_time = time.tv_sec;
+	microtime(&tv);
+	cgp->cg_time = tv.tv_sec;
 	bno = dtogd(fs, bno);
 	if (size == fs->fs_bsize) {
 		blkno = fragstoblks(fs, bno);
@@ -1426,7 +1429,7 @@ ffs_blkfree(ip, bno, size)
 	if (rev_endian)
 		byte_swap_cgout(cgp,fs);
 #endif /* REV_ENDIAN_FS */
-	bdwrite(bp);
+	buf_bdwrite(bp);
 }
 
 #if DIAGNOSTIC
@@ -1457,13 +1460,13 @@ ffs_checkblk(ip, bno, size)
 	}
 	if ((u_int)bno >= fs->fs_size)
 		panic("checkblk: bad block %d", bno);
-	error = bread(ip->i_devvp, fsbtodb(fs, cgtod(fs, dtog(fs, bno))),
-		(int)fs->fs_cgsize, NOCRED, &bp);
+	error = (int)buf_bread(ip->i_devvp, (daddr64_t)((unsigned)fsbtodb(fs, cgtod(fs, dtog(fs, bno)))),
+			       (int)fs->fs_cgsize, NOCRED, &bp);
 	if (error) {
-		brelse(bp);
+		buf_brelse(bp);
 		return;
 	}
-	cgp = (struct cg *)bp->b_data;
+	cgp = (struct cg *)buf_dataptr(bp);
 #if REV_ENDIAN_FS
 	if (rev_endian)
 		byte_swap_cgin(cgp,fs);
@@ -1473,7 +1476,7 @@ ffs_checkblk(ip, bno, size)
 		if (rev_endian)
 			byte_swap_cgout(cgp,fs);
 #endif /* REV_ENDIAN_FS */
-		brelse(bp);
+		buf_brelse(bp);
 		return;
 	}
 	bno = dtogd(fs, bno);
@@ -1491,7 +1494,7 @@ ffs_checkblk(ip, bno, size)
 	if (rev_endian)
 		byte_swap_cgout(cgp,fs);
 #endif /* REV_ENDIAN_FS */
-	brelse(bp);
+	buf_brelse(bp);
 	return (!free);
 }
 #endif /* DIAGNOSTIC */
@@ -1502,38 +1505,32 @@ ffs_checkblk(ip, bno, size)
  * The specified inode is placed back in the free map.
  */
 int
-ffs_vfree(ap)
-	struct vop_vfree_args /* {
-		struct vnode *a_pvp;
-		ino_t a_ino;
-		int a_mode;
-	} */ *ap;
+ffs_vfree(struct vnode *vp, ino_t ino, int mode)
 {
 	register struct fs *fs;
 	register struct cg *cgp;
 	register struct inode *pip;
-	ino_t ino = ap->a_ino;
 	struct buf *bp;
+	struct timeval tv;
 	int error, cg;
 #if REV_ENDIAN_FS
-	struct vnode *vp=ap->a_pvp;
 	struct mount *mp=vp->v_mount;
 	int rev_endian=(mp->mnt_flag & MNT_REVEND);
 #endif /* REV_ENDIAN_FS */
 
-	pip = VTOI(ap->a_pvp);
+	pip = VTOI(vp);
 	fs = pip->i_fs;
 	if ((u_int)ino >= fs->fs_ipg * fs->fs_ncg)
 		panic("ifree: range: dev = 0x%x, ino = %d, fs = %s\n",
 		    pip->i_dev, ino, fs->fs_fsmnt);
 	cg = ino_to_cg(fs, ino);
-	error = bread(pip->i_devvp, fsbtodb(fs, cgtod(fs, cg)),
-		(int)fs->fs_cgsize, NOCRED, &bp);
+	error = (int)buf_bread(pip->i_devvp, (daddr64_t)((unsigned)fsbtodb(fs, cgtod(fs, cg))),
+			       (int)fs->fs_cgsize, NOCRED, &bp);
 	if (error) {
-		brelse(bp);
+		buf_brelse(bp);
 		return (0);
 	}
-	cgp = (struct cg *)bp->b_data;
+	cgp = (struct cg *)buf_dataptr(bp);
 #if REV_ENDIAN_FS
 	if (rev_endian)
 		byte_swap_cgin(cgp,fs);
@@ -1543,10 +1540,11 @@ ffs_vfree(ap)
 		if (rev_endian)
 			byte_swap_cgout(cgp,fs);
 #endif /* REV_ENDIAN_FS */
-		brelse(bp);
+		buf_brelse(bp);
 		return (0);
 	}
-	cgp->cg_time = time.tv_sec;
+	microtime(&tv);
+	cgp->cg_time = tv.tv_sec;
 	ino %= fs->fs_ipg;
 	if (isclr(cg_inosused(cgp), ino)) {
 		printf("dev = 0x%x, ino = %d, fs = %s\n",
@@ -1560,7 +1558,7 @@ ffs_vfree(ap)
 	cgp->cg_cs.cs_nifree++;
 	fs->fs_cstotal.cs_nifree++;
 	fs->fs_cs(fs, cg).cs_nifree++;
-	if ((ap->a_mode & IFMT) == IFDIR) {
+	if ((mode & IFMT) == IFDIR) {
 		cgp->cg_cs.cs_ndir--;
 		fs->fs_cstotal.cs_ndir--;
 		fs->fs_cs(fs, cg).cs_ndir--;
@@ -1570,7 +1568,7 @@ ffs_vfree(ap)
 	if (rev_endian)
 		byte_swap_cgout(cgp,fs);
 #endif /* REV_ENDIAN_FS */
-	bdwrite(bp);
+	buf_bdwrite(bp);
 	return (0);
 }
 
@@ -1644,11 +1642,8 @@ ffs_mapsearch(fs, cgp, bpref, allocsiz)
  *
  * Cnt == 1 means free; cnt == -1 means allocating.
  */
-ffs_clusteracct(fs, cgp, blkno, cnt)
-	struct fs *fs;
-	struct cg *cgp;
-	ufs_daddr_t blkno;
-	int cnt;
+static void
+ffs_clusteracct(struct fs *fs, struct cg *cgp, ufs_daddr_t blkno, int cnt)
 {
 	int32_t *sump;
 	int32_t *lp;

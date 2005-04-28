@@ -1,24 +1,21 @@
 /*
- * Copyright (c) 2000 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2004 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -68,19 +65,16 @@
 #include <mach_assert.h>
 #include <mach_debug.h>
 
+#include <mach/mach_types.h>
 #include <mach/boolean.h>
 #include <mach/kern_return.h>
-#include <mach_debug.h>
 #include <mach/port.h>
-#include <kern/lock.h>
-#include <kern/ipc_kobject.h>
-#include <kern/wait_queue.h>
 
+#include <kern/kern_types.h>
+
+#include <ipc/ipc_types.h>
 #include <ipc/ipc_object.h>
 #include <ipc/ipc_mqueue.h>
-#include <ipc/ipc_table.h>
-#include <ipc/ipc_types.h>
-#include <ipc/ipc_entry.h>
 #include <ipc/ipc_space.h>
 
 /*
@@ -99,8 +93,6 @@
  */
 
 typedef unsigned int ipc_port_timestamp_t;
-
-typedef unsigned int ipc_port_flags_t;
 
 struct ipc_port {
 
@@ -143,7 +135,7 @@ struct ipc_port {
 #define	IP_NSPARES		10
 #define	IP_CALLSTACK_MAX	10
 	queue_chain_t	ip_port_links;	/* all allocated ports */
-	natural_t	ip_thread;	/* who made me?  thread context */
+	thread_t	ip_thread;	/* who made me?  thread context */
 	unsigned long	ip_timetrack;	/* give an idea of "when" created */
 	natural_t	ip_callstack[IP_CALLSTACK_MAX]; /* stack trace */
 	unsigned long	ip_spares[IP_NSPARES]; /* for debugging */
@@ -200,17 +192,8 @@ MACRO_BEGIN								\
 	(port)->ip_premsg = IKM_NULL;					\
 MACRO_END
 
-#define IP_BIT_CLASSIC        0x00004000     
-#define IP_CLASSIC(port)     ((port)->ip_bits & IP_BIT_CLASSIC)
 
-#define IP_SET_CLASSIC(port)					\
-MACRO_BEGIN										\
-	(port)->ip_bits |= IP_BIT_CLASSIC;		\
-MACRO_END
-
-typedef ipc_table_index_t ipc_port_request_index_t;
-
-typedef struct ipc_port_request {
+struct ipc_port_request {
 	union {
 		struct ipc_port *port;
 		ipc_port_request_index_t index;
@@ -220,15 +203,13 @@ typedef struct ipc_port_request {
 		mach_port_name_t name;
 		struct ipc_table_size *size;
 	} name;
-} *ipc_port_request_t;
+};
 
 #define	ipr_next		notify.index
 #define	ipr_size		name.size
 
 #define	ipr_soright		notify.port
 #define	ipr_name		name.name
-
-#define	IPR_NULL		((ipc_port_request_t) 0)
 
 /*
  *	Taking the ipc_port_multiple lock grants the privilege
@@ -239,7 +220,7 @@ typedef struct ipc_port_request {
 decl_mutex_data(extern,ipc_port_multiple_lock_data)
 
 #define	ipc_port_multiple_lock_init()					\
-		mutex_init(&ipc_port_multiple_lock_data, ETAP_IPC_PORT_MULT)
+		mutex_init(&ipc_port_multiple_lock_data, 0)
 
 #define	ipc_port_multiple_lock()					\
 		mutex_lock(&ipc_port_multiple_lock_data)
@@ -257,7 +238,7 @@ decl_mutex_data(extern,ipc_port_timestamp_lock_data)
 extern ipc_port_timestamp_t ipc_port_timestamp_data;
 
 #define	ipc_port_timestamp_lock_init()					\
-		mutex_init(&ipc_port_timestamp_lock_data, ETAP_IPC_PORT_TIME)
+		mutex_init(&ipc_port_timestamp_lock_data, 0)
 
 #define	ipc_port_timestamp_lock()					\
 		mutex_lock(&ipc_port_timestamp_lock_data)
@@ -297,8 +278,8 @@ ipc_port_dnrequest(
 
 /* Grow a port's table of dead-name requests */
 extern kern_return_t ipc_port_dngrow(
-	ipc_port_t	port,
-	int		target_size);
+	ipc_port_t			port,
+	ipc_table_elems_t		target_size);
 
 /* Cancel a dead-name request and return the send-once right */
 extern ipc_port_t ipc_port_dncancel(

@@ -3,22 +3,19 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -317,12 +314,24 @@ public:
 
     virtual bool didTerminate( IOService * provider, IOOptionBits options, bool * defer );
 
+    /* method available in Mac OS X 10.4 or later */
+/*! @function nextIdleTimeout
+    @abstract Allows subclasses to customize idle power management behavior.
+    @discussion Returns the next time that the device should idle into its next lower power state. Subclasses may override for custom idle behavior.
+    @param currentTime The current time
+    @param lastActivity The time of last activity on this device
+    @param powerState The device's current power state.
+    @result Returns the next time the device should idle off (in seconds, relative to the current time). */
+
+    virtual SInt32 nextIdleTimeout(AbsoluteTime currentTime, 
+        AbsoluteTime lastActivity, unsigned int powerState);
+
 private:
     OSMetaClassDeclareReservedUsed(IOService, 0);
     OSMetaClassDeclareReservedUsed(IOService, 1);
     OSMetaClassDeclareReservedUsed(IOService, 2);
+    OSMetaClassDeclareReservedUsed(IOService, 3);
 
-    OSMetaClassDeclareReservedUnused(IOService, 3);
     OSMetaClassDeclareReservedUnused(IOService, 4);
     OSMetaClassDeclareReservedUnused(IOService, 5);
     OSMetaClassDeclareReservedUnused(IOService, 6);

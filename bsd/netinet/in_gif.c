@@ -3,22 +3,19 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -94,11 +91,11 @@ SYSCTL_INT(_net_inet_ip, IPCTL_GIF_TTL, gifttl, CTLFLAG_RW,
 	&ip_gif_ttl,	0, "");
 
 int
-in_gif_output(ifp, family, m, rt)
-	struct ifnet	*ifp;
-	int		family;
-	struct mbuf	*m;
-	struct rtentry *rt;
+in_gif_output(
+	struct ifnet	*ifp,
+	int		family,
+	struct mbuf	*m,
+	struct rtentry *rt)
 {
 	struct gif_softc *sc = (struct gif_softc*)ifp;
 	struct sockaddr_in *dst = (struct sockaddr_in *)&sc->gif_ro.ro_dst;
@@ -345,14 +342,18 @@ gif_encapcheck4(m, off, proto, arg)
 		return 0;
 	}
 	/* reject packets with broadcast on source */
+	lck_mtx_lock(rt_mtx);
 	for (ia4 = TAILQ_FIRST(&in_ifaddrhead); ia4;
 	     ia4 = TAILQ_NEXT(ia4, ia_link))
 	{
 		if ((ia4->ia_ifa.ifa_ifp->if_flags & IFF_BROADCAST) == 0)
 			continue;
-		if (ip.ip_src.s_addr == ia4->ia_broadaddr.sin_addr.s_addr)
+		if (ip.ip_src.s_addr == ia4->ia_broadaddr.sin_addr.s_addr) {
+			lck_mtx_unlock(rt_mtx);
 			return 0;
+		}
 	}
+	lck_mtx_unlock(rt_mtx);
 
 	/* ingress filters on outer source */
 	if ((sc->gif_if.if_flags & IFF_LINK2) == 0 &&

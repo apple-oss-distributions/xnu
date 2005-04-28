@@ -1,25 +1,21 @@
-int	startup_miss = 0;
 /*
- * Copyright (c) 2002,2000 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2004 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -35,6 +31,7 @@ int	startup_miss = 0;
 
 
 #include <mach/mach_types.h>
+#include <mach/memory_object.h>
 #include <mach/shared_memory_server.h>
 #include <vm/task_working_set.h>
 #include <vm/vm_kern.h>
@@ -42,11 +39,37 @@ int	startup_miss = 0;
 #include <vm/vm_page.h>
 #include <vm/vm_pageout.h>
 #include <kern/sched.h>
+#include <kern/kalloc.h>
 
-extern unsigned sched_tick;
+#include <vm/vm_protos.h>
+
+/*
+ * LP64todo - Task Working Set Support is for 32-bit only
+ */
 extern zone_t lsf_zone;
 
 /* declarations for internal use only routines */
+int	startup_miss = 0;
+
+tws_hash_t
+tws_hash_create(
+	unsigned int lines,
+	unsigned int rows,
+	unsigned int style);
+
+kern_return_t
+tws_write_startup_file(
+	task_t		task,
+	int		fid,
+	int		mod,
+	char		*name,
+	unsigned int	string_length);
+
+kern_return_t
+tws_read_startup_file(
+	task_t		task,
+	tws_startup_t	startup,
+	vm_offset_t	cache_size);
 
 tws_startup_t
 tws_create_startup_list(
@@ -59,6 +82,17 @@ tws_startup_list_lookup(
 
 kern_return_t
 tws_internal_startup_send(
+	tws_hash_t	tws);
+
+void
+tws_hash_line_clear(
+	tws_hash_t	tws,
+	tws_hash_line_t hash_line,
+	vm_object_t	object,
+	boolean_t live);
+
+void
+tws_hash_clear(
 	tws_hash_t	tws);
 
 void
@@ -80,7 +114,7 @@ tws_traverse_object_hash_list (
 	unsigned int		index,
 	vm_object_t		object,
 	vm_object_offset_t	offset,
-	unsigned int		page_mask,
+	unsigned int		pagemask,
 	tws_hash_ptr_t		*target_ele,
 	tws_hash_ptr_t		**previous_ptr,
 	tws_hash_ptr_t		**free_list);
@@ -102,7 +136,14 @@ int tws_test_for_community(
 		vm_object_t		object, 
 		vm_object_offset_t	offset, 
 		unsigned int		threshold, 
-		unsigned int		*page_mask);
+		unsigned int		*pagemask);
+
+kern_return_t
+tws_internal_lookup(
+	tws_hash_t		tws,	
+	vm_object_offset_t	offset, 
+	vm_object_t		object,
+	tws_hash_line_t		 *line);
 
 /* Note:  all of the routines below depend on the associated map lock for */
 /* synchronization, the map lock will be on when the routines are called  */
@@ -115,8 +156,6 @@ tws_hash_create(
 	unsigned int style)
 {
 	tws_hash_t	tws;
-	int		i,j;
-
 	
 	if ((style != TWS_HASH_STYLE_BASIC) &&
 			(style != TWS_HASH_STYLE_BASIC)) {
@@ -131,39 +170,34 @@ tws_hash_create(
 	if((tws->table[0] = (tws_hash_ptr_t *)
 			kalloc(sizeof(tws_hash_ptr_t) * lines * rows)) 
 								== NULL) {
-		kfree((vm_offset_t)tws, sizeof(struct tws_hash));
+		kfree(tws, sizeof(struct tws_hash));
 		return (tws_hash_t)NULL;
 	}
 	if((tws->table_ele[0] = (tws_hash_ptr_t)
 			kalloc(sizeof(struct tws_hash_ptr) * lines * rows)) 
 								== NULL) {
-		kfree((vm_offset_t)tws->table[0], sizeof(tws_hash_ptr_t) 
-				* lines * rows);
-		kfree((vm_offset_t)tws, sizeof(struct tws_hash));
+		kfree(tws->table[0], sizeof(tws_hash_ptr_t) * lines * rows);
+		kfree(tws, sizeof(struct tws_hash));
 		return (tws_hash_t)NULL;
 	}
 	if((tws->alt_ele[0] = (tws_hash_ptr_t)
 			kalloc(sizeof(struct tws_hash_ptr) * lines * rows))
 								== NULL) {
-		kfree((vm_offset_t)tws->table[0], sizeof(tws_hash_ptr_t) 
-				* lines * rows);
-		kfree((vm_offset_t)tws->table_ele[0],
-				sizeof(struct tws_hash_ptr) 
-				* lines * rows);
-		kfree((vm_offset_t)tws, sizeof(struct tws_hash));
+		kfree(tws->table[0], sizeof(tws_hash_ptr_t) * lines * rows);
+		kfree(tws->table_ele[0],
+		      sizeof(struct tws_hash_ptr) * lines * rows);
+		kfree(tws, sizeof(struct tws_hash));
 		return (tws_hash_t)NULL;
 	}
 	if((tws->cache[0] = (struct tws_hash_line *)
 			kalloc(sizeof(struct tws_hash_line) * lines))
 								== NULL) {
-		kfree((vm_offset_t)tws->table[0], sizeof(tws_hash_ptr_t) 
-				* lines * rows);
-		kfree((vm_offset_t)tws->table_ele[0],
-				sizeof(struct tws_hash_ptr)
-				* lines * rows);
-		kfree((vm_offset_t)tws->alt_ele[0], sizeof(struct tws_hash_ptr) 
-				* lines * rows);
-		kfree((vm_offset_t)tws, sizeof(struct tws_hash));
+		kfree(tws->table[0], sizeof(tws_hash_ptr_t) * lines * rows);
+		kfree(tws->table_ele[0],
+		      sizeof(struct tws_hash_ptr) * lines * rows);
+		kfree(tws->alt_ele[0],
+		      sizeof(struct tws_hash_ptr) * lines * rows);
+		kfree(tws, sizeof(struct tws_hash));
 		return (tws_hash_t)NULL;
 	}
 	tws->free_hash_ele[0] = (tws_hash_ptr_t)0;
@@ -180,7 +214,7 @@ tws_hash_create(
 	bzero((char *)tws->cache[0], sizeof(struct tws_hash_line) 
 					* lines);
 
-	mutex_init(&tws->lock, ETAP_VM_MAP);
+	mutex_init(&tws->lock, 0);
 	tws->style = style;
 	tws->current_line = 0;
 	tws->pageout_count = 0;
@@ -197,11 +231,16 @@ tws_hash_create(
 	return tws;
 }
 
-int	newtest = 0;
+
+extern vm_page_t
+vm_page_lookup_nohint(vm_object_t object, vm_object_offset_t offset);
+
+
 void
 tws_hash_line_clear(
 	tws_hash_t	tws,
-	tws_hash_line_t hash_line, 
+	tws_hash_line_t hash_line,
+	__unused vm_object_t	object,
 	boolean_t live)
 {
 	struct tws_hash_ele	*hash_ele;
@@ -209,7 +248,7 @@ tws_hash_line_clear(
 	struct tws_hash_ptr	**free_list;
 	tws_hash_ele_t		addr_ele;
 	int			index;
-	unsigned int		i, j, k;
+	unsigned int		i, j;
 	int			dump_pmap;
 	int			hash_loop;
 
@@ -238,7 +277,7 @@ tws_hash_line_clear(
 			tws_hash_ptr_t	cache_ele;
 	
 			index = alt_tws_hash(
-				hash_ele->page_addr & TWS_HASH_OFF_MASK,
+				hash_ele->page_addr & TWS_ADDR_OFF_MASK,
 				tws->number_of_elements, 
 				tws->number_of_lines);
 	
@@ -260,7 +299,7 @@ tws_hash_line_clear(
 	
 			index = alt_tws_hash(
 				(hash_ele->page_addr - 0x1f000) 
-						& TWS_HASH_OFF_MASK,
+						& TWS_ADDR_OFF_MASK,
 				tws->number_of_elements, 
 				tws->number_of_lines);
 
@@ -284,21 +323,34 @@ tws_hash_line_clear(
 	
 			if((hash_ele->map != NULL) && (live)) {
 				vm_page_t	p;
-	
-				for (j = 0x1; j != 0; j = j<<1) {
-				   if(j & hash_ele->page_cache) {
-					p = vm_page_lookup(hash_ele->object, 
-						hash_ele->offset + local_off);
-					if((p != NULL) && (p->wire_count == 0) 
-							&& (dump_pmap == 1)) {
-						pmap_remove_some_phys((pmap_t)
-							vm_map_pmap(
-								current_map()),
-							p->phys_page);
-					}
-				   }
-				   local_off += PAGE_SIZE_64;
+				
+#if 0
+				if (object != hash_ele->object) {
+				    if (object)
+				        vm_object_unlock(object);
+				    vm_object_lock(hash_ele->object);
 				}
+#endif
+				if (dump_pmap == 1) {
+				    for (j = 0x1; j != 0; j = j<<1) {
+				        if(j & hash_ele->page_cache) {
+					    p = vm_page_lookup_nohint(hash_ele->object, 
+								      hash_ele->offset + local_off);
+					    if((p != NULL) && (p->wire_count == 0)) {
+					        pmap_remove_some_phys((pmap_t)vm_map_pmap(current_map()),
+								      p->phys_page);
+					    }
+					}
+					local_off += PAGE_SIZE_64;
+				    }
+				}
+#if 0
+				if (object != hash_ele->object) {
+				    vm_object_unlock(hash_ele->object);
+				    if (object)
+				        vm_object_lock(object);
+				}
+#endif
 			}
 	
 			if(tws->style == TWS_HASH_STYLE_SIGNAL) {
@@ -355,7 +407,7 @@ tws_internal_lookup(
 		int age_of_cache;
 		age_of_cache = ((sched_tick 
 			- tws->time_of_creation) >> SCHED_TICK_SHIFT);
-       		if (age_of_cache > 35) {
+       		if (age_of_cache > 45) {
 			return KERN_OPERATION_TIMED_OUT;
 		}
 	}
@@ -367,7 +419,7 @@ tws_internal_lookup(
 			int age_of_cache;
 			age_of_cache = ((sched_tick 
 				- tws->time_of_creation) >> SCHED_TICK_SHIFT);
-	        	if (age_of_cache > 60) {
+	        	if (age_of_cache > 45) {
 				return KERN_OPERATION_TIMED_OUT;
 			}
       		}
@@ -410,16 +462,13 @@ tws_lookup(
 
 kern_return_t
 tws_expand_working_set(
-	vm_offset_t	tws, 
-	int		line_count,
+	tws_hash_t	old_tws, 
+	unsigned int	line_count,
 	boolean_t	dump_data)
 {
 	tws_hash_t		new_tws;
-	tws_hash_t		old_tws;
 	unsigned int		i,j,k;
 	struct	tws_hash	temp;
-
-	old_tws = (tws_hash_t)tws;
 
 	/* Note we do an elaborate dance to preserve the header that */
 	/* task is pointing to.  In this way we can avoid taking a task */
@@ -445,7 +494,7 @@ tws_expand_working_set(
 		    if(entry->object != 0) {
 			paddr = 0;
 			for(page_index = 1; page_index != 0; 
-					page_index = page_index << 1); {
+					page_index = page_index << 1) {
 				if (entry->page_cache & page_index) {
 					tws_insert(new_tws, 
 						entry->offset+paddr,
@@ -534,7 +583,6 @@ tws_insert(
 	vm_offset_t		page_addr,
 	vm_map_t		map)
 {
-	queue_t 		bucket;
 	unsigned int		index;
 	unsigned int		alt_index;
 	unsigned int		index_enum[2];
@@ -545,37 +593,30 @@ tws_insert(
 	tws_hash_ptr_t		*trailer;
 	tws_hash_ptr_t		*free_list;
 	tws_hash_ele_t		target_element = NULL;
-	int			i,k;
-	int			current_line;
-	int			set;
+	unsigned int		i;
+	unsigned int		current_line;
+	unsigned int		set;
 	int			ctr;
 	unsigned int		startup_cache_line;
-	vm_offset_t		startup_page_addr;
-	int			cache_full = 0;
-	int			ask_for_startup_cache_release = 0;
-
+        int			age_of_cache = 0;
 
 	if(!tws_lock_try(tws)) {
 		return KERN_FAILURE;
 	}
 	tws->insert_count++;
 	current_line = 0xFFFFFFFF;
+	set = 0;
 
 	startup_cache_line = 0;
-	startup_page_addr =
-			 page_addr - (offset - (offset & TWS_HASH_OFF_MASK));
-	if(tws->startup_cache) {
-	      int age_of_cache;
-	      age_of_cache = ((sched_tick - tws->time_of_creation) 
-						>> SCHED_TICK_SHIFT);
-		startup_cache_line = tws_startup_list_lookup(
-					tws->startup_cache, startup_page_addr);
-if(tws == test_tws) {
-printf("cache_lookup, result = 0x%x, addr = 0x%x, object 0x%x, offset 0x%x%x\n", startup_cache_line, startup_page_addr, object, offset);
-}
-		if(age_of_cache > 60) {
-			ask_for_startup_cache_release = 1;
-		}
+
+	if (tws->startup_cache) {
+	        vm_offset_t	startup_page_addr;
+
+	        startup_page_addr = page_addr - (offset - (offset & TWS_HASH_OFF_MASK));
+
+		age_of_cache = ((sched_tick - tws->time_of_creation) >> SCHED_TICK_SHIFT);
+
+		startup_cache_line = tws_startup_list_lookup(tws->startup_cache, startup_page_addr);
 	}
 	/* This next bit of code, the and alternate hash */
 	/* are all made necessary because of IPC COW     */
@@ -586,11 +627,11 @@ printf("cache_lookup, result = 0x%x, addr = 0x%x, object 0x%x, offset 0x%x%x\n",
 	/* in avoiding duplication of entries against long lived non-cow */
 	/* objects */
 	index_enum[0] = alt_tws_hash(
-			page_addr & TWS_HASH_OFF_MASK,
+			page_addr & TWS_ADDR_OFF_MASK,
 			tws->number_of_elements, tws->number_of_lines);
 
 	index_enum[1] = alt_tws_hash(
-			(page_addr - 0x1f000) & TWS_HASH_OFF_MASK,
+			(page_addr - 0x1f000) & TWS_ADDR_OFF_MASK,
 			tws->number_of_elements, tws->number_of_lines);
 
 	for(ctr = 0; ctr < 2;) {
@@ -613,7 +654,7 @@ printf("cache_lookup, result = 0x%x, addr = 0x%x, object 0x%x, offset 0x%x%x\n",
 				   (1<<(((vm_offset_t)
 				   (offset & TWS_INDEX_MASK))>>12));
 				tws_unlock(tws);
-				if(ask_for_startup_cache_release)
+				if (age_of_cache > 45)
 					return KERN_OPERATION_TIMED_OUT;
 				return KERN_SUCCESS;
 			}
@@ -775,10 +816,10 @@ printf("cache_lookup, result = 0x%x, addr = 0x%x, object 0x%x, offset 0x%x%x\n",
 						* tws->number_of_lines 
 						* tws->number_of_elements)) 
 								== NULL) {
-				         kfree((vm_offset_t)tws->table[set], 
-						sizeof(tws_hash_ptr_t) 
-				       		* tws->number_of_lines 
-						* tws->number_of_elements);
+				         kfree(tws->table[set], 
+					       sizeof(tws_hash_ptr_t) 
+					       * tws->number_of_lines 
+					       * tws->number_of_elements);
 				         set = 0;
 				      } else if((tws->alt_ele[set] = 
 						(tws_hash_ptr_t)
@@ -786,12 +827,12 @@ printf("cache_lookup, result = 0x%x, addr = 0x%x, object 0x%x, offset 0x%x%x\n",
 						* tws->number_of_lines 
 						* tws->number_of_elements)) 
 								== NULL) {
-				         kfree((vm_offset_t)tws->table_ele[set], 
-						sizeof(struct tws_hash_ptr) 
-				       		* tws->number_of_lines 
-						* tws->number_of_elements);
-				         kfree((vm_offset_t)tws->table[set], 
-						sizeof(tws_hash_ptr_t) 
+				         kfree(tws->table_ele[set], 
+					       sizeof(struct tws_hash_ptr) 
+					       * tws->number_of_lines 
+					       * tws->number_of_elements);
+				         kfree(tws->table[set], 
+					       sizeof(tws_hash_ptr_t) 
 				       		* tws->number_of_lines 
 						* tws->number_of_elements);
 				         tws->table[set] = NULL;
@@ -803,18 +844,18 @@ printf("cache_lookup, result = 0x%x, addr = 0x%x, object 0x%x, offset 0x%x%x\n",
 						(struct tws_hash_line) 
 						* tws->number_of_lines)) 
 								== NULL) {
-				         kfree((vm_offset_t)tws->alt_ele[set], 
-						sizeof(struct tws_hash_ptr) 
-			               		* tws->number_of_lines 
-						* tws->number_of_elements);
-					 kfree((vm_offset_t)tws->table_ele[set], 
-						sizeof(struct tws_hash_ptr) 
-				       		* tws->number_of_lines 
-						* tws->number_of_elements);
-				         kfree((vm_offset_t)tws->table[set], 
-						sizeof(tws_hash_ptr_t) 
-			               		* tws->number_of_lines 
-						* tws->number_of_elements);
+				         kfree(tws->alt_ele[set], 
+					       sizeof(struct tws_hash_ptr) 
+					       * tws->number_of_lines 
+					       * tws->number_of_elements);
+					 kfree(tws->table_ele[set], 
+					       sizeof(struct tws_hash_ptr) 
+					       * tws->number_of_lines 
+					       * tws->number_of_elements);
+				         kfree(tws->table[set], 
+					       sizeof(tws_hash_ptr_t) 
+					       * tws->number_of_lines 
+					       * tws->number_of_elements);
 				         tws->table[set] = NULL;
 				         set = 0;
 							
@@ -841,29 +882,16 @@ printf("cache_lookup, result = 0x%x, addr = 0x%x, object 0x%x, offset 0x%x%x\n",
 				      }
 				      vm_object_lock(object);
 				   } else {
-				      int age_of_cache;
-				      age_of_cache = 
-						((sched_tick - 
-						    tws->time_of_creation) 
-							>> SCHED_TICK_SHIFT);
-	
-				      if((tws->startup_cache) && 
-							(age_of_cache > 60)) {
-					 ask_for_startup_cache_release = 1;
-				      }
-				      if((tws->startup_name != NULL) &&
-							(age_of_cache > 15)) {
+				      if (tws->startup_name != NULL) {
 						tws->current_line--;
+
+						age_of_cache = ((sched_tick - tws->time_of_creation) >> SCHED_TICK_SHIFT);
+
 						tws_unlock(tws);
-						return KERN_OPERATION_TIMED_OUT;
-				      }
-				      if((tws->startup_name != NULL) &&
-							(age_of_cache < 15)) {
-						/* If we are creating a */
-						/* cache, don't lose the */
-						/* early info */
-						tws->current_line--;
-						tws_unlock(tws);
+
+						if (age_of_cache > 45)
+						        return KERN_OPERATION_TIMED_OUT;
+
 						return KERN_FAILURE;
 				      }
 				      tws->lookup_count = 0;
@@ -875,7 +903,7 @@ printf("cache_lookup, result = 0x%x, addr = 0x%x, object 0x%x, offset 0x%x%x\n",
 			}
 			if(set < tws->expansion_count) {
 			   tws_hash_line_clear(tws, 
-				&(tws->cache[set][current_line]), TRUE);
+				&(tws->cache[set][current_line]), object, TRUE);
 			   if(tws->cache[set][current_line].ele_count 
 						>= tws->number_of_elements) {
 				if(tws->style == TWS_HASH_STYLE_SIGNAL) {
@@ -942,16 +970,15 @@ printf("cache_lookup, result = 0x%x, addr = 0x%x, object 0x%x, offset 0x%x%x\n",
 	target_element->map = map;
 	target_element->line = 
 			current_line + (set * tws->number_of_lines);
-	if(startup_cache_line) {
-	 	target_element->page_cache = startup_cache_line;
-	}
-	target_element->page_cache |=
-			 1<<(((vm_offset_t)(offset & TWS_INDEX_MASK))>>12);
 
+	target_element->page_cache |= startup_cache_line;
+	target_element->page_cache |= 1<<(((vm_offset_t)(offset & TWS_INDEX_MASK))>>12);
 
 	tws_unlock(tws);
-	if(ask_for_startup_cache_release)
+
+	if (age_of_cache > 45)
 		return KERN_OPERATION_TIMED_OUT;
+
 	return KERN_SUCCESS;
 }
 
@@ -1015,6 +1042,7 @@ printf("cache_lookup, result = 0x%x, addr = 0x%x, object 0x%x, offset 0x%x%x\n",
 #define PAGED_OUT(o, f) FALSE
 #endif /* MACH_PAGEMAP */
 
+
 void
 tws_build_cluster(
 		tws_hash_t		tws,
@@ -1024,7 +1052,6 @@ tws_build_cluster(
 		vm_size_t		max_length)
 {
 	tws_hash_line_t		line;
-	task_t			task;
 	vm_object_offset_t	before = *start;
 	vm_object_offset_t	after =  *end;
 	vm_object_offset_t	original_start = *start;
@@ -1034,10 +1061,11 @@ tws_build_cluster(
 	kern_return_t		kret;
 	vm_object_offset_t	object_size;
 	int			age_of_cache;
-	int			pre_heat_size;
+	vm_size_t		pre_heat_size;
 	unsigned int		ele_cache;
 	unsigned int		end_cache = 0;
 	unsigned int		start_cache = 0;
+	unsigned int		memory_scarce = 0;
 
 	if((object->private) || !(object->pager))
 		return;
@@ -1053,17 +1081,17 @@ tws_build_cluster(
 	if((!tws) || (!tws_lock_try(tws))) {
 		return;
 	}
-
 	age_of_cache = ((sched_tick 
 			- tws->time_of_creation) >> SCHED_TICK_SHIFT);
+
+	if (vm_page_free_count < (2 * vm_page_free_target))
+	        memory_scarce = 1;
 
 	/* When pre-heat files are not available, resort to speculation */
 	/* based on size of file */
 
-	if(tws->startup_cache || object->internal || age_of_cache > 15 || 
-		(age_of_cache > 5 && 
-			vm_page_free_count < (vm_page_free_target * 2) )) {
-			pre_heat_size = 0;
+	if (tws->startup_cache || object->internal || age_of_cache > 45) {
+		pre_heat_size = 0;
 	} else {
 		if (object_size > (vm_object_offset_t)(1024 * 1024))
 			pre_heat_size = 8 * PAGE_SIZE;
@@ -1073,64 +1101,59 @@ tws_build_cluster(
 			pre_heat_size = 2 * PAGE_SIZE;
 	}
 
-       	if ((age_of_cache < 10) && (tws->startup_cache)) {
-		if ((max_length >= ((*end - *start) 
-			+ (32 * PAGE_SIZE))) &&
-			(tws_test_for_community(tws, object, 
-					*start, 3, &ele_cache))) {
-			int	expanded;
-				start_cache = ele_cache;
+       	if (tws->startup_cache) {
+	        int target_page_count;
+
+		if (memory_scarce)
+		        target_page_count = 16;
+		else
+		        target_page_count = 4;
+
+	        if (tws_test_for_community(tws, object, *start, target_page_count, &ele_cache))
+		{
+	                start_cache = ele_cache;
 			*start = *start & TWS_HASH_OFF_MASK;
 			*end = *start + (32 * PAGE_SIZE_64);
-			if(*end > object_size) {
-				*end = trunc_page_64(object_size);
+
+			if (*end > object_size) {
+				*end = round_page_64(object_size);
 				max_length = 0;
-				if(before >= *end) {
-					*end = after;
-				} else {
-					end_cache = ele_cache;
-				}
-			} else {
-				end_cache = ele_cache;
-			}
-			while (max_length > ((*end - *start) 
-						+ (32 * PAGE_SIZE))) {
+			} else
+			        end_cache = ele_cache;
+
+			while (max_length > ((*end - *start) + (32 * PAGE_SIZE))) {
+			        int	expanded;
+
 				expanded = 0;
 				after = *end;
-				before = *start - PAGE_SIZE_64;
-				if((*end <= (object->size 	
-					+ (32 * PAGE_SIZE_64))) &&
-		   			(tws_test_for_community(tws, 
-						object, after, 
-						5, &ele_cache))) {
-					*end = after + 
-						(32 * PAGE_SIZE_64);
-					if(*end > object_size) {
-						*end = trunc_page_64(object_size);
-						max_length = 0;
-						if(*start >= *end) {
-							*end = after;
-						}
-					}
+
+				if ((after + (32 * PAGE_SIZE_64)) <= object_size &&
+				    (tws_test_for_community(tws, object, after, 8, &ele_cache))) {
+
+					*end = after + (32 * PAGE_SIZE_64);
 					end_cache = ele_cache;
 					expanded = 1;
 				}
-				if (max_length > ((*end - *start) 
-						+ (32 * PAGE_SIZE_64))) {
+				if (max_length < ((*end - *start) + (32 * PAGE_SIZE_64))) {
 					break;
 				}
-				if((*start >= (32 * PAGE_SIZE_64)) &&
-		   			(tws_test_for_community(tws, object, 
-					before, 5, &ele_cache))) {
-					*start = before;
-					start_cache = ele_cache;
-					expanded = 1;
+				if (*start) {
+				        before = (*start - PAGE_SIZE_64) & TWS_HASH_OFF_MASK;
+
+					if (tws_test_for_community(tws, object, before, 8, &ele_cache)) {
+
+					        *start = before;
+						start_cache = ele_cache;
+						expanded = 1;
+					}
 				}
-				if(expanded == 0)
+				if (expanded == 0)
 					break;
 			}
+			if (end_cache)
+			        *end -= PAGE_SIZE_64;
 
-			if(start_cache != 0) {
+			if (start_cache != 0) {
 				unsigned int mask;
 
 				for (mask = 1; mask != 0; mask = mask << 1) {
@@ -1142,24 +1165,23 @@ tws_build_cluster(
 						break;
 				}
 			}
-			if(end_cache != 0) {
+			if (end_cache != 0) {
 				unsigned int mask;
 
 				for (mask = 0x80000000; 
 						mask != 0; mask = mask >> 1) {
 			        	if (*end == original_end)
 				       		 break;
-					if(!(end_cache & mask))
+					if (!(end_cache & mask))
 						*end -= PAGE_SIZE_64;
 					else
 						break;
 				}
 			}
-
-			if (*start >= *end)
-			  panic("bad clipping occurred\n");
-
 			tws_unlock(tws);
+
+			if (*end < original_end)
+			        *end = original_end;
 			return;
 		}
 	}
@@ -1284,6 +1306,7 @@ tws_build_cluster(
 	tws_unlock(tws);
 }
 
+void
 tws_line_signal(
 	tws_hash_t	tws,
 	vm_map_t	map,
@@ -1319,7 +1342,7 @@ tws_line_signal(
 		while (j != 0) {
 			if(j & element->page_cache)
 				break;
-			j << 1;
+			j <<= 1;
 			local_off += PAGE_SIZE_64;
 		}
 		object = element->object;
@@ -1531,7 +1554,7 @@ tws_startup_list_lookup(
 
 	hash_index = do_startup_hash(addr, startup->array_size);
 
-	if(((unsigned int)&(startup->table[hash_index])) >= startup->tws_hash_size) {
+	if(((unsigned int)&(startup->table[hash_index])) >= ((unsigned int)startup + startup->tws_hash_size)) {
 		return page_cache_bits = 0;
 	}
 	element = (tws_startup_ptr_t)((int)startup->table[hash_index] +
@@ -1615,10 +1638,9 @@ tws_send_startup_info(
 {
 
 	tws_hash_t		tws;
-	tws_startup_t 		scache;
 
 	task_lock(task);
-	tws = (tws_hash_t)task->dynamic_working_set;
+	tws = task->dynamic_working_set;
 	task_unlock(task);
 	if(tws == NULL) {
 		return KERN_FAILURE;
@@ -1657,10 +1679,10 @@ tws_internal_startup_send(
 	if(scache == NULL)
 		return KERN_FAILURE;
 	bsd_write_page_cache_file(tws->uid, tws->startup_name, 
-				scache, scache->tws_hash_size, 
-				tws->mod, tws->fid);
-	kfree((vm_offset_t)scache, scache->tws_hash_size);
-	kfree((vm_offset_t) tws->startup_name, tws->startup_name_length);
+				  (caddr_t) scache, scache->tws_hash_size, 
+				  tws->mod, tws->fid);
+	kfree(scache, scache->tws_hash_size);
+	kfree(tws->startup_name, tws->startup_name_length);
 	tws->startup_name = NULL;
 	tws_unlock(tws);
 	return KERN_SUCCESS;
@@ -1671,7 +1693,7 @@ tws_handle_startup_file(
 		task_t			task,
 		unsigned int		uid,
 		char			*app_name,
-		vm_offset_t		app_vp,
+		void			*app_vp,
 		boolean_t		*new_info)
 
 {
@@ -1687,7 +1709,8 @@ tws_handle_startup_file(
 			return KERN_SUCCESS;
 		error = bsd_read_page_cache_file(uid, &fid, 
 					&mod, app_name, 
-					app_vp, &startup, 
+					app_vp,
+					(vm_offset_t *) &startup, 
 					&cache_size);
 		if(error) {
 			return KERN_FAILURE;
@@ -1738,14 +1761,19 @@ tws_write_startup_file(
 
 		string_length = strlen(name);
 
+restart:
 		task_lock(task);
-		tws = (tws_hash_t)task->dynamic_working_set;
-
+		tws = task->dynamic_working_set;
 		task_unlock(task);
+
 		if(tws == NULL) {
+			kern_return_t error;
+
 			/* create a dynamic working set of normal size */
-			task_working_set_create(task, 0,
-						0, TWS_HASH_STYLE_DEFAULT);
+			if((error = task_working_set_create(task, 0, 0, TWS_HASH_STYLE_DEFAULT)) != KERN_SUCCESS)
+				return error;
+			/* we need to reset tws and relock */
+			goto restart;
 		}
 		tws_lock(tws);
 
@@ -1771,6 +1799,8 @@ tws_write_startup_file(
 		return KERN_SUCCESS;
 }
 
+unsigned long tws_read_startup_file_rejects = 0;
+
 kern_return_t
 tws_read_startup_file(
 		task_t			task,
@@ -1778,26 +1808,52 @@ tws_read_startup_file(
 		vm_offset_t		cache_size)
 {
 		tws_hash_t		tws;
-		int			error;
 		int			lines;
 		int			old_exp_count;
+		unsigned int		ele_count;
 
+restart:
 		task_lock(task);
-		tws = (tws_hash_t)task->dynamic_working_set;
+		tws = task->dynamic_working_set;
 
-		if(cache_size < sizeof(struct tws_hash)) {
+		/* create a dynamic working set to match file size */
+
+		/* start with total size of the data we got from app_profile */
+		ele_count = cache_size;
+		/* skip the startup header */
+		ele_count -= sizeof(struct tws_startup); 
+		/*
+		 * For each startup cache entry, we have one of these:
+		 *	tws_startup_ptr_t startup->table[];
+		 * 	struct tws_startup_ptr startup->ele[];
+		 *	struct tws_startup_ele startup->array[];
+		 */
+		ele_count /= (sizeof (tws_startup_ptr_t) +
+			      sizeof (struct tws_startup_ptr) +
+			      sizeof (struct tws_startup_ele));
+
+		/*
+		 * Sanity check: make sure the value for startup->array_size
+		 * that we read from the app_profile file matches the size
+		 * of the data we read from disk.  If it doesn't match, we
+		 * can't trust the data and we just drop it all.
+		 */
+		if (cache_size < sizeof(struct tws_startup) ||
+		    startup->array_size != ele_count) {
+			tws_read_startup_file_rejects++;
 			task_unlock(task);
 			kmem_free(kernel_map, (vm_offset_t)startup, cache_size); 
 			return(KERN_SUCCESS);
 		}
 
-		/* create a dynamic working set to match file size */
-		lines = (cache_size - sizeof(struct tws_hash))/TWS_ARRAY_SIZE;
-		/* we now need to divide out element size and word size */
-		/* all fields are 4 bytes.  There are 8 bytes in each hash element */
-		/* entry, 4 bytes in each table ptr location and 8 bytes in each */
-		/* page_cache entry, making a total of 20 bytes for each entry */
-		lines = (lines/(20));
+		/*
+		 * We'll create the task working set with the default row size
+		 * (TWS_ARRAY_SIZE), so this will give us the number of lines
+		 * we need to store all the data from the app_profile startup
+		 * cache.
+		 */
+		lines = ele_count / TWS_ARRAY_SIZE;
+
 		if(lines <= TWS_SMALL_HASH_LINE_COUNT) {
 			lines = TWS_SMALL_HASH_LINE_COUNT;
 			task_unlock(task);
@@ -1810,17 +1866,20 @@ tws_read_startup_file(
 						* TWS_HASH_LINE_COUNT;
 			}
 			if(tws == NULL) {
-				task_working_set_create(task, lines, 
-						0, TWS_HASH_STYLE_DEFAULT);
+				kern_return_t error;
+
 				task_unlock(task);
+				if ((error = task_working_set_create(task, lines, 0, TWS_HASH_STYLE_DEFAULT)) != KERN_SUCCESS)
+					return error;
+				/* we need to reset tws and relock */
+				goto restart;
 			} else {
 				task_unlock(task);
 				tws_expand_working_set(
-					(vm_offset_t)tws, lines, TRUE);
+					(void *)tws, lines, TRUE);
 			}
 		}
 		
-
 		tws_lock(tws);
 		
 		if(tws->startup_cache != NULL) {
@@ -1860,21 +1919,16 @@ tws_hash_ws_flush(tws_hash_t tws) {
 		if(scache == NULL) {
 			/* dump the name cache, we'll */
 			/* get it next time */
-			kfree((vm_offset_t) 	
-				tws->startup_name, 
-				tws->startup_name_length);
+			kfree(tws->startup_name, tws->startup_name_length);
 			tws->startup_name = NULL;
 			tws_unlock(tws);
 			return;
 		}
 		bsd_write_page_cache_file(tws->uid, tws->startup_name, 
-				scache, scache->tws_hash_size, 
+				(caddr_t) scache, scache->tws_hash_size, 
 				tws->mod, tws->fid);
-		kfree((vm_offset_t)scache, 
-				scache->tws_hash_size);
-		kfree((vm_offset_t) 
-				tws->startup_name, 
-				tws->startup_name_length);
+		kfree(scache, scache->tws_hash_size);
+		kfree(tws->startup_name, tws->startup_name_length);
 		tws->startup_name = NULL;
 	}
 	tws_unlock(tws);
@@ -1884,8 +1938,7 @@ tws_hash_ws_flush(tws_hash_t tws) {
 void
 tws_hash_destroy(tws_hash_t	tws)
 {
-	int	i,k;
-	vm_size_t	cache_size;
+	unsigned int	i,k;
 
 	if(tws->startup_cache != NULL) {
 		kmem_free(kernel_map,
@@ -1899,43 +1952,43 @@ tws_hash_destroy(tws_hash_t	tws)
 	for (i=0; i<tws->number_of_lines; i++) {
 		for(k=0; k<tws->expansion_count; k++) {
 			/* clear the object refs */
-			tws_hash_line_clear(tws, &(tws->cache[k][i]), FALSE);
+			tws_hash_line_clear(tws, &(tws->cache[k][i]), NULL, FALSE);
 		}
 	}
 	i = 0;
 	while (i < tws->expansion_count) {
 		
-		kfree((vm_offset_t)tws->table[i], sizeof(tws_hash_ptr_t) 
-				* tws->number_of_lines 
-				* tws->number_of_elements);
-		kfree((vm_offset_t)tws->table_ele[i], 
-				sizeof(struct tws_hash_ptr) 
-				* tws->number_of_lines 
-				* tws->number_of_elements);
-		kfree((vm_offset_t)tws->alt_ele[i], 
-				sizeof(struct tws_hash_ptr) 
-				* tws->number_of_lines 
-				* tws->number_of_elements);
-		kfree((vm_offset_t)tws->cache[i], sizeof(struct tws_hash_line) 
-				* tws->number_of_lines);
+		kfree(tws->table[i],
+		      sizeof(tws_hash_ptr_t) 
+		      * tws->number_of_lines 
+		      * tws->number_of_elements);
+		kfree(tws->table_ele[i], 
+		      sizeof(struct tws_hash_ptr) 
+		      * tws->number_of_lines 
+		      * tws->number_of_elements);
+		kfree(tws->alt_ele[i], 
+		      sizeof(struct tws_hash_ptr) 
+		      * tws->number_of_lines 
+		      * tws->number_of_elements);
+		kfree(tws->cache[i],
+		      sizeof(struct tws_hash_line) * tws->number_of_lines);
 		i++;
 	}
 	if(tws->startup_name != NULL) {
-		kfree((vm_offset_t)tws->startup_name, 
-				tws->startup_name_length);
+		kfree(tws->startup_name, tws->startup_name_length);
 	}
-	kfree((vm_offset_t)tws, sizeof(struct tws_hash));
+	kfree(tws, sizeof(struct tws_hash));
 }
 
 void
 tws_hash_clear(tws_hash_t	tws)
 {
-	int	i, k;
+	unsigned int	i, k;
 
 	for (i=0; i<tws->number_of_lines; i++) {
 		for(k=0; k<tws->expansion_count; k++) {
 			/* clear the object refs */
-			tws_hash_line_clear(tws, &(tws->cache[k][i]), FALSE);
+			tws_hash_line_clear(tws, &(tws->cache[k][i]), NULL, FALSE);
 		}
 	}
 }
@@ -1961,8 +2014,8 @@ task_working_set_create(
 	if(task->dynamic_working_set != 0) {
 		task_unlock(task);
 		return(KERN_FAILURE);
-	} else if((task->dynamic_working_set 
-		= (vm_offset_t) tws_hash_create(lines, rows, style)) == 0) {
+	} else if((task->dynamic_working_set =
+		tws_hash_create(lines, rows, style)) == 0) {
 		task_unlock(task);
 		return(KERN_NO_SPACE);
 	}
@@ -1995,7 +2048,7 @@ tws_traverse_address_hash_list (
 	tws_hash_ptr_t		**free_list,
 	unsigned int		exclusive_addr)
 {
-	int	k;
+	unsigned int	k;
 	tws_hash_ptr_t	cache_ele;
 	tws_hash_ptr_t	base_ele;
 
@@ -2083,12 +2136,12 @@ tws_traverse_object_hash_list (
 	unsigned int		index,
 	vm_object_t		object,
 	vm_object_offset_t	offset,
-	unsigned int		page_mask,
+	unsigned int		pagemask,
 	tws_hash_ptr_t		*target_ele,
 	tws_hash_ptr_t		**previous_ptr,
 	tws_hash_ptr_t		**free_list)
 {
-	int	k;
+	unsigned int	k;
 	tws_hash_ptr_t	cache_ele;
 	tws_hash_ptr_t	base_ele;
 
@@ -2127,8 +2180,8 @@ tws_traverse_object_hash_list (
 			if ((cache_ele->element->object == object)
 				&& (cache_ele->element->offset == 
 				(offset - (offset & ~TWS_HASH_OFF_MASK)))) {
-				if((cache_ele->element->page_cache & page_mask) 
-					|| (page_mask == 0xFFFFFFFF)) {
+				if((cache_ele->element->page_cache & pagemask) 
+					|| (pagemask == 0xFFFFFFFF)) {
 					/* We've found a match */
 					*target_ele = cache_ele;
 					*free_list = &(tws->free_hash_ele[k]);
@@ -2153,7 +2206,7 @@ tws_test_for_community(
 		vm_object_t		object, 
 		vm_object_offset_t	offset, 
 		unsigned int		threshold, 
-		unsigned int		*page_mask) 
+		unsigned int		*pagemask) 
 {
 	int	index;
 	tws_hash_ptr_t	cache_ele;
@@ -2168,14 +2221,14 @@ tws_test_for_community(
 
 	if(cache_ele != NULL) {
 		int i;
-		int ctr;
+		unsigned int ctr;
 		ctr = 0;
 		for(i=1; i!=0; i=i<<1) {
 			if(i & cache_ele->element->page_cache)
 				ctr++;
 			if(ctr == threshold) {
 				community = 1;
-				*page_mask = cache_ele->element->page_cache;
+				*pagemask = cache_ele->element->page_cache;
 				break;
 			}
 		}

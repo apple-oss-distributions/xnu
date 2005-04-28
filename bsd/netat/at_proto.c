@@ -3,22 +3,19 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -39,6 +36,7 @@
 #include <sys/protosw.h>
 #include <sys/domain.h>
 #include <sys/mbuf.h>
+#include <kern/locks.h>
 
 #include <sys/sysctl.h>
 
@@ -48,7 +46,6 @@
 #include <netat/at_var.h>
 #include <netat/ddp.h>
 
-struct domain atalkdomain;
 
 extern int	ddp_pru_abort(struct socket *so);
 
@@ -74,6 +71,7 @@ extern int	ddp_pru_send(struct socket *so, int flags, struct mbuf *m,
 extern int	ddp_pru_shutdown(struct socket *so);
 extern int	ddp_pru_sockaddr(struct socket *so, 
 				 struct sockaddr **nam);
+void atalk_dominit();
 
 /*
  * Dummy usrreqs struct created by Ted for FreeBSD 3.x integration. 
@@ -84,24 +82,64 @@ struct pr_usrreqs ddp_usrreqs = {
 	ddp_pru_connect, pru_connect2_notsupp, ddp_pru_control, ddp_pru_detach,
 	ddp_pru_disconnect, pru_listen_notsupp, ddp_pru_peeraddr, pru_rcvd_notsupp,
 	pru_rcvoob_notsupp, ddp_pru_send, pru_sense_null, ddp_pru_shutdown,
-	ddp_pru_sockaddr, sosend, soreceive, sopoll
+	ddp_pru_sockaddr, sosend, soreceive, pru_sopoll_notsupp
 };
 
+struct domain atalkdomain;
 struct protosw atalksw[] = {
   { SOCK_RAW,	&atalkdomain,	/*protocol*/ 0,	PR_ATOMIC|PR_ADDR,
     /*input*/ 0, /*output*/ 0, /*clinput*/ 0, ddp_ctloutput,
     /*ousrreq*/ 0, 
     ddp_init, /*fastto*/ 0, /*slowto*/ 0, /*drain*/ 0, 
-    /*sysctl*/ 0, &ddp_usrreqs
+    /*sysctl*/ 0, &ddp_usrreqs,
+	0, 0, 0
   }
 };
 
 struct domain atalkdomain =
-{ AF_APPLETALK, "appletalk", 0, 0, 0, 
+{ AF_APPLETALK, "appletalk", atalk_dominit, 0, 0, 
   atalksw, 0,
   0, 0, 0,
   DDP_X_HDR_SIZE, 0
 };
 
+struct domain * atalkdom = &atalkdomain;
+lck_mtx_t  *atalk_mutex = NULL;
+
 SYSCTL_NODE(_net, PF_APPLETALK, appletalk, CTLFLAG_RW, 0, "AppleTalk Family");
+
+void
+atalk_dominit()
+{
+	atalk_mutex = atalkdom->dom_mtx;
+}
+
+void
+atalk_lock()
+{
+	int error = 0, lr, lr_saved;
+#ifdef __ppc__
+	__asm__ volatile("mflr %0" : "=r" (lr));
+	lr_saved = lr;
+#endif 
+	lck_mtx_assert(atalkdom->dom_mtx, LCK_MTX_ASSERT_NOTOWNED);
+	lck_mtx_lock(atalkdom->dom_mtx);
+}
+	
+void
+atalk_unlock()
+{
+	int error = 0, lr, lr_saved;
+#ifdef __ppc__
+	__asm__ volatile("mflr %0" : "=r" (lr));
+	lr_saved = lr;
+#endif 
+	lck_mtx_assert(atalkdom->dom_mtx, LCK_MTX_ASSERT_OWNED);
+	lck_mtx_unlock(atalkdom->dom_mtx);
+
+}
+	
+
+
+
 

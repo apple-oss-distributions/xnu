@@ -1,51 +1,50 @@
 /*
- * Copyright (c) 2003 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2003-2004 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
+
 #include <sys/types.h>
-#include <sys/bsm_token.h>      
-#include <sys/audit.h>      
 #include <sys/un.h>      
+#include <sys/event.h>      
+#include <sys/ucred.h>
+
+#include <sys/ipc.h>      
+#include <bsm/audit.h>      
+#include <bsm/audit_record.h>      
+#include <bsm/audit_klib.h>      
+#include <bsm/audit_kernel.h>      
+
 #include <kern/clock.h>
+#include <kern/kalloc.h>
+
+#include <string.h>
 
 #define GET_TOKEN_AREA(tok, dptr, length) \
         do {\
-                kmem_alloc(kernel_map, &tok, sizeof(*tok)); \
+                tok = (token_t *)kalloc(sizeof(*tok) + length); \
                 if(tok != NULL)\
                 {\
                         tok->len = length;\
-                        kmem_alloc(kernel_map, &tok->t_data, \
-                                length * sizeof(u_char));\
-                        if((dptr = tok->t_data) == NULL)\
-                        {\
-                                kmem_free(kernel_map, tok, sizeof(*tok));\
-                                tok = NULL;\
-                        }\
-                        else\
-                        {\
+                        dptr = tok->t_data = (u_char *)&tok[1];\
                                 memset(dptr, 0, length);\
                         }\
-                }\
         }while(0)
 
 
@@ -137,15 +136,23 @@ token_t *au_to_arg(char n, char *text, u_int32_t v)
  * node ID                 8 bytes
  * device                  4 bytes/8 bytes (32-bit/64-bit)
  */
-token_t *au_to_attr32(struct vattr *attr)
+token_t *au_to_attr32(__unused struct vnode_attr *attr)
+{
+	return NULL;
+}
+
+/* Kernel-specific version of the above function */
+token_t *kau_to_attr32(struct vnode_au_info *vni)
 {
 	token_t *t;
 	u_char *dptr;
+	u_int64_t fileid;
+	u_int16_t pad0_16 = 0;
+	u_int32_t pad0_32 = 0;
 
-	if(attr == NULL) {
+	if(vni == NULL) {
 		return NULL;
 	}
-	
 	
 	GET_TOKEN_AREA(t, dptr, 29);
 	if(t == NULL) {
@@ -153,43 +160,42 @@ token_t *au_to_attr32(struct vattr *attr)
 	}
 
 	ADD_U_CHAR(dptr, AU_ATTR32_TOKEN);
-	ADD_U_INT32(dptr, attr->va_mode);
-	ADD_U_INT32(dptr, attr->va_uid);
-	ADD_U_INT32(dptr, attr->va_gid);
-	ADD_U_INT32(dptr, attr->va_fsid);
-	ADD_U_INT64(dptr, attr->va_fileid);
-	ADD_U_INT32(dptr, attr->va_rdev);
+
+	/* 
+	 * Darwin defines the size for the file mode as 2 bytes; 
+	 * BSM defines 4. So we copy in a 0 first.
+	 */
+	ADD_U_INT16(dptr, pad0_16);
+	ADD_U_INT16(dptr, vni->vn_mode);
+
+	ADD_U_INT32(dptr, vni->vn_uid);
+	ADD_U_INT32(dptr, vni->vn_gid);
+	ADD_U_INT32(dptr, vni->vn_fsid);
+
+	/* 
+	 * Darwin defines the size for fileid as 4 bytes; 
+	 * BSM defines 8. So we copy in a 0 first.
+	 */
+	fileid = vni->vn_fileid;
+	ADD_U_INT32(dptr, pad0_32);
+	ADD_U_INT32(dptr, fileid);
+
+	ADD_U_INT32(dptr, vni->vn_dev);
 	
 	return t;
 }
 
-token_t *au_to_attr64(struct vattr *attr)
+token_t *au_to_attr64(__unused struct vnode_attr *attr)
 {
-	token_t *t;
-	u_char *dptr;
-
-	if(attr == NULL) {
-		return NULL;
-	}
+	return NULL;
+}
 	
-	
-	GET_TOKEN_AREA(t, dptr, 33);
-	if(t == NULL) {
-		return NULL;
-	}
-
-	ADD_U_CHAR(dptr, AU_ATTR64_TOKEN);
-	ADD_U_INT32(dptr, attr->va_mode);
-	ADD_U_INT32(dptr, attr->va_uid);
-	ADD_U_INT32(dptr, attr->va_gid);
-	ADD_U_INT32(dptr, attr->va_fsid);
-	ADD_U_INT64(dptr, attr->va_fileid);
-	ADD_U_INT64(dptr, attr->va_rdev);
-	
-	return t;
+token_t *kau_to_attr64(__unused struct vnode_au_info *vni)
+{
+	return NULL;
 }
 
-token_t *au_to_attr(struct vattr *attr)
+token_t *au_to_attr(struct vnode_attr *attr)
 {
 	return au_to_attr32(attr);
 
@@ -243,7 +249,6 @@ token_t *au_to_data(char unit_print, char unit_type,
 	
 	return t;
 }
-
 
 /*
  * token ID                1 byte
@@ -339,6 +344,7 @@ token_t *au_to_in_addr_ex(struct in6_addr *internet_addr)
 {
 	token_t *t;
 	u_char *dptr;
+	u_int32_t type = AF_INET6;
 	
 	if(internet_addr == NULL) {
 		return NULL;
@@ -350,6 +356,7 @@ token_t *au_to_in_addr_ex(struct in6_addr *internet_addr)
 	}
 						 
 	ADD_U_CHAR(dptr, AU_IN_ADDR_EX_TOKEN);
+	ADD_U_INT32(dptr, type);
 	ADD_U_INT32(dptr, internet_addr->__u6_addr.__u6_addr32[0]);
 	ADD_U_INT32(dptr, internet_addr->__u6_addr.__u6_addr32[1]);
 	ADD_U_INT32(dptr, internet_addr->__u6_addr.__u6_addr32[2]);
@@ -419,6 +426,7 @@ token_t *au_to_ipc_perm(struct ipc_perm *perm)
 {
 	token_t *t;
 	u_char *dptr;
+	u_int16_t pad0 = 0;
 
 	if(perm == NULL) {
 		return NULL;
@@ -429,14 +437,32 @@ token_t *au_to_ipc_perm(struct ipc_perm *perm)
 		return NULL;
 	}
 				
+	/* 
+	 * Darwin defines the sizes for ipc_perm members
+	 * as 2 bytes; BSM defines 4. So we copy in a 0 first.
+	 */
 	ADD_U_CHAR(dptr, AU_IPCPERM_TOKEN);
-	ADD_U_INT32(dptr, perm->uid);
-	ADD_U_INT32(dptr, perm->gid);
-	ADD_U_INT32(dptr, perm->cuid);
-	ADD_U_INT32(dptr, perm->cgid);
-	ADD_U_INT32(dptr, perm->mode);
-	ADD_U_INT32(dptr, perm->seq);
-	ADD_U_INT32(dptr, perm->key);
+
+	ADD_U_INT16(dptr, pad0);
+	ADD_U_INT16(dptr, perm->uid);
+
+	ADD_U_INT16(dptr, pad0);
+	ADD_U_INT16(dptr, perm->gid);
+
+	ADD_U_INT16(dptr, pad0);
+	ADD_U_INT16(dptr, perm->cuid);
+
+	ADD_U_INT16(dptr, pad0);
+	ADD_U_INT16(dptr, perm->cgid);
+
+	ADD_U_INT16(dptr, pad0);
+	ADD_U_INT16(dptr, perm->mode);
+
+	ADD_U_INT16(dptr, pad0);
+	ADD_U_INT16(dptr, perm->seq);
+
+	ADD_U_INT16(dptr, pad0);
+	ADD_U_INT16(dptr, perm->key);
 
 	return t;
 }
@@ -490,7 +516,6 @@ token_t *au_to_opaque(char *data, u_int16_t bytes)
 	return t;
 }
 
-#ifdef KERNEL
 /*
  * Kernel version of the add file token function, where the time value 
  * is passed in as an additional parameter.
@@ -500,7 +525,7 @@ token_t *au_to_opaque(char *data, u_int16_t bytes)
  * file name len		2 bytes
  * file pathname		N bytes + 1 terminating NULL byte   	
  */
-token_t *kau_to_file(char *file, struct timeval *tv)
+token_t *kau_to_file(const char *file, const struct timeval *tv)
 {
 	token_t *t;
 	u_char *dptr;
@@ -535,7 +560,6 @@ token_t *kau_to_file(char *file, struct timeval *tv)
 	return t;
 
 }
-#endif
 
 /*
  * token ID                1 byte
@@ -648,35 +672,17 @@ token_t *au_to_process32(au_id_t auid, uid_t euid, gid_t egid,
 	return t;
 }
 
-token_t *au_to_process64(au_id_t auid, uid_t euid, gid_t egid,
-		               uid_t ruid, gid_t rgid, pid_t pid,
-		               au_asid_t sid, au_tid_t *tid)
+token_t *au_to_process64(__unused au_id_t auid, 
+			 __unused uid_t euid,
+			 __unused gid_t egid,
+			 __unused uid_t ruid,
+			 __unused gid_t rgid,
+			 __unused pid_t pid,
+			 __unused au_asid_t sid,
+			 __unused au_tid_t *tid)
 {
-	token_t *t;
-	u_char *dptr;
-	
-	if(tid == NULL) {
 		return NULL;
 	}
-
-	GET_TOKEN_AREA(t, dptr, 41);
-	if(t == NULL) {
-		return NULL;
-	}
-						 
-	ADD_U_CHAR(dptr, AU_PROCESS_64_TOKEN);
-	ADD_U_INT32(dptr, auid);
-	ADD_U_INT32(dptr, euid);
-	ADD_U_INT32(dptr, egid);
-	ADD_U_INT32(dptr, ruid);
-	ADD_U_INT32(dptr, rgid);
-	ADD_U_INT32(dptr, pid);
-	ADD_U_INT32(dptr, sid);
-	ADD_U_INT64(dptr, tid->port);
-	ADD_U_INT32(dptr, tid->machine);
-	 
-	return t;
-}
 
 token_t *au_to_process(au_id_t auid, uid_t euid, gid_t egid,
 		               uid_t ruid, gid_t rgid, pid_t pid,
@@ -735,40 +741,19 @@ token_t *au_to_process32_ex(au_id_t auid, uid_t euid, gid_t egid,
 	return t;
 }
 
-token_t *au_to_process64_ex(au_id_t auid, uid_t euid, gid_t egid,
-		               	   uid_t ruid, gid_t rgid, pid_t pid,
-		                   au_asid_t sid, au_tid_addr_t *tid)
+token_t *au_to_process64_ex(
+	__unused au_id_t auid,
+	__unused uid_t euid,
+	__unused gid_t egid,
+	__unused uid_t ruid,
+	__unused gid_t rgid,
+	__unused pid_t pid,
+	__unused au_asid_t sid,
+	__unused au_tid_addr_t *tid)
 {
-	token_t *t;
-	u_char *dptr;
-	
-	if(tid == NULL) {
-		return NULL;
-	}
-
-	GET_TOKEN_AREA(t, dptr, 57);
-	if(t == NULL) {
-		return NULL;
-	}
-						 
-	ADD_U_CHAR(dptr, AU_PROCESS_64_EX_TOKEN);
-	ADD_U_INT32(dptr, auid);
-	ADD_U_INT32(dptr, euid);
-	ADD_U_INT32(dptr, egid);
-	ADD_U_INT32(dptr, ruid);
-	ADD_U_INT32(dptr, rgid);
-	ADD_U_INT32(dptr, pid);
-	ADD_U_INT32(dptr, sid);
-	ADD_U_INT64(dptr, tid->at_port);
-	ADD_U_INT32(dptr, tid->at_type);
-	ADD_U_INT32(dptr, tid->at_addr[0]);
-	ADD_U_INT32(dptr, tid->at_addr[1]);
-	ADD_U_INT32(dptr, tid->at_addr[2]);
-	ADD_U_INT32(dptr, tid->at_addr[3]);
-	 
-	return t;
+	return NULL;
 }
-
+						 
 token_t *au_to_process_ex(au_id_t auid, uid_t euid, gid_t egid,
 		               	   uid_t ruid, gid_t rgid, pid_t pid,
 		                   au_asid_t sid, au_tid_addr_t *tid)
@@ -847,12 +832,44 @@ token_t *au_to_seq(long audit_count)
 /*
  * token ID                1 byte
  * socket type             2 bytes
+ * local port              2 bytes
+ * local Internet address  4 bytes
  * remote port             2 bytes
  * remote Internet address 4 bytes
  */
-token_t *au_to_socket(struct socket *so)
+token_t *au_to_socket(__unused struct socket *so)
 {
-	return au_to_socket_ex_32(so);
+	return NULL;
+}
+
+/*
+ * Kernel-specific version of the above function.
+ */
+token_t *kau_to_socket(struct socket_au_info *soi)
+{
+	token_t *t;
+	u_char *dptr;
+	u_int16_t so_type;
+
+	if(soi == NULL) {
+		return NULL;
+	}	
+
+	GET_TOKEN_AREA(t, dptr, 15);
+	if(t == NULL) {
+		return NULL;
+	}
+						 
+	ADD_U_CHAR(dptr, AU_SOCK_TOKEN);
+	/* Coerce the socket type into a short value */
+	so_type = soi->so_type;
+	ADD_U_INT16(dptr, so_type);
+	ADD_U_INT16(dptr, soi->so_lport);
+	ADD_U_INT32(dptr, soi->so_laddr);
+	ADD_U_INT16(dptr, soi->so_rport);
+	ADD_U_INT32(dptr, soi->so_raddr);
+
+	return t;
 }
 
 /*
@@ -865,11 +882,20 @@ token_t *au_to_socket(struct socket *so)
  * address type/length     4 bytes
  * remote Internet address 4 bytes/16 bytes (IPv4/IPv6 address)
  */
-token_t *au_to_socket_ex_32(struct socket *so)
+token_t *au_to_socket_ex_32(
+	__unused u_int16_t lp,
+	__unused u_int16_t rp, 
+	__unused struct sockaddr *la,
+	__unused struct sockaddr *ra)
 {
 	return NULL;
 }
-token_t *au_to_socket_ex_128(struct socket *so)
+
+token_t *au_to_socket_ex_128(
+	__unused u_int16_t lp,
+	__unused u_int16_t rp, 
+	__unused struct sockaddr *la,
+	__unused struct sockaddr *ra)
 {
 	return NULL;
 }
@@ -1016,36 +1042,19 @@ token_t *au_to_subject32(au_id_t auid, uid_t euid, gid_t egid,
 	return t;
 }
 
-token_t *au_to_subject64(au_id_t auid, uid_t euid, gid_t egid,
-						uid_t ruid, gid_t rgid, pid_t pid,
-						au_asid_t sid, au_tid_t *tid)
+token_t *au_to_subject64(
+	__unused au_id_t auid,
+	__unused uid_t euid,
+	__unused gid_t egid,
+	__unused uid_t ruid,
+	__unused gid_t rgid,
+	__unused pid_t pid,
+	__unused au_asid_t sid,
+	__unused au_tid_t *tid)
 {
-	token_t *t;
-	u_char *dptr;
-	
-	if(tid == NULL) {
-		return NULL;
-	}
-
-	GET_TOKEN_AREA(t, dptr, 41);
-	if(t == NULL) {
 		return NULL;
 	}
 						 
-	ADD_U_CHAR(dptr, AU_SUBJECT_64_TOKEN);
-	ADD_U_INT32(dptr, auid);
-	ADD_U_INT32(dptr, euid);
-	ADD_U_INT32(dptr, egid);
-	ADD_U_INT32(dptr, ruid);
-	ADD_U_INT32(dptr, rgid);
-	ADD_U_INT32(dptr, pid);
-	ADD_U_INT32(dptr, sid);
-	ADD_U_INT64(dptr, tid->port);
-	ADD_U_INT32(dptr, tid->machine);
-	 
-	return t;
-}
-
 token_t *au_to_subject(au_id_t auid, uid_t euid, gid_t egid,
 						uid_t ruid, gid_t rgid, pid_t pid,
 						au_asid_t sid, au_tid_t *tid)
@@ -1103,38 +1112,17 @@ token_t *au_to_subject32_ex(au_id_t auid, uid_t euid,
 	return t;
 }
 
-token_t *au_to_subject64_ex(au_id_t auid, uid_t euid,
-	                       gid_t egid, uid_t ruid, gid_t rgid, pid_t pid,
-		                   au_asid_t sid, au_tid_addr_t *tid)
+token_t *au_to_subject64_ex(
+	__unused au_id_t auid,
+	__unused uid_t euid,
+	__unused gid_t egid,
+	__unused uid_t ruid,
+	__unused gid_t rgid,
+	__unused pid_t pid,
+	__unused au_asid_t sid,
+	__unused au_tid_addr_t *tid)
 {
-	token_t *t;
-	u_char *dptr;
-	
-	if(tid == NULL) {
-		return NULL;
-	}
-
-	GET_TOKEN_AREA(t, dptr, 57);
-	if(t == NULL) {
-		return NULL;
-	}
-						 
-	ADD_U_CHAR(dptr, AU_SUBJECT_64_EX_TOKEN);
-	ADD_U_INT32(dptr, auid);
-	ADD_U_INT32(dptr, euid);
-	ADD_U_INT32(dptr, egid);
-	ADD_U_INT32(dptr, ruid);
-	ADD_U_INT32(dptr, rgid);
-	ADD_U_INT32(dptr, pid);
-	ADD_U_INT32(dptr, sid);
-	ADD_U_INT64(dptr, tid->at_port);
-	ADD_U_INT32(dptr, tid->at_type);
-	ADD_U_INT32(dptr, tid->at_addr[0]);
-	ADD_U_INT32(dptr, tid->at_addr[1]);
-	ADD_U_INT32(dptr, tid->at_addr[2]);
-	ADD_U_INT32(dptr, tid->at_addr[3]);
-	 
-	return t;
+	return NULL;
 }
 
 token_t *au_to_subject_ex(au_id_t auid, uid_t euid,
@@ -1246,7 +1234,6 @@ token_t *au_to_exec_env(const char **env)
 }
 
 
-#ifdef KERNEL
 /*
  * Kernel version of the BSM header token functions. These versions take 
  * a timespec struct as an additional parameter in order to obtain the
@@ -1259,7 +1246,7 @@ token_t *au_to_exec_env(const char **env)
  * seconds of time         4 bytes/8 bytes (32-bit/64-bit value)
  * milliseconds of time    4 bytes/8 bytes (32-bit/64-bit value)
  */
-token_t *kau_to_header32(struct timespec *ctime, int rec_size, 
+token_t *kau_to_header32(const struct timespec *ctime, int rec_size, 
 			  au_event_t e_type, au_emod_t e_mod)
 {
 	token_t *t;
@@ -1284,38 +1271,20 @@ token_t *kau_to_header32(struct timespec *ctime, int rec_size,
 	return t;
 }
 
-token_t *kau_to_header64(struct timespec *ctime, int rec_size, 
-			  au_event_t e_type, au_emod_t e_mod)
+token_t *kau_to_header64(
+	__unused const struct timespec *ctime,
+	__unused int rec_size, 
+	__unused au_event_t e_type,
+	__unused au_emod_t e_mod)
 {
-	token_t *t;
-	u_char *dptr;
-	u_int32_t timems = ctime->tv_nsec/1000000; /* We need time in ms */
-	
-	GET_TOKEN_AREA(t, dptr, 26);
-	if(t == NULL) {
-		return NULL;
-	}
-						 
-	ADD_U_CHAR(dptr, AU_HEADER_64_TOKEN);
-	ADD_U_INT32(dptr, rec_size);
-	ADD_U_CHAR(dptr, HEADER_VERSION);
-	ADD_U_INT16(dptr, e_type);
-	ADD_U_INT16(dptr, e_mod);
-
-	/* Add the timestamp */
-	ADD_U_INT32(dptr, ctime->tv_sec);
-	ADD_U_INT32(dptr, timems); 
-
-	return t;
+	return NULL;
 }
-
-token_t *kau_to_header(struct timespec *ctime, int rec_size, 
+						 
+token_t *kau_to_header(const struct timespec *ctime, int rec_size, 
 			  au_event_t e_type, au_emod_t e_mod)
 {
 	return kau_to_header32(ctime, rec_size, e_type, e_mod);
 }
-
-#endif
 
 /*
  * token ID                1 byte

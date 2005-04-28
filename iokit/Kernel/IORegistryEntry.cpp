@@ -3,22 +3,19 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -46,6 +43,12 @@
 OSDefineMetaClassAndStructors(IORegistryEntry, OSObject)
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+
+#define kIORegPlaneParentSuffix		"ParentLinks"
+#define kIORegPlaneChildSuffix		"ChildLinks"
+#define kIORegPlaneNameSuffix		"Name"
+#define kIORegPlaneLocationSuffix	"Location"
+#define kIORegPlaneParentSuffixLen	(sizeof(kIORegPlaneParentSuffix) - 1)
 
 static IORegistryEntry * gRegistryRoot;
 static OSDictionary * 	 gIORegistryPlanes;
@@ -106,7 +109,7 @@ static SInt32			gIORegistryGenerationCount;
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
 struct s_lock_t {
-	decl_simple_lock_data(,interlock) /* "hardware" interlock field */
+	lck_spin_t interlock;	/* "hardware" interlock field */
 	volatile unsigned int
 		read_count:16,	/* No. of accepted readers */
 		want_upgrade:1,	/* Read-to-write upgrade waiting */
@@ -137,7 +140,7 @@ s_lock_init(
 {
 	(void) memset((void *) l, 0, sizeof(s_lock_t));
 
-	simple_lock_init(&l->interlock, 0);
+	lck_spin_init(&l->interlock, IOLockGroup, LCK_ATTR_NULL);
 	l->want_write = FALSE;
 	l->want_upgrade = FALSE;
 	l->read_count = 0;
@@ -150,7 +153,7 @@ s_lock_write(
 {
         register int	   i;
 
-	simple_lock(&l->interlock);
+	lck_spin_lock(&l->interlock);
 
 	/*
 	 *	Try to acquire the want_write bit.
@@ -159,17 +162,16 @@ s_lock_write(
 
 		i = lock_wait_time[l->can_sleep ? 1 : 0];
 		if (i != 0) {
-			simple_unlock(&l->interlock);
+			lck_spin_unlock(&l->interlock);
 			while (--i != 0 && l->want_write)
 				continue;
-			simple_lock(&l->interlock);
+			lck_spin_lock(&l->interlock);
 		}
 
 		if (l->can_sleep && l->want_write) {
 			l->waiting = TRUE;
-			thread_sleep_simple_lock((event_t) l,
-					simple_lock_addr(l->interlock),
-					THREAD_UNINT);
+			lck_spin_sleep( &l->interlock, LCK_SLEEP_DEFAULT,
+					(event_t) l, THREAD_UNINT);
 			/* interlock relocked */
 		}
 	}
@@ -181,23 +183,22 @@ s_lock_write(
 
 		i = lock_wait_time[l->can_sleep ? 1 : 0];
 		if (i != 0) {
-			simple_unlock(&l->interlock);
+			lck_spin_unlock(&l->interlock);
 			while (--i != 0 && (l->read_count != 0 ||
 					    l->want_upgrade))
 				continue;
-			simple_lock(&l->interlock);
+			lck_spin_lock(&l->interlock);
 		}
 
 		if (l->can_sleep && (l->read_count != 0 || l->want_upgrade)) {
 			l->waiting = TRUE;
-			thread_sleep_simple_lock((event_t) l,
-				simple_lock_addr(l->interlock),
-				THREAD_UNINT);
+			lck_spin_sleep( &l->interlock, LCK_SLEEP_DEFAULT,
+					(event_t) l, THREAD_UNINT);
 			/* interlock relocked */
 		}
 	}
 
-	simple_unlock(&l->interlock);
+	lck_spin_unlock(&l->interlock);
 }
 
 static void
@@ -206,7 +207,7 @@ s_lock_done(
 {
 	boolean_t	  do_wakeup = FALSE;
 
-	simple_lock(&l->interlock);
+	lck_spin_lock(&l->interlock);
 
 	if (l->read_count != 0) {
 		l->read_count -= 1;
@@ -232,7 +233,7 @@ s_lock_done(
 		do_wakeup = TRUE;
 	}
 
-	simple_unlock(&l->interlock);
+	lck_spin_unlock(&l->interlock);
 
 	if (do_wakeup)
 		thread_wakeup((event_t) l);
@@ -244,32 +245,31 @@ s_lock_read(
 {
 	register int	    i;
 
-	simple_lock(&l->interlock);
+	lck_spin_lock(&l->interlock);
 
 	while ( l->want_upgrade || ((0 == l->read_count) && l->want_write )) {
 
 		i = lock_wait_time[l->can_sleep ? 1 : 0];
 
 		if (i != 0) {
-			simple_unlock(&l->interlock);
+			lck_spin_unlock(&l->interlock);
 			while (--i != 0 && 
                             (l->want_upgrade || ((0 == l->read_count) && l->want_write )))
 				continue;
-			simple_lock(&l->interlock);
+			lck_spin_lock(&l->interlock);
 		}
 
 		if (l->can_sleep &&
                     (l->want_upgrade || ((0 == l->read_count) && l->want_write ))) {
 			l->waiting = TRUE;
-			thread_sleep_simple_lock((event_t) l,
-					simple_lock_addr(l->interlock),
-					THREAD_UNINT);
+			lck_spin_sleep( &l->interlock, LCK_SLEEP_DEFAULT,
+					(event_t) l, THREAD_UNINT);
 			/* interlock relocked */
 		}
 	}
 
 	l->read_count += 1;
-	simple_unlock(&l->interlock);
+	lck_spin_unlock(&l->interlock);
 
 }
 
@@ -330,16 +330,16 @@ const IORegistryPlane * IORegistryEntry::makePlane( const char * name )
 
     nameKey = OSSymbol::withCString( key);
 
-    strcpy( end, "ParentLinks" );
+    strcpy( end, kIORegPlaneParentSuffix );
     parentKey = OSSymbol::withCString( key);
 
-    strcpy( end, "ChildLinks" );
+    strcpy( end, kIORegPlaneChildSuffix );
     childKey = OSSymbol::withCString( key);
 
-    strcpy( end, "Name" );
+    strcpy( end, kIORegPlaneNameSuffix );
     pathNameKey = OSSymbol::withCString( key);
 
-    strcpy( end, "Location" );
+    strcpy( end, kIORegPlaneLocationSuffix );
     pathLocationKey = OSSymbol::withCString( key);
 
     plane = new IORegistryPlane;
@@ -588,14 +588,14 @@ IORegistryEntry::copyProperty( type *                  aKey, \
 
 bool IORegistryEntry::serializeProperties( OSSerialize * s ) const
 {
-    bool ok;
-
 //    setProperty( getRetainCount(), 32, "__retain" );
 
     PLOCK;
-    ok = getPropertyTable()->serialize( s );
+    OSCollection *snapshotProperties = getPropertyTable()->copyCollection();
     PUNLOCK;
 
+    bool ok =  snapshotProperties->serialize( s );
+    snapshotProperties->release();
     return( ok );
 }
 
@@ -641,6 +641,49 @@ IORegistryEntry::getProperty( const OSSymbol * aKey) const
     return( obj );
 }
 
+void
+IORegistryEntry::removeProperty( const OSSymbol * aKey)
+{
+    PLOCK;
+    getPropertyTable()->removeObject( aKey );
+    PUNLOCK;
+}
+
+bool
+IORegistryEntry::setProperty( const OSSymbol * aKey, OSObject * anObject)
+{
+    bool ret = false;
+
+    // If we are inserting a collection class and the current entry
+    // is attached into the registry (inPlane()) then mark the collection
+    // as immutable.
+    OSCollection *coll = OSDynamicCast(OSCollection, anObject);
+    bool makeImmutable = (coll && inPlane());
+
+    PLOCK;
+    if( makeImmutable )
+	coll->setOptions( OSCollection::kMASK, OSCollection::kImmutable );
+
+    ret = getPropertyTable()->setObject( aKey, anObject );
+    PUNLOCK;
+    
+    return ret;
+}
+
+IOReturn IORegistryEntry::
+runPropertyAction(Action inAction, OSObject *target,
+	void *arg0, void *arg1, void *arg2, void *arg3)
+{
+    IOReturn res;
+
+    // closeGate is recursive so don't worry if we already hold the lock.
+    PLOCK;
+    res = (*inAction)(target, arg0, arg1, arg2, arg3);
+    PUNLOCK;
+
+    return res;
+}
+
 OSObject *
 IORegistryEntry::getProperty( const OSString * aKey) const
 {
@@ -661,13 +704,6 @@ IORegistryEntry::getProperty( const char * aKey) const
     return( obj );
 }
 
-void
-IORegistryEntry::removeProperty( const OSSymbol * aKey)
-{
-    PLOCK;
-    getPropertyTable()->removeObject( aKey );
-    PUNLOCK;
-}
 
 void
 IORegistryEntry::removeProperty( const OSString * aKey)
@@ -683,17 +719,6 @@ IORegistryEntry::removeProperty( const char * aKey)
     const OSSymbol * tmpKey = OSSymbol::withCString( aKey );
     removeProperty( tmpKey );
     tmpKey->release();
-}
-
-bool
-IORegistryEntry::setProperty( const OSSymbol * aKey, OSObject * anObject)
-{
-    bool ret = false;
-    PLOCK;
-    ret = getPropertyTable()->setObject( aKey, anObject );
-    PUNLOCK;
-    
-    return ret;
 }
 
 bool
@@ -1661,7 +1686,34 @@ bool IORegistryEntry::inPlane( const IORegistryPlane * plane ) const
 
     RLOCK;
 
-    ret = (0 != getParentSetReference( plane ));
+    if( plane)
+	ret = (0 != getParentSetReference( plane ));
+    else {
+
+	// Check to see if this is in any plane.  If it is in a plane
+	// then the registryTable will contain a key with the ParentLinks
+	// suffix.  When we iterate over the keys looking for that suffix
+	ret = false;
+
+	OSCollectionIterator *iter =
+	    OSCollectionIterator::withCollection( registryTable());
+	if( iter) {
+	    const OSSymbol *key;
+
+            while( (key = (OSSymbol *) iter->getNextObject()) ) {
+		const char *keysuffix;
+
+		// Get a pointer to this keys suffix
+		keysuffix = key->getCStringNoCopy()
+			  + key->getLength() - kIORegPlaneParentSuffixLen;
+		if( !strcmp(keysuffix, kIORegPlaneParentSuffix) ) {
+		    ret = true;
+		    break;
+		}
+            }
+            iter->release();
+        }
+    }
 
     UNLOCK;
 
@@ -1687,9 +1739,32 @@ bool IORegistryEntry::attachToParent( IORegistryEntry * parent,
     else
 	needParent = true;
 
-//    ret &= parent->makeLink( this, kChildSetIndex, plane );
-
     UNLOCK;
+
+    PLOCK;
+
+    // Mark any collections in the property list as immutable
+    OSDictionary *ptable = getPropertyTable();
+    OSCollectionIterator *iter =
+	OSCollectionIterator::withCollection( ptable );
+    if( iter) {
+	const OSSymbol *key;
+
+	while( (key = (OSSymbol *) iter->getNextObject( ))) {
+	    // Is object for key a collection?
+	    OSCollection *coll =
+		OSDynamicCast( OSCollection, ptable->getObject( key ));
+
+	    if( coll) {
+		// Yup so mark it as immutable
+		coll->setOptions( OSCollection::kMASK,
+				  OSCollection::kImmutable );
+	    }
+	}
+	iter->release();
+    }
+
+    PUNLOCK;
 
     if( needParent)
         ret &= parent->attachToChild( this, plane );
@@ -2078,8 +2153,8 @@ OSMetaClassDefineReservedUsed(IORegistryEntry, 1);
 OSMetaClassDefineReservedUsed(IORegistryEntry, 2);
 OSMetaClassDefineReservedUsed(IORegistryEntry, 3);
 OSMetaClassDefineReservedUsed(IORegistryEntry, 4);
+OSMetaClassDefineReservedUsed(IORegistryEntry, 5);
 
-OSMetaClassDefineReservedUnused(IORegistryEntry, 5);
 OSMetaClassDefineReservedUnused(IORegistryEntry, 6);
 OSMetaClassDefineReservedUnused(IORegistryEntry, 7);
 OSMetaClassDefineReservedUnused(IORegistryEntry, 8);

@@ -3,22 +3,19 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -60,6 +57,11 @@ OSMetaClassDefineReservedUnused(IOTimerEventSource, 5);
 OSMetaClassDefineReservedUnused(IOTimerEventSource, 6);
 OSMetaClassDefineReservedUnused(IOTimerEventSource, 7);
 
+// 
+// reserved != 0 means IOTimerEventSource::timeoutAndRelease is being used,
+// not a subclassed implementation. 
+//
+
 bool IOTimerEventSource::checkForWork() { return false; }
 
 // Timeout handler function. This function is called by the kernel when
@@ -69,22 +71,59 @@ void IOTimerEventSource::timeout(void *self)
 {
     IOTimerEventSource *me = (IOTimerEventSource *) self;
 
-    if (me->enabled) {
-        Action doit = (Action) me->action;
-
-        if (doit) {
-            IOTimeStampConstant(IODBG_TIMES(IOTIMES_ACTION),
-                                (unsigned int) doit, (unsigned int) me->owner);
-            me->closeGate();
-            (*doit)(me->owner, me);
-            me->openGate();
+    if (me->enabled && me->action)
+    {
+        IOWorkLoop *
+        wl = me->workLoop;
+        if (wl)
+        {
+            Action doit;
+            wl->closeGate();
+            doit = (Action) me->action;
+            if (doit && me->enabled && AbsoluteTime_to_scalar(&me->abstime))
+            {
+                IOTimeStampConstant(IODBG_TIMES(IOTIMES_ACTION),
+                                    (unsigned int) doit, (unsigned int) me->owner);
+                (*doit)(me->owner, me);
+            }
+            wl->openGate();
         }
     }
 }
 
+void IOTimerEventSource::timeoutAndRelease(void * self, void * count)
+{
+    IOTimerEventSource *me = (IOTimerEventSource *) self;
+
+    if (me->enabled && me->action)
+    {
+        IOWorkLoop *
+        wl = me->reserved->workLoop;
+        if (wl)
+        {
+            Action doit;
+            wl->closeGate();
+            doit = (Action) me->action;
+            if (doit && (me->reserved->calloutGeneration == (SInt32) count))
+            {
+                IOTimeStampConstant(IODBG_TIMES(IOTIMES_ACTION),
+                                    (unsigned int) doit, (unsigned int) me->owner);
+                (*doit)(me->owner, me);
+            }
+            wl->openGate();
+        }
+    }
+
+    me->reserved->workLoop->release();
+    me->release();
+}
+
 void IOTimerEventSource::setTimeoutFunc()
 {
-    calloutEntry = (void *) thread_call_allocate((thread_call_func_t) timeout,
+    // reserved != 0 means IOTimerEventSource::timeoutAndRelease is being used,
+    // not a subclassed implementation
+    reserved = IONew(ExpansionData, 1);
+    calloutEntry = (void *) thread_call_allocate((thread_call_func_t) &IOTimerEventSource::timeoutAndRelease,
                                                  (thread_call_param_t) this);
 }
 
@@ -120,13 +159,23 @@ void IOTimerEventSource::free()
         thread_call_free((thread_call_t) calloutEntry);    
     }
 
+    if (reserved)
+        IODelete(reserved, ExpansionData, 1);
+
     super::free();
 }
 
 void IOTimerEventSource::cancelTimeout()
 {
-    thread_call_cancel((thread_call_t) calloutEntry);
+    if (reserved)
+        reserved->calloutGeneration++;
+    bool active = thread_call_cancel((thread_call_t) calloutEntry);
     AbsoluteTime_to_scalar(&abstime) = 0;
+    if (active && reserved)
+    {
+        release();
+        workLoop->release();
+    }
 }
 
 void IOTimerEventSource::enable()
@@ -138,13 +187,20 @@ void IOTimerEventSource::enable()
 
 void IOTimerEventSource::disable()
 {
-    thread_call_cancel((thread_call_t) calloutEntry);
+    if (reserved)
+        reserved->calloutGeneration++;
+    bool active = thread_call_cancel((thread_call_t) calloutEntry);
     super::disable();
+    if (active && reserved)
+    {
+        release();
+        workLoop->release();
+    }
 }
 
 IOReturn IOTimerEventSource::setTimeoutTicks(UInt32 ticks)
 {
-    return setTimeout(ticks, NSEC_PER_SEC/hz);
+    return setTimeout(ticks, kTickScale);
 }
 
 IOReturn IOTimerEventSource::setTimeoutMS(UInt32 ms)
@@ -190,7 +246,7 @@ IOReturn IOTimerEventSource::setTimeout(AbsoluteTime interval)
 
 IOReturn IOTimerEventSource::wakeAtTimeTicks(UInt32 ticks)
 {
-    return wakeAtTime(ticks, NSEC_PER_SEC/hz);
+    return wakeAtTime(ticks, kTickScale);
 }
 
 IOReturn IOTimerEventSource::wakeAtTimeMS(UInt32 ms)
@@ -203,25 +259,32 @@ IOReturn IOTimerEventSource::wakeAtTimeUS(UInt32 us)
     return wakeAtTime(us, kMicrosecondScale);
 }
 
-IOReturn IOTimerEventSource::wakeAtTime(UInt32 abstime, UInt32 scale_factor)
+IOReturn IOTimerEventSource::wakeAtTime(UInt32 inAbstime, UInt32 scale_factor)
 {
     AbsoluteTime end;
-    clock_interval_to_absolutetime_interval(abstime, scale_factor, &end);
+    clock_interval_to_absolutetime_interval(inAbstime, scale_factor, &end);
 
     return wakeAtTime(end);
 }
 
-IOReturn IOTimerEventSource::wakeAtTime(mach_timespec_t abstime)
+IOReturn IOTimerEventSource::wakeAtTime(mach_timespec_t inAbstime)
 {
     AbsoluteTime end, nsecs;
 
     clock_interval_to_absolutetime_interval
-        (abstime.tv_nsec, kNanosecondScale, &nsecs);
+        (inAbstime.tv_nsec, kNanosecondScale, &nsecs);
     clock_interval_to_absolutetime_interval
-        (abstime.tv_sec, kSecondScale, &end);
+        (inAbstime.tv_sec, kSecondScale, &end);
     ADD_ABSOLUTETIME(&end, &nsecs);
 
     return wakeAtTime(end);
+}
+
+void IOTimerEventSource::setWorkLoop(IOWorkLoop *inWorkLoop)
+{
+    super::setWorkLoop(inWorkLoop);
+    if ( enabled && AbsoluteTime_to_scalar(&abstime) && workLoop )
+        wakeAtTime(abstime);
 }
 
 IOReturn IOTimerEventSource::wakeAtTime(AbsoluteTime inAbstime)
@@ -230,8 +293,24 @@ IOReturn IOTimerEventSource::wakeAtTime(AbsoluteTime inAbstime)
         return kIOReturnNoResources;
 
     abstime = inAbstime;
-    if ( enabled && AbsoluteTime_to_scalar(&abstime) )
-        thread_call_enter_delayed((thread_call_t) calloutEntry, abstime);
+    if ( enabled && AbsoluteTime_to_scalar(&abstime) && workLoop )
+    {
+        if (reserved)
+        {
+            retain();
+            workLoop->retain();
+            reserved->workLoop = workLoop;
+            reserved->calloutGeneration++;
+            if (thread_call_enter1_delayed((thread_call_t) calloutEntry, 
+                    (void *) reserved->calloutGeneration, abstime))
+            {
+                release();
+                workLoop->release();
+            }
+        }
+        else
+            thread_call_enter_delayed((thread_call_t) calloutEntry, abstime);
+    }
 
     return kIOReturnSuccess;
 }

@@ -3,22 +3,19 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -235,14 +232,14 @@
 #define chud_970_mmcr1		798
 #define chud_970_imc		799
 
-/* PPC SPRs - 7400/7410 Specific */
+/* PPC SPRs - 7400/7410 Specific, Private */
 #define chud_7400_msscr1	1015
 
-/* PPC SPRs - 64-bit implementations */
+/* PPC SPRs - 64-bit implementations,  Private */
 #define chud_ppc64_accr		29
 #define chud_ppc64_ctrl		152
 
-/* PPC SPRs - 970 Specific */
+/* PPC SPRs - 970 Specific, Private */
 #define chud_970_scomc		276
 #define chud_970_scomd		277
 #define chud_970_hsprg0		304
@@ -267,3 +264,4 @@
 #define chud_970_pir		1023
 
 #endif // _CHUD_SPR_H_
+

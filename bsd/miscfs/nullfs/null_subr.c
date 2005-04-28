@@ -3,22 +3,19 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -69,7 +66,7 @@
 #include <sys/time.h>
 #include <sys/types.h>
 #include <sys/vnode.h>
-#include <sys/mount.h>
+#include <sys/mount_internal.h>
 #include <sys/namei.h>
 #include <sys/malloc.h>
 #include <sys/ubc.h>
@@ -82,8 +79,8 @@
  * Null layer cache:
  * Each cache entry holds a reference to the lower vnode
  * along with a pointer to the alias vnode.  When an
- * entry is added the lower vnode is VREF'd.  When the
- * alias is removed the lower vnode is vrele'd.
+ * entry is added the lower vnode is vnode_get'd.  When the
+ * alias is removed the lower vnode is vnode_put'd.
  */
 
 #define	NULL_NHASH(vp) \
@@ -104,7 +101,7 @@ nullfs_init()
 }
 
 /*
- * Return a VREF'ed alias for lower vnode if already exists, else 0.
+ * Return a vnode_get'ed alias for lower vnode if already exists, else 0.
  */
 static struct vnode *
 null_node_find(mp, lowervp)
@@ -120,19 +117,15 @@ null_node_find(mp, lowervp)
 	 * Find hash base, and then search the (two-way) linked
 	 * list looking for a null_node structure which is referencing
 	 * the lower vnode.  If found, the increment the null_node
-	 * reference count (but NOT the lower vnode's VREF counter).
+	 * reference count (but NOT the lower vnode's vnode_get counter).
 	 */
 	hd = NULL_NHASH(lowervp);
 loop:
 	for (a = hd->lh_first; a != 0; a = a->null_hash.le_next) {
 		if (a->null_lowervp == lowervp && NULLTOV(a)->v_mount == mp) {
 			vp = NULLTOV(a);
-			/*
-			 * We need vget for the VXLOCK
-			 * stuff, but we don't want to lock
-			 * the lower node.
-			 */
-			if (vget(vp, 0, p)) {
+
+			if (vnode_get(vp)) {
 				printf ("null_node_find: vget failed.\n");
 				goto loop;
 			};
@@ -185,7 +178,7 @@ null_node_alloc(mp, lowervp, vpp)
 	};
 	if (vp->v_type == VREG)
 		ubc_info_init(vp);
-	VREF(lowervp);   /* Extra VREF will be vrele'd in null_node_create */
+	vnode_get(lowervp);   /* Extra vnode_get will be vnode_put'd in null_node_create */
 	hd = NULL_NHASH(lowervp);
 	LIST_INSERT_HEAD(hd, xp, null_hash);
 	return 0;
@@ -213,7 +206,7 @@ null_node_create(mp, lowervp, newvpp)
 #ifdef NULLFS_DIAGNOSTIC
 		vprint("null_node_create: exists", NULLTOV(ap));
 #endif
-		/* VREF(aliasvp); --- done in null_node_find */
+		/* vnode_get(aliasvp); --- done in null_node_find */
 	} else {
 		int error;
 
@@ -231,11 +224,11 @@ null_node_create(mp, lowervp, newvpp)
 			return error;
 
 		/*
-		 * aliasvp is already VREF'd by getnewvnode()
+		 * aliasvp is already vnode_get'd by getnewvnode()
 		 */
 	}
 
-	vrele(lowervp);
+	vnode_put(lowervp);
 
 #if DIAGNOSTIC
 	if (lowervp->v_usecount < 1) {
@@ -264,7 +257,7 @@ null_checkvp(vp, fil, lno)
 	struct null_node *a = VTONULL(vp);
 #ifdef notyet
 	/*
-	 * Can't do this check because vop_reclaim runs
+	 * Can't do this check because vnop_reclaim runs
 	 * with a funny vop vector.
 	 */
 	if (vp->v_op != null_vnodeop_p) {

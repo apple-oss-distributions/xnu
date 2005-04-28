@@ -1,24 +1,21 @@
 /*
- * Copyright (c) 2003 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2003-2005 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -35,6 +32,7 @@
 #define	_SYS_AIO_H_
 
 #include <sys/signal.h>
+#include <sys/cdefs.h>
 
 struct aiocb {
 	int					aio_fildes;		/* File descriptor */
@@ -45,6 +43,29 @@ struct aiocb {
 	struct sigevent		aio_sigevent;	/* Signal number and value */
 	int					aio_lio_opcode;	/* Operation to be performed */
 };
+
+// LP64todo - should this move?
+#ifdef KERNEL
+
+#if __DARWIN_ALIGN_NATURAL
+#pragma options align=natural
+#endif
+
+struct user_aiocb {
+	int					aio_fildes;		/* File descriptor */
+	off_t				aio_offset;		/* File offset */
+	user_addr_t			aio_buf;		/* Location of buffer */
+	user_size_t			aio_nbytes;		/* Length of transfer */
+	int					aio_reqprio;	/* Request priority offset */
+	struct user_sigevent aio_sigevent;	/* Signal number and value */
+	int					aio_lio_opcode;	/* Operation to be performed */
+};
+
+#if __DARWIN_ALIGN_NATURAL
+#pragma options align=reset
+#endif
+
+#endif // KERNEL
 
 /*
  * aio_cancel() return values
@@ -105,7 +126,9 @@ struct aiocb {
  * notification is given when the operation is complete
  */
 
-#define	O_SYNC			0x0 	/* queued IO is completed as if by fsync() */
+#ifndef O_SYNC	/* XXX investigate documentation error */
+#define	O_SYNC			0x0080 	/* queued IO is completed as if by fsync() */
+#endif
 #if 0 /* O_DSYNC - NOT SUPPORTED */
 #define	O_DSYNC			0x1		/* queued async IO is completed as if by fdatasync() */
 #endif
@@ -114,6 +137,8 @@ struct aiocb {
 /*
  * Prototypes
  */
+
+__BEGIN_DECLS
 
 /*
  * Attempt to cancel one or more asynchronous I/O requests currently outstanding 
@@ -226,5 +251,7 @@ int		lio_listio( int mode,
 					struct aiocb *const aiocblist[],
 	 				int nent, 
 	 				struct sigevent *sigp );
+__END_DECLS
+
 #endif /* KERNEL */
 #endif /* _SYS_AIO_H_ */

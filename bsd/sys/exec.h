@@ -3,22 +3,19 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -68,38 +65,13 @@
 
 #include <sys/appleapiopts.h>
 
-#ifdef  __APPLE_API_OBSOLETE
 /*
- * The following structure is found at the top of the user stack of each
- * user process. The ps program uses it to locate argv and environment
- * strings. Programs that wish ps to display other information may modify
- * it; normally ps_argvstr points to the text for argv[0], and ps_nargvstr
- * is the same as the program's argc. The fields ps_envstr and ps_nenvstr
- * are the equivalent for the environment.
+ * XXX at this point, this file only exists for backward compatability with
+ * XXX software which includes <sys/exec.h> instead of the more correct
+ * XXX <machine/exec.h> and/or need the inclusion of <sys/appleapiopts.h>
+ * XXX as a side effect.
  */
-struct ps_strings {
-	char	*ps_argvstr;	/* first of 0 or more argument strings */
-	int	ps_nargvstr;	/* the number of argument strings */
-	char	*ps_envstr;	/* first of 0 or more environment strings */
-	int	ps_nenvstr;	/* the number of environment strings */
-};
-
-#endif /* __APPLE_API_OBSOLETE */
-
 #include <machine/exec.h>
-
-#ifdef KERNEL
-#ifdef __APPLE_API_PRIVATE
-/*
- * Arguments to the exec system call.
- */
-struct execve_args {
-	char	*fname;
-	char	**argp;
-	char	**envp;
-};
-#endif /*__APPLE_API_PRIVATE */
-#endif /* KERNEL */
 
 #endif /* !_SYS_EXEC_H_ */
 

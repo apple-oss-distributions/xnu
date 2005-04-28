@@ -3,22 +3,19 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -56,6 +53,8 @@
 #ifndef _NETAT_NBP_H_
 #define _NETAT_NBP_H_
 #include <sys/appleapiopts.h>
+
+#ifdef __APPLE_API_OBSOLETE
 
 /* NBP packet types */
 
@@ -100,8 +99,7 @@ typedef struct at_nbp {
 
 #define DEFAULT_ZONE(zone) (!(zone)->len || ((zone)->len == 1 && (zone)->str[0] == '*'))
 
-#ifdef KERNEL
-#ifdef __APPLE_API_PRIVATE
+#ifdef KERNEL_PRIVATE
 
 /* Struct for name registry */
 typedef struct _nve_ {
@@ -126,8 +124,10 @@ typedef struct _nve_ {
 #define	NBP_WILD_TYPE	0x02
 #define	NBP_WILD_MASK	0x03
 
-typedef	struct	nbp_req	{
-	int		(*func)();
+struct nbp_req;
+typedef	struct nbp_req nbp_req_t;
+struct nbp_req	{
+	int		(*func)(nbp_req_t *, nve_entry_t *);
 	gbuf_t		*response;	/* the response datagram	*/
 	int		space_unused;	/* Space available in the resp	*/
 					/* packet.			*/
@@ -137,16 +137,16 @@ typedef	struct	nbp_req	{
 	u_char		flags;		/* Flags to indicate whether or	*/
 					/* not the request tuple has	*/
 					/* wildcards in it		*/
-} nbp_req_t;
+};
 
 extern int	nbp_insert_entry(nve_entry_t *);
 extern u_int	nbp_strhash (at_nvestr_t *);
 extern nve_entry_t *nbp_find_nve(nve_entry_t *);
-extern int	nbp_fillin_nve();
+extern int	nbp_fillin_nve(at_entity_t *, nve_entry_t *);
 
 extern at_nvestr_t *getSPLocalZone(int);
 extern at_nvestr_t *getLocalZone(int);
 
-#endif /* __APPLE_API_PRIVATE */
-#endif /* KERNEL */
+#endif /* KERNEL_PRIVATE */
+#endif /* __APPLE_API_OBSOLETE */
 #endif /* _NETAT_NBP_H_ */

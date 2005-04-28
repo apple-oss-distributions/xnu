@@ -3,22 +3,19 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -45,17 +42,17 @@ extern "C" {
 
 extern "C" {
 extern void IODTFreeLoaderInfo( char *key, void *infoAddr, int infoSize );
-extern kern_return_t host_info(host_t host,
-    host_flavor_t flavor,
-    host_info_t info,
-    mach_msg_type_number_t  *count);
-extern int check_cpu_subtype(cpu_subtype_t cpu_subtype);
-extern struct section *
-getsectbyname(
-    char *segname,
-    char *sectname);
-extern struct segment_command *
-getsegbyname(char *seg_name);
+// extern kern_return_t host_info(host_t host,
+//     host_flavor_t flavor,
+//     host_info_t info,
+//     mach_msg_type_number_t  *count);
+extern int grade_binary(cpu_type_t exectype, cpu_subtype_t execsubtype);
+// Return the address of the named Mach-O segment from the currently
+// executing 32 bit kernel, or NULL.
+extern struct segment_command *getsegbyname(char *seg_name);
+// Return the address of the named section from the named Mach-O segment
+// from the currently executing 32 bit kernel, or NULL.
+extern struct section *getsectbyname(char *segname, char *sectname);
 };
 
 #define LOG_DELAY()
@@ -708,8 +705,17 @@ OSDictionary * readExtension(OSDictionary * propertyDict,
     driverInfo = (MemoryMapFileInfo *)
         bootxDriverDataObject->getBytesNoCopy(0,
         sizeof(MemoryMapFileInfo));
+#if defined (__ppc__)
     dataBuffer = (BootxDriverInfo *)ml_static_ptovirt(
-        driverInfo->paddr);
+      driverInfo->paddr);
+#elif defined (__i386__)
+    dataBuffer = (BootxDriverInfo *)driverInfo->paddr;
+    dataBuffer->plistAddr = ml_static_ptovirt(dataBuffer->plistAddr);
+    if (dataBuffer->moduleAddr)
+      dataBuffer->moduleAddr = ml_static_ptovirt(dataBuffer->moduleAddr);
+#else
+#error unsupported architecture
+#endif
     if (!dataBuffer) {
         IOLog("Error: No data buffer "
         "for device tree entry \"%s\".\n", memory_map_name);
@@ -941,8 +947,14 @@ bool extractExtensionsFromArchive(MemoryMapFileInfo * mkext_file_info,
     OSData         * moduleInfo = 0;  // must release
     MkextEntryInfo   module_info;
 
-    mkext_data = (mkext_header *)mkext_file_info->paddr;
 
+#if defined (__ppc__)
+    mkext_data = (mkext_header *)mkext_file_info->paddr;
+#elif defined (__i386__)
+    mkext_data = (mkext_header *)ml_static_ptovirt(mkext_file_info->paddr);
+#else
+#error unsupported architecture
+#endif
     if (OSSwapBigToHostInt32(mkext_data->magic) != MKEXT_MAGIC ||
         OSSwapBigToHostInt32(mkext_data->signature) != MKEXT_SIGN) {
         IOLog("Error: Extension archive has invalid magic or signature.\n");
@@ -997,7 +1009,8 @@ bool extractExtensionsFromArchive(MemoryMapFileInfo * mkext_file_info,
             result = false;
             goto finish;
         }
-        if (!check_cpu_subtype(OSSwapBigToHostInt32(mkext_data->cpusubtype))) {
+        if (!grade_binary(OSSwapBigToHostInt32(mkext_data->cputype),
+			  OSSwapBigToHostInt32(mkext_data->cpusubtype))) {
             IOLog("Error: Extension archive doesn't contain software "
                 "for this computer's CPU subtype.\n");
             LOG_DELAY();
@@ -1293,7 +1306,7 @@ bool addPersonalities(OSDictionary * extensions) {
 
         if (thisDriverPersonalities) {
             OSCollectionIterator * pIterator;
-            OSString * key;
+            OSString * locakKey;
             pIterator = OSCollectionIterator::withCollection(
                 thisDriverPersonalities);
             if (!pIterator) {
@@ -1302,12 +1315,12 @@ bool addPersonalities(OSDictionary * extensions) {
                 LOG_DELAY();
                 continue;
             }
-            while ( (key = OSDynamicCast(OSString,
+            while ( (locakKey = OSDynamicCast(OSString,
                      pIterator->getNextObject())) ) {
 
                 OSDictionary * personality = OSDynamicCast(
                     OSDictionary,
-                    thisDriverPersonalities->getObject(key));
+                    thisDriverPersonalities->getObject(locakKey));
                 if (personality) {
                     allDriverPersonalities->setObject(personality);
                 }

@@ -3,22 +3,19 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -52,7 +49,8 @@
 Lspin_lock_try_up:
 	movl		4(%esp), %ecx 
 	xorl		%eax, %eax
-	cmpxchgl	%ecx, (%ecx)
+	orl		$-1, %edx
+	cmpxchgl	%edx, (%ecx)
 	setz		%dl
 	movzbl		%dl, %eax
 	ret
@@ -63,8 +61,9 @@ Lspin_lock_try_up:
 Lspin_lock_try_mp:
 	movl		4(%esp), %ecx 
 	xorl		%eax, %eax
+	orl		$-1, %edx
 	lock
-	cmpxchgl	%ecx, (%ecx)
+	cmpxchgl	%edx, (%ecx)
 	setz		%dl
 	movzbl		%dl, %eax
 	ret
@@ -78,7 +77,8 @@ Lspin_lock_up:
 	movl		4(%esp), %ecx
 	xorl		%eax, %eax
 .set Lretry,		. - Lspin_lock_up
-	cmpxchgl	%ecx, (%ecx)
+	orl		$-1, %edx
+	cmpxchgl	%edx, (%ecx)
 	UNLIKELY
 	JNZ		Lrelinquish_off - . + Lspin_lock_up - LEN
 	ret
@@ -90,8 +90,9 @@ Lspin_lock_mp:
 	movl		4(%esp), %ecx
 	xorl		%eax, %eax
 0:
+	orl		$-1, %edx
 	lock
-	cmpxchgl	%ecx, (%ecx)
+	cmpxchgl	%edx, (%ecx)
 	UNLIKELY
 	jnz		1f
 	ret
@@ -123,11 +124,11 @@ Lrelinquish:				/* relinquish the processor	*/
 	pushl		$1		/* 1 ms				*/
 	pushl		$1		/* SWITCH_OPTION_DEPRESS	*/
 	pushl		$0		/* THREAD_NULL			*/
+	pushl		$0		/* push dummy stack ret addr    */
 	movl		$-61, %eax	/* syscall_thread_switch	*/
 	lcall		$7, $0
-	popl		%eax		/* set %eax to 0 again		*/
-	popl		%edx		/* use %edx as scratch		*/
-	popl		%edx		/* reg to fixup stack		*/
+	addl		$16, %esp	/* adjust stack*/
+	xorl		%eax, %eax	/* set %eax to 0 again		*/
 	JMP		Lretry - Lrelinquish_off - . + Lrelinquish - LEN
 
 	COMMPAGE_DESCRIPTOR(relinquish,_COMM_PAGE_RELINQUISH,0,0)

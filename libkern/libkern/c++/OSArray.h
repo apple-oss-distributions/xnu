@@ -3,22 +3,19 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -209,14 +206,14 @@ public:
     
     /*!
         @function isEqualTo
-        @abstract A member function which tests the equality of two OSArray objects.
+        @abstract A member function which tests the equality of the values of two OSArray objects.
         @param anArray The array object being compared against the receiver.
         @result Returns true if the two arrays are equivalent or false otherwise.
     */
     virtual bool isEqualTo(const OSArray *anArray) const;
     /*!
         @function isEqualTo
-        @abstract A member function which compares the equality of the receiving array to an arbitrary object.
+        @abstract A member function which compares the equality of the values of a receiving array to an arbitrary object.
         @param anObject The object to be compared against the receiver.
         @result Returns true if the two objects are equivalent, that is they are either the same object or they are both arrays containing the same or equivalent objects, or false otherwise.
     */
@@ -238,7 +235,7 @@ public:
 
     /*!
         @function getNextIndexOfObject
-        @abstract A member function which returns the next array index of an object, at or beyond the supplied index.
+        @abstract A member function which searches the array for the next instance of a specific object, at or beyond the supplied index.
         @result Returns the next index of the object in the array or (-1) if none is found.
     */
     virtual unsigned int getNextIndexOfObject(const OSMetaClassBase * anObject,
@@ -251,6 +248,24 @@ public:
         @result Returns true if serialization was successful, false if not.
     */
     virtual bool serialize(OSSerialize *s) const;
+
+    /*!
+        @function setOptions
+        @abstract This function is used to recursively set option bits in this array and all child collections.
+	@param options Set the (options & mask) bits.
+        @param mask The mask of bits which need to be set, 0 to get the current value.
+        @result The options before the set operation, NB setOptions(?,0) returns the current value of this collection.
+     */
+    virtual unsigned setOptions(unsigned options, unsigned mask, void * = 0);
+
+    /*!
+        @function copyCollection
+        @abstract Do a deep copy of this array and its collections.
+	@discussion This function copies this array included collections recursively.  Objects that don't derive from OSContainter are NOT copied, that is objects like OSString and OSData.
+	@param cycleDict Is a dictionary of all of the collections that have been, to start the copy at the top level just leave this field 0.
+	@result The newly copied collecton or 0 if insufficient memory
+    */
+    OSCollection *copyCollection(OSDictionary *cycleDict = 0);
 
     OSMetaClassDeclareReservedUnused(OSArray, 0);
     OSMetaClassDeclareReservedUnused(OSArray, 1);

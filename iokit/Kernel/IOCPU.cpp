@@ -3,22 +3,19 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -157,17 +154,19 @@ bool IOCPU::start(IOService *provider)
   gIOCPUs->setObject(this);
   
   // Correct the bus, cpu and timebase frequencies in the device tree.
-  if (gPEClockFrequencyInfo.bus_frequency_hz < 0x100000000ULL) 
-    busFrequency = OSData::withBytesNoCopy((void *)((char *)&gPEClockFrequencyInfo.bus_frequency_hz + 4), 4);
-  else
-    busFrequency = OSData::withBytesNoCopy((void *)&gPEClockFrequencyInfo.bus_clock_rate_hz, 8);
+  if (gPEClockFrequencyInfo.bus_frequency_hz < 0x100000000ULL) {
+    busFrequency = OSData::withBytesNoCopy((void *)&gPEClockFrequencyInfo.bus_clock_rate_hz, 4);
+  } else {
+    busFrequency = OSData::withBytesNoCopy((void *)&gPEClockFrequencyInfo.bus_frequency_hz, 8);
+  }
   provider->setProperty("bus-frequency", busFrequency);
   busFrequency->release();
     
-  if (gPEClockFrequencyInfo.cpu_frequency_hz < 0x100000000ULL) 
-    cpuFrequency = OSData::withBytesNoCopy((void *)((char *)&gPEClockFrequencyInfo.cpu_frequency_hz + 4), 4);
-  else
-    cpuFrequency = OSData::withBytesNoCopy((void *)&gPEClockFrequencyInfo.cpu_clock_rate_hz, 8);
+  if (gPEClockFrequencyInfo.cpu_frequency_hz < 0x100000000ULL) {
+    cpuFrequency = OSData::withBytesNoCopy((void *)&gPEClockFrequencyInfo.cpu_clock_rate_hz, 4);
+  } else {
+    cpuFrequency = OSData::withBytesNoCopy((void *)&gPEClockFrequencyInfo.cpu_frequency_hz, 8);
+  }
   provider->setProperty("clock-frequency", cpuFrequency);
   cpuFrequency->release();
   
@@ -175,12 +174,56 @@ bool IOCPU::start(IOService *provider)
   provider->setProperty("timebase-frequency", timebaseFrequency);
   timebaseFrequency->release();
   
-  setProperty("IOCPUID", (UInt32)this, 32);
+  super::setProperty("IOCPUID", (UInt32)this, 32);
   
   setCPUNumber(0);
   setCPUState(kIOCPUStateUnregistered);
   
   return true;
+}
+
+OSObject *IOCPU::getProperty(const OSSymbol *aKey) const
+{
+  if (aKey == gIOCPUStateKey) return gIOCPUStateNames[_cpuState];
+  
+  return super::getProperty(aKey);
+}
+
+bool IOCPU::setProperty(const OSSymbol *aKey, OSObject *anObject)
+{
+  OSString *stateStr;
+  
+  if (aKey == gIOCPUStateKey) {
+    stateStr = OSDynamicCast(OSString, anObject);
+    if (stateStr == 0) return false;
+    
+    if (_cpuNumber == 0) return false;
+    
+    if (stateStr->isEqualTo("running")) {
+      if (_cpuState == kIOCPUStateStopped) {
+	processor_start(machProcessor);
+      } else if (_cpuState != kIOCPUStateRunning) {
+	return false;
+      }
+    } else if (stateStr->isEqualTo("stopped")) {
+      if (_cpuState == kIOCPUStateRunning) {
+        haltCPU();
+      } else if (_cpuState != kIOCPUStateStopped) {
+        return false;
+      }
+    } else return false;
+    
+    return true;
+  }
+  
+  return super::setProperty(aKey, anObject);
+}
+
+bool IOCPU::serializeProperties(OSSerialize *serialize) const
+{
+  super::setProperty(gIOCPUStateKey, gIOCPUStateNames[_cpuState]);
+  
+  return super::serializeProperties(serialize);
 }
 
 IOReturn IOCPU::setProperties(OSObject *properties)
@@ -196,23 +239,9 @@ IOReturn IOCPU::setProperties(OSObject *properties)
     result = IOUserClient::clientHasPrivilege(current_task(), kIOClientPrivilegeAdministrator);
     if (result != kIOReturnSuccess) return result;
     
-    if (_cpuNumber == 0) return kIOReturnUnsupported;
+    if (setProperty(gIOCPUStateKey, stateStr)) return kIOReturnSuccess;
     
-    if (stateStr->isEqualTo("running")) {
-      if (_cpuState == kIOCPUStateStopped) {
-	processor_start(machProcessor);
-      } else if (_cpuState != kIOCPUStateRunning) {
-	return kIOReturnUnsupported;
-      }
-    } else if (stateStr->isEqualTo("stopped")) {
-      if (_cpuState == kIOCPUStateRunning) {
-        haltCPU();
-      } else if (_cpuState != kIOCPUStateStopped) {
-        return kIOReturnUnsupported;
-      }
-    } else return kIOReturnUnsupported;
-    
-    return kIOReturnSuccess;
+    return kIOReturnUnsupported;
   }
   
   return kIOReturnUnsupported;
@@ -234,7 +263,7 @@ UInt32 IOCPU::getCPUNumber(void)
 void IOCPU::setCPUNumber(UInt32 cpuNumber)
 {
   _cpuNumber = cpuNumber;
-  setProperty("IOCPUNumber", _cpuNumber, 32);
+  super::setProperty("IOCPUNumber", _cpuNumber, 32);
 }
 
 UInt32 IOCPU::getCPUState(void)
@@ -244,9 +273,8 @@ UInt32 IOCPU::getCPUState(void)
 
 void IOCPU::setCPUState(UInt32 cpuState)
 {
-  if ((cpuState >= 0) && (cpuState < kIOCPUStateCount)) {
+  if (cpuState < kIOCPUStateCount) {
     _cpuState = cpuState;
-    setProperty(gIOCPUStateKey, gIOCPUStateNames[cpuState]);
   }
 }
 

@@ -1,24 +1,21 @@
 /*
- * Copyright (c) 2000 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2003 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -50,27 +47,13 @@
  * OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
  * SUCH DAMAGE.
  *
+ * $FreeBSD: src/sys/net/if_vlan_var.h,v 1.16 2003/07/08 21:54:20 wpaul Exp $
  */
 
 #ifndef _NET_IF_VLAN_VAR_H_
 #define	_NET_IF_VLAN_VAR_H_	1
-#include <sys/appleapiopts.h>
 
-#ifdef __APPLE_API_PRIVATE
-#ifdef KERNEL
-struct	ifvlan {
-	struct	arpcom ifv_ac;	/* make this an interface */
-	struct	ifnet *ifv_p;	/* parent inteface of this vlan */
-	struct	ifv_linkmib {
-		int	ifvm_parent;
-		u_int16_t ifvm_proto; /* encapsulation ethertype */
-		u_int16_t ifvm_tag; /* tag to apply on packets leaving if */
-	}	ifv_mib;
-};
-#define	ifv_if	ifv_ac.ac_if
-#define	ifv_tag	ifv_mib.ifvm_tag
-#endif /* KERNEL */
-
+#define	ETHER_VLAN_ENCAP_LEN	4	/* len of 802.1Q VLAN encapsulation */
 struct	ether_vlan_header {
 	u_char	evl_dhost[ETHER_ADDR_LEN];
 	u_char	evl_shost[ETHER_ADDR_LEN];
@@ -79,16 +62,15 @@ struct	ether_vlan_header {
 	u_int16_t evl_proto;
 };
 
-#define	EVL_VLANOFTAG(tag) ((tag) & 4095)
+#define EVL_VLID_MASK	0x0FFF
+#define	EVL_VLANOFTAG(tag) ((tag) & EVL_VLID_MASK)
 #define	EVL_PRIOFTAG(tag) (((tag) >> 13) & 7)
-#define	EVL_ENCAPLEN	4	/* length in octets of encapsulation */
 
-/* When these sorts of interfaces get their own identifier... */
-#define	IFT_8021_VLAN	IFT_PROPVIRTUAL
-
+#if 0
 /* sysctl(3) tags, for compatibility purposes */
 #define	VLANCTL_PROTO	1
 #define	VLANCTL_MAX	2
+#endif 0
 
 /*
  * Configuration structure for SIOCSETVLAN and SIOCGETVLAN ioctls.
@@ -97,14 +79,8 @@ struct	vlanreq {
 	char	vlr_parent[IFNAMSIZ];
 	u_short	vlr_tag;
 };
-#define	SIOCSETVLAN	SIOCSIFGENERIC
-#define	SIOCGETVLAN	SIOCGIFGENERIC
 
-#ifdef KERNEL
-/* shared with if_ethersubr.c: */
-extern	u_int vlan_proto;
-extern	int vlan_input(struct ether_header *eh, struct mbuf *m);
-#endif
-
-#endif /* __APPLE_API_PRIVATE */
+#ifdef KERNEL_PRIVATE
+int vlan_family_init(void);
+#endif KERNEL_PRIVATE
 #endif /* _NET_IF_VLAN_VAR_H_ */

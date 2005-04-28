@@ -3,22 +3,19 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -55,7 +52,6 @@
 
 #include <sys/appleapiopts.h>
 
-#ifdef __APPLE_API_UNSTABLE
 #define DEVFS_CHAR 	0
 #define DEVFS_BLOCK 	1
 
@@ -76,9 +72,10 @@ __BEGIN_DECLS
  * Returns:
  *   A handle to a device node if successful, NULL otherwise.
  */
-void * 	devfs_make_node __P((dev_t dev, int chrblk, uid_t uid, gid_t gid, 
-			     int perms, char *fmt, ...));
+void * 	devfs_make_node(dev_t dev, int chrblk, uid_t uid, gid_t gid, 
+			     int perms, const char *fmt, ...);
 
+#ifdef BSD_KERNEL_PRIVATE
 /*
  * Function: devfs_make_link
  *
@@ -88,7 +85,8 @@ void * 	devfs_make_node __P((dev_t dev, int chrblk, uid_t uid, gid_t gid,
  * Returns:
  *   0 if successful, -1 if failed
  */
-int	devfs_link __P((void * handle, char *fmt, ...));
+int	devfs_link(void * handle, char *fmt, ...);
+#endif /* BSD_KERNEL_PRIVATE */
 
 /*
  * Function: devfs_remove
@@ -97,10 +95,9 @@ int	devfs_link __P((void * handle, char *fmt, ...));
  *   Remove the device node returned by devfs_make_node() along with
  *   any links created with devfs_make_link().
  */
-void	devfs_remove __P((void * handle));
+void	devfs_remove(void * handle);
 
 __END_DECLS
-#endif /* __APPLE_API_UNSTABLE */
 
 #ifdef __APPLE_API_PRIVATE
 /* XXX */

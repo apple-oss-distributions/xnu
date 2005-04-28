@@ -1,25 +1,22 @@
 /*
- * Copyright (c) 2000 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2004 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
- * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
- * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ *
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
+ *
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
- * 
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
+ *
  * @APPLE_LICENSE_HEADER_END@
  */
 
@@ -40,7 +37,7 @@ __BEGIN_DECLS
  */
 kern_return_t
 KUNCUserNotificationDisplayNotice(
-	int		timeout,
+	int		noticeTimeout,
 	unsigned	flags,
 	char		*iconPath,
 	char		*soundPath,
@@ -55,7 +52,7 @@ KUNCUserNotificationDisplayNotice(
  */
 kern_return_t
 KUNCUserNotificationDisplayAlert(
-	int		timeout,
+	int		alertTimeout,
 	unsigned	flags,
 	char		*iconPath,
 	char		*soundPath,
@@ -97,32 +94,60 @@ KUNCExecute(
  *
  *  Key			Type
  * Header			string (header displayed on dialog)
+ * 				corresponds to kCFUserNotificationAlertHeaderKey
+ *
  * Icon URL			string (url of the icon to display)
+ * 				corresponds to kCFUserNotificationIconURLKey
+ *
  * Sound URL			string (url of the sound to play on display)
+ * 				corresponds to kCFUserNotificationSoundURLKey
+ *
  * Localization URL		string (url of bundle to retrieve localization
  *				info from, using Localizable.strings files)
+ * 				corresponds to kCFUserNotificationLocalizationURLKey
+ *
  * Message			string (text of the message, can contain %@'s
  *				which are filled from tokenString passed in) 
+ * 				corresponds to kCFUserNotificationAlertMessageKey
+ *
  * OK Button Title 		string (title of the "main" button)
- * Alternate Button Title 	string (title of the "alternate" button -
- *				usually cancel)
+ * 				corresponds to kCFUserNotificationDefaultButtonTitleKey
+ *
+ * Alternate Button Title 	string (title of the "alternate" button,  usually cancel)
+ * 				corresponds to kCFUserNotificationAlternateButtonTitleKey
+ *
  * Other Button Title	 	string (title of the "other" button)
+ * 				corresponds to kCFUserNotificationOtherButtonTitleKey
+ *
  * Timeout			string (numeric, int - seconds until the dialog
  *				goes away on it's own)
- * Alert Level			string (Stop, Notice, Alert, 
+ *
+ * Alert Level			string (Stop, Notice, Alert)
+ *
  * Blocking Message		string (numeric, 1 or 0 - if 1, the dialog will
  *				have no buttons)
+ *
  * Text Field Strings		array of strings (each becomes a text field)
+ * 				corresponds to kCFUserNotificationTextFieldTitlesKey
+ *
  * Password Fields		array of strings (numeric - each indicates a
  *				pwd field)
+ *
  * Popup Button Strings		array of strings (each entry becomes a popup
  *				button string)
+ *
  * Radio Button Strings		array of strings (each becomes a radio button)
+ *
  * Check Box Strings		array of strings (each becomes a check box)
+ * 				corresponds to kCFUserNotificationCheckBoxTitlesKey
+ *
  * Selected Radio		string (numeric - which radio is selected)
+ *
  * Checked Boxes		array of strings (numeric - each indicates a
  *				checked field)
+ *
  * Selected Popup		string (numeric - which popup entry is selected)
+ *
  */
 
 /*
@@ -178,14 +203,14 @@ enum {
  */
 typedef void
 (*KUNCUserNotificationCallBack)(
-	int	contextKey,
-	int	responseFlags,
-	void	*xmlData);
+	int		contextKey,
+	int		responseFlags,
+	void		*xmlData);
 
 /*
  * Get a notification ID
  */
-KUNCUserNotificationID KUNCGetNotificationID();
+KUNCUserNotificationID KUNCGetNotificationID(void);
 
 
 /* This function currently requires a bundle path, which kexts cannot currently get.  In the future, the CFBundleIdentiofier of the kext will be pass in in place of the bundlePath. */

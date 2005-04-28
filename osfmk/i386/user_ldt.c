@@ -1,24 +1,21 @@
 /*
- * Copyright (c) 2000 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2004 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -81,8 +78,6 @@ char	acc_type[8][3] = {
     {	1,	0,	1	},	/* code, readable, conforming */
 };
 
-extern struct fake_descriptor ldt[];	/* for system call gate */
-
 #if 0
 /* Forward */
 
@@ -100,7 +95,7 @@ selector_check(
 	struct user_ldt	*ldt;
 	int	access;
 
-	ldt = thread->top_act->mact.pcb->ims.ldt;
+	ldt = thread->machine.pcb->ims.ldt;
 	if (ldt == 0) {
 	    switch (type) {
 		case S_CODE:
@@ -137,7 +132,7 @@ selector_check(
 
 kern_return_t
 i386_set_ldt(
-	thread_act_t		thr_act,
+	thread_t		thr_act,
 	int			first_selector,
 	descriptor_list_t	desc_list,
 	mach_msg_type_number_t	count)
@@ -156,7 +151,7 @@ i386_set_ldt(
 	    return KERN_INVALID_ARGUMENT;
 	if (first_desc + count >= 8192)
 	    return KERN_INVALID_ARGUMENT;
-	if (thr_act == THR_ACT_NULL)
+	if (thr_act == THREAD_NULL)
 	    return KERN_INVALID_ARGUMENT;
 	if ((thread = act_lock_thread(thr_act)) == THREAD_NULL) {
 		act_unlock_thread(thr_act);
@@ -176,7 +171,7 @@ i386_set_ldt(
 	 */
 	{
 	    kern_return_t	kr;
-	    vm_offset_t		dst_addr;
+	    vm_map_offset_t	dst_addr;
 
 	    old_copy_object = (vm_map_copy_t) desc_list;
 
@@ -186,11 +181,11 @@ i386_set_ldt(
 		return kr;
 
 	    (void) vm_map_wire(ipc_kernel_map,
-			trunc_page(dst_addr),
-			round_page(dst_addr + 
+			vm_map_trunc_page(dst_addr),
+			vm_map_round_page(dst_addr + 
 				count * sizeof(struct real_descriptor)),
 			VM_PROT_READ|VM_PROT_WRITE, FALSE);
-	    desc_list = (descriptor_list_t) dst_addr;
+	    desc_list = CAST_DOWN(descriptor_list_t, dst_addr);
 	}
 
 	for (i = 0, dp = (struct real_descriptor *) desc_list;
@@ -220,8 +215,8 @@ i386_set_ldt(
 		    break;
 		default:
 		    (void) vm_map_remove(ipc_kernel_map, 
-					 (vm_offset_t) desc_list,
-					 count * sizeof(struct real_descriptor),
+					 vm_map_trunc_page(desc_list),
+					 vm_map_round_page(&desc_list[count]),
 					 VM_MAP_REMOVE_KUNWIRE);
 		    return KERN_INVALID_ARGUMENT;
 	    }
@@ -229,7 +224,7 @@ i386_set_ldt(
 	ldt_size_needed = sizeof(struct real_descriptor)
 			* (first_desc + count);
 
-	pcb = thr_act->mact.pcb;
+	pcb = thr_act->machine.pcb;
 	new_ldt = 0;
     Retry:
 	simple_lock(&pcb->lock);
@@ -269,7 +264,7 @@ i386_set_ldt(
 		      (char *)&new_ldt->ldt[0],
 		      old_ldt->desc.limit_low + 1);
 	    }
-	    else if (thr_act == current_act()) {
+	    else if (thr_act == current_thread()) {
 		struct real_descriptor template = {0, 0, 0, ACC_P, 0, 0 ,0};
 
 		for (dp = &new_ldt->ldt[0], i = 0; i < first_desc; i++, dp++) {
@@ -303,22 +298,22 @@ i386_set_ldt(
 	/*
 	 * Free the descriptor list.
 	 */
-	(void) vm_map_remove(ipc_kernel_map, (vm_offset_t) desc_list,
-			count * sizeof(struct real_descriptor),
-			VM_MAP_REMOVE_KUNWIRE);
+	(void) vm_map_remove(ipc_kernel_map, vm_map_trunc_page(desc_list),
+			     vm_map_round_page(&desc_list[count]),
+			     VM_MAP_REMOVE_KUNWIRE);
 	return KERN_SUCCESS;
 }
 
 kern_return_t
 i386_get_ldt(
-	thread_act_t		thr_act,
+	thread_t		thr_act,
 	int			first_selector,
 	int			selector_count,	/* number wanted */
 	descriptor_list_t	*desc_list,	/* in/out */
 	mach_msg_type_number_t	*count)		/* in/out */
 {
 	struct user_ldt *user_ldt;
-	pcb_t		pcb = thr_act->mact.pcb;
+	pcb_t		pcb = thr_act->machine.pcb;
 	int		first_desc = sel_idx(first_selector);
 	unsigned int	ldt_count;
 	vm_size_t	ldt_size;
@@ -326,7 +321,7 @@ i386_get_ldt(
 	vm_offset_t	addr;
 	thread_t		thread;
 
-	if (thr_act == THR_ACT_NULL || (thread = thr_act->thread)==THREAD_NULL)
+	if (thr_act == THREAD_NULL)
 	    return KERN_INVALID_ARGUMENT;
 
 	if (first_desc < 0 || first_desc > 8191)
@@ -415,10 +410,10 @@ i386_get_ldt(
 	    /*
 	     * Unwire the memory and make it into copyin form.
 	     */
-	    (void) vm_map_unwire(ipc_kernel_map, trunc_page(addr),
-				 round_page(addr + size_used), FALSE);
-	    (void) vm_map_copyin(ipc_kernel_map, addr, size_used,
-				TRUE, &memory);
+	    (void) vm_map_unwire(ipc_kernel_map, vm_map_trunc_page(addr),
+				 vm_map_round_page(addr + size_used), FALSE);
+	    (void) vm_map_copyin(ipc_kernel_map, (vm_map_address_t)addr, 
+				 (vm_map_size_t)size_used, TRUE, &memory);
 	    *desc_list = (descriptor_list_t) memory;
 	}
 
@@ -430,6 +425,6 @@ void
 user_ldt_free(
 	user_ldt_t	user_ldt)
 {
-	kfree((vm_offset_t)user_ldt,
+	kfree(user_ldt,
 		user_ldt->desc.limit_low+1+sizeof(struct real_descriptor));
 }

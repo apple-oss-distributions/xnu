@@ -3,22 +3,19 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -338,9 +335,11 @@ finish:
 static bool
 figureDependenciesForKext(OSDictionary * kextPlist,
     OSDictionary * dependencies,
-    OSString * trueParent)
+    OSString * trueParent,
+    Boolean    skipKernelDependencies)
 {
     bool result = true;
+    bool hasDirectKernelDependency = false;
     OSString * kextName = 0;  // don't release
     OSDictionary * libraries = 0;  // don't release
     OSCollectionIterator * keyIterator = 0; // must release
@@ -382,9 +381,26 @@ figureDependenciesForKext(OSDictionary * kextPlist,
             result = false;
             goto finish;
         } else {
-            dependencies->setObject(libraryName,
-                trueParent ? trueParent : kextName);
+            char is_kernel_component;
+
+            if (!kextIsDependency(libraryName->getCStringNoCopy(), &is_kernel_component))
+                is_kernel_component = false;
+
+            if (!skipKernelDependencies || !is_kernel_component) {
+                dependencies->setObject(libraryName,
+                    trueParent ? trueParent : kextName);
+            }
+            if (!hasDirectKernelDependency && is_kernel_component) {
+                hasDirectKernelDependency = true;
+            }
         }
+    }
+    if (!hasDirectKernelDependency) {
+        /* a kext without any kernel dependency is assumed dependent on 6.0 */
+        dependencies->setObject("com.apple.kernel.libkern",
+                trueParent ? trueParent : kextName);
+        IOLog("Extension \"%s\" has no kernel dependency.\n",
+        	kextName->getCStringNoCopy());
     }
 
 finish:
@@ -507,7 +523,7 @@ bool add_dependencies_for_kmod(const char * kmod_name, dgraph_t * dgraph)
         goto finish;
     }
 
-    if (!figureDependenciesForKext(kextPlist, workingDependencies, NULL)) {
+    if (!figureDependenciesForKext(kextPlist, workingDependencies, NULL, false)) {
         IOLog("can't determine immediate dependencies for extension %s\n",
             kmod_name);
         result = false;
@@ -573,7 +589,7 @@ bool add_dependencies_for_kmod(const char * kmod_name, dgraph_t * dgraph)
                 * binaryless, dependency.
                 */
                 if (!figureDependenciesForKext(kextPlist, pendingDependencies,
-                    dependentName)) {
+                    dependentName, true)) {
 
                     IOLog("can't determine immediate dependencies for extension %s\n",
                         library_name);
@@ -637,7 +653,7 @@ bool add_dependencies_for_kmod(const char * kmod_name, dgraph_t * dgraph)
            /* Now put the library's dependencies onto the pending set.
             */
             if (!figureDependenciesForKext(kextPlist, pendingDependencies,
-                NULL)) {
+                NULL, false)) {
 
                 IOLog("can't determine immediate dependencies for extension %s\n",
                     library_name);

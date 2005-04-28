@@ -3,22 +3,19 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -68,7 +65,8 @@
 
 #include <sys/param.h>
 #include <sys/systm.h>
-#include <sys/proc.h>
+#include <sys/proc_internal.h>
+#include <sys/kauth.h>
 #include <sys/errno.h>
 #include <sys/ptrace.h>
 #include <sys/uio.h>
@@ -76,29 +74,32 @@
 #include <sys/sysctl.h>
 #include <sys/wait.h>
 
-#include <sys/mount.h>
+#include <sys/mount_internal.h>
+#include <sys/sysproto.h>
+
+#include <bsm/audit_kernel.h>
 
 #include <kern/task.h>
 #include <kern/thread.h>
 #include <mach/machine/thread_status.h>
+
 
 /* Macros to clear/set/test flags. */
 #define	SET(t, f)	(t) |= (f)
 #define	CLR(t, f)	(t) &= ~(f)
 #define	ISSET(t, f)	((t) & (f))
 
-void psignal_lock __P((struct proc *, int, int));
-int isinferior __P((struct proc *, struct proc *));
+extern thread_t	port_name_to_thread(mach_port_name_t port_name);
+extern kern_return_t thread_getstatus(thread_t thread, int flavor, thread_state_t tstate, mach_msg_type_number_t *count);
+extern thread_t get_firstthread(task_t);
+
+#if defined (ppc)
+extern kern_return_t thread_setstatus(thread_t thread, int flavor, thread_state_t tstate, mach_msg_type_number_t count);
+#endif
 
 /*
  * sys-trace system call.
  */
-struct ptrace_args {
-	int	req;
-	pid_t pid;
-	caddr_t	addr;
-	int	data;
-};
 
 int
 ptrace(p, uap, retval)
@@ -107,15 +108,10 @@ ptrace(p, uap, retval)
 	register_t *retval;
 {
 	struct proc *t = current_proc();	/* target process */
-	vm_offset_t	start_addr, end_addr,
-			kern_addr, offset;
-	vm_size_t	size;
 	task_t		task;
-	thread_t	thread;
-	thread_act_t	th_act;
+	thread_t	th_act;
 	struct uthread 	*ut;
 	int		*locr0;
-	int error = 0;
 #if defined(ppc)
 	struct ppc_thread_state64 statep;
 #elif	defined(i386)
@@ -126,15 +122,19 @@ ptrace(p, uap, retval)
 	unsigned long state_count;
 	int tr_sigexc = 0;
 
+	AUDIT_ARG(cmd, uap->req);
+	AUDIT_ARG(pid, uap->pid);
+	AUDIT_ARG(addr, uap->addr);
+	AUDIT_ARG(value, uap->data);
 
-        if (uap->req == PT_DENY_ATTACH) {
-	        if (ISSET(p->p_flag, P_TRACED)) {
-				exit1(p, W_EXITCODE(ENOTSUP, 0), retval);
-				/* drop funnel before we return */
-				thread_funnel_set(kernel_flock, FALSE);
-				thread_exception_return();
-				/* NOTREACHED */
-			}
+	if (uap->req == PT_DENY_ATTACH) {
+		if (ISSET(p->p_flag, P_TRACED)) {
+			exit1(p, W_EXITCODE(ENOTSUP, 0), retval);
+			/* drop funnel before we return */
+			thread_funnel_set(kernel_flock, FALSE);
+			thread_exception_return();
+			/* NOTREACHED */
+		}
 		SET(p->p_flag, P_NOATTACH);
 
 		return(0);
@@ -171,6 +171,7 @@ ptrace(p, uap, retval)
 	if ((t = pfind(uap->pid)) == NULL)
 			return (ESRCH);
 
+	AUDIT_ARG(process, t);
 
 	/* We do not want ptrace to do anything with kernel, init 
 	 * and mach_init
@@ -184,52 +185,35 @@ ptrace(p, uap, retval)
 		tr_sigexc = 1;
 	}
 	if (uap->req == PT_ATTACH) {
-
-		/*
-		 * You can't attach to a process if:
-		 *	(1) it's the process that's doing the attaching,
-		 */
-		if (t->p_pid == p->p_pid)
-			return (EINVAL);
-
-		/*
-		 *	(2) it's already being traced, or
-		 */
-		if (ISSET(t->p_flag, P_TRACED))
-			return (EBUSY);
-
-		/*
-		 *	(3) it's not owned by you, or is set-id on exec
-		 *	    (unless you're root).
-		 */
-		if ((t->p_cred->p_ruid != p->p_cred->p_ruid ||
-			ISSET(t->p_flag, P_SUGID)) &&
-		    (error = suser(p->p_ucred, &p->p_acflag)) != 0)
-			return (error);
-
-		if ((p->p_flag & P_TRACED) && isinferior(p, t))
-			return(EPERM);
-
-		if (ISSET(t->p_flag, P_NOATTACH)) {
-			psignal(p, SIGSEGV);
-			return (EBUSY);
+		int		err;
+		
+		if ( kauth_authorize_process(proc_ucred(p), KAUTH_PROCESS_CANTRACE, 
+									 t, (uintptr_t)&err, 0, 0) == 0 ) {
+			/* it's OK to attach */
+			SET(t->p_flag, P_TRACED);
+			if (tr_sigexc) 
+				SET(t->p_flag, P_SIGEXC);
+	
+			t->p_oppid = t->p_pptr->p_pid;
+			if (t->p_pptr != p)
+				proc_reparent(t, p);
+	
+			if (get_task_userstop(task) == 0 ) {
+				t->p_xstat = 0;
+				psignal(t, SIGSTOP);
+			} else {
+				t->p_xstat = SIGSTOP; 
+				task_resume(task);       
+			}
+			return(0);
 		}
-		SET(t->p_flag, P_TRACED);
-		if (tr_sigexc) 
-			SET(t->p_flag, P_SIGEXC);
-
-		t->p_oppid = t->p_pptr->p_pid;
-		if (t->p_pptr != p)
-			proc_reparent(t, p);
-
-		if (get_task_userstop(task) == 0 ) {
-			t->p_xstat = 0;
-			psignal(t, SIGSTOP);
-		} else {
-			t->p_xstat = SIGSTOP; 
-			task_resume(task);       
+		else {
+			/* not allowed to attach, proper error code returned by kauth_authorize_process */
+			if (ISSET(t->p_flag, P_NOATTACH)) {
+				psignal(p, SIGSEGV);
+			}
+			return (err);
 		}
-		return(0);
 	}
 
 	/*
@@ -280,8 +264,8 @@ ptrace(p, uap, retval)
 
 	case PT_STEP:			/* single step the child */
 	case PT_CONTINUE:		/* continue the child */
-		th_act = (thread_act_t)get_firstthread(task);
-		if (th_act == THR_ACT_NULL)
+		th_act = (thread_t)get_firstthread(task);
+		if (th_act == THREAD_NULL)
 			goto errorLabel;
 		ut = (uthread_t)get_bsdthread_info(th_act);
 		locr0 = ut->uu_ar0;
@@ -292,13 +276,13 @@ ptrace(p, uap, retval)
 		}	
 #elif defined(ppc)
 		state_count = PPC_THREAD_STATE64_COUNT;
-		if (thread_getstatus(th_act, PPC_THREAD_STATE64, &statep, &state_count)  != KERN_SUCCESS) {
+		if (thread_getstatus(th_act, PPC_THREAD_STATE64, (thread_state_t)&statep, (mach_msg_type_number_t *)&state_count)  != KERN_SUCCESS) {
 			goto errorLabel;
 		}	
 #else
 #error architecture not supported
 #endif
-		if ((int)uap->addr != 1) {
+		if (uap->addr != (user_addr_t)1) {
 #if	defined(i386)
 			locr0[PC] = (int)uap->addr;
 #elif	defined(ppc)
@@ -306,18 +290,18 @@ ptrace(p, uap, retval)
 		if (!ALIGNED((int)uap->addr, sizeof(int)))
 			return (ERESTART);
 
-		statep.srr0 = (uint64_t)((uint32_t)uap->addr);
+		statep.srr0 = uap->addr;
 		state_count = PPC_THREAD_STATE64_COUNT;
-		if (thread_setstatus(th_act, PPC_THREAD_STATE64, &statep, &state_count)  != KERN_SUCCESS) {
+		if (thread_setstatus(th_act, PPC_THREAD_STATE64, (thread_state_t)&statep, state_count)  != KERN_SUCCESS) {
 			goto errorLabel;
 		}	
 #undef 	ALIGNED
 #else
 #error architecture not implemented!
 #endif
-		} /* (int)uap->addr != 1 */
+		} /* uap->addr != (user_addr_t)1 */
 
-		if ((unsigned)uap->data < 0 || (unsigned)uap->data >= NSIG)
+		if ((unsigned)uap->data >= NSIG)
 			goto errorLabel;
 
 		if (uap->data != 0) {
@@ -325,7 +309,7 @@ ptrace(p, uap, retval)
                 }
 #if defined(ppc)
 		state_count = PPC_THREAD_STATE64_COUNT;
-		if (thread_getstatus(th_act, PPC_THREAD_STATE64, &statep, &state_count)  != KERN_SUCCESS) {
+		if (thread_getstatus(th_act, PPC_THREAD_STATE64, (thread_state_t)&statep, (mach_msg_type_number_t *)&state_count)  != KERN_SUCCESS) {
 			goto errorLabel;
 		}	
 #endif
@@ -350,7 +334,7 @@ ptrace(p, uap, retval)
 		}
 #if defined (ppc)
 		state_count = PPC_THREAD_STATE64_COUNT;
-		if (thread_setstatus(th_act, PPC_THREAD_STATE64, &statep, &state_count)  != KERN_SUCCESS) {
+		if (thread_setstatus(th_act, PPC_THREAD_STATE64, (thread_state_t)&statep, state_count)  != KERN_SUCCESS) {
 			goto errorLabel;
 		}	
 #endif
@@ -365,19 +349,17 @@ ptrace(p, uap, retval)
 		break;
 		
 	case PT_THUPDATE:  {
-		thread_act_t target_act;
-
 		if ((unsigned)uap->data >= NSIG)
 			goto errorLabel;
-		th_act = (thread_act_t)port_name_to_act((void *)uap->addr);
-		if (th_act == THR_ACT_NULL)
+		th_act = port_name_to_thread(CAST_DOWN(mach_port_name_t, uap->addr));
+		if (th_act == THREAD_NULL)
 			return (ESRCH);
 		ut = (uthread_t)get_bsdthread_info(th_act);
 		if (uap->data)
 			ut->uu_siglist |= sigmask(uap->data);
 		t->p_xstat = uap->data;
 		t->p_stat = SRUN;
-		act_deallocate(th_act);
+		thread_deallocate(th_act);
 		return(0);
 		}
 		break;
@@ -389,3 +371,51 @@ errorLabel:
 	return(0);
 }
 
+
+/*
+ * determine if one process (cur_procp) can trace another process (traced_procp).
+ */
+
+int
+cantrace(proc_t cur_procp, kauth_cred_t creds, proc_t traced_procp, int *errp)
+{
+	int		my_err;
+	/*
+	 * You can't trace a process if:
+	 *	(1) it's the process that's doing the tracing,
+	 */
+	if (traced_procp->p_pid == cur_procp->p_pid) {
+		*errp = EINVAL;
+		return (0);
+	}
+
+	/*
+	 *	(2) it's already being traced, or
+	 */
+	if (ISSET(traced_procp->p_flag, P_TRACED)) {
+		*errp = EBUSY;
+		return (0);
+	}
+
+	/*
+	 *	(3) it's not owned by you, or is set-id on exec
+	 *	    (unless you're root).
+	 */
+	if ((creds->cr_ruid != proc_ucred(traced_procp)->cr_ruid ||
+		ISSET(traced_procp->p_flag, P_SUGID)) &&
+		(my_err = suser(creds, &cur_procp->p_acflag)) != 0) {
+		*errp = my_err;
+		return (0);
+	}
+
+	if ((cur_procp->p_flag & P_TRACED) && isinferior(cur_procp, traced_procp)) {
+		*errp = EPERM;
+		return (0);
+	}
+
+	if (ISSET(traced_procp->p_flag, P_NOATTACH)) {
+		*errp = EBUSY;
+		return (0);
+	}
+	return(1);
+}

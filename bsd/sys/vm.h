@@ -1,24 +1,21 @@
 /*
- * Copyright (c) 2000-2002 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2005 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -66,6 +63,9 @@
 #define _SYS_VM_H
 
 #include <sys/appleapiopts.h>
+#include <sys/cdefs.h>
+
+#ifdef BSD_KERNEL_PRIVATE
 
 /* Machine specific config stuff */
 #if	defined(KERNEL) && !defined(MACH_USER_API)	
@@ -74,7 +74,6 @@
 #include <mach/vm_param.h>
 #endif
 
-#ifdef __APPLE_API_OBSOLETE
 /*
  * Shareable process virtual address space.
  * May eventually be merged with vm_map.
@@ -95,22 +94,55 @@ struct vmspace {
 	caddr_t vm_maxsaddr;	/* user VA at max stack growth */
 };
 
-#else /* __APPLE_API_OBSOLETE */
-/* just to keep kinfo_proc happy */
-struct vmspace {
-	int32_t	dummy[10];
+#ifdef KERNEL
+// LP64todo - should this move?
+/* LP64 version of vmspace.  all pointers 
+ * grow when we're dealing with a 64-bit process.
+ * WARNING - keep in sync with vmspace
+ */
+
+#if __DARWIN_ALIGN_NATURAL
+#pragma options align=natural
+#endif
+
+struct user_vmspace {
+	int     	vm_refcnt;      /* number of references */
+	user_addr_t	vm_shm;			/* SYS5 shared memory private data XXX */
+	segsz_t 	vm_rssize;		/* current resident set size in pages */
+	segsz_t 	vm_swrss;		/* resident set size before last swap */
+	segsz_t 	vm_tsize;		/* text size (pages) XXX */
+	segsz_t		vm_dsize;		/* data size (pages) XXX */
+	segsz_t 	vm_ssize;		/* stack size (pages) */
+	user_addr_t	vm_taddr;       /* user virtual address of text XXX */
+	user_addr_t	vm_daddr;       /* user virtual address of data XXX */
+	user_addr_t vm_maxsaddr; 	/* user VA at max stack growth */
 };
-#endif /* __APPLE_API_OBSOLETE */
+
+#if __DARWIN_ALIGN_NATURAL
+#pragma options align=reset
+#endif
+
+#endif /* KERNEL */
+
+#include <kern/thread.h>
+
+#else /* BSD_KERNEL_PRIVATE */
+/* just to keep kinfo_proc happy */
+/* NOTE: Pointer fields are size variant for LP64 */
+struct vmspace {
+	int32_t	dummy;
+	caddr_t	dummy2;
+	int32_t	dummy3[5];
+	caddr_t	dummy4[3];
+};
+
+#endif /* BSD_KERNEL_PRIVATE */
 
 #ifdef KERNEL
 
-#ifdef __APPLE_API_PRIVATE
-#ifdef BSD_BUILD
-#include <kern/thread.h>
-#endif /* BSD_BUILD */
-#endif /* __APPLE_API_PRIVATE */
-
+__BEGIN_DECLS
 struct proc *current_proc(void);
+__END_DECLS
 
 #endif /* KERNEL */
 

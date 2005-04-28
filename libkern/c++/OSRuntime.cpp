@@ -3,22 +3,19 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -70,7 +67,7 @@ void *kern_os_malloc(
 #endif
 
 	mem->mlen = memsize;
-	(void) memset(mem->dat, 0, size);
+	bzero( mem->dat, size);
 
 	return  (mem->dat);
 }
@@ -92,7 +89,7 @@ void kern_os_free(
 #if 0
 	memset((vm_offset_t)hdr, 0xbb, hdr->mlen);
 #else
-	kfree((vm_offset_t)hdr, hdr->mlen);
+	kfree(hdr, hdr->mlen);
 #endif
 }
 
@@ -133,7 +130,7 @@ void *kern_os_realloc(
 		(void) memset(&nmem->dat[osize], 0, nsize - osize);
 	(void) memcpy(nmem->dat, ohdr->dat,
 					(nsize > osize) ? osize : nsize);
-	kfree((vm_offset_t)ohdr, ohdr->mlen);
+	kfree(ohdr, ohdr->mlen);
 
 	return (nmem->dat);
 }
@@ -158,7 +155,11 @@ void __pure_virtual( void )	{ panic(__FUNCTION__); }
 
 typedef void (*structor_t)(void);
 
-void OSRuntimeUnloadCPPForSegment(struct segment_command * segment) {
+// Given a pointer to a 32 bit mach object segment, iterate the segment to
+// obtain a 32 bit destructor section for C++ objects, and call each of the
+// destructors there.
+void
+OSRuntimeUnloadCPPForSegment(struct segment_command * segment) {
 
     struct section * section;
 
@@ -182,6 +183,7 @@ void OSRuntimeUnloadCPPForSegment(struct segment_command * segment) {
     return;
 }
 
+// This function will only operate on 32 bit kmods
 void OSRuntimeUnloadCPP(kmod_info_t *ki, void *)
 {
     if (ki && ki->address) {
@@ -224,6 +226,7 @@ kern_return_t OSRuntimeFinalizeCPP(kmod_info_t *ki, void *)
 }
 
 // Functions used by the extenTools/kmod library project
+// This function will only operate on 32 bit kmods
 kern_return_t OSRuntimeInitializeCPP(kmod_info_t *ki, void *)
 {
     struct mach_header *header;
@@ -331,8 +334,6 @@ void * operator new( size_t size)
     void * result;
 
     result = (void *) kern_os_malloc( size);
-    if( result)
-	bzero( result, size);
     return( result);
 }
 

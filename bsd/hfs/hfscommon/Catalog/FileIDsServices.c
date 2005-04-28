@@ -1,24 +1,21 @@
 /*
- * Copyright (c) 2000-2003 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2004 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -38,12 +35,12 @@ struct ExtentsRecBuffer {
 typedef struct ExtentsRecBuffer ExtentsRecBuffer;
 
 
-UInt32	CheckExtents( void *extents, UInt32 blocks, Boolean isHFSPlus );
-OSErr	DeleteExtents( ExtendedVCB *vcb, UInt32 fileNumber, Boolean isHFSPlus );
-OSErr	MoveExtents( ExtendedVCB *vcb, UInt32 srcFileID, UInt32 destFileID, Boolean isHFSPlus );
-void	CopyCatalogNodeInfo( CatalogRecord *src, CatalogRecord *dest );
-void	CopyBigCatalogNodeInfo( CatalogRecord *src, CatalogRecord *dest );
-void	CopyExtentInfo( ExtentKey *key, ExtentRecord *data, ExtentsRecBuffer *buffer, UInt16 bufferCount );
+static UInt32 CheckExtents( void *extents, UInt32 blocks, Boolean isHFSPlus );
+static OSErr  DeleteExtents( ExtendedVCB *vcb, UInt32 fileNumber, Boolean isHFSPlus );
+static OSErr  MoveExtents( ExtendedVCB *vcb, UInt32 srcFileID, UInt32 destFileID, Boolean isHFSPlus );
+static void  CopyCatalogNodeInfo( CatalogRecord *src, CatalogRecord *dest );
+static void  CopyBigCatalogNodeInfo( CatalogRecord *src, CatalogRecord *dest );
+static void  CopyExtentInfo( ExtentKey *key, ExtentRecord *data, ExtentsRecBuffer *buffer, UInt16 bufferCount );
 
 
 
@@ -58,9 +55,6 @@ OSErr ExchangeFileIDs( ExtendedVCB *vcb, ConstUTF8Param srcName, ConstUTF8Param 
 	SInt16		numDestExtentBlocks;
 	OSErr		err;
 	Boolean		isHFSPlus = ( vcb->vcbSigWord == kHFSPlusSigWord );
-
-	TrashCatalogIterator(vcb, srcID);	//	invalidate any iterators for this parentID
-	TrashCatalogIterator(vcb, destID);	//	invalidate any iterators for this parentID
 
 	err = BuildCatalogKeyUTF8(vcb, srcID, srcName, kUndefinedStrLen, &srcKey, NULL);
 	ReturnIfError(err);
@@ -354,7 +348,7 @@ FlushAndReturn:
 }
 
 
-void	CopyCatalogNodeInfo( CatalogRecord *src, CatalogRecord *dest )
+static void  CopyCatalogNodeInfo( CatalogRecord *src, CatalogRecord *dest )
 {
 	dest->hfsFile.dataLogicalSize	= src->hfsFile.dataLogicalSize;
 	dest->hfsFile.dataPhysicalSize = src->hfsFile.dataPhysicalSize;
@@ -365,7 +359,7 @@ void	CopyCatalogNodeInfo( CatalogRecord *src, CatalogRecord *dest )
 	BlockMoveData( src->hfsFile.rsrcExtents, dest->hfsFile.rsrcExtents, sizeof(HFSExtentRecord) );
 }
 
-void	CopyBigCatalogNodeInfo( CatalogRecord *src, CatalogRecord *dest )
+static void  CopyBigCatalogNodeInfo( CatalogRecord *src, CatalogRecord *dest )
 {
 	BlockMoveData( &src->hfsPlusFile.dataFork, &dest->hfsPlusFile.dataFork, sizeof(HFSPlusForkData) );
 	BlockMoveData( &src->hfsPlusFile.resourceFork, &dest->hfsPlusFile.resourceFork, sizeof(HFSPlusForkData) );
@@ -373,7 +367,7 @@ void	CopyBigCatalogNodeInfo( CatalogRecord *src, CatalogRecord *dest )
 }
 
 
-OSErr	MoveExtents( ExtendedVCB *vcb, UInt32 srcFileID, UInt32 destFileID, Boolean isHFSPlus )
+static OSErr  MoveExtents( ExtendedVCB *vcb, UInt32 srcFileID, UInt32 destFileID, Boolean isHFSPlus )
 {
 	FCB *				fcb;
 	ExtentsRecBuffer	extentsBuffer[kNumExtentsToCache];
@@ -531,7 +525,7 @@ OSErr	MoveExtents( ExtendedVCB *vcb, UInt32 srcFileID, UInt32 destFileID, Boolea
 }
 
 
-void	CopyExtentInfo( ExtentKey *key, ExtentRecord *data, ExtentsRecBuffer *buffer, UInt16 bufferCount )
+static void  CopyExtentInfo( ExtentKey *key, ExtentRecord *data, ExtentsRecBuffer *buffer, UInt16 bufferCount )
 {
 	BlockMoveData( key, &(buffer[bufferCount].extentKey), sizeof( ExtentKey ) );
 	BlockMoveData( data, &(buffer[bufferCount].extentData), sizeof( ExtentRecord ) );
@@ -539,7 +533,7 @@ void	CopyExtentInfo( ExtentKey *key, ExtentRecord *data, ExtentsRecBuffer *buffe
 
 
 //--	Delete all extents in extent file that have the ID given.
-OSErr	DeleteExtents( ExtendedVCB *vcb, UInt32 fileID, Boolean isHFSPlus )
+static OSErr  DeleteExtents( ExtendedVCB *vcb, UInt32 fileID, Boolean isHFSPlus )
 {
 	FCB *				fcb;
 	ExtentKey *			extentKeyPtr;
@@ -617,7 +611,7 @@ OSErr	DeleteExtents( ExtendedVCB *vcb, UInt32 fileID, Boolean isHFSPlus )
 
 
 //	Check if there are extents represented in the extents overflow file.
-UInt32	CheckExtents( void *extents, UInt32 totalBlocks, Boolean isHFSPlus )
+static UInt32  CheckExtents( void *extents, UInt32 totalBlocks, Boolean isHFSPlus )
 {
 	UInt32		extentAllocationBlocks;
 	UInt16		i;

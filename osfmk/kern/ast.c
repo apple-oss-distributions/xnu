@@ -1,24 +1,21 @@
 /*
- * Copyright (c) 2000 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2004 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -63,7 +60,6 @@
  */
 
 #include <cputypes.h>
-#include <cpus.h>
 #include <platforms.h>
 
 #include <kern/ast.h>
@@ -73,24 +69,18 @@
 #include <kern/queue.h>
 #include <kern/sched_prim.h>
 #include <kern/thread.h>
-#include <kern/thread_act.h>
-#include <kern/thread_swap.h>
 #include <kern/processor.h>
 #include <kern/spl.h>
+#include <kern/wait_queue.h>
 #include <mach/policy.h>
 
-volatile ast_t need_ast[NCPUS];
+#ifdef __ppc__
+#include <ppc/trap.h> // for CHUD AST hook
+#endif
 
 void
 ast_init(void)
 {
-#ifndef	MACHINE_AST
-	register int i;
-
-	for (i=0; i<NCPUS; i++) {
-		need_ast[i] = AST_NONE;
-	}
-#endif	/* MACHINE_AST */
 }
 
 /*
@@ -98,30 +88,47 @@ ast_init(void)
  */
 void
 ast_taken(
-	ast_t			reasons,
-	boolean_t		enable
+	ast_t		reasons,
+	boolean_t	enable
 )
 {
-	register thread_t		self = current_thread();
-	register int			mycpu = cpu_number();
-	boolean_t				preempt_trap = (reasons == AST_PREEMPTION);
+	boolean_t		preempt_trap = (reasons == AST_PREEMPTION);
+	ast_t			*myast = ast_pending();
+	thread_t		thread = current_thread();
 
-	reasons &= need_ast[mycpu];
-	need_ast[mycpu] &= ~reasons;
+#ifdef __ppc__
+	/*
+	 * CHUD hook - all threads including idle processor threads
+	 */
+	if(perfASTHook) {
+		if(*myast & AST_PPC_CHUD_ALL) {
+			perfASTHook(0, NULL, 0, 0);
+			
+			if(*myast == AST_NONE) {
+				return; // nothing left to do
+			}
+		}
+	} else {
+		*myast &= ~AST_PPC_CHUD_ALL;
+	}
+#endif
+
+	reasons &= *myast;
+	*myast &= ~reasons;
 
 	/*
 	 * Handle ASTs for all threads
 	 * except idle processor threads.
 	 */
-	if (!(self->state & TH_IDLE)) {
+	if (!(thread->state & TH_IDLE)) {
 		/*
 		 * Check for urgent preemption.
 		 */
 		if (	(reasons & AST_URGENT)				&&
-				wait_queue_assert_possible(self)		) {
+				wait_queue_assert_possible(thread)		) {
 			if (reasons & AST_PREEMPT) {
 				counter(c_ast_taken_block++);
-				thread_block_reason(THREAD_CONTINUE_NULL,
+				thread_block_reason(THREAD_CONTINUE_NULL, NULL,
 										AST_PREEMPT | AST_URGENT);
 			}
 
@@ -140,11 +147,8 @@ ast_taken(
 			 * Handle BSD hook.
 			 */
 			if (reasons & AST_BSD) {
-				extern void		bsd_ast(thread_act_t	act);
-				thread_act_t	act = self->top_act;
-
-				thread_ast_clear(act, AST_BSD);
-				bsd_ast(act);
+				thread_ast_clear(thread, AST_BSD);
+				bsd_ast(thread);
 			}
 #endif
 
@@ -162,15 +166,15 @@ ast_taken(
 			if (reasons & AST_PREEMPT) {
 				processor_t		myprocessor = current_processor();
 
-				if (csw_needed(self, myprocessor))
+				if (csw_needed(thread, myprocessor))
 					reasons = AST_PREEMPT;
 				else
 					reasons = AST_NONE;
 			}
 			if (	(reasons & AST_PREEMPT)				&&
-					wait_queue_assert_possible(self)		) {		
+					wait_queue_assert_possible(thread)		) {		
 				counter(c_ast_taken_block++);
-				thread_block_reason(thread_exception_return, AST_PREEMPT);
+				thread_block_reason((thread_continue_t)thread_exception_return, NULL, AST_PREEMPT);
 			}
 		}
 	}
@@ -185,30 +189,22 @@ void
 ast_check(
 	processor_t		processor)
 {
-	register thread_t		self = processor->active_thread;
+	register thread_t		thread = processor->active_thread;
 
-	processor->current_pri = self->sched_pri;
-	if (processor->state == PROCESSOR_RUNNING) {
+	processor->current_pri = thread->sched_pri;
+	if (	processor->state == PROCESSOR_RUNNING		||
+			processor->state == PROCESSOR_SHUTDOWN		) {
 		register ast_t		preempt;
-processor_running:
 
 		/*
 		 *	Propagate thread ast to processor.
 		 */
-		ast_propagate(self->top_act->ast);
+		ast_propagate(thread->ast);
 
 		/*
 		 *	Context switch check.
 		 */
-		if ((preempt = csw_check(self, processor)) != AST_NONE)
+		if ((preempt = csw_check(thread, processor)) != AST_NONE)
 			ast_on(preempt);
 	}
-	else
-	if (	processor->state == PROCESSOR_DISPATCHING	||
-			processor->state == PROCESSOR_IDLE			) {
-		return;
-	}
-	else
-	if (processor->state == PROCESSOR_SHUTDOWN)
-		goto processor_running;
 }

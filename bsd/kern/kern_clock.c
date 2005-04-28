@@ -3,22 +3,19 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -74,8 +71,9 @@
 #include <sys/resourcevar.h>
 #include <sys/kernel.h>
 #include <sys/resource.h>
-#include <sys/proc.h>
+#include <sys/proc_internal.h>
 #include <sys/vm.h>
+#include <sys/sysctl.h>
 
 #ifdef GPROF
 #include <sys/gmon.h>
@@ -87,6 +85,14 @@
 #include <mach/boolean.h>
 
 #include <kern/thread_call.h>
+
+void bsd_uprofil(struct time_value *syst, user_addr_t pc);
+void get_procrustime(time_value_t *tv);
+int sysctl_clockrate(user_addr_t where, size_t *sizep);
+int tvtohz(struct timeval *tv);
+extern void psignal_sigprof(struct proc *);
+extern void psignal_vtalarm(struct proc *);
+extern void psignal_xcpu(struct proc *);
 
 /*
  * Clock handling routines.
@@ -110,13 +116,21 @@
  * we run through the statistics gathering routine as well.
  */
 
+int             hz = 100;                /* GET RID OF THIS !!! */
+int             tick = (1000000 / 100);  /* GET RID OF THIS !!! */
+
 int bsd_hardclockinit = 0;
 /*ARGSUSED*/
 void
-bsd_hardclock(usermode, pc, numticks)
-	boolean_t usermode;
-	caddr_t pc;
-	int numticks;
+bsd_hardclock(
+                boolean_t usermode, 
+#ifdef GPROF
+                caddr_t pc, 
+#else
+                __unused caddr_t pc, 
+#endif
+                int numticks
+             )
 {
 	register struct proc *p;
 	register thread_t	thread;
@@ -126,17 +140,11 @@ bsd_hardclock(usermode, pc, numticks)
 	if (!bsd_hardclockinit)
 		return;
 
-	/*
-	 * Increment the time-of-day.
-	 */
-	microtime(&tv);
-	time = tv;
-
 	if (bsd_hardclockinit < 0) {
 	    return;
 	}
 
-	thread = current_act();
+	thread = current_thread();
 	/*
 	 * Charge the time out based on the mode the cpu is in.
 	 * Here again we fudge for the lack of proper interval timers
@@ -144,7 +152,7 @@ bsd_hardclock(usermode, pc, numticks)
 	 * one tick.
 	 */
 	p = (struct proc *)current_proc();
-	if (p && ((p->p_flag & P_WEXIT) == NULL)) {
+	if (p && ((p->p_flag & P_WEXIT) == 0)) {
 		if (usermode) {		
 			if (p->p_stats && p->p_stats->p_prof.pr_scale) {
 				p->p_flag |= P_OWEUPC;
@@ -159,7 +167,6 @@ bsd_hardclock(usermode, pc, numticks)
 			if (p->p_stats && 
 				timerisset(&p->p_stats->p_timer[ITIMER_VIRTUAL].it_value) &&
 				!itimerdecr(&p->p_stats->p_timer[ITIMER_VIRTUAL], nusecs)) {
-				extern void psignal_vtalarm(struct proc *);
                         
 				/* does psignal(p, SIGVTALRM) in a thread context */
 				thread_call_func((thread_call_func_t)psignal_vtalarm, p, FALSE);
@@ -182,7 +189,6 @@ bsd_hardclock(usermode, pc, numticks)
 				thread_read_times(thread, &user_time, &sys_time);
 				if ((sys_time.seconds + user_time.seconds + 1) >
 					p->p_limit->pl_rlimit[RLIMIT_CPU].rlim_cur) {
-					extern void psignal_xcpu(struct proc *);
                         
 					/* does psignal(p, SIGXCPU) in a thread context */
 					thread_call_func((thread_call_func_t)psignal_xcpu, p, FALSE);
@@ -194,7 +200,6 @@ bsd_hardclock(usermode, pc, numticks)
 			}
 			if (timerisset(&p->p_stats->p_timer[ITIMER_PROF].it_value) &&
 				!itimerdecr(&p->p_stats->p_timer[ITIMER_PROF], nusecs)) {
-				extern void psignal_sigprof(struct proc *);
                         
 				/* does psignal(p, SIGPROF) in a thread context */
 				thread_call_func((thread_call_func_t)psignal_sigprof, p, FALSE);
@@ -216,8 +221,15 @@ bsd_hardclock(usermode, pc, numticks)
 /*ARGSUSED*/
 void
 gatherstats(
-	boolean_t	usermode,
-	caddr_t		pc)
+#ifdef GPROF
+                boolean_t	usermode,
+                caddr_t		pc
+#else
+                __unused boolean_t	usermode,
+                __unused caddr_t		pc
+#endif
+	       )
+	        
 {
 #ifdef GPROF
 	if (!usermode) {
@@ -272,12 +284,46 @@ untimeout(
 }
 
 
+/*
+ *	Set a timeout.
+ *
+ *	fcn:		function to call
+ *	param:		parameter to pass to function
+ *	ts:		timeout interval, in timespec
+ */
+void
+bsd_timeout(
+	timeout_fcn_t			fcn,
+	void					*param,
+	struct timespec         *ts)
+{
+	uint64_t		deadline = 0;
+
+	if (ts && (ts->tv_sec || ts->tv_nsec)) {
+		nanoseconds_to_absolutetime((uint64_t)ts->tv_sec * NSEC_PER_SEC + ts->tv_nsec,  &deadline );
+		clock_absolutetime_interval_to_deadline( deadline, &deadline );
+	}
+	thread_call_func_delayed((thread_call_func_t)fcn, param, deadline);
+}
+
+/*
+ * Cancel a timeout.
+ */
+void
+bsd_untimeout(
+	register timeout_fcn_t		fcn,
+	register void				*param)
+{
+	thread_call_func_cancel((thread_call_func_t)fcn, param, FALSE);
+}
+
 
 /*
  * Compute number of hz until specified time.
  * Used to compute third argument to timeout() from an
  * absolute time.
  */
+int
 hzto(tv)
 	struct timeval *tv;
 {
@@ -312,9 +358,7 @@ hzto(tv)
  * Return information about system clocks.
  */
 int
-sysctl_clockrate(where, sizep)
-	register char *where;
-	size_t *sizep;
+sysctl_clockrate(user_addr_t where, size_t *sizep)
 {
 	struct clockinfo clkinfo;
 
@@ -325,7 +369,7 @@ sysctl_clockrate(where, sizep)
 	clkinfo.tick = tick;
 	clkinfo.profhz = hz;
 	clkinfo.stathz = hz;
-	return sysctl_rdstruct(where, sizep, NULL, &clkinfo, sizeof(clkinfo));
+	return sysctl_rdstruct(where, sizep, USER_ADDR_NULL, &clkinfo, sizeof(clkinfo));
 }
 
 
@@ -333,8 +377,7 @@ sysctl_clockrate(where, sizep)
  * Compute number of ticks in the specified amount of time.
  */
 int
-tvtohz(tv)
-	struct timeval *tv;
+tvtohz(struct timeval *tv)
 {
 	register unsigned long ticks;
 	register long sec, usec;
@@ -415,7 +458,7 @@ stopprofclock(p)
 }
 
 void
-bsd_uprofil(struct time_value *syst, unsigned int pc)
+bsd_uprofil(struct time_value *syst, user_addr_t pc)
 {
 struct proc *p = current_proc();
 int		ticks;

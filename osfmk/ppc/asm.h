@@ -3,22 +3,19 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -240,6 +237,8 @@
 #define parm	0x01000000
 #define sten	7
 #define stenm	0x01000000
+#define dnap	7
+#define dnapm	0x01000000
 #define doze	8
 #define dozem	0x00800000
 #define nap		9
@@ -271,6 +270,8 @@
 #define dcfim	0x00000400
 #define spd		22
 #define spdm	0x00000200
+#define hdice	23
+#define hdicem	0x00000100
 #define sge		24
 #define sgem	0x00000080
 #define dcfa	25
@@ -293,6 +294,10 @@
 ;	hid1 bits
 #define hid1pcem	0xF8000000
 #define hid1prem	0x06000000
+#define hid1dfs0	8
+#define hid1dfs0m	0x00800000
+#define hid1dfs1	9
+#define hid1dfs1m	0x00400000
 #define hid1pi0		14
 #define hid1pi0m	0x00020000
 #define hid1FCPErr	14
@@ -443,12 +448,17 @@
 #define CoreSolid 2
 #define CorePulse 3
 
-;	GUS Mode Register
-#define GUSModeReg 0x0430
-#define GUSMdmapen 0x00008000
-#define GUSMstgtdis 0x00000080
-#define GUSMstgttim 0x00000038
-#define GUSMstgttoff 0x00000004
+;	L2 FIR
+#define l2FIR 0x0400
+#define l2FIRrst 0x0410
+
+;	Bus FIR
+#define busFIR 0x0A00
+#define busFIRrst 0x0A10
+
+; PowerTune
+#define PowerTuneControlReg	0x0AA001
+#define PowerTuneStatusReg	0x408001
 
 ;	HID4
 #define hid4RMCI 23
@@ -644,6 +654,13 @@
 #define	LOW_ADDR(x)	lo16(x)
 
 #endif	/* ASSEMBLER */
+
+/*	GUS Mode Register */
+#define GUSModeReg 0x0430
+#define GUSMdmapen 0x00008000
+#define GUSMstgtdis 0x00000080
+#define GUSMstgttim 0x00000038
+#define GUSMstgttoff 0x00000004
 
 /* Tags are placed before Immediately Following Code (IFC) for the debugger
  * to be able to deduce where to find various registers when backtracing

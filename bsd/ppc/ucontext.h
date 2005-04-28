@@ -3,22 +3,19 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -27,27 +24,44 @@
 #define _PPC_UCONTEXT_H_
 
 
-#include <mach/thread_status.h>
+#include <mach/ppc/_types.h>
 
+#ifndef _POSIX_C_SOURCE
 struct mcontext {
-	ppc_exception_state_t	es;
-	ppc_thread_state_t	ss;
-	ppc_float_state_t	fs;
-	ppc_vector_state_t	vs;
+	struct ppc_exception_state	es;
+	struct ppc_thread_state		ss;
+	struct ppc_float_state		fs;
+	struct ppc_vector_state		vs;
 };
-
 #define PPC_MCONTEXT_SIZE	(PPC_THREAD_STATE_COUNT + PPC_FLOAT_STATE_COUNT + PPC_EXCEPTION_STATE_COUNT + PPC_VECTOR_STATE_COUNT) * sizeof(int)
+#else /* _POSIX_C_SOURCE */
+struct __darwin_mcontext {
+	struct __darwin_ppc_exception_state	es;
+	struct __darwin_ppc_thread_state	ss;
+	struct __darwin_ppc_float_state		fs;
+	struct __darwin_ppc_vector_state	vs;
+};
+#endif /* _POSIX_C_SOURCE */
 
-typedef struct mcontext  * mcontext_t;
+#ifndef _MCONTEXT_T
+#define _MCONTEXT_T
+typedef __darwin_mcontext_t		mcontext_t;
+#endif
 
+#ifndef _POSIX_C_SOURCE
 struct mcontext64 {
-	ppc_exception_state_t	es;
-	ppc_thread_state64_t	ss;
-	ppc_float_state_t	fs;
-	ppc_vector_state_t	vs;
+	struct ppc_exception_state64	es;
+	struct ppc_thread_state64	ss;
+	struct ppc_float_state		fs;
+	struct ppc_vector_state		vs;
 };
 #define PPC_MCONTEXT64_SIZE	(PPC_THREAD_STATE64_COUNT + PPC_FLOAT_STATE_COUNT + PPC_EXCEPTION_STATE_COUNT + PPC_VECTOR_STATE_COUNT) * sizeof(int)
 
+#ifndef _MCONTEXT64_T
+#define _MCONTEXT64_T
 typedef struct mcontext64  * mcontext64_t;
+#endif
+
+#endif /* _POSIX_C_SOURCE */
 
 #endif /* _PPC_UCONTEXT_H_ */

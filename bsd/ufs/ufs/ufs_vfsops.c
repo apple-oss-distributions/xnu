@@ -1,24 +1,21 @@
 /*
- * Copyright (c) 2000 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2004 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -65,10 +62,9 @@
 
 #include <sys/param.h>
 #include <sys/mbuf.h>
-#include <sys/mount.h>
+#include <sys/mount_internal.h>
 #include <sys/proc.h>
-#include <sys/buf.h>
-#include <sys/vnode.h>
+#include <sys/vnode_internal.h>
 #include <sys/malloc.h>
 #include <sys/quota.h>
 
@@ -85,10 +81,10 @@
  */
 /* ARGSUSED */
 int
-ufs_start(mp, flags, p)
+ufs_start(mp, flags, context)
 	struct mount *mp;
 	int flags;
-	struct proc *p;
+	vfs_context_t context;
 {
 
 	return (0);
@@ -98,14 +94,15 @@ ufs_start(mp, flags, p)
  * Return the root of a filesystem.
  */
 int
-ufs_root(mp, vpp)
+ufs_root(mp, vpp, context)
 	struct mount *mp;
 	struct vnode **vpp;
+	vfs_context_t context;
 {
 	struct vnode *nvp;
 	int error;
 
-	if (error = VFS_VGET(mp, (void *)ROOTINO, &nvp))
+	if (error = VFS_VGET(mp, (ino64_t)ROOTINO, &nvp, context))
 		return (error);
 	*vpp = nvp;
 	return (0);
@@ -115,20 +112,21 @@ ufs_root(mp, vpp)
  * Do operations associated with quotas
  */
 int
-ufs_quotactl(mp, cmds, uid, arg, p)
+ufs_quotactl(mp, cmds, uid, datap, context)
 	struct mount *mp;
 	int cmds;
 	uid_t uid;
-	caddr_t arg;
-	struct proc *p;
+	caddr_t datap;
+	vfs_context_t context;
 {
+	struct proc *p = vfs_context_proc(context);
 	int cmd, type, error;
 
 #if !QUOTA
-	return (EOPNOTSUPP);
+	return (ENOTSUP);
 #else
 	if (uid == -1)
-		uid = p->p_cred->p_ruid;
+		uid = vfs_context_ucred(context)->cr_ruid;
 	cmd = cmds >> SUBCMDSHIFT;
 
 	switch (cmd) {
@@ -136,40 +134,40 @@ ufs_quotactl(mp, cmds, uid, arg, p)
 	case Q_QUOTASTAT:
 		break;
 	case Q_GETQUOTA:
-		if (uid == p->p_cred->p_ruid)
+		if (uid == vfs_context_ucred(context)->cr_ruid)
 			break;
 		/* fall through */
 	default:
-		if (error = suser(p->p_ucred, &p->p_acflag))
+		if (error = vfs_context_suser(context))
 			return (error);
 	}
 
 	type = cmds & SUBCMDMASK;
 	if ((u_int)type >= MAXQUOTAS)
 		return (EINVAL);
-	if (vfs_busy(mp, LK_NOWAIT, 0, p))
+	if (vfs_busy(mp, LK_NOWAIT))
 		return (0);
 
 	switch (cmd) {
 
 	case Q_QUOTAON:
-		error = quotaon(p, mp, type, arg, UIO_USERSPACE);
+		error = quotaon(context, mp, type, datap);
 		break;
 
 	case Q_QUOTAOFF:
-		error = quotaoff(p, mp, type);
+		error = quotaoff(mp, type);
 		break;
 
 	case Q_SETQUOTA:
-		error = setquota(mp, uid, type, arg);
+		error = setquota(mp, uid, type, datap);
 		break;
 
 	case Q_SETUSE:
-		error = setuse(mp, uid, type, arg);
+		error = setuse(mp, uid, type, datap);
 		break;
 
 	case Q_GETQUOTA:
-		error = getquota(mp, uid, type, arg);
+		error = getquota(mp, uid, type, datap);
 		break;
 
 	case Q_SYNC:
@@ -177,14 +175,15 @@ ufs_quotactl(mp, cmds, uid, arg, p)
 		break;
 
         case Q_QUOTASTAT:
-	        error = quotastat(mp, type, arg);
+	        error = quotastat(mp, type, datap);
 		break;
 
 	default:
 		error = EINVAL;
 		break;
 	}
-	vfs_unbusy(mp, p);
+	vfs_unbusy(mp);
+
 	return (error);
 #endif
 }
@@ -208,49 +207,3 @@ ufs_init(vfsp)
 	return (0);
 }
 
-/*
- * This is the generic part of fhtovp called after the underlying
- * filesystem has validated the file handle.
- *
- * Verify that a host should have access to a filesystem, and if so
- * return a vnode for the presented file handle.
- */
-int
-ufs_check_export(mp, ufhp, nam, vpp, exflagsp, credanonp)
-	register struct mount *mp;
-	struct ufid *ufhp;
-	struct mbuf *nam;
-	struct vnode **vpp;
-	int *exflagsp;
-	struct ucred **credanonp;
-{
-	register struct inode *ip;
-	register struct netcred *np;
-	register struct ufsmount *ump = VFSTOUFS(mp);
-	struct vnode *nvp;
-	int error;
-
-	/*
-	 * Get the export permission structure for this <mp, client> tuple.
-	 */
-	np = vfs_export_lookup(mp, &ump->um_export, nam);
-	if (nam && (np == NULL))
-		return (EACCES);
-
-	if (error = VFS_VGET(mp, (void *)ufhp->ufid_ino, &nvp)) {
-		*vpp = NULLVP;
-		return (error);
-	}
-	ip = VTOI(nvp);
-	if (ip->i_mode == 0 || ip->i_gen != ufhp->ufid_gen) {
-		vput(nvp);
-		*vpp = NULLVP;
-		return (ESTALE);
-	}
-	*vpp = nvp;
-	if (np) {
-		*exflagsp = np->netc_exflags;
-		*credanonp = &np->netc_anon;
-	}
-	return (0);
-}

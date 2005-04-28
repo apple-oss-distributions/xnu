@@ -1,42 +1,31 @@
 /*
- * Copyright (c) 2000 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2005 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
- */
-/*
- * Copyright (c) 1999 Apple Computer, Inc.  All rights reserved. 
- *
- * HISTORY
- *
- * 1999 Mar 29 rsulack created.
  */
 
 #ifndef	_MACH_KMOD_H_
 #define	_MACH_KMOD_H_
 
-#include <sys/appleapiopts.h>
 #include <mach/kern_return.h>
 
-#ifdef __APPLE_API_PRIVATE
+#include <sys/cdefs.h>
 
 #define KMOD_CNTL_START		1	// call kmod's start routine
 #define KMOD_CNTL_STOP		2	// call kmod's stop routine
@@ -48,23 +37,25 @@
 #define KMOD_UNPACK_FROM_ID(i)	((unsigned long)i >> 16)
 #define KMOD_UNPACK_TO_ID(i)	((unsigned long)i & 0xffff)
 
-#endif /* __APPLE_API_PRIVATE */
-
-#define KMOD_MAX_NAME	64
-
-#ifdef __APPLE_API_PRIVATE
-
 typedef int kmod_t;
 typedef int kmod_control_flavor_t;
 typedef void* kmod_args_t;
 
-#endif /* __APPLE_API_PRIVATE */
+#define KMOD_MAX_NAME	64
 
+#if __DARWIN_ALIGN_POWER
+#pragma options align=power
+#endif
+
+/* LP64todo - not 64-bit safe */
 typedef struct kmod_reference {
 	struct kmod_reference	*next;
 	struct kmod_info	*info;
 } kmod_reference_t;
 
+#if __DARWIN_ALIGN_POWER
+#pragma options align=reset
+#endif
 
 /**************************************************************************************/
 /*	 warning any changes to this structure affect the following macros.	      */	
@@ -75,6 +66,12 @@ typedef struct kmod_reference {
 
 typedef kern_return_t kmod_start_func_t(struct kmod_info *ki, void *data);
 typedef kern_return_t kmod_stop_func_t(struct kmod_info *ki, void *data);
+
+#if __DARWIN_ALIGN_POWER
+#pragma options align=power
+#endif
+
+/* LP64todo - not 64-bit safe */
 
 typedef struct kmod_info {
 	struct kmod_info 	*next;
@@ -91,11 +88,11 @@ typedef struct kmod_info {
         kmod_stop_func_t	*stop;
 } kmod_info_t;
 
-#ifdef __APPLE_API_PRIVATE
+#if __DARWIN_ALIGN_POWER
+#pragma options align=reset
+#endif
 
 typedef kmod_info_t *kmod_info_array_t;
-
-#endif /* __APPLE_API_PRIVATE */
 
 #define KMOD_INFO_NAME 		kmod_info
 #define KMOD_INFO_VERSION	1
@@ -125,8 +122,6 @@ typedef kmod_info_t *kmod_info_array_t;
 // kmod kernel to user commands
 // *************************************************************************************
 
-#ifdef __APPLE_API_PRIVATE
-
 #define KMOD_LOAD_EXTENSION_PACKET		1
 #define KMOD_LOAD_WITH_DEPENDENCIES_PACKET	2
 
@@ -150,33 +145,35 @@ typedef struct kmod_generic_cmd {
 	char	data[1];
 } kmod_generic_cmd_t;
 
-#ifdef KERNEL_PRIVATE
-
-extern void kmod_init();
-
-extern kern_return_t kmod_create_fake(const char *name, const char *version);
+#ifdef	KERNEL_PRIVATE
 
 extern kmod_info_t *kmod_lookupbyname(const char * name);
 extern kmod_info_t *kmod_lookupbyid(kmod_t id);
 
 extern kmod_info_t *kmod_lookupbyname_locked(const char * name);
 extern kmod_info_t *kmod_lookupbyid_locked(kmod_t id);
+extern kmod_start_func_t kmod_default_start;
+extern kmod_stop_func_t  kmod_default_stop;
+
+__BEGIN_DECLS
+extern void kmod_init(void);
+
+extern kern_return_t kmod_create_fake(const char *name, const char *version);
+extern kern_return_t kmod_create_fake_with_address(const char *name, const char *version, 
+                                                    vm_address_t address, vm_size_t size,
+                                                    int * return_id);
+extern kern_return_t kmod_destroy_fake(kmod_t id);
 
 extern kern_return_t kmod_load_extension(char *name);
 extern kern_return_t kmod_load_extension_with_dependencies(char *name, char **dependencies);
 extern kern_return_t kmod_send_generic(int type, void *data, int size);
 
-extern kmod_start_func_t kmod_default_start;
-extern kmod_stop_func_t  kmod_default_stop;
-
 extern kern_return_t kmod_initialize_cpp(kmod_info_t *info);
 extern kern_return_t kmod_finalize_cpp(kmod_info_t *info);
 
-extern void kmod_dump(vm_offset_t *addr, unsigned int cnt);
+extern void kmod_dump(vm_offset_t *addr, unsigned int dump_cnt);
+__END_DECLS
 
-#endif /* KERNEL_PRIVATE */
-
-#endif /* __APPLE_API_PRIVATE */
-
+#endif	/* KERNEL_PRIVATE */
 
 #endif	/* _MACH_KMOD_H_ */

@@ -8,6 +8,7 @@ include $(MakeInc_cmd)
 include $(MakeInc_def)
 
 INSTINC_SUBDIRS = \
+	bsm \
 	crypto \
 	dev \
 	hfs \
@@ -23,6 +24,7 @@ INSTINC_SUBDIRS = \
 	nfs \
 	sys \
 	ufs \
+	uuid \
 	vfs
 
 INSTINC_SUBDIRS_PPC = \
@@ -32,6 +34,7 @@ INSTINC_SUBDIRS_I386 = \
 	i386 
 
 EXPINC_SUBDIRS = \
+	bsm \
 	crypto \
 	dev \
 	hfs \
@@ -47,6 +50,7 @@ EXPINC_SUBDIRS = \
 	nfs \
 	sys \
 	ufs \
+	uuid \
 	vfs \
 	vm
 

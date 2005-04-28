@@ -1,24 +1,21 @@
 /*
- * Copyright (c) 2000 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2004 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -64,11 +61,13 @@
 #ifndef	_IPC_IPC_ENTRY_H_
 #define _IPC_IPC_ENTRY_H_
 
+#include <mach/mach_types.h>
 #include <mach/port.h>
 #include <mach/kern_return.h>
+
+#include <kern/kern_types.h>
 #include <kern/zalloc.h>
-#include <ipc/port.h>
-#include <ipc/ipc_table.h>
+
 #include <ipc/ipc_types.h>
 
 /*
@@ -92,10 +91,7 @@
  *	It is used as the head of the free list.
  */
 
-typedef natural_t ipc_entry_bits_t;
-typedef ipc_table_elems_t ipc_entry_num_t;	/* number of entries */
-
-typedef struct ipc_entry {
+struct ipc_entry {
 	struct ipc_object *ie_object;
 	ipc_entry_bits_t ie_bits;
 	union {
@@ -106,9 +102,7 @@ typedef struct ipc_entry {
 		mach_port_index_t table;
 		struct ipc_tree_entry *tree;
 	} hash;
-} *ipc_entry_t;
-
-#define	IE_NULL		((ipc_entry_t) 0)
+};
 
 #define	ie_request	index.request
 #define	ie_next		index.next
@@ -138,15 +132,13 @@ typedef struct ipc_entry {
 
 #define	IE_BITS_RIGHT_MASK	0x007fffff	/* relevant to the right */
 
-typedef struct ipc_tree_entry {
+struct ipc_tree_entry {
 	struct ipc_entry ite_entry;
 	mach_port_name_t ite_name;
 	struct ipc_space *ite_space;
 	struct ipc_tree_entry *ite_lchild;
 	struct ipc_tree_entry *ite_rchild;
-} *ipc_tree_entry_t;
-
-#define	ITE_NULL	((ipc_tree_entry_t) 0)
+};
 
 #define	ite_bits	ite_entry.ie_bits
 #define	ite_object	ite_entry.ie_object
@@ -156,7 +148,7 @@ typedef struct ipc_tree_entry {
 extern zone_t ipc_tree_entry_zone;
 
 #define ite_alloc()	((ipc_tree_entry_t) zalloc(ipc_tree_entry_zone))
-#define	ite_free(ite)	zfree(ipc_tree_entry_zone, (vm_offset_t) (ite))
+#define	ite_free(ite)	zfree(ipc_tree_entry_zone, (ite))
 
 /*
  * Exported interfaces
@@ -193,7 +185,7 @@ extern void ipc_entry_dealloc(
 
 /* Grow the table in a space */
 extern kern_return_t ipc_entry_grow_table(
-	ipc_space_t	space,
-	int		target_size);
+	ipc_space_t		space,
+	ipc_table_elems_t	target_size);
 
 #endif	/* _IPC_IPC_ENTRY_H_ */

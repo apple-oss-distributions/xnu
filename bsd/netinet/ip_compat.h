@@ -3,22 +3,19 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -38,13 +35,8 @@
 #ifndef	__IP_COMPAT_H__
 #define	__IP_COMPAT_H__
 
-#ifndef	__P
-# ifdef	__STDC__
-#  define	__P(x)  x
-# else
-#  define	__P(x)  ()
-#  define	const
-# endif
+#ifndef	__STDC__
+# define	const
 #endif
 
 #ifndef	SOLARIS
@@ -248,7 +240,7 @@ typedef	struct	qif	{
 	 */
 	int	qf_hl;	/* header length */
 } qif_t;
-extern	ill_t	*get_unit __P((char *));
+extern	ill_t	*get_unit(char *);
 #  define	GETUNIT(n)	get_unit((n))
 # else /* SOLARIS */
 #  if defined(__sgi)
@@ -292,8 +284,8 @@ typedef struct {
 #  define	KFREE(x)	kmem_free((char *)(x), sizeof(*(x)))
 #  define	KFREES(x,s)	kmem_free((char *)(x), (s))
 #  if !SOLARIS
-extern	void	m_copydata __P((struct mbuf *, int, int, caddr_t));
-extern	void	m_copyback __P((struct mbuf *, int, int, caddr_t));
+extern	void	m_copydata(struct mbuf *, int, int, caddr_t);
+extern	void	m_copyback(struct mbuf *, int, int, caddr_t);
 #  endif
 #  ifdef __sgi
 #   include <sys/kmem.h>

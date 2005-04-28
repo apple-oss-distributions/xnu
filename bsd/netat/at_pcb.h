@@ -3,22 +3,19 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -63,7 +60,8 @@
 /* at_pcb.h */
 #include <sys/appleapiopts.h>
 
-#ifdef __APPLE_API_PRIVATE
+#ifdef __APPLE_API_OBSOLETE
+#ifdef KERNEL_PRIVATE
 /*
  * Common structure pcb for internet protocol implementation.
  * Here are stored pointers to local and foreign host table
@@ -71,6 +69,8 @@
  * up (to a socket structure) and down (to a protocol-specific)
  * control block.
  */
+struct atpcb;
+typedef struct atpcb gref_t;
 struct atpcb {
 	struct atpcb 	*atpcb_next,	/* pointers to other pcb's */
 			*atpcb_prev,
@@ -99,14 +99,13 @@ struct atpcb {
 	atlock_t lock;
 	atevent_t event;
 	atevent_t iocevent;
-	int (*writeable)();
-	int (*readable)();
+	int (*writeable)(gref_t *gref);
+	int (*readable)(gref_t *gref);
 	struct selinfo si;	/* BSD 4.4 selinfo structure for 
 				   selrecord/selwakeup */
 };
 
 #define sotoatpcb(so)((struct atpcb *)(so)->so_pcb)
-#endif /* __APPLE_API_PRIVATE */
 
 /* ddp_flags */
 #define DDPFLG_CHKSUM	 0x01	/* DDP checksums to be used on this connection */
@@ -115,12 +114,13 @@ struct atpcb {
 #define DDPFLG_HDRINCL 	 0x08	/* user supplies entire DDP header */
 #define DDPFLG_STRIPHDR	0x200	/* drop DDP header on receive (raw) */
 
-#ifdef __APPLE_API_PRIVATE
-#ifdef KERNEL
-typedef struct atpcb gref_t;
+int	at_pcballoc(struct socket *, struct atpcb *);
+int	at_pcbdetach(struct atpcb *);
+int	at_pcbbind(struct atpcb *, struct sockaddr *);
 
-int	at_pcballoc __P((struct socket *, struct atpcb *));
-int	at_pcbdetach __P((struct atpcb *));
-int	at_pcbbind __P((struct atpcb *, struct sockaddr *));
-#endif /* KERNEL */
-#endif /* __APPLE_API_PRIVATE */
+int atalk_getref(struct fileproc *, int , gref_t ** , struct proc *, int);
+int atalk_getref_locked(struct fileproc *, int , gref_t ** , struct proc *, int);
+
+
+#endif /* KERNEL_PRIVATE */
+#endif /* __APPLE_API_OBSOLETE */

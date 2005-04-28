@@ -3,22 +3,19 @@
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -88,6 +85,17 @@ struct pstats {
 	struct	itimerval p_timer[3];	/* virtual-time timers */
 #define	pstat_endcopy	p_start
 	struct	timeval p_start;	/* starting time */
+#ifdef KERNEL
+	struct user_uprof {			    /* profile arguments */
+		struct user_uprof *pr_next;  /* multiple prof buffers allowed */
+		user_addr_t	    pr_base;	/* buffer base */
+		user_size_t	    pr_size;	/* buffer size */
+		user_ulong_t	pr_off;		/* pc offset */
+		user_ulong_t	pr_scale;	/* pc scaling */
+		user_ulong_t	pr_addr;	/* temp storage for addr until AST */
+		user_ulong_t	pr_ticks;	/* temp storage for ticks until AST */
+	} user_p_prof;
+#endif // KERNEL
 };
 
 /*
@@ -105,18 +113,21 @@ struct plimit {
 	int	p_refcnt;		/* number of references */
 };
 
+#ifdef KERNEL
 /* add user profiling from AST */
 #define	ADDUPROF(p)							\
-	addupc_task(p,							\
-	    (p)->p_stats->p_prof.pr_addr, (p)->p_stats->p_prof.pr_ticks)
+    addupc_task(p,							\
+                (proc_is64bit((p)) ? (p)->p_stats->user_p_prof.pr_addr \
+                                   : CAST_USER_ADDR_T((p)->p_stats->p_prof.pr_addr)), \
+                (proc_is64bit((p)) ? (p)->p_stats->user_p_prof.pr_ticks \
+                                   : (p)->p_stats->p_prof.pr_ticks))
 
-#ifdef KERNEL
-void	 addupc_intr __P((struct proc *p, u_long pc, u_int ticks));
-void	 addupc_task __P((struct proc *p, u_long pc, u_int ticks));
-void	 calcru __P((struct proc *p, struct timeval *up, struct timeval *sp,
-	    struct timeval *ip));
-void	 ruadd __P((struct rusage *ru, struct rusage *ru2));
-struct plimit *limcopy __P((struct plimit *lim));
+void	 addupc_intr(struct proc *p, u_long pc, u_int ticks);
+void	 addupc_task(struct proc *p, user_addr_t pc, u_int ticks);
+void	 calcru(struct proc *p, struct timeval *up, struct timeval *sp,
+	    struct timeval *ip);
+void	 ruadd(struct rusage *ru, struct rusage *ru2);
+struct plimit *limcopy(struct plimit *lim);
 #endif /* KERNEL */
 
 #endif /* __APPLE_API_PRIVATE */

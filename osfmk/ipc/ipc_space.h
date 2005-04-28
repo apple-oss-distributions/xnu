@@ -1,24 +1,21 @@
 /*
- * Copyright (c) 2000 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2004 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -123,7 +120,7 @@ struct ipc_space {
 extern zone_t ipc_space_zone;
 
 #define is_alloc()		((ipc_space_t) zalloc(ipc_space_zone))
-#define	is_free(is)		zfree(ipc_space_zone, (vm_offset_t) (is))
+#define	is_free(is)		zfree(ipc_space_zone, (is))
 
 extern ipc_space_t ipc_space_kernel;
 extern ipc_space_t ipc_space_reply;
@@ -136,8 +133,7 @@ extern ipc_space_t default_pager_space;
 
 #define is_fast_space(is)	((is)->is_fast)
 
-#define	is_ref_lock_init(is)	mutex_init(&(is)->is_ref_lock_data, \
-					   ETAP_IPC_IS_REF)
+#define	is_ref_lock_init(is)	mutex_init(&(is)->is_ref_lock_data, 0)
 
 #define	ipc_space_reference_macro(is)					\
 MACRO_BEGIN								\
@@ -160,7 +156,7 @@ MACRO_BEGIN								\
 		is_free(is);						\
 MACRO_END
 
-#define	is_lock_init(is)	mutex_init(&(is)->is_lock_data, ETAP_IPC_IS)
+#define	is_lock_init(is)	mutex_init(&(is)->is_lock_data, 0)
 
 #define	is_read_lock(is)	mutex_lock(&(is)->is_lock_data)
 #define is_read_unlock(is)	mutex_unlock(&(is)->is_lock_data)
@@ -194,6 +190,10 @@ extern kern_return_t ipc_space_create(
 
 /* Mark a space as dead and cleans up the entries*/
 extern void ipc_space_destroy(
+	ipc_space_t	space);
+
+/* Clean up the entries - but leave the space alive */
+extern void ipc_space_clean(
 	ipc_space_t	space);
 
 #endif /* MACH_KERNEL_PRIVATE */

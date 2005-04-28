@@ -1,24 +1,21 @@
 /*
- * Copyright (c) 2000-2002 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2004 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
- * Copyright (c) 1999-2003 Apple Computer, Inc.  All Rights Reserved.
+ * The contents of this file constitute Original Code as defined in and
+ * are subject to the Apple Public Source License Version 1.1 (the
+ * "License").  You may not use this file except in compliance with the
+ * License.  Please obtain a copy of the License at
+ * http://www.apple.com/publicsource and read it before using this file.
  * 
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- * 
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * This Original Code and all software distributed under the License are
+ * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
+ * License for the specific language governing rights and limitations
+ * under the License.
  * 
  * @APPLE_LICENSE_HEADER_END@
  */
@@ -61,8 +58,11 @@
 #define _LIBKERN_LIBKERN_H_
 
 #include <sys/appleapiopts.h>
+#include <stdint.h>
+#include <string.h>
 #include <sys/cdefs.h>
 #include <sys/types.h>
+#include <mach/vm_param.h>
 
 #ifdef __APPLE_API_OBSOLETE
 /* BCD conversions. */
@@ -122,18 +122,39 @@ ulmin(u_long a, u_long b)
 }
 
 /* Prototypes for non-quad routines. */
-int	 bcmp __P((const void *, const void *, size_t));
-int	 ffs __P((int));
-int	 locc __P((int, char *, u_int));
-u_long	 random __P((void));
-char	*rindex __P((const char *, int));
-int	 scanc __P((u_int, u_char *, u_char *, int));
-int	 skpc __P((int, int, char *));
-char	*strcat __P((char *, const char *));
-char	*strcpy __P((char *, const char *));
-size_t	 strlen __P((const char *));
-char	*strncpy __P((char *, const char *, size_t));
-long	strtol __P((const char*, char **, int));
+extern int	ffs(int);
+extern int	locc(int, char *, u_int);
+extern u_long	random(void);
+extern char	*rindex(const char *, int);
+extern int	scanc(u_int, u_char *, const u_char *, int);
+extern int	skpc(int, int, char *);
+extern long	strtol(const char*, char **, int);
+extern u_long	strtoul(const char *, char **, int);
+extern quad_t	strtoq(const char *, char **, int);
+extern u_quad_t strtouq(const char *, char **, int);
+
+int	snprintf(char *, size_t, const char *, ...);
+int	sprintf(char *bufp, const char *, ...);
+int	sscanf(const char *, char const *, ...);
+void printf(const char *, ...);
+
+uint32_t	crc32(uint32_t crc, const void *bufp, size_t len);
+
+int	copystr(const void *kfaddr, void *kdaddr, size_t len, size_t *done);
+int	copyinstr(const user_addr_t uaddr, void *kaddr, size_t len, size_t *done);
+int	copyoutstr(const void *kaddr, user_addr_t udaddr, size_t len, size_t *done);
+int	copyin(const user_addr_t uaddr, void *kaddr, size_t len);
+int	copyout(const void *kaddr, user_addr_t udaddr, size_t len);
+
+int vsscanf(const char *, char const *, __darwin_va_list);
+extern int	vsnprintf(char *, size_t, const char *, __darwin_va_list);
+extern int	vsprintf(char *bufp, const char *, __darwin_va_list); 
+
+extern void invalidate_icache(vm_offset_t, unsigned, int);
+extern void flush_dcache(vm_offset_t, unsigned, int);
+extern void invalidate_icache64(addr64_t, unsigned, int);
+extern void flush_dcache64(addr64_t, unsigned, int);
+
 __END_DECLS
 
 #endif /* _LIBKERN_LIBKERN_H_ */
