@@ -1,23 +1,29 @@
 /*
  * Copyright (c) 2000 Apple Computer, Inc. All rights reserved.
  *
- * @APPLE_LICENSE_HEADER_START@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. The rights granted to you under the License
+ * may not be used to create, or enable the creation or redistribution of,
+ * unlawful or unlicensed copies of an Apple operating system, or to
+ * circumvent, violate, or enable the circumvention or violation of, any
+ * terms of an Apple operating system software license agreement.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
- * @APPLE_LICENSE_HEADER_END@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /*
  * Copyright (c) 1982, 1986, 1990, 1993, 1995
@@ -154,8 +160,12 @@ chkdq(struct inode *ip, int64_t change, kauth_cred_t cred, int flags)
 		return (0);
 	}
 #warning "hack for no cred passed to chkdq()"
+	/*
+	 * This use of proc_ucred() is safe because kernproc credential never
+	 * changes.
+	 */
 	p = current_proc();
-	if (cred == NOCRED)
+	if (!IS_VALID_CRED(cred))
 		cred = proc_ucred(kernproc);
 	if ((flags & FORCE) == 0 && (suser(cred, NULL) || (proc_forcequota(p)))) {
 		for (i = 0; i < MAXQUOTAS; i++) {
@@ -286,8 +296,12 @@ chkiq(struct inode *ip, long change, kauth_cred_t cred, int flags)
 		return (0);
 	}
 #warning "hack for no cred passed to chkiq()"
+	/*
+	 * This use of proc_ucred() is safe because kernproc credential never
+	 * changes.
+	 */
 	p = current_proc();
-	if (cred == NOCRED)
+	if (!IS_VALID_CRED(cred))
 		cred = proc_ucred(kernproc);
 	if ((flags & FORCE) == 0 && (suser(cred, NULL) || (proc_forcequota(p)))) {
 		for (i = 0; i < MAXQUOTAS; i++) {
@@ -445,6 +459,9 @@ quotaon(context, mp, type, fnamep)
 	int error = 0;
 	struct ufs_quotaon_cargs args;
 
+	/* Finish setting up quota structures. */
+	dqhashinit();
+
 	qfp = &ump->um_qfiles[type];
 
 	if ( (qf_get(qfp, QTF_OPENING)) )
@@ -474,8 +491,7 @@ quotaon(context, mp, type, fnamep)
 	if ( (error = dqfileopen(&ump->um_qfiles[type], type)) ) {
                 (void) vnode_close(vp, FREAD|FWRITE, NULL);
 
-		kauth_cred_rele(qfp->qf_cred);
-		qfp->qf_cred = NOCRED;
+		kauth_cred_unref(&qfp->qf_cred);
                 qfp->qf_vp = NULLVP;
                 goto out;
         }
@@ -541,9 +557,14 @@ quotaoff(struct mount *mp, register int type)
 	struct ufsmount *ump = VFSTOUFS(mp);
 	struct quotafile *qfp;
 	int error = 0;
-	kauth_cred_t cred;
 	struct ufs_quotaoff_cargs args;
 	
+	/*
+	 * If quotas haven't been initialized, there's no work to be done.
+	 */
+	if (!dqisinitialized())
+		return (0);
+
 	qfp = &ump->um_qfiles[type];
 
 	if ( (qf_get(qfp, QTF_CLOSING)) )
@@ -576,10 +597,8 @@ quotaoff(struct mount *mp, register int type)
 	error = vnode_close(qvp, FREAD|FWRITE, NULL);
 
 	qfp->qf_vp = NULLVP;
-	cred = qfp->qf_cred;
-	if (cred != NOCRED) {
-		qfp->qf_cred = NOCRED;
-		kauth_cred_rele(cred);
+	if (IS_VALID_CRED(qfp->qf_cred)) {
+		kauth_cred_unref(&qfp->qf_cred);
 	}
 	for (type = 0; type < MAXQUOTAS; type++)
 		if (ump->um_qfiles[type].qf_vp != NULLVP)
@@ -757,6 +776,9 @@ qsync(mp)
 {
 	struct ufsmount *ump = VFSTOUFS(mp);
 	int i;
+
+	if (!dqisinitialized())
+		return (0);
 
 	/*
 	 * Check if the mount point has any quotas.

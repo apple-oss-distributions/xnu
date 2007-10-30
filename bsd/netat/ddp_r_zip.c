@@ -1,26 +1,29 @@
 /*
- * Copyright (c) 2000 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 1988-2007 Apple Inc. All rights reserved.
  *
- * @APPLE_LICENSE_HEADER_START@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. The rights granted to you under the License
+ * may not be used to create, or enable the creation or redistribution of,
+ * unlawful or unlicensed copies of an Apple operating system, or to
+ * circumvent, violate, or enable the circumvention or violation of, any
+ * terms of an Apple operating system software license agreement.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
- * @APPLE_LICENSE_HEADER_END@
- */
-/*
- *	Copyright (c) 1988-1998 Apple Computer, Inc. 
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /*
  *   0.01 05/12/94	Laurent Dumont		Creation
@@ -59,19 +62,17 @@
 
 #include <netat/sysglue.h>
 #include <netat/appletalk.h>
+#include <netat/at_pcb.h>
 #include <netat/at_var.h>
 #include <netat/ddp.h>
 #include <netat/nbp.h>
 #include <netat/zip.h>
-#include <netat/at_pcb.h>
 #include <netat/atp.h>
 #include <netat/routing_tables.h>
+#include <netat/rtmp.h>
 #include <netat/debug.h>
 
 #include <sys/kern_event.h>
-
-static void zip_reply_to_getmyzone();
-extern int at_reg_mcast(), at_unreg_mcast();
 
 /* globals */
 extern at_ifaddr_t *ifID_table[], *ifID_home;
@@ -92,6 +93,17 @@ static	void	zip_getnetinfo(at_ifaddr_t *);
 static	void	zip_getnetinfo_locked(void *);
 static	void	send_phony_reply(void *);
 
+int zip_reply_received(gbuf_t *, at_ifaddr_t *, int);
+int zip_reply_to_getlocalzones(at_ifaddr_t *, gbuf_t *);
+int zip_reply_to_getzonelist(at_ifaddr_t *, gbuf_t *);
+static void zip_reply_to_getmyzone(at_ifaddr_t *, gbuf_t *);
+gbuf_t *zip_prep_query_packet(at_ifaddr_t *, at_net_al, at_node);
+
+static void zip_send_reply_to_query(gbuf_t *, at_ifaddr_t *);
+static void zip_send_ext_reply_to_query(gbuf_t *, at_ifaddr_t *, RT_entry *, u_short);
+static gbuf_t *prep_ZIP_reply_packet(gbuf_t *, at_ifaddr_t *);
+static void zip_send_getnetinfo_reply(gbuf_t *, at_ifaddr_t *);
+
 /*
  * zip_send_getnetinfo_reply: we received a GetNetInfo packet, we need to reply
  *		   with the right information for the port.
@@ -105,7 +117,7 @@ static void zip_send_getnetinfo_reply(m, ifID)
 	at_ddp_t	*ddp, *ddp_sent;
 	short ZoneNameProvided = FALSE;
 	short RequestIsBroadcasted = FALSE;
-	u_short znumber, len, packet_length, size, status;
+	u_short znumber, len, packet_length = 0, size, status;
 	RT_entry *Entry;
 	char GNIReply[128];
 
@@ -150,13 +162,13 @@ static void zip_send_getnetinfo_reply(m, ifID)
 		bcopy(&zname->str, &GNIReply[7], zname->len);
 
 
-		if (znumber = zt_find_zname(zname)) {
+		if ((znumber = zt_find_zname(zname))) {
 
 			if (ZT_ISIN_ZMAP((znumber), Entry->ZoneBitMap)) {
 
 			  GNIReply[1] = 0; /* Zone Valid */
 
-			  if (len = zt_get_zmcast(ifID, zname, &GNIReply[8+zname->len]))
+			  if ((len = zt_get_zmcast(ifID, zname, &GNIReply[8+zname->len])))
 				GNIReply[7+zname->len] = len;
 			  else {
 				GNIReply[1] |= ZIP_USE_BROADCAST;
@@ -190,7 +202,7 @@ static void zip_send_getnetinfo_reply(m, ifID)
 
 		Index--;
 
-		if (len = zt_get_zmcast(ifID, &ZT_table[Index].Zone, &GNIReply[8+zname->len]))
+		if ((len = zt_get_zmcast(ifID, &ZT_table[Index].Zone, &GNIReply[8+zname->len])))
 			GNIReply[7+zname->len] = len;
 		else {
 			GNIReply[1] |= ZIP_USE_BROADCAST;
@@ -363,7 +375,7 @@ newPacket:
 
 						zone_count -= *ZonesInPacket;
 
-						DDPLEN_ASSIGN(ddp, reply_length + DDP_X_HDR_SIZE);
+						DDPLEN_ASSIGN(ddp, (reply_length + DDP_X_HDR_SIZE));
 						gbuf_winc(m,reply_length);
 						if ((status = 
 						     ddp_router_output(m, ifID, AT_ADDR,
@@ -404,7 +416,7 @@ newPacket:
 	 */
 
 	if (zone_count) {
-			DDPLEN_ASSIGN(ddp, reply_length + DDP_X_HDR_SIZE);
+			DDPLEN_ASSIGN(ddp, (reply_length + DDP_X_HDR_SIZE));
 			gbuf_winc(m,reply_length);
 			if ((status = 
 			     ddp_router_output(m, ifID, AT_ADDR,
@@ -429,7 +441,7 @@ static void zip_send_reply_to_query(mreceived, ifID)
      register at_ifaddr_t	*ifID;
 {
 	register gbuf_t	*m;
-	register at_ddp_t	*ddp, *ddp_received;
+	register at_ddp_t	*ddp = NULL, *ddp_received;
 	RT_entry *Entry;
 	short i, reply_length, Index, status;
 	u_char	network_count;
@@ -440,7 +452,7 @@ static void zip_send_reply_to_query(mreceived, ifID)
 
 	/* access the number of nets requested in the Query */
 	network_count  = *((char *)(ddp_received->data) + 1);
-	NetAsked = (u_short *)(ddp_received->data+ 2);
+	NetAsked = (u_short *)(ddp_received->data + 2);
 
 	/* check the validity of the Query packet */
 
@@ -478,7 +490,7 @@ newPacket:
 	reply_length = 2;	/* 1st byte is ZIP reply code, 2nd is network count */
 
 	for (i = 0 ; i < network_count ; i ++, NetAsked++) {
-	  Entry = rt_blookup(*NetAsked);
+	  Entry = rt_blookup(ntohs(*NetAsked));
 
 	  if (Entry != NULL && ((Entry->EntryState & 0x0F) >= RTE_STATE_SUSPECT) &&
 	      RT_ALL_ZONES_KNOWN(Entry)) { /* this net is well known... */
@@ -494,7 +506,7 @@ newPacket:
 
 			/* we need to send the packet before, this won't fit... */
 		
-			DDPLEN_ASSIGN(ddp, reply_length + DDP_X_HDR_SIZE);
+			DDPLEN_ASSIGN(ddp, (reply_length + DDP_X_HDR_SIZE));
 			gbuf_winc(m,reply_length);
 
 			if ((status = 
@@ -541,7 +553,7 @@ newPacket:
 			 * and build a separate packet for each extended network requested
 			 */
 
-	    	zip_send_ext_reply_to_query(mreceived, ifID, Entry, *NetAsked);
+	    	zip_send_ext_reply_to_query(mreceived, ifID, Entry, ntohs(*NetAsked));
 
 	    }
 	  }
@@ -552,7 +564,7 @@ newPacket:
 	 */
 
 	if ( reply_length > 2)  {
-		DDPLEN_ASSIGN(ddp, reply_length + DDP_X_HDR_SIZE);
+		DDPLEN_ASSIGN(ddp, (reply_length + DDP_X_HDR_SIZE));
 		gbuf_winc(m,reply_length);
 		if ((status = 
 		     ddp_router_output(m, ifID, AT_ADDR,
@@ -579,7 +591,7 @@ void zip_router_input (m, ifID)
 	register at_ddp_t	*ddp;
 	register at_atp_t	*atp;
 	register at_zip_t	*zip;
-	register u_long	 user_bytes;
+	u_char	 user_bytes[4];
 	register u_short user_byte;
 	
 	/* variables for ZipNotify processing */
@@ -587,7 +599,6 @@ void zip_router_input (m, ifID)
 	register char	new_zone_len;
 	register char	*old_zone;
 	char		*new_zone;
-	void		zip_sched_getnetinfo(); /* forward reference */
 
 	if (gbuf_type(m) != MSG_DATA) {
 		/* If this is a M_ERROR message, DDP is shutting down, 
@@ -684,7 +695,6 @@ void zip_router_input (m, ifID)
 			    ((NET_VALUE(ddp->src_net) != ifID->ifThisNode.s_net) ||
 			     (ddp->src_node != ifID->ifThisNode.s_node)) && netinfo_reply_pending)
 			{
-				extern void trackrouter();
 				dPrintf(D_M_ZIP, D_L_INPUT,
 					("zip_input: Received a GetNetInfo Reply from %d.%d\n",
 					NET_VALUE(ddp->src_net), ddp->src_node));
@@ -762,8 +772,8 @@ void zip_router_input (m, ifID)
 
 		/* Get the user bytes in network order */
 
-		user_bytes = UAL_VALUE(atp->user_bytes);
-		user_byte = user_bytes >> 24; /* Get the zeroth byte */
+		*((u_long*)user_bytes) = UAL_VALUE(atp->user_bytes);
+		user_byte = user_bytes[0]; /* Get the zeroth byte */
 
 		dPrintf(D_M_ZIP, D_L_INPUT,
 			("zip_input: received a ZIP_ATP command=%d\n", user_byte));
@@ -806,7 +816,6 @@ int zonename_equal (zone1, zone2)
      register at_nvestr_t	*zone1, *zone2;
 {
 	register char c1, c2;
-	char	upshift8();
 	register int	i;
 
 	if (zone1->len != zone2->len)
@@ -861,7 +870,6 @@ static void zip_netinfo_reply (netinfo, ifID)
      register at_ifaddr_t	*ifID;
 {
 	u_char	mcast_len;
-	void	zip_sched_getnetinfo(); /* forward reference */
 	register at_net_al	this_net;
 	char	*default_zone;
 	register u_char	zone_name_len;
@@ -993,13 +1001,13 @@ int zip_control (ifID, control)
 }
 
 /* locked version of zip_getnetinfo */
-static void zip_getnetinfo_locked(arg)
-     void       *arg;
+static void
+zip_getnetinfo_locked(void *arg)
 {
 	at_ifaddr_t       *ifID;
 	
 	atalk_lock();
-	if (ifID != NULL) {		// make sure it hasn't been closed
+	if (arg != NULL) {		// make sure it hasn't been closed
 		ifID = (at_ifaddr_t *)arg;
 		ifID->ifGNIScheduled = 0;
 		zip_getnetinfo(ifID);
@@ -1018,7 +1026,6 @@ static void zip_getnetinfo (ifID)
 	register at_x_zip_t	*zip;
 	gbuf_t			*m;
 	register at_ddp_t	*ddp;
-	void			zip_sched_getnetinfo();
 	register struct	atalk_addr	*at_dest;
 	register int		size;
 	
@@ -1058,7 +1065,7 @@ static void zip_getnetinfo (ifID)
 	/* let the lap fields be uninitialized, 'cause it doesn't 
 	 * matter.
 	 */
-	DDPLEN_ASSIGN(ddp, size - (sizeof(struct atalk_addr) + 1));
+	DDPLEN_ASSIGN(ddp, (size - (sizeof(struct atalk_addr) + 1)));
 	UAS_ASSIGN(ddp->checksum, 0);
 	ddp->hopcount = ddp->unused = 0;
 	NET_ASSIGN(ddp->dst_net, 0); /* cable-wide broadcast */
@@ -1096,9 +1103,9 @@ static void zip_getnetinfo (ifID)
  *
  **********************************************************************/
 
-void	zip_sched_getnetinfo (ifID)
-     register at_ifaddr_t	     *ifID;
+void	zip_sched_getnetinfo(void *arg)
 {
+     register at_ifaddr_t *ifID = (at_ifaddr_t *)arg;
 
 	atalk_lock();
 	
@@ -1152,7 +1159,7 @@ int zip_type_packet (m)
 	register at_atp_t	*atp;
 	register at_ddp_t	*ddp;
 	register at_zip_t	*zip;
-	register u_long	user_bytes;
+	u_char	user_bytes[4];
 	register int	user_byte;
 
 	ddp = (at_ddp_t *)gbuf_rptr(m);
@@ -1171,8 +1178,8 @@ int zip_type_packet (m)
 			else
 				atp = (at_atp_t *)(gbuf_rptr(gbuf_cont(m)));
 			/* Get the user bytes in network order */
-			user_bytes = UAL_VALUE(atp->user_bytes);
-			user_byte = user_bytes >> 24; /* Get the zeroth byte */
+			*((u_long*)user_bytes) = UAL_VALUE(atp->user_bytes);
+			user_byte = user_bytes[0]; /* Get the zeroth byte */
 			if ((user_byte == ZIP_GETMYZONE) ||
 			    (user_byte == ZIP_GETZONELIST) ||
 			    (user_byte == ZIP_GETLOCALZONES))
@@ -1258,8 +1265,7 @@ int zip_handle_getmyzone(ifID, m)
         r_atp->bitmap = 0;
         UAS_UAS(r_atp->tid, atp->tid);
         ulongtmp = 1;
-        ulongtmp = htonl(ulongtmp);
-	UAL_ASSIGN(r_atp->user_bytes, ulongtmp); /* no of zones */
+		UAL_ASSIGN_HTON(r_atp->user_bytes, ulongtmp); /* no of zones */
 
         /* fill up atp data part */
         bcopy((caddr_t) &ifID->ifZoneName, (caddr_t) r_atp->data, ifID->ifZoneName.len+1);
@@ -1384,7 +1390,7 @@ newPacket:
 			zip_sent = TRUE;
 
 			gbuf_winc(m,DDP_X_HDR_SIZE + Query_index);
-			DDPLEN_ASSIGN(ddp, DDP_X_HDR_SIZE + Query_index);
+			DDPLEN_ASSIGN(ddp, (DDP_X_HDR_SIZE + Query_index));
 
 			if ((status = 
 			     ddp_router_output(m, ifID, AT_ADDR,
@@ -1432,7 +1438,7 @@ newPacket:
 	if (*ZoneCount) { 	/* non-full Query needs to be sent */
 		zip_sent = TRUE;
 		gbuf_winc(m,DDP_X_HDR_SIZE + Query_index);
-		DDPLEN_ASSIGN(ddp, DDP_X_HDR_SIZE + Query_index);
+		DDPLEN_ASSIGN(ddp, (DDP_X_HDR_SIZE + Query_index));
 
 		if ((status = 
 		     ddp_router_output(m, ifID, AT_ADDR,
@@ -1455,7 +1461,7 @@ newPacket:
  *		we receive two types of replies: non extended and extended.
  *	    For extended replies, the network count is the Total of zones for that net.
  */
-
+int
 zip_reply_received(m, ifID, reply_type)
      register gbuf_t	*m;
      register at_ifaddr_t	*ifID;
@@ -1473,7 +1479,7 @@ zip_reply_received(m, ifID, reply_type)
 
 	/* access the number of nets provided in the ZIP Reply */
 
-	network_count  = *(u_char *)(gbuf_rptr(m) + DDP_X_HDR_SIZE + 1);
+	network_count  = ntohs(*(u_char *)(gbuf_rptr(m) + DDP_X_HDR_SIZE + 1));
 
 	PacketPtr = (char *)(gbuf_rptr(m) + DDP_X_HDR_SIZE + 2);
 
@@ -1485,7 +1491,7 @@ zip_reply_received(m, ifID, reply_type)
 
 	while (payload_len > 0 && network_count >0) {
 
-		Network = *(at_net_al *)PacketPtr;
+		Network = ntohs(*(at_net_al *)PacketPtr);
 		PacketPtr += 2;
 		zname = (at_nvestr_t *)PacketPtr;
 		if (payload_len)
@@ -1540,19 +1546,25 @@ zip_reply_received(m, ifID, reply_type)
 	}
 
 	if ((reply_type == ZIP_REPLY) && network_count > 0) {
+#if DEBUG
 		if (Entry)
 			dPrintf(D_M_ZIP, D_L_WARNING,
 			("zip_reply_received: Problem decoding zone (after net:%d-%d)\n",
 			Entry->NetStart, Entry->NetStop));
+#endif
 		ifID->ifZipNeedQueries = 1;
 	}
 	else {
 		ifID->ifZipNeedQueries = 0;
+#if DEBUG
 		if (Entry)
 			dPrintf(D_M_ZIP_LOW, D_L_INFO,
 			("zip_reply_received: entry %d-%d all zones known\n",
 			Entry->NetStart, Entry->NetStop));
+#endif
 	}
+	
+	return 0;
 }
 
 /*
@@ -1615,8 +1627,7 @@ static void zip_reply_to_getmyzone (ifID, m)
         r_atp->bitmap = 0;
         UAS_UAS(r_atp->tid, atp->tid);
         ulongtmp = 1;
-        ulongtmp = htonl(ulongtmp);
-	UAL_ASSIGN(r_atp->user_bytes, ulongtmp); /* no of zones */
+		UAL_ASSIGN_HTON(r_atp->user_bytes, ulongtmp); /* no of zones */
 
 	data_ptr = (char *)r_atp->data;
 
@@ -1655,6 +1666,7 @@ static void zip_reply_to_getmyzone (ifID, m)
  * zip_reply_to_getzonelist: replies to ZIP GetZoneList requested from the Net
  */
 
+int
 zip_reply_to_getzonelist (ifID, m)
      register at_ifaddr_t   *ifID;
      register gbuf_t      *m;
@@ -1713,7 +1725,7 @@ zip_reply_to_getzonelist (ifID, m)
 
 			/* get the start index from the ATP request */
 
-		StartPoint = (UAL_VALUE(atp->user_bytes) & 0xffff) -1;
+		StartPoint = (UAL_VALUE_NTOH(atp->user_bytes) & 0xffff) -1;
 
 		/* find the next zone to send */
 
@@ -1754,7 +1766,7 @@ zip_reply_to_getzonelist (ifID, m)
 				ulongtmp += 0x01000000;
 
         
-		UAL_ASSIGN(r_atp->user_bytes, ulongtmp); /* # of zones and flag*/
+		UAL_ASSIGN_HTON(r_atp->user_bytes, ulongtmp); /* # of zones and flag*/
 
         size = DDP_X_HDR_SIZE + ATP_HDR_SIZE + PacketLen;
         gbuf_winc(rm,size);
@@ -1767,8 +1779,8 @@ zip_reply_to_getzonelist (ifID, m)
 			NET_VALUE(r_ddp->dst_net), r_ddp->dst_node, ifID->ifPort, PacketLen));
 
 
-		if (status= ddp_router_output(rm, ifID, AT_ADDR,
-				 NET_VALUE(r_ddp->dst_net), r_ddp->dst_node, 0)) {
+		if ((status= ddp_router_output(rm, ifID, AT_ADDR,
+				 NET_VALUE(r_ddp->dst_net), r_ddp->dst_node, 0))) {
 			dPrintf(D_M_ZIP, D_L_ERROR, ("zip_reply_to_GZL: ddp_router_output returns=%d\n",
 				 status));
 			return (status);
@@ -1794,7 +1806,7 @@ int zip_reply_to_getlocalzones (ifID, m)
 		short	Index, Index_wanted, ZLength;
 		short i,j, packet_len;
 		short  zCount, ZoneCount, ZonesInPacket;
-		char *zmap, last_flag = 0;
+		unsigned char *zmap, last_flag = 0;
 		RT_entry *Entry;
 		char *Reply;
 
@@ -1825,7 +1837,7 @@ int zip_reply_to_getlocalzones (ifID, m)
 
 	/* get the start index from the ATP request */
 
-	Index_wanted = (UAL_VALUE(atp->user_bytes) & 0xffff) -1;
+	Index_wanted = (UAL_VALUE_NTOH(atp->user_bytes) & 0xffff) -1;
 
 	dPrintf(D_M_ZIP_LOW, D_L_INFO, 
 		("zip_r_GLZ: for station %d:%d Index_wanted = %d\n",
@@ -1953,7 +1965,7 @@ FullPacket:
         r_atp->bitmap = 0;
         UAS_UAS(r_atp->tid, atp->tid);
         ulongtmp =  ((last_flag << 24) & 0xFF000000) + ZonesInPacket; /* # of zones and flag*/
-	UAL_ASSIGN(r_atp->user_bytes, ulongtmp);
+		UAL_ASSIGN_HTON(r_atp->user_bytes, ulongtmp);
         size = DDP_X_HDR_SIZE + ATP_HDR_SIZE + packet_len;
         gbuf_winc(rm,size);
         DDPLEN_ASSIGN(r_ddp, size);
@@ -1964,8 +1976,8 @@ FullPacket:
 		("zip_r_GLZ: send packet to %d:%d port %d atp_len =%d\n",
 		 NET_VALUE(r_ddp->dst_net), r_ddp->dst_node, ifID->ifPort, packet_len));
 
-	if (status= ddp_router_output(rm, ifID, AT_ADDR,
-				      NET_VALUE(r_ddp->dst_net), r_ddp->dst_node, 0)) {
+	if ((status= ddp_router_output(rm, ifID, AT_ADDR,
+				      NET_VALUE(r_ddp->dst_net), r_ddp->dst_node, 0))) {
 		dPrintf(D_M_ZIP, D_L_ERROR, 
 			("zip_reply_to_GLZ: ddp_router_output returns =%d\n",
 			 status));
@@ -1977,7 +1989,6 @@ FullPacket:
 int regDefaultZone(ifID)
      at_ifaddr_t *ifID;
 {
-	int i;
 	char data[ETHERNET_ADDR_LEN];
 
 	if (!ifID)
@@ -1985,7 +1996,7 @@ int regDefaultZone(ifID)
 
 	zt_get_zmcast(ifID, &ifID->ifZoneName, data); 
 	if (FDDI_OR_TOKENRING(ifID->aa_ifp->if_type))
-		ddp_bit_reverse(data);
+		ddp_bit_reverse((unsigned char *)data);
 	bcopy((caddr_t)data, (caddr_t)&ifID->ZoneMcastAddr, ETHERNET_ADDR_LEN);
 	(void)at_reg_mcast(ifID, (caddr_t)&ifID->ZoneMcastAddr);
 	return(0);

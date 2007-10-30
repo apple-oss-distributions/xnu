@@ -1,23 +1,29 @@
 /*
- * Copyright (c) 2000-2004 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2007 Apple Computer, Inc. All rights reserved.
  *
- * @APPLE_LICENSE_HEADER_START@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. The rights granted to you under the License
+ * may not be used to create, or enable the creation or redistribution of,
+ * unlawful or unlicensed copies of an Apple operating system, or to
+ * circumvent, violate, or enable the circumvention or violation of, any
+ * terms of an Apple operating system software license agreement.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
- * @APPLE_LICENSE_HEADER_END@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /*
  * @OSF_COPYRIGHT@
@@ -41,9 +47,11 @@
 #include <mach/boolean.h>
 #include <kern/ast.h>
 #include <kern/cpu_data.h>
+#include <kern/pms.h>
 #include <pexpert/pexpert.h>
 #include <IOKit/IOInterrupts.h>
 #include <ppc/machine_routines.h>
+#include <ppc/rtclock.h>
 
 /*	Per processor CPU features */
 #pragma pack(4)							/* Make sure the structure stays as we defined it */
@@ -129,12 +137,10 @@ struct procFeatures {
 	unsigned int	pfPowerModes;		/* 0x07C */
 #define pmDPLLVmin		0x00010000
 #define pmDPLLVminb		15
-#define pmPowerTune		0x00000004
-#define pmPowerTuneb	29
+#define pmType			0x000000FF
+#define pmPowerTune		0x00000003
 #define pmDFS			0x00000002
-#define pmDFSb			30
 #define pmDualPLL		0x00000001
-#define pmDualPLLb		31
 	unsigned int	pfPowerTune0;		/* 0x080 */
 	unsigned int	pfPowerTune1;		/* 0x084 */
 	unsigned int	rsrvd88[6];			/* 0x088 */
@@ -343,25 +349,19 @@ struct per_proc_info {
 	/* PPC cache line boundary here - 140 */
 	void *			pp_cbfr;
 	void *			pp_chud;
-	uint64_t		rtclock_tick_deadline;
-	struct rtclock_timer {
-		uint64_t		deadline;
-		uint32_t
-		/*boolean_t*/	is_set:1,
-						has_expired:1,
-				  		:0;
-	}				rtclock_timer;
+	uint64_t		rtclock_intr_deadline;
+	rtclock_timer_t	rtclock_timer;
 	unsigned int	ppbbTaskEnv;		/* BlueBox Task Environment */
     
 	/* PPC cache line boundary here - 160 */
 	struct savearea *	db_saved_state;
 	time_base_enable_t	time_base_enable;
-	int				ppXFlags;
+	uint32_t		ppXFlags;
 	int				running;
 	int				debugger_is_slave;
 	int				debugger_active;
 	int				debugger_pending;
-	int				debugger_holdoff;
+	uint32_t		debugger_holdoff;
 	
 	/* PPC cache line boundary here - 180 */
     uint64_t        Uassist;            /* User Assist DoubleWord */
@@ -377,7 +377,7 @@ struct per_proc_info {
 	ppnum_t			VMMareaPhys;		/* vmm state page physical addr */
 	unsigned int	VMMXAFlgs;			/* vmm extended flags */
 	unsigned int	FAMintercept;		/* vmm FAM Exceptions to intercept */
-	unsigned int	ppinfo_reserved1;
+	unsigned int	hibernate;			/* wake from hibernate */
 	uint32_t		save_tbl;
 	uint32_t		save_tbu;
 	
@@ -518,10 +518,33 @@ struct per_proc_info {
 
 	hwCtrs			hwCtr;					/* Hardware exception counters */
 /*								   - A00 */
-
-	unsigned int	processor[384];			/* processor structure */
+	addr64_t		pp2ndPage;				/* Physical address of the second page of the per_proc */
+	addr64_t		ijsave;					/* Pointer to original savearea for injected code */
+	uint32_t		pprsvd0A10[4];
+/*								   - A20 */
+	pmsd			pms;					/* Power Management Stepper control */
+	unsigned int	pprsvd0A40[16];			/* Reserved */
+/*								   - A80 */
+	uint32_t		pprsvd0A80[16];			/* Reserved */
+	
+	unsigned int	pprsvd0AC0[336];		/* Reserved out to next page boundary */
 /*								   - 1000 */
 
+/*
+ *	This is the start of the second page of the per_proc block.  Because we do not
+ *	allocate physically contiguous memory, it may be physically discontiguous from the
+ *	first page.  Currently there isn't anything here that is accessed translation off,
+ *	but if we need it, pp2ndPage contains the physical address.
+ *
+ *	Note that the boot processor's per_proc is statically allocated, so it will be a
+ *	V=R contiguous area.  That allows access during early boot before we turn translation on
+ *	for the first time.
+ */
+
+	unsigned int	processor[384];			/* processor structure */
+	
+	unsigned int	pprsvd1[640];			/* Reserved out to next page boundary */
+/*								   - 2000 */
 
 };
 
@@ -529,7 +552,7 @@ struct per_proc_info {
 
 
 /*
- * Macro to conver a processor_t processor to its attached per_proc_info_t per_proc
+ * Macro to convert a processor_t processor to its attached per_proc_info_t per_proc
  */
 #define PROCESSOR_TO_PER_PROC(x)										\
 			((struct per_proc_info*)((unsigned int)(x)					\
@@ -540,24 +563,22 @@ extern struct per_proc_info BootProcInfo;
 #define	MAX_CPUS	256
 
 struct per_proc_entry {
-	addr64_t				ppe_paddr;
+	addr64_t				ppe_paddr;		/* Physical address of the first page of per_proc, 2nd is in pp2ndPage. */
 	unsigned int			ppe_pad4[1];
-	struct per_proc_info	*ppe_vaddr;
+	struct per_proc_info	*ppe_vaddr;		/* Virtual address of the per_proc */
 };
 
 extern	struct per_proc_entry PerProcTable[MAX_CPUS-1];
 
 
-extern char *trap_type[];
+extern const char *trap_type[];
 
-#endif /* ndef ASSEMBLER */											/* with this savearea should be redriven */
+#endif /* ndef ASSEMBLER */					/* with this savearea should be redriven */
 
 /* cpu_flags defs */
 #define SIGPactive	0x8000
 #define needSRload	0x4000
 #define turnEEon	0x2000
-#define traceBE     0x1000					/* user mode BE tracing in enabled */
-#define traceBEb    3						/* bit number for traceBE */
 #define SleepState	0x0800
 #define SleepStateb	4
 #define mcountOff	0x0400
@@ -622,6 +643,8 @@ extern char *trap_type[];
 #define T_INSTRUMENTATION		(0x2B * T_VECTOR_SIZE)
 #define T_ARCHDEP0				(0x2C * T_VECTOR_SIZE)
 #define T_HDEC					(0x2D * T_VECTOR_SIZE)
+#define T_INJECT_EXIT			(0x2E * T_VECTOR_SIZE)
+#define T_DTRACE_RET			T_INJECT_EXIT
 
 #define T_AST					(0x100 * T_VECTOR_SIZE) 
 #define T_MAX					T_CHOKE		 /* Maximum exception no */
@@ -644,9 +667,10 @@ extern char *trap_type[];
 #define	failSkipLists 7
 #define	failUnalignedStk 8
 #define	failPmap 9
+#define	failTimeout 10
 
 /* Always must be last - update failNames table in model_dep.c as well */
-#define failUnknown 10
+#define failUnknown 11
 
 #ifndef ASSEMBLER
 

@@ -1,23 +1,29 @@
 /*
- * Copyright (c) 1998-2000 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 1998-2006 Apple Computer, Inc. All rights reserved.
  *
- * @APPLE_LICENSE_HEADER_START@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. The rights granted to you under the License
+ * may not be used to create, or enable the creation or redistribution of,
+ * unlawful or unlicensed copies of an Apple operating system, or to
+ * circumvent, violate, or enable the circumvention or violation of, any
+ * terms of an Apple operating system software license agreement.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
- * @APPLE_LICENSE_HEADER_END@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 
 #include <IOKit/IODeviceTreeSupport.h>
@@ -88,7 +94,7 @@ IODeviceTreeAlloc( void * dtTop )
     OSObject *			obj;
     OSDictionary *		allInts;
     vm_offset_t *		dtMap;
-    int				propSize;
+    unsigned int		propSize;
     bool			intMap;
     bool			freeDT;
 
@@ -138,7 +144,7 @@ IODeviceTreeAlloc( void * dtTop )
     freeDT = (kSuccess == DTLookupEntry( 0, "/chosen/memory-map", &mapEntry ))
 	  && (kSuccess == DTGetProperty( mapEntry,
                 "DeviceTree", (void **) &dtMap, &propSize ))
-	  && ((2 * sizeof( vm_offset_t)) == propSize);
+	  && ((2 * sizeof(vm_offset_t)) == propSize);
 
     parent = MakeReferenceTable( (DTEntry)dtTop, freeDT );
 
@@ -216,7 +222,7 @@ IODeviceTreeAlloc( void * dtTop )
             if( (obj = child->getProperty( "driver,AAPL,MacOS,PowerPC"))) {
 
                 if( (0 == (prop = (OSData *)child->getProperty( gIODTTypeKey )))
-                  || (strcmp( "display", (char *) prop->getBytesNoCopy())) ) {
+                  || (strncmp("display", (char *)prop->getBytesNoCopy(), sizeof("display"))) ) {
                     child->removeProperty( "driver,AAPL,MacOS,PowerPC");
                 }
             }
@@ -302,7 +308,11 @@ static void FreePhysicalMemory( vm_offset_t * range )
 {
     vm_offset_t	virt;
 
+#if defined (__i386__)
+    virt = ml_boot_ptovirt( range[0] );
+#else
     virt = ml_static_ptovirt( range[0] );
+#endif
     if( virt) {
         ml_static_mfree( virt, range[1] );
     }
@@ -318,7 +328,7 @@ MakeReferenceTable( DTEntry dtEntry, bool copy )
     const OSSymbol		*sym;
     DTPropertyIterator	dtIter;
     void				*prop;
-    int					propSize;
+    unsigned int		propSize;
     char				*name;
     char				location[ 32 ];
     bool				noLocation = true;
@@ -363,17 +373,17 @@ MakeReferenceTable( DTEntry dtEntry, bool copy )
 
             } else if( nameKey == gIODTUnitKey ) {
                 // all OF strings are null terminated... except this one
-                if( propSize >= (int) sizeof( location))
-                    propSize = sizeof( location) - 1;
+                if( propSize >= (int) sizeof(location))
+                    propSize = sizeof(location) - 1;
                 strncpy( location, (const char *) prop, propSize );
                 location[ propSize ] = 0;
                 regEntry->setLocation( location );
                 propTable->removeObject( gIODTUnitKey );
                 noLocation = false;
     
-            } else if( noLocation && (0 == strcmp( name, "reg"))) {
+            } else if(noLocation && (!strncmp(name, "reg", sizeof("reg")))) {
                 // default location - override later
-                sprintf( location, "%lX", *((UInt32 *) prop) );
+                snprintf(location, sizeof(location), "%lX", *((UInt32 *) prop));
                 regEntry->setLocation( location );
             }
         }
@@ -452,7 +462,7 @@ const OSSymbol * IODTInterruptControllerName( IORegistryEntry * regEntry )
     assert( ok );
 
     if( ok) {
-        sprintf( buf, "IOInterruptController%08lX", phandle);
+        snprintf(buf, sizeof(buf), "IOInterruptController%08lX", phandle);
         sym = OSSymbol::withCString( buf );
     } else
         sym = 0;
@@ -489,7 +499,7 @@ UInt32 IODTMapOneInterrupt( IORegistryEntry * regEntry, UInt32 * intSpec,
     addrCmp = 0;
     if( acells) {
         data = OSDynamicCast( OSData, regEntry->getProperty( "reg" ));
-        if( data && (data->getLength() >= (acells * sizeof( UInt32))))
+        if( data && (data->getLength() >= (acells * sizeof(UInt32))))
             addrCmp = (UInt32 *) data->getBytesNoCopy();
     }
     original_icells = icells;
@@ -510,7 +520,7 @@ UInt32 IODTMapOneInterrupt( IORegistryEntry * regEntry, UInt32 * intSpec,
             // found a controller - don't want to follow cascaded controllers
             parent = 0;
             *spec = OSData::withBytesNoCopy( (void *) intSpec,
-                                            icells * sizeof( UInt32));
+                                            icells * sizeof(UInt32));
             *controller = IODTInterruptControllerName( regEntry );
             ok = (*spec && *controller);
         } else if( parent && (data = OSDynamicCast( OSData,
@@ -519,7 +529,7 @@ UInt32 IODTMapOneInterrupt( IORegistryEntry * regEntry, UInt32 * intSpec,
             map = (UInt32 *) data->getBytesNoCopy();
             endMap = map + (data->getLength() / sizeof(UInt32));
             data = OSDynamicCast( OSData, regEntry->getProperty( "interrupt-map-mask" ));
-            if( data && (data->getLength() >= ((acells + icells) * sizeof( UInt32))))
+            if( data && (data->getLength() >= ((acells + icells) * sizeof(UInt32))))
                 maskCmp = (UInt32 *) data->getBytesNoCopy();
             else
                 maskCmp = 0;
@@ -655,7 +665,7 @@ static bool IODTMapInterruptsSharing( IORegistryEntry * regEntry, OSDictionary *
     }
 
     localBits = (UInt32 *) local->getBytesNoCopy();
-    localEnd = localBits + (local->getLength() / sizeof( UInt32));
+    localEnd = localBits + (local->getLength() / sizeof(UInt32));
     mapped = OSArray::withCapacity( 1 );
     controllers = OSArray::withCapacity( 1 );
 
@@ -670,8 +680,8 @@ static bool IODTMapInterruptsSharing( IORegistryEntry * regEntry, OSDictionary *
                 break;
             }
         } else {
-            map = OSData::withData( local, mapped->getCount() * sizeof( UInt32),
-				sizeof( UInt32));
+            map = OSData::withData( local, mapped->getCount() * sizeof(UInt32),
+				sizeof(UInt32));
             controller = gIODTDefaultInterruptController;
             controller->retain();
         }
@@ -897,7 +907,7 @@ void IODTSetResolving( IORegistryEntry * 	regEntry,
 
     persist.compareFunc = compareFunc;
     persist.locationFunc = locationFunc;
-    prop = OSData::withBytes( &persist, sizeof( persist));
+    prop = OSData::withBytes( &persist, sizeof(persist));
     if( !prop)
         return;
 
@@ -911,7 +921,6 @@ static SInt32 DefaultCompare( UInt32 cellCount, UInt32 left[], UInt32 right[] )
     cellCount--;
     return( left[ cellCount ] - right[ cellCount ] );
 }
-
 
 void IODTGetCellCounts( IORegistryEntry * regEntry,
 			    UInt32 * sizeCount, UInt32 * addressCount)
@@ -941,10 +950,13 @@ bool IODTResolveAddressCell( IORegistryEntry * regEntry,
     UInt32		childSizeCells, childAddressCells;
     UInt32		childCells;
     UInt32		cell[ 5 ], offset = 0, length;
+    UInt32		endCell[ 5 ];
     UInt32		*range;
+    UInt32		*lookRange;
+    UInt32		*startRange;
     UInt32		*endRanges;
     bool		ok = true;
-    SInt32		diff;
+    SInt32		diff, diff2, endDiff;
 
     IODTPersistent	*persist;
     IODTCompareAddressCellFunc	compare;
@@ -952,67 +964,93 @@ bool IODTResolveAddressCell( IORegistryEntry * regEntry,
     IODTGetCellCounts( regEntry, &childSizeCells, &childAddressCells );
     childCells = childAddressCells + childSizeCells;
 
-    bcopy( cellsIn, cell, 4 * childCells );
+    bcopy( cellsIn, cell, sizeof(UInt32) * childCells );
     if( childSizeCells > 1)
         *len = IOPhysical32( cellsIn[ childAddressCells ],
                              cellsIn[ childAddressCells + 1 ] );
     else
         *len = IOPhysical32( 0, cellsIn[ childAddressCells ] );
 
-    do {
-        prop = OSDynamicCast( OSData, regEntry->getProperty( gIODTRangeKey ));
-        if( 0 == prop) {
-            /* end of the road */
-            *phys = IOPhysical32( 0,  cell[ childAddressCells - 1 ] + offset);
-            break;
-        }
+    do
+    {
+	prop = OSDynamicCast( OSData, regEntry->getProperty( gIODTRangeKey ));
+	if( 0 == prop) {
+	    /* end of the road */
+	    *phys = IOPhysical32( 0,  cell[ childAddressCells - 1 ] + offset);
+	    break;
+	}
 
-        parent = regEntry->getParentEntry( gIODTPlane );
-        IODTGetCellCounts( parent, &sizeCells, &addressCells );
+	parent = regEntry->getParentEntry( gIODTPlane );
+	IODTGetCellCounts( parent, &sizeCells, &addressCells );
 
-        if( (length = prop->getLength())) {
-            // search
-            range = (UInt32 *) prop->getBytesNoCopy();
-            endRanges = range + (length / 4);
+	if( (length = prop->getLength())) {
+	    // search
+	    startRange = (UInt32 *) prop->getBytesNoCopy();
+	    range = startRange;
+	    endRanges = range + (length / sizeof(UInt32));
 
-            prop = (OSData *) regEntry->getProperty( gIODTPersistKey );
-            if( prop) {
-                persist = (IODTPersistent *) prop->getBytesNoCopy();
-                compare = persist->compareFunc;
-            } else
-                compare = DefaultCompare;
+	    prop = (OSData *) regEntry->getProperty( gIODTPersistKey );
+	    if( prop) {
+		persist = (IODTPersistent *) prop->getBytesNoCopy();
+		compare = persist->compareFunc;
+	    } else
+		compare = DefaultCompare;
 
-            for( ok = false;
-                 range < endRanges;
-                 range += (childCells + addressCells) ) {
+	    for( ok = false;
+		 range < endRanges;
+		 range += (childCells + addressCells) ) {
 
-                // is cell >= range start?
-                diff = (*compare)( childAddressCells, cell, range );
-                if( diff < 0)
-                    continue;
-                    
-                // is cell + size <= range end?
-                if( (diff + cell[ childCells - 1 ])
-                        > range[ childCells + addressCells - 1 ])
-                    continue;
+		// is cell start within range?
+		diff = (*compare)( childAddressCells, cell, range );
 
-                offset += diff;
-                ok = true;
-                break;
-            }
+		bcopy(range, endCell, childAddressCells * sizeof(UInt32));
+		endCell[childAddressCells - 1] += range[childCells + addressCells - 1];
+		diff2 = (*compare)( childAddressCells, cell, endCell );
 
-            // Get the physical start of the range from our parent
-            bcopy( range + childAddressCells, cell, 4 * addressCells );
-            bzero( cell + addressCells, 4 * sizeCells );
+		if ((diff < 0) || (diff2 >= 0))
+		    continue;
 
-        } /* else zero length range => pass thru to parent */
+		ok = (0 == cell[childCells - 1]);
+		if (!ok)
+		{
+		    // search for cell end
+		    bcopy(cell, endCell, childAddressCells * sizeof(UInt32));
+		    endCell[childAddressCells - 1] += cell[childCells - 1] - 1;
+		    lookRange = startRange;
+		    for( ;
+			 lookRange < endRanges;
+			 lookRange += (childCells + addressCells) )
+		     {
+			// is cell >= range start?
+			endDiff = (*compare)( childAddressCells, endCell, lookRange );
+			if( endDiff < 0)
+			    continue;
+			if ((endDiff - cell[childCells - 1] + 1 + lookRange[childAddressCells + addressCells - 1])
+			    == (diff + range[childAddressCells + addressCells - 1]))
+			{
+			    ok = true;
+			    break;
+			}
+		    }
+		    if (!ok)
+			continue;
+		}
+		offset += diff;
+		break;
+	    }
+
+	    // Get the physical start of the range from our parent
+	    bcopy( range + childAddressCells, cell, sizeof(UInt32) * addressCells );
+	    bzero( cell + addressCells, sizeof(UInt32) * sizeCells );
+
+	} /* else zero length range => pass thru to parent */
 
 	regEntry		= parent;
 	childSizeCells		= sizeCells;
 	childAddressCells	= addressCells;
 	childCells		= childAddressCells + childSizeCells;
-
-    } while( ok && regEntry);
+    }
+    while( ok && regEntry);
 
     return( ok);
 }

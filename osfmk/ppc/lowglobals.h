@@ -1,23 +1,29 @@
 /*
  * Copyright (c) 2000-2005 Apple Computer, Inc. All rights reserved.
  *
- * @APPLE_LICENSE_HEADER_START@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. The rights granted to you under the License
+ * may not be used to create, or enable the creation or redistribution of,
+ * unlawful or unlicensed copies of an Apple operating system, or to
+ * circumvent, violate, or enable the circumvention or violation of, any
+ * terms of an Apple operating system software license agreement.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
- * @APPLE_LICENSE_HEADER_END@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /*
  *		Header files for the Low Memory Globals (lg) 
@@ -60,7 +66,9 @@ typedef struct lowglo {
 	uint64_t		lgPMWvaddr;				/* 5020 physical memory window virtual address */
 	uint64_t		lgUMWvaddr;				/* 5028 user memory window virtual address */
 	unsigned int	lgVMMforcedFeats;		/* 5030 VMM boot-args forced feature flags */
-	unsigned int	lgRsv034[19];			/* 5034 reserved */
+	unsigned int	lgMaxDec;				/* 5034 Maximum decrementer we can set */
+	unsigned int	lgPmsCtlp;				/* 5038 Pointer to power management stepper control */
+	unsigned int	lgRsv03C[17];			/* 503C reserved */
 	traceWork		lgTrcWork;				/* 5080 Tracing control block - trcWork */
 	unsigned int	lgRsv0A0[24];			/* 50A0 reserved */
 	struct Saveanchor	lgSaveanchor;		/* 5100 Savearea anchor - saveanchor */
@@ -78,9 +86,14 @@ typedef struct lowglo {
 	unsigned int	lgRsv380[32];			/* 5380 - 5400 reserved  */
 
 	unsigned int	lgRsv400[32];			/* 5400 - 5480 reserved  */
-
-	uint32_t		lgRsv480[704];			/* 5480 reserved - push to 1 page */
-
+	uint32_t		lgKmodptr;		/* 0x5480 Pointer to kmod, debugging aid */
+	uint32_t		lgTransOff;		/* 0x5484 Pointer to kdp_trans_off, debugging aid */
+	uint32_t		lgReadIO;		/* 0x5488 Pointer to kdp_read_io, debugging aid */
+	uint32_t		lgDevSlot1;		/* 0x548C For developer use */
+	uint32_t		lgDevSlot2;		/* 0x5490 For developer use */
+	uint32_t		lgOSVersion;		/* 0x5494 Pointer to OS version string */
+	uint32_t		lgRebootFlag;		/* 0x5498 Pointer to debugger reboot trigger */
+	uint32_t		lgRsv49C[729];		/* 0x549C Reserved - push to 1 page */
 } lowglo;
 
 extern lowglo lowGlo;

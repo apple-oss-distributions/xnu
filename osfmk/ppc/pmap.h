@@ -1,23 +1,29 @@
 /*
- * Copyright (c) 2000-2005 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2007 Apple Inc. All rights reserved.
  *
- * @APPLE_LICENSE_HEADER_START@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. The rights granted to you under the License
+ * may not be used to create, or enable the creation or redistribution of,
+ * unlawful or unlicensed copies of an Apple operating system, or to
+ * circumvent, violate, or enable the circumvention or violation of, any
+ * terms of an Apple operating system software license agreement.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
- * @APPLE_LICENSE_HEADER_END@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /*
  * @OSF_COPYRIGHT@
@@ -154,12 +160,13 @@ struct pmap {
 	shexlock		pmapSXlk;			/* Shared/Exclusive lock for mapping changes */
 	unsigned int	space;				/* space for this pmap */
 #define invalSpace 0x00000001			/* Predefined always invalid space */
-	int				ref_count;			/* reference count */
+	uint32_t	ref_count;			/* reference count */
 	unsigned int	pmapFlags;			/* Flags */
 #define pmapKeys	0x00000007			/* Keys and no execute bit to use with this pmap */
 #define pmapKeyDef	0x00000006			/* Default keys - Sup = 1, user = 1, no ex = 0 */
 #define pmapVMhost	0x00000010			/* pmap with Virtual Machines attached to it */
 #define pmapVMgsaa	0x00000020			/* Guest shadow assist active */
+#define pmapNXdisabled	0x00000040			/* no-execute disabled for this pmap */
 	unsigned int	spaceNum;			/* Space number */
 	unsigned int	pmapCCtl;			/* Cache control */
 #define pmapCCtlVal	0xFFFF0000			/* Valid entries */
@@ -250,9 +257,11 @@ extern pmapTransTab *pmapTrans;			/* Space to pmap translate table */
 #define PHYS_MEM_WINDOW_VADDR	0x0000000100000000ULL
 #define IO_MEM_WINDOW_VADDR		0x0000000080000000ULL
 #define IO_MEM_WINDOW_SIZE		0x0000000080000000ULL
+#define pmapSmallBlock 65536
 
 #define pmap_kernel()			(kernel_pmap)
 #define	pmap_resident_count(pmap)	((pmap)->stats.resident_count)
+#define	pmap_resident_max(pmap)		((pmap)->stats.resident_max)
 #define pmap_remove_attributes(pmap,start,end)
 #define pmap_copy(dpmap,spmap,da,len,sa)
 #define	pmap_update()
@@ -275,12 +284,13 @@ extern pmapTransTab *pmapTrans;			/* Space to pmap translate table */
 /* 
  * prototypes.
  */
-extern vm_offset_t phystokv(vm_offset_t pa);					/* Get kernel virtual address from physical */
-extern vm_offset_t kvtophys(vm_offset_t va);					/* Get physical address from kernel virtual */
+extern addr64_t	   	kvtophys(vm_offset_t va);				/* Get physical address from kernel virtual */
+extern vm_map_offset_t kvtophys64(vm_map_offset_t va);				/* Get 64-bit physical address from kernel virtual */
 extern vm_offset_t	pmap_map(vm_offset_t va,
 				 vm_offset_t spa,
 				 vm_offset_t epa,
-				 vm_prot_t prot);
+				 vm_prot_t prot,
+				 unsigned int flags);
 extern kern_return_t    pmap_add_physical_memory(vm_offset_t spa,
 						 vm_offset_t epa,
 						 boolean_t available,
@@ -300,13 +310,9 @@ extern void invalidate_dcache(vm_offset_t va, unsigned length, boolean_t phys);
 extern void invalidate_dcache64(addr64_t va, unsigned length, boolean_t phys);
 extern void invalidate_icache(vm_offset_t va, unsigned length, boolean_t phys);
 extern void invalidate_icache64(addr64_t va, unsigned length, boolean_t phys);
-extern void pmap_sync_page_data_phys(ppnum_t pa);
-extern void pmap_sync_page_attributes_phys(ppnum_t pa);
-extern void pmap_map_block(pmap_t pmap, addr64_t va, ppnum_t pa, vm_size_t size, vm_prot_t prot, int attr, unsigned int flags);
-extern int pmap_map_block_rc(pmap_t pmap, addr64_t va, ppnum_t pa, vm_size_t size, vm_prot_t prot, int attr, unsigned int flags);
+extern void pmap_map_block(pmap_t pmap, addr64_t va, ppnum_t pa, uint32_t size, vm_prot_t prot, int attr, unsigned int flags);
+extern int pmap_map_block_rc(pmap_t pmap, addr64_t va, ppnum_t pa, uint32_t size, vm_prot_t prot, int attr, unsigned int flags);
 
-extern kern_return_t pmap_nest(pmap_t grand, pmap_t subord, addr64_t vstart, addr64_t nstart, uint64_t size);
-extern kern_return_t pmap_unnest(pmap_t grand, addr64_t vaddr);
 extern ppnum_t pmap_find_phys(pmap_t pmap, addr64_t va);
 extern void MapUserMemoryWindowInit(void);
 extern addr64_t MapUserMemoryWindow(vm_map_t map, addr64_t va);
@@ -316,10 +322,10 @@ extern int pmap_list_resident_pages(
 	vm_offset_t	*listp,
 	int		space);
 extern void pmap_init_sharedpage(vm_offset_t cpg);
-extern void pmap_map_sharedpage(task_t task, pmap_t pmap);
-extern void pmap_unmap_sharedpage(pmap_t pmap);
-
-
+extern void pmap_disable_NX(pmap_t pmap);
+/* Not required for ppc: */
+static inline void pmap_set_4GB_pagezero(__unused pmap_t pmap) {}
+static inline void pmap_clear_4GB_pagezero(__unused pmap_t pmap) {}
 
 #endif /* _PPC_PMAP_H_ */
 

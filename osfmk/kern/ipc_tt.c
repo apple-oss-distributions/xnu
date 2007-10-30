@@ -1,23 +1,29 @@
 /*
- * Copyright (c) 2000-2004 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2007 Apple Inc. All rights reserved.
  *
- * @APPLE_LICENSE_HEADER_START@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. The rights granted to you under the License
+ * may not be used to create, or enable the creation or redistribution of,
+ * unlawful or unlicensed copies of an Apple operating system, or to
+ * circumvent, violate, or enable the circumvention or violation of, any
+ * terms of an Apple operating system software license agreement.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
- * @APPLE_LICENSE_HEADER_END@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /*
  * @OSF_COPYRIGHT@
@@ -46,6 +52,12 @@
  * 
  * any improvements or extensions that they make and grant Carnegie Mellon
  * the rights to redistribute these changes.
+ */
+/*
+ * NOTICE: This file was modified by McAfee Research in 2004 to introduce
+ * support for mandatory and extensible security protections.  This notice
+ * is included in support of clause 2.2 (b) of the Apple Public License,
+ * Version 2.0.
  */
 /*
  */
@@ -82,8 +94,9 @@
 
 #include <vm/vm_map.h>
 #include <vm/vm_pageout.h>
-#include <vm/vm_shared_memory_server.h>
 #include <vm/vm_protos.h>
+
+#include <security/mac_mach_internal.h>
 
 /* forward declarations */
 task_t convert_port_to_locked_task(ipc_port_t port);
@@ -107,6 +120,7 @@ ipc_task_init(
 {
 	ipc_space_t space;
 	ipc_port_t kport;
+	ipc_port_t nport;
 	kern_return_t kr;
 	int i;
 
@@ -115,16 +129,30 @@ ipc_task_init(
 	if (kr != KERN_SUCCESS)
 		panic("ipc_task_init");
 
+	space->is_task = task;
 
 	kport = ipc_port_alloc_kernel();
 	if (kport == IP_NULL)
 		panic("ipc_task_init");
 
+	nport = ipc_port_alloc_kernel();
+	if (nport == IP_NULL)
+		panic("ipc_task_init");
+
 	itk_lock_init(task);
 	task->itk_self = kport;
+	task->itk_nself = nport;
 	task->itk_sself = ipc_port_make_send(kport);
 	task->itk_space = space;
 	space->is_fast = FALSE;
+
+#if CONFIG_MACF_MACH
+	if (parent)
+		mac_task_label_associate(parent, task, &parent->maclabel,
+		    &task->maclabel, &kport->ip_label);
+	else
+		mac_task_label_associate_kernel(task, &task->maclabel, &kport->ip_label);
+#endif
 
 	if (parent == TASK_NULL) {
 		ipc_port_t port;
@@ -138,6 +166,10 @@ ipc_task_init(
 		task->itk_host = port;
 
 		task->itk_bootstrap = IP_NULL;
+		task->itk_seatbelt = IP_NULL;
+		task->itk_gssd = IP_NULL;
+		task->itk_automountd = IP_NULL;
+		task->itk_task_access = IP_NULL;
 
 		for (i = 0; i < TASK_PORT_REGISTER_MAX; i++)
 			task->itk_registered[i] = IP_NULL;
@@ -160,12 +192,26 @@ ipc_task_init(
 				parent->exc_actions[i].flavor;
 		    task->exc_actions[i].behavior = 
 				parent->exc_actions[i].behavior;
+		    task->exc_actions[i].privileged =
+				parent->exc_actions[i].privileged;
 		}/* for */
 		task->itk_host =
 			ipc_port_copy_send(parent->itk_host);
 
 		task->itk_bootstrap =
 			ipc_port_copy_send(parent->itk_bootstrap);
+
+		task->itk_seatbelt =
+			ipc_port_copy_send(parent->itk_seatbelt);
+
+		task->itk_gssd =
+			ipc_port_copy_send(parent->itk_gssd);
+
+		task->itk_automountd =
+			ipc_port_copy_send(parent->itk_automountd);
+
+		task->itk_task_access =
+			ipc_port_copy_send(parent->itk_task_access);
 
 		itk_unlock(parent);
 	}
@@ -184,11 +230,15 @@ ipc_task_enable(
 	task_t		task)
 {
 	ipc_port_t kport;
+	ipc_port_t nport;
 
 	itk_lock(task);
 	kport = task->itk_self;
 	if (kport != IP_NULL)
 		ipc_kobject_set(kport, (ipc_kobject_t) task, IKOT_TASK);
+	nport = task->itk_nself;
+	if (nport != IP_NULL)
+		ipc_kobject_set(nport, (ipc_kobject_t) task, IKOT_TASK_NAME);
 	itk_unlock(task);
 }
 
@@ -205,11 +255,15 @@ ipc_task_disable(
 	task_t		task)
 {
 	ipc_port_t kport;
+	ipc_port_t nport;
 
 	itk_lock(task);
 	kport = task->itk_self;
 	if (kport != IP_NULL)
 		ipc_kobject_set(kport, IKO_NULL, IKOT_NONE);
+	nport = task->itk_nself;
+	if (nport != IP_NULL)
+		ipc_kobject_set(nport, IKO_NULL, IKOT_NONE);
 	itk_unlock(task);
 }
 
@@ -227,6 +281,7 @@ ipc_task_terminate(
 	task_t		task)
 {
 	ipc_port_t kport;
+	ipc_port_t nport;
 	int i;
 
 	itk_lock(task);
@@ -237,8 +292,12 @@ ipc_task_terminate(
 		itk_unlock(task);
 		return;
 	}
-
 	task->itk_self = IP_NULL;
+
+	nport = task->itk_nself;
+	assert(nport != IP_NULL);
+	task->itk_nself = IP_NULL;
+
 	itk_unlock(task);
 
 	/* release the naked send rights */
@@ -258,6 +317,18 @@ ipc_task_terminate(
 	if (IP_VALID(task->itk_bootstrap))
 		ipc_port_release_send(task->itk_bootstrap);
 
+	if (IP_VALID(task->itk_seatbelt))
+		ipc_port_release_send(task->itk_seatbelt);
+	
+	if (IP_VALID(task->itk_gssd))
+		ipc_port_release_send(task->itk_gssd);
+
+	if (IP_VALID(task->itk_automountd))
+		ipc_port_release_send(task->itk_automountd);
+
+	if (IP_VALID(task->itk_task_access))
+		ipc_port_release_send(task->itk_task_access);
+
 	for (i = 0; i < TASK_PORT_REGISTER_MAX; i++)
 		if (IP_VALID(task->itk_registered[i]))
 			ipc_port_release_send(task->itk_registered[i]);
@@ -265,15 +336,18 @@ ipc_task_terminate(
 	ipc_port_release_send(task->wired_ledger_port);
 	ipc_port_release_send(task->paged_ledger_port);
 
-	/* destroy the kernel port */
+	/* destroy the kernel ports */
 	ipc_port_dealloc_kernel(kport);
+	ipc_port_dealloc_kernel(nport);
 }
 
 /*
  *	Routine:	ipc_task_reset
  *	Purpose:
  *		Reset a task's IPC state to protect it when
- *		it enters an elevated security context.
+ *		it enters an elevated security context. The
+ *		task name port can remain the same - since
+ *		it represents no specific privilege.
  *	Conditions:
  *		Nothing locked.  The task must be suspended.
  *		(Or the current thread must be in the task.)
@@ -285,10 +359,8 @@ ipc_task_reset(
 {
 	ipc_port_t old_kport, new_kport;
 	ipc_port_t old_sself;
-#if 0
 	ipc_port_t old_exc_actions[EXC_TYPES_COUNT];
 	int i;
-#endif
 
 	new_kport = ipc_port_alloc_kernel();
 	if (new_kport == IP_NULL)
@@ -311,12 +383,14 @@ ipc_task_reset(
 	ipc_kobject_set(old_kport, IKO_NULL, IKOT_NONE);
 	ipc_kobject_set(new_kport, (ipc_kobject_t) task, IKOT_TASK);
 
-#if 0
 	for (i = FIRST_EXCEPTION; i < EXC_TYPES_COUNT; i++) {
-		old_exc_actions[i] = task->exc_action[i].port;
-		task->exc_actions[i].port = IP_NULL;
+		if (!task->exc_actions[i].privileged) {
+			old_exc_actions[i] = task->exc_actions[i].port;
+			task->exc_actions[i].port = IP_NULL;
+		} else {
+			old_exc_actions[i] = IP_NULL;
+		}
 	}/* for */
-#endif
 
 	itk_unlock(task);
 
@@ -325,13 +399,11 @@ ipc_task_reset(
 	if (IP_VALID(old_sself))
 		ipc_port_release_send(old_sself);
 
-#if 0
 	for (i = FIRST_EXCEPTION; i < EXC_TYPES_COUNT; i++) {
 		if (IP_VALID(old_exc_actions[i])) {
 			ipc_port_release_send(old_exc_actions[i]);
 		}
 	}/* for */
-#endif
 
 	/* destroy the kernel port */
 	ipc_port_dealloc_kernel(old_kport);
@@ -415,6 +487,74 @@ ipc_thread_terminate(
 		ipc_port_dealloc_reply(thread->ith_rpc_reply);
 
 	thread->ith_rpc_reply = IP_NULL;
+}
+
+/*
+ *	Routine:	ipc_thread_reset
+ *	Purpose:
+ *		Reset the IPC state for a given Mach thread when
+ *		its task enters an elevated security context.
+ * 		Both the thread port and its exception ports have
+ *		to be reset.  Its RPC reply port cannot have any
+ *		rights outstanding, so it should be fine.
+ *	Conditions:
+ *		Nothing locked.
+ */
+
+void
+ipc_thread_reset(
+	thread_t	thread)
+{
+	ipc_port_t old_kport, new_kport;
+	ipc_port_t old_sself;
+	ipc_port_t old_exc_actions[EXC_TYPES_COUNT];
+	int i;
+
+	new_kport = ipc_port_alloc_kernel();
+	if (new_kport == IP_NULL)
+		panic("ipc_task_reset");
+
+	thread_mtx_lock(thread);
+
+	old_kport = thread->ith_self;
+
+	if (old_kport == IP_NULL) {
+		/* the  is already terminated (can this happen?) */
+		thread_mtx_unlock(thread);
+		ipc_port_dealloc_kernel(new_kport);
+		return;
+	}
+
+	thread->ith_self = new_kport;
+	old_sself = thread->ith_sself;
+	thread->ith_sself = ipc_port_make_send(new_kport);
+	ipc_kobject_set(old_kport, IKO_NULL, IKOT_NONE);
+	ipc_kobject_set(new_kport, (ipc_kobject_t) thread, IKOT_THREAD);
+
+	for (i = FIRST_EXCEPTION; i < EXC_TYPES_COUNT; i++) {
+		if (!thread->exc_actions[i].privileged) {
+			old_exc_actions[i] = thread->exc_actions[i].port;
+			thread->exc_actions[i].port = IP_NULL;
+		} else {
+			old_exc_actions[i] = IP_NULL;
+		}
+	}/* for */
+
+	thread_mtx_unlock(thread);
+
+	/* release the naked send rights */
+
+	if (IP_VALID(old_sself))
+		ipc_port_release_send(old_sself);
+
+	for (i = FIRST_EXCEPTION; i < EXC_TYPES_COUNT; i++) {
+		if (IP_VALID(old_exc_actions[i])) {
+			ipc_port_release_send(old_exc_actions[i]);
+		}
+	}/* for */
+
+	/* destroy the kernel port */
+	ipc_port_dealloc_kernel(old_kport);
 }
 
 /*
@@ -695,36 +835,10 @@ task_get_special_port(
 	int		which,
 	ipc_port_t	*portp)
 {
-	ipc_port_t *whichp;
 	ipc_port_t port;
 
 	if (task == TASK_NULL)
 		return KERN_INVALID_ARGUMENT;
-
-	switch (which) {
-	    case TASK_KERNEL_PORT:
-		whichp = &task->itk_sself;
-		break;
-
-	    case TASK_HOST_PORT:
-		whichp = &task->itk_host;
-		break;
-
-	    case TASK_BOOTSTRAP_PORT:
-		whichp = &task->itk_bootstrap;
-		break;
-
-            case TASK_WIRED_LEDGER_PORT:
-                whichp = &task->wired_ledger_port;
-                break;
-
-            case TASK_PAGED_LEDGER_PORT:
-                whichp = &task->paged_ledger_port;
-                break;
-                    
-	    default:
-		return KERN_INVALID_ARGUMENT;
-	}
 
 	itk_lock(task);
 	if (task->itk_self == IP_NULL) {
@@ -732,7 +846,51 @@ task_get_special_port(
 		return KERN_FAILURE;
 	}
 
-	port = ipc_port_copy_send(*whichp);
+	switch (which) {
+	    case TASK_KERNEL_PORT:
+		port = ipc_port_copy_send(task->itk_sself);
+		break;
+
+	    case TASK_NAME_PORT:
+		port = ipc_port_make_send(task->itk_nself);
+		break;
+
+	    case TASK_HOST_PORT:
+		port = ipc_port_copy_send(task->itk_host);
+		break;
+
+	    case TASK_BOOTSTRAP_PORT:
+		port = ipc_port_copy_send(task->itk_bootstrap);
+		break;
+
+	    case TASK_WIRED_LEDGER_PORT:
+		port = ipc_port_copy_send(task->wired_ledger_port);
+		break;
+
+	    case TASK_PAGED_LEDGER_PORT:
+		port = ipc_port_copy_send(task->paged_ledger_port);
+		break;
+                    
+	    case TASK_SEATBELT_PORT:
+		port = ipc_port_copy_send(task->itk_seatbelt);
+		break;
+
+	    case TASK_GSSD_PORT:
+		port = ipc_port_copy_send(task->itk_gssd);
+		break;
+			
+	    case TASK_ACCESS_PORT:
+		port = ipc_port_copy_send(task->itk_task_access);
+		break;
+			
+	    case TASK_AUTOMOUNTD_PORT:
+		port = ipc_port_copy_send(task->itk_automountd);
+		break;
+
+	    default:
+               itk_unlock(task);
+		return KERN_INVALID_ARGUMENT;
+	}
 	itk_unlock(task);
 
 	*portp = port;
@@ -752,6 +910,7 @@ task_get_special_port(
  *		KERN_INVALID_ARGUMENT	The task is null.
  *		KERN_FAILURE		The task/space is dead.
  *		KERN_INVALID_ARGUMENT	Invalid special port.
+ * 		KERN_NO_ACCESS		Attempted overwrite of seatbelt port.
  */
 
 kern_return_t
@@ -779,14 +938,30 @@ task_set_special_port(
 		whichp = &task->itk_bootstrap;
 		break;
 
-            case TASK_WIRED_LEDGER_PORT:
-                whichp = &task->wired_ledger_port;
-                break;
+	    case TASK_WIRED_LEDGER_PORT:
+		whichp = &task->wired_ledger_port;
+		break;
 
-            case TASK_PAGED_LEDGER_PORT:
-                whichp = &task->paged_ledger_port;
-                break;
+	    case TASK_PAGED_LEDGER_PORT:
+		whichp = &task->paged_ledger_port;
+		break;
                     
+	    case TASK_SEATBELT_PORT:
+		whichp = &task->itk_seatbelt;
+		break;
+
+	    case TASK_GSSD_PORT:
+		whichp = &task->itk_gssd;
+		break;
+		
+	    case TASK_ACCESS_PORT:
+		whichp = &task->itk_task_access;
+		break;
+		
+	    case TASK_AUTOMOUNTD_PORT:
+		whichp = &task->itk_automountd;
+		break;
+		
 	    default:
 		return KERN_INVALID_ARGUMENT;
 	}/* switch */
@@ -796,6 +971,20 @@ task_set_special_port(
 		itk_unlock(task);
 		return KERN_FAILURE;
 	}
+
+	/* do not allow overwrite of seatbelt or task access ports */
+	if ((TASK_SEATBELT_PORT == which  || TASK_ACCESS_PORT == which) 
+		&& IP_VALID(*whichp)) {
+			itk_unlock(task);
+			return KERN_NO_ACCESS;
+	}
+
+#if CONFIG_MACF_MACH
+       if (mac_task_check_service(current_task(), task, "set_special_port")) {
+               itk_unlock(task);
+               return KERN_NO_ACCESS;
+       }
+#endif
 
 	old = *whichp;
 	*whichp = port;
@@ -956,6 +1145,8 @@ mach_ports_lookup(
 task_t
 convert_port_to_locked_task(ipc_port_t port)
 {
+        int try_failed_count = 0;
+
 	while (IP_VALID(port)) {
 		task_t task;
 
@@ -975,9 +1166,10 @@ convert_port_to_locked_task(ipc_port_t port)
 			ip_unlock(port);
 			return(task);
 		}
+		try_failed_count++;
 
 		ip_unlock(port);
-		mutex_pause();
+		mutex_pause(try_failed_count);
 	}
 	return TASK_NULL;
 }
@@ -1004,6 +1196,39 @@ convert_port_to_task(
 				ip_kotype(port) == IKOT_TASK		) {
 			task = (task_t)port->ip_kobject;
 			assert(task != TASK_NULL);
+
+			task_reference_internal(task);
+		}
+
+		ip_unlock(port);
+	}
+
+	return (task);
+}
+
+/*
+ *	Routine:	convert_port_to_task_name
+ *	Purpose:
+ *		Convert from a port to a task name.
+ *		Doesn't consume the port ref; produces a task name ref,
+ *		which may be null.
+ *	Conditions:
+ *		Nothing locked.
+ */
+task_name_t
+convert_port_to_task_name(
+	ipc_port_t		port)
+{
+	task_name_t		task = TASK_NULL;
+
+	if (IP_VALID(port)) {
+		ip_lock(port);
+
+		if (	ip_active(port)					&&
+				(ip_kotype(port) == IKOT_TASK	||
+				 ip_kotype(port) == IKOT_TASK_NAME)) {
+			task = (task_name_t)port->ip_kobject;
+			assert(task != TASK_NAME_NULL);
 
 			task_reference_internal(task);
 		}
@@ -1194,6 +1419,33 @@ convert_task_to_port(
 }
 
 /*
+ *	Routine:	convert_task_name_to_port
+ *	Purpose:
+ *		Convert from a task name ref to a port.
+ *		Consumes a task name ref; produces a naked send right
+ *		which may be invalid.  
+ *	Conditions:
+ *		Nothing locked.
+ */
+
+ipc_port_t
+convert_task_name_to_port(
+	task_name_t		task_name)
+{
+	ipc_port_t port;
+
+	itk_lock(task_name);
+	if (task_name->itk_nself != IP_NULL)
+		port = ipc_port_make_send(task_name->itk_nself);
+	else
+		port = IP_NULL;
+	itk_unlock(task_name);
+
+	task_name_deallocate(task_name);
+	return port;
+}
+
+/*
  *	Routine:	convert_thread_to_port
  *	Purpose:
  *		Convert from a thread to a port.
@@ -1266,6 +1518,7 @@ thread_set_exception_ports(
 	thread_state_flavor_t	new_flavor)
 {
 	ipc_port_t		old_port[EXC_TYPES_COUNT];
+	boolean_t privileged = current_task()->sec_token.val[0] == 0;
 	register int	i;
 
 	if (thread == THREAD_NULL)
@@ -1275,7 +1528,7 @@ thread_set_exception_ports(
 		return (KERN_INVALID_ARGUMENT);
 
 	if (IP_VALID(new_port)) {
-		switch (new_behavior) {
+		switch (new_behavior & ~MACH_EXCEPTION_CODES) {
 
 		case EXCEPTION_DEFAULT:
 		case EXCEPTION_STATE:
@@ -1309,6 +1562,7 @@ thread_set_exception_ports(
 			thread->exc_actions[i].port = ipc_port_copy_send(new_port);
 			thread->exc_actions[i].behavior = new_behavior;
 			thread->exc_actions[i].flavor = new_flavor;
+			thread->exc_actions[i].privileged = privileged;
 		}
 		else
 			old_port[i] = IP_NULL;
@@ -1335,6 +1589,7 @@ task_set_exception_ports(
 	thread_state_flavor_t	new_flavor)
 {
 	ipc_port_t		old_port[EXC_TYPES_COUNT];
+	boolean_t privileged = current_task()->sec_token.val[0] == 0;
 	register int	i;
 
 	if (task == TASK_NULL)
@@ -1344,7 +1599,7 @@ task_set_exception_ports(
 		return (KERN_INVALID_ARGUMENT);
 
 	if (IP_VALID(new_port)) {
-		switch (new_behavior) {
+		switch (new_behavior & ~MACH_EXCEPTION_CODES) {
 
 		case EXCEPTION_DEFAULT:
 		case EXCEPTION_STATE:
@@ -1371,6 +1626,7 @@ task_set_exception_ports(
 				ipc_port_copy_send(new_port);
 			task->exc_actions[i].behavior = new_behavior;
 			task->exc_actions[i].flavor = new_flavor;
+			task->exc_actions[i].privileged = privileged;
 		}
 		else
 			old_port[i] = IP_NULL;
@@ -1429,6 +1685,7 @@ thread_swap_exception_ports(
 	thread_state_flavor_array_t	flavors)
 {
 	ipc_port_t		old_port[EXC_TYPES_COUNT];
+	boolean_t privileged = current_task()->sec_token.val[0] == 0;
 	unsigned int	i, j, count;
 
 	if (thread == THREAD_NULL)
@@ -1438,7 +1695,7 @@ thread_swap_exception_ports(
 		return (KERN_INVALID_ARGUMENT);
 
 	if (IP_VALID(new_port)) {
-		switch (new_behavior) {
+		switch (new_behavior & ~MACH_EXCEPTION_CODES) {
 
 		case EXCEPTION_DEFAULT:
 		case EXCEPTION_STATE:
@@ -1488,6 +1745,7 @@ thread_swap_exception_ports(
 			thread->exc_actions[i].port = ipc_port_copy_send(new_port);
 			thread->exc_actions[i].behavior = new_behavior;
 			thread->exc_actions[i].flavor = new_flavor;
+			thread->exc_actions[i].privileged = privileged;
 			if (count > *CountCnt)
 				break;
 		}
@@ -1523,6 +1781,7 @@ task_swap_exception_ports(
 	thread_state_flavor_array_t	flavors)
 {
 	ipc_port_t		old_port[EXC_TYPES_COUNT];
+	boolean_t privileged = current_task()->sec_token.val[0] == 0;
 	unsigned int	i, j, count;
 
 	if (task == TASK_NULL)
@@ -1532,7 +1791,7 @@ task_swap_exception_ports(
 		return (KERN_INVALID_ARGUMENT);
 
 	if (IP_VALID(new_port)) {
-		switch (new_behavior) {
+		switch (new_behavior & ~MACH_EXCEPTION_CODES) {
 
 		case EXCEPTION_DEFAULT:
 		case EXCEPTION_STATE:
@@ -1581,6 +1840,7 @@ task_swap_exception_ports(
 			task->exc_actions[i].port =	ipc_port_copy_send(new_port);
 			task->exc_actions[i].behavior = new_behavior;
 			task->exc_actions[i].flavor = new_flavor;
+			task->exc_actions[i].privileged = privileged;
 			if (count > *CountCnt)
 				break;
 		}

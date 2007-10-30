@@ -1,23 +1,29 @@
 /*
  * Copyright (c) 2000-2004 Apple Computer, Inc. All rights reserved.
  *
- * @APPLE_LICENSE_HEADER_START@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. The rights granted to you under the License
+ * may not be used to create, or enable the creation or redistribution of,
+ * unlawful or unlicensed copies of an Apple operating system, or to
+ * circumvent, violate, or enable the circumvention or violation of, any
+ * terms of an Apple operating system software license agreement.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
- * @APPLE_LICENSE_HEADER_END@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /*
  * @OSF_COPYRIGHT@
@@ -80,7 +86,6 @@
 #include <i386/tss.h>
 #include <i386/user_ldt.h>
 #include <i386/fpu.h>
-#include <i386/iopb_entries.h>
 #include <i386/misc_protos.h>
 
 /*
@@ -91,6 +96,7 @@ pmap_zero_page(
 	       ppnum_t pn)
 {
 	assert(pn != vm_page_fictitious_addr);
+	assert(pn != vm_page_guard_addr);
 	bzero_phys((addr64_t)i386_ptob(pn), PAGE_SIZE);
 }
 
@@ -105,6 +111,7 @@ pmap_zero_part_page(
 	vm_size_t       len)
 {
 	assert(pn != vm_page_fictitious_addr);
+	assert(pn != vm_page_guard_addr);
 	assert(offset + len <= PAGE_SIZE);
 	bzero_phys((addr64_t)(i386_ptob(pn) + offset), len);
 }
@@ -120,13 +127,19 @@ pmap_copy_part_page(
 	vm_offset_t	dst_offset,
 	vm_size_t	len)
 {
-        vm_offset_t  src, dst;
+        pmap_paddr_t src, dst;
+
 	assert(psrc != vm_page_fictitious_addr);
 	assert(pdst != vm_page_fictitious_addr);
-	src = (vm_offset_t)i386_ptob(psrc);
-	dst = (vm_offset_t)i386_ptob(pdst);
-	assert(((dst & PAGE_MASK) + dst_offset + len) <= PAGE_SIZE);
-	assert(((src & PAGE_MASK) + src_offset + len) <= PAGE_SIZE);
+	assert(psrc != vm_page_guard_addr);
+	assert(pdst != vm_page_guard_addr);
+
+	src = i386_ptob(psrc);
+	dst = i386_ptob(pdst);
+
+	assert((((uint32_t)dst & PAGE_MASK) + dst_offset + len) <= PAGE_SIZE);
+	assert((((uint32_t)src & PAGE_MASK) + src_offset + len) <= PAGE_SIZE);
+
 	bcopy_phys((addr64_t)src + (src_offset & INTEL_OFFMASK),
 		   (addr64_t)dst + (dst_offset & INTEL_OFFMASK),
 		   len);
@@ -143,21 +156,22 @@ pmap_copy_part_lpage(
 	vm_offset_t	dst_offset,
 	vm_size_t	len)
 {
-	pt_entry_t *ptep;
-	thread_t	thr_act = current_thread();
+        mapwindow_t *map;
 
 	assert(pdst != vm_page_fictitious_addr);
-	ptep = pmap_pte(thr_act->map->pmap, i386_ptob(pdst));
-	if (0 == ptep)
-		panic("pmap_copy_part_lpage ptep");
-	assert(((pdst & PAGE_MASK) + dst_offset + len) <= PAGE_SIZE);
-	if (*(pt_entry_t *) CM2)
-	  panic("pmap_copy_part_lpage");
-	*(int *) CM2 = INTEL_PTE_VALID | INTEL_PTE_RW | (*ptep & PG_FRAME) | 
-	  INTEL_PTE_REF | INTEL_PTE_MOD;
-	invlpg((unsigned int) CA2);
-	memcpy((void *) (CA2 + (dst_offset & INTEL_OFFMASK)), (void *) src, len);
-	*(pt_entry_t *) CM2 = 0;
+	assert(pdst != vm_page_guard_addr);
+	assert((dst_offset + len) <= PAGE_SIZE);
+
+        mp_disable_preemption();
+
+        map = pmap_get_mapwindow(INTEL_PTE_VALID | INTEL_PTE_RW | (i386_ptob(pdst) & PG_FRAME) | 
+                                 INTEL_PTE_REF | INTEL_PTE_MOD);
+
+	memcpy((void *) (map->prv_CADDR + (dst_offset & INTEL_OFFMASK)), (void *) src, len);
+
+	pmap_put_mapwindow(map);
+
+	mp_enable_preemption();
 }
 
 /*
@@ -171,21 +185,22 @@ pmap_copy_part_rpage(
 	vm_offset_t	dst,
 	vm_size_t	len)
 {
-  pt_entry_t *ptep;
-  thread_t thr_act = current_thread();
+        mapwindow_t *map;
 
 	assert(psrc != vm_page_fictitious_addr);
-	ptep = pmap_pte(thr_act->map->pmap, i386_ptob(psrc));
-	if (0 == ptep)
-		panic("pmap_copy_part_rpage ptep");
-	assert(((psrc & PAGE_MASK) + src_offset + len) <= PAGE_SIZE);
-	if (*(pt_entry_t *) CM2)
-	  panic("pmap_copy_part_rpage");
-	*(pt_entry_t *) CM2 = INTEL_PTE_VALID | INTEL_PTE_RW | (*ptep & PG_FRAME) | 
-	  INTEL_PTE_REF;
-	invlpg((unsigned int) CA2);
-	memcpy((void *) dst, (void *) (CA2 + (src_offset & INTEL_OFFMASK)), len);
-	*(pt_entry_t *) CM2 = 0;
+	assert(psrc != vm_page_guard_addr);
+	assert((src_offset + len) <= PAGE_SIZE);
+
+        mp_disable_preemption();
+
+        map = pmap_get_mapwindow(INTEL_PTE_VALID | INTEL_PTE_RW | (i386_ptob(psrc) & PG_FRAME) | 
+                                 INTEL_PTE_REF);
+
+	memcpy((void *) dst, (void *) (map->prv_CADDR + (src_offset & INTEL_OFFMASK)), len);
+
+	pmap_put_mapwindow(map);
+
+	mp_enable_preemption();
 }
 
 /*
@@ -193,19 +208,21 @@ pmap_copy_part_rpage(
  *
  *	Convert a kernel virtual address to a physical address
  */
-vm_offset_t
+addr64_t
 kvtophys(
 	vm_offset_t addr)
 {
         pt_entry_t *ptep;
 	pmap_paddr_t pa;
-
-	if ((ptep = pmap_pte(kernel_pmap, addr)) == PT_ENTRY_NULL) {
+ 
+	mp_disable_preemption();
+	if ((ptep = pmap_pte(kernel_pmap, (vm_map_offset_t)addr)) == PT_ENTRY_NULL) {
 	  pa = 0;
 	} else {
 	  pa =  pte_to_pa(*ptep) | (addr & INTEL_OFFMASK);
 	}
-	if (0 == pa)
-		kprintf("kvtophys ret 0!\n");
-	return (pa);
+	mp_enable_preemption_no_check();
+
+	return ((addr64_t)pa);
 }
+

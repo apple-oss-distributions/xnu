@@ -1,23 +1,29 @@
 /*
- * Copyright (c) 2000 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000, 2002, 2005 Apple Computer, Inc. All rights reserved.
  *
- * @APPLE_LICENSE_HEADER_START@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. The rights granted to you under the License
+ * may not be used to create, or enable the creation or redistribution of,
+ * unlawful or unlicensed copies of an Apple operating system, or to
+ * circumvent, violate, or enable the circumvention or violation of, any
+ * terms of an Apple operating system software license agreement.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
- * @APPLE_LICENSE_HEADER_END@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /*
 	File:		BTreeNodeOps.c
@@ -111,7 +117,6 @@
 //	ReleaseNode			- Call FS Agent to release node obtained by GetNode.
 //	UpdateNode			- Mark a node as dirty and call FS Agent to release it.
 //
-//	CheckNode			- Checks the validity of a node.
 //	ClearNode			- Clear a node to all zeroes.
 //
 //	InsertRecord		- Inserts a record into a BTree node.
@@ -137,34 +142,34 @@
 
 ////////////////////// Routines Internal To BTreeNodeOps.c //////////////////////
 
-UInt16		GetRecordOffset		(BTreeControlBlockPtr	 btree,
+u_int16_t	GetRecordOffset		(BTreeControlBlockPtr	 btree,
 								 NodeDescPtr			 node,
-								 UInt16					 index );
+								 u_int16_t				 index );
 
-UInt16	   *GetOffsetAddress	(BTreeControlBlockPtr	btreePtr,
+u_int16_t	*GetOffsetAddress	(BTreeControlBlockPtr	btreePtr,
 								 NodeDescPtr			 node,
-								 UInt16					index );
+								 u_int16_t				index );
 								 
 void		InsertOffset		(BTreeControlBlockPtr	 btreePtr,
 								 NodeDescPtr			 node,
-								 UInt16					 index,
-								 UInt16					 delta );
+								 u_int16_t				 index,
+								 u_int16_t				 delta );
 
 void		DeleteOffset		(BTreeControlBlockPtr	 btreePtr,
 								 NodeDescPtr			 node,
-								 UInt16					 index );
+								 u_int16_t				 index );
 
 
 /////////////////////////////////////////////////////////////////////////////////
 
-#define GetRecordOffset(btreePtr,node,index)		(*(short *) ((UInt8 *)(node) + (btreePtr)->nodeSize - ((index) << 1) - kOffsetSize))
+#define GetRecordOffset(btreePtr,node,index)		(*(short *) ((u_int8_t *)(node) + (btreePtr)->nodeSize - ((index) << 1) - kOffsetSize))
 
 #if HFS_DIAGNOSTIC
 		#include <sys/systm.h>
 	    #define PRINTIT kprintf
+static void PrintNode(const NodeDescPtr node, u_int16_t nodeSize, u_int32_t nodeNumber);
 #endif /* HFS_DIAGNOSTIC */
 
-static void PrintNode(const NodeDescPtr node, UInt16 nodeSize, UInt32 nodeNumber);
 
 
 
@@ -185,7 +190,7 @@ Result:
 -------------------------------------------------------------------------------*/
 
 OSStatus	GetNode		(BTreeControlBlockPtr	 btreePtr,
-						 UInt32					 nodeNum,
+						 u_int32_t				 nodeNum,
 						 NodeRec				*nodePtr )
 {
 	OSStatus			err;
@@ -215,58 +220,6 @@ OSStatus	GetNode		(BTreeControlBlockPtr	 btreePtr,
 		goto ErrorExit;
 	}
 	++btreePtr->numGetNodes;
-	
-	//
-	// Optimization
-	// Only call CheckNode if the node came from disk.
-	// If it was in the cache, we'll assume its already a valid node.
-	//
-	
-	if ( nodePtr->blockReadFromDisk )	// if we read it from disk then check it
-	{
-		err = CheckNode (btreePtr, nodePtr->buffer);
-
-		if (err != noErr)
-		{	
-		
-		VTOVCB(btreePtr->fileRefNum)->vcbFlags |= kHFS_DamagedVolume;
-
-		  #if HFS_DIAGNOSTIC
-			if (((NodeDescPtr)nodePtr->buffer)->numRecords != 0)
-				PrintNode(nodePtr->buffer, btreePtr->nodeSize, nodeNum);
-		  #endif
-
-			if (DEBUG_BUILD)
-			{
-				// With the removal of bounds checking in IsItAHint(), it's possible that
-				// GetNode() will be called to fetch a clear (all zeroes) node. We want
-				// CheckNode() to fail in this case (it does), however we don't want to assert
-				// this case because it is not really an "error". Returning an error from GetNode()
-				// in this case will cause the hint checking code to ignore the hint and revert to
-				// the full search mode.
-				
-				{
-					UInt32	*cur;
-					UInt32	*lastPlusOne;
-					
-					cur 		= nodePtr->buffer;
-					lastPlusOne = (UInt32 *) ((UInt8 *) cur + btreePtr->nodeSize);
-					
-					while( cur < lastPlusOne )
-					{
-						if( *cur++ != 0 )
-						{
-							Panic ("\pGetNode: CheckNode returned error.");
-							break;
-						}
-					}
-				}
-			}
-			
-			(void) TrashNode (btreePtr, nodePtr);					// ignore error
-			goto ErrorExit;
-		}
-	}
 
 	return noErr;
 
@@ -296,7 +249,7 @@ Result:		noErr		- success
 -------------------------------------------------------------------------------*/
 
 OSStatus	GetNewNode	(BTreeControlBlockPtr	 btreePtr,
-						 UInt32					 nodeNum,
+						 u_int32_t				 nodeNum,
 						 NodeRec				*returnNodePtr )
 {
 	OSStatus			 err;
@@ -331,7 +284,7 @@ OSStatus	GetNewNode	(BTreeControlBlockPtr	 btreePtr,
 	ClearNode (btreePtr, node);						// clear the node
 
 	pos = (char *)node + btreePtr->nodeSize - 2;	// find address of last offset
-	*(UInt16 *)pos = sizeof (BTNodeDescriptor);		// set offset to beginning of free space
+	*(u_int16_t *)pos = sizeof (BTNodeDescriptor);	// set offset to beginning of free space
 
 
 	return noErr;
@@ -427,9 +380,6 @@ Routine:	UpdateNode	-	Mark a node as dirty and call FS Agent to release it.
 
 Function:	Marks a BTree node dirty and informs the FS Agent that it may be released.
 
-			//€€ have another routine that clears & writes a node, so we can call
-			CheckNode from this routine.
-
 Input:		btreePtr		- pointer to BTree control block
 			nodeNum			- number of node to release
 			transactionID	- ID of transaction this node update is a part of
@@ -441,23 +391,19 @@ Result:		noErr		- success
 
 OSStatus	UpdateNode	(BTreeControlBlockPtr	 btreePtr,
 						 NodePtr				 nodePtr,
-						 UInt32					 transactionID,
-						 UInt32					 flags )
+						 u_int32_t				 transactionID,
+						 u_int32_t				 flags )
 {
+#pragma unused(transactionID)
+
 	OSStatus			 err;
 	ReleaseBlockProcPtr	 releaseNodeProc;
 	
 	
 	err = noErr;
 		
-	if (nodePtr->buffer != nil)			//€€ why call UpdateNode if nil ?!?
+	if (nodePtr->buffer != nil)			// Why call UpdateNode if nil ?!?
 	{
-		if (DEBUG_BUILD)
-		{
-			if ( btreePtr->attributes & kBTVariableIndexKeysMask )
-				(void) CheckNode (btreePtr, nodePtr->buffer);
-		}
-
 		releaseNodeProc = btreePtr->releaseBlockProc;
 		err = releaseNodeProc (btreePtr->fileRefNum,
 							   nodePtr,
@@ -478,104 +424,20 @@ ErrorExit:
 
 
 
-/*-------------------------------------------------------------------------------
-
-Routine:	CheckNode	-	Checks the validity of a node.
-
-Function:	Checks the validity of a node by verifying that the fLink and bLink fields
-			are within the forks EOF. The node type must be one of the four known
-			types. The node height must be less than or equal to the tree height. The
-			node must not have more than the maximum number of records, and the record
-			offsets must make sense.
-
-Input:		btreePtr		- pointer to BTree control block
-			node			- pointer to node to check
-						
-Result:		noErr		- success
-			fsBTInvalidNodeErr		- failure
--------------------------------------------------------------------------------*/
-
-OSStatus	CheckNode	(BTreeControlBlockPtr	 btreePtr, NodeDescPtr	 node )
-{
-	SInt32		index;
-	SInt32		maxRecords;
-	UInt32		maxNode;
-	UInt16		nodeSize;
-	UInt16		offset;
-	UInt16		prevOffset;
-
-	nodeSize = btreePtr->nodeSize;
-
-	///////////////////// are fLink and bLink within EOF ////////////////////////
-
-	maxNode = (GetFileControlBlock(btreePtr->fileRefNum)->fcbEOF / nodeSize) - 1;
-
-	if ( (node->fLink > maxNode) || (node->bLink > maxNode) )
-		return fsBTInvalidNodeErr;
-
-	/////////////// check node type (leaf, index, header, map) //////////////////
-
-	if ( (node->kind < kBTLeafNode) || (node->kind > kBTMapNode) )
-		return fsBTInvalidNodeErr;
-
-	///////////////////// is node height > tree depth? //////////////////////////
-
-	if ( node->height > btreePtr->treeDepth )
-		return fsBTInvalidNodeErr;
-
-	//////////////////////// check number of records ////////////////////////////
-		
-	//XXX can we calculate a more accurate minimum record size?
-	maxRecords = ( nodeSize - sizeof (BTNodeDescriptor) ) >> 3;
-
-	if (node->numRecords == 0 || node->numRecords > maxRecords)
-		return fsBTInvalidNodeErr;
-
-	////////////////////////// check record offsets /////////////////////////////
-
-	index = node->numRecords;		/* start index at free space */
-	prevOffset = nodeSize - (index << 1);	/* use 2 bytes past end of free space */
-
-	do {
-		offset = GetRecordOffset (btreePtr, node, index);
-			
-		if (offset & 1)								// offset is odd
-			return fsBTInvalidNodeErr;
-		
-		if (offset >= prevOffset)					// offset >= previous offset
-			return fsBTInvalidNodeErr;
-
-		/* reject keys that overflow record slot */
-		if ((node->kind == kBTLeafNode) &&
-		    (index < node->numRecords) &&	/* ignore free space record */
-		    (CalcKeySize(btreePtr, (KeyPtr) ((Ptr)node + offset)) > (prevOffset - offset))) {
-			return fsBTInvalidNodeErr;
-		}
-		
-		prevOffset = offset;
-	} while ( --index >= 0 );
-
-	if (offset < sizeof (BTNodeDescriptor) )	// first offset < minimum ?
-		return fsBTInvalidNodeErr;
-	
-	return noErr;
-}
-
-
 #if HFS_DIAGNOSTIC
-static void PrintNode(const NodeDescPtr node, UInt16 nodeSize, UInt32 nodeNumber)
+static void PrintNode(const NodeDescPtr node, u_int16_t nodeSize, u_int32_t nodeNumber)
 {
 	struct row {
-		UInt16	word[8];
+		u_int16_t	word[8];
 	};
 	struct row	*offset;
-	UInt16	rows;
-	UInt32	*lp;
+	u_int16_t	rows;
+	u_int32_t	*lp;
 
 	PRINTIT("Dump of B-tree node #%ld ($%08lX)\n", nodeNumber, nodeNumber);
 
 	rows = nodeSize/16;
-	lp = (UInt32*) node;
+	lp = (u_int32_t*) node;
 	offset = 0;
 	
 	while (rows-- > 0)
@@ -620,14 +482,14 @@ Result:		noErr		- success
 
 Boolean		InsertRecord	(BTreeControlBlockPtr	btreePtr,
 							 NodeDescPtr 			node,
-							 UInt16	 				index,
+							 u_int16_t	 			index,
 							 RecordPtr				recPtr,
-							 UInt16					recSize )
+							 u_int16_t				recSize )
 {
-	UInt16		freeSpace;
-	UInt16		indexOffset;
-	UInt16		freeOffset;
-	UInt16		bytesToMove;
+	u_int16_t	freeSpace;
+	u_int16_t	indexOffset;
+	u_int16_t	freeOffset;
+	u_int16_t	bytesToMove;
 	void	   *src;
 	void	   *dst;
 	
@@ -690,28 +552,28 @@ Result:		noErr		- success
 
 Boolean		InsertKeyRecord		(BTreeControlBlockPtr	 btreePtr,
 								 NodeDescPtr 			 node,
-								 UInt16	 				 index,
+								 u_int16_t	 			 index,
 								 KeyPtr					 keyPtr,
-								 UInt16					 keyLength,
+								 u_int16_t				 keyLength,
 								 RecordPtr				 recPtr,
-								 UInt16					 recSize )
+								 u_int16_t				 recSize )
 {
-	UInt16		freeSpace;
-	UInt16		indexOffset;
-	UInt16		freeOffset;
-	UInt16		bytesToMove;
-	UInt8 *		src;
-	UInt8 *		dst;
-	UInt16		keySize;
-	UInt16		rawKeyLength;
-	UInt16		sizeOfLength;
+	u_int16_t		freeSpace;
+	u_int16_t		indexOffset;
+	u_int16_t		freeOffset;
+	u_int16_t		bytesToMove;
+	u_int8_t *		src;
+	u_int8_t *		dst;
+	u_int16_t		keySize;
+	u_int16_t		rawKeyLength;
+	u_int16_t		sizeOfLength;
 	
 	//// calculate actual key size
 
 	if ( btreePtr->attributes & kBTBigKeysMask )
-		keySize = keyLength + sizeof(UInt16);
+		keySize = keyLength + sizeof(u_int16_t);
 	else
-		keySize = keyLength + sizeof(UInt8);
+		keySize = keyLength + sizeof(u_int8_t);
 	
 	if ( M_IsOdd (keySize) )
 		++keySize;			// add pad byte
@@ -732,8 +594,8 @@ Boolean		InsertKeyRecord		(BTreeControlBlockPtr	 btreePtr,
 	indexOffset = GetRecordOffset (btreePtr, node, index);
 	freeOffset	= GetRecordOffset (btreePtr, node, node->numRecords);
 
-	src = ((UInt8 *) node) + indexOffset;
-	dst = ((UInt8 *) src) + keySize + recSize;
+	src = ((u_int8_t *) node) + indexOffset;
+	dst = ((u_int8_t *) src) + keySize + recSize;
 	bytesToMove = freeOffset - indexOffset;
 	if (bytesToMove)
 		MoveRecordsRight (src, dst, bytesToMove);
@@ -746,11 +608,12 @@ Boolean		InsertKeyRecord		(BTreeControlBlockPtr	 btreePtr,
 
 	//// copy record key
 
-	dst = ((UInt8 *) node) + indexOffset;
+	dst = ((u_int8_t *) node) + indexOffset;
 
 	if ( btreePtr->attributes & kBTBigKeysMask )
 	{
-		*((UInt16*) dst)++ = keyLength;		// use keyLength rather than key.length
+		*((u_int16_t *)dst) = keyLength;			// use keyLength rather than key.length
+  		dst = (u_int8_t *) (((u_int16_t *)dst) + 1);
 		rawKeyLength = keyPtr->length16;
 		sizeOfLength = 2;
 	}
@@ -761,7 +624,7 @@ Boolean		InsertKeyRecord		(BTreeControlBlockPtr	 btreePtr,
 		sizeOfLength = 1;
 	}
 	
-	MoveRecordsLeft ( ((UInt8 *) keyPtr) + sizeOfLength, dst, rawKeyLength);	// copy key
+	MoveRecordsLeft ( ((u_int8_t *) keyPtr) + sizeOfLength, dst, rawKeyLength);	// copy key
 
 	// any pad bytes?
 	bytesToMove = keySize - rawKeyLength;
@@ -771,7 +634,7 @@ Boolean		InsertKeyRecord		(BTreeControlBlockPtr	 btreePtr,
 
 	//// copy record data
 
-	dst = ((UInt8 *) node) + indexOffset + keySize;
+	dst = ((u_int8_t *) node) + indexOffset + keySize;
 	MoveRecordsLeft (recPtr, dst, recSize);
 
 	return true;
@@ -794,12 +657,12 @@ Result:		none
 
 void		DeleteRecord	(BTreeControlBlockPtr	btreePtr,
 							 NodeDescPtr 			node,
-							 UInt16	 				index )
+							 u_int16_t	 			index )
 {
-	SInt16		indexOffset;
-	SInt16		nextOffset;
-	SInt16		freeOffset;
-	SInt16		bytesToMove;
+	int16_t		indexOffset;
+	int16_t		nextOffset;
+	int16_t		freeOffset;
+	int16_t		bytesToMove;
 	void	   *src;
 	void	   *dst;
 	
@@ -848,24 +711,24 @@ Boolean
 SearchNode( BTreeControlBlockPtr btreePtr,
 	    NodeDescPtr node,
 	    KeyPtr searchKey,
-	    UInt16 *returnIndex )
+	    u_int16_t *returnIndex )
 {
-	SInt32		lowerBound;
-	SInt32		upperBound;
-	SInt32		index;
-	SInt32		result;
+	int32_t		lowerBound;
+	int32_t		upperBound;
+	int32_t		index;
+	int32_t		result;
 	KeyPtr		trialKey;
-	UInt16		*offset;
+	u_int16_t	*offset;
 	KeyCompareProcPtr compareProc = btreePtr->keyCompareProc;
 
 	lowerBound = 0;
 	upperBound = node->numRecords - 1;
-	offset = (UInt16 *) ((UInt8 *)(node) + (btreePtr)->nodeSize - kOffsetSize);
+	offset = (u_int16_t *) ((u_int8_t *)(node) + (btreePtr)->nodeSize - kOffsetSize);
 	
 	while (lowerBound <= upperBound) {
 		index = (lowerBound + upperBound) >> 1;
 
-		trialKey = (KeyPtr) ((UInt8 *)node + *(offset - index));
+		trialKey = (KeyPtr) ((u_int8_t *)node + *(offset - index));
 		
 		result = compareProc(searchKey, trialKey);
 
@@ -905,14 +768,14 @@ Result:		none
 
 OSStatus	GetRecordByIndex	(BTreeControlBlockPtr	 btreePtr,
 								 NodeDescPtr			 node,
-								 UInt16					 index,
+								 u_int16_t				 index,
 								 KeyPtr					*keyPtr,
-								 UInt8 *				*dataPtr,
-								 UInt16					*dataSize )
+								 u_int8_t *				*dataPtr,
+								 u_int16_t				*dataSize )
 {
-	UInt16		offset;
-	UInt16		nextOffset;
-	UInt16		keySize;
+	u_int16_t		offset;
+	u_int16_t		nextOffset;
+	u_int16_t		keySize;
 	
 	//
 	//	Make sure index is valid (in range 0..numRecords-1)
@@ -930,7 +793,7 @@ OSStatus	GetRecordByIndex	(BTreeControlBlockPtr	 btreePtr,
 		++keySize;	// add pad byte
 
 	offset += keySize;			// add the key length to find data offset
-	*dataPtr = (UInt8 *) node + offset;
+	*dataPtr = (u_int8_t *) node + offset;
 	
 	//// find dataSize
 	nextOffset	= GetRecordOffset (btreePtr, node, index + 1);
@@ -954,9 +817,9 @@ Input:		btreePtr		- pointer to BTree control block
 Result:		- number of bytes used for data and offsets in the node.
 -------------------------------------------------------------------------------*/
 
-UInt16		GetNodeDataSize	(BTreeControlBlockPtr	btreePtr, NodeDescPtr	 node )
+u_int16_t	GetNodeDataSize	(BTreeControlBlockPtr	btreePtr, NodeDescPtr	 node )
 {
-	UInt16 freeOffset;
+	u_int16_t freeOffset;
 	
 	freeOffset = GetRecordOffset (btreePtr, node, node->numRecords);
 	
@@ -977,9 +840,9 @@ Input:		btreePtr		- pointer to BTree control block
 Result:		- number of bytes of free space in the node.
 -------------------------------------------------------------------------------*/
 
-UInt16		GetNodeFreeSize	(BTreeControlBlockPtr	btreePtr, NodeDescPtr	 node )
+u_int16_t		GetNodeFreeSize	(BTreeControlBlockPtr	btreePtr, NodeDescPtr	 node )
 {
-	UInt16	freeOffset;
+	u_int16_t	freeOffset;
 	
 	freeOffset = GetRecordOffset (btreePtr, node, node->numRecords);	//€€ inline?
 	
@@ -1002,14 +865,14 @@ Result:		- offset (in bytes) from beginning of node of record specified by index
 -------------------------------------------------------------------------------*/
 // make this a macro (for inlining)
 #if 0
-UInt16		GetRecordOffset	(BTreeControlBlockPtr	btreePtr,
+u_int16_t	GetRecordOffset	(BTreeControlBlockPtr	btreePtr,
 							 NodeDescPtr			node,
-							 UInt16					index )
+							 u_int16_t				index )
 {
 	void	*pos;
 	
 		
-	pos = (UInt8 *)node + btreePtr->nodeSize - (index << 1) - kOffsetSize;
+	pos = (u_int8_t *)node + btreePtr->nodeSize - (index << 1) - kOffsetSize;
 	
 	return *(short *)pos;
 }
@@ -1031,13 +894,13 @@ Result:		- pointer to record "index".
 -------------------------------------------------------------------------------*/
 // make this a macro (for inlining)
 #if 0
-UInt8 *		GetRecordAddress	(BTreeControlBlockPtr	btreePtr,
+u_int8_t *	GetRecordAddress	(BTreeControlBlockPtr	btreePtr,
 								 NodeDescPtr			node,
-								 UInt16					index )
+								 u_int16_t				index )
 {
-	UInt8 *		pos;
+	u_int8_t *	pos;
 	
-	pos = (UInt8 *)node + GetRecordOffset (btreePtr, node, index);
+	pos = (u_int8_t *)node + GetRecordOffset (btreePtr, node, index);
 	
 	return pos;
 }
@@ -1060,13 +923,13 @@ Input:		btreePtr		- pointer to BTree control block
 Result:		- size of record "index".
 -------------------------------------------------------------------------------*/
 
-UInt16		GetRecordSize		(BTreeControlBlockPtr	btreePtr,
+u_int16_t	GetRecordSize		(BTreeControlBlockPtr	btreePtr,
 								 NodeDescPtr			node,
-								 UInt16					index )
+								 u_int16_t				index )
 {
-	UInt16	*pos;
+	u_int16_t	*pos;
 		
-	pos = (UInt16 *) ((Ptr)node + btreePtr->nodeSize - (index << 1) - kOffsetSize);
+	pos = (u_int16_t *) ((Ptr)node + btreePtr->nodeSize - (index << 1) - kOffsetSize);
 	
 	return  *(pos-1) - *pos;
 }
@@ -1085,15 +948,15 @@ Input:		btreePtr		- pointer to BTree control block
 Result:		- pointer to offset for record "index".
 -------------------------------------------------------------------------------*/
 
-UInt16	   *GetOffsetAddress	(BTreeControlBlockPtr	btreePtr,
+u_int16_t	 *GetOffsetAddress	(BTreeControlBlockPtr	btreePtr,
 								 NodeDescPtr			node,
-								 UInt16					index )
+								 u_int16_t				index )
 {
 	void	*pos;
 	
 	pos = (Ptr)node + btreePtr->nodeSize - (index << 1) -2;
 	
-	return (UInt16 *)pos;
+	return (u_int16_t *)pos;
 }
 
 
@@ -1101,7 +964,7 @@ UInt16	   *GetOffsetAddress	(BTreeControlBlockPtr	btreePtr,
 /*-------------------------------------------------------------------------------
 Routine:	GetChildNodeNum	-	Return child node number from index record "index".
 
-Function:	Returns the first UInt32 stored after the key for record "index".
+Function:	Returns the first u_int32_t stored after the key for record "index".
 
 Assumes:	The node is an Index Node.
 			The key.length stored at record "index" is ODD. //€€ change for variable length index keys
@@ -1113,16 +976,16 @@ Input:		btreePtr		- pointer to BTree control block
 Result:		- child node number from record "index".
 -------------------------------------------------------------------------------*/
 
-UInt32		GetChildNodeNum			(BTreeControlBlockPtr	 btreePtr,
+u_int32_t	GetChildNodeNum			(BTreeControlBlockPtr	 btreePtr,
 									 NodeDescPtr			 nodePtr,
-									 UInt16					 index )
+									 u_int16_t				 index )
 {
-	UInt8 *		pos;
+	u_int8_t *		pos;
 	
 	pos = GetRecordAddress (btreePtr, nodePtr, index);
 	pos += CalcKeySize(btreePtr, (BTreeKey *) pos);		// key.length + size of length field
 	
-	return	*(UInt32 *)pos;
+	return	*(u_int32_t *)pos;
 }
 
 
@@ -1144,11 +1007,11 @@ Result:		none
 
 void		InsertOffset		(BTreeControlBlockPtr	 btreePtr,
 								 NodeDescPtr			 node,
-								 UInt16					 index,
-								 UInt16					 delta )
+								 u_int16_t				 index,
+								 u_int16_t				 delta )
 {
-	UInt16		*src, *dst;
-	UInt16		 numOffsets;
+	u_int16_t	*src, *dst;
+	u_int16_t	 numOffsets;
 	
 	src = GetOffsetAddress (btreePtr, node, node->numRecords);	// point to free offset
 	dst = src - 1; 												// point to new offset
@@ -1178,11 +1041,11 @@ Result:		none
 
 void		DeleteOffset		(BTreeControlBlockPtr	 btreePtr,
 								 NodeDescPtr			 node,
-								 UInt16					 index )
+								 u_int16_t				 index )
 {
-	UInt16		*src, *dst;
-	UInt16		 numOffsets;
-	UInt16		 delta;
+	u_int16_t		*src, *dst;
+	u_int16_t		 numOffsets;
+	u_int16_t		 delta;
 	
 	dst			= GetOffsetAddress (btreePtr, node, index);
 	src			= dst - 1;

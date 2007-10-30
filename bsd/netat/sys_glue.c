@@ -1,23 +1,29 @@
 /*
- * Copyright (c) 2000-2004 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2006 Apple Computer, Inc. All rights reserved.
  *
- * @APPLE_LICENSE_HEADER_START@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. The rights granted to you under the License
+ * may not be used to create, or enable the creation or redistribution of,
+ * unlawful or unlicensed copies of an Apple operating system, or to
+ * circumvent, violate, or enable the circumvention or violation of, any
+ * terms of an Apple operating system software license agreement.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
- * @APPLE_LICENSE_HEADER_END@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /*
  *	Copyright (c) 1995 Apple Computer, Inc. 
@@ -44,6 +50,8 @@
 #include <sys/socketvar.h>
 #include <sys/ioccom.h>
 #include <sys/uio_internal.h>
+#include <sys/file.h>
+#include <sys/vnode.h>
 
 #include <sys/sysctl.h>
 
@@ -55,25 +63,29 @@
 #include <netat/at_pcb.h>
 #include <netat/at_var.h>
 #include <netat/routing_tables.h>
+#include <netat/adsp.h>
+#include <netat/adsp_internal.h>
+#include <netat/asp.h>
+#include <netat/atp.h>
 #include <netat/debug.h>
+
+int _ATkqfilter(struct fileproc *, struct knote *, vfs_context_t);
+int _ATselect(struct fileproc *, int, void *, vfs_context_t);
+int _ATioctl(struct fileproc *, u_long, caddr_t, vfs_context_t);
+int _ATwrite(struct fileproc *, struct uio *, int, vfs_context_t);
+int _ATread(struct fileproc *, struct uio *, int, vfs_context_t);
+int _ATclose(struct fileglob *, vfs_context_t);
+
+int _ATrw(struct fileproc *, enum uio_rw, struct uio *, vfs_context_t);
 
 extern struct atpcb ddp_head;
 extern lck_mtx_t * atalk_mutex;
-
-extern void 
-  ddp_putmsg(gref_t *gref, gbuf_t *m),
-  elap_wput(gref_t *gref, gbuf_t *m),
-  atp_wput(gref_t *gref, gbuf_t *m),
-  asp_wput(gref_t *gref, gbuf_t *m),
-#ifdef AURP_SUPPORT
-  aurp_wput(gref_t *gref, gbuf_t *m),
-#endif
-  adsp_wput(gref_t *gref, gbuf_t *m);
   
 int atp_free_cluster_timeout_set = 0;
 
+int gref_alloc(gref_t **);
 
-void atalk_putnext(gref_t *gref, gbuf_t *m);
+
 /* bms:  make gref_close non static so its callable from kernel */
 int gref_close(gref_t *gref);
 
@@ -81,9 +93,9 @@ SYSCTL_DECL(_net_appletalk);
 dbgBits_t dbgBits;
 SYSCTL_STRUCT(_net_appletalk, OID_AUTO, debug, CTLFLAG_WR, 
 	      &dbgBits, dbgBits, "AppleTalk Debug Flags");
-volatile int RouterMix = RT_MIX_DEFAULT; /* default for nbr of ppsec */
+int RouterMix = RT_MIX_DEFAULT; /* default for nbr of ppsec */
 SYSCTL_INT(_net_appletalk, OID_AUTO, routermix, CTLFLAG_WR, 
-	   (int *)&RouterMix, 0, "Appletalk RouterMix");
+			&RouterMix, 0, "Appletalk RouterMix");
 at_ddp_stats_t at_ddp_stats;		/* DDP statistics */
 SYSCTL_STRUCT(_net_appletalk, OID_AUTO, ddpstats, CTLFLAG_RD,
 	      &at_ddp_stats, at_ddp_stats, "AppleTalk DDP Stats");
@@ -91,9 +103,10 @@ SYSCTL_STRUCT(_net_appletalk, OID_AUTO, ddpstats, CTLFLAG_RD,
 static void ioccmd_t_32_to_64( ioccmd_t *from_p, user_ioccmd_t *to_p );
 static void ioccmd_t_64_to_32( user_ioccmd_t *from_p, ioccmd_t *to_p );
 
-atlock_t refall_lock;
+extern lck_mtx_t *atalk_cluster_lock;
+caddr_t	atp_free_cluster_list = NULL;
 
-caddr_t	atp_free_cluster_list = 0;
+void gref_wput(gref_t *, gbuf_t *m);
 
 void gref_wput(gref, m)
 	gref_t *gref;
@@ -147,7 +160,9 @@ int _ATsocket(proto, err, proc)
 
 	case ATPROTO_ATP:
 	case ATPROTO_ASP:
+#ifdef AURP_SUPPORT
 	case ATPROTO_AURP:
+#endif
 	case ATPROTO_ADSP:
 		break;
 	default:
@@ -264,9 +279,9 @@ int _ATputmsg(fd, ctlptr, datptr, flags, err, proc)
 	return rc;
 }
 
-int _ATclose(fg, proc)
-	struct fileglob *fg;
-	struct proc *proc;
+int _ATclose(
+	struct fileglob *fg,
+	__unused vfs_context_t ctx)
 {
 	int err;
 	gref_t *gref;
@@ -280,25 +295,25 @@ int _ATclose(fg, proc)
 	return err;
 }
 
-int _ATrw(fp, rw, uio, ext)
-     void *fp;
+int _ATrw(fp, rw, uio, ctx)
+     struct fileproc *fp;
      enum uio_rw rw;
      struct uio *uio;
-     int ext;
+	 vfs_context_t ctx;
 {
-    int s, err, len, clen = 0, res;
+    int err, len, clen = 0, res;
     gref_t *gref;
     gbuf_t *m, *mhead, *mprev;
+	proc_t p = vfs_context_proc(ctx);
 
 	/* no need to get/drop iocount as the fp already has one */
-    if ((err = atalk_getref_locked(fp, 0, &gref, 0, 1)) != 0)
+    if ((err = atalk_getref_locked(fp, 0, &gref, p, 1)) != 0)
     	return err;
 
 	// LP64todo - fix this!
     if ((len = uio_resid(uio)) == 0)
     	return 0;
 
-    ATDISABLE(s, gref->lock);
 
     if (rw == UIO_READ) {
 	KERNEL_DEBUG(DBG_ADSP_ATRW, 0, gref, len, gref->rdhead, 0);
@@ -306,23 +321,18 @@ int _ATrw(fp, rw, uio, ext)
 		gref->sevents |= POLLMSG;
 		err = msleep(&gref->event, atalk_mutex, PSOCK | PCATCH, "AT read", 0);
 		gref->sevents &= ~POLLMSG;
-		if (err != 0) {
-			ATENABLE(s, gref->lock);
+		if (err != 0)
 			return err;
-		}
 		KERNEL_DEBUG(DBG_ADSP_ATRW, 1, gref, gref->rdhead, mhead, gbuf_next(mhead));
 	}
 
-	if (gref->errno) {
-		ATENABLE(s, gref->lock);
+	if (gref->errno)
 		return EPIPE;
-	}
 	if ((gref->rdhead = gbuf_next(mhead)) == 0)
 		gref->rdtail = 0;
 
 	KERNEL_DEBUG(DBG_ADSP_ATRW, 2, gref, gref->rdhead, mhead, gbuf_next(mhead));
 
-	ATENABLE(s, gref->lock);
 
 //##### LD TEST 08/05
 //	simple_lock(&gref->lock);
@@ -354,12 +364,10 @@ int _ATrw(fp, rw, uio, ext)
 			gbuf_cont(mprev) = 0;
 		else
 			mhead = 0;
-		ATDISABLE(s, gref->lock);
 		if (gref->rdhead == 0)
 			gref->rdtail = m;
 		gbuf_next(m) = gref->rdhead;
 		gref->rdhead = m;
-		ATENABLE(s, gref->lock);
 	}
 	if (mhead)
 		gbuf_freem(mhead);
@@ -372,14 +380,11 @@ int _ATrw(fp, rw, uio, ext)
 			gref->sevents |= POLLSYNC;
 			err = msleep(&gref->event, atalk_mutex, PSOCK | PCATCH, "AT write", 0);
 			gref->sevents &= ~POLLSYNC;
-			if (err != 0) {
-				ATENABLE(s, gref->lock);
+			if (err != 0)
 				return err;
-			}
 		}
 	}
 
-	ATENABLE(s, gref->lock);
 
 	/* allocate a buffer to copy in the write data */
 	if ((m = gbuf_alloc(AT_WR_OFFSET+len, PRI_MED)) == 0)
@@ -404,32 +409,30 @@ int _ATrw(fp, rw, uio, ext)
   return 0;
 } /* _ATrw */
 
-int _ATread(fp, uio, cred, flags, p)
-	struct fileproc *fp;
-	struct uio *uio;
-	void *cred;
-	int flags;
-	struct proc *p;
+int _ATread(
+	struct fileproc *fp,
+	struct uio *uio,
+	__unused int flags,
+	vfs_context_t ctx)
 {
      int stat;
 
 	atalk_lock();
-	stat = _ATrw(fp, UIO_READ, uio, 0);
+	stat = _ATrw(fp, UIO_READ, uio, ctx);
 	atalk_unlock();
 	return stat;
 }
 
-int _ATwrite(fp, uio, cred, flags, p)
-	struct fileproc *fp;
-	struct uio *uio;
-	void *cred;
-	int flags;
-	struct proc *p;
+int _ATwrite(
+	struct fileproc *fp,
+	struct uio *uio,
+	__unused int flags,
+	vfs_context_t ctx)
 {
-     int stat;
+	int stat;
 
 	atalk_lock();
-	stat = _ATrw(fp, UIO_WRITE, uio, 0);
+	stat = _ATrw(fp, UIO_WRITE, uio, ctx);
 	atalk_unlock();
 
 	return stat;
@@ -440,7 +443,7 @@ int _ATwrite(fp, uio, cred, flags, p)
 /* bms:  update to be callable from kernel */
 int at_ioctl(gref_t *gref, u_long cmd, caddr_t arg, int fromKernel)
 {
-    int s, err = 0, len;
+    int err = 0, len;
     u_int size;
     gbuf_t *m, *mdata;
     ioc_t *ioc;
@@ -520,7 +523,6 @@ int at_ioctl(gref_t *gref, u_long cmd, caddr_t arg, int fromKernel)
 	gref_wput(gref, m);
 
     /* wait for the ioc ack */
-    ATDISABLE(s, gref->lock);
     while ((m = gref->ichead) == 0) {
         gref->sevents |= POLLPRI;
 #ifdef APPLETALK_DEBUG
@@ -529,7 +531,6 @@ int at_ioctl(gref_t *gref, u_long cmd, caddr_t arg, int fromKernel)
 		err = msleep(&gref->iocevent, atalk_mutex, PSOCK | PCATCH, "AT ioctl", 0);
 		gref->sevents &= ~POLLPRI;
 		if (err != 0) {
-			ATENABLE(s, gref->lock);
 #ifdef APPLETALK_DEBUG
 			kprintf("at_ioctl: EINTR\n");
 #endif
@@ -543,7 +544,6 @@ int at_ioctl(gref_t *gref, u_long cmd, caddr_t arg, int fromKernel)
 
 	gref->ichead = gbuf_next(m);
 
-	ATENABLE(s, gref->lock);
 
 #ifdef APPLETALK_DEBUG
 	kprintf("at_ioctl: woke up from ioc sleep gref = 0x%x\n", 
@@ -600,11 +600,11 @@ l_done:
 	return err;
 } /* at_ioctl */
 
-int _ATioctl(fp, cmd, arg, proc)
-	void *fp;
-	u_long cmd;
-	register caddr_t arg;
-	void *proc;
+int _ATioctl(
+	struct fileproc *fp,
+	u_long cmd,
+	register caddr_t arg,
+	__unused vfs_context_t ctx)
 {
 	int err;
 	gref_t *gref;
@@ -624,24 +624,31 @@ int _ATioctl(fp, cmd, arg, proc)
 	return err;
 }
 
-int _ATselect(fp, which, wql, proc)
+int _ATselect(fp, which, wql, ctx)
 	struct fileproc *fp;
 	int which;
 	void * wql;
-	struct proc *proc;
+	vfs_context_t ctx;
 {
-	int s, err, rc = 0;
+	int err, rc = 0;
 	gref_t *gref;
+	proc_t proc = vfs_context_proc(ctx);
+
+	/* Radar 4128949: Drop the proc_fd lock here to avoid lock inversion issues with the other AT calls
+      * select() is already holding a reference on the fd, so it won't go away during the time it is unlocked.
+      */
+	proc_fdunlock(proc);
 
 	atalk_lock();
 	/* no need to drop the iocount as select covers that */
 	err = atalk_getref_locked(fp, 0, &gref, 0, 0);
 	atalk_unlock();
 
+	/* Safe to re-grab the proc_fdlock at that point */
+	proc_fdlock(proc);
 	if (err != 0)
 		rc = 1;
 	else {
-	     ATDISABLE(s, gref->lock);
 	     if (which == FREAD) {
 		  if (gref->rdhead || (gref->readable && (*gref->readable)(gref)))
 		       rc = 1;
@@ -661,16 +668,15 @@ int _ATselect(fp, which, wql, proc)
 		  } else
 		       rc = 1;
 	     }
-	     ATENABLE(s, gref->lock);
 	}
 
 	return rc;
 }
 
-int _ATkqfilter(fp, kn, p)
-	struct fileproc *fp;
-	struct knote *kn;
-	struct proc *p;
+int _ATkqfilter(
+	__unused struct fileproc *fp,
+	__unused struct knote *kn,
+	__unused vfs_context_t ctx)
 {
 	return (EOPNOTSUPP);
 }
@@ -679,9 +685,7 @@ void atalk_putnext(gref, m)
 	gref_t *gref;
 	gbuf_t *m;
 {
-	int s;
 
-	ATDISABLE(s, gref->lock);
 
 	/* *** potential leak? *** */
 	gbuf_next(m) = 0;
@@ -726,7 +730,6 @@ void atalk_putnext(gref, m)
 		    }
 	} /* switch gbuf_type(m) */
 
-	ATENABLE(s, gref->lock);
 } /* atalk_putnext */
 
 void atalk_enablew(gref)
@@ -739,9 +742,7 @@ void atalk_enablew(gref)
 void atalk_flush(gref)
 	gref_t *gref;
 {
-	int s;
 
-	ATDISABLE(s, gref->lock);
 	if (gref->rdhead) {
 		gbuf_freel(gref->rdhead);
 		gref->rdhead = 0;
@@ -750,7 +751,6 @@ void atalk_flush(gref)
 		gbuf_freel(gref->ichead);
 		gref->ichead = 0;
 	}
-	ATENABLE(s, gref->lock);
 }
 
 /*
@@ -761,8 +761,6 @@ void atalk_notify(gref, errno)
 	register gref_t *gref;
 	int errno;
 {
-	int s;
-	ATDISABLE(s, gref->lock);
 
 	if (gref->atpcb_socket) {
 	    /* For DDP --
@@ -793,43 +791,37 @@ void atalk_notify(gref, errno)
 		}
 	    }
 	}
-	ATENABLE(s, gref->lock);
 } /* atalk_notify */
 
 void atalk_notify_sel(gref)
 	gref_t *gref;
 {
-	int s;
 
-	ATDISABLE(s, gref->lock);
 	if (gref->sevents & POLLIN) {
 		gref->sevents &= ~POLLIN;
 		selwakeup(&gref->si);
 	}
-	ATENABLE(s, gref->lock);
 }
 
 int atalk_peek(gref, event)
 	gref_t *gref;
 	unsigned char *event;
 {
-	int s, rc;
+	int rc;
 
-	ATDISABLE(s, gref->lock);
 	if (gref->rdhead) {
 		*event = *gbuf_rptr(gref->rdhead);
 		rc = 0;
 	} else
 		rc = -1;
-	ATENABLE(s, gref->lock);
 
 	return rc;
 }
 
+#if 0
 static gbuf_t *trace_msg;
 
-void atalk_settrace(str, p1, p2, p3, p4, p5)
-	char *str;
+void atalk_settrace(char * str, p1, p2, p3, p4, p5)
 {
 	int len;
 	gbuf_t *m, *nextm;
@@ -859,23 +851,22 @@ void atalk_gettrace(m)
 		trace_msg = 0;
 	}
 }
+#endif /* 0 */
 
 #define GREF_PER_BLK 32
 static gref_t *gref_free_list = 0;
+extern gbuf_t *atp_resource_m;
 
 int gref_alloc(grefp)
 	gref_t **grefp;
 {
-	extern gbuf_t *atp_resource_m;
-	int i, s;
+	int i;
 	gbuf_t *m;
 	gref_t *gref, *gref_array;
 
 	*grefp = (gref_t *)NULL;
 
-	ATDISABLE(s, refall_lock);
 	if (gref_free_list == 0) {
-		ATENABLE(s, refall_lock);
 #ifdef APPLETALK_DEBUG
 		kprintf("gref_alloc: gbufalloc size=%d\n", GREF_PER_BLK*sizeof(gref_t));
 #endif
@@ -885,7 +876,6 @@ int gref_alloc(grefp)
 		gref_array = (gref_t *)gbuf_rptr(m);
 		for (i=0; i < GREF_PER_BLK-1; i++)
 			gref_array[i].atpcb_next = (gref_t *)&gref_array[i+1];
-		ATDISABLE(s, refall_lock);
 		gbuf_cont(m) = atp_resource_m;
 		atp_resource_m = m;
 		gref_array[i].atpcb_next = gref_free_list;
@@ -894,10 +884,6 @@ int gref_alloc(grefp)
 
 	gref = gref_free_list;
 	gref_free_list = gref->atpcb_next;
-	ATENABLE(s, refall_lock);
-	ATLOCKINIT(gref->lock);
-//### LD Test 08/05/98
-//	simple_lock_init(&gref->lock);
 	ATEVENTINIT(gref->event);
 	ATEVENTINIT(gref->iocevent);
 
@@ -911,7 +897,7 @@ int gref_alloc(grefp)
 /* bms:  make gref_close callable from kernel */
 int gref_close(gref_t *gref)
 {
-	int s, rc;
+	int rc;
 
 	switch (gref->proto) {
 
@@ -939,111 +925,73 @@ int gref_close(gref_t *gref)
 		selthreadclear(&gref->si);
 
 		/* from original gref_free() */
-		ATDISABLE(s, refall_lock);
 		bzero((char *)gref, sizeof(gref_t));
 		gref->atpcb_next = gref_free_list;
 		gref_free_list = gref;
-		ATENABLE(s, refall_lock);
 	}
 
 	return rc;
 }
 
-/* 
-   Buffer Routines
-
-   *** Some to be replaced with mbuf routines, some to be re-written
-       as mbuf routines (and moved to kern/uicp_mbuf.c or sys/mbuf.h?).
-   ***
-
-*/
-
-/*
- * LD 5/12/97 Added for MacOSX, defines a m_clattach function that:
- * "Allocates an mbuf structure and attaches an external cluster."
- */
-
-struct mbuf *m_clattach(extbuf, extfree, extsize, extarg, wait)
-	caddr_t extbuf;	
-	void (*extfree)(caddr_t , u_int, caddr_t);
-	u_int extsize;
-	caddr_t extarg;
-	int wait;
-{
-        struct mbuf *m;
-
-        if ((m = m_gethdr(wait, MSG_DATA)) == NULL)
-                return (NULL);
-
-        m->m_ext.ext_buf = extbuf;
-        m->m_ext.ext_free = extfree;
-        m->m_ext.ext_size = extsize;
-        m->m_ext.ext_arg = extarg;
-        m->m_ext.ext_refs.forward = 
-	  m->m_ext.ext_refs.backward = &m->m_ext.ext_refs;
-        m->m_data = extbuf;
-        m->m_flags |= M_EXT;
-
-        return (m);
-}
-
-
-
 /*
 	temp fix for bug 2731148  - until this code is re-written to use standard clusters
 	Deletes any free clusters on the free list.
 */
-void atp_delete_free_clusters()
+void atp_delete_free_clusters(__unused void *junk)
 {
 	caddr_t cluster;
 	caddr_t cluster_list;
-	
-	
+
 	/* check for free clusters on the free_cluster_list to be deleted */
-	MBUF_LOCK();	/* lock used by mbuf routines */
 
-		untimeout(&atp_delete_free_clusters, NULL);
-		atp_free_cluster_timeout_set = 0;
+	untimeout(&atp_delete_free_clusters, NULL);
 
-		cluster_list = atp_free_cluster_list;
-		atp_free_cluster_list = 0;
-		
-	MBUF_UNLOCK();
-	
-	while (cluster = cluster_list)
+	lck_mtx_lock(atalk_cluster_lock);
+
+	atp_free_cluster_timeout_set = 0;
+
+	cluster_list = atp_free_cluster_list;
+	atp_free_cluster_list = NULL;
+
+	lck_mtx_unlock(atalk_cluster_lock);
+
+	while ((cluster = cluster_list))
 	{
 		cluster_list = *((caddr_t*)cluster);
 		FREE(cluster, M_MCLUST);
 	}
-	
 }
 
 
 /* 
    Used as the "free" routine for over-size clusters allocated using
-   m_lgbuf_alloc(). Called by m_free while under MBUF_LOCK.
+   m_lgbuf_alloc().
 */
 
-void m_lgbuf_free(buf, size, arg)
-     caddr_t buf;
-     u_int size;
-     caddr_t arg; /* not needed, but they're in m_free() */
+void m_lgbuf_free(caddr_t, u_int, caddr_t);
+
+void m_lgbuf_free(
+     caddr_t buf,
+     __unused u_int size,
+     __unused caddr_t arg) /* not needed, but they're in m_free() */
 {
-	/* FREE(buf, M_MCLUST); - can't free here - called from m_free while under lock */
-	
+	int t;
+
 	/* move to free_cluster_list to be deleted later */
 	caddr_t cluster = (caddr_t)buf;
-	
-	/* don't need a lock because this is only called called from m_free which */
-	/* is under MBUF_LOCK */
+
+	lck_mtx_lock(atalk_cluster_lock);
+
 	*((caddr_t*)cluster) = atp_free_cluster_list;
 	atp_free_cluster_list = cluster;
-	
-	if (atp_free_cluster_timeout_set == 0)
-	{
+
+	if ((t = atp_free_cluster_timeout_set) == 0)
 		atp_free_cluster_timeout_set = 1;
+
+	lck_mtx_unlock(atalk_cluster_lock);
+
+	if (t == 0)
 		timeout(&atp_delete_free_clusters, NULL, (1 * HZ));
-	}
 }
 
 /*
@@ -1057,8 +1005,17 @@ struct mbuf *m_lgbuf_alloc(size, wait)
 	struct mbuf *m;
 
 	if (atp_free_cluster_list)
-		atp_delete_free_clusters();	/* delete any free clusters on the free list */
-	
+		atp_delete_free_clusters(NULL);	/* delete any free clusters on the free list */
+
+	/* Radar 5398094 
+	 * check that the passed size is within admissible boundaries
+	 * The max data size being ASP of 4576 (8 * ATP_DATA_SIZE),
+	 * allow for extra space for control data
+	 */
+
+	if (size < 0 || size > (ATP_DATA_SIZE * 10))	
+		return(NULL);
+
 	/* If size is too large, allocate a cluster, otherwise, use the
 	   standard mbuf allocation routines.*/
 	if (size > MCLBYTES) {
@@ -1069,14 +1026,14 @@ struct mbuf *m_lgbuf_alloc(size, wait)
 			return(NULL);
 		}
 		if (NULL == 
-		    (m = m_clattach(buf, m_lgbuf_free, size, 0, 
+		    (m = m_clattach(NULL, MSG_DATA, buf, m_lgbuf_free, size, 0, 
 				    (wait)? M_WAIT: M_DONTWAIT))) {
 			m_lgbuf_free(buf, 0, 0);
 			return(NULL);
 		}
 	} else {
 		m = m_gethdr(((wait)? M_WAIT: M_DONTWAIT), MSG_DATA);
-		if (m && (size > MHLEN)) {
+		if (m && ((size_t)size > MHLEN)) {
 			MCLGET(m, ((wait)? M_WAIT: M_DONTWAIT));
 			if (!(m->m_flags & M_EXT)) {
 				(void)m_free(m);
@@ -1104,8 +1061,8 @@ gbuf_t *gbuf_alloc_wait(size, wait)
 	/* Standard mbuf allocation routines assume that the caller
 	   will set the size. */
 	if (m) {
-		(struct mbuf *)m->m_pkthdr.len = size;
-		(struct mbuf *)m->m_len = size;
+		m->m_pkthdr.len = size;
+		m->m_len = size;
 	}
 
 	return(m);
@@ -1264,8 +1221,9 @@ l_cont:	prev_m = 0;
 		len -= buf_len;
 		goto l_cont;
 
-	} else
-		return 1;
+	}
+
+	return 1;
 }
 
 /*

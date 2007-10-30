@@ -1,23 +1,29 @@
 /*
  * Copyright (c) 2000 Apple Computer, Inc. All rights reserved.
  *
- * @APPLE_LICENSE_HEADER_START@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. The rights granted to you under the License
+ * may not be used to create, or enable the creation or redistribution of,
+ * unlawful or unlicensed copies of an Apple operating system, or to
+ * circumvent, violate, or enable the circumvention or violation of, any
+ * terms of an Apple operating system software license agreement.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
- * @APPLE_LICENSE_HEADER_END@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /* 
  * Reset.c
@@ -72,10 +78,8 @@ int RXFReset(sp, f)		/* (CCBPtr sp, ADSP_FRAMEPtr f) */
     unsigned int hi;
     register gbuf_t *mp;
     register struct adspcmd *pb;
-    int s;
 
-    ATDISABLE(s, sp->lock);
-    pktFirstByteSeq = netdw(UAL_VALUE(f->pktFirstByteSeq));
+    pktFirstByteSeq = UAL_VALUE_NTOH(f->pktFirstByteSeq);
     
     hi = sp->recvSeq + CalcRecvWdw(sp);
 
@@ -85,7 +89,7 @@ int RXFReset(sp, f)		/* (CCBPtr sp, ADSP_FRAMEPtr f) */
     if (BETWEEN(sp->recvSeq, pktFirstByteSeq, hi)) /* Is this acceptable? */
     {
 	sp->recvSeq = pktFirstByteSeq;
-	while (mp = sp->rbuf_mb) { /* clear the receive queue */
+	while ((mp = sp->rbuf_mb)) { /* clear the receive queue */
 	    sp->rbuf_mb = gbuf_next(mp);
 	    gbuf_freem(mp);
 	}
@@ -114,7 +118,6 @@ int RXFReset(sp, f)		/* (CCBPtr sp, ADSP_FRAMEPtr f) */
 	sp->callSend = 1;
     }
 
-    ATENABLE(s, sp->lock);
     return 0;
 }
 
@@ -137,13 +140,11 @@ int RXFResetAck(sp, f)		/* (CCBPtr sp, ADSP_FRAMEPtr f) */
     ADSP_FRAMEPtr f;
 {
     unsigned int  PktNextRecvSeq;
-    int s;
 
     if (sp->frpb == 0)		/* Not expecting frwd reset Ack packet */
 	return 1;
 
-    ATDISABLE(s, sp->lock);
-    PktNextRecvSeq = netdw(UAL_VALUE(f->pktNextRecvSeq));
+    PktNextRecvSeq = UAL_VALUE_NTOH(f->pktNextRecvSeq);
 
     if (BETWEEN(sp->sendSeq, PktNextRecvSeq, sp->sendWdwSeq+1)) {
 	struct adspcmd *pb;
@@ -170,7 +171,6 @@ int RXFResetAck(sp, f)		/* (CCBPtr sp, ADSP_FRAMEPtr f) */
 	}
     }
 
-    ATENABLE(s, sp->lock);
     return 0;
 }
 
@@ -193,7 +193,6 @@ int adspReset(sp, pb)		/* (DSPPBPtr pb) */
     CCBPtr sp;
     struct adspcmd *pb;
 {
-    int s;
     register gbuf_t *mp;
     register struct adspcmd *rpb;
 	
@@ -207,9 +206,8 @@ int adspReset(sp, pb)		/* (DSPPBPtr pb) */
 	return EINVAL;
     }
 	
-    ATDISABLE(s, sp->lock);
 
-    while (mp = sp->sbuf_mb) { /* clear the send queue */
+    while ((mp = sp->sbuf_mb)) { /* clear the send queue */
 	sp->sbuf_mb = gbuf_next(mp);
 	gbuf_freem(mp);
     }
@@ -222,20 +220,19 @@ int adspReset(sp, pb)		/* (DSPPBPtr pb) */
     sp->sendCtl |= B_CTL_FRESET;
 
     sp->firstRtmtSeq = sp->sendSeq; /* Reset sequence #'s */
-    if (mp = gbuf_copym(pb->mp)) {	/* copy the parameter block */
-	    adspioc_ack(0, pb->ioc, pb->gref); /* release user */
+    if ((mp = gbuf_copym(pb->mp))) {	/* copy the parameter block */
+	    adspioc_ack(0, (gbuf_t *)pb->ioc, pb->gref); /* release user */
 	    rpb = (struct adspcmd *)gbuf_rptr(mp);
 	    rpb->ioc = 0;		/* unlink copy */
 	    rpb->mp = mp;
 
-	    qAddToEnd(&sp->frpb, rpb); 
+	    qAddToEnd((struct qlink **)&sp->frpb, (struct qlink *)rpb); 
 				/* Hold on to pb (will be completed when */
 				/* forward reset ack is received). */
     } else {			/* assume it will work... but keep no
 				 * bookkeeping for it.  yetch! */
-	    adspioc_ack(0, pb->ioc, pb->gref);
+	    adspioc_ack(0, (gbuf_t *)pb->ioc, pb->gref);
     }
-    ATENABLE(s, sp->lock);
 
     CheckSend(sp);
     return STR_IGNORE;

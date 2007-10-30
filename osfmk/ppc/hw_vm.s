@@ -1,23 +1,29 @@
 /*
  * Copyright (c) 2000-2005 Apple Computer, Inc. All rights reserved.
  *
- * @APPLE_LICENSE_HEADER_START@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. The rights granted to you under the License
+ * may not be used to create, or enable the creation or redistribution of,
+ * unlawful or unlicensed copies of an Apple operating system, or to
+ * circumvent, violate, or enable the circumvention or violation of, any
+ * terms of an Apple operating system software license agreement.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
- * @APPLE_LICENSE_HEADER_END@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 #include <assym.s>
 #include <debug.h>
@@ -31,8 +37,6 @@
 #include <ppc/Performance.h>
 #include <ppc/exception.h>
 #include <mach/ppc/vm_param.h>
-
-#define INSTRUMENT 0
 	
 			.text
 
@@ -199,53 +203,28 @@ hamRescan:	lwz		r4,mpVAddr(r31)				; Get the new vaddr top half
 			mr		r29,r4						; Save top half of vaddr for later
 			mr		r30,r5						; Save bottom half of vaddr for later
 			
-#if INSTRUMENT
-			mfspr	r0,pmc1						; INSTRUMENT - saveinstr[16] - Take stamp before mapSearchFull
-			stw		r0,0x6100+(16*16)+0x0(0)	; INSTRUMENT - Save it
-			mfspr	r0,pmc2						; INSTRUMENT - Get stamp
-			stw		r0,0x6100+(16*16)+0x4(0)	; INSTRUMENT - Save it
-			mfspr	r0,pmc3						; INSTRUMENT - Get stamp
-			stw		r0,0x6100+(16*16)+0x8(0)	; INSTRUMENT - Save it
-			mfspr	r0,pmc4						; INSTRUMENT - Get stamp
-			stw		r0,0x6100+(16*16)+0xC(0)	; INSTRUMENT - Save it
-#endif			
-			
 			bl		EXT(mapSearchFull)			; Go see if we can find it
 			
-#if INSTRUMENT
-			mfspr	r0,pmc1						; INSTRUMENT - saveinstr[14] - Take stamp after mapSearchFull
-			stw		r0,0x6100+(17*16)+0x0(0)	; INSTRUMENT - Save it
-			mfspr	r0,pmc2						; INSTRUMENT - Get stamp
-			stw		r0,0x6100+(17*16)+0x4(0)	; INSTRUMENT - Save it
-			mfspr	r0,pmc3						; INSTRUMENT - Get stamp
-			stw		r0,0x6100+(17*16)+0x8(0)	; INSTRUMENT - Save it
-			mfspr	r0,pmc4						; INSTRUMENT - Get stamp
-			stw		r0,0x6100+(17*16)+0xC(0)	; INSTRUMENT - Save it
-#endif			
-
-			rlwinm	r0,r24,0,mpType				; Isolate the mapping type
-			rlwinm	r23,r23,12,0,19				; Convert standard block size to bytes
-			cmplwi	r0,mpNest					; Is this a nested type?
-			cmplwi	cr1,r0,mpLinkage			; Linkage type?
-			cror	cr0_eq,cr1_eq,cr0_eq		; Nested or linkage type?
+			li		r22,lo16(0x800C)			; Get 0xFFFF800C
+			rlwinm	r0,r24,mpBSub+1,31,31		; Rotate to get 0 if 4K bsu or 1 if 32MB bsu
+			addi	r23,r23,1					; Get actual length
+			rlwnm	r22,r22,r0,27,31			; Rotate to get 12 or 25
 			lis		r0,0x8000					; Get 0xFFFFFFFF80000000
-			li		r22,0						; Assume high part of size is 0
-			bne++	hamNoNest					; This is not a nested or linkage type
-			
-			rlwinm	r22,r23,16,16,31			; Convert partially converted size to segments
-			rlwinm	r23,r23,16,0,3				; Finish shift
-			
-hamNoNest:	add		r0,r0,r0					; Get 0xFFFFFFFF00000000 for 64-bit or 0 for 32-bit
+			slw		r9,r23,r22					; Isolate the low part
+			rlwnm	r22,r23,r22,22,31			; Extract the high order
+			addic	r23,r9,-4096				; Get the length to the last page
+			add		r0,r0,r0					; Get 0xFFFFFFFF00000000 for 64-bit or 0 for 32-bit
+			addme	r22,r22						; Do high order as well...
 			mr.		r3,r3						; Did we find a mapping here?
-			or		r0,r0,r30					; Make sure a carry will propagate all the way in 64-bit
-			crmove	cr5_eq,cr0_eq				; Remember that if we found the mapping
+			or		r0,r30,r0					; Fill high word of 64-bit with 1s so we will properly carry
+			bne--	hamOverlay					; We found a mapping, this is no good, can not double map...
+
 			addc	r9,r0,r23					; Add size to get last page in new range
 			or.		r0,r4,r5					; Are we beyond the end?
 			adde	r8,r29,r22					; Add the rest of the length on
-			bne--	cr5,hamOverlay				; Yeah, this is no good, can not double map...
 			rlwinm	r9,r9,0,0,31				; Clean top half of sum
 			beq++	hamFits						; We are at the end...
-			
+
 			cmplw	cr1,r9,r5					; Is the bottom part of our end less?
 			cmplw	r8,r4						; Is our end before the next (top part)
 			crand	cr0_eq,cr0_eq,cr1_lt		; Is the second half less and the first half equal?
@@ -283,39 +262,24 @@ hamFits:	mr.		r21,r21						; Do we already have the exclusive lock?
 			
 			.align	5
 
-hamGotX:	
-#if INSTRUMENT
-			mfspr	r3,pmc1						; INSTRUMENT - saveinstr[18] - Take stamp before mapSearchFull
-			stw		r3,0x6100+(18*16)+0x0(0)	; INSTRUMENT - Save it
-			mfspr	r3,pmc2						; INSTRUMENT - Get stamp
-			stw		r3,0x6100+(18*16)+0x4(0)	; INSTRUMENT - Save it
-			mfspr	r3,pmc3						; INSTRUMENT - Get stamp
-			stw		r3,0x6100+(18*16)+0x8(0)	; INSTRUMENT - Save it
-			mfspr	r3,pmc4						; INSTRUMENT - Get stamp
-			stw		r4,0x6100+(18*16)+0xC(0)	; INSTRUMENT - Save it
-#endif			
-			mr		r3,r28						; Get the pmap to insert into
+hamGotX:	mr		r3,r28						; Get the pmap to insert into
 			mr		r4,r31						; Point to the mapping
 			bl		EXT(mapInsert)				; Insert the mapping into the list
 
-#if INSTRUMENT
-			mfspr	r4,pmc1						; INSTRUMENT - saveinstr[19] - Take stamp before mapSearchFull
-			stw		r4,0x6100+(19*16)+0x0(0)	; INSTRUMENT - Save it
-			mfspr	r4,pmc2						; INSTRUMENT - Get stamp
-			stw		r4,0x6100+(19*16)+0x4(0)	; INSTRUMENT - Save it
-			mfspr	r4,pmc3						; INSTRUMENT - Get stamp
-			stw		r4,0x6100+(19*16)+0x8(0)	; INSTRUMENT - Save it
-			mfspr	r4,pmc4						; INSTRUMENT - Get stamp
-			stw		r4,0x6100+(19*16)+0xC(0)	; INSTRUMENT - Save it
-#endif			
-	
 			rlwinm	r11,r24,mpPcfgb+2,mpPcfg>>6	; Get the index into the page config table
 			lhz		r8,mpSpace(r31)				; Get the address space
 			lwz		r11,lgpPcfg(r11)			; Get the page config
 			mfsdr1	r7							; Get the hash table base/bounds
+
 			lwz		r4,pmapResidentCnt(r28)		; Get the mapped page count 
+			lwz	r12,pmapResidentMax(r28)		; r12 = pmap->stats.resident_max
+			addi	r4,r4,1						; Bump up the mapped page count
+			stw		r4,pmapResidentCnt(r28)		; Set the mapped page count
+			cmplw	r12,r4					; if pmap->stats.resident_max >= pmap->stats.resident_count
+			bge+	hamSkipMax				;	goto hamSkipResMax
+			stw	r4,pmapResidentMax(r28)			; pmap->stats.resident_max = pmap->stats.resident_count
 			
-			andi.	r0,r24,mpType				; Is this a normal mapping?
+hamSkipMax:		andi.	r0,r24,mpType				; Is this a normal mapping?
 
 			rlwimi	r8,r8,14,4,17				; Double address space
 			rlwinm	r9,r30,0,4,31				; Clear segment
@@ -323,10 +287,9 @@ hamGotX:
 			rlwimi	r8,r8,28,0,3				; Get the last nybble of the hash
 			rlwimi	r10,r29,18,0,13				; Shift EA[18:31] down to VSID (31-bit math works because of max hash table size)			
 			rlwinm	r7,r7,0,16,31				; Isolate length mask (or count)
-			addi	r4,r4,1						; Bump up the mapped page count
 			srw		r9,r9,r11					; Isolate just the page index
 			xor		r10,r10,r8					; Calculate the low 32 bits of the VSID
-			stw		r4,pmapResidentCnt(r28)		; Set the mapped page count 
+
 			xor		r9,r9,r10					; Get the hash to the PTEG
 			
 			bne--	hamDoneNP					; Not a normal mapping, therefore, no physent...
@@ -384,18 +347,7 @@ hamReturn:	bt++	pf64Bitb,hamR64				; Yes...
 hamR64:		mtmsrd	r17							; Restore enables/translation/etc.
 			isync								
 			
-hamReturnC:	
-#if INSTRUMENT
-			mfspr	r0,pmc1						; INSTRUMENT - saveinstr[20] - Take stamp before mapSearchFull
-			stw		r0,0x6100+(20*16)+0x0(0)	; INSTRUMENT - Save it
-			mfspr	r0,pmc2						; INSTRUMENT - Get stamp
-			stw		r0,0x6100+(20*16)+0x4(0)	; INSTRUMENT - Save it
-			mfspr	r0,pmc3						; INSTRUMENT - Get stamp
-			stw		r0,0x6100+(20*16)+0x8(0)	; INSTRUMENT - Save it
-			mfspr	r0,pmc4						; INSTRUMENT - Get stamp
-			stw		r0,0x6100+(20*16)+0xC(0)	; INSTRUMENT - Save it
-#endif			
-			lwz		r0,(FM_ALIGN((31-17+1)*4)+FM_SIZE+FM_LR_SAVE)(r1)	; Get the return
+hamReturnC:	lwz		r0,(FM_ALIGN((31-17+1)*4)+FM_SIZE+FM_LR_SAVE)(r1)	; Get the return
 			lwz		r17,FM_ARG0+0x00(r1)		; Save a register
 			lwz		r18,FM_ARG0+0x04(r1)		; Save a register
 			lwz		r19,FM_ARG0+0x08(r1)		; Save a register
@@ -948,13 +900,18 @@ hrmPanic:	lis		r0,hi16(Choke)				; System abend
 
 			.align	5
 			
-hrmBlock32:	
-			lhz		r23,mpSpace(r31)			; Get the address space hash
+hrmBlock32:	lis		r29,0xD000					; Get shift to 32MB bsu
+			rlwinm	r24,r20,mpBSub+1+2,29,29	; Rotate to get 0 if 4K bsu or 13 if 32MB bsu
 			lhz		r25,mpBSize(r31)			; Get the number of pages in block
+			lhz		r23,mpSpace(r31)			; Get the address space hash
 			lwz		r9,mpBlkRemCur(r31)			; Get our current remove position
+			rlwnm	r29,r29,r24,28,31			; Rotate to get 0 or 13
+			addi	r25,r25,1					; Account for zero-based counting
 			ori		r0,r20,mpRIP				; Turn on the remove in progress flag
+			slw		r25,r25,r29					; Adjust for 32MB if needed
 			mfsdr1	r29							; Get the hash table base and size
 			rlwinm	r24,r23,maxAdrSpb,32-maxAdrSpb-maxAdrSpb,31-maxAdrSpb	; Get high order of hash
+			subi	r25,r25,1					; Convert back to zero-based counting
 			lwz		r27,mpVAddr+4(r31)			; Get the base vaddr
 			sub		r4,r25,r9					; Get number of pages left
 			cmplw	cr1,r9,r25					; Have we already hit the end?
@@ -1279,13 +1236,18 @@ hrmRetn64:	rldicr	r8,r31,0,51					; Find start of page
 
 			.align	5
 			
-hrmBlock64:				
+hrmBlock64:	lis		r29,0xD000					; Get shift to 32MB bsu			
+			rlwinm	r10,r20,mpBSub+1+2,29,29	; Rotate to get 0 if 4K bsu or 13 if 32MB bsu
 			lhz		r24,mpSpace(r31)			; Get the address space hash
 			lhz		r25,mpBSize(r31)			; Get the number of pages in block
 			lwz		r9,mpBlkRemCur(r31)			; Get our current remove position
+			rlwnm	r29,r29,r10,28,31			; Rotate to get 0 or 13
+			addi	r25,r25,1					; Account for zero-based counting
 			ori		r0,r20,mpRIP				; Turn on the remove in progress flag
+			slw		r25,r25,r29					; Adjust for 32MB if needed
 			mfsdr1	r29							; Get the hash table base and size
 			ld		r27,mpVAddr(r31)			; Get the base vaddr
+			subi	r25,r25,1					; Convert back to zero-based counting
 			rlwinm	r5,r29,0,27,31				; Isolate the size
 			sub		r4,r25,r9					; Get number of pages left
 			cmplw	cr1,r9,r25					; Have we already hit the end?
@@ -2263,7 +2225,7 @@ hsg64Hit:	bl		mapPhysUnlock				; Unlock physent chain
 			
 			.align	5
 hsg64Miss:	bl		mapPhysUnlock				; Unlock physent chain
-			mtmsr	r11							; Restore 'rupts, translation
+			mtmsrd	r11							; Restore 'rupts, translation
 			li		r3,mapRtEmpty				; No mappings found matching specified criteria
 			b		hrmRetnCmn					; Exit through common epilog
 
@@ -2545,7 +2507,7 @@ hcmNextPhys32:
             addi	r3,r3,physEntrySize			; Next phys_entry
 			
 hcmNextMap32:
-			rlwinm.	r4,r4,0,0,25				; Clean and test mapping address
+			rlwinm.	r4,r4,0,~ppFlags			; Clean and test mapping address
 			beq		hcmNoMap32					; Did not find one...
 
 			lwz		r0,mpPte(r4)				; Grab the offset to the PTE
@@ -2688,7 +2650,7 @@ LEXT(hw_walk_phys)
 			blt		hwpSrc32					; Do TLB invalidate/purge/merge/reload for each mapping
 			beq		hwpMSrc32					; Do TLB merge for each mapping
 			
-hwpQSrc32:	rlwinm.	r31,r31,0,0,25				; Clean and test mapping address
+hwpQSrc32:	rlwinm.	r31,r31,0,~ppFlags			; Clean and test mapping address
 			beq		hwpNone32					; Did not find one...
 			
 			bctrl								; Call the op function
@@ -2698,7 +2660,7 @@ hwpQSrc32:	rlwinm.	r31,r31,0,0,25				; Clean and test mapping address
 			b		hwpQSrc32					; Check it out...
 
 			.align	5			
-hwpMSrc32:	rlwinm.	r31,r31,0,0,25				; Clean and test mapping address
+hwpMSrc32:	rlwinm.	r31,r31,0,~ppFlags			; Clean and test mapping address
 			beq		hwpNone32					; Did not find one...
 			
 			bl		mapMergeRC32				; Merge reference and change into mapping and physent
@@ -2918,17 +2880,19 @@ hwpSPrtPhy: cmplw	r0,r0						; Make sure we return CR0_EQ
 
 ;			Function 2 - Set protection in mapping
 
+;			NOTE: Changes to no-execute permission are ignored
+
 			.set	.,hwpOpBase+(2*128)			; Generate error if previous function too long
 
 hwpSPrtMap:	lwz		r9,mpFlags(r31)				; Get the mapping flags
 			lwz		r8,mpVAddr+4(r31)			; Get the protection part of mapping
 			rlwinm.	r9,r9,0,mpPermb,mpPermb		; Is the mapping permanent?
-			li		r0,lo16(mpN|mpPP)			; Get no-execute and protection bits
+			li		r0,lo16(mpPP)				; Get protection bits
 			crnot	cr0_eq,cr0_eq				; Change CR0_EQ to true if mapping is permanent
-			rlwinm	r2,r25,0,mpNb-32,mpPPe-32	; Isolate new no-execute and protection bits 
+			rlwinm	r2,r25,0,mpPP				; Isolate new protection bits 
 			beqlr--								; Leave if permanent mapping (before we trash R5)...
-			andc	r5,r5,r0					; Clear the old no-execute and prot bits
-			or		r5,r5,r2					; Move in the new no-execute and prot bits
+			andc	r5,r5,r0					; Clear the old prot bits
+			or		r5,r5,r2					; Move in the new prot bits
 			rlwimi	r8,r5,0,20,31				; Copy into the mapping copy
 			cmpw	r0,r0						; Make sure we return CR0_EQ
 			stw		r8,mpVAddr+4(r31)			; Set the flag part of mapping
@@ -3541,11 +3505,11 @@ mapFLPNitr:	lwz		r3,mrPhysTab(r9)			; Get the actual table address
 			lwz		r5,mrStart(r9)				; Get start of table entry
 			lwz		r0,mrEnd(r9)				; Get end of table entry
 			addi	r9,r9,mrSize				; Point to the next slot
-			cmplwi	cr2,r3,0					; Are we at the end of the table?
+			cmplwi	cr7,r3,0					; Are we at the end of the table?
 			cmplw	r2,r5						; See if we are in this table
 			cmplw	cr1,r2,r0					; Check end also
 			sub		r4,r2,r5					; Calculate index to physical entry
-			beq--	cr2,mapFLPNmiss				; Leave if we did not find an entry...
+			beq--	cr7,mapFLPNmiss				; Leave if we did not find an entry...
 			cror	cr0_lt,cr0_lt,cr1_gt		; Set CR0_LT if it is NOT this entry
 			slwi	r4,r4,3						; Get offset to physical entry
 
@@ -4088,8 +4052,8 @@ hpfGVfound:	rlwinm.	r0,r27,0,dsiMissb,dsiMissb	; Did we actually miss the segmen
 			bne--	cr5,hpfNoCacheEnt2			; Skip the cache entry if this is a "special nest" fault....
 			
 			mr		r3,r25						; Point to the pmap
-			mr		r4,r22						; ESID high half
-			mr		r5,r23						; ESID low half
+			mr		r4,r29						; ESID high half
+			mr		r5,r30						; ESID low half
 			bl		pmapCacheLookup				; Go see if this is in the cache already
 			
 			mr.		r3,r3						; Did we find it?
@@ -5506,7 +5470,7 @@ isInv1:		lwz		r4,pmapCCtl(r3)				; Get the segment cache control
 ;				We are in the exception vectors
 ;				pf64Bitb is set up
 ;				R3 contains the MSR we going to
-;				We can not use R4, R13, R20, R21, R29
+;				We can not use R4, R13, R20, R21, R25, R26, R29
 ;				R13 is the savearea
 ;				R29 has the per_proc
 ;

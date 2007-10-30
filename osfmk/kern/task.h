@@ -1,23 +1,29 @@
 /*
- * Copyright (c) 2000-2005 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2007 Apple Inc. All rights reserved.
  *
- * @APPLE_LICENSE_HEADER_START@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. The rights granted to you under the License
+ * may not be used to create, or enable the creation or redistribution of,
+ * unlawful or unlicensed copies of an Apple operating system, or to
+ * circumvent, violate, or enable the circumvention or violation of, any
+ * terms of an Apple operating system software license agreement.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
- * @APPLE_LICENSE_HEADER_END@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /*
  * @OSF_FREE_COPYRIGHT@
@@ -74,6 +80,13 @@
  * improvements that they make and grant CSL redistribution rights.
  *
  */
+/*
+ * NOTICE: This file was modified by McAfee Research in 2004 to introduce
+ * support for mandatory and extensible security protections.  This notice
+ * is included in support of clause 2.2 (b) of the Apple Public License,
+ * Version 2.0.
+ * Copyright (c) 2005 SPARTA, Inc.
+ */
 
 #ifndef	_KERN_TASK_H_
 #define _KERN_TASK_H_
@@ -91,38 +104,33 @@
 #include <mach/mach_param.h>
 #include <mach/task_info.h>
 #include <mach/exception_types.h>
+#include <machine/task.h>
 
 #include <kern/cpu_data.h>
 #include <kern/queue.h>
 #include <kern/exception.h>
 #include <kern/lock.h>
 #include <kern/thread.h>
-
-#include <mach_host.h>
-#include <mach_prof.h>
+#include <security/_label.h>
+#include <ipc/ipc_labelh.h>
 
 struct task {
 	/* Synchronization/destruction information */
 	decl_mutex_data(,lock)		/* Task's lock */
-	int		ref_count;	/* Number of references to me */
+	uint32_t	ref_count;	/* Number of references to me */
 	boolean_t	active;		/* Task has not been terminated */
 
 	/* Miscellaneous */
 	vm_map_t	map;		/* Address space description */
-	queue_chain_t	pset_tasks;	/* list of tasks assigned to pset */
+	queue_chain_t	tasks;	/* global list of tasks */
 	void		*user_data;	/* Arbitrary data settable via IPC */
 	int		suspend_count;	/* Internal scheduling only */
 
 	/* Threads in this task */
-	queue_head_t	threads;
-	int				thread_count;
-	int				active_thread_count;
-
-	processor_set_t	processor_set;	/* processor set for new threads */
-#if	MACH_HOST
-	boolean_t	may_assign;	/* can assigned pset be changed? */
-	boolean_t	assign_active;	/* waiting for may_assign */
-#endif	/* MACH_HOST */
+	queue_head_t		threads;
+	int			thread_count;
+	uint32_t		active_thread_count;
+	struct affinity_space	*affinity_space;
 
 	/* User-visible scheduling information */
 	integer_t		user_stop_count;	/* outstanding stops */
@@ -140,19 +148,22 @@ struct task {
 	uint64_t		total_user_time;	/* terminated threads only */
 	uint64_t		total_system_time;
 
-#if	MACH_PROF
-	boolean_t	task_profiled;  /* is task being profiled ? */
-	struct prof_data *profil_buffer;/* profile struct if so */
-#endif	/* MACH_PROF */
+	/* Virtual timers */
+	uint32_t		vtimers;
 
 	/* IPC structures */
 	decl_mutex_data(,itk_lock_data)
 	struct ipc_port *itk_self;	/* not a right, doesn't hold ref */
+	struct ipc_port *itk_nself;	/* not a right, doesn't hold ref */
 	struct ipc_port *itk_sself;	/* a send right */
 	struct exception_action exc_actions[EXC_TYPES_COUNT];
 		 			/* a send right each valid element  */
 	struct ipc_port *itk_host;	/* a send right */
 	struct ipc_port *itk_bootstrap;	/* a send right */
+	struct ipc_port *itk_seatbelt;	/* a send right */
+	struct ipc_port *itk_gssd;	/* yet another send right */
+	struct ipc_port *itk_task_access; /* and another send right */ 
+	struct ipc_port *itk_automountd;/* a send right */
 	struct ipc_port *itk_registered[TASK_PORT_REGISTER_MAX];
 					/* all send rights */
 
@@ -169,6 +180,8 @@ struct task {
 	struct ipc_port *paged_ledger_port;
 	unsigned int	priv_flags;			/* privilege resource flags */
 #define VM_BACKING_STORE_PRIV	0x1
+
+	MACHINE_TASK
         
 	integer_t faults;              /* faults counter */
         integer_t pageins;             /* pageins counter */
@@ -177,12 +190,13 @@ struct task {
         integer_t messages_received;   /* messages received counter */
         integer_t syscalls_mach;       /* mach system call counter */
         integer_t syscalls_unix;       /* unix system call counter */
-        integer_t csw;                 /* context switch counter */
+		uint32_t  c_switch;			   /* total context switches */
+		uint32_t  p_switch;			   /* total processor switches */
+		uint32_t  ps_switch;		   /* total pset switches */
 #ifdef  MACH_BSD 
 	void *bsd_info;
 #endif  
-	struct shared_region_mapping	*system_shared_region;
-	struct tws_hash 		*dynamic_working_set;
+	struct vm_shared_region		*shared_region;
 	uint32_t taskFeatures[2];		/* Special feature for this task */
 #define tf64BitAddr	0x80000000		/* Task has 64-bit addressing */
 #define tf64BitData	0x40000000		/* Task has 64-bit data registers */
@@ -193,18 +207,32 @@ struct task {
 #define task_clear_64BitAddr(task)	\
 	 ((task)->taskFeatures[0] &= ~tf64BitAddr)
 
+#if CONFIG_MACF_MACH
+	ipc_labelh_t label;
+#endif
+
 };
 
 #define task_lock(task)		mutex_lock(&(task)->lock)
 #define task_lock_try(task)	mutex_try(&(task)->lock)
 #define task_unlock(task)	mutex_unlock(&(task)->lock)
 
+#if CONFIG_MACF_MACH
+#define maclabel label->lh_label
+
+#define tasklabel_lock(task)	lh_lock((task)->label)
+#define tasklabel_unlock(task)	lh_unlock((task)->label)
+
+extern void tasklabel_lock2(task_t a, task_t b);
+extern void tasklabel_unlock2(task_t a, task_t b);
+#endif /* MAC_MACH */
+
 #define	itk_lock_init(task)	mutex_init(&(task)->itk_lock_data, 0)
 #define	itk_lock(task)		mutex_lock(&(task)->itk_lock_data)
 #define	itk_unlock(task)	mutex_unlock(&(task)->itk_lock_data)
 
 #define task_reference_internal(task)		\
-			hw_atomic_add(&(task)->ref_count, 1)
+			(void)hw_atomic_add(&(task)->ref_count, 1)
 
 #define task_deallocate_internal(task)		\
 			hw_atomic_sub(&(task)->ref_count, 1)
@@ -222,7 +250,7 @@ extern kern_return_t	kernel_task_create(
 							task_t 			*child);
 
 /* Initialize task module */
-extern void		task_init(void);
+extern void		task_init(void) __attribute__((section("__TEXT, initcode")));
 
 #define	current_task_fast()	(current_thread()->task)
 #define current_task()		current_task_fast()
@@ -261,20 +289,35 @@ extern kern_return_t	task_terminate_internal(
 extern kern_return_t	task_create_internal(
 							task_t		parent_task,
 							boolean_t	inherit_memory,
+							boolean_t	is_64bit,
 							task_t		*child_task);	/* OUT */
 
 extern kern_return_t	task_importance(
 							task_t			task,
 							integer_t		importance);
 
+extern void		task_vtimer_set(
+					task_t		task,
+					integer_t	which);
+
+extern void		task_vtimer_clear(
+					task_t		task,
+					integer_t	which);
+
+extern void		task_vtimer_update(
+					task_t		task,
+					integer_t	which,
+					uint32_t	*microsecs);
+
+#define	TASK_VTIMER_USER		0x01
+#define	TASK_VTIMER_PROF		0x02
+#define	TASK_VTIMER_RLIM		0x04
+
 extern void		task_set_64bit(
 					task_t		task,
 					boolean_t	is64bit);
 
 extern void		task_backing_store_privileged(
-					task_t		task);
-
-extern void		task_working_set_disable(
 					task_t		task);
 
 /* Get number of activations in a task */
@@ -290,11 +333,14 @@ extern pmap_t	get_task_pmap(task_t);
 
 extern boolean_t	is_kerneltask(task_t task);
 
+extern kern_return_t check_actforsig(task_t task, thread_t thread, int setast);
+
 #endif	/* XNU_KERNEL_PRIVATE */
 
 #ifdef	KERNEL_PRIVATE
 
 extern void 	*get_bsdtask_info(task_t);
+extern void	*get_bsdthreadtask_info(thread_t);
 extern vm_map_t get_task_map(task_t);
 
 #endif	/* KERNEL_PRIVATE */
@@ -304,6 +350,8 @@ extern task_t	kernel_task;
 extern void		task_deallocate(
 					task_t		task);
 
+extern void		task_name_deallocate(
+					task_name_t		task_name);
 __END_DECLS
 
 #endif	/* _KERN_TASK_H_ */

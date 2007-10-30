@@ -1,23 +1,29 @@
 /*
  * Copyright (c) 1994, 1996-2000 Apple Computer, Inc. All rights reserved.
  *
- * @APPLE_LICENSE_HEADER_START@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. The rights granted to you under the License
+ * may not be used to create, or enable the creation or redistribution of,
+ * unlawful or unlicensed copies of an Apple operating system, or to
+ * circumvent, violate, or enable the circumvention or violation of, any
+ * terms of an Apple operating system software license agreement.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
- * @APPLE_LICENSE_HEADER_END@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /*--------------------------------------------------------------------------
  * Router RTMP protocol functions: 
@@ -57,10 +63,10 @@
 
 #include <netat/sysglue.h>
 #include <netat/appletalk.h>
+#include <netat/at_pcb.h>
 #include <netat/at_var.h>
 #include <netat/ddp.h>
 #include <netat/rtmp.h>
-#include <netat/at_pcb.h>
 #include <netat/zip.h>
 #include <netat/routing_tables.h>
 #include <netat/aurp.h>
@@ -68,32 +74,33 @@
 
 #include <sys/kern_event.h>
 
-extern void (*ddp_AURPsendx)();
+extern void (*ddp_AURPsendx)(void);
 extern at_ifaddr_t *aurp_ifID;
 extern at_ifaddr_t *ifID_table[];
 extern at_ifaddr_t *ifID_home;
 
-/*DEBUG ONLY */
-static int dump_counter =0;
-/*DEBUG ONLY */
+
+int rtmp_router_start(at_kern_err_t *);
+void rtmp_router_start_tmo(void *);
+
+
 
 static at_kern_err_t ke; 
 			/* Used to record error discovered in rtmp_update() */
-gbuf_t *rtmp_prep_new_packet();
 
-void rtmp_timeout();
-void rtmp_send_port();
-void rtmp_send_port_locked();
+void rtmp_timeout(void *arg);
+void rtmp_send_port(at_ifaddr_t *);
+void rtmp_send_port_locked(void *);
 void rtmp_dropper(void *);
-void rtmp_shutdown();
-static void rtmp_update();
-static void rtmp_request();
-extern int elap_online3();
+static void rtmp_update(at_ifaddr_t *, at_rtmp *, short);
+static void rtmp_request(at_ifaddr_t *, at_ddp_t *);
+int elap_online3(at_ifaddr_t	*);
 
-extern pktsIn, pktsOut, pktsDropped, pktsHome;
 extern short ErrorRTMPoverflow, ErrorZIPoverflow;
-extern atlock_t ddpinp_lock;
 extern lck_mtx_t * atalk_mutex;
+
+extern int pktsIn, pktsOut, pktsDropped, pktsHome;
+
 
 /*
  * rtmp_router_input: function called by DDP (in router mode) to handle
@@ -252,11 +259,11 @@ static void rtmp_update(ifID, rtmp, tuple_nb)
 	register at_rtmp_tuple *FirstTuple =  (at_rtmp_tuple *)&rtmp->at_rtmp_id[1];
 	register at_rtmp_tuple *SecondTuple = (at_rtmp_tuple *)&rtmp->at_rtmp_id[4];
 	RT_entry NewRoute, *CurrentRoute;
-
 	register u_char SenderNodeID = rtmp->at_rtmp_id[0];
 	char *TuplePtr;
 	short state;
 
+	bzero(&NewRoute, sizeof(RT_entry));
 
 	/* Make sure this an AppleTalk node sending us the RTMP packet */
 
@@ -281,7 +288,7 @@ static void rtmp_update(ifID, rtmp, tuple_nb)
 				ifID->ifRoutingState = PORT_ERR_SEED;
 				ke.error 	= KE_CONF_SEED_RNG;
 				ke.port1 	= ifID->ifPort;
-				strncpy(ke.name1, ifID->ifName, sizeof(ke.name1));
+				strlcpy(ke.name1, ifID->ifName, sizeof(ke.name1));
 				ke.net 		=  NET_VALUE(rtmp->at_rtmp_this_net);
 				ke.node     = SenderNodeID;
 				ke.netr1b 	= TUPLENET(FirstTuple);
@@ -304,7 +311,7 @@ static void rtmp_update(ifID, rtmp, tuple_nb)
 			    (ifID->ifThisCableEnd != NET_VALUE(rtmp->at_rtmp_this_net))) {
 				ke.error 	= KE_CONF_SEED1;
 				ke.port1 	= ifID->ifPort;
-				strncpy(ke.name1, ifID->ifName,sizeof(ke.name1));
+				strlcpy(ke.name1, ifID->ifName,sizeof(ke.name1));
 				ke.net 		=  NET_VALUE(rtmp->at_rtmp_this_net);
 				ke.node     = SenderNodeID;
 				ke.netr1e 	= ifID->ifThisCableEnd;
@@ -342,7 +349,7 @@ static void rtmp_update(ifID, rtmp, tuple_nb)
 				ifID->ifRoutingState = PORT_ERR_CABLER;
 				ke.error 	= KE_CONF_SEED_NODE;
 				ke.port1 	= ifID->ifPort;
-				strncpy(ke.name1, ifID->ifName,sizeof(ke.name1));
+				strlcpy(ke.name1, ifID->ifName,sizeof(ke.name1));
 				ke.net 		=  NET_VALUE(rtmp->at_rtmp_this_net);
 				ke.node     = SenderNodeID;
 				ke.netr1b 	= TUPLENET(FirstTuple);
@@ -370,7 +377,7 @@ static void rtmp_update(ifID, rtmp, tuple_nb)
 			ifID->ifRoutingState = PORT_ERR_STARTUP;
 			ke.error 	= KE_SEED_STARTUP;
 			ke.port1 	= ifID->ifPort;
-			strncpy(ke.name1, ifID->ifName,sizeof(ke.name1));
+			strlcpy(ke.name1, ifID->ifName,sizeof(ke.name1));
 			ke.net 		=  NET_VALUE(rtmp->at_rtmp_this_net);
 			ke.node     = SenderNodeID;
 			RouterError(ifID->ifPort, ERTR_CABLE_STARTUP);
@@ -467,14 +474,14 @@ static void rtmp_update(ifID, rtmp, tuple_nb)
 				state = CurrentRoute->EntryState & 0x0F;
 				/* if entry has been updated recently, just clear the UPDATED 
 				   bit. if bit not set, then we can age the entry */
-				if (state)
+				if (state) {
 					if (CurrentRoute->EntryState & RTE_STATE_UPDATED) {
 						CurrentRoute->EntryState &= ~RTE_STATE_UPDATED; 
 					}
 					else {
 						state  = state >> 1 ;	/* decrement state */
 					}
-
+				}
 				CurrentRoute->EntryState = (CurrentRoute->EntryState & 0xF0) | state;
 			}
 		}
@@ -677,9 +684,11 @@ static void rtmp_update(ifID, rtmp, tuple_nb)
 					("rtmp_update: Shorter route found %d-%d, update\n",
 					 NewRoute.NetStart, NewRoute.NetStop));
 
+#ifdef AURP_SUPPORT
 			if (ddp_AURPsendx && (aurp_ifID->ifFlags & AT_IFF_AURP))
 				ddp_AURPsendx(AURPCODE_RTUPDATE,
 					      (void *)&NewRoute, AURPEV_NetDistChange);
+#endif
 			}
 		}
 		else { /* no entry found */
@@ -700,10 +709,11 @@ static void rtmp_update(ifID, rtmp, tuple_nb)
 					      NewRoute.NextIRNode, NewRoute.NetDist, NewRoute.NetPort,
 					      NewRoute.EntryState) == (RT_entry *)NULL)
 					ErrorRTMPoverflow = 1;
-
+#ifdef AURP_SUPPORT
 				else if (ddp_AURPsendx && (aurp_ifID->ifFlags & AT_IFF_AURP))
 					ddp_AURPsendx(AURPCODE_RTUPDATE,
 						      (void *)&NewRoute, AURPEV_NetAdded);
+#endif
 			}		
 		}
 
@@ -734,11 +744,10 @@ static void rtmp_update(ifID, rtmp, tuple_nb)
  *      RTE_STATE_UNUSED :  Unused or removed entry in the table
  */
 
-void rtmp_timeout(ifID)
-register at_ifaddr_t        *ifID;
+void rtmp_timeout(void *arg)
 {
+		at_ifaddr_t *ifID = (at_ifaddr_t *)arg;
 		register u_char state;
-		register unsigned int s;
 		short i;
 		RT_entry *en = &RT_table[0];
 
@@ -754,7 +763,6 @@ register at_ifaddr_t        *ifID;
 		if (ifID->ifRouterState > NO_ROUTER)
 			ifID->ifRouterState--;
 
-		ATDISABLE(s, ddpinp_lock);
 		for (i = 0 ; i < RT_maxentry; i++,en++) {
 
 			/* we want to age "learned" nets, not directly connected ones */
@@ -778,10 +786,11 @@ register at_ifaddr_t        *ifID;
 					dPrintf(D_M_RTMP, D_L_INFO,
 						("rtmp_timeout: Bad State for %d-%d (e#%d): remove\n",
 							en->NetStart, en->NetStop, i));
-
+#ifdef AURP_SUPPORT
 				if (ddp_AURPsendx && (aurp_ifID->ifFlags & AT_IFF_AURP))
 					ddp_AURPsendx(AURPCODE_RTUPDATE,
 						(void *)en, AURPEV_NetDeleted);
+#endif
 	
 					/* then clear the bit in the table concerning this entry.
 					If the zone Count reaches zero, remove the entry */
@@ -797,7 +806,6 @@ register at_ifaddr_t        *ifID;
 				}
 			}
 		}
-		ATENABLE(s, ddpinp_lock);
 		timeout(rtmp_timeout, (caddr_t) ifID, 20*SYS_HZ);
 		
 		atalk_unlock();
@@ -818,6 +826,8 @@ register at_ifaddr_t        *ifID;
  *
  */				
 		
+gbuf_t *rtmp_prep_new_packet (at_ifaddr_t *, at_net, u_char, char);
+
 gbuf_t *rtmp_prep_new_packet (ifID, DstNet, DstNode, socket)
 register at_ifaddr_t        *ifID;
 register at_net DstNet;
@@ -878,6 +888,8 @@ register char socket;
 
 
 }
+int rtmp_r_find_bridge(at_ifaddr_t *, at_ddp_t *);
+
 int rtmp_r_find_bridge(ifID, orig_ddp)
 register at_ifaddr_t    *ifID;
 register at_ddp_t 	*orig_ddp;
@@ -951,8 +963,8 @@ register at_ddp_t 	*orig_ddp;
 
 	dPrintf(D_M_RTMP, D_L_INFO, ("rtmp_r_find_bridge: for net %d send back router %d.%d\n",
 				NET_VALUE(orig_ddp->dst_net), Entry->NextIRNet, Entry->NextIRNode));
-	if (status = ddp_router_output(m, ifID, AT_ADDR, NET_VALUE(orig_ddp->src_net),
-			orig_ddp->src_node, 0)){
+	if ((status = ddp_router_output(m, ifID, AT_ADDR, NET_VALUE(orig_ddp->src_net),
+			orig_ddp->src_node, 0))){
 		dPrintf(D_M_RTMP, D_L_WARNING,
 			("rtmp_r_find_bridge: ddp_router_output failed status=%d\n", status));
 				return (status);
@@ -969,6 +981,8 @@ register at_ddp_t 	*orig_ddp;
  *	the table...
  *
  */
+static int rtmp_send_table(at_ifaddr_t *, at_net, u_char, short, char, short);
+
 static int rtmp_send_table(ifID, DestNet, DestNode, split_hz, socket, 
 			   n_neighbors)
      register at_ifaddr_t *ifID;	/* interface/port params */
@@ -986,7 +1000,6 @@ static int rtmp_send_table(ifID, DestNet, DestNode, split_hz, socket,
 	short size,status ;
 	register at_ddp_t	*ddp;
 	register short EntNb = 0, sent_tuple = 0;
-	register unsigned int s;
 
 	if (ifID->ifRoutingState < PORT_ONLINE) {
 		dPrintf(D_M_RTMP, D_L_INFO,
@@ -1011,7 +1024,6 @@ static int rtmp_send_table(ifID, DestNet, DestNode, split_hz, socket,
 	ddp = (at_ddp_t *)(gbuf_rptr(m));
 	Buff_ptr = (char *)((char *)ddp + DDP_X_HDR_SIZE + 10); 
 
-	ATDISABLE(s, ddpinp_lock);
 	while (EntNb < RT_maxentry) {
 
 		if (Entry->NetStop && ((Entry->EntryState & 0x0F) >= RTE_STATE_SUSPECT)) {
@@ -1042,11 +1054,10 @@ static int rtmp_send_table(ifID, DestNet, DestNode, split_hz, socket,
 		}
 
 		if (size > (DDP_DATA_SIZE-20)) {
-			DDPLEN_ASSIGN(ddp, size + DDP_X_HDR_SIZE + 10);
+			DDPLEN_ASSIGN(ddp, (size + DDP_X_HDR_SIZE + 10));
 			gbuf_winc(m,size);
-			ATENABLE(s, ddpinp_lock);
-			if (status = ddp_router_output(m, ifID, AT_ADDR,
-				NET_VALUE(DestNet),DestNode, 0)){
+			if ((status = ddp_router_output(m, ifID, AT_ADDR,
+				NET_VALUE(DestNet),DestNode, 0))){
 			  dPrintf(D_M_RTMP, D_L_WARNING,
 				  ("rtmp_send_table: ddp_router_output failed status=%d\n",
 				   status));
@@ -1066,20 +1077,18 @@ static int rtmp_send_table(ifID, DestNet, DestNode, split_hz, socket,
 				 sent_tuple, ifID->ifPort));
 			sent_tuple = 0;
 			size = 0;
-			ATDISABLE(s, ddpinp_lock);
 		}
 
 		Entry++;
 		EntNb++;
 	}
-	ATENABLE(s, ddpinp_lock);
 
 	/*
 	 * If we have some remaining entries to send, send them now.
          * otherwise, the last packet we sent was full, we need to send an empty one
          */
 
-	DDPLEN_ASSIGN(ddp, size + DDP_X_HDR_SIZE + 10);
+	DDPLEN_ASSIGN(ddp, (size + DDP_X_HDR_SIZE + 10));
 	gbuf_winc(m,size);
 	if ((status = 
 	     ddp_router_output(m, ifID, AT_ADDR, NET_VALUE(DestNet),DestNode, 0))){
@@ -1170,9 +1179,9 @@ static void rtmp_request(ifID, ddp)
 }
 
 /* locked version of rtmp_send_port */
-void rtmp_send_port_locked(ifID)
-     register at_ifaddr_t *ifID;
+void rtmp_send_port_locked(void *arg)
 {
+	at_ifaddr_t *ifID = (at_ifaddr_t *)arg;
 	atalk_lock();
 	rtmp_send_port(ifID);
 	atalk_unlock();
@@ -1205,6 +1214,7 @@ void rtmp_send_port(ifID)
 		rtmp_send_table(ifID, DestNet, 0xFF, 1, RTMP_SOCKET, 0);
 	}
 
+#ifdef DEBUG
 	if (ifID == ifID_home)
 		dPrintf(D_M_RTMP_LOW, D_L_VERBOSE,
 			("I:%5d O:%5d H:%5d dropped:%d\n",
@@ -1213,6 +1223,8 @@ void rtmp_send_port(ifID)
 	dPrintf(D_M_RTMP_LOW, D_L_TRACE,
 		("rtmp_send_port: func=0x%x, ifID=0x%x\n", 
 		 (u_int) rtmp_send_port, (u_int) ifID));
+#endif
+
 	timeout (rtmp_send_port_locked, (caddr_t)ifID, 10 * SYS_HZ);
 
 }
@@ -1221,7 +1233,7 @@ void rtmp_send_port(ifID)
  *               the actual packet dropping is done in ddp_input
  */
 
-void rtmp_dropper(void *arg)
+void rtmp_dropper(__unused void *arg)
 {
 
 	atalk_lock();
@@ -1240,8 +1252,7 @@ void rtmp_dropper(void *arg)
  *   ### LD 01/09/95 Changed to correct Zone problem on non seed ports.
  */
      
-int rtmp_router_start(keP)
-     at_kern_err_t *keP; /* used to report errors (if any) */
+int rtmp_router_start(at_kern_err_t *keP)
 {
 	int err = 0;
 	register at_ifaddr_t *ifID, *ifID2;
@@ -1266,12 +1277,12 @@ int rtmp_router_start(keP)
 				if (ifID->ifThisCableEnd == 0)  {
 					keP->error 	= KE_NO_SEED;
 					keP->port1 	= ifID->ifPort;
-					strncpy(keP->name1, ifID->ifName,sizeof(keP->name1));
+					strlcpy(keP->name1, ifID->ifName,sizeof(keP->name1));
 				}
 				else {
 					keP->error 	= KE_INVAL_RANGE;
 					keP->port1 	= ifID->ifPort;
-					strncpy(keP->name1, ifID->ifName,sizeof(keP->name1));
+					strlcpy(keP->name1, ifID->ifName,sizeof(keP->name1));
 					keP->netr1b 	= ifID->ifThisCableStart;
 					keP->netr1e 	= ifID->ifThisCableEnd;
 				}
@@ -1315,12 +1326,12 @@ int rtmp_router_start(keP)
 			if (ifID->ifThisCableEnd == 0)  {
 				keP->error 	= KE_NO_SEED;
 				keP->port1 	= ifID->ifPort;
-				strncpy(keP->name1, ifID->ifName,sizeof(keP->name1));
+				strlcpy(keP->name1, ifID->ifName,sizeof(keP->name1));
 			}
 			else {
 				keP->error 	= KE_INVAL_RANGE;
 				keP->port1 	= ifID->ifPort;
-				strncpy(keP->name1, ifID->ifName,sizeof(keP->name1));
+				strlcpy(keP->name1, ifID->ifName,sizeof(keP->name1));
 				keP->netr1b 	= ifID->ifThisCableStart;
 				keP->netr1e 	= ifID->ifThisCableEnd;
 			}
@@ -1350,9 +1361,9 @@ int rtmp_router_start(keP)
 
 					keP->error 	= KE_CONF_RANGE;
 					keP->port1 	= ifID->ifPort;
-					strncpy(keP->name1, ifID->ifName,sizeof(keP->name1));
+					strlcpy(keP->name1, ifID->ifName,sizeof(keP->name1));
 					keP->port2 	= ifID2->ifPort;
-					strncpy(keP->name2, ifID2->ifName,sizeof(keP->name2));
+					strlcpy(keP->name2, ifID2->ifName,sizeof(keP->name2));
 					keP->netr1b 	= ifID->ifThisCableStart;
 					keP->netr1e 	= ifID->ifThisCableEnd;
 					ifID->ifRoutingState = PORT_ERR_CABLER;
@@ -1460,7 +1471,7 @@ startZoneInfo:
 					("rtmp_router_start: no received response to ZipNeedQueries\n"));
 				keP->error 	= KE_NO_ZONES_FOUND;
 				keP->port1 	= ifID->ifPort;
-				strncpy(keP->name1, ifID->ifName,sizeof(keP->name1));
+				strlcpy(keP->name1, ifID->ifName,sizeof(keP->name1));
 				keP->netr1b 	= ifID->ifThisCableStart;
 				keP->netr1e 	= ifID->ifThisCableEnd;
 				ifID->ifRoutingState = PORT_ERR_CABLER;
@@ -1579,11 +1590,14 @@ error:
 	return((keP->error)? 0: err);
 } /* rtmp_router_start */
 
+void rtmp_router_start_tmo(void *arg)
+{
+	(void)rtmp_router_start_tmo((at_kern_err_t*)arg);
+}
 
-void rtmp_shutdown()
+void rtmp_shutdown(void)
 {
 	register at_ifaddr_t *ifID;
-	register short i;
 	at_net DestNet;	
 
 	NET_ASSIGN(DestNet, 0);
@@ -1591,9 +1605,9 @@ void rtmp_shutdown()
 	dPrintf(D_M_RTMP, D_L_SHUTDN,
 		("rtmp_shutdown:stop sending to all ports\n"));
 
-	untimeout(rtmp_dropper, (caddr_t)0);
-	untimeout(rtmp_router_start, 1); /* added for 2225395 */
-	untimeout(rtmp_router_start, 3); /* added for 2225395 */
+	untimeout(rtmp_dropper, (void *)0);
+	untimeout(rtmp_router_start_tmo, (void *)1); /* added for 2225395 */
+	untimeout(rtmp_router_start_tmo, (void *)3); /* added for 2225395 */
 	
 	TAILQ_FOREACH(ifID, &at_ifQueueHd, aa_link) {
 		if (ifID->ifRoutingState > PORT_OFFLINE ) {
@@ -1630,10 +1644,9 @@ void rtmp_purge(ifID)
 	at_ifaddr_t *ifID;
 {
 	u_char state;
-	int i, s;
+	int i;
 	RT_entry *en = &RT_table[0];
 
-	ATDISABLE(s, ddpinp_lock);
 	for (i=0; i < RT_maxentry; i++) {
 		state = en->EntryState & 0x0F;
 		if ((state > RTE_STATE_UNUSED) && (state != RTE_STATE_PERMANENT)
@@ -1643,5 +1656,4 @@ void rtmp_purge(ifID)
 		}
 		en++;
 	}
-	ATENABLE(s, ddpinp_lock);
 }

@@ -88,7 +88,7 @@ typedef __uint8_t		sa_family_t;
 #define __KAME__
 #define __KAME_VERSION		"20010528/apple-darwin"
 
-#ifndef _POSIX_C_SOURCE
+#if !defined(_POSIX_C_SOURCE) || defined(_DARWIN_C_SOURCE)
 /*
  * Local port number conventions:
  *
@@ -122,7 +122,7 @@ typedef __uint8_t		sa_family_t;
 #define	IPV6PORT_ANONMAX	65535
 #define	IPV6PORT_RESERVEDMIN	600
 #define	IPV6PORT_RESERVEDMAX	(IPV6PORT_RESERVED-1)
-#endif /* _POSIX_C_SOURCE */
+#endif /* (_POSIX_C_SOURCE && !_DARWIN_C_SOURCE) */
 
 /*
  * IPv6 address
@@ -147,9 +147,9 @@ struct in6_addr {
 /*
  * Socket address for IPv6
  */
-#ifndef _POSIX_C_SOURCE
+#if !defined(_POSIX_C_SOURCE) || defined(_DARWIN_C_SOURCE)
 #define SIN6_LEN
-#endif /* _POSIX_C_SOURCE */
+#endif /* (_POSIX_C_SOURCE && !_DARWIN_C_SOURCE) */
 struct sockaddr_in6 {
 	__uint8_t	sin6_len;	/* length of this struct(sa_family_t)*/
 	sa_family_t	sin6_family;	/* AF_INET6 (sa_family_t) */
@@ -182,7 +182,8 @@ extern const struct in6_addr in6mask32;
 extern const struct in6_addr in6mask64;
 extern const struct in6_addr in6mask96;
 extern const struct in6_addr in6mask128;
-#endif KERNEL_PRIVATE
+#endif /* KERNEL_PRIVATE */
+
 
 /*
  * Macros started with IPV6_ADDR is KAME local
@@ -218,7 +219,7 @@ extern const struct in6_addr in6mask128;
 #define IN6ADDR_LOOPBACK_INIT \
 	{{{ 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, \
 	    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01 }}}
-#ifndef _POSIX_C_SOURCE
+#if !defined(_POSIX_C_SOURCE) || defined(_DARWIN_C_SOURCE)
 #define IN6ADDR_NODELOCAL_ALLNODES_INIT \
 	{{{ 0xff, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, \
 	    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01 }}}
@@ -228,15 +229,15 @@ extern const struct in6_addr in6mask128;
 #define IN6ADDR_LINKLOCAL_ALLROUTERS_INIT \
 	{{{ 0xff, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, \
 	    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02 }}}
-#endif /* _POSIX_C_SOURCE */
+#endif /* (_POSIX_C_SOURCE && !_DARWIN_C_SOURCE) */
 
 extern const struct in6_addr in6addr_any;
 extern const struct in6_addr in6addr_loopback;
-#ifndef _POSIX_C_SOURCE
+#if !defined(_POSIX_C_SOURCE) || defined(_DARWIN_C_SOURCE)
 extern const struct in6_addr in6addr_nodelocal_allnodes;
 extern const struct in6_addr in6addr_linklocal_allnodes;
 extern const struct in6_addr in6addr_linklocal_allrouters;
-#endif /* _POSIX_C_SOURCE */
+#endif /* (_POSIX_C_SOURCE && !_DARWIN_C_SOURCE) */
 
 /*
  * Equality
@@ -248,10 +249,10 @@ extern const struct in6_addr in6addr_linklocal_allrouters;
 #define IN6_ARE_ADDR_EQUAL(a, b)			\
     (bcmp(&(a)->s6_addr[0], &(b)->s6_addr[0], sizeof(struct in6_addr)) == 0)
 #else
-#ifndef _POSIX_C_SOURCE
+#if !defined(_POSIX_C_SOURCE) || defined(_DARWIN_C_SOURCE)
 #define IN6_ARE_ADDR_EQUAL(a, b)			\
     (memcmp(&(a)->s6_addr[0], &(b)->s6_addr[0], sizeof(struct in6_addr)) == 0)
-#endif /* _POSIX_C_SOURCE */
+#endif /* (_POSIX_C_SOURCE && !_DARWIN_C_SOURCE) */
 #endif
 
 #ifdef KERNEL			/* non standard */
@@ -392,30 +393,30 @@ extern const struct in6_addr in6addr_linklocal_allrouters;
 /*
  * IP6 route structure
  */
-#ifndef _POSIX_C_SOURCE
+#if !defined(_POSIX_C_SOURCE) || defined(_DARWIN_C_SOURCE)
 #ifdef PRIVATE
 struct route_in6 {
 	struct	rtentry *ro_rt;
 	struct	sockaddr_in6 ro_dst;
 };
 #endif /* PRIVATE */
-#endif /* _POSIX_C_SOURCE */
+#endif /* (_POSIX_C_SOURCE && !_DARWIN_C_SOURCE) */
 
 /*
  * Options for use with [gs]etsockopt at the IPV6 level.
  * First word of comment is data type; bool is stored in int.
  */
 /* no hdrincl */
-#ifndef _POSIX_C_SOURCE
+#if !defined(_POSIX_C_SOURCE) || defined(_DARWIN_C_SOURCE)
 #if 0 /* the followings are relic in IPv4 and hence are disabled */
 #define IPV6_OPTIONS		1  /* buf/ip6_opts; set/get IP6 options */
 #define IPV6_RECVOPTS		5  /* bool; receive all IP6 opts w/dgram */
 #define IPV6_RECVRETOPTS	6  /* bool; receive IP6 opts for response */
 #define IPV6_RECVDSTADDR	7  /* bool; receive IP6 dst addr w/dgram */
 #define IPV6_RETOPTS		8  /* ip6_opts; set/get IP6 options */
-#endif 0
+#endif /* 0 */
 #define IPV6_SOCKOPT_RESERVED1	3  /* reserved for future use */
-#endif /* _POSIX_C_SOURCE */
+#endif /* (_POSIX_C_SOURCE && !_DARWIN_C_SOURCE) */
 #define IPV6_UNICAST_HOPS	4  /* int; IP6 hops */
 #define IPV6_MULTICAST_IF	9  /* __uint8_t; set/get IP6 multicast i/f  */
 #define IPV6_MULTICAST_HOPS	10 /* __uint8_t; set/get IP6 multicast hops */
@@ -423,7 +424,7 @@ struct route_in6 {
 #define IPV6_JOIN_GROUP		12 /* ip6_mreq; join a group membership */
 #define IPV6_LEAVE_GROUP	13 /* ip6_mreq; leave a group membership */
 
-#ifndef _POSIX_C_SOURCE
+#if !defined(_POSIX_C_SOURCE) || defined(_DARWIN_C_SOURCE)
 #define IPV6_PORTRANGE		14 /* int; range to choose for unspec port */
 #define ICMP6_FILTER		18 /* icmp6_filter; icmp6 filter */
 /* RFC2292 options */
@@ -436,17 +437,17 @@ struct route_in6 {
 #define IPV6_PKTOPTIONS		25 /* buf/cmsghdr; set/get IPv6 options */
 
 #define IPV6_CHECKSUM		26 /* int; checksum offset for raw socket */
-#endif /* _POSIX_C_SOURCE */
+#endif /* (_POSIX_C_SOURCE && !_DARWIN_C_SOURCE) */
 #define IPV6_V6ONLY		27 /* bool; only bind INET6 at wildcard bind */
-#ifndef _POSIX_C_SOURCE
+#if !defined(_POSIX_C_SOURCE) || defined(_DARWIN_C_SOURCE)
 #ifndef KERNEL
 #define IPV6_BINDV6ONLY		IPV6_V6ONLY
-#endif KERNEL
+#endif /* KERNEL */
 
 
 #if 1 /*IPSEC*/
 #define IPV6_IPSEC_POLICY	28 /* struct; get/set security policy */
-#endif 1
+#endif /* 1 */
 #define IPV6_FAITH		29 /* bool; accept FAITH'ed connections */
 
 #if 1 /*IPV6FIREWALL*/
@@ -455,7 +456,7 @@ struct route_in6 {
 #define IPV6_FW_FLUSH		32 /* flush firewall rule chain */
 #define IPV6_FW_ZERO		33 /* clear single/all firewall counter(s) */
 #define IPV6_FW_GET		34 /* get entire firewall rule chain */
-#endif 1
+#endif /* 1 */
 
 /* to define items, should talk with KAME guys first, for *BSD compatibility */
 
@@ -608,25 +609,30 @@ struct mbuf;
 struct ifnet;
 struct in6_aliasreq;
 
-int	in6_cksum(struct mbuf *, __uint8_t, __uint32_t, __uint32_t);
-int	in6_localaddr(struct in6_addr *);
-int	in6_addrscope(struct in6_addr *);
-struct	in6_ifaddr *in6_ifawithscope(struct ifnet *, struct in6_addr *);
-struct	in6_ifaddr *in6_ifawithifp(struct ifnet *, struct in6_addr *);
+#define	in6_cksum(m, n, o, l)	inet6_cksum(m, n, o, l)
+
+extern u_int16_t inet6_cksum(struct mbuf *m, unsigned int proto,
+    unsigned int offset, unsigned int transport_len);
+
+extern int in6_localaddr(struct in6_addr *);
+extern int in6_addrscope(struct in6_addr *);
+extern struct in6_ifaddr *in6_ifawithscope(struct ifnet *, struct in6_addr *);
+extern struct in6_ifaddr *in6_ifawithifp(struct ifnet *, struct in6_addr *);
 extern void in6_if_up(struct ifnet *, struct in6_aliasreq *);
 struct sockaddr;
 
-void	in6_sin6_2_sin(struct sockaddr_in *sin,
-			    struct sockaddr_in6 *sin6);
-void	in6_sin_2_v4mapsin6(struct sockaddr_in *sin,
-				 struct sockaddr_in6 *sin6);
-void	in6_sin6_2_sin_in_sock(struct sockaddr *nam);
-void	in6_sin_2_v4mapsin6_in_sock(struct sockaddr **nam);
+extern void in6_sin6_2_sin(struct sockaddr_in *sin, struct sockaddr_in6 *sin6);
+extern void in6_sin_2_v4mapsin6(struct sockaddr_in *sin,
+    struct sockaddr_in6 *sin6);
+extern void in6_sin6_2_sin_in_sock(struct sockaddr *nam);
+extern void in6_sin_2_v4mapsin6_in_sock(struct sockaddr **nam);
 
 #define	satosin6(sa)	((struct sockaddr_in6 *)(sa))
 #define	sin6tosa(sin6)	((struct sockaddr *)(sin6))
 #define	ifatoia6(ifa)	((struct in6_ifaddr *)(ifa))
-#endif KERNEL_PRIVATE
+
+extern int in6addr_local(struct in6_addr *);
+#endif /* KERNEL_PRIVATE */
 
 #ifndef KERNEL
 __BEGIN_DECLS
@@ -670,6 +676,6 @@ extern int inet6_rth_reverse(const void *, void *);
 extern int inet6_rth_segments(const void *);
 extern struct in6_addr *inet6_rth_getaddr(const void *, int);
 __END_DECLS
-#endif !KERNEL
-#endif /* _POSIX_C_SOURCE */
+#endif /* !KERNEL */
+#endif /* (_POSIX_C_SOURCE && !_DARWIN_C_SOURCE) */
 #endif /* !_NETINET6_IN6_H_ */

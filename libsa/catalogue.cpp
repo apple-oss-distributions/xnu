@@ -1,28 +1,35 @@
 /*
- * Copyright (c) 2000 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2007 Apple Inc. All rights reserved.
  *
- * @APPLE_LICENSE_HEADER_START@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. The rights granted to you under the License
+ * may not be used to create, or enable the creation or redistribution of,
+ * unlawful or unlicensed copies of an Apple operating system, or to
+ * circumvent, violate, or enable the circumvention or violation of, any
+ * terms of an Apple operating system software license agreement.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
- * @APPLE_LICENSE_HEADER_END@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 #include <libkern/c++/OSContainers.h>
 #include <IOKit/IODeviceTreeSupport.h>
 #include <IOKit/IORegistryEntry.h>
 #include <IOKit/IOCatalogue.h>
+#include <IOKit/IOKitKeysPrivate.h>
 #include <libkern/c++/OSUnserialize.h>
 #include <libkern/OSByteOrder.h>
 #include <libsa/catalogue.h>
@@ -52,7 +59,7 @@ extern int grade_binary(cpu_type_t exectype, cpu_subtype_t execsubtype);
 extern struct segment_command *getsegbyname(char *seg_name);
 // Return the address of the named section from the named Mach-O segment
 // from the currently executing 32 bit kernel, or NULL.
-extern struct section *getsectbyname(char *segname, char *sectname);
+extern struct section *getsectbyname(const char *segname, const char *sectname);
 };
 
 #define LOG_DELAY()
@@ -111,6 +118,7 @@ bool validateExtensionDict(OSDictionary * extension, int index) {
     bool id_missing = false;
     bool is_kernel_resource = false;
     bool has_executable = false;
+    bool ineligible_for_safe_boot = false;
     OSString * bundleIdentifier = NULL;    // do not release
     OSObject * rawValue = NULL;            // do not release
     OSString * stringValue = NULL;         // do not release
@@ -121,6 +129,7 @@ bool validateExtensionDict(OSDictionary * extension, int index) {
     OSString * key = NULL;                 // do not release
     VERS_version vers;
     VERS_version compatible_vers;
+    char namep[16];      // unused but needed for PE_parse_boot_arg()
 
     // Info dict is a dictionary
     if (!OSDynamicCast(OSDictionary, extension)) {
@@ -343,9 +352,10 @@ bool validateExtensionDict(OSDictionary * extension, int index) {
         keyIterator = NULL;
     }
 
-    // OSBundleRequired is a legal value - *not* required at boot time
-    // so we can do install CDs and the like with mkext files containing
-    // all normally-used drivers.
+    // OSBundleRequired, if present, must have a legal value.
+    // If it is not present and if we are safe-booting,
+    // then the kext is not eligible.
+    //
     rawValue = extension->getObject("OSBundleRequired");
     if (rawValue) {
         stringValue = OSDynamicCast(OSString, rawValue);
@@ -363,6 +373,10 @@ bool validateExtensionDict(OSDictionary * extension, int index) {
             goto finish;
         }
 
+    } else if (PE_parse_boot_arg("-x", namep)) { /* safe boot */
+        ineligible_for_safe_boot = true;
+        result = false;
+        goto finish;
     }
 
 
@@ -370,19 +384,24 @@ finish:
     if (keyIterator)   keyIterator->release();
 
     if (!result) {
-        if (not_a_dict) {
+        if (ineligible_for_safe_boot) {
+            IOLog(VTYELLOW "Skipping extension \"%s\" during safe boot "
+                "(no OSBundleRequired property)\n"
+                VTRESET,
+                bundleIdentifier->getCStringNoCopy());
+        } else if (not_a_dict) {
             if (index > -1) {
-                IOLog(VTYELLOW "mkext entry %d:." VTRESET, index);
+                IOLog(VTYELLOW "mkext entry %d: " VTRESET, index);
             } else {
-                IOLog(VTYELLOW "kernel extension" VTRESET);
+                IOLog(VTYELLOW "kernel extension " VTRESET);
             }
             IOLog(VTYELLOW "info dictionary isn't a dictionary\n"
                 VTRESET);
         } else if (id_missing) {
             if (index > -1) {
-                IOLog(VTYELLOW "mkext entry %d:." VTRESET, index);
+                IOLog(VTYELLOW "mkext entry %d: " VTRESET, index);
             } else {
-                IOLog(VTYELLOW "kernel extension" VTRESET);
+                IOLog(VTYELLOW "kernel extension " VTRESET);
             }
             IOLog(VTYELLOW "\"CFBundleIdentifier\" property is "
                 "missing or not a string\n"
@@ -675,7 +694,7 @@ OSDictionary * readExtension(OSDictionary * propertyDict,
     OSString             * errorString = NULL;
     OSDictionary         * driverDict = NULL;
 
-    MemoryMapFileInfo * driverInfo = 0;
+    const MemoryMapFileInfo * driverInfo = 0;
     BootxDriverInfo * dataBuffer;
 
     kmod_info_t          * loaded_kmod = NULL;
@@ -702,17 +721,16 @@ OSDictionary * readExtension(OSDictionary * propertyDict,
         goto finish;
     }
 
-    driverInfo = (MemoryMapFileInfo *)
+    driverInfo = (const MemoryMapFileInfo *)
         bootxDriverDataObject->getBytesNoCopy(0,
         sizeof(MemoryMapFileInfo));
-#if defined (__ppc__)
-    dataBuffer = (BootxDriverInfo *)ml_static_ptovirt(
-      driverInfo->paddr);
+#if defined (__ppc__) || defined (__arm__)
+    dataBuffer = (BootxDriverInfo *)ml_static_ptovirt(driverInfo->paddr);
 #elif defined (__i386__)
-    dataBuffer = (BootxDriverInfo *)driverInfo->paddr;
-    dataBuffer->plistAddr = ml_static_ptovirt(dataBuffer->plistAddr);
+    dataBuffer = (BootxDriverInfo *)ml_boot_ptovirt(driverInfo->paddr);
+    dataBuffer->plistAddr = (char *)ml_boot_ptovirt((vm_address_t)dataBuffer->plistAddr);
     if (dataBuffer->moduleAddr)
-      dataBuffer->moduleAddr = ml_static_ptovirt(dataBuffer->moduleAddr);
+      dataBuffer->moduleAddr = (void *)ml_boot_ptovirt((vm_address_t)dataBuffer->moduleAddr);
 #else
 #error unsupported architecture
 #endif
@@ -801,7 +819,7 @@ OSDictionary * readExtension(OSDictionary * propertyDict,
 finish:
 
     if (loaded_kmod) {
-        kfree((unsigned int)loaded_kmod, sizeof(kmod_info_t));
+        kfree(loaded_kmod, sizeof(kmod_info_t));
     }
 
     // do not release bootxDriverDataObject
@@ -913,7 +931,7 @@ finish:
 
 bool uncompressModule(OSData *compData, /* out */ OSData ** file) {
 
-    MkextEntryInfo *info = (MkextEntryInfo *) compData->getBytesNoCopy();
+    const MkextEntryInfo *info = (const MkextEntryInfo *) compData->getBytesNoCopy();
 
     return uncompressFile((u_int8_t *) info->base_address, 
 			  info->fileinfo, file);
@@ -924,7 +942,8 @@ bool uncompressModule(OSData *compData, /* out */ OSData ** file) {
 * Does the work of pulling extensions out of an mkext archive located
 * in memory.
 *********************************************************************/
-bool extractExtensionsFromArchive(MemoryMapFileInfo * mkext_file_info,
+bool extractExtensionsFromArchive(const MemoryMapFileInfo * mkext_file_info,
+    bool vaddr,
     OSDictionary * extensions) {
 
     bool result = true;
@@ -947,14 +966,19 @@ bool extractExtensionsFromArchive(MemoryMapFileInfo * mkext_file_info,
     OSData         * moduleInfo = 0;  // must release
     MkextEntryInfo   module_info;
 
-
-#if defined (__ppc__)
-    mkext_data = (mkext_header *)mkext_file_info->paddr;
+    if (vaddr) {
+	// addExtensionsFromArchive passes a kernel virtual address
+	mkext_data = (mkext_header *)mkext_file_info->paddr;
+    } else {
+#if defined (__ppc__) || defined (__arm__)
+	mkext_data = (mkext_header *)ml_static_ptovirt(mkext_file_info->paddr);
 #elif defined (__i386__)
-    mkext_data = (mkext_header *)ml_static_ptovirt(mkext_file_info->paddr);
+	mkext_data = (mkext_header *)ml_boot_ptovirt(mkext_file_info->paddr);
 #else
 #error unsupported architecture
 #endif
+    }
+
     if (OSSwapBigToHostInt32(mkext_data->magic) != MKEXT_MAGIC ||
         OSSwapBigToHostInt32(mkext_data->signature) != MKEXT_SIGN) {
         IOLog("Error: Extension archive has invalid magic or signature.\n");
@@ -981,6 +1005,16 @@ bool extractExtensionsFromArchive(MemoryMapFileInfo * mkext_file_info,
         LOG_DELAY();
         result = false;
         goto finish;
+    }
+
+    IORegistryEntry * root = IORegistryEntry::getRegistryRoot();
+    assert(root);
+    OSData * checksumObj = OSData::withBytes((void *)&checksum,
+        sizeof(checksum));
+    assert(checksumObj);
+    if (checksumObj) {
+        root->setProperty(kIOStartupMkextCRC, checksumObj);
+        checksumObj->release();
     }
 
    /* If the MKEXT archive isn't fat, check that the CPU type & subtype
@@ -1024,7 +1058,7 @@ bool extractExtensionsFromArchive(MemoryMapFileInfo * mkext_file_info,
          i++) {
 
         if (loaded_kmod) {
-            kfree((unsigned int)loaded_kmod, sizeof(kmod_info_t));
+            kfree(loaded_kmod, sizeof(kmod_info_t));
             loaded_kmod = 0;
         }
 
@@ -1074,7 +1108,7 @@ bool extractExtensionsFromArchive(MemoryMapFileInfo * mkext_file_info,
         } else {
             driverPlist = OSDynamicCast(OSDictionary,
                 OSUnserializeXML(
-                    (char *)driverPlistDataObject->getBytesNoCopy(),
+                    (const char *)driverPlistDataObject->getBytesNoCopy(),
                     &errorString));
             if (!driverPlist) {
                 IOLog("Error: Couldn't read XML property list "
@@ -1202,7 +1236,7 @@ bool extractExtensionsFromArchive(MemoryMapFileInfo * mkext_file_info,
 
 finish:
 
-    if (loaded_kmod) kfree((unsigned int)loaded_kmod, sizeof(kmod_info_t));
+    if (loaded_kmod) kfree(loaded_kmod, sizeof(kmod_info_t));
     if (driverPlistDataObject) {
         kmem_free(kernel_map,
             (unsigned int)driverPlistDataObject->getBytesNoCopy(),
@@ -1227,7 +1261,7 @@ bool readExtensions(OSDictionary * propertyDict,
 
     bool result = true;
     OSData * mkextDataObject = 0;      // don't release
-    MemoryMapFileInfo * mkext_file_info = 0; // don't free
+    const MemoryMapFileInfo * mkext_file_info = 0; // don't free
 
     mkextDataObject = OSDynamicCast(OSData,
         propertyDict->getObject(memory_map_name));
@@ -1242,13 +1276,13 @@ bool readExtensions(OSDictionary * propertyDict,
         goto finish;
     }
 
-    mkext_file_info = (MemoryMapFileInfo *)mkextDataObject->getBytesNoCopy();
+    mkext_file_info = (const MemoryMapFileInfo *)mkextDataObject->getBytesNoCopy();
     if (!mkext_file_info) {
         result = false;
         goto finish;
     }
 
-    result = extractExtensionsFromArchive(mkext_file_info, extensions);
+    result = extractExtensionsFromArchive(mkext_file_info, false /*physical*/, extensions);
 
 finish:
 
@@ -1393,7 +1427,7 @@ bool addExtensionsFromArchive(OSData * mkextDataObject) {
     */
     bootLoaderObjects->setObject(mkextDataObject);
 
-    result = extractExtensionsFromArchive(&mkext_file_info, extensions);
+    result = extractExtensionsFromArchive(&mkext_file_info, true /*virtual*/, extensions);
     if (!result) {
         IOLog("Error: Failed to extract extensions from archive.\n");
         LOG_DELAY();
@@ -1544,8 +1578,8 @@ bool recordStartupExtensions(void) {
 		    LOG_DELAY();
 		    continue;
 		}
-		UInt32 * prelink;
-		prelink = (UInt32 *) data->getBytesNoCopy();
+		const UInt32 * prelink;
+		prelink = (const UInt32 *) data->getBytesNoCopy();
 		kmod_info_t * kmod_info = (kmod_info_t *) OSReadBigInt32(prelink, 0);
 		// end of "file" is end of symbol sect
 		data = OSData::withBytesNoCopy((void *) kmod_info->address,
@@ -1977,7 +2011,7 @@ memory_map:
                   strlen(BOOTX_MULTIKEXT_PREFIX)) ) {
 
             OSData            * bootxDriverDataObject = NULL;
-            MemoryMapFileInfo * driverInfo = 0;
+            const MemoryMapFileInfo * driverInfo = 0;
 
             bootxDriverDataObject = OSDynamicCast(OSData,
                 propertyDict->getObject(keyValue));
@@ -1986,7 +2020,7 @@ memory_map:
             if (!bootxDriverDataObject) {
                 continue;
             }
-            driverInfo = (MemoryMapFileInfo *)
+            driverInfo = (const MemoryMapFileInfo *)
                 bootxDriverDataObject->getBytesNoCopy(0,
                 sizeof(MemoryMapFileInfo));
             IODTFreeLoaderInfo((char *)keyValue,

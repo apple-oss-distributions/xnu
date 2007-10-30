@@ -1,23 +1,29 @@
 /*
- * Copyright (c) 2000-2004 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2006 Apple Computer, Inc. All rights reserved.
  *
- * @APPLE_LICENSE_HEADER_START@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. The rights granted to you under the License
+ * may not be used to create, or enable the creation or redistribution of,
+ * unlawful or unlicensed copies of an Apple operating system, or to
+ * circumvent, violate, or enable the circumvention or violation of, any
+ * terms of an Apple operating system software license agreement.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
- * @APPLE_LICENSE_HEADER_END@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /*	$NetBSD: cd9660_vnops.c,v 1.22 1994/12/27 19:05:12 mycroft Exp $	*/
 
@@ -93,7 +99,7 @@
 #include <sys/lock.h>
 #include <sys/ubc_internal.h>
 #include <sys/uio_internal.h>
-#include <architecture/byte_order.h>
+#include <libkern/OSByteOrder.h>
 
 #include <vm/vm_map.h>
 #include <vm/vm_kern.h>		/* kmem_alloc, kmem_free */
@@ -240,7 +246,7 @@ cd9660_read(struct vnop_read_args *ap)
 			}
 		}
 		if (uio_resid(uio) > 0)
-			error = cluster_read(vp, uio, (off_t)ip->i_size, 0);
+			error = cluster_read(vp, uio, (off_t)ip->i_size, ap->a_ioflag);
 	} else {
 
 	do {
@@ -396,8 +402,10 @@ int
 cd9660_readdir(struct vnop_readdir_args *ap)
 {
 	register struct uio *uio = ap->a_uio;
+#if 0
 	off_t startingOffset = uio->uio_offset;
 	size_t lost = 0;
+#endif	/* 0 */
 	struct isoreaddir *idp;
 	struct vnode *vdp = ap->a_vp;
 	struct iso_node *dp;
@@ -521,7 +529,8 @@ cd9660_readdir(struct vnop_readdir_args *ap)
 			break;
 
 		default:	/* ISO_FTYPE_DEFAULT || ISO_FTYPE_9660 */
-			strcpy(idp->current.d_name,"..");
+			strlcpy(idp->current.d_name, "..",
+				__DARWIN_MAXNAMLEN + 1);
 			switch (ep->name[0]) {
 			case 0:
 				idp->current.d_namlen = 1;
@@ -762,10 +771,10 @@ cd9660_pathconf(struct vnop_pathconf_args *ap)
 		*ap->a_retval = PIPE_BUF;
 		return (0);
 	case _PC_CHOWN_RESTRICTED:
-		*ap->a_retval = 1;
+		*ap->a_retval = 200112;		/* _POSIX_CHOWN_RESTRICTED */
 		return (0);
 	case _PC_NO_TRUNC:
-		*ap->a_retval = 1;
+		*ap->a_retval = 200112;		/* _POSIX_NO_TRUNC */
 		return (0);
 	default:
 		return (EINVAL);
@@ -835,10 +844,6 @@ cd9660_pagein(struct vnop_pagein_args *ap)
 		}
 	} else {
 		/* check pageouts are for reg file only  and ubc info is present*/
-		if  (UBCINVALID(vp))
-			panic("cd9660_pagein: Not a  VREG");
-		UBCINFOCHECK("cd9660_pagein", vp);
-	
 		error = cluster_pagein(vp, pl, pl_offset, f_offset, size,
 				       (off_t)ip->i_size, flags);
 	}
@@ -870,96 +875,6 @@ cd9660_rmdir(struct vnop_rmdir_args *ap)
 }   
 
 /*
-
-#
-#% getattrlist	vp	= = =
-#
- vnop_getattrlist {
-     IN struct vnode *vp;
-     IN struct attrlist *alist;
-     INOUT struct uio *uio;
-     IN vfs_context_t context;
- };
-
- */
-int
-cd9660_getattrlist(struct vnop_getattrlist_args *ap)
-{
-    struct attrlist *alist = ap->a_alist;
-    int fixedblocksize;
-    int attrblocksize;
-    int attrbufsize;
-    void *attrbufptr;
-    void *attrptr;
-    void *varptr;
-    int error = 0;
-
-	if ((alist->bitmapcount != ATTR_BIT_MAP_COUNT) ||
-        ((alist->commonattr & ~ATTR_CMN_VALIDMASK) != 0) ||
-        ((alist->volattr & ~ATTR_VOL_VALIDMASK) != 0) ||
-        ((alist->dirattr & ~ATTR_DIR_VALIDMASK) != 0) ||
-        ((alist->fileattr & ~ATTR_FILE_VALIDMASK) != 0) ||
-        ((alist->forkattr & ~ATTR_FORK_VALIDMASK) != 0)) {
-		return EINVAL;
-	};
-
-	/* 
-	 * Requesting volume information requires setting the ATTR_VOL_INFO bit and
-	 * volume info requests are mutually exclusive with all other info requests:
-	 */
-	if ((alist->volattr != 0) &&
-		(((alist->volattr & ATTR_VOL_INFO) == 0) ||
-		(alist->dirattr != 0) || 
-		(alist->fileattr != 0) || 
-		(alist->forkattr != 0) )) {
-        return EINVAL;
-	};
-
-	/*
-	 * Reject requests for unsupported options for now:
-	 */
-	if (alist->volattr & ATTR_VOL_MOUNTPOINT) return EINVAL;
-	if (alist->commonattr & (ATTR_CMN_NAMEDATTRCOUNT | ATTR_CMN_NAMEDATTRLIST)) return EINVAL;
-	if (alist->fileattr &
-		(ATTR_FILE_FILETYPE |
-		 ATTR_FILE_FORKCOUNT |
-		 ATTR_FILE_FORKLIST |
-		 ATTR_FILE_DATAEXTENTS |
-		 ATTR_FILE_RSRCEXTENTS)) {
-		return EINVAL;
-	};
-
-
-    fixedblocksize = attrcalcsize(alist);
-    attrblocksize = fixedblocksize + (sizeof(uint32_t));                    /* uint32_t for length word */
-    if (alist->commonattr & ATTR_CMN_NAME) attrblocksize += NAME_MAX;
-    if (alist->commonattr & ATTR_CMN_NAMEDATTRLIST) attrblocksize += 0;			/* XXX PPD */
-    if (alist->volattr & ATTR_VOL_MOUNTPOINT) attrblocksize += PATH_MAX;
-    if (alist->volattr & ATTR_VOL_NAME) attrblocksize += NAME_MAX;
-    if (alist->fileattr & ATTR_FILE_FORKLIST) attrblocksize += 0;				/* XXX PPD */
-
-    attrbufsize = MIN(uio_resid(ap->a_uio), attrblocksize);
-    MALLOC(attrbufptr, void *, attrblocksize, M_TEMP, M_WAITOK);
-    attrptr = attrbufptr;
-    *((uint32_t *)attrptr) = 0;									/* Set buffer length in case of errors */
-    ++((uint32_t *)attrptr);										/* Reserve space for length field */
-    varptr = ((char *)attrptr) + fixedblocksize;				/* Point to variable-length storage */
-
-	packattrblk(alist, ap->a_vp, &attrptr, &varptr);
-
-    /* Store length of fixed + var block */
-    *((uint32_t *)attrbufptr) = ((char*)varptr - (char*)attrbufptr);
-    /* Don't copy out more data than was generated */
-    attrbufsize = MIN(attrbufsize, (char*)varptr - (char*)attrbufptr);
-
-    error = uiomove((caddr_t)attrbufptr, attrbufsize, ap->a_uio);
-
-    FREE(attrbufptr, M_TEMP);
-
-    return error;
-}
-
-/*
  * Make a RIFF file header for a CD-ROM XA media file.
  */
 __private_extern__ void
@@ -975,12 +890,12 @@ cd9660_xa_init(struct iso_node *ip, struct iso_directory_record *isodir)
 	sectors = ip->i_size / 2048;
 
 	strncpy(header->riff, "RIFF", 4);
-	header->fileSize = NXSwapHostLongToLittle(sectors * CDXA_SECTOR_SIZE + sizeof(struct riff_header) - 8);
+	header->fileSize = OSSwapHostToLittleInt32(sectors * CDXA_SECTOR_SIZE + sizeof(struct riff_header) - 8);
 	strncpy(header->cdxa, "CDXA", 4);
 	strncpy(header->fmt, "fmt ", 4);
-	header->fmtSize = NXSwapHostLongToLittle(16);
+	header->fmtSize = OSSwapHostToLittleConstInt32(16);
 	strncpy(header->data, "data", 4);
-	header->dataSize = NXSwapHostLongToLittle(sectors * CDXA_SECTOR_SIZE);
+	header->dataSize = OSSwapHostToLittleInt32(sectors * CDXA_SECTOR_SIZE);
 
 	/*
 	 * Copy the CD-ROM XA extended directory information into the header.  As far as
@@ -1172,11 +1087,6 @@ cd9660_xa_pagein(struct vnop_pagein_args *ap)
     kern_return_t kret;
     vm_offset_t ioaddr;
 
-	/* check pageins are for reg file only  and ubc info is present*/
-	if  (UBCINVALID(vp))
-		panic("cd9660_xa_pagein: Not a  VREG");
-	UBCINFOCHECK("cd9660_xa_pagein", vp);
-
 	if (size <= 0)
 		panic("cd9660_xa_pagein: size = %d", size);
 
@@ -1274,7 +1184,6 @@ struct vnodeopv_entry_desc cd9660_vnodeop_entries[] = {
 	{ &vnop_bwrite_desc, (VOPFUNC)vn_bwrite },
 	{ &vnop_pagein_desc, (VOPFUNC)cd9660_pagein },		/* Pagein */
 	{ &vnop_pageout_desc, (VOPFUNC)cd9660_pageout },		/* Pageout */
-	{ &vnop_getattrlist_desc, (VOPFUNC)cd9660_getattrlist },	/* getattrlist */
 	{ &vnop_blktooff_desc, (VOPFUNC)cd9660_blktooff },	/* blktooff */
 	{ &vnop_offtoblk_desc, (VOPFUNC)cd9660_offtoblk },	/* offtoblk */
   	{ &vnop_blockmap_desc, (VOPFUNC)cd9660_blockmap },		/* blockmap */
@@ -1323,7 +1232,6 @@ struct vnodeopv_entry_desc cd9660_cdxaop_entries[] = {
 	{ &vnop_bwrite_desc, (VOPFUNC)vn_bwrite },
 	{ &vnop_pagein_desc, (VOPFUNC)cd9660_xa_pagein },		/* Pagein */
 	{ &vnop_pageout_desc, (VOPFUNC)cd9660_pageout },		/* Pageout */
-	{ &vnop_getattrlist_desc, (VOPFUNC)cd9660_getattrlist },	/* getattrlist */
 	{ (struct vnodeop_desc*)NULL, (VOPFUNC)NULL }
 };
 struct vnodeopv_desc cd9660_cdxaop_opv_desc =
@@ -1361,7 +1269,6 @@ struct vnodeopv_entry_desc cd9660_specop_entries[] = {
 	{ &vnop_pathconf_desc, (VOPFUNC)spec_pathconf },	/* pathconf */
 	{ &vnop_advlock_desc, (VOPFUNC)spec_advlock },	/* advlock */
 	{ &vnop_bwrite_desc, (VOPFUNC)vn_bwrite },
-	{ &vnop_devblocksize_desc, (VOPFUNC)spec_devblocksize }, /* devblocksize */
 	{ &vnop_pagein_desc, (VOPFUNC)cd9660_pagein },		/* Pagein */
 	{ &vnop_pageout_desc, (VOPFUNC)cd9660_pageout },		/* Pageout */
 	{ &vnop_blktooff_desc, (VOPFUNC)cd9660_blktooff },	/* blktooff */

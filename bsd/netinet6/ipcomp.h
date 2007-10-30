@@ -37,6 +37,7 @@
 #ifndef _NETINET6_IPCOMP_H_
 #define _NETINET6_IPCOMP_H_
 #include <sys/appleapiopts.h>
+#include <netinet6/ipsec.h>
 
 struct ipcomp {
 	u_int8_t comp_nxt;	/* Next Header */
@@ -63,8 +64,8 @@ struct ipcomp_algorithm {
 struct ipsecrequest;
 extern const struct ipcomp_algorithm *ipcomp_algorithm_lookup(int);
 extern void ipcomp4_input(struct mbuf *, int);
-extern int ipcomp4_output(struct mbuf *, struct ipsecrequest *);
-#endif KERNEL_PRIVATE
-#endif KERNEL
+extern int ipcomp4_output(struct mbuf *, struct secasvar *);
+#endif /* KERNEL_PRIVATE */
+#endif /* KERNEL */
 
-#endif _NETINET6_IPCOMP_H_
+#endif /* _NETINET6_IPCOMP_H_ */

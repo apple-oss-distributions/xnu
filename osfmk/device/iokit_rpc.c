@@ -1,23 +1,29 @@
 /*
- * Copyright (c) 2000-2004 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2006 Apple Computer, Inc. All rights reserved.
  *
- * @APPLE_LICENSE_HEADER_START@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. The rights granted to you under the License
+ * may not be used to create, or enable the creation or redistribution of,
+ * unlawful or unlicensed copies of an Apple operating system, or to
+ * circumvent, violate, or enable the circumvention or violation of, any
+ * terms of an Apple operating system software license agreement.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
- * @APPLE_LICENSE_HEADER_END@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 #include <mach_kdb.h>
 #include <zone_debug.h>
@@ -29,7 +35,7 @@
 #include <mach/port.h>
 #include <mach/vm_param.h>
 #include <mach/notify.h>
-#include <mach/mach_host_server.h>
+//#include <mach/mach_host_server.h>
 #include <mach/mach_types.h>
 
 #include <machine/machparam.h>		/* spl definitions */
@@ -87,6 +93,46 @@ iokit_client_memory_for_type(
 	unsigned int *	flags,
 	vm_address_t *	address,
 	vm_size_t    *	size );
+
+
+extern ppnum_t IOGetLastPageNumber(void);
+
+/*
+ * Functions imported by iokit:IOUserClient.cpp
+ */
+
+extern ipc_port_t iokit_alloc_object_port( io_object_t obj,
+			ipc_kobject_type_t type );
+
+extern kern_return_t iokit_destroy_object_port( ipc_port_t port );
+
+extern mach_port_name_t iokit_make_send_right( task_t task,
+				io_object_t obj, ipc_kobject_type_t type );
+
+extern kern_return_t iokit_mod_send_right( task_t task, mach_port_name_t name, mach_port_delta_t delta );
+
+extern io_object_t iokit_lookup_connect_ref(io_object_t clientRef, ipc_space_t task);
+
+extern io_object_t iokit_lookup_connect_ref_current_task(io_object_t clientRef);
+
+extern void iokit_retain_port( ipc_port_t port );
+extern void iokit_release_port( ipc_port_t port );
+
+extern kern_return_t iokit_switch_object_port( ipc_port_t port, io_object_t obj, ipc_kobject_type_t type );
+
+/*
+ * Functions imported by iokit:IOMemoryDescriptor.cpp
+ */
+
+extern kern_return_t IOMapPages(vm_map_t map, mach_vm_address_t va, mach_vm_address_t pa,
+                                 mach_vm_size_t length, unsigned int mapFlags);
+
+extern kern_return_t IOUnmapPages(vm_map_t map, mach_vm_address_t va, mach_vm_size_t length);
+
+extern kern_return_t IOProtectCacheMode(vm_map_t map, mach_vm_address_t va,
+					mach_vm_size_t length, unsigned int options);
+
+extern unsigned int IODefaultCacheBits(addr64_t pa);
 
 /*
  * Lookup a device by its port.
@@ -228,10 +274,6 @@ iokit_make_connect_port(
     return( sendPort);
 }
 
-
-EXTERN ipc_port_t
-iokit_alloc_object_port( io_object_t obj, ipc_kobject_type_t type );
-
 int gIOKitPortCount;
 
 EXTERN ipc_port_t
@@ -335,7 +377,7 @@ iokit_no_senders( mach_no_senders_notification_t * notification )
 {
     ipc_port_t		port;
     io_object_t		obj = NULL;
-    ipc_kobject_type_t	type;
+    ipc_kobject_type_t	type = IKOT_NONE;
     ipc_port_t		notify;
 
     port = (ipc_port_t) notification->not_header.msgh_remote_port;
@@ -386,7 +428,7 @@ iokit_notify( mach_msg_header_t * msg )
         case MACH_NOTIFY_SEND_ONCE:
         case MACH_NOTIFY_DEAD_NAME:
         default:
-            printf("iokit_notify: strange notification %ld\n", msg->msgh_id);
+            printf("iokit_notify: strange notification %d\n", msg->msgh_id);
             return FALSE;
     }
 }
@@ -394,36 +436,12 @@ iokit_notify( mach_msg_header_t * msg )
 /* need to create a pmap function to generalize */
 unsigned int IODefaultCacheBits(addr64_t pa)
 {
-    unsigned int	flags;
-#ifndef i386
-    struct phys_entry * pp;
-
-    // Find physical address
-    if ((pp = pmap_find_physentry(pa >> 12))) {
-	// Use physical attributes as default
-	// NOTE: DEVICE_PAGER_FLAGS are made to line up
-	flags = VM_MEM_COHERENT;						/* We only support coherent memory */
-	if(pp->ppLink & ppG) flags |= VM_MEM_GUARDED;	/* Add in guarded if it is */
-	if(pp->ppLink & ppI) flags |= VM_MEM_NOT_CACHEABLE;	/* Add in cache inhibited if so */
-    } else
-	// If no physical, just hard code attributes
-        flags = VM_WIMG_IO;
-#else
-    extern pmap_paddr_t	avail_end;
-
-    if (pa < avail_end)
-	flags = VM_WIMG_COPYBACK;
-    else
-	flags = VM_WIMG_IO;
-#endif
-
-    return flags;
+	return(pmap_cache_attributes(pa >> PAGE_SHIFT));
 }
 
-kern_return_t IOMapPages(vm_map_t map, vm_offset_t va, vm_offset_t pa,
-			vm_size_t length, unsigned int options)
+kern_return_t IOMapPages(vm_map_t map, mach_vm_address_t va, mach_vm_address_t pa,
+			mach_vm_size_t length, unsigned int options)
 {
-    vm_size_t	off;
     vm_prot_t	prot;
     unsigned int flags;
     pmap_t 	 pmap = map->pmap;
@@ -446,7 +464,7 @@ kern_return_t IOMapPages(vm_map_t map, vm_offset_t va, vm_offset_t pa,
 	    flags = VM_WIMG_WTHRU;
 	    break;
 
-	case kIOWriteCombineCache:
+	case kIOMapWriteCombineCache:
 	    flags = VM_WIMG_WCOMB;
 	    break;
 
@@ -454,23 +472,14 @@ kern_return_t IOMapPages(vm_map_t map, vm_offset_t va, vm_offset_t pa,
 	    flags = VM_WIMG_COPYBACK;
 	    break;
     }
-#if __ppc__
 
     // Set up a block mapped area
-    pmap_map_block(pmap, (addr64_t)va, (ppnum_t)(pa >> 12), length, prot, flags, 0);
-
-#else
-//  enter each page's physical address in the target map
-
-    for (off = 0; off < length; off += page_size)
-	pmap_enter(pmap, va + off, (pa + off) >> 12, prot, flags, TRUE);
-
-#endif
+    pmap_map_block(pmap, va, (ppnum_t)atop_64(pa), (uint32_t) atop_64(round_page_64(length)), prot, flags, 0);
 
     return( KERN_SUCCESS );
 }
 
-kern_return_t IOUnmapPages(vm_map_t map, vm_offset_t va, vm_size_t length)
+kern_return_t IOUnmapPages(vm_map_t map, mach_vm_address_t va, mach_vm_size_t length)
 {
     pmap_t	pmap = map->pmap;
 
@@ -479,8 +488,87 @@ kern_return_t IOUnmapPages(vm_map_t map, vm_offset_t va, vm_size_t length)
     return( KERN_SUCCESS );
 }
 
+kern_return_t IOProtectCacheMode(vm_map_t __unused map, mach_vm_address_t __unused va,
+					mach_vm_size_t __unused length, unsigned int __unused options)
+{
+#if __ppc__
+    // can't remap block mappings, but ppc doesn't speculatively read from WC
+#else
+
+    mach_vm_size_t off;
+    vm_prot_t	   prot;
+    unsigned int   flags;
+    pmap_t 	   pmap = map->pmap;
+
+    prot = (options & kIOMapReadOnly)
+		? VM_PROT_READ : (VM_PROT_READ|VM_PROT_WRITE);
+
+    switch (options & kIOMapCacheMask)
+    {
+	// what cache mode do we need?
+	case kIOMapDefaultCache:
+	default:
+	    return (KERN_INVALID_ARGUMENT);
+
+	case kIOMapInhibitCache:
+	    flags = VM_WIMG_IO;
+	    break;
+
+	case kIOMapWriteThruCache:
+	    flags = VM_WIMG_WTHRU;
+	    break;
+
+	case kIOMapWriteCombineCache:
+	    flags = VM_WIMG_WCOMB;
+	    break;
+
+	case kIOMapCopybackCache:
+	    flags = VM_WIMG_COPYBACK;
+	    break;
+    }
+
+    //  enter each page's physical address in the target map
+    for (off = 0; off < length; off += page_size)
+    {
+	ppnum_t ppnum = pmap_find_phys(pmap, va + off);
+	if (ppnum)
+	    pmap_enter(pmap, va + off, ppnum, prot, flags, TRUE);
+    }
+
+#endif
+
+    return (KERN_SUCCESS);
+}
+
+ppnum_t IOGetLastPageNumber(void)
+{
+    ppnum_t	 lastPage, highest = 0;
+    unsigned int idx;
+
+#if __ppc__
+    for (idx = 0; idx < pmap_mem_regions_count; idx++)
+    {
+	lastPage = pmap_mem_regions[idx].mrEnd;
+#elif __i386__
+    for (idx = 0; idx < pmap_memory_region_count; idx++)
+    {
+	lastPage = pmap_memory_regions[idx].end - 1;
+#elif __arm__
+    if (0) /* XXX */
+    {
+#else
+#error arch
+#endif
+	if (lastPage > highest)
+	    highest = lastPage;
+    }
+    return (highest);
+}
+
+
 void IOGetTime( mach_timespec_t * clock_time);
 void IOGetTime( mach_timespec_t * clock_time)
 {
-	clock_get_system_nanotime(&clock_time->tv_sec, &clock_time->tv_nsec);
+	clock_get_system_nanotime(&clock_time->tv_sec, (uint32_t *) &clock_time->tv_nsec);
 }
+

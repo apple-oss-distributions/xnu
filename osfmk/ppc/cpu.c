@@ -1,23 +1,29 @@
 /*
- * Copyright (c) 2000-2004 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2006 Apple Computer, Inc. All rights reserved.
  *
- * @APPLE_LICENSE_HEADER_START@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. The rights granted to you under the License
+ * may not be used to create, or enable the creation or redistribution of,
+ * unlawful or unlicensed copies of an Apple operating system, or to
+ * circumvent, violate, or enable the circumvention or violation of, any
+ * terms of an Apple operating system software license agreement.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
- * @APPLE_LICENSE_HEADER_END@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 
 #include <mach/mach_types.h>
@@ -31,11 +37,14 @@
 #include <kern/thread.h>
 #include <kern/sched_prim.h>
 #include <kern/processor.h>
+#include <kern/pms.h>
 
 #include <vm/pmap.h>
+#include <IOKit/IOHibernatePrivate.h>
 
 #include <ppc/proc_reg.h>
 #include <ppc/misc_protos.h>
+#include <ppc/fpu_protos.h>
 #include <ppc/machine_routines.h>
 #include <ppc/cpu_internal.h>
 #include <ppc/exception.h>
@@ -47,6 +56,7 @@
 #include <ppc/Diagnostics.h>
 #include <ppc/trap.h>
 #include <ppc/machine_cpu.h>
+#include <ppc/rtclock.h>
 
 decl_mutex_data(static,ppt_lock);
 
@@ -62,15 +72,15 @@ static unsigned int	rht_state = 0;
 decl_simple_lock_data(static,SignalReadyLock);
 
 struct SIGtimebase {
-	boolean_t	avail;
-	boolean_t	ready;
-	boolean_t	done;
+	volatile boolean_t	avail;
+	volatile boolean_t	ready;
+	volatile boolean_t	done;
 	uint64_t	abstime;
 };
 
-perfCallback	   	perfCpuSigHook = 0;			/* Pointer to CHUD cpu signal hook routine */
+perfCallback	   	perfCpuSigHook;			/* Pointer to CHUD cpu signal hook routine */
 
-extern int 			debugger_sync;
+extern uint32_t			debugger_sync;
 
 /*
  * Forward definitions
@@ -118,6 +128,9 @@ cpu_init(
 		mttb(proc_info->save_tbl);
 	}
 
+	proc_info->rtcPop = EndOfAllTime;			/* forget any existing decrementer setting */
+	etimer_resync_deadlines();				/* Now that the time base is sort of correct, request the next timer pop */
+
 	proc_info->cpu_type = CPU_TYPE_POWERPC;
 	proc_info->cpu_subtype = (cpu_subtype_t)proc_info->pf.rptdProc;
 	proc_info->cpu_threadtype = CPU_THREADTYPE_NONE;
@@ -150,6 +163,24 @@ cpu_machine_init(
 
 	PE_cpu_machine_init(proc_info->cpu_id, !(proc_info->cpu_flags & BootDone));
 
+	if (proc_info->hibernate) {
+		uint32_t	tbu, tbl;
+
+		do {
+			tbu = mftbu();
+			tbl = mftb();
+		} while (mftbu() != tbu);
+
+	    proc_info->hibernate = 0;
+	    hibernate_machine_init();
+
+		// hibernate_machine_init() could take minutes and we don't want timeouts
+		// to fire as soon as scheduling starts. Reset timebase so it appears
+		// no time has elapsed, as it would for regular sleep.
+		mttb(0);
+		mttbu(tbu);
+		mttb(tbl);
+	}
 
 	if (proc_info != mproc_info) {
 	while (!((mproc_info->cpu_flags) & SignalReady)) 
@@ -163,10 +194,11 @@ cpu_machine_init(
 	proc_info->cpu_flags |= BootDone|SignalReady;
 	if (proc_info != mproc_info) {
 		if (proc_info->ppXFlags & SignalReadyWait) {
-			hw_atomic_and(&proc_info->ppXFlags, ~SignalReadyWait);
+			(void)hw_atomic_and(&proc_info->ppXFlags, ~SignalReadyWait);
 			thread_wakeup(&proc_info->cpu_flags);
 		}
 		simple_unlock(&SignalReadyLock);
+		pmsPark();						/* Timers should be cool now, park the power management stepper */
 	}
 }
 
@@ -179,34 +211,36 @@ struct per_proc_info *
 cpu_per_proc_alloc(
 		void)
 {
-	struct per_proc_info	*proc_info=0;
-	void			*interrupt_stack=0;
-	void			*debugger_stack=0;
+	struct per_proc_info	*proc_info = NULL;
+	void			*interrupt_stack = NULL;
+	void			*debugger_stack = NULL;
 
-	if ((proc_info = (struct per_proc_info*)kalloc(PAGE_SIZE)) == (struct per_proc_info*)0)
-		return (struct per_proc_info *)NULL;;
+	if ((proc_info = (struct per_proc_info*)kalloc(sizeof(struct per_proc_info))) == (struct per_proc_info*)0)
+		return (struct per_proc_info *)NULL;
 	if ((interrupt_stack = kalloc(INTSTACK_SIZE)) == 0) {
-		kfree(proc_info, PAGE_SIZE);
-		return (struct per_proc_info *)NULL;;
+		kfree(proc_info, sizeof(struct per_proc_info));
+		return (struct per_proc_info *)NULL;
 	}
-#if     MACH_KDP || MACH_KDB
+
 	if ((debugger_stack = kalloc(KERNEL_STACK_SIZE)) == 0) {
-		kfree(proc_info, PAGE_SIZE);
+		kfree(proc_info, sizeof(struct per_proc_info));
 		kfree(interrupt_stack, INTSTACK_SIZE);
-		return (struct per_proc_info *)NULL;;
+		return (struct per_proc_info *)NULL;
 	}
-#endif
 
 	bzero((void *)proc_info, sizeof(struct per_proc_info));
 
+	/* Set physical address of the second page */
+	proc_info->pp2ndPage = (addr64_t)pmap_find_phys(kernel_pmap,
+				((addr64_t)(unsigned int)proc_info) + 0x1000)
+			       << PAGE_SHIFT;
 	proc_info->next_savearea = (uint64_t)save_get_init();
 	proc_info->pf = BootProcInfo.pf;
 	proc_info->istackptr = (vm_offset_t)interrupt_stack + INTSTACK_SIZE - FM_SIZE;
 	proc_info->intstack_top_ss = proc_info->istackptr;
-#if     MACH_KDP || MACH_KDB
 	proc_info->debstackptr = (vm_offset_t)debugger_stack + KERNEL_STACK_SIZE - FM_SIZE;
 	proc_info->debstack_top_ss = proc_info->debstackptr;
-#endif  /* MACH_KDP || MACH_KDB */
+
 	return proc_info;
 
 }
@@ -225,7 +259,7 @@ cpu_per_proc_free(
 		return;
 	kfree((void *)(proc_info->intstack_top_ss - INTSTACK_SIZE + FM_SIZE), INTSTACK_SIZE);
 	kfree((void *)(proc_info->debstack_top_ss -  KERNEL_STACK_SIZE + FM_SIZE), KERNEL_STACK_SIZE);
-	kfree((void *)proc_info, PAGE_SIZE);
+	kfree((void *)proc_info, sizeof(struct per_proc_info));			/* Release the per_proc */
 }
 
 
@@ -248,7 +282,7 @@ cpu_per_proc_register(
 	cpu = real_ncpus;
 	proc_info->cpu_number = cpu;
 	PerProcTable[cpu].ppe_vaddr = proc_info;
-	PerProcTable[cpu].ppe_paddr = ((addr64_t)pmap_find_phys(kernel_pmap, (vm_offset_t)proc_info)) << PAGE_SHIFT;
+	PerProcTable[cpu].ppe_paddr = (addr64_t)pmap_find_phys(kernel_pmap, (addr64_t)(unsigned int)proc_info) << PAGE_SHIFT;
 	eieio();
 	real_ncpus++;
 	mutex_unlock(&ppt_lock);
@@ -281,7 +315,13 @@ cpu_start(
 		proc_info->interrupts_enabled = 0;
 		proc_info->pending_ast = AST_NONE;
 		proc_info->istackptr = proc_info->intstack_top_ss;
-		proc_info->rtcPop = 0xFFFFFFFFFFFFFFFFULL;
+		proc_info->rtcPop = EndOfAllTime;
+		proc_info->FPU_owner = NULL;
+		proc_info->VMX_owner = NULL;
+		proc_info->pms.pmsStamp = 0;									/* Dummy transition time */
+		proc_info->pms.pmsPop = EndOfAllTime;							/* Set the pop way into the future */
+		proc_info->pms.pmsState = pmsParked;							/* Park the stepper */
+		proc_info->pms.pmsCSetCmd = pmsCInit;							/* Set dummy initial hardware state */
 		mp = (mapping_t *)(&proc_info->ppUMWmp);
 		mp->mpFlags = 0x01000000 | mpLinkage | mpPerm | 1;
 		mp->mpSpace = invalSpace;
@@ -329,7 +369,7 @@ cpu_start(
 		} else {
 			simple_lock(&SignalReadyLock);
 			if (!((*(volatile short *)&proc_info->cpu_flags) & SignalReady)) {
-				hw_atomic_or(&proc_info->ppXFlags, SignalReadyWait);
+				(void)hw_atomic_or(&proc_info->ppXFlags, SignalReadyWait);
 				thread_sleep_simple_lock((event_t)&proc_info->cpu_flags,
 				                          &SignalReadyLock, THREAD_UNINT);
 			}
@@ -388,12 +428,13 @@ cpu_sleep(
 	proc_info->running = FALSE;
 
 	fowner = proc_info->FPU_owner;					/* Cache this */
-	if(fowner) fpu_save(fowner);					/* If anyone owns FPU, save it */
-	proc_info->FPU_owner = 0;						/* Set no fpu owner now */
+	if(fowner) /* If anyone owns FPU, save it */
+		fpu_save(fowner);
+	proc_info->FPU_owner = NULL;						/* Set no fpu owner now */
 
 	fowner = proc_info->VMX_owner;					/* Cache this */
 	if(fowner) vec_save(fowner);					/* If anyone owns vectors, save it */
-	proc_info->VMX_owner = 0;						/* Set no vector owner now */
+	proc_info->VMX_owner = NULL;						/* Set no vector owner now */
 
 	if (proc_info->cpu_number == master_cpu)  {
 		proc_info->cpu_flags &= BootDone;
@@ -529,11 +570,9 @@ cpu_signal(
  *	the lock and signal the other guy.
  */
 void 
-cpu_signal_handler(
-	void)
+cpu_signal_handler(void)
 {
-
-	unsigned int holdStat, holdParm0, holdParm1, holdParm2, mtype;
+	unsigned int holdStat, holdParm0, holdParm1, holdParm2;
 	unsigned int *parmAddr;
 	struct per_proc_info	*proc_info;
 	int cpu;
@@ -625,7 +664,7 @@ cpu_signal_handler(
 
 					proc_info->hwCtr.numSIGPdebug++;	/* Count this one */
 					proc_info->debugger_is_slave++;		/* Bump up the count to show we're here */
-					hw_atomic_sub(&debugger_sync, 1);	/* Show we've received the 'rupt */
+					(void)hw_atomic_sub(&debugger_sync, 1);	/* Show we've received the 'rupt */
 					__asm__ volatile("tw 4,r3,r3");	/* Enter the debugger */
 					return;							/* All done now... */
 					
@@ -635,7 +674,7 @@ cpu_signal_handler(
 					
 				case SIGPcall:						/* Call function on CPU */
 					proc_info->hwCtr.numSIGPcall++;	/* Count this one */
-					xfunc = holdParm1;				/* Do this since I can't seem to figure C out */
+					xfunc = (broadcastFunc)holdParm1;				/* Do this since I can't seem to figure C out */
 					xfunc(holdParm2);				/* Call the passed function */
 					return;							/* Done... */
 					
@@ -676,7 +715,7 @@ cpu_sync_timebase(
 							(unsigned int)&syncClkSpot) != KERN_SUCCESS)
 		continue;
 
-	while (*(volatile int *)&(syncClkSpot.avail) == FALSE)
+	while (syncClkSpot.avail == FALSE)
 		continue;
 
 	isync();
@@ -694,9 +733,10 @@ cpu_sync_timebase(
 
 	syncClkSpot.ready = TRUE;
 
-	while (*(volatile int *)&(syncClkSpot.done) == FALSE)
+	while (syncClkSpot.done == FALSE)
 		continue;
 
+	etimer_resync_deadlines();									/* Start the timer */
 	(void)ml_set_interrupts_enabled(intr);
 }
 
@@ -729,7 +769,8 @@ cpu_timebase_signal_handler(
 						
 	timebaseAddr->avail = TRUE;
 
-	while (*(volatile int *)&(timebaseAddr->ready) == FALSE);
+	while (timebaseAddr->ready == FALSE)
+		continue;
 
 	if(proc_info->time_base_enable !=  (void(*)(cpu_id_t, boolean_t ))NULL)
 		proc_info->time_base_enable(proc_info->cpu_id, TRUE);
@@ -1084,34 +1125,56 @@ cpu_threadtype(void)
  *	It is not passed to the other processor and must be known by the called function.
  *	The called function must do a thread_wakeup on the synch if it decrements the
  *	synch count to 0.
+ *
+ *	We start by initializing the synchronizer to the number of possible cpus.
+ *	The we signal each popssible processor.
+ *	If the signal fails, we count it.  We also skip our own.
+ *	When we are finished signaling, we adjust the syncronizer count down buy the number of failed signals.
+ *	Because the signaled processors are also decrementing the synchronizer count, the adjustment may result in a 0
+ *	If this happens, all other processors are finished with the function.
+ *	If so, we clear the wait and continue
+ *	Otherwise, we block waiting for the other processor(s) to finish.
+ *
+ *	Meanwhile, the other processors are decrementing the synchronizer when they are done
+ *	If it goes to zero, thread_wakeup is called to run the broadcaster
+ *
+ *	Note that because we account for the broadcaster in the synchronization count, we will not get any
+ *	premature wakeup calls.
+ *
+ *	Also note that when we do the adjustment of the synchronization count, it the result is 0, it means that
+ *	all of the other processors are finished.  Otherwise, we know that there is at least one more. 
+ *	When that thread decrements the synchronizer to zero, it will do a thread_wake.
+ *	
  */
 
-
-int32_t cpu_broadcast(uint32_t *synch, broadcastFunc func, uint32_t parm) {
-
-	int sigproc, cpu, ocpu;
-
-	cpu = cpu_number();									/* Who are we? */
-	sigproc = 0;										/* Clear called processor count */
-
-	if(real_ncpus > 1) {								/* Are we just a uni? */
+int32_t
+cpu_broadcast(uint32_t *synch, broadcastFunc func, uint32_t parm)
+{
+	int failsig;
+	unsigned int cpu, ocpu;
 	
+	cpu = cpu_number();						/* Who are we? */
+	failsig = 0;							/* Clear called processor count */
+	
+	if(real_ncpus > 1) {						/* Are we just a uni? */
+		
+		*synch = real_ncpus;					/* Set how many we are going to try */
 		assert_wait((event_t)synch, THREAD_UNINT);		/* If more than one processor, we may have to wait */
-
+		
 		for(ocpu = 0; ocpu < real_ncpus; ocpu++) {		/* Tell everyone to call */
-			if(ocpu == cpu) continue;					/* If we talk to ourselves, people will wonder... */
-			hw_atomic_add(synch, 1);					/* Tentatively bump synchronizer  */
-			sigproc++;									/* Tentatively bump signal sent count */
+			
+			if(ocpu == cpu)	continue;			/* If we talk to ourselves, people will wonder... */
+			
 			if(KERN_SUCCESS != cpu_signal(ocpu, SIGPcall, (uint32_t)func, parm)) {	/* Call the function on the other processor */
-				hw_atomic_sub(synch, 1);				/* Other guy isn't really there, ignore it  */
-				sigproc--;								/* and don't count it */
+				failsig++;				/* Count failed signals */
 			}
 		}
-
-		if(!sigproc) clear_wait(current_thread(), THREAD_AWAKENED);	/* Clear wait if we never signalled */
-		else thread_block(THREAD_CONTINUE_NULL);		/* Wait for everyone to get into step... */
+		
+		if (hw_atomic_sub(synch, failsig + 1) == 0)
+			clear_wait(current_thread(), THREAD_AWAKENED);	/* Clear wait if we never signalled or all of the others finished */
+		else
+			thread_block(THREAD_CONTINUE_NULL);		/* Wait for everyone to get into step... */
 	}
-
-	return sigproc;										/* Return the number of guys actually signalled */
-
+	
+	return (real_ncpus - failsig - 1);				/* Return the number of guys actually signalled... */
 }

@@ -1,23 +1,29 @@
 /*
  * Copyright (c) 2000 Apple Computer, Inc. All rights reserved.
  *
- * @APPLE_LICENSE_HEADER_START@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. The rights granted to you under the License
+ * may not be used to create, or enable the creation or redistribution of,
+ * unlawful or unlicensed copies of an Apple operating system, or to
+ * circumvent, violate, or enable the circumvention or violation of, any
+ * terms of an Apple operating system software license agreement.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
- * @APPLE_LICENSE_HEADER_END@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 
 /*
@@ -66,12 +72,12 @@
 
 #include <net/if.h>
 
+#include <netat/sysglue.h>  /* nbp.h needs the gbuf definiton */
 #include <netat/appletalk.h>
 #include <netat/ddp.h>
-#include <netat/sysglue.h>  /* nbp.h needs the gbuf definiton */
-#include <netat/nbp.h>
 #include <netat/at_pcb.h>
 #include <netat/at_var.h>
+#include <netat/nbp.h>
 #include <netat/atp.h>
 
 #define	SIP_SYSINFO_CMD		1
@@ -89,9 +95,9 @@ typedef	struct {
 	u_short	responder_version;
 } sip_userbytes_t;
 
-void sip_input(mp, ifID)
-     gbuf_t	*mp;
-     int	*ifID; /* not used */
+void sip_input(
+     gbuf_t	*mp,
+     __unused at_ifaddr_t	*ifID)
 {
 	/* Packets arriving here are actually ATP packets, but since
 	 * A/UX only send dummy responses, we're implementing responder as
@@ -114,7 +120,7 @@ void sip_input(mp, ifID)
 	/* assuming that the whole packet is in one contiguous buffer */
 	atp = (at_atp_t	*)ddp->data;
 	
-	switch(UAL_VALUE(atp->user_bytes)) {
+	switch(UAL_VALUE_NTOH(atp->user_bytes)) {
 	case SIP_SYSINFO_CMD :
 		/* Sending a response with "AppleTalk driver version" (u_short)
 		 * followed by 14 zeros will pacify the interpoll.
@@ -132,11 +138,11 @@ void sip_input(mp, ifID)
 		else
 			resp = (u_char *)gbuf_rptr(tmp);
 		bzero(resp, 16);
-		*(u_short *)resp = SIP_DRIVER_VERSION;
+		*(u_short *)resp = htons(SIP_DRIVER_VERSION);
 
 		ubytes.response = SIP_GOOD_RESPONSE;
 		ubytes.unused = 0;
-		ubytes.responder_version = SIP_RESPONDER_VERSION;
+		ubytes.responder_version = htons(SIP_RESPONDER_VERSION);
 		break;
 	case SIP_DATALINK_CMD :
 		/* In this case, the magic spell is to send 2 zeroes after
@@ -153,23 +159,23 @@ void sip_input(mp, ifID)
 		else
 			resp = (u_char *)gbuf_rptr(tmp);
 		bzero(resp, 16);
-		*(u_short *)resp = SIP_DRIVER_VERSION;
+		*(u_short *)resp = htons(SIP_DRIVER_VERSION);
 
 		ubytes.response = SIP_GOOD_RESPONSE;
 		ubytes.unused = 0;
-		ubytes.responder_version = SIP_RESPONDER_VERSION;
+		ubytes.responder_version = htons(SIP_RESPONDER_VERSION);
 		break;
 	default :
 		/* bad request, send a bad command response back */
 		ubytes.response = SIP_BAD_RESPONSE;
 		ubytes.unused = 0;
-		ubytes.responder_version = SIP_RESPONDER_VERSION;
+		ubytes.responder_version = htons(SIP_RESPONDER_VERSION);
 	}
 
 	NET_NET(ddp->dst_net, ddp->src_net);
 	ddp->dst_node = ddp->src_node;
 	ddp->dst_socket = ddp->src_socket;
-	bcopy((caddr_t) &ubytes, (caddr_t) atp->user_bytes, sizeof(ubytes));
+	UAL_ASSIGN_HTON(atp->user_bytes, &ubytes);
 	atp->cmd = ATP_CMD_TRESP;
 	atp->eom = 1;
 	atp->sts = 0;
@@ -178,4 +184,3 @@ void sip_input(mp, ifID)
 	(void)ddp_output(&mp, DDP_SOCKET_1st_DYNAMIC, FALSE);
 	return;
 } /* sip_input */
-

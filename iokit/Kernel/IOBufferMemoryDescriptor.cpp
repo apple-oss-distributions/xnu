@@ -1,31 +1,39 @@
 /*
  * Copyright (c) 1998-2000 Apple Computer, Inc. All rights reserved.
  *
- * @APPLE_LICENSE_HEADER_START@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. The rights granted to you under the License
+ * may not be used to create, or enable the creation or redistribution of,
+ * unlawful or unlicensed copies of an Apple operating system, or to
+ * circumvent, violate, or enable the circumvention or violation of, any
+ * terms of an Apple operating system software license agreement.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
- * @APPLE_LICENSE_HEADER_END@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 #include <IOKit/assert.h>
 #include <IOKit/system.h>
 
 #include <IOKit/IOLib.h>
+#include <IOKit/IOMapper.h>
 #include <IOKit/IOBufferMemoryDescriptor.h>
 
 #include "IOKitKernelInternal.h"
+#include "IOCopyMapper.h"
 
 __BEGIN_DECLS
 void ipc_port_release_send(ipc_port_t port);
@@ -33,6 +41,12 @@ void ipc_port_release_send(ipc_port_t port);
 
 vm_map_t IOPageableMapForAddress( vm_address_t address );
 __END_DECLS
+
+/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+
+volatile ppnum_t gIOHighestAllocatedPage;
+
+/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
 #define super IOGeneralMemoryDescriptor
 OSDefineMetaClassAndStructors(IOBufferMemoryDescriptor,
@@ -88,9 +102,23 @@ bool IOBufferMemoryDescriptor::initWithOptions(
                                vm_offset_t  alignment,
 			       task_t	    inTask)
 {
+    mach_vm_address_t physicalMask = 0;
+    return (initWithPhysicalMask(inTask, options, capacity, alignment, physicalMask));
+}
+
+bool IOBufferMemoryDescriptor::initWithPhysicalMask(
+				task_t		  inTask,
+				IOOptionBits      options,
+				mach_vm_size_t    capacity,
+				mach_vm_address_t alignment,
+				mach_vm_address_t physicalMask)
+{
     kern_return_t 	kr;
-    vm_map_t 		vmmap = 0;
-    IOOptionBits	iomdOptions = kIOMemoryAsReference | kIOMemoryTypeVirtual;
+    task_t		mapTask = NULL;
+    vm_map_t 		vmmap = NULL;
+    addr64_t            lastIOAddr;
+    IOAddressRange	range;
+    IOOptionBits	iomdOptions = kIOMemoryTypeVirtual64;
 
     if (!capacity)
         return false;
@@ -100,62 +128,121 @@ bool IOBufferMemoryDescriptor::initWithOptions(
     _physAddrs    = 0;
     _physSegCount = 0;
     _buffer	  = 0;
+    range.address = 0;
+    range.length  = 0;
+    _ranges.v64   = &range;
 
     // Grab the direction and the Auto Prepare bits from the Buffer MD options
     iomdOptions  |= options & (kIOMemoryDirectionMask | kIOMemoryAutoPrepare);
 
-    if ((options & kIOMemorySharingTypeMask) && (alignment < page_size))
-        alignment = page_size;
+    if ((options & (kIOMemorySharingTypeMask | kIOMapCacheMask)) && (alignment < page_size))
+	alignment = page_size;
 
-    if ((inTask != kernel_task) && !(options & kIOMemoryPageable))
-        return false;
+    if (physicalMask && (alignment <= 1))
+	alignment = ((physicalMask ^ PAGE_MASK) & PAGE_MASK) + 1;
 
     _alignment = alignment;
+
+    if (((inTask != kernel_task) && !(options & kIOMemoryPageable)) ||
+	(physicalMask && (options & kIOMapCacheMask)))
+	return false;
+
+    if ((options & kIOMemoryPhysicallyContiguous) && !physicalMask)
+	physicalMask = 0xFFFFFFFF;
+
+    // set flags for entry + object create
+    vm_prot_t memEntryCacheMode = VM_PROT_READ | VM_PROT_WRITE;
+
+    // set memory entry cache mode
+    switch (options & kIOMapCacheMask)
+    {
+	case kIOMapInhibitCache:
+	    SET_MAP_MEM(MAP_MEM_IO, memEntryCacheMode);
+	    break;
+
+	case kIOMapWriteThruCache:
+	    SET_MAP_MEM(MAP_MEM_WTHRU, memEntryCacheMode);
+	    break;
+
+	case kIOMapWriteCombineCache:
+	    SET_MAP_MEM(MAP_MEM_WCOMB, memEntryCacheMode);
+	    break;
+
+	case kIOMapCopybackCache:
+	    SET_MAP_MEM(MAP_MEM_COPYBACK, memEntryCacheMode);
+	    break;
+
+	case kIOMapDefaultCache:
+	default:
+	    SET_MAP_MEM(MAP_MEM_NOOP, memEntryCacheMode);
+	    break;
+    }
+
     if (options & kIOMemoryPageable)
     {
-        iomdOptions |= kIOMemoryBufferPageable;
+	iomdOptions |= kIOMemoryBufferPageable;
 
-        ipc_port_t sharedMem;
-        vm_size_t size = round_page_32(capacity);
-
-        // must create the entry before any pages are allocated
+	// must create the entry before any pages are allocated
 
 	// set flags for entry + object create
-	vm_prot_t memEntryCacheMode = VM_PROT_READ | VM_PROT_WRITE
-				    | MAP_MEM_NAMED_CREATE;
+	memEntryCacheMode |= MAP_MEM_NAMED_CREATE;
 
-        if (options & kIOMemoryPurgeable)
-            memEntryCacheMode |= MAP_MEM_PURGABLE;
+	if (options & kIOMemoryPurgeable)
+	    memEntryCacheMode |= MAP_MEM_PURGABLE;
+    }
+    else
+    {
+	memEntryCacheMode |= MAP_MEM_NAMED_REUSE;
 
-	// set memory entry cache mode
-	switch (options & kIOMapCacheMask)
+	if (IOMapper::gSystem)
+	    // assuming mapped space is 2G
+	    lastIOAddr = (1UL << 31) - PAGE_SIZE;
+	else
+	    lastIOAddr = ptoa_64(gIOHighestAllocatedPage);
+
+	if (physicalMask && (lastIOAddr != (lastIOAddr & physicalMask)))
 	{
-	    case kIOMapInhibitCache:
-		SET_MAP_MEM(MAP_MEM_IO, memEntryCacheMode);
-		break;
-    
-	    case kIOMapWriteThruCache:
-		SET_MAP_MEM(MAP_MEM_WTHRU, memEntryCacheMode);
-		break;
+	    mach_vm_address_t address;
+	    iomdOptions &= ~kIOMemoryTypeVirtual64;
+	    iomdOptions |= kIOMemoryTypePhysical64;
 
-	    case kIOMapWriteCombineCache:
-		SET_MAP_MEM(MAP_MEM_WCOMB, memEntryCacheMode);
-		break;
+	    address = IOMallocPhysical(capacity, physicalMask);
+	    _buffer = (void *) address;
+	    if (!_buffer)
+		return false;
 
-	    case kIOMapCopybackCache:
-		SET_MAP_MEM(MAP_MEM_COPYBACK, memEntryCacheMode);
-		break;
-
-	    case kIOMapDefaultCache:
-	    default:
-		SET_MAP_MEM(MAP_MEM_NOOP, memEntryCacheMode);
-		break;
+	    mapTask = inTask;
+	    inTask = 0;
 	}
+	else
+	{
+	    vmmap = kernel_map;
 
-	kr = mach_make_memory_entry( vmmap,
-		    &size, 0,
-		    memEntryCacheMode, &sharedMem,
-		    NULL );
+	    // Buffer shouldn't auto prepare they should be prepared explicitly
+	    // But it never was enforced so what are you going to do?
+	    iomdOptions |= kIOMemoryAutoPrepare;
+
+	    /* Allocate a wired-down buffer inside kernel space. */
+	    if (options & kIOMemoryPhysicallyContiguous)
+		_buffer = (void *) IOKernelAllocateContiguous(capacity, alignment);
+	    else if (alignment > 1)
+		_buffer = IOMallocAligned(capacity, alignment);
+	    else
+		_buffer = IOMalloc(capacity);
+	    if (!_buffer)
+		return false;
+	}
+    }
+
+    if( (kIOMemoryTypePhysical64 != (kIOMemoryTypeMask & iomdOptions)) 
+	&& (options & (kIOMemoryPageable | kIOMapCacheMask))) {
+	ipc_port_t	sharedMem;
+	vm_size_t	size = round_page_32(capacity);
+
+	kr = mach_make_memory_entry(vmmap,
+				    &size, (vm_offset_t)_buffer,
+				    memEntryCacheMode, &sharedMem,
+				    NULL );
 
 	if( (KERN_SUCCESS == kr) && (size != round_page_32(capacity))) {
 	    ipc_port_release_send( sharedMem );
@@ -165,72 +252,94 @@ bool IOBufferMemoryDescriptor::initWithOptions(
 	    return( false );
 
 	_memEntry = (void *) sharedMem;
+
+	if( options & kIOMemoryPageable) {
 #if IOALLOCDEBUG
-       debug_iomallocpageable_size += size;
+	    debug_iomallocpageable_size += size;
 #endif
-	if ((NULL == inTask) && (options & kIOMemoryPageable))
-	    inTask = kernel_task;
-	else if (inTask == kernel_task)
-	{
-	    vmmap = kernel_map;
+	    mapTask = inTask;
+	    if (NULL == inTask)
+		inTask = kernel_task;
 	}
-	else
+	else if (options & kIOMapCacheMask)
 	{
+	    // Prefetch each page to put entries into the pmap
+	    volatile UInt8 *	startAddr = (UInt8 *)_buffer;
+	    volatile UInt8 *	endAddr   = (UInt8 *)_buffer + capacity;
 
-	    if( !reserved) {
-		reserved = IONew( ExpansionData, 1 );
-		if( !reserved)
-		    return( false );
+	    while (startAddr < endAddr)
+	    {
+		*startAddr;
+		startAddr += page_size;
 	    }
-	    vmmap = get_task_map(inTask);
-	    vm_map_reference(vmmap);
-	    reserved->map = vmmap;
 	}
     }
-    else 
-    {
-        // @@@ gvdl: Need to remove this
-        // Buffer should never auto prepare they should be prepared explicitly
-        // But it never was enforced so what are you going to do?
-        iomdOptions |= kIOMemoryAutoPrepare;
 
-	/* Allocate a wired-down buffer inside kernel space. */
-	if (options & kIOMemoryPhysicallyContiguous)
-	    _buffer = IOMallocContiguous(capacity, alignment, 0);
-	else if (alignment > 1)
-	    _buffer = IOMallocAligned(capacity, alignment);
-	else
-	    _buffer = IOMalloc(capacity);
+    range.address = (mach_vm_address_t) _buffer;
+    range.length  = capacity;
 
-	if (!_buffer)
-	    return false;
-    }
-
-    _singleRange.v.address = (vm_address_t) _buffer;
-    _singleRange.v.length  = capacity;
-
-    if (!super::initWithOptions(&_singleRange.v, 1, 0,
-                               inTask, iomdOptions, /* System mapper */ 0))
+    if (!super::initWithOptions(&range, 1, 0,
+				inTask, iomdOptions, /* System mapper */ 0))
 	return false;
 
-    if (options & kIOMemoryPageable)
+    if (physicalMask && !IOMapper::gSystem)
     {
-        kern_return_t kr;
+	IOMDDMACharacteristics mdSummary;
 
-	if (vmmap)
+	bzero(&mdSummary, sizeof(mdSummary));
+	IOReturn rtn = dmaCommandOperation(
+		kIOMDGetCharacteristics,
+		&mdSummary, sizeof(mdSummary));
+	if (rtn)
+	    return false;
+
+	if (mdSummary.fHighestPage)
 	{
-	    kr = doMap(vmmap, (IOVirtualAddress *) &_buffer, kIOMapAnywhere, 0, round_page_32(capacity));
-	    if (KERN_SUCCESS != kr)
+	    ppnum_t highest;
+	    while (mdSummary.fHighestPage > (highest = gIOHighestAllocatedPage))
 	    {
-		_buffer = 0;
-		return( false );
+		if (OSCompareAndSwap(highest, mdSummary.fHighestPage, 
+					(UInt32 *) &gIOHighestAllocatedPage))
+		    break;
 	    }
-	    _singleRange.v.address = (vm_address_t) _buffer;
+	    lastIOAddr = ptoa_64(mdSummary.fHighestPage);
 	}
+	else
+	    lastIOAddr = ptoa_64(gIOLastPage);
+
+	if (lastIOAddr != (lastIOAddr & physicalMask))
+	{
+	    if (kIOMemoryTypePhysical64 != (_flags & kIOMemoryTypeMask))
+	    {
+		// flag a retry
+		_physSegCount = 1;
+	    }
+	    return false;
+	}
+    }
+
+    if (mapTask)
+    {
+	if (!reserved) {
+	    reserved = IONew( ExpansionData, 1 );
+	    if( !reserved)
+		return( false );
+	}
+	reserved->map = map(mapTask, 0, kIOMapAnywhere, 0, 0);
+	if (!reserved->map)
+	{
+	    _buffer = 0;
+	    return( false );
+	}
+	release();	    // map took a retain on this
+	mach_vm_address_t buffer = reserved->map->getAddress();
+	_buffer = (void *) buffer;
+	if (kIOMemoryTypeVirtual64 == (kIOMemoryTypeMask & iomdOptions))
+	    _ranges.v64->address = buffer;
     }
 
     setLength(capacity);
-    
+
     return true;
 }
 
@@ -243,8 +352,44 @@ IOBufferMemoryDescriptor * IOBufferMemoryDescriptor::inTaskWithOptions(
     IOBufferMemoryDescriptor *me = new IOBufferMemoryDescriptor;
     
     if (me && !me->initWithOptions(options, capacity, alignment, inTask)) {
+	bool retry = me->_physSegCount;
 	me->release();
 	me = 0;
+	if (retry)
+	{
+	    me = new IOBufferMemoryDescriptor;
+	    if (me && !me->initWithOptions(options, capacity, alignment, inTask))
+	    {
+		me->release();
+		me = 0;
+	    }
+	}
+    }
+    return me;
+}
+
+IOBufferMemoryDescriptor * IOBufferMemoryDescriptor::inTaskWithPhysicalMask(
+					    task_t	      inTask,
+                                            IOOptionBits      options,
+                                            mach_vm_size_t    capacity,
+                                            mach_vm_address_t physicalMask)
+{
+    IOBufferMemoryDescriptor *me = new IOBufferMemoryDescriptor;
+    
+    if (me && !me->initWithPhysicalMask(inTask, options, capacity, 1, physicalMask))
+    {
+	bool retry = me->_physSegCount;
+	me->release();
+	me = 0;
+	if (retry)
+	{
+	    me = new IOBufferMemoryDescriptor;
+	    if (me && !me->initWithPhysicalMask(inTask, options, capacity, 1, physicalMask))
+	    {
+		me->release();
+		me = 0;
+	    }
+	}
     }
     return me;
 }
@@ -262,13 +407,7 @@ IOBufferMemoryDescriptor * IOBufferMemoryDescriptor::withOptions(
                                             vm_size_t    capacity,
                                             vm_offset_t  alignment)
 {
-    IOBufferMemoryDescriptor *me = new IOBufferMemoryDescriptor;
-    
-    if (me && !me->initWithOptions(options, capacity, alignment, kernel_task)) {
-	me->release();
-	me = 0;
-    }
-    return me;
+    return(IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task, options, capacity, alignment));
 }
 
 
@@ -329,9 +468,21 @@ IOBufferMemoryDescriptor::withBytes(const void * inBytes,
 {
     IOBufferMemoryDescriptor *me = new IOBufferMemoryDescriptor;
 
-    if (me && !me->initWithBytes(inBytes, inLength, inDirection, inContiguous)){
-        me->release();
-        me = 0;
+    if (me && !me->initWithBytes(inBytes, inLength, inDirection, inContiguous))
+    {
+	bool retry = me->_physSegCount;
+	me->release();
+	me = 0;
+	if (retry)
+	{
+	    me = new IOBufferMemoryDescriptor;
+	    if (me && !me->initWithBytes(inBytes, inLength, inDirection, inContiguous))
+	    {
+		me->release();
+		me = 0;
+	    }
+	}
+
     }
     return me;
 }
@@ -345,16 +496,20 @@ void IOBufferMemoryDescriptor::free()
 {
     // Cache all of the relevant information on the stack for use
     // after we call super::free()!
-    IOOptionBits options   = _options;
-    vm_size_t    size	   = _capacity;
-    void *       buffer	   = _buffer;
-    vm_map_t	 vmmap	   = 0;
-    vm_offset_t  alignment = _alignment;
+    IOOptionBits     flags     = _flags;
+    IOOptionBits     options   = _options;
+    vm_size_t        size      = _capacity;
+    void *           buffer    = _buffer;
+    IOVirtualAddress source    = _ranges.v64->address;
+    IOMemoryMap *    map       = 0;
+    vm_offset_t      alignment = _alignment;
 
     if (reserved)
     {
-	vmmap = reserved->map;
+	map = reserved->map;
         IODelete( reserved, ExpansionData, 1 );
+	if (map)
+	    map->release();
     }
 
     /* super::free may unwire - deallocate buffer afterwards */
@@ -363,28 +518,20 @@ void IOBufferMemoryDescriptor::free()
     if (options & kIOMemoryPageable)
     {
 #if IOALLOCDEBUG
-        if (!buffer || vmmap)
-            debug_iomallocpageable_size -= round_page_32(size);
+	debug_iomallocpageable_size -= round_page_32(size);
 #endif
-        if (buffer)
-        {
-            if (vmmap)
-                vm_deallocate(vmmap, (vm_address_t) buffer, round_page_32(size));
-            else
-                IOFreePageable(buffer, size);
-        }
     }
     else if (buffer)
     {
-        if (options & kIOMemoryPhysicallyContiguous)
-            IOFreeContiguous(buffer, size);
+	if (kIOMemoryTypePhysical64 == (flags & kIOMemoryTypeMask))
+	    IOFreePhysical((mach_vm_address_t) source, size);
+        else if (options & kIOMemoryPhysicallyContiguous)
+            IOKernelFreeContiguous((mach_vm_address_t) buffer, size);
         else if (alignment > 1)
             IOFreeAligned(buffer, size);
         else
             IOFree(buffer, size);
     }
-    if (vmmap)
-	vm_map_deallocate(vmmap);
 }
 
 /*
@@ -412,7 +559,7 @@ void IOBufferMemoryDescriptor::setLength(vm_size_t length)
     assert(length <= _capacity);
 
     _length = length;
-    _singleRange.v.length = length;
+    _ranges.v64->length = length;
 }
 
 /*
@@ -437,13 +584,20 @@ void IOBufferMemoryDescriptor::setDirection(IODirection direction)
 bool
 IOBufferMemoryDescriptor::appendBytes(const void * bytes, vm_size_t withLength)
 {
-    vm_size_t actualBytesToCopy = min(withLength, _capacity - _length);
+    vm_size_t   actualBytesToCopy = min(withLength, _capacity - _length);
+    IOByteCount offset;
 
     assert(_length <= _capacity);
-    bcopy(/* from */ bytes, (void *)(_singleRange.v.address + _length),
-          actualBytesToCopy);
+
+    offset = _length;
     _length += actualBytesToCopy;
-    _singleRange.v.length += actualBytesToCopy;
+    _ranges.v64->length += actualBytesToCopy;
+
+    if (_task == kernel_task)
+	bcopy(/* from */ bytes, (void *)(_ranges.v64->address + offset),
+	      actualBytesToCopy);
+    else
+	writeBytes(offset, bytes, actualBytesToCopy);
 
     return true;
 }
@@ -455,8 +609,12 @@ IOBufferMemoryDescriptor::appendBytes(const void * bytes, vm_size_t withLength)
  */
 void * IOBufferMemoryDescriptor::getBytesNoCopy()
 {
-    return (void *)_singleRange.v.address;
+    if (kIOMemoryTypePhysical64 == (_flags & kIOMemoryTypeMask))
+	return _buffer;
+    else
+	return (void *)_ranges.v64->address;
 }
+
 
 /*
  * getBytesNoCopy:
@@ -466,13 +624,30 @@ void * IOBufferMemoryDescriptor::getBytesNoCopy()
 void *
 IOBufferMemoryDescriptor::getBytesNoCopy(vm_size_t start, vm_size_t withLength)
 {
-    if (start < _length && (start + withLength) <= _length)
-        return (void *)(_singleRange.v.address + start);
+    IOVirtualAddress address;
+    if (kIOMemoryTypePhysical64 == (_flags & kIOMemoryTypeMask))
+	address = (IOVirtualAddress) _buffer;
+    else
+	address = _ranges.v64->address;
+
+   if (start < _length && (start + withLength) <= _length)
+        return (void *)(address + start);
     return 0;
 }
 
+/* DEPRECATED */ void * IOBufferMemoryDescriptor::getVirtualSegment(IOByteCount offset,
+/* DEPRECATED */ 							IOByteCount * lengthOfSegment)
+{
+    void * bytes = getBytesNoCopy(offset, 0);
+    
+    if (bytes && lengthOfSegment)
+	*lengthOfSegment = _length - offset;
+
+    return bytes;
+}
+
 OSMetaClassDefineReservedUsed(IOBufferMemoryDescriptor, 0);
-OSMetaClassDefineReservedUnused(IOBufferMemoryDescriptor, 1);
+OSMetaClassDefineReservedUsed(IOBufferMemoryDescriptor, 1);
 OSMetaClassDefineReservedUnused(IOBufferMemoryDescriptor, 2);
 OSMetaClassDefineReservedUnused(IOBufferMemoryDescriptor, 3);
 OSMetaClassDefineReservedUnused(IOBufferMemoryDescriptor, 4);

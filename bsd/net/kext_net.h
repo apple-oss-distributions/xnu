@@ -1,23 +1,29 @@
 /*
- * Copyright (c) 1999-2005 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 1999-2006 Apple Computer, Inc. All rights reserved.
  *
- * @APPLE_LICENSE_HEADER_START@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. The rights granted to you under the License
+ * may not be used to create, or enable the creation or redistribution of,
+ * unlawful or unlicensed copies of an Apple operating system, or to
+ * circumvent, violate, or enable the circumvention or violation of, any
+ * terms of an Apple operating system software license agreement.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
- * @APPLE_LICENSE_HEADER_END@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 
 /*
@@ -42,7 +48,8 @@
 
 struct socket_filter;
 
-#define SFEF_DETACHING		0x1
+#define	SFEF_DETACHUSEZERO	0x1	// Detach when use reaches zero
+#define	SFEF_UNREGISTERING	0x2	// Remove due to unregister
 
 struct socket_filter_entry {
 	struct socket_filter_entry	*sfe_next_onsocket;
@@ -71,16 +78,15 @@ struct socket_filter {
 TAILQ_HEAD(socket_filter_list, socket_filter);
 
 /* Private, internal implementation functions */
-void	sflt_init(void);
+void	sflt_init(void) __attribute__((section("__TEXT, initcode")));
 void	sflt_initsock(struct socket *so);
 void	sflt_termsock(struct socket *so);
 void	sflt_use(struct socket *so);
 void	sflt_unuse(struct socket *so);
 void	sflt_notify(struct socket *so, sflt_event_t event, void *param);
 int		sflt_data_in(struct socket *so, const struct sockaddr *from, mbuf_t *data,
-					 mbuf_t *control, sflt_data_flag_t flags);
+					 mbuf_t *control, sflt_data_flag_t flags, int *filtered);
 int		sflt_attach_private(struct socket *so, struct socket_filter *filter, sflt_handle handle, int locked);
-void	sflt_detach_private(struct socket_filter_entry *entry, int filter_detached);
 
 #endif /* BSD_KERNEL_PRIVATE */
 
@@ -98,20 +104,16 @@ void	sflt_detach_private(struct socket_filter_entry *entry, int filter_detached)
  *  the 'where' NKE.  If the latter is NULL, the flags indicate "first"
  *  or "last"
  */
-#if __DARWIN_ALIGN_POWER
-#pragma options align=power
-#endif
+#pragma pack(4)
 
 struct so_nke
 {	unsigned int nke_handle;
 	unsigned int nke_where;
 	int nke_flags; /* NFF_BEFORE, NFF_AFTER: net/kext_net.h */
-	unsigned long reserved[4];	/* for future use */
+	u_int32_t reserved[4];	/* for future use */
 };
 
-#if __DARWIN_ALIGN_POWER
-#pragma options align=reset
-#endif
+#pragma pack()
 
 #endif /* NET_KEXT_NET_H */
 

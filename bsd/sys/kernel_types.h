@@ -16,8 +16,6 @@
 typedef int errno_t;
 typedef int64_t daddr64_t;
 
-typedef	int64_t	ino64_t;
-
 #ifndef BSD_BUILD
 struct buf;
 typedef struct buf * buf_t;
@@ -33,7 +31,7 @@ typedef struct mount * mount_t;
 
 #ifdef TBDDDD
 typedef struct fsid { int32_t val[2]; } fsid_t;	/* file system id type */
-#endif TBDDDD
+#endif /* TBDDDD */
 
 struct vnode;
 typedef struct vnode * vnode_t;

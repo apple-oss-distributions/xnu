@@ -1,27 +1,31 @@
 /*
- * Copyright (c) 2000 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 1998-2007 Apple Inc. All rights reserved.
  *
- * @APPLE_LICENSE_HEADER_START@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. The rights granted to you under the License
+ * may not be used to create, or enable the creation or redistribution of,
+ * unlawful or unlicensed copies of an Apple operating system, or to
+ * circumvent, violate, or enable the circumvention or violation of, any
+ * terms of an Apple operating system software license agreement.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
- * @APPLE_LICENSE_HEADER_END@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /*
- *	Copyright (c) 1988, 1989, 1997, 1998 Apple Computer, Inc. 
- *
  *   Modified, March 17, 1997 by Tuyen Nguyen for MacOSX.
  */
 
@@ -47,6 +51,7 @@
 
 #include <netat/sysglue.h>
 #include <netat/appletalk.h>
+#include <netat/at_pcb.h>
 #include <netat/at_var.h>
 #include <netat/ddp.h>
 #include <netat/nbp.h>
@@ -54,7 +59,6 @@
 #include <netat/rtmp.h>
 #include <netat/routing_tables.h>	/* router */
 #include <netat/at_snmp.h>
-#include <netat/at_pcb.h>
 #include <netat/debug.h>
 
 /* reaching for DDP and NBP headers in the datagram */
@@ -76,31 +80,28 @@ extern at_ifaddr_t *ifID_home;
 
 TAILQ_HEAD(name_registry, _nve_) name_registry;
 
-atlock_t 	nve_lock;
 
 /* statics */
 static	int		errno;
 static  gbuf_t  *lzones=0;	/* head of local zones list */
 static int	lzonecnt=0;		/* # zones stored in lzones	*/
 static u_int  hzonehash=0;	/* hash val of home zone */
-static int	nve_lock_pri;
 
 static int	nbp_lkup_reply(nbp_req_t *, nve_entry_t *);
 static int	nbp_strcmp(at_nvestr_t *, at_nvestr_t *, u_char);
 static int	nbp_setup_resp(nbp_req_t *, int);
 static int	nbp_send_resp(nbp_req_t *);
 static int	nbp_validate_n_hash(nbp_req_t *, int, int);
-static	nve_entry_t	*nbp_search_nve();
+static	nve_entry_t	*nbp_search_nve(nbp_req_t *, at_ifaddr_t *);
 static int isZoneLocal(at_nvestr_t *);
+static int nbp_enum_gen (nve_entry_t *);
+static	void	nbp_setup_hdr (nbp_req_t *);
+static	void	nbp_upshift (u_char *, int);
+static u_char *nbp2zone(at_nbp_t *, u_char *);
 
 /* macros */
 #define NVE_LOCK nve_lock
 
-/* prototypes */
-void nbp_delete_entry();
-extern int at_reg_mcast();
-extern at_nvestr_t *getRTRLocalZone(zone_usage_t *);
-extern void	nbp_add_multicast( at_nvestr_t *, at_ifaddr_t *);
 
 static long nbp_id_count = 0;
 
@@ -112,19 +113,17 @@ void sethzonehash(elapp)
 	}
 }
 
-void nbp_shutdown()
+void nbp_shutdown(void)
 {
 	/* delete all NVE's and release buffers */
 	register nve_entry_t	*nve_entry, *nve_next;
 
-	ATDISABLE(nve_lock_pri,NVE_LOCK);
-        for ((nve_entry = TAILQ_FIRST(&name_registry)); nve_entry; nve_entry = nve_next) {
-                nve_next = TAILQ_NEXT(nve_entry, nve_link);
+	for ((nve_entry = TAILQ_FIRST(&name_registry)); nve_entry; nve_entry = nve_next) {
+			nve_next = TAILQ_NEXT(nve_entry, nve_link);
 
                 /* NB: nbp_delete_entry calls TAILQ_REMOVE */
 		nbp_delete_entry(nve_entry);
 	}
-	ATENABLE(nve_lock_pri,NVE_LOCK);
 
 	if (lzones) {
 		gbuf_freem(lzones);
@@ -158,7 +157,6 @@ void nbp_input(m, ifID)
 {
 	register at_ddp_t 	*ddp = DATA_DDP(m);
 	register at_nbp_t	*nbp = DATA_NBP(m);
-	register nve_entry_t	*nve_entry, *next_nve;
 	register RT_entry	*rt;
 	register int ddpSent = FALSE; 	/* true if we re-sent this pkt (don't free) */
 	struct etalk_addr mcastAddr;
@@ -207,12 +205,9 @@ void nbp_input(m, ifID)
 #ifdef NBP_DEBUG
 	{
 		char zone[35],object[35],type[35];
-		strncpy(zone,nbp_req.nve.zone.str, nbp_req.nve.zone.len);
-		strncpy(object,nbp_req.nve.object.str, nbp_req.nve.object.len);
-		strncpy(type,nbp_req.nve.type.str, nbp_req.nve.type.len);
-		object[nbp_req.nve.object.len] = '\0';
-		zone[nbp_req.nve.zone.len] = '\0';
-		type[nbp_req.nve.type.len] = '\0';
+		strlcpy(zone,nbp_req.nve.zone.str, sizeof(zone));
+		strlcpy(object,nbp_req.nve.object.str, sizeof(object));
+		strlcpy(type,nbp_req.nve.type.str, sizeof(type));
 		if (ifID != ifID_home) 
 			dPrintf(D_M_NBP_LOW,D_L_USR2,
 				("nbp_LKUP for:%s:%s@%s", object, type, zone));
@@ -286,15 +281,15 @@ void nbp_input(m, ifID)
 
  /*### LD 01/18/94 Check if the dest is also the home zone. */
  
- 		p = nbp2zone(nbp, gbuf_wptr(m));
- 		if ((p == NULL) || !(zno = zt_find_zname(p))) {
+ 		p = nbp2zone(nbp, (u_char *)gbuf_wptr(m));
+ 		if ((p == NULL) || !(zno = zt_find_zname((at_nvestr_t *)p))) {
  			dPrintf(D_M_NBP,D_L_WARNING,
  				("nbp_input: FWDRQ:zone not found\n"));
 			break;
  		}
 		if (isZoneLocal((at_nvestr_t*)p)) 
 			zhome = TRUE;				/* one of our  ports is in destination zone */
-		if (!zt_get_zmcast(ifID, p, &mcastAddr)) {
+		if (!zt_get_zmcast(ifID, (at_nvestr_t*)p, (char *)&mcastAddr)) {
 			dPrintf(D_M_NBP,D_L_ERROR,
 				("nbp_input: FDWREQ:zt_get_zmcast error\n"));
 			break;
@@ -320,8 +315,8 @@ void nbp_input(m, ifID)
  		}
  
 		if (FDDI_OR_TOKENRING(ifID->aa_ifp->if_type))
-			ddp_bit_reverse(&mcastAddr);
-		ddp_router_output(m, ifID, ET_ADDR,NULL,NULL, &mcastAddr);
+			ddp_bit_reverse((unsigned char *)&mcastAddr);
+		ddp_router_output(m, ifID, ET_ADDR, 0, 0, &mcastAddr);
 		ddpSent = TRUE;
 		}
 		break;
@@ -335,7 +330,7 @@ void nbp_input(m, ifID)
 		register int	i;
 		register  gbuf_t	*m2, *m3;
 		register int fromUs = FALSE;
-		register at_socket ourSkt;	/* originating skt */
+		register at_socket ourSkt = 0;	/* originating skt */
 
 		/* for router & MH local only */
 		if ((!(MULTIHOME_MODE && FROM_US(ddp))) && !ROUTING_MODE) {
@@ -344,8 +339,8 @@ void nbp_input(m, ifID)
 
 			break;
 		}
- 		p = nbp2zone(nbp, gbuf_wptr(m));
-		if ((p == NULL) || !(zno = zt_find_zname(p))) {
+ 		p = nbp2zone(nbp, (u_char *)gbuf_wptr(m));
+		if ((p == NULL) || !(zno = zt_find_zname((at_nvestr_t *)p))) {
 			break;
 		}
 		if (MULTIHOME_MODE && ifID->ifRouterState == NO_ROUTER) {
@@ -403,29 +398,30 @@ void nbp_input(m, ifID)
 				   ("nbp_input: BRREQ: src changed to %d.%d.%d\n",
 					ifID->ifThisNode.s_net,
 					ifID->ifThisNode.s_node, ourSkt));
-				nbp->tuple[0].enu_addr.net = ifID->ifThisNode.s_net;
+				nbp->tuple[0].enu_addr.net = htons(ifID->ifThisNode.s_net);
 				nbp->tuple[0].enu_addr.node = ifID->ifThisNode.s_node;
 				nbp->tuple[0].enu_addr.socket = ourSkt; 
 				ddp->src_socket = NBP_SOCKET;
 			}
+#if DEBUG
 			else
 				dPrintf(D_M_NBP, D_L_USR3, 
 					("nbp_input: BRREQ: not from us\n"));
-
+#endif /* DEBUG */
 			dPrintf(D_M_NBP, D_L_USR3,
 				("nbp_input dist:%d\n", rt->NetDist));
 			if (rt->NetDist == 0) {			/* if direct connect, *we* do the LKUP */
 				nbp->control  = NBP_LKUP;
 	 			NET_ASSIGN(ddp->dst_net, 0);
 	 			ddp->dst_node = 255;
-				if (!zt_get_zmcast(ifID, p, &mcastAddr)) {
+				if (!zt_get_zmcast(ifID, (at_nvestr_t*)p, (char *)&mcastAddr)) {
 					dPrintf(D_M_NBP,D_L_ERROR, 
 						("nbp_input: BRRQ:zt_get_zmcast error\n"));
 					break;
 				}
 				if (FDDI_OR_TOKENRING(ifID->aa_ifp->if_type))
-					ddp_bit_reverse(&mcastAddr);
-				ddp_router_output(m2, ifID, ET_ADDR, NULL, NULL, &mcastAddr); 
+					ddp_bit_reverse((unsigned char *)&mcastAddr);
+				ddp_router_output(m2, ifID, ET_ADDR, 0, 0, &mcastAddr); 
 			}
 			else {							/* else fwd to router */
 				ddp->dst_node = 0;
@@ -499,7 +495,7 @@ static	int	nbp_validate_n_hash (nbp_req, wild_ok, checkLocal)
 #ifdef COMMENTED_OUT
 	{
 		int net,node,skt;
-		net = tuple->enu_addr.net;
+		net = ntohs(tuple->enu_addr.net);
 		node = tuple->enu_addr.node;
 		skt = tuple->enu_addr.socket;
 		dPrintf(D_M_NBP_LOW,D_L_USR4,
@@ -523,12 +519,9 @@ static	int	nbp_validate_n_hash (nbp_req, wild_ok, checkLocal)
 #ifdef NBP_DEBUG
 	{
 		char xzone[35],xobject[35],xtype[35];
-		strncpy(xzone,zone->str, zone->len);
-		strncpy(xobject,object->str, object->len);
-		strncpy(xtype,type->str, type->len);
-		xobject[object->len] = '\0';
-		xzone[zone->len] = '\0';
-		xtype[type->len] = '\0';
+		strlcpy(xzone,zone->str, sizeof(xzone));
+		strlcpy(xobject,object->str, sizeof(xobject));
+		strlcpy(xtype,type->str, sizeof(xtype));
 		dPrintf(D_M_NBP_LOW, D_L_USR4,
 			("nbp_validate: looking for %s:%s@%s\n",
 			xobject, xtype, xzone));
@@ -541,8 +534,7 @@ static	int	nbp_validate_n_hash (nbp_req, wild_ok, checkLocal)
 
 	if (checkLocal && !isZoneLocal(zone)) {
 		char str[35];
-		strncpy(str,zone->str,zone->len);
-		str[zone->len] = '\0';
+		strlcpy((char *)str,(char *)zone->str,sizeof(str));
 		dPrintf(D_M_NBP_LOW,D_L_WARNING,
 			("nbp_val_n_hash bad zone: %s\n", str));
 		errno = EINVAL;
@@ -568,8 +560,8 @@ static	int	nbp_validate_n_hash (nbp_req, wild_ok, checkLocal)
 		}
 	} else{
 		for (i = part_wild = 0; (unsigned) i<object->len; i++) {
-			if (object->str[i] == NBP_SPL_WILDCARD)
-				if (wild_ok)
+			if (object->str[i] == NBP_SPL_WILDCARD) {
+				if (wild_ok) {
 					if (part_wild) {
 					  dPrintf(D_M_NBP_LOW, D_L_WARNING, 
 						  ("nbp_val_n_hash: too many parts wild\n"));
@@ -577,12 +569,13 @@ static	int	nbp_validate_n_hash (nbp_req, wild_ok, checkLocal)
 					  return (-1);
 					} else
 					  part_wild++;
-				else {
+				} else {
 				  dPrintf(D_M_NBP_LOW, D_L_WARNING, 
 					  ("nbp_val_n_hash: wild not okay2\n"));
 				  errno = EINVAL;
 				  return (-1);
 				}
+			}
 			nbp_req->nve.object.str[i] = object->str[i];
 		}
 		if (!part_wild)
@@ -604,8 +597,8 @@ static	int	nbp_validate_n_hash (nbp_req, wild_ok, checkLocal)
 		}
 	} else {
 		for (i = part_wild = 0; (unsigned) i<type->len; i++) {
-			if (type->str[i] == NBP_SPL_WILDCARD)
-				if (wild_ok)
+			if (type->str[i] == NBP_SPL_WILDCARD) {
+				if (wild_ok) {
 					if (part_wild) {
 					  dPrintf(D_M_NBP_LOW, D_L_WARNING, 
 						  ("nbp_val_n_hash: too many parts wild2\n"));
@@ -613,10 +606,11 @@ static	int	nbp_validate_n_hash (nbp_req, wild_ok, checkLocal)
 					  return (-1);
 					} else
 					  part_wild++;
-				else {
+				} else {
 					errno = EINVAL;
 					return (-1);
 				}
+			}
 			nbp_req->nve.type.str[i] = type->str[i];
 		}
 		if (!part_wild)
@@ -626,12 +620,9 @@ static	int	nbp_validate_n_hash (nbp_req, wild_ok, checkLocal)
 #ifdef NBP_DEBUG
 	{
 		char zone[35],object[35],type[35];
-		strncpy(zone,nbp_req->nve.zone.str, nbp_req->nve.zone.len);
-		strncpy(object,nbp_req->nve.object.str, nbp_req->nve.object.len);
-		strncpy(type,nbp_req->nve.type.str, nbp_req->nve.type.len);
-		object[nbp_req->nve.object.len] = '\0';
-		zone[nbp_req->nve.zone.len] = '\0';
-		type[nbp_req->nve.type.len] = '\0';
+		strlcpy(zone,nbp_req.nve.zone.str, sizeof(zone));
+		strlcpy(object,nbp_req.nve.object.str, sizeof(object));
+		strlcpy(type,nbp_req.nve.type.str, sizeof(type));
 		dPrintf(D_M_NBP_LOW,D_L_USR4,
 			("nbp_validate: after hash: %s:%s@%s\n",
 			object, type, zone));
@@ -679,7 +670,7 @@ u_int nbp_strhash (nvestr)
 	} un;
 
 	for (i=0; (unsigned) i < nvestr->len; i+=sizeof(int)) {
-		len = MIN((nvestr->len-i), sizeof(int));
+		len = MIN((size_t)(nvestr->len-i), sizeof(int));
 		if (len == sizeof(int))
 			bcopy(&(nvestr->str[i]), &un, sizeof(un));
 		else {
@@ -703,18 +694,14 @@ static	nve_entry_t *nbp_search_nve (nbp_req, ifID)
 #ifdef NBP_DEBUG
 	{
 		char zone[35],object[35],type[35];
-		strncpy(zone,nbp_req->nve.zone.str, nbp_req->nve.zone.len);
-		strncpy(object,nbp_req->nve.object.str, nbp_req->nve.object.len);
-		strncpy(type,nbp_req->nve.type.str, nbp_req->nve.type.len);
-		object[nbp_req->nve.object.len] = '\0';
-		zone[nbp_req->nve.zone.len] = '\0';
-		type[nbp_req->nve.type.len] = '\0';
+		strlcpy(zone,nbp_req.nve.zone.str, sizeof(zone));
+		strlcpy(object,nbp_req.nve.object.str, sizeof(object));
+		strlcpy(type,nbp_req.nve.type.str, sizeof(type));
 		dPrintf(D_M_NBP_LOW, D_L_USR4,
 				("nbp_search: looking for %s:%s@%s resp:0x%x\n",object,type,zone,
 				(u_int) nbp_req->response));
 	}
 #endif /* NBP_DEBUG */
-	ATDISABLE(nve_lock_pri,NVE_LOCK);
 	TAILQ_FOREACH(nve_entry, &name_registry, nve_link) {
 		if ((nbp_req->nve.zone_hash) && 
 			((nbp_req->nve.zone_hash != 
@@ -747,11 +734,13 @@ static	nve_entry_t *nbp_search_nve (nbp_req, ifID)
 					 ifID->ifThisNode.s_net));
 				continue;
 			    }
+#if DEBUG
 			    if (ifID)
 				dPrintf(D_M_NBP, D_L_USR4, 
 					("nbp search ifID (%d) & req net (%d)  equal\n",
 					 nve_entry->address.net,
 					 ifID->ifThisNode.s_net));
+#endif /* DEBUG */
 			}
 		
 		}
@@ -786,12 +775,9 @@ static	nve_entry_t *nbp_search_nve (nbp_req, ifID)
 	{
 		char zone[35],object[35],type[35];
 
-		strncpy(zone,nbp_req->nve.zone.str, nbp_req->nve.zone.len);
-		strncpy(object,nbp_req->nve.object.str, nbp_req->nve.object.len);
-		strncpy(type,nbp_req->nve.type.str, nbp_req->nve.type.len);
-		object[nbp_req->nve.object.len] = '\0';
-		zone[nbp_req->nve.zone.len] = '\0';
-		type[nbp_req->nve.type.len] = '\0';
+		strlcpy(zone,nbp_req.nve.zone.str, sizeof(zone));
+		strlcpy(object,nbp_req.nve.object.str, sizeof(object));
+		strlcpy(type,nbp_req.nve.type.str, sizeof(type));
 		dPrintf(D_M_NBP_LOW, D_L_USR2,
 			("nbp_search: found  %s:%s@%s  net:%d\n",
 			object, type, zone, (int)nve_entry->address.net));
@@ -800,15 +786,11 @@ static	nve_entry_t *nbp_search_nve (nbp_req, ifID)
 		if (nbp_req->func != NULL) {
 			if ((*(nbp_req->func))(nbp_req, nve_entry) != 0) {
 				/* errno expected to be set by func */
-				ATENABLE(nve_lock_pri,NVE_LOCK);
 				return (NULL);
 			}
-		} else {
-			ATENABLE(nve_lock_pri,NVE_LOCK);
+		} else
 			return (nve_entry);
-		}
 	}
-	ATENABLE(nve_lock_pri,NVE_LOCK);
 
 	errno = 0;
 	return (NULL);
@@ -848,7 +830,9 @@ register nve_entry_t	*nve_entry;
 	 * tuple we want to write. Write it!
 	 */
 	tuple = (at_nbptuple_t *)gbuf_wptr(nbp_req->response);
-	tuple->enu_addr = nve_entry->address;
+	tuple->enu_addr.net = htons(nve_entry->address.net);
+	tuple->enu_addr.node = nve_entry->address.node;
+	tuple->enu_addr.socket = nve_entry->address.socket;
 	tuple->enu_enum = nve_entry->enumerator;
 
         /* tuple is in the compressed (no "filler") format */
@@ -969,7 +953,7 @@ register nbp_req_t	*nbp_req;
 	case NBP_LKUP :
 		ddp->dst_socket = nbp_req->nve.address.socket;
 		ddp->dst_node = nbp_req->nve.address.node;
-		NET_ASSIGN(ddp->dst_net, nbp_req->nve.address.net);
+		NET_ASSIGN_NOSWAP(ddp->dst_net, nbp_req->nve.address.net);
 		nbp->control = NBP_LKUP_REPLY;
 		break;
 	}
@@ -1015,45 +999,42 @@ void nbp_add_multicast(zone, ifID)
      at_ifaddr_t *ifID;
 {
 	char data[ETHERNET_ADDR_LEN];
-	int i;
 
 	if (zone->str[0] == '*')
 		return;
 
 	{
 	  char str[35];
-	  strncpy(str,zone->str,zone->len);
-	  str[zone->len] = '\0';
+	  strlcpy((char *)str,(char *)zone->str,sizeof(str));
 	  dPrintf(D_M_NBP_LOW, D_L_USR3,
 		  ("nbp_add_multi getting mc for %s\n", str));
 	}
 	zt_get_zmcast(ifID, zone, data); 
 	if (FDDI_OR_TOKENRING(ifID->aa_ifp->if_type))
-	  ddp_bit_reverse(data);
+	  ddp_bit_reverse((unsigned char *)data);
 	dPrintf(D_M_NBP_LOW,D_L_USR3,
 		("nbp_add_multi adding  0x%x%x port:%d ifID:0x%x if:%s\n",
 		 *(unsigned*)data, (*(unsigned *)(data+2))&0x0000ffff,
-		 i, (u_int) ifID, ifID->ifName));
+		 /*i*/0, (u_int) ifID, ifID->ifName));
 
 	bcopy((caddr_t)data, (caddr_t)&ifID->ZoneMcastAddr, ETHERNET_ADDR_LEN);
 	(void)at_reg_mcast(ifID, (caddr_t)&ifID->ZoneMcastAddr);
 }
 
-
-getNbpTableSize()
+int
+getNbpTableSize(void)
 
 /* for SNMP, returns size in # of entries */
 {
 	register nve_entry_t *nve;
 	register int i=0;
 
-	ATDISABLE(nve_lock_pri,NVE_LOCK);
 	for (nve = TAILQ_FIRST(&name_registry); nve; nve = TAILQ_NEXT(nve, nve_link), i++)
 		i++;
-	ATENABLE(nve_lock_pri,NVE_LOCK);
 	return(i);
 }
 
+int
 getNbpTable(p, s, c)
      snmpNbpEntry_t	*p;
      int 		s;		/* starting entry */
@@ -1073,7 +1054,6 @@ getNbpTable(p, s, c)
 	else
 		nve = TAILQ_FIRST(&name_registry);
 
-	ATDISABLE(nve_lock_pri,NVE_LOCK);
 	for ( ; nve && c ; nve = TAILQ_NEXT(nve, nve_link), p++,i++) {
 		if (i>= s) {
 			p->nbpe_object = nve->object;
@@ -1081,7 +1061,6 @@ getNbpTable(p, s, c)
 			c--;
 		}
 	}
-	ATENABLE(nve_lock_pri,NVE_LOCK);
 	if (nve) {
 		next = nve;
 		nextNo = i;
@@ -1089,6 +1068,8 @@ getNbpTable(p, s, c)
 		next = (nve_entry_t*)NULL;
 		nextNo = 0;
 	}
+	
+	return 0;
 }
 
 
@@ -1115,26 +1096,26 @@ int setLocalZones(newzones, size)
 	while (bytesread < size) {		/* for each new zone */
 		{
 			char str[35];
-			strncpy(str,pnew->str,pnew->len);
-			str[pnew->len] = '\0';
+			strlcpy((char *)str,(char *)pnew->str,sizeof(str));
 		}
 		m = lzones;				
 		pnve = (at_nvestr_t*)gbuf_rptr(m);
 		dupe = 0;
 		for (i=0; i<lzonecnt && !dupe; i++,pnve++)  {
-			if (i && !(i%ZONES_PER_BLK))
+			if (i && !(i%ZONES_PER_BLK)) {
 				if (gbuf_cont(m)) {
 					m = gbuf_cont(m);
 					pnve = (at_nvestr_t*)gbuf_rptr(m);
 				}
 				else
 					break;
+			}
 			if (pnew->len != pnve->len)
 				continue;
 			if (pnew->len > NBP_NVE_STR_SIZE) {
 				return(0);
 			}
-			if (!strncmp(pnew->str, pnve->str, pnew->len)) {
+			if (!strncmp((char *)pnew->str, (char *)pnve->str, pnew->len)) {
 				dupe=1;
 				continue;
 			}
@@ -1147,7 +1128,7 @@ int setLocalZones(newzones, size)
 				gbuf_wset(gbuf_cont(m),0);
 				pnve = (at_nvestr_t*)gbuf_rptr(gbuf_cont(m));
 			}
-			strncpy(pnve->str,pnew->str,pnew->len);
+			strlcpy((char *)pnve->str,(char *)pnew->str,sizeof(pnve->str));
 			pnve->len = pnew->len;
 			lzonecnt++;
 		}
@@ -1170,13 +1151,13 @@ showLocalZones1()
 		if (!(pnve = getLocalZone(i))) {
 			break;
 		}
-		strncpy(str,pnve->str,pnve->len);
-		str[pnve->len] = '\0';
+		strlcpy(str,pnve->str,sizeof(str));
 	}
 }
 
 *********/
 
+int
 isZoneLocal(zone)
 at_nvestr_t *zone;
 {
@@ -1323,7 +1304,6 @@ nve_entry_t *nbp_find_nve(nve)
 {
 	register nve_entry_t	*nve_entry;
 
-	ATDISABLE(nve_lock_pri,NVE_LOCK);
 	TAILQ_FOREACH(nve_entry, &name_registry, nve_link) {
 		if (nve->zone_hash &&
 		    ((nve->zone_hash != nve_entry->zone_hash) &&
@@ -1343,10 +1323,8 @@ nve_entry_t *nbp_find_nve(nve)
 			continue;
 
 		/* Found a match! */
-		ATENABLE(nve_lock_pri,NVE_LOCK);
 		return (nve_entry);
 	}
-	ATENABLE(nve_lock_pri,NVE_LOCK);
 
 	return (NULL);
 } /* nbp_find_nve */
@@ -1357,22 +1335,19 @@ static int nbp_enum_gen (nve_entry)
 	register int		new_enum = 0;
 	register nve_entry_t	*ne;
 
-	ATDISABLE(nve_lock_pri,NVE_LOCK);
 re_do:
 	TAILQ_FOREACH(ne, &name_registry, nve_link) {
 		if ((*(int *)&ne->address == *(int *)&nve_entry->address) &&
 			(ne->enumerator == new_enum)) {
-			if (new_enum == 255) {
-				ATENABLE(nve_lock_pri,NVE_LOCK);
+			if (new_enum == 255)
 				return(EADDRNOTAVAIL);
-			} else {
+			else {
 				new_enum++;
 				goto re_do;
 			}
 		}
 	}
 
-	ATENABLE(nve_lock_pri,NVE_LOCK);
 	nve_entry->enumerator = new_enum;
 	return (0);
 }
@@ -1425,20 +1400,15 @@ int nbp_new_nve_entry(nve_entry, ifID)
 	new_entry->tag = tag;
 	new_entry->pid =  proc_selfpid();
 
-	ATDISABLE(nve_lock_pri,NVE_LOCK);
 	TAILQ_INSERT_TAIL(&name_registry, new_entry, nve_link);
-	ATENABLE(nve_lock_pri,NVE_LOCK);
 	at_state.flags |= AT_ST_NBP_CHANGED;
 
 #ifdef NBP_DEBUG
 	{
 		char zone[35],object[35],type[35];
-		strncpy(zone,new_entry->zone.str, new_entry->zone.len);
-		strncpy(object,new_entry->object.str, new_entry->object.len);
-		strncpy(type,new_entry->type.str, new_entry->type.len);
-		object[new_entry->object.len] = '\0';
-		zone[new_entry->zone.len] = '\0';
-		type[new_entry->type.len] = '\0';
+		strlcpy(zone,nbp_req.nve.zone.str, sizeof(zone));
+		strlcpy(object,nbp_req.nve.object.str, sizeof(object));
+		strlcpy(type,nbp_req.nve.type.str, sizeof(type));
 		dPrintf(D_M_NBP_LOW, D_L_USR4,
 			("nbp_insert: adding %s:%s@%s addr:%d.%d ",
 			 object, type, zone, 

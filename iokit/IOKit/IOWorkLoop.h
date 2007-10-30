@@ -1,23 +1,29 @@
 /*
- * Copyright (c) 1998-2000 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 1998-2007 Apple Inc. All rights reserved.
  *
- * @APPLE_LICENSE_HEADER_START@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. The rights granted to you under the License
+ * may not be used to create, or enable the creation or redistribution of,
+ * unlawful or unlicensed copies of an Apple operating system, or to
+ * circumvent, violate, or enable the circumvention or violation of, any
+ * terms of an Apple operating system software license agreement.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
- * @APPLE_LICENSE_HEADER_END@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /*
 Copyright (c) 1998 Apple Computer, Inc.	 All rights reserved.
@@ -72,6 +78,9 @@ member function's parameter list.
     typedef IOReturn (*Action)(OSObject *target,
 			       void *arg0, void *arg1,
 			       void *arg2, void *arg3);
+    enum {
+	kPreciousStack = 0x00000001
+    };
 
 private:
 /*! @function threadMainContinuation
@@ -90,6 +99,7 @@ protected:
 
 /*! @var gateLock
     Mutual exclusion lock that is used by close and open Gate functions.  
+    This is a recursive lock, which allows multiple layers of code to share a single IOWorkLoop without deadlock.  This is common in IOKit since threads of execution tend to follow the service plane in the IORegistry, and multiple objects along the call path may acquire the gate for the same (shared) workloop.
 */
     IORecursiveLock *gateLock;
 
@@ -103,7 +113,7 @@ protected:
 */
     IOCommandGate *controlG;
 
-/*! @var workSpinLock
+/*! @var workToDoLock
     The spin lock that is used to guard the 'workToDo' variable. 
 */
     IOSimpleLock *workToDoLock;
@@ -126,7 +136,9 @@ protected:
 /*! @struct ExpansionData
     @discussion This structure will be used to expand the capablilties of the IOWorkLoop in the future.
 */    
-    struct ExpansionData { };
+    struct ExpansionData {
+	IOOptionBits options;
+    };
 
 /*! @var reserved
     Reserved for future use.  (Internal use only) 
@@ -148,20 +160,33 @@ protected:
     virtual void free();
 
 /*! @function threadMain
-    @discussion Work loop threads main function.  This function consists of 3 loops: the outermost loop is the semaphore clear and wait loop, the middle loop terminates when there is no more work, and the inside loop walks the event list calling the checkForWork method in each event source.  If an event source has more work to do, it can set the more flag and the middle loop will repeat.  When no more work is outstanding the outermost will sleep until an event is signalled or the least wakeupTime, whichever occurs first.  If the event source does not require the semaphore wait to time out, it must set the provided wakeupTime parameter to zero.
+    @discussion Work loop threads main function.  This function consists of 3
+    loops: the outermost loop is the semaphore clear and wait loop, the middle
+    loop terminates when there is no more work, and the inside loop walks the
+    event list calling the checkForWork method in each event source.  If an
+    event source has more work to do, it can set the more flag and the middle
+    loop will repeat.  When no more work is outstanding the outermost will
+    sleep until an event is signalled.
 */
     virtual void threadMain();
 
 public:
 
 /*! @function workLoop
-    @abstract Factory member function to constuct and intialize a work loop.
+    @abstract Factory member function to construct and intialize a work loop.
     @result Returns a workLoop instance if constructed successfully, 0 otherwise. 
 */
     static IOWorkLoop *workLoop();
 
+/*! @function workLoopWithOptions(IOOptionBits options)
+    @abstract Factory member function to constuct and intialize a work loop.
+    @param options Options - kPreciousStack to avoid stack deallocation on paging path.
+    @result Returns a workLoop instance if constructed successfully, 0 otherwise. 
+*/
+    static IOWorkLoop *workLoopWithOptions(IOOptionBits options);
+
 /*! @function init
-    @discussion Initializes an instance of the workloop.  This method creates and initialses the signaling semaphore and forks the thread that will continue executing.
+    @discussion Initializes an instance of the workloop.  This method creates and initializes the signaling semaphore, the controller gate lock, and spawns the thread that will continue executing.
     @result Returns true if initialized successfully, false otherwise. 
 */
     virtual bool init();
@@ -231,7 +256,7 @@ protected:
     virtual void openGate();
     virtual void closeGate();
     virtual bool tryCloseGate();
-    virtual int sleepGate(void *event, UInt32 interuptibleType);
+    virtual int  sleepGate(void *event, UInt32 interuptibleType);
     virtual void wakeupGate(void *event, bool oneThread);
 
 public:
@@ -239,9 +264,7 @@ public:
 
 /*! @function runAction
     @abstract Single thread a call to an action with the work-loop.
-    @discussion Client function that causes the given action to be called in
-a single threaded manner.  Beware: the work-loop's gate is recursive and runAction can cause direct or indirect re-entrancy.  When executing on a client's thread, runAction will sleep until the work-loop's gate opens for
-execution of client actions, the action is single threaded against all other work-loop event sources.
+    @discussion Client function that causes the given action to be called in a single threaded manner.  Beware: the work-loop's gate is recursive and runAction can cause direct or indirect re-entrancy.  When executing on a client's thread, runAction will sleep until the work-loop's gate opens for execution of client actions, the action is single threaded against all other work-loop event sources.
     @param action Pointer to function to be executed in work-loop context.
     @param arg0 Parameter for action parameter, defaults to 0.
     @param arg1 Parameter for action parameter, defaults to 0.
@@ -249,14 +272,35 @@ execution of client actions, the action is single threaded against all other wor
     @param arg3 Parameter for action parameter, defaults to 0.
     @result Returns the value of the Action callout.
 */
+    OSMetaClassDeclareReservedUsed(IOWorkLoop, 0);
     virtual IOReturn runAction(Action action, OSObject *target,
 			       void *arg0 = 0, void *arg1 = 0,
 			       void *arg2 = 0, void *arg3 = 0);
 
-protected:
-    OSMetaClassDeclareReservedUsed(IOWorkLoop, 0);
+/*! @function runEventSources
+    @discussion Consists of the inner 2 loops of the threadMain function(qv).
+    The outer loop terminates when there is no more work, and the inside loop
+    walks the event list calling the checkForWork method in each event source.
+    If an event source has more work to do, it can set the more flag and the
+    outer loop will repeat.
+<br><br>
+    This function can be used to clear a priority inversion between the normal
+    workloop thread and multimedia's real time threads.  The problem is that
+    the interrupt action routine is often held off by high priority threads.
+    So if they want to get their data now they will have to call us and ask if
+    any data is available.  The multi-media user client will arrange for this
+    function to be called, which causes any pending interrupts to be processed
+    and the completion routines called.  By the time the function returns all
+    outstanding work will have been completed at the real time threads
+    priority.
 
-    OSMetaClassDeclareReservedUnused(IOWorkLoop, 1);
+    @result Return false if the work loop is shutting down, true otherwise.
+*/
+    OSMetaClassDeclareReservedUsed(IOWorkLoop, 1);
+    virtual bool runEventSources();
+
+protected:
+
     OSMetaClassDeclareReservedUnused(IOWorkLoop, 2);
     OSMetaClassDeclareReservedUnused(IOWorkLoop, 3);
     OSMetaClassDeclareReservedUnused(IOWorkLoop, 4);

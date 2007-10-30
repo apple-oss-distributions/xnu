@@ -1,27 +1,31 @@
 /*
- * Copyright (c) 2000 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 1995-2007 Apple Inc. All rights reserved.
  *
- * @APPLE_LICENSE_HEADER_START@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. The rights granted to you under the License
+ * may not be used to create, or enable the creation or redistribution of,
+ * unlawful or unlicensed copies of an Apple operating system, or to
+ * circumvent, violate, or enable the circumvention or violation of, any
+ * terms of an Apple operating system software license agreement.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
- * @APPLE_LICENSE_HEADER_END@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /*
- *	Copyright (c) 1995-1998 Apple Computer, Inc. 
- *
  *  Change Log:
  *    Created February 20, 1995 by Tuyen Nguyen
  *    Modified for MP, 1996 by Tuyen Nguyen
@@ -47,19 +51,12 @@
 
 #include <netat/sysglue.h>
 #include <netat/appletalk.h>
-#include <netat/at_var.h>
 #include <netat/at_pcb.h>
+#include <netat/at_var.h>
 #include <netat/debug.h>
 
-int (*sys_ATsocket)() = 0;
-int (*sys_ATgetmsg)() = 0;
-int (*sys_ATputmsg)() = 0;
-int (*sys_ATPsndreq)() = 0;
-int (*sys_ATPsndrsp)() = 0;
-int (*sys_ATPgetreq)() = 0;
-int (*sys_ATPgetrsp)() = 0;
+int falloc_locked(proc_t, struct fileproc **, int *, vfs_context_t, int);
 
-extern at_state_t at_state;	/* global state of AT network */
 extern at_ifaddr_t *ifID_home;	/* default interface */
 extern lck_mtx_t * atalk_mutex;
 
@@ -71,6 +68,14 @@ extern lck_mtx_t * atalk_mutex;
 #define f_offset f_fglob->fg_offset
 #define f_data f_fglob->fg_data
 
+
+int _ATkqfilter(struct fileproc *, struct knote *, vfs_context_t);
+int _ATselect(struct fileproc *, int, void *, vfs_context_t);
+int _ATioctl(struct fileproc *, u_long, caddr_t, vfs_context_t);
+int _ATwrite(struct fileproc *, struct uio *, int, vfs_context_t);
+int _ATread(struct fileproc *, struct uio *, int, vfs_context_t);
+int _ATclose(struct fileglob *, vfs_context_t);
+
 int ATsocket(proc, uap, retval)
 	struct proc *proc;
 	struct ATsocket_args *uap;
@@ -78,13 +83,13 @@ int ATsocket(proc, uap, retval)
 {
 	int err;
 	atalk_lock();
-	if (sys_ATsocket) {
+	if (1 /* _ATsocket*/) {
 		/* required check for all AppleTalk system calls */
 		if (!(at_state.flags & AT_ST_STARTED) || !ifID_home) {
 			*retval = -1;
 			err = ENOTREADY;
 		} else {
-			*retval = (*sys_ATsocket)(uap->proto, &err, proc);
+			*retval = _ATsocket((int)uap->proto, (int *)&err, (void *)proc);
 		}
 	} else {
 		*retval = -1;
@@ -102,14 +107,14 @@ int ATgetmsg(proc, uap, retval)
 	int err;
 
 	atalk_lock();
-	if (sys_ATgetmsg) {
+	if (1 /* _ATgetmsg */) {
 		/* required check for all AppleTalk system calls */
 		if (!(at_state.flags & AT_ST_STARTED) || !ifID_home) {
 			*retval = -1;
 			err = ENOTREADY;
 		} else {
 			*retval = 
-			  (*sys_ATgetmsg)(uap->fd, uap->ctlptr, uap->datptr, 
+			  (*_ATgetmsg)(uap->fd, uap->ctlptr, uap->datptr, 
 					  uap->flags, &err, proc);
 		}
 	} else {
@@ -128,14 +133,14 @@ int ATputmsg(proc, uap, retval)
 	int err;
 
 	atalk_lock();
-	if (sys_ATputmsg) {
+	if (1 /* _ATputmsg */) {
 		/* required check for all AppleTalk system calls */
 		if (!(at_state.flags & AT_ST_STARTED) || !ifID_home) {
 			*retval = -1;
 			err = ENOTREADY;
 		} else {
 			*retval = 
-			  (*sys_ATputmsg)(uap->fd, uap->ctlptr, uap->datptr, 
+			  _ATputmsg(uap->fd, uap->ctlptr, uap->datptr, 
 					  uap->flags, &err, proc);
 		}
 	} else {
@@ -154,14 +159,14 @@ int ATPsndreq(proc, uap, retval)
 	int err;
 
 	atalk_lock();
-	if (sys_ATPsndreq) {
+	if (1 /* _ATPsndreq */) {
 		/* required check for all AppleTalk system calls */
 		if (!(at_state.flags & AT_ST_STARTED) || !ifID_home) {
 			*retval = -1;
 			err = ENOTREADY;
 		} else {
 			*retval = 
-			  (*sys_ATPsndreq)(uap->fd, uap->buf, uap->len, 
+			  _ATPsndreq(uap->fd, uap->buf, uap->len, 
 					   uap->nowait, &err, proc);
 		}
 	} else {
@@ -180,14 +185,14 @@ int ATPsndrsp(proc, uap, retval)
 	int err;
 
 	atalk_lock();
-	if (sys_ATPsndrsp) {
+	if (1 /*_ATPsndrsp*/) {
 		/* required check for all AppleTalk system calls */
 		if (!(at_state.flags & AT_ST_STARTED) || !ifID_home) {
 			*retval = -1;
 			err = ENOTREADY;
 		} else { 
 			*retval = 
-			  (*sys_ATPsndrsp)(uap->fd, uap->respbuff, 
+			  _ATPsndrsp(uap->fd, uap->respbuff, 
 					   uap->resplen, uap->datalen, &err, proc);
 		}
 	} else {
@@ -206,14 +211,14 @@ int ATPgetreq(proc, uap, retval)
 	int err;
 
 	atalk_lock();
-	if (sys_ATPgetreq) {
+	if (1 /* _ATPgetreq */) {
 		/* required check for all AppleTalk system calls */
 		if (!(at_state.flags & AT_ST_STARTED) || !ifID_home) {
 			*retval = -1;
 			err = ENOTREADY;
 		} else {
 			*retval = 
-			  (*sys_ATPgetreq)(uap->fd, uap->buf, uap->buflen, 
+			  _ATPgetreq(uap->fd, uap->buf, uap->buflen, 
 					   &err, proc);
 		}
 	} else {
@@ -232,14 +237,14 @@ int ATPgetrsp(proc, uap, retval)
 	int err = 0;
 
 	atalk_lock();
-	if (sys_ATPgetrsp) {
+	if (1 /*_ATPgetrsp*/) {
 		/* required check for all AppleTalk system calls */
 		if (!(at_state.flags & AT_ST_STARTED) || !ifID_home) {
 			*retval = -1;
 			err = ENOTREADY;
 		} else {
 			*retval = 
-			  (*sys_ATPgetrsp)(uap->fd, uap->bdsp, &err, proc);
+			  _ATPgetrsp(uap->fd, (struct atpBDS *)uap->bdsp, &err, proc);
 		}
 	} else {
 		*retval = -1;
@@ -265,7 +270,6 @@ int atalk_openref(gref, retfd, proc)
 	int *retfd;
 	struct proc *proc;
 {
-	extern int _ATread(), _ATwrite(),_ATioctl(), _ATselect(), _ATclose(), _ATkqfilter();
 	static struct fileops fileops = 
 		{_ATread, _ATwrite, _ATioctl, _ATselect, _ATclose, _ATkqfilter, 0};
 	int err, fd;
@@ -274,7 +278,7 @@ int atalk_openref(gref, retfd, proc)
 	lck_mtx_assert(atalk_mutex, LCK_MTX_ASSERT_OWNED);
 	
 	proc_fdlock(proc);
-	if ((err = falloc_locked(proc, &fp, &fd, 1)) != 0) {
+	if ((err = falloc_locked(proc, &fp, &fd, vfs_context_current(), 1)) != 0) {
 		proc_fdunlock(proc);
 		return err;
 	}
@@ -287,7 +291,7 @@ int atalk_openref(gref, retfd, proc)
 	fp->f_ops = &fileops;
 	fp->f_data = (void *)gref;
 
-	*fdflags(proc, fd) &= ~UF_RESERVED;
+	procfdtbl_releasefd(proc, fd, NULL);
 	*retfd = fd;
 	fp_drop(proc, fd, fp, 1);
 	proc_fdunlock(proc);
@@ -337,10 +341,10 @@ int droponerr;
 		}
 	}
 	*grefp = (gref_t *)fp->f_data;
-	if (*grefp == 0 || *grefp == (gref_t *)(-1)) {
+	if (fp->f_type != (DTYPE_ATALK+1) || *grefp == 0 || *grefp == (gref_t *)(-1)) {
 		if (droponerr)
 			fp_drop(proc, fd, fp, 1);
-		printf("atalk_getref_locked EBADF f_data: %x\n", fp->f_data);
+		printf("atalk_getref_locked EBADF f_data: %p\n", fp->f_data);
 		return EBADF;
 	}
 	

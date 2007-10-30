@@ -1,23 +1,29 @@
 /*
- * Copyright (c) 2000 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2007 Apple Inc. All rights reserved.
  *
- * @APPLE_LICENSE_HEADER_START@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. The rights granted to you under the License
+ * may not be used to create, or enable the creation or redistribution of,
+ * unlawful or unlicensed copies of an Apple operating system, or to
+ * circumvent, violate, or enable the circumvention or violation of, any
+ * terms of an Apple operating system software license agreement.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
- * @APPLE_LICENSE_HEADER_END@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /* IOSymbol.cpp created by gvdl on Fri 1998-11-17 */
 
@@ -44,6 +50,24 @@ extern "C" {
 #else
 #define ACCUMSIZE(s)
 #endif
+
+#define INITIAL_POOL_SIZE  (exp2ml(1 + log2(kInitBucketCount)))
+
+#define GROW_FACTOR   (1)
+#define SHRINK_FACTOR (3)
+
+#define GROW_POOL()     do \
+    if (count * GROW_FACTOR > nBuckets) { \
+        reconstructSymbols(true); \
+    } \
+while (0)
+
+#define SHRINK_POOL()     do \
+    if (count * SHRINK_FACTOR < nBuckets && \
+        nBuckets > INITIAL_POOL_SIZE) { \
+        reconstructSymbols(false); \
+    } \
+while (0)
 
 class OSSymbolPool
 {
@@ -78,7 +102,8 @@ private:
     static unsigned long log2(unsigned int x);
     static unsigned long exp2ml(unsigned int x);
 
-    void reconstructSymbols();
+    void reconstructSymbols(void);
+    void reconstructSymbols(bool grow);
 
 public:
     static void *operator new(size_t size);
@@ -113,14 +138,14 @@ void * OSSymbolPool::operator new(size_t size)
 
 void OSSymbolPool::operator delete(void *mem, size_t size)
 {
-    kfree((vm_offset_t)mem, size);
+    kfree(mem, size);
     ACCUMSIZE(-size);
 }
 
 bool OSSymbolPool::init()
 {
     count = 0;
-    nBuckets = exp2ml(1 + log2(kInitBucketCount));
+    nBuckets = INITIAL_POOL_SIZE;
     buckets = (Bucket *) kalloc(nBuckets * sizeof(Bucket));
     ACCUMSIZE(nBuckets * sizeof(Bucket));
     if (!buckets)
@@ -145,12 +170,12 @@ OSSymbolPool::OSSymbolPool(const OSSymbolPool *old)
 OSSymbolPool::~OSSymbolPool()
 {
     if (buckets) {
-        kfree((vm_offset_t)buckets, nBuckets * sizeof(Bucket));
+        kfree(buckets, nBuckets * sizeof(Bucket));
         ACCUMSIZE(-(nBuckets * sizeof(Bucket)));
     }
 
     if (poolGate)
-        kfree((vm_offset_t) poolGate, 36 * 4);
+        kfree(poolGate, 36 * 4);
 }
 
 unsigned long OSSymbolPool::log2(unsigned int x)
@@ -192,14 +217,35 @@ OSSymbol *OSSymbolPool::nextHashState(OSSymbolPoolState *stateP)
         return thisBucket->symbolP[stateP->j];
 }
 
-void OSSymbolPool::reconstructSymbols()
+void OSSymbolPool::reconstructSymbols(void)
 {
-    OSSymbolPool old(this);
+    this->reconstructSymbols(true);
+}
+
+void OSSymbolPool::reconstructSymbols(bool grow)
+{
+    unsigned int new_nBuckets = nBuckets;
     OSSymbol *insert;
     OSSymbolPoolState state;
 
-    nBuckets += nBuckets + 1;
+    if (grow) {
+        new_nBuckets += new_nBuckets + 1;
+    } else {
+       /* Don't shrink the pool below the default initial size.
+        */
+        if (nBuckets <= INITIAL_POOL_SIZE) {
+            return;
+        }
+        new_nBuckets = (new_nBuckets - 1) / 2;
+    }
+
+   /* Create old pool to iterate after doing above check, cause it
+    * gets finalized at return.
+    */
+    OSSymbolPool old(this);
+
     count = 0;
+    nBuckets = new_nBuckets;
     buckets = (Bucket *) kalloc(nBuckets * sizeof(Bucket));
     ACCUMSIZE(nBuckets * sizeof(Bucket));
     /* @@@ gvdl: Zero test and panic if can't set up pool */
@@ -275,8 +321,7 @@ OSSymbol *OSSymbolPool::insertSymbol(OSSymbol *sym)
         thisBucket->symbolP = list;
         thisBucket->count++;
         count++;
-        if (count > nBuckets)
-            reconstructSymbols();
+        GROW_POOL();
 
         return sym;
     }
@@ -295,11 +340,10 @@ OSSymbol *OSSymbolPool::insertSymbol(OSSymbol *sym)
     /* @@@ gvdl: Zero test and panic if can't set up pool */
     list[0] = sym;
     bcopy(thisBucket->symbolP, list + 1, j * sizeof(OSSymbol *));
-    kfree((vm_offset_t)thisBucket->symbolP, j * sizeof(OSSymbol *));
+    kfree(thisBucket->symbolP, j * sizeof(OSSymbol *));
     ACCUMSIZE(-(j * sizeof(OSSymbol *)));
     thisBucket->symbolP = list;
-    if (count > nBuckets)
-        reconstructSymbols();
+    GROW_POOL();
 
     return sym;
 }
@@ -325,6 +369,7 @@ void OSSymbolPool::removeSymbol(OSSymbol *sym)
             thisBucket->symbolP = 0;
             count--;
             thisBucket->count--;
+            SHRINK_POOL();
             return;
         }
         return;
@@ -334,20 +379,22 @@ void OSSymbolPool::removeSymbol(OSSymbol *sym)
         probeSymbol = list[0];
         if (probeSymbol == sym) {
             thisBucket->symbolP = (OSSymbol **) list[1];
-            kfree((vm_offset_t)list, 2 * sizeof(OSSymbol *));
+            kfree(list, 2 * sizeof(OSSymbol *));
 	    ACCUMSIZE(-(2 * sizeof(OSSymbol *)));
             count--;
             thisBucket->count--;
+            SHRINK_POOL();
             return;
         }
 
         probeSymbol = list[1];
         if (probeSymbol == sym) {
             thisBucket->symbolP = (OSSymbol **) list[0];
-            kfree((vm_offset_t)list, 2 * sizeof(OSSymbol *));
+            kfree(list, 2 * sizeof(OSSymbol *));
 	    ACCUMSIZE(-(2 * sizeof(OSSymbol *)));
             count--;
             thisBucket->count--;
+            SHRINK_POOL();
             return;
         }
         return;
@@ -367,7 +414,7 @@ void OSSymbolPool::removeSymbol(OSSymbol *sym)
                 bcopy(thisBucket->symbolP + thisBucket->count-j,
                       list + thisBucket->count-1-j,
                       j * sizeof(OSSymbol *));
-            kfree((vm_offset_t)thisBucket->symbolP, thisBucket->count * sizeof(OSSymbol *));
+            kfree(thisBucket->symbolP, thisBucket->count * sizeof(OSSymbol *));
 	    ACCUMSIZE(-(thisBucket->count * sizeof(OSSymbol *)));
             thisBucket->symbolP = list;
             count--;

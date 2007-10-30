@@ -1,23 +1,29 @@
 /*
- * Copyright (c) 2000-2004 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2007 Apple Inc. All rights reserved.
  *
- * @APPLE_LICENSE_HEADER_START@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. The rights granted to you under the License
+ * may not be used to create, or enable the creation or redistribution of,
+ * unlawful or unlicensed copies of an Apple operating system, or to
+ * circumvent, violate, or enable the circumvention or violation of, any
+ * terms of an Apple operating system software license agreement.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
- * @APPLE_LICENSE_HEADER_END@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /*
  * @OSF_COPYRIGHT@
@@ -196,6 +202,11 @@ extern kern_return_t task_for_pid(
 				int pid,
 				mach_port_name_t *t);
 
+extern kern_return_t task_name_for_pid(
+				mach_port_name_t target_tport,
+				int pid,
+				mach_port_name_t *tn);
+
 extern kern_return_t pid_for_task(
 				mach_port_name_t t,
 				int *x);
@@ -217,13 +228,9 @@ extern kern_return_t map_fd(
 #ifdef	XNU_KERNEL_PRIVATE
 
 /* Syscall data translations routines */
-#ifdef __ppc__
 #define	PAD_(t)	(sizeof(uint64_t) <= sizeof(t) \
  		? 0 : sizeof(uint64_t) - sizeof(t))
-#else
-#define	PAD_(t)	(sizeof(register_t) <= sizeof(t) \
- 		? 0 : sizeof(register_t) - sizeof(t))
-#endif
+#define PAD_ARG_8
 
 #if BYTE_ORDER == LITTLE_ENDIAN
 #define	PADL_(t)	0
@@ -325,6 +332,7 @@ struct mach_msg_overwrite_trap_args {
 	PAD_ARG_(mach_port_name_t, rcv_name);
 	PAD_ARG_(mach_msg_timeout_t, timeout);
 	PAD_ARG_(mach_port_name_t, notify);
+	PAD_ARG_8
 	PAD_ARG_(mach_vm_address_t, rcv_msg);  /* Unused on mach_msg_trap */
 };
 extern mach_msg_return_t mach_msg_trap(
@@ -405,6 +413,14 @@ struct task_for_pid_args {
 };
 extern kern_return_t task_for_pid(
 				struct task_for_pid_args *args);
+
+struct task_name_for_pid_args {
+	PAD_ARG_(mach_port_name_t, target_tport);
+	PAD_ARG_(int, pid);
+	PAD_ARG_(user_addr_t, t);
+};
+extern kern_return_t task_name_for_pid(
+				struct task_name_for_pid_args *args);
 
 struct pid_for_task_args {
 	PAD_ARG_(mach_port_name_t, t);
@@ -519,17 +535,6 @@ struct mk_timer_cancel_trap_args {
 extern kern_return_t mk_timer_cancel_trap(
 				struct mk_timer_cancel_trap_args *args);
 
-/* no user-level prototype for this one */
-struct mk_timebase_info_trap_args {
-	PAD_ARG_(uint32_t *, delta);
-	PAD_ARG_(uint32_t *, abs_to_ns_numer);
-	PAD_ARG_(uint32_t *, abs_to_ns_denom);
-	PAD_ARG_(uint32_t *, proc_to_abs_numer);
-	PAD_ARG_(uint32_t *, proc_to_abs_denom);
-};
-extern void mk_timebase_info_trap(
-				struct mk_timebase_info_trap_args *args);
-
 /* not published to LP64 clients yet */
 struct iokit_user_client_trap_args {
 	PAD_ARG_(void *, userClientRef);
@@ -539,6 +544,7 @@ struct iokit_user_client_trap_args {
 	PAD_ARG_(void *, p3);
 	PAD_ARG_(void *, p4);
 	PAD_ARG_(void *, p5);
+    	PAD_ARG_8
 	PAD_ARG_(void *, p6);
 };
 kern_return_t iokit_user_client_trap(
@@ -548,6 +554,7 @@ kern_return_t iokit_user_client_trap(
 #undef PADL_
 #undef PADR_
 #undef PAD_ARG_
+#undef PAD_ARG_8
 
 #endif	/* XNU_KERNEL_PRIVATE */
 

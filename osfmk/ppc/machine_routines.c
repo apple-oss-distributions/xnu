@@ -1,23 +1,29 @@
 /*
- * Copyright (c) 2000-2004 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2007 Apple Inc. All rights reserved.
  *
- * @APPLE_LICENSE_HEADER_START@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. The rights granted to you under the License
+ * may not be used to create, or enable the creation or redistribution of,
+ * unlawful or unlicensed copies of an Apple operating system, or to
+ * circumvent, violate, or enable the circumvention or violation of, any
+ * terms of an Apple operating system software license agreement.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
- * @APPLE_LICENSE_HEADER_END@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 
 #include <mach/mach_types.h>
@@ -33,13 +39,15 @@
 #include <ppc/mem.h>
 #include <ppc/new_screen.h>
 #include <ppc/proc_reg.h>
+#include <ppc/machine_cpu.h> /* for cpu_signal_handler() */
+#include <ppc/fpu_protos.h>
 #include <kern/kern_types.h>
 #include <kern/processor.h>
 #include <kern/machine.h>
 
 #include <vm/vm_page.h>
 
-unsigned int		LockTimeOut = 12500000;
+unsigned int		LockTimeOut = 1250000000;
 unsigned int		MutexSpin = 0;
 
 decl_mutex_data(static,mcpus_lock);
@@ -82,11 +90,6 @@ extern unsigned int mulckePatch_eieio;
 extern unsigned int sulckPatch_eieio;
 extern unsigned int rwlesPatch_eieio;
 extern unsigned int rwldPatch_eieio;
-#if     !MACH_LDEBUG
-extern unsigned int entfsectPatch_isync;
-extern unsigned int retfsectPatch_isync;
-extern unsigned int retfsectPatch_eieio;
-#endif
 
 struct patch_up {
         unsigned int    *addr;
@@ -125,11 +128,6 @@ patch_up_t patch_up_table[] = {
 	{&sulckPatch_eieio,		0x60000000},
 	{&rwlesPatch_eieio,		0x60000000},
 	{&rwldPatch_eieio,		0x60000000},
-#if     !MACH_LDEBUG
-	{&entfsectPatch_isync,		0x60000000},
-	{&retfsectPatch_isync,		0x60000000},
-	{&retfsectPatch_eieio,		0x60000000},
-#endif
 	{NULL,				0x00000000}
 };
 
@@ -142,8 +140,16 @@ ml_io_map(
 	vm_offset_t phys_addr, 
 	vm_size_t size)
 {
-	return(io_map(phys_addr,size));
+	return(io_map(phys_addr,size,VM_WIMG_IO));
 }
+
+
+void ml_get_bouncepool_info(vm_offset_t *phys_addr, vm_size_t *size)
+{
+        *phys_addr = 0;
+	*size      = 0;
+}
+
 
 /*
  *	Routine:        ml_static_malloc
@@ -241,7 +247,48 @@ void ml_install_interrupt_handler(
 	proc_info->interrupts_enabled = TRUE;  
 	(void) ml_set_interrupts_enabled(current_state);
 
-	initialize_screen(0, kPEAcquireScreen);
+	initialize_screen(NULL, kPEAcquireScreen);
+}
+
+/*
+ *	Routine:        ml_nofault_copy
+ *	Function:	Perform a physical mode copy if the source and
+ *			destination have valid translations in the kernel pmap.
+ *			If translations are present, they are assumed to
+ *			be wired; i.e. no attempt is made to guarantee that the
+ *			translations obtained remained valid for
+ *			the duration of their use.
+ */
+
+vm_size_t ml_nofault_copy(
+	vm_offset_t virtsrc, vm_offset_t virtdst, vm_size_t size)
+{
+	addr64_t cur_phys_dst, cur_phys_src;
+	uint32_t count, pindex, nbytes = 0;
+
+	while (size > 0) {
+		if (!(cur_phys_src = kvtophys(virtsrc)))
+			break;
+		if (!(cur_phys_dst = kvtophys(virtdst)))
+			break;
+		if (!mapping_phys_lookup((cur_phys_src>>12), &pindex) ||
+		    !mapping_phys_lookup((cur_phys_dst>>12), &pindex))
+			break;
+		count = PAGE_SIZE - (cur_phys_src & PAGE_MASK);
+		if (count > (PAGE_SIZE - (cur_phys_dst & PAGE_MASK)))
+			count = PAGE_SIZE - (cur_phys_dst & PAGE_MASK);
+		if (count > size)
+			count = size;
+
+		bcopy_phys(cur_phys_src, cur_phys_dst, count);
+
+		nbytes += count;
+		virtsrc += count;
+		virtdst += count;
+		size -= count;
+	}
+
+	return nbytes;
 }
 
 /*
@@ -297,14 +344,9 @@ void ml_cause_interrupt(void)
  */
 void ml_thread_policy(
 	thread_t thread,
-	unsigned policy_id,
+__unused	unsigned policy_id,
 	unsigned policy_info)
 {
-
-	if ((policy_id == MACHINE_GROUP) &&
-		((PerProcTable[master_cpu].ppe_vaddr->pf.Available) & pfSMPcap))
-			thread_bind(thread, master_processor);
-
 	if (policy_info & MACHINE_NETWORK_WORKLOOP) {
 		spl_t		s = splsched();
 
@@ -380,9 +422,9 @@ ml_processor_register(
 	else
 		proc_info->time_base_enable = (void(*)(cpu_id_t, boolean_t ))NULL;
 
-	if (proc_info->pf.pfPowerModes & pmPowerTune) {
-	  proc_info->pf.pfPowerTune0 = in_processor_info->power_mode_0;
-	  proc_info->pf.pfPowerTune1 = in_processor_info->power_mode_1;
+	if((proc_info->pf.pfPowerModes & pmType) == pmPowerTune) {
+		proc_info->pf.pfPowerTune0 = in_processor_info->power_mode_0;
+		proc_info->pf.pfPowerTune1 = in_processor_info->power_mode_1;
 	}
 
 	donap = in_processor_info->supports_nap;	/* Assume we use requested nap */
@@ -398,8 +440,9 @@ ml_processor_register(
 	}
 
 	if (!boot_processor) {
-		(void)hw_atomic_add((uint32_t *)&saveanchor.savetarget, FreeListMin);   /* saveareas for this processor */
-		processor_init((struct processor *)proc_info->processor, proc_info->cpu_number);
+		(void)hw_atomic_add(&saveanchor.savetarget, FreeListMin);   /* saveareas for this processor */
+		processor_init((struct processor *)proc_info->processor,
+								proc_info->cpu_number, processor_pset(master_processor));
 	}
 
 	*processor_out = (struct processor *)proc_info->processor;
@@ -508,8 +551,8 @@ ml_get_max_cpus(void)
 		mcpus_state |= MAX_CPUS_WAIT;
 		thread_sleep_mutex((event_t)&mcpus_state,
 					 &mcpus_lock, THREAD_UNINT);
-	} else
-		mutex_unlock(&mcpus_lock);
+	}
+	mutex_unlock(&mcpus_lock);
 	return(machine_info.max_cpus);
 }
 
@@ -520,8 +563,8 @@ ml_get_max_cpus(void)
 void
 ml_cpu_up(void)
 {
-	hw_atomic_add(&machine_info.physical_cpu, 1);
-	hw_atomic_add(&machine_info.logical_cpu, 1);
+	(void)hw_atomic_add(&machine_info.physical_cpu, 1);
+	(void)hw_atomic_add(&machine_info.logical_cpu, 1);
 }
 
 /*
@@ -531,8 +574,8 @@ ml_cpu_up(void)
 void
 ml_cpu_down(void)
 {
-	hw_atomic_sub(&machine_info.physical_cpu, 1);
-	hw_atomic_sub(&machine_info.logical_cpu, 1);
+	(void)hw_atomic_sub(&machine_info.physical_cpu, 1);
+	(void)hw_atomic_sub(&machine_info.logical_cpu, 1);
 }
 
 /*
@@ -616,8 +659,6 @@ ml_enable_cache_level(int cache_level, int enable)
 }
 
 
-decl_simple_lock_data(, spsLock);
-
 /*
  *      Routine:        ml_set_processor_speed
  *      Function:
@@ -626,57 +667,64 @@ void
 ml_set_processor_speed(unsigned long speed)
 {
 	struct per_proc_info    *proc_info;
-	uint32_t                powerModes, cpu;
+	uint32_t                cpu;
 	kern_return_t           result;
  	boolean_t		current_state;
 	 unsigned int		i;
   
 	proc_info = PerProcTable[master_cpu].ppe_vaddr;
-	powerModes = proc_info->pf.pfPowerModes;
 
-	if (powerModes & pmDualPLL) {
+	switch (proc_info->pf.pfPowerModes & pmType) {	/* Figure specific type */
+		case pmDualPLL:
 
-		ml_set_processor_speed_dpll(speed);
+			ml_set_processor_speed_dpll(speed);
+			break;
+			
+		case pmDFS:
 
-	} else if (powerModes & pmDFS) {
-
-		for (cpu = 0; cpu < real_ncpus; cpu++) {
-			/*
-			 * cpu_signal() returns after .5ms if it fails to signal a running cpu
-			 * retry cpu_signal() for .1s to deal with long interrupt latency at boot
-			 */
-			for (i=200; i>0; i--) {
-				current_state = ml_set_interrupts_enabled(FALSE);
-				if (cpu != cpu_number()) {
-				        if (PerProcTable[cpu].ppe_vaddr->cpu_flags & SignalReady)
-						/*
-						 * Target cpu is off-line, skip
-						 */
+			for (cpu = 0; cpu < real_ncpus; cpu++) {
+				/*
+				 * cpu_signal() returns after .5ms if it fails to signal a running cpu
+				 * retry cpu_signal() for .1s to deal with long interrupt latency at boot
+				 */
+				for (i=200; i>0; i--) {
+					current_state = ml_set_interrupts_enabled(FALSE);
+					if (cpu != (unsigned)cpu_number()) {
+							if (PerProcTable[cpu].ppe_vaddr->cpu_flags & SignalReady)
+							/*
+							 * Target cpu is off-line, skip
+							 */
+							result = KERN_SUCCESS;
+						else {
+							simple_lock(&spsLock);
+							result = cpu_signal(cpu, SIGPcpureq, CPRQsps, speed);	
+							if (result == KERN_SUCCESS) 
+								thread_sleep_simple_lock(&spsLock, &spsLock, THREAD_UNINT);
+							simple_unlock(&spsLock);
+						}
+					} else {
+						ml_set_processor_speed_dfs(speed);
 						result = KERN_SUCCESS;
-					else {
-						simple_lock(&spsLock);
-						result = cpu_signal(cpu, SIGPcpureq, CPRQsps, speed);	
-						if (result == KERN_SUCCESS) 
-							thread_sleep_simple_lock(&spsLock, &spsLock, THREAD_UNINT);
-						simple_unlock(&spsLock);
 					}
-				} else {
-					ml_set_processor_speed_dfs(speed);
-					result = KERN_SUCCESS;
+					(void) ml_set_interrupts_enabled(current_state);
+					if (result == KERN_SUCCESS)
+						break;
 				}
-				(void) ml_set_interrupts_enabled(current_state);
-				if (result == KERN_SUCCESS)
-					break;
+				if (result != KERN_SUCCESS)
+					panic("ml_set_processor_speed(): Fail to set cpu%d speed\n", cpu);
 			}
-			if (result != KERN_SUCCESS)
-				panic("ml_set_processor_speed(): Fail to set cpu%d speed\n", cpu);
-		}
-
-	} else if (powerModes & pmPowerTune) {
-
-		ml_set_processor_speed_powertune(speed);
+			break;
+			
+		case pmPowerTune:
+	
+			ml_set_processor_speed_powertune(speed);
+			break;
+			
+		default:					
+			break;
 
 	}
+	return;
 }
 
 /*
@@ -754,49 +802,6 @@ machine_processor_shutdown(
 {
 	CreateShutdownCTX();   
 	return((thread_t)(getPerProc()->old_thread));
-}
-
-/*
- *	Routine:        set_be_bit
- *	Function:
- */
-int
-set_be_bit(
-	void)
-{
-	boolean_t current_state;
-
-	current_state = ml_set_interrupts_enabled(FALSE);
-	getPerProc()->cpu_flags |= traceBE;
-	(void) ml_set_interrupts_enabled(current_state);
-	return(1);
-}
-
-/*
- *	Routine:        clr_be_bit
- *	Function:
- */
-int
-clr_be_bit(
-	void)
-{
-	boolean_t current_state;
-
-	current_state = ml_set_interrupts_enabled(FALSE);
-	getPerProc()->cpu_flags &= ~traceBE;
-	(void) ml_set_interrupts_enabled(current_state);
-	return(1);
-}
-
-/*
- *	Routine:        be_tracing
- *	Function:
- */
-int
-be_tracing(
-	void)
-{
-  return(getPerProc()->cpu_flags & traceBE);
 }
 
 

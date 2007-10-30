@@ -10,11 +10,13 @@ include $(MakeInc_def)
 DATAFILES =
 
 EXPORT_ONLY_FILES = \
+	affinity.h \
 	assert.h \
 	clock.h \
 	cpu_number.h \
 	cpu_data.h \
 	debug.h \
+	etimer.h \
 	ipc_mig.h \
 	kalloc.h \
 	kern_types.h \
@@ -23,6 +25,8 @@ EXPORT_ONLY_FILES = \
 	host.h \
 	mach_param.h \
 	macro_help.h \
+	page_decrypt.h \
+	pms.h \
 	processor.h \
 	queue.h \
 	sched_prim.h \

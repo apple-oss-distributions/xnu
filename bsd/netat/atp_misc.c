@@ -1,23 +1,29 @@
 /*
  * Copyright (c) 2000 Apple Computer, Inc. All rights reserved.
  *
- * @APPLE_LICENSE_HEADER_START@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. The rights granted to you under the License
+ * may not be used to create, or enable the creation or redistribution of,
+ * unlawful or unlicensed copies of an Apple operating system, or to
+ * circumvent, violate, or enable the circumvention or violation of, any
+ * terms of an Apple operating system software license agreement.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
- * @APPLE_LICENSE_HEADER_END@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /*
  *	Copyright (c) 1996-1998 Apple Computer, Inc.
@@ -46,11 +52,11 @@
 #include <netat/ddp.h>
 #include <netat/at_pcb.h>
 #include <netat/atp.h>
+#include <netat/asp.h>
 #include <netat/debug.h>
 
-extern atlock_t atpgen_lock;
-void atp_free();
-void atp_send(struct atp_trans *);
+extern   struct atp_rcb_qhead atp_need_rel;
+extern struct atp_trans *trp_tmo_rcb;
 
 /*
  *	The request timer retries a request, if all retries are used up
@@ -61,7 +67,6 @@ void
 atp_req_timeout(trp)
 register struct atp_trans *trp;
 {
-	int s;
 	register gbuf_t *m;
 	gref_t *gref;
 	struct atp_state *atp;
@@ -69,19 +74,15 @@ register struct atp_trans *trp;
 
 	if ((atp = trp->tr_queue) == 0)
 		return;
-	ATDISABLE(s, atp->atp_lock);
-	if (atp->atp_flags & ATP_CLOSING) {
-		ATENABLE(s, atp->atp_lock);
+	if (atp->atp_flags & ATP_CLOSING)
 		return;
-	}
+	
 	for (ctrp = atp->atp_trans_wait.head; ctrp; ctrp = ctrp->tr_list.next) {
 		if (ctrp == trp)
 			break;
 	}
-	if (ctrp != trp) {
-		ATENABLE(s, atp->atp_lock);
+	if (ctrp != trp)
 		return;
-	}
 
 	if ((m = gbuf_cont(trp->tr_xmt)) == NULL)
 	        m = trp->tr_xmt;               /* issued via the new interface */
@@ -95,7 +96,6 @@ l_notify:
 				*gbuf_rptr(m) = 99;
 				gbuf_set_type(m, MSG_DATA);
 				gref = trp->tr_queue->atp_gref;
-				ATENABLE(s, atp->atp_lock);
 				atalk_putnext(gref, m);
 
 			return;
@@ -109,13 +109,11 @@ l_notify:
 			if (trp->tr_queue->dflag)
 				((ioc_t *)gbuf_rptr(m))->ioc_cmd = AT_ATP_REQUEST_COMPLETE;
 			else if (trp->tr_bdsp == NULL) {
-				ATENABLE(s, atp->atp_lock);
 				gbuf_freem(m);
 				if (trp->tr_rsp_wait)
 					wakeup(&trp->tr_event);
 				break;
 			}
-			ATENABLE(s, atp->atp_lock);
 			atp_iocnak(trp->tr_queue, m, ETIMEDOUT);
 			atp_free(trp);
 			return;
@@ -131,7 +129,6 @@ l_notify:
 
 		if (trp->tr_retry != (unsigned int) ATP_INFINITE_RETRIES)
 			trp->tr_retry--;
-		ATENABLE(s, atp->atp_lock);
 		atp_send(trp);
 	}
 }
@@ -148,12 +145,10 @@ register struct atp_trans *trp;
 {	
 	register struct atp_state *atp;
 	register int i;
-	int s;
 	
 	dPrintf(D_M_ATP_LOW, D_L_TRACE,
 		("atp_free: freeing trp 0x%x\n", (u_int) trp));
 
-	ATDISABLE(s, atpgen_lock);
 
 	if (trp->tr_state == TRANS_ABORTING) {
 		ATP_Q_REMOVE(atp_trans_abort, trp, tr_list);
@@ -185,12 +180,10 @@ register struct atp_trans *trp;
 			trp->tr_state = TRANS_ABORTING;
 			ATP_Q_APPEND(atp_trans_abort, trp, tr_list);
 			wakeup(&trp->tr_event);
-			ATENABLE(s, atpgen_lock);
 			return;
 		}
 	}
 	
-	ATENABLE(s, atpgen_lock);
 	atp_trans_free(trp);
 } /* atp_free */
 
@@ -245,10 +238,8 @@ register struct atp_rcb *rcbp;
 {
 	register struct atp_state *atp;
 	register int i;
-	int s;
 
   if ((atp = rcbp->rc_queue) != 0) {
-	ATDISABLE(s, atp->atp_lock);
 	for (i = 0; i < rcbp->rc_pktcnt; i++) {
 		if (rcbp->rc_bitmap&atp_mask[i])
 			rcbp->rc_snd[i] = 1;
@@ -258,10 +249,8 @@ register struct atp_rcb *rcbp;
         if (rcbp->rc_rep_waiting == 0) {
 	        rcbp->rc_state = RCB_SENDING;
 	        rcbp->rc_rep_waiting = 1;
-	        ATENABLE(s, atp->atp_lock);
 	        atp_send_replies(atp, rcbp);
-	} else
-	ATENABLE(s, atp->atp_lock);
+	}
   }
 }
 
@@ -270,32 +259,26 @@ register struct atp_rcb *rcbp;
  *	The rcb timer just frees the rcb, this happens when we missed a release for XO
  */
 
-void atp_rcb_timer()
+void atp_rcb_timer(__unused struct atp_trans *junk)
 {  
-	int s;
-        register struct atp_rcb *rcbp;
+    register struct atp_rcb *rcbp;
 	register struct atp_rcb *next_rcbp;
-	extern   struct atp_rcb_qhead atp_need_rel;
-	extern struct atp_trans *trp_tmo_rcb;
 	struct timeval timenow;
 
 l_again:
-	ATDISABLE(s, atpgen_lock);
 	getmicrouptime(&timenow);
 	for (rcbp = atp_need_rel.head; rcbp; rcbp = next_rcbp) {
 	        next_rcbp = rcbp->rc_tlist.next;
 
-	        if (abs(timenow.tv_sec - rcbp->rc_timestamp) > 30) {
-		        ATENABLE(s, atpgen_lock);
+	        if ((timenow.tv_sec - rcbp->rc_timestamp) > 30) {
 		        atp_rcb_free(rcbp);
 		        goto l_again;
 		}
 	}
-	ATENABLE(s, atpgen_lock);
 	atp_timout(atp_rcb_timer, trp_tmo_rcb, 10 * HZ);
 }
 
-atp_iocack(atp, m)
+void atp_iocack(atp, m)
 struct   atp_state *atp;
 register gbuf_t *m;
 {
@@ -312,7 +295,7 @@ register gbuf_t *m;
 		atalk_putnext(atp->atp_gref, m);
 }
 
-atp_iocnak(atp, m, err)
+void atp_iocnak(atp, m, err)
 struct   atp_state *atp;
 register gbuf_t *m;
 register int err;
@@ -337,14 +320,12 @@ register int err;
  *	Generate a transaction id for a socket
  */
 static int lasttid;
-atp_tid(atp)
+int atp_tid(atp)
 register struct atp_state *atp;
 {
 	register int i;
 	register struct atp_trans *trp;
-	int s;
 
-	ATDISABLE(s, atpgen_lock);
 	for (i = lasttid;;) {
 		i = (i+1)&0xffff;
 
@@ -354,7 +335,6 @@ register struct atp_state *atp;
 		}
 		if (trp == NULL) {
 			lasttid = i;
-			ATENABLE(s, atpgen_lock);
 			return(i);
 		}
 	}

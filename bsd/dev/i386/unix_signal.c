@@ -1,23 +1,29 @@
 /*
- * Copyright (c) 2000 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2006 Apple Computer, Inc. All rights reserved.
  *
- * @APPLE_LICENSE_HEADER_START@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. The rights granted to you under the License
+ * may not be used to create, or enable the creation or redistribution of,
+ * unlawful or unlicensed copies of an Apple operating system, or to
+ * circumvent, violate, or enable the circumvention or violation of, any
+ * terms of an Apple operating system software license agreement.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
- * @APPLE_LICENSE_HEADER_END@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /* 
  * Copyright (c) 1992 NeXT, Inc.
@@ -38,28 +44,40 @@
 #include <sys/user.h>
 #include <sys/sysproto.h>
 #include <sys/sysent.h>
+#include <sys/ucontext.h>
+#include <sys/wait.h>
 #include <mach/thread_act.h>	/* for thread_abort_safely */
+#include <mach/thread_status.h>	
+#include <i386/machine_routines.h>
 
+#include <i386/eflags.h>
 #include <i386/psl.h>
 #include <i386/seg.h>
 
-#include <mach/i386/thread_status.h>
+#include <sys/kdebug.h>
 
-extern struct i386_saved_state *get_user_regs(thread_t);
-
-extern boolean_t valid_user_segment_selectors(uint16_t cs,
-					      uint16_t ss,
-					      uint16_t ds,
-					      uint16_t es,
-					      uint16_t fs,
-					      uint16_t gs);
+#include <sys/sdt.h>
 
 /* Forward: */
-extern boolean_t machine_exception(int, int, int, int *, int *);
+extern boolean_t machine_exception(int, mach_exception_code_t, 
+		mach_exception_subcode_t, int *, mach_exception_subcode_t *);
+extern kern_return_t thread_getstatus(register thread_t act, int flavor,
+			thread_state_t tstate, mach_msg_type_number_t *count);
+extern kern_return_t thread_setstatus(thread_t thread, int flavor,
+			thread_state_t tstate, mach_msg_type_number_t count);
 
 /* Signal handler flavors supported */
 /* These defns should match the Libc implmn */
 #define UC_TRAD			1
+#define UC_FLAVOR		30
+#define	UC_SET_ALT_STACK	0x40000000
+#define	UC_RESET_ALT_STACK	0x80000000
+
+#define	C_32_STK_ALIGN		16
+#define	C_64_STK_ALIGN		16
+#define	C_64_REDZONE_LEN	128
+#define TRUNC_DOWN32(a,c)	((((uint32_t)a)-(c)) & ((uint32_t)(-(c))))
+#define TRUNC_DOWN64(a,c)	((((uint64_t)a)-(c)) & ((uint64_t)(-(c))))
 
 /*
  * Send an interrupt to process.
@@ -71,111 +89,444 @@ extern boolean_t machine_exception(int, int, int, int *, int *);
  * pointer, and the argument pointer, it returns
  * to the user specified pc, psl.
  */
+struct sigframe32 {
+        int		  retaddr;
+	sig_t		  catcher;
+	int		  sigstyle;
+	int		  sig;
+	siginfo_t	* sinfo;
+	struct ucontext * uctx;
+};
+
+
+
 void
-sendsig(p, catcher, sig, mask, code)
- 	struct proc *p;
-	user_addr_t catcher;	/* sig_t */
-	int sig, mask;
-	u_long code;
+sendsig(struct proc *p, user_addr_t ua_catcher, int sig, int mask, __unused u_long code)
 {
-	struct sigframe {
-		int			retaddr;
-		sig_t			catcher;
-		int			sigstyle;
-		int			sig;
-		int			code;
-		struct sigcontext *	scp;
-	} frame, *fp;
-	struct sigcontext		context, *scp;
+        union {
+	    struct mcontext32	mctx32;
+	    struct mcontext64	mctx64;
+	} mctx;
+	user_addr_t	ua_sp;
+	user_addr_t	ua_fp;
+	user_addr_t	ua_cr2;
+	user_addr_t	ua_sip;
+	user_addr_t 	ua_uctxp;
+	user_addr_t	ua_mctxp;
+	user_siginfo_t	sinfo64;
+
 	struct sigacts *ps = p->p_sigacts;
-	int oonstack;
-	thread_t thread = current_thread();
+	int oonstack, flavor; 
+	void * state;
+	mach_msg_type_number_t state_count;
+
+	thread_t thread;
 	struct uthread * ut;
-	struct i386_saved_state * saved_state = get_user_regs(thread);
-	sig_t trampact;
+	int stack_size = 0;
+	int infostyle = UC_TRAD;
     
+	thread = current_thread();
 	ut = get_bsdthread_info(thread);
-	oonstack = ps->ps_sigstk.ss_flags & SA_ONSTACK;
-	if ((ps->ps_flags & SAS_ALTSTACK) && !oonstack &&
-		(ps->ps_sigonstack & sigmask(sig))) {
-			scp = ((struct sigcontext *)ps->ps_sigstk.ss_sp) - 1;
-			ps->ps_sigstk.ss_flags |= SA_ONSTACK;
-	} else
-		scp = ((struct sigcontext *)saved_state->uesp) - 1;
-	fp = ((struct sigframe *)scp) - 1;
 
-	/* 
-	 * Build the argument list for the signal handler.
-	 */
+	if (p->p_sigacts->ps_siginfo & sigmask(sig))
+		infostyle = UC_FLAVOR;
 
-	trampact = (sig_t)ps->ps_trampact[sig];
-	/* Handler should call sigreturn to get out of it */
-	frame.retaddr = 0xffffffff;	
-	frame.catcher = CAST_DOWN(sig_t,catcher);	/* XXX LP64 */
-	frame.sigstyle = UC_TRAD;
-	frame.sig = sig;
-
-	if (sig == SIGILL || sig == SIGFPE) {
-		frame.code = code;
-	} else
-		frame.code = 0;
-	frame.scp = scp;
-	if (copyout((caddr_t)&frame, (user_addr_t)fp, sizeof (frame))) 
-		goto bad;
+	oonstack = ut->uu_sigstk.ss_flags & SA_ONSTACK;
 
 	/*
-	 * Build the signal context to be used by sigreturn.
+	 * init siginfo
 	 */
-	context.sc_onstack = oonstack;
-	context.sc_mask = mask;
-	context.sc_eax = saved_state->eax;
-	context.sc_ebx = saved_state->ebx;
-	context.sc_ecx = saved_state->ecx;
-	context.sc_edx = saved_state->edx;
-	context.sc_edi = saved_state->edi;
-	context.sc_esi = saved_state->esi;
-	context.sc_ebp = saved_state->ebp;
-	context.sc_esp = saved_state->uesp;
-	context.sc_ss = saved_state->ss;
-	context.sc_eflags = saved_state->efl;
-	context.sc_eip = saved_state->eip;
-	context.sc_cs = saved_state->cs;
-	if (saved_state->efl & EFL_VM) {
-		context.sc_ds = saved_state->v86_segs.v86_ds;
-		context.sc_es = saved_state->v86_segs.v86_es;
-		context.sc_fs = saved_state->v86_segs.v86_fs;
-		context.sc_gs = saved_state->v86_segs.v86_gs;
+	proc_unlock(p);
 
-		saved_state->efl &= ~EFL_VM;
+	bzero((caddr_t)&sinfo64, sizeof(user_siginfo_t));
+	sinfo64.si_signo = sig;
+		
+
+	if (proc_is64bit(p)) {
+	        x86_thread_state64_t	*tstate64;
+	        struct user_ucontext64 	uctx64;
+
+	        flavor = x86_THREAD_STATE64;
+		state_count = x86_THREAD_STATE64_COUNT;
+		state = (void *)&mctx.mctx64.ss;
+		if (thread_getstatus(thread, flavor, (thread_state_t)state, &state_count) != KERN_SUCCESS)
+		        goto bad;
+
+		flavor = x86_FLOAT_STATE64;
+		state_count = x86_FLOAT_STATE64_COUNT;
+		state = (void *)&mctx.mctx64.fs;
+		if (thread_getstatus(thread, flavor, (thread_state_t)state, &state_count) != KERN_SUCCESS)
+		        goto bad;
+
+		flavor = x86_EXCEPTION_STATE64;
+		state_count = x86_EXCEPTION_STATE64_COUNT;
+		state = (void *)&mctx.mctx64.es;
+		if (thread_getstatus(thread, flavor, (thread_state_t)state, &state_count) != KERN_SUCCESS)
+		        goto bad;
+
+		tstate64 = &mctx.mctx64.ss;
+
+		/* figure out where our new stack lives */
+		if ((ut->uu_flag & UT_ALTSTACK) && !oonstack &&
+		    (ps->ps_sigonstack & sigmask(sig))) {
+			ua_sp = ut->uu_sigstk.ss_sp;
+			stack_size = ut->uu_sigstk.ss_size;
+			ua_sp += stack_size;
+			ut->uu_sigstk.ss_flags |= SA_ONSTACK;
+		} else {
+		        ua_sp = tstate64->rsp;
+		}
+		ua_cr2 = mctx.mctx64.es.faultvaddr;
+
+		/* The x86_64 ABI defines a 128-byte red zone. */
+		ua_sp -= C_64_REDZONE_LEN;
+
+		ua_sp -= sizeof (struct user_ucontext64);
+		ua_uctxp = ua_sp;			 // someone tramples the first word!
+
+		ua_sp -= sizeof (user_siginfo_t);
+		ua_sip = ua_sp;
+
+	        ua_sp -= sizeof (struct mcontext64);
+		ua_mctxp = ua_sp;
+
+		/*
+		 * Align the frame and stack pointers to 16 bytes for SSE.
+		 * (Note that we use 'ua_fp' as the base of the stack going forward)
+		 */
+		ua_fp = TRUNC_DOWN64(ua_sp, C_64_STK_ALIGN);
+
+		/*
+		 * But we need to account for the return address so the alignment is
+		 * truly "correct" at _sigtramp
+		 */
+		ua_fp -= sizeof(user_addr_t);
+
+		/*
+		 * Build the signal context to be used by sigreturn.
+		 */
+		bzero(&uctx64, sizeof(uctx64));
+
+		uctx64.uc_onstack = oonstack;
+		uctx64.uc_sigmask = mask;
+		uctx64.uc_stack.ss_sp = ua_fp;
+		uctx64.uc_stack.ss_size = stack_size;
+
+		if (oonstack)
+		        uctx64.uc_stack.ss_flags |= SS_ONSTACK;	
+		uctx64.uc_link = 0;
+
+		uctx64.uc_mcsize = sizeof(struct mcontext64);
+		uctx64.uc_mcontext64 = ua_mctxp;
+		
+		if (copyout((caddr_t)&uctx64, ua_uctxp, sizeof (uctx64))) 
+		        goto bad;
+
+	        if (copyout((caddr_t)&mctx.mctx64, ua_mctxp, sizeof (struct mcontext64))) 
+		        goto bad;
+
+		sinfo64.pad[0]  = tstate64->rsp;
+		sinfo64.si_addr = tstate64->rip;
+
+		tstate64->rip = ps->ps_trampact[sig];
+		tstate64->rsp = ua_fp;
+		tstate64->rflags = get_eflags_exportmask();
+		/*
+		 * JOE - might not need to set these
+		 */
+		tstate64->cs = USER64_CS;
+		tstate64->fs = NULL_SEG;
+		tstate64->gs = USER_CTHREAD;
+
+		/* 
+		 * Build the argument list for the signal handler.
+		 * Handler should call sigreturn to get out of it
+		 */
+		tstate64->rdi = ua_catcher;
+		tstate64->rsi = infostyle;
+		tstate64->rdx = sig;
+		tstate64->rcx = ua_sip;
+		tstate64->r8  = ua_uctxp;
+
 	} else {
-		context.sc_ds = saved_state->ds;
-		context.sc_es = saved_state->es;
-		context.sc_fs = saved_state->fs;
-		context.sc_gs = saved_state->gs;
+	        x86_thread_state32_t	*tstate32;
+	        struct ucontext 	uctx32;
+		struct sigframe32	frame32;
+
+	        flavor = x86_THREAD_STATE32;
+		state_count = x86_THREAD_STATE32_COUNT;
+		state = (void *)&mctx.mctx32.ss;
+		if (thread_getstatus(thread, flavor, (thread_state_t)state, &state_count) != KERN_SUCCESS)
+		        goto bad;
+
+		flavor = x86_FLOAT_STATE32;
+		state_count = x86_FLOAT_STATE32_COUNT;
+		state = (void *)&mctx.mctx32.fs;
+		if (thread_getstatus(thread, flavor, (thread_state_t)state, &state_count) != KERN_SUCCESS)
+		        goto bad;
+
+		flavor = x86_EXCEPTION_STATE32;
+		state_count = x86_EXCEPTION_STATE32_COUNT;
+		state = (void *)&mctx.mctx32.es;
+		if (thread_getstatus(thread, flavor, (thread_state_t)state, &state_count) != KERN_SUCCESS)
+		        goto bad;
+
+		tstate32 = &mctx.mctx32.ss;
+
+		/* figure out where our new stack lives */
+		if ((ut->uu_flag & UT_ALTSTACK) && !oonstack &&
+		    (ps->ps_sigonstack & sigmask(sig))) {
+			ua_sp = ut->uu_sigstk.ss_sp;
+			stack_size = ut->uu_sigstk.ss_size;
+			ua_sp += stack_size;
+			ut->uu_sigstk.ss_flags |= SA_ONSTACK;
+		} else {
+		        ua_sp = tstate32->esp;
+		}
+		ua_cr2 = mctx.mctx32.es.faultvaddr;
+
+		ua_sp -= sizeof (struct ucontext);
+		ua_uctxp = ua_sp;			 // someone tramples the first word!
+
+		ua_sp -= sizeof (siginfo_t);
+		ua_sip = ua_sp;
+
+	        ua_sp -= sizeof (struct mcontext32);
+		ua_mctxp = ua_sp;
+
+		ua_sp -= sizeof (struct sigframe32);
+		ua_fp = ua_sp;
+
+		/*
+		 * Align the frame and stack pointers to 16 bytes for SSE.
+		 * (Note that we use 'fp' as the base of the stack going forward)
+		 */
+		ua_fp = TRUNC_DOWN32(ua_fp, C_32_STK_ALIGN);
+
+		/*
+		 * But we need to account for the return address so the alignment is
+		 * truly "correct" at _sigtramp
+		 */
+		ua_fp -= sizeof(frame32.retaddr);
+
+		/* 
+		 * Build the argument list for the signal handler.
+		 * Handler should call sigreturn to get out of it
+		 */
+		frame32.retaddr = -1;	
+		frame32.sigstyle = infostyle;
+		frame32.sig = sig;
+		frame32.catcher = CAST_DOWN(sig_t, ua_catcher);
+		frame32.sinfo = CAST_DOWN(siginfo_t *, ua_sip);
+		frame32.uctx = CAST_DOWN(struct ucontext *, ua_uctxp);
+
+		if (copyout((caddr_t)&frame32, ua_fp, sizeof (frame32))) 
+		        goto bad;
+
+		/*
+		 * Build the signal context to be used by sigreturn.
+		 */
+		bzero(&uctx32, sizeof(uctx32));
+
+		uctx32.uc_onstack = oonstack;
+		uctx32.uc_sigmask = mask;
+		uctx32.uc_stack.ss_sp = CAST_DOWN(char *, ua_fp);
+		uctx32.uc_stack.ss_size = stack_size;
+
+		if (oonstack)
+		        uctx32.uc_stack.ss_flags |= SS_ONSTACK;	
+		uctx32.uc_link = 0;
+
+		uctx32.uc_mcsize = sizeof(struct mcontext32);
+
+		uctx32.uc_mcontext = CAST_DOWN(_STRUCT_MCONTEXT32 *, ua_mctxp);
+		
+		if (copyout((caddr_t)&uctx32, ua_uctxp, sizeof (uctx32))) 
+		        goto bad;
+
+		if (copyout((caddr_t)&mctx.mctx32, ua_mctxp, sizeof (struct mcontext32))) 
+		        goto bad;
+
+		sinfo64.pad[0]  = tstate32->esp;
+		sinfo64.si_addr = tstate32->eip;
 	}
-	if (copyout((caddr_t)&context, (user_addr_t)scp, sizeof (context))) 
-		goto bad;
 
-	saved_state->eip = (unsigned int)trampact;
-	saved_state->cs = USER_CS;
+	switch (sig) {
+		case SIGILL:
+			switch (ut->uu_code) {
+				case EXC_I386_INVOP:
+					sinfo64.si_code = ILL_ILLOPC;
+					break;
+				default:
+					printf("unknown SIGILL code %ld\n", (long) ut->uu_code);
+					sinfo64.si_code = ILL_NOOP;
+			}
+			break;
+		case SIGFPE:
+#define FP_IE 0 /* Invalid operation */
+#define FP_DE 1 /* Denormalized operand */
+#define FP_ZE 2 /* Zero divide */
+#define FP_OE 3 /* overflow */
+#define FP_UE 4 /* underflow */
+#define FP_PE 5 /* precision */
+			if (ut->uu_subcode & (1 << FP_ZE)) {
+				sinfo64.si_code = FPE_FLTDIV;
+			} else if (ut->uu_subcode & (1 << FP_OE)) {
+				sinfo64.si_code = FPE_FLTOVF;
+			} else if (ut->uu_subcode & (1 << FP_UE)) {
+				sinfo64.si_code = FPE_FLTUND;
+			} else if (ut->uu_subcode & (1 << FP_PE)) {
+				sinfo64.si_code = FPE_FLTRES;
+			} else if (ut->uu_subcode & (1 << FP_IE)) {
+				sinfo64.si_code = FPE_FLTINV;
+			} else {
+				printf("unknown SIGFPE code %ld, subcode %lx\n",
+				       (long) ut->uu_code, (long) ut->uu_subcode);
+				sinfo64.si_code = FPE_NOOP;
+			}
+			break;
+		case SIGBUS:
+			sinfo64.si_code = BUS_ADRERR;
+			sinfo64.si_addr = ua_cr2;
+			break;
+		case SIGTRAP:
+			sinfo64.si_code = TRAP_BRKPT;
+			break;
+		case SIGSEGV:
+		        sinfo64.si_addr = ua_cr2;
 
-	saved_state->uesp = (unsigned int)fp;
-	saved_state->ss = USER_DS;
+			switch (ut->uu_code) {
+				case EXC_I386_GPFLT:
+					/* CR2 is meaningless after GP fault */
+					/* XXX namespace clash! */
+					sinfo64.si_addr = 0ULL;
+					sinfo64.si_code = 0;
+					break;
+				case KERN_PROTECTION_FAILURE:
+					sinfo64.si_code = SEGV_ACCERR;
+					break;
+				case KERN_INVALID_ADDRESS:
+					sinfo64.si_code = SEGV_MAPERR;
+					break;
+				default:
+					printf("unknown SIGSEGV code %ld\n", (long) ut->uu_code);
+					sinfo64.si_code = FPE_NOOP;
+			}
+				break;
+		default:
+		{
+			int status_and_exitcode;
 
-	saved_state->ds = USER_DS;
-	saved_state->es = USER_DS;
-	saved_state->fs = NULL_SEG;
-	saved_state->gs = USER_CTHREAD;
+			/*
+			 * All other signals need to fill out a minimum set of
+			 * information for the siginfo structure passed into
+			 * the signal handler, if SA_SIGINFO was specified.
+			 *
+			 * p->si_status actually contains both the status and
+			 * the exit code; we save it off in its own variable
+			 * for later breakdown.
+			 */
+			proc_lock(p);
+			sinfo64.si_pid = p->si_pid;
+			p->si_pid =0;
+			status_and_exitcode = p->si_status;
+			p->si_status = 0;
+			sinfo64.si_uid = p->si_uid;
+			p->si_uid =0;
+			sinfo64.si_code = p->si_code;
+			p->si_code = 0;
+			proc_unlock(p);
+			if (sinfo64.si_code == CLD_EXITED) {
+				if (WIFEXITED(status_and_exitcode)) 
+					sinfo64.si_code = CLD_EXITED;
+				else if (WIFSIGNALED(status_and_exitcode)) {
+					if (WCOREDUMP(status_and_exitcode)) {
+						sinfo64.si_code = CLD_DUMPED;
+						status_and_exitcode = W_EXITCODE(status_and_exitcode,status_and_exitcode);
+					} else {
+						sinfo64.si_code = CLD_KILLED;
+						status_and_exitcode = W_EXITCODE(status_and_exitcode,status_and_exitcode);
+					}
+				}
+			}
+			/*
+			 * The recorded status contains the exit code and the
+			 * signal information, but the information to be passed
+			 * in the siginfo to the handler is supposed to only
+			 * contain the status, so we have to shift it out.
+			 */
+			sinfo64.si_status = WEXITSTATUS(status_and_exitcode);
+			break;
+		}
+	}
+	if (proc_is64bit(p)) {
+
+		/* XXX truncates catcher address to uintptr_t */
+		DTRACE_PROC3(signal__handle, int, sig, siginfo_t *, &sinfo64,
+			void (*)(void), CAST_DOWN(sig_t, ua_catcher));
+
+	        if (copyout((caddr_t)&sinfo64, ua_sip, sizeof (sinfo64))) 
+		        goto bad;
+
+		flavor = x86_THREAD_STATE64;
+		state_count = x86_THREAD_STATE64_COUNT;
+		state = (void *)&mctx.mctx64.ss;
+	} else {
+	        x86_thread_state32_t	*tstate32;
+		siginfo_t		sinfo32;
+
+		bzero((caddr_t)&sinfo32, sizeof(siginfo_t));
+
+		sinfo32.si_signo  = sinfo64.si_signo;
+		sinfo32.si_code   = sinfo64.si_code;
+		sinfo32.si_pid    = sinfo64.si_pid;
+		sinfo32.si_uid    = sinfo64.si_uid;
+		sinfo32.si_status = sinfo64.si_status;
+		sinfo32.si_addr   = CAST_DOWN(void *, sinfo64.si_addr);
+		sinfo32.__pad[0]    = sinfo64.pad[0];
+
+		DTRACE_PROC3(signal__handle, int, sig, siginfo_t *, &sinfo32,
+			void (*)(void), CAST_DOWN(sig_t, ua_catcher));
+
+	        if (copyout((caddr_t)&sinfo32, ua_sip, sizeof (sinfo32))) 
+		        goto bad;
+	
+		tstate32 = &mctx.mctx32.ss;
+		tstate32->eip = CAST_DOWN(unsigned int, ps->ps_trampact[sig]);
+		tstate32->esp = CAST_DOWN(unsigned int, ua_fp);
+		
+		tstate32->eflags = get_eflags_exportmask();
+
+		tstate32->cs = USER_CS;
+		tstate32->ss = USER_DS;
+		tstate32->ds = USER_DS;
+		tstate32->es = USER_DS;
+		tstate32->fs = NULL_SEG;
+		tstate32->gs = USER_CTHREAD;
+
+		flavor = x86_THREAD_STATE32;
+		state_count = x86_THREAD_STATE32_COUNT;
+		state = (void *)tstate32;
+	}
+	if (thread_setstatus(thread, flavor, (thread_state_t)state, state_count) != KERN_SUCCESS)
+	        goto bad;
+	ml_fp_setvalid(FALSE);
+
+	proc_lock(p);
+
 	return;
 
 bad:
+	proc_lock(p);
 	SIGACTION(p, SIGILL) = SIG_DFL;
 	sig = sigmask(SIGILL);
 	p->p_sigignore &= ~sig;
 	p->p_sigcatch &= ~sig;
 	ut->uu_sigmask &= ~sig;
 	/* sendsig is called with signal lock held */
-	psignal_lock(p, SIGILL, 0);
+	proc_unlock(p);
+	psignal_locked(p, SIGILL);
+	proc_lock(p);
 	return;
 }
 
@@ -189,91 +540,104 @@ bad:
  * psl to gain improper priviledges or to cause
  * a machine fault.
  */
-/* ARGSUSED */
+
 int
-sigreturn(
-	struct proc *p,
-	struct sigreturn_args *uap,
-	__unused int *retval)
+sigreturn(struct proc *p, struct sigreturn_args *uap, __unused int *retval)
 {
-    struct sigcontext		context;
-    thread_t			thread = current_thread();
-	int error;
-    struct i386_saved_state*	saved_state = (struct i386_saved_state*)
-							get_user_regs(thread);	
+        union {
+	    struct mcontext32	mctx32;
+	    struct mcontext64	mctx64;
+	} mctx;
+	thread_t thread = current_thread();
 	struct uthread * ut;
+	int	error;
+	int	onstack = 0;
 
-
-    
-	if (saved_state == NULL) 
-		return EINVAL;
-
-    if ((error = copyin(CAST_USER_ADDR_T(uap->sigcntxp), (void *)&context, 
-				sizeof (context)))) 
-		return(error);
-
-	/*
-	 * Validate segment selectors.
-	 * Bad values would result in kernel exception at context switch
-	 * back to user mode. If other state is invalid an exception will
-	 * occur in user context.
-	 */
-	if (!valid_user_segment_selectors(context.sc_cs,
-					  context.sc_ss,
-					  context.sc_ds,
-					  context.sc_es,
-					  context.sc_fs,
-					  context.sc_gs)) {
-		return EINVAL;
-	}
+	mach_msg_type_number_t ts_count;
+	unsigned int           ts_flavor;
+	void		    *  ts;
+	mach_msg_type_number_t fs_count;
+	unsigned int           fs_flavor;
+	void		    *  fs;
 
 	ut = (struct uthread *)get_bsdthread_info(thread);
 
-	if (context.sc_onstack & 01)
-		p->p_sigacts->ps_sigstk.ss_flags |= SA_ONSTACK;
-	else
-		p->p_sigacts->ps_sigstk.ss_flags &= ~SA_ONSTACK;
+	/*
+	 * If we are being asked to change the altstack flag on the thread, we
+	 * just set/reset it and return (the uap->uctx is not used).
+	 */
+	if ((unsigned int)uap->infostyle == UC_SET_ALT_STACK) {
+		ut->uu_sigstk.ss_flags |= SA_ONSTACK;
+		return (0);
+	} else if ((unsigned int)uap->infostyle == UC_RESET_ALT_STACK) {
+		ut->uu_sigstk.ss_flags &= ~SA_ONSTACK;
+		return (0);
+	}
 
-	ut->uu_sigmask = context.sc_mask &~ sigcantmask;
-	if(ut->uu_siglist & ~ut->uu_sigmask)
+	if (proc_is64bit(p)) {
+	        struct user_ucontext64	uctx64;
+
+	        if ((error = copyin(uap->uctx, (void *)&uctx64, sizeof (uctx64))))
+		        return(error);
+
+		if ((error = copyin(uctx64.uc_mcontext64, (void *)&mctx.mctx64, sizeof (struct mcontext64))))
+		        return(error);
+
+		onstack = uctx64.uc_onstack & 01;
+		ut->uu_sigmask = uctx64.uc_sigmask & ~sigcantmask;
+
+	        ts_flavor = x86_THREAD_STATE64;
+		ts_count  = x86_THREAD_STATE64_COUNT;
+		ts = (void *)&mctx.mctx64.ss;
+
+		fs_flavor = x86_FLOAT_STATE64;
+		fs_count  = x86_FLOAT_STATE64_COUNT;
+		fs = (void *)&mctx.mctx64.fs;
+
+      } else {
+	        struct ucontext		uctx32;
+
+	        if ((error = copyin(uap->uctx, (void *)&uctx32, sizeof (uctx32)))) 
+		        return(error);
+
+		if ((error = copyin(CAST_USER_ADDR_T(uctx32.uc_mcontext), (void *)&mctx.mctx32, sizeof (struct mcontext32)))) 
+		        return(error);
+
+		onstack = uctx32.uc_onstack & 01;
+		ut->uu_sigmask = uctx32.uc_sigmask & ~sigcantmask;
+
+	        ts_flavor = x86_THREAD_STATE32;
+		ts_count  = x86_THREAD_STATE32_COUNT;
+		ts = (void *)&mctx.mctx32.ss;
+
+		fs_flavor = x86_FLOAT_STATE32;
+		fs_count  = x86_FLOAT_STATE32_COUNT;
+		fs = (void *)&mctx.mctx32.fs;
+	}
+
+	if (onstack)
+		ut->uu_sigstk.ss_flags |= SA_ONSTACK;
+	else
+		ut->uu_sigstk.ss_flags &= ~SA_ONSTACK;
+
+	if (ut->uu_siglist & ~ut->uu_sigmask)
 		signal_setast(thread);
 
-	saved_state->eax = context.sc_eax;
-	saved_state->ebx = context.sc_ebx;
-	saved_state->ecx = context.sc_ecx;
-	saved_state->edx = context.sc_edx;
-	saved_state->edi = context.sc_edi;
-	saved_state->esi = context.sc_esi;
-	saved_state->ebp = context.sc_ebp;
-	saved_state->uesp = context.sc_esp;
-	saved_state->ss = context.sc_ss;
-	saved_state->efl = context.sc_eflags;
-	saved_state->efl &= ~EFL_USERCLR;
-	saved_state->efl |= EFL_USERSET;
-	saved_state->eip = context.sc_eip;
-	saved_state->cs = context.sc_cs;
+	/*
+	 * thread_set_state() does all the needed checks for the passed in
+	 * content
+	 */
+	if (thread_setstatus(thread, ts_flavor, ts, ts_count) != KERN_SUCCESS)
+	        return(EINVAL);
 
-	if (context.sc_eflags & EFL_VM) {
-		saved_state->ds = NULL_SEG;
-    		saved_state->es = NULL_SEG;
-    		saved_state->fs = NULL_SEG;
-    		saved_state->gs = NULL_SEG;
-		saved_state->v86_segs.v86_ds = context.sc_ds;
-		saved_state->v86_segs.v86_es = context.sc_es;
-		saved_state->v86_segs.v86_fs = context.sc_fs;
-		saved_state->v86_segs.v86_gs = context.sc_gs;
+	ml_fp_setvalid(TRUE);
 
-		saved_state->efl |= EFL_VM;
-	}
-	else {
-		saved_state->ds = context.sc_ds;
-		saved_state->es = context.sc_es;
-		saved_state->fs = context.sc_fs;
-		saved_state->gs = context.sc_gs;
-	}
+	if (thread_setstatus(thread, fs_flavor, fs, fs_count)  != KERN_SUCCESS)
+	        return(EINVAL);
 
 	return (EJUSTRETURN);
 }
+
 
 /*
  * machine_exception() performs MD translation
@@ -282,78 +646,49 @@ sigreturn(
 
 boolean_t
 machine_exception(
-    int			exception,
-    int			code,
-    __unused int	subcode,
-    int			*unix_signal,
-    int			*unix_code
-)
+	int				exception,
+	mach_exception_code_t		code,
+	__unused mach_exception_subcode_t subcode,
+	int 				*unix_signal,
+	mach_exception_code_t		*unix_code)
 {
 
-    switch(exception) {
+	switch(exception) {
 
-    case EXC_BAD_INSTRUCTION:
-	*unix_signal = SIGILL;
-	*unix_code = code;
-	break;
-
-    case EXC_ARITHMETIC:
-	*unix_signal = SIGFPE;
-	*unix_code = code;
-	break;
-
-    default:
-	return(FALSE);
-    }
-   
-    return(TRUE);
-}
-
-#include <sys/systm.h>
-#include <sys/sysent.h>
-
-int __pthread_cset(struct sysent *);
-void __pthread_creset(struct sysent *);
-
-int
-__pthread_cset(struct sysent *callp)
-{
-	unsigned int cancel_enable;
-	thread_t thread;
-	struct uthread * uthread; 
-
-	thread = current_thread();
-	uthread = get_bsdthread_info(thread);
-
-	cancel_enable = callp->sy_cancel;
-	if (cancel_enable == _SYSCALL_CANCEL_NONE) {
-		uthread->uu_flag |= UT_NOTCANCELPT;
-	} else {
-		if((uthread->uu_flag & (UT_CANCELDISABLE | UT_CANCEL | UT_CANCELED)) == UT_CANCEL) {
-			if (cancel_enable == _SYSCALL_CANCEL_PRE)
-				return(EINTR);
-			else
-				thread_abort_safely(thread);
+	case EXC_BAD_ACCESS:
+		/* Map GP fault to SIGSEGV, otherwise defer to caller */
+		if (code == EXC_I386_GPFLT) {
+			*unix_signal = SIGSEGV;
+			*unix_code = code;
+			break;
 		}
-	}   
-	return(0);
-}
+		return(FALSE);
 
+	case EXC_BAD_INSTRUCTION:
+		*unix_signal = SIGILL;
+		*unix_code = code;
+		break;
 
-void
-__pthread_creset(struct sysent *callp)
-{
+	case EXC_ARITHMETIC:
+		*unix_signal = SIGFPE;
+		*unix_code = code;
+		break;
 
-	unsigned int cancel_enable;
-	thread_t thread;
-	struct uthread * uthread; 
+	case EXC_SOFTWARE:
+		if (code == EXC_I386_BOUND) {
+			/*
+			 * Map #BR, the Bound Range Exceeded exception, to
+			 * SIGTRAP.
+			 */
+			*unix_signal = SIGTRAP;
+			*unix_code = code;
+			break;
+		}
 
-	thread = current_thread();
-	uthread = get_bsdthread_info(thread);
-	
-	cancel_enable = callp->sy_cancel;
-	if (!cancel_enable) 
-		uthread->uu_flag &= ~UT_NOTCANCELPT;
-
+	default:
+		return(FALSE);
+	}
+   
+	return(TRUE);
 }
 

@@ -1,23 +1,29 @@
 /*
- * Copyright (c) 2000-2004 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2007 Apple Inc. All rights reserved.
  *
- * @APPLE_LICENSE_HEADER_START@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. The rights granted to you under the License
+ * may not be used to create, or enable the creation or redistribution of,
+ * unlawful or unlicensed copies of an Apple operating system, or to
+ * circumvent, violate, or enable the circumvention or violation of, any
+ * terms of an Apple operating system software license agreement.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
- * @APPLE_LICENSE_HEADER_END@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 
 /* 	Copyright (c) 1997 Apple Computer, Inc.  All rights reserved. 
@@ -49,6 +55,8 @@ __BEGIN_DECLS
 #define DBG_PAGEIN_FAULT      2
 #define DBG_COW_FAULT         3
 #define DBG_CACHE_HIT_FAULT   4
+#define DBG_NZF_PAGE_FAULT    5
+#define DBG_GUARD_FAULT	      6	
 
 
 /* The debug code consists of the following 
@@ -67,38 +75,42 @@ __BEGIN_DECLS
 
 
 /* The Kernel Debug Classes  */
-#define DBG_MACH		1
-#define DBG_NETWORK		2	
-#define DBG_FSYSTEM		3
-#define DBG_BSD			4
-#define DBG_IOKIT		5
-#define DBG_DRIVERS		6
-#define DBG_TRACE               7
+#define DBG_MACH			1
+#define DBG_NETWORK			2	
+#define DBG_FSYSTEM			3
+#define DBG_BSD				4
+#define DBG_IOKIT			5
+#define DBG_DRIVERS			6
+#define DBG_TRACE           7
 #define DBG_DLIL	        8
 #define DBG_SECURITY		9
-#define DBG_MISC		20
-#define DBG_DYLD                31
-#define DBG_QT                  32
-#define DBG_APPS                33
-#define DBG_MIG			255
+#define DBG_MISC			20
+#define DBG_DYLD            31
+#define DBG_QT              32
+#define DBG_APPS            33
+#define DBG_MIG				255
 
 /* **** The Kernel Debug Sub Classes for Mach (DBG_MACH) **** */
+#define	DBG_MACH_EXCP_KTRAP_x86	0x02	/* Kernel Traps on x86 */
 #define	DBG_MACH_EXCP_DFLT	0x03	/* Data Translation Fault */
 #define	DBG_MACH_EXCP_IFLT	0x04	/* Inst Translation Fault */
 #define	DBG_MACH_EXCP_INTR	0x05	/* Interrupts */
 #define	DBG_MACH_EXCP_ALNG	0x06	/* Alignment Exception */
-#define	DBG_MACH_EXCP_TRAP	0x07	/* Traps */
+#define	DBG_MACH_EXCP_UTRAP_x86	0x07	/* User Traps on x86 */
 #define	DBG_MACH_EXCP_FP	0x08	/* FP Unavail */
 #define	DBG_MACH_EXCP_DECI	0x09	/* Decrementer Interrupt */
+#define	DBG_MACH_CHUD		0x0A	/* CHUD */
 #define	DBG_MACH_EXCP_SC	0x0C	/* System Calls */
 #define	DBG_MACH_EXCP_TRACE	0x0D	/* Trace exception */
 #define	DBG_MACH_EXCP_EMUL	0x0E	/* Instruction emulated */
 #define	DBG_MACH_IHDLR		0x10	/* Interrupt Handlers */
 #define	DBG_MACH_IPC		0x20	/* Inter Process Comm */
 #define	DBG_MACH_VM		0x30	/* Virtual Memory */
+#define	DBG_MACH_LEAKS		0x31    /* alloc/free */
 #define	DBG_MACH_SCHED		0x40	/* Scheduler */
 #define	DBG_MACH_MSGID_INVALID	0x50	/* Messages - invalid */
 #define DBG_MACH_LOCKS		0x60	/* new lock APIs */
+#define DBG_MACH_PMAP		0x70	/* pmap */
 
 /* Codes for Scheduler (DBG_MACH_SCHED) */     
 #define MACH_SCHED              0x0     /* Scheduler */
@@ -110,7 +122,20 @@ __BEGIN_DECLS
 #define MACH_MAKE_RUNNABLE      0x6     /* make thread runnable */
 #define	MACH_PROMOTE			0x7		/* promoted due to resource */
 #define	MACH_DEMOTE				0x8		/* promotion undone */
-#define MACH_PREBLOCK_MUTEX		0x9		/* preblocking on mutex */
+#define MACH_IDLE				0x9		/* processor idling */
+
+/* Codes for pmap (DBG_MACH_PMAP) */     
+#define PMAP__CREATE		0x0
+#define PMAP__DESTROY		0x1
+#define PMAP__PROTECT		0x2
+#define PMAP__PAGE_PROTECT	0x3
+#define PMAP__ENTER		0x4
+#define PMAP__REMOVE		0x5
+#define PMAP__NEST		0x6
+#define PMAP__UNNEST		0x7
+#define PMAP__FLUSH_TLBS	0x8
+#define PMAP__UPDATE_INTERRUPT	0x9
+#define PMAP__ATTRIBUTE_CLEAR	0xa
 
 /* **** The Kernel Debug Sub Classes for Network (DBG_NETWORK) **** */
 #define DBG_NETIP	1	/* Internet Protocol */
@@ -139,33 +164,60 @@ __BEGIN_DECLS
 #define	DBG_NETIPSEC	128	/* IPsec Protocol  */
 
 /* **** The Kernel Debug Sub Classes for IOKIT (DBG_IOKIT) **** */
-#define DBG_IOSCSI	1	/* SCSI */
-#define DBG_IODISK	2	/* Disk layers */
-#define	DBG_IONETWORK	3	/* Network layers */
-#define	DBG_IOKEYBOARD	4	/* Keyboard */
-#define	DBG_IOPOINTING	5	/* Pointing Devices */
-#define	DBG_IOAUDIO	6	/* Audio */
-#define	DBG_IOFLOPPY	7	/* Floppy */
-#define	DBG_IOSERIAL	8	/* Serial */
-#define	DBG_IOTTY	9	/* TTY layers */
-#define DBG_IOWORKLOOP	10	/* Work from work loop */
-#define DBG_IOINTES	11	/* Interrupt event source */
-#define DBG_IOCLKES	12	/* Clock event source */
-#define DBG_IOCMDQ	13	/* Command queue latencies */
-#define DBG_IOMCURS	14	/* Memory Cursor */
-#define DBG_IOMDESC	15	/* Memory Descriptors */
-#define DBG_IOPOWER	16	/* Power Managerment */
+#define DBG_IOWORKLOOP		1	/* Work from work loop */
+#define DBG_IOINTES			2	/* Interrupt event source */
+#define DBG_IOCLKES			3	/* Clock event source */
+#define DBG_IOCMDQ			4	/* Command queue latencies */
+#define DBG_IOMCURS			5	/* Memory Cursor */
+#define DBG_IOMDESC			6	/* Memory Descriptors */
+#define DBG_IOPOWER			7	/* Power Managerment */
+
+/* **** 8-32 reserved for internal IOKit usage **** */
+
+#define DBG_IOSTORAGE		32	/* Storage layers */
+#define	DBG_IONETWORK		33	/* Network layers */
+#define	DBG_IOKEYBOARD		34	/* Keyboard */
+#define	DBG_IOHID			35	/* HID Devices */
+#define	DBG_IOAUDIO			36	/* Audio */
+#define	DBG_IOSERIAL		37	/* Serial */
+#define	DBG_IOTTY			38	/* TTY layers */
+#define DBG_IOSAM			39	/* SCSI Architecture Model layers */
+#define DBG_IOPARALLELATA   40	/* Parallel ATA */
+#define DBG_IOPARALLELSCSI	41	/* Parallel SCSI */
+#define DBG_IOSATA			42	/* Serial-ATA */
+#define DBG_IOSAS			43	/* SAS */
+#define DBG_IOFIBRECHANNEL	44	/* FiberChannel */
+#define DBG_IOUSB			45	/* USB */
+#define DBG_IOBLUETOOTH		46	/* Bluetooth */
+#define DBG_IOFIREWIRE		47	/* FireWire */
+#define DBG_IOINFINIBAND	48	/* Infiniband */
+#define DBG_IOCPUPM		49	/* CPU Power Management */
+
+/* Backwards compatibility */
+#define	DBG_IOPOINTING		DBG_IOHID			/* OBSOLETE: Use DBG_IOHID instead */
+#define DBG_IODISK			DBG_IOSTORAGE		/* OBSOLETE: Use DBG_IOSTORAGE instead */
 
 /* **** The Kernel Debug Sub Classes for Device Drivers (DBG_DRIVERS) **** */
-#define DBG_DRVSCSI	1	/* SCSI */
-#define DBG_DRVDISK	2	/* Disk layers */
-#define	DBG_DRVNETWORK	3	/* Network layers */
-#define	DBG_DRVKEYBOARD	4	/* Keyboard */
-#define	DBG_DRVPOINTING	5	/* Pointing Devices */
-#define	DBG_DRVAUDIO	6	/* Audio */
-#define	DBG_DRVFLOPPY	7	/* Floppy */
-#define	DBG_DRVSERIAL	8	/* Serial */
-#define DBG_DRVSPLT     9
+#define DBG_DRVSTORAGE		1	/* Storage layers */
+#define	DBG_DRVNETWORK		2	/* Network layers */
+#define	DBG_DRVKEYBOARD		3	/* Keyboard */
+#define	DBG_DRVHID			4	/* HID Devices */
+#define	DBG_DRVAUDIO		5	/* Audio */
+#define	DBG_DRVSERIAL		7	/* Serial */
+#define DBG_DRVSAM			8	/* SCSI Architecture Model layers */
+#define DBG_DRVPARALLELATA  9	/* Parallel ATA */
+#define DBG_DRVPARALLELSCSI	10	/* Parallel SCSI */
+#define DBG_DRVSATA			11	/* Serial ATA */
+#define DBG_DRVSAS			12	/* SAS */
+#define DBG_DRVFIBRECHANNEL	13	/* FiberChannel */
+#define DBG_DRVUSB			14	/* USB */
+#define DBG_DRVBLUETOOTH	15	/* Bluetooth */
+#define DBG_DRVFIREWIRE		16	/* FireWire */
+#define DBG_DRVINFINIBAND	17	/* Infiniband */
+
+/* Backwards compatibility */
+#define	DBG_DRVPOINTING		DBG_DRVHID		/* OBSOLETE: Use DBG_DRVHID instead */
+#define DBG_DRVDISK			DBG_DRVSTORAGE	/* OBSOLETE: Use DBG_DRVSTORAGE instead */
 
 /* **** The Kernel Debug Sub Classes for the DLIL Layer (DBG_DLIL) **** */
 #define DBG_DLIL_STATIC 1       /* Static DLIL code */
@@ -179,15 +231,21 @@ __BEGIN_DECLS
 #define DBG_DKRW      2       /* reads and writes to the disk */
 #define DBG_FSVN      3       /* vnode operations (inc. locking/unlocking) */
 #define DBG_FSLOOOKUP 4       /* namei and other lookup-related operations */
+#define DBG_JOURNAL   5       /* journaling operations */
 
 /* The Kernel Debug Sub Classes for BSD */
-#define	DBG_BSD_EXCP_SC	0x0C	/* System Calls */
+#define	DBG_BSD_EXCP_SC		0x0C	/* System Calls */
 #define	DBG_BSD_AIO		0x0D	/* aio (POSIX async IO) */
-#define DBG_BSD_SC_EXTENDED_INFO 0x0E    /* System Calls, extended info */
+#define DBG_BSD_SC_EXTENDED_INFO 0x0E	/* System Calls, extended info */
+#define DBG_BSD_SC_EXTENDED_INFO2 0x0F	/* System Calls, extended info */
 
 /* The Kernel Debug Sub Classes for DBG_TRACE */
 #define DBG_TRACE_DATA      0
 #define DBG_TRACE_STRING    1
+
+/* The Kernel Debug Sub Classes for DBG_MISC */
+#define DBG_EVENT	0x10
+#define	DBG_BUFFER	0x20
 
 /* The Kernel Debug Sub Classes for DBG_DYLD */
 #define DBG_DYLD_STRING   5
@@ -198,6 +256,9 @@ __BEGIN_DECLS
 #define DKIO_ASYNC	0x04
 #define DKIO_META	0x08
 #define DKIO_PAGING	0x10
+
+/* Codes for Application Sub Classes */
+#define DBG_APP_SAMBA	128
 
 /**********************************************************************/
 
@@ -218,6 +279,18 @@ __BEGIN_DECLS
 #define DYLDDBG_CODE(SubClass,code) KDBG_CODE(DBG_DYLD, SubClass, code)
 #define QTDBG_CODE(SubClass,code) KDBG_CODE(DBG_QT, SubClass, code)
 #define APPSDBG_CODE(SubClass,code) KDBG_CODE(DBG_APPS, SubClass, code)
+#define CPUPM_CODE(code) IOKDBG_CODE(DBG_IOCPUPM, code)
+
+#define KMEM_ALLOC_CODE MACHDBG_CODE(DBG_MACH_LEAKS, 0)
+#define KMEM_ALLOC_CODE_2 MACHDBG_CODE(DBG_MACH_LEAKS, 1)
+#define KMEM_FREE_CODE MACHDBG_CODE(DBG_MACH_LEAKS, 2)
+#define KMEM_FREE_CODE_2 MACHDBG_CODE(DBG_MACH_LEAKS, 3)
+#define ZALLOC_CODE MACHDBG_CODE(DBG_MACH_LEAKS, 4)
+#define ZALLOC_CODE_2 MACHDBG_CODE(DBG_MACH_LEAKS, 5)
+#define ZFREE_CODE MACHDBG_CODE(DBG_MACH_LEAKS, 6)
+#define ZFREE_CODE_2 MACHDBG_CODE(DBG_MACH_LEAKS, 7)
+
+#define PMAP_CODE(code) MACHDBG_CODE(DBG_MACH_PMAP, code)
 
 /*   Usage:
 * kernel_debug((KDBG_CODE(DBG_NETWORK, DNET_PROTOCOL, 51) | DBG_FUNC_START), 
@@ -251,6 +324,8 @@ extern unsigned int kdebug_enable;
 #define KDEBUG_ENABLE_ENTROPY 0x2
 #define KDEBUG_ENABLE_CHUD    0x4
 
+#if	(!defined(NO_KDEBUG))
+
 #define KERNEL_DEBUG_CONSTANT(x,a,b,c,d,e)    \
 do {					\
     if (kdebug_enable)			\
@@ -263,6 +338,14 @@ do {					\
         kernel_debug1(x,a,b,c,d,e);	\
 } while(0)
 
+#else
+
+#define KERNEL_DEBUG_CONSTANT(x,a,b,c,d,e)
+#define KERNEL_DEBUG_CONSTANT1(x,a,b,c,d,e)
+
+#define __kdebug_constant_only __unused
+#endif
+
 extern void kernel_debug(unsigned int debugid, unsigned int arg1, unsigned int arg2, unsigned int arg3,  unsigned int arg4, unsigned int arg5);
 
 extern void kernel_debug1(unsigned int debugid, unsigned int arg1, unsigned int arg2, unsigned int arg3,  unsigned int arg4, unsigned int arg5);
@@ -270,33 +353,38 @@ extern void kernel_debug1(unsigned int debugid, unsigned int arg1, unsigned int 
 /*
  * LP64todo - for some reason these are problematic
  */
+struct proc;
 extern void kdbg_trace_data(struct proc *proc, long *arg_pid);
 
 extern void kdbg_trace_string(struct proc *proc, long *arg1, long *arg2, long *arg3, long *arg4);
 
-#if	KDEBUG
+#if	(KDEBUG && (!defined(NO_KDEBUG)))
 
 #define KERNEL_DEBUG(x,a,b,c,d,e)	\
 do {					\
     if (kdebug_enable)			\
-        kernel_debug(x,a,b,c,d,e);	\
+        kernel_debug((unsigned int)x, (unsigned int)a, (unsigned int)b, \
+		     (unsigned int)c, (unsigned int)d, (unsigned int)e); \
 } while(0)
 
 #define KERNEL_DEBUG1(x,a,b,c,d,e)	\
 do {					\
     if (kdebug_enable)			\
-        kernel_debug1(x,a,b,c,d,e);	\
+        kernel_debug1((unsigned int)x, (unsigned int)a, (unsigned int)b, \
+		      (unsigned int)c, (unsigned int)d, (unsigned int)e); \
 } while(0)
 
 #define __kdebug_only
 
 #else
 
-#define KERNEL_DEBUG(x,a,b,c,d,e)
-#define KERNEL_DEBUG1(x,a,b,c,d,e)
+#define KERNEL_DEBUG(x,a,b,c,d,e) do {} while (0)
+#define KERNEL_DEBUG1(x,a,b,c,d,e) do {} while (0)
 
 #define __kdebug_only __unused
 #endif
+
+void start_kern_tracing(unsigned int);
 
 #endif /* __APPLE_API_UNSTABLE */
 __END_DECLS
@@ -309,13 +397,13 @@ __END_DECLS
  */
 
 typedef struct {
-uint64_t	timestamp;
-unsigned int	arg1;
-unsigned int	arg2;
-unsigned int	arg3;
-unsigned int	arg4;
-unsigned int	arg5;       /* will hold current thread */
-unsigned int	debugid;
+	uint64_t	timestamp;
+	unsigned int	arg1;
+	unsigned int	arg2;
+	unsigned int	arg3;
+	unsigned int	arg4;
+	unsigned int	arg5;       /* will hold current thread */
+	unsigned int	debugid;
 } kd_buf;
 
 #define KDBG_TIMESTAMP_MASK 0x00ffffffffffffffULL
@@ -388,31 +476,6 @@ typedef struct
 
 /* Minimum value allowed when setting decrementer ticks */
 #define KDBG_MINRTCDEC  2500
-
-
-/* PCSAMPLES control operations */
-#define PCSAMPLE_DISABLE   1
-#define PCSAMPLE_SETNUMBUF 2
-#define PCSAMPLE_GETNUMBUF 3
-#define PCSAMPLE_SETUP	   4
-#define PCSAMPLE_REMOVE	   5
-#define	PCSAMPLE_READBUF   6
-#define	PCSAMPLE_SETREG    7
-#define PCSAMPLE_COMM      8
-
-#define MAX_PCSAMPLES    1000000     /* Maximum number of pc's in a single buffer */
-
-
-extern unsigned int pcsample_enable;
-
-typedef struct
-{
-    int npcbufs;
-    int bufsize;
-    int enable;
-	unsigned int pcsample_beg;
-	unsigned int pcsample_end;
-} pcinfo_t;
 
 #endif /* __APPLE_API_PRIVATE */
 #endif	/* PRIVATE */

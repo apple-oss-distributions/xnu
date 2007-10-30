@@ -1,23 +1,29 @@
 /*
- * Copyright (c) 2000-2004 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2006 Apple Computer, Inc. All rights reserved.
  *
- * @APPLE_LICENSE_HEADER_START@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. The rights granted to you under the License
+ * may not be used to create, or enable the creation or redistribution of,
+ * unlawful or unlicensed copies of an Apple operating system, or to
+ * circumvent, violate, or enable the circumvention or violation of, any
+ * terms of an Apple operating system software license agreement.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
- * @APPLE_LICENSE_HEADER_END@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /*
  * @OSF_COPYRIGHT@
@@ -34,6 +40,7 @@
 #include <machine/machparam.h>		/* spl definitions */
 #include <types.h>
 #include <console/video_console.h>
+#include <console/serial_protos.h>
 #include <kern/kalloc.h>
 #include <kern/thread.h>
 #include <ppc/misc_protos.h>
@@ -56,33 +63,11 @@
  */
 
 const int console_unit = 0;
-const int console_chan_default = CONSOLE_PORT;
+const uint32_t console_chan_default = CONSOLE_PORT;
 #define console_chan (console_chan_default) /* ^ cpu_number()) */
-
-#define OPS(putc, getc, nosplputc, nosplgetc) putc, getc
-
-const struct console_ops {
-	int	(*putc)(int, int, int);
-	int	(*getc)(int, int, boolean_t, boolean_t);
-} cons_ops[] = {
-#define SCC_CONS_OPS 0
-	{OPS(scc_putc, scc_getc, no_spl_scputc, no_spl_scgetc)},
-#define VC_CONS_OPS 1
-	{OPS(vcputc, vcgetc, no_spl_vcputc, no_spl_vcgetc)},
-};
-#define NCONSOPS (sizeof cons_ops / sizeof cons_ops[0])
-
-#if SERIAL_CONSOLE_DEFAULT
-#define CONS_OPS SCC_CONS_OPS
-#define CONS_NAME "com"
-#else
-#define CONS_OPS VC_CONS_OPS
-#define CONS_NAME "vc"
-#endif
 
 #define MP_SAFE_CONSOLE 1	/* Set this to 1 to allow more than 1 processor to print at once */
 #if MP_SAFE_CONSOLE
-
 struct ppcbfr {													/* Controls multiple processor output */
 	unsigned int 	pos;										/* Current position in buffer */
 	unsigned int	noprompt;									/* Set if we skip the prompt */
@@ -94,11 +79,23 @@ typedef struct ppcbfr ppcbfr_t;
 ppcbfr_t cbfr_boot_cpu;											/* Get one for boot cpu */
 volatile unsigned int cbfpend;									/* A buffer is pending output */
 volatile unsigned int sconowner=-1;								/* Mark who's actually writing */
+#endif /* MP_SAFE_CONSOLE */
 
-#endif
+struct console_ops cons_ops[] = {
+	{
+		.putc = scc_putc,
+		.getc = scc_getc,
+	},
+	{
+		.putc = vcputc,
+		.getc = vcgetc,
+	},
+};
 
+uint32_t nconsops = (sizeof cons_ops / sizeof cons_ops[0]);
 
-unsigned int cons_ops_index = CONS_OPS;
+uint32_t cons_ops_index = VC_CONS_OPS;
+
 unsigned int killprint = 0;
 unsigned int debcnputc = 0;
 extern unsigned int	mappingdeb0;
@@ -140,12 +137,12 @@ void cnputcusr(char c) {										/* Echo input character directly */
 	s=splhigh();
 	procinfo = getPerProc();
 
-	hw_atomic_add(&(procinfo->debugger_holdoff), 1);			/* Don't allow debugger entry just now (this is a HACK) */
+	(void)hw_atomic_add(&(procinfo->debugger_holdoff), 1); /* Don't allow debugger entry just now (this is a HACK) */
 
 	_cnputc( c);												/* Echo the character */
 	if(c=='\n') _cnputc( '\r');									/* Add a return if we had a new line */
 
-	hw_atomic_sub(&(procinfo->debugger_holdoff), 1);			/* Don't allow debugger entry just now (this is a HACK) */
+	(void)hw_atomic_sub(&(procinfo->debugger_holdoff), 1); /* Don't allow debugger entry just now (this is a HACK) */
 	splx(s);
 	return;
 }
@@ -175,13 +172,13 @@ cnputc(char c)
 	cpu = procinfo->cpu_number;
 	cbfr = procinfo->pp_cbfr;
 
-	hw_atomic_add(&(procinfo->debugger_holdoff), 1);			/* Don't allow debugger entry just now (this is a HACK) */
+	(void)hw_atomic_add(&(procinfo->debugger_holdoff), 1); /* Don't allow debugger entry just now (this is a HACK) */
 
 	ourbit = 1 << cpu;											/* Make a mask for just us */
 	if(debugger_cpu != -1) {									/* Are we in the debugger with empty buffers? */
 	
 		while(sconowner != cpu) {								/* Anyone but us? */
-			hw_compare_and_store(-1, cpu, (unsigned int *)&sconowner);	/* Try to mark it for us if idle */
+			hw_compare_and_store(-1, cpu, &sconowner);	/* Try to mark it for us if idle */
 		}
 	
 		_cnputc( c);											/* Yeah, just write it */
@@ -189,7 +186,7 @@ cnputc(char c)
 			_cnputc( '\r');										/* Yeah, just add a return */
 			
 		sconowner=-1;											/* Mark it idle */	
-		hw_atomic_sub(&(procinfo->debugger_holdoff), 1);			/* Don't allow debugger entry just now (this is a HACK) */
+		(void)hw_atomic_sub(&(procinfo->debugger_holdoff), 1); /* Don't allow debugger entry just now (this is a HACK) */
 		
 		splx(s);
 		return;													/* Leave... */
@@ -232,11 +229,11 @@ cnputc(char c)
 				
 		while(1) {												/* Loop until we see who's doing this */
 			oldpend=cbfpend;									/* Get the currentest pending buffer flags */
-			if(hw_compare_and_store(oldpend, oldpend|ourbit, (unsigned int *)&cbfpend))	/* Swap ours on if no change */
+			if(hw_compare_and_store(oldpend, oldpend|ourbit, &cbfpend))	/* Swap ours on if no change */
 				break;											/* Bail the loop if it worked */
 		}
 		
-		if(!hw_compare_and_store(-1, cpu, (unsigned int *)&sconowner)) {	/* See if someone else has this, and take it if not */
+		if(!hw_compare_and_store(-1, cpu, &sconowner)) {	/* See if someone else has this, and take it if not */
 			procinfo->debugger_holdoff = 0;						/* Allow debugger entry (this is a HACK) */
 			splx(s);											/* Let's take some 'rupts now */
 			return;												/* We leave here, 'cause another processor is already writing the buffers */
@@ -278,17 +275,17 @@ cnputc(char c)
 						
 					cbfr_cpu->pos=0;								/* Reset the buffer pointer */
 		
-					while(!hw_compare_and_store(cbfpend, cbfpend&~(1<<sccpu), (unsigned int *)&cbfpend));	/* Swap it off */
+					while(!hw_compare_and_store(cbfpend, cbfpend&~(1<<sccpu), &cbfpend));	/* Swap it off */
 				}
 			}
 			sconowner=-1;										/* Set the writer to idle */
 			sync();												/* Insure that everything's done */
-			if(hw_compare_and_store(0, 0, (unsigned int *)&cbfpend)) break;	/* If there are no new buffers, we are done... */
-			if(!hw_compare_and_store(-1, cpu, (unsigned int *)&sconowner)) break;	/* If this isn't idle anymore, we're done */
+			if(hw_compare_and_store(0, 0, &cbfpend)) break;	/* If there are no new buffers, we are done... */
+			if(!hw_compare_and_store(-1, cpu, &sconowner)) break;	/* If this isn't idle anymore, we're done */
 	
 		}
 	}
-	hw_atomic_sub(&(procinfo->debugger_holdoff), 1);					/* Don't allow debugger entry just now (this is a HACK) */
+	(void)hw_atomic_sub(&(procinfo->debugger_holdoff), 1); /* Don't allow debugger entry just now (this is a HACK) */
 	splx(s);													/* Let's take some 'rupts now */
 
 #else  /* MP_SAFE_CONSOLE */
@@ -300,54 +297,17 @@ cnputc(char c)
 }
 
 int
-cngetc()
+cngetc(void)
 {
 	return cons_ops[cons_ops_index].getc(console_unit, console_chan,
 					     TRUE, FALSE);
 }
 
 int
-cnmaygetc()
+cnmaygetc(void)
 {
 	return cons_ops[cons_ops_index].getc(console_unit, console_chan,
 					     FALSE, FALSE);
-}
-
-boolean_t console_is_serial()
-{
-	return cons_ops_index == SCC_CONS_OPS;
-}
-
-int
-switch_to_video_console()
-{
-	int old_cons_ops = cons_ops_index;
-	cons_ops_index = VC_CONS_OPS;
-	return old_cons_ops;
-}
-
-int
-switch_to_serial_console()
-{
-	int old_cons_ops = cons_ops_index;
-	cons_ops_index = SCC_CONS_OPS;
-	return old_cons_ops;
-}
-
-/* The switch_to_{video,serial,kgdb}_console functions return a cookie that
-   can be used to restore the console to whatever it was before, in the
-   same way that splwhatever() and splx() work.  */
-void
-switch_to_old_console(int old_console)
-{
-	static boolean_t squawked;
-	unsigned int ops = old_console;
-
-	if (ops >= NCONSOPS && !squawked) {
-		squawked = TRUE;
-		printf("switch_to_old_console: unknown ops %d\n", ops);
-	} else
-		cons_ops_index = ops;
 }
 
 

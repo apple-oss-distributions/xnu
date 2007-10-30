@@ -1,23 +1,29 @@
 /*
  * Copyright (c) 2000 Apple Computer, Inc. All rights reserved.
  *
- * @APPLE_LICENSE_HEADER_START@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. The rights granted to you under the License
+ * may not be used to create, or enable the creation or redistribution of,
+ * unlawful or unlicensed copies of an Apple operating system, or to
+ * circumvent, violate, or enable the circumvention or violation of, any
+ * terms of an Apple operating system software license agreement.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
- * @APPLE_LICENSE_HEADER_END@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /*
  *	Copyright (c) 1990, 1995-1998 Apple Computer, Inc.
@@ -59,6 +65,8 @@
 
 int adsp_window = 1;
 
+int attachData(CCBPtr, gbuf_t *mp);
+
 /*
  * CalcRecvWdw
  *
@@ -75,7 +83,7 @@ int CalcRecvWdw(sp)		/* (CCBPtr sp) */
     bytes = calcRecvQ(sp);
     bytes = sp->rbuflen - bytes; /* get what is left */
 
-    if (bytes <= 16) {		/* %%% this should be zero */
+    if ((bytes <= 16)) {		/* %%% this should be zero */
 	sp->rbufFull = 1;	/* Save flag that our recv buf is full */
 	return 0;
     }
@@ -83,6 +91,7 @@ int CalcRecvWdw(sp)		/* (CCBPtr sp) */
 	return ((bytes+bytes+bytes) >> 2) + 1; /* %%% */
 }
 
+int
 calcRecvQ(sp)
     CCBPtr sp;
 {
@@ -98,13 +107,13 @@ calcRecvQ(sp)
     register gbuf_t *mb;
 
     if (sp->rData) {		/* There is data in buffer */
-	if (mb = sp->rbuf_mb) {
+	if ((mb = sp->rbuf_mb)) {
 	    do {
 		bytes += gbuf_msgsize(mb);
 		mb = gbuf_next(mb);
 	    } while (mb);
 	}
-	if (mb = sp->crbuf_mb)
+	if ((mb = sp->crbuf_mb))
 	    bytes += gbuf_msgsize(mb);
     }
 #endif
@@ -129,7 +138,6 @@ void CheckSend(sp)		/* (CCBPtr sp) */
 {
     int i;
     int	attnMsg;		/* True if attention message */
-    int	s;
     register gbuf_t *mp;	/* send message block */
 #ifdef notdef
     register gbuf_t *tmp;
@@ -139,7 +147,7 @@ void CheckSend(sp)		/* (CCBPtr sp) */
     int use_attention_code;
     int len;			/* length used in allocd mblk */
     int datalen;		/* amount of data attached to mblk */
-    gbuf_t *mprev, *mlist = 0;
+    gbuf_t *mprev = 0, *mlist = 0;
 
 top:
 
@@ -155,7 +163,6 @@ top:
 		gbuf_freel(mlist);
 	return;		/* can't get buffers... do nothing! */
     }
-    ATDISABLE(s, sp->lock);
     sp->callSend = 0;		/* Clear flag */
     use_attention_code = 0;
     len = 0;
@@ -176,24 +183,24 @@ top:
 
 	    /* point past ADSP header (no attention) */
 	    dp = ((char *) gbuf_wptr(mp)) + ADSP_FRAME_LEN; 
-	    UAL_ASSIGN(sp->f.pktFirstByteSeq, netdw(sp->firstRtmtSeq));
+	    UAL_ASSIGN_HTON(sp->f.pktFirstByteSeq, sp->firstRtmtSeq);
 	    
-	    UAS_ASSIGN(sp->of.version, netw(0x0100)); /* Fill in open connection parms */
-	    UAS_ASSIGN(sp->of.dstCID, sp->remCID);	/* Destination CID */
-	    UAL_ASSIGN(sp->of.pktAttnRecvSeq, netdw(sp->attnRecvSeq));
+	    UAS_ASSIGN_HTON(sp->of.version, netw(0x0100)); /* Fill in open connection parms */
+	    UAS_ASSIGN_HTON(sp->of.dstCID, sp->remCID);	/* Destination CID */
+	    UAL_ASSIGN_HTON(sp->of.pktAttnRecvSeq, sp->attnRecvSeq);
 	    bcopy((caddr_t) &sp->of, (caddr_t) dp, ADSP_OPEN_FRAME_LEN);
 	    len += ADSP_OPEN_FRAME_LEN;
 
 	    if (i & B_CTL_OREQ) {
-		UAS_ASSIGN(sp->f.CID, sp->locCID);
+		UAS_ASSIGN_HTON(sp->f.CID, sp->locCID);
 		mask = B_CTL_OREQ;
 		sp->f.descriptor = ADSP_CONTROL_BIT | ADSP_CTL_OREQ;
 	    } else if (i & B_CTL_OACK) {
-		UAS_ASSIGN(sp->f.CID, sp->locCID);
+		UAS_ASSIGN_HTON(sp->f.CID, sp->locCID);
 		mask = B_CTL_OACK;
 		sp->f.descriptor = ADSP_CONTROL_BIT | ADSP_CTL_OACK;
 	    } else if (i & B_CTL_OREQACK) {
-		UAS_ASSIGN(sp->f.CID, sp->locCID);
+		UAS_ASSIGN_HTON(sp->f.CID, sp->locCID);
 		mask = B_CTL_OREQACK;
 		sp->f.descriptor = ADSP_CONTROL_BIT | ADSP_CTL_OREQACK;
 	    } else 		/* Deny */
@@ -219,7 +226,7 @@ top:
 	    }
 	} else {
 	    /* seq # of next byte to send */
-	    UAL_ASSIGN(sp->f.pktFirstByteSeq, netdw(sp->sendSeq));	
+	    UAL_ASSIGN_HTON(sp->f.pktFirstByteSeq, sp->sendSeq);	
 			
 	    if (i & B_CTL_CLOSE) {
 		sp->state = sClosed; /* Now we're closed */
@@ -293,12 +300,12 @@ top:
 					    * in a row. */
     {
 	attnMsg = 0;
-	if (datalen = attachData(sp, mp)) /* attach data to mp */
+	if ((datalen = attachData(sp, mp))) /* attach data to mp */
 	    goto sendit;	/* if successful, sendit */
     }
 
     if (sp->sendDataAck) {
-	UAL_ASSIGN(sp->f.pktFirstByteSeq, netdw(sp->sendSeq)); /* seq # of next byte */
+	UAL_ASSIGN_HTON(sp->f.pktFirstByteSeq, sp->sendSeq); /* seq # of next byte */
 	attnMsg = 0;
 	sp->f.descriptor = ADSP_CONTROL_BIT;
 	goto sendit;
@@ -309,7 +316,6 @@ top:
      */
     if (mp)
 	gbuf_freem(mp);
-    ATENABLE(s, sp->lock);
     if (mlist)
 	adsp_sendddp(sp, mlist, 0, &sp->remoteAddress, DDP_ADSP);
     return;
@@ -317,13 +323,13 @@ top:
 sendit:
 
     if (attnMsg) {
-	UAL_ASSIGN(sp->f.pktFirstByteSeq, netdw(sp->attnSendSeq));
-	UAL_ASSIGN(sp->f.pktNextRecvSeq, netdw(sp->attnRecvSeq));
+	UAL_ASSIGN_HTON(sp->f.pktFirstByteSeq, sp->attnSendSeq);
+	UAL_ASSIGN_HTON(sp->f.pktNextRecvSeq, sp->attnRecvSeq);
 	UAS_ASSIGN(sp->f.pktRecvWdw, 0);	/* Always zero in attn pkt */
     } else {
 	sp->sendDataAck = 0;
-	UAL_ASSIGN(sp->f.pktNextRecvSeq, netdw(sp->recvSeq));
-	UAS_ASSIGN(sp->f.pktRecvWdw, netw(CalcRecvWdw(sp)));
+	UAL_ASSIGN_HTON(sp->f.pktNextRecvSeq, sp->recvSeq);
+	UAS_ASSIGN_HTON(sp->f.pktRecvWdw, CalcRecvWdw(sp));
     }
     if (use_attention_code) {
 	bcopy((caddr_t) &sp->f, (caddr_t) gbuf_wptr(mp), ADSP_FRAME_LEN + 2);
@@ -341,12 +347,10 @@ sendit:
 
     if (sp->state == sClosed) {	/* must have sent a close advice */
 				/* send header + data */
-	ATENABLE(s, sp->lock);
 	adsp_sendddp(sp, mlist, 0, &sp->remoteAddress, DDP_ADSP);
 	DoClose(sp, 0, -1);	/* complete close! */
 	return;
     }
-    ATENABLE(s, sp->lock);
     if (sp->state == sClosing) /* See if we were waiting on this write */
 	CheckOkToClose(sp);
     goto top;
@@ -374,6 +378,8 @@ void completepb(sp, pb)
 	gbuf_freem(pb->mp);
 }
 
+
+int
 attachData(sp, mp)
     register CCBPtr sp;
     register gbuf_t *mp;
@@ -401,11 +407,11 @@ attachData(sp, mp)
      * The easiest fix to this timing dilemma seems to be to reset 
      * sendSeq to first Rtmt Seq if we're sending the first packet.
      */
-    UAL_ASSIGN(sp->f.pktFirstByteSeq, netdw(sp->sendSeq));
+    UAL_ASSIGN_HTON(sp->f.pktFirstByteSeq, sp->sendSeq);
 		
-    if (smp = sp->sbuf_mb) /* Get oldest header */
+    if ((smp = sp->sbuf_mb)) /* Get oldest header */
 	eom = 1;
-    else if (smp = sp->csbuf_mb)
+    else if ((smp = sp->csbuf_mb))
 	eom = 0;
 
     if (smp == 0) {		/* this shouldn't happen... */

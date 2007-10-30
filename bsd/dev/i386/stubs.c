@@ -1,23 +1,29 @@
 /*
- * Copyright (c) 2000 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2006 Apple Computer, Inc. All rights reserved.
  *
- * @APPLE_LICENSE_HEADER_START@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. The rights granted to you under the License
+ * may not be used to create, or enable the creation or redistribution of,
+ * unlawful or unlicensed copies of an Apple operating system, or to
+ * circumvent, violate, or enable the circumvention or violation of, any
+ * terms of an Apple operating system software license agreement.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
- * @APPLE_LICENSE_HEADER_END@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /*
  * Copyright (c) 1997 by Apple Computer, Inc., all rights reserved
@@ -37,12 +43,12 @@
 #include <kern/task.h>
 #include <kern/thread.h>
 #include <vm/vm_map.h>
+#include <machine/machine_routines.h>
 
 /* XXX should be elsewhere (cpeak) */
-extern int	set_bsduthreadargs(thread_t, void *, void *);
 extern void	*get_bsduthreadarg(thread_t);
 extern int	*get_bsduthreadrval(thread_t);
-extern int	*get_bsduthreadlowpridelay(thread_t);
+extern void	*find_user_regs(thread_t);
 
 /* 
  * copy a null terminated string from the kernel address space into
@@ -111,56 +117,27 @@ copywithin(void *src, void *dst, size_t count)
 	return 0;
 }
 
-int
-set_bsduthreadargs(thread_t th, void * pcb, __unused void *ignored_arg)
-{
-	struct uthread * ut;
-	struct proc *p = current_proc();
-
-	ut = get_bsdthread_info(th);
-	ut->uu_ar0 = (int *)pcb;
-
-	/*
-	 * Delayed binding of thread credential to process credential.
-	 *
-	 * XXX This doesn't really belong here, but the i386 code has a
-	 * XXX number of seemingly gratuitous structural differences that
-	 * XXX make this the most appropriate place to do the work.
-	 */
-	if (ut->uu_ucred != p->p_ucred &&
-	    (ut->uu_flag & UT_SETUID) == 0) {
-		kauth_cred_t old = ut->uu_ucred;
-		proc_lock(p);
-		ut->uu_ucred = p->p_ucred;
-		kauth_cred_ref(ut->uu_ucred);
-		proc_unlock(p);
-		if (old != NOCRED)
-			kauth_cred_rele(old);
-	}
-
-	return(1);
-}
-
 void *
 get_bsduthreadarg(thread_t th)
 {
+        void	*arg_ptr;
 struct uthread *ut;
+  
 	ut = get_bsdthread_info(th);
-	return((void *)(ut->uu_arg));
+
+	if (ml_thread_is64bit(th) == TRUE)
+	        arg_ptr = (void *)saved_state64(find_user_regs(th));
+	else
+		arg_ptr = (void *)(ut->uu_arg);
+
+	return(arg_ptr);
 }
 
 int *
 get_bsduthreadrval(thread_t th)
 {
 struct uthread *ut;
+
 	ut = get_bsdthread_info(th);
 	return(&ut->uu_rval[0]);
-}
-
-int *
-get_bsduthreadlowpridelay(thread_t th)
-{
-struct uthread *ut;
-	ut = get_bsdthread_info(th);
-	return(&ut->uu_lowpri_delay);
 }

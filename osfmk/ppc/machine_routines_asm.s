@@ -1,23 +1,29 @@
 /*
- * Copyright (c) 2000 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2007 Apple Inc. All rights reserved.
  *
- * @APPLE_LICENSE_HEADER_START@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. The rights granted to you under the License
+ * may not be used to create, or enable the creation or redistribution of,
+ * unlawful or unlicensed copies of an Apple operating system, or to
+ * circumvent, violate, or enable the circumvention or violation of, any
+ * terms of an Apple operating system software license agreement.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
- * @APPLE_LICENSE_HEADER_END@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 #include <ppc/asm.h>
 #include <ppc/proc_reg.h>
@@ -756,34 +762,72 @@ LEXT(timer_grab)
 
 ;			Force a line boundry here
 			.align  5
-			.globl  EXT(timer_event)
+			.globl  EXT(thread_timer_event)
  
-LEXT(timer_event)
+LEXT(thread_timer_event)
 			mfsprg	r10,1							; Get the current activation
 			lwz		r10,ACT_PER_PROC(r10)			; Get the per_proc block
 			addi	r10,r10,PP_PROCESSOR
-			lwz		r11,CURRENT_TIMER(r10)
+			lwz		r11,THREAD_TIMER(r10)
 
 			lwz		r9,TIMER_LOW(r11)
-			lwz		r2,TIMER_TSTAMP(r11)
-			add		r0,r9,r3
-			subf	r5,r2,r0
-			cmplw	r5,r9
-			bge++	0f
+			lwz		r7,TIMER_TSTAMP(r11)
+			lwz		r8,TIMER_TSTAMP+4(r11)
+			subfc	r8,r8,r4
+			subfe	r7,r7,r3
+			addc	r8,r8,r9
+			addze.	r7,r7
+			beq++	0f
 
 			lwz		r6,TIMER_HIGH(r11)
-			addi	r6,r6,1
-			stw		r6,TIMER_HIGHCHK(r11)
+			add		r7,r7,r6
+			stw		r7,TIMER_HIGHCHK(r11)
 			eieio
-			stw		r5,TIMER_LOW(r11)
+			stw		r8,TIMER_LOW(r11)
 			eieio
-	 		stw		r6,TIMER_HIGH(r11)
+	 		stw		r7,TIMER_HIGH(r11)
 			b		1f
 
-0:			stw		r5,TIMER_LOW(r11)
+0:			stw		r8,TIMER_LOW(r11)
 
-1:			stw		r4,CURRENT_TIMER(r10)
-			stw		r3,TIMER_TSTAMP(r4)
+1:			stw		r5,THREAD_TIMER(r10)
+			stw		r3,TIMER_TSTAMP(r5)
+			stw		r4,TIMER_TSTAMP+4(r5)
+			blr
+
+;			Force a line boundry here
+			.align  5
+			.globl  EXT(state_event)
+ 
+LEXT(state_event)
+			mfsprg	r10,1							; Get the current activation
+			lwz		r10,ACT_PER_PROC(r10)			; Get the per_proc block
+			addi	r10,r10,PP_PROCESSOR
+			lwz		r11,CURRENT_STATE(r10)
+
+			lwz		r9,TIMER_LOW(r11)
+			lwz		r7,TIMER_TSTAMP(r11)
+			lwz		r8,TIMER_TSTAMP+4(r11)
+			subfc	r8,r8,r4
+			subfe	r7,r7,r3
+			addc	r8,r8,r9
+			addze.	r7,r7
+			beq++	0f
+
+			lwz		r6,TIMER_HIGH(r11)
+			add		r7,r7,r6
+			stw		r7,TIMER_HIGHCHK(r11)
+			eieio
+			stw		r8,TIMER_LOW(r11)
+			eieio
+	 		stw		r7,TIMER_HIGH(r11)
+			b		1f
+
+0:			stw		r8,TIMER_LOW(r11)
+
+1:			stw		r5,CURRENT_STATE(r10)
+			stw		r3,TIMER_TSTAMP(r5)
+			stw		r4,TIMER_TSTAMP+4(r5)
 			blr
 
 /*  Set machine into idle power-saving mode. 
@@ -989,10 +1033,8 @@ LEXT(machine_idle_ret)
 
 ;			Force a line boundry here
 			.align	5
-			.globl	EXT(ml_ppc_sleep)
-LEXT(ml_ppc_sleep)
-
 			.globl	EXT(ml_ppc_do_sleep)
+
 LEXT(ml_ppc_do_sleep)
 
 #if 0
@@ -1971,19 +2013,6 @@ LEXT(current_act)
 
 			mfsprg	r3,1
 			blr
-
-			.align	5
-			.globl	EXT(clock_get_uptime)
-LEXT(clock_get_uptime)
-1:			mftbu	r9
-			mftb	r0
-			mftbu	r11
-			cmpw	r11,r9
-			bne--	1b
-			stw		r0,4(r3)
-			stw		r9,0(r3)
-			blr
-
 		
 			.align	5
 			.globl	EXT(mach_absolute_time)
@@ -2026,8 +2055,6 @@ LEXT(ml_set_processor_speed_powertune)
 
 			mfsprg	r31,1									; Get the current activation
 			lwz		r31,ACT_PER_PROC(r31)					; Get the per_proc block
-
-			lwz		r30, pfPowerModes(r31)					; Get the supported power modes
 
 			rlwinm	r28, r3, 31-dnap, dnap, dnap			; Shift the 1 bit to the dnap+32 bit
 			rlwinm	r3, r3, 2, 29, 29						; Shift the 1 to a 4 and mask
@@ -2137,7 +2164,11 @@ spsDPLL2:
 
 
 /*
-**      ml_set_processor_speed_dfs()
+**      ml_set_processor_speed_dfs(divideby)
+**			divideby == 0 then divide by 1 (full speed)
+**			divideby == 1 then divide by 2 (half speed)
+**			divideby == 2 then divide by 4 (quarter speed)
+**			divideby == 3 then divide by 4 (quarter speed) - preferred
 **
 */
 ;			Force a line boundry here
@@ -2145,19 +2176,13 @@ spsDPLL2:
 			.globl	EXT(ml_set_processor_speed_dfs)
 
 LEXT(ml_set_processor_speed_dfs)
-			mfsprg	r5,1									; Get the current activation
-			lwz		r5,ACT_PER_PROC(r5)						; Get the per_proc block
 
-			cmplwi	r3, 0									; full speed?
-			mfspr	r3, hid1								; Get the current HID1
-			rlwinm	r3, r3, 0, hid1dfs1+1, hid1dfs0-1		; assume full speed, clear dfs bits
-			beq		spsDFS
-			oris	r3, r3, hi16(hid1dfs1m)					; slow, set half speed dfs1 bit
-
-spsDFS:
-			stw		r3, pfHID1(r5)							; Save the new hid1 value
+			mfspr	r4,hid1									; Get the current HID1
+			mfsprg	r5,0									; Get the per_proc_info
+			rlwimi	r4,r3,31-hid1dfs1,hid1dfs0,hid1dfs1		; Stick the new divider bits in
+			stw		r4,pfHID1(r5)							; Save the new hid1 value
 			sync
-			mtspr	hid1, r3								; Set the new HID1
+			mtspr	hid1,r4									; Set the new HID1
 			sync
 			isync
 			blr
@@ -2272,3 +2297,49 @@ mhrcalc:	mftb	r8									; Get time now
 			sub		r3,r2,r9							; How many ticks?
 			mtmsrd	r12,1								; Flip EE on if needed
 			blr											; Leave...
+
+
+;
+;			int setPop(time)
+;	
+;			Calculates the number of ticks to the supplied event and
+;			sets the decrementer.  Never set the time for less that the
+;			minimum, which is 10, nor more than maxDec, which is usually 0x7FFFFFFF
+;			and never more than that but can be set by root.
+;
+;
+
+			.align	7
+			.globl	EXT(setPop)
+
+#define kMin	10
+
+LEXT(setPop)
+
+spOver:		mftbu	r8									; Get upper time
+			addic	r2,r4,-kMin							; Subtract minimum from target
+			mftb	r9									; Get lower
+			addme	r11,r3								; Do you have any bits I could borrow?
+			mftbu	r10									; Get upper again
+			subfe	r0,r0,r0							; Get -1 if we went negative 0 otherwise
+			subc	r7,r2,r9							; Subtract bottom and get carry
+			cmplw	r8,r10								; Did timebase upper tick?
+			subfe	r6,r8,r11							; Get the upper difference accounting for borrow
+			lwz		r12,maxDec(0)						; Get the maximum decrementer size 
+			addme	r0,r0								; Get -1 or -2 if anything negative, 0 otherwise
+			addic	r2,r6,-1							; Set carry if diff < 2**32
+			srawi	r0,r0,1								; Make all foxes
+			subi	r10,r12,kMin						; Adjust maximum for minimum adjust
+			andc	r7,r7,r0							; Pin time at 0 if under minimum
+			subfe	r2,r2,r2							; 0 if diff > 2**32, -1 otherwise		
+			sub		r7,r7,r10							; Negative if duration is less than (max - min)
+			or		r2,r2,r0							; If the duration is negative, it is not too big
+			srawi	r0,r7,31							; -1 if duration is too small
+			and		r7,r7,r2							; Clear duration if high part too big
+			and		r7,r7,r0							; Clear duration if low part too big
+			bne--	spOver								; Timer ticked...
+			add		r3,r7,r12							; Add back the max for total				
+			mtdec	r3									; Set the decrementer
+			blr											; Leave...
+
+

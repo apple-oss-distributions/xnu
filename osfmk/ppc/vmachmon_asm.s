@@ -1,23 +1,29 @@
 /*
  * Copyright (c) 2000-2005 Apple Computer, Inc. All rights reserved.
  *
- * @APPLE_LICENSE_HEADER_START@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. The rights granted to you under the License
+ * may not be used to create, or enable the creation or redistribution of,
+ * unlawful or unlicensed copies of an Apple operating system, or to
+ * circumvent, violate, or enable the circumvention or violation of, any
+ * terms of an Apple operating system software license agreement.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
- * @APPLE_LICENSE_HEADER_END@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 #include <assym.s>
 #include <debug.h>
@@ -1223,7 +1229,7 @@ swap64:		lwz		r22,vmmXAFlgs(r27)			; Get the eXtended Architecture flags
 			lwz		r15,vmmppcpc(r5)			; First line of context	
 			lis		r22,hi16(MSR_IMPORT_BITS)	; Get the MSR bits that are controllable by user
 			lwz		r23,vmmppcmsr(r5)				
-			ori		r22,r25,lo16(MSR_IMPORT_BITS)	; Get the rest of the MSR bits that are controllable by user
+			ori		r22,r22,lo16(MSR_IMPORT_BITS)	; Get the rest of the MSR bits that are controllable by user
 			lwz		r17,vmmppcr0(r5)				
 			lwz		r18,vmmppcr1(r5)		
 			and		r23,r23,r22					; Keep only the controllable bits		
@@ -1259,7 +1265,7 @@ sw64x1:		ld		r15,vmmppcXpc(r5)			; First line of context
 			lis		r22,hi16(MSR_IMPORT_BITS)	; Get the MSR bits that are controllable by user (we will also allow 64-bit here)
 			sldi	r0,r0,63					; Get 64-bit bit
 			ld		r23,vmmppcXmsr(r5)				
-			ori		r22,r25,lo16(MSR_IMPORT_BITS)	; Get the rest of the MSR bits that are controllable by user
+			ori		r22,r22,lo16(MSR_IMPORT_BITS)	; Get the rest of the MSR bits that are controllable by user
 			ld		r17,vmmppcXr0(r5)		
 			or		r22,r22,r0					; Add the 64-bit bit		
 			ld		r18,vmmppcXr1(r5)		

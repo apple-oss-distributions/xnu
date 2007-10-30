@@ -1,23 +1,29 @@
 /*
- * Copyright (c) 2000 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2006 Apple Computer, Inc. All rights reserved.
  *
- * @APPLE_LICENSE_HEADER_START@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. The rights granted to you under the License
+ * may not be used to create, or enable the creation or redistribution of,
+ * unlawful or unlicensed copies of an Apple operating system, or to
+ * circumvent, violate, or enable the circumvention or violation of, any
+ * terms of an Apple operating system software license agreement.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
- * @APPLE_LICENSE_HEADER_END@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /* OSMetaClass.cpp created by gvdl on Fri 1998-11-17 */
 
@@ -37,6 +43,9 @@
 #include <libkern/c++/OSSerialize.h>
 #include <libkern/c++/OSLib.h>
 #include <libkern/OSAtomic.h>
+
+#include <IOKit/pwr_mgt/RootDomain.h>
+#include <IOKit/IOMessage.h>
 
 __BEGIN_DECLS
 
@@ -70,7 +79,7 @@ static const int kClassCapacityIncrement = 40;
 static const int kKModCapacityIncrement = 10;
 static OSDictionary *sAllClassesDict, *sKModClassesDict, *sSortedByClassesDict;
 
-static mutex_t *loadLock;
+static mutex_t *loadLock = 0;
 static struct StalledData {
     const char *kmodName;
     OSReturn result;
@@ -80,6 +89,8 @@ static struct StalledData {
 } *sStalled;
 
 static unsigned int sConsiderUnloadDelay = 60;	/* secs */
+static bool unloadsEnabled = true;  // set to false when system going to sleep
+static thread_call_t unloadCallout = 0;
 
 static const char OSMetaClassBasePanicMsg[] =
     "OSMetaClassBase::_RESERVEDOSMetaClassBase%d called\n";
@@ -272,7 +283,7 @@ OSMetaClass::OSMetaClass(const char *inClassName,
 
 	    sStalled->capacity += kKModCapacityIncrement;
 	    memmove(sStalled->classes, oldStalled, oldSize);
-	    kfree((vm_offset_t)oldStalled, oldSize);
+	    kfree(oldStalled, oldSize);
 	    ACCUMSIZE(newSize - oldSize);
 	}
 
@@ -323,13 +334,13 @@ OSMetaClass::~OSMetaClass()
     }
 }
 
-void *OSMetaClass::operator new(size_t size) { return 0; }
+void *OSMetaClass::operator new(__unused size_t size) { return 0; }
 void OSMetaClass::retain() const { }
 void OSMetaClass::release() const { }
-void OSMetaClass::release(int when) const { }
-void OSMetaClass::taggedRetain(const void *tag) const { }
-void OSMetaClass::taggedRelease(const void *tag) const { }
-void OSMetaClass::taggedRelease(const void *tag, const int when) const { }
+void OSMetaClass::release(__unused int when) const { }
+void OSMetaClass::taggedRetain(__unused const void *tag) const { }
+void OSMetaClass::taggedRelease(__unused const void *tag) const { }
+void OSMetaClass::taggedRelease(__unused const void *tag, __unused const int when) const { }
 int  OSMetaClass::getRetainCount() const { return 0; }
 
 const char *OSMetaClass::getClassName() const
@@ -356,7 +367,7 @@ void *OSMetaClass::preModLoad(const char *kmodName)
 	sStalled->classes  = (OSMetaClass **)
 			kalloc(kKModCapacityIncrement * sizeof(OSMetaClass *));
 	if (!sStalled->classes) {
-	    kfree((vm_offset_t) sStalled, sizeof(*sStalled));
+	    kfree(sStalled, sizeof(*sStalled));
 	    return 0;
 	}
 	ACCUMSIZE((kKModCapacityIncrement * sizeof(OSMetaClass *)) + sizeof(*sStalled));
@@ -408,7 +419,7 @@ OSReturn OSMetaClass::postModLoad(void *loadHandle)
     case kCompletedBootstrap:
     {
         unsigned int i;
-        myname = OSSymbol::withCStringNoCopy(sStalled->kmodName);
+        myname = (OSSymbol *)OSSymbol::withCStringNoCopy(sStalled->kmodName);
 
 	if (!sStalled->count)
 	    break;	// Nothing to do so just get out
@@ -465,9 +476,9 @@ OSReturn OSMetaClass::postModLoad(void *loadHandle)
     if (sStalled) {
 	ACCUMSIZE(-(sStalled->capacity * sizeof(OSMetaClass *)
 		     + sizeof(*sStalled)));
-	kfree((vm_offset_t) sStalled->classes,
+	kfree(sStalled->classes,
 	      sStalled->capacity * sizeof(OSMetaClass *));
-	kfree((vm_offset_t) sStalled, sizeof(*sStalled));
+	kfree(sStalled, sizeof(*sStalled));
 	sStalled = 0;
     }
 
@@ -558,10 +569,38 @@ void OSMetaClass::reportModInstances(const char *kmodName)
     iter->release();
 }
 
+
+extern "C" {
+
+IOReturn OSMetaClassSystemSleepOrWake(UInt32 messageType)
+{
+    mutex_lock(loadLock);
+
+   /* If the system is going to sleep, cancel the reaper thread timer
+    * and mark unloads disabled in case it just fired but hasn't
+    * taken the lock yet. If we are coming back from sleep, just
+    * set unloads enabled; IOService's normal operation will cause
+    * unloads to be considered soon enough.
+    */
+    if (messageType == kIOMessageSystemWillSleep) {
+        if (unloadCallout) {
+            thread_call_cancel(unloadCallout);
+        }
+        unloadsEnabled = false;
+    } else if (messageType == kIOMessageSystemHasPoweredOn) {
+        unloadsEnabled = true;
+    }
+    mutex_unlock(loadLock);
+
+    return kIOReturnSuccess;
+}
+
+};
+
 extern "C" kern_return_t kmod_unload_cache(void);
 
-static void _OSMetaClassConsiderUnloads(thread_call_param_t p0,
-                                        thread_call_param_t p1)
+static void _OSMetaClassConsiderUnloads(__unused thread_call_param_t p0,
+                                        __unused thread_call_param_t p1)
 {
     OSSet *kmodClasses;
     OSSymbol *kmodName;
@@ -574,6 +613,11 @@ static void _OSMetaClassConsiderUnloads(thread_call_param_t p0,
 
     mutex_lock(loadLock);
 
+    if (!unloadsEnabled) {
+        mutex_unlock(loadLock);
+        return;
+    }
+
     do {
 
 	kmods = OSCollectionIterator::withCollection(sKModClassesDict);
@@ -584,7 +628,7 @@ static void _OSMetaClassConsiderUnloads(thread_call_param_t p0,
         while ( (kmodName = (OSSymbol *) kmods->getNextObject()) ) {
 
             if (ki) {
-                kfree((vm_offset_t) ki, sizeof(kmod_info_t));
+                kfree(ki, sizeof(kmod_info_t));
                 ki = 0;
             }
 
@@ -626,7 +670,6 @@ static void _OSMetaClassConsiderUnloads(thread_call_param_t p0,
 
 void OSMetaClass::considerUnloads()
 {
-    static thread_call_t unloadCallout;
     AbsoluteTime when;
 
     mutex_lock(loadLock);
@@ -780,7 +823,7 @@ const OSMetaClass *OSMetaClass::getSuperClass() const
 
 const OSSymbol *OSMetaClass::getKmodName() const
 {	
-    return sSortedByClassesDict->getObject((const OSSymbol *)this);
+    return (const OSSymbol *)sSortedByClassesDict->getObject((OSSymbol *)this);
 }
 
 unsigned int OSMetaClass::getInstanceCount() const
@@ -818,7 +861,7 @@ OSDictionary * OSMetaClass::getClassDictionary()
     return 0;
 }
 
-bool OSMetaClass::serialize(OSSerialize *s) const
+bool OSMetaClass::serialize(__unused OSSerialize *s) const
 {
     panic("OSMetaClass::serialize(): Obsoleted\n");
     return false;

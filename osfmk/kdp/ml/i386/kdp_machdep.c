@@ -1,25 +1,32 @@
 /*
- * Copyright (c) 2000 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2006 Apple Computer, Inc. All rights reserved.
  *
- * @APPLE_LICENSE_HEADER_START@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. The rights granted to you under the License
+ * may not be used to create, or enable the creation or redistribution of,
+ * unlawful or unlicensed copies of an Apple operating system, or to
+ * circumvent, violate, or enable the circumvention or violation of, any
+ * terms of an Apple operating system software license agreement.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
- * @APPLE_LICENSE_HEADER_END@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
  
+#include <mach_kdp.h>
 #include <mach/mach_types.h>
 #include <mach/machine.h>
 #include <mach/exception_types.h>
@@ -27,6 +34,17 @@
 #include <i386/trap.h>
 #include <i386/mp.h>
 #include <kdp/kdp_internal.h>
+#include <kdp/kdp_callout.h>
+#include <mach-o/loader.h>
+#include <mach-o/nlist.h>
+#include <IOKit/IOPlatformExpert.h> /* for PE_halt_restart */
+#include <kern/machine.h> /* for halt_all_cpus */
+
+#include <kern/thread.h>
+#include <i386/thread.h>
+#include <vm/vm_map.h>
+#include <i386/pmap.h>
+#include <kern/kalloc.h>
 
 #define KDP_TEST_HARNESS 0
 #if KDP_TEST_HARNESS
@@ -35,7 +53,8 @@
 #define dprintf(x)
 #endif
 
-extern void	kdreboot(void);
+extern cpu_type_t cpuid_cputype(void);
+extern cpu_subtype_t cpuid_cpusubtype(void);
 
 void		print_saved_state(void *);
 void		kdp_call(void);
@@ -44,12 +63,19 @@ boolean_t	kdp_call_kdb(void);
 void		kdp_getstate(i386_thread_state_t *);
 void		kdp_setstate(i386_thread_state_t *);
 void		kdp_print_phys(int);
-void		kdp_i386_backtrace(void *, int);
-void		kdp_i386_trap(
-			unsigned int,
-			struct i386_saved_state	*,
-			kern_return_t,
-			vm_offset_t);
+
+int
+machine_trace_thread(thread_t thread, char *tracepos, char *tracebound, int nframes, boolean_t user_p);
+
+int
+machine_trace_thread64(thread_t thread, char *tracepos, char *tracebound, int nframes, boolean_t user_p);
+
+unsigned
+machine_read64(addr64_t srcaddr, caddr_t dstaddr, uint32_t len);
+
+extern unsigned kdp_vm_read(caddr_t src, caddr_t dst, unsigned len);
+
+static void	kdp_callouts(kdp_event_t event);
 
 void
 kdp_exception(
@@ -110,13 +136,13 @@ kdp_exception_ack(
 
 void
 kdp_getstate(
-    i386_thread_state_t		*state
+    x86_thread_state32_t	*state
 )
 {
-    static i386_thread_state_t	null_state;
-    struct i386_saved_state	*saved_state;
+    static x86_thread_state32_t	null_state;
+    x86_saved_state32_t	*saved_state;
     
-    saved_state = (struct i386_saved_state *)kdp.saved_state;
+    saved_state = (x86_saved_state32_t *)kdp.saved_state;
     
     *state = null_state;	
     state->eax = saved_state->eax;
@@ -147,12 +173,12 @@ kdp_getstate(
 
 void
 kdp_setstate(
-    i386_thread_state_t		*state
+    x86_thread_state32_t	*state
 )
 {
-    struct i386_saved_state	*saved_state;
+    x86_saved_state32_t		*saved_state;
     
-    saved_state = (struct i386_saved_state *)kdp.saved_state;
+    saved_state = (x86_saved_state32_t *)kdp.saved_state;
 
     saved_state->eax = state->eax;
     saved_state->ebx = state->ebx;
@@ -180,20 +206,20 @@ kdp_machine_read_regs(
     __unused int *size
 )
 {
-    static i386_thread_fpstate_t null_fpstate;
+    static x86_float_state32_t  null_fpstate;
 
     switch (flavor) {
 
-    case i386_THREAD_STATE:
+    case x86_THREAD_STATE32:
 	dprintf(("kdp_readregs THREAD_STATE\n"));
-	kdp_getstate((i386_thread_state_t *)data);
-	*size = sizeof (i386_thread_state_t);
+	kdp_getstate((x86_thread_state32_t *)data);
+	*size = sizeof (x86_thread_state32_t);
 	return KDPERR_NO_ERROR;
 	
-    case i386_THREAD_FPSTATE:
+    case x86_FLOAT_STATE32:
 	dprintf(("kdp_readregs THREAD_FPSTATE\n"));
-	*(i386_thread_fpstate_t *)data = null_fpstate;
-	*size = sizeof (i386_thread_fpstate_t);
+	*(x86_float_state32_t *)data = null_fpstate;
+	*size = sizeof (x86_float_state32_t);
 	return KDPERR_NO_ERROR;
 	
     default:
@@ -213,12 +239,12 @@ kdp_machine_write_regs(
 {
     switch (flavor) {
 
-    case i386_THREAD_STATE:
+    case x86_THREAD_STATE32:
 	dprintf(("kdp_writeregs THREAD_STATE\n"));
-	kdp_setstate((i386_thread_state_t *)data);
+	kdp_setstate((x86_thread_state32_t *)data);
 	return KDPERR_NO_ERROR;
 	
-    case i386_THREAD_FPSTATE:
+    case x86_FLOAT_STATE32:
 	dprintf(("kdp_writeregs THREAD_FPSTATE\n"));
 	return KDPERR_NO_ERROR;
 	
@@ -246,14 +272,17 @@ kdp_machine_hostinfo(
         hostinfo->cpus_mask |= (1 << i);
     }
 
-   /* FIXME?? */
-    hostinfo->cpu_type = CPU_TYPE_I386;
-    hostinfo->cpu_subtype = CPU_SUBTYPE_486;
+    hostinfo->cpu_type = cpuid_cputype();
+    hostinfo->cpu_subtype = cpuid_cpusubtype();
 }
 
 void
 kdp_panic(
+#if CONFIG_NO_KPRINTF_STRINGS
+    __unused const char		*msg
+#else
     const char		*msg
+#endif
 )
 {
     kprintf("kdp panic: %s\n", msg);    
@@ -264,7 +293,12 @@ kdp_panic(
 void
 kdp_reboot(void)
 {
-    kdreboot();
+	printf("Attempting system restart...");
+	/* Call the platform specific restart*/
+	if (PE_halt_restart)
+		(*PE_halt_restart)(kPERestartCPU);
+	/* If we do reach this, give up */
+	halt_all_cpus(TRUE);
 }
 
 int
@@ -280,7 +314,7 @@ kdp_intr_enbl(int s)
 }
 
 int
-kdp_getc()
+kdp_getc(void)
 {
 	return	cnmaygetc();
 }
@@ -293,25 +327,25 @@ kdp_us_spin(int usec)
 
 void print_saved_state(void *state)
 {
-    struct i386_saved_state	*saved_state;
+    x86_saved_state32_t		*saved_state;
 
     saved_state = state;
 
 	kprintf("pc = 0x%x\n", saved_state->eip);
-	kprintf("cr3= 0x%x\n", saved_state->cr2);
+	kprintf("cr2= 0x%x\n", saved_state->cr2);
 	kprintf("rp = TODO FIXME\n");
-	kprintf("sp = 0x%x\n", saved_state->esp);
+	kprintf("sp = %p\n", saved_state);
 
 }
 
 void
-kdp_sync_cache()
+kdp_sync_cache(void)
 {
 	return;	/* No op here. */
 }
 
 void
-kdp_call()
+kdp_call(void)
 {
 	__asm__ volatile ("int	$3");	/* Let the processor do the work */
 }
@@ -346,51 +380,30 @@ kdp_print_phys(int src)
 
 }
 
-
-#define MAX_FRAME_DELTA		65536
-
-void
-kdp_i386_backtrace(void	*_frame, int nframes)
-{
-	cframe_t	*frame = (cframe_t *)_frame;
-	int i;
-
-	for (i=0; i<nframes; i++) {
-	    if ((vm_offset_t)frame < VM_MIN_KERNEL_ADDRESS ||
-	        (vm_offset_t)frame > VM_MAX_KERNEL_ADDRESS) {
-		goto invalid;
-	    }
-	    kprintf("frame 0x%x called by 0x%x ",
-		frame, frame->caller);
-	    kprintf("args 0x%x 0x%x 0x%x 0x%x\n",
-		frame->args[0], frame->args[1],
-		frame->args[2], frame->args[3]);
-	    if ((frame->prev < frame) ||	/* wrong direction */
-	    	((frame->prev - frame) > MAX_FRAME_DELTA)) {
-		goto invalid;
-	    }
-	    frame = frame->prev;
-	}
-	return;
-invalid:
-	kprintf("invalid frame pointer 0x%x\n",frame);
-}
-
-void
+boolean_t
 kdp_i386_trap(
     unsigned int		trapno,
-    struct i386_saved_state	*saved_state,
+    x86_saved_state32_t	*saved_state,
     kern_return_t	result,
     vm_offset_t		va
 )
 {
     unsigned int exception, subcode = 0, code;
 
-    mp_kdp_enter();
+    if (trapno != T_INT3 && trapno != T_DEBUG) {
+    	kprintf("Debugger: Unexpected kernel trap number: "
+		"0x%x, EIP: 0x%x, CR2: 0x%x\n",
+		trapno, saved_state->eip, saved_state->cr2);
+	if (!kdp.is_conn)
+	    return FALSE;
+    }	
 
-    if (trapno != T_INT3 && trapno != T_DEBUG)
-    	kprintf("unexpected kernel trap 0x%x eip 0x%x cr2 0x%x \n",
-		trapno, saved_state->eip, saved_state->esp);
+    mp_kdp_enter();
+    kdp_callouts(KDP_EVENT_ENTER);
+
+    if (saved_state->efl & EFL_TF) {
+	    enable_preemption_no_check();
+    }
 
     switch (trapno) {
     
@@ -455,11 +468,17 @@ kdp_i386_trap(
 	break;
     }
 
-    kdp_i386_backtrace((void *) saved_state->ebp, 10);
-
     kdp_raise_exception(exception, code, subcode, saved_state);
+    /* If the instruction single step bit is set, disable kernel preemption
+     */
+    if (saved_state->efl & EFL_TF) {
+	    disable_preemption();
+    }
 
+    kdp_callouts(KDP_EVENT_EXIT);
     mp_kdp_exit();
+
+    return TRUE;
 }
 
 boolean_t 
@@ -473,4 +492,217 @@ unsigned int
 kdp_ml_get_breakinsn(void)
 {
   return 0xcc;
+}
+extern pmap_t kdp_pmap;
+extern uint32_t kdp_src_high32;
+
+#define RETURN_OFFSET 4
+int
+machine_trace_thread(thread_t thread, char *tracepos, char *tracebound, int nframes, boolean_t user_p)
+{
+	uint32_t *tracebuf = (uint32_t *)tracepos;
+	uint32_t fence = 0;
+	uint32_t stackptr = 0;
+	uint32_t stacklimit = 0xfc000000;
+	int framecount = 0;
+	uint32_t init_eip = 0;
+	uint32_t prevsp = 0;
+	uint32_t framesize = 2 * sizeof(vm_offset_t);
+	
+	if (user_p) {
+	        x86_saved_state32_t	*iss32;
+		
+		iss32 = USER_REGS32(thread);
+
+			init_eip = iss32->eip;
+			stackptr = iss32->ebp;
+
+		/* This bound isn't useful, but it doesn't hinder us*/
+		stacklimit = 0xffffffff;
+		kdp_pmap = thread->task->map->pmap;
+	}
+	else {
+		/*Examine the i386_saved_state at the base of the kernel stack*/
+		stackptr = STACK_IKS(thread->kernel_stack)->k_ebp;
+		init_eip = STACK_IKS(thread->kernel_stack)->k_eip;
+	}
+
+	*tracebuf++ = init_eip;
+
+	for (framecount = 0; framecount < nframes; framecount++) {
+
+		if ((uint32_t)(tracebound - ((char *)tracebuf)) < (4 * framesize)) {
+			tracebuf--;
+			break;
+		}
+
+		*tracebuf++ = stackptr;
+/* Invalid frame, or hit fence */
+		if (!stackptr || (stackptr == fence)) {
+			break;
+		}
+		/* Stack grows downward */
+		if (stackptr < prevsp) {
+			break;
+		}
+		/* Unaligned frame */
+		if (stackptr & 0x0000003) {
+			break;
+		}
+		if (stackptr > stacklimit) {
+			break;
+		}
+
+		if (kdp_vm_read((caddr_t) (stackptr + RETURN_OFFSET), (caddr_t) tracebuf, sizeof(caddr_t)) != sizeof(caddr_t)) {
+			break;
+		}
+		tracebuf++;
+		
+		prevsp = stackptr;
+		if (kdp_vm_read((caddr_t) stackptr, (caddr_t) &stackptr, sizeof(caddr_t)) != sizeof(caddr_t)) {
+			*tracebuf++ = 0;
+			break;
+		}
+	}
+
+	kdp_pmap = 0;
+
+	return (uint32_t) (((char *) tracebuf) - tracepos);
+}
+
+#define RETURN_OFFSET64	8
+/* Routine to encapsulate the 64-bit address read hack*/
+unsigned
+machine_read64(addr64_t srcaddr, caddr_t dstaddr, uint32_t len)
+{
+	uint32_t kdp_vm_read_low32;
+	unsigned retval;
+	
+	kdp_src_high32 = srcaddr >> 32;
+	kdp_vm_read_low32 = srcaddr & 0x00000000FFFFFFFFUL;
+	retval = kdp_vm_read((caddr_t)kdp_vm_read_low32, dstaddr, len);
+	kdp_src_high32 = 0;
+	return retval;
+}
+
+int
+machine_trace_thread64(thread_t thread, char *tracepos, char *tracebound, int nframes, boolean_t user_p)
+{
+	uint64_t *tracebuf = (uint64_t *)tracepos;
+	uint32_t fence = 0;
+	addr64_t stackptr = 0;
+	uint64_t stacklimit = 0xfc000000;
+	int framecount = 0;
+	addr64_t init_rip = 0;
+	addr64_t prevsp = 0;
+	unsigned framesize = 2 * sizeof(addr64_t);
+	
+	if (user_p) {
+		x86_saved_state64_t	*iss64;
+		iss64 = USER_REGS64(thread);
+		init_rip = iss64->isf.rip;
+		stackptr = iss64->rbp;
+		stacklimit = 0xffffffffffffffffULL;
+		kdp_pmap = thread->task->map->pmap;
+	}
+	else {
+		/* DRK: This would need to adapt for a 64-bit kernel, if any */
+		stackptr = STACK_IKS(thread->kernel_stack)->k_ebp;
+		init_rip = STACK_IKS(thread->kernel_stack)->k_eip;
+	}
+
+	*tracebuf++ = init_rip;
+
+	for (framecount = 0; framecount < nframes; framecount++) {
+
+		if ((uint32_t)(tracebound - ((char *)tracebuf)) < (4 * framesize)) {
+			tracebuf--;
+			break;
+		}
+
+		*tracebuf++ = stackptr;
+
+		if (!stackptr || (stackptr == fence)){
+			break;
+		}
+		if (stackptr < prevsp) {
+			break;
+		}
+		if (stackptr & 0x0000003) {
+			break;
+		}
+		if (stackptr > stacklimit) {
+			break;
+		}
+
+		if (machine_read64(stackptr + RETURN_OFFSET64, (caddr_t) tracebuf, sizeof(addr64_t)) != sizeof(addr64_t)) {
+			break;
+		}
+		tracebuf++;
+
+		prevsp = stackptr;
+		if (machine_read64(stackptr, (caddr_t) &stackptr, sizeof(addr64_t)) != sizeof(addr64_t)) {
+			*tracebuf++ = 0;
+			break;
+		}
+	}
+
+	kdp_pmap = NULL;
+
+	return (uint32_t) (((char *) tracebuf) - tracepos);
+}
+
+static struct kdp_callout {
+	struct kdp_callout	*callout_next;
+	kdp_callout_fn_t	callout_fn;
+	void			*callout_arg;
+} *kdp_callout_list = NULL;
+
+
+/*
+ * Called from kernel context to register a kdp event callout.
+ */
+void
+kdp_register_callout(
+	kdp_callout_fn_t	fn,
+	void			*arg)
+{
+	struct kdp_callout	*kcp;
+	struct kdp_callout	*list_head;
+
+	kcp = kalloc(sizeof(*kcp));
+	if (kcp == NULL)
+		panic("kdp_register_callout() kalloc failed");
+
+	kcp->callout_fn  = fn;
+	kcp->callout_arg = arg;
+
+	/* Lock-less list insertion using compare and exchange. */
+	do {
+		list_head = kdp_callout_list;
+		kcp->callout_next = list_head;
+	} while(!atomic_cmpxchg((uint32_t *) &kdp_callout_list,
+				(uint32_t) list_head,
+				(uint32_t) kcp));
+}
+
+/*
+ * Called at exception/panic time when extering or exiting kdp.  
+ * We are single-threaded at this time and so we don't use locks.
+ */
+static void
+kdp_callouts(kdp_event_t event)
+{
+	struct kdp_callout	*kcp = kdp_callout_list;
+
+	while (kcp) {
+		kcp->callout_fn(kcp->callout_arg, event); 
+		kcp = kcp->callout_next;
+	}	
+}
+
+void
+kdp_ml_enter_debugger(void)
+{
+	__asm__ __volatile__("int3");
 }

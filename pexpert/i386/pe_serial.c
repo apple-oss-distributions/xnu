@@ -1,23 +1,29 @@
 /*
- * Copyright (c) 2000 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2006 Apple Computer, Inc. All rights reserved.
  *
- * @APPLE_LICENSE_HEADER_START@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
- * The contents of this file constitute Original Code as defined in and
- * are subject to the Apple Public Source License Version 1.1 (the
- * "License").  You may not use this file except in compliance with the
- * License.  Please obtain a copy of the License at
- * http://www.apple.com/publicsource and read it before using this file.
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. The rights granted to you under the License
+ * may not be used to create, or enable the creation or redistribution of,
+ * unlawful or unlicensed copies of an Apple operating system, or to
+ * circumvent, violate, or enable the circumvention or violation of, any
+ * terms of an Apple operating system software license agreement.
  * 
- * This Original Code and all software distributed under the License are
- * distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this file.
+ * 
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
  * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.  Please see the
- * License for the specific language governing rights and limitations
- * under the License.
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
  * 
- * @APPLE_LICENSE_HEADER_END@
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 
 /*
@@ -27,10 +33,6 @@
 
 #include <pexpert/protos.h>
 #include <pexpert/pexpert.h>
-
-void	serial_putc(char);
-int	serial_getc(void);
-int	serial_init(void);
 
 /* standard port addresses */
 enum {
@@ -67,11 +69,17 @@ enum {
 };
 
 enum {
+    UART_LSR_DR    = 0x01,
+    UART_LSR_OE    = 0x02,
+    UART_LSR_PE    = 0x04,
+    UART_LSR_FE    = 0x08,
     UART_LSR_THRE  = 0x20
 };
 
-#define UART_BAUD_RATE  115200
+static unsigned uart_baud_rate = 115200;
 #define UART_PORT_ADDR  COM1_PORT_ADDR
+
+#define UART_CLOCK  1843200   /* 1.8432 MHz clock */
 
 #define WRITE(r, v)  outb(UART_PORT_ADDR + UART_##r, v)
 #define READ(r)      inb(UART_PORT_ADDR + UART_##r)
@@ -96,8 +104,6 @@ uart_probe( void )
 static void
 uart_set_baud_rate( unsigned long baud_rate )
 {
-    #define UART_CLOCK  1843200   /* 1.8432 MHz clock */
-
     const unsigned char lcr = READ( LCR );
     unsigned long       div;
 
@@ -120,8 +126,40 @@ uart_putc( char c )
     WRITE( THR, c );
 }
 
+static int
+uart_getc( void )
+{
+    /*
+     * This function returns:
+     * -1 : no data
+     * -2 : receiver error
+     * >0 : character received
+     */
+
+    unsigned char lsr;
+
+    if (!uart_initted) return -1;
+
+    lsr = READ( LSR );
+
+    if ( lsr & (UART_LSR_FE | UART_LSR_PE | UART_LSR_OE) )
+    {
+        READ( RBR ); /* discard */
+        return -2;
+    }
+
+    if ( lsr & UART_LSR_DR )
+    {
+        return READ( RBR );
+    }
+
+    return -1;
+}
+
 int serial_init( void )
 {
+    unsigned serial_baud_rate = 0;
+	
     if ( /*uart_initted ||*/ uart_probe() == 0 ) return 0;
 
     /* Disable hardware interrupts */
@@ -137,9 +175,16 @@ int serial_init( void )
 
     WRITE( LCR, UART_LCR_8BITS );
 
-    /* Set baud rate */
+    /* Set baud rate - use the supplied boot-arg if available */
 
-    uart_set_baud_rate( UART_BAUD_RATE );
+    if (PE_parse_boot_arg("serialbaud", &serial_baud_rate))
+    {
+	    /* Valid divisor? */
+	    if (!((UART_CLOCK / 16) % serial_baud_rate)) {
+		    uart_baud_rate = serial_baud_rate;
+	    }
+    }
+    uart_set_baud_rate( uart_baud_rate );
 
     /* Assert DTR# and RTS# lines (OUT2?) */
 
@@ -162,5 +207,5 @@ void serial_putc( char c )
 
 int serial_getc( void )
 {
-    return 0;  /* not supported */
+    return uart_getc();
 }
