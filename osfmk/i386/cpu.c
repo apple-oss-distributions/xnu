@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2007 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2009 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -35,14 +35,17 @@
 #include <kern/misc_protos.h>
 #include <kern/machine.h>
 #include <mach/processor_info.h>
+#include <i386/pmap.h>
 #include <i386/machine_cpu.h>
 #include <i386/machine_routines.h>
-#include <i386/pmap.h>
 #include <i386/misc_protos.h>
 #include <i386/cpu_threads.h>
 #include <i386/rtclock.h>
+#include <i386/cpuid.h>
+#if CONFIG_VMX
+#include <i386/vmx/vmx_cpu.h>
+#endif
 #include <vm/vm_kern.h>
-#include "cpuid.h"
 
 struct processor	processor_master;
 
@@ -113,14 +116,26 @@ cpu_start(
 	if (cpu == cpu_number()) {
 		cpu_machine_init();
 		return KERN_SUCCESS;
-	} else {
+	}
+
+	/*
+	 * Try to bring the CPU back online without a reset.
+	 * If the fast restart doesn't succeed, fall back to
+	 * the slow way.
+	 */
+	ret = intel_startCPU_fast(cpu);
+	if (ret != KERN_SUCCESS) {
 		/*
 		 * Should call out through PE.
 		 * But take the shortcut here.
 		 */
 		ret = intel_startCPU(cpu);
-		return(ret);
 	}
+
+	if (ret != KERN_SUCCESS)
+		kprintf("cpu: cpu_start(%d) returning failure!\n", cpu);
+
+	return(ret);
 }
 
 void
@@ -129,8 +144,13 @@ cpu_exit_wait(
 {
     	cpu_data_t	*cdp = cpu_datap(cpu);
 
+	/*
+	 * Wait until the CPU indicates that it has stopped.
+	 */
 	simple_lock(&x86_topo_lock);
-	while (!cdp->lcpu.halted) {
+	while ((cdp->lcpu.state != LCPU_HALT)
+	       && (cdp->lcpu.state != LCPU_OFF)
+	       && !cdp->lcpu.stopped) {
 	    simple_unlock(&x86_topo_lock);
 	    cpu_pause();
 	    simple_lock(&x86_topo_lock);
@@ -156,8 +176,10 @@ cpu_machine_init(
 #endif
 	ml_init_interrupt();
 
+#if CONFIG_VMX
 	/* for every CPU, get the VT specs */
 	vmx_get_specs();
+#endif
 }
 
 processor_t
@@ -223,6 +245,8 @@ slot_threadtype(
 {
 	return (cpu_datap(slot_num)->cpu_threadtype);
 }
+
+
 
 cpu_type_t
 cpu_type(void)

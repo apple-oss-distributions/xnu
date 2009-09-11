@@ -30,10 +30,8 @@
 
 #if defined (__ppc__)
 #include "ppc/trap.h"
-#elif defined (__i386__)
+#elif defined (__i386__) || defined (__x86_64__)
 #include "i386/trap.h"
-#elif defined (__arm__)
-#include "arm/trap.h"
 #else
 #error architecture not supported
 #endif

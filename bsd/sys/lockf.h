@@ -104,6 +104,7 @@ struct lockf {
 
 __BEGIN_DECLS
 
+#ifdef KERNEL_PRIVATE
 int	lf_advlock(struct vnop_advlock_args *);
 int	lf_assert(struct vnop_advlock_args *, void **);
 void	lf_commit(void *, int);
@@ -112,6 +113,7 @@ void	lf_commit(void *, int);
 void	lf_print(char *, struct lockf *);
 void	lf_printlist(char *, struct lockf *);
 #endif
+#endif /* KERNEL_PRIVATE */
 
 __END_DECLS
 

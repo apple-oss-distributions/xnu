@@ -84,6 +84,7 @@ iocpu_run_platform_actions(queue_head_t * queue, uint32_t first_priority, uint32
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
+#define kBootCPUNumber  0
 
 static iocpu_platform_action_entry_t * gIOAllActionsQueue;
 static queue_head_t gIOSleepActionQueue;
@@ -174,14 +175,14 @@ iocpu_run_platform_actions(queue_head_t * queue, uint32_t first_priority, uint32
 extern "C" kern_return_t 
 IOCPURunPlatformQuiesceActions(void)
 {
-    return (iocpu_run_platform_actions(iocpu_get_platform_quiesce_queue(), 0, 0UL-1,
+    return (iocpu_run_platform_actions(iocpu_get_platform_quiesce_queue(), 0, 0U-1,
 				    NULL, NULL, NULL));
 }
 
 extern "C" kern_return_t 
 IOCPURunPlatformActiveActions(void)
 {
-    return (iocpu_run_platform_actions(iocpu_get_platform_active_queue(), 0, 0UL-1,
+    return (iocpu_run_platform_actions(iocpu_get_platform_active_queue(), 0, 0U-1,
 				    NULL, NULL, NULL));
 }
 
@@ -269,6 +270,7 @@ void PE_cpu_machine_quiesce(cpu_id_t target)
   if (targetCPU) targetCPU->quiesceCPU();
 }
 
+
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
 #define super IOService
@@ -293,6 +295,7 @@ void IOCPUSleepKernel(void)
 {
     long cnt, numCPUs;
     IOCPU *target;
+    IOCPU *bootCPU = NULL;
   
     kprintf("IOCPUSleepKernel\n");
 
@@ -321,20 +324,33 @@ void IOCPUSleepKernel(void)
 	iter->release();
     }
 
-    iocpu_run_platform_actions(&gIOSleepActionQueue, 0, 0UL-1,
+    iocpu_run_platform_actions(&gIOSleepActionQueue, 0, 0U-1,
 				NULL, NULL, NULL);
 
     numCPUs = gIOCPUs->getCount();
     // Sleep the CPUs.
     cnt = numCPUs;
-    while (cnt--) {
-	target = OSDynamicCast(IOCPU, gIOCPUs->getObject(cnt));
-	if (target->getCPUState() == kIOCPUStateRunning) {
-	    target->haltCPU();
-	}
+    while (cnt--) 
+    {
+        target = OSDynamicCast(IOCPU, gIOCPUs->getObject(cnt));
+        
+        // We make certain that the bootCPU is the last to sleep
+        // We'll skip it for now, and halt it after finishing the
+        // non-boot CPU's.
+        if (target->getCPUNumber() == kBootCPUNumber) 
+        {
+            bootCPU = target;
+        } else if (target->getCPUState() == kIOCPUStateRunning) 
+        {
+            target->haltCPU();
+        }
     }
 
-    iocpu_run_platform_actions(&gIOWakeActionQueue, 0, 0UL-1,
+    // Now sleep the boot CPU.
+    if (bootCPU)
+        bootCPU->haltCPU();
+
+    iocpu_run_platform_actions(&gIOWakeActionQueue, 0, 0U-1,
 				    NULL, NULL, NULL);
 
     iocpu_platform_action_entry_t * entry;
@@ -346,16 +362,21 @@ void IOCPUSleepKernel(void)
     }
 
     if (!queue_empty(&gIOSleepActionQueue))
-	IOPanic("gIOSleepActionQueue");
+	panic("gIOSleepActionQueue");
     if (!queue_empty(&gIOWakeActionQueue))
-	IOPanic("gIOWakeActionQueue");
+	panic("gIOWakeActionQueue");
   
     // Wake the other CPUs.
-    for (cnt = 1; cnt < numCPUs; cnt++) {
-	target = OSDynamicCast(IOCPU, gIOCPUs->getObject(cnt));
-	if (target->getCPUState() == kIOCPUStateStopped) {
-	    processor_start(target->getMachProcessor());
-	}
+    for (cnt = 0; cnt < numCPUs; cnt++) 
+    {
+        target = OSDynamicCast(IOCPU, gIOCPUs->getObject(cnt));
+        
+        // Skip the already-woken boot CPU.
+        if ((target->getCPUNumber() != kBootCPUNumber)
+            && (target->getCPUState() == kIOCPUStateStopped))
+        {
+            processor_start(target->getMachProcessor());
+        }
     }
 }
 
@@ -411,7 +432,7 @@ bool IOCPU::start(IOService *provider)
   provider->setProperty("timebase-frequency", timebaseFrequency);
   timebaseFrequency->release();
   
-  super::setProperty("IOCPUID", (UInt32)this, 32);
+  super::setProperty("IOCPUID", (uintptr_t)this, sizeof(uintptr_t)*8);
   
   setCPUNumber(0);
   setCPUState(kIOCPUStateUnregistered);

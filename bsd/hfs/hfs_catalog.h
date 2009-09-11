@@ -57,10 +57,10 @@ struct cat_desc {
 	u_int8_t  cd_flags;       /* see below (8 bits) */
 	u_int8_t  cd_encoding;    /* name encoding */
 	int16_t   cd_namelen;     /* length of cnode name */
-	const u_int8_t * cd_nameptr; /* pointer to cnode name */
 	cnid_t    cd_parentcnid;  /* parent directory CNID */
-	u_long    cd_hint;        /* catalog file hint */
+	u_int32_t    cd_hint;        /* catalog file hint */
 	cnid_t    cd_cnid;        /* cnode id (for getattrlist) */
+	const u_int8_t * cd_nameptr; /* pointer to cnode name */
 };
 
 /* cd_flags */
@@ -113,9 +113,15 @@ struct cat_attr {
  * Catalog Node Fork (runtime)
  *
  * NOTE: this is not the same as a struct HFSPlusForkData
+ *
+ * NOTE: if cf_new_size > cf_size, then a write is in progress and is extending
+ * the EOF; the new EOF will be cf_new_size.  Writes and pageouts may validly
+ * write up to cf_new_size, but reads should only read up to cf_size.  When
+ * an extending write is not in progress, cf_new_size is zero.
  */
 struct cat_fork {
 	off_t          cf_size;        /* fork's logical size in bytes */
+	off_t          cf_new_size;    /* fork's logical size after write completes */
 	union {
 	    u_int32_t  cfu_clump;      /* fork's clump size in bytes (sys files only) */
 	    u_int64_t  cfu_bytesread;  /* bytes read from this fork */
@@ -167,8 +173,8 @@ struct cat_entry {
 	struct cat_attr	ce_attr;
 	off_t		ce_datasize;
 	off_t		ce_rsrcsize;
-	u_long		ce_datablks;
-	u_long		ce_rsrcblks;
+	u_int32_t		ce_datablks;
+	u_int32_t		ce_rsrcblks;
 };
 
 /*
@@ -188,9 +194,9 @@ struct cat_entry {
  * A cat_entrylist is a list of Catalog Node Entries.
  */
 struct cat_entrylist {
-	u_long  maxentries;    /* number of entries requested */
-	u_long  realentries;   /* number of valid entries returned */
-	u_long  skipentries;   /* number of entries skipped (reserved HFS+ files) */
+	u_int32_t  maxentries;    /* number of entries requested */
+	u_int32_t  realentries;   /* number of valid entries returned */
+	u_int32_t  skipentries;   /* number of entries skipped (reserved HFS+ files) */
 	struct cat_entry  entry[1];   /* array of entries */
 };
 
@@ -217,7 +223,11 @@ typedef u_int32_t	catops_t;
  * the nreserve struct (in BTreeNodeReserve.c).
  */
 typedef	struct cat_cookie_t {
+#if defined(__LP64__)
+	char	opaque[40];
+#else
 	char	opaque[24];
+#endif
 } cat_cookie_t;
 
 /* Universal catalog key */
@@ -366,7 +376,7 @@ extern int cat_set_childlinkbit(
 #define HFS_IGNORABLE_LINK  0x00000001
 
 extern int cat_resolvelink( struct hfsmount *hfsmp,
-                            u_long linkref,
+                            u_int32_t linkref,
                             int isdirlink,
                             struct HFSPlusCatalogFile *recp);
 

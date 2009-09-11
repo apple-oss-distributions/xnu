@@ -89,7 +89,7 @@ void IOTimerEventSource::timeout(void *self)
             if (doit && me->enabled && AbsoluteTime_to_scalar(&me->abstime))
             {
                 IOTimeStampConstant(IODBG_TIMES(IOTIMES_ACTION),
-                                    (unsigned int) doit, (unsigned int) me->owner);
+                                    (uintptr_t) doit, (uintptr_t) me->owner);
                 (*doit)(me->owner, me);
             }
             wl->openGate();
@@ -97,9 +97,12 @@ void IOTimerEventSource::timeout(void *self)
     }
 }
 
-void IOTimerEventSource::timeoutAndRelease(void * self, void * count)
+void IOTimerEventSource::timeoutAndRelease(void * self, void * c)
 {
     IOTimerEventSource *me = (IOTimerEventSource *) self;
+	/* The second parameter (a pointer) gets abused to carry an SInt32, so on LP64, "count"
+	   must be cast to "long" before, in order to tell GCC we're not truncating a pointer. */
+	SInt32 count = (SInt32) (long) c;
 
     if (me->enabled && me->action)
     {
@@ -110,10 +113,10 @@ void IOTimerEventSource::timeoutAndRelease(void * self, void * count)
             Action doit;
             wl->closeGate();
             doit = (Action) me->action;
-            if (doit && (me->reserved->calloutGeneration == (SInt32) count))
+            if (doit && (me->reserved->calloutGeneration == count))
             {
                 IOTimeStampConstant(IODBG_TIMES(IOTIMES_ACTION),
-                                    (unsigned int) doit, (unsigned int) me->owner);
+                                    (uintptr_t) doit, (uintptr_t) me->owner);
                 (*doit)(me->owner, me);
             }
             wl->openGate();
@@ -227,6 +230,7 @@ IOReturn IOTimerEventSource::setTimeout(UInt32 interval, UInt32 scale_factor)
     return wakeAtTime(end);
 }
 
+#if !defined(__LP64__)
 IOReturn IOTimerEventSource::setTimeout(mach_timespec_t interval)
 {
     AbsoluteTime end, nsecs;
@@ -239,6 +243,7 @@ IOReturn IOTimerEventSource::setTimeout(mach_timespec_t interval)
 
     return wakeAtTime(end);
 }
+#endif
 
 IOReturn IOTimerEventSource::setTimeout(AbsoluteTime interval)
 {
@@ -273,6 +278,7 @@ IOReturn IOTimerEventSource::wakeAtTime(UInt32 inAbstime, UInt32 scale_factor)
     return wakeAtTime(end);
 }
 
+#if !defined(__LP64__)
 IOReturn IOTimerEventSource::wakeAtTime(mach_timespec_t inAbstime)
 {
     AbsoluteTime end, nsecs;
@@ -285,6 +291,7 @@ IOReturn IOTimerEventSource::wakeAtTime(mach_timespec_t inAbstime)
 
     return wakeAtTime(end);
 }
+#endif
 
 void IOTimerEventSource::setWorkLoop(IOWorkLoop *inWorkLoop)
 {
@@ -299,7 +306,7 @@ IOReturn IOTimerEventSource::wakeAtTime(AbsoluteTime inAbstime)
         return kIOReturnNoResources;
 
     abstime = inAbstime;
-    if ( enabled && AbsoluteTime_to_scalar(&abstime) && workLoop )
+    if ( enabled && AbsoluteTime_to_scalar(&inAbstime) && AbsoluteTime_to_scalar(&abstime) && workLoop )
     {
         if (reserved)
         {
@@ -308,14 +315,14 @@ IOReturn IOTimerEventSource::wakeAtTime(AbsoluteTime inAbstime)
             reserved->workLoop = workLoop;
             reserved->calloutGeneration++;
             if (thread_call_enter1_delayed((thread_call_t) calloutEntry, 
-                    (void *) reserved->calloutGeneration, abstime))
+                    (void *) reserved->calloutGeneration, inAbstime))
             {
                 release();
                 workLoop->release();
             }
         }
         else
-            thread_call_enter_delayed((thread_call_t) calloutEntry, abstime);
+            thread_call_enter_delayed((thread_call_t) calloutEntry, inAbstime);
     }
 
     return kIOReturnSuccess;

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2007 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2009 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -73,6 +73,25 @@
 #include <kern/syscall_subr.h>
 #include <mach/mach_host_server.h>
 #include <mach/mach_syscalls.h>
+
+
+#ifdef MACH_BSD
+extern void workqueue_thread_yielded(void);
+#endif /* MACH_BSD */
+
+
+/* Called from commpage to take a delayed preemption when exiting
+ * the "Preemption Free Zone" (PFZ).
+ */
+kern_return_t
+pfz_exit(
+__unused	struct pfz_exit_args *args)
+{
+	/* For now, nothing special to do.  We'll pick up the ASTs on kernel exit. */
+
+	return (KERN_SUCCESS);
+}
+
 
 /*
  *	swtch and swtch_pri both attempt to context switch (logic in
@@ -221,6 +240,8 @@ thread_switch(
 	    return (KERN_INVALID_ARGUMENT);
     }
 
+    workqueue_thread_yielded();
+
 	/*
 	 * Translate the port name if supplied.
 	 */
@@ -331,7 +352,6 @@ thread_depress_abstime(
 
 		self->sched_pri = DEPRESSPRI;
 		myprocessor->current_pri = self->sched_pri;
-		self->sched_mode &= ~TH_MODE_PREEMPT;
 		self->sched_mode |= TH_MODE_DEPRESS;
 
 		if (interval != 0) {
@@ -427,7 +447,6 @@ thread_poll_yield(
 			if (!(self->sched_mode & TH_MODE_ISDEPRESSED)) {
 				self->sched_pri = DEPRESSPRI;
 				myprocessor->current_pri = self->sched_pri;
-				self->sched_mode &= ~TH_MODE_PREEMPT;
 			}
 			self->computation_epoch = abstime;
 			self->computation_metered = 0;
@@ -438,7 +457,7 @@ thread_poll_yield(
 				self->depress_timer_active++;
 			thread_unlock(self);
 
-			if ((preempt = csw_check(self, myprocessor)) != AST_NONE)
+			if ((preempt = csw_check(myprocessor)) != AST_NONE)
 				ast_on(preempt);
 		}
 	}

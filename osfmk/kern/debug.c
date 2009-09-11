@@ -60,12 +60,14 @@
 #include <mach_kdp.h>
 
 #include <kern/cpu_number.h>
+#include <kern/kalloc.h>
 #include <kern/lock.h>
 #include <kern/spl.h>
 #include <kern/thread.h>
 #include <kern/assert.h>
 #include <kern/sched_prim.h>
 #include <kern/misc_protos.h>
+#include <kern/clock.h>
 #include <vm/vm_kern.h>
 #include <vm/pmap.h>
 #include <stdarg.h>
@@ -78,12 +80,15 @@
 #include <ppc/low_trace.h>
 #endif
 
-#ifdef __i386__
+#if defined(__i386__) || defined(__x86_64__)
 #include <i386/cpu_threads.h>
 #include <i386/pmCPU.h>
 #endif
 
 #include <IOKit/IOPlatformExpert.h>
+
+#include <sys/kdebug.h>
+#include <libkern/OSKextLibPrivate.h>
 
 unsigned int	halt_in_debugger = 0;
 unsigned int	switch_debugger = 0;
@@ -106,10 +111,15 @@ unsigned int		panic_is_inited = 0;
 unsigned int		return_on_panic = 0;
 unsigned long		panic_caller;
 
-char *debug_buf;
-ppnum_t debug_buf_page;
-char *debug_buf_ptr;
-unsigned int debug_buf_size;
+#if CONFIG_EMBEDDED
+#define DEBUG_BUF_SIZE (PAGE_SIZE)
+#else
+#define DEBUG_BUF_SIZE (3 * PAGE_SIZE)
+#endif
+
+char debug_buf[DEBUG_BUF_SIZE];
+char *debug_buf_ptr = debug_buf;
+unsigned int debug_buf_size = sizeof(debug_buf);
 
 static char model_name[64];
 
@@ -126,15 +136,16 @@ struct pasc {
 
 typedef struct pasc pasc_t;
 
+/* Prevent CPP from breaking the definition below */
+#if CONFIG_NO_PANIC_STRINGS
+#undef Assert
+#endif
+
 void
 Assert(
 	const char	*file,
 	int		line,
-#if CONFIG_NO_PANIC_STRINGS
-	__unused const char	*expression
-#else
 	const char	*expression
-#endif
       )
 {
 	int saved_return_on_panic;
@@ -183,16 +194,11 @@ debug_log_init(void)
 {
 	if (debug_buf_size != 0)
 		return;
-	if (kmem_alloc(kernel_map, (vm_offset_t *) &debug_buf, PAGE_SIZE)
-			!= KERN_SUCCESS)
-		panic("cannot allocate debug_buf\n");
 	debug_buf_ptr = debug_buf;
-	debug_buf_size = PAGE_SIZE;
-        debug_buf_page = pmap_find_phys(kernel_pmap,
-					(addr64_t)(uintptr_t)debug_buf_ptr);
+	debug_buf_size = sizeof(debug_buf);
 }
 
-#if __i386__
+#if defined(__i386__) || defined(__x86_64__)
 #define panic_stop()	pmCPUHalt(PM_HALT_PANIC)
 #define panic_safe()	pmSafeMode(x86_lcpu(), PM_SAFE_FL_SAFE)
 #define panic_normal()	pmSafeMode(x86_lcpu(), PM_SAFE_FL_NORMAL)
@@ -202,7 +208,17 @@ debug_log_init(void)
 #define panic_normal()
 #endif
 
-#undef panic(...) 
+/*
+ * Prevent CPP from breaking the definition below,
+ * since all clients get a #define to prepend line numbers
+ */
+#undef panic
+
+void _consume_panic_args(int a __unused, ...)
+{
+    panic(NULL);
+}
+
 void
 panic(const char *str, ...)
 {
@@ -210,6 +226,10 @@ panic(const char *str, ...)
 	spl_t	s;
 	thread_t thread;
 	wait_queue_t wq;
+
+
+	if (kdebug_enable)
+		kdbg_dump_trace_to_file("/var/tmp/panic.trace");
 
 	s = splhigh();
 	disable_preemption();
@@ -259,7 +279,7 @@ restart:
 	panicwait = 1;
 
 	PANIC_UNLOCK();
-	kdb_printf("panic(cpu %d caller 0x%08lX): ", (unsigned) paniccpu, panic_caller);
+	kdb_printf("panic(cpu %d caller 0x%lx): ", (unsigned) paniccpu, panic_caller);
 	if (str) {
 		va_start(listp, str);
 		_doprnt(str, &listp, consdebug_putc, 0);
@@ -400,6 +420,13 @@ static void panic_display_model_name(void) {
 		kdb_printf("System model name: %s\n", model_name);
 }
 
+static void panic_display_uptime(void) {
+	uint64_t	uptime;
+	absolutetime_to_nanoseconds(mach_absolute_time(), &uptime);
+
+	kdb_printf("\nSystem uptime in nanoseconds: %llu\n", uptime);
+}
+
 extern const char version[];
 extern char osversion[];
 
@@ -412,13 +439,59 @@ __private_extern__ void panic_display_system_configuration(void) {
 		    (osversion[0] != 0) ? osversion : "Not yet set");
 		kdb_printf("\nKernel version:\n%s\n",version);
 		panic_display_model_name();
+		panic_display_uptime();
 		config_displayed = TRUE;
+		panic_display_zprint();
+		kext_dump_panic_lists(&kdb_log);
+	}
+}
+
+extern zone_t		first_zone;
+extern unsigned int	num_zones, stack_total;
+
+#if defined(__i386__) || defined (__x86_64__)
+extern unsigned int	inuse_ptepages_count;
+#endif
+
+extern boolean_t	panic_include_zprint;
+
+__private_extern__ void panic_display_zprint()
+{
+	if(panic_include_zprint == TRUE) {
+
+		unsigned int	i;
+		struct zone	zone_copy;
+
+		if(first_zone!=NULL) {
+			if(ml_nofault_copy((vm_offset_t)first_zone, (vm_offset_t)&zone_copy, sizeof(struct zone)) == sizeof(struct zone)) {
+				for (i = 0; i < num_zones; i++) {
+					if(zone_copy.cur_size > (1024*1024)) {
+						kdb_printf("%.20s:%lu\n",zone_copy.zone_name,(uintptr_t)zone_copy.cur_size);
+					}	
+					
+					if(zone_copy.next_zone == NULL) {
+						break;
+					}
+
+					if(ml_nofault_copy((vm_offset_t)zone_copy.next_zone, (vm_offset_t)&zone_copy, sizeof(struct zone)) != sizeof(struct zone)) {
+						break;
+					}
+				}
+			}
+		}
+
+		kdb_printf("Kernel Stacks:%lu\n",(uintptr_t)(kernel_stack_size * stack_total));
+
+#if defined(__i386__) || defined (__x86_64__)
+		kdb_printf("PageTables:%lu\n",(uintptr_t)(PAGE_SIZE * inuse_ptepages_count));
+#endif
+
+		kdb_printf("Kalloc.Large:%lu\n",(uintptr_t)kalloc_large_total);
 	}
 }
 
 #if !MACH_KDP
 static struct ether_addr kdp_current_mac_address = {{0, 0, 0, 0, 0, 0}};
-unsigned int not_in_kdp = 1;
 
 /* XXX ugly forward declares to stop warnings */
 void *kdp_get_interface(void);

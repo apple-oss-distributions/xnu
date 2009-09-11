@@ -32,9 +32,44 @@
 #include <sys/cdefs.h>
 #include <stdint.h>
 
+#ifdef __APPLE_API_PRIVATE
+#ifdef __APPLE_API_UNSTABLE
+
+struct thread_snapshot {
+	uint32_t 		snapshot_magic;
+	uint32_t 		nkern_frames;
+	uint32_t 		nuser_frames;
+	int32_t 		pid;
+	uint64_t 		wait_event;
+	uint64_t	 	continuation;
+	uint64_t 		thread_id;
+	int32_t  		state;
+	char			ss_flags;
+	/* We restrict ourselves to a statically defined
+	 * (current as of 2009) length for the
+	 * p_comm string, due to scoping issues (osfmk/bsd and user/kernel
+	 * binary compatibility).
+	 */
+	char			p_comm[17];
+} __attribute__ ((packed));
+
+enum {
+	kUser64_p = 0x1,
+	kKernel64_p = 0x2,
+	kHasDispatchSerial = 0x4
+};
+
+enum	{STACKSHOT_GET_DQ = 1};
+#define STACKSHOT_DISPATCH_OFFSET_MASK 0xffff0000
+#define STACKSHOT_DISPATCH_OFFSET_SHIFT 16 
+
+#endif /* __APPLE_API_UNSTABLE */
+#endif /* __APPLE_API_PRIVATE */
+
 #ifdef	KERNEL_PRIVATE
 
 extern unsigned int	systemLogDiags;
+extern char debug_buf[];
 
 #ifdef MACH_KERNEL_PRIVATE
 
@@ -49,7 +84,7 @@ extern unsigned int     current_debugger;
 
 extern unsigned int     active_debugger;
 extern unsigned int 	debug_mode; 
-extern unsigned int	disable_debug_output;
+extern unsigned int 	disable_debug_output; 
 
 extern unsigned int     panicDebugging;
 extern unsigned int	logPanicDataToScreen;
@@ -71,7 +106,6 @@ extern const char		*panicstr;
 extern volatile unsigned int	nestedpanic;
 extern int unsigned long panic_caller;
 
-extern char *debug_buf;
 extern char *debug_buf_ptr;
 extern unsigned int debug_buf_size;
 
@@ -84,6 +118,7 @@ int	packA(char *inbuf, uint32_t length, uint32_t buflen);
 void	unpackA(char *inbuf, uint32_t length);
 
 void	panic_display_system_configuration(void);
+void	panic_display_zprint(void);
 
 #endif /* MACH_KERNEL_PRIVATE */
 
@@ -98,19 +133,78 @@ void	panic_display_system_configuration(void);
 #define DB_LOG_PI_SCRN	0x100
 #define DB_KDP_GETC_ENA 0x200
 
-#define DB_KERN_DUMP_ON_PANIC       0x400 /* Trigger core dump on panic*/
-#define DB_KERN_DUMP_ON_NMI         0x800 /* Trigger core dump on NMI */
-#define DB_DBG_POST_CORE            0x1000 /*Wait in debugger after NMI core */
-#define DB_PANICLOG_DUMP            0x2000 /* Send paniclog on panic,not core*/
+#define DB_KERN_DUMP_ON_PANIC		0x400 /* Trigger core dump on panic*/
+#define DB_KERN_DUMP_ON_NMI		0x800 /* Trigger core dump on NMI */
+#define DB_DBG_POST_CORE		0x1000 /*Wait in debugger after NMI core */
+#define DB_PANICLOG_DUMP		0x2000 /* Send paniclog on panic,not core*/
+#define DB_REBOOT_POST_CORE		0x4000 /* Attempt to reboot after
+						* post-panic crashdump/paniclog
+						* dump.
+						*/
+
+#if DEBUG
+/*
+ * For the DEBUG kernel, support the following:
+ *	sysctl -w debug.kprint_syscall=<syscall_mask> 
+ *	sysctl -w debug.kprint_syscall_process=<p_comm>
+ * <syscall_mask> should be an OR of the masks below
+ * for UNIX, MACH, MDEP, or IPC. This debugging aid
+ * assumes the task/process is locked/wired and will
+ * not go away during evaluation. If no process is
+ * specified, all processes will be traced
+ */
+extern int debug_kprint_syscall;
+extern int debug_kprint_current_process(const char **namep);
+#define DEBUG_KPRINT_SYSCALL_PREDICATE_INTERNAL(mask, namep)			\
+	( (debug_kprint_syscall & (mask)) && debug_kprint_current_process(namep) )
+#define DEBUG_KPRINT_SYSCALL_MASK(mask, fmt, args...)	do { 			\
+		const char *dks_name = NULL;									\
+		if (DEBUG_KPRINT_SYSCALL_PREDICATE_INTERNAL(mask, &dks_name)) {	\
+			kprintf("[%s%s%p]" fmt, dks_name ? dks_name : "",			\
+					dks_name ? "@" : "", current_thread(), args);			\
+		}																\
+	} while (0)
+#else /* !DEBUG */
+#define DEBUG_KPRINT_SYSCALL_PREDICATE_INTERNAL(mask, namep) (0)
+#define DEBUG_KPRINT_SYSCALL_MASK(mask, fmt, args...) do { } while(0)
+#endif /* !DEBUG */
+
+enum {
+	DEBUG_KPRINT_SYSCALL_UNIX_MASK = 1 << 0,
+	DEBUG_KPRINT_SYSCALL_MACH_MASK = 1 << 1,
+	DEBUG_KPRINT_SYSCALL_MDEP_MASK = 1 << 2,
+	DEBUG_KPRINT_SYSCALL_IPC_MASK  = 1 << 3
+};
+
+#define DEBUG_KPRINT_SYSCALL_PREDICATE(mask)				\
+	DEBUG_KPRINT_SYSCALL_PREDICATE_INTERNAL(mask, NULL)
+#define DEBUG_KPRINT_SYSCALL_UNIX(fmt, args...)				\
+	DEBUG_KPRINT_SYSCALL_MASK(DEBUG_KPRINT_SYSCALL_UNIX_MASK,fmt,args)
+#define DEBUG_KPRINT_SYSCALL_MACH(fmt, args...)				\
+	DEBUG_KPRINT_SYSCALL_MASK(DEBUG_KPRINT_SYSCALL_MACH_MASK,fmt,args)
+#define DEBUG_KPRINT_SYSCALL_MDEP(fmt, args...)				\
+	DEBUG_KPRINT_SYSCALL_MASK(DEBUG_KPRINT_SYSCALL_MDEP_MASK,fmt,args)
+#define DEBUG_KPRINT_SYSCALL_IPC(fmt, args...)				\
+	DEBUG_KPRINT_SYSCALL_MASK(DEBUG_KPRINT_SYSCALL_IPC_MASK,fmt,args)
 
 #endif	/* KERNEL_PRIVATE */
 
 __BEGIN_DECLS
 
 extern void panic(const char *string, ...) __printflike(1,2);
+
+#if KERNEL_PRIVATE
+void _consume_panic_args(int, ...);
+#endif
+
 #if CONFIG_NO_PANIC_STRINGS
+#if KERNEL_PRIVATE
+#define panic_plain(x, ...) _consume_panic_args( 0, ## __VA_ARGS__ )
+#define panic(x, ...) _consume_panic_args( 0, ## __VA_ARGS__ )
+#else
 #define panic_plain(...) (panic)((char *)0)
 #define panic(...)  (panic)((char *)0)
+#endif
 #else /* CONFIGS_NO_PANIC_STRINGS */
 #define panic_plain(ex, ...) \
 	(panic)(ex, ## __VA_ARGS__)

@@ -30,10 +30,8 @@
 
 #if defined (__ppc__)
 #include "ppc/xpr.h"
-#elif defined (__i386__)
+#elif defined (__i386__) || defined (__x86_64__)
 #include "i386/xpr.h"
-#elif defined (__arm__)
-#include "arm/xpr.h"
 #else
 #error architecture not supported
 #endif

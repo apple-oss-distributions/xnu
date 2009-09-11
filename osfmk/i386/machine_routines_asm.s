@@ -27,6 +27,7 @@
  */
  
 #include <i386/asm.h>
+#include <i386/rtclock.h>
 #include <i386/proc_reg.h>
 #include <i386/eflags.h>
        
@@ -46,7 +47,9 @@ ENTRY(ml_get_timebase)
 
 			movl    S_ARG0, %ecx
 			
+			lfence
 			rdtsc
+			lfence
 			
 			movl    %edx, 0(%ecx)
 			movl    %eax, 4(%ecx)
@@ -132,6 +135,13 @@ LEXT(tmrCvt)
 
 			ret						// Leave...
 
+
+/* void             _rtc_nanotime_store(uint64_t                tsc,
+	                                uint64_t                nsec,
+	                                uint32_t                scale,
+	                                uint32_t                shift,
+	                                rtc_nanotime_t  *dst) ;
+*/
 			.globl	EXT(_rtc_nanotime_store)
 			.align	FALIGN
 
@@ -175,7 +185,10 @@ LEXT(_rtc_nanotime_store)
  *
  * This is the same as the commpage nanotime routine, except that it uses the
  * kernel internal "rtc_nanotime_info" data instead of the commpage data.  The two copies
- * of data (one in the kernel and one in user space) are kept in sync by rtc_nanotime_update().
+ * of data (one in the kernel and one in user space) are kept in sync by rtc_clock_napped().
+ *
+ * Warning!  There is another copy of this code in osfmk/i386/locore.s.  The
+ * two versions must be kept in sync with each other!
  *
  * There are actually two versions of the algorithm, one each for "slow" and "fast"
  * processors.  The more common "fast" algorithm is:
@@ -214,30 +227,7 @@ LEXT(_rtc_nanotime_read)
 		jnz		Lslow
 		
 		/* Processor whose TSC frequency is faster than SLOW_TSC_THRESHOLD */
-0:
-		movl		RNT_GENERATION(%edi),%esi		/* get generation (0 if being changed) */
-		testl		%esi,%esi				/* if being changed, loop until stable */
-		jz		0b
-
-		rdtsc							/* get TSC in %edx:%eax */
-		subl		RNT_TSC_BASE(%edi),%eax
-		sbbl		RNT_TSC_BASE+4(%edi),%edx
-
-		movl		RNT_SCALE(%edi),%ecx
-
-		movl		%edx,%ebx
-		mull		%ecx
-		movl		%ebx,%eax
-		movl		%edx,%ebx
-		mull		%ecx
-		addl		%ebx,%eax
-		adcl		$0,%edx
-
-		addl		RNT_NS_BASE(%edi),%eax
-		adcl		RNT_NS_BASE+4(%edi),%edx
-
-		cmpl		RNT_GENERATION(%edi),%esi		/* have the parameters changed? */
-		jne		0b					/* yes, loop until stable */
+		RTC_NANOTIME_READ_FAST()
 
 		popl		%ebx
 		popl		%edi
@@ -253,7 +243,9 @@ Lslow:
 		pushl		%esi					/* save generation */
 		pushl		RNT_SHIFT(%edi)				/* save low 32 bits of tscFreq */
 
-		rdtsc							/* get TSC in %edx:%eax */
+		lfence
+		rdtsc	  						/* get TSC in %edx:%eax */
+		lfence
 		subl		RNT_TSC_BASE(%edi),%eax
 		sbbl		RNT_TSC_BASE+4(%edi),%edx
 

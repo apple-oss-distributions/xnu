@@ -32,10 +32,8 @@
 
 #if defined (__ppc__)
 #include "ppc/simple_lock.h"
-#elif defined (__i386__)
+#elif defined (__i386__) || defined (__x86_64__)
 #include "i386/simple_lock.h"
-#elif defined (__arm__)
-#include "arm/simple_lock.h"
 #else
 #error architecture not supported
 #endif

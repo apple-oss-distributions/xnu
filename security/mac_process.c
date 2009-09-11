@@ -75,7 +75,7 @@
 
 #include <security/mac_internal.h>
 
-#include <bsd/bsm/audit_kernel.h>
+#include <bsd/security/audit/audit.h>
 
 struct label *
 mac_cred_label_alloc(void)
@@ -366,6 +366,18 @@ mac_proc_check_mprotect(proc_t proc,
 	return (error);
 }
 
+int
+mac_proc_check_run_cs_invalid(proc_t proc)
+{
+	int error;
+	
+	if (!mac_vm_enforce) return (0);
+	
+	MAC_CHECK(proc_check_run_cs_invalid, proc);
+	
+	return (error);
+}
+				   
 int
 mac_proc_check_sched(proc_t curp, struct proc *proc)
 {

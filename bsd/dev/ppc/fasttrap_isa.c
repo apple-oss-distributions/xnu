@@ -48,12 +48,12 @@
  */
 
 /*
- * Copyright 2006 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
 /*
- * #pragma ident	"@(#)fasttrap_isa.c	1.23	06/09/19 SMI"
+ * #pragma ident	"@(#)fasttrap_isa.c	1.27	08/04/09 SMI"
  */
 
 #ifdef KERNEL
@@ -76,8 +76,10 @@
 #include <mach/task.h>
 #include <vm/pmap.h>
 #include <vm/vm_map.h> /* All the bits we care about are guarded by MACH_KERNEL_PRIVATE :-( */
+extern dtrace_id_t dtrace_probeid_error;
 
-#define proc_t struct proc
+/* Solaris proc_t is the struct. Darwin's proc_t is a pointer to it. */
+#define proc_t struct proc /* Steer clear of the Darwin typedef for proc_t */
 
 static int32_t branchtaken(int32_t bo, int32_t bi, ppc_saved_state_t *sv);
 static int32_t dtrace_decode_ppc(uint32_t inst);
@@ -334,7 +336,7 @@ fasttrap_return_common(ppc_saved_state_t *sv, user_addr_t pc, pid_t pid, user_ad
 
 	for (tp = bucket->ftb_data; tp != NULL; tp = tp->ftt_next) {
 		if (pid == tp->ftt_pid && pc == tp->ftt_pc &&
-		    !tp->ftt_proc->ftpc_defunct)
+		    tp->ftt_proc->ftpc_acount != 0)
 			break;
 	}
 
@@ -358,9 +360,15 @@ fasttrap_return_common(ppc_saved_state_t *sv, user_addr_t pc, pid_t pid, user_ad
 			continue;							/* Yeah, skip this one... */
 
 		DTRACE_CPUFLAG_SET(CPU_DTRACE_USTACK_FP);
-		dtrace_probe(id->fti_probe->ftp_id,
-			pc - id->fti_probe->ftp_faddr,
-			sv->save_r3, sv->save_r4, 0, 0);
+		if (ISSET(current_proc()->p_lflag, P_LNOATTACH)) {
+			dtrace_probe(dtrace_probeid_error, 0 /* state */, 
+				     id->fti_probe->ftp_id, 1 /* ndx */, -1 /* offset */, 
+				     DTRACEFLT_UPRIV);
+		} else {
+			dtrace_probe(id->fti_probe->ftp_id,
+				pc - id->fti_probe->ftp_faddr,
+				sv->save_r3, sv->save_r4, 0, 0);
+		}
 		DTRACE_CPUFLAG_CLEAR(CPU_DTRACE_USTACK_FP);
 	}
 
@@ -441,7 +449,7 @@ fasttrap_pid_probe(ppc_saved_state_t *sv)
 	 */
 	for (tp = bucket->ftb_data; tp != NULL; tp = tp->ftt_next) {
 		if (pid == tp->ftt_pid && (sv->save_srr0 == tp->ftt_pc) &&
-		    !tp->ftt_proc->ftpc_defunct)
+		    tp->ftt_proc->ftpc_acount != 0)
 			break;
 	}
 
@@ -461,7 +469,11 @@ fasttrap_pid_probe(ppc_saved_state_t *sv)
 		for (id = tp->ftt_ids; id != NULL; id = id->fti_next) {
 			fasttrap_probe_t *probe = id->fti_probe;
 			
-			if (id->fti_ptype == DTFTP_ENTRY) {
+			if (ISSET(current_proc()->p_lflag, P_LNOATTACH)) {
+				dtrace_probe(dtrace_probeid_error, 0 /* state */, 
+				     id->fti_probe->ftp_id, 1 /* ndx */, -1 /* offset */, 
+				     DTRACEFLT_UPRIV);
+			} else if (id->fti_ptype == DTFTP_ENTRY) {
 				/*
 				 * We note that this was an entry
 				 * probe to help ustack() find the

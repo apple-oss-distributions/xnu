@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2007 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2009 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -185,15 +185,6 @@ MACRO_BEGIN													\
 			(thread)->realtime.computation: std_quantum;	\
 MACRO_END
 
-/* Invoked at splsched by a thread on itself */
-#define csw_needed(thread, processor) (										\
-	((thread)->state & TH_SUSP)										||		\
-	(first_timeslice(processor)?											\
-	 ((processor)->runq.highq > (thread)->sched_pri				||			\
-	  rt_runq.highq > (thread)->sched_pri) :								\
-	 ((processor)->runq.highq >= (thread)->sched_pri			||			\
-	  rt_runq.highq >= (thread)->sched_pri))								)
-
 extern struct run_queue		rt_runq;
 
 /*
@@ -209,10 +200,8 @@ extern void		thread_quantum_expire(
 					timer_call_param_t	processor,
 					timer_call_param_t	thread);
 
-/* Called at splsched by a thread on itself */
-extern ast_t	csw_check(
-					thread_t		thread,
-					processor_t		processor);
+/* Context switch check for current processor */
+extern ast_t	csw_check(processor_t		processor);
 
 extern uint32_t	std_quantum, min_std_quantum;
 extern uint32_t	std_quantum_us;
@@ -238,6 +227,9 @@ extern void		compute_averunnable(
 extern void		compute_stack_target(
 					void			*arg);
 
+extern void		compute_memory_pressure(
+					void			*arg);
+
 /*
  *	Conversion factor from usage
  *	to priority.
@@ -258,25 +250,33 @@ extern uint64_t		max_unsafe_computation;
 extern uint64_t		max_poll_computation;
 
 #define sched_run_incr()			\
-	(void)hw_atomic_add(&sched_run_count, 1)
+MACRO_BEGIN													\
+	machine_run_count(hw_atomic_add(&sched_run_count, 1));	\
+MACRO_END
 
 #define sched_run_decr()			\
-	(void)hw_atomic_sub(&sched_run_count, 1)
+MACRO_BEGIN													\
+	machine_run_count(hw_atomic_sub(&sched_run_count, 1));	\
+MACRO_END
 
 #define sched_share_incr()			\
-	(void)hw_atomic_add(&sched_share_count, 1)
+MACRO_BEGIN											\
+	(void)hw_atomic_add(&sched_share_count, 1);		\
+MACRO_END
 
 #define sched_share_decr()			\
-	(void)hw_atomic_sub(&sched_share_count, 1)
+MACRO_BEGIN											\
+	(void)hw_atomic_sub(&sched_share_count, 1);		\
+MACRO_END
 
 /*
  *	thread_timer_delta macro takes care of both thread timers.
  */
 #define thread_timer_delta(thread, delta)					\
 MACRO_BEGIN													\
-	(delta) = timer_delta(&(thread)->system_timer,			\
+	(delta) = (typeof(delta))timer_delta(&(thread)->system_timer,			\
 							&(thread)->system_timer_save);	\
-	(delta) += timer_delta(&(thread)->user_timer,			\
+	(delta) += (typeof(delta))timer_delta(&(thread)->user_timer,			\
 							&(thread)->user_timer_save);	\
 MACRO_END
 

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2003, 2005 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2003, 2005-2008 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -248,7 +248,7 @@ OSStatus UpdateHeader(BTreeControlBlockPtr btreePtr, Boolean forceWrite)
 	return	noErr;
 	
 	
-	err = GetNode (btreePtr, kHeaderNodeNum, &node );
+	err = GetNode (btreePtr, kHeaderNodeNum, 0, &node );
 	if (err != noErr) {
 		return	err;
 	}
@@ -356,7 +356,7 @@ OSStatus	FindIteratorPosition	(BTreeControlBlockPtr	 btreePtr,
 		goto SearchTheTree;
 	}
 	
-	err = GetNode (btreePtr, nodeNum, middle);
+	err = GetNode (btreePtr, nodeNum, kGetNodeHint, middle);
 	if( err == fsBTInvalidNodeErr )	// returned if nodeNum is out of range
 		goto SearchTheTree;
 		
@@ -392,7 +392,7 @@ OSStatus	FindIteratorPosition	(BTreeControlBlockPtr	 btreePtr,
 		M_ExitOnError(err);
 
 		// Look up the left node 
-		err = GetNode (btreePtr, nodeNum, left);
+		err = GetNode (btreePtr, nodeNum, 0, left);
 		M_ExitOnError (err);
 
 		// Look up the current node again
@@ -424,7 +424,7 @@ OSStatus	FindIteratorPosition	(BTreeControlBlockPtr	 btreePtr,
 		{
 			nodeNum = ((NodeDescPtr) left->buffer)->fLink;
 			
-			PanicIf (index != 0, "\pFindIteratorPosition: index != 0");	//€€ just checking...
+			PanicIf (index != 0, "FindIteratorPosition: index != 0");	//€€ just checking...
 			goto SuccessfulExit;
 		}
 		else
@@ -627,7 +627,7 @@ OSStatus	TrySimpleReplace		(BTreeControlBlockPtr	 btreePtr,
 		didItFit = InsertKeyRecord (btreePtr, nodePtr, index,
 										&iterator->key, KeyLength(btreePtr, &iterator->key),
 										record->bufferAddress, recordLen);
-		PanicIf (didItFit == false, "\pTrySimpleInsert: InsertKeyRecord returned false!");
+		PanicIf (didItFit == false, "TrySimpleInsert: InsertKeyRecord returned false!");
 
 		*recordInserted = true;
 	}

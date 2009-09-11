@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2005-2006 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2005-2008 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -69,7 +69,6 @@
 #include <i386/mp.h>
 #include <i386/pmCPU.h>
 #include <i386/tsc.h>
-#include <i386/hpet.h>
 #include <mach/i386/syscall_sw.h>
 
 extern uint64_t lastNapClear;
@@ -192,7 +191,7 @@ diagCall(x86_saved_state_t * state)
 			durNap = 1;	/* This is a very short time, make it
 					 * bigger */
 
-		curpos = data + sizeof(real_ncpus);	/* Point to the next
+		curpos = (uint32_t)(data + sizeof(real_ncpus));	/* Point to the next
 							 * available spot */
 
 		for (i = 0; i < real_ncpus; i++) {	/* Move 'em all out */
@@ -201,7 +200,7 @@ diagCall(x86_saved_state_t * state)
 			(void) copyout((char *) &cpu_data_ptr[i]->cpu_hwIntCnt, curpos + 8, 256 * sizeof(uint32_t));	/* Copy out interrupt
 															 * data for this
 															 * processor */
-			curpos = curpos + (256 * sizeof(uint32_t) + 8);	/* Point to next out put
+			curpos = (uint32_t)(curpos + (256 * sizeof(uint32_t) + 8));	/* Point to next out put
 									 * slot */
 		}
 

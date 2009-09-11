@@ -30,10 +30,8 @@
 
 #if defined (__ppc__)
 #include "ppc/locks.h"
-#elif defined (__i386__)
+#elif defined (__i386__) || defined (__x86_64__)
 #include "i386/locks.h"
-#elif defined (__arm__)
-#include "arm/locks.h"
 #else
 #error architecture not supported
 #endif

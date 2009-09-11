@@ -30,10 +30,8 @@
 
 #if defined (__ppc__)
 #include "ppc/task.h"
-#elif defined (__i386__)
+#elif defined (__i386__) || defined (__x86_64__)
 #include "i386/task.h"
-#elif defined (__arm__)
-#include "arm/task.h"
 #else
 #error architecture not supported
 #endif

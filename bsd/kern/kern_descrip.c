@@ -93,8 +93,9 @@
 #include <sys/aio_kern.h>
 #include <sys/ev.h>
 #include <kern/lock.h>
+#include <sys/uio_internal.h>
 
-#include <bsm/audit_kernel.h>
+#include <security/audit/audit.h>
 
 #include <sys/mount_internal.h>
 #include <sys/kdebug.h>
@@ -104,16 +105,15 @@
 #include <kern/kalloc.h>
 #include <libkern/OSAtomic.h>
 
-#include <sys/ubc.h>
+#include <sys/ubc_internal.h>
 
 struct psemnode;
 struct pshmnode;
 
 int fdopen(dev_t dev, int mode, int type, proc_t p);
-int finishdup(proc_t p, struct filedesc *fdp, int old, int new, register_t *retval);
+int finishdup(proc_t p, struct filedesc *fdp, int old, int new, int32_t *retval);
 
 int falloc_locked(proc_t p, struct fileproc **resultfp, int *resultfd, vfs_context_t ctx, int locked);
-int fdgetf_noref(proc_t p, int fd, struct fileproc **resultfp);
 void fg_drop(struct fileproc * fp);
 void fg_free(struct fileglob *fg);
 void fg_ref(struct fileproc * fp);
@@ -126,7 +126,7 @@ static int closef_finish(struct fileproc *fp, struct fileglob *fg, proc_t p, vfs
 
 /* We don't want these exported */
 __private_extern__
-int open1(vfs_context_t, struct nameidata *, int, struct vnode_attr *, register_t *);
+int open1(vfs_context_t, struct nameidata *, int, struct vnode_attr *, int32_t *);
 
 __private_extern__
 int unlink1(vfs_context_t, struct nameidata *, int);
@@ -141,6 +141,8 @@ extern int soo_stat(struct socket *so, void *ub, int isstat64);
 #endif /* SOCKETS */
 
 extern kauth_scope_t	kauth_scope_fileop;
+
+extern int cs_debug;
 
 #define f_flag f_fglob->fg_flag
 #define f_type f_fglob->fg_type
@@ -260,7 +262,7 @@ proc_fdunlock(proc_t p)
  *		*retval (modified)		Size of dtable
  */
 int
-getdtablesize(proc_t p, __unused struct getdtablesize_args *uap, register_t *retval)
+getdtablesize(proc_t p, __unused struct getdtablesize_args *uap, int32_t *retval)
 {
 	proc_fdlock_spin(p);
 	*retval = min((int)p->p_rlimit[RLIMIT_NOFILE].rlim_cur, maxfiles);
@@ -351,6 +353,82 @@ _fdrelse(struct proc * p, int fd)
 }
 
 
+int
+fd_rdwr(
+	int fd,
+	enum uio_rw rw,
+	uint64_t base,
+	int64_t len,
+	enum uio_seg segflg,
+	off_t	offset,
+	int	io_flg,
+	int64_t *aresid)
+{
+        struct fileproc *fp;
+	proc_t	p;
+        int error = 0;
+	int flags = 0;
+	int spacetype;
+	uio_t auio = NULL;
+	char uio_buf[ UIO_SIZEOF(1) ];
+	struct vfs_context context = *(vfs_context_current());
+
+	p = current_proc();
+
+        error = fp_lookup(p, fd, &fp, 0);
+        if (error)
+                return(error);
+
+	if (fp->f_type != DTYPE_VNODE && fp->f_type != DTYPE_PIPE && fp->f_type != DTYPE_SOCKET) {
+		error = EINVAL;
+		goto out;
+	}
+	if (rw == UIO_WRITE && !(fp->f_flag & FWRITE)) {
+                error = EBADF;
+		goto out;
+	}
+	
+	if (rw == UIO_READ && !(fp->f_flag & FREAD)) {
+    		error = EBADF;
+    		goto out;
+	}
+	
+	context.vc_ucred = fp->f_fglob->fg_cred;
+
+	if (UIO_SEG_IS_USER_SPACE(segflg))
+		spacetype = proc_is64bit(p) ? UIO_USERSPACE64 : UIO_USERSPACE32;
+	else
+		spacetype = UIO_SYSSPACE;
+
+	auio = uio_createwithbuffer(1, offset, spacetype, rw, &uio_buf[0], sizeof(uio_buf));
+
+	uio_addiov(auio, base, len);
+
+	if ( !(io_flg & IO_APPEND))
+		flags = FOF_OFFSET;
+
+	if (rw == UIO_WRITE)
+		error = fo_write(fp, auio, flags, &context);
+	else
+		error = fo_read(fp, auio, flags, &context);
+
+	if (aresid)
+		*aresid = uio_resid(auio);
+	else {
+		if (uio_resid(auio) && error == 0)
+			error = EIO;
+	}
+out:
+        if (rw == UIO_WRITE && error == 0)
+                fp_drop_written(p, fd, fp);
+        else
+                fp_drop(p, fd, fp, 0);
+
+	return error;
+}
+
+
+
 /*
  * dup
  *
@@ -367,7 +445,7 @@ _fdrelse(struct proc * p, int fd)
  *		*retval (modified)		The new descriptor
  */
 int
-dup(proc_t p, struct dup_args *uap, register_t *retval)
+dup(proc_t p, struct dup_args *uap, int32_t *retval)
 {
 	struct filedesc *fdp = p->p_fd;
 	int old = uap->fd;
@@ -409,7 +487,7 @@ dup(proc_t p, struct dup_args *uap, register_t *retval)
  *		*retval (modified)		The new descriptor
  */
 int
-dup2(proc_t p, struct dup2_args *uap, register_t *retval)
+dup2(proc_t p, struct dup2_args *uap, int32_t *retval)
 {
 	struct filedesc *fdp = p->p_fd;
 	int old = uap->from, new = uap->to;
@@ -514,7 +592,7 @@ closeit:
  *		blocking operation.
  */
 int
-fcntl(proc_t p, struct fcntl_args *uap, register_t *retval)
+fcntl(proc_t p, struct fcntl_args *uap, int32_t *retval)
 {
 	__pthread_testcancel(1);
 	return(fcntl_nocancel(p, (struct fcntl_nocancel_args *)uap, retval));
@@ -575,7 +653,7 @@ fcntl(proc_t p, struct fcntl_args *uap, register_t *retval)
  *		*retval (modified)		fcntl return value (if any)
  */
 int
-fcntl_nocancel(proc_t p, struct fcntl_nocancel_args *uap, register_t *retval)
+fcntl_nocancel(proc_t p, struct fcntl_nocancel_args *uap, int32_t *retval)
 {
 	int fd = uap->fd;
 	struct filedesc *fdp = p->p_fd;
@@ -591,6 +669,7 @@ fcntl_nocancel(proc_t p, struct fcntl_nocancel_args *uap, register_t *retval)
 	int devBlockSize = 0;
 	unsigned int fflag;
 	user_addr_t argp;
+	boolean_t is64bit;
 
 	AUDIT_ARG(fd, uap->fd);
 	AUDIT_ARG(cmd, uap->cmd);
@@ -602,7 +681,9 @@ fcntl_nocancel(proc_t p, struct fcntl_nocancel_args *uap, register_t *retval)
 	}
 	context.vc_thread = current_thread();
 	context.vc_ucred = fp->f_cred;
-	if (proc_is64bit(p)) {
+
+	is64bit = proc_is64bit(p);
+	if (is64bit) {
 		argp = uap->arg;
 	}
 	else {
@@ -615,7 +696,7 @@ fcntl_nocancel(proc_t p, struct fcntl_nocancel_args *uap, register_t *retval)
 		 * from a 32-bit process we lop off the top 32-bits to avoid
 		 * getting the wrong address
 		 */
-		argp = CAST_USER_ADDR_T(uap->arg);
+		argp = CAST_USER_ADDR_T((uint32_t)uap->arg);
 	}
 
 	pop = &fdp->fd_ofileflags[fd];
@@ -630,7 +711,8 @@ fcntl_nocancel(proc_t p, struct fcntl_nocancel_args *uap, register_t *retval)
 	switch (uap->cmd) {
 
 	case F_DUPFD:
-		newmin = CAST_DOWN(int, uap->arg);
+		newmin = CAST_DOWN_EXPLICIT(int, uap->arg); /* arg is an int, so we won't lose bits */
+		AUDIT_ARG(value32, newmin);
 		if ((u_int)newmin >= p->p_rlimit[RLIMIT_NOFILE].rlim_cur ||
 		    newmin >= maxfiles) {
 			error = EINVAL;
@@ -647,6 +729,7 @@ fcntl_nocancel(proc_t p, struct fcntl_nocancel_args *uap, register_t *retval)
 		goto out;
 
 	case F_SETFD:
+		AUDIT_ARG(value32, uap->arg);
 		*pop = (*pop &~ UF_EXCLOSE) |
 			(uap->arg & 1)? UF_EXCLOSE : 0;
 		error = 0;
@@ -659,7 +742,8 @@ fcntl_nocancel(proc_t p, struct fcntl_nocancel_args *uap, register_t *retval)
 
 	case F_SETFL:
 		fp->f_flag &= ~FCNTLFLAGS;
-		tmp = CAST_DOWN(int, uap->arg);
+		tmp = CAST_DOWN_EXPLICIT(int, uap->arg); /* arg is an int, so we won't lose bits */
+		AUDIT_ARG(value32, tmp);
 		fp->f_flag |= FFLAGS(tmp) & FCNTLFLAGS;
 		tmp = fp->f_flag & FNONBLOCK;
 		error = fo_ioctl(fp, FIONBIO, (caddr_t)&tmp, &context);
@@ -685,7 +769,8 @@ fcntl_nocancel(proc_t p, struct fcntl_nocancel_args *uap, register_t *retval)
 		goto out;
 
 	case F_SETOWN:
-		tmp = CAST_DOWN(pid_t, uap->arg);
+		tmp = CAST_DOWN_EXPLICIT(pid_t, uap->arg); /* arg is an int, so we won't lose bits */
+		AUDIT_ARG(value32, tmp);
 		if (fp->f_type == DTYPE_SOCKET) {
 			((struct socket *)fp->f_data)->so_pgid = tmp;
 			error =0;
@@ -759,7 +844,7 @@ fcntl_nocancel(proc_t p, struct fcntl_nocancel_args *uap, register_t *retval)
 				goto outdrop;
 			}
 			// XXX UInt32 unsafe for LP64 kernel
-			OSBitOrAtomic(P_LADVLOCK, (UInt32 *)&p->p_ladvflag);
+			OSBitOrAtomic(P_LADVLOCK, &p->p_ladvflag);
 			error = VNOP_ADVLOCK(vp, (caddr_t)p, F_SETLK, &fl, flg, &context);
 			(void)vnode_put(vp);
 			goto outdrop;
@@ -771,7 +856,7 @@ fcntl_nocancel(proc_t p, struct fcntl_nocancel_args *uap, register_t *retval)
 				goto outdrop;
 			}
 			// XXX UInt32 unsafe for LP64 kernel
-			OSBitOrAtomic(P_LADVLOCK, (UInt32 *)&p->p_ladvflag);
+			OSBitOrAtomic(P_LADVLOCK, &p->p_ladvflag);
 			error = VNOP_ADVLOCK(vp, (caddr_t)p, F_SETLK, &fl, flg, &context);
 			(void)vnode_put(vp);
 			goto outdrop;
@@ -955,6 +1040,7 @@ fcntl_nocancel(proc_t p, struct fcntl_nocancel_args *uap, register_t *retval)
 		error = copyin(argp, (caddr_t)&offset, sizeof (off_t));
 		if (error)
 			goto outdrop;
+		AUDIT_ARG(value64, offset);
 
 		error = vnode_getwithref(vp);
 		if (error)
@@ -1074,7 +1160,7 @@ fcntl_nocancel(proc_t p, struct fcntl_nocancel_args *uap, register_t *retval)
 
 	case F_READBOOTSTRAP:
 	case F_WRITEBOOTSTRAP: {
-		fbootstraptransfer_t fbt_struct;
+		user32_fbootstraptransfer_t user32_fbt_struct;
 		user_fbootstraptransfer_t user_fbt_struct;
 		int	sizeof_struct;
 		caddr_t boot_structp;
@@ -1091,8 +1177,8 @@ fcntl_nocancel(proc_t p, struct fcntl_nocancel_args *uap, register_t *retval)
 			boot_structp = (caddr_t) &user_fbt_struct;
 		}
 		else {
-			sizeof_struct = sizeof(fbt_struct);
-			boot_structp = (caddr_t) &fbt_struct;
+			sizeof_struct = sizeof(user32_fbt_struct);
+			boot_structp = (caddr_t) &user32_fbt_struct;
 		}
 		error = copyin(argp, boot_structp, sizeof_struct);
 		if (error)
@@ -1204,6 +1290,7 @@ fcntl_nocancel(proc_t p, struct fcntl_nocancel_args *uap, register_t *retval)
 
 		if ( (error = copyinstr(argp, pathbufp, MAXPATHLEN, &pathlen)) == 0 ) {
 		        if ( (error = vnode_getwithref(vp)) == 0 ) {
+				AUDIT_ARG(text, pathbufp);
 			        error = vn_path_package_check(vp, pathbufp, pathlen, retval);
 
 				(void)vnode_put(vp);
@@ -1266,7 +1353,7 @@ fcntl_nocancel(proc_t p, struct fcntl_nocancel_args *uap, register_t *retval)
 		if (IS_64BIT_PROCESS(p)) {
 			error = copyin(argp, &fopen, sizeof(fopen));
 		} else {
-			struct fopenfrom fopen32;
+			struct user32_fopenfrom fopen32;
 
 			error = copyin(argp, &fopen32, sizeof(fopen32));
 			fopen.o_flags = fopen32.o_flags;
@@ -1277,6 +1364,8 @@ fcntl_nocancel(proc_t p, struct fcntl_nocancel_args *uap, register_t *retval)
 			vnode_put(vp);
 			goto outdrop;
 		}
+		AUDIT_ARG(fflags, fopen.o_flags);
+		AUDIT_ARG(mode, fopen.o_mode);
 		VATTR_INIT(&va);
 		/* Mask off all but regular access permissions */
 		cmode = ((fopen.o_mode &~ fdp->fd_cmask) & ALLPERMS) & ~S_ISTXT;
@@ -1338,10 +1427,12 @@ fcntl_nocancel(proc_t p, struct fcntl_nocancel_args *uap, register_t *retval)
 
 	}
 
-	case F_ADDSIGS: {
+	case F_ADDSIGS:
+	case F_ADDFILESIGS:
+	{
 		struct user_fsignatures fs;
 		kern_return_t kr;
-		vm_address_t kernel_blob_addr;
+		vm_offset_t kernel_blob_addr;
 		vm_size_t kernel_blob_size;
 
 		if (fp->f_type != DTYPE_VNODE) {
@@ -1357,7 +1448,7 @@ fcntl_nocancel(proc_t p, struct fcntl_nocancel_args *uap, register_t *retval)
 		if (IS_64BIT_PROCESS(p)) {
 			error = copyin(argp, &fs, sizeof (fs));
 		} else {
-			struct fsignatures fs32;
+			struct user32_fsignatures fs32;
 
 			error = copyin(argp, &fs32, sizeof (fs32));
 			fs.fs_file_start = fs32.fs_file_start;
@@ -1370,6 +1461,16 @@ fcntl_nocancel(proc_t p, struct fcntl_nocancel_args *uap, register_t *retval)
 			goto outdrop;
 		}
 
+		if(ubc_cs_blob_get(vp, CPU_TYPE_ANY, fs.fs_file_start))
+		{
+			/*
+			if(cs_debug)
+				printf("CODE SIGNING: resident blob offered for: %s\n", vp->v_name);
+			 */
+			vnode_put(vp);
+			goto outdrop;
+		}
+				   
 #define CS_MAX_BLOB_SIZE (1ULL * 1024 * 1024) /* XXX ? */
 		if (fs.fs_blob_size > CS_MAX_BLOB_SIZE) {
 			error = E2BIG;
@@ -1378,22 +1479,33 @@ fcntl_nocancel(proc_t p, struct fcntl_nocancel_args *uap, register_t *retval)
 		}
 
 		kernel_blob_size = CAST_DOWN(vm_size_t, fs.fs_blob_size);
-		kr = kmem_alloc(kernel_map,
-				&kernel_blob_addr,
-				kernel_blob_size);
+		kr = ubc_cs_blob_allocate(&kernel_blob_addr, &kernel_blob_size);
 		if (kr != KERN_SUCCESS) {
 			error = ENOMEM;
 			vnode_put(vp);
 			goto outdrop;
 		}
 
-		error = copyin(fs.fs_blob_start,
-			       (void *) kernel_blob_addr,
-			       kernel_blob_size);
+		if(uap->cmd == F_ADDSIGS) {
+			error = copyin(fs.fs_blob_start,
+				       (void *) kernel_blob_addr,
+				       kernel_blob_size);
+		} else /* F_ADDFILESIGS */ {
+			error = vn_rdwr(UIO_READ,
+					vp,
+					(caddr_t) kernel_blob_addr,
+					kernel_blob_size,
+					 fs.fs_file_start + fs.fs_blob_start,
+					UIO_SYSSPACE,
+					0,
+					kauth_cred_get(),
+					0,
+					p);
+		}
+		
 		if (error) {
-			kmem_free(kernel_map,
-				  kernel_blob_addr,
-				  kernel_blob_size);
+			ubc_cs_blob_deallocate(kernel_blob_addr,
+					       kernel_blob_size);
 			vnode_put(vp);
 			goto outdrop;
 		}
@@ -1405,11 +1517,10 @@ fcntl_nocancel(proc_t p, struct fcntl_nocancel_args *uap, register_t *retval)
 			kernel_blob_addr,
 			kernel_blob_size);
 		if (error) {
-			kmem_free(kernel_map,
-				  kernel_blob_addr,
-				  kernel_blob_size);
+			ubc_cs_blob_deallocate(kernel_blob_addr,
+					       kernel_blob_size);
 		} else {
-			/* ubc_blob_add() was consumed "kernel_blob_addr" */
+			/* ubc_blob_add() has consumed "kernel_blob_addr" */
 		}
 
 		(void) vnode_put(vp);
@@ -1476,13 +1587,17 @@ fcntl_nocancel(proc_t p, struct fcntl_nocancel_args *uap, register_t *retval)
 	}
 
 	default:
-		if (uap->cmd < FCNTL_FS_SPECIFIC_BASE) {
-			error = EINVAL;
+		/*
+		 * This is an fcntl() that we d not recognize at this level;
+		 * if this is a vnode, we send it down into the VNOP_IOCTL
+		 * for this vnode; this can include special devices, and will
+		 * effectively overload fcntl() to send ioctl()'s.
+		 */
+		if((uap->cmd & IOC_VOID) && (uap->cmd & IOC_INOUT)){
+                	error = EINVAL;
 			goto out;
 		}
-
-		// if it's a fs-specific fcntl() then just pass it through
-
+		
 		if (fp->f_type != DTYPE_VNODE) {
 			error = EBADF;
 			goto out;
@@ -1491,12 +1606,82 @@ fcntl_nocancel(proc_t p, struct fcntl_nocancel_args *uap, register_t *retval)
 		proc_fdunlock(p);
 
 		if ( (error = vnode_getwithref(vp)) == 0 ) {
-			error = VNOP_IOCTL(vp, uap->cmd, CAST_DOWN(caddr_t, argp), 0, &context);
+#define STK_PARAMS 128
+			char stkbuf[STK_PARAMS];
+			unsigned int size;
+			caddr_t data, memp;
+			/*
+			 * For this to work properly, we have to copy in the
+			 * ioctl() cmd argument if there is one; we must also
+			 * check that a command parameter, if present, does
+			 * not exceed the maximum command length dictated by
+			 * the number of bits we have available in the command
+			 * to represent a structure length.  Finally, we have
+			 * to copy the results back out, if it is that type of
+			 * ioctl().
+			 */
+			size = IOCPARM_LEN(uap->cmd);
+			if (size > IOCPARM_MAX) {
+				(void)vnode_put(vp);
+				error = EINVAL;
+				break;
+			}
+
+			memp = NULL;
+			if (size > sizeof (stkbuf)) {
+				if ((memp = (caddr_t)kalloc(size)) == 0) {
+					(void)vnode_put(vp);
+					error = ENOMEM;
+					goto outdrop;
+				}
+				data = memp;
+			} else {
+				data = &stkbuf[0];
+			}
+			
+			if (uap->cmd & IOC_IN) {
+				if (size) {
+					/* structure */
+					error = copyin(argp, data, size);
+					if (error) {
+						(void)vnode_put(vp);
+						if (memp)
+							kfree(memp, size);
+						goto outdrop;
+					}
+				} else {
+					/* int */
+					if (is64bit) {
+						*(user_addr_t *)data = argp;
+					} else {
+						*(uint32_t *)data = (uint32_t)argp;
+					}
+				};
+			} else if ((uap->cmd & IOC_OUT) && size) {
+				/*
+				 * Zero the buffer so the user always
+				 * gets back something deterministic.
+				 */
+				bzero(data, size);
+			} else if (uap->cmd & IOC_VOID) {
+				if (is64bit) {
+				    *(user_addr_t *)data = argp;
+				} else {
+				    *(uint32_t *)data = (uint32_t)argp;
+				}
+			}
+
+			error = VNOP_IOCTL(vp, uap->cmd, CAST_DOWN(caddr_t, data), 0, &context);
 
 			(void)vnode_put(vp);
+
+			/* Copy any output data to user */
+			if (error == 0 && (uap->cmd & IOC_OUT) && size) 
+				error = copyout(data, argp, size);
+			if (memp)
+				kfree(memp, size);
 		}
 		break;
-	
 	}
 
 outdrop:
@@ -1535,7 +1720,7 @@ out:
  *		has not been subsequently changes out from under it.
  */
 int
-finishdup(proc_t p, struct filedesc *fdp, int old, int new, register_t *retval)
+finishdup(proc_t p, struct filedesc *fdp, int old, int new, int32_t *retval)
 {
 	struct fileproc *nfp;
 	struct fileproc *ofp;
@@ -1614,7 +1799,7 @@ finishdup(proc_t p, struct filedesc *fdp, int old, int new, register_t *retval)
  *					close function
  */
 int
-close(proc_t p, struct close_args *uap, register_t *retval)
+close(proc_t p, struct close_args *uap, int32_t *retval)
 {
 	__pthread_testcancel(1);
 	return(close_nocancel(p, (struct close_nocancel_args *)uap, retval));
@@ -1622,7 +1807,7 @@ close(proc_t p, struct close_args *uap, register_t *retval)
 
 
 int
-close_nocancel(proc_t p, struct close_nocancel_args *uap, __unused register_t *retval)
+close_nocancel(proc_t p, struct close_nocancel_args *uap, __unused int32_t *retval)
 {
 	struct fileproc *fp;
 	int fd = uap->fd;
@@ -1795,10 +1980,16 @@ static int
 fstat1(proc_t p, int fd, user_addr_t ub, user_addr_t xsecurity, user_addr_t xsecurity_size, int isstat64)
 {
 	struct fileproc *fp;
-	struct stat sb;
-	struct stat64 sb64;
-	struct user_stat user_sb;
-	struct user_stat64 user_sb64;
+	union {
+		struct stat sb;
+		struct stat64 sb64;
+	} source;
+	union {
+		struct user64_stat user64_sb;
+		struct user32_stat user32_sb;
+		struct user64_stat64 user64_sb64;
+		struct user32_stat64 user32_sb64;
+	} dest;
 	int error, my_size;
 	int funnel_state;
 	file_type_t type;
@@ -1818,7 +2009,7 @@ fstat1(proc_t p, int fd, user_addr_t ub, user_addr_t xsecurity, user_addr_t xsec
 	data = fp->f_data;
 	fsec = KAUTH_FILESEC_NONE;
 
-	sbptr = (isstat64 != 0) ? (void *)&sb64: (void *)&sb;
+	sbptr = (void *)&source;
 
 	switch (type) {
 
@@ -1868,28 +2059,31 @@ fstat1(proc_t p, int fd, user_addr_t ub, user_addr_t xsecurity, user_addr_t xsec
 		caddr_t sbp;
 
 		if (isstat64 != 0) {
-			sb64.st_lspare = 0;
-			sb64.st_qspare[0] = 0LL;
-			sb64.st_qspare[1] = 0LL;
+			source.sb64.st_lspare = 0;
+			source.sb64.st_qspare[0] = 0LL;
+			source.sb64.st_qspare[1] = 0LL;
+
 			if (IS_64BIT_PROCESS(current_proc())) {
-				munge_stat64(&sb64, &user_sb64); 
-				my_size = sizeof(user_sb64);
-				sbp = (caddr_t)&user_sb64;
+				munge_user64_stat64(&source.sb64, &dest.user64_sb64); 
+				my_size = sizeof(dest.user64_sb64);
+				sbp = (caddr_t)&dest.user64_sb64;
 			} else {
-				my_size = sizeof(sb64);
-				sbp = (caddr_t)&sb64;
+				munge_user32_stat64(&source.sb64, &dest.user32_sb64); 
+				my_size = sizeof(dest.user32_sb64);
+				sbp = (caddr_t)&dest.user32_sb64;
 			}
 		} else {
-			sb.st_lspare = 0;
-			sb.st_qspare[0] = 0LL;
-			sb.st_qspare[1] = 0LL;
+			source.sb.st_lspare = 0;
+			source.sb.st_qspare[0] = 0LL;
+			source.sb.st_qspare[1] = 0LL;
 			if (IS_64BIT_PROCESS(current_proc())) {
-				munge_stat(&sb, &user_sb); 
-				my_size = sizeof(user_sb);
-				sbp = (caddr_t)&user_sb;
+				munge_user64_stat(&source.sb, &dest.user64_sb); 
+				my_size = sizeof(dest.user64_sb);
+				sbp = (caddr_t)&dest.user64_sb;
 			} else {
-				my_size = sizeof(sb);
-				sbp = (caddr_t)&sb;
+				munge_user32_stat(&source.sb, &dest.user32_sb); 
+				my_size = sizeof(dest.user32_sb);
+				sbp = (caddr_t)&dest.user32_sb;
 			}
 		}
 
@@ -1945,7 +2139,7 @@ out:
  *		!0				Errno (see fstat1)
  */
 int
-fstat_extended(proc_t p, struct fstat_extended_args *uap, __unused register_t *retval)
+fstat_extended(proc_t p, struct fstat_extended_args *uap, __unused int32_t *retval)
 {
 	return(fstat1(p, uap->fd, uap->ub, uap->xsecurity, uap->xsecurity_size, 0));
 }
@@ -1964,7 +2158,7 @@ fstat_extended(proc_t p, struct fstat_extended_args *uap, __unused register_t *r
  *		!0				Errno (see fstat1)
  */
 int
-fstat(proc_t p, register struct fstat_args *uap, __unused register_t *retval)
+fstat(proc_t p, register struct fstat_args *uap, __unused int32_t *retval)
 {
 	return(fstat1(p, uap->fd, uap->ub, 0, 0, 0));
 }
@@ -1987,7 +2181,7 @@ fstat(proc_t p, register struct fstat_args *uap, __unused register_t *retval)
  *		!0				Errno (see fstat1)
  */
 int
-fstat64_extended(proc_t p, struct fstat64_extended_args *uap, __unused register_t *retval)
+fstat64_extended(proc_t p, struct fstat64_extended_args *uap, __unused int32_t *retval)
 {
 	return(fstat1(p, uap->fd, uap->ub, uap->xsecurity, uap->xsecurity_size, 1));
 }
@@ -2007,7 +2201,7 @@ fstat64_extended(proc_t p, struct fstat64_extended_args *uap, __unused register_
  *		!0				Errno (see fstat1)
  */
 int
-fstat64(proc_t p, register struct fstat64_args *uap, __unused register_t *retval)
+fstat64(proc_t p, register struct fstat64_args *uap, __unused int32_t *retval)
 {
 	return(fstat1(p, uap->fd, uap->ub, 0, 0, 1));
 }
@@ -2033,7 +2227,7 @@ fstat64(proc_t p, register struct fstat64_args *uap, __unused register_t *retval
  *		*retval (modified)		Returned information (numeric)
  */
 int
-fpathconf(proc_t p, struct fpathconf_args *uap, register_t *retval)
+fpathconf(proc_t p, struct fpathconf_args *uap, int32_t *retval)
 {
 	int fd = uap->fd;
 	struct fileproc *fp;
@@ -2052,8 +2246,8 @@ fpathconf(proc_t p, struct fpathconf_args *uap, register_t *retval)
 	switch (type) {
 
 	case DTYPE_SOCKET:
-	        if (uap->name != _PC_PIPE_BUF) {
-		        error = EINVAL;
+		if (uap->name != _PC_PIPE_BUF) {
+			error = EINVAL;
 			goto out;
 		}
 		*retval = PIPE_BUF;
@@ -2061,7 +2255,11 @@ fpathconf(proc_t p, struct fpathconf_args *uap, register_t *retval)
 		goto out;
 
 	case DTYPE_PIPE:
-	        *retval = PIPE_BUF;
+		if (uap->name != _PC_PIPE_BUF) {
+			error = EINVAL;
+			goto out;
+		}
+		*retval = PIPE_BUF;
 		error = 0;
 		goto out;
 
@@ -2700,7 +2898,7 @@ fp_getfpipe(proc_t p, int fd, struct fileproc **resultfp,
 	return (0);
 }
 
-
+#if NETAT
 #define DTYPE_ATALK -1		/* XXX This does not belong here */
 
 
@@ -2760,6 +2958,7 @@ fp_getfatalk(proc_t p, int fd, struct fileproc **resultfp,
 	return (0);
 }
 
+#endif /* NETAT */
 
 /*
  * fp_lookup
@@ -2989,7 +3188,75 @@ file_vnode(int fd, struct vnode **vpp)
 		proc_fdunlock(p);
 		return(EINVAL);
 	}
-	*vpp = (struct vnode *)fp->f_data;
+	if (vpp != NULL)
+		*vpp = (struct vnode *)fp->f_data;
+	proc_fdunlock(p);
+
+	return(0);
+}
+
+
+/*
+ * file_vnode_withvid
+ *
+ * Description:	Given an fd, look it up in the current process's per process
+ *		open file table, and return its internal vnode pointer.
+ *
+ * Parameters:	fd				fd to obtain vnode from
+ *		vpp				pointer to vnode return area
+ *		vidp				pointer to vid of the returned vnode
+ *
+ * Returns:	0				Success
+ *		EINVAL				The fd does not refer to a
+ *						vnode fileproc entry
+ *	fp_lookup:EBADF				Bad file descriptor
+ *
+ * Implicit returns:
+ *		*vpp (modified)			Returned vnode pointer
+ *
+ * Locks:	This function internally takes and drops the proc_fdlock for
+ *		the current process
+ *
+ * Notes:	If successful, this function increments the f_iocount on the
+ *		fd's corresponding fileproc.
+ *
+ *		The fileproc referenced is not returned; because of this, care
+ *		must be taken to not drop the last reference (e.g. by closing
+ *		the file).  This is inhernely unsafe, since the reference may
+ *		not be recoverable from the vnode, if there is a subsequent
+ *		close that destroys the associate fileproc.  The caller should
+ *		therefore retain their own reference on the fileproc so that
+ *		the f_iocount can be dropped subsequently.  Failure to do this
+ *		can result in the returned pointer immediately becoming invalid
+ *		following the call.
+ *
+ *		Use of this function is discouraged.
+ */
+int
+file_vnode_withvid(int fd, struct vnode **vpp, uint32_t * vidp)
+{
+	proc_t p = current_proc();
+	struct fileproc *fp;
+	vnode_t vp;
+	int error;
+	
+	proc_fdlock_spin(p);
+	if ( (error = fp_lookup(p, fd, &fp, 1)) ) {
+		proc_fdunlock(p);
+		return(error);
+	}
+	if (fp->f_type != DTYPE_VNODE) {
+		fp_drop(p, fd, fp,1);
+		proc_fdunlock(p);
+		return(EINVAL);
+	}
+	vp = (struct vnode *)fp->f_data;
+	if (vpp != NULL) 
+		*vpp = vp;
+
+	if ((vidp != NULL) && (vp != NULLVP)) 
+		*vidp = (uint32_t)vp->v_id;
+
 	proc_fdunlock(p);
 
 	return(0);
@@ -3409,10 +3676,12 @@ void
 fdexec(proc_t p)
 {
 	struct filedesc *fdp = p->p_fd;
-	int i = fdp->fd_lastfile;
+	int i;
 	struct fileproc *fp;
 
 	proc_fdlock(p);
+	i = fdp->fd_lastfile;
+
 	while (i >= 0) {
 
 		fp = fdp->fd_ofiles[i];
@@ -3612,6 +3881,7 @@ fdcopy(proc_t p, vnode_t uth_cdir)
 			for (i = newfdp->fd_lastfile; i >= 0; i--, fpp--) {
 				if (*fpp != NULL && (*fpp)->f_type == DTYPE_KQUEUE) {
 					*fpp = NULL;
+					newfdp->fd_ofileflags[i] = 0;
 					if (i < newfdp->fd_freefile)
 						newfdp->fd_freefile = i;
 				}
@@ -3865,16 +4135,14 @@ closef_locked(struct fileproc *fp, struct fileglob *fg, proc_t p)
 	fg->fg_lflags |= FG_TERM;
 	lck_mtx_unlock(&fg->fg_lock);
 
-	proc_fdunlock(p);
+	if (p)
+		proc_fdunlock(p);
 	error = closef_finish(fp, fg, p, &context);
-	proc_fdlock(p);
+	if (p)
+		proc_fdlock(p);
 
 	return(error);
 }
-
-
-/* sleep address to permit wakeup of select by fileproc_drain() */
-extern int selwait;
 
 
 /*
@@ -3912,13 +4180,12 @@ fileproc_drain(proc_t p, struct fileproc * fp)
 
 	        lck_mtx_convert_spin(&p->p_fdmlock);
 
-		if (((fp->f_flags & FP_INSELECT)== FP_INSELECT)) {
-			wait_queue_wakeup_all((wait_queue_t)fp->f_waddr, &selwait, THREAD_INTERRUPTED);
-		} else  {
-			if (fp->f_fglob->fg_ops->fo_drain) {
-				(*fp->f_fglob->fg_ops->fo_drain)(fp, &context);
-			}
+		if (fp->f_fglob->fg_ops->fo_drain) {
+			(*fp->f_fglob->fg_ops->fo_drain)(fp, &context);
 		}
+		if (((fp->f_flags & FP_INSELECT)== FP_INSELECT)) {
+			wait_queue_wakeup_all((wait_queue_t)fp->f_waddr, NULL, THREAD_INTERRUPTED);
+		} 
 		p->p_fpdrainwait = 1;
 
 		msleep(&p->p_fpdrainwait, &p->p_fdmlock, PRIBIO, "fpdrain", NULL);
@@ -3980,7 +4247,7 @@ fp_free(proc_t p, int fd, struct fileproc * fp)
  *		the entire file (l_whence = SEEK_SET, l_start = 0, l_len = 0).
  */
 int
-flock(proc_t p, struct flock_args *uap, __unused register_t *retval)
+flock(proc_t p, struct flock_args *uap, __unused int32_t *retval)
 {
 	int fd = uap->fd;
 	int how = uap->how;
@@ -4419,4 +4686,22 @@ int
 fo_kqfilter(struct fileproc *fp, struct knote *kn, vfs_context_t ctx)
 {
         return ((*fp->f_ops->fo_kqfilter)(fp, kn, ctx));
+}
+
+/*
+ * The ability to send a file descriptor to another
+ * process is opt-in by file type.
+ */
+boolean_t
+filetype_issendable(file_type_t fdtype) 
+{
+	switch (fdtype) {
+		case DTYPE_VNODE:
+		case DTYPE_SOCKET:
+		case DTYPE_PIPE:
+			return TRUE;
+		default:
+			/* DTYPE_KQUEUE, DTYPE_FSEVENTS, DTYPE_PSXSHM, DTYPE_PSXSEM */
+			return FALSE;
+	}
 }

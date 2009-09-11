@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2007 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2008 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -112,22 +112,12 @@ extern void *kdp_get_interface(void);
 extern void kdp_set_ip_and_mac_addresses(struct in_addr *ipaddr,
 										 struct ether_addr *macaddr);
 
-#if defined (__arm__)
-static __inline__ void
-_ip_copy(struct in_addr * dst, const struct in_addr * src)
-{
-	memcpy(dst, src, sizeof(*dst));
-	return;
-}
-
-#else
 static __inline__ void
 _ip_copy(struct in_addr * dst, const struct in_addr * src)
 {
 	*dst = *src;
 	return;
 }
-#endif
 
 static void
 ether_inet_arp_input(
@@ -312,10 +302,10 @@ ether_inet_resolve_multi(
 
 static errno_t
 ether_inet_prmod_ioctl(
-    ifnet_t						ifp,
+    ifnet_t			ifp,
     __unused protocol_family_t	protocol_family,
-    u_int32_t					command,
-    void*						data)
+    u_long			command,
+    void			*data)
 {
     ifaddr_t ifa = data;
     struct ifreq *ifr = data;
@@ -430,7 +420,7 @@ ether_inet_arp(
 	/* Move the data pointer in the mbuf to the end, aligned to 4 bytes */
 	datap = mbuf_datastart(m);
 	datap += mbuf_trailingspace(m);
-	datap -= (((u_long)datap) & 0x3);
+	datap -= (((uintptr_t)datap) & 0x3);
 	mbuf_setdata(m, datap, sizeof(*ea));
 	ea = mbuf_data(m);
 	

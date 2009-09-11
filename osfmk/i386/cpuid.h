@@ -95,9 +95,12 @@
 #define CPUID_FEATURE_CX16    _HBit(13)	/* CmpXchg16b instruction */
 #define CPUID_FEATURE_xTPR    _HBit(14)	/* Send Task PRiority msgs */
 #define CPUID_FEATURE_PDCM    _HBit(15)	/* Perf/Debug Capability MSR */
+#define CPUID_FEATURE_DCA     _HBit(18)	/* Direct Cache Access */
 #define CPUID_FEATURE_SSE4_1  _HBit(19)	/* Streaming SIMD extensions 4.1 */
-#define CPUID_FEATURE_SSE4_2  _HBit(20)	/* Streaming SIMD extensions 4.1 */
+#define CPUID_FEATURE_SSE4_2  _HBit(20)	/* Streaming SIMD extensions 4.2 */
+#define CPUID_FEATURE_xAPIC   _HBit(21)	/* Extended APIC Mode */
 #define CPUID_FEATURE_POPCNT  _HBit(23)	/* POPCNT instruction */
+#define CPUID_FEATURE_VMM     _HBit(31)	/* VMM (Hypervisor) present */
 
 /*
  * The CPUID_EXTFEATURE_XXX values define 64-bit values
@@ -105,83 +108,26 @@
  */
 #define CPUID_EXTFEATURE_SYSCALL   _Bit(11)	/* SYSCALL/sysret */
 #define CPUID_EXTFEATURE_XD	   _Bit(20)	/* eXecute Disable */
+#define CPUID_EXTFEATURE_RDTSCP	   _Bit(27)	/* RDTSCP */
 #define CPUID_EXTFEATURE_EM64T	   _Bit(29)	/* Extended Mem 64 Technology */
 
 #define CPUID_EXTFEATURE_LAHF	   _HBit(20)	/* LAFH/SAHF instructions */
 
-#define	CPUID_CACHE_SIZE	16	/* Number of descriptor vales */
+/*
+ * The CPUID_EXTFEATURE_XXX values define 64-bit values
+ * returned in %ecx:%edx to a CPUID request with %eax of 0x80000007: 
+ */
+#define CPUID_EXTFEATURE_TSCI      _Bit(8)	/* TSC Invariant */
 
-#define	CPUID_CACHE_NULL	   0x00	/* NULL */
-#define	CPUID_CACHE_ITLB_4K	   0x01	/* Instruction TLB: 4K pages */
-#define	CPUID_CACHE_ITLB_4M	   0x02	/* Instruction TLB: 4M pages */
-#define	CPUID_CACHE_DTLB_4K	   0x03	/* Data TLB: 4K pages */
-#define	CPUID_CACHE_DTLB_4M	   0x04	/* Data TLB: 4M pages */
-#define	CPUID_CACHE_ICACHE_8K	   0x06	/* Instruction cache: 8K */
-#define	CPUID_CACHE_ICACHE_16K	   0x08	/* Instruction cache: 16K */
-#define	CPUID_CACHE_DCACHE_8K	   0x0A	/* Data cache: 8K */
-#define	CPUID_CACHE_DCACHE_16K     0x0C	/* Data cache: 16K */
-#define CPUID_CACHE_L3_512K        0x22 /* L3: 512K */
-#define CPUID_CACHE_L3_1M          0x23 /* L3: 1M */
-#define CPUID_CACHE_L3_2M          0x25 /* L3: 2M */
-#define CPUID_CACHE_L3_4M          0x29 /* L3: 4M */
-#define CPUID_CACHE_DCACHE_32K     0x2C /* Data cache: 32K, 8-way */
-#define CPUID_CACHE_ICACHE_32K     0x30 /* Instruction cache: 32K, 8-way */
-#define CPUID_CACHE_L2_128K_S4     0x39 /* L2: 128K, 4-way, sectored */
-#define CPUID_CACHE_L2_128K_S2     0x3B /* L2: 128K, 2-way, sectored */
-#define CPUID_CACHE_L2_256K_S4     0x3C /* L2: 256K, 4-way, sectored */
-#define CPUID_CACHE_NOCACHE        0x40 /* No 2nd level or 3rd-level cache */
-#define	CPUID_CACHE_L2_128K	   0x41	/* L2: 128K */
-#define	CPUID_CACHE_L2_256K	   0x42	/* L2: 256K */
-#define	CPUID_CACHE_L2_512K	   0x43	/* L2: 512K */
-#define	CPUID_CACHE_L2_1M_4	   0x44	/* L2: 1M, 4-way */
-#define	CPUID_CACHE_L2_2M_4	   0x45	/* L2: 2M, 4-way */
-#define CPUID_CACHE_L3_4M_4_64     0x46 /* L3:  4M,  4-way, 64 bytes */
-#define CPUID_CACHE_L3_8M_8_64     0x47 /* L3:  8M,  8-way, 64 bytes*/
-#define CPUID_CACHE_L2_3M_12_64    0x48 /* L3:  3M,  8-way, 64 bytes*/
-#define CPUID_CACHE_L2_4M_16_64    0x49 /* L2:  4M, 16-way, 64 bytes */
-#define CPUID_CACHE_L2_6M_12_64    0x4A /* L2:  6M, 12-way, 64 bytes */
-#define CPUID_CACHE_L2_8M_16_64    0x4B /* L2:  8M, 16-way, 64 bytes */
-#define CPUID_CACHE_L2_12M_12_64   0x4C /* L2: 12M, 12-way, 64 bytes */
-#define CPUID_CACHE_L2_16M_16_64   0x4D /* L2: 16M, 16-way, 64 bytes */
-#define CPUID_CACHE_L2_6M_24_64    0x4E /* L2:  6M, 24-way, 64 bytes */
-#define CPUID_CACHE_ITLB_64        0x50 /* Instruction TLB: 64 entries */
-#define CPUID_CACHE_ITLB_128       0x51 /* Instruction TLB: 128 entries */
-#define CPUID_CACHE_ITLB_256       0x52 /* Instruction TLB: 256 entries */
-#define CPUID_CACHE_DTLB_4M_16_4   0x56 /* Data TLB: 4M, 16 entries, 4-way */
-#define CPUID_CACHE_DTLB_4K_16_4   0x56 /* Data TLB: 4K, 16 entries, 4-way */
-#define CPUID_CACHE_DTLB_64        0x5B /* Data TLB: 64 entries */
-#define CPUID_CACHE_DTLB_128       0x5C /* Data TLB: 128 entries */
-#define CPUID_CACHE_DTLB_256       0x5D /* Data TLB: 256 entries */
-#define	CPUID_CACHE_DCACHE_16K_8_64 0x60 /* Data cache: 16K, 8-way, 64 bytes */
-#define	CPUID_CACHE_DCACHE_8K_4_64  0x66 /* Data cache:  8K, 4-way, 64 bytes */
-#define	CPUID_CACHE_DCACHE_16K_4_64 0x67 /* Data cache: 16K, 4-way, 64 bytes */
-#define	CPUID_CACHE_DCACHE_32K_4_64 0x68 /* Data cache: 32K, 4-way, 64 bytes */
-#define CPUID_CACHE_TRACE_12K_8    0x70 /* Trace cache 12K-uop, 8-way */
-#define CPUID_CACHE_TRACE_16K_8    0x71 /* Trace cache 16K-uop, 8-way */
-#define CPUID_CACHE_TRACE_32K_8    0x72 /* Trace cache 32K-uop, 8-way */
-#define	CPUID_CACHE_L2_1M_4_64     0x78 /* L2:   1M, 4-way, 64 bytes */
-#define	CPUID_CACHE_L2_128K_8_64_2 0x79 /* L2: 128K, 8-way, 64b, 2 lines/sec */
-#define	CPUID_CACHE_L2_256K_8_64_2 0x7A /* L2: 256K, 8-way, 64b, 2 lines/sec */
-#define	CPUID_CACHE_L2_512K_8_64_2 0x7B /* L2: 512K, 8-way, 64b, 2 lines/sec */
-#define	CPUID_CACHE_L2_1M_8_64_2   0x7C /* L2:   1M, 8-way, 64b, 2 lines/sec */
-#define	CPUID_CACHE_L2_2M_8_64     0x7D /* L2:   2M, 8-way, 64 bytes */
-#define	CPUID_CACHE_L2_512K_2_64   0x7F /* L2: 512K, 2-way, 64 bytes */
-#define CPUID_CACHE_L2_256K_8_32   0x82 /* L2: 256K, 8-way, 32 bytes */
-#define CPUID_CACHE_L2_512K_8_32   0x83 /* L2: 512K, 8-way, 32 bytes */
-#define CPUID_CACHE_L2_1M_8_32     0x84 /* L2:   1M, 8-way, 32 bytes */
-#define CPUID_CACHE_L2_2M_8_32     0x85 /* L2:   2M, 8-way, 32 bytes */
-#define CPUID_CACHE_L2_512K_4_64   0x86 /* L2: 512K, 4-way, 64 bytes */
-#define CPUID_CACHE_L2_1M_8_64     0x87 /* L2:   1M, 8-way, 64 bytes */
-#define CPUID_CACHE_ITLB_4K_128_4  0xB0 /* ITLB: 4KB, 128 entries, 4-way */
-#define CPUID_CACHE_ITLB_4M_4_4    0xB1 /* ITLB: 4MB,   4 entries, 4-way, or  */
-#define CPUID_CACHE_ITLB_2M_8_4    0xB1 /* ITLB: 2MB,   8 entries, 4-way */
-#define CPUID_CACHE_DTLB_4K_128_4  0xB3 /* DTLB: 4KB, 128 entries, 4-way */
-#define CPUID_CACHE_DTLB_4K_256_4  0xB4 /* DTLB: 4KB, 256 entries, 4-way */
-#define CPUID_CACHE_PREFETCH_64    0xF0 /* 64-Byte Prefetching */
-#define CPUID_CACHE_PREFETCH_128   0xF1 /* 128-Byte Prefetching */
+#define	CPUID_CACHE_SIZE	16	/* Number of descriptor values */
 
 #define CPUID_MWAIT_EXTENSION	_Bit(0)	/* enumeration of WMAIT extensions */
 #define CPUID_MWAIT_BREAK	_Bit(1)	/* interrupts are break events	   */
+
+#define CPUID_MODEL_YONAH	14
+#define CPUID_MODEL_MEROM	15
+#define CPUID_MODEL_PENRYN	23
+#define CPUID_MODEL_NEHALEM	26
 
 #ifndef ASSEMBLER
 #include <stdint.h>
@@ -297,6 +243,23 @@ typedef struct {
 	/* Virtual and physical address aize: */
 	uint32_t	cpuid_address_bits_physical;
 	uint32_t	cpuid_address_bits_virtual;
+
+	uint32_t	cpuid_microcode_version;
+
+	/* Numbers of tlbs per processor [i|d, small|large, level0|level1] */
+	uint32_t	cpuid_tlb[2][2][2];
+			#define	TLB_INST	0
+			#define	TLB_DATA	1
+			#define	TLB_SMALL	0
+			#define	TLB_LARGE	1
+	uint32_t	cpuid_stlb;
+
+	uint32_t	core_count;
+	uint32_t	thread_count;
+
+	/* Max leaf ids available from CPUID */
+	uint32_t	cpuid_max_basic;
+	uint32_t	cpuid_max_ext;
 } i386_cpu_info_t;
 
 #ifdef __cplusplus

@@ -99,7 +99,7 @@ extern uint64_t hpet2tsc;
 extern uint64_t bus2hpet;
 extern uint64_t hpet2bus;
 
-extern uint32_t rcbaArea;			
+extern vm_offset_t rcbaArea;			
 extern uint32_t rcbaAreap;
 
 extern void map_rcbaAread(void);

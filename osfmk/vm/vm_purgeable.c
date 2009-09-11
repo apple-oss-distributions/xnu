@@ -23,36 +23,46 @@
 
 #include <mach/mach_types.h>
 #include <vm/vm_page.h>
+#include <vm/vm_kern.h>				/* kmem_alloc */
 #include <vm/vm_purgeable_internal.h>
 #include <sys/kdebug.h>
+#include <kern/sched_prim.h>
 
 struct token {
 	token_cnt_t     count;
 	token_idx_t     next;
 };
 
-struct token    tokens[MAX_VOLATILE];
+struct token	*tokens;
+token_idx_t	token_q_max_cnt = 0;
+vm_size_t	token_q_cur_size = 0;
 
-token_idx_t     token_free_idx = 0;	/* head of free queue */
-token_cnt_t     token_init_count = 1;	/* token 0 is reserved!! */
-token_cnt_t     token_new_pagecount = 0;	/* count of pages that will
+token_idx_t     token_free_idx = 0;		/* head of free queue */
+token_idx_t     token_init_idx = 1;		/* token 0 is reserved!! */
+int32_t		token_new_pagecount = 0;	/* count of pages that will
 						 * be added onto token queue */
 
 int             available_for_purge = 0;	/* increase when ripe token
 						 * added, decrease when ripe
-						 * token removed protect with
-						 * page_queue_lock */
+						 * token removed.
+						 * protected by page_queue_lock 
+						 */
+
+static int token_q_allocating = 0;		/* flag for singlethreading 
+						 * allocator */
 
 struct purgeable_q purgeable_queues[PURGEABLE_Q_TYPE_MAX];
 
-#define TOKEN_ADD           0x40/* 0x100 */
-#define TOKEN_DELETE        0x41/* 0x104 */
-#define TOKEN_QUEUE_ADVANCE 0x42/* 0x108 actually means "token ripened" */
-#define TOKEN_OBJECT_PURGED 0x43/* 0x10c */
-#define OBJECT_ADDED        0x50/* 0x140 */
-#define OBJECT_REMOVED      0x51/* 0x144 */
+decl_lck_mtx_data(,vm_purgeable_queue_lock)
 
-static void     vm_purgeable_q_advance(uint32_t num_pages, purgeable_q_t queue);
+#define TOKEN_ADD		0x40	/* 0x100 */
+#define TOKEN_DELETE		0x41	/* 0x104 */
+#define TOKEN_RIPEN		0x42	/* 0x108 */
+#define OBJECT_ADD		0x48	/* 0x120 */
+#define OBJECT_REMOVE		0x49	/* 0x124 */
+#define OBJECT_PURGE		0x4a	/* 0x128 */
+#define OBJECT_PURGE_ALL	0x4b	/* 0x12c */
+
 static token_idx_t vm_purgeable_token_remove_first(purgeable_q_t queue);
 
 #if MACH_ASSERT
@@ -83,37 +93,125 @@ vm_purgeable_token_check_queue(purgeable_q_t queue)
 	if (unripe)
 		assert(queue->token_q_unripe == unripe);
 	assert(token_cnt == queue->debug_count_tokens);
-	our_inactive_count = page_cnt + queue->new_pages + token_new_pagecount;
-	assert(our_inactive_count >= 0);
-	assert((uint32_t) our_inactive_count == vm_page_inactive_count);
+	
+	/* obsolete queue doesn't maintain token counts */
+	if(queue->type != PURGEABLE_Q_TYPE_OBSOLETE)
+	{
+		our_inactive_count = page_cnt + queue->new_pages + token_new_pagecount;
+		assert(our_inactive_count >= 0);
+		assert((uint32_t) our_inactive_count == vm_page_inactive_count);
+	}
 }
 #endif
 
+/*
+ * Add a token. Allocate token queue memory if necessary.
+ * Call with page queue locked.
+ */
 kern_return_t
 vm_purgeable_token_add(purgeable_q_t queue)
 {
+#if MACH_ASSERT
+	lck_mtx_assert(&vm_page_queue_lock, LCK_MTX_ASSERT_OWNED);
+#endif
+	
 	/* new token */
 	token_idx_t     token;
 	enum purgeable_q_type i;
 
-	if (token_init_count < MAX_VOLATILE) {	/* lazy token array init */
-		token = token_init_count;
-		token_init_count++;
-	} else if (token_free_idx) {
+find_available_token:
+
+	if (token_free_idx) {				/* unused tokens available */
 		token = token_free_idx;
 		token_free_idx = tokens[token_free_idx].next;
-	} else {
-		return KERN_FAILURE;
+	} else if (token_init_idx < token_q_max_cnt) {	/* lazy token array init */
+		token = token_init_idx;
+		token_init_idx++;
+	} else {					/* allocate more memory */
+		/* Wait if another thread is inside the memory alloc section */
+		while(token_q_allocating) {
+			wait_result_t res = lck_mtx_sleep(&vm_page_queue_lock,
+							  LCK_SLEEP_DEFAULT,
+							  (event_t)&token_q_allocating,
+							  THREAD_UNINT);
+			if(res != THREAD_AWAKENED) return KERN_ABORTED;
+		};
+		
+		/* Check whether memory is still maxed out */
+		if(token_init_idx < token_q_max_cnt)
+			goto find_available_token;
+		
+		/* Still no memory. Allocate some. */
+		token_q_allocating = 1;
+		
+		/* Drop page queue lock so we can allocate */
+		vm_page_unlock_queues();
+		
+		struct token *new_loc;
+		vm_size_t alloc_size = token_q_cur_size + PAGE_SIZE;
+		kern_return_t result;
+		
+		if (alloc_size / sizeof (struct token) > TOKEN_COUNT_MAX) {
+			result = KERN_RESOURCE_SHORTAGE;
+		} else {
+			if (token_q_cur_size) {
+				result = kmem_realloc(kernel_map,
+						      (vm_offset_t) tokens,
+						      token_q_cur_size,
+						      (vm_offset_t *) &new_loc,
+						      alloc_size);
+			} else {
+				result = kmem_alloc(kernel_map,
+						    (vm_offset_t *) &new_loc,
+						    alloc_size);
+			}
+		}
+		
+		vm_page_lock_queues();
+		
+		if (result) {
+			/* Unblock waiting threads */
+			token_q_allocating = 0;
+			thread_wakeup((event_t)&token_q_allocating);
+			return result;
+		}
+		
+		/* If we get here, we allocated new memory. Update pointers and
+		 * dealloc old range */
+		struct token *old_tokens=tokens;
+		tokens=new_loc;
+		vm_size_t old_token_q_cur_size=token_q_cur_size;
+		token_q_cur_size=alloc_size;
+		token_q_max_cnt = (token_idx_t) (token_q_cur_size /
+						 sizeof(struct token));
+		assert (token_init_idx < token_q_max_cnt);	/* We must have a free token now */
+		
+		if (old_token_q_cur_size) {	/* clean up old mapping */
+			vm_page_unlock_queues();
+			/* kmem_realloc leaves the old region mapped. Get rid of it. */
+			kmem_free(kernel_map, (vm_offset_t)old_tokens, old_token_q_cur_size);
+			vm_page_lock_queues();
+		}
+		
+		/* Unblock waiting threads */
+		token_q_allocating = 0;
+		thread_wakeup((event_t)&token_q_allocating);
+		
+		goto find_available_token;
 	}
-
+	
+	assert (token);
+	
 	/*
 	 * the new pagecount we got need to be applied to all queues except
 	 * obsolete
 	 */
 	for (i = PURGEABLE_Q_TYPE_FIFO; i < PURGEABLE_Q_TYPE_MAX; i++) {
-		purgeable_queues[i].new_pages += token_new_pagecount;
-		assert(purgeable_queues[i].new_pages >= 0);
-		assert((uint64_t) (purgeable_queues[i].new_pages) <= TOKEN_COUNT_MAX);
+		int64_t pages = purgeable_queues[i].new_pages += token_new_pagecount;
+		assert(pages >= 0);
+		assert(pages <= TOKEN_COUNT_MAX);
+		purgeable_queues[i].new_pages = (int32_t) pages;
+		assert(purgeable_queues[i].new_pages == pages);
 	}
 	token_new_pagecount = 0;
 
@@ -164,10 +262,15 @@ vm_purgeable_token_add(purgeable_q_t queue)
 /*
  * Remove first token from queue and return its index. Add its count to the
  * count of the next token.
+ * Call with page queue locked. 
  */
 static token_idx_t 
 vm_purgeable_token_remove_first(purgeable_q_t queue)
 {
+#if MACH_ASSERT
+	lck_mtx_assert(&vm_page_queue_lock, LCK_MTX_ASSERT_OWNED);
+#endif
+	
 	token_idx_t     token;
 	token = queue->token_q_head;
 
@@ -218,10 +321,16 @@ vm_purgeable_token_remove_first(purgeable_q_t queue)
 	return token;
 }
 
-/* Delete first token from queue. Return token to token queue. */
+/* 
+ * Delete first token from queue. Return token to token queue.
+ * Call with page queue locked. 
+ */
 void
 vm_purgeable_token_delete_first(purgeable_q_t queue)
 {
+#if MACH_ASSERT
+	lck_mtx_assert(&vm_page_queue_lock, LCK_MTX_ASSERT_OWNED);
+#endif
 	token_idx_t     token = vm_purgeable_token_remove_first(queue);
 
 	if (token) {
@@ -232,66 +341,84 @@ vm_purgeable_token_delete_first(purgeable_q_t queue)
 }
 
 
+/* Call with page queue locked. */
 void
-vm_purgeable_q_advance_all(uint32_t num_pages)
+vm_purgeable_q_advance_all()
 {
+#if MACH_ASSERT
+	lck_mtx_assert(&vm_page_queue_lock, LCK_MTX_ASSERT_OWNED);
+#endif
+	
+	/* check queue counters - if they get really large, scale them back.
+	 * They tend to get that large when there is no purgeable queue action */
+	int i;
+	if(token_new_pagecount > (TOKEN_NEW_PAGECOUNT_MAX >> 1))	/* a system idling years might get there */
+	{
+		for (i = PURGEABLE_Q_TYPE_FIFO; i < PURGEABLE_Q_TYPE_MAX; i++) {
+			int64_t pages = purgeable_queues[i].new_pages += token_new_pagecount;
+			assert(pages >= 0);
+			assert(pages <= TOKEN_COUNT_MAX);
+			purgeable_queues[i].new_pages = (int32_t) pages;
+			assert(purgeable_queues[i].new_pages == pages);
+		}
+		token_new_pagecount = 0;
+	}
+	
 	/*
-	 * don't need to advance obsolete queue - all items are ripe there,
+	 * Decrement token counters. A token counter can be zero, this means the
+	 * object is ripe to be purged. It is not purged immediately, because that
+	 * could cause several objects to be purged even if purging one would satisfy
+	 * the memory needs. Instead, the pageout thread purges one after the other
+	 * by calling vm_purgeable_object_purge_one and then rechecking the memory
+	 * balance.
+	 *
+	 * No need to advance obsolete queue - all items are ripe there,
 	 * always
 	 */
-	vm_purgeable_q_advance(num_pages, &purgeable_queues[PURGEABLE_Q_TYPE_FIFO]);
-	vm_purgeable_q_advance(num_pages, &purgeable_queues[PURGEABLE_Q_TYPE_LIFO]);
-}
+	for (i = PURGEABLE_Q_TYPE_FIFO; i < PURGEABLE_Q_TYPE_MAX; i++) {
+		purgeable_q_t queue = &purgeable_queues[i];
+		uint32_t num_pages = 1;
+		
+		/* Iterate over tokens as long as there are unripe tokens. */
+		while (queue->token_q_unripe) {
+			if (tokens[queue->token_q_unripe].count && num_pages)
+			{
+				tokens[queue->token_q_unripe].count -= 1;
+				num_pages -= 1;
+			}
 
-/*
- * Decrements token counters. A token counter can be zero, this means the
- * object is ripe to be purged. It is not purged immediately, because that
- * could cause several objects to be purged even if purging one would satisfy
- * the memory needs. Instead, the pageout thread purges one after the other
- * by calling vm_purgeable_object_purge_one and then rechecking the memory
- * balance.
- */
-static void
-vm_purgeable_q_advance(uint32_t num_pages, purgeable_q_t queue)
-{
-	/* Iterate over tokens as long as there are unripe tokens. */
-	while (queue->token_q_unripe) {
-		int             min = (tokens[queue->token_q_unripe].count < num_pages) ?
-		tokens[queue->token_q_unripe].count : num_pages;
-		tokens[queue->token_q_unripe].count -= min;
-		num_pages -= min;
-
-		if (tokens[queue->token_q_unripe].count == 0) {
-			queue->token_q_unripe = tokens[queue->token_q_unripe].next;
-			available_for_purge++;
-			KERNEL_DEBUG_CONSTANT((MACHDBG_CODE(DBG_MACH_VM, TOKEN_QUEUE_ADVANCE)),
-					      queue->type,
-					  tokens[queue->token_q_head].count,	/* num pages on new
-										 * first token */
-					      0,
-					      available_for_purge,
-					      0);
-			continue;	/* One token ripened. Make sure to
-					 * check the next. */
+			if (tokens[queue->token_q_unripe].count == 0) {
+				queue->token_q_unripe = tokens[queue->token_q_unripe].next;
+				available_for_purge++;
+				KERNEL_DEBUG_CONSTANT((MACHDBG_CODE(DBG_MACH_VM, TOKEN_RIPEN)),
+						      queue->type,
+						      tokens[queue->token_q_head].count,	/* num pages on new
+											 * first token */
+						      0,
+						      available_for_purge,
+						      0);
+				continue;	/* One token ripened. Make sure to
+						 * check the next. */
+			}
+			if (num_pages == 0)
+				break;	/* Current token not ripe and no more pages.
+					 * Work done. */
 		}
-		if (num_pages == 0)
-			break;	/* Current token not ripe and no more pages.
-				 * Work done. */
-	}
 
-	/*
-	 * if there are no unripe tokens in the queue, decrement the
-	 * new_pages counter instead new_pages can be negative, but must be
-	 * canceled out by token_new_pagecount -- since inactive queue as a
-	 * whole always contains a nonnegative number of pages
-	 */
-	if (!queue->token_q_unripe) {
-		queue->new_pages -= num_pages;
-		assert((int32_t) token_new_pagecount + queue->new_pages >= 0);
-	}
+		/*
+		 * if there are no unripe tokens in the queue, decrement the
+		 * new_pages counter instead new_pages can be negative, but must be
+		 * canceled out by token_new_pagecount -- since inactive queue as a
+		 * whole always contains a nonnegative number of pages
+		 */
+		if (!queue->token_q_unripe) {
+			queue->new_pages -= num_pages;
+			assert((int32_t) token_new_pagecount + queue->new_pages >= 0);
+		}
 #if MACH_ASSERT
-	vm_purgeable_token_check_queue(queue);
+		vm_purgeable_token_check_queue(queue);
 #endif
+	}
 }
 
 /*
@@ -305,10 +432,14 @@ vm_purgeable_q_advance(uint32_t num_pages, purgeable_q_t queue)
  *     Yes - purge it. Remove token. If there is no ripe token, remove ripe
  *      token from other queue and migrate unripe token from this
  *      queue to other queue.
+ * Call with page queue locked.
  */
 static void
 vm_purgeable_token_remove_ripe(purgeable_q_t queue)
 {
+#if MACH_ASSERT
+	lck_mtx_assert(&vm_page_queue_lock, LCK_MTX_ASSERT_OWNED);
+#endif
 	assert(queue->token_q_head && tokens[queue->token_q_head].count == 0);
 	/* return token to free list. advance token list. */
 	token_idx_t     new_head = tokens[queue->token_q_head].next;
@@ -331,10 +462,14 @@ vm_purgeable_token_remove_ripe(purgeable_q_t queue)
  * Delete a ripe token from the given queue. If there are no ripe tokens on
  * that queue, delete a ripe token from queue2, and migrate an unripe token
  * from queue to queue2
+ * Call with page queue locked.
  */
 static void
 vm_purgeable_token_choose_and_delete_ripe(purgeable_q_t queue, purgeable_q_t queue2)
 {
+#if MACH_ASSERT
+	lck_mtx_assert(&vm_page_queue_lock, LCK_MTX_ASSERT_OWNED);
+#endif
 	assert(queue->token_q_head);
 
 	if (tokens[queue->token_q_head].count == 0) {
@@ -400,9 +535,11 @@ vm_purgeable_token_choose_and_delete_ripe(purgeable_q_t queue, purgeable_q_t que
 }
 
 /* Find an object that can be locked. Returns locked object. */
+/* Call with purgeable queue locked. */
 static          vm_object_t
 vm_purgeable_object_find_and_lock(purgeable_q_t queue, int group)
 {
+	lck_mtx_assert(&vm_purgeable_queue_lock, LCK_MTX_ASSERT_OWNED);
 	/*
 	 * Usually we would pick the first element from a queue. However, we
 	 * might not be able to get a lock on it, in which case we try the
@@ -429,17 +566,86 @@ vm_purgeable_object_find_and_lock(purgeable_q_t queue, int group)
 	return 0;
 }
 
+/* Can be called without holding locks */
 void
+vm_purgeable_object_purge_all(void)
+{
+	enum purgeable_q_type i;
+	int             group;
+	vm_object_t     object;
+	unsigned int	purged_count;
+	uint32_t	collisions;
+
+	purged_count = 0;
+	collisions = 0;
+
+restart:
+	lck_mtx_lock(&vm_purgeable_queue_lock);
+	/* Cycle through all queues */
+	for (i = PURGEABLE_Q_TYPE_OBSOLETE; i < PURGEABLE_Q_TYPE_MAX; i++) {
+		purgeable_q_t   queue;
+
+		queue = &purgeable_queues[i];
+
+		/*
+		 * Look through all groups, starting from the lowest. If
+		 * we find an object in that group, try to lock it (this can
+		 * fail). If locking is successful, we can drop the queue
+		 * lock, remove a token and then purge the object.
+		 */
+		for (group = 0; group < NUM_VOLATILE_GROUPS; group++) {
+			while (!queue_empty(&queue->objq[group])) {
+				object = vm_purgeable_object_find_and_lock(queue, group);
+				if (object == VM_OBJECT_NULL) {
+					lck_mtx_unlock(&vm_purgeable_queue_lock);
+					mutex_pause(collisions++);
+					goto restart;
+				}
+
+				lck_mtx_unlock(&vm_purgeable_queue_lock);
+				
+				/* Lock the page queue here so we don't hold it
+				 * over the whole, legthy operation */
+				vm_page_lock_queues();
+				vm_purgeable_token_remove_first(queue);
+				vm_page_unlock_queues();
+				
+				assert(object->purgable == VM_PURGABLE_VOLATILE);
+				(void) vm_object_purge(object);
+				vm_object_unlock(object);
+				purged_count++;
+				goto restart;
+			}
+			assert(queue->debug_count_objects >= 0);
+		}
+	}
+	KERNEL_DEBUG_CONSTANT((MACHDBG_CODE(DBG_MACH_VM, OBJECT_PURGE_ALL)),
+			      purged_count, /* # of purged objects */
+			      0,
+			      available_for_purge,
+			      0,
+			      0);
+	lck_mtx_unlock(&vm_purgeable_queue_lock);
+	return;
+}
+
+boolean_t
 vm_purgeable_object_purge_one(void)
 {
 	enum purgeable_q_type i;
 	int             group;
 	vm_object_t     object = 0;
+	purgeable_q_t   queue, queue2;
 
-	mutex_lock(&vm_purgeable_queue_lock);
+	/* Need the page queue lock since we'll be changing the token queue. */
+#if MACH_ASSERT
+	lck_mtx_assert(&vm_page_queue_lock, LCK_MTX_ASSERT_OWNED);
+#endif
+	lck_mtx_lock(&vm_purgeable_queue_lock);
+	
 	/* Cycle through all queues */
 	for (i = PURGEABLE_Q_TYPE_OBSOLETE; i < PURGEABLE_Q_TYPE_MAX; i++) {
-		purgeable_q_t   queue = &purgeable_queues[i];
+		queue = &purgeable_queues[i];
 
 		/*
 		 * Are there any ripe tokens on this queue? If yes, we'll
@@ -456,18 +662,22 @@ vm_purgeable_object_purge_one(void)
 		 * lock, remove a token and then purge the object.
 		 */
 		for (group = 0; group < NUM_VOLATILE_GROUPS; group++) {
-			if (!queue_empty(&queue->objq[group]) && (object = vm_purgeable_object_find_and_lock(queue, group))) {
-				mutex_unlock(&vm_purgeable_queue_lock);
+			if (!queue_empty(&queue->objq[group]) && 
+			    (object = vm_purgeable_object_find_and_lock(queue, group))) {
+				lck_mtx_unlock(&vm_purgeable_queue_lock);
 				vm_purgeable_token_choose_and_delete_ripe(queue, 0);
 				goto purge_now;
-			} else {
-				assert(i != PURGEABLE_Q_TYPE_OBSOLETE);	/* obsolete queue must
-									 * have all objects in
-									 * group 0 */
-				purgeable_q_t   queue2 = &purgeable_queues[i != PURGEABLE_Q_TYPE_FIFO ? PURGEABLE_Q_TYPE_FIFO : PURGEABLE_Q_TYPE_LIFO];
+			}
+			if (i != PURGEABLE_Q_TYPE_OBSOLETE) { 
+				/* This is the token migration case, and it works between
+				 * FIFO and LIFO only */
+				queue2 = &purgeable_queues[i != PURGEABLE_Q_TYPE_FIFO ? 
+							   PURGEABLE_Q_TYPE_FIFO : 
+							   PURGEABLE_Q_TYPE_LIFO];
 
-				if (!queue_empty(&queue2->objq[group]) && (object = vm_purgeable_object_find_and_lock(queue2, group))) {
-					mutex_unlock(&vm_purgeable_queue_lock);
+				if (!queue_empty(&queue2->objq[group]) && 
+				    (object = vm_purgeable_object_find_and_lock(queue2, group))) {
+					lck_mtx_unlock(&vm_purgeable_queue_lock);
 					vm_purgeable_token_choose_and_delete_ripe(queue2, queue);
 					goto purge_now;
 				}
@@ -480,27 +690,34 @@ vm_purgeable_object_purge_one(void)
          * we could end up with no object to purge at this time, even though
          * we have objects in a purgeable state
          */
-	mutex_unlock(&vm_purgeable_queue_lock);
-	return;
+	lck_mtx_unlock(&vm_purgeable_queue_lock);
+	return FALSE;
 
 purge_now:
 
 	assert(object);
+	assert(object->purgable == VM_PURGABLE_VOLATILE);
+	vm_page_unlock_queues();  /* Unlock for call to vm_object_purge() */
 	(void) vm_object_purge(object);
 	vm_object_unlock(object);
+	vm_page_lock_queues();
 
-	KERNEL_DEBUG_CONSTANT((MACHDBG_CODE(DBG_MACH_VM, TOKEN_OBJECT_PURGED)),
-			      (unsigned int) object,	/* purged object */
+	KERNEL_DEBUG_CONSTANT((MACHDBG_CODE(DBG_MACH_VM, OBJECT_PURGE)),
+			      object,	/* purged object */
 			      0,
 			      available_for_purge,
 			      0,
 			      0);
+	
+	return TRUE;
 }
 
+/* Called with object lock held */
 void
 vm_purgeable_object_add(vm_object_t object, purgeable_q_t queue, int group)
 {
-	mutex_lock(&vm_purgeable_queue_lock);
+	vm_object_lock_assert_exclusive(object);
+	lck_mtx_lock(&vm_purgeable_queue_lock);
 
 	if (queue->type == PURGEABLE_Q_TYPE_OBSOLETE)
 		group = 0;
@@ -512,7 +729,7 @@ vm_purgeable_object_add(vm_object_t object, purgeable_q_t queue, int group)
 
 #if MACH_ASSERT
 	queue->debug_count_objects++;
-	KERNEL_DEBUG_CONSTANT((MACHDBG_CODE(DBG_MACH_VM, OBJECT_ADDED)),
+	KERNEL_DEBUG_CONSTANT((MACHDBG_CODE(DBG_MACH_VM, OBJECT_ADD)),
 			      0,
 			      tokens[queue->token_q_head].count,
 			      queue->type,
@@ -520,18 +737,21 @@ vm_purgeable_object_add(vm_object_t object, purgeable_q_t queue, int group)
 			      0);
 #endif
 
-	mutex_unlock(&vm_purgeable_queue_lock);
+	lck_mtx_unlock(&vm_purgeable_queue_lock);
 }
 
 /* Look for object. If found, remove from purgeable queue. */
+/* Called with object lock held */
 purgeable_q_t
 vm_purgeable_object_remove(vm_object_t object)
 {
 	enum purgeable_q_type i;
 	int             group;
 
-	mutex_lock(&vm_purgeable_queue_lock);
-	for (i = PURGEABLE_Q_TYPE_FIFO; i < PURGEABLE_Q_TYPE_MAX; i++) {
+	vm_object_lock_assert_exclusive(object);
+	lck_mtx_lock(&vm_purgeable_queue_lock);
+	
+	for (i = PURGEABLE_Q_TYPE_OBSOLETE; i < PURGEABLE_Q_TYPE_MAX; i++) {
 		purgeable_q_t   queue = &purgeable_queues[i];
 		for (group = 0; group < NUM_VOLATILE_GROUPS; group++) {
 			vm_object_t     o;
@@ -543,14 +763,14 @@ vm_purgeable_object_remove(vm_object_t object)
 						     vm_object_t, objq);
 #if MACH_ASSERT
 					queue->debug_count_objects--;
-					KERNEL_DEBUG_CONSTANT((MACHDBG_CODE(DBG_MACH_VM, OBJECT_REMOVED)),
+					KERNEL_DEBUG_CONSTANT((MACHDBG_CODE(DBG_MACH_VM, OBJECT_REMOVE)),
 							      0,
 					  tokens[queue->token_q_head].count,
 							      queue->type,
 							      group,
 							      0);
 #endif
-					mutex_unlock(&vm_purgeable_queue_lock);
+					lck_mtx_unlock(&vm_purgeable_queue_lock);
 					object->objq.next = 0;
 					object->objq.prev = 0;
 					return &purgeable_queues[i];
@@ -558,6 +778,6 @@ vm_purgeable_object_remove(vm_object_t object)
 			}
 		}
 	}
-	mutex_unlock(&vm_purgeable_queue_lock);
+	lck_mtx_unlock(&vm_purgeable_queue_lock);
 	return 0;
 }

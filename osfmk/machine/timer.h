@@ -30,10 +30,8 @@
 
 #if defined (__ppc__)
 #include "ppc/timer.h"
-#elif defined (__i386__)
+#elif defined (__i386__) || defined (__x86_64__)
 #include "i386/timer.h"
-#elif defined (__arm__)
-#include "arm/timer.h"
 #else
 #error architecture not supported
 #endif

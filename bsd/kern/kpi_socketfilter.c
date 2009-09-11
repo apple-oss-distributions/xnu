@@ -36,6 +36,8 @@
 #include <kern/locks.h>
 #include <net/kext_net.h>
 
+#include <libkern/libkern.h>
+
 #include <string.h>
 
 static struct socket_filter_list	sock_filter_head;
@@ -298,10 +300,19 @@ sflt_detach_private(
 	if (!unregistering) {
 		if ((entry->sfe_flags & SFEF_UNREGISTERING) != 0) {
 			/*
-			 * Another thread is unregistering the filter, we need to
-			 * avoid detaching the filter here so the socket won't go
-			 * away.
+			 * Another thread is unregistering the filter, we
+			 * need to avoid detaching the filter here so the
+			 * socket won't go away.  Bump up the socket's
+			 * usecount so that it won't be freed until after
+			 * the filter unregistration has been completed;
+			 * at this point the caller has already held the
+			 * socket's lock, so we can directly modify the
+			 * usecount.
 			 */
+			if (!(entry->sfe_flags & SFEF_DETACHXREF)) {
+				entry->sfe_socket->so_usecount++;
+				entry->sfe_flags |= SFEF_DETACHXREF;
+			}
 			lck_mtx_unlock(sock_filter_lock);
 			return;
 		}
@@ -318,21 +329,34 @@ sflt_detach_private(
 			lck_mtx_unlock(sock_filter_lock);
 			return;
 		}
-	}
-	else {
+	} else {
 		/*
 		 * Clear the removing flag. We will perform the detach here or
-		 * request a delayed deatch.
+		 * request a delayed detach.  Since we do an extra ref release
+		 * below, bump up the usecount if we haven't done so.
 		 */
 		entry->sfe_flags &= ~SFEF_UNREGISTERING;
+		if (!(entry->sfe_flags & SFEF_DETACHXREF)) {
+			entry->sfe_socket->so_usecount++;
+			entry->sfe_flags |= SFEF_DETACHXREF;
+		}
 	}
 
 	if (entry->sfe_socket->so_filteruse != 0) {
 		entry->sfe_flags |= SFEF_DETACHUSEZERO;
 		lck_mtx_unlock(sock_filter_lock);
+	
+		if (unregistering) {
+#if DEBUG
+			printf("sflt_detach_private unregistering SFEF_DETACHUSEZERO "
+				"so%p so_filteruse %u so_usecount %d\n",
+				entry->sfe_socket, entry->sfe_socket->so_filteruse, 
+				entry->sfe_socket->so_usecount);
+#endif
+			socket_unlock(entry->sfe_socket, 0);	
+		}
 		return;
-	}
-	else {
+	} else {
 		/*
 		 * Check if we are removing the last attached filter and
 		 * the parent filter is being unregistered.
@@ -510,10 +534,22 @@ sflt_unregister(
 		filter->sf_flags |= SFF_DETACHING;
 	
 		for (next_entry = entry_head; next_entry;
-			 next_entry = next_entry->sfe_next_onfilter) {
-			socket_lock(next_entry->sfe_socket, 1);
+		    next_entry = next_entry->sfe_next_onfilter) {
+			/*
+			 * Mark this as "unregistering"; upon dropping the
+			 * lock, another thread may win the race and attempt
+			 * to detach a socket from it (e.g. as part of close)
+			 * before we get a chance to detach.  Setting this
+			 * flag practically tells the other thread to go away.
+			 * If the other thread wins, this causes an extra
+			 * reference hold on the socket so that it won't be
+			 * deallocated until after we finish with the detach
+			 * for it below.  If we win the race, the extra
+			 * reference hold is also taken to compensate for the
+			 * extra reference release when detach is called
+			 * with a "1" for its second parameter.
+			 */
 			next_entry->sfe_flags |= SFEF_UNREGISTERING;
-			socket_unlock(next_entry->sfe_socket, 0);	/* Radar 4201550: prevents the socket from being deleted while being unregistered */
 		}
 	}
 	
@@ -555,7 +591,7 @@ sock_inject_data_in(
 	socket_lock(so, 1);
 	
 	if (from) {
-		if (sbappendaddr(&so->so_rcv, (struct sockaddr*)from, data,
+		if (sbappendaddr(&so->so_rcv, (struct sockaddr*)(uintptr_t)from, data,
 						 control, NULL))
 			sorwakeup(so);
 		goto done;
@@ -594,7 +630,7 @@ sock_inject_data_out(
 {
 	int	sosendflags = 0;
 	if (flags & sock_data_filt_flag_oob) sosendflags = MSG_OOB;
-	return sosend(so, (struct sockaddr*)to, NULL,
+	return sosend(so, (struct sockaddr*)(uintptr_t)to, NULL,
 				  data, control, sosendflags);
 }
 

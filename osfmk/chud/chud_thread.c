@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2003-2007 Apple Inc. All rights reserved.
+ * Copyright (c) 2003-2009 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -48,8 +48,6 @@
 #	include <i386/mp.h>	
 #elif defined(__ppc__) || defined(__ppc64__)
 #	include <ppc/cpu_internal.h>
-#elif defined(__arm__)
-#	include <arm/cpu_internal.h>
 #else
 // fall back on declaring it extern.  The linker will sort us out.
 extern unsigned int real_ncpus;
@@ -58,7 +56,9 @@ extern unsigned int real_ncpus;
 // Mask for supported options
 #define T_CHUD_BIND_OPT_MASK (-1UL)
 
+#if 0
 #pragma mark **** thread binding ****
+#endif
 
 /*
  * This method will bind a given thread to the requested CPU starting at the
@@ -96,7 +96,7 @@ chudxnu_bind_thread(thread_t thread, int cpu, __unused int options)
 		 * reschedule on the target CPU.
 		 */
 		if(thread == current_thread() && 
-			!(ml_at_interrupt_context() && cpu_number() == cpu)) {
+			!ml_at_interrupt_context() && cpu_number() != cpu) {
 			(void)thread_block(THREAD_CONTINUE_NULL);
 		}
 		return KERN_SUCCESS;
@@ -124,7 +124,9 @@ chudxnu_thread_get_idle(thread_t thread) {
 	return ((thread->state & TH_IDLE) == TH_IDLE);
 }
 
+#if 0
 #pragma mark **** task and thread info ****
+#endif
 
 __private_extern__ boolean_t
 chudxnu_is_64bit_task(task_t task)
@@ -156,7 +158,7 @@ chudxnu_private_processor_set_things(
 	size = 0; addr = NULL;
 
 	for (;;) {
-		mutex_lock(&tasks_threads_lock);
+		lck_mtx_lock(&tasks_threads_lock);
 
 		if (type == THING_TASK)
 			maxthings = tasks_count;
@@ -169,7 +171,7 @@ chudxnu_private_processor_set_things(
 		if (size_needed <= size)
 			break;
 
-		mutex_unlock(&tasks_threads_lock);
+		lck_mtx_unlock(&tasks_threads_lock);
 
 		if (size != 0)
 			kfree(addr, size);
@@ -216,7 +218,7 @@ chudxnu_private_processor_set_things(
 	}
 	}
 		
-	mutex_unlock(&tasks_threads_lock);
+	lck_mtx_unlock(&tasks_threads_lock);
 
 	if (actual < maxthings)
 		size_needed = actual * sizeof (mach_port_t);
@@ -477,13 +479,6 @@ chudxnu_thread_info(
 }
 
 
-__private_extern__ kern_return_t
-chudxnu_thread_last_context_switch(thread_t thread, uint64_t *timestamp)
-{
-    *timestamp = thread->last_switch;
-    return KERN_SUCCESS;
-}
-
 /* thread marking stuff */
 
 __private_extern__ boolean_t 
@@ -502,10 +497,10 @@ chudxnu_thread_set_marked(thread_t thread, boolean_t new_value)
 	if(thread) {
 		if(new_value) {
 			// set the marked bit
-			old_val = OSBitOrAtomic(T_CHUD_MARKED, (UInt32 *) &(thread->t_chud));
+			old_val = OSBitOrAtomic(T_CHUD_MARKED,  &(thread->t_chud));
 		} else {
 			// clear the marked bit
-			old_val = OSBitAndAtomic(~T_CHUD_MARKED, (UInt32 *) &(thread->t_chud));
+			old_val = OSBitAndAtomic(~T_CHUD_MARKED,  &(thread->t_chud));
 		}
 		return (old_val & T_CHUD_MARKED) == T_CHUD_MARKED;
 	}

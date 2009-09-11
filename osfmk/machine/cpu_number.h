@@ -32,10 +32,8 @@
 
 #if defined (__ppc__)
 #include "ppc/cpu_number.h"
-#elif defined (__i386__)
+#elif defined (__i386__) || defined (__x86_64__)
 #include "i386/cpu_number.h"
-#elif defined (__arm__)
-#include "arm/cpu_number.h"
 #else
 #error architecture not supported
 #endif

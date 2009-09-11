@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2006 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2009 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -68,14 +68,14 @@
 
 #include <vm/vm_kern.h>
 
-#include <i386/seg.h>
-#include <i386/thread.h>
-#include <i386/user_ldt.h>
-#include <i386/mp_desc.h>
-#include <i386/proc_reg.h>
 #include <i386/machdep_call.h>
+#include <i386/user_ldt.h>
 #include <i386/mp.h>
 #include <i386/machine_routines.h>
+#include <i386/proc_reg.h>
+#include <i386/mp_desc.h>
+#include <i386/seg.h>
+#include <i386/thread.h>
 
 #include <sys/errno.h>
 
@@ -152,7 +152,7 @@ i386_set_ldt(
 		start_sel = LDTSZ_MIN;
 	    }
 		
-	    if (start_sel + num_sels > LDTSZ) {
+	    if ((uint64_t)start_sel + (uint64_t)num_sels > LDTSZ) {
 		task_unlock(task);
 		return ENOMEM;
 	    }
@@ -264,7 +264,7 @@ i386_set_ldt(
 	 * and we need to make sure the new LDT is in place
 	 * throughout the task before returning to the user.
 	 */
-	mp_rendezvous_no_intrs(user_ldt_set_action, task);
+	mp_broadcast(user_ldt_set_action, task);
 
 	task_unlock(task);
 
@@ -294,7 +294,7 @@ i386_get_ldt(
 
 	if (start_sel >= 8192)
 	    return EINVAL;
-	if (start_sel + num_sels > 8192)
+	if ((uint64_t)start_sel + (uint64_t)num_sels > 8192)
 	    return EINVAL;
 	if (descs == 0)
 	    return EINVAL;

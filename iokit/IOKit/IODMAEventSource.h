@@ -34,6 +34,8 @@
 #include <IOKit/IODMAController.h>
 #include <IOKit/IOEventSource.h>
 
+class IODMAController;
+
 class IODMAEventSource : public IOEventSource
 {
   OSDeclareDefaultStructors(IODMAEventSource);
@@ -56,9 +58,10 @@ class IODMAEventSource : public IOEventSource
 					  UInt32 dmaIndex = 0);
   
   virtual IOReturn startDMACommand(IODMACommand *dmaCommand, IODirection direction, IOByteCount byteCount = 0, IOByteCount byteOffset = 0);
-  virtual IOReturn stopDMACommand(bool flush = false, mach_timespec_t *timeout = 0);
+  virtual IOReturn stopDMACommand(bool flush = false, uint64_t timeout = UINT64_MAX);
   
   virtual IOReturn queryDMACommand(IODMACommand **dmaCommand, IOByteCount *transferCount, bool waitForIdle = false);
+  virtual IOByteCount getFIFODepth();
   
  private:
   IOService       *dmaProvider;

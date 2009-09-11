@@ -46,20 +46,13 @@ enum purgeable_q_type {
 	PURGEABLE_Q_TYPE_MAX
 };
 
-/* 
- * It appears there's a 16 vs 32 size mismatch when using
- * CONFIG_TOKEN_QUEUE_SMALL and the resulting math can lead to a large 
- * negative value for new_pages in vm_purgeable.c.
- */
-#if (CONFIG_TOKEN_QUEUE_SMALL == 1) && 0
+#if (CONFIG_TOKEN_QUEUE_SMALL == 1)
 typedef uint16_t token_idx_t;
 typedef uint16_t token_cnt_t;
-#define MAX_VOLATILE 0x01000
 #define TOKEN_COUNT_MAX UINT16_MAX
 #else
 typedef uint32_t token_idx_t;
 typedef uint32_t token_cnt_t;
-#define MAX_VOLATILE 0x10000
 #define TOKEN_COUNT_MAX UINT32_MAX
 #endif
 
@@ -80,7 +73,8 @@ struct purgeable_q {
 typedef struct purgeable_q * purgeable_q_t;
 
 extern struct purgeable_q purgeable_queues[PURGEABLE_Q_TYPE_MAX];
-extern token_cnt_t token_new_pagecount;
+extern int32_t token_new_pagecount;
+#define TOKEN_NEW_PAGECOUNT_MAX INT32_MAX
 extern int available_for_purge;
 
 
@@ -89,11 +83,10 @@ extern int available_for_purge;
  * the token counters are protected by the vm_page_queue_lock, since they're
  * mostly used in that context and we don't want to do a lot of extra locking
  * the purgeable page queues are protected by a separate lock since they're
- * mostly user on a user context and we don't want any contention with the
+ * mostly used on a user context and we don't want any contention with the
  * pageout daemon.
  */
-
-decl_mutex_data(,vm_purgeable_queue_lock)
+decl_lck_mtx_data(extern,vm_purgeable_queue_lock)
 
 /* add a new token to queue. called by vm_object_purgeable_control */
 /* enter with page queue locked */
@@ -103,19 +96,22 @@ kern_return_t vm_purgeable_token_add(purgeable_q_t queue);
 void vm_purgeable_token_delete_first(purgeable_q_t queue);
 
 /*
- * decrement token counters. the function will call the object purger if a
- * token expires.
+ * decrement token counters.
+ * enter with page queue locked
  */
-/* enter with page queue locked */
-void vm_purgeable_q_advance_all(uint32_t num_pages);
+void vm_purgeable_q_advance_all(void);
 
-/* the object purger. purges the specified number of objects from memory. */
-void vm_purgeable_object_purge_one(void);
+/* the object purger. purges the next eligible object from memory. */
+/* returns TRUE if an object was purged, otherwise FALSE. */
+boolean_t vm_purgeable_object_purge_one(void);
+
+/* purge all volatile objects now */
+void vm_purgeable_object_purge_all(void);
 
 /* insert purgeable object into queue */
 void vm_purgeable_object_add(vm_object_t object, purgeable_q_t queue, int group);
 
-/* Look for page belonging to object. If found, put on inactive queue. */
+/* look for object. If found, remove from purgeable queue. */
 purgeable_q_t vm_purgeable_object_remove(vm_object_t object);
 
 #endif /* __VM_PURGEABLE_INTERNAL__ */

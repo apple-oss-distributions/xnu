@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2007 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2009 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -221,7 +221,7 @@
  *		Apple API extensions in scope.
  *
  *		Most users will use this compilation environment to avoid
- *		behavioural differences between 32 and 64 bit code.
+ *		behavioral differences between 32 and 64 bit code.
  *
  * LEGACY	Defining _NONSTD_SOURCE will get pre-POSIX APIs plus Apple
  *		API extensions in scope.
@@ -246,36 +246,79 @@
  *
  * In any compilation environment, for correct symbol resolution to occur,
  * function prototypes must be in scope.  It is recommended that all Apple
- * tools users add etiher the "-Wall" or "-Wimplicit-function-declaration"
+ * tools users add either the "-Wall" or "-Wimplicit-function-declaration"
  * compiler flags to their projects to be warned when a function is being
  * used without a prototype in scope.
  */
 
+/* These settings are particular to each product. */
+#ifdef KERNEL
+#define __DARWIN_ONLY_64_BIT_INO_T	0
+#define __DARWIN_ONLY_UNIX_CONFORMANCE	0
+#define __DARWIN_ONLY_VERS_1050		0
+#define	__DARWIN_SUF_DARWIN10	"_darwin10"
+#define	__DARWIN10_ALIAS(sym)	__asm("_" __STRING(sym) __DARWIN_SUF_DARWIN10)
+#else /* !KERNEL */
+#ifdef PRODUCT_AppleTV
+/* Product: AppleTV */
+#define __DARWIN_ONLY_64_BIT_INO_T	1
+#define __DARWIN_ONLY_UNIX_CONFORMANCE	1
+#define __DARWIN_ONLY_VERS_1050		1
+#endif /* PRODUCT_AppleTV */
+#ifdef PRODUCT_iPhone
+/* Product: iPhone */
+#define __DARWIN_ONLY_64_BIT_INO_T	1
+#define __DARWIN_ONLY_UNIX_CONFORMANCE	1
+#define __DARWIN_ONLY_VERS_1050		1
+#endif /* PRODUCT_iPhone */
+#ifdef PRODUCT_MacOSX
+/* Product: MacOSX */
+#define __DARWIN_ONLY_64_BIT_INO_T	0
+/* #undef __DARWIN_ONLY_UNIX_CONFORMANCE (automatically set for 64-bit) */
+#define __DARWIN_ONLY_VERS_1050		0
+#endif /* PRODUCT_MacOSX */
+#endif /* KERNEL */
+
 /*
  * The __DARWIN_ALIAS macros are used to do symbol renaming; they allow
- * legacy code to use the old symbol, thus maintiang binary compatability
+ * legacy code to use the old symbol, thus maintaining binary compatibility
  * while new code can use a standards compliant version of the same function.
  *
  * __DARWIN_ALIAS is used by itself if the function signature has not
  * changed, it is used along with a #ifdef check for __DARWIN_UNIX03
- * if the signature has changed.  Because the __LP64__ enviroment
- * only supports UNIX03 sementics it causes __DARWIN_UNIX03 to be
+ * if the signature has changed.  Because the __LP64__ environment
+ * only supports UNIX03 semantics it causes __DARWIN_UNIX03 to be
  * defined, but causes __DARWIN_ALIAS to do no symbol mangling.
  *
  * As a special case, when XCode is used to target a specific version of the
  * OS, the manifest constant __ENVIRONMENT_MAC_OS_X_VERSION_MIN_REQUIRED__
  * will be defined by the compiler, with the digits representing major version
- * time 100 + minor version times 10 (e.g. 10.5 := 1050).  If we are targetting
+ * time 100 + minor version times 10 (e.g. 10.5 := 1050).  If we are targeting
  * pre-10.5, and it is the default compilation environment, revert the
  * compilation environment to pre-__DARWIN_UNIX03.
  */
+#if !defined(__DARWIN_ONLY_UNIX_CONFORMANCE)
+#  if defined(__LP64__)
+#    define __DARWIN_ONLY_UNIX_CONFORMANCE 1
+#  else /* !__LP64__ */
+#    define __DARWIN_ONLY_UNIX_CONFORMANCE 0
+#  endif /* __LP64__ */
+#endif /* !__DARWIN_ONLY_UNIX_CONFORMANCE */
+
 #if !defined(__DARWIN_UNIX03)
-#  if defined(_DARWIN_C_SOURCE) || defined(_XOPEN_SOURCE) || defined(_POSIX_C_SOURCE) || defined(__LP64__) || (defined(__arm__) && !defined(KERNEL))
+#  if defined(KERNEL)
+#    define __DARWIN_UNIX03	0
+#  elif __DARWIN_ONLY_UNIX_CONFORMANCE
 #    if defined(_NONSTD_SOURCE)
-#      error "Can't define both _NONSTD_SOURCE and any of _DARWIN_C_SOURCE, _XOPEN_SOURCE, _POSIX_C_SOURCE, or __LP64__"
+#      error "Can't define _NONSTD_SOURCE when only UNIX conformance is available."
 #    endif /* _NONSTD_SOURCE */
 #    define __DARWIN_UNIX03	1
-#  elif defined(_NONSTD_SOURCE) || defined(KERNEL)
+#  elif defined(_DARWIN_C_SOURCE) || defined(_XOPEN_SOURCE) || defined(_POSIX_C_SOURCE)
+#    if defined(_NONSTD_SOURCE)
+#      error "Can't define both _NONSTD_SOURCE and any of _DARWIN_C_SOURCE, _XOPEN_SOURCE or _POSIX_C_SOURCE."
+#    endif /* _NONSTD_SOURCE */
+#    define __DARWIN_UNIX03	1
+#  elif defined(_NONSTD_SOURCE)
 #    define __DARWIN_UNIX03	0
 #  else /* default */
 #    if defined(__ENVIRONMENT_MAC_OS_X_VERSION_MIN_REQUIRED__) && ((__ENVIRONMENT_MAC_OS_X_VERSION_MIN_REQUIRED__-0) < 1050)
@@ -287,14 +330,40 @@
 #endif /* !__DARWIN_UNIX03 */
 
 #if !defined(__DARWIN_64_BIT_INO_T)
-#  if defined(_DARWIN_USE_64_BIT_INODE)
+#  if defined(KERNEL)
+#    define __DARWIN_64_BIT_INO_T 0
+#  elif defined(_DARWIN_USE_64_BIT_INODE)
+#    if defined(_DARWIN_NO_64_BIT_INODE)
+#      error "Can't define both _DARWIN_USE_64_BIT_INODE and _DARWIN_NO_64_BIT_INODE."
+#    endif /* _DARWIN_NO_64_BIT_INODE */
 #    define __DARWIN_64_BIT_INO_T 1
-#  elif defined(_DARWIN_NO_64_BIT_INODE) || defined(KERNEL)
+#  elif defined(_DARWIN_NO_64_BIT_INODE)
+#    if __DARWIN_ONLY_64_BIT_INO_T
+#      error "Can't define _DARWIN_NO_64_BIT_INODE when only 64-bit inodes are available."
+#    endif /* __DARWIN_ONLY_64_BIT_INO_T */
 #    define __DARWIN_64_BIT_INO_T 0
 #  else /* default */
-#    define __DARWIN_64_BIT_INO_T 0
+#    if __DARWIN_ONLY_64_BIT_INO_T
+#      define __DARWIN_64_BIT_INO_T 1
+#    elif defined(__ENVIRONMENT_MAC_OS_X_VERSION_MIN_REQUIRED__) && ((__ENVIRONMENT_MAC_OS_X_VERSION_MIN_REQUIRED__-0) < 1060) || __DARWIN_UNIX03 == 0
+#      define __DARWIN_64_BIT_INO_T 0
+#    else /* default */
+#      define __DARWIN_64_BIT_INO_T 1
+#    endif /* __DARWIN_ONLY_64_BIT_INO_T */
 #  endif
 #endif /* !__DARWIN_64_BIT_INO_T */
+
+#if !defined(__DARWIN_VERS_1050)
+#  if defined(KERNEL)
+#    define __DARWIN_VERS_1050 0
+#  elif __DARWIN_ONLY_VERS_1050
+#    define __DARWIN_VERS_1050 1
+#  elif defined(__ENVIRONMENT_MAC_OS_X_VERSION_MIN_REQUIRED__) && ((__ENVIRONMENT_MAC_OS_X_VERSION_MIN_REQUIRED__-0) < 1050) || __DARWIN_UNIX03 == 0
+#    define __DARWIN_VERS_1050 0
+#  else /* default */
+#    define __DARWIN_VERS_1050 1
+#  endif
+#endif /* !__DARWIN_VERS_1050 */
 
 #if !defined(__DARWIN_NON_CANCELABLE)
 #  if defined(KERNEL)
@@ -304,31 +373,35 @@
 #  endif
 #endif /* !__DARWIN_NON_CANCELABLE */
 
-#if !defined(__DARWIN_VERS_1050)
-#  if !defined(KERNEL) && defined(__ENVIRONMENT_MAC_OS_X_VERSION_MIN_REQUIRED__) && ((__ENVIRONMENT_MAC_OS_X_VERSION_MIN_REQUIRED__-0) >= 1050)
-#    define __DARWIN_VERS_1050 1
-#  else /* default */
-#    define __DARWIN_VERS_1050 0
-#  endif
-#endif /* !__DARWIN_NON_CANCELABLE */
-
 /*
  * symbol suffixes used for symbol versioning
  */
 #if __DARWIN_UNIX03
-#  if !defined(__LP64__) && !defined(__arm__)
-#    define __DARWIN_SUF_UNIX03		"$UNIX2003"
-#    define __DARWIN_SUF_UNIX03_SET	1
-#  else /* __LP64__ || __arm__ */
+#  if __DARWIN_ONLY_UNIX_CONFORMANCE
 #    define __DARWIN_SUF_UNIX03		/* nothing */
-#    define __DARWIN_SUF_UNIX03_SET	0
-#  endif /* !__LP64__ && !__arm__ */
+#  else /* !__DARWIN_ONLY_UNIX_CONFORMANCE */
+#    define __DARWIN_SUF_UNIX03		"$UNIX2003"
+#  endif /* __DARWIN_ONLY_UNIX_CONFORMANCE */
 
 #  if __DARWIN_64_BIT_INO_T
-#    define __DARWIN_SUF_64_BIT_INO_T	"$INODE64"
+#    if __DARWIN_ONLY_64_BIT_INO_T
+#      define __DARWIN_SUF_64_BIT_INO_T	/* nothing */
+#    else /* !__DARWIN_ONLY_64_BIT_INO_T */
+#      define __DARWIN_SUF_64_BIT_INO_T	"$INODE64"
+#    endif /* __DARWIN_ONLY_64_BIT_INO_T */
 #  else /* !__DARWIN_64_BIT_INO_T */
 #    define __DARWIN_SUF_64_BIT_INO_T	/* nothing */
-#  endif /* __DARWIN_UNIX03 */
+#  endif /* __DARWIN_64_BIT_INO_T */
+
+#  if __DARWIN_VERS_1050
+#    if __DARWIN_ONLY_VERS_1050
+#      define __DARWIN_SUF_1050		/* nothing */
+#    else /* !__DARWIN_ONLY_VERS_1050 */
+#      define __DARWIN_SUF_1050		"$1050"
+#    endif /* __DARWIN_ONLY_VERS_1050 */
+#  else /* !__DARWIN_VERS_1050 */
+#    define __DARWIN_SUF_1050		/* nothing */
+#  endif /* __DARWIN_VERS_1050 */
 
 #  if __DARWIN_NON_CANCELABLE
 #    define __DARWIN_SUF_NON_CANCELABLE	"$NOCANCEL"
@@ -336,15 +409,8 @@
 #    define __DARWIN_SUF_NON_CANCELABLE	/* nothing */
 #  endif /* __DARWIN_NON_CANCELABLE */
 
-#  if __DARWIN_VERS_1050
-#    define __DARWIN_SUF_1050		"$1050"
-#  else /* !__DARWIN_VERS_1050 */
-#    define __DARWIN_SUF_1050		/* nothing */
-#  endif /* __DARWIN_VERS_1050 */
-
 #else /* !__DARWIN_UNIX03 */
 #  define __DARWIN_SUF_UNIX03		/* nothing */
-#  define __DARWIN_SUF_UNIX03_SET	0
 #  define __DARWIN_SUF_64_BIT_INO_T	/* nothing */
 #  define __DARWIN_SUF_NON_CANCELABLE	/* nothing */
 #  define __DARWIN_SUF_1050		/* nothing */
@@ -368,6 +434,17 @@
 
 #define __DARWIN_EXTSN(sym)		__asm("_" __STRING(sym) __DARWIN_SUF_EXTSN)
 #define __DARWIN_EXTSN_C(sym)		__asm("_" __STRING(sym) __DARWIN_SUF_EXTSN __DARWIN_SUF_NON_CANCELABLE)
+
+/*
+ * symbol release macros
+ */
+#if defined(__ENVIRONMENT_MAC_OS_X_VERSION_MIN_REQUIRED__) && ((__ENVIRONMENT_MAC_OS_X_VERSION_MIN_REQUIRED__-0) < 1060)
+#undef __DARWIN_10_6_AND_LATER
+#define __DARWIN_10_6_AND_LATER_ALIAS(x)	/* nothing */
+#else /* 10.6 and beyond */
+#define __DARWIN_10_6_AND_LATER
+#define __DARWIN_10_6_AND_LATER_ALIAS(x)	x
+#endif
 
 
 /*
@@ -435,7 +512,7 @@
  * long doubles.  This applies only to ppc; i386 already has long double
  * support, while ppc64 doesn't have any backwards history.
  */
-#if defined(__ppc__)
+#if   defined(__ppc__)
 #  if defined(__LDBL_MANT_DIG__) && defined(__DBL_MANT_DIG__) && \
 	__LDBL_MANT_DIG__ > __DBL_MANT_DIG__
 #    if __ENVIRONMENT_MAC_OS_X_VERSION_MIN_REQUIRED__-0 < 1040
@@ -450,7 +527,7 @@
 #   define	__DARWIN_LDBL_COMPAT2(x) /* nothing */
 #   define	__DARWIN_LONG_DOUBLE_IS_DOUBLE	1
 #  endif
-#elif defined(__i386__) || defined(__ppc64__) || defined(__x86_64__) || defined (__arm__)
+#elif defined(__i386__) || defined(__ppc64__) || defined(__x86_64__)
 #  define	__DARWIN_LDBL_COMPAT(x)	/* nothing */
 #  define	__DARWIN_LDBL_COMPAT2(x) /* nothing */
 #  define	__DARWIN_LONG_DOUBLE_IS_DOUBLE	0
@@ -472,11 +549,45 @@
  *****************************************/
 
 /*
+ * _DARWIN_FEATURE_64_BIT_INODE indicates that the ino_t type is 64-bit, and
+ * structures modified for 64-bit inodes (like struct stat) will be used.
+ */
+#if __DARWIN_64_BIT_INO_T
+#define _DARWIN_FEATURE_64_BIT_INODE		1
+#endif
+
+/*
  * _DARWIN_FEATURE_LONG_DOUBLE_IS_DOUBLE indicates when the long double type
- * is the same as the double type (ppc only)
+ * is the same as the double type (ppc and arm only)
  */
 #if __DARWIN_LONG_DOUBLE_IS_DOUBLE
 #define _DARWIN_FEATURE_LONG_DOUBLE_IS_DOUBLE	1
+#endif
+
+/*
+ * _DARWIN_FEATURE_64_ONLY_BIT_INODE indicates that the ino_t type may only
+ * be 64-bit; there is no support for 32-bit ino_t when this macro is defined
+ * (and non-zero).  There is no struct stat64 either, as the regular
+ * struct stat will already be the 64-bit version.
+ */
+#if __DARWIN_ONLY_64_BIT_INO_T
+#define _DARWIN_FEATURE_ONLY_64_BIT_INODE	1
+#endif
+
+/*
+ * _DARWIN_FEATURE_ONLY_VERS_1050 indicates that only those APIs updated
+ * in 10.5 exists; no pre-10.5 variants are available.
+ */
+#if __DARWIN_ONLY_VERS_1050
+#define _DARWIN_FEATURE_ONLY_VERS_1050		1
+#endif
+
+/*
+ * _DARWIN_FEATURE_ONLY_UNIX_CONFORMANCE indicates only UNIX conforming API
+ * are available (the legacy BSD APIs are not available)
+ */
+#if __DARWIN_ONLY_UNIX_CONFORMANCE
+#define _DARWIN_FEATURE_ONLY_UNIX_CONFORMANCE	1
 #endif
 
 /*
@@ -487,12 +598,14 @@
 #define _DARWIN_FEATURE_UNIX_CONFORMANCE	3
 #endif
 
-/*
- * _DARWIN_FEATURE_64_BIT_INODE indicates that the ino_t type is 64-bit, and
- * structures modified for 64-bit inodes (like struct stat) will be used.
+/* 
+ * This macro casts away the qualifier from the variable
+ *
+ * Note: use at your own risk, removing qualifiers can result in
+ * catastrophic run-time failures.
  */
-#if __DARWIN_64_BIT_INO_T
-#define _DARWIN_FEATURE_64_BIT_INODE		1
+#ifndef __CAST_AWAY_QUALIFIER
+#define __CAST_AWAY_QUALIFIER(variable, qualifier, type)  (type) ((char *)0 + ((qualifier char *)(variable) - (qualifier char *)0) ) 
 #endif
 
 #endif /* !_CDEFS_H_ */

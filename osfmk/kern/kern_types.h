@@ -42,7 +42,11 @@
 
 struct zone ;
 
+#ifndef __LP64__
 struct wait_queue { unsigned int opaque[2]; uintptr_t opaquep[2]; } ;
+#else
+struct wait_queue { unsigned char opaque[32]; };
+#endif
 
 #endif	/* MACH_KERNEL_PRIVATE */
 
@@ -63,6 +67,7 @@ typedef	void *event_t;		/* wait event */
 
 typedef uint64_t event64_t;		/* 64 bit wait event */
 #define		NO_EVENT64		((event64_t) 0)
+#define		CAST_EVENT64_T(a_ptr)	((event64_t)((uintptr_t)(a_ptr)))
 
 /*
  *	Possible wait_result_t values.
@@ -73,6 +78,7 @@ typedef int wait_result_t;
 #define THREAD_TIMED_OUT	1		/* timeout expired */
 #define THREAD_INTERRUPTED	2		/* aborted/interrupted */
 #define THREAD_RESTART		3		/* restart operation entirely */
+#define THREAD_NOT_WAITING      10              /* thread didn't need to wait */
 
 typedef	void (*thread_continue_t)(void *, wait_result_t);
 #define	THREAD_CONTINUE_NULL	((thread_continue_t) 0)

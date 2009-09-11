@@ -30,10 +30,8 @@
 
 #if defined (__ppc__)
 #include "ppc/asm.h"
-#elif defined (__i386__)
+#elif defined (__i386__) || defined (__x86_64__)
 #include "i386/asm.h"
-#elif defined (__arm__)
-#include "arm/asm.h"
 #else
 #error architecture not supported
 #endif

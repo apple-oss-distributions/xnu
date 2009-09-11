@@ -100,6 +100,9 @@
 
 #include <kern/ipc_tt.h>
 #include <kern/kalloc.h>
+#include <kern/thread_call.h>
+
+#include <mach/mach_vm.h>
 
 #include <vm/vm_map.h>
 #include <vm/vm_shared_region.h>
@@ -112,11 +115,14 @@
 /* "dyld" uses this to figure out what the kernel supports */
 int shared_region_version = 3;
 
-/* should local (non-chroot) shared regions persist when no task uses them ? */
-int shared_region_persistence = 1;	/* yes by default */
-
 /* trace level, output is sent to the system log file */
 int shared_region_trace_level = SHARED_REGION_TRACE_ERROR_LVL;
+
+/* should local (non-chroot) shared regions persist when no task uses them ? */
+int shared_region_persistence = 0;	/* no by default */
+
+/* delay before reclaiming an unused shared region */
+int shared_region_destroy_delay = 120; /* in seconds */
 
 /* this lock protects all the shared region data structures */
 lck_grp_t *vm_shared_region_lck_grp;
@@ -139,6 +145,16 @@ static vm_shared_region_t vm_shared_region_create(
 	cpu_type_t		cputype,
 	boolean_t		is_64bit);
 static void vm_shared_region_destroy(vm_shared_region_t shared_region);
+
+static void vm_shared_region_timeout(thread_call_param_t param0,
+				     thread_call_param_t param1);
+
+static int __commpage_setup = 0;
+#if defined(__i386__) || defined(__x86_64__)
+static int __system_power_source = 1;	/* init to extrnal power source */
+static void post_sys_powersource_internal(int i, int internal);
+#endif /* __i386__ || __x86_64__ */
+
 
 /*
  * Initialize the module...
@@ -398,6 +414,22 @@ vm_shared_region_reference_locked(
 		 shared_region));
 	assert(shared_region->sr_ref_count > 0);
 	shared_region->sr_ref_count++;
+
+	if (shared_region->sr_timer_call != NULL) {
+		boolean_t cancelled;
+
+		/* cancel and free any pending timeout */
+		cancelled = thread_call_cancel(shared_region->sr_timer_call);
+		if (cancelled) {
+			thread_call_free(shared_region->sr_timer_call);
+			shared_region->sr_timer_call = NULL;
+			/* release the reference held by the cancelled timer */
+			shared_region->sr_ref_count--;
+		} else {
+			/* the timer will drop the reference and free itself */
+		}
+	}
+
 	SHARED_REGION_TRACE_DEBUG(
 		("shared_region: reference_locked(%p) <- %d\n",
 		 shared_region, shared_region->sr_ref_count));
@@ -447,16 +479,46 @@ vm_shared_region_deallocate(
 		 shared_region, shared_region->sr_ref_count));
 
 	if (shared_region->sr_ref_count == 0) {
-		assert(! shared_region->sr_mapping_in_progress);
-		/* remove it from the queue first, so no one can find it... */
-		queue_remove(&vm_shared_region_queue,
-			     shared_region,
-			     vm_shared_region_t,
-			     sr_q);
-		vm_shared_region_unlock();
-		/* ... and destroy it */
-		vm_shared_region_destroy(shared_region);
-		shared_region = NULL;
+		uint64_t deadline;
+
+		if (shared_region->sr_timer_call == NULL) {
+			/* hold one reference for the timer */
+			assert(! shared_region->sr_mapping_in_progress);
+			shared_region->sr_ref_count++;
+
+			/* set up the timer */
+			shared_region->sr_timer_call = thread_call_allocate(
+				(thread_call_func_t) vm_shared_region_timeout,
+				(thread_call_param_t) shared_region);
+
+			/* schedule the timer */
+			clock_interval_to_deadline(shared_region_destroy_delay,
+						   1000 * 1000 * 1000,
+						   &deadline);
+			thread_call_enter_delayed(shared_region->sr_timer_call,
+						  deadline);
+
+			SHARED_REGION_TRACE_DEBUG(
+				("shared_region: deallocate(%p): armed timer\n",
+				 shared_region));
+
+			vm_shared_region_unlock();
+		} else {
+			/* timer expired: let go of this shared region */
+
+			/*
+			 * Remove it from the queue first, so no one can find
+			 * it...
+			 */
+			queue_remove(&vm_shared_region_queue,
+				     shared_region,
+				     vm_shared_region_t,
+				     sr_q);
+			vm_shared_region_unlock();
+			/* ... and destroy it */
+			vm_shared_region_destroy(shared_region);
+			shared_region = NULL;
+		}
 	} else {
 		vm_shared_region_unlock();
 	}
@@ -464,6 +526,18 @@ vm_shared_region_deallocate(
 	SHARED_REGION_TRACE_DEBUG(
 		("shared_region: deallocate(%p) <-\n",
 		 shared_region));
+}
+
+void
+vm_shared_region_timeout(
+	thread_call_param_t	param0,
+	__unused thread_call_param_t	param1)
+{
+	vm_shared_region_t	shared_region;
+
+	shared_region = (vm_shared_region_t) param0;
+
+	vm_shared_region_deallocate(shared_region);
 }
 
 /*
@@ -604,6 +678,7 @@ vm_shared_region_create(
 	queue_init(&shared_region->sr_q);
 	shared_region->sr_mapping_in_progress = FALSE;
 	shared_region->sr_persists = FALSE;
+	shared_region->sr_timer_call = NULL;
 	shared_region->sr_first_mapping = (mach_vm_offset_t) -1;
 
 	/* grab a reference for the caller */
@@ -680,6 +755,10 @@ vm_shared_region_destroy(
 	mach_memory_entry_port_release(shared_region->sr_mem_entry);
 	mem_entry = NULL;
 	shared_region->sr_mem_entry = IPC_PORT_NULL;
+
+	if (shared_region->sr_timer_call) {
+		thread_call_free(shared_region->sr_timer_call);
+	}
 
 	/* release the shared region structure... */
 	kfree(shared_region, sizeof (*shared_region));
@@ -770,6 +849,9 @@ vm_shared_region_map_file(
 	unsigned int		i;
 	mach_port_t		map_port;
 	mach_vm_offset_t	target_address;
+	vm_object_t		object;
+	vm_object_size_t	obj_size;
+
 
 	kr = KERN_SUCCESS;
 
@@ -844,51 +926,143 @@ vm_shared_region_map_file(
 		target_address =
 			mappings[i].sfm_address - sr_base_address;
 
-		/* establish that mapping, OK if it's to "already" there */
-		kr = vm_map_enter_mem_object(
-			sr_map,
-			&target_address,
-			vm_map_round_page(mappings[i].sfm_size),
-			0,
-			VM_FLAGS_FIXED | VM_FLAGS_ALREADY,
-			map_port,
-			mappings[i].sfm_file_offset,
-			TRUE,
-			mappings[i].sfm_init_prot & VM_PROT_ALL,
-			mappings[i].sfm_max_prot & VM_PROT_ALL,
-			VM_INHERIT_DEFAULT);
-		if (kr == KERN_MEMORY_PRESENT) {
-			/* this exact mapping was already there: that's fine */
-			SHARED_REGION_TRACE_INFO(
-				("shared_region: mapping[%d]: "
-				 "address:0x%016llx size:0x%016llx "
-				 "offset:0x%016llx "
-				 "maxprot:0x%x prot:0x%x already mapped...\n",
-				 i,
-				 (long long)mappings[i].sfm_address,
-				 (long long)mappings[i].sfm_size,
-				 (long long)mappings[i].sfm_file_offset,
-				 mappings[i].sfm_max_prot,
-				 mappings[i].sfm_init_prot));
-			kr = KERN_SUCCESS;
-		} else if (kr != KERN_SUCCESS) {
-			/* this mapping failed ! */
-			SHARED_REGION_TRACE_ERROR(
-				("shared_region: mapping[%d]: "
-				 "address:0x%016llx size:0x%016llx "
-				 "offset:0x%016llx "
-				 "maxprot:0x%x prot:0x%x failed 0x%x\n",
-				 i,
-				 (long long)mappings[i].sfm_address,
-				 (long long)mappings[i].sfm_size,
-				 (long long)mappings[i].sfm_file_offset,
-				 mappings[i].sfm_max_prot,
-				 mappings[i].sfm_init_prot,
-				 kr));
-			break;
+		/* establish that mapping, OK if it's "already" there */
+		if (map_port == MACH_PORT_NULL) {
+			/*
+			 * We want to map some anonymous memory in a
+			 * shared region.
+			 * We have to create the VM object now, so that it
+			 * can be mapped "copy-on-write".
+			 */
+			obj_size = vm_map_round_page(mappings[i].sfm_size);
+			object = vm_object_allocate(obj_size);
+			if (object == VM_OBJECT_NULL) {
+				kr = KERN_RESOURCE_SHORTAGE;
+			} else {
+				kr = vm_map_enter(
+					sr_map,
+					&target_address,
+					vm_map_round_page(mappings[i].sfm_size),
+					0,
+					VM_FLAGS_FIXED | VM_FLAGS_ALREADY,
+					object,
+					0,
+					TRUE,
+					mappings[i].sfm_init_prot & VM_PROT_ALL,
+					mappings[i].sfm_max_prot & VM_PROT_ALL,
+					VM_INHERIT_DEFAULT);
+			}
+		} else {
+			object = VM_OBJECT_NULL; /* no anonymous memory here */
+			kr = vm_map_enter_mem_object(
+				sr_map,
+				&target_address,
+				vm_map_round_page(mappings[i].sfm_size),
+				0,
+				VM_FLAGS_FIXED | VM_FLAGS_ALREADY,
+				map_port,
+				mappings[i].sfm_file_offset,
+				TRUE,
+				mappings[i].sfm_init_prot & VM_PROT_ALL,
+				mappings[i].sfm_max_prot & VM_PROT_ALL,
+				VM_INHERIT_DEFAULT);
 		}
 
-		/* we're protected by "sr_mapping_in_progress" */
+		if (kr != KERN_SUCCESS) {
+			if (map_port == MACH_PORT_NULL) {
+				/*
+				 * Get rid of the VM object we just created
+				 * but failed to map.
+				 */
+				vm_object_deallocate(object);
+				object = VM_OBJECT_NULL;
+			}
+			if (kr == KERN_MEMORY_PRESENT) {
+				/*
+				 * This exact mapping was already there:
+				 * that's fine.
+				 */
+				SHARED_REGION_TRACE_INFO(
+					("shared_region: mapping[%d]: "
+					 "address:0x%016llx size:0x%016llx "
+					 "offset:0x%016llx "
+					 "maxprot:0x%x prot:0x%x "
+					 "already mapped...\n",
+					 i,
+					 (long long)mappings[i].sfm_address,
+					 (long long)mappings[i].sfm_size,
+					 (long long)mappings[i].sfm_file_offset,
+					 mappings[i].sfm_max_prot,
+					 mappings[i].sfm_init_prot));
+				/*
+				 * We didn't establish this mapping ourselves;
+				 * let's reset its size, so that we do not
+				 * attempt to undo it if an error occurs later.
+				 */
+				mappings[i].sfm_size = 0;
+				kr = KERN_SUCCESS;
+			} else {
+				unsigned int j;
+
+				/* this mapping failed ! */
+				SHARED_REGION_TRACE_ERROR(
+					("shared_region: mapping[%d]: "
+					 "address:0x%016llx size:0x%016llx "
+					 "offset:0x%016llx "
+					 "maxprot:0x%x prot:0x%x failed 0x%x\n",
+					 i,
+					 (long long)mappings[i].sfm_address,
+					 (long long)mappings[i].sfm_size,
+					 (long long)mappings[i].sfm_file_offset,
+					 mappings[i].sfm_max_prot,
+					 mappings[i].sfm_init_prot,
+					 kr));
+
+				/*
+				 * Undo the mappings we've established so far.
+				 */
+				for (j = 0; j < i; j++) {
+					kern_return_t kr2;
+
+					if (mappings[j].sfm_size == 0) {
+						/*
+						 * We didn't establish this
+						 * mapping, so nothing to undo.
+						 */
+						continue;
+					}
+					SHARED_REGION_TRACE_INFO(
+						("shared_region: mapping[%d]: "
+						 "address:0x%016llx "
+						 "size:0x%016llx "
+						 "offset:0x%016llx "
+						 "maxprot:0x%x prot:0x%x: "
+						 "undoing...\n",
+						 j,
+						 (long long)mappings[j].sfm_address,
+						 (long long)mappings[j].sfm_size,
+						 (long long)mappings[j].sfm_file_offset,
+						 mappings[j].sfm_max_prot,
+						 mappings[j].sfm_init_prot));
+					kr2 = mach_vm_deallocate(
+						sr_map,
+						(mappings[j].sfm_address -
+						 sr_base_address),
+						mappings[j].sfm_size);
+					assert(kr2 == KERN_SUCCESS);
+				}
+
+				break;
+			}
+
+		}
+
+		/*
+		 * Record the first (chronologically) mapping in
+		 * this shared region.
+		 * We're protected by "sr_mapping_in_progress" here,
+		 * so no need to lock "shared_region".
+		 */
 		if (shared_region->sr_first_mapping == (mach_vm_offset_t) -1) {
 			shared_region->sr_first_mapping = target_address;
 		}
@@ -1158,6 +1332,12 @@ vm_commpage_init(void)
 
 	/* populate them according to this specific platform */
 	commpage_populate();
+	__commpage_setup = 1;
+#if defined(__i386__) || defined(__x86_64__)
+	if (__system_power_source == 0) {
+		post_sys_powersource_internal(0, 1);
+	}
+#endif /* __i386__ || __x86_64__ */
 
 	SHARED_REGION_TRACE_DEBUG(
 		("commpage: init() <-\n"));
@@ -1269,3 +1449,38 @@ vm_commpage_enter(
 		 map, task, kr));
 	return kr;
 }
+
+
+/* 
+ * This is called from powermanagement code to let kernel know the current source of power.
+ * 0 if it is external source (connected to power )
+ * 1 if it is internal power source ie battery
+ */
+void
+#if defined(__i386__) || defined(__x86_64__)
+post_sys_powersource(int i)
+#else
+post_sys_powersource(__unused int i)
+#endif
+{
+#if defined(__i386__) || defined(__x86_64__)
+	post_sys_powersource_internal(i, 0);
+#endif /* __i386__ || __x86_64__ */
+}
+
+
+#if defined(__i386__) || defined(__x86_64__)
+static void
+post_sys_powersource_internal(int i, int internal)
+{
+	if (internal == 0)
+		__system_power_source = i;
+
+	if (__commpage_setup != 0) {
+		if (__system_power_source != 0)
+			commpage_set_spin_count(0);
+		else
+			commpage_set_spin_count(MP_SPIN_TRIES);
+	}
+}
+#endif /* __i386__ || __x86_64__ */

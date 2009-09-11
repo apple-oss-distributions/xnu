@@ -16,9 +16,10 @@ KMOD_NAME =		libkmod
 KMODCPP_NAME =		libkmodc++
 LIB_INSTALL_FLAGS = 	-p -m 444
 
-CFLAGS += -Wall -Wno-four-char-constants
-CFLAGS_PPC += -mlong-branch
-CFLAGS_ARM += -mlong-calls
+# -mkernel implies -mlong-branch/-mlong-calls/-mno-red-zone as needed for
+# code linked into kexts
+CFLAGS_KMOD = $(filter-out -O0 -O1 -O2 -O3 -O4 -Os -Oz,$(CFLAGS)) \
+	    -Os -mkernel -Wall
 
 ifneq ($(MACHINE_CONFIG), DEFAULT)
 COMPOBJROOT = $(OBJROOT)/$(KERNEL_CONFIG)_$(ARCH_CONFIG)_$(MACHINE_CONFIG)/$(COMPONENT)/kmod
@@ -38,35 +39,61 @@ KMODCPP_OFILES = $(KMODCPP_CFILES:.c=.o)
 ALL_OFILES = $(KMOD_OFILES) $(KMODCPP_OFILES)
 
 $(ALL_OFILES): %.o : %.c
-	${KCC} -c ${CFLAGS} ${${join $@,_CFLAGS}} ${INCFLAGS} ${${join $@,_INCFLAGS}} -o $(COMPOBJROOT)/$(*F).o $<
+	@echo CC $@
+	$(_v)${KCC} -c ${CFLAGS_KMOD} ${${join $@,_CFLAGS}} ${INCFLAGS} ${${join $@,_INCFLAGS}} -o $(COMPOBJROOT)/$(*F).o $<
 
 $(COMPOBJROOT)/$(KMOD_NAME).a: $(KMOD_OFILES)
-	libtool -static -o $@ $^
+	@echo LIBTOOL $(notdir $@)
+	$(_v)$(LIBTOOL) -static -o $@ $^ $(_vstdout) 2>&1
 
 $(COMPOBJROOT)/$(KMODCPP_NAME).a: $(KMODCPP_OFILES)
-	libtool -static -o $@ $^
+	@echo LIBTOOL $(notdir $@)
+	$(_v)$(LIBTOOL) -static -o $@ $^ $(_vstdout) 2>&1
 
 do_build_all: $(COMPOBJROOT)/$(KMOD_NAME).a $(COMPOBJROOT)/$(KMODCPP_NAME).a
 
 $(INSTALL_DIR)/%.a: $(INSTOBJROOT)/%.a
-	@allarchs="";							\
-	for onearch in $(INSTALL_ARCHS); do				\
-		if [ $(MACHINE_CONFIG) = DEFAULT ] ; then	\
-			archdir=$(OBJROOT)/$(KERNEL_CONFIG)_$${onearch}/$(COMPONENT);	\
-		else		\
-			archdir=$(OBJROOT)/$(KERNEL_CONFIG)_$${onearch}_$(MACHINE_CONFIG)/$(COMPONENT);	\
-		fi;		\
-	    if [ -e $${archdir}/kmod/$(*F).a ]; then			\
-		allarchs="$${allarchs} $${archdir}/kmod/$(*F).a";		\
-	    fi;								\
-	done;								\
-	$(RM) $@ || true;						\
+	@echo Installing $< in $@;
+	$(_v)$(RM) $@ || true;						\
 	${MKDIR} $(INSTALL_DIR) $(SYMROOT);				\
-        cmd="lipo $${allarchs} -create -output $(SYMROOT)/$(*F).a";	\
-	echo $$cmd; eval $$cmd;						\
-	cmd="install $(LIB_INSTALL_FLAGS) $(SYMROOT)/$(*F).a $@";	\
+	if [ $(MACHINE_CONFIG) = DEFAULT ]; then			\
+		allarchs="";						\
+		for onearch in $(INSTALL_ARCHS); do			\
+			archdir=$(OBJROOT)/$(KERNEL_CONFIG)_$${onearch}/$(COMPONENT); \
+			if [ -e $${archdir}/kmod/$(*F).a ]; then	\
+				allarchs="$${allarchs} $${archdir}/kmod/$(*F).a"; \
+			fi;						\
+		done;							\
+		cmd="$(LIPO) $${allarchs} -create -output $(SYMROOT)/$(*F).a"; \
+		echo $$cmd; eval $$cmd;					\
+	else								\
+		my_counter=1;						\
+		my_innercounter=1;					\
+		outputfile=$(SYMROOT)/$(*F).a;				\
+		for my_config in $(TARGET_CONFIGS_UC); do		\
+			if [ $${my_counter} -eq 1 ]; then		\
+				my_counter=2;				\
+				my_kconfig=$${my_config};		\
+			elif [ $${my_counter} -eq 2 ]; then		\
+				my_counter=3;				\
+				my_aconfig=$${my_config};		\
+			else						\
+				my_counter=1;				\
+				inputfile=$(OBJROOT)/$${my_kconfig}_$${my_aconfig}_$${my_config}/$(COMPONENT)/kmod/$(*F).a; \
+				if [ -e $${inputfile} ]; then		\
+					if [ $${my_innercounter} -eq 1 ]; then \
+						my_innercounter=2;	\
+						cmd="$(LIPO) -create $${inputfile} -o $${outputfile}"; \
+					else				\
+						cmd="$(LIPO) -create $${outputfile} $${inputfile} -o $${outputfile} || true"; \
+					fi;				\
+					echo $$cmd; eval $$cmd;		\
+				fi;					\
+			fi;						\
+		done;							\
+	fi;								\
+	cmd="$(INSTALL) $(LIB_INSTALL_FLAGS) $(SYMROOT)/$(*F).a $@";	\
 	echo $$cmd; eval $$cmd
-
 
 do_build_install: $(INSTALL_DIR)/$(KMOD_NAME).a $(INSTALL_DIR)/$(KMODCPP_NAME).a
 

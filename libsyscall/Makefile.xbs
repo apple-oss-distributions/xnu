@@ -54,7 +54,7 @@ SOBJS+= ${OBJS:.o=.So}
 
 #### mig Rules ########################################################
 .defs.h .defsUser.c .defsServer.c:
-	mig -arch ${MACHINE_ARCH} -cc ${CC} -user ${.PREFIX}User.c -server ${.PREFIX}Server.c -header ${.PREFIX}.h ${.IMPSRC}
+	$(MIG) ${PRIVINC} ${MIGDEFINES} -arch ${MACHINE_ARCH} -cc ${MIGCC} -user ${.PREFIX}User.c -server ${.PREFIX}Server.c -header ${.PREFIX}.h ${.IMPSRC}
 
 gen_mig_defs: ${SRVMIGHDRS} ${MIGHDRS}
 gen_md_mig_defs: ${MD_MIGHDRS}
@@ -94,9 +94,11 @@ PRIVHDRSPPC = ${PRIVHDRS}/architecture/ppc
 KERNELFRAMEWORK = ${DESTDIR}/System/Library/Frameworks/Kernel.framework
 PRIVKERNELHDRS = ${KERNELFRAMEWORK}/Versions/A/PrivateHeaders
 
+ARCHDIR = ${MACHINE_ARCH:C/^armv.*$/arm/}
+
 installhdrs-md: gen_md_mig_defs
-	mkdir -p ${INCDIR}/mach/${MACHINE_ARCH}
-	${INSTALL} -o 0 -c -m 444 ${MD_MIGHDRS} ${INCDIR}/mach/${MACHINE_ARCH}
+	mkdir -p ${INCDIR}/mach/${ARCHDIR}
+	${INSTALL} -o 0 -c -m 444 ${MD_MIGHDRS} ${INCDIR}/mach/${ARCHDIR}
 	mkdir -p ${PRIVHDRSPPC}
 	${INSTALL} -c -m 444 ${PRIVHDRSPPCHDRS} ${PRIVHDRSPPC}
 

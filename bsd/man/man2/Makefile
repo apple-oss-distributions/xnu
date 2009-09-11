@@ -7,7 +7,6 @@ include $(MakeInc_cmd)
 include $(MakeInc_def)
 
 DATAFILES = \
-	__syscall.2		\
 	_exit.2			\
 	EV_SET.2		\
 	FD_CLR.2		\
@@ -45,6 +44,8 @@ DATAFILES = \
 	fchmod.2		\
 	fchown.2		\
 	fcntl.2			\
+	fgetattrlist.2		\
+	fsetattrlist.2		\
 	fgetxattr.2		\
 	fhopen.2		\
 	flistxattr.2		\
@@ -62,6 +63,7 @@ DATAFILES = \
 	futimes.2		\
 	getattrlist.2		\
 	getaudit.2		\
+	getaudit_addr.2		\
 	getauid.2		\
 	getdirentries.2		\
 	getdirentriesattr.2	\
@@ -95,6 +97,7 @@ DATAFILES = \
 	issetugid.2		\
 	kill.2			\
 	kevent.2		\
+	kevent64.2		\
 	kqueue.2		\
 	lchown.2		\
 	link.2			\
@@ -125,6 +128,7 @@ DATAFILES = \
 	posix_madvise.2		\
 	pread.2			\
 	profil.2		\
+	pthread_setugid_np.2	\
 	ptrace.2		\
 	pwrite.2		\
 	quotactl.2		\
@@ -150,6 +154,7 @@ DATAFILES = \
 	sendto.2		\
 	setattrlist.2		\
 	setaudit.2		\
+	setaudit_addr.2		\
 	setauid.2		\
 	setegid.2		\
 	seteuid.2		\

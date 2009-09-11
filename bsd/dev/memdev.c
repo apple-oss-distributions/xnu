@@ -108,9 +108,14 @@ static strategy_fcn_t	mdevstrategy;
 static int				mdevbioctl(dev_t dev, u_long cmd, caddr_t data, int flag, struct proc *p);
 static int				mdevcioctl(dev_t dev, u_long cmd, caddr_t data, int flag, struct proc *p);
 static int 				mdevrw(dev_t dev, struct uio *uio, int ioflag);
+
+#ifdef CONFIG_MEMDEV_INSECURE
+
 static char *			nonspace(char *pos, char *end);
 static char *			getspace(char *pos, char *end);
 static char *			cvtnum(char *pos, char *end, unsigned int *num);
+
+#endif /* CONFIG_MEMDEV_INSECURE */
 
 extern void		bcopy_phys(addr64_t from, addr64_t to, vm_size_t bytes);
 extern void		mapping_set_mod(ppnum_t pn);
@@ -151,7 +156,7 @@ static struct cdevsw mdevcdevsw = {
 };
 
 struct mdev {
-	vm_offset_t	mdBase;		/* file size in bytes */
+	uint64_t	mdBase;		/* file size in bytes */
 	uint32_t	mdSize;		/* file size in bytes */
 	int			mdFlags;	/* flags */
 	int			mdSecsize;	/* sector size */
@@ -172,6 +177,7 @@ int mdevCMajor = -1;
 static int mdevioctl(dev_t dev, u_long cmd, caddr_t data, int flag, struct proc *p, int is_char);
 dev_t mdevadd(int devid, ppnum_t base, unsigned int size, int phys);
 dev_t mdevlookup(int devid);
+void mdevremoveall(void);
 
 static	int mdevclose(__unused dev_t dev, __unused int flags, 
 					  __unused int devtype, __unused struct proc *p) {
@@ -207,7 +213,7 @@ static int mdevrw(dev_t dev, struct uio *uio, __unused int ioflag) {
 	
 	saveflag = uio->uio_segflg;							/* Remember what the request is */
 #if LP64_DEBUG
-	if (IS_VALID_UIO_SEGFLG(uio->uio_segflg) == 0) {
+	if (UIO_IS_USER_SPACE(uio) == 0 && UIO_IS_SYS_SPACE(uio) == 0) {
 	  panic("mdevrw - invalid uio_segflg\n"); 
 	}
 #endif /* LP64_DEBUG */
@@ -282,9 +288,9 @@ static void mdevstrategy(struct buf *bp) {
 				lop = min((4096 - (vaddr & 4095)), (4096 - (fvaddr & 4095)));	/* Get smallest amount left on sink and source */
 				csize = min(lop, left);					/* Don't move more than we need to */
 				
-				pp = pmap_find_phys(kernel_pmap, (addr64_t)((unsigned int)vaddr));	/* Get the sink physical address */
+				pp = pmap_find_phys(kernel_pmap, (addr64_t)((uintptr_t)vaddr));	/* Get the sink physical address */
 				if(!pp) {								/* Not found, what gives? */
-					panic("mdevstrategy: sink address %016llX not mapped\n", (addr64_t)((unsigned int)vaddr));
+					panic("mdevstrategy: sink address %016llX not mapped\n", (addr64_t)((uintptr_t)vaddr));
 				}
 				paddr = (addr64_t)(((addr64_t)pp << 12) | (addr64_t)(vaddr & 4095));	/* Get actual address */
 				bcopy_phys(fvaddr, paddr, csize);		/* Copy this on in */
@@ -308,9 +314,9 @@ static void mdevstrategy(struct buf *bp) {
 				lop = min((4096 - (vaddr & 4095)), (4096 - (fvaddr & 4095)));	/* Get smallest amount left on sink and source */
 				csize = min(lop, left);					/* Don't move more than we need to */
 				
-				pp = pmap_find_phys(kernel_pmap, (addr64_t)((unsigned int)vaddr));	/* Get the source physical address */
+				pp = pmap_find_phys(kernel_pmap, (addr64_t)((uintptr_t)vaddr));	/* Get the source physical address */
 				if(!pp) {								/* Not found, what gives? */
-					panic("mdevstrategy: source address %016llX not mapped\n", (addr64_t)((unsigned int)vaddr));
+					panic("mdevstrategy: source address %016llX not mapped\n", (addr64_t)((uintptr_t)vaddr));
 				}
 				paddr = (addr64_t)(((addr64_t)pp << 12) | (addr64_t)(vaddr & 4095));	/* Get actual address */
 			
@@ -345,7 +351,7 @@ static int mdevcioctl(dev_t dev, u_long cmd, caddr_t data, int flag, struct proc
 static int mdevioctl(dev_t dev, u_long cmd, caddr_t data, __unused int flag, 
 					 struct proc *p, int is_char) {
 	int error;
-	u_long *f;
+	u_int32_t *f;
 	u_int64_t *o;
 	int devid;
 
@@ -356,7 +362,7 @@ static int mdevioctl(dev_t dev, u_long cmd, caddr_t data, __unused int flag,
 	error = proc_suser(p);			/* Are we superman? */
 	if (error) return (error);							/* Nope... */
 
-	f = (u_long*)data;
+	f = (u_int32_t*)data;
 	o = (u_int64_t *)data;
 
 	switch (cmd) {
@@ -427,6 +433,8 @@ static	int mdevsize(dev_t dev) {
 
 void mdevinit(__unused int the_cnt) {
 
+#ifdef CONFIG_MEMDEV_INSECURE
+
 	int devid, phys;
 	ppnum_t base;
 	unsigned int size;
@@ -471,9 +479,13 @@ void mdevinit(__unused int the_cnt) {
 		dev = mdevadd(devid, base >> 12, size >> 12, phys);	/* Go add the device */ 
 	}
 
+#endif /* CONFIG_MEMDEV_INSECURE */
+
 	return;
 
 }
+
+#ifdef CONFIG_MEMDEV_INSECURE
 
 char *nonspace(char *pos, char *end) {					/* Find next non-space in string */
 
@@ -529,6 +541,8 @@ char *cvtnum(char *pos, char *end, unsigned int *num) {		/* Convert to a number 
 	}
 }
 
+#endif /* CONFIG_MEMDEV_INSECURE */
+
 dev_t mdevadd(int devid, ppnum_t base, unsigned int size, int phys) {
 	
 	int i;
@@ -542,7 +556,7 @@ dev_t mdevadd(int devid, ppnum_t base, unsigned int size, int phys) {
 				continue;								/* Skip check */
 			}
 			if(!(((base + size -1 ) < mdev[i].mdBase) || ((mdev[i].mdBase + mdev[i].mdSize - 1) < base))) {	/* Is there any overlap? */
-				panic("mdevadd: attempt to add overlapping memory device at %08X-%08X\n", mdev[i].mdBase, mdev[i].mdBase + mdev[i].mdSize - 1);
+				panic("mdevadd: attempt to add overlapping memory device at %08lX-%08lX\n", (long) mdev[i].mdBase, (long) mdev[i].mdBase + mdev[i].mdSize - 1);
 			}
 		}
 		if(devid < 0) {									/* Do we have free slots? */
@@ -608,4 +622,25 @@ dev_t mdevlookup(int devid) {
 	if((devid < 0) || (devid > 15)) return -1;			/* Filter any bogus requests */
 	if(!(mdev[devid].mdFlags & mdInited)) return -1;	/* This one hasn't been defined */
 	return mdev[devid].mdBDev;							/* Return the device number */
+}
+
+void mdevremoveall(void) {
+
+	int i;
+
+	for(i = 0; i < 16; i++) {
+		if(!(mdev[i].mdFlags & mdInited)) continue;	/* Ignore unused mdevs */
+
+		devfs_remove(mdev[i].mdbdevb);			/* Remove the block device */
+		devfs_remove(mdev[i].mdcdevb);			/* Remove the character device */
+
+		mdev[i].mdBase = 0;				/* Clear the mdev's storage */
+		mdev[i].mdSize = 0;
+		mdev[i].mdSecsize = 0;
+		mdev[i].mdFlags = 0;
+		mdev[i].mdBDev = 0;
+		mdev[i].mdCDev = 0;
+		mdev[i].mdbdevb = 0;
+		mdev[i].mdcdevb = 0;
+	}
 }

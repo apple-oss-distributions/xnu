@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2008 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -366,7 +366,7 @@ struct sockaddr_in {
 	sa_family_t	sin_family;
 	in_port_t	sin_port;
 	struct	in_addr sin_addr;
-	char		sin_zero[8];		/* XXX bwg2001-004 */
+	char		sin_zero[8];
 };
 
 #define INET_ADDRSTRLEN                 16
@@ -414,7 +414,8 @@ struct ip_opts {
 #ifdef __APPLE__
 #define IP_STRIPHDR      	23   /* bool: drop receive of raw IP header */
 #endif
-#define IP_RECVTTL			24	/* bool; receive reception TTL w/dgram */
+#define IP_RECVTTL		24   /* bool; receive reception TTL w/dgram */
+#define	IP_BOUND_IF		25   /* set/get bound interface */
 
 
 #define	IP_FW_ADD     		40   /* add a firewall rule to chain */
@@ -440,9 +441,8 @@ struct ip_opts {
 
 #define	IP_TRAFFIC_MGT_BACKGROUND	65   /* int*; get background IO flags; set background IO */
 
-#if CONFIG_FORCE_OUT_IFP
-/* This is a hack, this is only a hack. */
-#define	IP_FORCE_OUT_IFP	69	/* char ifname[] - send traffic on this interface */
+#ifdef PRIVATE
+#define	IP_FORCE_OUT_IFP	69   /* deprecated; use IP_BOUND_IF instead */
 #endif
 
 /* Background socket configuration flags */
@@ -612,7 +612,7 @@ extern u_short in_addword(u_short, u_short);
 extern u_short in_pseudo(u_int, u_int, u_int);
 
 extern int in_localaddr(struct in_addr);
-extern u_long in_netof(struct in_addr);
+extern u_int32_t in_netof(struct in_addr);
 
 extern int inaddr_local(struct in_addr);
 #endif /* KERNEL_PRIVATE */
@@ -621,5 +621,15 @@ extern int inaddr_local(struct in_addr);
 
 extern const char *inet_ntop(int, const void *, char *, socklen_t); /* in libkern */
 #endif /* KERNEL */
+
+#ifndef KERNEL		
+#if !defined(_POSIX_C_SOURCE) || defined(_DARWIN_C_SOURCE)
+__BEGIN_DECLS
+int        bindresvport(int, struct sockaddr_in *);
+struct sockaddr;
+int        bindresvport_sa(int, struct sockaddr *);
+__END_DECLS
+#endif
+#endif
 
 #endif /* _NETINET_IN_H_ */

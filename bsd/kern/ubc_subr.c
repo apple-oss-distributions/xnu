@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1999-2007 Apple Inc. All rights reserved.
+ * Copyright (c) 1999-2008 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -55,6 +55,7 @@
 #include <mach/memory_object_types.h>
 #include <mach/memory_object_control.h>
 #include <mach/vm_map.h>
+#include <mach/mach_vm.h>
 #include <mach/upl.h>
 
 #include <kern/kern_types.h>
@@ -65,6 +66,8 @@
 #include <vm/vm_protos.h> /* last */
 
 #include <libkern/crypto/sha1.h>
+
+#include <security/mac_framework.h>
 
 /* XXX These should be in a BSD accessible Mach header, but aren't. */
 extern kern_return_t memory_object_pages_resident(memory_object_control_t,
@@ -85,7 +88,7 @@ kern_return_t ubc_page_op_with_control(
 
 #if DIAGNOSTIC
 #if defined(assert)
-#undef assert()
+#undef assert
 #endif
 #define assert(cond)    \
     ((void) ((cond) ? 0 : panic("Assert failed: %s", # cond)))
@@ -105,6 +108,9 @@ struct zone	*ubc_info_zone;
  * CODESIGNING
  * Routines to navigate code signing data structures in the kernel...
  */
+
+extern int cs_debug;
+
 static boolean_t
 cs_valid_range(
 	const void *start,
@@ -139,6 +145,7 @@ enum {
 	CSSLOT_CODEDIRECTORY = 0,				/* slot index for CodeDirectory */
 };
 
+static const uint32_t supportsScatter = 0x20100;	// first version to support scatter option
 
 /*
  * Structure of an embedded-signature SuperBlob
@@ -156,6 +163,12 @@ typedef struct __SuperBlob {
 	/* followed by Blobs in no particular order as indicated by offsets in index */
 } CS_SuperBlob;
 
+struct Scatter {
+	uint32_t count;			// number of pages; zero for sentinel (only)
+	uint32_t base;			// first page number
+	uint64_t targetOffset;		// offset in target
+	uint64_t spare;			// reserved
+};
 
 /*
  * C form of a CodeDirectory.
@@ -175,6 +188,8 @@ typedef struct __CodeDirectory {
 	uint8_t spare1;					/* unused (must be zero) */
 	uint8_t	pageSize;				/* log2(page size in bytes); 0 => infinite */
 	uint32_t spare2;				/* unused (must be zero) */
+	/* Version 0x20100 */
+	uint32_t scatterOffset;				/* offset of optional scatter vector */
 	/* followed by dynamic content as located by offset fields above */
 } CS_CodeDirectory;
 
@@ -222,6 +237,13 @@ CS_CodeDirectory *findCodeDirectory(
 	    cs_valid_range(cd, cd + 1, lower_bound, upper_bound) &&
 	    cs_valid_range(cd, (const char *) cd + ntohl(cd->length),
 			   lower_bound, upper_bound) &&
+	    cs_valid_range(cd, (const char *) cd + ntohl(cd->hashOffset),
+			   lower_bound, upper_bound) &&
+	    cs_valid_range(cd, (const char *) cd +
+			   ntohl(cd->hashOffset) +
+			   (ntohl(cd->nCodeSlots) * SHA1_RESULTLEN),
+			   lower_bound, upper_bound) &&
+	    
 	    ntohl(cd->magic) == CSMAGIC_CODEDIRECTORY) {
 		return cd;
 	}
@@ -242,21 +264,83 @@ hashes(
 	char *upper_bound)
 {
 	const unsigned char *base, *top, *hash;
-	uint32_t nCodeSlots;
+	uint32_t nCodeSlots = ntohl(cd->nCodeSlots);
 
 	assert(cs_valid_range(cd, cd + 1, lower_bound, upper_bound));
 
-	base = (const unsigned char *)cd + ntohl(cd->hashOffset);
-	nCodeSlots = ntohl(cd->nCodeSlots);
-	top = base + nCodeSlots * SHA1_RESULTLEN;
-	if (!cs_valid_range(base, top, 
-			    lower_bound, upper_bound) ||
-	    page > nCodeSlots) {
-		return NULL;
-	}
-	assert(page < nCodeSlots);
+	if((ntohl(cd->version) >= supportsScatter) && (ntohl(cd->scatterOffset))) {
+		/* Get first scatter struct */
+		const struct Scatter *scatter = (const struct Scatter*)
+			((const char*)cd + ntohl(cd->scatterOffset));
+		uint32_t hashindex=0, scount, sbase=0;
+		/* iterate all scatter structs */
+		do {
+			if((const char*)scatter > (const char*)cd + ntohl(cd->length)) {
+				if(cs_debug) {
+					printf("CODE SIGNING: Scatter extends past Code Directory\n");
+				}
+				return NULL;
+			}
+			
+			scount = ntohl(scatter->count);
+			uint32_t new_base = ntohl(scatter->base);
 
-	hash = base + page * SHA1_RESULTLEN;
+			/* last scatter? */
+			if (scount == 0) {
+				return NULL;
+			}
+			
+			if((hashindex > 0) && (new_base <= sbase)) {
+				if(cs_debug) {
+					printf("CODE SIGNING: unordered Scatter, prev base %d, cur base %d\n",
+					sbase, new_base);
+				}
+				return NULL;	/* unordered scatter array */
+			}
+			sbase = new_base;
+
+			/* this scatter beyond page we're looking for? */
+			if (sbase > page) {
+				return NULL;
+			}
+			
+			if (sbase+scount >= page) {
+				/* Found the scatter struct that is 
+				 * referencing our page */
+
+				/* base = address of first hash covered by scatter */
+				base = (const unsigned char *)cd + ntohl(cd->hashOffset) + 
+					hashindex * SHA1_RESULTLEN;
+				/* top = address of first hash after this scatter */
+				top = base + scount * SHA1_RESULTLEN;
+				if (!cs_valid_range(base, top, lower_bound, 
+						    upper_bound) ||
+				    hashindex > nCodeSlots) {
+					return NULL;
+				}
+				
+				break;
+			}
+			
+			/* this scatter struct is before the page we're looking 
+			 * for. Iterate. */
+			hashindex+=scount;
+			scatter++;
+		} while(1);
+		
+		hash = base + (page - sbase) * SHA1_RESULTLEN;
+	} else {
+		base = (const unsigned char *)cd + ntohl(cd->hashOffset);
+		top = base + nCodeSlots * SHA1_RESULTLEN;
+		if (!cs_valid_range(base, top, lower_bound, upper_bound) ||
+		    page > nCodeSlots) {
+			return NULL;
+		}
+		assert(page < nCodeSlots);
+
+		hash = base + page * SHA1_RESULTLEN;
+	}
+	
 	if (!cs_valid_range(hash, hash + SHA1_RESULTLEN,
 			    lower_bound, upper_bound)) {
 		hash = NULL;
@@ -539,8 +623,10 @@ ubc_setsize(struct vnode *vp, off_t nsize)
 	 */
 	uip->ui_size = nsize;
 
-	if (nsize >= osize)	/* Nothing more to do */
+	if (nsize >= osize) {	/* Nothing more to do */
+		lock_vnode_and_post(vp, NOTE_EXTEND);
 		return (1);		/* return success */
+	}
 
 	/*
 	 * When the file shrinks, invalidate the pages beyond the
@@ -577,6 +663,12 @@ ubc_setsize(struct vnode *vp, off_t nsize)
 		lastpg += PAGE_SIZE_64;
 	}
 	if (olastpgend > lastpg) {
+		int	flags;
+
+		if (lastpg == 0)
+			flags = MEMORY_OBJECT_DATA_FLUSH_ALL;
+		else
+			flags = MEMORY_OBJECT_DATA_FLUSH;
 	        /*
 		 * invalidate the pages beyond the new EOF page
 		 *
@@ -584,8 +676,7 @@ ubc_setsize(struct vnode *vp, off_t nsize)
 	        kret = memory_object_lock_request(control,
 						  (memory_object_offset_t)lastpg,
 						  (memory_object_size_t)(olastpgend - lastpg), NULL, NULL,
-						  MEMORY_OBJECT_RETURN_NONE, MEMORY_OBJECT_DATA_FLUSH,
-						  VM_PROT_NO_CHANGE);
+						  MEMORY_OBJECT_RETURN_NONE, flags, VM_PROT_NO_CHANGE);
 		if (kret != KERN_SUCCESS)
 		        printf("ubc_setsize: invalidate failed (error = %d)\n", kret);
 	}
@@ -835,7 +926,6 @@ ubc_setcred(struct vnode *vp, proc_t p)
 
 	return (1);
 }
-
 
 /*
  * ubc_getpager
@@ -1426,7 +1516,7 @@ ubc_isinuse_locked(struct vnode *vp, int busycount, int locked)
 
 
 	if (!locked)
-		vnode_lock(vp);
+		vnode_lock_spin(vp);
 
 	if ((vp->v_usecount - vp->v_kusecount) > busycount)
 		retval = 1;
@@ -1462,9 +1552,6 @@ ubc_unmap(struct vnode *vp)
 	struct ubc_info *uip;
 	int	need_rele = 0;
 	int	need_wakeup = 0;
-#if NAMEDRSRCFORK 
-	int	named_fork = 0;
-#endif
 
 	if (vnode_getwithref(vp))
 	        return;
@@ -1480,14 +1567,6 @@ ubc_unmap(struct vnode *vp)
 		}
 		SET(uip->ui_flags, UI_MAPBUSY);
 
-#if NAMEDRSRCFORK
-		if ((vp->v_flag & VISNAMEDSTREAM) &&
-		    (vp->v_parent != NULLVP) && 
-		    !(vp->v_parent->v_mount->mnt_kern_flag & MNTK_NAMED_STREAMS)) {
-		    	named_fork = 1;
-		}
-#endif
-
 		if (ISSET(uip->ui_flags, UI_ISMAPPED)) {
 		        CLR(uip->ui_flags, UI_ISMAPPED);
 			need_rele = 1;
@@ -1496,13 +1575,6 @@ ubc_unmap(struct vnode *vp)
 		
 		if (need_rele) {
 		        (void)VNOP_MNOMAP(vp, vfs_context_current());
-
-#if NAMEDRSRCFORK
-			if (named_fork) {
-				vnode_relenamedstream(vp->v_parent, vp, vfs_context_current());
-			}
-#endif
-
 		        vnode_rele(vp);
 		}
 
@@ -1745,39 +1817,58 @@ kern_return_t
 ubc_create_upl(
 	struct vnode	*vp,
 	off_t 		f_offset,
-	long		bufsize,
+	int		bufsize,
 	upl_t		*uplp,
 	upl_page_info_t	**plp,
 	int		uplflags)
 {
 	memory_object_control_t		control;
-	mach_msg_type_number_t		count;
-	int                             ubcflags;
 	kern_return_t			kr;
+
+	if (plp != NULL)
+		*plp = NULL;
+	*uplp = NULL;
 	
 	if (bufsize & 0xfff)
 		return KERN_INVALID_ARGUMENT;
 
-	if (uplflags & UPL_FOR_PAGEOUT) {
-		uplflags &= ~UPL_FOR_PAGEOUT;
-	        ubcflags  =  UBC_FOR_PAGEOUT;
-	} else
-	        ubcflags = UBC_FLAGS_NONE;
+	if (uplflags & (UPL_UBC_MSYNC | UPL_UBC_PAGEOUT | UPL_UBC_PAGEIN)) {
 
-	control = ubc_getobject(vp, ubcflags);
+		if (uplflags & UPL_UBC_MSYNC) {
+			uplflags &= UPL_RET_ONLY_DIRTY;
+
+			uplflags |= UPL_COPYOUT_FROM | UPL_CLEAN_IN_PLACE |
+				    UPL_SET_INTERNAL | UPL_SET_LITE;
+
+		} else if (uplflags & UPL_UBC_PAGEOUT) {
+			uplflags &= UPL_RET_ONLY_DIRTY;
+
+			if (uplflags & UPL_RET_ONLY_DIRTY)
+				uplflags |= UPL_NOBLOCK;
+
+			uplflags |= UPL_FOR_PAGEOUT | UPL_CLEAN_IN_PLACE |
+                                    UPL_COPYOUT_FROM | UPL_SET_INTERNAL | UPL_SET_LITE;
+		} else {
+			uplflags |= UPL_RET_ONLY_ABSENT | UPL_NOBLOCK |
+				    UPL_NO_SYNC | UPL_CLEAN_IN_PLACE |
+				    UPL_SET_INTERNAL | UPL_SET_LITE;
+		}
+	} else {
+		uplflags &= ~UPL_FOR_PAGEOUT;
+
+		if (uplflags & UPL_WILL_BE_DUMPED) {
+			uplflags &= ~UPL_WILL_BE_DUMPED;
+			uplflags |= (UPL_NO_SYNC|UPL_SET_INTERNAL);
+		} else
+			uplflags |= (UPL_NO_SYNC|UPL_CLEAN_IN_PLACE|UPL_SET_INTERNAL);
+	}
+	control = ubc_getobject(vp, UBC_FLAGS_NONE);
 	if (control == MEMORY_OBJECT_CONTROL_NULL)
 		return KERN_INVALID_ARGUMENT;
 
-	if (uplflags & UPL_WILL_BE_DUMPED) {
-	        uplflags &= ~UPL_WILL_BE_DUMPED;
-		uplflags |= (UPL_NO_SYNC|UPL_SET_INTERNAL);
-	} else
-	        uplflags |= (UPL_NO_SYNC|UPL_CLEAN_IN_PLACE|UPL_SET_INTERNAL);
-	count = 0;
-
-	kr = memory_object_upl_request(control, f_offset, bufsize, uplp, NULL, &count, uplflags);
-	if (plp != NULL)
-			*plp = UPL_GET_INTERNAL_PAGE_LIST(*uplp);
+	kr = memory_object_upl_request(control, f_offset, bufsize, uplp, NULL, NULL, uplflags);
+	if (kr == KERN_SUCCESS && plp != NULL)
+		*plp = UPL_GET_INTERNAL_PAGE_LIST(*uplp);
 	return kr;
 }
 		
@@ -1795,7 +1886,7 @@ upl_size_t
 ubc_upl_maxbufsize(
 	void)
 {
-	return(MAX_UPL_TRANSFER * PAGE_SIZE);
+	return(MAX_UPL_SIZE * PAGE_SIZE);
 }
 
 /*
@@ -1875,7 +1966,7 @@ ubc_upl_commit(
 	kern_return_t 	kr;
 
 	pl = UPL_GET_INTERNAL_PAGE_LIST(upl);
-	kr = upl_commit(upl, pl, MAX_UPL_TRANSFER);
+	kr = upl_commit(upl, pl, MAX_UPL_SIZE);
 	upl_deallocate(upl);
 	return kr;
 }
@@ -1936,8 +2027,8 @@ ubc_upl_commit(
 kern_return_t
 ubc_upl_commit_range(
 	upl_t 			upl,
-	vm_offset_t		offset,
-	vm_size_t		size,
+	upl_offset_t		offset,
+	upl_size_t		size,
 	int				flags)
 {
 	upl_page_info_t	*pl;
@@ -1947,10 +2038,14 @@ ubc_upl_commit_range(
 	if (flags & UPL_COMMIT_FREE_ON_EMPTY)
 		flags |= UPL_COMMIT_NOTIFY_EMPTY;
 
+	if (flags & UPL_COMMIT_KERNEL_ONLY_FLAGS) {
+		return KERN_INVALID_ARGUMENT;
+	}
+
 	pl = UPL_GET_INTERNAL_PAGE_LIST(upl);
 
 	kr = upl_commit_range(upl, offset, size, flags,
-						  pl, MAX_UPL_TRANSFER, &empty);
+						  pl, MAX_UPL_SIZE, &empty);
 
 	if((flags & UPL_COMMIT_FREE_ON_EMPTY) && empty)
 		upl_deallocate(upl);
@@ -2007,8 +2102,8 @@ ubc_upl_commit_range(
 kern_return_t
 ubc_upl_abort_range(
 	upl_t			upl,
-	vm_offset_t		offset,
-	vm_size_t		size,
+	upl_offset_t		offset,
+	upl_size_t		size,
 	int				abort_flags)
 {
 	kern_return_t 	kr;
@@ -2117,13 +2212,12 @@ UBCINFOEXISTS(struct vnode * vp)
 /*
  * CODE SIGNING
  */
-#define CS_BLOB_KEEP_IN_KERNEL 1
+#define CS_BLOB_PAGEABLE 0
 static volatile SInt32 cs_blob_size = 0;
 static volatile SInt32 cs_blob_count = 0;
 static SInt32 cs_blob_size_peak = 0;
 static UInt32 cs_blob_size_max = 0;
 static SInt32 cs_blob_count_peak = 0;
-extern int cs_debug;
 
 int cs_validation = 1;
 
@@ -2134,6 +2228,39 @@ SYSCTL_INT(_vm, OID_AUTO, cs_blob_count_peak, CTLFLAG_RD, &cs_blob_count_peak, 0
 SYSCTL_INT(_vm, OID_AUTO, cs_blob_size_peak, CTLFLAG_RD, &cs_blob_size_peak, 0, "Peak size of code signature blobs");
 SYSCTL_INT(_vm, OID_AUTO, cs_blob_size_max, CTLFLAG_RD, &cs_blob_size_max, 0, "Size of biggest code signature blob");
 
+kern_return_t
+ubc_cs_blob_allocate(
+	vm_offset_t	*blob_addr_p,
+	vm_size_t	*blob_size_p)
+{
+	kern_return_t	kr;
+
+#if CS_BLOB_PAGEABLE
+	*blob_size_p = round_page(*blob_size_p);
+	kr = kmem_alloc(kernel_map, blob_addr_p, *blob_size_p);
+#else	/* CS_BLOB_PAGEABLE */
+	*blob_addr_p = (vm_offset_t) kalloc(*blob_size_p);
+	if (*blob_addr_p == 0) {
+		kr = KERN_NO_SPACE;
+	} else {
+		kr = KERN_SUCCESS;
+	}
+#endif	/* CS_BLOB_PAGEABLE */
+	return kr;
+}
+
+void
+ubc_cs_blob_deallocate(
+	vm_offset_t	blob_addr,
+	vm_size_t	blob_size)
+{
+#if CS_BLOB_PAGEABLE
+	kmem_free(kernel_map, blob_addr, blob_size);
+#else	/* CS_BLOB_PAGEABLE */
+	kfree((void *) blob_addr, blob_size);
+#endif	/* CS_BLOB_PAGEABLE */
+}
+	
 int
 ubc_cs_blob_add(
 	struct vnode	*vp,
@@ -2159,6 +2286,7 @@ ubc_cs_blob_add(
 		return ENOMEM;
 	}
 
+#if CS_BLOB_PAGEABLE
 	/* get a memory entry on the blob */
 	blob_size = (memory_object_size_t) size;
 	kr = mach_make_memory_entry_64(kernel_map,
@@ -2173,13 +2301,16 @@ ubc_cs_blob_add(
 	}
 	if (memory_object_round_page(blob_size) !=
 	    (memory_object_size_t) round_page(size)) {
-		printf("ubc_cs_blob_add: size mismatch 0x%llx 0x%x !?\n",
-		       blob_size, size);
-		panic("XXX FBDP size mismatch 0x%llx 0x%x\n", blob_size, size);
+		printf("ubc_cs_blob_add: size mismatch 0x%llx 0x%lx !?\n",
+		       blob_size, (size_t)size);
+		panic("XXX FBDP size mismatch 0x%llx 0x%lx\n", blob_size, (size_t)size);
 		error = EINVAL;
 		goto out;
 	}
-
+#else
+	blob_size = (memory_object_size_t) size;
+	blob_handle = IPC_PORT_NULL;
+#endif
 
 	/* fill in the new blob */
 	blob->csb_cpu_type = cputype;
@@ -2188,7 +2319,6 @@ ubc_cs_blob_add(
 	blob->csb_mem_offset = 0;
 	blob->csb_mem_handle = blob_handle;
 	blob->csb_mem_kaddr = addr;
-
 	
 	/*
 	 * Validate the blob's contents
@@ -2208,8 +2338,14 @@ ubc_cs_blob_add(
 
 		blob->csb_flags = ntohl(cd->flags) | CS_VALID;
 		blob->csb_end_offset = round_page(ntohl(cd->codeLimit));
-		blob->csb_start_offset = (blob->csb_end_offset -
-					  (ntohl(cd->nCodeSlots) * PAGE_SIZE));
+		if((ntohl(cd->version) >= supportsScatter) && (ntohl(cd->scatterOffset))) {
+			const struct Scatter *scatter = (const struct Scatter*)
+				((const char*)cd + ntohl(cd->scatterOffset));
+			blob->csb_start_offset = ntohl(scatter->base) * PAGE_SIZE;
+		} else {
+			blob->csb_start_offset = (blob->csb_end_offset -
+						  (ntohl(cd->nCodeSlots) * PAGE_SIZE));
+		}
 		/* compute the blob's SHA1 hash */
 		sha1_base = (const unsigned char *) cd;
 		sha1_size = ntohl(cd->length);
@@ -2218,14 +2354,24 @@ ubc_cs_blob_add(
 		SHA1Final(blob->csb_sha1, &sha1ctxt);
 	}
 
-
+	/* 
+	 * Let policy module check whether the blob's signature is accepted.
+	 */
+#if CONFIG_MACF
+	error = mac_vnode_check_signature(vp, blob->csb_sha1, (void*)addr, size);
+	if (error) 
+		goto out;
+#endif	
+	
 	/*
 	 * Validate the blob's coverage
 	 */
 	blob_start_offset = blob->csb_base_offset + blob->csb_start_offset;
 	blob_end_offset = blob->csb_base_offset + blob->csb_end_offset;
 
-	if (blob_start_offset >= blob_end_offset) {
+	if (blob_start_offset >= blob_end_offset ||
+	    blob_start_offset < 0 ||
+	    blob_end_offset <= 0) {
 		/* reject empty or backwards blob */
 		error = EINVAL;
 		goto out;
@@ -2314,12 +2460,12 @@ ubc_cs_blob_add(
 	if (cs_blob_count > cs_blob_count_peak) {
 		cs_blob_count_peak = cs_blob_count; /* XXX atomic ? */
 	}
-	OSAddAtomic(+blob->csb_mem_size, &cs_blob_size);
-	if (cs_blob_size > cs_blob_size_peak) {
-		cs_blob_size_peak = cs_blob_size; /* XXX atomic ? */
+	OSAddAtomic((SInt32) +blob->csb_mem_size, &cs_blob_size);
+	if ((SInt32) cs_blob_size > cs_blob_size_peak) {
+		cs_blob_size_peak = (SInt32) cs_blob_size; /* XXX atomic ? */
 	}
-	if (blob->csb_mem_size > cs_blob_size_max) {
-		cs_blob_size_max = blob->csb_mem_size;
+	if ((UInt32) blob->csb_mem_size > cs_blob_size_max) {
+		cs_blob_size_max = (UInt32) blob->csb_mem_size;
 	}
 
 	if (cs_debug) {
@@ -2337,10 +2483,6 @@ ubc_cs_blob_add(
 		       blob->csb_flags);
 	}
 
-#if !CS_BLOB_KEEP_IN_KERNEL
-	blob->csb_mem_kaddr = 0;
-#endif /* CS_BLOB_KEEP_IN_KERNEL */
-
 	vnode_unlock(vp);
 
 	error = 0;	/* success ! */
@@ -2356,10 +2498,6 @@ out:
 			mach_memory_entry_port_release(blob_handle);
 			blob_handle = IPC_PORT_NULL;
 		}
-	} else {
-#if !CS_BLOB_KEEP_IN_KERNEL
-		kmem_free(kernel_map, addr, size);
-#endif /* CS_BLOB_KEEP_IN_KERNEL */
 	}
 
 	if (error == EAGAIN) {
@@ -2372,7 +2510,7 @@ out:
 		/*
 		 * Since we're not failing, consume the data we received.
 		 */
-		kmem_free(kernel_map, addr, size);
+		ubc_cs_blob_deallocate(addr, size);
 	}
 
 	return error;
@@ -2430,15 +2568,16 @@ ubc_cs_free(
 	     blob = next_blob) {
 		next_blob = blob->csb_next;
 		if (blob->csb_mem_kaddr != 0) {
-			kmem_free(kernel_map,
-				  blob->csb_mem_kaddr,
-				  blob->csb_mem_size);
+			ubc_cs_blob_deallocate(blob->csb_mem_kaddr,
+					       blob->csb_mem_size);
 			blob->csb_mem_kaddr = 0;
 		}
-		mach_memory_entry_port_release(blob->csb_mem_handle);
+		if (blob->csb_mem_handle != IPC_PORT_NULL) {
+			mach_memory_entry_port_release(blob->csb_mem_handle);
+		}
 		blob->csb_mem_handle = IPC_PORT_NULL;
 		OSAddAtomic(-1, &cs_blob_count);
-		OSAddAtomic(-blob->csb_mem_size, &cs_blob_size);
+		OSAddAtomic((SInt32) -blob->csb_mem_size, &cs_blob_size);
 		kfree(blob, sizeof (*blob));
 	}
 	uip->cs_blobs = NULL;
@@ -2451,7 +2590,20 @@ ubc_get_cs_blobs(
 	struct ubc_info	*uip;
 	struct cs_blob	*blobs;
 
-	vnode_lock_spin(vp);
+	/*
+	 * No need to take the vnode lock here.  The caller must be holding
+	 * a reference on the vnode (via a VM mapping or open file descriptor),
+	 * so the vnode will not go away.  The ubc_info stays until the vnode
+	 * goes away.  And we only modify "blobs" by adding to the head of the
+	 * list.
+	 * The ubc_info could go away entirely if the vnode gets reclaimed as
+	 * part of a forced unmount.  In the case of a code-signature validation
+	 * during a page fault, the "paging_in_progress" reference on the VM
+	 * object guarantess that the vnode pager (and the ubc_info) won't go
+	 * away during the fault.
+	 * Other callers need to protect against vnode reclaim by holding the
+	 * vnode lock, for example.
+	 */
 
 	if (! UBCINFOEXISTS(vp)) {
 		blobs = NULL;
@@ -2462,8 +2614,6 @@ ubc_get_cs_blobs(
 	blobs = uip->cs_blobs;
 
 out:
-	vnode_unlock(vp);
-
 	return blobs;
 }
 
@@ -2483,7 +2633,6 @@ cs_validate_page(
 	struct cs_blob		*blobs, *blob;
 	const CS_CodeDirectory	*cd;
 	const CS_SuperBlob	*embedded;
-	off_t			start_offset, end_offset;
 	const unsigned char	*hash;
 	boolean_t		validated;
 	off_t			offset;	/* page offset in the file */
@@ -2529,8 +2678,8 @@ cs_validate_page(
 			if (kr != KERN_SUCCESS) {
 				/* XXX FBDP what to do !? */
 				printf("cs_validate_page: failed to map blob, "
-				       "size=0x%x kr=0x%x\n",
-				       blob->csb_mem_size, kr);
+				       "size=0x%lx kr=0x%x\n",
+				       (size_t)blob->csb_mem_size, kr);
 				break;
 			}
 		}
@@ -2546,34 +2695,24 @@ cs_validate_page(
 			    cd->hashType != 0x1 ||
 			    cd->hashSize != SHA1_RESULTLEN) {
 				/* bogus blob ? */
-#if !CS_BLOB_KEEP_IN_KERNEL
-				kmem_free(kernel_map, kaddr, ksize);
-#endif /* CS_BLOB_KEEP_IN_KERNEL */
 				continue;
 			}
-			    
-			end_offset = round_page(ntohl(cd->codeLimit));
-			start_offset = end_offset - (ntohl(cd->nCodeSlots) * PAGE_SIZE);
+
 			offset = page_offset - blob->csb_base_offset;
-			if (offset < start_offset ||
-			    offset >= end_offset) {
+			if (offset < blob->csb_start_offset ||
+			    offset >= blob->csb_end_offset) {
 				/* our page is not covered by this blob */
-#if !CS_BLOB_KEEP_IN_KERNEL
-				kmem_free(kernel_map, kaddr, ksize);
-#endif /* CS_BLOB_KEEP_IN_KERNEL */
 				continue;
 			}
 
 			codeLimit = ntohl(cd->codeLimit);
 			hash = hashes(cd, atop(offset),
 				      lower_bound, upper_bound);
-			bcopy(hash, expected_hash, sizeof (expected_hash));
-			found_hash = TRUE;
-
-#if !CS_BLOB_KEEP_IN_KERNEL
-			/* we no longer need that blob in the kernel map */
-			kmem_free(kernel_map, kaddr, ksize);
-#endif /* CS_BLOB_KEEP_IN_KERNEL */
+			if (hash != NULL) {
+				bcopy(hash, expected_hash,
+				      sizeof (expected_hash));
+				found_hash = TRUE;
+			}
 
 			break;
 		}
@@ -2597,17 +2736,17 @@ cs_validate_page(
 		validated = FALSE;
 		*tainted = FALSE;
 	} else {
-		const uint32_t *asha1, *esha1;
 
 		size = PAGE_SIZE;
-		if (offset + size > codeLimit) {
+		const uint32_t *asha1, *esha1;
+		if ((off_t)(offset + size) > codeLimit) {
 			/* partial page at end of segment */
 			assert(offset < codeLimit);
-			size = codeLimit & PAGE_MASK;
+			size = (size_t) (codeLimit & PAGE_MASK);
 		}
 		/* compute the actual page's SHA1 hash */
 		SHA1Init(&sha1ctxt);
-		SHA1Update(&sha1ctxt, data, size);
+		SHA1UpdateUsePhysicalAddress(&sha1ctxt, data, size);
 		SHA1Final(actual_hash, &sha1ctxt);
 
 		asha1 = (const uint32_t *) actual_hash;
@@ -2647,8 +2786,11 @@ ubc_cs_getcdhash(
 	off_t		offset,
 	unsigned char	*cdhash)
 {
-	struct cs_blob *blobs, *blob;
-	off_t rel_offset;
+	struct cs_blob	*blobs, *blob;
+	off_t		rel_offset;
+	int		ret;
+
+	vnode_lock(vp);
 
 	blobs = ubc_get_cs_blobs(vp);
 	for (blob = blobs;
@@ -2665,11 +2807,14 @@ ubc_cs_getcdhash(
 
 	if (blob == NULL) {
 		/* we didn't find a blob covering "offset" */
-		return EBADEXEC; /* XXX any better error ? */
+		ret = EBADEXEC; /* XXX any better error ? */
+	} else {
+		/* get the SHA1 hash of that blob */
+		bcopy(blob->csb_sha1, cdhash, sizeof (blob->csb_sha1));
+		ret = 0;
 	}
 
-	/* get the SHA1 hash of that blob */
-	bcopy(blob->csb_sha1, cdhash, sizeof (blob->csb_sha1));
+	vnode_unlock(vp);
 
-	return 0;
+	return ret;
 }

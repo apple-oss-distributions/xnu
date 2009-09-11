@@ -99,12 +99,11 @@ struct image_params {
 	char		*ip_p_comm;		/* optional alt p->p_comm */
 	struct vfs_context	*ip_vfs_context;	/* VFS context */
 	struct nameidata *ip_ndp;		/* current nameidata */
-	thread_t	ip_vfork_thread;	/* thread created, if vfork */
+	thread_t	ip_new_thread;		/* thread for spawn/vfork */
 
 	struct label	*ip_execlabelp;		/* label of the executable */
 	struct label	*ip_scriptlabelp;	/* label of the script */
 	unsigned int	ip_csflags;		/* code signing flags */
-	int		ip_no_trans;		/* allow suid/sgid transition?*/
 	void		*ip_px_sa;
 	void		*ip_px_sfa;
 	void		*ip_px_spa;
@@ -116,7 +115,11 @@ struct image_params {
 #define	IMGPF_NONE	0x00000000		/* No flags */
 #define	IMGPF_INTERPRET	0x00000001		/* Interpreter invoked */
 #define	IMGPF_POWERPC	0x00000002		/* ppc mode for x86 */
+#if CONFIG_EMBEDDED
+#undef IMGPF_POWERPC
+#endif
 #define	IMGPF_WAS_64BIT	0x00000004		/* exec from a 64Bit binary */
 #define	IMGPF_IS_64BIT	0x00000008		/* exec to a 64Bit binary */
+#define	IMGPF_SPAWN	0x00000010		/* spawn (without setexec) */
 
 #endif	/* !_SYS_IMGACT */

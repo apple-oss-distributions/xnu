@@ -140,12 +140,20 @@ struct ipc_port ;
 
 typedef struct ipc_port	        *ipc_port_t;
 
-#define IPC_PORT_NULL		((ipc_port_t) 0)
-#define IPC_PORT_DEAD		((ipc_port_t)~0)
+#define IPC_PORT_NULL		((ipc_port_t) 0UL)
+#define IPC_PORT_DEAD		((ipc_port_t)~0UL)
 #define IPC_PORT_VALID(port) \
 	((port) != IPC_PORT_NULL && (port) != IPC_PORT_DEAD)
 
 typedef ipc_port_t 		mach_port_t;
+
+/*
+ * Since the 32-bit and 64-bit representations of ~0 are different,
+ * explicitly handle MACH_PORT_DEAD
+ */
+
+#define CAST_MACH_PORT_TO_NAME(x) ((mach_port_name_t)(uintptr_t)(x))
+#define CAST_MACH_NAME_TO_PORT(x) ((x) == MACH_PORT_DEAD ? (mach_port_t)IPC_PORT_DEAD : (mach_port_t)(uintptr_t)(x))
 
 #else	/* KERNEL */
 
@@ -308,6 +316,7 @@ typedef struct mach_port_status {
 #define MACH_PORT_QLIMIT_BASIC		((mach_port_msgcount_t) 5)
 #define MACH_PORT_QLIMIT_SMALL		((mach_port_msgcount_t) 16)
 #define MACH_PORT_QLIMIT_LARGE		((mach_port_msgcount_t) 1024)
+#define MACH_PORT_QLIMIT_KERNEL		((mach_port_msgcount_t) 65536)
 #define MACH_PORT_QLIMIT_MIN		MACH_PORT_QLIMIT_ZERO
 #define MACH_PORT_QLIMIT_DEFAULT	MACH_PORT_QLIMIT_BASIC
 #define MACH_PORT_QLIMIT_MAX		MACH_PORT_QLIMIT_LARGE

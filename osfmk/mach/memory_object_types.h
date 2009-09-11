@@ -86,6 +86,8 @@ typedef unsigned long long	memory_object_size_t;
 typedef natural_t		memory_object_cluster_size_t;
 typedef natural_t *		memory_object_fault_info_t;
 
+typedef unsigned long long 	vm_object_id_t;
+
 
 /*
  * Temporary until real EMMI version gets re-implemented
@@ -96,12 +98,19 @@ typedef natural_t *		memory_object_fault_info_t;
 struct memory_object_pager_ops;	/* forward declaration */
 
 typedef struct 		memory_object {
+	unsigned int	_pad1; /* struct ipc_object_header */
+#ifdef __LP64__
+	unsigned int	_pad2; /* pad to natural boundary */
+#endif
 	const struct memory_object_pager_ops	*mo_pager_ops;
 } *memory_object_t;
 
 typedef struct		memory_object_control {
+	unsigned int	moc_ikot; /* struct ipc_object_header */
+#ifdef __LP64__
+	unsigned int	_pad; /* pad to natural boundary */
+#endif
 	struct vm_object *moc_object;
-	unsigned int	moc_ikot; /* XXX fake ip_kotype */
 } *memory_object_control_t;
 
 typedef const struct memory_object_pager_ops {
@@ -124,7 +133,7 @@ typedef const struct memory_object_pager_ops {
 	kern_return_t (*memory_object_data_return)(
 		memory_object_t mem_obj,
 		memory_object_offset_t offset,
-		vm_size_t size,
+		memory_object_cluster_size_t size,
 		memory_object_offset_t *resid_offset,
 		int *io_error,
 		boolean_t dirty,
@@ -133,18 +142,21 @@ typedef const struct memory_object_pager_ops {
 	kern_return_t (*memory_object_data_initialize)(
 		memory_object_t mem_obj,
 		memory_object_offset_t offset,
-		vm_size_t size);
+		memory_object_cluster_size_t size);
 	kern_return_t (*memory_object_data_unlock)(
 		memory_object_t mem_obj,
 		memory_object_offset_t offset,
-		vm_size_t size,
+		memory_object_size_t size,
 		vm_prot_t desired_access);
 	kern_return_t (*memory_object_synchronize)(
 		memory_object_t mem_obj,
 		memory_object_offset_t offset,
-		vm_size_t size,
+		memory_object_size_t size,
 		vm_sync_t sync_flags);
-	kern_return_t (*memory_object_unmap)(
+	kern_return_t (*memory_object_map)(
+		memory_object_t mem_obj,
+		vm_prot_t prot);
+	kern_return_t (*memory_object_last_unmap)(
 		memory_object_t mem_obj);
 	const char *memory_object_pager_name;
 } * memory_object_pager_ops_t;
@@ -233,6 +245,7 @@ typedef	int		memory_object_return_t;
 #define		MEMORY_OBJECT_COPY_SYNC		0x8
 #define		MEMORY_OBJECT_DATA_SYNC		0x10
 #define         MEMORY_OBJECT_IO_SYNC           0x20
+#define		MEMORY_OBJECT_DATA_FLUSH_ALL	0x40
 
 /*
  *	Types for the memory object flavor interfaces
@@ -380,20 +393,23 @@ typedef struct memory_object_attr_info	memory_object_attr_info_data_t;
  */
 #ifdef PRIVATE
 #define MAX_UPL_TRANSFER 256
+#define MAX_UPL_SIZE	 8192
 
 struct upl_page_info {
 	ppnum_t		phys_addr;	/* physical page index number */
         unsigned int
 #ifdef  XNU_KERNEL_PRIVATE
-                        pageout:1,      /* page is to be removed on commit */
-                        absent:1,       /* No valid data in this page */
-                        dirty:1,        /* Page must be cleaned (O) */
-			precious:1,     /* must be cleaned, we have only copy */
-			device:1,	/* no page data, mapped dev memory */
-	                speculative:1,  /* page is valid, but not yet accessed */
-                        :0;		/* force to long boundary */
+		pageout:1,      /* page is to be removed on commit */
+		absent:1,       /* No valid data in this page */
+		dirty:1,        /* Page must be cleaned (O) */
+		precious:1,     /* must be cleaned, we have only copy */
+		device:1,	/* no page data, mapped dev memory */
+		speculative:1,  /* page is valid, but not yet accessed */
+		cs_validated:1,	/* CODE SIGNING: page was validated */
+		cs_tainted:1,	/* CODE SIGNING: page is tainted */
+		:0;		/* force to long boundary */
 #else
-			opaque;		/* use upl_page_xxx() accessor funcs */
+		opaque;		/* use upl_page_xxx() accessor funcs */
 #endif /* XNU_KERNEL_PRIVATE */
 };
 
@@ -444,9 +460,12 @@ typedef uint32_t	upl_size_t;	/* page-aligned byte size */
 #define UPL_WILL_MODIFY		0x00800000 /* caller will modify the pages */
 
 #define UPL_NEED_32BIT_ADDR	0x01000000
+#define UPL_UBC_MSYNC		0x02000000
+#define UPL_UBC_PAGEOUT		0x04000000
+#define UPL_UBC_PAGEIN		0x08000000
 
 /* UPL flags known by this kernel */
-#define UPL_VALID_FLAGS		0x01FFFFFF
+#define UPL_VALID_FLAGS		0x0FFFFFFF
 
 
 /* upl abort error flags */
@@ -456,7 +475,7 @@ typedef uint32_t	upl_size_t;	/* page-aligned byte size */
 #define UPL_ABORT_FREE_ON_EMPTY	0x8  /* only implemented in wrappers */
 #define UPL_ABORT_DUMP_PAGES	0x10
 #define UPL_ABORT_NOTIFY_EMPTY	0x20
-#define UPL_ABORT_ALLOW_ACCESS	0x40
+/* deprecated: #define UPL_ABORT_ALLOW_ACCESS	0x40 */
 #define UPL_ABORT_REFERENCE	0x80
 
 /* upl pages check flags */
@@ -519,8 +538,16 @@ typedef uint32_t	upl_size_t;	/* page-aligned byte size */
  * pageout will reenter the FS for the same file currently
  * being handled in this context.
  */
-
 #define UPL_NESTED_PAGEOUT	0x80
+
+/*
+ * we've detected a sequential access pattern and
+ * we are speculatively and aggressively pulling
+ * pages in... do not count these as real PAGEINs
+ * w/r to our hard throttle maintenance
+ */
+#define UPL_IOSTREAMING		0x100
+
 
 
 
@@ -530,7 +557,12 @@ typedef uint32_t	upl_size_t;	/* page-aligned byte size */
 #define UPL_COMMIT_SET_DIRTY		0x4
 #define UPL_COMMIT_INACTIVATE		0x8
 #define UPL_COMMIT_NOTIFY_EMPTY		0x10
-#define UPL_COMMIT_ALLOW_ACCESS		0x20
+/* deprecated: #define UPL_COMMIT_ALLOW_ACCESS		0x20 */
+#define UPL_COMMIT_CS_VALIDATED		0x40
+#define UPL_COMMIT_CLEAR_PRECIOUS	0x80
+#define UPL_COMMIT_SPECULATE		0x100
+
+#define UPL_COMMIT_KERNEL_ONLY_FLAGS	(UPL_COMMIT_CS_VALIDATED)
 
 /* flags for return of state from vm_map_get_upl,  vm_upl address space */
 /* based call */
@@ -609,18 +641,39 @@ typedef uint32_t	upl_size_t;	/* page-aligned byte size */
 	(((upl)[(index)].phys_addr != 0) ?       \
 	 ((upl)[(index)].pageout = FALSE) : FALSE)
 
+/* modifier macros for upl_t */
+
+#define UPL_SET_CS_VALIDATED(upl, index, value) \
+	((upl)[(index)].cs_validated = ((value) ? TRUE : FALSE))
+
+#define UPL_SET_CS_TAINTED(upl, index, value) \
+	((upl)[(index)].cs_tainted = ((value) ? TRUE : FALSE))
+
 /* The call prototyped below is used strictly by UPL_GET_INTERNAL_PAGE_LIST */
 
 extern vm_size_t	upl_offset_to_pagelist;
 extern vm_size_t 	upl_get_internal_pagelist_offset(void);
+extern void*		upl_get_internal_vectorupl(upl_t);
+extern upl_page_info_t*		upl_get_internal_vectorupl_pagelist(upl_t);
+
+/*Use this variant to get the UPL's page list iff:*/
+/*- the upl being passed in is already part of a vector UPL*/
+/*- the page list you want is that of this "sub-upl" and not that of the entire vector-upl*/
+
+#define UPL_GET_INTERNAL_PAGE_LIST_SIMPLE(upl) \
+	((upl_page_info_t *)((upl_offset_to_pagelist == 0) ?  \
+	(uintptr_t)upl + (unsigned int)(upl_offset_to_pagelist = upl_get_internal_pagelist_offset()): \
+	(uintptr_t)upl + (unsigned int)upl_offset_to_pagelist))
 
 /* UPL_GET_INTERNAL_PAGE_LIST is only valid on internal objects where the */
 /* list request was made with the UPL_INTERNAL flag */
 
+
 #define UPL_GET_INTERNAL_PAGE_LIST(upl) \
+	((upl_get_internal_vectorupl(upl) != NULL ) ? (upl_get_internal_vectorupl_pagelist(upl)) : \
 	((upl_page_info_t *)((upl_offset_to_pagelist == 0) ?  \
-	(unsigned int)upl + (unsigned int)(upl_offset_to_pagelist = upl_get_internal_pagelist_offset()): \
-	(unsigned int)upl + (unsigned int)upl_offset_to_pagelist))
+	(uintptr_t)upl + (unsigned int)(upl_offset_to_pagelist = upl_get_internal_pagelist_offset()): \
+	(uintptr_t)upl + (unsigned int)upl_offset_to_pagelist)))
 
 __BEGIN_DECLS
 

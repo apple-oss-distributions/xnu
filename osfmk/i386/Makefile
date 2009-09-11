@@ -16,8 +16,8 @@ EXPORT_ONLY_FILES = 	\
 		    cpu_topology.h \
 		    cpuid.h \
 		    eflags.h \
-		    hpet.h \
 		    io_map_entries.h \
+		    lapic.h \
 		    lock.h \
 		    locks.h \
 		    machine_routines.h \
@@ -41,6 +41,10 @@ INSTALL_MD_DIR = i386
 INSTALL_MD_LIST = eflags.h user_ldt.h
 
 INSTALL_MD_LCL_LIST = cpu_capabilities.h
+
+INSTALL_KF_MD_LIST = asm.h cpuid.h eflags.h locks.h machine_routines.h proc_reg.h vmx.h
+
+INSTALL_KF_MD_LCL_LIST = $(filter-out cpu_data.h, $(EXPORT_ONLY_FILES))
 
 EXPORT_MD_LIST = ${EXPORT_ONLY_FILES}
 

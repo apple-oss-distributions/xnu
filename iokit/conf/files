@@ -3,7 +3,6 @@
 OPTIONS/iokitcpp					optional iokitcpp
 OPTIONS/kdebug						optional kdebug
 OPTIONS/networking					optional networking
-OPTIONS/kpidirect					optional kpidirect
 OPTIONS/hibernation					optional hibernation
 OPTIONS/crypto						optional crypto
 OPTIONS/config_dtrace				optional config_dtrace
@@ -59,6 +58,7 @@ iokit/Kernel/IOMemoryCursor.cpp				optional iokitcpp
 iokit/Kernel/IOMemoryDescriptor.cpp			optional iokitcpp
 iokit/Kernel/IOMultiMemoryDescriptor.cpp		optional iokitcpp
 iokit/Kernel/IORangeAllocator.cpp			optional iokitcpp
+iokit/Kernel/IOSubMemoryDescriptor.cpp			optional iokitcpp
 
 iokit/Kernel/IOPlatformExpert.cpp			optional iokitcpp
 

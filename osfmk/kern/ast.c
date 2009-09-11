@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2005 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2009 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -81,6 +81,7 @@
 #include <mach/policy.h>
 #include <machine/trap.h> // for CHUD AST hook
 
+
 void
 ast_init(void)
 {
@@ -98,21 +99,21 @@ ast_taken(
 	boolean_t		preempt_trap = (reasons == AST_PREEMPTION);
 	ast_t			*myast = ast_pending();
 	thread_t		thread = current_thread();
+	perfCallback	perf_hook = perfASTHook;
 
 	/*
 	 * CHUD hook - all threads including idle processor threads
 	 */
-	if(perfASTHook) {
-		if(*myast & AST_CHUD_ALL) {
-			perfASTHook(0, NULL, 0, 0);
+	if (perf_hook) {
+		if (*myast & AST_CHUD_ALL) {
+			(*perf_hook)(0, NULL, 0, 0);
 			
-			if(*myast == AST_NONE) {
-				return; // nothing left to do
-			}
+			if (*myast == AST_NONE)
+				return;
 		}
-	} else {
-		*myast &= ~AST_CHUD_ALL;
 	}
+	else
+		*myast &= ~AST_CHUD_ALL;
 
 	reasons &= *myast;
 	*myast &= ~reasons;
@@ -164,14 +165,9 @@ ast_taken(
 			/* 
 			 * Check for preemption.
 			 */
-			if (reasons & AST_PREEMPT) {
-				processor_t		myprocessor = current_processor();
+			if (reasons & AST_PREEMPT)
+				reasons = csw_check(current_processor());
 
-				if (csw_needed(thread, myprocessor))
-					reasons = AST_PREEMPT;
-				else
-					reasons = AST_NONE;
-			}
 			if (	(reasons & AST_PREEMPT)				&&
 					wait_queue_assert_possible(thread)		) {		
 				counter(c_ast_taken_block++);
@@ -190,10 +186,12 @@ void
 ast_check(
 	processor_t		processor)
 {
+	thread_t			thread = processor->active_thread;
+
+	processor->current_pri = thread->sched_pri;
 	if (	processor->state == PROCESSOR_RUNNING		||
 			processor->state == PROCESSOR_SHUTDOWN		) {
-		thread_t			thread = processor->active_thread;
-		ast_t				preempt;
+		ast_t			preempt;
 
 		/*
 		 *	Propagate thread ast to processor.
@@ -203,7 +201,7 @@ ast_check(
 		/*
 		 *	Context switch check.
 		 */
-		if ((preempt = csw_check(thread, processor)) != AST_NONE)
+		if ((preempt = csw_check(processor)) != AST_NONE)
 			ast_on(preempt);
 	}
 }

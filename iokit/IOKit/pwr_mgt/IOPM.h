@@ -210,9 +210,25 @@ enum {
  */
 #define kAppleClamshellCausesSleepKey       "AppleClamshellCausesSleep"
 
+/* kIOPMSleepWakeUUIDKey
+ * Key refers to a CFStringRef that will uniquely identify
+ * a sleep/wake cycle for logging & tracking.
+ * The key becomes valid at the beginning of a sleep cycle - before we
+ * initiate any sleep/wake notifications.
+ * The key becomes invalid at the completion of a system wakeup. The
+ * property will not be present in the IOPMrootDomain's registry entry
+ * when it is invalid.
+ * 
+ * See IOPMrootDomain notification kIOPMMessageSleepWakeUUIDChange
+ */
+ #define kIOPMSleepWakeUUIDKey              "SleepWakeUUID"
+
 /*******************************************************************************
  *
  * Root Domain general interest messages
+ *
+ * Available by registering for interest type 'gIOGeneralInterest' 
+ * on IOPMrootDomain. 
  *
  ******************************************************************************/
 
@@ -252,13 +268,42 @@ enum {
     kInflowForciblyEnabledBit = (1 << 0)
 };
 
+/* kIOPMMessageInternalBatteryFullyDischarged
+ * The battery has drained completely to its "Fully Discharged" state. 
+ */
 #define kIOPMMessageInternalBatteryFullyDischarged  \
                 iokit_family_msg(sub_iokit_powermanagement, 0x120)
 
+/* kIOPMMessageSystemPowerEventOccurred
+ * Some major system thermal property has changed, and interested clients may
+ * modify their behavior.
+ */
+#define kIOPMMessageSystemPowerEventOccurred  \
+                iokit_family_msg(sub_iokit_powermanagement, 0x130)
+
+/* kIOPMMessageSleepWakeUUIDChange
+ * Either a new SleepWakeUUID has been specified at the beginning of a sleep,
+ * or we're removing the existing property upon completion of a wakeup.
+ */
+#define kIOPMMessageSleepWakeUUIDChange  \
+                iokit_family_msg(sub_iokit_powermanagement, 0x140)
+                
+/* kIOPMMessageSleepWakeUUIDSet
+ * Argument accompanying the kIOPMMessageSleepWakeUUIDChange notification when 
+ * a new UUID has been specified.
+ */
+#define kIOPMMessageSleepWakeUUIDSet                    ((void *)1)
+
+/* kIOPMMessageSleepWakeUUIDCleared
+ * Argument accompanying the kIOPMMessageSleepWakeUUIDChange notification when 
+ * the current UUID has been removed.
+ */
+#define kIOPMMessageSleepWakeUUIDCleared                ((void *)0)
 
 /*******************************************************************************
  *
  * Power commands issued to root domain
+ * Use with IOPMrootDomain::receivePowerNotification()
  *
  * These commands are issued from system drivers only:
  *      ApplePMU, AppleSMU, IOGraphics, AppleACPIFamily
@@ -278,6 +323,7 @@ enum {
   kIOPMClamshellOpened          = (1<<10)  // clamshell was opened
 };
 
+
 /*******************************************************************************
  *
  * Power Management Return Codes
@@ -285,25 +331,31 @@ enum {
  ******************************************************************************/
 enum {
     kIOPMNoErr                  = 0,
-    // Returned by powerStateWillChange and powerStateDidChange:
-    // Immediate acknowledgement of power state change
+
+    // Returned by driver's setPowerState(), powerStateWillChangeTo(),
+    // powerStateDidChangeTo(), or acknowledgeSetPowerState() to
+    // implicitly acknowledge power change upon function return.
     kIOPMAckImplied             = 0,
-    // Acknowledgement of power state change will come later 
+
+    // Deprecated
     kIOPMWillAckLater           = 1,
-    
-    // Returned by requestDomainState:
-    // Unrecognized specification parameter
+
+    // Returned by requestPowerDomainState() to indicate
+    // unrecognized specification parameter.
     kIOPMBadSpecification       = 4,
-    // No power state matches search specification
+
+    // Returned by requestPowerDomainState() to indicate
+    // no power state matches search specification.
     kIOPMNoSuchState            = 5,
-    
-    // Device cannot change its power for some reason
+
+    // Deprecated
     kIOPMCannotRaisePower       = 6,
-    
-  // Returned by changeStateTo:
-    // Requested state doesn't exist
+
+    // Deprecated
     kIOPMParameterError         = 7,
-    // Device not yet fully hooked into power management
+
+    // Returned when power management state is accessed
+    // before driver has called PMinit().
     kIOPMNotYetInitialized      = 8,
 
     // And the old constants; deprecated
@@ -347,7 +399,17 @@ enum {
 #define kIOPMPSLegacyBatteryInfoKey                 "LegacyBatteryInfo"
 #define kIOPMPSBatteryHealthKey                     "BatteryHealth"
 #define kIOPMPSHealthConfidenceKey                  "HealthConfidence"
-#define kIOPMPSCapacityEstimatedKey		    "CapacityEstimated"
+#define kIOPMPSCapacityEstimatedKey	                "CapacityEstimated"
+#define kIOPMPSBatteryChargeStatusKey               "ChargeStatus"
+#define kIOPMPSBatteryTemperatureKey                "Temperature"
+
+// kIOPMPSBatteryChargeStatusKey may have one of the following values, or may have
+// no value. If kIOPMBatteryChargeStatusKey has a NULL value (or no value) associated with it
+// then charge is proceeding normally. If one of these battery charge status reasons is listed,
+// then the charge may have been interrupted.
+#define kIOPMBatteryChargeStatusTooHot              "HighTemperature"
+#define kIOPMBatteryChargeStatusTooCold             "LowTemperature"
+#define kIOPMBatteryChargeStatusGradient            "BatteryTemperatureGradient"
 
 // Definitions for battery location, in case of multiple batteries.
 // A location of 0 is unspecified
@@ -378,6 +440,76 @@ enum {
 #define kIOPMPSPostDishargeWaitSecondsKey      "PostDischargeWaitSeconds"
 
 
+/* CPU Power Management status keys
+ * Pass as arguments to IOPMrootDomain::systemPowerEventOccurred
+ * Or as arguments to IOPMSystemPowerEventOccurred()
+ * Or to decode the dictionary obtained from IOPMCopyCPUPowerStatus()
+ * These keys reflect restrictions placed on the CPU by the system
+ * to bring the CPU's power consumption within allowable thermal and 
+ * power constraints.
+ */
+
+
+/* kIOPMGraphicsPowerLimitsKey
+ *   The key representing the dictionary of graphics power limits.
+ *   The dictionary contains the other kIOPMCPUPower keys & their associated
+ *   values (e.g. Speed limit, Processor Count, and Schedule limits).
+ */
+#define kIOPMGraphicsPowerLimitsKey                     "Graphics_Power_Limits"
+
+/* kIOPMGraphicsPowerLimitPerformanceKey
+ *   The key representing the percent of overall performance made available
+ *   by the graphics chip as a percentage (integer 0 - 100).
+ */
+#define kIOPMGraphicsPowerLimitPerformanceKey           "Graphics_Power_Performance"
+
+
+
+/* kIOPMCPUPowerLimitsKey
+ *   The key representing the dictionary of CPU Power Limits.
+ *   The dictionary contains the other kIOPMCPUPower keys & their associated
+ *   values (e.g. Speed limit, Processor Count, and Schedule limits).
+ */
+#define kIOPMCPUPowerLimitsKey                          "CPU_Power_Limits"
+
+/* kIOPMCPUPowerLimitProcessorSpeedKey defines the speed & voltage limits placed 
+ *   on the CPU.
+ *   Represented as a percentage (0-100) of maximum CPU speed.
+ */
+#define kIOPMCPUPowerLimitProcessorSpeedKey             "CPU_Speed_Limit"
+
+/* kIOPMCPUPowerLimitProcessorCountKey reflects how many, if any, CPUs have been
+ *   taken offline. Represented as an integer number of CPUs (0 - Max CPUs).
+ */
+#define kIOPMCPUPowerLimitProcessorCountKey             "CPU_Available_CPUs"
+
+/* kIOPMCPUPowerLimitSchedulerTimeKey represents the percentage (0-100) of CPU time 
+ *   available. 100% at normal operation. The OS may limit this time for a percentage
+ *   less than 100%.
+ */
+#define kIOPMCPUPowerLimitSchedulerTimeKey              "CPU_Scheduler_Limit"
+
+
+/* Thermal Level Warning Key
+ * Indicates the thermal constraints placed on the system. This value may 
+ * cause clients to action to consume fewer system resources.
+ * The value associated with this warning is defined by the platform.
+ */
+#define kIOPMThermalLevelWarningKey                     "Thermal_Level_Warning"
+
+/* Thermal Warning Level values
+ *      kIOPMThermalWarningLevelNormal - under normal operating conditions
+ *      kIOPMThermalWarningLevelDanger - thermal pressure may cause system slowdown
+ *      kIOPMThermalWarningLevelCrisis - thermal conditions may cause imminent shutdown
+ *
+ * The platform may define additional thermal levels if necessary.
+ */
+enum {
+  kIOPMThermalWarningLevelNormal    = 0,
+  kIOPMThermalWarningLevelDanger    = 5,
+  kIOPMThermalWarningLevelCrisis    = 10
+};
+
 
 // PM Settings Controller setting types
 // Settings types used primarily with:
@@ -393,6 +525,7 @@ enum {
 #define kIOPMSettingDisplaySleepUsesDimKey          "Display Sleep Uses Dim"
 #define kIOPMSettingTimeZoneOffsetKey               "TimeZoneOffsetSeconds"
 #define kIOPMSettingMobileMotionModuleKey           "MobileMotionModule"
+#define kIOPMSettingGraphicsSwitchKey               "GPUSwitch"
 
 // Setting controlling drivers can register to receive scheduled wake data
 // Either in "CF seconds" type, or structured calendar data in a formatted
@@ -406,6 +539,9 @@ enum {
 // Used by sleep cycling debug tools
 #define kIOPMSettingDebugWakeRelativeKey            "WakeRelativeToSleep"
 #define kIOPMSettingDebugPowerRelativeKey           "PowerRelativeToShutdown"
+
+// Maintenance wake calendar.
+#define kIOPMSettingMaintenanceWakeCalendarKey      "MaintenanceWakeCalendarDate"
 
 struct IOPMCalendarStruct {
     UInt32      year;
@@ -512,8 +648,6 @@ struct IOPowerStateChangeNotification {
 };
 typedef struct IOPowerStateChangeNotification IOPowerStateChangeNotification;
 typedef IOPowerStateChangeNotification sleepWakeNote;
-
-extern void IOPMRegisterDevice(const char *, IOService *);
 #endif /* KERNEL && __cplusplus */
 
 #endif /* ! _IOKIT_IOPM_H */

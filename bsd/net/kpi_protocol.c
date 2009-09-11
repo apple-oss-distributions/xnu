@@ -40,8 +40,8 @@
 
 void proto_input_run(void);
 
-typedef int (*attach_t)(struct ifnet *ifp, u_long protocol_family);
-typedef int (*detach_t)(struct ifnet *ifp, u_long protocol_family);
+typedef int (*attach_t)(struct ifnet *ifp, uint32_t protocol_family);
+typedef int (*detach_t)(struct ifnet *ifp, uint32_t protocol_family);
 
 struct proto_input_entry {
 	struct proto_input_entry		*next;
@@ -266,6 +266,7 @@ proto_input_run(void)
 					}
 				}
 				if (locked) {
+					locked = 0;
 					lck_mtx_unlock(entry->domain->dom_mtx);
 				}	
 		}

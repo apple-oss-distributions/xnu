@@ -28,10 +28,8 @@
 
 #if defined (__ppc__)
 #include "ppc/chud_xnu_glue.h"
-#elif defined (__i386__)
+#elif defined (__i386__) || defined (__x86_64__)
 #include "i386/chud_xnu_glue.h"
-#elif defined (__arm__)
-#include "arm/chud_xnu_glue.h"
 #else
 #error architecture not supported
 #endif

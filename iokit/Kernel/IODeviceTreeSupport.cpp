@@ -91,7 +91,6 @@ IODeviceTreeAlloc( void * dtTop )
     DTEntry			mapEntry;
     OSArray *			stack;
     OSData *			prop;
-    OSObject *			obj;
     OSDictionary *		allInts;
     vm_offset_t *		dtMap;
     unsigned int		propSize;
@@ -144,7 +143,7 @@ IODeviceTreeAlloc( void * dtTop )
     freeDT = (kSuccess == DTLookupEntry( 0, "/chosen/memory-map", &mapEntry ))
 	  && (kSuccess == DTGetProperty( mapEntry,
                 "DeviceTree", (void **) &dtMap, &propSize ))
-	  && ((2 * sizeof(vm_offset_t)) == propSize);
+	  && ((2 * sizeof(uint32_t)) == propSize);
 
     parent = MakeReferenceTable( (DTEntry)dtTop, freeDT );
 
@@ -193,7 +192,7 @@ IODeviceTreeAlloc( void * dtTop )
         // free original device tree
         DTInit(0);
         IODTFreeLoaderInfo( "DeviceTree",
-			(void *)dtMap[0], round_page_32(dtMap[1]) );
+			    (void *)dtMap[0], (int) round_page(dtMap[1]) );
     }
 
     // adjust tree
@@ -209,6 +208,9 @@ IODeviceTreeAlloc( void * dtTop )
             IODTMapInterruptsSharing( child, allInts );
             if( !intMap && child->getProperty( gIODTInterruptParentKey))
                 intMap = true;
+
+#if __ppc__
+            OSObject * obj;
 
             // Look for a "driver,AAPL,MacOSX,PowerPC" property.
             if( (obj = child->getProperty( "driver,AAPL,MacOSX,PowerPC"))) {
@@ -226,6 +228,7 @@ IODeviceTreeAlloc( void * dtTop )
                     child->removeProperty( "driver,AAPL,MacOS,PowerPC");
                 }
             }
+#endif /* __ppc__ */
         }
         regIter->release();
     }
@@ -308,11 +311,7 @@ static void FreePhysicalMemory( vm_offset_t * range )
 {
     vm_offset_t	virt;
 
-#if defined (__i386__)
-    virt = ml_boot_ptovirt( range[0] );
-#else
     virt = ml_static_ptovirt( range[0] );
-#endif
     if( virt) {
         ml_static_mfree( virt, range[1] );
     }
@@ -383,7 +382,7 @@ MakeReferenceTable( DTEntry dtEntry, bool copy )
     
             } else if(noLocation && (!strncmp(name, "reg", sizeof("reg")))) {
                 // default location - override later
-                snprintf(location, sizeof(location), "%lX", *((UInt32 *) prop));
+                snprintf(location, sizeof(location), "%X", *((uint32_t *) prop));
                 regEntry->setLocation( location );
             }
         }
@@ -435,15 +434,21 @@ static bool GetUInt32( IORegistryEntry * regEntry, const OSSymbol * name,
         return( false );
 }
 
-IORegistryEntry * IODTFindInterruptParent( IORegistryEntry * regEntry )
+static IORegistryEntry * IODTFindInterruptParent( IORegistryEntry * regEntry, IOItemCount index )
 {
     IORegistryEntry *	parent;
     UInt32		phandle;
+    OSData	    *	data;
+    unsigned int	len;
 
-    if( GetUInt32( regEntry, gIODTInterruptParentKey, &phandle))
-        parent = FindPHandle( phandle );
+    if( (data = OSDynamicCast( OSData, regEntry->getProperty( gIODTInterruptParentKey )))
+      && (sizeof(UInt32) <= (len = data->getLength()))) {
+	if (((index + 1) * sizeof(UInt32)) > len)
+	    index = 0;
+	phandle = ((UInt32 *) data->getBytesNoCopy())[index];
+	parent = FindPHandle( phandle );
 
-    else if( 0 == regEntry->getProperty( "interrupt-controller"))
+    } else if( 0 == regEntry->getProperty( "interrupt-controller"))
         parent = regEntry->getParentEntry( gIODTPlane);
     else
         parent = 0;
@@ -462,7 +467,7 @@ const OSSymbol * IODTInterruptControllerName( IORegistryEntry * regEntry )
     assert( ok );
 
     if( ok) {
-        snprintf(buf, sizeof(buf), "IOInterruptController%08lX", phandle);
+        snprintf(buf, sizeof(buf), "IOInterruptController%08X", (uint32_t)phandle);
         sym = OSSymbol::withCString( buf );
     } else
         sym = 0;
@@ -481,8 +486,8 @@ static void IODTGetICellCounts( IORegistryEntry * regEntry,
         *aCellCount = 0;
 }
 
-UInt32 IODTMapOneInterrupt( IORegistryEntry * regEntry, UInt32 * intSpec,
-				OSData ** spec, const OSSymbol ** controller )
+static UInt32 IODTMapOneInterrupt( IORegistryEntry * regEntry, UInt32 * intSpec, UInt32 index,
+				    OSData ** spec, const OSSymbol ** controller )
 {
     IORegistryEntry *parent = 0;
     OSData			*data;
@@ -494,7 +499,7 @@ UInt32 IODTMapOneInterrupt( IORegistryEntry * regEntry, UInt32 * intSpec,
     UInt32			i, original_icells;
     bool			cmp, ok = false;
 
-    parent = IODTFindInterruptParent( regEntry );    
+    parent = IODTFindInterruptParent( regEntry, index );    
     IODTGetICellCounts( parent, &icells, &acells );
     addrCmp = 0;
     if( acells) {
@@ -640,11 +645,12 @@ static bool IODTMapInterruptsSharing( IORegistryEntry * regEntry, OSDictionary *
     OSData *		local2;
     UInt32 *		localBits;
     UInt32 *		localEnd;
+    IOItemCount		index;
     OSData * 		map;
     OSObject *		oneMap;
     OSArray *		mapped;
     OSArray *		controllerInts;
-    const OSSymbol *	controller;
+    const OSSymbol *	controller = 0;
     OSArray *		controllers;
     UInt32		skip = 1;
     bool		ok, nw;
@@ -666,6 +672,7 @@ static bool IODTMapInterruptsSharing( IORegistryEntry * regEntry, OSDictionary *
 
     localBits = (UInt32 *) local->getBytesNoCopy();
     localEnd = localBits + (local->getLength() / sizeof(UInt32));
+    index = 0;
     mapped = OSArray::withCapacity( 1 );
     controllers = OSArray::withCapacity( 1 );
 
@@ -673,7 +680,7 @@ static bool IODTMapInterruptsSharing( IORegistryEntry * regEntry, OSDictionary *
 
     if( ok) do {
         if( nw) {
-            skip = IODTMapOneInterrupt( regEntry, localBits, &map, &controller );
+            skip = IODTMapOneInterrupt( regEntry, localBits, index, &map, &controller );
             if( 0 == skip) {
                 IOLog("%s: error mapping interrupt[%d]\n",
                         regEntry->getName(), mapped->getCount());
@@ -686,6 +693,7 @@ static bool IODTMapInterruptsSharing( IORegistryEntry * regEntry, OSDictionary *
             controller->retain();
         }
 
+	index++;
         localBits += skip;
         mapped->setObject( map );
         controllers->setObject( controller );
@@ -836,7 +844,7 @@ bool IODTMatchNubWithKeys( IORegistryEntry * regEntry,
         result = regEntry->compareNames( obj );
 		obj->release();
     }
-#ifdef DEBUG
+#if DEBUG
     else IOLog("Couldn't unserialize %s\n", keys );
 #endif
 
@@ -1092,7 +1100,7 @@ OSArray * IODTResolveAddressing( IORegistryEntry * regEntry,
             range = 0;
             if( parent)
                 range = IODeviceMemory::withSubRange( parent,
-                        phys - parent->getPhysicalAddress(), len );
+                        phys - parent->getPhysicalSegment(0, 0, kIOMemoryMapperNone), len );
             if( 0 == range)
                 range = IODeviceMemory::withRange( phys, len );
             if( range)

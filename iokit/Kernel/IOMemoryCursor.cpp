@@ -72,7 +72,7 @@ IOMemoryCursor::initWithSpecification(SegmentFunction  inSegFunc,
 static UInt sMaxDBDMASegment;
 if (!sMaxDBDMASegment) {
     sMaxDBDMASegment = (UInt) -1;
-    if (PE_parse_boot_arg("mseg", &sMaxDBDMASegment))
+    if (PE_parse_boot_argn("mseg", &sMaxDBDMASegment, sizeof (sMaxDBDMASegment)))
         IOLog("Setting MaxDBDMASegment to %d\n", sMaxDBDMASegment);
 }
 
@@ -101,7 +101,7 @@ if (inMaxSegmentSize > sMaxDBDMASegment) inMaxSegmentSize = sMaxDBDMASegment;
 
 UInt32 
 IOMemoryCursor::genPhysicalSegments(IOMemoryDescriptor *inDescriptor,
-                                    IOPhysicalLength	fromPosition,
+                                    IOByteCount		fromPosition,
                                     void *		inSegments,
                                     UInt32		inMaxSegments,
                                     UInt32		inMaxTransferSize,
@@ -133,7 +133,7 @@ IOMemoryCursor::genPhysicalSegments(IOMemoryDescriptor *inDescriptor,
         if (!seg.location)
         {
             seg.location = inDescriptor->getPhysicalSegment(
-                               fromPosition, &seg.length);
+                               fromPosition, (IOByteCount*)&seg.length);
             assert(seg.location);
             assert(seg.length);
             fromPosition += seg.length;

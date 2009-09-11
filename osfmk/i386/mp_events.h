@@ -45,6 +45,7 @@ typedef enum {
 	MP_CHUD,
 	MP_BROADCAST,
 	MP_CALL,
+	MP_CALL_PM,
 	MP_LAST
 } mp_event_t;
 
@@ -60,6 +61,7 @@ const char *mp_event_name[] = {	\
 	"MP_CHUD",		\
 	"MP_BROADCAST",		\
 	"MP_CALL",		\
+	"MP_CALL_PM",		\
 	"MP_LAST"		\
 }
 
@@ -72,6 +74,7 @@ extern void	i386_signal_cpus(mp_event_t event, mp_sync_t mode);
 extern int	i386_active_cpus(void);
 extern void	i386_activate_cpu(void);
 extern void	i386_deactivate_cpu(void);
+extern void	cpu_NMI_interrupt(int /* cpu */);
 
 __END_DECLS
 

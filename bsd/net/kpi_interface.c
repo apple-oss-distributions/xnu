@@ -47,6 +47,8 @@
 #include <libkern/OSAtomic.h>
 #include <kern/locks.h>
 
+#include "net/net_str_id.h"
+
 #if IF_LASTCHANGEUPTIME
 #define TOUCHLASTCHANGE(__if_lastchange) microuptime(__if_lastchange)
 #else
@@ -55,6 +57,9 @@
 
 extern struct dlil_threading_info *dlil_lo_thread_ptr;
 extern int dlil_multithreaded_input;
+
+static errno_t
+ifnet_list_get_common(ifnet_family_t, boolean_t, ifnet_t **, u_int32_t *);
 
 /*
 	Temporary work around until we have real reference counting
@@ -186,7 +191,7 @@ ifnet_reference(
 	
 	if (ifp == NULL) return EINVAL;
 	
-	oldval = OSIncrementAtomic((SInt32 *)&ifp->if_refcnt);
+	oldval = OSIncrementAtomic(&ifp->if_refcnt);
 	
 	return 0;
 }
@@ -199,11 +204,20 @@ ifnet_release(
 	
 	if (ifp == NULL) return EINVAL;
 	
-	oldval = OSDecrementAtomic((SInt32*)&ifp->if_refcnt);
+	oldval = OSDecrementAtomic(&ifp->if_refcnt);
 	if (oldval == 0)
 		panic("ifnet_release - refcount decremented past zero!");
 	
 	return 0;
+}
+
+errno_t 
+ifnet_interface_family_find(const char *module_string, ifnet_family_t *family_id)
+{
+	if (module_string == NULL || family_id == NULL)
+		return EINVAL;
+	return net_str_id_find_internal(module_string, family_id, NSI_IF_FAM_ID, 1);
+	
 }
 
 void*
@@ -300,7 +314,7 @@ ifnet_eflags(
 static const ifnet_offload_t offload_mask = IFNET_CSUM_IP | IFNET_CSUM_TCP |
 			IFNET_CSUM_UDP | IFNET_CSUM_FRAGMENT | IFNET_IP_FRAGMENT |
 			IFNET_CSUM_SUM16 | IFNET_VLAN_TAGGING | IFNET_VLAN_MTU |
-			IFNET_MULTIPAGES;
+			IFNET_MULTIPAGES | IFNET_TSO_IPV4 | IFNET_TSO_IPV6;
 
 errno_t
 ifnet_set_offload(
@@ -325,6 +339,127 @@ ifnet_offload(
 {
 	return interface == NULL ? 0 : (interface->if_hwassist & offload_mask);
 }
+
+errno_t 
+ifnet_set_tso_mtu(
+	ifnet_t interface, 
+	sa_family_t	family,
+	u_int32_t mtuLen)
+{
+	errno_t error = 0;
+
+	if (interface == NULL) return EINVAL;
+
+	if (mtuLen < interface->if_mtu)
+		return EINVAL;
+	
+
+	switch (family) {
+
+		case AF_INET: 
+			if (interface->if_hwassist & IFNET_TSO_IPV4)
+				interface->if_tso_v4_mtu = mtuLen;
+			else
+				error = EINVAL;
+			break;
+
+		case AF_INET6:
+			if (interface->if_hwassist & IFNET_TSO_IPV6)
+				interface->if_tso_v6_mtu = mtuLen;
+			else
+				error = EINVAL;
+			break;
+
+		default:
+			error = EPROTONOSUPPORT;
+	}
+
+	return error;
+}
+	
+errno_t 
+ifnet_get_tso_mtu(
+	ifnet_t interface, 
+	sa_family_t	family,
+	u_int32_t *mtuLen)
+{
+	errno_t error = 0;
+
+	if (interface == NULL || mtuLen == NULL) return EINVAL;
+	
+	switch (family) {
+
+		case AF_INET: 
+			if (interface->if_hwassist & IFNET_TSO_IPV4)
+				*mtuLen = interface->if_tso_v4_mtu;
+			else
+				error = EINVAL;
+			break;
+
+		case AF_INET6:
+			if (interface->if_hwassist & IFNET_TSO_IPV6)
+				*mtuLen = interface->if_tso_v6_mtu;
+			else
+				error = EINVAL;
+			break;
+		default:
+			error = EPROTONOSUPPORT;
+	}
+
+	return error;
+}
+
+errno_t 
+ifnet_set_wake_flags(ifnet_t interface, u_int32_t properties, u_int32_t mask)
+{
+	int lock;
+        struct kev_msg        ev_msg;
+        struct net_event_data ev_data;
+	
+	if (interface == NULL)
+		return EINVAL;
+
+	/* Do not accept wacky values */
+	if ((properties & mask) & ~IF_WAKE_VALID_FLAGS)
+		return EINVAL;
+
+	lock = (interface->if_lock != 0);
+
+	if (lock) 
+		ifnet_lock_exclusive(interface);
+
+	interface->if_wake_properties = (properties & mask) | (interface->if_wake_properties & ~mask);
+
+	if (lock) 
+		ifnet_lock_done(interface);
+
+	(void) ifnet_touch_lastchange(interface);
+
+	/* Notify application of the change */
+	ev_msg.vendor_code    = KEV_VENDOR_APPLE;
+	ev_msg.kev_class      = KEV_NETWORK_CLASS;
+	ev_msg.kev_subclass   = KEV_DL_SUBCLASS;
+
+	ev_msg.event_code = KEV_DL_WAKEFLAGS_CHANGED;
+	strlcpy(&ev_data.if_name[0], interface->if_name, IFNAMSIZ);
+	ev_data.if_family = interface->if_family;
+	ev_data.if_unit   = (u_int32_t) interface->if_unit;
+	ev_msg.dv[0].data_length = sizeof(struct net_event_data);
+	ev_msg.dv[0].data_ptr    = &ev_data;
+	ev_msg.dv[1].data_length = 0;
+	kev_post_msg(&ev_msg);
+	
+	return 0;
+}
+
+u_int32_t
+ifnet_get_wake_flags(ifnet_t interface)
+{
+	return interface == NULL ? 0 : interface->if_wake_properties;
+}
+
+
+
 
 /*
  * Should MIB data store a copy?
@@ -1084,42 +1219,55 @@ ifnet_find_by_name(
 }
 
 errno_t
-ifnet_list_get(
-	ifnet_family_t family,
-	ifnet_t **list,
-	u_int32_t *count)
+ifnet_list_get(ifnet_family_t family, ifnet_t **list, u_int32_t *count)
+{
+	return (ifnet_list_get_common(family, FALSE, list, count));
+}
+
+__private_extern__ errno_t
+ifnet_list_get_all(ifnet_family_t family, ifnet_t **list, u_int32_t *count)
+{
+	return (ifnet_list_get_common(family, TRUE, list, count));
+}
+
+static errno_t
+ifnet_list_get_common(ifnet_family_t family, boolean_t get_all, ifnet_t **list,
+    u_int32_t *count)
 {
 	struct ifnet *ifp;
 	u_int32_t cmax = 0;
 	*count = 0;
 	errno_t	result = 0;
-	
-	if (list == NULL || count == NULL) return EINVAL;
-	
+
+	if (list == NULL || count == NULL)
+		return (EINVAL);
+
 	ifnet_head_lock_shared();
-	TAILQ_FOREACH(ifp, &ifnet, if_link)
-	{
-		if (ifp->if_eflags & IFEF_DETACHING) continue;
-		if (family == 0 || ifp->if_family == family)
+	TAILQ_FOREACH(ifp, &ifnet, if_link) {
+		if ((ifp->if_eflags & IFEF_DETACHING) && !get_all)
+			continue;
+		if (family == IFNET_FAMILY_ANY || ifp->if_family == family)
 			cmax++;
 	}
-	
+
 	if (cmax == 0)
 		result = ENXIO;
-	
+
 	if (result == 0) {
-		MALLOC(*list, ifnet_t*, sizeof(ifnet_t) * (cmax + 1), M_TEMP, M_NOWAIT);
+		MALLOC(*list, ifnet_t*, sizeof(ifnet_t) * (cmax + 1),
+		    M_TEMP, M_NOWAIT);
 		if (*list == NULL)
 			result = ENOMEM;
 	}
 
 	if (result == 0) {
-		TAILQ_FOREACH(ifp, &ifnet, if_link)
-		{
-			if (ifp->if_eflags & IFEF_DETACHING) continue;
-			if (*count + 1 > cmax) break;
-			if (family == 0 || ((ifnet_family_t)ifp->if_family) == family)
-			{
+		TAILQ_FOREACH(ifp, &ifnet, if_link) {
+			if ((ifp->if_eflags & IFEF_DETACHING) && !get_all)
+				continue;
+			if (*count + 1 > cmax)
+				break;
+			if (family == IFNET_FAMILY_ANY ||
+			    ((ifnet_family_t)ifp->if_family) == family) {
 				(*list)[*count] = (ifnet_t)ifp;
 				ifnet_reference((*list)[*count]);
 				(*count)++;
@@ -1128,23 +1276,22 @@ ifnet_list_get(
 		(*list)[*count] = NULL;
 	}
 	ifnet_head_done();
-	
-	return 0;
+
+	return (result);
 }
 
 void
-ifnet_list_free(
-	ifnet_t *interfaces)
+ifnet_list_free(ifnet_t *interfaces)
 {
 	int i;
-	
-	if (interfaces == NULL) return;
-	
-	for (i = 0; interfaces[i]; i++)
-	{
+
+	if (interfaces == NULL)
+		return;
+
+	for (i = 0; interfaces[i]; i++) {
 		ifnet_release(interfaces[i]);
 	}
-	
+
 	FREE(interfaces, M_TEMP);
 }
 

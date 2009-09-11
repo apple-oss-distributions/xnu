@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1998-2006 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 1998-2008 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -46,15 +46,13 @@
 #include <IOKit/system.h>
 
 #include <libkern/c++/OSContainers.h>
+#include <libkern/crypto/sha1.h>
 
 extern "C" {
 #include <machine/machine_routines.h>
 #include <pexpert/pexpert.h>
 #include <uuid/uuid.h>
 }
-
-/* Delay period for UPS halt */
-#define kUPSDelayHaltCPU_msec   (1000*60*5)
 
 void printDictionaryKeys (OSDictionary * inDictionary, char * inMsg);
 static void getCStringForObject(OSObject *inObj, char *outStr, size_t outStrLen);
@@ -106,7 +104,7 @@ bool IOPlatformExpert::start( IOService * provider )
       return false;
     
     // Override the mapper present flag is requested by boot arguments.
-    if (PE_parse_boot_arg("dart", &debugFlags) && (debugFlags == 0))
+    if (PE_parse_boot_argn("dart", &debugFlags, sizeof (debugFlags)) && (debugFlags == 0))
       removeProperty(kIOPlatformMapperPresentKey);
     
     // Register the presence or lack thereof a system 
@@ -253,16 +251,11 @@ int IOPlatformExpert::haltRestart(unsigned int type)
 {
   if (type == kPEPanicSync) return 0;
 
-  if (type == kPEHangCPU) while (1);
+  if (type == kPEHangCPU) while (true) {}
 
   if (type == kPEUPSDelayHaltCPU) {
-    // Stall shutdown for 5 minutes, and if no outside force has 
-    // removed our power at that point, proceed with a reboot.
-    IOSleep( kUPSDelayHaltCPU_msec );
-
-    // Ideally we never reach this point.
-
-    type = kPERestartCPU;
+    // RestartOnPowerLoss feature was turned on, proceed with shutdown.
+    type = kPEHaltCPU;
   }
 
   // On ARM kPEPanicRestartCPU is supported in the drivers
@@ -383,13 +376,14 @@ PMLog(const char *who, unsigned long event,
 
     if (debugFlags & kIOLogPower) {
 
-	uint32_t nows, nowus;
+	clock_sec_t nows;
+	clock_usec_t nowus;
 	clock_get_system_microtime(&nows, &nowus);
 	nowus += (nows % 1000) * 1000000;
 
-        kprintf("pm%u %x %.30s %d %x %x\n",
-		nowus, (unsigned) current_thread(), who,	// Identity
-		(int) event, param1, param2);			// Args
+        kprintf("pm%u %p %.30s %d %lx %lx\n",
+		nowus, current_thread(), who,	// Identity
+		(int) event, (long) param1, (long) param2);			// Args
 
 	if (debugFlags & kIOLogTracePower) {
 	    static const UInt32 sStartStopBitField[] = 
@@ -411,7 +405,7 @@ PMLog(const char *who, unsigned long event,
 	    }
 
 	    // Record the timestamp, wish I had a this pointer
-	    IOTimeStampConstant(code, (UInt32) who, event, param1, param2);
+	    IOTimeStampConstant(code, (uintptr_t) who, event, param1, param2);
 	}
     }
 }
@@ -432,7 +426,6 @@ void IOPlatformExpert::PMInstantiatePowerDomains ( void )
     root->init();
     root->attach(this);
     root->start(this);
-    root->youAreRoot();
 }
 
 
@@ -749,7 +742,7 @@ static void IOShutdownNotificationsTimedOut(
     thread_call_param_t p0, 
     thread_call_param_t p1)
 {
-    int type = (int)p0;
+    int type = (int)(long)p0;
 
     /* 30 seconds has elapsed - resume shutdown */
     if(gIOPlatform) gIOPlatform->haltRestart(type);
@@ -791,7 +784,6 @@ int PEHaltRestart(unsigned int type)
   IOPMrootDomain    *pmRootDomain = IOService::getPMRootDomain();
   AbsoluteTime      deadline;
   thread_call_t     shutdown_hang;
-  unsigned int      tell_type;
   
   if(type == kPEHaltCPU || type == kPERestartCPU || type == kPEUPSDelayHaltCPU)
   {
@@ -808,15 +800,8 @@ int PEHaltRestart(unsigned int type)
                         (thread_call_param_t) type);
     clock_interval_to_deadline( 30, kSecondScale, &deadline );
     thread_call_enter1_delayed( shutdown_hang, 0, deadline );
-    
 
-    if( kPEUPSDelayHaltCPU == type ) {
-        tell_type = kPEHaltCPU;
-    } else {
-        tell_type = type;
-    }
-
-    pmRootDomain->handlePlatformHaltRestart(tell_type); 
+    pmRootDomain->handlePlatformHaltRestart(type); 
     /* This notification should have few clients who all do 
        their work synchronously.
              
@@ -841,16 +826,14 @@ long PEGetGMTTimeOfDay(void)
 {
 	long	result = 0;
 
-    if( gIOPlatform)
-		result = gIOPlatform->getGMTTimeOfDay();
+	if( gIOPlatform)		result = gIOPlatform->getGMTTimeOfDay();
 
 	return (result);
 }
 
 void PESetGMTTimeOfDay(long secs)
 {
-    if( gIOPlatform)
-		gIOPlatform->setGMTTimeOfDay(secs);
+    if( gIOPlatform)		gIOPlatform->setGMTTimeOfDay(secs);
 }
 
 } /* extern "C" */
@@ -858,29 +841,57 @@ void PESetGMTTimeOfDay(long secs)
 void IOPlatformExpert::registerNVRAMController(IONVRAMController * caller)
 {
     OSData *          data;
-    IORegistryEntry * nvram;
-    OSString *        string;
+    IORegistryEntry * entry;
+    OSString *        string = 0;
+    uuid_string_t     uuid;
 
-    nvram = IORegistryEntry::fromPath( "/options", gIODTPlane );
-    if ( nvram )
+    entry = IORegistryEntry::fromPath( "/efi/platform", gIODTPlane );
+    if ( entry )
     {
-        data = OSDynamicCast( OSData, nvram->getProperty( "platform-uuid" ) );
-        if ( data && data->getLength( ) == sizeof( uuid_t ) )
+        data = OSDynamicCast( OSData, entry->getProperty( "system-id" ) );
+        if ( data && data->getLength( ) == 16 )
         {
-            char uuid[ 36 + 1 ];
-            uuid_unparse( ( UInt8 * ) data->getBytesNoCopy( ), uuid );
+            SHA1_CTX     context;
+            uint8_t      digest[ SHA_DIGEST_LENGTH ];
+            const uuid_t space = { 0x2A, 0x06, 0x19, 0x90, 0xD3, 0x8D, 0x44, 0x40, 0xA1, 0x39, 0xC4, 0x97, 0x70, 0x37, 0x65, 0xAC };
 
+            SHA1Init( &context );
+            SHA1Update( &context, space, sizeof( space ) );
+            SHA1Update( &context, data->getBytesNoCopy( ), data->getLength( ) );
+            SHA1Final( digest, &context );
+
+            digest[ 6 ] = ( digest[ 6 ] & 0x0F ) | 0x50;
+            digest[ 8 ] = ( digest[ 8 ] & 0x3F ) | 0x80;
+
+            uuid_unparse( digest, uuid );
             string = OSString::withCString( uuid );
-            if ( string )
-            {
-                getProvider( )->setProperty( kIOPlatformUUIDKey, string );
-                publishResource( kIOPlatformUUIDKey, string );
-
-                string->release( );
-            }
         }
 
-        nvram->release( );
+        entry->release( );
+    }
+
+    if ( string == 0 )
+    {
+        entry = IORegistryEntry::fromPath( "/options", gIODTPlane );
+        if ( entry )
+        {
+            data = OSDynamicCast( OSData, entry->getProperty( "platform-uuid" ) );
+            if ( data && data->getLength( ) == sizeof( uuid_t ) )
+            {
+                uuid_unparse( ( uint8_t * ) data->getBytesNoCopy( ), uuid );
+                string = OSString::withCString( uuid );
+            }
+
+            entry->release( );
+        }
+    }
+
+    if ( string )
+    {
+        getProvider( )->setProperty( kIOPlatformUUIDKey, string );
+        publishResource( kIOPlatformUUIDKey, string );
+
+        string->release( );
     }
 
     publishResource("IONVRAM");
@@ -896,7 +907,7 @@ IOReturn IOPlatformExpert::callPlatformFunction(const OSSymbol *functionName,
   if (waitForFunction) {
     _resources = waitForService(resourceMatching(functionName));
   } else {
-    _resources = resources();
+    _resources = getResourceService();
   }
   if (_resources == 0) return kIOReturnUnsupported;
   
@@ -1281,7 +1292,7 @@ IOReturn IOPlatformExpertDevice::setProperties( OSObject * properties )
     object = dictionary->getObject( kIOPlatformUUIDKey );
     if ( object )
     {
-        IORegistryEntry * nvram;
+        IORegistryEntry * entry;
         OSString *        string;
         uuid_t            uuid;
 
@@ -1294,11 +1305,11 @@ IOReturn IOPlatformExpertDevice::setProperties( OSObject * properties )
         status = uuid_parse( string->getCStringNoCopy( ), uuid );
         if ( status != 0 ) return kIOReturnBadArgument;
 
-        nvram = IORegistryEntry::fromPath( "/options", gIODTPlane );
-        if ( nvram )
+        entry = IORegistryEntry::fromPath( "/options", gIODTPlane );
+        if ( entry )
         {
-            nvram->setProperty( "platform-uuid", uuid, sizeof( uuid_t ) );
-            nvram->release( );
+            entry->setProperty( "platform-uuid", uuid, sizeof( uuid_t ) );
+            entry->release( );
         }
 
         setProperty( kIOPlatformUUIDKey, string );
@@ -1377,3 +1388,4 @@ bool IOPanicPlatform::start(IOService * provider) {
 
     return false;
 }
+

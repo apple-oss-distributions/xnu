@@ -30,10 +30,8 @@
 
 #if defined (__ppc__)
 #include "ppc/sched_param.h"
-#elif defined (__i386__)
+#elif defined (__i386__) || defined (__x86_64__)
 #include "i386/sched_param.h"
-#elif defined (__arm__)
-#include "arm/sched_param.h"
 #else
 #error architecture not supported
 #endif

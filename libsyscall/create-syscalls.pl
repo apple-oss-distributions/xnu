@@ -70,6 +70,7 @@ my %Stub = (
 my $StubFile = 'libsyscall.list';
 # size in bytes of known types (only used for i386)
 my %TypeBytes = (
+    'au_asid_t'		=> 4,
     'caddr_t'		=> 4,
     'gid_t'		=> 4,
     'id_t'		=> 4,
@@ -79,6 +80,7 @@ my %TypeBytes = (
     'int64_t'		=> 8,
     'key_t'		=> 4,
     'long'		=> 4,
+    'mach_port_name_t'	=> 4,
     'mode_t'		=> 4,
     'off_t'		=> 8,
     'pid_t'		=> 4,
@@ -87,7 +89,6 @@ my %TypeBytes = (
     'size_t'		=> 4,
     'socklen_t'		=> 4,
     'ssize_t'		=> 4,
-    'time_t'		=> 4,
     'u_int'		=> 4,
     'u_long'		=> 4,
     'uid_t'		=> 4,
@@ -102,7 +103,7 @@ my %TypeBytes = (
 
 ##########################################################################
 # Make a __xxx.s file: if it exists in the $CustomDir, just copy it, otherwise
-# create one.  We define the macro __SYSCALL_I386_ARG_BYTES so that SYS.h could
+# create one.  We define the macro __SYSCALL_32BIT_ARG_BYTES so that SYS.h could
 # use that to define __SYSCALL dependent on the arguments' total size.
 ##########################################################################
 sub make_s {
@@ -119,7 +120,7 @@ sub make_s {
     } else {
 	my $f = IO::File->new($path, 'w');
 	die "$MyName: $path: $!\n" unless defined($f);
-	print $f "#define __SYSCALL_I386_ARG_BYTES $bytes\n\n";
+	print $f "#define __SYSCALL_32BIT_ARG_BYTES $bytes\n\n";
 	print $f "#include \"SYS.h\"\n\n";
 	print $f "__SYSCALL($pseudo, $name, $args)\n";
 	print "Creating $path\n";

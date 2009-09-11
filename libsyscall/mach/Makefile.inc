@@ -1,6 +1,7 @@
 # machine-dependent mach sources
-.if exists(${.CURDIR}/mach/${MACHINE_ARCH}/Makefile.inc)
-.include "${.CURDIR}/mach/${MACHINE_ARCH}/Makefile.inc"
+ARCHDIR = ${MACHINE_ARCH:C/^armv.*$/arm/}
+.if exists(${.CURDIR}/mach/${ARCHDIR}/Makefile.inc)
+.include "${.CURDIR}/mach/${ARCHDIR}/Makefile.inc"
 .endif
 
 .PATH: ${.CURDIR}/mach

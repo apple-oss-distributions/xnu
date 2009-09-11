@@ -26,6 +26,7 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 #include <mach/mach_types.h>
+#include <mach/machine/vm_param.h>
 
 #include <kern/kern_types.h>
 #include <kern/processor.h>
@@ -245,6 +246,22 @@ ipc_space_t  get_task_ipcspace(task_t t)
 	return(t->itk_space);
 }
 
+int get_task_numactivethreads(task_t task)
+{
+	thread_t	inc;
+	int num_active_thr=0;
+	task_lock(task);
+
+	for (inc  = (thread_t)queue_first(&task->threads);
+			!queue_end(&task->threads, (queue_entry_t)inc); inc = (thread_t)queue_next(&inc->task_threads)) 
+	{
+		if(inc->active)
+			num_active_thr++;
+	}
+	task_unlock(task);
+	return num_active_thr;
+}
+
 int  get_task_numacts(task_t t)
 {
 	return(t->thread_count);
@@ -261,12 +278,12 @@ int is_64signalregset(void)
 }
 
 /*
- * The old map reference is returned.
+ * Swap in a new map for the task/thread pair; the old map reference is
+ * returned.
  */
 vm_map_t
-swap_task_map(task_t task,vm_map_t map)
+swap_task_map(task_t task, thread_t thread, vm_map_t map)
 {
-	thread_t thread = current_thread();
 	vm_map_t old_map;
 
 	if (task != thread->task)
@@ -277,7 +294,9 @@ swap_task_map(task_t task,vm_map_t map)
 	thread->map = task->map = map;
 	task_unlock(task);
 
+#if (defined(__i386__) || defined(__x86_64__)) && NCOPY_WINDOWS > 0
 	inval_copy_windows(thread);
+#endif
 
 	return old_map;
 }
@@ -288,6 +307,17 @@ swap_task_map(task_t task,vm_map_t map)
 pmap_t  get_task_pmap(task_t t)
 {
 	return(t->map->pmap);
+}
+
+/*
+ *
+ */
+uint64_t get_task_resident_size(task_t task) 
+{
+	vm_map_t map;
+	
+	map = (task == kernel_task) ? kernel_map: task->map;
+	return((uint64_t)pmap_resident_count(map->pmap) * PAGE_SIZE_64);
 }
 
 /*
@@ -570,7 +600,7 @@ fill_taskthreadinfo(task_t task, uint64_t thaddr, struct proc_threadinfo_interna
 			!queue_end(&task->threads, (queue_entry_t)thact); ) {
 #if defined(__ppc__) || defined(__arm__)
 		if (thact->machine.cthread_self == thaddr)
-#elif defined (__i386__)
+#elif defined (__i386__) || defined (__x86_64__)
 		if (thact->machine.pcb->cthread_self == thaddr)
 #else
 #error architecture not supported
@@ -601,6 +631,7 @@ fill_taskthreadinfo(task_t task, uint64_t thaddr, struct proc_threadinfo_interna
 			
 			if ((vpp != NULL) && (thact->uthread != NULL)) 
 				bsd_threadcdir(thact->uthread, vpp, vidp);
+			bsd_getthreadname(thact->uthread,ptinfo->pth_name);
 			err = 0;
 			goto out; 
 		}
@@ -629,7 +660,7 @@ fill_taskthreadlist(task_t task, void * buffer, int thcount)
 			!queue_end(&task->threads, (queue_entry_t)thact); ) {
 #if defined(__ppc__) || defined(__arm__)
 		thaddr = thact->machine.cthread_self;
-#elif defined (__i386__)
+#elif defined (__i386__) || defined (__x86_64__)
 		thaddr = thact->machine.pcb->cthread_self;
 #else
 #error architecture not supported
@@ -643,7 +674,7 @@ fill_taskthreadlist(task_t task, void * buffer, int thcount)
 
 out:
 	task_unlock(task);
-	return(numthr * sizeof(uint64_t));
+	return (int)(numthr * sizeof(uint64_t));
 	
 }
 

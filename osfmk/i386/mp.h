@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2007 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2008 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -58,124 +58,35 @@
  */
 #ifdef	KERNEL_PRIVATE
 
-#ifndef _I386AT_MP_H_
-#define _I386AT_MP_H_
+#ifndef _I386_MP_H_
+#define _I386_MP_H_
 
-#ifndef	DEBUG
-#include <debug.h>
-#endif
 //#define	MP_DEBUG 1
 
 #include <i386/apic.h>
 #include <i386/mp_events.h>
 
-#define LAPIC_ID_MAX	(LAPIC_ID_MASK)
-
-#define MAX_CPUS	(LAPIC_ID_MAX + 1)
+#define MAX_CPUS	32		/* (8*sizeof(long)) */	
 
 #ifndef	ASSEMBLER
+#include <stdint.h>
 #include <sys/cdefs.h>
 #include <mach/boolean.h>
 #include <mach/kern_return.h>
 #include <mach/i386/thread_status.h>
+#include <mach/vm_types.h>
+#include <kern/lock.h>
 
 __BEGIN_DECLS
 
 extern kern_return_t intel_startCPU(int slot_num);
+extern kern_return_t intel_startCPU_fast(int slot_num);
 extern void i386_init_slave(void);
+extern void i386_init_slave_fast(void);
 extern void smp_init(void);
 
 extern void cpu_interrupt(int cpu);
-
-extern void lapic_init(void);
-extern void lapic_shutdown(void);
-extern void lapic_smm_restore(void);
-extern boolean_t lapic_probe(void);
-extern void lapic_dump(void);
-extern int  lapic_interrupt(int interrupt, x86_saved_state_t *state);
-extern void lapic_end_of_interrupt(void);
-extern int  lapic_to_cpu[];
-extern int  cpu_to_lapic[];
-extern int  lapic_interrupt_base;
-extern void lapic_cpu_map(int lapic, int cpu_num);
-extern uint32_t ml_get_apicid(uint32_t cpu);
-
-extern void lapic_set_timer(
-		boolean_t		interrupt,
-		lapic_timer_mode_t	mode,
-		lapic_timer_divide_t 	divisor,
-		lapic_timer_count_t	initial_count);
-
-extern void lapic_get_timer(
-		lapic_timer_mode_t	*mode,
-		lapic_timer_divide_t	*divisor,
-		lapic_timer_count_t	*initial_count,
-		lapic_timer_count_t	*current_count);
-
-typedef	void (*i386_intr_func_t)(void *);
-extern void lapic_set_timer_func(i386_intr_func_t func);
-extern void lapic_set_pmi_func(i386_intr_func_t func);
-extern void lapic_set_thermal_func(i386_intr_func_t func);
-
 __END_DECLS
-
-/*
- * By default, use high vectors to leave vector space for systems
- * with multiple I/O APIC's. However some systems that boot with
- * local APIC disabled will hang in SMM when vectors greater than
- * 0x5F are used. Those systems are not expected to have I/O APIC
- * so 16 (0x50 - 0x40) vectors for legacy PIC support is perfect.
- */
-#define LAPIC_DEFAULT_INTERRUPT_BASE	0xD0
-#define LAPIC_REDUCED_INTERRUPT_BASE	0x50
-/*
- * Specific lapic interrupts are relative to this base
- * in priority order from high to low:
- */
-
-#define LAPIC_PERFCNT_INTERRUPT		0xF
-#define LAPIC_TIMER_INTERRUPT		0xE
-#define LAPIC_INTERPROCESSOR_INTERRUPT	0xD
-#define LAPIC_THERMAL_INTERRUPT		0xC
-#define LAPIC_ERROR_INTERRUPT		0xB
-#define LAPIC_SPURIOUS_INTERRUPT	0xA
-/* The vector field is ignored for NMI interrupts via the LAPIC
- * or otherwise, so this is not an offset from the interrupt
- * base.
- */
-#define LAPIC_NMI_INTERRUPT		0x2
-
-#define LAPIC_REG(reg) \
-	(*((volatile uint32_t *)(lapic_start + LAPIC_##reg)))
-#define LAPIC_REG_OFFSET(reg,off) \
-	(*((volatile uint32_t *)(lapic_start + LAPIC_##reg + (off))))
-
-#define LAPIC_VECTOR(src) \
-	(lapic_interrupt_base + LAPIC_##src##_INTERRUPT)
-
-#define LAPIC_ISR_IS_SET(base,src) \
-	(LAPIC_REG_OFFSET(ISR_BASE,((base+LAPIC_##src##_INTERRUPT)/32)*0x10) & \
-		(1 <<((base + LAPIC_##src##_INTERRUPT)%32)))
-
-extern vm_offset_t	lapic_start;
-
-#endif	/* ASSEMBLER */
-
-#define CPU_NUMBER(r)				\
-	movl	%gs:CPU_NUMBER_GS,r
-
-#define CPU_NUMBER_FROM_LAPIC(r)		\
-    	movl	EXT(lapic_id),r;		\
-    	movl	0(r),r;				\
-    	shrl	$(LAPIC_ID_SHIFT),r;		\
-    	andl	$(LAPIC_ID_MASK),r;		\
-	movl	EXT(lapic_to_cpu)(,r,4),r
-
-
-/* word describing the reason for the interrupt, one per cpu */
-
-#ifndef	ASSEMBLER
-#include <kern/lock.h>
 
 extern	unsigned int	real_ncpus;		/* real number of cpus */
 extern	unsigned int	max_ncpus;		/* max number of cpus */
@@ -192,11 +103,14 @@ extern	int	kdb_debug;
 extern	int	kdb_active[];
 
 extern	volatile boolean_t mp_kdp_trap;
-extern boolean_t force_immediate_debugger_NMI;
+extern 	volatile boolean_t force_immediate_debugger_NMI;
+extern  volatile boolean_t pmap_tlb_flush_timeout;
+extern	uint64_t	LastDebuggerEntryAllowance;
 
 extern	void	mp_kdp_enter(void);
 extern	void	mp_kdp_exit(void);
 
+extern	boolean_t	mp_recent_debugger_activity(void);
 #if MACH_KDB
 extern void mp_kdb_exit(void);
 #endif
@@ -222,6 +136,14 @@ extern void mp_rendezvous_break_lock(void);
 extern void mp_broadcast(
 		void (*action_func)(void *),
 		void *arg);
+#if MACH_KDP
+typedef long (*kdp_x86_xcpu_func_t) (void *arg0, void *arg1, uint16_t lcpu);
+
+extern  long kdp_x86_xcpu_invoke(const uint16_t lcpu, 
+                                 kdp_x86_xcpu_func_t func, 
+                                 void *arg0, void *arg1);
+typedef enum	{KDP_XCPU_NONE = 0xffff, KDP_CURRENT_LCPU = 0xfffe} kdp_cpu_t;
+#endif
 
 typedef uint32_t cpu_t;
 typedef uint32_t cpumask_t;
@@ -249,6 +171,15 @@ extern cpu_t mp_cpus_call(
 		mp_sync_t	mode,
 		void		(*action_func)(void *),
 		void		*arg);
+
+/*
+ * Power-management-specific SPI to:
+ *  - register a callout function, and
+ *  - request the callout (if registered) on a given cpu.
+ */
+extern void PM_interrupt_register(void (*fn)(void));
+extern void cpu_PM_interrupt(int cpu);
+
 
 __END_DECLS
 
@@ -303,7 +234,7 @@ extern cpu_signal_event_log_t	*cpu_handle[];
 			(vm_offset_t *) hdl_logpp,			\
 			sizeof(cpu_signal_event_log_t)) != KERN_SUCCESS)\
 		panic("DBGLOG_CPU_INIT cpu_handle allocation failed\n");\
-	bzero(*sig_logpp, sizeof(cpu_signal_event_log_t));		\
+	bzero(*hdl_logpp, sizeof(cpu_signal_event_log_t));		\
 }
 #else	/* MP_DEBUG */
 #define DBGLOG(log,_cpu,_event)
@@ -312,7 +243,16 @@ extern cpu_signal_event_log_t	*cpu_handle[];
 
 #endif	/* ASSEMBLER */
 
-#define i_bit(bit, word)	((long)(*(word)) & ((long)1 << (bit)))
+#ifdef ASSEMBLER
+#define i_bit(bit, word)	((long)(*(word)) & (1L << (bit)))
+#else
+// Workaround for 6640051
+static inline long 
+i_bit_impl(long word, long bit) {
+	return word & 1L << bit;
+}
+#define i_bit(bit, word)	i_bit_impl((long)(*(word)), bit)
+#endif
 
 
 /* 
@@ -339,6 +279,9 @@ extern cpu_signal_event_log_t	*cpu_handle[];
 #define MP_DEV_OP_CALLB	3	/* If lock busy, register a pending callback */
 
 #if	MACH_RT
+
+#if defined(__i386__)
+
 #define _DISABLE_PREEMPTION 					\
 	incl	%gs:CPU_PREEMPTION_LEVEL
 
@@ -357,7 +300,26 @@ extern cpu_signal_event_log_t	*cpu_handle[];
 #define _ENABLE_PREEMPTION_NO_CHECK				\
 	decl	%gs:CPU_PREEMPTION_LEVEL
 
-#if	MACH_ASSERT
+#elif defined(__x86_64__)
+
+#define _DISABLE_PREEMPTION 					\
+	incl	%gs:CPU_PREEMPTION_LEVEL
+
+#define _ENABLE_PREEMPTION 					\
+	decl	%gs:CPU_PREEMPTION_LEVEL		;	\
+	jne	9f					;	\
+	call	EXT(kernel_preempt_check)		;	\
+9:	
+
+#define _ENABLE_PREEMPTION_NO_CHECK				\
+	decl	%gs:CPU_PREEMPTION_LEVEL
+
+#else
+#error Unsupported architecture
+#endif
+
+/* x86_64 just calls through to the other macro directly */
+#if	MACH_ASSERT && defined(__i386__)
 #define DISABLE_PREEMPTION					\
 	pushl	%eax;						\
 	pushl	%ecx;						\
@@ -424,6 +386,6 @@ extern cpu_signal_event_log_t	*cpu_handle[];
 #define MP_ENABLE_PREEMPTION_NO_CHECK
 #endif	/* MACH_RT */
 
-#endif /* _I386AT_MP_H_ */
+#endif /* _I386_MP_H_ */
 
 #endif /* KERNEL_PRIVATE */
