@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1998-2000 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 1998-2000, 2009-2010 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -31,6 +31,7 @@
 #include <IOKit/IOWorkLoop.h>
 #include <IOKit/IOReturn.h>
 #include <IOKit/IOTimeStamp.h>
+#include <IOKit/IOKitDebug.h>
 
 #define super IOEventSource
 
@@ -48,11 +49,33 @@ OSMetaClassDefineReservedUnused(IOCommandGate, 5);
 OSMetaClassDefineReservedUnused(IOCommandGate, 6);
 OSMetaClassDefineReservedUnused(IOCommandGate, 7);
 
-bool IOCommandGate::checkForWork() { return false; }
+#if IOKITSTATS
+
+#define IOStatisticsInitializeCounter() \
+do { \
+	IOStatistics::setCounterType(IOEventSource::reserved->counter, kIOStatisticsCommandGateCounter); \
+} while (0)
+
+#define IOStatisticsActionCall() \
+do { \
+	IOStatistics::countCommandGateActionCall(IOEventSource::reserved->counter); \
+} while (0)
+
+#else
+
+#define IOStatisticsInitializeCounter()
+#define IOStatisticsActionCall()
+
+#endif /* IOKITSTATS */
 
 bool IOCommandGate::init(OSObject *inOwner, Action inAction)
 {
-    return super::init(inOwner, (IOEventSource::Action) inAction);
+    bool res = super::init(inOwner, (IOEventSource::Action) inAction);
+    if (res) {
+        IOStatisticsInitializeCounter();
+    }
+
+    return res;
 }
 
 IOCommandGate *
@@ -129,9 +152,6 @@ IOReturn IOCommandGate::runAction(Action inAction,
     if (!inAction)
         return kIOReturnBadArgument;
 
-    IOTimeStampConstant(IODBG_CMDQ(IOCMDQ_ACTION),
-			(uintptr_t) inAction, (uintptr_t) owner);
-
     // closeGate is recursive needn't worry if we already hold the lock.
     closeGate();
 
@@ -158,10 +178,23 @@ IOReturn IOCommandGate::runAction(Action inAction,
 	}
     }
 
+    bool trace = ( gIOKitTrace & kIOTraceCommandGates ) ? true : false;
+	
+	if (trace)
+		IOTimeStampStartConstant(IODBG_CMDQ(IOCMDQ_ACTION),
+								 (uintptr_t) inAction, (uintptr_t) owner);
+	
+    IOStatisticsActionCall();
+	
     // Must be gated and on the work loop or enabled
     res = (*inAction)(owner, arg0, arg1, arg2, arg3);
+	
+	if (trace)
+		IOTimeStampEndConstant(IODBG_CMDQ(IOCMDQ_ACTION),
+							   (uintptr_t) inAction, (uintptr_t) owner);
+    
     openGate();
-
+	
     return res;
 }
 
@@ -182,10 +215,20 @@ IOReturn IOCommandGate::attemptAction(Action inAction,
     if (!workLoop->onThread() && !enabled)
         res = kIOReturnNotPermitted;
     else {
-	IOTimeStampConstant(IODBG_CMDQ(IOCMDQ_ACTION),
-			    (uintptr_t) inAction, (uintptr_t) owner);
-
-	res = (*inAction)(owner, arg0, arg1, arg2, arg3);
+		
+        bool trace = ( gIOKitTrace & kIOTraceCommandGates ) ? true : false;
+		
+        if (trace)
+            IOTimeStampStartConstant(IODBG_CMDQ(IOCMDQ_ACTION),
+									 (uintptr_t) inAction, (uintptr_t) owner);
+        
+        IOStatisticsActionCall();
+        
+        res = (*inAction)(owner, arg0, arg1, arg2, arg3);
+		
+        if (trace)
+            IOTimeStampEndConstant(IODBG_CMDQ(IOCMDQ_ACTION),
+								   (uintptr_t) inAction, (uintptr_t) owner);
     }
 
     openGate();

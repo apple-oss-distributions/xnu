@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2008-2011 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -42,6 +42,7 @@
 
 #ifndef _IP6_FW_H
 #define _IP6_FW_H
+#ifdef __APPLE_API_OBSOLETE
 
 #include <sys/appleapiopts.h>
 
@@ -329,6 +330,7 @@ struct ip6_fw_chain {
  * Function definitions.
  */
 void ip6_fw_init(void);
+void load_ip6fw(void);
 
 /* Firewall hooks */
 struct ip6_hdr;
@@ -342,4 +344,5 @@ extern	int ip6_fw_enable;
 
 #endif /* KERNEL_PRIVATE */
 
+#endif /* __APPLE_API_OBSOLETE */
 #endif /* _IP6_FW_H */

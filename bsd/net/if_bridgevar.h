@@ -1,5 +1,6 @@
+/*	$NetBSD: if_bridgevar.h,v 1.4 2003/07/08 07:13:50 itojun Exp $	*/
 /*
- * Copyright (c) 2004-2009 Apple Inc. All rights reserved.
+ * Copyright (c) 2004-2010 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -25,9 +26,6 @@
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
-
-/*	$apfw: if_bridgevar,v 1.7 2008/10/24 02:34:06 cbzimmer Exp $ */
-/*	$NetBSD: if_bridgevar.h,v 1.8 2005/12/10 23:21:38 elad Exp $	*/
 
 /*
  * Copyright 2001 Wasabi Systems, Inc.
@@ -95,6 +93,8 @@
  * POSSIBILITY OF SUCH DAMAGE.
  *
  * OpenBSD: if_bridge.h,v 1.14 2001/03/22 03:48:29 jason Exp
+ *
+ * $FreeBSD$
  */
 
 /*
@@ -138,10 +138,18 @@
 #define	BRDGGMA			19	/* get max age (ifbrparam) */
 #define	BRDGSMA			20	/* set max age (ifbrparam) */
 #define	BRDGSIFPRIO		21	/* set if priority (ifbreq) */
-#define BRDGSIFCOST		22	/* set if path cost (ifbreq) */
-#define BRDGGFILT	        23	/* get filter flags (ifbrparam) */
-#define BRDGSFILT	        24	/* set filter flags (ifbrparam) */
+#define	BRDGSIFCOST		22	/* set if path cost (ifbreq) */
+#define BRDGGFILT		23	/* get filter flags (ifbrparam) */
+#define BRDGSFILT	    24	/* set filter flags (ifbrparam) */
 #define	BRDGPURGE		25	/* purge address cache for a particular interface (ifbreq) */
+#define	BRDGADDS		26	/* add bridge span member (ifbreq) */
+#define	BRDGDELS		27	/* delete bridge span member (ifbreq) */
+#define	BRDGPARAM		28	/* get bridge STP params (ifbropreq) */
+#define	BRDGGRTE		29	/* get cache drops (ifbrparam) */
+#define	BRDGGIFSSTP		30	/* get member STP params list (ifbpstpconf) */
+#define	BRDGSPROTO		31	/* set protocol (ifbrparam) */
+#define	BRDGSTXHC		32	/* set tx hold count (ifbrparam) */
+#define	BRDGSIFAMAX		33	/* set max interface addrs (ifbreq) */
 
 /*
  * Generic bridge control request.
@@ -151,38 +159,41 @@
 struct ifbreq {
 	char		ifbr_ifsname[IFNAMSIZ];	/* member if name */
 	uint32_t	ifbr_ifsflags;		/* member if flags */
-        uint16_t        ifbr_portno;            /* member if port number */
-	uint8_t		ifbr_state;		/* member if STP state */
+	uint32_t	ifbr_stpflags;		/* member if STP flags */
+	uint32_t	ifbr_path_cost;		/* member if STP cost */
+	uint8_t		ifbr_portno;		/* member if port number */
 	uint8_t		ifbr_priority;		/* member if STP priority */
-	uint8_t		ifbr_path_cost;		/* member if STP cost */
+	uint8_t		ifbr_proto;		/* member if STP protocol */
+	uint8_t		ifbr_role;		/* member if STP role */
+	uint8_t		ifbr_state;		/* member if STP state */
+	uint32_t	ifbr_addrcnt;		/* member if addr number */
+	uint32_t	ifbr_addrmax;		/* member if addr max */
+	uint32_t	ifbr_addrexceeded;	/* member if addr violations */
+	uint8_t		pad[32];
 };
 
 #pragma pack()
 
 /* BRDGGIFFLAGS, BRDGSIFFLAGS */
-#define	IFBIF_LEARNING		0x01	/* if can learn */
-#define	IFBIF_DISCOVER		0x02	/* if sends packets w/ unknown dest. */
-#define	IFBIF_STP		0x04	/* if participates in spanning tree */
-/* APPLE MODIFICATION <cbz@apple.com>
- add the following bits for ProxySTA:
- IFBIF_PROXYSTA, IFBIF_PROXYSTA_DISCOVER
- add the following bits for Guest Network	
- IFBIF_NO_FORWARDING
- */
-#define	IFBIF_PROXYSTA				0x08	/* if interface is a proxy sta */
-#define	IFBIF_PROXYSTA_DISCOVER		0x10	/* if interface is used to discover proxy sta candidates */
-#define	IFBIF_NO_FORWARDING		    0x20	/* if interface cannot forward traffic from one interface to the next */
+#define	IFBIF_LEARNING		0x0001	/* if can learn */
+#define	IFBIF_DISCOVER		0x0002	/* if sends packets w/ unknown dest. */
+#define	IFBIF_STP		0x0004	/* if participates in spanning tree */
+#define	IFBIF_SPAN		0x0008	/* if is a span port */
+#define	IFBIF_STICKY		0x0010	/* if learned addresses stick */
+#define	IFBIF_BSTP_EDGE		0x0020	/* member stp edge port */
+#define	IFBIF_BSTP_AUTOEDGE	0x0040	/* member stp autoedge enabled */
+#define	IFBIF_BSTP_PTP		0x0080	/* member stp point to point */
+#define	IFBIF_BSTP_AUTOPTP	0x0100	/* member stp autoptp enabled */
+#define	IFBIF_BSTP_ADMEDGE	0x0200	/* member stp admin edge enabled */
+#define	IFBIF_BSTP_ADMCOST	0x0400	/* member stp admin path cost */
+#define	IFBIF_PRIVATE		0x0800	/* if is a private segment */
 
-/* APPLE MODIFICATION <cbz@apple.com> 
- add the following bits for ProxySTA:
- PROXYSTA, PROXYSTA_DISCOVER
- add the following bits for Guest Network	
- NO_FORWARDING
- this was...	
- 
- #define	IFBIFBITS	"\020\1LEARNING\2DISCOVER\3STP"
- */
-#define	IFBIFBITS	"\020\1LEARNING\2DISCOVER\3STP\4PROXYSTA\5PROXYSTA_DISCOVER\6NO_FORWARDING"
+#define	IFBIFBITS	"\020\001LEARNING\002DISCOVER\003STP\004SPAN" \
+			"\005STICKY\014PRIVATE\006EDGE\007AUTOEDGE\010PTP" \
+			"\011AUTOPTP"
+#define	IFBIFMASK	~(IFBIF_BSTP_EDGE|IFBIF_BSTP_AUTOEDGE|IFBIF_BSTP_PTP| \
+			IFBIF_BSTP_AUTOPTP|IFBIF_BSTP_ADMEDGE| \
+			IFBIF_BSTP_ADMCOST)	/* not saved */
 
 /* BRDGFLUSH */
 #define	IFBF_FLUSHDYN		0x00	/* flush learned addresses only */
@@ -206,35 +217,33 @@ IFBF_FILT_MEMBER | \
 IFBF_FILT_ONLYIP)
 #endif
 
-/* STP port states */
-#define	BSTP_IFSTATE_DISABLED	0
-#define	BSTP_IFSTATE_LISTENING	1
-#define	BSTP_IFSTATE_LEARNING	2
-#define	BSTP_IFSTATE_FORWARDING	3
-#define	BSTP_IFSTATE_BLOCKING	4
-
 /*
  * Interface list structure.
  */
 
 #pragma pack(4)
 
+#ifndef XNU_KERNEL_PRIVATE
+
 struct ifbifconf {
 	uint32_t	ifbic_len;	/* buffer size */
 	union {
 		caddr_t	ifbicu_buf;
 		struct ifbreq *ifbicu_req;
-	} ifbic_ifbicu;
 #define	ifbic_buf	ifbic_ifbicu.ifbicu_buf
 #define	ifbic_req	ifbic_ifbicu.ifbicu_req
+	} ifbic_ifbicu;
 };
 
-#ifdef KERNEL_PRIVATE
+#else /* XNU_KERNEL_PRIVATE */
+
 struct ifbifconf32 {
 	uint32_t	ifbic_len;	/* buffer size */
 	union {
 		user32_addr_t	ifbicu_buf;
 		user32_addr_t	ifbicu_req;
+#define	ifbic_buf	ifbic_ifbicu.ifbicu_buf
+#define	ifbic_req	ifbic_ifbicu.ifbicu_req
 	} ifbic_ifbicu;
 };
 
@@ -245,7 +254,7 @@ struct ifbifconf64 {
 		user64_addr_t	ifbicu_req;
 	} ifbic_ifbicu;
 };
-#endif /* KERNEL_PRIVATE */
+#endif /* XNU_KERNEL_PRIVATE */
 
 #pragma pack()
 
@@ -255,19 +264,24 @@ struct ifbifconf64 {
 
 #pragma pack(4)
 
+#ifndef XNU_KERNEL_PRIVATE
+
 struct ifbareq {
 	char		ifba_ifsname[IFNAMSIZ];	/* member if name */
 	unsigned long	ifba_expire;		/* address expire time */
 	uint8_t		ifba_flags;		/* address flags */
 	uint8_t		ifba_dst[ETHER_ADDR_LEN];/* destination address */
+	uint16_t	ifba_vlan;		/* vlan id */
 };
 
-#ifdef KERNEL_PRIVATE
+#else /* XNU_KERNEL_PRIVATE */
+
 struct ifbareq32 {
 	char		ifba_ifsname[IFNAMSIZ];	/* member if name */
 	uint32_t	ifba_expire;		/* address expire time */
 	uint8_t		ifba_flags;		/* address flags */
 	uint8_t		ifba_dst[ETHER_ADDR_LEN];/* destination address */
+	uint16_t	ifba_vlan;		/* vlan id */
 };
 
 struct ifbareq64 {
@@ -275,16 +289,18 @@ struct ifbareq64 {
 	uint64_t	ifba_expire;		/* address expire time */
 	uint8_t		ifba_flags;		/* address flags */
 	uint8_t		ifba_dst[ETHER_ADDR_LEN];/* destination address */
+	uint16_t	ifba_vlan;		/* vlan id */
 };
-#endif /* KERNEL_PRIVATE */
+#endif /* XNU_KERNEL_PRIVATE */
 
 #pragma pack()
 
 #define	IFBAF_TYPEMASK	0x03	/* address type mask */
 #define	IFBAF_DYNAMIC	0x00	/* dynamically learned address */
 #define	IFBAF_STATIC	0x01	/* static address */
+#define	IFBAF_STICKY	0x02	/* sticky address */
 
-#define	IFBAFBITS	"\020\1STATIC"
+#define	IFBAFBITS	"\020\1STATIC\2STICKY"
 
 /*
  * Address list structure.
@@ -292,22 +308,27 @@ struct ifbareq64 {
 
 #pragma pack(4)
 
+#ifndef XNU_KERNEL_PRIVATE
+
 struct ifbaconf {
 	uint32_t	ifbac_len;	/* buffer size */
 	union {
 		caddr_t ifbacu_buf;
 		struct ifbareq *ifbacu_req;
-	} ifbac_ifbacu;
 #define	ifbac_buf	ifbac_ifbacu.ifbacu_buf
 #define	ifbac_req	ifbac_ifbacu.ifbacu_req
+	} ifbac_ifbacu;
 };
 
-#ifdef KERNEL_PRIVATE
+#else /* XNU_KERNEL_PRIVATE */
+
 struct ifbaconf32 {
 	uint32_t	ifbac_len;	/* buffer size */
 	union {
 		user32_addr_t	ifbacu_buf;
 		user32_addr_t	ifbacu_req;
+#define	ifbac_buf	ifbac_ifbacu.ifbacu_buf
+#define	ifbac_req	ifbac_ifbacu.ifbacu_req
 	} ifbac_ifbacu;
 };
 
@@ -318,7 +339,7 @@ struct ifbaconf64 {
 		user64_addr_t	ifbacu_req;
 	} ifbac_ifbacu;
 };
-#endif /* KERNEL_PRIVATE */
+#endif /* XNU_KERNEL_PRIVATE */
 
 #pragma pack()
 
@@ -341,144 +362,138 @@ struct ifbrparam {
 #define	ifbrp_csize	ifbrp_ifbrpu.ifbrpu_int32	/* cache size */
 #define	ifbrp_ctime	ifbrp_ifbrpu.ifbrpu_int32	/* cache time (sec) */
 #define	ifbrp_prio	ifbrp_ifbrpu.ifbrpu_int16	/* bridge priority */
+#define	ifbrp_proto	ifbrp_ifbrpu.ifbrpu_int8	/* bridge protocol */
+#define	ifbrp_txhc	ifbrp_ifbrpu.ifbrpu_int8	/* bpdu tx holdcount */
 #define	ifbrp_hellotime	ifbrp_ifbrpu.ifbrpu_int8	/* hello time (sec) */
 #define	ifbrp_fwddelay	ifbrp_ifbrpu.ifbrpu_int8	/* fwd time (sec) */
 #define	ifbrp_maxage	ifbrp_ifbrpu.ifbrpu_int8	/* max age (sec) */
+#define	ifbrp_cexceeded ifbrp_ifbrpu.ifbrpu_int32	/* # of cache dropped
+							 * adresses */
 #define	ifbrp_filter	ifbrp_ifbrpu.ifbrpu_int32	/* filtering flags */
 
-#ifdef KERNEL
 /*
- * Timekeeping structure used in spanning tree code.
+ * Bridge current operational parameters structure.
  */
-struct bridge_timer {
-	uint16_t	active;
-	uint16_t	value;
+
+#pragma pack(4)
+
+#ifndef XNU_KERNEL_PRIVATE
+
+struct ifbropreq {
+	uint8_t		ifbop_holdcount;
+	uint8_t		ifbop_maxage;
+	uint8_t		ifbop_hellotime;
+	uint8_t		ifbop_fwddelay;
+	uint8_t		ifbop_protocol;
+	uint16_t	ifbop_priority;
+	uint16_t	ifbop_root_port;
+	uint32_t	ifbop_root_path_cost;
+	uint64_t	ifbop_bridgeid;
+	uint64_t	ifbop_designated_root;
+	uint64_t	ifbop_designated_bridge;
+	struct timeval	ifbop_last_tc_time;
 };
 
-struct bstp_config_unit {
-	uint64_t	cu_rootid;
-	uint64_t	cu_bridge_id;
-	uint32_t	cu_root_path_cost;
-	uint16_t	cu_message_age;
-	uint16_t	cu_max_age;
-	uint16_t	cu_hello_time;
-	uint16_t	cu_forward_delay;
-	uint16_t	cu_port_id;
-	uint8_t		cu_message_type;
-	uint8_t		cu_topology_change_acknowledgment;
-	uint8_t		cu_topology_change;
+#else /* XNU_KERNEL_PRIVATE */
+
+struct ifbropreq32 {
+	uint8_t		ifbop_holdcount;
+	uint8_t		ifbop_maxage;
+	uint8_t		ifbop_hellotime;
+	uint8_t		ifbop_fwddelay;
+	uint8_t		ifbop_protocol;
+	uint16_t	ifbop_priority;
+	uint16_t	ifbop_root_port;
+	uint32_t	ifbop_root_path_cost;
+	uint64_t	ifbop_bridgeid;
+	uint64_t	ifbop_designated_root;
+	uint64_t	ifbop_designated_bridge;
+	struct timeval	ifbop_last_tc_time;
 };
 
-struct bstp_tcn_unit {
-	uint8_t		tu_message_type;
+struct ifbropreq64 {
+	uint8_t		ifbop_holdcount;
+	uint8_t		ifbop_maxage;
+	uint8_t		ifbop_hellotime;
+	uint8_t		ifbop_fwddelay;
+	uint8_t		ifbop_protocol;
+	uint16_t	ifbop_priority;
+	uint16_t	ifbop_root_port;
+	uint32_t	ifbop_root_path_cost;
+	uint64_t	ifbop_bridgeid;
+	uint64_t	ifbop_designated_root;
+	uint64_t	ifbop_designated_bridge;
+	struct timeval	ifbop_last_tc_time;
 };
 
-struct bridge_softc;
+#endif
 
-/*
- * Bridge interface list entry.
- * (VL) bridge_ifmember would be a better name, more descriptive
- */
-struct bridge_iflist {
-	LIST_ENTRY(bridge_iflist) bif_next;
-	uint64_t		bif_designated_root;
-	uint64_t		bif_designated_bridge;
-	uint32_t		bif_path_cost;
-	uint32_t		bif_designated_cost;
-	struct bridge_timer	bif_hold_timer;
-	struct bridge_timer	bif_message_age_timer;
-	struct bridge_timer	bif_forward_delay_timer;
-	uint16_t		bif_port_id;
-	uint16_t		bif_designated_port;
-	struct bstp_config_unit	bif_config_bpdu;
-	uint8_t			bif_state;
-	uint8_t			bif_topology_change_acknowledge;
-	uint8_t			bif_config_pending;
-	uint8_t			bif_change_detection_enabled;
-	uint8_t			bif_priority;
-	struct ifnet	*bif_ifp;	/* member if */
-	uint32_t		bif_flags;	/* member if flags */
-	int				bif_mutecap;	/* member muted caps */
-	interface_filter_t 	bif_iff_ref;
-	struct bridge_softc *bif_sc;
-};
-
-/*
- * Bridge route node.
- */
-struct bridge_rtnode {
-	LIST_ENTRY(bridge_rtnode) brt_hash;	/* hash table linkage */
-	LIST_ENTRY(bridge_rtnode) brt_list;	/* list linkage */
-	struct ifnet		*brt_ifp;	/* destination if */
-	unsigned long		brt_expire;	/* expiration time */
-	uint8_t			brt_flags;	/* address flags */
-	uint8_t			brt_addr[ETHER_ADDR_LEN];
-	/* APPLE MODIFICATION <cbz@apple.com> - add the following elements:
-     brt_flags_ext, brt_ifp_proxysta */
-#define IFBAF_EXT_PROXYSTA  0x01
-	uint8_t			brt_flags_ext;	/* extended flags */
-	struct ifnet	*brt_ifp_proxysta;	/* proxy sta if */
-};
-
+#pragma pack()
 
 /*
- * Software state for each bridge.
+ * Bridge member operational STP params structure.
  */
-struct bridge_softc {
-	LIST_ENTRY(bridge_softc) sc_list;
-	struct ifnet	*sc_if;
-	uint64_t		sc_designated_root;
-	uint64_t		sc_bridge_id;
-	struct bridge_iflist	*sc_root_port;
-	uint32_t		sc_root_path_cost;
-	uint16_t		sc_max_age;
-	uint16_t		sc_hello_time;
-	uint16_t		sc_forward_delay;
-	uint16_t		sc_bridge_max_age;
-	uint16_t		sc_bridge_hello_time;
-	uint16_t		sc_bridge_forward_delay;
-	uint16_t		sc_topology_change_time;
-	uint16_t		sc_hold_time;
-	uint16_t		sc_bridge_priority;
-	uint8_t			sc_topology_change_detected;
-	uint8_t			sc_topology_change;
-	struct bridge_timer	sc_hello_timer;
-	struct bridge_timer	sc_topology_change_timer;
-	struct bridge_timer	sc_tcn_timer;
-	uint32_t		sc_brtmax;	/* max # of addresses */
-	uint32_t		sc_brtcnt;	/* cur. # of addresses */
-	/* APPLE MODIFICATION <cbz@apple.com> - add the following elements:
-     sc_brtmax_proxysta */
-	uint32_t		sc_brtmax_proxysta;	/* max # of proxy sta addresses */
-	uint32_t		sc_brttimeout;	/* rt timeout in seconds */
-	LIST_HEAD(, bridge_iflist) sc_iflist;	/* member interface list */
-	LIST_HEAD(, bridge_rtnode) *sc_rthash;	/* our forwarding table */
-	LIST_HEAD(, bridge_rtnode) sc_rtlist;	/* list version of above */
-	uint32_t		sc_rthash_key;	/* key for hash */
-	uint32_t		sc_filter_flags; /* ipf and flags */
-    
-	//(VL)
-	char			sc_if_xname[IFNAMSIZ];
-    bpf_packet_func	sc_bpf_input;
-    bpf_packet_func	sc_bpf_output;
-    u_int32_t		sc_flags;
-    lck_mtx_t		*sc_mtx;
+
+#pragma pack(4)
+
+struct ifbpstpreq {
+	uint8_t		ifbp_portno;		/* bp STP port number */
+	uint32_t	ifbp_fwd_trans;		/* bp STP fwd transitions */
+	uint32_t	ifbp_design_cost;	/* bp STP designated cost */
+	uint32_t	ifbp_design_port;	/* bp STP designated port */
+	uint64_t	ifbp_design_bridge;	/* bp STP designated bridge */
+	uint64_t	ifbp_design_root;	/* bp STP designated root */
 };
 
-#define SCF_DETACHING 0x1
+#pragma pack()
 
-extern const uint8_t bstp_etheraddr[];
+/*
+ * Bridge STP ports list structure.
+ */
+
+#pragma pack(4)
+
+#ifndef XNU_KERNEL_PRIVATE
+
+struct ifbpstpconf {
+	uint32_t	ifbpstp_len;	/* buffer size */
+	union {
+		caddr_t	ifbpstpu_buf;
+		struct ifbpstpreq *ifbpstpu_req;
+	} ifbpstp_ifbpstpu;
+#define	ifbpstp_buf	ifbpstp_ifbpstpu.ifbpstpu_buf
+#define	ifbpstp_req	ifbpstp_ifbpstpu.ifbpstpu_req
+};
+
+#else /* XNU_KERNEL_PRIVATE */
+
+struct ifbpstpconf32 {
+	uint32_t	ifbpstp_len;	/* buffer size */
+	union {
+		user32_addr_t	ifbpstpu_buf;
+		user32_addr_t 	ifbpstpu_req;
+#define	ifbpstp_buf	ifbpstp_ifbpstpu.ifbpstpu_buf
+#define	ifbpstp_req	ifbpstp_ifbpstpu.ifbpstpu_req
+	} ifbpstp_ifbpstpu;
+};
+
+struct ifbpstpconf64 {
+	uint32_t	ifbpstp_len;	/* buffer size */
+	union {
+		user64_addr_t	ifbpstpu_buf;
+		user64_addr_t	ifbpstpu_req;
+	} ifbpstp_ifbpstpu;
+};
+
+#endif /* XNU_KERNEL_PRIVATE */
+
+#pragma pack()
+
+
+#ifdef XNU_KERNEL_PRIVATE
 
 int	bridgeattach(int);
-void	bridge_enqueue(struct bridge_softc *, struct ifnet *, struct mbuf *);
-void	bridge_rtdelete(struct bridge_softc *, struct ifnet *, int);
 
-void	bstp_initialization(struct bridge_softc *);
-void	bstp_stop(struct bridge_softc *);
-struct mbuf *bstp_input(struct bridge_softc *, struct ifnet *, struct mbuf *);
-
-
-#endif /* KERNEL */
+#endif /* XNU_KERNEL_PRIVATE */
 #endif /* PRIVATE */
 #endif /* !_NET_IF_BRIDGEVAR_H_ */
-

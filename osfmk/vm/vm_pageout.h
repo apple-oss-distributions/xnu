@@ -81,6 +81,45 @@
 
 #include <vm/vm_options.h>
 
+#ifdef	MACH_KERNEL_PRIVATE
+#include <vm/vm_page.h>
+#endif
+
+#include <sys/kdebug.h>
+
+#if CONFIG_FREEZE
+extern boolean_t vm_freeze_enabled;
+#define VM_DYNAMIC_PAGING_ENABLED(port) ((vm_freeze_enabled == FALSE) && IP_VALID(port))
+#else
+#define VM_DYNAMIC_PAGING_ENABLED(port) IP_VALID(port)
+#endif
+
+
+extern int	vm_debug_events;
+
+#define VMF_CHECK_ZFDELAY	0x100
+#define VMF_COWDELAY		0x101
+#define VMF_ZFDELAY		0x102
+
+#define VM_PAGEOUT_SCAN		0x104
+#define VM_PAGEOUT_BALANCE	0x105
+#define VM_PAGEOUT_FREELIST	0x106
+#define VM_PAGEOUT_PURGEONE	0x107
+#define VM_PAGEOUT_CACHE_EVICT	0x108
+#define VM_PAGEOUT_THREAD_BLOCK	0x109
+
+#define VM_UPL_PAGE_WAIT	0x120
+#define VM_IOPL_PAGE_WAIT	0x121
+
+#define VM_DEBUG_EVENT(name, event, control, arg1, arg2, arg3, arg4)	\
+	MACRO_BEGIN						\
+	if (vm_debug_events) {					\
+		KERNEL_DEBUG_CONSTANT((MACHDBG_CODE(DBG_MACH_VM, event)) | control, arg1, arg2, arg3, arg4, 0); \
+	}							\
+	MACRO_END
+
+
+
 extern kern_return_t vm_map_create_upl(
 	vm_map_t		map,
 	vm_map_address_t	offset,
@@ -96,6 +135,25 @@ extern ppnum_t upl_get_highest_page(
 extern upl_size_t upl_get_size(
 	upl_t			upl);
 
+
+#ifndef	MACH_KERNEL_PRIVATE
+typedef struct vm_page	*vm_page_t;
+#endif
+
+extern void                vm_page_free_list(
+                            vm_page_t	mem,
+                            boolean_t	prepare_object);
+
+extern kern_return_t      vm_page_alloc_list(
+                            int         page_count,
+                            int			flags,
+                            vm_page_t * list);
+
+extern void               vm_page_set_offset(vm_page_t page, vm_object_offset_t offset);
+extern vm_object_offset_t vm_page_get_offset(vm_page_t page);
+extern ppnum_t            vm_page_get_phys_page(vm_page_t page);
+extern vm_page_t          vm_page_get_next(vm_page_t page);
+
 #ifdef	MACH_KERNEL_PRIVATE
 
 #include <vm/vm_page.h>
@@ -103,22 +161,6 @@ extern upl_size_t upl_get_size(
 extern unsigned int	vm_pageout_scan_event_counter;
 extern unsigned int	vm_zf_queue_count;
 
-
-#if defined(__ppc__) /* On ppc, vm statistics are still 32-bit */
-
-extern unsigned int	vm_zf_count;
-
-#define VM_ZF_COUNT_INCR()				\
-	MACRO_BEGIN					\
-	OSAddAtomic(1, (SInt32 *) &vm_zf_count);	\
-	MACRO_END					\
-
-#define VM_ZF_COUNT_DECR()				\
-	MACRO_BEGIN					\
-	OSAddAtomic(-1, (SInt32 *) &vm_zf_count);	\
-	MACRO_END					\
-
-#else /* !(defined(__ppc__)) */
 
 extern uint64_t	vm_zf_count;
 
@@ -132,7 +174,28 @@ extern uint64_t	vm_zf_count;
 	OSAddAtomic64(-1, (SInt64 *) &vm_zf_count);	\
 	MACRO_END					\
 
-#endif /* !(defined(__ppc__)) */
+/*
+ * must hold the page queues lock to
+ * manipulate this structure
+ */
+struct vm_pageout_queue {
+        queue_head_t	pgo_pending;	/* laundry pages to be processed by pager's iothread */
+        unsigned int	pgo_laundry;	/* current count of laundry pages on queue or in flight */
+        unsigned int	pgo_maxlaundry;
+
+        unsigned int	pgo_idle:1,	/* iothread is blocked waiting for work to do */
+	                pgo_busy:1,     /* iothread is currently processing request from pgo_pending */
+			pgo_throttled:1,/* vm_pageout_scan thread needs a wakeup when pgo_laundry drops */
+		        pgo_draining:1,
+			:0;
+};
+
+#define VM_PAGE_Q_THROTTLED(q)		\
+        ((q)->pgo_laundry >= (q)->pgo_maxlaundry)
+
+extern struct	vm_pageout_queue	vm_pageout_queue_internal;
+extern struct	vm_pageout_queue	vm_pageout_queue_external;
+
 
 /*
  *	Routines exported to Mach.
@@ -205,6 +268,7 @@ struct ucd {
 struct upl {
 	decl_lck_mtx_data(,	Lock)	/* Synchronization */
 	int		ref_count;
+	int		ext_ref_count;
 	int		flags;
 	vm_object_t	src_object; /* object derived from */
 	vm_object_offset_t offset;
@@ -243,6 +307,8 @@ struct upl {
 #define UPL_SHADOWED		0x1000
 #define UPL_KERNEL_OBJECT	0x2000
 #define UPL_VECTOR		0x4000
+#define UPL_SET_DIRTY		0x8000
+#define UPL_HAS_BUSY		0x10000
 
 /* flags for upl_create flags parameter */
 #define UPL_CREATE_EXTERNAL	0
@@ -295,10 +361,6 @@ extern kern_return_t vm_map_remove_upl(
 /* wired  page list structure */
 typedef uint32_t *wpl_array_t;
 
-extern void vm_page_free_list(
-	vm_page_t	mem,
-	boolean_t	prepare_object);
-	 
 extern void vm_page_free_reserve(int pages);
 
 extern void vm_pageout_throttle_down(vm_page_t page);
@@ -341,6 +403,9 @@ extern void vm_pageout_queue_steal(
 	vm_page_t page, 
 	boolean_t queues_locked);
 	
+extern boolean_t vm_page_is_slideable(vm_page_t m);
+
+extern kern_return_t vm_page_slide(vm_page_t page, vm_map_offset_t kernel_mapping_offset);
 #endif  /* MACH_KERNEL_PRIVATE */
 
 #if UPL_DEBUG
@@ -371,7 +436,7 @@ extern kern_return_t mach_vm_pressure_monitor(
 
 extern kern_return_t
 vm_set_buffer_cleanup_callout(
-	boolean_t	(*func)(void));
+	boolean_t	(*func)(int));
 
 struct vm_page_stats_reusable {
 	SInt32		reusable_count;
@@ -393,6 +458,8 @@ struct vm_page_stats_reusable {
 };
 extern struct vm_page_stats_reusable vm_page_stats_reusable;
 	
+extern int hibernate_flush_memory(void);
+
 #endif	/* KERNEL_PRIVATE */
 
 #endif	/* _VM_VM_PAGEOUT_H_ */

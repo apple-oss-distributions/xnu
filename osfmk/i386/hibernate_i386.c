@@ -44,6 +44,8 @@
 #include <vm/vm_page.h>
 #include <i386/i386_lowmem.h>
 
+extern ppnum_t max_ppnum;
+
 #define MAX_BANKS	32
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
@@ -74,8 +76,13 @@ hibernate_page_list_allocate(void)
     {
 	base = (ppnum_t) (mptr->PhysicalStart >> I386_PGSHIFT);
 	num = (ppnum_t) mptr->NumberOfPages;
+
+	if (base > max_ppnum)
+		continue;
+	if ((base + num - 1) > max_ppnum)
+		num = max_ppnum - base + 1;
 	if (!num)
-	    continue;
+		continue;
 
 	switch (mptr->Type)
 	{
@@ -85,7 +92,6 @@ hibernate_page_list_allocate(void)
 	    case kEfiBootServicesCode:
 	    case kEfiBootServicesData:
 	    case kEfiConventionalMemory:
-	    case kEfiACPIReclaimMemory:
 	    case kEfiACPIMemoryNVS:
 	    case kEfiPalCode:
 
@@ -119,6 +125,8 @@ hibernate_page_list_allocate(void)
 	    // runtime services will be restarted, so no save
 	    case kEfiRuntimeServicesCode:
 	    case kEfiRuntimeServicesData:
+	    // contents are volatile once the platform expert starts
+	    case kEfiACPIReclaimMemory:
 	    // non dram
 	    case kEfiReservedMemoryType:
 	    case kEfiUnusableMemory:
@@ -211,11 +219,9 @@ hibernate_processor_setup(IOHibernateImageHeader * header)
 
     header->runtimePages     = args->efiRuntimeServicesPageStart;
     header->runtimePageCount = args->efiRuntimeServicesPageCount;
-    if (args->Version == kBootArgsVersion1 && args->Revision >= kBootArgsRevision1_5) {
-        header->runtimeVirtualPages = args->efiRuntimeServicesVirtualPageStart;
-    } else {
-        header->runtimeVirtualPages = 0;
-    }
+    header->runtimeVirtualPages = args->efiRuntimeServicesVirtualPageStart;
+    header->performanceDataStart = args->performanceDataStart;
+    header->performanceDataSize = args->performanceDataSize;
 
     return (KERN_SUCCESS);
 }

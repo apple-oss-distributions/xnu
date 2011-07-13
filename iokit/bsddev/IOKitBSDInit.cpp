@@ -28,6 +28,7 @@
 #include <IOKit/IOBSD.h>
 #include <IOKit/IOLib.h>
 #include <IOKit/IOService.h>
+#include <IOKit/IOCatalogue.h>
 #include <IOKit/IODeviceTreeSupport.h>
 #include <IOKit/IOKitKeys.h>
 #include <IOKit/IOPlatformExpert.h>
@@ -45,9 +46,10 @@ extern "C" {
 #define ROOTDEVICETIMEOUT       60
 #endif
 
-extern dev_t mdevadd(int devid, ppnum_t base, unsigned int size, int phys);
+extern dev_t mdevadd(int devid, uint64_t base, unsigned int size, int phys);
 extern dev_t mdevlookup(int devid);
 extern void mdevremoveall(void);
+extern void di_root_ramfile(IORegistryEntry * entry);
 
 kern_return_t
 IOKitBSDInit( void )
@@ -55,6 +57,69 @@ IOKitBSDInit( void )
     IOService::publishResource("IOBSD");
 
     return( kIOReturnSuccess );
+}
+
+void
+IOServicePublishResource( const char * property, boolean_t value )
+{
+    if ( value)
+        IOService::publishResource( property, kOSBooleanTrue );
+    else
+        IOService::getResourceService()->removeProperty( property );
+}
+
+boolean_t
+IOServiceWaitForMatchingResource( const char * property, uint64_t timeout )
+{
+    OSDictionary *	dict = 0;
+    IOService *         match = 0;
+    boolean_t		found = false;
+    
+    do {
+        
+        dict = IOService::resourceMatching( property );
+        if( !dict)
+            continue;
+        match = IOService::waitForMatchingService( dict, timeout );
+        if ( match)
+            found = true;
+        
+    } while( false );
+    
+    if( dict)
+        dict->release();
+    if( match)
+        match->release();
+    
+    return( found );
+}
+
+boolean_t
+IOCatalogueMatchingDriversPresent( const char * property )
+{
+    OSDictionary *	dict = 0;
+    OSOrderedSet *	set = 0;
+    SInt32		generationCount = 0;
+    boolean_t		found = false;
+    
+    do {
+        
+        dict = OSDictionary::withCapacity(1);
+        if( !dict)
+            continue;
+        dict->setObject( property, kOSBooleanTrue );
+        set = gIOCatalogue->findDrivers( dict, &generationCount );
+        if ( set && (set->getCount() > 0))
+            found = true;
+        
+    } while( false );
+    
+    if( dict)
+        dict->release();
+    if( set)
+        set->release();
+    
+    return( found );
 }
 
 OSDictionary * IOBSDNameMatching( const char * name )
@@ -478,7 +543,7 @@ kern_return_t IOFindBSDRoot( char * rootName, unsigned int rootNameSize,
     UInt32		flags = 0;
     int			mnr, mjr;
     bool		findHFSChild = false;
-    char *              mediaProperty = 0;
+    const char *        mediaProperty = 0;
     char *		rdBootVar;
     enum {		kMaxPathBuf = 512, kMaxBootVar = 128 };
     char *		str;
@@ -507,6 +572,7 @@ kern_return_t IOFindBSDRoot( char * rootName, unsigned int rootNameSize,
 
     do {
 	if( (regEntry = IORegistryEntry::fromPath( "/chosen", gIODTPlane ))) {
+	    di_root_ramfile(regEntry);
             data = OSDynamicCast(OSData, regEntry->getProperty( "root-matching" ));
             if (data) {
                matching = OSDynamicCast(OSDictionary, OSUnserializeXML((char *)data->getBytesNoCopy()));
@@ -853,7 +919,7 @@ kern_return_t IOBSDGetPlatformUUID( uuid_t uuid, mach_timespec_t timeout )
     IOService * resources;
     OSString *  string;
 
-    resources = IOService::waitForService( IOService::resourceMatching( kIOPlatformUUIDKey ), &timeout );
+    resources = IOService::waitForService( IOService::resourceMatching( kIOPlatformUUIDKey ), ( timeout.tv_sec || timeout.tv_nsec ) ? &timeout : 0 );
     if ( resources == 0 ) return KERN_OPERATION_TIMED_OUT;
 
     string = ( OSString * ) IOService::getPlatform( )->getProvider( )->getProperty( kIOPlatformUUIDKey );

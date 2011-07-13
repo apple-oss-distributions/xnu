@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2007 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2010 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -43,6 +43,10 @@
 #include <sys/namei.h>
 #include <sys/ubc_internal.h>
 #include <sys/malloc.h>
+#include <sys/user.h>
+#if CONFIG_PROTECT
+#include <sys/cprotect.h>
+#endif
 
 #include <default_pager/default_pager_types.h>
 #include <default_pager/default_pager_object.h>
@@ -205,6 +209,9 @@ macx_triggers(
 	return mach_macx_triggers(args);
 }
 
+
+extern boolean_t dp_isssd;
+
 /*
  *	Routine:	macx_swapon
  *	Function:
@@ -226,6 +233,8 @@ macx_swapon(
 	off_t			file_size;
 	vfs_context_t		ctx = vfs_context_current();
 	struct proc		*p =  current_proc();
+	int			dp_cluster_size;
+
 
 	AUDIT_MACH_SYSCALL_ENTER(AUE_SWAPON);
 	AUDIT_ARG(value32, args->priority);
@@ -236,15 +245,10 @@ macx_swapon(
 	if ((error = suser(kauth_cred_get(), 0)))
 		goto swapon_bailout;
 
-	if(default_pager_init_flag == 0) {
-		start_def_pager(NULL);
-		default_pager_init_flag = 1;
-	}
-
 	/*
 	 * Get a vnode for the paging area.
 	 */
-	NDINIT(ndp, LOOKUP, FOLLOW | LOCKLEAF | AUDITVNPATH1,
+	NDINIT(ndp, LOOKUP, OP_LOOKUP, FOLLOW | LOCKLEAF | AUDITVNPATH1,
 	       ((IS_64BIT_PROCESS(p)) ? UIO_USERSPACE64 : UIO_USERSPACE32),
 	       (user_addr_t) args->filename, ctx);
 
@@ -273,6 +277,23 @@ macx_swapon(
 	if ((file_size < (off_t)size) && ((error = vnode_setsize(vp, (off_t)size, 0, ctx)) != 0))
 		goto swapon_bailout;
 
+#if CONFIG_PROTECT
+	{
+		void *cnode = NULL;
+		/* initialize content protection keys manually */
+		if ((cnode = cp_get_protected_cnode(vp)) != 0) {
+			if ((error = cp_handle_vnop(cnode, CP_WRITE_ACCESS)) != 0)
+				goto swapon_bailout;
+		}
+	}
+#endif
+
+
+	if (default_pager_init_flag == 0) {
+		start_def_pager(NULL);
+		default_pager_init_flag = 1;
+	}
+
 	/* add new backing store to list */
 	i = 0;
 	while(bs_port_table[i].vp != 0) {
@@ -300,9 +321,26 @@ macx_swapon(
 	   goto swapon_bailout;
 	}
 
+#if CONFIG_EMBEDDED
+	dp_cluster_size = 1 * PAGE_SIZE;
+#else
+	if ((dp_isssd = vnode_pager_isSSD(vp)) == TRUE) {
+		/*
+		 * keep the cluster size small since the
+		 * seek cost is effectively 0 which means
+		 * we don't care much about fragmentation
+		 */
+		dp_cluster_size = 2 * PAGE_SIZE;
+	} else {
+		/*
+		 * use the default cluster size
+		 */
+		dp_cluster_size = 0;
+	}
+#endif
 	kr = default_pager_backing_store_create(default_pager, 
 					-1, /* default priority */
-					0, /* default cluster size */
+					dp_cluster_size,
 					&backing_store);
 	memory_object_default_deallocate(default_pager);
 
@@ -358,6 +396,12 @@ swapon_bailout:
 	}
 	(void) thread_funnel_set(kernel_flock, FALSE);
 	AUDIT_MACH_SYSCALL_EXIT(error);
+
+	if (error)
+		printf("macx_swapon FAILED - %d\n", error);
+	else
+		printf("macx_swapon SUCCESS\n");
+
 	return(error);
 }
 
@@ -381,6 +425,8 @@ macx_swapoff(
 	int			error;
 	boolean_t		funnel_state;
 	vfs_context_t ctx = vfs_context_current();
+	struct uthread	*ut;
+	int			orig_iopol_disk;
 
 	AUDIT_MACH_SYSCALL_ENTER(AUE_SWAPOFF);
 
@@ -394,7 +440,7 @@ macx_swapoff(
 	/*
 	 * Get the vnode for the paging area.
 	 */
-	NDINIT(ndp, LOOKUP, FOLLOW | LOCKLEAF | AUDITVNPATH1,
+	NDINIT(ndp, LOOKUP, OP_LOOKUP, FOLLOW | LOCKLEAF | AUDITVNPATH1,
 	       ((IS_64BIT_PROCESS(p)) ? UIO_USERSPACE64 : UIO_USERSPACE32),
 	       (user_addr_t) args->filename, ctx);
 
@@ -426,7 +472,24 @@ macx_swapoff(
 	}
 	backing_store = (mach_port_t)bs_port_table[i].bs;
 
+	ut = get_bsdthread_info(current_thread());
+
+#if !CONFIG_EMBEDDED
+	orig_iopol_disk = proc_get_thread_selfdiskacc();
+	proc_apply_thread_selfdiskacc(IOPOL_THROTTLE);
+#else /* !CONFIG_EMBEDDED */
+	orig_iopol_disk = ut->uu_iopol_disk;
+	ut->uu_iopol_disk = IOPOL_THROTTLE;
+#endif /* !CONFIG_EMBEDDED */
+
 	kr = default_pager_backing_store_delete(backing_store);
+
+#if !CONFIG_EMBEDDED
+	proc_apply_thread_selfdiskacc(orig_iopol_disk);
+#else /* !CONFIG_EMBEDDED */
+	ut->uu_iopol_disk = orig_iopol_disk;
+#endif /* !CONFIG_EMBEDDED */
+
 	switch (kr) {
 		case KERN_SUCCESS:
 			error = 0;
@@ -455,6 +518,12 @@ swapoff_bailout:
 
 	(void) thread_funnel_set(kernel_flock, FALSE);
 	AUDIT_MACH_SYSCALL_EXIT(error);
+
+	if (error)
+		printf("macx_swapoff FAILED - %d\n", error);
+	else
+		printf("macx_swapoff SUCCESS\n");
+
 	return(error);
 }
 

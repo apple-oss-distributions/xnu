@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1998-2000 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 1998-2000, 2009-2010 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -25,17 +25,6 @@
  * 
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
-/*
- * Copyright (c) 1999 Apple Computer, Inc.  All rights reserved. 
- *
- * IOTimerEventSource.cpp
- *
- * HISTORY
- * 2-Feb-1999		Joe Liu (jliu) created.
- * 1999-10-14		Godfrey van der Linden(gvdl)
- *		Revamped to use thread_call APIs
- *
- */
 
 #include <sys/cdefs.h>
 
@@ -51,6 +40,7 @@ __END_DECLS
 #include <IOKit/IOWorkLoop.h>
 
 #include <IOKit/IOTimeStamp.h>
+#include <IOKit/IOKitDebug.h>
 
 #define super IOEventSource
 OSDefineMetaClassAndStructors(IOTimerEventSource, IOEventSource)
@@ -63,12 +53,41 @@ OSMetaClassDefineReservedUnused(IOTimerEventSource, 5);
 OSMetaClassDefineReservedUnused(IOTimerEventSource, 6);
 OSMetaClassDefineReservedUnused(IOTimerEventSource, 7);
 
+#if IOKITSTATS
+
+#define IOStatisticsInitializeCounter() \
+do { \
+	IOStatistics::setCounterType(IOEventSource::reserved->counter, kIOStatisticsTimerEventSourceCounter); \
+} while (0)
+
+#define IOStatisticsOpenGate() \
+do { \
+	IOStatistics::countOpenGate(me->IOEventSource::reserved->counter); \
+} while (0)
+
+#define IOStatisticsCloseGate() \
+do { \
+	IOStatistics::countCloseGate(me->IOEventSource::reserved->counter); \
+} while (0)
+
+#define IOStatisticsTimeout() \
+do { \
+	IOStatistics::countTimerTimeout(me->IOEventSource::reserved->counter); \
+} while (0)
+
+#else
+
+#define IOStatisticsInitializeCounter()
+#define IOStatisticsOpenGate()
+#define IOStatisticsCloseGate()
+#define IOStatisticsTimeout()
+
+#endif /* IOKITSTATS */
+
 // 
 // reserved != 0 means IOTimerEventSource::timeoutAndRelease is being used,
 // not a subclassed implementation. 
 //
-
-bool IOTimerEventSource::checkForWork() { return false; }
 
 // Timeout handler function. This function is called by the kernel when
 // the timeout interval expires.
@@ -76,6 +95,8 @@ bool IOTimerEventSource::checkForWork() { return false; }
 void IOTimerEventSource::timeout(void *self)
 {
     IOTimerEventSource *me = (IOTimerEventSource *) self;
+
+    IOStatisticsTimeout();
 
     if (me->enabled && me->action)
     {
@@ -85,13 +106,23 @@ void IOTimerEventSource::timeout(void *self)
         {
             Action doit;
             wl->closeGate();
+            IOStatisticsCloseGate();
             doit = (Action) me->action;
             if (doit && me->enabled && AbsoluteTime_to_scalar(&me->abstime))
             {
-                IOTimeStampConstant(IODBG_TIMES(IOTIMES_ACTION),
-                                    (uintptr_t) doit, (uintptr_t) me->owner);
+            	bool    trace = (gIOKitTrace & kIOTraceTimers) ? true : false;
+            	
+            	if (trace)
+                	IOTimeStampStartConstant(IODBG_TIMES(IOTIMES_ACTION),
+											 (uintptr_t) doit, (uintptr_t) me->owner);
+				
                 (*doit)(me->owner, me);
+                
+				if (trace)
+                	IOTimeStampEndConstant(IODBG_TIMES(IOTIMES_ACTION),
+										   (uintptr_t) doit, (uintptr_t) me->owner);
             }
+            IOStatisticsOpenGate();
             wl->openGate();
         }
     }
@@ -104,6 +135,8 @@ void IOTimerEventSource::timeoutAndRelease(void * self, void * c)
 	   must be cast to "long" before, in order to tell GCC we're not truncating a pointer. */
 	SInt32 count = (SInt32) (long) c;
 
+    IOStatisticsTimeout();
+	
     if (me->enabled && me->action)
     {
         IOWorkLoop *
@@ -112,13 +145,23 @@ void IOTimerEventSource::timeoutAndRelease(void * self, void * c)
         {
             Action doit;
             wl->closeGate();
+            IOStatisticsCloseGate();
             doit = (Action) me->action;
             if (doit && (me->reserved->calloutGeneration == count))
             {
-                IOTimeStampConstant(IODBG_TIMES(IOTIMES_ACTION),
-                                    (uintptr_t) doit, (uintptr_t) me->owner);
+            	bool    trace = (gIOKitTrace & kIOTraceTimers) ? true : false;
+            	
+            	if (trace)
+                	IOTimeStampStartConstant(IODBG_TIMES(IOTIMES_ACTION),
+											 (uintptr_t) doit, (uintptr_t) me->owner);
+				
                 (*doit)(me->owner, me);
+                
+				if (trace)
+                	IOTimeStampEndConstant(IODBG_TIMES(IOTIMES_ACTION),
+										   (uintptr_t) doit, (uintptr_t) me->owner);
             }
+            IOStatisticsOpenGate();
             wl->openGate();
         }
     }
@@ -144,6 +187,8 @@ bool IOTimerEventSource::init(OSObject *inOwner, Action inAction)
     setTimeoutFunc();
     if (!calloutEntry)
         return false;
+
+    IOStatisticsInitializeCounter();
 
     return true;
 }

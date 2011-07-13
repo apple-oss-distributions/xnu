@@ -43,8 +43,10 @@
 
 #include <kern/lock.h>
 #include <kern/queue.h>
-#include <machine/cpu_number.h>
+#include <mach/branch_predicates.h>
 
+#include <machine/cpu_number.h>
+#include <machine/machine_routines.h> /* machine_timeout_suspended() */
 /*
  *	wait_queue_t
  *	This is the definition of the common event wait queue
@@ -152,7 +154,7 @@ typedef struct _wait_queue_link {
 #define wait_queue_lock_try(wq) (hw_lock_try(&(wq)->wq_interlock))
 
 /* For x86, the hardware timeout is in TSC units. */
-#if defined(i386)
+#if defined(i386) || defined(x86_64)
 #define	hwLockTimeOut LockTimeOutTSC
 #else
 #define	hwLockTimeOut LockTimeOut
@@ -165,11 +167,25 @@ typedef struct _wait_queue_link {
  */
 
 static inline void wait_queue_lock(wait_queue_t wq) {
-	if (!hw_lock_to(&(wq)->wq_interlock, hwLockTimeOut * 2))
-		panic("wait queue deadlock - wq=%p, cpu=%d\n", wq, cpu_number(
-));
+	if (__improbable(hw_lock_to(&(wq)->wq_interlock, hwLockTimeOut * 2) == 0)) {
+		boolean_t wql_acquired = FALSE;
+
+		while (machine_timeout_suspended()) {
+#if	defined(__i386__) || defined(__x86_64__)
+/*
+ * i386/x86_64 return with preemption disabled on a timeout for
+ * diagnostic purposes.
+ */
+			mp_enable_preemption();
+#endif
+			if ((wql_acquired = hw_lock_to(&(wq)->wq_interlock, hwLockTimeOut * 2)))
+				break;
+		}
+		if (wql_acquired == FALSE)
+			panic("wait queue deadlock - wq=%p, cpu=%d\n", wq, cpu_number());
+	}
 }
- 
+
 static inline void wait_queue_unlock(wait_queue_t wq) {
 	assert(wait_queue_held(wq));
 	hw_lock_unlock(&(wq)->wq_interlock);
@@ -314,6 +330,15 @@ extern kern_return_t wait_queue_unlink_all(
 extern kern_return_t wait_queue_set_unlink_all(
 			wait_queue_set_t set_queue);
 
+#ifdef XNU_KERNEL_PRIVATE
+extern kern_return_t wait_queue_set_unlink_one(
+			wait_queue_set_t set_queue,
+			wait_queue_link_t link);
+
+extern wait_queue_link_t wait_queue_link_allocate(void);
+
+#endif /* XNU_KERNEL_PRIVATE */
+
 /* legacy API */
 kern_return_t wait_queue_sub_init(
 			wait_queue_set_t set_queue,
@@ -373,7 +398,8 @@ extern wait_result_t wait_queue_assert_wait(
 extern kern_return_t wait_queue_wakeup_one(
 			wait_queue_t wait_queue,
 			event_t wake_event,
-			wait_result_t result);
+			wait_result_t result,
+	                int priority);
 
 /* wakeup all the threads waiting on <wait_queue,event> pair */
 extern kern_return_t wait_queue_wakeup_all(

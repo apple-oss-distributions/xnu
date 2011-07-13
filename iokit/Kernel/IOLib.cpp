@@ -55,6 +55,24 @@
 #include <sys/sysctl.h>
 #endif
 
+#include "libkern/OSAtomic.h"
+#include <libkern/c++/OSKext.h>
+#include <IOKit/IOStatisticsPrivate.h>
+#include <sys/msgbuf.h>
+
+#if IOKITSTATS
+
+#define IOStatisticsAlloc(type, size) \
+do { \
+	IOStatistics::countAlloc(type, size); \
+} while (0)
+
+#else
+
+#define IOStatisticsAlloc(type, size)
+
+#endif /* IOKITSTATS */
+
 extern "C"
 {
 
@@ -63,7 +81,7 @@ mach_timespec_t IOZeroTvalspec = { 0, 0 };
 
 extern ppnum_t pmap_find_phys(pmap_t pmap, addr64_t va);
 
-int
+extern int
 __doprnt(
 	const char		*fmt,
 	va_list			argp,
@@ -71,7 +89,9 @@ __doprnt(
 	void                    *arg,
 	int			radix);
 
-extern void conslog_putc(char);
+extern void cons_putc_locked(char);
+extern void bsd_log_lock(void);
+extern void bsd_log_unlock(void);
 
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
@@ -178,11 +198,13 @@ void * IOMalloc(vm_size_t size)
     void * address;
 
     address = (void *)kalloc(size);
+    if ( address ) {
 #if IOALLOCDEBUG
-    if (address) {
 		debug_iomalloc_size += size;
-	}
 #endif
+		IOStatisticsAlloc(kIOStatisticsMalloc, size);
+    }
+
     return address;
 }
 
@@ -193,6 +215,7 @@ void IOFree(void * address, vm_size_t size)
 #if IOALLOCDEBUG
 		debug_iomalloc_size -= size;
 #endif
+		IOStatisticsAlloc(kIOStatisticsFree, size);
     }
 }
 
@@ -250,11 +273,12 @@ void * IOMallocAligned(vm_size_t size, vm_size_t alignment)
 
     assert(0 == (address & alignMask));
 
-#if IOALLOCDEBUG
     if( address) {
+#if IOALLOCDEBUG
 		debug_iomalloc_size += size;
-	}
 #endif
+    	IOStatisticsAlloc(kIOStatisticsMallocAligned, size);
+	}
 
     return (void *) address;
 }
@@ -289,12 +313,14 @@ void IOFreeAligned(void * address, vm_size_t size)
 #if IOALLOCDEBUG
     debug_iomalloc_size -= size;
 #endif
+
+    IOStatisticsAlloc(kIOStatisticsFreeAligned, size);
 }
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
 void
-IOKernelFreeContiguous(mach_vm_address_t address, mach_vm_size_t size)
+IOKernelFreePhysical(mach_vm_address_t address, mach_vm_size_t size)
 {
     mach_vm_address_t allocationAddress;
     mach_vm_size_t    adjustedSize;
@@ -324,8 +350,8 @@ IOKernelFreeContiguous(mach_vm_address_t address, mach_vm_size_t size)
 }
 
 mach_vm_address_t
-IOKernelAllocateContiguous(mach_vm_size_t size, mach_vm_address_t maxPhys, 
-			    mach_vm_size_t alignment)
+IOKernelAllocateWithPhysicalRestrict(mach_vm_size_t size, mach_vm_address_t maxPhys, 
+			                mach_vm_size_t alignment, bool contiguous)
 {
     kern_return_t	kr;
     mach_vm_address_t	address;
@@ -341,11 +367,25 @@ IOKernelAllocateContiguous(mach_vm_size_t size, mach_vm_address_t maxPhys,
     alignMask = alignment - 1;
     adjustedSize = (2 * size) + sizeof(mach_vm_size_t) + sizeof(mach_vm_address_t);
 
-    if (adjustedSize >= page_size)
+    contiguous = (contiguous && (adjustedSize > page_size))
+                   || (alignment > page_size);
+
+    if (contiguous || maxPhys)
     {
+        int options = 0;
 	vm_offset_t virt;
+
 	adjustedSize = size;
-	if ((adjustedSize > page_size) || (alignment > page_size) || maxPhys)
+        contiguous = (contiguous && (adjustedSize > page_size))
+                           || (alignment > page_size);
+
+        if ((!contiguous) && (maxPhys <= 0xFFFFFFFF))
+        {
+            maxPhys = 0;
+            options |= KMA_LOMEM;
+        }
+
+	if (contiguous || maxPhys)
 	{
 	    kr = kmem_alloc_contig(kernel_map, &virt, size,
 				   alignMask, atop(maxPhys), atop(alignMask), 0);
@@ -353,7 +393,7 @@ IOKernelAllocateContiguous(mach_vm_size_t size, mach_vm_address_t maxPhys,
 	else
 	{
 	    kr = kernel_memory_allocate(kernel_map, &virt,
-					size, alignMask, 0);
+					size, alignMask, options);
 	}
 	if (KERN_SUCCESS == kr)
 	    address = virt;
@@ -391,6 +431,7 @@ IOKernelAllocateContiguous(mach_vm_size_t size, mach_vm_address_t maxPhys,
     return (address);
 }
 
+
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
 struct _IOMallocContiguousEntry
@@ -414,7 +455,7 @@ void * IOMallocContiguous(vm_size_t size, vm_size_t alignment,
     /* Do we want a physical address? */
     if (!physicalAddress)
     {
-	address = IOKernelAllocateContiguous(size, 0 /*maxPhys*/, alignment);
+	address = IOKernelAllocateWithPhysicalRestrict(size, 0 /*maxPhys*/, alignment, true);
     }
     else do
     {
@@ -448,6 +489,10 @@ void * IOMallocContiguous(vm_size_t size, vm_size_t alignment,
 	*physicalAddress = bmd->getPhysicalAddress();
     }
     while (false);
+
+	if (address) {
+	    IOStatisticsAlloc(kIOStatisticsMallocContiguous, size);
+    }
 
     return (void *) address;
 }
@@ -484,8 +529,10 @@ void IOFreeContiguous(void * _address, vm_size_t size)
     }
     else
     {
-	IOKernelFreeContiguous((mach_vm_address_t) address, size);
+	IOKernelFreePhysical((mach_vm_address_t) address, size);
     }
+
+    IOStatisticsAlloc(kIOStatisticsFreeContiguous, size);
 }
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
@@ -589,10 +636,12 @@ void * IOMallocPageable(vm_size_t size, vm_size_t alignment)
     if( kIOReturnSuccess != kr)
         ref.address = 0;
 
+	if( ref.address) {
 #if IOALLOCDEBUG
-    if( ref.address)
        debug_iomallocpageable_size += round_page(size);
 #endif
+       IOStatisticsAlloc(kIOStatisticsMallocPageable, size);
+	}
 
     return( (void *) ref.address );
 }
@@ -626,6 +675,8 @@ void IOFreePageable(void * address, vm_size_t size)
 #if IOALLOCDEBUG
     debug_iomallocpageable_size -= round_page(size);
 #endif
+
+    IOStatisticsAlloc(kIOStatisticsFreePageable, size);
 }
     
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
@@ -713,23 +764,36 @@ void IOPause(unsigned nanoseconds)
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
-static void _iolog_putc(int ch, void *arg __unused)
+static void _iolog_consputc(int ch, void *arg __unused)
 {
-	conslog_putc(ch);
+    cons_putc_locked(ch);
+}
+
+static void _iolog_logputc(int ch, void *arg __unused)
+{
+    log_putc_locked(ch);
 }
 
 void IOLog(const char *format, ...)
 {
-	va_list ap;
+    va_list ap;
 
-	va_start(ap, format);
-	__doprnt(format, ap, _iolog_putc, NULL, 16);
-	va_end(ap);
+    va_start(ap, format);
+    IOLogv(format, ap);
+    va_end(ap);
 }
 
 void IOLogv(const char *format, va_list ap)
 {
-	__doprnt(format, ap, _iolog_putc, NULL, 16);
+    va_list ap2;
+
+    va_copy(ap2, ap);
+
+    bsd_log_lock();
+    __doprnt(format, ap, _iolog_logputc, NULL, 16);
+    bsd_log_unlock();
+
+    __doprnt(format, ap2, _iolog_consputc, NULL, 16);
 }
 
 #if !__LP64__

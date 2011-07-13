@@ -18,7 +18,9 @@ EXPORT_ONLY_FILES = \
 	cpu_data.h \
 	debug.h \
 	etimer.h \
+	extmod_statistics.h \
 	ipc_mig.h \
+	ipc_misc.h \
 	kalloc.h \
 	kext_alloc.h \
 	kern_types.h \

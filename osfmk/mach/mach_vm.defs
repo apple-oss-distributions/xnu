@@ -291,7 +291,11 @@ routine vm_behavior_set(
 #if !defined(_MACH_VM_PUBLISH_AS_LOCAL_)
 routine mach_vm_map(
 #else
+#if defined(__arm__) && !LIBSYSCALL_INTERFACE
+routine _vm_map_arm(
+#else
 routine vm_map(
+#endif
 #endif
 		target_task	: vm_task_entry_t;
 	inout	address		: mach_vm_address_t;
@@ -333,7 +337,7 @@ routine vm_remap(
 	inout	target_address	: mach_vm_address_t;
 		size		: mach_vm_size_t;
 		mask		: mach_vm_offset_t;
-		anywhere	: boolean_t;
+		flags		: int;
 		src_task	: vm_map_t;
 		src_address	: mach_vm_address_t;
 		copy		: boolean_t;

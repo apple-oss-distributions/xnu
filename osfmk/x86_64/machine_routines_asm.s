@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2008 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2010 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -27,7 +27,7 @@
  */
  
 #include <i386/asm.h>
-#include <i386/rtclock.h>
+#include <i386/rtclock_asm.h>
 #include <i386/proc_reg.h>
 #include <i386/eflags.h>
        
@@ -85,27 +85,20 @@ ENTRY(tmrCvt)
 	shrdq   $32,%rdx,%rax			/* %rdx:%rax >>= 32 */
 	ret
 
-
-/*
- * void _rtc_nanotime_store(
- *		uint64_t        tsc,		// %rdi
- *		uint64_t        nsec,		// %rsi
- *		uint32_t        scale,		// %rdx
- *		uint32_t        shift,		// %rcx
- *		rtc_nanotime_t  *dst);		// %r8
+ /*
+ * void _rtc_nanotime_adjust(
+ *		uint64_t        tsc_base_delta,	// %rdi
+ *		rtc_nanotime_t  *dst);		// %rsi
  */
-ENTRY(_rtc_nanotime_store)
-	movl	RNT_GENERATION(%r8),%eax	/* get current generation */
-	movl	$0,RNT_GENERATION(%r8)		/* flag data as being updated */
-	movq	%rdi,RNT_TSC_BASE(%r8)
-	movq	%rsi,RNT_NS_BASE(%r8)
-	movl	%edx,RNT_SCALE(%r8)
-	movl	%ecx,RNT_SHIFT(%r8)
+ENTRY(_rtc_nanotime_adjust)
+	movl	RNT_GENERATION(%rsi),%eax	/* get current generation */
+	movl	$0,RNT_GENERATION(%rsi)		/* flag data as being updated */
+	addq	%rdi,RNT_TSC_BASE(%rsi)
 
 	incl	%eax				/* next generation */
 	jnz	1f
 	incl	%eax				/* skip 0, which is a flag */
-1:	movl	%eax,RNT_GENERATION(%r8)	/* update generation */
+1:	movl	%eax,RNT_GENERATION(%rsi)	/* update generation */
 
 	ret
 
@@ -153,7 +146,7 @@ ENTRY(_rtc_nanotime_read)
 	/*
 	 * Processor whose TSC frequency is faster than SLOW_TSC_THRESHOLD
 	 */
-	RTC_NANOTIME_READ_FAST()
+	PAL_RTC_NANOTIME_READ_FAST()
 
 	ret
 
@@ -168,4 +161,15 @@ Lslow:
 	hlt
 	.data
 1: 	String	"_rtc_nanotime_read() - slow algorithm not supported"
+
+
+Entry(call_continuation)
+	movq	%rdi,%rcx			/* get continuation */
+	movq	%rsi,%rdi			/* continuation param */
+	movq	%rdx,%rsi			/* wait result */
+	movq	%gs:CPU_KERNEL_STACK,%rsp	/* set the stack */
+	xorq	%rbp,%rbp			/* zero frame pointer */
+	call	*%rcx				/* call continuation */
+	movq	%gs:CPU_ACTIVE_THREAD,%rdi
+	call	EXT(thread_terminate)
 

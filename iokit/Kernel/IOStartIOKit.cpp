@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1998-2008 Apple Inc. All rights reserved.
+ * Copyright (c) 1998-2010 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -25,12 +25,6 @@
  * 
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
-/*
- * Copyright (c) 1998,1999 Apple Inc.  All rights reserved. 
- *
- * HISTORY
- *
- */
 
 #include <libkern/c++/OSUnserialize.h>
 #include <libkern/c++/OSKext.h>
@@ -44,7 +38,10 @@
 #include <IOKit/IOLib.h>
 #include <IOKit/IOKitKeys.h>
 #include <IOKit/IOKitDebug.h>
+#include <IOKit/pwr_mgt/RootDomain.h>
 #include <IOKit/pwr_mgt/IOPMinformeeList.h>
+#include <IOKit/IOStatisticsPrivate.h>
+#include <IOKit/IOKitKeysPrivate.h>
 
 #include <IOKit/assert.h>
 
@@ -67,7 +64,7 @@ void IOKitInitializeTime( void )
 	t.tv_nsec = 0;
 	IOService::waitForService(
 		IOService::resourceMatching("IORTC"), &t );
-#ifdef ppc
+#if defined(__i386__) || defined(__x86_64__)
 	IOService::waitForService(
 		IOService::resourceMatching("IONVRAM"), &t );
 #endif
@@ -85,6 +82,8 @@ void IOKitResetTime( void )
     clock_get_calendar_microtime(&secs, &microsecs);
     gIOLastWakeTime.tv_sec  = secs;
     gIOLastWakeTime.tv_usec = microsecs;
+
+    IOService::updateConsoleUsers(NULL, kIOMessageSystemHasPoweredOn);
 }
 
 void iokit_post_constructor_init(void)
@@ -96,8 +95,11 @@ void iokit_post_constructor_init(void)
     assert( root );
     IOService::initialize();
     IOCatalogue::initialize();
+    IOStatistics::initialize();
+    OSKext::initialize();
     IOUserClient::initialize();
     IOMemoryDescriptor::initialize();
+    IORootParent::initialize();
 
     // Initializes IOPMinformeeList class-wide shared lock
     IOPMinformeeList::getSharedRecursiveLock();
@@ -113,7 +115,6 @@ void iokit_post_constructor_init(void)
         root->setProperty( kIOKitDiagnosticsKey, obj );
 	obj->release();
     }
-
 }
 
 // From <osfmk/kern/debug.c>
@@ -130,8 +131,14 @@ void StartIOKit( void * p1, void * p2, void * p3, void * p4 )
     int				debugFlags;
 
     if( PE_parse_boot_argn( "io", &debugFlags, sizeof (debugFlags) ))
-	gIOKitDebug = debugFlags;
-
+		gIOKitDebug = debugFlags;
+	
+    if( PE_parse_boot_argn( "iotrace", &debugFlags, sizeof (debugFlags) ))
+		gIOKitTrace = debugFlags;
+	
+	// Compat for boot-args
+	gIOKitTrace |= (gIOKitDebug & kIOTraceCompatBootArgs);
+	
     // Check for the log synchronous bit set in io
     if (gIOKitDebug & kIOLogSynchronous)
         debug_mode = true;

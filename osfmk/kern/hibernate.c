@@ -42,24 +42,29 @@
 #include <vm/vm_pageout.h>
 #include <vm/vm_purgeable_internal.h>
 
-
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
 kern_return_t 
 hibernate_setup(IOHibernateImageHeader * header,
-                        uint32_t free_page_ratio,
-                        uint32_t free_page_time,
+                        uint32_t  free_page_ratio,
+                        uint32_t  free_page_time,
+                        boolean_t vmflush,
 			hibernate_page_list_t ** page_list_ret,
 			hibernate_page_list_t ** page_list_wired_ret,
+			hibernate_page_list_t ** page_list_pal_ret,
                         boolean_t * encryptedswap)
 {
     hibernate_page_list_t * page_list = NULL;
     hibernate_page_list_t * page_list_wired = NULL;
+    hibernate_page_list_t * page_list_pal = NULL;
     uint32_t    	    gobble_count;
 
     *page_list_ret       = NULL;
     *page_list_wired_ret = NULL;
-
+	*page_list_pal_ret    = NULL;
+    
+    if (vmflush)
+        hibernate_flush_memory();
 
     page_list = hibernate_page_list_allocate();
     if (!page_list)
@@ -68,6 +73,13 @@ hibernate_setup(IOHibernateImageHeader * header,
     if (!page_list_wired)
     {
         kfree(page_list, page_list->list_size);
+        return (KERN_RESOURCE_SHORTAGE);
+    }
+    page_list_pal = hibernate_page_list_allocate();
+    if (!page_list_pal)
+    {
+        kfree(page_list, page_list->list_size);
+        kfree(page_list_wired, page_list_wired->list_size);
         return (KERN_RESOURCE_SHORTAGE);
     }
 
@@ -88,6 +100,7 @@ hibernate_setup(IOHibernateImageHeader * header,
 
     *page_list_ret       = page_list;
     *page_list_wired_ret = page_list_wired;
+    *page_list_pal_ret    = page_list_pal;
 
     return (KERN_SUCCESS);
 }

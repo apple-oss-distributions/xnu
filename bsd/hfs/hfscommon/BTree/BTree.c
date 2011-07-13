@@ -1997,7 +1997,6 @@ OSStatus	BTSetLastSync		(FCB					*filePtr,
 	return noErr;
 }
 
-
 __private_extern__
 OSStatus	BTHasContiguousNodes	(FCB	 				*filePtr)
 {
@@ -2022,7 +2021,6 @@ Routine:	BTGetUserData
 Function:	Read the user data area of the b-tree header node.
 
 -------------------------------------------------------------------------------*/
-__private_extern__
 OSStatus
 BTGetUserData(FCB *filePtr, void * dataPtr, int dataSize)
 {
@@ -2060,7 +2058,6 @@ Routine:	BTSetUserData
 
 Function:	Write the user data area of the b-tree header node.
 -------------------------------------------------------------------------------*/
-__private_extern__
 OSStatus
 BTSetUserData(FCB *filePtr, void * dataPtr, int dataSize)
 {

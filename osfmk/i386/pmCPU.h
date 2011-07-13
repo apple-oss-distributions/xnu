@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2006-2009 Apple Inc. All rights reserved.
+ * Copyright (c) 2006-2010 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -30,15 +30,14 @@
 #define _I386_PMCPU_H_
 
 #include <i386/cpu_topology.h>
-#include <i386/rtclock.h>
 
 #ifndef ASSEMBLER
 
 /*
- * This value should be changed each time that pmDsipatch_t or pmCallBacks_t
+ * This value should be changed each time that pmDispatch_t or pmCallBacks_t
  * changes.
  */
-#define PM_DISPATCH_VERSION	19
+#define PM_DISPATCH_VERSION	102
 
 /*
  * Dispatch table for functions that get installed when the power
@@ -52,7 +51,7 @@
  */
 typedef struct
 {
-    int			(*pmCPUStateInit)(void);
+    kern_return_t	(*pmCPUStateInit)(void);
     void		(*cstateInit)(void);
     uint64_t		(*MachineIdle)(uint64_t maxIdleDuration);
     uint64_t		(*GetDeadline)(x86_lcpu_t *lcpu);
@@ -77,11 +76,24 @@ typedef struct
     boolean_t		(*pmIsCPUUnAvailable)(x86_lcpu_t *lcpu);
     int			(*pmChooseCPU)(int startCPU, int endCPU, int preferredCPU);
     int			(*pmIPIHandler)(void *state);
+    void		(*pmThreadTellUrgency)(int urgency, uint64_t rt_period, uint64_t rt_deadline);
+    void		(*pmActiveRTThreads)(boolean_t active);
+    boolean_t           (*pmInterruptPrewakeApplicable)(void);
 } pmDispatch_t;
 
+/* common time fields exported to PM code. This structure may be
+ * allocated on the stack, so avoid making it unnecessarily large.
+ */
+typedef struct pm_rtc_nanotime {
+	uint64_t	tsc_base;		/* timestamp */
+	uint64_t	ns_base;		/* nanoseconds */
+	uint32_t	scale;			/* tsc -> nanosec multiplier */
+	uint32_t	shift;			/* tsc -> nanosec shift/div */
+	uint32_t	generation;		/* 0 == being updated */
+} pm_rtc_nanotime_t;
 
 typedef struct {
-    int			(*setRTCPop)(uint64_t time);
+    uint64_t		(*setRTCPop)(uint64_t time);
     void		(*resyncDeadlines)(int cpu);
     void		(*initComplete)(void);
     x86_lcpu_t		*(*GetLCPU)(int cpu);
@@ -99,8 +111,15 @@ typedef struct {
     processor_t		(*ThreadBind)(processor_t proc);
     uint32_t		(*GetSavedRunCount)(void);
     void		(*pmSendIPI)(int cpu);
-    rtc_nanotime_t	*(*GetNanotimeInfo)(void);
+    void		(*GetNanotimeInfo)(pm_rtc_nanotime_t *);
+    int			(*ThreadGetUrgency)(uint64_t *rt_period, uint64_t *rt_deadline);
+    uint32_t		(*timerQueueMigrate)(int cpu);
+    void		(*RTCClockAdjust)(uint64_t adjustment);
     x86_topology_parameters_t	*topoParms;
+    boolean_t		(*InterruptPending)(void);
+    boolean_t		(*IsInterrupting)(uint8_t vector);
+    void		(*InterruptStats)(uint64_t intrs[256]);
+    void		(*DisableApicTimer)(void);
 } pmCallBacks_t;
 
 extern pmDispatch_t	*pmDispatch;
@@ -136,7 +155,9 @@ void pmSafeMode(x86_lcpu_t *lcpu, uint32_t flags);
 #define PM_SAFE_FL_RESUME	0x00000020	/* resume execution on the CPU */
 
 extern int pmsafe_debug;
-extern int idlehalt;
+/* Default urgency timing threshold for the DEBUG build */
+#define		URGENCY_NOTIFICATION_ASSERT_NS (5 * 1000 * 1000)
+extern uint64_t	urgency_notification_assert_abstime_threshold;
 
 /******************************************************************************
  *

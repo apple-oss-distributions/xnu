@@ -58,9 +58,6 @@ typedef struct console_buf {
 	char	buf[CPU_BUFFER_LEN];
 } console_buf_t;
 
-extern int serial_getc(void);
-extern void serial_putc(int);
-
 static void _serial_putc(int, int, int);
 
 struct console_ops cons_ops[] = {
@@ -136,6 +133,13 @@ console_cpu_free(void *buf)
 {
 	if (buf != NULL)
 		kfree((void *) buf, sizeof(console_buf_t));
+}
+
+/* So we can re-write the serial device functions at boot-time */
+void
+console_set_serial_ops( struct console_ops *newops )
+{
+	cons_ops[SERIAL_CONS_OPS] = *newops;
 }
 
 static inline int
@@ -307,7 +311,9 @@ cnputc(char c)
 		 */
 		while (cbp->buf_ptr-cbp->buf_base + 1 > console_ring_space()) {
 			simple_unlock(&console_ring.write_lock);
+			ml_set_interrupts_enabled(state);
 			console_ring_try_empty();
+			state = ml_set_interrupts_enabled(FALSE);
 			SIMPLE_LOCK_NO_INTRS(&console_ring.write_lock);
 		}
 		for (cp = cbp->buf_base; cp < cbp->buf_ptr; cp++)

@@ -102,16 +102,18 @@
 
 #include <kern/task.h>
 #include <kern/clock.h>		/* for absolutetime_to_microtime() */
-#include <netinet/in.h>		/* for TRAFFIC_MGT_SO_BACKGROUND */
+#include <netinet/in.h>		/* for TRAFFIC_MGT_SO_* */
 #include <sys/socketvar.h>	/* for struct socket */
 
 #include <vm/vm_map.h>
 
 int	donice(struct proc *curp, struct proc *chgp, int n);
 int	dosetrlimit(struct proc *p, u_int which, struct rlimit *limp);
-static void do_background_socket(struct proc *curp, thread_t thread, int priority);
-static int do_background_thread(struct proc *curp, int priority);
-static int do_background_task(struct proc *curp, int priority);
+int	uthread_get_background_state(uthread_t);
+static void do_background_socket(struct proc *p, thread_t thread, int priority);
+static int do_background_thread(struct proc *curp, thread_t thread, int priority);
+static int do_background_proc(struct proc *curp, struct proc *targetp, int priority);
+void proc_apply_task_networkbg_internal(proc_t);
 
 rlim_t maxdmap = MAXDSIZ;	/* XXX */ 
 rlim_t maxsmap = MAXSSIZ - PAGE_SIZE;	/* XXX */ 
@@ -124,10 +126,10 @@ rlim_t maxsmap = MAXSSIZ - PAGE_SIZE;	/* XXX */
  */
 __private_extern__ int maxfilesperproc = OPEN_MAX;		/* per-proc open files limit */
 
-SYSCTL_INT( _kern, KERN_MAXPROCPERUID, maxprocperuid, CTLFLAG_RW,
+SYSCTL_INT(_kern, KERN_MAXPROCPERUID, maxprocperuid, CTLFLAG_RW | CTLFLAG_LOCKED,
     		&maxprocperuid, 0, "Maximum processes allowed per userid" );
 
-SYSCTL_INT( _kern, KERN_MAXFILESPERPROC, maxfilesperproc, CTLFLAG_RW,       
+SYSCTL_INT(_kern, KERN_MAXFILESPERPROC, maxfilesperproc, CTLFLAG_RW | CTLFLAG_LOCKED,
     		&maxfilesperproc, 0, "Maximum files allowed open per process" );
 
 /* Args and fn for proc_iteration callback used in setpriority */
@@ -231,7 +233,7 @@ getpriority(struct proc *curp, struct getpriority_args *uap, int32_t *retval)
 		ut = get_bsdthread_info(thread);
 
 		low = 0;
-		if ( (ut->uu_flag & UT_BACKGROUND) != 0 ) {
+		if ( (ut->uu_flag & UT_BACKGROUND_TRAFFIC_MGT) != 0 ) {
 			low = 1;
 		}
 		break;
@@ -370,8 +372,10 @@ setpriority(struct proc *curp, struct setpriority_args *uap, __unused int32_t *r
 		if (uap->who != 0) {
 			return (EINVAL);
 		}
-		error = do_background_thread(curp, uap->prio);
-		(void) do_background_socket(curp, current_thread(), uap->prio);
+		error = do_background_thread(curp, current_thread(), uap->prio);
+		if (!error) {
+			(void) do_background_socket(curp, current_thread(), uap->prio);
+		}
 		found++;
 		break;
 	}
@@ -386,14 +390,11 @@ setpriority(struct proc *curp, struct setpriority_args *uap, __unused int32_t *r
 			refheld = 1;
 		}
 
-		error = do_background_task(p, uap->prio);
-		(void) do_background_socket(p, NULL, uap->prio);
+		error = do_background_proc(curp, p, uap->prio);
+		if (!error) {
+			(void) do_background_socket(p, NULL, uap->prio);
+		}
 		
-		proc_lock(p);
-		p->p_iopol_disk = (uap->prio == PRIO_DARWIN_BG ? 
-				IOPOL_THROTTLE : IOPOL_DEFAULT); 
-		proc_unlock(p);
-
 		found++;
 		if (refheld != 0)
 			proc_rele(p);
@@ -425,9 +426,9 @@ donice(struct proc *curp, struct proc *chgp, int n)
 	ucred = kauth_cred_proc_ref(curp);
 	my_cred = kauth_cred_proc_ref(chgp);
 
-	if (suser(ucred, NULL) && ucred->cr_ruid &&
+	if (suser(ucred, NULL) && kauth_cred_getruid(ucred) &&
 	    kauth_cred_getuid(ucred) != kauth_cred_getuid(my_cred) &&
-	    ucred->cr_ruid != kauth_cred_getuid(my_cred)) {
+	    kauth_cred_getruid(ucred) != kauth_cred_getuid(my_cred)) {
 		error = EPERM;
 		goto out;
 	}
@@ -455,36 +456,97 @@ out:
 }
 
 static int
-do_background_task(struct proc *p, int priority)
+do_background_proc(struct proc *curp, struct proc *targetp, int priority)
 {
 	int error = 0;
+	kauth_cred_t ucred;
+	kauth_cred_t target_cred;
+#if CONFIG_EMBEDDED
 	task_category_policy_data_t info;
+#endif
 
-	if (priority & PRIO_DARWIN_BG) { 
+	ucred = kauth_cred_get();
+	target_cred = kauth_cred_proc_ref(targetp);
+
+	if (!kauth_cred_issuser(ucred) && kauth_cred_getruid(ucred) &&
+	    kauth_cred_getuid(ucred) != kauth_cred_getuid(target_cred) &&
+	    kauth_cred_getruid(ucred) != kauth_cred_getuid(target_cred))
+	{
+		error = EPERM;
+		goto out;
+	}
+
+#if CONFIG_MACF
+	error = mac_proc_check_sched(curp, targetp);
+	if (error) 
+		goto out;
+#endif
+
+#if !CONFIG_EMBEDDED
+	if (priority == PRIO_DARWIN_NONUI)
+		error = proc_apply_task_gpuacc(targetp->task, TASK_POLICY_HWACCESS_GPU_ATTRIBUTE_NOACCESS);
+	else
+		error = proc_set1_bgtaskpolicy(targetp->task, priority);
+	if (error)
+		goto out;
+#else /* !CONFIG_EMBEDDED */
+
+	/* set the max scheduling priority on the task */
+	if (priority == PRIO_DARWIN_BG) { 
 		info.role = TASK_THROTTLE_APPLICATION;
-	} else {
+	}
+	else if (priority == PRIO_DARWIN_NONUI) { 
+		info.role = TASK_NONUI_APPLICATION;
+	}
+	else {
 		info.role = TASK_DEFAULT_APPLICATION;
 	}
 
-	error = task_policy_set(p->task,
+	error = task_policy_set(targetp->task,
 			TASK_CATEGORY_POLICY,
 			(task_policy_t) &info,
 			TASK_CATEGORY_POLICY_COUNT);
+
+	if (error)
+		goto out;
+
+	proc_lock(targetp);
+
+	/* mark proc structure as backgrounded */
+	if (priority == PRIO_DARWIN_BG) {
+		targetp->p_lflag |= P_LBACKGROUND;
+	} else {
+		targetp->p_lflag &= ~P_LBACKGROUND;
+	}
+
+	/* set or reset the disk I/O priority */
+	targetp->p_iopol_disk = (priority == PRIO_DARWIN_BG ? 
+			IOPOL_THROTTLE : IOPOL_DEFAULT); 
+
+	proc_unlock(targetp);
+#endif /* !CONFIG_EMBEDDED */
+
+out:
+	kauth_cred_unref(&target_cred);
 	return (error);
 }
 
 static void 
-do_background_socket(struct proc *curp, thread_t thread, int priority)
+do_background_socket(struct proc *p, thread_t thread, int priority)
 {
 	struct filedesc                     *fdp;
 	struct fileproc                     *fp;
 	int                                 i;
 
-	if (priority & PRIO_DARWIN_BG) {
-		/* enable network throttle process-wide (if no thread is specified) */
+	if (priority == PRIO_DARWIN_BG) {
+		/*
+		 * For PRIO_DARWIN_PROCESS (thread is NULL), simply mark
+		 * the sockets with the background flag.  There's nothing
+		 * to do here for the PRIO_DARWIN_THREAD case.
+		 */
 		if (thread == NULL) {
-			proc_fdlock(curp);
-			fdp = curp->p_fd;
+			proc_fdlock(p);
+			fdp = p->p_fd;
 
 			for (i = 0; i < fdp->fd_nfiles; i++) {
 				struct socket       *sockp;
@@ -495,20 +557,21 @@ do_background_socket(struct proc *curp, thread_t thread, int priority)
 					continue;
 				}
 				sockp = (struct socket *)fp->f_fglob->fg_data;
-				sockp->so_traffic_mgt_flags |= TRAFFIC_MGT_SO_BACKGROUND;
+				socket_set_traffic_mgt_flags(sockp, TRAFFIC_MGT_SO_BACKGROUND);
 				sockp->so_background_thread = NULL;
 			}
-			proc_fdunlock(curp);
+			proc_fdunlock(p);
 		}
 
 	} else {
+
 		/* disable networking IO throttle.
 		 * NOTE - It is a known limitation of the current design that we 
 		 * could potentially clear TRAFFIC_MGT_SO_BACKGROUND bit for 
 		 * sockets created by other threads within this process.  
 		 */
-		proc_fdlock(curp);
-		fdp = curp->p_fd;
+		proc_fdlock(p);
+		fdp = p->p_fd;
 		for ( i = 0; i < fdp->fd_nfiles; i++ ) {
 			struct socket       *sockp;
 
@@ -522,10 +585,10 @@ do_background_socket(struct proc *curp, thread_t thread, int priority)
 			if ((thread) && (sockp->so_background_thread != thread)) {
 				continue;
 			}
-			sockp->so_traffic_mgt_flags &= ~TRAFFIC_MGT_SO_BACKGROUND;
+			socket_clear_traffic_mgt_flags(sockp, TRAFFIC_MGT_SO_BACKGROUND);
 			sockp->so_background_thread = NULL;
 		}
-		proc_fdunlock(curp);
+		proc_fdunlock(p);
 	}
 }
 
@@ -534,17 +597,36 @@ do_background_socket(struct proc *curp, thread_t thread, int priority)
  * do_background_thread
  * Returns:	0			Success
  * XXX - todo - does this need a MACF hook?
+ *
+ * NOTE: To maintain binary compatibility with PRIO_DARWIN_THREAD with respect
+ *	 to network traffic management, UT_BACKGROUND_TRAFFIC_MGT is set/cleared
+ *	 along with UT_BACKGROUND flag, as the latter alone no longer implies
+ *	 any form of traffic regulation (it simply means that the thread is
+ *	 background.)  With PRIO_DARWIN_PROCESS, any form of network traffic
+ *	 management must be explicitly requested via whatever means appropriate,
+ *	 and only TRAFFIC_MGT_SO_BACKGROUND is set via do_background_socket().
  */
 static int
-do_background_thread(struct proc *curp __unused, int priority)
+do_background_thread(struct proc *curp __unused, thread_t thread, int priority)
 {
-	thread_t							thread;
 	struct uthread						*ut;
+#if !CONFIG_EMBEDDED
+	int error = 0;
+#else /* !CONFIG_EMBEDDED */
 	thread_precedence_policy_data_t		policy;
+#endif /* !CONFIG_EMBEDDED */
 	
-	thread = current_thread();
 	ut = get_bsdthread_info(thread);
 
+	/* Backgrounding is unsupported for threads in vfork */
+	if ( (ut->uu_flag & UT_VFORK) != 0) {
+		return(EPERM);
+	}
+
+#if !CONFIG_EMBEDDED
+	error = proc_set1_bgthreadpolicy(curp->task, thread_tid(thread), priority);
+	return(error);
+#else /* !CONFIG_EMBEDDED */
 	if ( (priority & PRIO_DARWIN_BG) == 0 ) {
 		/* turn off backgrounding of thread */
 		if ( (ut->uu_flag & UT_BACKGROUND) == 0 ) {
@@ -552,8 +634,13 @@ do_background_thread(struct proc *curp __unused, int priority)
 			return(0);
 		}
 
-		/* clear background bit in thread and disable disk IO throttle */
-		ut->uu_flag &= ~UT_BACKGROUND;
+		/*
+		 * Clear background bit in thread and disable disk IO
+		 * throttle as well as network traffic management.
+		 * The corresponding socket flags for sockets created by
+		 * this thread will be cleared in do_background_socket().
+		 */
+		ut->uu_flag &= ~(UT_BACKGROUND | UT_BACKGROUND_TRAFFIC_MGT);
 		ut->uu_iopol_disk = IOPOL_NORMAL;
 
 		/* reset thread priority (we did not save previous value) */
@@ -570,22 +657,97 @@ do_background_thread(struct proc *curp __unused, int priority)
 		return(0);
 	}
 
-	/* tag thread as background and throttle disk IO */
-	ut->uu_flag |= UT_BACKGROUND;
+	/*
+	 * Tag thread as background and throttle disk IO, as well
+	 * as regulate network traffics.  Future sockets created
+	 * by this thread will have their corresponding socket
+	 * flags set at socket create time.
+	 */
+	ut->uu_flag |= (UT_BACKGROUND | UT_BACKGROUND_TRAFFIC_MGT);
 	ut->uu_iopol_disk = IOPOL_THROTTLE;
 
 	policy.importance = INT_MIN;
 	thread_policy_set( thread, THREAD_PRECEDENCE_POLICY,
 					   (thread_policy_t)&policy,
 					   THREAD_PRECEDENCE_POLICY_COUNT );
-	
+
 	/* throttle networking IO happens in socket( ) syscall.
-	 * If UT_BACKGROUND is set in the current thread then
-	 * TRAFFIC_MGT_SO_BACKGROUND socket option is set.
+	 * If UT_{BACKGROUND,BACKGROUND_TRAFFIC_MGT} is set in the current
+	 * thread then TRAFFIC_MGT_SO_{BACKGROUND,BG_REGULATE} is set.
+	 * Existing sockets are taken care of by do_background_socket().
 	 */
+#endif /* !CONFIG_EMBEDDED */
 	return(0);
 }
 
+#if CONFIG_EMBEDDED
+int mach_do_background_thread(thread_t thread, int prio);
+
+int
+mach_do_background_thread(thread_t thread, int prio)
+{
+	int 			error		= 0;
+	struct proc		*curp		= NULL;
+	struct proc		*targetp	= NULL;
+	kauth_cred_t	ucred;
+
+	targetp = get_bsdtask_info(get_threadtask(thread));
+	if (!targetp) {
+		return KERN_INVALID_ARGUMENT;
+	}
+
+	curp = proc_self();
+	if (curp == PROC_NULL) {
+		return KERN_FAILURE;
+	}
+
+	ucred = kauth_cred_proc_ref(curp);
+
+	if (suser(ucred, NULL) && curp != targetp) {
+		error = KERN_PROTECTION_FAILURE;
+		goto out;
+	}
+
+	error = do_background_thread(curp, thread, prio);
+	if (!error) {
+		(void) do_background_socket(curp, thread, prio);
+	} else {
+		if (error == EPERM) {
+			error = KERN_PROTECTION_FAILURE;
+		} else {
+			error = KERN_FAILURE;
+		}
+	}
+
+out:
+	proc_rele(curp);
+	kauth_cred_unref(&ucred);
+	return error;
+}
+#endif /* CONFIG_EMBEDDED */
+
+#if CONFIG_EMBEDDED
+/*
+ * If the thread or its proc has been put into the background
+ * with setpriority(PRIO_DARWIN_{THREAD,PROCESS}, *, PRIO_DARWIN_BG),
+ * report that status.
+ *
+ * Returns: PRIO_DARWIN_BG if background
+ * 			0 if foreground
+ */
+int
+uthread_get_background_state(uthread_t uth)
+{
+	proc_t p = uth->uu_proc;
+	if (p && (p->p_lflag & P_LBACKGROUND))
+		return PRIO_DARWIN_BG;
+	
+	if (uth->uu_flag & UT_BACKGROUND)
+		return PRIO_DARWIN_BG;
+
+	return 0;
+}
+#endif /* CONFIG_EMBEDDED */
 
 /*
  * Returns:	0			Success
@@ -1167,19 +1329,70 @@ int
 iopolicysys(__unused struct proc *p, __unused struct iopolicysys_args *uap, __unused int32_t *retval)
 {
 	int	error = 0;
-	thread_t thread = THREAD_NULL;
-	int *policy;
-	struct uthread	*ut = NULL;
 	struct _iopol_param_t iop_param;
+#if !CONFIG_EMBEDDED
+	int processwide = 0;
+#else /* !CONFIG_EMBEDDED */
+	thread_t thread = THREAD_NULL;
+	struct uthread	*ut = NULL;
+	int *policy;
+#endif /* !CONFIG_EMBEDDED */
 
 	if ((error = copyin(uap->arg, &iop_param, sizeof(iop_param))) != 0)
-		goto exit;
+		goto out;
 
 	if (iop_param.iop_iotype != IOPOL_TYPE_DISK) {
 		error = EINVAL;
-		goto exit;
+		goto out;
 	}
 
+#if !CONFIG_EMBEDDED
+	switch (iop_param.iop_scope) {
+	case IOPOL_SCOPE_PROCESS:
+		processwide = 1;
+		break;
+	case IOPOL_SCOPE_THREAD:
+		processwide = 0;
+		break;
+	default:
+		error = EINVAL;
+		goto out;
+	}
+		
+	switch(uap->cmd) {
+	case IOPOL_CMD_SET:
+		switch (iop_param.iop_policy) {
+		case IOPOL_DEFAULT:
+		case IOPOL_NORMAL:
+		case IOPOL_THROTTLE:
+		case IOPOL_PASSIVE:
+			if(processwide != 0)
+				proc_apply_task_diskacc(current_task(), iop_param.iop_policy);
+			else
+				proc_apply_thread_selfdiskacc(iop_param.iop_policy);
+				
+			break;
+		default:
+			error = EINVAL;
+			goto out;
+		}
+		break;
+	
+	case IOPOL_CMD_GET:
+		if(processwide != 0)
+			iop_param.iop_policy = proc_get_task_disacc(current_task());
+		else
+			iop_param.iop_policy = proc_get_thread_selfdiskacc();
+			
+		error = copyout((caddr_t)&iop_param, uap->arg, sizeof(iop_param));
+
+		break;
+	default:
+		error = EINVAL; // unknown command
+		break;
+	}
+
+#else /* !CONFIG_EMBEDDED */
 	switch (iop_param.iop_scope) {
 	case IOPOL_SCOPE_PROCESS:
 		policy = &p->p_iopol_disk;
@@ -1191,7 +1404,7 @@ iopolicysys(__unused struct proc *p, __unused struct iopolicysys_args *uap, __un
 		break;
 	default:
 		error = EINVAL;
-		goto exit;
+		goto out;
 	}
 		
 	switch(uap->cmd) {
@@ -1207,7 +1420,7 @@ iopolicysys(__unused struct proc *p, __unused struct iopolicysys_args *uap, __un
 			break;
 		default:
 			error = EINVAL;
-			goto exit;
+			goto out;
 		}
 		break;
 	case IOPOL_CMD_GET:
@@ -1233,7 +1446,8 @@ iopolicysys(__unused struct proc *p, __unused struct iopolicysys_args *uap, __un
 		break;
 	}
 
-  exit:
+#endif /* !CONFIG_EMBEDDED */
+out:
 	*retval = error;
 	return (error);
 }
@@ -1242,20 +1456,77 @@ iopolicysys(__unused struct proc *p, __unused struct iopolicysys_args *uap, __un
 boolean_t thread_is_io_throttled(void);
 
 boolean_t
-thread_is_io_throttled(void) {
+thread_is_io_throttled(void) 
+{
 
+#if !CONFIG_EMBEDDED
+
+	return(proc_get_task_selfdiskacc() == IOPOL_THROTTLE);
+		
+#else /* !CONFIG_EMBEDDED */
 	int	policy;
 	struct uthread  *ut;
 
-	policy = current_proc()->p_iopol_disk;
-
 	ut = get_bsdthread_info(current_thread());
 
-	if (ut->uu_iopol_disk != IOPOL_DEFAULT)
-		policy = ut->uu_iopol_disk;
+	if(ut){
+		policy = current_proc()->p_iopol_disk;
 
-	if (policy == IOPOL_THROTTLE)
-		return TRUE;
+		if (ut->uu_iopol_disk != IOPOL_DEFAULT)
+			policy = ut->uu_iopol_disk;
 
+		if (policy == IOPOL_THROTTLE)
+			return TRUE;
+	}
 	return FALSE;
+#endif /* !CONFIG_EMBEDDED */
 }
+
+void
+proc_apply_task_networkbg(void * bsd_info)
+{
+	proc_t p = PROC_NULL;
+	proc_t curp = (proc_t)bsd_info;
+	pid_t pid;
+
+	pid = curp->p_pid;
+	p = proc_find(pid);
+	if (p != PROC_NULL) {
+		do_background_socket(p, NULL, PRIO_DARWIN_BG);
+		proc_rele(p);
+	}
+}
+
+void
+proc_restore_task_networkbg(void * bsd_info)
+{
+	proc_t p = PROC_NULL;
+	proc_t curp = (proc_t)bsd_info;
+	pid_t pid;
+
+	pid = curp->p_pid;
+	p = proc_find(pid);
+	if (p != PROC_NULL) {
+		do_background_socket(p, NULL, 0);
+		proc_rele(p);
+	}
+
+}
+
+void
+proc_set_task_networkbg(void * bsdinfo, int setbg)
+{
+	if (setbg != 0)
+		proc_apply_task_networkbg(bsdinfo);
+	else
+		proc_restore_task_networkbg(bsdinfo);
+}
+
+void
+proc_apply_task_networkbg_internal(proc_t p)
+{
+	if (p != PROC_NULL) {
+		do_background_socket(p, NULL, PRIO_DARWIN_BG);
+	}
+}
+

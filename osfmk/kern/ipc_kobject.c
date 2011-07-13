@@ -126,6 +126,7 @@
 
 #include <kern/ipc_tt.h>
 #include <kern/ipc_mig.h>
+#include <kern/ipc_misc.h>
 #include <kern/ipc_kobject.h>
 #include <kern/host_notify.h>
 #include <kern/mk_timer.h>
@@ -559,6 +560,10 @@ ipc_kobject_notify(
 			   return TRUE;
 		   }
 #endif
+		   if (ip_kotype(port) == IKOT_FILEPORT) {
+			fileport_notify(request_header);
+			return TRUE;
+		   }
 
 	  	   break;
 

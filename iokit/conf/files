@@ -10,9 +10,6 @@ OPTIONS/mach_assert				optional mach_assert
 
 # libIOKit
 
-
-iokit/Kernel/WKdmCompress.c				optional hibernation
-iokit/Kernel/WKdmDecompress.c				optional hibernation
 iokit/Kernel/IOHibernateIO.cpp				optional hibernation
 iokit/Kernel/IOHibernateRestoreKernel.c			optional hibernation
 
@@ -35,6 +32,7 @@ iokit/Kernel/IOPMPowerStateQueue.cpp			optional iokitcpp
 iokit/Kernel/IOCatalogue.cpp				optional iokitcpp
 iokit/Kernel/IOPMPowerSource.cpp                        optional iokitcpp
 iokit/Kernel/IOPMPowerSourceList.cpp                    optional iokitcpp
+iokit/Kernel/IOPolledInterface.cpp			optional iokitcpp
 
 iokit/Kernel/IOWorkLoop.cpp				optional iokitcpp
 iokit/Kernel/IOEventSource.cpp				optional iokitcpp
@@ -53,7 +51,6 @@ iokit/Kernel/IODMACommand.cpp				optional iokitcpp
 iokit/Kernel/IODeviceMemory.cpp				optional iokitcpp
 iokit/Kernel/IOInterleavedMemoryDescriptor.cpp		optional iokitcpp
 iokit/Kernel/IOMapper.cpp				optional iokitcpp
-iokit/Kernel/IOCopyMapper.cpp				optional iokitcpp
 iokit/Kernel/IOMemoryCursor.cpp				optional iokitcpp
 iokit/Kernel/IOMemoryDescriptor.cpp			optional iokitcpp
 iokit/Kernel/IOMultiMemoryDescriptor.cpp		optional iokitcpp
@@ -78,6 +75,8 @@ iokit/Kernel/IOSharedDataQueue.cpp			optional iokitcpp
 # iokit/Tests/TestDevice.cpp				optional iokitcpp
 # iokit/Tests/TestContainers.cpp			optional iokitcpp
 # iokit/Tests/TestCollections.cpp			optional iokitcpp
+
+iokit/Kernel/IOStatistics.cpp			optional iokitcpp
 
 iokit/Kernel/IOStringFuncs.c				standard
 

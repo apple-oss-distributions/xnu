@@ -110,6 +110,10 @@
 #define x86_DEBUG_STATE64		11
 #define x86_DEBUG_STATE			12
 #define THREAD_STATE_NONE		13
+/* 15 and 16 are used for the internal x86_SAVED_STATE flavours */
+#define x86_AVX_STATE32			16
+#define x86_AVX_STATE64			17
+
 
 /*
  * Largest state on this machine:
@@ -136,6 +140,8 @@
 	  (x == x86_FLOAT_STATE)	|| \
 	  (x == x86_EXCEPTION_STATE)	|| \
 	  (x == x86_DEBUG_STATE)	|| \
+	  (x == x86_AVX_STATE32)	|| \
+	  (x == x86_AVX_STATE64)	|| \
 	  (x == THREAD_STATE_NONE))
 
 struct x86_state_hdr {
@@ -175,6 +181,10 @@ typedef _STRUCT_X86_FLOAT_STATE32 x86_float_state32_t;
 #define x86_FLOAT_STATE32_COUNT ((mach_msg_type_number_t) \
 		(sizeof(x86_float_state32_t)/sizeof(unsigned int)))
 
+typedef _STRUCT_X86_AVX_STATE32 x86_avx_state32_t;
+#define x86_AVX_STATE32_COUNT ((mach_msg_type_number_t) \
+		(sizeof(x86_avx_state32_t)/sizeof(unsigned int)))
+
 /*
  * to be deprecated in the future
  */
@@ -201,7 +211,11 @@ typedef _STRUCT_X86_THREAD_STATE64 x86_thread_state64_t;
 typedef _STRUCT_X86_FLOAT_STATE64 x86_float_state64_t;
 #define x86_FLOAT_STATE64_COUNT ((mach_msg_type_number_t) \
 		(sizeof(x86_float_state64_t)/sizeof(unsigned int)))
-		
+
+typedef _STRUCT_X86_AVX_STATE64 x86_avx_state64_t;
+#define x86_AVX_STATE64_COUNT ((mach_msg_type_number_t) \
+		(sizeof(x86_avx_state64_t)/sizeof(unsigned int)))
+
 typedef _STRUCT_X86_EXCEPTION_STATE64 x86_exception_state64_t;
 #define x86_EXCEPTION_STATE64_COUNT	((mach_msg_type_number_t) \
     ( sizeof (x86_exception_state64_t) / sizeof (int) ))
@@ -286,11 +300,12 @@ typedef struct x86_debug_state x86_debug_state_t;
  * enough stack
  */
 struct x86_seg_load_fault32 {
-	unsigned int    trapno;
-	unsigned int    err;
-	unsigned int    eip;
-	unsigned int    cs;
-	unsigned int    efl;
+	uint16_t	trapno;
+	uint16_t	cpu;
+	uint32_t	err;
+	uint32_t	eip;
+	uint32_t	cs;
+	uint32_t	efl;
 };
 
 #ifdef XNU_KERNEL_PRIVATE
@@ -304,23 +319,24 @@ struct x86_seg_load_fault32 {
  * on all traps into debugger.)
  */
 struct x86_saved_state32_from_kernel {
-	unsigned int	gs;
-	unsigned int	fs;
-	unsigned int	es;
-	unsigned int	ds;
-	unsigned int	edi;
-	unsigned int	esi;
-	unsigned int	ebp;
-	unsigned int	cr2;	/* kernel esp stored by pusha - we save cr2 here later */
-	unsigned int	ebx;
-	unsigned int	edx;
-	unsigned int	ecx;
-	unsigned int	eax;
-	unsigned int	trapno;
-	unsigned int	err;
-	unsigned int	eip;
-	unsigned int	cs;
-	unsigned int	efl;
+	uint32_t	gs;
+	uint32_t	fs;
+	uint32_t	es;
+	uint32_t	ds;
+	uint32_t	edi;
+	uint32_t	esi;
+	uint32_t	ebp;
+	uint32_t	cr2;	/* kernel esp stored by pusha - we save cr2 here later */
+	uint32_t	ebx;
+	uint32_t	edx;
+	uint32_t	ecx;
+	uint32_t	eax;
+	uint16_t	trapno;
+	uint16_t	cpu;
+	uint32_t	err;
+	uint32_t	eip;
+	uint32_t	cs;
+	uint32_t	efl;
 };
 
 /*
@@ -329,25 +345,26 @@ struct x86_saved_state32_from_kernel {
  * servers, because copying can be avoided:
  */
 struct x86_saved_state32 {
-	unsigned int	gs;
-	unsigned int	fs;
-	unsigned int	es;
-	unsigned int	ds;
-	unsigned int	edi;
-	unsigned int	esi;
-	unsigned int	ebp;
-	unsigned int	cr2;	/* kernel esp stored by pusha - we save cr2 here later */
-	unsigned int	ebx;
-	unsigned int	edx;
-	unsigned int	ecx;
-	unsigned int	eax;
-	unsigned int	trapno;
-	unsigned int	err;
-	unsigned int	eip;
-	unsigned int	cs;
-	unsigned int	efl;
-	unsigned int	uesp;
-	unsigned int	ss;
+	uint32_t	gs;
+	uint32_t	fs;
+	uint32_t	es;
+	uint32_t	ds;
+	uint32_t	edi;
+	uint32_t	esi;
+	uint32_t	ebp;
+	uint32_t	cr2;	/* kernel esp stored by pusha - we save cr2 here later */
+	uint32_t	ebx;
+	uint32_t	edx;
+	uint32_t	ecx;
+	uint32_t	eax;
+	uint16_t	trapno;
+	uint16_t	cpu;
+	uint32_t	err;
+	uint32_t	eip;
+	uint32_t	cs;
+	uint32_t	efl;
+	uint32_t	uesp;
+	uint32_t	ss;
 };
 typedef struct x86_saved_state32 x86_saved_state32_t;
 
@@ -360,6 +377,7 @@ struct x86_saved_state32_tagged {
 	struct x86_saved_state32	state;
 };
 typedef struct x86_saved_state32_tagged x86_saved_state32_tagged_t;
+/* Note: sizeof(x86_saved_state32_tagged_t) is a multiple of 16 bytes */
 
 struct x86_sframe32 {
 	/*
@@ -381,13 +399,10 @@ typedef struct x86_sframe32 x86_sframe32_t;
  * on any exception/trap/interrupt.
  */
 struct x86_64_intr_stack_frame {
-	uint32_t	trapno;
-#if defined(__LP64__) && defined(KERNEL)
+	uint16_t	trapno;
+	uint16_t	cpu;
 	uint32_t 	_pad;
 	uint64_t	trapfn;
-#else
-	uint32_t	trapfn;
-#endif
 	uint64_t	err;
 	uint64_t	rip;
 	uint64_t	cs;
@@ -396,6 +411,7 @@ struct x86_64_intr_stack_frame {
 	uint64_t	ss;
 };
 typedef struct x86_64_intr_stack_frame x86_64_intr_stack_frame_t;
+/* Note: sizeof(x86_64_intr_stack_frame_t) must be a multiple of 16 bytes */
 
 /*
  * This defines the state saved before entry into compatibility mode.
@@ -404,24 +420,18 @@ typedef struct x86_64_intr_stack_frame x86_64_intr_stack_frame_t;
  */
 struct x86_saved_state_compat32 {
 	struct x86_saved_state32_tagged	iss32;
-#if defined(__LP64__) && defined(KERNEL)
-#else
-	uint32_t			pad_for_16byte_alignment[2];
-#endif
-	struct	x86_64_intr_stack_frame	isf64;
+	struct x86_64_intr_stack_frame	isf64;
 };
 typedef struct x86_saved_state_compat32 x86_saved_state_compat32_t;
 
 struct x86_sframe_compat32 {
+	uint32_t			pad_for_16byte_alignment[2];
+	uint64_t			_register_save_slot;
         struct x86_64_intr_stack_frame  slf;
-#if defined(__LP64__) && defined(KERNEL)
-#else
-	uint32_t	pad_for_16byte_alignment[2];
-#endif
         struct x86_saved_state_compat32 ssf;
-	uint32_t			empty[4];
 };
 typedef struct x86_sframe_compat32 x86_sframe_compat32_t;
+/* Note: sizeof(x86_sframe_compat32_t) must be a multiple of 16 bytes */
 
 /*
  * thread state format for task running in 64bit long mode
@@ -466,9 +476,9 @@ struct x86_saved_state64 {
 
 	uint32_t	gs;
 	uint32_t	fs;
-#ifdef __x86_64__
-	uint32_t		_pad_for_alignment[3];
-#endif
+
+	uint32_t	_pad_for_tagged_alignment[3];
+
 	struct	x86_64_intr_stack_frame	isf;
 };
 typedef struct x86_saved_state64 x86_saved_state64_t;
@@ -482,13 +492,12 @@ struct x86_saved_state64_tagged {
 typedef struct x86_saved_state64_tagged x86_saved_state64_tagged_t;
 
 struct x86_sframe64 {
-        struct x86_64_intr_stack_frame	slf;
-#ifdef __i386__
-		uint32_t		_pad_for_alignment[3];
-#endif
-        struct x86_saved_state64_tagged	ssf;
+	uint64_t			_register_save_slot[2];
+	struct x86_64_intr_stack_frame	slf;
+	x86_saved_state64_tagged_t	ssf;
 };
 typedef struct x86_sframe64 x86_sframe64_t;
+/* Note: sizeof(x86_sframe64_t) is a multiple of 16 bytes */
 
 extern uint32_t get_eflags_exportmask(void);
 

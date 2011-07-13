@@ -125,6 +125,12 @@ queue_head_t * iocpu_get_platform_quiesce_queue(void)
 
 queue_head_t * iocpu_get_platform_active_queue(void)
 {
+    if (!iocpu_active_queue.next)
+    {
+	queue_init(&iocpu_quiesce_queue);
+	queue_init(&iocpu_active_queue);
+	iocpu_platform_cpu_action_init(&iocpu_quiesce_queue, &iocpu_active_queue);
+    }
     return (&iocpu_active_queue);
 }
 
@@ -296,11 +302,14 @@ void IOCPUSleepKernel(void)
     long cnt, numCPUs;
     IOCPU *target;
     IOCPU *bootCPU = NULL;
-  
+    IOPMrootDomain  *rootDomain = IOService::getPMRootDomain();
+
     kprintf("IOCPUSleepKernel\n");
 
     OSIterator * iter;
     IOService *  service;
+
+    rootDomain->tracePoint( kIOPMTracePointSleepPlatformActions );
 
     queue_init(&gIOSleepActionQueue);
     queue_init(&gIOWakeActionQueue);
@@ -327,6 +336,8 @@ void IOCPUSleepKernel(void)
     iocpu_run_platform_actions(&gIOSleepActionQueue, 0, 0U-1,
 				NULL, NULL, NULL);
 
+    rootDomain->tracePoint( kIOPMTracePointSleepCPUs );
+
     numCPUs = gIOCPUs->getCount();
     // Sleep the CPUs.
     cnt = numCPUs;
@@ -346,9 +357,13 @@ void IOCPUSleepKernel(void)
         }
     }
 
+    rootDomain->tracePoint( kIOPMTracePointSleepPlatformDriver );
+
     // Now sleep the boot CPU.
     if (bootCPU)
         bootCPU->haltCPU();
+
+    rootDomain->tracePoint( kIOPMTracePointWakePlatformActions );
 
     iocpu_run_platform_actions(&gIOWakeActionQueue, 0, 0U-1,
 				    NULL, NULL, NULL);
@@ -366,6 +381,8 @@ void IOCPUSleepKernel(void)
     if (!queue_empty(&gIOWakeActionQueue))
 	panic("gIOWakeActionQueue");
   
+    rootDomain->tracePoint( kIOPMTracePointWakeCPUs );
+
     // Wake the other CPUs.
     for (cnt = 0; cnt < numCPUs; cnt++) 
     {

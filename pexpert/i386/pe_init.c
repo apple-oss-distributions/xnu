@@ -75,12 +75,16 @@ int PE_initialize_console( PE_Video * info, int op )
 
         case kPEEnableScreen:
             initialize_screen(info, op);
-	    if (info) PE_state.video = *info;
+            if (info) PE_state.video = *info;
             kprintf("kPEEnableScreen %d\n", last_console);
             if( last_console != -1)
                 switch_to_old_console( last_console);
             break;
 	
+        case kPEBaseAddressChange:
+            if (info) PE_state.video = *info;
+            /* fall thru */
+
         default:
             initialize_screen(info, op);
             break;
@@ -181,9 +185,7 @@ void PE_init_platform(boolean_t vm_initialized, void * _args)
     }
 
     if (!vm_initialized) {
-		/* Hack! FIXME.. */ 
-        outb(0x21, 0xff);   /* Maskout all interrupts Pic1 */
-        outb(0xa1, 0xff);   /* Maskout all interrupts Pic2 */
+
         if (PE_state.deviceTreeHead) {
             DTInit(PE_state.deviceTreeHead);
         }

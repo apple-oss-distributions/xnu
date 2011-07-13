@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2007 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2010 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -105,6 +105,9 @@ extern unsigned int	mul_scale(
 /* Move arbitrarily-aligned data from one physical address to another */
 extern void bcopy_phys(addr64_t from, addr64_t to, vm_size_t nbytes);
 
+/* allow a function to get a quick virtual mapping of a physical page */
+extern int apply_func_phys(addr64_t src64, vm_size_t bytes, int (*func)(void * buffer, vm_size_t bytes, void * arg), void * arg);
+
 extern void ml_copy_phys(addr64_t, addr64_t, vm_size_t);
 
 /* Flush all cachelines for a page. */
@@ -128,7 +131,7 @@ extern void rtc_nanotime_init_commpage(void);
 
 extern void	rtc_sleep_wakeup(uint64_t base);
 
-extern void rtc_lapic_start_ticking(void);
+extern void	rtc_timer_start(void);
 
 extern void	rtc_clock_stepping(
 			uint32_t new_frequency,
@@ -137,6 +140,7 @@ extern void	rtc_clock_stepped(
 			uint32_t new_frequency,
 			uint32_t old_frequency);
 extern void	rtc_clock_napped(uint64_t, uint64_t);
+extern void	rtc_clock_adjust(uint64_t);
 
 extern void     pmap_lowmem_finalize(void);
 
@@ -159,6 +163,8 @@ copy_debug_state32(x86_debug_state32_t *src, x86_debug_state32_t *target, boolea
 
 void 
 copy_debug_state64(x86_debug_state64_t *src, x86_debug_state64_t *target, boolean_t all);
+
+extern void act_machine_switch_pcb(thread_t old, thread_t new);
 
 /* Fast-restart parameters */
 #define FULL_SLAVE_INIT	(NULL)

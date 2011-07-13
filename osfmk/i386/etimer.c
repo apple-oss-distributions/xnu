@@ -65,39 +65,57 @@
  * XXX a better implementation would use a set of generic callouts and iterate over them
  */
 void
-etimer_intr(
-__unused int inuser,
-__unused uint64_t iaddr)
+etimer_intr(int		user_mode,
+	    uint64_t	rip)
 {
 	uint64_t		abstime;
 	rtclock_timer_t		*mytimer;
 	cpu_data_t		*pp;
-	x86_lcpu_t		*lcpu;
+	int32_t			latency;
+	uint64_t		pmdeadline;
 
 	pp = current_cpu_datap();
-	lcpu = x86_lcpu();
 
-	mytimer = &pp->rtclock_timer;				/* Point to the event timer */
-	abstime = mach_absolute_time();				/* Get the time now */
+	SCHED_STATS_TIMER_POP(current_processor());
 
-	/* is it time for power management state change? */	
-	if (pmCPUGetDeadline(pp) <= abstime) {
-	        KERNEL_DEBUG_CONSTANT(MACHDBG_CODE(DBG_MACH_EXCP_DECI, 3) | DBG_FUNC_START, 0, 0, 0, 0, 0);
-		pmCPUDeadline(pp);
-	        KERNEL_DEBUG_CONSTANT(MACHDBG_CODE(DBG_MACH_EXCP_DECI, 3) | DBG_FUNC_END, 0, 0, 0, 0, 0);
-
-		abstime = mach_absolute_time();			/* Get the time again since we ran a bit */
-	}
+	abstime = mach_absolute_time();		/* Get the time now */
 
 	/* has a pending clock timer expired? */
-	if (mytimer->deadline <= abstime) {			/* Have we expired the deadline? */
-		mytimer->has_expired = TRUE;			/* Remember that we popped */
+	mytimer = &pp->rtclock_timer;		/* Point to the event timer */
+	if (mytimer->deadline <= abstime) {
+		/*
+		 * Log interrupt service latency (-ve value expected by tool)
+		 * a non-PM event is expected next.
+		 * The requested deadline may be earlier than when it was set 
+		 * - use MAX to avoid reporting bogus latencies.
+		 */
+		latency = (int32_t) (abstime - MAX(mytimer->deadline,
+						   mytimer->when_set));
+		KERNEL_DEBUG_CONSTANT(
+			DECR_TRAP_LATENCY | DBG_FUNC_NONE,
+			-latency, rip, user_mode, 0, 0);
+
+		mytimer->has_expired = TRUE;	/* Remember that we popped */
 		mytimer->deadline = timer_queue_expire(&mytimer->queue, abstime);
 		mytimer->has_expired = FALSE;
+
+		/* Get the time again since we ran a bit */
+		abstime = mach_absolute_time();
+		mytimer->when_set = abstime;
+	}
+
+	/* is it time for power management state change? */
+	if ((pmdeadline = pmCPUGetDeadline(pp)) && (pmdeadline <= abstime)) {
+	        KERNEL_DEBUG_CONSTANT(
+			DECR_PM_DEADLINE | DBG_FUNC_START,
+			0, 0, 0, 0, 0);
+		pmCPUDeadline(pp);
+	        KERNEL_DEBUG_CONSTANT(
+			DECR_PM_DEADLINE | DBG_FUNC_END,
+			0, 0, 0, 0, 0);
 	}
 
 	/* schedule our next deadline */
-	lcpu->rtcPop = EndOfAllTime;				/* any real deadline will be earlier */
 	etimer_resync_deadlines();
 }
 
@@ -110,11 +128,12 @@ void etimer_set_deadline(uint64_t deadline)
 	spl_t			s;
 	cpu_data_t		*pp;
 
-	s = splclock();					/* no interruptions */
+	s = splclock();				/* no interruptions */
 	pp = current_cpu_datap();
 
-	mytimer = &pp->rtclock_timer;			/* Point to the timer itself */
-	mytimer->deadline = deadline;			/* Set the new expiration time */
+	mytimer = &pp->rtclock_timer;		/* Point to the timer itself */
+	mytimer->deadline = deadline;		/* Set new expiration time */
+	mytimer->when_set = mach_absolute_time();
 
 	etimer_resync_deadlines();
 
@@ -134,44 +153,37 @@ etimer_resync_deadlines(void)
 	rtclock_timer_t		*mytimer;
 	spl_t			s = splclock();
 	cpu_data_t		*pp;
-	x86_lcpu_t		*lcpu;
+	uint32_t		decr;
 
 	pp = current_cpu_datap();
-	lcpu = x86_lcpu();
-	deadline = ~0ULL;
+	deadline = EndOfAllTime;
 
 	/*
-	 * If we have a clock timer set sooner, pop on that.
+	 * If we have a clock timer set, pick that.
 	 */
 	mytimer = &pp->rtclock_timer;
-	if (!mytimer->has_expired && mytimer->deadline > 0)
+	if (!mytimer->has_expired &&
+	    0 < mytimer->deadline && mytimer->deadline < EndOfAllTime)
 		deadline = mytimer->deadline;
 
 	/*
 	 * If we have a power management deadline, see if that's earlier.
 	 */
 	pmdeadline = pmCPUGetDeadline(pp);
-	if (pmdeadline > 0 && pmdeadline < deadline)
-	    deadline = pmdeadline;
+	if (0 < pmdeadline && pmdeadline < deadline)
+		deadline = pmdeadline;
 
 	/*
 	 * Go and set the "pop" event.
 	 */
-	if (deadline > 0) {
-		int     decr;
-		uint64_t now;
+	decr = (uint32_t) setPop(deadline);
 
-		now = mach_absolute_time();
-		decr = setPop(deadline);
-
-		if (deadline < now)
-		        lcpu->rtcPop = now + decr;
-		else
-		        lcpu->rtcPop = deadline;
-
-		lcpu->rtcDeadline = lcpu->rtcPop;
-
-		KERNEL_DEBUG_CONSTANT(MACHDBG_CODE(DBG_MACH_EXCP_DECI, 1) | DBG_FUNC_NONE, decr, 2, 0, 0, 0);
+	/* Record non-PM deadline for latency tool */
+	if (deadline != pmdeadline) {
+		KERNEL_DEBUG_CONSTANT(
+			DECR_SET_DEADLINE | DBG_FUNC_NONE,
+			decr, 2,
+			deadline, (uint32_t)(deadline >> 32), 0);
 	}
 	splx(s);
 }
@@ -185,10 +197,8 @@ __unused void			*arg)
 	rtclock_timer_t		*mytimer;
 	uint64_t			abstime;
 	cpu_data_t			*pp;
-	x86_lcpu_t			*lcpu;
 
 	pp = current_cpu_datap();
-	lcpu = x86_lcpu();
 
 	mytimer = &pp->rtclock_timer;
 	abstime = mach_absolute_time();
@@ -196,33 +206,45 @@ __unused void			*arg)
 	mytimer->has_expired = TRUE;
 	mytimer->deadline = timer_queue_expire(&mytimer->queue, abstime);
 	mytimer->has_expired = FALSE;
+	mytimer->when_set = mach_absolute_time();
 
-	lcpu->rtcPop = EndOfAllTime;
 	etimer_resync_deadlines();
 }
 
-queue_t
+uint64_t	
+timer_call_slop(
+	uint64_t	deadline)
+{
+	uint64_t now = mach_absolute_time();
+	if (deadline > now) {
+		return MIN((deadline - now) >> 3, NSEC_PER_MSEC); /* Min of 12.5% and 1ms */
+	}
+
+	return 0;
+}
+
+mpqueue_head_t *
 timer_queue_assign(
     uint64_t        deadline)
 {
-	cpu_data_t			*cdp = current_cpu_datap();
-	rtclock_timer_t		*timer;
+	cpu_data_t		*cdp = current_cpu_datap();
+	mpqueue_head_t		*queue;
 
 	if (cdp->cpu_running) {
-		timer = &cdp->rtclock_timer;
+		queue = &cdp->rtclock_timer.queue;
 
-		if (deadline < timer->deadline)
+		if (deadline < cdp->rtclock_timer.deadline)
 			etimer_set_deadline(deadline);
 	}
 	else
-		timer = &cpu_datap(master_cpu)->rtclock_timer;
+		queue = &cpu_datap(master_cpu)->rtclock_timer.queue;
 
-    return (&timer->queue);
+    return queue;
 }
 
 void
 timer_queue_cancel(
-    queue_t         queue,
+    mpqueue_head_t  *queue,
     uint64_t        deadline,
     uint64_t        new_deadline)
 {
@@ -230,4 +252,54 @@ timer_queue_cancel(
         if (deadline < new_deadline)
             etimer_set_deadline(new_deadline);
     }
+}
+
+/*
+ * etimer_queue_migrate() is called from the Power-Management kext
+ * when a logical processor goes idle (in a deep C-state) with a distant
+ * deadline so that it's timer queue can be moved to another processor.
+ * This target processor should be the least idle (most busy) --
+ * currently this is the primary processor for the calling thread's package.
+ * Locking restrictions demand that the target cpu must be the boot cpu. 
+ */
+uint32_t
+etimer_queue_migrate(int target_cpu)
+{
+	cpu_data_t	*target_cdp = cpu_datap(target_cpu);
+	cpu_data_t	*cdp = current_cpu_datap();
+	int		ntimers_moved;
+
+	assert(!ml_get_interrupts_enabled());
+	assert(target_cpu != cdp->cpu_number);
+	assert(target_cpu == master_cpu);
+
+	KERNEL_DEBUG_CONSTANT(
+		DECR_TIMER_MIGRATE | DBG_FUNC_START,
+		target_cpu,
+		cdp->rtclock_timer.deadline, (cdp->rtclock_timer.deadline >>32),
+		0, 0);
+
+	/*
+	 * Move timer requests from the local queue to the target processor's.
+	 * The return value is the number of requests moved. If this is 0,
+	 * it indicates that the first (i.e. earliest) timer is earlier than
+	 * the earliest for the target processor. Since this would force a
+	 * resync, the move of this and all later requests is aborted.
+	 */
+	ntimers_moved = timer_queue_migrate(&cdp->rtclock_timer.queue,
+					    &target_cdp->rtclock_timer.queue);
+
+	/*
+	 * Assuming we moved stuff, clear local deadline.
+	 */
+	if (ntimers_moved > 0) {
+		cdp->rtclock_timer.deadline = EndOfAllTime;
+		setPop(EndOfAllTime);
+	}
+ 
+	KERNEL_DEBUG_CONSTANT(
+		DECR_TIMER_MIGRATE | DBG_FUNC_END,
+		target_cpu, ntimers_moved, 0, 0, 0);
+
+	return ntimers_moved;
 }

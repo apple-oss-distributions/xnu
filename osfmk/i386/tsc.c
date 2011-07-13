@@ -51,7 +51,6 @@
 #include <mach/vm_prot.h>
 #include <vm/pmap.h>
 #include <vm/vm_kern.h>		/* for kernel_map */
-#include <i386/ipl.h>
 #include <architecture/i386/pio.h>
 #include <i386/machine_cpu.h>
 #include <i386/cpuid.h>
@@ -143,6 +142,8 @@ tsc_init(void)
 	busFreq = EFI_FSB_frequency();
 
 	switch (cpuid_cpufamily()) {
+	case CPUFAMILY_INTEL_SANDYBRIDGE:
+	case CPUFAMILY_INTEL_WESTMERE:
 	case CPUFAMILY_INTEL_NEHALEM: {
 		uint64_t cpu_mhz;
 		uint64_t msr_flex_ratio;

@@ -1,17 +1,12 @@
 ######################################################################
 #BEGIN  Machine dependent Makefile fragment for x86_64
 ######################################################################
- 
-# Enable -Werror for x86_64 builds
-CFLAGS+= $(WERROR)
-CWARNFLAGS= $(filter-out -Wbad-function-cast, $(CWARNFLAGS_STD))
 
-# Objects that don't compile cleanly:
-#OBJS_NO_WERROR=			\
- 
-OBJS_WERROR=$(filter-out $(OBJS_NO_WERROR),$(OBJS))
+# Files that must go in the __HIB segment:
+UNCONFIGURED_HIB_FILES=	\
+			IOHibernateRestoreKernel.o
 
-$(OBJS_WERROR):		WERROR=-Werror
+HIB_FILES=$(filter $(UNCONFIGURED_HIB_FILES),$(OBJS))
 
 ######################################################################
 #END    Machine dependent Makefile fragment for x86_64

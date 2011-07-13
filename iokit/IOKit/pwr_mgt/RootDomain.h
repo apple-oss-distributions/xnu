@@ -31,17 +31,49 @@
 #include <IOKit/IOService.h>
 #include <IOKit/pwr_mgt/IOPM.h>
 #include "IOKit/pwr_mgt/IOPMPrivate.h"
+#include <IOKit/IOBufferMemoryDescriptor.h> 
 
 #ifdef XNU_KERNEL_PRIVATE
-#if defined(__i386__) || defined(__x86_64__)
-#define ROOT_DOMAIN_RUN_STATES      1
-#endif
 struct AggressivesRecord;
-#endif
-
+struct IOPMMessageFilterContext;
+struct IOPMActions;
+class PMSettingObject;
+class IOPMTimeline;
+class PMEventDetails;
+class PMTraceWorker;
 class IOPMPowerStateQueue;
 class RootDomainUserClient;
-class PMTraceWorker;
+class PMAssertionsTracker;
+#endif
+
+/*!
+ * Types for PM Assertions
+ * For creating, releasing, and getting PM assertion levels.
+ */
+ 
+/*! IOPMDriverAssertionType
+ * A bitfield describing a set of assertions. May be used to specify which assertions
+ * to set with <link>IOPMrootDomain::createPMAssertion</link>; or to query which 
+ * assertions are set with <link>IOPMrootDomain::releasePMAssertion</link>.
+ */
+typedef uint64_t IOPMDriverAssertionType;
+
+/* IOPMDriverAssertionID
+ * Drivers may create PM assertions to request system behavior (keep the system awake,
+ *  or keep the display awake). When a driver creates an assertion via 
+ *  <link>IOPMrootDomain::createPMAssertion</link>, PM returns a handle to 
+ *  the assertion of type IOPMDriverAssertionID.
+ */
+typedef uint64_t IOPMDriverAssertionID;
+#define kIOPMUndefinedDriverAssertionID       0
+
+/* IOPMDriverAssertionLevel
+ * Possible values for IOPMDriverAssertionLevel are <link>kIOPMDriverAssertionLevelOff</link>
+ * and <link>kIOPMDriverAssertionLevelOn</link>
+ */
+typedef uint32_t IOPMDriverAssertionLevel;
+#define kIOPMDriverAssertionLevelOff          0
+#define kIOPMDriverAssertionLevelOn           255
 
 /*
  * Flags for get/setSleepSupported()
@@ -124,6 +156,7 @@ public:
     IOReturn            sleepSystemOptions( OSDictionary *options );
 
     virtual IOReturn    setProperties( OSObject * );
+    virtual bool        serializeProperties( OSSerialize * s ) const;
 
 /*! @function systemPowerEventOccurred
     @abstract Other drivers may inform IOPMrootDomain of system PM events
@@ -224,23 +257,60 @@ public:
                                 const OSSymbol * typeOfInterest,
                                 IOServiceInterestHandler handler,
                                 void * target, void * ref = 0 );
-                                
-    void                pmStatsRecordEvent(
-                                int             eventIndex,
-                                AbsoluteTime    timestamp);
-
-    void                pmStatsRecordApplicationResponse(
-                            const OSSymbol		*response,
-                            const char 		    *name,
-                            int                 messageType,
-                            uint32_t			delay_ms,
-                            int     			app_pid);
 
     virtual IOReturn    callPlatformFunction(
                                 const OSSymbol *functionName,
                                 bool waitForFunction,
                                 void *param1, void *param2,
                                 void *param3, void *param4 );
+
+/*! @function createPMAssertion
+    @abstract Creates an assertion to influence system power behavior.
+    @param whichAssertionBits A bitfield specify the assertion that the caller requests.
+    @param assertionLevel An integer detailing the initial assertion level, kIOPMDriverAssertionLevelOn
+        or kIOPMDriverAssertionLevelOff.
+    @param ownerService A pointer to the caller's IOService class, for tracking.
+    @param ownerDescription A reverse-DNS string describing the caller's identity and reason.
+    @result On success, returns a new assertion of type IOPMDriverAssertionID
+*/
+    IOPMDriverAssertionID createPMAssertion(
+                                IOPMDriverAssertionType whichAssertionsBits,
+                                IOPMDriverAssertionLevel assertionLevel,
+                                IOService *ownerService,
+                                const char *ownerDescription);
+
+/* @function setPMAssertionLevel
+   @abstract Modify the level of a pre-existing assertion.
+   @discussion Change the value of a PM assertion to influence system behavior, 
+    without undergoing the work required to create or destroy an assertion. Suggested
+    for clients who will assert and de-assert needs for PM behavior several times over
+    their lifespan.
+   @param assertionID An assertion ID previously returned by <link>createPMAssertion</link>
+   @param assertionLevel The new assertion level.
+   @result kIOReturnSuccess if it worked; kIOReturnNotFound or other IOReturn error on failure.
+*/
+    IOReturn setPMAssertionLevel(IOPMDriverAssertionID assertionID, IOPMDriverAssertionLevel assertionLevel);
+
+/*! @function getPMAssertionLevel
+    @absract Returns the active level of the specified assertion(s).
+    @discussion Returns <link>kIOPMDriverAssertionLevelOff</link> or 
+        <link>kIOPMDriverAssertionLevelOn</link>. If multiple assertions are specified
+        in the bitfield, only returns <link>kIOPMDriverAssertionLevelOn</link>
+        if all assertions are active.
+    @param whichAssertionBits Bits defining the assertion or assertions the caller is interested in
+        the level of. If in doubt, pass <link>kIOPMDriverAssertionCPUBit</link> as the argument.
+    @result Returns <link>kIOPMDriverAssertionLevelOff</link> or 
+        <link>kIOPMDriverAssertionLevelOn</link> indicating the specified assertion's levels, if available.
+        If the assertions aren't supported on this machine, or aren't recognized by the OS, the
+        result is undefined.
+*/
+    IOPMDriverAssertionLevel getPMAssertionLevel(IOPMDriverAssertionType whichAssertionBits);
+
+/*! @function releasePMAssertion
+    @abstract Removes an assertion to influence system power behavior.
+    @result On success, returns a new assertion of type IOPMDriverAssertionID *
+*/
+    IOReturn releasePMAssertion(IOPMDriverAssertionID releaseAssertion);
 
 private:
     virtual IOReturn    changePowerStateTo( unsigned long ordinal );
@@ -254,69 +324,154 @@ private:
 #ifdef XNU_KERNEL_PRIVATE
     /* Root Domain internals */
 public:
-
-#if ROOT_DOMAIN_RUN_STATES
     void        tagPowerPlaneService(
-                    IOService * service,
-                    uint32_t *  rdFlags );
+                    IOService *     service,
+                    IOPMActions *   actions );
 
-    void        handleActivityTickleForService(
+    void        overrideOurPowerChange(
+                    IOService *     service,
+                    IOPMActions *   actions,
+                    unsigned long * inOutPowerState,
+                    uint32_t *      inOutChangeFlags );
+
+    void        handleOurPowerChangeStart(
+                    IOService *     service,
+                    IOPMActions *   actions,
+                    uint32_t        powerState,
+                    uint32_t *      inOutChangeFlags );
+
+    void        handleOurPowerChangeDone(
+                    IOService *     service,
+                    IOPMActions *   actions,
+                    uint32_t        powerState,
+                    uint32_t        changeFlags );
+
+    void        overridePowerChangeForUIService(
+                    IOService *     service,
+                    IOPMActions *   actions,
+                    unsigned long * inOutPowerState,
+                    uint32_t *      inOutChangeFlags );
+
+    void        handleActivityTickleForDisplayWrangler(
+                    IOService *     service,
+                    IOPMActions *   actions );
+
+    bool        shouldDelayChildNotification(
                     IOService * service );
 
-    void        handlePowerChangeStartForService(
-                    IOService * service,
-                    uint32_t *  rootDomainFlags,
-                    uint32_t    newPowerState,
-                    uint32_t    changeFlags );
-
-    void        handlePowerChangeDoneForService(
-                    IOService * service,
-                    uint32_t *  rootDomainFlags,
-                    uint32_t    newPowerState,
-                    uint32_t    changeFlags );
-
-    void        overridePowerStateForService(
+    void        handlePowerChangeStartForPCIDevice(
                     IOService *     service,
-                    uint32_t *      rdFlags,
-                    unsigned long * powerState,
+                    IOPMActions *   actions, 
+                    uint32_t        powerState,
+                    uint32_t *      inOutChangeFlags );
+
+    void        handlePowerChangeDoneForPCIDevice(
+                    IOService *     service,
+                    IOPMActions *   actions, 
+                    uint32_t        powerState,
                     uint32_t        changeFlags );
+
+    void        askChangeDownDone(
+                    IOPMPowerChangeFlags * inOutChangeFlags,
+                    bool * cancel );
+
+    void        handlePublishSleepWakeUUID(
+                    bool shouldPublish);
+
+    void        handleQueueSleepWakeUUID(
+                    OSObject *obj);
 
     IOReturn    setMaintenanceWakeCalendar(
                     const IOPMCalendarStruct * calendar );
-#endif /* ROOT_DOMAIN_RUN_STATES */
 
     // Handle callbacks from IOService::systemWillShutdown()
-	void acknowledgeSystemWillShutdown( IOService * from );
+	void        acknowledgeSystemWillShutdown( IOService * from );
 
     // Handle platform halt and restart notifications
-	void handlePlatformHaltRestart( UInt32 pe_type );
+	void        handlePlatformHaltRestart( UInt32 pe_type );
 
-    IOReturn shutdownSystem( void );
-    IOReturn restartSystem( void );
-    void handleSleepTimerExpiration( void );
-    void handleForcedSleepTimerExpiration( void );
-    void stopIgnoringClamshellEventsDuringWakeup( void );
+    IOReturn    shutdownSystem( void );
+    IOReturn    restartSystem( void );
+    void        handleSleepTimerExpiration( void );
+
+    bool        activitySinceSleep(void);
+    bool        abortHibernation(void);
 
     IOReturn    joinAggressiveness( IOService * service );
     void        handleAggressivesRequests( void );
 
     void        tracePoint( uint8_t point );
+    void        tracePoint( uint8_t point, uint8_t data );
+    void        traceDetail( uint32_t data32 );
+
+    bool        systemMessageFilter(
+                    void * object, void * arg1, void * arg2, void * arg3 );
+
+/*! @function recordPMEvent
+    @abstract Logs IOService PM event timing.
+    @discussion Should only be called from IOServicePM. Should not be exported.
+    @result kIOReturn on success.
+*/
+    IOReturn    recordPMEvent( PMEventDetails *details );
+    IOReturn    recordAndReleasePMEvent( PMEventDetails *details );
+    IOReturn    recordPMEventGated( PMEventDetails *details );
+    IOReturn    recordAndReleasePMEventGated( PMEventDetails *details );
+
+    void        pmStatsRecordEvent(
+                                int             eventIndex,
+                                AbsoluteTime    timestamp);
+
+    void        pmStatsRecordApplicationResponse(
+                                const OSSymbol		*response,
+                                const char 		    *name,
+                                int                 messageType,
+                                uint32_t			delay_ms,
+                                int     			app_pid);
+
+#if HIBERNATION
+    bool        getHibernateSettings(
+                    uint32_t *  hibernateMode,
+                    uint32_t *  hibernateFreeRatio,
+                    uint32_t *  hibernateFreeTime );
+#endif
 
 private:
     friend class PMSettingObject;
+    friend class RootDomainUserClient;
+    friend class PMAssertionsTracker;
 
-    // Points to our parent
+    static IOReturn sysPowerDownHandler( void * target, void * refCon,
+                                    UInt32 messageType, IOService * service,
+                                    void * messageArgument, vm_size_t argSize );
+
+    static IOReturn displayWranglerNotification( void * target, void * refCon,
+                                    UInt32 messageType, IOService * service,
+                                    void * messageArgument, vm_size_t argSize );
+
+    static IOReturn rootBusyStateChangeHandler( void * target, void * refCon,
+                                    UInt32 messageType, IOService * service,
+                                    void * messageArgument, vm_size_t argSize );
+
+    static bool displayWranglerMatchPublished( void * target, void * refCon,
+                                    IOService * newService,
+                                    IONotifier * notifier);
+
+    static bool batteryPublished( void * target, void * refCon,
+                                    IOService * resourceService,
+                                    IONotifier * notifier);
+
     IOService *             wrangler;
-    class IORootParent *    patriarch;
+    IOService *             wranglerConnection;
 
     IOLock                  *featuresDictLock;  // guards supportedFeatures
     IOPMPowerStateQueue     *pmPowerStateQueue;
 
     OSArray                 *allowedPMSettings;
     PMTraceWorker           *pmTracer;
+    PMAssertionsTracker     *pmAssertions;
 
     // Settings controller info
-    IORecursiveLock         *settingsCtrlLock;  
+    IOLock                  *settingsCtrlLock;  
     OSDictionary            *settingsCallbacks;
     OSDictionary            *fPMSettingsDict;
 
@@ -324,16 +479,16 @@ private:
     IONotifier              *_displayWranglerNotifier;
 
     // Statistics
-    const OSSymbol           *_statsNameKey;
-    const OSSymbol           *_statsPIDKey;
-    const OSSymbol           *_statsTimeMSKey;
-    const OSSymbol           *_statsResponseTypeKey;
-    const OSSymbol           *_statsMessageTypeKey;
+    const OSSymbol          *_statsNameKey;
+    const OSSymbol          *_statsPIDKey;
+    const OSSymbol          *_statsTimeMSKey;
+    const OSSymbol          *_statsResponseTypeKey;
+    const OSSymbol          *_statsMessageTypeKey;
     
     OSString                *queuedSleepWakeUUIDString;
-
     OSArray                 *pmStatsAppResponses;
 
+    bool                    uuidPublished;
     PMStatsStruct           pmStats;
 
     // Pref: idle time before idle sleep
@@ -346,89 +501,128 @@ private:
     unsigned long           extraSleepDelay;		
 
     // Used to wait between say display idle and system idle
-    thread_call_t           extraSleepTimer;		
-
-    // Used to ignore clamshell close events while we're waking from sleep
-    thread_call_t           clamshellWakeupIgnore;   
-
+    thread_call_t           extraSleepTimer;
     thread_call_t           diskSyncCalloutEntry;
 
-    uint32_t                runStateIndex;
-    uint32_t                runStateFlags;
-    uint32_t                nextRunStateIndex;
-    uint32_t                wranglerTickled;
+    // IOPMActions parameter encoding
+    enum {
+        kPMActionsFlagIsDisplayWrangler = 0x00000001,
+        kPMActionsFlagIsGraphicsDevice  = 0x00000002,
+        kPMActionsFlagIsAudioDevice     = 0x00000004,
+        kPMActionsFlagLimitPower        = 0x00000008,
+        kPMActionsPCIBitNumberMask      = 0x000000ff  
+    };
+
+    // Track system capabilities.
+    uint32_t                _desiredCapability;
+    uint32_t                _currentCapability;
+    uint32_t                _pendingCapability;
+    uint32_t                _highestCapability;
+    OSSet *                 _joinedCapabilityClients;
+    uint32_t                _systemStateGeneration;
+
+    // Type of clients that can receive system messages.
+    enum {
+        kSystemMessageClientConfigd   = 0x01,
+        kSystemMessageClientApp       = 0x02,
+        kSystemMessageClientUser      = 0x03,
+        kSystemMessageClientKernel    = 0x04,
+        kSystemMessageClientAll       = 0x07
+    };
+    uint32_t                _systemMessageClientMask;
+
+    // Power state and capability change transitions.
+    enum {
+        kSystemTransitionNone         = 0,
+        kSystemTransitionSleep        = 1,
+        kSystemTransitionWake         = 2,
+        kSystemTransitionCapability   = 3,
+        kSystemTransitionNewCapClient = 4
+    }                       _systemTransitionType;
 
     unsigned int            systemBooting           :1;
     unsigned int            systemShutdown          :1;
+    unsigned int            systemDarkWake          :1;
     unsigned int            clamshellExists         :1;
-    unsigned int            clamshellIsClosed       :1;
-    unsigned int            ignoringClamshell       :1;
-    unsigned int            ignoringClamshellOnWake :1;
+    unsigned int            clamshellClosed         :1;
+    unsigned int            clamshellDisabled       :1;
     unsigned int            desktopMode             :1;
-    unsigned int            acAdaptorConnected      :1;    
+    unsigned int            acAdaptorConnected      :1;
 
-    unsigned int            allowSleep              :1;
-    unsigned int            sleepIsSupported        :1;
-    unsigned int            canSleep                :1;
-    unsigned int            sleepASAP               :1;
     unsigned int            idleSleepTimerPending   :1;
     unsigned int            userDisabledAllSleep    :1;
-    unsigned int            ignoreChangeDown        :1;
+    unsigned int            childPreventSystemSleep :1;
+    unsigned int            ignoreTellChangeDown    :1;
     unsigned int            wranglerAsleep          :1;
+    unsigned int            wranglerTickled         :1;
+    unsigned int            wranglerSleepIgnored    :1;
+    unsigned int            graphicsSuppressed      :1;
+
+    unsigned int            capabilityLoss          :1;
+    unsigned int            pciCantSleepFlag        :1;
+    unsigned int            pciCantSleepValid       :1;
+    unsigned int            logWranglerTickle       :1;
+    unsigned int            logGraphicsClamp        :1;
+    unsigned int            darkWakeToSleepASAP     :1;
+    unsigned int            darkWakeMaintenance     :1;
+    unsigned int            darkWakePostTickle      :1;
+
+    unsigned int            sleepTimerMaintenance   :1;
+    unsigned int            lowBatteryCondition     :1;
+    unsigned int            hibernateDisabled       :1;
+    unsigned int            hibernateNoDefeat       :1;
+    unsigned int            hibernateAborted        :1;
+    unsigned int            rejectWranglerTickle    :1;
+
+    uint32_t                hibernateMode;
+    uint32_t                userActivityCount;
+    uint32_t                userActivityAtSleep;
+    uint32_t                lastSleepReason;
 
     // Info for communicating system state changes to PMCPU
     int32_t                 idxPMCPUClamshell;
     int32_t                 idxPMCPULimitedPower;
 
     IOOptionBits            platformSleepSupport;
+    uint32_t                _debugWakeSeconds;
 
     queue_head_t            aggressivesQueue;
     thread_call_t           aggressivesThreadCall;
     OSData *                aggressivesData;
 
     AbsoluteTime            wranglerSleepTime;
-    
+    AbsoluteTime            systemWakeTime;
+
     // PCI top-level PM trace
     IOService *             pciHostBridgeDevice;
+    IOService *             pciHostBridgeDriver;
+
+    IONotifier *            systemCapabilityNotifier;
+
+    IOPMTimeline            *timeline;
 
 	// IOPMrootDomain internal sleep call
-    IOReturn privateSleepSystem( const char *sleepReason );
-    void announcePowerSourceChange( void );
+    IOReturn    privateSleepSystem( uint32_t sleepReason );
+    void        reportUserInput( void );
+    bool        checkSystemCanSleep( IOOptionBits options = 0 );
 
-    void reportUserInput( void );
-    static IOReturn sysPowerDownHandler( void * target, void * refCon,
-                                    UInt32 messageType, IOService * service,
-                                    void * messageArgument, vm_size_t argSize );
+    void        adjustPowerState( bool sleepASAP = false );
+    void        setQuickSpinDownTimeout( void );
+    void        restoreUserSpinDownTimeout( void );
 
-    static IOReturn displayWranglerNotification( void * target, void * refCon,
-                                    UInt32 messageType, IOService * service,
-                                    void * messageArgument, vm_size_t argSize );
+    bool        shouldSleepOnClamshellClosed(void );
+    void        sendClientClamshellNotification( void );
 
-    static bool displayWranglerPublished( void * target, void * refCon,
-                                    IOService * newService);
-
-    static bool batteryPublished( void * target, void * refCon,
-                                    IOService * resourceService );
-
-    void adjustPowerState( void );
-    void setQuickSpinDownTimeout( void );
-    void restoreUserSpinDownTimeout( void );
-    
-    bool shouldSleepOnClamshellClosed(void );
-    void sendClientClamshellNotification( void );
-    
     // Inform PMCPU of changes to state like lid, AC vs. battery
-    void informCPUStateChange( uint32_t type, uint32_t value );
+    void        informCPUStateChange( uint32_t type, uint32_t value );
 
-    void dispatchPowerEvent( uint32_t event, void * arg0, void * arg1 );
-    void handlePowerNotification( UInt32 msg );
+    void        dispatchPowerEvent( uint32_t event, void * arg0, uint64_t arg1 );
+    void        handlePowerNotification( UInt32 msg );
 
-    IOReturn setPMSetting(const OSSymbol *, OSObject *);
+    IOReturn    setPMSetting(const OSSymbol *, OSObject *);
 
-    void startIdleSleepTimer( uint32_t inSeconds );
-    void cancelIdleSleepTimer( void );
-
-    void updateRunState( uint32_t inRunState );
+    void        startIdleSleepTimer( uint32_t inSeconds );
+    void        cancelIdleSleepTimer( void );
 
     IOReturn    setAggressiveness(
                         unsigned long type,
@@ -444,11 +638,23 @@ private:
                         const AggressivesRecord * array,
                         int count );
 
-    void        aggressivenessChanged( void );
+    // getPMTraceMemoryDescriptor should only be called by our friend RootDomainUserClient
+    IOMemoryDescriptor *getPMTraceMemoryDescriptor(void);
 
-    
-    void publishSleepWakeUUID( bool shouldPublish );
-    
+    IOReturn    setPMAssertionUserLevels(IOPMDriverAssertionType);
+
+    void        publishSleepWakeUUID( bool shouldPublish );
+
+    void        evaluatePolicy( int stimulus, uint32_t arg = 0 );
+
+    void        deregisterPMSettingObject( PMSettingObject * pmso );
+
+#if HIBERNATION
+    bool        getSleepOption( const char * key, uint32_t * option );
+    bool        evaluateSystemSleepPolicy( IOPMSystemSleepParameters * p );
+    void        evaluateSystemSleepPolicyEarly( void );
+    void        evaluateSystemSleepPolicyFinal( void );
+#endif /* HIBERNATION */
 #endif /* XNU_KERNEL_PRIVATE */
 };
 
@@ -457,10 +663,9 @@ class IORootParent: public IOService
 {
     OSDeclareFinalStructors(IORootParent)
 
-private:
-    unsigned long mostRecentChange;
-
 public:
+    static void initialize( void );
+    virtual OSObject * copyProperty( const char * aKey ) const;
     bool start( IOService * nub );
     void shutDownSystem( void );
     void restartSystem( void );

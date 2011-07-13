@@ -977,7 +977,7 @@ mach_vm_remap(
 	mach_vm_offset_t	*address,
 	mach_vm_size_t	size,
 	mach_vm_offset_t	mask,
-	boolean_t		anywhere,
+	int			flags,
 	vm_map_t		src_map,
 	mach_vm_offset_t	memory_address,
 	boolean_t		copy,
@@ -991,13 +991,17 @@ mach_vm_remap(
 	if (VM_MAP_NULL == target_map || VM_MAP_NULL == src_map)
 		return KERN_INVALID_ARGUMENT;
 
+	/* filter out any kernel-only flags */
+	if (flags & ~VM_FLAGS_USER_REMAP)
+		return KERN_INVALID_ARGUMENT;
+
 	map_addr = (vm_map_offset_t)*address;
 
 	kr = vm_map_remap(target_map,
 			  &map_addr,
 			  size,
 			  mask,
-			  anywhere,
+			  flags,
 			  src_map,
 			  memory_address,
 			  copy,
@@ -1025,7 +1029,7 @@ vm_remap(
 	vm_offset_t		*address,
 	vm_size_t		size,
 	vm_offset_t		mask,
-	boolean_t		anywhere,
+	int			flags,
 	vm_map_t		src_map,
 	vm_offset_t		memory_address,
 	boolean_t		copy,
@@ -1039,13 +1043,17 @@ vm_remap(
 	if (VM_MAP_NULL == target_map || VM_MAP_NULL == src_map)
 		return KERN_INVALID_ARGUMENT;
 
+	/* filter out any kernel-only flags */
+	if (flags & ~VM_FLAGS_USER_REMAP)
+		return KERN_INVALID_ARGUMENT;
+
 	map_addr = (vm_map_offset_t)*address;
 
 	kr = vm_map_remap(target_map,
 			  &map_addr,
 			  size,
 			  mask,
-			  anywhere,
+			  flags,
 			  src_map,
 			  memory_address,
 			  copy,
@@ -1236,6 +1244,32 @@ vm_msync(
 			(vm_map_size_t)size, sync_flags);
 }
 
+
+int
+vm_toggle_entry_reuse(int toggle, int *old_value)
+{
+	vm_map_t map = current_map();
+	
+	if(toggle == VM_TOGGLE_GETVALUE && old_value != NULL){
+		*old_value = map->disable_vmentry_reuse;
+	} else if(toggle == VM_TOGGLE_SET){
+		vm_map_lock(map);
+		map->disable_vmentry_reuse = TRUE;
+		if (map->first_free == vm_map_to_entry(map)) {
+			map->highest_entry_end = vm_map_min(map);
+		} else {
+			map->highest_entry_end = map->first_free->vme_end;
+		}
+		vm_map_unlock(map);
+	} else if (toggle == VM_TOGGLE_CLEAR){
+		vm_map_lock(map);
+		map->disable_vmentry_reuse = FALSE;
+		vm_map_unlock(map);
+	} else
+		return KERN_INVALID_ARGUMENT;
+
+	return KERN_SUCCESS;
+}
 
 /*
  *	mach_vm_behavior_set 
@@ -1796,8 +1830,8 @@ mach_make_memory_entry_64(
 
 	unsigned int		access;
 	vm_prot_t		protections;
+	vm_prot_t		original_protections, mask_protections;
 	unsigned int		wimg_mode;
-	boolean_t		cache_attr = FALSE;
 
 	if (((permission & 0x00FF0000) &
 	     ~(MAP_MEM_ONLY |
@@ -1817,7 +1851,9 @@ mach_make_memory_entry_64(
 		parent_entry = NULL;
 	}
 
-	protections = permission & VM_PROT_ALL;
+	original_protections = permission & VM_PROT_ALL;
+	protections = original_protections;
+	mask_protections = permission & VM_PROT_IS_MASK;
 	access = GET_MAP_MEM(permission);
 
 	user_handle = IP_NULL;
@@ -1838,7 +1874,7 @@ mach_make_memory_entry_64(
 		if(parent_is_object && object != VM_OBJECT_NULL)
 			wimg_mode = object->wimg_bits;
 		else
-			wimg_mode = VM_WIMG_DEFAULT;
+			wimg_mode = VM_WIMG_USE_DEFAULT;
 		if((access != GET_MAP_MEM(parent_entry->protection)) &&
 				!(parent_entry->protection & VM_PROT_WRITE)) { 
 			return KERN_INVALID_RIGHT;
@@ -1848,7 +1884,7 @@ mach_make_memory_entry_64(
 		   wimg_mode = VM_WIMG_IO;
 		} else if (access == MAP_MEM_COPYBACK) {
 		   SET_MAP_MEM(access, parent_entry->protection);
-		   wimg_mode = VM_WIMG_DEFAULT;
+		   wimg_mode = VM_WIMG_USE_DEFAULT;
 		} else if (access == MAP_MEM_WTHRU) {
 		   SET_MAP_MEM(access, parent_entry->protection);
 		   wimg_mode = VM_WIMG_WTHRU;
@@ -1856,29 +1892,14 @@ mach_make_memory_entry_64(
 		   SET_MAP_MEM(access, parent_entry->protection);
 		   wimg_mode = VM_WIMG_WCOMB;
 		}
-		if(parent_is_object && object &&
+		if (parent_is_object && object &&
 			(access != MAP_MEM_NOOP) && 
 			(!(object->nophyscache))) {
-			if(object->wimg_bits != wimg_mode) {
-			   vm_page_t p;
-			   if ((wimg_mode == VM_WIMG_IO)
-				|| (wimg_mode == VM_WIMG_WCOMB))
-				cache_attr = TRUE;
-			   else 
-				cache_attr = FALSE;
-			   vm_object_lock(object);
-			   vm_object_paging_wait(object, THREAD_UNINT);
-		           object->wimg_bits = wimg_mode;
-			   queue_iterate(&object->memq, 
-						p, vm_page_t, listq) {
-				if (!p->fictitious) {
-				        if (p->pmapped)
-					        pmap_disconnect(p->phys_page);
-					if (cache_attr)
-					        pmap_sync_page_attributes_phys(p->phys_page);
-				}
-			   }
-			   vm_object_unlock(object);
+
+			if (object->wimg_bits != wimg_mode) {
+				vm_object_lock(object);
+				vm_object_change_wimg_mode(object, wimg_mode);
+				vm_object_unlock(object);
 			}
 		}
 		if (object_handle)
@@ -1927,7 +1948,7 @@ mach_make_memory_entry_64(
 		if (access == MAP_MEM_IO) {
 			wimg_mode = VM_WIMG_IO;
 		} else if (access == MAP_MEM_COPYBACK) {
-			wimg_mode = VM_WIMG_DEFAULT;
+			wimg_mode = VM_WIMG_USE_DEFAULT;
 		} else if (access == MAP_MEM_WTHRU) {
 			wimg_mode = VM_WIMG_WTHRU;
 		} else if (access == MAP_MEM_WCOMB) {
@@ -1977,6 +1998,7 @@ mach_make_memory_entry_64(
 		}
 
 redo_lookup:
+		protections = original_protections;
 		vm_map_lock_read(target_map);
 
 		/* get the object associated with the target address */
@@ -1984,13 +2006,22 @@ redo_lookup:
 		/* that requested by the caller */
 
 		kr = vm_map_lookup_locked(&target_map, map_offset, 
-			        protections, OBJECT_LOCK_EXCLUSIVE, &version,
-				&object, &obj_off, &prot, &wired,
-				&fault_info,
-				&real_map);
+					  protections | mask_protections,
+					  OBJECT_LOCK_EXCLUSIVE, &version,
+					  &object, &obj_off, &prot, &wired,
+					  &fault_info,
+					  &real_map);
 		if (kr != KERN_SUCCESS) {
 			vm_map_unlock_read(target_map);
 			goto make_mem_done;
+		}
+		if (mask_protections) {
+			/*
+			 * The caller asked us to use the "protections" as
+			 * a mask, so restrict "protections" to what this
+			 * mapping actually allows.
+			 */
+			protections &= prot;
 		}
 		if (((prot & protections) != protections) 
 					|| (object == kernel_object)) {
@@ -2077,6 +2108,14 @@ redo_lookup:
 			 /* JMM - The check below should be reworked instead. */
 			 object->true_share = TRUE;
 		      }
+		if (mask_protections) {
+			/*
+			 * The caller asked us to use the "protections" as
+			 * a mask, so restrict "protections" to what this
+			 * mapping actually allows.
+			 */
+			protections &= map_entry->max_protection;
+		}
 		if(((map_entry->max_protection) & protections) != protections) {
 			 kr = KERN_INVALID_RIGHT;
                          vm_object_unlock(object);
@@ -2105,6 +2144,16 @@ redo_lookup:
 					   next_entry->vme_prev->offset + 
 					   (next_entry->vme_prev->vme_end - 
 				 	   next_entry->vme_prev->vme_start))) {
+					if (mask_protections) {
+						/*
+						 * The caller asked us to use
+						 * the "protections" as a mask,
+						 * so restrict "protections" to
+						 * what this mapping actually
+						 * allows.
+						 */
+						protections &= next_entry->max_protection;
+					}
 					if(((next_entry->max_protection) 
 						& protections) != protections) {
 			 			break;
@@ -2132,7 +2181,7 @@ redo_lookup:
 			/* under us.  */
 
 	      		if ((map_entry->needs_copy  || object->shadowed ||
-			     (object->size > total_size))
+			     (object->vo_size > total_size))
 					&& !object->true_share) {
 				/*
 				 * We have to unlock the VM object before
@@ -2169,7 +2218,7 @@ redo_lookup:
 				 
 		   		/* create a shadow object */
 				vm_object_shadow(&map_entry->object.vm_object,
-						&map_entry->offset, total_size);
+						 &map_entry->offset, total_size);
 				shadow_object = map_entry->object.vm_object;
 				vm_object_unlock(object);
 
@@ -2267,28 +2316,8 @@ redo_lookup:
 		if(real_map != target_map)
 			vm_map_unlock_read(real_map);
 
-		if(object->wimg_bits != wimg_mode) {
-			vm_page_t p;
-
-			vm_object_paging_wait(object, THREAD_UNINT);
-
-			if ((wimg_mode == VM_WIMG_IO)
-			    || (wimg_mode == VM_WIMG_WCOMB))
-				cache_attr = TRUE;
-			else 
-				cache_attr = FALSE;
-
-			queue_iterate(&object->memq, 
-						p, vm_page_t, listq) {
-				if (!p->fictitious) {
-				        if (p->pmapped)
-					        pmap_disconnect(p->phys_page);
-					if (cache_attr)
-					        pmap_sync_page_attributes_phys(p->phys_page);
-				}
-			}
-			object->wimg_bits = wimg_mode;
-		}
+		if (object->wimg_bits != wimg_mode)
+			vm_object_change_wimg_mode(object, wimg_mode);
 
 		/* the size of mapped entry that overlaps with our region */
 		/* which is targeted for share.                           */
@@ -2345,7 +2374,8 @@ redo_lookup:
 		user_entry->is_sub_map = FALSE;
 		user_entry->is_pager = FALSE;
 		user_entry->offset = obj_off;
-		user_entry->protection = permission;
+		user_entry->protection = protections;
+		SET_MAP_MEM(GET_MAP_MEM(permission), user_entry->protection);
 		user_entry->size = map_size;
 
 		/* user_object pager and internal fields are not used */
@@ -2367,6 +2397,14 @@ redo_lookup:
 			goto make_mem_done;
 		}
 
+		if (mask_protections) {
+			/*
+			 * The caller asked us to use the "protections" as
+			 * a mask, so restrict "protections" to what this
+			 * mapping actually allows.
+			 */
+			protections &= parent_entry->protection;
+		}
 		if((protections & parent_entry->protection) != protections) {
 			kr = KERN_PROTECTION_FAILURE;
 			goto make_mem_done;
@@ -2417,10 +2455,12 @@ redo_lookup:
 
 make_mem_done:
 	if (user_handle != IP_NULL) {
-		ipc_port_dealloc_kernel(user_handle);
-	}
-	if (user_entry != NULL) {
-		kfree(user_entry, sizeof *user_entry);
+		/*
+		 * Releasing "user_handle" causes the kernel object
+		 * associated with it ("user_entry" here) to also be
+		 * released and freed.
+		 */
+		mach_memory_entry_port_release(user_handle);
 	}
 	return kr;
 }
@@ -2644,7 +2684,7 @@ mach_memory_entry_purgable_control(
 	vm_object_lock(object);
 
 	/* check that named entry covers entire object ? */
-	if (mem_entry->offset != 0 || object->size != mem_entry->size) {
+	if (mem_entry->offset != 0 || object->vo_size != mem_entry->size) {
 		vm_object_unlock(object);
 		named_entry_unlock(mem_entry);
 		return KERN_INVALID_ARGUMENT;
@@ -3048,7 +3088,7 @@ vm_map_get_phys_page(
 			/* If they are not present in the object they will  */
 			/* have to be picked up from the pager through the  */
 			/* fault mechanism.  */
-			if(entry->object.vm_object->shadow_offset == 0) {
+			if(entry->object.vm_object->vo_shadow_offset == 0) {
 				/* need to call vm_fault */
 				vm_map_unlock(map);
 				vm_fault(map, map_offset, VM_PROT_NONE, 
@@ -3058,7 +3098,7 @@ vm_map_get_phys_page(
 			}
 			offset = entry->offset + (map_offset - entry->vme_start);
 			phys_page = (ppnum_t)
-				((entry->object.vm_object->shadow_offset 
+				((entry->object.vm_object->vo_shadow_offset 
 							+ offset) >> 12);
 			break;
 			
@@ -3073,7 +3113,7 @@ vm_map_get_phys_page(
 					vm_object_t old_object;
 					vm_object_lock(object->shadow);
 					old_object = object;
-					offset = offset + object->shadow_offset;
+					offset = offset + object->vo_shadow_offset;
 					object = object->shadow;
 					vm_object_unlock(old_object);
 				} else {

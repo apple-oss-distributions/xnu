@@ -1,6 +1,5 @@
-
 /*
- * Copyright (c) 2000-2007 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2010 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -42,6 +41,7 @@
 
 #include <sys/types.h>
 #include <kern/locks.h>
+#include <sys/disk.h>
 
 typedef struct _blk_info {
     int32_t    bsize;
@@ -74,19 +74,29 @@ typedef struct block_list_header {
 
 struct journal;
 
+struct jnl_trim_list {
+	uint32_t	allocated_count;
+	uint32_t	extent_count;
+	dk_extent_t *extents;
+};
+
+typedef void (*jnl_trim_callback_t)(void *arg, uint32_t extent_count, const dk_extent_t *extents);
+
 typedef struct transaction {
-    int                 tbuffer_size;  // in bytes
-    char               *tbuffer;       // memory copy of the transaction
-    block_list_header  *blhdr;         // points to the first byte of tbuffer
-    int                 num_blhdrs;    // how many buffers we've allocated
-    int                 total_bytes;   // total # of bytes in transaction
-    int                 num_flushed;   // how many bytes have been flushed
-    int                 num_killed;    // how many bytes were "killed"
-    off_t               journal_start; // where in the journal this transaction starts
-    off_t               journal_end;   // where in the journal this transaction ends
-    struct journal     *jnl;           // ptr back to the journal structure
-    struct transaction *next;          // list of tr's (either completed or to be free'd)
-    uint32_t            sequence_num;
+    int                  tbuffer_size;  // in bytes
+    char                *tbuffer;       // memory copy of the transaction
+    block_list_header   *blhdr;         // points to the first byte of tbuffer
+    int                  num_blhdrs;    // how many buffers we've allocated
+    int                  total_bytes;   // total # of bytes in transaction
+    int                  num_flushed;   // how many bytes have been flushed
+    int                  num_killed;    // how many bytes were "killed"
+    off_t                journal_start; // where in the journal this transaction starts
+    off_t                journal_end;   // where in the journal this transaction ends
+    struct journal      *jnl;           // ptr back to the journal structure
+    struct transaction  *next;          // list of tr's (either completed or to be free'd)
+    uint32_t             sequence_num;
+    struct jnl_trim_list trim;
+    boolean_t            delayed_header_write;
 } transaction;
 
 
@@ -125,6 +135,8 @@ typedef struct journal_header {
  */
 typedef struct journal {
     lck_mtx_t           jlock;             // protects the struct journal data
+    lck_mtx_t		flock;             // serializes flushing of journal
+    lck_rw_t            trim_lock;         // protects the async_trim field, below
 
     struct vnode       *jdev;              // vnode of the device where the journal lives
     off_t               jdev_offset;       // byte offset to the start of the journal
@@ -137,10 +149,22 @@ typedef struct journal {
 
     int32_t             flags;
     int32_t             tbuffer_size;      // default transaction buffer size
+    boolean_t		flush_aborted;
+    boolean_t		flushing;
+    boolean_t		asyncIO;
+    boolean_t		writing_header;
+    boolean_t		write_header_failed;
 
+    struct jnl_trim_list *async_trim;      // extents to be trimmed by transaction being asynchronously flushed
+    jnl_trim_callback_t	trim_callback;
+    void				*trim_callback_arg;
+    
     char               *header_buf;        // in-memory copy of the journal header
     int32_t             header_buf_size;
     journal_header     *jhdr;              // points to the first byte of header_buf
+
+    uint32_t		saved_sequence_num;
+    uint32_t		sequence_num;
 
     off_t               max_read_size;
     off_t               max_write_size;
@@ -166,6 +190,7 @@ typedef struct journal {
 #define JOURNAL_FLUSHCACHE_ERR    0x00040000   // means we already printed this err
 #define JOURNAL_NEED_SWAP         0x00080000   // swap any data read from disk
 #define JOURNAL_DO_FUA_WRITES     0x00100000   // do force-unit-access writes
+#define JOURNAL_USE_UNMAP         0x00200000   // device supports UNMAP (TRIM)
 
 /* journal_open/create options are always in the low-16 bits */
 #define JOURNAL_OPTION_FLAGS_MASK 0x0000ffff
@@ -283,16 +308,26 @@ void      journal_close(journal *journalp);
  * then call journal_kill_block().  This will mark it so
  * that the journal does not play it back (effectively
  * dropping it).
+ *
+ * journal_trim_add_extent() marks a range of bytes on the device which should
+ * be trimmed (invalidated, unmapped).  journal_trim_remove_extent() marks a
+ * range of bytes which should no longer be trimmed.  Accumulated extents
+ * will be trimmed when the transaction is flushed to the on-disk journal.
  */
 int   journal_start_transaction(journal *jnl);
 int   journal_modify_block_start(journal *jnl, struct buf *bp);
 int   journal_modify_block_abort(journal *jnl, struct buf *bp);
 int   journal_modify_block_end(journal *jnl, struct buf *bp, void (*func)(struct buf *bp, void *arg), void *arg);
 int   journal_kill_block(journal *jnl, struct buf *bp);
+#ifdef BSD_KERNEL_PRIVATE
+int   journal_trim_add_extent(journal *jnl, uint64_t offset, uint64_t length);
+int   journal_trim_remove_extent(journal *jnl, uint64_t offset, uint64_t length);
+void  journal_trim_set_callback(journal *jnl, jnl_trim_callback_t callback, void *arg);
+#endif
 int   journal_end_transaction(journal *jnl);
 
 int   journal_active(journal *jnl);
-int   journal_flush(journal *jnl);
+int   journal_flush(journal *jnl, boolean_t wait_for_IO);
 void *journal_owner(journal *jnl);    // compare against current_thread()
 int   journal_uses_fua(journal *jnl);
 

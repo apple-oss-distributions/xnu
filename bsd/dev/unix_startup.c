@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2008 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2010 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -42,6 +42,7 @@
 #include <sys/file_internal.h>
 #include <sys/proc_internal.h>
 #include <sys/clist.h>
+#include <sys/mcache.h>
 #include <sys/mbuf.h>
 #include <sys/systm.h>
 #include <sys/tty.h>
@@ -50,7 +51,9 @@
 #include <machine/cons.h>
 #include <pexpert/pexpert.h>
 #include <sys/socketvar.h>
+#include <pexpert/pexpert.h>
 
+extern uint32_t kern_maxvnodes;
 extern vm_map_t mb_map;
 
 #if INET || INET6
@@ -61,8 +64,8 @@ extern uint32_t   tcp_recvspace;
 void            bsd_bufferinit(void) __attribute__((section("__TEXT, initcode")));
 extern void     md_prepare_for_shutdown(int, int, char *);
 
-unsigned int	bsd_mbuf_cluster_reserve(void);
-void bsd_srv_setup(int);
+unsigned int	bsd_mbuf_cluster_reserve(boolean_t *);
+void bsd_scale_setup(int);
 void bsd_exec_setup(int);
 
 /*
@@ -71,7 +74,7 @@ void bsd_exec_setup(int);
 
 #ifdef	NBUF
 int             max_nbuf_headers = NBUF;
-int             niobuf_headers = NBUF / 2;
+int             niobuf_headers = (NBUF / 2) + 2048;
 int 		nbuf_hashelements = NBUF;
 int 		nbuf_headers = NBUF;
 #else
@@ -81,11 +84,11 @@ int 		nbuf_hashelements = 0;
 int		nbuf_headers = 0;
 #endif
 
-SYSCTL_INT (_kern, OID_AUTO, nbuf, CTLFLAG_RD, &nbuf_headers, 0, "");
-SYSCTL_INT (_kern, OID_AUTO, maxnbuf, CTLFLAG_RW, &max_nbuf_headers, 0, "");
+SYSCTL_INT (_kern, OID_AUTO, nbuf, CTLFLAG_RD | CTLFLAG_LOCKED, &nbuf_headers, 0, "");
+SYSCTL_INT (_kern, OID_AUTO, maxnbuf, CTLFLAG_RW | CTLFLAG_LOCKED, &max_nbuf_headers, 0, "");
 
 __private_extern__ int customnbuf = 0;
-int             srv = 0;	/* Flag indicates a server boot when set */
+int             serverperfmode = 0;	/* Flag indicates a server boot when set */
 int             ncl = 0;
 static unsigned int mbuf_poolsz;
 
@@ -118,10 +121,12 @@ bsd_startupearly(void)
 	} else
 		nbuf_hashelements = max_nbuf_headers;
 
-	if (niobuf_headers == 0)
-		niobuf_headers = max_nbuf_headers;
-	if (niobuf_headers > 4096)
-		niobuf_headers = 4096;
+	if (niobuf_headers == 0) {
+		if (max_nbuf_headers < 4096)
+			niobuf_headers = max_nbuf_headers;
+		else
+			niobuf_headers = (max_nbuf_headers / 2) + 2048;
+	}
 	if (niobuf_headers < CONFIG_MIN_NIOBUF)
 		niobuf_headers = CONFIG_MIN_NIOBUF;
 
@@ -159,7 +164,7 @@ bsd_startupearly(void)
 #endif
 		int             scale;
 
-		nmbclusters = bsd_mbuf_cluster_reserve() / MCLBYTES;
+		nmbclusters = bsd_mbuf_cluster_reserve(NULL) / MCLBYTES;
 
 #if INET || INET6
 		if ((scale = nmbclusters / NMBCLUSTERS) > 1) {
@@ -176,18 +181,23 @@ bsd_startupearly(void)
 #endif /* SOCKETS */
 
 	if (vnodes_sized == 0) {
-	/*
-	 * Size vnodes based on memory 
-	 * Number vnodes  is (memsize/64k) + 1024 
-	 * This is the calculation that is used by launchd in tiger
-	 * we are clipping the max based on 16G 
-	 * ie ((16*1024*1024*1024)/(64 *1024)) + 1024 = 263168;
-	 * CONFIG_VNODES is set to 263168 for "medium" configurations (the default)
-	 * but can be smaller or larger. 
-	 */
-	desiredvnodes  = (sane_size/65536) + 1024;
-	if (desiredvnodes > CONFIG_VNODES)
-		desiredvnodes = CONFIG_VNODES;
+		if (!PE_get_default("kern.maxvnodes", &desiredvnodes, sizeof(desiredvnodes))) {
+			/*
+			 * Size vnodes based on memory 
+			 * Number vnodes  is (memsize/64k) + 1024 
+			 * This is the calculation that is used by launchd in tiger
+			 * we are clipping the max based on 16G 
+			 * ie ((16*1024*1024*1024)/(64 *1024)) + 1024 = 263168;
+			 * CONFIG_VNODES is set to 263168 for "medium" configurations (the default)
+			 * but can be smaller or larger. 
+			 */
+			desiredvnodes  = (sane_size/65536) + 1024;
+#ifdef CONFIG_VNODES
+				if (desiredvnodes > CONFIG_VNODES)
+					desiredvnodes = CONFIG_VNODES;
+#endif
+		}
+		vnodes_sized = 1;
 	}
 }
 
@@ -237,9 +247,10 @@ bsd_bufferinit(void)
  * memory that is present.
  */
 unsigned int
-bsd_mbuf_cluster_reserve(void)
+bsd_mbuf_cluster_reserve(boolean_t *overridden)
 {
 	int mbuf_pool = 0;
+	static boolean_t was_overridden = FALSE;
 
 	/* If called more than once, return the previously calculated size */
 	if (mbuf_poolsz != 0)
@@ -251,7 +262,6 @@ bsd_mbuf_cluster_reserve(void)
 	 * to correctly compute the size of the low-memory VM pool.  It is
 	 * redundant but rather harmless.
 	 */
-	//(void) PE_parse_boot_argn("srv", &srv, sizeof (srv));
 	(void) PE_parse_boot_argn("ncl", &ncl, sizeof (ncl));
 	(void) PE_parse_boot_argn("mbuf_pool", &mbuf_pool, sizeof (mbuf_pool));
 
@@ -263,9 +273,13 @@ bsd_mbuf_cluster_reserve(void)
 		ncl = (mbuf_pool << MBSHIFT) >> MCLSHIFT;
 
         if (sane_size > (64 * 1024 * 1024) || ncl != 0) {
+
+		if (ncl || serverperfmode)
+			was_overridden = TRUE;
+
 	        if ((nmbclusters = ncl) == 0) {
 			/* Auto-configure the mbuf pool size */
-			nmbclusters = mbuf_default_ncl(srv, sane_size);
+			nmbclusters = mbuf_default_ncl(serverperfmode, sane_size);
 		} else {
 			/* Make sure it's not odd in case ncl is manually set */
 			if (nmbclusters & 0x1)
@@ -275,9 +289,15 @@ bsd_mbuf_cluster_reserve(void)
 			if (nmbclusters > MAX_NCL)
 				nmbclusters = MAX_NCL;
 		}
+
+		/* Round it down to nearest multiple of 4KB clusters */
+		nmbclusters = P2ROUNDDOWN(nmbclusters, NCLPBG);
 	}
 	mbuf_poolsz = nmbclusters << MCLSHIFT;
 done:
+	if (overridden)
+		*overridden = was_overridden;
+
 	return (mbuf_poolsz);
 }
 #if defined(__LP64__)
@@ -288,11 +308,15 @@ void IOSleep(int);
 
 
 void
-bsd_srv_setup(int scale)
+bsd_scale_setup(int scale)
 {
 #if defined(__LP64__)
-	/* if memory is more than 16G, then apply rules for processes */
-	if (scale >  0) {
+	if ((scale > 0) && (serverperfmode == 0)) {
+		maxproc *= scale;
+		maxprocperuid = (maxproc * 2) / 3;
+	}
+	/* Apply server scaling rules */
+	if ((scale >  0) && (serverperfmode !=0)) {
 		maxproc = 2500 * scale;
 		hard_maxproc = maxproc;
 		/* no fp usage */
