@@ -54,8 +54,7 @@
  *	When performance isn't the only concern, it's
  *	nice to build stack frames...
  */
-#define	BUILD_STACK_FRAMES   (GPROF || \
-				((MACH_LDEBUG) && MACH_KDB))
+#define	BUILD_STACK_FRAMES   (GPROF)
 
 #if	BUILD_STACK_FRAMES
 
@@ -214,9 +213,7 @@
 #define PREEMPTION_DISABLE				\
 	incl	%gs:CPU_PREEMPTION_LEVEL
 
-#if MACH_LDEBUG || 1
 #define	PREEMPTION_LEVEL_DEBUG 1	
-#endif
 #if	PREEMPTION_LEVEL_DEBUG
 #define	PREEMPTION_ENABLE				\
 	decl	%gs:CPU_PREEMPTION_LEVEL	;	\
@@ -362,7 +359,7 @@ LEAF_ENTRY(hw_lock_init)
 
 
 /*
- *	void hw_lock_byte_init(uint8_t *)
+ *	void hw_lock_byte_init(volatile uint8_t *)
  *
  *	Initialize a hardware byte lock.
  */
@@ -456,7 +453,6 @@ LEAF_ENTRY(hw_lock_to)
 
 	lfence
 	rdtsc				/* read cyclecount into %edx:%eax */
-	lfence
 	addl	%ecx,%eax		/* fetch and timeout */
 	adcl	$0,%edx			/* add carry */
 	mov	%edx,%ecx
@@ -466,7 +462,6 @@ LEAF_ENTRY(hw_lock_to)
 	push	%r9
 	lfence
 	rdtsc				/* read cyclecount into %edx:%eax */
-	lfence
 	shlq	$32, %rdx
 	orq	%rdx, %rax		/* load 64-bit quantity into %rax */
 	addq	%rax, %rsi		/* %rsi is the timeout expiry */
@@ -500,7 +495,6 @@ LEAF_ENTRY(hw_lock_to)
 	mov	%edx,%edi		/* Save %edx */
 	lfence
 	rdtsc				/* cyclecount into %edx:%eax */
-	lfence
 	xchg	%edx,%edi		/* cyclecount into %edi:%eax */
 	cmpl	%ecx,%edi		/* compare high-order 32-bits */
 	jb	4b			/* continue spinning if less, or */
@@ -512,7 +506,6 @@ LEAF_ENTRY(hw_lock_to)
 #else
 	lfence
 	rdtsc				/* cyclecount into %edx:%eax */
-	lfence
 	shlq	$32, %rdx
 	orq	%rdx, %rax		/* load 64-bit quantity into %rax */
 	cmpq	%rsi, %rax		/* compare to timeout */
@@ -710,7 +703,7 @@ Entry(lck_rw_try_lock_shared)
 	LOCKSTAT_LABEL(_lck_rw_try_lock_shared_lockstat_patch_point)
 	ret
     /* Fall thru when patched, counting on lock pointer in LCK_RW_REGISTER  */
-    LOCKSTAT_RECORD(LS_LCK_RW_LOCK_SHARED_ACQUIRE, LCK_RW_REGISTER)
+    LOCKSTAT_RECORD(LS_LCK_RW_TRY_LOCK_SHARED_ACQUIRE, LCK_RW_REGISTER)
 #endif
 	movl	$1, %eax			/* return TRUE */
 	ret
@@ -786,7 +779,7 @@ Entry(lck_rw_lock_exclusive)
 	LOCKSTAT_LABEL(_lck_rw_lock_exclusive_lockstat_patch_point)
 	ret
     /* Fall thru when patched, counting on lock pointer in LCK_RW_REGISTER  */
-    LOCKSTAT_RECORD(LS_LCK_RW_LOCK_SHARED_ACQUIRE, LCK_RW_REGISTER)
+    LOCKSTAT_RECORD(LS_LCK_RW_LOCK_EXCL_ACQUIRE, LCK_RW_REGISTER)
 #endif
 	ret
 2:
@@ -830,7 +823,7 @@ Entry(lck_rw_try_lock_exclusive)
 	LOCKSTAT_LABEL(_lck_rw_try_lock_exclusive_lockstat_patch_point)
 	ret
     /* Fall thru when patched, counting on lock pointer in LCK_RW_REGISTER  */
-    LOCKSTAT_RECORD(LS_LCK_RW_LOCK_SHARED_ACQUIRE, LCK_RW_REGISTER)
+    LOCKSTAT_RECORD(LS_LCK_RW_TRY_LOCK_EXCL_ACQUIRE, LCK_RW_REGISTER)
 #endif
 	movl	$1, %eax			/* return TRUE */
 	ret
@@ -891,7 +884,7 @@ Entry(lck_rw_lock_shared_to_exclusive)
 	LOCKSTAT_LABEL(_lck_rw_lock_shared_to_exclusive_lockstat_patch_point)
 	ret
     /* Fall thru when patched, counting on lock pointer in LCK_RW_REGISTER  */
-    LOCKSTAT_RECORD(LS_LCK_RW_LOCK_SHARED_ACQUIRE, LCK_RW_REGISTER)
+    LOCKSTAT_RECORD(LS_LCK_RW_LOCK_SHARED_TO_EXCL_UPGRADE, LCK_RW_REGISTER)
 #endif
 	movl	$1, %eax			/* return success */
 	ret
@@ -1421,14 +1414,14 @@ mutex_interlock_destroyed_str:
  * lck_mtx_convert_spin()
  */
 NONLEAF_ENTRY(lck_mtx_lock_spin_always)
-	LOAD_LMTX_REG(B_ARG0)		/* fetch lock pointer */
-	jmp	Llmls_avoid_check
-
+	LOAD_LMTX_REG(B_ARG0)           /* fetch lock pointer */
+	jmp     Llmls_avoid_check
+	
 NONLEAF_ENTRY(lck_mtx_lock_spin)
 	LOAD_LMTX_REG(B_ARG0)		/* fetch lock pointer */
 
 	CHECK_PREEMPTION_LEVEL()
-Llmls_avoid_check:	
+Llmls_avoid_check:
 	mov	M_STATE(LMTX_REG), LMTX_C_REG32
 	test	$(M_ILOCKED_MSK | M_MLOCKED_MSK), LMTX_C_REG32	/* is the interlock or mutex held */
 	jnz	Llmls_slow
@@ -2267,27 +2260,42 @@ LEAF_ENTRY(bit_unlock)
  * Atomic primitives, prototyped in kern/simple_lock.h
  */
 LEAF_ENTRY(hw_atomic_add)
+#if	MACH_LDEBUG
+	test	$3, %rdi
+	jz	1f
+	ud2
+1:
+#endif	
 	movl	%esi, %eax		/* Load addend */
-	lock
-	xaddl	%eax, (%rdi)		/* Atomic exchange and add */
+	lock 	xaddl %eax, (%rdi)		/* Atomic exchange and add */
 	addl	%esi, %eax		/* Calculate result */
 	LEAF_RET
 
 LEAF_ENTRY(hw_atomic_sub)
+#if	MACH_LDEBUG
+	test	$3, %rdi
+	jz	1f
+	ud2
+1:
+#endif	
 	negl	%esi
 	movl	%esi, %eax
-	lock
-	xaddl	%eax, (%rdi)		/* Atomic exchange and add */
+	lock	xaddl %eax, (%rdi)		/* Atomic exchange and add */
 	addl	%esi, %eax		/* Calculate result */
 	LEAF_RET
 
 LEAF_ENTRY(hw_atomic_or)
+#if	MACH_LDEBUG
+	test	$3, %rdi
+	jz	1f
+	ud2
+1:
+#endif	
 	movl	(%rdi), %eax
 1:
 	movl	%esi, %edx		/* Load mask */
 	orl	%eax, %edx
-	lock
-	cmpxchgl	%edx, (%rdi)	/* Atomic CAS */
+	lock	cmpxchgl %edx, (%rdi)	/* Atomic CAS */
 	jne	1b
 	movl	%edx, %eax		/* Result */
 	LEAF_RET
@@ -2297,18 +2305,29 @@ LEAF_ENTRY(hw_atomic_or)
  */
 
 LEAF_ENTRY(hw_atomic_or_noret)
+#if	MACH_LDEBUG
+	test	$3, %rdi
+	jz	1f
+	ud2
+1:
+#endif	
 	lock
 	orl	%esi, (%rdi)		/* Atomic OR */
 	LEAF_RET
 
 
 LEAF_ENTRY(hw_atomic_and)
+#if	MACH_LDEBUG
+	test	$3, %rdi
+	jz	1f
+	ud2
+1:
+#endif	
 	movl	(%rdi), %eax
 1:
 	movl	%esi, %edx		/* Load mask */
 	andl	%eax, %edx
-	lock
-	cmpxchgl	%edx, (%rdi)	/* Atomic CAS */
+	lock	cmpxchgl %edx, (%rdi)	/* Atomic CAS */
 	jne	1b
 	movl	%edx, %eax		/* Result */
 	LEAF_RET
@@ -2318,8 +2337,13 @@ LEAF_ENTRY(hw_atomic_and)
  */
 
 LEAF_ENTRY(hw_atomic_and_noret)
-	lock
-	andl	%esi, (%rdi)		/* Atomic OR */
+#if	MACH_LDEBUG
+	test	$3, %rdi
+	jz	1f
+	ud2
+1:
+#endif	
+	lock	andl	%esi, (%rdi)		/* Atomic OR */
 	LEAF_RET
 
 #endif /* !__i386 __ */

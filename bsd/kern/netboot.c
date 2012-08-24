@@ -591,6 +591,7 @@ find_interface(void)
 {
     struct ifnet *		ifp = NULL;
 
+    dlil_if_lock();
     if (rootdevice[0]) {
 		ifp = ifunit((char *)rootdevice);
     }
@@ -601,6 +602,7 @@ find_interface(void)
 				break;
 		ifnet_head_done();
     }
+    dlil_if_unlock();
     return (ifp);
 }
 

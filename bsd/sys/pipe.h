@@ -71,6 +71,8 @@
 #define PIPE_SIZE	16384
 #endif
 
+#define PIPE_KVAMAX	(1024 * 1024 * 16)
+
 #ifndef BIG_PIPE_SIZE
 #define BIG_PIPE_SIZE	(64*1024)
 #endif
@@ -132,6 +134,8 @@ struct pipemapping {
 #define PIPE_KNOTE	0x1000   /* Pipe has kernel events activated */
 #define PIPE_DRAIN	0x2000  /* Waiting for I/O to drop for a close.  Treated like EOF;
 					only separate for easier debugging. */
+#define PIPE_WSELECT	0x4000  /* Some thread has done an FWRITE select on the pipe */
+#define PIPE_DEAD	0x8000  /* Pipe is dead and needs garbage collection */
 
 #ifdef	KERNEL
 

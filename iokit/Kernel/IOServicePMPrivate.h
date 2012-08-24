@@ -54,6 +54,7 @@ enum {
     kIOPMRequestTypeSynchronizePowerTree        = 0x0D,
     kIOPMRequestTypeRequestPowerStateOverride   = 0x0E,
     kIOPMRequestTypeSetIdleTimerPeriod          = 0x0F,
+    kIOPMRequestTypeIgnoreIdleTimer             = 0x10,
     
     /* Reply Types */
     kIOPMRequestTypeReplyStart                  = 0x80,
@@ -231,7 +232,6 @@ private:
     unsigned int            InitialPowerChange:1;
     unsigned int            InitialSetPowerState:1;
     unsigned int            DeviceOverrideEnabled:1;
-    unsigned int            DeviceWasActive:1;
     unsigned int            DoNotPowerDown:1;
     unsigned int            ParentsKnowState:1;
     unsigned int            StrictTreeOrder:1;
@@ -240,6 +240,7 @@ private:
     unsigned int            IsPreChange:1;
     unsigned int            DriverCallBusy:1;
     unsigned int            PCDFunctionOverride:1;
+    unsigned int            IdleTimerIgnored:1;
 
     // Time of last device activity.
     AbsoluteTime            DeviceActiveTimestamp;
@@ -311,7 +312,12 @@ private:
     uint32_t                OutOfBandMessage;
     uint32_t                TempClampCount;
     uint32_t                OverrideMaxPowerState;
+
+    // Protected by ActivityLock - BEGIN
     uint32_t                ActivityTickleCount;
+    uint32_t                DeviceWasActive;
+    // Protected by ActivityLock - END
+
     uint32_t                WaitReason;
     uint32_t                SavedMachineState;
     uint32_t                RootDomainState;
@@ -367,6 +373,7 @@ private:
 #define fIsPreChange                pwrMgt->IsPreChange
 #define fDriverCallBusy             pwrMgt->DriverCallBusy
 #define fPCDFunctionOverride        pwrMgt->PCDFunctionOverride
+#define fIdleTimerIgnored           pwrMgt->IdleTimerIgnored
 #define fDeviceActiveTimestamp      pwrMgt->DeviceActiveTimestamp
 #define fActivityLock               pwrMgt->ActivityLock
 #define fIdleTimerPeriod            pwrMgt->IdleTimerPeriod
@@ -442,6 +449,7 @@ the ack timer is ticking every tenth of a second.
 #define kIOPMSyncNoChildNotify      0x0200  // sync root domain only, not entire tree
 #define kIOPMSyncTellPowerDown      0x0400  // send the ask/will power off messages
 #define kIOPMSyncCancelPowerDown    0x0800  // sleep cancel for maintenance wake
+#define kIOPMInitialPowerChange     0x1000  // set for initial power change
 
 enum {
     kDriverCallInformPreChange,

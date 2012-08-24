@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2011 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2012 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -125,7 +125,7 @@
 #include <netinet6/mld6.h>
 #include <netinet6/mld6_var.h>
 
-/* Lock group and attribute for mld6_mtx */
+/* Lock group and attribute for mld_mtx */
 static lck_attr_t       *mld_mtx_attr;
 static lck_grp_t        *mld_mtx_grp;
 static lck_grp_attr_t   *mld_mtx_grp_attr;
@@ -162,10 +162,12 @@ static lck_grp_attr_t   *mld_mtx_grp_attr;
  */
 static decl_lck_mtx_data(, mld_mtx);
 
+SLIST_HEAD(mld_in6m_relhead, in6_multi);
+
 static void	mli_initvar(struct mld_ifinfo *, struct ifnet *, int);
 static struct mld_ifinfo *mli_alloc(int);
 static void	mli_free(struct mld_ifinfo *);
-static void	mli_delete(const struct ifnet *);
+static void	mli_delete(const struct ifnet *, struct mld_in6m_relhead *);
 static void	mld_dispatch_packet(struct mbuf *);
 static void	mld_final_leave(struct in6_multi *, struct mld_ifinfo *);
 static int	mld_handle_state_change(struct in6_multi *,
@@ -176,7 +178,7 @@ static int	mld_initial_join(struct in6_multi *, struct mld_ifinfo *,
 static const char *	mld_rec_type_to_str(const int);
 #endif
 static void	mld_set_version(struct mld_ifinfo *, const int);
-static void	mld_flush_relq(struct mld_ifinfo *);
+static void	mld_flush_relq(struct mld_ifinfo *, struct mld_in6m_relhead *);
 static void	mld_dispatch_queue(struct mld_ifinfo *, struct ifqueue *, int);
 static int	mld_v1_input_query(struct ifnet *, const struct ip6_hdr *,
 		    /*const*/ struct mld_hdr *);
@@ -234,16 +236,27 @@ static int interface_timers_running6;
 static int state_change_timers_running6;
 static int current_state_timers_running6;
 
-static decl_lck_mtx_data(, mld6_mtx);
-
 #define	MLD_LOCK()			\
-	lck_mtx_lock(&mld6_mtx)
+	lck_mtx_lock(&mld_mtx)
 #define	MLD_LOCK_ASSERT_HELD()		\
-	lck_mtx_assert(&mld6_mtx, LCK_MTX_ASSERT_OWNED)
+	lck_mtx_assert(&mld_mtx, LCK_MTX_ASSERT_OWNED)
 #define	MLD_LOCK_ASSERT_NOTHELD()	\
-	lck_mtx_assert(&mld6_mtx, LCK_MTX_ASSERT_NOTOWNED)
+	lck_mtx_assert(&mld_mtx, LCK_MTX_ASSERT_NOTOWNED)
 #define	MLD_UNLOCK()			\
-	lck_mtx_unlock(&mld6_mtx)
+	lck_mtx_unlock(&mld_mtx)
+
+#define	MLD_ADD_DETACHED_IN6M(_head, _in6m) {				\
+	SLIST_INSERT_HEAD(_head, _in6m, in6m_dtle);			\
+}
+
+#define	MLD_REMOVE_DETACHED_IN6M(_head) {				\
+	struct in6_multi *_in6m, *_inm_tmp;				\
+	SLIST_FOREACH_SAFE(_in6m, _head, in6m_dtle, _inm_tmp) {		\
+		SLIST_REMOVE(_head, _in6m, in6_multi, in6m_dtle);	\
+		IN6M_REMREF(_in6m);					\
+	}								\
+	VERIFY(SLIST_EMPTY(_head));					\
+}
 
 #define	MLI_ZONE_MAX		64		/* maximum elements in zone */
 #define	MLI_ZONE_NAME		"mld_ifinfo"	/* zone name */
@@ -483,6 +496,9 @@ mld_domifattach(struct ifnet *ifp, int how)
 	MLI_ADDREF_LOCKED(mli); /* hold a reference for mli_head */
 	MLI_ADDREF_LOCKED(mli); /* hold a reference for caller */
 	MLI_UNLOCK(mli);
+	ifnet_lock_shared(ifp);
+	mld6_initsilent(ifp, mli);
+	ifnet_lock_done(ifp);
 
 	LIST_INSERT_HEAD(&mli_head, mli, mli_link);
 
@@ -513,6 +529,9 @@ mld_domifreattach(struct mld_ifinfo *mli)
 	mli->mli_debug |= IFD_ATTACHED;
 	MLI_ADDREF_LOCKED(mli); /* hold a reference for mli_head */
 	MLI_UNLOCK(mli);
+	ifnet_lock_shared(ifp);
+	mld6_initsilent(ifp, mli);
+	ifnet_lock_done(ifp);
 
 	LIST_INSERT_HEAD(&mli_head, mli, mli_link);
 
@@ -528,13 +547,19 @@ mld_domifreattach(struct mld_ifinfo *mli)
 void
 mld_domifdetach(struct ifnet *ifp)
 {
+	SLIST_HEAD(, in6_multi)	in6m_dthead;
+
+	SLIST_INIT(&in6m_dthead);
 
 	MLD_PRINTF(("%s: called for ifp %p(%s%d)\n",
 	    __func__, ifp, ifp->if_name, ifp->if_unit));
 
 	MLD_LOCK();
-	mli_delete(ifp);
+	mli_delete(ifp, (struct mld_in6m_relhead *)&in6m_dthead);
 	MLD_UNLOCK();
+
+	/* Now that we're dropped all locks, release detached records */
+	MLD_REMOVE_DETACHED_IN6M(&in6m_dthead);
 }
 
 /*
@@ -544,7 +569,7 @@ mld_domifdetach(struct ifnet *ifp)
  * the reattach case.
  */
 static void
-mli_delete(const struct ifnet *ifp)
+mli_delete(const struct ifnet *ifp, struct mld_in6m_relhead *in6m_dthead)
 {
 	struct mld_ifinfo *mli, *tmli;
 
@@ -558,7 +583,7 @@ mli_delete(const struct ifnet *ifp)
 			 */
 			IF_DRAIN(&mli->mli_gq);
 			IF_DRAIN(&mli->mli_v1q);
-			mld_flush_relq(mli);
+			mld_flush_relq(mli, in6m_dthead);
 			VERIFY(SLIST_EMPTY(&mli->mli_relinmhead));
 			mli->mli_debug &= ~IFD_ATTACHED;
 			MLI_UNLOCK(mli);
@@ -570,6 +595,21 @@ mli_delete(const struct ifnet *ifp)
 		MLI_UNLOCK(mli);
 	}
 	panic("%s: mld_ifinfo not found for ifp %p\n", __func__,  ifp);
+}
+
+__private_extern__ void
+mld6_initsilent(struct ifnet *ifp, struct mld_ifinfo *mli)
+{
+	ifnet_lock_assert(ifp, IFNET_LCK_ASSERT_OWNED);
+
+	MLI_LOCK_ASSERT_NOTHELD(mli);
+	MLI_LOCK(mli);
+	if (!(ifp->if_flags & IFF_MULTICAST) &&
+	    (ifp->if_eflags & (IFEF_IPV6_ND6ALT|IFEF_LOCALNET_PRIVATE)))
+		mli->mli_flags |= MLIF_SILENT;
+	else
+		mli->mli_flags &= ~MLIF_SILENT;
+	MLI_UNLOCK(mli);
 }
 
 static void
@@ -585,9 +625,6 @@ mli_initvar(struct mld_ifinfo *mli, struct ifnet *ifp, int reattach)
 	mli->mli_qri = MLD_QRI_INIT;
 	mli->mli_uri = MLD_URI_INIT;
 
-	/* ifnet is not yet attached; no need to hold ifnet lock */
-	if (!(ifp->if_flags & IFF_MULTICAST))
-		mli->mli_flags |= MLIF_SILENT;
 	if (mld_use_allow)
 		mli->mli_flags |= MLIF_USEALLOW;
 	if (!reattach)
@@ -657,6 +694,7 @@ mli_addref(struct mld_ifinfo *mli, int locked)
 void
 mli_remref(struct mld_ifinfo *mli)
 {
+	SLIST_HEAD(, in6_multi)	in6m_dthead;
 	struct ifnet *ifp;
 
 	MLI_LOCK_SPIN(mli);
@@ -676,9 +714,13 @@ mli_remref(struct mld_ifinfo *mli)
 	mli->mli_ifp = NULL;
 	IF_DRAIN(&mli->mli_gq);
 	IF_DRAIN(&mli->mli_v1q);
-	mld_flush_relq(mli);
+	SLIST_INIT(&in6m_dthead);
+	mld_flush_relq(mli, (struct mld_in6m_relhead *)&in6m_dthead);
 	VERIFY(SLIST_EMPTY(&mli->mli_relinmhead));
 	MLI_UNLOCK(mli);
+
+	/* Now that we're dropped all locks, release detached records */
+	MLD_REMOVE_DETACHED_IN6M(&in6m_dthead);
 
 	MLD_PRINTF(("%s: freeing mld_ifinfo for ifp %p(%s%d)\n",
 	    __func__, ifp, ifp->if_name, ifp->if_unit));
@@ -1138,7 +1180,7 @@ mld_v2_process_group_query(struct in6_multi *inm, int timer, struct mbuf *m0,
 		for (i = 0; i < nsrc; i++) {
 			sp = mtod(m, uint8_t *) + soff;
 			retval = in6m_record_source(inm,
-			    (const struct in6_addr *)sp);
+			    (const struct in6_addr *)(void *)sp);
 			if (retval < 0)
 				break;
 			nrecorded += retval;
@@ -1397,6 +1439,9 @@ mld_slowtimo(void)
 	struct mld_ifinfo	*mli;
 	struct in6_multi	*inm;
 	int			 uri_fasthz = 0;
+	SLIST_HEAD(, in6_multi)	in6m_dthead;
+
+	SLIST_INIT(&in6m_dthead);
 
 	MLD_LOCK();
 
@@ -1513,7 +1558,7 @@ next:
 		 * for the link is no longer MLDv2, in order to handle the
 		 * version change case.
 		 */
-		mld_flush_relq(mli);
+		mld_flush_relq(mli, (struct mld_in6m_relhead *)&in6m_dthead);
 		VERIFY(SLIST_EMPTY(&mli->mli_relinmhead));
 		MLI_UNLOCK(mli);
 
@@ -1523,6 +1568,9 @@ next:
 
 out_locked:
 	MLD_UNLOCK();
+
+	/* Now that we're dropped all locks, release detached records */
+	MLD_REMOVE_DETACHED_IN6M(&in6m_dthead);
 }
 
 /*
@@ -1531,7 +1579,7 @@ out_locked:
  * Caller must be holding mli_lock.
  */
 static void
-mld_flush_relq(struct mld_ifinfo *mli)
+mld_flush_relq(struct mld_ifinfo *mli, struct mld_in6m_relhead *in6m_dthead)
 {
 	struct in6_multi *inm;
 
@@ -1556,9 +1604,17 @@ again:
 		/* from mli_relinmhead */
 		IN6M_REMREF(inm);
 		/* from in6_multihead_list */
-		if (lastref)
-			IN6M_REMREF(inm);
-
+		if (lastref) {
+			/*
+			 * Defer releasing our final reference, as we
+			 * are holding the MLD lock at this point, and
+			 * we could end up with locking issues later on
+			 * (while issuing SIOCDELMULTI) when this is the
+			 * final reference count.  Let the caller do it
+			 * when it is safe.
+			 */
+			MLD_ADD_DETACHED_IN6M(in6m_dthead, inm);
+		}
 		MLI_LOCK(mli);
 		goto again;
 	}
@@ -1949,7 +2005,6 @@ mld_v1_transmit_report(struct in6_multi *in6m, const int type)
 
 	mh->m_flags |= M_MLDV1;
 
-	
 	/*
 	 * Due to the fact that at this point we are possibly holding
 	 * in6_multihead_lock in shared or exclusive mode, we can't call
@@ -3246,6 +3301,13 @@ mld_dispatch_packet(struct mbuf *m)
 	mld = (struct mld_hdr *)(mtod(md, uint8_t *) + off);
 	type = mld->mld_type;
 
+	if (ifp->if_eflags & IFEF_TXSTART) {
+		/* Use control service class if the outgoing 
+		 * interface supports transmit-start model.
+		 */
+		(void) m_set_service_class(m0, MBUF_SC_CTL);
+	}
+
 	error = ip6_output(m0, &mld_po, NULL, IPV6_UNSPECSRC, im6o,
 	    &oifp, NULL);
 
@@ -3384,7 +3446,7 @@ mld_init(void)
 
 	MLD_PRINTF(("%s: initializing\n", __func__));
 
-        /* Setup lock group and attribute for mld6_mtx */
+        /* Setup lock group and attribute for mld_mtx */
         mld_mtx_grp_attr = lck_grp_attr_alloc_init();
         mld_mtx_grp = lck_grp_alloc_init("mld_mtx\n", mld_mtx_grp_attr);
         mld_mtx_attr = lck_attr_alloc_init();

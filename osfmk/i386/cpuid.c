@@ -29,21 +29,22 @@
  * @OSF_COPYRIGHT@
  */
 #include <platforms.h>
-#include <mach_kdb.h>
 #include <vm/vm_page.h>
 #include <pexpert/pexpert.h>
 
 #include <i386/cpuid.h>
-#if MACH_KDB
-#include <machine/db_machdep.h>
-#include <ddb/db_aout.h>
-#include <ddb/db_access.h>
-#include <ddb/db_sym.h>
-#include <ddb/db_variables.h>
-#include <ddb/db_command.h>
-#include <ddb/db_output.h>
-#include <ddb/db_expr.h>
+
+static	boolean_t	cpuid_dbg
+#if DEBUG
+				  = TRUE;
+#else
+				  = FALSE;
 #endif
+#define DBG(x...)			\
+	do {				\
+		if (cpuid_dbg)		\
+			kprintf(x);	\
+	} while (0)			\
 
 #define min(a,b) ((a) < (b) ? (a) : (b))
 #define quad(hi,lo)	(((uint64_t)(hi)) << 32 | (lo))
@@ -231,6 +232,8 @@ static i386_cpu_info_t	cpuid_cpu_info;
 static void cpuid_fn(uint32_t selector, uint32_t *result)
 {
 	do_cpuid(selector, result);
+	DBG("cpuid_fn(0x%08x) eax:0x%08x ebx:0x%08x ecx:0x%08x edx:0x%08x\n",
+		selector, result[0], result[1], result[2], result[3]);
 }
 #else
 static void cpuid_fn(uint32_t selector, uint32_t *result)
@@ -248,8 +251,14 @@ static void cpuid_fn(uint32_t selector, uint32_t *result)
 	} else {
 		do_cpuid(selector, result);
 	}
+	DBG("cpuid_fn(0x%08x) eax:0x%08x ebx:0x%08x ecx:0x%08x edx:0x%08x\n",
+		selector, result[0], result[1], result[2], result[3]);
 }
 #endif
+
+static const char *cache_type_str[LCACHE_MAX] = {
+	"Lnone", "L1I", "L1D", "L2U", "L3U"
+};
 
 /* this function is Intel-specific */
 static void
@@ -262,6 +271,8 @@ cpuid_set_cache_info( i386_cpu_info_t * info_p )
 	unsigned int	i;
 	unsigned int	j;
 	boolean_t	cpuid_deterministic_supported = FALSE;
+
+	DBG("cpuid_set_cache_info(%p)\n", info_p);
 
 	bzero( linesizes, sizeof(linesizes) );
 
@@ -311,7 +322,7 @@ cpuid_set_cache_info( i386_cpu_info_t * info_p )
 		reg[eax] = 4;		/* cpuid request 4 */
 		reg[ecx] = index;	/* index starting at 0 */
 		cpuid(reg);
-//kprintf("cpuid(4) index=%d eax=%p\n", index, reg[eax]);
+		DBG("cpuid(4) index=%d eax=0x%x\n", index, reg[eax]);
 		cache_type = bitfield32(reg[eax], 4, 0);
 		if (cache_type == 0)
 			break;		/* no more caches */
@@ -354,6 +365,13 @@ cpuid_set_cache_info( i386_cpu_info_t * info_p )
 			info_p->cache_partitions[type] = cache_partitions;
 			linesizes[type] = cache_linesize;
 
+			DBG(" cache_size[%s]      : %d\n",
+			    cache_type_str[type], cache_size);
+			DBG(" cache_sharing[%s]   : %d\n",
+			    cache_type_str[type], cache_sharing);
+			DBG(" cache_partitions[%s]: %d\n",
+			    cache_type_str[type], cache_partitions);
+
 			/*
 			 * Overwrite associativity determined via
 			 * CPUID.0x80000006 -- this leaf is more
@@ -389,6 +407,7 @@ cpuid_set_cache_info( i386_cpu_info_t * info_p )
 				vm_cache_geometry_colors = colors;
 		}
 	} 
+	DBG(" vm_cache_geometry_colors: %d\n", vm_cache_geometry_colors);
 	
 	/*
 	 * If deterministic cache parameters are not available, use
@@ -403,6 +422,13 @@ cpuid_set_cache_info( i386_cpu_info_t * info_p )
 		info_p->cache_partitions[L2U] = 1;
 
 		linesizes[L2U] = info_p->cpuid_cache_linesize;
+
+		DBG(" cache_size[L2U]      : %d\n",
+		    info_p->cache_size[L2U]);
+		DBG(" cache_sharing[L2U]   : 1\n");
+		DBG(" cache_partitions[L2U]: 1\n");
+		DBG(" linesizes[L2U]       : %d\n",
+		    info_p->cpuid_cache_linesize);
 	}
 	
 	/*
@@ -414,16 +440,19 @@ cpuid_set_cache_info( i386_cpu_info_t * info_p )
 	else if (linesizes[L1D])
 		info_p->cache_linesize = linesizes[L1D];
 	else panic("no linesize");
+	DBG(" cache_linesize    : %d\n", info_p->cache_linesize);
 
 	/*
 	 * Extract and publish TLB information from Leaf 2 descriptors.
 	 */
+	DBG(" %ld leaf2 descriptors:\n", sizeof(info_p->cache_info));
 	for (i = 1; i < sizeof(info_p->cache_info); i++) {
 		cpuid_cache_descriptor_t	*descp;
 		int				id;
 		int				level;
 		int				page;
 
+		DBG(" 0x%02x", info_p->cache_info[i]);
 		descp = cpuid_leaf2_find(info_p->cache_info[i]);
 		if (descp == NULL)
 			continue;
@@ -458,6 +487,7 @@ cpuid_set_cache_info( i386_cpu_info_t * info_p )
 			info_p->cpuid_stlb = descp->entries;
 		}
 	}
+	DBG("\n");
 }
 
 static void
@@ -465,6 +495,8 @@ cpuid_set_generic_info(i386_cpu_info_t *info_p)
 {
 	uint32_t	reg[4];
         char            str[128], *p;
+
+	DBG("cpuid_set_generic_info(%p)\n", info_p);
 
 	/* do cpuid 0 to get vendor */
 	cpuid_fn(0, reg);
@@ -575,11 +607,30 @@ cpuid_set_generic_info(i386_cpu_info_t *info_p)
 				quad(reg[ecx], reg[edx]);
 	}
 
+	DBG(" max_basic           : %d\n", info_p->cpuid_max_basic);
+	DBG(" max_ext             : 0x%08x\n", info_p->cpuid_max_ext);
+	DBG(" vendor              : %s\n", info_p->cpuid_vendor);
+	DBG(" brand_string        : %s\n", info_p->cpuid_brand_string);
+	DBG(" signature           : 0x%08x\n", info_p->cpuid_signature);
+	DBG(" stepping            : %d\n", info_p->cpuid_stepping);
+	DBG(" model               : %d\n", info_p->cpuid_model);
+	DBG(" family              : %d\n", info_p->cpuid_family);
+	DBG(" type                : %d\n", info_p->cpuid_type);
+	DBG(" extmodel            : %d\n", info_p->cpuid_extmodel);
+	DBG(" extfamily           : %d\n", info_p->cpuid_extfamily);
+	DBG(" brand               : %d\n", info_p->cpuid_brand);
+	DBG(" features            : 0x%016llx\n", info_p->cpuid_features);
+	DBG(" extfeatures         : 0x%016llx\n", info_p->cpuid_extfeatures);
+	DBG(" logical_per_package : %d\n", info_p->cpuid_logical_per_package);
+	DBG(" microcode_version   : 0x%08x\n", info_p->cpuid_microcode_version);
+
 	/* Fold in the Invariant TSC feature bit, if present */
 	if (info_p->cpuid_max_ext >= 0x80000007) {
 		cpuid_fn(0x80000007, reg);  
 		info_p->cpuid_extfeatures |=
 				reg[edx] & (uint32_t)CPUID_EXTFEATURE_TSCI;
+		DBG(" extfeatures         : 0x%016llx\n",
+		    info_p->cpuid_extfeatures);
 	}
 
 	if (info_p->cpuid_max_basic >= 0x5) {
@@ -594,6 +645,12 @@ cpuid_set_generic_info(i386_cpu_info_t *info_p)
 		cmp->extensions   = reg[ecx];
 		cmp->sub_Cstates  = reg[edx];
 		info_p->cpuid_mwait_leafp = cmp;
+
+		DBG(" Monitor/Mwait Leaf:\n");
+		DBG("  linesize_min : %d\n", cmp->linesize_min);
+		DBG("  linesize_max : %d\n", cmp->linesize_max);
+		DBG("  extensions   : %d\n", cmp->extensions);
+		DBG("  sub_Cstates  : 0x%08x\n", cmp->sub_Cstates);
 	}
 
 	if (info_p->cpuid_max_basic >= 0x6) {
@@ -614,6 +671,18 @@ cpuid_set_generic_info(i386_cpu_info_t *info_p)
 		ctp->hardware_feedback	  = bitfield32(reg[ecx], 1, 1);
 		ctp->energy_policy	  = bitfield32(reg[ecx], 2, 2);
 		info_p->cpuid_thermal_leafp = ctp;
+
+		DBG(" Thermal/Power Leaf:\n");
+		DBG("  sensor               : %d\n", ctp->sensor);
+		DBG("  dynamic_acceleration : %d\n", ctp->dynamic_acceleration);
+		DBG("  invariant_APIC_timer : %d\n", ctp->invariant_APIC_timer);
+		DBG("  core_power_limits    : %d\n", ctp->core_power_limits);
+		DBG("  fine_grain_clock_mod : %d\n", ctp->fine_grain_clock_mod);
+		DBG("  package_thermal_intr : %d\n", ctp->package_thermal_intr);
+		DBG("  thresholds           : %d\n", ctp->thresholds);
+		DBG("  ACNT_MCNT            : %d\n", ctp->ACNT_MCNT);
+		DBG("  hardware_feedback    : %d\n", ctp->hardware_feedback);
+		DBG("  energy_policy        : %d\n", ctp->energy_policy);
 	}
 
 	if (info_p->cpuid_max_basic >= 0xa) {
@@ -631,6 +700,15 @@ cpuid_set_generic_info(i386_cpu_info_t *info_p)
 		capp->fixed_number  = bitfield32(reg[edx],  4,  0);
 		capp->fixed_width   = bitfield32(reg[edx], 12,  5);
 		info_p->cpuid_arch_perf_leafp = capp;
+
+		DBG(" Architectural Performance Monitoring Leaf:\n");
+		DBG("  version       : %d\n", capp->version);
+		DBG("  number        : %d\n", capp->number);
+		DBG("  width         : %d\n", capp->width);
+		DBG("  events_number : %d\n", capp->events_number);
+		DBG("  events        : %d\n", capp->events);
+		DBG("  fixed_number  : %d\n", capp->fixed_number);
+		DBG("  fixed_width   : %d\n", capp->fixed_width);
 	}
 
 	if (info_p->cpuid_max_basic >= 0xd) {
@@ -640,6 +718,23 @@ cpuid_set_generic_info(i386_cpu_info_t *info_p)
 		 */
 		cpuid_fn(0xd, info_p->cpuid_xsave_leaf.extended_state);
 		info_p->cpuid_xsave_leafp = xsp;
+
+		DBG(" XSAVE Leaf:\n");
+		DBG("  EAX           : 0x%x\n", xsp->extended_state[eax]);
+		DBG("  EBX           : 0x%x\n", xsp->extended_state[ebx]);
+		DBG("  ECX           : 0x%x\n", xsp->extended_state[ecx]);
+		DBG("  EDX           : 0x%x\n", xsp->extended_state[edx]);
+	}
+
+	if (info_p->cpuid_model == CPUID_MODEL_IVYBRIDGE) {
+		/*
+		 * XSAVE Features:
+		 */
+		cpuid_fn(0x7, reg);
+		info_p->cpuid_leaf7_features = reg[ebx];
+
+		DBG(" Feature Leaf7:\n");
+		DBG("  EBX           : 0x%x\n", reg[ebx]);
 	}
 
 	return;
@@ -679,11 +774,15 @@ cpuid_set_cpufamily(i386_cpu_info_t *info_p)
 		case CPUID_MODEL_JAKETOWN:
 			cpufamily = CPUFAMILY_INTEL_SANDYBRIDGE;
 			break;
+		case CPUID_MODEL_IVYBRIDGE:
+			cpufamily = CPUFAMILY_INTEL_IVYBRIDGE;
+			break;
 		}
 		break;
 	}
 
 	info_p->cpuid_cpufamily = cpufamily;
+	DBG("cpuid_set_cpufamily(%p) returning 0x%x\n", info_p, cpufamily);
 	return cpufamily;
 }
 /*
@@ -694,7 +793,9 @@ void
 cpuid_set_info(void)
 {
 	i386_cpu_info_t		*info_p = &cpuid_cpu_info;
-	
+
+	PE_parse_boot_argn("-cpuid", &cpuid_dbg, sizeof(cpuid_dbg));
+
 	bzero((void *)info_p, sizeof(cpuid_cpu_info));
 
 	cpuid_set_generic_info(info_p);
@@ -722,6 +823,7 @@ cpuid_set_info(void)
 		info_p->thread_count = bitfield32((uint32_t)msr, 15,  0);
 		break;
 		}
+	case CPUFAMILY_INTEL_IVYBRIDGE:
 	case CPUFAMILY_INTEL_SANDYBRIDGE:
 	case CPUFAMILY_INTEL_NEHALEM: {
 		uint64_t msr = rdmsr64(MSR_CORE_THREAD_COUNT);
@@ -734,11 +836,14 @@ cpuid_set_info(void)
 		info_p->core_count   = info_p->cpuid_cores_per_package;
 		info_p->thread_count = info_p->cpuid_logical_per_package;
 	}
+	DBG("cpuid_set_info():\n");
+	DBG("  core_count   : %d\n", info_p->core_count);
+	DBG("  thread_count : %d\n", info_p->thread_count);
 
 	cpuid_cpu_info.cpuid_model_string = ""; /* deprecated */
 }
 
-static struct {
+static struct table {
 	uint64_t	mask;
 	const char	*name;
 } feature_map[] = {
@@ -798,6 +903,8 @@ static struct {
 	{CPUID_FEATURE_SEGLIM64,  "SEGLIM64"},
 	{CPUID_FEATURE_TSCTMR,    "TSCTMR"},
 	{CPUID_FEATURE_AVX1_0,    "AVX1.0"},
+	{CPUID_FEATURE_RDRAND,    "RDRAND"},
+	{CPUID_FEATURE_F16C,      "F16C"},
 	{0, 0}
 },
 extfeature_map[] = {
@@ -809,7 +916,36 @@ extfeature_map[] = {
 	{CPUID_EXTFEATURE_RDTSCP,  "RDTSCP"},
 	{CPUID_EXTFEATURE_TSCI,    "TSCI"},
 	{0, 0}
+
+},
+leaf7_feature_map[] = {
+	{CPUID_LEAF7_FEATURE_RDWRFSGS, "RDWRFSGS"},
+	{CPUID_LEAF7_FEATURE_SMEP,     "SMEP"},
+	{CPUID_LEAF7_FEATURE_ENFSTRG,  "ENFSTRG"},
+	{0, 0}
 };
+
+static char *
+cpuid_get_names(struct table *map, uint64_t bits, char *buf, unsigned buf_len)
+{
+	size_t	len = 0;
+	char	*p = buf;
+	int	i;
+
+	for (i = 0; map[i].mask != 0; i++) {
+		if ((bits & map[i].mask) == 0)
+			continue;
+		if (len && ((size_t) (p - buf) < (buf_len - 1)))
+			*p++ = ' ';
+		len = min(strlen(map[i].name), (size_t)((buf_len-1)-(p-buf)));
+		if (len == 0)
+			break;
+		bcopy(map[i].name, p, len);
+		p += len;
+	}
+	*p = '\0';
+	return buf;
+}
 
 i386_cpu_info_t	*
 cpuid_info(void)
@@ -825,48 +961,20 @@ cpuid_info(void)
 char *
 cpuid_get_feature_names(uint64_t features, char *buf, unsigned buf_len)
 {
-	size_t	len = 0;
-	char	*p = buf;
-	int	i;
-
-	for (i = 0; feature_map[i].mask != 0; i++) {
-		if ((features & feature_map[i].mask) == 0)
-			continue;
-		if (len && ((size_t)(p - buf) < (buf_len - 1)))
-			*p++ = ' ';
-
-		len = min(strlen(feature_map[i].name), (size_t) ((buf_len-1) - (p-buf)));
-		if (len == 0)
-			break;
-		bcopy(feature_map[i].name, p, len);
-		p += len;
-	}
-	*p = '\0';
-	return buf;
+	return cpuid_get_names(feature_map, features, buf, buf_len); 
 }
 
 char *
 cpuid_get_extfeature_names(uint64_t extfeatures, char *buf, unsigned buf_len)
 {
-	size_t	len = 0;
-	char	*p = buf;
-	int	i;
-
-	for (i = 0; extfeature_map[i].mask != 0; i++) {
-		if ((extfeatures & extfeature_map[i].mask) == 0)
-			continue;
-		if (len && ((size_t) (p - buf) < (buf_len - 1)))
-			*p++ = ' ';
-		len = min(strlen(extfeature_map[i].name), (size_t) ((buf_len-1)-(p-buf)));
-		if (len == 0)
-			break;
-		bcopy(extfeature_map[i].name, p, len);
-		p += len;
-	}
-	*p = '\0';
-	return buf;
+	return cpuid_get_names(extfeature_map, extfeatures, buf, buf_len); 
 }
 
+char *
+cpuid_get_leaf7_feature_names(uint64_t features, char *buf, unsigned buf_len)
+{
+	return cpuid_get_names(leaf7_feature_map, features, buf, buf_len); 
+}
 
 void
 cpuid_feature_display(
@@ -874,9 +982,12 @@ cpuid_feature_display(
 {
 	char	buf[256];
 
-	kprintf("%s: %s\n", header,
-		  cpuid_get_feature_names(cpuid_features(),
-						buf, sizeof(buf)));
+	kprintf("%s: %s", header,
+		 cpuid_get_feature_names(cpuid_features(), buf, sizeof(buf)));
+	if (cpuid_leaf7_features())
+		kprintf(" %s", cpuid_get_leaf7_feature_names(
+				cpuid_leaf7_features(), buf, sizeof(buf)));
+	kprintf("\n");
 	if (cpuid_features() & CPUID_FEATURE_HTT) {
 #define s_if_plural(n)	((n > 1) ? "s" : "")
 		kprintf("  HTT: %d core%s per package;"
@@ -962,48 +1073,75 @@ cpuid_extfeatures(void)
 	return cpuid_info()->cpuid_extfeatures;
 }
  
-
-#if MACH_KDB
-
-/*
- *	Display the cpuid
- * *		
- *	cp
- */
-void 
-db_cpuid(__unused db_expr_t addr,
-	 __unused int have_addr,
-	 __unused db_expr_t count,
-	 __unused char *modif)
+uint64_t
+cpuid_leaf7_features(void)
 {
-
-	uint32_t        i, mid;
-	uint32_t        cpid[4];
-
-	do_cpuid(0, cpid);	/* Get the first cpuid which is the number of
-				 * basic ids */
-	db_printf("%08X - %08X %08X %08X %08X\n",
-		0, cpid[eax], cpid[ebx], cpid[ecx], cpid[edx]);
-
-	mid = cpid[eax];	/* Set the number */
-	for (i = 1; i <= mid; i++) {	/* Dump 'em out */
-		do_cpuid(i, cpid);	/* Get the next */
-		db_printf("%08X - %08X %08X %08X %08X\n",
-			i, cpid[eax], cpid[ebx], cpid[ecx], cpid[edx]);
-	}
-	db_printf("\n");
-
-	do_cpuid(0x80000000, cpid);	/* Get the first extended cpuid which
-					 * is the number of extended ids */
-	db_printf("%08X - %08X %08X %08X %08X\n",
-		0x80000000, cpid[eax], cpid[ebx], cpid[ecx], cpid[edx]);
-
-	mid = cpid[eax];	/* Set the number */
-	for (i = 0x80000001; i <= mid; i++) {	/* Dump 'em out */
-		do_cpuid(i, cpid);	/* Get the next */
-		db_printf("%08X - %08X %08X %08X %08X\n",
-			i, cpid[eax], cpid[ebx], cpid[ecx], cpid[edx]);
-	}
+	return cpuid_info()->cpuid_leaf7_features;
 }
 
-#endif
+static i386_vmm_info_t	*_cpuid_vmm_infop = NULL;
+static i386_vmm_info_t	_cpuid_vmm_info;
+
+static void
+cpuid_init_vmm_info(i386_vmm_info_t *info_p)
+{
+	uint32_t	reg[4];
+	uint32_t	max_vmm_leaf;
+
+	bzero(info_p, sizeof(*info_p));
+
+	if (!cpuid_vmm_present())
+		return;
+
+	DBG("cpuid_init_vmm_info(%p)\n", info_p);
+
+	/* do cpuid 0x40000000 to get VMM vendor */
+	cpuid_fn(0x40000000, reg);
+	max_vmm_leaf = reg[eax];
+	bcopy((char *)&reg[ebx], &info_p->cpuid_vmm_vendor[0], 4);
+	bcopy((char *)&reg[ecx], &info_p->cpuid_vmm_vendor[4], 4);
+	bcopy((char *)&reg[edx], &info_p->cpuid_vmm_vendor[8], 4);
+	info_p->cpuid_vmm_vendor[12] = '\0';
+
+	if (0 == strcmp(info_p->cpuid_vmm_vendor, CPUID_VMM_ID_VMWARE)) {
+		/* VMware identification string: kb.vmware.com/kb/1009458 */
+		info_p->cpuid_vmm_family = CPUID_VMM_FAMILY_VMWARE;
+	} else {
+		info_p->cpuid_vmm_family = CPUID_VMM_FAMILY_UNKNOWN;
+	}
+
+	/* VMM generic leaves: https://lkml.org/lkml/2008/10/1/246 */
+	if (max_vmm_leaf >= 0x40000010) {
+		cpuid_fn(0x40000010, reg);
+		
+		info_p->cpuid_vmm_tsc_frequency = reg[eax];
+		info_p->cpuid_vmm_bus_frequency = reg[ebx];
+	}
+
+	DBG(" vmm_vendor          : %s\n", info_p->cpuid_vmm_vendor);
+	DBG(" vmm_family          : %u\n", info_p->cpuid_vmm_family);
+	DBG(" vmm_bus_frequency   : %u\n", info_p->cpuid_vmm_bus_frequency);
+	DBG(" vmm_tsc_frequency   : %u\n", info_p->cpuid_vmm_tsc_frequency);
+}
+
+boolean_t
+cpuid_vmm_present(void)
+{
+	return (cpuid_features() & CPUID_FEATURE_VMM) ? TRUE : FALSE;
+}
+
+i386_vmm_info_t *
+cpuid_vmm_info(void)
+{
+	if (_cpuid_vmm_infop == NULL) {
+		cpuid_init_vmm_info(&_cpuid_vmm_info);
+		_cpuid_vmm_infop = &_cpuid_vmm_info;
+	}
+	return _cpuid_vmm_infop;
+}
+
+uint32_t
+cpuid_vmm_family(void)
+{
+	return cpuid_vmm_info()->cpuid_vmm_family;
+}

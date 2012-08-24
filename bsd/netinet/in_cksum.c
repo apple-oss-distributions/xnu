@@ -141,38 +141,6 @@ in_pseudo(u_int a, u_int b, u_int c)
 
 }
 
-#if defined(__arm__) && __ARM_ARCH__ >= 6
-
-extern int cpu_in_cksum(struct mbuf *m, int len, int off, uint32_t initial_sum);
-
-u_int16_t
-inet_cksum(struct mbuf *m, unsigned int nxt, unsigned int skip,
-    unsigned int len)
-{
-	u_int32_t sum = 0;
-
-	/* sanity check */
-	if ((m->m_flags & M_PKTHDR) && m->m_pkthdr.len < skip + len) {
-		panic("inet_cksum: mbuf len (%d) < off+len (%d+%d)\n",
-		    m->m_pkthdr.len, skip, len);
-	}
-
-	/* include pseudo header checksum? */
-	if (nxt != 0) {
-		struct ip *iph;
-
-		if (m->m_len < sizeof (struct ip))
-			panic("inet_cksum: bad mbuf chain");
-
-		iph = mtod(m, struct ip *);
-		sum = in_pseudo(iph->ip_src.s_addr, iph->ip_dst.s_addr,
-		    htonl(len + nxt));
-	}
-
-	return (cpu_in_cksum(m, len, skip, sum));
-}
-
-#else
 
 u_int16_t
 inet_cksum(struct mbuf *m, unsigned int nxt, unsigned int skip,
@@ -209,7 +177,7 @@ inet_cksum(struct mbuf *m, unsigned int nxt, unsigned int skip,
 		for (; skip && m; m = m->m_next) {
 			if (m->m_len > skip) {
 				mlen = m->m_len - skip;
-				w = (u_short *)(m->m_data+skip);
+				w = (u_short *)(void *)(m->m_data+skip);
 				goto skip_start;
 			} else {
 				skip -= m->m_len;
@@ -232,7 +200,7 @@ inet_cksum(struct mbuf *m, unsigned int nxt, unsigned int skip,
 			 */
 			s_util.c[1] = *(char *)w;
 			sum += s_util.s;
-			w = (u_short *)((char *)w + 1);
+			w = (u_short *)(void *)((char *)w + 1);
 			mlen = m->m_len - 1;
 			len--;
 		} else {
@@ -250,7 +218,7 @@ skip_start:
 			REDUCE;
 			sum <<= 8;
 			s_util.c[0] = *(u_char *)w;
-			w = (u_short *)((char *)w + 1);
+			w = (u_short *)(void *)((char *)w + 1);
 			mlen--;
 			byte_swapped = 1;
 		}
@@ -304,4 +272,3 @@ skip_start:
 	return (~sum & 0xffff);
 }
 
-#endif

@@ -67,7 +67,6 @@
  */
 
 #include <platforms.h>
-#include <mach_kdb.h>
 
 #include <mach/i386/vm_param.h>
 
@@ -102,9 +101,6 @@
 #include <i386/pmCPU.h>
 #include <architecture/i386/pio.h> /* inb() */
 #include <pexpert/i386/boot.h>
-#if	MACH_KDB
-#include <ddb/db_aout.h>
-#endif /* MACH_KDB */
 
 #include <vm/pmap.h>
 #include <vm/vm_map.h>
@@ -116,18 +112,21 @@
 #include <pexpert/i386/efi.h>
 
 #include <kern/thread.h>
+#include <kern/sched.h>
 #include <mach-o/loader.h>
 #include <mach-o/nlist.h>
 
 #include <libkern/kernel_mach_header.h>
 #include <libkern/OSKextLibPrivate.h>
 
+#if	DEBUG
+#define DPRINTF(x...)	kprintf(x)
+#else
 #define DPRINTF(x...)
-//#define DPRINTF(x...)	kprintf(x)
+#endif
 
 static void machine_conf(void);
 
-extern int		default_preemption_rate;
 extern int		max_unsafe_quanta;
 extern int		max_poll_quanta;
 extern unsigned int	panic_is_inited;
@@ -146,12 +145,6 @@ volatile int panic_double_fault_cpu = -1;
 #define PRINT_ARGS_FROM_STACK_FRAME	0
 #else
 #error unsupported architecture
-#endif
-
-#ifdef __LP64__
-typedef struct nlist_64 kernel_nlist_t;
-#else
-typedef struct nlist kernel_nlist_t;
 #endif
 
 typedef struct _cframe_t {
@@ -201,30 +194,6 @@ machine_startup(void)
 	hw_lock_init(&debugger_lock);	/* initialize debugger lock */
 #endif
 	hw_lock_init(&pbtlock);		/* initialize print backtrace lock */
-
-#if	MACH_KDB
-	/*
-	 * Initialize KDB
-	 */
-#if	DB_MACHINE_COMMANDS
-	db_machine_commands_install(ppc_db_commands);
-#endif	/* DB_MACHINE_COMMANDS */
-	ddb_init();
-
-	if (boot_arg & DB_KDB)
-		current_debugger = KDB_CUR_DB;
-
-	/*
-	 * Cause a breakpoint trap to the debugger before proceeding
-	 * any further if the proper option bit was specified in
-	 * the boot flags.
-	 */
-	if (halt_in_debugger && (current_debugger == KDB_CUR_DB)) {
-	        Debugger("inline call to debugger(machine_startup)");
-		halt_in_debugger = 0;
-		active_debugger =1;
-	}
-#endif /* MACH_KDB */
 
 	if (PE_parse_boot_argn("preempt", &boot_arg, sizeof (boot_arg))) {
 		default_preemption_rate = boot_arg;
@@ -571,7 +540,7 @@ efi_init(void)
 			(void *) (uintptr_t) mptr->VirtualStart,
 			(void *) vm_addr,
 			(void *) vm_size);
-		pmap_map(vm_addr, phys_addr, phys_addr + round_page(vm_size),
+		pmap_map_bd(vm_addr, phys_addr, phys_addr + round_page(vm_size),
 		     (mptr->Type == kEfiRuntimeServicesCode) ? VM_PROT_READ | VM_PROT_EXECUTE : VM_PROT_READ|VM_PROT_WRITE,
 		     (mptr->Type == EfiMemoryMappedIO)       ? VM_WIMG_IO   : VM_WIMG_USE_DEFAULT);
 	    }
@@ -580,7 +549,7 @@ efi_init(void)
         if (args->Version != kBootArgsVersion2)
             panic("Incompatible boot args version %d revision %d\n", args->Version, args->Revision);
 
-        kprintf("Boot args version %d revision %d mode %d\n", args->Version, args->Revision, args->efiMode);
+	DPRINTF("Boot args version %d revision %d mode %d\n", args->Version, args->Revision, args->efiMode);
         if (args->efiMode == kBootArgsEfiMode64) {
             efi_set_tables_64((EFI_SYSTEM_TABLE_64 *) ml_static_ptovirt(args->efiSystemTable));
         } else {
@@ -687,6 +656,11 @@ hibernate_newruntime_map(void * map, vm_size_t map_size, uint32_t system_table_o
 void
 machine_init(void)
 {
+#if __x86_64__
+	/* Now with VM up, switch to dynamically allocated cpu data */
+	cpu_data_realloc();
+#endif
+
         /* Ensure panic buffer is initialized. */
         debug_log_init();
 
@@ -775,24 +749,45 @@ panic_io_port_read(void) {
 
 uint64_t panic_restart_timeout = ~(0ULL);
 
+#define PANIC_RESTART_TIMEOUT (3ULL * NSEC_PER_SEC)
+
 static void
 machine_halt_cpu(void) {
+	uint64_t deadline;
+
 	panic_io_port_read();
 
-	if (panic_restart_timeout != ~(0ULL)) {
-		uint64_t deadline = mach_absolute_time() + panic_restart_timeout;
-		while (mach_absolute_time() < deadline) {
-			cpu_pause();
-		}
-		kprintf("Invoking PE_halt_restart\n");
-		/* Attempt restart via ACPI RESET_REG; at the time of this
-		 * writing, this is routine is chained through AppleSMC->
-		 * AppleACPIPlatform
-		 */
-		if (PE_halt_restart)
-			(*PE_halt_restart)(kPERestartCPU);
+	/* Halt here forever if we're not rebooting */
+	if (!PE_reboot_on_panic() && panic_restart_timeout == ~(0ULL)) {
+		pmCPUHalt(PM_HALT_DEBUG);
+		return;
 	}
+
+	if (PE_reboot_on_panic())
+		deadline = mach_absolute_time() + PANIC_RESTART_TIMEOUT;
+	else
+		deadline = mach_absolute_time() + panic_restart_timeout;
+
+	while (mach_absolute_time() < deadline)
+		cpu_pause();
+
+	kprintf("Invoking PE_halt_restart\n");
+	/* Attempt restart via ACPI RESET_REG; at the time of this
+	 * writing, this is routine is chained through AppleSMC->
+	 * AppleACPIPlatform
+	 */
+	if (PE_halt_restart)
+		(*PE_halt_restart)(kPERestartCPU);
 	pmCPUHalt(PM_HALT_DEBUG);
+}
+
+void
+DebuggerWithContext(
+	__unused unsigned int	reason,
+	__unused void 		*ctx,
+	const char		*message)
+{
+	Debugger(message);
 }
 
 void
@@ -907,10 +902,6 @@ Debugger(
 			 * that a panic occurred while in that codepath.
 			 */
 			mp_rendezvous_break_lock();
-			if (PE_reboot_on_panic()) {
-				if (PE_halt_restart)
-					(*PE_halt_restart)(kPERestartCPU);
-			}
 
 			/* Non-maskably interrupt all other processors
 			 * If a restart timeout is specified, this processor
@@ -968,7 +959,7 @@ panic_print_macho_symbol_name(kernel_mach_header_t *mh, vm_address_t search, con
                 orig_le = orig_sg;
             else if (strncmp("", orig_sg->segname,
 				    sizeof(orig_sg->segname)) == 0)
-                orig_ts = orig_sg; /* pre-Barolo i386 kexts have a single unnamed segment */
+                orig_ts = orig_sg; /* pre-Lion i386 kexts have a single unnamed segment */
         }
         else if (cmd->cmd == LC_SYMTAB)
             orig_st = (struct symtab_command *) cmd;

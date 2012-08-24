@@ -197,7 +197,8 @@ enum {
     kIOInhibitCache		= 1,
     kIOWriteThruCache		= 2,
     kIOCopybackCache		= 3,
-    kIOWriteCombineCache	= 4
+    kIOWriteCombineCache	= 4,
+    kIOCopybackInnerCache	= 5
 };
 
 // IOMemory mapping options
@@ -206,11 +207,12 @@ enum {
 
     kIOMapCacheMask		= 0x00000700,
     kIOMapCacheShift		= 8,
-    kIOMapDefaultCache		= kIODefaultCache      << kIOMapCacheShift,
-    kIOMapInhibitCache		= kIOInhibitCache      << kIOMapCacheShift,
-    kIOMapWriteThruCache	= kIOWriteThruCache    << kIOMapCacheShift,
-    kIOMapCopybackCache		= kIOCopybackCache     << kIOMapCacheShift,
-    kIOMapWriteCombineCache	= kIOWriteCombineCache << kIOMapCacheShift,
+    kIOMapDefaultCache		= kIODefaultCache       << kIOMapCacheShift,
+    kIOMapInhibitCache		= kIOInhibitCache       << kIOMapCacheShift,
+    kIOMapWriteThruCache	= kIOWriteThruCache     << kIOMapCacheShift,
+    kIOMapCopybackCache		= kIOCopybackCache      << kIOMapCacheShift,
+    kIOMapWriteCombineCache	= kIOWriteCombineCache  << kIOMapCacheShift,
+    kIOMapCopybackInnerCache	= kIOCopybackInnerCache << kIOMapCacheShift,
 
     kIOMapUserOptionsMask	= 0x00000fff,
 
@@ -238,6 +240,10 @@ enum {
     kMillisecondScale = 1000 * 1000,
     kSecondScale      = 1000 * 1000 * 1000,
     kTickScale        = (kSecondScale / 100)
+};
+
+enum {
+    kIOConnectMethodVarOutputSize = -3
 };
 
 /* compatibility types */

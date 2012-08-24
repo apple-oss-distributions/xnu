@@ -85,8 +85,6 @@ extern Boolean OSCompareAndSwap64(
 
 #endif /* defined(__i386__) || defined(__x86_64__) */
 
-#if defined(__i386__) || defined(__x86_64__) || defined(__arm__)
-
 /*!
  * @function OSAddAtomic64
  *
@@ -129,8 +127,6 @@ inline static SInt64 OSDecrementAtomic64(volatile SInt64 * address)
 {
     return OSAddAtomic64(-1LL, address);
 }
-
-#endif  /* defined(__i386__) || defined(__x86_64__) || defined(__arm__) */
 
 #if XNU_KERNEL_PRIVATE
 /* Not to be included in headerdoc.
@@ -638,7 +634,13 @@ extern void OSSpinLockUnlock(volatile OSSpinLock * lock);
 static __inline__ void OSSynchronizeIO(void)
 {
 }
-
+#if	defined(XNU_KERNEL_PRIVATE)
+#if   defined(__i386__) || defined(__x86_64__)
+static inline void OSMemoryBarrier(void) {
+	__asm__ volatile("mfence" ::: "memory");
+}
+#endif
+#endif /*XNU_KERNEL_PRIVATE */
 #if defined(__cplusplus)
 }
 #endif

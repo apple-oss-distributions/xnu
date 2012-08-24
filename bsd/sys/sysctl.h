@@ -544,11 +544,15 @@ SYSCTL_DECL(_user);
 #define KERN_KDGETENTROPY       16
 #define KERN_KDWRITETR		17
 #define KERN_KDWRITEMAP		18
-
+#define KERN_KDENABLE_BG_TRACE	19
+#define KERN_KDDISABLE_BG_TRACE	20
+#define KERN_KDSET_TYPEFILTER   22
 
 /* KERN_PANICINFO types */
 #define	KERN_PANICINFO_MAXSIZE	1	/* quad: panic UI image size limit */
 #define	KERN_PANICINFO_IMAGE	2	/* panic UI in 8-bit kraw format */
+#define KERN_PANICINFO_TEST 	4	/* Allow the panic UI to be tested by root without causing a panic */
+#define KERN_PANICINFO_NOROOT_TEST	5	/* Allow the noroot UI to be tested by root */
 
 #define CTL_KERN_NAMES { \
 	{ 0, 0 }, \

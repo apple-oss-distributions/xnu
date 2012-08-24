@@ -69,6 +69,19 @@
 #include <netinet/in.h>
 #include <net/kpi_interface.h>
 
+/*
+ * NFS_MAX_WHO is the maximum length of a string representation used
+ * in as an ace who, owner, or group. There is no explicit limit in the
+ * protocol, however the kauth routines have a limit of MAPATHLEN for
+ * strings including the trailing null character, so we impose that
+ * limit. This should be changed if kauth routines change.
+ *
+ * We also want some reasonable maximum, as 32 bits worth of string length
+ * is liable to cause problems. At the very least this limit must guarantee 
+ * that any express that contains the 32 bit length from off the wire used in
+ * allocations does not overflow.
+ */
+#define	NFS_MAX_WHO	MAXPATHLEN
 
 /*
  * Create the unique client ID to use for this mount.
@@ -426,7 +439,7 @@ out:
  * get the list of supported security flavors
  *
  * How we get them depends on what args we are given:
- * 
+ *
  * FH?   Name?  Action
  * ----- -----  ------
  * YES   YES    Use the fh and name provided
@@ -1516,7 +1529,8 @@ nfs4_parsefattr(
 {
 	int error = 0, error2, rderror = 0, attrbytes;
 	uint32_t val, val2, val3, i;
-	uint32_t bitmap[NFS_ATTR_BITMAP_LEN], len, slen;
+	uint32_t bitmap[NFS_ATTR_BITMAP_LEN], len;
+	size_t slen;
 	char sbuf[64], *s;
 	struct nfs_fsattr nfsa_dummy;
 	struct nfs_vattr nva_dummy;
@@ -1652,6 +1666,8 @@ nfs4_parsefattr(
 			nfsm_chain_get_32(error, nmc, ace_flags);
 			nfsm_chain_get_32(error, nmc, ace_mask);
 			nfsm_chain_get_32(error, nmc, len);
+			if (!error && len >= NFS_MAX_WHO)
+				error = EBADRPC;
 			acl->acl_ace[i].ace_flags = nfs4_ace_nfstype_to_vfstype(ace_type, &error);
 			acl->acl_ace[i].ace_flags |= nfs4_ace_nfsflags_to_vfsflags(ace_flags);
 			acl->acl_ace[i].ace_rights = nfs4_ace_nfsmask_to_vfsrights(ace_mask);
@@ -1661,11 +1677,12 @@ nfs4_parsefattr(
 					s = sbuf;
 					slen = sizeof(sbuf);
 				}
-				MALLOC(s, char*, len+16, M_TEMP, M_WAITOK);
+				/* Let's add a bit more if we can to the allocation as to try and avoid future allocations */
+				MALLOC(s, char*, (len + 16 < NFS_MAX_WHO) ? len+16 : NFS_MAX_WHO, M_TEMP, M_WAITOK);
 				if (s)
-					slen = len+16;
+					slen = (len + 16 < NFS_MAX_WHO) ? len+16 : NFS_MAX_WHO;
 				else
-					error2 = ENOMEM;
+					error = ENOMEM;
 			}
 			if (error2)
 				nfsm_chain_adv(error, nmc, nfsm_rndup(len));
@@ -1980,15 +1997,18 @@ nfs4_parsefattr(
 	}
 	if (NFS_BITMAP_ISSET(bitmap, NFS_FATTR_OWNER)) {
 		nfsm_chain_get_32(error, nmc, len);
+		if (!error && len >= NFS_MAX_WHO)
+			error = EBADRPC;
 		if (!error && (len >= slen)) {
 			if (s != sbuf) {
 				FREE(s, M_TEMP);
 				s = sbuf;
 				slen = sizeof(sbuf);
 			}
-			MALLOC(s, char*, len+16, M_TEMP, M_WAITOK);
+			/* Let's add a bit more if we can to the allocation as to try and avoid future allocations */
+			MALLOC(s, char*, (len + 16 < NFS_MAX_WHO) ? len+16 : NFS_MAX_WHO, M_TEMP, M_WAITOK);
 			if (s)
-				slen = len+16;
+				slen = (len + 16 < NFS_MAX_WHO) ? len+16 : NFS_MAX_WHO;
 			else
 				error = ENOMEM;
 		}
@@ -2012,15 +2032,18 @@ nfs4_parsefattr(
 	}
 	if (NFS_BITMAP_ISSET(bitmap, NFS_FATTR_OWNER_GROUP)) {
 		nfsm_chain_get_32(error, nmc, len);
+		if (!error && len >= NFS_MAX_WHO)
+			error = EBADRPC;
 		if (!error && (len >= slen)) {
 			if (s != sbuf) {
 				FREE(s, M_TEMP);
 				s = sbuf;
 				slen = sizeof(sbuf);
 			}
-			MALLOC(s, char*, len+16, M_TEMP, M_WAITOK);
+			/* Let's add a bit more if we can to the allocation as to try and avoid future allocations */
+			MALLOC(s, char*, (len + 16 < NFS_MAX_WHO) ? len+16 : NFS_MAX_WHO, M_TEMP, M_WAITOK);
 			if (s)
-				slen = len+16;
+				slen = (len + 16 < NFS_MAX_WHO) ? len+16 : NFS_MAX_WHO;
 			else
 				error = ENOMEM;
 		}
@@ -2667,4 +2690,3 @@ recheckdeleg:
 			vfs_statfs(nmp->nm_mountp)->f_mntfromname, nmp->nm_stategenid, error);
 	}
 }
-

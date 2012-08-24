@@ -405,7 +405,7 @@ SYSCTL_PROC(_hw, HW_L2SETTINGS,   l2settings, CTLTYPE_INT | CTLFLAG_RD | CTLFLAG
 SYSCTL_PROC(_hw, HW_L3SETTINGS,   l3settings, CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_MASKED | CTLFLAG_LOCKED, 0, HW_L3SETTINGS, sysctl_hw_generic, "I", "");
 SYSCTL_INT (_hw, OID_AUTO, cputhreadtype, CTLFLAG_RD | CTLFLAG_NOAUTO | CTLFLAG_KERN | CTLFLAG_LOCKED, &cputhreadtype, 0, "");
 
-#if defined (__i386__) || defined (__x86_64__)
+#if defined(__i386__) || defined(__x86_64__)
 int mmx_flag = -1;
 int sse_flag = -1;
 int sse2_flag = -1;
@@ -416,6 +416,9 @@ int x86_64_flag = -1;
 int supplementalsse3_flag = -1;
 int aes_flag = -1;
 int avx1_0_flag = -1;
+int rdrand_flag = -1;
+int f16c_flag = -1;
+int enfstrg_flag = -1;
 
 SYSCTL_INT(_hw_optional, OID_AUTO, mmx, CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, &mmx_flag, 0, "");
 SYSCTL_INT(_hw_optional, OID_AUTO, sse, CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, &sse_flag, 0, "");
@@ -429,6 +432,11 @@ SYSCTL_INT(_hw_optional, OID_AUTO, sse4_2, CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_L
 SYSCTL_INT(_hw_optional, OID_AUTO, x86_64, CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, &x86_64_flag, 0, "");
 SYSCTL_INT(_hw_optional, OID_AUTO, aes, CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, &aes_flag, 0, "");
 SYSCTL_INT(_hw_optional, OID_AUTO, avx1_0, CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, &avx1_0_flag, 0, "");
+SYSCTL_INT(_hw_optional, OID_AUTO, rdrand, CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, &rdrand_flag, 0, "");
+SYSCTL_INT(_hw_optional, OID_AUTO, f16c, CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, &f16c_flag, 0, "");
+SYSCTL_INT(_hw_optional, OID_AUTO, enfstrg, CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, &enfstrg_flag, 0, "");
+#else
+#error Unsupported arch
 #endif /* !__i386__ && !__x86_64 && !__arm__ */
 
 /*
@@ -473,6 +481,8 @@ sysctl_mib_init(void)
 	cputhreadtype = cpu_threadtype();
 #if defined(__i386__) || defined (__x86_64__)
     cpu64bit = (_get_cpu_capabilities() & k64Bit) == k64Bit;
+#else
+#error Unsupported arch
 #endif
 
 	/*
@@ -499,6 +509,9 @@ sysctl_mib_init(void)
 	x86_64_flag		= is_capability_set(k64Bit);
 	aes_flag		= is_capability_set(kHasAES);
 	avx1_0_flag		= is_capability_set(kHasAVX1_0);
+	rdrand_flag		= is_capability_set(kHasRDRAND);
+	f16c_flag		= is_capability_set(kHasF16C);
+	enfstrg_flag		= is_capability_set(kHasENFSTRG);
 
 	/* hw.cpufamily */
 	cpufamily = cpuid_cpufamily();
@@ -521,8 +534,8 @@ sysctl_mib_init(void)
 	packages = roundup(ml_cpu_cache_sharing(0), cpuid_info()->thread_count)
 			/ cpuid_info()->thread_count;
 
-#else /* end __arm__ */
-# error unknown architecture
+#else
+#error unknown architecture
 #endif /* !__i386__ && !__x86_64 && !__arm__ */
 
 }

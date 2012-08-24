@@ -36,6 +36,7 @@
 #include <IOKit/IOBufferMemoryDescriptor.h>
 #include "RootDomainUserClient.h"
 #include <IOKit/pwr_mgt/IOPMLibDefs.h>
+#include <IOKit/pwr_mgt/IOPMPrivate.h>
 
 #define super IOUserClient
 
@@ -307,6 +308,12 @@ IOReturn RootDomainUserClient::externalMethod(
         case kPMSetUserAssertionLevels:
             ret = this->secureSetUserAssertionLevels(
                         (uint32_t)arguments->scalarInput[0]);
+            break;
+            
+        case kPMActivityTickle:
+            fOwner->reportUserInput( );
+            fOwner->setProperty(kIOPMRootDomainWakeTypeKey, "UserActivity Assertion");
+            ret = kIOReturnSuccess;
             break;
             
 /*

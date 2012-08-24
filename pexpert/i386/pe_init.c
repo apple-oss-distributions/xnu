@@ -54,6 +54,9 @@ clock_frequency_info_t gPEClockFrequencyInfo;
 void *gPEEFISystemTable;
 void *gPEEFIRuntimeServices;
 
+static boot_icon_element* norootIcon_lzss;
+static const uint8_t*     norootClut_lzss;
+
 int PE_initialize_console( PE_Video * info, int op )
 {
     static int   last_console = -1;
@@ -104,11 +107,15 @@ void PE_init_iokit(void)
     } DriversPackageProp;
 
     boolean_t bootClutInitialized = FALSE;
-    boolean_t norootInitialized = FALSE;
+    boolean_t noroot_rle_Initialized = FALSE;
+
     DTEntry             entry;
     unsigned int	size;
     uint32_t		*map;
 	boot_progress_element *bootPict;
+
+    norootIcon_lzss = NULL;
+    norootClut_lzss = NULL;
 
     PE_init_kprintf(TRUE);
     PE_init_printf(TRUE);
@@ -120,34 +127,45 @@ void PE_init_iokit(void)
      */
 
     if( kSuccess == DTLookupEntry(NULL, "/chosen/memory-map", &entry)) {
-	if( kSuccess == DTGetProperty(entry, "BootCLUT", (void **) &map, &size)) {
-	    if (sizeof(appleClut8) <= map[1]) {
-	        bcopy( (void *)ml_static_ptovirt(map[0]), appleClut8, sizeof(appleClut8) );
-		bootClutInitialized = TRUE;
-	    }
-	}
+        if( kSuccess == DTGetProperty(entry, "BootCLUT", (void **) &map, &size)) {
+            if (sizeof(appleClut8) <= map[1]) {
+                bcopy( (void *)ml_static_ptovirt(map[0]), appleClut8, sizeof(appleClut8) );
+                bootClutInitialized = TRUE;
+            }
+        }
 
-	if( kSuccess == DTGetProperty(entry, "Pict-FailedBoot", (void **) &map, &size)) {
-	    bootPict = (boot_progress_element *) ml_static_ptovirt(map[0]);
-	    default_noroot.width  = bootPict->width;
-	    default_noroot.height = bootPict->height;
-	    default_noroot.dx     = 0;
-	    default_noroot.dy     = bootPict->yOffset;
-	    default_noroot_data   = &bootPict->data[0];
-            norootInitialized = TRUE;
-	}
+        if( kSuccess == DTGetProperty(entry, "Pict-FailedBoot", (void **) &map, &size)) {
+            bootPict = (boot_progress_element *) ml_static_ptovirt(map[0]);
+            default_noroot.width  = bootPict->width;
+            default_noroot.height = bootPict->height;
+            default_noroot.dx     = 0;
+            default_noroot.dy     = bootPict->yOffset;
+            default_noroot_data   = &bootPict->data[0];
+            noroot_rle_Initialized = TRUE;
+        }
+
+        if( kSuccess == DTGetProperty(entry, "FailedCLUT", (void **) &map, &size)) {
+	        norootClut_lzss = (uint8_t*) ml_static_ptovirt(map[0]);
+        }
+
+        if( kSuccess == DTGetProperty(entry, "FailedImage", (void **) &map, &size)) {
+            norootIcon_lzss = (boot_icon_element *) ml_static_ptovirt(map[0]);
+            if (norootClut_lzss == NULL) {
+                    printf("ERROR: No FailedCLUT provided for noroot icon!\n");
+            }
+        }
     }
 
     if (!bootClutInitialized) {
-    bcopy( (void *) (uintptr_t) bootClut, (void *) appleClut8, sizeof(appleClut8) );
+        bcopy( (void *) (uintptr_t) bootClut, (void *) appleClut8, sizeof(appleClut8) );
     }
 
-    if (!norootInitialized) {
-    default_noroot.width  = kFailedBootWidth;
-    default_noroot.height = kFailedBootHeight;
-    default_noroot.dx     = 0;
-    default_noroot.dy     = kFailedBootOffset;
-    default_noroot_data   = failedBootPict;
+    if (!noroot_rle_Initialized) {
+        default_noroot.width  = kFailedBootWidth;
+        default_noroot.height = kFailedBootHeight;
+        default_noroot.dx     = 0;
+        default_noroot.dy     = kFailedBootOffset;
+        default_noroot_data   = failedBootPict;
     }
     
     /*
@@ -158,7 +176,7 @@ void PE_init_iokit(void)
     /*
      * Initialize the spinning wheel (progress indicator).
      */
-    vc_progress_initialize( &default_progress, default_progress_data,
+    vc_progress_initialize( &default_progress, default_progress_data1x, default_progress_data2x,
                             (unsigned char *) appleClut8 );
 
     (void) StartIOKit( PE_state.deviceTreeHead, PE_state.bootArgs, gPEEFIRuntimeServices, NULL);
@@ -180,8 +198,18 @@ void PE_init_platform(boolean_t vm_initialized, void * _args)
         PE_state.video.v_height	    = args->Video.v_height;
         PE_state.video.v_depth	    = args->Video.v_depth;
         PE_state.video.v_display    = args->Video.v_display;
+        PE_state.video.v_scale      = (kBootArgsFlagHiDPI & args->flags) ? 2 : 1;
         strlcpy(PE_state.video.v_pixelFormat, "PPPPPPPP",
 		sizeof(PE_state.video.v_pixelFormat));
+
+#ifdef  kBootArgsFlagHiDPI
+	if (args->flags & kBootArgsFlagHiDPI)
+                PE_state.video.v_scale = kPEScaleFactor2x;
+	else
+                PE_state.video.v_scale = kPEScaleFactor1x;
+#else
+	PE_state.video.v_scale = kPEScaleFactor1x;
+#endif
     }
 
     if (!vm_initialized) {
@@ -214,8 +242,22 @@ int PE_current_console( PE_Video * info )
 
 void PE_display_icon( __unused unsigned int flags, __unused const char * name )
 {
-    if ( default_noroot_data )
+    if ( norootIcon_lzss && norootClut_lzss ) {
+        uint32_t width  = norootIcon_lzss->width;
+        uint32_t height = norootIcon_lzss->height;
+        uint32_t x = ((PE_state.video.v_width  - width) / 2);
+        uint32_t y = ((PE_state.video.v_height - height) / 2) + norootIcon_lzss->y_offset_from_center;
+
+        vc_display_lzss_icon(x, y, width, height,
+                             &norootIcon_lzss->data[0],
+                             norootIcon_lzss->data_size,
+                             norootClut_lzss);
+    }
+    else if ( default_noroot_data ) {
         vc_display_icon( &default_noroot, default_noroot_data );
+    } else {
+        printf("ERROR: No data found for noroot icon!\n");
+    }
 }
 
 boolean_t
@@ -279,5 +321,10 @@ int (*PE_poll_input)(unsigned int options, char * c)
 boolean_t
 PE_reboot_on_panic(void)
 {
-	return FALSE;
+	boot_args *args = (boot_args *)PE_state.bootArgs;
+
+	if (args->flags & kBootArgsFlagRebootOnPanic)
+		return TRUE;
+	else
+		return FALSE;
 }

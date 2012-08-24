@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2006 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2011 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -248,30 +248,36 @@ ml_phys_read_data(pmap_paddr_t paddr, int size)
 {
 	unsigned int result;
 
-        switch (size) {
-            unsigned char s1;
-            unsigned short s2;
-        case 1:
-            s1 = *(unsigned char *)PHYSMAP_PTOV(paddr);
-            result = s1;
-            break;
-        case 2:
-            s2 = *(unsigned short *)PHYSMAP_PTOV(paddr);
-            result = s2;
-            break;
-        case 4:
-        default:
-            result = *(unsigned int *)PHYSMAP_PTOV(paddr);
-            break;
-        }
+	if (!physmap_enclosed(paddr))
+		panic("%s: 0x%llx out of bounds\n", __FUNCTION__, paddr);
 
+        switch (size) {
+		unsigned char s1;
+		unsigned short s2;
+        case 1:
+		s1 = *(volatile unsigned char *)PHYSMAP_PTOV(paddr);
+		result = s1;
+		break;
+        case 2:
+		s2 = *(volatile unsigned short *)PHYSMAP_PTOV(paddr);
+		result = s2;
+		break;
+        case 4:
+		result = *(volatile unsigned int *)PHYSMAP_PTOV(paddr);
+		break;
+	default:
+		panic("Invalid size %d for ml_phys_read_data\n", size);
+		break;
+        }
         return result;
 }
 
 static unsigned long long
 ml_phys_read_long_long(pmap_paddr_t paddr )
 {
-	return *(unsigned long long *)PHYSMAP_PTOV(paddr);
+	if (!physmap_enclosed(paddr))
+		panic("%s: 0x%llx out of bounds\n", __FUNCTION__, paddr);
+	return *(volatile unsigned long long *)PHYSMAP_PTOV(paddr);
 }
 
 unsigned int ml_phys_read( vm_offset_t paddr)
@@ -333,24 +339,32 @@ unsigned long long ml_phys_read_double_64(addr64_t paddr64)
 static inline void
 ml_phys_write_data(pmap_paddr_t paddr, unsigned long data, int size)
 {
+	if (!physmap_enclosed(paddr))
+		panic("%s: 0x%llx out of bounds\n", __FUNCTION__, paddr);
+
         switch (size) {
         case 1:
-	    *(unsigned char *)PHYSMAP_PTOV(paddr) = (unsigned char)data;
+	    *(volatile unsigned char *)PHYSMAP_PTOV(paddr) = (unsigned char)data;
             break;
         case 2:
-	    *(unsigned short *)PHYSMAP_PTOV(paddr) = (unsigned short)data;
+	    *(volatile unsigned short *)PHYSMAP_PTOV(paddr) = (unsigned short)data;
             break;
         case 4:
-        default:
-	    *(unsigned int *)PHYSMAP_PTOV(paddr) = (unsigned int)data;
+	    *(volatile unsigned int *)PHYSMAP_PTOV(paddr) = (unsigned int)data;
             break;
+	default:
+		panic("Invalid size %d for ml_phys_write_data\n", size);
+		break;
         }
 }
 
 static void
 ml_phys_write_long_long(pmap_paddr_t paddr, unsigned long long data)
 {
-	*(unsigned long long *)PHYSMAP_PTOV(paddr) = data;
+	if (!physmap_enclosed(paddr))
+		panic("%s: 0x%llx out of bounds\n", __FUNCTION__, paddr);
+
+	*(volatile unsigned long long *)PHYSMAP_PTOV(paddr) = data;
 }
 
 void ml_phys_write_byte(vm_offset_t paddr, unsigned int data)
@@ -408,9 +422,8 @@ void ml_phys_write_double_64(addr64_t paddr64, unsigned long long data)
  *
  *
  *      Read the memory location at physical address paddr.
- *  This is a part of a device probe, so there is a good chance we will
- *  have a machine check here. So we have to be able to handle that.
- *  We assume that machine checks are enabled both in MSR and HIDs
+ * *Does not* recover from machine checks, unlike the PowerPC implementation.
+ * Should probably be deprecated.
  */
 
 boolean_t
@@ -569,7 +582,7 @@ flush_dcache64(addr64_t addr, unsigned count, int phys)
 		dcache_incoherent_io_flush64(addr, count);
 	}
 	else {
-		uint32_t  linesize = cpuid_info()->cache_linesize;
+		uint64_t  linesize = cpuid_info()->cache_linesize;
 		addr64_t  bound = (addr + count + linesize -1) & ~(linesize - 1);
 		__mfence();
 		while (addr < bound) {
@@ -632,6 +645,20 @@ kdp_register_callout(void)
 {
 }
 #endif
+
+/*
+ * Return a uniformly distributed 64-bit random number.
+ *
+ * This interface should have minimal dependencies on kernel
+ * services, and thus be available very early in the life
+ * of the kernel.  But as a result, it may not be very random
+ * on all platforms.
+ */
+uint64_t
+early_random(void)
+{
+	return (ml_early_random());
+}
 
 #if !CONFIG_VMX
 int host_vmxon(boolean_t exclusive __unused)

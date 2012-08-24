@@ -278,9 +278,14 @@ struct ipsecstat {
 }
 
 #ifdef KERNEL
+
+#define IPSEC_IS_P2ALIGNED(p)        1
+#define IPSEC_GET_P2UNALIGNED_OFS(p) 0
+
 struct ipsec_output_state {
+    int tunneled;
 	struct mbuf *m;
-	struct route *ro;
+	struct route ro;
 	struct sockaddr *dst;
 };
 
@@ -339,6 +344,16 @@ extern const char *ipsec_logsastr(struct secasvar *);
 extern void ipsec_dumpmbuf(struct mbuf *);
 
 extern int ipsec4_output(struct ipsec_output_state *, struct secpolicy *, int);
+#if INET
+extern struct mbuf * ipsec4_splithdr(struct mbuf *);
+extern int ipsec4_encapsulate(struct mbuf *, struct secasvar *);
+extern int ipsec4_encapsulate_utun_esp_keepalive(struct mbuf **, struct secasvar *);
+#endif
+#if INET6
+extern struct mbuf * ipsec6_splithdr(struct mbuf *);
+extern int ipsec6_encapsulate(struct mbuf *, struct secasvar *);
+extern int ipsec6_encapsulate_utun_esp_keepalive(struct mbuf **, struct secasvar *);
+#endif
 extern int ipsec4_tunnel_validate(struct mbuf *, int, u_int, struct secasvar *, sa_family_t *);
 extern struct mbuf *ipsec_copypkt(struct mbuf *);
 extern void ipsec_delaux(struct mbuf *);

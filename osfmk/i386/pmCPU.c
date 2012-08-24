@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2004-2010 Apple Inc. All rights reserved.
+ * Copyright (c) 2004-2011 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -54,16 +54,17 @@
 
 extern int disableConsoleOutput;
 
-decl_simple_lock_data(,pm_init_lock);
+#define DELAY_UNSET		0xFFFFFFFFFFFFFFFFULL
 
 /*
  * The following is set when the KEXT loads and initializes.
  */
 pmDispatch_t	*pmDispatch	= NULL;
 
-static uint32_t		pmInitDone	= 0;
-static boolean_t	earlyTopology	= FALSE;
-
+static uint32_t		pmInitDone		= 0;
+static boolean_t	earlyTopology		= FALSE;
+static uint64_t		earlyMaxBusDelay	= DELAY_UNSET;
+static uint64_t		earlyMaxIntDelay	= DELAY_UNSET;
 
 /*
  * Initialize the Cstate change code.
@@ -71,16 +72,6 @@ static boolean_t	earlyTopology	= FALSE;
 void
 power_management_init(void)
 {
-    static boolean_t	initialized	= FALSE;
-
-    /*
-     * Initialize the lock for the KEXT initialization.
-     */
-    if (!initialized) {
-	simple_lock_init(&pm_init_lock, 0);
-	initialized = TRUE;
-    }
-
     if (pmDispatch != NULL && pmDispatch->cstateInit != NULL)
 	(*pmDispatch->cstateInit)();
 }
@@ -100,6 +91,20 @@ machine_idle(void)
     my_cpu->lcpu.state = LCPU_IDLE;
     DBGLOG(cpu_handle, cpu_number(), MP_IDLE);
     MARK_CPU_IDLE(cpu_number());
+
+    if (pmInitDone) {
+	/*
+	 * Handle case where ml_set_maxbusdelay() or ml_set_maxintdelay()
+	 * were called prior to the CPU PM kext being registered.  We do
+	 * this here since we know at this point the values will be first
+	 * used since idle is where the decisions using these values is made.
+	 */
+	if (earlyMaxBusDelay != DELAY_UNSET)
+	    ml_set_maxbusdelay((uint32_t)(earlyMaxBusDelay & 0xFFFFFFFF));
+
+	if (earlyMaxIntDelay != DELAY_UNSET)
+	    ml_set_maxintdelay(earlyMaxIntDelay);
+    }
 
     if (pmInitDone
 	&& pmDispatch != NULL
@@ -201,8 +206,12 @@ pmMarkAllCPUsOff(void)
 static void
 pmInitComplete(void)
 {
-    if (earlyTopology && pmDispatch != NULL && pmDispatch->pmCPUStateInit != NULL)
+    if (earlyTopology
+	&& pmDispatch != NULL
+	&& pmDispatch->pmCPUStateInit != NULL) {
 	(*pmDispatch->pmCPUStateInit)();
+	earlyTopology = FALSE;
+    }
 
     pmInitDone = 1;
 }
@@ -284,7 +293,7 @@ pmCPUGetDeadline(cpu_data_t *cpu)
 {
     uint64_t	deadline	= 0;
 
-	if (pmInitDone
+    if (pmInitDone
 	&& pmDispatch != NULL
 	&& pmDispatch->GetDeadline != NULL)
 	deadline = (*pmDispatch->GetDeadline)(&cpu->lcpu);
@@ -448,7 +457,8 @@ ml_get_maxsnoop(void)
 {
     uint64_t	max_snoop	= 0;
 
-    if (pmDispatch != NULL
+    if (pmInitDone
+	&& pmDispatch != NULL
 	&& pmDispatch->getMaxSnoop != NULL)
 	max_snoop = pmDispatch->getMaxSnoop();
 
@@ -461,7 +471,8 @@ ml_get_maxbusdelay(void)
 {
     uint64_t	max_delay	= 0;
 
-    if (pmDispatch != NULL
+    if (pmInitDone
+	&& pmDispatch != NULL
 	&& pmDispatch->getMaxBusDelay != NULL)
 	max_delay = pmDispatch->getMaxBusDelay();
 
@@ -482,8 +493,11 @@ ml_set_maxbusdelay(uint32_t mdelay)
     uint64_t	maxdelay	= mdelay;
 
     if (pmDispatch != NULL
-	&& pmDispatch->setMaxBusDelay != NULL)
+	&& pmDispatch->setMaxBusDelay != NULL) {
+	earlyMaxBusDelay = DELAY_UNSET;
 	pmDispatch->setMaxBusDelay(maxdelay);
+    } else
+	earlyMaxBusDelay = maxdelay;
 }
 
 uint64_t
@@ -505,8 +519,11 @@ void
 ml_set_maxintdelay(uint64_t mdelay)
 {
     if (pmDispatch != NULL
-	&& pmDispatch->setMaxIntDelay != NULL)
+	&& pmDispatch->setMaxIntDelay != NULL) {
+	earlyMaxIntDelay = DELAY_UNSET;
 	pmDispatch->setMaxIntDelay(mdelay);
+    } else
+	earlyMaxIntDelay = mdelay;
 }
 
 boolean_t
@@ -810,6 +827,12 @@ pmKextRegister(uint32_t version, pmDispatch_t *cpuFuncs,
 
     if (cpuFuncs != NULL) {
 	pmDispatch = cpuFuncs;
+
+	if (earlyTopology
+	    && pmDispatch->pmCPUStateInit != NULL) {
+	    (*pmDispatch->pmCPUStateInit)();
+	    earlyTopology = FALSE;
+	}
 
 	if (pmDispatch->pmIPIHandler != NULL) {
 	    lapic_set_pm_func((i386_intr_func_t)pmDispatch->pmIPIHandler);

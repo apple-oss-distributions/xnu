@@ -254,7 +254,7 @@ thread_switch(
 			ip_unlock(port);
 
 			thread = convert_port_to_thread(port);
-			ipc_port_release(port);
+			ip_release(port);
 
 			if (thread == self) {
 				(void)thread_deallocate_internal(thread);
@@ -356,7 +356,7 @@ thread_depress_abstime(
 
 		if (interval != 0) {
 			clock_absolutetime_interval_to_deadline(interval, &deadline);
-			if (!timer_call_enter(&self->depress_timer, deadline, 0))
+			if (!timer_call_enter(&self->depress_timer, deadline, TIMER_CALL_CRITICAL))
 				self->depress_timer_active++;
 		}
 	}
@@ -453,7 +453,7 @@ thread_poll_yield(
 			self->sched_flags |= TH_SFLAG_POLLDEPRESS;
 
 			abstime += (total_computation >> sched_poll_yield_shift);
-			if (!timer_call_enter(&self->depress_timer, abstime, 0))
+			if (!timer_call_enter(&self->depress_timer, abstime, TIMER_CALL_CRITICAL))
 				self->depress_timer_active++;
 			thread_unlock(self);
 

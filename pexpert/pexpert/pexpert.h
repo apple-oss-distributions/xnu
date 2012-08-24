@@ -58,8 +58,6 @@ void PE_init_platform(
 	void *args);
 
 
-
-
 void PE_init_kprintf(
 	boolean_t vm_initialized);
 
@@ -172,6 +170,13 @@ enum {
     kDebugTypeSerial  = 2 
 };
 
+/*  Scale factor values for PE_Video.v_scale */
+enum {
+   kPEScaleFactorUnknown = 0,
+   kPEScaleFactor1x      = 1,
+   kPEScaleFactor2x      = 2
+};
+
 struct PE_Video {
         unsigned long   v_baseAddr;     /* Base address of video memory */
         unsigned long   v_rowBytes;     /* Number of bytes per pixel row */
@@ -219,17 +224,6 @@ extern int PE_initialize_console(
 
 extern void PE_display_icon( unsigned int flags,
 			     const char * name );
-
-#if !CONFIG_EMBEDDED
-
-extern void
-vc_enable_progressmeter(int new_value);
-extern void
-vc_set_progressmeter(int new_value);
-extern int vc_progress_meter_enable;
-extern int vc_progress_meter_value;
-
-#endif /* !CONFIG_EMBEDDED */
 
 typedef struct PE_state {
 	boolean_t	initialized;

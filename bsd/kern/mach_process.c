@@ -129,10 +129,6 @@ ptrace(struct proc *p, struct ptrace_args *uap, int32_t *retval)
 	AUDIT_ARG(value32, uap->data);
 
 	if (uap->req == PT_DENY_ATTACH) {
-#if (DEVELOPMENT || DEBUG) && defined(__arm__)
-		if (PE_i_can_has_debugger(NULL))
-			return(0);
-#endif
 		proc_lock(p);
 		if (ISSET(p->p_lflag, P_LTRACED)) {
 			proc_unlock(p);
@@ -317,6 +313,11 @@ ptrace(struct proc *p, struct ptrace_args *uap, int32_t *retval)
 		 *	is resumed by adding NSIG to p_cursig. [see issig]
 		 */
 		proc_unlock(t);
+#if NOTYET
+		error = mac_proc_check_signal(p, t, SIGKILL);
+		if (0 != error)
+			goto resume;
+#endif
 		psignal(t, SIGKILL);
 		goto resume;
 
@@ -329,14 +330,10 @@ ptrace(struct proc *p, struct ptrace_args *uap, int32_t *retval)
 			goto out;
 		}
 
+		/* force use of Mach SPIs (and task_for_pid security checks) to adjust PC */
 		if (uap->addr != (user_addr_t)1) {
-#if defined(ppc)
-#define ALIGNED(addr,size)	(((unsigned)(addr)&((size)-1))==0)
-			if (!ALIGNED((int)uap->addr, sizeof(int)))
-				return (ERESTART);
-#undef 	ALIGNED
-#endif
-			thread_setentrypoint(th_act, uap->addr);
+			error = ENOTSUP;
+			goto out;
 		}
 
 		if ((unsigned)uap->data >= NSIG) {
@@ -350,8 +347,15 @@ ptrace(struct proc *p, struct ptrace_args *uap, int32_t *retval)
 
 		if (uap->req == PT_STEP) {
 		        /*
-			 * set trace bit
+			 * set trace bit 
+			 * we use sending SIGSTOP as a comparable security check.
 			 */
+#if NOTYET
+			error = mac_proc_check_signal(p, t, SIGSTOP);
+			if (0 != error) {
+				goto out;
+			}
+#endif
 			if (thread_setsinglestep(th_act, 1) != KERN_SUCCESS) {
 				error = ENOTSUP;
 				goto out;
@@ -359,7 +363,14 @@ ptrace(struct proc *p, struct ptrace_args *uap, int32_t *retval)
 		} else {
 		        /*
 			 * clear trace bit if on
+			 * we use sending SIGCONT as a comparable security check.
 			 */
+#if NOTYET
+			error = mac_proc_check_signal(p, t, SIGCONT);
+			if (0 != error) {
+				goto out;
+			}
+#endif
 			if (thread_setsinglestep(th_act, 0) != KERN_SUCCESS) {
 				error = ENOTSUP;
 				goto out;

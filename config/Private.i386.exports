@@ -8,6 +8,7 @@ _acpi_sleep_kernel
 _add_fsevent
 _apic_table
 _apply_func_phys
+_bufattr_delayidlesleep
 _cpu_to_lapic
 _cpuid_features
 _cpuid_info
@@ -33,3 +34,5 @@ _xts_decrypt
 _xts_done
 _xts_encrypt
 _xts_start
+_aes_decrypt
+_PE_reboot_on_panic
