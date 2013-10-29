@@ -90,6 +90,8 @@ extern thread_t		machine_processor_shutdown(
 
 extern void machine_idle(void);
 
+extern void machine_track_platform_idle(boolean_t);
+
 extern void machine_signal_idle(
 					processor_t         processor);
 
@@ -107,7 +109,7 @@ extern char *machine_boot_info(
  * levels of return pc information.
  */
 extern void machine_callstack(
-					natural_t           *buf,
+					uintptr_t           *buf,
 					vm_size_t           callstack_max);
 
 extern void consider_machine_collect(void);

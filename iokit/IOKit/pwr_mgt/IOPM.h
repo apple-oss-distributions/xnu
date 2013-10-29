@@ -90,6 +90,13 @@ enum {
 
     @constant kIOPMInitialDeviceState
     Indicates the initial power state for the device. If <code>initialPowerStateForDomainState()</code> returns a power state with this flag set in the capability field, then the initial power change is performed without calling the driver's <code>setPowerState()</code>.
+
+    @constant kIOPMRootDomainState
+    An indication that the power flags represent the state of the root power
+    domain. This bit must not be set in the IOPMPowerState structure.
+    Power Management may pass this bit to initialPowerStateForDomainState()
+    or powerStateForDomainState() to map from a global system state to the
+    desired device state.
 */
 typedef unsigned long IOPMPowerFlags;
 enum {
@@ -101,7 +108,8 @@ enum {
     kIOPMRestartCapability          = 0x00000080,
     kIOPMSleep                      = 0x00000001,
     kIOPMRestart                    = 0x00000080,
-    kIOPMInitialDeviceState         = 0x00000100
+    kIOPMInitialDeviceState         = 0x00000100,
+    kIOPMRootDomainState            = 0x00000200
 };
 
 /*
@@ -222,6 +230,15 @@ enum {
  */
  #define kIOPMSleepWakeUUIDKey              "SleepWakeUUID"
 
+/* kIOPMBootSessionUUIDKey
+ * Key refers to a CFStringRef that will uniquely identify
+ * a boot cycle.
+ * The key becomes valid at boot time and remains valid 
+ * till shutdown. The property value will remain same across 
+ * sleep/wake/hibernate cycle.
+ */
+#define kIOPMBootSessionUUIDKey             "BootSessionUUID"
+
 /* kIOPMDeepSleepEnabledKey
  * Indicates the Deep Sleep enable state.
  * It has a boolean value.
@@ -245,7 +262,31 @@ enum {
  *  false       == Retain FV key when going to standby mode
  *  not present == Retain FV key when going to standby mode
  */
-#define kIOPMDestroyFVKeyOnStandbyKey            "DestroyFVKeyOnStandby"
+#define kIOPMDestroyFVKeyOnStandbyKey       "DestroyFVKeyOnStandby"
+
+/*******************************************************************************
+ *
+ * Properties that can control power management behavior
+ *
+ ******************************************************************************/
+
+/* kIOPMResetPowerStateOnWakeKey
+ * If an IOService publishes this key with the value of kOSBooleanTrue,
+ * then PM will disregard the influence from changePowerStateToPriv() or
+ * any activity tickles that occurred before system sleep when resolving
+ * the initial device power state on wake. Influences from power children
+ * and changePowerStateTo() are not eliminated. At the earliest opportunity
+ * upon system wake, PM will query the driver for a new power state to be
+ * installed as the initial changePowerStateToPriv() influence, by calling
+ * initialPowerStateForDomainState() with both kIOPMRootDomainState and
+ * kIOPMPowerOn flags set. The default implementation will always return
+ * the lowest power state. Drivers can override this default behavior to
+ * immediately raise the power state when there are work blocked on the
+ * power change, and cannot afford to wait until the next activity tickle.
+ * This property should be statically added to a driver's plist or set at
+ * runtime before calling PMinit().
+ */
+#define kIOPMResetPowerStateOnWakeKey       "IOPMResetPowerStateOnWake"
 
 /*******************************************************************************
  *
@@ -288,7 +329,21 @@ enum {
      */
     kIOPMDriverAssertionPreventDisplaySleepBit      = 0x40,
 
-    kIOPMDriverAssertionReservedBit7                = 0x80
+    /*! kIOPMDriverAssertionReservedBit7
+     * Reserved for storage family.
+     */
+    kIOPMDriverAssertionReservedBit7                = 0x80,
+
+    /*! kIOPMDriverAssertionMagicPacketWakeEnabledBit
+     * When set, driver is informing PM that magic packet wake is enabled.
+     */
+    kIOPMDriverAssertionMagicPacketWakeEnabledBit   = 0x100,
+
+    /*! kIOPMDriverAssertionNetworkKeepAliveActiveBit
+     * When set, driver is informing PM that it is holding the network
+     * interface up to do TCPKeepAlive
+     */
+    kIOPMDriverAssertionNetworkKeepAliveActiveBit   = 0x200
 };
 
  /* kIOPMAssertionsDriverKey
@@ -322,6 +377,7 @@ enum {
 #define kIOPMDriverAssertionModifiedTimeKey     "ModifiedTime"
 #define kIOPMDriverAssertionOwnerStringKey      "Owner"
 #define kIOPMDriverAssertionOwnerServiceKey     "ServicePtr"
+#define kIOPMDriverAssertionRegistryEntryIDKey  "RegistryEntryID"
 #define kIOPMDriverAssertionLevelKey            "Level"
 #define kIOPMDriverAssertionAssertedKey         "Assertions"
 
@@ -761,6 +817,9 @@ enum {
 enum {
     kIOPMSubclassPolicy,
     kIOPMSuperclassPolicy1
+#ifdef KERNEL_PRIVATE
+    , kIOPMActivityTickleTypeAdvisory = 128
+#endif
 };
 
 struct stateChangeNote {

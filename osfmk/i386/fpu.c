@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2010 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2012 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -334,54 +334,15 @@ static void fpu_load_registers(void *fstate) {
 	}
 #endif	/* DEBUG */
 
-#if defined(__i386__)
-	if (layout == FXSAVE32) {
-		/* Restore the compatibility/legacy mode XMM+x87 state */
-		fxrstor(ifps);
-	}
-	else if (layout == FXSAVE64) {
-		fxrstor64(ifps);
-	}
-	else if (layout == XSAVE32) {
-		xrstor(ifps);
-	}
-	else if (layout == XSAVE64) {
-		xrstor64(ifps);
-	}
-#elif defined(__x86_64__)
 	if ((layout == XSAVE64) || (layout == XSAVE32))
 		xrstor(ifps);
 	else
 		fxrstor(ifps);
-#endif
 }
 
 static void fpu_store_registers(void *fstate, boolean_t is64) {
 	struct x86_fx_thread_state *ifps = fstate;
 	assert(ALIGNED(ifps, 64));
-#if defined(__i386__)
-	if (!is64) {
-		if (fpu_YMM_present) {
-			xsave(ifps);
-			ifps->fp_save_layout = XSAVE32;
-		}
-		else {
-			/* save the compatibility/legacy mode XMM+x87 state */
-			fxsave(ifps);
-			ifps->fp_save_layout = FXSAVE32;
-		}
-	}
-	else {
-		if (fpu_YMM_present) {
-			xsave64(ifps);
-			ifps->fp_save_layout = XSAVE64;
-		}
-		else {
-			fxsave64(ifps);
-			ifps->fp_save_layout = FXSAVE64;
-		}
-	}
-#elif defined(__x86_64__)
 	if (fpu_YMM_present) {
 		xsave(ifps);
 		ifps->fp_save_layout = is64 ? XSAVE64 : XSAVE32;
@@ -390,7 +351,6 @@ static void fpu_store_registers(void *fstate, boolean_t is64) {
 		fxsave(ifps);
 		ifps->fp_save_layout = is64 ? FXSAVE64 : FXSAVE32;
 	}
-#endif
 }
 
 /*
@@ -488,6 +448,10 @@ fpu_set_fxstate(
 	if (fp_kind == FP_NO)
 	    return KERN_FAILURE;
 
+	if ((f == x86_AVX_STATE32 || f == x86_AVX_STATE64) &&
+	    !ml_fpu_avx_enabled())
+	    return KERN_FAILURE;
+
 	state = (x86_float_state64_t *)tstate;
 
 	assert(thr_act != THREAD_NULL);
@@ -562,7 +526,7 @@ fpu_set_fxstate(
 		iavx->fp_save_layout = thread_is_64bit(thr_act) ? XSAVE64 : XSAVE32;
 		/* Sanitize XSAVE header */
 		bzero(&iavx->_xh.xhrsvd[0], sizeof(iavx->_xh.xhrsvd));
-		if (state_size == sizeof(struct x86_avx_thread_state))
+		if (fpu_nyreg)
 			iavx->_xh.xsbv = (XFEM_YMM | XFEM_SSE | XFEM_X87);
 		else
 			iavx->_xh.xsbv = (XFEM_SSE | XFEM_X87);
@@ -605,6 +569,10 @@ fpu_get_fxstate(
 	size_t	state_size = sizeof(struct x86_fx_thread_state);
 
 	if (fp_kind == FP_NO)
+		return KERN_FAILURE;
+
+	if ((f == x86_AVX_STATE32 || f == x86_AVX_STATE64) &&
+	    !ml_fpu_avx_enabled())
 		return KERN_FAILURE;
 
 	state = (x86_float_state64_t *)tstate;
@@ -949,7 +917,12 @@ fp_load(
 	struct x86_fx_thread_state *ifps = pcb->ifps;
 
 	assert(ifps);
-	assert(ifps->fp_valid == FALSE || ifps->fp_valid == TRUE);
+#if	DEBUG
+	if (ifps->fp_valid != FALSE && ifps->fp_valid != TRUE) {
+		panic("fp_load() invalid fp_valid: %u, fp_save_layout: %u\n",
+		      ifps->fp_valid, ifps->fp_save_layout);
+	}
+#endif
 
 	if (ifps->fp_valid == FALSE) {
 		fpinit();

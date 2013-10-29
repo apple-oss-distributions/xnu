@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2004 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2004-2012 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -51,7 +51,7 @@ extern ppnum_t max_ppnum;
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
 hibernate_page_list_t *
-hibernate_page_list_allocate(void)
+hibernate_page_list_allocate(boolean_t log)
 {
     ppnum_t		    base, num;
     vm_size_t               size;
@@ -64,6 +64,7 @@ hibernate_page_list_allocate(void)
     uint32_t		    mcount, msize, i;
     hibernate_bitmap_t	    dram_ranges[MAX_BANKS];
     boot_args *		    args = (boot_args *) PE_state.bootArgs;
+    uint32_t		    non_os_pagecount;
 
     mptr = (EfiMemoryRange *)ml_static_ptovirt(args->MemoryMap);
     if (args->MemoryMapDescriptorSize == 0)
@@ -72,6 +73,7 @@ hibernate_page_list_allocate(void)
     mcount = args->MemoryMapSize / msize;
 
     num_banks = 0;
+    non_os_pagecount = 0;
     for (i = 0; i < mcount; i++, mptr = (EfiMemoryRange *)(((vm_offset_t)mptr) + msize))
     {
 	base = (ppnum_t) (mptr->PhysicalStart >> I386_PGSHIFT);
@@ -87,13 +89,16 @@ hibernate_page_list_allocate(void)
 	switch (mptr->Type)
 	{
 	    // any kind of dram
+	    case kEfiACPIMemoryNVS:
+	    case kEfiPalCode:
+		non_os_pagecount += num;
+
+	    // OS used dram
 	    case kEfiLoaderCode:
 	    case kEfiLoaderData:
 	    case kEfiBootServicesCode:
 	    case kEfiBootServicesData:
 	    case kEfiConventionalMemory:
-	    case kEfiACPIMemoryNVS:
-	    case kEfiPalCode:
 
 		for (bank = 0; bank < num_banks; bank++)
 		{
@@ -167,11 +172,11 @@ hibernate_page_list_allocate(void)
         bitmap->last_page  = dram_ranges[bank].last_page;
         bitmap->bitmapwords = (bitmap->last_page + 1
                                - bitmap->first_page + 31) >> 5;
-        kprintf("hib bank[%d]: 0x%x000 end 0x%xfff\n", bank,
-                bitmap->first_page,
-                bitmap->last_page);
+        if (log) kprintf("hib bank[%d]: 0x%x000 end 0x%xfff\n",
+        		  bank, bitmap->first_page, bitmap->last_page);
 	bitmap = (hibernate_bitmap_t *) &bitmap->bitmap[bitmap->bitmapwords];
     }
+    if (log) printf("efi pagecount %d\n", non_os_pagecount);
 
     return (list);
 }
@@ -181,6 +186,7 @@ hibernate_page_list_allocate(void)
 void
 hibernate_page_list_setall_machine( __unused hibernate_page_list_t * page_list,
                                     __unused hibernate_page_list_t * page_list_wired,
+                                    __unused boolean_t preflight,
                                     __unused uint32_t * pagesOut)
 {
 }
@@ -192,13 +198,6 @@ hibernate_page_list_set_volatile( hibernate_page_list_t * page_list,
 				  uint32_t * pagesOut)
 {
     boot_args * args = (boot_args *) PE_state.bootArgs;
-
-#if !defined(x86_64)
-    hibernate_set_page_state(page_list, page_list_wired, 
-		I386_HIB_PAGETABLE, I386_HIB_PAGETABLE_COUNT, 
-		kIOHibernatePageStateFree);
-    *pagesOut -= I386_HIB_PAGETABLE_COUNT;
-#endif
 
     if (args->efiRuntimeServicesPageStart)
     {
@@ -229,42 +228,11 @@ hibernate_processor_setup(IOHibernateImageHeader * header)
 void
 hibernate_vm_lock(void)
 {
-    if (current_cpu_datap()->cpu_hibernate)
-    {
-        vm_page_lock_queues();
-        lck_mtx_lock(&vm_page_queue_free_lock);
-
-	if (vm_page_local_q) {
-		uint32_t  i;
-
-		for (i = 0; i < vm_page_local_q_count; i++) {
-			struct vpl	*lq;
-
-			lq = &vm_page_local_q[i].vpl_un.vpl;
-
-			VPL_LOCK(&lq->vpl_lock);
-		}
-	}
-    }
+    if (current_cpu_datap()->cpu_hibernate) hibernate_vm_lock_queues();
 }
 
 void
 hibernate_vm_unlock(void)
 {
-    if (current_cpu_datap()->cpu_hibernate)
-    {
-	if (vm_page_local_q) {
-		uint32_t  i;
-
-		for (i = 0; i < vm_page_local_q_count; i++) {
-			struct vpl	*lq;
-
-			lq = &vm_page_local_q[i].vpl_un.vpl;
-
-			VPL_UNLOCK(&lq->vpl_lock);
-		}
-	}
-        lck_mtx_unlock(&vm_page_queue_free_lock);
-        vm_page_unlock_queues();
-    }
+    if (current_cpu_datap()->cpu_hibernate)  hibernate_vm_unlock_queues();
 }

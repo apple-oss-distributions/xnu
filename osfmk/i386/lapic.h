@@ -174,15 +174,20 @@ typedef enum {
 #define	LAPIC_MSR(reg)		(LAPIC_MSR_BASE + LAPIC_MSR_OFFSET(reg))
 
 typedef struct {
-	void		(*init)	(void);
-	uint32_t	(*read)	(lapic_register_t);
-	void		(*write)(lapic_register_t, uint32_t);
+	void		(*init)		(void);
+	uint32_t	(*read)		(lapic_register_t);
+	void		(*write)	(lapic_register_t, uint32_t);
+	uint64_t	(*read_icr)	(void);
+	void		(*write_icr)	(uint32_t, uint32_t);
 } lapic_ops_table_t;
 extern  lapic_ops_table_t *lapic_ops;
 
+#define LAPIC_INIT()			lapic_ops->init();
 #define LAPIC_WRITE(reg,val)		lapic_ops->write(reg, val)
 #define LAPIC_READ(reg)			lapic_ops->read(reg)
 #define LAPIC_READ_OFFSET(reg,off)	LAPIC_READ((reg)+(off))
+#define LAPIC_READ_ICR()		lapic_ops->read_icr()
+#define LAPIC_WRITE_ICR(dst,cmd)	lapic_ops->write_icr(dst, cmd)
 
 typedef enum {
 	periodic,
@@ -225,6 +230,7 @@ typedef uint32_t lapic_timer_count_t;
 #define LAPIC_PM_INTERRUPT		0x7
 
 #define LAPIC_PMC_SWI_VECTOR		(LAPIC_DEFAULT_INTERRUPT_BASE + LAPIC_PMC_SW_INTERRUPT)
+#define LAPIC_TIMER_VECTOR		(LAPIC_DEFAULT_INTERRUPT_BASE + LAPIC_TIMER_INTERRUPT)
 
 /* The vector field is ignored for NMI interrupts via the LAPIC
  * or otherwise, so this is not an offset from the interrupt
@@ -295,6 +301,12 @@ static inline void	lapic_set_timer_func(i386_intr_func_t func)
 {
 	lapic_set_intr_func(LAPIC_VECTOR(TIMER), func);
 }
+/* We don't support dynamic adjustment of the LAPIC timer base vector here
+ * it's effectively incompletely supported elsewhere as well.
+ */
+static inline void	lapic_timer_swi(void) {
+	__asm__ __volatile__("int %0" :: "i"(LAPIC_DEFAULT_INTERRUPT_BASE + LAPIC_TIMER_INTERRUPT):"memory");
+}
 
 static inline void	lapic_set_thermal_func(i386_intr_func_t func)
 {
@@ -314,8 +326,8 @@ extern boolean_t	lapic_is_interrupting(uint8_t vector);
 extern void		lapic_interrupt_counts(uint64_t intrs[256]);
 extern void		lapic_disable_timer(void);
 
+#define	MAX_LAPICIDS	(LAPIC_ID_MAX+1)
 #ifdef MP_DEBUG
-extern	void		lapic_cpu_map_dump(void);
 #define LAPIC_CPU_MAP_DUMP()	lapic_cpu_map_dump()
 #define LAPIC_DUMP()		lapic_dump()
 #else

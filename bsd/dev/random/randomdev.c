@@ -56,6 +56,7 @@
 #include <dev/random/YarrowCoreLib/include/yarrow.h>
 
 #include <libkern/OSByteOrder.h>
+#include <libkern/OSAtomic.h>
 
 #include <mach/mach_time.h>
 #include <machine/machine_routines.h>
@@ -65,6 +66,9 @@
 #define RANDOM_MAJOR  -1 /* let the kernel pick the device number */
 
 d_ioctl_t       random_ioctl;
+
+/* To generate the seed for the RNG */
+extern uint64_t early_random();
 
 /*
  * A struct describing which functions will get invoked for certain
@@ -101,13 +105,14 @@ static struct cdevsw random_cdevsw =
 
 
 /* Used to detect whether we've already been initialized */
-static int gRandomInstalled = 0;
+static UInt8 gRandomInstalled = 0;
 static PrngRef gPrngRef;
 static int gRandomError = 1;
 static lck_grp_t *gYarrowGrp;
 static lck_attr_t *gYarrowAttr;
 static lck_grp_attr_t *gYarrowGrpAttr;
 static lck_mtx_t *gYarrowMutex = 0;
+static UInt8 gYarrowInitializationLock = 0;
 
 #define RESEED_TICKS 50 /* how long a reseed operation can take */
 
@@ -307,6 +312,27 @@ PreliminarySetup(void)
 {
     prng_error_status perr;
 
+	/* Multiple threads can enter this as a result of an earlier
+	 * check of gYarrowMutex.  We make sure that only one of them
+	 * can enter at a time.  If one of them enters and discovers
+	 * that gYarrowMutex is no longer NULL, we know that another
+	 * thread has initialized the Yarrow state and we can exit.
+	 */
+	
+	/* The first thread that enters this function will find
+	 * gYarrowInitializationLock set to 0.  It will atomically
+	 * set the value to 1 and, seeing that it was zero, drop
+	 * out of the loop.  Other threads will see that the value is
+	 * 1 and continue to loop until we are initialized.
+     */
+
+	while (OSTestAndSet(0, &gYarrowInitializationLock)); /* serialize access to this function */
+	
+	if (gYarrowMutex) {
+		/*  we've already been initialized, clear and get out */
+		goto function_exit;
+	}
+
     /* create a Yarrow object */
     perr = prngInitialize(&gPrngRef);
     if (perr != 0) {
@@ -317,24 +343,19 @@ PreliminarySetup(void)
 	/* clear the error flag, reads and write should then work */
     gRandomError = 0;
 
-    struct timeval tt;
+    uint64_t tt;
     char buffer [16];
 
     /* get a little non-deterministic data as an initial seed. */
-    microtime(&tt);
+	/* On OSX, securityd will add much more entropy as soon as it */
+	/* comes up.  On iOS, entropy is added with each system interrupt. */
+    tt = early_random();
 
-    /*
-	 * So how much of the system clock is entropic?
-	 * It's hard to say, but assume that at least the
-	 * least significant byte of a 64 bit structure
-	 * is entropic.  It's probably more, how can you figure
-	 * the exact time the user turned the computer on, for example.
-    */
     perr = prngInput(gPrngRef, (BYTE*) &tt, sizeof (tt), SYSTEM_SOURCE, 8);
     if (perr != 0) {
         /* an error, complain */
         printf ("Couldn't seed Yarrow.\n");
-        return;
+        goto function_exit;
     }
     
     /* turn the data around */
@@ -350,6 +371,10 @@ PreliminarySetup(void)
     gYarrowMutex   = lck_mtx_alloc_init(gYarrowGrp, gYarrowAttr);
 	
 	fips_initialize ();
+
+function_exit:
+	/* allow other threads to figure out whether or not we have been initialized. */
+	gYarrowInitializationLock = 0;
 }
 
 const Block kKnownAnswer = {0x92, 0xb4, 0x04, 0xe5, 0x56, 0x58, 0x8c, 0xed, 0x6c, 0x1a, 0xcd, 0x4e, 0xbf, 0x05, 0x3f, 0x68, 0x09, 0xf7, 0x3a, 0x93};
@@ -384,14 +409,11 @@ random_init(void)
 {
 	int ret;
 
-	if (gRandomInstalled)
+	if (OSTestAndSet(0, &gRandomInstalled)) {
+		/* do this atomically so that it works correctly with
+		 multiple threads */
 		return;
-
-	/* install us in the file system */
-	gRandomInstalled = 1;
-
-	/* setup yarrow and the mutex */
-	PreliminarySetup();
+	}
 
 	ret = cdevsw_add(RANDOM_MAJOR, &random_cdevsw);
 	if (ret < 0) {
@@ -409,6 +431,9 @@ random_init(void)
 	 */
 	devfs_make_node(makedev (ret, 1), DEVFS_CHAR,
 		UID_ROOT, GID_WHEEL, 0666, "urandom", 0);
+
+	/* setup yarrow and the mutex if needed*/
+	PreliminarySetup();
 }
 
 int
@@ -515,51 +540,6 @@ error_exit: /* do this to make sure the mutex unlocks. */
     return (retCode);
 }
 
-/*
- * return data to the caller.  Results unpredictable.
- */ 
-int
-random_read(__unused dev_t dev, struct uio *uio, __unused int ioflag)
-{
-    int retCode = 0;
-	
-    if (gRandomError != 0)
-        return (ENOTSUP);
-
-   /* lock down the mutex */
-    lck_mtx_lock(gYarrowMutex);
-
-
-	int bytes_remaining = uio_resid(uio);
-    while (bytes_remaining > 0 && retCode == 0) {
-        /* get the user's data */
-		int bytes_to_read = 0;
-		
-		int bytes_available = kBlockSize - g_bytes_used;
-        if (bytes_available == 0)
-		{
-			random_block(g_random_data, TRUE);
-			g_bytes_used = 0;
-			bytes_available = kBlockSize;
-		}
-		
-		bytes_to_read = min (bytes_remaining, bytes_available);
-		
-        retCode = uiomove(((caddr_t)g_random_data)+ g_bytes_used, bytes_to_read, uio);
-        g_bytes_used += bytes_to_read;
-
-        if (retCode != 0)
-            goto error_exit;
-		
-		bytes_remaining = uio_resid(uio);
-    }
-    
-    retCode = 0;
-    
-error_exit:
-    lck_mtx_unlock(gYarrowMutex);
-    return retCode;
-}
 
 /* export good random numbers to the rest of the kernel */
 void
@@ -570,6 +550,8 @@ read_random(void* buffer, u_int numbytes)
     }
     
     lck_mtx_lock(gYarrowMutex);
+
+
 	int bytes_read = 0;
 
 	int bytes_remaining = numbytes;
@@ -591,6 +573,36 @@ read_random(void* buffer, u_int numbytes)
     lck_mtx_unlock(gYarrowMutex);
 }
 
+/*
+ * return data to the caller.  Results unpredictable.
+ */ 
+int
+random_read(__unused dev_t dev, struct uio *uio, __unused int ioflag)
+{
+    int retCode = 0;
+	
+    if (gRandomError != 0)
+        return (ENOTSUP);
+
+    char buffer[64];
+
+	user_ssize_t bytes_remaining = uio_resid(uio);
+    while (bytes_remaining > 0 && retCode == 0) {
+		user_ssize_t bytesToRead = min(sizeof(buffer), bytes_remaining);
+        read_random(buffer, bytesToRead);
+        retCode = uiomove(buffer, bytesToRead, uio);
+
+        if (retCode != 0)
+            goto error_exit;
+		
+		bytes_remaining = uio_resid(uio);
+    }
+    
+    retCode = 0;
+    
+error_exit:
+    return retCode;
+}
 /*
  * Return an u_int32_t pseudo-random number.
  */

@@ -351,7 +351,11 @@ __END_DECLS
 #define CPU_SUBTYPE_ARM_XSCALE		((cpu_subtype_t) 8)
 #define CPU_SUBTYPE_ARM_V7		((cpu_subtype_t) 9)
 #define CPU_SUBTYPE_ARM_V7F		((cpu_subtype_t) 10) /* Cortex A9 */
+#define CPU_SUBTYPE_ARM_V7S		((cpu_subtype_t) 11) /* Swift */
 #define CPU_SUBTYPE_ARM_V7K		((cpu_subtype_t) 12) /* Kirkwood40 */
+#define CPU_SUBTYPE_ARM_V6M		((cpu_subtype_t) 14) /* Not meant to be run under xnu */
+#define CPU_SUBTYPE_ARM_V7M		((cpu_subtype_t) 15) /* Not meant to be run under xnu */
+#define CPU_SUBTYPE_ARM_V7EM		((cpu_subtype_t) 16) /* Not meant to be run under xnu */
 
 #endif /* !__ASSEMBLER__ */
 
@@ -378,11 +382,14 @@ __END_DECLS
 #define CPUFAMILY_INTEL_WESTMERE	0x573b5eec
 #define CPUFAMILY_INTEL_SANDYBRIDGE	0x5490b78c
 #define CPUFAMILY_INTEL_IVYBRIDGE	0x1f65e835
+#define CPUFAMILY_INTEL_HASWELL		0x10b282dc
 #define CPUFAMILY_ARM_9			0xe73283ae
 #define CPUFAMILY_ARM_11		0x8ff620d8
 #define CPUFAMILY_ARM_XSCALE		0x53b005f5
+#define CPUFAMILY_ARM_12		0xbd1b0ae9
 #define CPUFAMILY_ARM_13		0x0cc90e64
 #define CPUFAMILY_ARM_14		0x96077ef1
+#define CPUFAMILY_ARM_SWIFT 		0x1e2d6381
 
 /* The following synonyms are deprecated: */
 #define CPUFAMILY_INTEL_6_14	CPUFAMILY_INTEL_YONAH

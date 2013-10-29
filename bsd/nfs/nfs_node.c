@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2011 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2013 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -72,6 +72,7 @@
 #include <sys/proc.h>
 #include <sys/kauth.h>
 #include <sys/mount_internal.h>
+#include <sys/vnode_internal.h>
 #include <sys/vnode.h>
 #include <sys/ubc.h>
 #include <sys/malloc.h>
@@ -94,6 +95,8 @@ static lck_grp_t *nfs_node_hash_lck_grp;
 static lck_grp_t *nfs_node_lck_grp;
 static lck_grp_t *nfs_data_lck_grp;
 lck_mtx_t *nfs_node_hash_mutex;
+
+#define NFS_NODE_DBG(...) NFS_DBG(NFS_FAC_NODE, 7, ## __VA_ARGS__)
 
 /*
  * Initialize hash links for nfsnodes
@@ -132,6 +135,48 @@ nfs_hash(u_char *fhp, int fhsize)
 	return (fhsum);
 }
 
+	
+int nfs_case_insensitive(mount_t);
+
+int
+nfs_case_insensitive(mount_t mp)
+{
+	struct nfsmount *nmp = VFSTONFS(mp);
+	int answer = 0;
+	int skip = 0;
+	
+	if (nmp == NULL) {
+		return (0);
+	}
+	
+	if (nmp->nm_vers == NFS_VER2) {
+		/* V2 has no way to know */
+		return (0);
+	}
+
+	lck_mtx_lock(&nmp->nm_lock);
+	if (nmp->nm_vers == NFS_VER3) {
+		if (!(nmp->nm_state & NFSSTA_GOTPATHCONF)) {
+			/* We're holding the node lock so we just return 
+			 * with answer as case sensitive. Is very rare
+			 * for file systems not to be homogenous w.r.t. pathconf
+			 */
+			skip = 1;
+		} 
+	} else if (!(nmp->nm_fsattr.nfsa_flags & NFS_FSFLAG_HOMOGENEOUS)) {
+		/* no pathconf info cached */
+		skip = 1;
+	}
+
+	if (!skip && NFS_BITMAP_ISSET(nmp->nm_fsattr.nfsa_bitmap, NFS_FATTR_CASE_INSENSITIVE))
+		answer = 1;
+
+	lck_mtx_unlock(&nmp->nm_lock);
+
+	return (answer);
+}
+
+	
 /*
  * Look up a vnode/nfsnode by file handle.
  * Callers must check for mount points!!
@@ -234,6 +279,86 @@ loop:
 		} else {
 			if (dnp && cnp && (flags & NG_MAKEENTRY))
 				cache_enter(NFSTOV(dnp), vp, cnp);
+			/*
+			 * Update the vnode if the name/and or the parent has
+			 * changed. We need to do this so that if getattrlist is
+			 * called asking for ATTR_CMN_NAME, that the "most"
+			 * correct name is being returned. In addition for
+			 * monitored vnodes we need to kick the vnode out of the
+			 * name cache. We do this so that if there are hard
+			 * links in the same directory the link will not be
+			 * found and a lookup will get us here to return the
+			 * name of the current link. In addition by removing the
+			 * name from the name cache the old name will not be
+			 * found after a rename done on another client or the
+			 * server.  The principle reason to do this is because
+			 * Finder is asking for notifications on a directory.
+			 * The directory changes, Finder gets notified, reads
+			 * the directory (which we have purged) and for each
+			 * entry returned calls getattrlist with the name
+			 * returned from readdir. gettattrlist has to call
+			 * namei/lookup to resolve the name, because its not in
+			 * the cache we end up here. We need to update the name
+			 * so Finder will get the name it called us with.
+			 *
+			 * We had an imperfect solution with respect to case
+			 * sensitivity.  There is a test that is run in
+			 * FileBuster that does renames from some name to
+			 * another name differing only in case. It then reads
+			 * the directory looking for the new name, after it
+			 * finds that new name, it ask gettattrlist to verify
+			 * that the name is the new name.  Usually that works,
+			 * but renames generate fsevents and fseventsd will do a
+			 * lookup on the name via lstat. Since that test renames
+			 * old name to new name back and forth there is a race
+			 * that an fsevent will be behind and will access the
+			 * file by the old name, on a case insensitive file
+			 * system that will work. Problem is if we do a case
+			 * sensitive compare, we're going to change the name,
+			 * which the test's getattrlist verification step is
+			 * going to fail. So we will check the case sensitivity
+			 * of the file system and do the appropriate compare. In
+			 * a rare instance for non homogeneous file systems
+			 * w.r.t. pathconf we will use case sensitive compares.
+			 * That could break if the file system is actually case
+			 * insensitive.
+			 *
+			 * Note that V2 does not know the case, so we just
+			 * assume case sensitivity. 
+			 *
+			 * This is clearly not perfect due to races, but this is
+			 * as good as its going to get. You can defeat the
+			 * handling of hard links simply by doing:
+			 *
+			 *	while :; do ls -l > /dev/null; done
+			 *
+			 * in a terminal window. Even a single ls -l can cause a
+			 * race.
+			 *
+			 * <rant>What we really need is for the caller, that
+			 * knows the name being used is valid since it got it
+			 * from a readdir to use that name and not ask for the
+			 * ATTR_CMN_NAME</rant>
+			 */
+			if (dnp && cnp && (vp != NFSTOV(dnp))) {
+				int update_flags = (vnode_ismonitored((NFSTOV(dnp)))) ? VNODE_UPDATE_CACHE : 0;
+				int (*cmp)(const char *s1, const char *s2, size_t n);
+
+				cmp = nfs_case_insensitive(mp) ? strncasecmp : strncmp;
+
+				if (vp->v_name && cnp->cn_namelen && (*cmp)(cnp->cn_nameptr, vp->v_name, cnp->cn_namelen))
+					update_flags |= VNODE_UPDATE_NAME;
+				if ((vp->v_name == NULL && cnp->cn_namelen != 0) || (vp->v_name != NULL && cnp->cn_namelen == 0))
+					update_flags |= VNODE_UPDATE_NAME;
+				if (vnode_parent(vp) != NFSTOV(dnp))
+					update_flags |= VNODE_UPDATE_PARENT;
+				if (update_flags) {
+					NFS_NODE_DBG("vnode_update_identity old name %s new name %*s\n",
+						     vp->v_name, cnp->cn_namelen, cnp->cn_nameptr ? cnp->cn_nameptr : "");
+					vnode_update_identity(vp, NFSTOV(dnp), cnp->cn_nameptr, cnp->cn_namelen, 0, update_flags);
+				}
+			}
+
 			*npp = np;
 		}
 		FSDBG_BOT(263, dnp, *npp, 0xcace0000, error);
@@ -466,14 +591,23 @@ nfs_vnop_inactive(ap)
 {
 	vnode_t vp = ap->a_vp;
 	vfs_context_t ctx = ap->a_context;
-	nfsnode_t np = VTONFS(ap->a_vp);
+	nfsnode_t np;
 	struct nfs_sillyrename *nsp;
 	struct nfs_vattr nvattr;
 	int unhash, attrerr, busyerror, error, inuse, busied, force;
 	struct nfs_open_file *nofp;
 	struct componentname cn;
-	struct nfsmount *nmp = NFSTONMP(np);
-	mount_t mp = vnode_mount(vp);
+	struct nfsmount *nmp;
+	mount_t mp;
+
+	if (vp == NULL)
+		panic("nfs_vnop_inactive: vp == NULL");
+	np = VTONFS(vp);
+	if (np == NULL)
+		panic("nfs_vnop_inactive: np == NULL");
+			
+	nmp = NFSTONMP(np);
+	mp = vnode_mount(vp);
 
 restart:
 	force = (!mp || (mp->mnt_kern_flag & MNTK_FRCUNMOUNT));
@@ -482,8 +616,21 @@ restart:
 
 	/* There shouldn't be any open or lock state at this point */
 	lck_mtx_lock(&np->n_openlock);
-	if (np->n_openrefcnt && !force)
+	if (np->n_openrefcnt && !force) {
+		/*
+		 * vnode_rele and vnode_put drop the vnode lock before
+		 * calling VNOP_INACTIVE, so there is a race were the
+		 * vnode could become active again. Perhaps there are
+		 * other places where this can happen, so if we've got
+		 * here we need to get out.
+		 */
+#ifdef NFS_NODE_DEBUG
 		NP(np, "nfs_vnop_inactive: still open: %d", np->n_openrefcnt);
+#endif		
+		lck_mtx_unlock(&np->n_openlock);
+		return 0;
+	}
+
 	TAILQ_FOREACH(nofp, &np->n_opens, nof_link) {
 		lck_mtx_lock(&nofp->nof_lock);
 		if (nofp->nof_flags & NFS_OPEN_FILE_BUSY) {
@@ -1179,6 +1326,7 @@ nfs_data_update_size(nfsnode_t np, int datalocked)
 }
 
 #define DODEBUG 1
+
 int
 nfs_mount_is_dirty(mount_t mp)
 {
@@ -1205,8 +1353,8 @@ out:
 	microuptime(&then);
 	timersub(&then, &now, &diff);
 	
-	printf("nfs_mount_is_dirty took %lld mics for %ld slots and %ld nodes return %d\n",
-	       (uint64_t)diff.tv_sec * 1000000LL + diff.tv_usec, i, ncnt, (i <= nfsnodehash));
+	NFS_DBG(NFS_FAC_SOCK, 7, "mount_is_dirty for %s took %lld mics for %ld slots and %ld nodes return %d\n",
+		vfs_statfs(mp)->f_mntfromname, (uint64_t)diff.tv_sec * 1000000LL + diff.tv_usec, i, ncnt, (i <= nfsnodehash));
 #endif
 
 	return (i <=  nfsnodehash);

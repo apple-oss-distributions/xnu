@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2006 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2012 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -162,6 +162,7 @@ static cpuid_cache_descriptor_t intel_cpuid_leaf2_descriptor_table[] = {
 	{ 0x70,	CACHE,	TRACE,		8,	12*K,	NA  },
 	{ 0x71,	CACHE,	TRACE,		8,	16*K,	NA  },
 	{ 0x72,	CACHE,	TRACE,		8,	32*K,	NA  },
+	{ 0x76,	TLB,	INST,		NA,	BOTH,	8   },
 	{ 0x78,	CACHE,	L2,		4,	1*M,	64  },
 	{ 0x79,	CACHE,	L2_2LINESECTOR,	8,	128*K,	64  },
 	{ 0x7A,	CACHE,	L2_2LINESECTOR,	8,	256*K,	64  },
@@ -181,8 +182,11 @@ static cpuid_cache_descriptor_t intel_cpuid_leaf2_descriptor_table[] = {
 	{ 0xB2,	TLB,	INST,		4,	SMALL,	64  },	
 	{ 0xB3,	TLB,	DATA,		4,	SMALL,	128 },	
 	{ 0xB4,	TLB,	DATA1,		4,	SMALL,	256 },	
+	{ 0xB5,	TLB,	DATA1,		8,	SMALL,	64  },	
+	{ 0xB6,	TLB,	DATA1,		8,	SMALL,	128 },	
 	{ 0xBA,	TLB,	DATA1,		4,	BOTH,	64  },	
-	{ 0xCA,	STLB,	DATA1,		4,	BOTH,	512 },	
+	{ 0xC1,	STLB,	DATA1,		8,	SMALL,	1024},	
+	{ 0xCA,	STLB,	DATA1,		4,	SMALL,	512 },	
 	{ 0xD0,	CACHE,	L3,		4,	512*K,	64  },	
 	{ 0xD1,	CACHE,	L3,		4,	1*M,	64  },	
 	{ 0xD2,	CACHE,	L3,		4,	2*M,	64  },	
@@ -225,36 +229,15 @@ cpuid_leaf2_find(uint8_t value)
  * CPU identification routines.
  */
 
-static i386_cpu_info_t	*cpuid_cpu_infop = NULL;
 static i386_cpu_info_t	cpuid_cpu_info;
+static i386_cpu_info_t	*cpuid_cpu_infop = NULL;
 
-#if defined(__x86_64__)
 static void cpuid_fn(uint32_t selector, uint32_t *result)
 {
 	do_cpuid(selector, result);
 	DBG("cpuid_fn(0x%08x) eax:0x%08x ebx:0x%08x ecx:0x%08x edx:0x%08x\n",
 		selector, result[0], result[1], result[2], result[3]);
 }
-#else
-static void cpuid_fn(uint32_t selector, uint32_t *result)
-{
-	if (get_is64bit()) {
-	       asm("call _cpuid64"
-			: "=a" (result[0]),
-			  "=b" (result[1]),
-			  "=c" (result[2]),
-			  "=d" (result[3])
-			: "a"(selector),
-			  "b" (0),
-			  "c" (0),
-			  "d" (0));
-	} else {
-		do_cpuid(selector, result);
-	}
-	DBG("cpuid_fn(0x%08x) eax:0x%08x ebx:0x%08x ecx:0x%08x edx:0x%08x\n",
-		selector, result[0], result[1], result[2], result[3]);
-}
-#endif
 
 static const char *cache_type_str[LCACHE_MAX] = {
 	"Lnone", "L1I", "L1D", "L2U", "L3U"
@@ -587,7 +570,7 @@ cpuid_set_generic_info(i386_cpu_info_t *info_p)
 	info_p->cpuid_features  = quad(reg[ecx], reg[edx]);
 
 	/* Get "processor flag"; necessary for microcode update matching */
-	info_p->cpuid_processor_flag = (rdmsr64(MSR_IA32_PLATFORM_ID)>> 50) & 3;
+	info_p->cpuid_processor_flag = (rdmsr64(MSR_IA32_PLATFORM_ID)>> 50) & 0x7;
 
 	/* Fold extensions into family/model */
 	if (info_p->cpuid_family == 0x0f)
@@ -663,13 +646,13 @@ cpuid_set_generic_info(i386_cpu_info_t *info_p)
 		ctp->sensor 		  = bitfield32(reg[eax], 0, 0);
 		ctp->dynamic_acceleration = bitfield32(reg[eax], 1, 1);
 		ctp->invariant_APIC_timer = bitfield32(reg[eax], 2, 2);
-		ctp->core_power_limits    = bitfield32(reg[eax], 3, 3);
-		ctp->fine_grain_clock_mod = bitfield32(reg[eax], 4, 4);
-		ctp->package_thermal_intr = bitfield32(reg[eax], 5, 5);
+		ctp->core_power_limits    = bitfield32(reg[eax], 4, 4);
+		ctp->fine_grain_clock_mod = bitfield32(reg[eax], 5, 5);
+		ctp->package_thermal_intr = bitfield32(reg[eax], 6, 6);
 		ctp->thresholds		  = bitfield32(reg[ebx], 3, 0);
 		ctp->ACNT_MCNT		  = bitfield32(reg[ecx], 0, 0);
 		ctp->hardware_feedback	  = bitfield32(reg[ecx], 1, 1);
-		ctp->energy_policy	  = bitfield32(reg[ecx], 2, 2);
+		ctp->energy_policy	  = bitfield32(reg[ecx], 3, 3);
 		info_p->cpuid_thermal_leafp = ctp;
 
 		DBG(" Thermal/Power Leaf:\n");
@@ -681,7 +664,7 @@ cpuid_set_generic_info(i386_cpu_info_t *info_p)
 		DBG("  package_thermal_intr : %d\n", ctp->package_thermal_intr);
 		DBG("  thresholds           : %d\n", ctp->thresholds);
 		DBG("  ACNT_MCNT            : %d\n", ctp->ACNT_MCNT);
-		DBG("  hardware_feedback    : %d\n", ctp->hardware_feedback);
+		DBG("  ACNT2                : %d\n", ctp->hardware_feedback);
 		DBG("  energy_policy        : %d\n", ctp->energy_policy);
 	}
 
@@ -726,9 +709,9 @@ cpuid_set_generic_info(i386_cpu_info_t *info_p)
 		DBG("  EDX           : 0x%x\n", xsp->extended_state[edx]);
 	}
 
-	if (info_p->cpuid_model == CPUID_MODEL_IVYBRIDGE) {
+	if (info_p->cpuid_model >= CPUID_MODEL_IVYBRIDGE) {
 		/*
-		 * XSAVE Features:
+		 * Leaf7 Features:
 		 */
 		cpuid_fn(0x7, reg);
 		info_p->cpuid_leaf7_features = reg[ebx];
@@ -748,11 +731,6 @@ cpuid_set_cpufamily(i386_cpu_info_t *info_p)
 	switch (info_p->cpuid_family) {
 	case 6:
 		switch (info_p->cpuid_model) {
-#if CONFIG_YONAH
-		case 14:
-			cpufamily = CPUFAMILY_INTEL_YONAH;
-			break;
-#endif
 		case 15:
 			cpufamily = CPUFAMILY_INTEL_MEROM;
 			break;
@@ -777,6 +755,11 @@ cpuid_set_cpufamily(i386_cpu_info_t *info_p)
 		case CPUID_MODEL_IVYBRIDGE:
 			cpufamily = CPUFAMILY_INTEL_IVYBRIDGE;
 			break;
+		case CPUID_MODEL_HASWELL:
+		case CPUID_MODEL_HASWELL_ULT:
+		case CPUID_MODEL_CRYSTALWELL:
+			cpufamily = CPUFAMILY_INTEL_HASWELL;
+			break;
 		}
 		break;
 	}
@@ -794,10 +777,6 @@ cpuid_set_info(void)
 {
 	i386_cpu_info_t		*info_p = &cpuid_cpu_info;
 
-	PE_parse_boot_argn("-cpuid", &cpuid_dbg, sizeof(cpuid_dbg));
-
-	bzero((void *)info_p, sizeof(cpuid_cpu_info));
-
 	cpuid_set_generic_info(info_p);
 
 	/* verify we are running on a supported CPU */
@@ -810,7 +789,7 @@ cpuid_set_info(void)
 	info_p->cpuid_cpu_type = CPU_TYPE_X86;
 	info_p->cpuid_cpu_subtype = CPU_SUBTYPE_X86_ARCH1;
 	/* Must be invoked after set_generic_info */
-	cpuid_set_cache_info(&cpuid_cpu_info);
+	cpuid_set_cache_info(info_p);
 
 	/*
 	 * Find the number of enabled cores and threads
@@ -823,6 +802,7 @@ cpuid_set_info(void)
 		info_p->thread_count = bitfield32((uint32_t)msr, 15,  0);
 		break;
 		}
+	case CPUFAMILY_INTEL_HASWELL:
 	case CPUFAMILY_INTEL_IVYBRIDGE:
 	case CPUFAMILY_INTEL_SANDYBRIDGE:
 	case CPUFAMILY_INTEL_NEHALEM: {
@@ -840,7 +820,7 @@ cpuid_set_info(void)
 	DBG("  core_count   : %d\n", info_p->core_count);
 	DBG("  thread_count : %d\n", info_p->thread_count);
 
-	cpuid_cpu_info.cpuid_model_string = ""; /* deprecated */
+	info_p->cpuid_model_string = ""; /* deprecated */
 }
 
 static struct table {
@@ -887,12 +867,13 @@ static struct table {
 	{CPUID_FEATURE_TM2,       "TM2"},
 	{CPUID_FEATURE_SSSE3,     "SSSE3"},
 	{CPUID_FEATURE_CID,       "CID"},
+	{CPUID_FEATURE_FMA,       "FMA"},
 	{CPUID_FEATURE_CX16,      "CX16"},
 	{CPUID_FEATURE_xTPR,      "TPR"},
 	{CPUID_FEATURE_PDCM,      "PDCM"},
 	{CPUID_FEATURE_SSE4_1,    "SSE4.1"},
 	{CPUID_FEATURE_SSE4_2,    "SSE4.2"},
-	{CPUID_FEATURE_xAPIC,     "xAPIC"},
+	{CPUID_FEATURE_x2APIC,    "x2APIC"},
 	{CPUID_FEATURE_MOVBE,     "MOVBE"},
 	{CPUID_FEATURE_POPCNT,    "POPCNT"},
 	{CPUID_FEATURE_AES,       "AES"},
@@ -919,9 +900,16 @@ extfeature_map[] = {
 
 },
 leaf7_feature_map[] = {
-	{CPUID_LEAF7_FEATURE_RDWRFSGS, "RDWRFSGS"},
 	{CPUID_LEAF7_FEATURE_SMEP,     "SMEP"},
 	{CPUID_LEAF7_FEATURE_ENFSTRG,  "ENFSTRG"},
+	{CPUID_LEAF7_FEATURE_RDWRFSGS, "RDWRFSGS"},
+	{CPUID_LEAF7_FEATURE_TSCOFF,   "TSC_THREAD_OFFSET"},
+	{CPUID_LEAF7_FEATURE_BMI1,     "BMI1"},
+	{CPUID_LEAF7_FEATURE_HLE,      "HLE"},
+	{CPUID_LEAF7_FEATURE_AVX2,     "AVX2"},
+	{CPUID_LEAF7_FEATURE_BMI2,     "BMI2"},
+	{CPUID_LEAF7_FEATURE_INVPCID,  "INVPCID"},
+	{CPUID_LEAF7_FEATURE_RTM,      "RTM"},
 	{0, 0}
 };
 
@@ -952,6 +940,7 @@ cpuid_info(void)
 {
 	/* Set-up the cpuid_info stucture lazily */
 	if (cpuid_cpu_infop == NULL) {
+		PE_parse_boot_argn("-cpuid", &cpuid_dbg, sizeof(cpuid_dbg));
 		cpuid_set_info();
 		cpuid_cpu_infop = &cpuid_cpu_info;
 	}
@@ -992,10 +981,10 @@ cpuid_feature_display(
 #define s_if_plural(n)	((n > 1) ? "s" : "")
 		kprintf("  HTT: %d core%s per package;"
 			     " %d logical cpu%s per package\n",
-			cpuid_cpu_info.cpuid_cores_per_package,
-			s_if_plural(cpuid_cpu_info.cpuid_cores_per_package),
-			cpuid_cpu_info.cpuid_logical_per_package,
-			s_if_plural(cpuid_cpu_info.cpuid_logical_per_package));
+			cpuid_cpu_infop->cpuid_cores_per_package,
+			s_if_plural(cpuid_cpu_infop->cpuid_cores_per_package),
+			cpuid_cpu_infop->cpuid_logical_per_package,
+			s_if_plural(cpuid_cpu_infop->cpuid_logical_per_package));
 	}
 }
 
@@ -1014,8 +1003,8 @@ void
 cpuid_cpu_display(
 	const char	*header)
 {
-    if (cpuid_cpu_info.cpuid_brand_string[0] != '\0') {
-	kprintf("%s: %s\n", header, cpuid_cpu_info.cpuid_brand_string);
+    if (cpuid_cpu_infop->cpuid_brand_string[0] != '\0') {
+	kprintf("%s: %s\n", header, cpuid_cpu_infop->cpuid_brand_string);
     }
 }
 
@@ -1056,15 +1045,15 @@ cpuid_features(void)
 				printf("limiting fpu features to: %s\n", fpu_arg);
 				if (!strncmp("387", fpu_arg, sizeof("387")) || !strncmp("mmx", fpu_arg, sizeof("mmx"))) {
 					printf("no sse or sse2\n");
-					cpuid_cpu_info.cpuid_features &= ~(CPUID_FEATURE_SSE | CPUID_FEATURE_SSE2 | CPUID_FEATURE_FXSR);
+					cpuid_cpu_infop->cpuid_features &= ~(CPUID_FEATURE_SSE | CPUID_FEATURE_SSE2 | CPUID_FEATURE_FXSR);
 				} else if (!strncmp("sse", fpu_arg, sizeof("sse"))) {
 					printf("no sse2\n");
-					cpuid_cpu_info.cpuid_features &= ~(CPUID_FEATURE_SSE2);
+					cpuid_cpu_infop->cpuid_features &= ~(CPUID_FEATURE_SSE2);
 				}
 			}
 			checked = 1;
 	}
-	return cpuid_cpu_info.cpuid_features;
+	return cpuid_cpu_infop->cpuid_features;
 }
 
 uint64_t
@@ -1145,3 +1134,4 @@ cpuid_vmm_family(void)
 {
 	return cpuid_vmm_info()->cpuid_vmm_family;
 }
+

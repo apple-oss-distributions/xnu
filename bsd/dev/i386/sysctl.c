@@ -33,10 +33,12 @@
 #include <i386/cpuid.h>
 #include <i386/tsc.h>
 #include <i386/machine_routines.h>
+#include <i386/pal_routines.h>
 #include <i386/ucode.h>
 #include <kern/clock.h>
 #include <libkern/libkern.h>
 #include <i386/lapic.h>
+
 
 static int
 _i386_cpu_info SYSCTL_HANDLER_ARGS
@@ -477,7 +479,7 @@ SYSCTL_PROC(_machdep_cpu_thermal, OID_AUTO, package_thermal_intr,
 	    CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_LOCKED, 
 	    (void *)offsetof(cpuid_thermal_leaf_t, package_thermal_intr),
 	    sizeof(boolean_t),
-	    cpu_thermal, "I", "Packge Thermal interrupt and Status");
+	    cpu_thermal, "I", "Package Thermal interrupt and Status");
 
 SYSCTL_PROC(_machdep_cpu_thermal, OID_AUTO, hardware_feedback,
 	    CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_LOCKED, 
@@ -730,7 +732,30 @@ SYSCTL_QUAD(_machdep_memmap, OID_AUTO, Other, CTLFLAG_RD|CTLFLAG_LOCKED, &firmwa
 
 SYSCTL_NODE(_machdep, OID_AUTO, tsc, CTLFLAG_RD|CTLFLAG_LOCKED, NULL, "Timestamp counter parameters");
 
-SYSCTL_QUAD(_machdep_tsc, OID_AUTO, frequency, CTLFLAG_RD|CTLFLAG_LOCKED, &tscFreq, "");
+SYSCTL_QUAD(_machdep_tsc, OID_AUTO, frequency,
+	CTLFLAG_RD|CTLFLAG_LOCKED, &tscFreq, "");
+
+extern uint32_t deep_idle_rebase;
+SYSCTL_UINT(_machdep_tsc, OID_AUTO, deep_idle_rebase,
+	CTLFLAG_RW|CTLFLAG_KERN|CTLFLAG_LOCKED, &deep_idle_rebase, 0, "");
+
+SYSCTL_NODE(_machdep_tsc, OID_AUTO, nanotime,
+	CTLFLAG_RD|CTLFLAG_LOCKED, NULL, "TSC to ns conversion");
+SYSCTL_QUAD(_machdep_tsc_nanotime, OID_AUTO, tsc_base,
+	CTLFLAG_RD | CTLFLAG_LOCKED,
+	(uint64_t *) &pal_rtc_nanotime_info.tsc_base, "");
+SYSCTL_QUAD(_machdep_tsc_nanotime, OID_AUTO, ns_base,
+	CTLFLAG_RD | CTLFLAG_LOCKED,
+	(uint64_t *)&pal_rtc_nanotime_info.ns_base, "");
+SYSCTL_UINT(_machdep_tsc_nanotime, OID_AUTO, scale,
+	CTLFLAG_RD | CTLFLAG_LOCKED,
+	(uint32_t *)&pal_rtc_nanotime_info.scale, 0, "");
+SYSCTL_UINT(_machdep_tsc_nanotime, OID_AUTO, shift,
+	CTLFLAG_RD | CTLFLAG_LOCKED,
+	(uint32_t *)&pal_rtc_nanotime_info.shift, 0, "");
+SYSCTL_UINT(_machdep_tsc_nanotime, OID_AUTO, generation,
+	CTLFLAG_RD | CTLFLAG_LOCKED,
+	(uint32_t *)&pal_rtc_nanotime_info.generation, 0, "");
 
 SYSCTL_NODE(_machdep, OID_AUTO, misc, CTLFLAG_RW|CTLFLAG_LOCKED, 0,
 	"Miscellaneous x86 kernel parameters");
@@ -750,3 +775,181 @@ SYSCTL_PROC(_machdep_misc, OID_AUTO, machine_check_panic,
 	    0, 0,
 	    misc_machine_check_panic, "A", "Machine-check exception test");
 
+
+
+extern void timer_queue_trace_cpu(int);
+static int
+misc_timer_queue_trace(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused int arg2, struct sysctl_req *req)
+{
+	int changed = 0, error;
+	char buf[128];
+	buf[0] = '\0';
+
+	error = sysctl_io_string(req, buf, sizeof(buf), 0, &changed);
+
+	if (error == 0 && changed) {
+		timer_queue_trace_cpu(0);
+	}
+	return error;
+}
+
+SYSCTL_PROC(_machdep_misc, OID_AUTO, timer_queue_trace,
+	    CTLTYPE_STRING | CTLFLAG_RW | CTLFLAG_LOCKED, 
+	    0, 0,
+	    misc_timer_queue_trace, "A", "Cut timer queue tracepoint");
+
+extern long NMI_count;
+extern void NMI_cpus(void);
+static int
+misc_nmis(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused int arg2, struct sysctl_req *req)
+{
+	int new = 0, old = 0, changed = 0, error;
+
+	old = NMI_count;
+
+	error = sysctl_io_number(req, old, sizeof(int), &new, &changed);
+	if (error == 0 && changed) {
+		NMI_cpus();
+	}
+
+	return error;
+}
+
+SYSCTL_PROC(_machdep_misc, OID_AUTO, nmis,
+	    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED, 
+	    0, 0,
+	    misc_nmis, "I", "Report/increment NMI count");
+
+/* Parameters related to timer coalescing tuning, to be replaced
+ * with a dedicated systemcall in the future.
+ */
+/* Enable processing pending timers in the context of any other interrupt */
+SYSCTL_INT(_kern, OID_AUTO, interrupt_timer_coalescing_enabled,
+		CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
+		&interrupt_timer_coalescing_enabled, 0, "");
+/* Upon entering idle, process pending timers with HW deadlines
+ * this far in the future.
+ */
+SYSCTL_INT(_kern, OID_AUTO, timer_coalesce_idle_entry_hard_deadline_max,
+		CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
+		&idle_entry_timer_processing_hdeadline_threshold, 0, "");
+/* Coalescing tuning parameters for various thread/task attributes */
+SYSCTL_INT(_kern, OID_AUTO, timer_coalesce_bg_scale,
+		CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
+		&tcoal_prio_params.timer_coalesce_bg_shift, 0, "");
+
+SYSCTL_QUAD(_kern, OID_AUTO, timer_coalesce_bg_ns_max,
+		CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
+		&tcoal_prio_params.timer_coalesce_bg_ns_max, "");
+
+SYSCTL_INT(_kern, OID_AUTO, timer_coalesce_kt_scale,
+		CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
+		&tcoal_prio_params.timer_coalesce_kt_shift, 0, "");
+
+SYSCTL_QUAD(_kern, OID_AUTO, timer_coalesce_kt_ns_max,
+		CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
+		&tcoal_prio_params.timer_coalesce_kt_ns_max, "");
+
+SYSCTL_INT(_kern, OID_AUTO, timer_coalesce_fp_scale,
+		CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
+		&tcoal_prio_params.timer_coalesce_fp_shift, 0, "");
+
+SYSCTL_QUAD(_kern, OID_AUTO, timer_coalesce_fp_ns_max,
+		CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
+		&tcoal_prio_params.timer_coalesce_fp_ns_max, "");
+
+SYSCTL_INT(_kern, OID_AUTO, timer_coalesce_ts_scale,
+		CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
+		&tcoal_prio_params.timer_coalesce_ts_shift, 0, "");
+
+SYSCTL_QUAD(_kern, OID_AUTO, timer_coalesce_ts_ns_max,
+		CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
+		&tcoal_prio_params.timer_coalesce_ts_ns_max, "");
+
+SYSCTL_INT(_kern, OID_AUTO, timer_coalesce_tier0_scale,
+		CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
+		&tcoal_prio_params.latency_qos_scale[0], 0, "");
+
+SYSCTL_QUAD(_kern, OID_AUTO, timer_coalesce_tier0_ns_max,
+		CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
+		&tcoal_prio_params.latency_qos_ns_max[0], "");
+
+SYSCTL_INT(_kern, OID_AUTO, timer_coalesce_tier1_scale,
+		CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
+		&tcoal_prio_params.latency_qos_scale[1], 0, "");
+
+SYSCTL_QUAD(_kern, OID_AUTO, timer_coalesce_tier1_ns_max,
+		CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
+		&tcoal_prio_params.latency_qos_ns_max[1], "");
+
+SYSCTL_INT(_kern, OID_AUTO, timer_coalesce_tier2_scale,
+		CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
+		&tcoal_prio_params.latency_qos_scale[2], 0, "");
+
+SYSCTL_QUAD(_kern, OID_AUTO, timer_coalesce_tier2_ns_max,
+		CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
+		&tcoal_prio_params.latency_qos_ns_max[2], "");
+
+SYSCTL_INT(_kern, OID_AUTO, timer_coalesce_tier3_scale,
+		CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
+		&tcoal_prio_params.latency_qos_scale[3], 0, "");
+
+SYSCTL_QUAD(_kern, OID_AUTO, timer_coalesce_tier3_ns_max,
+		CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
+		&tcoal_prio_params.latency_qos_ns_max[3], "");
+
+SYSCTL_INT(_kern, OID_AUTO, timer_coalesce_tier4_scale,
+		CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
+		&tcoal_prio_params.latency_qos_scale[4], 0, "");
+
+SYSCTL_QUAD(_kern, OID_AUTO, timer_coalesce_tier4_ns_max,
+		CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
+		&tcoal_prio_params.latency_qos_ns_max[4], "");
+
+SYSCTL_INT(_kern, OID_AUTO, timer_coalesce_tier5_scale,
+		CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
+		&tcoal_prio_params.latency_qos_scale[5], 0, "");
+
+SYSCTL_QUAD(_kern, OID_AUTO, timer_coalesce_tier5_ns_max,
+		CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
+		&tcoal_prio_params.latency_qos_ns_max[5], "");
+
+/* Track potentially expensive eager timer evaluations on QoS tier
+ * switches.
+ */
+extern uint32_t ml_timer_eager_evaluations;
+
+SYSCTL_INT(_machdep, OID_AUTO, eager_timer_evaluations,
+		CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
+		&ml_timer_eager_evaluations, 0, "");
+
+extern uint64_t ml_timer_eager_evaluation_max;
+
+SYSCTL_QUAD(_machdep, OID_AUTO, eager_timer_evaluation_max,
+		CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
+		&ml_timer_eager_evaluation_max, "");
+
+/* Communicate the "user idle level" heuristic to the timer layer, and
+ * potentially other layers in the future.
+ */
+
+static int
+timer_set_user_idle_level(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused int arg2, struct sysctl_req *req) {
+	int new_value = 0, old_value = 0, changed = 0, error;
+
+	old_value = ml_timer_get_user_idle_level();
+
+	error = sysctl_io_number(req, old_value, sizeof(int), &new_value, &changed);
+
+	if (error == 0 && changed) {
+		if (ml_timer_set_user_idle_level(new_value) != KERN_SUCCESS)
+			error = ERANGE;
+	}
+
+	return error;
+}
+
+SYSCTL_PROC(_machdep, OID_AUTO, user_idle_level,
+	    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED, 
+	    0, 0,
+	    timer_set_user_idle_level, "I", "User idle level heuristic, 0-128");

@@ -109,9 +109,7 @@
 #include <sys/kdebug.h>
 
 #include "iso_font.c"
-#if !CONFIG_EMBEDDED
 #include "progress_meter_data.c"
-#endif
 
 #include "sys/msgbuf.h"
 
@@ -121,9 +119,6 @@
  */
 
 struct vc_info vinfo;
-/* if panicDialogDesired is true then we use the panic dialog when its */
-/* allowed otherwise we won't use the panic dialog even if it is allowed */
-boolean_t panicDialogDesired;
 
 void noroot_icon_test(void);
 
@@ -189,7 +184,7 @@ MACRO_END
 
 #define VCPUTC_LOCK_LOCK()				\
 MACRO_BEGIN						\
-	if (!hw_lock_to(&vcputc_lock, hwLockTimeOut*10))\
+	if (!hw_lock_to(&vcputc_lock, ~0U))\
 	{						\
 		panic("VCPUTC_LOCK_LOCK");		\
 	}						\
@@ -2700,13 +2695,11 @@ initialize_screen(PE_Video * boot_vinfo, unsigned int op)
 	switch ( op )
 	{
 		case kPEGraphicsMode:
-			panicDialogDesired = TRUE;
 			gc_graphics_boot = TRUE;
 			gc_desire_text = FALSE;
 			break;
 
 		case kPETextMode:
-			panicDialogDesired = FALSE;
 			disable_debug_output = FALSE;
 			gc_graphics_boot = FALSE;
 			break;
@@ -2736,7 +2729,6 @@ initialize_screen(PE_Video * boot_vinfo, unsigned int op)
 		case kPETextScreen:
 			if ( console_is_serial() ) break;
 
-			panicDialogDesired = FALSE;
 			disable_debug_output = FALSE;
 			if ( gc_acquired == FALSE )
 			{
@@ -2746,9 +2738,7 @@ initialize_screen(PE_Video * boot_vinfo, unsigned int op)
 			if ( gc_graphics_boot == FALSE ) break;
 
 			vc_progress_set( FALSE, 0 );
-#if !CONFIG_EMBEDDED
 			vc_enable_progressmeter( FALSE );
-#endif
 			gc_enable( TRUE );
 			break;
 
@@ -2759,9 +2749,7 @@ initialize_screen(PE_Video * boot_vinfo, unsigned int op)
 			if ( gc_graphics_boot == FALSE ) break;
 
 			vc_progress_set( FALSE, 0 );
-#if !CONFIG_EMBEDDED
 			vc_enable_progressmeter( FALSE );
-#endif
 
 			vc_clut8 = NULL;
 #ifdef GRATEFULDEBUGGER
@@ -2841,7 +2829,6 @@ vcattach(void)
 	}
 }
 
-#if !CONFIG_EMBEDDED
 
 int vc_progress_meter_enable;
 int vc_progress_meter_value;
@@ -2981,5 +2968,4 @@ vc_set_progressmeter(int new_value)
     splx(s);
 }
 
-#endif /* !CONFIG_EMBEDDED */
 

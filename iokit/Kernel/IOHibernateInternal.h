@@ -46,6 +46,8 @@ struct IOHibernateVars
     OSObject *				saveBootDevice;
 
     struct IOPolledFileIOVars *		fileVars;
+    uint64_t				fileMinSize;
+    uint64_t				fileMaxSize;
     vm_offset_t				videoMapping;
     vm_size_t				videoAllocSize;
     vm_size_t				videoMapSize;
@@ -62,6 +64,7 @@ typedef struct IOHibernateVars IOHibernateVars;
 struct IOPolledFileIOVars
 {
     struct kern_direct_file_io_ref_t *	fileRef;
+    IORegistryEntry *                   media;
     class OSArray *			pollers;
     IOByteCount				blockSize;
     uint8_t *  				buffer;
@@ -73,6 +76,7 @@ struct IOPolledFileIOVars
     IOByteCount				lastRead;
     IOByteCount				readEnd;
     uint32_t                            flags;
+    uint64_t				fileSize;
     uint64_t				block0;
     uint64_t				position;
     uint64_t				extentPosition;

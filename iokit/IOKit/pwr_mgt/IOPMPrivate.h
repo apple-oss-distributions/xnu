@@ -43,28 +43,28 @@
 /* @constant kIOPMTimelineDictionaryKey
  * @abstract RootDomain key for dictionary describing Timeline's info
  */
-#define     kIOPMTimelineDictionaryKey                  "PMTimelineLogging"
+#define kIOPMTimelineDictionaryKey              "PMTimelineLogging"
 
 /* @constant kIOPMTimelineEnabledKey
  * @abstract Boolean value indicating whether the system is recording PM events.
  * @discussion Key may be found in the dictionary at IOPMrootDomain's property 
  * kIOPMTimelineDictionaryKey. uint32_t value; may be 0.
  */
-#define     kIOPMTimelineEnabledKey                     "TimelineEnabled"
+#define kIOPMTimelineEnabledKey                 "TimelineEnabled"
 
 /* @constant kIOMPTimelineSystemNumberTrackedKey
  * @abstract The maximum number of system power events the system may record.
  * @discussion Key may be found in the dictionary at IOPMrootDomain's property 
  * kIOPMTimelineDictionaryKey. uint32_t value; may be 0.
  */
-#define     kIOPMTimelineSystemNumberTrackedKey         "TimelineSystemEventsTracked"
+#define kIOPMTimelineSystemNumberTrackedKey     "TimelineSystemEventsTracked"
 
 /* @constant kIOPMTimelineSystemBufferSizeKey
  * @abstract Size in bytes  of buffer recording system PM events
  * @discussion Key may be found in the dictionary at IOPMrootDomain's property 
  * kIOPMTimelineDictionaryKey. uint32_t value; may be 0.
  */
-#define     kIOPMTimelineSystemBufferSizeKey            "TimelineSystemBufferSize"
+#define kIOPMTimelineSystemBufferSizeKey        "TimelineSystemBufferSize"
 
 
 
@@ -78,7 +78,7 @@
  * @abstract Potential system events logged in the system event record.
  */
 enum {
-	kIOPMEventTypeUndefined                     = 0,
+    kIOPMEventTypeUndefined                     = 0,
 
     /* Event types mark driver events 
      */
@@ -92,18 +92,18 @@ enum {
     /* Start and stop event types bracket major
      * system power management events.
      */
-	kIOPMEventTypeSleep                         = 2001,
-	kIOPMEventTypeSleepDone                     = 2002,
-	kIOPMEventTypeWake                          = 3001,
-	kIOPMEventTypeWakeDone                      = 3002,
-	kIOPMEventTypeDoze                          = 4001,
-	kIOPMEventTypeDozeDone                      = 4002,
-	kIOPMEventTypeLiteWakeUp                    = 5001,
-	kIOPMEventTypeLiteWakeUpDone                = 5002,
-	kIOPMEventTypeLiteWakeDown                  = 5003,
-	kIOPMEventTypeLiteWakeDownDone              = 5004,
-	kIOPMEventTypeUUIDSet                       = 6001,
-	kIOPMEventTypeUUIDClear                     = 6002,
+    kIOPMEventTypeSleep                         = 2001,
+    kIOPMEventTypeSleepDone                     = 2002,
+    kIOPMEventTypeWake                          = 3001,
+    kIOPMEventTypeWakeDone                      = 3002,
+    kIOPMEventTypeDoze                          = 4001,
+    kIOPMEventTypeDozeDone                      = 4002,
+    kIOPMEventTypeLiteWakeUp                    = 5001,
+    kIOPMEventTypeLiteWakeUpDone                = 5002,
+    kIOPMEventTypeLiteWakeDown                  = 5003,
+    kIOPMEventTypeLiteWakeDownDone              = 5004,
+    kIOPMEventTypeUUIDSet                       = 6001,
+    kIOPMEventTypeUUIDClear                     = 6002,
 
     /* Intermediate events that may only occur within the bounds
      * of a major system event (between the event's initiation and its "done event".)
@@ -118,8 +118,28 @@ enum {
     kIOPMEventTypeCalTimeChange                 = 503 | kIOPMEventTypeIntermediateFlag
 };
 
+/*****************************************************************************
+ *
+ * Private Root Domain general interest messages
+ *
+ * Check IOPM.h when adding new messages to avoid conflict.
+ *
+ *****************************************************************************/
 
-/* @enum SystemSleepReasons 
+/* kIOPMMessageUserIsActiveChanged 
+ * User became active or inactive. Message sent after the kIOPMUserIsActiveKey
+ * property was updated with a new value.
+ */ 
+#define kIOPMMessageUserIsActiveChanged \
+                iokit_family_msg(sub_iokit_powermanagement, 0x400)
+
+/*
+ * Private IOMessage notifications shared between kernel and userspace PM policy
+ */
+#define kIOPMMessageLastCallBeforeSleep \
+                iokit_family_msg(sub_iokit_powermanagement, 0x410)
+
+/* @enum SystemSleepReasons
  * @abstract The potential causes for system sleep as logged in the system event record.
  */
 enum {
@@ -349,6 +369,7 @@ enum {
 #define kIOPMStatsTimeMSKey                     "TimeMS"
 #define kIOPMStatsApplicationResponseTypeKey    "ResponseType"
 #define kIOPMStatsMessageTypeKey                "MessageType"
+#define kIOPMStatsPowerCapabilityKey            "PowerCaps"
  
 // PM Statistics: potential values for the key kIOPMStatsApplicationResponseTypeKey
 // entry in the application results array.
@@ -619,32 +640,260 @@ enum {
 #define kIOPMSleepWakeFailureLoginKey       "LWFailurePhase"
 #define kIOPMSleepWakeFailureUUIDKey        "UUID"
 #define kIOPMSleepWakeFailureDateKey        "Date"
+#define kIOPMSleepWakeWdogRebootKey         "SWWdogTriggeredRestart"
+#define kIOPMSleepWakeWdogLogsValidKey      "SWWdogLogsValid"
 
-/******************************************************************************/
-/* System sleep policy
- * Shared between PM root domain and platform driver.
+/*****************************************************************************
+ *
+ * Root Domain private property keys
+ *
+ *****************************************************************************/
+
+/* kIOPMFeatureAutoPowerOffKey
+ * Feature published if Auto Power Off is supported
  */
+#define kIOPMFeatureAutoPowerOffKey         "AutoPowerOff"
 
-// Platform specific property added by the platform driver.
-// An OSData that describes the system sleep policy.
-#define kIOPlatformSystemSleepPolicyKey     "IOPlatformSystemSleepPolicy"
+/* kIOPMAutoPowerOffEnabledKey
+ * Indicates if Auto Power Off is enabled.
+ * It has a boolean value.
+ *  true        == Auto Power Off is enabled
+ *  false       == Auto Power Off is disabled
+ *  not present == Auto Power Off is not supported on this hardware
+ */
+#define kIOPMAutoPowerOffEnabledKey         "AutoPowerOff Enabled"
 
-// Root domain property updated before platform sleep.
-// An OSData that describes the system sleep parameters.
+/* kIOPMAutoPowerOffDelayKey
+ * Key refers to a CFNumberRef that represents the delay in seconds before
+ * entering the Auto Power Off state.  The property is not present if Auto
+ * Power Off is unsupported.
+ */
+#define kIOPMAutoPowerOffDelayKey           "AutoPowerOff Delay"
+
+/* kIOPMAutoPowerOffTimerKey
+ * Key refers to a CFNumberRef that indicates the time in seconds until the
+ * expiration of the Auto Power Off delay period. This value should be used
+ * to program a wake alarm before system sleep.
+ */
+#define kIOPMAutoPowerOffTimerKey           "AutoPowerOff Timer"
+
+/* kIOPMUserWakeAlarmScheduledKey
+ * Key refers to a boolean value that indicates if an user alarm was scheduled
+ * or pending.
+ */
+#define kIOPMUserWakeAlarmScheduledKey      "UserWakeAlarmScheduled"
+
+/* kIOPMDeepIdleSupportedKey
+ * Presence of this key indicates Deep Idle is supported on this platform.
+ * Key will always refer to a value of kOSBooleanTrue.
+ */
+#define kIOPMDeepIdleSupportedKey           "IOPMDeepIdleSupported"
+
+/* kIOPMUserTriggeredFullWakeKey
+ * Key refers to a boolean value that indicates if the first full wake since
+ * last system sleep was triggered by the local user. This property is set
+ * before the initial full wake transition, and removed after powering down
+ * drivers for system sleep.
+ */
+#define kIOPMUserTriggeredFullWakeKey       "IOPMUserTriggeredFullWake"
+
+/* kIOPMUserIsActiveKey
+ * Key refers to a boolean value that indicates if the user is active.
+ */
+#define kIOPMUserIsActiveKey                "IOPMUserIsActive"
+
+/*****************************************************************************
+ *
+ * System Sleep Policy
+ *
+ *****************************************************************************/
+
+#define kIOPMSystemSleepPolicySignature     0x54504c53
+#define kIOPMSystemSleepPolicyVersion       2
+
+/*!
+ * @defined kIOPMSystemSleepTypeKey
+ * @abstract Indicates the type of system sleep.
+ * @discussion An OSNumber property of root domain that describes the type
+ * of system sleep. This property is set after notifying priority sleep/wake
+ * clients, but before informing interested drivers and shutting down power
+ * plane drivers.
+ */
+#define kIOPMSystemSleepTypeKey             "IOPMSystemSleepType"
+
+struct IOPMSystemSleepPolicyVariables
+{
+    uint32_t    signature;                  // kIOPMSystemSleepPolicySignature
+    uint32_t    version;                    // kIOPMSystemSleepPolicyVersion
+
+    uint64_t    currentCapability;          // current system capability bits
+    uint64_t    highestCapability;          // highest system capability bits
+
+    uint64_t    sleepFactors;               // sleep factor bits
+    uint32_t    sleepReason;                // kIOPMSleepReason*
+    uint32_t    sleepPhase;                 // identify the sleep phase
+    uint32_t    hibernateMode;              // current hibernate mode
+
+    uint32_t    standbyDelay;               // standby delay in seconds
+    uint32_t    poweroffDelay;              // auto-poweroff delay in seconds
+    uint32_t    scheduledAlarms;            // bitmask of scheduled alarm types
+    uint32_t    poweroffTimer;              // auto-poweroff timer in seconds
+
+    uint32_t    reserved[49];               // pad sizeof 256 bytes
+};
+
+enum {
+    kIOPMAlarmBitDebugWake                  = 0x01,
+    kIOPMAlarmBitCalendarWake               = 0x02,
+    kIOPMAlarmBitMaintenanceWake            = 0x04,
+    kIOPMAlarmBitSleepServiceWake           = 0x08
+};
+
+enum {
+    kIOPMSleepPhase0 = 0,
+    kIOPMSleepPhase1,
+    kIOPMSleepPhase2
+};
+
+// Sleep Factor Mask / Bits
+enum {
+    kIOPMSleepFactorSleepTimerWake          = 0x00000001ULL,
+    kIOPMSleepFactorLidOpen                 = 0x00000002ULL,
+    kIOPMSleepFactorACPower                 = 0x00000004ULL,
+    kIOPMSleepFactorBatteryLow              = 0x00000008ULL,
+    kIOPMSleepFactorStandbyNoDelay          = 0x00000010ULL,
+    kIOPMSleepFactorStandbyForced           = 0x00000020ULL,
+    kIOPMSleepFactorStandbyDisabled         = 0x00000040ULL,
+    kIOPMSleepFactorUSBExternalDevice       = 0x00000080ULL,
+    kIOPMSleepFactorBluetoothHIDDevice      = 0x00000100ULL,
+    kIOPMSleepFactorExternalMediaMounted    = 0x00000200ULL,
+    kIOPMSleepFactorThunderboltDevice       = 0x00000400ULL,
+    kIOPMSleepFactorRTCAlarmScheduled       = 0x00000800ULL,
+    kIOPMSleepFactorMagicPacketWakeEnabled  = 0x00001000ULL,
+    kIOPMSleepFactorHibernateForced         = 0x00010000ULL,
+    kIOPMSleepFactorAutoPowerOffDisabled    = 0x00020000ULL,
+    kIOPMSleepFactorAutoPowerOffForced      = 0x00040000ULL,
+    kIOPMSleepFactorExternalDisplay         = 0x00080000ULL,
+    kIOPMSleepFactorNetworkKeepAliveActive  = 0x00100000ULL,
+    kIOPMSleepFactorLocalUserActivity       = 0x00200000ULL
+};
+
+// System Sleep Types
+enum {
+    kIOPMSleepTypeInvalid                   = 0,
+    kIOPMSleepTypeAbortedSleep              = 1,
+    kIOPMSleepTypeNormalSleep               = 2,
+    kIOPMSleepTypeSafeSleep                 = 3,
+    kIOPMSleepTypeHibernate                 = 4,
+    kIOPMSleepTypeStandby                   = 5,
+    kIOPMSleepTypePowerOff                  = 6,
+    kIOPMSleepTypeDeepIdle                  = 7,
+    kIOPMSleepTypeLast                      = 8
+};
+
+// System Sleep Flags
+enum {
+    kIOPMSleepFlagDisableHibernateAbort     = 0x00000001,
+    kIOPMSleepFlagDisableUSBWakeEvents      = 0x00000002,
+    kIOPMSleepFlagDisableBatlowAssertion    = 0x00000004,
+    kIOPMSleepFlagDisableS4WakeSources      = 0x00000008
+};
+
+// System Wake Events
+enum {
+    kIOPMWakeEventLidOpen                   = 0x00000001,
+    kIOPMWakeEventLidClose                  = 0x00000002,
+    kIOPMWakeEventACAttach                  = 0x00000004,
+    kIOPMWakeEventACDetach                  = 0x00000008,
+    kIOPMWakeEventCDInsert                  = 0x00000010,
+    kIOPMWakeEventCDEject                   = 0x00000020,
+    kIOPMWakeEventHPDAttach                 = 0x00000040,
+    kIOPMWakeEventHPDDetach                 = 0x00000080,
+    kIOPMWakeEventPowerButton               = 0x00000100,
+    kIOPMWakeEventG3PowerOn                 = 0x00000200,
+    kIOPMWakeEventUserPME                   = 0x00000400,
+    kIOPMWakeEventSleepTimer                = 0x00000800,
+    kIOPMWakeEventBatteryLow                = 0x00001000,
+    kIOPMWakeEventDarkPME                   = 0x00002000
+};
+
+/*!
+ * @defined kIOPMSystemSleepParametersKey
+ * @abstract Sleep parameters describing the upcoming sleep
+ * @discussion Root domain updates this OSData property before system sleep
+ * to pass sleep parameters to the platform driver.  Some of the parameters
+ * are based on the chosen entry in the system sleep policy table.
+ */
 #define kIOPMSystemSleepParametersKey       "IOPMSystemSleepParameters"
+#define kIOPMSystemSleepParametersVersion   2
 
 struct IOPMSystemSleepParameters
 {
-    uint32_t    version;
+    uint16_t    version;
+    uint16_t    reserved1;
+    uint32_t    sleepType;
     uint32_t    sleepFlags;
-    uint32_t    sleepTimer;
-    uint32_t    wakeEvents;
-};
+    uint32_t    ecWakeEvents;
+    uint32_t    ecWakeTimer;
+    uint32_t    ecPoweroffTimer;
+    uint32_t    reserved2[10];
+} __attribute__((packed));
 
-// Sleep flags
-enum {
-    kIOPMSleepFlagHibernate         = 0x00000001,
-    kIOPMSleepFlagSleepTimerEnable  = 0x00000002
-};
+
+/*
+ * Sleep Wake debug buffer header
+ */
+typedef struct {
+   uint32_t version;
+   uint32_t alloc_size;
+   uint32_t          dlog_buf_offset; /* Offset at which root domain's logging is stored */
+   volatile uint32_t dlog_cur_pos;    /* Offset at which next trace will be copied to */
+   uint32_t          dlog_size;       /* Size reserverd  for root domain's logging */
+   uint32_t          crc;             /* CRC for spindump & following data. Doesn't cover hdr & DLOG buf */
+   uint32_t          spindump_offset; /* Offset at which spindump offset is stored */
+   uint32_t          spindump_size;
+
+   /* All members from UUID onwards are saved into log file */
+   char             UUID[44]; 
+   char             cps[9];          /* Current power state */
+   char             PMStatusCode[100];
+   char             reason[42];
+} swd_hdr; 
+
+#define SWD_BUF_SIZE            (20*PAGE_SIZE)
+#define SWD_DLOG_SIZE           ((4*PAGE_SIZE)-sizeof(swd_hdr))
+
+/* Bits in swd_flags */
+#define SWD_WDOG_ENABLED    0x1
+#define SWD_BOOT_BY_WDOG    0x2
+#define SWD_VALID_LOGS      0x4
+
+
+/* RootDomain IOReporting channels */
+#define kSleepCntChID IOREPORT_MAKEID('S','l','e','e','p','C','n','t')
+#define kDarkWkCntChID IOREPORT_MAKEID('G','U','I','W','k','C','n','t')
+#define kUserWkCntChID IOREPORT_MAKEID('D','r','k','W','k','C','n','t')
+
+
+
+#if defined(KERNEL) && defined(__cplusplus)
+
+/*!
+ * @defined kIOPMInstallSystemSleepPolicyHandlerKey
+ * @abstract Name of the platform function to install a sleep policy handler.
+ * @discussion Pass to IOPMrootDomain::callPlatformFunction(), with a pointer
+ * to the C-function handler at param1, and an optional target at param2, to
+ * register a sleep policy handler. Only a single sleep policy handler can
+ * be installed.
+ */
+#define kIOPMInstallSystemSleepPolicyHandlerKey	\
+        "IOPMInstallSystemSleepPolicyHandler"
+
+typedef IOReturn (*IOPMSystemSleepPolicyHandler)(
+        void * target,
+        const IOPMSystemSleepPolicyVariables * vars,
+        IOPMSystemSleepParameters * params );
+
+#endif /* KERNEL */
 
 #endif /* ! _IOKIT_IOPMPRIVATE_H */

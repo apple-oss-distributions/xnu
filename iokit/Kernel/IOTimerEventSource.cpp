@@ -41,6 +41,9 @@ __END_DECLS
 
 #include <IOKit/IOTimeStamp.h>
 #include <IOKit/IOKitDebug.h>
+#if CONFIG_DTRACE
+#include <mach/sdt.h>
+#endif
 
 #define super IOEventSource
 OSDefineMetaClassAndStructors(IOTimerEventSource, IOEventSource)
@@ -114,13 +117,16 @@ void IOTimerEventSource::timeout(void *self)
             	
             	if (trace)
                 	IOTimeStampStartConstant(IODBG_TIMES(IOTIMES_ACTION),
-											 (uintptr_t) doit, (uintptr_t) me->owner);
+											 VM_KERNEL_UNSLIDE(doit), (uintptr_t) me->owner);
 				
                 (*doit)(me->owner, me);
+#if CONFIG_DTRACE
+		DTRACE_TMR3(iotescallout__expire, Action, doit, OSObject, me->owner, void, me->workLoop);
+#endif
                 
 				if (trace)
                 	IOTimeStampEndConstant(IODBG_TIMES(IOTIMES_ACTION),
-										   (uintptr_t) doit, (uintptr_t) me->owner);
+										   VM_KERNEL_UNSLIDE(doit), (uintptr_t) me->owner);
             }
             IOStatisticsOpenGate();
             wl->openGate();
@@ -153,13 +159,16 @@ void IOTimerEventSource::timeoutAndRelease(void * self, void * c)
             	
             	if (trace)
                 	IOTimeStampStartConstant(IODBG_TIMES(IOTIMES_ACTION),
-											 (uintptr_t) doit, (uintptr_t) me->owner);
+											 VM_KERNEL_UNSLIDE(doit), (uintptr_t) me->owner);
 				
                 (*doit)(me->owner, me);
+#if CONFIG_DTRACE
+		DTRACE_TMR3(iotescallout__expire, Action, doit, OSObject, me->owner, void, me->workLoop);
+#endif
                 
 				if (trace)
                 	IOTimeStampEndConstant(IODBG_TIMES(IOTIMES_ACTION),
-										   (uintptr_t) doit, (uintptr_t) me->owner);
+										   VM_KERNEL_UNSLIDE(doit), (uintptr_t) me->owner);
             }
             IOStatisticsOpenGate();
             wl->openGate();
@@ -360,7 +369,7 @@ IOReturn IOTimerEventSource::wakeAtTime(AbsoluteTime inAbstime)
             reserved->workLoop = workLoop;
             reserved->calloutGeneration++;
             if (thread_call_enter1_delayed((thread_call_t) calloutEntry, 
-                    (void *) reserved->calloutGeneration, inAbstime))
+                    (void *)(uintptr_t) reserved->calloutGeneration, inAbstime))
             {
                 release();
                 workLoop->release();

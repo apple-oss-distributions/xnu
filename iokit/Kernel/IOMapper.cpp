@@ -29,6 +29,7 @@
 #include <IOKit/IOMapper.h>
 #include <IOKit/IODMACommand.h>
 #include <libkern/c++/OSData.h>
+#include <libkern/OSDebug.h>
 
 __BEGIN_DECLS
 extern ppnum_t pmap_find_phys(pmap_t pmap, addr64_t va);
@@ -40,7 +41,7 @@ OSDefineMetaClassAndAbstractStructors(IOMapper, IOService);
 OSMetaClassDefineReservedUsed(IOMapper, 0);
 OSMetaClassDefineReservedUsed(IOMapper, 1);
 OSMetaClassDefineReservedUsed(IOMapper, 2);
-OSMetaClassDefineReservedUnused(IOMapper, 3);
+OSMetaClassDefineReservedUsed(IOMapper, 3);
 OSMetaClassDefineReservedUnused(IOMapper, 4);
 OSMetaClassDefineReservedUnused(IOMapper, 5);
 OSMetaClassDefineReservedUnused(IOMapper, 6);
@@ -132,45 +133,78 @@ void IOMapper::waitForSystemMapper()
 {
     sMapperLock.lock();
     while ((uintptr_t) IOMapper::gSystem & kWaitMask)
+    {
+		OSReportWithBacktrace("waitForSystemMapper");
         sMapperLock.sleep(&IOMapper::gSystem);
+    }
     sMapperLock.unlock();
 }
 
 IOMapper * IOMapper::copyMapperForDevice(IOService * device)
 {
+    return copyMapperForDeviceWithIndex(device, 0);
+}
+
+IOMapper * IOMapper::copyMapperForDeviceWithIndex(IOService * device, unsigned int index)
+{
+    OSData *data;
     OSObject * obj;
-    IOMapper * mapper;
+    IOMapper * mapper = NULL;
     OSDictionary * matching;
     
     obj = device->copyProperty("iommu-parent");
     if (!obj)
-	return (NULL);
+        return (NULL);
 
     if ((mapper = OSDynamicCast(IOMapper, obj)))
-	return (mapper);
+        return (mapper);
 
-    matching = IOService::propertyMatching(gIOMapperIDKey, obj);
+    if ((data = OSDynamicCast(OSData, obj)))
+    {
+        if (index >= data->getLength() / sizeof(UInt32))
+            goto done;
+        
+        data = OSData::withBytesNoCopy((UInt32 *)data->getBytesNoCopy() + index, sizeof(UInt32));
+        if (!data)
+            goto done;
+
+        matching = IOService::propertyMatching(gIOMapperIDKey, data);
+        data->release();
+    }
+    else
+        matching = IOService::propertyMatching(gIOMapperIDKey, obj);
+
     if (matching)
     {
-	mapper = OSDynamicCast(IOMapper, IOService::waitForMatchingService(matching));
-    	matching->release();
+        mapper = OSDynamicCast(IOMapper, IOService::waitForMatchingService(matching));
+            matching->release();
     }
-    if (mapper)
-	device->setProperty("iommu-parent", mapper);
-    else
-	obj->release();
-    
+
+done:
+    if (obj)
+            obj->release();
     return (mapper);
 }
 
 ppnum_t IOMapper::iovmAllocDMACommand(IODMACommand * command, IOItemCount pageCount)
 {
-	return (0);
+    return (0);
 }
 
 void IOMapper::iovmFreeDMACommand(IODMACommand * command,
 				  ppnum_t addr, IOItemCount pageCount)
 {
+}
+
+ppnum_t IOMapper::iovmMapMemory(
+    			  OSObject                    * memory,   // dma command or iomd
+			  ppnum_t                       offsetPage,
+			  ppnum_t                       pageCount,
+			  uint32_t                      options,
+			  upl_page_info_t             * pageList,
+			  const IODMAMapSpecification * mapSpecification)
+{
+    return (0);
 }
 
 void IOMapper::iovmInsert(ppnum_t addr, IOItemCount offset,
@@ -249,6 +283,7 @@ void IOMapperIOVMFree(ppnum_t addr, unsigned pages)
 ppnum_t IOMapperInsertPage(ppnum_t addr, unsigned offset, ppnum_t page)
 {
     if (IOMapper::gSystem) {
+		if (!addr) panic("!addr");
         IOMapper::gSystem->iovmInsert(addr, (IOItemCount) offset, page);
         return addr + offset;
     }

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2010 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2012 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -51,7 +51,7 @@
 #include <kern/misc_protos.h>
 #include <kern/spl.h>
 #include <kern/assert.h>
-#include <kern/etimer.h>
+#include <kern/timer_queue.h>
 #include <mach/vm_prot.h>
 #include <vm/pmap.h>
 #include <vm/vm_kern.h>		/* for kernel_map */
@@ -70,7 +70,6 @@
 #include <sys/kdebug.h>
 #include <i386/tsc.h>
 #include <i386/rtclock_protos.h>
-
 #define UI_CPUFREQ_ROUNDING_FACTOR	10000000
 
 int		rtclock_config(void);
@@ -88,82 +87,25 @@ rtc_timer_start(void)
 	/*
 	 * Force a complete re-evaluation of timer deadlines.
 	 */
-	etimer_resync_deadlines();
-}
-
-/*
- * tsc_to_nanoseconds:
- *
- * Basic routine to convert a raw 64 bit TSC value to a
- * 64 bit nanosecond value.  The conversion is implemented
- * based on the scale factor and an implicit 32 bit shift.
- */
-static inline uint64_t
-_tsc_to_nanoseconds(uint64_t value)
-{
-#if defined(__i386__)
-    asm volatile("movl	%%edx,%%esi	;"
-		 "mull	%%ecx		;"
-		 "movl	%%edx,%%edi	;"
-		 "movl	%%esi,%%eax	;"
-		 "mull	%%ecx		;"
-		 "addl	%%edi,%%eax	;"	
-		 "adcl	$0,%%edx	 "
-		 : "+A" (value)
-		 : "c" (pal_rtc_nanotime_info.scale)
-		 : "esi", "edi");
-#elif defined(__x86_64__)
-    asm volatile("mul %%rcx;"
-		 "shrq $32, %%rax;"
-		 "shlq $32, %%rdx;"
-		 "orq %%rdx, %%rax;"
-		 : "=a"(value)
-		 : "a"(value), "c"(pal_rtc_nanotime_info.scale)
-		 : "rdx", "cc" );
-#else
-#error Unsupported architecture
-#endif
-
-    return (value);
+	x86_lcpu()->rtcDeadline = EndOfAllTime;
+	timer_resync_deadlines();
 }
 
 static inline uint32_t
 _absolutetime_to_microtime(uint64_t abstime, clock_sec_t *secs, clock_usec_t *microsecs)
 {
 	uint32_t remain;
-#if defined(__i386__)
-	asm volatile(
-			"divl %3"
-				: "=a" (*secs), "=d" (remain)
-				: "A" (abstime), "r" (NSEC_PER_SEC));
-	asm volatile(
-			"divl %3"
-				: "=a" (*microsecs)
-				: "0" (remain), "d" (0), "r" (NSEC_PER_USEC));
-#elif defined(__x86_64__)
 	*secs = abstime / (uint64_t)NSEC_PER_SEC;
 	remain = (uint32_t)(abstime % (uint64_t)NSEC_PER_SEC);
 	*microsecs = remain / NSEC_PER_USEC;
-#else
-#error Unsupported architecture
-#endif
 	return remain;
 }
 
 static inline void
 _absolutetime_to_nanotime(uint64_t abstime, clock_sec_t *secs, clock_usec_t *nanosecs)
 {
-#if defined(__i386__)
-	asm volatile(
-			"divl %3"
-			: "=a" (*secs), "=d" (*nanosecs)
-			: "A" (abstime), "r" (NSEC_PER_SEC));
-#elif defined(__x86_64__)
 	*secs = abstime / (uint64_t)NSEC_PER_SEC;
 	*nanosecs = (clock_usec_t)(abstime % (uint64_t)NSEC_PER_SEC);
-#else
-#error Unsupported architecture
-#endif
 }
 
 /*
@@ -251,13 +193,7 @@ rtc_nanotime_init_commpage(void)
 static inline uint64_t
 rtc_nanotime_read(void)
 {
-	
-#if CONFIG_EMBEDDED
-	if (gPEClockFrequencyInfo.timebase_frequency_hz > SLOW_TSC_THRESHOLD)
-		return	_rtc_nanotime_read(&rtc_nanotime_info, 1);	/* slow processor */
-	else
-#endif
-	return	_rtc_nanotime_read(&pal_rtc_nanotime_info, 0);	/* assume fast processor */
+	return	_rtc_nanotime_read(&pal_rtc_nanotime_info);
 }
 
 /*
@@ -277,8 +213,8 @@ rtc_clock_napped(uint64_t base, uint64_t tsc_base)
 
 	assert(!ml_get_interrupts_enabled());
 	tsc = rdtsc64();
-	oldnsecs = rntp->ns_base + _tsc_to_nanoseconds(tsc - rntp->tsc_base);
-	newnsecs = base + _tsc_to_nanoseconds(tsc - tsc_base);
+	oldnsecs = rntp->ns_base + _rtc_tsc_to_nanoseconds(tsc - rntp->tsc_base, rntp);
+	newnsecs = base + _rtc_tsc_to_nanoseconds(tsc - tsc_base, rntp);
 	
 	/*
 	 * Only update the base values if time using the new base values
@@ -287,7 +223,6 @@ rtc_clock_napped(uint64_t base, uint64_t tsc_base)
 	if (oldnsecs < newnsecs) {
 	    _pal_rtc_nanotime_store(tsc_base, base, rntp->scale, rntp->shift, rntp);
 	    rtc_nanotime_set_commpage(rntp);
-		trace_set_timebases(tsc_base, base);
 	}
 }
 
@@ -326,8 +261,8 @@ rtc_clock_stepped(__unused uint32_t new_frequency,
  * rtc_sleep_wakeup:
  *
  * Invoked from power management when we have awoken from a sleep (S3)
- * and the TSC has been reset.  The nanotime data is updated based on
- * the passed in value.
+ * and the TSC has been reset, or from Deep Idle (S0) sleep when the TSC
+ * has progressed.  The nanotime data is updated based on the passed-in value.
  *
  * The caller must guarantee non-reentrancy.
  */
@@ -377,7 +312,7 @@ rtclock_init(void)
 		rtc_timer_init();
 		clock_timebase_init();
 		ml_init_lock_timeout();
-		ml_init_delay_spin_threshold();
+		ml_init_delay_spin_threshold(10);
 	}
 
     	/* Set fixed configuration for lapic timers */
@@ -394,14 +329,21 @@ static void
 rtc_set_timescale(uint64_t cycles)
 {
 	pal_rtc_nanotime_t	*rntp = &pal_rtc_nanotime_info;
+	uint32_t    shift = 0;
+    
+	/* the "scale" factor will overflow unless cycles>SLOW_TSC_THRESHOLD */
+    
+	while ( cycles <= SLOW_TSC_THRESHOLD) {
+		shift++;
+		cycles <<= 1;
+	}
+	
+	if ( shift != 0 )
+		printf("Slow TSC, rtc_nanotime.shift == %d\n", shift);
+    
 	rntp->scale = (uint32_t)(((uint64_t)NSEC_PER_SEC << 32) / cycles);
 
-#if CONFIG_EMBEDDED
-	if (cycles <= SLOW_TSC_THRESHOLD)
-		rntp->shift = (uint32_t)cycles;
-	else
-#endif
-		rntp->shift = 32;
+	rntp->shift = shift;
 
 	if (tsc_rebase_abs_time == 0)
 		tsc_rebase_abs_time = mach_absolute_time();
@@ -510,7 +452,7 @@ rtclock_intr(
 	}
 
 	/* call the generic etimer */
-	etimer_intr(user_mode, rip);
+	timer_intr(user_mode, rip);
 }
 
 
@@ -602,12 +544,11 @@ nanoseconds_to_absolutetime(
 
 void
 machine_delay_until(
+	uint64_t interval,
 	uint64_t		deadline)
 {
-	uint64_t		now;
-
-	do {
+	(void)interval;
+	while (mach_absolute_time() < deadline) {
 		cpu_pause();
-		now = mach_absolute_time();
-	} while (now < deadline);
+	} 
 }

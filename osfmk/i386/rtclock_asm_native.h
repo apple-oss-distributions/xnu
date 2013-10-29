@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2010 Apple Inc. All rights reserved.
+ * Copyright (c) 2010-2012 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -39,39 +39,27 @@
 #ifndef _PAL_RTCLOCK_ASM_NATIVE_H_
 #define _PAL_RTCLOCK_ASM_NATIVE_H_
 
-
-#if defined(__i386__)
 /*
  * Assembly snippet included in exception handlers and rtc_nanotime_read()
- * %edi points to nanotime info struct
- * %edx:%eax returns nanotime
- */
-#define PAL_RTC_NANOTIME_READ_FAST()					  \
-0:	movl	RNT_GENERATION(%edi),%esi	/* being updated? */	; \
-	testl	%esi,%esi						; \
-	jz	0b				/* wait until done */	; \
-	lfence								; \
-	rdtsc								; \
-	lfence								; \
-	subl	RNT_TSC_BASE(%edi),%eax					; \
-	sbbl	RNT_TSC_BASE+4(%edi),%edx	/* tsc - tsc_base */	; \
-	movl	RNT_SCALE(%edi),%ecx		/* * scale factor */	; \
-	movl	%edx,%ebx						; \
-	mull	%ecx							; \
-	movl	%ebx,%eax						; \
-	movl	%edx,%ebx						; \
-	mull	%ecx							; \
-	addl	%ebx,%eax						; \
-	adcl	$0,%edx							; \
-	addl	RNT_NS_BASE(%edi),%eax		/* + ns_base */		; \
-	adcl	RNT_NS_BASE+4(%edi),%edx				; \
-	cmpl	RNT_GENERATION(%edi),%esi	/* check for update */	; \
-	jne	0b				/* do it all again */
-
-#elif defined(__x86_64__)
-
-/*
- * Assembly snippet included in exception handlers and rtc_nanotime_read()
+ *
+ *
+ * Warning!  There are several copies of this code in the trampolines found in
+ * osfmk/x86_64/idt64.s, coming from the various TIMER macros in rtclock_asm.h.
+ * They're all kept in sync by using the RTC_NANOTIME_READ() macro.
+ *
+ * The algorithm we use is:
+ *
+ *	ns = ((((rdtsc - rnt_tsc_base)<<rnt_shift)*rnt_tsc_scale) / 2**32) + rnt_ns_base;
+ *
+ * rnt_shift, a constant computed during initialization, is the smallest value for which:
+ *
+ *	(tscFreq << rnt_shift) > SLOW_TSC_THRESHOLD
+ *
+ * Where SLOW_TSC_THRESHOLD is about 10e9.  Since most processor's tscFreqs are greater
+ * than 1GHz, rnt_shift is usually 0.  rnt_tsc_scale is also a 32-bit constant:
+ *
+ *	rnt_tsc_scale = (10e9 * 2**32) / (tscFreq << rnt_shift);
+ *
  * %rdi points to nanotime info struct.
  * %rax returns nanotime
  */
@@ -83,17 +71,15 @@
 	rdtsc								; \
 	lfence								; \
 	shlq	$32,%rdx						; \
+	movl    RNT_SHIFT(%rdi),%ecx					; \
 	orq	%rdx,%rax			/* %rax := tsc */	; \
 	subq	RNT_TSC_BASE(%rdi),%rax		/* tsc - tsc_base */	; \
-	xorq	%rcx,%rcx						; \
+	shlq    %cl,%rax						; \
 	movl	RNT_SCALE(%rdi),%ecx					; \
 	mulq	%rcx				/* delta * scale */	; \
 	shrdq	$32,%rdx,%rax			/* %rdx:%rax >>= 32 */	; \
 	addq	RNT_NS_BASE(%rdi),%rax		/* add ns_base */	; \
 	cmpl	RNT_GENERATION(%rdi),%esi	/* repeat if changed */ ; \
 	jne	0b
-
-#endif /* !defined(x86_64) */
-
 
 #endif /* _PAL_RTCLOCK_ASM_NATIVE_H_ */
