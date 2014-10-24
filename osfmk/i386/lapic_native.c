@@ -811,6 +811,10 @@ lapic_interrupt(int interrupt_num, x86_saved_state_t *state)
 #endif /* CONFIG_COUNTERS */
 		}
 		break;
+	case LAPIC_KICK_INTERRUPT:
+		_lapic_end_of_interrupt();
+		retval = 1;
+		break;
 	}
 
 	return retval;
@@ -954,3 +958,26 @@ lapic_disable_timer(void)
 	}
 }
 
+/* SPI returning the CMCI vector */
+uint8_t
+lapic_get_cmci_vector(void)
+{
+	uint8_t	cmci_vector = 0;
+#if CONFIG_MCA
+	/* CMCI, if available */
+	if (mca_is_cmci_present())
+		cmci_vector = LAPIC_VECTOR(CMCI);
+#endif
+	return cmci_vector;
+}
+
+#if DEBUG
+extern void lapic_trigger_MC(void);
+void
+lapic_trigger_MC(void)
+{
+	/* A 64-bit access to any register will do it. */
+	volatile uint64_t dummy = *(uint64_t *) (void *) LAPIC_MMIO(ID);
+	dummy++;
+}
+#endif

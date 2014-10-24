@@ -569,12 +569,7 @@ ml_get_maxbusdelay(void)
 }
 
 /*
- * Set the maximum delay time allowed for snoop on the bus.
- *
- * Note that this value will be compared to the amount of time that it takes
- * to transition from a non-snooping power state (C4) to a snooping state (C2).
- * If maxBusDelay is less than C4C2SnoopDelay,
- * we will not enter the lowest power state.
+ * Advertise a memory access latency tolerance of "mdelay" ns
  */
 void
 ml_set_maxbusdelay(uint32_t mdelay)
@@ -680,18 +675,6 @@ machine_run_count(uint32_t count)
 	pmDispatch->pmSetRunCount(count);
     else
 	saved_run_count = count;
-}
-
-boolean_t
-machine_processor_is_inactive(processor_t processor)
-{
-    int		cpu = processor->cpu_id;
-
-    if (pmDispatch != NULL
-	&& pmDispatch->pmIsCPUUnAvailable != NULL)
-	return(pmDispatch->pmIsCPUUnAvailable(cpu_to_lcpu(cpu)));
-    else
-	return(FALSE);
 }
 
 processor_t

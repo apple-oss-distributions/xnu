@@ -102,7 +102,7 @@ struct vm_shared_region_slide_info_entry {
 };
 
 #define NBBY	8
-#define	NUM_SLIDING_BITMAPS_PER_PAGE	(PAGE_SIZE/sizeof(int)/NBBY) /*128*/
+#define	NUM_SLIDING_BITMAPS_PER_PAGE	(0x1000/sizeof(int)/NBBY) /*128*/
 typedef struct slide_info_entry_toc	*slide_info_entry_toc_t;
 struct slide_info_entry_toc { 
 	uint8_t entry[NUM_SLIDING_BITMAPS_PER_PAGE];
@@ -195,7 +195,9 @@ extern kern_return_t vm_shared_region_map_file(
 	memory_object_control_t	file_control,
 	memory_object_size_t	file_size,
 	void			*root_dir,
-	struct shared_file_mapping_np *mapping_to_slide);
+	uint32_t		slide,
+	user_addr_t		slide_start,
+	user_addr_t		slide_size);
 extern kern_return_t vm_shared_region_sliding_valid(uint32_t slide);
 extern kern_return_t vm_shared_region_slide_sanity_check(vm_shared_region_t sr);
 extern kern_return_t vm_shared_region_slide_init(vm_shared_region_t sr,

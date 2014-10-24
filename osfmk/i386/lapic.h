@@ -228,6 +228,7 @@ typedef uint32_t lapic_timer_count_t;
 #define LAPIC_CMCI_INTERRUPT		0x9
 #define LAPIC_PMC_SW_INTERRUPT		0x8
 #define LAPIC_PM_INTERRUPT		0x7
+#define LAPIC_KICK_INTERRUPT		0x6
 
 #define LAPIC_PMC_SWI_VECTOR		(LAPIC_DEFAULT_INTERRUPT_BASE + LAPIC_PMC_SW_INTERRUPT)
 #define LAPIC_TIMER_VECTOR		(LAPIC_DEFAULT_INTERRUPT_BASE + LAPIC_TIMER_INTERRUPT)
@@ -325,6 +326,8 @@ extern boolean_t	lapic_is_interrupt_pending(void);
 extern boolean_t	lapic_is_interrupting(uint8_t vector);
 extern void		lapic_interrupt_counts(uint64_t intrs[256]);
 extern void		lapic_disable_timer(void);
+
+extern uint8_t		lapic_get_cmci_vector(void);
 
 #define	MAX_LAPICIDS	(LAPIC_ID_MAX+1)
 #ifdef MP_DEBUG

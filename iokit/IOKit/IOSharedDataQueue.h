@@ -33,7 +33,11 @@
 #undef dequeue
 #endif
 
+#define DISABLE_DATAQUEUE_WARNING /* IODataQueue is deprecated, please use IOSharedDataQueue instead */
+
 #include <IOKit/IODataQueue.h>
+
+#undef DISABLE_DATAQUEUE_WARNING
 
 typedef struct _IODataQueueEntry IODataQueueEntry;
 
@@ -53,6 +57,7 @@ class IOSharedDataQueue : public IODataQueue
     OSDeclareDefaultStructors(IOSharedDataQueue)
 
     struct ExpansionData { 
+        UInt32 queueSize;
     };
     /*! @var reserved
         Reserved for future use.  (Internal use only)  */
@@ -60,6 +65,23 @@ class IOSharedDataQueue : public IODataQueue
 
 protected:
     virtual void free();
+
+    /*!
+     * @function getQueueSize
+     * @abstract Returns the size of the data queue.
+     * @discussion Use this method to access the size of the data queue. Do not access the value of size directly, as it can get modified from userspace and is not reliable. 
+     * @result Returns the size of the data queue, or zero in case of failure.
+     */
+    UInt32 getQueueSize();
+
+    /*!
+     * @function setQueueSize
+     * @abstract Stores the value of the size of the data queue.
+     * @discussion Use this method to store the value of the size of the data queue. Do not access the value of size directly, as it can get modified from userspace and is not reliable.
+     * @param size The size of the data queue.  
+     * @result Returns true in case of success, false otherwise.
+     */
+    Boolean setQueueSize(UInt32 size);
 
 public:
     /*!
@@ -115,6 +137,16 @@ public:
      * @result Returns true on success and false on failure.  Typically failure means that the queue is empty.
      */
     virtual Boolean dequeue(void *data, UInt32 *dataSize);
+
+    /*!
+     * @function enqueue
+     * @abstract Enqueues a new entry on the queue.
+     * @discussion This method adds a new data entry of dataSize to the queue.  It sets the size parameter of the entry pointed to by the tail value and copies the memory pointed to by the data parameter in place in the queue.  Once that is done, it moves the tail to the next available location.  When attempting to add a new entry towards the end of the queue and there isn't enough space at the end, it wraps back to the beginning.<br>  If the queue is empty when a new entry is added, sendDataAvailableNotification() is called to send a message to the user process that data is now available.
+     * @param data Pointer to the data to be added to the queue.
+     * @param dataSize Size of the data pointed to by data.
+     * @result Returns true on success and false on failure.  Typically failure means that the queue is full.
+     */
+    virtual Boolean enqueue(void *data, UInt32 dataSize);
 
     OSMetaClassDeclareReservedUnused(IOSharedDataQueue, 0);
     OSMetaClassDeclareReservedUnused(IOSharedDataQueue, 1);

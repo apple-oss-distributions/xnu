@@ -21,7 +21,6 @@ extern char  g_target_path[ PATH_MAX ];
  */
 int shm_tests( void * the_argp )
 {	
-#if !TARGET_OS_EMBEDDED
 	int					my_err;
 	int					my_shm_id;
 	void *				my_shm_addr = NULL;
@@ -57,6 +56,16 @@ int shm_tests( void * the_argp )
 		goto test_failed_exit;
 	}
 
+	if (my_shmid_ds.shm_internal != (void *) 0){
+		/*
+		 * The shm_internal field is a pointer reserved for kernel
+		 * use only.  It should not be leaked to user space.
+		 * (PR-15642873)
+		 */
+		printf( "shmctl failed to sanitize kernel internal pointer \n" );
+		goto test_failed_exit;
+	}
+
 	my_err = shmdt( my_shm_addr );
 	if ( my_err == -1 ) {
 		printf( "shmdt failed with error %d - \"%s\" \n", errno, strerror( errno) );
@@ -83,10 +92,6 @@ test_passed_exit:
 		shmctl( my_shm_id, IPC_RMID, NULL);
 	}
 	return( my_err );
-#else
-	printf( "\t--> Not supported on EMBEDDED TARGET\n" );
-	return 0;
-#endif
 }
 
 

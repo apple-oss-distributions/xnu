@@ -143,11 +143,15 @@
 #include <sys/_types.h>
 
 #include <machine/_mcontext.h>
+
+#ifndef KERNEL
+#include <sys/_pthread/_pthread_attr_t.h>
+#endif /* KERNEL */
+
 #include <sys/_types/_sigaltstack.h>
 #include <sys/_types/_ucontext.h>
 
 #include <sys/_types/_pid_t.h>
-#include <sys/_types/_pthread_attr_t.h>
 #include <sys/_types/_sigset_t.h>
 #include <sys/_types/_size_t.h>
 #include <sys/_types/_uid_t.h>
@@ -162,6 +166,7 @@ union sigval {
 #define	SIGEV_SIGNAL	1	/* aio - completion notification */
 #define	SIGEV_THREAD	3	/* [NOTIMP] [RTS] call notification function */
 
+#ifndef KERNEL
 struct sigevent {
 	int				sigev_notify;				/* Notification type */
 	int				sigev_signo;				/* Signal number */
@@ -169,6 +174,7 @@ struct sigevent {
 	void			(*sigev_notify_function)(union sigval);	  /* Notification function */
 	pthread_attr_t	*sigev_notify_attributes;	/* Notification attributes */
 };
+#endif /* KERNEL */
 
 #ifdef BSD_KERNEL_PRIVATE
 
@@ -564,7 +570,7 @@ struct	sigstack {
 		    sigmask(SIGIOT)|sigmask(SIGEMT)|\
 		    sigmask(SIGFPE)|sigmask(SIGBUS)|\
 		    sigmask(SIGSEGV)|sigmask(SIGSYS)|\
-		    sigmask(SIGPIPE))
+		    sigmask(SIGPIPE)|sigmask(SIGKILL))
 
 #define workq_threadmask (threadmask | sigcantmask)
 

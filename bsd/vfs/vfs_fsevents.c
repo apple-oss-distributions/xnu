@@ -392,7 +392,7 @@ add_fsevent(int type, vfs_context_t ctx, ...)
     // (as long as it's not an event type that can never be the
     // same as a previous event)
     //
-    if (type != FSE_CREATE_FILE && type != FSE_DELETE && type != FSE_RENAME && type != FSE_EXCHANGE && type != FSE_CHOWN) {
+    if (type != FSE_CREATE_FILE && type != FSE_DELETE && type != FSE_RENAME && type != FSE_EXCHANGE && type != FSE_CHOWN && type != FSE_DOCID_CHANGED && type != FSE_DOCID_CREATED) {
 	void *ptr=NULL;
 	int   vid=0, was_str=0, nlen=0;
 
@@ -500,6 +500,7 @@ add_fsevent(int type, vfs_context_t ctx, ...)
 		    printf("add_fsevent: kfse_list head %p ; num_pending_rename %d\n", listhead, num_pending_rename);
 		    printf("add_fsevent: zalloc sez: %p\n", junkptr);
 		    printf("add_fsevent: event_zone info: %d 0x%x\n", ((int *)event_zone)[0], ((int *)event_zone)[1]);
+		    lock_watch_table();
 		    for(ii=0; ii < MAX_WATCHERS; ii++) {
 			if (watcher_table[ii] == NULL) {
 			    continue;
@@ -511,6 +512,7 @@ add_fsevent(int type, vfs_context_t ctx, ...)
 			       watcher_table[ii]->rd, watcher_table[ii]->wr,
 			       watcher_table[ii]->eventq_size, watcher_table[ii]->flags);
 		    }
+		    unlock_watch_table();
 
 		    last_print = current_tv;
 		    if (junkptr) {
@@ -563,6 +565,60 @@ add_fsevent(int type, vfs_context_t ctx, ...)
     //
     
     cur = kfse;
+
+    if (type == FSE_DOCID_CREATED || type == FSE_DOCID_CHANGED) {
+	    uint64_t val;
+
+	    //
+	    // These events are special and not like the other events.  They only
+	    // have a dev_t, src inode #, dest inode #, and a doc-id.  We use the
+	    // fields that we can in the kfse but have to overlay the dest inode
+	    // number and the doc-id on the other fields.
+	    //
+
+	    // First the dev_t
+	    arg_type = va_arg(ap, int32_t);
+	    if (arg_type == FSE_ARG_DEV) {
+		    cur->dev = (dev_t)(va_arg(ap, dev_t));
+	    } else {
+		    cur->dev = (dev_t)0xbadc0de1;
+	    }
+
+	    // next the source inode #
+	    arg_type = va_arg(ap, int32_t);
+	    if (arg_type == FSE_ARG_INO) {
+		    cur->ino = (ino64_t)(va_arg(ap, ino64_t));
+	    } else {
+		    cur->ino = 0xbadc0de2;
+	    }
+
+	    // now the dest inode #
+	    arg_type = va_arg(ap, int32_t);
+	    if (arg_type == FSE_ARG_INO) {
+		    val = (ino64_t)(va_arg(ap, ino64_t));
+	    } else {
+		    val = 0xbadc0de2;
+	    }
+	    // overlay the dest inode number on the str/dest pointer fields
+	    memcpy(&cur->str, &val, sizeof(ino64_t));
+
+
+	    // and last the document-id
+	    arg_type = va_arg(ap, int32_t);
+	    if (arg_type == FSE_ARG_INT32) {
+		    val = (uint64_t)va_arg(ap, uint32_t);
+	    } else if (arg_type == FSE_ARG_INT64) {
+		    val = (uint64_t)va_arg(ap, uint64_t);
+	    } else {
+		    val = 0xbadc0de3;
+	    }
+	    
+	    // the docid is 64-bit and overlays the uid/gid fields
+	    memcpy(&cur->uid, &val, sizeof(uint64_t));
+
+	    goto done_with_args;
+    }
+
     for(arg_type=va_arg(ap, int32_t); arg_type != FSE_ARG_DONE; arg_type=va_arg(ap, int32_t))
 
 	switch(arg_type) {
@@ -687,12 +743,19 @@ add_fsevent(int type, vfs_context_t ctx, ...)
 		}
 		break;
 
+	    case FSE_ARG_INT32: {
+		    uint32_t ival = (uint32_t)va_arg(ap, int32_t);
+		    kfse->uid = (ino64_t)ival;
+		break;
+	    }
+		    
 	    default:
 		printf("add_fsevent: unknown type %d\n", arg_type);
 		// just skip one 32-bit word and hope we sync up...
 		(void)va_arg(ap, int32_t);
 	}
 
+done_with_args:
     va_end(ap);
 
     OSBitAndAtomic16(~KFSE_BEING_CREATED, &kfse->flags);
@@ -835,7 +898,7 @@ release_event_ref(kfs_event *kfse)
     unlock_fs_event_list();
     
     // if we have a pointer in the union
-    if (copy.str) {
+    if (copy.str && copy.type != FSE_DOCID_CHANGED) {
 	if (copy.len == 0) {    // and it's not a string
 	    panic("%s:%d: no more fref.vp!\n", __FILE__, __LINE__);
 	    // vnode_rele_ext(copy.fref.vp, O_EVTONLY, 0);
@@ -903,14 +966,7 @@ add_watcher(int8_t *event_list, int32_t num_events, int32_t eventq_size, fs_even
 
     lock_watch_table();
 
-    // now update the global list of who's interested in
-    // events of a particular type...
-    for(i=0; i < num_events; i++) {
-	if (event_list[i] != FSE_IGNORE && i < FSE_MAX_EVENTS) {
-	    fs_event_type_watchers[i]++;
-	}
-    }
-
+    // find a slot for the new watcher
     for(i=0; i < MAX_WATCHERS; i++) {
 	if (watcher_table[i] == NULL) {
 	    watcher->my_id   = i;
@@ -919,10 +975,19 @@ add_watcher(int8_t *event_list, int32_t num_events, int32_t eventq_size, fs_even
 	}
     }
 
-    if (i > MAX_WATCHERS) {
+    if (i >= MAX_WATCHERS) {
 	printf("fsevents: too many watchers!\n");
 	unlock_watch_table();
+	FREE(watcher, M_TEMP);
 	return ENOSPC;
+    }
+
+    // now update the global list of who's interested in
+    // events of a particular type...
+    for(i=0; i < num_events; i++) {
+	if (event_list[i] != FSE_IGNORE && i < FSE_MAX_EVENTS) {
+	    fs_event_type_watchers[i]++;
+	}
     }
 
     unlock_watch_table();
@@ -1248,6 +1313,36 @@ copy_out_kfse(fs_event_watcher *watcher, kfs_event *kfse, struct uio *uio)
 
   copy_again:
 
+    if (kfse->type == FSE_DOCID_CHANGED || kfse->type == FSE_DOCID_CREATED) {
+	dev_t    dev  = cur->dev;
+	ino_t    ino  = cur->ino;
+	uint64_t ival;
+
+	error = fill_buff(FSE_ARG_DEV, sizeof(dev_t), &dev, evbuff, &evbuff_idx, sizeof(evbuff), uio);
+	if (error != 0) {
+	    goto get_out;
+	}
+
+	error = fill_buff(FSE_ARG_INO, sizeof(ino_t), &ino, evbuff, &evbuff_idx, sizeof(evbuff), uio);
+	if (error != 0) {
+	    goto get_out;
+	}
+
+	memcpy(&ino, &cur->str, sizeof(ino_t));
+	error = fill_buff(FSE_ARG_INO, sizeof(ino_t), &ino, evbuff, &evbuff_idx, sizeof(evbuff), uio);
+	if (error != 0) {
+	    goto get_out;
+	}
+
+	memcpy(&ival, &cur->uid, sizeof(uint64_t));   // the docid gets stuffed into the ino field
+	error = fill_buff(FSE_ARG_INT64, sizeof(uint64_t), &ival, evbuff, &evbuff_idx, sizeof(evbuff), uio);
+	if (error != 0) {
+	    goto get_out;
+	}
+
+	goto done;
+    }
+
     if (cur->str == NULL || cur->str[0] == '\0') {
 	printf("copy_out_kfse:2: empty/short path (%s)\n", cur->str);
 	error = fill_buff(FSE_ARG_STRING, 2, "/", evbuff, &evbuff_idx, sizeof(evbuff), uio);
@@ -1438,7 +1533,7 @@ fmod_watch(fs_event_watcher *watcher, struct uio *uio)
 
 	if (watcher->event_list[kfse->type] == FSE_REPORT && watcher_cares_about_dev(watcher, kfse->dev)) {
 
-	  if (!(watcher->flags & WATCHER_APPLE_SYSTEM_SERVICE) & is_ignored_directory(kfse->str)) {
+	  if (!(watcher->flags & WATCHER_APPLE_SYSTEM_SERVICE) && kfse->type != FSE_DOCID_CHANGED && is_ignored_directory(kfse->str)) {
 	    // If this is not an Apple System Service, skip specified directories
 	    // radar://12034844
 	    error = 0;
@@ -2171,6 +2266,7 @@ fseventsioctl(__unused dev_t dev, u_long cmd, caddr_t data, __unused int flag, s
 
 	    error = falloc(p, &f, &fd, vfs_context_current());
 	    if (error) {
+		remove_watcher(fseh->watcher);
 		FREE(event_list, M_TEMP);
 		FREE(fseh, M_TEMP);
 		return (error);

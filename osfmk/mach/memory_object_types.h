@@ -399,12 +399,16 @@ typedef struct memory_object_attr_info	memory_object_attr_info_data_t;
  *  each of those pages.
  */
 #ifdef PRIVATE
-#define MAX_UPL_TRANSFER 256
-#define MAX_UPL_SIZE	 8192
+#define MAX_UPL_TRANSFER_BYTES	(1024 * 1024)
+#define MAX_UPL_SIZE_BYTES	(1024 * 1024 * 64)
+
+#define MAX_UPL_SIZE		(MAX_UPL_SIZE_BYTES / PAGE_SIZE)
+#define	MAX_UPL_TRANSFER	(MAX_UPL_TRANSFER_BYTES / PAGE_SIZE)
+
 
 struct upl_page_info {
 	ppnum_t		phys_addr;	/* physical page index number */
-        unsigned int
+	unsigned int
 #ifdef  XNU_KERNEL_PRIVATE
 		pageout:1,      /* page is to be removed on commit */
 		absent:1,       /* No valid data in this page */
@@ -474,9 +478,10 @@ typedef uint32_t	upl_size_t;	/* page-aligned byte size */
 #define UPL_REQUEST_SET_DIRTY	0x10000000
 #define UPL_REQUEST_NO_FAULT	0x20000000 /* fail if pages not all resident */
 #define UPL_NOZEROFILLIO	0x40000000 /* allow non zerofill pages present */
+#define UPL_REQUEST_FORCE_COHERENCY	0x80000000
 
 /* UPL flags known by this kernel */
-#define UPL_VALID_FLAGS		0x7FFFFFFF
+#define UPL_VALID_FLAGS		0xFFFFFFFF
 
 
 /* upl abort error flags */
@@ -580,6 +585,7 @@ typedef uint32_t	upl_size_t;	/* page-aligned byte size */
 #define UPL_COMMIT_CLEAR_PRECIOUS	0x80
 #define UPL_COMMIT_SPECULATE		0x100
 #define UPL_COMMIT_FREE_ABSENT		0x200
+#define UPL_COMMIT_WRITTEN_BY_KERNEL	0x400
 
 #define UPL_COMMIT_KERNEL_ONLY_FLAGS	(UPL_COMMIT_CS_VALIDATED | UPL_COMMIT_FREE_ABSENT)
 
@@ -626,6 +632,9 @@ typedef uint32_t	upl_size_t;	/* page-aligned byte size */
 
 #ifdef	PRIVATE
 
+#define UPL_REPRIO_INFO_MASK 	(0xFFFFFFFF)
+#define UPL_REPRIO_INFO_SHIFT 	32
+
 /* access macros for upl_t */
 
 #define UPL_DEVICE_PAGE(upl) \
@@ -660,6 +669,12 @@ typedef uint32_t	upl_size_t;	/* page-aligned byte size */
 	(((upl)[(index)].phys_addr != 0) ?       \
 	 ((upl)[(index)].pageout = FALSE) : FALSE)
 
+#define UPL_REPRIO_INFO_BLKNO(upl, index) \
+	(((upl)->upl_reprio_info[(index)]) & UPL_REPRIO_INFO_MASK) 
+
+#define UPL_REPRIO_INFO_LEN(upl, index) \
+	((((upl)->upl_reprio_info[(index)]) >> UPL_REPRIO_INFO_SHIFT) & UPL_REPRIO_INFO_MASK)
+
 /* modifier macros for upl_t */
 
 #define UPL_SET_CS_VALIDATED(upl, index, value) \
@@ -667,6 +682,10 @@ typedef uint32_t	upl_size_t;	/* page-aligned byte size */
 
 #define UPL_SET_CS_TAINTED(upl, index, value) \
 	((upl)[(index)].cs_tainted = ((value) ? TRUE : FALSE))
+
+#define UPL_SET_REPRIO_INFO(upl, index, blkno, len) \
+	((upl)->upl_reprio_info[(index)]) = (((uint64_t)(blkno) & UPL_REPRIO_INFO_MASK) | \
+	(((uint64_t)(len) & UPL_REPRIO_INFO_MASK) << UPL_REPRIO_INFO_SHIFT))
 
 /* The call prototyped below is used strictly by UPL_GET_INTERNAL_PAGE_LIST */
 
@@ -702,6 +721,10 @@ extern boolean_t	upl_speculative_page(upl_page_info_t *upl, int index);
 extern void	upl_clear_dirty(upl_t upl, boolean_t value);
 extern void	upl_set_referenced(upl_t upl, boolean_t value);
 extern void	upl_range_needed(upl_t upl, int index, int count);
+#if CONFIG_IOSCHED
+extern int64_t upl_blkno(upl_page_info_t *upl, int index);
+extern void 	upl_set_blkno(upl_t upl, vm_offset_t upl_offset, int size, int64_t blkno);
+#endif
 
 __END_DECLS
 
@@ -713,6 +736,8 @@ extern boolean_t	upl_page_present(upl_page_info_t *upl, int index);
 extern boolean_t	upl_dirty_page(upl_page_info_t *upl, int index);
 extern boolean_t	upl_valid_page(upl_page_info_t *upl, int index);
 extern void		upl_deallocate(upl_t upl);
+extern void 		upl_mark_decmp(upl_t upl);
+extern void 		upl_unmark_decmp(upl_t upl);
 
 __END_DECLS
 

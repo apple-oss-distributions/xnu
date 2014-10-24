@@ -71,6 +71,7 @@ extern void	acpi_wake_prot(void);
 #endif
 extern kern_return_t IOCPURunPlatformQuiesceActions(void);
 extern kern_return_t IOCPURunPlatformActiveActions(void);
+extern kern_return_t IOCPURunPlatformHaltRestartActions(uint32_t message);
 
 extern void 	fpinit(void);
 
@@ -95,7 +96,7 @@ typedef struct acpi_hibernate_callback_data acpi_hibernate_callback_data_t;
 unsigned int		save_kdebug_enable = 0;
 static uint64_t		acpi_sleep_abstime;
 static uint64_t		acpi_idle_abstime;
-static uint64_t		acpi_wake_abstime;
+static uint64_t		acpi_wake_abstime, acpi_wake_postrebase_abstime;
 boolean_t		deep_idle_rebase = TRUE;
 
 #if CONFIG_SLEEP
@@ -115,12 +116,14 @@ acpi_hibernate(void *refcon)
 		{
 			// off
 			HIBLOG("power off\n");
+			IOCPURunPlatformHaltRestartActions(kPEHaltCPU);
 			if (PE_halt_restart) (*PE_halt_restart)(kPEHaltCPU);
 		}
 		else if( mode == kIOHibernatePostWriteRestart )
 		{
 			// restart
 			HIBLOG("restart\n");
+			IOCPURunPlatformHaltRestartActions(kPERestartCPU);
 			if (PE_halt_restart) (*PE_halt_restart)(kPERestartCPU);
 		}
 		else
@@ -292,6 +295,8 @@ acpi_sleep_kernel(acpi_sleep_callback func, void *refcon)
 
 	/* let the realtime clock reset */
 	rtc_sleep_wakeup(acpi_sleep_abstime);
+	acpi_wake_postrebase_abstime = mach_absolute_time();
+	assert(mach_absolute_time() >= acpi_sleep_abstime);
 
 	kdebug_enable = save_kdebug_enable;
 
@@ -419,7 +424,8 @@ acpi_idle_kernel(acpi_sleep_callback func, void *refcon)
 		rtc_sleep_wakeup(acpi_idle_abstime);
 		kdebug_enable = save_kdebug_enable;
 	}
-
+	acpi_wake_postrebase_abstime = mach_absolute_time();
+	assert(mach_absolute_time() >= acpi_idle_abstime);
 	cpu_datap(master_cpu)->cpu_running = TRUE;
 
 	KERNEL_DEBUG_CONSTANT(
@@ -467,3 +473,9 @@ install_real_mode_bootstrap(void *prot_entry)
 	__asm__("wbinvd");
 }
 
+boolean_t
+ml_recent_wake(void) {
+	uint64_t ctime = mach_absolute_time();
+	assert(ctime > acpi_wake_postrebase_abstime);
+	return ((ctime - acpi_wake_postrebase_abstime) < 5 * NSEC_PER_SEC);
+}
