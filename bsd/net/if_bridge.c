@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2004-2014 Apple Inc. All rights reserved.
+ * Copyright (c) 2004-2015 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -2087,6 +2087,14 @@ bridge_delete_member(struct bridge_softc *sc, struct bridge_iflist *bif,
 	BRIDGE_LOCK_ASSERT_HELD(sc);
 	VERIFY(ifs != NULL);
 
+	/*
+	 * First, remove the member from the list first so it cannot be found anymore
+	 * when we release the bridge lock below
+	 */
+	BRIDGE_XLOCK(sc);
+	TAILQ_REMOVE(&sc->sc_iflist, bif, bif_next);
+	BRIDGE_XDROP(sc);
+
 	if (!gone) {
 		switch (ifs->if_type) {
 		case IFT_ETHER:
@@ -2094,8 +2102,15 @@ bridge_delete_member(struct bridge_softc *sc, struct bridge_iflist *bif,
 			/*
 			 * Take the interface out of promiscuous mode.
 			 */
-			if (bif->bif_flags & BIFF_PROMISC)
+			if (bif->bif_flags & BIFF_PROMISC) {
+				/*
+				 * Unlock to prevent deadlock with bridge_iff_event() in
+				 * case the driver generates an interface event
+				 */
+				BRIDGE_UNLOCK(sc);
 				(void) ifnet_set_promiscuous(ifs, 0);
+				BRIDGE_LOCK(sc);
+			}
 			break;
 
 		case IFT_GIF:
@@ -2122,10 +2137,6 @@ bridge_delete_member(struct bridge_softc *sc, struct bridge_iflist *bif,
 	if (bif->bif_ifflags & IFBIF_STP)
 		bstp_disable(&bif->bif_stp);
 #endif /* BRIDGESTP */
-
-	BRIDGE_XLOCK(sc);
-	TAILQ_REMOVE(&sc->sc_iflist, bif, bif_next);
-	BRIDGE_XDROP(sc);
 
 	/*
 	 * If removing the interface that gave the bridge its mac address, set
@@ -5403,7 +5414,7 @@ bridge_pfil(struct mbuf **mp, struct ifnet *bifp, struct ifnet *ifp, int dir)
 		if (DUMMYNET_LOADED && (i == IP_FW_DUMMYNET)) {
 
 			/* put the Ethernet header back on */
-			M_PREPEND(*mp, ETHER_HDR_LEN, M_DONTWAIT);
+			M_PREPEND(*mp, ETHER_HDR_LEN, M_DONTWAIT, 0);
 			if (*mp == NULL)
 				return (error);
 			bcopy(&eh2, mtod(*mp, caddr_t), ETHER_HDR_LEN);
@@ -5534,13 +5545,13 @@ ipfwpass:
 	 * Finally, put everything back the way it was and return
 	 */
 	if (snap) {
-		M_PREPEND(*mp, sizeof (struct llc), M_DONTWAIT);
+		M_PREPEND(*mp, sizeof (struct llc), M_DONTWAIT, 0);
 		if (*mp == NULL)
 			return (error);
 		bcopy(&llc1, mtod(*mp, caddr_t), sizeof (struct llc));
 	}
 
-	M_PREPEND(*mp, ETHER_HDR_LEN, M_DONTWAIT);
+	M_PREPEND(*mp, ETHER_HDR_LEN, M_DONTWAIT, 0);
 	if (*mp == NULL)
 		return (error);
 	bcopy(&eh2, mtod(*mp, caddr_t), ETHER_HDR_LEN);
@@ -5737,7 +5748,7 @@ bridge_fragment(struct ifnet *ifp, struct mbuf *m, struct ether_header *eh,
 	for (m0 = m; m0; m0 = m0->m_nextpkt) {
 		if (error == 0) {
 			if (snap) {
-				M_PREPEND(m0, sizeof (struct llc), M_DONTWAIT);
+				M_PREPEND(m0, sizeof (struct llc), M_DONTWAIT, 0);
 				if (m0 == NULL) {
 					error = ENOBUFS;
 					continue;
@@ -5745,7 +5756,7 @@ bridge_fragment(struct ifnet *ifp, struct mbuf *m, struct ether_header *eh,
 				bcopy(llc, mtod(m0, caddr_t),
 				    sizeof (struct llc));
 			}
-			M_PREPEND(m0, ETHER_HDR_LEN, M_DONTWAIT);
+			M_PREPEND(m0, ETHER_HDR_LEN, M_DONTWAIT, 0);
 			if (m0 == NULL) {
 				error = ENOBUFS;
 				continue;

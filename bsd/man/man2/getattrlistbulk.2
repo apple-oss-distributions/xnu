@@ -151,10 +151,17 @@ It is typical to ask for a combination of common, file, and directory
 attributes and then use the value of the 
 .Dv ATTR_CMN_OBJTYPE 
 attribute to parse the resulting attribute buffer.
+.Pp
+A directory which is a mount point for a file system, will have a value of "DIR_MNTSTATUS_MNTPOINT" set for it's the
+ATTR_DIR_MOUNTSTATUS attribute entry. However the attributes for the mount point will be those from the (underlying) file system. The only way to get the attributes of mounted root directory is to call getattrlist(2) on the mount point.
 .
 .Sh RETURN VALUES
 Upon successful completion the numbers of entries successfully read
-is returned. A value of 0 indicates there are no more entries. On error,
+is returned. A value of 0 indicates there are no more entries. Once 0 is returned,
+no further entries are returned even if new entries are added to the directory.
+Directory iteration should be restarted either by repostioning the offset to 0 by
+.Fn lseek
+or by closing the file descriptor and opening the directory again. On error,
 a value of -1 is returned and
 .Va errno
 is set to indicate the error.

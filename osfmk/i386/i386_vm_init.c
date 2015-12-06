@@ -100,9 +100,16 @@ vm_offset_t	vm_kernel_top;
 vm_offset_t	vm_kernel_stext;
 vm_offset_t	vm_kernel_etext;
 vm_offset_t	vm_kernel_slide;
-vm_offset_t     vm_hib_base;
+vm_offset_t vm_hib_base;
 vm_offset_t	vm_kext_base = VM_MIN_KERNEL_AND_KEXT_ADDRESS;
 vm_offset_t	vm_kext_top = VM_MIN_KERNEL_ADDRESS;
+
+vm_offset_t vm_prelink_stext;
+vm_offset_t vm_prelink_etext;
+vm_offset_t vm_prelink_sinfo;
+vm_offset_t vm_prelink_einfo;
+vm_offset_t vm_slinkedit;
+vm_offset_t vm_elinkedit;
 
 #define MAXLORESERVE	(32 * 1024 * 1024)
 
@@ -133,6 +140,7 @@ vm_offset_t segTEXTB; unsigned long segSizeTEXT;
 vm_offset_t segDATAB; unsigned long segSizeDATA;
 vm_offset_t segLINKB; unsigned long segSizeLINK;
 vm_offset_t segPRELINKB; unsigned long segSizePRELINK;
+vm_offset_t segPRELINKINFOB; unsigned long segSizePRELINKINFO;
 vm_offset_t segHIBB; unsigned long segSizeHIB;
 vm_offset_t sectCONSTB; unsigned long sectSizeConst;
 
@@ -188,7 +196,7 @@ i386_vm_init(uint64_t	maxmem,
 	vm_kernel_base_page = i386_btop(args->kaddr);
 	vm_offset_t base_address;
 	vm_offset_t static_base_address;
-
+    
 	/*
 	 * Establish the KASLR parameters.
 	 */
@@ -243,8 +251,10 @@ i386_vm_init(uint64_t	maxmem,
 					"__LINKEDIT", &segSizeLINK);
 	segHIBB  = (vm_offset_t) getsegdatafromheader(&_mh_execute_header,
 					"__HIB", &segSizeHIB);
-	segPRELINKB = (vm_offset_t) getsegdatafromheader(&_mh_execute_header,
-					"__PRELINK_TEXT", &segSizePRELINK);
+    segPRELINKB = (vm_offset_t) getsegdatafromheader(&_mh_execute_header,
+                                                     "__PRELINK_TEXT", &segSizePRELINK);
+    segPRELINKINFOB = (vm_offset_t) getsegdatafromheader(&_mh_execute_header,
+                                                     "__PRELINK_INFO", &segSizePRELINKINFO);
 	segTEXT = getsegbynamefromheader(&_mh_execute_header,
 					"__TEXT");
 	segDATA = getsegbynamefromheader(&_mh_execute_header,
@@ -285,6 +295,7 @@ i386_vm_init(uint64_t	maxmem,
 	DBG("segLINKB    = %p\n", (void *) segLINKB);
 	DBG("segHIBB     = %p\n", (void *) segHIBB);
 	DBG("segPRELINKB = %p\n", (void *) segPRELINKB);
+	DBG("segPRELINKINFOB = %p\n", (void *) segPRELINKINFOB);
 	DBG("sHIB        = %p\n", (void *) sHIB);
 	DBG("eHIB        = %p\n", (void *) eHIB);
 	DBG("stext       = %p\n", (void *) stext);
@@ -299,6 +310,13 @@ i386_vm_init(uint64_t	maxmem,
 	vm_kernel_top   = (vm_offset_t) &last_kernel_symbol;
 	vm_kernel_stext = stext;
 	vm_kernel_etext = etext;
+
+    vm_prelink_stext = segPRELINKB;
+    vm_prelink_etext = segPRELINKB + segSizePRELINK;
+    vm_prelink_sinfo = segPRELINKINFOB;
+    vm_prelink_einfo = segPRELINKINFOB + segSizePRELINKINFO;
+    vm_slinkedit = segLINKB;
+    vm_elinkedit = segLINKB + segSizePRELINK;
 
 	vm_set_page_size();
 
@@ -384,15 +402,10 @@ i386_vm_init(uint64_t	maxmem,
 			 * sane_size should reflect the total amount of physical
 			 * RAM in the system, not just the amount that is
 			 * available for the OS to use.
-			 * FIXME:Consider deriving this value from SMBIOS tables
+			 * We now get this value from SMBIOS tables
 			 * rather than reverse engineering the memory map.
-			 * Alternatively, see
-			 * <rdar://problem/4642773> Memory map should
-			 * describe all memory
-			 * Firmware on some systems guarantees that the memory
-			 * map is complete via the "RomReservedMemoryTracked"
-			 * feature field--consult that where possible to
-			 * avoid the "round up to 128M" workaround below.
+			 * But the legacy computation of "sane_size" is kept
+			 * for diagnostic information.
 			 */
 
 		case kEfiRuntimeServicesCode:
@@ -597,14 +610,19 @@ i386_vm_init(uint64_t	maxmem,
 #endif
 
 	avail_start = first_avail;
-	mem_actual = sane_size;
+	mem_actual = args->PhysicalMemorySize;
 
 	/*
-	 * For user visible memory size, round up to 128 Mb - accounting for the various stolen memory
-	 * not reported by EFI.
+	 * For user visible memory size, round up to 128 Mb
+	 * - accounting for the various stolen memory not reported by EFI.
+	 * This is maintained for historical, comparison purposes but
+	 * we now use the memory size reported by EFI/Booter.
 	 */
-
 	sane_size = (sane_size + 128 * MB - 1) & ~((uint64_t)(128 * MB - 1));
+	if (sane_size != mem_actual)
+		printf("mem_actual: 0x%llx\n legacy sane_size: 0x%llx\n",
+			mem_actual, sane_size);
+	sane_size = mem_actual;
 
 	/*
 	 * We cap at KERNEL_MAXMEM bytes (currently 32GB for K32, 96GB for K64).

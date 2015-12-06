@@ -69,6 +69,10 @@ extern void *find_user_regs(thread_t);
 /* dynamically generated at build time based on syscalls.master */
 extern const char *syscallnames[];
 
+#define code_is_kdebug_trace(code) (((code) == SYS_kdebug_trace) ||   \
+                                    ((code) == SYS_kdebug_trace64) || \
+                                    ((code) == SYS_kdebug_trace_string))
+
 /*
  * Function:	unix_syscall
  *
@@ -99,6 +103,10 @@ unix_syscall(x86_saved_state_t *state)
 #endif
 	thread = current_thread();
 	uthread = get_bsdthread_info(thread);
+
+#if PROC_REF_DEBUG
+	uthread_reset_proc_refcount(uthread);
+#endif
 
 	/* Get the approriate proc; may be different from task's for vfork() */
 	is_vfork = uthread->uu_flag & UT_VFORK;
@@ -151,8 +159,8 @@ unix_syscall(x86_saved_state_t *state)
 			/* NOTREACHED */
 		}
 
-		if (__probable(code != 180)) {
-	        	int *ip = (int *)vt;
+		if (__probable(!code_is_kdebug_trace(code))) {
+			int *ip = (int *)vt;
 
 			KERNEL_DEBUG_CONSTANT_IST(KDEBUG_TRACE,
 				BSDDBG_CODE(DBG_BSD_EXCP_SC, code) | DBG_FUNC_START,
@@ -239,7 +247,7 @@ unix_syscall(x86_saved_state_t *state)
 		 */
 		throttle_lowpri_io(1);
 	}
-	if (__probable(code != 180))
+	if (__probable(!code_is_kdebug_trace(code)))
 		KERNEL_DEBUG_CONSTANT_IST(KDEBUG_TRACE, 
 			BSDDBG_CODE(DBG_BSD_EXCP_SC, code) | DBG_FUNC_END,
 			error, uthread->uu_rval[0], uthread->uu_rval[1], p->p_pid, 0);
@@ -247,6 +255,12 @@ unix_syscall(x86_saved_state_t *state)
 	if (__improbable(!is_vfork && callp->sy_call == (sy_call_t *)execve && !error)) {
 		pal_execve_return(thread);
 	}
+
+#if PROC_REF_DEBUG
+	if (__improbable(uthread_get_proc_refcount(uthread) != 0)) {
+		panic("system call returned with uu_proc_refcount != 0");
+	}
+#endif
 
 	thread_exception_return();
 	/* NOTREACHED */
@@ -275,6 +289,10 @@ unix_syscall64(x86_saved_state_t *state)
 #endif
 	thread = current_thread();
 	uthread = get_bsdthread_info(thread);
+
+#if PROC_REF_DEBUG
+	uthread_reset_proc_refcount(uthread);
+#endif
 
 	/* Get the approriate proc; may be different from task's for vfork() */
 	if (__probable(!(uthread->uu_flag & UT_VFORK)))
@@ -320,7 +338,7 @@ unix_syscall64(x86_saved_state_t *state)
 		memcpy(vt, args_start_at_rdi ? &regs->rdi : &regs->rsi, args_in_regs * sizeof(syscall_arg_t));
 
 
-		if (code != 180) {
+		if (!code_is_kdebug_trace(code)) {
 			uint64_t *ip = (uint64_t *)vt;
 
 			KERNEL_DEBUG_CONSTANT_IST(KDEBUG_TRACE, 
@@ -432,10 +450,16 @@ unix_syscall64(x86_saved_state_t *state)
 		 */
 		throttle_lowpri_io(1);
 	}
-	if (__probable(code != 180))
+	if (__probable(!code_is_kdebug_trace(code)))
 		KERNEL_DEBUG_CONSTANT_IST(KDEBUG_TRACE, 
 			BSDDBG_CODE(DBG_BSD_EXCP_SC, code) | DBG_FUNC_END,
 			error, uthread->uu_rval[0], uthread->uu_rval[1], p->p_pid, 0);
+
+#if PROC_REF_DEBUG
+	if (__improbable(uthread_get_proc_refcount(uthread))) {
+		panic("system call returned with uu_proc_refcount != 0");
+	}
+#endif
 
 	thread_exception_return();
 	/* NOTREACHED */
@@ -559,7 +583,7 @@ unix_syscall_return(int error)
 		 */
 		throttle_lowpri_io(1);
 	}
-	if (code != 180)
+	if (!code_is_kdebug_trace(code))
 		KERNEL_DEBUG_CONSTANT_IST(KDEBUG_TRACE, 
 			BSDDBG_CODE(DBG_BSD_EXCP_SC, code) | DBG_FUNC_END,
 			error, uthread->uu_rval[0], uthread->uu_rval[1], p->p_pid, 0);

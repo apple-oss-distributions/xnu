@@ -116,7 +116,7 @@ extern void kprint_state(x86_saved_state64_t *saved_state);
  * Forward declarations
  */
 static void user_page_fault_continue(kern_return_t kret);
-static void panic_trap(x86_saved_state64_t *saved_state);
+static void panic_trap(x86_saved_state64_t *saved_state, uint32_t pl);
 static void set_recovery_ip(x86_saved_state64_t *saved_state, vm_offset_t ip);
 
 volatile perfCallback perfTrapHook = NULL; /* Pointer to CHUD trap hook routine */
@@ -391,12 +391,7 @@ interrupt(x86_saved_state_t *state)
 	SCHED_STATS_INTERRUPT(current_processor());
 
 #if CONFIG_TELEMETRY
-	if (telemetry_needs_record
-		&& (current_task() != kernel_task)
-#if CONFIG_SCHED_IDLE_IN_PLACE
-		&& ((current_thread()->state & TH_IDLE) == 0) /* idle-in-place should be treated like the idle thread */
-#endif
-		) {
+	if (telemetry_needs_record) {
 		telemetry_mark_curthread(user_mode);
 	}
 #endif
@@ -476,6 +471,7 @@ interrupt(x86_saved_state_t *state)
 		MACHDBG_CODE(DBG_MACH_EXCP_INTR, 0) | DBG_FUNC_END,
 		interrupt_num, 0, 0, 0, 0);
 
+	assert(ml_get_interrupts_enabled() == FALSE);
 }
 
 static inline void
@@ -517,7 +513,8 @@ kernel_trap(
 	int			fault_in_copy_window = -1;
 #endif
 	int			is_user = 0;
-	
+	int			trap_pl = get_preemption_level();
+
 	thread = current_thread();
 
 	if (__improbable(is_saved_state32(state)))
@@ -621,6 +618,17 @@ kernel_trap(
 				 * the intercept).
 				 */
 				if (__improbable((code == (T_PF_PROT | T_PF_EXECUTE)) && (pmap_smep_enabled) && (saved_state->isf.rip == vaddr))) {
+					goto debugger_entry;
+				}
+
+				/*
+				 * Additionally check for SMAP faults...
+				 * which are characterized by page-present and
+				 * the AC bit unset (i.e. not from copyin/out path).
+				 */
+				if (__improbable(code & T_PF_PROT &&
+						 pmap_smap_enabled &&
+						 (saved_state->isf.rflags & EFL_AC) == 0)) {
 					goto debugger_entry;
 				}
 
@@ -780,7 +788,7 @@ debugger_entry:
 #endif
 	}
 	pal_cli();
-	panic_trap(saved_state);
+	panic_trap(saved_state, trap_pl);
 	/*
 	 * NO RETURN
 	 */
@@ -797,11 +805,12 @@ set_recovery_ip(x86_saved_state64_t  *saved_state, vm_offset_t ip)
 
 
 static void
-panic_trap(x86_saved_state64_t *regs)
+panic_trap(x86_saved_state64_t *regs, uint32_t pl)
 {
 	const char	*trapname = "Unknown";
 	pal_cr_t	cr0, cr2, cr3, cr4;
 	boolean_t	potential_smep_fault = FALSE, potential_kernel_NX_fault = FALSE;
+	boolean_t	potential_smap_fault = FALSE;
 
 	pal_get_control_registers( &cr0, &cr2, &cr3, &cr4 );
 	assert(ml_get_interrupts_enabled() == FALSE);
@@ -826,6 +835,12 @@ panic_trap(x86_saved_state64_t *regs)
 		} else if (regs->isf.rip >= VM_MIN_KERNEL_AND_KEXT_ADDRESS) {
 			potential_kernel_NX_fault = TRUE;
 		}
+	} else if (pmap_smap_enabled &&
+		   regs->isf.trapno == T_PAGE_FAULT &&
+		   regs->isf.err & T_PF_PROT &&
+		   regs->cr2 < VM_MAX_USER_PAGE_ADDRESS &&
+		   regs->isf.rip >= VM_MIN_KERNEL_AND_KEXT_ADDRESS) {
+		potential_smap_fault = TRUE;
 	}
 
 #undef panic
@@ -836,7 +851,7 @@ panic_trap(x86_saved_state64_t *regs)
 	      "R8:  0x%016llx, R9:  0x%016llx, R10: 0x%016llx, R11: 0x%016llx\n"
 	      "R12: 0x%016llx, R13: 0x%016llx, R14: 0x%016llx, R15: 0x%016llx\n"
 	      "RFL: 0x%016llx, RIP: 0x%016llx, CS:  0x%016llx, SS:  0x%016llx\n"
-	      "Fault CR2: 0x%016llx, Error code: 0x%016llx, Fault CPU: 0x%x%s%s%s%s\n",
+	      "Fault CR2: 0x%016llx, Error code: 0x%016llx, Fault CPU: 0x%x%s%s%s%s, PL: %d\n",
 	      regs->isf.rip, regs->isf.trapno, trapname,
 	      cr0, cr2, cr3, cr4,
 	      regs->rax, regs->rbx, regs->rcx, regs->rdx,
@@ -848,7 +863,7 @@ panic_trap(x86_saved_state64_t *regs)
 	      virtualized ? " VMM" : "",
 	      potential_kernel_NX_fault ? " Kernel NX fault" : "",
 	      potential_smep_fault ? " SMEP/User NX fault" : "",
-	      "");
+	      potential_smap_fault ? " SMAP fault" : "", pl);
 	/*
 	 * This next statement is not executed,
 	 * but it's needed to stop the compiler using tail call optimization

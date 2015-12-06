@@ -20,7 +20,8 @@
  */
 
 /*
- * Portions copyright (c) 2011, Joyent, Inc. All rights reserved.
+ * Portions Copyright (c) 2013, Joyent, Inc. All rights reserved.
+ * Portions Copyright (c) 2013 by Delphix. All rights reserved.
  */
 
 /*
@@ -1456,7 +1457,7 @@ dtrace_priv_proc(dtrace_state_t *state)
 	if (ISSET(current_proc()->p_lflag, P_LNOATTACH))
 		goto bad;
 
-	if (dtrace_is_restricted() && !dtrace_can_attach_to_proc(current_proc()))
+	if (dtrace_is_restricted() && !dtrace_is_running_apple_internal() && !dtrace_can_attach_to_proc(current_proc()))
 		goto bad;
 
 	if (state->dts_cred.dcr_action & DTRACE_CRA_PROC)
@@ -1488,7 +1489,7 @@ dtrace_priv_proc_relaxed(dtrace_state_t *state)
 static int
 dtrace_priv_kernel(dtrace_state_t *state)
 {
-	if (dtrace_is_restricted())
+	if (dtrace_is_restricted() && !dtrace_is_running_apple_internal())
 		goto bad;
 
 	if (state->dts_cred.dcr_action & DTRACE_CRA_KERNEL)
@@ -2583,9 +2584,10 @@ dtrace_speculation_commit(dtrace_state_t *state, processorid_t cpu,
 {
 	dtrace_speculation_t *spec;
 	dtrace_buffer_t *src, *dest;
-	uintptr_t daddr, saddr, dlimit;
+	uintptr_t daddr, saddr, dlimit, slimit;
 	dtrace_speculation_state_t current,  new = DTRACESPEC_INACTIVE;
 	intptr_t offs;
+	uint64_t timestamp;
 
 	if (which == 0)
 		return;
@@ -2661,7 +2663,38 @@ dtrace_speculation_commit(dtrace_state_t *state, processorid_t cpu,
 	}
 
 	/*
-	 * We have the space; copy the buffer across.  (Note that this is a
+	 * We have sufficient space to copy the speculative buffer into the
+	 * primary buffer.  First, modify the speculative buffer, filling
+	 * in the timestamp of all entries with the current time.  The data
+	 * must have the commit() time rather than the time it was traced,
+	 * so that all entries in the primary buffer are in timestamp order.
+	 */
+	timestamp = dtrace_gethrtime();
+	saddr = (uintptr_t)src->dtb_tomax;
+	slimit = saddr + src->dtb_offset;
+	while (saddr < slimit) {
+		size_t size;
+		dtrace_rechdr_t *dtrh = (dtrace_rechdr_t *)saddr;
+
+		if (dtrh->dtrh_epid == DTRACE_EPIDNONE) {
+			saddr += sizeof (dtrace_epid_t);
+			continue;
+		}
+
+		ASSERT(dtrh->dtrh_epid <= ((dtrace_epid_t) state->dts_necbs));
+		size = state->dts_ecbs[dtrh->dtrh_epid - 1]->dte_size;
+
+		ASSERT(saddr + size <= slimit);
+		ASSERT(size >= sizeof(dtrace_rechdr_t));
+		ASSERT(DTRACE_RECORD_LOAD_TIMESTAMP(dtrh) == UINT64_MAX);
+
+		DTRACE_RECORD_STORE_TIMESTAMP(dtrh, timestamp);
+
+		saddr += size;
+	}
+
+	/*
+	 * Copy the buffer across.  (Note that this is a
 	 * highly subobtimal bcopy(); in the unlikely event that this becomes
 	 * a serious performance issue, a high-performance DTrace-specific
 	 * bcopy() should obviously be invented.)
@@ -3094,6 +3127,9 @@ dtrace_dif_variable(dtrace_mstate_t *mstate, dtrace_state_t *state, uint64_t v,
 		}
 		return (mstate->dtms_machtimestamp);
 
+	case DIF_VAR_CPU:
+		return ((uint64_t) dtrace_get_thread_last_cpu_id(current_thread()));
+
 	case DIF_VAR_IPL:
 		if (!dtrace_priv_kernel(state))
 			return (0);
@@ -3291,7 +3327,7 @@ dtrace_dif_variable(dtrace_mstate_t *mstate, dtrace_state_t *state, uint64_t v,
 			return (0);
 
 		mstate->dtms_scratch_ptr += scratch_size;
-		proc_selfname( xname, MAXCOMLEN );
+		proc_selfname( xname, scratch_size );
 
 		return ((uint64_t)(uintptr_t)xname);
 	}
@@ -4674,6 +4710,15 @@ inetout:	regs[rd] = (uintptr_t)end + 1;
 		break;
 	}
 
+	case DIF_SUBR_VM_KERNEL_ADDRPERM: {
+		if (!dtrace_priv_kernel(state)) {
+			regs[rd] = 0;
+		} else {
+			regs[rd] = VM_KERNEL_ADDRPERM((vm_offset_t) tupregs[0].dttk_value);
+		}
+
+		break;
+	}
 /*
  * APPLE NOTE:
  * CoreProfile callback ('core_profile (uint64_t, [uint64_t], [uint64_t] ...)')
@@ -5837,6 +5882,63 @@ out:
 	mstate->dtms_scratch_ptr = old;
 }
 
+static void
+dtrace_store_by_ref(dtrace_difo_t *dp, caddr_t tomax, size_t size,
+    size_t *valoffsp, uint64_t *valp, uint64_t end, int intuple, int dtkind)
+{
+	volatile uint16_t *flags;
+	uint64_t val = *valp;
+	size_t valoffs = *valoffsp;
+
+	flags = (volatile uint16_t *)&cpu_core[CPU->cpu_id].cpuc_dtrace_flags;
+	ASSERT(dtkind == DIF_TF_BYREF || dtkind == DIF_TF_BYUREF);
+
+	/*
+	 * If this is a string, we're going to only load until we find the zero
+	 * byte -- after which we'll store zero bytes.
+	 */
+	if (dp->dtdo_rtype.dtdt_kind == DIF_TYPE_STRING) {
+		char c = '\0' + 1;
+		size_t s;
+
+		for (s = 0; s < size; s++) {
+			if (c != '\0' && dtkind == DIF_TF_BYREF) {
+				c = dtrace_load8(val++);
+			} else if (c != '\0' && dtkind == DIF_TF_BYUREF) {
+				DTRACE_CPUFLAG_SET(CPU_DTRACE_NOFAULT);
+				c = dtrace_fuword8((user_addr_t)(uintptr_t)val++);
+				DTRACE_CPUFLAG_CLEAR(CPU_DTRACE_NOFAULT);
+				if (*flags & CPU_DTRACE_FAULT)
+					break;
+			}
+
+			DTRACE_STORE(uint8_t, tomax, valoffs++, c);
+
+			if (c == '\0' && intuple)
+				break;
+		}
+	} else {
+		uint8_t c;
+		while (valoffs < end) {
+			if (dtkind == DIF_TF_BYREF) {
+				c = dtrace_load8(val++);
+			} else if (dtkind == DIF_TF_BYUREF) {
+				DTRACE_CPUFLAG_SET(CPU_DTRACE_NOFAULT);
+				c = dtrace_fuword8((user_addr_t)(uintptr_t)val++);
+				DTRACE_CPUFLAG_CLEAR(CPU_DTRACE_NOFAULT);
+				if (*flags & CPU_DTRACE_FAULT)
+					break;
+			}
+
+			DTRACE_STORE(uint8_t, tomax,
+			    valoffs++, c);
+		}
+	}
+
+	*valp = val;
+	*valoffsp = valoffs;
+}
+
 /*
  * If you're looking for the epicenter of DTrace, you just found it.  This
  * is the function called by the provider to fire a probe -- from which all
@@ -6119,8 +6221,23 @@ __dtrace_probe(dtrace_id_t id, uint64_t arg0, uint64_t arg1,
 		tomax = buf->dtb_tomax;
 		ASSERT(tomax != NULL);
 
-		if (ecb->dte_size != 0)
-			DTRACE_STORE(uint32_t, tomax, offs, ecb->dte_epid);
+		/*
+		 * Build and store the record header corresponding to the ECB.
+		 */
+		if (ecb->dte_size != 0) {
+			dtrace_rechdr_t dtrh;
+
+			if (!(mstate.dtms_present & DTRACE_MSTATE_TIMESTAMP)) {
+				mstate.dtms_timestamp = dtrace_gethrtime();
+				mstate.dtms_present |= DTRACE_MSTATE_TIMESTAMP;
+			}
+
+			ASSERT(ecb->dte_size >= sizeof(dtrace_rechdr_t));
+
+			dtrh.dtrh_epid = ecb->dte_epid;
+			DTRACE_RECORD_STORE_TIMESTAMP(&dtrh, mstate.dtms_timestamp);
+			DTRACE_STORE(dtrace_rechdr_t, tomax, offs, dtrh);
+		}
 
 		mstate.dtms_epid = ecb->dte_epid;
 		mstate.dtms_present |= DTRACE_MSTATE_EPID;
@@ -6268,7 +6385,9 @@ __dtrace_probe(dtrace_id_t id, uint64_t arg0, uint64_t arg1,
 				continue;
 
 			switch (act->dta_kind) {
-			case DTRACEACT_SPECULATE:
+			case DTRACEACT_SPECULATE: {
+				dtrace_rechdr_t *dtrh = NULL;
+
 				ASSERT(buf == &state->dts_buffer[cpuid]);
 				buf = dtrace_speculation_buffer(state,
 				    cpuid, val);
@@ -6291,9 +6410,23 @@ __dtrace_probe(dtrace_id_t id, uint64_t arg0, uint64_t arg1,
 				ASSERT(tomax != NULL);
 
 				if (ecb->dte_size != 0)
-					DTRACE_STORE(uint32_t, tomax, offs,
-					    ecb->dte_epid);
-				continue;
+					continue;
+
+				ASSERT(ecb->dte_size >= sizeof(dtrace_rechdr_t));
+				dtrh = ((void *)(tomax + offs));
+				dtrh->dtrh_epid = ecb->dte_epid;
+
+				/*
+				 * When the speculation is committed, all of
+				 * the records in the speculative buffer will
+				 * have their timestamps set to the commit
+				 * time.  Until then, it is set to a sentinel
+				 * value, for debugability.
+				 */
+				DTRACE_RECORD_STORE_TIMESTAMP(dtrh, UINT64_MAX);
+
+ 				continue;
+			}
 
 			case DTRACEACT_CHILL:
 				if (dtrace_priv_kernel_destructive(state))
@@ -6399,7 +6532,7 @@ __dtrace_probe(dtrace_id_t id, uint64_t arg0, uint64_t arg1,
 				ASSERT(0);
 			}
 
-			if (dp->dtdo_rtype.dtdt_flags & DIF_TF_BYREF) {
+			if (dp->dtdo_rtype.dtdt_flags & (DIF_TF_BYREF | DIF_TF_BYUREF)) {
 				uintptr_t end = valoffs + size;
 
 				if (tracememsize != 0 &&
@@ -6409,39 +6542,17 @@ __dtrace_probe(dtrace_id_t id, uint64_t arg0, uint64_t arg1,
                                         tracememsize = 0;
                                 }
 
-				if (!dtrace_vcanload((void *)(uintptr_t)val,
-				    &dp->dtdo_rtype, &mstate, vstate))
-					continue;
-
-				/*
-				 * If this is a string, we're going to only
-				 * load until we find the zero byte -- after
-				 * which we'll store zero bytes.
-				 */
-				if (dp->dtdo_rtype.dtdt_kind ==
-				    DIF_TYPE_STRING) {
-					char c = '\0' + 1;
-					int intuple = act->dta_intuple;
-					size_t s;
-
-					for (s = 0; s < size; s++) {
-						if (c != '\0')
-							c = dtrace_load8(val++);
-
-						DTRACE_STORE(uint8_t, tomax,
-						    valoffs++, c);
-
-						if (c == '\0' && intuple)
-							break;
-					}
-
+				if (dp->dtdo_rtype.dtdt_flags & DIF_TF_BYREF &&
+				    !dtrace_vcanload((void *)(uintptr_t)val,
+				                     &dp->dtdo_rtype, &mstate, vstate))
+				{
 					continue;
 				}
 
-				while (valoffs < end) {
-					DTRACE_STORE(uint8_t, tomax, valoffs++,
-					    dtrace_load8(val++));
-				}
+				dtrace_store_by_ref(dp, tomax, size, &valoffs,
+				    &val, end, act->dta_intuple,
+				    dp->dtdo_rtype.dtdt_flags & DIF_TF_BYREF ?
+				    DIF_TF_BYREF: DIF_TF_BYUREF);
 
 				continue;
 			}
@@ -8599,7 +8710,7 @@ dtrace_difo_validate(dtrace_difo_t *dp, dtrace_vstate_t *vstate, uint_t nregs,
 		    "expected 'ret' as last DIF instruction\n");
 	}
 
-	if (!(dp->dtdo_rtype.dtdt_flags & DIF_TF_BYREF)) {
+	if (!(dp->dtdo_rtype.dtdt_flags & (DIF_TF_BYREF | DIF_TF_BYUREF))) {
 		/*
 		 * If we're not returning by reference, the size must be either
 		 * 0 or the size of one of the base types.
@@ -9559,9 +9670,9 @@ dtrace_ecb_add(dtrace_state_t *state, dtrace_probe_t *probe)
 
 	/*
 	 * The default size is the size of the default action: recording
-	 * the epid.
+	 * the header.
 	 */
-	ecb->dte_size = ecb->dte_needed = sizeof (dtrace_epid_t);
+	ecb->dte_size = ecb->dte_needed = sizeof (dtrace_rechdr_t);
 	ecb->dte_alignment = sizeof (dtrace_epid_t);
 
 	epid = state->dts_epid++;
@@ -9661,122 +9772,85 @@ dtrace_ecb_enable(dtrace_ecb_t *ecb)
 static void
 dtrace_ecb_resize(dtrace_ecb_t *ecb)
 {
-	uint32_t maxalign = sizeof (dtrace_epid_t);
-	uint32_t align = sizeof (uint8_t), offs, diff;
 	dtrace_action_t *act;
-	int wastuple = 0;
+	uint32_t curneeded = UINT32_MAX;
 	uint32_t aggbase = UINT32_MAX;
-	dtrace_state_t *state = ecb->dte_state;
 
 	/*
-	 * If we record anything, we always record the epid.  (And we always
-	 * record it first.)
+	 * If we record anything, we always record the dtrace_rechdr_t.  (And
+	 * we always record it first.)
 	 */
-	offs = sizeof (dtrace_epid_t);
-	ecb->dte_size = ecb->dte_needed = sizeof (dtrace_epid_t);
+	ecb->dte_size = sizeof (dtrace_rechdr_t);
+	ecb->dte_alignment = sizeof (dtrace_epid_t);
 
 	for (act = ecb->dte_action; act != NULL; act = act->dta_next) {
 		dtrace_recdesc_t *rec = &act->dta_rec;
+		ASSERT(rec->dtrd_size > 0 || rec->dtrd_alignment == 1);
 
-		if ((align = rec->dtrd_alignment) > maxalign)
-			maxalign = align;
-
-		if (!wastuple && act->dta_intuple) {
-			/*
-			 * This is the first record in a tuple.  Align the
-			 * offset to be at offset 4 in an 8-byte aligned
-			 * block.
-			 */
-			diff = offs + sizeof (dtrace_aggid_t);
-
-			if ((diff = (diff & (sizeof (uint64_t) - 1))))
-				offs += sizeof (uint64_t) - diff;
-
-			aggbase = offs - sizeof (dtrace_aggid_t);
-			ASSERT(!(aggbase & (sizeof (uint64_t) - 1)));
-		}
-
-		/*LINTED*/
-		if (rec->dtrd_size != 0 && (diff = (offs & (align - 1)))) {
-			/*
-			 * The current offset is not properly aligned; align it.
-			 */
-			offs += align - diff;
-		}
-
-		rec->dtrd_offset = offs;
-
-		if (offs + rec->dtrd_size > ecb->dte_needed) {
-			ecb->dte_needed = offs + rec->dtrd_size;
-
-			if (ecb->dte_needed > state->dts_needed)
-				state->dts_needed = ecb->dte_needed;
-		}
+		ecb->dte_alignment = MAX(ecb->dte_alignment, rec->dtrd_alignment);
 
 		if (DTRACEACT_ISAGG(act->dta_kind)) {
 			dtrace_aggregation_t *agg = (dtrace_aggregation_t *)act;
-			dtrace_action_t *first = agg->dtag_first, *prev;
 
-			ASSERT(rec->dtrd_size != 0 && first != NULL);
-			ASSERT(wastuple);
+			ASSERT(rec->dtrd_size != 0);
+			ASSERT(agg->dtag_first != NULL);
+			ASSERT(act->dta_prev->dta_intuple);
 			ASSERT(aggbase != UINT32_MAX);
+			ASSERT(curneeded != UINT32_MAX);
 
 			agg->dtag_base = aggbase;
 
-			while ((prev = first->dta_prev) != NULL &&
-			    DTRACEACT_ISAGG(prev->dta_kind)) {
-				agg = (dtrace_aggregation_t *)prev;
-				first = agg->dtag_first;
+			curneeded = P2ROUNDUP(curneeded, rec->dtrd_alignment);
+			rec->dtrd_offset = curneeded;
+			curneeded += rec->dtrd_size;
+			ecb->dte_needed = MAX(ecb->dte_needed, curneeded);
+
+			aggbase = UINT32_MAX;
+			curneeded = UINT32_MAX;
+		} else if (act->dta_intuple) {
+			if (curneeded == UINT32_MAX) {
+				/*
+				 * This is the first record in a tuple.  Align
+				 * curneeded to be at offset 4 in an 8-byte
+				 * aligned block.
+				 */
+				ASSERT(act->dta_prev == NULL || !act->dta_prev->dta_intuple);
+				ASSERT(aggbase == UINT32_MAX);
+
+				curneeded = P2PHASEUP(ecb->dte_size,
+				    sizeof (uint64_t), sizeof (dtrace_aggid_t));
+
+				aggbase = curneeded - sizeof (dtrace_aggid_t);
+				ASSERT(IS_P2ALIGNED(aggbase,
+				    sizeof (uint64_t)));
 			}
 
-			if (prev != NULL) {
-				offs = prev->dta_rec.dtrd_offset +
-				    prev->dta_rec.dtrd_size;
-			} else {
-				offs = sizeof (dtrace_epid_t);
-			}
-			wastuple = 0;
+			curneeded = P2ROUNDUP(curneeded, rec->dtrd_alignment);
+			rec->dtrd_offset = curneeded;
+			curneeded += rec->dtrd_size;
 		} else {
-			if (!act->dta_intuple)
-				ecb->dte_size = offs + rec->dtrd_size;
-
-			offs += rec->dtrd_size;
+			/* tuples must be followed by an aggregation */
+			ASSERT(act->dta_prev == NULL || !act->dta_prev->dta_intuple);
+			ecb->dte_size = P2ROUNDUP(ecb->dte_size, rec->dtrd_alignment);
+			rec->dtrd_offset = ecb->dte_size;
+			ecb->dte_size += rec->dtrd_size;
+			ecb->dte_needed = MAX(ecb->dte_needed, ecb->dte_size);
 		}
-
-		wastuple = act->dta_intuple;
 	}
 
 	if ((act = ecb->dte_action) != NULL &&
 	    !(act->dta_kind == DTRACEACT_SPECULATE && act->dta_next == NULL) &&
-	    ecb->dte_size == sizeof (dtrace_epid_t)) {
+	    ecb->dte_size == sizeof (dtrace_rechdr_t)) {
 		/*
-		 * If the size is still sizeof (dtrace_epid_t), then all
+		 * If the size is still sizeof (dtrace_rechdr_t), then all
 		 * actions store no data; set the size to 0.
 		 */
-		ecb->dte_alignment = maxalign;
 		ecb->dte_size = 0;
-
-		/*
-		 * If the needed space is still sizeof (dtrace_epid_t), then
-		 * all actions need no additional space; set the needed
-		 * size to 0.
-		 */
-		if (ecb->dte_needed == sizeof (dtrace_epid_t))
-			ecb->dte_needed = 0;
-
-		return;
 	}
 
-	/*
-	 * Set our alignment, and make sure that the dte_size and dte_needed
-	 * are aligned to the size of an EPID.
-	 */
-	ecb->dte_alignment = maxalign;
-	ecb->dte_size = (ecb->dte_size + (sizeof (dtrace_epid_t) - 1)) &
-	    ~(sizeof (dtrace_epid_t) - 1);
-	ecb->dte_needed = (ecb->dte_needed + (sizeof (dtrace_epid_t) - 1)) &
-	    ~(sizeof (dtrace_epid_t) - 1);
-	ASSERT(ecb->dte_size <= ecb->dte_needed);
+	ecb->dte_size = P2ROUNDUP(ecb->dte_size, sizeof (dtrace_epid_t));
+	ecb->dte_needed = P2ROUNDUP(ecb->dte_needed, (sizeof (dtrace_epid_t)));
+	ecb->dte_state->dts_needed = MAX(ecb->dte_state->dts_needed, ecb->dte_needed);
 }
 
 static dtrace_action_t *
@@ -10028,12 +10102,14 @@ dtrace_ecb_action_add(dtrace_ecb_t *ecb, dtrace_actdesc_t *desc)
 		case DTRACEACT_PRINTA:
 		case DTRACEACT_SYSTEM:
 		case DTRACEACT_FREOPEN:
+		case DTRACEACT_DIFEXPR:
 			/*
 			 * We know that our arg is a string -- turn it into a
 			 * format.
 			 */
 			if (arg == 0) {
-				ASSERT(desc->dtad_kind == DTRACEACT_PRINTA);
+				ASSERT(desc->dtad_kind == DTRACEACT_PRINTA ||
+				       desc->dtad_kind == DTRACEACT_DIFEXPR);
 				format = 0;
 			} else {
 				ASSERT(arg != 0);
@@ -10044,7 +10120,6 @@ dtrace_ecb_action_add(dtrace_ecb_t *ecb, dtrace_actdesc_t *desc)
 
 			/*FALLTHROUGH*/
 		case DTRACEACT_LIBACT:
-		case DTRACEACT_DIFEXPR:
 		case DTRACEACT_TRACEMEM:
 		case DTRACEACT_TRACEMEM_DYNSIZE:
 		case DTRACEACT_APPLEBINARY:	/* __APPLE__ */
@@ -10147,7 +10222,7 @@ dtrace_ecb_action_add(dtrace_ecb_t *ecb, dtrace_actdesc_t *desc)
 			break;
 
 		case DTRACEACT_SPECULATE:
-			if (ecb->dte_size > sizeof (dtrace_epid_t))
+			if (ecb->dte_size > sizeof (dtrace_rechdr_t))
 				return (EINVAL);
 
 			if (dp == NULL)
@@ -10260,7 +10335,7 @@ dtrace_ecb_action_remove(dtrace_ecb_t *ecb)
 
 	ecb->dte_action = NULL;
 	ecb->dte_action_last = NULL;
-	ecb->dte_size = sizeof (dtrace_epid_t);
+	ecb->dte_size = 0;
 }
 
 static void
@@ -10534,11 +10609,13 @@ dtrace_buffer_switch(dtrace_buffer_t *buf)
 	caddr_t tomax = buf->dtb_tomax;
 	caddr_t xamot = buf->dtb_xamot;
 	dtrace_icookie_t cookie;
+	hrtime_t now;
 
 	ASSERT(!(buf->dtb_flags & DTRACEBUF_NOSWITCH));
 	ASSERT(!(buf->dtb_flags & DTRACEBUF_RING));
 
 	cookie = dtrace_interrupt_disable();
+	now = dtrace_gethrtime();
 	buf->dtb_tomax = xamot;
 	buf->dtb_xamot = tomax;
 	buf->dtb_xamot_drops = buf->dtb_drops;
@@ -10549,6 +10626,8 @@ dtrace_buffer_switch(dtrace_buffer_t *buf)
 	buf->dtb_drops = 0;
 	buf->dtb_errors = 0;
 	buf->dtb_flags &= ~(DTRACEBUF_ERROR | DTRACEBUF_DROPPED);
+	buf->dtb_interval = now - buf->dtb_switched;
+	buf->dtb_switched = now;
 	dtrace_interrupt_enable(cookie);
 }
 
@@ -12043,15 +12122,19 @@ dtrace_dof_actdesc(dof_hdr_t *dof, dof_sec_t *sec, dtrace_vstate_t *vstate,
 		    (uintptr_t)sec->dofs_offset + offs);
 		kind = (dtrace_actkind_t)desc->dofa_kind;
 
-		if (DTRACEACT_ISPRINTFLIKE(kind) &&
-		    (kind != DTRACEACT_PRINTA ||
-		    desc->dofa_strtab != DOF_SECIDX_NONE)) {
+		if ((DTRACEACT_ISPRINTFLIKE(kind) &&
+		    (kind != DTRACEACT_PRINTA || desc->dofa_strtab != DOF_SECIDX_NONE)) ||
+		    (kind == DTRACEACT_DIFEXPR && desc->dofa_strtab != DOF_SECIDX_NONE))
+		{
 			dof_sec_t *strtab;
 			char *str, *fmt;
 			uint64_t i;
 
 			/*
-			 * printf()-like actions must have a format string.
+			 * The argument to these actions is an index into the
+			 * DOF string table.  For printf()-like actions, this
+			 * is the format string.  For print(), this is the
+			 * CTF type of the expression result.
 			 */
 			if ((strtab = dtrace_dof_sect(dof,
 			    DOF_SECT_STRTAB, desc->dofa_strtab)) == NULL)
@@ -16617,6 +16700,7 @@ dtrace_ioctl(dev_t dev, u_long cmd, user_addr_t arg, int md, cred_t *cr, int *rv
 			desc.dtbd_drops = buf->dtb_drops;
 			desc.dtbd_errors = buf->dtb_errors;
 			desc.dtbd_oldest = buf->dtb_xamot_offset;
+			desc.dtbd_timestamp = dtrace_gethrtime();
 
 			lck_mtx_unlock(&dtrace_lock);
 
@@ -16669,6 +16753,7 @@ dtrace_ioctl(dev_t dev, u_long cmd, user_addr_t arg, int md, cred_t *cr, int *rv
 		desc.dtbd_drops = buf->dtb_xamot_drops;
 		desc.dtbd_errors = buf->dtb_xamot_errors;
 		desc.dtbd_oldest = 0;
+		desc.dtbd_timestamp = buf->dtb_switched;
 
 		lck_mtx_unlock(&dtrace_lock);
 
@@ -16819,7 +16904,7 @@ dtrace_ioctl(dev_t dev, u_long cmd, user_addr_t arg, int md, cred_t *cr, int *rv
 		 * Security restrictions make this operation illegal, if this is enabled DTrace
 		 * must refuse to provide any fbt probes.
 		 */
-		if (dtrace_is_restricted()) {
+		if (dtrace_fbt_probes_restricted()) {
 			cmn_err(CE_WARN, "security restrictions disallow DTRACEIOC_MODUUIDSLIST");	
 			return (EPERM);
 		}
@@ -16974,7 +17059,7 @@ dtrace_ioctl(dev_t dev, u_long cmd, user_addr_t arg, int md, cred_t *cr, int *rv
 		 * Security restrictions make this operation illegal, if this is enabled DTrace
 		 * must refuse to provide any fbt probes.
 		 */
-		if (dtrace_is_restricted()) {
+		if (dtrace_fbt_probes_restricted()) {
 			cmn_err(CE_WARN, "security restrictions disallow DTRACEIOC_MODUUIDSLIST");	
 			return (EPERM);
 		}
@@ -17088,7 +17173,7 @@ dtrace_ioctl(dev_t dev, u_long cmd, user_addr_t arg, int md, cred_t *cr, int *rv
 
 	case DTRACEIOC_PROCWAITFOR: {
 		dtrace_procdesc_t pdesc = {
-			.p_comm = {0},
+			.p_name = {0},
 			.p_pid  = -1
 		};
 
@@ -17571,7 +17656,6 @@ dtrace_init( void )
 		(void)dtrace_abs_to_nano(0LL); /* Force once only call to clock_timebase_info (which can take a lock) */
 
 		dtrace_isa_init();
-		
 		/*
 		 * See dtrace_impl.h for a description of dof modes.
 		 * The default is lazy dof.
@@ -17612,7 +17696,9 @@ dtrace_init( void )
 		if (!PE_parse_boot_argn("dtrace_kernel_symbol_mode", &dtrace_kernel_symbol_mode, sizeof (dtrace_kernel_symbol_mode))) {
 			dtrace_kernel_symbol_mode = DTRACE_KERNEL_SYMBOLS_FROM_USERSPACE;
 		}
-				
+
+		dtrace_restriction_policy_load();
+
 		gDTraceInited = 1;
 
 	} else

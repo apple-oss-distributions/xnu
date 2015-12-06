@@ -20,12 +20,15 @@
  */
 
 /*
- * Portions copyright (c) 2011, Joyent, Inc. All rights reserved.
+ * Portions copyright (c) 2013, Joyent, Inc. All rights reserved.
+ * Portions Copyright (c) 2013 by Delphix. All rights reserved.
  */
 
 /*
  * Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
+ *
+ * Portions Copyright (c) 2012 by Delphix. All rights reserved.
  */
 
 #ifndef _SYS_DTRACE_H
@@ -103,6 +106,7 @@ extern "C" {
 
 #define S_ROUND(x, a)   ((x) + (((a) ? (a) : 1) - 1) & ~(((a) ? (a) : 1) - 1))
 #define P2ROUNDUP(x, align)             (-(-(x) & -(align)))
+#define	P2PHASEUP(x, align, phase)	((phase) - (((phase) - (x)) & -(align)))
 
 #define	CTF_MODEL_ILP32	1	/* object data model is ILP32 */
 #define	CTF_MODEL_LP64	2	/* object data model is LP64 */
@@ -337,6 +341,7 @@ typedef enum dtrace_probespec {
 #define DIF_VAR_PTHREAD_SELF	0x0200	/* Apple specific PTHREAD_SELF (Not currently supported!) */
 #define DIF_VAR_DISPATCHQADDR	0x0201	/* Apple specific dispatch queue addr */
 #define DIF_VAR_MACHTIMESTAMP	0x0202	/* mach_absolute_timestamp() */
+#define DIF_VAR_CPU		0x0203	/* cpu number */
 #endif /* __APPLE __ */
 
 #define	DIF_SUBR_RAND			0
@@ -385,13 +390,14 @@ typedef enum dtrace_probespec {
 #define	DIF_SUBR_INET_NTOA6		43
 #define	DIF_SUBR_TOUPPER		44
 #define	DIF_SUBR_TOLOWER		45
+#define	DIF_SUBR_VM_KERNEL_ADDRPERM	46
 #if !defined(__APPLE__)
 
-#define DIF_SUBR_MAX			45      /* max subroutine value */
-#else
-#define DIF_SUBR_COREPROFILE		46
-
 #define DIF_SUBR_MAX			46      /* max subroutine value */
+#else
+#define DIF_SUBR_COREPROFILE		47
+
+#define DIF_SUBR_MAX			47      /* max subroutine value */
 #endif /* __APPLE__ */
 
 typedef uint32_t dif_instr_t;
@@ -454,6 +460,7 @@ typedef struct dtrace_diftype {
 #define DIF_TYPE_STRING         1       /* type is a D string */
 
 #define DIF_TF_BYREF            0x1     /* type is passed by reference */
+#define DIF_TF_BYUREF           0x2     /* user type is passed by reference */
 
 /*
  * A DTrace Intermediate Format variable record is used to describe each of the
@@ -1046,10 +1053,10 @@ typedef struct dtrace_ecbdesc {
  * DTrace Metadata Description Structures
  *
  * DTrace separates the trace data stream from the metadata stream.  The only
- * metadata tokens placed in the data stream are enabled probe identifiers
- * (EPIDs) or (in the case of aggregations) aggregation identifiers.  In order
- * to determine the structure of the data, DTrace consumers pass the token to
- * the kernel, and receive in return a corresponding description of the enabled
+ * metadata tokens placed in the data stream are the dtrace_rechdr_t (EPID +
+ * timestamp) or (in the case of aggregations) aggregation identifiers.  To
+ * determine the structure of the data, DTrace consumers pass the token to the
+ * kernel, and receive in return a corresponding description of the enabled
  * probe (via the dtrace_eprobedesc structure) or the aggregation (via the
  * dtrace_aggdesc structure).  Both of these structures are expressed in terms
  * of record descriptions (via the dtrace_recdesc structure) that describe the
@@ -1147,11 +1154,12 @@ typedef struct dtrace_fmtdesc {
 #define	DTRACEOPT_AGGHIST	27 	/* histogram aggregation output */
 #define	DTRACEOPT_AGGPACK	28 	/* packed aggregation output */
 #define	DTRACEOPT_AGGZOOM	29 	/* zoomed aggregation scaling */
+#define	DTRACEOPT_TEMPORAL	30	/* temporally ordered output */
 #if !defined(__APPLE__)
-#define DTRACEOPT_MAX           30      /* number of options */
-#else
-#define DTRACEOPT_STACKSYMBOLS  30      /* clear to prevent stack symbolication */
 #define DTRACEOPT_MAX           31      /* number of options */
+#else
+#define DTRACEOPT_STACKSYMBOLS  31      /* clear to prevent stack symbolication */
+#define DTRACEOPT_MAX           32      /* number of options */
 #endif /* __APPLE__ */
 
 #define	DTRACEOPT_UNSET		(dtrace_optval_t)-2	/* unset option */
@@ -1172,7 +1180,9 @@ typedef struct dtrace_fmtdesc {
  * where user-level wishes the kernel to snapshot the buffer to (the
  * dtbd_data field).  The kernel uses the same structure to pass back some
  * information regarding the buffer:  the size of data actually copied out, the
- * number of drops, the number of errors, and the offset of the oldest record.
+ * number of drops, the number of errors, the offset of the oldest record,
+ * and the time of the snapshot.
+ *
  * If the buffer policy is a "switch" policy, taking a snapshot of the
  * principal buffer has the additional effect of switching the active and
  * inactive buffers.  Taking a snapshot of the aggregation buffer _always_ has
@@ -1185,7 +1195,28 @@ typedef struct dtrace_bufdesc {
         uint64_t dtbd_drops;                    /* number of drops */
         DTRACE_PTR(char, dtbd_data);            /* data */
         uint64_t dtbd_oldest;                   /* offset of oldest record */
+	uint64_t dtbd_timestamp;		/* hrtime of snapshot */
 } dtrace_bufdesc_t;
+
+/*
+ * Each record in the buffer (dtbd_data) begins with a header that includes
+ * the epid and a timestamp.  The timestamp is split into two 4-byte parts
+ * so that we do not require 8-byte alignment.
+ */
+typedef struct dtrace_rechdr {
+	dtrace_epid_t dtrh_epid;		/* enabled probe id */
+	uint32_t dtrh_timestamp_hi;		/* high bits of hrtime_t */
+	uint32_t dtrh_timestamp_lo;		/* low bits of hrtime_t */
+} dtrace_rechdr_t;
+
+#define	DTRACE_RECORD_LOAD_TIMESTAMP(dtrh)			\
+	((dtrh)->dtrh_timestamp_lo +				\
+	((uint64_t)(dtrh)->dtrh_timestamp_hi << 32))
+
+#define	DTRACE_RECORD_STORE_TIMESTAMP(dtrh, hrtime) {		\
+	(dtrh)->dtrh_timestamp_lo = (uint32_t)hrtime;		\
+	(dtrh)->dtrh_timestamp_hi = hrtime >> 32;		\
+}
 
 /*
  * DTrace Status
@@ -1420,7 +1451,10 @@ typedef struct dtrace_module_uuids_list {
 #define DTRACE_MODULE_UUIDS_LIST_SIZE(count) (sizeof(dtrace_module_uuids_list_t) + ((count - 1) * sizeof(UUID)))
 
 typedef struct dtrace_procdesc {
-	char		p_comm[MAXCOMLEN+1];
+	/* Must be specified by user-space */
+	char		p_name[128];
+	/* Set or modified by the Kernel */
+	int		p_name_length;
 	pid_t		p_pid;
 } dtrace_procdesc_t;
 

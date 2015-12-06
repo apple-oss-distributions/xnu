@@ -68,6 +68,12 @@
 #include <kern/page_decrypt.h>
 #include <kern/processor.h>
 
+#include <sys/kdebug.h>
+
+#if CONFIG_ATM
+#include <atm/atm_internal.h>
+#endif
+
 /* the lists of commpage routines are in commpage_asm.s  */
 extern	commpage_descriptor*	commpage_32_routines[];
 extern	commpage_descriptor*	commpage_64_routines[];
@@ -120,10 +126,24 @@ commpage_allocate(
 	if (submap == NULL)
 		panic("commpage submap is null");
 
-	if ((kr = vm_map(kernel_map,&kernel_addr,area_used,0,VM_FLAGS_ANYWHERE,NULL,0,FALSE,VM_PROT_ALL,VM_PROT_ALL,VM_INHERIT_NONE)))
+	if ((kr = vm_map(kernel_map,
+			 &kernel_addr,
+			 area_used,
+			 0,
+			 VM_FLAGS_ANYWHERE | VM_MAKE_TAG(VM_KERN_MEMORY_OSFMK),
+			 NULL,
+			 0,
+			 FALSE,
+			 VM_PROT_ALL,
+			 VM_PROT_ALL,
+			 VM_INHERIT_NONE)))
 		panic("cannot allocate commpage %d", kr);
 
-	if ((kr = vm_map_wire(kernel_map,kernel_addr,kernel_addr+area_used,VM_PROT_DEFAULT,FALSE)))
+	if ((kr = vm_map_wire(kernel_map,
+			      kernel_addr,
+			      kernel_addr+area_used,
+			      VM_PROT_DEFAULT|VM_PROT_MEMORY_TAG_MAKE(VM_KERN_MEMORY_OSFMK),
+			      FALSE)))
 		panic("cannot wire commpage: %d", kr);
 
 	/* 
@@ -136,7 +156,7 @@ commpage_allocate(
 	 */
 	if (!(kr = vm_map_lookup_entry( kernel_map, vm_map_trunc_page(kernel_addr, VM_MAP_PAGE_MASK(kernel_map)), &entry) || entry->is_sub_map))
 		panic("cannot find commpage entry %d", kr);
-	entry->object.vm_object->copy_strategy = MEMORY_OBJECT_COPY_NONE;
+	VME_OBJECT(entry)->copy_strategy = MEMORY_OBJECT_COPY_NONE;
 
 	if ((kr = mach_make_memory_entry( kernel_map,		// target map
 				    &size,		// size 
@@ -281,6 +301,10 @@ commpage_init_cpu_capabilities( void )
 					CPUID_LEAF7_FEATURE_HLE);
 	setif(bits, kHasAVX2_0,  cpuid_leaf7_features() &
 					CPUID_LEAF7_FEATURE_AVX2);
+	setif(bits, kHasRDSEED,  cpuid_features() &
+					CPUID_LEAF7_FEATURE_RDSEED);
+	setif(bits, kHasADX,     cpuid_features() &
+					CPUID_LEAF7_FEATURE_ADX);
 	
 	uint64_t misc_enable = rdmsr64(MSR_IA32_MISC_ENABLE);
 	setif(bits, kHasENFSTRG, (misc_enable & 1ULL) &&
@@ -457,8 +481,12 @@ commpage_populate( void )
 	simple_lock_init(&commpage_active_cpus_lock, 0);
 
 	commpage_update_active_cpus();
-        commpage_mach_approximate_time_init();
+	commpage_mach_approximate_time_init();
 	rtc_nanotime_init_commpage();
+	commpage_update_kdebug_enable();
+#if CONFIG_ATM
+	commpage_update_atm_diagnostic_config(atm_get_diagnostic_config());
+#endif
 }
 
 /* Fill in the common routines during kernel initialization. 
@@ -691,6 +719,55 @@ commpage_update_active_cpus(void)
 }
 
 /*
+ * Update the commpage data with the value of the "kdebug_enable"
+ * global so that userspace can avoid trapping into the kernel
+ * for kdebug_trace() calls. Serialization is handled
+ * by the caller in bsd/kern/kdebug.c.
+ */
+void
+commpage_update_kdebug_enable(void)
+{
+	volatile uint32_t *saved_data_ptr;
+	char *cp;
+
+	cp = commPagePtr32;
+	if (cp) {
+		cp += (_COMM_PAGE_KDEBUG_ENABLE - _COMM_PAGE32_BASE_ADDRESS);
+		saved_data_ptr = (volatile uint32_t *)cp;
+		*saved_data_ptr = kdebug_enable;
+	}
+
+	cp = commPagePtr64;
+	if ( cp ) {
+		cp += (_COMM_PAGE_KDEBUG_ENABLE - _COMM_PAGE32_START_ADDRESS);
+		saved_data_ptr = (volatile uint32_t *)cp;
+		*saved_data_ptr = kdebug_enable;
+	}
+}
+
+/* Ditto for atm_diagnostic_config */
+void
+commpage_update_atm_diagnostic_config(uint32_t diagnostic_config)
+{
+	volatile uint32_t *saved_data_ptr;
+	char *cp;
+
+	cp = commPagePtr32;
+	if (cp) {
+		cp += (_COMM_PAGE_ATM_DIAGNOSTIC_CONFIG - _COMM_PAGE32_BASE_ADDRESS);
+		saved_data_ptr = (volatile uint32_t *)cp;
+		*saved_data_ptr = diagnostic_config;
+	}
+
+	cp = commPagePtr64;
+	if ( cp ) {
+		cp += (_COMM_PAGE_ATM_DIAGNOSTIC_CONFIG - _COMM_PAGE32_START_ADDRESS);
+		saved_data_ptr = (volatile uint32_t *)cp;
+		*saved_data_ptr = diagnostic_config;
+	}
+}
+
+/*
  * update the commpage data for last known value of mach_absolute_time()
  */
 
@@ -699,11 +776,11 @@ commpage_update_mach_approximate_time(uint64_t abstime)
 {
 #ifdef CONFIG_MACH_APPROXIMATE_TIME
 	uint64_t saved_data;
-        char *cp;
-
-        cp = commPagePtr32;
+	char *cp;
+	
+	cp = commPagePtr32;
 	if ( cp ) {
-	        cp += (_COMM_PAGE_APPROX_TIME - _COMM_PAGE32_BASE_ADDRESS);
+		cp += (_COMM_PAGE_APPROX_TIME - _COMM_PAGE32_BASE_ADDRESS);
 		saved_data = *(uint64_t *)cp;
 		if (saved_data < abstime) {
 			/* ignoring the success/fail return value assuming that
@@ -713,9 +790,9 @@ commpage_update_mach_approximate_time(uint64_t abstime)
 			OSCompareAndSwap64(saved_data, abstime, (uint64_t *)cp);
 		}
 	}
-        cp = commPagePtr64;
+	cp = commPagePtr64;
 	if ( cp ) {
-	        cp += (_COMM_PAGE_APPROX_TIME - _COMM_PAGE32_START_ADDRESS);
+		cp += (_COMM_PAGE_APPROX_TIME - _COMM_PAGE32_START_ADDRESS);
 		saved_data = *(uint64_t *)cp;
 		if (saved_data < abstime) {
 			/* ignoring the success/fail return value assuming that

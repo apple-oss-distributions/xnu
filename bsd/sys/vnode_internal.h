@@ -260,6 +260,13 @@ struct vnode {
 #define VNEEDSSNAPSHOT 0x1000000
 #define VNOCS	       0x2000000	/* is there no code signature available */
 #define VISDIRTY       0x4000000        /* vnode will need IO if reclaimed */	
+#define VFASTDEVCANDIDATE  0x8000000        /* vnode is a candidate to store on a fast device */
+#define VAUTOCANDIDATE 0x10000000       /* vnode was automatically marked as a fast-dev candidate */
+/*
+  0x20000000 not used
+  0x40000000 not used
+  0x80000000 not used.
+*/
 
 /*
  * This structure describes vnode data which is specific to a file descriptor.
@@ -290,16 +297,6 @@ struct fd_vn_data {
 
 #define FV_LOCK(fvd) lck_mtx_lock(&(((struct fd_vn_data *)fvd)->fv_lock))
 #define FV_UNLOCK(fvd) lck_mtx_unlock(&(((struct fd_vn_data *)fvd)->fv_lock))
-#define FV_BUF_FREE(fvd, tag)      \
-do {                               \
-	FREE(fvd->fv_buf, tag);    \
-	fvd->fv_buf = NULL;        \
-	fvd->fv_bufsiz = 0;        \
-	fvd->fv_bufdone = 0;       \
-	fvd->fv_soff = 0;          \
-	fvd->fv_eoff = 0;          \
-	fvd->fv_eofflag = 0;       \
-} while (0);
 
 /*
  * Global vnode data.
@@ -562,6 +559,22 @@ void	vfsinit(void);
 void vnode_lock(vnode_t);
 void vnode_unlock(vnode_t);
 
+void vn_print_state(vnode_t /* vp */, const char * /* fmt */, ...)
+    __printflike(2,3);
+
+#if DEVELOPMENT || DEBUG
+#define VNASSERT(exp, vp, msg)						\
+do {									\
+	if (__improbable(!(exp))) {					\
+		vn_print_state(vp, "VNASSERT failed %s:%d\n", __FILE__,	\
+		    __LINE__);						\
+		panic msg;						\
+	}								\
+} while (0)
+#else
+#define VNASSERT(exp, vp, msg)
+#endif /* DEVELOPMENT || DEBUG */
+
 /*
  * XXX exported symbols; should be static
  */
@@ -580,6 +593,7 @@ vnode_readdir64(struct vnode *vp, struct uio *uio, int flags, int *eofflag,
                 int *numdirent, vfs_context_t ctxp);
 
 void vnode_setswapmount(vnode_t);
+int64_t	vnode_getswappin_avail(vnode_t);
 
 #if CONFIG_TRIGGERS
 /* VFS Internal Vnode Trigger Interfaces (Private) */

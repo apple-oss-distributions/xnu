@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2014 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2015 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -38,11 +38,12 @@
 
 /*
 Public routines:
-	BlockAllocate
+	BlockAllocate / hfs_block_alloc
 					Allocate space on a volume.  Can allocate space contiguously.
 					If not contiguous, then allocation may be less than what was
 					asked for.  Returns the starting block number, and number of
-					blocks.  (Will only do a single extent???)
+					blocks.  It will only return a single extent.
+
 	BlockDeallocate
 					Deallocate a contiguous run of allocation blocks.
  
@@ -92,20 +93,20 @@ Internal routines:
 					block number of the first block in the range is returned.  This is only
 					called by the bitmap scanning logic as the red-black tree should be able
 					to do this internally by searching its tree. 
-	BlockAllocateAny
+	BlockFindAny
 					Find and allocate a contiguous range of blocks up to a given size.  The
 					first range of contiguous free blocks found are allocated, even if there
 					are fewer blocks than requested (and even if a contiguous range of blocks
 					of the given size exists elsewhere).
-	BlockAllocateAnyBitmap
+	BlockFindAnyBitmap
 					Finds a range of blocks per the above requirements without using the 
 					Allocation RB Tree.  This relies on the bitmap-scanning logic in order to find
 					any valid range of free space needed.
-	BlockAllocateContig
-					Find and allocate a contiguous range of blocks of a given size.  If
-					a contiguous range of free blocks of the given size isn't found, then
-					the allocation fails (i.e. it is "all or nothing"). 
-	BlockAllocateKnown
+	BlockFindContig
+					Find a contiguous range of blocks of a given size.
+					If the minimum cannot be satisfied, nothing is
+					returned.
+	BlockFindKnown
 					Try to allocate space from known free space in the volume's
 					free extent cache.
 	ReadBitmapBlock
@@ -155,31 +156,37 @@ Optimization Routines
 					
 */
 
-#include "../../hfs_macos_defs.h"
 
 #include <sys/types.h>
 #include <sys/buf.h>
-#include <sys/systm.h>
-#include <sys/sysctl.h>
-#include <sys/disk.h>
-#include <sys/ubc.h>
-#include <sys/uio.h>
-#include <kern/kalloc.h>
-#include <sys/malloc.h>
 
+#if !HFS_ALLOC_TEST
+
+#include "../../hfs_macos_defs.h"
+#include <sys/systm.h>
+#include <sys/ubc.h>
+#include <kern/kalloc.h>
 /* For VM Page size */
 #include <libkern/libkern.h>
-
+#include <vfs/vfs_journal.h>
 #include "../../hfs.h"
+#include "../../hfs_endian.h"
+#include "../headers/FileMgrInternal.h"
+
+#endif // !HFS_ALLOC_TEST
+
+#include <sys/sysctl.h>
+#include <sys/disk.h>
+#include <sys/uio.h>
+#include <sys/malloc.h>
+
 #include "../../hfs_dbg.h"
 #include "../../hfs_format.h"
-#include "../../hfs_endian.h"
-#include "../../hfs_macos_defs.h"
-#include "../headers/FileMgrInternal.h"
 #include "../../hfs_kdebug.h"
+#include "../../rangelist.h"
+#include "../../hfs_extents.h"
 
 /* Headers for unmap-on-mount support */
-#include <vfs/vfs_journal.h>
 #include <sys/disk.h>
 
 #ifndef CONFIG_HFS_TRIM
@@ -238,38 +245,44 @@ static OSErr ReadBitmapBlock(
 		ExtendedVCB		*vcb,
 		u_int32_t		bit,
 		u_int32_t		**buffer,
-		uintptr_t		*blockRef);
+		uintptr_t		*blockRef,
+		hfs_block_alloc_flags_t flags);
 
 static OSErr ReleaseBitmapBlock(
 		ExtendedVCB		*vcb,
 		uintptr_t		blockRef,
 		Boolean			dirty);
 
-static OSErr BlockAllocateAny(
+static OSErr hfs_block_alloc_int(hfsmount_t *hfsmp,
+								 HFSPlusExtentDescriptor *extent,
+								 hfs_block_alloc_flags_t flags,
+								 hfs_alloc_extra_args_t *ap);
+
+static OSErr BlockFindAny(
 		ExtendedVCB		*vcb,
 		u_int32_t		startingBlock,
 		u_int32_t		endingBlock,
 		u_int32_t		maxBlocks,
-		u_int32_t		flags,
+		hfs_block_alloc_flags_t flags,
 		Boolean			trustSummary,
 		u_int32_t		*actualStartBlock,
 		u_int32_t		*actualNumBlocks);
 
-static OSErr BlockAllocateAnyBitmap(
+static OSErr BlockFindAnyBitmap(
 		ExtendedVCB		*vcb,
 		u_int32_t		startingBlock,
 		u_int32_t		endingBlock,
 		u_int32_t		maxBlocks,
-		u_int32_t		flags,
+		hfs_block_alloc_flags_t flags,
 		u_int32_t		*actualStartBlock,
 		u_int32_t		*actualNumBlocks);
 
-static OSErr BlockAllocateContig(
+static OSErr BlockFindContig(
 		ExtendedVCB		*vcb,
 		u_int32_t		startingBlock,
 		u_int32_t		minBlocks,
 		u_int32_t		maxBlocks,
-		u_int32_t		flags,
+		hfs_block_alloc_flags_t flags,
 		u_int32_t		*actualStartBlock,
 		u_int32_t		*actualNumBlocks);
 
@@ -282,18 +295,25 @@ static OSErr BlockFindContiguous(
 		Boolean			useMetaZone,
 		Boolean			trustSummary,
 		u_int32_t		*actualStartBlock,
-		u_int32_t		*actualNumBlocks);
+		u_int32_t		*actualNumBlocks,
+		hfs_block_alloc_flags_t flags);
 
-static OSErr BlockAllocateKnown(
+static OSErr BlockFindKnown(
 		ExtendedVCB		*vcb,
 		u_int32_t		maxBlocks,
 		u_int32_t		*actualStartBlock,
 		u_int32_t		*actualNumBlocks);
 
+static OSErr hfs_alloc_try_hard(hfsmount_t *hfsmp,
+								HFSPlusExtentDescriptor *extent,
+								uint32_t max_blocks,
+								hfs_block_alloc_flags_t flags);
+
 static OSErr BlockMarkAllocatedInternal (
 		ExtendedVCB		*vcb,
 		u_int32_t		startingBlock,
-		register u_int32_t	numBlocks);
+		u_int32_t		numBlocks,
+		hfs_block_alloc_flags_t flags);
 
 static OSErr BlockMarkFreeInternal(
 		ExtendedVCB	*vcb,
@@ -356,6 +376,32 @@ void hfs_validate_summary (struct hfsmount *hfsmp);
 static void remove_free_extent_cache(struct hfsmount *hfsmp, u_int32_t startBlock, u_int32_t blockCount);
 static Boolean add_free_extent_cache(struct hfsmount *hfsmp, u_int32_t startBlock, u_int32_t blockCount);
 static void sanity_check_free_ext(struct hfsmount *hfsmp, int check_allocated);
+
+static void hfs_release_reserved(hfsmount_t *hfsmp, struct rl_entry *range, int list);
+
+/* Functions for getting free exents */
+
+typedef struct bitmap_context {
+	void			*bitmap;				// current bitmap chunk
+	uint32_t		run_offset;				// offset (in bits) from start of bitmap to start of current run
+	uint32_t		chunk_current;			// next bit to scan in the chunk
+	uint32_t		chunk_end;				// number of valid bits in this chunk
+	struct hfsmount *hfsmp;
+	struct buf		*bp;
+	uint32_t		last_free_summary_bit;	// last marked free summary bit
+	int				lockflags;
+	uint64_t		lock_start;
+} bitmap_context_t;
+
+
+static errno_t get_more_bits(bitmap_context_t *bitmap_ctx);
+static int bit_count_set(void *bitmap, int start, int end);
+static int bit_count_clr(void *bitmap, int start, int end);
+static errno_t hfs_bit_count(bitmap_context_t *bitmap_ctx, int (*fn)(void *, int ,int), uint32_t *bit_count);
+static errno_t hfs_bit_count_set(bitmap_context_t *bitmap_ctx, uint32_t *count);
+static errno_t hfs_bit_count_clr(bitmap_context_t *bitmap_ctx, uint32_t *count);
+static errno_t update_summary_table(bitmap_context_t *bitmap_ctx, uint32_t start, uint32_t count, bool set);
+static int clzll(uint64_t x);
 
 #if ALLOC_DEBUG
 /*
@@ -496,7 +542,7 @@ static int hfs_track_unmap_blocks (struct hfsmount *hfsmp, u_int32_t start,
 	u_int64_t length;
 	int error = 0;
 
-	if ((hfsmp->hfs_flags & HFS_UNMAP) && (hfsmp->jnl != NULL)) {
+	if ((hfsmp->hfs_flags & HFS_UNMAP) && (hfsmp->jnl != NULL) && list->allocated_count && list->extents != NULL) {
 		int extent_no = list->extent_count;
 		offset = (u_int64_t) start * hfsmp->blockSize + (u_int64_t) hfsmp->hfsPlusIOPosOffset;
 		length = (u_int64_t) numBlocks * hfsmp->blockSize;
@@ -535,7 +581,7 @@ static int hfs_issue_unmap (struct hfsmount *hfsmp, struct jnl_trim_list *list)
 		KERNEL_DEBUG_CONSTANT(HFSDBG_UNMAP_SCAN_TRIM | DBG_FUNC_START, hfsmp->hfs_raw_dev, 0, 0, 0, 0);
 	}
 
-	if (list->extent_count > 0) {
+	if (list->extent_count > 0 && list->extents != NULL) {
 		bzero(&unmap, sizeof(unmap));
 		unmap.extents = list->extents;
 		unmap.extentsCount = list->extent_count;
@@ -590,7 +636,7 @@ static void hfs_unmap_alloc_extent(struct hfsmount *hfsmp, u_int32_t startingBlo
 {
 	u_int64_t offset;
 	u_int64_t length;
-	int err;
+	int err = 0;
 
 	if (hfs_kdebug_allocation & HFSDBG_UNMAP_ENABLED)
 		KERNEL_DEBUG_CONSTANT(HFSDBG_UNMAP_ALLOC | DBG_FUNC_START, startingBlock, numBlocks, 0, 0, 0);
@@ -784,6 +830,7 @@ u_int32_t ScanUnmapBlocks (struct hfsmount *hfsmp)
 	 dk_extent_t *extents;
 	 };
 	 */
+	bzero (&trimlist, sizeof(trimlist));
 
 	/* 
 	 * The scanning itself here is not tied to the presence of CONFIG_HFS_TRIM
@@ -806,7 +853,6 @@ u_int32_t ScanUnmapBlocks (struct hfsmount *hfsmp)
 		if (extents == NULL) {
 			return ENOMEM;
 		}
-		bzero (&trimlist, sizeof(trimlist));
 		trimlist.extents = (dk_extent_t*)extents;
 		trimlist.allocated_count = alloc_count;
 		trimlist.extent_count = 0;
@@ -852,10 +898,129 @@ u_int32_t ScanUnmapBlocks (struct hfsmount *hfsmp)
 	return error;
 }
 
+static void add_to_reserved_list(hfsmount_t *hfsmp, uint32_t start, 
+								 uint32_t count, int list, 
+								 struct rl_entry **reservation)
+{
+	struct rl_entry *range, *next_range;
+
+	if (list == HFS_TENTATIVE_BLOCKS) {
+		int nranges = 0;
+		// Don't allow more than 4 tentative reservations
+		TAILQ_FOREACH_SAFE(range, &hfsmp->hfs_reserved_ranges[HFS_TENTATIVE_BLOCKS],
+						   rl_link, next_range) {
+			if (++nranges > 3)
+				hfs_release_reserved(hfsmp, range, HFS_TENTATIVE_BLOCKS);
+		}
+	}
+
+	MALLOC(range, struct rl_entry *, sizeof(*range), M_TEMP, M_WAITOK);
+	range->rl_start = start;
+	range->rl_end = start + count - 1;
+	TAILQ_INSERT_HEAD(&hfsmp->hfs_reserved_ranges[list], range, rl_link);
+	*reservation = range;
+}
+
+static void hfs_release_reserved(hfsmount_t *hfsmp,
+								 struct rl_entry *range,
+								 int list)
+{
+	if (range->rl_start == -1)
+		return;
+
+	TAILQ_REMOVE(&hfsmp->hfs_reserved_ranges[list], range, rl_link);
+
+	if (rl_len(range) > 0) {
+		if (list == HFS_TENTATIVE_BLOCKS)
+			hfsmp->tentativeBlocks -= rl_len(range);
+		else {
+			/*
+			 * We don't need to unmap tentative blocks because we won't have
+			 * written to them, but we might have written to reserved blocks.
+			 * Nothing can refer to those blocks so this doesn't have to be
+			 * via the journal. If this proves to be too expensive, we could
+			 * consider not sending down the unmap or we could require this
+			 * to always be called within a transaction and then we can use
+			 * the journal.
+			 */
+			dk_extent_t extent = {
+				.offset = (hfs_blk_to_bytes(range->rl_start, hfsmp->blockSize)
+						   + hfsmp->hfsPlusIOPosOffset),
+				.length = hfs_blk_to_bytes(rl_len(range), hfsmp->blockSize)
+			};
+			dk_unmap_t unmap = {
+				.extents = &extent,
+				.extentsCount = 1,
+			};
+			VNOP_IOCTL(hfsmp->hfs_devvp, DKIOCUNMAP, (caddr_t)&unmap,
+					   0, vfs_context_kernel());
+			assert(hfsmp->lockedBlocks >= rl_len(range));
+			hfsmp->lockedBlocks -= rl_len(range);
+		}
+		hfs_release_summary(hfsmp, range->rl_start, rl_len(range));
+		add_free_extent_cache(hfsmp, range->rl_start, rl_len(range));
+	}
+
+	range->rl_start = -1;
+	range->rl_end   = -2;
+}
+
+static void hfs_free_locked_internal(hfsmount_t *hfsmp,
+									   struct rl_entry **reservation,
+									   int list)
+{
+	if (*reservation) {
+		hfs_release_reserved(hfsmp, *reservation, list);
+		FREE(*reservation, M_TEMP);
+		*reservation = NULL;
+	}
+}
+
+void hfs_free_tentative(hfsmount_t *hfsmp, struct rl_entry **reservation)
+{
+	hfs_free_locked_internal(hfsmp, reservation, HFS_TENTATIVE_BLOCKS);
+}
+
+void hfs_free_locked(hfsmount_t *hfsmp, struct rl_entry **reservation)
+{
+	hfs_free_locked_internal(hfsmp, reservation, HFS_LOCKED_BLOCKS);
+}
+
+OSErr BlockAllocate (
+		 hfsmount_t		*hfsmp,				/* which volume to allocate space on */
+		 u_int32_t		startingBlock,		/* preferred starting block, or 0 for no preference */
+		 u_int32_t		minBlocks,		/* desired number of blocks to allocate */
+		 u_int32_t		maxBlocks,		/* maximum number of blocks to allocate */
+		 hfs_block_alloc_flags_t flags,			/* option flags */
+		 u_int32_t		*actualStartBlock,	/* actual first block of allocation */
+		 u_int32_t		*actualNumBlocks)
+{
+	hfs_alloc_extra_args_t extra_args = {
+		.max_blocks = maxBlocks
+	};
+
+	HFSPlusExtentDescriptor extent = { startingBlock, minBlocks };
+
+	OSErr err = hfs_block_alloc_int(hfsmp, &extent, flags, &extra_args);
+
+	*actualStartBlock = extent.startBlock;
+	*actualNumBlocks  = extent.blockCount;
+
+	return err;
+}
+
+errno_t hfs_block_alloc(hfsmount_t *hfsmp,
+						HFSPlusExtentDescriptor *extent,
+						hfs_block_alloc_flags_t flags,
+						hfs_alloc_extra_args_t *ap)
+{
+	return MacToVFSError(hfs_block_alloc_int(hfsmp, extent, flags, ap));
+}
+
 /*
  ;________________________________________________________________________________
  ;
- ; Routine:	   BlockAllocate
+ ; Routine:	   hfs_block_alloc_int
  ;
  ; Function:   Allocate space on a volume.	If contiguous allocation is requested,
  ;			   at least the requested number of bytes will be allocated or an
@@ -870,56 +1035,124 @@ u_int32_t ScanUnmapBlocks (struct hfsmount *hfsmp)
  ;			   point.
  ;
  ; Input Arguments:
- ;	 vcb			 - Pointer to ExtendedVCB for the volume to allocate space on
- ;	 fcb			 - Pointer to FCB for the file for which storage is being allocated
- ;	 startingBlock	 - Preferred starting allocation block, 0 = no preference
- ;	 minBlocks	 	 - Number of blocks requested.	If the allocation is non-contiguous,
- ;					   less than this may actually be allocated
- ;	 maxBlocks	 	 - The maximum number of blocks to allocate.  If there is additional free
- ;					   space after bytesRequested, then up to maxBlocks bytes should really
- ;					   be allocated.  (Used by ExtendFileC to round up allocations to a multiple
- ;					   of the file's clump size.)
- ;	 flags           - Flags to specify options like contiguous, use metadata zone, 
- ;					   skip free block check, etc.
+ ;   hfsmp           - Pointer to the HFS mount structure.
+ ;   extent          - startBlock indicates the block to start
+ ;                     searching from and blockCount is the number of
+ ;                     blocks required.  Depending on the flags used,
+ ;                     more or less blocks may be returned.  The
+ ;                     allocated extent is returned via this
+ ;                     parameter.
+ ;   flags           - Flags to specify options like contiguous, use
+ ;                     metadata zone, skip free block check, etc.
+ ;   ap              - Additional arguments used depending on flags.
+ ;                     See hfs_alloc_extra_args_t and below.
  ;
  ; Output:
- ;	 (result)		 - Error code, zero for successful allocation
- ;	 *startBlock	 - Actual starting allocation block
- ;	 *actualBlccks	 - Actual number of allocation blocks allocated
+ ;   (result)        - Error code, zero for successful allocation
+ ;   extent          - If successful, the allocated extent.
  ;
  ; Side effects:
  ;	 The volume bitmap is read and updated; the volume bitmap cache may be changed.
+ ;
+ ; HFS_ALLOC_TENTATIVE
+ ; Blocks will be reserved but not marked allocated.  They can be
+ ; stolen if free space is limited.  Tentative blocks can be used by
+ ; passing HFS_ALLOC_USE_TENTATIVE and passing in the resevation.
+ ; @ap->reservation_out is used to store the reservation.
+ ;
+ ; HFS_ALLOC_USE_TENTATIVE
+ ; Use blocks previously returned with HFS_ALLOC_TENTATIVE.
+ ; @ap->reservation_in should be set to whatever @ap->reservation_out
+ ; was set to when HFS_ALLOC_TENTATIVE was used.  If the tentative
+ ; reservation was stolen, a normal allocation will take place.
+ ;
+ ; HFS_ALLOC_LOCKED
+ ; Blocks will be reserved but not marked allocated.  Unlike tentative
+ ; reservations they cannot be stolen.  It is safe to write to these
+ ; blocks.  @ap->reservation_out is used to store the reservation.
+ ;
+ ; HFS_ALLOC_COMMIT
+ ; This will take blocks previously returned with HFS_ALLOC_LOCKED and
+ ; mark them allocated on disk.  @ap->reservation_in is used.
+ ;
+ ; HFS_ALLOC_ROLL_BACK
+ ; Take blocks that were just recently deallocated and mark them
+ ; allocated.  This is for roll back situations.  Blocks got
+ ; deallocated and then something went wrong and we need to roll back
+ ; by marking the blocks allocated.
+ ;
+ ; HFS_ALLOC_FORCECONTIG
+ ; It will not return fewer than @min_blocks.
+ ;
+ ; HFS_ALLOC_TRY_HARD
+ ; We will perform an exhaustive search to try and find @max_blocks.
+ ; It will not return fewer than @min_blocks.
+ ;
  ;________________________________________________________________________________
  */
-OSErr BlockAllocate (
-		ExtendedVCB		*vcb,				/* which volume to allocate space on */
-		u_int32_t		startingBlock,		/* preferred starting block, or 0 for no preference */
-		u_int32_t		minBlocks,		/* desired number of blocks to allocate */
-		u_int32_t		maxBlocks,		/* maximum number of blocks to allocate */
-		u_int32_t		flags,			/* option flags */
-		u_int32_t		*actualStartBlock,	/* actual first block of allocation */
-		u_int32_t		*actualNumBlocks)	
-/*
- *  actualNumBlocks is the number of blocks actually allocated; 
- * if forceContiguous was zero, then this may represent fewer than minBlocks 
- */
+OSErr hfs_block_alloc_int(hfsmount_t *hfsmp,
+						  HFSPlusExtentDescriptor *extent,
+						  hfs_block_alloc_flags_t flags,
+						  hfs_alloc_extra_args_t *ap)
 {
 	u_int32_t  freeBlocks;
-	OSErr			err;
+	OSErr			err = 0;
 	Boolean			updateAllocPtr = false;		//	true if nextAllocation needs to be updated
-	struct hfsmount	*hfsmp;
 	Boolean useMetaZone;
-	Boolean forceContiguous;
+	Boolean forceContiguous = false;
 	Boolean forceFlush;
+
+	uint32_t startingBlock = extent->startBlock;
+	uint32_t minBlocks = extent->blockCount;
+	uint32_t maxBlocks = (ap && ap->max_blocks) ? ap->max_blocks : minBlocks;
 
 	if (hfs_kdebug_allocation & HFSDBG_ALLOC_ENABLED)
 		KERNEL_DEBUG_CONSTANT(HFSDBG_BLOCK_ALLOCATE | DBG_FUNC_START, startingBlock, minBlocks, maxBlocks, flags, 0);
 
-	if (flags & HFS_ALLOC_FORCECONTIG) {
-		forceContiguous = true;
-	} else {
-		forceContiguous = false;
+	if (ISSET(flags, HFS_ALLOC_COMMIT)) {
+		extent->startBlock = (*ap->reservation_in)->rl_start;
+		extent->blockCount = rl_len(*ap->reservation_in);
+		goto mark_allocated;
 	}
+
+	if (ISSET(flags, HFS_ALLOC_ROLL_BACK))
+		goto mark_allocated;
+
+	freeBlocks = hfs_freeblks(hfsmp, 0);
+
+	if (ISSET(flags, HFS_ALLOC_USE_TENTATIVE)) {
+		struct rl_entry *range = *ap->reservation_in;
+
+		if (range && range->rl_start != -1) {
+			/*
+			 * It's possible that we have a tentative reservation
+			 * but there aren't enough free blocks due to loaned blocks
+			 * or insufficient space in the backing store.
+			 */
+			uint32_t count = min(min(maxBlocks, rl_len(range)), freeBlocks);
+
+			if (count >= minBlocks) {
+				extent->startBlock = range->rl_start;
+				extent->blockCount = count;
+
+				// Should we go straight to commit?
+				if (!ISSET(flags, HFS_ALLOC_LOCKED))
+					SET(flags, HFS_ALLOC_COMMIT);
+
+				goto mark_allocated;
+			}
+		}
+
+		/*
+		 * We can't use the tentative reservation so free it and allocate
+		 * normally.
+		 */
+		hfs_free_tentative(hfsmp, ap->reservation_in);
+		CLR(flags, HFS_ALLOC_USE_TENTATIVE);
+	}
+
+	if (ISSET(flags, HFS_ALLOC_FORCECONTIG | HFS_ALLOC_TRY_HARD))
+		forceContiguous = true;
 
 	if (flags & HFS_ALLOC_METAZONE) {
 		useMetaZone = true;
@@ -934,15 +1167,11 @@ OSErr BlockAllocate (
 		forceFlush = false;
 	}
 
+	assert(hfsmp->freeBlocks >= hfsmp->tentativeBlocks);
 
-	//
-	//	Initialize outputs in case we get an error
-	//
-	*actualStartBlock = 0;
-	*actualNumBlocks = 0;
-	hfsmp = VCBTOHFS (vcb);
-	freeBlocks = hfs_freeblks(hfsmp, 0);
-
+	// See if we have to steal tentative blocks
+	if (freeBlocks < hfsmp->tentativeBlocks + minBlocks)
+		SET(flags, HFS_ALLOC_IGNORE_TENTATIVE);
 
 	/* Skip free block check if blocks are being allocated for relocating 
 	 * data during truncating a volume.
@@ -960,11 +1189,11 @@ OSErr BlockAllocate (
 		//	If the disk is already full, don't bother.
 		if (freeBlocks == 0) {
 			err = dskFulErr;
-			goto Exit;
+			goto exit;
 		}
 		if (forceContiguous && freeBlocks < minBlocks) {
 			err = dskFulErr;
-			goto Exit;
+			goto exit;
 		}
 
 		/*
@@ -978,6 +1207,14 @@ OSErr BlockAllocate (
 		}
 	}
 
+	if (ISSET(flags, HFS_ALLOC_TRY_HARD)) {
+		err = hfs_alloc_try_hard(hfsmp, extent, maxBlocks, flags);
+		if (err)
+			goto exit;
+
+		goto mark_allocated;
+	}
+
 	//
 	//	If caller didn't specify a starting block number, then use the volume's
 	//	next block to allocate from.
@@ -986,18 +1223,18 @@ OSErr BlockAllocate (
 		hfs_lock_mount (hfsmp);
 
 		/* Sparse Allocation and nextAllocation are both used even if the R/B Tree is on */
-		if (vcb->hfs_flags & HFS_HAS_SPARSE_DEVICE) {
-			startingBlock = vcb->sparseAllocation;
+		if (hfsmp->hfs_flags & HFS_HAS_SPARSE_DEVICE) {
+			startingBlock = hfsmp->sparseAllocation;
 		} 
 		else {
-			startingBlock = vcb->nextAllocation;
+			startingBlock = hfsmp->nextAllocation;
 		}
 		hfs_unlock_mount(hfsmp);
 		updateAllocPtr = true;
 	}
 
 
-	if (startingBlock >= vcb->allocLimit) {
+	if (startingBlock >= hfsmp->allocLimit) {
 		startingBlock = 0; /* overflow so start at beginning */
 	}
 
@@ -1006,8 +1243,8 @@ OSErr BlockAllocate (
 	//	that is long enough.  Otherwise, find the first free block.
 	//
 	if (forceContiguous) {
-		err = BlockAllocateContig(vcb, startingBlock, minBlocks, maxBlocks,
-				flags, actualStartBlock, actualNumBlocks);
+		err = BlockFindContig(hfsmp, startingBlock, minBlocks, maxBlocks,
+				flags, &extent->startBlock, &extent->blockCount);
 		/*
 		 * If we allocated from a new position then also update the roving allocator.  
 		 * This will keep the roving allocation pointer up-to-date even 
@@ -1016,9 +1253,9 @@ OSErr BlockAllocate (
 		 * the block to vend out.
 		 */
 		if ((err == noErr) &&
-				(*actualStartBlock > startingBlock) &&
-				((*actualStartBlock < VCBTOHFS(vcb)->hfs_metazone_start) ||
-				 (*actualStartBlock > VCBTOHFS(vcb)->hfs_metazone_end))) {
+				(extent->startBlock > startingBlock) &&
+				((extent->startBlock < hfsmp->hfs_metazone_start) ||
+				 (extent->startBlock > hfsmp->hfs_metazone_end))) {
 			updateAllocPtr = true;
 		}
 	} else {					
@@ -1040,12 +1277,13 @@ OSErr BlockAllocate (
 		}
 
 		/* 
-		 * BlockAllocateKnown only examines the free extent cache; anything in there will
+		 * BlockFindKnown only examines the free extent cache; anything in there will
 		 * have been committed to stable storage already.
 		 */
-		err = BlockAllocateKnown(vcb, maxBlocks, actualStartBlock, actualNumBlocks);
+		err = BlockFindKnown(hfsmp, maxBlocks, &extent->startBlock,
+							&extent->blockCount);
 
-		/* dskFulErr out of BlockAllocateKnown indicates an empty Free Extent Cache */
+		/* dskFulErr out of BlockFindKnown indicates an empty Free Extent Cache */
 
 		if (err == dskFulErr) {
 			/* 
@@ -1053,9 +1291,9 @@ OSErr BlockAllocate (
 			 * allocation limit.  We 'trust' the summary bitmap in this call, if it tells us
 			 * that it could not find any free space.
 			 */
-			err = BlockAllocateAny(vcb, startingBlock, vcb->allocLimit,
+			err = BlockFindAny(hfsmp, startingBlock, hfsmp->allocLimit,
 					maxBlocks, flags, true, 
-					actualStartBlock, actualNumBlocks);
+					&extent->startBlock, &extent->blockCount);
 		}
 		if (err == dskFulErr) {
 			/*
@@ -1065,14 +1303,14 @@ OSErr BlockAllocate (
 			 * If it is off, then we trust the above and go up until the startingBlock.
 			 */
 			if (hfsmp->hfs_flags & HFS_SUMMARY_TABLE) {
-				err = BlockAllocateAny(vcb, 1, vcb->allocLimit, maxBlocks,
+				err = BlockFindAny(hfsmp, 1, hfsmp->allocLimit, maxBlocks,
 						flags, false, 
-						actualStartBlock, actualNumBlocks);
+						&extent->startBlock, &extent->blockCount);
 			}
 			else {
-				err = BlockAllocateAny(vcb, 1, startingBlock, maxBlocks,
+				err = BlockFindAny(hfsmp, 1, startingBlock, maxBlocks,
 						flags, false, 
-						actualStartBlock, actualNumBlocks);
+						&extent->startBlock, &extent->blockCount);
 			}	
 
 			/*
@@ -1080,60 +1318,82 @@ OSErr BlockAllocate (
 	 		 */		 
 			if (err == dskFulErr && forceFlush) {
 				flags |= HFS_ALLOC_FLUSHTXN;
-				err = BlockAllocateAny(vcb, 1, vcb->allocLimit, maxBlocks,
+				err = BlockFindAny(hfsmp, 1, hfsmp->allocLimit, maxBlocks,
 						flags, false, 
-						actualStartBlock, actualNumBlocks);
+						&extent->startBlock, &extent->blockCount);
 			}
 		}
 	}
 
-Exit:
-	if ((hfsmp->hfs_flags & HFS_CS) && *actualNumBlocks != 0) {
-		errno_t ec;
-		_dk_cs_map_t cm;
-		uint64_t mapped_blocks;
+	if (err)
+		goto exit;
 
-		cm.cm_extent.offset = (uint64_t)*actualStartBlock * hfsmp->blockSize + hfsmp->hfsPlusIOPosOffset;
-		cm.cm_extent.length = (uint64_t)*actualNumBlocks * hfsmp->blockSize;
-		cm.cm_bytes_mapped = 0;
-		ec = VNOP_IOCTL(hfsmp->hfs_devvp, _DKIOCCSMAP, (caddr_t)&cm, 0, vfs_context_current());
-		if (ec != 0 && ec != ENOSPC) {
-			printf ("VNOP_IOCTL(_DKIOCCSMAP) returned an unexpected error code=%d\n", ec);
-			err = ec;
-			goto Exit_CS;
-		}
-		mapped_blocks = cm.cm_bytes_mapped / hfsmp->blockSize;
-		/* CoreStorage returned more blocks than requested */
-		if (mapped_blocks > *actualNumBlocks) {
-			printf ("VNOP_IOCTL(_DKIOCCSMAP) mapped too many blocks, mapped=%lld, actual=%d\n", 
-					mapped_blocks, *actualNumBlocks);
-		}
-		if (*actualNumBlocks > mapped_blocks) {
-			if (forceContiguous && mapped_blocks < minBlocks) {
-				mapped_blocks = 0;
+mark_allocated:
+
+	// Handle alignment
+	if (ap && ap->alignment && extent->blockCount < ap->max_blocks) {
+		/*
+		 * See the comment in FileMgrInternal.h for alignment
+		 * semantics.
+		 */
+		uint32_t rounding = ((extent->blockCount + ap->alignment_offset)
+							 % ap->alignment);
+
+		// @minBlocks is still the minimum
+		if (extent->blockCount >= minBlocks + rounding)
+			extent->blockCount -= rounding;
+	}
+
+	err = BlockMarkAllocatedInternal(hfsmp, extent->startBlock,
+									 extent->blockCount, flags);
+
+	if (err)
+		goto exit;
+
+	if (ISSET(hfsmp->hfs_flags, HFS_CS) && extent->blockCount != 0
+		&& !ISSET(flags, HFS_ALLOC_TENTATIVE)) {
+		if (ISSET(flags, HFS_ALLOC_FAST_DEV)) {
+#if !HFS_ALLOC_TEST        /* need this guard because this file is compiled outside of the kernel */
+			hfs_pin_block_range(hfsmp, HFS_PIN_IT,
+								extent->startBlock, extent->blockCount,
+								vfs_context_kernel());
+#endif
+		} else {
+			_dk_cs_map_t cm = {
+				.cm_extent = {
+					(hfs_blk_to_bytes(extent->startBlock, hfsmp->blockSize)
+					 + hfsmp->hfsPlusIOPosOffset),
+					hfs_blk_to_bytes(extent->blockCount, hfsmp->blockSize)
+				}
+			};
+
+			errno_t err2 = VNOP_IOCTL(hfsmp->hfs_devvp, _DKIOCCSMAP,
+									  (caddr_t)&cm, 0, vfs_context_current());
+
+			/*
+			 * Ignore errors for now; we are fully provisioned so in
+			 * theory CoreStorage should be able to handle this
+			 * allocation.  Should we want to change this in future, then
+			 * we should think carefully how we handle errors.  Allowing
+			 * CoreStorage to truncate our allocation is problematic
+			 * because we might have minimum and alignment requirements
+			 * and backing out changes we have already made is
+			 * non-trivial.
+			 */
+
+			if (err2 || cm.cm_bytes_mapped < cm.cm_extent.length) {
+				printf("hfs: _DKIOCCSMAP error: %d, bytes_mapped: %llu\n",
+					   err2, cm.cm_bytes_mapped);
 			}
-		}
-		uint64_t numBlocksToFree = *actualNumBlocks - mapped_blocks;
-		uint64_t firstBlockToFree = *actualStartBlock + mapped_blocks;
-		if (numBlocksToFree > 0) {
-			err = BlockDeallocate(vcb, firstBlockToFree, numBlocksToFree, flags);
-			if (err != noErr) {
-				printf ("BlockDeallocate failed (err=%d)\n", err);
-				goto Exit_CS;
-			}
-		}
-		*actualNumBlocks = mapped_blocks;
-		if (*actualNumBlocks == 0 && err == noErr) {
-			err = dskFulErr;
 		}
 	}
-Exit_CS: 
+
 	// if we actually allocated something then go update the
 	// various bits of state that we maintain regardless of
 	// whether there was an error (i.e. partial allocations
 	// still need to update things like the free block count).
 	//
-	if (*actualNumBlocks != 0) {
+	if (extent->blockCount != 0) {
 		//
 		//	If we used the volume's roving allocation pointer, then we need to update it.
 		//	Adding in the length of the current allocation might reduce the next allocate
@@ -1144,24 +1404,39 @@ Exit_CS:
 		//
 		hfs_lock_mount (hfsmp);
 
-		lck_spin_lock(&hfsmp->vcbFreeExtLock);
-		if (vcb->vcbFreeExtCnt == 0 && vcb->hfs_freed_block_count == 0) {
-			vcb->sparseAllocation = *actualStartBlock;
-		}
-		lck_spin_unlock(&hfsmp->vcbFreeExtLock);
-		if (*actualNumBlocks < vcb->hfs_freed_block_count) {
-			vcb->hfs_freed_block_count -= *actualNumBlocks;
-		} else {
-			vcb->hfs_freed_block_count = 0;
+		if (!ISSET(flags, HFS_ALLOC_USE_TENTATIVE | HFS_ALLOC_COMMIT)) {
+			lck_spin_lock(&hfsmp->vcbFreeExtLock);
+			if (hfsmp->vcbFreeExtCnt == 0 && hfsmp->hfs_freed_block_count == 0) {
+				hfsmp->sparseAllocation = extent->startBlock;
+			}
+			lck_spin_unlock(&hfsmp->vcbFreeExtLock);
+			if (extent->blockCount < hfsmp->hfs_freed_block_count) {
+				hfsmp->hfs_freed_block_count -= extent->blockCount;
+			} else {
+				hfsmp->hfs_freed_block_count = 0;
+			}
+
+			if (updateAllocPtr &&
+				((extent->startBlock < hfsmp->hfs_metazone_start) ||
+				 (extent->startBlock > hfsmp->hfs_metazone_end))) {
+				HFS_UPDATE_NEXT_ALLOCATION(hfsmp, extent->startBlock);
+			}
+
+			(void) remove_free_extent_cache(hfsmp, extent->startBlock, extent->blockCount);
 		}
 
-		if (updateAllocPtr &&
-				((*actualStartBlock < VCBTOHFS(vcb)->hfs_metazone_start) ||
-				 (*actualStartBlock > VCBTOHFS(vcb)->hfs_metazone_end))) {
-			HFS_UPDATE_NEXT_ALLOCATION(vcb, *actualStartBlock);
+		if (ISSET(flags, HFS_ALLOC_USE_TENTATIVE)) {
+			(*ap->reservation_in)->rl_start += extent->blockCount;
+			hfsmp->tentativeBlocks -= extent->blockCount;
+			if (rl_len(*ap->reservation_in) <= 0)
+				hfs_free_tentative(hfsmp, ap->reservation_in);
+		} else if (ISSET(flags, HFS_ALLOC_COMMIT)) {
+			// Handle committing locked extents
+			assert(hfsmp->lockedBlocks >= extent->blockCount);
+			(*ap->reservation_in)->rl_start += extent->blockCount;
+			hfsmp->lockedBlocks -= extent->blockCount;
+			hfs_free_locked(hfsmp, ap->reservation_in);
 		}
-
-		(void) remove_free_extent_cache(hfsmp, *actualStartBlock, *actualNumBlocks);
 
 		/* 
 		 * Update the number of free blocks on the volume 
@@ -1169,36 +1444,122 @@ Exit_CS:
 		 * Skip updating the free blocks count if the block are 
 		 * being allocated to relocate data as part of hfs_truncatefs()
 		 */
-		if ((flags & HFS_ALLOC_SKIPFREEBLKS) == 0) {
-			vcb->freeBlocks -= *actualNumBlocks;
+
+		if (ISSET(flags, HFS_ALLOC_TENTATIVE)) {
+			hfsmp->tentativeBlocks += extent->blockCount;
+		} else if (ISSET(flags, HFS_ALLOC_LOCKED)) {
+			hfsmp->lockedBlocks += extent->blockCount;
+		} else if ((flags & HFS_ALLOC_SKIPFREEBLKS) == 0) {
+			hfsmp->freeBlocks -= extent->blockCount;
 		}
-		MarkVCBDirty(vcb);
+		MarkVCBDirty(hfsmp);
 		hfs_unlock_mount(hfsmp);
 
-		hfs_generate_volume_notifications(VCBTOHFS(vcb));
+		hfs_generate_volume_notifications(hfsmp);
+
+		if (ISSET(flags, HFS_ALLOC_TENTATIVE)) {
+			add_to_reserved_list(hfsmp, extent->startBlock, extent->blockCount, 
+								 0, ap->reservation_out);
+		} else if (ISSET(flags, HFS_ALLOC_LOCKED)) {
+			add_to_reserved_list(hfsmp, extent->startBlock, extent->blockCount, 
+								 1, ap->reservation_out);
+		}
+
+		if (ISSET(flags, HFS_ALLOC_IGNORE_TENTATIVE)) {
+			/*
+			 * See if we used tentative blocks.  Note that we cannot
+			 * free the reservations here because we don't have access
+			 * to the external pointers.  All we can do is update the
+			 * reservations and they'll be cleaned up when whatever is
+			 * holding the pointers calls us back.
+			 *
+			 * We use the rangelist code to detect overlaps and
+			 * constrain the tentative block allocation.  Note that
+			 * @end is inclusive so that our rangelist code will
+			 * resolve the various cases for us.  As a result, we need
+			 * to ensure that we account for it properly when removing
+			 * the blocks from the tentative count in the mount point
+			 * and re-inserting the remainder (either head or tail)
+			 */
+			struct rl_entry *range, *next_range;
+			struct rl_head *ranges = &hfsmp->hfs_reserved_ranges[HFS_TENTATIVE_BLOCKS];
+			const uint32_t start = extent->startBlock;
+			const uint32_t end = start + extent->blockCount - 1;
+			TAILQ_FOREACH_SAFE(range, ranges, rl_link, next_range) {
+				switch (rl_overlap(range, start, end)) {
+					case RL_OVERLAPCONTAINSRANGE:
+						// Keep the bigger part
+						if (start - range->rl_start > range->rl_end - end) {
+							// Discard the tail
+							hfsmp->tentativeBlocks -= range->rl_end + 1 - start;
+							hfs_release_summary(hfsmp, end + 1, range->rl_end - end);
+							const uint32_t old_end = range->rl_end;
+							range->rl_end = start - 1;
+							add_free_extent_cache(hfsmp, end + 1, old_end - end);
+						} else {
+							// Discard the head
+							hfsmp->tentativeBlocks -= end + 1 - range->rl_start;
+							hfs_release_summary(hfsmp, range->rl_start,
+												start - range->rl_start);
+							const uint32_t old_start = range->rl_start;
+							range->rl_start = end + 1;
+							add_free_extent_cache(hfsmp, old_start,
+												  start - old_start);
+						}
+						assert(range->rl_end >= range->rl_start);
+						break;
+					case RL_MATCHINGOVERLAP:
+					case RL_OVERLAPISCONTAINED:
+						hfsmp->tentativeBlocks -= rl_len(range);
+						range->rl_end = range->rl_start - 1;
+						hfs_release_reserved(hfsmp, range, HFS_TENTATIVE_BLOCKS);
+						break;
+					case RL_OVERLAPSTARTSBEFORE:
+						hfsmp->tentativeBlocks -= range->rl_end + 1 - start;
+						range->rl_end = start - 1;
+						assert(range->rl_end >= range->rl_start);
+						break;
+					case RL_OVERLAPENDSAFTER:
+						hfsmp->tentativeBlocks -= end + 1 - range->rl_start;
+						range->rl_start = end + 1;
+						assert(range->rl_end >= range->rl_start);
+						break;
+					case RL_NOOVERLAP:
+						break;
+				}
+			}
+		}
 	}
+
+exit:
 
 	if (ALLOC_DEBUG) {
 		if (err == noErr) {
-			if (*actualStartBlock >= hfsmp->totalBlocks) {
+			if (extent->startBlock >= hfsmp->totalBlocks) {
 				panic ("BlockAllocate: vending invalid blocks!");
 			}
-			if (*actualStartBlock >= hfsmp->allocLimit) {
+			if (extent->startBlock >= hfsmp->allocLimit) {
 				panic ("BlockAllocate: vending block past allocLimit!");
 			}
 
-			if ((*actualStartBlock + *actualNumBlocks) >= hfsmp->totalBlocks) {	
+			if ((extent->startBlock + extent->blockCount) >= hfsmp->totalBlocks) {	
 				panic ("BlockAllocate: vending too many invalid blocks!");
 			}
 
-			if ((*actualStartBlock + *actualNumBlocks) >= hfsmp->allocLimit) {	
+			if ((extent->startBlock + extent->blockCount) >= hfsmp->allocLimit) {	
 				panic ("BlockAllocate: vending too many invalid blocks past allocLimit!");
 			}
 		}
 	}
 
+	if (err) {
+		// Just to be safe...
+		extent->startBlock = 0;
+		extent->blockCount = 0;
+	}
+
 	if (hfs_kdebug_allocation & HFSDBG_ALLOC_ENABLED)
-		KERNEL_DEBUG_CONSTANT(HFSDBG_BLOCK_ALLOCATE | DBG_FUNC_END, err, *actualStartBlock, *actualNumBlocks, 0, 0);
+		KERNEL_DEBUG_CONSTANT(HFSDBG_BLOCK_ALLOCATE | DBG_FUNC_END, err, extent->startBlock, extent->blockCount, 0, 0);
 
 	return err;
 }
@@ -1222,6 +1583,7 @@ Exit_CS:
 ; Side effects:
 ;	 The volume bitmap is read and updated; the volume bitmap cache may be changed.
 ;	 The Allocator's red-black trees may also be modified as a result.
+;
 ;________________________________________________________________________________
 */
 
@@ -1229,8 +1591,11 @@ OSErr BlockDeallocate (
 		ExtendedVCB		*vcb,			//	Which volume to deallocate space on
 		u_int32_t		firstBlock,		//	First block in range to deallocate
 		u_int32_t		numBlocks, 		//	Number of contiguous blocks to deallocate
-		u_int32_t 		flags)
+		hfs_block_alloc_flags_t flags)
 {
+	if (ISSET(flags, HFS_ALLOC_TENTATIVE | HFS_ALLOC_LOCKED))
+		return 0;
+
 	OSErr			err;
 	struct hfsmount *hfsmp;
 	hfsmp = VCBTOHFS(vcb);
@@ -1361,7 +1726,8 @@ MetaZoneFreeBlocks(ExtendedVCB *vcb)
 				(void) ReleaseBitmapBlock(vcb, blockRef, false);
 				blockRef = 0;
 			}
-			if (ReadBitmapBlock(vcb, bit, &currCache, &blockRef) != 0) {
+			if (ReadBitmapBlock(vcb, bit, &currCache, &blockRef, 
+								HFS_ALLOC_IGNORE_TENTATIVE) != 0) {
 				return (0);
 			}
 			buffer = (u_int8_t *)currCache;
@@ -1403,6 +1769,104 @@ static u_int32_t NextBitmapBlock(
 }
 
 
+// Assumes @bitmap is aligned to 8 bytes and multiple of 8 bytes.
+static void bits_set(void *bitmap, int start, int end)
+{
+	const int start_bit = start & 63;
+	const int end_bit   = end   & 63;
+
+#define LEFT_MASK(bit)	OSSwapHostToBigInt64(0xffffffffffffffffull << (64 - bit))
+#define RIGHT_MASK(bit)	OSSwapHostToBigInt64(0xffffffffffffffffull >> bit)
+
+	uint64_t *p = (uint64_t *)bitmap + start / 64;
+
+	if ((start & ~63) == (end & ~63)) {
+		// Start and end in same 64 bits
+		*p |= RIGHT_MASK(start_bit) & LEFT_MASK(end_bit);
+	} else {
+		*p++ |= RIGHT_MASK(start_bit);
+
+		int nquads = (end - end_bit - start - 1) / 64;
+
+		while (nquads--)
+			*p++ = 0xffffffffffffffffull;
+
+		if (end_bit)
+			*p |= LEFT_MASK(end_bit);
+	}
+}
+
+// Modifies the buffer and applies any reservations that we might have
+static buf_t process_reservations(hfsmount_t *hfsmp, buf_t bp, off_t offset,
+								  hfs_block_alloc_flags_t flags,
+								  bool always_copy)
+{
+	bool taken_copy = false;
+	void *buffer = (void *)buf_dataptr(bp);
+	const uint32_t nbytes = buf_count(bp);
+	const off_t end = offset + nbytes * 8 - 1;
+
+	for (int i = (ISSET(flags, HFS_ALLOC_IGNORE_TENTATIVE)
+				  ? HFS_LOCKED_BLOCKS : HFS_TENTATIVE_BLOCKS); i < 2; ++i) {
+		struct rl_entry *entry;
+		TAILQ_FOREACH(entry, &hfsmp->hfs_reserved_ranges[i], rl_link) {
+			uint32_t a, b;
+
+			enum rl_overlaptype overlap_type = rl_overlap(entry, offset, end);
+
+			if (overlap_type == RL_NOOVERLAP)
+				continue;
+
+			/*
+			 * If always_copy is false, we only take a copy if B_LOCKED is
+			 * set because ReleaseScanBitmapRange doesn't invalidate the
+			 * buffer in that case.
+			 */
+			if (!taken_copy && (always_copy || ISSET(buf_flags(bp), B_LOCKED))) {
+				buf_t new_bp = buf_create_shadow(bp, true, 0, NULL, NULL);
+				buf_brelse(bp);
+				bp = new_bp;
+				buf_setflags(bp, B_NOCACHE);
+				buffer = (void *)buf_dataptr(bp);
+				taken_copy = true;
+			}
+
+			switch (overlap_type) {
+			case RL_OVERLAPCONTAINSRANGE:
+			case RL_MATCHINGOVERLAP:
+				memset(buffer, 0xff, nbytes);
+				return bp;
+			case RL_OVERLAPISCONTAINED:
+				a = entry->rl_start;
+				b = entry->rl_end;
+				break;
+			case RL_OVERLAPSTARTSBEFORE:
+				a = offset;
+				b = entry->rl_end;
+				break;
+			case RL_OVERLAPENDSAFTER:
+				a = entry->rl_start;
+				b = end;
+				break;
+			case RL_NOOVERLAP:
+				__builtin_unreachable();
+			}
+
+			a -= offset;
+			b -= offset;
+
+			assert(a < buf_count(bp) * 8);
+			assert(b < buf_count(bp) * 8);
+			assert(b >= a);
+
+			// b is inclusive
+			bits_set(buffer, a, b + 1);
+		}
+	} // for (;;)
+
+	return bp;
+}
+
 /*
 ;_______________________________________________________________________
 ;
@@ -1420,11 +1884,11 @@ static u_int32_t NextBitmapBlock(
 ;	blockRef
 ;_______________________________________________________________________
 */
-static OSErr ReadBitmapBlock(
-		ExtendedVCB		*vcb,
-		u_int32_t		bit,
-		u_int32_t		**buffer,
-		uintptr_t		*blockRef)
+static OSErr ReadBitmapBlock(ExtendedVCB		*vcb,
+							 u_int32_t		bit,
+							 u_int32_t		**buffer,
+							 uintptr_t		*blockRef,
+							 hfs_block_alloc_flags_t flags)
 {
 	OSErr			err;
 	struct buf *bp = NULL;
@@ -1463,6 +1927,13 @@ static OSErr ReadBitmapBlock(
 			*blockRef = 0;
 			*buffer = NULL;
 		} else {
+			if (!ISSET(flags, HFS_ALLOC_IGNORE_RESERVED)) {
+				bp = process_reservations(vcb, bp, block * blockSize * 8,
+										  flags, /* always_copy: */ true);
+			}
+
+			buf_setfsprivate(bp, (void *)(uintptr_t)flags);
+
 			*blockRef = (uintptr_t)bp;
 			*buffer = (u_int32_t *)buf_dataptr(bp);
 		}
@@ -1543,6 +2014,9 @@ static OSErr ReadBitmapRange(struct hfsmount *hfsmp, uint32_t offset,
 			*blockRef = 0;
 			*buffer = NULL;
 		} else {
+			bp = process_reservations(hfsmp, bp, (offset * 8), 0,
+									  /* always_copy: */ false);
+
 			*blockRef = bp;
 			*buffer = (u_int32_t *)buf_dataptr(bp);
 		}
@@ -1587,7 +2061,11 @@ static OSErr ReleaseBitmapBlock(
 
 	if (bp) {
 		if (dirty) {
-			// XXXdbg
+			hfs_block_alloc_flags_t flags = (uintptr_t)buf_fsprivate(bp);
+
+			if (!ISSET(flags, HFS_ALLOC_IGNORE_RESERVED))
+				panic("Modified read-only bitmap buffer!");
+
 			struct hfsmount *hfsmp = VCBTOHFS(vcb);
 
 			if (hfsmp->jnl) {
@@ -1641,15 +2119,65 @@ static OSErr ReleaseScanBitmapRange(struct buf *bp ) {
 	return (0);
 }
 
+/* 
+ * @extent.startBlock, on input, contains a preferred block for the
+ * allocation.  @extent.blockCount, on input, contains the minimum
+ * number of blocks acceptable.  Upon success, the result is conveyed
+ * in @extent.
+ */
+static OSErr hfs_alloc_try_hard(hfsmount_t *hfsmp,
+								HFSPlusExtentDescriptor *extent,
+								uint32_t max_blocks,
+								hfs_block_alloc_flags_t flags)
+{
+	OSErr err = dskFulErr;
+
+	const uint32_t min_blocks = extent->blockCount;
+
+	// It's > rather than >= because the last block is always reserved
+	if (extent->startBlock > 0 && extent->startBlock < hfsmp->allocLimit
+		&& hfsmp->allocLimit - extent->startBlock > max_blocks) {
+		/*
+		 * This is just checking to see if there's an extent starting
+		 * at extent->startBlock that will suit.  We only check for
+		 * @max_blocks here; @min_blocks is ignored.
+		 */
+
+		err = BlockFindContiguous(hfsmp, extent->startBlock, extent->startBlock + max_blocks,
+								  max_blocks, max_blocks, true, true,
+								  &extent->startBlock, &extent->blockCount, flags);
+
+		if (err != dskFulErr)
+			return err;
+	}
+
+	err = BlockFindKnown(hfsmp, max_blocks, &extent->startBlock,
+						&extent->blockCount);
+
+	if (!err) {
+		if (extent->blockCount >= max_blocks)
+			return 0;
+	} else if (err != dskFulErr)
+		return err;
+
+	// Try a more exhaustive search
+	return BlockFindContiguous(hfsmp, 1, hfsmp->allocLimit,
+							   min_blocks, max_blocks,
+							   /* useMetaZone: */ true,
+							   /* trustSummary: */ true,
+							   &extent->startBlock, &extent->blockCount, flags);
+}
+
 /*
 _______________________________________________________________________
 
-Routine:	BlockAllocateContig
+Routine:	BlockFindContig
 
-Function:	Allocate a contiguous group of allocation blocks.  The
-			allocation is all-or-nothing.  The caller guarantees that
-			there are enough free blocks (though they may not be
-			contiguous, in which case this call will fail).
+Function:   Find a contiguous group of allocation blocks.  If the
+			minimum cannot be satisfied, nothing is returned.  The
+			caller guarantees that there are enough free blocks
+			(though they may not be contiguous, in which case this
+			call will fail).
 
 Inputs:
 	vcb				Pointer to volume where space is to be allocated
@@ -1663,12 +2191,12 @@ Outputs:
 	actualNumBlocks		Number of blocks allocated, or 0 if error
 _______________________________________________________________________
 */
-static OSErr BlockAllocateContig(
+static OSErr BlockFindContig(
 		ExtendedVCB		*vcb,
 		u_int32_t		startingBlock,
 		u_int32_t		minBlocks,
 		u_int32_t		maxBlocks,
-		u_int32_t		flags,
+		hfs_block_alloc_flags_t flags,
 		u_int32_t		*actualStartBlock,
 		u_int32_t		*actualNumBlocks)
 {
@@ -1689,40 +2217,39 @@ static OSErr BlockAllocateContig(
 	struct hfsmount *hfsmp = VCBTOHFS(vcb);
 
 	if (hfs_kdebug_allocation & HFSDBG_ALLOC_ENABLED)
-		KERNEL_DEBUG_CONSTANT(HFSDBG_ALLOC_CONTIG_BITMAP | DBG_FUNC_START, startingBlock, minBlocks, maxBlocks, useMetaZone, 0);
+		KERNEL_DEBUG_CONSTANT(HFSDBG_FIND_CONTIG_BITMAP | DBG_FUNC_START, startingBlock, minBlocks, maxBlocks, useMetaZone, 0);
 
 	while ((retval == noErr) && (foundStart == 0) && (foundCount == 0)) {
 
 		/* Try and find something that works. */
-		do {
-			/*
-			 * NOTE: If the only contiguous free extent of at least minBlocks
-			 * crosses startingBlock (i.e. starts before, ends after), then we
-			 * won't find it. Earlier versions *did* find this case by letting
-			 * the second search look past startingBlock by minBlocks.  But
-			 * with the free extent cache, this can lead to duplicate entries
-			 * in the cache, causing the same blocks to be allocated twice.
-			 */
-			retval = BlockFindContiguous(vcb, currentStart, vcb->allocLimit, minBlocks, 
-					maxBlocks, useMetaZone, true, &foundStart, &foundCount);
 
-			if (retval == dskFulErr && currentStart != 0) {
-				/*
-				 * We constrain the endingBlock so we don't bother looking for ranges
-				 * that would overlap those found in the previous call, if the summary bitmap
-				 * is not on for this volume.  If it is, then we assume that it was not trust
-				 * -worthy and do a full scan.
-				 */
-				if (hfsmp->hfs_flags & HFS_SUMMARY_TABLE) {
-					retval = BlockFindContiguous(vcb, 1, vcb->allocLimit, minBlocks, 
-							maxBlocks, useMetaZone, false, &foundStart, &foundCount);
-				}
-				else {
-					retval = BlockFindContiguous(vcb, 1, currentStart, minBlocks, 
-							maxBlocks, useMetaZone, false, &foundStart, &foundCount);
-				}
-			}	
-		} while (0);
+		/*
+		 * NOTE: If the only contiguous free extent of at least minBlocks
+		 * crosses startingBlock (i.e. starts before, ends after), then we
+		 * won't find it. Earlier versions *did* find this case by letting
+		 * the second search look past startingBlock by minBlocks.  But
+		 * with the free extent cache, this can lead to duplicate entries
+		 * in the cache, causing the same blocks to be allocated twice.
+		 */
+		retval = BlockFindContiguous(vcb, currentStart, vcb->allocLimit, minBlocks, 
+				maxBlocks, useMetaZone, true, &foundStart, &foundCount, flags);
+
+		if (retval == dskFulErr && currentStart != 0) {
+			/*
+			 * We constrain the endingBlock so we don't bother looking for ranges
+			 * that would overlap those found in the previous call, if the summary bitmap
+			 * is not on for this volume.  If it is, then we assume that it was not trust
+			 * -worthy and do a full scan.
+			 */
+			if (hfsmp->hfs_flags & HFS_SUMMARY_TABLE) {
+				retval = BlockFindContiguous(vcb, 1, vcb->allocLimit, minBlocks, 
+						maxBlocks, useMetaZone, false, &foundStart, &foundCount, flags);
+			}
+			else {
+				retval = BlockFindContiguous(vcb, 1, currentStart, minBlocks,
+						maxBlocks, useMetaZone, false, &foundStart, &foundCount, flags);
+			}
+		}
 
 		if (retval != noErr) {
 			goto bailout;
@@ -1790,16 +2317,14 @@ static OSErr BlockAllocateContig(
 	} // end while loop. 
 
 bailout:
-	/* mark the blocks as in-use */
+
 	if (retval == noErr) {
 		*actualStartBlock = foundStart;
 		*actualNumBlocks = foundCount;
-		err = BlockMarkAllocatedInternal(vcb, *actualStartBlock, *actualNumBlocks);
-
-		if (hfs_kdebug_allocation & HFSDBG_ALLOC_ENABLED) {
-			KERNEL_DEBUG_CONSTANT(HFSDBG_ALLOC_CONTIG_BITMAP | DBG_FUNC_END, *actualStartBlock, *actualNumBlocks, 0, 0, 0);
-		}
 	}
+
+	if (hfs_kdebug_allocation & HFSDBG_ALLOC_ENABLED)
+		KERNEL_DEBUG_CONSTANT(HFSDBG_FIND_CONTIG_BITMAP | DBG_FUNC_END, foundStart, foundCount, retval, 0, 0);
 
 	return retval;
 
@@ -1809,12 +2334,11 @@ bailout:
 /*
 _______________________________________________________________________
 
-Routine:	BlockAllocateAny
+Routine:	BlockFindAny
 
-Function:	Allocate one or more allocation blocks.  If there are fewer
-			free blocks than requested, all free blocks will be
-			allocated.  The caller guarantees that there is at least
-			one free block.
+Function: Find one or more allocation blocks and may return fewer than
+          requested.  The caller guarantees that there is at least one
+          free block.
 
 Inputs:
 	vcb				Pointer to volume where space is to be allocated
@@ -1829,12 +2353,12 @@ Outputs:
 _______________________________________________________________________
 */
 
-static OSErr BlockAllocateAny(
+static OSErr BlockFindAny(
 		ExtendedVCB		*vcb,
 		u_int32_t		startingBlock,
 		register u_int32_t	endingBlock,
 		u_int32_t		maxBlocks,
-		u_int32_t		flags,
+		hfs_block_alloc_flags_t flags,
 		Boolean			trustSummary,
 		u_int32_t		*actualStartBlock,
 		u_int32_t		*actualNumBlocks)
@@ -1884,7 +2408,7 @@ static OSErr BlockAllocateAny(
 		}
 	}
 
-	err =  BlockAllocateAnyBitmap(vcb, start_blk, end_blk, maxBlocks, 
+	err =  BlockFindAnyBitmap(vcb, start_blk, end_blk, maxBlocks,
 			flags, actualStartBlock, actualNumBlocks);
 
 	return err;
@@ -1892,33 +2416,32 @@ static OSErr BlockAllocateAny(
 
 
 /*
- * BlockAllocateAnyBitmap finds free ranges by scanning the bitmap to figure out
- * where the free allocation blocks are.  Inputs and outputs are the same as for
- * BlockAllocateAny and BlockAllocateAnyRBTree
+ * BlockFindAnyBitmap finds free ranges by scanning the bitmap to
+ * figure out where the free allocation blocks are.  Inputs and
+ * outputs are the same as for BlockFindAny.
  */
 
-static OSErr BlockAllocateAnyBitmap(
+static OSErr BlockFindAnyBitmap(
 		ExtendedVCB		*vcb,
 		u_int32_t		startingBlock,
 		register u_int32_t	endingBlock,
 		u_int32_t		maxBlocks,
-		u_int32_t		flags,
+		hfs_block_alloc_flags_t flags,
 		u_int32_t		*actualStartBlock,
 		u_int32_t		*actualNumBlocks)
 {
 	OSErr			err;
-	register u_int32_t	block;			//	current block number
+	register u_int32_t	block = 0;		//	current block number
 	register u_int32_t	currentWord;	//	Pointer to current word within bitmap block
 	register u_int32_t	bitMask;		//	Word with given bits already set (ready to OR in)
 	register u_int32_t	wordsLeft;		//	Number of words left in this bitmap block
 	u_int32_t  *buffer = NULL;
 	u_int32_t  *currCache = NULL;
-	uintptr_t  blockRef;
+	uintptr_t  blockRef = 0;
 	u_int32_t  bitsPerBlock;
 	u_int32_t  wordsPerBlock;
 	Boolean dirty = false;
 	struct hfsmount *hfsmp = VCBTOHFS(vcb);
-	uint32_t summary_block_scan = 0;
 	Boolean useMetaZone = (flags & HFS_ALLOC_METAZONE);
 	Boolean forceFlush = (flags & HFS_ALLOC_FLUSHTXN);
 
@@ -1926,6 +2449,7 @@ static OSErr BlockAllocateAnyBitmap(
 		KERNEL_DEBUG_CONSTANT(HFSDBG_ALLOC_ANY_BITMAP | DBG_FUNC_START, startingBlock, endingBlock, maxBlocks, useMetaZone, 0);
 
 restartSearchAny:
+
 	/*
 	 * When we're skipping the metadata zone and the start/end
 	 * range overlaps with the metadata zone then adjust the 
@@ -1952,7 +2476,7 @@ restartSearchAny:
 	//
 	//	Pre-read the first bitmap block
 	//
-	err = ReadBitmapBlock(vcb, startingBlock, &currCache, &blockRef);
+	err = ReadBitmapBlock(vcb, startingBlock, &currCache, &blockRef, flags);
 	if (err != noErr) goto Exit;
 	buffer = currCache;
 
@@ -1976,6 +2500,8 @@ restartSearchAny:
 	 * While loop 1:
 	 *		Find the first unallocated block starting at 'block'
 	 */
+	uint32_t summary_block_scan = 0;
+
 	block=startingBlock;
 	while (block < endingBlock) {
 		if ((currentWord & bitMask) == 0)
@@ -2024,7 +2550,7 @@ restartSearchAny:
 					goto Exit;
 				}
 
-				err = ReadBitmapBlock(vcb, block, &currCache, &blockRef);
+				err = ReadBitmapBlock(vcb, block, &currCache, &blockRef, flags);
 				if (err != noErr) goto Exit;
 				buffer = currCache;
 				summary_block_scan = block;
@@ -2127,7 +2653,7 @@ restartSearchAny:
 					goto Exit;
 				}
 
-				err = ReadBitmapBlock(vcb, block, &currCache, &blockRef);
+				err = ReadBitmapBlock(vcb, block, &currCache, &blockRef, flags);
 				if (err != noErr) {
 					goto Exit;
 				}
@@ -2150,11 +2676,8 @@ Exit:
 	
 		// sanity check
 		if ((*actualStartBlock + *actualNumBlocks) > vcb->allocLimit) {
-			panic("hfs: BlockAllocateAny: allocation overflow on \"%s\"", vcb->vcbVN);
+			panic("hfs: BlockFindAnyBitmap: allocation overflow on \"%s\"", vcb->vcbVN);
 		}
-
-		/* Mark the bits found as in-use */
-		err = BlockMarkAllocatedInternal (vcb, *actualStartBlock, *actualNumBlocks);
 	}
 	else {
 		*actualStartBlock = 0;
@@ -2171,10 +2694,11 @@ Exit:
 /*
 _______________________________________________________________________
 
-Routine:	BlockAllocateKnown
+Routine:	BlockFindKnown
 
-Function:	Try to allocate space from known free space in the free
-			extent cache.
+Function:   Return a potential extent from the free extent cache.  The
+		    returned extent *must* be marked allocated and removed
+		    from the cache by the *caller*.
 
 Inputs:
 	vcb				Pointer to volume where space is to be allocated
@@ -2189,7 +2713,7 @@ Returns:
 _______________________________________________________________________
 */
 
-static OSErr BlockAllocateKnown(
+static OSErr BlockFindKnown(
 		ExtendedVCB		*vcb,
 		u_int32_t		maxBlocks,
 		u_int32_t		*actualStartBlock,
@@ -2200,7 +2724,7 @@ static OSErr BlockAllocateKnown(
 	struct hfsmount *hfsmp = VCBTOHFS(vcb);
 
 	if (hfs_kdebug_allocation & HFSDBG_ALLOC_ENABLED)
-		KERNEL_DEBUG_CONSTANT(HFSDBG_ALLOC_KNOWN_BITMAP | DBG_FUNC_START, 0, 0, maxBlocks, 0, 0);
+		KERNEL_DEBUG_CONSTANT(HFSDBG_ALLOC_FIND_KNOWN | DBG_FUNC_START, 0, 0, maxBlocks, 0, 0);
 
 	hfs_lock_mount (hfsmp);
 	lck_spin_lock(&vcb->vcbFreeExtLock);
@@ -2209,7 +2733,7 @@ static OSErr BlockAllocateKnown(
 		lck_spin_unlock(&vcb->vcbFreeExtLock);
 		hfs_unlock_mount(hfsmp);
 		if (hfs_kdebug_allocation & HFSDBG_ALLOC_ENABLED)
-			KERNEL_DEBUG_CONSTANT(HFSDBG_ALLOC_KNOWN_BITMAP | DBG_FUNC_END, dskFulErr, *actualStartBlock, *actualNumBlocks, 0, 0);
+			KERNEL_DEBUG_CONSTANT(HFSDBG_ALLOC_FIND_KNOWN | DBG_FUNC_END, dskFulErr, *actualStartBlock, *actualNumBlocks, 0, 0);
 		return dskFulErr;
 	}
 	lck_spin_unlock(&vcb->vcbFreeExtLock);
@@ -2226,29 +2750,17 @@ static OSErr BlockAllocateKnown(
 
 	lck_spin_unlock(&vcb->vcbFreeExtLock);
 
-	remove_free_extent_cache(vcb, *actualStartBlock, *actualNumBlocks);
-
 	// sanity check
 	if ((*actualStartBlock + *actualNumBlocks) > vcb->allocLimit) 
 	{
 		printf ("hfs: BlockAllocateKnown() found allocation overflow on \"%s\"", vcb->vcbVN);
 		hfs_mark_inconsistent(vcb, HFS_INCONSISTENCY_DETECTED);
-		*actualStartBlock = 0;
-		*actualNumBlocks = 0;
 		err = EIO;
-	} 
-	else 
-	{
-		//
-		//	Now mark the found extent in the bitmap
-		//
-		err = BlockMarkAllocatedInternal(vcb, *actualStartBlock, *actualNumBlocks);
-	}
-
-	sanity_check_free_ext(vcb, 0);
+	} else
+		err = 0;
 
 	if (hfs_kdebug_allocation & HFSDBG_ALLOC_ENABLED)
-		KERNEL_DEBUG_CONSTANT(HFSDBG_ALLOC_KNOWN_BITMAP | DBG_FUNC_END, err, *actualStartBlock, *actualNumBlocks, 0, 0);
+		KERNEL_DEBUG_CONSTANT(HFSDBG_ALLOC_FIND_KNOWN | DBG_FUNC_END, err, *actualStartBlock, *actualNumBlocks, 0, 0);
 
 	return err;
 }
@@ -2271,10 +2783,9 @@ OSErr BlockMarkAllocated(
 
 	hfsmp = VCBTOHFS(vcb);
 
-	return BlockMarkAllocatedInternal(vcb, startingBlock, numBlocks);
+	return BlockMarkAllocatedInternal(vcb, startingBlock, numBlocks, 0);
 
 }
-
 
 
 /*
@@ -2298,9 +2809,10 @@ _______________________________________________________________________
 */
 static 
 OSErr BlockMarkAllocatedInternal (
-		ExtendedVCB		*vcb,
-		u_int32_t		startingBlock,
-		register u_int32_t	numBlocks)
+								  ExtendedVCB		*vcb,
+								  u_int32_t		startingBlock,
+								  u_int32_t	numBlocks,
+								  hfs_block_alloc_flags_t flags)
 {
 	OSErr			err;
 	register u_int32_t	*currentWord;	//	Pointer to current word within bitmap block
@@ -2309,14 +2821,24 @@ OSErr BlockMarkAllocatedInternal (
 	u_int32_t		firstBit;		//	Bit index within word of first bit to allocate
 	u_int32_t		numBits;		//	Number of bits in word to allocate
 	u_int32_t		*buffer = NULL;
-	uintptr_t  blockRef;
+	uintptr_t  blockRef = 0;
 	u_int32_t  bitsPerBlock;
 	u_int32_t  wordsPerBlock;
 	// XXXdbg
 	struct hfsmount *hfsmp = VCBTOHFS(vcb);
 
 	if (hfs_kdebug_allocation & HFSDBG_BITMAP_ENABLED)
-		KERNEL_DEBUG_CONSTANT(HFSDBG_MARK_ALLOC_BITMAP | DBG_FUNC_START, startingBlock, numBlocks, 0, 0, 0);
+		KERNEL_DEBUG_CONSTANT(HFSDBG_MARK_ALLOC_BITMAP | DBG_FUNC_START, startingBlock, numBlocks, flags, 0, 0);
+
+#if DEBUG
+
+	struct rl_entry *range;
+	TAILQ_FOREACH(range, &hfsmp->hfs_reserved_ranges[HFS_LOCKED_BLOCKS], rl_link) {
+		assert(rl_overlap(range, startingBlock,
+						  startingBlock + numBlocks - 1) == RL_NOOVERLAP);
+	}
+
+#endif
 
 	int force_flush = 0;
 	/*
@@ -2339,11 +2861,24 @@ OSErr BlockMarkAllocatedInternal (
 
 	hfs_unmap_alloc_extent(vcb, startingBlock, numBlocks);
 
+	/*
+	 * Don't make changes to the disk if we're just reserving.  Note that
+	 * we could do better in the tentative case because we could, in theory,
+	 * avoid the journal flush above.  However, that would mean that we would
+	 * need to catch the callback to stop it incorrectly addding the extent
+	 * to our free cache.
+	 */
+	if (ISSET(flags, HFS_ALLOC_LOCKED | HFS_ALLOC_TENTATIVE)) {
+		err = 0;
+		goto Exit;
+	}
+
 	//
 	//	Pre-read the bitmap block containing the first word of allocation
 	//
 
-	err = ReadBitmapBlock(vcb, startingBlock, &buffer, &blockRef);
+	err = ReadBitmapBlock(vcb, startingBlock, &buffer, &blockRef,
+						  HFS_ALLOC_IGNORE_RESERVED);
 	if (err != noErr) goto Exit;
 	//
 	//	Initialize currentWord, and wordsLeft.
@@ -2378,7 +2913,7 @@ OSErr BlockMarkAllocatedInternal (
 			numBits = numBlocks;					//	entire allocation is inside this one word
 			bitMask &= ~(kAllBitsSetInWord >> (firstBit + numBits));	//	turn off bits after last
 		}
-#if DEBUG_BUILD
+#if DEBUG
 		if ((*currentWord & SWAP_BE32 (bitMask)) != 0) {
 			panic("hfs: BlockMarkAllocatedInternal: blocks already allocated!");
 		}
@@ -2404,7 +2939,8 @@ OSErr BlockMarkAllocatedInternal (
 			err = ReleaseBitmapBlock(vcb, blockRef, true);
 			if (err != noErr) goto Exit;
 
-			err = ReadBitmapBlock(vcb, startingBlock, &buffer, &blockRef);
+			err = ReadBitmapBlock(vcb, startingBlock, &buffer, &blockRef,
+								  HFS_ALLOC_IGNORE_RESERVED);
 			if (err != noErr) goto Exit;
 
 			// XXXdbg
@@ -2416,7 +2952,7 @@ OSErr BlockMarkAllocatedInternal (
 			currentWord = buffer;
 			wordsLeft = wordsPerBlock;
 		}
-#if DEBUG_BUILD
+#if DEBUG
 		if (*currentWord != 0) {
 			panic("hfs: BlockMarkAllocatedInternal: blocks already allocated!");
 		}
@@ -2442,7 +2978,8 @@ OSErr BlockMarkAllocatedInternal (
 			err = ReleaseBitmapBlock(vcb, blockRef, true);
 			if (err != noErr) goto Exit;
 
-			err = ReadBitmapBlock(vcb, startingBlock, &buffer, &blockRef);
+			err = ReadBitmapBlock(vcb, startingBlock, &buffer, &blockRef,
+								  HFS_ALLOC_IGNORE_RESERVED);
 			if (err != noErr) goto Exit;
 
 			// XXXdbg
@@ -2454,7 +2991,7 @@ OSErr BlockMarkAllocatedInternal (
 			currentWord = buffer;
 			wordsLeft = wordsPerBlock;
 		}
-#if DEBUG_BUILD
+#if DEBUG
 		if ((*currentWord & SWAP_BE32 (bitMask)) != 0) {
 			panic("hfs: BlockMarkAllocatedInternal: blocks already allocated!");
 		}
@@ -2623,7 +3160,7 @@ OSErr BlockMarkFreeInternal(
 	u_int32_t	currentBit;		//	Bit index within word of current bit to allocate
 	u_int32_t	numBits;		//	Number of bits in word to allocate
 	u_int32_t	*buffer = NULL;
-	uintptr_t	blockRef;
+	uintptr_t	blockRef = 0;
 	u_int32_t	bitsPerBlock;
 	u_int32_t	wordsPerBlock;
 	// XXXdbg
@@ -2638,25 +3175,44 @@ OSErr BlockMarkFreeInternal(
 	 */
 	if ((do_validate == true) && 
 			(startingBlock + numBlocks > vcb->totalBlocks)) {
-		if (ALLOC_DEBUG) {
-			panic ("BlockMarkFreeInternal() free non-existent blocks at %u (numBlock=%u) on vol %s\n", startingBlock, numBlocks, vcb->vcbVN);
-		}
-
+#if ALLOC_DEBUG || DEBUG
+		panic ("BlockMarkFreeInternal() free non-existent blocks at %u (numBlock=%u) on vol %s\n", startingBlock, numBlocks, vcb->vcbVN);
+		__builtin_unreachable();
+#else
 		printf ("hfs: BlockMarkFreeInternal() trying to free non-existent blocks starting at %u (numBlock=%u) on volume %s\n", startingBlock, numBlocks, vcb->vcbVN);
 		hfs_mark_inconsistent(vcb, HFS_INCONSISTENCY_DETECTED);
 		err = EIO;
 		goto Exit;
+#endif
 	}
 
 	//
 	//	Pre-read the bitmap block containing the first word of allocation
 	//
 
-	err = ReadBitmapBlock(vcb, startingBlock, &buffer, &blockRef);
+	err = ReadBitmapBlock(vcb, startingBlock, &buffer, &blockRef, 
+						  HFS_ALLOC_IGNORE_RESERVED);
 	if (err != noErr) goto Exit;
 	// XXXdbg
 	if (hfsmp->jnl) {
 		journal_modify_block_start(hfsmp->jnl, (struct buf *)blockRef);
+	}
+
+	uint32_t min_unmap = 0, max_unmap = UINT32_MAX;
+
+	// Work out the bounds of any unmap we can send down
+	struct rl_entry *range;
+	for (int i = 0; i < 2; ++i) {
+		TAILQ_FOREACH(range, &hfsmp->hfs_reserved_ranges[i], rl_link) {
+			if (range->rl_start < startingBlock
+				&& range->rl_end >= min_unmap) {
+				min_unmap = range->rl_end + 1;
+			}
+			if (range->rl_end >= startingBlock + numBlocks
+				&& range->rl_start < max_unmap) {
+				max_unmap = range->rl_start;
+			}
+		}
 	}
 
 	//
@@ -2674,7 +3230,7 @@ OSErr BlockMarkFreeInternal(
 	currentWord = buffer + wordIndexInBlock;
 	currentBit = startingBlock % kBitsPerWord;
 	bitMask = kHighBitInWordMask >> currentBit;
-	while (true) {
+	while (unmapStart > min_unmap) {
 		// Move currentWord/bitMask back by one bit
 		bitMask <<= 1;
 		if (bitMask == 0) {
@@ -2729,7 +3285,8 @@ OSErr BlockMarkFreeInternal(
 			err = ReleaseBitmapBlock(vcb, blockRef, true);
 			if (err != noErr) goto Exit;
 
-			err = ReadBitmapBlock(vcb, startingBlock, &buffer, &blockRef);
+			err = ReadBitmapBlock(vcb, startingBlock, &buffer, &blockRef,
+								  HFS_ALLOC_IGNORE_RESERVED);
 			if (err != noErr) goto Exit;
 
 			// XXXdbg
@@ -2766,7 +3323,8 @@ OSErr BlockMarkFreeInternal(
 			err = ReleaseBitmapBlock(vcb, blockRef, true);
 			if (err != noErr) goto Exit;
 
-			err = ReadBitmapBlock(vcb, startingBlock, &buffer, &blockRef);
+			err = ReadBitmapBlock(vcb, startingBlock, &buffer, &blockRef, 
+								  HFS_ALLOC_IGNORE_RESERVED);
 			if (err != noErr) goto Exit;
 
 			// XXXdbg
@@ -2796,7 +3354,7 @@ OSErr BlockMarkFreeInternal(
 	currentWord = buffer + wordIndexInBlock;
 	currentBit = (startingBlock_in + numBlocks_in - 1) % kBitsPerWord;
 	bitMask = kHighBitInWordMask >> currentBit;
-	while (true) {
+	while (unmapStart + unmapCount < max_unmap) {
 		// Move currentWord/bitMask/wordsLeft forward one bit
 		bitMask >>= 1;
 		if (bitMask == 0) {
@@ -2826,10 +3384,12 @@ Exit:
 	return err;
 
 Corruption:
-#if DEBUG_BUILD
+#if DEBUG
 	panic("hfs: BlockMarkFreeInternal: blocks not allocated!");
+	__builtin_unreachable();
 #else
-	printf ("hfs: BlockMarkFreeInternal() trying to free unallocated blocks on volume %s\n", vcb->vcbVN);
+	printf ("hfs: BlockMarkFreeInternal() trying to free unallocated blocks on volume %s <%u, %u>\n",
+			vcb->vcbVN, startingBlock_in, numBlocks_in);
 	hfs_mark_inconsistent(vcb, HFS_INCONSISTENCY_DETECTED);
 	err = EIO;
 	goto Exit;
@@ -2876,7 +3436,8 @@ static OSErr BlockFindContiguous(
 		Boolean			useMetaZone,
 		Boolean			trustSummary,
 		u_int32_t		*actualStartBlock,
-		u_int32_t		*actualNumBlocks)
+		u_int32_t		*actualNumBlocks,
+		hfs_block_alloc_flags_t flags)
 {
 	OSErr			err;
 	register u_int32_t	currentBlock;		//	Block we're currently looking at.
@@ -2888,10 +3449,11 @@ static OSErr BlockFindContiguous(
 	register u_int32_t	bitMask;
 	register u_int32_t	wordsLeft;
 	register u_int32_t	tempWord;
-	uintptr_t  blockRef;
+	uintptr_t  blockRef = 0;
 	u_int32_t  wordsPerBlock;
 	u_int32_t  updated_free_extent = 0;
 	struct hfsmount *hfsmp = (struct hfsmount*) vcb;
+	HFSPlusExtentDescriptor best = { 0, 0 };
 
 	if (hfs_kdebug_allocation & HFSDBG_ALLOC_ENABLED)
 		KERNEL_DEBUG_CONSTANT(HFSDBG_BLOCK_FIND_CONTIG | DBG_FUNC_START, startingBlock, endingBlock, minBlocks, maxBlocks, 0);
@@ -2937,16 +3499,19 @@ static OSErr BlockFindContiguous(
 	 */
 	if ((trustSummary) && (hfsmp->hfs_flags & HFS_SUMMARY_TABLE)) {
 		uint32_t suggestion;
-		if (hfs_find_summary_free (hfsmp, currentBlock, &suggestion) == 0) {
-			currentBlock = suggestion;
-		}		
+		err = hfs_find_summary_free (hfsmp, currentBlock, &suggestion);
+		if (err && err != ENOSPC)
+			goto ErrorExit;
+		if (err == ENOSPC || suggestion >= stopBlock)
+			goto DiskFull;
+		currentBlock = suggestion;
 	}
 
 
 	//
 	//	Pre-read the first bitmap block.
 	//
-	err = ReadBitmapBlock(vcb, currentBlock, &buffer, &blockRef);
+	err = ReadBitmapBlock(vcb, currentBlock, &buffer, &blockRef, flags);
 	if ( err != noErr ) goto ErrorExit;
 
 	//
@@ -2958,6 +3523,10 @@ static OSErr BlockFindContiguous(
 	currentWord = buffer + wordsLeft;
 	wordsLeft = wordsPerBlock - wordsLeft;
 
+	uint32_t remaining = (hfsmp->freeBlocks - hfsmp->lockedBlocks
+						  - (ISSET(flags, HFS_ALLOC_IGNORE_TENTATIVE)
+							 ? 0 : hfsmp->tentativeBlocks));
+
 	/*
 	 * This outer do-while loop is the main body of this function.  Its job is 
 	 * to search through the blocks (until we hit 'stopBlock'), and iterate
@@ -2967,6 +3536,13 @@ static OSErr BlockFindContiguous(
 	do
 	{
 		foundBlocks = 0;
+		/*
+		 * We will try and update the summary table as we search
+		 * below.  Note that we will never update the summary table
+		 * for the first and last blocks that the summary table
+		 * covers.  Ideally, we should, but the benefits probably
+		 * aren't that significant so we leave things alone for now.
+		 */
 		uint32_t summary_block_scan = 0;
 		/*
 		 * Inner while loop 1:
@@ -3037,14 +3613,15 @@ static OSErr BlockFindContiguous(
 				/* Skip over fully allocated bitmap blocks if we can */
 				if ((trustSummary) && (hfsmp->hfs_flags & HFS_SUMMARY_TABLE)) {
 					uint32_t suggestion;
-					if (hfs_find_summary_free (hfsmp, currentBlock, &suggestion) == 0) {
-						if (suggestion < stopBlock) {
-							currentBlock = suggestion;
-						}			
-					}
+					err = hfs_find_summary_free (hfsmp, currentBlock, &suggestion);
+					if (err && err != ENOSPC)
+						goto ErrorExit;
+					if (err == ENOSPC || suggestion >= stopBlock)
+						goto LoopExit;
+					currentBlock = suggestion;
 				}
 
-				err = ReadBitmapBlock(vcb, currentBlock, &buffer, &blockRef);
+				err = ReadBitmapBlock(vcb, currentBlock, &buffer, &blockRef, flags);
 				if ( err != noErr ) goto ErrorExit;
 
 				/*
@@ -3143,7 +3720,7 @@ FoundUnused:
 					}
 				}
 
-				err = ReadBitmapBlock(vcb, currentBlock, &buffer, &blockRef);
+				err = ReadBitmapBlock(vcb, currentBlock, &buffer, &blockRef, flags);
 				if ( err != noErr ) goto ErrorExit;
 
 				currentWord = buffer;
@@ -3185,36 +3762,81 @@ FoundUsed:
 		foundBlocks = currentBlock - firstBlock;
 		if (foundBlocks > maxBlocks)
 			foundBlocks = maxBlocks;
-		if (foundBlocks >= minBlocks)
+
+		if (remaining) {
+			if (foundBlocks > remaining) {
+#if DEBUG || DEVELOPMENT
+				printf("hfs: found more blocks than are indicated free!\n");
+#endif
+				remaining = UINT32_MAX;
+			} else
+				remaining -= foundBlocks;
+		}
+
+		if (ISSET(flags, HFS_ALLOC_TRY_HARD)) {
+			if (foundBlocks > best.blockCount) {
+				best.startBlock = firstBlock;
+				best.blockCount = foundBlocks;
+			}
+
+			if (foundBlocks >= maxBlocks || best.blockCount >= remaining)
+				break;
+
+			/*
+			 * Note that we will go ahead and add this free extent to our
+			 * cache below but that's OK because we'll remove it again if we
+			 * decide to use this extent.
+			 */
+		} else if (foundBlocks >= minBlocks)
 			break;		//	Found what we needed!
 
 		/*
-		 * We did not find the total blocks were were looking for, but 
+		 * We did not find the total blocks we were looking for, but
 		 * add this free block run to our free extent cache list, if possible.
 		 */
-		if (hfsmp->jnl == NULL) {
-			/* If there is no journal, go ahead and add to the free ext cache. */
-			updated_free_extent = add_free_extent_cache(vcb, firstBlock, foundBlocks);
-		}
-		else {
-			/*
-			 * If journaled, only add to the free extent cache if this block is not
-			 * waiting for a TRIM to complete; that implies that the transaction that freed it
-			 * has not yet been committed to stable storage. 
-			 */
-			int recently_deleted = 0;
-			uint32_t nextblock;
-			err = CheckUnmappedBytes(hfsmp, (uint64_t)firstBlock, 
-					(uint64_t)foundBlocks, &recently_deleted, &nextblock);
-			if ((err) || (recently_deleted == 0))  {
-				/* if we hit an error, or the blocks not recently freed, go ahead and insert it */
-				updated_free_extent = add_free_extent_cache(vcb, firstBlock, foundBlocks);
+
+		// If we're ignoring tentative ranges, we need to account for them here
+		if (ISSET(flags, HFS_ALLOC_IGNORE_TENTATIVE)) {
+			struct rl_entry free_extent = rl_make(firstBlock, firstBlock + foundBlocks - 1);
+			struct rl_entry *range;;
+			TAILQ_FOREACH(range, &hfsmp->hfs_reserved_ranges[HFS_TENTATIVE_BLOCKS], rl_link) {
+				rl_subtract(&free_extent, range);
+				if (rl_len(range) == 0)
+					break;
 			}
-			err = 0;
+			firstBlock = free_extent.rl_start;
+			foundBlocks = rl_len(&free_extent);
 		}
 
+		if (foundBlocks) {
+			if (hfsmp->jnl == NULL) {
+				/* If there is no journal, go ahead and add to the free ext cache. */
+				updated_free_extent = add_free_extent_cache(vcb, firstBlock, foundBlocks);
+			}
+			else {
+				/*
+				 * If journaled, only add to the free extent cache if this block is not
+				 * waiting for a TRIM to complete; that implies that the transaction that freed it
+				 * has not yet been committed to stable storage. 
+				 */
+				int recently_deleted = 0;
+				uint32_t nextblock;
+				err = CheckUnmappedBytes(hfsmp, (uint64_t)firstBlock, 
+						(uint64_t)foundBlocks, &recently_deleted, &nextblock);
+				if ((err) || (recently_deleted == 0))  {
+					/* if we hit an error, or the blocks not recently freed, go ahead and insert it */
+					updated_free_extent = add_free_extent_cache(vcb, firstBlock, foundBlocks);
+				}
+				err = 0;
+			}
+		}
 	} while (currentBlock < stopBlock);
 LoopExit:
+
+	if (ISSET(flags, HFS_ALLOC_TRY_HARD)) {
+		firstBlock = best.startBlock;
+		foundBlocks = best.blockCount;
+	}
 
 	//	Return the outputs.
 	if (foundBlocks < minBlocks)
@@ -3336,7 +3958,8 @@ hfs_isallocated_internal(struct hfsmount *hfsmp, u_int32_t startingBlock,
 	/*
 	 * Pre-read the bitmap block containing the first word of allocation
 	 */
-	error = ReadBitmapBlock(hfsmp, startingBlock, &buffer, &blockRef);
+	error = ReadBitmapBlock(hfsmp, startingBlock, &buffer, &blockRef, 
+							HFS_ALLOC_IGNORE_TENTATIVE);
 	if (error)
 		goto JustReturn;
 
@@ -3389,7 +4012,8 @@ hfs_isallocated_internal(struct hfsmount *hfsmp, u_int32_t startingBlock,
 			error = ReleaseBitmapBlock(hfsmp, blockRef, false);
 			if (error) goto Exit;
 
-			error = ReadBitmapBlock(hfsmp, startingBlock, &buffer, &blockRef);
+			error = ReadBitmapBlock(hfsmp, startingBlock, &buffer, &blockRef, 
+									HFS_ALLOC_IGNORE_TENTATIVE);
 			if (error) goto Exit;
 
 			/* Readjust currentWord and wordsLeft. */
@@ -3421,7 +4045,8 @@ hfs_isallocated_internal(struct hfsmount *hfsmp, u_int32_t startingBlock,
 			error = ReleaseBitmapBlock(hfsmp, blockRef, false);
 			if (error) goto Exit;
 
-			error = ReadBitmapBlock(hfsmp, startingBlock, &buffer, &blockRef);
+			error = ReadBitmapBlock(hfsmp, startingBlock, &buffer, &blockRef, 
+									HFS_ALLOC_IGNORE_TENTATIVE);
 			if (error) goto Exit;
 
 			currentWord = buffer;
@@ -3721,7 +4346,7 @@ int hfs_find_summary_free (struct hfsmount *hfsmp, uint32_t block,  uint32_t *ne
 		 * Compute how much of hfs_summary_size is useable for the given number
 		 * of allocation blocks eligible on this FS.
 		 */
-		err = hfs_get_summary_index (hfsmp, hfsmp->allocLimit, &summary_cap);
+		err = hfs_get_summary_index (hfsmp, hfsmp->allocLimit - 1, &summary_cap);
 		if (err) {
 			goto summary_exit;
 		}
@@ -3781,7 +4406,7 @@ int hfs_find_summary_free (struct hfsmount *hfsmp, uint32_t block,  uint32_t *ne
 		if (maybe_has_blocks == 0) {
 			err = ENOSPC;
 		}
-	}	
+	}
 
 	/* If the summary table is not active for this mount, we'll just return ENOSPC */
 summary_exit:
@@ -4578,15 +5203,7 @@ static int hfs_scan_range_size (struct hfsmount *hfsmp, uint32_t bitmap_st, uint
 	 * have to complete the I/O on VBMIOSize boundaries, but we can only read
 	 * up until the end of the bitmap file.
 	 */
-	bitmap_len = hfsmp->totalBlocks / kBitsPerByte;
-	if (bitmap_len % (hfsmp->blockSize)) {
-		bitmap_len = (bitmap_len / hfsmp->blockSize);
-		/* round up to the end of the next alloc block */
-		bitmap_len++;
-
-		/* Convert the # of alloc blocks back to bytes. */
-		bitmap_len = bitmap_len * hfsmp->blockSize;	
-	}
+	bitmap_len = roundup(hfsmp->totalBlocks, hfsmp->blockSize * 8) / 8;
 
 	remaining_bitmap = bitmap_len - bitmap_off;
 
@@ -4618,7 +5235,7 @@ int hfs_isallocated_scan(struct hfsmount *hfsmp, u_int32_t startingBlock, u_int3
 	u_int32_t  firstBit;       // Bit index within word of first bit to allocate
 	u_int32_t  numBits;        // Number of bits in word to allocate
 	u_int32_t  bitsPerBlock;
-	uintptr_t  blockRef;
+	uintptr_t  blockRef = 0;
 	u_int32_t  wordsPerBlock;
 	u_int32_t  numBlocks = 1;
 	u_int32_t  *buffer = NULL;
@@ -4635,7 +5252,8 @@ int hfs_isallocated_scan(struct hfsmount *hfsmp, u_int32_t startingBlock, u_int3
 		/*
 		 * Pre-read the bitmap block containing the first word of allocation
 		 */
-		error = ReadBitmapBlock(hfsmp, startingBlock, &buffer, &blockRef);
+		error = ReadBitmapBlock(hfsmp, startingBlock, &buffer, &blockRef,
+								HFS_ALLOC_IGNORE_TENTATIVE);
 		if (error)
 			return (error);
 	}
@@ -4755,10 +5373,16 @@ u_int32_t UpdateAllocLimit (struct hfsmount *hfsmp, u_int32_t new_end_block) {
 	/* Force a rebuild of the summary table. */
 	(void) hfs_rebuild_summary (hfsmp);
 
+	// Delete any tentative ranges that are in the area we're shrinking
+	struct rl_entry *range, *next_range;
+	TAILQ_FOREACH_SAFE(range, &hfsmp->hfs_reserved_ranges[HFS_TENTATIVE_BLOCKS],
+					   rl_link, next_range) {
+		if (rl_overlap(range, new_end_block, RL_INFINITY) != RL_NOOVERLAP)
+			hfs_release_reserved(hfsmp, range, HFS_TENTATIVE_BLOCKS);
+	}
+
 	return 0;
-
 }
-
 
 /*
  * Remove an extent from the list of free extents.
@@ -5017,6 +5641,16 @@ static Boolean add_free_extent_cache(struct hfsmount *hfsmp, u_int32_t startBloc
 	if (hfs_kdebug_allocation & HFSDBG_EXT_CACHE_ENABLED)
 		KERNEL_DEBUG_CONSTANT(HFSDBG_ADD_EXTENT_CACHE | DBG_FUNC_START, startBlock, blockCount, 0, 0, 0);
 
+#if DEBUG
+	for (i = 0; i < 2; ++i) {
+		struct rl_entry *range;
+		TAILQ_FOREACH(range, &hfsmp->hfs_reserved_ranges[i], rl_link) {
+			assert(rl_overlap(range, startBlock,
+							  startBlock + blockCount - 1) == RL_NOOVERLAP);
+		}
+	}
+#endif
+
 	/* No need to add extent that is beyond current allocLimit */
 	if (startBlock >= hfsmp->allocLimit) {
 		goto out_not_locked;
@@ -5151,5 +5785,466 @@ static void sanity_check_free_ext(struct hfsmount *hfsmp, int check_allocated)
 		}
 	}
 	lck_spin_unlock(&hfsmp->vcbFreeExtLock);
+}
+
+#define BIT_RIGHT_MASK(bit)	(0xffffffffffffffffull >> (bit))
+#define kHighBitInDoubleWordMask 0x8000000000000000ull
+
+static int clzll(uint64_t x)
+{
+	if (x == 0)
+		return 64;
+	else
+		return __builtin_clzll(x);
+}
+
+#if !HFS_ALLOC_TEST
+
+static errno_t get_more_bits(bitmap_context_t *bitmap_ctx)
+{
+	uint32_t	start_bit;
+	uint32_t	iosize = 0;
+	uint32_t	byte_offset;
+	uint32_t	last_bitmap_block;
+	int			error;
+	struct hfsmount *hfsmp = bitmap_ctx->hfsmp;
+#if !HFS_ALLOC_TEST
+	uint64_t	lock_elapsed;
+#endif
+
+
+	if (bitmap_ctx->bp)
+		ReleaseScanBitmapRange(bitmap_ctx->bp);
+	
+	if (msleep(NULL, NULL, PINOD | PCATCH,
+			   "hfs_fsinfo", NULL) == EINTR) {
+		return EINTR;
+	}
+
+#if !HFS_ALLOC_TEST
+	/*
+	 * Let someone else use the allocation map after we've processed over HFS_FSINFO_MAX_LOCKHELD_TIME .
+	 * lock_start is initialized in hfs_find_free_extents().
+	 */
+	absolutetime_to_nanoseconds(mach_absolute_time() - bitmap_ctx->lock_start, &lock_elapsed);
+
+	if (lock_elapsed >= HFS_FSINFO_MAX_LOCKHELD_TIME) {
+
+		hfs_systemfile_unlock(hfsmp, bitmap_ctx->lockflags);
+		
+		/* add tsleep here to force context switch and fairness */
+		tsleep((caddr_t)get_more_bits, PRIBIO, "hfs_fsinfo", 1);
+
+		hfs_journal_lock(hfsmp);
+
+		/* Flush the journal and wait for all I/Os to finish up */
+		error = hfs_flush(hfsmp, HFS_FLUSH_JOURNAL_META);
+		if (error) {
+			hfs_journal_unlock(hfsmp);
+			return error;
+		}
+
+		/*
+		 * Take bitmap lock to ensure it is not being modified while journal is still held.
+		 * Since we are reading larger than normal blocks from the bitmap, which
+		 * might confuse other parts of the bitmap code using normal blocks, we
+		 * take exclusive lock here.
+		 */
+		bitmap_ctx->lockflags = hfs_systemfile_lock(hfsmp, SFL_BITMAP, HFS_EXCLUSIVE_LOCK);
+
+		bitmap_ctx->lock_start = mach_absolute_time();
+
+		/* Release the journal lock */
+		hfs_journal_unlock(hfsmp);
+
+		/*
+		 * Bitmap is read in large block size (up to 1MB),
+		 * unlike the runtime which reads the bitmap in the
+		 * 4K block size.  If the bitmap is read by both ways
+		 * at the same time, it can result in multiple buf_t with
+		 * different sizes and potentially case data corruption.
+		 * To avoid this, we invalidate all the existing buffers
+		 * associated with the bitmap vnode.
+		 */
+		error = buf_invalidateblks(hfsmp->hfs_allocation_vp, 0, 0, 0);
+		if (error) {
+			/* hfs_systemfile_unlock will be called in the caller */
+			return error;
+		}
+	}
+#endif
+
+	start_bit = bitmap_ctx->run_offset;
+
+	if (start_bit >= bitmap_ctx->hfsmp->totalBlocks) {
+		bitmap_ctx->chunk_end = 0;
+		bitmap_ctx->bp = NULL;
+		bitmap_ctx->bitmap = NULL;
+		return 0;
+	}
+
+	assert(start_bit % 8 == 0);
+
+	/*
+	 * Compute how much I/O we should generate here.
+	 * hfs_scan_range_size will validate that the start bit
+	 * converted into a byte offset into the bitmap file,
+	 * is aligned on a VBMIOSize boundary.
+	 */
+	error = hfs_scan_range_size (bitmap_ctx->hfsmp, start_bit, &iosize);
+	if (error)
+		return error;
+
+	assert(iosize != 0);
+
+	/* hfs_scan_range_size should have verified startbit.  Convert it to bytes */
+	byte_offset = start_bit / kBitsPerByte;
+
+	/*
+	 * When the journal replays blocks, it does so by writing directly to the disk
+	 * device (bypassing any filesystem vnodes and such).  When it finishes its I/Os
+	 * it also immediately re-reads and invalidates the range covered by the bp so
+	 * it does not leave anything lingering in the cache (for iosize reasons).
+	 *
+	 * As such, it is safe to do large I/Os here with ReadBitmapRange.
+	 *
+	 * NOTE: It is not recommended, but it is possible to call the function below
+	 * on sections of the bitmap that may be in core already as long as the pages are not
+	 * dirty.  In that case, we'd notice that something starting at that
+	 * logical block of the bitmap exists in the metadata cache, and we'd check
+	 * if the iosize requested is the same as what was already allocated for it.
+	 * Odds are pretty good we're going to request something larger.  In that case,
+	 * we just free the existing memory associated with the buf and reallocate a
+	 * larger range. This function should immediately invalidate it as soon as we're
+	 * done scanning, so this shouldn't cause any coherency issues.
+	 */
+	error = ReadBitmapRange(bitmap_ctx->hfsmp, byte_offset, iosize, (uint32_t **)&bitmap_ctx->bitmap, &bitmap_ctx->bp);
+	if (error)
+		return error;
+
+	/*
+	 * At this point, we have a giant wired buffer that represents some portion of
+	 * the bitmap file that we want to analyze.   We may not have gotten all 'iosize'
+	 * bytes though, so clip our ending bit to what we actually read in.
+	 */
+	last_bitmap_block = start_bit + buf_count(bitmap_ctx->bp) * kBitsPerByte;
+
+	/* Cap the last block to the total number of blocks if required */
+	if (last_bitmap_block > bitmap_ctx->hfsmp->totalBlocks)
+		last_bitmap_block = bitmap_ctx->hfsmp->totalBlocks;
+
+	bitmap_ctx->chunk_current = 0;  // new chunk of bitmap
+	bitmap_ctx->chunk_end = last_bitmap_block - start_bit;
+
+	return 0;
+}
+
+#endif // !HFS_ALLOC_TEST
+
+// Returns number of contiguous bits set at start
+static int bit_count_set(void *bitmap, int start, int end)
+{
+	if (start == end)
+		return 0;
+
+	assert(end > start);
+
+	const int start_bit = start & 63;
+	const int end_bit   = end & 63;
+
+	uint64_t *p = (uint64_t *)bitmap + start / 64;
+	uint64_t x = ~OSSwapBigToHostInt64(*p);
+
+	if ((start & ~63) == (end & ~63)) {
+		// Start and end in same 64 bits
+		x = (x & BIT_RIGHT_MASK(start_bit)) | BIT_RIGHT_MASK(end_bit);
+		return clzll(x) - start_bit;
+	}
+
+	// Deal with initial unaligned bit
+	x &= BIT_RIGHT_MASK(start_bit);
+
+	if (x)
+		return clzll(x) - start_bit;
+
+	// Go fast
+	++p;
+	int count = 64 - start_bit;
+	int nquads = (end - end_bit - start - 1) / 64;
+
+	while (nquads--) {
+		if (*p != 0xffffffffffffffffull) {
+			x = ~OSSwapBigToHostInt64(*p);
+			return count + clzll(x);
+		}
+		++p;
+		count += 64;
+	}
+
+	if (end_bit) {
+		x = ~OSSwapBigToHostInt64(*p) | BIT_RIGHT_MASK(end_bit);
+		count += clzll(x);
+	}
+
+	return count;
+}
+
+/* Returns the number of a run of cleared bits:
+ *  bitmap is a single chunk of memory being examined
+ *  start: the start bit relative to the current buffer to be examined; start is inclusive.
+ *  end: the end bit relative to the current buffer to be examined; end is not inclusive.
+ */
+static int bit_count_clr(void *bitmap, int start, int end)
+{
+	if (start == end)
+		return 0;
+
+	assert(end > start);
+
+	const int start_bit = start & 63;
+	const int end_bit   = end & 63;
+
+	uint64_t *p = (uint64_t *)bitmap + start / 64;
+	uint64_t x = OSSwapBigToHostInt64(*p);
+
+	if ((start & ~63) == (end & ~63)) {
+		// Start and end in same 64 bits
+		x = (x & BIT_RIGHT_MASK(start_bit)) | BIT_RIGHT_MASK(end_bit);
+
+		return clzll(x) - start_bit;
+	}
+
+	// Deal with initial unaligned bit
+	x &= BIT_RIGHT_MASK(start_bit);
+
+	if (x)
+		return clzll(x) - start_bit;
+
+	// Go fast
+	++p;
+	int count = 64 - start_bit;
+	int nquads = (end - end_bit - start - 1) / 64;
+
+	while (nquads--) {
+		if (*p) {
+			x = OSSwapBigToHostInt64(*p);
+			return count + clzll(x);
+		}
+		++p;
+		count += 64;
+	}
+
+	if (end_bit) {
+		x = OSSwapBigToHostInt64(*p) | BIT_RIGHT_MASK(end_bit);
+
+		count += clzll(x);
+	}
+
+	return count;
+}
+
+#if !HFS_ALLOC_TEST
+static errno_t update_summary_table(bitmap_context_t *bitmap_ctx, uint32_t start, uint32_t count, bool set)
+{
+	uint32_t	end, start_summary_bit, end_summary_bit;
+	errno_t		error = 0;
+
+	if (count == 0)
+		goto out;
+
+	if (!ISSET(bitmap_ctx->hfsmp->hfs_flags, HFS_SUMMARY_TABLE))
+		return 0;
+
+	if (hfs_get_summary_index (bitmap_ctx->hfsmp, start, &start_summary_bit)) {
+		error = EINVAL;
+		goto out;
+	}
+
+	end = start + count - 1;
+	if (hfs_get_summary_index (bitmap_ctx->hfsmp, end, &end_summary_bit)) {
+		error = EINVAL;
+		goto out;
+	}
+
+	// if summary table bit has been updated with free block previously, leave it.
+	if ((start_summary_bit == bitmap_ctx->last_free_summary_bit) && set)
+		start_summary_bit++;
+
+	for (uint32_t summary_bit = start_summary_bit; summary_bit <= end_summary_bit; summary_bit++)
+		hfs_set_summary (bitmap_ctx->hfsmp, summary_bit, set);
+
+	if (!set)
+		bitmap_ctx->last_free_summary_bit = end_summary_bit;
+
+out:
+	return error;
+
+}
+#endif //!HFS_ALLOC_TEST
+
+/*
+ * Read in chunks of the bitmap into memory, and find a run of cleared/set bits;
+ * the run can extend across chunk boundaries.
+ * bit_count_clr can be passed to get a run of cleared bits.
+ * bit_count_set can be passed to get a run of set bits.
+ */
+static errno_t hfs_bit_count(bitmap_context_t *bitmap_ctx, int (*fn)(void *, int ,int), uint32_t *bit_count)
+{
+	int count;
+	errno_t error = 0;
+
+	*bit_count = 0;
+
+	do {
+		if (bitmap_ctx->run_offset == 0 || bitmap_ctx->chunk_current == bitmap_ctx->chunk_end) {
+			if ((error = get_more_bits(bitmap_ctx)) != 0)
+				goto out;
+		}
+
+		if (bitmap_ctx->chunk_end == 0)
+			break;
+
+		count = fn(bitmap_ctx->bitmap, bitmap_ctx->chunk_current, bitmap_ctx->chunk_end);
+
+		bitmap_ctx->run_offset += count;
+		bitmap_ctx->chunk_current += count;
+		*bit_count += count;
+
+	} while (bitmap_ctx->chunk_current >= bitmap_ctx->chunk_end && count);
+
+out:
+	return error;
+
+}
+
+// Returns count of number of bits clear
+static errno_t hfs_bit_count_clr(bitmap_context_t *bitmap_ctx, uint32_t *count)
+{
+	return hfs_bit_count(bitmap_ctx, bit_count_clr, count);
+}
+
+// Returns count of number of bits set
+static errno_t hfs_bit_count_set(bitmap_context_t *bitmap_ctx, uint32_t *count)
+{
+	return hfs_bit_count(bitmap_ctx, bit_count_set, count);
+}
+
+static uint32_t hfs_bit_offset(bitmap_context_t *bitmap_ctx)
+{
+	return bitmap_ctx->run_offset;
+}
+
+/*
+ * Perform a full scan of the bitmap file.
+ * Note: during the scan of bitmap file, it may drop and reacquire the
+ * bitmap lock to let someone else use the bitmap for fairness.
+ * Currently it is used by HFS_GET_FSINFO statistic gathing, which
+ * is run while other processes might perform HFS operations.
+ */
+
+errno_t hfs_find_free_extents(struct hfsmount *hfsmp,
+							  void (*callback)(void *data, off_t free_extent_size), void *callback_arg)
+{
+	struct bitmap_context bitmap_ctx;
+	uint32_t count;
+	errno_t error = 0;
+
+	if ((hfsmp->hfs_flags & HFS_SUMMARY_TABLE) == 0) {
+		error = hfs_init_summary(hfsmp);
+		if (error)
+			return error;
+	}
+
+	bzero(&bitmap_ctx, sizeof(struct bitmap_context));
+
+	/*
+	 * The journal maintains list of recently deallocated blocks to
+	 * issue DKIOCUNMAPs when the corresponding journal transaction is
+	 * flushed to the disk.  To avoid any race conditions, we only
+	 * want one active trim list.  Therefore we make sure that the
+	 * journal trim list is sync'ed, empty, and not modifiable for
+	 * the duration of our scan.
+	 *
+	 * Take the journal lock before flushing the journal to the disk.
+	 * We will keep on holding the journal lock till we don't get the
+	 * bitmap lock to make sure that no new journal transactions can
+	 * start.  This will make sure that the journal trim list is not
+	 * modified after the journal flush and before getting bitmap lock.
+	 * We can release the journal lock after we acquire the bitmap
+	 * lock as it will prevent any further block deallocations.
+	 */
+	hfs_journal_lock(hfsmp);
+
+	/* Flush the journal and wait for all I/Os to finish up */
+	error = hfs_flush(hfsmp, HFS_FLUSH_JOURNAL_META);
+	if (error) {
+		hfs_journal_unlock(hfsmp);
+		return error;
+	}
+
+	/*
+	 * Take bitmap lock to ensure it is not being modified.
+	 * Since we are reading larger than normal blocks from the bitmap, which
+	 * might confuse other parts of the bitmap code using normal blocks, we
+	 * take exclusive lock here.
+	 */
+	bitmap_ctx.lockflags = hfs_systemfile_lock(hfsmp, SFL_BITMAP, HFS_EXCLUSIVE_LOCK);
+
+#if !HFS_ALLOC_TEST
+	bitmap_ctx.lock_start = mach_absolute_time();
+#endif
+
+	/* Release the journal lock */
+	hfs_journal_unlock(hfsmp);
+
+	/*
+	 * Bitmap is read in large block size (up to 1MB),
+	 * unlike the runtime which reads the bitmap in the
+	 * 4K block size.  If the bitmap is read by both ways
+	 * at the same time, it can result in multiple buf_t with
+	 * different sizes and potentially case data corruption.
+	 * To avoid this, we invalidate all the existing buffers
+	 * associated with the bitmap vnode.
+	 */
+	error = buf_invalidateblks(hfsmp->hfs_allocation_vp, 0, 0, 0);
+	if (error)
+		goto out;
+
+	/*
+	 * Get the list of all free extent ranges.  hfs_alloc_scan_range()
+	 * will call hfs_fsinfo_data_add() to account for all the free
+	 * extent ranges found during scan.
+	 */
+	bitmap_ctx.hfsmp = hfsmp;
+	bitmap_ctx.run_offset = 0;
+
+	while (bitmap_ctx.run_offset < hfsmp->totalBlocks) {
+
+		uint32_t start = hfs_bit_offset(&bitmap_ctx);
+
+		if ((error = hfs_bit_count_clr(&bitmap_ctx, &count)) != 0)
+			goto out;
+
+		if (count)
+			callback(callback_arg, hfs_blk_to_bytes(count, hfsmp->blockSize));
+
+		if ((error = update_summary_table(&bitmap_ctx, start, count, false)) != 0)
+			goto out;
+
+		start = hfs_bit_offset(&bitmap_ctx);
+
+		if ((error = hfs_bit_count_set(&bitmap_ctx, &count)) != 0)
+			goto out;
+
+		if ((error = update_summary_table(&bitmap_ctx, start, count, true)) != 0)
+			goto out;
+	}
+
+out:
+	if (bitmap_ctx.lockflags) {
+		hfs_systemfile_unlock(hfsmp, bitmap_ctx.lockflags);
+	}
+
+	return error;
 }
 

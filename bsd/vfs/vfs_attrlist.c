@@ -473,7 +473,7 @@ struct getattrlist_attrtab {
 static struct getattrlist_attrtab getattrlist_common_tab[] = {
 	{ATTR_CMN_NAME,		VATTR_BIT(va_name),		sizeof(struct attrreference),	KAUTH_VNODE_READ_ATTRIBUTES},
 	{ATTR_CMN_DEVID,	0,				sizeof(dev_t),			KAUTH_VNODE_READ_ATTRIBUTES},
-	{ATTR_CMN_FSID,		VATTR_BIT(va_fsid),		sizeof(fsid_t),			KAUTH_VNODE_READ_ATTRIBUTES},
+	{ATTR_CMN_FSID,		0,				sizeof(fsid_t),			KAUTH_VNODE_READ_ATTRIBUTES},
 	{ATTR_CMN_OBJTYPE,	0,				sizeof(fsobj_type_t),		KAUTH_VNODE_READ_ATTRIBUTES},
 	{ATTR_CMN_OBJTAG,	0,				sizeof(fsobj_tag_t),		KAUTH_VNODE_READ_ATTRIBUTES},
 	{ATTR_CMN_OBJID,	VATTR_BIT(va_fileid) | VATTR_BIT(va_linkid), sizeof(fsobj_id_t), KAUTH_VNODE_READ_ATTRIBUTES},
@@ -1445,14 +1445,6 @@ attr_pack_common(vfs_context_t ctx, struct vnode *vp,  struct attrlist *alp,
 			abp->actual.commonattr |= ATTR_CMN_FSID;
 		} else if (VATTR_IS_SUPPORTED(vap, va_fsid64)) {
 			ATTR_PACK8((*abp), vap->va_fsid64);
-			abp->actual.commonattr |= ATTR_CMN_FSID;
-		} else if (VATTR_IS_SUPPORTED(vap, va_fsid)) {
-			fsid_t fsid;
-
-			/* va_fsid is 32 bits */
-			fsid.val[0] = vap->va_fsid;
-			fsid.val[1] = 0;
-			ATTR_PACK8((*abp), fsid);
 			abp->actual.commonattr |= ATTR_CMN_FSID;
 		} else if (!return_valid || pack_invalid) {
 			fsid_t fsid = {{0}};
@@ -2493,17 +2485,6 @@ vfs_attr_pack(vnode_t vp, uio_t uio, struct attrlist *alp, uint64_t options,
 	error = getattrlist_setupvattr_all(alp, vap, v_type, &fixedsize,
 	    proc_is64bit(vfs_context_proc(ctx)));
 
-	/*
-	 * Ugly hack to correctly report fsids. vs_fsid is 32 bits and
-	 * there is va_fsid64 as well but filesystems have to say that
-	 * both are supported so that the value can be used correctly.
-	 * So we set va_fsid if the filesystem has only set va_fsid64.
-	 */
-
-	if ((alp->commonattr & ATTR_CMN_FSID) &&
-	    VATTR_IS_SUPPORTED(vap, va_fsid64))
-		VATTR_SET_SUPPORTED(vap, va_fsid);
-
 	if (error) {
 		VFS_DEBUG(ctx, vp,
 		    "ATTRLIST - ERROR: setup for request failed");
@@ -2835,6 +2816,18 @@ refill_fd_direntries(vfs_context_t ctx, vnode_t dvp, struct fd_vn_data *fvd,
 	int eofflag;
 	int nentries;
 	int error;
+
+	/*
+	 * If the last readdir returned EOF, don't try again.
+	 */
+	if (fvd->fv_eofflag) {
+		*eofflagp = 1;
+		if (fvd->fv_buf) {
+			FREE(fvd->fv_buf, M_FD_DIRBUF);
+			fvd->fv_buf = NULL;
+		}
+		return 0;
+	}
 
 	error = 0;
 
@@ -3226,9 +3219,18 @@ readdirattr(vnode_t dvp, struct fd_vn_data *fvd, uio_t auio,
 		}
 
 		/*
-		 * We have an iocount on the directory already
+		 * We have an iocount on the directory already.
+		 * 
+		 * Note that we supply NOCROSSMOUNT to the namei call as we attempt to acquire
+		 * a vnode for this particular entry.  This is because the native call will
+		 * (likely) attempt to emit attributes based on its own metadata in order to avoid
+		 * creating vnodes where posssible.  If the native call is not going to  walk
+		 * up the vnode mounted-on chain in order to find the top-most mount point, then we
+		 * should not either in this emulated readdir+getattrlist() approach.  We  
+		 * will be responsible for setting DIR_MNTSTATUS_MNTPOINT on that directory that
+		 * contains a mount point.  
 		 */
-		NDINIT(&nd, LOOKUP, OP_GETATTR, AUDITVNPATH1 | USEDVP,
+		NDINIT(&nd, LOOKUP, OP_GETATTR, (AUDITVNPATH1 | USEDVP | NOCROSSMOUNT), 
 		    UIO_SYSSPACE, CAST_USER_ADDR_T(name_buffer), ctx);
 
 		nd.ni_dvp = dvp;
@@ -3472,9 +3474,14 @@ getattrlistbulk(proc_t p, struct getattrlistbulk_args *uap, int32_t *retval)
 	 */
 	if (!fp->f_fglob->fg_offset) {
 		fvdata->fv_offset = 0;
-		if (fvdata->fv_buf) {
-			FV_BUF_FREE(fvdata, M_FD_DIRBUF);
-		}
+		if (fvdata->fv_buf)
+			FREE(fvdata->fv_buf, M_FD_DIRBUF);
+		fvdata->fv_buf = NULL;
+		fvdata->fv_bufsiz = 0;
+		fvdata->fv_bufdone = 0;
+		fvdata->fv_soff = 0;
+		fvdata->fv_eoff = 0;
+		fvdata->fv_eofflag = 0;
 	}
 
 	auio = uio_createwithbuffer(1, fvdata->fv_offset, segflg, UIO_READ,
@@ -3497,26 +3504,37 @@ getattrlistbulk(proc_t p, struct getattrlistbulk_args *uap, int32_t *retval)
 		struct vnode_attr va;
 		char *va_name;
 
-		eofflag = 0;
-		count = 0;
+		if (fvdata->fv_eofflag && !fvdata->fv_buf) {
+			/*
+			 * If the last successful VNOP_GETATTRLISTBULK or
+			 * VNOP_READDIR returned EOF, don't try again.
+			 */
+			eofflag = 1;
+			count = 0;
+			error = 0;
+		} else {
+			eofflag = 0;
+			count = 0;
 
-		VATTR_INIT(&va);
-		MALLOC(va_name, char *, MAXPATHLEN, M_TEMP, M_WAITOK|M_ZERO);
-		va.va_name = va_name;
+			VATTR_INIT(&va);
+			MALLOC(va_name, char *, MAXPATHLEN, M_TEMP,
+			    M_WAITOK | M_ZERO);
+			va.va_name = va_name;
 
-		(void)getattrlist_setupvattr_all(&al, &va, VNON, NULL,
-		    IS_64BIT_PROCESS(p));
+			(void)getattrlist_setupvattr_all(&al, &va, VNON, NULL,
+			    IS_64BIT_PROCESS(p));
 
-		error = VNOP_GETATTRLISTBULK(dvp, &al, &va, auio, NULL,
-		    options, &eofflag, &count, ctx);
+			error = VNOP_GETATTRLISTBULK(dvp, &al, &va, auio, NULL,
+			    options, &eofflag, &count, ctx);
 
-		FREE(va_name, M_TEMP);
+			FREE(va_name, M_TEMP);
 
-		/*
-		 * cache state of eofflag.
-		 */
-		if (!error) {
-			fvdata->fv_eofflag = eofflag;
+			/*
+			 * cache state of eofflag.
+			 */
+			if (!error) {
+				fvdata->fv_eofflag = eofflag;
+			}
 		}
 	}
 
@@ -3530,22 +3548,6 @@ getattrlistbulk(proc_t p, struct getattrlistbulk_args *uap, int32_t *retval)
 
 		error = readdirattr(dvp, fvdata, auio, &al, options,
 		    &count, &eofflag, ctx);
-	}
-
-	if (error && fvdata->fv_eofflag) {
-		/*
-		 * Some filesystems return EINVAL if called again when,
-		 * for a directory, they have already returned EOF. We
-		 * have the EOF state from the last successful call to it.
-		 * If this is an error just reuse the state from the last
-		 * call and use that to return 0 to the user instead of
-		 * percolating an error to the user. We're not particular
-		 * about the error returned. If we get *any* error after
-		 * having already gotten an EOF, we ignore it.
-		 */
-		eofflag = 1;
-		error = 0;
-		count = 0;
 	}
 
 	if (count) {
@@ -3726,7 +3728,8 @@ setattrlist_internal(vnode_t vp, struct setattrlist_args *uap, proc_t p, vfs_con
 	}
 	if (al.commonattr & ATTR_CMN_CHGTIME) {
 		ATTR_UNPACK_TIME(va.va_change_time, proc_is64);
-		VATTR_SET_ACTIVE(&va, va_change_time);
+		al.commonattr &= ~ATTR_CMN_CHGTIME;
+		/*quietly ignore change time; advisory in man page*/
 	}
 	if (al.commonattr & ATTR_CMN_ACCTIME) {
 		ATTR_UNPACK_TIME(va.va_access_time, proc_is64);
@@ -3760,6 +3763,10 @@ setattrlist_internal(vnode_t vp, struct setattrlist_args *uap, proc_t p, vfs_con
 	if (al.commonattr & ATTR_CMN_FLAGS) {
 		ATTR_UNPACK(va.va_flags);
 		VATTR_SET_ACTIVE(&va, va_flags);
+#if CONFIG_MACF
+		if ((error = mac_vnode_check_setflags(ctx, vp, va.va_flags)) != 0)
+			goto out;
+#endif
 	}
 	if (al.commonattr & ATTR_CMN_EXTENDED_SECURITY) {
 
@@ -3822,18 +3829,20 @@ setattrlist_internal(vnode_t vp, struct setattrlist_args *uap, proc_t p, vfs_con
 			volname = cursor;
 			ATTR_UNPACK(ar);	
 			/* attr_length cannot be 0! */
-			if ((ar.attr_dataoffset < 0) || (ar.attr_length == 0)) {
+			if ((ar.attr_dataoffset < 0) || (ar.attr_length == 0) ||
+				(ar.attr_length > uap->bufferSize) ||
+				(uap->bufferSize - ar.attr_length < (unsigned)ar.attr_dataoffset)) {
 				VFS_DEBUG(ctx, vp, "ATTRLIST - ERROR: bad offset supplied (2) ", ar.attr_dataoffset);
 				error = EINVAL;
 				goto out;
 			}
 
-			volname += ar.attr_dataoffset;
-			if ((volname + ar.attr_length) > bufend) {
+			if (volname >= bufend - ar.attr_dataoffset - ar.attr_length) {
 				error = EINVAL;
 				VFS_DEBUG(ctx, vp, "ATTRLIST - ERROR: volume name too big for caller buffer");
 				goto out;
 			}
+			volname += ar.attr_dataoffset;
 			/* guarantee NUL termination */
 			volname[ar.attr_length - 1] = 0;
 		}

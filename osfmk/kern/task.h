@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2010 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2010, 2015 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -117,6 +117,7 @@
 
 #ifdef XNU_KERNEL_PRIVATE
 
+#include <kern/kern_cdata.h>
 #include <mach/sfi_class.h>
 
 /* defns for task->rsu_controldata */
@@ -147,6 +148,7 @@
 
 
 #include <kern/thread.h>
+#include <mach/coalition.h>
 
 #ifdef CONFIG_ATM
 #include <atm/atm_internal.h>
@@ -258,6 +260,7 @@ struct task {
 #ifdef  MACH_BSD 
 	void *bsd_info;
 #endif  
+	kcdata_descriptor_t		corpse_info;
 	struct vm_shared_region		*shared_region;
 	volatile uint32_t t_flags;                                      /* general-purpose task flags protected by task_lock (TL) */
 #define TF_64B_ADDR             0x00000001                              /* task has 64-bit addressing */
@@ -266,6 +269,8 @@ struct task {
 #define TF_WAKEMON_WARNING      0x00000008                              /* task is in wakeups monitor warning zone */
 #define TF_TELEMETRY            (TF_CPUMON_WARNING | TF_WAKEMON_WARNING) /* task is a telemetry participant */
 #define TF_GPU_DENIED           0x00000010                              /* task is not allowed to access the GPU */
+#define TF_CORPSE               0x00000020                              /* task is a corpse */
+#define TF_PENDING_CORPSE       0x00000040                              /* task corpse has not been reported yet */
 
 #define task_has_64BitAddr(task)	\
 	 (((task)->t_flags & TF_64B_ADDR) != 0)
@@ -276,10 +281,25 @@ struct task {
 #define task_has_64BitData(task)    \
 	 (((task)->t_flags & TF_64B_DATA) != 0)
 
+#define task_is_a_corpse(task)      \
+	 (((task)->t_flags & TF_CORPSE) != 0)
+
+#define task_set_corpse(task)       \
+	 ((task)->t_flags |= TF_CORPSE)
+
+#define task_corpse_pending_report(task) 	\
+	 (((task)->t_flags & TF_PENDING_CORPSE) != 0)
+
+#define task_set_corpse_pending_report(task)       \
+	 ((task)->t_flags |= TF_PENDING_CORPSE)
+
+#define task_clear_corpse_pending_report(task)       \
+	 ((task)->t_flags &= ~TF_PENDING_CORPSE)
+
 	mach_vm_address_t	all_image_info_addr; /* dyld __all_image_info     */
 	mach_vm_size_t		all_image_info_size; /* section location and size */
 
-#if CONFIG_COUNTERS || KPERF
+#if KPERF
 #define TASK_PMC_FLAG			0x1	/* Bit in "t_chud" signifying PMC interest */
 #define TASK_KPC_FORCED_ALL_CTRS	0x2	/* Bit in "t_chud" signifying KPC forced all counters */
 
@@ -325,11 +345,12 @@ struct task {
 	/*
 	 * Can be merged with imp_donor bits, once the IMPORTANCE_INHERITANCE macro goes away.
 	 */
-	uint32_t        low_mem_notified_warn     :1,    /* warning low memory notification is sent to the task */
-	                low_mem_notified_critical :1,    /* critical low memory notification is sent to the task */
-	                purged_memory_warn        :1,    /* purgeable memory of the task is purged for warning level pressure */
-	                purged_memory_critical    :1,    /* purgeable memory of the task is purged for critical level pressure */
-	                mem_notify_reserved       :28;   /* reserved for future use */
+	uint32_t        low_mem_notified_warn		:1,	/* warning low memory notification is sent to the task */
+	                low_mem_notified_critical	:1,	/* critical low memory notification is sent to the task */
+	                purged_memory_warn		:1,	/* purgeable memory of the task is purged for warning level pressure */
+	                purged_memory_critical		:1,	/* purgeable memory of the task is purged for critical level pressure */
+			low_mem_privileged_listener	:1,	/* if set, task would like to know about pressure changes before other tasks on the system */
+	                mem_notify_reserved		:27;	/* reserved for future use */
 
 	io_stat_info_t 	task_io_stats;
 	
@@ -350,10 +371,16 @@ struct task {
 	boolean_t	task_purgeable_disowning;
 	boolean_t	task_purgeable_disowned;
 
-	/* Coalition is set in task_create_internal and unset in task_deallocate_internal, so it can be referenced without the task lock. */
-	coalition_t	coalition;		/* coalition this task belongs to */
-	/* These fields are protected by coalition->lock, not the task lock. */
-	queue_chain_t	coalition_tasks;	/* list of tasks in the coalition */
+	/*
+	 * A task's coalition set is "adopted" in task_create_internal
+	 * and unset in task_deallocate_internal, so each array member
+	 * can be referenced without the task lock.
+	 * Note: these fields are protected by coalition->lock,
+	 *       not the task lock.
+	 */
+	coalition_t	coalition[COALITION_NUM_TYPES];
+	queue_chain_t   task_coalition[COALITION_NUM_TYPES];
+	uint64_t        dispatchqueue_offset;
 
 #if HYPERVISOR
 	void *hv_task_target; /* hypervisor virtual machine object associated with this task */
@@ -407,6 +434,14 @@ extern void		init_task_ledgers(void);
 extern lck_attr_t      task_lck_attr;
 extern lck_grp_t       task_lck_grp;
 
+#define QOS_OVERRIDE_MODE_OVERHANG_PEAK 0
+#define QOS_OVERRIDE_MODE_IGNORE_OVERRIDE 1
+#define QOS_OVERRIDE_MODE_FINE_GRAINED_OVERRIDE 2
+#define QOS_OVERRIDE_MODE_FINE_GRAINED_OVERRIDE_BUT_IGNORE_DISPATCH 3
+#define QOS_OVERRIDE_MODE_FINE_GRAINED_OVERRIDE_BUT_SINGLE_MUTEX_OVERRIDE 4
+
+extern uint32_t qos_override_mode;
+
 #else	/* MACH_KERNEL_PRIVATE */
 
 __BEGIN_DECLS
@@ -435,6 +470,10 @@ extern kern_return_t	task_wait(
 /* Release hold on all threads in a task */
 extern kern_return_t	task_release(
 							task_t		task);
+
+/* Suspend/resume a task where the kernel owns the suspend count */
+extern kern_return_t    task_suspend_internal(          task_t          task);
+extern kern_return_t    task_resume_internal(           task_t          task);
 
 /* Suspends a task by placing a hold on its threads */
 extern kern_return_t    task_pidsuspend(
@@ -483,7 +522,7 @@ extern kern_return_t	task_terminate_internal(
 
 extern kern_return_t	task_create_internal(
 							task_t		parent_task,
-							coalition_t	parent_coalition,
+							coalition_t	*parent_coalitions,
 							boolean_t	inherit_memory,
 							boolean_t	is_64bit,
 							task_t		*child_task);	/* OUT */
@@ -534,6 +573,7 @@ extern int		get_task_numacts(
 					task_t		task);
 
 extern int get_task_numactivethreads(task_t task);
+extern kern_return_t task_collect_crash_info(task_t task);
 
 /* JMM - should just be temporary (implementation in bsd_kern still) */
 extern void	set_bsdtask_info(task_t,void *);
@@ -547,7 +587,9 @@ extern uint64_t	get_task_phys_footprint(task_t);
 extern uint64_t	get_task_phys_footprint_max(task_t);
 extern uint64_t	get_task_purgeable_size(task_t);
 extern uint64_t	get_task_cpu_time(task_t);
+extern uint64_t get_task_dispatchqueue_offset(task_t);
 
+extern kern_return_t task_convert_phys_footprint_limit(int, int *);
 extern kern_return_t task_set_phys_footprint_limit_internal(task_t, int, int *, boolean_t);
 extern kern_return_t task_get_phys_footprint_limit(task_t task, int *limit_mb);
 
@@ -578,6 +620,7 @@ struct _task_ledger_indices {
 	int internal;
 	int iokit_mapped;
 	int alternate_accounting;
+	int alternate_accounting_compressed;
 	int phys_footprint;
 	int internal_compressed;
 	int purgeable_volatile;
@@ -586,7 +629,9 @@ struct _task_ledger_indices {
 	int purgeable_nonvolatile_compressed;
 	int platform_idle_wakeups;
 	int interrupt_wakeups;
-        int sfi_wait_times[MAX_SFI_CLASS_ID];
+#if CONFIG_SCHED_SFI
+	int sfi_wait_times[MAX_SFI_CLASS_ID];
+#endif /* CONFIG_SCHED_SFI */
 #ifdef CONFIG_BANK
 	int cpu_time_billed_to_me;
 	int cpu_time_billed_to_others;
@@ -658,10 +703,14 @@ extern void proc_get_task_policy2(task_t task, thread_t thread, int category, in
 /* For use by kernel threads and others who don't hold a reference on the target thread */
 extern void proc_set_task_policy_thread(task_t task, uint64_t tid, int category, int flavor, int value);
 
-extern void proc_set_task_spawnpolicy(task_t task, int apptype, int qos_clamp,
+extern void proc_set_task_spawnpolicy(task_t task, int apptype, int qos_clamp, int role,
                                       ipc_port_t * portwatch_ports, int portwatch_count);
 
 extern void task_set_main_thread_qos(task_t task, thread_t main_thread);
+
+extern int proc_darwin_role_to_task_role(int darwin_role, int* task_role);
+extern int proc_task_role_to_darwin_role(int task_role);
+
 
 /* IO Throttle tiers */
 #define THROTTLE_LEVEL_NONE     -1
@@ -691,6 +740,7 @@ extern int proc_restore_workq_bgthreadpolicy(thread_t thread);
 
 extern int proc_get_darwinbgstate(task_t task, uint32_t *flagsp);
 extern boolean_t proc_task_is_tal(task_t task);
+extern int task_get_apptype(task_t);
 extern integer_t task_grab_latency_qos(task_t task);
 extern void task_policy_create(task_t task, int parent_boosted);
 extern void thread_policy_create(thread_t thread);
@@ -702,7 +752,8 @@ typedef struct task_pend_token {
 	uint32_t        tpt_update_sockets      :1,
 	                tpt_update_timers       :1,
 	                tpt_update_watchers     :1,
-	                tpt_update_live_donor   :1;
+	                tpt_update_live_donor   :1,
+	                tpt_update_coal_sfi     :1;
 } *task_pend_token_t;
 
 extern void task_policy_update_complete_unlocked(task_t task, thread_t thread, task_pend_token_t pend_token);
@@ -726,8 +777,10 @@ int proc_clear_task_ruse_cpu(task_t task, int cpumon_entitled);
 thread_t task_findtid(task_t, uint64_t);
 void set_thread_iotier_override(thread_t, int policy);
 
-boolean_t proc_thread_qos_add_override(task_t task, thread_t thread, uint64_t tid, int override_qos, boolean_t first_override_for_resource);
-boolean_t proc_thread_qos_remove_override(task_t task, thread_t thread, uint64_t tid);
+boolean_t proc_thread_qos_add_override(task_t task, thread_t thread, uint64_t tid, int override_qos, boolean_t first_override_for_resource, user_addr_t resource, int resource_type);
+boolean_t proc_thread_qos_remove_override(task_t task, thread_t thread, uint64_t tid, user_addr_t resource, int resource_type);
+boolean_t proc_thread_qos_reset_override(task_t task, thread_t thread, uint64_t tid, user_addr_t resource, int resource_type);
+void proc_thread_qos_deallocate(thread_t thread);
 
 #define TASK_RUSECPU_FLAGS_PROC_LIMIT			0x01
 #define TASK_RUSECPU_FLAGS_PERTHR_LIMIT			0x02
@@ -780,6 +833,7 @@ extern int task_importance_drop_legacy_external_assertion(task_t target_task, ui
 
 #endif /* IMPORTANCE_INHERITANCE */
 
+extern int task_low_mem_privileged_listener(task_t task, boolean_t new_value, boolean_t *old_value);
 extern boolean_t task_has_been_notified(task_t task, int pressurelevel);
 extern boolean_t task_used_for_purging(task_t task, int pressurelevel);
 extern void task_mark_has_been_notified(task_t task, int pressurelevel);
@@ -788,11 +842,7 @@ extern void task_clear_has_been_notified(task_t task, int pressurelevel);
 extern void task_clear_used_for_purging(task_t task);
 extern int task_importance_estimate(task_t task);
 
-/*
- * This should only be used for debugging.
- * pid is stored in audit_token by set_security_token().
- */
-#define audit_token_pid_from_task(task)  ((task)->audit_token.val[5])
+extern int task_pid(task_t task);
 
 /* End task_policy */
 
@@ -807,6 +857,7 @@ extern boolean_t task_is_gpu_denied(task_t task);
 
 extern void 	*get_bsdtask_info(task_t);
 extern void	*get_bsdthreadtask_info(thread_t);
+extern void task_bsdtask_kill(task_t);
 extern vm_map_t get_task_map(task_t);
 extern ledger_t	get_task_ledger(task_t);
 

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2015 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -67,7 +67,7 @@
 #ifdef PRIVATE
 
 struct	tcp_debug {
-	n_time	td_time;
+	u_int32_t td_time;
 	short	td_act;
 	short	td_ostate;
 	caddr_t	td_tcb;

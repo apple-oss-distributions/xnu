@@ -50,6 +50,8 @@ struct uthread;
 typedef void (*sched_call_t)(int type, thread_t thread);
 #endif
 
+typedef struct workq_reqthreads_req_s {unsigned long priority; int count;} *workq_reqthreads_req_t;
+
 /*
  * Increment each time new reserved slots are used. When the pthread
  * kext registers this table, it will include the version of the xnu
@@ -100,8 +102,14 @@ typedef struct pthread_functions_s {
 	/* New pthreadctl system. */
 	int (*bsdthread_ctl)(struct proc *p, user_addr_t cmd, user_addr_t arg1, user_addr_t arg2, user_addr_t arg3, int *retval);
 
+    /* Request threads to deliver kevents */
+    thread_t (*workq_reqthreads)(struct proc *p, int requests_count, workq_reqthreads_req_t requests);
+
+    /* Resolve a pthread_priority_t to a QoS/relative pri */
+    integer_t (*thread_qos_from_pthread_priority)(unsigned long pthread_priority, unsigned long *flags);
+
 	/* padding for future */
-	void* _pad[97];
+	void* _pad[95];
 } *pthread_functions_t;
 
 typedef struct pthread_callbacks_s {
@@ -230,8 +238,12 @@ typedef struct pthread_callbacks_s {
 
 	kern_return_t (*thread_set_voucher_name)(mach_port_name_t voucher_name);
 
+	boolean_t (*proc_usynch_thread_qos_add_override_for_resource)(task_t task, struct uthread *, uint64_t tid, int override_qos, boolean_t first_override_for_resource, user_addr_t resource, int resource_type);
+	boolean_t (*proc_usynch_thread_qos_remove_override_for_resource)(task_t task, struct uthread *, uint64_t tid, user_addr_t resource, int resource_type);
+	boolean_t (*proc_usynch_thread_qos_reset_override_for_resource)(task_t task, struct uthread *, uint64_t tid, user_addr_t resource, int resource_type);
+
 	/* padding for future */
-	void* _pad[87];
+	void* _pad[84];
 
 } *pthread_callbacks_t;
 

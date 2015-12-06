@@ -92,7 +92,7 @@ munge_wl(void *args)
 	volatile uint64_t *out_args = (volatile uint64_t*)args;
 	volatile uint32_t *in_args = (volatile uint32_t*)args;
 
-	out_args[1] = *(uint64_t*)&in_args[1];
+	out_args[1] = *(volatile uint64_t*)&in_args[1];
 	out_args[0] = in_args[0];
 }
 
@@ -102,7 +102,7 @@ munge_wwl(void *args)
 	volatile uint64_t *out_args = (volatile uint64_t*)args;
 	volatile uint32_t *in_args = (volatile uint32_t*)args;
 
-	out_args[2] = *(uint64_t*)&in_args[2];
+	out_args[2] = *(volatile uint64_t*)&in_args[2];
 	out_args[1] = in_args[1];
 	out_args[0] = in_args[0];
 }
@@ -114,7 +114,7 @@ munge_wwlw(void *args)
 	volatile uint32_t *in_args = (volatile uint32_t*)args;
 
 	out_args[3] = in_args[4];
-	out_args[2] = *(uint64_t*)&in_args[2];
+	out_args[2] = *(volatile uint64_t*)&in_args[2];
 	out_args[1] = in_args[1];
 	out_args[0] = in_args[0];
 }
@@ -124,9 +124,9 @@ munge_wwlll(void *args)
 	volatile uint64_t *out_args = (volatile uint64_t*)args;
 	volatile uint32_t *in_args = (volatile uint32_t*)args;
 
-	out_args[4] = *(uint64_t*)&in_args[6];
-	out_args[3] = *(uint64_t*)&in_args[4];
-	out_args[2] = *(uint64_t*)&in_args[2];
+	out_args[4] = *(volatile uint64_t*)&in_args[6];
+	out_args[3] = *(volatile uint64_t*)&in_args[4];
+	out_args[2] = *(volatile uint64_t*)&in_args[2];
 	out_args[1] = in_args[1];
 	out_args[0] = in_args[0];
 }
@@ -139,8 +139,8 @@ munge_wwllww(void *args)
 
 	out_args[5] = in_args[7];
 	out_args[4] = in_args[6];
-	out_args[3] = *(uint64_t*)&in_args[4];
-	out_args[2] = *(uint64_t*)&in_args[2];
+	out_args[3] = *(volatile uint64_t*)&in_args[4];
+	out_args[2] = *(volatile uint64_t*)&in_args[2];
 	out_args[1] = in_args[1];
 	out_args[0] = in_args[0];
 }
@@ -152,7 +152,19 @@ munge_wlw(void *args)
 	volatile uint32_t *in_args = (volatile uint32_t*)args;
 
 	out_args[2] = in_args[3];
-	out_args[1] = *(uint64_t*)&in_args[1];
+	out_args[1] = *(volatile uint64_t*)&in_args[1];
+	out_args[0] = in_args[0];
+}
+
+void
+munge_wlww(void *args)
+{
+	volatile uint64_t *out_args = (volatile uint64_t*)args;
+	volatile uint32_t *in_args = (volatile uint32_t*)args;
+
+	out_args[3] = in_args[4];
+	out_args[2] = in_args[3];
+	out_args[1] = *(volatile uint64_t*)&in_args[1];
 	out_args[0] = in_args[0];
 }
 
@@ -162,12 +174,12 @@ munge_wlwwwll(void *args)
 	volatile uint64_t *out_args = (volatile uint64_t*)args;
 	volatile uint32_t *in_args = (volatile uint32_t*)args;
 
-	out_args[6] = *(uint64_t*)&in_args[8];
-	out_args[5] = *(uint64_t*)&in_args[6];
+	out_args[6] = *(volatile uint64_t*)&in_args[8];
+	out_args[5] = *(volatile uint64_t*)&in_args[6];
 	out_args[4] = in_args[5];
 	out_args[3] = in_args[4];
 	out_args[2] = in_args[3];
-	out_args[1] = *(uint64_t*)&in_args[1];
+	out_args[1] = *(volatile uint64_t*)&in_args[1];
 	out_args[0] = in_args[0];
 }
 
@@ -188,12 +200,12 @@ munge_wlwwlwlw(void *args)
 	volatile uint32_t *in_args = (volatile uint32_t*)args;
 
 	out_args[7] = in_args[10];
-	out_args[6] = *(uint64_t*)&in_args[8];
+	out_args[6] = *(volatile uint64_t*)&in_args[8];
 	out_args[5] = in_args[7];
-	out_args[4] = *(uint64_t*)&in_args[5];
+	out_args[4] = *(volatile uint64_t*)&in_args[5];
 	out_args[3] = in_args[4];
 	out_args[2] = in_args[3];
-	out_args[1] = *(uint64_t*)&in_args[1];
+	out_args[1] = *(volatile uint64_t*)&in_args[1];
 	out_args[0] = in_args[0];
 }
 
@@ -203,8 +215,8 @@ munge_wll(void *args)
 	volatile uint64_t *out_args = (volatile uint64_t*)args;
 	volatile uint32_t *in_args = (volatile uint32_t*)args;
 
-	out_args[2] = *(uint64_t*)&in_args[3];
-	out_args[1] = *(uint64_t*)&in_args[1];
+	out_args[2] = *(volatile uint64_t*)&in_args[3];
+	out_args[1] = *(volatile uint64_t*)&in_args[1];
 	out_args[0] = in_args[0];
 }
 
@@ -214,9 +226,22 @@ munge_wlll(void *args)
 	volatile uint64_t *out_args = (volatile uint64_t*)args;
 	volatile uint32_t *in_args = (volatile uint32_t*)args;
 
-	out_args[3] = *(uint64_t*)&in_args[5];
-	out_args[2] = *(uint64_t*)&in_args[3];
-	out_args[1] = *(uint64_t*)&in_args[1];
+	out_args[3] = *(volatile uint64_t*)&in_args[5];
+	out_args[2] = *(volatile uint64_t*)&in_args[3];
+	out_args[1] = *(volatile uint64_t*)&in_args[1];
+	out_args[0] = in_args[0];
+}
+
+void 
+munge_wllll(void *args)
+{
+	volatile uint64_t *out_args = (volatile uint64_t*)args;
+	volatile uint32_t *in_args = (volatile uint32_t*)args;
+
+	out_args[4] = *(volatile uint64_t*)&in_args[7];
+	out_args[3] = *(volatile uint64_t*)&in_args[5];
+	out_args[2] = *(volatile uint64_t*)&in_args[3];
+	out_args[1] = *(volatile uint64_t*)&in_args[1];
 	out_args[0] = in_args[0];
 }
 
@@ -228,8 +253,8 @@ munge_wllww(void *args)
 
 	out_args[4] = in_args[6];
 	out_args[3] = in_args[5];
-	out_args[2] = *(uint64_t*)&in_args[3];
-	out_args[1] = *(uint64_t*)&in_args[1];
+	out_args[2] = *(volatile uint64_t*)&in_args[3];
+	out_args[1] = *(volatile uint64_t*)&in_args[1];
 	out_args[0] = in_args[0];
 }
 
@@ -239,12 +264,12 @@ munge_wllwwll(void *args)
 	volatile uint64_t *out_args = (volatile uint64_t*)args;
 	volatile uint32_t *in_args = (volatile uint32_t*)args;
 
-	out_args[6] = *(uint64_t*)&in_args[9];
-	out_args[5] = *(uint64_t*)&in_args[7];
+	out_args[6] = *(volatile uint64_t*)&in_args[9];
+	out_args[5] = *(volatile uint64_t*)&in_args[7];
 	out_args[4] = in_args[6];
 	out_args[3] = in_args[5];
-	out_args[2] = *(uint64_t*)&in_args[3];
-	out_args[1] = *(uint64_t*)&in_args[1];
+	out_args[2] = *(volatile uint64_t*)&in_args[3];
+	out_args[1] = *(volatile uint64_t*)&in_args[1];
 	out_args[0] = in_args[0];
 }
 
@@ -255,7 +280,7 @@ munge_wwwlw(void *args)
 	volatile uint32_t *in_args = (volatile uint32_t*)args;
 
 	out_args[4] = in_args[5];
-	out_args[3] = *(uint64_t*)&in_args[3];
+	out_args[3] = *(volatile uint64_t*)&in_args[3];
 	out_args[2] = in_args[2];
 	out_args[1] = in_args[1];
 	out_args[0] = in_args[0];
@@ -269,7 +294,7 @@ munge_wwwlww(void *args)
 
 	out_args[5] = in_args[6];
 	out_args[4] = in_args[5];
-	out_args[3] = *(uint64_t*)&in_args[3];
+	out_args[3] = *(volatile uint64_t*)&in_args[3];
 	out_args[2] = in_args[2];
 	out_args[1] = in_args[1];
 	out_args[0] = in_args[0];
@@ -281,7 +306,7 @@ munge_wwwl(void *args)
 	volatile uint64_t *out_args = (volatile uint64_t*)args;
 	volatile uint32_t *in_args = (volatile uint32_t*)args;
 
-	out_args[3] = *(uint64_t*)&in_args[3];
+	out_args[3] = *(volatile uint64_t*)&in_args[3];
 	out_args[2] = in_args[2];
 	out_args[1] = in_args[1];
 	out_args[0] = in_args[0];
@@ -294,7 +319,7 @@ munge_wwwwlw(void *args)
 	volatile uint32_t *in_args = (volatile uint32_t*)args;
 
 	out_args[5] = in_args[6];
-	out_args[4] = *(uint64_t*)&in_args[4];
+	out_args[4] = *(volatile uint64_t*)&in_args[4];
 	out_args[3] = in_args[3];
 	out_args[2] = in_args[2];
 	out_args[1] = in_args[1];
@@ -307,7 +332,7 @@ munge_wwwwl(void *args)
 	volatile uint64_t *out_args = (volatile uint64_t*)args;
 	volatile uint32_t *in_args = (volatile uint32_t*)args;
 
-	out_args[4] = *(uint64_t*)&in_args[4];
+	out_args[4] = *(volatile uint64_t*)&in_args[4];
 	out_args[3] = in_args[3];
 	out_args[2] = in_args[2];
 	out_args[1] = in_args[1];
@@ -320,7 +345,7 @@ munge_wwwwwl(void *args)
 	volatile uint64_t *out_args = (volatile uint64_t*)args;
 	volatile uint32_t *in_args = (volatile uint32_t*)args;
 
-	out_args[5] = *(uint64_t*)&in_args[5];
+	out_args[5] = *(volatile uint64_t*)&in_args[5];
 	out_args[4] = in_args[4];
 	out_args[3] = in_args[3];
 	out_args[2] = in_args[2];
@@ -336,7 +361,7 @@ munge_wwwwwlww(void *args)
 
 	out_args[7] = in_args[8];
 	out_args[6] = in_args[7];
-	out_args[5] = *(uint64_t*)&in_args[5];
+	out_args[5] = *(volatile uint64_t*)&in_args[5];
 	out_args[4] = in_args[4];
 	out_args[3] = in_args[3];
 	out_args[2] = in_args[2];
@@ -351,8 +376,8 @@ munge_wwwwwllw(void *args)
 	volatile uint32_t *in_args = (volatile uint32_t*)args;
 
 	out_args[7] = in_args[9];
-	out_args[6] = *(uint64_t*)&in_args[7];
-	out_args[5] = *(uint64_t*)&in_args[5];
+	out_args[6] = *(volatile uint64_t*)&in_args[7];
+	out_args[5] = *(volatile uint64_t*)&in_args[5];
 	out_args[4] = in_args[4];
 	out_args[3] = in_args[3];
 	out_args[2] = in_args[2];
@@ -366,9 +391,9 @@ munge_wwwwwlll(void *args)
 	volatile uint64_t *out_args = (volatile uint64_t*)args;
 	volatile uint32_t *in_args = (volatile uint32_t*)args;
 
-	out_args[7] = *(uint64_t*)&in_args[9];
-	out_args[6] = *(uint64_t*)&in_args[7];
-	out_args[5] = *(uint64_t*)&in_args[5];
+	out_args[7] = *(volatile uint64_t*)&in_args[9];
+	out_args[6] = *(volatile uint64_t*)&in_args[7];
+	out_args[5] = *(volatile uint64_t*)&in_args[5];
 	out_args[4] = in_args[4];
 	out_args[3] = in_args[3];
 	out_args[2] = in_args[2];
@@ -382,7 +407,7 @@ munge_wwwwwwl(void *args)
 	volatile uint64_t *out_args = (volatile uint64_t*)args;
 	volatile uint32_t *in_args = (volatile uint32_t*)args;
 
-	out_args[6] = *(uint64_t*)&in_args[6];
+	out_args[6] = *(volatile uint64_t*)&in_args[6];
 	out_args[5] = in_args[5];
 	out_args[4] = in_args[4];
 	out_args[3] = in_args[3];
@@ -398,7 +423,7 @@ munge_wwwwwwlw(void *args)
 	volatile uint32_t *in_args = (volatile uint32_t*)args;
 
 	out_args[7] = in_args[8];
-	out_args[6] = *(uint64_t*)&in_args[6];
+	out_args[6] = *(volatile uint64_t*)&in_args[6];
 	out_args[5] = in_args[5];
 	out_args[4] = in_args[4];
 	out_args[3] = in_args[3];
@@ -413,8 +438,8 @@ munge_wwwwwwll(void *args)
 	volatile uint64_t *out_args = (volatile uint64_t*)args;
 	volatile uint32_t *in_args = (volatile uint32_t*)args;
 
-	out_args[7] = *(uint64_t*)&in_args[8];
-	out_args[6] = *(uint64_t*)&in_args[6];
+	out_args[7] = *(volatile uint64_t*)&in_args[8];
+	out_args[6] = *(volatile uint64_t*)&in_args[6];
 	out_args[5] = in_args[5];
 	out_args[4] = in_args[4];
 	out_args[3] = in_args[3];
@@ -446,6 +471,19 @@ munge_wws(void *args)
 }
 
 void 
+munge_wwws(void *args)
+{
+	volatile uint64_t *out_args = (volatile uint64_t*)args;
+	volatile uint32_t *in_args = (volatile uint32_t*)args;
+
+	out_args[3] = (int64_t)(int)in_args[3]; /* Sign-extend */
+	out_args[2] = in_args[2];
+	out_args[1] = in_args[1];
+	out_args[0] = in_args[0];
+}
+
+
+void
 munge_wwwsw(void *args)
 {
 	volatile uint64_t *out_args = (volatile uint64_t*)args;
@@ -483,7 +521,7 @@ munge_lw(void *args)
 	volatile uint32_t *in_args = (volatile uint32_t*)args;
 
 	out_args[1] = in_args[2];
-	out_args[0] = *(uint64_t*)&in_args[0];
+	out_args[0] = *(volatile uint64_t*)&in_args[0];
 }
 
 void 
@@ -495,7 +533,7 @@ munge_lwww(void *args)
 	out_args[3] = in_args[4]; 
 	out_args[2] = in_args[3];
 	out_args[1] = in_args[2];
-	out_args[0] = *(uint64_t*)&in_args[0];
+	out_args[0] = *(volatile uint64_t*)&in_args[0];
 }
 
 void
@@ -507,7 +545,7 @@ munge_wwlwww(void *args)
 	out_args[5] = in_args[6];
 	out_args[4] = in_args[5];
 	out_args[3] = in_args[4];
-	out_args[2] = *(uint64_t*)&in_args[2];
+	out_args[2] = *(volatile uint64_t*)&in_args[2];
 	out_args[1] = in_args[1];
 	out_args[0] = in_args[0];
 }

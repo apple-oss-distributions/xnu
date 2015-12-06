@@ -694,18 +694,31 @@ cpuid_set_generic_info(i386_cpu_info_t *info_p)
 	}
 
 	if (info_p->cpuid_max_basic >= 0xd) {
-		cpuid_xsave_leaf_t	*xsp = &info_p->cpuid_xsave_leaf;
+		cpuid_xsave_leaf_t	*xsp;
 		/*
 		 * XSAVE Features:
 		 */
-		cpuid_fn(0xd, info_p->cpuid_xsave_leaf.extended_state);
+		xsp = &info_p->cpuid_xsave_leaf[0];
 		info_p->cpuid_xsave_leafp = xsp;
-
-		DBG(" XSAVE Leaf:\n");
+		xsp->extended_state[eax] = 0xd;
+		xsp->extended_state[ecx] = 0;
+		cpuid(xsp->extended_state);
+		DBG(" XSAVE Main leaf:\n");
 		DBG("  EAX           : 0x%x\n", xsp->extended_state[eax]);
 		DBG("  EBX           : 0x%x\n", xsp->extended_state[ebx]);
 		DBG("  ECX           : 0x%x\n", xsp->extended_state[ecx]);
 		DBG("  EDX           : 0x%x\n", xsp->extended_state[edx]);
+
+		xsp = &info_p->cpuid_xsave_leaf[1];
+		xsp->extended_state[eax] = 0xd;
+		xsp->extended_state[ecx] = 1;
+		cpuid(xsp->extended_state);
+		DBG(" XSAVE Sub-leaf1:\n");
+		DBG("  EAX           : 0x%x\n", xsp->extended_state[eax]);
+		DBG("  EBX           : 0x%x\n", xsp->extended_state[ebx]);
+		DBG("  ECX           : 0x%x\n", xsp->extended_state[ecx]);
+		DBG("  EDX           : 0x%x\n", xsp->extended_state[edx]);
+
 	}
 
 	if (info_p->cpuid_model >= CPUID_MODEL_IVYBRIDGE) {
@@ -713,13 +726,12 @@ cpuid_set_generic_info(i386_cpu_info_t *info_p)
 		 * Leaf7 Features:
 		 */
 		cpuid_fn(0x7, reg);
-		info_p->cpuid_leaf7_features = reg[ebx];
+		info_p->cpuid_leaf7_features = quad(reg[ecx], reg[ebx]);
 
 		DBG(" Feature Leaf7:\n");
 		DBG("  EBX           : 0x%x\n", reg[ebx]);
+		DBG("  ECX           : 0x%x\n", reg[ecx]);
 	}
-
-	return;
 }
 
 static uint32_t
@@ -756,9 +768,14 @@ cpuid_set_cpufamily(i386_cpu_info_t *info_p)
 			cpufamily = CPUFAMILY_INTEL_IVYBRIDGE;
 			break;
 		case CPUID_MODEL_HASWELL:
+		case CPUID_MODEL_HASWELL_EP:
 		case CPUID_MODEL_HASWELL_ULT:
 		case CPUID_MODEL_CRYSTALWELL:
 			cpufamily = CPUFAMILY_INTEL_HASWELL;
+			break;
+		case CPUID_MODEL_BROADWELL:
+		case CPUID_MODEL_BRYSTALWELL:
+			cpufamily = CPUFAMILY_INTEL_BROADWELL;
 			break;
 		}
 		break;
@@ -814,16 +831,18 @@ cpuid_set_info(void)
 	 * (which determines whether SMT/Hyperthreading is active).
 	 */
 	switch (info_p->cpuid_cpufamily) {
+	case CPUFAMILY_INTEL_MEROM:
+	case CPUFAMILY_INTEL_PENRYN:
+		info_p->core_count   = info_p->cpuid_cores_per_package;
+		info_p->thread_count = info_p->cpuid_logical_per_package;
+		break;
 	case CPUFAMILY_INTEL_WESTMERE: {
 		uint64_t msr = rdmsr64(MSR_CORE_THREAD_COUNT);
 		info_p->core_count   = bitfield32((uint32_t)msr, 19, 16);
 		info_p->thread_count = bitfield32((uint32_t)msr, 15,  0);
 		break;
 		}
-	case CPUFAMILY_INTEL_HASWELL:
-	case CPUFAMILY_INTEL_IVYBRIDGE:
-	case CPUFAMILY_INTEL_SANDYBRIDGE:
-	case CPUFAMILY_INTEL_NEHALEM: {
+	default: {
 		uint64_t msr = rdmsr64(MSR_CORE_THREAD_COUNT);
 		info_p->core_count   = bitfield32((uint32_t)msr, 31, 16);
 		info_p->thread_count = bitfield32((uint32_t)msr, 15,  0);
@@ -932,6 +951,9 @@ leaf7_feature_map[] = {
 	{CPUID_LEAF7_FEATURE_BMI2,     "BMI2"},
 	{CPUID_LEAF7_FEATURE_INVPCID,  "INVPCID"},
 	{CPUID_LEAF7_FEATURE_RTM,      "RTM"},
+	{CPUID_LEAF7_FEATURE_SMAP,     "SMAP"},
+	{CPUID_LEAF7_FEATURE_RDSEED,   "RDSEED"},
+	{CPUID_LEAF7_FEATURE_ADX,      "ADX"},
 	{0, 0}
 };
 
@@ -991,7 +1013,7 @@ void
 cpuid_feature_display(
 	const char	*header)
 {
-	char	buf[256];
+       char    buf[320];
 
 	kprintf("%s: %s", header,
 		 cpuid_get_feature_names(cpuid_features(), buf, sizeof(buf)));

@@ -64,12 +64,15 @@ typedef struct _load_result {
 				prog_allocated_stack	:1,
 				prog_stack_size : 1,    
 				validentry	:1,
+				has_pagezero    :1,
+				using_lcmain	:1,
 						:0;
 	unsigned int		csflags;
 	unsigned char	uuid[16];	
 	mach_vm_address_t	min_vm_addr;
 	mach_vm_address_t	max_vm_addr;
 	unsigned int		platform_binary;
+	off_t			cs_end_offset;
 } load_result_t;
 
 struct image_params;

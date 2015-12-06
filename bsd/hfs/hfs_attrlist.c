@@ -338,7 +338,7 @@ hfs_readdirattr_internal(struct vnode *dvp, struct attrlist *alist,
 	 */
 	if ((dcp->c_entries == 0) && (ce_list->realentries > 0)) {
 		dcp->c_entries++;
-		dcp->c_flag |= (C_MODIFIED | C_FORCEUPDATE);
+		dcp->c_flag |= C_MODIFIED;
 		printf("hfs_vnop_readdirattr: repairing valence to non-zero! \n");
 		/* force an update on dcp while we're still holding the lock. */
 		hfs_update(dvp, 0);
@@ -497,6 +497,13 @@ hfs_readdirattr_internal(struct vnode *dvp, struct attrlist *alist,
 				break;
 		}
 	} /* for each catalog entry */
+
+	/*
+	 * If we couldn't fit all the entries requested in the user's buffer,
+	 * it's not EOF.
+	 */
+	if (*eofflag && (*actualcount < (int)ce_list->realentries))
+		*eofflag = 0;
 
 	/* If we skipped catalog entries for reserved files that should
 	 * not be listed in namespace, update the index accordingly.

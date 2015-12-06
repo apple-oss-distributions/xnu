@@ -39,13 +39,16 @@
 #include <sys/disk.h>
 #include <vm/vm_protos.h>
 #include <vm/vm_pageout.h>
+#include <hfs/hfs.h>
 
 void vm_swapfile_open(const char *path, vnode_t *vp);
 void vm_swapfile_close(uint64_t path, vnode_t vp);
-int vm_swapfile_preallocate(vnode_t vp, uint64_t *size);
+int vm_swapfile_preallocate(vnode_t vp, uint64_t *size, boolean_t *pin);
 uint64_t vm_swapfile_get_blksize(vnode_t vp);
 uint64_t vm_swapfile_get_transfer_size(vnode_t vp);
 int vm_swapfile_io(vnode_t vp, uint64_t offset, uint64_t start, int npages, int flags);
+int vm_record_file_write(struct vnode *vp, uint64_t offset, char *buf, int size);
+
 
 void
 vm_swapfile_open(const char *path, vnode_t *vp)
@@ -74,26 +77,29 @@ vm_swapfile_get_transfer_size(vnode_t vp)
 	return((uint64_t)vp->v_mount->mnt_vfsstat.f_iosize);
 }
 
-int unlink1(vfs_context_t, struct nameidata *, int);
+int unlink1(vfs_context_t, vnode_t, user_addr_t, enum uio_seg, int);
 
 void
 vm_swapfile_close(uint64_t path_addr, vnode_t vp)
 {
-	struct nameidata nd;
 	vfs_context_t context = vfs_context_current();
-	int error = 0;
+	int error;
 
 	vnode_getwithref(vp);
 	vnode_close(vp, 0, context);
 	
-	NDINIT(&nd, DELETE, OP_UNLINK, AUDITVNPATH1, UIO_SYSSPACE,
-	       path_addr, context);
+	error = unlink1(context, NULLVP, CAST_USER_ADDR_T(path_addr),
+	    UIO_SYSSPACE, 0);
 
-	error = unlink1(context, &nd, 0);
+#if DEVELOPMENT || DEBUG
+	if (error)
+		printf("%s : unlink of %s failed with error %d", __FUNCTION__,
+		    (char *)path_addr, error);
+#endif
 }
 
 int
-vm_swapfile_preallocate(vnode_t vp, uint64_t *size)
+vm_swapfile_preallocate(vnode_t vp, uint64_t *size, boolean_t *pin)
 {
 	int		error = 0;
 	uint64_t	file_size = 0;
@@ -123,7 +129,6 @@ vm_swapfile_preallocate(vnode_t vp, uint64_t *size)
  		}
 	}
 #endif
-
 	error = vnode_setsize(vp, *size, IO_NOZEROFILL, ctx);
 
 	if (error) {
@@ -135,16 +140,47 @@ vm_swapfile_preallocate(vnode_t vp, uint64_t *size)
 
 	if (error) {
 		printf("vnode_size (new file) for swap file failed: %d\n", error);
+		goto done;
 	}	
-
 	assert(file_size == *size);
 	
+	if (pin != NULL && *pin != FALSE) {
+
+		assert(vnode_tag(vp) == VT_HFS);
+
+		error = hfs_pin_vnode(VTOHFS(vp), vp, HFS_PIN_IT | HFS_DATALESS_PIN, NULL, ctx);
+
+		if (error) {
+			printf("hfs_pin_vnode for swap files failed: %d\n", error);
+			/* this is not fatal, carry on with files wherever they landed */
+			*pin = FALSE;
+			error = 0;
+		}
+	}
+
 	vnode_lock_spin(vp);
 	SET(vp->v_flag, VSWAP);
 	vnode_unlock(vp);
 done:
 	return error;
 }
+
+
+int
+vm_record_file_write(vnode_t vp, uint64_t offset, char *buf, int size)
+{
+	int error = 0;
+	vfs_context_t ctx;
+
+	ctx = vfs_context_kernel();
+		
+	error = vn_rdwr(UIO_WRITE, vp, (caddr_t)buf, size, offset,
+		UIO_SYSSPACE, IO_NODELOCKED, vfs_context_ucred(ctx), (int *) 0, vfs_context_proc(ctx));
+
+	return (error);
+}
+
+
 
 int
 vm_swapfile_io(vnode_t vp, uint64_t offset, uint64_t start, int npages, int flags)
@@ -155,10 +191,12 @@ vm_swapfile_io(vnode_t vp, uint64_t offset, uint64_t start, int npages, int flag
 	kern_return_t	kr = KERN_SUCCESS;
 	upl_t		upl = NULL;
 	unsigned int	count = 0;
-	int		upl_create_flags = 0, upl_control_flags = 0;
+	upl_control_flags_t upl_create_flags = 0;
+	int		upl_control_flags = 0;
 	upl_size_t	upl_size = 0;
 
-	upl_create_flags = UPL_SET_INTERNAL | UPL_SET_LITE;
+	upl_create_flags = UPL_SET_INTERNAL | UPL_SET_LITE
+			| UPL_MEMORY_TAG_MAKE(VM_KERN_MEMORY_OSFMK);
 
 #if ENCRYPTED_SWAP
 	upl_control_flags = UPL_IOSYNC | UPL_PAGING_ENCRYPTED;

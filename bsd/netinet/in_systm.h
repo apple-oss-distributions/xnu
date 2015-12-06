@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2015 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -85,6 +85,6 @@ typedef __uint32_t n_long;		/* long as received from the net */
 typedef	__uint32_t n_time;		/* ms since 00:00 GMT, byte rev */
 
 #ifdef BSD_KERNEL_PRIVATE
-n_time	 iptime(void);
+u_int32_t iptime(void);
 #endif /* BSD_KERNEL_PRIVATE */
 #endif /* _NETINET_IN_SYSTM_H_ */

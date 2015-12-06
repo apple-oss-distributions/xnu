@@ -44,10 +44,10 @@ int hv_support_available = 0;
 hv_callbacks_t hv_callbacks = {
 	.dispatch = NULL,		/* thread is being dispatched for execution */
 	.preempt = NULL,		/* thread is being preempted */
+	.suspend = NULL,		/* system is being suspended */
 	.thread_destroy = NULL,	/* thread is being destroyed */
 	.task_destroy = NULL,	/* task is being destroyed */
 	.volatile_state = NULL,	/* thread state is becoming volatile */
-	.memory_pressure = NULL	/* memory pressure notification */
 };
 
 /* trap tables for hv_*_trap syscalls */
@@ -63,12 +63,8 @@ static hv_trap_table_t hv_trap_table[] = {
 };
 
 static int hv_callbacks_enabled = 0;
-static int hv_mp_notify_enabled = 0;
-static int hv_mp_notify_destroy = 0;
 static lck_grp_t *hv_support_lck_grp = NULL;
 static lck_mtx_t *hv_support_lck_mtx = NULL;
-static thread_t hv_mp_notify_thread = THREAD_NULL;
-static void hv_mp_notify(void);
 
 /* hv_support boot initialization */
 void
@@ -129,65 +125,6 @@ hv_get_volatile_state(hv_volatile_state_t state) {
 	return is_volatile;
 }
 
-/* memory pressure monitor thread */
-static void
-hv_mp_notify(void) {
-	while (1) {
-		mach_vm_pressure_monitor(TRUE, 0, NULL, NULL);
-
-		lck_mtx_lock(hv_support_lck_mtx);
-		if (hv_mp_notify_destroy == 1) {
-			hv_mp_notify_destroy = 0;
-			hv_mp_notify_enabled = 0;
-			lck_mtx_unlock(hv_support_lck_mtx);
-			break;
-		} else {
-			hv_callbacks.memory_pressure(NULL);
-		}
-		lck_mtx_unlock(hv_support_lck_mtx);
-	}
-
-	thread_deallocate(current_thread());
-}
-
-/* subscribe to memory pressure notifications */
-kern_return_t
-hv_set_mp_notify(void) {
-	kern_return_t kr;
-
-	lck_mtx_lock(hv_support_lck_mtx);
-	if (hv_callbacks_enabled == 0) {
-		lck_mtx_unlock(hv_support_lck_mtx);
-		return KERN_FAILURE;
-	}
-
-	if (hv_mp_notify_enabled == 1) {
-		hv_mp_notify_destroy = 0;
-		lck_mtx_unlock(hv_support_lck_mtx);
-		return KERN_SUCCESS;
-	}
-
-	kr = kernel_thread_start((thread_continue_t) &hv_mp_notify, NULL,
-		&hv_mp_notify_thread);
-
-	if (kr == KERN_SUCCESS) {
-		hv_mp_notify_enabled = 1;
-	}
-	lck_mtx_unlock(hv_support_lck_mtx);
-
-	return kr;
-}
-
-/* unsubscribe from memory pressure notifications */
-void
-hv_release_mp_notify(void) {
-	lck_mtx_lock(hv_support_lck_mtx);
-	if (hv_mp_notify_enabled == 1) {
-		hv_mp_notify_destroy = 1;
-	}
-	lck_mtx_unlock(hv_support_lck_mtx);
-}
-
 /* register a list of trap handlers for the hv_*_trap syscalls */
 kern_return_t
 hv_set_traps(hv_trap_type_t trap_type, const hv_trap_t *traps,
@@ -244,6 +181,7 @@ hv_release_callbacks(void) {
 	hv_callbacks = (hv_callbacks_t) {
 		.dispatch = NULL,
 		.preempt = NULL,
+		.suspend = NULL,
 		.thread_destroy = NULL,
 		.task_destroy = NULL,
 		.volatile_state = NULL,
@@ -252,6 +190,14 @@ hv_release_callbacks(void) {
 
 	hv_callbacks_enabled = 0;
 	lck_mtx_unlock(hv_support_lck_mtx);
+}
+
+/* system suspend notification */
+void
+hv_suspend(void) {
+	if (hv_callbacks_enabled) {
+		hv_callbacks.suspend();
+	}
 }
 
 /* dispatch hv_task_trap/hv_thread_trap syscalls to trap handlers,

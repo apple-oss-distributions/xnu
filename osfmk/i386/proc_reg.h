@@ -145,6 +145,7 @@
 /*
  * CR4
  */
+#define CR4_SMAP	0x00200000	/* Supervisor-Mode Access Protect */
 #define CR4_SMEP	0x00100000	/* Supervisor-Mode Execute Protect */
 #define CR4_OSXSAVE	0x00040000	/* OS supports XSAVE */
 #define CR4_PCIDE	0x00020000	/* PCID Enable */
@@ -166,12 +167,12 @@
 /*
  * XCR0 - XFEATURE_ENABLED_MASK (a.k.a. XFEM) register
  */
-#define	XCR0_YMM 0x0000000000000004ULL /* YMM state available */
-#define	XFEM_YMM XCR0_YMM
-#define XCR0_SSE 0x0000000000000002ULL	/* SSE supported by XSAVE/XRESTORE */
-#define XCR0_X87 0x0000000000000001ULL	/* x87, FPU/MMX (always set) */
-#define XFEM_SSE XCR0_SSE
-#define XFEM_X87 XCR0_X87
+#define XCR0_X87 	(1ULL << 0)	/* x87, FPU/MMX (always set) */
+#define XCR0_SSE	(1ULL << 1)	/* SSE supported by XSAVE/XRESTORE */
+#define	XCR0_YMM	(1ULL << 2)	/* YMM state available */
+#define XFEM_X87	XCR0_X87
+#define XFEM_SSE	XCR0_SSE
+#define	XFEM_YMM	XCR0_YMM
 #define XCR0 (0)
 
 #define	PMAP_PCID_PRESERVE (1ULL << 63)
@@ -267,7 +268,7 @@ static inline uintptr_t get_cr2(void)
 
 static inline uintptr_t get_cr3_raw(void)
 {
-	register uintptr_t cr3;
+	uintptr_t cr3;
 	__asm__ volatile("mov %%cr3, %0" : "=r" (cr3));
 	return(cr3);
 }
@@ -279,7 +280,7 @@ static inline void set_cr3_raw(uintptr_t value)
 
 static inline uintptr_t get_cr3_base(void)
 {
-	register uintptr_t cr3;
+	uintptr_t cr3;
 	__asm__ volatile("mov %%cr3, %0" : "=r" (cr3));
 	return(cr3 & ~(0xFFFULL));
 }
@@ -370,6 +371,16 @@ static inline void wbinvd(void)
 static inline void invlpg(uintptr_t addr)
 {
 	__asm__  volatile("invlpg (%0)" :: "r" (addr) : "memory");
+}
+
+static inline void clac(void)
+{
+	__asm__  volatile("clac");
+}
+
+static inline void stac(void)
+{
+	__asm__  volatile("stac");
 }
 
 /*
@@ -473,6 +484,8 @@ __END_DECLS
 
 #define MSR_IA32_PERFCTR0			0xc1
 #define MSR_IA32_PERFCTR1			0xc2
+#define MSR_IA32_PERFCTR3			0xc3
+#define MSR_IA32_PERFCTR4			0xc4
 
 #define MSR_PLATFORM_INFO			0xce
 
@@ -491,6 +504,8 @@ __END_DECLS
 
 #define MSR_IA32_EVNTSEL0			0x186
 #define MSR_IA32_EVNTSEL1			0x187
+#define MSR_IA32_EVNTSEL2			0x188
+#define MSR_IA32_EVNTSEL3			0x189
 
 #define MSR_FLEX_RATIO				0x194
 #define MSR_IA32_PERF_STS			0x198
@@ -561,6 +576,7 @@ __END_DECLS
 #define MSR_IA32_VMX_VMCS_ENUM				MSR_IA32_VMX_BASE+10
 #define MSR_IA32_VMX_PROCBASED_CTLS2		MSR_IA32_VMX_BASE+11
 #define MSR_IA32_VMX_EPT_VPID_CAP			MSR_IA32_VMX_BASE+12
+#define		MSR_IA32_VMX_EPT_VPID_CAP_AD_SHIFT	21
 #define MSR_IA32_VMX_TRUE_PINBASED_CTLS		MSR_IA32_VMX_BASE+13
 #define MSR_IA32_VMX_TRUE_PROCBASED_CTLS	MSR_IA32_VMX_BASE+14
 #define MSR_IA32_VMX_TRUE_VMEXIT_CTLS		MSR_IA32_VMX_BASE+15
@@ -582,6 +598,7 @@ __END_DECLS
 
 #define MSR_IA32_PP0_ENERGY_STATUS		0x639
 #define MSR_IA32_PP1_ENERGY_STATUS		0x641
+
 #define MSR_IA32_IA_PERF_LIMIT_REASONS		0x690
 #define MSR_IA32_GT_PERF_LIMIT_REASONS		0x6B0
 
