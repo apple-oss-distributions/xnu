@@ -1122,6 +1122,12 @@ extern kern_return_t	vm_map_copy_overwrite(
 				vm_map_copy_t           copy,
 				boolean_t               interruptible);
 
+/* returns TRUE if size of vm_map_copy == size parameter FALSE otherwise */
+extern boolean_t	vm_map_copy_validate_size(
+				vm_map_t		dst_map,
+				vm_map_copy_t		copy,
+				vm_map_size_t		size);
+
 /* Place a copy into a map */
 extern kern_return_t	vm_map_copyout(
 				vm_map_t		dst_map,
@@ -1152,6 +1158,17 @@ extern kern_return_t	vm_map_copyin_common(
 				boolean_t		src_volatile,
 				vm_map_copy_t		*copy_result,	/* OUT */
 				boolean_t		use_maxprot);
+
+#define VM_MAP_COPYIN_SRC_DESTROY	0x00000001
+#define VM_MAP_COPYIN_USE_MAXPROT	0x00000002
+#define VM_MAP_COPYIN_ENTRY_LIST	0x00000004
+#define VM_MAP_COPYIN_ALL_FLAGS		0x00000007
+extern kern_return_t	vm_map_copyin_internal(
+				vm_map_t		src_map,
+				vm_map_address_t	src_addr,
+				vm_map_size_t		len,
+				int			flags,
+				vm_map_copy_t		*copy_result); /* OUT */
 
 extern kern_return_t	vm_map_copy_extract(
 	vm_map_t		src_map,

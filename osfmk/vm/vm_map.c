@@ -4999,6 +4999,7 @@ vm_map_wire_nested(
 					   &real_map)) {
 
 					vm_map_unlock_read(lookup_map);
+					assert(map_pmap == NULL);
 					vm_map_unwire(map, start,
 						      s, user_wire);
 					return(KERN_FAILURE);
@@ -5347,7 +5348,8 @@ done:
 
 	if (rc != KERN_SUCCESS) {
 		/* undo what has been wired so far */
-		vm_map_unwire(map, start, s, user_wire);
+		vm_map_unwire_nested(map, start, s, user_wire,
+				     map_pmap, pmap_addr);
 		if (physpage_p) {
 			*physpage_p = 0;
 		}
@@ -8645,6 +8647,39 @@ vm_map_copy_remap(
 	}
 }
 
+
+boolean_t
+vm_map_copy_validate_size(
+	vm_map_t		dst_map,
+	vm_map_copy_t		copy,
+	vm_map_size_t		size)
+{
+	if (copy == VM_MAP_COPY_NULL)
+		return FALSE;
+	switch (copy->type) {
+	case VM_MAP_COPY_OBJECT:
+	case VM_MAP_COPY_KERNEL_BUFFER:
+		if (size == copy->size)
+			return TRUE;
+		break;
+	case VM_MAP_COPY_ENTRY_LIST:
+		/*
+		 * potential page-size rounding prevents us from exactly
+		 * validating this flavor of vm_map_copy, but we can at least
+		 * assert that it's within a range.
+		 */
+		if (copy->size >= size &&
+		    copy->size <= vm_map_round_page(size,
+						    VM_MAP_PAGE_MASK(dst_map)))
+			return TRUE;
+		break;
+	default:
+		break;
+	}
+	return FALSE;
+}
+
+
 /*
  *	Routine:	vm_map_copyout
  *
@@ -9120,12 +9155,34 @@ vm_map_copyin_common(
 	vm_map_copy_t	*copy_result,	/* OUT */
 	boolean_t	use_maxprot)
 {
+	int flags;
+
+	flags = 0;
+	if (src_destroy) {
+		flags |= VM_MAP_COPYIN_SRC_DESTROY;
+	}
+	if (use_maxprot) {
+		flags |= VM_MAP_COPYIN_USE_MAXPROT;
+	}
+	return vm_map_copyin_internal(src_map,
+				      src_addr,
+				      len,
+				      flags,
+				      copy_result);
+}
+kern_return_t
+vm_map_copyin_internal(
+	vm_map_t	src_map,
+	vm_map_address_t src_addr,
+	vm_map_size_t	len,
+	int		flags,
+	vm_map_copy_t	*copy_result)	/* OUT */
+{
 	vm_map_entry_t	tmp_entry;	/* Result of last map lookup --
 					 * in multi-level lookup, this
 					 * entry contains the actual
 					 * vm_object/offset.
 					 */
-	register
 	vm_map_entry_t	new_entry = VM_MAP_ENTRY_NULL;	/* Map entry for copy */
 
 	vm_map_offset_t	src_start;	/* Start of current entry --
@@ -9138,10 +9195,18 @@ vm_map_copyin_common(
 	boolean_t	map_share=FALSE;
 	submap_map_t	*parent_maps = NULL;
 
-	register
 	vm_map_copy_t	copy;		/* Resulting copy */
 	vm_map_address_t copy_addr;
 	vm_map_size_t	copy_size;
+	boolean_t	src_destroy;
+	boolean_t	use_maxprot;
+
+	if (flags & ~VM_MAP_COPYIN_ALL_FLAGS) {
+		return KERN_INVALID_ARGUMENT;
+	}
+		
+	src_destroy = (flags & VM_MAP_COPYIN_SRC_DESTROY) ? TRUE : FALSE;
+	use_maxprot = (flags & VM_MAP_COPYIN_USE_MAXPROT) ? TRUE : FALSE;
 
 	/*
 	 *	Check for copies of zero bytes.
@@ -9165,7 +9230,9 @@ vm_map_copyin_common(
 	 * setting up VM (and taking C-O-W faults) dominates the copy costs
 	 * for small regions.
 	 */
-	if ((len < msg_ool_size_small) && !use_maxprot)
+	if ((len < msg_ool_size_small) &&
+	    !use_maxprot &&
+	    !(flags & VM_MAP_COPYIN_ENTRY_LIST))
 		return vm_map_copyin_kernel_buffer(src_map, src_addr, len,
 						   src_destroy, copy_result);
 
@@ -12665,6 +12732,10 @@ vm_map_entry_is_reusable(
 
 	vm_object_t object;
 
+	if (entry->is_sub_map) {
+		return FALSE;
+	}
+
 	switch (VME_ALIAS(entry)) {
 	case VM_MEMORY_MALLOC:
 	case VM_MEMORY_MALLOC_SMALL:
@@ -12795,6 +12866,7 @@ vm_map_reuse_pages(
 		start_offset += VME_OFFSET(entry);
 		end_offset += VME_OFFSET(entry);
 
+		assert(!entry->is_sub_map);
 		object = VME_OBJECT(entry);
 		if (object != VM_OBJECT_NULL) {
 			vm_object_lock(object);
@@ -12885,6 +12957,7 @@ vm_map_reusable_pages(
 		start_offset += VME_OFFSET(entry);
 		end_offset += VME_OFFSET(entry);
 
+		assert(!entry->is_sub_map);
 		object = VME_OBJECT(entry);
 		if (object == VM_OBJECT_NULL)
 			continue;
@@ -15846,7 +15919,6 @@ vm_map_query_volatile(
 	mach_vm_size_t	volatile_pmap_count;
 	mach_vm_size_t	volatile_compressed_pmap_count;
 	mach_vm_size_t	resident_count;
-	unsigned int	compressed_count;
 	vm_map_entry_t	entry;
 	vm_object_t	object;
 
@@ -15861,6 +15933,8 @@ vm_map_query_volatile(
 	for (entry = vm_map_first_entry(map);
 	     entry != vm_map_to_entry(map);
 	     entry = entry->vme_next) {
+		mach_vm_size_t	pmap_resident_bytes, pmap_compressed_bytes;
+
 		if (entry->is_sub_map) {
 			continue;
 		}
@@ -15898,12 +15972,15 @@ vm_map_query_volatile(
 			volatile_compressed_count +=
 				vm_compressor_pager_get_count(object->pager);
 		}
-		compressed_count = 0;
-		volatile_pmap_count += pmap_query_resident(map->pmap,
-							   entry->vme_start,
-							   entry->vme_end,
-							   &compressed_count);
-		volatile_compressed_pmap_count += compressed_count;
+		pmap_compressed_bytes = 0;
+		pmap_resident_bytes =
+			pmap_query_resident(map->pmap,
+					    entry->vme_start,
+					    entry->vme_end,
+					    &pmap_compressed_bytes);
+		volatile_pmap_count += (pmap_resident_bytes / PAGE_SIZE);
+		volatile_compressed_pmap_count += (pmap_compressed_bytes
+						   / PAGE_SIZE);
 	}
 
 	/* map is still locked on return */

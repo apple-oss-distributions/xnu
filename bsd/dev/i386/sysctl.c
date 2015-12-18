@@ -32,6 +32,7 @@
 #include <sys/sysctl.h>
 #include <i386/cpuid.h>
 #include <i386/tsc.h>
+#include <i386/rtclock_protos.h>
 #include <i386/machine_routines.h>
 #include <i386/pal_routines.h>
 #include <i386/ucode.h>
@@ -690,6 +691,21 @@ SYSCTL_PROC(_machdep_cpu, OID_AUTO, ucupdate,
 	    CTLTYPE_INT | CTLFLAG_WR | CTLFLAG_LOCKED, 0, 0,
             cpu_ucode_update, "S", "Microcode update interface");
 
+SYSCTL_NODE(_machdep_cpu, OID_AUTO, tsc_ccc, CTLFLAG_RW|CTLFLAG_LOCKED, 0,
+	"TSC/CCC frequency information");
+
+SYSCTL_PROC(_machdep_cpu_tsc_ccc, OID_AUTO, numerator,
+	    CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_LOCKED, 
+	    (void *)offsetof(i386_cpu_info_t, cpuid_tsc_leaf.numerator),
+	    sizeof(uint32_t),
+	    i386_cpu_info, "I", "Numerator of TSC/CCC ratio");
+
+SYSCTL_PROC(_machdep_cpu_tsc_ccc, OID_AUTO, denominator,
+	    CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_LOCKED, 
+	    (void *)offsetof(i386_cpu_info_t, cpuid_tsc_leaf.denominator),
+	    sizeof(uint32_t),
+	    i386_cpu_info, "I", "Denominator of TSC/CCC ratio");
+
 static const uint32_t apic_timer_vector = (LAPIC_DEFAULT_INTERRUPT_BASE + LAPIC_TIMER_INTERRUPT);
 static const uint32_t apic_IPI_vector = (LAPIC_DEFAULT_INTERRUPT_BASE + LAPIC_INTERPROCESSOR_INTERRUPT);
 
@@ -743,7 +759,11 @@ SYSCTL_QUAD(_machdep_tsc, OID_AUTO, frequency,
 
 extern uint32_t deep_idle_rebase;
 SYSCTL_UINT(_machdep_tsc, OID_AUTO, deep_idle_rebase,
-	CTLFLAG_RW|CTLFLAG_KERN|CTLFLAG_LOCKED, &deep_idle_rebase, 0, "");
+	CTLFLAG_RD|CTLFLAG_LOCKED, &deep_idle_rebase, 0, "");
+SYSCTL_QUAD(_machdep_tsc, OID_AUTO, at_boot,
+	CTLFLAG_RD|CTLFLAG_LOCKED, &tsc_at_boot, "");
+SYSCTL_QUAD(_machdep_tsc, OID_AUTO, rebase_abs_time,
+	CTLFLAG_RD|CTLFLAG_LOCKED, &tsc_rebase_abs_time, "");
 
 SYSCTL_NODE(_machdep_tsc, OID_AUTO, nanotime,
 	CTLFLAG_RD|CTLFLAG_LOCKED, NULL, "TSC to ns conversion");

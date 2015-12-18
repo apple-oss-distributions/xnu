@@ -3192,7 +3192,8 @@ MACRO_END
 
 			if (m->wpmapped == FALSE) {
 				vm_object_lock_assert_exclusive(m->object);
-
+				if (!m->object->internal)
+					task_update_logical_writes(current_task(), PAGE_SIZE, TASK_WRITE_DEFERRED);
 				m->wpmapped = TRUE;
 			}
 			if (must_disconnect) {
@@ -4827,7 +4828,10 @@ handle_copy_delay:
 			int superpage;
 
 			if (!object->pager_created &&
-			    object->phys_contiguous) {
+			    object->phys_contiguous &&
+			    VME_OFFSET(entry) == 0 &&
+			    (entry->vme_end - entry->vme_start == object->vo_size) &&
+			    VM_MAP_PAGE_ALIGNED(entry->vme_start, (object->vo_size-1))) {
 				superpage = VM_MEM_SUPERPAGE;
 			} else {
 				superpage = 0;
@@ -6012,10 +6016,6 @@ vm_page_validate_cs_mapped(
 	assert(page->busy);
 	vm_object_lock_assert_exclusive(page->object);
 
-	if (!cs_validation) {
-		return;
-	}
-
 	if (page->wpmapped && !page->cs_tainted) {
 		/*
 		 * This page was mapped for "write" access sometime in the
@@ -6112,10 +6112,6 @@ vm_page_validate_cs(
 	boolean_t		need_unmap;
 
 	vm_object_lock_assert_held(page->object);
-
-	if (!cs_validation) {
-		return;
-	}
 
 	if (page->wpmapped && !page->cs_tainted) {
 		vm_object_lock_assert_exclusive(page->object);
@@ -6237,10 +6233,6 @@ vm_page_validate_cs_mapped_chunk(
 
 	assert(page->busy);
 	vm_object_lock_assert_exclusive(page->object);
-
-	if (!cs_validation) {
-		return;
-	}
 
 	object = page->object;
 	assert(object->code_signed);

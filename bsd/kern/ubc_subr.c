@@ -2695,11 +2695,6 @@ static SInt32 cs_blob_size_peak = 0;
 static UInt32 cs_blob_size_max = 0;
 static SInt32 cs_blob_count_peak = 0;
 
-int cs_validation = 1;
-
-#ifndef SECURE_KERNEL
-SYSCTL_INT(_vm, OID_AUTO, cs_validation, CTLFLAG_RW | CTLFLAG_LOCKED, &cs_validation, 0, "Do validate code signatures");
-#endif
 SYSCTL_INT(_vm, OID_AUTO, cs_blob_count, CTLFLAG_RD | CTLFLAG_LOCKED, (int *)(uintptr_t)&cs_blob_count, 0, "Current number of code signature blobs");
 SYSCTL_INT(_vm, OID_AUTO, cs_blob_size, CTLFLAG_RD | CTLFLAG_LOCKED, (int *)(uintptr_t)&cs_blob_size, 0, "Current size of all code signature blobs");
 SYSCTL_INT(_vm, OID_AUTO, cs_blob_count_peak, CTLFLAG_RD | CTLFLAG_LOCKED, &cs_blob_count_peak, 0, "Peak number of code signature blobs");
@@ -2852,13 +2847,12 @@ ubc_cs_blob_add(
 
 	error = cs_validate_csblob((const uint8_t *)addr, size, &cd);
 	if (error) {
-		if (cs_debug)
+
+        if (cs_debug)
 			printf("CODESIGNING: csblob invalid: %d\n", error);
-		blob->csb_flags = 0;
-		blob->csb_start_offset = 0;
-		blob->csb_end_offset = 0;
-		memset(blob->csb_cdhash, 0, sizeof(blob->csb_cdhash));
-		/* let the vnode checker determine if the signature is valid or not */
+        /* The vnode checker can't make the rest of this function succeed if csblob validation failed, so bail */
+        goto out;
+
 	} else {
 		const unsigned char *md_base;
 		uint8_t hash[CS_HASH_MAX_SIZE];
