@@ -140,6 +140,10 @@ acpi_hibernate(void *refcon)
 		}
 
 	}
+
+#if CONFIG_VMX
+	vmx_suspend();
+#endif
 	kdebug_enable = 0;
 
 	IOCPURunPlatformQuiesceActions();
@@ -202,13 +206,6 @@ acpi_sleep_kernel(acpi_sleep_callback func, void *refcon)
 	hv_suspend();
 #endif
 
-#if CONFIG_VMX
-	/* 
-	 * Turn off VT, otherwise switching to legacy mode will fail
-	 */
-	vmx_suspend();
-#endif
-
 	/*
 	 * Enable FPU/SIMD unit for potential hibernate acceleration
 	 */
@@ -231,10 +228,19 @@ acpi_sleep_kernel(acpi_sleep_callback func, void *refcon)
 #if HIBERNATION
 	acpi_sleep_cpu(acpi_hibernate, &data);
 #else
+#if CONFIG_VMX
+	vmx_suspend();
+#endif
 	acpi_sleep_cpu(func, refcon);
 #endif
 
-	start = mach_absolute_time();
+	acpi_wake_abstime = mach_absolute_time();
+	/* Rebase TSC->absolute time conversion, using timestamp
+	 * recorded before sleep.
+	 */
+	rtc_nanotime_init(acpi_sleep_abstime);
+	acpi_wake_postrebase_abstime = start = mach_absolute_time();
+	assert(start >= acpi_sleep_abstime);
 
 	x86_64_post_sleep(old_cr3);
 
@@ -274,16 +280,16 @@ acpi_sleep_kernel(acpi_sleep_callback func, void *refcon)
 	/* update CPU microcode */
 	ucode_update_wake();
 
+#if CONFIG_MTRR
+	/* set up PAT following boot processor power up */
+	pat_init();
+#endif
+
 #if CONFIG_VMX
 	/* 
 	 * Restore VT mode
 	 */
-	vmx_resume();
-#endif
-
-#if CONFIG_MTRR
-	/* set up PAT following boot processor power up */
-	pat_init();
+	vmx_resume(did_hibernate);
 #endif
 
 	/*
@@ -302,19 +308,14 @@ acpi_sleep_kernel(acpi_sleep_callback func, void *refcon)
 #endif
 
 	elapsed += mach_absolute_time() - start;
-	acpi_wake_abstime = mach_absolute_time();
 
-	/* let the realtime clock reset */
-	rtc_sleep_wakeup(acpi_sleep_abstime);
-	acpi_wake_postrebase_abstime = mach_absolute_time();
-	assert(mach_absolute_time() >= acpi_sleep_abstime);
-
+	rtc_decrementer_configure();
 	kdebug_enable = save_kdebug_enable;
 
 	if (kdebug_enable == 0) {
 		if (wake_nkdbufs) {
 			start = mach_absolute_time();
-			start_kern_tracing(wake_nkdbufs, TRUE);
+			kdebug_trace_start(wake_nkdbufs, NULL, TRUE);
 			elapsed_trace_start += mach_absolute_time() - start;
 		}
 	}
@@ -448,7 +449,7 @@ acpi_idle_kernel(acpi_sleep_callback func, void *refcon)
 	/* Like S3 sleep, turn on tracing if trace_wake boot-arg is present */ 
 	if (kdebug_enable == 0) {
 		if (wake_nkdbufs)
-			start_kern_tracing(wake_nkdbufs, TRUE);
+			kdebug_trace_start(wake_nkdbufs, NULL, TRUE);
 	}
 
 	IOCPURunPlatformActiveActions();

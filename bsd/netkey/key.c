@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2014 Apple Inc. All rights reserved.
+ * Copyright (c) 2008-2016 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -172,7 +172,8 @@ static int ipsec_sav_count = 0;
 
 static u_int32_t acq_seq = 0;
 static int key_tick_init_random = 0;
-__private_extern__ u_int32_t natt_now = 0;
+static u_int64_t up_time = 0;
+__private_extern__ u_int64_t natt_now = 0;
 
 static LIST_HEAD(_sptree, secpolicy) sptree[IPSEC_DIR_MAX];	/* SPD */
 static LIST_HEAD(_sahtree, secashead) sahtree;			/* SAD */
@@ -588,12 +589,12 @@ static int key_setsaval2(struct secasvar      *sav,
 						 u_int32_t             pid,
 						 struct sadb_lifetime *lifetime_hard,
 						 struct sadb_lifetime *lifetime_soft);
+static void bzero_keys(const struct sadb_msghdr *);
 
 extern int ipsec_bypass;
 extern int esp_udp_encap_port;
 int ipsec_send_natt_keepalive(struct secasvar *sav);
 bool ipsec_fill_offload_frame(ifnet_t ifp, struct secasvar *sav, struct ifnet_keepalive_offload_frame *frame, size_t frame_data_offset);
-u_int32_t key_fill_offload_frames_for_savs (ifnet_t ifp, struct ifnet_keepalive_offload_frame *frames_array, u_int32_t frames_array_count, size_t frame_data_offset);
 
 void key_init(struct protosw *, struct domain *);
 
@@ -2346,15 +2347,14 @@ key_spdadd(
 	
 #if 1
 	/*
-	 * allow IPv6 over IPv4 tunnels using ESP -
+	 * allow IPv6 over IPv4 or IPv4 over IPv6 tunnels using ESP -
 	 * otherwise reject if inner and outer address families not equal
 	 */
 	if (newsp->req && newsp->req->saidx.src.ss_family) {
 		struct sockaddr *sa;
 		sa = (struct sockaddr *)(src0 + 1);
 		if (sa->sa_family != newsp->req->saidx.src.ss_family) {
-			if (newsp->req->saidx.mode != IPSEC_MODE_TUNNEL || newsp->req->saidx.proto != IPPROTO_ESP
-			    || sa->sa_family != AF_INET6 || newsp->req->saidx.src.ss_family != AF_INET) {
+			if (newsp->req->saidx.mode != IPSEC_MODE_TUNNEL || newsp->req->saidx.proto != IPPROTO_ESP) {
 				keydb_delsecpolicy(newsp);
                 if (internal_if) {
                     ifnet_release(internal_if);
@@ -2368,8 +2368,7 @@ key_spdadd(
 		struct sockaddr *sa;
 		sa = (struct sockaddr *)(dst0 + 1);
 		if (sa->sa_family != newsp->req->saidx.dst.ss_family) {
-			if (newsp->req->saidx.mode != IPSEC_MODE_TUNNEL || newsp->req->saidx.proto != IPPROTO_ESP
-			    || sa->sa_family != AF_INET6 || newsp->req->saidx.dst.ss_family != AF_INET) {
+			if (newsp->req->saidx.mode != IPSEC_MODE_TUNNEL || newsp->req->saidx.proto != IPPROTO_ESP) {
 				keydb_delsecpolicy(newsp);
                 if (internal_if) {
                     ifnet_release(internal_if);
@@ -6215,8 +6214,10 @@ key_timehandler(void)
 		key_tick_init_random = 0;
 		key_srandom();
 	}
-	
-	natt_now++;
+
+	uint64_t acc_sleep_time = 0;
+	absolutetime_to_nanoseconds(mach_absolutetime_asleep, &acc_sleep_time);
+	natt_now = ++up_time + (acc_sleep_time / NSEC_PER_SEC);
 	
 	lck_mtx_unlock(sadb_mutex);
 	
@@ -6358,7 +6359,6 @@ key_satype2proto(
 			return IPPROTO_ESP;
 		case SADB_X_SATYPE_IPCOMP:
 			return IPPROTO_IPCOMP;
-			break;
 		default:
 			return 0;
 	}
@@ -6381,7 +6381,6 @@ key_proto2satype(
 			return SADB_SATYPE_ESP;
 		case IPPROTO_IPCOMP:
 			return SADB_X_SATYPE_IPCOMP;
-			break;
 		default:
 			return 0;
 	}
@@ -7076,7 +7075,7 @@ key_migrate(struct socket *so,
 	sav->natt_interval = ((const struct sadb_sa_2*)(sa0))->sadb_sa_natt_interval;
 	sav->natt_offload_interval = ((const struct sadb_sa_2*)(sa0))->sadb_sa_natt_offload_interval;
 	sav->natt_last_activity = natt_now;
-	
+
 	/*
 	 * Verify if SADB_X_EXT_NATT_MULTIPLEUSERS flag is set that
 	 * SADB_X_EXT_NATT is set and SADB_X_EXT_NATT_KEEPALIVE is not
@@ -7194,6 +7193,7 @@ key_add(
 	/* map satype to proto */
 	if ((proto = key_satype2proto(mhp->msg->sadb_msg_satype)) == 0) {
 		ipseclog((LOG_DEBUG, "key_add: invalid satype is passed.\n"));
+		bzero_keys(mhp);
 		return key_senderror(so, m, EINVAL);
 	}
 	
@@ -7209,6 +7209,7 @@ key_add(
 	    (mhp->ext[SADB_EXT_LIFETIME_HARD] == NULL &&
 	     mhp->ext[SADB_EXT_LIFETIME_SOFT] != NULL)) {
 			ipseclog((LOG_DEBUG, "key_add: invalid message is passed.\n"));
+			bzero_keys(mhp);
 			return key_senderror(so, m, EINVAL);
 		}
 	if (mhp->extlen[SADB_EXT_SA] < sizeof(struct sadb_sa) ||
@@ -7216,6 +7217,7 @@ key_add(
 	    mhp->extlen[SADB_EXT_ADDRESS_DST] < sizeof(struct sadb_address)) {
 		/* XXX need more */
 		ipseclog((LOG_DEBUG, "key_add: invalid message is passed.\n"));
+		bzero_keys(mhp);
 		return key_senderror(so, m, EINVAL);
 	}
 	if (mhp->ext[SADB_X_EXT_SA2] != NULL) {
@@ -7244,6 +7246,7 @@ key_add(
 		if ((newsah = key_newsah(&saidx, ipsec_if, key_get_outgoing_ifindex_from_message(mhp, SADB_X_EXT_IPSECIF), IPSEC_DIR_OUTBOUND)) == NULL) {
 			lck_mtx_unlock(sadb_mutex);
 			ipseclog((LOG_DEBUG, "key_add: No more memory.\n"));
+			bzero_keys(mhp);
 			return key_senderror(so, m, ENOBUFS);
 		}
 	}
@@ -7253,6 +7256,7 @@ key_add(
 	error = key_setident(newsah, m, mhp);
 	if (error) {
 		lck_mtx_unlock(sadb_mutex);
+		bzero_keys(mhp);
 		return key_senderror(so, m, error);
 	}
 	
@@ -7261,11 +7265,13 @@ key_add(
 	if (key_getsavbyspi(newsah, sa0->sadb_sa_spi)) {
 		lck_mtx_unlock(sadb_mutex);
 		ipseclog((LOG_DEBUG, "key_add: SA already exists.\n"));
+		bzero_keys(mhp);
 		return key_senderror(so, m, EEXIST);
 	}
 	newsav = key_newsav(m, mhp, newsah, &error, so);
 	if (newsav == NULL) {
 		lck_mtx_unlock(sadb_mutex);
+		bzero_keys(mhp);
 		return key_senderror(so, m, error);
 	}
 	
@@ -7282,6 +7288,7 @@ key_add(
 	if ((error = key_mature(newsav)) != 0) {
 		key_freesav(newsav, KEY_SADB_LOCKED);
 		lck_mtx_unlock(sadb_mutex);
+		bzero_keys(mhp);
 		return key_senderror(so, m, error);
 	}
 	
@@ -7299,9 +7306,13 @@ key_add(
 		n = key_getmsgbuf_x1(m, mhp);
 		if (n == NULL) {
 			ipseclog((LOG_DEBUG, "key_update: No more memory.\n"));
+			bzero_keys(mhp);
 			return key_senderror(so, m, ENOBUFS);
 		}
 		
+		// mh.ext points to the mbuf content.
+		// Zero out Encryption and Integrity keys if present.
+		bzero_keys(mhp);
 		m_freem(m);
 		return key_sendup_mbuf(so, n, KEY_SENDUP_ALL);
     }
@@ -9216,7 +9227,7 @@ bzero_mbuf(struct mbuf *m)
 }
 
 static void
-bzero_keys(struct sadb_msghdr *mh)
+bzero_keys(const struct sadb_msghdr *mh)
 {
 	int extlen = 0;
 	int offset = 0;
@@ -9516,10 +9527,6 @@ key_parse(
 	
 	error = (*key_typesw[msg->sadb_msg_type])(so, m, &mh);
 
-	// mh.ext points to the mbuf content.
-	// Zero out Encryption and Integrity keys if present.
-	bzero_keys(&mh);
-	
 	return error;
 
 senderror:

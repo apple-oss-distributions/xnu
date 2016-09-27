@@ -87,19 +87,21 @@
 #include <sys/proc_internal.h>
 #include <sys/kauth.h>
 #include <sys/user.h>
+#include <sys/reason.h>
 #include <sys/resourcevar.h>
 #include <sys/vnode_internal.h>
 #include <sys/file_internal.h>
 #include <sys/acct.h>
 #include <sys/codesign.h>
 #include <sys/sysproto.h>
-
+#if CONFIG_PERSONAS
+#include <sys/persona.h>
+#endif
+#include <sys/doc_tombstone.h>
 #if CONFIG_DTRACE
 /* Do not include dtrace.h, it redefines kmem_[alloc/free] */
-extern void dtrace_fasttrap_fork(proc_t, proc_t);
-extern void (*dtrace_helpers_fork)(proc_t, proc_t);
 extern void (*dtrace_proc_waitfor_exec_ptr)(proc_t);
-extern void dtrace_lazy_dofs_duplicate(proc_t, proc_t);
+extern void dtrace_proc_fork(proc_t, proc_t, int);
 
 /*
  * Since dtrace_proc_waitfor_exec_ptr can be added/removed in dtrace_subr.c,
@@ -394,7 +396,6 @@ fork1(proc_t parent_proc, thread_t *child_threadp, int kind, coalition_t *coalit
 	 * always less than what an rlim_t can hold.
 	 * (locking protection is provided by list lock held in chgproccnt)
 	 */
-
 	count = chgproccnt(uid, 1);
 	if (uid != 0 &&
 	    (rlim_t)count > parent_proc->p_rlimit[RLIMIT_NPROC].rlim_cur) {
@@ -616,61 +617,16 @@ fork1(proc_t parent_proc, thread_t *child_threadp, int kind, coalition_t *coalit
 
 		child_proc->p_acflag = AFORK;	/* forked but not exec'ed */
 
-// <rdar://6598155> dtrace code cleanup needed
 #if CONFIG_DTRACE
-		/*
-		 * This code applies to new processes who are copying the task
-		 * and thread state and address spaces of their parent process.
-		 */
-		if (!spawn) {
-// <rdar://6598155> call dtrace specific function here instead of all this...
-		/*
-		 * APPLE NOTE: Solaris does a sprlock() and drops the
-		 * proc_lock here. We're cheating a bit and only taking
-		 * the p_dtrace_sprlock lock. A full sprlock would
-		 * task_suspend the parent.
-		 */
-		lck_mtx_lock(&parent_proc->p_dtrace_sprlock);
-
-		/*
-		 * Remove all DTrace tracepoints from the child process. We
-		 * need to do this _before_ duplicating USDT providers since
-		 * any associated probes may be immediately enabled.
-		 */
-		if (parent_proc->p_dtrace_count > 0) {
-			dtrace_fasttrap_fork(parent_proc, child_proc);
-		}
-
-		lck_mtx_unlock(&parent_proc->p_dtrace_sprlock);
-
-		/*
-		 * Duplicate any lazy dof(s). This must be done while NOT
-		 * holding the parent sprlock! Lock ordering is
-		 * dtrace_dof_mode_lock, then sprlock.  It is imperative we
-		 * always call dtrace_lazy_dofs_duplicate, rather than null
-		 * check and call if !NULL. If we NULL test, during lazy dof
-		 * faulting we can race with the faulting code and proceed
-		 * from here to beyond the helpers copy. The lazy dof
-		 * faulting will then fail to copy the helpers to the child
-		 * process.
-		 */
-		dtrace_lazy_dofs_duplicate(parent_proc, child_proc);
-		
-		/*
-		 * Duplicate any helper actions and providers. The SFORKING
-		 * we set above informs the code to enable USDT probes that
-		 * sprlock() may fail because the child is being forked.
-		 */
-		/*
-		 * APPLE NOTE: As best I can tell, Apple's sprlock() equivalent
-		 * never fails to find the child. We do not set SFORKING.
-		 */
-		if (parent_proc->p_dtrace_helpers != NULL && dtrace_helpers_fork) {
-			(*dtrace_helpers_fork)(parent_proc, child_proc);
-		}
-
-		}
+		dtrace_proc_fork(parent_proc, child_proc, spawn);
 #endif	/* CONFIG_DTRACE */
+		if (!spawn) {
+			/*
+			 * Of note, we need to initialize the bank context behind
+			 * the protection of the proc_trans lock to prevent a race with exit.
+			 */
+			task_bank_init(get_threadtask(child_thread));
+		}
 
 		break;
 
@@ -797,6 +753,7 @@ fork_create_child(task_t parent_task, coalition_t *parent_coalitions, proc_t chi
 					parent_coalitions,
 					inherit_memory,
 					is64bit,
+					TF_NONE,
 					&child_task);
 	if (result != KERN_SUCCESS) {
 		printf("%s: task_create_internal failed.  Code: %d\n",
@@ -982,7 +939,7 @@ cloneproc(task_t parent_task, coalition_t *parent_coalitions, proc_t parent_proc
 		goto bad;
 	}
 
-	child_thread = fork_create_child(parent_task, parent_coalitions, child_proc, inherit_memory, (parent_task == TASK_NULL) ? FALSE : (parent_proc->p_flag & P_LP64));
+	child_thread = fork_create_child(parent_task, parent_coalitions, child_proc, inherit_memory, parent_proc->p_flag & P_LP64);
 
 	if (child_thread == NULL) {
 		/*
@@ -1039,6 +996,13 @@ bad:
 void
 forkproc_free(proc_t p)
 {
+#if CONFIG_PERSONAS
+	persona_proc_drop(p);
+#endif /* CONFIG_PERSONAS */
+
+#if PSYNCH
+	pth_proc_hashdelete(p);
+#endif /* PSYNCH */
 
 	/* We held signal and a transition locks; drop them */
 	proc_signalend(p, 0);
@@ -1083,12 +1047,34 @@ forkproc_free(proc_t p)
 	/* Update the audit session proc count */
 	AUDIT_SESSION_PROCEXIT(p);
 
+#if CONFIG_FINE_LOCK_GROUPS
+	lck_mtx_destroy(&p->p_mlock, proc_mlock_grp);
+	lck_mtx_destroy(&p->p_fdmlock, proc_fdmlock_grp);
+	lck_mtx_destroy(&p->p_ucred_mlock, proc_ucred_mlock_grp);
+#if CONFIG_DTRACE
+	lck_mtx_destroy(&p->p_dtrace_sprlock, proc_lck_grp);
+#endif
+	lck_spin_destroy(&p->p_slock, proc_slock_grp);
+#else /* CONFIG_FINE_LOCK_GROUPS */
+	lck_mtx_destroy(&p->p_mlock, proc_lck_grp);
+	lck_mtx_destroy(&p->p_fdmlock, proc_lck_grp);
+	lck_mtx_destroy(&p->p_ucred_mlock, proc_lck_grp);
+#if CONFIG_DTRACE
+	lck_mtx_destroy(&p->p_dtrace_sprlock, proc_lck_grp);
+#endif
+	lck_spin_destroy(&p->p_slock, proc_lck_grp);
+#endif /* CONFIG_FINE_LOCK_GROUPS */
+
 	/* Release the credential reference */
 	kauth_cred_unref(&p->p_ucred);
 
 	proc_list_lock();
 	/* Decrement the count of processes in the system */
 	nprocs--;
+
+	/* Take it out of process hash */
+	LIST_REMOVE(p, p_hash);
+
 	proc_list_unlock();
 
 	thread_call_free(p->p_rcall);
@@ -1343,12 +1329,6 @@ retry:
 	child_proc->p_csflags = (parent_proc->p_csflags & ~CS_KILLED);
 
 	/*
-	 * All processes have work queue locks; cleaned up by
-	 * reap_child_locked()
-	 */
-	workqueue_init_lock(child_proc);
-
-	/*
 	 * Copy work queue information
 	 *
 	 * Note: This should probably only happen in the case where we are
@@ -1362,7 +1342,6 @@ retry:
 	child_proc->p_wqthread = parent_proc->p_wqthread;
 	child_proc->p_threadstart = parent_proc->p_threadstart;
 	child_proc->p_pthsize = parent_proc->p_pthsize;
-	child_proc->p_targconc = parent_proc->p_targconc;
 	if ((parent_proc->p_lflag & P_LREGISTER) != 0) {
 		child_proc->p_lflag |= P_LREGISTER;
 	}
@@ -1373,12 +1352,28 @@ retry:
 	pth_proc_hashinit(child_proc);
 #endif /* PSYNCH */
 
+#if CONFIG_PERSONAS
+	child_proc->p_persona = NULL;
+	error = persona_proc_inherit(child_proc, parent_proc);
+	if (error != 0) {
+		printf("forkproc: persona_proc_inherit failed (persona %d being destroyed?)\n", persona_get_uid(parent_proc->p_persona));
+		forkproc_free(child_proc);
+		child_proc = NULL;
+		goto bad;
+	}
+#endif
+
 #if CONFIG_MEMORYSTATUS
-	/* Memorystatus + jetsam init */
+	/* Memorystatus init */
 	child_proc->p_memstat_state = 0;
 	child_proc->p_memstat_effectivepriority = JETSAM_PRIORITY_DEFAULT;
 	child_proc->p_memstat_requestedpriority = JETSAM_PRIORITY_DEFAULT;
-	child_proc->p_memstat_userdata = 0;
+	child_proc->p_memstat_userdata          = 0;
+	child_proc->p_memstat_idle_start	= 0;
+	child_proc->p_memstat_idle_delta	= 0;
+	child_proc->p_memstat_memlimit          = 0;
+	child_proc->p_memstat_memlimit_active   = 0;
+	child_proc->p_memstat_memlimit_inactive = 0;
 #if CONFIG_FREEZE
 	child_proc->p_memstat_suspendedfootprint = 0;
 #endif
@@ -1441,19 +1436,25 @@ proc_ucred_unlock(proc_t p)
 
 #include <kern/zalloc.h>
 
-struct zone	*uthread_zone;
-static int uthread_zone_inited = 0;
+struct zone *uthread_zone = NULL;
+
+static lck_grp_t        *rethrottle_lock_grp;
+static lck_attr_t       *rethrottle_lock_attr;
+static lck_grp_attr_t   *rethrottle_lock_grp_attr;
 
 static void
 uthread_zone_init(void)
 {
-	if (!uthread_zone_inited) {
-		uthread_zone = zinit(sizeof(struct uthread),
-					thread_max * sizeof(struct uthread),
-					THREAD_CHUNK * sizeof(struct uthread),
-					"uthreads");
-		uthread_zone_inited = 1;
-	}
+	assert(uthread_zone == NULL);
+
+	rethrottle_lock_grp_attr = lck_grp_attr_alloc_init();
+	rethrottle_lock_grp = lck_grp_alloc_init("rethrottle", rethrottle_lock_grp_attr);
+	rethrottle_lock_attr = lck_attr_alloc_init();
+
+	uthread_zone = zinit(sizeof(struct uthread),
+	                     thread_max * sizeof(struct uthread),
+	                     THREAD_CHUNK * sizeof(struct uthread),
+	                     "uthreads");
 }
 
 void *
@@ -1464,7 +1465,7 @@ uthread_alloc(task_t task, thread_t thread, int noinherit)
 	uthread_t uth_parent;
 	void *ut;
 
-	if (!uthread_zone_inited)
+	if (uthread_zone == NULL)
 		uthread_zone_init();
 
 	ut = (void *)zalloc(uthread_zone);
@@ -1473,6 +1474,9 @@ uthread_alloc(task_t task, thread_t thread, int noinherit)
 	p = (proc_t) get_bsdtask_info(task);
 	uth = (uthread_t)ut;
 	uth->uu_thread = thread;
+
+	lck_spin_init(&uth->uu_rethrottle_lock, rethrottle_lock_grp,
+	              rethrottle_lock_attr);
 
 	/*
 	 * Thread inherits credential from the creating thread, if both
@@ -1533,9 +1537,7 @@ uthread_alloc(task_t task, thread_t thread, int noinherit)
 
 /*
  * This routine frees the thread name field of the uthread_t structure. Split out of
- * uthread_cleanup() so it can be called separately on the threads of a corpse after
- * the corpse notification has been sent, and the handler has had a chance to extract
- * the thread names.
+ * uthread_cleanup() so thread name does not get deallocated while generating a corpse fork.
  */
 void
 uthread_cleanup_name(void *uthread)
@@ -1564,7 +1566,7 @@ uthread_cleanup_name(void *uthread)
  * It does not free the uthread structure as well
  */
 void
-uthread_cleanup(task_t task, void *uthread, void * bsd_info, boolean_t is_corpse)
+uthread_cleanup(task_t task, void *uthread, void * bsd_info)
 {
 	struct _select *sel;
 	uthread_t uth = (uthread_t)uthread;
@@ -1597,6 +1599,15 @@ uthread_cleanup(task_t task, void *uthread, void * bsd_info, boolean_t is_corpse
 	 */
 	assert(uth->uu_ar == NULL);
 
+	if (uth->uu_kqueue_bound) {
+		kevent_qos_internal_unbind(p, 
+		                           uth->uu_kqueue_bound, 
+		                           uth->uu_thread,
+		                           uth->uu_kqueue_flags);
+		uth->uu_kqueue_flags = 0;
+		uth->uu_kqueue_bound = 0;
+	}
+
 	sel = &uth->uu_select;
 	/* cleanup the select bit space */
 	if (sel->nbytes) {
@@ -1618,13 +1629,7 @@ uthread_cleanup(task_t task, void *uthread, void * bsd_info, boolean_t is_corpse
 		uth->uu_wqstate_sz = 0;
 	}
 
-	/*
-	 * defer the removal of the thread name on process corpses until the corpse has
-	 * been autopsied.
-	 */
-	if (!is_corpse) {
-		uthread_cleanup_name(uth);
-	}
+	os_reason_free(uth->uu_exit_reason);
 
 	if ((task != kernel_task) && p) {
 
@@ -1676,6 +1681,9 @@ uthread_zone_free(void *uthread)
 		uth->t_tombstone = NULL;
 	}
 
+	lck_spin_destroy(&uth->uu_rethrottle_lock, rethrottle_lock_grp);
+
+	uthread_cleanup_name(uthread);
 	/* and free the uthread itself */
 	zfree(uthread_zone, uthread);
 }

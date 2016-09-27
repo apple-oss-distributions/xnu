@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1999-2000 Apple Computer, Inc.  All rights reserved.
+ * Copyright (c) 1999-2016 Apple Inc.  All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -25,16 +25,11 @@
  * 
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
-/*
- * Copyright (c) 1999-2000 Apple Computer, Inc.  All rights reserved.
- *
- *  DRI: Josh de Cesare
- *
- */
 
 extern "C" {
 #include <machine/machine_routines.h>
 #include <pexpert/pexpert.h>
+#include <kern/cpu_number.h>
 }
 
 #include <machine/machine_routines.h>
@@ -46,9 +41,13 @@ extern "C" {
 #include <IOKit/IOUserClient.h>
 #include <IOKit/IOKitKeysPrivate.h>
 #include <IOKit/IOCPU.h>
+#include "IOKitKernelInternal.h"
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 #include <kern/queue.h>
+
+extern "C" void console_suspend();
+extern "C" void console_resume();
 
 typedef kern_return_t (*iocpu_platform_action_t)(void * refcon0, void * refcon1, uint32_t priority,
 						 void * param1, void * param2, void * param3,
@@ -156,6 +155,7 @@ IOCPURunPlatformActiveActions(void)
 extern "C" kern_return_t 
 IOCPURunPlatformHaltRestartActions(uint32_t message)
 {
+    if (!gActionQueues[kQueueHaltRestart].next) return (kIOReturnNotReady);
     return (iocpu_run_platform_actions(&gActionQueues[kQueueHaltRestart], 0, 0U-1,
 				     (void *)(uintptr_t) message, NULL, NULL));
 }
@@ -163,6 +163,7 @@ IOCPURunPlatformHaltRestartActions(uint32_t message)
 extern "C" kern_return_t 
 IOCPURunPlatformPanicActions(uint32_t message)
 {
+    if (!gActionQueues[kQueueHaltRestart].next) return (kIOReturnNotReady);
     return (iocpu_run_platform_actions(&gActionQueues[kQueuePanic], 0, 0U-1,
 				     (void *)(uintptr_t) message, NULL, NULL));
 }
@@ -431,19 +432,25 @@ void IOCPUSleepKernel(void)
         if (target->getCPUNumber() == kBootCPUNumber) 
         {
             bootCPU = target;
-        } else if (target->getCPUState() == kIOCPUStateRunning) 
+        } else if (target->getCPUState() == kIOCPUStateRunning)
         {
-            target->haltCPU();
+	  target->haltCPU();
         }
     }
+
+    assert(bootCPU != NULL);
+    assert(cpu_number() == 0);
+
+    console_suspend();
 
     rootDomain->tracePoint( kIOPMTracePointSleepPlatformDriver );
 
     // Now sleep the boot CPU.
-    if (bootCPU)
-        bootCPU->haltCPU();
+    bootCPU->haltCPU();
 
     rootDomain->tracePoint( kIOPMTracePointWakePlatformActions );
+
+    console_resume();
 
     iocpu_run_platform_actions(&gActionQueues[kQueueWake], 0, 0U-1,
 				    NULL, NULL, NULL);
@@ -544,31 +551,10 @@ OSObject *IOCPU::getProperty(const OSSymbol *aKey) const
 
 bool IOCPU::setProperty(const OSSymbol *aKey, OSObject *anObject)
 {
-  OSString *stateStr;
-  
   if (aKey == gIOCPUStateKey) {
-    stateStr = OSDynamicCast(OSString, anObject);
-    if (stateStr == 0) return false;
-    
-    if (_cpuNumber == 0) return false;
-    
-    if (stateStr->isEqualTo("running")) {
-      if (_cpuState == kIOCPUStateStopped) {
-	processor_start(machProcessor);
-      } else if (_cpuState != kIOCPUStateRunning) {
-	return false;
-      }
-    } else if (stateStr->isEqualTo("stopped")) {
-      if (_cpuState == kIOCPUStateRunning) {
-        haltCPU();
-      } else if (_cpuState != kIOCPUStateStopped) {
-        return false;
-      }
-    } else return false;
-    
-    return true;
+    return false;
   }
-  
+
   return super::setProperty(aKey, anObject);
 }
 

@@ -116,21 +116,34 @@ mach_msg_send_from_kernel(
 	ipc_kmsg_t kmsg;
 	mach_msg_return_t mr;
 
+	KDBG(MACHDBG_CODE(DBG_MACH_IPC,MACH_IPC_KMSG_INFO) | DBG_FUNC_START);
+
 	mr = ipc_kmsg_get_from_kernel(msg, send_size, &kmsg);
-	if (mr != MACH_MSG_SUCCESS)
+	if (mr != MACH_MSG_SUCCESS) {
+		KDBG(MACHDBG_CODE(DBG_MACH_IPC,MACH_IPC_KMSG_INFO) | DBG_FUNC_END, mr);
 		return mr;
+	}
 
 	mr = ipc_kmsg_copyin_from_kernel_legacy(kmsg);
 	if (mr != MACH_MSG_SUCCESS) {
 		ipc_kmsg_free(kmsg);
+		KDBG(MACHDBG_CODE(DBG_MACH_IPC,MACH_IPC_KMSG_INFO) | DBG_FUNC_END, mr);
 		return mr;
 	}		
 
-	mr = ipc_kmsg_send(kmsg, 
-			   MACH_SEND_KERNEL_DEFAULT,
-			   MACH_MSG_TIMEOUT_NONE);
+	/*
+	 * respect the thread's SEND_IMPORTANCE option to allow importance
+	 * donation from the kernel-side of user threads
+	 * (11938665 & 23925818)
+	 */
+	mach_msg_option_t option = MACH_SEND_KERNEL_DEFAULT;
+	if (current_thread()->options & TH_OPT_SEND_IMPORTANCE)
+		option &= ~MACH_SEND_NOIMPORTANCE;
+
+	mr = ipc_kmsg_send(kmsg, option, MACH_MSG_TIMEOUT_NONE);
 	if (mr != MACH_MSG_SUCCESS) {
 		ipc_kmsg_destroy(kmsg);
+		KDBG(MACHDBG_CODE(DBG_MACH_IPC,MACH_IPC_KMSG_INFO) | DBG_FUNC_END, mr);
 	}
 
 	return mr;
@@ -146,21 +159,34 @@ mach_msg_send_from_kernel_proper(
 	ipc_kmsg_t kmsg;
 	mach_msg_return_t mr;
 
+	KDBG(MACHDBG_CODE(DBG_MACH_IPC,MACH_IPC_KMSG_INFO) | DBG_FUNC_START);
+
 	mr = ipc_kmsg_get_from_kernel(msg, send_size, &kmsg);
-	if (mr != MACH_MSG_SUCCESS)
+	if (mr != MACH_MSG_SUCCESS) {
+		KDBG(MACHDBG_CODE(DBG_MACH_IPC,MACH_IPC_KMSG_INFO) | DBG_FUNC_END, mr);
 		return mr;
+	}
 
 	mr = ipc_kmsg_copyin_from_kernel(kmsg);
 	if (mr != MACH_MSG_SUCCESS) {
 		ipc_kmsg_free(kmsg);
+		KDBG(MACHDBG_CODE(DBG_MACH_IPC,MACH_IPC_KMSG_INFO) | DBG_FUNC_END, mr);
 		return mr;
 	}
 
-	mr = ipc_kmsg_send(kmsg, 
-			   MACH_SEND_KERNEL_DEFAULT,
-			   MACH_MSG_TIMEOUT_NONE);
+	/*
+	 * respect the thread's SEND_IMPORTANCE option to force importance
+	 * donation from the kernel-side of user threads
+	 * (11938665 & 23925818)
+	 */
+	mach_msg_option_t option = MACH_SEND_KERNEL_DEFAULT;
+	if (current_thread()->options & TH_OPT_SEND_IMPORTANCE)
+		option &= ~MACH_SEND_NOIMPORTANCE;
+
+	mr = ipc_kmsg_send(kmsg, option, MACH_MSG_TIMEOUT_NONE);
 	if (mr != MACH_MSG_SUCCESS) {
 		ipc_kmsg_destroy(kmsg);
+		KDBG(MACHDBG_CODE(DBG_MACH_IPC,MACH_IPC_KMSG_INFO) | DBG_FUNC_END, mr);
 	}
 
 	return mr;
@@ -176,30 +202,39 @@ mach_msg_send_from_kernel_with_options(
 	ipc_kmsg_t kmsg;
 	mach_msg_return_t mr;
 
+	KDBG(MACHDBG_CODE(DBG_MACH_IPC,MACH_IPC_KMSG_INFO) | DBG_FUNC_START);
+
 	mr = ipc_kmsg_get_from_kernel(msg, send_size, &kmsg);
-	if (mr != MACH_MSG_SUCCESS)
+	if (mr != MACH_MSG_SUCCESS) {
+		KDBG(MACHDBG_CODE(DBG_MACH_IPC,MACH_IPC_KMSG_INFO) | DBG_FUNC_END, mr);
 		return mr;
+	}
 
 	mr = ipc_kmsg_copyin_from_kernel(kmsg);
 	if (mr != MACH_MSG_SUCCESS) {
 		ipc_kmsg_free(kmsg);
+		KDBG(MACHDBG_CODE(DBG_MACH_IPC,MACH_IPC_KMSG_INFO) | DBG_FUNC_END, mr);
 		return mr;
 	}
 
-#if 11938665
 	/*
 	 * Until we are sure of its effects, we are disabling
 	 * importance donation from the kernel-side of user
 	 * threads in importance-donating tasks - unless the
-	 * option to force importance donation is passed in.
+	 * option to force importance donation is passed in,
+	 * or the thread's SEND_IMPORTANCE option has been set.
+	 * (11938665 & 23925818)
 	 */
-	if ((option & MACH_SEND_IMPORTANCE) == 0)
+	if (current_thread()->options & TH_OPT_SEND_IMPORTANCE)
+		option &= ~MACH_SEND_NOIMPORTANCE;
+	else if ((option & MACH_SEND_IMPORTANCE) == 0)
 		option |= MACH_SEND_NOIMPORTANCE;
-#endif
+
 	mr = ipc_kmsg_send(kmsg, option, timeout_val);
 
 	if (mr != MACH_MSG_SUCCESS) {
 		ipc_kmsg_destroy(kmsg);
+		KDBG(MACHDBG_CODE(DBG_MACH_IPC,MACH_IPC_KMSG_INFO) | DBG_FUNC_END, mr);
 	}
 	
 	return mr;
@@ -218,28 +253,37 @@ mach_msg_send_from_kernel_with_options_legacy(
 	ipc_kmsg_t kmsg;
 	mach_msg_return_t mr;
 
+	KDBG(MACHDBG_CODE(DBG_MACH_IPC,MACH_IPC_KMSG_INFO) | DBG_FUNC_START);
+
 	mr = ipc_kmsg_get_from_kernel(msg, send_size, &kmsg);
-	if (mr != MACH_MSG_SUCCESS)
+	if (mr != MACH_MSG_SUCCESS) {
+		KDBG(MACHDBG_CODE(DBG_MACH_IPC,MACH_IPC_KMSG_INFO) | DBG_FUNC_END, mr);
 		return mr;
+	}
 
 	mr = ipc_kmsg_copyin_from_kernel_legacy(kmsg);
 	if (mr != MACH_MSG_SUCCESS) {
 		ipc_kmsg_free(kmsg);
+		KDBG(MACHDBG_CODE(DBG_MACH_IPC,MACH_IPC_KMSG_INFO) | DBG_FUNC_END, mr);
 		return mr;
 	}
 
-#if 11938665
 	/*
 	 * Until we are sure of its effects, we are disabling
 	 * importance donation from the kernel-side of user
 	 * threads in importance-donating tasks.
+	 * (11938665 & 23925818)
 	 */
-	option |= MACH_SEND_NOIMPORTANCE;
-#endif
+	if (current_thread()->options & TH_OPT_SEND_IMPORTANCE)
+		option &= ~MACH_SEND_NOIMPORTANCE;
+	else
+		option |= MACH_SEND_NOIMPORTANCE;
+
 	mr = ipc_kmsg_send(kmsg, option, timeout_val);
 
 	if (mr != MACH_MSG_SUCCESS) {
 		ipc_kmsg_destroy(kmsg);
+		KDBG(MACHDBG_CODE(DBG_MACH_IPC,MACH_IPC_KMSG_INFO) | DBG_FUNC_END, mr);
 	}
 	
 	return mr;
@@ -312,9 +356,13 @@ mach_msg_rpc_from_kernel_body(
 
 	assert(msg->msgh_local_port == MACH_PORT_NULL);
 
+	KDBG(MACHDBG_CODE(DBG_MACH_IPC,MACH_IPC_KMSG_INFO) | DBG_FUNC_START);
+
 	mr = ipc_kmsg_get_from_kernel(msg, send_size, &kmsg);
-	if (mr != MACH_MSG_SUCCESS)
+	if (mr != MACH_MSG_SUCCESS) {
+		KDBG(MACHDBG_CODE(DBG_MACH_IPC,MACH_IPC_KMSG_INFO) | DBG_FUNC_END, mr);
 		return mr;
+	}
 
 	reply = self->ith_rpc_reply;
 	if (reply == IP_NULL) {
@@ -340,13 +388,23 @@ mach_msg_rpc_from_kernel_body(
 #endif
     if (mr != MACH_MSG_SUCCESS) {
 	    ipc_kmsg_free(kmsg);
+	    KDBG(MACHDBG_CODE(DBG_MACH_IPC,MACH_IPC_KMSG_INFO) | DBG_FUNC_END, mr);
 	    return mr;
     }
-	mr = ipc_kmsg_send(kmsg, 
-			   MACH_SEND_KERNEL_DEFAULT,
-			   MACH_MSG_TIMEOUT_NONE);
+
+	/*
+	 * respect the thread's SEND_IMPORTANCE option to force importance
+	 * donation from the kernel-side of user threads
+	 * (11938665 & 23925818)
+	 */
+	mach_msg_option_t option = MACH_SEND_KERNEL_DEFAULT;
+	if (current_thread()->options & TH_OPT_SEND_IMPORTANCE)
+		option &= ~MACH_SEND_NOIMPORTANCE;
+
+	mr = ipc_kmsg_send(kmsg, option, MACH_MSG_TIMEOUT_NONE);
 	if (mr != MACH_MSG_SUCCESS) {
 		ipc_kmsg_destroy(kmsg);
+		KDBG(MACHDBG_CODE(DBG_MACH_IPC,MACH_IPC_KMSG_INFO) | DBG_FUNC_END, mr);
 		return mr;
 	}
 
@@ -460,7 +518,7 @@ mach_msg_overwrite(
 	mach_msg_size_t		rcv_size,
 	mach_port_name_t		rcv_name,
 	__unused mach_msg_timeout_t	msg_timeout,
-	__unused mach_port_name_t	notify,
+	mach_msg_priority_t	override,
 	__unused mach_msg_header_t	*rcv_msg,
        __unused mach_msg_size_t	rcv_msg_size)
 {
@@ -481,12 +539,21 @@ mach_msg_overwrite(
 		if (send_size > MACH_MSG_SIZE_MAX - MAX_TRAILER_SIZE)
 			return MACH_SEND_TOO_LARGE;
 
+		KDBG(MACHDBG_CODE(DBG_MACH_IPC,MACH_IPC_KMSG_INFO) | DBG_FUNC_START);
+
 		msg_and_trailer_size = send_size + MAX_TRAILER_SIZE;
 		kmsg = ipc_kmsg_alloc(msg_and_trailer_size);
 
-		if (kmsg == IKM_NULL)
+		if (kmsg == IKM_NULL) {
+			KDBG(MACHDBG_CODE(DBG_MACH_IPC,MACH_IPC_KMSG_INFO) | DBG_FUNC_END, MACH_SEND_NO_BUFFER);
 			return MACH_SEND_NO_BUFFER;
+		}
 
+		KERNEL_DEBUG_CONSTANT(MACHDBG_CODE(DBG_MACH_IPC,MACH_IPC_KMSG_LINK) | DBG_FUNC_NONE,
+				      (uintptr_t)0, /* this should only be called from the kernel! */
+				      VM_KERNEL_ADDRPERM((uintptr_t)kmsg),
+				      0, 0,
+				      0);
 		(void) memcpy((void *) kmsg->ikm_header, (const void *) msg, send_size);
 
 		kmsg->ikm_header->msgh_size = send_size;
@@ -503,10 +570,11 @@ mach_msg_overwrite(
 		max_trailer->msgh_trailer_type = MACH_MSG_TRAILER_FORMAT_0;
 		max_trailer->msgh_trailer_size = MACH_MSG_TRAILER_MINIMUM_SIZE;
 
-		mr = ipc_kmsg_copyin(kmsg, space, map, &option);
+		mr = ipc_kmsg_copyin(kmsg, space, map, override, &option);
 
 		if (mr != MACH_MSG_SUCCESS) {
 			ipc_kmsg_free(kmsg);
+			KDBG(MACHDBG_CODE(DBG_MACH_IPC,MACH_IPC_KMSG_INFO) | DBG_FUNC_END, mr);
 			return mr;
 		}
 
@@ -543,9 +611,9 @@ mach_msg_overwrite(
 			io_release(object);
 
 		} while (mr == MACH_RCV_INTERRUPTED);
+
 		if (mr != MACH_MSG_SUCCESS)
 			return mr;
-
 
 		trailer_size = ipc_kmsg_add_trailer(kmsg, space, option, current_thread(), seqno, TRUE,
 				kmsg->ikm_header->msgh_remote_port->ip_context);
@@ -648,6 +716,59 @@ mig_strncpy(
 	        *dest = '\0';
 	}
     return i;
+}
+
+/*
+ * mig_strncpy_zerofill -- Bounded string copy.  Does what the
+ * library routine strncpy OUGHT to do:  Copies the (null terminated)
+ * string in src into dest, a buffer of length len.  Assures that
+ * the copy is still null terminated and doesn't overflow the buffer,
+ * truncating the copy if necessary. If the string in src is smaller
+ * than given length len, it will zero fill the remaining bytes in dest.
+ *
+ * Parameters:
+ *
+ *     dest - Pointer to destination buffer.
+ *
+ *     src - Pointer to source string.
+ *
+ *     len - Length of destination buffer.
+ */
+int
+mig_strncpy_zerofill(
+	char		*dest,
+	const char	*src,
+	int		len)
+{
+	int i = 0;
+	boolean_t terminated = FALSE;
+	int retval = 0;
+
+	if (len <= 0 || dest == NULL) {
+		return 0;
+	}
+
+	if (src == NULL) {
+		terminated = TRUE;
+	}
+
+	for (i = 1; i < len; i++) {
+		if (!terminated) {
+			if (!(*dest++ = *src++)) {
+				retval = i;
+				terminated = TRUE;
+			}
+		} else {
+			*dest++ = '\0';
+		}
+	}
+
+	*dest = '\0';
+	if (!terminated) {
+		retval = i;
+	}
+
+	return retval;
 }
 
 char *

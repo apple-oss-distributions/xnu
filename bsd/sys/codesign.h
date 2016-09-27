@@ -41,9 +41,9 @@
 #define CS_RESTRICT		0x0000800	/* tell dyld to treat restricted */
 #define CS_ENFORCEMENT		0x0001000	/* require enforcement */
 #define CS_REQUIRE_LV		0x0002000	/* require library validation */
-#define CS_ENTITLEMENTS_VALIDATED	0x0004000
+#define CS_ENTITLEMENTS_VALIDATED	0x0004000	/* code signature permits restricted entitlements */
 
-#define	CS_ALLOWED_MACHO	0x00ffffe
+#define	CS_ALLOWED_MACHO	(CS_ADHOC | CS_HARD | CS_KILL | CS_CHECK_EXPIRATION | CS_RESTRICT | CS_ENFORCEMENT | CS_REQUIRE_LV)
 
 #define CS_EXEC_SET_HARD	0x0100000	/* set CS_HARD on any exec'ed process */
 #define CS_EXEC_SET_KILL	0x0200000	/* set CS_KILL on any exec'ed process */
@@ -54,6 +54,8 @@
 #define CS_DYLD_PLATFORM	0x2000000	/* dyld used to load this is a platform binary */
 #define CS_PLATFORM_BINARY	0x4000000	/* this is a platform binary */
 #define CS_PLATFORM_PATH	0x8000000	/* platform binary by the fact of path (osx only) */
+#define CS_DEBUGGED     	0x10000000  /* process is currently or has previously been debugged and allowed to run with invalid pages */
+#define CS_SIGNED           0x20000000  /* process has a signature (may have gone invalid) */
 
 #define CS_ENTITLEMENT_FLAGS	(CS_GET_TASK_ALLOW | CS_INSTALLER)
 
@@ -75,6 +77,7 @@
 #define CS_OPS_SET_STATUS	9	/* set codesign flags */
 #define CS_OPS_BLOB		10	/* get codesign blob */
 #define CS_OPS_IDENTITY		11	/* get codesign identity */
+#define CS_OPS_CLEARINSTALLER	12	/* clear INSTALLER flag */
 
 /*
  * Magic numbers used by Code Signing
@@ -99,6 +102,10 @@ enum {
 	CSSLOT_APPLICATION = 4,
 	CSSLOT_ENTITLEMENTS = 5,
 
+	CSSLOT_ALTERNATE_CODEDIRECTORIES = 0x1000, /* first alternate CodeDirectory, if any */
+	CSSLOT_ALTERNATE_CODEDIRECTORY_MAX = 5,		/* max number of alternate CD slots */
+	CSSLOT_ALTERNATE_CODEDIRECTORY_LIMIT = CSSLOT_ALTERNATE_CODEDIRECTORIES + CSSLOT_ALTERNATE_CODEDIRECTORY_MAX, /* one past the last */
+
 	CSSLOT_SIGNATURESLOT = 0x10000,			/* CMS Signature */
 
 	CSTYPE_INDEX_REQUIREMENTS = 0x00000002,		/* compat with amfi */
@@ -107,12 +114,13 @@ enum {
 	CS_HASHTYPE_SHA1 = 1,
 	CS_HASHTYPE_SHA256 = 2,
 	CS_HASHTYPE_SHA256_TRUNCATED = 3,
+	CS_HASHTYPE_SHA384 = 4,
 
 	CS_SHA1_LEN = 20,
 	CS_SHA256_TRUNCATED_LEN = 20,
 
-	CS_CDHASH_LEN = 20,
-	CS_HASH_MAX_SIZE = 32, /* max size of the hash we'll support */
+	CS_CDHASH_LEN = 20,						/* always - larger hashes are truncated */
+	CS_HASH_MAX_SIZE = 48, /* max size of the hash we'll support */
 };
 
 
@@ -189,6 +197,8 @@ __END_DECLS
 
 #else /* !KERNEL */
 
+#include <mach/vm_types.h>
+
 #include <sys/cdefs.h>
 #include <sys/_types/_off_t.h>
 
@@ -197,8 +207,10 @@ struct cs_blob;
 struct fileglob;
 
 __BEGIN_DECLS
+int	cs_valid(struct proc *);
 int	cs_enforcement(struct proc *);
 int	cs_require_lv(struct proc *);
+int	cs_system_require_lv(void);
 uint32_t cs_entitlement_flags(struct proc *p);
 int	cs_entitlements_blob_get(struct proc *, void **, size_t *);
 int	cs_restricted(struct proc *);
@@ -208,16 +220,23 @@ struct cs_blob * csproc_get_blob(struct proc *);
 struct cs_blob * csvnode_get_blob(struct vnode *, off_t);
 void		 csvnode_print_debug(struct vnode *);
 
+off_t			csblob_get_base_offset(struct cs_blob *);
+vm_size_t		csblob_get_size(struct cs_blob *);
+vm_address_t	csblob_get_addr(struct cs_blob *);
 const char *	csblob_get_teamid(struct cs_blob *);
 const char *	csblob_get_identity(struct cs_blob *);
 const uint8_t *	csblob_get_cdhash(struct cs_blob *);
-int		csblob_get_platform_binary(struct cs_blob *);
-unsigned int 	csblob_get_flags(struct cs_blob *blob);
+int				csblob_get_platform_binary(struct cs_blob *);
+unsigned int	csblob_get_flags(struct cs_blob *blob);
+
 int		csblob_get_entitlements(struct cs_blob *, void **, size_t *);
+
 const CS_GenericBlob *
 		csblob_find_blob(struct cs_blob *, uint32_t, uint32_t);
 const CS_GenericBlob *
 		csblob_find_blob_bytes(const uint8_t *, size_t, uint32_t, uint32_t);
+void *          csblob_entitlements_dictionary_copy(struct cs_blob *csblob);
+void            csblob_entitlements_dictionary_set(struct cs_blob *csblob, void * entitlements);
 
 /*
  * Mostly convenience functions below
@@ -237,7 +256,7 @@ extern int cs_debug;
 
 void	cs_init(void);
 int	cs_allow_invalid(struct proc *);
-int	cs_invalid_page(addr64_t);
+int	cs_invalid_page(addr64_t vaddr, boolean_t *cs_killed);
 int	csproc_get_platform_path(struct proc *);
 
 #if !SECURE_KERNEL

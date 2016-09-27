@@ -24,6 +24,7 @@
  * Use is subject to license terms.
  *
  * Portions Copyright (c) 2012 by Delphix. All rights reserved.
+ * Portions Copyright (c) 2016 by Joyent, Inc.
  */
 
 #ifndef _SYS_DTRACE_IMPL_H
@@ -421,6 +422,8 @@ typedef struct dtrace_aggregation {
 
 typedef struct dtrace_buffer {
 	uint64_t dtb_offset;			/* current offset in buffer */
+	uint64_t dtb_cur_limit;			/* current limit before signaling/dropping */
+	uint64_t dtb_limit;			/* limit before signaling */
 	uint64_t dtb_size;			/* size of buffer */
 	uint32_t dtb_flags;			/* flags */
 	uint32_t dtb_drops;			/* number of drops */
@@ -436,6 +439,7 @@ typedef struct dtrace_buffer {
 #endif
 	uint64_t dtb_switched;			/* time of last switch */
 	uint64_t dtb_interval;			/* observed switch interval */
+	uint64_t dtb_pad2[4];			/* pad to avoid false sharing */
 } dtrace_buffer_t;
 
 /*
@@ -927,6 +931,7 @@ typedef struct dtrace_mstate {
 	int dtms_ipl;				/* cached interrupt pri lev */
 	int dtms_fltoffs;			/* faulting DIFO offset */
 	uintptr_t dtms_strtok;			/* saved strtok() pointer */
+	uintptr_t dtms_strtok_limit;		/* upper bound of strtok ptr */
 	uint32_t dtms_access;			/* memory access rights */
 	dtrace_difo_t *dtms_difo;		/* current dif object */
 } dtrace_mstate_t;
@@ -952,6 +957,7 @@ typedef struct dtrace_mstate {
  * dtrace_stop() (from DTRACIOCSTOP) and on the exit() action.  Activities may
  * only transition in one direction; the activity transition diagram is a
  * directed acyclic graph.  The activity transition diagram is as follows:
+ *
  *
  *
  * +----------+                   +--------+                   +--------+
@@ -1125,6 +1131,7 @@ typedef struct dtrace_helpers {
 #define	DTRACE_HELPTRACE_DONE	(-2)
 #define	DTRACE_HELPTRACE_ERR	(-3)
 
+
 typedef struct dtrace_helptrace {
 	dtrace_helper_action_t	*dtht_helper;	/* helper action */
 	int dtht_where;				/* where in helper action */
@@ -1219,6 +1226,7 @@ struct dtrace_state {
 	dtrace_cred_t dts_cred;			/* credentials */
 	size_t dts_nretained;			/* number of retained enabs */
 	uint64_t dts_arg_error_illval;
+	uint32_t dts_buf_over_limit;		/* number of bufs over dtb_limit */
 };
 
 struct dtrace_provider {
@@ -1302,6 +1310,18 @@ typedef struct dtrace_errhash {
 
 #endif	/* DTRACE_ERRDEBUG */
 
+/**
+ * DTrace Matching pre-conditions
+ *
+ * Used when matching new probes to discard matching of enablings that
+ * doesn't match the condition tested by dmc_func
+ */
+typedef struct dtrace_match_cond {
+	int (*dmc_func)(dtrace_probedesc_t*, void*);
+	void *dmc_data;
+} dtrace_match_cond_t;
+
+
 /*
  * DTrace Toxic Ranges
  *
@@ -1355,27 +1375,41 @@ extern void dtrace_copy(uintptr_t, uintptr_t, size_t);
 extern void dtrace_copystr(uintptr_t, uintptr_t, size_t, volatile uint16_t *);
 
 /*
+ * DTrace state handling
+ */
+extern minor_t dtrace_state_reserve(void);
+extern dtrace_state_t* dtrace_state_allocate(minor_t minor);
+extern dtrace_state_t* dtrace_state_get(minor_t minor);
+extern void dtrace_state_free(minor_t minor);
+
+/*
  * DTrace restriction checks
  */
 extern void dtrace_restriction_policy_load(void);
 extern boolean_t dtrace_is_restricted(void);
-extern boolean_t dtrace_is_running_apple_internal(void);
+extern boolean_t dtrace_are_restrictions_relaxed(void);
 extern boolean_t dtrace_fbt_probes_restricted(void);
+extern boolean_t dtrace_sdt_probes_restricted(void);
 extern boolean_t dtrace_can_attach_to_proc(proc_t);
 
 /*
  * DTrace Assertions
  *
- * DTrace calls ASSERT from probe context.  To assure that a failed ASSERT
- * does not induce a markedly more catastrophic failure (e.g., one from which
- * a dump cannot be gleaned), DTrace must define its own ASSERT to be one that
- * may safely be called from probe context.  This header file must thus be
- * included by any DTrace component that calls ASSERT from probe context, and
- * _only_ by those components.  (The only exception to this is kernel
- * debugging infrastructure at user-level that doesn't depend on calling
- * ASSERT.)
+ * DTrace calls ASSERT and VERIFY from probe context.  To assure that a failed
+ * ASSERT or VERIFYdoes not induce a markedly more catastrophic failure (e.g.,
+ * one from which a dump cannot be gleaned), DTrace must define its own ASSERT
+ * and VERIFY macros to be ones that may safely be called from probe context.
+ * This header file must thus be included by any DTrace component that calls
+ * ASSERT and/or VERIFY from probe context, and _only_ by those components.
+ * (The only exception to this is kernel debugging infrastructure at user-level
+ * that doesn't depend on calling ASSERT.)
  */
 #undef ASSERT
+#undef VERIFY
+
+#define	VERIFY(EX)	((void)((EX) || \
+			dtrace_assfail(#EX, __FILE__, __LINE__)))
+
 #if DEBUG
 #define	ASSERT(EX)	((void)((EX) || \
 			dtrace_assfail(#EX, __FILE__, __LINE__)))

@@ -245,8 +245,8 @@ tcpcb_to_xtcpcb_n(struct tcpcb *tp, struct xtcpcb_n *xt)
 	xt->ts_recent = tp->ts_recent;
 	xt->ts_recent_age = tp->ts_recent_age;
 	xt->last_ack_sent = tp->last_ack_sent;
-	xt->cc_send = tp->cc_send;
-	xt->cc_recv = tp->cc_recv;
+	xt->cc_send = 0;
+	xt->cc_recv = 0;
 	xt->snd_recover = tp->snd_recover;
 	xt->snd_cwnd_prev = tp->snd_cwnd_prev;
 	xt->snd_ssthresh_prev = tp->snd_ssthresh_prev;
@@ -319,13 +319,21 @@ get_pcblist_n(short proto, struct sysctl_req *req, struct inpcbinfo *pcbinfo)
 		goto done;
 	}
 
-	for (inp = pcbinfo->ipi_listhead->lh_first, i = 0; inp && i < n;
-	    inp = inp->inp_list.le_next) {
-		if (inp->inp_gencnt <= gencnt &&
-		    inp->inp_state != INPCB_STATE_DEAD)
-			inp_list[i++] = inp;
+	/*
+	 * Special case TCP to include the connections in time wait
+	 */
+	if (proto == IPPROTO_TCP) {
+		n = get_tcp_inp_list(inp_list, n, gencnt);
+	} else {
+		for (inp = pcbinfo->ipi_listhead->lh_first, i = 0; inp && i < n;
+		     inp = inp->inp_list.le_next) {
+			if (inp->inp_gencnt <= gencnt &&
+			    inp->inp_state != INPCB_STATE_DEAD)
+				inp_list[i++] = inp;
+		}
+		n = i;
 	}
-	n = i;
+
 
 	error = 0;
 	for (i = 0; i < n; i++) {
@@ -548,12 +556,12 @@ inpcb_count_opportunistic(unsigned int ifindex, struct inpcbinfo *pcbinfo,
 					    (SO_FILT_HINT_LOCKED |
 					    SO_FILT_HINT_RESUME));
 				}
-				SOTHROTTLELOG(("throttle[%d]: so 0x%llx "
+				SOTHROTTLELOG("throttle[%d]: so 0x%llx "
 				    "[%d,%d] %s\n", so->last_pid,
 				    (uint64_t)VM_KERNEL_ADDRPERM(so),
 				    SOCK_DOM(so), SOCK_TYPE(so),
 				    (so->so_flags & SOF_SUSPENDED) ?
-				    "SUSPENDED" : "RESUMED"));
+				    "SUSPENDED" : "RESUMED");
 				socket_unlock(so, 1);
 			}
 		}

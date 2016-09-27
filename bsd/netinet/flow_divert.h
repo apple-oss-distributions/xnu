@@ -32,6 +32,7 @@
 #include <sys/mbuf.h>
 
 struct flow_divert_group;
+struct flow_divert_trie_node;
 
 struct flow_divert_pcb {
     decl_lck_mtx_data(, mtx);
@@ -48,14 +49,32 @@ struct flow_divert_pcb {
     uint32_t						control_group_unit;
     int32_t							ref_count;
     uint32_t						bytes_written_by_app;
-	uint32_t						bytes_read_by_app;
+    uint32_t						bytes_read_by_app;
     uint32_t						bytes_sent;
     uint32_t						bytes_received;
-	uint8_t							log_level;
+    uint8_t							log_level;
     SLIST_ENTRY(flow_divert_pcb)	tmp_list_entry;
+    mbuf_t							connect_packet;
+    uint8_t							*app_data;
+    size_t							app_data_length;
 };
 
 RB_HEAD(fd_pcb_tree, flow_divert_pcb);
+
+struct flow_divert_trie
+{
+	struct flow_divert_trie_node *nodes;
+	uint16_t *child_maps;
+	uint8_t *bytes;
+	void *memory;
+	size_t nodes_count;
+	size_t child_maps_count;
+	size_t bytes_count;
+	size_t nodes_free_next;
+	size_t child_maps_free_next;
+	size_t bytes_free_next;
+	uint16_t root;
+};
 
 struct flow_divert_group {
     decl_lck_rw_data(, lck);
@@ -65,6 +84,7 @@ struct flow_divert_group {
     MBUFQ_HEAD(send_queue_head)		send_queue;
     uint8_t							*token_key;
     size_t							token_key_size;
+    struct flow_divert_trie			signing_id_trie;
 };
 
 void		flow_divert_init(void);

@@ -134,8 +134,7 @@ extern int rtt_samples_per_slot;
 
 static void update_cwnd(struct tcpcb *tp, uint32_t incr) {
 	uint32_t max_allowed_cwnd = 0, flight_size = 0;
-	uint32_t qdelay, base_rtt;
-	int32_t off_target;
+	uint32_t base_rtt;
 
 	base_rtt = get_base_rtt(tp);
 
@@ -146,12 +145,10 @@ static void update_cwnd(struct tcpcb *tp, uint32_t incr) {
 		tp->snd_cwnd += incr;
 		goto check_max;
 	}
-		
-	qdelay = tp->t_rttcur - base_rtt;
-	off_target = (int32_t)(target_qdelay - qdelay);
 
-	if (off_target >= 0) {
-		/* Delay decreased or remained the same, we can increase 
+	if (tp->t_rttcur <= (base_rtt + target_qdelay)) {
+		/*
+		 * Delay decreased or remained the same, we can increase
 		 * the congestion window according to RFC 3465.
 		 *
 		 * Move background slow-start threshold to current
@@ -252,8 +249,8 @@ tcp_ledbat_ack_rcvd(struct tcpcb *tp, struct tcphdr *th) {
 	 * greater than or equal to the congestion window.
 	 */
 
-	register u_int cw = tp->snd_cwnd;
-	register u_int incr = tp->t_maxseg;
+	u_int cw = tp->snd_cwnd;
+	u_int incr = tp->t_maxseg;
 	int acked = 0;
 
 	acked = BYTES_ACKED(th, tp);
@@ -333,28 +330,6 @@ tcp_ledbat_post_fr(struct tcpcb *tp, struct tcphdr *th) {
  */
 void
 tcp_ledbat_after_idle(struct tcpcb *tp) {
-	int32_t n = N_RTT_BASE, i = (N_RTT_BASE - 1);
-
-	/* Decide how many base history entries have to be cleared 
-	 * based on how long the connection has been idle.
-	 */
-	
-	if (tp->t_rttcur > 0) {
-		int32_t nrtt, idle_time;
-
-		idle_time = tcp_now - tp->t_rcvtime;
-		nrtt = idle_time / tp->t_rttcur; 
-		n = nrtt / rtt_samples_per_slot;
-		if (n > N_RTT_BASE)
-			n = N_RTT_BASE;
-	}
-	for (i = (N_RTT_BASE - 1); n > 0; --i, --n) {
-		tp->rtt_hist[i] = 0;
-	}
-	for (n = (N_RTT_BASE - 1); i >= 0; --i, --n) {
-		tp->rtt_hist[n] = tp->rtt_hist[i];
-		tp->rtt_hist[i] = 0;
-	}
 	
 	/* Reset the congestion window */
 	tp->snd_cwnd = tp->t_maxseg * bg_ss_fltsz;
@@ -399,15 +374,8 @@ tcp_ledbat_after_timeout(struct tcpcb *tp) {
 
 int
 tcp_ledbat_delay_ack(struct tcpcb *tp, struct tcphdr *th) {
-	/* If any flag other than TH_ACK is set, set "end-of-write" bit */
-	if (th->th_flags & ~TH_ACK)
-		tp->t_flagsext |= TF_STREAMEOW;
-	else
-		tp->t_flagsext &= ~(TF_STREAMEOW);
-
 	if ((tp->t_flags & TF_RXWIN0SENT) == 0 &&
-		(th->th_flags & TH_PUSH) == 0 &&
-		(tp->t_unacksegs == 1))
+		(th->th_flags & TH_PUSH) == 0 && (tp->t_unacksegs == 1))
 		return(1);
 	return(0);
 }

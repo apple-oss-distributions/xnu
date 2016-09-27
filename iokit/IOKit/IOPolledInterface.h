@@ -31,12 +31,15 @@
 
 enum
 {
-    kIOPolledPreflightState   = 1,
-    kIOPolledBeforeSleepState = 2,
-    kIOPolledAfterSleepState  = 3,
-    kIOPolledPostflightState  = 4,
+    kIOPolledPreflightState           = 1,
+    kIOPolledBeforeSleepState         = 2,
+    kIOPolledAfterSleepState          = 3,
+    kIOPolledPostflightState          = 4,
 
     kIOPolledPreflightCoreDumpState   = 5,
+    kIOPolledPostflightCoreDumpState  = 6,
+
+    kIOPolledBeforeSleepStateAborted  = 7,
 };
 
 #if defined(__cplusplus)

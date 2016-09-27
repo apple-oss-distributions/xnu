@@ -52,8 +52,15 @@ typedef int load_return_t;
 typedef struct _load_result {
 	user_addr_t		mach_header;
 	user_addr_t		entry_point;
+
+	// The user stack pointer and addressable user stack size.
 	user_addr_t		user_stack;
 	mach_vm_size_t		user_stack_size;
+
+	// The allocation containing the stack and guard area.
+	user_addr_t		user_stack_alloc;
+	mach_vm_size_t		user_stack_alloc_size;
+
 	mach_vm_address_t	all_image_info_addr;
 	mach_vm_size_t		all_image_info_size;
 	int			thread_count;
@@ -61,18 +68,19 @@ typedef struct _load_result {
 		/* boolean_t */	unixproc	:1,
 				needs_dynlinker : 1,
 				dynlinker	:1,
-				prog_allocated_stack	:1,
-				prog_stack_size : 1,    
 				validentry	:1,
 				has_pagezero    :1,
 				using_lcmain	:1,
+				is64bit         :1,
 						:0;
 	unsigned int		csflags;
-	unsigned char	uuid[16];	
+	unsigned char		uuid[16];
 	mach_vm_address_t	min_vm_addr;
 	mach_vm_address_t	max_vm_addr;
 	unsigned int		platform_binary;
 	off_t			cs_end_offset;
+	void			*threadstate;
+	size_t			threadstate_sz;
 } load_result_t;
 
 struct image_params;
@@ -80,7 +88,7 @@ load_return_t load_machfile(
 	struct image_params	*imgp,
 	struct mach_header	*header,
 	thread_t		thread,
-	vm_map_t		map,
+	vm_map_t		*mapp,
 	load_result_t		*result);
 
 #define LOAD_SUCCESS		0
@@ -94,5 +102,6 @@ load_return_t load_machfile(
 #define	LOAD_ENOENT		8	/* resource not found */
 #define	LOAD_IOERROR		9	/* IO error */
 #define	LOAD_DECRYPTFAIL	10	/* FP decrypt failure */
+#define	LOAD_BADMACHO_UPX	11	/* malformed mach-o file */
 
 #endif	/* _BSD_KERN_MACH_LOADER_H_ */

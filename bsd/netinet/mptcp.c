@@ -222,10 +222,10 @@ mptcp_input(struct mptses *mpte, struct mbuf *m)
 	 * In the degraded fallback case, data is accepted without DSS map
 	 */
 	if (in_fallback) {
-fallback: 
-		/* 
-		 * assume degraded flow as this may be the first packet 
-		 * without DSS, and the subflow state is not updated yet. 
+fallback:
+		/*
+		 * assume degraded flow as this may be the first packet
+		 * without DSS, and the subflow state is not updated yet.
 		 */
 		if (sbappendstream(&mp_so->so_rcv, m))
 			sorwakeup(mp_so);
@@ -398,13 +398,14 @@ try_again:
 	DTRACE_MPTCP3(output, struct mptses *, mpte, struct mptsub *, mpts,
 	    struct socket *, mp_so);
 	error = mptcp_subflow_output(mpte, mpts);
-	if (error) {
+	if (error && error != EWOULDBLOCK) {
 		/* can be a temporary loss of source address or other error */
 		mpts->mpts_flags |= MPTSF_FAILINGOVER;
 		mpts->mpts_flags &= ~MPTSF_ACTIVE;
 		mpts_tried = mpts;
 		MPTS_UNLOCK(mpts);
-		mptcplog((LOG_INFO, "MPTCP Sender: Error = %d \n", error),
+		mptcplog((LOG_INFO, "MPTCP Sender: %s Error = %d \n",
+		    __func__, error),
 		    MPTCP_SENDER_DBG, MPTCP_LOGLVL_LOG);
 		goto try_again;
 	}
@@ -491,11 +492,12 @@ mptcp_get_subflow(struct mptses *mpte, struct mptsub *ignore, struct mptsub **pr
 		}
 
 		/*
-		 * Subflows with Fastjoin allow data to be written before
+		 * Subflows with TFO or Fastjoin allow data to be written before
 		 * the subflow is mp capable.
 		 */
 		if (!(mpts->mpts_flags & MPTSF_MP_CAPABLE) &&
-		    !(mpts->mpts_flags & MPTSF_FASTJ_REQD)) {
+		    !(mpts->mpts_flags & MPTSF_FASTJ_REQD) &&
+		    !(mpts->mpts_flags & MPTSF_TFO_REQD)) {
 			MPTS_UNLOCK(mpts);
 			continue;
 		}
@@ -619,7 +621,7 @@ struct mptsub *
 mptcp_get_pending_subflow(struct mptses *mpte, struct mptsub *ignore)
 {
 	struct mptsub *mpts = NULL;
-	
+
 	MPTE_LOCK_ASSERT_HELD(mpte);    /* same as MP socket lock */
 
 	TAILQ_FOREACH(mpts, &mpte->mpte_subflows, mpts_entry) {
@@ -690,9 +692,6 @@ mptcp_state_to_str(mptcp_state_t state)
 	case MPTCPS_TIME_WAIT:
 		c = "MPTCPS_TIME_WAIT";
 		break;
-	case MPTCPS_FASTCLOSE_WAIT:
-		c = "MPTCPS_FASTCLOSE_WAIT";
-		break;
 	case MPTCPS_TERMINATE:
 		c = "MPTCPS_TERMINATE";
 		break;
@@ -706,7 +705,7 @@ mptcp_close_fsm(struct mptcb *mp_tp, uint32_t event)
 	MPT_LOCK_ASSERT_HELD(mp_tp);
 	mptcp_state_t old_state = mp_tp->mpt_state;
 
-	DTRACE_MPTCP2(state__change, struct mptcb *, mp_tp, 
+	DTRACE_MPTCP2(state__change, struct mptcb *, mp_tp,
 	    uint32_t, event);
 
 	switch (mp_tp->mpt_state) {
@@ -719,27 +718,26 @@ mptcp_close_fsm(struct mptcb *mp_tp, uint32_t event)
 		if (event == MPCE_CLOSE) {
 			mp_tp->mpt_state = MPTCPS_FIN_WAIT_1;
 			mp_tp->mpt_sndmax += 1; /* adjust for Data FIN */
-		}	
-		else if (event == MPCE_RECV_DATA_FIN) {
+		} else if (event == MPCE_RECV_DATA_FIN) {
 			mp_tp->mpt_rcvnxt += 1; /* adj remote data FIN */
 			mp_tp->mpt_state = MPTCPS_CLOSE_WAIT;
-		}	
+		}
 		break;
 
 	case MPTCPS_CLOSE_WAIT:
 		if (event == MPCE_CLOSE) {
 			mp_tp->mpt_state = MPTCPS_LAST_ACK;
 			mp_tp->mpt_sndmax += 1; /* adjust for Data FIN */
-		}	
+		}
 		break;
 
 	case MPTCPS_FIN_WAIT_1:
-		if (event == MPCE_RECV_DATA_ACK)
+		if (event == MPCE_RECV_DATA_ACK) {
 			mp_tp->mpt_state = MPTCPS_FIN_WAIT_2;
-		else if (event == MPCE_RECV_DATA_FIN) {
+		} else if (event == MPCE_RECV_DATA_FIN) {
 			mp_tp->mpt_rcvnxt += 1; /* adj remote data FIN */
 			mp_tp->mpt_state = MPTCPS_CLOSING;
-		}	
+		}
 		break;
 
 	case MPTCPS_CLOSING:
@@ -756,25 +754,19 @@ mptcp_close_fsm(struct mptcb *mp_tp, uint32_t event)
 		if (event == MPCE_RECV_DATA_FIN) {
 			mp_tp->mpt_rcvnxt += 1; /* adj remote data FIN */
 			mp_tp->mpt_state = MPTCPS_TIME_WAIT;
-		}	
+		}
 		break;
 
 	case MPTCPS_TIME_WAIT:
 		break;
 
-	case MPTCPS_FASTCLOSE_WAIT:
-		if (event == MPCE_CLOSE) {
-			/* no need to adjust for data FIN */
-			mp_tp->mpt_state = MPTCPS_TERMINATE;
-		}
-		break;
 	case MPTCPS_TERMINATE:
 		break;
 	default:
 		VERIFY(0);
 		/* NOTREACHED */
 	}
-	DTRACE_MPTCP2(state__change, struct mptcb *, mp_tp, 
+	DTRACE_MPTCP2(state__change, struct mptcb *, mp_tp,
 	    uint32_t, event);
 	mptcplog((LOG_INFO, "MPTCP State: %s to %s on event %s\n",
 	    mptcp_state_to_str(old_state),
@@ -803,7 +795,7 @@ mptcp_data_ack_rcvd(struct mptcb *mp_tp, struct tcpcb *tp, u_int64_t full_dack)
 			/* bring back sndnxt to retransmit MPTCP data */
 			mp_tp->mpt_sndnxt = mp_tp->mpt_dsn_at_csum_fail;
 			mp_tp->mpt_flags |= MPTCPF_POST_FALLBACK_SYNC;
-			tp->t_inpcb->inp_socket->so_flags1 |= 
+			tp->t_inpcb->inp_socket->so_flags1 |=
 			    SOF1_POST_FALLBACK_SYNC;
 		}
 	}
@@ -884,6 +876,13 @@ mptcp_update_rcv_state_f(struct mptcp_dss_ack_opt *dss_info, struct tcpcb *tp,
 	u_int64_t full_dsn = 0;
 	struct mptcb *mp_tp = tptomptp(tp);
 
+	/*
+	 * May happen, because the caller of this function does an soevent.
+	 * Review after rdar://problem/24083886
+	 */
+	if (!mp_tp)
+		return;
+
 	NTOHL(dss_info->mdss_dsn);
 	NTOHL(dss_info->mdss_subflow_seqn);
 	NTOHS(dss_info->mdss_data_len);
@@ -903,6 +902,13 @@ mptcp_update_rcv_state_g(struct mptcp_dss64_ack32_opt *dss_info,
 {
 	u_int64_t dsn = mptcp_ntoh64(dss_info->mdss_dsn);
 	struct mptcb *mp_tp = tptomptp(tp);
+
+	/*
+	 * May happen, because the caller of this function does an soevent.
+	 * Review after rdar://problem/24083886
+	 */
+	if (!mp_tp)
+		return;
 
 	NTOHL(dss_info->mdss_subflow_seqn);
 	NTOHS(dss_info->mdss_data_len);
@@ -1005,7 +1011,7 @@ mptcp_input_csum(struct tcpcb *tp, struct mbuf *m, int off)
 	if (tp->t_mpflags & TMPF_TCP_FALLBACK)
 		return (0);
 
-	/* 
+	/*
 	 * The remote side may send a packet with fewer bytes than the
 	 * claimed DSS checksum length.
 	 */

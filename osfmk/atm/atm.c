@@ -107,6 +107,7 @@ atm_get_value(
 	mach_voucher_attr_content_t recipe,
 	mach_voucher_attr_content_size_t recipe_size,
 	mach_voucher_attr_value_handle_t *out_value,
+	mach_voucher_attr_value_flags_t  *out_flags,
 	ipc_voucher_t *out_value_voucher);
 
 kern_return_t
@@ -143,6 +144,7 @@ struct ipc_voucher_attr_manager atm_manager = {
 	.ivam_extract_content  = atm_extract_content,
 	.ivam_command	       = atm_command,
 	.ivam_release          = atm_release,
+	.ivam_flags            = IVAM_FLAGS_NONE,
 };
 
 #if DEVELOPMENT || DEBUG
@@ -306,6 +308,7 @@ atm_get_value(
 	mach_voucher_attr_content_t          __unused recipe,
 	mach_voucher_attr_content_size_t     __unused recipe_size,
 	mach_voucher_attr_value_handle_t             *out_value,
+	mach_voucher_attr_value_flags_t              *out_flags,
 	ipc_voucher_t 				                 *out_value_voucher)
 {
 	atm_value_t atm_value = ATM_VALUE_NULL;
@@ -322,6 +325,7 @@ atm_get_value(
 
 	/* never an out voucher */
 	*out_value_voucher = IPC_VOUCHER_NULL;
+	*out_flags = MACH_VOUCHER_ATTR_VALUE_FLAGS_NONE;
 
 	if (disable_atm || (atm_get_diagnostic_config() & ATM_TRACE_DISABLE))
 		return KERN_NOT_SUPPORTED;
@@ -727,9 +731,14 @@ atm_send_user_notification(
 	/* Make sure that honor queue limit option is unset on the thread. */
 	th->options &= (~TH_OPT_HONOR_QLIMIT);
 
-	if (kr == MACH_SEND_TIMED_OUT) {
-		kr = KERN_SUCCESS;
+	if (kr != KERN_SUCCESS) {
+		ipc_port_release_send(user_port);
+
+		if (kr == MACH_SEND_TIMED_OUT) {
+			kr = KERN_SUCCESS;
+		}
 	}
+
 	return kr;
 }
 
@@ -790,8 +799,12 @@ atm_send_proc_inspect_notification(
 	/* Make sure that honor queue limit option is unset on the thread. */
 	th->options &= (~TH_OPT_HONOR_QLIMIT);
 
-	if (kr == MACH_SEND_TIMED_OUT) {
-		kr = KERN_SUCCESS;
+	if (kr != KERN_SUCCESS) {
+		ipc_port_release_send(user_port);
+
+		if (kr == MACH_SEND_TIMED_OUT) {
+			kr = KERN_SUCCESS;
+		}
 	}
 
 	ipc_port_release_send(memory_port);

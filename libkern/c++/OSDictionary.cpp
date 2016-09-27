@@ -269,7 +269,8 @@ unsigned int OSDictionary::setCapacityIncrement(unsigned int increment)
 unsigned int OSDictionary::ensureCapacity(unsigned int newCapacity)
 {
     dictEntry *newDict;
-    unsigned int finalCapacity, oldSize, newSize;
+    unsigned int finalCapacity;
+    vm_size_t oldSize, newSize;
 
     if (newCapacity <= capacity)
         return capacity;
@@ -284,8 +285,11 @@ unsigned int OSDictionary::ensureCapacity(unsigned int newCapacity)
     
     newSize = sizeof(dictEntry) * finalCapacity;
 
-    newDict = (dictEntry *) kalloc_container(newSize);
+    newDict = (dictEntry *) kallocp_container(&newSize);
     if (newDict) {
+        // use all of the actual allocation size
+        finalCapacity = newSize / sizeof(dictEntry);
+
         oldSize = sizeof(dictEntry) * capacity;
 
         bcopy(dictionary, newDict, oldSize);
@@ -313,7 +317,7 @@ void OSDictionary::flushCollection()
 }
 
 bool OSDictionary::
-setObject(const OSSymbol *aKey, const OSMetaClassBase *anObject)
+setObject(const OSSymbol *aKey, const OSMetaClassBase *anObject, bool onlyAdd)
 {
     unsigned int i;
     bool exists;
@@ -331,6 +335,9 @@ setObject(const OSSymbol *aKey, const OSMetaClassBase *anObject)
     }
 
     if (exists) {
+
+	if (onlyAdd) return false;
+
 	const OSMetaClassBase *oldObject = dictionary[i].value;
     
 	haveUpdated();
@@ -357,6 +364,12 @@ setObject(const OSSymbol *aKey, const OSMetaClassBase *anObject)
     count++;
 
     return true;
+}
+
+bool OSDictionary::
+setObject(const OSSymbol *aKey, const OSMetaClassBase *anObject)
+{
+    return (setObject(aKey, anObject, false));
 }
 
 void OSDictionary::removeObject(const OSSymbol *aKey)
@@ -692,3 +705,21 @@ abortCopy:
     return ret;
 }
 
+OSArray * OSDictionary::copyKeys(void)
+{
+    OSArray * array;
+
+	array = OSArray::withCapacity(count);
+	if (!array) return (0);
+
+	for (unsigned int i = 0; i < count; i++)
+	{
+	    if (!array->setObject(i, dictionary[i].key))
+	    {
+            array->release();
+            array = 0;
+            break;
+        }
+	}
+    return (array);
+}

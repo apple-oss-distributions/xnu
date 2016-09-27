@@ -85,8 +85,11 @@
 #include <security/mac_framework.h>
 #endif
 
+int pshm_cache_purge_all(proc_t p);
+int psem_cache_purge_all(proc_t p);
+
 int
-reboot(struct proc *p, register struct reboot_args *uap, __unused int32_t *retval)
+reboot(struct proc *p, struct reboot_args *uap, __unused int32_t *retval)
 {
 	char message[128];
 	int error=0;
@@ -126,4 +129,20 @@ reboot(struct proc *p, register struct reboot_args *uap, __unused int32_t *retva
 		error = reboot_kernel(uap->opt, message);
 	}
 	return(error);
+}
+
+int
+usrctl(struct proc *p, __unused struct usrctl_args *uap, __unused int32_t *retval)
+{
+	if (p != initproc) {
+		return EPERM;
+	}
+
+	int error = 0;
+	error = pshm_cache_purge_all(p);
+	if (error)
+		return error;
+
+	error = psem_cache_purge_all(p);
+	return error;
 }

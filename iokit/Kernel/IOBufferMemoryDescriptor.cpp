@@ -554,6 +554,7 @@ vm_size_t IOBufferMemoryDescriptor::getCapacity() const
 void IOBufferMemoryDescriptor::setLength(vm_size_t length)
 {
     assert(length <= _capacity);
+    if (length > _capacity) return;
 
     _length = length;
     _ranges.v64->length = length;
@@ -625,6 +626,9 @@ void *
 IOBufferMemoryDescriptor::getBytesNoCopy(vm_size_t start, vm_size_t withLength)
 {
     IOVirtualAddress address;
+
+    if ((start + withLength) < start) return 0;
+
     if (kIOMemoryTypePhysical64 == (_flags & kIOMemoryTypeMask))
 	address = (IOVirtualAddress) _buffer;
     else

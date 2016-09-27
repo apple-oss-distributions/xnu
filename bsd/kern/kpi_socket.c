@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2003-2012 Apple Inc. All rights reserved.
+ * Copyright (c) 2003-2016 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -495,7 +495,7 @@ so_tc_from_dscp(u_int8_t dscp)
 	else if (dscp >= 0x20 && dscp <= 0x2f)
 		tc = SO_TC_VI;
 	else if (dscp >= 0x08 && dscp <= 0x17)
-		tc = SO_TC_BK;
+		tc = SO_TC_BK_SYS;
 	else
 		tc = SO_TC_BE;
 
@@ -950,7 +950,13 @@ sock_release(socket_t sock)
 		    __func__, sock->so_retaincnt, sock);
 		/* NOTREACHED */
 	}
-	if ((sock->so_retaincnt == 0) && (sock->so_usecount == 2)) {
+	/*
+	 * Check SS_NOFDREF in case a close happened as sock_retain()
+	 * was grabbing the lock
+	 */
+	if ((sock->so_retaincnt == 0) && (sock->so_usecount == 2) &&
+	    (!(sock->so_state & SS_NOFDREF) ||
+	    (sock->so_flags & SOF_MP_SUBFLOW))) {
 		/* close socket only if the FD is not holding it */
 		soclose_locked(sock);
 	} else {
@@ -1040,7 +1046,15 @@ sock_set_tcp_stream_priority(socket_t sock)
 void
 socket_set_traffic_mgt_flags_locked(socket_t sock, u_int8_t flags)
 {
-	(void) OSBitOrAtomic8(flags, &sock->so_traffic_mgt_flags);
+	u_int32_t soflags1 = 0;
+	
+	if ((flags & TRAFFIC_MGT_SO_BACKGROUND))
+		soflags1 |= SOF1_TRAFFIC_MGT_SO_BACKGROUND;
+	if ((flags & TRAFFIC_MGT_TCP_RECVBG))
+		soflags1 |= SOF1_TRAFFIC_MGT_TCP_RECVBG;
+	
+	(void) OSBitOrAtomic(soflags1, &sock->so_flags1);
+
 	sock_set_tcp_stream_priority(sock);
 }
 
@@ -1058,7 +1072,15 @@ socket_set_traffic_mgt_flags(socket_t sock, u_int8_t flags)
 void
 socket_clear_traffic_mgt_flags_locked(socket_t sock, u_int8_t flags)
 {
-	(void) OSBitAndAtomic8(~flags, &sock->so_traffic_mgt_flags);
+	u_int32_t soflags1 = 0;
+
+	if ((flags & TRAFFIC_MGT_SO_BACKGROUND))
+		soflags1 |= SOF1_TRAFFIC_MGT_SO_BACKGROUND;
+	if ((flags & TRAFFIC_MGT_TCP_RECVBG))
+		soflags1 |= SOF1_TRAFFIC_MGT_TCP_RECVBG;
+	
+	(void) OSBitAndAtomic(~soflags1, &sock->so_flags1);
+
 	sock_set_tcp_stream_priority(sock);
 }
 

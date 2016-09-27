@@ -2,7 +2,7 @@
  * Copyright (c) 2014 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
- * 
+ *
  * This file contains Original Code and/or Modifications of Original Code
  * as defined in and that are subject to the Apple Public Source License
  * Version 2.0 (the 'License'). You may not use this file except in
@@ -11,10 +11,10 @@
  * unlawful or unlicensed copies of an Apple operating system, or to
  * circumvent, violate, or enable the circumvention or violation of, any
  * terms of an Apple operating system software license agreement.
- * 
+ *
  * Please obtain a copy of the License at
  * http://www.opensource.apple.com/apsl/ and read it before using this file.
- * 
+ *
  * The Original Code and all software distributed under the License are
  * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
@@ -22,7 +22,7 @@
  * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
  * Please see the License for the specific language governing rights and
  * limitations under the License.
- * 
+ *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 
@@ -48,6 +48,7 @@ typedef uint32_t csr_op_t;
 #define CSR_ALLOW_UNRESTRICTED_DTRACE	(1 << 5)
 #define CSR_ALLOW_UNRESTRICTED_NVRAM	(1 << 6)
 #define CSR_ALLOW_DEVICE_CONFIGURATION	(1 << 7)
+#define CSR_ALLOW_ANY_RECOVERY_OS	(1 << 8)
 
 #define CSR_VALID_FLAGS (CSR_ALLOW_UNTRUSTED_KEXTS | \
                          CSR_ALLOW_UNRESTRICTED_FS | \
@@ -56,7 +57,8 @@ typedef uint32_t csr_op_t;
                          CSR_ALLOW_APPLE_INTERNAL | \
                          CSR_ALLOW_UNRESTRICTED_DTRACE | \
                          CSR_ALLOW_UNRESTRICTED_NVRAM | \
-                         CSR_ALLOW_DEVICE_CONFIGURATION)
+                         CSR_ALLOW_DEVICE_CONFIGURATION | \
+                         CSR_ALLOW_ANY_RECOVERY_OS)
 
 
 /* CSR capabilities that a booter can give to the system */
@@ -81,10 +83,6 @@ __BEGIN_DECLS
 
 #ifdef XNU_KERNEL_PRIVATE
 void csr_init(void);
-#endif
-
-#if KERNEL_PRIVATE
-void csr_set_allow_all(int value);
 #endif
 
 /* Syscalls */

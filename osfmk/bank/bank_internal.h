@@ -42,16 +42,18 @@
 
 /* Default value for Voucher Attribute Manager for BANK */
 #define BANK_DEFAULT_VALUE NULL
+#define BANK_DEFAULT_TASK_VALUE ((void *) 1)
+
 typedef mach_voucher_attr_value_handle_t bank_handle_t;
 
 #define BANK_TASK        0
 #define BANK_ACCOUNT     1
 
 struct bank_element {
-	int           be_type;                   /* Type of element */
+	unsigned int  be_type:31,                /* Type of element */
+	              be_voucher_ref:1;          /* Voucher system holds a ref */
 	int           be_refs;                   /* Ref count */
-	int           be_made;                   /* Made refs for voucher, Actual ref is also taken for each Made ref */
-	int32_t       be_pid;                    /* Customer task's pid. */
+	unsigned int  be_made;                   /* Made refs for voucher, Actual ref is only taken for voucher ref transition (0 to 1) */
 #if DEVELOPMENT || DEBUG
 	task_t        be_task;                   /* Customer task, do not use it since ref is not taken on task */
 #endif
@@ -61,21 +63,32 @@ typedef struct bank_element * bank_element_t;
 #define BANK_ELEMENT_NULL ((bank_element_t) 0)
 
 struct bank_task {
-	struct bank_element bt_elem;                 /* Bank element */
-	ledger_t            bt_creditcard;           /* Ledger of the customer task */
-	queue_head_t        bt_accounts_to_pay;      /* List of accounts worked for me and need to pay */
-	queue_head_t        bt_accounts_to_charge;   /* List of accounts I did work and need to charge */
-	decl_lck_mtx_data(, bt_acc_to_pay_lock)      /* Lock to protect accounts to pay list */
-	decl_lck_mtx_data(, bt_acc_to_charge_lock)   /* Lock to protect accounts to charge list */
+	struct bank_element       bt_elem;                 /* Bank element */
+	struct proc_persona_info  bt_proc_persona;         /* Persona of the process */
+	ledger_t                  bt_creditcard;           /* Ledger of the customer task */
+	queue_head_t              bt_accounts_to_pay;      /* List of accounts worked for me and need to pay */
+	queue_head_t              bt_accounts_to_charge;   /* List of accounts I did work and need to charge */
+	decl_lck_mtx_data(,       bt_acc_to_pay_lock)      /* Lock to protect accounts to pay list */
+	decl_lck_mtx_data(,       bt_acc_to_charge_lock)   /* Lock to protect accounts to charge list */
+	uint8_t                   bt_hasentitlement;       /* If the secure persona entitlement is set on the task */
 #if DEVELOPMENT || DEBUG
-	queue_chain_t       bt_global_elt;           /* Element on the global bank task chain */
+	queue_chain_t             bt_global_elt;           /* Element on the global bank task chain */
 #endif
 };
 
 #define bt_type             bt_elem.be_type
+#define bt_voucher_ref      bt_elem.be_voucher_ref
 #define bt_refs             bt_elem.be_refs
 #define bt_made             bt_elem.be_made
-#define bt_pid              bt_elem.be_pid
+
+#define bt_flags            bt_proc_persona.flags
+#define bt_unique_pid       bt_proc_persona.unique_pid
+#define bt_pid              bt_proc_persona.pid
+#define bt_pidversion       bt_proc_persona.pidversion
+#define bt_persona_id       bt_proc_persona.persona_id
+#define bt_uid              bt_proc_persona.uid
+#define bt_gid              bt_proc_persona.gid
+#define bt_macho_uuid       bt_proc_persona.macho_uuid
 
 #if DEVELOPMENT || DEBUG
 #define bt_task             bt_elem.be_task
@@ -94,13 +107,13 @@ typedef struct bank_task * bank_task_t;
 		(OSAddAtomic(-(num), &(elem)->bt_refs))
 
 #define bank_task_made_reference(elem) 	\
-		(OSAddAtomic(1, &(elem)->bt_made))
+		(hw_atomic_add(&(elem)->bt_made, 1) - 1)
 
 #define bank_task_made_release(elem) 	\
-		(OSAddAtomic(-1, &(elem)->bt_made))
+		(hw_atomic_sub(&(elem)->bt_made, 1) + 1)
 
 #define bank_task_made_release_num(elem, num) 	\
-		(OSAddAtomic(-(num), &(elem)->bt_made))
+		(hw_atomic_sub(&(elem)->bt_made, (num)) + (num))
 
 
 struct bank_account {
@@ -108,6 +121,8 @@ struct bank_account {
 	ledger_t            ba_bill;                 /* Temporary ledger i.e. chit */
 	bank_task_t         ba_merchant;             /* Task who worked for me, who will charge me on behalf of */
 	bank_task_t         ba_holder;               /* Credit Card task holder */
+	bank_task_t         ba_secureoriginator;     /* Bank task of the secure originator */
+	bank_task_t         ba_proximateprocess;     /* Process who propagated the voucher to us */
 	queue_chain_t       ba_next_acc_to_pay;      /* Next account I need to pay to */
 	queue_chain_t       ba_next_acc_to_charge;   /* Next account I need to charge to */
 #if DEVELOPMENT || DEBUG
@@ -116,9 +131,9 @@ struct bank_account {
 };
 
 #define ba_type             ba_elem.be_type
+#define ba_voucher_ref      ba_elem.be_voucher_ref
 #define ba_refs             ba_elem.be_refs
 #define ba_made             ba_elem.be_made
-#define ba_pid              ba_elem.be_pid
 
 #if DEVELOPMENT || DEBUG
 #define ba_task             ba_elem.be_task
@@ -137,13 +152,13 @@ typedef struct bank_account * bank_account_t;
 		(OSAddAtomic(-(num), &(elem)->ba_refs))
 
 #define bank_account_made_reference(elem) 	\
-		(OSAddAtomic(1, &(elem)->ba_made))
+		(hw_atomic_add(&(elem)->ba_made, 1) - 1)
 
 #define bank_account_made_release(elem) 	\
-		(OSAddAtomic(-1, &(elem)->ba_made))
+		(hw_atomic_sub(&(elem)->ba_made, 1) + 1)
 
 #define bank_account_made_release_num(elem, num) 	\
-		(OSAddAtomic(-(num), &(elem)->ba_made))
+		(hw_atomic_sub(&(elem)->ba_made, (num)) + (num))
 
 struct _bank_ledger_indices {
 	int cpu_time;
@@ -152,8 +167,11 @@ struct _bank_ledger_indices {
 extern struct _bank_ledger_indices bank_ledgers;
 
 extern void bank_init(void);
-extern void bank_task_destroy(bank_task_t);
+extern void bank_task_destroy(task_t);
+extern void bank_task_initialize(task_t task);
+extern uint64_t bank_billed_time_safe(task_t task);
 extern uint64_t bank_billed_time(bank_task_t bank_task);
+extern uint64_t bank_serviced_time_safe(task_t task);
 extern uint64_t bank_serviced_time(bank_task_t bank_task);
 extern ledger_t bank_get_voucher_ledger(ipc_voucher_t voucher);
 extern void bank_swap_thread_bank_ledger(thread_t thread, ledger_t ledger);

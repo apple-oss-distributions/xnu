@@ -7,14 +7,14 @@ include $(MakeInc_cmd)
 include $(MakeInc_def)
 
 INSTINC_SUBDIRS = \
-	libkern
+	libkern os firehose
 INSTINC_SUBDIRS_X86_64 = libkern
 INSTINC_SUBDIRS_X86_64H = libkern
 INSTINC_SUBDIRS_ARM = libkern
 INSTINC_SUBDIRS_ARM64 = libkern
 
 EXPINC_SUBDIRS = \
-	libkern
+	libkern os firehose
 EXPINC_SUBDIRS_X86_64 = libkern
 EXPINC_SUBDIRS_X86_64H = libkern
 EXPINC_SUBDIRS_ARM = libkern
