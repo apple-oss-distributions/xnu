@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2013 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2016 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -53,13 +53,25 @@ void
 vm_swapfile_open(const char *path, vnode_t *vp)
 {
 	int error = 0;
-	vfs_context_t	ctx = vfs_context_current();
+	vfs_context_t	ctx = vfs_context_kernel();
 
 	if ((error = vnode_open(path, (O_CREAT | O_TRUNC | FREAD | FWRITE), S_IRUSR | S_IWUSR, 0, vp, ctx))) {
 		printf("Failed to open swap file %d\n", error);
 		*vp = NULL;
 		return;
 	}	
+
+	/*
+	 * If MNT_IOFLAGS_NOSWAP is set, opening the swap file should fail.
+	 * To avoid a race on the mount we only make this check after creating the
+	 * vnode.
+	 */
+	if ((*vp)->v_mount->mnt_kern_flag & MNTK_NOSWAP) {
+		vnode_put(*vp);
+		vm_swapfile_close((uint64_t)path, *vp);
+		*vp = NULL;
+		return;
+	}
 
 	vnode_put(*vp);
 }
@@ -81,7 +93,7 @@ int unlink1(vfs_context_t, vnode_t, user_addr_t, enum uio_seg, int);
 void
 vm_swapfile_close(uint64_t path_addr, vnode_t vp)
 {
-	vfs_context_t context = vfs_context_current();
+	vfs_context_t context = vfs_context_kernel();
 	int error;
 
 	vnode_getwithref(vp);
@@ -105,7 +117,7 @@ vm_swapfile_preallocate(vnode_t vp, uint64_t *size, boolean_t *pin)
 	vfs_context_t	ctx = NULL;
 
 
-	ctx = vfs_context_current();
+	ctx = vfs_context_kernel();
 
 	error = vnode_setsize(vp, *size, IO_NOZEROFILL, ctx);
 
@@ -170,8 +182,7 @@ vm_swapfile_io(vnode_t vp, uint64_t offset, uint64_t start, int npages, int flag
 	int		upl_control_flags = 0;
 	upl_size_t	upl_size = 0;
 
-	upl_create_flags = UPL_SET_INTERNAL | UPL_SET_LITE
-			| UPL_MEMORY_TAG_MAKE(VM_KERN_MEMORY_OSFMK);
+	upl_create_flags = UPL_SET_INTERNAL | UPL_SET_LITE;
 
 #if ENCRYPTED_SWAP
 	upl_control_flags = UPL_IOSYNC | UPL_PAGING_ENCRYPTED;
@@ -189,7 +200,8 @@ vm_swapfile_io(vnode_t vp, uint64_t offset, uint64_t start, int npages, int flag
 				&upl,
 				NULL,
 				&count,
-				&upl_create_flags);
+				&upl_create_flags,
+				VM_KERN_MEMORY_OSFMK);
 
 	if (kr != KERN_SUCCESS || (upl_size != io_size)) {
 		panic("vm_map_create_upl failed with %d\n", kr);
@@ -310,17 +322,17 @@ u_int32_t vnode_trim_list (vnode_t vp, struct trim_list *tl, boolean_t route_onl
 			 * in each call to ensure that the entire range is covered.
 			 */
 			error = VNOP_BLOCKMAP (vp, current_offset, remaining_length, 
-					       &io_blockno, &io_bytecount, NULL, VNODE_READ, NULL);
+					       &io_blockno, &io_bytecount, NULL, VNODE_READ | VNODE_BLOCKMAP_NO_TRACK, NULL);
 
 			if (error) {
 				goto trim_exit;
 			}
+			if (io_blockno != -1) {
+			        extents[trim_index].offset = (uint64_t) io_blockno * (u_int64_t) blocksize;
+				extents[trim_index].length = io_bytecount;
 
-			extents[trim_index].offset = (uint64_t) io_blockno * (u_int64_t) blocksize;
-			extents[trim_index].length = io_bytecount;
-
-			trim_index++;
-
+				trim_index++;
+			}
 			if (trim_index == MAX_BATCH_TO_TRIM) {
 
 				if (vp->v_mount->mnt_ioflags & MNT_IOFLAGS_CSUNMAP_SUPPORTED) {

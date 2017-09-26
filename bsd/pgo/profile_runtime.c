@@ -26,6 +26,7 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 
+#include <machine/machine_routines.h>
 #include <sys/sysproto.h>
 #include <sys/malloc.h>
 #include <sys/systm.h>
@@ -33,13 +34,6 @@
 #include <sys/kauth.h>
 #include <security/mac_framework.h>
 #include <libkern/OSKextLib.h>
-
-
-/*
- * This tells compiler_rt not to include userspace-specific stuff writing
- * profile data to a file.
- */
-int __llvm_profile_runtime = 0;
 
 
 #ifdef PROFILE
@@ -105,9 +99,8 @@ static int write_buffer(int flags, char *buffer)
 int kdp_pgo_reset_counters = 0;
 
 /* called in debugger context */
-static kern_return_t do_pgo_reset_counters(void *context)
+kern_return_t do_pgo_reset_counters()
 {
-#pragma unused(context)
 #ifdef PROFILE
     memset(&__pgo_hib_CountersStart, 0,
            ((uintptr_t)(&__pgo_hib_CountersEnd)) - ((uintptr_t)(&__pgo_hib_CountersStart)));
@@ -118,12 +111,26 @@ static kern_return_t do_pgo_reset_counters(void *context)
 }
 
 static kern_return_t
+kextpgo_trap()
+{
+    return DebuggerTrapWithState(DBOP_RESET_PGO_COUNTERS, NULL, NULL, NULL, 0, FALSE, 0);
+}
+
+static kern_return_t
 pgo_reset_counters()
 {
     kern_return_t r;
+    boolean_t istate;
+
     OSKextResetPgoCountersLock();
+
+    istate = ml_set_interrupts_enabled(FALSE);
+
     kdp_pgo_reset_counters = 1;
-    r = DebuggerWithCallback(do_pgo_reset_counters, NULL, FALSE);
+    r = kextpgo_trap();
+
+    ml_set_interrupts_enabled(istate);
+
     OSKextResetPgoCountersUnlock();
     return r;
 }
@@ -207,6 +214,9 @@ int grab_pgo_data(struct proc *p,
                     }
 
                     err = OSKextGrabPgoData(uuid, &size64, NULL, 0, 0, !!(uap->flags & PGO_METADATA));
+                    if (size64 == 0 && err == 0) {
+                        err = EIO;
+                    }
                     if (err) {
                         goto out;
                     }
@@ -230,22 +240,38 @@ int grab_pgo_data(struct proc *p,
 
                 } else {
 
-                    MALLOC(buffer, char *, uap->size, M_TEMP, M_WAITOK);
+                    uint64_t size64 = 0 ;
+
+                    err = OSKextGrabPgoData(uuid, &size64, NULL, 0,
+                                            false,
+                                            !!(uap->flags & PGO_METADATA));
+
+                    if (size64 == 0 && err == 0) {
+                        err = EIO;
+                    }
+                    if (err) {
+                        goto out;
+                    }
+
+                    if (uap->size < 0 || (uint64_t)uap->size < size64) {
+                        err = EINVAL;
+                        goto out;
+                    }
+
+                    MALLOC(buffer, char *, size64, M_TEMP, M_WAITOK | M_ZERO);
                     if (!buffer) {
                         err = ENOMEM;
                         goto out;
                     }
 
-                    uint64_t size64;
-
-                    err = OSKextGrabPgoData(uuid, &size64, buffer, uap->size,
+                    err = OSKextGrabPgoData(uuid, &size64, buffer, size64,
                                             !!(uap->flags & PGO_WAIT_FOR_UNLOAD),
                                             !!(uap->flags & PGO_METADATA));
                     if (err) {
                         goto out;
                     }
 
-                    ssize_t size = size64;
+                    ssize_t size = size64;                    
                     if ( ((uint64_t) size) != size64  ||
                          size < 0 )
                     {
@@ -290,7 +316,7 @@ int grab_pgo_data(struct proc *p,
                 err = EINVAL;
                 goto out;
         } else {
-                MALLOC(buffer, char *, size, M_TEMP, M_WAITOK);
+                MALLOC(buffer, char *, size, M_TEMP, M_WAITOK | M_ZERO);
                 if (!buffer) {
                         err = ENOMEM;
                         goto out;

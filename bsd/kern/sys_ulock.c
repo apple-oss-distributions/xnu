@@ -54,6 +54,7 @@
 #include <kern/waitq.h>
 #include <kern/sched_prim.h>
 #include <kern/zalloc.h>
+#include <kern/debug.h>
 
 #include <pexpert/pexpert.h>
 
@@ -94,6 +95,9 @@ static lck_mtx_t ull_table_lock;
 #define ull_lock(ull)           lck_mtx_lock(&ull->ull_lock)
 #define ull_unlock(ull)         lck_mtx_unlock(&ull->ull_lock)
 #define ull_assert_owned(ull)	LCK_MTX_ASSERT(&ull->ull_lock, LCK_MTX_ASSERT_OWNED)
+
+#define ULOCK_TO_EVENT(ull)   ((event_t)ull)
+#define EVENT_TO_ULOCK(event) ((ull_t *)event)
 
 typedef struct __attribute__((packed)) {
 	user_addr_t	ulk_addr;
@@ -136,7 +140,6 @@ static thread_t ull_promote_owner_locked(ull_t* ull, thread_t thread);
 
 #if DEVELOPMENT || DEBUG
 static int ull_simulate_copyin_fault = 0;
-static int ull_panic_on_corruption = 0;
 
 static void
 ull_dump(ull_t *ull)
@@ -205,13 +208,6 @@ ulock_initialize(void)
 	                 0, "ulocks");
 
 	zone_change(ull_zone, Z_NOENCRYPT, TRUE);
-
-#if DEVELOPMENT || DEBUG
-	if (!PE_parse_boot_argn("ulock_panic_on_corruption",
-			&ull_panic_on_corruption, sizeof(ull_panic_on_corruption))) {
-		ull_panic_on_corruption = 0;
-	}
-#endif
 }
 
 #if DEVELOPMENT || DEBUG
@@ -277,7 +273,7 @@ ull_free(ull_t *ull)
 {
 	assert(ull->ull_owner == THREAD_NULL);
 
-	lck_mtx_assert(&ull->ull_lock, LCK_ASSERT_NOTOWNED);
+	LCK_MTX_ASSERT(&ull->ull_lock, LCK_ASSERT_NOTOWNED);
 
 	lck_mtx_destroy(&ull->ull_lock, ull_lck_grp);
 
@@ -496,17 +492,6 @@ ulock_wait(struct proc *p, struct ulock_wait_args *args, int32_t *retval)
 
 		/* HACK: don't bail on MACH_PORT_DEAD, to avoid blowing up the no-tsd pthread lock */
 		if (owner_name != MACH_PORT_DEAD && owner_thread == THREAD_NULL) {
-#if DEBUG || DEVELOPMENT
-			if (ull_panic_on_corruption) {
-				if (flags & ULF_NO_ERRNO) {
-					// ULF_NO_ERRNO is used by libplatform ulocks, but not libdispatch ones.
-					// Don't panic on libdispatch ulock corruptions; the userspace likely
-					// mismanaged a dispatch queue.
-					panic("ulock_wait: ulock is corrupted; value=0x%x, ull=%p",
-							(uint32_t)(args->value), ull);
-				}
-			}
-#endif
 			/*
 			 * Translation failed - even though the lock value is up to date,
 			 * whatever was stored in the lock wasn't actually a thread port.
@@ -535,10 +520,11 @@ ulock_wait(struct proc *p, struct ulock_wait_args *args, int32_t *retval)
 
 	wait_result_t wr;
 	uint32_t timeout = args->timeout;
+	thread_set_pending_block_hint(self, kThreadWaitUserLock);
 	if (timeout) {
-		wr = assert_wait_timeout((event_t)ull, THREAD_ABORTSAFE, timeout, NSEC_PER_USEC);
+		wr = assert_wait_timeout(ULOCK_TO_EVENT(ull), THREAD_ABORTSAFE, timeout, NSEC_PER_USEC);
 	} else {
-		wr = assert_wait((event_t)ull, THREAD_ABORTSAFE);
+		wr = assert_wait(ULOCK_TO_EVENT(ull), THREAD_ABORTSAFE);
 	}
 
 	ull_unlock(ull);
@@ -717,9 +703,9 @@ ulock_wake(struct proc *p, struct ulock_wake_args *args, __unused int32_t *retva
 	}
 
 	if (flags & ULF_WAKE_ALL) {
-		thread_wakeup((event_t)ull);
+		thread_wakeup(ULOCK_TO_EVENT(ull));
 	} else if (flags & ULF_WAKE_THREAD) {
-		kern_return_t kr = thread_wakeup_thread((event_t)ull, wake_thread);
+		kern_return_t kr = thread_wakeup_thread(ULOCK_TO_EVENT(ull), wake_thread);
 		if (kr != KERN_SUCCESS) {
 			assert(kr == KERN_NOT_WAITING);
 			ret = EALREADY;
@@ -727,12 +713,12 @@ ulock_wake(struct proc *p, struct ulock_wake_args *args, __unused int32_t *retva
 	} else {
 		/*
 		 * TODO: WAITQ_SELECT_MAX_PRI forces a linear scan of the (hashed) global waitq.
-		 * Move to a ulock-private, priority sorted waitq to avoid that.
+		 * Move to a ulock-private, priority sorted waitq (i.e. SYNC_POLICY_FIXED_PRIORITY) to avoid that.
 		 *
 		 * TODO: 'owner is not current_thread (or null)' likely means we can avoid this wakeup
 		 * <rdar://problem/25487001>
 		 */
-		thread_wakeup_one_with_pri((event_t)ull, WAITQ_SELECT_MAX_PRI);
+		thread_wakeup_one_with_pri(ULOCK_TO_EVENT(ull), WAITQ_SELECT_MAX_PRI);
 	}
 
 	/*
@@ -808,3 +794,20 @@ ull_promote_owner_locked(ull_t*    ull,
 	return old_owner;
 }
 
+void
+kdp_ulock_find_owner(__unused struct waitq * waitq, event64_t event, thread_waitinfo_t * waitinfo)
+{
+	ull_t *ull = EVENT_TO_ULOCK(event);
+	assert(kdp_is_in_zone(ull, "ulocks"));
+
+	if (ull->ull_opcode == UL_UNFAIR_LOCK) {// owner is only set if it's an os_unfair_lock
+		waitinfo->owner = thread_tid(ull->ull_owner);
+		waitinfo->context = ull->ull_key.ulk_addr;
+	} else if (ull->ull_opcode == UL_COMPARE_AND_WAIT) { // otherwise, this is a spinlock
+		waitinfo->owner = 0;
+		waitinfo->context = ull->ull_key.ulk_addr;
+	} else {
+		panic("%s: Invalid ulock opcode %d addr %p", __FUNCTION__, ull->ull_opcode, (void*)ull);
+	}
+	return;
+}

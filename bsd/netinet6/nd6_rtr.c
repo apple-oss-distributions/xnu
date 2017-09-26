@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2003-2016 Apple Inc. All rights reserved.
+ * Copyright (c) 2003-2017 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -382,7 +382,10 @@ nd6_ra_input(
 	struct nd_defrouter dr0;
 	u_int32_t advreachable;
 
-
+#if (DEVELOPMENT || DEBUG)
+	if (ip6_accept_rtadv == 0)
+		goto freeit;
+#endif /* (DEVELOPMENT || DEBUG) */
 	/* Expect 32-bit aligned data pointer on strict-align platforms */
 	MBUF_STRICT_DATA_ALIGNMENT_CHECK_32(m);
 
@@ -685,7 +688,7 @@ skip:
 
 	/* Post message */
 	nd6_post_msg(KEV_ND6_RA, nd_prefix_list_head, nd_prefix_list_length,
-	    mtu, lladdr, lladdrlen);
+	    mtu);
 
 	/*
 	 * Installing a link-layer address might change the state of the
@@ -751,7 +754,7 @@ defrouter_addreq(struct nd_defrouter *new, boolean_t scoped)
 	int err;
 	struct nd_ifinfo *ndi = ND_IFINFO(new->ifp);
 
-	lck_mtx_assert(nd6_mutex, LCK_MTX_ASSERT_NOTOWNED);
+	LCK_MTX_ASSERT(nd6_mutex, LCK_MTX_ASSERT_NOTOWNED);
 	NDDR_LOCK_ASSERT_NOTHELD(new);
 	/*
 	 * We're free to lock and unlock NDDR because our callers 
@@ -854,7 +857,7 @@ defrouter_lookup(
 {
 	struct nd_defrouter *dr;
 
-	lck_mtx_assert(nd6_mutex, LCK_MTX_ASSERT_OWNED);
+	LCK_MTX_ASSERT(nd6_mutex, LCK_MTX_ASSERT_OWNED);
 
 	for (dr = TAILQ_FIRST(&nd_defrouter); dr;
 	    dr = TAILQ_NEXT(dr, dr_entry)) {
@@ -883,7 +886,7 @@ defrouter_delreq(struct nd_defrouter *dr)
 	unsigned int ifscope;
 	int err;
 
-	lck_mtx_assert(nd6_mutex, LCK_MTX_ASSERT_NOTOWNED);
+	LCK_MTX_ASSERT(nd6_mutex, LCK_MTX_ASSERT_NOTOWNED);
 	NDDR_LOCK_ASSERT_NOTHELD(dr);
 	/*
 	 * We're free to lock and unlock NDDR because our callers 
@@ -963,7 +966,7 @@ defrouter_reset(void)
 {
 	struct nd_defrouter *dr, drany;
 
-	lck_mtx_assert(nd6_mutex, LCK_MTX_ASSERT_OWNED);
+	LCK_MTX_ASSERT(nd6_mutex, LCK_MTX_ASSERT_OWNED);
 
 	dr = TAILQ_FIRST(&nd_defrouter);
 	while (dr) {
@@ -1040,6 +1043,12 @@ defrtrlist_ioctl(u_long cmd, caddr_t data)
 		dr0.ifp = dr_ifp;
 		ifnet_head_done();
 
+		if (ND_IFINFO(dr_ifp) == NULL ||
+		    !ND_IFINFO(dr_ifp)->initialized) {
+			error = ENXIO;
+			break;
+		}
+
 		if (IN6_IS_SCOPE_EMBED(&dr0.rtaddr)) {
 			uint16_t *scope = &dr0.rtaddr.s6_addr16[1];
 
@@ -1086,7 +1095,7 @@ defrtrlist_del(struct nd_defrouter *dr)
 	struct nd_ifinfo *ndi = NULL;
 	boolean_t resetmtu;
 
-	lck_mtx_assert(nd6_mutex, LCK_MTX_ASSERT_OWNED);
+	LCK_MTX_ASSERT(nd6_mutex, LCK_MTX_ASSERT_OWNED);
 
 #if (DEVELOPMENT || DEBUG)
 	/*
@@ -1286,7 +1295,7 @@ defrouter_select(struct ifnet *ifp)
 	unsigned int genid = 0;
 	boolean_t is_installed_reachable = FALSE;
 
-	lck_mtx_assert(nd6_mutex, LCK_MTX_ASSERT_OWNED);
+	LCK_MTX_ASSERT(nd6_mutex, LCK_MTX_ASSERT_OWNED);
 
 	if (ifp == NULL) {
 		nd6log2((LOG_INFO,
@@ -1352,7 +1361,7 @@ defrouter_select(struct ifnet *ifp)
 		nd_defrouter_waiters++;
 		msleep(nd_defrouter_waitchan, nd6_mutex, (PZERO-1),
 		    __func__, NULL);
-		lck_mtx_assert(nd6_mutex, LCK_MTX_ASSERT_OWNED);
+		LCK_MTX_ASSERT(nd6_mutex, LCK_MTX_ASSERT_OWNED);
 	}
 	nd_defrouter_busy = TRUE;
 
@@ -1461,6 +1470,7 @@ defrouter_select(struct ifnet *ifp)
 					rtaddr = installed_dr->rtaddr_mapped;
 				else
 					rtaddr = installed_dr->rtaddr;
+				NDDR_UNLOCK(dr);
 				lck_mtx_unlock(nd6_mutex);
 				/* Callee returns a locked route upon success */
 				if ((rt = nd6_lookup(&rtaddr, 0, ifp, 0)) != NULL) {
@@ -1479,9 +1489,11 @@ defrouter_select(struct ifnet *ifp)
 				nd6log((LOG_ERR, "defrouter_select: more than one "
 				    "default router is installed for interface :%s.\n",
 				    if_name(ifp)));
+				NDDR_UNLOCK(dr);
 			}
-		}
-		NDDR_UNLOCK(dr);
+		} else
+			NDDR_UNLOCK(dr);
+
 		NDDR_REMREF(dr);	/* for this for loop */
 		if (drrele != NULL)
 			NDDR_REMREF(drrele);
@@ -1497,7 +1509,7 @@ defrouter_select(struct ifnet *ifp)
 			}
 
 			if (installed_dr) {
-				NDDR_REMREF(selected_dr);
+				NDDR_REMREF(installed_dr);
 				installed_dr = NULL;
 			}
 
@@ -1634,7 +1646,7 @@ out:
 		NDDR_REMREF(selected_dr);
 	if (installed_dr)
 		NDDR_REMREF(installed_dr);
-	lck_mtx_assert(nd6_mutex, LCK_MTX_ASSERT_OWNED);
+	LCK_MTX_ASSERT(nd6_mutex, LCK_MTX_ASSERT_OWNED);
 	VERIFY(nd_defrouter_busy);
 	nd_defrouter_busy = FALSE;
 	if (nd_defrouter_waiters > 0) {
@@ -1651,7 +1663,7 @@ defrtrlist_update_common(struct nd_defrouter *new, boolean_t scoped)
 	struct nd_ifinfo *ndi = NULL;
 	struct timeval caltime;
 
-	lck_mtx_assert(nd6_mutex, LCK_MTX_ASSERT_OWNED);
+	LCK_MTX_ASSERT(nd6_mutex, LCK_MTX_ASSERT_OWNED);
 
 	if ((dr = defrouter_lookup(&new->rtaddr, ifp)) != NULL) {
 		/* entry exists */
@@ -1799,7 +1811,7 @@ defrtrlist_update(struct nd_defrouter *new)
 {
 	struct nd_defrouter *dr;
 
-	lck_mtx_assert(nd6_mutex, LCK_MTX_ASSERT_OWNED);
+	LCK_MTX_ASSERT(nd6_mutex, LCK_MTX_ASSERT_OWNED);
 	dr = defrtrlist_update_common(new,
 	    (nd6_defifp != NULL && new->ifp != nd6_defifp));
 
@@ -1811,7 +1823,7 @@ pfxrtr_lookup(struct nd_prefix *pr, struct nd_defrouter *dr)
 {
 	struct nd_pfxrouter *search;
 
-	lck_mtx_assert(nd6_mutex, LCK_MTX_ASSERT_OWNED);
+	LCK_MTX_ASSERT(nd6_mutex, LCK_MTX_ASSERT_OWNED);
 	NDPR_LOCK_ASSERT_HELD(pr);
 
 	for (search = pr->ndpr_advrtrs.lh_first; search;
@@ -1828,7 +1840,7 @@ pfxrtr_add(struct nd_prefix *pr, struct nd_defrouter *dr)
 {
 	struct nd_pfxrouter *new;
 
-	lck_mtx_assert(nd6_mutex, LCK_MTX_ASSERT_OWNED);
+	LCK_MTX_ASSERT(nd6_mutex, LCK_MTX_ASSERT_OWNED);
 	NDPR_LOCK_ASSERT_NOTHELD(pr);
 
 	new = zalloc(ndprtr_zone);
@@ -1848,7 +1860,7 @@ pfxrtr_add(struct nd_prefix *pr, struct nd_defrouter *dr)
 static void
 pfxrtr_del(struct nd_pfxrouter *pfr, struct nd_prefix *pr)
 {
-	lck_mtx_assert(nd6_mutex, LCK_MTX_ASSERT_OWNED);
+	LCK_MTX_ASSERT(nd6_mutex, LCK_MTX_ASSERT_OWNED);
 	NDPR_LOCK_ASSERT_HELD(pr);
 	pr->ndpr_genid++;
 	LIST_REMOVE(pfr, pfr_entry);
@@ -1997,7 +2009,7 @@ prelist_remove(struct nd_prefix *pr)
 	int e;
 	struct nd_ifinfo *ndi = NULL;
 
-	lck_mtx_assert(nd6_mutex, LCK_MTX_ASSERT_OWNED);
+	LCK_MTX_ASSERT(nd6_mutex, LCK_MTX_ASSERT_OWNED);
 	NDPR_LOCK_ASSERT_HELD(pr);
 
 	if (pr->ndpr_stateflags & NDPRF_DEFUNCT)
@@ -2159,8 +2171,6 @@ prelist_update(
 		NDPR_REMREF(pr);
 		lck_mtx_unlock(nd6_mutex);
 	} else {
-		struct nd_prefix *newpr = NULL;
-
 		newprefix = 1;
 
 		if (new->ndpr_vltime == 0)
@@ -2170,33 +2180,16 @@ prelist_update(
 
 		bzero(&new->ndpr_addr, sizeof (struct in6_addr));
 
-		error = nd6_prelist_add(new, dr, &newpr, FALSE);
-		if (error != 0 || newpr == NULL) {
+		error = nd6_prelist_add(new, dr, &pr, FALSE);
+		if (error != 0 || pr == NULL) {
 			nd6log((LOG_NOTICE, "prelist_update: "
 			    "nd6_prelist_add failed for %s/%d on %s "
 			    "errno=%d, returnpr=0x%llx\n",
 			    ip6_sprintf(&new->ndpr_prefix.sin6_addr),
 			    new->ndpr_plen, if_name(new->ndpr_ifp),
-			    error, (uint64_t)VM_KERNEL_ADDRPERM(newpr)));
+			    error, (uint64_t)VM_KERNEL_ADDRPERM(pr)));
 			goto end; /* we should just give up in this case. */
 		}
-
-		/*
-		 * XXX: from the ND point of view, we can ignore a prefix
-		 * with the on-link bit being zero.  However, we need a
-		 * prefix structure for references from autoconfigured
-		 * addresses.  Thus, we explicitly make sure that the prefix
-		 * itself expires now.
-		 */
-		NDPR_LOCK(newpr);
-		if (newpr->ndpr_raf_onlink == 0) {
-			newpr->ndpr_vltime = 0;
-			newpr->ndpr_pltime = 0;
-			in6_init_prefix_ltimes(newpr);
-		}
-
-		pr = newpr;
-		NDPR_UNLOCK(newpr);
 	}
 
 	/*
@@ -2206,7 +2199,7 @@ prelist_update(
 
 	/* 5.5.3 (a). Ignore the prefix without the A bit set. */
 	if (!new->ndpr_raf_auto)
-		goto afteraddrconf;
+		goto end;
 
 	/*
 	 * 5.5.3 (b). the link-local prefix should have been ignored in
@@ -2418,8 +2411,6 @@ prelist_update(
 			lck_mtx_unlock(nd6_mutex);
 		}
 	}
-
-afteraddrconf:
 
 end:
 	if (pr != NULL)
@@ -2729,7 +2720,7 @@ find_pfxlist_reachable_router(struct nd_prefix *pr)
 	struct in6_addr rtaddr;
 	unsigned int genid;
 
-	lck_mtx_assert(nd6_mutex, LCK_MTX_ASSERT_OWNED);
+	LCK_MTX_ASSERT(nd6_mutex, LCK_MTX_ASSERT_OWNED);
 	NDPR_LOCK_ASSERT_HELD(pr);
 
 	genid = pr->ndpr_genid;
@@ -2795,13 +2786,13 @@ pfxlist_onlink_check(void)
 	struct ifaddr **ifap = NULL;
 	struct nd_prefix *ndpr;
 
-	lck_mtx_assert(nd6_mutex, LCK_MTX_ASSERT_OWNED);
+	LCK_MTX_ASSERT(nd6_mutex, LCK_MTX_ASSERT_OWNED);
 
 	while (nd_prefix_busy) {
 		nd_prefix_waiters++;
 		msleep(nd_prefix_waitchan, nd6_mutex, (PZERO-1),
 		    __func__, NULL);
-		lck_mtx_assert(nd6_mutex, LCK_MTX_ASSERT_OWNED);
+		LCK_MTX_ASSERT(nd6_mutex, LCK_MTX_ASSERT_OWNED);
 	}
 	nd_prefix_busy = TRUE;
 
@@ -3082,6 +3073,9 @@ pfxlist_onlink_check(void)
 				NDPR_UNLOCK(ndpr);
 				IFA_LOCK(&ifa->ia_ifa);
 				ifa->ia6_flags |= IN6_IFF_DETACHED;
+				in6_event_enqueue_nwk_wq_entry(IN6_ADDR_MARKED_DETACHED,
+				    ifa->ia_ifa.ifa_ifp, &ifa->ia_addr.sin6_addr,
+				    0);
 				IFA_UNLOCK(&ifa->ia_ifa);
 			}
 			NDPR_REMREF(ndpr);
@@ -3113,7 +3107,7 @@ nd6_prefix_equal_lookup(struct nd_prefix *pr, boolean_t primary_only)
 {
 	struct nd_prefix *opr;
 
-	lck_mtx_assert(nd6_mutex, LCK_MTX_ASSERT_OWNED);
+	LCK_MTX_ASSERT(nd6_mutex, LCK_MTX_ASSERT_OWNED);
 
 	for (opr = nd_prefix.lh_first; opr; opr = opr->ndpr_next) {
 		if (opr == pr)
@@ -3149,7 +3143,7 @@ nd6_prefix_sync(struct ifnet *ifp)
 	struct nd_prefix *pr, *opr;
 	int err = 0;
 
-	lck_mtx_assert(nd6_mutex, LCK_MTX_ASSERT_OWNED);
+	LCK_MTX_ASSERT(nd6_mutex, LCK_MTX_ASSERT_OWNED);
 
 	if (ifp == NULL)
 		return;
@@ -3252,7 +3246,7 @@ nd6_prefix_onlink_common(struct nd_prefix *pr, boolean_t force_scoped,
 	int error = 0, prproxy = 0;
 	struct rtentry *rt = NULL;
 
-	lck_mtx_assert(nd6_mutex, LCK_MTX_ASSERT_OWNED);
+	LCK_MTX_ASSERT(nd6_mutex, LCK_MTX_ASSERT_OWNED);
 
 	/* sanity check */
 	NDPR_LOCK(pr);
@@ -3465,7 +3459,7 @@ nd6_prefix_offlink(struct nd_prefix *pr)
 	struct rtentry *rt = NULL, *ndpr_rt = NULL;
 	unsigned int ifscope;
 
-	lck_mtx_assert(nd6_mutex, LCK_MTX_ASSERT_NOTOWNED);
+	LCK_MTX_ASSERT(nd6_mutex, LCK_MTX_ASSERT_NOTOWNED);
 
 	/* sanity check */
 	NDPR_LOCK(pr);
@@ -3975,7 +3969,7 @@ rt6_deleteroute(
 	struct rtentry *rt = (struct rtentry *)rn;
 	struct in6_addr *gate = (struct in6_addr *)arg;
 
-	lck_mtx_assert(rnh_lock, LCK_MTX_ASSERT_OWNED);
+	LCK_MTX_ASSERT(rnh_lock, LCK_MTX_ASSERT_OWNED);
 
 	RT_LOCK(rt);
 	if (rt->rt_gateway == NULL || rt->rt_gateway->sa_family != AF_INET6) {
@@ -4022,7 +4016,7 @@ nd6_setdefaultiface(
 	int error = 0;
 	ifnet_t def_ifp = NULL;
 
-	lck_mtx_assert(nd6_mutex, LCK_MTX_ASSERT_NOTOWNED);
+	LCK_MTX_ASSERT(nd6_mutex, LCK_MTX_ASSERT_NOTOWNED);
 
 	ifnet_head_lock_shared();
 	if (ifindex < 0 || if_index < ifindex) {

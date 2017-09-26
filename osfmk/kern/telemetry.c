@@ -66,6 +66,8 @@ extern uint64_t proc_uniqueid(void *p);
 extern uint64_t proc_was_throttled(void *p);
 extern uint64_t proc_did_throttle(void *p);
 extern int	proc_selfpid(void);
+extern boolean_t task_did_exec(task_t task);
+extern boolean_t task_is_exec_copy(task_t task);
 
 struct micro_snapshot_buffer {
 	vm_offset_t		buffer;
@@ -159,7 +161,11 @@ void telemetry_init(void)
 	 */
 	if (!PE_parse_boot_argn("telemetry_sample_all_tasks", &telemetry_sample_all_tasks, sizeof(telemetry_sample_all_tasks))) {
 
+#if CONFIG_EMBEDDED && !(DEVELOPMENT || DEBUG)
+		telemetry_sample_all_tasks = FALSE;
+#else
 		telemetry_sample_all_tasks = TRUE;
+#endif /* CONFIG_EMBEDDED && !(DEVELOPMENT || DEBUG) */
 
 	}
 
@@ -300,7 +306,7 @@ void telemetry_mark_curthread(boolean_t interrupted_userspace)
 
 	telemetry_needs_record = FALSE;
 	thread_ast_set(thread, ast_bits);
-	ast_propagate(thread->ast);
+	ast_propagate(thread);
 }
 
 void compute_telemetry(void *arg __unused)
@@ -332,12 +338,17 @@ telemetry_notify_user(void)
 	ipc_port_release_send(user_port);
 }
 
-void telemetry_ast(thread_t thread, boolean_t interrupted_userspace, boolean_t io_telemetry)
+void telemetry_ast(thread_t thread, ast_t reasons)
 {
+	assert((reasons & AST_TELEMETRY_ALL) != AST_TELEMETRY_ALL); /* only one is valid at a time */
+
+	boolean_t io_telemetry = (reasons & AST_TELEMETRY_IO) ? TRUE : FALSE;
+	boolean_t interrupted_userspace = (reasons & AST_TELEMETRY_USER) ? TRUE : FALSE;
+
 	uint8_t microsnapshot_flags = kInterruptRecord;
-	if (io_telemetry == TRUE) {
+
+	if (io_telemetry == TRUE)
 		microsnapshot_flags = kIORecord;
-	}
 
 	if (interrupted_userspace)
 		microsnapshot_flags |= kUserMode;
@@ -366,7 +377,7 @@ void telemetry_take_sample(thread_t thread, uint8_t microsnapshot_flags, struct 
 		return;
 
 	task = thread->task;
-	if ((task == TASK_NULL) || (task == kernel_task))
+	if ((task == TASK_NULL) || (task == kernel_task) || task_did_exec(task) || task_is_exec_copy(task))
 		return;
 
 	/*

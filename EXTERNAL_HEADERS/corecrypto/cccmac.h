@@ -15,7 +15,7 @@
 #include <corecrypto/ccmode.h>
 #include <corecrypto/ccaes.h>
 
-#define CMAC_BLOCKSIZE 16
+#define CMAC_BLOCKSIZE   16
 
 #if CORECRYPTO_USE_TRANSPARENT_UNION
 struct cccmac_ctx {
@@ -23,8 +23,12 @@ struct cccmac_ctx {
 } CC_ALIGNED(8);
 
 typedef struct cccmac_ctx_hdr {
-    uint8_t k1[16];
-    uint8_t k2[16];
+    uint8_t k1[CMAC_BLOCKSIZE];
+    uint8_t k2[CMAC_BLOCKSIZE];
+    uint8_t block[CMAC_BLOCKSIZE];
+    size_t  block_nbytes;      // Number of byte occupied in block buf
+    size_t  cumulated_nbytes;  // Total size processed
+    const struct ccmode_cbc *cbc;
     uint8_t ctx[8];
 } CC_ALIGNED(8) cccmac_ctx_hdr;
 
@@ -38,8 +42,12 @@ typedef union {
 #else
 
 struct cccmac_ctx {
-    uint8_t k1[16];
-    uint8_t k2[16];
+    uint8_t k1[CMAC_BLOCKSIZE];
+    uint8_t k2[CMAC_BLOCKSIZE];
+    uint8_t block[CMAC_BLOCKSIZE];
+    size_t  block_nbytes; // Number of byte occupied in block
+    size_t  cumulated_nbytes;  // Total size processed
+    const struct ccmode_cbc *cbc;
     uint8_t ctx[8];
 } CC_ALIGNED(8);// cccmac_ctx_hdr;
 
@@ -73,20 +81,132 @@ typedef struct cccmac_ctx* cccmac_ctx_t;
 #define cccmac_mode_iv(_mode_, HC)     (cccbc_iv *)(cccmac_mode_ctx_start(_mode_, HC)+cccmac_cbc_size(_mode_))
 #define cccmac_k1(HC)       (CCCMAC_HDR(HC)->k1)
 #define cccmac_k2(HC)       (CCCMAC_HDR(HC)->k2)
-
-void cccmac_init(const struct ccmode_cbc *cbc, cccmac_ctx_t ctx, const void *key);
-
-
-void cccmac_block_update(const struct ccmode_cbc *cbc, cccmac_ctx_t cmac,
-                                       size_t nblocks, const void *data);
+#define cccmac_block(HC)    (CCCMAC_HDR(HC)->block)
+#define cccmac_cbc(HC)      (CCCMAC_HDR(HC)->cbc)
+#define cccmac_block_nbytes(HC)        (CCCMAC_HDR(HC)->block_nbytes)
+#define cccmac_cumulated_nbytes(HC)    (CCCMAC_HDR(HC)->cumulated_nbytes)
 
 
-void cccmac_final(const struct ccmode_cbc *cbc, cccmac_ctx_t ctx,
-                  size_t nbytes, const void *in, void *out);
+/* CMAC as defined in NIST SP800-38B - 2005 */
 
-void cccmac(const struct ccmode_cbc *cbc, const void *key,
-            size_t data_len, const void *data,
-            void *mac);
+/* =============================================================================
 
+                                ONE SHOT
+
+ ==============================================================================*/
+
+/*!
+ @function   cccmac_one_shot_generate
+ @abstract   CMAC generation in one call
+
+ @param   cbc          CBC and block cipher specification
+ @param   key_nbytes   Length of the key in bytes
+ @param   key          Pointer to the key of length key_nbytes
+ @param   data_nbytes  Length of the data in bytes
+ @param   data         Pointer to the data in bytes
+ @param   mac_nbytes   Length in byte of the mac, > 0
+ @param   mac          Output of length cbc->block_size
+
+ @result     0 iff successful.
+
+ @discussion Only supports CMAC_BLOCKSIZE block ciphers
+ */
+int cccmac_one_shot_generate(const struct ccmode_cbc *cbc,
+                        size_t key_nbytes, const void *key,
+                        size_t data_nbytes, const void *data,
+                        size_t mac_nbytes, void *mac);
+
+/*!
+ @function   cccmac_one_shot_verify
+ @abstract   CMAC verification in one call
+
+ @param   cbc          CBC and block cipher specification
+ @param   key_nbytes  Length of the key in bytes
+ @param   key          Pointer to the key of length key_nbytes
+ @param   data_nbytes Length of the data in bytes
+ @param   data         Pointer to the data in bytes
+ @param   expected_mac_nbytes  Length in byte of the mac, > 0
+ @param   expected_mac Mac value expected
+
+ @result     0 iff successful.
+
+ @discussion Only supports CMAC_BLOCKSIZE block ciphers
+ */
+int cccmac_one_shot_verify(const struct ccmode_cbc *cbc,
+                           size_t key_nbytes, const void *key,
+                           size_t data_nbytes, const void *data,
+                           size_t expected_mac_nbytes, const void *expected_mac);
+
+/* =============================================================================
+
+                               STREAMING
+ 
+                        Init - Update - Final
+
+==============================================================================*/
+
+/*!
+ @function   cccmac_init
+ @abstract   Init CMAC context with CBC mode and key
+
+ @param   cbc         CBC and block cipher specification
+ @param   ctx         Context use to store internal state
+ @param   key_nbytes  Length of the key in bytes
+ @param   key         Full key
+
+ @result     0 iff successful.
+
+ @discussion Only supports CMAC_BLOCKSIZE block ciphers
+ */
+
+int cccmac_init(const struct ccmode_cbc *cbc,
+                cccmac_ctx_t ctx,
+                size_t key_nbytes, const void *key);
+
+/*!
+ @function   cccmac_update
+ @abstract   Process data
+
+ @param   ctx          Context use to store internal state
+ @param   data_nbytes Length in byte of the data
+ @param   data         Data to process
+
+ @result     0 iff successful.
+
+ @discussion Only supports CMAC_BLOCKSIZE block ciphers
+ */
+
+int cccmac_update(cccmac_ctx_t ctx,
+                  size_t data_nbytes, const void *data);
+
+/*!
+ @function   cccmac_final_generate
+ @abstract   Final step for generation
+
+ @param   ctx          Context use to store internal state
+ @param   mac_nbytes   Length in byte of the mac, > 0
+ @param   mac          Output of length mac_nbytes
+
+ @result     0 iff successful.
+
+ @discussion Only supports CMAC_BLOCKSIZE block ciphers
+ */
+int cccmac_final_generate(cccmac_ctx_t ctx,
+                     size_t mac_nbytes, void *mac);
+
+/*!
+ @function   cccmac_final_verify
+ @abstract   Final step and verification
+
+ @param   ctx          Context use to store internal state
+ @param   expected_mac_nbytes  Length in byte of the mac, > 0
+ @param   expected_mac Mac value expected
+
+ @result     0 iff successful.
+
+ @discussion Only supports CMAC_BLOCKSIZE block ciphers
+ */
+int cccmac_final_verify(cccmac_ctx_t ctx,
+                        size_t expected_mac_nbytes, const void *expected_mac);
 
 #endif /* _CORECRYPTO_cccmac_H_ */

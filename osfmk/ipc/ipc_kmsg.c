@@ -89,7 +89,6 @@
 #include <kern/processor.h>
 #include <kern/thread.h>
 #include <kern/sched_prim.h>
-#include <kern/spl.h>
 #include <kern/misc_protos.h>
 #include <kern/counters.h>
 #include <kern/cpu_data.h>
@@ -117,6 +116,8 @@
 #include <kern/mach_node.h>
 #include <ipc/flipc.h>
 #endif
+
+#include <os/overflow.h>
 
 #include <security/mac_mach_internal.h>
 
@@ -577,6 +578,7 @@ MACRO_END
 #define KMSG_TRACE_PORTS_SHIFT     0
 
 #if (KDEBUG_LEVEL >= KDEBUG_LEVEL_STANDARD)
+#include <stdint.h>
 extern boolean_t kdebug_debugid_enabled(uint32_t debugid);
 
 void ipc_kmsg_trace_send(ipc_kmsg_t kmsg,
@@ -851,6 +853,8 @@ mach_msg_return_t ipc_kmsg_copyin_body(
 	ipc_space_t		space,
 	vm_map_t		map);
 
+extern int thread_qos_from_pthread_priority(unsigned long, unsigned long *);
+
 /*
  *	We keep a per-processor cache of kernel message buffers.
  *	The cache saves the overhead/locking of using kalloc/kfree.
@@ -1107,7 +1111,7 @@ ipc_kmsg_override_qos(
 		cur->ikm_qos_override = override;
 		if (cur == first)
 			return TRUE;
-		 cur = cur->ikm_next;
+		 cur = cur->ikm_prev;
 	}
 	return FALSE;
 }
@@ -1462,7 +1466,16 @@ ipc_kmsg_set_prealloc(
 	assert(kmsg->ikm_prealloc == IP_NULL);
   
 	kmsg->ikm_prealloc = IP_NULL;
+	/* take the mqueue lock since the sync qos is protected under it */
+	imq_lock(&port->ip_messages);
+
+	/* copy the sync qos values to kmsg */
+	for (int i = 0; i < THREAD_QOS_LAST; i++) {
+		kmsg->sync_qos[i] = port_sync_qos(port, i);
+	}
+	kmsg->special_port_qos = port_special_qos(port);
 	IP_SET_PREALLOC(port, kmsg);
+	imq_unlock(&port->ip_messages);
 }
 
 /*
@@ -1480,7 +1493,18 @@ ipc_kmsg_clear_prealloc(
 	assert(kmsg->ikm_prealloc == port);
   
 	kmsg->ikm_prealloc = IP_NULL;
+
+	/* take the mqueue lock since the sync qos is protected under it */
+	imq_lock(&port->ip_messages);
+
 	IP_CLEAR_PREALLOC(port, kmsg);
+
+	/* copy the sync qos values from kmsg to port */
+	for (int i = 0; i < THREAD_QOS_LAST; i++) {
+		set_port_sync_qos(port, i, kmsg->sync_qos[i]);
+	}
+	set_port_special_qos(port, kmsg->special_port_qos);
+	imq_unlock(&port->ip_messages);
 }
 
 /*
@@ -1544,6 +1568,14 @@ ipc_kmsg_get(
 
 	if (copyinmsg(msg_addr, (char *)&legacy_base, len_copied))
 		return MACH_SEND_INVALID_DATA;
+
+	/*
+	 * If the message claims to be complex, it must at least
+	 * have the length of a "base" message (header + dsc_count).
+	 */
+	if (len_copied < sizeof(mach_msg_legacy_base_t) &&
+	    (legacy_base.header.msgh_bits & MACH_MSGH_BITS_COMPLEX))
+		return MACH_SEND_MSG_TOO_SMALL;
 
 	msg_addr += sizeof(legacy_base.header);
 #if defined(__LP64__)
@@ -1704,6 +1736,8 @@ ipc_kmsg_get_from_kernel(
 
 	(void) memcpy((void *) kmsg->ikm_header, (const void *) msg, size);
 
+	ikm_qos_init(kmsg);
+
 	kmsg->ikm_header->msgh_size = size;
 
 	/* 
@@ -1767,10 +1801,10 @@ ipc_kmsg_send(
 
 #if IMPORTANCE_INHERITANCE
 	boolean_t did_importance = FALSE;
-#if IMPORTANCE_DEBUG
+#if IMPORTANCE_TRACE
 	mach_msg_id_t imp_msgh_id = -1;
 	int           sender_pid  = -1;
-#endif /* IMPORTANCE_DEBUG */
+#endif /* IMPORTANCE_TRACE */
 #endif /* IMPORTANCE_INHERITANCE */
 
 	/* don't allow the creation of a circular loop */
@@ -1898,10 +1932,10 @@ retry:
 			default:
 				break;
 		}
-#if IMPORTANCE_DEBUG
+#if IMPORTANCE_TRACE
 		KERNEL_DEBUG_CONSTANT_IST(KDEBUG_TRACE, (IMPORTANCE_CODE(IMP_MSG, IMP_MSG_SEND)) | DBG_FUNC_END,
 		                          task_pid(current_task()), sender_pid, imp_msgh_id, importance_cleared, 0);
-#endif /* IMPORTANCE_DEBUG */
+#endif /* IMPORTANCE_TRACE */
 	}
 #endif /* IMPORTANCE_INHERITANCE */
 
@@ -2068,13 +2102,16 @@ ipc_kmsg_put_to_kernel(
 
 unsigned long pthread_priority_canonicalize(unsigned long priority, boolean_t propagation);
 
-static void
+static kern_return_t
 ipc_kmsg_set_qos(
 	ipc_kmsg_t kmsg,
 	mach_msg_option_t options,
 	mach_msg_priority_t override)
 {
 	kern_return_t kr;
+	unsigned long flags = 0;
+	ipc_port_t special_reply_port = kmsg->ikm_header->msgh_local_port;
+	ipc_port_t dest_port = kmsg->ikm_header->msgh_remote_port;
 
 	kr = ipc_get_pthpriority_from_kmsg_voucher(kmsg, &kmsg->ikm_qos);
 	if (kr != KERN_SUCCESS) {
@@ -2091,6 +2128,25 @@ ipc_kmsg_set_qos(
 		if (canon > kmsg->ikm_qos)
 			kmsg->ikm_qos_override = canon;
 	}
+
+	kr = KERN_SUCCESS;
+	if ((options & MACH_SEND_SYNC_OVERRIDE)) {
+		if (IP_VALID(special_reply_port) &&
+		    MACH_MSGH_BITS_LOCAL(kmsg->ikm_header->msgh_bits) == MACH_MSG_TYPE_PORT_SEND_ONCE) {
+			/*
+			 * Update the sync override count if the reply port is a special reply port,
+			 * link the destination port to special reply port and update the qos count
+			 * of destination port.
+			 *
+			 * Use the qos value passed by voucher and not the one passed by notify field.
+			 */
+			kr = ipc_port_link_special_reply_port_with_qos(special_reply_port, dest_port,
+				thread_qos_from_pthread_priority(kmsg->ikm_qos, &flags));
+		} else {
+			kr = KERN_FAILURE;
+		}
+	}
+	return kr;
 }
 
 /*
@@ -2407,18 +2463,37 @@ ipc_kmsg_copyin_header(
 		}
 	}
 
-	/* the entry(s) might need to be deallocated */
+	/*
+	 * The entries might need to be deallocated.
+	 *
+	 * Each entry should be deallocated only once,
+	 * even if it was specified in more than one slot in the header.
+	 * Note that dest can be the same entry as reply or voucher,
+	 * but reply and voucher must be distinct entries.
+	 */
 	assert(IE_NULL != dest_entry);
+	if (IE_NULL != reply_entry)
+		assert(reply_entry != voucher_entry);
+
 	if (IE_BITS_TYPE(dest_entry->ie_bits) == MACH_PORT_TYPE_NONE) {
 		ipc_entry_dealloc(space, dest_name, dest_entry);
+
+		if (dest_entry == reply_entry) {
+			reply_entry = IE_NULL;
+		}
+
+		if (dest_entry == voucher_entry) {
+			voucher_entry = IE_NULL;
+		}
+
 		dest_entry = IE_NULL;
 	}
-	if (dest_entry != reply_entry && IE_NULL != reply_entry &&
+	if (IE_NULL != reply_entry &&
 	    IE_BITS_TYPE(reply_entry->ie_bits) == MACH_PORT_TYPE_NONE) {
 		ipc_entry_dealloc(space, reply_name, reply_entry);
 		reply_entry = IE_NULL;
 	}
-	if (dest_entry != voucher_entry && IE_NULL != voucher_entry &&
+	if (IE_NULL != voucher_entry &&
 	    IE_BITS_TYPE(voucher_entry->ie_bits) == MACH_PORT_TYPE_NONE) {
 		ipc_entry_dealloc(space, voucher_name, voucher_entry);
 		voucher_entry = IE_NULL;
@@ -2504,12 +2579,12 @@ ipc_kmsg_copyin_header(
 		voucher_type = MACH_MSG_TYPE_MOVE_SEND;
 	}
 
-	/* capture the qos value(s) for the kmsg */
-	ipc_kmsg_set_qos(kmsg, *optionp, override);
-
 	msg->msgh_bits = MACH_MSGH_BITS_SET(dest_type, reply_type, voucher_type, mbits);
 	msg->msgh_remote_port = (ipc_port_t)dest_port;
 	msg->msgh_local_port = (ipc_port_t)reply_port;
+
+	/* capture the qos value(s) for the kmsg */
+	ipc_kmsg_set_qos(kmsg, *optionp, override);
 
 	if (release_port != IP_NULL)
 		ip_release(release_port);
@@ -2777,14 +2852,24 @@ ipc_kmsg_copyin_ool_ports_descriptor(
     result_disp = ipc_object_copyin_type(user_disp);
     dsc->disposition = result_disp;
 
-    if (count > (INT_MAX / sizeof(mach_port_t))) {
-        *mr = MACH_SEND_TOO_LARGE;
+    /* We always do a 'physical copy', but you have to specify something valid */
+    if (copy_option != MACH_MSG_PHYSICAL_COPY &&
+        copy_option != MACH_MSG_VIRTUAL_COPY) {
+        *mr = MACH_SEND_INVALID_TYPE;
         return NULL;
     }
 
     /* calculate length of data in bytes, rounding up */
-    ports_length = count * sizeof(mach_port_t);
-    names_length = count * sizeof(mach_port_name_t);
+
+    if (os_mul_overflow(count, sizeof(mach_port_t), &ports_length)) {
+        *mr = MACH_SEND_TOO_LARGE;
+        return NULL;
+    }
+
+    if (os_mul_overflow(count, sizeof(mach_port_name_t), &names_length)) {
+        *mr = MACH_SEND_TOO_LARGE;
+        return NULL;
+    }
 
     if (ports_length == 0) {
         return user_dsc;
@@ -2896,6 +2981,8 @@ ipc_kmsg_copyin_body(
 
     vm_size_t           descriptor_size = 0;
 
+    mach_msg_type_number_t total_ool_port_count = 0;
+
     /*
      * Determine if the target is a kernel port.
      */
@@ -2915,6 +3002,7 @@ ipc_kmsg_copyin_body(
     daddr = NULL;
     for (i = 0; i < dsc_count; i++) {
 	mach_msg_size_t size;
+	mach_msg_type_number_t ool_port_count = 0;
 
 	daddr = naddr;
 
@@ -2939,9 +3027,8 @@ ipc_kmsg_copyin_body(
 
 	if (naddr > (mach_msg_descriptor_t *)
 	    ((vm_offset_t)kmsg->ikm_header + kmsg->ikm_header->msgh_size)) {
-	    ipc_kmsg_clean_partial(kmsg, 0, NULL, 0, 0);
-	    mr = MACH_SEND_MSG_TOO_SMALL;
-	    goto out;
+		mr = MACH_SEND_MSG_TOO_SMALL;
+		goto clean_message;
 	}
 
 	switch (daddr->type.type) {
@@ -2956,11 +3043,10 @@ ipc_kmsg_copyin_body(
 		/*
 		 * Invalid copy option
 		 */
-		ipc_kmsg_clean_partial(kmsg, 0, NULL, 0, 0);
 		mr = MACH_SEND_INVALID_TYPE;
-		goto out;
+		goto clean_message;
 	    }
-	    
+
 	    if ((size >= MSG_OOL_SIZE_SMALL) &&
 		(daddr->out_of_line.copy == MACH_MSG_PHYSICAL_COPY) &&
 		!(daddr->out_of_line.deallocate)) {
@@ -2970,25 +3056,51 @@ ipc_kmsg_copyin_body(
 		 * memory requirements
 		 */
 		if (space_needed + round_page(size) <= space_needed) {
-		    /* Overflow dectected */
-		    ipc_kmsg_clean_partial(kmsg, 0, NULL, 0, 0);
-		    mr = MACH_MSG_VM_KERNEL;
-		    goto out;
-		}		    
-		    
+			/* Overflow dectected */
+			mr = MACH_MSG_VM_KERNEL;
+			goto clean_message;
+		}
+
 		space_needed += round_page(size);
 		if (space_needed > ipc_kmsg_max_vm_space) {
-		    
-		    /*
-		     * Per message kernel memory limit exceeded
-		     */
-		    ipc_kmsg_clean_partial(kmsg, 0, NULL, 0, 0);
+		    /* Per message kernel memory limit exceeded */
 		    mr = MACH_MSG_VM_KERNEL;
-		    goto out;
+		    goto clean_message;
 		}
 	    }
+	    break;
+	case MACH_MSG_PORT_DESCRIPTOR:
+		if (os_add_overflow(total_ool_port_count, 1, &total_ool_port_count)) {
+			/* Overflow detected */
+			mr = MACH_SEND_TOO_LARGE;
+			goto clean_message;
+		}
+		break;
+	case MACH_MSG_OOL_PORTS_DESCRIPTOR:
+		ool_port_count = (is_task_64bit) ?
+		        ((mach_msg_ool_ports_descriptor64_t *)daddr)->count :
+		        daddr->ool_ports.count;
+
+		if (os_add_overflow(total_ool_port_count, ool_port_count, &total_ool_port_count)) {
+			/* Overflow detected */
+			mr = MACH_SEND_TOO_LARGE;
+			goto clean_message;
+		}
+
+		if (ool_port_count > (ipc_kmsg_max_vm_space/sizeof(mach_port_t))) {
+			/* Per message kernel memory limit exceeded */
+			mr = MACH_SEND_TOO_LARGE;
+			goto clean_message;
+		}
+		break;
 	}
     }
+
+	/* Sending more than 16383 rights in one message seems crazy */
+	if (total_ool_port_count >= (MACH_PORT_UREFS_MAX / 4)) {
+		mr = MACH_SEND_TOO_LARGE;
+		goto clean_message;
+	}
 
     /*
      * Allocate space in the pageable kernel ipc copy map for all the
@@ -2996,11 +3108,10 @@ ipc_kmsg_copyin_body(
      * space.
      */
     if (space_needed) {
-        if (vm_allocate(ipc_kernel_copy_map, &paddr, space_needed, 
-                    VM_FLAGS_ANYWHERE | VM_MAKE_TAG(VM_KERN_MEMORY_IPC)) != KERN_SUCCESS) {
-            ipc_kmsg_clean_partial(kmsg, 0, NULL, 0, 0);
+        if (vm_allocate_kernel(ipc_kernel_copy_map, &paddr, space_needed,
+                    VM_FLAGS_ANYWHERE, VM_KERN_MEMORY_IPC) != KERN_SUCCESS) {
             mr = MACH_MSG_VM_KERNEL;
-            goto out;
+            goto clean_message;
         }
     }
 
@@ -3064,6 +3175,11 @@ ipc_kmsg_copyin_body(
     }
  out:
     return mr;
+
+clean_message:
+	/* no descriptors have been copied in yet */
+	ipc_kmsg_clean_partial(kmsg, 0, NULL, 0, 0);
+	return mr;
 }
 
 
@@ -3876,6 +3992,7 @@ ipc_kmsg_copyout_port_descriptor(mach_msg_descriptor_t *dsc,
     {
         mach_msg_port_descriptor_t *user_dsc = (typeof(user_dsc))dest_dsc;
         user_dsc--; // point to the start of this port descriptor
+        bzero((void *)user_dsc, sizeof(*user_dsc));
         user_dsc->name = CAST_MACH_NAME_TO_PORT(name);
         user_dsc->disposition = disp;
         user_dsc->type = MACH_MSG_PORT_DESCRIPTOR;
@@ -3883,6 +4000,7 @@ ipc_kmsg_copyout_port_descriptor(mach_msg_descriptor_t *dsc,
     } else {
         mach_msg_legacy_port_descriptor_t *user_dsc = (typeof(user_dsc))dest_dsc;
         user_dsc--; // point to the start of this port descriptor
+        bzero((void *)user_dsc, sizeof(*user_dsc));
         user_dsc->name = CAST_MACH_PORT_TO_NAME(name);
         user_dsc->disposition = disp;
         user_dsc->type = MACH_MSG_PORT_DESCRIPTOR;
@@ -3943,6 +4061,7 @@ ipc_kmsg_copyout_ool_descriptor(mach_msg_ool_descriptor_t *dsc, mach_msg_descrip
     {
         mach_msg_ool_descriptor_t *user_ool_dsc = (typeof(user_ool_dsc))user_dsc;
         user_ool_dsc--;
+        bzero((void *)user_ool_dsc, sizeof(*user_ool_dsc));
 
         user_ool_dsc->address = (void *)(uintptr_t)rcv_addr;
         user_ool_dsc->deallocate = (copy_options == MACH_MSG_VIRTUAL_COPY) ?
@@ -3955,6 +4074,7 @@ ipc_kmsg_copyout_ool_descriptor(mach_msg_ool_descriptor_t *dsc, mach_msg_descrip
     } else if (is_64bit) {
         mach_msg_ool_descriptor64_t *user_ool_dsc = (typeof(user_ool_dsc))user_dsc;
         user_ool_dsc--;
+        bzero((void *)user_ool_dsc, sizeof(*user_ool_dsc));
 
         user_ool_dsc->address = rcv_addr;
         user_ool_dsc->deallocate = (copy_options == MACH_MSG_VIRTUAL_COPY) ?
@@ -3967,6 +4087,7 @@ ipc_kmsg_copyout_ool_descriptor(mach_msg_ool_descriptor_t *dsc, mach_msg_descrip
     } else {
         mach_msg_ool_descriptor32_t *user_ool_dsc = (typeof(user_ool_dsc))user_dsc;
         user_ool_dsc--;
+        bzero((void *)user_ool_dsc, sizeof(*user_ool_dsc));
 
         user_ool_dsc->address = CAST_DOWN_EXPLICIT(uint32_t, rcv_addr);
         user_ool_dsc->size = (mach_msg_size_t)size;
@@ -4041,14 +4162,14 @@ ipc_kmsg_copyout_ool_ports_descriptor(mach_msg_ool_ports_descriptor_t *dsc,
             /*
              * Dynamically allocate the region
              */
-            int anywhere = VM_FLAGS_ANYWHERE;
-	    if (vm_kernel_map_is_kernel(map)) anywhere |= VM_MAKE_TAG(VM_KERN_MEMORY_IPC);
-	    else                              anywhere |= VM_MAKE_TAG(VM_MEMORY_MACH_MSG);
+            vm_tag_t tag;
+	    if (vm_kernel_map_is_kernel(map)) tag = VM_KERN_MEMORY_IPC;
+	    else                              tag = VM_MEMORY_MACH_MSG;
 
             kern_return_t kr;
-            if ((kr = mach_vm_allocate(map, &rcv_addr, 
+            if ((kr = mach_vm_allocate_kernel(map, &rcv_addr,
                             (mach_vm_size_t)names_length,
-                            anywhere)) != KERN_SUCCESS) {
+                            VM_FLAGS_ANYWHERE, tag)) != KERN_SUCCESS) {
                 ipc_kmsg_clean_body(kmsg, 1, (mach_msg_descriptor_t *)dsc);
                 rcv_addr = 0;
 
@@ -4094,6 +4215,7 @@ ipc_kmsg_copyout_ool_ports_descriptor(mach_msg_ool_ports_descriptor_t *dsc,
     if(current_task() == kernel_task) {
         mach_msg_ool_ports_descriptor_t *user_ool_dsc = (typeof(user_ool_dsc))user_dsc;
         user_ool_dsc--;
+        bzero((void *)user_ool_dsc, sizeof(*user_ool_dsc));
 
         user_ool_dsc->address = (void *)(uintptr_t)rcv_addr;
         user_ool_dsc->deallocate = (copy_options == MACH_MSG_VIRTUAL_COPY) ?
@@ -4107,6 +4229,7 @@ ipc_kmsg_copyout_ool_ports_descriptor(mach_msg_ool_ports_descriptor_t *dsc,
     } if (is_64bit) {
         mach_msg_ool_ports_descriptor64_t *user_ool_dsc = (typeof(user_ool_dsc))user_dsc;
         user_ool_dsc--;
+        bzero((void *)user_ool_dsc, sizeof(*user_ool_dsc));
 
         user_ool_dsc->address = rcv_addr;
         user_ool_dsc->deallocate = (copy_options == MACH_MSG_VIRTUAL_COPY) ?
@@ -4120,6 +4243,7 @@ ipc_kmsg_copyout_ool_ports_descriptor(mach_msg_ool_ports_descriptor_t *dsc,
     } else {
         mach_msg_ool_ports_descriptor32_t *user_ool_dsc = (typeof(user_ool_dsc))user_dsc;
         user_ool_dsc--;
+        bzero((void *)user_ool_dsc, sizeof(*user_ool_dsc));
 
         user_ool_dsc->address = CAST_DOWN_EXPLICIT(uint32_t, rcv_addr);
         user_ool_dsc->count = count;
@@ -4352,6 +4476,9 @@ ipc_kmsg_copyout_pseudo(
 	mach_port_name_t voucher_name = kmsg->ikm_header->msgh_voucher_port;
 	mach_port_name_t dest_name, reply_name;
 	mach_msg_return_t mr;
+
+	/* Set ith_knote to ITH_KNOTE_PSEUDO */
+	current_thread()->ith_knote = ITH_KNOTE_PSEUDO;
 
 	assert(IO_VALID(dest));
 
@@ -4633,6 +4760,28 @@ ipc_kmsg_copyout_to_kernel_legacy(
 }
 #endif /* IKM_SUPPORT_LEGACY */
 
+#ifdef __arm64__
+/*
+ * Just sets those parts of the trailer that aren't set up at allocation time.
+ */
+static void
+ipc_kmsg_munge_trailer(mach_msg_max_trailer_t *in, void *_out, boolean_t is64bit) 
+{
+	if (is64bit) {
+		mach_msg_max_trailer64_t *out = (mach_msg_max_trailer64_t*)_out;
+		out->msgh_seqno = in->msgh_seqno;
+		out->msgh_context = in->msgh_context;
+		out->msgh_trailer_size = in->msgh_trailer_size;
+		out->msgh_ad = in->msgh_ad;
+	} else {
+		mach_msg_max_trailer32_t *out = (mach_msg_max_trailer32_t*)_out;
+		out->msgh_seqno = in->msgh_seqno;
+		out->msgh_context = (mach_port_context32_t)in->msgh_context;
+		out->msgh_trailer_size = in->msgh_trailer_size;
+		out->msgh_ad = in->msgh_ad;
+	}
+}
+#endif /* __arm64__ */
 
 mach_msg_trailer_size_t
 ipc_kmsg_add_trailer(ipc_kmsg_t kmsg, ipc_space_t space __unused, 
@@ -4642,10 +4791,25 @@ ipc_kmsg_add_trailer(ipc_kmsg_t kmsg, ipc_space_t space __unused,
 {
 	mach_msg_max_trailer_t *trailer;
 
+#ifdef __arm64__
+	mach_msg_max_trailer_t tmp_trailer; /* This accommodates U64, and we'll munge */
+	void *real_trailer_out = (void*)(mach_msg_max_trailer_t *)
+		((vm_offset_t)kmsg->ikm_header +
+		 round_msg(kmsg->ikm_header->msgh_size));
+
+	/* 
+	 * Populate scratch with initial values set up at message allocation time.
+	 * After, we reinterpret the space in the message as the right type 
+	 * of trailer for the address space in question.
+	 */
+	bcopy(real_trailer_out, &tmp_trailer, MAX_TRAILER_SIZE);
+	trailer = &tmp_trailer;
+#else /* __arm64__ */
 	(void)thread;
 	trailer = (mach_msg_max_trailer_t *)
 		((vm_offset_t)kmsg->ikm_header +
 		 round_msg(kmsg->ikm_header->msgh_size));
+#endif /* __arm64__ */
 
 	if (!(option & MACH_RCV_TRAILER_MASK)) {
 		return trailer->msgh_trailer_size;
@@ -4675,6 +4839,9 @@ ipc_kmsg_add_trailer(ipc_kmsg_t kmsg, ipc_space_t space __unused,
 	}
 
 done:
+#ifdef __arm64__
+	ipc_kmsg_munge_trailer(trailer, real_trailer_out, thread_is_64bit(thread));
+#endif /* __arm64__ */
 
 	return trailer->msgh_trailer_size;
 }

@@ -98,7 +98,6 @@ __END_DECLS
  * PFDL = Process File Desc Lock
  * PUCL = Process User Credentials Lock
  * PSL = Process Spin Lock
- * PPL = Parent Process Lock (planed for later usage)
  * LL = List Lock
  * SL = Session Lock
 */
@@ -255,6 +254,7 @@ struct	proc {
 
 	pid_t		p_oppid;	 	/* Save parent pid during ptrace. XXX */
 	u_int		p_xstat;		/* Exit status for wait; also stop signal. */
+	uint8_t p_xhighbits;		/* Stores the top byte of exit status to avoid truncation*/
 
 #ifdef _PROC_HAS_SCHEDINFO_
 	/* may need cleanup, not used */
@@ -318,10 +318,6 @@ struct	proc {
 	char	p_nice;		/* Process "nice" value.(PL) */
 	u_char	p_resv1;	/* (NU) User-priority based on p_cpu and p_nice. */
 
-#if CONFIG_MACF
-	int	p_mac_enforce;			/* MAC policy enforcement control */
-#endif
-
 	// types currently in sys/param.h
 	command_t   p_comm;
 	proc_name_t p_name;	/* can be changed by the process */
@@ -364,7 +360,6 @@ struct	proc {
 	uint32_t	p_pth_tsd_offset;	/* offset from pthread_t to TSD for new threads */
 	user_addr_t	p_stack_addr_hint;	/* stack allocation hint for wq threads */
 	void * 	p_wqptr;			/* workq ptr */
-	struct kqueue * p_wqkqueue;             /* private workq kqueue */
 
 	struct  timeval p_start;        	/* starting time */
 	void *	p_rcall;
@@ -384,6 +379,8 @@ struct	proc {
 #endif /* DIAGNOSTIC */
 	uint64_t	p_dispatchqueue_offset;
 	uint64_t	p_dispatchqueue_serialno_offset;
+	uint64_t	p_return_to_kernel_offset;
+	uint64_t	p_mach_thread_self_offset;
 #if VM_PRESSURE_EVENTS
 	struct timeval	vm_pressure_last_notify_tstamp;
 #endif
@@ -409,6 +406,7 @@ struct	proc {
 
 	/* cached proc-specific data required for corpse inspection */
 	pid_t             p_responsible_pid;	/* pid resonsible for this process */
+	_Atomic uint32_t  p_user_faults; /* count the number of user faults generated */
 
 	struct os_reason     *p_exit_reason;
 };
@@ -434,7 +432,8 @@ struct	proc {
 #define P_LIST_INPGRP	 		0x00020000	/* process is in pgrp */
 #define P_LIST_PGRPTRANS 		0x00040000	/* pgrp is getting replaced */
 #define P_LIST_PGRPTRWAIT 		0x00080000	/* wait for pgrp replacement */
-#define P_LIST_EXITCOUNT 		0x00100000	/* counted for process exit */ 
+#define P_LIST_EXITCOUNT 		0x00100000	/* counted for process exit */
+#define P_LIST_REFWAIT   		0x00200000	/* wait to take a ref */
  
 
 /* local flags */
@@ -459,11 +458,9 @@ struct	proc {
 #define	P_LLIMWAIT	0x00040000
 #define P_LWAITED   	0x00080000 
 #define P_LINSIGNAL    	0x00100000 
-#define P_LRETURNWAIT  	0x00200000 	/* process is completing spawn/vfork-exec/fork */
 #define P_LRAGE_VNODES	0x00400000
 #define P_LREGISTER	0x00800000	/* thread start fns registered  */
 #define P_LVMRSRCOWNER	0x01000000	/* can handle the resource ownership of  */
-#define P_LRETURNWAITER 0x02000000	/* thread is waiting on P_LRETURNWAIT being cleared */
 #define P_LTERM_DECRYPTFAIL	0x04000000	/* process terminating due to key failure to decrypt */
 #define	P_LTERM_JETSAM		0x08000000	/* process is being jetsam'd */
 #define P_JETSAM_VMPAGESHORTAGE	0x00000000	/* jetsam: lowest jetsam priority proc, killed due to vm page shortage */
@@ -487,6 +484,10 @@ struct	proc {
 #define PROC_ACTION_STATE(p) ((p->p_pcaction >> 16) & P_PCMAX)
 #define PROC_SETACTION_STATE(p) (p->p_pcaction = (PROC_CONTROL_STATE(p) | (PROC_CONTROL_STATE(p) << 16)))
 #define PROC_RESETACTION_STATE(p) (p->p_pcaction = PROC_CONTROL_STATE(p))
+
+/* Process exit reason macros */
+#define PROC_HAS_EXITREASON(p) (p->p_exit_reason != OS_REASON_NULL)
+#define PROC_EXITREASON_FLAGS(p) p->p_exit_reason->osr_flags
 
 /* additional process flags */
 #define P_LADVLOCK		0x01
@@ -512,7 +513,9 @@ struct	proc {
 /* This packing breaks symmetry with userspace side (struct extern_proc 
  * of proc.h) for the ARMV7K ABI where 64-bit types are 64-bit aligned
  */
+#if !(__arm__ && (__BIGGEST_ALIGNMENT__ > 4))
 #pragma pack(4)
+#endif
 struct user32_extern_proc {
 	union {
 		struct {
@@ -652,9 +655,11 @@ extern LIST_HEAD(sesshashhead, session) *sesshashtbl;
 extern u_long sesshash;
 
 extern lck_grp_t * proc_lck_grp;
+extern lck_grp_t * proc_fdmlock_grp;
+extern lck_grp_t * proc_kqhashlock_grp;
+extern lck_grp_t * proc_knhashlock_grp;
 #if CONFIG_FINE_LOCK_GROUPS
 extern lck_grp_t * proc_mlock_grp;
-extern lck_grp_t * proc_fdmlock_grp;
 extern lck_grp_t * proc_ucred_mlock_grp;
 extern lck_grp_t * proc_slock_grp;
 #endif
@@ -713,6 +718,8 @@ extern void proc_reparentlocked(struct proc *child, struct proc * newparent, int
 extern proc_t proc_findinternal(int pid, int locked);
 extern proc_t proc_findthread(thread_t thread);
 extern void proc_refdrain(proc_t);
+extern proc_t proc_refdrain_with_refwait(proc_t p, boolean_t get_ref_and_allow_wait);
+extern void proc_refwake(proc_t p);
 extern void proc_childdrainlocked(proc_t);
 extern void proc_childdrainstart(proc_t);
 extern void proc_childdrainend(proc_t);
@@ -766,10 +773,6 @@ void psynch_wq_cleanup(__unused void *  param, __unused void * param1);
 extern lck_mtx_t * pthread_list_mlock;
 #endif /* PSYNCH */
 struct uthread * current_uthread(void);
-
-void proc_set_return_wait(struct proc *);
-void proc_clear_return_wait(proc_t p, thread_t child_thread);
-void proc_wait_to_return(void);
 
 /* process iteration */
 

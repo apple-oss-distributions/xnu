@@ -148,7 +148,7 @@ kern_ioctl_file_extents(struct kern_direct_file_io_ref_t * ref, u_long theIoctl,
 	    if (filechunk > (size_t)(end - offset))
 	    filechunk = (size_t)(end - offset);
             error = VNOP_BLOCKMAP(ref->vp, offset, filechunk, &blkno,
-								  &filechunk, NULL, VNODE_WRITE, NULL);
+								  &filechunk, NULL, VNODE_WRITE | VNODE_BLOCKMAP_NO_TRACK, NULL);
             if (error) break;
             if (-1LL == blkno) continue;
             fileblk = blkno * ref->blksize;
@@ -251,7 +251,7 @@ kern_open_file_for_direct_io(const char * name,
 
     bzero(ref, sizeof(*ref));
     p = kernproc;
-    ref->ctx = vfs_context_create(vfs_context_kernel());
+    ref->ctx = vfs_context_kernel();
 
     fmode  = (create_file) ? (O_CREAT | FWRITE) : FWRITE;
     cmode =  S_IRUSR | S_IWUSR;
@@ -261,7 +261,10 @@ kern_open_file_for_direct_io(const char * name,
     VATTR_SET(&va, va_mode, cmode);
     VATTR_SET(&va, va_dataprotect_flags, VA_DP_RAWENCRYPTED);
     VATTR_SET(&va, va_dataprotect_class, PROTECTION_CLASS_D);
-    if ((error = vn_open_auth(&nd, &fmode, &va))) goto out;
+    if ((error = vn_open_auth(&nd, &fmode, &va))) {
+	kprintf("vn_open_auth(fmode: %d, cmode: %d) failed with error: %d\n", fmode, cmode, error);
+	goto out;
+    }
 
     ref->vp = nd.ni_vp;
     if (ref->vp->v_type == VREG)
@@ -273,7 +276,10 @@ kern_open_file_for_direct_io(const char * name,
 
     if (write_file_addr && write_file_len)
     {
-	if ((error = kern_write_file(ref, write_file_offset, write_file_addr, write_file_len, 0))) goto out;
+	if ((error = kern_write_file(ref, write_file_offset, write_file_addr, write_file_len, IO_SKIP_ENCRYPTION))) {
+		kprintf("kern_write_file() failed with error: %d\n", error);
+		goto out;
+	}
     }
 
     VATTR_INIT(&va);
@@ -376,7 +382,7 @@ kern_open_file_for_direct_io(const char * name,
             daddr64_t blkno;
 
             error = VNOP_BLOCKMAP(ref->vp, f_offset, filechunk, &blkno,
-								  &filechunk, NULL, VNODE_WRITE, NULL);
+								  &filechunk, NULL, VNODE_WRITE | VNODE_BLOCKMAP_NO_TRACK, NULL);
             if (error) goto out;
             if (-1LL == blkno) continue;
             fileblk = blkno * ref->blksize;
@@ -508,12 +514,12 @@ kern_open_file_for_direct_io(const char * name,
     {
         vnode_close(ref->vp, FWRITE, ref->ctx);
         ref->vp = NULLVP;
-	vfs_context_rele(ref->ctx);
 	ref->ctx = NULL;
     }
 
 out:
-    printf("kern_open_file_for_direct_io(%d)\n", error);
+    printf("kern_open_file_for_direct_io(%p, %d)\n", ref, error);
+
 
     if (error && locked)
     {
@@ -529,7 +535,7 @@ out:
 	    vnode_close(ref->vp, FWRITE, ref->ctx);
 	    ref->vp = NULLVP;
 	}
-	vfs_context_rele(ref->ctx);
+	ref->ctx = NULL;
 	kfree(ref, sizeof(struct kern_direct_file_io_ref_t));
 	ref = NULL;
     }
@@ -570,7 +576,7 @@ kern_close_file_for_direct_io(struct kern_direct_file_io_ref_t * ref,
 			      off_t discard_offset, off_t discard_end)
 {
     int error;
-    kprintf("kern_close_file_for_direct_io\n");
+    printf("kern_close_file_for_direct_io(%p)\n", ref);
 
     if (!ref) return;
 
@@ -612,18 +618,17 @@ kern_close_file_for_direct_io(struct kern_direct_file_io_ref_t * ref,
 
         if (addr && write_length)
         {
-            (void) kern_write_file(ref, write_offset, addr, write_length, 0);
+            (void) kern_write_file(ref, write_offset, addr, write_length, IO_SKIP_ENCRYPTION);
         }
 
         error = vnode_close(ref->vp, FWRITE, ref->ctx);
 
         ref->vp = NULLVP;
         kprintf("vnode_close(%d)\n", error);
+
     }
-    if (ref->ctx)
-    {
-	vfs_context_rele(ref->ctx);
-	ref->ctx = NULL;
-    }
+
+    ref->ctx = NULL;
+
     kfree(ref, sizeof(struct kern_direct_file_io_ref_t));
 }

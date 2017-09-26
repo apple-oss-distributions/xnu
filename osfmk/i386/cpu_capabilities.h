@@ -73,10 +73,20 @@
 #define	kHasADX			0x0000000400000000ULL
 #define	kHasMPX			0x0000001000000000ULL
 #define	kHasSGX			0x0000002000000000ULL
+#if !defined(RC_HIDE_XNU_J137)
+#define	kHasAVX512F		0x0000004000000000ULL
+#define	kHasAVX512CD		0x0000008000000000ULL
+#define	kHasAVX512DQ		0x0000010000000000ULL
+#define	kHasAVX512BW		0x0000020000000000ULL
+#define	kHasAVX512IFMA		0x0000040000000000ULL
+#define	kHasAVX512VBMI		0x0000080000000000ULL
+#define	kHasAVX512VL		0x0000100000000000ULL
+#endif /* not RC_HIDE_XNU_J137 */
 
 
 #ifndef	__ASSEMBLER__
 #include <sys/cdefs.h>
+#include <sys/commpage.h>
 
 __BEGIN_DECLS
 extern uint64_t  _get_cpu_capabilities( void );
@@ -208,6 +218,7 @@ int _NumCPUs( void )
 /* Align following entries to next cache line */
 #define _COMM_PAGE_CONT_TIMEBASE	(_COMM_PAGE_START_ADDRESS+0x0C0)	/* used by mach_continuous_time() */
 #define _COMM_PAGE_BOOTTIME_USEC	(_COMM_PAGE_START_ADDRESS+0x0C8)	/* uint64_t boottime */
+#define _COMM_PAGE_NEWTIMEOFDAY_DATA	(_COMM_PAGE_START_ADDRESS+0x0D0) 	/* used by gettimeofday(). Currently, sizeof(new_commpage_timeofday_data_t) = 40*/
 
 #define _COMM_PAGE_END			(_COMM_PAGE_START_ADDRESS+0xfff)	/* end of common page */
 
@@ -241,15 +252,17 @@ int _NumCPUs( void )
 
 #define _COMM_TEXT_PREEMPT_OFFSET		(0x5a0)	/* called from withing pfz */
 #define _COMM_TEXT_BACKOFF_OFFSET		(0x600)	/* called from PFZ */
+#define _COMM_TEXT_RET_OFFSET			(0x680)	/* called from PFZ */
 #define _COMM_TEXT_PFZ_START_OFFSET		(0xc00)	/* offset for Preemption Free Zone */
 #define _COMM_TEXT_PFZ_ENQUEUE_OFFSET		(0xc00)	/* internal FIFO enqueue */
 #define _COMM_TEXT_PFZ_DEQUEUE_OFFSET		(0xc80)	/* internal FIFO dequeue */
-#define _COMM_TEXT_UNUSED_OFFSET		(0xd80)	/* end of routines in text page */
-#define _COMM_TEXT_PFZ_END_OFFSET		(0xfff)	/* offset for end of PFZ */
+#define _COMM_TEXT_UNUSED_OFFSET		(0xd00)	/* end of routines in text page */
+#define _COMM_TEXT_PFZ_END_OFFSET		(0xd00)	/* offset for end of PFZ */
 
 
 #define _COMM_PAGE_PREEMPT		(_COMM_PAGE_TEXT_START+_COMM_TEXT_PREEMPT_OFFSET)
 #define _COMM_PAGE_BACKOFF		(_COMM_PAGE_TEXT_START+_COMM_TEXT_BACKOFF_OFFSET)	
+#define _COMM_PAGE_RET			(_COMM_PAGE_TEXT_START+_COMM_TEXT_RET_OFFSET)	
 
 #define _COMM_PAGE_PFZ_START		(_COMM_PAGE_TEXT_START+_COMM_PAGE_PFZ_START_OFFSET)
 

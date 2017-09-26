@@ -391,7 +391,7 @@ public:
     *
     * @abstract
     * Deallocates or releases any resources
-    * used by the OSDictionary instance.
+    * used by the OSData instance.
     *
     * @discussion
     * This function should not be called directly;
@@ -751,6 +751,7 @@ private:
 #endif
     virtual void setDeallocFunction(DeallocFunction func);
     OSMetaClassDeclareReservedUsed(OSData, 0);
+    bool isSerializable(void);
 
 private:
     OSMetaClassDeclareReservedUnused(OSData, 1);

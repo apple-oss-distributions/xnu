@@ -41,6 +41,7 @@ include $(MakeInc_def)
 CFLAGS+= -include meta_features.h -DDRIVER_PRIVATE \
 	-D_KERNEL_BUILD -DKERNEL_BUILD -DMACH_KERNEL -DBSD_BUILD \
 	-DBSD_KERNEL_PRIVATE -DLP64_DEBUG=0
+SFLAGS+= -include meta_features.h
 
 #
 # Directories for mig generated files
@@ -82,8 +83,6 @@ vm_unix.o_CFLAGS_ADD			+= -Wshorten-64-to-32
 pthread_synch.o_CFLAGS_ADD		+= -Wno-unused-parameter -Wno-missing-prototypes
 pthread_support.o_CFLAGS_ADD		+= -Wno-unused-parameter -Wno-missing-prototypes
 
-ip_icmp.o_CFLFAGS_ADD		+= -O0
-
 # Objects that don't want -Wsign-compare
 OBJS_NO_SIGN_COMPARE =		\
 		radix.o	\
@@ -115,6 +114,7 @@ OBJS_NO_SIGN_COMPARE =		\
 		esp_input.o	\
 		esp_output.o	\
 		esp_rijndael.o	\
+		esp_chachapoly.o	\
 		ipsec.o	\
 		dest6.o	\
 		frag6.o	\
@@ -224,6 +224,41 @@ OBJS_NO_CAST_ALIGN =			\
 
 $(foreach file,$(OBJS_NO_CAST_ALIGN),$(eval $(call add_perfile_cflags,$(file),-Wno-cast-align)))
 
+# Relax -Waddress-of-packed-member on networking (28123676)
+OBJS_NO_PACKED_ADDRESS =    \
+		ah_core.o           \
+		ah_input.o          \
+		esp_input.o         \
+		esp_output.o        \
+		frag6.o             \
+		icmp6.o             \
+		if_stf.o            \
+		in6_cksum.o         \
+		in6_gif.o           \
+		ip6_forward.o       \
+		ip6_input.o         \
+		ip6_output.o        \
+		iptap.o	            \
+		ipsec.o             \
+		mld6.o              \
+		mptcp_opt.o         \
+		nd6.o               \
+		nd6_nbr.o           \
+		nd6_prproxy.o       \
+		nd6_rtr.o           \
+		necp.o              \
+		pf.o                \
+		pf_norm.o           \
+		pktap.o             \
+		raw_ip6.o           \
+		tcp_input.o         \
+		tcp_subr.o          \
+		udp6_output.o       \
+		udp6_usrreq.o       \
+		udp_usrreq.o
+
+$(foreach file,$(OBJS_NO_PACKED_ADDRESS),$(eval $(call add_perfile_cflags,$(file),-Wno-address-of-packed-member)))
+
 #
 # This rule insures that the subr_prof.c does NOT get compiled with
 # profiling. It implements mcount() and profiling it leads to recursion.
@@ -264,6 +299,10 @@ syscalls.c: $(SRCROOT)/bsd/kern/syscalls.master $(MAKESYSCALLS)
 audit_kevents.c: $(SRCROOT)/bsd/kern/syscalls.master $(MAKESYSCALLS)
 	@echo "[$(CMD_MC)] $(ColorH)GENERATING$(Color0) $(ColorLF)$@$(Color0) from $(ColorF)$<$(Color0)";
 	$(_v)$(MAKESYSCALLS) $< audit > /dev/null
+
+systrace_args.c:  $(SRCROOT)/bsd/kern/syscalls.master $(MAKESYSCALLS)
+	@echo "[$(CMD_MC)] $(ColorH)GENERATING$(Color0) $(ColorLF)$@$(Color0) from $(ColorF)$<$(Color0)";
+	$(_v)$(MAKESYSCALLS) $< systrace > /dev/null
 
 do_all: $(COMPONENT).filelist
 

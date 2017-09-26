@@ -96,6 +96,8 @@ struct cl_writebehind {
 
 struct cs_hash;
 
+uint8_t cs_hash_type(struct cs_hash const *);
+
 struct cs_blob {
 	struct cs_blob	*csb_next;
 	cpu_type_t	csb_cpu_type;
@@ -107,7 +109,7 @@ struct cs_blob {
 	vm_offset_t	csb_mem_offset;
 	vm_address_t	csb_mem_kaddr;
 	unsigned char	csb_cdhash[CS_CDHASH_LEN];
-	struct cs_hash  *csb_hashtype;
+	const struct cs_hash  *csb_hashtype;
 	vm_size_t	csb_hash_pagesize;	/* each hash entry represent this many bytes in the file */
 	vm_size_t	csb_hash_pagemask;
 	vm_size_t	csb_hash_pageshift;
@@ -116,6 +118,9 @@ struct cs_blob {
 	const char 	*csb_teamid;
 	const CS_GenericBlob *csb_entitlements_blob;	/* raw blob, subrange of csb_mem_kaddr */
 	void *          csb_entitlements;	/* The entitlements as an OSDictionary */
+	unsigned int	csb_signer_type;
+
+	/* The following two will be replaced by the csb_signer_type. */
 	unsigned int	csb_platform_binary:1;
 	unsigned int	csb_platform_path:1;
 };

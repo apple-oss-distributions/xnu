@@ -196,7 +196,7 @@
 #endif
 
 #ifdef PRIVATE
-#define	SO_EXECPATH	0x1085 		/* Application Firewall Socket option */
+#define	SO_EXECPATH	0x1085		/* Application Firewall Socket option */
 
 /*
  * Traffic service class definitions (lowest to highest):
@@ -324,13 +324,11 @@
 #define	SO_DELEGATED_UUID	0x1108	/* set socket as delegate (uuid_t) */
 #define	SO_NECP_ATTRIBUTES	0x1109	/* NECP socket attributes (domain, account, etc.) */
 #define	SO_CFIL_SOCK_ID		0x1110	/* get content filter socket ID (cfil_sock_id_t) */
-#if MPTCP
-#define	SO_MPTCP_FASTJOIN	0x1111	/* fast join MPTCP */
-#endif /* MPTCP */
+#define	SO_NECP_CLIENTUUID	0x1111	/* NECP Client uuid */
 #endif /* PRIVATE */
 #define	SO_NUMRCVPKT		0x1112	/* number of datagrams in receive socket buffer */
 #ifdef PRIVATE
-#define	SO_AWDL_UNRESTRICTED 	0x1113  /* try to use AWDL in restricted mode */
+#define	SO_AWDL_UNRESTRICTED	0x1113  /* try to use AWDL in restricted mode */
 #define	SO_EXTENDED_BK_IDLE	0x1114	/* extended time to keep socket idle after app is suspended (int) */
 #define	SO_MARK_CELLFALLBACK	0x1115	/* Mark as initiated by cell fallback */
 #endif /* PRIVATE */
@@ -469,6 +467,7 @@ typedef __uint32_t sae_connid_t;
 /* connectx() flag parameters */
 #define	CONNECT_RESUME_ON_READ_WRITE	0x1 /* resume connect() on read/write */
 #define	CONNECT_DATA_IDEMPOTENT		0x2 /* data is idempotent */
+#define	CONNECT_DATA_AUTHENTICATED	0x4 /* data includes security that replaces the TFO-cookie */
 
 /* sockaddr endpoints */
 typedef struct sa_endpoints {
@@ -627,24 +626,6 @@ struct sockaddr_storage {
 	__int64_t	__ss_align;	/* force structure storage alignment */
 	char			__ss_pad2[_SS_PAD2SIZE];
 };
-
-#ifdef BSD_KERNEL_PRIVATE
-#include <sys/queue.h>
-
-struct sockaddr_entry {
-	TAILQ_ENTRY(sockaddr_entry)	se_link;
-	struct sockaddr			*se_addr;
-	uint32_t			se_flags;
-};
-
-#define	SEF_ATTACHED		1	/* attached to sockaddr_list */
-
-struct sockaddr_list {
-	TAILQ_HEAD(, sockaddr_entry)	sl_head;
-	uint32_t			sl_cnt;
-
-};
-#endif /* BSD_KERNEL_PRIVATE */
 
 /*
  * Protocol families, same as address families for now.
@@ -1286,6 +1267,7 @@ struct so_cinforeq64 {
 
 /* valid connection info auxiliary data types */
 #define	CIAUX_TCP	0x1	/* TCP auxiliary data (conninfo_tcp_t) */
+#define	CIAUX_MPTCP	0x2	/* MPTCP auxiliary data (conninfo_mptcp_t) */
 
 /*
  * Structure for SIOC{S,G}CONNORDER
@@ -1442,8 +1424,12 @@ int	sendfile(int, int, off_t, off_t *, struct sf_hdtr *, int);
 
 #if !defined(_POSIX_C_SOURCE) || defined(_DARWIN_C_SOURCE)
 void	pfctlinput(int, struct sockaddr *);
+
+__API_AVAILABLE(macosx(10.11), ios(9.0), tvos(9.0), watchos(2.0))
 int connectx(int, const sa_endpoints_t *, sae_associd_t, unsigned int,
     const struct iovec *, unsigned int, size_t *, sae_connid_t *);
+
+__API_AVAILABLE(macosx(10.11), ios(9.0), tvos(9.0), watchos(2.0))
 int disconnectx(int, sae_associd_t, sae_connid_t);
 #endif	/* (!_POSIX_C_SOURCE || _DARWIN_C_SOURCE) */
 __END_DECLS

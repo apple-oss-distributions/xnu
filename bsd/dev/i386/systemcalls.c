@@ -95,6 +95,7 @@ unix_syscall(x86_saved_state_t *state)
 	struct uthread		*uthread;
 	x86_saved_state32_t	*regs;
 	boolean_t		is_vfork;
+	pid_t			pid;
 
 	assert(is_saved_state32(state));
 	regs = saved_state32(state);
@@ -105,9 +106,7 @@ unix_syscall(x86_saved_state_t *state)
 	thread = current_thread();
 	uthread = get_bsdthread_info(thread);
 
-#if PROC_REF_DEBUG
 	uthread_reset_proc_refcount(uthread);
-#endif
 
 	/* Get the approriate proc; may be different from task's for vfork() */
 	is_vfork = uthread->uu_flag & UT_VFORK;
@@ -180,6 +179,7 @@ unix_syscall(x86_saved_state_t *state)
 	uthread->uu_rval[1] = 0;
 	uthread->uu_flag |= UT_NOTCANCELPT;
 	uthread->syscall_code = code;
+	pid = proc_pid(p);
 
 #ifdef JOE_DEBUG
         uthread->uu_iocount = 0;
@@ -229,6 +229,12 @@ unix_syscall(x86_saved_state_t *state)
 
 	uthread->uu_flag &= ~UT_NOTCANCELPT;
 
+#if DEBUG || DEVELOPMENT
+	kern_allocation_name_t
+	prior __assert_only = thread_set_allocation_name(NULL);
+	assertf(prior == NULL, "thread_set_allocation_name(\"%s\") not cleared", kern_allocation_get_name(prior));
+#endif /* DEBUG || DEVELOPMENT */
+
 	if (__improbable(uthread->uu_lowpri_window)) {
 	        /*
 		 * task is marked as a low priority I/O type
@@ -242,7 +248,7 @@ unix_syscall(x86_saved_state_t *state)
 	if (__probable(!code_is_kdebug_trace(code)))
 		KERNEL_DEBUG_CONSTANT_IST(KDEBUG_TRACE, 
 			BSDDBG_CODE(DBG_BSD_EXCP_SC, code) | DBG_FUNC_END,
-			error, uthread->uu_rval[0], uthread->uu_rval[1], p->p_pid, 0);
+			error, uthread->uu_rval[0], uthread->uu_rval[1], pid, 0);
 
 	if (__improbable(!is_vfork && callp->sy_call == (sy_call_t *)execve && !error)) {
 		pal_execve_return(thread);
@@ -272,6 +278,7 @@ unix_syscall64(x86_saved_state_t *state)
 	struct proc	*p;
 	struct uthread	*uthread;
 	x86_saved_state64_t *regs;
+	pid_t		pid;
 
 	assert(is_saved_state64(state));
 	regs = saved_state64(state);
@@ -282,9 +289,7 @@ unix_syscall64(x86_saved_state_t *state)
 	thread = current_thread();
 	uthread = get_bsdthread_info(thread);
 
-#if PROC_REF_DEBUG
 	uthread_reset_proc_refcount(uthread);
-#endif
 
 	/* Get the approriate proc; may be different from task's for vfork() */
 	if (__probable(!(uthread->uu_flag & UT_VFORK)))
@@ -366,6 +371,7 @@ unix_syscall64(x86_saved_state_t *state)
 	uthread->uu_rval[1] = 0;
 	uthread->uu_flag |= UT_NOTCANCELPT;
 	uthread->syscall_code = code;
+	pid = proc_pid(p);
 
 #ifdef JOE_DEBUG
         uthread->uu_iocount = 0;
@@ -432,6 +438,12 @@ unix_syscall64(x86_saved_state_t *state)
 	
 	uthread->uu_flag &= ~UT_NOTCANCELPT;
 
+#if DEBUG || DEVELOPMENT
+	kern_allocation_name_t
+	prior __assert_only = thread_set_allocation_name(NULL);
+	assertf(prior == NULL, "thread_set_allocation_name(\"%s\") not cleared", kern_allocation_get_name(prior));
+#endif /* DEBUG || DEVELOPMENT */
+
 	if (__improbable(uthread->uu_lowpri_window)) {
 	        /*
 		 * task is marked as a low priority I/O type
@@ -445,7 +457,7 @@ unix_syscall64(x86_saved_state_t *state)
 	if (__probable(!code_is_kdebug_trace(code)))
 		KERNEL_DEBUG_CONSTANT_IST(KDEBUG_TRACE, 
 			BSDDBG_CODE(DBG_BSD_EXCP_SC, code) | DBG_FUNC_END,
-			error, uthread->uu_rval[0], uthread->uu_rval[1], p->p_pid, 0);
+			error, uthread->uu_rval[0], uthread->uu_rval[1], pid, 0);
 
 #if PROC_REF_DEBUG
 	if (__improbable(uthread_get_proc_refcount(uthread))) {
@@ -564,6 +576,12 @@ unix_syscall_return(int error)
 
 
 	uthread->uu_flag &= ~UT_NOTCANCELPT;
+
+#if DEBUG || DEVELOPMENT
+	kern_allocation_name_t
+	prior __assert_only = thread_set_allocation_name(NULL);
+	assertf(prior == NULL, "thread_set_allocation_name(\"%s\") not cleared", kern_allocation_get_name(prior));
+#endif /* DEBUG || DEVELOPMENT */
 
 	if (uthread->uu_lowpri_window) {
 	        /*

@@ -170,6 +170,8 @@ Following is a step by step guideline on how to add a new command ( e.g showtask
 
   6. If your function finds issue with the passed argument then you can `raise ArgumentError('error_message')` to notify the user. The framework will automatically catch this and show appropriate help using the function doc string.
 
+  7. Please use "##" for commenting your code. This is important because single "#" based strings may be mistakenly considered in `unifdef` program.
+
  Time for some code example? Try reading the code for function ShowTaskVmeHelper in memory.py.
 
 SPECIAL Note: Very often you will find yourself making changes to a file for some command/summary and would like to test it out in lldb.
@@ -184,6 +186,10 @@ To easily reload your changes in lldb please follow the below example.
         (lldb) xnudebug reload memory
          memory is reloaded from ./memory.py
         (lldb)
+
+  * Alternatively, you can use lldb`s command for script loading as
+        (lldb) command script import /path/to/memory.py
+    You can re-run the same command every time you update the code in file.
 
  It is very important that you do reload using xnudebug command as it does the plumbing of commands and types for your change in the module. Otherwise you could easily get confused
  why your changes are not reflected in the command.

@@ -181,18 +181,42 @@ do {                                  \
 #define ns_per_us                   1000
 #define k30Seconds                  (30*us_per_s)
 #define k5Seconds                   ( 5*us_per_s)
+#if CONFIG_EMBEDDED
+#define kCanSleepMaxTimeReq         k5Seconds
+#else
 #define kCanSleepMaxTimeReq         k30Seconds
+#endif
 #define kMaxTimeRequested           k30Seconds
 #define kMinAckTimeoutTicks         (10*1000000)
 #define kIOPMTardyAckSPSKey         "IOPMTardyAckSetPowerState"
 #define kIOPMTardyAckPSCKey         "IOPMTardyAckPowerStateChange"
 #define kPwrMgtKey                  "IOPowerManagement"
 
-#define OUR_PMLog(t, a, b) do {          \
-    if (gIOKitDebug & kIOLogPower)       \
-        pwrMgt->pmPrint(t, a, b);        \
-    if (gIOKitTrace & kIOTracePowerMgmt) \
-        pwrMgt->pmTrace(t, a, b);        \
+#define OUR_PMLog(t, a, b) do {                 \
+    if (pwrMgt) {                               \
+        if (gIOKitDebug & kIOLogPower)          \
+            pwrMgt->pmPrint(t, a, b);           \
+        if (gIOKitTrace & kIOTracePowerMgmt)    \
+            pwrMgt->pmTrace(t, DBG_FUNC_NONE, a, b);        \
+    }                                           \
+    } while(0)
+
+#define OUR_PMLogFuncStart(t, a, b) do {        \
+    if (pwrMgt) {                               \
+        if (gIOKitDebug & kIOLogPower)          \
+            pwrMgt->pmPrint(t, a, b);           \
+        if (gIOKitTrace & kIOTracePowerMgmt)    \
+            pwrMgt->pmTrace(t, DBG_FUNC_START, a, b);       \
+    }                                           \
+    } while(0)
+
+#define OUR_PMLogFuncEnd(t, a, b) do {          \
+    if (pwrMgt) {                               \
+        if (gIOKitDebug & kIOLogPower)          \
+            pwrMgt->pmPrint(-t, a, b);          \
+        if (gIOKitTrace & kIOTracePowerMgmt)    \
+            pwrMgt->pmTrace(t, DBG_FUNC_END, a, b);        \
+    }                                           \
     } while(0)
 
 #define NS_TO_MS(nsec)              ((int)((nsec) / 1000000ULL))
@@ -220,6 +244,9 @@ do {                                  \
 #define LOG_APP_RESPONSE_TIMES      (100ULL * 1000ULL * 1000ULL)
 // use message tracer to log messages longer than (ns):
 #define LOG_APP_RESPONSE_MSG_TRACER (3 * 1000ULL * 1000ULL * 1000ULL)
+
+// log kext responses longer than (ns):
+#define LOG_KEXT_RESPONSE_TIMES     (100ULL * 1000ULL * 1000ULL)
 
 enum {
     kReserveDomainPower = 1
@@ -3961,13 +3988,13 @@ void IOService::driverSetPowerState( void )
 
     if (assertPMDriverCall(&callEntry))
     {
-        OUR_PMLog(          kPMLogProgramHardware, (uintptr_t) this, powerState);
+        OUR_PMLogFuncStart(kPMLogProgramHardware, (uintptr_t) this, powerState);
         start_spindump_timer("SetState");
         clock_get_uptime(&fDriverCallStartTime);
         result = fControllingDriver->setPowerState( powerState, this );
         clock_get_uptime(&end);
         stop_spindump_timer();
-        OUR_PMLog((UInt32) -kPMLogProgramHardware, (uintptr_t) this, (UInt32) result);
+        OUR_PMLogFuncEnd(kPMLogProgramHardware, (uintptr_t) this, (UInt32) result);
 
         deassertPMDriverCall(&callEntry);
 
@@ -4043,23 +4070,23 @@ void IOService::driverInformPowerChange( void )
         {
             if (fDriverCallReason == kDriverCallInformPreChange)
             {
-                OUR_PMLog(kPMLogInformDriverPreChange, (uintptr_t) this, powerState);
+                OUR_PMLogFuncStart(kPMLogInformDriverPreChange, (uintptr_t) this, powerState);
                 start_spindump_timer("WillChange");
                 clock_get_uptime(&informee->startTime);
                 result = driver->powerStateWillChangeTo(powerFlags, powerState, this);
                 clock_get_uptime(&end);
                 stop_spindump_timer();
-                OUR_PMLog((UInt32)-kPMLogInformDriverPreChange, (uintptr_t) this, result);
+                OUR_PMLogFuncEnd(kPMLogInformDriverPreChange, (uintptr_t) this, result);
             }
             else
             {
-                OUR_PMLog(kPMLogInformDriverPostChange, (uintptr_t) this, powerState);
+                OUR_PMLogFuncStart(kPMLogInformDriverPostChange, (uintptr_t) this, powerState);
                 start_spindump_timer("DidChange");
                 clock_get_uptime(&informee->startTime);
                 result = driver->powerStateDidChangeTo(powerFlags, powerState, this);
                 clock_get_uptime(&end);
                 stop_spindump_timer();
-                OUR_PMLog((UInt32)-kPMLogInformDriverPostChange, (uintptr_t) this, result);
+                OUR_PMLogFuncEnd(kPMLogInformDriverPostChange, (uintptr_t) this, result);
             }
 
             deassertPMDriverCall(&callEntry);
@@ -5269,6 +5296,10 @@ bool IOService::ackTimerTick( void )
                     PM_ERROR("%s::setPowerState(%p, %lu -> %lu) timed out after %d ms\n",
                         fName, OBFUSCATE(this), fCurrentPowerState, fHeadNotePowerState, NS_TO_MS(nsec));
 
+#if DEBUG && CONFIG_EMBEDDED
+                    panic("%s::setPowerState(%p, %lu -> %lu) timed out after %d ms",
+                        fName, this, fCurrentPowerState, fHeadNotePowerState, NS_TO_MS(nsec));
+#else
                     if (gIOKitDebug & kIOLogDebugPower)
                     {
                         panic("%s::setPowerState(%p, %lu -> %lu) timed out after %d ms",
@@ -5279,6 +5310,7 @@ bool IOService::ackTimerTick( void )
                         // Unblock state machine and pretend driver has acked.
                         done = true;
                     }
+#endif
                 } else {
                     // still waiting, set timer again
                     start_ack_timer();
@@ -5752,7 +5784,7 @@ static void logAppTimeouts( OSObject * object, void * arg )
 
             // TODO: record message type if possible
             IOService::getPMRootDomain()->pmStatsRecordApplicationResponse(
-                gIOPMStatsApplicationResponseTimedOut,
+                gIOPMStatsResponseTimedOut,
                 name, 0, (30*1000), pid, object);
 
         }
@@ -5895,7 +5927,6 @@ bool IOService::tellClientsWithResponse( int messageType )
             applyToInterested( gIOGeneralInterest,
                 pmTellClientWithResponse, (void *) &context );
 
-            fNotifyClientArray = context.notifyClients;
             break;
 
         case kNotifyPriority:
@@ -5916,7 +5947,6 @@ bool IOService::tellClientsWithResponse( int messageType )
         case kNotifyCapabilityChangeApps:
             applyToInterested( gIOAppPowerStateInterest,
                 pmTellCapabilityAppWithResponse, (void *) &context );
-            fNotifyClientArray = context.notifyClients;
 	    if(context.messageType == kIOMessageCanSystemSleep)
 	    {
 		maxTimeOut = kCanSleepMaxTimeReq;
@@ -5934,6 +5964,7 @@ bool IOService::tellClientsWithResponse( int messageType )
                 pmTellCapabilityClientWithResponse, (void *) &context );
             break;
     }
+    fNotifyClientArray = context.notifyClients;
 
     // do we have to wait for somebody?
     if ( !checkForDone() )
@@ -6077,6 +6108,8 @@ void IOService::pmTellClientWithResponse( OSObject * object, void * arg )
     _IOServiceInterestNotifier *    notifier;
     uint32_t                        msgIndex, msgRef, msgType;
     IOReturn                        retCode;
+    AbsoluteTime                    start, end;
+    uint64_t                        nsec;
 
     if (context->messageFilter &&
         !context->messageFilter(context->us, object, context, 0, 0))
@@ -6117,6 +6150,9 @@ void IOService::pmTellClientWithResponse( OSObject * object, void * arg )
             OBFUSCATE(object), OBFUSCATE(notifier->handler));
     }
 
+    if (0 == context->notifyClients)
+        context->notifyClients = OSArray::withCapacity( 32 );
+
     notify.powerRef    = (void *)(uintptr_t) msgRef;
     notify.returnValue = 0;
     notify.stateNumber = context->stateNumber;
@@ -6124,15 +6160,18 @@ void IOService::pmTellClientWithResponse( OSObject * object, void * arg )
 
     if (context->enableTracing && (notifier != 0))
     {
-        getPMRootDomain()->traceDetail(msgType, msgIndex, (uintptr_t) notifier->handler);
+        getPMRootDomain()->traceDetail(notifier);
     }
 
+    clock_get_uptime(&start);
     retCode = context->us->messageClient(msgType, object, (void *) &notify, sizeof(notify));
+    clock_get_uptime(&end);
 
     if (kIOReturnSuccess == retCode)
     {
         if (0 == notify.returnValue) {
             OUR_PMLog(kPMLogClientAcknowledge, msgRef, (uintptr_t) object);
+            context->responseArray->setObject(msgIndex, replied);
         } else {
             replied = kOSBooleanFalse;
             if ( notify.returnValue > context->maxTimeRequested )
@@ -6149,14 +6188,39 @@ void IOService::pmTellClientWithResponse( OSObject * object, void * arg )
                 else
                     context->maxTimeRequested = notify.returnValue;
             }
+            //
+            // Track time taken to ack, by storing the timestamp of
+            // callback completion
+            OSNumber * num;
+            num = OSNumber::withNumber(AbsoluteTime_to_scalar(&end), sizeof(uint64_t) * 8);
+            if (num) {
+                context->responseArray->setObject(msgIndex, num);
+                num->release();
+            }
+            else {
+                context->responseArray->setObject(msgIndex, replied);
+            }
         }
-    } else {
+
+        if (context->enableTracing) {
+            SUB_ABSOLUTETIME(&end, &start);
+            absolutetime_to_nanoseconds(end, &nsec);
+
+            if ((nsec > LOG_KEXT_RESPONSE_TIMES) || (notify.returnValue != 0)) {
+                getPMRootDomain()->traceAckDelay(notifier, notify.returnValue/1000, NS_TO_MS(nsec));
+            }
+        }
+    }
+    else {
         // not a client of ours
         // so we won't be waiting for response
         OUR_PMLog(kPMLogClientAcknowledge, msgRef, 0);
+        context->responseArray->setObject(msgIndex, replied);
+    }
+    if (context->notifyClients) {
+        context->notifyClients->setObject(msgIndex, object);
     }
 
-    context->responseArray->setObject(msgIndex, replied);
 }
 
 //*********************************************************************************
@@ -6258,6 +6322,8 @@ void IOService::pmTellCapabilityClientWithResponse(
     _IOServiceInterestNotifier *    notifier;
     uint32_t                        msgIndex, msgRef, msgType;
     IOReturn                        retCode;
+    AbsoluteTime                    start, end;
+    uint64_t                        nsec;
 
     memset(&msgArg, 0, sizeof(msgArg));
     if (context->messageFilter &&
@@ -6275,6 +6341,9 @@ void IOService::pmTellCapabilityClientWithResponse(
         return;
     }
 
+    if (0 == context->notifyClients) {
+        context->notifyClients = OSArray::withCapacity( 32 );
+    }
     notifier = OSDynamicCast(_IOServiceInterestNotifier, object);
     msgType  = context->messageType;
     msgIndex = context->responseArray->getCount();
@@ -6304,11 +6373,13 @@ void IOService::pmTellCapabilityClientWithResponse(
 
     if (context->enableTracing && (notifier != 0))
     {
-        getPMRootDomain()->traceDetail(msgType, msgIndex, (uintptr_t) notifier->handler);
+        getPMRootDomain()->traceDetail(notifier);
     }
 
+    clock_get_uptime(&start);
     retCode = context->us->messageClient(
         msgType, object, (void *) &msgArg, sizeof(msgArg));
+    clock_get_uptime(&end);
 
     if ( kIOReturnSuccess == retCode )
     {
@@ -6316,6 +6387,7 @@ void IOService::pmTellCapabilityClientWithResponse(
         {
             // client doesn't want time to respond
             OUR_PMLog(kPMLogClientAcknowledge, msgRef, (uintptr_t) object);
+            context->responseArray->setObject(msgIndex, replied);
         }
         else
         {
@@ -6326,13 +6398,34 @@ void IOService::pmTellCapabilityClientWithResponse(
                 {
                     context->maxTimeRequested = kCapabilityClientMaxWait;
                     PM_ERROR("%s: client %p returned %u for %s\n",
-                        context->us->getName(),
-                        notifier ? (void *) OBFUSCATE(notifier->handler) : OBFUSCATE(object),
-                        msgArg.maxWaitForReply,
-                        getIOMessageString(msgType));
+                            context->us->getName(),
+                            notifier ? (void *) OBFUSCATE(notifier->handler) : OBFUSCATE(object),
+                            msgArg.maxWaitForReply,
+                            getIOMessageString(msgType));
                 }
                 else
                     context->maxTimeRequested = msgArg.maxWaitForReply;
+            }
+
+            // Track time taken to ack, by storing the timestamp of
+            // callback completion
+            OSNumber * num;
+            num = OSNumber::withNumber(AbsoluteTime_to_scalar(&end), sizeof(uint64_t) * 8);
+            if (num) {
+                context->responseArray->setObject(msgIndex, num);
+                num->release();
+            }
+            else {
+                context->responseArray->setObject(msgIndex, replied);
+            }
+        }
+
+        if (context->enableTracing) {
+            SUB_ABSOLUTETIME(&end, &start);
+            absolutetime_to_nanoseconds(end, &nsec);
+
+            if ((nsec > LOG_KEXT_RESPONSE_TIMES) || (msgArg.maxWaitForReply != 0)) {
+                getPMRootDomain()->traceAckDelay(notifier, msgArg.maxWaitForReply/1000, NS_TO_MS(nsec));
             }
         }
     }
@@ -6341,9 +6434,12 @@ void IOService::pmTellCapabilityClientWithResponse(
         // not a client of ours
         // so we won't be waiting for response
         OUR_PMLog(kPMLogClientAcknowledge, msgRef, 0);
+        context->responseArray->setObject(msgIndex, replied);
+    }
+    if (context->notifyClients) {
+        context->notifyClients->setObject(msgIndex, object);
     }
 
-    context->responseArray->setObject(msgIndex, replied);
 }
 
 //*********************************************************************************
@@ -6610,12 +6706,39 @@ bool IOService::responseValid( uint32_t refcon, int pid )
         uint64_t        nsec;
         char            name[128];
 
-        name[0] = '\0';
-        proc_name(pid, name, sizeof(name));
         clock_get_uptime(&now);
         AbsoluteTime_to_scalar(&start) = num->unsigned64BitValue();
         SUB_ABSOLUTETIME(&now, &start);
         absolutetime_to_nanoseconds(now, &nsec);
+
+        if (pid != 0) {
+            name[0] = '\0';
+            proc_name(pid, name, sizeof(name));
+
+            if (nsec > LOG_APP_RESPONSE_TIMES)
+            {
+                IOLog("PM response took %d ms (%d, %s)\n", NS_TO_MS(nsec),
+                        pid, name);
+            }
+
+
+            if (nsec > LOG_APP_RESPONSE_MSG_TRACER)
+            {
+                // TODO: populate the messageType argument
+                getPMRootDomain()->pmStatsRecordApplicationResponse(
+                        gIOPMStatsResponseSlow,
+                        name, 0, NS_TO_MS(nsec), pid, object);
+            }
+            else
+            {
+                getPMRootDomain()->pmStatsRecordApplicationResponse(
+                        gIOPMStatsResponsePrompt,
+                        name, 0, NS_TO_MS(nsec), pid, object);
+            }
+        }
+        else {
+            getPMRootDomain()->traceAckDelay(object, 0, NS_TO_MS(nsec));
+        }
 
         if (kIOLogDebugPower & gIOKitDebug)
         {
@@ -6623,34 +6746,11 @@ bool IOService::responseValid( uint32_t refcon, int pid )
                 (uint32_t) ordinalComponent,
                 NS_TO_MS(nsec));
         }
-
-        // > 100 ms
-        if (nsec > LOG_APP_RESPONSE_TIMES)
-        {
-            IOLog("PM response took %d ms (%d, %s)\n", NS_TO_MS(nsec),
-                pid, name);
-        }
-
-        if (nsec > LOG_APP_RESPONSE_MSG_TRACER)
-        {
-            // TODO: populate the messageType argument
-            getPMRootDomain()->pmStatsRecordApplicationResponse(
-                gIOPMStatsApplicationResponseSlow,
-                name, 0, NS_TO_MS(nsec), pid, object);
-        }
-        else
-        {
-            getPMRootDomain()->pmStatsRecordApplicationResponse(
-                gIOPMStatsApplicationResponsePrompt,
-                name, 0, NS_TO_MS(nsec), pid, object);
-        }
-
-
         theFlag = kOSBooleanFalse;
     }
     else if (object) {
         getPMRootDomain()->pmStatsRecordApplicationResponse(
-            gIOPMStatsApplicationResponsePrompt, 
+            gIOPMStatsResponsePrompt,
             0, 0, 0, pid, object);
 
     }
@@ -7835,7 +7935,7 @@ bool IOService::actionPMReplyQueue( IOPMRequest * request, IOPMRequestQueue * qu
 
                         OSString * name = (OSString *) request->fArg2;
                         getPMRootDomain()->pmStatsRecordApplicationResponse(
-                            gIOPMStatsApplicationResponseCancel,
+                            gIOPMStatsResponseCancel,
                             name ? name->getCStringNoCopy() : "", 0,
                             0, (int)(uintptr_t) request->fArg1, 0);
                     }
@@ -8081,7 +8181,9 @@ const char * IOService::getIOMessageString( uint32_t msg )
         MSG_ENTRY( kIOMessageSystemWillRestart      ),
         MSG_ENTRY( kIOMessageSystemWillPowerOn      ),
         MSG_ENTRY( kIOMessageSystemCapabilityChange ),
-        MSG_ENTRY( kIOPMMessageLastCallBeforeSleep  )
+        MSG_ENTRY( kIOPMMessageLastCallBeforeSleep  ),
+        MSG_ENTRY( kIOMessageSystemPagingOff        ),
+        { 0, NULL }
     };
 
     return IOFindNameForValue(msg, msgNames);
@@ -8820,38 +8922,19 @@ void IOServicePM::pmPrint(
 
 void IOServicePM::pmTrace(
     uint32_t        event,
+    uint32_t        eventFunc,
     uintptr_t       param1,
     uintptr_t       param2 ) const
 {
-    const char *  who = Name;
-    uint64_t    regId = Owner->getRegistryEntryID();
-    uintptr_t    name = 0;
+    uintptr_t nameAsArg = 0;
 
-    static const uint32_t sStartStopBitField[] =
-    { 0x00000000, 0x00000040 }; // Only Program Hardware so far
+    assert(event < KDBG_CODE_MAX);
+    assert((eventFunc & ~KDBG_FUNC_MASK) == 0);
 
-    // Arcane formula from Hacker's Delight by Warren
-    // abs(x)  = ((int) x >> 31) ^ (x + ((int) x >> 31))
-    uint32_t sgnevent = ((int) event >> 31);
-    uint32_t absevent = sgnevent ^ (event + sgnevent);
-    uint32_t code     = IODBG_POWER(absevent);
+    // Copy the first characters of the name into an uintptr_t.
+    // NULL termination is not required.
+    strncpy((char*)&nameAsArg, Name, sizeof(nameAsArg));
 
-    uint32_t bit = 1 << (absevent & 0x1f);
-    if ((absevent < (sizeof(sStartStopBitField) * 8)) &&
-        (sStartStopBitField[absevent >> 5] & bit))
-    {
-        // Or in the START or END bits, Start = 1 & END = 2
-        //      If sgnevent ==  0 then START -  0 => START
-        // else if sgnevent == -1 then START - -1 => END
-        code |= DBG_FUNC_START - sgnevent;
-    }
-
-    // Copy the first characters of the name into an uintptr_t
-    for (uint32_t i = 0; (i < sizeof(uintptr_t) && who[i] != 0); i++)
-    {
-        ((char *) &name)[sizeof(uintptr_t) - i - 1] = who[i];
-    }
-
-    IOTimeStampConstant(code, name, (uintptr_t) regId, (uintptr_t)(OBFUSCATE(param1)), (uintptr_t)(OBFUSCATE(param2)));
+    IOTimeStampConstant(IODBG_POWER(event) | eventFunc, nameAsArg, (uintptr_t)Owner->getRegistryEntryID(), (uintptr_t)(OBFUSCATE(param1)), (uintptr_t)(OBFUSCATE(param2)));
 }
 

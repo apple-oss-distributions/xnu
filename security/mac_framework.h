@@ -273,6 +273,8 @@ int	mac_mount_check_snapshot_create(vfs_context_t ctx, struct mount *mp,
 	    const char *name);
 int	mac_mount_check_snapshot_delete(vfs_context_t ctx, struct mount *mp,
 	    const char *name);
+int	mac_mount_check_snapshot_revert(vfs_context_t ctx, struct mount *mp,
+	    const char *name);
 int	mac_mount_check_remount(vfs_context_t ctx, struct mount *mp);
 int	mac_mount_check_setattr(vfs_context_t ctx, struct mount *mp,
 	    struct vfs_attr *vfa);
@@ -339,7 +341,6 @@ void	mac_posixshm_label_init(struct pshminfo *pshm);
 int	mac_priv_check(kauth_cred_t cred, int priv);
 int	mac_priv_grant(kauth_cred_t cred, int priv);
 int	mac_proc_check_debug(proc_t proc1, proc_t proc2);
-int	mac_proc_check_cpumon(proc_t curp);
 int	mac_proc_check_proc_info(proc_t curp, proc_t target, int callnum, int flavor);
 int	mac_proc_check_get_cs_info(proc_t curp, proc_t target, unsigned int op);
 int	mac_proc_check_set_cs_info(proc_t curp, proc_t target, unsigned int op);
@@ -367,7 +368,7 @@ int     mac_proc_check_setlcid(proc_t proc1, proc_t proc2,
 int	mac_proc_check_signal(proc_t proc1, proc_t proc2,
 	    int signum);
 int	mac_proc_check_wait(proc_t proc1, proc_t proc2);
-void	mac_proc_set_enforce(proc_t p, int enforce_flags);
+void	mac_proc_notify_exit(proc_t proc);
 int	mac_setsockopt_label(kauth_cred_t cred, struct socket *so,
 	    struct mac *extmac);
 int     mac_socket_check_accept(kauth_cred_t cred, struct socket *so);
@@ -379,6 +380,8 @@ int	mac_socket_check_connect(kauth_cred_t cred, struct socket *so,
 int	mac_socket_check_create(kauth_cred_t cred, int domain,
 	    int type, int protocol);
 int	mac_socket_check_deliver(struct socket *so, struct mbuf *m);
+int	mac_socket_check_ioctl(kauth_cred_t cred, struct socket *so,
+	    unsigned int cmd);
 int	mac_socket_check_kqfilter(kauth_cred_t cred, struct knote *kn,
 	    struct socket *so);
 int	mac_socket_check_listen(kauth_cred_t cred, struct socket *so);
@@ -483,10 +486,8 @@ int	mac_vnode_check_exchangedata(vfs_context_t ctx, struct vnode *v1,
 int	mac_vnode_check_exec(vfs_context_t ctx, struct vnode *vp,
 	    struct image_params *imgp);
 int	mac_vnode_check_fsgetpath(vfs_context_t ctx, struct vnode *vp);
-int	mac_vnode_check_signature(struct vnode *vp,
-		struct cs_blob *cs_blob, struct image_params *imgp,
-		unsigned int *cs_flags,
-		int flags);
+int	mac_vnode_check_getattr(vfs_context_t ctx, struct ucred *file_cred,
+            struct vnode *vp, struct vnode_attr *va);
 int     mac_vnode_check_getattrlist(vfs_context_t ctx, struct vnode *vp,
 	    struct attrlist *alist);
 int	mac_vnode_check_getextattr(vfs_context_t ctx, struct vnode *vp,
@@ -502,6 +503,8 @@ int	mac_vnode_check_link(vfs_context_t ctx, struct vnode *dvp,
 int	mac_vnode_check_listextattr(vfs_context_t ctx, struct vnode *vp);
 int	mac_vnode_check_lookup(vfs_context_t ctx, struct vnode *dvp,
 	    struct componentname *cnp);
+int	mac_vnode_check_lookup_preflight(vfs_context_t ctx, struct vnode *dvp,
+	    const char *path, size_t pathlen);
 int	mac_vnode_check_open(vfs_context_t ctx, struct vnode *vp,
 	    int acc_mode);
 int	mac_vnode_check_read(vfs_context_t ctx,
@@ -530,6 +533,10 @@ int	mac_vnode_check_setowner(vfs_context_t ctx, struct vnode *vp,
 	    uid_t uid, gid_t gid);
 int	mac_vnode_check_setutimes(vfs_context_t ctx, struct vnode *vp,
 	    struct timespec atime, struct timespec mtime);
+int	mac_vnode_check_signature(struct vnode *vp,
+		struct cs_blob *cs_blob, struct image_params *imgp,
+		unsigned int *cs_flags, unsigned int *signer_type,
+		int flags);
 int	mac_vnode_check_stat(vfs_context_t ctx,
 	    kauth_cred_t file_cred, struct vnode *vp);
 int	mac_vnode_check_truncate(vfs_context_t ctx,
@@ -587,6 +594,8 @@ void	mac_pty_notify_close(proc_t p, struct tty *tp, dev_t dev, struct label *lab
 int	mac_kext_check_load(kauth_cred_t cred, const char *identifier);
 int	mac_kext_check_unload(kauth_cred_t cred, const char *identifier);
 int	mac_kext_check_query(kauth_cred_t cred);
+int	mac_skywalk_flow_check_connect(proc_t p, void *flow, const struct sockaddr *addr, int type, int protocol);
+int	mac_skywalk_flow_check_listen(proc_t p, void *flow, const struct sockaddr *addr, int type, int protocol);
 
 void psem_label_associate(struct fileproc *fp, struct vnode *vp, struct vfs_context *ctx);
 void pshm_label_associate(struct fileproc *fp, struct vnode *vp, struct vfs_context *ctx);

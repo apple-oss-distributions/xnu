@@ -33,6 +33,7 @@
 #include <sys/time.h>
 #include <sys/proc.h>
 #include <sys/param.h>
+#include <mach_debug/zone_info.h>
 
 #define MEMORYSTATUS_ENTITLEMENT "com.apple.private.memorystatus"
 
@@ -109,6 +110,10 @@ typedef struct memorystatus_kernel_stats {
 	uint64_t compressions;
 	uint64_t decompressions;
 	uint64_t total_uncompressed_pages_in_compressor;
+	uint64_t zone_map_size;
+	uint64_t zone_map_capacity;
+	uint64_t largest_zone_size;
+	char	 largest_zone_name[MACH_ZONE_NAME_MAX_LEN];
 } memorystatus_kernel_stats_t;
 
 /*
@@ -172,20 +177,14 @@ typedef struct memorystatus_freeze_entry {
 #define kMemorystatusSupportsIdleExit 0x10
 #define kMemorystatusDirty            0x20
 
-/* Cause */
-enum {
-	kMemorystatusKilled = 1,
-	kMemorystatusKilledHiwat,
- 	kMemorystatusKilledVnodes,
-  	kMemorystatusKilledVMPageShortage,
-  	kMemorystatusKilledVMThrashing,
-  	kMemorystatusKilledFCThrashing,
-  	kMemorystatusKilledPerProcessLimit,
-	kMemorystatusKilledDiagnostic,
-	kMemorystatusKilledIdleExit
-};
-
-/* Jetsam exit reason definitions */
+/*
+ * Jetsam exit reason definitions - related to memorystatus
+ *
+ * When adding new exit reasons also update:
+ *	JETSAM_REASON_MEMORYSTATUS_MAX
+ *	kMemorystatusKilled... Cause enum
+ *	memorystatus_kill_cause_name[]
+ */
 #define JETSAM_REASON_INVALID			0
 #define JETSAM_REASON_GENERIC			1
 #define JETSAM_REASON_MEMORY_HIGHWATER		2
@@ -196,12 +195,28 @@ enum {
 #define JETSAM_REASON_MEMORY_PERPROCESSLIMIT	7
 #define JETSAM_REASON_MEMORY_DIAGNOSTIC		8
 #define JETSAM_REASON_MEMORY_IDLE_EXIT		9
-#define JETSAM_REASON_CPULIMIT			10
+#define JETSAM_REASON_ZONE_MAP_EXHAUSTION	10
 
-/* Temporary, to prevent the need for a linked submission of ReportCrash */
-/* Remove when <rdar://problem/13210532> has been integrated */
+#define JETSAM_REASON_MEMORYSTATUS_MAX   JETSAM_REASON_ZONE_MAP_EXHAUSTION
+
+/*
+ * Jetsam exit reason definitions - not related to memorystatus
+ */
+#define JETSAM_REASON_CPULIMIT			100
+
+/* Cause */
 enum {
-	kMemorystatusKilledVM = kMemorystatusKilledVMPageShortage
+	kMemorystatusInvalid			= JETSAM_REASON_INVALID,
+	kMemorystatusKilled			= JETSAM_REASON_GENERIC,
+	kMemorystatusKilledHiwat		= JETSAM_REASON_MEMORY_HIGHWATER,
+	kMemorystatusKilledVnodes		= JETSAM_REASON_VNODE,
+	kMemorystatusKilledVMPageShortage	= JETSAM_REASON_MEMORY_VMPAGESHORTAGE,
+	kMemorystatusKilledVMThrashing		= JETSAM_REASON_MEMORY_VMTHRASHING,
+	kMemorystatusKilledFCThrashing		= JETSAM_REASON_MEMORY_FCTHRASHING,
+	kMemorystatusKilledPerProcessLimit	= JETSAM_REASON_MEMORY_PERPROCESSLIMIT,
+	kMemorystatusKilledDiagnostic		= JETSAM_REASON_MEMORY_DIAGNOSTIC,
+	kMemorystatusKilledIdleExit		= JETSAM_REASON_MEMORY_IDLE_EXIT,
+	kMemorystatusKilledZoneMapExhaustion	= JETSAM_REASON_ZONE_MAP_EXHAUSTION
 };
 
 /* Memorystatus control */
@@ -317,12 +332,6 @@ typedef struct memorystatus_memlimit_properties {
  * Non-fatal limit types are the
  *	- high-water-mark limit
  *
- * P_MEMSTAT_MEMLIMIT_BACKGROUND is translated in posix_spawn as
- *	the fatal system_wide task limit when active
- * 	non-fatal inactive limit based on limit provided.
- *	This is necessary for backward compatibility until the
- * 	the flag can be considered obsolete.
- *
  * Processes that opt into dirty tracking are evaluated
  * based on clean vs dirty state.
  *      dirty ==> active
@@ -350,14 +359,12 @@ typedef struct memorystatus_memlimit_properties {
 #define P_MEMSTAT_FOREGROUND           0x00000100
 #define P_MEMSTAT_DIAG_SUSPENDED       0x00000200
 #define P_MEMSTAT_PRIOR_THAW           0x00000400
-#define P_MEMSTAT_MEMLIMIT_BACKGROUND  0x00000800 /* Task has a memory limit for when it's in the background. Used for a process' "high water mark".*/
+/* unused                              0x00000800 */
 #define P_MEMSTAT_INTERNAL             0x00001000
 #define P_MEMSTAT_FATAL_MEMLIMIT                  0x00002000   /* current fatal state of the process's memlimit */
 #define P_MEMSTAT_MEMLIMIT_ACTIVE_FATAL           0x00004000   /* if set, exceeding limit is fatal when the process is active   */
-#define P_MEMSTAT_MEMLIMIT_ACTIVE_EXC_TRIGGERED   0x00008000   /* if set, supresses high-water-mark EXC_RESOURCE, allows one hit per active limit */
-#define P_MEMSTAT_MEMLIMIT_INACTIVE_FATAL         0x00010000   /* if set, exceeding limit is fatal when the process is inactive */
-#define P_MEMSTAT_MEMLIMIT_INACTIVE_EXC_TRIGGERED 0x00020000   /* if set, supresses high-water-mark EXC_RESOURCE, allows one hit per inactive limit */
-#define P_MEMSTAT_USE_ELEVATED_INACTIVE_BAND 	  0x00040000   /* if set, the process will go into this band & stay there when in the background instead
+#define P_MEMSTAT_MEMLIMIT_INACTIVE_FATAL         0x00008000   /* if set, exceeding limit is fatal when the process is inactive */
+#define P_MEMSTAT_USE_ELEVATED_INACTIVE_BAND 	  0x00010000   /* if set, the process will go into this band & stay there when in the background instead
 								  of the aging bands and/or the IDLE band. */
 
 extern void memorystatus_init(void) __attribute__((section("__TEXT, initcode")));
@@ -367,7 +374,7 @@ extern void memorystatus_init_at_boot_snapshot(void);
 extern int memorystatus_add(proc_t p, boolean_t locked);
 extern int memorystatus_update(proc_t p, int priority, uint64_t user_data, boolean_t effective,
 			       boolean_t update_memlimit, int32_t memlimit_active, boolean_t memlimit_active_is_fatal,
-			       int32_t memlimit_inactive, boolean_t memlimit_inactive_is_fatal, boolean_t memlimit_background);
+			       int32_t memlimit_inactive, boolean_t memlimit_inactive_is_fatal);
 
 extern int memorystatus_remove(proc_t p, boolean_t locked);
 
@@ -395,15 +402,15 @@ int memorystatus_knote_register(struct knote *kn);
 void memorystatus_knote_unregister(struct knote *kn);
 
 #if CONFIG_MEMORYSTATUS
-boolean_t memorystatus_turnoff_exception_and_get_fatalness(boolean_t warning, const int max_footprint_mb);
-void memorystatus_on_ledger_footprint_exceeded(int warning, boolean_t is_fatal);
+void memorystatus_log_exception(const int max_footprint_mb, boolean_t memlimit_is_active, boolean_t memlimit_is_fatal);
+void memorystatus_on_ledger_footprint_exceeded(int warning, boolean_t memlimit_is_active, boolean_t memlimit_is_fatal);
 void proc_memstat_terminated(proc_t p, boolean_t set);
 boolean_t memorystatus_proc_is_dirty_unsafe(void *v);
 #endif /* CONFIG_MEMORYSTATUS */
 
-#if CONFIG_JETSAM
-
 int memorystatus_get_pressure_status_kdp(void);
+
+#if CONFIG_JETSAM
 
 typedef enum memorystatus_policy {
 	kPolicyDefault        = 0x0, 
@@ -417,19 +424,19 @@ extern int memorystatus_jetsam_wakeup;
 extern unsigned int memorystatus_jetsam_running;
 
 boolean_t memorystatus_kill_on_VM_page_shortage(boolean_t async);
-boolean_t memorystatus_kill_on_VM_thrashing(boolean_t async);
 boolean_t memorystatus_kill_on_FC_thrashing(boolean_t async);
 boolean_t memorystatus_kill_on_vnode_limit(void);
 
 void jetsam_on_ledger_cpulimit_exceeded(void);
 
-void memorystatus_pages_update(unsigned int pages_avail);
+#endif /* CONFIG_JETSAM */
 
-#else /* CONFIG_JETSAM */
+boolean_t memorystatus_kill_on_zone_map_exhaustion(pid_t pid);
+boolean_t memorystatus_kill_on_VM_thrashing(boolean_t async);
+void memorystatus_pages_update(unsigned int pages_avail);
 
 boolean_t memorystatus_idle_exit_from_VM(void);
 
-#endif /* !CONFIG_JETSAM */
 
 #ifdef CONFIG_FREEZE
 

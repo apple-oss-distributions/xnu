@@ -48,6 +48,7 @@
 #include <mach-o/loader.h>
 #include <mach-o/nlist.h>
 #include <mach-o/reloc.h>
+#include <os/overflow.h>
 
 #define DEBUG_ASSERT_COMPONENT_NAME_STRING "kxld"
 #include <AssertMacros.h>
@@ -353,8 +354,9 @@ kxld_object_set_link_info(KXLDObject *object, splitKextLinkInfo *link_info)
     object->split_info.vmaddr_TEXT_EXEC = link_info->vmaddr_TEXT_EXEC;
     object->split_info.vmaddr_DATA = link_info->vmaddr_DATA;
     object->split_info.vmaddr_DATA_CONST = link_info->vmaddr_DATA_CONST;
+    object->split_info.vmaddr_LLVM_COV = link_info->vmaddr_LLVM_COV;
     object->split_info.vmaddr_LINKEDIT = link_info->vmaddr_LINKEDIT;
-    
+
     return;
 }
 
@@ -382,6 +384,14 @@ get_target_machine_info(KXLDObject *object, cpu_type_t cputype __unused,
 #else
     object->cpusubtype = CPU_SUBTYPE_X86_64_ALL;
 #endif
+    return KERN_SUCCESS;
+#elif defined(__arm__)
+    object->cputype = CPU_TYPE_ARM;
+    object->cpusubtype = CPU_SUBTYPE_ARM_ALL;
+    return KERN_SUCCESS;
+#elif defined(__arm64__)
+    object->cputype = CPU_TYPE_ARM64;
+    object->cpusubtype = CPU_SUBTYPE_ARM64_ALL;
     return KERN_SUCCESS;
 #else 
     kxld_log(kKxldLogLinking, kKxldLogErr, 
@@ -494,8 +504,10 @@ get_macho_slice_for_arch(KXLDObject *object, u_char *file, u_long size)
 
     if (fat->magic == FAT_MAGIC) {
         struct fat_arch *arch = NULL;
+        u_long arch_size;
+        boolean_t ovr = os_mul_and_add_overflow(fat->nfat_arch, sizeof(*archs), sizeof(*fat), &arch_size);
 
-        require_action(size >= (sizeof(*fat) + (fat->nfat_arch * sizeof(*archs))),
+        require_action(!ovr && size >= arch_size,
             finish, 
             rval=KERN_FAILURE;
             kxld_log(kKxldLogLinking, kKxldLogErr, kKxldLogTruncatedMachO));
@@ -568,6 +580,7 @@ init_from_final_linked_image(KXLDObject *object, u_int *filetype_out,
     struct symtab_command *symtab_hdr = NULL;
     struct uuid_command *uuid_hdr = NULL;
     struct version_min_command *versionmin_hdr = NULL;
+    struct build_version_command *build_version_hdr = NULL;
     struct source_version_command *source_version_hdr = NULL;
     u_long base_offset = 0;
     u_long offset = 0;
@@ -701,6 +714,10 @@ init_from_final_linked_image(KXLDObject *object, u_int *filetype_out,
             versionmin_hdr = (struct version_min_command *) cmd_hdr;
             kxld_versionmin_init_from_macho(&object->versionmin, versionmin_hdr);
             break;
+        case LC_BUILD_VERSION:
+            build_version_hdr = (struct build_version_command *)cmd_hdr;
+            kxld_versionmin_init_from_build_cmd(&object->versionmin, build_version_hdr);
+            break;
         case LC_SOURCE_VERSION:
             source_version_hdr = (struct source_version_command *) (void *) cmd_hdr;
             kxld_srcversion_init_from_macho(&object->srcversion, source_version_hdr);
@@ -732,6 +749,9 @@ init_from_final_linked_image(KXLDObject *object, u_int *filetype_out,
                     split_info_hdr = (struct linkedit_data_command *) (void *) cmd_hdr;
                     kxld_splitinfolc_init_from_macho(&object->splitinfolc, split_info_hdr);
                 }
+            break;
+        case LC_NOTE:
+            /* binary blob of data */
             break;
         case LC_CODE_SIGNATURE:
         case LC_DYLD_INFO:
@@ -1051,6 +1071,15 @@ init_from_object(KXLDObject *object)
         case LC_DYLIB_CODE_SIGN_DRS:
             /* Various metadata that might be stored in the linkedit segment */
             break;
+        case LC_NOTE:
+            /* bag-of-bits carried with the binary: ignore */
+            break;
+        case LC_BUILD_VERSION:
+            /* should be able to ignore build version commands */
+            kxld_log(kKxldLogLinking, kKxldLogWarn,
+                     "Ignoring LC_BUILD_VERSION (%u) in MH_OBJECT kext: (platform:%d)",
+                     cmd_hdr->cmd, ((struct build_version_command *)cmd_hdr)->platform);
+            break;
         case LC_VERSION_MIN_MACOSX:
         case LC_VERSION_MIN_IPHONEOS:
         case LC_VERSION_MIN_TVOS:
@@ -1179,7 +1208,7 @@ get_macho_header_size(const KXLDObject *object)
     }
 
     if (object->versionmin.has_versionmin) {
-        header_size += kxld_versionmin_get_macho_header_size();
+        header_size += kxld_versionmin_get_macho_header_size(&object->versionmin);
     }
 
     if (object->srcversion.has_srcversion) {
@@ -2484,6 +2513,9 @@ process_relocs_from_tables(KXLDObject *object)
                 else if (kxld_seg_is_data_const_seg(seg)) {
                     my_link_addr = object->split_info.vmaddr_DATA_CONST;
                 }
+                else if (kxld_seg_is_llvm_cov_seg(seg)) {
+                    my_link_addr = object->split_info.vmaddr_LLVM_COV;
+                }
                 else if (kxld_seg_is_linkedit_seg(seg)) {
                     my_link_addr = object->split_info.vmaddr_LINKEDIT;
                 }
@@ -2518,6 +2550,9 @@ process_relocs_from_tables(KXLDObject *object)
                 }
                 else if (kxld_seg_is_data_const_seg(seg)) {
                     my_link_addr = object->split_info.vmaddr_DATA_CONST;
+                }
+                else if (kxld_seg_is_llvm_cov_seg(seg)) {
+                    my_link_addr = object->split_info.vmaddr_LLVM_COV;
                 }
                 else if (kxld_seg_is_linkedit_seg(seg)) {
                     my_link_addr = object->split_info.vmaddr_LINKEDIT;

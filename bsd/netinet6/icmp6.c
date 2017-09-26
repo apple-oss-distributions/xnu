@@ -164,7 +164,7 @@ static const char *icmp6_redirect_diag(struct in6_addr *,
 static struct mbuf *ni6_input(struct mbuf *, int);
 static struct mbuf *ni6_nametodns(const char *, int, int);
 static int ni6_dnsmatch(const char *, int, const char *, int);
-static int ni6_addrs(struct icmp6_nodeinfo *, 
+static int ni6_addrs(struct icmp6_nodeinfo *,
 			  struct ifnet **, char *);
 static int ni6_store_addrs(struct icmp6_nodeinfo *, struct icmp6_nodeinfo *,
 				struct ifnet *, int);
@@ -574,14 +574,12 @@ icmp6_input(struct mbuf **mp, int *offp, int proto)
 		icmp6_ifstat_inc(m->m_pkthdr.rcvif, ifs6_in_dstunreach);
 		switch (code) {
 		case ICMP6_DST_UNREACH_NOROUTE:
+		case ICMP6_DST_UNREACH_ADDR:	/* PRC_HOSTDEAD is a DOS */
 			code = PRC_UNREACH_NET;
 			break;
 		case ICMP6_DST_UNREACH_ADMIN:
 			icmp6_ifstat_inc(m->m_pkthdr.rcvif, ifs6_in_adminprohib);
 			code = PRC_UNREACH_PROTOCOL; /* is this a good code? */
-			break;
-		case ICMP6_DST_UNREACH_ADDR:
-			code = PRC_HOSTDEAD;
 			break;
 		case ICMP6_DST_UNREACH_BEYONDSCOPE:
 			/* I mean "source address was incorrect." */
@@ -752,7 +750,7 @@ icmp6_input(struct mbuf **mp, int *offp, int proto)
 		if (!icmp6_nodeinfo)
 			break;
 //### LD 10/20 Check fbsd differences here. Not sure we're more advanced or not.
-		/* By RFC 4620 refuse to answer queries from global scope addresses */ 
+		/* By RFC 4620 refuse to answer queries from global scope addresses */
 		if ((icmp6_nodeinfo & 8) != 8 && in6_addrscope(&ip6->ip6_src) == IPV6_ADDR_SCOPE_GLOBAL)
 			break;
 
@@ -942,7 +940,7 @@ icmp6_notify_error(struct mbuf *m, int off, int icmp6len, int code)
 
 	/* Detect the upper level protocol */
 	{
-		void (*ctlfunc)(int, struct sockaddr *, void *);
+		void (*ctlfunc)(int, struct sockaddr *, void *, struct ifnet *);
 		u_int8_t nxt = eip6->ip6_nxt;
 		int eoff = off + sizeof(struct icmp6_hdr) +
 			sizeof(struct ip6_hdr);
@@ -1133,11 +1131,10 @@ icmp6_notify_error(struct mbuf *m, int off, int icmp6len, int code)
 			icmp6_mtudisc_update(&ip6cp, 1);	/*XXX*/
 		}
 
-		ctlfunc = (void (*)(int, struct sockaddr *, void *))
-			(ip6_protox[nxt]->pr_ctlinput);
+		ctlfunc = ip6_protox[nxt]->pr_ctlinput;
 		if (ctlfunc) {
 			(void) (*ctlfunc)(code, (struct sockaddr *)&icmp6dst,
-					  &ip6cp);
+			    &ip6cp, m->m_pkthdr.rcvif);
 		}
 	}
 	return(0);
@@ -1288,7 +1285,7 @@ ni6_input(struct mbuf *m, int off)
 		    !(icmp6_nodeinfo & ICMP6_NODEINFO_TMPADDROK)) {
 			nd6log((LOG_DEBUG, "ni6_input: ignore node info to "
 				"a temporary address in %s:%d",
-			       __FILE__, __LINE__));
+			       __func__, __LINE__));
 			goto bad;
 		}
 	}
@@ -2036,7 +2033,7 @@ icmp6_rip6_input(struct mbuf **mp, int off)
 	rip6src.sin6_family = AF_INET6;
 	rip6src.sin6_len = sizeof(struct sockaddr_in6);
 	rip6src.sin6_addr = ip6->ip6_src;
-	if (sa6_recoverscope(&rip6src, TRUE)) 
+	if (sa6_recoverscope(&rip6src, TRUE))
 		return (IPPROTO_DONE);
 
 	lck_rw_lock_shared(ripcbinfo.ipi_lock);
@@ -2136,7 +2133,8 @@ icmp6_reflect(struct mbuf *m, size_t off)
 	struct nd_ifinfo *ndi = NULL;
 	u_int32_t oflow;
 	struct ip6_out_args ip6oa = { IFSCOPE_NONE, { 0 },
-	    IP6OAF_SELECT_SRCIF | IP6OAF_BOUND_SRCADDR, 0,
+	    IP6OAF_SELECT_SRCIF | IP6OAF_BOUND_SRCADDR |
+	    IP6OAF_INTCOPROC_ALLOWED | IP6OAF_AWDL_UNRESTRICTED, 0,
 	    SO_TC_UNSPEC, _NET_SERVICE_TYPE_UNSPEC };
 
 	if (!(m->m_pkthdr.pkt_flags & PKTF_LOOP) && m->m_pkthdr.rcvif != NULL) {
@@ -2149,7 +2147,7 @@ icmp6_reflect(struct mbuf *m, size_t off)
 		nd6log((LOG_DEBUG,
 		    "sanity fail: off=%lx, sizeof(ip6)=%lx in %s:%d\n",
 		    (u_int32_t)off, (u_int32_t)sizeof(struct ip6_hdr),
-		    __FILE__, __LINE__));
+		    __func__, __LINE__));
 		goto bad;
 	}
 
@@ -2783,7 +2781,7 @@ nolladdropt:;
 	 * and truncates if not.
 	 */
 	if (m0->m_next || m0->m_pkthdr.len != m0->m_len)
-		panic("assumption failed in %s:%d\n", __FILE__, __LINE__);
+		panic("assumption failed in %s:%d\n", __func__, __LINE__);
 
 	if (len - sizeof(*nd_opt_rh) < m0->m_pkthdr.len) {
 		/* not enough room, truncate */
@@ -2897,7 +2895,7 @@ icmp6_ctloutput(struct socket *so, struct sockopt *sopt)
 			}
 
 			if (optlen == 0) {
-				/* According to RFC 3542, an installed filter can be 
+				/* According to RFC 3542, an installed filter can be
 				 * cleared by issuing a setsockopt for ICMP6_FILTER
 				 * with a zero length.
 				 */

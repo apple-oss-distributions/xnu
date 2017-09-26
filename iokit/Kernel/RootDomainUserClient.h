@@ -67,7 +67,7 @@ private:
 
     IOReturn            secureSetUserAssertionLevels(uint32_t    assertionBitfield);
 
-    IOReturn            secureGetSystemSleepType( uint32_t *sleepType );
+    IOReturn            secureGetSystemSleepType( uint32_t *sleepType, uint32_t *sleepTimer);
 
 public:
 
@@ -89,6 +89,7 @@ public:
 
     // Unused - retained for symbol compatibility
     virtual IOExternalMethod * getTargetAndMethodForIndex( IOService ** targetP, UInt32 index ) APPLE_KEXT_OVERRIDE;
+    virtual void stop( IOService *provider) APPLE_KEXT_OVERRIDE;
 
 };
 

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2015 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2017 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -75,6 +75,7 @@
 #include <sys/syslog.h>
 #include <sys/mcache.h>
 #include <kern/locks.h>
+#include <sys/codesign.h>
 
 #include <net/if.h>
 #include <net/route.h>
@@ -144,6 +145,11 @@ SYSCTL_NODE(_net, PF_ROUTE, routetable, CTLFLAG_RD | CTLFLAG_LOCKED,
 	sysctl_rtsock, "");
 
 SYSCTL_NODE(_net, OID_AUTO, route, CTLFLAG_RW|CTLFLAG_LOCKED, 0, "routing");
+
+/* Align x to 1024 (only power of 2) assuming x is positive */
+#define ALIGN_BYTES(x) do {						\
+	x = P2ALIGN(x, 1024);						\
+} while(0)
 
 #define	ROUNDUP32(a)							\
 	((a) > 0 ? (1 + (((a) - 1) | (sizeof (uint32_t) - 1))) :	\
@@ -307,7 +313,7 @@ route_output(struct mbuf *m, struct socket *so)
 	int sendonlytoself = 0;
 	unsigned int ifscope = IFSCOPE_NONE;
 	struct rawcb *rp = NULL;
-
+	boolean_t is_router = FALSE;
 #define	senderr(e) { error = (e); goto flush; }
 	if (m == NULL || ((m->m_len < sizeof (intptr_t)) &&
 	    (m = m_pullup(m, sizeof (intptr_t))) == NULL))
@@ -420,6 +426,22 @@ route_output(struct mbuf *m, struct socket *so)
 			senderr(EINVAL);
 		ifscope = rtm->rtm_index;
 	}
+	/*
+	 * Block changes on INTCOPROC interfaces.
+	 */
+	if (ifscope) {
+		unsigned int intcoproc_scope = 0;
+		ifnet_head_lock_shared();
+		TAILQ_FOREACH(ifp, &ifnet_head, if_link) {
+			if (IFNET_IS_INTCOPROC(ifp)) {
+				intcoproc_scope = ifp->if_index;
+				break;
+			}
+		}
+		ifnet_head_done();
+		if (intcoproc_scope == ifscope && current_proc()->p_pid != 0)
+			senderr(EINVAL);
+	}
 
 	/*
 	 * RTF_PROXY can only be set internally from within the kernel.
@@ -526,8 +548,10 @@ route_output(struct mbuf *m, struct socket *so)
 		 */
 		switch (rtm->rtm_type) {
 		case RTM_GET: {
+			kauth_cred_t cred;
 			struct ifaddr *ifa2;
 report:
+			cred = kauth_cred_proc_ref(current_proc());
 			ifa2 = NULL;
 			RT_LOCK_ASSERT_HELD(rt);
 			info.rti_info[RTAX_DST] = rt_key(rt);
@@ -556,7 +580,7 @@ report:
 			}
 			if (ifa2 != NULL)
 				IFA_LOCK(ifa2);
-			len = rt_msg2(rtm->rtm_type, &info, NULL, NULL, NULL);
+			len = rt_msg2(rtm->rtm_type, &info, NULL, NULL, &cred);
 			if (ifa2 != NULL)
 				IFA_UNLOCK(ifa2);
 			if (len > rtm->rtm_msglen) {
@@ -574,7 +598,7 @@ report:
 			if (ifa2 != NULL)
 				IFA_LOCK(ifa2);
 			(void) rt_msg2(rtm->rtm_type, &info, (caddr_t)rtm,
-			    NULL, NULL);
+			    NULL, &cred);
 			if (ifa2 != NULL)
 				IFA_UNLOCK(ifa2);
 			rtm->rtm_flags = rt->rt_flags;
@@ -582,10 +606,14 @@ report:
 			rtm->rtm_addrs = info.rti_addrs;
 			if (ifa2 != NULL)
 				IFA_REMREF(ifa2);
+
+			kauth_cred_unref(&cred);
 			break;
 		}
 
 		case RTM_CHANGE:
+			is_router = (rt->rt_flags & RTF_ROUTER) ? TRUE : FALSE;
+
 			if (info.rti_info[RTAX_GATEWAY] != NULL &&
 			    (error = rt_setgate(rt, rt_key(rt),
 			    info.rti_info[RTAX_GATEWAY]))) {
@@ -598,7 +626,7 @@ report:
 			 * the required gateway, then just use the old one.
 			 * This can happen if the user tries to change the
 			 * flags on the default route without changing the
-			 * default gateway.  Changing flags still doesn't work.
+			 * default gateway. Changing flags still doesn't work.
 			 */
 			if ((rt->rt_flags & RTF_GATEWAY) &&
 			    info.rti_info[RTAX_GATEWAY] == NULL)
@@ -621,6 +649,24 @@ report:
 			}
 			if (info.rti_info[RTAX_GENMASK])
 				rt->rt_genmask = info.rti_info[RTAX_GENMASK];
+
+			/*
+			 * Enqueue work item to invoke callback for this route entry
+			 * This may not be needed always, but for now issue it anytime
+			 * RTM_CHANGE gets called.
+			 */
+			route_event_enqueue_nwk_wq_entry(rt, NULL, ROUTE_ENTRY_REFRESH, NULL, TRUE);
+			/*
+			 * If the route is for a router, walk the tree to send refresh
+			 * event to protocol cloned entries
+			 */
+			if (is_router) {
+				struct route_event rt_ev;
+				route_event_init(&rt_ev, rt, NULL, ROUTE_ENTRY_REFRESH);
+				RT_UNLOCK(rt);
+				(void) rnh->rnh_walktree(rnh, route_event_walktree, (void *)&rt_ev);
+				RT_LOCK(rt);
+			}
 			/* FALLTHRU */
 		case RTM_LOCK:
 			rt->rt_rmx.rmx_locks &= ~(rtm->rtm_inits);
@@ -797,7 +843,7 @@ rt_setif(struct rtentry *rt, struct sockaddr *Ifpaddr, struct sockaddr *Ifaaddr,
 	struct ifnet *ifp = NULL;
 	void (*ifa_rtrequest)(int, struct rtentry *, struct sockaddr *);
 
-	lck_mtx_assert(rnh_lock, LCK_MTX_ASSERT_OWNED);
+	LCK_MTX_ASSERT(rnh_lock, LCK_MTX_ASSERT_OWNED);
 
 	RT_LOCK_ASSERT_HELD(rt);
 
@@ -1150,7 +1196,7 @@ again:
 			sa = rtm_scrub(type, i, hint, sa, &ssbuf,
 			    sizeof (ssbuf), NULL);
 			break;
-
+		case RTAX_GATEWAY:
 		case RTAX_IFP:
 			sa = rtm_scrub(type, i, NULL, sa, &ssbuf,
 			    sizeof (ssbuf), credp);
@@ -1273,7 +1319,7 @@ rt_newaddrmsg(int cmd, struct ifaddr *ifa, int error, struct rtentry *rt)
 	struct ifnet *ifp = ifa->ifa_ifp;
 	struct sockproto route_proto = { PF_ROUTE, 0 };
 
-	lck_mtx_assert(rnh_lock, LCK_MTX_ASSERT_OWNED);
+	LCK_MTX_ASSERT(rnh_lock, LCK_MTX_ASSERT_OWNED);
 	RT_LOCK_ASSERT_HELD(rt);
 
 	if (route_cb.any_count == 0)
@@ -1595,7 +1641,7 @@ sysctl_iflist(int af, struct walkarg *w)
 	struct ifnet *ifp;
 	struct ifaddr *ifa;
 	struct	rt_addrinfo info;
-	int	len, error = 0;
+	int	len = 0, error = 0;
 	int	pass = 0;
 	int	total_len = 0, current_len = 0;
 	char	*total_buffer = NULL, *cp = NULL;
@@ -1644,6 +1690,14 @@ sysctl_iflist(int af, struct walkarg *w)
 				if_data_internal_to_if_data(ifp, &ifp->if_data,
 				    &ifm->ifm_data);
 				ifm->ifm_addrs = info.rti_addrs;
+				/*
+				 * <rdar://problem/32940901>
+				 * Round bytes only for non-platform
+				*/
+				if (!csproc_get_platform_binary(w->w_req->p)) {
+					ALIGN_BYTES(ifm->ifm_data.ifi_ibytes);
+					ALIGN_BYTES(ifm->ifm_data.ifi_obytes);
+				}
 
 				cp += len;
 				VERIFY(IS_P2ALIGNED(cp, sizeof (u_int32_t)));
@@ -1737,7 +1791,7 @@ sysctl_iflist2(int af, struct walkarg *w)
 	struct ifnet *ifp;
 	struct ifaddr *ifa;
 	struct	rt_addrinfo info;
-	int	len, error = 0;
+	int	len = 0, error = 0;
 	int	pass = 0;
 	int	total_len = 0, current_len = 0;
 	char	*total_buffer = NULL, *cp = NULL;
@@ -1793,6 +1847,14 @@ sysctl_iflist2(int af, struct walkarg *w)
 				ifm->ifm_timer = ifp->if_timer;
 				if_data_internal_to_if_data64(ifp,
 				    &ifp->if_data, &ifm->ifm_data);
+				/*
+				 * <rdar://problem/32940901>
+				 * Round bytes only for non-platform
+				*/
+				if (!csproc_get_platform_binary(w->w_req->p)) {
+					ALIGN_BYTES(ifm->ifm_data.ifi_ibytes);
+					ALIGN_BYTES(ifm->ifm_data.ifi_obytes);
+				}
 
 				cp += len;
 				VERIFY(IS_P2ALIGNED(cp, sizeof (u_int32_t)));

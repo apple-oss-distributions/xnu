@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2015 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2017 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -479,6 +479,7 @@ nfs3_access_rpc(nfsnode_t np, u_int32_t *access, int rpcflags, vfs_context_t ctx
 	uint32_t access_result = 0;
 	u_int64_t xid;
 	struct nfsm_chain nmreq, nmrep;
+	struct nfsmount *nmp;
 	struct timeval now;
 	uid_t uid;
 
@@ -501,7 +502,18 @@ nfs3_access_rpc(nfsnode_t np, u_int32_t *access, int rpcflags, vfs_context_t ctx
 	nfsm_chain_get_32(error, &nmrep, access_result);
 	nfsmout_if(error);
 
-	uid = kauth_cred_getuid(vfs_context_ucred(ctx));
+	/* XXXab do we really need mount here, also why are we doing access cache management here? */
+	nmp = NFSTONMP(np);
+	if (nfs_mount_gone(nmp)) {
+		error = ENXIO;
+	}
+	nfsmout_if(error);
+
+	if (auth_is_kerberized(np->n_auth) || auth_is_kerberized(nmp->nm_auth)) {
+		uid = nfs_cred_getasid2uid(vfs_context_ucred(ctx));
+	} else {
+		uid = kauth_cred_getuid(vfs_context_ucred(ctx));
+	}
 	slot = nfs_node_access_slot(np, uid, 1);
 	np->n_accessuid[slot] = uid;
 	microuptime(&now);
@@ -1719,6 +1731,7 @@ nfs3_vnop_getattr(
 	int error;
 	struct nfs_vattr nva;
 	struct vnode_attr *vap = ap->a_vap;
+	struct nfsmount *nmp;
 	dev_t rdev;
 
 	/*
@@ -1739,6 +1752,8 @@ nfs3_vnop_getattr(
 		return (error);
 
 	/* copy nva to *a_vap */
+	nmp = VTONMP(ap->a_vp);
+	vap->va_flags |= nmp ? (nmp->nm_vers > 2 ? VA_64BITOBJIDS : 0) : 0;
 	VATTR_RETURN(vap, va_type, nva.nva_type);
 	VATTR_RETURN(vap, va_mode, nva.nva_mode);
 	rdev = makedev(nva.nva_rawdev.specdata1, nva.nva_rawdev.specdata2);
@@ -1785,6 +1800,7 @@ nfs_vnop_setattr(
 	u_quad_t origsize, vapsize;
 	struct nfs_dulookup dul;
 	nfsnode_t dnp = NULL;
+	int dul_in_progress = 0;
 	vnode_t dvp = NULL;
 	const char *vname = NULL;
 	struct nfs_open_owner *noop = NULL;
@@ -1993,15 +2009,19 @@ restart:
 			vname = vnode_getname(vp);
 			dnp = (dvp && vname) ? VTONFS(dvp) : NULL;
 			if (dnp) {
-				error = nfs_node_set_busy(dnp, vfs_context_thread(ctx));
-				if (error) {
-					dnp = NULL;
-					error = 0;
+				if (nfs_node_set_busy(dnp, vfs_context_thread(ctx))) {
+					vnode_put(dvp);
+					vnode_putname(vname);
+				} else {
+					nfs_dulookup_init(&dul, dnp, vname, strlen(vname), ctx);
+					nfs_dulookup_start(&dul, dnp, ctx);
+					dul_in_progress = 1;
 				}
-			}
-			if (dnp) {
-				nfs_dulookup_init(&dul, dnp, vname, strlen(vname), ctx);
-				nfs_dulookup_start(&dul, dnp, ctx);
+			} else {
+				if (dvp)
+					vnode_put(dvp);
+				if (vname)
+					vnode_putname(vname);
 			}
 		}
 	}
@@ -2009,18 +2029,11 @@ restart:
 	if (!error)
 		error = nmp->nm_funcs->nf_setattr_rpc(np, vap, ctx);
 
-	if (VATTR_IS_ACTIVE(vap, va_mode) || VATTR_IS_ACTIVE(vap, va_uid) || VATTR_IS_ACTIVE(vap, va_gid) ||
-	    VATTR_IS_ACTIVE(vap, va_acl) || VATTR_IS_ACTIVE(vap, va_uuuid) || VATTR_IS_ACTIVE(vap, va_guuid)) {
-		if (!namedattrs) {
-			if (dnp) {
-				nfs_dulookup_finish(&dul, dnp, ctx);
-				nfs_node_clear_busy(dnp);
-			}
-			if (dvp != NULLVP)
-				vnode_put(dvp);
-			if (vname != NULL)
-				vnode_putname(vname);
-		}
+	if (dul_in_progress) {
+		nfs_dulookup_finish(&dul, dnp, ctx);
+		nfs_node_clear_busy(dnp);
+		vnode_put(dvp);
+		vnode_putname(vname);
 	}
 
 	FSDBG_BOT(512, np->n_size, vap->va_data_size, np->n_vattr.nva_size, error);
@@ -6686,7 +6699,7 @@ nfsspec_vnop_read(
 	} */ *ap)
 {
 	nfsnode_t np = VTONFS(ap->a_vp);
-	struct timeval now;
+	struct timespec now;
 	int error;
 
 	/*
@@ -6695,9 +6708,9 @@ nfsspec_vnop_read(
 	if ((error = nfs_node_lock(np)))
 		return (error);
 	np->n_flag |= NACC;
-	microtime(&now);
+	nanotime(&now);
 	np->n_atim.tv_sec = now.tv_sec;
-	np->n_atim.tv_nsec = now.tv_usec * 1000;
+	np->n_atim.tv_nsec = now.tv_nsec;
 	nfs_node_unlock(np);
 	return (VOCALL(spec_vnodeop_p, VOFFSET(vnop_read), ap));
 }
@@ -6716,7 +6729,7 @@ nfsspec_vnop_write(
 	} */ *ap)
 {
 	nfsnode_t np = VTONFS(ap->a_vp);
-	struct timeval now;
+	struct timespec now;
 	int error;
 
 	/*
@@ -6725,9 +6738,9 @@ nfsspec_vnop_write(
 	if ((error = nfs_node_lock(np)))
 		return (error);
 	np->n_flag |= NUPD;
-	microtime(&now);
+	nanotime(&now);
 	np->n_mtim.tv_sec = now.tv_sec;
-	np->n_mtim.tv_nsec = now.tv_usec * 1000;
+	np->n_mtim.tv_nsec = now.tv_nsec;
 	nfs_node_unlock(np);
 	return (VOCALL(spec_vnodeop_p, VOFFSET(vnop_write), ap));
 }
@@ -6794,7 +6807,7 @@ nfsfifo_vnop_read(
 	} */ *ap)
 {
 	nfsnode_t np = VTONFS(ap->a_vp);
-	struct timeval now;
+	struct timespec now;
 	int error;
 
 	/*
@@ -6803,9 +6816,9 @@ nfsfifo_vnop_read(
 	if ((error = nfs_node_lock(np)))
 		return (error);
 	np->n_flag |= NACC;
-	microtime(&now);
+	nanotime(&now);
 	np->n_atim.tv_sec = now.tv_sec;
-	np->n_atim.tv_nsec = now.tv_usec * 1000;
+	np->n_atim.tv_nsec = now.tv_nsec;
 	nfs_node_unlock(np);
 	return (VOCALL(fifo_vnodeop_p, VOFFSET(vnop_read), ap));
 }
@@ -6824,7 +6837,7 @@ nfsfifo_vnop_write(
 	} */ *ap)
 {
 	nfsnode_t np = VTONFS(ap->a_vp);
-	struct timeval now;
+	struct timespec now;
 	int error;
 
 	/*
@@ -6833,9 +6846,9 @@ nfsfifo_vnop_write(
 	if ((error = nfs_node_lock(np)))
 		return (error);
 	np->n_flag |= NUPD;
-	microtime(&now);
+	nanotime(&now);
 	np->n_mtim.tv_sec = now.tv_sec;
-	np->n_mtim.tv_nsec = now.tv_usec * 1000;
+	np->n_mtim.tv_nsec = now.tv_nsec;
 	nfs_node_unlock(np);
 	return (VOCALL(fifo_vnodeop_p, VOFFSET(vnop_write), ap));
 }
@@ -6857,21 +6870,21 @@ nfsfifo_vnop_close(
 	vnode_t vp = ap->a_vp;
 	nfsnode_t np = VTONFS(vp);
 	struct vnode_attr vattr;
-	struct timeval now;
+	struct timespec now;
 	mount_t mp;
 	int error;
 
 	if ((error = nfs_node_lock(np)))
 		return (error);
 	if (np->n_flag & (NACC | NUPD)) {
-		microtime(&now);
+		nanotime(&now);
 		if (np->n_flag & NACC) {
 			np->n_atim.tv_sec = now.tv_sec;
-			np->n_atim.tv_nsec = now.tv_usec * 1000;
+			np->n_atim.tv_nsec = now.tv_nsec;
 		}
 		if (np->n_flag & NUPD) {
 			np->n_mtim.tv_sec = now.tv_sec;
-			np->n_mtim.tv_nsec = now.tv_usec * 1000;
+			np->n_mtim.tv_nsec = now.tv_nsec;
 		}
 		np->n_flag |= NCHG;
 		if (!vnode_isinuse(vp, 1) && (mp = vnode_mount(vp)) && !vfs_isrdonly(mp)) {
@@ -6925,14 +6938,18 @@ nfs_vnop_ioctl(
 			return (EROFS);
 		error = nfs_flush(VTONFS(vp), MNT_WAIT, vfs_context_thread(ctx), 0);
 		break;
-	case NFS_FSCTL_DESTROY_CRED:
+	case NFS_IOC_DESTROY_CRED:
 		if (!auth_is_kerberized(mp->nm_auth))
 			return (ENOTSUP);
 		error = nfs_gss_clnt_ctx_remove(mp, vfs_context_ucred(ctx));
 		break;
-	case NFS_FSCTL_SET_CRED:
+	case NFS_IOC_SET_CRED:
+	case NFS_IOC_SET_CRED64:
 		if (!auth_is_kerberized(mp->nm_auth))
 			return (ENOTSUP);
+		if ((ap->a_command == NFS_IOC_SET_CRED && vfs_context_is64bit(ctx)) ||
+		    (ap->a_command == NFS_IOC_SET_CRED64 && !vfs_context_is64bit(ctx)))
+			return (EINVAL);
 		if (vfs_context_is64bit(ctx)) {
 			gprinc = *(struct user_nfs_gss_principal *)ap->a_data;
 		} else {
@@ -6961,9 +6978,13 @@ nfs_vnop_ioctl(
 		NFS_DBG(NFS_FAC_GSS, 7, "Seting credential to principal %s returned %d\n", p, error);
 		FREE(p, M_TEMP);
 		break;
-	case NFS_FSCTL_GET_CRED:
+	case NFS_IOC_GET_CRED:
+	case NFS_IOC_GET_CRED64:
 		if (!auth_is_kerberized(mp->nm_auth))
 			return (ENOTSUP);
+		if ((ap->a_command == NFS_IOC_GET_CRED && vfs_context_is64bit(ctx)) ||
+		    (ap->a_command == NFS_IOC_GET_CRED64 && !vfs_context_is64bit(ctx)))
+			return (EINVAL);
 		error = nfs_gss_clnt_ctx_get_principal(mp, ctx, &gprinc);
 		if (error)
 			break;
@@ -7896,6 +7917,8 @@ nfs_vnode_notify(nfsnode_t np, uint32_t events)
 	if (!nfs_getattrcache(np, &nvattr, 0)) {
 		vap = &vattr;
 		VATTR_INIT(vap);
+
+		vap->va_flags |= nmp->nm_vers > 2 ? VA_64BITOBJIDS : 0;
 		VATTR_RETURN(vap, va_fsid, vfs_statfs(nmp->nm_mountp)->f_fsid.val[0]);
 		VATTR_RETURN(vap, va_fileid, nvattr.nva_fileid);
 		VATTR_RETURN(vap, va_mode, nvattr.nva_mode);

@@ -40,6 +40,8 @@
 #include <sys/cdefs.h>
 #include <sys/appleapiopts.h>
 
+#include <stdarg.h>
+
 __BEGIN_DECLS
 
 #ifdef XNU_KERNEL_PRIVATE
@@ -80,7 +82,7 @@ void ml_install_interrupt_handler(
 
 void ml_entropy_collect(void);
 
-uint64_t ml_get_timebase();
+uint64_t ml_get_timebase(void);
 void ml_init_lock_timeout(void); 
 void ml_init_delay_spin_threshold(int);
 
@@ -151,6 +153,16 @@ void plctrace_disable(void);
 /* Warm up a CPU to receive an interrupt */
 kern_return_t ml_interrupt_prewarm(uint64_t deadline);
 
+/* Check if the machine layer wants to intercept a panic call */
+boolean_t ml_wants_panic_trap_to_debugger(void);
+
+/* Machine layer routine for intercepting panics */
+void ml_panic_trap_to_debugger(const char *panic_format_str,
+                               va_list *panic_args,
+                               unsigned int reason,
+                               void *ctx,
+                               uint64_t panic_options_mask,
+                               unsigned long panic_caller);
 #endif /* XNU_KERNEL_PRIVATE */
 
 #ifdef KERNEL_PRIVATE
@@ -218,6 +230,12 @@ unsigned long long ml_phys_read_double(
 	vm_offset_t paddr);
 unsigned long long ml_phys_read_double_64(
 	addr64_t paddr);
+
+unsigned long long ml_io_read(uintptr_t iovaddr, int iovsz);
+unsigned int ml_io_read8(uintptr_t iovaddr);
+unsigned int ml_io_read16(uintptr_t iovaddr);
+unsigned int ml_io_read32(uintptr_t iovaddr);
+unsigned long long ml_io_read64(uintptr_t iovaddr);
 
 /* Write physical address byte */
 void ml_phys_write_byte(
@@ -305,6 +323,12 @@ boolean_t ml_set_interrupts_enabled(boolean_t enable);
 /* Check if running at interrupt context */
 boolean_t ml_at_interrupt_context(void);
 
+#ifdef XNU_KERNEL_PRIVATE
+extern boolean_t ml_is_quiescing(void);
+extern void ml_set_is_quiescing(boolean_t);
+extern uint64_t ml_get_booter_memory_size(void);
+#endif
+
 /* Zero bytes starting at a physical address */
 void bzero_phys(
 	addr64_t phys_address,
@@ -314,10 +338,18 @@ void bzero_phys(
 vm_offset_t ml_stack_remaining(void);
 
 __END_DECLS
-
+#if defined(MACH_KERNEL_PRIVATE)
+__private_extern__ uint64_t
+ml_phys_read_data(uint64_t paddr, int psz);
+__private_extern__ void
+pmap_verify_noncacheable(uintptr_t vaddr);
+#endif /* MACH_KERNEL_PRIVATE */
 #ifdef	XNU_KERNEL_PRIVATE
 
 boolean_t ml_fpu_avx_enabled(void);
+#if !defined(RC_HIDE_XNU_J137)
+boolean_t ml_fpu_avx512_enabled(void);
+#endif
 
 void interrupt_latency_tracker_setup(void);
 void interrupt_reset_latency_stats(void);
@@ -336,6 +368,7 @@ boolean_t ml_recent_wake(void);
 
 extern uint64_t reportphyreaddelayabs;
 extern uint32_t reportphyreadosbt;
+extern uint32_t phyreadpanic;
 
 #endif /* XNU_KERNEL_PRIVATE */
 #endif /* _I386_MACHINE_ROUTINES_H_ */

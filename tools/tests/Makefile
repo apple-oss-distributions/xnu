@@ -26,13 +26,13 @@ COMMON_TARGETS = unit_tests \
 		packetdrill		\
 		affinity		\
 		execperf		\
-		kqueue_tests		\
 		superpages		\
 		zero-to-n		\
 		jitter			\
 		perf_index		\
 		darwintests		\
-		unixconf
+		unixconf	 	\
+		testkext/pgokext.kext
 
 IPHONE_TARGETS =
 
@@ -52,15 +52,22 @@ all:	$(BATS_TARGET) $(TARGETS)
 
 always:
 
+# NOTE: RC_ARCHES nonsense is here because code signing will fail on kexts if we include a i386 slice
+# <rdar://problem/29878263> CoreOSLobo: xnu_tests-4026 fails to codesign
+
+$(DSTSUBPATH)/testkext/pgokext.kext: always
+	xcodebuild -configuration Debug -project $(SRCROOT)/testkext/testkext.xcodeproj -target pgokext DSTROOT=$(DSTSUBPATH)/testkext SYMROOT=$(SYMROOT)/testkext SRCROOT=$(SRCROOT)/testkext OBJROOT=$(OBJROOT)/testkext SDKROOT=$(SDKROOT) RC_ARCHS="$(subst i386,,$(RC_ARCHS))" install
+
 $(DSTSUBPATH)/%: always
 	$(_v)echo Building $@
 	$(_v)mkdir -p $@
 	$(_v)mkdir -p $(OBJROOT)/$(notdir $@)
 	$(_v)mkdir -p $(SYMROOT)/$(notdir $@)
 	$(_v)$(MAKE) -C $(SRCROOT)/$(notdir $@) SRCROOT=$(SRCROOT)/$(notdir $@) DSTROOT=$@ OBJROOT=$(OBJROOT)/$(notdir $@) SYMROOT=$(SYMROOT)/$(notdir $@) SDKROOT=$(SDKROOT) BASEDSTROOT=$(DSTROOT)
+	$(_v)find $@ -type d -name "*.dSYM" -exec cp -a {} $(SYMROOT)/ ';'
 
 $(BATS_TARGET): $(TARGETS)
 	$(_v)mkdir -p $@
 	$(_v)mkdir -p $(OBJROOT)/$(notdir $@)
 	$(_v)mkdir -p $(SYMROOT)
-	$(_v)$(MAKE) -C $(SRCROOT)/$(notdir $@) SRCROOT=$(SRCROOT)/$(notdir $@) DSTROOT=$@ OBJROOT=$(OBJROOT)/$(notdir $@) SDKROOT=$(SDKROOT) BASEDSTROOT=$(DSTROOT)
+	$(_v)$(MAKE) -C $(SRCROOT)/$(notdir $@) SRCROOT=$(SRCROOT)/$(notdir $@) DSTROOT=$@ OBJROOT=$(OBJROOT)/$(notdir $@) SDKROOT=$(SDKROOT) BASEDSTROOT=$(DSTROOT) BASEDSTSUBPATH=$(DSTSUBPATH)

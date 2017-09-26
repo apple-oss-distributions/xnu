@@ -54,7 +54,7 @@
  * the rights to redistribute these changes.
  */
 
-#include <mach_rt.h>
+#include <debug.h>
 #include <mach_kdp.h>
 #include <mach_assert.h>
 
@@ -62,6 +62,7 @@
 #include <i386/asm.h>
 #include <i386/cpuid.h>
 #include <i386/eflags.h>
+#include <i386/postcode.h>
 #include <i386/proc_reg.h>
 #include <i386/trap.h>
 #include <assym.s>
@@ -157,14 +158,22 @@ wrmsr_fail:
 	movl	$1, %eax
 	ret
 
+#if DEBUG
+.globl	EXT(thread_exception_return_internal)
+#else
 .globl	EXT(thread_exception_return)
+#endif
 .globl	EXT(thread_bootstrap_return)
 LEXT(thread_bootstrap_return)
 #if CONFIG_DTRACE
 	call EXT(dtrace_thread_bootstrap)
 #endif
 
+#if DEBUG
+LEXT(thread_exception_return_internal)
+#else
 LEXT(thread_exception_return)
+#endif
 	cli
 	xorl	%ecx, %ecx		/* don't check if we're in the PFZ */
 	jmp	EXT(return_from_trap)
@@ -343,4 +352,13 @@ L_copyin_word_fail:
  */
 	RECOVERY_SECTION
 	RECOVER_TABLE_END
+
+
+/*
+ * Vector here on any exception at startup prior to switching to
+ * the kernel's idle page-tables and installing the kernel master IDT.
+ */
+Entry(vstart_trap_handler)
+	POSTCODE(BOOT_TRAP_HLT)
+	hlt
 

@@ -95,6 +95,9 @@
 
 #endif
 
+/* prevent infinite recursion when memmove calls bcopy; in string.h, bcopy is defined to call memmove */
+#undef bcopy
+
 /* XXX - should be gone from here */
 extern void		invalidate_icache64(addr64_t addr, unsigned cnt, int phys);
 extern void		flush_dcache64(addr64_t addr, unsigned count, int phys);
@@ -165,6 +168,40 @@ ffs(unsigned int mask)
 	 * 'ffs'
 	 */
 	return 1 + __builtin_ctz(mask);
+}
+
+int
+ffsll(unsigned long long mask)
+{
+	if (mask == 0)
+		return 0;
+
+	/*
+	 * NOTE: cannot use __builtin_ffsll because it generates a call to
+	 * 'ffsll'
+	 */
+	return 1 + __builtin_ctzll(mask);
+}
+
+/*
+ * Find last bit set in bit string.
+ */
+int
+fls(unsigned int mask)
+{
+	if (mask == 0)
+		return 0;
+
+	return (sizeof (mask) << 3) - __builtin_clz(mask);
+}
+
+int
+flsll(unsigned long long mask)
+{
+	if (mask == 0)
+		return 0;
+
+	return (sizeof (mask) << 3) - __builtin_clzll(mask);
 }
 
 void
@@ -254,14 +291,19 @@ ovbcopy(
 uint64_t reportphyreaddelayabs;
 uint32_t reportphyreadosbt;
 
-static inline unsigned int
-ml_phys_read_data(pmap_paddr_t paddr, int size)
-{
-	unsigned int result = 0;
+#if DEVELOPMENT || DEBUG
+uint32_t phyreadpanic = 1;
+#else
+uint32_t phyreadpanic = 0;
+#endif
+
+__private_extern__ uint64_t
+ml_phys_read_data(pmap_paddr_t paddr, int size) {
+	uint64_t result = 0;
 	unsigned char s1;
 	unsigned short s2;
-	boolean_t istate;
-	uint64_t sabs, eabs;
+	boolean_t istate = TRUE, timeread = FALSE;
+	uint64_t sabs = 0, eabs;
 
 	if (__improbable(!physmap_enclosed(paddr)))
 		panic("%s: 0x%llx out of bounds\n", __FUNCTION__, paddr);
@@ -269,6 +311,7 @@ ml_phys_read_data(pmap_paddr_t paddr, int size)
 	if (__improbable(reportphyreaddelayabs != 0)) {
 		istate = ml_set_interrupts_enabled(FALSE);
 		sabs = mach_absolute_time();
+		timeread = TRUE;
 	}
 
         switch (size) {
@@ -283,16 +326,24 @@ ml_phys_read_data(pmap_paddr_t paddr, int size)
         case 4:
 		result = *(volatile unsigned int *)PHYSMAP_PTOV(paddr);
 		break;
+	case 8:
+		result = *(volatile unsigned long long *)PHYSMAP_PTOV(paddr);
+		break;
 	default:
 		panic("Invalid size %d for ml_phys_read_data\n", size);
 		break;
         }
 
-	if (__improbable(reportphyreaddelayabs != 0)) {
+	if (__improbable(timeread == TRUE)) {
 		eabs = mach_absolute_time();
 		(void)ml_set_interrupts_enabled(istate);
 
-		if ((eabs - sabs) > reportphyreaddelayabs) {
+		if (__improbable((eabs - sabs) > reportphyreaddelayabs)) {
+			if (phyreadpanic && (machine_timeout_suspended() == FALSE)) {
+				panic_io_port_read();
+				panic("Read from physical addr 0x%llx took %llu ns, result: 0x%llx (start: %llu, end: %llu), ceiling: %llu", paddr, (eabs - sabs), result, sabs, eabs, reportphyreaddelayabs);
+			}
+
 			if (reportphyreadosbt) {
 				OSReportWithBacktrace("ml_phys_read_data took %lluus\n", (eabs - sabs) / 1000);
 			}
@@ -307,51 +358,48 @@ ml_phys_read_data(pmap_paddr_t paddr, int size)
 }
 
 static unsigned long long
-ml_phys_read_long_long(pmap_paddr_t paddr )
-{
-	if (!physmap_enclosed(paddr))
-		panic("%s: 0x%llx out of bounds\n", __FUNCTION__, paddr);
-	return *(volatile unsigned long long *)PHYSMAP_PTOV(paddr);
+ml_phys_read_long_long(pmap_paddr_t paddr) {
+	return ml_phys_read_data(paddr, 8);
 }
 
 unsigned int ml_phys_read( vm_offset_t paddr)
 {
-        return ml_phys_read_data((pmap_paddr_t)paddr, 4);
+        return (unsigned int) ml_phys_read_data((pmap_paddr_t)paddr, 4);
 }
 
 unsigned int ml_phys_read_word(vm_offset_t paddr) {
 
-        return ml_phys_read_data((pmap_paddr_t)paddr, 4);
+        return (unsigned int) ml_phys_read_data((pmap_paddr_t)paddr, 4);
 }
 
 unsigned int ml_phys_read_64(addr64_t paddr64)
 {
-        return ml_phys_read_data((pmap_paddr_t)paddr64, 4);
+        return (unsigned int) ml_phys_read_data((pmap_paddr_t)paddr64, 4);
 }
 
 unsigned int ml_phys_read_word_64(addr64_t paddr64)
 {
-        return ml_phys_read_data((pmap_paddr_t)paddr64, 4);
+        return (unsigned int) ml_phys_read_data((pmap_paddr_t)paddr64, 4);
 }
 
 unsigned int ml_phys_read_half(vm_offset_t paddr)
 {
-        return ml_phys_read_data((pmap_paddr_t)paddr, 2);
+        return (unsigned int) ml_phys_read_data((pmap_paddr_t)paddr, 2);
 }
 
 unsigned int ml_phys_read_half_64(addr64_t paddr64)
 {
-        return ml_phys_read_data((pmap_paddr_t)paddr64, 2);
+        return (unsigned int) ml_phys_read_data((pmap_paddr_t)paddr64, 2);
 }
 
 unsigned int ml_phys_read_byte(vm_offset_t paddr)
 {
-        return ml_phys_read_data((pmap_paddr_t)paddr, 1);
+        return (unsigned int) ml_phys_read_data((pmap_paddr_t)paddr, 1);
 }
 
 unsigned int ml_phys_read_byte_64(addr64_t paddr64)
 {
-        return ml_phys_read_data((pmap_paddr_t)paddr64, 1);
+        return (unsigned int) ml_phys_read_data((pmap_paddr_t)paddr64, 1);
 }
 
 unsigned long long ml_phys_read_double(vm_offset_t paddr)
@@ -488,6 +536,7 @@ ml_probe_read_64(addr64_t paddr64, unsigned int *val)
 }
 
 
+#undef bcmp
 int bcmp(
 	const void	*pa,
 	const void	*pb,
@@ -507,6 +556,7 @@ int bcmp(
 	return (int)len;
 }
 
+#undef memcmp
 int
 memcmp(const void *s1, const void *s2, size_t n)
 {
@@ -521,6 +571,7 @@ memcmp(const void *s1, const void *s2, size_t n)
 	return (0);
 }
 
+#undef memmove
 void *
 memmove(void *dst, const void *src, size_t ulen)
 {
@@ -534,6 +585,7 @@ memmove(void *dst, const void *src, size_t ulen)
  * the terminating null character.
  */
 
+#undef strlen
 size_t
 strlen(
 	const char *string)

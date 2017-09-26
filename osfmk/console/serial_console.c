@@ -44,7 +44,12 @@
 #include <kern/kalloc.h>
 #include <kern/thread.h>
 #include <kern/cpu_data.h>
+#include <libkern/section_keywords.h>
 
+#if __arm__ || __arm64__
+#include <machine/machine_routines.h>
+#include <arm/cpu_data_internal.h>
+#endif
 
 
 #ifndef MAX_CPU_SLOTS
@@ -109,7 +114,7 @@ extern void serial_putc(char);
 
 static void _serial_putc(int, int, int);
 
-struct console_ops cons_ops[] = {
+SECURITY_READ_ONLY_EARLY(struct console_ops) cons_ops[] = {
     {
         .putc = _serial_putc, .getc = _serial_getc,
     },
@@ -118,12 +123,37 @@ struct console_ops cons_ops[] = {
     },
 };
 
-uint32_t nconsops = (sizeof cons_ops / sizeof cons_ops[0]);
+SECURITY_READ_ONLY_EARLY(uint32_t) nconsops = (sizeof cons_ops / sizeof cons_ops[0]);
 
 uint32_t cons_ops_index = VC_CONS_OPS;
 
+#ifdef __arm__
+// NMI static variables
+#define NMI_STRING_SIZE 32
+char nmi_string[NMI_STRING_SIZE] = "afDIGHr84A84jh19Kphgp428DNPdnapq";
+static int nmi_counter           = 0;
+#endif /* __arm__ */
 
 static bool console_suspended = false;
+
+/* Wrapper for ml_set_interrupts_enabled */
+static void
+console_restore_interrupts_state(boolean_t state)
+{
+#if INTERRUPT_MASKED_DEBUG
+	/*
+	 * Serial console holds interrupts disabled for far too long
+	 * and would trip the spin-debugger.  If we are about to reenable
+	 * interrupts then clear the timer and avoid panicking on the delay.
+	 * Otherwise, let the code that printed with interrupt disabled
+	 * take the panic when it reenables interrupts.
+	 * Hopefully one day this is fixed so that this workaround is unnecessary.
+	 */
+	if (state == TRUE)
+		ml_spin_debug_clear_self();
+#endif /* INTERRUPT_MASKED_DEBUG */
+	ml_set_interrupts_enabled(state);
+}
 
 static void
 console_ring_lock_init(void)
@@ -166,7 +196,7 @@ console_cpu_alloc(__unused boolean_t boot_processor)
 {
 	console_buf_t * cbp;
 	int i;
-	uint32_t * p;
+	uint32_t * p = NULL;
 
 	console_init();
 	assert(console_ring.buffer != NULL);
@@ -243,14 +273,20 @@ _cnputs(char * c, int size)
 	/* The console device output routines are assumed to be
 	 * non-reentrant.
 	 */
+#ifdef __x86_64__
+	uint32_t lock_timeout_ticks = UINT32_MAX;
+#else
+	uint32_t lock_timeout_ticks = LockTimeOut;
+#endif
+
 	mp_disable_preemption();
-	if (!hw_lock_to(&cnputc_lock, LockTimeOut)) {
+	if (!hw_lock_to(&cnputc_lock, lock_timeout_ticks)) {
 		/* If we timed out on the lock, and we're in the debugger,
 		 * copy lock data for debugging and break the lock.
 		 */
 		hw_lock_data_t _shadow_lock;
 		memcpy(&_shadow_lock, &cnputc_lock, sizeof(cnputc_lock));
-		if (debug_mode) {
+		if (kernel_debugger_entry_count) {
 			/* Since hw_lock_to takes a pre-emption count...*/
 			mp_enable_preemption();
 			hw_lock_init(&cnputc_lock);
@@ -278,9 +314,21 @@ cnputc_unbuffered(char c)
 	_cnputs(&c, 1);
 }
 
-void
-cnputcusr(char c)
+
+void cnputcusr(char c)
 {
+	cnputsusr(&c, 1);
+}
+
+void
+cnputsusr(char *s, int size)
+{
+
+	if (size > 1) {
+		console_write(s, size);
+		return;
+	}
+
 	boolean_t state;
 
 	/* Spin (with pre-emption enabled) waiting for console_ring_try_empty()
@@ -295,8 +343,9 @@ cnputcusr(char c)
 	 * interrupts off); we don't want to disable pre-emption indefinitely
 	 * here, and spinlocks and mutexes are inappropriate.
 	 */
-	while (console_output != 0)
-		;
+	while (console_output != 0) {
+		delay(1);
+	}
 
 	/*
 	 * We disable interrupts to avoid issues caused by rendevous IPIs
@@ -304,8 +353,8 @@ cnputcusr(char c)
 	 * core wants it.  Stackshot is the prime example of this.
 	 */
 	state = ml_set_interrupts_enabled(FALSE);
-	_cnputs(&c, 1);
-	ml_set_interrupts_enabled(state);
+	_cnputs(s, 1);
+	console_restore_interrupts_state(state);
 }
 
 static void
@@ -370,14 +419,14 @@ console_ring_try_empty(void)
 
 		simple_unlock(&console_ring.read_lock);
 
-		ml_set_interrupts_enabled(state);
+		console_restore_interrupts_state(state);
 
 		/*
 		 * In case we end up being the console drain thread
 		 * for far too long, break out. Except in panic/suspend cases
 		 * where we should clear out full buffer.
 		 */
-		if (debug_mode == 0 && !console_suspended && (total_chars_out >= MAX_TOTAL_FLUSH_SIZE))
+		if (!kernel_debugger_entry_count && !console_suspended && (total_chars_out >= MAX_TOTAL_FLUSH_SIZE))
 			break;
 
 	} while (nchars_out > 0);
@@ -413,7 +462,7 @@ console_write(char * str, int size)
 		simple_lock_try_lock_loop(&console_ring.write_lock);
 		while (chunk_size > console_ring_space()) {
 			simple_unlock(&console_ring.write_lock);
-			ml_set_interrupts_enabled(state);
+			console_restore_interrupts_state(state);
 
 			console_ring_try_empty();
 
@@ -427,7 +476,7 @@ console_write(char * str, int size)
 		str = &str[i];
 		size -= chunk_size;
 		simple_unlock(&console_ring.write_lock);
-		ml_set_interrupts_enabled(state);
+		console_restore_interrupts_state(state);
 	}
 
 	console_ring_try_empty();
@@ -484,7 +533,7 @@ restart:
 
 		if (cpu_buffer_size(cbp) > console_ring_space()) {
 			simple_unlock(&console_ring.write_lock);
-			ml_set_interrupts_enabled(state);
+			console_restore_interrupts_state(state);
 			mp_enable_preemption();
 
 			console_ring_try_empty();
@@ -502,7 +551,7 @@ restart:
 	needs_print = FALSE;
 
 	if (c != '\n') {
-		ml_set_interrupts_enabled(state);
+		console_restore_interrupts_state(state);
 		mp_enable_preemption();
 		return;
 	}
@@ -519,7 +568,7 @@ restart:
 
 	if (cpu_buffer_size(cbp) > console_ring_space()) {
 		simple_unlock(&console_ring.write_lock);
-		ml_set_interrupts_enabled(state);
+		console_restore_interrupts_state(state);
 		mp_enable_preemption();
 
 		console_ring_try_empty();
@@ -532,7 +581,8 @@ restart:
 
 	cbp->buf_ptr = cbp->buf_base;
 	simple_unlock(&console_ring.write_lock);
-	ml_set_interrupts_enabled(state);
+
+	console_restore_interrupts_state(state);
 	mp_enable_preemption();
 
 	console_ring_try_empty();
@@ -548,6 +598,20 @@ _serial_getc(__unused int a, __unused int b, boolean_t wait, __unused boolean_t 
 		c = serial_getc();
 	} while (wait && c < 0);
 
+#ifdef __arm__
+	// Check for the NMI string
+	if (c == nmi_string[nmi_counter]) {
+		nmi_counter++;
+		if (nmi_counter == NMI_STRING_SIZE) {
+			// We've got the NMI string, now do an NMI
+			Debugger("Automatic NMI");
+			nmi_counter = 0;
+			return '\n';
+		}
+	} else if (c != -1) {
+		nmi_counter = 0;
+	}
+#endif
 
 	return c;
 }
@@ -579,12 +643,5 @@ vcgetc(__unused int l, __unused int u, __unused boolean_t wait, __unused boolean
 		return c;
 	else
 		return 0;
-}
-
-/* So we can re-write the serial device functions at boot-time */
-void
-console_set_serial_ops(struct console_ops * newops)
-{
-	cons_ops[SERIAL_CONS_OPS] = *newops;
 }
 

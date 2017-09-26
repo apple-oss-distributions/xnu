@@ -87,6 +87,8 @@ __BEGIN_DECLS
 
 extern mach_port_name_t mach_reply_port(void);
 
+extern mach_port_name_t thread_get_special_reply_port(void);
+
 extern mach_port_name_t thread_self_trap(void);
 
 extern mach_port_name_t host_self_trap(void);
@@ -344,7 +346,11 @@ extern kern_return_t pid_for_task(
 #else
 #define	PAD_(t)	(sizeof(uint32_t) <= sizeof(t) \
  		? 0 : sizeof(uint32_t) - sizeof(t))
+#if __arm__ && (__BIGGEST_ALIGNMENT__ > 4)
+#define PAD_ARG_8
+#else
 #define PAD_ARG_8 char arg8_pad_[sizeof(uint32_t)];
+#endif
 #endif
 
 #if BYTE_ORDER == LITTLE_ENDIAN
@@ -376,6 +382,12 @@ struct mach_reply_port_args {
 };
 extern mach_port_name_t mach_reply_port(
 				struct mach_reply_port_args *args);
+
+struct thread_get_special_reply_port_args {
+	int32_t dummy;
+};
+extern mach_port_name_t thread_get_special_reply_port(
+				struct thread_get_special_reply_port_args *args);
 
 struct thread_self_trap_args {
 	int32_t dummy;
@@ -586,6 +598,15 @@ struct mk_timer_arm_trap_args {
 };
 extern kern_return_t mk_timer_arm_trap(
 				struct mk_timer_arm_trap_args *args);
+
+struct mk_timer_arm_leeway_trap_args {
+	PAD_ARG_(mach_port_name_t, name);
+	PAD_ARG_(uint64_t, mk_timer_flags);
+	PAD_ARG_(uint64_t, expire_time);
+	PAD_ARG_(uint64_t, mk_leeway);
+};
+extern kern_return_t mk_timer_arm_leeway_trap(
+				struct mk_timer_arm_leeway_trap_args *args);
 
 struct mk_timer_cancel_trap_args {
     PAD_ARG_(mach_port_name_t, name);

@@ -79,6 +79,11 @@
 #include <kern/thread_call.h>
 #include <kern/btlog.h>
 
+#if KASAN
+#include <sys/queue.h>
+#include <san/kasan.h>
+#endif
+
 #if	CONFIG_GZALLOC
 typedef struct gzalloc_data {
 	uint32_t	gzfc_index;
@@ -135,7 +140,12 @@ struct zone {
 	/* boolean_t */	alignment_required :1,
 	/* boolean_t */ zone_logging	   :1,	/* Enable zone logging for this zone. */
 	/* boolean_t */ zone_replenishing  :1,
-	/* future    */ _reserved          :15;
+	/* boolean_t */ kasan_quarantine   :1,
+	/* boolean_t */ tags               :1,
+	/* boolean_t */ tags_inline        :1,
+	/* future    */ tag_zone_index     :6,
+	/* boolean_t */ zone_valid         :1,
+	/* future    */ _reserved          :5;
 
 	int		index;		/* index into zone_info arrays for this zone */
 	const char	*zone_name;	/* a name for the zone */
@@ -150,6 +160,10 @@ struct zone {
 	gzalloc_data_t	gz;
 #endif /* CONFIG_GZALLOC */
 
+#if KASAN_ZALLOC
+	vm_size_t kasan_redzone;
+#endif
+
 	btlog_t		*zlog_btlog;		/* zone logging structure to hold stacks and element references to those stacks. */
 };
 
@@ -163,8 +177,25 @@ typedef struct zinfo_usage_store_t {
 	uint64_t	free __attribute__((aligned(8)));		/* free counter */
 } zinfo_usage_store_t;
 
-extern void		zone_gc(void);
-extern void		consider_zone_gc(void);
+/*
+ * For sysctl kern.zones_collectable_bytes used by memory_maintenance to check if a
+ * userspace reboot is needed. The only other way to query for this information
+ * is via mach_memory_info() which is unavailable on release kernels.
+ */
+extern uint64_t get_zones_collectable_bytes(void);
+
+/*
+ * zone_gc also checks if the zone_map is getting close to full and triggers jetsams if needed, provided
+ * consider_jetsams is set to TRUE. To avoid deadlocks, we only pass a value of TRUE from within the
+ * vm_pageout_garbage_collect thread.
+ */
+extern void		zone_gc(boolean_t consider_jetsams);
+extern void		consider_zone_gc(boolean_t consider_jetsams);
+extern void		drop_free_elements(zone_t z);
+
+/* Debug logging for zone-map-exhaustion jetsams. */
+extern void		get_zone_map_size(uint64_t *current_size, uint64_t *capacity);
+extern void		get_largest_zone_info(char *zone_name, size_t zone_name_len, uint64_t *zone_size);
 
 /* Bootstrap zone module (create zone zone) */
 extern void		zone_bootstrap(void);
@@ -202,9 +233,40 @@ extern void		zone_debug_disable(
 extern unsigned int            num_zones;
 extern struct zone             zone_array[];
 
+/* zindex and page_count must pack into 16 bits
+ * update tools/lldbmacros/memory.py:GetRealMetadata
+ * when these values change */
+
+#define ZINDEX_BITS              (10U)
+#define PAGECOUNT_BITS           (16U - ZINDEX_BITS)
+#define MULTIPAGE_METADATA_MAGIC ((1UL << ZINDEX_BITS) - 1)
+#define ZONE_CHUNK_MAXPAGES      ((1UL << PAGECOUNT_BITS) - 1)
+
+/*
+ * The max # of elements in a chunk should fit into zone_page_metadata.free_count (uint16_t).
+ * Update this if the type of free_count changes.
+ */
+#define ZONE_CHUNK_MAXELEMENTS   (UINT16_MAX)
+
 #endif	/* MACH_KERNEL_PRIVATE */
 
 __BEGIN_DECLS
+
+
+/* Item definitions for zalloc/zinit/zone_change */
+#define Z_EXHAUST	1	/* Make zone exhaustible	*/
+#define Z_COLLECT	2	/* Make zone collectable	*/
+#define Z_EXPAND	3	/* Make zone expandable		*/
+#define	Z_FOREIGN	4	/* Allow collectable zone to contain foreign elements */
+#define Z_CALLERACCT	5	/* Account alloc/free against the caller */
+#define Z_NOENCRYPT	6	/* Don't encrypt zone during hibernation */
+#define Z_NOCALLOUT 	7	/* Don't asynchronously replenish the zone via callouts */
+#define Z_ALIGNMENT_REQUIRED 8
+#define Z_GZALLOC_EXEMPT 9	/* Not tracked in guard allocation mode */
+#define Z_KASAN_QUARANTINE	10 /* Allow zone elements to be quarantined on free */
+#ifdef	XNU_KERNEL_PRIVATE
+#define Z_TAGS_ENABLED	11      /* Store tags */
+#endif  /* XNU_KERNEL_PRIVATE */
 
 #ifdef	XNU_KERNEL_PRIVATE
 
@@ -212,35 +274,21 @@ extern vm_offset_t     zone_map_min_address;
 extern vm_offset_t     zone_map_max_address;
 
 
-/* Allocate from zone */
-extern void *	zalloc(
-					zone_t		zone);
-
-/* Free zone element */
-extern void		zfree(
-					zone_t		zone,
-					void 		*elem);
-
-/* Create zone */
-extern zone_t	zinit(
-					vm_size_t	size,		/* the size of an element */
-					vm_size_t	maxmem,		/* maximum memory to use */
-					vm_size_t	alloc,		/* allocation size */
-					const char	*name);		/* a name for the zone */
-
-
 /* Non-waiting for memory version of zalloc */
 extern void *	zalloc_nopagewait(
-					zone_t		zone);
-
-/* Non-blocking version of zalloc */
-extern void *	zalloc_noblock(
 					zone_t		zone);
 
 /* selective version of zalloc */
 extern void *	zalloc_canblock(
 					zone_t		zone,
 					boolean_t	canblock);
+
+/* selective version of zalloc */
+extern void *	zalloc_canblock_tag(
+					zone_t		zone,
+					boolean_t	canblock,
+					vm_size_t	reqsize,
+					vm_tag_t    tag);
 
 /* Get from zone free list */
 extern void *	zget(
@@ -257,24 +305,9 @@ extern int		zfill(
 					zone_t		zone,
 					int			nelem);
 
-/* Change zone parameters */
-extern void		zone_change(
-					zone_t			zone,
-					unsigned int	item,
-					boolean_t		value);
 extern void		zone_prio_refill_configure(zone_t, vm_size_t);
-/* Item definitions */
-#define Z_EXHAUST	1	/* Make zone exhaustible	*/
-#define Z_COLLECT	2	/* Make zone collectable	*/
-#define Z_EXPAND	3	/* Make zone expandable		*/
-#define	Z_FOREIGN	4	/* Allow collectable zone to contain foreign elements */
-#define Z_CALLERACCT	5	/* Account alloc/free against the caller */
-#define Z_NOENCRYPT	6	/* Don't encrypt zone during hibernation */
-#define Z_NOCALLOUT 	7	/* Don't asynchronously replenish the zone via
-				 * callouts
-				 */
-#define Z_ALIGNMENT_REQUIRED 8
-#define Z_GZALLOC_EXEMPT 9	/* Not tracked in guard allocation mode */
+
+/* See above/top of file. Z_* definitions moved so they would be usable by kexts */
 
 /* Preallocate space for zone from zone map */
 extern void		zprealloc(
@@ -324,6 +357,17 @@ extern int get_zleak_state(void);
 
 #endif	/* CONFIG_ZLEAKS */
 
+#ifndef VM_MAX_TAG_ZONES
+#error MAX_TAG_ZONES
+#endif
+
+#if VM_MAX_TAG_ZONES
+
+extern boolean_t zone_tagging_on;
+extern uint32_t  zone_index_from_tag_index(uint32_t tag_zone_index, vm_size_t * elem_size);
+
+#endif /* VM_MAX_TAG_ZONES */
+
 /* These functions used for leak detection both in zalloc.c and mbuf.c */
 extern uintptr_t hash_mix(uintptr_t);
 extern uint32_t hashbacktrace(uintptr_t *, uint32_t, uint32_t);
@@ -331,7 +375,7 @@ extern uint32_t hashaddr(uintptr_t, uint32_t);
 
 #define lock_zone(zone)					\
 MACRO_BEGIN						\
-	lck_mtx_lock_spin(&(zone)->lock);		\
+	lck_mtx_lock_spin_always(&(zone)->lock);	\
 MACRO_END
 
 #define unlock_zone(zone)				\
@@ -344,6 +388,7 @@ void gzalloc_init(vm_size_t);
 void gzalloc_zone_init(zone_t);
 void gzalloc_configure(void);
 void gzalloc_reconfigure(zone_t);
+void gzalloc_empty_free_cache(zone_t);
 boolean_t gzalloc_enabled(void);
 
 vm_offset_t gzalloc_alloc(zone_t, boolean_t);
@@ -355,7 +400,47 @@ boolean_t gzalloc_element_size(void *, zone_t *, vm_size_t *);
 void zlog_btlog_lock(__unused void *);
 void zlog_btlog_unlock(__unused void *);
 
+#ifdef MACH_KERNEL_PRIVATE
+#define MAX_ZONE_NAME	32	/* max length of a zone name we can take from the boot-args */
+int track_this_zone(const char *zonename, const char *logname);
+#endif
+
+#if DEBUG || DEVELOPMENT
+extern boolean_t run_zone_test(void);
+extern vm_size_t zone_element_info(void *addr, vm_tag_t * ptag);
+#endif /* DEBUG || DEVELOPMENT */
+
 #endif	/* XNU_KERNEL_PRIVATE */
+
+/* Allocate from zone */
+extern void *	zalloc(
+					zone_t		zone);
+
+/* Non-blocking version of zalloc */
+extern void *	zalloc_noblock(
+					zone_t		zone);
+
+/* Free zone element */
+extern void		zfree(
+					zone_t		zone,
+					void 		*elem);
+
+/* Create zone */
+extern zone_t	zinit(
+					vm_size_t	size,		/* the size of an element */
+					vm_size_t	maxmem,		/* maximum memory to use */
+					vm_size_t	alloc,		/* allocation size */
+					const char	*name);		/* a name for the zone */
+
+/* Change zone parameters */
+extern void		zone_change(
+					zone_t			zone,
+					unsigned int	item,
+					boolean_t		value);
+
+/* Destroy the zone */
+extern void		zdestroy(
+					zone_t		zone);
 
 __END_DECLS
 

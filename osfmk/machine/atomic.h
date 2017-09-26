@@ -29,18 +29,12 @@
 #ifndef _MACHINE_ATOMIC_H
 #define _MACHINE_ATOMIC_H
 
-/* This should be in stdatomic.h once supported by compiler */
-enum memory_order {
-    memory_order_relaxed,
-    memory_order_consume,
-    memory_order_acquire,
-    memory_order_release,
-    memory_order_acq_rel,
-    memory_order_seq_cst
-};
+#include <stdatomic.h>
 
 #if defined (__x86_64__)
 #include "i386/atomic.h"
+#elif defined (__arm__) || defined (__arm64__)
+#include "arm/atomic.h"
 #else
 #error architecture not supported
 #endif

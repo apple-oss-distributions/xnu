@@ -106,6 +106,14 @@ COMMPAGE_DESCRIPTOR_NAME(label) ## :				;\
 
 #define UNIQUEID(name)	L ## name
 
+/* COMMPAGE_JMP(target,from,start)
+ *
+ * This macro perform a jump to another commpage routine.
+ * Used to return from the PFZ by jumping via a return outside the PFZ.
+ */
+#define COMMPAGE_JMP(target,from,start)				\
+	jmp      L ## start - from + target
+
 #else /* __ASSEMBLER__ */
 
 /* Each potential commpage routine is described by one of these.
@@ -134,12 +142,11 @@ typedef	volatile struct	commpage_time_data	{
 	uint64_t	gtod_sec_base;				// _COMM_PAGE_GTOD_SEC_BASE
 } commpage_time_data;
 
-
 extern	char	*commPagePtr32;				// virt address of 32-bit commpage in kernel map
 extern	char	*commPagePtr64;				// ...and of 64-bit commpage
 
-extern	void	commpage_set_timestamp(uint64_t abstime, uint64_t secs);
-extern	void	commpage_disable_timestamp( void );
+extern  void	commpage_set_timestamp(uint64_t abstime, uint64_t sec, uint64_t frac, uint64_t scale, uint64_t tick_per_sec);
+#define commpage_disable_timestamp() commpage_set_timestamp( 0, 0, 0, 0, 0 );
 extern  void	commpage_set_nanotime(uint64_t tsc_base, uint64_t ns_base, uint32_t scale, uint32_t shift);
 extern	void	commpage_set_memory_pressure(unsigned int  pressure);
 extern	void	commpage_set_spin_count(unsigned int  count);

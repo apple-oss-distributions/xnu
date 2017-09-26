@@ -169,6 +169,7 @@ struct accessx_descriptor {
 #define	_PC_SYMLINK_MAX		24	/* Max # of bytes in symlink name */
 #define	_PC_SYNC_IO		25	/* Sync I/O [SIO] supported? */
 #define _PC_XATTR_SIZE_BITS 	26	/* # of bits to represent maximum xattr size */
+#define _PC_MIN_HOLE_SIZE	27	/* Recommended minimum hole size for sparse files */
 
 /* configurable system strings */
 #define	_CS_PATH		 1
@@ -179,11 +180,14 @@ struct accessx_descriptor {
 #include <machine/_types.h>
 #include <sys/_types/_size_t.h>
 #include <_types/_uint64_t.h>
+#include <_types/_uint32_t.h>
 #include <Availability.h>
 
 __BEGIN_DECLS
 
-int getattrlistbulk(int, void *, void *, size_t, uint64_t) __OSX_AVAILABLE_STARTING(__MAC_10_10, __IPHONE_8_0);
+int	getattrlistbulk(int, void *, void *, size_t, uint64_t) __OSX_AVAILABLE_STARTING(__MAC_10_10, __IPHONE_8_0);
+int	getattrlistat(int, const char *, void *, void *, size_t, unsigned long) __OSX_AVAILABLE_STARTING(__MAC_10_10, __IPHONE_8_0);
+int	setattrlistat(int, const char *, void *, void *, size_t, uint32_t) __OSX_AVAILABLE(10.13) __IOS_AVAILABLE(11.0) __TVOS_AVAILABLE(11.0) __WATCHOS_AVAILABLE(4.0);
 
 __END_DECLS
 
@@ -207,7 +211,6 @@ int	linkat(int, const char *, int, const char *, int)	__OSX_AVAILABLE_STARTING(_
 ssize_t readlinkat(int, const char *, char *, size_t)	__OSX_AVAILABLE_STARTING(__MAC_10_10, __IPHONE_8_0);
 int	symlinkat(const char *, int, const char *) __OSX_AVAILABLE_STARTING(__MAC_10_10, __IPHONE_8_0);
 int	unlinkat(int, const char *, int) __OSX_AVAILABLE_STARTING(__MAC_10_10, __IPHONE_8_0);
-int	getattrlistat(int, const char *, void *, void *, size_t, unsigned long) __OSX_AVAILABLE_STARTING(__MAC_10_10, __IPHONE_8_0);
 
 __END_DECLS
 

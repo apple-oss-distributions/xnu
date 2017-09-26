@@ -147,6 +147,7 @@ struct kev_in_portinuse {
 #ifdef BSD_KERNEL_PRIVATE
 #include <net/if.h>
 #include <net/if_var.h>
+#include <net/if_llatbl.h>
 #include <kern/locks.h>
 #include <sys/tree.h>
 /*
@@ -335,10 +336,10 @@ struct in_multi {
 };
 
 #define	INM_LOCK_ASSERT_HELD(_inm)					\
-	lck_mtx_assert(&(_inm)->inm_lock, LCK_MTX_ASSERT_OWNED)
+	LCK_MTX_ASSERT(&(_inm)->inm_lock, LCK_MTX_ASSERT_OWNED)
 
 #define	INM_LOCK_ASSERT_NOTHELD(_inm)					\
-	lck_mtx_assert(&(_inm)->inm_lock, LCK_MTX_ASSERT_NOTOWNED)
+	LCK_MTX_ASSERT(&(_inm)->inm_lock, LCK_MTX_ASSERT_NOTOWNED)
 
 #define	INM_LOCK(_inm)							\
 	lck_mtx_lock(&(_inm)->inm_lock)
@@ -462,14 +463,17 @@ struct inpcb;
 struct in_ifextra {
 	uint32_t		netsig_len;
 	u_int8_t		netsig[IFNET_SIGNATURELEN];
+	struct lltable		*ii_llt;	/* ARP state */
 };
 #define	IN_IFEXTRA(_ifp)	((struct in_ifextra *)(_ifp->if_inetdata))
+#define LLTABLE(ifp)		((IN_IFEXTRA(ifp) == NULL) ? NULL : IN_IFEXTRA(ifp)->ii_llt)
 
 extern u_int32_t ipv4_ll_arp_aware;
 
 extern void in_ifaddr_init(void);
-extern int imo_multi_filter(const struct ip_moptions *, const struct ifnet *,
-    const struct sockaddr *, const struct sockaddr *);
+extern int imo_multi_filter(const struct ip_moptions *,
+    const struct ifnet *, const struct sockaddr_in *,
+    const struct sockaddr_in *);
 extern int imo_clone(struct inpcb *, struct inpcb *);
 extern void inm_commit(struct in_multi *);
 extern void inm_clear_recorded(struct in_multi *);
@@ -497,9 +501,6 @@ extern int in_ifadown(struct ifaddr *ifa, int);
 extern void in_ifscrub(struct ifnet *, struct in_ifaddr *, int);
 extern u_int32_t inaddr_hashval(u_int32_t);
 extern void in_purgeaddrs(struct ifnet *);
-extern int in_selectaddrs(int af, struct sockaddr_list **,
-    struct sockaddr_entry **, struct sockaddr_list **,
-    struct sockaddr_entry **);
 extern void gre_input(struct mbuf *, int);
 extern void imf_leave(struct in_mfilter *);
 extern void imf_purge(struct in_mfilter *);

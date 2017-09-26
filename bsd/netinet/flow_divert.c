@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2016 Apple Inc. All rights reserved.
+ * Copyright (c) 2012-2017 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -601,6 +601,7 @@ flow_divert_add_data_statistics(struct flow_divert_pcb *fd_cb, int data_len, Boo
 		INP_ADD_STAT(inp, cell, wifi, wired, rxpackets, 1);
 		INP_ADD_STAT(inp, cell, wifi, wired, rxbytes, data_len);
 	}
+	inp_set_activity_bitmap(inp);
 }
 
 static errno_t
@@ -1037,7 +1038,11 @@ flow_divert_create_connect_packet(struct flow_divert_pcb *fd_cb, struct sockaddr
 	if (signing_id != NULL) {
 		uint16_t result = NULL_TRIE_IDX;
 		lck_rw_lock_shared(&fd_cb->group->lck);
-		result = flow_divert_trie_search(&fd_cb->group->signing_id_trie, (uint8_t *)signing_id);
+		if (fd_cb->group->flags & FLOW_DIVERT_GROUP_FLAG_NO_APP_MAP) {
+			result = 1;
+		} else {
+			result = flow_divert_trie_search(&fd_cb->group->signing_id_trie, (uint8_t *)signing_id);
+		}
 		lck_rw_done(&fd_cb->group->lck);
 		if (result != NULL_TRIE_IDX) {
 			error = 0;
@@ -1360,9 +1365,11 @@ flow_divert_send_data_packet(struct flow_divert_pcb *fd_cb, mbuf_t data, size_t 
 		}
 	}
 
-	last = m_last(packet);
-	mbuf_setnext(last, data);
-	mbuf_pkthdr_adjustlen(packet, data_len);
+	if (data_len > 0 && data != NULL) {
+		last = m_last(packet);
+		mbuf_setnext(last, data);
+		mbuf_pkthdr_adjustlen(packet, data_len);
+	}
 	error = flow_divert_send_packet(fd_cb, packet, force);
 
 	if (error) {
@@ -1447,11 +1454,15 @@ flow_divert_send_buffered_data(struct flow_divert_pcb *fd_cb, Boolean force)
 				}
 			}
 			data_len = mbuf_pkthdr_len(m);
-			FDLOG(LOG_DEBUG, fd_cb, "mbuf_copym() data_len = %lu", data_len);
-			error = mbuf_copym(m, 0, data_len, MBUF_DONTWAIT, &data);
-			if (error) {
-				FDLOG(LOG_ERR, fd_cb, "mbuf_copym failed: %d", error);
-				break;
+			if (data_len > 0) {
+				FDLOG(LOG_DEBUG, fd_cb, "mbuf_copym() data_len = %lu", data_len);
+				error = mbuf_copym(m, 0, data_len, MBUF_DONTWAIT, &data);
+				if (error) {
+					FDLOG(LOG_ERR, fd_cb, "mbuf_copym failed: %d", error);
+					break;
+				}
+			} else {
+				data = NULL;
 			}
 			error = flow_divert_send_data_packet(fd_cb, data, data_len, toaddr, force);
 			if (error) {
@@ -1551,7 +1562,7 @@ flow_divert_send_app_data(struct flow_divert_pcb *fd_cb, mbuf_t data, struct soc
 			}
 		}
 	} else if (SOCK_TYPE(fd_cb->so) == SOCK_DGRAM) {
-		if (to_send) {
+		if (to_send || mbuf_pkthdr_len(data) == 0) {
 			error = flow_divert_send_data_packet(fd_cb, data, to_send, toaddr, FALSE);
 			if (error) {
 				FDLOG(LOG_ERR, fd_cb, "flow_divert_send_data_packet failed. send data size = %lu", to_send);
@@ -2041,6 +2052,7 @@ flow_divert_handle_group_init(struct flow_divert_group *group, mbuf_t packet, in
 	int error = 0;
 	uint32_t key_size = 0;
 	int log_level;
+	uint32_t flags = 0;
 
 	error = flow_divert_packet_get_tlv(packet, offset, FLOW_DIVERT_TLV_TOKEN_KEY, 0, NULL, &key_size);
 	if (error) {
@@ -2071,6 +2083,11 @@ flow_divert_handle_group_init(struct flow_divert_group *group, mbuf_t packet, in
 	}
 
 	group->token_key_size = key_size;
+
+	error = flow_divert_packet_get_tlv(packet, offset, FLOW_DIVERT_TLV_FLAGS, sizeof(flags), &flags, NULL);
+	if (!error) {
+		group->flags = flags;
+	}
 
 	lck_rw_done(&group->lck);
 }
@@ -2823,13 +2840,9 @@ done:
 }
 
 static int
-flow_divert_connectx_out_common(struct socket *so, int af,
-    struct sockaddr_list **src_sl, struct sockaddr_list **dst_sl,
-    struct proc *p, uint32_t ifscope __unused, sae_associd_t aid __unused,
-    sae_connid_t *pcid, uint32_t flags __unused, void *arg __unused,
-    uint32_t arglen __unused, struct uio *auio, user_ssize_t *bytes_written)
+flow_divert_connectx_out_common(struct socket *so, struct sockaddr *dst,
+    struct proc *p, sae_connid_t *pcid, struct uio *auio, user_ssize_t *bytes_written)
 {
-	struct sockaddr_entry *src_se = NULL, *dst_se = NULL;
 	struct inpcb *inp = sotoinpcb(so);
 	int error;
 
@@ -2837,20 +2850,9 @@ flow_divert_connectx_out_common(struct socket *so, int af,
 		return (EINVAL);
 	}
 
-	VERIFY(dst_sl != NULL);
+	VERIFY(dst != NULL);
 
-	/* select source (if specified) and destination addresses */
-	error = in_selectaddrs(af, src_sl, &src_se, dst_sl, &dst_se);
-	if (error != 0) {
-		return (error);
-	}
-
-	VERIFY(*dst_sl != NULL && dst_se != NULL);
-	VERIFY(src_se == NULL || *src_sl != NULL);
-	VERIFY(dst_se->se_addr->sa_family == af);
-	VERIFY(src_se == NULL || src_se->se_addr->sa_family == af);
-
-	error = flow_divert_connect_out(so, dst_se->se_addr, p);
+	error = flow_divert_connect_out(so, dst, p);
 
 	if (error != 0) {
 		return error;
@@ -2893,26 +2895,22 @@ flow_divert_connectx_out_common(struct socket *so, int af,
 }
 
 static int
-flow_divert_connectx_out(struct socket *so, struct sockaddr_list **src_sl,
-    struct sockaddr_list **dst_sl, struct proc *p, uint32_t ifscope,
-    sae_associd_t aid, sae_connid_t *pcid, uint32_t flags, void *arg,
-    uint32_t arglen, struct uio *uio, user_ssize_t *bytes_written)
+flow_divert_connectx_out(struct socket *so, struct sockaddr *src __unused,
+    struct sockaddr *dst, struct proc *p, uint32_t ifscope __unused,
+    sae_associd_t aid __unused, sae_connid_t *pcid, uint32_t flags __unused, void *arg __unused,
+    uint32_t arglen __unused, struct uio *uio, user_ssize_t *bytes_written)
 {
-#pragma unused(uio, bytes_written)
-	return (flow_divert_connectx_out_common(so, AF_INET, src_sl, dst_sl,
-	    p, ifscope, aid, pcid, flags, arg, arglen, uio, bytes_written));
+	return (flow_divert_connectx_out_common(so, dst, p, pcid, uio, bytes_written));
 }
 
 #if INET6
 static int
-flow_divert_connectx6_out(struct socket *so, struct sockaddr_list **src_sl,
-    struct sockaddr_list **dst_sl, struct proc *p, uint32_t ifscope,
-    sae_associd_t aid, sae_connid_t *pcid, uint32_t flags, void *arg,
-    uint32_t arglen, struct uio *uio, user_ssize_t *bytes_written)
+flow_divert_connectx6_out(struct socket *so, struct sockaddr *src __unused,
+    struct sockaddr *dst, struct proc *p, uint32_t ifscope __unused,
+    sae_associd_t aid __unused, sae_connid_t *pcid, uint32_t flags __unused, void *arg __unused,
+    uint32_t arglen __unused, struct uio *uio, user_ssize_t *bytes_written)
 {
-#pragma unused(uio, bytes_written)
-	return (flow_divert_connectx_out_common(so, AF_INET6, src_sl, dst_sl,
-	    p, ifscope, aid, pcid, flags, arg, arglen, uio, bytes_written));
+	return (flow_divert_connectx_out_common(so, dst, p, pcid, uio, bytes_written));
 }
 #endif /* INET6 */
 
@@ -3152,7 +3150,7 @@ flow_divert_preconnect(struct socket *so)
 		fd_cb->flags |= FLOW_DIVERT_CONNECT_STARTED;
 	}
 
-	so->so_flags1 &= ~SOF1_PRECONNECT_DATA;
+	soclearfastopen(so);
 
 	return error;
 }
@@ -3396,6 +3394,9 @@ flow_divert_token_set(struct socket *so, struct sockopt *sopt)
 	error = flow_divert_packet_get_tlv(token, 0, FLOW_DIVERT_TLV_KEY_UNIT, sizeof(key_unit), (void *)&key_unit, NULL);
 	if (!error) {
 		key_unit = ntohl(key_unit);
+		if (key_unit >= GROUP_COUNT_MAX) {
+			key_unit = 0;
+		}
 	} else if (error != ENOENT) {
 		FDLOG(LOG_ERR, &nil_pcb, "Failed to get the key unit from the token: %d", error);
 		goto done;

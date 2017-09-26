@@ -113,6 +113,10 @@
 #include <mach/vm_statistics.h>
 #include <machine/task.h>
 
+#if MONOTONIC
+#include <machine/monotonic.h>
+#endif /* MONOTONIC */
+
 #include <kern/cpu_data.h>
 #include <kern/queue.h>
 #include <kern/exception.h>
@@ -122,6 +126,7 @@
 
 #include <kern/thread.h>
 #include <mach/coalition.h>
+#include <stdatomic.h>
 
 #ifdef CONFIG_ATM
 #include <atm/atm_internal.h>
@@ -137,14 +142,12 @@ struct _cpu_time_qos_stats {
         uint64_t cpu_time_qos_user_interactive;
 };
 
-#ifdef CONFIG_BANK
 #include <bank/bank_internal.h>
-#endif
 
 struct task {
 	/* Synchronization/destruction information */
 	decl_lck_mtx_data(,lock)		/* Task's lock */
-	uint32_t	ref_count;	/* Number of references to me */
+	_Atomic uint32_t	ref_count;	/* Number of references to me */
 	boolean_t	active;		/* Task has not been terminated */
 	boolean_t	halting;	/* Task is being halted */
 
@@ -183,6 +186,7 @@ struct task {
 	/* Statistics */
 	uint64_t		total_user_time;	/* terminated threads only */
 	uint64_t		total_system_time;
+	uint64_t		total_ptime;
 	
 	/* Virtual timers */
 	uint32_t		vtimers;
@@ -232,7 +236,7 @@ struct task {
 	void *bsd_info;
 #endif  
 	kcdata_descriptor_t		corpse_info;
-	void *				corpse_info_kernel;
+	uint64_t			crashed_thread_id;
 	queue_chain_t			corpse_tasks;
 #ifdef CONFIG_MACF
 	struct label *			crash_label;
@@ -249,6 +253,9 @@ struct task {
 #define TF_CORPSE               0x00000020                              /* task is a corpse */
 #define TF_PENDING_CORPSE       0x00000040                              /* task corpse has not been reported yet */
 #define TF_CORPSE_FORK          0x00000080                              /* task is a forked corpse */
+#define TF_LRETURNWAIT          0x00000100                              /* task is waiting for fork/posix_spawn/exec to complete */
+#define TF_LRETURNWAITER        0x00000200                              /* task is waiting for TF_LRETURNWAIT to get cleared */
+#define TF_PLATFORM             0x00000400                              /* task is a platform binary */
 
 #define task_has_64BitAddr(task)	\
 	 (((task)->t_flags & TF_64B_ADDR) != 0)
@@ -277,6 +284,17 @@ struct task {
 #define task_is_a_corpse_fork(task)	\
 	(((task)->t_flags & TF_CORPSE_FORK) != 0)
 
+	uint32_t t_procflags;                                            /* general-purpose task flags protected by proc_lock (PL) */
+#define TPF_NONE                 0
+#define TPF_DID_EXEC             0x00000001                              /* task has been execed to a new task */
+#define TPF_EXEC_COPY            0x00000002                              /* task is the new copy of an exec */
+
+#define task_did_exec_internal(task)		\
+	(((task)->t_procflags & TPF_DID_EXEC) != 0)
+
+#define task_is_exec_copy_internal(task)	\
+	(((task)->t_procflags & TPF_EXEC_COPY) != 0)
+
 	mach_vm_address_t	all_image_info_addr; /* dyld __all_image_info     */
 	mach_vm_size_t		all_image_info_size; /* section location and size */
 
@@ -301,13 +319,16 @@ struct task {
 	uint64_t rusage_cpu_perthr_interval;    /* Per-thread CPU limit interval */
 	uint64_t rusage_cpu_deadline;
 	thread_call_t rusage_cpu_callt;
+#if CONFIG_EMBEDDED
+	queue_head_t	task_watchers;		/* app state watcher threads */
+	int	num_taskwatchers;
+	int		watchapplying;
+#endif /* CONFIG_EMBEDDED */
 
 #if CONFIG_ATM
 	struct atm_task_descriptor *atm_context;  /* pointer to per task atm descriptor */
 #endif
-#if CONFIG_BANK
 	struct bank_task *bank_context;  /* pointer to per task bank structure */
-#endif
 
 #if IMPORTANCE_INHERITANCE
 	struct ipc_importance_task  *task_imp_base;	/* Base of IPC importance chain */
@@ -332,6 +353,12 @@ struct task {
 			low_mem_privileged_listener	:1,	/* if set, task would like to know about pressure changes before other tasks on the system */
 	                mem_notify_reserved		:27;	/* reserved for future use */
 
+	uint32_t memlimit_is_active                 :1, /* if set, use active attributes, otherwise use inactive attributes */
+                memlimit_is_fatal                   :1, /* if set, exceeding current memlimit will prove fatal to the task */
+		memlimit_active_exc_resource        :1, /* if set, suppress exc_resource exception when task exceeds active memory limit */
+		memlimit_inactive_exc_resource      :1, /* if set, suppress exc_resource exception when task exceeds inactive memory limit */
+		memlimit_attrs_reserved             :28; /* reserved for future use */
+
 	io_stat_info_t 		task_io_stats;
 	uint64_t 		task_immediate_writes __attribute__((aligned(8)));
 	uint64_t 		task_deferred_writes __attribute__((aligned(8)));
@@ -348,6 +375,11 @@ struct task {
 	uint32_t	task_timer_wakeups_bin_2;
 	uint64_t	task_gpu_ns;
 	uint64_t	task_energy;
+
+#if MONOTONIC
+	/* Read and written under task_lock */
+	struct mt_task task_monotonic;
+#endif /* MONOTONIC */
 
 	/* # of purgeable volatile VM objects owned by this task: */
 	int		task_volatile_objects;
@@ -387,7 +419,7 @@ struct task {
 };
 
 #define task_lock(task)		 	lck_mtx_lock(&(task)->lock)
-#define	task_lock_assert_owned(task)	lck_mtx_assert(&(task)->lock, LCK_MTX_ASSERT_OWNED)
+#define	task_lock_assert_owned(task)	LCK_MTX_ASSERT(&(task)->lock, LCK_MTX_ASSERT_OWNED)
 #define task_lock_try(task)	 	lck_mtx_try_lock(&(task)->lock)
 #define task_unlock(task)	 	lck_mtx_unlock(&(task)->lock)
 
@@ -403,10 +435,10 @@ extern void task_reference_internal(task_t task);
 extern uint32_t task_deallocate_internal(task_t task);
 #else
 #define task_reference_internal(task)		\
-			(void)hw_atomic_add(&(task)->ref_count, 1)
+			(void)atomic_fetch_add_explicit(&(task)->ref_count, 1, memory_order_relaxed)
 
 #define task_deallocate_internal(task)		\
-			hw_atomic_sub(&(task)->ref_count, 1)
+			(atomic_fetch_sub_explicit(&task->ref_count, 1, memory_order_release) - 1)
 #endif
 
 #define task_reference(task)					\
@@ -443,6 +475,12 @@ extern task_t	current_task(void);
 extern void		task_reference(task_t	task);
 
 #define TF_NONE                 0
+#define TF_LRETURNWAIT          0x00000100                              /* task is waiting for fork/posix_spawn/exec to complete */
+#define TF_LRETURNWAITER        0x00000200                              /* task is waiting for TF_LRETURNWAIT to get cleared */
+
+#define TPF_NONE                0
+#define TPF_EXEC_COPY           0x00000002                              /* task is the new copy of an exec */
+
 
 __END_DECLS
 
@@ -528,19 +566,28 @@ extern kern_return_t	task_create_internal(
 							boolean_t	inherit_memory,
 							boolean_t	is_64bit,
 							uint32_t	flags,
+							uint32_t	procflags,
 							task_t		*child_task);	/* OUT */
 
+extern kern_return_t	task_info(
+							task_t			task,
+							task_flavor_t		flavor,
+							task_info_t		task_info_out,
+							mach_msg_type_number_t	*task_info_count);
 
 extern void 		task_power_info_locked(
 							task_t			task,
 							task_power_info_t	info,
-							gpu_energy_data_t gpu_energy,
-							uint64_t *task_power);
+							gpu_energy_data_t	gpu_energy,
+							task_power_info_v2_t	infov2);
 
 extern uint64_t		task_gpu_utilisation(
 							task_t	 task);
 
 extern uint64_t		task_energy(
+							task_t	 task);
+
+extern uint64_t		task_cpu_ptime(
 							task_t	 task);
 
 extern void		task_vtimer_set(
@@ -564,6 +611,10 @@ extern void		task_set_64bit(
 					task_t		task,
 					boolean_t	is64bit);
 
+extern void 	task_set_platform_binary(
+					task_t task,
+					boolean_t is_platform);
+
 extern void		task_backing_store_privileged(
 					task_t		task);
 
@@ -577,26 +628,35 @@ extern int		get_task_numacts(
 					task_t		task);
 
 extern int get_task_numactivethreads(task_t task);
-extern kern_return_t task_collect_crash_info(task_t task, struct proc *p, int is_corpse_fork);
+
+struct label;
+extern kern_return_t task_collect_crash_info(
+						task_t task,
+#if CONFIG_MACF
+						struct label *crash_label,
+#endif
+						int is_corpse_fork);
 void task_port_notify(mach_msg_header_t *msg);
 void task_wait_till_threads_terminate_locked(task_t task);
 
 /* JMM - should just be temporary (implementation in bsd_kern still) */
 extern void	set_bsdtask_info(task_t,void *);
 extern vm_map_t get_task_map_reference(task_t);
-extern vm_map_t	swap_task_map(task_t, thread_t, vm_map_t, boolean_t);
+extern vm_map_t	swap_task_map(task_t, thread_t, vm_map_t);
 extern pmap_t	get_task_pmap(task_t);
 extern uint64_t	get_task_resident_size(task_t);
 extern uint64_t	get_task_compressed(task_t);
 extern uint64_t	get_task_resident_max(task_t);
 extern uint64_t	get_task_phys_footprint(task_t);
-extern uint64_t	get_task_phys_footprint_max(task_t);
+extern uint64_t	get_task_phys_footprint_recent_max(task_t);
+extern uint64_t	get_task_phys_footprint_lifetime_max(task_t);
 extern uint64_t	get_task_phys_footprint_limit(task_t);
 extern uint64_t	get_task_purgeable_size(task_t);
 extern uint64_t	get_task_cpu_time(task_t);
 extern uint64_t get_task_dispatchqueue_offset(task_t);
 extern uint64_t get_task_dispatchqueue_serialno_offset(task_t);
-extern uint64_t get_task_uniqueid(task_t);
+extern uint64_t get_task_uniqueid(task_t task);
+extern int      get_task_version(task_t task);
 
 extern uint64_t get_task_internal(task_t);
 extern uint64_t get_task_internal_compressed(task_t);
@@ -609,8 +669,16 @@ extern uint64_t get_task_memory_region_count(task_t);
 extern uint64_t get_task_page_table(task_t);
 
 extern kern_return_t task_convert_phys_footprint_limit(int, int *);
-extern kern_return_t task_set_phys_footprint_limit_internal(task_t, int, int *, boolean_t);
+extern kern_return_t task_set_phys_footprint_limit_internal(task_t, int, int *, boolean_t, boolean_t);
 extern kern_return_t task_get_phys_footprint_limit(task_t task, int *limit_mb);
+
+/* Jetsam memlimit attributes */
+extern boolean_t task_get_memlimit_is_active(task_t task);
+extern boolean_t task_get_memlimit_is_fatal(task_t task);
+extern void task_set_memlimit_is_active(task_t task, boolean_t memlimit_is_active);
+extern void task_set_memlimit_is_fatal(task_t task, boolean_t memlimit_is_fatal);
+extern boolean_t task_has_triggered_exc_resource(task_t task, boolean_t memlimit_is_active);
+extern void task_mark_has_triggered_exc_resource(task_t task, boolean_t memlimit_is_active);
 
 extern boolean_t	is_kerneltask(task_t task);
 extern boolean_t	is_corpsetask(task_t task);
@@ -653,21 +721,32 @@ struct _task_ledger_indices {
 #if CONFIG_SCHED_SFI
 	int sfi_wait_times[MAX_SFI_CLASS_ID];
 #endif /* CONFIG_SCHED_SFI */
-#ifdef CONFIG_BANK
 	int cpu_time_billed_to_me;
 	int cpu_time_billed_to_others;
-#endif
 	int physical_writes;
 	int logical_writes;
+	int energy_billed_to_me;
+	int energy_billed_to_others;
 };
 extern struct _task_ledger_indices task_ledgers;
 
 /* requires task to be unlocked, returns a referenced thread */
 thread_t task_findtid(task_t task, uint64_t tid);
+int pid_from_task(task_t task);
 
 extern kern_return_t task_wakeups_monitor_ctl(task_t task, uint32_t *rate_hz, int32_t *flags);
 extern kern_return_t task_cpu_usage_monitor_ctl(task_t task, uint32_t *flags);
+extern void task_rollup_accounting_info(task_t new_task, task_t parent_task);
 extern kern_return_t task_io_monitor_ctl(task_t task, uint32_t *flags);
+extern void task_set_did_exec_flag(task_t task);
+extern void task_clear_exec_copy_flag(task_t task);
+extern boolean_t task_is_exec_copy(task_t);
+extern boolean_t task_did_exec(task_t task);
+extern boolean_t task_is_active(task_t task);
+extern boolean_t task_is_halting(task_t task);
+extern void task_clear_return_wait(task_t task);
+extern void task_wait_to_return(void);
+extern event_t task_get_return_wait_event(task_t task);
 
 extern void task_atm_reset(task_t task);
 extern void task_bank_reset(task_t task);
@@ -681,6 +760,8 @@ extern void      task_set_gpu_denied(task_t task, boolean_t denied);
 extern boolean_t task_is_gpu_denied(task_t task);
 
 extern queue_head_t * task_io_user_clients(task_t task);
+
+extern void task_copy_fields_for_exec(task_t dst_task, task_t src_task);
 
 #endif	/* XNU_KERNEL_PRIVATE */
 
@@ -698,6 +779,7 @@ extern boolean_t get_task_frozen(task_t);
 /* Convert from a task to a port */
 extern ipc_port_t convert_task_to_port(task_t);
 extern ipc_port_t convert_task_name_to_port(task_name_t);
+extern ipc_port_t convert_task_inspect_to_port(task_inspect_t);
 extern ipc_port_t convert_task_suspension_token_to_port(task_suspension_token_t task);
 
 /* Convert from a port (in this case, an SO right to a task's resume port) to a task. */
@@ -727,7 +809,6 @@ extern boolean_t task_could_use_secluded_mem(task_t task);
 
 #if CONFIG_MACF
 extern struct label *get_task_crash_label(task_t task);
-extern void set_task_crash_label(task_t task, struct label *label);
 #endif /* CONFIG_MACF */
 
 #endif	/* KERNEL_PRIVATE */
@@ -739,6 +820,9 @@ extern void		task_deallocate(
 
 extern void		task_name_deallocate(
 					task_name_t		task_name);
+
+extern void		task_inspect_deallocate(
+					task_inspect_t		task_inspect);
 
 extern void		task_suspension_token_deallocate(
 					task_suspension_token_t	token);

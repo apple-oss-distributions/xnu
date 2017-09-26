@@ -112,18 +112,19 @@ int	ubc_setcred(struct vnode *, struct proc *);
 #endif
 
 #include <IOKit/IOBSD.h>
+#include <libkern/section_keywords.h>
 
 static int vn_closefile(struct fileglob *fp, vfs_context_t ctx);
 static int vn_ioctl(struct fileproc *fp, u_long com, caddr_t data,
-			vfs_context_t ctx);
+		vfs_context_t ctx);
 static int vn_read(struct fileproc *fp, struct uio *uio, int flags,
-			vfs_context_t ctx);
+		vfs_context_t ctx);
 static int vn_write(struct fileproc *fp, struct uio *uio, int flags,
-			vfs_context_t ctx);
+		vfs_context_t ctx);
 static int vn_select( struct fileproc *fp, int which, void * wql,
-			vfs_context_t ctx);
+		vfs_context_t ctx);
 static int vn_kqfilt_add(struct fileproc *fp, struct knote *kn,
-			vfs_context_t ctx);
+		struct kevent_internal_s *kev, vfs_context_t ctx);
 static void filt_vndetach(struct knote *kn);
 static int filt_vnode(struct knote *kn, long hint);
 static int filt_vnode_common(struct knote *kn, vnode_t vp, long hint);
@@ -147,10 +148,10 @@ const struct fileops vnops = {
 static int filt_vntouch(struct knote *kn, struct kevent_internal_s *kev);
 static int filt_vnprocess(struct knote *kn, struct filt_process_s *data, struct kevent_internal_s *kev);
 
-struct  filterops vnode_filtops = { 
-	.f_isfd = 1, 
-	.f_attach = NULL, 
-	.f_detach = filt_vndetach, 
+SECURITY_READ_ONLY_EARLY(struct  filterops) vnode_filtops = {
+	.f_isfd = 1,
+	.f_attach = NULL,
+	.f_detach = filt_vndetach,
 	.f_event = filt_vnode,
 	.f_touch = filt_vntouch,
 	.f_process = filt_vnprocess,
@@ -567,6 +568,19 @@ continue_create_lookup:
 		panic("Haven't cleaned up adequately in vn_open_auth()");
 	}
 
+#if DEVELOPMENT || DEBUG
+	/*
+	 * XXX VSWAP: Check for entitlements or special flag here
+	 * so we can restrict access appropriately.
+	 */
+#else /* DEVELOPMENT || DEBUG */
+
+	if (vnode_isswap(vp) && (fmode & (FWRITE | O_TRUNC)) && (ctx != vfs_context_kernel())) {
+		error = EPERM;
+		goto bad;
+	}
+#endif /* DEVELOPMENT || DEBUG */
+
 	/*
 	 * Expect to use this code for filesystems without compound VNOPs, for the root 
 	 * of a filesystem, which can't be "looked up" in the sense of VNOP_LOOKUP(),
@@ -922,7 +936,21 @@ vn_rdwr_64(
 				error = VNOP_READ(vp, auio, ioflg, &context);
 			}
 		} else {
+
+#if DEVELOPMENT || DEBUG
+			/*
+	 		 * XXX VSWAP: Check for entitlements or special flag here
+	 		 * so we can restrict access appropriately.
+	 		 */
 			error = VNOP_WRITE(vp, auio, ioflg, &context);
+#else /* DEVELOPMENT || DEBUG */
+
+			if (vnode_isswap(vp) && ((ioflg & (IO_SWAP_DISPATCH | IO_SKIP_ENCRYPTION)) == 0)) {
+				error = EPERM;
+			} else {
+				error = VNOP_WRITE(vp, auio, ioflg, &context);
+			}
+#endif /* DEVELOPMENT || DEBUG */
 		}
 	}
 
@@ -1017,11 +1045,13 @@ vn_read(struct fileproc *fp, struct uio *uio, int flags, vfs_context_t ctx)
 	count = uio_resid(uio);
 
 	if (vnode_isswap(vp) && !(IO_SKIP_ENCRYPTION & ioflag)) {
+
 		/* special case for swap files */
 		error = vn_read_swapfile(vp, uio);
 	} else {
 		error = VNOP_READ(vp, uio, ioflag, ctx);
 	}
+
 	if ((flags & FOF_OFFSET) == 0) {
 		fp->f_fglob->fg_offset += count - uio_resid(uio);
 		if (offset_locked) {
@@ -1055,6 +1085,21 @@ vn_write(struct fileproc *fp, struct uio *uio, int flags, vfs_context_t ctx)
 	if ( (error = vnode_getwithref(vp)) ) {
 		return(error);
 	}
+
+#if DEVELOPMENT || DEBUG
+	/*
+	 * XXX VSWAP: Check for entitlements or special flag here
+	 * so we can restrict access appropriately.
+	 */
+#else /* DEVELOPMENT || DEBUG */
+
+	if (vnode_isswap(vp)) {
+		(void)vnode_put(vp);
+		error = EPERM;
+		return (error);
+	}
+#endif /* DEVELOPMENT || DEBUG */
+
 
 #if CONFIG_MACF
 	error = mac_vnode_check_write(ctx, vfs_context_ucred(ctx), vp);
@@ -1203,7 +1248,8 @@ error_out:
  *	vnode_getattr:???
  */
 int
-vn_stat_noauth(struct vnode *vp, void *sbptr, kauth_filesec_t *xsec, int isstat64, vfs_context_t ctx)
+vn_stat_noauth(struct vnode *vp, void *sbptr, kauth_filesec_t *xsec, int isstat64,
+	       vfs_context_t ctx, struct ucred *file_cred)
 {
 	struct vnode_attr va;
 	int error;
@@ -1244,6 +1290,19 @@ vn_stat_noauth(struct vnode *vp, void *sbptr, kauth_filesec_t *xsec, int isstat6
 	error = vnode_getattr(vp, &va, ctx);
 	if (error)
 		goto out;
+#if CONFIG_MACF
+	/*
+	 * Give MAC polices a chance to reject or filter the attributes
+	 * returned by the filesystem.  Note that MAC policies are consulted
+	 * *after* calling the filesystem because filesystems can return more
+	 * attributes than were requested so policies wouldn't be authoritative
+	 * is consulted beforehand.  This also gives policies an opportunity
+	 * to change the values of attributes retrieved.
+	 */
+	error = mac_vnode_check_getattr(ctx, file_cred, vp, &va);
+	if (error)
+		goto out;
+#endif
 	/*
 	 * Copy from vattr table
 	 */
@@ -1284,7 +1343,7 @@ vn_stat_noauth(struct vnode *vp, void *sbptr, kauth_filesec_t *xsec, int isstat6
 	};
 	if (isstat64 != 0) {
 		sb64->st_mode = mode;
-		sb64->st_nlink = VATTR_IS_SUPPORTED(&va, va_nlink) ? (u_int16_t)va.va_nlink : 1;
+		sb64->st_nlink = VATTR_IS_SUPPORTED(&va, va_nlink) ? va.va_nlink > UINT16_MAX ? UINT16_MAX : (u_int16_t)va.va_nlink : 1;
 		sb64->st_uid = va.va_uid;
 		sb64->st_gid = va.va_gid;
 		sb64->st_rdev = va.va_rdev;
@@ -1302,7 +1361,7 @@ vn_stat_noauth(struct vnode *vp, void *sbptr, kauth_filesec_t *xsec, int isstat6
 		sb64->st_blocks = roundup(va.va_total_alloc, 512) / 512;
 	} else {
 		sb->st_mode = mode;
-		sb->st_nlink = VATTR_IS_SUPPORTED(&va, va_nlink) ? (u_int16_t)va.va_nlink : 1;
+		sb->st_nlink = VATTR_IS_SUPPORTED(&va, va_nlink) ? va.va_nlink > UINT16_MAX ? UINT16_MAX : (u_int16_t)va.va_nlink : 1;
 		sb->st_uid = va.va_uid;
 		sb->st_gid = va.va_gid;
 		sb->st_rdev = va.va_rdev;
@@ -1388,7 +1447,7 @@ vn_stat(struct vnode *vp, void *sb, kauth_filesec_t *xsec, int isstat64, vfs_con
 		return(error);
 
 	/* actual stat */
-	return(vn_stat_noauth(vp, sb, xsec, isstat64, ctx));
+	return(vn_stat_noauth(vp, sb, xsec, isstat64, ctx, NOCRED));
 }
 
 
@@ -1628,12 +1687,13 @@ vn_pathconf(vnode_t vp, int name, int32_t *retval, vfs_context_t ctx)
 }
 
 static int
-vn_kqfilt_add(struct fileproc *fp, struct knote *kn, vfs_context_t ctx)
+vn_kqfilt_add(struct fileproc *fp, struct knote *kn,
+		struct kevent_internal_s *kev, vfs_context_t ctx)
 {
 	struct vnode *vp;
 	int error = 0;
 	int result = 0;
-	
+
 	vp = (struct vnode *)fp->f_fglob->fg_data;
 
 	/*
@@ -1651,7 +1711,7 @@ vn_kqfilt_add(struct fileproc *fp, struct knote *kn, vfs_context_t ctx)
 
 				} else if (!vnode_isreg(vp)) {
 					if (vnode_ischr(vp)) {
-						result = spec_kqfilter(vp, kn);
+						result = spec_kqfilter(vp, kn, kev);
 						if ((kn->kn_flags & EV_ERROR) == 0) {
 							/* claimed by a special device */
 							vnode_put(vp);

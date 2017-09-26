@@ -74,9 +74,9 @@
 #include <ipc/ipc_port.h>
 
 #include <kern/kern_types.h>
-#include <kern/spl.h>
 
 #include <vm/vm_map.h>
+#include <libkern/section_keywords.h>
 
 /*
  *	Routine:	ipc_pset_alloc
@@ -321,8 +321,6 @@ void
 ipc_pset_destroy(
 	ipc_pset_t	pset)
 {
-	spl_t		s;
-
 	assert(ips_active(pset));
 
 	pset->ips_object.io_bits &= ~IO_BITS_ACTIVE;
@@ -332,16 +330,14 @@ ipc_pset_destroy(
 	 * AND remove this message queue from any containing sets
 	 */
 	ipc_mqueue_remove_all(&pset->ips_messages);
-	
+
 	/*
 	 * Set all waiters on the portset running to
 	 * discover the change.
 	 */
-	s = splsched();
 	imq_lock(&pset->ips_messages);
 	ipc_mqueue_changed(&pset->ips_messages);
 	imq_unlock(&pset->ips_messages);
-	splx(s);
 
 	ipc_mqueue_deinit(&pset->ips_messages);
 
@@ -354,31 +350,32 @@ ipc_pset_destroy(
 #include <sys/event.h>
 #include <sys/errno.h>
 
-static int      filt_machportattach(struct knote *kn);
+static int      filt_machportattach(struct knote *kn, struct kevent_internal_s *kev);
 static void	filt_machportdetach(struct knote *kn);
 static int	filt_machport(struct knote *kn, long hint);
 static int     filt_machporttouch(struct knote *kn, struct kevent_internal_s *kev);
 static int     filt_machportprocess(struct knote *kn, struct filt_process_s *data, struct kevent_internal_s *kev);
 static unsigned filt_machportpeek(struct knote *kn);
-struct filterops machport_filtops = {
-        .f_attach = filt_machportattach,
-        .f_detach = filt_machportdetach,
-        .f_event = filt_machport,
-        .f_touch = filt_machporttouch,
-        .f_process = filt_machportprocess,
+SECURITY_READ_ONLY_EARLY(struct filterops) machport_filtops = {
+	.f_adjusts_qos = 1,
+	.f_attach = filt_machportattach,
+	.f_detach = filt_machportdetach,
+	.f_event = filt_machport,
+	.f_touch = filt_machporttouch,
+	.f_process = filt_machportprocess,
 	.f_peek = filt_machportpeek,
 };
 
 static int
 filt_machportattach(
-        struct knote *kn)
+		struct knote *kn,
+		__unused struct kevent_internal_s *kev)
 {
 	mach_port_name_t name = (mach_port_name_t)kn->kn_kevent.ident;
 	uint64_t wq_link_id = waitq_link_reserve(NULL);
 	ipc_space_t space = current_space();
 	ipc_kmsg_t first;
 
-	spl_t s;
 	int error;
 	int result = 0;
 	kern_return_t kr;
@@ -394,11 +391,12 @@ filt_machportattach(
 
 			__IGNORE_WCASTALIGN(pset = (ipc_pset_t)entry->ie_object);
 			mqueue = &pset->ips_messages;
+			ips_reference(pset);
 
-			s = splsched();
 			imq_lock(mqueue);
+			kn->kn_ptr.p_mqueue = mqueue;
 
-			/* 
+			/*
 			 * Bind the portset wait queue directly to knote/kqueue.
 			 * This allows us to just use wait_queue foo to effect a wakeup,
 			 * rather than having to call knote() from the Mach code on each
@@ -407,13 +405,16 @@ filt_machportattach(
 			 */
 			error = knote_link_waitq(kn, &mqueue->imq_wait_queue, &wq_link_id);
 			if (!error) {
-				ips_reference(pset);
-				kn->kn_ptr.p_mqueue = mqueue; 
 				KNOTE_ATTACH(&mqueue->imq_klist, kn);
+				imq_unlock(mqueue);
+
 			}
-			imq_unlock(mqueue);
-			splx(s);
-			
+			else {
+				kn->kn_ptr.p_mqueue = IMQ_NULL;
+				imq_unlock(mqueue);
+				ips_release(pset);
+			}
+
 			is_read_unlock(space);
 
 			/*
@@ -428,7 +429,7 @@ filt_machportattach(
 			__IGNORE_WCASTALIGN(port = (ipc_port_t)entry->ie_object);
 			mqueue = &port->ip_messages;
 			ip_reference(port);
-		
+
 			/*
 			 * attach knote to port and determine result
 			 * If the filter requested direct message receipt,
@@ -436,17 +437,17 @@ filt_machportattach(
 			 * reflect the requested and override qos of the
 			 * first message in the queue.
 			 */
-			s = splsched();
 			imq_lock(mqueue);
 			kn->kn_ptr.p_mqueue = mqueue; 
 			KNOTE_ATTACH(&mqueue->imq_klist, kn);
 			if ((first = ipc_kmsg_queue_first(&mqueue->imq_messages)) != IKM_NULL) {
+				int sync_qos_override_index = ipc_port_get_max_sync_qos_index(port);
 				if (kn->kn_sfflags & MACH_RCV_MSG)
-					knote_adjust_qos(kn, first->ikm_qos, first->ikm_qos_override);
+					knote_adjust_qos(kn, first->ikm_qos, first->ikm_qos_override,
+						sync_qos_override_index);
 				result = 1;
 			}
 			imq_unlock(mqueue);
-			splx(s);
 
 			is_read_unlock(space);
 			error = 0;
@@ -482,14 +483,11 @@ filt_machportdetach(
 {
 	ipc_mqueue_t mqueue = kn->kn_ptr.p_mqueue;
 	ipc_object_t object = mqueue_to_object(mqueue);
-	spl_t s;
 
-	s = splsched();
 	imq_lock(mqueue);
 	KNOTE_DETACH(&mqueue->imq_klist, kn);
 	kn->kn_ptr.p_mqueue = IMQ_NULL;
 	imq_unlock(mqueue);
-	splx(s);
 
 	if (io_otype(object) == IOT_PORT_SET) {
 		/*
@@ -541,8 +539,12 @@ filt_machport(
 	} else if (imq_is_valid(mqueue)) {
 		assert(!imq_is_set(mqueue));
 		if ((first = ipc_kmsg_queue_first(&mqueue->imq_messages)) != IKM_NULL) {
+			ipc_port_t port = ip_from_mq(mqueue);
+			int sync_qos_override_index = ipc_port_get_max_sync_qos_index(port);
+
 			if (kn->kn_sfflags & MACH_RCV_MSG)
-				knote_adjust_qos(kn, first->ikm_qos, first->ikm_qos_override);
+				knote_adjust_qos(kn, first->ikm_qos, first->ikm_qos_override,
+					sync_qos_override_index);
 			result = 1;
 		}
 	}
@@ -558,9 +560,7 @@ filt_machporttouch(
 	ipc_mqueue_t mqueue = kn->kn_ptr.p_mqueue;
 	ipc_kmsg_t first;
 	int result = 0;
-	spl_t s;
 
-	s = splsched();
 	imq_lock(mqueue);
 
 	/* copy in new settings and save off new input fflags */
@@ -579,16 +579,20 @@ filt_machporttouch(
 	 */
 	if (imq_is_valid(mqueue) && !imq_is_set(mqueue) &&
 	    (first = ipc_kmsg_queue_first(&mqueue->imq_messages)) != IKM_NULL) {
+		ipc_port_t port = ip_from_mq(mqueue);
+		int sync_qos_override_index = ipc_port_get_max_sync_qos_index(port);
+
 		if (kn->kn_sfflags & MACH_RCV_MSG)
-			knote_adjust_qos(kn, first->ikm_qos, first->ikm_qos_override);
+			knote_adjust_qos(kn, first->ikm_qos, first->ikm_qos_override,
+				sync_qos_override_index);
 		result = 1;
 	} else if (kn->kn_sfflags & MACH_RCV_MSG) {
 		knote_adjust_qos(kn,
 		                 MACH_MSG_PRIORITY_UNSPECIFIED,
-		                 MACH_MSG_PRIORITY_UNSPECIFIED);
+		                 MACH_MSG_PRIORITY_UNSPECIFIED,
+				 THREAD_QOS_UNSPECIFIED);
 	}
 	imq_unlock(mqueue);
-	splx(s);
 
 	return result;
 }
@@ -671,6 +675,7 @@ filt_machportprocess(
 	self->ith_continuation = NULL;
 	option |= MACH_RCV_TIMEOUT; // never wait
 	self->ith_state = MACH_RCV_IN_PROGRESS;
+	self->ith_knote = kn;
 
 	wresult = ipc_mqueue_receive_on_thread(
 			mqueue,

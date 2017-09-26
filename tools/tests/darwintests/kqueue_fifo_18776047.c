@@ -11,11 +11,13 @@
 #include <stdlib.h>
 #include <errno.h>
 
+#include <TargetConditionals.h>
+
 #define TMP_FILE_PATH "/tmp/test_kqueue_fifo_18776047"
 
 #define READ_BUFFER_LEN 256
 
-#if defined(PLATFORM_WatchOS)
+#if TARGET_OS_WATCH
 #define TOTAL_ITERATIONS 5000
 #else
 #define TOTAL_ITERATIONS 10000
@@ -108,7 +110,7 @@ kevent_one_shot(int kq, int fd, int filter)
 	T_ASSERT_POSIX_ZERO(retval, "ONESHOT kevent for fd %d, filter %d", fd, filter);
 }
 
-T_DECL(kqueue_fifo_18776047, "Tests kqueue, kevent for watching a fifo.", T_META("owner", "Core Kernel Team"))
+T_DECL(kqueue_fifo_18776047, "Tests kqueue, kevent for watching a fifo.", T_META_LTEPHASE(LTE_POSTINIT))
 {
 	struct kevent kev[1];
 	int read_fd, write_fd, kq;

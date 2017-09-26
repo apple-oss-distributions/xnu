@@ -812,6 +812,13 @@ SYSCTL_UINT(_machdep_tsc_nanotime, OID_AUTO, generation,
 SYSCTL_NODE(_machdep, OID_AUTO, misc, CTLFLAG_RW|CTLFLAG_LOCKED, 0,
 	"Miscellaneous x86 kernel parameters");
 
+#if (DEVELOPMENT || DEBUG)
+extern uint32_t mp_interrupt_watchdog_events;
+SYSCTL_UINT(_machdep_misc, OID_AUTO, interrupt_watchdog_events,
+	CTLFLAG_RW|CTLFLAG_LOCKED, &mp_interrupt_watchdog_events, 0, "");
+#endif
+
+
 SYSCTL_PROC(_machdep_misc, OID_AUTO, panic_restart_timeout,
 	    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED, 
 	    0, 0,
@@ -839,6 +846,9 @@ SYSCTL_QUAD(_machdep, OID_AUTO, reportphyreadabs,
 SYSCTL_INT(_machdep, OID_AUTO, reportphyreadosbt,
 		CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
 		&reportphyreadosbt, 0, "");
+SYSCTL_INT(_machdep, OID_AUTO, phyreaddelaypanic,
+		CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
+		&phyreadpanic, 0, "");
 
 extern int pmap_pagezero_mitigation;
 extern int pmap_asserts_enabled, pmap_asserts_traced;

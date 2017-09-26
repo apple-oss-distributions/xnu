@@ -104,6 +104,7 @@ struct buf {
 	LIST_ENTRY(buf) b_vnbufs;	/* Buffer's associated vnode. */
 	TAILQ_ENTRY(buf) b_freelist;	/* Free list position if not active. */
 	int	b_timestamp;		/* timestamp for queuing operation */
+	struct timeval b_timestamp_tv; /* microuptime for disk conditioner */
 	int	b_whichq;		/* the free list the buffer belongs to */
 	volatile uint32_t	b_flags;	/* B_* flags. */
 	volatile uint32_t	b_lflags;	/* BL_BUSY | BL_WANTED flags... protected by buf_mtx */
@@ -270,6 +271,7 @@ extern vm_offset_t buf_kernel_addrperm;
 #define BA_ISOCHRONOUS  	0x00001000 /* device specific isochronous throughput to media */
 
 #define BA_STRATEGY_TRACKED_IO  0x00002000 /* tracked by spec_strategy */
+#define BA_IO_TIER_UPGRADE  0x00004000 /* effective I/O tier is higher than BA_IO_TIER */
 
 
 #define GET_BUFATTR_IO_TIER(bap)	((bap->ba_flags & BA_IO_TIER_MASK) >> BA_IO_TIER_SHIFT)

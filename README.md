@@ -81,6 +81,8 @@ Other makefile options
  * $ make REMOTEBUILD=user@remotehost # perform build on remote host
  * $ make BUILD_JSON_COMPILATION_DATABASE=1 # Build Clang JSON Compilation Database
 
+The XNU build system can optionally output color-formatted build output. To enable this, you can either
+set the `XNU_LOGCOLORS` environment variable to `y`, or you can pass `LOGCOLORS=y` to the make command.
 
 
 Debug information formats
@@ -244,6 +246,11 @@ member file lists and their default location are described below -
        Definition -
             INSTALL_KF_MI_LCL_LIST = ${KERNELFILES} ${PRIVATE_KERNELFILES}
 
+    e. `EXPORT_MI_LIST` : Exports header file to all of xnu (bsd/, osfmk/, etc.)
+       for compilation only. Does not install anything into the SDK.
+       Definition -
+            EXPORT_MI_LIST = ${KERNELFILES} ${PRIVATE_KERNELFILES}
+
 If you want to install the header file in a sub-directory of the paths
 described in (1), specify the directory name using two variables
 `INSTALL_MI_DIR` and `EXPORT_MI_DIR` as follows -
@@ -268,7 +275,8 @@ want to export a function only to kernel level but not user level.
        header files installed in all the paths described above in (1) will not
        have code enclosed within this macro.
 
-    b. `KERNEL_PRIVATE` : Same as PRIVATE
+    b. `KERNEL_PRIVATE` : If true, code is available to all of the xnu kernel and Apple
+        internal kernel extensions.
 
     c. `BSD_KERNEL_PRIVATE` : If true, code is available to the xnu/bsd part of
        the kernel and is not available to rest of the kernel, kernel extensions

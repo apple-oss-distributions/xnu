@@ -89,6 +89,7 @@
 #include <net/content_filter.h>
 #include <netinet/in.h>
 #include <netinet/in_pcb.h>
+#include <netinet/tcp_var.h>
 #include <sys/kdebug.h>
 #include <libkern/OSAtomic.h>
 
@@ -142,10 +143,6 @@ int32_t total_sbmb_cnt_floor __attribute__((aligned(8))) = 0;
 int32_t total_sbmb_cnt_peak __attribute__((aligned(8))) = 0;
 int64_t sbmb_limreached __attribute__((aligned(8))) = 0;
 
-/* Control whether to throttle sockets eligible to be throttled */
-__private_extern__ u_int32_t net_io_policy_throttled = 0;
-static int sysctl_io_policy_throttled SYSCTL_HANDLER_ARGS;
-
 u_int32_t net_io_policy_log = 0;	/* log socket policy changes */
 #if CONFIG_PROC_UUID_POLICY
 u_int32_t net_io_policy_uuid = 1;	/* enable UUID socket policy */
@@ -183,7 +180,6 @@ u_int32_t net_io_policy_uuid = 1;	/* enable UUID socket policy */
 void
 soisconnecting(struct socket *so)
 {
-
 	so->so_state &= ~(SS_ISCONNECTED|SS_ISDISCONNECTING);
 	so->so_state |= SS_ISCONNECTING;
 
@@ -193,8 +189,6 @@ soisconnecting(struct socket *so)
 void
 soisconnected(struct socket *so)
 {
-	struct socket *head = so->so_head;
-
 	so->so_state &= ~(SS_ISCONNECTING|SS_ISDISCONNECTING|SS_ISCONFIRMING);
 	so->so_state |= SS_ISCONNECTED;
 
@@ -202,22 +196,44 @@ soisconnected(struct socket *so)
 
 	sflt_notify(so, sock_evt_connected, NULL);
 
-	if (head && (so->so_state & SS_INCOMP)) {
-		so->so_state &= ~SS_INCOMP;
-		so->so_state |= SS_COMP;
+	if (so->so_head != NULL && (so->so_state & SS_INCOMP)) {
+		struct socket *head = so->so_head;
+		int locked = 0;
+		
+		/*
+		 * Enforce lock order when the protocol has per socket locks
+		 */
 		if (head->so_proto->pr_getlock != NULL) {
-			socket_unlock(so, 0);
 			socket_lock(head, 1);
+			so_acquire_accept_list(head, so);
+			locked = 1;
 		}
-		postevent(head, 0, EV_RCONN);
-		TAILQ_REMOVE(&head->so_incomp, so, so_list);
-		head->so_incqlen--;
-		TAILQ_INSERT_TAIL(&head->so_comp, so, so_list);
-		sorwakeup(head);
-		wakeup_one((caddr_t)&head->so_timeo);
-		if (head->so_proto->pr_getlock != NULL) {
+		if (so->so_head == head && (so->so_state & SS_INCOMP)) {
+			so->so_state &= ~SS_INCOMP;
+			so->so_state |= SS_COMP;
+			TAILQ_REMOVE(&head->so_incomp, so, so_list);
+			TAILQ_INSERT_TAIL(&head->so_comp, so, so_list);
+			head->so_incqlen--;
+
+			/*
+			 * We have to release the accept list in
+			 * case a socket callback calls sock_accept()
+			 */
+			if (locked != 0) {
+				so_release_accept_list(head);
+				socket_unlock(so, 0);
+			}
+			postevent(head, 0, EV_RCONN);
+			sorwakeup(head);
+			wakeup_one((caddr_t)&head->so_timeo);
+
+			if (locked != 0) {
+				socket_unlock(head, 1);
+				socket_lock(so, 0);
+			}
+		} else if (locked != 0) {
+			so_release_accept_list(head);
 			socket_unlock(head, 1);
-			socket_lock(so, 0);
 		}
 	} else {
 		postevent(so, 0, EV_WCONN);
@@ -235,7 +251,6 @@ socanwrite(struct socket *so)
 	return ((so->so_state & SS_ISCONNECTED) ||
 	       !(so->so_proto->pr_flags & PR_CONNREQUIRED) ||
 	       (so->so_flags1 & SOF1_PRECONNECT_DATA));
-
 }
 
 void
@@ -309,7 +324,7 @@ sonewconn_internal(struct socket *head, int connstatus)
 		mutex_held = (*head->so_proto->pr_getlock)(head, 0);
 	else
 		mutex_held = head->so_proto->pr_domain->dom_mtx;
-	lck_mtx_assert(mutex_held, LCK_MTX_ASSERT_OWNED);
+	LCK_MTX_ASSERT(mutex_held, LCK_MTX_ASSERT_OWNED);
 
 	if (!soqlencomp) {
 		/*
@@ -420,6 +435,8 @@ sonewconn_internal(struct socket *head, int connstatus)
 	atomic_add_32(&so->so_proto->pr_domain->dom_refs, 1);
 
 	/* Insert in head appropriate lists */
+	so_acquire_accept_list(head, NULL);
+
 	so->so_head = head;
 
 	/*
@@ -440,6 +457,8 @@ sonewconn_internal(struct socket *head, int connstatus)
 		head->so_incqlen++;
 	}
 	head->so_qlen++;
+
+	so_release_accept_list(head);
 
 	/* Attach socket filters for this protocol */
 	sflt_initsock(so);
@@ -529,11 +548,11 @@ sbwait(struct sockbuf *sb)
 	}
 
 	if (so->so_proto->pr_getlock != NULL)
-		mutex_held = (*so->so_proto->pr_getlock)(so, 0);
+		mutex_held = (*so->so_proto->pr_getlock)(so, PR_F_WILLUNLOCK);
 	else
 		mutex_held = so->so_proto->pr_domain->dom_mtx;
 
-	lck_mtx_assert(mutex_held, LCK_MTX_ASSERT_OWNED);
+	LCK_MTX_ASSERT(mutex_held, LCK_MTX_ASSERT_OWNED);
 
 	ts.tv_sec = sb->sb_timeo.tv_sec;
 	ts.tv_nsec = sb->sb_timeo.tv_usec * 1000;
@@ -608,15 +627,18 @@ sowakeup(struct socket *so, struct sockbuf *sb)
 	if (sb->sb_flags & SB_UPCALL) {
 		void (*sb_upcall)(struct socket *, void *, int);
 		caddr_t sb_upcallarg;
+		int lock = !(sb->sb_flags & SB_UPCALL_LOCK);
 
 		sb_upcall = sb->sb_upcall;
 		sb_upcallarg = sb->sb_upcallarg;
 		/* Let close know that we're about to do an upcall */
 		so->so_upcallusecount++;
 
-		socket_unlock(so, 0);
+		if (lock)
+			socket_unlock(so, 0);
 		(*sb_upcall)(so, sb_upcallarg, M_DONTWAIT);
-		socket_lock(so, 0);
+		if (lock)
+			socket_lock(so, 0);
 
 		so->so_upcallusecount--;
 		/* Tell close that it's safe to proceed */
@@ -679,7 +701,6 @@ sowakeup(struct socket *so, struct sockbuf *sb)
 int
 soreserve(struct socket *so, u_int32_t sndcc, u_int32_t rcvcc)
 {
-
 	if (sbreserve(&so->so_snd, sndcc) == 0)
 		goto bad;
 	else
@@ -876,7 +897,7 @@ sbcheck(struct sockbuf *sb)
 	else
 		mutex_held = sb->sb_so->so_proto->pr_domain->dom_mtx;
 
-	lck_mtx_assert(mutex_held, LCK_MTX_ASSERT_OWNED);
+	LCK_MTX_ASSERT(mutex_held, LCK_MTX_ASSERT_OWNED);
 
 	if (sbchecking == 0)
 		return;
@@ -1447,9 +1468,6 @@ sbappendmptcpstream_rcv(struct sockbuf *sb, struct mbuf *m)
 
 	SBLASTMBUFCHK(sb, __func__);
 
-	if (mptcp_adj_rmap(so, m) != 0)
-		return (0);
-
 	/* No filter support (SB_RECV) on mptcp subflow sockets */
 
 	sbcompress(sb, m, sb->sb_mbtail);
@@ -1841,13 +1859,17 @@ sbdrop(struct sockbuf *sb, int len)
 
 	next = (m = sb->sb_mb) ? m->m_nextpkt : 0;
 #if MPTCP
-	if ((m != NULL) && (len > 0) &&
-	    (!(sb->sb_flags & SB_RECV)) &&
+	if (m != NULL && len > 0 && !(sb->sb_flags & SB_RECV) &&
 	    ((sb->sb_so->so_flags & SOF_MP_SUBFLOW) ||
-	    ((SOCK_CHECK_DOM(sb->sb_so, PF_MULTIPATH)) &&
-	    (SOCK_CHECK_PROTO(sb->sb_so, IPPROTO_TCP)))) &&
-	    (!(sb->sb_so->so_flags1 & SOF1_POST_FALLBACK_SYNC))) {
+	     (SOCK_CHECK_DOM(sb->sb_so, PF_MULTIPATH) &&
+	      SOCK_CHECK_PROTO(sb->sb_so, IPPROTO_TCP))) &&
+	    !(sb->sb_so->so_flags1 & SOF1_POST_FALLBACK_SYNC)) {
 		mptcp_preproc_sbdrop(sb->sb_so, m, (unsigned int)len);
+	}
+	if (m != NULL && len > 0 && !(sb->sb_flags & SB_RECV) &&
+	    (sb->sb_so->so_flags & SOF_MP_SUBFLOW) &&
+	    (sb->sb_so->so_flags1 & SOF1_POST_FALLBACK_SYNC)) {
+		mptcp_fallback_sbdrop(sb->sb_so, m, len);
 	}
 #endif /* MPTCP */
 	KERNEL_DEBUG((DBG_FNC_SBDROP | DBG_FUNC_START), sb, len, 0, 0, 0);
@@ -2071,12 +2093,12 @@ pru_connect2_notsupp(struct socket *so1, struct socket *so2)
 }
 
 int
-pru_connectx_notsupp(struct socket *so, struct sockaddr_list **src_sl,
-    struct sockaddr_list **dst_sl, struct proc *p, uint32_t ifscope,
+pru_connectx_notsupp(struct socket *so, struct sockaddr *src,
+    struct sockaddr *dst, struct proc *p, uint32_t ifscope,
     sae_associd_t aid, sae_connid_t *pcid, uint32_t flags, void *arg,
     uint32_t arglen, struct uio *uio, user_ssize_t *bytes_written)
 {
-#pragma unused(so, src_sl, dst_sl, p, ifscope, aid, pcid, flags, arg, arglen, uio, bytes_written)
+#pragma unused(so, src, dst, p, ifscope, aid, pcid, flags, arg, arglen, uio, bytes_written)
 	return (EOPNOTSUPP);
 }
 
@@ -2113,13 +2135,6 @@ int
 pru_listen_notsupp(struct socket *so, struct proc *p)
 {
 #pragma unused(so, p)
-	return (EOPNOTSUPP);
-}
-
-int
-pru_peeloff_notsupp(struct socket *so, sae_associd_t aid, struct socket **psop)
-{
-#pragma unused(so, aid, psop)
 	return (EOPNOTSUPP);
 }
 
@@ -2269,7 +2284,6 @@ pru_sanitize(struct pr_usrreqs *pru)
 	DEFAULT(pru->pru_disconnect, pru_disconnect_notsupp);
 	DEFAULT(pru->pru_disconnectx, pru_disconnectx_notsupp);
 	DEFAULT(pru->pru_listen, pru_listen_notsupp);
-	DEFAULT(pru->pru_peeloff, pru_peeloff_notsupp);
 	DEFAULT(pru->pru_peeraddr, pru_peeraddr_notsupp);
 	DEFAULT(pru->pru_rcvd, pru_rcvd_notsupp);
 	DEFAULT(pru->pru_rcvoob, pru_rcvoob_notsupp);
@@ -2342,7 +2356,7 @@ int
 msgq_sbspace(struct socket *so, struct mbuf *control)
 {
 	int space = 0, error;
-	u_int32_t msgpri;
+	u_int32_t msgpri = 0;
 	VERIFY(so->so_type == SOCK_STREAM &&
 		SOCK_PROTO(so) == IPPROTO_TCP);
 	if (control != NULL) {
@@ -2545,11 +2559,11 @@ sblock(struct sockbuf *sb, uint32_t flags)
 		 * us the lock.  This will be fixed in future.
 		 */
 		if (so->so_proto->pr_getlock != NULL)
-			mutex_held = (*so->so_proto->pr_getlock)(so, 0);
+			mutex_held = (*so->so_proto->pr_getlock)(so, PR_F_WILLUNLOCK);
 		else
 			mutex_held = so->so_proto->pr_domain->dom_mtx;
 
-		lck_mtx_assert(mutex_held, LCK_MTX_ASSERT_OWNED);
+		LCK_MTX_ASSERT(mutex_held, LCK_MTX_ASSERT_OWNED);
 
 		sb->sb_wantlock++;
 		VERIFY(sb->sb_wantlock != 0);
@@ -2638,13 +2652,13 @@ sbunlock(struct sockbuf *sb, boolean_t keeplocked)
 		lck_mtx_t *mutex_held;
 
 		if (so->so_proto->pr_getlock != NULL)
-			mutex_held = (*so->so_proto->pr_getlock)(so, 0);
+			mutex_held = (*so->so_proto->pr_getlock)(so, PR_F_WILLUNLOCK);
 		else
 			mutex_held = so->so_proto->pr_domain->dom_mtx;
 
-		lck_mtx_assert(mutex_held, LCK_MTX_ASSERT_OWNED);
+		LCK_MTX_ASSERT(mutex_held, LCK_MTX_ASSERT_OWNED);
 
-		VERIFY(so->so_usecount != 0);
+		VERIFY(so->so_usecount > 0);
 		so->so_usecount--;
 		so->unlock_lr[so->next_unlock_lr] = lr_saved;
 		so->next_unlock_lr = (so->next_unlock_lr + 1) % SO_LCKDBG_MAX;
@@ -2690,18 +2704,10 @@ soevupcall(struct socket *so, u_int32_t hint)
 {
 	if (so->so_event != NULL) {
 		caddr_t so_eventarg = so->so_eventarg;
-		int locked = hint & SO_FILT_HINT_LOCKED;
 
 		hint &= so->so_eventmask;
-		if (hint != 0) {
-			if (locked)
-				socket_unlock(so, 0);
-
+		if (hint != 0)
 			so->so_event(so, so_eventarg, hint);
-
-			if (locked)
-				socket_lock(so, 0);
-		}
 	}
 }
 
@@ -2815,6 +2821,7 @@ sotoxsocket(struct socket *so, struct xsocket *xso)
 }
 
 
+#if !CONFIG_EMBEDDED
 
 void
 sotoxsocket64(struct socket *so, struct xsocket64 *xso)
@@ -2844,6 +2851,7 @@ sotoxsocket64(struct socket *so, struct xsocket64 *xso)
 	xso->so_uid = kauth_cred_getuid(so->so_cred);
 }
 
+#endif /* !CONFIG_EMBEDDED */
 
 /*
  * This does the same for sockbufs.  Note that the xsockbuf structure,
@@ -2873,12 +2881,7 @@ sbtoxsockbuf(struct sockbuf *sb, struct xsockbuf *xsb)
 inline int
 soisthrottled(struct socket *so)
 {
-	/*
-	 * On non-embedded, we rely on implicit throttling by the
-	 * application, as we're missing the system wide "decision maker"
-	 */
-	return (
-		(so->so_flags1 & SOF1_TRAFFIC_MGT_SO_BACKGROUND));
+	return (so->so_flags1 & SOF1_TRAFFIC_MGT_SO_BACKGROUND);
 }
 
 inline int
@@ -2907,6 +2910,16 @@ soissrcbesteffort(struct socket *so)
 	return (so->so_traffic_class == SO_TC_BE ||
 	    so->so_traffic_class == SO_TC_RD ||
 	    so->so_traffic_class == SO_TC_OAM);
+}
+
+void
+soclearfastopen(struct socket *so)
+{
+	if (so->so_flags1 & SOF1_PRECONNECT_DATA)
+		so->so_flags1 &= ~SOF1_PRECONNECT_DATA;
+
+	if (so->so_flags1 & SOF1_DATA_IDEMPOTENT)
+		so->so_flags1 &= ~SOF1_DATA_IDEMPOTENT;
 }
 
 void
@@ -2942,27 +2955,6 @@ sysctl_sb_max SYSCTL_HANDLER_ARGS
 	return (error);
 }
 
-static int
-sysctl_io_policy_throttled SYSCTL_HANDLER_ARGS
-{
-#pragma unused(arg1, arg2)
-	int i, err;
-
-	i = net_io_policy_throttled;
-
-	err = sysctl_handle_int(oidp, &i, 0, req);
-	if (err != 0 || req->newptr == USER_ADDR_NULL)
-		return (err);
-
-	if (i != net_io_policy_throttled)
-		SOTHROTTLELOG("throttle: network IO policy throttling is "
-		    "now %s\n", i ? "ON" : "OFF");
-
-	net_io_policy_throttled = i;
-
-	return (err);
-}
-
 SYSCTL_PROC(_kern_ipc, KIPC_MAXSOCKBUF, maxsockbuf,
 	CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED,
 	&sb_max, 0, &sysctl_sb_max, "IU", "Maximum socket buffer size");
@@ -2983,8 +2975,39 @@ SYSCTL_INT(_kern_ipc, KIPC_SOQLIMITCOMPAT, soqlimitcompat,
 	CTLFLAG_RW | CTLFLAG_LOCKED, &soqlimitcompat, 1,
 	"Enable socket queue limit compatibility");
 
-SYSCTL_INT(_kern_ipc, OID_AUTO, soqlencomp, CTLFLAG_RW | CTLFLAG_LOCKED,
-	&soqlencomp, 0, "Listen backlog represents only complete queue");
+/*
+ * Hack alert -- rdar://33572856
+ * A loopback test we cannot change was failing because it sets
+ * SO_SENDTIMEO to 5 seconds and that's also the value
+ * of the minimum persist timer. Because of the persist timer,
+ * the connection was not idle for 5 seconds and SO_SNDTIMEO
+ * was not triggering at 5 seconds causing the test failure.
+ * As a workaround we check the sysctl soqlencomp the test is already
+ * setting to set disable auto tuning of the receive buffer.
+ */
+
+extern u_int32_t tcp_do_autorcvbuf;
+
+static int
+sysctl_soqlencomp SYSCTL_HANDLER_ARGS
+{
+#pragma unused(oidp, arg1, arg2)
+	u_int32_t new_value;
+	int changed = 0;
+	int error = sysctl_io_number(req, soqlencomp, sizeof (u_int32_t),
+	    &new_value, &changed);
+	if (!error && changed) {
+		soqlencomp = new_value;
+		if (new_value != 0) {
+			tcp_do_autorcvbuf = 0;
+			tcptv_persmin_val = 6 * TCP_RETRANSHZ;
+		}
+	}
+	return (error);
+}
+SYSCTL_PROC(_kern_ipc, OID_AUTO, soqlencomp,
+	CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED,
+	&soqlencomp, 0, &sysctl_soqlencomp, "IU", "");
 
 SYSCTL_INT(_kern_ipc, OID_AUTO, sbmb_cnt, CTLFLAG_RD | CTLFLAG_LOCKED,
 	&total_sbmb_cnt, 0, "");
@@ -2997,10 +3020,6 @@ SYSCTL_QUAD(_kern_ipc, OID_AUTO, sbmb_limreached, CTLFLAG_RD | CTLFLAG_LOCKED,
 
 
 SYSCTL_NODE(_kern_ipc, OID_AUTO, io_policy, CTLFLAG_RW, 0, "network IO policy");
-
-SYSCTL_PROC(_kern_ipc_io_policy, OID_AUTO, throttled,
-	CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED, &net_io_policy_throttled, 0,
-	sysctl_io_policy_throttled, "I", "");
 
 SYSCTL_INT(_kern_ipc_io_policy, OID_AUTO, log, CTLFLAG_RW | CTLFLAG_LOCKED,
 	&net_io_policy_log, 0, "");

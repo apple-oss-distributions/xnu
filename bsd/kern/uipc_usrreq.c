@@ -305,7 +305,7 @@ uipc_detach(struct socket *so)
 	if (unp == 0)
 		return (EINVAL);
 
-	lck_mtx_assert(&unp->unp_mtx, LCK_MTX_ASSERT_OWNED);
+	LCK_MTX_ASSERT(&unp->unp_mtx, LCK_MTX_ASSERT_OWNED);
 	unp_detach(unp);
 	return (0);
 }
@@ -987,8 +987,18 @@ unp_bind(
 		return (EAFNOSUPPORT);
 	}
 
+	/*
+	 * Check if the socket is already bound to an address
+	 */
 	if (unp->unp_vnode != NULL)
 		return (EINVAL);
+	/*
+	 * Check if the socket may have been shut down
+	 */
+	if ((so->so_state & (SS_CANTRCVMORE | SS_CANTSENDMORE)) ==
+	    (SS_CANTRCVMORE | SS_CANTSENDMORE))
+		return (EINVAL);
+
 	namelen = soun->sun_len - offsetof(struct sockaddr_un, sun_path);
 	if (namelen <= 0)
 		return (EINVAL);
@@ -1165,6 +1175,7 @@ unp_connect(struct socket *so, struct sockaddr *nam, __unused proc_t p)
 			socket_lock(so, 0);
 		} else {
 			/* Release the reference held for the listen socket */
+			VERIFY(so2->so_usecount > 0);
 			so2->so_usecount--;
 		}
 		goto out;
@@ -1207,6 +1218,7 @@ unp_connect(struct socket *so, struct sockaddr *nam, __unused proc_t p)
 				/* Release the reference held for
 				 * listen socket.
 				 */
+				VERIFY(so2->so_usecount > 0);
 				so2->so_usecount--;
 			}
 			goto out;
@@ -1298,6 +1310,7 @@ decref_out:
 			 * This is possible only for SOCK_DGRAM sockets. We refuse
 			 * connecting to the same socket for SOCK_STREAM sockets.
 			 */
+			VERIFY(so2->so_usecount > 0);
 			so2->so_usecount--;
 		}
 	}
@@ -1308,7 +1321,7 @@ decref_out:
 	}
 
 out:
-	lck_mtx_assert(&unp->unp_mtx, LCK_MTX_ASSERT_OWNED);
+	LCK_MTX_ASSERT(&unp->unp_mtx, LCK_MTX_ASSERT_OWNED);
 	vnode_put(vp);
 	return (error);
 }
@@ -1329,8 +1342,8 @@ unp_connect2(struct socket *so, struct socket *so2)
 
 	unp2 = sotounpcb(so2);
 
-	lck_mtx_assert(&unp->unp_mtx, LCK_MTX_ASSERT_OWNED);
-	lck_mtx_assert(&unp2->unp_mtx, LCK_MTX_ASSERT_OWNED);
+	LCK_MTX_ASSERT(&unp->unp_mtx, LCK_MTX_ASSERT_OWNED);
+	LCK_MTX_ASSERT(&unp2->unp_mtx, LCK_MTX_ASSERT_OWNED);
 
 	/* Verify both sockets are still opened */
 	if (unp == 0 || unp2 == 0)
@@ -1352,6 +1365,7 @@ unp_connect2(struct socket *so, struct socket *so2)
 			socket_unlock(so2, 0);
 			soisconnected(so);
 			unp_get_locks_in_order(so, so2);
+			VERIFY(so2->so_usecount > 0);
 			so2->so_usecount--;
 		} else {
 			soisconnected(so);
@@ -1386,14 +1400,15 @@ unp_connect2(struct socket *so, struct socket *so2)
 
 		unp_get_locks_in_order(so, so2);
 		/* Decrement the extra reference left before */
+		VERIFY(so2->so_usecount > 0);
 		so2->so_usecount--;
 		break;
 
 	default:
 		panic("unknown socket type %d in unp_connect2", so->so_type);
 	}
-	lck_mtx_assert(&unp->unp_mtx, LCK_MTX_ASSERT_OWNED);
-	lck_mtx_assert(&unp2->unp_mtx, LCK_MTX_ASSERT_OWNED);
+	LCK_MTX_ASSERT(&unp->unp_mtx, LCK_MTX_ASSERT_OWNED);
+	LCK_MTX_ASSERT(&unp2->unp_mtx, LCK_MTX_ASSERT_OWNED);
 	return (0);
 }
 
@@ -1455,8 +1470,8 @@ try_again:
 	}
 	so_locked = 1;
 
-	lck_mtx_assert(&unp->unp_mtx, LCK_MTX_ASSERT_OWNED);
-	lck_mtx_assert(&unp2->unp_mtx, LCK_MTX_ASSERT_OWNED);
+	LCK_MTX_ASSERT(&unp->unp_mtx, LCK_MTX_ASSERT_OWNED);
+	LCK_MTX_ASSERT(&unp2->unp_mtx, LCK_MTX_ASSERT_OWNED);
 
 	/* Check for the UNP_DONTDISCONNECT flag, if it
 	 * is set, release both sockets and go to sleep
@@ -1478,6 +1493,7 @@ try_again:
 	}
 
 	unp->unp_conn = NULL;
+	VERIFY(so2->so_usecount > 0);
 	so2->so_usecount--;
 
 	if (unp->unp_flags & UNP_TRACE_MDNS)
@@ -1494,6 +1510,7 @@ try_again:
 
 	case SOCK_STREAM:
 		unp2->unp_conn = NULL;
+		VERIFY(so->so_usecount > 0);
 		so->so_usecount--;
 
 		/* Set the socket state correctly but do a wakeup later when
@@ -1528,7 +1545,7 @@ out:
 		socket_lock(so,0);
 		soisdisconnected(so);
 	}
-	lck_mtx_assert(&unp->unp_mtx, LCK_MTX_ASSERT_OWNED);
+	LCK_MTX_ASSERT(&unp->unp_mtx, LCK_MTX_ASSERT_OWNED);
 	return;
 }
 
@@ -1700,6 +1717,7 @@ SYSCTL_PROC(_net_local_stream, OID_AUTO, pcblist,
             (caddr_t)(long)SOCK_STREAM, 0, unp_pcblist, "S,xunpcb",
             "List of active local stream sockets");
 
+#if !CONFIG_EMBEDDED
 
 static int
 unp_pcblist64 SYSCTL_HANDLER_ARGS
@@ -1848,6 +1866,7 @@ SYSCTL_PROC(_net_local_stream, OID_AUTO, pcblist64,
 	    (caddr_t)(long)SOCK_STREAM, 0, unp_pcblist64, "S,xunpcb64",
 	    "List of active local stream sockets 64 bit");
 
+#endif /* !CONFIG_EMBEDDED */
 
 static void
 unp_shutdown(struct unpcb *unp)
@@ -1885,13 +1904,13 @@ unp_externalize(struct mbuf *rights)
 	struct fileglob **rp = (struct fileglob **)(cm + 1);
 	int *fds = (int *)(cm + 1);
 	struct fileproc *fp;
-	struct fileglob **fgl;
+	struct fileproc **fileproc_l;
 	int newfds = (cm->cmsg_len - sizeof (*cm)) / sizeof (int);
 	int f, error = 0;
 
-	MALLOC(fgl, struct fileglob **, newfds * sizeof (struct fileglob *),
-		M_TEMP, M_WAITOK);
-	if (fgl == NULL) {
+	MALLOC(fileproc_l, struct fileproc **,
+	    newfds * sizeof (struct fileproc *), M_TEMP, M_WAITOK);
+	if (fileproc_l == NULL) {
 		error = ENOMEM;
 		goto discard;
 	}
@@ -1935,27 +1954,40 @@ unp_externalize(struct mbuf *rights)
 			panic("unp_externalize: MALLOC_ZONE");
 		fp->f_iocount = 0;
 		fp->f_fglob = rp[i];
-		if (fg_removeuipc_mark(rp[i]))
-			fgl[i] = rp[i];
-		else
-			fgl[i] = NULL;
+		if (fg_removeuipc_mark(rp[i])) {
+
+			/*
+			 * Take an iocount on the fp for completing the
+			 * removal from the global msg queue
+			 */
+			fp->f_iocount++;
+			fileproc_l[i] = fp;
+		} else {
+			fileproc_l[i] = NULL;
+		}
 		procfdtbl_releasefd(p, f, fp);
 		fds[i] = f;
 	}
 	proc_fdunlock(p);
 
 	for (i = 0; i < newfds; i++) {
-		if (fgl[i] != NULL) {
-			VERIFY(fgl[i]->fg_lflags & FG_RMMSGQ);
-			fg_removeuipc(fgl[i]);
+		if (fileproc_l[i] != NULL) {
+			VERIFY(fileproc_l[i]->f_fglob != NULL &&
+			    (fileproc_l[i]->f_fglob->fg_lflags & FG_RMMSGQ));
+			VERIFY(fds[i] > 0);
+			fg_removeuipc(fileproc_l[i]->f_fglob);
+
+			/* Drop the iocount */
+			fp_drop(p, fds[i], fileproc_l[i], 0);
+			fileproc_l[i] = NULL;
 		}
-		if (fds[i])
+		if (fds[i] != 0)
 			(void) OSAddAtomic(-1, &unp_rights);
 	}
 
 discard:
-	if (fgl)
-		FREE(fgl, M_TEMP);
+	if (fileproc_l != NULL)
+		FREE(fileproc_l, M_TEMP);
 	if (error) {
 		for (i = 0; i < newfds; i++) {
 			unp_discard(*rp, p);
@@ -2411,9 +2443,10 @@ unp_lock(struct socket *so, int refcount, void * lr)
                 panic("unp_lock: so=%p so_pcb=%p lr=%p ref=0x%x\n",
                 so, so->so_pcb, lr_saved, so->so_usecount);
 
-        if (refcount)
-                so->so_usecount++;
-
+        if (refcount) {
+		VERIFY(so->so_usecount > 0);
+		so->so_usecount++;
+	}
         so->lock_lr[so->next_lock_lr] = lr_saved;
         so->next_lock_lr = (so->next_lock_lr+1) % SO_LCKDBG_MAX;
         return (0);
@@ -2440,7 +2473,7 @@ unp_unlock(struct socket *so, int refcount, void * lr)
         } else {
                 mutex_held = &((struct unpcb *)so->so_pcb)->unp_mtx;
         }
-        lck_mtx_assert(mutex_held, LCK_MTX_ASSERT_OWNED);
+        LCK_MTX_ASSERT(mutex_held, LCK_MTX_ASSERT_OWNED);
         so->unlock_lr[so->next_unlock_lr] = lr_saved;
         so->next_unlock_lr = (so->next_unlock_lr+1) % SO_LCKDBG_MAX;
 
@@ -2464,7 +2497,7 @@ unp_unlock(struct socket *so, int refcount, void * lr)
 }
 
 lck_mtx_t *
-unp_getlock(struct socket *so, __unused int locktype)
+unp_getlock(struct socket *so, __unused int flags)
 {
         struct unpcb *unp = (struct unpcb *)so->so_pcb;
 

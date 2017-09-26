@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2016 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2017 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -117,7 +117,7 @@ enum vtagtype	{
  */
 #define VNODE_READ	0x01
 #define VNODE_WRITE	0x02
-
+#define VNODE_BLOCKMAP_NO_TRACK 0x04 // APFS Fusion: Do not track this request
 
 
 /* flags for VNOP_ALLOCATE */
@@ -548,8 +548,58 @@ struct vnode_trigger_param {
 #define VNODE_ATTR_va_rsrc_alloc	(1LL<<40)	/* 10000000000 */
 #define VNODE_ATTR_va_fsid64		(1LL<<41)	/* 20000000000 */
 #define VNODE_ATTR_va_write_gencount    (1LL<<42)	/* 40000000000 */
+#define VNODE_ATTR_va_private_size	(1LL<<43)	/* 80000000000 */
 
 #define VNODE_ATTR_BIT(n)	(VNODE_ATTR_ ## n)
+
+/*
+ * ALL of the attributes.
+ */
+#define	VNODE_ATTR_ALL		(VNODE_ATTR_BIT(va_rdev) |		\
+				VNODE_ATTR_BIT(va_nlink) |		\
+				VNODE_ATTR_BIT(va_total_size) |		\
+				VNODE_ATTR_BIT(va_total_alloc) |	\
+				VNODE_ATTR_BIT(va_data_size) |		\
+				VNODE_ATTR_BIT(va_data_alloc) |		\
+				VNODE_ATTR_BIT(va_iosize) |		\
+				VNODE_ATTR_BIT(va_uid) |		\
+				VNODE_ATTR_BIT(va_gid) |		\
+				VNODE_ATTR_BIT(va_mode) |		\
+				VNODE_ATTR_BIT(va_flags) |		\
+				VNODE_ATTR_BIT(va_acl) |		\
+				VNODE_ATTR_BIT(va_create_time) |	\
+				VNODE_ATTR_BIT(va_access_time) |	\
+				VNODE_ATTR_BIT(va_modify_time) |	\
+				VNODE_ATTR_BIT(va_change_time) |	\
+				VNODE_ATTR_BIT(va_backup_time) |	\
+				VNODE_ATTR_BIT(va_fileid) |		\
+				VNODE_ATTR_BIT(va_linkid) |		\
+				VNODE_ATTR_BIT(va_parentid) |		\
+				VNODE_ATTR_BIT(va_fsid) |		\
+				VNODE_ATTR_BIT(va_filerev) |		\
+				VNODE_ATTR_BIT(va_gen) |		\
+				VNODE_ATTR_BIT(va_encoding) |		\
+				VNODE_ATTR_BIT(va_type) |		\
+				VNODE_ATTR_BIT(va_name) |		\
+				VNODE_ATTR_BIT(va_uuuid) |		\
+				VNODE_ATTR_BIT(va_guuid) |		\
+				VNODE_ATTR_BIT(va_nchildren) |		\
+				VNODE_ATTR_BIT(va_dirlinkcount) |	\
+				VNODE_ATTR_BIT(va_addedtime) |		\
+				VNODE_ATTR_BIT(va_dataprotect_class) |	\
+				VNODE_ATTR_BIT(va_dataprotect_flags) |	\
+				VNODE_ATTR_BIT(va_document_id) |	\
+				VNODE_ATTR_BIT(va_devid) |		\
+				VNODE_ATTR_BIT(va_objtype) |		\
+				VNODE_ATTR_BIT(va_objtag) |		\
+				VNODE_ATTR_BIT(va_user_access) |	\
+				VNODE_ATTR_BIT(va_finderinfo) |		\
+				VNODE_ATTR_BIT(va_rsrc_length) |	\
+				VNODE_ATTR_BIT(va_rsrc_alloc) |		\
+				VNODE_ATTR_BIT(va_fsid64) |		\
+				VNODE_ATTR_BIT(va_write_gencount) |	\
+				VNODE_ATTR_BIT(va_private_size))
+
 /*
  * Read-only attributes.
  */
@@ -569,7 +619,6 @@ struct vnode_trigger_param {
 				VNODE_ATTR_BIT(va_type) |		\
 				VNODE_ATTR_BIT(va_nchildren) |		\
 				VNODE_ATTR_BIT(va_dirlinkcount) |	\
-				VNODE_ATTR_BIT(va_addedtime) |		\
 				VNODE_ATTR_BIT(va_devid) |		\
 				VNODE_ATTR_BIT(va_objtype) |		\
 				VNODE_ATTR_BIT(va_objtag) |		\
@@ -578,7 +627,8 @@ struct vnode_trigger_param {
 				VNODE_ATTR_BIT(va_rsrc_length) |	\
 				VNODE_ATTR_BIT(va_rsrc_alloc) |		\
 				VNODE_ATTR_BIT(va_fsid64) |		\
-				VNODE_ATTR_BIT(va_write_gencount))
+				VNODE_ATTR_BIT(va_write_gencount) |		\
+				VNODE_ATTR_BIT(va_private_size))
 /*
  * Attributes that can be applied to a new file object.
  */
@@ -646,7 +696,7 @@ struct vnode_attr {
 	/* misc parameters */
 	uint32_t	va_encoding;	/* filename encoding script */
 
-	enum vtype	va_type;	/* file type (create only) */
+	enum vtype	va_type;	/* file type */
 	char *		va_name;	/* Name for ATTR_CMN_NAME; MAXPATHLEN bytes */
 	guid_t		va_uuuid;	/* file owner UUID */
 	guid_t		va_guuid;	/* file group UUID */
@@ -680,6 +730,8 @@ struct vnode_attr {
 	fsid_t 		va_fsid64;	/* fsid, of the correct type  */
 
 	uint32_t va_write_gencount;     /* counter that increments each time the file changes */
+
+	uint64_t va_private_size; /* If the file were deleted, how many bytes would be freed immediately */
 
 	/* add new fields here only */
 };
@@ -749,6 +801,11 @@ extern int		vttoif_tab[];
 #define VNODE_READDIR_SEEKOFF32   0x0004   /* seek offset values should fit in 32 bits */
 #define VNODE_READDIR_NAMEMAX     0x0008   /* For extended readdir, try to limit names to NAME_MAX bytes */
 
+/* VNOP_CLONEFILE flags: */
+#define VNODE_CLONEFILE_DEFAULT       0x0000
+#define VNODE_CLONEFILE_NOOWNERCOPY   0x0001 /* Don't copy ownership information */
+
+
 #define	NULLVP	((struct vnode *)NULL)
 
 #ifndef BSD_KERNEL_PRIVATE
@@ -787,11 +844,6 @@ struct vnop_generic_args {
 	/* other random data follows, presumably */
 };
 
-#ifndef _KAUTH_ACTION_T
-typedef int kauth_action_t;
-# define _KAUTH_ACTION_T
-#endif
-
 #include <sys/vnode_if.h>
 
 __BEGIN_DECLS
@@ -808,7 +860,7 @@ __BEGIN_DECLS
  */
 errno_t	vnode_create(uint32_t flavor, uint32_t size, void  *data, vnode_t *vpp);
 
-#if KERNEL_PRIVATE
+#ifdef KERNEL_PRIVATE
 /*!
  @function vnode_create_empty
  @abstract Create an empty, uninitialized vnode.
@@ -1042,7 +1094,6 @@ int	vnode_ischr(vnode_t vp);
  */
 int	vnode_isswap(vnode_t vp);
 
-#ifdef __APPLE_API_UNSTABLE
 /*!
  @function vnode_isnamedstream
  @abstract Determine if a vnode is a named stream.
@@ -1050,7 +1101,6 @@ int	vnode_isswap(vnode_t vp);
  @return Nonzero if the vnode is a named stream, 0 otherwise.
  */
 int	vnode_isnamedstream(vnode_t vp);
-#endif
 
 /*!
  @function vnode_ismountedon
@@ -1339,7 +1389,7 @@ int	vfs_context_issignal(vfs_context_t ctx, sigset_t mask);
  @function vfs_context_suser
  @abstract Determine if a vfs_context_t corresponds to the superuser.
  @param ctx Context to examine.
- @return Nonzero if context belongs to superuser, 0 otherwise.
+ @return 0 if context belongs to superuser, EPERM otherwise.
  */
 int	vfs_context_suser(vfs_context_t ctx);
 
@@ -1585,6 +1635,21 @@ int	vnode_isdyldsharedcache(vnode_t vp);
  */
 int 	vn_getpath_fsenter(struct vnode *vp, char *pathbuf, int *len);
 
+/*!
+ @function vn_getpath_fsenter_with_parent
+ @abstract Attempt to get a vnode's path by entering the file system if needed given a vnode and it's directory vnode.
+ @discussion Same as vn_getpath_fsenter but is given the directory vnode as well as the target vnode. Used
+to get the path from the vnode while performing rename, rmdir, and unlink. This is done to avoid potential
+dead lock if another thread is doing a forced unmount.
+ @param dvp Containing directory vnode. Must be holding an IO count.
+ @param vp  Vnode whose path to get. Must be holding an IO count.
+ @param pathbuf Buffer in which to store path.
+ @param len Destination for length of resulting path string.  Result will include NULL-terminator in count--that is, "len"
+ will be strlen(pathbuf) + 1.
+ @return 0 for success or an error.
+*/
+int	vn_getpath_fsenter_with_parent(struct vnode *dvp, struct vnode *vp, char *pathbuf, int *len);
+
 #endif /* KERNEL_PRIVATE */
 
 #define	VNODE_UPDATE_PARENT	0x01
@@ -1629,6 +1694,35 @@ int	vn_bwrite(struct vnop_bwrite_args *ap);
  @return EACCESS if permission is denied.  0 if operation allowed.  Various errors from lower layers.
  */
 int	vnode_authorize(vnode_t vp, vnode_t dvp, kauth_action_t action, vfs_context_t ctx);
+
+#ifdef KERNEL_PRIVATE
+/*!
+ @function vnode_attr_authorize_init
+ @abstract Initialize attributes for authorization of a kauth-style action on a file system object based on its attributes.
+ @discussion This function tells the caller what attributes may be required for a authorizing
+ a kauth style action.
+ @param vap attributes of file system object on which to authorize action.
+ @param dvap attributes of parent of file system object, can be NULL.
+ @param action Action to authorize, e.g. KAUTH_VNODE_READ_DATA.  See bsd/sys/kauth.h.
+ @param ctx Context for which to authorize actions.
+ @return EINVAL if a required parameters are not passed (for eg. not passing dvap when the action is KAUTH_ACTION_DELETE), 0 otherwise.
+ */
+#define VNODE_ATTR_AUTHORIZE_AVAILABLE		0x01
+int	vnode_attr_authorize_init(struct vnode_attr *vap, struct vnode_attr *dvap, kauth_action_t action, vfs_context_t ctx);
+
+/*!
+ @function vnode_attr_authorize
+ @abstract Authorize a kauth-style action on a file system object based on its attributes.
+ @discussion This function should be preceded by a call to vnode_attr_authorize_init to get what attributes are required.
+ @param vap attributes of file system object on which to authorize action.
+ @param dvap attributes of parent of file system object, can be NULL.
+ @param mp  mountpoint to which file system object belongs, can be NULL.
+ @param action Action to authorize, e.g. KAUTH_VNODE_READ_DATA.  See bsd/sys/kauth.h.
+ @param ctx Context for which to authorize actions.
+ @return EACCESS if permission is denied.  0 if operation allowed.  Various errors from lower layers.
+ */
+int	vnode_attr_authorize(struct vnode_attr *vap, struct vnode_attr *dvap, mount_t mp, kauth_action_t action, vfs_context_t ctx);
+#endif /* KERNEL_PRIVATE */
 
 /*!
  @function vnode_authattr
@@ -2021,8 +2115,10 @@ int vnode_getfromfd (vfs_context_t ctx, int fd, vnode_t *vpp);
 #ifdef BSD_KERNEL_PRIVATE
 /* Not in export list so can be private */
 struct stat;
-int	vn_stat(struct vnode *vp, void * sb, kauth_filesec_t *xsec, int isstat64, vfs_context_t ctx);
-int	vn_stat_noauth(struct vnode *vp, void * sb, kauth_filesec_t *xsec, int isstat64, vfs_context_t ctx);
+int	vn_stat(struct vnode *vp, void * sb, kauth_filesec_t *xsec, int isstat64,
+		vfs_context_t ctx);
+int	vn_stat_noauth(struct vnode *vp, void * sb, kauth_filesec_t *xsec, int isstat64,
+		       vfs_context_t ctx, struct ucred *file_cred);
 int	vaccess(mode_t file_mode, uid_t uid, gid_t gid,
 	  		mode_t acc_mode, kauth_cred_t cred);
 int	check_mountedon(dev_t dev, enum vtype type, int  *errorp);
@@ -2083,6 +2179,7 @@ void vnode_putname_printable(const char *name);
  @function vfs_setup_vattr_from_attrlist
  @abstract Setup a vnode_attr structure given an attrlist structure.
  @Used by a VNOP_GETATTRLISTBULK implementation to setup a vnode_attr structure from a attribute list. It also returns the fixed size of the attribute buffer required.
+ @warning this forces new fork attr behavior, i.e. reinterpret forkattr bits as ATTR_CMNEXT
  @param alp Pointer to attribute list structure.
  @param vap Pointer to vnode_attr structure.
  @param obj_vtype Type of object - If VNON is passed, then the type is ignored and common, file and dir attrs are used to initialise the vattrs. If set to VDIR, only common and directory attributes are used. For all other types, only common and file attrbutes are used.

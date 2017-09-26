@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2016 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2017 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -223,6 +223,9 @@ struct vfsstatfs {
 #define VFSATTR_f_signature		(1LL<< 22)
 #define VFSATTR_f_carbon_fsid		(1LL<< 23)
 #define VFSATTR_f_uuid			(1LL<< 24)
+#define VFSATTR_f_quota		(1LL<< 25)
+#define VFSATTR_f_reserved		(1LL<< 26)
+
 
 /*
  * Argument structure.
@@ -269,6 +272,8 @@ struct vfs_attr {
 	uint16_t	f_signature;	/* used for ATTR_VOL_SIGNATURE, Carbon's FSVolumeInfo.signature */
 	uint16_t	f_carbon_fsid;	/* same as Carbon's FSVolumeInfo.filesystemID */
 	uuid_t		f_uuid;		/* file system UUID (version 3 or 5), available in 10.6 and later */
+	uint64_t	f_quota;	/* total quota data blocks in file system */
+	uint64_t	f_reserved;	/* total reserved data blocks in file system */
 };
 
 #pragma pack()
@@ -315,7 +320,8 @@ struct vfs_attr {
 #define MNT_NOUSERXATTR	0x01000000	/* Don't allow user extended attributes */
 #define MNT_DEFWRITE	0x02000000	/* filesystem should defer writes */
 #define MNT_MULTILABEL	0x04000000	/* MAC support for individual labels */
-#define MNT_NOATIME	0x10000000	/* disable update of file access time */
+#define MNT_NOATIME		0x10000000	/* disable update of file access time */
+#define MNT_SNAPSHOT	0x40000000 /* The mount is a snapshot */
 #ifdef BSD_KERNEL_PRIVATE
 /* #define MNT_IMGSRC_BY_INDEX 0x20000000 see sys/imgsrc.h */
 #endif /* BSD_KERNEL_PRIVATE */
@@ -335,7 +341,7 @@ struct vfs_attr {
 			MNT_ROOTFS	| MNT_DOVOLFS	| MNT_DONTBROWSE | \
 			MNT_IGNORE_OWNERSHIP | MNT_AUTOMOUNTED | MNT_JOURNALED | \
 			MNT_NOUSERXATTR | MNT_DEFWRITE	| MNT_MULTILABEL | \
-			MNT_NOATIME | MNT_CPROTECT)
+			MNT_NOATIME | MNT_SNAPSHOT | MNT_CPROTECT)
 /*
  * External filesystem command modifier flags.
  * Unmount can use the MNT_FORCE flag.
@@ -481,8 +487,8 @@ struct netfs_status {
 #define VQ_SYNCEVENT	0x0400	/* a sync just happened (not set by kernel starting Mac OS X 10.9) */
 #define VQ_SERVEREVENT  0x0800  /* server issued notification/warning */
 #define VQ_QUOTA	0x1000	/* a user quota has been hit */
-#define VQ_FLAG2000	0x2000	/* placeholder */
-#define VQ_FLAG4000	0x4000	/* placeholder */
+#define VQ_NEARLOWDISK		0x2000	/* Above lowdisk and below desired disk space */
+#define VQ_DESIRED_DISK 	0x4000	/* the desired disk space */
 #define VQ_FLAG8000	0x8000	/* placeholder */
 
 
@@ -755,13 +761,16 @@ struct fs_snapshot_mount_args {
 };
 
 #define VFSIOC_MOUNT_SNAPSHOT  _IOW('V', 1, struct fs_snapshot_mount_args)
-#define VFSCTL_MOUNT_SNAPSHOT  IOCBASECMD(VFSIOC_MOUNT_SNAPSHOT)
 
 struct fs_snapshot_revert_args {
     struct componentname *sr_cnp;
 };
 #define VFSIOC_REVERT_SNAPSHOT  _IOW('V', 2, struct fs_snapshot_revert_args)
-#define VFSCTL_REVERT_SNAPSHOT  IOCBASECMD(VFSIOC_REVERT_SNAPSHOT)
+
+struct fs_snapshot_root_args {
+    struct componentname *sr_cnp;
+};  
+#define VFSIOC_ROOT_SNAPSHOT  _IOW('V', 3, struct fs_snapshot_root_args)
 
 #endif /* KERNEL */
 
@@ -1001,6 +1010,20 @@ void	vfs_setextendedsecurity(mount_t mp);
 void	vfs_clearextendedsecurity(mount_t mp);
 
 /*!
+  @function vfs_setnoswap
+  @abstract Mark a filesystem as unable to use swap files.
+  @param mp Mount to mark.
+  */
+void	vfs_setnoswap(mount_t mp);
+
+/*!
+  @function vfs_clearnoswap
+  @abstract Mark a filesystem as capable of using swap files.
+  @param mp Mount to mark.
+  */
+void	vfs_clearnoswap(mount_t mp);
+
+/*!
   @function vfs_setlocklocal
   @abstract Mark a filesystem as using VFS-level advisory locking support.
   @discussion Advisory locking operations will not call down to the filesystem if this flag is set.
@@ -1085,7 +1108,7 @@ void	vfs_setfsprivate(mount_t mp, void *mntdata);
   @abstract Get information about filesystem status.
   @discussion Each filesystem has a struct vfsstatfs associated with it which is updated as events occur; this function
   returns a pointer to it.  Note that the data in the structure will continue to change over time and also that it may
-  be quite stale of vfs_update_vfsstat has not been called recently.
+  be quite stale if vfs_update_vfsstat has not been called recently.
   @param mp Mount for which to get vfsstatfs pointer.
   @return Pointer to vfsstatfs.
   */
@@ -1237,6 +1260,13 @@ void	vfs_event_signal(fsid_t *fsid, u_int32_t event, intptr_t data);
   */
 void	vfs_event_init(void); /* XXX We should not export this */
 
+/*!
+  @function vfs_set_root_unmount_cleanly
+  @abstract This function should be called by the root file system
+  when it is being mounted if the file system state is consistent.
+*/
+void vfs_set_root_unmounted_cleanly(void);
+
 #ifdef KERNEL_PRIVATE
 int	vfs_getbyid(fsid_t *fsid, ino64_t ino, vnode_t *vpp, vfs_context_t ctx);
 int	vfs_getattr(mount_t mp, struct vfs_attr *vfa, vfs_context_t ctx);
@@ -1356,10 +1386,14 @@ int	getfsstat(struct statfs *, int, int) __DARWIN_INODE64(getfsstat);
 int	getfsstat64(struct statfs64 *, int, int) __OSX_AVAILABLE_BUT_DEPRECATED(__MAC_10_5,__MAC_10_6,__IPHONE_NA,__IPHONE_NA);
 #endif /* !__DARWIN_ONLY_64_BIT_INO_T */
 int	getmntinfo(struct statfs **, int) __DARWIN_INODE64(getmntinfo);
+int	getmntinfo_r_np(struct statfs **, int) __DARWIN_INODE64(getmntinfo_r_np) 
+	    __OSX_AVAILABLE(10.13) __IOS_AVAILABLE(11.0)
+	    __TVOS_AVAILABLE(11.0) __WATCHOS_AVAILABLE(4.0);
 #if !__DARWIN_ONLY_64_BIT_INO_T
 int	getmntinfo64(struct statfs64 **, int) __OSX_AVAILABLE_BUT_DEPRECATED(__MAC_10_5,__MAC_10_6,__IPHONE_NA,__IPHONE_NA);
 #endif /* !__DARWIN_ONLY_64_BIT_INO_T */
 int	mount(const char *, const char *, int, void *);
+int	fmount(const char *, int, int, void *) __OSX_AVAILABLE(10.13) __IOS_AVAILABLE(11.0) __TVOS_AVAILABLE(11.0) __WATCHOS_AVAILABLE(4.0);
 int	statfs(const char *, struct statfs *) __DARWIN_INODE64(statfs);
 #if !__DARWIN_ONLY_64_BIT_INO_T
 int	statfs64(const char *, struct statfs64 *) __OSX_AVAILABLE_BUT_DEPRECATED(__MAC_10_5,__MAC_10_6,__IPHONE_NA,__IPHONE_NA);

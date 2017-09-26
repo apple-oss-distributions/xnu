@@ -76,12 +76,14 @@
 #include <mach/mach_host_server.h>
 #include <mach/mach_syscalls.h>
 #include <sys/kdebug.h>
+#include <kern/ast.h>
 
 #ifdef MACH_BSD
 extern void workqueue_thread_yielded(void);
 extern sched_call_t workqueue_get_sched_callback(void);
 #endif /* MACH_BSD */
 
+extern wait_result_t thread_handoff_reason(thread_t thread, ast_t reason);
 
 /* Called from commpage to take a delayed preemption when exiting
  * the "Preemption Free Zone" (PFZ).
@@ -107,11 +109,11 @@ static void
 swtch_continue(void)
 {
 	processor_t	myprocessor;
-    boolean_t				result;
+	boolean_t	result;
 
-    disable_preemption();
+	disable_preemption();
 	myprocessor = current_processor();
-	result = !SCHED(processor_queue_empty)(myprocessor) || rt_runq.count > 0;
+	result = SCHED(thread_should_yield)(myprocessor, current_thread());
 	enable_preemption();
 
 	thread_syscall_return(result);
@@ -127,7 +129,7 @@ swtch(
 
 	disable_preemption();
 	myprocessor = current_processor();
-	if (SCHED(processor_queue_empty)(myprocessor) &&	rt_runq.count == 0) {
+	if (!SCHED(thread_should_yield)(myprocessor, current_thread())) {
 		mp_enable_preemption();
 
 		return (FALSE);
@@ -140,7 +142,7 @@ swtch(
 
 	disable_preemption();
 	myprocessor = current_processor();
-	result = !SCHED(processor_queue_empty)(myprocessor) || rt_runq.count > 0;
+	result = SCHED(thread_should_yield)(myprocessor, current_thread());
 	enable_preemption();
 
 	return (result);
@@ -150,13 +152,13 @@ static void
 swtch_pri_continue(void)
 {
 	processor_t	myprocessor;
-    boolean_t				result;
+	boolean_t	result;
 
 	thread_depress_abort_internal(current_thread());
 
-    disable_preemption();
+	disable_preemption();
 	myprocessor = current_processor();
-	result = !SCHED(processor_queue_empty)(myprocessor) || rt_runq.count > 0;
+	result = SCHED(thread_should_yield)(myprocessor, current_thread());
 	mp_enable_preemption();
 
 	thread_syscall_return(result);
@@ -172,7 +174,7 @@ __unused	struct swtch_pri_args *args)
 
 	disable_preemption();
 	myprocessor = current_processor();
-	if (SCHED(processor_queue_empty)(myprocessor) && rt_runq.count == 0) {
+	if (!SCHED(thread_should_yield)(myprocessor, current_thread())) {
 		mp_enable_preemption();
 
 		return (FALSE);
@@ -189,7 +191,7 @@ __unused	struct swtch_pri_args *args)
 
 	disable_preemption();
 	myprocessor = current_processor();
-	result = !SCHED(processor_queue_empty)(myprocessor) || rt_runq.count > 0;
+	result = SCHED(thread_should_yield)(myprocessor, current_thread());
 	enable_preemption();
 
 	return (result);
@@ -494,6 +496,7 @@ thread_depress_abstime(
 		                      0);
 
 		myprocessor->current_pri = self->sched_pri;
+		myprocessor->current_perfctl_class = thread_get_perfcontrol_class(self);
 		self->sched_flags |= TH_SFLAG_DEPRESS;
 
 		if (interval != 0) {
@@ -597,6 +600,7 @@ thread_poll_yield(
 				                      0);
 
 				myprocessor->current_pri = self->sched_pri;
+				myprocessor->current_perfctl_class = thread_get_perfcontrol_class(self);
 			}
 			self->computation_epoch = abstime;
 			self->computation_metered = 0;
@@ -624,7 +628,7 @@ thread_yield_internal(
 
 	disable_preemption();
 	myprocessor = current_processor();
-	if (SCHED(processor_queue_empty)(myprocessor) && rt_runq.count == 0) {
+	if (!SCHED(thread_should_yield)(myprocessor, current_thread())) {
 		mp_enable_preemption();
 
 		return;

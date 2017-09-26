@@ -135,11 +135,27 @@ type task_name_t = mach_port_t
 #endif	/* KERNEL_SERVER */
 		;
 
+type task_inspect_t = mach_port_t
+#if	KERNEL_SERVER
+		intran: task_inspect_t convert_port_to_task_inspect(mach_port_t)
+		outtran: mach_port_t convert_task_inspect_to_port(task_inspect_t)
+		destructor: task_inspect_deallocate(task_inspect_t)
+#endif	/* KERNEL_SERVER */
+		;
+
 type thread_t = mach_port_t
 #if	KERNEL_SERVER
 		intran: thread_t convert_port_to_thread(mach_port_t)
 		outtran: mach_port_t convert_thread_to_port(thread_t)
 		destructor: thread_deallocate(thread_t)
+#endif	/* KERNEL_SERVER */
+		;
+
+type thread_inspect_t = mach_port_t
+#if	KERNEL_SERVER
+		intran: thread_inspect_t convert_port_to_thread_inspect(mach_port_t)
+		outtran: mach_port_t convert_thread_inspect_to_port(thread_inspect_t)
+		destructor: thread_inspect_deallocate(thread_inspect_t)
 #endif	/* KERNEL_SERVER */
 		;
 
@@ -195,6 +211,13 @@ type ipc_space_t = mach_port_t
 #endif	/* KERNEL_SERVER */
 		;
 
+type ipc_space_inspect_t = mach_port_t
+#if	KERNEL_SERVER
+		intran: ipc_space_inspect_t convert_port_to_space_inspect(mach_port_t)
+		destructor: space_inspect_deallocate(ipc_space_inspect_t)
+#endif	/* KERNEL_SERVER */
+		;
+
 type vm_prot_t = int;
 type vm_inherit_t = int;
 type vm_purgable_t = int;
@@ -245,6 +268,9 @@ type task_purgable_info_t	= struct[68] of integer_t;
 
 type task_policy_flavor_t	= natural_t;
 type task_policy_t		= array[*:16] of integer_t;
+
+type task_inspect_flavor_t = natural_t;
+type task_inspect_info_t = array[*:4] of integer_t;
 
 type mem_entry_name_port_t = mach_port_t
 #if     KERNEL_SERVER
@@ -560,9 +586,6 @@ type mach_voucher_selector_t = uint32_t;
 type mach_voucher_attr_value_handle_t = uint64_t;
 type mach_voucher_attr_value_handle_array_t = array[*:4] of mach_voucher_attr_value_handle_t;
 type mach_voucher_attr_value_reference_t = uint32_t;
-
-type task_inspect_flavor_t = natural_t;
-type task_inspect_data_t = array[] of char;
 
 /* kernel module loader */
 type kmod_t = int;

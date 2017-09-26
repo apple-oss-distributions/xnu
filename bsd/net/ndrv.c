@@ -78,8 +78,6 @@
 #endif
 #include <netinet/if_ether.h>
 
-#include <machine/spl.h>
-
 static unsigned int ndrv_multi_max_count = NDRV_DMUX_MAX_DESCR;
 SYSCTL_UINT(_net, OID_AUTO, ndrv_multi_max_count, CTLFLAG_RW | CTLFLAG_LOCKED,
         &ndrv_multi_max_count, 0, "Number of allowed multicast addresses per NRDV socket");
@@ -194,7 +192,7 @@ ndrv_input(
         return EJUSTRETURN;
     bcopy(frame_header, m->m_data, ifnet_hdrlen(ifp));
 
-	lck_mtx_assert(ndrvdomain->dom_mtx, LCK_MTX_ASSERT_NOTOWNED);
+	LCK_MTX_ASSERT(ndrvdomain->dom_mtx, LCK_MTX_ASSERT_NOTOWNED);
 	lck_mtx_lock(ndrvdomain->dom_mtx);
 	if (sbappendaddr(&(so->so_rcv), (struct sockaddr *)&ndrvsrc,
 			 		 m, (struct mbuf *)0, &error) != 0) {
@@ -299,7 +297,7 @@ ndrv_event(struct ifnet *ifp, __unused protocol_family_t protocol,
 		event->kev_class == KEV_NETWORK_CLASS &&
 		event->kev_subclass == KEV_DL_SUBCLASS &&
 		event->event_code == KEV_DL_IF_DETACHING) {
-		lck_mtx_assert(ndrvdomain->dom_mtx, LCK_MTX_ASSERT_NOTOWNED);
+		LCK_MTX_ASSERT(ndrvdomain->dom_mtx, LCK_MTX_ASSERT_NOTOWNED);
 		lck_mtx_lock(ndrvdomain->dom_mtx);
 		ndrv_handle_ifp_detach(ifnet_family(ifp), ifnet_unit(ifp));
 		lck_mtx_unlock(ndrvdomain->dom_mtx);
@@ -337,6 +335,7 @@ ndrv_bind(struct socket *so, struct sockaddr *nam, __unused struct proc *p)
 		return(ENOMEM);
 	bcopy((caddr_t) sa, (caddr_t) np->nd_laddr, sizeof(struct sockaddr_ndrv));
 	dname = (char *) sa->snd_name;
+	np->nd_laddr->snd_len = sizeof(struct sockaddr_ndrv);
 	if (*dname == '\0')
 		return(EINVAL);
 #if NDRV_DEBUG
@@ -406,7 +405,7 @@ ndrv_disconnect(struct socket *so)
 static int
 ndrv_shutdown(struct socket *so)
 {
-	lck_mtx_assert(ndrvdomain->dom_mtx, LCK_MTX_ASSERT_OWNED);
+	LCK_MTX_ASSERT(ndrvdomain->dom_mtx, LCK_MTX_ASSERT_OWNED);
 	socantsendmore(so);
 	return 0;
 }
@@ -865,7 +864,7 @@ ndrv_handle_ifp_detach(u_int32_t family, short unit)
 
 		  so = np->nd_socket;
             /* Make sure sending returns an error */
-		lck_mtx_assert(ndrvdomain->dom_mtx, LCK_MTX_ASSERT_OWNED);
+		LCK_MTX_ASSERT(ndrvdomain->dom_mtx, LCK_MTX_ASSERT_OWNED);
             socantsendmore(so);
             socantrcvmore(so);
         }

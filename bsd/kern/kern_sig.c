@@ -95,8 +95,6 @@
 
 #include <security/audit/audit.h>
 
-#include <machine/spl.h>
-
 #include <kern/cpu_number.h>
 
 #include <sys/vm.h>
@@ -116,6 +114,11 @@
 
 #include <sys/sdt.h>
 #include <sys/codesign.h>
+#include <libkern/section_keywords.h>
+
+#if CONFIG_MACF
+#include <security/mac_framework.h>
+#endif
 
 /*
  * Missing prototypes that Mach should export
@@ -126,6 +129,8 @@ extern int thread_enable_fpe(thread_t act, int onoff);
 extern thread_t	port_name_to_thread(mach_port_name_t port_name);
 extern kern_return_t get_signalact(task_t , thread_t *, int);
 extern unsigned int get_useraddr(void);
+extern boolean_t task_did_exec(task_t task);
+extern boolean_t task_is_exec_copy(task_t task);
 
 /*
  * ---
@@ -147,13 +152,13 @@ kern_return_t semaphore_timedwait_trap_internal(mach_port_name_t, unsigned int, 
 kern_return_t semaphore_wait_signal_trap_internal(mach_port_name_t, mach_port_name_t, void (*)(kern_return_t));
 kern_return_t semaphore_wait_trap_internal(mach_port_name_t, void (*)(kern_return_t));
 
-static int	filt_sigattach(struct knote *kn);
+static int	filt_sigattach(struct knote *kn, struct kevent_internal_s *kev);
 static void	filt_sigdetach(struct knote *kn);
 static int	filt_signal(struct knote *kn, long hint);
 static int	filt_signaltouch(struct knote *kn, struct kevent_internal_s *kev);
 static int	filt_signalprocess(struct knote *kn, struct filt_process_s *data, struct kevent_internal_s *kev);
 
-struct filterops sig_filtops = {
+SECURITY_READ_ONLY_EARLY(struct filterops) sig_filtops = {
         .f_attach = filt_sigattach,
         .f_detach = filt_sigdetach,
         .f_event = filt_signal,
@@ -479,11 +484,11 @@ sigaction(proc_t p, struct sigaction_args *uap, __unused int32_t *retval)
 			sa->sa_flags |= SA_NOCLDWAIT;
 
 		if (IS_64BIT_PROCESS(p)) {
-			struct user64_sigaction	vec64;
+			struct user64_sigaction	vec64 = {};
 			sigaction_kern_to_user64(sa, &vec64);
 			error = copyout(&vec64, uap->osa, sizeof(vec64));
 		} else {
-			struct user32_sigaction	vec32;
+			struct user32_sigaction	vec32 = {};
 			sigaction_kern_to_user32(sa, &vec32);
 			error = copyout(&vec32, uap->osa, sizeof(vec32));
 		}
@@ -1403,11 +1408,11 @@ sigaltstack(__unused proc_t p, struct sigaltstack_args *uap, __unused int32_t *r
 	onstack = pstk->ss_flags & SA_ONSTACK;
 	if (uap->oss) {
 		if (IS_64BIT_PROCESS(p)) {
-			struct user64_sigaltstack ss64;
+			struct user64_sigaltstack ss64 = {};
 			sigaltstack_kern_to_user64(pstk, &ss64);			
 			error = copyout(&ss64, uap->oss, sizeof(ss64));
 		} else {
-			struct user32_sigaltstack ss32;
+			struct user32_sigaltstack ss32 = {};
 			sigaltstack_kern_to_user32(pstk, &ss32);			
 			error = copyout(&ss32, uap->oss, sizeof(ss32));
 		}
@@ -1641,18 +1646,11 @@ terminate_with_payload_internal(struct proc *cur_proc, int target_pid, uint32_t 
 {
 	proc_t target_proc = PROC_NULL;
 	kauth_cred_t cur_cred = kauth_cred_get();
-	int signum = SIGKILL;
 
 	os_reason_t signal_reason = OS_REASON_NULL;
 
 	AUDIT_ARG(pid, target_pid);
-	if ((target_pid <= 0) || (cur_proc->p_pid == target_pid)) {
-		return EINVAL;
-	}
-
-	if (reason_namespace == OS_REASON_INVALID ||
-		reason_namespace > OS_REASON_MAX_VALID_NAMESPACE) {
-
+	if ((target_pid <= 0)) {
 		return EINVAL;
 	}
 
@@ -1663,7 +1661,7 @@ terminate_with_payload_internal(struct proc *cur_proc, int target_pid, uint32_t 
 
 	AUDIT_ARG(process, target_proc);
 
-	if (!cansignal(cur_proc, cur_cred, target_proc, signum, 0)) {
+	if (!cansignal(cur_proc, cur_cred, target_proc, SIGKILL, 0)) {
 		proc_rele(target_proc);
 		return EPERM;
 	}
@@ -1673,9 +1671,19 @@ terminate_with_payload_internal(struct proc *cur_proc, int target_pid, uint32_t 
 					reason_code, 0, 0);
 
 	signal_reason = build_userspace_exit_reason(reason_namespace, reason_code, payload, payload_size,
-							reason_string, reason_flags);
+							reason_string, (reason_flags | OS_REASON_FLAG_NO_CRASHED_TID));
 
-	psignal_with_reason(target_proc, signum, signal_reason);
+	if (target_pid == cur_proc->p_pid) {
+		/*
+		 * psignal_thread_with_reason() will pend a SIGKILL on the specified thread or
+		 * return if the thread and/or task are already terminating. Either way, the
+		 * current thread won't return to userspace.
+		 */
+		psignal_thread_with_reason(target_proc, current_thread(), SIGKILL, signal_reason);
+	} else {
+		psignal_with_reason(target_proc, SIGKILL, signal_reason);
+	}
+
 	proc_rele(target_proc);
 
 	return 0;
@@ -2036,7 +2044,7 @@ build_signal_reason(int signum, const char *procname)
 	reason_buffer_size_estimate = kcdata_estimate_required_buffer_size(2, sizeof(sender_proc->p_name) +
 										sizeof(sender_proc->p_pid));
 
-	ret = os_reason_alloc_buffer(signal_reason, reason_buffer_size_estimate);
+	ret = os_reason_alloc_buffer_noblock(signal_reason, reason_buffer_size_estimate);
 	if (ret != 0) {
 		printf("build_signal_reason: unable to allocate signal reason buffer.\n");
 		return signal_reason;
@@ -2502,6 +2510,7 @@ psignal_internal(proc_t p, task_t task, thread_t thread, int flavor, int signum,
 			assert(signal_reason == NULL);
 			OSBitOrAtomic(P_CONTINUED, &sig_proc->p_flag);
 			sig_proc->p_contproc = sig_proc->p_pid;
+			sig_proc->p_xstat = signum;
 
 			(void) task_resume_internal(sig_task);
 
@@ -2654,6 +2663,12 @@ psignal_try_thread_with_reason(proc_t p, thread_t thread, int signum, struct os_
 	psignal_internal(p, TASK_NULL, thread, PSIG_TRY_THREAD, signum, signal_reason);
 }
 
+void
+psignal_thread_with_reason(proc_t p, thread_t thread, int signum, struct os_reason *signal_reason)
+{
+	psignal_internal(p, TASK_NULL, thread, PSIG_THREAD, signum, signal_reason);
+}
+
 /*
  * If the current process has received a signal (should be caught or cause
  * termination, should interrupt current syscall), return the signal number.
@@ -2749,6 +2764,8 @@ issignal_locked(proc_t p)
 					proc_lock(pp);
 
 					pp->si_pid = p->p_pid;
+					pp->p_xhighbits = p->p_xhighbits;
+					p->p_xhighbits = 0;
 					pp->si_status = p->p_xstat;
 					pp->si_code = CLD_TRAPPED;
 					pp->si_uid = r_uid;
@@ -3200,7 +3217,7 @@ postsig_locked(int signum)
  */
 
 static int
-filt_sigattach(struct knote *kn)
+filt_sigattach(struct knote *kn, __unused struct kevent_internal_s *kev)
 {
 	proc_t p = current_proc();  /* can attach only to oneself */
 
@@ -3318,6 +3335,11 @@ bsd_ast(thread_t thread)
 
 	if (p == NULL)
 		return;
+
+	/* don't run bsd ast on exec copy or exec'ed tasks */
+	if (task_did_exec(current_task()) || task_is_exec_copy(current_task())) {
+		return;
+	}
 
 	if ((p->p_flag & P_OWEUPC) && (p->p_flag & P_PROFIL)) {
 		pc = get_useraddr();

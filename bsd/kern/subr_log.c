@@ -71,6 +71,7 @@
 #include <sys/vnode.h>
 #include <stdbool.h>
 #include <firehose/tracepoint_private.h>
+#include <firehose/chunk_private.h>
 #include <firehose/ioctl_private.h>
 #include <os/firehose_buffer_private.h>
 
@@ -128,17 +129,17 @@ struct logsoftc {
 
 int	log_open;			/* also used in log() */
 char smsg_bufc[CONFIG_MSG_BSIZE]; /* static buffer */
-char oslog_stream_bufc[FIREHOSE_BUFFER_CHUNK_SIZE]; /* static buffer */
-struct firehose_buffer_chunk_s __attribute__((aligned(8))) oslog_boot_buf = {
-	.fbc_pos = {
-		.fbc_next_entry_offs = offsetof(struct firehose_buffer_chunk_s, fbc_data),
-		.fbc_private_offs = FIREHOSE_BUFFER_CHUNK_SIZE,
-		.fbc_refcnt = 1, // indicate that there is a writer to this chunk
-		.fbc_stream = firehose_stream_persist,
-		.fbc_flag_io = 1, // for now, lets assume this is coming from the io bank
+char oslog_stream_bufc[FIREHOSE_CHUNK_SIZE]; /* static buffer */
+struct firehose_chunk_s oslog_boot_buf = {
+	.fc_pos = {
+		.fcp_next_entry_offs = offsetof(struct firehose_chunk_s, fc_data),
+		.fcp_private_offs = FIREHOSE_CHUNK_SIZE,
+		.fcp_refcnt = 1, // indicate that there is a writer to this chunk
+		.fcp_stream = firehose_stream_persist,
+		.fcp_flag_io = 1, // for now, lets assume this is coming from the io bank
 	},
 }; /* static buffer */
-firehose_buffer_chunk_t firehose_boot_chunk = &oslog_boot_buf;
+firehose_chunk_t firehose_boot_chunk = &oslog_boot_buf;
 struct msgbuf msgbuf = {MSG_MAGIC,sizeof(smsg_bufc),0,0,smsg_bufc};
 struct msgbuf oslog_stream_buf = {MSG_MAGIC,0,0,0,NULL};
 struct msgbuf *msgbufp __attribute__((used)) = &msgbuf;
@@ -466,7 +467,7 @@ oslog_streamread(__unused dev_t dev, struct uio *uio, int flag)
 {
 	int error = 0;
 	int copy_size = 0;
-	static char logline[FIREHOSE_BUFFER_CHUNK_SIZE];
+	static char logline[FIREHOSE_CHUNK_SIZE];
 
 	lck_spin_lock(&oslog_stream_lock);
 
@@ -689,7 +690,7 @@ oslogwakeup(void)
 static void
 oslog_streamwakeup_locked(void)
 {
-	lck_spin_assert(&oslog_stream_lock, LCK_ASSERT_OWNED);
+	LCK_SPIN_ASSERT(&oslog_stream_lock, LCK_ASSERT_OWNED);
 	if (!oslog_stream_open) {
 		return;
 	}
@@ -765,7 +766,7 @@ int
 oslogioctl(__unused dev_t dev, u_long com, caddr_t data, __unused int flag, __unused struct proc *p)
 {
 	int ret = 0;
-	mach_vm_size_t buffer_size = (FIREHOSE_BUFFER_KERNEL_CHUNK_COUNT * FIREHOSE_BUFFER_CHUNK_SIZE);
+	mach_vm_size_t buffer_size = (FIREHOSE_BUFFER_KERNEL_CHUNK_COUNT * FIREHOSE_CHUNK_SIZE);
 	firehose_buffer_map_info_t map_info = {0, 0};
 	firehose_buffer_t kernel_firehose_buffer = NULL;
 	mach_vm_address_t user_addr = 0;
@@ -776,7 +777,7 @@ oslogioctl(__unused dev_t dev, u_long com, caddr_t data, __unused int flag, __un
 	/* return number of characters immediately available */
 
 	case LOGBUFFERMAP:
-		kernel_firehose_buffer = kernel_firehose_addr;
+		kernel_firehose_buffer = (firehose_buffer_t)kernel_firehose_addr;
 
 		ret = mach_make_memory_entry_64(kernel_map,
 						&buffer_size,
@@ -785,11 +786,12 @@ oslogioctl(__unused dev_t dev, u_long com, caddr_t data, __unused int flag, __un
 						&mem_entry_ptr,
 						MACH_PORT_NULL);
 		if (ret == KERN_SUCCESS) {
-			ret = mach_vm_map(get_task_map(current_task()),
+			ret = mach_vm_map_kernel(get_task_map(current_task()),
 					  &user_addr,
 					  buffer_size,
 					  0, /*  mask */
 					  VM_FLAGS_ANYWHERE,
+					  VM_KERN_MEMORY_NONE,
 					  mem_entry_ptr,
 					  0, /* offset */
 					  FALSE, /* copy */
@@ -856,7 +858,7 @@ void
 oslog_init(void)
 {
 	kern_return_t kr;
-	vm_size_t size = FIREHOSE_BUFFER_KERNEL_CHUNK_COUNT * FIREHOSE_BUFFER_CHUNK_SIZE;
+	vm_size_t size = FIREHOSE_BUFFER_KERNEL_CHUNK_COUNT * FIREHOSE_CHUNK_SIZE;
 
 	oslog_lock_init();
 
@@ -867,9 +869,9 @@ oslog_init(void)
 		panic("Failed to allocate memory for firehose logging buffer");
 	}
 	kernel_firehose_addr += PAGE_SIZE;
-	bzero(kernel_firehose_addr, size);
+	bzero((void *)kernel_firehose_addr, size);
 	/* register buffer with firehose */
-	kernel_firehose_addr = __firehose_buffer_create((size_t *) &size);
+	kernel_firehose_addr = (vm_offset_t)__firehose_buffer_create((size_t *) &size);
 
 	kprintf("oslog_init completed\n");
 }
@@ -906,7 +908,7 @@ oslog_stream_find_free_buf_entry_locked(void)
 	struct msgbuf *mbp;
 	oslog_stream_buf_entry_t buf_entry = NULL;
 
-	lck_spin_assert(&oslog_stream_lock, LCK_ASSERT_OWNED);
+	LCK_SPIN_ASSERT(&oslog_stream_lock, LCK_ASSERT_OWNED);
 
 	mbp = oslog_streambufp;
 
@@ -945,7 +947,7 @@ oslog_stream_find_free_buf_entry_locked(void)
 void
 oslog_streamwrite_metadata_locked(oslog_stream_buf_entry_t m_entry)
 {
-	lck_spin_assert(&oslog_stream_lock, LCK_ASSERT_OWNED);
+	LCK_SPIN_ASSERT(&oslog_stream_lock, LCK_ASSERT_OWNED);
 	STAILQ_INSERT_TAIL(&oslog_stream_buf_head, m_entry, buf_entries);
 
 	return;
@@ -955,7 +957,7 @@ static void oslog_streamwrite_append_bytes(const char *buffer, int buflen)
 {
 	struct msgbuf *mbp;
 
-	lck_spin_assert(&oslog_stream_lock, LCK_ASSERT_OWNED);
+	LCK_SPIN_ASSERT(&oslog_stream_lock, LCK_ASSERT_OWNED);
 
 	mbp = oslog_streambufp;
 	// Check if we have enough space in the stream buffer to write the data
@@ -994,7 +996,7 @@ oslog_streamwrite_locked(firehose_tracepoint_id_u ftid,
 	uint16_t ft_size = offsetof(struct firehose_tracepoint_s, ft_data);
 	int ft_length = ft_size + publen;
 
-	lck_spin_assert(&oslog_stream_lock, LCK_ASSERT_OWNED);
+	LCK_SPIN_ASSERT(&oslog_stream_lock, LCK_ASSERT_OWNED);
 
 	mbp = oslog_streambufp;
 	if (ft_length > mbp->msg_size) {

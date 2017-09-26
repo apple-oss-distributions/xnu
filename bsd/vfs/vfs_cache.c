@@ -388,12 +388,12 @@ vnode_issubdir(vnode_t vp, vnode_t dvp, int *is_subdir, vfs_context_t ctx)
 }
 
 /*
- * This function builds the path to a filename in "buff".  The
- * length of the buffer *INCLUDING* the trailing zero byte is
- * returned in outlen.  NOTE: the length includes the trailing
- * zero byte and thus the length is one greater than what strlen
- * would return.  This is important and lots of code elsewhere
- * in the kernel assumes this behavior.
+ * This function builds the path in "buff" from the supplied vnode.
+ * The length of the buffer *INCLUDING* the trailing zero byte is
+ * returned in outlen.  NOTE: the length includes the trailing zero
+ * byte and thus the length is one greater than what strlen would
+ * return.  This is important and lots of code elsewhere in the kernel
+ * assumes this behavior.
  * 
  * This function can call vnop in file system if the parent vnode 
  * does not exist or when called for hardlinks via volfs path.  
@@ -410,9 +410,19 @@ vnode_issubdir(vnode_t vp, vnode_t dvp, int *is_subdir, vfs_context_t ctx)
  * cross over mount points during building the path. 
  *
  * passed in vp must have a valid io_count reference
+ *
+ * If parent vnode is non-NULL it also must have an io count.  This
+ * allows build_path_with_parent to be safely called for operations
+ * unlink, rmdir and rename that already have io counts on the target
+ * and the directory. In this way build_path_with_parent does not have
+ * to try and obtain an additional io count on the parent.  Taking an
+ * io count ont the parent can lead to dead lock if a forced unmount
+ * occures at the right moment. For a fuller explaination on how this
+ * can occur see the comment for vn_getpath_with_parent.
+ *
  */
 int
-build_path(vnode_t first_vp, char *buff, int buflen, int *outlen, int flags, vfs_context_t ctx)
+build_path_with_parent(vnode_t first_vp, vnode_t parent_vp, char *buff, int buflen, int *outlen, int flags, vfs_context_t ctx)
 {
         vnode_t vp, tvp;
 	vnode_t vp_with_iocount;
@@ -587,7 +597,7 @@ again:
 
 			NAME_CACHE_UNLOCK();
 
-			if (vp != first_vp && vp != vp_with_iocount) {
+			if (vp != first_vp && vp != parent_vp && vp != vp_with_iocount) {
 				if (vp_with_iocount) {
 					vnode_put(vp_with_iocount);
 					vp_with_iocount = NULLVP;
@@ -678,7 +688,7 @@ bad_news:
 
 			NAME_CACHE_UNLOCK();
 
-			if (vp != first_vp && vp != vp_with_iocount) {
+			if (vp != first_vp && vp != parent_vp && vp != vp_with_iocount) {
 				if (vp_with_iocount) {
 					vnode_put(vp_with_iocount);
 					vp_with_iocount = NULLVP;
@@ -745,6 +755,11 @@ out:
 	return (ret);
 }
 
+int
+build_path(vnode_t first_vp, char *buff, int buflen, int *outlen, int flags, vfs_context_t ctx)
+{
+	return (build_path_with_parent(first_vp, NULL, buff, buflen, outlen, flags, ctx));
+}
 
 /*
  * return NULLVP if vp's parent doesn't
@@ -916,6 +931,7 @@ vnode_update_identity(vnode_t vp, vnode_t dvp, const char *name, int name_len, u
 			tcred = vp->v_cred;
 			vp->v_cred = NOCRED;
 			vp->v_authorized_actions = 0;
+			vp->v_cred_timestamp = 0;
 		}
 		if ( (flags & VNODE_UPDATE_NAME) ) {
 			vname = vp->v_name;
@@ -1361,7 +1377,7 @@ skiprsrcfork:
 
 #if CONFIG_MACF
 
-		/* 
+		/*
 		 * Name cache provides authorization caching (see below)
 		 * that will short circuit MAC checks in lookup().
 		 * We must perform MAC check here.  On denial
@@ -1376,8 +1392,11 @@ skiprsrcfork:
 			}
 		}
 #endif /* MAC */
-		if (ttl_enabled && ((tv.tv_sec - dp->v_cred_timestamp) > dp->v_mount->mnt_authcache_ttl))
+		if (ttl_enabled &&
+		    (dp->v_mount->mnt_authcache_ttl == 0 ||
+		    ((tv.tv_sec - dp->v_cred_timestamp) > dp->v_mount->mnt_authcache_ttl))) {
 		        break;
+		}
 
 		/*
 		 * NAME_CACHE_LOCK holds these fields stable
@@ -1386,11 +1405,17 @@ skiprsrcfork:
 		 * so we make an ugly check for root here. root is always
 		 * allowed and breaking out of here only to find out that is
 		 * authorized by virtue of being root is very very expensive.
+		 * However, the check for not root is valid only for filesystems
+		 * which use local authorization.
+		 *
+		 * XXX: Remove the check for root when we can reliably set
+		 * KAUTH_VNODE_SEARCHBYANYONE as root.
 		 */
 		if ((dp->v_cred != ucred || !(dp->v_authorized_actions & KAUTH_VNODE_SEARCH)) &&
 		    !(dp->v_authorized_actions & KAUTH_VNODE_SEARCHBYANYONE) &&
-		    !vfs_context_issuser(ctx))
+		    (ttl_enabled || !vfs_context_issuser(ctx)))  {
 		        break;
+		}
 
 		/*
 		 * indicate that we're allowed to traverse this directory...
@@ -1675,7 +1700,7 @@ cache_lookup_locked(vnode_t dvp, struct componentname *cnp)
 	ncpp = NCHHASH(dvp, cnp->cn_hash);
 	LIST_FOREACH(ncp, ncpp, nc_hash) {
 	        if ((ncp->nc_dvp == dvp) && (ncp->nc_hashval == hashval)) {
-			if (memcmp(ncp->nc_name, cnp->cn_nameptr, namelen) == 0 && ncp->nc_name[namelen] == 0)
+			if (strncmp(ncp->nc_name, cnp->cn_nameptr, namelen) == 0 && ncp->nc_name[namelen] == 0)
 			        break;
 		}
 	}
@@ -1762,7 +1787,7 @@ relook:
 	ncpp = NCHHASH(dvp, cnp->cn_hash);
 	LIST_FOREACH(ncp, ncpp, nc_hash) {
 	        if ((ncp->nc_dvp == dvp) && (ncp->nc_hashval == hashval)) {
-			if (memcmp(ncp->nc_name, cnp->cn_nameptr, namelen) == 0 && ncp->nc_name[namelen] == 0)
+			if (strncmp(ncp->nc_name, cnp->cn_nameptr, namelen) == 0 && ncp->nc_name[namelen] == 0)
 			        break;
 		}
 	}
@@ -2201,7 +2226,7 @@ resize_namecache(u_int newsize)
 }
 
 static void
-cache_delete(struct namecache *ncp, int age_entry)
+cache_delete(struct namecache *ncp, int free_entry)
 {
         NCHSTAT(ncs_deletes);
 
@@ -2222,16 +2247,13 @@ cache_delete(struct namecache *ncp, int age_entry)
 	 */
 	ncp->nc_hash.le_prev = NULL;
 
-	if (age_entry) {
-	        /*
-		 * make it the next one available
-		 * for cache_enter's use
-		 */
-	        TAILQ_REMOVE(&nchead, ncp, nc_entry);
-	        TAILQ_INSERT_HEAD(&nchead, ncp, nc_entry);
-	}
 	vfs_removename(ncp->nc_name);
 	ncp->nc_name = NULL;
+	if (free_entry) {
+	        TAILQ_REMOVE(&nchead, ncp, nc_entry);
+		FREE_ZONE(ncp, sizeof(*ncp), M_CACHE);
+		numcache--;
+	}
 }
 
 
@@ -2465,7 +2487,7 @@ add_name_internal(const char *name, uint32_t len, u_int hashval, boolean_t need_
 	lck_mtx_lock_spin(&strcache_mtx_locks[lock_index]);
 
 	for (entry = head->lh_first; entry != NULL; chain_len++, entry = entry->hash_chain.le_next) {
-		if (memcmp(entry->str, name, len) == 0 && entry->str[len] == 0) {
+		if (strncmp(entry->str, name, len) == 0 && entry->str[len] == 0) {
 			entry->refcount++;
 			break;
 		}

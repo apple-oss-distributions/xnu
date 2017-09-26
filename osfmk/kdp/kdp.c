@@ -119,7 +119,6 @@ static unsigned int breakpoints_initialized = 0;
 
 int reattach_wait = 0;
 int noresume_on_disconnect = 0;
-extern unsigned int return_on_panic;
 
 kdp_error_t
 kdp_set_breakpoint_internal(
@@ -276,7 +275,7 @@ kdp_disconnect(
     kdp.exception_seq = kdp.conn_seq = 0;
     kdp.session_key = 0;
 
-    if ((panicstr != NULL) && (return_on_panic == 0))
+    if (debugger_panic_str != NULL)
 	reattach_wait = 1;
 
     if (noresume_on_disconnect == 1) {
@@ -1146,8 +1145,7 @@ kdp_dumpinfo(
         }
 
         /* gather some stats for reply */
-        kdp_get_dump_info(&rp->type, rp->name, rp->destip, rp->routerip, 
-                          &rp->port);
+        kdp_get_dump_info(rp);
 
 	*reply_port = kdp.reply_port;
 	*len = rp->hdr.len;

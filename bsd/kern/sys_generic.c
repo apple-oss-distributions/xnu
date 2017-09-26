@@ -97,6 +97,7 @@
 #include <sys/proc.h>
 #include <sys/kauth.h>
 
+#include <machine/smp.h>
 #include <mach/mach_types.h>
 #include <kern/kern_types.h>
 #include <kern/assert.h>
@@ -140,6 +141,10 @@
 #include <kern/kalloc.h>
 #include <sys/vnode_internal.h>
 
+#if CONFIG_MACF
+#include <security/mac_framework.h>
+#endif
+
 /* XXX should be in a header file somewhere */
 void evsofree(struct socket *);
 void evpipefree(struct pipe *);
@@ -158,7 +163,6 @@ __private_extern__ int	dofilewrite(vfs_context_t ctx, struct fileproc *fp,
 									off_t offset, int flags, user_ssize_t *retval);
 __private_extern__ int	preparefileread(struct proc *p, struct fileproc **fp_ret, int fd, int check_for_vnode);
 __private_extern__ void	donefileread(struct proc *p, struct fileproc *fp_ret, int fd);
-
 
 /* Conflict wait queue for when selects collide (opaque type) */
 struct waitq select_conflict_queue;
@@ -770,7 +774,7 @@ ioctl(struct proc *p, struct ioctl_args *uap, __unused int32_t *retval)
 	boolean_t is64bit = FALSE;
 	int tmp = 0;
 #define STK_PARAMS	128
-	char stkbuf[STK_PARAMS];
+	char stkbuf[STK_PARAMS] = {};
 	int fd = uap->fd;
 	u_long com = uap->com;
 	struct vfs_context context = *vfs_context_current();
@@ -1778,9 +1782,24 @@ poll_nocancel(struct proc *p, struct poll_nocancel_args *uap, int32_t *retval)
 			fds[i].revents = 0;
 	}
 
-	/* Did we have any trouble registering? */
-	if (rfds == nfds)
+	/*
+	 * Did we have any trouble registering?
+	 * If user space passed 0 FDs, then respect any timeout value passed.
+	 * This is an extremely inefficient sleep. If user space passed one or
+	 * more FDs, and we had trouble registering _all_ of them, then bail
+	 * out. If a subset of the provided FDs failed to register, then we
+	 * will still call the kqueue_scan function.
+	 */
+	if (nfds && (rfds == nfds))
 		goto done;
+
+	/*
+	 * If any events have trouble registering, an event has fired and we
+	 * shouldn't wait for events in kqueue_scan -- use the current time as
+	 * the deadline.
+	 */
+	if (rfds)
+		getmicrouptime(&atv);
 
 	/* scan for, and possibly wait for, the kevents to trigger */
 	cont->pca_fds = uap->fds;
@@ -3096,6 +3115,14 @@ gethostuuid(struct proc *p, struct gethostuuid_args *uap, __unused int32_t *retv
 	__darwin_uuid_t uuid_kern;	/* for IOKit call */
 
 	if (!uap->spi) {
+#if CONFIG_EMBEDDED
+#if CONFIG_MACF
+		if ((error = mac_system_check_info(kauth_cred_get(), "hw.uuid")) != 0) {
+			/* EPERM invokes userspace upcall if present */
+			return (error);
+		}
+#endif
+#endif
 	}
 
 	/* Convert the 32/64 bit timespec into a mach_timespec_t */
@@ -3157,9 +3184,11 @@ ledger(struct proc *p, struct ledger_args *args, __unused int32_t *retval)
 		error = copyin(args->arg3, (char *)&len, sizeof (len));
 	else if (args->cmd == LEDGER_TEMPLATE_INFO)
 		error = copyin(args->arg2, (char *)&len, sizeof (len));
-#ifdef LEDGER_DEBUG
 	else if (args->cmd == LEDGER_LIMIT)
+#ifdef LEDGER_DEBUG
 		error = copyin(args->arg2, (char *)&lla, sizeof (lla));
+#else
+		return (EINVAL);
 #endif
 	else if ((args->cmd < 0) || (args->cmd > LEDGER_MAX_CMD))
 		return (EINVAL);
@@ -3272,7 +3301,7 @@ telemetry(__unused struct proc *p, struct telemetry_args *args, __unused int32_t
 	return (error);
 }
 
-#if defined(DEVELOPMENT) || defined(DEBUG)
+#if DEVELOPMENT || DEBUG
 #if CONFIG_WAITQ_DEBUG
 static uint64_t g_wqset_num = 0;
 struct g_wqset {
@@ -3652,4 +3681,6 @@ SYSCTL_PROC(_kern, OID_AUTO, wqset_clear_preposts, CTLTYPE_QUAD | CTLFLAG_RW | C
 	    0, 0, sysctl_wqset_clear_preposts, "Q", "clear preposts on given waitq set");
 
 #endif /* CONFIG_WAITQ_DEBUG */
-#endif /* defined(DEVELOPMENT) || defined(DEBUG) */
+#endif /* DEVELOPMENT || DEBUG */
+
+

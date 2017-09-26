@@ -95,6 +95,7 @@
 #include <kern/thread.h>
 
 #include <sys/fslog.h>		/* fslog_io_error() */
+#include <sys/disk.h>		/* dk_error_description_t */
 
 #include <mach/mach_types.h>
 #include <mach/memory_object_types.h>
@@ -130,6 +131,8 @@ static buf_t	buf_create_shadow_internal(buf_t bp, boolean_t force_copy,
 
 
 int  bdwrite_internal(buf_t, int);
+
+extern void disk_conditioner_delay(buf_t, int, int, uint64_t);
 
 /* zone allocated buffer headers */
 static void	bufzoneinit(void);
@@ -170,8 +173,17 @@ static lck_attr_t	*buf_mtx_attr;
 static lck_grp_attr_t   *buf_mtx_grp_attr;
 static lck_mtx_t	*iobuffer_mtxp;
 static lck_mtx_t	*buf_mtxp;
+static lck_mtx_t	*buf_gc_callout;
 
 static int buf_busycount;
+
+#define FS_BUFFER_CACHE_GC_CALLOUTS_MAX_SIZE 16
+typedef struct {
+	void (* callout)(int, void *);
+	void *context;
+} fs_buffer_cache_gc_callout_t;
+
+fs_buffer_cache_gc_callout_t fs_callouts[FS_BUFFER_CACHE_GC_CALLOUTS_MAX_SIZE] = { {NULL, NULL} };
 
 static __inline__ int
 buf_timestamp(void)
@@ -481,10 +493,16 @@ bufattr_markmeta(bufattr_t bap) {
 }
 
 int
+#if !CONFIG_EMBEDDED
 bufattr_delayidlesleep(bufattr_t bap) 
+#else /* !CONFIG_EMBEDDED */
+bufattr_delayidlesleep(__unused bufattr_t bap) 
+#endif /* !CONFIG_EMBEDDED */
 {
+#if !CONFIG_EMBEDDED
 	if ( (bap->ba_flags & BA_DELAYIDLESLEEP) )
 		return 1;
+#endif /* !CONFIG_EMBEDDED */
 	return 0;
 }
 
@@ -1328,7 +1346,8 @@ buf_strategy(vnode_t devvp, void *ap)
 			/* 
 			 * Attach the file offset to this buffer.  The
 			 * bufattr attributes will be passed down the stack
-			 * until they reach IOFlashStorage.  IOFlashStorage
+			 * until they reach the storage driver (whether 
+			 * IOFlashStorage, ASP, or IONVMe). The driver
 			 * will retain the offset in a local variable when it
 			 * issues its I/Os to the NAND controller.	 
 			 * 
@@ -1337,6 +1356,11 @@ buf_strategy(vnode_t devvp, void *ap)
 			 * case, LwVM will update this field when it dispatches
 			 * each I/O to IOFlashStorage.  But from our perspective
 			 * we have only issued a single I/O.
+			 *
+			 * In the case of APFS we do not bounce through another 
+			 * intermediate layer (such as CoreStorage). APFS will
+			 * issue the I/Os directly to the block device / IOMedia
+			 * via buf_strategy on the specfs node. 	 
 			 */
 			buf_setcpoff(bp, f_offset);
 			CP_DEBUG((CPDBG_OFFSET_IO | DBG_FUNC_NONE), (uint32_t) f_offset, (uint32_t) bp->b_lblkno, (uint32_t) bp->b_blkno, (uint32_t) bp->b_bcount, 0);
@@ -1990,12 +2014,16 @@ bufinit(void)
 	 */
 	buf_mtxp	= lck_mtx_alloc_init(buf_mtx_grp, buf_mtx_attr);
 	iobuffer_mtxp	= lck_mtx_alloc_init(buf_mtx_grp, buf_mtx_attr);
+	buf_gc_callout  = lck_mtx_alloc_init(buf_mtx_grp, buf_mtx_attr);
 
 	if (iobuffer_mtxp == NULL)
 	        panic("couldn't create iobuffer mutex");
 
 	if (buf_mtxp == NULL)
 	        panic("couldn't create buf mutex");
+
+	if (buf_gc_callout == NULL)
+		panic("couldn't create buf_gc_callout mutex");
 
 	/*
 	 * allocate and initialize cluster specific global locks...
@@ -2023,7 +2051,7 @@ bufinit(void)
  */
 
 #define MINMETA 512
-#define MAXMETA 8192
+#define MAXMETA 16384
 
 struct meta_zone_entry {
 	zone_t mz_zone;
@@ -2038,6 +2066,7 @@ struct meta_zone_entry meta_zones[] = {
 	{NULL, (MINMETA * 4),  16 * (MINMETA * 4), "buf.2048" },
 	{NULL, (MINMETA * 8), 512 * (MINMETA * 8), "buf.4096" },
 	{NULL, (MINMETA * 16), 512 * (MINMETA * 16), "buf.8192" },
+	{NULL, (MINMETA * 32), 512 * (MINMETA * 32), "buf.16384" },
 	{NULL, 0, 0, "" } /* End */
 };
 
@@ -2608,12 +2637,13 @@ buf_brelse(buf_t bp)
 
 		if (upl == NULL) {
 		        if ( !ISSET(bp->b_flags, B_INVAL)) {
-				kret = ubc_create_upl(bp->b_vp, 
+				kret = ubc_create_upl_kernel(bp->b_vp,
 						      ubc_blktooff(bp->b_vp, bp->b_lblkno),
 						      bp->b_bufsize, 
 						      &upl,
 						      NULL,
-						      UPL_PRECIOUS);
+						      UPL_PRECIOUS,
+						      VM_KERN_MEMORY_FILE);
 
 				if (kret != KERN_SUCCESS)
 				        panic("brelse: Failed to create UPL");
@@ -2945,6 +2975,8 @@ start:
 				break;
 			}		
 		} else {
+			int clear_bdone;
+
 			/*
 			 * buffer in core and not busy
 			 */
@@ -2963,8 +2995,41 @@ start:
 			if ( (bp->b_upl) )
 			        panic("buffer has UPL, but not marked BUSY: %p", bp);
 
-			if ( !ret_only_valid && bp->b_bufsize != size)
-			        allocbuf(bp, size);
+			clear_bdone = FALSE;
+			if (!ret_only_valid) {
+				/*
+				 * If the number bytes that are valid is going
+				 * to increase (even if we end up not doing a
+				 * reallocation through allocbuf) we have to read
+				 * the new size first.
+				 *
+				 * This is required in cases where we doing a read
+				 * modify write of a already valid data on disk but
+				 * in cases where the data on disk beyond (blkno + b_bcount)
+				 * is invalid, we may end up doing extra I/O.
+				 */
+				if (operation == BLK_META && bp->b_bcount < size) {
+					/*
+					 * Since we are going to read in the whole size first
+					 * we first have to ensure that any pending delayed write
+					 * is flushed to disk first.
+					 */
+					if (ISSET(bp->b_flags, B_DELWRI)) {
+						CLR(bp->b_flags, B_CACHE);
+						buf_bwrite(bp);
+						goto start;
+					}
+					/*
+					 * clear B_DONE before returning from
+					 * this function so that the caller can
+					 * can issue a read for the new size.
+					 */
+					clear_bdone = TRUE;
+				}
+
+				if (bp->b_bufsize != size)
+					allocbuf(bp, size);
+			}
 
 			upl_flags = 0;
 			switch (operation) {
@@ -2978,12 +3043,13 @@ start:
 			case BLK_READ:
 				upl_flags |= UPL_PRECIOUS;
 			        if (UBCINFOEXISTS(bp->b_vp) && bp->b_bufsize) {
-					kret = ubc_create_upl(vp,
+					kret = ubc_create_upl_kernel(vp,
 							      ubc_blktooff(vp, bp->b_lblkno), 
 							      bp->b_bufsize, 
 							      &upl, 
 							      &pl,
-							      upl_flags);
+							      upl_flags,
+							      VM_KERN_MEMORY_FILE);
 					if (kret != KERN_SUCCESS)
 					        panic("Failed to create UPL");
 
@@ -3016,6 +3082,9 @@ start:
 				/*NOTREACHED*/
 				break;
 			}
+
+			if (clear_bdone)
+				CLR(bp->b_flags, B_DONE);
 		}
 	} else { /* not incore() */
 		int queue = BQ_EMPTY; /* Start with no preference */
@@ -3124,12 +3193,13 @@ start:
 			f_offset = ubc_blktooff(vp, blkno);
 
 			upl_flags |= UPL_PRECIOUS;
-			kret = ubc_create_upl(vp,
+			kret = ubc_create_upl_kernel(vp,
 					      f_offset,
 					      bp->b_bufsize, 
 					      &upl,
 					      &pl,
-					      upl_flags);
+					      upl_flags,
+					      VM_KERN_MEMORY_FILE);
 
 			if (kret != KERN_SUCCESS)
 				panic("Failed to create UPL");
@@ -3909,6 +3979,8 @@ buf_biodone(buf_t bp)
 {
 	mount_t mp;
 	struct bufattr *bap;
+	struct timeval real_elapsed;
+	uint64_t real_elapsed_usec = 0;
 	
 	KERNEL_DEBUG((FSDBG_CODE(DBG_FSRW, 387)) | DBG_FUNC_START,
 		     bp, bp->b_datap, bp->b_flags, 0, 0);
@@ -3924,6 +3996,16 @@ buf_biodone(buf_t bp)
 		mp = NULL;
 	}
 	
+	if (ISSET(bp->b_flags, B_ERROR)) {
+		if (mp && (MNT_ROOTFS & mp->mnt_flag)) {
+			dk_error_description_t desc;
+			bzero(&desc, sizeof(desc));
+			desc.description      = panic_disk_error_description;
+			desc.description_size = panic_disk_error_description_size;
+			VNOP_IOCTL(mp->mnt_devvp, DKIOCGETERRORDESCRIPTION, (caddr_t)&desc, 0, vfs_context_kernel());
+		}
+	}
+
 	if (mp && (bp->b_flags & B_READ) == 0) {
 		update_last_io_time(mp);
 		INCR_PENDING_IO(-(pending_io_t)buf_count(bp), mp->mnt_pending_write_size);
@@ -3958,9 +4040,18 @@ buf_biodone(buf_t bp)
 		if (bap->ba_flags & BA_NOCACHE)
 			code |= DKIO_NOCACHE;
 
+		if (bap->ba_flags & BA_IO_TIER_UPGRADE) {
+			code |= DKIO_TIER_UPGRADE;
+		}
+
 		KERNEL_DEBUG_CONSTANT_IST(KDEBUG_COMMON, FSDBG_CODE(DBG_DKRW, code) | DBG_FUNC_NONE,
 		                          buf_kernel_addrperm_addr(bp), (uintptr_t)VM_KERNEL_ADDRPERM(bp->b_vp), bp->b_resid, bp->b_error, 0);
         }
+
+	microuptime(&real_elapsed);
+	timevalsub(&real_elapsed, &bp->b_timestamp_tv);
+	real_elapsed_usec = real_elapsed.tv_sec * USEC_PER_SEC + real_elapsed.tv_usec;
+	disk_conditioner_delay(bp, 1, bp->b_bcount, real_elapsed_usec);
 
 	/*
 	 * I/O was done, so don't believe
@@ -3969,7 +4060,7 @@ buf_biodone(buf_t bp)
 	 * indicators
 	 */
 	CLR(bp->b_flags, (B_WASDIRTY | B_PASSIVE));
-	CLR(bap->ba_flags, (BA_META | BA_NOCACHE | BA_DELAYIDLESLEEP));
+	CLR(bap->ba_flags, (BA_META | BA_NOCACHE | BA_DELAYIDLESLEEP | BA_IO_TIER_UPGRADE));
 
 	SET_BUFATTR_IO_TIER(bap, 0);
 
@@ -4411,12 +4502,13 @@ brecover_data(buf_t bp)
 		upl_flags |= UPL_WILL_MODIFY;
 	}
 		
-	kret = ubc_create_upl(vp,
+	kret = ubc_create_upl_kernel(vp,
 			      ubc_blktooff(vp, bp->b_lblkno), 
 			      bp->b_bufsize, 
 			      &upl, 
 			      &pl,
-			      upl_flags);
+			      upl_flags,
+			      VM_KERN_MEMORY_FILE);
 	if (kret != KERN_SUCCESS)
 	        panic("Failed to create UPL");
 
@@ -4441,6 +4533,50 @@ dump_buffer:
 	buf_brelse(bp);
 
 	return(0);
+}
+
+int
+fs_buffer_cache_gc_register(void (* callout)(int, void *), void *context)
+{
+	lck_mtx_lock(buf_gc_callout);
+	for (int i = 0; i < FS_BUFFER_CACHE_GC_CALLOUTS_MAX_SIZE; i++) {
+		if (fs_callouts[i].callout == NULL) {
+			fs_callouts[i].callout = callout;
+			fs_callouts[i].context = context;
+			lck_mtx_unlock(buf_gc_callout);
+			return 0;
+		}
+	}
+
+	lck_mtx_unlock(buf_gc_callout);
+	return ENOMEM;
+}
+
+int
+fs_buffer_cache_gc_unregister(void (* callout)(int, void *), void *context)
+{
+	lck_mtx_lock(buf_gc_callout);
+	for (int i = 0; i < FS_BUFFER_CACHE_GC_CALLOUTS_MAX_SIZE; i++) {
+		if (fs_callouts[i].callout == callout &&
+		    fs_callouts[i].context == context) {
+			fs_callouts[i].callout = NULL;
+			fs_callouts[i].context = NULL;
+		}
+	}
+	lck_mtx_unlock(buf_gc_callout);
+	return 0;
+}
+
+static void
+fs_buffer_cache_gc_dispatch_callouts(int all)
+{
+	lck_mtx_lock(buf_gc_callout);
+	for(int i = 0; i < FS_BUFFER_CACHE_GC_CALLOUTS_MAX_SIZE; i++) {
+		if (fs_callouts[i].callout != NULL) {
+			fs_callouts[i].callout(all, fs_callouts[i].context);
+		}
+	}
+	lck_mtx_unlock(buf_gc_callout);
 }
 
 boolean_t 
@@ -4571,6 +4707,8 @@ buffer_cache_gc(int all)
 	} while (all && (found == BUF_MAX_GC_BATCH_SIZE));
 
 	lck_mtx_unlock(buf_mtxp);
+
+	fs_buffer_cache_gc_dispatch_callouts(all);
 
 	return did_large_zfree;
 }

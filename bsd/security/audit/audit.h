@@ -44,11 +44,6 @@
 
 #if defined(_KERNEL) || defined(KERNEL)
 
-#if CONFIG_MACF
-#include <sys/queue.h>
-#include <security/mac_framework.h>
-#endif
-
 #include <bsm/audit.h>
 
 #include <sys/sysctl.h>
@@ -267,7 +262,7 @@ void	 audit_session_ref(kauth_cred_t cred);
 void	 audit_session_unref(kauth_cred_t cred);
 void	 audit_session_procnew(proc_t p);
 void	 audit_session_procexit(proc_t p);
-int	 audit_session_spawnjoin(proc_t p, ipc_port_t port);
+int	 audit_session_spawnjoin(proc_t p, task_t task, ipc_port_t port);
 
 void	 audit_sdev_submit(au_id_t auid, au_asid_t asid, void *record,
 	    u_int record_len);

@@ -9,6 +9,7 @@ from utils import *
 from core.lazytarget import *
 import time
 import xnudefines
+import memory
 
 def GetProcNameForTask(task):
     """ returns a string name of the process. if proc is not valid "unknown" is returned
@@ -177,15 +178,19 @@ def GetASTSummary(ast):
         T - AST_TELEMETRY_KERNEL
         T - AST_TELEMETRY_WINDOWED
         S - AST_SFI
+        D - AST_DTRACE
+        I - AST_TELEMETRY_IO
+        E - AST_KEVENT
     """
     out_string = ""
     state = int(ast)
     thread_state_chars = {0x0:'', 0x1:'P', 0x2:'Q', 0x4:'U', 0x8:'H', 0x10:'Y', 0x20:'A',
                           0x40:'L', 0x80:'B', 0x100:'K', 0x200:'M', 0x400:'C', 0x800:'C',
-                          0x1000:'G', 0x2000:'T', 0x4000:'T', 0x8000:'T', 0x10000:'S'}
+                          0x1000:'G', 0x2000:'T', 0x4000:'T', 0x8000:'T', 0x10000:'S',
+                          0x20000: 'D', 0x40000: 'I', 0x80000: 'E'}
     state_str = ''
     mask = 0x1
-    while mask <= 0x10000:
+    while mask <= 0x80000:
         state_str += thread_state_chars[int(state & mask)]
         mask = mask << 1
 
@@ -216,6 +221,8 @@ def GetTaskSummary(task, showcorpse=False):
     task_flags = ''
     if hasattr(task, "suppression_generation") and (int(task.suppression_generation) & 0x1) == 0x1:
         task_flags += 'P'
+    if hasattr(task, "effective_policy") and int(task.effective_policy.tep_sup_active) == 1:
+        task_flags += 'N'
     if hasattr(task, "suspend_count") and int(task.suspend_count) > 0:
         task_flags += 'S'
     if hasattr(task, 'task_imp_base') and unsigned(task.task_imp_base):
@@ -237,6 +244,19 @@ def GetTaskSummary(task, showcorpse=False):
     if showcorpse is True and unsigned(task.corpse_info) != 0:
         out_string += " " + GetKCDataSummary(task.corpse_info)
     return out_string
+
+def GetThreadName(thread):
+    """ Get the name of a thread, if possible.  Returns the empty string
+        otherwise.
+    """
+    if int(thread.uthread) != 0:
+        uthread = Cast(thread.uthread, 'uthread *')
+        if int(uthread.pth_name) != 0 :
+            th_name_strval = Cast(uthread.pth_name, 'char *')
+            if len(str(th_name_strval)) > 0 :
+                return str(th_name_strval)
+
+    return ''
 
 @lldb_type_summary(['thread *', 'thread_t'])
 @header("{0: <24s} {1: <10s} {2: <20s} {3: <6s} {4: <6s} {5: <15s} {6: <15s} {7: <8s} {8: <12s} {9: <32s} {10: <20s} {11: <20s} {12: <20s}".format('thread', 'thread_id', 'processor', 'base', 'pri', 'sched_mode', 'io_policy', 'state', 'ast', 'waitq', 'wait_event', 'wmesg', 'thread_name'))
@@ -267,7 +287,6 @@ def GetThreadSummary(thread):
     if int(thread.static_param) : 
         thread_ptr_str+="[WQ]"
     thread_id = hex(thread.thread_id)
-    thread_name = ''
     processor = hex(thread.last_processor)
     base_priority = str(int(thread.base_pri))
     sched_priority = str(int(thread.sched_pri))
@@ -288,14 +307,10 @@ def GetThreadSummary(thread):
         sched_mode+=" BG"
     
     io_policy_str = ""
+    thread_name = GetThreadName(thread)
     if int(thread.uthread) != 0:
         uthread = Cast(thread.uthread, 'uthread *')
-        #check for thread name
-        if int(uthread.pth_name) != 0 :
-            th_name_strval = Cast(uthread.pth_name, 'char *')
-            if len(str(th_name_strval)) > 0 :
-                thread_name = str(th_name_strval)
-        
+
         #check for io_policy flags 
         if int(uthread.uu_flag) & 0x400:
             io_policy_str+='RAGE '
@@ -372,6 +387,8 @@ def GetCoalitionFlagString(coal):
         flags.append('reaped')
     if (coal.notified):
         flags.append('notified')
+    if (coal.efficient):
+        flags.append('efficient')
     return "|".join(flags)
 
 def GetCoalitionTasks(queue, coal_type, thread_details=False):
@@ -433,6 +450,7 @@ def GetResourceCoalitionSummary(coal, verbose=False):
     out_string += "\t  bytesread {0: <d}\n\t  byteswritten {1: <d}\n\t  gpu_time {2: <d}".format(coal.r.bytesread, coal.r.byteswritten, coal.r.gpu_time)
     out_string += "\n\t  total_tasks {0: <d}\n\t  dead_tasks {1: <d}\n\t  active_tasks {2: <d}".format(coal.r.task_count, coal.r.dead_task_count, coal.r.task_count - coal.r.dead_task_count)
     out_string += "\n\t  last_became_nonempty_time {0: <d}\n\t  time_nonempty {1: <d}".format(coal.r.last_became_nonempty_time, coal.r.time_nonempty)
+    out_string += "\n\t  cpu_ptime {0: <d}".format(coal.r.cpu_ptime)
     out_string += "\n\t  Tasks:\n\t\t"
     tasks = GetCoalitionTasks(addressof(coal.r.tasks), 0, thread_details)
     out_string += "\n\t\t".join(tasks)
@@ -447,7 +465,7 @@ def GetJetsamCoalitionSummary(coal, verbose=False):
         out_string += "\n\t  NO Leader!"
     else:
         out_string += "\n\t  Leader:\n\t\t"
-        out_string += "({0: <d},{1: #x}, {2: <s}, {3: <s})".format(GetProcPIDForTask(coal.j.leader),coal.j.leader,GetProcNameForTask(coal.j.leader),GetTaskRoleString(coal.j.leader.effective_policy.t_role))
+        out_string += "({0: <d},{1: #x}, {2: <s}, {3: <s})".format(GetProcPIDForTask(coal.j.leader),coal.j.leader,GetProcNameForTask(coal.j.leader),GetTaskRoleString(coal.j.leader.effective_policy.tep_role))
     out_string += "\n\t  Extensions:\n\t\t"
     tasks = GetCoalitionTasks(addressof(coal.j.extensions), 1, thread_details)
     out_string += "\n\t\t".join(tasks)
@@ -457,6 +475,7 @@ def GetJetsamCoalitionSummary(coal, verbose=False):
     out_string += "\n\t  Other Tasks:\n\t\t"
     tasks = GetCoalitionTasks(addressof(coal.j.other), 1, thread_details)
     out_string += "\n\t\t".join(tasks)
+    out_string += "\n\t  Thread Group: {0: <#020x}\n".format(coal.j.thread_group)
     return out_string
 
 @lldb_type_summary(['coalition_t', 'coalition *'])
@@ -504,9 +523,7 @@ def ShowCoalitionInfo(cmd_args=None, cmd_options={}):
     if config['verbosity'] > vHUMAN:
         verbose = True
     if not cmd_args:
-        print "No arguments passed"
-        print ShowCoalitionInfo.__doc__
-        return False
+        raise ArgumentError("No arguments passed")
     coal = kern.GetValueFromAddress(cmd_args[0], 'coalition *')
     if not coal:
         print "unknown arguments:", str(cmd_args)
@@ -527,6 +544,34 @@ def ShowAllCoalitions(cmd_args=None):
         print GetCoalitionSummary(c)
 
 # EndMacro: showallcoalitions
+
+# Macro: showallthreadgroups
+
+@lldb_type_summary(['thread_group_t', 'thread_group *'])
+@header("{0: <20s} {1: <5s} {2: <16s} {3: <5s} {4: <8s} {5: <20s}".format("thread_group", "id", "name", "refc", "flags", "recommendation"))
+def GetThreadGroupSummary(tg):
+    if unsigned(tg) == 0:
+        return '{0: <#020x} {1: <5d} {2: <16s} {3: <5d} {4: <8s} {5: <20d}'.format(0, -1, "", -1, "", -1)
+    out_string = ""
+    format_string = '{0: <#020x} {1: <5d} {2: <16s} {3: <5d} {4: <8s} {5: <20d}'
+    tg_flags = ''
+    if (tg.tg_flags & 0x1):
+        tg_flags += 'E'
+    if (tg.tg_flags & 0x2):
+        tg_flags += 'U'
+    out_string += format_string.format(tg, tg.tg_id, tg.tg_name, tg.tg_refcount, tg_flags, tg.tg_recommendation)
+    return out_string
+
+@lldb_command('showallthreadgroups')
+def ShowAllThreadGroups(cmd_args=None):
+    """  Print a summary listing of all thread groups
+    """
+    global kern
+    print GetThreadGroupSummary.header
+    for tg in kern.thread_groups:
+        print GetThreadGroupSummary(tg)
+
+# EndMacro: showallthreadgroups
 
 # Macro: showtaskcoalitions
 
@@ -612,6 +657,12 @@ def GetProcSummary(proc):
         wq_idle_threads = -1
         wq_req_threads = -1
     process_name = str(proc.p_comm)
+    if process_name == 'xpcproxy':
+        for thread in IterateQueue(task.threads, 'thread *', 'task_threads'):
+            thread_name = GetThreadName(thread)
+            if thread_name:
+                process_name += ' (' + thread_name + ')'
+                break
     out_string += format_string.format(pid, proc_addr, " ".join([proc_rage_str, io_policy_str]), wq_num_threads, wq_idle_threads, wq_req_threads, process_name)
     return out_string
 
@@ -629,47 +680,6 @@ def GetTTYDevSummary(tty_dev):
     name_fn = kern.Symbolicate(int(hex(tty_dev.name), 16))
     revoke_fn = kern.Symbolicate(int(hex(tty_dev.revoke), 16))
     out_string += format_string.format(tty_dev, tty_dev.master, tty_dev.slave, open_fn, free_fn, name_fn, revoke_fn)
-    return out_string
-
-@lldb_type_summary(['kqueue *'])
-@header("{: <20s} {: <20s} {: <6s} {: <20s} {: <10s}".format('kqueue', 'process', '#events', 'wqs', 'state'))
-def GetKQueueSummary(kq):
-    """ summarizes kqueue information
-        returns: str - summary of kqueue
-    """
-    out_string = ""
-    format_string = "{o: <#020x} {o.kq_p: <#020x} {o.kq_count: <6d} {wqs: <#020x} {st_str: <10s}"
-    state = int(kq.kq_state)
-    state_str = ''
-    mask = 0x1
-    while mask <= 0x80 :
-        if int(state & mask):
-            state_str += ' ' + xnudefines.kq_state_strings[int(state & mask)]
-        mask = mask << 1
-    out_string += format_string.format(o=kq, wqs=addressof(kq.kq_wqs), st_str=state_str)
-    out_string += "\n" + GetKnoteSummary.header
-    for kn in IterateTAILQ_HEAD(kq.kq_head, 'kn_tqe'):
-        out_string += "\n" + GetKnoteSummary(kn)
-    return out_string
-
-@lldb_type_summary(['knote *'])
-@header("{0: <20s} {1: <10s} {2: <10s} {3: <20s} {4: <20s} {5: <30s}".format('knote', 'ident', 'kev_flags', 'kn_kq', 'filtops', ' status'))
-def GetKnoteSummary(kn):
-    """ Summarizes a knote and related information
-        returns: str - summary of knote
-    """
-    out_string = ""
-    format_string = "{o: <#020x} {o.kn_kevent.ident: <#010X} {o.kn_kevent.flags: <#010X} {o.kn_kq: <#020X} {ops_str: <20s} {st_str: <30s}"
-    state = unsigned(kn.kn_status)
-    fops_str = kern.Symbolicate(unsigned(kn.kn_fop))
-    mask = 0x1
-    status_desc = ''
-    while mask <= 0x40:
-        if state & mask:
-            status_desc += ' ' + xnudefines.kn_state_strings[int(state & mask)]
-        mask = mask << 1
-
-    out_string += format_string.format(o=kn, st_str=status_desc, ops_str=fops_str)
     return out_string
 
 # Macro: showtask
@@ -707,9 +717,7 @@ def ShowPid(cmd_args=None):
          Usage: showpid <pid value>
     """
     if not cmd_args:
-        print "No arguments passed"
-        print ShowPid.__doc__
-        return False
+        raise ArgumentError("No arguments passed")
     pidval = ArgumentStringToInt(cmd_args[0])
     for t in kern.tasks:
         pval = Cast(t.bsd_info, 'proc *')
@@ -728,9 +736,7 @@ def ShowProc(cmd_args=None):
          Usage: showproc <address of proc>
     """
     if not cmd_args:
-        print "No arguments passed"
-        print ShowProc.__doc__
-        return False
+        raise ArgumentError("No arguments passed")
     pval = kern.GetValueFromAddress(cmd_args[0], 'proc *')
     if not pval:
         print "unknown arguments:", str(cmd_args)
@@ -750,9 +756,7 @@ def ShowProcInfo(cmd_args=None):
          Usage: showprocinfo <address of proc>
     """
     if not cmd_args:
-        print "No arguments passed"
-        print ShowProcInfo.__doc__
-        return False
+        raise ArgumentError("No arguments passed")
     pval = kern.GetValueFromAddress(cmd_args[0], 'proc *')
     if not pval:
         print "unknown arguments:", str(cmd_args)
@@ -782,17 +786,6 @@ def ShowProcFiles(cmd_args=None):
     print "{0:-<5s} {0:-<18s} {0:-<10s} {0:-<8s} {0:-<18s} {0:-<64s}".format("")
     count = 0
 
-    # Filetype map
-    filetype_dict = {
-                1: 'VNODE',
-                2: 'SOCKET',
-                3: 'PSXSHM',
-                4: 'PSXSEM',
-                5: 'KQUEUE',
-                6: 'PIPE',
-                7: 'FSEVENTS'
-              }
-
     while count <= proc_lastfile:
         if unsigned(proc_ofiles[count]) != 0:
             out_str = ''
@@ -802,8 +795,8 @@ def ShowProcFiles(cmd_args=None):
             out_str += "{0: <#18x} ".format(unsigned(proc_fd_fglob))
             out_str += "0x{0:0>8x} ".format(unsigned(proc_fd_flags))
             proc_fd_ftype = unsigned(proc_fd_fglob.fg_ops.fo_type)
-            if proc_fd_ftype in filetype_dict:
-                out_str += "{0: <8s} ".format(filetype_dict[proc_fd_ftype])
+            if proc_fd_ftype in xnudefines.filetype_strings:
+                out_str += "{0: <8s} ".format(xnudefines.filetype_strings[proc_fd_ftype])
             else:
                 out_str += "?: {0: <5d} ".format(proc_fd_ftype)
             out_str += "{0: <#18x} ".format(unsigned(proc_fd_fglob.fg_data))
@@ -815,66 +808,6 @@ def ShowProcFiles(cmd_args=None):
         count += 1
 
 #EndMacro: showprocfiles
-
-
-def GetProcKqueues(proc):
-    filetype_KQUEUE = 5
-
-    proc_filedesc = proc.p_fd
-    proc_lastfile = unsigned(proc_filedesc.fd_lastfile)
-    proc_ofiles = proc_filedesc.fd_ofiles
-
-    queues = list()
-
-    if unsigned(proc_ofiles) == 0:
-        return queues
-
-    count = 0
-
-    while count <= proc_lastfile:
-        if unsigned(proc_ofiles[count]) != 0:
-            proc_fd_flags = proc_ofiles[count].f_flags
-            proc_fd_fglob = proc_ofiles[count].f_fglob
-            proc_fd_ftype = unsigned(proc_fd_fglob.fg_ops.fo_type)
-            if proc_fd_ftype == filetype_KQUEUE:
-                q = Cast(proc_fd_fglob.fg_data, 'struct kqueue *')
-                queues.append(q)
-        count += 1
-
-    return queues
-
-def GetAllKqueues():
-    for t in kern.tasks:
-        if unsigned(t.bsd_info) == 0:
-            continue
-        pval = Cast(t.bsd_info, 'proc *')
-        for kq in GetProcKqueues(pval):
-            yield kq
-
-#Macro: showallkqueues
-@lldb_command('showallkqueues' ,'')
-def ShowAllKqueues(cmd_args=[], cmd_options={}):
-    """ Display a summary of all the kqueues in the system """
-    for kq in GetAllKqueues():
-        print GetKQueueSummary.header
-        print GetKQueueSummary(kq)
-        print "\n\n"
-#EndMacro: showallkqueues
-
-#Macro: showkqueue
-@lldb_command('showkqueue' ,'')
-def ShowKQueue(cmd_args=[], cmd_options={}):
-    """ Given a struct kqueue pointer, display the summary of the kqueue
-        Usage: (lldb) showkqueue <struct kqueue *>
-    """
-    if not cmd_args:
-        raise ArgumentError('Invalid arguments')
-
-    kq = kern.GetValueFromAddress(cmd_args[0], 'struct kqueue *')
-    print GetKQueueSummary.header
-    print GetKQueueSummary(kq)
-
-#EndMacro: showkqueue
 
 #Macro: showtty
 
@@ -1060,6 +993,23 @@ def ShowAllTasks(cmd_args=None, cmd_options={}):
         print out_str
     ZombTasks()
 
+@lldb_command('taskforpmap')
+def TaskForPmap(cmd_args=None):
+    """ Find the task whose pmap corresponds to <pmap>.
+        Syntax: (lldb) taskforpmap <pmap>
+            Multiple -v's can be specified for increased verbosity
+    """
+    if cmd_args == None or len(cmd_args) < 1:
+        raise ArgumentError("Too few arguments to taskforpmap.")
+    pmap = kern.GetValueFromAddress(cmd_args[0], 'pmap_t')
+    print GetTaskSummary.header + " " + GetProcSummary.header
+    for tasklist in [kern.tasks, kern.terminated_tasks]:
+        for t in tasklist:
+            if t.map.pmap == pmap:
+                pval = Cast(t.bsd_info, 'proc *')
+                out_str = GetTaskSummary(t) + " " + GetProcSummary(pval)
+                print out_str
+
 @lldb_command('showterminatedtasks') 
 def ShowTerminatedTasks(cmd_args=None):
     """  Routine to print a summary listing of all the terminated tasks
@@ -1138,6 +1088,52 @@ def ShowTaskStacksCmdHelper(cmd_args=None, cmd_options={}):
 
 # EndMacro: showtaskstacks
 
+def CheckTaskProcRefs(task, proc):
+    for thread in IterateQueue(task.threads, 'thread *', 'task_threads'):
+        if int(thread.uthread) == 0:
+            continue
+        uthread = Cast(thread.uthread, 'uthread *')
+        refcount = int(uthread.uu_proc_refcount)
+        uu_ref_index = int(uthread.uu_pindex)
+        if refcount == 0:
+            continue
+        for ref in range(0, uu_ref_index):
+            if unsigned(uthread.uu_proc_ps[ref]) == unsigned(proc):
+                print GetTaskSummary.header + " " + GetProcSummary.header
+                pval = Cast(task.bsd_info, 'proc *')
+                print GetTaskSummary(task) + " " + GetProcSummary(pval)
+                print "\t" + GetThreadSummary.header
+                print "\t" + GetThreadSummary(thread) + "\n"
+
+                for frame in range (0, 10):
+                    trace_addr = unsigned(uthread.uu_proc_pcs[ref][frame])
+                    symbol_arr = kern.SymbolicateFromAddress(unsigned(trace_addr))
+                    if symbol_arr:
+                        symbol_str = str(symbol_arr[0].addr)
+                    else:
+                        symbol_str = ''
+                    print '{0: <#x} {1: <s}'.format(trace_addr, symbol_str)
+    return
+
+@lldb_command('showprocrefs')
+def ShowProcRefs(cmd_args = None):
+    """ Display information on threads/BTs that could be holding a reference on the specified proc
+        NOTE: We can't say affirmatively if any of these references are still held since
+              there's no way to pair references with drop-refs in the current infrastructure.
+        Usage: showprocrefs <proc>
+    """
+    if cmd_args == None or len(cmd_args) < 1:
+         raise ArgumentError("No arguments passed")
+
+    proc = kern.GetValueFromAddress(cmd_args[0], 'proc *')
+
+    for t in kern.tasks:
+        CheckTaskProcRefs(t, proc)
+    for t in kern.terminated_tasks:
+        CheckTaskProcRefs(t, proc)
+
+    return
+
 @lldb_command('showallthreads')
 def ShowAllThreads(cmd_args = None):
     """ Display info about all threads in the system
@@ -1182,10 +1178,8 @@ def ShowAct(cmd_args=None):
     """ Routine to print out the state of a specific thread.
         usage: showact <activation> 
     """
-    if cmd_args == None or len(cmd_args) < 1:
-        print "No arguments passed"
-        print ShowAct.__doc__
-        return False
+    if not cmd_args:
+        raise ArgumentError("No arguments passed")
     threadval = kern.GetValueFromAddress(cmd_args[0], 'thread *')
     print GetThreadSummary.header
     print GetThreadSummary(threadval)
@@ -1195,10 +1189,8 @@ def ShowActStack(cmd_args=None):
     """ Routine to print out the stack of a specific thread.
         usage:  showactstack <activation> 
     """
-    if cmd_args == None or len(cmd_args) < 1:
-        print "No arguments passed"
-        print ShowAct.__doc__.strip()
-        return False
+    if not cmd_args:
+        raise ArgumentError("No arguments passed")
     threadval = kern.GetValueFromAddress(cmd_args[0], 'thread *')
     print GetThreadSummary.header
     print GetThreadSummary(threadval)
@@ -1214,10 +1206,8 @@ def SwitchToAct(cmd_args=None):
     Before resuming execution, issue a "resetctx" command, to
     return to the original execution context.
     """
-    if cmd_args == None or len(cmd_args) < 1:
-        print "No arguments passed"
-        print SwitchToAct.__doc__.strip()
-        return False
+    if cmd_args is None or len(cmd_args) < 1:
+        raise ArgumentError("No arguments passed")
     thval = kern.GetValueFromAddress(cmd_args[0], 'thread *')
     lldbthread = GetLLDBThreadForKernelThread(thval)
     print GetThreadSummary.header
@@ -1325,7 +1315,7 @@ def GetFullBackTrace(frame_addr, verbosity = vHUMAN, prefix = ""):
     # <rdar://problem/12677290> lldb unable to find symbol for _mh_execute_header
     mh_execute_addr = int(lldb_run_command('p/x (uintptr_t *)&_mh_execute_header').split('=')[-1].strip(), 16)
     while frame_ptr and frame_ptr != previous_frame_ptr and bt_count < 128:
-        if (kern.arch not in ('arm', 'arm64') and frame_ptr < mh_execute_addr) or (kern.arch in ('arm', 'arm64') and frame_ptr > mh_execute_addr):
+        if (not kern.arch.startswith('arm') and frame_ptr < mh_execute_addr) or (kern.arch.startswith('arm') and frame_ptr > mh_execute_addr):
             break
         pc_val = kern.GetValueFromAddress(frame_ptr + kern.ptrsize,'uintptr_t *')
         pc_val = unsigned(dereference(pc_val))
@@ -1521,11 +1511,14 @@ def GetLedgerEntrySummary(ledger_template, ledger, i):
     out_str += "{: >32s} {:<2d}:".format(ledger_template.lt_entries[i].et_key, i)
     out_str += "{: >15d} ".format(unsigned(ledger.le_credit) - unsigned(ledger.le_debit))
     if (ledger.le_flags & lf_tracking_max):
-        out_str += "{:9d} {:5d} ".format(ledger._le.le_peaks[0].le_max, now - unsigned(ledger._le.le_peaks[0].le_time))
-        out_str += "{:9d} {:4d} ".format(ledger._le.le_peaks[1].le_max, now - unsigned(ledger._le.le_peaks[1].le_time))
+        out_str += "{:9d} {:5d} ".format(ledger._le.le_maxtracking.le_peaks[0].le_max, now - unsigned(ledger._le.le_maxtracking.le_peaks[0].le_time))
     else:
-        out_str += "        -     -         -    - "
-    
+        out_str += "        -     -"
+
+    if (ledger.le_flags & lf_tracking_max):
+        out_str += "{:12d} ".format(ledger._le.le_maxtracking.le_lifetime_max)
+    else:
+        out_str += "             -"
     out_str += "{:12d} {:12d} ".format(unsigned(ledger.le_credit), unsigned(ledger.le_debit))
     if (unsigned(ledger.le_limit) != ledger_limit_infinity):
         out_str += "{:12d} ".format(unsigned(ledger.le_limit))
@@ -1570,9 +1563,9 @@ def GetThreadLedgerSummary(thread_val):
             i = i + 1
     return out_str
 
-@header("{0: <15s} {1: >16s} {2: <2s} {3: >15s} {4: >9s} {5: >6s} {6: >8s} {7: <10s} {8: <9s} \
-    {9: <12s} {10: <7s} {11: <15s} {12: <8s} {13: <9s} {14: <6s} {15: >6s}".format(
-    "task [thread]", "entry", "#", "balance", "peakA", "(age)", "peakB", "(age)", "credit",
+@header("{0: <15s} {1: >16s} {2: <2s} {3: >15s} {4: >9s} {5: >6s} {6: >12s} {7: >11s} \
+    {8: >7s} {9: >13s}   {10: <15s} {11: <8s} {12: <9s} {13: <6s} {14: >6s}".format(
+    "task [thread]", "entry", "#", "balance", "peakA", "(age)", "lifemax", "credit",
      "debit", "limit", "refill period", "lim pct", "warn pct", "over?", "flags"))
 def GetTaskLedgers(task_val):
     """ Internal function to get summary of ledger entries from the task and its threads
@@ -2073,62 +2066,4 @@ def Showstackafterthread(cmd_args = None):
                thread_flag = 1
         print '\n'
     return
-
-def FindVMEntriesForVnode(task, vn):
-    """ returns an array of vme that have the vnode set to defined vnode
-        each entry in array is of format (vme, start_addr, end_address, protection)
-    """
-    retval = []
-    vmmap = task.map
-    pmap = vmmap.pmap
-    pager_ops_addr = unsigned(addressof(kern.globals.vnode_pager_ops))
-    debuglog("pager_ops_addr %s" % hex(pager_ops_addr))
-
-    if unsigned(pmap) == 0:
-        return retval
-    vme_list_head = vmmap.hdr.links
-    vme_ptr_type = gettype('vm_map_entry *')
-    for vme in IterateQueue(vme_list_head, vme_ptr_type, 'links'):
-        #print vme
-        if unsigned(vme.is_sub_map) == 0 and unsigned(vme.object.vm_object) != 0:
-            obj = vme.object.vm_object
-        else:
-            continue
-
-        while obj != 0:
-            if obj.pager != 0:
-                if obj.internal:
-                    pass
-                else:
-                    vn_pager = Cast(obj.pager, 'vnode_pager *')
-                    if unsigned(vn_pager.pager_ops) == pager_ops_addr and unsigned(vn_pager.vnode_handle) == unsigned(vn):
-                        retval.append((vme, unsigned(vme.links.start), unsigned(vme.links.end), unsigned(vme.protection)))
-            obj = obj.shadow
-    return retval
-
-@lldb_command('showtaskloadinfo')
-def ShowTaskLoadInfo(cmd_args=None, cmd_options={}):
-    """ Print the load address and uuid for the process
-        Usage: (lldb)showtaskloadinfo <task_t>
-    """
-    if not cmd_args:
-        raise ArgumentError("Insufficient arguments")
-    t = kern.GetValueFromAddress(cmd_args[0], 'struct task *')
-    print_format = "0x{0:x} - 0x{1:x} {2: <50s} (??? - ???) <{3: <36s}> {4: <50s}"
-    p = Cast(t.bsd_info, 'struct proc *')
-    uuid = p.p_uuid
-    uuid_out_string = "{a[0]:02X}{a[1]:02X}{a[2]:02X}{a[3]:02X}-{a[4]:02X}{a[5]:02X}-{a[6]:02X}{a[7]:02X}-{a[8]:02X}{a[9]:02X}-{a[10]:02X}{a[11]:02X}{a[12]:02X}{a[13]:02X}{a[14]:02X}{a[15]:02X}".format(a=uuid)
-    filepath = GetVnodePath(p.p_textvp)
-    libname = filepath.split('/')[-1]
-    #print "uuid: %s file: %s" % (uuid_out_string, filepath)
-    mappings = FindVMEntriesForVnode(t, p.p_textvp)
-    load_addr = 0
-    end_addr = 0
-    for m in mappings:
-        if m[3] == 5:
-            load_addr = m[1]
-            end_addr = m[2]
-            #print "Load address: %s" % hex(m[1])
-    print print_format.format(load_addr, end_addr, libname, uuid_out_string, filepath)
-    return None
 

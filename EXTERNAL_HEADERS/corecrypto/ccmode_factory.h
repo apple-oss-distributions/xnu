@@ -115,12 +115,12 @@ const struct ccmode_cbc *cc3des_cbc_encrypt_mode(void) {
 
 
 
-void ccmode_cbc_init(const struct ccmode_cbc *cbc, cccbc_ctx *ctx,
-                     size_t rawkey_len, const void *rawkey);
-void ccmode_cbc_decrypt(const cccbc_ctx *ctx, cccbc_iv *iv, size_t nblocks,
-                        const void *in, void *out);
-void ccmode_cbc_encrypt(const cccbc_ctx *ctx, cccbc_iv *iv, size_t nblocks,
-                        const void *in, void *out);
+int ccmode_cbc_init(const struct ccmode_cbc *cbc, cccbc_ctx *ctx,
+                    size_t rawkey_len, const void *rawkey);
+int ccmode_cbc_decrypt(const cccbc_ctx *ctx, cccbc_iv *iv, size_t nblocks,
+                       const void *in, void *out);
+int ccmode_cbc_encrypt(const cccbc_ctx *ctx, cccbc_iv *iv, size_t nblocks,
+                       const void *in, void *out);
 
 struct _ccmode_cbc_key {
     const struct ccmode_ecb *ecb;
@@ -160,13 +160,13 @@ void ccmode_factory_cbc_encrypt(struct ccmode_cbc *cbc,
                                 const struct ccmode_ecb *ecb);
 
 
-void ccmode_cfb_init(const struct ccmode_cfb *cfb, cccfb_ctx *ctx,
-                     size_t rawkey_len, const void *rawkey,
-                     const void *iv);
-void ccmode_cfb_decrypt(cccfb_ctx *ctx, size_t nbytes,
-                        const void *in, void *out);
-void ccmode_cfb_encrypt(cccfb_ctx *ctx, size_t nbytes,
-                        const void *in, void *out);
+int ccmode_cfb_init(const struct ccmode_cfb *cfb, cccfb_ctx *ctx,
+                    size_t rawkey_len, const void *rawkey,
+                    const void *iv);
+int ccmode_cfb_decrypt(cccfb_ctx *ctx, size_t nbytes,
+                       const void *in, void *out);
+int ccmode_cfb_encrypt(cccfb_ctx *ctx, size_t nbytes,
+                       const void *in, void *out);
 struct _ccmode_cfb_key {
     const struct ccmode_ecb *ecb;
     size_t pad_len;
@@ -205,12 +205,12 @@ void ccmode_factory_cfb_decrypt(struct ccmode_cfb *cfb,
 void ccmode_factory_cfb_encrypt(struct ccmode_cfb *cfb,
                                 const struct ccmode_ecb *ecb);
 
-void ccmode_cfb8_init(const struct ccmode_cfb8 *cfb8, cccfb8_ctx *ctx,
-                      size_t rawkey_len, const void *rawkey, const void *iv);
-void ccmode_cfb8_decrypt(cccfb8_ctx *ctx, size_t nbytes,
-                         const void *in, void *out);
-void ccmode_cfb8_encrypt(cccfb8_ctx *ctx, size_t nbytes,
-                         const void *in, void *out);
+int ccmode_cfb8_init(const struct ccmode_cfb8 *cfb8, cccfb8_ctx *ctx,
+                     size_t rawkey_len, const void *rawkey, const void *iv);
+int ccmode_cfb8_decrypt(cccfb8_ctx *ctx, size_t nbytes,
+                        const void *in, void *out);
+int ccmode_cfb8_encrypt(cccfb8_ctx *ctx, size_t nbytes,
+                        const void *in, void *out);
 
 struct _ccmode_cfb8_key {
     const struct ccmode_ecb *ecb;
@@ -249,14 +249,15 @@ void ccmode_factory_cfb8_decrypt(struct ccmode_cfb8 *cfb8,
 void ccmode_factory_cfb8_encrypt(struct ccmode_cfb8 *cfb8,
                                  const struct ccmode_ecb *ecb);
 
-void ccmode_ctr_init(const struct ccmode_ctr *ctr, ccctr_ctx *ctx,
-                     size_t rawkey_len, const void *rawkey, const void *iv);
-void ccmode_ctr_crypt(ccctr_ctx *ctx, size_t nbytes,
-                      const void *in, void *out);
+int ccmode_ctr_init(const struct ccmode_ctr *ctr, ccctr_ctx *ctx,
+                    size_t rawkey_len, const void *rawkey, const void *iv);
+int ccmode_ctr_setctr(const struct ccmode_ctr *mode, ccctr_ctx *ctx, const void *ctr);
+int ccmode_ctr_crypt(ccctr_ctx *ctx, size_t nbytes,
+                     const void *in, void *out);
 
 struct _ccmode_ctr_key {
     const struct ccmode_ecb *ecb;
-    size_t pad_len;
+    size_t pad_offset;
     cc_unit u[];
 };
 
@@ -264,7 +265,9 @@ struct _ccmode_ctr_key {
 #define CCMODE_FACTORY_CTR_CRYPT(ECB_ENCRYPT) { \
 .size = ccn_sizeof_size(sizeof(struct _ccmode_ctr_key)) + 2 * ccn_sizeof_size((ECB_ENCRYPT)->block_size) + ccn_sizeof_size((ECB_ENCRYPT)->size), \
 .block_size = 1, \
+.ecb_block_size = (ECB_ENCRYPT)->block_size, \
 .init = ccmode_ctr_init, \
+.setctr = ccmode_ctr_setctr, \
 .ctr = ccmode_ctr_crypt, \
 .custom = (ECB_ENCRYPT) \
 }
@@ -282,7 +285,7 @@ void ccmode_factory_ctr_crypt(struct ccmode_ctr *ctr,
  storage. */
 int ccmode_gcm_init(const struct ccmode_gcm *gcm, ccgcm_ctx *ctx,
                      size_t rawkey_len, const void *rawkey);
-int ccmode_gcm_set_iv(ccgcm_ctx *ctx, size_t iv_size, const void *iv);
+int ccmode_gcm_set_iv(ccgcm_ctx *ctx, size_t iv_nbytes, const void *iv);
 int ccmode_gcm_aad(ccgcm_ctx *ctx, size_t nbytes, const void *in);
 int ccmode_gcm_decrypt(ccgcm_ctx *ctx, size_t nbytes, const void *in,
                         void *out);
@@ -292,19 +295,22 @@ int ccmode_gcm_encrypt(ccgcm_ctx *ctx, size_t nbytes, const void *in,
 /*!
  @function  ccmode_gcm_finalize() finalizes AES-GCM call sequence
  @param key encryption or decryption key
- @param tag_size
- @param tag
+ @param tag_nbytes length of tag in bytes
+ @param tag authentication tag
  @result	0=success or non zero= error
  @discussion For decryption, the tag parameter must be the expected-tag. A secure compare is performed between the provided expected-tag and the computed-tag. If they are the same, 0 is returned. Otherwise, non zero is returned. For encryption, tag is output and provides the authentication tag.
 
  */
-int ccmode_gcm_finalize(ccgcm_ctx *key, size_t tag_size, void *tag);
+int ccmode_gcm_finalize(ccgcm_ctx *key, size_t tag_nbytes, void *tag);
 int ccmode_gcm_reset(ccgcm_ctx *key);
 
+#define CCGCM_FLAGS_INIT_WITH_IV 1
 
 // Here is what the structure looks like in memory
 // [ temp space | length | *ecb | *ecb_key | table | ecb_key ]
 // size of table depends on the implementation (VNG vs factory)
+// currently, VNG and factory share the same "header" described here
+// VNG may add additional data after the header
 struct _ccmode_gcm_key {
     // 5 blocks of temp space.
     unsigned char H[16];       /* multiplier */
@@ -314,12 +320,12 @@ struct _ccmode_gcm_key {
     unsigned char buf[16];      /* buffer for stuff */
 
     // State and length
-    uint32_t ivmode;       /* Which mode is the IV in? */
-    uint32_t state;        /* state the GCM code is in */
-    uint32_t buflen;       /* length of data in buf */
+    uint16_t state;        /* state the GCM code is in */
+    uint16_t flags;        /* flags (persistent across reset) */
+    uint32_t buf_nbytes;   /* length of data in buf */
 
-    uint64_t totlen;       /* 64-bit counter used for IV and AAD */
-    uint64_t pttotlen;     /* 64-bit counter for the plaintext PT */
+    uint64_t aad_nbytes;   /* 64-bit counter used for IV and AAD */
+    uint64_t text_nbytes;  /* 64-bit counter for the plaintext PT */
 
     // ECB
     const struct ccmode_ecb *ecb;              // ecb mode
@@ -328,7 +334,7 @@ struct _ccmode_gcm_key {
     int encdec; //is it an encrypt or decrypt object
 
     // Buffer with ECB key and H table if applicable
-    unsigned char u[] __attribute__ ((aligned (16))); // ecb key + tables
+    CC_ALIGNED(16) unsigned char u[]; // ecb key + tables
 };
 
 #define GCM_ECB_KEY_SIZE(ECB_ENCRYPT) \
@@ -431,11 +437,11 @@ void ccmode_factory_ccm_encrypt(struct ccmode_ccm *ccm,
                                 const struct ccmode_ecb *ecb_encrypt);
 
 
-void ccmode_ofb_init(const struct ccmode_ofb *ofb, ccofb_ctx *ctx,
-                     size_t rawkey_len, const void *rawkey,
-                     const void *iv);
-void ccmode_ofb_crypt(ccofb_ctx *ctx, size_t nbytes,
-                      const void *in, void *out);
+int ccmode_ofb_init(const struct ccmode_ofb *ofb, ccofb_ctx *ctx,
+                    size_t rawkey_len, const void *rawkey,
+                    const void *iv);
+int ccmode_ofb_crypt(ccofb_ctx *ctx, size_t nbytes,
+                     const void *in, void *out);
 
 struct _ccmode_ofb_key {
     const struct ccmode_ecb *ecb;
@@ -469,9 +475,9 @@ int ccmode_omac_encrypt(ccomac_ctx *ctx, size_t nblocks,
  ccmode_omac->omac().
  key must point to at least sizeof(CCMODE_OMAC_KEY(ecb)) bytes of free
  storage. */
-void ccmode_omac_init(const struct ccmode_omac *omac, ccomac_ctx *ctx,
-                      size_t tweak_len, size_t rawkey_len,
-                      const void *rawkey);
+int ccmode_omac_init(const struct ccmode_omac *omac, ccomac_ctx *ctx,
+                     size_t tweak_len, size_t rawkey_len,
+                     const void *rawkey);
 
 struct _ccmode_omac_key {
     const struct ccmode_ecb *ecb;
@@ -513,13 +519,16 @@ void ccmode_factory_omac_encrypt(struct ccmode_omac *omac,
 
 
 /* Function prototypes used by the macros below, do not call directly. */
-void ccmode_xts_init(const struct ccmode_xts *xts, ccxts_ctx *ctx,
-                     size_t key_len, const void *data_key,
-                     const void *tweak_key);
+int ccmode_xts_init(const struct ccmode_xts *xts, ccxts_ctx *ctx,
+                    size_t key_nbytes, const void *data_key,
+                    const void *tweak_key);
+void ccmode_xts_key_sched(const struct ccmode_xts *xts, ccxts_ctx *ctx,
+                          size_t key_nbytes, const void *data_key,
+                          const void *tweak_key);
 void *ccmode_xts_crypt(const ccxts_ctx *ctx, ccxts_tweak *tweak,
                        size_t nblocks, const void *in, void *out);
-void ccmode_xts_set_tweak(const ccxts_ctx *ctx, ccxts_tweak *tweak,
-                          const void *iv);
+int ccmode_xts_set_tweak(const ccxts_ctx *ctx, ccxts_tweak *tweak,
+                         const void *iv);
 
 
 struct _ccmode_xts_key {
@@ -544,6 +553,7 @@ struct _ccmode_xts_tweak {
 .tweak_size = ccn_sizeof_size(sizeof(struct _ccmode_xts_tweak)) + ccn_sizeof_size(ecb->block_size), \
 .block_size = ecb->block_size, \
 .init = ccmode_xts_init, \
+.key_sched = ccmode_xts_key_sched, \
 .set_tweak = ccmode_xts_set_tweak, \
 .xts = ccmode_xts_crypt, \
 .custom = (ECB), \
@@ -556,6 +566,7 @@ struct _ccmode_xts_tweak {
 .tweak_size = ccn_sizeof_size(sizeof(struct _ccmode_xts_tweak)) + ccn_sizeof_size(ecb->block_size), \
 .block_size = ecb->block_size, \
 .init = ccmode_xts_init, \
+.key_sched = ccmode_xts_key_sched, \
 .set_tweak = ccmode_xts_set_tweak, \
 .xts = ccmode_xts_crypt, \
 .custom = (ECB), \

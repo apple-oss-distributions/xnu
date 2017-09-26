@@ -138,8 +138,10 @@
 #include <kern/policy_internal.h>
 #include <kern/kalloc.h>
 
+#include <os/log.h>
+
 #if CONFIG_MACF
-#include <security/mac.h>
+#include <security/mac_framework.h>
 #include <security/mac_mach_internal.h>
 #endif
 
@@ -175,9 +177,17 @@ static void (*dtrace_proc_waitfor_hook)(proc_t) = NULL;
 #endif
 
 /* support for child creation in exec after vfork */
-thread_t fork_create_child(task_t parent_task, coalition_t *parent_coalition, proc_t child_proc, int inherit_memory, int is64bit);
+thread_t fork_create_child(task_t parent_task, coalition_t *parent_coalition, proc_t child_proc, int inherit_memory, int is64bit, int in_exec);
 void vfork_exit(proc_t p, int rv);
 extern void proc_apply_task_networkbg_internal(proc_t, thread_t);
+extern void task_set_did_exec_flag(task_t task);
+extern void task_clear_exec_copy_flag(task_t task);
+proc_t proc_exec_switch_task(proc_t p, task_t old_task, task_t new_task, thread_t new_thread);
+boolean_t task_is_active(task_t);
+boolean_t thread_is_active(thread_t thread);
+void thread_copy_resource_info(thread_t dst_thread, thread_t src_thread);
+void *ipc_importance_exec_switch_task(task_t old_task, task_t new_task);
+extern void ipc_importance_release(void *elem);
 
 /*
  * Mach things for which prototypes are unavailable from Mach headers
@@ -233,6 +243,16 @@ extern const struct fileops vnops;
 #define	USER_ADDR_ALIGN(addr, val) \
 	( ( (user_addr_t)(addr) + (val) - 1) \
 		& ~((val) - 1) )
+
+ /* Platform Code Exec Logging */
+static int platform_exec_logging = 0;
+
+SYSCTL_DECL(_security_mac);
+
+SYSCTL_INT(_security_mac, OID_AUTO, platform_exec_logging, CTLFLAG_RW, &platform_exec_logging, 0,
+		   "log cdhashes for all platform binary executions");
+
+static os_log_t peLog = OS_LOG_DEFAULT;
 
 struct image_params;	/* Forward */
 static int exec_activate_image(struct image_params *imgp);
@@ -446,10 +466,6 @@ exec_shell_imgact(struct image_params *imgp)
 	char *ihp;
 	char *line_startp, *line_endp;
 	char *interp;
-	proc_t p;
-	struct fileproc *fp;
-	int fd;
-	int error;
 
 	/*
 	 * Make sure it's a shell script.  If we've already redirected
@@ -544,12 +560,18 @@ exec_shell_imgact(struct image_params *imgp)
 		*interp++ = *ihp;
 	*interp = '\0';
 
+#if !SECURE_KERNEL
 	/*
-	 * If we have a SUID oder SGID script, create a file descriptor
+	 * If we have an SUID or SGID script, create a file descriptor
 	 * from the vnode and pass /dev/fd/%d instead of the actual
 	 * path name so that the script does not get opened twice
 	 */
 	if (imgp->ip_origvattr->va_mode & (VSUID | VSGID)) {
+		proc_t p;
+		struct fileproc *fp;
+		int fd;
+		int error;
+
 		p = vfs_context_proc(imgp->ip_vfs_context);
 		error = falloc(p, &fp, &fd, imgp->ip_vfs_context);
 		if (error)
@@ -567,6 +589,7 @@ exec_shell_imgact(struct image_params *imgp)
 
 		imgp->ip_interp_sugid_fd = fd;
 	}
+#endif
 
 	return (-3);
 }
@@ -612,7 +635,8 @@ exec_fat_imgact(struct image_params *imgp)
 
 	if (imgp->ip_origcputype != 0) {
 		/* Fat header previously matched, don't allow another fat file inside */
-		return (-1);
+		error = -1; /* not claimed */
+		goto bad;
 	}
 
 	/* Make sure it's a fat binary */
@@ -764,6 +788,15 @@ set_proc_name(struct image_params *imgp, proc_t p)
 	p->p_comm[imgp->ip_ndp->ni_cnd.cn_namelen] = '\0';
 }
 
+static uint64_t get_va_fsid(struct vnode_attr *vap)
+{
+	if (VATTR_IS_SUPPORTED(vap, va_fsid64)) {
+		return *(uint64_t *)&vap->va_fsid64;
+	} else {
+		return vap->va_fsid;
+	}
+}
+
 /*
  * exec_mach_imgact
  *
@@ -798,12 +831,13 @@ exec_mach_imgact(struct image_params *imgp)
 	thread_t		thread;
 	struct uthread		*uthread;
 	vm_map_t old_map = VM_MAP_NULL;
-	vm_map_t map;
+	vm_map_t map = VM_MAP_NULL;
 	load_return_t		lret;
 	load_result_t		load_result;
 	struct _posix_spawnattr *psa = NULL;
 	int			spawn = (imgp->ip_flags & IMGPF_SPAWN);
 	int			vfexec = (imgp->ip_flags & IMGPF_VFORK_EXEC);
+	int			exec = (imgp->ip_flags & IMGPF_EXEC);
 	os_reason_t		exec_failure_reason = OS_REASON_NULL;
 
 	/*
@@ -896,23 +930,20 @@ grade:
 	 * obtained indirectly from the image_params vfs_context_t, is the
 	 * new child process.
 	 */
-	if (vfexec || spawn) {
-		if (vfexec) {
-			imgp->ip_new_thread = fork_create_child(task, NULL, p, FALSE, (imgp->ip_flags & IMGPF_IS_64BIT));
-			if (imgp->ip_new_thread == NULL) {
-				error = ENOMEM;
-				goto bad;
-			}
+	if (vfexec) {
+		imgp->ip_new_thread = fork_create_child(task, NULL, p, FALSE, (imgp->ip_flags & IMGPF_IS_64BIT), FALSE);
+		/* task and thread ref returned, will be released in __mac_execve */
+		if (imgp->ip_new_thread == NULL) {
+			error = ENOMEM;
+			goto bad;
 		}
-
-		/* reset local idea of thread, uthread, task */
-		thread = imgp->ip_new_thread;
-		uthread = get_bsdthread_info(thread);
-		task = new_task = get_threadtask(thread);
-		map = get_task_map(task);
-	} else {
-		map = VM_MAP_NULL;
 	}
+
+
+	/* reset local idea of thread, uthread, task */
+	thread = imgp->ip_new_thread;
+	uthread = get_bsdthread_info(thread);
+	task = new_task = get_threadtask(thread);
 
 	/*
 	 *	Load the Mach-O file.
@@ -962,7 +993,7 @@ grade:
 	 */
 	if (load_result.csflags & CS_VALID) {
 		imgp->ip_csflags |= load_result.csflags & 
-			(CS_VALID|CS_SIGNED|
+			(CS_VALID|CS_SIGNED|CS_DEV_CODE|
 			 CS_HARD|CS_KILL|CS_RESTRICT|CS_ENFORCEMENT|CS_REQUIRE_LV|
 			 CS_ENTITLEMENTS_VALIDATED|CS_DYLD_PLATFORM|
 			 CS_ENTITLEMENT_FLAGS|
@@ -977,8 +1008,14 @@ grade:
 		imgp->ip_csflags |= CS_KILL;
 	if (p->p_csflags & CS_EXEC_SET_ENFORCEMENT)
 		imgp->ip_csflags |= CS_ENFORCEMENT;
-	if (p->p_csflags & CS_EXEC_SET_INSTALLER)
-		imgp->ip_csflags |= CS_INSTALLER;
+	if (p->p_csflags & CS_EXEC_INHERIT_SIP) {
+		if (p->p_csflags & CS_INSTALLER)
+			imgp->ip_csflags |= CS_INSTALLER;
+		if (p->p_csflags & CS_DATAVAULT_CONTROLLER)
+			imgp->ip_csflags |= CS_DATAVAULT_CONTROLLER;
+		if (p->p_csflags & CS_NVRAM_UNRESTRICTED)
+			imgp->ip_csflags |= CS_NVRAM_UNRESTRICTED;
+	}
 
 	/*
 	 * Set up the system reserved areas in the new address space.
@@ -988,16 +1025,14 @@ grade:
 	/*
 	 * Close file descriptors which specify close-on-exec.
 	 */
-	fdexec(p, psa != NULL ? psa->psa_flags : 0);
+	fdexec(p, psa != NULL ? psa->psa_flags : 0, exec);
 
 	/*
 	 * deal with set[ug]id.
 	 */
 	error = exec_handle_sugid(imgp);
 	if (error) {
-		if (spawn || !vfexec) {
-			vm_map_deallocate(map);
-		}
+		vm_map_deallocate(map);
 
 		KERNEL_DEBUG_CONSTANT(BSDDBG_CODE(DBG_BSD_PROC, BSD_PROC_EXITREASON_CREATE) | DBG_FUNC_NONE,
 						p->p_pid, OS_REASON_EXEC, EXEC_EXIT_REASON_SUGID_FAILURE, 0, 0);
@@ -1008,14 +1043,18 @@ grade:
 	/*
 	 * Commit to new map.
 	 *
-	 * Swap the new map for the old, which consumes our new map reference but
-	 * each leaves us responsible for the old_map reference.  That lets us get
-	 * off the pmap associated with it, and then we can release it.
+	 * Swap the new map for the old for target task, which consumes
+	 * our new map reference but each leaves us responsible for the
+	 * old_map reference.  That lets us get off the pmap associated
+	 * with it, and then we can release it.
+	 *
+	 * The map needs to be set on the target task which is different
+	 * than current task, thus swap_task_map is used instead of
+	 * vm_map_switch.
 	 */
-	if (!vfexec) {
-		old_map = swap_task_map(task, thread, map, !spawn);
-		vm_map_deallocate(old_map);
-	}
+	old_map = swap_task_map(task, thread, map);
+	vm_map_deallocate(old_map);
+	old_map = NULL;
 
 	lret = activate_exec_state(task, p, thread, &load_result);
 	if (lret != KERN_SUCCESS) {
@@ -1057,9 +1096,8 @@ grade:
 		goto badtoolate;
 	}
 
-	if (vfexec || spawn) {
-		old_map = vm_map_switch(get_task_map(task));
-	}
+	/* Switch to target task's map to copy out strings */
+	old_map = vm_map_switch(get_task_map(task));
 
 	if (load_result.unixproc) {
 		user_addr_t	ap;
@@ -1071,8 +1109,7 @@ grade:
 		ap = p->user_stack;
 		error = exec_copyout_strings(imgp, &ap);
 		if (error) {
-			if (vfexec || spawn)
-				vm_map_switch(old_map);
+			vm_map_switch(old_map);
 
 			KERNEL_DEBUG_CONSTANT(BSDDBG_CODE(DBG_BSD_PROC, BSD_PROC_EXITREASON_CREATE) | DBG_FUNC_NONE,
 						p->p_pid, OS_REASON_EXEC, EXEC_EXIT_REASON_COPYOUT_STRINGS, 0, 0);
@@ -1092,8 +1129,7 @@ grade:
 		error = copyoutptr(load_result.mach_header, ap, new_ptr_size);
 
 		if (error) {
-			if (vfexec || spawn)
-				vm_map_switch(old_map);
+			vm_map_switch(old_map);
 
 			KERNEL_DEBUG_CONSTANT(BSDDBG_CODE(DBG_BSD_PROC, BSD_PROC_EXITREASON_CREATE) | DBG_FUNC_NONE,
 						p->p_pid, OS_REASON_EXEC, EXEC_EXIT_REASON_COPYOUT_DYNLINKER, 0, 0);
@@ -1107,9 +1143,7 @@ grade:
 	/* Avoid immediate VM faults back into kernel */
 	exec_prefault_data(p, imgp, &load_result);
 
-	if (vfexec || spawn) {
-		vm_map_switch(old_map);
-	}
+	vm_map_switch(old_map);
 
 	/* Stop profiling */
 	stopprofclock(p);
@@ -1143,37 +1177,54 @@ grade:
 	set_proc_name(imgp, p);
 
 #if CONFIG_SECLUDED_MEMORY
-	if (secluded_for_apps) {
+	if (secluded_for_apps &&
+	    load_result.platform_binary) {
 		if (strncmp(p->p_name,
 			    "Camera",
-			    sizeof (p->p_name)) == 0 ||
-#if 00
-		    strncmp(p->p_name,
-			    "camerad",
-			    sizeof (p->p_name)) == 0 ||
-#endif
-		    strncmp(p->p_name,
-			    "testCamera",
 			    sizeof (p->p_name)) == 0) {
-			task_set_could_use_secluded_mem(p->task, TRUE);
+			task_set_could_use_secluded_mem(task, TRUE);
 		} else {
-			task_set_could_use_secluded_mem(p->task, FALSE);
+			task_set_could_use_secluded_mem(task, FALSE);
 		}
 		if (strncmp(p->p_name,
 			    "mediaserverd",
 			    sizeof (p->p_name)) == 0) {
-			task_set_could_also_use_secluded_mem(p->task, TRUE);
+			task_set_could_also_use_secluded_mem(task, TRUE);
 		}
 	}
 #endif /* CONFIG_SECLUDED_MEMORY */
 
-	pal_dbg_set_task_name( p->task );
+	pal_dbg_set_task_name(task);
+
+	/*
+	 * The load result will have already been munged by AMFI to include the
+	 * platform binary flag if boot-args dictated it (AMFI will mark anything
+	 * that doesn't go through the upcall path as a platform binary if its
+	 * enforcement is disabled).
+	 */
+	if (load_result.platform_binary) {
+		if (cs_debug) {
+			printf("setting platform binary on task: pid = %d\n", p->p_pid);
+		}
+
+		/*
+		 * We must use 'task' here because the proc's task has not yet been
+		 * switched to the new one.
+		 */
+		task_set_platform_binary(task, TRUE);
+	} else {
+		if (cs_debug) {
+			printf("clearing platform binary on task: pid = %d\n", p->p_pid);
+		}
+
+		task_set_platform_binary(task, FALSE);
+	}
 
 #if DEVELOPMENT || DEBUG
-	/* 
+	/*
 	 * Update the pid an proc name for importance base if any
 	 */
-	task_importance_update_owner_info(p->task);
+	task_importance_update_owner_info(task);
 #endif
 
 	memcpy(&p->p_uuid[0], &load_result.uuid[0], sizeof(p->p_uuid));
@@ -1190,17 +1241,20 @@ grade:
 		 */
 		kdbg_trace_string(p, &dbg_arg1, &dbg_arg2, &dbg_arg3, &dbg_arg4);
 
-		if (vfexec || spawn) {
-			KERNEL_DEBUG_CONSTANT1(TRACE_DATA_EXEC | DBG_FUNC_NONE,
-					p->p_pid ,0,0,0, (uintptr_t)thread_tid(thread));
-			KERNEL_DEBUG_CONSTANT1(TRACE_STRING_EXEC | DBG_FUNC_NONE,
-					dbg_arg1, dbg_arg2, dbg_arg3, dbg_arg4, (uintptr_t)thread_tid(thread));
-		} else {
-			KERNEL_DEBUG_CONSTANT(TRACE_DATA_EXEC | DBG_FUNC_NONE,
-					p->p_pid ,0,0,0,0);
-			KERNEL_DEBUG_CONSTANT(TRACE_STRING_EXEC | DBG_FUNC_NONE,
-					dbg_arg1, dbg_arg2, dbg_arg3, dbg_arg4, 0);
+		uintptr_t fsid = 0, fileid = 0;
+		if (imgp->ip_vattr) {
+			uint64_t fsid64 = get_va_fsid(imgp->ip_vattr);
+			fsid   = fsid64;
+			fileid = imgp->ip_vattr->va_fileid;
+			// check for (unexpected) overflow and trace zero in that case
+			if (fsid != fsid64 || fileid != imgp->ip_vattr->va_fileid) {
+				fsid = fileid = 0;
+			}
 		}
+		KERNEL_DEBUG_CONSTANT1(TRACE_DATA_EXEC | DBG_FUNC_NONE,
+				p->p_pid , fsid, fileid, 0, (uintptr_t)thread_tid(thread));
+		KERNEL_DEBUG_CONSTANT1(TRACE_STRING_EXEC | DBG_FUNC_NONE,
+				dbg_arg1, dbg_arg2, dbg_arg3, dbg_arg4, (uintptr_t)thread_tid(thread));
 	}
 
 	/*
@@ -1213,7 +1267,7 @@ grade:
 			proc_lock(p);
 			p->p_stat = SSTOP;
 			proc_unlock(p);
-			(void) task_suspend_internal(p->task);
+			(void) task_suspend_internal(task);
 		}
 	}
 
@@ -1251,6 +1305,11 @@ badtoolate:
 			assert(exec_failure_reason != OS_REASON_NULL);
 			psignal_with_reason(p, SIGKILL, exec_failure_reason);
 			exec_failure_reason = OS_REASON_NULL;
+
+			if (exec) {
+				/* Terminate the exec copy task */
+				task_terminate_internal(task);
+			}
 		}
 
 		/* We can't stop this system call at this point, so just pretend we succeeded */
@@ -1265,12 +1324,6 @@ done:
 		/* notify only if it has not failed due to FP Key error */
 		if ((p->p_lflag & P_LTERM_DECRYPTFAIL) == 0)
 			proc_knote(p, NOTE_EXEC);
-	}
-
-	/* Drop extra references for cases where we don't expect the caller to clean up */
-	if (vfexec || (spawn && error == 0)) {
-		task_deallocate(new_task);
-		thread_deallocate(thread);
 	}
 
 	if (load_result.threadstate) {
@@ -1310,7 +1363,8 @@ struct execsw {
  *
  * Description:	Iterate through the available image activators, and activate
  *		the image associated with the imgp structure.  We start with
- *		the
+ *		the activator for Mach-o binaries followed by that for Fat binaries
+ *		for Interpreter scripts.
  *
  * Parameters:	struct image_params *	Image parameter block
  *
@@ -1479,18 +1533,6 @@ encapsulated_binary:
 					KAUTH_FILEOP_EXEC,
 					(uintptr_t)ndp->ni_vp, 0);
 	}
-
-	if (error == 0) {
-		/*
-		 * Reset atm context from task
-		 */
-		task_atm_reset(p->task);
-
-		/*
-		 * Reset old bank context from task
-		 */
-		task_bank_reset(p->task);
-	}
 bad:
 	proc_transend(p, 0);
 
@@ -1543,9 +1585,11 @@ exec_handle_spawnattr_policy(proc_t p, int psa_apptype, uint64_t psa_qos_clamp, 
 			case POSIX_SPAWN_PROC_TYPE_APP_DEFAULT:
 				apptype = TASK_APPTYPE_APP_DEFAULT;
 				break;
+#if !CONFIG_EMBEDDED
 			case POSIX_SPAWN_PROC_TYPE_APP_TAL:
 				apptype = TASK_APPTYPE_APP_TAL;
 				break;
+#endif /* !CONFIG_EMBEDDED */
 			default:
 				apptype = TASK_APPTYPE_NONE;
 				/* TODO: Should an invalid value here fail the spawn? */
@@ -1604,9 +1648,11 @@ exec_handle_port_actions(struct image_params *imgp, boolean_t * portwatch_presen
                          ipc_port_t * portwatch_ports)
 {
 	_posix_spawn_port_actions_t pacts = imgp->ip_px_spa;
+#if CONFIG_AUDIT
 	proc_t p = vfs_context_proc(imgp->ip_vfs_context);
+#endif
 	_ps_port_action_t *act = NULL;
-	task_t task = p->task;
+	task_t task = get_threadtask(imgp->ip_new_thread);
 	ipc_port_t port = NULL;
 	errno_t ret = 0;
 	int i;
@@ -1647,7 +1693,12 @@ exec_handle_port_actions(struct image_params *imgp, boolean_t * portwatch_presen
 			break;
 #if CONFIG_AUDIT
 		case PSPA_AU_SESSION:
-			ret = audit_session_spawnjoin(p, port);
+			ret = audit_session_spawnjoin(p, task, port);
+			if (ret) {
+				/* audit_session_spawnjoin() has already dropped the reference in case of error. */
+				goto done;
+			}
+
 			break;
 #endif
 		case PSPA_IMP_WATCHPORTS:
@@ -2122,50 +2173,6 @@ out:
 }
 #endif
 
-void
-proc_set_return_wait(proc_t p)
-{
-	proc_lock(p);
-	p->p_lflag |= P_LRETURNWAIT;
-	proc_unlock(p);
-}
-
-void
-proc_clear_return_wait(proc_t p, thread_t child_thread)
-{
-	proc_lock(p);
-
-	p->p_lflag &= ~P_LRETURNWAIT;
-	if (p->p_lflag & P_LRETURNWAITER) {
-		wakeup(&p->p_lflag);
-	}
-
-	proc_unlock(p);
-
-	(void)thread_resume(child_thread);
-}
-
-void
-proc_wait_to_return()
-{
-	proc_t	p;
-
-	p = current_proc();
-	proc_lock(p);
-
-	if (p->p_lflag & P_LRETURNWAIT) {
-		p->p_lflag |= P_LRETURNWAITER;
-		do {
-			msleep(&p->p_lflag, &p->p_mlock, 0,
-				"thread_check_setup_complete", NULL);
-		} while (p->p_lflag & P_LRETURNWAIT);
-		p->p_lflag &= ~P_LRETURNWAITER;
-	}
-
-	proc_unlock(p);
-	thread_bootstrap_return();
-}
-
 /*
  * posix_spawn
  *
@@ -2218,7 +2225,10 @@ posix_spawn(proc_t ap, struct posix_spawn_args *uap, int32_t *retval)
 	boolean_t exec_done = FALSE;
 	int portwatch_count = 0;
 	ipc_port_t * portwatch_ports = NULL;
-	vm_size_t px_sa_offset = offsetof(struct _posix_spawnattr, psa_ports); 
+	vm_size_t px_sa_offset = offsetof(struct _posix_spawnattr, psa_ports);
+	task_t new_task = NULL;
+	boolean_t should_release_proc_ref = FALSE;
+	void *inherit = NULL;
 #if CONFIG_PERSONAS
 	struct _posix_spawn_persona_info *px_persona = NULL;
 #endif
@@ -2485,13 +2495,33 @@ do_fork1:
 		 * caller's persona (if it exists)
 		 */
 		error = fork1(p, &imgp->ip_new_thread, PROC_CREATE_SPAWN, coal);
+		/* returns a thread and task reference */
 
+		if (error == 0) {
+			new_task = get_threadtask(imgp->ip_new_thread);
+		}
 #if CONFIG_COALITIONS
 		/* set the roles of this task within each given coalition */
 		if (error == 0) {
-			kr = coalitions_set_roles(coal, get_threadtask(imgp->ip_new_thread), coal_role);
+			kr = coalitions_set_roles(coal, new_task, coal_role);
 			if (kr != KERN_SUCCESS)
 				error = EINVAL;
+			if (kdebug_debugid_enabled(MACHDBG_CODE(DBG_MACH_COALITION,
+				MACH_COALITION_ADOPT))) {
+				for (i = 0; i < COALITION_NUM_TYPES; i++) {
+					if (coal[i] != COALITION_NULL) {
+						/*
+						 * On 32-bit targets, uniqueid
+						 * will get truncated to 32 bits
+						 */
+						KDBG_RELEASE(MACHDBG_CODE(
+							DBG_MACH_COALITION,
+							MACH_COALITION_ADOPT),
+							coalition_id(coal[i]),
+							get_task_uniqueid(new_task));
+					}
+				}
+			}
 		}
 
 		/* drop our references and activations - fork1() now holds them */
@@ -2527,6 +2557,42 @@ do_fork1:
 		}
 #endif /* 0 */
 #endif /* CONFIG_PERSONAS */
+	} else {
+		/*
+		 * For execve case, create a new task and thread
+		 * which points to current_proc. The current_proc will point
+		 * to the new task after image activation and proc ref drain.
+		 *
+		 * proc (current_proc) <-----  old_task (current_task)
+		 *  ^ |                                ^
+		 *  | |                                |
+		 *  | ----------------------------------
+		 *  |
+		 *  --------- new_task (task marked as TF_EXEC_COPY)
+		 *
+		 * After image activation, the proc will point to the new task
+		 * and would look like following.
+		 *
+		 * proc (current_proc)  <-----  old_task (current_task, marked as TPF_DID_EXEC)
+		 *  ^ |
+		 *  | |
+		 *  | ----------> new_task
+		 *  |               |
+		 *  -----------------
+		 *
+		 * During exec any transition from new_task -> proc is fine, but don't allow
+		 * transition from proc->task, since it will modify old_task.
+		 */
+		imgp->ip_new_thread = fork_create_child(current_task(),
+					NULL, p, FALSE, p->p_flag & P_LP64, TRUE);
+		/* task and thread ref returned by fork_create_child */
+		if (imgp->ip_new_thread == NULL) {
+			error = ENOMEM;
+			goto bad;
+		}
+
+		new_task = get_threadtask(imgp->ip_new_thread);
+		imgp->ip_flags |= IMGPF_EXEC;
 	}
 
 	if (spawn_no_exec) {
@@ -2541,16 +2607,8 @@ do_fork1:
 	}
 	assert(p != NULL);
 
-	/* By default, the thread everyone plays with is the parent */
-	context.vc_thread = current_thread();
+	context.vc_thread = imgp->ip_new_thread;
 	context.vc_ucred = p->p_ucred;	/* XXX must NOT be kauth_cred_get() */
-
-	/*
-	 * However, if we're not in the setexec case, redirect the context
-	 * to the newly created process instead
-	 */
-	if (spawn_no_exec)
-		context.vc_thread = imgp->ip_new_thread;
 
 	/*
 	 * Post fdcopy(), pre exec_handle_sugid() - this is where we want
@@ -2689,6 +2747,10 @@ do_fork1:
 			OSBitOrAtomic(P_DISABLE_ASLR, &p->p_flag);
 #endif /* !SECURE_KERNEL */
 
+		/* Randomize high bits of ASLR slide */
+		if (px_sa.psa_flags & _POSIX_SPAWN_HIGH_BITS_ASLR)
+			imgp->ip_flags |= IMGPF_HIGH_BITS_ASLR;
+
 		/*
 		 * Forcibly disallow execution from data pages for the spawned process
 		 * even if it would otherwise be permitted by the architecture default.
@@ -2729,6 +2791,12 @@ do_fork1:
 	 */
 	error = exec_activate_image(imgp);
 	
+	if (error == 0 && !spawn_no_exec) {
+		p = proc_exec_switch_task(p, current_task(), new_task, imgp->ip_new_thread);
+		/* proc ref returned */
+		should_release_proc_ref = TRUE;
+	}
+
 	if (error == 0) {
 		/* process completed the exec */
 		exec_done = TRUE;
@@ -2747,18 +2815,8 @@ do_fork1:
 	 * until after the image is activated.
 	 */
 	if (!error && imgp->ip_px_sa != NULL) {
-		thread_t child_thread = current_thread();
-		uthread_t child_uthread = uthread;
-
-		/*
-		 * If we created a new child thread, then the thread and
-		 * uthread are different than the current ones; otherwise,
-		 * we leave them, since we are in the exec case instead.
-		 */
-		if (spawn_no_exec) {
-			child_thread = imgp->ip_new_thread;
-			child_uthread = get_bsdthread_info(child_thread);
-		}
+		thread_t child_thread = imgp->ip_new_thread;
+		uthread_t child_uthread = get_bsdthread_info(child_thread);
 
 		/*
 		 * Mask a list of signals, instead of them being unmasked, if
@@ -2810,8 +2868,10 @@ bad:
 
 	if (error == 0) {
 		/* reset delay idle sleep status if set */
+#if !CONFIG_EMBEDDED
 		if ((p->p_flag & P_DELAYIDLESLEEP) == P_DELAYIDLESLEEP)
 			OSBitAndAtomic(~((uint32_t)P_DELAYIDLESLEEP), &p->p_flag);
+#endif /* !CONFIG_EMBEDDED */
 		/* upon  successful spawn, re/set the proc control state */
 		if (imgp->ip_px_sa != NULL) {
 			switch (px_sa.psa_pcontrol) {
@@ -2838,20 +2898,17 @@ bad:
 			/*
 			 * With 2-level high-water-mark support, POSIX_SPAWN_JETSAM_HIWATER_BACKGROUND is no
 			 * longer relevant, as background limits are described via the inactive limit slots.
-			 * At the kernel layer, the flag is ignored.
 			 *
 			 * That said, however, if the POSIX_SPAWN_JETSAM_HIWATER_BACKGROUND is passed in,
 			 * we attempt to mimic previous behavior by forcing the BG limit data into the
 			 * inactive/non-fatal mode and force the active slots to hold system_wide/fatal mode.
-			 * The kernel layer will flag this mapping.
 			 */
 			if (px_sa.psa_jetsam_flags & POSIX_SPAWN_JETSAM_HIWATER_BACKGROUND) {
 				memorystatus_update(p, px_sa.psa_priority, 0,
 					    (px_sa.psa_jetsam_flags & POSIX_SPAWN_JETSAM_USE_EFFECTIVE_PRIORITY),
 					    TRUE,
 					    -1, TRUE,
-					    px_sa.psa_memlimit_inactive, FALSE,
-					    (px_sa.psa_jetsam_flags & POSIX_SPAWN_JETSAM_HIWATER_BACKGROUND));
+					    px_sa.psa_memlimit_inactive, FALSE);
 			} else {
 				memorystatus_update(p, px_sa.psa_priority, 0,
 					    (px_sa.psa_jetsam_flags & POSIX_SPAWN_JETSAM_USE_EFFECTIVE_PRIORITY),
@@ -2859,8 +2916,7 @@ bad:
 					    px_sa.psa_memlimit_active,
 					    (px_sa.psa_jetsam_flags & POSIX_SPAWN_JETSAM_MEMLIMIT_ACTIVE_FATAL),
 					    px_sa.psa_memlimit_inactive,
-					    (px_sa.psa_jetsam_flags & POSIX_SPAWN_JETSAM_MEMLIMIT_INACTIVE_FATAL),
-					    (px_sa.psa_jetsam_flags & POSIX_SPAWN_JETSAM_HIWATER_BACKGROUND));
+					    (px_sa.psa_jetsam_flags & POSIX_SPAWN_JETSAM_MEMLIMIT_INACTIVE_FATAL));
 			}
 
 		}
@@ -2892,9 +2948,6 @@ bad:
 		/* notify only if it has not failed due to FP Key error */
 		if ((p->p_lflag & P_LTERM_DECRYPTFAIL) == 0)
 			proc_knote(p, NOTE_EXEC);
-	} else if (error == 0) {
-		/* reset the importance attribute from our previous life */
-		task_importance_reset(p->task);
 	}
 
 	if (error == 0) {
@@ -2907,11 +2960,15 @@ bad:
 		error = proc_transstart(p, 0, 0);
 
 		if (error == 0) {
-			task_bank_init(p->task);
+			task_bank_init(get_threadtask(imgp->ip_new_thread));
 			proc_transend(p, 0);
 		}
 	}
 
+	/* Inherit task role from old task to new task for exec */
+	if (error == 0 && !spawn_no_exec) {
+		proc_inherit_task_role(get_threadtask(imgp->ip_new_thread), current_task());
+	}
 
 	/*
 	 * Apply the spawnattr policy, apptype (which primes the task for importance donation),
@@ -2929,11 +2986,31 @@ bad:
 		                              portwatch_ports, portwatch_count);
 	}
 
-	/* Apply the main thread qos */
-	if (error == 0) {
-		thread_t main_thread = (imgp->ip_new_thread != NULL) ? imgp->ip_new_thread : current_thread();
+	/*
+	 * Need to transfer pending watch port boosts to the new task while still making
+	 * sure that the old task remains in the importance linkage. Create an importance
+	 * linkage from old task to new task, then switch the task importance base
+	 * of old task and new task. After the switch the port watch boost will be
+	 * boosting the new task and new task will be donating importance to old task.
+	 */
+	if (error == 0 && task_did_exec(current_task())) {
+		inherit = ipc_importance_exec_switch_task(current_task(), get_threadtask(imgp->ip_new_thread));
+	}
 
-		task_set_main_thread_qos(p->task, main_thread);
+	if (error == 0) {
+		/* Apply the main thread qos */		
+		thread_t main_thread = imgp->ip_new_thread;
+		task_set_main_thread_qos(get_threadtask(imgp->ip_new_thread), main_thread);
+
+#if CONFIG_MACF
+		/*
+		 * Processes with the MAP_JIT entitlement are permitted to have
+		 * a jumbo-size map.
+		 */
+		if (mac_proc_check_map_anon(p, 0, 0, 0, MAP_JIT, NULL) == 0) {
+			vm_map_set_jumbo(get_task_map(p->task));
+		}
+#endif /* CONFIG_MACF */
 	}
 
 	/*
@@ -3042,9 +3119,23 @@ bad:
 		}
 	}
 
-	if ((dtrace_proc_waitfor_hook = dtrace_proc_waitfor_exec_ptr) != NULL)
+	if ((dtrace_proc_waitfor_hook = dtrace_proc_waitfor_exec_ptr) != NULL) {
 		(*dtrace_proc_waitfor_hook)(p);
+	}
 #endif
+	/*
+	 * exec-success dtrace probe fired, clear bsd_info from
+	 * old task if it did exec.
+	 */
+	if (task_did_exec(current_task())) {
+		set_bsdtask_info(current_task(), NULL);
+	}
+
+	/* clear bsd_info from new task and terminate it if exec failed  */
+	if (new_task != NULL && task_is_exec_copy(new_task)) {
+		set_bsdtask_info(new_task, NULL);
+		task_terminate_internal(new_task);
+	}
 
 	/* Return to both the parent and the child? */
 	if (imgp != NULL && spawn_no_exec) {
@@ -3069,37 +3160,177 @@ bad:
 				p->exit_thread = current_thread();
 				proc_unlock(p);
 				exit1(p, 1, (int *)NULL);
-				proc_clear_return_wait(p, imgp->ip_new_thread);
-				if (exec_done == FALSE) {
-					task_deallocate(get_threadtask(imgp->ip_new_thread));
-					thread_deallocate(imgp->ip_new_thread);
-				}
 			} else {
 				/* someone is doing it for us; just skip it */
 				proc_unlock(p);
-				proc_clear_return_wait(p, imgp->ip_new_thread);
 			}
-		} else {
-
-			/*
-			 * Return to the child
-			 *
-			 * Note: the image activator earlier dropped the
-			 * task/thread references to the newly spawned
-			 * process; this is OK, since we still have suspended
-			 * queue references on them, so we should be fine
-			 * with the delayed resume of the thread here.
-			 */
-			proc_clear_return_wait(p, imgp->ip_new_thread);
 		}
 	}
+
+	/*
+	 * Do not terminate the current task, if proc_exec_switch_task did not
+	 * switch the tasks, terminating the current task without the switch would
+	 * result in loosing the SIGKILL status.
+	 */
+	if (task_did_exec(current_task())) {
+		/* Terminate the current task, since exec will start in new task */
+		task_terminate_internal(current_task());
+	}
+
+	/* Release the thread ref returned by fork_create_child/fork1 */
+	if (imgp != NULL && imgp->ip_new_thread) {
+		/* wake up the new thread */
+		task_clear_return_wait(get_threadtask(imgp->ip_new_thread));
+		thread_deallocate(imgp->ip_new_thread);
+		imgp->ip_new_thread = NULL;
+	}
+
+	/* Release the ref returned by fork_create_child/fork1 */
+	if (new_task) {
+		task_deallocate(new_task);
+		new_task = NULL;
+	}
+
+	if (should_release_proc_ref) {
+		proc_rele(p);
+	}
+
 	if (bufp != NULL) {
 		FREE(bufp, M_TEMP);
+	}
+
+	if (inherit != NULL) {
+		ipc_importance_release(inherit);
 	}
 	
 	return(error);
 }
 
+/*
+ * proc_exec_switch_task
+ *
+ * Parameters:  p			proc
+ *		old_task		task before exec
+ *		new_task		task after exec
+ *		new_thread		thread in new task
+ *
+ * Returns: proc.
+ *
+ * Note: The function will switch the task pointer of proc
+ * from old task to new task. The switch needs to happen
+ * after draining all proc refs and inside a proc translock.
+ * In the case of failure to switch the task, which might happen
+ * if the process received a SIGKILL or jetsam killed it, it will make
+ * sure that the new tasks terminates. User proc ref returned
+ * to caller.
+ *
+ * This function is called after point of no return, in the case
+ * failure to switch, it will terminate the new task and swallow the
+ * error and let the terminated process complete exec and die.
+ */
+proc_t
+proc_exec_switch_task(proc_t p, task_t old_task, task_t new_task, thread_t new_thread)
+{
+	int error = 0;
+	boolean_t task_active;
+	boolean_t proc_active;
+	boolean_t thread_active;
+	thread_t old_thread = current_thread();
+
+	/*
+	 * Switch the task pointer of proc to new task.
+	 * Before switching the task, wait for proc_refdrain.
+	 * After the switch happens, the proc can disappear,
+	 * take a ref before it disappears. Waiting for
+	 * proc_refdrain in exec will block all other threads
+	 * trying to take a proc ref, boost the current thread
+	 * to avoid priority inversion.
+	 */
+	thread_set_exec_promotion(old_thread);
+	p = proc_refdrain_with_refwait(p, TRUE);
+	/* extra proc ref returned to the caller */
+
+	assert(get_threadtask(new_thread) == new_task);
+	task_active = task_is_active(new_task);
+
+	/* Take the proc_translock to change the task ptr */
+	proc_lock(p);
+	proc_active = !(p->p_lflag & P_LEXIT);
+
+	/* Check if the current thread is not aborted due to SIGKILL */
+	thread_active = thread_is_active(old_thread);
+
+	/*
+	 * Do not switch the task if the new task or proc is already terminated
+	 * as a result of error in exec past point of no return
+	 */
+	if (proc_active && task_active && thread_active) {
+		error = proc_transstart(p, 1, 0);
+		if (error == 0) {
+			uthread_t new_uthread = get_bsdthread_info(new_thread);
+			uthread_t old_uthread = get_bsdthread_info(current_thread());
+
+			/*
+			 * bsd_info of old_task will get cleared in execve and posix_spawn
+			 * after firing exec-success/error dtrace probe.
+			 */
+			p->task = new_task;
+
+			/* Clear dispatchqueue and workloop ast offset */
+			p->p_dispatchqueue_offset = 0;
+			p->p_dispatchqueue_serialno_offset = 0;
+			p->p_return_to_kernel_offset = 0;
+
+			/* Copy the signal state, dtrace state and set bsd ast on new thread */
+			act_set_astbsd(new_thread);
+			new_uthread->uu_siglist = old_uthread->uu_siglist;
+			new_uthread->uu_sigwait = old_uthread->uu_sigwait;
+			new_uthread->uu_sigmask = old_uthread->uu_sigmask;
+			new_uthread->uu_oldmask = old_uthread->uu_oldmask;
+			new_uthread->uu_vforkmask = old_uthread->uu_vforkmask;
+			new_uthread->uu_exit_reason = old_uthread->uu_exit_reason;
+#if CONFIG_DTRACE
+			new_uthread->t_dtrace_sig = old_uthread->t_dtrace_sig;
+			new_uthread->t_dtrace_stop = old_uthread->t_dtrace_stop;
+			new_uthread->t_dtrace_resumepid = old_uthread->t_dtrace_resumepid;
+			assert(new_uthread->t_dtrace_scratch == NULL);
+			new_uthread->t_dtrace_scratch = old_uthread->t_dtrace_scratch;
+
+			old_uthread->t_dtrace_sig = 0;
+			old_uthread->t_dtrace_stop = 0;
+			old_uthread->t_dtrace_resumepid = 0;
+			old_uthread->t_dtrace_scratch = NULL;
+#endif
+			/* Copy the resource accounting info */
+			thread_copy_resource_info(new_thread, current_thread());
+
+			/* Clear the exit reason and signal state on old thread */
+			old_uthread->uu_exit_reason = NULL;
+			old_uthread->uu_siglist = 0;
+
+			/* Add the new uthread to proc uthlist and remove the old one */
+			TAILQ_INSERT_TAIL(&p->p_uthlist, new_uthread, uu_list);
+			TAILQ_REMOVE(&p->p_uthlist, old_uthread, uu_list);
+
+			task_set_did_exec_flag(old_task);
+			task_clear_exec_copy_flag(new_task);
+
+			task_copy_fields_for_exec(new_task, old_task);
+
+			proc_transend(p, 1);
+		}
+	}
+
+	proc_unlock(p);
+	proc_refwake(p);
+	thread_clear_exec_promotion(old_thread);
+
+	if (error != 0 || !task_active || !proc_active || !thread_active) {
+		task_terminate_internal(new_task);
+	}
+
+	return p;
+}
 
 /*
  * execve
@@ -3177,6 +3408,11 @@ __mac_execve(proc_t p, struct __mac_execve_args *uap, int32_t *retval)
 	int is_64 = IS_64BIT_PROCESS(p);
 	struct vfs_context context;
 	struct uthread	*uthread;
+	task_t new_task = NULL;
+	boolean_t should_release_proc_ref = FALSE;
+	boolean_t exec_done = FALSE;
+	boolean_t in_vfexec = FALSE;
+	void *inherit = NULL;
 
 	context.vc_thread = current_thread();
 	context.vc_ucred = kauth_cred_proc_ref(p);	/* XXX must NOT be kauth_cred_get() */
@@ -3205,11 +3441,6 @@ __mac_execve(proc_t p, struct __mac_execve_args *uap, int32_t *retval)
 	imgp->ip_mac_return = 0;
 	imgp->ip_cs_error = OS_REASON_NULL;
 
-	uthread = get_bsdthread_info(current_thread());
-	if (uthread->uu_flag & UT_VFORK) {
-		imgp->ip_flags |= IMGPF_VFORK_EXEC;
-	}
-
 #if CONFIG_MACF
 	if (uap->mac_p != USER_ADDR_NULL) {
 		error = mac_execve_enter(uap->mac_p, imgp);
@@ -3219,8 +3450,66 @@ __mac_execve(proc_t p, struct __mac_execve_args *uap, int32_t *retval)
 		}
 	}
 #endif
+	uthread = get_bsdthread_info(current_thread());
+	if (uthread->uu_flag & UT_VFORK) {
+		imgp->ip_flags |= IMGPF_VFORK_EXEC;
+		in_vfexec = TRUE;
+	} else {
+		imgp->ip_flags |= IMGPF_EXEC;
+
+		/*
+		 * For execve case, create a new task and thread
+		 * which points to current_proc. The current_proc will point
+		 * to the new task after image activation and proc ref drain.
+		 *
+		 * proc (current_proc) <-----  old_task (current_task)
+		 *  ^ |                                ^
+		 *  | |                                |
+		 *  | ----------------------------------
+		 *  |
+		 *  --------- new_task (task marked as TF_EXEC_COPY)
+		 *
+		 * After image activation, the proc will point to the new task
+		 * and would look like following.
+		 *
+		 * proc (current_proc)  <-----  old_task (current_task, marked as TPF_DID_EXEC)
+		 *  ^ |
+		 *  | |
+		 *  | ----------> new_task
+		 *  |               |
+		 *  -----------------
+		 *
+		 * During exec any transition from new_task -> proc is fine, but don't allow
+		 * transition from proc->task, since it will modify old_task.
+		 */
+		imgp->ip_new_thread = fork_create_child(current_task(),
+					NULL, p, FALSE, p->p_flag & P_LP64, TRUE);
+		/* task and thread ref returned by fork_create_child */
+		if (imgp->ip_new_thread == NULL) {
+			error = ENOMEM;
+			goto exit_with_error;
+		}
+
+		new_task = get_threadtask(imgp->ip_new_thread);
+		context.vc_thread = imgp->ip_new_thread;
+	}
 
 	error = exec_activate_image(imgp);
+	/* thread and task ref returned for vfexec case */
+
+	if (imgp->ip_new_thread != NULL) {
+		/*
+		 * task reference might be returned by exec_activate_image
+		 * for vfexec.
+		 */
+		new_task = get_threadtask(imgp->ip_new_thread);
+	}
+
+	if (!error && !in_vfexec) {
+		p = proc_exec_switch_task(p, current_task(), new_task, imgp->ip_new_thread);
+		/* proc ref returned */
+		should_release_proc_ref = TRUE;
+	}
 
 	kauth_cred_unref(&context.vc_ucred);
 	
@@ -3228,7 +3517,10 @@ __mac_execve(proc_t p, struct __mac_execve_args *uap, int32_t *retval)
 	if (error == -1)
 		error = ENOEXEC;
 
-	if (error == 0) {
+	if (!error) {
+		exec_done = TRUE;
+		assert(imgp->ip_new_thread != NULL);
+
 		exec_resettextvp(p, imgp);
 		error = check_for_signature(p, imgp);
 	}	
@@ -3257,23 +3549,33 @@ __mac_execve(proc_t p, struct __mac_execve_args *uap, int32_t *retval)
 		 * aren't loaded until subsequent calls (including exec_resettextvp).
 		 */
 		error = proc_transstart(p, 0, 0);
-
-		if (!error) {
-			task_bank_init(p->task);
-			proc_transend(p, 0);
-		}
 	}
 
 	if (!error) {
+		task_bank_init(get_threadtask(imgp->ip_new_thread));
+		proc_transend(p, 0);
+
 		/* Sever any extant thread affinity */
 		thread_affinity_exec(current_thread());
 
-		thread_t main_thread = (imgp->ip_new_thread != NULL) ? imgp->ip_new_thread : current_thread();
+		/* Inherit task role from old task to new task for exec */
+		if (!in_vfexec) {
+			proc_inherit_task_role(get_threadtask(imgp->ip_new_thread), current_task());
+		}
 
-		task_set_main_thread_qos(p->task, main_thread);
+		thread_t main_thread = imgp->ip_new_thread;
 
-		/* reset task importance */
-		task_importance_reset(p->task);
+		task_set_main_thread_qos(new_task, main_thread);
+
+#if CONFIG_MACF
+		/*
+		 * Processes with the MAP_JIT entitlement are permitted to have
+		 * a jumbo-size map.
+		 */
+		if (mac_proc_check_map_anon(p, 0, 0, 0, MAP_JIT, NULL) == 0) {
+			vm_map_set_jumbo(get_task_map(new_task));
+		}
+#endif /* CONFIG_MACF */
 
 		DTRACE_PROC(exec__success);
 
@@ -3282,17 +3584,76 @@ __mac_execve(proc_t p, struct __mac_execve_args *uap, int32_t *retval)
 			(*dtrace_proc_waitfor_hook)(p);
 #endif
 
-		if (imgp->ip_flags & IMGPF_VFORK_EXEC) {
+		if (in_vfexec) {
 			vfork_return(p, retval, p->p_pid);
-			proc_clear_return_wait(p, imgp->ip_new_thread);
 		}
 	} else {
 		DTRACE_PROC1(exec__failure, int, error);
 	}
 
 exit_with_error:
+
+	/*
+	 * exec-success dtrace probe fired, clear bsd_info from
+	 * old task if it did exec.
+	 */
+	if (task_did_exec(current_task())) {
+		set_bsdtask_info(current_task(), NULL);
+	}
+
+	/* clear bsd_info from new task and terminate it if exec failed  */
+	if (new_task != NULL && task_is_exec_copy(new_task)) {
+		set_bsdtask_info(new_task, NULL);
+		task_terminate_internal(new_task);
+	}
+
+	/*
+	 * Need to transfer pending watch port boosts to the new task while still making
+	 * sure that the old task remains in the importance linkage. Create an importance
+	 * linkage from old task to new task, then switch the task importance base
+	 * of old task and new task. After the switch the port watch boost will be
+	 * boosting the new task and new task will be donating importance to old task.
+	 */
+	if (error == 0 && task_did_exec(current_task())) {
+		inherit = ipc_importance_exec_switch_task(current_task(), get_threadtask(imgp->ip_new_thread));
+	}
+
+	if (imgp != NULL) {
+		/*
+		 * Do not terminate the current task, if proc_exec_switch_task did not
+		 * switch the tasks, terminating the current task without the switch would
+		 * result in loosing the SIGKILL status.
+		 */
+		if (task_did_exec(current_task())) {
+			/* Terminate the current task, since exec will start in new task */
+			task_terminate_internal(current_task());
+		}
+
+		/* Release the thread ref returned by fork_create_child */
+		if (imgp->ip_new_thread) {
+			/* wake up the new exec thread */
+			task_clear_return_wait(get_threadtask(imgp->ip_new_thread));
+			thread_deallocate(imgp->ip_new_thread);
+			imgp->ip_new_thread = NULL;
+		}
+	}
+
+	/* Release the ref returned by fork_create_child */
+	if (new_task) {
+		task_deallocate(new_task);
+		new_task = NULL;
+	}
+
+	if (should_release_proc_ref) {
+		proc_rele(p);
+	}
+
 	if (bufp != NULL) {
 		FREE(bufp, M_TEMP);
+	}
+
+	if (inherit != NULL) {
+		ipc_importance_release(inherit);
 	}
 	
 	return(error);
@@ -3861,6 +4222,12 @@ extern user64_addr_t commpage_text64_location;
 #define MAIN_STACK_VALUES 4
 #define MAIN_STACK_KEY "main_stack="
 
+#define FSID_KEY "executable_file="
+#define DYLD_FSID_KEY "dyld_file="
+#define CDHASH_KEY "executable_cdhash="
+
+#define FSID_MAX_STRING "0x1234567890abcdef,0x1234567890abcdef"
+
 #define HEX_STR_LEN 18 // 64-bit hex value "0x0123456701234567"
 
 static int
@@ -3980,6 +4347,48 @@ exec_add_apple_strings(struct image_params *imgp,
 		imgp->ip_applec++;
 	}
 
+	if (imgp->ip_vattr) {
+		uint64_t fsid    = get_va_fsid(imgp->ip_vattr);
+		uint64_t fsobjid = imgp->ip_vattr->va_fileid;
+
+		char fsid_string[strlen(FSID_KEY) + strlen(FSID_MAX_STRING) + 1];
+		snprintf(fsid_string, sizeof(fsid_string),
+				 FSID_KEY "0x%llx,0x%llx", fsid, fsobjid);
+		error = exec_add_user_string(imgp, CAST_USER_ADDR_T(fsid_string), UIO_SYSSPACE, FALSE);
+		if (error) {
+			goto bad;
+		}
+		imgp->ip_applec++;
+	}
+
+	if (imgp->ip_dyld_fsid || imgp->ip_dyld_fsobjid ) {
+		char fsid_string[strlen(DYLD_FSID_KEY) + strlen(FSID_MAX_STRING) + 1];
+		snprintf(fsid_string, sizeof(fsid_string),
+				 DYLD_FSID_KEY "0x%llx,0x%llx", imgp->ip_dyld_fsid, imgp->ip_dyld_fsobjid);
+		error = exec_add_user_string(imgp, CAST_USER_ADDR_T(fsid_string), UIO_SYSSPACE, FALSE);
+		if (error) {
+			goto bad;
+		}
+		imgp->ip_applec++;
+	}
+	
+ 	uint8_t cdhash[SHA1_RESULTLEN];
+	int cdhash_errror = ubc_cs_getcdhash(imgp->ip_vp, imgp->ip_arch_offset, cdhash);
+	if (cdhash_errror == 0) {
+		char hash_string[strlen(CDHASH_KEY) + 2*SHA1_RESULTLEN + 1]; 
+		strncpy(hash_string, CDHASH_KEY, sizeof(hash_string));
+		char *p = hash_string + sizeof(CDHASH_KEY) - 1; 
+		for (int i = 0; i < SHA1_RESULTLEN; i++) { 
+			snprintf(p, 3, "%02x", (int) cdhash[i]);
+			p += 2; 
+		}
+		error = exec_add_user_string(imgp, CAST_USER_ADDR_T(hash_string), UIO_SYSSPACE, FALSE);
+		if (error) {
+			goto bad;
+		}
+		imgp->ip_applec++;
+	}
+
 	/* Align the tail of the combined applev area */
 	while (imgp->ip_strspace % img_ptr_size != 0) {
 		*imgp->ip_strendp++ = '\0';
@@ -4027,6 +4436,7 @@ exec_check_permissions(struct image_params *imgp)
 	VATTR_WANTED(vap, va_gid);
 	VATTR_WANTED(vap, va_mode);
 	VATTR_WANTED(vap, va_fsid);
+	VATTR_WANTED(vap, va_fsid64);
 	VATTR_WANTED(vap, va_fileid);
 	VATTR_WANTED(vap, va_data_size);
 	if ((error = vnode_getattr(vp, vap, imgp->ip_vfs_context)) != 0)
@@ -4126,6 +4536,7 @@ exec_handle_sugid(struct image_params *imgp)
 	int			leave_sugid_clear = 0;
 	int			mac_reset_ipc = 0;
 	int			error = 0;
+	task_t			task = NULL;
 #if CONFIG_MACF
 	int			mac_transition, disjoint_cred = 0;
 	int 		label_update_return = 0;
@@ -4177,6 +4588,7 @@ exec_handle_sugid(struct image_params *imgp)
 handle_mac_transition:
 #endif
 
+#if !SECURE_KERNEL
 		/*
 		 * Replace the credential with a copy of itself if euid or
 		 * egid change.
@@ -4254,6 +4666,7 @@ handle_mac_transition:
 
 			break;
 		}
+#endif /* !SECURE_KERNEL */
 
 #if CONFIG_MACF
 		/* 
@@ -4319,7 +4732,8 @@ handle_mac_transition:
 			 * a setuid exec to be able to access/control the
 			 * task/thread after.
 			 */
-			ipc_task_reset(p->task);
+			ipc_task_reset((imgp->ip_new_thread != NULL) ?
+					get_threadtask(imgp->ip_new_thread) : p->task);
 			ipc_thread_reset((imgp->ip_new_thread != NULL) ?
 				 	 imgp->ip_new_thread : current_thread());
 		}
@@ -4457,7 +4871,13 @@ handle_mac_transition:
 
 	/* Update the process' identity version and set the security token */
 	p->p_idversion++;
-	set_security_token(p);
+
+	if (imgp->ip_new_thread != NULL) {
+		task = get_threadtask(imgp->ip_new_thread);
+	} else {
+		task = p->task;
+	}
+	set_security_token_task_internal(p, task);
 
 	return(error);
 }
@@ -4506,15 +4926,13 @@ create_unix_stack(vm_map_t map, load_result_t* load_result,
 			return KERN_INVALID_ARGUMENT;
 		}
 		addr = mach_vm_trunc_page(load_result->user_stack - size);
-		kr = mach_vm_allocate(map, &addr, size,
-				      VM_MAKE_TAG(VM_MEMORY_STACK) |
-				      VM_FLAGS_FIXED);
+		kr = mach_vm_allocate_kernel(map, &addr, size,
+				      VM_FLAGS_FIXED, VM_MEMORY_STACK);
 		if (kr != KERN_SUCCESS) {
 			// Can't allocate at default location, try anywhere
 			addr = 0;
-			kr = mach_vm_allocate(map, &addr, size,
-					      VM_MAKE_TAG(VM_MEMORY_STACK) |
-					      VM_FLAGS_ANYWHERE);
+			kr = mach_vm_allocate_kernel(map, &addr, size,
+					      VM_FLAGS_ANYWHERE, VM_MEMORY_STACK);
 			if (kr != KERN_SUCCESS) {
 				return kr;
 			}
@@ -4706,10 +5124,10 @@ load_init_program(proc_t p)
 	mach_vm_offset_t scratch_addr = 0;
 	mach_vm_size_t map_page_size = vm_map_page_size(map);
 
-	(void) mach_vm_allocate(map, &scratch_addr, map_page_size, VM_FLAGS_ANYWHERE);
-#if CONFIG_MEMORYSTATUS && CONFIG_JETSAM
+	(void) mach_vm_allocate_kernel(map, &scratch_addr, map_page_size, VM_FLAGS_ANYWHERE, VM_KERN_MEMORY_NONE);
+#if CONFIG_MEMORYSTATUS
 	(void) memorystatus_init_at_boot_snapshot();
-#endif /* CONFIG_MEMORYSTATUS && CONFIG_JETSAM */
+#endif /* CONFIG_MEMORYSTATUS */
 
 #if DEBUG || DEVELOPMENT
 	/* Check for boot-arg suffix first */
@@ -4720,6 +5138,7 @@ load_init_program(proc_t p)
 					       (strcmp(launchd_suffix, "release") == 0));
 
 		if (is_release_suffix) {
+			printf("load_init_program: attempting to load /sbin/launchd\n");
 			error = load_init_program_at_path(p, (user_addr_t)scratch_addr, "/sbin/launchd");
 			if (!error)
 				return;
@@ -4729,10 +5148,12 @@ load_init_program(proc_t p)
 			strlcpy(launchd_path, "/usr/local/sbin/launchd.", sizeof(launchd_path));
 			strlcat(launchd_path, launchd_suffix, sizeof(launchd_path));
 
-			/* All the error data is lost in the loop below, don't
-			 * attempt to save it. */
-			if (!load_init_program_at_path(p, (user_addr_t)scratch_addr, launchd_path)) {
+			printf("load_init_program: attempting to load %s\n", launchd_path);
+			error = load_init_program_at_path(p, (user_addr_t)scratch_addr, launchd_path);
+			if (!error) {
 				return;
+			} else {
+				printf("load_init_program: failed loading %s: errno %d\n", launchd_path, error);
 			}
 		}
 	}
@@ -4740,9 +5161,13 @@ load_init_program(proc_t p)
 
 	error = ENOENT;
 	for (i = 0; i < sizeof(init_programs)/sizeof(init_programs[0]); i++) {
+		printf("load_init_program: attempting to load %s\n", init_programs[i]);
 		error = load_init_program_at_path(p, (user_addr_t)scratch_addr, init_programs[i]);
-		if (!error)
+		if (!error) {
 			return;
+		} else {
+			printf("load_init_program: failed loading %s: errno %d\n", init_programs[i], error);
+		}
 	}
 
 	panic("Process 1 exec of %s failed, errno %d", ((i == 0) ? "<null>" : init_programs[i-1]), error);
@@ -4857,7 +5282,7 @@ execargs_lock_sleep(void) {
 
 static kern_return_t
 execargs_purgeable_allocate(char **execarg_address) {
-	kern_return_t kr = vm_allocate(bsd_pageable_map, (vm_offset_t *)execarg_address, BSD_PAGEABLE_SIZE_PER_EXEC, VM_FLAGS_ANYWHERE | VM_FLAGS_PURGABLE);
+	kern_return_t kr = vm_allocate_kernel(bsd_pageable_map, (vm_offset_t *)execarg_address, BSD_PAGEABLE_SIZE_PER_EXEC, VM_FLAGS_ANYWHERE | VM_FLAGS_PURGABLE, VM_KERN_MEMORY_NONE);
 	assert(kr == KERN_SUCCESS);
 	return kr;
 }
@@ -5023,6 +5448,24 @@ exec_resettextvp(proc_t p, struct image_params *imgp)
 
 }
 
+// Includes the 0-byte (therefore "SIZE" instead of "LEN").
+static const size_t CS_CDHASH_STRING_SIZE = CS_CDHASH_LEN * 2 + 1;
+
+static void cdhash_to_string(char str[CS_CDHASH_STRING_SIZE], uint8_t const * const cdhash) {
+	   static char const nibble[] = "0123456789abcdef";
+
+	   /* Apparently still the safest way to get a hex representation
+		* of binary data.
+		* xnu's printf routines have %*D/%20D in theory, but "not really", see:
+		* <rdar://problem/33328859> confusion around %*D/%nD in printf
+		*/
+	   for (int i = 0; i < CS_CDHASH_LEN; ++i) {
+			   str[i*2] = nibble[(cdhash[i] & 0xf0) >> 4];
+			   str[i*2+1] = nibble[cdhash[i] & 0x0f];
+	   }
+	   str[CS_CDHASH_STRING_SIZE - 1] = 0;
+}
+
 /*
  * If the process is not signed or if it contains entitlements, we
  * need to communicate through the task_access_port to taskgated.
@@ -5041,7 +5484,11 @@ taskgated_required(proc_t p, boolean_t *require_success)
 	if (cs_debug > 2)
 		csvnode_print_debug(p->p_textvp);
 
+#if !CONFIG_EMBEDDED
 	const int can_skip_taskgated = csproc_get_platform_binary(p) && !csproc_get_platform_path(p);
+#else
+	const int can_skip_taskgated = csproc_get_platform_binary(p);
+#endif
 	if (can_skip_taskgated) {
 		if (cs_debug) printf("taskgated not required for: %s\n", p->p_name);
 		*require_success = FALSE;
@@ -5055,6 +5502,7 @@ taskgated_required(proc_t p, boolean_t *require_success)
 
 	error = cs_entitlements_blob_get(p, &blob, &length);
 	if (error == 0 && blob != NULL) {
+#if !CONFIG_EMBEDDED
 		/*
 		 * fatal on the desktop when entitlements are present,
 		 * unless we started in single-user mode 
@@ -5069,6 +5517,7 @@ taskgated_required(proc_t p, boolean_t *require_success)
 			return FALSE;
 		}
 
+#endif
 		if (cs_debug) printf("taskgated required for: %s\n", p->p_name);
 
 		return TRUE;
@@ -5098,7 +5547,7 @@ check_for_signature(proc_t p, struct image_params *imgp)
 	kern_return_t kr = KERN_FAILURE;
 	int error = EACCES;
 	boolean_t unexpected_failure = FALSE;
-	unsigned char hash[SHA1_RESULTLEN];
+	unsigned char hash[CS_CDHASH_LEN];
 	boolean_t require_success = FALSE;
 	int spawn = (imgp->ip_flags & IMGPF_SPAWN);
 	int vfexec = (imgp->ip_flags & IMGPF_VFORK_EXEC);
@@ -5117,7 +5566,7 @@ check_for_signature(proc_t p, struct image_params *imgp)
 	if(p->p_csflags & (CS_HARD|CS_KILL)) {
 		vm_map_switch_protect(get_task_map(p->task), TRUE);
 	}
-	
+
 	/*
 	 * image activation may be failed due to policy
 	 * which is unexpected but security framework does not
@@ -5202,7 +5651,20 @@ check_for_signature(proc_t p, struct image_params *imgp)
 	}
 
 done:
-	if (0 != error) {
+	if (0 == error) {
+		/* The process's code signature related properties are
+		 * fully set up, so this is an opportune moment to log
+		 * platform binary execution, if desired. */
+		if (platform_exec_logging != 0 && csproc_get_platform_binary(p)) {
+			uint8_t cdhash[CS_CDHASH_LEN];
+			char cdhash_string[CS_CDHASH_STRING_SIZE];
+			proc_getcdhash(p, cdhash);
+			cdhash_to_string(cdhash_string, cdhash);
+
+			os_log(peLog, "CS Platform Exec Logging: Executing platform signed binary "
+				   "'%s' with cdhash %s\n", p->p_name, cdhash_string);
+		}
+	} else {
 		if (!unexpected_failure)
 			p->p_csflags |= CS_KILLED;
 		/* make very sure execution fails */
@@ -5246,7 +5708,7 @@ static void exec_prefault_data(proc_t p __unused, struct image_params *imgp, loa
 		 vm_map_trunc_page(load_result->entry_point,
 				   vm_map_page_mask(current_map())),
 		 VM_PROT_READ | VM_PROT_EXECUTE,
-		 FALSE,
+		 FALSE, VM_KERN_MEMORY_NONE,
 		 THREAD_UNINT, NULL, 0);
 	
 	if (imgp->ip_flags & IMGPF_IS_64BIT) {
@@ -5272,7 +5734,7 @@ static void exec_prefault_data(proc_t p __unused, struct image_params *imgp, loa
 			 vm_map_trunc_page(load_result->all_image_info_addr,
 					   vm_map_page_mask(current_map())),
 			 VM_PROT_READ | VM_PROT_WRITE,
-			 FALSE,
+			 FALSE, VM_KERN_MEMORY_NONE,
 			 THREAD_UNINT, NULL, 0);
 		if ((load_result->all_image_info_addr & PAGE_MASK) + expected_all_image_infos_size > PAGE_SIZE) {
 			/* all_image_infos straddles a page */
@@ -5280,14 +5742,14 @@ static void exec_prefault_data(proc_t p __unused, struct image_params *imgp, loa
 				 vm_map_trunc_page(load_result->all_image_info_addr + expected_all_image_infos_size - 1,
 						   vm_map_page_mask(current_map())),
 				 VM_PROT_READ | VM_PROT_WRITE,
-				 FALSE,
+				 FALSE, VM_KERN_MEMORY_NONE,
 				 THREAD_UNINT, NULL, 0);
 		}
 
 		ret = copyin(load_result->all_image_info_addr,
 					 &all_image_infos,
 					 expected_all_image_infos_size);
-		if (ret == 0 && all_image_infos.infos32.version >= 9) {
+		if (ret == 0 && all_image_infos.infos32.version >= DYLD_ALL_IMAGE_INFOS_ADDRESS_MINIMUM_VERSION) {
 
 			user_addr_t notification_address;
 			user_addr_t dyld_image_address;
@@ -5336,25 +5798,25 @@ static void exec_prefault_data(proc_t p __unused, struct image_params *imgp, loa
 				 vm_map_trunc_page(notification_address + dyld_slide_amount,
 						   vm_map_page_mask(current_map())),
 				 VM_PROT_READ | VM_PROT_EXECUTE,
-				 FALSE,
+				 FALSE, VM_KERN_MEMORY_NONE,
 				 THREAD_UNINT, NULL, 0);
 			vm_fault(current_map(),
 				 vm_map_trunc_page(dyld_image_address + dyld_slide_amount,
 						   vm_map_page_mask(current_map())),
 				 VM_PROT_READ | VM_PROT_EXECUTE,
-				 FALSE,
+				 FALSE, VM_KERN_MEMORY_NONE,
 				 THREAD_UNINT, NULL, 0);
 			vm_fault(current_map(),
 				 vm_map_trunc_page(dyld_version_address + dyld_slide_amount,
 						   vm_map_page_mask(current_map())),
 				 VM_PROT_READ,
-				 FALSE,
+				 FALSE, VM_KERN_MEMORY_NONE,
 				 THREAD_UNINT, NULL, 0);
 			vm_fault(current_map(),
 				 vm_map_trunc_page(dyld_all_image_infos_address + dyld_slide_amount,
 						   vm_map_page_mask(current_map())),
 				 VM_PROT_READ | VM_PROT_WRITE,
-				 FALSE,
+				 FALSE, VM_KERN_MEMORY_NONE,
 				 THREAD_UNINT, NULL, 0);
 		}
 	}

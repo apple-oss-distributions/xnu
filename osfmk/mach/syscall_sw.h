@@ -129,6 +129,7 @@ kernel_trap(macx_swapoff,-49, 2)
 kernel_trap(macx_swapon,-48, 5)
 kernel_trap(macx_swapoff,-49, 3)
 #endif	/* __LP64__ */
+kernel_trap(thread_get_special_reply_port,-50,0)
 kernel_trap(macx_triggers,-51, 4)
 kernel_trap(macx_backing_store_suspend,-52, 1)
 kernel_trap(macx_backing_store_recovery,-53, 1)
@@ -169,7 +170,11 @@ kernel_trap(mk_timer_arm,-93,3)
 #endif	/* __LP64__ */
 
 kernel_trap(mk_timer_cancel,-94,2)
-
+#if		defined(__LP64__)
+kernel_trap(mk_timer_arm_leeway,-95,4)
+#else
+kernel_trap(mk_timer_arm_leeway,-95,7)
+#endif
 /*
  * N.B: Trap #-100 is in use by IOTrap.s in the IOKit Framework
  * (iokit_user_client_trap)
