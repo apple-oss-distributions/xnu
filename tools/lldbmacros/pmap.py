@@ -381,12 +381,11 @@ def _PmapL4Walk(pmap_addr_val,vaddr, ept_pmap, verbose_level = vSCRIPT):
         params: pmap_addr_val - core.value representing kernel data of type pmap_addr_t
         vaddr : int - virtual address to walk
     """
-    is_cpu64_bit = int(kern.globals.cpu_64bit)
     pt_paddr = unsigned(pmap_addr_val)
     pt_valid = (unsigned(pmap_addr_val) != 0)
     pt_large = 0
     pframe_offset = 0
-    if pt_valid and is_cpu64_bit:
+    if pt_valid:
         # Lookup bits 47:39 of linear address in PML4T
         pt_index = (vaddr >> 39) & 0x1ff
         pframe_offset = vaddr & 0x7fffffffff
@@ -1051,13 +1050,13 @@ def ShowPTEARM(pte):
     else:
         pte_pgoff = pte_pgoff / 4
         nttes = page_size / 4
-    if ptd.pt_cnt[pt_index].refcnt == 0x4000:
+    if ptd.ptd_info[pt_index].refcnt == 0x4000:
         level = 2
         granule = nttes * page_size
     else:
         level = 3
         granule = page_size
-    print "maps VA: {:#x}".format(long(unsigned(ptd.pt_map[pt_index].va)) + (pte_pgoff * granule))
+    print "maps VA: {:#x}".format(long(unsigned(ptd.ptd_info[pt_index].va)) + (pte_pgoff * granule))
     pteval = long(unsigned(dereference(kern.GetValueFromAddress(unsigned(pte), 'pt_entry_t *'))))
     print "value: {:#x}".format(pteval)
     if kern.arch.startswith('arm64'):

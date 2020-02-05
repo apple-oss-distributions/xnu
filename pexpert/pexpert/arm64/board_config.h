@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2007-2017 Apple Inc. All rights reserved.
+ * Copyright (c) 2007-2019 Apple Inc. All rights reserved.
  * Copyright (c) 2005-2006 Apple Computer, Inc. All rights reserved.
  */
 #ifndef _PEXPERT_ARM_BOARD_CONFIG_H
@@ -7,18 +7,6 @@
 
 #include <mach/machine.h>
 
-#ifdef ARM64_BOARD_CONFIG_S5L8960X
-#define APPLE_ARM64_ARCH_FAMILY  1
-#define APPLECYCLONE
-#define ARM_ARCH_TIMER
-#include <pexpert/arm64/S5L8960X.h>
-#define __ARM_L2CACHE_SIZE_LOG__ 20
-#define ARM_BOARD_WFE_TIMEOUT_NS 1000
-#define ARM_BOARD_CLASS_S5L8960X
-#define KERNEL_INTEGRITY_WT 1
-#define PEXPERT_NO_3X_IMAGES	1
-#define CORE_NCTRS 8
-#endif  /* ARM64_BOARD_CONFIG_S5L8960X */
 
 #ifdef ARM64_BOARD_CONFIG_T7000
 #define APPLE_ARM64_ARCH_FAMILY  1
@@ -30,6 +18,7 @@
 #define ARM_BOARD_CLASS_T7000
 #define KERNEL_INTEGRITY_WT 1
 #define CORE_NCTRS 8
+#define CPMU_AIC_PMI 1
 #endif  /* ARM64_BOARD_CONFIG_T7000 */
 
 #ifdef ARM64_BOARD_CONFIG_T7001
@@ -43,6 +32,7 @@
 #define KERNEL_INTEGRITY_WT 1
 #define CPU_COUNT 3
 #define CORE_NCTRS 8
+#define CPMU_AIC_PMI 1
 #endif  /* ARM64_BOARD_CONFIG_T7001 */
 
 #ifdef ARM64_BOARD_CONFIG_S8000
@@ -61,6 +51,7 @@
 #define ARM_BOARD_CLASS_S8000
 #define KERNEL_INTEGRITY_WT 1
 #define CORE_NCTRS 8
+#define CPMU_AIC_PMI 1
 #endif  /* ARM64_BOARD_CONFIG_S8000 */
 
 #ifdef ARM64_BOARD_CONFIG_S8001
@@ -79,6 +70,7 @@
 #define ARM_BOARD_CLASS_S8000
 #define KERNEL_INTEGRITY_WT 1
 #define CORE_NCTRS 8
+#define CPMU_AIC_PMI 1
 #endif  /* ARM64_BOARD_CONFIG_S8001 */
 
 #ifdef ARM64_BOARD_CONFIG_T8010
@@ -97,6 +89,7 @@
 #define ARM_BOARD_WFE_TIMEOUT_NS 1000
 #define ARM_BOARD_CLASS_T8010
 #define CORE_NCTRS 10
+#define CPMU_AIC_PMI 1
 #if DEVELOPMENT || DEBUG
 #define PMAP_CS                  1
 #define PMAP_CS_ENABLE           0
@@ -114,6 +107,7 @@
 #define ARM_BOARD_CLASS_T8011
 #define CPU_COUNT 3
 #define CORE_NCTRS 10
+#define CPMU_AIC_PMI 1
 #if DEVELOPMENT || DEBUG
 #define PMAP_CS                  1
 #define PMAP_CS_ENABLE           0
@@ -157,6 +151,9 @@
 
 
 
+
+
+
 #ifdef ARM64_BOARD_CONFIG_BCM2837
 #define BCM2837
 #define BCM2837_BRINGUP
@@ -165,6 +162,7 @@
 #define __ARM_L2CACHE_SIZE_LOG__ 19
 #define ARM_BOARD_CLASS_BCM2837
 #define CPU_COUNT 4
+#define CORE_NCTRS 8 /* Placeholder; KPC is not enabled for this target */
 #endif  /* ARM64_BOARD_CONFIG_BCM2837 */
 
 #endif /* ! _PEXPERT_ARM_BOARD_CONFIG_H */

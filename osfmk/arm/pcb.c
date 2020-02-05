@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2007 Apple Inc. All rights reserved.
+ * Copyright (c) 2007-2019 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -102,11 +102,23 @@ machine_switch_context(
 
 	new->machine.CpuDatap = cpu_data_ptr;
 
+#if __SMP__
+	/* TODO: Should this be ordered? */
+	old->machine.machine_thread_flags &= ~MACHINE_THREAD_FLAGS_ON_CPU;
+	new->machine.machine_thread_flags |= MACHINE_THREAD_FLAGS_ON_CPU;
+#endif /* __SMP__ */
+
 	machine_switch_context_kprintf("old= %x contination = %x new = %x\n", old, continuation, new);
 	retval = Switch_context(old, continuation, new);
 	assert(retval != NULL);
 
 	return retval;
+}
+
+boolean_t
+machine_thread_on_core(thread_t thread)
+{
+	return thread->machine.machine_thread_flags & MACHINE_THREAD_FLAGS_ON_CPU;
 }
 
 /*
@@ -137,7 +149,7 @@ machine_thread_create(
 	struct pmap *new_pmap = vm_map_pmap(task->map);
 
 	thread->machine.kptw_ttb = ((unsigned int) kernel_pmap->ttep) | TTBR_SETUP;
-	thread->machine.asid = new_pmap->asid;
+	thread->machine.asid = new_pmap->hw_asid;
 	if (new_pmap->tte_index_max == NTTES) {
 		thread->machine.uptw_ttc = 2;
 		thread->machine.uptw_ttb = ((unsigned int) new_pmap->ttep) | TTBR_SETUP;
@@ -270,6 +282,13 @@ machine_stack_handoff(
 
 	pmap_set_pmap(new->map->pmap, new);
 	new->machine.CpuDatap = cpu_data_ptr;
+
+#if __SMP__
+	/* TODO: Should this be ordered? */
+	old->machine.machine_thread_flags &= ~MACHINE_THREAD_FLAGS_ON_CPU;
+	new->machine.machine_thread_flags |= MACHINE_THREAD_FLAGS_ON_CPU;
+#endif /* __SMP__ */
+
 	machine_set_current_thread(new);
 	thread_initialize_kernel_state(new);
 
@@ -404,4 +423,15 @@ machine_thread_set_tsd_base(
 	}
 
 	return KERN_SUCCESS;
+}
+
+void
+machine_tecs(__unused thread_t thr)
+{
+}
+
+int
+machine_csv(__unused cpuvn_e cve)
+{
+	return 0;
 }
