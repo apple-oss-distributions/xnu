@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2018 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2020 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -145,10 +145,6 @@
 #include <net/net_osdep.h>
 
 #include <net/bpf.h>
-
-#if CONFIG_MACF_NET
-#include <security/mac_framework.h>
-#endif
 
 #define GET_V4(x) ((const struct in_addr *)(const void *)(&(x)->s6_addr16[1]))
 
@@ -372,10 +368,6 @@ stfattach(void)
 	ifnet_set_flags(sc->sc_if, IFF_LINK2, IFF_LINK2);
 #endif
 
-#if CONFIG_MACF_NET
-	mac_ifnet_label_init(&sc->sc_if);
-#endif
-
 	error = ifnet_attach(sc->sc_if, NULL);
 	if (error != 0) {
 		printf("stfattach: ifnet_attach returned error=%d\n", error);
@@ -571,6 +563,7 @@ stf_pre_output(
 			IFA_REMREF(&ia6->ia_ifa);
 			return ENOBUFS;
 		}
+		*m0 = m;
 	}
 	ip6 = mtod(m, struct ip6_hdr *);
 	tos = (ntohl(ip6->ip6_flow) >> 20) & 0xff;
@@ -604,6 +597,8 @@ stf_pre_output(
 		IFA_REMREF(&ia6->ia_ifa);
 		return ENOBUFS;
 	}
+
+	*m0 = m;
 	ip = mtod(m, struct ip *);
 
 	bzero(ip, sizeof(*ip));
@@ -788,10 +783,6 @@ in_stf_input(
 	}
 
 	ifp = sc->sc_if;
-
-#if MAC_LABEL
-	mac_mbuf_label_associate_ifnet(ifp, m);
-#endif
 
 	/*
 	 * perform sanity check against outer src/dst.

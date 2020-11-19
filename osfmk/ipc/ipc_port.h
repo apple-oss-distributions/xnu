@@ -108,6 +108,8 @@
  *  taken when the port was destroyed.
  */
 
+struct task_watchport_elem;
+
 typedef unsigned int ipc_port_timestamp_t;
 
 struct ipc_port {
@@ -120,13 +122,15 @@ struct ipc_port {
 	struct ipc_mqueue ip_messages;
 
 	union {
-		struct ipc_space *receiver;
-		struct ipc_port *destination;
+		struct ipc_space * receiver;
+		struct ipc_port * destination;
 		ipc_port_timestamp_t timestamp;
 	} data;
 
+	/* update host_request_notification if this union is changed */
 	union {
-		ipc_kobject_t kobject;
+		ipc_kobject_t XNU_PTRAUTH_SIGNED_PTR("ipc_port.kobject") kobject;
+		ipc_kobject_label_t XNU_PTRAUTH_SIGNED_PTR("ipc_port.kolabel") kolabel;
 		ipc_importance_task_t imp_task;
 		ipc_port_t sync_inheritor_port;
 		struct knote *sync_inheritor_knote;
@@ -140,8 +144,6 @@ struct ipc_port {
 		struct ipc_kmsg *premsg;
 		struct turnstile *send_turnstile;
 	} kdata2;
-
-	struct task_watchport_elem *ip_watchport_elem;
 
 	mach_vm_address_t ip_context;
 
@@ -157,7 +159,8 @@ struct ipc_port {
 	    ip_immovable_receive:1,     /* the receive right cannot be moved out of a space, until it is destroyed */
 	    ip_no_grant:1,              /* Port wont accept complex messages containing (ool) port descriptors */
 	    ip_immovable_send:1,        /* No send(once) rights to this port can be moved out of a space */
-	    ip_impcount:18;             /* number of importance donations in nested queue */
+	    ip_tg_block_tracking:1,     /* Track blocking relationship between thread groups during sync IPC */
+	    ip_impcount:17;             /* number of importance donations in nested queue */
 
 	mach_port_mscount_t ip_mscount;
 	mach_port_rights_t ip_srights;
@@ -190,6 +193,7 @@ struct ipc_port {
 #define ip_timestamp            data.timestamp
 
 #define ip_kobject              kdata.kobject
+#define ip_kolabel              kdata.kolabel
 #define ip_imp_task             kdata.imp_task
 #define ip_sync_inheritor_port  kdata.sync_inheritor_port
 #define ip_sync_inheritor_knote kdata.sync_inheritor_knote
@@ -213,7 +217,7 @@ MACRO_END
 (IP_PREALLOC(port) ? &((port)->ip_premsg->ikm_turnstile) : &((port)->ip_send_turnstile))
 
 #define port_rcv_turnstile_address(port) \
-	(NULL)
+	&(port)->ip_messages.imq_wait_queue.waitq_ts
 
 
 /*
@@ -280,9 +284,15 @@ MACRO_END
 
 #define ip_kotype(port)         io_kotype(ip_to_object(port))
 #define ip_is_kobject(port)     io_is_kobject(ip_to_object(port))
+#define ip_is_kolabeled(port)   io_is_kolabeled(ip_to_object(port))
+#define ip_get_kobject(port)    ipc_kobject_get(port)
+#define ip_label_check(space, port, msgt_name) \
+	(!ip_is_kolabeled(port) || ipc_kobject_label_check((space), (port), (msgt_name)))
 
 #define ip_full_kernel(port)    imq_full_kernel(&(port)->ip_messages)
 #define ip_full(port)           imq_full(&(port)->ip_messages)
+
+/* Bits reserved in IO_BITS_PORT_INFO are defined here */
 
 /*
  * JMM - Preallocation flag
@@ -307,6 +317,13 @@ MACRO_BEGIN                                                             \
 	(port)->ip_object.io_bits &= ~IP_BIT_PREALLOC;                  \
 	(port)->ip_premsg = IKM_NULL;                                   \
 MACRO_END
+
+/*
+ * This flag indicates that the port has opted into message filtering based
+ * on a policy defined in the Sandbox.
+ */
+#define IP_BIT_FILTER_MSG               0x00001000
+#define ip_enforce_msg_filtering(port)    (((port)->ip_object.io_bits & IP_BIT_FILTER_MSG) != 0)
 
 /* JMM - address alignment/packing for LP64 */
 struct ipc_port_request {
@@ -348,9 +365,6 @@ extern lck_attr_t       ipc_lck_attr;
  */
 
 extern lck_spin_t ipc_port_multiple_lock_data;
-
-#define ipc_port_multiple_lock_init()                                   \
-	        lck_spin_init(&ipc_port_multiple_lock_data, &ipc_lck_grp, &ipc_lck_attr)
 
 #define ipc_port_multiple_lock()                                        \
 	        lck_spin_lock_grp(&ipc_port_multiple_lock_data, &ipc_lck_grp)
@@ -452,7 +466,7 @@ extern boolean_t ipc_port_request_sparm(
 	mach_port_name_t          name,
 	ipc_port_request_index_t  index,
 	mach_msg_option_t         option,
-	mach_msg_priority_t       override);
+	mach_msg_priority_t       priority);
 
 /* Make a port-deleted request */
 extern void ipc_port_pdrequest(
@@ -472,22 +486,33 @@ extern boolean_t ipc_port_clear_receiver(
 	ipc_port_t              port,
 	boolean_t               should_destroy);
 
+__options_decl(ipc_port_init_flags_t, uint32_t, {
+	IPC_PORT_INIT_NONE              = 0x00000000,
+	IPC_PORT_INIT_MAKE_SEND_RIGHT   = 0x00000001,
+	IPC_PORT_INIT_MESSAGE_QUEUE     = 0x00000002,
+	IPC_PORT_INIT_SPECIAL_REPLY     = 0x00000004,
+	IPC_PORT_INIT_FILTER_MESSAGE    = 0x00000008,
+	IPC_PORT_INIT_TG_BLOCK_TRACKING = 0x00000010,
+});
+
 /* Initialize a newly-allocated port */
 extern void ipc_port_init(
 	ipc_port_t              port,
 	ipc_space_t             space,
+	ipc_port_init_flags_t   flags,
 	mach_port_name_t        name);
 
 /* Allocate a port */
 extern kern_return_t ipc_port_alloc(
 	ipc_space_t             space,
-	bool                    make_send_right,
+	ipc_port_init_flags_t   flags,
 	mach_port_name_t        *namep,
 	ipc_port_t              *portp);
 
 /* Allocate a port, with a specific name */
 extern kern_return_t ipc_port_alloc_name(
 	ipc_space_t             space,
+	ipc_port_init_flags_t   flags,
 	mach_port_name_t        name,
 	ipc_port_t              *portp);
 
@@ -559,8 +584,7 @@ ipc_port_adjust_sync_link_state_locked(
 void
 ipc_port_adjust_special_reply_port(
 	ipc_port_t special_reply_port,
-	uint8_t flags,
-	boolean_t get_turnstile);
+	uint8_t flags);
 
 void
 ipc_port_adjust_port_locked(
@@ -646,6 +670,11 @@ extern mach_port_name_t ipc_port_copyout_send(
 	ipc_port_t      sright,
 	ipc_space_t     space);
 
+extern void ipc_port_thread_group_blocked(
+	ipc_port_t      port);
+
+extern void ipc_port_thread_group_unblocked(void);
+
 #endif /* MACH_KERNEL_PRIVATE */
 
 #if KERNEL_PRIVATE
@@ -686,7 +715,8 @@ extern void ipc_port_finalize(
 
 /* Allocate a port in a special space */
 extern ipc_port_t ipc_port_alloc_special(
-	ipc_space_t     space);
+	ipc_space_t             space,
+	ipc_port_init_flags_t   flags);
 
 /* Deallocate a port in a special space */
 extern void ipc_port_dealloc_special(
@@ -697,9 +727,6 @@ extern void ipc_port_dealloc_special(
 /* Track low-level port deallocation */
 extern void ipc_port_track_dealloc(
 	ipc_port_t      port);
-
-/* Initialize general port debugging state */
-extern void ipc_port_debug_init(void);
 #endif  /* MACH_ASSERT */
 
 extern void ipc_port_recv_update_inheritor(ipc_port_t port,
@@ -710,13 +737,16 @@ extern void ipc_port_send_update_inheritor(ipc_port_t port,
     struct turnstile *turnstile,
     turnstile_update_flags_t flags);
 
+extern int
+ipc_special_reply_get_pid_locked(ipc_port_t port);
+
 #define ipc_port_alloc_kernel()         \
-	        ipc_port_alloc_special(ipc_space_kernel)
+	        ipc_port_alloc_special(ipc_space_kernel, IPC_PORT_INIT_NONE)
 #define ipc_port_dealloc_kernel(port)   \
 	        ipc_port_dealloc_special((port), ipc_space_kernel)
 
 #define ipc_port_alloc_reply()          \
-	        ipc_port_alloc_special(ipc_space_reply)
+	        ipc_port_alloc_special(ipc_space_reply, IPC_PORT_INIT_MESSAGE_QUEUE)
 #define ipc_port_dealloc_reply(port)    \
 	        ipc_port_dealloc_special((port), ipc_space_reply)
 

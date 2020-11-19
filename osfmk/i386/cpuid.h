@@ -50,8 +50,11 @@
 #define CPUID_VID_INTEL         "GenuineIntel"
 #define CPUID_VID_AMD           "AuthenticAMD"
 
-#define CPUID_VMM_ID_VMWARE             "VMwareVMware"
+#define CPUID_VMM_ID_VMWARE     "VMwareVMware"
 #define CPUID_VMM_ID_PARALLELS  "Parallels\0\0\0"
+#define CPUID_VMM_ID_HYVE       "bhyve bhyve "
+#define CPUID_VMM_ID_HVF        "HVFHVFHVFHVF"
+#define CPUID_VMM_ID_KVM        "KVMKVMKVM\0\0\0"
 
 #define CPUID_STRING_UNKNOWN    "Unknown CPU Typ"
 
@@ -183,6 +186,7 @@
 #define CPUID_LEAF7_EXTFEATURE_AVX5124VNNIW     _Bit(2)         /* AVX512_4VNNIW */
 #define CPUID_LEAF7_EXTFEATURE_AVX5124FMAPS     _Bit(3)         /* AVX512_4FMAPS */
 #define CPUID_LEAF7_EXTFEATURE_FSREPMOV         _Bit(4)         /* Fast Short REP MOV */
+#define CPUID_LEAF7_EXTFEATURE_SRBDS_CTRL       _Bit(9)         /* SRBDS MSR Presence and Mitigation Control */
 #define CPUID_LEAF7_EXTFEATURE_MDCLEAR          _Bit(10)        /* Overloaded VERW / L1D_FLUSH */
 #define CPUID_LEAF7_EXTFEATURE_TSXFA            _Bit(13)        /* TSX RTM_FORCE_ABORT MSR */
 #define CPUID_LEAF7_EXTFEATURE_IBRS             _Bit(26)        /* IBRS / IBPB */
@@ -262,20 +266,29 @@
 #define CPUID_MODEL_SKYLAKE_ULT         0x4E
 #define CPUID_MODEL_SKYLAKE_ULX         0x4E
 #define CPUID_MODEL_SKYLAKE_DT          0x5E
-#if !defined(RC_HIDE_XNU_J137)
 #define CPUID_MODEL_SKYLAKE_W           0x55
 #define PLATID_XEON_SP_1                0x00
 #define PLATID_XEON_SP_2                0x07
 #define PLATID_MAYBE_XEON_SP            0x01
-#endif /* not RC_HIDE_XNU_J137 */
 #define CPUID_MODEL_KABYLAKE            0x8E
 #define CPUID_MODEL_KABYLAKE_ULT        0x8E
 #define CPUID_MODEL_KABYLAKE_ULX        0x8E
 #define CPUID_MODEL_KABYLAKE_DT         0x9E
+#define CPUID_MODEL_ICELAKE             0x7E
+#define CPUID_MODEL_ICELAKE_ULT         0x7E
+#define CPUID_MODEL_ICELAKE_ULX         0x7E
+#define CPUID_MODEL_ICELAKE_DT          0x7D
+#define CPUID_MODEL_ICELAKE_H           0x9F
 
-#define CPUID_VMM_FAMILY_UNKNOWN        0x0
-#define CPUID_VMM_FAMILY_VMWARE         0x1
-#define CPUID_VMM_FAMILY_PARALLELS      0x2
+#define CPUID_VMM_FAMILY_NONE           0x0
+#define CPUID_VMM_FAMILY_UNKNOWN        0x1
+#define CPUID_VMM_FAMILY_VMWARE         0x2
+#define CPUID_VMM_FAMILY_PARALLELS      0x3
+#define CPUID_VMM_FAMILY_HYVE           0x4
+#define CPUID_VMM_FAMILY_HVF            0x5
+#define CPUID_VMM_FAMILY_KVM            0x6
+
+
 
 #ifndef ASSEMBLER
 #include <stdint.h>
@@ -383,7 +396,7 @@ typedef struct {
 } cpuid_tsc_leaf_t;
 
 /* Physical CPU info - this is exported out of the kernel (kexts), so be wary of changes */
-typedef struct {
+typedef struct i386_cpu_info {
 	char            cpuid_vendor[16];
 	char            cpuid_brand_string[48];
 	const char      *cpuid_model_string;
@@ -476,7 +489,9 @@ typedef struct {
 
 typedef enum {
 	CPU_INTEL_SEGCHK = 1,
-	CPU_INTEL_TSXFA
+	CPU_INTEL_TSXFA = 2,
+	CPU_INTEL_TSXDA = 4,
+	CPU_INTEL_SRBDS = 8
 } cpu_wa_e;
 
 typedef enum {
@@ -495,6 +510,7 @@ is_xeon_sp(uint8_t platid)
 	if (platid != PLATID_MAYBE_XEON_SP) {
 		return 0;
 	}
+
 	boolean_t intrs = ml_set_interrupts_enabled(FALSE);
 	outl(cfgAdr, XeonCapID5);
 	uint32_t cap5reg = inl(cfgDat);
@@ -536,13 +552,14 @@ extern uint32_t         cpuid_cpufamily(void);
 
 extern i386_cpu_info_t  *cpuid_info(void);
 extern void             cpuid_set_info(void);
+extern boolean_t        cpuid_vmm_present(void);
 
 #ifdef MACH_KERNEL_PRIVATE
-extern boolean_t        cpuid_vmm_present(void);
 extern i386_vmm_info_t  *cpuid_vmm_info(void);
 extern uint32_t         cpuid_vmm_family(void);
 extern cwa_classifier_e cpuid_wa_required(cpu_wa_e wa);
 extern void cpuid_do_was(void);
+extern const char       *cpuid_vmm_family_string(void);
 #endif
 
 #ifdef __cplusplus

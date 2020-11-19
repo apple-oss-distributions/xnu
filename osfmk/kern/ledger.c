@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2010-2018 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2010-2020 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -96,7 +96,7 @@ struct entry_template {
 	struct ledger_callback  *et_callback;
 };
 
-lck_grp_t ledger_lck_grp;
+LCK_GRP_DECLARE(ledger_lck_grp, "ledger");
 os_refgrp_decl(static, ledger_refgrp, "ledger", NULL);
 
 /*
@@ -172,12 +172,6 @@ nsecs_to_abstime(uint64_t nsecs)
 
 	nanoseconds_to_absolutetime(nsecs, &abstime);
 	return abstime;
-}
-
-void
-ledger_init(void)
-{
-	lck_grp_init(&ledger_lck_grp, "ledger", LCK_GRP_ATTR_NULL);
 }
 
 ledger_template_t
@@ -371,9 +365,7 @@ ledger_template_complete(ledger_template_t template)
 {
 	size_t ledger_size;
 	ledger_size = sizeof(struct ledger) + (template->lt_cnt * sizeof(struct ledger_entry));
-	template->lt_zone = zinit(ledger_size, CONFIG_TASK_MAX * ledger_size,
-	    ledger_size,
-	    template->lt_name);
+	template->lt_zone = zone_create(template->lt_name, ledger_size, ZC_NONE);
 	template->lt_initialized = true;
 }
 
@@ -448,7 +440,7 @@ ledger_instantiate(ledger_template_t template, int entry_type)
 		le->le_credit        = 0;
 		le->le_debit         = 0;
 		le->le_limit         = LEDGER_LIMIT_INFINITY;
-		le->le_warn_level    = LEDGER_LIMIT_INFINITY;
+		le->le_warn_percent  = LEDGER_PERCENT_NONE;
 		le->_le.le_refill.le_refill_period = 0;
 		le->_le.le_refill.le_last_refill   = 0;
 	}
@@ -521,7 +513,8 @@ warn_level_exceeded(struct ledger_entry *le)
 	 * use positive limits.
 	 */
 	balance = le->le_credit - le->le_debit;
-	if ((le->le_warn_level != LEDGER_LIMIT_INFINITY) && (balance > le->le_warn_level)) {
+	if (le->le_warn_percent != LEDGER_PERCENT_NONE &&
+	    ((balance > (le->le_limit * le->le_warn_percent) >> 16))) {
 		return 1;
 	}
 	return 0;
@@ -658,12 +651,12 @@ ledger_refill(uint64_t now, ledger_t ledger, int entry)
 		due = balance;
 	}
 
-	assertf(due >= 0, "now=%llu, ledger=%p, entry=%d, balance=%lld, due=%lld", now, ledger, entry, balance, due);
-
-	OSAddAtomic64(due, &le->le_debit);
-
-	assert(le->le_debit >= 0);
-
+	if (due < 0 && (le->le_flags & LF_PANIC_ON_NEGATIVE)) {
+		assertf(due >= 0, "now=%llu, ledger=%p, entry=%d, balance=%lld, due=%lld", now, ledger, entry, balance, due);
+	} else {
+		OSAddAtomic64(due, &le->le_debit);
+		assert(le->le_debit >= 0);
+	}
 	/*
 	 * If we've completely refilled the pool, set the refill time to now.
 	 * Otherwise set it to the time at which it last should have been
@@ -987,9 +980,9 @@ ledger_set_limit(ledger_t ledger, int entry, ledger_amount_t limit,
 		assert(warn_level_percentage <= 100);
 		assert(limit > 0); /* no negative limit support for warnings */
 		assert(limit != LEDGER_LIMIT_INFINITY); /* warn % without limit makes no sense */
-		le->le_warn_level = (le->le_limit * warn_level_percentage) / 100;
+		le->le_warn_percent = warn_level_percentage * (1u << 16) / 100;
 	} else {
-		le->le_warn_level = LEDGER_LIMIT_INFINITY;
+		le->le_warn_percent = LEDGER_PERCENT_NONE;
 	}
 
 	return KERN_SUCCESS;
@@ -1145,12 +1138,12 @@ ledger_disable_callback(ledger_t ledger, int entry)
 	}
 
 	/*
-	 * le_warn_level is used to indicate *if* this ledger has a warning configured,
+	 * le_warn_percent is used to indicate *if* this ledger has a warning configured,
 	 * in addition to what that warning level is set to.
 	 * This means a side-effect of ledger_disable_callback() is that the
 	 * warning level is forgotten.
 	 */
-	ledger->l_entries[entry].le_warn_level = LEDGER_LIMIT_INFINITY;
+	ledger->l_entries[entry].le_warn_percent = LEDGER_PERCENT_NONE;
 	flag_clear(&ledger->l_entries[entry].le_flags, LEDGER_ACTION_CALLBACK);
 	return KERN_SUCCESS;
 }
@@ -1674,7 +1667,8 @@ ledger_template_info(void **buf, int *len)
 	if (*len > l->l_size) {
 		*len = l->l_size;
 	}
-	lti = kalloc((*len) * sizeof(struct ledger_template_info));
+	lti = kheap_alloc(KHEAP_DATA_BUFFERS,
+	    (*len) * sizeof(struct ledger_template_info), Z_WAITOK);
 	if (lti == NULL) {
 		return ENOMEM;
 	}
@@ -1731,7 +1725,8 @@ ledger_get_task_entry_info_multiple(task_t task, void **buf, int *len)
 	if (*len > l->l_size) {
 		*len = l->l_size;
 	}
-	lei = kalloc((*len) * sizeof(struct ledger_entry_info));
+	lei = kheap_alloc(KHEAP_DATA_BUFFERS,
+	    (*len) * sizeof(struct ledger_entry_info), Z_WAITOK);
 	if (lei == NULL) {
 		return ENOMEM;
 	}

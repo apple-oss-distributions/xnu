@@ -110,6 +110,30 @@ def IterateLinkageChain(queue_head, element_type, field_name, field_ofst=0):
         yield obj
         link = link.next
 
+def IterateCircleQueue(queue_head, element_ptr_type, element_field_name):
+    """ iterate over a circle queue in kernel of type circle_queue_head_t. refer to osfmk/kern/circle_queue.h
+        params:
+            queue_head         - lldb.SBValue : Value object for queue_head.
+            element_type       - lldb.SBType : a pointer type of the element 'next' points to. Typically its structs like thread, task etc..
+            element_field_name - str : name of the field in target struct.
+        returns:
+            A generator does not return. It is used for iterating.
+            SBValue  : an object thats of type (element_type) queue_head->next. Always a pointer object
+    """
+    head = queue_head.head.GetSBValue()
+    queue_head_addr = 0x0
+    if head.TypeIsPointerType():
+        queue_head_addr = head.GetValueAsUnsigned()
+    else:
+        queue_head_addr = head.GetAddress().GetLoadAddress(osplugin_target_obj)
+    cur_elt = head
+    while True:
+        if not cur_elt.IsValid() or cur_elt.GetValueAsUnsigned() == 0:
+            break
+        yield containerof(value(cur_elt), element_ptr_type, element_field_name)
+        cur_elt = cur_elt.GetChildMemberWithName('next')
+        if cur_elt.GetValueAsUnsigned() == queue_head_addr:
+            break
 
 def IterateQueue(queue_head, element_ptr_type, element_field_name, backwards=False, unpack_ptr_fn=None):
     """ Iterate over an Element Chain queue in kernel of type queue_head_t. (osfmk/kern/queue.h method 2)
@@ -223,7 +247,7 @@ def IterateRBTreeEntry(element, element_type, field_name):
                 elt = cast(elt, element_type)
 
 
-def IteratePriorityQueue(root, element_type, field_name):
+def IterateSchedPriorityQueue(root, element_type, field_name):
     """ iterate over a priority queue as defined with struct priority_queue from osfmk/kern/priority_queue.h
             root         - value : Value object for the priority queue
             element_type - str   : Type of the link element
@@ -233,9 +257,9 @@ def IteratePriorityQueue(root, element_type, field_name):
             value  : an object thats of type (element_type). Always a pointer object
     """
     def _make_pqe(addr):
-        return value(root.GetSBValue().CreateValueFromExpression(None,'(struct priority_queue_entry *)'+str(addr)))
+        return value(root.GetSBValue().CreateValueFromExpression(None,'(struct priority_queue_entry_sched *)'+str(addr)))
 
-    queue = [unsigned(root.pq_root_packed) & ~3]
+    queue = [unsigned(root.pq_root)]
 
     while len(queue):
         elt = _make_pqe(queue.pop())
@@ -245,6 +269,20 @@ def IteratePriorityQueue(root, element_type, field_name):
             addr = unsigned(elt.child)
             if addr: queue.append(addr)
             elt = elt.next
+
+def SchedPriorityStableQueueRootPri(root, element_type, field_name):
+    """ Return the root level priority of a priority queue as defined with struct priority_queue from osfmk/kern/priority_queue.h
+            root         - value : Value object for the priority queue
+            element_type - str   : Type of the link element
+            field_name   - str   : Name of the field in link element's structure
+        returns:
+            The sched pri of the root element.
+    """
+    def _make_pqe(addr):
+        return value(root.GetSBValue().CreateValueFromExpression(None,'(struct priority_queue_entry_stable *)'+str(addr)))
+
+    elt = _make_pqe(unsigned(root.pq_root))
+    return (elt.key >> 8);
 
 def IterateMPSCQueue(root, element_type, field_name):
     """ iterate over an MPSC queue as defined with struct mpsc_queue_head from osfmk/kern/mpsc_queue.h

@@ -73,6 +73,10 @@ extern void     mach_kauth_cred_uthread_update(void);
 extern void throttle_lowpri_io(int);
 #endif
 
+#if CONFIG_MACF
+#include <security/mac_mach_internal.h>
+#endif
+
 void * find_user_regs(thread_t);
 
 unsigned int get_msr_exportmask(void);
@@ -92,7 +96,7 @@ thread_userstack(
 	__unused thread_t   thread,
 	int                 flavor,
 	thread_state_t      tstate,
-	__unused unsigned int        count,
+	unsigned int        count,
 	mach_vm_offset_t    *user_stack,
 	int                 *customstack,
 	__unused boolean_t  is64bit
@@ -106,6 +110,10 @@ thread_userstack(
 	case x86_THREAD_STATE32:
 	{
 		x86_thread_state32_t *state25;
+
+		if (__improbable(count != x86_THREAD_STATE32_COUNT)) {
+			return KERN_INVALID_ARGUMENT;
+		}
 
 		state25 = (x86_thread_state32_t *) tstate;
 
@@ -124,10 +132,36 @@ thread_userstack(
 	}
 
 	case x86_THREAD_FULL_STATE64:
-	/* FALL THROUGH */
+	{
+		x86_thread_full_state64_t *state25;
+
+		if (__improbable(count != x86_THREAD_FULL_STATE64_COUNT)) {
+			return KERN_INVALID_ARGUMENT;
+		}
+
+		state25 = (x86_thread_full_state64_t *) tstate;
+
+		if (state25->ss64.rsp) {
+			*user_stack = state25->ss64.rsp;
+			if (customstack) {
+				*customstack = 1;
+			}
+		} else {
+			*user_stack = VM_USRSTACK64;
+			if (customstack) {
+				*customstack = 0;
+			}
+		}
+		break;
+	}
+
 	case x86_THREAD_STATE64:
 	{
 		x86_thread_state64_t *state25;
+
+		if (__improbable(count != x86_THREAD_STATE64_COUNT)) {
+			return KERN_INVALID_ARGUMENT;
+		}
 
 		state25 = (x86_thread_state64_t *) tstate;
 
@@ -176,7 +210,7 @@ thread_entrypoint(
 	__unused thread_t   thread,
 	int                 flavor,
 	thread_state_t      tstate,
-	__unused unsigned int        count,
+	unsigned int        count,
 	mach_vm_offset_t    *entry_point
 	)
 {
@@ -192,6 +226,10 @@ thread_entrypoint(
 	{
 		x86_thread_state32_t *state25;
 
+		if (count != x86_THREAD_STATE32_COUNT) {
+			return KERN_INVALID_ARGUMENT;
+		}
+
 		state25 = (i386_thread_state_t *) tstate;
 		*entry_point = state25->eip ? state25->eip : VM_MIN_ADDRESS;
 		break;
@@ -200,6 +238,10 @@ thread_entrypoint(
 	case x86_THREAD_STATE64:
 	{
 		x86_thread_state64_t *state25;
+
+		if (count != x86_THREAD_STATE64_COUNT) {
+			return KERN_INVALID_ARGUMENT;
+		}
 
 		state25 = (x86_thread_state64_t *) tstate;
 		*entry_point = state25->rip ? state25->rip : VM_MIN_ADDRESS64;
@@ -514,7 +556,29 @@ mach_call_munger(x86_saved_state_t *state)
 	    MACHDBG_CODE(DBG_MACH_EXCP_SC, (call_number)) | DBG_FUNC_START,
 	    args.arg1, args.arg2, args.arg3, args.arg4, 0);
 
+#if CONFIG_MACF
+	/* Check mach trap filter mask, if exists. */
+	task_t task = current_task();
+	uint8_t *filter_mask = task->mach_trap_filter_mask;
+
+	if (__improbable(filter_mask != NULL &&
+	    !bitstr_test(filter_mask, call_number))) {
+		/* Not in filter mask, evaluate policy. */
+		if (mac_task_mach_trap_evaluate != NULL) {
+			retval = mac_task_mach_trap_evaluate(get_bsdtask_info(task),
+			    call_number);
+			if (retval) {
+				goto skip_machcall;
+			}
+		}
+	}
+#endif /* CONFIG_MACF */
+
 	retval = mach_call(&args);
+
+#if CONFIG_MACF
+skip_machcall:
+#endif
 
 	DEBUG_KPRINT_SYSCALL_MACH("mach_call_munger: retval=0x%x\n", retval);
 
@@ -615,7 +679,29 @@ mach_call_munger64(x86_saved_state_t *state)
 	mach_kauth_cred_uthread_update();
 #endif
 
+#if CONFIG_MACF
+	/* Check syscall filter mask, if exists. */
+	task_t task = current_task();
+	uint8_t *filter_mask = task->mach_trap_filter_mask;
+
+	if (__improbable(filter_mask != NULL &&
+	    !bitstr_test(filter_mask, call_number))) {
+		/* Not in filter mask, evaluate policy. */
+		if (mac_task_mach_trap_evaluate != NULL) {
+			regs->rax = mac_task_mach_trap_evaluate(get_bsdtask_info(task),
+			    call_number);
+			if (regs->rax) {
+				goto skip_machcall;
+			}
+		}
+	}
+#endif /* CONFIG_MACF */
+
 	regs->rax = (uint64_t)mach_call((void *)&args);
+
+#if CONFIG_MACF
+skip_machcall:
+#endif
 
 	DEBUG_KPRINT_SYSCALL_MACH( "mach_call_munger64: retval=0x%llx\n", regs->rax);
 
@@ -675,7 +761,7 @@ thread_setuserstack(
  * Returns the adjusted user stack pointer from the machine
  * dependent thread state info.  Used for small (<2G) deltas.
  */
-uint64_t
+user_addr_t
 thread_adjuserstack(
 	thread_t        thread,
 	int             adjust)

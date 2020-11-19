@@ -35,6 +35,16 @@
 #include <net/pktsched/pktsched.h>
 #include <net/pktsched/pktsched_netem.h>
 
+/* <rdar://problem/55953523> M8 Perf: Remove norm_dist_table on armv7k (16K wired win) */
+/* compile out netem on platforms where skywalk is not enabled by default */
+#if __LP64__
+#define CONFIG_NETEM 1
+#else
+#define CONFIG_NETEM 0
+#endif
+
+#if CONFIG_NETEM
+
 enum {
 	NETEM_LOG_ERROR = 0,
 	NETEM_LOG_INFO = 1,
@@ -586,12 +596,12 @@ struct heap_elem {
 };
 
 struct heap {
-	uint32_t        limit;  /* max size */
-	uint32_t        size;   /* current size */
+	uint64_t        limit;  /* max size */
+	uint64_t        size;   /* current size */
 	struct heap_elem p[0];
 };
 
-static struct heap *heap_create(uint32_t size);
+static struct heap *heap_create(uint64_t size);
 static int heap_insert(struct heap *h, uint64_t k, pktsched_pkt_t *p);
 static int heap_peek(struct heap *h, uint64_t *k, pktsched_pkt_t *p);
 static int heap_extract(struct heap *h, uint64_t *k, pktsched_pkt_t *p);
@@ -680,7 +690,7 @@ struct netem {
 	lck_mtx_unlock(&(_sch)->netem_lock)
 
 static struct heap *
-heap_create(uint32_t limit)
+heap_create(uint64_t limit)
 {
 	struct heap *h = NULL;
 
@@ -716,10 +726,10 @@ heap_insert(struct heap *h, uint64_t key, pktsched_pkt_t *pkt)
 	ASSERT(h != NULL);
 
 	if (h->size == h->limit) {
-		return ENOMEM;
+		return ENOBUFS;
 	}
 
-	uint32_t child, parent;
+	uint64_t child, parent;
 	if (pkt == NULL) {
 		child = key;
 		ASSERT(child < h->size);
@@ -758,7 +768,7 @@ heap_peek(struct heap *h, uint64_t *key, pktsched_pkt_t *pkt)
 static int
 heap_extract(struct heap *h, uint64_t *key, pktsched_pkt_t *pkt)
 {
-	uint32_t child, parent, max;
+	uint64_t child, parent, max;
 
 	if (h->size == 0) {
 		netem_log(NETEM_LOG_ERROR, "warning: extract from empty heap");
@@ -1107,20 +1117,6 @@ done:
 	return ret;
 }
 
-int
-netem_dequeue(struct netem *ne, pktsched_pkt_t *p,
-    boolean_t *ppending)
-{
-	int ret;
-
-	NETEM_MTX_LOCK(ne);
-	netem_update_locked(ne);
-	ret = netem_dequeue_internal_locked(ne, p, ppending);
-	NETEM_MTX_UNLOCK(ne);
-
-	return ret;
-}
-
 __attribute__((noreturn))
 static void
 netem_output_thread_cont(void *v, wait_result_t w)
@@ -1417,17 +1413,17 @@ netem_set_params(struct netem *ne, const struct if_netem_params *p)
 	struct reordering *r = &ne->netem_reordering_model;
 	r->reordering_p = p->ifnetem_reordering_p;
 
-	netem_log(NETEM_LOG_INFO, "success: bandwidth %d bps", tb->rate);
-	netem_log(NETEM_LOG_INFO, "success: corruption %d\%",
+	netem_log(NETEM_LOG_INFO, "success: bandwidth %llu bps", tb->rate);
+	netem_log(NETEM_LOG_INFO, "success: corruption %d%% ",
 	    corr->corruption_p);
-	netem_log(NETEM_LOG_INFO, "success: duplication %d\%",
+	netem_log(NETEM_LOG_INFO, "success: duplication %d%%",
 	    dup->duplication_p);
 	netem_log(NETEM_LOG_INFO, "success: latency_ms %d jitter_ms %d",
 	    late->latency_ms, late->jitter_ms);
 	netem_log(NETEM_LOG_INFO, "changed loss p_gr_gl %d p_gr_bl %d "
 	    "p_bl_gr %d p_bl_br %d p_br_bl %d", loss->p_gr_gl, loss->p_gr_bl,
 	    loss->p_bl_gr, loss->p_bl_br, loss->p_br_bl);
-	netem_log(NETEM_LOG_DEBUG, "success: reordering %d\%",
+	netem_log(NETEM_LOG_DEBUG, "success: reordering %d%%",
 	    r->reordering_p);
 
 	NETEM_MTX_UNLOCK(ne);
@@ -1521,3 +1517,47 @@ done:
 	netem_log(NETEM_LOG_INFO, "netem config ret %d", ret);
 	return ret;
 }
+
+#else /* !CONFIG_NETEM */
+
+int
+netem_init(void)
+{
+	return 0;
+}
+
+int
+netem_config(struct netem **ne, const char *name,
+    const struct if_netem_params *p, void *output_handle,
+    int (*output_func)(void *handle, pktsched_pkt_t *pkts, uint32_t n_pkts),
+    uint32_t output_max_batch_size)
+{
+#pragma unused(ne, name, p, output_handle, output_func, output_max_batch_size)
+	printf("%s error %d: unavailable on this platform\n", __func__, ENOTSUP);
+	return ENOTSUP;
+}
+
+void
+__attribute__((noreturn))
+netem_get_params(struct netem *ne, struct if_netem_params *p)
+{
+#pragma unused(ne, p)
+	panic("unexpected netem call");
+}
+
+void
+__attribute__((noreturn))
+netem_destroy(struct netem *ne)
+{
+#pragma unused(ne)
+	panic("unexpected netem call");
+}
+
+int
+netem_enqueue(struct netem *ne, classq_pkt_t *p, boolean_t *pdrop)
+{
+#pragma unused(ne, p, pdrop)
+	panic("unexpected netem call");
+	return 0;
+}
+#endif /* !CONFIG_NETEM */

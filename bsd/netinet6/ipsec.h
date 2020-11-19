@@ -45,6 +45,8 @@
 #include <netkey/keydb.h>
 #include <netinet/ip_var.h>
 
+#include <os/log.h>
+
 /* lock for IPsec stats */
 extern lck_grp_t         *sadb_stat_mutex_grp;
 extern lck_grp_attr_t    *sadb_stat_mutex_grp_attr;
@@ -72,7 +74,7 @@ struct secpolicyindex {
 	struct sockaddr_storage dst;    /* IP dst address for SP */
 	u_int8_t prefs;                 /* prefix length in bits for src */
 	u_int8_t prefd;                 /* prefix length in bits for dst */
-	u_int16_t ul_proto;             /* upper layer Protocol */
+	u_int8_t ul_proto;             /* upper layer Protocol */
 	ifnet_t internal_if; /* Interface a matching packet is bound to */
 	struct secpolicyaddrrange src_range;    /* IP src address range for SP */
 	struct secpolicyaddrrange dst_range;    /* IP dst address range for SP */
@@ -242,6 +244,10 @@ struct ipsec_wake_pkt_info {
 	u_int16_t wake_pkt_len;
 };
 
+struct ipsec_wake_pkt_event_data {
+	uuid_string_t wake_uuid;
+};
+
 #ifdef BSD_KERNEL_PRIVATE
 /*
  * Definitions for IPsec & Key sysctl operations.
@@ -337,13 +343,32 @@ extern int ip4_esp_randpad;
 
 extern bool ipsec_save_wake_pkt;
 
-#define ipseclog(x)     do { if (ipsec_debug) log x; } while (0)
+#define _ipsec_log(level, fmt, ...) do {                            \
+	os_log_type_t type;                                         \
+	switch (level) {                                            \
+	default:                                                    \
+	        type = OS_LOG_TYPE_DEFAULT;                         \
+	        break;                                              \
+	case LOG_INFO:                                              \
+	        type = OS_LOG_TYPE_INFO;                            \
+	        break;                                              \
+	case LOG_DEBUG:                                             \
+	        type = OS_LOG_TYPE_DEBUG;                           \
+	        break;                                              \
+	case LOG_ERR:                                               \
+	        type = OS_LOG_TYPE_ERROR;                           \
+	        break;                                              \
+	}                                                           \
+	os_log_with_type(OS_LOG_DEFAULT, type, fmt, ##__VA_ARGS__); \
+} while (0)
 
-extern struct secpolicy *ipsec4_getpolicybysock(struct mbuf *, u_int,
+#define ipseclog(x)     do { if (ipsec_debug != 0) _ipsec_log x; } while (0)
+
+extern struct secpolicy *ipsec4_getpolicybysock(struct mbuf *, u_int8_t,
     struct socket *, int *);
-extern struct secpolicy *ipsec4_getpolicybyaddr(struct mbuf *, u_int, int,
+extern struct secpolicy *ipsec4_getpolicybyaddr(struct mbuf *, u_int8_t, int,
     int *);
-extern int ipsec4_getpolicybyinterface(struct mbuf *, u_int, int *,
+extern int ipsec4_getpolicybyinterface(struct mbuf *, u_int8_t, int *,
     struct ip_out_args *, struct secpolicy **);
 
 extern u_int ipsec_get_reqlevel(struct ipsecrequest *);
@@ -364,7 +389,7 @@ struct tcpcb;
 extern int ipsec_chkreplay(u_int32_t, struct secasvar *, u_int8_t);
 extern int ipsec_updatereplay(u_int32_t, struct secasvar *, u_int8_t);
 
-extern size_t ipsec4_hdrsiz(struct mbuf *, u_int, struct inpcb *);
+extern size_t ipsec4_hdrsiz(struct mbuf *, u_int8_t, struct inpcb *);
 extern size_t ipsec_hdrsiz_tcp(struct tcpcb *);
 extern size_t ipsec_hdrsiz(struct secpolicy *);
 
@@ -380,10 +405,8 @@ extern int ipsec4_output(struct ipsec_output_state *, struct secpolicy *, int);
 extern struct mbuf * ipsec4_splithdr(struct mbuf *);
 extern int ipsec4_encapsulate(struct mbuf *, struct secasvar *);
 #endif
-#if INET6
 extern struct mbuf * ipsec6_splithdr(struct mbuf *);
 extern int ipsec6_encapsulate(struct mbuf *, struct secasvar *);
-#endif
 extern int ipsec4_tunnel_validate(struct mbuf *, int, u_int, struct secasvar *, sa_family_t *);
 extern struct mbuf *ipsec_copypkt(struct mbuf *);
 extern void ipsec_delaux(struct mbuf *);

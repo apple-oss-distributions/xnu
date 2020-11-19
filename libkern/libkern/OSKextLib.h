@@ -244,6 +244,38 @@ __BEGIN_DECLS
  */
 #define kOSKextReturnSystemPolicy                    libkern_kext_err(0x1b)
 
+/*!
+ * @define   kOSKextReturnKCLoadFailure
+ * @abstract Loading of the System KC failed
+ */
+#define kOSKextReturnKCLoadFailure                  libkern_kext_err(0x1c)
+
+/*!
+ * @define   kOSKextReturnKCLoadFailureSystemKC
+ * @abstract Loading of the System KC failed
+ *
+ * This a sub-code of kOSKextReturnKCLoadFailure. It can be OR'd together
+ * with: kOSKextReturnKCLoadFailureAuxKC
+ *
+ * If both the System and Aux KCs fail to load, then the error code will be:
+ * libkern_kext_err(0x1f)
+ */
+#define kOSKextReturnKCLoadFailureSystemKC          libkern_kext_err(0x1d)
+
+/*!
+ * @define   kOSKextReturnKCLoadFailureAuxKC
+ * @abstract Loading of the Aux KC failed
+ *
+ * This a sub-code of kOSKextReturnKCLoadFailure. It can be OR'd together
+ * with: kOSKextReturnKCLoadFailureSystemKC
+ *
+ * If both the System and Aux KCs fail to load, then the error code will be:
+ * libkern_kext_err(0x1f)
+ */
+#define kOSKextReturnKCLoadFailureAuxKC             libkern_kext_err(0x1e)
+
+/* next available error is: libkern_kext_err(0x20) */
+
 #if PRAGMA_MARK
 #pragma mark -
 /********************************************************************/
@@ -267,6 +299,7 @@ __BEGIN_DECLS
 #define kCFBundleExecutableKey                  "CFBundleExecutable"
 #define kCFBundlePackageTypeKey                 "CFBundlePackageType"
 #define kCFBundleDriverKitUUIDKey               "CFBundleDriverKitUUID"
+#define kCFBundleDriverKitExecutableKey         "CFBundleUEXTExecutable"
 #endif /* KERNEL */
 
 /*!
@@ -323,6 +356,13 @@ __BEGIN_DECLS
 #define kOSBundleRequiredKey                    "OSBundleRequired"
 
 /*!
+ * @define   kOSBundleRequireExplicitLoadKey
+ * @abstract A boolean value indicating whether the kext requires an
+ *           explicit kextload in order to start/match.
+ */
+#define kOSBundleRequireExplicitLoadKey         "OSBundleRequireExplicitLoad"
+
+/*!
  * @define   kOSBundleAllowUserLoadKey
  * @abstract A boolean value indicating whether
  *           <code>@link //apple_ref/doc/man/8/kextd kextcache(8)@/link</code>
@@ -334,6 +374,15 @@ __BEGIN_DECLS
  * KextManagerLoadKextWithIdentifier@/link</code>.
  */
 #define kOSBundleAllowUserLoadKey               "OSBundleAllowUserLoad"
+
+/*!
+ * @define   kOSBundleAllowUserTerminateKey
+ * @abstract A boolean value indicating whether the kextunload tool
+ *           is allowed to issue IOService terminate to classes defined in this kext.
+ * @discussion A boolean value indicating whether the kextunload tool
+ *           is allowed to issue IOService terminate to classes defined in this kext.
+ */
+#define kOSBundleAllowUserTerminateKey          "OSBundleAllowUserTerminate"
 
 /*!
  * @define   kOSKernelResourceKey
@@ -371,6 +420,14 @@ __BEGIN_DECLS
 #define kAppleTextHashesKey                     "AppleTextHashes"
 #endif
 
+/*!
+ * @define   kOSMutableSegmentCopy
+ * @abstract A boolean value indicating whether the kext requires a copy of
+ *           its mutable segments to be kept in memory, and then reset when the kext
+ *           unloads. This should be used with caution as it will increase the
+ *           amount of memory used by the kext.
+ */
+#define kOSMutableSegmentCopy                   "OSMutableSegmentCopy"
 
 
 #if PRAGMA_MARK

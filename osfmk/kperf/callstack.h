@@ -46,6 +46,10 @@
 #define CALLSTACK_CONTINUATION (1U << 5)
 /* the frames field is filled with uintptr_t, not uint64_t */
 #define CALLSTACK_KERNEL_WORDS (1U << 6)
+/* the frames come from a translated task */
+#define CALLSTACK_TRANSLATED   (1U << 7)
+/* the last frame could be the real PC */
+#define CALLSTACK_FIXUP_PC     (1U << 8)
 
 struct kp_ucallstack {
 	uint32_t kpuc_flags;
@@ -70,7 +74,8 @@ void kperf_continuation_sample(struct kp_kcallstack *cs, struct kperf_context *)
 void kperf_backtrace_sample(struct kp_kcallstack *cs, struct kperf_context *context);
 
 void kperf_ucallstack_sample(struct kp_ucallstack *cs, struct kperf_context *);
-int kperf_ucallstack_pend(struct kperf_context *, uint32_t depth);
+int kperf_ucallstack_pend(struct kperf_context *, uint32_t depth,
+    unsigned int actionid);
 void kperf_ucallstack_log(struct kp_ucallstack *cs);
 
 #endif /* !defined(KPERF_CALLSTACK_H) */

@@ -149,6 +149,7 @@ typedef struct cfil_crypto_data {
 #define CFM_OP_DATA_IN 4                /* data being received */
 #define CFM_OP_DISCONNECT_OUT 5         /* no more outgoing data */
 #define CFM_OP_DISCONNECT_IN 6          /* no more incoming data */
+#define CFM_OP_STATS 7                  /* periodic stats report(s) */
 
 /*
  * Operations associated with action from filter to kernel
@@ -212,6 +213,11 @@ struct cfil_msg_sock_attached {
 };
 
 /*
+ * CFIL data flags
+ */
+#define CFD_DATA_FLAG_IP_HEADER         0x00000001          /* Data includes IP header */
+
+/*
  * struct cfil_msg_data_event
  *
  * Event for the content fiter to act on a span of data
@@ -234,6 +240,7 @@ struct cfil_msg_data_event {
 	uint64_t                cfd_end_offset;
 	cfil_crypto_signature   cfd_signature;
 	uint32_t                cfd_signature_length;
+	uint32_t                cfd_flags;
 	/* Actual content data immediatly follows */
 };
 
@@ -263,6 +270,30 @@ struct cfil_msg_sock_closed {
 } __attribute__((aligned(8)));
 
 /*
+ * struct cfil_msg_stats_report
+ *
+ * Statistics report for flow(s).
+ *
+ * Action: No reply is expected.
+ *
+ * Valid Types: CFM_TYPE_EVENT
+ *
+ * Valid Op: CFM_OP_STATS
+ */
+struct cfil_msg_sock_stats {
+	cfil_sock_id_t          cfs_sock_id;
+	uint64_t                cfs_byte_inbound_count;
+	uint64_t                cfs_byte_outbound_count;
+	union sockaddr_in_4_6   cfs_laddr;
+} __attribute__((aligned(8)));
+
+struct cfil_msg_stats_report {
+	struct cfil_msg_hdr        cfr_msghdr;
+	uint32_t                   cfr_count;
+	struct cfil_msg_sock_stats cfr_stats[];
+} __attribute__((aligned(8)));
+
+/*
  * struct cfil_msg_action
  *
  * Valid Type: CFM_TYPE_ACTION
@@ -285,6 +316,7 @@ struct cfil_msg_action {
 	uint64_t                cfa_in_peek_offset;
 	uint64_t                cfa_out_pass_offset;
 	uint64_t                cfa_out_peek_offset;
+	uint32_t                cfa_stats_frequency; // Statistics frequency in milliseconds
 };
 
 /*
@@ -409,6 +441,10 @@ struct cfil_stats {
 	int32_t cfs_data_event_flow_control;
 	int32_t cfs_data_event_fail;
 
+	int32_t cfs_stats_event_ok;
+	int32_t cfs_stats_event_flow_control;
+	int32_t cfs_stats_event_fail;
+
 	int32_t cfs_disconnect_in_event_ok;
 	int32_t cfs_disconnect_out_event_ok;
 	int32_t cfs_disconnect_event_flow_control;
@@ -494,9 +530,12 @@ extern int cfil_sock_data_space(struct sockbuf *sb);
 extern void cfil_sock_buf_update(struct sockbuf *sb);
 
 extern cfil_sock_id_t cfil_sock_id_from_socket(struct socket *so);
+extern cfil_sock_id_t cfil_sock_id_from_datagram_socket(struct socket *so, struct sockaddr *local, struct sockaddr *remote);
 
-extern struct m_tag *cfil_udp_get_socket_state(struct mbuf *m, uint32_t *state_change_cnt,
-    short *options, struct sockaddr **faddr);
+extern struct m_tag *cfil_dgram_get_socket_state(struct mbuf *m, uint32_t *state_change_cnt,
+    uint32_t *options, struct sockaddr **faddr, int *inp_flags);
+extern boolean_t cfil_dgram_peek_socket_state(struct mbuf *m, int *inp_flags);
+
 #endif /* BSD_KERNEL_PRIVATE */
 
 __END_DECLS

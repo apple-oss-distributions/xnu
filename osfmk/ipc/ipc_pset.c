@@ -77,6 +77,7 @@
 
 #include <vm/vm_map.h>
 #include <libkern/section_keywords.h>
+#include <pthread/priority_private.h>
 
 /*
  *	Routine:	ipc_pset_alloc
@@ -110,7 +111,7 @@ ipc_pset_alloc(
 	}
 	/* pset and space are locked */
 
-	ipc_mqueue_init(&pset->ips_messages, TRUE /* set */);
+	ipc_mqueue_init(&pset->ips_messages, IPC_MQUEUE_KIND_SET);
 	is_write_unlock(space);
 
 	*namep = name;
@@ -149,7 +150,7 @@ ipc_pset_alloc_name(
 	}
 	/* pset is locked */
 
-	ipc_mqueue_init(&pset->ips_messages, TRUE /* set */);
+	ipc_mqueue_init(&pset->ips_messages, IPC_MQUEUE_KIND_SET);
 
 	*psetp = pset;
 	return KERN_SUCCESS;
@@ -186,7 +187,7 @@ ipc_pset_alloc_special(
 	pset->ips_references = 1;
 	pset->ips_object.io_bits = io_makebits(TRUE, IOT_PORT_SET, 0);
 
-	ipc_mqueue_init(&pset->ips_messages, TRUE /* set */);
+	ipc_mqueue_init(&pset->ips_messages, IPC_MQUEUE_KIND_SET);
 
 	return pset;
 }
@@ -414,8 +415,7 @@ static int
 filt_machport_adjust_qos(struct knote *kn, ipc_kmsg_t first)
 {
 	if (kn->kn_sfflags & MACH_RCV_MSG) {
-		int qos = _pthread_priority_thread_qos(first->ikm_qos_override);
-		return FILTER_ADJUST_EVENT_QOS(qos);
+		return FILTER_ADJUST_EVENT_QOS(first->ikm_qos_override);
 	}
 	return 0;
 }
@@ -1206,8 +1206,8 @@ filt_machportprocess(struct knote *kn, struct kevent_qos_s *kev)
 	 * QoS values in the continuation save area on successful receive.
 	 */
 	if (kev->fflags == MACH_MSG_SUCCESS) {
-		kev->ext[2] = ((uint64_t)self->ith_qos << 32) |
-		    (uint64_t)self->ith_qos_override;
+		kev->ext[2] = ((uint64_t)self->ith_ppriority << 32) |
+		    _pthread_priority_make_from_thread_qos(self->ith_qos_override, 0, 0);
 	}
 
 	return FILTER_ACTIVE;

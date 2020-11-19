@@ -88,6 +88,10 @@
 /* KEV_NETPOLICY_SUBCLASS event codes */
 #define KEV_NETPOLICY_IFDENIED  1       /* denied access to interface */
 #define KEV_NETPOLICY_IFFAILED  2       /* failed to bring up interface */
+#define KEV_NETPOLICY_NETDENIED 3       /* denied access to some network */
+
+#define NETPOLICY_NETWORKTYPE_LOCAL     1   /* local network */
+
 
 #define KEV_SOCKET_SUBCLASS     4       /* Socket subclass */
 /* KEV_SOCKET_SUBCLASS event codes */
@@ -141,6 +145,10 @@
 #define KEV_MPTCP_SUBCLASS      12      /* Global MPTCP events subclass */
 /* KEV_MPTCP_SUBCLASS event codes */
 #define KEV_MPTCP_CELLUSE       1
+
+#define KEV_IPSEC_SUBCLASS      13      /* IPsec event subclass */
+#define KEV_IPSEC_WAKE_PACKET   1       /* IPsec wake packet available, the
+	                                 * first packet processed after a wake event */
 
 #endif /* PRIVATE */
 #endif /* (!_POSIX_C_SOURCE || _DARWIN_C_SOURCE) */

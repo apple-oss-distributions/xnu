@@ -31,7 +31,6 @@
 #include <mach_ldebug.h>
 
 #include <kern/locks.h>
-#include <kern/kalloc.h>
 #include <kern/misc_protos.h>
 #include <kern/thread.h>
 #include <kern/processor.h>
@@ -71,6 +70,7 @@
  */
 
 #if DEVELOPMENT || DEBUG
+TUNABLE(bool, LckDisablePreemptCheck, "-disable_mtx_chk", false);
 
 /*
  * If one or more simplelocks are currently held by a thread,
@@ -247,6 +247,10 @@ lck_mtx_lock_spin_always(
 	 * Indirect mutexes will fall through the slow path as
 	 * well as destroyed mutexes.
 	 */
+
+	if (state & (LCK_MTX_ILOCKED_MSK | LCK_MTX_SPIN_MSK)) {
+		return lck_mtx_lock_spin_slow(lock);
+	}
 
 	/* Note LCK_MTX_SPIN_MSK is set only if LCK_MTX_ILOCKED_MSK is set */
 	prev = state & ~(LCK_MTX_ILOCKED_MSK | LCK_MTX_MLOCKED_MSK);

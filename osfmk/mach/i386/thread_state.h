@@ -32,12 +32,8 @@
 #ifndef _MACH_I386_THREAD_STATE_H_
 #define _MACH_I386_THREAD_STATE_H_
 
-/* Size of maximum exported thread state in words */
-#if !defined(RC_HIDE_XNU_J137)
+/* Size of maximum exported thread state in 32-bit words */
 #define I386_THREAD_STATE_MAX   (614)    /* Size of biggest state possible */
-#else
-#define I386_THREAD_STATE_MAX   (224)    /* Size of biggest state possible */
-#endif /* !defined(RC_HIDE_XNU_J137) */
 
 #if defined (__i386__) || defined(__x86_64__)
 #define THREAD_STATE_MAX        I386_THREAD_STATE_MAX

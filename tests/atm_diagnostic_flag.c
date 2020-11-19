@@ -52,9 +52,8 @@ _reset_atm_diagnostic_flag(void)
 	}
 }
 
-T_DECL(toggle_atm_diagnostic_flag,
-    "change the atm_diagnostic_flag, which should use the commpage",
-    T_META_ASROOT(true))
+static void
+_toggle_atm_diagnostic_flag(void)
 {
 	T_ATEND(_reset_atm_diagnostic_flag);
 	uint32_t f = _save_atm_diagnostic_flag();
@@ -65,18 +64,21 @@ T_DECL(toggle_atm_diagnostic_flag,
 		    "Ignoring host_set_atm_diagnostic_flag functionality. "
 		    "Bailing gracefully.");
 	}
-	T_EXPECT_MACH_SUCCESS(kr, "Set atm_diagnostic_flag");
+	T_EXPECT_MACH_ERROR(KERN_NO_ACCESS, kr,
+	    "Deny change to atm_diagnostic_flag");
 }
 
-T_DECL(unprivileged_atm_diagnostic_flag,
-    "expect to fail to set the atm_diagnostic_flag",
+T_DECL(atm_diagnostic_flag_unentitled_privileged,
+    "expect to fail to set the atm_diagnostic_flag (unentitled, privileged)",
+    T_META_ASROOT(true))
+{
+	_toggle_atm_diagnostic_flag();
+}
+
+T_DECL(atm_diagnostic_flag_unentitled_unprivileged,
+    "expect to fail to set the atm_diagnostic_flag (unentitled, unprivileged)",
     T_META_ASROOT(false))
 {
 	drop_priv();
-	T_ATEND(_reset_atm_diagnostic_flag);
-	uint32_t f = _save_atm_diagnostic_flag();
-	f ^= LIBTRACE_PRIVATE_DATA;
-	kern_return_t kr = _mutate_atm_diagnostic_flag(f);
-	T_EXPECT_MACH_ERROR(KERN_INVALID_ARGUMENT, kr,
-	    "Deny change to atm_diagnostic_flag");
+	_toggle_atm_diagnostic_flag();
 }

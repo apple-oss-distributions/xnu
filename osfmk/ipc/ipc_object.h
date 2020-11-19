@@ -131,8 +131,9 @@ struct ipc_object_header {
  *	definitions in ipc_port.h.
  */
 #define IO_BITS_PORT_INFO       0x0000f000      /* stupid port tricks */
-#define IO_BITS_KOTYPE          0x000007ff      /* used by the object */
+#define IO_BITS_KOTYPE          0x000003ff      /* used by the object */
 #define IO_BITS_KOBJECT         0x00000800      /* port belongs to a kobject */
+#define IO_BITS_KOLABEL         0x00000400      /* The kobject has a label */
 #define IO_BITS_OTYPE           0x7fff0000      /* determines a zone */
 #define IO_BITS_ACTIVE          0x80000000      /* is object alive? */
 
@@ -141,7 +142,7 @@ struct ipc_object_header {
 #define io_otype(io)            (((io)->io_bits & IO_BITS_OTYPE) >> 16)
 #define io_kotype(io)           ((io)->io_bits & IO_BITS_KOTYPE)
 #define io_is_kobject(io)       (((io)->io_bits & IO_BITS_KOBJECT) != IKOT_NONE)
-
+#define io_is_kolabeled(io)     (((io)->io_bits & IO_BITS_KOLABEL) != 0)
 #define io_makebits(active, otype, kotype)      \
 	(((active) ? IO_BITS_ACTIVE : 0) | ((otype) << 16) | (kotype))
 
@@ -197,7 +198,7 @@ extern boolean_t io_lock_try(
  * and zfree modifies that to point to the next free zone element.
  */
 #define IO_MAX_REFERENCES                                               \
-	(unsigned)(~0 ^ (1U << (sizeof(int)*BYTE_SIZE - 1)))
+	(unsigned)(~0U ^ (1U << (sizeof(int)*BYTE_SIZE - 1)))
 
 static inline void
 io_reference(ipc_object_t io)
@@ -332,7 +333,7 @@ extern kern_return_t ipc_object_copyin(
 	ipc_object_t            *objectp,
 	mach_port_context_t     context,
 	mach_msg_guard_flags_t  *guard_flags,
-	uint32_t                kmsg_flags);
+	uint16_t                kmsg_flags);
 
 /* Copyin a naked capability from the kernel */
 extern void ipc_object_copyin_from_kernel(

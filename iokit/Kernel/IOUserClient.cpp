@@ -28,6 +28,7 @@
 
 
 #include <libkern/c++/OSKext.h>
+#include <libkern/c++/OSSharedPtr.h>
 #include <IOKit/IOKitServer.h>
 #include <IOKit/IOKitKeysPrivate.h>
 #include <IOKit/IOUserClient.h>
@@ -173,35 +174,37 @@ public:
 };
 
 #define super OSObject
-OSDefineMetaClassAndStructors(IOMachPort, OSObject)
+OSDefineMetaClassAndStructorsWithZone(IOMachPort, OSObject, ZC_ZFREE_CLEARMEM)
 
 static IOLock *         gIOObjectPortLock;
 IOLock *                gIOUserServerLock;
+
+SECURITY_READ_ONLY_LATE(const struct io_filter_callbacks *) gIOUCFilterCallbacks;
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
 SLIST_HEAD(IOMachPortHashList, IOMachPort);
 
-#if CONFIG_EMBEDDED
-#define PORT_HASH_SIZE 256
-#else
+#if defined(XNU_TARGET_OS_OSX)
 #define PORT_HASH_SIZE 4096
-#endif /* CONFIG_EMBEDDED */
+#else /* defined(!XNU_TARGET_OS_OSX) */
+#define PORT_HASH_SIZE 256
+#endif /* !defined(!XNU_TARGET_OS_OSX) */
 
-IOMachPortHashList ports[PORT_HASH_SIZE];
+IOMachPortHashList gIOMachPortHash[PORT_HASH_SIZE];
 
 void
 IOMachPortInitialize(void)
 {
 	for (size_t i = 0; i < PORT_HASH_SIZE; i++) {
-		SLIST_INIT(&ports[i]);
+		SLIST_INIT(&gIOMachPortHash[i]);
 	}
 }
 
 IOMachPortHashList*
 IOMachPort::bucketForObject(OSObject *obj, ipc_kobject_type_t type )
 {
-	return &ports[os_hash_kernel_pointer(obj) % PORT_HASH_SIZE];
+	return &gIOMachPortHash[os_hash_kernel_pointer(obj) % PORT_HASH_SIZE];
 }
 
 IOMachPort*
@@ -409,6 +412,23 @@ IOMachPort::free( void )
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
+static bool
+IOTaskRegistryCompatibility(task_t task)
+{
+	return false;
+}
+
+static void
+IOTaskRegistryCompatibilityMatching(task_t task, OSDictionary * matching)
+{
+	if (!IOTaskRegistryCompatibility(task)) {
+		return;
+	}
+	matching->setObject(gIOCompatibilityMatchKey, kOSBooleanTrue);
+}
+
+/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+
 class IOUserIterator : public OSIterator
 {
 	OSDeclareDefaultStructors(IOUserIterator);
@@ -548,7 +568,35 @@ extern "C" {
 // functions called from osfmk/device/iokit_rpc.c
 
 void
-iokit_add_reference( io_object_t obj, ipc_kobject_type_t type )
+iokit_port_object_description(io_object_t obj, kobject_description_t desc)
+{
+	IORegistryEntry    * regEntry;
+	IOUserNotification * __unused noti;
+	_IOServiceNotifier * __unused serviceNoti;
+	OSSerialize        * __unused s;
+
+	if ((regEntry = OSDynamicCast(IORegistryEntry, obj))) {
+		snprintf(desc, KOBJECT_DESCRIPTION_LENGTH, "%s(0x%qx)", obj->getMetaClass()->getClassName(), regEntry->getRegistryEntryID());
+#if DEVELOPMENT || DEBUG
+	} else if ((noti = OSDynamicCast(IOUserNotification, obj))
+	    && ((serviceNoti = OSDynamicCast(_IOServiceNotifier, noti->holdNotify)))) {
+		s = OSSerialize::withCapacity((unsigned int) page_size);
+		if (s && serviceNoti->matching->serialize(s)) {
+			snprintf(desc, KOBJECT_DESCRIPTION_LENGTH, "%s(%s)", obj->getMetaClass()->getClassName(), s->text());
+		}
+		OSSafeReleaseNULL(s);
+#endif /* DEVELOPMENT || DEBUG */
+	} else {
+		snprintf(desc, KOBJECT_DESCRIPTION_LENGTH, "%s", obj->getMetaClass()->getClassName());
+	}
+}
+
+// FIXME: Implementation of these functions are hidden from the static analyzer.
+// As for now, the analyzer doesn't consistently support wrapper functions
+// for retain and release.
+#ifndef __clang_analyzer__
+void
+iokit_add_reference( io_object_t obj, natural_t type )
 {
 	IOUserClient * uc;
 
@@ -571,6 +619,7 @@ iokit_remove_reference( io_object_t obj )
 		obj->release();
 	}
 }
+#endif // __clang_analyzer__
 
 void
 iokit_remove_connect_reference( io_object_t obj )
@@ -652,24 +701,33 @@ iokit_client_died( io_object_t obj, ipc_port_t /* port */,
 	IOUserClient *      client;
 	IOMemoryMap *       map;
 	IOUserNotification * notify;
+	IOUserServerCheckInToken * token;
 
 	if (!IOMachPort::noMoreSendersForObject( obj, type, mscount )) {
 		return kIOReturnNotReady;
 	}
 
-	if (IKOT_IOKIT_CONNECT == type) {
+	switch (type) {
+	case IKOT_IOKIT_CONNECT:
 		if ((client = OSDynamicCast( IOUserClient, obj ))) {
 			IOStatisticsClientCall();
-			IOLockLock(client->lock);
+			IORWLockWrite(client->lock);
 			client->clientDied();
-			IOLockUnlock(client->lock);
+			IORWLockUnlock(client->lock);
 		}
-	} else if (IKOT_IOKIT_OBJECT == type) {
+		break;
+	case IKOT_IOKIT_OBJECT:
 		if ((map = OSDynamicCast( IOMemoryMap, obj ))) {
 			map->taskDied();
 		} else if ((notify = OSDynamicCast( IOUserNotification, obj ))) {
 			notify->setNotification( NULL );
 		}
+		break;
+	case IKOT_IOKIT_IDENT:
+		if ((token = OSDynamicCast( IOUserServerCheckInToken, obj ))) {
+			IOUserServerCheckInToken::notifyNoSenders( token );
+		}
+		break;
 	}
 
 	return kIOReturnSuccess;
@@ -690,7 +748,7 @@ class IOServiceUserNotification : public IOUserNotification
 	enum { kMaxOutstanding = 1024 };
 
 	PingMsg     *       pingMsg;
-	vm_size_t           msgSize;
+	mach_msg_size_t     msgSize;
 	OSArray     *       newSet;
 	bool                armed;
 	bool                ipcLogged;
@@ -723,7 +781,7 @@ class IOServiceMessageUserNotification : public IOUserNotification
 	};
 
 	PingMsg *           pingMsg;
-	vm_size_t           msgSize;
+	mach_msg_size_t     msgSize;
 	uint8_t             clientIs64;
 	int                 owningPID;
 	bool                ipcLogged;
@@ -732,7 +790,7 @@ public:
 
 	virtual bool init( mach_port_t port, natural_t type,
 	    void * reference, vm_size_t referenceSize,
-	    vm_size_t extraSize,
+	    mach_msg_size_t extraSize,
 	    bool clientIs64 );
 
 	virtual void free() APPLE_KEXT_OVERRIDE;
@@ -828,7 +886,8 @@ IOServiceUserNotification::init( mach_port_t port, natural_t type,
 		return false;
 	}
 
-	msgSize = sizeof(PingMsg) - sizeof(OSAsyncReference64) + referenceSize;
+	msgSize = (mach_msg_size_t) (sizeof(PingMsg) - sizeof(OSAsyncReference64) + referenceSize);
+
 	pingMsg = (PingMsg *) IOMalloc( msgSize);
 	if (!pingMsg) {
 		return false;
@@ -976,7 +1035,7 @@ OSDefineMetaClassAndStructors(IOServiceMessageUserNotification, IOUserNotificati
 
 bool
 IOServiceMessageUserNotification::init( mach_port_t port, natural_t type,
-    void * reference, vm_size_t referenceSize, vm_size_t extraSize,
+    void * reference, vm_size_t referenceSize, mach_msg_size_t extraSize,
     bool client64 )
 {
 	if (!super::init()) {
@@ -992,7 +1051,7 @@ IOServiceMessageUserNotification::init( mach_port_t port, natural_t type,
 	owningPID = proc_selfpid();
 
 	extraSize += sizeof(IOServiceInterestContent64);
-	msgSize = sizeof(PingMsg) - sizeof(OSAsyncReference64) + referenceSize;
+	msgSize = (mach_msg_size_t) (sizeof(PingMsg) - sizeof(OSAsyncReference64) + referenceSize);
 	pingMsg = (PingMsg *) IOMalloc( msgSize);
 	if (!pingMsg) {
 		return false;
@@ -1067,7 +1126,7 @@ IOServiceMessageUserNotification::handler( void * ref,
 	void *                       allocMsg;
 	kern_return_t                kr;
 	vm_size_t                    argSize;
-	vm_size_t                    thisMsgSize;
+	mach_msg_size_t              thisMsgSize;
 	ipc_port_t                   thisPort, providerPort;
 	struct PingMsg *             thisMsg;
 	IOServiceInterestContent64 * data;
@@ -1097,10 +1156,9 @@ IOServiceMessageUserNotification::handler( void * ref,
 	type |= ((argSize & kIOKitNoticationMsgSizeMask) << kIOKitNoticationTypeSizeAdjShift);
 	argSize = (argSize + kIOKitNoticationMsgSizeMask) & ~kIOKitNoticationMsgSizeMask;
 
-	thisMsgSize = msgSize
-	    + sizeof(IOServiceInterestContent64)
-	    - sizeof(data->messageArgument)
-	    + argSize;
+	if (os_add3_overflow(msgSize, sizeof(IOServiceInterestContent64) - sizeof(data->messageArgument), argSize, &thisMsgSize)) {
+		return kIOReturnBadArgument;
+	}
 
 	if (thisMsgSize > sizeof(stackMsg)) {
 		allocMsg = IOMalloc(thisMsgSize);
@@ -1187,17 +1245,32 @@ IOUserClient::initialize( void )
 	gIOUserClientOwnersLock = IOLockAlloc();
 	gIOUserServerLock       = IOLockAlloc();
 	assert(gIOObjectPortLock && gIOUserClientOwnersLock);
+
+#if IOTRACKING
+	IOTrackingQueueCollectUser(IOUserIterator::gMetaClass.getTracking());
+	IOTrackingQueueCollectUser(IOServiceMessageUserNotification::gMetaClass.getTracking());
+	IOTrackingQueueCollectUser(IOServiceUserNotification::gMetaClass.getTracking());
+	IOTrackingQueueCollectUser(IOUserClient::gMetaClass.getTracking());
+	IOTrackingQueueCollectUser(IOMachPort::gMetaClass.getTracking());
+#endif /* IOTRACKING */
 }
 
 void
+#if __LP64__
+__attribute__((__noreturn__))
+#endif
 IOUserClient::setAsyncReference(OSAsyncReference asyncRef,
     mach_port_t wakePort,
     void *callback, void *refcon)
 {
+#if __LP64__
+	panic("setAsyncReference not valid for 64b");
+#else
 	asyncRef[kIOAsyncReservedIndex]      = ((uintptr_t) wakePort)
 	    | (kIOUCAsync0Flags & asyncRef[kIOAsyncReservedIndex]);
 	asyncRef[kIOAsyncCalloutFuncIndex]   = (uintptr_t) callback;
 	asyncRef[kIOAsyncCalloutRefconIndex] = (uintptr_t) refcon;
+#endif
 }
 
 void
@@ -1382,24 +1455,20 @@ IOUserClient::clientHasPrivilege( void * securityToken,
 
 	return kr;
 }
+#define MAX_ENTITLEMENTS_LEN    (128 * 1024)
 
 OSDictionary *
 IOUserClient::copyClientEntitlements(task_t task)
 {
-#define MAX_ENTITLEMENTS_LEN    (128 * 1024)
-
 	proc_t p = NULL;
 	pid_t pid = 0;
 	size_t len = 0;
 	void *entitlements_blob = NULL;
-	char *entitlements_data = NULL;
-	OSObject *entitlements_obj = NULL;
 	OSDictionary *entitlements = NULL;
-	OSString *errorString = NULL;
 
 	p = (proc_t)get_bsdtask_info(task);
 	if (p == NULL) {
-		goto fail;
+		return NULL;
 	}
 	pid = proc_pid(p);
 
@@ -1410,8 +1479,18 @@ IOUserClient::copyClientEntitlements(task_t task)
 	}
 
 	if (cs_entitlements_blob_get(p, &entitlements_blob, &len) != 0) {
-		goto fail;
+		return NULL;
 	}
+	return IOUserClient::copyEntitlementsFromBlob(entitlements_blob, len);
+}
+
+OSDictionary *
+IOUserClient::copyEntitlementsFromBlob(void *entitlements_blob, size_t len)
+{
+	char *entitlements_data = NULL;
+	OSObject *entitlements_obj = NULL;
+	OSString *errorString = NULL;
+	OSDictionary *entitlements = NULL;
 
 	if (len <= offsetof(CS_GenericBlob, data)) {
 		goto fail;
@@ -1423,8 +1502,8 @@ IOUserClient::copyClientEntitlements(task_t task)
 	 */
 	len -= offsetof(CS_GenericBlob, data);
 	if (len > MAX_ENTITLEMENTS_LEN) {
-		IOLog("failed to parse entitlements for %s[%u]: %lu bytes of entitlements exceeds maximum of %u\n",
-		    proc_best_name(p), pid, len, MAX_ENTITLEMENTS_LEN);
+		IOLog("failed to parse entitlements: %lu bytes of entitlements exceeds maximum of %u\n",
+		    len, MAX_ENTITLEMENTS_LEN);
 		goto fail;
 	}
 
@@ -1442,8 +1521,7 @@ IOUserClient::copyClientEntitlements(task_t task)
 
 	entitlements_obj = OSUnserializeXML(entitlements_data, len + 1, &errorString);
 	if (errorString != NULL) {
-		IOLog("failed to parse entitlements for %s[%u]: %s\n",
-		    proc_best_name(p), pid, errorString->getCStringNoCopy());
+		IOLog("failed to parse entitlements: %s\n", errorString->getCStringNoCopy());
 		goto fail;
 	}
 	if (entitlements_obj == NULL) {
@@ -1469,6 +1547,18 @@ fail:
 	return entitlements;
 }
 
+OSDictionary *
+IOUserClient::copyClientEntitlementsVnode(vnode_t vnode, off_t offset)
+{
+	size_t len = 0;
+	void *entitlements_blob = NULL;
+
+	if (cs_entitlements_blob_get_vnode(vnode, offset, &entitlements_blob, &len) != 0) {
+		return NULL;
+	}
+	return IOUserClient::copyEntitlementsFromBlob(entitlements_blob, len);
+}
+
 OSObject *
 IOUserClient::copyClientEntitlement( task_t task,
     const char * entitlement )
@@ -1477,6 +1567,30 @@ IOUserClient::copyClientEntitlement( task_t task,
 	OSObject *value;
 
 	entitlements = copyClientEntitlements(task);
+	if (entitlements == NULL) {
+		return NULL;
+	}
+
+	/* Fetch the entitlement value from the dictionary. */
+	value = entitlements->getObject(entitlement);
+	if (value != NULL) {
+		value->retain();
+	}
+
+	entitlements->release();
+	return value;
+}
+
+OSObject *
+IOUserClient::copyClientEntitlementVnode(
+	struct vnode *vnode,
+	off_t offset,
+	const char *entitlement)
+{
+	OSDictionary *entitlements;
+	OSObject *value;
+
+	entitlements = copyClientEntitlementsVnode(vnode, offset);
 	if (entitlements == NULL) {
 		return NULL;
 	}
@@ -1541,7 +1655,7 @@ bool
 IOUserClient::reserve()
 {
 	if (!reserved) {
-		reserved = IONew(ExpansionData, 1);
+		reserved = IONewZero(ExpansionData, 1);
 		if (!reserved) {
 			return false;
 		}
@@ -1728,6 +1842,44 @@ iokit_task_terminate(task_t task)
 	return KERN_SUCCESS;
 }
 
+struct IOUCFilterPolicy {
+	task_t             task;
+	io_filter_policy_t filterPolicy;
+	IOUCFilterPolicy * next;
+};
+
+io_filter_policy_t
+IOUserClient::filterForTask(task_t task, io_filter_policy_t addFilterPolicy)
+{
+	IOUCFilterPolicy * elem;
+	io_filter_policy_t filterPolicy;
+
+	filterPolicy = 0;
+	IOLockLock(filterLock);
+
+	for (elem = reserved->filterPolicies; elem && (elem->task != task); elem = elem->next) {
+	}
+
+	if (elem) {
+		if (addFilterPolicy) {
+			assert(addFilterPolicy == elem->filterPolicy);
+		}
+		filterPolicy = elem->filterPolicy;
+	} else if (addFilterPolicy) {
+		elem = IONewZero(IOUCFilterPolicy, 1);
+		if (elem) {
+			elem->task               = task;
+			elem->filterPolicy       = addFilterPolicy;
+			elem->next               = reserved->filterPolicies;
+			reserved->filterPolicies = elem;
+			filterPolicy = addFilterPolicy;
+		}
+	}
+
+	IOLockUnlock(filterLock);
+	return filterPolicy;
+}
+
 void
 IOUserClient::free()
 {
@@ -1735,7 +1887,10 @@ IOUserClient::free()
 		mappings->release();
 	}
 	if (lock) {
-		IOLockFree(lock);
+		IORWLockFree(lock);
+	}
+	if (filterLock) {
+		IOLockFree(filterLock);
 	}
 
 	IOStatisticsUnregisterCounter();
@@ -1744,6 +1899,15 @@ IOUserClient::free()
 	assert(!owners.prev);
 
 	if (reserved) {
+		IOUCFilterPolicy * elem;
+		IOUCFilterPolicy * nextElem;
+		for (elem = reserved->filterPolicies; elem; elem = nextElem) {
+			nextElem = elem->next;
+			if (elem->filterPolicy && gIOUCFilterCallbacks->io_filter_release) {
+				gIOUCFilterCallbacks->io_filter_release(elem->filterPolicy);
+			}
+			IODelete(elem, IOUCFilterPolicy, 1);
+		}
 		IODelete(reserved, ExpansionData, 1);
 	}
 
@@ -1811,6 +1975,17 @@ IOUserClient::clientMemoryForType( UInt32 type,
     IOMemoryDescriptor ** memory )
 {
 	return kIOReturnUnsupported;
+}
+
+IOReturn
+IOUserClient::clientMemoryForType( UInt32 type,
+    IOOptionBits * options,
+    OSSharedPtr<IOMemoryDescriptor>& memory )
+{
+	IOMemoryDescriptor* memoryRaw = nullptr;
+	IOReturn result = clientMemoryForType(type, options, &memoryRaw);
+	memory.reset(memoryRaw, OSNoRetain);
+	return result;
 }
 
 #if !__LP64__
@@ -1897,6 +2072,16 @@ IOUserClient::copyObjectForPortNameInTask(task_t task, mach_port_name_t port_nam
 }
 
 IOReturn
+IOUserClient::copyObjectForPortNameInTask(task_t task, mach_port_name_t port_name,
+    OSSharedPtr<OSObject>& obj)
+{
+	OSObject* objRaw = NULL;
+	IOReturn result = copyObjectForPortNameInTask(task, port_name, &objRaw);
+	obj.reset(objRaw, OSNoRetain);
+	return result;
+}
+
+IOReturn
 IOUserClient::adjustPortNameReferencesInTask(task_t task, mach_port_name_t port_name, mach_port_delta_t delta)
 {
 	return iokit_mod_send_right(task, port_name, delta);
@@ -1939,6 +2124,16 @@ getTargetAndMethodForIndex(IOService **targetP, UInt32 index)
 	return method;
 }
 
+IOExternalMethod *
+IOUserClient::
+getTargetAndMethodForIndex(OSSharedPtr<IOService>& targetP, UInt32 index)
+{
+	IOService* targetPRaw = NULL;
+	IOExternalMethod* result = getTargetAndMethodForIndex(&targetPRaw, index);
+	targetP.reset(targetPRaw, OSRetain);
+	return result;
+}
+
 IOExternalAsyncMethod *
 IOUserClient::
 getAsyncTargetAndMethodForIndex(IOService ** targetP, UInt32 index)
@@ -1950,6 +2145,16 @@ getAsyncTargetAndMethodForIndex(IOService ** targetP, UInt32 index)
 	}
 
 	return method;
+}
+
+IOExternalAsyncMethod *
+IOUserClient::
+getAsyncTargetAndMethodForIndex(OSSharedPtr<IOService>& targetP, UInt32 index)
+{
+	IOService* targetPRaw = NULL;
+	IOExternalAsyncMethod* result = getAsyncTargetAndMethodForIndex(&targetPRaw, index);
+	targetP.reset(targetPRaw, OSRetain);
+	return result;
 }
 
 IOExternalTrap *
@@ -2072,7 +2277,8 @@ IOUserClient::_sendAsyncResult64(OSAsyncReference64 reference,
 		replyMsg.m.msg64.notifyHdr.size = sizeof(IOAsyncCompletionContent)
 		    + numArgs * sizeof(io_user_reference_t);
 		replyMsg.m.msg64.notifyHdr.type = kIOAsyncCompletionNotificationType;
-		bcopy(reference, replyMsg.m.msg64.notifyHdr.reference, sizeof(OSAsyncReference64));
+		/* Copy reference except for reference[0], which is left as 0 from the earlier bzero */
+		bcopy(&reference[1], &replyMsg.m.msg64.notifyHdr.reference[1], sizeof(OSAsyncReference64) - sizeof(reference[0]));
 
 		replyMsg.m.msg64.asyncContent.result = result;
 		if (numArgs) {
@@ -2089,7 +2295,8 @@ IOUserClient::_sendAsyncResult64(OSAsyncReference64 reference,
 		    + numArgs * sizeof(uint32_t);
 		replyMsg.m.msg32.notifyHdr.type = kIOAsyncCompletionNotificationType;
 
-		for (idx = 0; idx < kOSAsyncRefCount; idx++) {
+		/* Skip reference[0] which is left as 0 from the earlier bzero */
+		for (idx = 1; idx < kOSAsyncRefCount; idx++) {
 			replyMsg.m.msg32.notifyHdr.reference[idx] = REF32(reference[idx]);
 		}
 
@@ -2378,7 +2585,6 @@ is_io_iterator_is_valid(
 	return kIOReturnSuccess;
 }
 
-
 static kern_return_t
 internal_io_service_match_property_table(
 	io_service_t _service,
@@ -2393,9 +2599,12 @@ internal_io_service_match_property_table(
 	OSDictionary *      dict;
 
 	assert(matching_size);
+
+
 	obj = OSUnserializeXML(matching, matching_size);
 
 	if ((dict = OSDynamicCast( OSDictionary, obj))) {
+		IOTaskRegistryCompatibilityMatching(current_task(), dict);
 		*matches = service->passiveMatch( dict );
 		kr = kIOReturnSuccess;
 	} else {
@@ -2476,6 +2685,7 @@ internal_io_service_get_matching_services(
 	obj = OSUnserializeXML(matching, matching_size);
 
 	if ((dict = OSDynamicCast( OSDictionary, obj))) {
+		IOTaskRegistryCompatibilityMatching(current_task(), dict);
 		*existing = IOUserIterator::withIterator(IOService::getMatchingServices( dict ));
 		kr = kIOReturnSuccess;
 	} else {
@@ -2558,6 +2768,7 @@ internal_io_service_get_matching_service(
 	obj = OSUnserializeXML(matching, matching_size);
 
 	if ((dict = OSDynamicCast( OSDictionary, obj))) {
+		IOTaskRegistryCompatibilityMatching(current_task(), dict);
 		*service = IOService::copyMatchingService( dict );
 		kr = *service ? kIOReturnSuccess : kIOReturnNotFound;
 	} else {
@@ -2635,9 +2846,10 @@ internal_io_service_add_notification(
 	IOServiceUserNotification * userNotify = NULL;
 	IONotifier *                notify = NULL;
 	const OSSymbol *            sym;
+	OSObject *                  obj;
 	OSDictionary *              dict;
 	IOReturn                    err;
-	unsigned long int           userMsgType;
+	natural_t                   userMsgType;
 
 	if (master_port != master_device_port) {
 		return kIOReturnNotPrivileged;
@@ -2655,11 +2867,13 @@ internal_io_service_add_notification(
 		}
 
 		assert(matching_size);
-		dict = OSDynamicCast(OSDictionary, OSUnserializeXML(matching, matching_size));
+		obj = OSUnserializeXML(matching, matching_size);
+		dict = OSDynamicCast(OSDictionary, obj);
 		if (!dict) {
 			err = kIOReturnBadArgument;
 			continue;
 		}
+		IOTaskRegistryCompatibilityMatching(current_task(), dict);
 
 		if ((sym == gIOPublishNotification)
 		    || (sym == gIOFirstPublishNotification)) {
@@ -2705,8 +2919,8 @@ internal_io_service_add_notification(
 	if (sym) {
 		sym->release();
 	}
-	if (dict) {
-		dict->release();
+	if (obj) {
+		obj->release();
 	}
 
 	return err;
@@ -3014,11 +3228,16 @@ is_io_connect_get_notification_semaphore(
 	natural_t notification_type,
 	semaphore_t *semaphore )
 {
+	IOReturn ret;
 	CHECK( IOUserClient, connection, client );
 
 	IOStatisticsClientCall();
-	return client->getNotificationSemaphore((UInt32) notification_type,
-	           semaphore );
+	IORWLockWrite(client->lock);
+	ret = client->getNotificationSemaphore((UInt32) notification_type,
+	    semaphore );
+	IORWLockUnlock(client->lock);
+
+	return ret;
 }
 
 /* Routine io_registry_get_root_entry */
@@ -3122,6 +3341,20 @@ is_io_registry_entry_from_path(
 	}
 
 	entry = IORegistryEntry::fromPath( path );
+
+	if (!entry && IOTaskRegistryCompatibility(current_task())) {
+		OSDictionary * matching;
+		const OSObject * objects[2] = { kOSBooleanTrue, NULL };
+		const OSSymbol * keys[2]    = { gIOCompatibilityMatchKey, gIOPathMatchKey };
+
+		objects[1] = OSString::withCStringNoCopy(path);
+		matching = OSDictionary::withObjects(objects, keys, 2, 2);
+		if (matching) {
+			entry = IOService::copyMatchingService(matching);
+		}
+		OSSafeReleaseNULL(matching);
+		OSSafeReleaseNULL(objects[1]);
+	}
 
 	*registry_entry = entry;
 
@@ -3338,6 +3571,31 @@ is_io_registry_entry_get_registry_entry_id(
 	return kIOReturnSuccess;
 }
 
+
+static OSObject *
+IOCopyPropertyCompatible(IORegistryEntry * regEntry, const char * name)
+{
+	OSObject     * obj;
+	OSObject     * compatProps;
+	OSDictionary * props;
+
+	obj = regEntry->copyProperty(name);
+	if (!obj
+	    && IOTaskRegistryCompatibility(current_task())
+	    && (compatProps = regEntry->copyProperty(gIOCompatibilityPropertiesKey))) {
+		props = OSDynamicCast(OSDictionary, compatProps);
+		if (props) {
+			obj = props->getObject(name);
+			if (obj) {
+				obj->retain();
+			}
+		}
+		compatProps->release();
+	}
+
+	return obj;
+}
+
 /* Routine io_registry_entry_get_property */
 kern_return_t
 is_io_registry_entry_get_property_bytes(
@@ -3364,7 +3622,7 @@ is_io_registry_entry_get_property_bytes(
 	}
 #endif
 
-	obj = entry->copyProperty(property_name);
+	obj = IOCopyPropertyCompatible(entry, property_name);
 	if (!obj) {
 		return kIOReturnNoResources;
 	}
@@ -3421,7 +3679,7 @@ is_io_registry_entry_get_property(
 	mach_msg_type_number_t *propertiesCnt )
 {
 	kern_return_t       err;
-	vm_size_t           len;
+	unsigned int        len;
 	OSObject *          obj;
 
 	CHECK( IORegistryEntry, registry_entry, entry );
@@ -3432,7 +3690,7 @@ is_io_registry_entry_get_property(
 	}
 #endif
 
-	obj = entry->copyProperty(property_name);
+	obj = IOCopyPropertyCompatible(entry, property_name);
 	if (!obj) {
 		return kIOReturnNotFound;
 	}
@@ -3468,7 +3726,7 @@ is_io_registry_entry_get_property_recursively(
 	mach_msg_type_number_t *propertiesCnt )
 {
 	kern_return_t       err;
-	vm_size_t           len;
+	unsigned int        len;
 	OSObject *          obj;
 
 	CHECK( IORegistryEntry, registry_entry, entry );
@@ -3548,15 +3806,18 @@ GetPropertiesEditor(void                  * reference,
 
 #endif /* CONFIG_MACF */
 
-/* Routine io_registry_entry_get_properties */
+/* Routine io_registry_entry_get_properties_bin_buf */
 kern_return_t
-is_io_registry_entry_get_properties_bin(
+is_io_registry_entry_get_properties_bin_buf(
 	io_object_t registry_entry,
+	mach_vm_address_t buf,
+	mach_vm_size_t *bufsize,
 	io_buf_ptr_t *properties,
 	mach_msg_type_number_t *propertiesCnt)
 {
-	kern_return_t              err = kIOReturnSuccess;
-	vm_size_t                  len;
+	kern_return_t          err = kIOReturnSuccess;
+	unsigned int           len;
+	OSObject             * compatProperties;
 	OSSerialize          * s;
 	OSSerialize::Editor    editor = NULL;
 	void                 * editRef = NULL;
@@ -3579,32 +3840,75 @@ is_io_registry_entry_get_properties_bin(
 		return kIOReturnNoMemory;
 	}
 
-	if (!entry->serializeProperties(s)) {
+	if (IOTaskRegistryCompatibility(current_task())
+	    && (compatProperties = entry->copyProperty(gIOCompatibilityPropertiesKey))) {
+		OSDictionary * dict;
+
+		dict = entry->dictionaryWithProperties();
+		if (!dict) {
+			err = kIOReturnNoMemory;
+		} else {
+			dict->removeObject(gIOCompatibilityPropertiesKey);
+			dict->merge(OSDynamicCast(OSDictionary, compatProperties));
+			if (!dict->serialize(s)) {
+				err = kIOReturnUnsupported;
+			}
+			dict->release();
+		}
+		compatProperties->release();
+	} else if (!entry->serializeProperties(s)) {
 		err = kIOReturnUnsupported;
 	}
 
 	if (kIOReturnSuccess == err) {
 		len = s->getLength();
-		*propertiesCnt = len;
-		err = copyoutkdata(s->text(), len, properties);
+		if (buf && bufsize && len <= *bufsize) {
+			*bufsize = len;
+			*propertiesCnt = 0;
+			*properties = nullptr;
+			if (copyout(s->text(), buf, len)) {
+				err = kIOReturnVMError;
+			} else {
+				err = kIOReturnSuccess;
+			}
+		} else {
+			if (bufsize) {
+				*bufsize = 0;
+			}
+			*propertiesCnt = len;
+			err = copyoutkdata( s->text(), len, properties );
+		}
 	}
 	s->release();
 
 	return err;
 }
 
-/* Routine io_registry_entry_get_property_bin */
+/* Routine io_registry_entry_get_properties_bin */
 kern_return_t
-is_io_registry_entry_get_property_bin(
+is_io_registry_entry_get_properties_bin(
+	io_object_t registry_entry,
+	io_buf_ptr_t *properties,
+	mach_msg_type_number_t *propertiesCnt)
+{
+	return is_io_registry_entry_get_properties_bin_buf(registry_entry,
+	           0, NULL, properties, propertiesCnt);
+}
+
+/* Routine io_registry_entry_get_property_bin_buf */
+kern_return_t
+is_io_registry_entry_get_property_bin_buf(
 	io_object_t registry_entry,
 	io_name_t plane,
 	io_name_t property_name,
 	uint32_t options,
+	mach_vm_address_t buf,
+	mach_vm_size_t *bufsize,
 	io_buf_ptr_t *properties,
 	mach_msg_type_number_t *propertiesCnt )
 {
 	kern_return_t       err;
-	vm_size_t           len;
+	unsigned int        len;
 	OSObject *          obj;
 	const OSSymbol *    sym;
 
@@ -3625,10 +3929,24 @@ is_io_registry_entry_get_property_bin(
 		obj = entry->copyPropertyKeys();
 	} else {
 		if ((kIORegistryIterateRecursively & options) && plane[0]) {
-			obj = entry->copyProperty(property_name,
-			    IORegistryEntry::getPlane(plane), options );
+			if (!IOTaskRegistryCompatibility(current_task())) {
+				obj = entry->copyProperty(property_name,
+				    IORegistryEntry::getPlane(plane), options);
+			} else {
+				obj = IOCopyPropertyCompatible(entry, property_name);
+				if ((NULL == obj) && plane && (options & kIORegistryIterateRecursively)) {
+					IORegistryIterator * iter;
+					iter = IORegistryIterator::iterateOver(entry, IORegistryEntry::getPlane(plane), options);
+					if (iter) {
+						while ((NULL == obj) && (entry = iter->getNextObject())) {
+							obj = IOCopyPropertyCompatible(entry, property_name);
+						}
+						iter->release();
+					}
+				}
+			}
 		} else {
-			obj = entry->copyProperty(property_name);
+			obj = IOCopyPropertyCompatible(entry, property_name);
 		}
 		if (obj && gIORemoveOnReadProperties->containsObject(sym)) {
 			entry->removeProperty(sym);
@@ -3648,8 +3966,22 @@ is_io_registry_entry_get_property_bin(
 
 	if (obj->serialize( s )) {
 		len = s->getLength();
-		*propertiesCnt = len;
-		err = copyoutkdata( s->text(), len, properties );
+		if (buf && bufsize && len <= *bufsize) {
+			*bufsize = len;
+			*propertiesCnt = 0;
+			*properties = nullptr;
+			if (copyout(s->text(), buf, len)) {
+				err = kIOReturnVMError;
+			} else {
+				err = kIOReturnSuccess;
+			}
+		} else {
+			if (bufsize) {
+				*bufsize = 0;
+			}
+			*propertiesCnt = len;
+			err = copyoutkdata( s->text(), len, properties );
+		}
 	} else {
 		err = kIOReturnUnsupported;
 	}
@@ -3658,6 +3990,20 @@ is_io_registry_entry_get_property_bin(
 	obj->release();
 
 	return err;
+}
+
+/* Routine io_registry_entry_get_property_bin */
+kern_return_t
+is_io_registry_entry_get_property_bin(
+	io_object_t registry_entry,
+	io_name_t plane,
+	io_name_t property_name,
+	uint32_t options,
+	io_buf_ptr_t *properties,
+	mach_msg_type_number_t *propertiesCnt )
+{
+	return is_io_registry_entry_get_property_bin_buf(registry_entry, plane,
+	           property_name, options, 0, NULL, properties, propertiesCnt);
 }
 
 
@@ -3924,11 +4270,46 @@ is_io_service_open_extended(
 
 		if (res == kIOReturnSuccess) {
 			assert( OSDynamicCast(IOUserClient, client));
+			if (!client->reserved) {
+				if (!client->reserve()) {
+					client->clientClose();
+					OSSafeReleaseNULL(client);
+					res = kIOReturnNoMemory;
+				}
+			}
+		}
 
+		if (res == kIOReturnSuccess) {
 			client->sharedInstance = (NULL != client->getProperty(kIOUserClientSharedInstanceKey));
-			client->messageAppSuspended = (NULL != client->getProperty(kIOUserClientMessageAppSuspendedKey));
-			client->closed = false;
-			client->lock = IOLockAlloc();
+			if (client->sharedInstance) {
+				IOLockLock(gIOUserClientOwnersLock);
+			}
+			if (!client->lock) {
+				client->lock       = IORWLockAlloc();
+				client->filterLock = IOLockAlloc();
+
+				client->messageAppSuspended = (NULL != client->getProperty(kIOUserClientMessageAppSuspendedKey));
+				{
+					OSObject * obj;
+					extern const OSSymbol * gIOSurfaceIdentifier;
+					obj = client->getProperty(kIOUserClientDefaultLockingKey);
+					if (obj) {
+						client->defaultLocking = (kOSBooleanFalse != client->getProperty(kIOUserClientDefaultLockingKey));
+					} else {
+						const OSMetaClass * meta;
+						OSKext            * kext;
+						meta = client->getMetaClass();
+						kext = meta->getKext();
+						if (!kext || !kext->hasDependency(gIOSurfaceIdentifier)) {
+							client->defaultLocking = true;
+							client->setProperty(kIOUserClientDefaultLockingKey, kOSBooleanTrue);
+						}
+					}
+				}
+			}
+			if (client->sharedInstance) {
+				IOLockUnlock(gIOUserClientOwnersLock);
+			}
 
 			disallowAccess = (crossEndian
 			    && (kOSBooleanTrue != service->getProperty(kIOUserClientCrossEndianCompatibleKey))
@@ -3941,6 +4322,21 @@ is_io_service_open_extended(
 				res = kIOReturnNotPermitted;
 			}
 #endif
+
+			if ((kIOReturnSuccess == res)
+			    && gIOUCFilterCallbacks
+			    && gIOUCFilterCallbacks->io_filter_resolver) {
+				io_filter_policy_t filterPolicy;
+				filterPolicy = client->filterForTask(owningTask, 0);
+				if (!filterPolicy) {
+					res = gIOUCFilterCallbacks->io_filter_resolver(owningTask, client, connect_type, &filterPolicy);
+					if (kIOReturnUnsupported == res) {
+						res = kIOReturnSuccess;
+					} else if (kIOReturnSuccess == res) {
+						client->filterForTask(owningTask, filterPolicy);
+					}
+				}
+			}
 
 			if (kIOReturnSuccess == res) {
 				res = client->registerOwner(owningTask);
@@ -3983,9 +4379,9 @@ is_io_service_close(
 	IOStatisticsClientCall();
 
 	if (client->sharedInstance || OSCompareAndSwap8(0, 1, &client->closed)) {
-		IOLockLock(client->lock);
+		IORWLockWrite(client->lock);
 		client->clientClose();
-		IOLockUnlock(client->lock);
+		IORWLockUnlock(client->lock);
 	} else {
 		IOLog("ignored is_io_service_close(0x%qx,%s)\n",
 		    client->getRegistryEntryID(), client->getName());
@@ -4026,10 +4422,10 @@ is_io_connect_set_notification_port(
 	CHECK( IOUserClient, connection, client );
 
 	IOStatisticsClientCall();
-	IOLockLock(client->lock);
+	IORWLockWrite(client->lock);
 	ret = client->registerNotificationPort( port, notification_type,
 	    (io_user_reference_t) reference );
-	IOLockUnlock(client->lock);
+	IORWLockUnlock(client->lock);
 	return ret;
 }
 
@@ -4045,10 +4441,10 @@ is_io_connect_set_notification_port_64(
 	CHECK( IOUserClient, connection, client );
 
 	IOStatisticsClientCall();
-	IOLockLock(client->lock);
+	IORWLockWrite(client->lock);
 	ret = client->registerNotificationPort( port, notification_type,
 	    reference );
-	IOLockUnlock(client->lock);
+	IORWLockUnlock(client->lock);
 	return ret;
 }
 
@@ -4074,7 +4470,13 @@ is_io_connect_map_memory_into_task
 	}
 
 	IOStatisticsClientCall();
+	if (client->defaultLocking) {
+		IORWLockWrite(client->lock);
+	}
 	map = client->mapClientMemory64( memory_type, into_task, flags, *address );
+	if (client->defaultLocking) {
+		IORWLockUnlock(client->lock);
+	}
 
 	if (map) {
 		*address = map->getAddress();
@@ -4183,7 +4585,13 @@ is_io_connect_unmap_memory_from_task
 	}
 
 	IOStatisticsClientCall();
+	if (client->defaultLocking) {
+		IORWLockWrite(client->lock);
+	}
 	err = client->clientMemoryForType((UInt32) memory_type, &options, &memory );
+	if (client->defaultLocking) {
+		IORWLockUnlock(client->lock);
+	}
 
 	if (memory && (kIOReturnSuccess == err)) {
 		options = (options & ~kIOMapUserOptionsMask)
@@ -4199,7 +4607,8 @@ is_io_connect_unmap_memory_from_task
 			IOLockUnlock( gIOObjectPortLock);
 
 			mach_port_name_t name = 0;
-			if (from_task != current_task()) {
+			bool is_shared_instance_or_from_current_task = from_task != current_task() || client->sharedInstance;
+			if (is_shared_instance_or_from_current_task) {
 				name = IOMachPort::makeSendRightForTask( from_task, map, IKOT_IOKIT_OBJECT );
 				map->release();
 			}
@@ -4211,7 +4620,7 @@ is_io_connect_unmap_memory_from_task
 			} else {
 				IOMachPort::releasePortForObject( map, IKOT_IOKIT_OBJECT );
 			}
-			if (from_task == current_task()) {
+			if (!is_shared_instance_or_from_current_task) {
 				map->release();
 			}
 		} else {
@@ -4249,8 +4658,17 @@ is_io_connect_add_client(
 	CHECK( IOUserClient, connection, client );
 	CHECK( IOUserClient, connect_to, to );
 
+	IOReturn ret;
+
 	IOStatisticsClientCall();
-	return client->connectClient( to );
+	if (client->defaultLocking) {
+		IORWLockWrite(client->lock);
+	}
+	ret = client->connectClient( to );
+	if (client->defaultLocking) {
+		IORWLockUnlock(client->lock);
+	}
+	return ret;
 }
 
 
@@ -4329,7 +4747,21 @@ is_io_connect_method_var_output
 	args.structureOutputDescriptorSize = 0;
 
 	IOStatisticsClientCall();
-	ret = client->externalMethod( selector, &args );
+	ret = kIOReturnSuccess;
+
+	io_filter_policy_t filterPolicy = client->filterForTask(current_task(), 0);
+	if (filterPolicy && gIOUCFilterCallbacks->io_filter_applier) {
+		ret = gIOUCFilterCallbacks->io_filter_applier(filterPolicy, io_filter_type_external_method, selector);
+	}
+	if (kIOReturnSuccess == ret) {
+		if (client->defaultLocking) {
+			IORWLockRead(client->lock);
+		}
+		ret = client->externalMethod( selector, &args );
+		if (client->defaultLocking) {
+			IORWLockUnlock(client->lock);
+		}
+	}
 
 	*scalar_outputCnt = args.scalarOutputCount;
 	*inband_outputCnt = args.structureOutputSize;
@@ -4337,7 +4769,7 @@ is_io_connect_method_var_output
 	if (var_outputCnt && var_output && (kIOReturnSuccess == ret)) {
 		OSSerialize * serialize;
 		OSData      * data;
-		vm_size_t     len;
+		unsigned int  len;
 
 		if ((serialize = OSDynamicCast(OSSerialize, structureVariableOutputData))) {
 			len = serialize->getLength();
@@ -4408,8 +4840,13 @@ is_io_connect_method
 	if (ool_input && (ool_input_size <= sizeof(io_struct_inband_t))) {
 		return kIOReturnIPCError;
 	}
-	if (ool_output && (*ool_output_size <= sizeof(io_struct_inband_t))) {
-		return kIOReturnIPCError;
+	if (ool_output) {
+		if (*ool_output_size <= sizeof(io_struct_inband_t)) {
+			return kIOReturnIPCError;
+		}
+		if (*ool_output_size > UINT_MAX) {
+			return kIOReturnIPCError;
+		}
 	}
 
 	if (ool_input) {
@@ -4432,10 +4869,25 @@ is_io_connect_method
 	}
 
 	args.structureOutputDescriptor = outputMD;
-	args.structureOutputDescriptorSize = ool_output_size ? *ool_output_size : 0;
+	args.structureOutputDescriptorSize = ool_output_size
+	    ? ((typeof(args.structureOutputDescriptorSize)) * ool_output_size)
+	    : 0;
 
 	IOStatisticsClientCall();
-	ret = client->externalMethod( selector, &args );
+	ret = kIOReturnSuccess;
+	io_filter_policy_t filterPolicy = client->filterForTask(current_task(), 0);
+	if (filterPolicy && gIOUCFilterCallbacks->io_filter_applier) {
+		ret = gIOUCFilterCallbacks->io_filter_applier(filterPolicy, io_filter_type_external_method, selector);
+	}
+	if (kIOReturnSuccess == ret) {
+		if (client->defaultLocking) {
+			IORWLockRead(client->lock);
+		}
+		ret = client->externalMethod( selector, &args );
+		if (client->defaultLocking) {
+			IORWLockUnlock(client->lock);
+		}
+	}
 
 	*scalar_outputCnt = args.scalarOutputCount;
 	*inband_outputCnt = args.structureOutputSize;
@@ -4481,6 +4933,10 @@ is_io_connect_async_method
 	IOMemoryDescriptor * inputMD  = NULL;
 	IOMemoryDescriptor * outputMD = NULL;
 
+	if (referenceCnt < 1) {
+		return kIOReturnBadArgument;
+	}
+
 	bzero(&args.__reserved[0], sizeof(args.__reserved));
 	args.__reservedA = 0;
 	args.version = kIOExternalMethodArgumentsCurrentVersion;
@@ -4506,8 +4962,13 @@ is_io_connect_async_method
 	if (ool_input && (ool_input_size <= sizeof(io_struct_inband_t))) {
 		return kIOReturnIPCError;
 	}
-	if (ool_output && (*ool_output_size <= sizeof(io_struct_inband_t))) {
-		return kIOReturnIPCError;
+	if (ool_output) {
+		if (*ool_output_size <= sizeof(io_struct_inband_t)) {
+			return kIOReturnIPCError;
+		}
+		if (*ool_output_size > UINT_MAX) {
+			return kIOReturnIPCError;
+		}
 	}
 
 	if (ool_input) {
@@ -4530,10 +4991,23 @@ is_io_connect_async_method
 	}
 
 	args.structureOutputDescriptor = outputMD;
-	args.structureOutputDescriptorSize = *ool_output_size;
+	args.structureOutputDescriptorSize = ((typeof(args.structureOutputDescriptorSize)) * ool_output_size);
 
 	IOStatisticsClientCall();
-	ret = client->externalMethod( selector, &args );
+	ret = kIOReturnSuccess;
+	io_filter_policy_t filterPolicy = client->filterForTask(current_task(), 0);
+	if (filterPolicy && gIOUCFilterCallbacks->io_filter_applier) {
+		ret = gIOUCFilterCallbacks->io_filter_applier(filterPolicy, io_filter_type_external_async_method, selector);
+	}
+	if (kIOReturnSuccess == ret) {
+		if (client->defaultLocking) {
+			IORWLockRead(client->lock);
+		}
+		ret = client->externalMethod( selector, &args );
+		if (client->defaultLocking) {
+			IORWLockUnlock(client->lock);
+		}
+	}
 
 	*scalar_outputCnt = args.scalarOutputCount;
 	*inband_outputCnt = args.structureOutputSize;
@@ -5404,10 +5878,6 @@ shim_io_async_method_structureI_structureO(
 	return err;
 }
 
-#if !NO_KEXTD
-bool gIOKextdClearedBusy = false;
-#endif
-
 /* Routine io_catalog_send_data */
 kern_return_t
 is_io_catalog_send_data(
@@ -5437,7 +5907,7 @@ is_io_catalog_send_data(
 		return kIOReturnBadArgument;
 	}
 
-	if (!IOTaskHasEntitlement(current_task(), kOSKextManagementEntitlement)) {
+	if (!IOTaskHasEntitlement(current_task(), kIOCatalogManagementEntitlement)) {
 		OSString * taskName = IOCopyLogNameForPID(proc_selfpid());
 		IOLog("IOCatalogueSendData(%s): Not entitled\n", taskName ? taskName->getCStringNoCopy() : "");
 		OSSafeReleaseNULL(taskName);
@@ -5523,32 +5993,10 @@ is_io_catalog_send_data(
 
 	case kIOCatalogStartMatching__Removed:
 	case kIOCatalogRemoveKernelLinker__Removed:
+	case kIOCatalogKextdActive:
+	case kIOCatalogKextdFinishedLaunching:
 		kr = KERN_NOT_SUPPORTED;
 		break;
-
-	case kIOCatalogKextdActive:
-#if !NO_KEXTD
-		IOServiceTrace(IOSERVICE_KEXTD_ALIVE, 0, 0, 0, 0);
-		OSKext::setKextdActive();
-
-		/* Dump all nonloaded startup extensions; kextd will now send them
-		 * down on request.
-		 */
-		OSKext::flushNonloadedKexts( /* flushPrelinkedKexts */ false);
-#endif
-		kr = kIOReturnSuccess;
-		break;
-
-	case kIOCatalogKextdFinishedLaunching: {
-#if !NO_KEXTD
-		if (!gIOKextdClearedBusy) {
-			IOService::kextdLaunched();
-			gIOKextdClearedBusy = true;
-		}
-#endif
-		kr = kIOReturnSuccess;
-	}
-	break;
 
 	default:
 		kr = kIOReturnBadArgument;
@@ -5586,28 +6034,7 @@ is_io_catalog_terminate(
 	switch (flag) {
 #if !defined(SECURE_KERNEL)
 	case kIOCatalogServiceTerminate:
-		OSIterator *        iter;
-		IOService *         service;
-
-		iter = IORegistryIterator::iterateOver(gIOServicePlane,
-		    kIORegistryIterateRecursively);
-		if (!iter) {
-			return kIOReturnNoMemory;
-		}
-
-		do {
-			iter->reset();
-			while ((service = (IOService *)iter->getNextObject())) {
-				if (service->metaCast(name)) {
-					if (!service->terminate( kIOServiceRequired
-					    | kIOServiceSynchronous)) {
-						kr = kIOReturnUnsupported;
-						break;
-					}
-				}
-			}
-		} while (!service && !iter->isValid());
-		iter->release();
+		kr = gIOCatalogue->terminateDrivers(NULL, name);
 		break;
 
 	case kIOCatalogModuleUnload:
@@ -5652,14 +6079,14 @@ is_io_catalog_get_data(
 	if (kr == kIOReturnSuccess) {
 		vm_offset_t data;
 		vm_map_copy_t copy;
-		vm_size_t size;
+		unsigned int size;
 
 		size = s->getLength();
 		kr = vm_allocate_kernel(kernel_map, &data, size, VM_FLAGS_ANYWHERE, VM_KERN_MEMORY_IOKIT);
 		if (kr == kIOReturnSuccess) {
 			bcopy(s->text(), (void *)data, size);
 			kr = vm_map_copyin(kernel_map, (vm_map_address_t)data,
-			    (vm_map_size_t)size, true, &copy);
+			    size, true, &copy);
 			*outData = (char *)copy;
 			*outDataCount = size;
 		}
@@ -5751,11 +6178,17 @@ iokit_user_client_trap(struct iokit_user_client_trap_args *args)
 		}
 		OSSafeReleaseNULL(object);
 	} else if ((userClient = OSDynamicCast(IOUserClient, iokit_lookup_connect_ref_current_task((mach_port_name_t) ref)))) {
-		IOExternalTrap *trap;
+		IOExternalTrap *trap = NULL;
 		IOService *target = NULL;
 
-		trap = userClient->getTargetAndTrapForIndex(&target, args->index);
-
+		result = kIOReturnSuccess;
+		io_filter_policy_t filterPolicy = userClient->filterForTask(current_task(), 0);
+		if (filterPolicy && gIOUCFilterCallbacks->io_filter_applier) {
+			result = gIOUCFilterCallbacks->io_filter_applier(filterPolicy, io_filter_type_trap, args->index);
+		}
+		if (kIOReturnSuccess == result) {
+			trap = userClient->getTargetAndTrapForIndex(&target, args->index);
+		}
 		if (trap && target) {
 			IOTrap func;
 
@@ -5936,9 +6369,26 @@ IOUserClient::externalMethod( uint32_t selector, IOExternalMethodArguments * arg
 		}
 	}
 
-	args->structureOutputSize = structureOutputSize;
+	if (structureOutputSize > UINT_MAX) {
+		structureOutputSize = 0;
+		err = kIOReturnBadArgument;
+	}
+
+	args->structureOutputSize = ((typeof(args->structureOutputSize))structureOutputSize);
 
 	return err;
+}
+
+IOReturn
+IOUserClient::registerFilterCallbacks(const struct io_filter_callbacks *callbacks, size_t size)
+{
+	if (size < sizeof(*callbacks)) {
+		return kIOReturnBadArgument;
+	}
+	if (!OSCompareAndSwapPtr(NULL, __DECONST(void *, callbacks), &gIOUCFilterCallbacks)) {
+		return kIOReturnBusy;
+	}
+	return kIOReturnSuccess;
 }
 
 #if __LP64__

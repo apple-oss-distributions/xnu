@@ -49,15 +49,15 @@ struct secasindex {
 	u_int ipsec_ifindex;
 };
 
+#define SECURITY_ASSOCIATION_ANY          0x0000
+#define SECURITY_ASSOCIATION_PFKEY        0x0001
+#define SECURITY_ASSOCIATION_CUSTOM_IPSEC 0x0010
+
 /* Security Association Data Base */
 struct secashead {
 	LIST_ENTRY(secashead) chain;
 
 	struct secasindex saidx;
-
-	struct sadb_ident *idents;      /* source identity */
-	struct sadb_ident *identd;      /* destination identity */
-	                                /* XXX I don't know how to use them. */
 
 	ifnet_t ipsec_if;
 	u_int outgoing_if;
@@ -68,6 +68,9 @@ struct secashead {
 	/* The first of this list is newer SA */
 
 	struct route_in6 sa_route;              /* route cache */
+
+	uint16_t flags;
+	u_int32_t use_count;
 };
 
 #define MAX_REPLAY_WINDOWS 4
@@ -119,8 +122,8 @@ struct secasvar {
 
 /* replay prevention */
 struct secreplay {
+	u_int8_t wsize;           /* window size */
 	u_int32_t count;
-	u_int wsize;            /* window size, i.g. 4 bytes */
 	u_int32_t seq;          /* used by sender */
 	u_int32_t lastseq;      /* used by sender/receiver */
 	caddr_t bitmap;         /* used by receiver */
@@ -168,7 +171,7 @@ extern struct secashead *keydb_newsecashead(void);
 // extern void keydb_refsecasvar(struct secasvar *);	// not used
 // extern void keydb_freesecasvar(struct secasvar *);	// not used
 /* secreplay */
-extern struct secreplay *keydb_newsecreplay(size_t);
+extern struct secreplay *keydb_newsecreplay(u_int8_t);
 extern void keydb_delsecreplay(struct secreplay *);
 /* secreg */
 // extern struct secreg *keydb_newsecreg(void);			// not used

@@ -55,6 +55,9 @@
  *      from BSDI nfs_lock.c,v 2.4 1998/12/14 23:49:56 jch Exp
  */
 
+#include <nfs/nfs_conf.h>
+#if CONFIG_NFS_CLIENT
+
 #include <sys/cdefs.h>
 #include <sys/param.h>
 #include <sys/systm.h>
@@ -433,7 +436,8 @@ nfs3_lockd_request(
 	int interruptable, slpflag;
 	struct nfsmount *nmp;
 	struct timeval now;
-	int timeo, starttime, endtime, lastmsg, wentdown = 0;
+	int timeo, wentdown = 0;
+	long starttime, endtime, lastmsg;
 	struct timespec ts;
 	struct sockaddr *saddr;
 
@@ -1050,3 +1054,5 @@ nfslockdnotify(proc_t p, user_addr_t argp)
 
 	return error;
 }
+
+#endif /* CONFIG_NFS_CLIENT */

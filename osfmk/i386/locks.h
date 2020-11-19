@@ -37,11 +37,6 @@
 
 #include <i386/hw_lock_types.h>
 
-extern  unsigned int    LcksOpts;
-#if DEVELOPMENT || DEBUG
-extern  unsigned int    LckDisablePreemptCheck;
-#endif
-
 #define enaLkDeb                0x00000001      /* Request debug in default attribute */
 #define enaLkStat               0x00000002      /* Request statistic in default attribute */
 #define disLkRWPrio             0x00000004      /* Disable RW lock priority promotion */
@@ -115,11 +110,18 @@ typedef struct _lck_mtx_ {
 
 /* Adaptive spin before blocking */
 extern uint64_t         MutexSpin;
+extern uint64_t         low_MutexSpin;
+extern int64_t         high_MutexSpin;
 
 typedef enum lck_mtx_spinwait_ret_type {
 	LCK_MTX_SPINWAIT_ACQUIRED = 0,
-	LCK_MTX_SPINWAIT_SPUN = 1,
-	LCK_MTX_SPINWAIT_NO_SPIN = 2,
+
+	LCK_MTX_SPINWAIT_SPUN_HIGH_THR = 1,
+	LCK_MTX_SPINWAIT_SPUN_OWNER_NOT_CORE = 2,
+	LCK_MTX_SPINWAIT_SPUN_NO_WINDOW_CONTENTION = 3,
+	LCK_MTX_SPINWAIT_SPUN_SLIDING_THR = 4,
+
+	LCK_MTX_SPINWAIT_NO_SPIN = 5,
 } lck_mtx_spinwait_ret_type_t;
 
 extern lck_mtx_spinwait_ret_type_t              lck_mtx_lock_spinwait_x86(lck_mtx_t *mutex);
@@ -262,8 +264,8 @@ static_assert(sizeof(lck_rw_t) == LCK_RW_T_SIZE);
 
 #if LOCK_PRIVATE
 
-#define disable_preemption_for_thread(t) ((cpu_data_t GS_RELATIVE *)0UL)->cpu_preemption_level++
-#define preemption_disabled_for_thread(t) (((cpu_data_t GS_RELATIVE *)0UL)->cpu_preemption_level > 0)
+#define disable_preemption_for_thread(t)   disable_preemption_internal()
+#define preemption_disabled_for_thread(t)  (get_preemption_level() > 0)
 
 #define LCK_MTX_THREAD_TO_STATE(t)      ((uintptr_t)t)
 #define PLATFORM_LCK_ILOCK              0

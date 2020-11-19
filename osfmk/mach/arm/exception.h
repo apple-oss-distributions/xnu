@@ -35,6 +35,12 @@
 
 #define EXCEPTION_CODE_MAX       2      /*  code and subcode */
 
+#if XNU_KERNEL_PRIVATE
+#if __has_feature(ptrauth_calls)
+#define EXC_PTRAUTH_BIT         0x200  /* bit set if exception could have been caused by ptrauth failure */
+#endif /* __has_feature(ptrauth_calls) */
+#endif /* XNU_KERNEL_PRIVATE */
+
 /*
  *	Trap numbers as defined by the hardware exception vectors.
  */
@@ -66,6 +72,7 @@
 #define EXC_ARM_DA_DEBUG        0x102   /* Debug (watch/break) Fault */
 #define EXC_ARM_SP_ALIGN        0x103   /* SP Alignment Fault */
 #define EXC_ARM_SWP             0x104   /* SWP instruction */
+#define EXC_ARM_PAC_FAIL        0x105   /* PAC authentication failure */
 
 /*
  *	EXC_BREAKPOINT

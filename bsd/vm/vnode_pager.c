@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2006 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2020 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -65,7 +65,6 @@
 #include <vm/vm_map.h>
 #include <vm/vm_kern.h>
 #include <kern/zalloc.h>
-#include <kern/kalloc.h>
 #include <libkern/libkern.h>
 
 #include <vm/vnode_pager.h>
@@ -73,6 +72,7 @@
 
 #include <kern/assert.h>
 #include <sys/kdebug.h>
+#include <nfs/nfs_conf.h>
 #include <nfs/rpcv2.h>
 #include <nfs/nfsproto.h>
 #include <nfs/nfs.h>
@@ -82,7 +82,7 @@
 #include <vfs/vfs_disk_conditioner.h>
 
 void
-vnode_pager_throttle()
+vnode_pager_throttle(void)
 {
 	struct uthread *ut;
 
@@ -121,7 +121,7 @@ vnode_pager_issue_reprioritize_io(struct vnode *devvp, uint64_t blkno, uint32_t 
 
 	set_tier.extents = &extent;
 	set_tier.extentsCount = 1;
-	set_tier.tier = priority;
+	set_tier.tier = (uint8_t)priority;
 
 	error = VNOP_IOCTL(devvp, DKIOCSETTIER, (caddr_t)&set_tier, 0, vfs_context_kernel());
 	return;
@@ -311,6 +311,26 @@ vnode_pageout(struct vnode *vp,
 
 	isize = (int)size;
 
+	/*
+	 * This call is non-blocking and does not ever fail but it can
+	 * only be made when there is other explicit synchronization
+	 * with reclaiming of the vnode which, in this path, is provided
+	 * by the paging in progress counter.
+	 *
+	 * In addition, this may also be entered via explicit ubc_msync
+	 * calls or vm_swapfile_io where the existing iocount provides
+	 * the necessary synchronization. Ideally we would not take an
+	 * additional iocount here in the cases where an explcit iocount
+	 * has already been taken but this call doesn't cause a deadlock
+	 * as other forms of vnode_get* might if this thread has already
+	 * taken an iocount.
+	 */
+	error = vnode_getalways_from_pager(vp);
+	if (error != 0) {
+		/* This can't happen */
+		panic("vnode_getalways returned %d for vp %p", error, vp);
+	}
+
 	if (isize <= 0) {
 		result    = PAGER_ERROR;
 		error_ret = EINVAL;
@@ -430,12 +450,12 @@ vnode_pageout(struct vnode *vp,
 		 * of it's pages
 		 */
 		for (offset = upl_offset; isize; isize -= PAGE_SIZE, offset += PAGE_SIZE) {
-#if NFSCLIENT
+#if CONFIG_NFS_CLIENT
 			if (vp->v_tag == VT_NFS) {
 				/* check with nfs if page is OK to drop */
 				error = nfs_buf_page_inval(vp, (off_t)f_offset);
 			} else
-#endif
+#endif /* CONFIG_NFS_CLIENT */
 			{
 				blkno = ubc_offtoblk(vp, (off_t)f_offset);
 				error = buf_invalblkno(vp, blkno, 0);
@@ -487,12 +507,12 @@ vnode_pageout(struct vnode *vp,
 			 * Note we must not sleep here if the buffer is busy - that is
 			 * a lock inversion which causes deadlock.
 			 */
-#if NFSCLIENT
+#if CONFIG_NFS_CLIENT
 			if (vp->v_tag == VT_NFS) {
 				/* check with nfs if page is OK to drop */
 				error = nfs_buf_page_inval(vp, (off_t)f_offset);
 			} else
-#endif
+#endif /* CONFIG_NFS_CLIENT */
 			{
 				blkno = ubc_offtoblk(vp, (off_t)f_offset);
 				error = buf_invalblkno(vp, blkno, 0);
@@ -548,6 +568,8 @@ vnode_pageout(struct vnode *vp,
 		pg_index += num_of_pages;
 	}
 out:
+	vnode_put_from_pager(vp);
+
 	if (errorp) {
 		*errorp = error_ret;
 	}
@@ -583,6 +605,25 @@ vnode_pagein(
 
 	if (flags & UPL_IGNORE_VALID_PAGE_CHECK) {
 		ignore_valid_page_check = 1;
+	}
+
+	/*
+	 * This call is non-blocking and does not ever fail but it can
+	 * only be made when there is other explicit synchronization
+	 * with reclaiming of the vnode which, in this path, is provided
+	 * by the paging in progress counter.
+	 *
+	 * In addition, this may also be entered via vm_swapfile_io
+	 * where the existing iocount provides the necessary synchronization.
+	 * Ideally we would not take an additional iocount here in the cases
+	 * where an explcit iocount has already been taken but this call
+	 * doesn't cause a deadlock as other forms of vnode_get* might if
+	 * this thread has already taken an iocount.
+	 */
+	error = vnode_getalways_from_pager(vp);
+	if (error != 0) {
+		/* This can't happen */
+		panic("vnode_getalways returned %d for vp %p", error, vp);
 	}
 
 	if (UBCINFOEXISTS(vp) == 0) {
@@ -769,6 +810,8 @@ vnode_pagein(
 		}
 	}
 out:
+	vnode_put_from_pager(vp);
+
 	if (errorp) {
 		*errorp = result;
 	}

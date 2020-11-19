@@ -34,6 +34,7 @@
 #include <sys/proc.h>
 #include <sys/param.h>
 #include <sys/kern_memorystatus.h>
+#include <mach/resource_monitors.h>     // command/proc_name_t
 
 typedef struct memorystatus_freeze_entry {
 	int32_t pid;
@@ -41,17 +42,21 @@ typedef struct memorystatus_freeze_entry {
 	uint32_t pages;
 } memorystatus_freeze_entry_t;
 
+#ifdef PRIVATE
+#define FREEZE_PROCESSES_MAX 20
+#endif /* PRIVATE */
+
 #ifdef XNU_KERNEL_PRIVATE
 
 extern unsigned long freeze_threshold_percentage;
-extern unsigned int memorystatus_frozen_count;
+extern unsigned int memorystatus_frozen_count; /* # of processes that are currently frozen. */
 extern unsigned int memorystatus_frozen_processes_max;
 extern unsigned int memorystatus_frozen_shared_mb;
 extern unsigned int memorystatus_frozen_shared_mb_max;
 extern unsigned int memorystatus_freeze_shared_mb_per_process_max; /* Max. MB allowed per process to be freezer-eligible. */
 extern unsigned int memorystatus_freeze_private_shared_pages_ratio; /* Ratio of private:shared pages for a process to be freezer-eligible. */
 extern unsigned int memorystatus_suspended_count;
-extern unsigned int memorystatus_thaw_count;
+extern unsigned int memorystatus_thaw_count; /* # of processes that have been thawed in the current interval. */
 extern unsigned int memorystatus_refreeze_eligible_count; /* # of processes currently thawed i.e. have state on disk & in-memory */
 
 void memorystatus_freeze_init(void);
@@ -63,7 +68,6 @@ extern int  memorystatus_freeze_process_sync(proc_t p);
 #define FREEZE_PAGES_MAX   (max_task_footprint_mb == 0 ? INT_MAX : (max_task_footprint_mb << (20 - PAGE_SHIFT)))
 
 #define FREEZE_SUSPENDED_THRESHOLD_DEFAULT 4
-#define FREEZE_PROCESSES_MAX               20
 
 #define FREEZE_DAILY_MB_MAX_DEFAULT       1024
 #define FREEZE_DEGRADATION_BUDGET_THRESHOLD     25 //degraded perf. when the daily budget left falls below this threshold percentage
@@ -112,5 +116,21 @@ int memorystatus_freezer_control(int32_t flags, user_addr_t buffer, size_t buffe
 #endif /* CONFIG_FREEZE */
 
 #endif /* XNU_KERNEL_PRIVATE */
+
+#ifdef PRIVATE
+/* Lists all the processes that are currently in the freezer. */
+#define FREEZER_CONTROL_GET_PROCS        (2)
+
+#define FREEZER_CONTROL_GET_PROCS_MAX_COUNT (FREEZE_PROCESSES_MAX * 2)
+
+typedef struct _global_frozen_procs {
+	size_t gfp_num_frozen;
+	struct {
+		pid_t fp_pid;
+		proc_name_t fp_name;
+	} gfp_procs[FREEZER_CONTROL_GET_PROCS_MAX_COUNT];
+} global_frozen_procs_t;
+
+#endif /* PRIVATE */
 
 #endif /* SYS_MEMORYSTATUS_FREEZE_H */

@@ -110,8 +110,8 @@ enum vtagtype   {
 	VT_HFS, VT_ZFS, VT_DEVFS, VT_WEBDAV, VT_UDF,
 	/* 21 - 25 */
 	VT_AFP, VT_CDDA, VT_CIFS, VT_OTHER, VT_APFS,
-	/* 26 */
-	VT_LOCKERFS,
+	/* 26 - 27*/
+	VT_LOCKERFS, VT_BINDFS,
 };
 
 #define HAVE_VT_LOCKERFS 1
@@ -559,6 +559,9 @@ struct vnode_trigger_param {
 #define VNODE_ATTR_va_fsid64            (1LL<<41)       /* 20000000000 */
 #define VNODE_ATTR_va_write_gencount    (1LL<<42)       /* 40000000000 */
 #define VNODE_ATTR_va_private_size      (1LL<<43)       /* 80000000000 */
+#define VNODE_ATTR_va_clone_id          (1LL<<44)       /* 100000000000 */
+#define VNODE_ATTR_va_extflags          (1LL<<45)       /* 200000000000 */
+#define VNODE_ATTR_va_recursive_gencount (1LL<<46)      /* 400000000000 */
 
 #define VNODE_ATTR_BIT(n)       (VNODE_ATTR_ ## n)
 
@@ -608,7 +611,10 @@ struct vnode_trigger_param {
 	                        VNODE_ATTR_BIT(va_rsrc_alloc) |         \
 	                        VNODE_ATTR_BIT(va_fsid64) |             \
 	                        VNODE_ATTR_BIT(va_write_gencount) |     \
-	                        VNODE_ATTR_BIT(va_private_size))
+	                        VNODE_ATTR_BIT(va_private_size) |       \
+	                        VNODE_ATTR_BIT(va_clone_id) |           \
+	                        VNODE_ATTR_BIT(va_extflags) |           \
+	                        VNODE_ATTR_BIT(va_recursive_gencount))
 
 /*
  * Read-only attributes.
@@ -637,8 +643,12 @@ struct vnode_trigger_param {
 	                        VNODE_ATTR_BIT(va_rsrc_length) |        \
 	                        VNODE_ATTR_BIT(va_rsrc_alloc) |         \
 	                        VNODE_ATTR_BIT(va_fsid64) |             \
-	                        VNODE_ATTR_BIT(va_write_gencount) |             \
-	                        VNODE_ATTR_BIT(va_private_size))
+	                        VNODE_ATTR_BIT(va_write_gencount) |     \
+	                        VNODE_ATTR_BIT(va_private_size) |       \
+	                        VNODE_ATTR_BIT(va_clone_id) |           \
+	                        VNODE_ATTR_BIT(va_extflags) |           \
+	                        VNODE_ATTR_BIT(va_recursive_gencount))
+
 /*
  * Attributes that can be applied to a new file object.
  */
@@ -742,6 +752,9 @@ struct vnode_attr {
 	uint32_t va_write_gencount;     /* counter that increments each time the file changes */
 
 	uint64_t va_private_size; /* If the file were deleted, how many bytes would be freed immediately */
+	uint64_t va_clone_id;     /* If a file is cloned this is a unique id shared by all "perfect" clones */
+	uint64_t va_extflags;     /* extended file/directory flags */
+	uint64_t va_recursive_gencount; /* for dir-stats enabled directories */
 
 	/* add new fields here only */
 };
@@ -1689,6 +1702,19 @@ int     vnode_isdyldsharedcache(vnode_t vp);
  */
 int     vn_authorize_unlink(vnode_t dvp, vnode_t vp, struct componentname *cnp, vfs_context_t ctx, void *reserved);
 
+
+/*!
+ *  @function vn_authorize_rmdir
+ *  @abstract Authorize an rmdir operation given the vfs_context_t
+ *  @discussion Check if the context assocated with vfs_context_t is allowed to rmdir the vnode vp in directory dvp.
+ *  @param dvp Parent vnode of the directory to be rmdir'ed
+ *  @param vp The vnode to be rmdir'ed
+ *  @param cnp A componentname containing the name of the file to be rmdir'ed.  May be NULL.
+ *  @param reserved Pass NULL
+ *  @return returns zero if the operation is allowed, non-zero indicates the rmdir is not authorized.
+ */
+int     vn_authorize_rmdir(vnode_t dvp, vnode_t vp, struct componentname *cnp, vfs_context_t ctx, void *reserved);
+
 /*!
  *  @function vn_getpath_fsenter
  *  @abstract Attempt to get a vnode's path, willing to enter the filesystem.
@@ -1747,10 +1773,29 @@ int     vn_getpath_fsenter_with_parent(struct vnode *dvp, struct vnode *vp, char
  */
 int     vn_getpath_ext(struct vnode *vp, struct vnode *dvp, char *pathbuf, int *len, int flags);
 
+/*!
+ *  @function vn_getpath_ext_with_mntlen
+ *  @abstract Attempt to get a vnode's path without rentering filesystem (unless passed an option to allow)
+ *  @discussion Paths to vnodes are not always straightforward: a file with multiple hard-links will have multiple pathnames,
+ *  and it is sometimes impossible to determine a vnode's full path.  vn_getpath_fsenter() may enter the filesystem
+ *  to try to construct a path, so filesystems should be wary of calling it.
+ *  @param vp Vnode whose path to get
+ *  @param dvp parent vnode of vnode whose path to get, can be NULL if not available.
+ *  @param pathbuf Buffer in which to store path.
+ *  @param len Destination for length of resulting path string.  Result will include NULL-terminator in count--that is, "len"
+ *  will be strlen(pathbuf) + 1.
+ *  @param mntlen Destination for length of path that is the mount point for the returned path. Will always be less than or equal to len.
+ *  will be strlen(pathbuf) + 1.
+ *  @param flags flags for controlling behavior.
+ *  @return 0 for success or an error.
+ */
+int     vn_getpath_ext_with_mntlen(struct vnode *vp, struct vnode *dvp, char *pathbuf, size_t *len, size_t *mntlen, int flags);
+
 /* supported flags for vn_getpath_ext */
 #define VN_GETPATH_FSENTER              0x0001 /* Can re-enter filesystem */
 #define VN_GETPATH_NO_FIRMLINK          0x0002
 #define VN_GETPATH_VOLUME_RELATIVE      0x0004 /* also implies VN_GETPATH_NO_FIRMLINK */
+#define VN_GETPATH_NO_PROCROOT          0x0008 /* Give the non chrooted path for a process */
 
 #endif /* KERNEL_PRIVATE */
 
@@ -1995,6 +2040,7 @@ int     vnode_iterate(struct mount *mp, int flags, int (*callout)(struct vnode *
 #ifdef BSD_KERNEL_PRIVATE
 #define VNODE_ALWAYS            0x400
 #define VNODE_DRAINO            0x800
+#define VNODE_PAGER             0x1000
 #endif /* BSD_KERNEL_PRIVATE */
 
 /*
@@ -2244,7 +2290,6 @@ int     vaccess(mode_t file_mode, uid_t uid, gid_t gid,
 int     check_mountedon(dev_t dev, enum vtype type, int  *errorp);
 int vn_getcdhash(struct vnode *vp, off_t offset, unsigned char *cdhash);
 void    vnode_reclaim(vnode_t);
-vnode_t current_rootdir(void);
 vnode_t current_workingdir(void);
 void    *vnode_vfsfsprivate(vnode_t);
 struct vfsstatfs *vnode_vfsstatfs(vnode_t);
@@ -2368,7 +2413,11 @@ int is_package_name(const char *name, int len);
 int     vfs_context_issuser(vfs_context_t);
 int vfs_context_iskernel(vfs_context_t);
 vfs_context_t vfs_context_kernel(void);         /* get from 1st kernel thread */
+#ifdef XNU_KERNEL_PRIVATE
+void vfs_set_context_kernel(vfs_context_t);     /* set from 1st kernel thread */
+#endif /* XNU_KERNEL_PRIVATE */
 vnode_t vfs_context_cwd(vfs_context_t);
+vnode_t vfs_context_get_cwd(vfs_context_t); /* get cwd with iocount */
 int vnode_isnoflush(vnode_t);
 void vnode_setnoflush(vnode_t);
 void vnode_clearnoflush(vnode_t);
@@ -2378,6 +2427,7 @@ void vnode_clearnoflush(vnode_t);
 #define BUILDPATH_CHECK_MOVED     0x4 /* Return EAGAIN if the parent hierarchy is modified */
 #define BUILDPATH_VOLUME_RELATIVE 0x8 /* Return path relative to the nearest mount point */
 #define BUILDPATH_NO_FIRMLINK     0x10 /* Return non-firmlinked path */
+#define BUILDPATH_NO_PROCROOT     0x20 /* Return path relative to system root, not the process root */
 
 int     build_path(vnode_t first_vp, char *buff, int buflen, int *outlen, int flags, vfs_context_t ctx);
 

@@ -120,15 +120,19 @@ static void ipc_mqueue_peek_on_thread(
  */
 void
 ipc_mqueue_init(
-	ipc_mqueue_t    mqueue,
-	boolean_t       is_set)
+	ipc_mqueue_t            mqueue,
+	ipc_mqueue_kind_t       kind)
 {
-	if (is_set) {
+	switch (kind) {
+	case IPC_MQUEUE_KIND_SET:
 		waitq_set_init(&mqueue->imq_set_queue,
 		    SYNC_POLICY_FIFO | SYNC_POLICY_PREPOST,
 		    NULL, NULL);
-	} else {
-		waitq_init(&mqueue->imq_wait_queue, SYNC_POLICY_FIFO | SYNC_POLICY_PORT);
+		break;
+	case IPC_MQUEUE_KIND_NONE: /* cheat: we really should have "no" mqueue */
+	case IPC_MQUEUE_KIND_PORT:
+		waitq_init(&mqueue->imq_wait_queue,
+		    SYNC_POLICY_FIFO | SYNC_POLICY_TURNSTILE_PROXY);
 		ipc_kmsg_queue_init(&mqueue->imq_messages);
 		mqueue->imq_seqno = 0;
 		mqueue->imq_msgcount = 0;
@@ -138,6 +142,7 @@ ipc_mqueue_init(
 #if MACH_FLIPC
 		mqueue->imq_fport = FPORT_NULL;
 #endif
+		break;
 	}
 	klist_init(&mqueue->imq_klist);
 }
@@ -638,10 +643,10 @@ ipc_mqueue_send(
  *		The message queue is not locked.
  *		The caller holds a reference on the message queue.
  */
-extern void
+void
 ipc_mqueue_override_send(
 	ipc_mqueue_t        mqueue,
-	mach_msg_priority_t override)
+	mach_msg_qos_t      qos_ovr)
 {
 	boolean_t __unused full_queue_empty = FALSE;
 
@@ -652,7 +657,7 @@ ipc_mqueue_override_send(
 	if (imq_full(mqueue)) {
 		ipc_kmsg_t first = ipc_kmsg_queue_first(&mqueue->imq_messages);
 
-		if (first && ipc_kmsg_override_qos(&mqueue->imq_messages, first, override)) {
+		if (first && ipc_kmsg_override_qos(&mqueue->imq_messages, first, qos_ovr)) {
 			ipc_object_t object = imq_to_object(mqueue);
 			assert(io_otype(object) == IOT_PORT);
 			ipc_port_t port = ip_object_to_port(object);
@@ -964,8 +969,9 @@ ipc_mqueue_receive_results(wait_result_t saved_wait_result)
 			if (option & MACH_RCV_LARGE) {
 				return;
 			}
-
+			return;
 		case MACH_MSG_SUCCESS:
+			return;
 		case MACH_PEEK_READY:
 			return;
 
@@ -1147,7 +1153,7 @@ ipc_mqueue_receive_on_thread(
 			imq_unlock(port_mq);
 			return THREAD_NOT_WAITING;
 		}
-	} else if (imq_is_queue(mqueue)) {
+	} else if (imq_is_queue(mqueue) || imq_is_turnstile_proxy(mqueue)) {
 		ipc_kmsg_queue_t kmsgs;
 
 		/*
@@ -1199,8 +1205,7 @@ ipc_mqueue_receive_on_thread(
 	}
 
 	/*
-	 * Threads waiting on a special reply port
-	 * (not portset or regular ports)
+	 * Threads waiting on a reply port (not portset)
 	 * will wait on its receive turnstile.
 	 *
 	 * Donate waiting thread's turnstile and
@@ -1217,7 +1222,7 @@ ipc_mqueue_receive_on_thread(
 	 * will be converted to to turnstile waitq
 	 * in waitq_assert_wait instead of global waitqs.
 	 */
-	if (imq_is_queue(mqueue) && ip_from_mq(mqueue)->ip_specialreply) {
+	if (imq_is_turnstile_proxy(mqueue)) {
 		ipc_port_t port = ip_from_mq(mqueue);
 		rcv_turnstile = turnstile_prepare((uintptr_t)port,
 		    port_rcv_turnstile_address(port),
@@ -1420,7 +1425,7 @@ ipc_mqueue_peek_locked(ipc_mqueue_t mq,
 	if (msg_trailerp != NULL) {
 		memcpy(msg_trailerp,
 		    (mach_msg_max_trailer_t *)((vm_offset_t)kmsg->ikm_header +
-		    round_msg(kmsg->ikm_header->msgh_size)),
+		    mach_round_msg(kmsg->ikm_header->msgh_size)),
 		    sizeof(mach_msg_max_trailer_t));
 	}
 	if (kmsgp != NULL) {
@@ -1751,7 +1756,7 @@ ipc_mqueue_set_qlimit(
 			mqueue->imq_msgcount++;  /* give it to the awakened thread */
 		}
 	}
-	mqueue->imq_qlimit = qlimit;
+	mqueue->imq_qlimit = (uint16_t)qlimit;
 	imq_unlock(mqueue);
 }
 

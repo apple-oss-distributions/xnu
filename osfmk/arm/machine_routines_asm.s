@@ -35,13 +35,15 @@
 	.align	2
 	.globl	EXT(machine_set_current_thread)
 LEXT(machine_set_current_thread)
+	ldr		r1, [r0, ACT_CPUDATAP]
+	str		r0, [r1, CPU_ACTIVE_THREAD]
 	mcr		p15, 0, r0, c13, c0, 4				// Write TPIDRPRW
 	ldr		r1, [r0, TH_CTH_SELF]
 	mrc		p15, 0, r2, c13, c0, 3				// Read TPIDRURO
 	and		r2, r2, #3							// Extract cpu number
 	orr		r1, r1, r2							//
 	mcr		p15, 0, r1, c13, c0, 3				// Write TPIDRURO
-	ldr		r1, [r0, TH_CTH_DATA]
+	mov		r1, #0
 	mcr		p15, 0, r1, c13, c0, 2				// Write TPIDRURW
 	bx		lr
 
@@ -113,9 +115,7 @@ LEXT(timer_grab)
 0:
 	ldr		r2, [r0, TIMER_HIGH]
 	ldr		r3, [r0, TIMER_LOW]
-#if	__ARM_SMP__
 	dmb		ish									// dmb ish
-#endif
 	ldr		r1, [r0, TIMER_HIGHCHK]
 	cmp		r1, r2
 	bne		0b
@@ -126,13 +126,9 @@ LEXT(timer_grab)
 	.globl	EXT(timer_advance_internal_32)
 LEXT(timer_advance_internal_32)
 	str		r1, [r0, TIMER_HIGHCHK]
-#if	__ARM_SMP__
 	dmb		ish									// dmb ish
-#endif
 	str		r2, [r0, TIMER_LOW]
-#if	__ARM_SMP__
 	dmb		ish									// dmb ish
-#endif
 	str		r1, [r0, TIMER_HIGH]
 	bx		lr
 
@@ -207,11 +203,7 @@ LEXT(sync_tlb_flush)
 
 .macro FLUSH_MMU_TLB
 	mov     r0, #0
-#if	__ARM_SMP__
 	mcr     p15, 0, r0, c8, c3, 0				// Invalidate Inner Shareable entire TLBs
-#else
-	mcr     p15, 0, r0, c8, c7, 0				// Invalidate entire TLB
-#endif
 .endmacro
 
 /*
@@ -271,11 +263,7 @@ LEXT(flush_core_tlb)
 	bx	lr
 
 .macro FLUSH_MMU_TLB_ENTRY
-#if	__ARM_SMP__
 	mcr     p15, 0, r0, c8, c3, 1				// Invalidate TLB  Inner Shareableentry
-#else
-	mcr     p15, 0, r0, c8, c7, 1				// Invalidate TLB entry
-#endif
 .endmacro
 /*
  *	void flush_mmu_tlb_entry_async(uint32_t)
@@ -304,11 +292,7 @@ LEXT(flush_mmu_tlb_entry)
 
 .macro FLUSH_MMU_TLB_ENTRIES
 1:
-#if	__ARM_SMP__
 	mcr     p15, 0, r0, c8, c3, 1				// Invalidate TLB Inner Shareable entry 
-#else
-	mcr     p15, 0, r0, c8, c7, 1				// Invalidate TLB entry
-#endif
 	add	r0, r0, ARM_PGBYTES				// Increment to the next page
 	cmp	r0, r1						// Loop if current address < end address
 	blt	1b
@@ -341,11 +325,7 @@ LEXT(flush_mmu_tlb_entries)
 
 
 .macro FLUSH_MMU_TLB_MVA_ENTRIES
-#if	__ARM_SMP__
 	mcr     p15, 0, r0, c8, c3, 3				// Invalidate TLB Inner Shareable entries by mva
-#else
-	mcr     p15, 0, r0, c8, c7, 3				// Invalidate TLB Inner Shareable entries by mva
-#endif
 .endmacro
 
 /*
@@ -374,11 +354,7 @@ LEXT(flush_mmu_tlb_mva_entries)
 	bx	lr
 
 .macro FLUSH_MMU_TLB_ASID
-#if	__ARM_SMP__
 	mcr     p15, 0, r0, c8, c3, 2				// Invalidate TLB Inner Shareable entries by asid
-#else
-	mcr     p15, 0, r0, c8, c7, 2				// Invalidate TLB entries by asid
-#endif
 .endmacro
 
 /*
@@ -471,7 +447,6 @@ LEXT(set_mmu_ttb_alternate)
 	.globl EXT(get_mmu_ttb)
 LEXT(get_mmu_ttb)
 	mrc		p15, 0, r0, c2, c0, 0				// translation table to r0
-	isb
 	bx		lr
 
 /*
@@ -1275,35 +1250,6 @@ LEXT(ml_get_interrupts_enabled)
  * Platform Specific Timebase & Decrementer Functions
  *
  */
-
-#if defined(ARM_BOARD_CLASS_S7002)
-	.text
-	.align 2
-	.globl EXT(fleh_fiq_s7002)
-LEXT(fleh_fiq_s7002)
-	str		r11, [r10, #PMGR_INTERVAL_TMR_CTL_OFFSET]		// Clear the decrementer interrupt
-	mvn		r13, #0
-	str		r13, [r8, CPU_DECREMENTER]
-	b		EXT(fleh_dec)
-
-	.text
-	.align 2
-	.globl EXT(s7002_get_decrementer)
-LEXT(s7002_get_decrementer)
-	ldr		ip, [r3, CPU_TBD_HARDWARE_ADDR]					// Get the hardware address
-	add		ip, ip, #PMGR_INTERVAL_TMR_OFFSET
-	ldr		r0, [ip]										// Get the Decrementer
-	bx		lr
-
-	.text
-	.align 2
-	.globl EXT(s7002_set_decrementer)
-LEXT(s7002_set_decrementer)
-	str		r0, [r3, CPU_DECREMENTER]					// Save the new dec value
-	ldr		ip, [r3, CPU_TBD_HARDWARE_ADDR]				// Get the hardware address
-	str		r0, [ip, #PMGR_INTERVAL_TMR_OFFSET]			// Store the new Decrementer
-	bx		lr
-#endif /* defined(ARM_BOARD_CLASS_S7002) */
 
 #if defined(ARM_BOARD_CLASS_T8002)
 	.text

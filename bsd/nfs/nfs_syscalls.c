@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2018 Apple Inc.  All rights reserved.
+ * Copyright (c) 2000-2020 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -64,6 +64,9 @@
  *	@(#)nfs_syscalls.c	8.5 (Berkeley) 3/30/95
  * FreeBSD-Id: nfs_syscalls.c,v 1.32 1997/11/07 08:53:25 phk Exp $
  */
+
+#include <nfs/nfs_conf.h>
+
 /*
  * NOTICE: This file was modified by SPARTA, Inc. in 2005 to introduce
  * support for mandatory and extensible security protections.  This notice
@@ -121,7 +124,7 @@
 
 kern_return_t   thread_terminate(thread_t); /* XXX */
 
-#if NFSSERVER
+#if CONFIG_NFS_SERVER
 
 extern const nfsrv_proc_t nfsrv_procs[NFS_NPROCS];
 
@@ -141,15 +144,17 @@ void    nfsrv_zapsock(struct nfsrv_sock *);
 void    nfsrv_slpderef(struct nfsrv_sock *);
 void    nfsrv_slpfree(struct nfsrv_sock *);
 
-#endif /* NFSSERVER */
+#endif /* CONFIG_NFS_SERVER */
 
+#if CONFIG_NFS
 /*
  * sysctl stuff
  */
 SYSCTL_DECL(_vfs_generic);
 SYSCTL_NODE(_vfs_generic, OID_AUTO, nfs, CTLFLAG_RW | CTLFLAG_LOCKED, 0, "nfs hinge");
+#endif /* CONFIG_NFS */
 
-#if NFSCLIENT
+#if CONFIG_NFS_CLIENT
 SYSCTL_NODE(_vfs_generic_nfs, OID_AUTO, client, CTLFLAG_RW | CTLFLAG_LOCKED, 0, "nfs client hinge");
 SYSCTL_INT(_vfs_generic_nfs_client, OID_AUTO, initialdowndelay, CTLFLAG_RW | CTLFLAG_LOCKED, &nfs_tprintf_initial_delay, 0, "");
 SYSCTL_INT(_vfs_generic_nfs_client, OID_AUTO, nextdowndelay, CTLFLAG_RW | CTLFLAG_LOCKED, &nfs_tprintf_delay, 0, "");
@@ -168,6 +173,7 @@ SYSCTL_INT(_vfs_generic_nfs_client, OID_AUTO, idmap_ctrl, CTLFLAG_RW | CTLFLAG_L
 SYSCTL_INT(_vfs_generic_nfs_client, OID_AUTO, callback_port, CTLFLAG_RW | CTLFLAG_LOCKED, &nfs_callback_port, 0, "");
 SYSCTL_INT(_vfs_generic_nfs_client, OID_AUTO, is_mobile, CTLFLAG_RW | CTLFLAG_LOCKED, &nfs_is_mobile, 0, "");
 SYSCTL_INT(_vfs_generic_nfs_client, OID_AUTO, squishy_flags, CTLFLAG_RW | CTLFLAG_LOCKED, &nfs_squishy_flags, 0, "");
+SYSCTL_UINT(_vfs_generic_nfs_client, OID_AUTO, tcp_sockbuf, CTLFLAG_RW | CTLFLAG_LOCKED, &nfs_tcp_sockbuf, 0, "");
 SYSCTL_UINT(_vfs_generic_nfs_client, OID_AUTO, debug_ctl, CTLFLAG_RW | CTLFLAG_LOCKED, &nfs_debug_ctl, 0, "");
 SYSCTL_INT(_vfs_generic_nfs_client, OID_AUTO, readlink_nocache, CTLFLAG_RW | CTLFLAG_LOCKED, &nfs_readlink_nocache, 0, "");
 #if CONFIG_NFS_GSS
@@ -176,9 +182,9 @@ SYSCTL_INT(_vfs_generic_nfs_client, OID_AUTO, root_steals_gss_context, CTLFLAG_R
 #if CONFIG_NFS4
 SYSCTL_STRING(_vfs_generic_nfs_client, OID_AUTO, default_nfs4domain, CTLFLAG_RW | CTLFLAG_LOCKED, nfs4_default_domain, sizeof(nfs4_default_domain), "");
 #endif
-#endif /* NFSCLIENT */
+#endif /* CONFIG_NFS_CLIENT */
 
-#if NFSSERVER
+#if CONFIG_NFS_SERVER
 SYSCTL_NODE(_vfs_generic_nfs, OID_AUTO, server, CTLFLAG_RW | CTLFLAG_LOCKED, 0, "nfs server hinge");
 SYSCTL_INT(_vfs_generic_nfs_server, OID_AUTO, wg_delay, CTLFLAG_RW | CTLFLAG_LOCKED, &nfsrv_wg_delay, 0, "");
 SYSCTL_INT(_vfs_generic_nfs_server, OID_AUTO, wg_delay_v3, CTLFLAG_RW | CTLFLAG_LOCKED, &nfsrv_wg_delay_v3, 0, "");
@@ -202,12 +208,9 @@ SYSCTL_INT(_vfs_generic_nfs_server, OID_AUTO, upcall_queue_limit, CTLFLAG_RW | C
 SYSCTL_INT(_vfs_generic_nfs_server, OID_AUTO, upcall_queue_max_seen, CTLFLAG_RW | CTLFLAG_LOCKED, &nfsrv_uc_queue_max_seen, 0, "");
 SYSCTL_INT(_vfs_generic_nfs_server, OID_AUTO, upcall_queue_count, CTLFLAG_RD | CTLFLAG_LOCKED, __DECONST(int *, &nfsrv_uc_queue_count), 0, "");
 #endif
-#endif /* NFSSERVER */
+#endif /* CONFIG_NFS_SERVER */
 
-
-#if NFSCLIENT
-
-#if CONFIG_NFS4
+#if CONFIG_NFS_CLIENT && CONFIG_NFS4
 static int
 mapname2id(struct nfs_testmapid *map)
 {
@@ -287,11 +290,21 @@ nfsclnt_testidmap(proc_t p, user_addr_t argp)
 
 	return error ? error : coerror;
 }
+#endif /* CONFIG_NFS_CLIENT && CONFIG_NFS4 */
+
+#if !CONFIG_NFS_CLIENT
+#define __no_nfs_client_unused      __unused
+#else
+#define __no_nfs_client_unused      /* nothing */
 #endif
 
 int
-nfsclnt(proc_t p, struct nfsclnt_args *uap, __unused int *retval)
+nfsclnt(
+	proc_t p __no_nfs_client_unused,
+	struct nfsclnt_args *uap __no_nfs_client_unused,
+	__unused int *retval)
 {
+#if CONFIG_NFS_CLIENT
 	struct lockd_ans la;
 	int error;
 
@@ -314,8 +327,12 @@ nfsclnt(proc_t p, struct nfsclnt_args *uap, __unused int *retval)
 		error = EINVAL;
 	}
 	return error;
+#else
+	return ENOSYS;
+#endif /* CONFIG_NFS_CLIENT */
 }
 
+#if CONFIG_NFS_CLIENT
 
 /*
  * Asynchronous I/O threads for client NFS.
@@ -512,27 +529,51 @@ worktodo:
 	return 0;
 }
 
-#endif /* NFSCLIENT */
+#endif /* CONFIG_NFS_CLIENT */
 
-
-#if NFSSERVER
+#if !CONFIG_NFS_SERVER
+#define __no_nfs_server_unused      __unused
+#else
+#define __no_nfs_server_unused      /* nothing */
+#endif
 
 /*
  * NFS server system calls
  * getfh() lives here too, but maybe should move to kern/vfs_syscalls.c
  */
 
+#if CONFIG_NFS_SERVER
+static struct nfs_exportfs *
+nfsrv_find_exportfs(const char *ptr)
+{
+	struct nfs_exportfs *nxfs;
+
+	LIST_FOREACH(nxfs, &nfsrv_exports, nxfs_next) {
+		if (!strncmp(nxfs->nxfs_path, ptr, MAXPATHLEN)) {
+			break;
+		}
+	}
+	if (nxfs && strncmp(nxfs->nxfs_path, ptr, strlen(nxfs->nxfs_path))) {
+		nxfs = NULL;
+	}
+
+	return nxfs;
+}
+
 /*
  * Get file handle system call
  */
 int
-getfh(proc_t p, struct getfh_args *uap, __unused int *retval)
+getfh(
+	proc_t p __no_nfs_server_unused,
+	struct getfh_args *uap __no_nfs_server_unused,
+	__unused int *retval)
 {
 	vnode_t vp;
 	struct nfs_filehandle nfh;
-	int error, fhlen, fidlen;
+	int error, fhlen = 0, fidlen;
 	struct nameidata nd;
-	char path[MAXPATHLEN], *ptr;
+	char path[MAXPATHLEN], real_mntonname[MAXPATHLEN], *ptr;
 	size_t pathlen;
 	struct nfs_exportfs *nxfs;
 	struct nfs_export *nx;
@@ -575,12 +616,28 @@ getfh(proc_t p, struct getfh_args *uap, __unused int *retval)
 	// find exportfs that matches f_mntonname
 	lck_rw_lock_shared(&nfsrv_export_rwlock);
 	ptr = vnode_mount(vp)->mnt_vfsstat.f_mntonname;
-	LIST_FOREACH(nxfs, &nfsrv_exports, nxfs_next) {
-		if (!strncmp(nxfs->nxfs_path, ptr, MAXPATHLEN)) {
-			break;
+	if ((nxfs = nfsrv_find_exportfs(ptr)) == NULL) {
+		/*
+		 * The f_mntonname might be a firmlink path.  Resolve
+		 * it into a physical path and try again.
+		 */
+		int pathbuflen = MAXPATHLEN;
+		vnode_t rvp;
+
+		error = VFS_ROOT(vnode_mount(vp), &rvp, vfs_context_current());
+		if (error) {
+			goto out;
 		}
+		error = vn_getpath_ext(rvp, NULLVP, real_mntonname, &pathbuflen,
+		    VN_GETPATH_FSENTER | VN_GETPATH_NO_FIRMLINK);
+		vnode_put(rvp);
+		if (error) {
+			goto out;
+		}
+		ptr = real_mntonname;
+		nxfs = nfsrv_find_exportfs(ptr);
 	}
-	if (!nxfs || strncmp(nxfs->nxfs_path, path, strlen(nxfs->nxfs_path))) {
+	if (nxfs == NULL) {
 		error = EINVAL;
 		goto out;
 	}
@@ -590,7 +647,7 @@ getfh(proc_t p, struct getfh_args *uap, __unused int *retval)
 		ptr++;
 	}
 	LIST_FOREACH(nx, &nxfs->nxfs_exports, nx_next) {
-		int len = strlen(nx->nx_path);
+		size_t len = strlen(nx->nx_path);
 		if (len == 0) { // we've hit the export entry for the root directory
 			break;
 		}
@@ -632,7 +689,9 @@ out:
 	error = copyout((caddr_t)&nfh, uap->fhp, sizeof(fhandle_t));
 	return error;
 }
+#endif /* CONFIG_NFS_SERVER */
 
+#if CONFIG_NFS_SERVER
 extern const struct fileops vnops;
 
 /*
@@ -643,9 +702,9 @@ extern const struct fileops vnops;
  * security hole.
  */
 int
-fhopen( proc_t p,
-    struct fhopen_args *uap,
-    int32_t *retval)
+fhopen(proc_t p __no_nfs_server_unused,
+    struct fhopen_args *uap __no_nfs_server_unused,
+    int32_t *retval __no_nfs_server_unused)
 {
 	vnode_t vp;
 	struct nfs_filehandle nfh;
@@ -758,9 +817,9 @@ fhopen( proc_t p,
 	}
 	fp = nfp;
 
-	fp->f_fglob->fg_flag = fmode & FMASK;
-	fp->f_fglob->fg_ops = &vnops;
-	fp->f_fglob->fg_data = (caddr_t)vp;
+	fp->fp_glob->fg_flag = fmode & FMASK;
+	fp->fp_glob->fg_ops = &vnops;
+	fp->fp_glob->fg_data = (caddr_t)vp;
 
 	// XXX do we really need to support this with fhopen()?
 	if (fmode & (O_EXLOCK | O_SHLOCK)) {
@@ -776,16 +835,16 @@ fhopen( proc_t p,
 		if ((fmode & FNONBLOCK) == 0) {
 			type |= F_WAIT;
 		}
-		if ((error = VNOP_ADVLOCK(vp, (caddr_t)fp->f_fglob, F_SETLK, &lf, type, ctx, NULL))) {
+		if ((error = VNOP_ADVLOCK(vp, (caddr_t)fp->fp_glob, F_SETLK, &lf, type, ctx, NULL))) {
 			struct vfs_context context = *vfs_context_current();
 			/* Modify local copy (to not damage thread copy) */
-			context.vc_ucred = fp->f_fglob->fg_cred;
+			context.vc_ucred = fp->fp_glob->fg_cred;
 
-			vn_close(vp, fp->f_fglob->fg_flag, &context);
+			vn_close(vp, fp->fp_glob->fg_flag, &context);
 			fp_free(p, indx, fp);
-			return error;
+			goto bad;
 		}
-		fp->f_fglob->fg_flag |= FHASLOCK;
+		fp->fp_glob->fg_flag |= FWASLOCKED;
 	}
 
 	vnode_put(vp);
@@ -802,12 +861,16 @@ bad:
 	vnode_put(vp);
 	return error;
 }
+#endif /* CONFIG_NFS_SERVER */
 
+#if CONFIG_NFS_SERVER
 /*
  * NFS server pseudo system call
  */
 int
-nfssvc(proc_t p, struct nfssvc_args *uap, __unused int *retval)
+nfssvc(proc_t p __no_nfs_server_unused,
+    struct nfssvc_args *uap __no_nfs_server_unused,
+    __unused int *retval)
 {
 	mbuf_t nam;
 	struct user_nfsd_args user_nfsdarg;
@@ -883,6 +946,9 @@ nfssvc(proc_t p, struct nfssvc_args *uap, __unused int *retval)
 	}
 	return error;
 }
+#endif /* CONFIG_NFS_SERVER */
+
+#if CONFIG_NFS_SERVER
 
 /*
  * Adds a socket to the list for servicing by nfsds.
@@ -892,8 +958,9 @@ nfssvc_addsock(socket_t so, mbuf_t mynam)
 {
 	struct nfsrv_sock *slp;
 	int error = 0, sodomain, sotype, soprotocol, on = 1;
-	int first;
+	int first, sobufsize;
 	struct timeval timeo;
+	u_quad_t sbmaxsize;
 
 	/* make sure mbuf constants are set up */
 	if (!nfs_mbuf_mhlen) {
@@ -925,14 +992,18 @@ nfssvc_addsock(socket_t so, mbuf_t mynam)
 	if ((sodomain == AF_INET) && (soprotocol == IPPROTO_TCP)) {
 		sock_setsockopt(so, IPPROTO_TCP, TCP_NODELAY, &on, sizeof(on));
 	}
-	if (sotype == SOCK_DGRAM || sodomain == AF_LOCAL) { /* set socket buffer sizes for UDP */
-		int reserve = (sotype == SOCK_DGRAM) ? NFS_UDPSOCKBUF : (2 * 1024 * 1024);
-		error |= sock_setsockopt(so, SOL_SOCKET, SO_SNDBUF, &reserve, sizeof(reserve));
-		error |= sock_setsockopt(so, SOL_SOCKET, SO_RCVBUF, &reserve, sizeof(reserve));
-		if (error) {
-			log(LOG_INFO, "nfssvc_addsock: UDP socket buffer setting error(s) %d\n", error);
-			error = 0;
-		}
+
+	/* Calculate maximum supported socket buffers sizes */
+	sbmaxsize = (u_quad_t)sb_max * MCLBYTES / (MSIZE + MCLBYTES);
+
+	/* Set socket buffer sizes for UDP/TCP */
+	sobufsize = min(sbmaxsize, (sotype == SOCK_DGRAM) ? NFS_UDPSOCKBUF : NFSRV_TCPSOCKBUF);
+	error |= sock_setsockopt(so, SOL_SOCKET, SO_SNDBUF, &sobufsize, sizeof(sobufsize));
+	error |= sock_setsockopt(so, SOL_SOCKET, SO_RCVBUF, &sobufsize, sizeof(sobufsize));
+
+	if (error) {
+		log(LOG_INFO, "nfssvc_addsock: socket buffer setting error(s) %d\n", error);
+		error = 0;
 	}
 	sock_nointerrupt(so, 0);
 
@@ -1048,6 +1119,7 @@ nfssvc_addsock(socket_t so, mbuf_t mynam)
 	slp->ns_so = so;
 	slp->ns_sotype = sotype;
 	slp->ns_nam = mynam;
+	slp->ns_sobufsize = sobufsize;
 
 	/* set up the socket up-call */
 	nfsrv_uc_addsock(slp, first);
@@ -1101,13 +1173,13 @@ nfssvc_addsock(socket_t so, mbuf_t mynam)
 int
 nfssvc_nfsd(void)
 {
-	mbuf_t m, mrep;
+	mbuf_t m, mrep = NULL;
 	struct nfsrv_sock *slp;
 	struct nfsd *nfsd;
 	struct nfsrv_descript *nd = NULL;
 	int error = 0, cacherep, writes_todo;
 	int siz, procrastinate, opcnt = 0;
-	u_quad_t cur_usec;
+	time_t cur_usec;
 	struct timeval now;
 	struct vfs_context context;
 	struct timespec to;
@@ -1240,8 +1312,7 @@ nfssvc_nfsd(void)
 				writes_todo = 0;
 				if (error && (slp->ns_wgtime || (slp->ns_flag & SLP_DOWRITES))) {
 					microuptime(&now);
-					cur_usec = (u_quad_t)now.tv_sec * 1000000 +
-					    (u_quad_t)now.tv_usec;
+					cur_usec = (now.tv_sec * 1000000) + now.tv_usec;
 					if (slp->ns_wgtime <= cur_usec) {
 						error = 0;
 						cacherep = RC_DOIT;
@@ -1265,8 +1336,7 @@ nfssvc_nfsd(void)
 				if (nd->nd_gss_context) {
 					nfs_gss_svc_ctx_deref(nd->nd_gss_context);
 				}
-				FREE_ZONE(nd, sizeof(*nd), M_NFSRVDESC);
-				nd = NULL;
+				NFS_ZFREE(nfsrv_descript_zone, nd);
 			}
 			nfsd->nfsd_slp = NULL;
 			nfsd->nfsd_flag &= ~NFSD_REQINPROG;
@@ -1352,7 +1422,7 @@ nfssvc_nfsd(void)
 				}
 				OSAddAtomic64(1, &nfsstats.srvrpccnt[nd->nd_procnum]);
 				nfsrv_updatecache(nd, TRUE, mrep);
-			/* FALLTHRU */
+				OS_FALLTHROUGH;
 
 			case RC_REPLY:
 				if (nd->nd_gss_mb != NULL) { // It's RPCSEC_GSS
@@ -1423,7 +1493,7 @@ nfssvc_nfsd(void)
 					if (nd->nd_gss_context) {
 						nfs_gss_svc_ctx_deref(nd->nd_gss_context);
 					}
-					FREE_ZONE(nd, sizeof(*nd), M_NFSRVDESC);
+					NFS_ZFREE(nfsrv_descript_zone, nd);
 					nfsrv_slpderef(slp);
 					lck_mtx_lock(nfsd_mutex);
 					goto done;
@@ -1447,8 +1517,7 @@ nfssvc_nfsd(void)
 				if (nd->nd_gss_context) {
 					nfs_gss_svc_ctx_deref(nd->nd_gss_context);
 				}
-				FREE_ZONE(nd, sizeof(*nd), M_NFSRVDESC);
-				nd = NULL;
+				NFS_ZFREE(nfsrv_descript_zone, nd);
 			}
 
 			/*
@@ -1458,8 +1527,7 @@ nfssvc_nfsd(void)
 			writes_todo = 0;
 			if (slp->ns_wgtime) {
 				microuptime(&now);
-				cur_usec = (u_quad_t)now.tv_sec * 1000000 +
-				    (u_quad_t)now.tv_usec;
+				cur_usec = (now.tv_sec * 1000000) + now.tv_usec;
 				if (slp->ns_wgtime <= cur_usec) {
 					cacherep = RC_DOIT;
 					writes_todo = 1;
@@ -1605,7 +1673,7 @@ nfsrv_slpfree(struct nfsrv_sock *slp)
 		if (nwp->nd_gss_context) {
 			nfs_gss_svc_ctx_deref(nwp->nd_gss_context);
 		}
-		FREE_ZONE(nwp, sizeof(*nwp), M_NFSRVDESC);
+		NFS_ZFREE(nfsrv_descript_zone, nwp);
 	}
 	LIST_INIT(&slp->ns_tq);
 
@@ -1798,4 +1866,4 @@ nfsrv_cleanup(void)
 	nfsrv_udp6sock = NULL;
 }
 
-#endif /* NFS_NOSERVER */
+#endif /* CONFIG_NFS_SERVER */

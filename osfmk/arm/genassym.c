@@ -81,10 +81,11 @@
 #include <arm/cpu_internal.h>
 #include <arm/rtclock.h>
 #include <machine/commpage.h>
+#include <machine/config.h>
 #include <vm/vm_map.h>
 #include <pexpert/arm/boot.h>
 #include <arm/proc_reg.h>
-#include <prng/random.h>
+#include <prng/entropy.h>
 
 /*
  * genassym.c is used to produce an
@@ -131,18 +132,15 @@ main(
 	DECLARE("ACT_TASK", offsetof(struct thread, task));
 	DECLARE("ACT_PCBDATA", offsetof(struct thread, machine.PcbData));
 #if __ARM_VFP__
-	DECLARE("ACT_UVFP", offsetof(struct thread, machine.uVFPdata));
-	DECLARE("ACT_KVFP", offsetof(struct thread, machine.kVFPdata));
+	DECLARE("ACT_UVFP", offsetof(struct thread, machine.PcbData.VFPdata));
 #endif
 	DECLARE("TH_CTH_SELF", offsetof(struct thread, machine.cthread_self));
-	DECLARE("TH_CTH_DATA", offsetof(struct thread, machine.cthread_data));
 	DECLARE("ACT_PCBDATA_PC", offsetof(struct thread, machine.PcbData.pc));
 	DECLARE("ACT_PCBDATA_R0", offsetof(struct thread, machine.PcbData.r[0]));
 	DECLARE("ACT_PREEMPT_CNT", offsetof(struct thread, machine.preemption_count));
 	DECLARE("ACT_CPUDATAP", offsetof(struct thread, machine.CpuDatap));
 	DECLARE("ACT_MAP", offsetof(struct thread, map));
 #if __ARM_USER_PROTECT__
-	DECLARE("ACT_UPTW_TTC", offsetof(struct thread, machine.uptw_ttc));
 	DECLARE("ACT_UPTW_TTB", offsetof(struct thread, machine.uptw_ttb));
 	DECLARE("ACT_KPTW_TTB", offsetof(struct thread, machine.kptw_ttb));
 	DECLARE("ACT_ASID", offsetof(struct thread, machine.asid));
@@ -150,6 +148,7 @@ main(
 	DECLARE("ACT_DEBUGDATA", offsetof(struct thread, machine.DebugData));
 	DECLARE("TH_IOTIER_OVERRIDE", offsetof(struct thread, iotier_override));
 	DECLARE("TH_RWLOCK_CNT", offsetof(struct thread, rwlock_count));
+	DECLARE("TH_TMP_ALLOC_CNT", offsetof(struct thread, t_temp_alloc_count));
 	DECLARE("TH_SCHED_FLAGS", offsetof(struct thread, sched_flags));
 	DECLARE("TH_SFLAG_RW_PROMOTED", TH_SFLAG_RW_PROMOTED);
 
@@ -176,6 +175,7 @@ main(
 	DECLARE("SS_EXC", offsetof(struct arm_saved_state, exception));
 
 #if __ARM_VFP__
+	DECLARE("SS_KVFP", offsetof(struct arm_saved_state, VFPdata));
 	DECLARE("VSS_SIZE", sizeof(struct arm_vfpsaved_state));
 	DECLARE("VSS_FPSCR", offsetof(struct arm_vfpsaved_state, fpscr));
 	DECLARE("VSS_FPEXC", offsetof(struct arm_vfpsaved_state, fpexc));
@@ -200,8 +200,6 @@ main(
 
 	DECLARE("KERN_INVALID_ADDRESS", KERN_INVALID_ADDRESS);
 
-	DECLARE("MAX_CPUS", MAX_CPUS);
-
 	DECLARE("cdeSize",
 	    sizeof(struct cpu_data_entry));
 
@@ -222,16 +220,12 @@ main(
 	    offsetof(cpu_data_t, fiqstack_top));
 	DECLARE("CPU_NUMBER_GS",
 	    offsetof(cpu_data_t, cpu_number));
-	DECLARE("CPU_IDENT",
-	    offsetof(cpu_data_t, cpu_ident));
 	DECLARE("CPU_RUNNING",
 	    offsetof(cpu_data_t, cpu_running));
 	DECLARE("CPU_MCOUNT_OFF",
 	    offsetof(cpu_data_t, cpu_mcount_off));
 	DECLARE("CPU_PENDING_AST",
 	    offsetof(cpu_data_t, cpu_pending_ast));
-	DECLARE("CPU_PROCESSOR",
-	    offsetof(cpu_data_t, cpu_processor));
 	DECLARE("CPU_CACHE_DISPATCH",
 	    offsetof(cpu_data_t, cpu_cache_dispatch));
 	DECLARE("CPU_BASE_TIMEBASE_LOW",
@@ -326,22 +320,22 @@ main(
 	DECLARE("TIMER_TSTAMP",
 	    offsetof(struct timer, tstamp));
 	DECLARE("THREAD_TIMER",
-	    offsetof(struct processor, processor_data.thread_timer));
+	    offsetof(struct processor, thread_timer));
 	DECLARE("KERNEL_TIMER",
-	    offsetof(struct processor, processor_data.kernel_timer));
+	    offsetof(struct processor, kernel_timer));
 	DECLARE("SYSTEM_STATE",
-	    offsetof(struct processor, processor_data.system_state));
+	    offsetof(struct processor, system_state));
 	DECLARE("USER_STATE",
-	    offsetof(struct processor, processor_data.user_state));
+	    offsetof(struct processor, user_state));
 	DECLARE("CURRENT_STATE",
-	    offsetof(struct processor, processor_data.current_state));
+	    offsetof(struct processor, current_state));
 
 	DECLARE("SYSTEM_TIMER",
 	    offsetof(struct thread, system_timer));
 	DECLARE("USER_TIMER",
 	    offsetof(struct thread, user_timer));
 
-#if !CONFIG_SKIP_PRECISE_USER_KERNEL_TIME
+#if !CONFIG_SKIP_PRECISE_USER_KERNEL_TIME || HAS_FAST_CNTVCT
 	DECLARE("PRECISE_USER_KERNEL_TIME",
 	    offsetof(struct thread, precise_user_kernel_time));
 #endif
@@ -359,7 +353,10 @@ main(
 	    offsetof(entropy_data_t, sample_count));
 	DECLARE("ENTROPY_BUFFER",
 	    offsetof(entropy_data_t, buffer));
-	DECLARE("ENTROPY_BUFFER_INDEX_MASK", ENTROPY_BUFFER_INDEX_MASK);
+	DECLARE("ENTROPY_BUFFER_INDEX_MASK",
+	    offsetof(entropy_data_t, buffer_index_mask));
+	DECLARE("ENTROPY_BUFFER_ROR_MASK",
+	    offsetof(entropy_data_t, ror_mask));
 
 	return 0;
 }

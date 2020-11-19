@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2004-2016 Apple Inc.
+ * Copyright (c) 2004-2019 Apple Inc.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -172,7 +172,12 @@ void    audit_syscall_exit(int error, struct proc *proc,
 void    audit_mach_syscall_enter(unsigned short audit_event);
 void    audit_mach_syscall_exit(int retval, struct uthread *uthread);
 
-extern struct auditinfo_addr *audit_default_aia_p;
+void                    audit_subcall_enter(au_event_t event,
+    struct proc *proc, struct uthread *uthread);
+void                    audit_subcall_exit(int error,
+    struct uthread *uthread);
+
+extern struct auditinfo_addr * const audit_default_aia_p;
 
 /*
  * The remaining kernel functions are conditionally compiled in as they are
@@ -242,9 +247,9 @@ void     audit_arg_auditon(struct kaudit_record *ar,
 void     audit_arg_file(struct kaudit_record *ar, struct proc *p,
     struct fileproc *fp);
 void     audit_arg_argv(struct kaudit_record *ar, char *argv, int argc,
-    int length);
+    size_t length);
 void     audit_arg_envv(struct kaudit_record *ar, char *envv, int envc,
-    int length);
+    size_t length);
 void    audit_arg_identity(struct kaudit_record *ar);
 
 void     audit_arg_mach_port1(struct kaudit_record *ar, mach_port_name_t port);
@@ -349,6 +354,16 @@ extern au_event_t sys_au_event[];
 	                audit_syscall_exit(code, error, proc, uthread); \
 } while (0)
 
+#define AUDIT_SUBCALL_ENTER(event, proc, uthread)  do {                 \
+	if (AUDIT_ENABLED())                                            \
+	        audit_subcall_enter(AUE_ ## event, proc, uthread);      \
+} while (0)
+
+#define AUDIT_SUBCALL_EXIT(uthread, error)  do {                        \
+	        if (AUDIT_AUDITING(uthread->uu_ar))                     \
+	                audit_subcall_exit(error, uthread);             \
+} while (0)
+
 /*
  * Wrap the audit_mach_syscall_enter() and audit_mach_syscall_exit()
  * functions in a manner similar to other system call enter/exit functions.
@@ -388,6 +403,12 @@ extern au_event_t sys_au_event[];
 } while (0)
 
 #define AUDIT_SYSCALL_EXIT(code, proc, uthread, error)  do {            \
+} while (0)
+
+#define AUDIT_SUBCALL_ENTER(event, proc, uthread)    do {               \
+} while (0)
+
+#define AUDIT_SUBCALL_EXIT(uthread, error)  do {                        \
 } while (0)
 
 #define AUDIT_MACH_SYSCALL_ENTER(args...)       do {                    \

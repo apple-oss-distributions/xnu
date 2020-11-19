@@ -169,9 +169,11 @@ __OSKextVersionStageForString(const char ** string_p)
 /*********************************************************************
 *********************************************************************/
 static const char *
-__OSKextVersionStringForStage(OSKextVersionStage stage)
+__OSKextVersionStringForStage(OSKextVersion stage)
 {
 	switch (stage) {
+	default:
+		OS_FALLTHROUGH;
 	case kOSKextVersionStageInvalid:     return NULL;
 	case kOSKextVersionStageDevelopment: return "d";
 	case kOSKextVersionStageAlpha:       return "a";
@@ -192,7 +194,7 @@ OSKextParseVersionString(const char * versionString)
 	OSKextVersion   vers_major         = 0;
 	OSKextVersion   vers_minor         = 0;
 	OSKextVersion   vers_revision      = 0;
-	OSKextVersion   vers_stage         = 0;
+	OSKextVersionStage   vers_stage         = 0;
 	OSKextVersion   vers_stage_level   = 0;
 	const char    * current_char_p;
 
@@ -453,20 +455,20 @@ OSKextVersionGetString(
 		return TRUE;
 	}
 
-	cpos = snprintf(buffer, bufferLength, "%u", (uint32_t)vers_major);
+	cpos = scnprintf(buffer, bufferLength, "%u", (uint32_t)vers_major);
 
 	/* Always include the minor version; it just looks weird without.
 	 */
 	buffer[cpos] = '.';
 	cpos++;
-	cpos += snprintf(buffer + cpos, bufferLength - cpos, "%u", (uint32_t)vers_minor);
+	cpos += scnprintf(buffer + cpos, bufferLength - cpos, "%u", (uint32_t)vers_minor);
 
 	/* The revision is displayed only if nonzero.
 	 */
 	if (vers_revision) {
 		buffer[cpos] = '.';
 		cpos++;
-		cpos += snprintf(buffer + cpos, bufferLength - cpos, "%u",
+		cpos += scnprintf(buffer + cpos, bufferLength - cpos, "%u",
 		    (uint32_t)vers_revision);
 	}
 

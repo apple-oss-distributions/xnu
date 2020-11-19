@@ -65,7 +65,7 @@
 #include <i386/trap.h>
 #include <i386/pmap.h>
 #include <i386/fpu.h>
-#include <i386/misc_protos.h> /* panic_io_port_read() */
+#include <i386/panic_notify.h>
 
 #include <mach/exception.h>
 #include <mach/kern_return.h>
@@ -130,7 +130,7 @@ panic_64(x86_saved_state_t *sp, __unused int pc, __unused const char *msg, boole
 	 * Issue an I/O port read if one has been requested - this is an
 	 * event logic analyzers can use as a trigger point.
 	 */
-	panic_io_port_read();
+	panic_notify();
 
 
 	/*
@@ -171,11 +171,19 @@ panic_64(x86_saved_state_t *sp, __unused int pc, __unused const char *msg, boole
 void
 panic_double_fault64(x86_saved_state_t *sp)
 {
+#if DEVELOPMENT || DEBUG
+	uint64_t frameptr = is_saved_state64(sp) ? saved_state64(sp)->rbp : saved_state32(sp)->ebp;
+	(void) traptrace_start(T_DOUBLE_FAULT, saved_state64(sp)->isf.rip, mach_absolute_time(), frameptr);
+#endif
 	(void)OSCompareAndSwap((UInt32) - 1, (UInt32) cpu_number(), (volatile UInt32 *)&panic_double_fault_cpu);
 	panic_64(sp, PANIC_DOUBLE_FAULT, "Double fault", FALSE);
 }
 void
 panic_machine_check64(x86_saved_state_t *sp)
 {
+#if DEVELOPMENT || DEBUG
+	uint64_t frameptr = is_saved_state64(sp) ? saved_state64(sp)->rbp : saved_state32(sp)->ebp;
+	(void) traptrace_start(T_MACHINE_CHECK, saved_state64(sp)->isf.rip, mach_absolute_time(), frameptr);
+#endif
 	panic_64(sp, PANIC_MACHINE_CHECK, "Machine Check", TRUE);
 }

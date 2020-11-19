@@ -149,8 +149,7 @@ extern int      ffsll(unsigned long long);
 extern int      fls(unsigned int);
 extern int      flsll(unsigned long long);
 extern u_int32_t        random(void);
-extern int      scanc(u_int, u_char *, const u_char *, int);
-extern int      skpc(int, int, char *);
+extern size_t   scanc(size_t, u_char *, const u_char *, u_char);
 extern long     strtol(const char*, char **, int);
 extern u_long   strtoul(const char *, char **, int);
 extern quad_t   strtoq(const char *, char **, int);
@@ -159,7 +158,13 @@ extern char     *strsep(char **, const char *);
 extern void     *memchr(const void *, int, size_t);
 extern void     url_decode(char *str);
 
+/*
+ * NOTE: snprintf() returns the full length of the formatted string even if it
+ * couldn't fit in the supplied buffer.
+ * Use scnprintf() if you need the actual number of bytes (minus the \0)
+ */
 int     snprintf(char *, size_t, const char *, ...) __printflike(3, 4);
+int     scnprintf(char *, size_t, const char *, ...) __printflike(3, 4);
 
 /* sprintf() is being deprecated. Please use snprintf() instead. */
 int     sprintf(char *bufp, const char *, ...) __deprecated __printflike(2, 3);
@@ -209,9 +214,11 @@ int vsscanf(const char *, char const *, va_list);
 
 extern int      vprintf(const char *, va_list) __printflike(1, 0);
 extern int      vsnprintf(char *, size_t, const char *, va_list) __printflike(3, 0);
+extern int      vscnprintf(char *, size_t, const char *, va_list) __printflike(3, 0);
 
 #if XNU_KERNEL_PRIVATE
-extern int      vprintf_log_locked(const char *, va_list, bool addcr) __printflike(1, 0);
+extern bool     printf_log_locked(bool addcr, const char*, ...) __printflike(2, 3);
+extern bool     vprintf_log_locked(const char *, va_list, bool addcr) __printflike(1, 0);
 extern void     osobject_retain(void * object);
 extern void     osobject_release(void * object);
 #endif

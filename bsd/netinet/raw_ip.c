@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2019 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2020 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -86,6 +86,7 @@
 #include <net/if.h>
 #include <net/net_api_stats.h>
 #include <net/route.h>
+#include <net/content_filter.h>
 
 #define _IP_VHL
 #include <netinet/in.h>
@@ -96,11 +97,8 @@
 #include <netinet/in_var.h>
 #include <netinet/ip_var.h>
 
-#if INET6
 #include <netinet6/in6_pcb.h>
-#endif /* INET6 */
 
-#include <netinet/ip_fw.h>
 
 #if IPSEC
 #include <netinet6/ipsec.h>
@@ -108,13 +106,8 @@
 
 #if DUMMYNET
 #include <netinet/ip_dummynet.h>
-#endif
+#endif /* DUMMYNET */
 
-#if CONFIG_MACF_NET
-#include <security/mac_framework.h>
-#endif /* MAC_NET */
-
-int load_ipfw(void);
 int rip_detach(struct socket *);
 int rip_abort(struct socket *);
 int rip_disconnect(struct socket *);
@@ -125,10 +118,7 @@ int rip_shutdown(struct socket *);
 struct  inpcbhead ripcb;
 struct  inpcbinfo ripcbinfo;
 
-/* control hooks for ipfw and dummynet */
-#if IPFIREWALL
-ip_fw_ctl_t *ip_fw_ctl_ptr;
-#endif /* IPFIREWALL */
+/* control hooks for dummynet */
 #if DUMMYNET
 ip_dn_ctl_t *ip_dn_ctl_ptr;
 #endif /* DUMMYNET */
@@ -170,8 +160,8 @@ rip_init(struct protosw *pp, struct domain *dp)
 	ripcbinfo.ipi_hashbase = hashinit(1, M_PCB, &ripcbinfo.ipi_hashmask);
 	ripcbinfo.ipi_porthashbase = hashinit(1, M_PCB, &ripcbinfo.ipi_porthashmask);
 
-	ripcbinfo.ipi_zone = zinit(sizeof(struct inpcb),
-	    (4096 * sizeof(struct inpcb)), 4096, "ripzone");
+	ripcbinfo.ipi_zone = zone_create("ripzone", sizeof(struct inpcb),
+	    ZC_NONE);
 
 	pcbinfo = &ripcbinfo;
 	/*
@@ -222,11 +212,9 @@ rip_input(struct mbuf *m, int iphlen)
 	ripsrc.sin_addr = ip->ip_src;
 	lck_rw_lock_shared(ripcbinfo.ipi_lock);
 	LIST_FOREACH(inp, &ripcb, inp_list) {
-#if INET6
 		if ((inp->inp_vflag & INP_IPV4) == 0) {
 			continue;
 		}
-#endif
 		if (inp->inp_ip_p && (inp->inp_ip_p != ip->ip_p)) {
 			continue;
 		}
@@ -248,24 +236,19 @@ rip_input(struct mbuf *m, int iphlen)
 
 #if NECP
 			if (n && !necp_socket_is_allowed_to_send_recv_v4(last, 0, 0,
-			    &ip->ip_dst, &ip->ip_src, ifp, NULL, NULL, NULL)) {
+			    &ip->ip_dst, &ip->ip_src, ifp, 0, NULL, NULL, NULL, NULL)) {
 				m_freem(n);
 				/* do not inject data to pcb */
 				skipit = 1;
 			}
 #endif /* NECP */
-#if CONFIG_MACF_NET
-			if (n && skipit == 0) {
-				if (mac_inpcb_check_deliver(last, n, AF_INET,
-				    SOCK_RAW) != 0) {
-					m_freem(n);
-					skipit = 1;
-				}
-			}
-#endif
 			if (n && skipit == 0) {
 				int error = 0;
 				if ((last->inp_flags & INP_CONTROLOPTS) != 0 ||
+#if CONTENT_FILTER
+				    /* Content Filter needs to see local address */
+				    (last->inp_socket->so_cfil_db != NULL) ||
+#endif
 				    (last->inp_socket->so_options & SO_TIMESTAMP) != 0 ||
 				    (last->inp_socket->so_options & SO_TIMESTAMP_MONOTONIC) != 0 ||
 				    (last->inp_socket->so_options & SO_TIMESTAMP_CONTINUOUS) != 0) {
@@ -277,7 +260,14 @@ rip_input(struct mbuf *m, int iphlen)
 						continue;
 					}
 				}
-				if (last->inp_flags & INP_STRIPHDR) {
+				if (last->inp_flags & INP_STRIPHDR
+#if CONTENT_FILTER
+				    /*
+				     * If socket is subject to Content Filter, delay stripping until reinject
+				     */
+				    && (last->inp_socket->so_cfil_db == NULL)
+#endif
+				    ) {
 					n->m_len -= iphlen;
 					n->m_pkthdr.len -= iphlen;
 					n->m_data += iphlen;
@@ -302,24 +292,20 @@ rip_input(struct mbuf *m, int iphlen)
 	skipit = 0;
 #if NECP
 	if (last && !necp_socket_is_allowed_to_send_recv_v4(last, 0, 0,
-	    &ip->ip_dst, &ip->ip_src, ifp, NULL, NULL, NULL)) {
+	    &ip->ip_dst, &ip->ip_src, ifp, 0, NULL, NULL, NULL, NULL)) {
 		m_freem(m);
 		OSAddAtomic(1, &ipstat.ips_delivered);
 		/* do not inject data to pcb */
 		skipit = 1;
 	}
 #endif /* NECP */
-#if CONFIG_MACF_NET
-	if (last && skipit == 0) {
-		if (mac_inpcb_check_deliver(last, m, AF_INET, SOCK_RAW) != 0) {
-			skipit = 1;
-			m_freem(m);
-		}
-	}
-#endif
 	if (skipit == 0) {
 		if (last) {
 			if ((last->inp_flags & INP_CONTROLOPTS) != 0 ||
+#if CONTENT_FILTER
+			    /* Content Filter needs to see local address */
+			    (last->inp_socket->so_cfil_db != NULL) ||
+#endif
 			    (last->inp_socket->so_options & SO_TIMESTAMP) != 0 ||
 			    (last->inp_socket->so_options & SO_TIMESTAMP_MONOTONIC) != 0 ||
 			    (last->inp_socket->so_options & SO_TIMESTAMP_CONTINUOUS) != 0) {
@@ -330,7 +316,14 @@ rip_input(struct mbuf *m, int iphlen)
 					goto unlock;
 				}
 			}
-			if (last->inp_flags & INP_STRIPHDR) {
+			if (last->inp_flags & INP_STRIPHDR
+#if CONTENT_FILTER
+			    /*
+			     * If socket is subject to Content Filter, delay stripping until reinject
+			     */
+			    && (last->inp_socket->so_cfil_db == NULL)
+#endif
+			    ) {
 				m->m_len -= iphlen;
 				m->m_pkthdr.len -= iphlen;
 				m->m_data += iphlen;
@@ -370,9 +363,74 @@ rip_output(
 	struct ip *ip;
 	struct inpcb *inp = sotoinpcb(so);
 	int flags = (so->so_options & SO_DONTROUTE) | IP_ALLOWBROADCAST;
+	int inp_flags = inp ? inp->inp_flags : 0;
 	struct ip_out_args ipoa;
 	struct ip_moptions *imo;
+	int tos = IPTOS_UNSPEC;
 	int error = 0;
+#if CONTENT_FILTER
+	struct m_tag *cfil_tag = NULL;
+	bool cfil_faddr_use = false;
+	uint32_t cfil_so_state_change_cnt = 0;
+	uint32_t cfil_so_options = 0;
+	int cfil_inp_flags = 0;
+	struct sockaddr *cfil_faddr = NULL;
+	struct sockaddr_in *cfil_sin;
+#endif
+
+#if CONTENT_FILTER
+	/*
+	 * If socket is subject to Content Filter and no addr is passed in,
+	 * retrieve CFIL saved state from mbuf and use it if necessary.
+	 */
+	if (so->so_cfil_db && dst == INADDR_ANY) {
+		cfil_tag = cfil_dgram_get_socket_state(m, &cfil_so_state_change_cnt, &cfil_so_options, &cfil_faddr, &cfil_inp_flags);
+		if (cfil_tag) {
+			cfil_sin = SIN(cfil_faddr);
+			flags = (cfil_so_options & SO_DONTROUTE) | IP_ALLOWBROADCAST;
+			inp_flags = cfil_inp_flags;
+			if (inp && inp->inp_faddr.s_addr == INADDR_ANY) {
+				/*
+				 * Socket is unconnected, simply use the saved faddr as 'addr' to go through
+				 * the connect/disconnect logic.
+				 */
+				dst = cfil_sin->sin_addr.s_addr;
+			} else if ((so->so_state_change_cnt != cfil_so_state_change_cnt) &&
+			    (inp->inp_fport != cfil_sin->sin_port ||
+			    inp->inp_faddr.s_addr != cfil_sin->sin_addr.s_addr)) {
+				/*
+				 * Socket is connected but socket state and dest addr/port changed.
+				 * We need to use the saved faddr and socket options.
+				 */
+				cfil_faddr_use = true;
+			}
+			m_tag_free(cfil_tag);
+		}
+	}
+#endif
+
+	if (so->so_state & SS_ISCONNECTED) {
+		if (dst != INADDR_ANY) {
+			if (m != NULL) {
+				m_freem(m);
+			}
+			if (control != NULL) {
+				m_freem(control);
+			}
+			return EISCONN;
+		}
+		dst = cfil_faddr_use ? cfil_sin->sin_addr.s_addr : inp->inp_faddr.s_addr;
+	} else {
+		if (dst == INADDR_ANY) {
+			if (m != NULL) {
+				m_freem(m);
+			}
+			if (control != NULL) {
+				m_freem(control);
+			}
+			return ENOTCONN;
+		}
+	}
 
 	bzero(&ipoa, sizeof(ipoa));
 	ipoa.ipoa_boundif = IFSCOPE_NONE;
@@ -383,6 +441,7 @@ rip_output(
 
 
 	if (control != NULL) {
+		tos = so_tos_from_control(control);
 		sotc = so_tc_from_control(control, &netsvctype);
 
 		m_freem(control);
@@ -434,7 +493,7 @@ rip_output(
 	 * If the user handed us a complete IP packet, use it.
 	 * Otherwise, allocate an mbuf for a header and fill it in.
 	 */
-	if ((inp->inp_flags & INP_HDRINCL) == 0) {
+	if ((inp_flags & INP_HDRINCL) == 0) {
 		if (m->m_pkthdr.len + sizeof(struct ip) > IP_MAXPACKET) {
 			m_freem(m);
 			return EMSGSIZE;
@@ -444,10 +503,18 @@ rip_output(
 			return ENOBUFS;
 		}
 		ip = mtod(m, struct ip *);
-		ip->ip_tos = inp->inp_ip_tos;
-		ip->ip_off = 0;
+		if (tos != IPTOS_UNSPEC) {
+			ip->ip_tos = (uint8_t)(tos & IPTOS_MASK);
+		} else {
+			ip->ip_tos = inp->inp_ip_tos;
+		}
+		if (inp->inp_flags2 & INP2_DONTFRAG) {
+			ip->ip_off = IP_DF;
+		} else {
+			ip->ip_off = 0;
+		}
 		ip->ip_p = inp->inp_ip_p;
-		ip->ip_len = m->m_pkthdr.len;
+		ip->ip_len = (uint16_t)m->m_pkthdr.len;
 		ip->ip_src = inp->inp_laddr;
 		ip->ip_dst.s_addr = dst;
 		ip->ip_ttl = inp->inp_ip_ttl;
@@ -483,12 +550,17 @@ rip_output(
 		necp_kernel_policy_id policy_id;
 		necp_kernel_policy_id skip_policy_id;
 		u_int32_t route_rule_id;
+		u_int32_t pass_flags;
 
 		/*
 		 * We need a route to perform NECP route rule checks
 		 */
-		if (net_qos_policy_restricted != 0 &&
-		    ROUTE_UNUSABLE(&inp->inp_route)) {
+		if ((net_qos_policy_restricted != 0 &&
+		    ROUTE_UNUSABLE(&inp->inp_route))
+#if CONTENT_FILTER
+		    || cfil_faddr_use
+#endif
+		    ) {
 			struct sockaddr_in to;
 			struct sockaddr_in from;
 			struct in_addr laddr = ip->ip_src;
@@ -519,12 +591,12 @@ rip_output(
 		}
 
 		if (!necp_socket_is_allowed_to_send_recv_v4(inp, 0, 0,
-		    &ip->ip_src, &ip->ip_dst, NULL, &policy_id, &route_rule_id, &skip_policy_id)) {
+		    &ip->ip_src, &ip->ip_dst, NULL, 0, &policy_id, &route_rule_id, &skip_policy_id, &pass_flags)) {
 			m_freem(m);
 			return EHOSTUNREACH;
 		}
 
-		necp_mark_packet_from_socket(m, inp, policy_id, route_rule_id, skip_policy_id);
+		necp_mark_packet_from_socket(m, inp, policy_id, route_rule_id, skip_policy_id, pass_flags);
 
 		if (net_qos_policy_restricted != 0) {
 			struct ifnet *rt_ifp = NULL;
@@ -533,8 +605,7 @@ rip_output(
 				rt_ifp = inp->inp_route.ro_rt->rt_ifp;
 			}
 
-			necp_socket_update_qos_marking(inp, inp->inp_route.ro_rt,
-			    NULL, route_rule_id);
+			necp_socket_update_qos_marking(inp, inp->inp_route.ro_rt, route_rule_id);
 		}
 	}
 #endif /* NECP */
@@ -567,10 +638,6 @@ rip_output(
 		m->m_pkthdr.tx_rawip_e_pid = 0;
 	}
 
-#if CONFIG_MACF_NET
-	mac_mbuf_label_associate_inpcb(inp, m);
-#endif
-
 	imo = inp->inp_moptions;
 	if (imo != NULL) {
 		IMO_ADDREF(imo);
@@ -594,6 +661,10 @@ rip_output(
 
 		if ((rt->rt_flags & (RTF_MULTICAST | RTF_BROADCAST)) ||
 		    inp->inp_socket == NULL ||
+#if CONTENT_FILTER
+		    /* Discard temporary route for cfil case */
+		    cfil_faddr_use ||
+#endif
 		    !(inp->inp_socket->so_state & SS_ISCONNECTED)) {
 			rt = NULL;      /* unusable */
 		}
@@ -630,24 +701,6 @@ rip_output(
 	return error;
 }
 
-#if IPFIREWALL
-int
-load_ipfw(void)
-{
-	kern_return_t   err;
-
-	ipfw_init();
-
-#if DUMMYNET
-	if (!DUMMYNET_LOADED) {
-		ip_dn_init();
-	}
-#endif /* DUMMYNET */
-	err = 0;
-
-	return err == 0 && ip_fw_ctl_ptr == NULL ? -1 : err;
-}
-#endif /* IPFIREWALL */
 
 /*
  * Raw IP socket option processing.
@@ -679,21 +732,6 @@ rip_ctloutput(struct socket *so, struct sockopt *sopt)
 			error = sooptcopyout(sopt, &optval, sizeof optval);
 			break;
 
-#if IPFIREWALL
-		case IP_FW_ADD:
-		case IP_FW_GET:
-		case IP_OLD_FW_ADD:
-		case IP_OLD_FW_GET:
-			if (ip_fw_ctl_ptr == 0) {
-				error = load_ipfw();
-			}
-			if (ip_fw_ctl_ptr && error == 0) {
-				error = ip_fw_ctl_ptr(sopt);
-			} else {
-				error = ENOPROTOOPT;
-			}
-			break;
-#endif /* IPFIREWALL */
 
 #if DUMMYNET
 		case IP_DUMMYNET_GET:
@@ -742,27 +780,6 @@ rip_ctloutput(struct socket *so, struct sockopt *sopt)
 			}
 			break;
 
-#if IPFIREWALL
-		case IP_FW_ADD:
-		case IP_FW_DEL:
-		case IP_FW_FLUSH:
-		case IP_FW_ZERO:
-		case IP_FW_RESETLOG:
-		case IP_OLD_FW_ADD:
-		case IP_OLD_FW_DEL:
-		case IP_OLD_FW_FLUSH:
-		case IP_OLD_FW_ZERO:
-		case IP_OLD_FW_RESETLOG:
-			if (ip_fw_ctl_ptr == 0) {
-				error = load_ipfw();
-			}
-			if (ip_fw_ctl_ptr && error == 0) {
-				error = ip_fw_ctl_ptr(sopt);
-			} else {
-				error = ENOPROTOOPT;
-			}
-			break;
-#endif /* IPFIREWALL */
 
 #if DUMMYNET
 		case IP_DUMMYNET_CONFIGURE:
@@ -777,7 +794,7 @@ rip_ctloutput(struct socket *so, struct sockopt *sopt)
 				error = ENOPROTOOPT;
 			}
 			break;
-#endif
+#endif /* DUMMYNET */
 
 		case SO_FLUSH:
 			if ((error = sooptcopyin(sopt, &optval, sizeof(optval),
@@ -928,8 +945,9 @@ rip_attach(struct socket *so, int proto, struct proc *p)
 	}
 	inp = (struct inpcb *)so->so_pcb;
 	inp->inp_vflag |= INP_IPV4;
-	inp->inp_ip_p = proto;
-	inp->inp_ip_ttl = ip_defttl;
+	VERIFY(proto <= UINT8_MAX);
+	inp->inp_ip_p = (u_char)proto;
+	inp->inp_ip_ttl = (u_char)ip_defttl;
 	return 0;
 }
 
@@ -1061,7 +1079,7 @@ rip_send(struct socket *so, int flags, struct mbuf *m, struct sockaddr *nam,
 {
 #pragma unused(flags, p)
 	struct inpcb *inp = sotoinpcb(so);
-	u_int32_t dst;
+	u_int32_t dst = INADDR_ANY;
 	int error = 0;
 
 	if (inp == NULL
@@ -1077,17 +1095,7 @@ rip_send(struct socket *so, int flags, struct mbuf *m, struct sockaddr *nam,
 		goto bad;
 	}
 
-	if (so->so_state & SS_ISCONNECTED) {
-		if (nam != NULL) {
-			error = EISCONN;
-			goto bad;
-		}
-		dst = inp->inp_faddr.s_addr;
-	} else {
-		if (nam == NULL) {
-			error = ENOTCONN;
-			goto bad;
-		}
+	if (nam != NULL) {
 		dst = ((struct sockaddr_in *)(void *)nam)->sin_addr.s_addr;
 	}
 	return rip_output(m, so, dst, control);
@@ -1132,12 +1140,11 @@ rip_unlock(struct socket *so, int refcount, void *debug)
 			lck_mtx_unlock(so->so_proto->pr_domain->dom_mtx);
 			lck_rw_lock_exclusive(ripcbinfo.ipi_lock);
 			if (inp->inp_state != INPCB_STATE_DEAD) {
-#if INET6
 				if (SOCK_CHECK_DOM(so, PF_INET6)) {
 					in6_pcbdetach(inp);
-				} else
-#endif /* INET6 */
-				in_pcbdetach(inp);
+				} else {
+					in_pcbdetach(inp);
+				}
 			}
 			in_pcbdispose(inp);
 			lck_rw_done(ripcbinfo.ipi_lock);
@@ -1255,7 +1262,7 @@ SYSCTL_PROC(_net_inet_raw, OID_AUTO /*XXX*/, pcblist,
     CTLTYPE_STRUCT | CTLFLAG_RD | CTLFLAG_LOCKED, 0, 0,
     rip_pcblist, "S,xinpcb", "List of active raw IP sockets");
 
-#if !CONFIG_EMBEDDED
+#if XNU_TARGET_OS_OSX
 
 static int
 rip_pcblist64 SYSCTL_HANDLER_ARGS
@@ -1361,7 +1368,7 @@ SYSCTL_PROC(_net_inet_raw, OID_AUTO, pcblist64,
     CTLTYPE_STRUCT | CTLFLAG_RD | CTLFLAG_LOCKED, 0, 0,
     rip_pcblist64, "S,xinpcb64", "List of active raw IP sockets");
 
-#endif /* !CONFIG_EMBEDDED */
+#endif /* XNU_TARGET_OS_OSX */
 
 
 static int

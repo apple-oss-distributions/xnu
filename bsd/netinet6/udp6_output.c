@@ -170,6 +170,7 @@ udp6_output(struct in6pcb *in6p, struct mbuf *m, struct sockaddr *addr6,
 	struct socket *so = in6p->in6p_socket;
 	struct route_in6 ro;
 	int flowadv = 0;
+	bool sndinprog_cnt_used = false;
 #if CONTENT_FILTER
 	struct m_tag *cfil_tag = NULL;
 	bool cfil_faddr_use = false;
@@ -177,6 +178,7 @@ udp6_output(struct in6pcb *in6p, struct mbuf *m, struct sockaddr *addr6,
 	struct sockaddr *cfil_faddr = NULL;
 	struct sockaddr_in6 *cfil_sin6 = NULL;
 #endif
+	bool check_qos_marking_again = (so->so_flags1 & SOF1_QOSMARKING_POLICY_OVERRIDE) ? FALSE : TRUE;
 
 	bzero(&ip6oa, sizeof(ip6oa));
 	ip6oa.ip6oa_boundif = IFSCOPE_NONE;
@@ -216,7 +218,7 @@ udp6_output(struct in6pcb *in6p, struct mbuf *m, struct sockaddr *addr6,
 	 * retrieve CFIL saved state from mbuf and use it if necessary.
 	 */
 	if (so->so_cfil_db && !addr6) {
-		cfil_tag = cfil_udp_get_socket_state(m, &cfil_so_state_change_cnt, NULL, &cfil_faddr);
+		cfil_tag = cfil_dgram_get_socket_state(m, &cfil_so_state_change_cnt, NULL, &cfil_faddr, NULL);
 		if (cfil_tag) {
 			cfil_sin6 = (struct sockaddr_in6 *)(void *)cfil_faddr;
 			if ((so->so_state_change_cnt != cfil_so_state_change_cnt) &&
@@ -249,6 +251,9 @@ udp6_output(struct in6pcb *in6p, struct mbuf *m, struct sockaddr *addr6,
 	}
 	ip6oa.ip6oa_sotc = sotc;
 	ip6oa.ip6oa_netsvctype = netsvctype;
+
+	in6p->inp_sndinprog_cnt++;
+	sndinprog_cnt_used = true;
 
 	if (addr6) {
 		/*
@@ -435,6 +440,7 @@ udp6_output(struct in6pcb *in6p, struct mbuf *m, struct sockaddr *addr6,
 			necp_kernel_policy_id policy_id;
 			necp_kernel_policy_id skip_policy_id;
 			u_int32_t route_rule_id;
+			u_int32_t pass_flags;
 
 			/*
 			 * We need a route to perform NECP route rule checks
@@ -468,22 +474,25 @@ udp6_output(struct in6pcb *in6p, struct mbuf *m, struct sockaddr *addr6,
 				in6p->inp_policyresult.results.qos_marking_gencount = 0;
 			}
 
-			if (!necp_socket_is_allowed_to_send_recv_v6(in6p, in6p->in6p_lport, fport, laddr, faddr, NULL, &policy_id, &route_rule_id, &skip_policy_id)) {
+			if (!necp_socket_is_allowed_to_send_recv_v6(in6p, in6p->in6p_lport, fport, laddr, faddr, NULL, 0, &policy_id, &route_rule_id, &skip_policy_id, &pass_flags)) {
 				error = EHOSTUNREACH;
 				goto release;
 			}
 
-			necp_mark_packet_from_socket(m, in6p, policy_id, route_rule_id, skip_policy_id);
+			necp_mark_packet_from_socket(m, in6p, policy_id, route_rule_id, skip_policy_id, pass_flags);
 
 			if (net_qos_policy_restricted != 0) {
-				necp_socket_update_qos_marking(in6p, in6p->in6p_route.ro_rt,
-				    NULL, route_rule_id);
+				necp_socket_update_qos_marking(in6p, in6p->in6p_route.ro_rt, route_rule_id);
 			}
 		}
 #endif /* NECP */
 		if ((so->so_flags1 & SOF1_QOSMARKING_ALLOWED)) {
 			ip6oa.ip6oa_flags |= IP6OAF_QOSMARKING_ALLOWED;
 		}
+		if (check_qos_marking_again) {
+			ip6oa.ip6oa_flags |= IP6OAF_REDO_QOSMARKING_POLICY;
+		}
+		ip6oa.qos_marking_gencount = in6p->inp_policyresult.results.qos_marking_gencount;
 
 #if IPSEC
 		if (in6p->in6p_sp != NULL && ipsec_setsocket(m, so) != 0) {
@@ -529,8 +538,6 @@ udp6_output(struct in6pcb *in6p, struct mbuf *m, struct sockaddr *addr6,
 			IM6O_UNLOCK(im6o);
 		}
 
-		in6p->inp_sndinprog_cnt++;
-
 		socket_unlock(so, 0);
 		error = ip6_output(m, optp, &ro, flags, im6o, NULL, &ip6oa);
 		m = NULL;
@@ -538,6 +545,15 @@ udp6_output(struct in6pcb *in6p, struct mbuf *m, struct sockaddr *addr6,
 
 		if (im6o != NULL) {
 			IM6O_REMREF(im6o);
+		}
+
+		if (check_qos_marking_again) {
+			in6p->inp_policyresult.results.qos_marking_gencount = ip6oa.qos_marking_gencount;
+			if (ip6oa.ip6oa_flags & IP6OAF_QOSMARKING_ALLOWED) {
+				in6p->inp_socket->so_flags1 |= SOF1_QOSMARKING_ALLOWED;
+			} else {
+				in6p->inp_socket->so_flags1 &= ~SOF1_QOSMARKING_ALLOWED;
+			}
 		}
 
 		if (error == 0 && nstat_collect) {
@@ -568,18 +584,10 @@ udp6_output(struct in6pcb *in6p, struct mbuf *m, struct sockaddr *addr6,
 			inp_set_fc_state(in6p, adv->code);
 		}
 
-		VERIFY(in6p->inp_sndinprog_cnt > 0);
-		if (--in6p->inp_sndinprog_cnt == 0) {
-			in6p->inp_flags &= ~(INP_FC_FEEDBACK);
-			if (in6p->inp_sndingprog_waiters > 0) {
-				wakeup(&in6p->inp_sndinprog_cnt);
-			}
-		}
-
 		if (ro.ro_rt != NULL) {
 			struct ifnet *outif = ro.ro_rt->rt_ifp;
 
-			so->so_pktheadroom = P2ROUNDUP(
+			so->so_pktheadroom = (uint16_t)P2ROUNDUP(
 				sizeof(struct udphdr) +
 				hlen +
 				ifnet_hdrlen(outif) +
@@ -632,7 +640,7 @@ udp6_output(struct in6pcb *in6p, struct mbuf *m, struct sockaddr *addr6,
 				if (outif != NULL && outif != in6p->in6p_last_outifp) {
 					in6p->in6p_last_outifp = outif;
 
-					so->so_pktheadroom = P2ROUNDUP(
+					so->so_pktheadroom = (uint16_t)P2ROUNDUP(
 						sizeof(struct udphdr) +
 						hlen +
 						ifnet_hdrlen(outif) +
@@ -661,6 +669,7 @@ udp6_output(struct in6pcb *in6p, struct mbuf *m, struct sockaddr *addr6,
 	goto releaseopt;
 
 release:
+
 	if (m != NULL) {
 		m_freem(m);
 	}
@@ -677,5 +686,16 @@ releaseopt:
 		m_tag_free(cfil_tag);
 	}
 #endif
+	if (sndinprog_cnt_used) {
+		VERIFY(in6p->inp_sndinprog_cnt > 0);
+		if (--in6p->inp_sndinprog_cnt == 0) {
+			in6p->inp_flags &= ~(INP_FC_FEEDBACK);
+			if (in6p->inp_sndingprog_waiters > 0) {
+				wakeup(&in6p->inp_sndinprog_cnt);
+			}
+		}
+		sndinprog_cnt_used = false;
+	}
+
 	return error;
 }

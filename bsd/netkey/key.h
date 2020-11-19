@@ -67,6 +67,7 @@ extern struct secasvar *key_allocsa(u_int, caddr_t, caddr_t,
 struct secasvar *
 key_allocsa_extended(u_int family, caddr_t src, caddr_t dst,
     u_int proto, u_int32_t spi, ifnet_t interface);
+extern bool key_checksa_present(u_int family, caddr_t src, caddr_t dst, u_int16_t src_port, u_int16_t dst_port);
 extern u_int16_t key_natt_get_translated_port(struct secasvar *);
 extern void key_freesp(struct secpolicy *, int);
 extern void key_freesav(struct secasvar *, int);
@@ -87,28 +88,6 @@ extern void key_sa_chgstate(struct secasvar *, u_int8_t);
 extern void key_sa_stir_iv(struct secasvar *);
 extern void key_delsah(struct secashead *sah);
 extern struct secashead *key_newsah2(struct secasindex *saidx, u_int8_t dir);
-extern u_int32_t key_getspi2(struct sockaddr      *src,
-    struct sockaddr      *dst,
-    u_int8_t              proto,
-    u_int8_t              mode,
-    u_int32_t             reqid,
-    struct sadb_spirange *spirange);
-extern struct secasvar * key_newsav2(struct secashead     *sah,
-    u_int8_t              satype,
-    u_int8_t              alg_auth,
-    u_int8_t              alg_enc,
-    u_int32_t             flags,
-    u_int8_t              replay,
-    struct sadb_key      *key_auth,
-    u_int16_t             key_auth_len,
-    struct sadb_key      *key_enc,
-    u_int16_t             key_enc_len,
-    u_int16_t             natt_port,
-    u_int32_t             seq,
-    u_int32_t             spi,
-    u_int32_t             pid,
-    struct sadb_lifetime *lifetime_hard,
-    struct sadb_lifetime *lifetime_soft);
 extern void key_delsav(struct secasvar *sav);
 extern struct secpolicy *key_getspbyid(u_int32_t);
 extern void key_delsp_for_ipsec_if(ifnet_t ipsec_if);
@@ -118,7 +97,9 @@ struct ifnet_keepalive_offload_frame;
 extern u_int32_t key_fill_offload_frames_for_savs(struct ifnet *,
     struct ifnet_keepalive_offload_frame *frames_array, u_int32_t, size_t);
 
-
+extern bool key_custom_ipsec_token_is_valid(void *);
+extern int key_reserve_custom_ipsec(void **, union sockaddr_in_4_6 *, union sockaddr_in_4_6 *, u_int8_t proto);
+extern void key_release_custom_ipsec(void **);
 
 #endif /* BSD_KERNEL_PRIVATE */
 #endif /* _NETKEY_KEY_H_ */

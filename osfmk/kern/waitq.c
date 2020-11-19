@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015-2016 Apple Inc. All rights reserved.
+ * Copyright (c) 2015-2020 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -66,6 +66,7 @@
 #include <kern/kern_types.h>
 #include <kern/ltable.h>
 #include <kern/mach_param.h>
+#include <kern/percpu.h>
 #include <kern/queue.h>
 #include <kern/sched_prim.h>
 #include <kern/simple_lock.h>
@@ -122,9 +123,16 @@ static kern_return_t waitq_select_thread_locked(struct waitq *waitq,
     event64_t event,
     thread_t thread, spl_t *spl);
 
-#define WAITQ_SET_MAX (task_max * 3)
-static zone_t waitq_set_zone;
+ZONE_DECLARE(waitq_set_zone, "waitq sets",
+    sizeof(struct waitq_set), ZC_NOENCRYPT);
 
+/* waitq prepost cache */
+#define WQP_CACHE_MAX   50
+struct wqp_cache {
+	uint64_t        head;
+	unsigned int    avail;
+};
+static struct wqp_cache PERCPU_DATA(wqp_cache);
 
 #define P2ROUNDUP(x, align) (-(-((uint32_t)(x)) & -(align)))
 #define ROUNDDOWN(x, y)  (((x)/(y))*(y))
@@ -134,7 +142,7 @@ static zone_t waitq_set_zone;
 static __inline__ void waitq_grab_backtrace(uintptr_t bt[NWAITQ_BTFRAMES], int skip);
 #endif
 
-lck_grp_t waitq_lck_grp;
+LCK_GRP_DECLARE(waitq_lck_grp, "waitq");
 
 #if __arm64__
 
@@ -744,7 +752,7 @@ wq_prepost_refill_cpu_cache(uint32_t nalloc)
 	}
 
 	disable_preemption();
-	cache = &PROCESSOR_DATA(current_processor(), wqp_cache);
+	cache = PERCPU_GET(wqp_cache);
 
 	/* check once more before putting these elements on the list */
 	if (cache->avail >= WQP_CACHE_MAX) {
@@ -776,14 +784,14 @@ wq_prepost_ensure_free_space(void)
 	struct wqp_cache *cache;
 
 	if (g_min_free_cache == 0) {
-		g_min_free_cache = (WQP_CACHE_MAX * ml_get_max_cpus());
+		g_min_free_cache = (WQP_CACHE_MAX * ml_wait_max_cpus());
 	}
 
 	/*
 	 * Ensure that we always have a pool of per-CPU prepost elements
 	 */
 	disable_preemption();
-	cache = &PROCESSOR_DATA(current_processor(), wqp_cache);
+	cache = PERCPU_GET(wqp_cache);
 	free_elem = cache->avail;
 	enable_preemption();
 
@@ -828,7 +836,7 @@ wq_prepost_alloc(int type, int nelem)
 	 * allocating RESERVED elements
 	 */
 	disable_preemption();
-	cache = &PROCESSOR_DATA(current_processor(), wqp_cache);
+	cache = PERCPU_GET(wqp_cache);
 	if (nelem <= (int)cache->avail) {
 		struct lt_elem *first, *next = NULL;
 		int nalloc = nelem;
@@ -1048,7 +1056,7 @@ wq_prepost_release_rlist(struct wq_prepost *wqp)
 	 * if our cache is running low.
 	 */
 	disable_preemption();
-	cache = &PROCESSOR_DATA(current_processor(), wqp_cache);
+	cache = PERCPU_GET(wqp_cache);
 	if (cache->avail < WQP_CACHE_MAX) {
 		struct lt_elem *tmp = NULL;
 		if (cache->head != LT_IDX_MAX) {
@@ -1121,14 +1129,14 @@ restart:
 			/* the caller wants to remove the only prepost here */
 			assert(wqp_id == wqset->wqset_prepost_id);
 			wqset->wqset_prepost_id = 0;
-		/* fall through */
+			OS_FALLTHROUGH;
 		case WQ_ITERATE_CONTINUE:
 			wq_prepost_put(wqp);
 			ret = WQ_ITERATE_SUCCESS;
 			break;
 		case WQ_ITERATE_RESTART:
 			wq_prepost_put(wqp);
-		/* fall through */
+			OS_FALLTHROUGH;
 		case WQ_ITERATE_DROPPED:
 			goto restart;
 		default:
@@ -1196,7 +1204,7 @@ restart:
 			goto next_prepost;
 		case WQ_ITERATE_RESTART:
 			wq_prepost_put(wqp);
-		/* fall-through */
+			OS_FALLTHROUGH;
 		case WQ_ITERATE_DROPPED:
 			/* the callback dropped the ref to wqp: just restart */
 			goto restart;
@@ -1809,19 +1817,29 @@ waitq_irq_safe(struct waitq *waitq)
 	return waitq->waitq_irq;
 }
 
-struct waitq *
+static inline bool
+waitq_empty(struct waitq *wq)
+{
+	if (waitq_is_turnstile_queue(wq)) {
+		return priority_queue_empty(&wq->waitq_prio_queue);
+	} else if (waitq_is_turnstile_proxy(wq)) {
+		struct turnstile *ts = wq->waitq_ts;
+		return ts == TURNSTILE_NULL ||
+		       priority_queue_empty(&ts->ts_waitq.waitq_prio_queue);
+	} else {
+		return queue_empty(&wq->waitq_queue);
+	}
+}
+
+static struct waitq *
 waitq_get_safeq(struct waitq *waitq)
 {
-	struct waitq *safeq;
-
 	/* Check if it's a port waitq */
-	if (waitq_is_port_queue(waitq)) {
-		assert(!waitq_irq_safe(waitq));
-		safeq = ipc_port_rcv_turnstile_waitq(waitq);
-	} else {
-		safeq = global_eventq(waitq);
+	if (waitq_is_turnstile_proxy(waitq)) {
+		struct turnstile *ts = waitq->waitq_ts;
+		return ts ? &ts->ts_waitq : NULL;
 	}
-	return safeq;
+	return global_eventq(waitq);
 }
 
 static uint32_t
@@ -1872,8 +1890,7 @@ waitq_thread_remove(struct waitq *wq,
 		    VM_KERNEL_UNSLIDE_OR_PERM(waitq_to_turnstile(wq)),
 		    thread_tid(thread),
 		    0, 0, 0);
-		priority_queue_remove(&wq->waitq_prio_queue, &thread->wait_prioq_links,
-		    PRIORITY_QUEUE_SCHED_PRI_MAX_HEAP_COMPARE);
+		priority_queue_remove(&wq->waitq_prio_queue, &thread->wait_prioq_links);
 	} else {
 		remqueue(&(thread->wait_links));
 	}
@@ -1890,8 +1907,6 @@ waitq_bootstrap(void)
 		g_min_free_table_elem = tmp32;
 	}
 	wqdbg("Minimum free table elements: %d", tmp32);
-
-	lck_grp_init(&waitq_lck_grp, "waitq", LCK_GRP_ATTR_NULL);
 
 	/*
 	 * Determine the amount of memory we're willing to reserve for
@@ -1942,12 +1957,6 @@ waitq_bootstrap(void)
 	for (uint32_t i = 0; i < g_num_waitqs; i++) {
 		waitq_init(&global_waitqs[i], SYNC_POLICY_FIFO | SYNC_POLICY_DISABLE_IRQ);
 	}
-
-	waitq_set_zone = zinit(sizeof(struct waitq_set),
-	    WAITQ_SET_MAX * sizeof(struct waitq_set),
-	    sizeof(struct waitq_set),
-	    "waitq sets");
-	zone_change(waitq_set_zone, Z_NOENCRYPT, TRUE);
 
 	/* initialize the global waitq link table */
 	wql_init();
@@ -2140,13 +2149,13 @@ waitq_select_walk_cb(struct waitq *waitq, void *ctx,
 			 */
 
 			disable_preemption();
-			os_atomic_inc(hook, relaxed);
+			os_atomic_add(hook, (uint16_t)1, relaxed);
 			waitq_set_unlock(wqset);
 
 			waitq_set__CALLING_PREPOST_HOOK__(hook);
 
 			/* Note: after this decrement, the wqset may be deallocated */
-			os_atomic_dec(hook, relaxed);
+			os_atomic_add(hook, (uint16_t)-1, relaxed);
 			enable_preemption();
 			return ret;
 		}
@@ -2287,8 +2296,7 @@ waitq_prioq_iterate_locked(struct waitq *safeq, struct waitq *waitq,
 
 		if (remove_op) {
 			thread = priority_queue_remove_max(&safeq->waitq_prio_queue,
-			    struct thread, wait_prioq_links,
-			    PRIORITY_QUEUE_SCHED_PRI_MAX_HEAP_COMPARE);
+			    struct thread, wait_prioq_links);
 		} else {
 			/* For the peek operation, the only valid value for max_threads is 1 */
 			assert(max_threads == 1);
@@ -2387,6 +2395,15 @@ do_waitq_select_n_locked(struct waitq_select_args *args)
 		/* JMM - add flag to waitq to avoid global lookup if no waiters */
 		eventmask = _CAST_TO_EVENT_MASK(waitq);
 		safeq = waitq_get_safeq(waitq);
+		if (safeq == NULL) {
+			/*
+			 * in the WQT_TSPROXY case, if there's no turnstile,
+			 * there's no queue and no waiters, so we can move straight
+			 * to the waitq set recursion
+			 */
+			goto handle_waitq_set;
+		}
+
 		if (*nthreads == 0) {
 			spl = splsched();
 		}
@@ -2464,6 +2481,7 @@ do_waitq_select_n_locked(struct waitq_select_args *args)
 		return;
 	}
 
+handle_waitq_set:
 	/*
 	 * wait queues that are not in any sets
 	 * are the bottom of the recursion
@@ -2678,13 +2696,22 @@ waitq_select_thread_locked(struct waitq *waitq,
 	kern_return_t kr;
 	spl_t s;
 
-	s = splsched();
-
 	/* Find and lock the interrupts disabled queue the thread is actually on */
 	if (!waitq_irq_safe(waitq)) {
 		safeq = waitq_get_safeq(waitq);
+		if (safeq == NULL) {
+			/*
+			 * in the WQT_TSPROXY case, if there's no turnstile,
+			 * there's no queue and no waiters, so we can move straight
+			 * to the waitq set recursion
+			 */
+			goto handle_waitq_set;
+		}
+
+		s = splsched();
 		waitq_lock(safeq);
 	} else {
+		s = splsched();
 		safeq = waitq;
 	}
 
@@ -2709,6 +2736,7 @@ waitq_select_thread_locked(struct waitq *waitq,
 
 	splx(s);
 
+handle_waitq_set:
 	if (!waitq->waitq_set_id) {
 		return KERN_NOT_WAITING;
 	}
@@ -2819,6 +2847,10 @@ waitq_assert_wait64_locked(struct waitq *waitq,
 	 */
 	if (!waitq_irq_safe(waitq)) {
 		safeq = waitq_get_safeq(waitq);
+		if (__improbable(safeq == NULL)) {
+			panic("Trying to assert_wait on a turnstile proxy "
+			    "that hasn't been donated one (waitq: %p)", waitq);
+		}
 		eventmask = _CAST_TO_EVENT_MASK(waitq);
 		waitq_lock(safeq);
 	} else {
@@ -2922,6 +2954,10 @@ waitq_pull_thread_locked(struct waitq *waitq, thread_t thread)
 	/* Find the interrupts disabled queue thread is waiting on */
 	if (!waitq_irq_safe(waitq)) {
 		safeq = waitq_get_safeq(waitq);
+		if (__improbable(safeq == NULL)) {
+			panic("Trying to clear_wait on a turnstile proxy "
+			    "that hasn't been donated one (waitq: %p)", waitq);
+		}
 	} else {
 		safeq = waitq;
 	}
@@ -3058,7 +3094,7 @@ waitq_wakeup64_all_locked(struct waitq *waitq,
 		assert_thread_magic(thread);
 		remqueue(&thread->wait_links);
 		maybe_adjust_thread_pri(thread, priority, waitq);
-		ret = thread_go(thread, result);
+		ret = thread_go(thread, result, WQ_OPTION_NONE);
 		assert(ret == KERN_SUCCESS);
 		thread_unlock(thread);
 	}
@@ -3086,7 +3122,8 @@ waitq_wakeup64_one_locked(struct waitq *waitq,
     wait_result_t result,
     uint64_t *reserved_preposts,
     int priority,
-    waitq_lock_state_t lock_state)
+    waitq_lock_state_t lock_state,
+    waitq_options_t option)
 {
 	thread_t thread;
 	spl_t th_spl;
@@ -3109,7 +3146,7 @@ waitq_wakeup64_one_locked(struct waitq *waitq,
 
 	if (thread != THREAD_NULL) {
 		maybe_adjust_thread_pri(thread, priority, waitq);
-		kern_return_t ret = thread_go(thread, result);
+		kern_return_t ret = thread_go(thread, result, option);
 		assert(ret == KERN_SUCCESS);
 		thread_unlock(thread);
 		splx(th_spl);
@@ -3160,7 +3197,7 @@ waitq_wakeup64_identify_locked(struct waitq     *waitq,
 
 	if (thread != THREAD_NULL) {
 		kern_return_t __assert_only ret;
-		ret = thread_go(thread, result);
+		ret = thread_go(thread, result, WQ_OPTION_NONE);
 		assert(ret == KERN_SUCCESS);
 	}
 
@@ -3214,7 +3251,7 @@ waitq_wakeup64_thread_locked(struct waitq *waitq,
 		return KERN_NOT_WAITING;
 	}
 
-	ret = thread_go(thread, result);
+	ret = thread_go(thread, result, WQ_OPTION_NONE);
 	assert(ret == KERN_SUCCESS);
 	thread_unlock(thread);
 	splx(th_spl);
@@ -3246,8 +3283,12 @@ waitq_init(struct waitq *waitq, int policy)
 	waitq->waitq_fifo = ((policy & SYNC_POLICY_REVERSED) == 0);
 	waitq->waitq_irq = !!(policy & SYNC_POLICY_DISABLE_IRQ);
 	waitq->waitq_prepost = 0;
-	waitq->waitq_type = WQT_QUEUE;
-	waitq->waitq_turnstile_or_port = !!(policy & SYNC_POLICY_TURNSTILE);
+	if (policy & SYNC_POLICY_TURNSTILE_PROXY) {
+		waitq->waitq_type = WQT_TSPROXY;
+	} else {
+		waitq->waitq_type = WQT_QUEUE;
+	}
+	waitq->waitq_turnstile = !!(policy & SYNC_POLICY_TURNSTILE);
 	waitq->waitq_eventmask = 0;
 
 	waitq->waitq_set_id = 0;
@@ -3256,9 +3297,11 @@ waitq_init(struct waitq *waitq, int policy)
 	waitq_lock_init(waitq);
 	if (waitq_is_turnstile_queue(waitq)) {
 		/* For turnstile, initialize it as a priority queue */
-		priority_queue_init(&waitq->waitq_prio_queue,
-		    PRIORITY_QUEUE_BUILTIN_MAX_HEAP);
+		priority_queue_init(&waitq->waitq_prio_queue);
 		assert(waitq->waitq_fifo == 0);
+	} else if (policy & SYNC_POLICY_TURNSTILE_PROXY) {
+		waitq->waitq_ts = TURNSTILE_NULL;
+		waitq->waitq_tspriv = NULL;
 	} else {
 		queue_init(&waitq->waitq_queue);
 	}
@@ -3343,7 +3386,12 @@ waitq_deinit(struct waitq *waitq)
 {
 	spl_t s;
 
-	if (!waitq || !waitq_is_queue(waitq)) {
+	assert(waitq);
+	if (!waitq_is_valid(waitq)) {
+		return;
+	}
+
+	if (!waitq_is_queue(waitq) && !waitq_is_turnstile_proxy(waitq)) {
 		return;
 	}
 
@@ -3351,25 +3399,33 @@ waitq_deinit(struct waitq *waitq)
 		s = splsched();
 	}
 	waitq_lock(waitq);
-	if (!waitq_valid(waitq)) {
-		waitq_unlock(waitq);
-		if (waitq_irq_safe(waitq)) {
-			splx(s);
+
+	if (waitq_valid(waitq)) {
+		waitq->waitq_isvalid = 0;
+		if (!waitq_irq_safe(waitq)) {
+			waitq_unlink_all_unlock(waitq);
+			/* waitq unlocked and set links deallocated */
+			goto out;
 		}
-		return;
 	}
 
-	waitq->waitq_isvalid = 0;
-
-	if (!waitq_irq_safe(waitq)) {
-		waitq_unlink_all_unlock(waitq);
-		/* waitq unlocked and set links deallocated */
-	} else {
-		waitq_unlock(waitq);
+	waitq_unlock(waitq);
+	if (waitq_irq_safe(waitq)) {
 		splx(s);
 	}
 
-	assert(waitq_empty(waitq));
+out:
+#if MACH_ASSERT
+	if (waitq_is_turnstile_queue(waitq)) {
+		assert(priority_queue_empty(&waitq->waitq_prio_queue));
+	} else if (waitq_is_turnstile_proxy(waitq)) {
+		assert(waitq->waitq_ts == TURNSTILE_NULL);
+	} else {
+		assert(queue_empty(&waitq->waitq_queue));
+	}
+#else
+	(void)0;
+#endif // MACH_ASSERT
 }
 
 void
@@ -4888,7 +4944,7 @@ waitq_alloc_prepost_reservation(int nalloc, struct waitq *waitq,
 	 */
 	if (waitq) {
 		disable_preemption();
-		cache = &PROCESSOR_DATA(current_processor(), wqp_cache);
+		cache = PERCPU_GET(wqp_cache);
 		if (nalloc <= (int)cache->avail) {
 			goto do_alloc;
 		}
@@ -5488,7 +5544,7 @@ waitq_wakeup64_one(struct waitq *waitq, event64_t wake_event,
 
 	/* waitq is locked upon return */
 	kr = waitq_wakeup64_one_locked(waitq, wake_event, result,
-	    &reserved_preposts, priority, WAITQ_UNLOCK);
+	    &reserved_preposts, priority, WAITQ_UNLOCK, WQ_OPTION_NONE);
 
 	if (waitq_irq_safe(waitq)) {
 		splx(spl);
@@ -5580,7 +5636,7 @@ waitq_wakeup64_thread(struct waitq *waitq,
 	waitq_unlock(waitq);
 
 	if (ret == KERN_SUCCESS) {
-		ret = thread_go(thread, result);
+		ret = thread_go(thread, result, WQ_OPTION_NONE);
 		assert(ret == KERN_SUCCESS);
 		thread_unlock(thread);
 		splx(th_spl);

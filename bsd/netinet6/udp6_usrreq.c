@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2019 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2020 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -133,6 +133,7 @@
 #include <netinet6/ipsec.h>
 #include <netinet6/ipsec6.h>
 #include <netinet6/esp6.h>
+#include <netkey/key.h>
 extern int ipsec_bypass;
 extern int esp_udp_encap_port;
 #endif /* IPSEC */
@@ -202,13 +203,11 @@ udp6_append(struct inpcb *last, struct ip6_hdr *ip6,
 	boolean_t wifi = (!cell && IFNET_IS_WIFI(ifp));
 	boolean_t wired = (!wifi && IFNET_IS_WIRED(ifp));
 
-#if CONFIG_MACF_NET
-	if (mac_inpcb_check_deliver(last, n, AF_INET6, SOCK_DGRAM) != 0) {
-		m_freem(n);
-		return;
-	}
-#endif /* CONFIG_MACF_NET */
 	if ((last->in6p_flags & INP_CONTROLOPTS) != 0 ||
+#if CONTENT_FILTER
+	    /* Content Filter needs to see local address */
+	    (last->in6p_socket->so_cfil_db != NULL) ||
+#endif
 	    (last->in6p_socket->so_options & SO_TIMESTAMP) != 0 ||
 	    (last->in6p_socket->so_options & SO_TIMESTAMP_MONOTONIC) != 0 ||
 	    (last->in6p_socket->so_options & SO_TIMESTAMP_CONTINUOUS) != 0) {
@@ -250,6 +249,7 @@ udp6_input(struct mbuf **mp, int *offp, int proto)
 	struct sockaddr_in6 udp_in6;
 	struct inpcbinfo *pcbinfo = &udbinfo;
 	struct sockaddr_in6 fromsa;
+	u_int16_t pf_tag = 0;
 
 	IP6_EXTHDR_CHECK(m, off, sizeof(struct udphdr), return IPPROTO_DONE);
 
@@ -261,6 +261,10 @@ udp6_input(struct mbuf **mp, int *offp, int proto)
 	cell = IFNET_IS_CELLULAR(ifp);
 	wifi = (!cell && IFNET_IS_WIFI(ifp));
 	wired = (!wifi && IFNET_IS_WIRED(ifp));
+
+	if (m->m_flags & M_PKTHDR) {
+		pf_tag = m_pftag(m)->pftag_tag;
+	}
 
 	udpstat.udps_ipackets++;
 
@@ -411,7 +415,7 @@ udp6_input(struct mbuf **mp, int *offp, int proto)
 			skipit = 0;
 			if (!necp_socket_is_allowed_to_send_recv_v6(in6p,
 			    uh->uh_dport, uh->uh_sport, &ip6->ip6_dst,
-			    &ip6->ip6_src, ifp, NULL, NULL, NULL)) {
+			    &ip6->ip6_src, ifp, pf_tag, NULL, NULL, NULL, NULL)) {
 				/* do not inject data to pcb */
 				skipit = 1;
 			}
@@ -492,34 +496,49 @@ udp6_input(struct mbuf **mp, int *offp, int proto)
 	if (ipsec_bypass == 0 && (esp_udp_encap_port & 0xFFFF) != 0 &&
 	    (uh->uh_dport == ntohs((u_short)esp_udp_encap_port) ||
 	    uh->uh_sport == ntohs((u_short)esp_udp_encap_port))) {
-		int payload_len = ulen - sizeof(struct udphdr) > 4 ? 4 :
-		    ulen - sizeof(struct udphdr);
-
-		if (m->m_len < off + sizeof(struct udphdr) + payload_len) {
-			if ((m = m_pullup(m, off + sizeof(struct udphdr) +
-			    payload_len)) == NULL) {
-				udpstat.udps_hdrops++;
-				goto bad;
-			}
-			/*
-			 * Expect 32-bit aligned data pointer on strict-align
-			 * platforms.
-			 */
-			MBUF_STRICT_DATA_ALIGNMENT_CHECK_32(m);
-
-			ip6 = mtod(m, struct ip6_hdr *);
-			uh = (struct udphdr *)(void *)((caddr_t)ip6 + off);
+		/*
+		 * Check if ESP or keepalive:
+		 *      1. If the destination port of the incoming packet is 4500.
+		 *      2. If the source port of the incoming packet is 4500,
+		 *         then check the SADB to match IP address and port.
+		 */
+		bool check_esp = true;
+		if (uh->uh_dport != ntohs((u_short)esp_udp_encap_port)) {
+			check_esp = key_checksa_present(AF_INET6, (caddr_t)&ip6->ip6_dst,
+			    (caddr_t)&ip6->ip6_src, uh->uh_dport,
+			    uh->uh_sport);
 		}
-		/* Check for NAT keepalive packet */
-		if (payload_len == 1 && *(u_int8_t*)
-		    ((caddr_t)uh + sizeof(struct udphdr)) == 0xFF) {
-			goto bad;
-		} else if (payload_len == 4 && *(u_int32_t*)(void *)
-		    ((caddr_t)uh + sizeof(struct udphdr)) != 0) {
-			/* UDP encapsulated IPsec packet to pass through NAT */
-			/* preserve the udp header */
-			*offp = off + sizeof(struct udphdr);
-			return esp6_input(mp, offp, IPPROTO_UDP);
+
+		if (check_esp) {
+			int payload_len = ulen - sizeof(struct udphdr) > 4 ? 4 :
+			    ulen - sizeof(struct udphdr);
+
+			if (m->m_len < off + sizeof(struct udphdr) + payload_len) {
+				if ((m = m_pullup(m, off + sizeof(struct udphdr) +
+				    payload_len)) == NULL) {
+					udpstat.udps_hdrops++;
+					goto bad;
+				}
+				/*
+				 * Expect 32-bit aligned data pointer on strict-align
+				 * platforms.
+				 */
+				MBUF_STRICT_DATA_ALIGNMENT_CHECK_32(m);
+
+				ip6 = mtod(m, struct ip6_hdr *);
+				uh = (struct udphdr *)(void *)((caddr_t)ip6 + off);
+			}
+			/* Check for NAT keepalive packet */
+			if (payload_len == 1 && *(u_int8_t*)
+			    ((caddr_t)uh + sizeof(struct udphdr)) == 0xFF) {
+				goto bad;
+			} else if (payload_len == 4 && *(u_int32_t*)(void *)
+			    ((caddr_t)uh + sizeof(struct udphdr)) != 0) {
+				/* UDP encapsulated IPsec packet to pass through NAT */
+				/* preserve the udp header */
+				*offp = off + sizeof(struct udphdr);
+				return esp6_input(mp, offp, IPPROTO_UDP);
+			}
 		}
 	}
 #endif /* IPSEC */
@@ -563,7 +582,7 @@ udp6_input(struct mbuf **mp, int *offp, int proto)
 	}
 #if NECP
 	if (!necp_socket_is_allowed_to_send_recv_v6(in6p, uh->uh_dport,
-	    uh->uh_sport, &ip6->ip6_dst, &ip6->ip6_src, ifp, NULL, NULL, NULL)) {
+	    uh->uh_sport, &ip6->ip6_dst, &ip6->ip6_src, ifp, pf_tag, NULL, NULL, NULL, NULL)) {
 		in_pcb_checkstate(in6p, WNT_RELEASE, 0);
 		IF_UDP_STATINC(ifp, badipsec);
 		goto bad;
@@ -585,6 +604,10 @@ udp6_input(struct mbuf **mp, int *offp, int proto)
 	init_sin6(&udp_in6, m); /* general init */
 	udp_in6.sin6_port = uh->uh_sport;
 	if ((in6p->in6p_flags & INP_CONTROLOPTS) != 0 ||
+#if CONTENT_FILTER
+	    /* Content Filter needs to see local address */
+	    (in6p->in6p_socket->so_cfil_db != NULL) ||
+#endif
 	    (in6p->in6p_socket->so_options & SO_TIMESTAMP) != 0 ||
 	    (in6p->in6p_socket->so_options & SO_TIMESTAMP_MONOTONIC) != 0 ||
 	    (in6p->in6p_socket->so_options & SO_TIMESTAMP_CONTINUOUS) != 0) {
@@ -632,7 +655,9 @@ udp6_ctlinput(int cmd, struct sockaddr *sa, void *d, __unused struct ifnet *ifp)
 	struct ip6ctlparam *ip6cp = NULL;
 	struct icmp6_hdr *icmp6 = NULL;
 	const struct sockaddr_in6 *sa6_src = NULL;
+	void *cmdarg = NULL;
 	void (*notify)(struct inpcb *, int) = udp_notify;
+	struct inpcb *in6p;
 	struct udp_portonly {
 		u_int16_t uh_sport;
 		u_int16_t uh_dport;
@@ -662,10 +687,12 @@ udp6_ctlinput(int cmd, struct sockaddr *sa, void *d, __unused struct ifnet *ifp)
 		m = ip6cp->ip6c_m;
 		ip6 = ip6cp->ip6c_ip6;
 		off = ip6cp->ip6c_off;
+		cmdarg = ip6cp->ip6c_cmdarg;
 		sa6_src = ip6cp->ip6c_src;
 	} else {
 		m = NULL;
 		ip6 = NULL;
+		cmdarg = NULL;
 		sa6_src = &sa6_any;
 	}
 
@@ -682,9 +709,18 @@ udp6_ctlinput(int cmd, struct sockaddr *sa, void *d, __unused struct ifnet *ifp)
 		bzero(&uh, sizeof(uh));
 		m_copydata(m, off, sizeof(*uhp), (caddr_t)&uh);
 
+		in6p = in6_pcblookup_hash(&udbinfo, &ip6->ip6_dst, uh.uh_dport,
+		    &ip6->ip6_src, uh.uh_sport, 0, NULL);
+		if (cmd == PRC_MSGSIZE && in6p != NULL && !uuid_is_null(in6p->necp_client_uuid)) {
+			uuid_t null_uuid;
+			uuid_clear(null_uuid);
+			necp_update_flow_protoctl_event(null_uuid, in6p->necp_client_uuid,
+			    PRC_MSGSIZE, ntohl(icmp6->icmp6_mtu), 0);
+		}
+
 		(void) in6_pcbnotify(&udbinfo, sa, uh.uh_dport,
 		    (struct sockaddr*)ip6cp->ip6c_src, uh.uh_sport,
-		    cmd, NULL, notify);
+		    cmd, cmdarg, notify);
 	}
 	/*
 	 * XXX The else condition here was broken for a long time.
@@ -745,7 +781,7 @@ udp6_attach(struct socket *so, int proto, struct proc *p)
 	 * because the socket may be bound to an IPv6 wildcard address,
 	 * which may match an IPv4-mapped IPv6 address.
 	 */
-	inp->inp_ip_ttl = ip_defttl;
+	inp->inp_ip_ttl = (u_char)ip_defttl;
 	if (nstat_collect) {
 		nstat_udp_new_pcb(inp);
 	}
@@ -858,14 +894,9 @@ udp6_connect(struct socket *so, struct sockaddr *nam, struct proc *p)
 #if defined(NECP) && defined(FLOW_DIVERT)
 do_flow_divert:
 	if (should_use_flow_divert) {
-		uint32_t fd_ctl_unit = necp_socket_get_flow_divert_control_unit(inp);
-		if (fd_ctl_unit > 0) {
-			error = flow_divert_pcb_init(so, fd_ctl_unit);
-			if (error == 0) {
-				error = flow_divert_connect_out(so, nam, p);
-			}
-		} else {
-			error = ENETDOWN;
+		error = flow_divert_pcb_init(so);
+		if (error == 0) {
+			error = flow_divert_connect_out(so, nam, p);
 		}
 		return error;
 	}
@@ -996,7 +1027,7 @@ udp6_send(struct socket *so, int flags, struct mbuf *m, struct sockaddr *addr,
 #if CONTENT_FILTER
 	//If socket is subject to UDP Content Filter and unconnected, get addr from tag.
 	if (so->so_cfil_db && !addr && IN6_IS_ADDR_UNSPECIFIED(&inp->in6p_faddr)) {
-		cfil_tag = cfil_udp_get_socket_state(m, NULL, NULL, &cfil_faddr);
+		cfil_tag = cfil_dgram_get_socket_state(m, NULL, NULL, &cfil_faddr, NULL);
 		if (cfil_tag) {
 			addr = (struct sockaddr *)cfil_faddr;
 		}

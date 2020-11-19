@@ -28,6 +28,7 @@
 #ifndef _IOBUFFERMEMORYDESCRIPTOR_H
 #define _IOBUFFERMEMORYDESCRIPTOR_H
 
+#include <libkern/c++/OSPtr.h>
 #include <IOKit/IOMemoryDescriptor.h>
 #include <DriverKit/IOBufferMemoryDescriptor.h>
 
@@ -52,6 +53,7 @@ enum {
 
 #define _IOBUFFERMEMORYDESCRIPTOR_INTASKWITHOPTIONS_            1
 #define _IOBUFFERMEMORYDESCRIPTOR_HOSTPHYSICALLYCONTIGUOUS_     1
+#define IOBUFFERMEMORYDESCRIPTOR_SUPPORTS_INTASKWITHOPTIONS_TAGS        1
 /*!
  *   @class IOBufferMemoryDescriptor
  *   @abstract Provides a simple memory descriptor that allocates its own buffer memory.
@@ -105,8 +107,8 @@ public:
 	OSMetaClassDeclareReservedUnused(IOBufferMemoryDescriptor, 0);
 	OSMetaClassDeclareReservedUnused(IOBufferMemoryDescriptor, 1);
 #else /* !__LP64__ */
-	OSMetaClassDeclareReservedUsed(IOBufferMemoryDescriptor, 0);
-	OSMetaClassDeclareReservedUsed(IOBufferMemoryDescriptor, 1);
+	OSMetaClassDeclareReservedUsedX86(IOBufferMemoryDescriptor, 0);
+	OSMetaClassDeclareReservedUsedX86(IOBufferMemoryDescriptor, 1);
 #endif /* !__LP64__ */
 	OSMetaClassDeclareReservedUnused(IOBufferMemoryDescriptor, 2);
 	OSMetaClassDeclareReservedUnused(IOBufferMemoryDescriptor, 3);
@@ -141,14 +143,14 @@ public:
 	    vm_offset_t  alignment) APPLE_KEXT_DEPRECATED;                         /* use withOptions() instead */
 #endif /* !__LP64__ */
 
-	static IOBufferMemoryDescriptor * withCopy(
+	static OSPtr<IOBufferMemoryDescriptor> withCopy(
 		task_t            inTask,
 		IOOptionBits      options,
 		vm_map_t          sourceMap,
 		mach_vm_address_t source,
 		mach_vm_size_t    size);
 
-	static IOBufferMemoryDescriptor * withOptions(  IOOptionBits options,
+	static OSPtr<IOBufferMemoryDescriptor> withOptions(  IOOptionBits options,
 	    vm_size_t    capacity,
 	    vm_offset_t  alignment = 1);
 
@@ -170,11 +172,39 @@ public:
  *   @param alignment The minimum required alignment of the buffer in bytes - 1 is the default for no required alignment. For example, pass 256 to get memory allocated at an address with bits 0-7 zero.
  *   @result Returns an instance of class IOBufferMemoryDescriptor to be released by the caller, which will free the memory desriptor and associated buffer. */
 
-	static IOBufferMemoryDescriptor * inTaskWithOptions(
+	static OSPtr<IOBufferMemoryDescriptor> inTaskWithOptions(
 		task_t       inTask,
 		IOOptionBits options,
 		vm_size_t    capacity,
 		vm_offset_t  alignment = 1);
+
+/*! @function inTaskWithOptions
+ *   @abstract Creates a memory buffer with memory descriptor for that buffer.
+ *   @discussion Added in Mac OS X 10.2, this method allocates a memory buffer with a given size and alignment in the task's address space specified, and returns a memory descriptor instance representing the memory. It is recommended that memory allocated for I/O or sharing via mapping be created via IOBufferMemoryDescriptor. Options passed with the request specify the kind of memory to be allocated - pageablity and sharing are specified with option bits. This function may block and so should not be called from interrupt level or while a simple lock is held.
+ *   @param inTask The task the buffer will be allocated in.
+ *   @param options Options for the allocation:<br>
+ *   kIODirectionOut, kIODirectionIn - set the direction of the I/O transfer.<br>
+ *   kIOMemoryPhysicallyContiguous - pass to request memory be physically contiguous. This option is heavily discouraged. The request may fail if memory is fragmented, may cause large amounts of paging activity, and may take a very long time to execute.<br>
+ *   kIOMemoryPageable - pass to request memory be non-wired - the default for kernel allocated memory is wired.<br>
+ *   kIOMemoryPurgeable - pass to request memory that may later have its purgeable state set with IOMemoryDescriptor::setPurgeable. Only supported for kIOMemoryPageable allocations.<br>
+ *   kIOMemoryKernelUserShared - pass to request memory that will be mapped into both the kernel and client applications.<br>
+ *   kIOMapInhibitCache - allocate memory with inhibited cache setting. <br>
+ *   kIOMapWriteThruCache - allocate memory with writethru cache setting. <br>
+ *   kIOMapCopybackCache - allocate memory with copyback cache setting. <br>
+ *   kIOMapWriteCombineCache - allocate memory with writecombined cache setting.
+ *   @param capacity The number of bytes to allocate.
+ *   @param alignment The minimum required alignment of the buffer in bytes - 1 is the default for no required alignment. For example, pass 256 to get memory allocated at an address with bits 0-7 zero.
+ *   @param kernTag The kernel memory tag
+ *   @param userTag The user memory tag
+ *   @result Returns an instance of class IOBufferMemoryDescriptor to be released by the caller, which will free the memory desriptor and associated buffer. */
+
+	static OSPtr<IOBufferMemoryDescriptor> inTaskWithOptions(
+		task_t       inTask,
+		IOOptionBits options,
+		vm_size_t    capacity,
+		vm_offset_t  alignment,
+		uint32_t     kernTag,
+		uint32_t     userTag);
 
 /*! @function inTaskWithPhysicalMask
  *   @abstract Creates a memory buffer with memory descriptor for that buffer.
@@ -192,7 +222,7 @@ public:
  *   @param physicalMask The buffer will be allocated with pages such that physical addresses will only have bits set present in physicalMask. For example, pass 0x00000000FFFFFFFFULL for a buffer to be accessed by hardware that has 32 address bits.
  *   @result Returns an instance of class IOBufferMemoryDescriptor to be released by the caller, which will free the memory desriptor and associated buffer. */
 
-	static IOBufferMemoryDescriptor * inTaskWithPhysicalMask(
+	static OSPtr<IOBufferMemoryDescriptor> inTaskWithPhysicalMask(
 		task_t            inTask,
 		IOOptionBits      options,
 		mach_vm_size_t    capacity,
@@ -205,7 +235,7 @@ public:
  * hold capacity bytes.  The descriptor's length is initially set to the
  * capacity.
  */
-	static IOBufferMemoryDescriptor * withCapacity(
+	static OSPtr<IOBufferMemoryDescriptor> withCapacity(
 		vm_size_t    capacity,
 		IODirection  withDirection,
 		bool         withContiguousMemory = false);
@@ -222,7 +252,7 @@ public:
  * Returns a new IOBufferMemoryDescriptor preloaded with bytes (copied).
  * The descriptor's length and capacity are set to the input buffer's size.
  */
-	static IOBufferMemoryDescriptor * withBytes(
+	static OSPtr<IOBufferMemoryDescriptor> withBytes(
 		const void * bytes,
 		vm_size_t    withLength,
 		IODirection  withDirection,

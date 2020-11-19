@@ -118,9 +118,10 @@ struct ipc_space {
 	ipc_entry_num_t is_table_size;  /* current size of table */
 	ipc_entry_num_t is_table_hashed;/* count of hashed elements */
 	ipc_entry_num_t is_table_free;  /* count of free elements */
-	ipc_entry_t is_table;           /* an array of entries */
-	task_t is_task;                 /* associated task */
-	struct ipc_table_size *is_table_next; /* info for larger table */
+	ipc_entry_t XNU_PTRAUTH_SIGNED_PTR("ipc_space.is_table") is_table; /* an array of entries */
+	struct ipc_table_size * XNU_PTRAUTH_SIGNED_PTR("ipc_space.is_table_next") is_table_next; /* info for larger table */
+	task_t XNU_PTRAUTH_SIGNED_PTR("ipc_space.is_task") is_task; /* associated task */
+	ipc_label_t is_label;           /* [private] mandatory access label */
 	ipc_entry_num_t is_low_mod;     /* lowest modified entry during growth */
 	ipc_entry_num_t is_high_mod;    /* highest modified entry during growth */
 	struct bool_gen bool_gen;       /* state for boolean RNG */
@@ -153,7 +154,7 @@ static inline void
 is_done_growing(ipc_space_t is)
 {
 	assert(is_growing(is));
-	OSBitAndAtomic(~IS_GROWING, &is->is_bits);
+	OSBitAndAtomic((ipc_space_refs_t)~IS_GROWING, &is->is_bits);
 }
 
 extern zone_t ipc_space_zone;
@@ -225,7 +226,18 @@ extern kern_return_t ipc_space_create_special(
 /* Create a new IPC space */
 extern kern_return_t ipc_space_create(
 	ipc_table_size_t        initial,
+	ipc_label_t             label,
 	ipc_space_t             *spacep);
+
+/* Change the label on an existing space */
+extern kern_return_t ipc_space_label(
+	ipc_space_t space,
+	ipc_label_t label);
+
+/* Add a label to an existing space */
+extern kern_return_t ipc_space_add_label(
+	ipc_space_t space,
+	ipc_label_t label);
 
 /* Mark a space as dead and cleans up the entries*/
 extern void ipc_space_terminate(

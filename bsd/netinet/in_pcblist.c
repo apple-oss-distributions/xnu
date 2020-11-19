@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2010-2018 Apple Inc. All rights reserved.
+ * Copyright (c) 2010-2020 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -155,9 +155,9 @@ sbtoxsockbuf_n(struct sockbuf *sb, struct xsockbuf_n *xsb)
 	xsb->sb_mbcnt = sb->sb_mbcnt;
 	xsb->sb_mbmax = sb->sb_mbmax;
 	xsb->sb_lowat = sb->sb_lowat;
-	xsb->sb_flags = sb->sb_flags;
-	xsb->sb_timeo = (short)(sb->sb_timeo.tv_sec * hz) +
-	    sb->sb_timeo.tv_usec / tick;
+	xsb->sb_flags = (short)sb->sb_flags;
+	xsb->sb_timeo = (short)((sb->sb_timeo.tv_sec * hz) +
+	    sb->sb_timeo.tv_usec / tick);
 	if (xsb->sb_timeo == 0 && sb->sb_timeo.tv_usec != 0) {
 		xsb->sb_timeo = 1;
 	}
@@ -438,29 +438,37 @@ inpcb_get_ports_used(uint32_t ifindex, int protocol, uint32_t flags,
 	bool iswildcard, wildcardok, nowakeok;
 	bool recvanyifonly, extbgidleok;
 	bool activeonly;
+	bool anytcpstateok;
 
-	wildcardok = ((flags & INPCB_GET_PORTS_USED_WILDCARDOK) != 0);
-	nowakeok = ((flags & INPCB_GET_PORTS_USED_NOWAKEUPOK) != 0);
-	recvanyifonly = ((flags & INPCB_GET_PORTS_USED_RECVANYIFONLY) != 0);
-	extbgidleok = ((flags & INPCB_GET_PORTS_USED_EXTBGIDLEONLY) != 0);
-	activeonly = ((flags & INPCB_GET_PORTS_USED_ACTIVEONLY) != 0);
+	wildcardok = ((flags & IFNET_GET_LOCAL_PORTS_WILDCARDOK) != 0);
+	nowakeok = ((flags & IFNET_GET_LOCAL_PORTS_NOWAKEUPOK) != 0);
+	recvanyifonly = ((flags & IFNET_GET_LOCAL_PORTS_RECVANYIFONLY) != 0);
+	extbgidleok = ((flags & IFNET_GET_LOCAL_PORTS_EXTBGIDLEONLY) != 0);
+	activeonly = ((flags & IFNET_GET_LOCAL_PORTS_ACTIVEONLY) != 0);
+	anytcpstateok = ((flags & IFNET_GET_LOCAL_PORTS_ANYTCPSTATEOK) != 0);
 
 	lck_rw_lock_shared(pcbinfo->ipi_lock);
 	gencnt = pcbinfo->ipi_gencnt;
 
 	for (inp = LIST_FIRST(pcbinfo->ipi_listhead); inp;
 	    inp = LIST_NEXT(inp, inp_list)) {
-		uint16_t port;
-
 		if (inp->inp_gencnt > gencnt ||
 		    inp->inp_state == INPCB_STATE_DEAD ||
 		    inp->inp_wantcnt == WNT_STOPUSING) {
 			continue;
 		}
 
-		if ((so = inp->inp_socket) == NULL ||
-		    (so->so_state & SS_DEFUNCT) ||
-		    (so->so_state & SS_ISDISCONNECTED)) {
+		if ((so = inp->inp_socket) == NULL || inp->inp_lport == 0) {
+			continue;
+		}
+
+		/*
+		 * ANYTCPSTATEOK means incoming packets cannot be filtered
+		 * reception so cast a wide net of possibilities
+		 */
+		if (!anytcpstateok &&
+		    ((so->so_state & SS_DEFUNCT) ||
+		    (so->so_state & SS_ISDISCONNECTED))) {
 			continue;
 		}
 
@@ -551,6 +559,15 @@ inpcb_get_ports_used(uint32_t ifindex, int protocol, uint32_t flags,
 
 			switch (tp->t_state) {
 			case TCPS_CLOSED:
+				if (anytcpstateok && inp->inp_fport != 0) {
+					/*
+					 * A foreign port means we had a 4 tuple at
+					 * least a connection attempt so packets
+					 * may be received for the 4 tuple after the
+					 * connection is gone
+					 */
+					break;
+				}
 				continue;
 			/* NOT REACHED */
 			case TCPS_LISTEN:
@@ -570,26 +587,28 @@ inpcb_get_ports_used(uint32_t ifindex, int protocol, uint32_t flags,
 			case TCPS_FIN_WAIT_2:
 				/*
 				 * In the closing states, the connection
-				 * is not idle when there is outgoing
+				 * is active when there is outgoing
 				 * data having to be acknowledged
 				 */
-				if (activeonly && so->so_snd.sb_cc == 0) {
+				if (!anytcpstateok &&
+				    (activeonly && so->so_snd.sb_cc == 0)) {
 					continue;
 				}
 				break;
 			case TCPS_TIME_WAIT:
+				if (anytcpstateok) {
+					/*
+					 * Packets may still be received for the 4 tuple
+					 * after the connection is gone
+					 */
+					break;
+				}
 				continue;
 				/* NOT REACHED */
 			}
 		}
-		/*
-		 * Final safeguard to exclude unspecified local port
-		 */
-		port = ntohs(inp->inp_lport);
-		if (port == 0) {
-			continue;
-		}
-		bitstr_set(bitfield, port);
+
+		bitstr_set(bitfield, ntohs(inp->inp_lport));
 
 		if_ports_used_add_inpcb(ifindex, inp);
 	}
@@ -697,34 +716,25 @@ inpcb_find_anypcb_byaddr(struct ifaddr *ifa, struct inpcbinfo *pcbinfo)
 static int
 shutdown_sockets_on_interface_proc_callout(proc_t p, void *arg)
 {
-	struct filedesc *fdp;
-	int i;
+	struct fileproc *fp;
 	struct ifnet *ifp = (struct ifnet *)arg;
 
 	if (ifp == NULL) {
 		return PROC_RETURNED;
 	}
 
-	proc_fdlock(p);
-	fdp = p->p_fd;
-	for (i = 0; i < fdp->fd_nfiles; i++) {
-		struct fileproc *fp = fdp->fd_ofiles[i];
-		struct fileglob *fg;
+	fdt_foreach(fp, p) {
+		struct fileglob *fg = fp->fp_glob;
 		struct socket *so;
 		struct inpcb *inp;
 		struct ifnet *inp_ifp;
 		int error;
 
-		if (fp == NULL || (fdp->fd_ofileflags[i] & UF_RESERVED) != 0) {
-			continue;
-		}
-
-		fg = fp->f_fglob;
 		if (FILEGLOB_DTYPE(fg) != DTYPE_SOCKET) {
 			continue;
 		}
 
-		so = (struct socket *)fp->f_fglob->fg_data;
+		so = (struct socket *)fp->fp_glob->fg_data;
 		if (SOCK_DOM(so) != PF_INET && SOCK_DOM(so) != PF_INET6) {
 			continue;
 		}
@@ -780,4 +790,61 @@ shutdown_sockets_on_interface(struct ifnet *ifp)
 	proc_iterate(PROC_ALLPROCLIST,
 	    shutdown_sockets_on_interface_proc_callout,
 	    ifp, NULL, NULL);
+}
+
+__private_extern__ int
+inp_limit_companion_link(struct inpcbinfo *pcbinfo, u_int32_t limit)
+{
+	struct inpcb *inp;
+	struct socket *so = NULL;
+
+	lck_rw_lock_shared(pcbinfo->ipi_lock);
+	inp_gen_t gencnt = pcbinfo->ipi_gencnt;
+	for (inp = LIST_FIRST(pcbinfo->ipi_listhead);
+	    inp != NULL; inp = LIST_NEXT(inp, inp_list)) {
+		if (inp->inp_gencnt <= gencnt &&
+		    inp->inp_state != INPCB_STATE_DEAD &&
+		    inp->inp_socket != NULL) {
+			so = inp->inp_socket;
+
+			if ((so->so_state & SS_DEFUNCT) || so->so_state & SS_ISDISCONNECTED ||
+			    SOCK_PROTO(so) != IPPROTO_TCP || inp->inp_last_outifp == NULL ||
+			    !IFNET_IS_COMPANION_LINK(inp->inp_last_outifp)) {
+				continue;
+			}
+			so->so_snd.sb_flags &= ~SB_LIMITED;
+			u_int32_t new_size = MAX(MIN(limit, so->so_snd.sb_lowat), so->so_snd.sb_cc);
+			sbreserve(&so->so_snd, new_size);
+			so->so_snd.sb_flags |= SB_LIMITED;
+		}
+	}
+	lck_rw_done(pcbinfo->ipi_lock);
+	return 0;
+}
+
+__private_extern__ int
+inp_recover_companion_link(struct inpcbinfo *pcbinfo)
+{
+	struct inpcb *inp;
+	inp_gen_t gencnt = pcbinfo->ipi_gencnt;
+	struct socket *so = NULL;
+
+	lck_rw_lock_shared(pcbinfo->ipi_lock);
+	for (inp = LIST_FIRST(pcbinfo->ipi_listhead);
+	    inp != NULL; inp = LIST_NEXT(inp, inp_list)) {
+		if (inp->inp_gencnt <= gencnt &&
+		    inp->inp_state != INPCB_STATE_DEAD &&
+		    inp->inp_socket != NULL) {
+			so = inp->inp_socket;
+
+			if (SOCK_PROTO(so) != IPPROTO_TCP || inp->inp_last_outifp == NULL ||
+			    !(so->so_snd.sb_flags & SB_LIMITED)) {
+				continue;
+			}
+
+			so->so_snd.sb_flags &= ~SB_LIMITED;
+		}
+	}
+	lck_rw_done(pcbinfo->ipi_lock);
+	return 0;
 }

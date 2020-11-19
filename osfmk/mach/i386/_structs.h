@@ -222,7 +222,6 @@ _STRUCT_XMM_REG
 };
 #endif /* !__DARWIN_UNIX03 */
 
-#if !defined(RC_HIDE_XNU_J137)
 /* defn of 256 bit YMM regs */
 
 #if __DARWIN_UNIX03
@@ -268,7 +267,6 @@ _STRUCT_OPMASK_REG
 	char		opmask_reg[8];
 };
 #endif /* !__DARWIN_UNIX03 */
-#endif /* not RC_HIDE_XNU_J137 */
 
 /* 
  * Floating point state.
@@ -362,7 +360,6 @@ _STRUCT_X86_AVX_STATE32
 	_STRUCT_XMM_REG		__fpu_ymmh7;		/* YMMH 7  */
 };
 
-#if !defined(RC_HIDE_XNU_J137)
 #define	_STRUCT_X86_AVX512_STATE32	struct __darwin_i386_avx512_state
 _STRUCT_X86_AVX512_STATE32
 {
@@ -424,7 +421,6 @@ _STRUCT_X86_AVX512_STATE32
 	_STRUCT_YMM_REG		__fpu_zmmh6;		/* ZMMH 6  */
 	_STRUCT_YMM_REG		__fpu_zmmh7;		/* ZMMH 7  */
 };
-#endif /* not RC_HIDE_XNU_J137 */
 
 #else /* !__DARWIN_UNIX03 */
 #define	_STRUCT_X86_FLOAT_STATE32	struct i386_float_state
@@ -510,7 +506,6 @@ _STRUCT_X86_AVX_STATE32
 	_STRUCT_XMM_REG		fpu_ymmh7;		/* YMMH 7  */
 };
 
-#if !defined(RC_HIDE_XNU_J137)
 #define	_STRUCT_X86_AVX512_STATE32	struct i386_avx512_state
 _STRUCT_X86_AVX512_STATE32
 {
@@ -572,7 +567,6 @@ _STRUCT_X86_AVX512_STATE32
 	_STRUCT_YMM_REG		fpu_zmmh6;		/* ZMMH 6  */
 	_STRUCT_YMM_REG		fpu_zmmh7;		/* ZMMH 7  */
 };
-#endif /* not RC_HIDE_XNU_J137 */
 
 #endif /* !__DARWIN_UNIX03 */
 
@@ -609,7 +603,48 @@ _STRUCT_X86_DEBUG_STATE32
 	unsigned int	__dr6;
 	unsigned int	__dr7;
 };
+
+#define _STRUCT_X86_INSTRUCTION_STATE	struct __x86_instruction_state
+_STRUCT_X86_INSTRUCTION_STATE
+{
+        int		__insn_stream_valid_bytes;
+        int		__insn_offset;
+	int		__out_of_synch;	/*
+					 * non-zero when the cacheline that includes the insn_offset
+					 * is replaced in the insn_bytes array due to a mismatch
+					 * detected when comparing it with the same cacheline in memory
+					 */
+#define _X86_INSTRUCTION_STATE_MAX_INSN_BYTES    (2448 - 64 - 4)
+        __uint8_t	__insn_bytes[_X86_INSTRUCTION_STATE_MAX_INSN_BYTES];
+#define _X86_INSTRUCTION_STATE_CACHELINE_SIZE	64
+	__uint8_t	__insn_cacheline[_X86_INSTRUCTION_STATE_CACHELINE_SIZE];
+};
+
+#define _STRUCT_LAST_BRANCH_RECORD	struct __last_branch_record
+_STRUCT_LAST_BRANCH_RECORD
+{
+	__uint64_t	__from_ip;
+	__uint64_t	__to_ip;
+	__uint32_t	__mispredict : 1,
+			__tsx_abort  : 1,
+			__in_tsx     : 1,
+			__cycle_count: 16,
+			__reserved   : 13;
+};
+
+#define _STRUCT_LAST_BRANCH_STATE	struct __last_branch_state
+_STRUCT_LAST_BRANCH_STATE
+{
+        int				__lbr_count;
+	__uint32_t			__lbr_supported_tsx : 1,
+					__lbr_supported_cycle_count : 1,
+					__reserved : 30;
+#define	__LASTBRANCH_MAX	32
+	_STRUCT_LAST_BRANCH_RECORD	__lbrs[__LASTBRANCH_MAX];
+};
+
 #else /* !__DARWIN_UNIX03 */
+
 #define _STRUCT_X86_DEBUG_STATE32	struct x86_debug_state32
 _STRUCT_X86_DEBUG_STATE32
 {
@@ -621,6 +656,45 @@ _STRUCT_X86_DEBUG_STATE32
 	unsigned int	dr5;
 	unsigned int	dr6;
 	unsigned int	dr7;
+};
+
+#define _STRUCT_X86_INSTRUCTION_STATE	struct __x86_instruction_state
+_STRUCT_X86_INSTRUCTION_STATE
+{
+        int		insn_stream_valid_bytes;
+        int		insn_offset;
+	int		out_of_synch;	/*
+					 * non-zero when the cacheline that includes the insn_offset
+					 * is replaced in the insn_bytes array due to a mismatch
+					 * detected when comparing it with the same cacheline in memory
+					 */
+#define x86_INSTRUCTION_STATE_MAX_INSN_BYTES    (2448 - 64 - 4)
+        __uint8_t	insn_bytes[x86_INSTRUCTION_STATE_MAX_INSN_BYTES];
+#define x86_INSTRUCTION_STATE_CACHELINE_SIZE	64
+	__uint8_t	insn_cacheline[x86_INSTRUCTION_STATE_CACHELINE_SIZE];
+};
+
+#define _STRUCT_LAST_BRANCH_RECORD	struct __last_branch_record
+_STRUCT_LAST_BRANCH_RECORD
+{
+	__uint64_t	from_ip;
+	__uint64_t	to_ip;
+	__uint32_t	mispredict : 1,
+			tsx_abort  : 1,
+			in_tsx     : 1,
+			cycle_count: 16,
+			reserved   : 13;
+};
+
+#define _STRUCT_LAST_BRANCH_STATE	struct __last_branch_state
+_STRUCT_LAST_BRANCH_STATE
+{
+        int				lbr_count;
+	__uint32_t			lbr_supported_tsx : 1,
+					lbr_supported_cycle_count : 1,
+					reserved : 30;
+#define	__LASTBRANCH_MAX	32
+	_STRUCT_LAST_BRANCH_RECORD	lbrs[__LASTBRANCH_MAX];
 };
 #endif /* !__DARWIN_UNIX03 */
 
@@ -835,7 +909,6 @@ _STRUCT_X86_AVX_STATE64
 	_STRUCT_XMM_REG		__fpu_ymmh15;		/* YMMH 15  */
 };
 
-#if !defined(RC_HIDE_XNU_J137)
 #define	_STRUCT_X86_AVX512_STATE64	struct __darwin_x86_avx512_state64
 _STRUCT_X86_AVX512_STATE64
 {
@@ -943,7 +1016,6 @@ _STRUCT_X86_AVX512_STATE64
 	_STRUCT_ZMM_REG		__fpu_zmm30;		/* ZMM 30  */
 	_STRUCT_ZMM_REG		__fpu_zmm31;		/* ZMM 31  */
 };
-#endif /* not RC_HIDE_XNU_J137 */
 
 #else /* !__DARWIN_UNIX03 */
 #define	_STRUCT_X86_FLOAT_STATE64	struct x86_float_state64
@@ -1065,7 +1137,6 @@ _STRUCT_X86_AVX_STATE64
 	_STRUCT_XMM_REG		fpu_ymmh15;		/* YMMH 15  */
 };
 
-#if !defined(RC_HIDE_XNU_J137)
 #define	_STRUCT_X86_AVX512_STATE64	struct x86_avx512_state64
 _STRUCT_X86_AVX512_STATE64
 {
@@ -1173,7 +1244,6 @@ _STRUCT_X86_AVX512_STATE64
 	_STRUCT_ZMM_REG		fpu_zmm30;		/* ZMM 30  */
 	_STRUCT_ZMM_REG		fpu_zmm31;		/* ZMM 31  */
 };
-#endif /* not RC_HIDE_XNU_J137 */
 
 #endif /* !__DARWIN_UNIX03 */
 

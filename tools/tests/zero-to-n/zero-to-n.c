@@ -56,6 +56,7 @@
 #include <stdatomic.h>
 
 #include <os/tsd.h>
+#include <TargetConditionals.h>
 
 typedef enum wake_type { WAKE_BROADCAST_ONESEM, WAKE_BROADCAST_PERTHREAD, WAKE_CHAIN, WAKE_HOP } wake_type_t;
 typedef enum my_policy_type { MY_POLICY_REALTIME, MY_POLICY_TIMESHARE, MY_POLICY_FIXEDPRI } my_policy_type_t;
@@ -66,6 +67,9 @@ typedef enum my_policy_type { MY_POLICY_REALTIME, MY_POLICY_TIMESHARE, MY_POLICY
 
 #define CONSTRAINT_NANOS        (20000000ll)    /* 20 ms */
 #define COMPUTATION_NANOS       (10000000ll)    /* 10 ms */
+#define LL_CONSTRAINT_NANOS     ( 2000000ll)    /*  2 ms */
+#define LL_COMPUTATION_NANOS    ( 1000000ll)    /*  1 ms */
+#define RT_CHURN_COMP_NANOS     ( 1000000ll)    /*  1 ms */
 #define TRACEWORTHY_NANOS       (10000000ll)    /* 10 ms */
 #define TRACEWORTHY_NANOS_TEST  ( 2000000ll)    /*  2 ms */
 
@@ -105,8 +109,13 @@ static uint32_t                 g_iteration_sleeptime_us = 0;
 static uint32_t                 g_priority = 0;
 static uint32_t                 g_churn_pri = 0;
 static uint32_t                 g_churn_count = 0;
+static uint32_t                 g_rt_churn_count = 0;
 
 static pthread_t*               g_churn_threads = NULL;
+static pthread_t*               g_rt_churn_threads = NULL;
+
+/* should we skip test if run on non-intel */
+static boolean_t                g_run_on_intel_only = FALSE;
 
 /* Threshold for dropping a 'bad run' tracepoint */
 static uint64_t                 g_traceworthy_latency_ns = TRACEWORTHY_NANOS;
@@ -123,8 +132,13 @@ static boolean_t                g_do_all_spin = FALSE;
 /* Every thread backgrounds temporarily before parking */
 static boolean_t                g_drop_priority = FALSE;
 
+/* Use low-latency (sub 4ms deadline) realtime threads */
+static boolean_t                g_rt_ll = FALSE;
+
 /* Test whether realtime threads are scheduled on the separate CPUs */
 static boolean_t                g_test_rt = FALSE;
+
+static boolean_t                g_rt_churn = FALSE;
 
 /* On SMT machines, test whether realtime threads are scheduled on the correct CPUs */
 static boolean_t                g_test_rt_smt = FALSE;
@@ -151,6 +165,8 @@ static semaphore_t              g_broadcastsem;
 static semaphore_t              g_leadersem;
 static semaphore_t              g_readysem;
 static semaphore_t              g_donesem;
+static semaphore_t              g_rt_churn_sem;
+static semaphore_t              g_rt_churn_start_sem;
 
 /* Global variables (chain) */
 static semaphore_t             *g_semarr;
@@ -271,6 +287,129 @@ join_churn_threads(void)
 }
 
 /*
+ * Set policy
+ */
+static int
+rt_churn_thread_setup(void)
+{
+	kern_return_t kr;
+	thread_time_constraint_policy_data_t pol;
+
+	/* Hard-coded realtime parameters (similar to what Digi uses) */
+	pol.period      = 100000;
+	pol.constraint  = (uint32_t) nanos_to_abs(CONSTRAINT_NANOS * 2);
+	pol.computation = (uint32_t) nanos_to_abs(RT_CHURN_COMP_NANOS * 2);
+	pol.preemptible = 0;         /* Ignored by OS */
+
+	kr = thread_policy_set(mach_thread_self(), THREAD_TIME_CONSTRAINT_POLICY,
+	    (thread_policy_t) &pol, THREAD_TIME_CONSTRAINT_POLICY_COUNT);
+	mach_assert_zero_t(0, kr);
+
+	return 0;
+}
+
+static void *
+rt_churn_thread(__unused void *arg)
+{
+	rt_churn_thread_setup();
+
+	for (uint32_t i = 0; i < g_iterations; i++) {
+		kern_return_t kr = semaphore_wait_signal(g_rt_churn_start_sem, g_rt_churn_sem);
+		mach_assert_zero_t(0, kr);
+
+		volatile double x = 0.0;
+		volatile double y = 0.0;
+
+		uint64_t endspin = mach_absolute_time() + nanos_to_abs(RT_CHURN_COMP_NANOS);
+		while (mach_absolute_time() < endspin) {
+			y = y + 1.5 + x;
+			x = sqrt(y);
+		}
+	}
+
+	kern_return_t kr = semaphore_signal(g_rt_churn_sem);
+	mach_assert_zero_t(0, kr);
+
+	return NULL;
+}
+
+static void
+wait_for_rt_churn_threads(void)
+{
+	for (uint32_t i = 0; i < g_rt_churn_count; i++) {
+		kern_return_t kr = semaphore_wait(g_rt_churn_sem);
+		mach_assert_zero_t(0, kr);
+	}
+}
+
+static void
+start_rt_churn_threads(void)
+{
+	for (uint32_t i = 0; i < g_rt_churn_count; i++) {
+		kern_return_t kr = semaphore_signal(g_rt_churn_start_sem);
+		mach_assert_zero_t(0, kr);
+	}
+}
+
+static void
+create_rt_churn_threads(void)
+{
+	if (g_rt_churn_count == 0) {
+		/* Leave 1 CPU to ensure that the main thread can make progress */
+		g_rt_churn_count = g_numcpus - 1;
+	}
+
+	errno_t err;
+
+	struct sched_param param = { .sched_priority = (int)g_churn_pri };
+	pthread_attr_t attr;
+
+	/* Array for churn threads */
+	g_rt_churn_threads = (pthread_t*) valloc(sizeof(pthread_t) * g_rt_churn_count);
+	assert(g_rt_churn_threads);
+
+	if ((err = pthread_attr_init(&attr))) {
+		errc(EX_OSERR, err, "pthread_attr_init");
+	}
+
+	if ((err = pthread_attr_setschedparam(&attr, &param))) {
+		errc(EX_OSERR, err, "pthread_attr_setschedparam");
+	}
+
+	if ((err = pthread_attr_setschedpolicy(&attr, SCHED_RR))) {
+		errc(EX_OSERR, err, "pthread_attr_setschedpolicy");
+	}
+
+	for (uint32_t i = 0; i < g_rt_churn_count; i++) {
+		pthread_t new_thread;
+
+		if ((err = pthread_create(&new_thread, &attr, rt_churn_thread, NULL))) {
+			errc(EX_OSERR, err, "pthread_create");
+		}
+		g_rt_churn_threads[i] = new_thread;
+	}
+
+	if ((err = pthread_attr_destroy(&attr))) {
+		errc(EX_OSERR, err, "pthread_attr_destroy");
+	}
+
+	/* Wait until all threads have checked in */
+	wait_for_rt_churn_threads();
+}
+
+static void
+join_rt_churn_threads(void)
+{
+	/* Rejoin rt churn threads */
+	for (uint32_t i = 0; i < g_rt_churn_count; i++) {
+		errno_t err = pthread_join(g_rt_churn_threads[i], NULL);
+		if (err) {
+			errc(EX_OSERR, err, "pthread_join %d", i);
+		}
+	}
+}
+
+/*
  * Figure out what thread policy to use
  */
 static my_policy_type_t
@@ -334,8 +473,13 @@ thread_setup(uint32_t my_id)
 	case MY_POLICY_REALTIME:
 		/* Hard-coded realtime parameters (similar to what Digi uses) */
 		pol.period      = 100000;
-		pol.constraint  = (uint32_t) nanos_to_abs(CONSTRAINT_NANOS);
-		pol.computation = (uint32_t) nanos_to_abs(COMPUTATION_NANOS);
+		if (g_rt_ll) {
+			pol.constraint  = (uint32_t) nanos_to_abs(LL_CONSTRAINT_NANOS);
+			pol.computation = (uint32_t) nanos_to_abs(LL_COMPUTATION_NANOS);
+		} else {
+			pol.constraint  = (uint32_t) nanos_to_abs(CONSTRAINT_NANOS);
+			pol.computation = (uint32_t) nanos_to_abs(COMPUTATION_NANOS);
+		}
 		pol.preemptible = 0;         /* Ignored by OS */
 
 		kr = thread_policy_set(mach_thread_self(), THREAD_TIME_CONSTRAINT_POLICY,
@@ -660,6 +804,19 @@ main(int argc, char **argv)
 
 	mach_timebase_info(&g_mti);
 
+#if TARGET_OS_OSX
+	/* SKIP test if running on arm platform */
+	if (g_run_on_intel_only) {
+		int is_arm = 0;
+		size_t is_arm_size = sizeof(is_arm);
+		ret = sysctlbyname("hw.optional.arm64", &is_arm, &is_arm_size, NULL, 0);
+		if (ret == 0 && is_arm) {
+			printf("Unsupported platform. Skipping test.\n");
+			exit(0);
+		}
+	}
+#endif /* TARGET_OS_OSX */
+
 	size_t ncpu_size = sizeof(g_numcpus);
 	ret = sysctlbyname("hw.ncpu", &g_numcpus, &ncpu_size, NULL, 0);
 	if (ret) {
@@ -828,6 +985,12 @@ main(int argc, char **argv)
 	kr = semaphore_create(mach_task_self(), &g_readysem, SYNC_POLICY_FIFO, 0);
 	mach_assert_zero(kr);
 
+	kr = semaphore_create(mach_task_self(), &g_rt_churn_sem, SYNC_POLICY_FIFO, 0);
+	mach_assert_zero(kr);
+
+	kr = semaphore_create(mach_task_self(), &g_rt_churn_start_sem, SYNC_POLICY_FIFO, 0);
+	mach_assert_zero(kr);
+
 	atomic_store_explicit(&g_done_threads, 0, memory_order_relaxed);
 
 	/* Create the threads */
@@ -850,6 +1013,9 @@ main(int argc, char **argv)
 	if (g_churn_pri) {
 		create_churn_threads();
 	}
+	if (g_rt_churn) {
+		create_rt_churn_threads();
+	}
 
 	/* Let everyone get settled */
 	kr = semaphore_wait(g_main_sem);
@@ -869,6 +1035,11 @@ main(int argc, char **argv)
 			g_one_long_spin_id = (uint32_t)rand() % g_numthreads;
 		}
 
+		if (g_rt_churn) {
+			start_rt_churn_threads();
+			usleep(100);
+		}
+
 		debug_log("%d Main thread reset\n", i);
 
 		atomic_store_explicit(&g_done_threads, 0, memory_order_seq_cst);
@@ -882,6 +1053,10 @@ main(int argc, char **argv)
 		debug_log("%d Main thread return\n", i);
 
 		assert(atomic_load_explicit(&g_done_threads, memory_order_relaxed) == g_numthreads);
+
+		if (g_rt_churn) {
+			wait_for_rt_churn_threads();
+		}
 
 		/*
 		 * We report the worst latencies relative to start time
@@ -931,6 +1106,10 @@ main(int argc, char **argv)
 		if (ret) {
 			errc(EX_OSERR, ret, "pthread_join %d", i);
 		}
+	}
+
+	if (g_rt_churn) {
+		join_rt_churn_threads();
 	}
 
 	if (g_churn_pri) {
@@ -1071,7 +1250,8 @@ usage()
 	    "<realtime | timeshare | fixed> <iterations>\n\t\t"
 	    "[--trace <traceworthy latency in ns>] "
 	    "[--verbose] [--spin-one] [--spin-all] [--spin-time <nanos>] [--affinity]\n\t\t"
-	    "[--no-sleep] [--drop-priority] [--churn-pri <pri>] [--churn-count <n>]",
+	    "[--no-sleep] [--drop-priority] [--churn-pri <pri>] [--churn-count <n>]\n\t\t"
+	    "[--rt-churn] [--rt-churn-count <n>] [--rt-ll] [--test-rt] [--test-rt-smt] [--test-rt-avoid0]",
 	    getprogname());
 }
 
@@ -1104,6 +1284,7 @@ parse_args(int argc, char *argv[])
 		OPT_PRIORITY,
 		OPT_CHURN_PRI,
 		OPT_CHURN_COUNT,
+		OPT_RT_CHURN_COUNT,
 	};
 
 	static struct option longopts[] = {
@@ -1113,8 +1294,10 @@ parse_args(int argc, char *argv[])
 		{ "priority",           required_argument,      NULL,                           OPT_PRIORITY  },
 		{ "churn-pri",          required_argument,      NULL,                           OPT_CHURN_PRI },
 		{ "churn-count",        required_argument,      NULL,                           OPT_CHURN_COUNT },
+		{ "rt-churn-count",     required_argument,      NULL,                           OPT_RT_CHURN_COUNT },
 		{ "switched_apptype",   no_argument,            (int*)&g_seen_apptype,          TRUE },
 		{ "spin-one",           no_argument,            (int*)&g_do_one_long_spin,      TRUE },
+		{ "intel-only",         no_argument,            (int*)&g_run_on_intel_only,     TRUE },
 		{ "spin-all",           no_argument,            (int*)&g_do_all_spin,           TRUE },
 		{ "affinity",           no_argument,            (int*)&g_do_affinity,           TRUE },
 		{ "no-sleep",           no_argument,            (int*)&g_do_sleep,              FALSE },
@@ -1122,6 +1305,8 @@ parse_args(int argc, char *argv[])
 		{ "test-rt",            no_argument,            (int*)&g_test_rt,               TRUE },
 		{ "test-rt-smt",        no_argument,            (int*)&g_test_rt_smt,           TRUE },
 		{ "test-rt-avoid0",     no_argument,            (int*)&g_test_rt_avoid0,        TRUE },
+		{ "rt-churn",           no_argument,            (int*)&g_rt_churn,              TRUE },
+		{ "rt-ll",              no_argument,            (int*)&g_rt_ll,                 TRUE },
 		{ "histogram",          no_argument,            (int*)&g_histogram,             TRUE },
 		{ "verbose",            no_argument,            (int*)&g_verbose,               TRUE },
 		{ "help",               no_argument,            NULL,                           'h' },
@@ -1152,6 +1337,9 @@ parse_args(int argc, char *argv[])
 			break;
 		case OPT_CHURN_COUNT:
 			g_churn_count = read_dec_arg();
+			break;
+		case OPT_RT_CHURN_COUNT:
+			g_rt_churn_count = read_dec_arg();
 			break;
 		case '?':
 		case 'h':

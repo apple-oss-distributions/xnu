@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2004 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2020 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -87,6 +87,8 @@
 #include <kern/misc_protos.h>
 #include <kern/ux_handler.h>
 
+#include <vm/vm_map.h>
+
 #include <security/mac_mach_internal.h>
 #include <string.h>
 
@@ -122,6 +124,16 @@ kern_return_t bsd_exception(
 	mach_exception_data_t   code,
 	mach_msg_type_number_t  codeCnt);
 #endif /* MACH_BSD */
+
+#if __has_feature(ptrauth_calls)
+extern int exit_with_pac_exception(
+	void *proc,
+	exception_type_t         exception,
+	mach_exception_code_t    code,
+	mach_exception_subcode_t subcode);
+
+extern bool proc_is_traced(void *p);
+#endif /* __has_feature(ptrauth_calls) */
 
 /*
  * Routine: exception_init
@@ -447,6 +459,7 @@ exception_triage_thread(
 	lck_mtx_t               *mutex;
 	kern_return_t   kr = KERN_FAILURE;
 
+
 	assert(exception != EXC_RPC_ALERT);
 
 	/*
@@ -518,6 +531,7 @@ out:
  *	Returns:
  *		KERN_SUCCESS if exception is handled by any of the handlers.
  */
+int debug4k_panic_on_exception = 0;
 kern_return_t
 exception_triage(
 	exception_type_t        exception,
@@ -525,6 +539,35 @@ exception_triage(
 	mach_msg_type_number_t  codeCnt)
 {
 	thread_t thread = current_thread();
+	if (VM_MAP_PAGE_SIZE(thread->task->map) < PAGE_SIZE) {
+		DEBUG4K_EXC("thread %p task %p map %p exception %d codes 0x%llx 0x%llx \n", thread, thread->task, thread->task->map, exception, code[0], code[1]);
+		if (debug4k_panic_on_exception) {
+			panic("DEBUG4K %s:%d thread %p task %p map %p exception %d codes 0x%llx 0x%llx \n", __FUNCTION__, __LINE__, thread, thread->task, thread->task->map, exception, code[0], code[1]);
+		}
+	}
+#if __has_feature(ptrauth_calls)
+	/*
+	 * If it is a ptrauth violation, then check if the task has the TF_PAC_EXC_FATAL
+	 * flag set and isn't being ptraced. If so, terminate the task via exit_with_reason
+	 */
+	if (exception & EXC_PTRAUTH_BIT) {
+		exception &= ~EXC_PTRAUTH_BIT;
+
+		boolean_t traced_flag = FALSE;
+		task_t task = thread->task;
+		void *proc = task->bsd_info;
+
+		if (task->bsd_info) {
+			traced_flag = proc_is_traced(proc);
+		}
+
+		if (task_is_pac_exception_fatal(current_task()) && !traced_flag) {
+			exit_with_pac_exception(proc, exception, code[0], code[1]);
+			thread_exception_return();
+			/* NOT_REACHABLE */
+		}
+	}
+#endif /* __has_feature(ptrauth_calls) */
 	return exception_triage_thread(exception, code, codeCnt, thread);
 }
 

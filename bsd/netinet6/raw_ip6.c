@@ -105,6 +105,7 @@
 #include <net/net_api_stats.h>
 #include <net/route.h>
 #include <net/if_types.h>
+#include <net/content_filter.h>
 
 #include <netinet/in.h>
 #include <netinet/in_var.h>
@@ -202,13 +203,17 @@ rip6_input(
 
 #if NECP
 			if (n && !necp_socket_is_allowed_to_send_recv_v6(in6p, 0, 0,
-			    &ip6->ip6_dst, &ip6->ip6_src, ifp, NULL, NULL, NULL)) {
+			    &ip6->ip6_dst, &ip6->ip6_src, ifp, 0, NULL, NULL, NULL, NULL)) {
 				m_freem(n);
 				/* do not inject data into pcb */
 			} else
 #endif /* NECP */
 			if (n) {
 				if ((last->in6p_flags & INP_CONTROLOPTS) != 0 ||
+#if CONTENT_FILTER
+				    /* Content Filter needs to see local address */
+				    (last->in6p_socket->so_cfil_db != NULL) ||
+#endif
 				    (last->in6p_socket->so_options & SO_TIMESTAMP) != 0 ||
 				    (last->in6p_socket->so_options & SO_TIMESTAMP_MONOTONIC) != 0 ||
 				    (last->in6p_socket->so_options & SO_TIMESTAMP_CONTINUOUS) != 0) {
@@ -238,7 +243,7 @@ rip6_input(
 
 #if NECP
 	if (last && !necp_socket_is_allowed_to_send_recv_v6(in6p, 0, 0,
-	    &ip6->ip6_dst, &ip6->ip6_src, ifp, NULL, NULL, NULL)) {
+	    &ip6->ip6_dst, &ip6->ip6_src, ifp, 0, NULL, NULL, NULL, NULL)) {
 		m_freem(m);
 		ip6stat.ip6s_delivered--;
 		/* do not inject data into pcb */
@@ -246,6 +251,10 @@ rip6_input(
 #endif /* NECP */
 	if (last) {
 		if ((last->in6p_flags & INP_CONTROLOPTS) != 0 ||
+#if CONTENT_FILTER
+		    /* Content Filter needs to see local address */
+		    (last->in6p_socket->so_cfil_db != NULL) ||
+#endif
 		    (last->in6p_socket->so_options & SO_TIMESTAMP) != 0 ||
 		    (last->in6p_socket->so_options & SO_TIMESTAMP_MONOTONIC) != 0 ||
 		    (last->in6p_socket->so_options & SO_TIMESTAMP_CONTINUOUS) != 0) {
@@ -277,7 +286,7 @@ rip6_input(
 			char *prvnxtp = ip6_get_prevhdr(m, *offp); /* XXX */
 			icmp6_error(m, ICMP6_PARAM_PROB,
 			    ICMP6_PARAMPROB_NEXTHEADER,
-			    prvnxtp - mtod(m, char *));
+			    (int)(prvnxtp - mtod(m, char *)));
 		}
 		ip6stat.ip6s_delivered--;
 	}
@@ -295,8 +304,8 @@ rip6_ctlinput(
 	void *d,
 	__unused struct ifnet *ifp)
 {
-	struct ip6_hdr *ip6;
-	struct mbuf *m;
+	struct ip6_hdr *ip6 = NULL;
+	struct mbuf *m = NULL;
 	void *cmdarg = NULL;
 	int off = 0;
 	struct ip6ctlparam *ip6cp = NULL;
@@ -331,6 +340,7 @@ rip6_ctlinput(
 	} else {
 		m = NULL;
 		ip6 = NULL;
+		cmdarg = NULL;
 		sa6_src = &sa6_any;
 	}
 
@@ -363,8 +373,80 @@ rip6_output(
 	int netsvctype = _NET_SERVICE_TYPE_UNSPEC;
 	struct ip6_out_args ip6oa;
 	int flags = IPV6_OUTARGS;
+	struct sockaddr_in6 tmp;
+#if CONTENT_FILTER
+	struct m_tag *cfil_tag = NULL;
+	bool cfil_faddr_use = false;
+	uint32_t cfil_so_state_change_cnt = 0;
+	uint32_t cfil_so_options = 0;
+	struct sockaddr *cfil_faddr = NULL;
+	struct sockaddr_in6 *cfil_sin6 = NULL;
+#endif
 
 	in6p = sotoin6pcb(so);
+	if (in6p == NULL) {
+		error = EINVAL;
+		goto bad;
+	}
+
+#if CONTENT_FILTER
+	/*
+	 * If socket is subject to Content Filter and no addr is passed in,
+	 * retrieve CFIL saved state from mbuf and use it if necessary.
+	 */
+	if (so->so_cfil_db && !dstsock) {
+		cfil_tag = cfil_dgram_get_socket_state(m, &cfil_so_state_change_cnt, &cfil_so_options, &cfil_faddr, NULL);
+		if (cfil_tag) {
+			cfil_sin6 = SIN6(cfil_faddr);
+			if (IN6_IS_ADDR_UNSPECIFIED(&in6p->in6p_faddr)) {
+				/*
+				 * Socket is unconnected, simply use the saved faddr as 'addr' to go through
+				 * the connect/disconnect logic.
+				 */
+				dstsock = cfil_sin6;
+			} else if ((so->so_state_change_cnt != cfil_so_state_change_cnt) &&
+			    (in6p->in6p_fport != cfil_sin6->sin6_port ||
+			    !IN6_ARE_ADDR_EQUAL(&in6p->in6p_faddr, &cfil_sin6->sin6_addr))) {
+				/*
+				 * Socket is connected but socket state and dest addr/port changed.
+				 * We need to use the saved faddr and socket options.
+				 */
+				cfil_faddr_use = true;
+			}
+		}
+	}
+#endif
+
+	/* always copy sockaddr to avoid overwrites */
+	if (so->so_state & SS_ISCONNECTED) {
+		if (dstsock != NULL) {
+			error = EISCONN;
+			goto bad;
+		}
+		/* XXX */
+		bzero(&tmp, sizeof(tmp));
+		tmp.sin6_family = AF_INET6;
+		tmp.sin6_len = sizeof(struct sockaddr_in6);
+		bcopy(
+#if CONTENT_FILTER
+			cfil_faddr_use ? &cfil_sin6->sin6_addr :
+#endif
+			&in6p->in6p_faddr, &tmp.sin6_addr, sizeof(struct in6_addr));
+		dstsock = &tmp;
+	} else {
+		if (dstsock == NULL) {
+			error = ENOTCONN;
+			goto bad;
+		}
+		tmp = *dstsock;
+		dstsock = &tmp;
+	}
+
+#if ENABLE_DEFAULT_SCOPE
+	if (dstsock->sin6_scope_id == 0) { /* not change if specified  */
+		dstsock->sin6_scope_id = scope6_addr2default(&dstsock->sin6_addr);
+	}
+#endif
 
 	bzero(&ip6oa, sizeof(ip6oa));
 	ip6oa.ip6oa_boundif = IFSCOPE_NONE;
@@ -487,7 +569,7 @@ rip6_output(
 		 */
 		ifnet_head_lock_shared();
 		if (optp && (pi = optp->ip6po_pktinfo) && pi->ipi6_ifindex) {
-			ip6->ip6_dst.s6_addr16[1] = htons(pi->ipi6_ifindex);
+			ip6->ip6_dst.s6_addr16[1] = htons((uint16_t)pi->ipi6_ifindex);
 			oifp = ifindex2ifnet[pi->ipi6_ifindex];
 			if (oifp != NULL) {
 				ifnet_reference(oifp);
@@ -600,12 +682,17 @@ rip6_output(
 		necp_kernel_policy_id policy_id;
 		necp_kernel_policy_id skip_policy_id;
 		u_int32_t route_rule_id;
+		u_int32_t pass_flags;
 
 		/*
 		 * We need a route to perform NECP route rule checks
 		 */
-		if (net_qos_policy_restricted != 0 &&
-		    ROUTE_UNUSABLE(&in6p->in6p_route)) {
+		if ((net_qos_policy_restricted != 0 &&
+		    ROUTE_UNUSABLE(&in6p->in6p_route))
+#if CONTENT_FILTER
+		    || cfil_faddr_use
+#endif
+		    ) {
 			struct sockaddr_in6 to;
 			struct sockaddr_in6 from;
 
@@ -634,16 +721,15 @@ rip6_output(
 		}
 
 		if (!necp_socket_is_allowed_to_send_recv_v6(in6p, 0, 0,
-		    &ip6->ip6_src, &ip6->ip6_dst, NULL, &policy_id, &route_rule_id, &skip_policy_id)) {
+		    &ip6->ip6_src, &ip6->ip6_dst, NULL, 0, &policy_id, &route_rule_id, &skip_policy_id, &pass_flags)) {
 			error = EHOSTUNREACH;
 			goto bad;
 		}
 
-		necp_mark_packet_from_socket(m, in6p, policy_id, route_rule_id, skip_policy_id);
+		necp_mark_packet_from_socket(m, in6p, policy_id, route_rule_id, skip_policy_id, pass_flags);
 
 		if (net_qos_policy_restricted != 0) {
-			necp_socket_update_qos_marking(in6p, in6p->in6p_route.ro_rt,
-			    NULL, route_rule_id);
+			necp_socket_update_qos_marking(in6p, in6p->in6p_route.ro_rt, route_rule_id);
 		}
 	}
 #endif /* NECP */
@@ -697,6 +783,10 @@ rip6_output(
 
 		if ((rt->rt_flags & RTF_MULTICAST) ||
 		    in6p->in6p_socket == NULL ||
+#if CONTENT_FILTER
+		    /* Discard temporary route for cfil case */
+		    cfil_faddr_use ||
+#endif
 		    !(in6p->in6p_socket->so_state & SS_ISCONNECTED)) {
 			rt = NULL;      /* unusable */
 		}
@@ -772,6 +862,12 @@ freectl:
 	if (oifp != NULL) {
 		ifnet_release(oifp);
 	}
+#if CONTENT_FILTER
+	if (cfil_tag) {
+		m_tag_free(cfil_tag);
+	}
+#endif
+
 	return error;
 }
 
@@ -1053,8 +1149,6 @@ rip6_send(struct socket *so, int flags, struct mbuf *m, struct sockaddr *nam,
 {
 #pragma unused(flags, p)
 	struct inpcb *inp = sotoinpcb(so);
-	struct sockaddr_in6 tmp;
-	struct sockaddr_in6 *dst = (struct sockaddr_in6 *)(void *)nam;
 	int error = 0;
 
 	if (inp == NULL
@@ -1070,33 +1164,7 @@ rip6_send(struct socket *so, int flags, struct mbuf *m, struct sockaddr *nam,
 		goto bad;
 	}
 
-	/* always copy sockaddr to avoid overwrites */
-	if (so->so_state & SS_ISCONNECTED) {
-		if (nam != NULL) {
-			error = EISCONN;
-			goto bad;
-		}
-		/* XXX */
-		bzero(&tmp, sizeof(tmp));
-		tmp.sin6_family = AF_INET6;
-		tmp.sin6_len = sizeof(struct sockaddr_in6);
-		bcopy(&inp->in6p_faddr, &tmp.sin6_addr,
-		    sizeof(struct in6_addr));
-		dst = &tmp;
-	} else {
-		if (nam == NULL) {
-			error = ENOTCONN;
-			goto bad;
-		}
-		tmp = *(struct sockaddr_in6 *)(void *)nam;
-		dst = &tmp;
-	}
-#if ENABLE_DEFAULT_SCOPE
-	if (dst->sin6_scope_id == 0) {  /* not change if specified  */
-		dst->sin6_scope_id = scope6_addr2default(&dst->sin6_addr);
-	}
-#endif
-	return rip6_output(m, so, dst, control, 1);
+	return rip6_output(m, so, SIN6(nam), control, 1);
 
 bad:
 	VERIFY(error != 0);

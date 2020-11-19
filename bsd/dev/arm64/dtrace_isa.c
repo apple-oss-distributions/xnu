@@ -41,6 +41,7 @@
 #include <sys/dtrace.h>
 #include <sys/dtrace_impl.h>
 #include <machine/atomic.h>
+#include <kern/cambria_layout.h>
 #include <kern/simple_lock.h>
 #include <kern/sched_prim.h>            /* for thread_wakeup() */
 #include <kern/thread_call.h>
@@ -54,6 +55,10 @@ typedef arm_saved_state_t savearea_t;
 extern lck_attr_t       *dtrace_lck_attr;
 extern lck_grp_t        *dtrace_lck_grp;
 
+#if XNU_MONITOR
+extern void * pmap_stacks_start;
+extern void * pmap_stacks_end;
+#endif
 
 struct frame {
 	struct frame *backchain;
@@ -66,21 +71,13 @@ struct frame {
 inline void
 dtrace_membar_producer(void)
 {
-#if __ARM_SMP__
 	__asm__ volatile ("dmb ish" : : : "memory");
-#else
-	__asm__ volatile ("nop" : : : "memory");
-#endif
 }
 
 inline void
 dtrace_membar_consumer(void)
 {
-#if __ARM_SMP__
 	__asm__ volatile ("dmb ish" : : : "memory");
-#else
-	__asm__ volatile ("nop" : : : "memory");
-#endif
 }
 
 /*
@@ -98,7 +95,6 @@ dtrace_getipl(void)
 	return ml_at_interrupt_context() ? 1 : 0;
 }
 
-#if __ARM_SMP__
 /*
  * MP coordination
  */
@@ -125,7 +121,6 @@ xcRemote(void *foo)
 		thread_wakeup((event_t) &dt_xc_sync);
 	}
 }
-#endif
 
 /*
  * dtrace_xcall() is not called from probe context.
@@ -133,7 +128,6 @@ xcRemote(void *foo)
 void
 dtrace_xcall(processorid_t cpu, dtrace_xcall_t f, void *arg)
 {
-#if __ARM_SMP__
 	/* Only one dtrace_xcall in flight allowed */
 	lck_mtx_lock(&dt_xc_lock);
 
@@ -147,14 +141,6 @@ dtrace_xcall(processorid_t cpu, dtrace_xcall_t f, void *arg)
 
 	lck_mtx_unlock(&dt_xc_lock);
 	return;
-#else
-#pragma unused(cpu)
-	/* On uniprocessor systems, the cpu should always be either ourselves or all */
-	ASSERT(cpu == CPU->cpu_id || cpu == DTRACE_CPUALL);
-
-	(*f)(arg);
-	return;
-#endif
 }
 
 /*
@@ -198,12 +184,21 @@ dtrace_getreg(struct regs * savearea, uint_t reg)
 	return (uint64_t)get_saved_state_reg(regs, reg);
 }
 
+uint64_t
+dtrace_getvmreg(uint_t ndx)
+{
+#pragma unused(ndx)
+	DTRACE_CPUFLAG_SET(CPU_DTRACE_ILLOP);
+	return 0;
+}
+
 #define RETURN_OFFSET64 8
 
 static int
 dtrace_getustack_common(uint64_t * pcstack, int pcstack_limit, user_addr_t pc,
     user_addr_t sp)
 {
+	volatile uint16_t *flags = (volatile uint16_t *) &cpu_core[CPU->cpu_id].cpuc_dtrace_flags;
 	int ret = 0;
 
 	ASSERT(pcstack == NULL || pcstack_limit > 0);
@@ -224,6 +219,12 @@ dtrace_getustack_common(uint64_t * pcstack, int pcstack_limit, user_addr_t pc,
 
 		pc = dtrace_fuword64((sp + RETURN_OFFSET64));
 		sp = dtrace_fuword64(sp);
+
+		/* Truncate ustack if the iterator causes fault. */
+		if (*flags & CPU_DTRACE_FAULT) {
+			*flags &= ~CPU_DTRACE_FAULT;
+			break;
+		}
 	}
 
 	return ret;
@@ -232,9 +233,9 @@ dtrace_getustack_common(uint64_t * pcstack, int pcstack_limit, user_addr_t pc,
 void
 dtrace_getupcstack(uint64_t * pcstack, int pcstack_limit)
 {
-	thread_t        thread = current_thread();
-	savearea_t     *regs;
-	user_addr_t     pc, sp, fp;
+	thread_t thread = current_thread();
+	savearea_t *regs;
+	user_addr_t pc, sp, fp;
 	volatile uint16_t *flags = (volatile uint16_t *) &cpu_core[CPU->cpu_id].cpuc_dtrace_flags;
 	int n;
 
@@ -267,7 +268,10 @@ dtrace_getupcstack(uint64_t * pcstack, int pcstack_limit)
 
 	pc = get_saved_state_pc(regs);
 	sp = get_saved_state_sp(regs);
-	fp = get_saved_state_fp(regs);
+
+	{
+		fp = get_saved_state_fp(regs);
+	}
 
 	if (DTRACE_CPUFLAG_ISSET(CPU_DTRACE_ENTRY)) {
 		*pcstack++ = (uint64_t) pc;
@@ -435,18 +439,11 @@ dtrace_getufpstack(uint64_t * pcstack, uint64_t * fpstack, int pcstack_limit)
 			sp = dtrace_fuword64(sp);
 		}
 
-#if 0
-		/* XXX ARMTODO*/
-		/*
-		 * This is totally bogus:  if we faulted, we're going to clear
-		 * the fault and break.  This is to deal with the apparently
-		 * broken Java stacks on x86.
-		 */
+		/* Truncate ustack if the iterator causes fault. */
 		if (*flags & CPU_DTRACE_FAULT) {
 			*flags &= ~CPU_DTRACE_FAULT;
 			break;
 		}
-#endif
 	}
 
 zero:
@@ -455,6 +452,14 @@ zero:
 	}
 }
 
+#if XNU_MONITOR
+static inline boolean_t
+dtrace_frame_in_ppl_stack(struct frame * fp)
+{
+	return ((void *)fp >= pmap_stacks_start) &&
+	       ((void *)fp < pmap_stacks_end);
+}
+#endif
 
 void
 dtrace_getpcstack(pc_t * pcstack, int pcstack_limit, int aframes,
@@ -464,6 +469,9 @@ dtrace_getpcstack(pc_t * pcstack, int pcstack_limit, int aframes,
 	struct frame   *nextfp, *minfp, *stacktop;
 	int             depth = 0;
 	int             on_intr;
+#if XNU_MONITOR
+	int             on_ppl_stack;
+#endif
 	int             last = 0;
 	uintptr_t       pc;
 	uintptr_t       caller = CPU->cpu_dtrace_caller;
@@ -471,6 +479,11 @@ dtrace_getpcstack(pc_t * pcstack, int pcstack_limit, int aframes,
 	if ((on_intr = CPU_ON_INTR(CPU)) != 0) {
 		stacktop = (struct frame *) dtrace_get_cpu_int_stack_top();
 	}
+#if XNU_MONITOR
+	else if ((on_ppl_stack = dtrace_frame_in_ppl_stack(fp))) {
+		stacktop = (struct frame *) pmap_stacks_end;
+	}
+#endif
 	else {
 		stacktop = (struct frame *) (dtrace_get_kernel_stack(current_thread()) + kernel_stack_size);
 	}
@@ -496,6 +509,14 @@ dtrace_getpcstack(pc_t * pcstack, int pcstack_limit, int aframes,
 				if (arm_kern_regs) {
 					nextfp = (struct frame *)(saved_state64(arm_kern_regs)->fp);
 
+#if XNU_MONITOR
+					on_ppl_stack = dtrace_frame_in_ppl_stack(nextfp);
+
+					if (on_ppl_stack) {
+						minfp = pmap_stacks_start;
+						stacktop = pmap_stacks_end;
+					} else
+#endif
 					{
 						vm_offset_t kstack_base = dtrace_get_kernel_stack(current_thread());
 
@@ -517,6 +538,30 @@ dtrace_getpcstack(pc_t * pcstack, int pcstack_limit, int aframes,
 					last = 1;
 				}
 			} else {
+#if XNU_MONITOR
+				if ((!on_ppl_stack) && dtrace_frame_in_ppl_stack(nextfp)) {
+					/*
+					 * We are switching from the kernel stack
+					 * to the PPL stack.
+					 */
+					on_ppl_stack = 1;
+					minfp = pmap_stacks_start;
+					stacktop = pmap_stacks_end;
+				} else if (on_ppl_stack) {
+					/*
+					 * We could be going from the PPL stack
+					 * to the kernel stack.
+					 */
+					vm_offset_t kstack_base = dtrace_get_kernel_stack(current_thread());
+
+					minfp = (struct frame *)kstack_base;
+					stacktop = (struct frame *)(kstack_base + kernel_stack_size);
+
+					if (nextfp <= minfp || nextfp >= stacktop) {
+						last = 1;
+					}
+				} else
+#endif
 				{
 					/*
 					 * This is the last frame we can process; indicate

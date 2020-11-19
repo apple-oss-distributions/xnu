@@ -915,6 +915,7 @@ typedef struct dtrace_vstate {
 #define	DTRACE_MSTATE_USTACKDEPTH	0x00000200
 #define	DTRACE_MSTATE_UCALLER		0x00000400
 #define	DTRACE_MSTATE_MACHTIMESTAMP	0x00000800
+#define	DTRACE_MSTATE_MACHCTIMESTAMP	0x00001000
 
 typedef struct dtrace_mstate {
 	uintptr_t dtms_scratch_base;		/* base of scratch space */
@@ -926,6 +927,7 @@ typedef struct dtrace_mstate {
 	uint64_t dtms_timestamp;		/* cached timestamp */
 	hrtime_t dtms_walltimestamp;		/* cached wall timestamp */
 	uint64_t dtms_machtimestamp;		/* cached mach absolute timestamp */
+	uint64_t dtms_machctimestamp;		/* cached mach continuous timestamp */
 	int dtms_stackdepth;			/* cached stackdepth */
 	int dtms_ustackdepth;			/* cached ustackdepth */
 	struct dtrace_probe *dtms_probe;	/* current probe */
@@ -1185,6 +1187,13 @@ typedef struct dtrace_cred {
 	uint16_t		dcr_action;
 } dtrace_cred_t;
 
+typedef struct dtrace_format {
+	uint64_t dtf_refcount;
+	char dtf_str[];
+} dtrace_format_t;
+
+#define DTRACE_FORMAT_SIZE(fmt) (strlen(fmt->dtf_str) + 1 + sizeof(dtrace_format_t))
+
 /*
  * DTrace Consumer State
  *
@@ -1224,7 +1233,7 @@ struct dtrace_state {
 	char dts_speculates;			/* boolean: has speculations */
 	char dts_destructive;			/* boolean: has dest. actions */
 	int dts_nformats;			/* number of formats */
-	char **dts_formats;			/* format string array */
+	dtrace_format_t **dts_formats;		/* format string array */
 	dtrace_optval_t dts_options[DTRACEOPT_MAX]; /* options */
 	dtrace_cred_t dts_cred;			/* credentials */
 	size_t dts_nretained;			/* number of retained enabs */
@@ -1314,7 +1323,6 @@ typedef struct dtrace_errhash {
 
 #endif	/* DTRACE_ERRDEBUG */
 
-
 typedef struct dtrace_string dtrace_string_t;
 
 typedef struct dtrace_string {
@@ -1371,6 +1379,7 @@ extern uint64_t dtrace_load64(uintptr_t);
 extern int dtrace_canload(uint64_t, size_t, dtrace_mstate_t*, dtrace_vstate_t*);
 
 extern uint64_t dtrace_getreg(struct regs *, uint_t);
+extern uint64_t dtrace_getvmreg(uint_t);
 extern int dtrace_getstackdepth(int);
 extern void dtrace_getupcstack(uint64_t *, int);
 extern void dtrace_getufpstack(uint64_t *, uint64_t *, int);
@@ -1395,6 +1404,9 @@ extern void dtrace_copystr(uintptr_t, uintptr_t, size_t, volatile uint16_t *);
 
 extern void* dtrace_ptrauth_strip(void*, uint64_t);
 extern int dtrace_is_valid_ptrauth_key(uint64_t);
+
+extern uint64_t dtrace_physmem_read(uint64_t, size_t);
+extern void dtrace_physmem_write(uint64_t, uint64_t, size_t);
 
 /*
  * DTrace state handling

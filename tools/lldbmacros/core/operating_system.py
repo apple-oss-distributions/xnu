@@ -156,47 +156,28 @@ class Armv8_RegisterSet(object):
         return self
 
     def ReadRegisterDataFromKernelStack(self, kstack_saved_state_addr, kernel_version):
-        saved_state = kernel_version.CreateValueFromExpression(None, '(struct arm_saved_state64 *) '+ str(kstack_saved_state_addr))
+        saved_state = kernel_version.CreateValueFromExpression(None, '(arm_kernel_saved_state_t *) '+ str(kstack_saved_state_addr))
         saved_state = saved_state.Dereference()
         saved_state = PluginValue(saved_state)
         self.ResetRegisterValues()
-        self.x0 = saved_state.GetChildMemberWithName('x').GetChildAtIndex(0).GetValueAsUnsigned()
-        self.x1 = saved_state.GetChildMemberWithName('x').GetChildAtIndex(1).GetValueAsUnsigned()
-        self.x2 = saved_state.GetChildMemberWithName('x').GetChildAtIndex(2).GetValueAsUnsigned()
-        self.x3 = saved_state.GetChildMemberWithName('x').GetChildAtIndex(3).GetValueAsUnsigned()
-        self.x4 = saved_state.GetChildMemberWithName('x').GetChildAtIndex(4).GetValueAsUnsigned()
-        self.x5 = saved_state.GetChildMemberWithName('x').GetChildAtIndex(5).GetValueAsUnsigned()
-        self.x6 = saved_state.GetChildMemberWithName('x').GetChildAtIndex(6).GetValueAsUnsigned()
-        self.x7 = saved_state.GetChildMemberWithName('x').GetChildAtIndex(7).GetValueAsUnsigned()
-        self.x8 = saved_state.GetChildMemberWithName('x').GetChildAtIndex(8).GetValueAsUnsigned()
-        self.x9 = saved_state.GetChildMemberWithName('x').GetChildAtIndex(9).GetValueAsUnsigned()
-        self.x10 = saved_state.GetChildMemberWithName('x').GetChildAtIndex(10).GetValueAsUnsigned()
-        self.x11 = saved_state.GetChildMemberWithName('x').GetChildAtIndex(11).GetValueAsUnsigned()
-        self.x12 = saved_state.GetChildMemberWithName('x').GetChildAtIndex(12).GetValueAsUnsigned()
-        self.x13 = saved_state.GetChildMemberWithName('x').GetChildAtIndex(13).GetValueAsUnsigned()
-        self.x14 = saved_state.GetChildMemberWithName('x').GetChildAtIndex(14).GetValueAsUnsigned()
-        self.x15 = saved_state.GetChildMemberWithName('x').GetChildAtIndex(15).GetValueAsUnsigned()
-        self.x16 = saved_state.GetChildMemberWithName('x').GetChildAtIndex(16).GetValueAsUnsigned()
-        self.x17 = saved_state.GetChildMemberWithName('x').GetChildAtIndex(17).GetValueAsUnsigned()
-        self.x18 = saved_state.GetChildMemberWithName('x').GetChildAtIndex(18).GetValueAsUnsigned()
-        self.x19 = saved_state.GetChildMemberWithName('x').GetChildAtIndex(19).GetValueAsUnsigned()
-        self.x20 = saved_state.GetChildMemberWithName('x').GetChildAtIndex(20).GetValueAsUnsigned()
-        self.x21 = saved_state.GetChildMemberWithName('x').GetChildAtIndex(21).GetValueAsUnsigned()
-        self.x22 = saved_state.GetChildMemberWithName('x').GetChildAtIndex(22).GetValueAsUnsigned()
-        self.x23 = saved_state.GetChildMemberWithName('x').GetChildAtIndex(23).GetValueAsUnsigned()
-        self.x24 = saved_state.GetChildMemberWithName('x').GetChildAtIndex(24).GetValueAsUnsigned()
-        self.x25 = saved_state.GetChildMemberWithName('x').GetChildAtIndex(25).GetValueAsUnsigned()
-        self.x26 = saved_state.GetChildMemberWithName('x').GetChildAtIndex(26).GetValueAsUnsigned()
-        self.x27 = saved_state.GetChildMemberWithName('x').GetChildAtIndex(27).GetValueAsUnsigned()
-        self.x28 = saved_state.GetChildMemberWithName('x').GetChildAtIndex(28).GetValueAsUnsigned()
+        self.x16 = saved_state.GetChildMemberWithName('x').GetChildAtIndex(0).GetValueAsUnsigned()
+        self.x17 = saved_state.GetChildMemberWithName('x').GetChildAtIndex(1).GetValueAsUnsigned()
+        self.x19 = saved_state.GetChildMemberWithName('x').GetChildAtIndex(2).GetValueAsUnsigned()
+        self.x20 = saved_state.GetChildMemberWithName('x').GetChildAtIndex(3).GetValueAsUnsigned()
+        self.x21 = saved_state.GetChildMemberWithName('x').GetChildAtIndex(4).GetValueAsUnsigned()
+        self.x22 = saved_state.GetChildMemberWithName('x').GetChildAtIndex(5).GetValueAsUnsigned()
+        self.x23 = saved_state.GetChildMemberWithName('x').GetChildAtIndex(6).GetValueAsUnsigned()
+        self.x24 = saved_state.GetChildMemberWithName('x').GetChildAtIndex(7).GetValueAsUnsigned()
+        self.x25 = saved_state.GetChildMemberWithName('x').GetChildAtIndex(8).GetValueAsUnsigned()
+        self.x26 = saved_state.GetChildMemberWithName('x').GetChildAtIndex(9).GetValueAsUnsigned()
+        self.x27 = saved_state.GetChildMemberWithName('x').GetChildAtIndex(10).GetValueAsUnsigned()
+        self.x28 = saved_state.GetChildMemberWithName('x').GetChildAtIndex(11).GetValueAsUnsigned()
         self.fp = saved_state.GetChildMemberWithName('fp').GetValueAsUnsigned()
         self.lr = saved_state.GetChildMemberWithName('lr').GetValueAsUnsigned()
         self.sp = saved_state.GetChildMemberWithName('sp').GetValueAsUnsigned()
         # pc for a blocked thread is treated to be the next instruction it would run after thread switch.
         self.pc = self.switch_context_address
-        self.far = saved_state.GetChildMemberWithName('far').GetValueAsUnsigned()
         self.cpsr = saved_state.GetChildMemberWithName('cpsr').GetValueAsUnsigned()
-        self.esr = saved_state.GetChildMemberWithName('esr').GetValueAsUnsigned()
         return self
 
     def ReadRegisterDataFromContinuation(self, continuation_ptr):
@@ -649,32 +630,6 @@ def IterateQueue(queue_head, element_ptr_type, element_field_name):
         yield elt
         cur_elt = elt.GetChildMemberWithName(element_field_name).GetChildMemberWithName('next')
 
-def IterateCircleQueue(queue_head, element_ptr_type, element_field_name):
-    """ iterate over a circle queue in kernel of type circle_queue_head_t. refer to osfmk/kern/circle_queue.h
-        params:
-            queue_head         - lldb.SBValue : Value object for queue_head.
-            element_type       - lldb.SBType : a pointer type of the element 'next' points to. Typically its structs like thread, task etc..
-            element_field_name - str : name of the field in target struct.
-        returns:
-            A generator does not return. It is used for iterating.
-            SBValue  : an object thats of type (element_type) queue_head->next. Always a pointer object
-    """
-    head = queue_head.head
-    queue_head_addr = 0x0
-    if head.TypeIsPointerType():
-        queue_head_addr = head.GetValueAsUnsigned()
-    else:
-        queue_head_addr = head.GetAddress().GetLoadAddress(osplugin_target_obj)
-    cur_elt = head
-    while True:
-        if not cur_elt.IsValid() or cur_elt.GetValueAsUnsigned() == 0:
-            break
-        elt = cur_elt.Cast(element_ptr_type)
-        yield elt
-        cur_elt = elt.GetChildMemberWithName(element_field_name).GetChildMemberWithName('next')
-        if cur_elt.GetValueAsUnsigned() == queue_head_addr:
-            break
-
 def GetUniqueSessionID(process_obj):
     """ Create a unique session identifier.
         params:
@@ -909,12 +864,12 @@ class OperatingSystemPlugIn(object):
                     return regs.GetPackedRegisterState()
                 elif self.target_arch.startswith(archARMv8) and int(PluginValue(thobj).GetChildMemberWithName('machine').GetChildMemberWithName('kstackptr').GetValueAsUnsigned()) != 0:
                     saved_state_addr = PluginValue(thobj).GetChildMemberWithName('machine').GetChildMemberWithName('kstackptr').GetValueAsUnsigned()
-                    arm_ctx = PluginValue(self.version.CreateValueFromExpression(None, '(struct arm_context *) ' + str(saved_state_addr)))
-                    ss_64_addr = arm_ctx.GetChildMemberWithName('ss').GetChildMemberWithName('uss').GetChildMemberWithName('ss_64').GetLoadAddress()
-                    regs.ReadRegisterDataFromKernelStack(ss_64_addr, self.version)
+                    arm_ctx = PluginValue(self.version.CreateValueFromExpression(None, '(struct arm_kernel_context *) ' + str(saved_state_addr)))
+                    arm_ss_addr = arm_ctx.GetChildMemberWithName('ss').GetLoadAddress()
+                    regs.ReadRegisterDataFromKernelStack(arm_ss_addr, self.version)
                     return regs.GetPackedRegisterState()
             elif self.target_arch == archX86_64 or self.target_arch.startswith(archARMv7) or self.target_arch.startswith(archARMv8):
-                regs.ReadRegisterDataFromContinuation( PluginValue(thobj).GetChildMemberWithName('continuation').GetValueAsUnsigned())
+                regs.ReadRegisterDataFromContinuation( PluginValue(thobj).GetChildMemberWithName('continuation').GetValueAsAddress())
                 return regs.GetPackedRegisterState()
             #incase we failed very miserably
         except KeyboardInterrupt, ke:

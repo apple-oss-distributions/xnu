@@ -37,7 +37,8 @@
 #include <i386/proc_reg.h>
 #include <i386/cpuid.h>
 #include <vm/vm_kern.h>
-#include <i386/mp.h>                    // mp_cpus_call
+#include <i386/cpu_data.h> // mp_*_preemption
+#include <i386/mp.h> // mp_cpus_call
 #include <i386/commpage/commpage.h>
 #include <i386/fpu.h>
 #include <machine/cpu_number.h> // cpu_number
@@ -190,13 +191,14 @@ cpu_update(__unused void *arg)
  * by sleeping.
  */
 void
-ucode_update_wake()
+ucode_update_wake_and_apply_cpu_was()
 {
 	if (global_update) {
 		kprintf("ucode: Re-applying update after wake (CPU #%d)\n", cpu_number());
 		cpu_update(NULL);
-#if DEBUG
 	} else {
+		cpuid_do_was();
+#if DEBUG
 		kprintf("ucode: No update to apply (CPU #%d)\n", cpu_number());
 #endif
 	}
@@ -252,8 +254,6 @@ xcpu_update(void)
 	cpu_apply_microcode();
 	/* Update the cpuid info */
 	ucode_cpuid_set_info();
-	/* Now apply workarounds */
-	cpuid_do_was();
 	mp_enable_preemption();
 
 	/* Get all other CPUs to perform the update */

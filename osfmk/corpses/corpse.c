@@ -152,6 +152,9 @@ static _Atomic uint32_t inflight_corpses;
 unsigned long  total_corpses_created = 0;
 boolean_t corpse_enabled_config = TRUE;
 
+/* bootarg to generate corpse with size up to max_footprint_mb */
+boolean_t corpse_threshold_system_limit = FALSE;
+
 /* bootarg to turn on corpse forking for EXC_RESOURCE */
 int exc_via_corpse_forking = 1;
 
@@ -189,6 +192,11 @@ corpses_init()
 	if (PE_parse_boot_argn("corpse_for_fatal_memkill", &fatal_memkill, sizeof(fatal_memkill))) {
 		corpse_for_fatal_memkill = fatal_memkill;
 	}
+#if DEBUG || DEVELOPMENT
+	if (PE_parse_boot_argn("-corpse_threshold_system_limit", &corpse_threshold_system_limit, sizeof(corpse_threshold_system_limit))) {
+		corpse_threshold_system_limit = TRUE;
+	}
+#endif /* DEBUG || DEVELOPMENT */
 }
 
 /*
@@ -216,7 +224,7 @@ total_corpses_count(void)
  * Returns: KERN_SUCCESS if the policy allows for creating a corpse.
  */
 static kern_return_t
-task_crashinfo_get_ref(uint16_t kcd_u_flags)
+task_crashinfo_get_ref(corpse_flags_t kcd_u_flags)
 {
 	union corpse_creation_gate oldgate, newgate;
 
@@ -248,7 +256,7 @@ task_crashinfo_get_ref(uint16_t kcd_u_flags)
  *          release the slot for corpse being used.
  */
 static kern_return_t
-task_crashinfo_release_ref(uint16_t kcd_u_flags)
+task_crashinfo_release_ref(corpse_flags_t kcd_u_flags)
 {
 	union corpse_creation_gate oldgate, newgate;
 
@@ -277,7 +285,7 @@ task_crashinfo_release_ref(uint16_t kcd_u_flags)
 
 kcdata_descriptor_t
 task_crashinfo_alloc_init(mach_vm_address_t crash_data_p, unsigned size,
-    uint32_t kc_u_flags, unsigned kc_flags)
+    corpse_flags_t kc_u_flags, unsigned kc_flags)
 {
 	kcdata_descriptor_t kcdata;
 
@@ -532,7 +540,7 @@ task_generate_corpse_internal(
 	uint64_t *udata_buffer = NULL;
 	int size = 0;
 	int num_udata = 0;
-	uint16_t kc_u_flags = CORPSE_CRASHINFO_HAS_REF;
+	corpse_flags_t kc_u_flags = CORPSE_CRASHINFO_HAS_REF;
 
 #if CONFIG_MACF
 	struct label *label = NULL;
@@ -661,7 +669,7 @@ error_task_generate_corpse:
 	}
 	/* Free the udata buffer allocated in task_duplicate_map_and_threads */
 	if (udata_buffer != NULL) {
-		kfree(udata_buffer, size);
+		kheap_free(KHEAP_DATA_BUFFERS, udata_buffer, size);
 	}
 
 	return kr;
@@ -718,7 +726,7 @@ task_map_corpse_info_64(
 {
 	kern_return_t kr;
 	mach_vm_offset_t crash_data_ptr = 0;
-	mach_vm_size_t size = CORPSEINFO_ALLOCATION_SIZE;
+	const mach_vm_size_t size = CORPSEINFO_ALLOCATION_SIZE;
 	void *corpse_info_kernel = NULL;
 
 	if (task == TASK_NULL || task_is_a_corpse_fork(task)) {
@@ -735,7 +743,7 @@ task_map_corpse_info_64(
 	if (kr != KERN_SUCCESS) {
 		return kr;
 	}
-	copyout(corpse_info_kernel, crash_data_ptr, size);
+	copyout(corpse_info_kernel, (user_addr_t)crash_data_ptr, (size_t)size);
 	*kcd_addr_begin = crash_data_ptr;
 	*kcd_size = size;
 

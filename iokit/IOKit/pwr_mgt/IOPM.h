@@ -103,10 +103,8 @@ enum {
 	kIOPMDeviceUsable               = 0x00008000,
 	kIOPMLowPower                   = 0x00010000,
 #if PRIVATE
-#if !(defined(RC_HIDE_N144) || defined(RC_HIDE_N146))
 	kIOPMAOTPower                   = 0x00020000,
 	kIOPMAOTCapability              = kIOPMAOTPower,
-#endif /* !(defined(RC_HIDE_N144) || defined(RC_HIDE_N146)) */
 #endif /* PRIVATE */
 	kIOPMPreventIdleSleep           = 0x00000040,
 	kIOPMSleepCapability            = 0x00000004,
@@ -523,7 +521,9 @@ enum {
 	kIOPMOverTemp                 = (1 << 9),// system dangerously hot
 	kIOPMClamshellOpened          = (1 << 10),// clamshell was opened
 	kIOPMDWOverTemp               = (1 << 11),// DarkWake thermal limits exceeded.
-	kIOPMPowerButtonUp            = (1 << 12) // Power button up
+	kIOPMPowerButtonUp            = (1 << 12),// Power button up
+	kIOPMProModeEngaged           = (1 << 13),// Fans entered 'ProMode'
+	kIOPMProModeDisengaged        = (1 << 14) // Fans exited 'ProMode'
 };
 
 
@@ -671,6 +671,7 @@ enum {
 	kIOPSFamilyCodeExternal3     = iokit_family_err(sub_iokit_pmu, 3),
 	kIOPSFamilyCodeExternal4     = iokit_family_err(sub_iokit_pmu, 4),
 	kIOPSFamilyCodeExternal5     = iokit_family_err(sub_iokit_pmu, 5),
+	kIOPSFamilyCodeExternal6     = iokit_family_err(sub_iokit_pmu, 6),
 };
 
 // values for kIOPMPSAdapterDetailsErrorFlagsKey
@@ -788,6 +789,8 @@ enum {
 #define kIOPMSettingTimeZoneOffsetKey               "TimeZoneOffsetSeconds"
 #define kIOPMSettingMobileMotionModuleKey           "MobileMotionModule"
 #define kIOPMSettingGraphicsSwitchKey               "GPUSwitch"
+#define kIOPMSettingProModeControl                  "ProModeControl"
+#define kIOPMSettingProModeDefer                    "ProModeDefer"
 
 // Setting controlling drivers can register to receive scheduled wake data
 // Either in "CF seconds" type, or structured calendar data in a formatted

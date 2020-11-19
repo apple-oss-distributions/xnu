@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 1999-2009 Apple Inc.
+ * Copyright (c) 1999-2020 Apple Inc.
  * Copyright (c) 2006-2007 Robert N. M. Watson
  * All rights reserved.
  *
@@ -74,7 +74,6 @@
 #include <mach/audit_triggers_server.h>
 
 #include <kern/host.h>
-#include <kern/kalloc.h>
 #include <kern/zalloc.h>
 #include <kern/sched_prim.h>
 
@@ -87,6 +86,7 @@
 MALLOC_DEFINE(M_AUDITDATA, "audit_data", "Audit data storage");
 MALLOC_DEFINE(M_AUDITPATH, "audit_path", "Audit path storage");
 MALLOC_DEFINE(M_AUDITTEXT, "audit_text", "Audit text storage");
+KALLOC_HEAP_DEFINE(KHEAP_AUDIT, "Audit", KHEAP_ID_DEFAULT);
 
 /*
  * Audit control settings that are set/read by system calls and are hence
@@ -180,7 +180,8 @@ struct cv               audit_watermark_cv;
  */
 static struct cv        audit_fail_cv;
 
-static zone_t           audit_record_zone;
+static ZONE_DECLARE(audit_record_zone, "audit_zone",
+    sizeof(struct kaudit_record), ZC_NONE);
 
 /*
  * Kernel audit information.  This will store the current audit address
@@ -329,7 +330,6 @@ audit_init(void)
 	audit_kinfo.ai_termid.at_type = AU_IPv4;
 	audit_kinfo.ai_termid.at_addr[0] = INADDR_ANY;
 
-	_audit_lck_grp_init();
 	mtx_init(&audit_mtx, "audit_mtx", NULL, MTX_DEF);
 	KINFO_LOCK_INIT();
 	cv_init(&audit_worker_cv, "audit_worker_cv");
@@ -337,11 +337,6 @@ audit_init(void)
 	cv_init(&audit_watermark_cv, "audit_watermark_cv");
 	cv_init(&audit_fail_cv, "audit_fail_cv");
 
-	audit_record_zone = zinit(sizeof(struct kaudit_record),
-	    AQ_HIWATER * sizeof(struct kaudit_record), 8192, "audit_zone");
-#if CONFIG_MACF
-	audit_mac_init();
-#endif
 	/* Init audit session subsystem. */
 	audit_session_init();
 
@@ -755,6 +750,77 @@ out:
 }
 
 /*
+ * For system calls such as posix_spawn(2) the sub operations (i.e., file actions
+ * and port actions) need to be audited as their own events. Like with system
+ * calls we need to determine if the sub operation needs to be audited by
+ * examining preselection masks.
+ */
+void
+audit_subcall_enter(au_event_t event, proc_t proc, struct uthread *uthread)
+{
+	struct au_mask *aumask;
+	au_class_t class;
+	au_id_t auid;
+	kauth_cred_t cred;
+
+	/*
+	 * Check which audit mask to use; either the kernel non-attributable
+	 * event mask or the process audit mask.
+	 */
+	cred = kauth_cred_proc_ref(proc);
+	auid = cred->cr_audit.as_aia_p->ai_auid;
+	if (auid == AU_DEFAUDITID) {
+		aumask = &audit_nae_mask;
+	} else {
+		aumask = &cred->cr_audit.as_mask;
+	}
+
+	/*
+	 * Allocate an audit record, if preselection allows it, and store in
+	 * the thread for later use.
+	 */
+	class = au_event_class(event);
+
+	if (au_preselect(event, class, aumask, AU_PRS_BOTH)) {
+		/*
+		 * If we're out of space and need to suspend unprivileged
+		 * processes, do that here rather than trying to allocate
+		 * another audit record.
+		 *
+		 * Note: we might wish to be able to continue here in the
+		 * future, if the system recovers.  That should be possible
+		 * by means of checking the condition in a loop around
+		 * cv_wait().  It might be desirable to reevaluate whether an
+		 * audit record is still required for this event by
+		 * re-calling au_preselect().
+		 */
+		if (audit_in_failure &&
+		    suser(cred, &proc->p_acflag) != 0) {
+			cv_wait(&audit_fail_cv, &audit_mtx);
+			panic("audit_failing_stop: thread continued");
+		}
+		if (uthread->uu_ar == NULL) {
+			uthread->uu_ar = audit_new(event, proc, uthread);
+		}
+	} else if (audit_pipe_preselect(auid, event, class, AU_PRS_BOTH, 0)) {
+		if (uthread->uu_ar == NULL) {
+			uthread->uu_ar = audit_new(event, proc, uthread);
+		}
+	}
+
+	kauth_cred_unref(&cred);
+}
+
+void
+audit_subcall_exit(int error, struct uthread *uthread)
+{
+	/* A subcall doesn't have a return value so always zero. */
+	audit_commit(uthread->uu_ar, error, 0 /* retval */);
+
+	uthread->uu_ar = NULL;
+}
+
+/*
  * Calls to set up and tear down audit structures used during Mach system
  * calls.
  */
@@ -884,6 +950,9 @@ audit_proc_coredump(proc_t proc, char *path, int errcode)
 	 */
 	uthread = curthread();
 	ar = audit_new(AUE_CORE, proc, uthread);
+	if (ar == NULL) {
+		return;
+	}
 	if (path != NULL) {
 		pathp = &ar->k_ar.ar_arg_upath1;
 		*pathp = malloc(MAXPATHLEN, M_AUDITPATH, M_WAITOK);

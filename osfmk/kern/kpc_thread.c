@@ -57,17 +57,8 @@ boolean_t kpc_off_cpu_active = FALSE;
 static uint32_t kpc_thread_classes = 0;
 static uint32_t kpc_thread_classes_count = 0;
 
-static lck_grp_attr_t *kpc_thread_lckgrp_attr = NULL;
-static lck_grp_t      *kpc_thread_lckgrp = NULL;
-static lck_mtx_t       kpc_thread_lock;
-
-void
-kpc_thread_init(void)
-{
-	kpc_thread_lckgrp_attr = lck_grp_attr_alloc_init();
-	kpc_thread_lckgrp = lck_grp_alloc_init("kpc", kpc_thread_lckgrp_attr);
-	lck_mtx_init(&kpc_thread_lock, kpc_thread_lckgrp, LCK_ATTR_NULL);
-}
+static LCK_GRP_DECLARE(kpc_thread_lckgrp, "kpc thread");
+static LCK_MTX_DECLARE(kpc_thread_lock, &kpc_thread_lckgrp);
 
 uint32_t
 kpc_get_thread_counting(void)
@@ -116,7 +107,7 @@ kpc_set_thread_counting(uint32_t classes)
 
 		/* and schedule an AST for this thread... */
 		if (!current_thread()->kpc_buf) {
-			current_thread()->kperf_flags |= T_KPC_ALLOC;
+			current_thread()->kperf_ast |= T_KPC_ALLOC;
 			act_set_kperf(current_thread());
 		}
 	}
@@ -150,7 +141,7 @@ kpc_update_thread_counters( thread_t thread )
 
 	/* schedule any necessary allocations */
 	if (!current_thread()->kpc_buf) {
-		current_thread()->kperf_flags |= T_KPC_ALLOC;
+		current_thread()->kperf_ast |= T_KPC_ALLOC;
 		act_set_kperf(current_thread());
 	}
 
@@ -234,12 +225,10 @@ kpc_thread_destroy(thread_t thread)
 	kpc_counterbuf_free(buf);
 }
 
-/* ast callback on a thread */
 void
-kpc_thread_ast_handler( thread_t thread )
+kpc_thread_ast_handler(thread_t thread)
 {
-	/* see if we want an alloc */
-	if (thread->kperf_flags & T_KPC_ALLOC) {
+	if (thread->kperf_ast & T_KPC_ALLOC) {
 		thread->kpc_buf = kpc_counterbuf_alloc();
 	}
 }

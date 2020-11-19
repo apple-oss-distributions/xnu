@@ -58,6 +58,7 @@
 
 #include <vm/pmap.h>
 #include <kern/kalloc.h>
+#include <kern/cpu_number.h>
 #include <kern/locks.h>
 #include <kern/misc_protos.h>
 #include <kern/thread.h>
@@ -80,6 +81,10 @@
 #include <arm/cpu_data_internal.h>
 #include <arm/pmap.h>
 
+#if defined(KERNEL_INTEGRITY_KTRR) || defined(KERNEL_INTEGRITY_CTRR)
+#include <arm64/amcc_rorgn.h>
+#endif // defined(KERNEL_INTEGRITY_KTRR) || defined(KERNEL_INTEGRITY_CTRR)
+
 kern_return_t arm64_lock_test(void);
 kern_return_t arm64_munger_test(void);
 kern_return_t ex_cb_test(void);
@@ -88,6 +93,10 @@ kern_return_t arm64_late_pan_test(void);
 #if defined(HAS_APPLE_PAC)
 #include <ptrauth.h>
 kern_return_t arm64_ropjop_test(void);
+#endif
+#if defined(KERNEL_INTEGRITY_CTRR)
+kern_return_t ctrr_test(void);
+kern_return_t ctrr_test_cpu(void);
 #endif
 #if HAS_TWO_STAGE_SPR_LOCK
 kern_return_t arm64_spr_lock_test(void);
@@ -270,22 +279,26 @@ lt_upgrade_downgrade_rw()
 	lck_rw_done(&lt_rwlock);
 }
 
+#if __AMP__
 const int limit = 1000000;
 static int lt_stress_local_counters[MAX_CPUS];
 
+lck_ticket_t lt_ticket_lock;
+lck_grp_t lt_ticket_grp;
+
 static void
-lt_stress_hw_lock()
+lt_stress_ticket_lock()
 {
 	int local_counter = 0;
 
-	uint cpuid = current_processor()->cpu_id;
+	uint cpuid = cpu_number();
 
 	kprintf("%s>cpu %d starting\n", __FUNCTION__, cpuid);
 
-	hw_lock_lock(&lt_hw_lock, LCK_GRP_NULL);
+	lck_ticket_lock(&lt_ticket_lock, &lt_ticket_grp);
 	lt_counter++;
 	local_counter++;
-	hw_lock_unlock(&lt_hw_lock);
+	lck_ticket_unlock(&lt_ticket_lock);
 
 	while (lt_counter < lt_target_done_threads) {
 		;
@@ -294,18 +307,19 @@ lt_stress_hw_lock()
 	kprintf("%s>cpu %d started\n", __FUNCTION__, cpuid);
 
 	while (lt_counter < limit) {
-		hw_lock_lock(&lt_hw_lock, LCK_GRP_NULL);
+		lck_ticket_lock(&lt_ticket_lock, &lt_ticket_grp);
 		if (lt_counter < limit) {
 			lt_counter++;
 			local_counter++;
 		}
-		hw_lock_unlock(&lt_hw_lock);
+		lck_ticket_unlock(&lt_ticket_lock);
 	}
 
 	lt_stress_local_counters[cpuid] = local_counter;
 
 	kprintf("%s>final counter %d cpu %d incremented the counter %d times\n", __FUNCTION__, lt_counter, cpuid, local_counter);
 }
+#endif
 
 static void
 lt_grab_hw_lock()
@@ -596,6 +610,19 @@ lt_thread(void *arg, wait_result_t wres __unused)
 }
 
 static void
+lt_start_lock_thread(thread_continue_t func)
+{
+	thread_t thread;
+	kern_return_t kr;
+
+	kr = kernel_thread_start(lt_thread, func, &thread);
+	assert(kr == KERN_SUCCESS);
+
+	thread_deallocate(thread);
+}
+
+#if __AMP__
+static void
 lt_bound_thread(void *arg, wait_result_t wres __unused)
 {
 	void (*func)(void) = (void (*)(void))arg;
@@ -619,17 +646,68 @@ lt_bound_thread(void *arg, wait_result_t wres __unused)
 }
 
 static void
-lt_start_lock_thread(thread_continue_t func)
+lt_e_thread(void *arg, wait_result_t wres __unused)
+{
+	void (*func)(void) = (void (*)(void))arg;
+
+	thread_t thread = current_thread();
+
+	spl_t s = splsched();
+	thread_lock(thread);
+	thread->sched_flags |= TH_SFLAG_ECORE_ONLY;
+	thread_unlock(thread);
+	splx(s);
+
+	thread_block(THREAD_CONTINUE_NULL);
+
+	func();
+
+	OSIncrementAtomic((volatile SInt32*) &lt_done_threads);
+}
+
+static void
+lt_p_thread(void *arg, wait_result_t wres __unused)
+{
+	void (*func)(void) = (void (*)(void))arg;
+
+	thread_t thread = current_thread();
+
+	spl_t s = splsched();
+	thread_lock(thread);
+	thread->sched_flags |= TH_SFLAG_PCORE_ONLY;
+	thread_unlock(thread);
+	splx(s);
+
+	thread_block(THREAD_CONTINUE_NULL);
+
+	func();
+
+	OSIncrementAtomic((volatile SInt32*) &lt_done_threads);
+}
+
+static void
+lt_start_lock_thread_e(thread_continue_t func)
 {
 	thread_t thread;
 	kern_return_t kr;
 
-	kr = kernel_thread_start(lt_thread, func, &thread);
+	kr = kernel_thread_start(lt_e_thread, func, &thread);
 	assert(kr == KERN_SUCCESS);
 
 	thread_deallocate(thread);
 }
 
+static void
+lt_start_lock_thread_p(thread_continue_t func)
+{
+	thread_t thread;
+	kern_return_t kr;
+
+	kr = kernel_thread_start(lt_p_thread, func, &thread);
+	assert(kr == KERN_SUCCESS);
+
+	thread_deallocate(thread);
+}
 
 static void
 lt_start_lock_thread_bound(thread_continue_t func)
@@ -642,6 +720,7 @@ lt_start_lock_thread_bound(thread_continue_t func)
 
 	thread_deallocate(thread);
 }
+#endif
 
 static kern_return_t
 lt_test_locks()
@@ -833,13 +912,16 @@ lt_test_locks()
 	lt_wait_for_lock_test_threads();
 	T_EXPECT_EQ_UINT(lt_counter, LOCK_TEST_ITERATIONS * lt_target_done_threads, NULL);
 
-	/* HW locks stress test */
-	T_LOG("Running HW locks stress test with hw_lock_lock()");
+#if __AMP__
+	/* Ticket locks stress test */
+	T_LOG("Running Ticket locks stress test with lck_ticket_lock()");
 	extern unsigned int real_ncpus;
+	lck_grp_init(&lt_ticket_grp, "ticket lock stress", LCK_GRP_ATTR_NULL);
+	lck_ticket_init(&lt_ticket_lock, &lt_ticket_grp);
 	lt_reset();
 	lt_target_done_threads = real_ncpus;
 	for (processor_t processor = processor_list; processor != NULL; processor = processor->processor_list) {
-		lt_start_lock_thread_bound(lt_stress_hw_lock);
+		lt_start_lock_thread_bound(lt_stress_ticket_lock);
 	}
 	lt_wait_for_lock_test_threads();
 	bool starvation = false;
@@ -853,9 +935,25 @@ lt_test_locks()
 	} else if (starvation) {
 		T_FAIL("Lock starvation found\n");
 	} else {
-		T_PASS("HW locks stress test with hw_lock_lock()");
+		T_PASS("Ticket locks stress test with lck_ticket_lock()");
 	}
 
+	/* AMP ticket locks stress test */
+	T_LOG("Running AMP Ticket locks stress test bound to clusters with lck_ticket_lock()");
+	lt_reset();
+	lt_target_done_threads = real_ncpus;
+	for (processor_t processor = processor_list; processor != NULL; processor = processor->processor_list) {
+		processor_set_t pset = processor->processor_set;
+		if (pset->pset_cluster_type == PSET_AMP_P) {
+			lt_start_lock_thread_p(lt_stress_ticket_lock);
+		} else if (pset->pset_cluster_type == PSET_AMP_E) {
+			lt_start_lock_thread_e(lt_stress_ticket_lock);
+		} else {
+			lt_start_lock_thread(lt_stress_ticket_lock);
+		}
+	}
+	lt_wait_for_lock_test_threads();
+#endif
 
 	/* HW locks: trylocks */
 	T_LOG("Running test with hw_lock_try()");
@@ -936,8 +1034,10 @@ struct munger_test {
 	{MT_FUNC(munge_wllwwll), 11, 7, {MT_W_VAL, MT_L_VAL, MT_L_VAL, MT_W_VAL, MT_W_VAL, MT_L_VAL, MT_L_VAL}},
 	{MT_FUNC(munge_wwwlw), 6, 5, {MT_W_VAL, MT_W_VAL, MT_W_VAL, MT_L_VAL, MT_W_VAL}},
 	{MT_FUNC(munge_wwwlww), 7, 6, {MT_W_VAL, MT_W_VAL, MT_W_VAL, MT_L_VAL, MT_W_VAL, MT_W_VAL}},
+	{MT_FUNC(munge_wwwlwww), 8, 7, {MT_W_VAL, MT_W_VAL, MT_W_VAL, MT_L_VAL, MT_W_VAL, MT_W_VAL, MT_W_VAL}},
 	{MT_FUNC(munge_wwwl), 5, 4, {MT_W_VAL, MT_W_VAL, MT_W_VAL, MT_L_VAL}},
 	{MT_FUNC(munge_wwwwlw), 7, 6, {MT_W_VAL, MT_W_VAL, MT_W_VAL, MT_W_VAL, MT_L_VAL, MT_W_VAL}},
+	{MT_FUNC(munge_wwwwllww), 10, 8, {MT_W_VAL, MT_W_VAL, MT_W_VAL, MT_W_VAL, MT_L_VAL, MT_L_VAL, MT_W_VAL, MT_W_VAL}},
 	{MT_FUNC(munge_wwwwl), 6, 5, {MT_W_VAL, MT_W_VAL, MT_W_VAL, MT_W_VAL, MT_L_VAL}},
 	{MT_FUNC(munge_wwwwwl), 7, 6, {MT_W_VAL, MT_W_VAL, MT_W_VAL, MT_W_VAL, MT_W_VAL, MT_L_VAL}},
 	{MT_FUNC(munge_wwwwwlww), 9, 8, {MT_W_VAL, MT_W_VAL, MT_W_VAL, MT_W_VAL, MT_W_VAL, MT_L_VAL, MT_W_VAL, MT_W_VAL}},
@@ -1092,24 +1192,32 @@ arm64_ropjop_test()
 
 	/* how is ROP/JOP configured */
 	boolean_t config_rop_enabled = TRUE;
-	boolean_t config_jop_enabled = !(BootArgs->bootFlags & kBootFlagsDisableJOP);
+	boolean_t config_jop_enabled = TRUE;
 
 
 	/* assert all AppleMode ROP/JOP features enabled */
 	uint64_t apctl = __builtin_arm_rsr64(ARM64_REG_APCTL_EL1);
 #if __APSTS_SUPPORTED__
 	uint64_t apsts = __builtin_arm_rsr64(ARM64_REG_APSTS_EL1);
-	T_ASSERT(apsts & APSTS_EL1_MKEYVld, NULL);
+	T_EXPECT(apsts & APSTS_EL1_MKEYVld, NULL);
 #else
-	T_ASSERT(apctl & APCTL_EL1_MKEYVld, NULL);
+	T_EXPECT(apctl & APCTL_EL1_MKEYVld, NULL);
 #endif /* __APSTS_SUPPORTED__ */
-	T_ASSERT(apctl & APCTL_EL1_AppleMode, NULL);
-	T_ASSERT(apctl & APCTL_EL1_KernKeyEn, NULL);
+	T_EXPECT(apctl & APCTL_EL1_AppleMode, NULL);
+
+	bool kernkeyen = apctl & APCTL_EL1_KernKeyEn;
+#if HAS_APCTL_EL1_USERKEYEN
+	bool userkeyen = apctl & APCTL_EL1_UserKeyEn;
+#else
+	bool userkeyen = false;
+#endif
+	/* for KernKey to work as a diversifier, it must be enabled at exactly one of {EL0, EL1/2} */
+	T_EXPECT(kernkeyen || userkeyen, "KernKey is enabled");
+	T_EXPECT(!(kernkeyen && userkeyen), "KernKey is not simultaneously enabled at userspace and kernel space");
 
 	/* ROP/JOP keys enabled current status */
 	bool status_jop_enabled, status_rop_enabled;
 #if __APSTS_SUPPORTED__ /* H13+ */
-	// TODO: update unit test to understand ROP/JOP enabled config for H13+
 	status_jop_enabled = status_rop_enabled = apctl & APCTL_EL1_EnAPKey1;
 #elif __APCFG_SUPPORTED__ /* H12 */
 	uint64_t apcfg_el1 = __builtin_arm_rsr64(APCFG_EL1);
@@ -1121,8 +1229,8 @@ arm64_ropjop_test()
 #endif /* __APSTS_SUPPORTED__ */
 
 	/* assert configured and running status match */
-	T_ASSERT(config_rop_enabled == status_rop_enabled, NULL);
-	T_ASSERT(config_jop_enabled == status_jop_enabled, NULL);
+	T_EXPECT(config_rop_enabled == status_rop_enabled, NULL);
+	T_EXPECT(config_jop_enabled == status_jop_enabled, NULL);
 
 
 	if (config_jop_enabled) {
@@ -1225,9 +1333,70 @@ arm64_late_pan_test()
 	return KERN_SUCCESS;
 }
 
+static bool
+arm64_pan_test_pan_enabled_fault_handler(arm_saved_state_t * state)
+{
+	bool retval                 = false;
+	uint32_t esr                = get_saved_state_esr(state);
+	esr_exception_class_t class = ESR_EC(esr);
+	fault_status_t fsc          = ISS_IA_FSC(ESR_ISS(esr));
+	uint32_t cpsr               = get_saved_state_cpsr(state);
+	uint64_t far                = get_saved_state_far(state);
+
+	if ((class == ESR_EC_DABORT_EL1) && (fsc == FSC_PERMISSION_FAULT_L3) &&
+	    (cpsr & PSR64_PAN) &&
+	    ((esr & ISS_DA_WNR) ? mmu_kvtop_wpreflight(far) : mmu_kvtop(far))) {
+		++pan_exception_level;
+		// read the user-accessible value to make sure
+		// pan is enabled and produces a 2nd fault from
+		// the exception handler
+		if (pan_exception_level == 1) {
+			ml_expect_fault_begin(arm64_pan_test_pan_enabled_fault_handler, far);
+			pan_fault_value = *(volatile char *)far;
+			ml_expect_fault_end();
+			__builtin_arm_wsr("pan", 1); // turn PAN back on after the nested exception cleared it for this context
+		}
+		// this fault address is used for PAN test
+		// disable PAN and rerun
+		mask_saved_state_cpsr(state, 0, PSR64_PAN);
+
+		retval = true;
+	}
+
+	return retval;
+}
+
+static bool
+arm64_pan_test_pan_disabled_fault_handler(arm_saved_state_t * state)
+{
+	bool retval             = false;
+	uint32_t esr            = get_saved_state_esr(state);
+	esr_exception_class_t class = ESR_EC(esr);
+	fault_status_t fsc      = ISS_IA_FSC(ESR_ISS(esr));
+	uint32_t cpsr           = get_saved_state_cpsr(state);
+
+	if ((class == ESR_EC_DABORT_EL1) && (fsc == FSC_PERMISSION_FAULT_L3) &&
+	    !(cpsr & PSR64_PAN)) {
+		++pan_exception_level;
+		// On an exception taken from a PAN-disabled context, verify
+		// that PAN is re-enabled for the exception handler and that
+		// accessing the test address produces a PAN fault.
+		ml_expect_fault_begin(arm64_pan_test_pan_enabled_fault_handler, pan_test_addr);
+		pan_fault_value = *(volatile char *)pan_test_addr;
+		ml_expect_fault_end();
+		__builtin_arm_wsr("pan", 1); // turn PAN back on after the nested exception cleared it for this context
+		add_saved_state_pc(state, 4);
+
+		retval = true;
+	}
+
+	return retval;
+}
+
 kern_return_t
 arm64_pan_test()
 {
+	bool values_match = false;
 	vm_offset_t priv_addr = _COMM_PAGE_SIGNATURE;
 
 	T_LOG("Testing PAN.");
@@ -1243,11 +1412,18 @@ arm64_pan_test()
 	pan_test_addr = priv_addr + _COMM_HIGH_PAGE64_BASE_ADDRESS -
 	    _COMM_PAGE_START_ADDRESS;
 
+	// Context-switch with PAN disabled is prohibited; prevent test logging from
+	// triggering a voluntary context switch.
+	mp_disable_preemption();
+
 	// Below should trigger a PAN exception as pan_test_addr is accessible
 	// in user mode
 	// The exception handler, upon recognizing the fault address is pan_test_addr,
 	// will disable PAN and rerun this instruction successfully
-	T_ASSERT(*(char *)pan_test_addr == *(char *)priv_addr, NULL);
+	ml_expect_fault_begin(arm64_pan_test_pan_enabled_fault_handler, pan_test_addr);
+	values_match = (*(volatile char *)pan_test_addr == *(volatile char *)priv_addr);
+	ml_expect_fault_end();
+	T_ASSERT(values_match, NULL);
 
 	T_ASSERT(pan_exception_level == 2, NULL);
 
@@ -1261,7 +1437,9 @@ arm64_pan_test()
 
 	// Force a permission fault while PAN is disabled to make sure PAN is
 	// re-enabled during the exception handler.
+	ml_expect_fault_begin(arm64_pan_test_pan_disabled_fault_handler, pan_ro_addr);
 	*((volatile uint64_t*)pan_ro_addr) = 0xFEEDFACECAFECAFE;
+	ml_expect_fault_end();
 
 	T_ASSERT(pan_exception_level == 2, NULL);
 
@@ -1273,6 +1451,8 @@ arm64_pan_test()
 	pan_ro_addr = 0;
 
 	__builtin_arm_wsr("pan", 1);
+
+	mp_enable_preemption();
 
 	return KERN_SUCCESS;
 }
@@ -1292,6 +1472,188 @@ arm64_munger_test()
 	return 0;
 }
 
+#if defined(KERNEL_INTEGRITY_CTRR) && defined(CONFIG_XNUPOST)
+SECURITY_READ_ONLY_LATE(uint64_t) ctrr_ro_test;
+uint64_t ctrr_nx_test = 0xd65f03c0; /* RET */
+volatile uint64_t ctrr_exception_esr;
+vm_offset_t ctrr_test_va;
+vm_offset_t ctrr_test_page;
+
+kern_return_t
+ctrr_test(void)
+{
+	processor_t p;
+	boolean_t ctrr_disable = FALSE;
+
+	PE_parse_boot_argn("-unsafe_kernel_text", &ctrr_disable, sizeof(ctrr_disable));
+
+#if CONFIG_CSR_FROM_DT
+	if (csr_unsafe_kernel_text) {
+		ctrr_disable = TRUE;
+	}
+#endif /* CONFIG_CSR_FROM_DT */
+
+	if (ctrr_disable) {
+		T_LOG("Skipping CTRR test when -unsafe_kernel_text boot-arg present");
+		return KERN_SUCCESS;
+	}
+
+	T_LOG("Running CTRR test.");
+
+	for (p = processor_list; p != NULL; p = p->processor_list) {
+		thread_bind(p);
+		thread_block(THREAD_CONTINUE_NULL);
+		T_LOG("Running CTRR test on cpu %d\n", p->cpu_id);
+		ctrr_test_cpu();
+	}
+
+	/* unbind thread from specific cpu */
+	thread_bind(PROCESSOR_NULL);
+	thread_block(THREAD_CONTINUE_NULL);
+
+	return KERN_SUCCESS;
+}
+
+static bool
+ctrr_test_ro_fault_handler(arm_saved_state_t * state)
+{
+	bool retval                 = false;
+	uint32_t esr                = get_saved_state_esr(state);
+	esr_exception_class_t class = ESR_EC(esr);
+	fault_status_t fsc          = ISS_DA_FSC(ESR_ISS(esr));
+
+	if ((class == ESR_EC_DABORT_EL1) && (fsc == FSC_PERMISSION_FAULT_L3)) {
+		ctrr_exception_esr = esr;
+		add_saved_state_pc(state, 4);
+		retval = true;
+	}
+
+	return retval;
+}
+
+static bool
+ctrr_test_nx_fault_handler(arm_saved_state_t * state)
+{
+	bool retval                 = false;
+	uint32_t esr                = get_saved_state_esr(state);
+	esr_exception_class_t class = ESR_EC(esr);
+	fault_status_t fsc          = ISS_IA_FSC(ESR_ISS(esr));
+
+	if ((class == ESR_EC_IABORT_EL1) && (fsc == FSC_PERMISSION_FAULT_L3)) {
+		ctrr_exception_esr = esr;
+		/* return to the instruction immediately after the call to NX page */
+		set_saved_state_pc(state, get_saved_state_lr(state));
+		retval = true;
+	}
+
+	return retval;
+}
+
+/* test CTRR on a cpu, caller to bind thread to desired cpu */
+/* ctrr_test_page was reserved during bootstrap process */
+kern_return_t
+ctrr_test_cpu(void)
+{
+	ppnum_t ro_pn, nx_pn;
+	uint64_t *ctrr_ro_test_ptr;
+	void (*ctrr_nx_test_ptr)(void);
+	kern_return_t kr;
+	uint64_t prot = 0;
+	extern vm_offset_t virtual_space_start;
+
+	/* ctrr read only region = [rorgn_begin_va, rorgn_end_va) */
+
+	vm_offset_t rorgn_begin_va = phystokv(ctrr_begin);
+	vm_offset_t rorgn_end_va = phystokv(ctrr_end) + 1;
+	vm_offset_t ro_test_va = (vm_offset_t)&ctrr_ro_test;
+	vm_offset_t nx_test_va = (vm_offset_t)&ctrr_nx_test;
+
+	T_EXPECT(rorgn_begin_va <= ro_test_va && ro_test_va < rorgn_end_va, "Expect ro_test_va to be inside the CTRR region");
+	T_EXPECT((nx_test_va < rorgn_begin_va) ^ (nx_test_va >= rorgn_end_va), "Expect nx_test_va to be outside the CTRR region");
+
+	ro_pn = pmap_find_phys(kernel_pmap, ro_test_va);
+	nx_pn = pmap_find_phys(kernel_pmap, nx_test_va);
+	T_EXPECT(ro_pn && nx_pn, "Expect ro page number and nx page number to be non zero");
+
+	T_LOG("test virtual page: %p, ctrr_ro_test: %p, ctrr_nx_test: %p, ro_pn: %x, nx_pn: %x ",
+	    (void *)ctrr_test_page, &ctrr_ro_test, &ctrr_nx_test, ro_pn, nx_pn);
+
+	prot = pmap_get_arm64_prot(kernel_pmap, ctrr_test_page);
+	T_EXPECT(~prot & ARM_TTE_VALID, "Expect ctrr_test_page to be unmapped");
+
+	T_LOG("Read only region test mapping virtual page %p to CTRR RO page number %d", ctrr_test_page, ro_pn);
+	kr = pmap_enter(kernel_pmap, ctrr_test_page, ro_pn,
+	    VM_PROT_READ | VM_PROT_WRITE, VM_PROT_NONE, VM_WIMG_USE_DEFAULT, FALSE);
+	T_EXPECT(kr == KERN_SUCCESS, "Expect pmap_enter of RW mapping to succeed");
+
+	// assert entire mmu prot path (Hierarchical protection model) is NOT RO
+	// fetch effective block level protections from table/block entries
+	prot = pmap_get_arm64_prot(kernel_pmap, ctrr_test_page);
+	T_EXPECT(ARM_PTE_EXTRACT_AP(prot) == AP_RWNA && (prot & ARM_PTE_PNX), "Mapping is EL1 RWNX");
+
+	ctrr_test_va = ctrr_test_page + (ro_test_va & PAGE_MASK);
+	ctrr_ro_test_ptr = (void *)ctrr_test_va;
+
+	T_LOG("Read only region test writing to %p to provoke data abort", ctrr_ro_test_ptr);
+
+	// should cause data abort
+	ml_expect_fault_begin(ctrr_test_ro_fault_handler, ctrr_test_va);
+	*ctrr_ro_test_ptr = 1;
+	ml_expect_fault_end();
+
+	// ensure write permission fault at expected level
+	// data abort handler will set ctrr_exception_esr when ctrr_test_va takes a permission fault
+
+	T_EXPECT(ESR_EC(ctrr_exception_esr) == ESR_EC_DABORT_EL1, "Data Abort from EL1 expected");
+	T_EXPECT(ISS_DA_FSC(ESR_ISS(ctrr_exception_esr)) == FSC_PERMISSION_FAULT_L3, "Permission Fault Expected");
+	T_EXPECT(ESR_ISS(ctrr_exception_esr) & ISS_DA_WNR, "Write Fault Expected");
+
+	ctrr_test_va = 0;
+	ctrr_exception_esr = 0;
+	pmap_remove(kernel_pmap, ctrr_test_page, ctrr_test_page + PAGE_SIZE);
+
+	T_LOG("No execute test mapping virtual page %p to CTRR PXN page number %d", ctrr_test_page, nx_pn);
+
+	kr = pmap_enter(kernel_pmap, ctrr_test_page, nx_pn,
+	    VM_PROT_READ | VM_PROT_EXECUTE, VM_PROT_NONE, VM_WIMG_USE_DEFAULT, FALSE);
+	T_EXPECT(kr == KERN_SUCCESS, "Expect pmap_enter of RX mapping to succeed");
+
+	// assert entire mmu prot path (Hierarchical protection model) is NOT XN
+	prot = pmap_get_arm64_prot(kernel_pmap, ctrr_test_page);
+	T_EXPECT(ARM_PTE_EXTRACT_AP(prot) == AP_RONA && (~prot & ARM_PTE_PNX), "Mapping is EL1 ROX");
+
+	ctrr_test_va = ctrr_test_page + (nx_test_va & PAGE_MASK);
+#if __has_feature(ptrauth_calls)
+	ctrr_nx_test_ptr = ptrauth_sign_unauthenticated((void *)ctrr_test_va, ptrauth_key_function_pointer, 0);
+#else
+	ctrr_nx_test_ptr = (void *)ctrr_test_va;
+#endif
+
+	T_LOG("No execute test calling ctrr_nx_test_ptr(): %p to provoke instruction abort", ctrr_nx_test_ptr);
+
+	// should cause prefetch abort
+	ml_expect_fault_begin(ctrr_test_nx_fault_handler, ctrr_test_va);
+	ctrr_nx_test_ptr();
+	ml_expect_fault_end();
+
+	// TODO: ensure execute permission fault at expected level
+	T_EXPECT(ESR_EC(ctrr_exception_esr) == ESR_EC_IABORT_EL1, "Instruction abort from EL1 Expected");
+	T_EXPECT(ISS_DA_FSC(ESR_ISS(ctrr_exception_esr)) == FSC_PERMISSION_FAULT_L3, "Permission Fault Expected");
+
+	ctrr_test_va = 0;
+	ctrr_exception_esr = 0;
+
+	pmap_remove(kernel_pmap, ctrr_test_page, ctrr_test_page + PAGE_SIZE);
+
+	T_LOG("Expect no faults when reading CTRR region to verify correct programming of CTRR limits");
+	for (vm_offset_t addr = rorgn_begin_va; addr < rorgn_end_va; addr += 8) {
+		volatile uint64_t x = *(uint64_t *)addr;
+		(void) x; /* read for side effect only */
+	}
+
+	return KERN_SUCCESS;
+}
+#endif /* defined(KERNEL_INTEGRITY_CTRR) && defined(CONFIG_XNUPOST) */
 
 #if HAS_TWO_STAGE_SPR_LOCK
 

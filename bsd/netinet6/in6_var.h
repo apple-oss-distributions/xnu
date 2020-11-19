@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2018 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2020 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -161,8 +161,12 @@ struct in6_ifaddr {
 	struct sockaddr_in6 ia_dstaddr; /* space for destination addr */
 	struct sockaddr_in6 ia_prefixmask; /* prefix mask */
 	u_int32_t ia_plen;              /* prefix length */
-	struct in6_ifaddr *ia_next;     /* next in6 list of IP6 addresses */
+	TAILQ_ENTRY(in6_ifaddr) ia6_link;     /* next in6 list of IP6 addresses */
+	TAILQ_ENTRY(in6_ifaddr) ia6_hash; /* hash bucket entry */
 	int ia6_flags;
+
+	/* cga collision count */
+	uint8_t   ia6_cga_collision_count;
 
 	struct in6_addrlifetime_i ia6_lifetime;
 	/*
@@ -180,6 +184,34 @@ struct in6_ifaddr {
 };
 
 #define ifatoia6(ifa)   ((struct in6_ifaddr *)(void *)(ifa))
+
+extern TAILQ_HEAD(in6_ifaddrhead, in6_ifaddr) in6_ifaddrhead;
+extern TAILQ_HEAD(in6_ifaddrhashhead, in6_ifaddr) * in6_ifaddrhashtbl;
+extern uint32_t in6addr_nhash;                  /* hash table size */
+extern uint32_t in6addr_hashp;                  /* next largest prime */
+
+static __inline uint32_t
+in6addr_hashval(const struct in6_addr *in6)
+{
+	/*
+	 * The hash index is the computed prime times the key modulo
+	 * the hash size, as documented in "Introduction to Algorithms"
+	 * (Cormen, Leiserson, Rivest).
+	 */
+	if (in6addr_nhash > 1) {
+		uint32_t x;
+
+		x = in6->s6_addr32[0] ^ in6->s6_addr32[1] ^ in6->s6_addr32[2] ^
+		    in6->s6_addr32[3];
+
+		return (x * in6addr_hashp) % in6addr_nhash;
+	} else {
+		return 0;
+	}
+}
+
+#define IN6ADDR_HASH(x)                 (&in6_ifaddrhashtbl[in6addr_hashval(x)])
+
 #endif /* BSD_KERNEL_PRIVATE */
 
 /* control structure to manage address selection policy */
@@ -363,50 +395,21 @@ struct in6_cga_nodecfg {
 	struct in6_cga_prepare cga_prepare;
 };
 
-/*
- * XXX in6_llstartreq will be removed once
- * configd adopts the more generically named
- * in6_cgareq structure.
- */
-struct in6_llstartreq {
-	char llsr_name[IFNAMSIZ];
-	int llsr_flags;
-	struct in6_cga_prepare llsr_cgaprep;
-	struct in6_addrlifetime llsr_lifetime;
-};
-
 struct in6_cgareq {
 	char cgar_name[IFNAMSIZ];
 	int cgar_flags;
 	struct in6_cga_prepare cgar_cgaprep;
 	struct in6_addrlifetime cgar_lifetime;
+	uint8_t cgar_collision_count;
 };
 
 #ifdef BSD_KERNEL_PRIVATE
-/*
- * XXX Corresponding versions of in6_llstartreq
- * will be removed after the new in6_cgareq is
- * adopted by configd
- */
-struct in6_llstartreq_32 {
-	char llsr_name[IFNAMSIZ];
-	int llsr_flags;
-	struct in6_cga_prepare llsr_cgaprep;
-	struct in6_addrlifetime_32 llsr_lifetime;
-};
-
-struct in6_llstartreq_64 {
-	char llsr_name[IFNAMSIZ];
-	int llsr_flags;
-	struct in6_cga_prepare llsr_cgaprep;
-	struct in6_addrlifetime_64 llsr_lifetime;
-};
-
 struct in6_cgareq_32 {
 	char cgar_name[IFNAMSIZ];
 	int cgar_flags;
 	struct in6_cga_prepare cgar_cgaprep;
 	struct in6_addrlifetime_32 cgar_lifetime;
+	uint8_t cgar_collision_count;
 };
 
 struct in6_cgareq_64 {
@@ -414,6 +417,7 @@ struct in6_cgareq_64 {
 	int cgar_flags;
 	struct in6_cga_prepare cgar_cgaprep;
 	struct in6_addrlifetime_64 cgar_lifetime;
+	uint8_t cgar_collision_count;
 };
 
 #endif /* !BSD_KERNEL_PRIVATE */
@@ -711,9 +715,36 @@ void in6_post_msg(struct ifnet *, u_int32_t, struct in6_ifaddr *, uint8_t *mac);
 #endif /* BSD_KERNEL_PRIVATE */
 
 /*
- * enable/disable IPv6 router mode on interface.
+ * SIOCSETROUTERMODE_IN6
+ * Set the IPv6 router mode on an interface.
+ *
+ * IPV6_ROUTER_MODE_DISABLED
+ * - disable IPv6 router mode if it is enabled
+ * - if the previous mode was IPV6_ROUTER_MODE_EXCUSIVE,
+ *   scrubs all IPv6 auto-configured addresses
+ *
+ * IPV6_ROUTER_MODE_EXCLUSIVE
+ * - act exclusively as an IPv6 router on the interface
+ * - disables accepting external Router Advertisements
+ * - scrubs all IPv6 auto-configured addresses
+ * - disables optimistic dad
+ * - disables ND6 prefix proxy, if enabled
+ * - used by the internet sharing/personal hotspot feature
+ *
+ * IPV6_ROUTER_MODE_HYBRID
+ * - act as both an IPv6 router and IPv6 client on the interface
+ * - does not modify whether to accept Router Advertisements
+ * - does not scrub any addresses
+ * - used when acting as the gateway/router for an otherwise isolated
+ *   network whose existence is likely advertised via a
+ *   a Route Information Option in a Router Advertisement
  */
+#define IPV6_ROUTER_MODE_DISABLED       0
+#define IPV6_ROUTER_MODE_EXCLUSIVE      1
+#define IPV6_ROUTER_MODE_HYBRID         2
 #define SIOCSETROUTERMODE_IN6   _IOWR('i', 136, struct in6_ifreq)
+
+#define SIOCGETROUTERMODE_IN6   _IOWR('i', 137, struct in6_ifreq)
 
 /*
  * start secure link-local interface addresses
@@ -724,8 +755,17 @@ void in6_post_msg(struct ifnet *, u_int32_t, struct in6_ifaddr *, uint8_t *mac);
 #define SIOCLL_CGASTART_64      _IOW('i', 160, struct in6_cgareq_64)
 #endif
 
+/*
+ * get/set the CGA parameters
+ */
 #define SIOCGIFCGAPREP_IN6      _IOWR('i', 187, struct in6_cgareq)
 #define SIOCSIFCGAPREP_IN6      _IOWR('i', 188, struct in6_cgareq)
+#ifdef BSD_KERNEL_PRIVATE
+#define SIOCGIFCGAPREP_IN6_32   _IOWR('i', 187, struct in6_cgareq_32)
+#define SIOCGIFCGAPREP_IN6_64   _IOWR('i', 187, struct in6_cgareq_64)
+#define SIOCSIFCGAPREP_IN6_32   _IOWR('i', 188, struct in6_cgareq_32)
+#define SIOCSIFCGAPREP_IN6_64   _IOWR('i', 188, struct in6_cgareq_64)
+#endif
 
 #define SIOCCLAT46_START        _IOWR('i', 189, struct in6_ifreq)
 #define SIOCCLAT46_STOP         _IOWR('i', 190, struct in6_ifreq)
@@ -775,8 +815,6 @@ void in6_post_msg(struct ifnet *, u_int32_t, struct in6_ifaddr *, uint8_t *mac);
 #endif /* KERNEL */
 
 #ifdef BSD_KERNEL_PRIVATE
-extern struct in6_ifaddr *in6_ifaddrs;
-
 extern struct icmp6stat icmp6stat;
 extern lck_rw_t in6_ifaddr_rwlock;
 extern lck_mtx_t proxy6_lock;
@@ -1170,12 +1208,14 @@ extern int in6_cga_stop(void);
 extern ssize_t in6_cga_parameters_prepare(void *, size_t,
     const struct in6_addr *, u_int8_t, const struct in6_cga_modifier *);
 extern int in6_cga_generate(struct in6_cga_prepare *, u_int8_t,
-    struct in6_addr *);
+    struct in6_addr *, struct ifnet *);
 extern int in6_getconninfo(struct socket *, sae_connid_t, uint32_t *,
     uint32_t *, int32_t *, user_addr_t, socklen_t *,
     user_addr_t, socklen_t *, uint32_t *, user_addr_t, uint32_t *);
 extern void in6_ip6_to_sockaddr(const struct in6_addr *ip6, u_int16_t port,
     struct sockaddr_in6 *sin6, u_int32_t maxlen);
+extern void in6_cgareq_copy_from_user(const void *, int,
+    struct in6_cgareq *cgareq);
 
 #endif /* BSD_KERNEL_PRIVATE */
 #endif /* _NETINET6_IN6_VAR_H_ */

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2007 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2020 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -94,7 +94,16 @@
 
 #include <security/mac_mach_internal.h>
 
-zone_t ipc_object_zones[IOT_NUMBER];
+SECURITY_READ_ONLY_LATE(zone_t) ipc_object_zones[IOT_NUMBER];
+
+ZONE_INIT(&ipc_object_zones[IOT_PORT], "ipc ports", sizeof(struct ipc_port),
+    ZC_NOENCRYPT | ZC_CACHING | ZC_ZFREE_CLEARMEM | ZC_NOSEQUESTER,
+    ZONE_ID_IPC_PORT, NULL);
+
+ZONE_INIT(&ipc_object_zones[IOT_PORT_SET], "ipc port sets",
+    sizeof(struct ipc_pset),
+    ZC_NOENCRYPT | ZC_ZFREE_CLEARMEM | ZC_NOSEQUESTER,
+    ZONE_ID_IPC_PORT_SET, NULL);
 
 /*
  *	Routine:	ipc_object_reference
@@ -495,8 +504,13 @@ void
 ipc_object_validate(
 	ipc_object_t    object)
 {
-	int otype = (io_otype(object) == IOT_PORT_SET) ? IOT_PORT_SET : IOT_PORT;
-	zone_require(object, ipc_object_zones[otype]);
+	if (io_otype(object) != IOT_PORT_SET) {
+		zone_id_require(ZONE_ID_IPC_PORT,
+		    sizeof(struct ipc_port), object);
+	} else {
+		zone_id_require(ZONE_ID_IPC_PORT_SET,
+		    sizeof(struct ipc_pset), object);
+	}
 }
 
 /*
@@ -945,6 +959,7 @@ ipc_object_copyout(
 			break;
 		}
 
+
 		name = CAST_MACH_PORT_TO_NAME(object);
 		kr = ipc_entry_get(space, &name, &entry);
 		if (kr != KERN_SUCCESS) {
@@ -962,6 +977,14 @@ ipc_object_copyout(
 
 		io_lock(object);
 		if (!io_active(object)) {
+			io_unlock(object);
+			ipc_entry_dealloc(space, name, entry);
+			is_write_unlock(space);
+			return KERN_INVALID_CAPABILITY;
+		}
+
+		/* Don't actually copyout rights we aren't allowed to */
+		if (!ip_label_check(space, ip_object_to_port(object), msgt_name)) {
 			io_unlock(object);
 			ipc_entry_dealloc(space, name, entry);
 			is_write_unlock(space);
@@ -1058,6 +1081,14 @@ ipc_object_copyout_name(
 
 		io_lock(object);
 		if (!io_active(object)) {
+			io_unlock(object);
+			ipc_entry_dealloc(space, name, entry);
+			is_write_unlock(space);
+			return KERN_INVALID_CAPABILITY;
+		}
+
+		/* Don't actually copyout rights we aren't allowed to */
+		if (!ip_label_check(space, ip_object_to_port(object), msgt_name)) {
 			io_unlock(object);
 			ipc_entry_dealloc(space, name, entry);
 			is_write_unlock(space);
