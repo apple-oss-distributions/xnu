@@ -535,6 +535,8 @@ _sock_listen
 _sock_nointerrupt
 _sock_receive
 _sock_receivembuf
+_sock_release
+_sock_retain
 _sock_send
 _sock_sendmbuf
 _sock_setpriv
@@ -772,6 +774,7 @@ _vnode_vid
 _vnode_isonexternalstorage
 _vnode_vtype
 _vnode_waitforwrites
+_vnode_willberecycled
 _vnode_writedone
 _vnop_access_desc
 _vnop_advlock_desc

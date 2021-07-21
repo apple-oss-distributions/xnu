@@ -1638,6 +1638,7 @@ task_create_internal(
 	if (new_task->coalition[COALITION_TYPE_RESOURCE] == COALITION_NULL) {
 		panic("created task is not a member of a resource coalition");
 	}
+	task_set_coalition_member(new_task);
 #endif /* CONFIG_COALITIONS */
 
 	new_task->dispatchqueue_offset = 0;
@@ -2856,9 +2857,14 @@ task_terminate_internal(
 
 #if CONFIG_COALITIONS
 	/*
-	 * Leave our coalitions. (drop activation but not reference)
+	 * Leave the coalition for corpse task or task that
+	 * never had any active threads (e.g. fork, exec failure).
+	 * For task with active threads, the task will be removed
+	 * from coalition by last terminating thread.
 	 */
-	coalitions_remove_task(task);
+	if (task->active_thread_count == 0) {
+		coalitions_remove_task(task);
+	}
 #endif
 
 #if CONFIG_FREEZE

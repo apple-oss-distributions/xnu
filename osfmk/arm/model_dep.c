@@ -374,6 +374,45 @@ panic_display_hung_cpus_help(void)
 }
 
 static void
+panic_display_pvhs_locked(void)
+{
+}
+
+static void
+panic_display_pvh_to_lock(void)
+{
+}
+
+static void
+panic_display_last_pc_lr(void)
+{
+#if defined(__arm64__)
+	const int max_cpu = ml_get_max_cpu_number();
+
+	for (int cpu = 0; cpu <= max_cpu; cpu++) {
+		cpu_data_t *current_cpu_datap = cpu_datap(cpu);
+
+		if (current_cpu_datap == NULL) {
+			continue;
+		}
+
+		if (current_cpu_datap == getCpuDatap()) {
+			/**
+			 * Skip printing the PC/LR if this is the CPU
+			 * that initiated the panic.
+			 */
+			paniclog_append_noflush("CORE %u is the one that panicked. Check the full backtrace for details.\n", cpu);
+			continue;
+		}
+
+		paniclog_append_noflush("CORE %u: PC=0x%016llx, LR=0x%016llx, FP=0x%016llx\n", cpu,
+		    current_cpu_datap->ipi_pc, (uint64_t)VM_KERNEL_STRIP_PTR(current_cpu_datap->ipi_lr),
+		    (uint64_t)VM_KERNEL_STRIP_PTR(current_cpu_datap->ipi_fp));
+	}
+#endif
+}
+
+static void
 do_print_all_backtraces(const char *message, uint64_t panic_options)
 {
 	int             logversion = PANICLOG_VERSION;
@@ -501,6 +540,9 @@ do_print_all_backtraces(const char *message, uint64_t panic_options)
 	panic_display_times();
 	panic_display_zprint();
 	panic_display_hung_cpus_help();
+	panic_display_pvhs_locked();
+	panic_display_pvh_to_lock();
+	panic_display_last_pc_lr();
 #if CONFIG_ZLEAKS
 	panic_display_ztrace();
 #endif /* CONFIG_ZLEAKS */
@@ -1085,6 +1127,9 @@ DebuggerXCall(
 
 	if (regs != NULL) {
 #if defined(__arm64__)
+		current_cpu_datap()->ipi_pc = (uint64_t)get_saved_state_pc(regs);
+		current_cpu_datap()->ipi_lr = (uint64_t)get_saved_state_lr(regs);
+		current_cpu_datap()->ipi_fp = (uint64_t)get_saved_state_fp(regs);
 		save_context = PSR64_IS_KERNEL(get_saved_state_cpsr(regs));
 #else
 		save_context = PSR_IS_KERNEL(regs->cpsr);

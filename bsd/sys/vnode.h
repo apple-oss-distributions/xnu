@@ -1202,6 +1202,15 @@ void    vnode_clearmountedon(vnode_t vp);
 int     vnode_isrecycled(vnode_t vp);
 
 /*!
+ *  @function vnode_willberecycled
+ *  @abstract Check if a vnode is marked for recycling when the last reference to it is released.
+ *  @discussion This is only a snapshot: a vnode may start to be recycled, or go from dead to in use, at any time.
+ *  @param vp The vnode to test.
+ *  @return Nonzero if vnode is marked for recycling, 0 otherwise.
+ */
+int     vnode_willberecycled(vnode_t vp);
+
+/*!
  *  @function vnode_isnocache
  *  @abstract Check if a vnode is set to not have its data cached in memory  (i.e. we write-through to disk and always read from disk).
  *  @param vp The vnode to test.

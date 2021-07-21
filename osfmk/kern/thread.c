@@ -459,6 +459,16 @@ thread_terminate_self(void)
 	 */
 	threadcnt = os_atomic_dec(&task->active_thread_count, relaxed);
 
+#if CONFIG_COALITIONS
+	/*
+	 * Leave the coalitions when last thread of task is exiting and the
+	 * task is not a corpse.
+	 */
+	if (threadcnt == 0 && !task->corpse_info) {
+		coalitions_remove_task(task);
+	}
+#endif
+
 	/*
 	 * If we are the last thread to terminate and the task is
 	 * associated with a BSD process, perform BSD process exit.

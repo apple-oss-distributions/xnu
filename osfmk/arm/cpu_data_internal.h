@@ -285,6 +285,15 @@ typedef struct cpu_data {
 	uint64_t                        wfe_deadline_checks;
 	uint64_t                        wfe_terminations;
 #endif
+#if __arm64__
+	/**
+	 * Stash the state of the system when an IPI is received. This will be
+	 * dumped in the case a panic is getting triggered.
+	 */
+	uint64_t ipi_pc;
+	uint64_t ipi_lr;
+	uint64_t ipi_fp;
+#endif
 } cpu_data_t;
 
 /*

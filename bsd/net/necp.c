@@ -6470,8 +6470,11 @@ necp_application_find_policy_match_internal(proc_t proc,
 	}
 
 	// Initialize UID, PID, and UUIDs to the current process
-	kauth_cred_t cred = kauth_cred_get();
-	uid_t uid = kauth_cred_getuid(cred);
+	uid_t uid = 0;
+	kauth_cred_t cred = kauth_cred_proc_ref(proc);
+	if (cred != NULL) {
+		uid = kauth_cred_getuid(cred);
+	}
 	pid_t pid = proc_pid(proc);
 	int32_t pid_version = proc_pidversion(proc);
 	uuid_t application_uuid;
@@ -6508,6 +6511,9 @@ necp_application_find_policy_match_internal(proc_t proc,
 	u_int32_t flow_divert_aggregate_unit = 0;
 
 	if (returned_result == NULL) {
+		if (cred != NULL) {
+			kauth_cred_unref(&cred);
+		}
 		return EINVAL;
 	}
 
@@ -6534,6 +6540,9 @@ necp_application_find_policy_match_internal(proc_t proc,
 		if (necp_drop_all_order > 0 || drop_order > 0) {
 			returned_result->routing_result = NECP_KERNEL_POLICY_RESULT_DROP;
 			lck_rw_done(&necp_kernel_policy_lock);
+			if (cred != NULL) {
+				kauth_cred_unref(&cred);
+			}
 			return 0;
 		}
 	}
@@ -6739,6 +6748,9 @@ necp_application_find_policy_match_internal(proc_t proc,
 		returned_result->routing_result = NECP_KERNEL_POLICY_RESULT_PASS;
 		returned_result->routed_interface_index = lo_ifp->if_index;
 		*flags |= (NECP_CLIENT_RESULT_FLAG_IS_LOCAL | NECP_CLIENT_RESULT_FLAG_IS_DIRECT);
+		if (cred != NULL) {
+			kauth_cred_unref(&cred);
+		}
 		return 0;
 	}
 
@@ -7253,6 +7265,10 @@ done:
 		proc_rele(responsible_proc);
 	}
 #endif
+
+	if (cred != NULL) {
+		kauth_cred_unref(&cred);
+	}
 
 	return error;
 }
@@ -9999,8 +10015,11 @@ necp_socket_is_allowed_to_send_recv_internal(struct inpcb *inp, struct sockaddr 
 	if (bypass_type == NECP_BYPASS_TYPE_LOOPBACK &&
 	    necp_pass_loopback == NECP_LOOPBACK_PASS_WITH_FILTER &&
 	    (matched_policy == NULL || matched_policy->result != NECP_KERNEL_POLICY_RESULT_SOCKET_DIVERT)) {
-		// Polices have changed since last evaluation, update inp result with new filter state
-		if (inp->inp_policyresult.results.filter_control_unit != filter_control_unit) {
+		// If policies haven't changed since last evaluation, do not update filter result in order to
+		// preserve the very first filter result for the socket.  Otherwise, update the filter result to
+		// allow content filter to detect and drop pre-existing flows.
+		if (inp->inp_policyresult.policy_gencount != necp_kernel_socket_policies_gencount &&
+		    inp->inp_policyresult.results.filter_control_unit != filter_control_unit) {
 			inp->inp_policyresult.results.filter_control_unit = filter_control_unit;
 		}
 		if (inp->inp_policyresult.results.flow_divert_aggregate_unit != flow_divert_aggregate_unit) {
@@ -10046,8 +10065,11 @@ necp_socket_is_allowed_to_send_recv_internal(struct inpcb *inp, struct sockaddr 
 			if (matched_policy->result == NECP_KERNEL_POLICY_RESULT_PASS) {
 				pass_flags = matched_policy->result_parameter.pass_flags;
 			}
-			// Polices has changed since last evaluation, update inp result with new filter state
-			if (inp->inp_policyresult.results.filter_control_unit != filter_control_unit) {
+			// If policies haven't changed since last evaluation, do not update filter result in order to
+			// preserve the very first filter result for the socket.  Otherwise, update the filter result to
+			// allow content filter to detect and drop pre-existing flows.
+			if (inp->inp_policyresult.policy_gencount != necp_kernel_socket_policies_gencount &&
+			    inp->inp_policyresult.results.filter_control_unit != filter_control_unit) {
 				inp->inp_policyresult.results.filter_control_unit = filter_control_unit;
 			}
 			if (inp->inp_policyresult.results.flow_divert_aggregate_unit != flow_divert_aggregate_unit) {
@@ -10076,8 +10098,11 @@ necp_socket_is_allowed_to_send_recv_internal(struct inpcb *inp, struct sockaddr 
 				*return_route_rule_id = route_rule_id;
 			}
 
-			// Polices has changed since last evaluation, update inp result with new filter state
-			if (inp->inp_policyresult.results.filter_control_unit != filter_control_unit) {
+			// If policies haven't changed since last evaluation, do not update filter result in order to
+			// preserve the very first filter result for the socket.  Otherwise, update the filter result to
+			// allow content filter to detect and drop pre-existing flows.
+			if (inp->inp_policyresult.policy_gencount != necp_kernel_socket_policies_gencount &&
+			    inp->inp_policyresult.results.filter_control_unit != filter_control_unit) {
 				inp->inp_policyresult.results.filter_control_unit = filter_control_unit;
 			}
 			if (inp->inp_policyresult.results.flow_divert_aggregate_unit != flow_divert_aggregate_unit) {

@@ -268,6 +268,7 @@ SYSCTL_QUAD(_machdep, OID_AUTO, tlto,
     CTLFLAG_RW | CTLFLAG_LOCKED, &TLockTimeOut,
     "Ticket spinlock timeout (MATUs): use with care");
 
+
 /*
  * macro to generate a sysctl machdep.cpu.sysreg_* for a given system register
  * using __builtin_arm_rsr64.

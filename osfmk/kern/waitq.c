@@ -3647,9 +3647,7 @@ waitq_set_deinit(struct waitq_set *wqset)
 		 */
 		while (os_atomic_load(hook, relaxed) != 0) {
 			waitq_set_unlock(wqset);
-			do {
-				delay(1);
-			} while (os_atomic_load(hook, relaxed) != 0);
+			delay(1);
 			waitq_set_lock(wqset);
 		}
 	}

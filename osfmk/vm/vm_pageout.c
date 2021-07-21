@@ -4365,6 +4365,25 @@ extern unsigned int     memorystatus_level;
 
 boolean_t vm_pressure_events_enabled = FALSE;
 
+#if (XNU_TARGET_OS_OSX && __arm64__)
+extern uint64_t next_warning_notification_sent_at_ts;
+extern uint64_t next_critical_notification_sent_at_ts;
+
+#define PRESSURE_LEVEL_STUCK_THRESHOLD_MINS    (30)    /* 30 minutes. */
+
+/*
+ * The last time there was change in pressure level OR we forced a check
+ * because the system is stuck in a non-normal pressure level.
+ */
+uint64_t  vm_pressure_last_level_transition_abs = 0;
+
+/*
+ *  This is how the long the system waits 'stuck' in an unchanged non-normal pressure
+ * level before resending out notifications for that level again.
+ */
+int  vm_pressure_level_transition_threshold = PRESSURE_LEVEL_STUCK_THRESHOLD_MINS;
+#endif /* (XNU_TARGET_OS_OSX && __arm64__) */
+
 void
 vm_pressure_response(void)
 {
@@ -4398,6 +4417,19 @@ vm_pressure_response(void)
 		return;
 	}
 
+#if (XNU_TARGET_OS_OSX && __arm64__)
+	uint64_t                curr_ts, abs_time_since_level_transition, time_in_ns;
+	bool                    force_check = false;
+	int                     time_in_mins;
+
+	curr_ts = mach_absolute_time();
+	abs_time_since_level_transition = curr_ts - vm_pressure_last_level_transition_abs;
+
+	absolutetime_to_nanoseconds(abs_time_since_level_transition, &time_in_ns);
+	time_in_mins = (int) ((time_in_ns / NSEC_PER_SEC) / 60);
+	force_check = (time_in_mins >= vm_pressure_level_transition_threshold);
+#endif /* (XNU_TARGET_OS_OSX && __arm64__) */
+
 	old_level = memorystatus_vm_pressure_level;
 
 	switch (memorystatus_vm_pressure_level) {
@@ -4418,6 +4450,11 @@ vm_pressure_response(void)
 			new_level = kVMPressureNormal;
 		} else if (VM_PRESSURE_WARNING_TO_CRITICAL()) {
 			new_level = kVMPressureCritical;
+#if (XNU_TARGET_OS_OSX && __arm64__)
+		} else if (force_check) {
+			new_level = kVMPressureWarning;
+			next_warning_notification_sent_at_ts = curr_ts;
+#endif /* (XNU_TARGET_OS_OSX && __arm64__) */
 		}
 		break;
 	}
@@ -4428,6 +4465,11 @@ vm_pressure_response(void)
 			new_level = kVMPressureNormal;
 		} else if (VM_PRESSURE_CRITICAL_TO_WARNING()) {
 			new_level = kVMPressureWarning;
+#if (XNU_TARGET_OS_OSX && __arm64__)
+		} else if (force_check) {
+			new_level = kVMPressureCritical;
+			next_critical_notification_sent_at_ts = curr_ts;
+#endif /* (XNU_TARGET_OS_OSX && __arm64__) */
 		}
 		break;
 	}
@@ -4436,15 +4478,30 @@ vm_pressure_response(void)
 		return;
 	}
 
-	if (new_level != -1) {
-		memorystatus_vm_pressure_level = (vm_pressure_level_t) new_level;
+	if (new_level != -1
+#if (XNU_TARGET_OS_OSX && __arm64__)
+	    || force_check
+#endif /* (XNU_TARGET_OS_OSX && __arm64__)  */
+	    ) {
+		if (new_level != -1) {
+			memorystatus_vm_pressure_level = (vm_pressure_level_t) new_level;
 
-		if (new_level != (int) old_level) {
+			if (new_level != (int) old_level) {
+				VM_DEBUG_CONSTANT_EVENT(vm_pressure_level_change, VM_PRESSURE_LEVEL_CHANGE, DBG_FUNC_NONE,
+				    new_level, old_level, 0, 0);
+			}
+#if (XNU_TARGET_OS_OSX && __arm64__)
+		} else {
 			VM_DEBUG_CONSTANT_EVENT(vm_pressure_level_change, VM_PRESSURE_LEVEL_CHANGE, DBG_FUNC_NONE,
-			    new_level, old_level, 0, 0);
+			    new_level, old_level, force_check, 0);
+#endif /* (XNU_TARGET_OS_OSX && __arm64__) */
 		}
 
-		if ((memorystatus_vm_pressure_level != kVMPressureNormal) || (old_level != memorystatus_vm_pressure_level)) {
+		if ((memorystatus_vm_pressure_level != kVMPressureNormal) || (old_level != memorystatus_vm_pressure_level)
+#if (XNU_TARGET_OS_OSX && __arm64__)
+		    || force_check
+#endif /* (XNU_TARGET_OS_OSX && __arm64__) */
+		    ) {
 			if (vm_pageout_state.vm_pressure_thread_running == FALSE) {
 				thread_wakeup(&vm_pressure_thread);
 			}
@@ -4452,6 +4509,9 @@ vm_pressure_response(void)
 			if (old_level != memorystatus_vm_pressure_level) {
 				thread_wakeup(&vm_pageout_state.vm_pressure_changed);
 			}
+#if (XNU_TARGET_OS_OSX && __arm64__)
+			vm_pressure_last_level_transition_abs = curr_ts; /* renew the window of observation for a stuck pressure level */
+#endif /* (XNU_TARGET_OS_OSX && __arm64__) */
 		}
 	}
 }

@@ -8535,6 +8535,9 @@ pmap_enter_options_internal(
 		    pmap, (uint64_t)pa);
 	}
 
+	/* The PA should not extend beyond the architected physical address space */
+	pa &= ARM_PTE_PAGE_MASK;
+
 	if ((prot & VM_PROT_EXECUTE) && (pmap == kernel_pmap)) {
 #if defined(KERNEL_INTEGRITY_CTRR) && defined(CONFIG_XNUPOST)
 		extern vm_offset_t ctrr_test_page;
@@ -11106,13 +11109,13 @@ pmap_map_cpu_windows_copy_internal(
 	bool            need_strong_sync = false;
 
 #if XNU_MONITOR
-	unsigned int    cacheattr = (!pa_valid(ptoa(pn)) ? pmap_cache_attributes(pn) : 0);
+	unsigned int    cacheattr = (!pa_valid(ptoa(pn) & ARM_PTE_PAGE_MASK) ? pmap_cache_attributes(pn) : 0);
 	need_strong_sync = ((cacheattr & PMAP_IO_RANGE_STRONG_SYNC) != 0);
 #endif
 
 #if XNU_MONITOR
 #ifdef  __ARM_COHERENT_IO__
-	if (__improbable(pa_valid(ptoa(pn)) && !pmap_ppl_disable)) {
+	if (__improbable(pa_valid(ptoa(pn) & ARM_PTE_PAGE_MASK) && !pmap_ppl_disable)) {
 		panic("%s: attempted to map a managed page, "
 		    "pn=%u, prot=0x%x, wimg_bits=0x%x",
 		    __FUNCTION__,

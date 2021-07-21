@@ -191,6 +191,10 @@
 #include <IOKit/IOPlatformExpert.h>
 #include <IOKit/IOSharedDataQueue.h>
 #include <IOKit/IODataQueueShared.h>
+#include <IOKit/IOKitKeysPrivate.h>
+#include <IOKit/IOKitServer.h>
+#include <IOKit/IOBSD.h>
+#include <kern/ipc_kobject.h>
 #include <libkern/Block.h>
 #include <libkern/Block_private.h>
 #include <libkern/c++/OSAllocation.h>
@@ -741,3 +745,149 @@ SYSCTL_PROC(_kern, OID_AUTO, iokittest,
     CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_KERN | CTLFLAG_LOCKED,
     NULL, 0, sysctl_iokittest, "I", "");
 #endif // __clang_analyzer__
+
+#if DEVELOPMENT || DEBUG
+
+/*
+ * A simple wrapper around an IOService. This terminates the IOService in free().
+ */
+class TestIOServiceHandle : public OSObject
+{
+	OSDeclareDefaultStructors(TestIOServiceHandle);
+public:
+	static TestIOServiceHandle * withService(IOService * service);
+
+private:
+	bool initWithService(IOService * service);
+	virtual void free() APPLE_KEXT_OVERRIDE;
+
+	IOService * fService;
+};
+
+OSDefineMetaClassAndStructors(TestIOServiceHandle, OSObject);
+
+TestIOServiceHandle *
+TestIOServiceHandle::withService(IOService * service)
+{
+	TestIOServiceHandle * handle = new TestIOServiceHandle;
+	if (handle && !handle->initWithService(service)) {
+		return NULL;
+	}
+	return handle;
+}
+
+bool
+TestIOServiceHandle::initWithService(IOService * service)
+{
+	fService = service;
+	fService->retain();
+	return true;
+}
+
+void
+TestIOServiceHandle::free()
+{
+	if (fService) {
+		fService->terminate();
+		OSSafeReleaseNULL(fService);
+	}
+}
+
+/*
+ * Set up test IOServices. See the available services in xnu/iokit/Tests/TestServices.
+ *
+ * xnu darwintests use this sysctl to make these test services available. A send right is pushed
+ * to the task that called the sysctl, which when deallocated removes the service. This ensures
+ * that the registry isn't polluted by misbehaving tests.
+ *
+ * Since this sysctl allows callers to instantiate arbitrary classes based on their class name,
+ * this can be a security concern. Tests that call this sysctl need the
+ * kIOServiceTestServiceManagementEntitlementKey entitlement.
+ */
+static int
+sysctl_iokit_test_service_setup(struct sysctl_oid *oidp, __unused void *arg1, __unused int arg2, struct sysctl_req *req)
+{
+	char classname[128] = {0};
+	IOService * service; // must not release
+	OSObject * obj = NULL; // must release
+	IOService * provider = NULL; // must not release
+	TestIOServiceHandle * handle = NULL; // must release
+	mach_port_name_t name __unused;
+	int error;
+
+	if (!IOTaskHasEntitlement(current_task(), kIOServiceTestServiceManagementEntitlementKey)) {
+		error = EPERM;
+		goto finish;
+	}
+
+	error = sysctl_handle_string(oidp, classname, sizeof(classname), req);
+	if (error != 0) {
+		goto finish;
+	}
+
+	/*
+	 * All test services currently attach to IOResources.
+	 */
+	provider = IOService::getResourceService();
+	if (!provider) {
+		IOLog("Failed to find IOResources\n");
+		error = ENOENT;
+		goto finish;
+	}
+
+	obj = OSMetaClass::allocClassWithName(classname);
+	if (!obj) {
+		IOLog("Failed to alloc class %s\n", classname);
+		error = ENOENT;
+		goto finish;
+	}
+
+	service = OSDynamicCast(IOService, obj);
+
+	if (!service) {
+		IOLog("Instance of class %s is not an IOService\n", classname);
+		error = EINVAL;
+		goto finish;
+	}
+
+	if (!service->init()) {
+		IOLog("Failed to initialize %s\n", classname);
+		error = EINVAL;
+		goto finish;
+	}
+
+	if (!service->attach(provider)) {
+		IOLog("Failed to attach %s\n", classname);
+		error = EINVAL;
+		goto finish;
+	}
+
+	if (!service->start(provider)) {
+		IOLog("Failed to start %s\n", classname);
+		error = EINVAL;
+		goto finish;
+	}
+
+	handle = TestIOServiceHandle::withService(service);
+	if (!handle) {
+		IOLog("Failed to create service handle\n");
+		error = ENOMEM;
+		goto finish;
+	}
+	name = iokit_make_send_right(current_task(), handle, IKOT_IOKIT_OBJECT);
+
+	error = 0;
+
+finish:
+
+	OSSafeReleaseNULL(obj);
+	OSSafeReleaseNULL(handle);
+	return error;
+}
+
+
+SYSCTL_PROC(_kern, OID_AUTO, iokit_test_service_setup,
+    CTLTYPE_STRING | CTLFLAG_WR | CTLFLAG_KERN | CTLFLAG_LOCKED,
+    NULL, 0, sysctl_iokit_test_service_setup, "-", "");
+
+#endif /* DEVELOPMENT || DEBUG */

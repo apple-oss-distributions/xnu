@@ -29,8 +29,6 @@ _rtc_clock_napped
 _serial_getc
 _serial_init
 _serial_putc
-_sock_release
-_sock_retain
 _tmrCvt
 _tsc_get_info
 _PE_state

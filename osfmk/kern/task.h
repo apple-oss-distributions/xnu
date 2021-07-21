@@ -287,6 +287,7 @@ struct task {
 #if defined(__x86_64__)
 #define TF_INSN_COPY_OPTOUT     0x00040000                              /* task threads opt out of unhandled-fault instruction stream collection */
 #endif
+#define TF_COALITION_MEMBER     0x00080000                              /* task is a member of a coalition */
 
 /*
  * Task is running within a 64-bit address space.
@@ -325,6 +326,15 @@ struct task {
 
 #define task_is_a_corpse_fork(task)     \
 	(((task)->t_flags & TF_CORPSE_FORK) != 0)
+
+#define task_set_coalition_member(task)      \
+	((task)->t_flags |= TF_COALITION_MEMBER)
+
+#define task_clear_coalition_member(task)    \
+	((task)->t_flags &= ~TF_COALITION_MEMBER)
+
+#define task_is_coalition_member(task)       \
+	(((task)->t_flags & TF_COALITION_MEMBER) != 0)
 
 	uint32_t t_procflags;                                            /* general-purpose task flags protected by proc_lock (PL) */
 #define TPF_NONE                 0

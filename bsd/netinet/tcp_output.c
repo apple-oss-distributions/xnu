@@ -1937,8 +1937,9 @@ send:
 			tso_maxlen = tp->tso_max_segment_size ?
 			    tp->tso_max_segment_size : TCP_MAXWIN;
 
-			if (len > tso_maxlen - hdrlen - optlen) {
-				len = tso_maxlen - hdrlen - optlen;
+			/* hdrlen includes optlen */
+			if (len > tso_maxlen - hdrlen) {
+				len = tso_maxlen - hdrlen;
 				sendalot = 1;
 			} else if (tp->t_flags & TF_NEEDFIN) {
 				sendalot = 1;

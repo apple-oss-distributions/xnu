@@ -946,7 +946,13 @@ bool
 IOServiceUserNotification::_handler( void * target,
     void * ref, IOService * newService, IONotifier * notifier )
 {
-	return ((IOServiceUserNotification *) target)->handler( ref, newService );
+	IOServiceUserNotification * targetObj = (IOServiceUserNotification *)target;
+	bool ret;
+
+	targetObj->retain();
+	ret = targetObj->handler( ref, newService );
+	targetObj->release();
+	return ret;
 }
 
 bool
@@ -1112,8 +1118,14 @@ IOServiceMessageUserNotification::_handler( void * target, void * ref,
     UInt32 messageType, IOService * provider,
     void * argument, vm_size_t argSize )
 {
-	return ((IOServiceMessageUserNotification *) target)->handler(
+	IOServiceMessageUserNotification * targetObj = (IOServiceMessageUserNotification *)target;
+	IOReturn ret;
+
+	targetObj->retain();
+	ret = targetObj->handler(
 		ref, messageType, provider, argument, argSize);
+	targetObj->release();
+	return ret;
 }
 
 IOReturn

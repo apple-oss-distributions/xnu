@@ -967,17 +967,13 @@ cfil_data_length(struct mbuf *m, int *retmbcnt, int *retmbnum)
 	int mbcnt;
 	int mbnum;
 
-	// Locate the start of data
+	// Locate M_PKTHDR and mark as start of data if present
 	for (m0 = m; m0 != NULL; m0 = m0->m_next) {
 		if (m0->m_flags & M_PKTHDR) {
+			m = m0;
 			break;
 		}
 	}
-	if (m0 == NULL) {
-		CFIL_LOG(LOG_ERR, "cfil_data_length: no M_PKTHDR");
-		return 0;
-	}
-	m = m0;
 
 	if (retmbcnt == NULL && retmbnum == NULL) {
 		return m_length(m);
@@ -1008,13 +1004,13 @@ cfil_data_start(struct mbuf *m)
 {
 	struct mbuf *m0;
 
-	// Locate the start of data
+	// Locate M_PKTHDR and use it as start of data if present
 	for (m0 = m; m0 != NULL; m0 = m0->m_next) {
 		if (m0->m_flags & M_PKTHDR) {
-			break;
+			return m0;
 		}
 	}
-	return m0;
+	return m;
 }
 
 /*
@@ -3634,8 +3630,8 @@ cfil_dispatch_data_event(struct socket *so, struct cfil_info *cfil_info, uint32_
 	}
 
 	data = cfil_data_start(data);
-	if (data == NULL || (data->m_flags & M_PKTHDR) == 0) {
-		CFIL_LOG(LOG_ERR, "NOT PKTHDR");
+	if (data == NULL) {
+		CFIL_LOG(LOG_ERR, "No data start");
 		goto done;
 	}
 
@@ -4102,6 +4098,10 @@ cfil_service_inject_queue(struct socket *so, struct cfil_info *cfil_info, int ou
 	}
 
 	socket_lock_assert_owned(so);
+
+	if (so->so_state & SS_DEFUNCT) {
+		return 0;
+	}
 
 	if (outgoing) {
 		cfi_buf = &cfil_info->cfi_snd;

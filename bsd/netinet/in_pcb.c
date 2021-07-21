@@ -3712,8 +3712,11 @@ inp_decr_sndbytes_total(struct socket *so, int32_t len)
 	struct ifnet *ifp = inp->inp_last_outifp;
 
 	if (ifp != NULL) {
-		VERIFY(ifp->if_sndbyte_total >= len);
-		OSAddAtomic64(-len, &ifp->if_sndbyte_total);
+		if (ifp->if_sndbyte_total >= len) {
+			OSAddAtomic64(-len, &ifp->if_sndbyte_total);
+		} else {
+			ifp->if_sndbyte_total = 0;
+		}
 	}
 }
 

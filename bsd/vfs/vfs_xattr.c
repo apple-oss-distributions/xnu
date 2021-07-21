@@ -1457,7 +1457,8 @@ typedef struct attr_info {
 	 (attr_entry_t *)((u_int8_t *)(ae) + ATTR_ENTRY_LENGTH((ae)->namelen))
 
 #define ATTR_VALID(ae, ai)  \
-	((u_int8_t *)ATTR_NEXT(ae) <= ((ai).rawdata + (ai).rawsize))
+	((&(ae)->namelen < ((ai).rawdata + (ai).rawsize)) && \
+	 (u_int8_t *)ATTR_NEXT(ae) <= ((ai).rawdata + (ai).rawsize))
 
 #define SWAP16(x)  OSSwapBigToHostInt16((x))
 #define SWAP32(x)  OSSwapBigToHostInt32((x))
@@ -1977,6 +1978,11 @@ start:
 			options &= ~XATTR_REPLACE;
 			goto start; /* start over */
 		}
+	} else {
+		if (!ATTR_VALID(entry, ainfo)) {
+			error = ENOSPC;
+			goto out;
+		}
 	}
 
 	if (options & XATTR_REPLACE) {
@@ -2186,7 +2192,6 @@ default_removexattr(vnode_t vp, const char *name, __unused int options, vfs_cont
 		}
 		attrdata = (u_int8_t *)ainfo.filehdr + ainfo.finderinfo->offset;
 		bzero((caddr_t)attrdata, FINDERINFOSIZE);
-		ainfo.iosize = sizeof(attr_header_t);
 		error = write_xattrinfo(&ainfo);
 		goto out;
 	}
@@ -2793,12 +2798,13 @@ get_xattrinfo(vnode_t xvp, int setting, attr_info_t *ainfop, vfs_context_t conte
 		iosize = MIN(ATTR_MAX_HDR_SIZE, ainfop->filesize);
 	}
 
-	if (iosize == 0) {
+	if (iosize == 0 || iosize < sizeof(apple_double_header_t)) {
 		error = ENOATTR;
 		goto bail;
 	}
+
 	ainfop->iosize = iosize;
-	buffer = kheap_alloc(KHEAP_DATA_BUFFERS, iosize, Z_WAITOK);
+	buffer = kheap_alloc(KHEAP_DATA_BUFFERS, iosize, Z_WAITOK | Z_ZERO);
 	if (buffer == NULL) {
 		error = ENOMEM;
 		goto bail;
@@ -3188,6 +3194,7 @@ check_and_swap_attrhdr(attr_header_t *ah, attr_info_t *ainfop)
 	u_int32_t end;
 	int count;
 	int i;
+	uint32_t total_header_size;
 
 	if (ah == NULL) {
 		return EINVAL;
@@ -3221,10 +3228,17 @@ check_and_swap_attrhdr(attr_header_t *ah, attr_info_t *ainfop)
 	/*
 	 * Make sure each of the attr_entry_t's fits within total_size.
 	 */
-	buf_end = ainfop->rawdata + ah->total_size;
+	buf_end = ainfop->rawdata + ah->data_start;
+	if (buf_end > ainfop->rawdata + ainfop->rawsize) {
+		return EINVAL;
+	}
 	count = ah->num_attrs;
+	if (count > 256) {
+		return EINVAL;
+	}
 	ae = (attr_entry_t *)(&ah[1]);
 
+	total_header_size = sizeof(attr_header_t);
 	for (i = 0; i < count; i++) {
 		/* Make sure the fixed-size part of this attr_entry_t fits. */
 		if ((u_int8_t *) &ae[1] > buf_end) {
@@ -3240,7 +3254,6 @@ check_and_swap_attrhdr(attr_header_t *ah, attr_info_t *ainfop)
 		if (strnlen((const char *)ae->name, ae->namelen) != ae->namelen - 1) {
 			return EINVAL;
 		}
-
 
 		/* Swap the attribute entry fields */
 		ae->offset      = SWAP32(ae->offset);
@@ -3258,7 +3271,16 @@ check_and_swap_attrhdr(attr_header_t *ah, attr_info_t *ainfop)
 			return EINVAL;
 		}
 
+		/* We verified namelen is ok above, so add this entry's size to a total */
+		total_header_size += ATTR_ENTRY_LENGTH(ae->namelen);
+
 		ae = ATTR_NEXT(ae);
+	}
+
+
+	/* make sure data_start is actually after all the xattr key entries */
+	if (ah->data_start < total_header_size) {
+		return EINVAL;
 	}
 
 	return 0;

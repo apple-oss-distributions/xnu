@@ -559,6 +559,13 @@ install-get_shared_cache_address: get_shared_cache_address
 endif
 
 ifneq ($(PLATFORM),MacOSX)
+EXCLUDED_SOURCES += atomics.c
+else
+atomics: INVALID_ARCHS = arm64 arm64e arm
+atomics: atomics.c
+endif
+
+ifneq ($(PLATFORM),MacOSX)
 EXCLUDED_SOURCES += hvtest_x86.m hvtest_x86_guest.c hvtest_x86_asm.s
 else
 EXCLUDED_SOURCES += hvtest_x86_guest.c hvtest_x86_asm.s

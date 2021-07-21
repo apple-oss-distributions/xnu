@@ -1316,6 +1316,7 @@ Lppl_fail_dispatch:
 	b		ppl_return_to_kernel_mode
 
 Lppl_dispatch_exit:
+
 	/* Indicate that we are cleanly exiting the PPL. */
 	mov		x15, #PPL_EXIT_DISPATCH
 

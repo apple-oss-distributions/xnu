@@ -11950,6 +11950,10 @@ fgetxattr(proc_t p, struct fgetxattr_args *uap, user_ssize_t *retval)
 		goto out;
 	}
 	if (uap->value && uap->size > 0) {
+		if (uap->size > (size_t)XATTR_MAXSIZE) {
+			uap->size = XATTR_MAXSIZE;
+		}
+
 		auio = uio_createwithbuffer(1, uap->position, spacetype, UIO_READ,
 		    &uio_buf[0], sizeof(uio_buf));
 		uio_addiov(auio, uap->value, uap->size);

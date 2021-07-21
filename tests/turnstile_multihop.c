@@ -353,6 +353,14 @@ workloop_cb_test_intransit(uint64_t *workloop_id, void **eventslist, int *events
 		mach_msg_destroy(hdr);
 		*events = 0;
 
+		/*
+		 * Destroying the message will send a send-once notification for reply port, once the
+		 * send-once notification is consumed (by the waiting thread), only then the actual
+		 * send-once right is destroyed and only then the push will go away.
+		 */
+		T_LOG("Sleeping for 5 seconds so waiting thread is unblocked\n");
+		sleep(5);
+
 		/* now that the message is destroyed, the priority should be gone */
 		T_EXPECT_EFFECTIVE_QOS_EQ(QOS_CLASS_MAINTENANCE,
 		    "dispatch_source event handler QoS should be QOS_CLASS_MAINTENANCE after destroying message");
@@ -698,6 +706,9 @@ thread_at_sixty(void *arg __unused)
 
 	T_QUIET; T_LOG("The time for priority 60 thread to acquire lock was %llu \n",
 	    (after_lock_time - before_lock_time));
+
+	T_LOG("Wait for 5 seconds for the server to terminate\n");
+	sleep(5);
 	T_END;
 }
 
@@ -713,6 +724,9 @@ thread_at_ui(void *arg __unused)
 
 	thread_wait_to_boost(def_thread_port, in_thread_port, 37);
 	thread_create_at_qos(QOS_CLASS_USER_INTERACTIVE, thread_at_sixty);
+
+	T_EXPECT_GE(get_thread_base_priority(), 46u,
+	    "thread_at_ui should have base pri 46 or greater");
 
 	T_LOG("Thread at UI priority trying to acquire IN lock");
 	ull_lock(&lock_IN, 2, UL_UNFAIR_LOCK, 0);
@@ -804,7 +818,7 @@ thread_at_maintenance(void *arg __unused)
 	thread_create_at_qos(QOS_CLASS_DEFAULT, thread_at_default);
 
 	/* Block on Sync IPC */
-	mach_msg_id_t message_id = receive(special_reply_port, service_port);
+	mach_msg_id_t message_id = receive(special_reply_port, conn_port);
 
 	T_ASSERT_EQ(message_id, MACH_NOTIFY_SEND_ONCE, "got the expected send-once notification");
 

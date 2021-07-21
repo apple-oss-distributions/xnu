@@ -1024,8 +1024,20 @@ done_scanning:
 	return kn_max;
 }
 
-static uint64_t next_warning_notification_sent_at_ts = 0;
-static uint64_t next_critical_notification_sent_at_ts = 0;
+/*
+ * To avoid notification storms in a system with sawtooth behavior of pressure levels eg:
+ * Normal -> warning (notify clients) -> critical (notify) -> warning (notify) -> critical (notify) -> warning (notify)...
+ *
+ * We have 'resting' periods: WARNING_NOTIFICATION_RESTING_PERIOD and CRITICAL_NOTIFICATION_RESTING_PERIOD
+ *
+ * So it would look like:-
+ * Normal -> warning (notify) -> critical (notify) -> warning (notify if it has been RestPeriod since last warning) -> critical (notify if it has been RestPeriod since last critical) -> ...
+ *
+ * That's what these 2 timestamps below signify.
+ */
+
+uint64_t next_warning_notification_sent_at_ts = 0;
+uint64_t next_critical_notification_sent_at_ts = 0;
 
 boolean_t        memorystatus_manual_testing_on = FALSE;
 vm_pressure_level_t    memorystatus_manual_testing_level = kVMPressureNormal;
@@ -1482,6 +1494,11 @@ SYSCTL_PROC(_kern, OID_AUTO, memorypressure_manual_trigger, CTLTYPE_INT | CTLFLA
 SYSCTL_INT(_kern, OID_AUTO, memorystatus_purge_on_warning, CTLFLAG_RW | CTLFLAG_LOCKED, &vm_pageout_state.memorystatus_purge_on_warning, 0, "");
 SYSCTL_INT(_kern, OID_AUTO, memorystatus_purge_on_urgent, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED, &vm_pageout_state.memorystatus_purge_on_urgent, 0, "");
 SYSCTL_INT(_kern, OID_AUTO, memorystatus_purge_on_critical, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED, &vm_pageout_state.memorystatus_purge_on_critical, 0, "");
+
+#if (XNU_TARGET_OS_OSX && __arm64__)
+extern int vm_pressure_level_transition_threshold;
+SYSCTL_INT(_kern, OID_AUTO, vm_pressure_level_transition_threshold, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED, &vm_pressure_level_transition_threshold, 0, "");
+#endif /* (XNU_TARGET_OS_OSX && __arm64__) */
 
 #if DEBUG || DEVELOPMENT
 SYSCTL_UINT(_kern, OID_AUTO, memorystatus_vm_pressure_events_enabled, CTLFLAG_RW | CTLFLAG_LOCKED, &vm_pressure_events_enabled, 0, "");

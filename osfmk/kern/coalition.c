@@ -1845,6 +1845,15 @@ coalitions_remove_task(task_t task)
 	kern_return_t kr;
 	int i;
 
+	task_lock(task);
+	if (!task_is_coalition_member(task)) {
+		task_unlock(task);
+		return KERN_SUCCESS;
+	}
+
+	task_clear_coalition_member(task);
+	task_unlock(task);
+
 	for (i = 0; i < COALITION_NUM_TYPES; i++) {
 		kr = coalition_remove_task_internal(task, i);
 		assert(kr == KERN_SUCCESS);

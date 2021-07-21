@@ -216,6 +216,7 @@ kdp_setintegerstate(char * state_in)
 	assert(is_saved_state64(saved_state));
 
 	thread_state64_to_saved_state(&thread_state64, saved_state);
+	set_saved_state_cpsr(saved_state, thread_state64.cpsr); /* override CPSR sanitization */
 #else
 #error Unknown architecture.
 #endif

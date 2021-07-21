@@ -347,6 +347,7 @@ extern boolean_t        pmap_verify_free(ppnum_t pn);
 extern void pmap_assert_free(ppnum_t pn);
 #endif
 
+
 /*
  *	Statistics routines
  */

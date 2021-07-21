@@ -7496,22 +7496,56 @@ unsigned int vmtc_byte_counts[MAX_TRACK_POWER2 + 1];
 
 #if DEVELOPMENT || DEBUG
 /*
- * Keep around the last diagnosed corruption buffers to aid in debugging.
+ * Buffers used to compare before/after page contents.
+ * Stashed to aid when debugging crashes.
  */
-static size_t vmtc_last_buffer_size;
+static size_t vmtc_last_buffer_size = 0;
 static uint64_t *vmtc_last_before_buffer = NULL;
 static uint64_t *vmtc_last_after_buffer = NULL;
 #endif /* DEVELOPMENT || DEBUG */
+
+/*
+ * Stash a copy of data from a possibly corrupt page.
+ */
+static uint64_t *
+vmtc_get_page_data(
+	vm_map_offset_t code_addr,
+	vm_page_t       page)
+{
+	uint64_t        *buffer = NULL;
+	addr64_t        buffer_paddr;
+	addr64_t        page_paddr;
+	extern void     bcopy_phys(addr64_t from, addr64_t to, vm_size_t bytes);
+	uint_t          size = MIN(vm_map_page_size(current_map()), PAGE_SIZE);
+
+	/*
+	 * Need an aligned buffer to do a physical copy.
+	 */
+	if (kmem_alloc_aligned(kernel_map, (vm_offset_t *)&buffer, size, VM_KERN_MEMORY_DIAG) != KERN_SUCCESS) {
+		return NULL;
+	}
+	buffer_paddr = kvtophys((vm_offset_t)buffer);
+	page_paddr = ptoa(VM_PAGE_GET_PHYS_PAGE(page));
+
+	/* adjust the page start address if we need only 4K of a 16K page */
+	if (size < PAGE_SIZE) {
+		uint_t subpage_start = ((code_addr & (PAGE_SIZE - 1)) & ~(size - 1));
+		page_paddr += subpage_start;
+	}
+
+	bcopy_phys(page_paddr, buffer_paddr, size);
+	return buffer;
+}
 
 /*
  * Set things up so we can diagnose a potential text page corruption.
  */
 static uint64_t *
 vmtc_text_page_diagnose_setup(
-	vm_map_offset_t code_addr)
+	vm_map_offset_t code_addr,
+	vm_page_t       page)
 {
-	uint64_t        *buffer;
-	size_t          size = MIN(vm_map_page_size(current_map()), PAGE_SIZE);
+	uint64_t        *buffer = NULL;
 
 	(void)OSAddAtomic(1, &vmtc_total);
 
@@ -7526,10 +7560,8 @@ vmtc_text_page_diagnose_setup(
 	/*
 	 * Get the contents of the corrupt page.
 	 */
-	buffer = kheap_alloc(KHEAP_DEFAULT, size, Z_WAITOK);
-	if (copyin((user_addr_t)vm_map_trunc_page(code_addr, size - 1), buffer, size) != 0) {
-		/* copyin error, so undo things */
-		kheap_free(KHEAP_DEFAULT, buffer, size);
+	buffer = vmtc_get_page_data(code_addr, page);
+	if (buffer == NULL) {
 		(void)OSAddAtomic(1, &vmtc_undiagnosed);
 		++vmtc_copyin_fail;
 		if (!OSCompareAndSwap(1, 0, &vmtc_diagnosing)) {
@@ -7559,6 +7591,7 @@ vmtc_text_page_diagnose(
 	uint64_t        *old;
 
 	new_code_buffer = kheap_alloc(KHEAP_DEFAULT, size, Z_WAITOK);
+	assert(new_code_buffer != NULL);
 	if (copyin((user_addr_t)vm_map_trunc_page(code_addr, size - 1), new_code_buffer, size) != 0) {
 		/* copyin error, so undo things */
 		(void)OSAddAtomic(1, &vmtc_undiagnosed);
@@ -7632,7 +7665,7 @@ done:
 	 */
 #if DEVELOPMENT || DEBUG
 	if (vmtc_last_before_buffer != NULL) {
-		kheap_free(KHEAP_DEFAULT, vmtc_last_before_buffer, vmtc_last_buffer_size);
+		kmem_free(kernel_map, (vm_offset_t)vmtc_last_before_buffer, vmtc_last_buffer_size);
 	}
 	if (vmtc_last_after_buffer != NULL) {
 		kheap_free(KHEAP_DEFAULT, vmtc_last_after_buffer, vmtc_last_buffer_size);
@@ -7642,7 +7675,7 @@ done:
 	vmtc_last_buffer_size = size;
 #else /* DEVELOPMENT || DEBUG */
 	kheap_free(KHEAP_DEFAULT, new_code_buffer, size);
-	kheap_free(KHEAP_DEFAULT, old_code_buffer, size);
+	kmem_free(kernel_map, (vm_offset_t)old_code_buffer, size);
 #endif /* DEVELOPMENT || DEBUG */
 
 	/*
@@ -7856,24 +7889,14 @@ revalidate_text_page(task_t task, vm_map_offset_t code_addr)
 #endif /* DEBUG || DEVELOPMENT */
 
 		/*
-		 * We're going to invalidate this page. Mark it as busy so we can
-		 * drop the object lock and use copyin() to save its contents.
+		 * We're going to invalidate this page. Grab a copy of it for comparison.
 		 */
 		do_invalidate = true;
-		assert(!page->vmp_busy);
-		page->vmp_busy = TRUE;
-		vm_object_unlock(object);
-		diagnose_buffer = vmtc_text_page_diagnose_setup(code_addr);
+		diagnose_buffer = vmtc_text_page_diagnose_setup(code_addr, page);
 	}
 
 done:
 	if (do_invalidate) {
-		vm_object_lock(object);
-		assert(page->vmp_busy);
-		assert(VM_PAGE_OBJECT(page) == object);      /* Since the page was busy, this shouldn't change */
-		assert(page->vmp_offset == offset);
-		PAGE_WAKEUP_DONE(page);                      /* make no longer busy */
-
 		/*
 		 * Invalidate, i.e. toss, the corrupted page.
 		 */
@@ -7904,6 +7927,7 @@ done:
 			(void)OSAddAtomic(1, &vmtc_not_eligible);
 		}
 		vm_object_unlock(object);
+		object = NULL;
 
 		/*
 		 * Now try to diagnose the type of failure by faulting

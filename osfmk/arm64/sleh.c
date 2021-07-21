@@ -1202,6 +1202,8 @@ handle_fp_trap(arm_saved_state_t *state, uint32_t esr)
  *   EFAULT: Emulation failed (probably due to permissions)
  *   EINVAL: Emulation failed (probably due to a bad address)
  */
+
+
 static int
 handle_alignment_fault_from_user(arm_saved_state_t *state, kern_return_t *vmfr)
 {

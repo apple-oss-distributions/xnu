@@ -704,11 +704,7 @@ static char *mbuf_dump_buf;
  * mb_drain_maxint controls the amount of time to wait (in seconds) before
  * consecutive calls to mbuf_drain().
  */
-#if !XNU_TARGET_OS_OSX || DEVELOPMENT || DEBUG
 static unsigned int mb_watchdog = 1;
-#else /* XNU_TARGET_OS_OSX && !DEVELOPMENT && !DEBUG */
-static unsigned int mb_watchdog = 0;
-#endif /* XNU_TARGET_OS_OSX && !DEVELOPMENT && !DEBUG */
 #if !XNU_TARGET_OS_OSX
 static unsigned int mb_drain_maxint = 60;
 #else /* XNU_TARGET_OS_OSX */

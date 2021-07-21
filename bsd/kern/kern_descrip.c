@@ -90,6 +90,7 @@
 #include <sys/fsctl.h>
 #include <sys/malloc.h>
 #include <sys/mman.h>
+#include <sys/mount.h>
 #include <sys/syslog.h>
 #include <sys/unistd.h>
 #include <sys/resourcevar.h>
@@ -3030,8 +3031,40 @@ dropboth:
 		goto outdrop;
 	}
 
-#if DEBUG || DEVELOPMENT
-	case F_RECYCLE:
+	case F_RECYCLE: {
+#if !DEBUG && !DEVELOPMENT
+		bool allowed = false;
+
+		//
+		// non-debug and non-development kernels have restrictions
+		// on who can all this fcntl.  the process has to be marked
+		// with the dataless-manipulator entitlement and either the
+		// process or thread have to be marked rapid-aging.
+		//
+		if (!vfs_context_is_dataless_manipulator(&context)) {
+			error = EPERM;
+			goto out;
+		}
+
+		proc_t proc = vfs_context_proc(&context);
+		if (proc && (proc->p_lflag & P_LRAGE_VNODES)) {
+			allowed = true;
+		} else {
+			thread_t thr = vfs_context_thread(&context);
+			if (thr) {
+				struct uthread *ut = get_bsdthread_info(thr);
+
+				if (ut && (ut->uu_flag & UT_RAGE_VNODES)) {
+					allowed = true;
+				}
+			}
+		}
+		if (!allowed) {
+			error = EPERM;
+			goto out;
+		}
+#endif
+
 		if (fp->f_type != DTYPE_VNODE) {
 			error = EBADF;
 			goto out;
@@ -3041,7 +3074,7 @@ dropboth:
 
 		vnode_recycle(vp);
 		break;
-#endif
+	}
 
 	default:
 		/*
@@ -5103,7 +5136,8 @@ fileproc_drain(proc_t p, struct fileproc * fp)
 
 		fo_drain(fp, &context);
 		if ((fp->fp_flags & FP_INSELECT) == FP_INSELECT) {
-			if (waitq_wakeup64_all((struct waitq *)fp->fp_wset, NO_EVENT64,
+			if (fp->fp_wset != NULL &&
+			    waitq_wakeup64_all((struct waitq *)fp->fp_wset, NO_EVENT64,
 			    THREAD_INTERRUPTED, WAITQ_ALL_PRIORITIES) == KERN_INVALID_ARGUMENT) {
 				panic("bad wait queue for waitq_wakeup64_all %p (fp:%p)", fp->fp_wset, fp);
 			}

@@ -2607,21 +2607,6 @@ ipc_kmsg_set_qos(
 	return kr;
 }
 
-static inline void
-ipc_kmsg_allow_immovable_send(
-	ipc_kmsg_t   kmsg,
-	ipc_entry_t  dest_entry)
-{
-	ipc_object_t object = dest_entry->ie_object;
-	/*
-	 *	If the dest port is a kobject, allow copyin of immovable send
-	 *	rights in the message body to succeed
-	 */
-	if (IO_VALID(object) && io_is_kobject(object)) {
-		kmsg->ikm_flags |= IPC_OBJECT_COPYIN_FLAGS_ALLOW_IMMOVABLE_SEND;
-	}
-}
-
 /*
  *	Routine:	ipc_kmsg_link_reply_context_locked
  *	Purpose:
@@ -2936,8 +2921,6 @@ ipc_kmsg_copyin_header(
 		if (dest_entry == IE_NULL) {
 			goto invalid_dest;
 		}
-		/* Check if dest port allows immovable send rights to be sent in the kmsg body */
-		ipc_kmsg_allow_immovable_send(kmsg, dest_entry);
 
 		/*
 		 *	Make sure a future copyin of the reply port will succeed.
@@ -3010,7 +2993,6 @@ ipc_kmsg_copyin_header(
 			if (dest_entry == IE_NULL) {
 				goto invalid_dest;
 			}
-			ipc_kmsg_allow_immovable_send(kmsg, dest_entry);
 
 			reply_entry = dest_entry;
 			assert(reply_type != 0); /* because name not null */
@@ -3067,7 +3049,6 @@ ipc_kmsg_copyin_header(
 				goto invalid_dest;
 			}
 			assert(dest_entry != voucher_entry);
-			ipc_kmsg_allow_immovable_send(kmsg, dest_entry);
 
 			/*
 			 *	Make sure reply port entry is valid before dest copyin.
@@ -3177,6 +3158,19 @@ ipc_kmsg_copyin_header(
 
 	dest_type = ipc_object_copyin_type(dest_type);
 	reply_type = ipc_object_copyin_type(reply_type);
+
+	/*
+	 *	If the dest port is a kobject AND its receive right belongs to kernel, allow
+	 *  copyin of immovable send rights in the message body (port descriptor) to
+	 *  succeed since those send rights are simply "moved" or "copied" into kernel.
+	 *
+	 *  See: ipc_object_copyin().
+	 */
+	if (io_is_kobject(dest_port) &&
+	    ip_object_to_port(dest_port)->ip_receiver == ipc_space_kernel) {
+		assert(io_kotype(dest_port) != IKOT_HOST_NOTIFY && io_kotype(dest_port) != IKOT_TIMER);
+		kmsg->ikm_flags |= IPC_OBJECT_COPYIN_FLAGS_ALLOW_IMMOVABLE_SEND;
+	}
 
 	/*
 	 * JMM - Without rdar://problem/6275821, this is the last place we can

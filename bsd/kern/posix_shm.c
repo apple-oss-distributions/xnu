@@ -739,7 +739,7 @@ pshm_mmap(
 	vm_map_offset_t    user_addr = (vm_map_offset_t)uap->addr;
 	vm_map_size_t      user_size = (vm_map_size_t)uap->len;
 	vm_map_offset_t    user_start_addr;
-	vm_map_size_t      map_size, mapped_size;
+	vm_map_size_t      map_size, mapped_size, pshm_size;
 	int                prot = uap->prot;
 	int                max_prot = VM_PROT_DEFAULT;
 	int                flags = uap->flags;
@@ -771,6 +771,8 @@ pshm_mmap(
 		max_prot &= ~VM_PROT_WRITE;
 	}
 
+	user_map = current_map();
+
 	PSHM_SUBSYS_LOCK();
 	pnode = (pshmnode_t *)fp->f_data;
 	if (pnode == NULL) {
@@ -789,7 +791,9 @@ pshm_mmap(
 		return EINVAL;
 	}
 
-	if (user_size > (vm_map_size_t)pinfo->pshm_length) {
+	pshm_size = vm_map_round_page((vm_map_size_t)pinfo->pshm_length, vm_map_page_mask(user_map));
+
+	if (user_size > pshm_size) {
 		PSHM_SUBSYS_UNLOCK();
 		return EINVAL;
 	}
@@ -799,7 +803,7 @@ pshm_mmap(
 		PSHM_SUBSYS_UNLOCK();
 		return EINVAL;
 	}
-	if (end_pos > (vm_map_size_t)pinfo->pshm_length) {
+	if (end_pos > pshm_size) {
 		PSHM_SUBSYS_UNLOCK();
 		return EINVAL;
 	}
@@ -825,7 +829,6 @@ pshm_mmap(
 	}
 
 	PSHM_SUBSYS_UNLOCK();
-	user_map = current_map();
 
 	if (!(flags & MAP_FIXED)) {
 		alloc_flags = VM_FLAGS_ANYWHERE;

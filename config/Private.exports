@@ -676,8 +676,6 @@ _sock_catchevents
 _sock_getlistener
 _sock_gettclassopt
 _sock_iskernel
-_sock_release
-_sock_retain
 _sock_settclassopt
 _sock_setupcall
 _sock_setupcalls

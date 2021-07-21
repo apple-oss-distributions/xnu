@@ -91,11 +91,14 @@ iokit/Kernel/IOUserClient.cpp				optional iokitcpp
 iokit/Kernel/IOKitDebug.cpp				optional iokitcpp
 iokit/Kernel/IODataQueue.cpp				optional iokitcpp
 iokit/Kernel/IOSharedDataQueue.cpp			optional iokitcpp
+
+# IOKit tests
 iokit/Tests/Tests.cpp					optional iokitcpp
 iokit/Tests/TestIOMemoryDescriptor.cpp      optional iokitcpp
 # iokit/Tests/TestDevice.cpp                optional iokitcpp
 # iokit/Tests/TestContainers.cpp            optional iokitcpp
 # iokit/Tests/TestCollections.cpp           optional iokitcpp
+iokit/Tests/TestServices/TestIOConnectMapMemoryPortLeak45265408.cpp optional iokitcpp
 
 iokit/Kernel/IOStatistics.cpp				optional iokitcpp
 iokit/Kernel/IOInterruptAccounting.cpp			optional iokitcpp

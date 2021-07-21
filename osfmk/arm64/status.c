@@ -101,7 +101,13 @@ saved_state_to_thread_state64(const arm_saved_state_t * saved_state,
 }
 
 /*
- * Copy values from ts64 to saved_state
+ * Copy values from ts64 to saved_state.
+ *
+ * For safety, CPSR is sanitized as follows:
+ *
+ * - ts64->cpsr.{N,Z,C,V} are copied as-is into saved_state->cpsr
+ * - ts64->cpsr.M is ignored, and saved_state->cpsr.M is reset to EL0
+ * - All other saved_state->cpsr bits are preserved as-is
  */
 void
 thread_state64_to_saved_state(const arm_thread_state64_t * ts64,
@@ -114,25 +120,32 @@ thread_state64_to_saved_state(const arm_thread_state64_t * ts64,
 
 	assert(is_saved_state64(saved_state));
 
+	const uint32_t CPSR_COPY_MASK = PSR64_USER_MASK;
+	const uint32_t CPSR_ZERO_MASK = PSR64_MODE_MASK;
+	const uint32_t CPSR_PRESERVE_MASK = ~(CPSR_COPY_MASK | CPSR_ZERO_MASK);
 #if __has_feature(ptrauth_calls)
+	/* BEGIN IGNORE CODESTYLE */
 	MANIPULATE_SIGNED_THREAD_STATE(saved_state,
-	    "and	w2, w2, %w[not_psr64_user_mask]	\n"
-	    "mov	w6, %w[cpsr]					\n"
-	    "and	w6, w6, %w[psr64_user_mask]		\n"
-	    "orr	w2, w2, w6						\n"
-	    "str	w2, [x0, %[SS64_CPSR]]			\n",
-	    [cpsr] "r"(ts64->cpsr),
-	    [psr64_user_mask] "i"(PSR64_USER_MASK),
-	    [not_psr64_user_mask] "i"(~PSR64_USER_MASK)
-	    );
+		"and	w2, w2, %w[preserve_mask]"	"\n"
+		"mov	w6, %w[cpsr]"			"\n"
+		"and	w6, w6, %w[copy_mask]"		"\n"
+		"orr	w2, w2, w6"			"\n"
+		"str	w2, [x0, %[SS64_CPSR]]"		"\n",
+		[cpsr] "r"(ts64->cpsr),
+		[preserve_mask] "i"(CPSR_PRESERVE_MASK),
+		[copy_mask] "i"(CPSR_COPY_MASK)
+	);
+	/* END IGNORE CODESTYLE */
 	/*
 	 * Make writes to ts64->cpsr visible first, since it's useful as a
 	 * canary to detect thread-state corruption.
 	 */
 	__builtin_arm_dmb(DMB_ST);
 #else
-	set_saved_state_cpsr(saved_state,
-	    (get_saved_state_cpsr(saved_state) & ~PSR64_USER_MASK) | (ts64->cpsr & PSR64_USER_MASK));
+	uint32_t new_cpsr = get_saved_state_cpsr(saved_state);
+	new_cpsr &= CPSR_PRESERVE_MASK;
+	new_cpsr |= (ts64->cpsr & CPSR_COPY_MASK);
+	set_saved_state_cpsr(saved_state, new_cpsr);
 #endif /* __has_feature(ptrauth_calls) */
 	set_saved_state_fp(saved_state, ts64->fp);
 	set_saved_state_lr(saved_state, ts64->lr);

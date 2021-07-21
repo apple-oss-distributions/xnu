@@ -82,6 +82,7 @@
 #define FLOW_DIVERT_DID_SET_LOCAL_ADDR  0x00000200
 #define FLOW_DIVERT_HAS_TOKEN           0x00000400
 #define FLOW_DIVERT_SHOULD_SET_LOCAL_ADDR 0x00000800
+#define FLOW_DIVERT_FLOW_IS_TRANSPARENT   0x00001000
 
 #define FDLOG(level, pcb, format, ...) \
 	os_log_with_type(OS_LOG_DEFAULT, flow_divert_syslog_type_to_oslog_type(level), "(%u): " format "\n", (pcb)->hash, __VA_ARGS__)
@@ -1867,8 +1868,9 @@ flow_divert_set_remote_endpoint(struct flow_divert_pcb *fd_cb, struct sockaddr *
 }
 
 static uint32_t
-flow_divert_derive_kernel_control_unit(uint32_t ctl_unit, uint32_t *aggregate_unit)
+flow_divert_derive_kernel_control_unit(uint32_t ctl_unit, uint32_t *aggregate_unit, bool *is_aggregate)
 {
+	*is_aggregate = false;
 	if (aggregate_unit != NULL && *aggregate_unit != 0) {
 		uint32_t counter;
 		for (counter = 0; counter < (GROUP_COUNT_MAX - 1); counter++) {
@@ -1878,6 +1880,7 @@ flow_divert_derive_kernel_control_unit(uint32_t ctl_unit, uint32_t *aggregate_un
 		}
 		if (counter < (GROUP_COUNT_MAX - 1)) {
 			*aggregate_unit &= ~(1 << counter);
+			*is_aggregate = true;
 			return counter + 1;
 		} else {
 			return ctl_unit;
@@ -1895,8 +1898,9 @@ flow_divert_try_next(struct flow_divert_pcb *fd_cb)
 	struct flow_divert_group *current_group = NULL;
 	struct flow_divert_group *next_group = NULL;
 	int error = 0;
+	bool is_aggregate = false;
 
-	next_ctl_unit = flow_divert_derive_kernel_control_unit(fd_cb->policy_control_unit, &(fd_cb->aggregate_unit));
+	next_ctl_unit = flow_divert_derive_kernel_control_unit(fd_cb->policy_control_unit, &(fd_cb->aggregate_unit), &is_aggregate);
 	current_ctl_unit = fd_cb->control_group_unit;
 
 	if (current_ctl_unit == next_ctl_unit) {
@@ -1938,6 +1942,11 @@ flow_divert_try_next(struct flow_divert_pcb *fd_cb)
 
 	fd_cb->group = next_group;
 	fd_cb->control_group_unit = next_ctl_unit;
+	if (is_aggregate) {
+		fd_cb->flags |= FLOW_DIVERT_FLOW_IS_TRANSPARENT;
+	} else {
+		fd_cb->flags &= ~FLOW_DIVERT_FLOW_IS_TRANSPARENT;
+	}
 
 	lck_rw_done(&(next_group->lck));
 	lck_rw_done(&(current_group->lck));
@@ -3397,7 +3406,11 @@ flow_divert_connect_out_internal(struct socket *so, struct sockaddr *to, proc_t 
 			error = in6_pcbladdr(inp, to, &(fd_cb->local_endpoint.sin6.sin6_addr), &ifp);
 			if (error) {
 				FDLOG(LOG_WARNING, fd_cb, "failed to get a local IPv6 address: %d", error);
-				error = 0;
+				if (!(fd_cb->flags & FLOW_DIVERT_FLOW_IS_TRANSPARENT) || IN6_IS_ADDR_UNSPECIFIED(&(satosin6(to)->sin6_addr))) {
+					error = 0;
+				} else {
+					goto done;
+				}
 			}
 			if (ifp != NULL) {
 				inp->in6p_last_outifp = ifp;
@@ -3412,7 +3425,11 @@ flow_divert_connect_out_internal(struct socket *so, struct sockaddr *to, proc_t 
 			error = in_pcbladdr(inp, to, &(fd_cb->local_endpoint.sin.sin_addr), IFSCOPE_NONE, &ifp, 0);
 			if (error) {
 				FDLOG(LOG_WARNING, fd_cb, "failed to get a local IPv4 address: %d", error);
-				error = 0;
+				if (!(fd_cb->flags & FLOW_DIVERT_FLOW_IS_TRANSPARENT) || satosin(to)->sin_addr.s_addr == INADDR_ANY) {
+					error = 0;
+				} else {
+					goto done;
+				}
 			}
 			if (ifp != NULL) {
 				inp->inp_last_outifp = ifp;
@@ -3742,7 +3759,8 @@ flow_divert_pcb_init_internal(struct socket *so, uint32_t ctl_unit, uint32_t agg
 	errno_t error = 0;
 	struct flow_divert_pcb *fd_cb;
 	uint32_t agg_unit = aggregate_unit;
-	uint32_t group_unit = flow_divert_derive_kernel_control_unit(ctl_unit, &agg_unit);
+	bool is_aggregate = false;
+	uint32_t group_unit = flow_divert_derive_kernel_control_unit(ctl_unit, &agg_unit, &is_aggregate);
 
 	if (group_unit == 0) {
 		return EINVAL;
@@ -3759,6 +3777,11 @@ flow_divert_pcb_init_internal(struct socket *so, uint32_t ctl_unit, uint32_t agg
 		fd_cb->control_group_unit = group_unit;
 		fd_cb->policy_control_unit = ctl_unit;
 		fd_cb->aggregate_unit = agg_unit;
+		if (is_aggregate) {
+			fd_cb->flags |= FLOW_DIVERT_FLOW_IS_TRANSPARENT;
+		} else {
+			fd_cb->flags &= ~FLOW_DIVERT_FLOW_IS_TRANSPARENT;
+		}
 
 		error = flow_divert_pcb_insert(fd_cb, group_unit);
 		if (error) {

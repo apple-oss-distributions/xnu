@@ -3736,6 +3736,10 @@ thread_set_exception_ports(
 		}
 	}
 
+	if (IP_VALID(new_port) && (new_port->ip_immovable_receive || new_port->ip_immovable_send)) {
+		return KERN_INVALID_RIGHT;
+	}
+
 
 	/*
 	 * Check the validity of the thread_state_flavor by calling the
@@ -3830,6 +3834,10 @@ task_set_exception_ports(
 		default:
 			return KERN_INVALID_ARGUMENT;
 		}
+	}
+
+	if (IP_VALID(new_port) && (new_port->ip_immovable_receive || new_port->ip_immovable_send)) {
+		return KERN_INVALID_RIGHT;
 	}
 
 
@@ -3957,6 +3965,10 @@ thread_swap_exception_ports(
 		}
 	}
 
+	if (IP_VALID(new_port) && (new_port->ip_immovable_receive || new_port->ip_immovable_send)) {
+		return KERN_INVALID_RIGHT;
+	}
+
 
 	if (new_flavor != 0 && !VALID_THREAD_STATE_FLAVOR(new_flavor)) {
 		return KERN_INVALID_ARGUMENT;
@@ -4079,6 +4091,10 @@ task_swap_exception_ports(
 		default:
 			return KERN_INVALID_ARGUMENT;
 		}
+	}
+
+	if (IP_VALID(new_port) && (new_port->ip_immovable_receive || new_port->ip_immovable_send)) {
+		return KERN_INVALID_RIGHT;
 	}
 
 

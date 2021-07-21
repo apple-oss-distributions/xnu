@@ -687,6 +687,7 @@ load_machfile(
 	}
 #endif /* __has_feature(ptrauth_calls) && defined(XNU_TARGET_OS_OSX) */
 
+
 #ifdef CONFIG_32BIT_TELEMETRY
 	if (!result->is_64bit_data) {
 		/*

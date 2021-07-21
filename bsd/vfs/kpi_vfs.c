@@ -1733,6 +1733,14 @@ vnode_isrecycled(vnode_t vp)
 	return ret;
 }
 
+/* is this vnode marked for termination */
+int
+vnode_willberecycled(vnode_t vp)
+{
+	return (vp->v_lflag & VL_MARKTERM) ? 1 : 0;
+}
+
+
 /* vnode was created by background task requesting rapid aging
  *  and has not since been referenced by a normal task */
 int

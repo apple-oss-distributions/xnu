@@ -128,16 +128,34 @@ SYSCTL_INT(_debug, OID_AUTO, lockf_debug, CTLFLAG_RW | CTLFLAG_LOCKED, &lockf_de
 #define OTHERS  0x2
 #define OFF_MAX 0x7fffffffffffffffULL   /* max off_t */
 
+/* return the effective end of a 'struct lockf': lf_end == -1 is OFF_MAX */
+#define LF_END(l)       ((l)->lf_end == -1 ? OFF_MAX : (l)->lf_end)
+
 /*
  * Overlapping lock states
+ *
+ * For lk_find_overlap(..., SELF, ...), the possible sequences are a single:
+ *   - OVERLAP_NONE,
+ *   - OVERLAP_EQUALS_LOCK, or
+ *   - OVERLAP_CONTAINS_LOCK
+ *
+ * or the following sequence:
+ *   - optional OVERLAP_STARTS_BEFORE_LOCK
+ *   - zero or more OVERLAP_CONTAINED_BY_LOCK
+ *   - optional OVERLAP_ENDS_AFTER_LOCK
+ *   - OVERLAP_NONE
+ *
+ * In the annotations:
+ *   - the search lock is [SS, SE] and
+ *   - the returned overlap lock is [OS,OE].
  */
 typedef enum {
 	OVERLAP_NONE = 0,
-	OVERLAP_EQUALS_LOCK,
-	OVERLAP_CONTAINS_LOCK,
-	OVERLAP_CONTAINED_BY_LOCK,
-	OVERLAP_STARTS_BEFORE_LOCK,
-	OVERLAP_ENDS_AFTER_LOCK
+	OVERLAP_EQUALS_LOCK,        /* OS == SS && OE == SE */
+	OVERLAP_CONTAINS_LOCK,      /* OS <= SS && OE >= SE */
+	OVERLAP_CONTAINED_BY_LOCK,  /* OS >= SS && OE <= SE */
+	OVERLAP_STARTS_BEFORE_LOCK, /* OS < SS && OE >= SS */
+	OVERLAP_ENDS_AFTER_LOCK     /* OS > SS && OE > SE */
 } overlap_t;
 
 static int       lf_clearlock(struct lockf *);
@@ -437,8 +455,8 @@ lf_coalesce_adjacent(struct lockf *lock)
 		 * NOTE: Assumes that if two locks are adjacent on the number line
 		 * and belong to the same owner, then they are adjacent on the list.
 		 */
-		if ((*lf)->lf_end != -1 &&
-		    ((*lf)->lf_end + 1) == lock->lf_start) {
+		if (LF_END(*lf) < OFF_MAX &&
+		    (LF_END(*lf) + 1) == lock->lf_start) {
 			struct lockf *adjacent = *lf;
 
 			LOCKF_DEBUG(LF_DBG_LIST, "lf_coalesce_adjacent: coalesce adjacent previous\n");
@@ -452,8 +470,8 @@ lf_coalesce_adjacent(struct lockf *lock)
 			continue;
 		}
 		/* If the lock starts adjacent to us, we can coalesce it */
-		if (lock->lf_end != -1 &&
-		    (lock->lf_end + 1) == (*lf)->lf_start) {
+		if (LF_END(lock) < OFF_MAX &&
+		    (LF_END(lock) + 1) == (*lf)->lf_start) {
 			struct lockf *adjacent = *lf;
 
 			LOCKF_DEBUG(LF_DBG_LIST, "lf_coalesce_adjacent: coalesce adjacent following\n");
@@ -817,6 +835,7 @@ scan:
 	block = *head;
 	needtolink = 1;
 	for (;;) {
+		const off_t lkend = LF_END(lock);
 		ovcase = lf_findoverlap(block, lock, SELF, &prev, &overlap);
 		if (ovcase) {
 			block = overlap->lf_next;
@@ -866,7 +885,8 @@ scan:
 			if (overlap->lf_start == lock->lf_start) {
 				*prev = lock;
 				lock->lf_next = overlap;
-				overlap->lf_start = lock->lf_end + 1;
+				assert(lkend < OFF_MAX);
+				overlap->lf_start = lkend + 1;
 			} else {
 				/*
 				 * If we can't split the lock, we can't
@@ -912,6 +932,7 @@ scan:
 			 */
 			lock->lf_next = overlap->lf_next;
 			overlap->lf_next = lock;
+			assert(lock->lf_start > 0);
 			overlap->lf_end = lock->lf_start - 1;
 			prev = &lock->lf_next;
 			lf_wakelock(overlap, TRUE);
@@ -926,7 +947,8 @@ scan:
 				*prev = lock;
 				lock->lf_next = overlap;
 			}
-			overlap->lf_start = lock->lf_end + 1;
+			assert(lkend < OFF_MAX);
+			overlap->lf_start = lkend + 1;
 			lf_wakelock(overlap, TRUE);
 			break;
 		}
@@ -981,6 +1003,7 @@ lf_clearlock(struct lockf *unlock)
 #endif /* LOCKF_DEBUGGING */
 	prev = head;
 	while ((ovcase = lf_findoverlap(lf, unlock, SELF, &prev, &overlap)) != OVERLAP_NONE) {
+		const off_t unlkend = LF_END(unlock);
 		/*
 		 * Wakeup the list of locks to be retried.
 		 */
@@ -1002,7 +1025,8 @@ lf_clearlock(struct lockf *unlock)
 
 		case OVERLAP_CONTAINS_LOCK: /* split it */
 			if (overlap->lf_start == unlock->lf_start) {
-				overlap->lf_start = unlock->lf_end + 1;
+				assert(unlkend < OFF_MAX);
+				overlap->lf_start = unlkend + 1;
 				break;
 			}
 			/*
@@ -1022,13 +1046,15 @@ lf_clearlock(struct lockf *unlock)
 			continue;
 
 		case OVERLAP_STARTS_BEFORE_LOCK:
+			assert(unlock->lf_start > 0);
 			overlap->lf_end = unlock->lf_start - 1;
 			prev = &overlap->lf_next;
 			lf = overlap->lf_next;
 			continue;
 
 		case OVERLAP_ENDS_AFTER_LOCK:
-			overlap->lf_start = unlock->lf_end + 1;
+			assert(unlkend < OFF_MAX);
+			overlap->lf_start = unlkend + 1;
 			break;
 		}
 		break;
@@ -1079,10 +1105,11 @@ lf_getlock(struct lockf *lock, struct flock *fl, pid_t matchpid)
 		fl->l_type = block->lf_type;
 		fl->l_whence = SEEK_SET;
 		fl->l_start = block->lf_start;
-		if (block->lf_end == -1) {
+		if (block->lf_end == -1 ||
+		    (block->lf_start == 0 && LF_END(block) == OFF_MAX)) {
 			fl->l_len = 0;
 		} else {
-			fl->l_len = block->lf_end - block->lf_start + 1;
+			fl->l_len = LF_END(block) - block->lf_start + 1;
 		}
 		if (NULL != block->lf_owner) {
 			/*
@@ -1195,7 +1222,6 @@ static overlap_t
 lf_findoverlap(struct lockf *lf, struct lockf *lock, int type,
     struct lockf ***prev, struct lockf **overlap)
 {
-	off_t start, end;
 	int found_self = 0;
 
 	*overlap = lf;
@@ -1207,8 +1233,8 @@ lf_findoverlap(struct lockf *lf, struct lockf *lock, int type,
 		lf_print("lf_findoverlap: looking for overlap in", lock);
 	}
 #endif /* LOCKF_DEBUGGING */
-	start = lock->lf_start;
-	end = lock->lf_end;
+	const off_t start = lock->lf_start;
+	const off_t end = LF_END(lock);
 	while (lf != NOLOCKF) {
 		if (((type & SELF) && lf->lf_id != lock->lf_id) ||
 		    ((type & OTHERS) && lf->lf_id == lock->lf_id)) {
@@ -1242,8 +1268,10 @@ lf_findoverlap(struct lockf *lf, struct lockf *lock, int type,
 		/*
 		 * OK, check for overlap
 		 */
-		if ((lf->lf_end != -1 && start > lf->lf_end) ||
-		    (end != -1 && lf->lf_start > end)) {
+		const off_t lfstart = lf->lf_start;
+		const off_t lfend = LF_END(lf);
+
+		if ((start > lfend) || (lfstart > end)) {
 			/* Case 0 */
 			LOCKF_DEBUG(LF_DBG_LIST, "no overlap\n");
 
@@ -1251,37 +1279,30 @@ lf_findoverlap(struct lockf *lf, struct lockf *lock, int type,
 			 * NOTE: assumes that locks for the same process are
 			 * nonintersecting and ordered.
 			 */
-			if ((type & SELF) && end != -1 && lf->lf_start > end) {
+			if ((type & SELF) && lfstart > end) {
 				return OVERLAP_NONE;
 			}
 			*prev = &lf->lf_next;
 			*overlap = lf = lf->lf_next;
 			continue;
 		}
-		if ((lf->lf_start == start) && (lf->lf_end == end)) {
+		if ((lfstart == start) && (lfend == end)) {
 			LOCKF_DEBUG(LF_DBG_LIST, "overlap == lock\n");
 			return OVERLAP_EQUALS_LOCK;
 		}
-		if ((lf->lf_start <= start) &&
-		    (end != -1) &&
-		    ((lf->lf_end >= end) || (lf->lf_end == -1))) {
+		if ((lfstart <= start) && (lfend >= end)) {
 			LOCKF_DEBUG(LF_DBG_LIST, "overlap contains lock\n");
 			return OVERLAP_CONTAINS_LOCK;
 		}
-		if (start <= lf->lf_start &&
-		    (end == -1 ||
-		    (lf->lf_end != -1 && end >= lf->lf_end))) {
+		if ((start <= lfstart) && (end >= lfend)) {
 			LOCKF_DEBUG(LF_DBG_LIST, "lock contains overlap\n");
 			return OVERLAP_CONTAINED_BY_LOCK;
 		}
-		if ((lf->lf_start < start) &&
-		    ((lf->lf_end >= start) || (lf->lf_end == -1))) {
+		if ((lfstart < start) && (lfend >= start)) {
 			LOCKF_DEBUG(LF_DBG_LIST, "overlap starts before lock\n");
 			return OVERLAP_STARTS_BEFORE_LOCK;
 		}
-		if ((lf->lf_start > start) &&
-		    (end != -1) &&
-		    ((lf->lf_end > end) || (lf->lf_end == -1))) {
+		if ((lfstart > start) && (lfend > end)) {
 			LOCKF_DEBUG(LF_DBG_LIST, "overlap ends after lock\n");
 			return OVERLAP_ENDS_AFTER_LOCK;
 		}
@@ -1329,11 +1350,13 @@ lf_split(struct lockf *lock1, struct lockf *lock2)
 	 * Check to see if splitting into only two pieces.
 	 */
 	if (lock1->lf_start == lock2->lf_start) {
-		lock1->lf_start = lock2->lf_end + 1;
+		assert(LF_END(lock2) < OFF_MAX);
+		lock1->lf_start = LF_END(lock2) + 1;
 		lock2->lf_next = lock1;
 		return 0;
 	}
-	if (lock1->lf_end == lock2->lf_end) {
+	if (LF_END(lock1) == LF_END(lock2)) {
+		assert(lock2->lf_start > 0);
 		lock1->lf_end = lock2->lf_start - 1;
 		lock2->lf_next = lock1->lf_next;
 		lock1->lf_next = lock2;
@@ -1348,8 +1371,10 @@ lf_split(struct lockf *lock1, struct lockf *lock2)
 		return ENOLCK;
 	}
 	bcopy(lock1, splitlock, sizeof *splitlock);
-	splitlock->lf_start = lock2->lf_end + 1;
+	assert(LF_END(lock2) < OFF_MAX);
+	splitlock->lf_start = LF_END(lock2) + 1;
 	TAILQ_INIT(&splitlock->lf_blkhd);
+	assert(lock2->lf_start > 0);
 	lock1->lf_end = lock2->lf_start - 1;
 	/*
 	 * OK, now link it in
