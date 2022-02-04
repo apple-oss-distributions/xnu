@@ -98,38 +98,37 @@ __options_decl(fileproc_vflags_t, unsigned int, {
 	FPV_DRAIN       = 0x01,
 });
 
+__options_decl(fileproc_flags_t, uint16_t, {
+	FP_NONE         = 0,
+	FP_CLOEXEC      = 0x01,
+	FP_CLOFORK      = 0x02,
+	FP_INSELECT     = 0x04,
+	FP_AIOISSUED    = 0x08,
+	FP_SELCONFLICT  = 0x10,  /* select conflict on an individual fp */
+});
+
+struct fileproc_guard {
+	struct waitq_set *fpg_wset;
+	guardid_t         fpg_guard;
+};
+
 /*
  * Kernel descriptor table.
  * One entry for each open kernel vnode and socket.
  */
 struct fileproc {
-	unsigned int fp_flags;
+	os_refcnt_t      fp_iocount;
 	_Atomic fileproc_vflags_t fp_vflags;
-	os_refcnt_t fp_iocount;
-	struct fileglob * fp_glob;
-	void *fp_wset;
+	fileproc_flags_t fp_flags;
+	uint16_t         fp_guard_attrs;
+	struct fileglob *fp_glob;
+	union {
+		struct waitq_set      *fp_wset;   /* fp_guard_attrs == 0 */
+		struct fileproc_guard *fp_guard;  /* fp_guard_attrs != 0 */
+	};
 };
 
-#define FILEPROC_NULL (struct fileproc *)0
-
-#define FP_INSELECT     0x0004
-#define FP_AIOISSUED    0x0080
-#define FP_SELCONFLICT  0x0200  /* select conflict on an individual fp */
-
-/* squeeze a "type" value into the upper flag bits */
-
-#define _FP_TYPESHIFT   24
-#define FP_TYPEMASK     (0x7 << _FP_TYPESHIFT)  /* 8 "types" of fileproc */
-
-#define FILEPROC_TYPE(fp)       ((fp)->fp_flags & FP_TYPEMASK)
-
-#define FP_ISGUARDED(fp, attribs)  \
-	        ((FILEPROC_TYPE(fp) == FTYPE_GUARDED) ? fp_isguarded(fp, attribs) : 0)
-
-typedef enum {
-	FTYPE_SIMPLE    = 0,
-	FTYPE_GUARDED   = (1 << _FP_TYPESHIFT)
-} fileproc_type_t;
+#define FILEPROC_NULL ((struct fileproc *)0)
 
 /* file types */
 typedef enum {
@@ -184,7 +183,7 @@ struct fileglob {
 	const struct fileops *fg_ops;
 	off_t                fg_offset;
 	void                *fg_data;       /* vnode or socket or SHM or semaphore */
-	void                *fg_vn_data;    /* Per fd vnode data, used for directories */
+	struct fd_vn_data   *fg_vn_data;    /* Per fd vnode data, used for directories */
 	lck_mtx_t            fg_lock;
 #if CONFIG_MACF
 	struct label        *fg_label;      /* JMM - use the one in the cred? */
@@ -206,11 +205,30 @@ os_refgrp_decl_extern(f_refgrp);        /* os_refgrp_t for file refcounts */
  * @brief
  * Acquire a file reference on the specified file.
  *
+ * @description
+ * The @c proc must be locked while this operation is being performed
+ * to avoid races with setting the FG_CONFINED flag.
+ *
+ * @param proc
+ * The proc this file reference is taken on behalf of.
+ *
  * @param fg
  * The specified file
  */
 void
-fg_ref(struct fileglob *fg);
+fg_ref(proc_t proc, struct fileglob *fg);
+
+/*!
+ * @function fg_drop_live
+ *
+ * @brief
+ * Drops a file reference on the specified file that isn't the last one.
+ *
+ * @param fg
+ * The file whose reference is being dropped.
+ */
+void
+fg_drop_live(struct fileglob *fg);
 
 /*!
  * @function fg_drop
@@ -388,16 +406,18 @@ int fp_guard_exception(proc_t p, int fd, struct fileproc *fp, u_int attribs);
 struct nameidata;
 struct vnode_attr;
 int open1(vfs_context_t ctx, struct nameidata *ndp, int uflags,
-    struct vnode_attr *vap, fp_allocfn_t fp_zalloc, void *cra,
+    struct vnode_attr *vap, fp_initfn_t fp_init, void *initarg,
     int32_t *retval);
 int chdir_internal(proc_t p, vfs_context_t ctx, struct nameidata *ndp, int per_thread);
-int kqueue_internal(struct proc *p, fp_allocfn_t, void *cra, int32_t *retval);
+int kqueue_internal(struct proc *p, fp_initfn_t, void *initarg, int32_t *retval);
 void procfdtbl_releasefd(struct proc * p, int fd, struct fileproc * fp);
-extern struct fileproc *fileproc_alloc_init(void *crargs);
+extern struct fileproc *fileproc_alloc_init(void);
 extern void fileproc_free(struct fileproc *fp);
-extern void guarded_fileproc_free(struct fileproc *fp);
+extern void guarded_fileproc_unguard(struct fileproc *fp);
 extern void fg_vn_data_free(void *fgvndata);
 extern int nameiat(struct nameidata *ndp, int dirfd);
+extern void vn_offset_lock(struct fileglob *fg);
+extern void vn_offset_unlock(struct fileglob *fg);
 extern int falloc_guarded(struct proc *p, struct fileproc **fp, int *fd,
     vfs_context_t ctx, const guardid_t *guard, u_int attrs);
 extern void fileproc_modify_vflags(struct fileproc *fp, fileproc_vflags_t vflags, boolean_t clearflags);
@@ -405,7 +425,7 @@ fileproc_vflags_t fileproc_get_vflags(struct fileproc *fp);
 
 #pragma mark internal version of syscalls
 
-int fileport_makefd(proc_t p, ipc_port_t port, int uf_flags, int *fd);
+int fileport_makefd(proc_t p, ipc_port_t port, fileproc_flags_t fp_flags, int *fd);
 int dup2(proc_t p, int from, int to, int *fd);
 int close_nocancel(proc_t p, int fd);
 

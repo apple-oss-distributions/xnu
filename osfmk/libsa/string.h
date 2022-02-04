@@ -43,10 +43,7 @@
 #else
 #include <sys/types.h>
 #endif
-
-#if defined(KERNEL)
 #include <sys/cdefs.h>
-#endif
 
 #ifdef __cplusplus
 extern "C" {
@@ -64,22 +61,22 @@ extern "C" {
 #endif
 #endif
 
-extern void     *memcpy(void *, const void *, size_t);
-extern int      memcmp(const void *, const void *, size_t);
-extern void     *memmove(void *, const void *, size_t);
-extern void     *memset(void *, int, size_t);
-extern int      memset_s(void *, size_t, int, size_t);
+extern void     *memcpy(void *dst __sized_by(n), const void *src __sized_by(n), size_t n);
+extern int      memcmp(const void *s1 __sized_by(n), const void *s2 __sized_by(n), size_t n) __stateful_pure;
+extern void     *memmove(void *dst __sized_by(n), const void *src __sized_by(n), size_t n);
+extern void     *memset(void *s __sized_by(n), int, size_t n);
+extern int      memset_s(void *s __sized_by(smax), size_t smax, int c, size_t n);
 
 #ifdef XNU_KERNEL_PRIVATE
 /* memcmp_zero_ptr_aligned() checks string s of n bytes contains all zeros.
  * Address and size of the string s must be pointer-aligned.
  * Return 0 if true, 1 otherwise. Also return 0 if n is 0.
  */
-extern unsigned long memcmp_zero_ptr_aligned(const void *s, size_t n);
+extern unsigned long memcmp_zero_ptr_aligned(const void *s __sized_by(n), size_t n) __stateful_pure;
 #endif
 
-extern size_t   strlen(const char *);
-extern size_t   strnlen(const char *, size_t);
+extern size_t   strlen(const char *) __stateful_pure;
+extern size_t   strnlen(const char *, size_t) __stateful_pure;
 
 /* strcpy() and strncpy() are deprecated. Please use strlcpy() instead. */
 __kpi_deprecated_arm64_macos_unavailable
@@ -95,32 +92,30 @@ extern char     *strcat(char *, const char *) __deprecated;
 __kpi_deprecated_arm64_macos_unavailable
 extern char     *strncat(char *, const char *, size_t);
 
-/* strcmp() is deprecated. Please use strncmp() instead. */
-__kpi_deprecated_arm64_macos_unavailable
-extern int      strcmp(const char *, const char *);
+extern int      strcmp(const char *, const char *) __stateful_pure;
+extern int      strncmp(const char *, const char *, size_t) __stateful_pure;
 
 extern size_t   strlcpy(char *, const char *, size_t);
 extern size_t   strlcat(char *, const char *, size_t);
-extern int      strncmp(const char *, const char *, size_t);
 
-extern int      strcasecmp(const char *s1, const char *s2);
-extern int      strncasecmp(const char *s1, const char *s2, size_t n);
+extern int      strcasecmp(const char *s1, const char *s2) __stateful_pure;
+extern int      strncasecmp(const char *s1, const char *s2, size_t n) __stateful_pure;
 #ifdef XNU_KERNEL_PRIVATE
-extern const char     *strnstr(const char *s, const char *find, size_t slen);
+extern const char     *strnstr(const char *s, const char *find, size_t slen) __stateful_pure;
 #else
-extern char     *strnstr(const char *s, const char *find, size_t slen);
+extern char     *strnstr(const char *s, const char *find, size_t slen) __stateful_pure;
 #endif
-extern char     *strchr(const char *s, int c);
+extern char     *strchr(const char *s, int c) __stateful_pure;
 #ifdef XNU_KERNEL_PRIVATE
-extern char     *strrchr(const char *s, int c);
+extern char     *strrchr(const char *s, int c) __stateful_pure;
 #endif
 extern char     *STRDUP(const char *, int);
-extern int      strprefix(const char *s1, const char *s2);
+extern int      strprefix(const char *s1, const char *s2) __stateful_pure;
 
-extern int      bcmp(const void *, const void *, size_t);
-extern void     bcopy(const void *, void *, size_t);
-extern void     bzero(void *, size_t);
-extern int      timingsafe_bcmp(const void *b1, const void *b2, size_t n);
+extern int      bcmp(const void *s1 __sized_by(n), const void *s2 __sized_by(n), size_t n) __stateful_pure;
+extern void     bcopy(const void *src __sized_by(n), void *dst __sized_by(n), size_t n);
+extern void     bzero(void *s __sized_by(n), size_t n);
+extern int      timingsafe_bcmp(const void *b1 __sized_by(n), const void *b2 __sized_by(n), size_t n);
 
 #ifdef PRIVATE
 #include <san/memintrinsics.h>
@@ -132,20 +127,19 @@ extern int      timingsafe_bcmp(const void *b1, const void *b2, size_t n);
 #define XNU_BOS __builtin_object_size
 #endif
 
-
 /* __nochk_ functions for opting out of type 1 bounds checking */
 __attribute__((always_inline)) static inline void *
-__nochk_memcpy(void *dest, const void *src, size_t len)
+__nochk_memcpy(void *dest __sized_by(len), const void *src __sized_by(len), size_t len)
 {
 	return __builtin___memcpy_chk(dest, src, len, XNU_BOS(dest, 0));
 }
 __attribute__((always_inline)) static inline void *
-__nochk_memmove(void *dest, const void *src, size_t len)
+__nochk_memmove(void *dest __sized_by(len), const void *src __sized_by(len), size_t len)
 {
 	return __builtin___memmove_chk(dest, src, len, XNU_BOS(dest, 0));
 }
 __attribute__((always_inline)) static inline void
-__nochk_bcopy(const void *src, void *dest, size_t len)
+__nochk_bcopy(const void *src __sized_by(len), void *dest __sized_by(len), size_t len)
 {
 	__builtin___memmove_chk(dest, src, len, XNU_BOS(dest, 0));
 }
@@ -200,6 +194,20 @@ __nochk_bcopy(const void *src, void *dest, size_t len)
 #if __has_builtin(__builtin___memmove_chk)
 #define bcopy(src, dest, len) __builtin___memmove_chk(dest, src, len, XNU_BOS(dest, BOS_COPY_TYPE))
 #endif
+
+#if KERNEL_PRIVATE
+/*
+ * those allow small memsets/bzeros to be reasoned about by the compiler
+ * despite using -fno-builtin
+ */
+#ifndef memset
+#define memset(p, c, len) __builtin_memset(p, c, len)
+#endif
+
+#ifndef bzero
+#define bzero(p, len)     __builtin_bzero(p, len)
+#endif
+#endif /* KERNEL_PRIVATE */
 
 #endif /* _chk macros */
 #ifdef __cplusplus

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2021 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -46,21 +46,24 @@
 
 #include	<architecture/i386/reg_help.h>
 
-
 #ifdef	__ASSEMBLER__
+
+/* Unwind Prologue added to each function to indicate the start of the unwind information. */
+#define UNWIND_PROLOGUE \
+.cfi_sections .eh_frame ;\
+.cfi_startproc          ;
+
+/* Unwind Epilogue added to each function to indicate the end of the unwind information */
+#define UNWIND_EPILOGUE .cfi_endproc
 
 #define ALIGN						\
 	.align	2, 0x90
 
-/* Note that ROUND_TO_STACK rounds to Intel's stack alignment requirement,
- * but it is not sufficient for the Apple ABI which requires a 16-byte
- * aligned stack.  Various parts of the OS depend on this requirement,
- * including dyld.
- */
 #define	ROUND_TO_STACK(len)				\
 	(((len) + STACK_INCR - 1) / STACK_INCR * STACK_INCR)
 
 #ifdef notdef
+#if defined(__i386__)
 #define CALL_MCOUNT						\
 	pushl	%ebp						;\
 	movl	%esp, %ebp					;\
@@ -70,6 +73,17 @@
 	lea 9b,%edx						;\
 	call mcount						;\
 	popl	%ebp						;
+#elif defined(__x86_64__)
+#define CALL_MCOUNT						\
+	pushq	%rbp						;\
+	movq	%rsp, %rbp					;\
+	.data							;\
+	1: .quad 0						;\
+	.text							;\
+	lea 9b,%r13						;\
+	call mcount						;\
+	popq	%rbp					;
+#endif
 #else
 #define CALL_MCOUNT
 #endif
@@ -78,52 +92,87 @@
  * Prologue for functions that may call other functions.  Saves
  * registers and sets up a C frame.
  */
+#if defined(__i386__)
 #define NESTED_FUNCTION_PROLOGUE(localvarsize)			\
-	.set	__framesize,ROUND_TO_STACK(localvarsize)	;\
-	.set	__nested_function, 1				;\
+	.set	L__framesize,ROUND_TO_STACK(localvarsize)	;\
+	.set	L__nested_function, 1				;\
 	CALL_MCOUNT						\
-	.if __framesize						;\
+	.if L__framesize						;\
 	  pushl	%ebp						;\
 	  movl	%esp, %ebp					;\
-	  subl	$__framesize, %esp				;\
+	  subl	$L__framesize, %esp				;\
 	.endif							;\
 	pushl	%edi						;\
 	pushl	%esi						;\
 	pushl	%ebx
+#elif defined(__x86_64__)
+#define NESTED_FUNCTION_PROLOGUE(localvarsize)			\
+	UNWIND_PROLOGUE										;\
+	.set	L__framesize,ROUND_TO_STACK(localvarsize)	;\
+	.set	L__nested_function, 1				;\
+	CALL_MCOUNT						\
+	.if L__framesize						;\
+	  pushq	%rbp						;\
+	  movq	%rsp, %rbp					;\
+	  subq	$L__framesize, %rsp				;\
+	.endif							;
+#endif
 
 /*
  * Prologue for functions that do not call other functions.  Does not
  * save registers (this is the functions responsibility).  Does set
  * up a C frame.
  */
+#if defined(__i386__)
 #define LEAF_FUNCTION_PROLOGUE(localvarsize)			\
-	.set	__framesize,ROUND_TO_STACK(localvarsize)	;\
-	.set	__nested_function, 0				;\
+	.set	L__framesize,ROUND_TO_STACK(localvarsize)	;\
+	.set	L__nested_function, 0				;\
 	CALL_MCOUNT						\
-	.if __framesize						;\
+	.if L__framesize						;\
 	  pushl	%ebp						;\
 	  movl	%esp, %ebp					;\
-	  subl	$__framesize, %esp				;\
+	  subl	$L__framesize, %esp				;\
 	.endif
+#elif defined(__x86_64__)
+#define LEAF_FUNCTION_PROLOGUE(localvarsize)			\
+	UNWIND_PROLOGUE						;\
+	.set	L__framesize,ROUND_TO_STACK(localvarsize)	;\
+	.set	L__nested_function, 0				;\
+	CALL_MCOUNT						\
+	.if L__framesize						;\
+	  pushq	%rbp						;\
+	  movq	%rsp, %rbp					;\
+	  subq	$L__framesize, %rsp				;\
+	.endif
+#endif
 
 /*
- * Prologue for any function.
+ * Epilogue for any function.
  *
  * We assume that all Leaf functions will be responsible for saving any
  * local registers they clobber.
  */
+#if defined(__i386__)
 #define FUNCTION_EPILOGUE					\
-	.if __nested_function					;\
+	.if L__nested_function					;\
 	  popl	%ebx						;\
 	  popl	%esi						;\
 	  popl	%edi						;\
 	.endif							;\
-	.if __framesize						;\
+	.if L__framesize						;\
 	  movl	%ebp, %esp					;\
 	  popl	%ebp						;\
 	.endif							;\
 	ret
-
+#elif defined(__x86_64__)
+#define FUNCTION_EPILOGUE					\
+	.if L__framesize						;\
+	  movq	%rbp, %rsp					;\
+	  popq	%rbp						;\
+	.endif							;\
+	ret								;\
+	UNWIND_EPILOGUE
+#endif
 
 /*
  * Macros for declaring procedures
@@ -268,58 +317,95 @@ name:
  */
 
 #if defined(__DYNAMIC__)
+#if defined(__i386__)
 #define PICIFY(var)					\
 	call	1f					; \
 1:							; \
 	popl	%edx					; \
-	movl	L ## var ## $non_lazy_ptr-1b(%edx),%edx
+	movl	L ## var ## __non_lazy_ptr-1b(%edx),%edx
+#elif defined(__x86_64__)
+#define PICIFY(var)					\
+	movq	var@GOTPCREL(%rip),%r11
+#endif
 
+#if defined(__i386__)
 #define CALL_EXTERN_AGAIN(func)	\
 	PICIFY(func)		; \
-	call	%edx
+	call	*%edx
+#elif defined(__x86_64__)
+#define CALL_EXTERN_AGAIN(func)	\
+	call	func
+#endif
 
+#if defined(__i386__)
 #define NON_LAZY_STUB(var)	\
-.non_lazy_symbol_pointer	; \
-L ## var ## $non_lazy_ptr:	; \
+.section __IMPORT,__pointers,non_lazy_symbol_pointers	; \
+L ## var ## __non_lazy_ptr:	; \
 .indirect_symbol var		; \
 .long 0				; \
 .text
+#elif defined(__x86_64__)
+#define NON_LAZY_STUB(var)
+#endif
 
 #define CALL_EXTERN(func)	\
 	CALL_EXTERN_AGAIN(func)	; \
 	NON_LAZY_STUB(func)
 
+#if defined(__i386__)
 #define BRANCH_EXTERN(func)	\
 	PICIFY(func)		; \
-	jmp	%edx		; \
+	jmp	*%edx		; \
 	NON_LAZY_STUB(func)
+#elif defined(__x86_64__)
+#define BRANCH_EXTERN(func)	\
+	jmp	func
+#endif
 
+#if defined(__i386__)
 #define PUSH_EXTERN(var)	\
 	PICIFY(var)		; \
 	movl	(%edx),%edx	; \
 	pushl	%edx		; \
 	NON_LAZY_STUB(var)
+#endif
 
+#if defined(__i386__)
 #define REG_TO_EXTERN(reg, var)	\
 	PICIFY(var)		; \
 	movl	reg, (%edx)	; \
 	NON_LAZY_STUB(var)
+#elif defined(__x86_64__)
+#define REG_TO_EXTERN(reg, var)	\
+	PICIFY(var)		; \
+	mov		reg, (%r11)
+#endif
 
+#if defined(__i386__)
 #define EXTERN_TO_REG(var, reg)				\
 	call	1f					; \
 1:							; \
 	popl	%edx					; \
-	movl	L ## var ##$non_lazy_ptr-1b(%edx),reg	; \
+	movl	L ## var ##__non_lazy_ptr-1b(%edx),reg	; \
 	NON_LAZY_STUB(var)
-
+#elif defined(__x86_64__)
+#define EXTERN_TO_REG(var, reg)				\
+	PICIFY(var)		; \
+	mov    (%r11), reg
+#endif
 
 #else
 #define BRANCH_EXTERN(func)	jmp	func
-#define PUSH_EXTERN(var)	pushl	var
+#define PUSH_EXTERN(var)	push	var
 #define CALL_EXTERN(func)	call	func
 #define CALL_EXTERN_AGAIN(func)	call	func
-#define REG_TO_EXTERN(reg, var)	movl	reg, var
-#define EXTERN_TO_REG(var, reg)	movl	$ ## var, reg
+#if defined(__i386__)
+#define REG_TO_EXTERN(reg, var)	mov	reg, var
+#define EXTERN_TO_REG(var, reg)	mov	$ ## var, reg
+#elif defined(__x86_64__)
+#define REG_TO_EXTERN(reg, var)	mov	reg, var ## (%rip)
+#define EXTERN_TO_REG(var, reg)	mov	var ## (%rip), reg
+#endif
 #endif
 
 #endif	/* __ASSEMBLER__ */

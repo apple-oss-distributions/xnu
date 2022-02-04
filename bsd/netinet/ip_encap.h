@@ -78,8 +78,6 @@ struct ip6protosw;
 struct domain;
 
 __BEGIN_DECLS
-void    encap4_init(struct protosw *, struct domain *);
-void    encap6_init(struct ip6protosw *, struct domain *);
 void    encap4_input(struct mbuf *, int);
 int     encap6_input(struct mbuf **, int *, int);
 const struct encaptab *encap_attach(int, int, const struct sockaddr *,

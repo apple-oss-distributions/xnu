@@ -192,7 +192,9 @@ struct uthread {
 		uint    nbytes; /* number of bytes in ibits and obits */
 	} uu_select;                    /* saved state for select() */
 
-	struct proc *uu_proc;
+#if CONFIG_VFORK
+	struct proc * XNU_PTRAUTH_SIGNED_PTR("uthread.uu_proc") uu_proc;
+#endif
 	thread_t uu_thread;
 	void * uu_userstate;
 	struct waitq_set *uu_wqset;             /* waitq state cached across select calls */
@@ -202,7 +204,9 @@ struct uthread {
 	sigset_t uu_sigwait;                            /*  sigwait on this thread*/
 	sigset_t uu_sigmask;                            /* signal mask for the thread */
 	sigset_t uu_oldmask;                            /* signal mask saved before sigpause */
+#if CONFIG_VFORK
 	sigset_t uu_vforkmask;                          /* saved signal mask during vfork */
+#endif /* CONFIG_VFORK */
 	struct vfs_context uu_context;                  /* thread + cred */
 
 	TAILQ_ENTRY(uthread) uu_list;           /* List of uthreads in proc */
@@ -253,10 +257,10 @@ struct uthread {
 		uint16_t qos_override : 4;    /* received async override */
 		uint16_t qos_bucket : 4;      /* current acked bucket */
 	} uu_workq_pri;
-	uint8_t uu_workq_flags;
+	uint16_t uu_workq_flags;
 	kq_index_t uu_kqueue_override;
 
-#ifdef JOE_DEBUG
+#ifdef CONFIG_IOCOUNT_TRACE
 	int             uu_iocount;
 	int             uu_vpindex;
 	void    *uu_vps[32];
@@ -332,7 +336,14 @@ struct uthread {
 	/* Document Tracking struct used to track a "tombstone" for a document */
 	struct doc_tombstone *t_tombstone;
 
+	/* Field to be used by filesystems */
+	uint64_t t_fs_private;
+
 	struct os_reason *uu_exit_reason;
+
+#if CONFIG_DEBUG_SYSCALL_REJECTION
+	uint64_t        *syscall_rejection_mask;  /* mach_trap_count + nsysent bits */
+#endif /* CONFIG_DEBUG_SYSCALL_REJECTION */
 };
 
 typedef struct uthread * uthread_t;
@@ -340,10 +351,10 @@ typedef struct uthread * uthread_t;
 /* Definition of uu_flag */
 #define UT_SAS_OLDMASK  0x00000001      /* need to restore mask before pause */
 #define UT_NO_SIGMASK   0x00000002      /* exited thread; invalid sigmask */
-#define UT_NOTCANCELPT  0x00000004             /* not a cancelation point */
-#define UT_CANCEL       0x00000008             /* thread marked for cancel */
-#define UT_CANCELED     0x00000010            /* thread cancelled */
-#define UT_CANCELDISABLE 0x00000020            /* thread cancel disabled */
+#define UT_NOTCANCELPT  0x00000004      /* not a cancelation point */
+#define UT_CANCEL       0x00000008      /* thread marked for cancel */
+#define UT_CANCELED     0x00000010      /* thread cancelled */
+#define UT_CANCELDISABLE 0x00000020     /* thread cancel disabled */
 #define UT_ALTSTACK     0x00000040      /* this thread has alt stack for signals */
 #define UT_THROTTLE_IO  0x00000080      /* this thread issues throttle I/O */
 #define UT_PASSIVE_IO   0x00000100      /* this thread issues passive I/O */
@@ -353,10 +364,17 @@ typedef struct uthread * uthread_t;
 #define UT_NSPACE_NODATALESSFAULTS 0x00001000 /* thread does not materialize dataless files */
 #define UT_ATIME_UPDATE 0x00002000      /* don't update atime for files accessed by this thread */
 #define UT_NSPACE_FORCEDATALESSFAULTS  0x00004000 /* thread always materializes dataless files */
+#if CONFIG_VFORK
 #define UT_VFORK        0x02000000      /* thread has vfork children */
+#define UT_ALREADY_CANCELED_MASK (UT_VFORK | UT_CANCEL | UT_CANCELED)
+#else
+#define UT_ALREADY_CANCELED_MASK (UT_CANCEL | UT_CANCELED)
+#endif /* CONFIG_VFORK */
 #define UT_SETUID       0x04000000      /* thread is settugid() */
+#if CONFIG_VFORK
 #define UT_WASSETUID    0x08000000      /* thread was settugid() (in vfork) */
 #define UT_VFORKING     0x10000000      /* thread in vfork() syscall */
+#endif /* CONFIG_VFORK */
 
 #endif /* BSD_KERNEL_PRIVATE */
 

@@ -152,7 +152,7 @@ ipc_pthread_priority_release_value(
 
 	ipc_pthread_priority_value_t ipc_pthread_priority_value = HANDLE_TO_IPC_PTHREAD_PRIORITY_VALUE(value);
 
-	panic("ipc_pthread_priority_release_value called for a persistent PTHPRIORITY value %x with sync value %d\n", ipc_pthread_priority_value, sync);
+	panic("ipc_pthread_priority_release_value called for a persistent PTHPRIORITY value %x with sync value %d", ipc_pthread_priority_value, sync);
 	return KERN_FAILURE;
 }
 

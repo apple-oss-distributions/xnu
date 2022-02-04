@@ -30,6 +30,7 @@
 #include <arm/proc_reg.h>
 #include <arm/pmap.h>
 #include <sys/errno.h>
+#include <kern/ticket_lock.h>
 #include "assym.s"
 
 	.align	2
@@ -189,6 +190,11 @@ LEXT(OSSynchronizeIO)
 	isb
 .endmacro
 
+.macro SYNC_TLB_FLUSH_LOCAL
+	dsb	nsh
+	isb
+.endmacro
+
 /*
  *	void sync_tlb_flush
  *
@@ -200,6 +206,19 @@ LEXT(OSSynchronizeIO)
 LEXT(sync_tlb_flush)
 	SYNC_TLB_FLUSH
 	bx	lr
+
+/*
+ *	void sync_tlb_flush_local
+ *
+ *		Synchronize one or more prior TLB flush operations, to the local core only
+ */
+	.text
+	.align 2
+	.globl EXT(sync_tlb_flush_local)
+LEXT(sync_tlb_flush_local)
+	SYNC_TLB_FLUSH_LOCAL
+	bx	lr
+
 
 .macro FLUSH_MMU_TLB
 	mov     r0, #0
@@ -259,7 +278,7 @@ LEXT(flush_core_tlb_async)
 	.globl EXT(flush_core_tlb)
 LEXT(flush_core_tlb)
 	FLUSH_CORE_TLB
-	SYNC_TLB_FLUSH
+	SYNC_TLB_FLUSH_LOCAL
 	bx	lr
 
 .macro FLUSH_MMU_TLB_ENTRY
@@ -408,7 +427,7 @@ LEXT(flush_core_tlb_asid_async)
 	.globl EXT(flush_core_tlb_asid)
 LEXT(flush_core_tlb_asid)
 	FLUSH_CORE_TLB_ASID
-	SYNC_TLB_FLUSH
+	SYNC_TLB_FLUSH_LOCAL
 	bx	lr
 
 /*
@@ -1001,6 +1020,100 @@ LEXT(copyinframe)
 	stmia		r1, {r2, r3}
 	b		Lcopyin_noerror
 
+/*
+ * int hw_lock_trylock_mask_allow_invalid(uint32_t *lock, uint32_t mask)
+ */
+	.text
+	.align 2
+	.private_extern EXT(hw_lock_trylock_mask_allow_invalid)
+	.globl EXT(hw_lock_trylock_mask_allow_invalid)
+LEXT(hw_lock_trylock_mask_allow_invalid)
+/*
+ * r0: address of the lock
+ * r1: mask
+ * r2: temporary used for several meanings
+ * r3: address of the original recovery function to restore
+ * r9: strex status
+ *
+ * We do not use r4 and friends to avoid having to stash/restore them
+ */
+	adr		r2, 9f
+	mrc		p15, 0, r12, c13, c0, 4
+	ldr		r3, [r12, TH_RECOVER]
+	str		r2, [r12, TH_RECOVER]
+1:
+	ldrex		r2, [r0]
+	cmp		r2, #0		// 0 value == invalid lock
+	beq		9f
+
+	tst		r1, r2		// is `mask` set ?
+	bne		8f		// if yes, wfe and return 0
+
+	orr		r2, r2, r1
+	strex		r9, r2, [r0]
+	cmp		r9, #0
+	bne		1b
+
+	str		r3, [r12, TH_RECOVER]
+	dmb		ish
+	mov		r0, #1
+	bx		lr
+
+8: /* contention */
+	wfe
+	str		r3, [r12, TH_RECOVER]
+	mov		r0, #0
+	bx		lr
+9: /* invalid */
+	clrex
+	str		r3, [r12, TH_RECOVER]
+	mov		r0, #-1
+	bx		lr
+
+/*
+ * hw_lck_ticket_t
+ * hw_lck_ticket_reserve_orig_allow_invalid(hw_lck_ticket_t *lck)
+ */
+	.text
+	.align 2
+	.private_extern EXT(hw_lck_ticket_reserve_orig_allow_invalid)
+	.globl EXT(hw_lck_ticket_reserve_orig_allow_invalid)
+LEXT(hw_lck_ticket_reserve_orig_allow_invalid)
+/*
+ * r0: value of the lock
+ * r1: address of the lock
+ * r2: the new value of the lock
+ * r3: address of the original recovery function to restore
+ * r9: strex status
+ *
+ * We do not use r4 and friends to avoid having to stash/restore them
+ */
+	adr		r2, 9f
+	mrc		p15, 0, r12, c13, c0, 4
+	ldr		r3, [r12, TH_RECOVER]
+	str		r2, [r12, TH_RECOVER]
+
+	mov		r1, r0
+1:
+	ldrex		r0, [r1]
+	tst		r0, #(1 << HW_LCK_TICKET_LOCK_VALID_BIT)
+	beq		9f	/* is the lock valid ? */
+
+	add		r2, r0, #HW_LCK_TICKET_LOCK_INCREMENT
+	strex		r9, r2, [r1]
+	cmp		r9, #0
+	bne		1b
+
+	str		r3, [r12, TH_RECOVER]
+	dmb		ish
+	bx		lr
+
+9: /* invalid */
+	clrex
+	str		r3, [r12, TH_RECOVER]
+	mov		r0, #0
+	bx		lr
+
 /* 
  * uint32_t arm_debug_read_dscr(void)
  */
@@ -1156,16 +1269,12 @@ LEXT(reenable_async_aborts)
 	bx		lr
 
 /*
- *	uint64_t ml_get_timebase(void)
+ *	uint64_t ml_get_speculative_timebase(void)
  */
 	.text
 	.align 2
-	.globl EXT(ml_get_timebase)
-LEXT(ml_get_timebase)
-	mrc		p15, 0, r12, c13, c0, 4						// Read TPIDRPRW
-	ldr		r3, [r12, ACT_CPUDATAP]						// Get current cpu data
-#if __ARM_TIME__ || __ARM_TIME_TIMEBASE_ONLY__
-	isb													// Required by ARMV7C.b section B8.1.2, ARMv8 section D6.1.2.
+	.globl EXT(ml_get_speculative_timebase)
+LEXT(ml_get_speculative_timebase)
 1:
 	mrrc	p15, 0, r3, r1, c14							// Read the Time Base (CNTPCT), high => r1
 	mrrc	p15, 0, r0, r3, c14							// Read the Time Base (CNTPCT), low => r0
@@ -1173,21 +1282,32 @@ LEXT(ml_get_timebase)
 	cmp		r1, r2
 	bne		1b											// Loop until both high values are the same
 
+	mrc		p15, 0, r12, c13, c0, 4						// Read TPIDRPRW
 	ldr		r3, [r12, ACT_CPUDATAP]						// Get current cpu data
 	ldr		r2, [r3, CPU_BASE_TIMEBASE_LOW]				// Add in the offset to
 	adds	r0, r0, r2									// convert to
 	ldr		r2, [r3, CPU_BASE_TIMEBASE_HIGH]			// mach_absolute_time
 	adc		r1, r1, r2									//
-#else /* ! __ARM_TIME__  || __ARM_TIME_TIMEBASE_ONLY__ */
-1:
-	ldr		r2, [r3, CPU_TIMEBASE_HIGH]					// Get the saved TBU value
-	ldr		r0, [r3, CPU_TIMEBASE_LOW]					// Get the saved TBL value
-	ldr		r1, [r3, CPU_TIMEBASE_HIGH]					// Get the saved TBU value
-	cmp		r1, r2										// Make sure TB has not rolled over
-	bne		1b
-#endif /* __ARM_TIME__ */
 	bx		lr											// return
 
+/*
+ *	uint64_t ml_get_timebase(void)
+ */
+	.text
+	.align 2
+	.globl EXT(ml_get_timebase)
+LEXT(ml_get_timebase)
+	isb													// Required by ARMV7C.b section B8.1.2, ARMv8 section D6.1.2.
+	b	EXT(ml_get_speculative_timebase)
+
+/*
+ *	uint64_t ml_get_timebase_entropy(void)
+ */
+	.text
+	.align 2
+	.globl EXT(ml_get_timebase_entropy)
+LEXT(ml_get_timebase_entropy)
+	b	EXT(ml_get_speculative_timebase)
 
 /*
  *	uint32_t ml_get_decrementer(void)

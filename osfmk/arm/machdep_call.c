@@ -84,7 +84,6 @@ thread_get_cthread_self(void)
 	assert( self == current_thread()->machine.cthread_self);
 	return (kern_return_t) current_thread()->machine.cthread_self;
 #else
-	self &= MACHDEP_CTHREAD_MASK;
 	assert( self == current_thread()->machine.cthread_self);
 	return self;
 #endif

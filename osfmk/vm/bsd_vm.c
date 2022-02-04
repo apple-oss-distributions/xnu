@@ -56,6 +56,7 @@
 #include <vm/vm_protos.h>
 #include <vm/vm_purgeable_internal.h>
 
+#include <sys/kdebug_triage.h>
 
 /* BSD VM COMPONENT INTERFACES */
 int
@@ -109,6 +110,7 @@ const struct memory_object_pager_ops vnode_pager_ops = {
 	.memory_object_map = vnode_pager_map,
 	.memory_object_last_unmap = vnode_pager_last_unmap,
 	.memory_object_data_reclaim = NULL,
+	.memory_object_backing_object = NULL,
 	.memory_object_pager_name = "vnode pager"
 };
 
@@ -117,7 +119,11 @@ typedef struct vnode_pager {
 	struct memory_object vn_pgr_hdr;
 
 	/*  pager-specific */
-	struct os_refcnt        ref_count;
+#if MEMORY_OBJECT_HAS_REFCOUNT
+#define vn_pgr_hdr_ref      vn_pgr_hdr.mo_ref
+#else
+	os_ref_atomic_t         vn_pgr_hdr_ref;
+#endif
 	struct vnode            *vnode_handle;  /* vnode handle              */
 } *vnode_pager_t;
 
@@ -649,7 +655,7 @@ vnode_pager_reference(
 	vnode_pager_t   vnode_object;
 
 	vnode_object = vnode_pager_lookup(mem_obj);
-	os_ref_retain(&vnode_object->ref_count);
+	os_ref_retain_raw(&vnode_object->vn_pgr_hdr_ref, NULL);
 }
 
 /*
@@ -665,7 +671,7 @@ vnode_pager_deallocate(
 
 	vnode_object = vnode_pager_lookup(mem_obj);
 
-	if (os_ref_release(&vnode_object->ref_count) == 0) {
+	if (os_ref_release_raw(&vnode_object->vn_pgr_hdr_ref, NULL) == 0) {
 		if (vnode_object->vnode_handle != NULL) {
 			vnode_pager_vrele(vnode_object->vnode_handle);
 		}
@@ -698,7 +704,7 @@ vnode_pager_synchronize(
 	__unused memory_object_size_t   length,
 	__unused vm_sync_t              sync_flags)
 {
-	panic("vnode_pager_synchronize: memory_object_synchronize no longer supported\n");
+	panic("vnode_pager_synchronize: memory_object_synchronize no longer supported");
 	return KERN_FAILURE;
 }
 
@@ -888,6 +894,7 @@ vnode_pager_cluster_read(
 			 */
 		}
 
+		kernel_triage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_VM, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_VM_VNODEPAGER_CLREAD_NO_UPL), 0 /* arg */);
 		return KERN_FAILURE;
 	}
 
@@ -903,10 +910,7 @@ vnode_object_create(
 {
 	vnode_pager_t  vnode_object;
 
-	vnode_object = (struct vnode_pager *) zalloc(vnode_pager_zone);
-	if (vnode_object == VNODE_PAGER_NULL) {
-		return VNODE_PAGER_NULL;
-	}
+	vnode_object = zalloc_flags(vnode_pager_zone, Z_WAITOK | Z_NOFAIL);
 
 	/*
 	 * The vm_map call takes both named entry ports and raw memory
@@ -919,7 +923,7 @@ vnode_object_create(
 	vnode_object->vn_pgr_hdr.mo_pager_ops = &vnode_pager_ops;
 	vnode_object->vn_pgr_hdr.mo_control = MEMORY_OBJECT_CONTROL_NULL;
 
-	os_ref_init(&vnode_object->ref_count, NULL);
+	os_ref_init_raw(&vnode_object->vn_pgr_hdr_ref, NULL);
 	vnode_object->vnode_handle = vp;
 
 	return vnode_object;

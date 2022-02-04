@@ -193,8 +193,6 @@ RB_GENERATE_PREV(prproxy_sols_tree, nd6_prproxy_soltgt,
 /* The following is protected by proxy6_lock (for updates) */
 u_int32_t nd6_prproxy;
 
-extern lck_mtx_t *nd6_mutex;
-
 SYSCTL_DECL(_net_inet6_icmp6);
 
 SYSCTL_UINT(_net_inet6_icmp6, OID_AUTO, nd6_maxsolstgt,
@@ -436,6 +434,7 @@ nd6_if_prproxy(struct ifnet *ifp, boolean_t enable)
 	SLIST_FOREACH(up, &up_head, ndprl_le) {
 		struct nd_prefix *fwd;
 		struct in6_addr pr_addr;
+		uint32_t pr_ifscope;
 		u_char pr_len;
 
 		pr = up->ndprl_pr;
@@ -443,6 +442,7 @@ nd6_if_prproxy(struct ifnet *ifp, boolean_t enable)
 		NDPR_LOCK(pr);
 		bcopy(&pr->ndpr_prefix.sin6_addr, &pr_addr, sizeof(pr_addr));
 		pr_len = pr->ndpr_plen;
+		pr_ifscope = pr->ndpr_prefix.sin6_scope_id;
 		NDPR_UNLOCK(pr);
 
 		for (fwd = nd_prefix.lh_first; fwd; fwd = fwd->ndpr_next) {
@@ -450,8 +450,8 @@ nd6_if_prproxy(struct ifnet *ifp, boolean_t enable)
 			if (!(fwd->ndpr_stateflags & NDPRF_ONLINK) ||
 			    !(fwd->ndpr_stateflags & NDPRF_IFSCOPE) ||
 			    fwd->ndpr_plen != pr_len ||
-			    !in6_are_prefix_equal(&fwd->ndpr_prefix.sin6_addr,
-			    &pr_addr, pr_len)) {
+			    !in6_are_prefix_equal(&fwd->ndpr_prefix.sin6_addr, fwd->ndpr_prefix.sin6_scope_id,
+			    &pr_addr, pr_ifscope, pr_len)) {
 				NDPR_UNLOCK(fwd);
 				continue;
 			}
@@ -527,8 +527,8 @@ nd6_prproxy_isours(struct mbuf *m, struct ip6_hdr *ip6, struct route_in6 *ro6,
 		ROUTE_RELEASE(ro6);
 
 		/* Caller must have ensured this condition (not srcrt) */
-		VERIFY(IN6_ARE_ADDR_EQUAL(&ip6->ip6_dst,
-		    &ro6->ro_dst.sin6_addr));
+		VERIFY(in6_are_addr_equal_scoped(&ip6->ip6_dst,
+		    &ro6->ro_dst.sin6_addr, ip6_input_getdstifscope(m), ro6->ro_dst.sin6_scope_id));
 
 		rtalloc_scoped_ign((struct route *)ro6, RTF_PRCLONING, ifscope);
 		if ((rt = ro6->ro_rt) == NULL) {
@@ -558,6 +558,7 @@ void
 nd6_proxy_find_fwdroute(struct ifnet *ifp, struct route_in6 *ro6)
 {
 	struct in6_addr *dst6 = &ro6->ro_dst.sin6_addr;
+	uint32_t dst_ifscope = ro6->ro_dst.sin6_scope_id;
 	struct ifnet *fwd_ifp = NULL;
 	struct nd_prefix *pr;
 	struct rtentry *rt;
@@ -593,13 +594,15 @@ nd6_proxy_find_fwdroute(struct ifnet *ifp, struct route_in6 *ro6)
 	for (pr = nd_prefix.lh_first; pr; pr = pr->ndpr_next) {
 		struct in6_addr pr_addr;
 		struct nd_prefix *fwd;
+		uint32_t pr_ifscope = pr->ndpr_prefix.sin6_scope_id;
+
 		u_char pr_len;
 
 		NDPR_LOCK(pr);
 		if (!(pr->ndpr_stateflags & NDPRF_ONLINK) ||
 		    !(pr->ndpr_stateflags & NDPRF_PRPROXY) ||
-		    !IN6_ARE_MASKED_ADDR_EQUAL(&pr->ndpr_prefix.sin6_addr,
-		    dst6, &pr->ndpr_mask)) {
+		    !in6_are_masked_addr_scope_equal(&pr->ndpr_prefix.sin6_addr, pr_ifscope,
+		    dst6, dst_ifscope, &pr->ndpr_mask)) {
 			NDPR_UNLOCK(pr);
 			continue;
 		}
@@ -614,8 +617,8 @@ nd6_proxy_find_fwdroute(struct ifnet *ifp, struct route_in6 *ro6)
 			if (!(fwd->ndpr_stateflags & NDPRF_ONLINK) ||
 			    fwd->ndpr_ifp == ifp ||
 			    fwd->ndpr_plen != pr_len ||
-			    !in6_are_prefix_equal(&fwd->ndpr_prefix.sin6_addr,
-			    &pr_addr, pr_len)) {
+			    !in6_are_prefix_equal(&fwd->ndpr_prefix.sin6_addr, fwd->ndpr_prefix.sin6_scope_id,
+			    &pr_addr, pr_ifscope, pr_len)) {
 				NDPR_UNLOCK(fwd);
 				continue;
 			}
@@ -701,6 +704,7 @@ nd6_prproxy_prelist_update(struct nd_prefix *pr_cur, struct nd_prefix *pr_up)
 	struct in6_addr pr_addr;
 	boolean_t enable;
 	u_char pr_len;
+	uint32_t pr_ifscope;
 
 	SLIST_INIT(&up_head);
 	SLIST_INIT(&down_head);
@@ -719,6 +723,7 @@ nd6_prproxy_prelist_update(struct nd_prefix *pr_cur, struct nd_prefix *pr_up)
 		bcopy(&pr_cur->ndpr_prefix.sin6_addr, &pr_addr,
 		    sizeof(pr_addr));
 		pr_len = pr_cur->ndpr_plen;
+		pr_ifscope = pr_cur->ndpr_prefix.sin6_scope_id;
 		NDPR_UNLOCK(pr_cur);
 
 		for (pr = nd_prefix.lh_first; pr; pr = pr->ndpr_next) {
@@ -726,8 +731,8 @@ nd6_prproxy_prelist_update(struct nd_prefix *pr_cur, struct nd_prefix *pr_up)
 			if (!(pr->ndpr_stateflags & NDPRF_ONLINK) ||
 			    !(pr->ndpr_stateflags & NDPRF_PRPROXY) ||
 			    pr->ndpr_plen != pr_len ||
-			    !in6_are_prefix_equal(&pr->ndpr_prefix.sin6_addr,
-			    &pr_addr, pr_len)) {
+			    !in6_are_prefix_equal(&pr->ndpr_prefix.sin6_addr, pr->ndpr_prefix.sin6_scope_id,
+			    &pr_addr, pr_ifscope, pr_len)) {
 				NDPR_UNLOCK(pr);
 				continue;
 			}
@@ -744,6 +749,7 @@ nd6_prproxy_prelist_update(struct nd_prefix *pr_cur, struct nd_prefix *pr_up)
 		NDPR_LOCK(pr_up);
 		bcopy(&pr_up->ndpr_prefix.sin6_addr, &pr_addr,
 		    sizeof(pr_addr));
+		pr_ifscope = pr_up->ndpr_prefix.sin6_scope_id;
 		pr_len = pr_up->ndpr_plen;
 	}
 	NDPR_LOCK_ASSERT_HELD(pr_up);
@@ -776,8 +782,8 @@ nd6_prproxy_prelist_update(struct nd_prefix *pr_cur, struct nd_prefix *pr_up)
 		if (!(pr->ndpr_stateflags & NDPRF_ONLINK) ||
 		    !(pr->ndpr_stateflags & NDPRF_IFSCOPE) ||
 		    pr->ndpr_plen != pr_len ||
-		    !in6_are_prefix_equal(&pr->ndpr_prefix.sin6_addr,
-		    &pr_addr, pr_len)) {
+		    !in6_are_prefix_equal(&pr->ndpr_prefix.sin6_addr, pr->ndpr_prefix.sin6_scope_id,
+		    &pr_addr, pr_ifscope, pr_len)) {
 			NDPR_UNLOCK(pr);
 			continue;
 		}
@@ -816,16 +822,17 @@ boolean_t
 nd6_prproxy_ifaddr(struct in6_ifaddr *ia)
 {
 	struct nd_prefix *pr;
-	struct in6_addr addr, pr_mask;
+	struct in6_addr addr;
 	u_int32_t pr_len;
+	uint32_t pr_scope_id;
 	boolean_t proxied = FALSE;
 
 	LCK_MTX_ASSERT(nd6_mutex, LCK_MTX_ASSERT_NOTOWNED);
 
 	IFA_LOCK(&ia->ia_ifa);
 	bcopy(&ia->ia_addr.sin6_addr, &addr, sizeof(addr));
-	bcopy(&ia->ia_prefixmask.sin6_addr, &pr_mask, sizeof(pr_mask));
 	pr_len = ia->ia_plen;
+	pr_scope_id = IA6_SIN6_SCOPE(ia);
 	IFA_UNLOCK(&ia->ia_ifa);
 
 	lck_mtx_lock(nd6_mutex);
@@ -833,8 +840,8 @@ nd6_prproxy_ifaddr(struct in6_ifaddr *ia)
 		NDPR_LOCK(pr);
 		if ((pr->ndpr_stateflags & NDPRF_ONLINK) &&
 		    (pr->ndpr_stateflags & NDPRF_PRPROXY) &&
-		    in6_are_prefix_equal(&pr->ndpr_prefix.sin6_addr,
-		    &addr, pr_len)) {
+		    in6_are_prefix_equal(&pr->ndpr_prefix.sin6_addr, pr->ndpr_prefix.sin6_scope_id,
+		    &addr, pr_scope_id, pr_len)) {
 			NDPR_UNLOCK(pr);
 			proxied = TRUE;
 			break;
@@ -865,6 +872,8 @@ nd6_prproxy_ns_output(struct ifnet *ifp, struct ifnet *exclifp,
 	struct ifnet *fwd_ifp;
 	struct in6_addr pr_addr;
 	u_char pr_len;
+	uint32_t pr_scope_id;
+	uint32_t taddr_ifscope = ifp->if_index;
 
 	/*
 	 * Ignore excluded interface if it's the same as the original;
@@ -889,10 +898,12 @@ nd6_prproxy_ns_output(struct ifnet *ifp, struct ifnet *exclifp,
 
 	for (pr = nd_prefix.lh_first; pr; pr = pr->ndpr_next) {
 		NDPR_LOCK(pr);
+		pr_scope_id = pr->ndpr_prefix.sin6_scope_id;
+
 		if (!(pr->ndpr_stateflags & NDPRF_ONLINK) ||
 		    !(pr->ndpr_stateflags & NDPRF_PRPROXY) ||
-		    !IN6_ARE_MASKED_ADDR_EQUAL(&pr->ndpr_prefix.sin6_addr,
-		    taddr, &pr->ndpr_mask)) {
+		    !in6_are_masked_addr_scope_equal(&pr->ndpr_prefix.sin6_addr, pr_scope_id,
+		    taddr, taddr_ifscope, &pr->ndpr_mask)) {
 			NDPR_UNLOCK(pr);
 			continue;
 		}
@@ -907,8 +918,8 @@ nd6_prproxy_ns_output(struct ifnet *ifp, struct ifnet *exclifp,
 			if (!(fwd->ndpr_stateflags & NDPRF_ONLINK) ||
 			    fwd->ndpr_ifp == ifp || fwd->ndpr_ifp == exclifp ||
 			    fwd->ndpr_plen != pr_len ||
-			    !in6_are_prefix_equal(&fwd->ndpr_prefix.sin6_addr,
-			    &pr_addr, pr_len)) {
+			    !in6_are_prefix_equal(&fwd->ndpr_prefix.sin6_addr, fwd->ndpr_prefix.sin6_scope_id,
+			    &pr_addr, pr_scope_id, pr_len)) {
 				NDPR_UNLOCK(fwd);
 				continue;
 			}
@@ -985,6 +996,8 @@ nd6_prproxy_ns_input(struct ifnet *ifp, struct in6_addr *saddr,
 	struct in6_addr pr_addr;
 	u_char pr_len;
 	boolean_t solrec = FALSE;
+	uint32_t pr_scope_id;
+	uint32_t taddr_ifscope = ifp->if_index;
 
 	SLIST_INIT(&ndprl_head);
 
@@ -992,10 +1005,12 @@ nd6_prproxy_ns_input(struct ifnet *ifp, struct in6_addr *saddr,
 
 	for (pr = nd_prefix.lh_first; pr; pr = pr->ndpr_next) {
 		NDPR_LOCK(pr);
+		pr_scope_id = pr->ndpr_prefix.sin6_scope_id;
+
 		if (!(pr->ndpr_stateflags & NDPRF_ONLINK) ||
 		    !(pr->ndpr_stateflags & NDPRF_PRPROXY) ||
-		    !IN6_ARE_MASKED_ADDR_EQUAL(&pr->ndpr_prefix.sin6_addr,
-		    taddr, &pr->ndpr_mask)) {
+		    !in6_are_masked_addr_scope_equal(&pr->ndpr_prefix.sin6_addr, pr_scope_id,
+		    taddr, taddr_ifscope, &pr->ndpr_mask)) {
 			NDPR_UNLOCK(pr);
 			continue;
 		}
@@ -1023,8 +1038,8 @@ nd6_prproxy_ns_input(struct ifnet *ifp, struct in6_addr *saddr,
 			if (!(fwd->ndpr_stateflags & NDPRF_ONLINK) ||
 			    fwd->ndpr_ifp == ifp ||
 			    fwd->ndpr_plen != pr_len ||
-			    !in6_are_prefix_equal(&fwd->ndpr_prefix.sin6_addr,
-			    &pr_addr, pr_len)) {
+			    !in6_are_prefix_equal(&fwd->ndpr_prefix.sin6_addr, fwd->ndpr_prefix.sin6_scope_id,
+			    &pr_addr, pr_scope_id, pr_len)) {
 				NDPR_UNLOCK(fwd);
 				continue;
 			}
@@ -1115,18 +1130,21 @@ nd6_prproxy_na_input(struct ifnet *ifp, struct in6_addr *saddr,
 	struct nd_prefix *pr;
 	struct ifnet *fwd_ifp;
 	struct in6_addr daddr;
+	uint32_t pr_scope_id;
+	uint32_t taddr_ifscope = ifp->if_index;
 
 	SLIST_INIT(&ndprl_head);
-
 
 	lck_mtx_lock(nd6_mutex);
 
 	for (pr = nd_prefix.lh_first; pr; pr = pr->ndpr_next) {
 		NDPR_LOCK(pr);
+
+		pr_scope_id = pr->ndpr_prefix.sin6_scope_id;
 		if (!(pr->ndpr_stateflags & NDPRF_ONLINK) ||
 		    !(pr->ndpr_stateflags & NDPRF_PRPROXY) ||
-		    !IN6_ARE_MASKED_ADDR_EQUAL(&pr->ndpr_prefix.sin6_addr,
-		    taddr, &pr->ndpr_mask)) {
+		    !in6_are_masked_addr_scope_equal(&pr->ndpr_prefix.sin6_addr, pr_scope_id,
+		    taddr, taddr_ifscope, &pr->ndpr_mask)) {
 			NDPR_UNLOCK(pr);
 			continue;
 		}
@@ -1174,8 +1192,8 @@ nd6_prproxy_na_input(struct ifnet *ifp, struct in6_addr *saddr,
 				    fwd->ndpr_ifp == ifp ||
 				    fwd->ndpr_plen != pr_len ||
 				    !in6_are_prefix_equal(
-					    &fwd->ndpr_prefix.sin6_addr,
-					    &pr_addr, pr_len)) {
+					    &fwd->ndpr_prefix.sin6_addr, fwd->ndpr_prefix.sin6_scope_id,
+					    &pr_addr, pr_scope_id, pr_len)) {
 					NDPR_UNLOCK(fwd);
 					continue;
 				}

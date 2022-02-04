@@ -140,9 +140,11 @@ typedef struct {
 /* f8 */ uint64_t unused;
 /* 100 */ uint64_t dyld_system_flags;
 
-/* 108 */ uint8_t unused2[3800];
+/* 108 */ uint8_t unused2[3792];
+/* 0xFD8 */ uint64_t arm_cpu_capabilities;
 /* 0xFE0 */ uint8_t cp_aprr_shadow_supported;
-/* 0xFE1 */ uint8_t unused3[7];
+/* 0xFE1 */ uint8_t user_timebase_type;
+/* 0xFE2 */ uint8_t unused3[6];
 /* 0xFE8 */ uint64_t cp_aprr_shadow_jit_rw;
 /* 0xFF0*/ uint64_t cp_aprr_shadow_jit_rx;
 /* 0xFF8 */ uint32_t unused4;

@@ -130,6 +130,8 @@ struct btlog {
 	                                                    * And so they want to be in charge of explicitly removing elements. Depending on this variable we
 	                                                    * will choose what kind of data structure to use for the elem_linkage_un union above.
 	                                                    */
+	boolean_t   kmem;            /* If TRUE, btlog_create allocated memory from the kernel_map */
+	vm_offset_t freelist_buffer; /* Freelist memory. Static for btlog's lifetime. */
 };
 
 #define lookup_btrecord(btlog, index) \
@@ -236,6 +238,7 @@ btlog_create(size_t numrecords,
 	kern_return_t ret;
 	size_t btrecord_size = 0;
 	uintptr_t free_elem = 0, next_free_elem = 0;
+	boolean_t kmem = FALSE;
 
 	if (startup_phase >= STARTUP_SUB_VM_KERNEL &&
 	    startup_phase < STARTUP_SUB_KMEM_ALLOC) {
@@ -280,6 +283,8 @@ btlog_create(size_t numrecords,
 	    (buffersize_needed - sizeof(btlog_t)) / btrecord_size);
 
 	if (__probable(startup_phase >= STARTUP_SUB_KMEM_ALLOC)) {
+		kmem = TRUE;
+
 		ret = kmem_alloc(kernel_map, &buffer, buffersize_needed, VM_KERN_MEMORY_DIAG);
 		if (ret != KERN_SUCCESS) {
 			return NULL;
@@ -321,6 +326,7 @@ btlog_create(size_t numrecords,
 	btlog->btlog_buffer = buffer;
 	btlog->btlog_buffersize = buffersize_needed;
 	btlog->freelist_elements = (btlog_element_t *)elem_buffer;
+	btlog->freelist_buffer = (vm_offset_t)elem_buffer;
 
 	simple_lock_init(&btlog->btlog_lock, 0);
 
@@ -364,7 +370,33 @@ btlog_create(size_t numrecords,
 	}
 	*(uintptr_t*)next_free_elem = BTLOG_HASHELEMINDEX_NONE;
 
+	btlog->kmem = kmem;
+
 	return btlog;
+}
+
+void
+btlog_destroy(btlog_t *btlog)
+{
+	vm_size_t elemsize_needed = 0;
+
+	if (btlog->kmem == FALSE) {
+		return;
+	}
+
+	if (btlog->caller_will_remove_entries_for_element) {
+		kmem_free(kernel_map, (vm_offset_t)btlog->elem_linkage_un.elem_recindex_hashtbl,
+		    ELEMENT_HASH_BUCKET_COUNT * sizeof(btlog_element_t *));
+	} else {
+		kmem_free(kernel_map, (vm_offset_t)btlog->elem_linkage_un.element_hash_queue,
+		    2 * sizeof(btlog_element_t*));
+	}
+
+	elemsize_needed = sizeof(btlog_element_t) * zelems_count;
+	elemsize_needed = round_page(elemsize_needed);
+	kmem_free(kernel_map, btlog->freelist_buffer, elemsize_needed);
+
+	kmem_free(kernel_map, (vm_offset_t)btlog, btlog->btlog_buffersize);
 }
 
 /* Assumes btlog is already locked */
@@ -443,7 +475,7 @@ btlog_evict_elements_from_record(btlog_t *btlog, int num_elements_to_evict)
 
 	if (recindex == BTLOG_RECORDINDEX_NONE) {
 		/* nothing on active list */
-		panic("BTLog: Eviction requested on btlog (0x%lx) with an empty active list.\n", (uintptr_t) btlog);
+		panic("BTLog: Eviction requested on btlog (0x%lx) with an empty active list.", (uintptr_t) btlog);
 	} else {
 		while (num_elements_to_evict) {
 			/*
@@ -511,7 +543,7 @@ btlog_evict_elements_from_record(btlog_t *btlog, int num_elements_to_evict)
 					}
 
 					if (hashelem == NULL) {
-						panic("BTLog: Missing hashelem for element list of record 0x%lx\n", (uintptr_t) record);
+						panic("BTLog: Missing hashelem for element list of record 0x%lx", (uintptr_t) record);
 					}
 
 					if (prev_hashelem != hashelem) {
@@ -626,14 +658,13 @@ btlog_add_entry(btlog_t *btlog,
 		return;
 	}
 
-	btlog_lock(btlog);
-
 	MD5Init(&btlog_ctx);
 	for (i = 0; i < MIN(btcount, btlog->btrecord_btdepth); i++) {
 		MD5Update(&btlog_ctx, (u_char *) &bt[i], sizeof(bt[i]));
 	}
 	MD5Final((u_char *) &md5_buffer, &btlog_ctx);
 
+	btlog_lock(btlog);
 	recindex = lookup_btrecord_byhash(btlog, md5_buffer[0], bt, btcount);
 
 	if (recindex != BTLOG_RECORDINDEX_NONE) {
@@ -706,7 +737,7 @@ btlog_remove_entries_for_element(btlog_t *btlog,
 	btlog_element_t *prev_hashelem = NULL, *hashelem = NULL;
 
 	if (btlog->caller_will_remove_entries_for_element == FALSE) {
-		panic("Explicit removal of entry is not permitted for this btlog (%p).\n", btlog);
+		panic("Explicit removal of entry is not permitted for this btlog (%p).", btlog);
 	}
 
 	if (g_crypto_funcs == NULL) {

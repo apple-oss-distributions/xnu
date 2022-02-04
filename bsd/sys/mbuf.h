@@ -449,7 +449,8 @@ struct pkthdr {
 	union builtin_mtag builtin_mtag;
 
 	uint32_t comp_gencnt;
-	uint32_t padding;
+	uint16_t pkt_ext_flags;
+	uint16_t padding;
 	/*
 	 * Module private scratch space (32-bit aligned), currently 16-bytes
 	 * large. Anything stored here is not guaranteed to survive across
@@ -536,6 +537,7 @@ struct pkthdr {
 #define PKTF_INET6_RESOLVE      0x80    /* IPv6 resolver packet */
 #define PKTF_RESOLVE_RTR        0x100   /* pkt is for resolving router */
 #define PKTF_SKIP_PKTAP         0x200   /* pkt has already passed through pktap */
+#define PKTF_WAKE_PKT           0x400   /* packet caused system to wake from sleep */
 #define PKTF_MPTCP              0x800   /* TCP with MPTCP metadata */
 #define PKTF_MPSO               0x1000  /* MPTCP socket meta data */
 #define PKTF_LOOP               0x2000  /* loopbacked packet */
@@ -557,6 +559,8 @@ struct pkthdr {
 #define PKTF_MPTCP_REINJ        0x20000000 /* Packet has been reinjected for MPTCP */
 #define PKTF_MPTCP_DFIN         0x40000000 /* Packet is a data-fin */
 #define PKTF_HBH_CHKED          0x80000000 /* HBH option is checked */
+
+#define PKTF_EXT_OUTPUT_SCOPE   0x1     /* outgoing packet has ipv6 address scope id */
 
 /* flags related to flow control/advisory and identification */
 #define PKTF_FLOW_MASK  \
@@ -615,6 +619,7 @@ struct mbuf {
 #define m_dat           M_dat.M_databuf
 #define m_pktlen(_m)    ((_m)->m_pkthdr.len)
 #define m_pftag(_m)     (&(_m)->m_pkthdr.builtin_mtag._net_mtag._pf_mtag)
+#define m_necptag(_m)   (&(_m)->m_pkthdr.builtin_mtag._net_mtag._necp_mtag)
 
 /* mbuf flags (private) */
 #define M_EXT           0x0001  /* has associated external storage */
@@ -692,6 +697,9 @@ struct mbuf {
 
 /* checksum start adjustment has been done */
 #define CSUM_ADJUST_DONE        0x00020000
+
+/* VLAN encapsulation present */
+#define CSUM_VLAN_ENCAP_PRESENT    0x00040000      /* mbuf has vlan encapsulation */
 
 /* TCP Segment Offloading requested on this mbuf */
 #define CSUM_TSO_IPV4           0x00100000      /* This mbuf needs to be segmented by the NIC */
@@ -814,6 +822,8 @@ union m16kcluster {
 
 #define M_COPY_PFTAG(to, from)          m_copy_pftag(to, from)
 
+#define M_COPY_NECPTAG(to, from)        m_copy_necptag(to, from)
+
 #define M_COPY_CLASSIFIER(to, from)     m_copy_classifier(to, from)
 
 /*
@@ -828,9 +838,15 @@ union m16kcluster {
  * can be simply recompiled in order to be forward-compatible with future
  * changes toward the struture sizes.
  */
+#ifdef XNU_KERNEL_PRIVATE
+#define MLEN            _MLEN
+#define MHLEN           _MHLEN
+#define MINCLSIZE       (MLEN + MHLEN)
+#else
 #define MLEN            mbuf_get_mlen()         /* normal mbuf data len */
 #define MHLEN           mbuf_get_mhlen()        /* data len in an mbuf w/pkthdr */
 #define MINCLSIZE       mbuf_get_minclsize()    /* cluster usage threshold */
+#endif
 /*
  * Return the address of the start of the buffer associated with an mbuf,
  * handling external storage, packet-header mbufs, and regular data mbufs.
@@ -1076,6 +1092,7 @@ struct mbstat {
 	u_int32_t       m_bigclusters;  /* clusters obtained from page pool */
 	u_int32_t       m_bigclfree;    /* free clusters */
 	u_int32_t       m_bigmclbytes;  /* length of an mbuf cluster */
+	u_int32_t       m_forcedefunct; /* times we force defunct'ed an app's sockets */
 };
 
 /* Compatibillity with 10.3 */
@@ -1276,6 +1293,8 @@ extern struct mbuf *m_prepend_2(struct mbuf *, int, int, int);
 extern struct mbuf *m_pullup(struct mbuf *, int);
 extern struct mbuf *m_split(struct mbuf *, int, int);
 extern void m_mclfree(caddr_t p);
+extern int mbuf_get_class(struct mbuf *m);
+extern bool mbuf_class_under_pressure(struct mbuf *m);
 
 /*
  * On platforms which require strict alignment (currently for anything but
@@ -1402,7 +1421,7 @@ extern int _max_protohdr;       /* largest protocol header */
 __private_extern__ unsigned int mbuf_default_ncl(uint64_t);
 __private_extern__ void mbinit(void);
 __private_extern__ struct mbuf *m_clattach(struct mbuf *, int, caddr_t,
-    void (*)(caddr_t, u_int, caddr_t), u_int, caddr_t, int, int);
+    void (*)(caddr_t, u_int, caddr_t), size_t, caddr_t, int, int);
 __private_extern__ caddr_t m_bigalloc(int);
 __private_extern__ void m_bigfree(caddr_t, u_int, caddr_t);
 __private_extern__ struct mbuf *m_mbigget(struct mbuf *, int);
@@ -1434,6 +1453,7 @@ __private_extern__ caddr_t m_mclalloc(int);
 __private_extern__ int m_mclhasreference(struct mbuf *);
 __private_extern__ void m_copy_pkthdr(struct mbuf *, struct mbuf *);
 __private_extern__ void m_copy_pftag(struct mbuf *, struct mbuf *);
+__private_extern__ void m_copy_necptag(struct mbuf *, struct mbuf *);
 __private_extern__ void m_copy_classifier(struct mbuf *, struct mbuf *);
 
 __private_extern__ struct mbuf *m_dtom(void *);

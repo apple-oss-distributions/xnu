@@ -54,8 +54,6 @@ enum{
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
-class OSObject;
-
 #define OSObject_Instantiate_ID       0x0000000100000001ULL
 
 enum {
@@ -106,6 +104,7 @@ typedef uint64_t IOTrapMessageBuffer[256];
 
 class IOUserServer;
 class OSUserMetaClass;
+class OSObject;
 class IODispatchQueue;
 class IODispatchSource;
 class IOInterruptDispatchSource;
@@ -127,7 +126,9 @@ struct OSObjectUserVars {
 	bool               stopped;
 	bool               userServerPM;
 	bool               willPower;
+	bool               powerState;
 	uint32_t           powerOverride;
+	IOLock           * uvarsLock;
 };
 
 extern IOLock *        gIOUserServerLock;
@@ -142,6 +143,7 @@ void serverAdd(IOUserServer * server);
 void serverRemove(IOUserServer * server);
 void serverAck(IOUserServer * server);
 bool serverSlept(void);
+void systemHalt(int howto);
 };
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
@@ -158,14 +160,22 @@ class IOUserServer : public IOUserClient
 	IODispatchQueue     * fRootQueue;
 	OSArray             * fServices;
 
-	uint64_t              fPowerStates;
 	uint8_t               fRootNotifier;
 	uint8_t               fSystemPowerAck;
 	uint8_t               fSystemOff;
 	IOUserServerCheckInToken * fCheckInToken;
+public:
+	kern_allocation_name_t fAllocationName;
 
 public:
 
+	/*
+	 * Launch a dext with the specified bundle ID, server name, and server tag. If reuseIfExists is true, this will attempt to find an existing IOUserServer instance or
+	 * a pending dext launch with the same server name.
+	 *
+	 * Returns a IOUserServer instance if one was found, or a token to track the pending dext launch. If both are NULL, then launching the dext failed.
+	 */
+	static  IOUserServer * launchUserServer(OSString * bundleID, const OSSymbol * serverName, OSNumber * serverTag, bool reuseIfExists, IOUserServerCheckInToken ** token);
 	static  IOUserClient * withTask(task_t owningTask);
 	virtual IOReturn       clientClose(void) APPLE_KEXT_OVERRIDE;
 	virtual bool           finalize(IOOptionBits options) APPLE_KEXT_OVERRIDE;
@@ -197,13 +207,16 @@ public:
 
 	bool                   serviceMatchesCheckInToken(IOUserServerCheckInToken *token);
 	bool                   checkEntitlements(IOService * provider, IOService * dext);
-	bool                   checkEntitlements(OSDictionary * entitlements, OSObject * prop,
+	bool                   checkEntitlements(OSDictionary * entitlements, LIBKERN_CONSUMED OSObject * prop,
 	    IOService * provider, IOService * dext);
 
 	void                   setTaskLoadTag(OSKext *kext);
 	void                   setDriverKitUUID(OSKext *kext);
 	void                   setCheckInToken(IOUserServerCheckInToken *token);
 	void                   systemPower(bool powerOff);
+	void                               systemHalt(int howto);
+	static void            powerSourceChanged(bool acAttached);
+
 	IOReturn                                setPowerState(unsigned long state, IOService * service) APPLE_KEXT_OVERRIDE;
 	IOReturn                                powerStateWillChangeTo(IOPMPowerFlags flags, unsigned long state, IOService * service) APPLE_KEXT_OVERRIDE;
 	IOReturn                                powerStateDidChangeTo(IOPMPowerFlags flags, unsigned long state, IOService * service) APPLE_KEXT_OVERRIDE;
@@ -236,19 +249,77 @@ public:
 	kern_return_t          waitInterruptTrap(void * p1, void * p2, void * p3, void * p4, void * p5, void * p6);
 };
 
-typedef void (*IOUserServerCheckInNotificationHandler)(class IOUserServerCheckInToken*, void*);
+typedef void (*IOUserServerCheckInCancellationHandler)(class IOUserServerCheckInToken*, void*);
+
+// OSObject wrapper around IOUserServerCheckInCancellationHandler
+class _IOUserServerCheckInCancellationHandler : public OSObject {
+	OSDeclareDefaultStructors(_IOUserServerCheckInCancellationHandler);
+public:
+	static _IOUserServerCheckInCancellationHandler *
+	withHandler(IOUserServerCheckInCancellationHandler handler, void * args);
+
+	void call(IOUserServerCheckInToken * token);
+private:
+	IOUserServerCheckInCancellationHandler fHandler;
+	void                                 * fHandlerArgs;
+};
 
 class IOUserServerCheckInToken : public OSObject
 {
+	enum State {
+		kIOUserServerCheckInPending,
+		kIOUserServerCheckInCanceled,
+		kIOUserServerCheckInComplete,
+	};
+
 	OSDeclareDefaultStructors(IOUserServerCheckInToken);
 public:
-	static IOUserServerCheckInToken * create();
-	void setNoSendersNotification(IOUserServerCheckInNotificationHandler handler, void *handlerArgs);
-	void clearNotification();
-	static void notifyNoSenders(IOUserServerCheckInToken * token);
+	virtual void free() APPLE_KEXT_OVERRIDE;
+
+	/*
+	 * Cancel all pending dext launches.
+	 */
+	static void cancelAll();
+
+	/*
+	 * Set handler to be invoked when launch is cancelled. Returns an wrapper object for the handler to be released by the caller.
+	 * The returned object can be used with removeCancellationHandler().
+	 */
+	_IOUserServerCheckInCancellationHandler * setCancellationHandler(IOUserServerCheckInCancellationHandler handler, void *handlerArgs);
+
+	/*
+	 * Remove previously set cancellation handler.
+	 */
+	void removeCancellationHandler(_IOUserServerCheckInCancellationHandler * handler);
+
+	/*
+	 * Cancel the launch
+	 */
+	void cancel();
+
+	/*
+	 * Mark launch as completed.
+	 */
+	void complete();
+
+	const OSSymbol * copyServerName() const;
+	OSNumber * copyServerTag() const;
+
 private:
-	IOUserServerCheckInNotificationHandler handler;
-	void *handlerArgs;
+	static IOUserServerCheckInToken * findExistingToken(const OSSymbol * serverName);
+	bool setState(IOUserServerCheckInToken::State state);
+	bool init(const OSSymbol * userServerName, OSNumber * serverTag);
+
+	friend class IOUserServer;
+
+
+
+private:
+	IOUserServerCheckInToken::State          fState;
+	const OSSymbol                         * fServerName;
+	OSNumber                               * fServerTag;
+	OSSet                                  * fHandlers;
+	IOLock                                 * fLock;
 };
 
 extern "C" kern_return_t

@@ -170,6 +170,7 @@ IOPlatformExpert::start( IOService * provider )
 	    IORangeAllocator::kLocking);
 	assert(physicalRanges);
 	setProperty("Platform Memory Ranges", physicalRanges);
+	OSSafeReleaseNULL(physicalRanges);
 
 	setPlatform( this );
 	gIOPlatform = this;
@@ -198,7 +199,7 @@ IOPlatformExpert::configure( IOService * provider )
 {
 	OSSet *             topLevel;
 	OSDictionary *      dict;
-	IOService *         nub;
+	IOService *         nub = NULL;
 
 	topLevel = OSDynamicCast( OSSet, getProperty("top-level"));
 
@@ -207,16 +208,17 @@ IOPlatformExpert::configure( IOService * provider )
 		    topLevel->getAnyObject()))) {
 			dict->retain();
 			topLevel->removeObject( dict );
+			OSSafeReleaseNULL(nub);
 			nub = createNub( dict );
+			dict->release();
 			if (NULL == nub) {
 				continue;
 			}
-			dict->release();
 			nub->attach( this );
 			nub->registerService();
 		}
 	}
-
+	OSSafeReleaseNULL(nub);
 	return true;
 }
 
@@ -1018,6 +1020,7 @@ PEHaltRestartInternal(unsigned int type, uint32_t details)
 			if (data && data->getLength() == 4) {
 				timeout = *((uint32_t *) data->getBytesNoCopy());
 			}
+			OSSafeReleaseNULL(node);
 		}
 
 #if (DEVELOPMENT || DEBUG)
@@ -1082,6 +1085,8 @@ PEHaltRestartInternal(unsigned int type, uint32_t details)
 				IOCPURunPlatformPanicActions(type, details);
 			}
 		}
+	} else if (type == kPEPanicDiagnosticsDone || type == kPEPanicDiagnosticsInProgress) {
+		IOCPURunPlatformPanicActions(type, details);
 	}
 
 skip_to_haltRestart:
@@ -1430,11 +1435,12 @@ IOPlatformExpert::registerNVRAMController(IONVRAMController * caller)
 	IORegistryEntry * entry;
 
 	/*
-	 * If we have panic debugging enabled and a prod-fused coprocessor,
-	 * disable cross panics so that the co-processor doesn't cause the system
+	 * If we have panic debugging enabled WITHOUT behavior to reboot after any crash (DB_REBOOT_ALWAYS)
+	 * and we are on a co-processor system that has the panic SoC watchdog enabled, disable
+	 * cross panics so that the co-processor doesn't cause the system
 	 * to reset when we enter the debugger or hit a panic on the x86 side.
 	 */
-	if (panicDebugging) {
+	if (panicDebugging && !(debug_boot_arg & DB_REBOOT_ALWAYS)) {
 		entry = IORegistryEntry::fromPath( "/options", gIODTPlane );
 		if (entry) {
 			data = OSDynamicCast( OSData, entry->getProperty( APPLE_VENDOR_VARIABLE_GUID":BridgeOSPanicWatchdogEnabled" ));
@@ -1481,6 +1487,8 @@ IOPlatformExpert::callPlatformFunction(const OSSymbol *functionName,
     void *param3, void *param4)
 {
 	IOService *service, *_resources;
+	OSObject  *prop = NULL;
+	IOReturn   ret;
 
 	if (functionName == gIOPlatformQuiesceActionKey ||
 	    functionName == gIOPlatformActiveActionKey) {
@@ -1503,13 +1511,19 @@ IOPlatformExpert::callPlatformFunction(const OSSymbol *functionName,
 		return kIOReturnUnsupported;
 	}
 
-	service = OSDynamicCast(IOService, _resources->getProperty(functionName));
+	prop = _resources->copyProperty(functionName);
+	service = OSDynamicCast(IOService, prop);
 	if (service == NULL) {
-		return kIOReturnUnsupported;
+		ret = kIOReturnUnsupported;
+		goto finish;
 	}
 
-	return service->callPlatformFunction(functionName, waitForFunction,
-	           param1, param2, param3, param4);
+	ret = service->callPlatformFunction(functionName, waitForFunction,
+	    param1, param2, param3, param4);
+
+finish:
+	OSSafeReleaseNULL(prop);
+	return ret;
 }
 
 IOByteCount
@@ -1583,11 +1597,13 @@ bool
 IODTPlatformExpert::createNubs( IOService * parent, OSIterator * iter )
 {
 	IORegistryEntry *   next;
-	IOService *         nub;
+	IOService *         nub = NULL;
 	bool                ok = true;
 
 	if (iter) {
 		while ((next = (IORegistryEntry *) iter->getNextObject())) {
+			OSSafeReleaseNULL(nub);
+
 			if (NULL == (nub = createNub( next ))) {
 				continue;
 			}
@@ -1634,6 +1650,7 @@ IODTPlatformExpert::createNubs( IOService * parent, OSIterator * iter )
 #endif
 			nub->registerService();
 		}
+		OSSafeReleaseNULL(nub);
 		iter->release();
 	}
 
@@ -2135,8 +2152,8 @@ IOPlatformExpertDevice::createNVRAM( void )
 	assert(gIOOptionsEntry != NULL);
 
 	gIOOptionsEntry->init(options, gIODTPlane);
-
 	gIOOptionsEntry->attach(this);
+	gIOOptionsEntry->start(this);
 	options->release();
 }
 
@@ -2287,7 +2304,7 @@ IOPanicPlatform::start(IOService * provider)
 		platform_name = provider->getName();
 	}
 
-	panic("Unable to find driver for this platform: \"%s\".\n",
+	panic("Unable to find driver for this platform: \"%s\".",
 	    platform_name);
 
 	return false;

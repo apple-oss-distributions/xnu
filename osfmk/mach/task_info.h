@@ -538,6 +538,7 @@ typedef struct task_debug_info_internal task_debug_info_internal_data_t;
 typedef uint32_t task_exc_guard_behavior_t;
 
 /* EXC_GUARD optional delivery settings on a per-task basis */
+#define TASK_EXC_GUARD_NONE                  0x00
 #define TASK_EXC_GUARD_VM_DELIVER            0x01 /* Deliver virtual memory EXC_GUARD exceptions */
 #define TASK_EXC_GUARD_VM_ONCE               0x02 /* Deliver them only once */
 #define TASK_EXC_GUARD_VM_CORPSE             0x04 /* Deliver them via a forked corpse */
@@ -558,7 +559,34 @@ typedef uint32_t task_exc_guard_behavior_t;
  * The default for 3rd party guards is shifted up 8 bits - but otherwise the same values as above.
  */
 #define TASK_EXC_GUARD_THIRD_PARTY_DEFAULT_SHIFT 0x8 /* 3rd party default shifted up in boot-arg */
+
+#define TASK_EXC_GUARD_HONOR_NAMED_DEFAULTS 0x10000  /* Honor the by-process-name defaults */
+
 #endif
+
+/*
+ * Type to control corpse forking options for a task
+ * via task_get/set_corpse_forking_behavior interface(s).
+ */
+typedef uint32_t task_corpse_forking_behavior_t;
+
+#define TASK_CORPSE_FORKING_DISABLED_MEM_DIAG  0x01 /* Disable corpse forking because the task is running under a diagnostic tool */
+
+#ifdef XNU_KERNEL_PRIVATE
+
+__options_decl(task_control_port_options_t, uint32_t, {
+	TASK_CONTROL_PORT_OPTIONS_NONE     = 0x00000000,
+
+	TASK_CONTROL_PORT_PINNED_SOFT      = 0x00000001,
+	TASK_CONTROL_PORT_PINNED_HARD      = 0x00000002,
+	TASK_CONTROL_PORT_IMMOVABLE_SOFT   = 0x00000004,
+	TASK_CONTROL_PORT_IMMOVABLE_HARD   = 0x00000008,
+});
+
+#define TASK_CONTROL_PORT_IMMOVABLE (TASK_CONTROL_PORT_IMMOVABLE_SOFT | TASK_CONTROL_PORT_IMMOVABLE_HARD)
+#define TASK_CONTROL_PORT_PINNED    (TASK_CONTROL_PORT_PINNED_SOFT | TASK_CONTROL_PORT_PINNED_HARD)
+
+#endif /* XNU_KERNEL_PRIVATE */
 
 /*
  * Obsolete interfaces.

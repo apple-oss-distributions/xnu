@@ -167,7 +167,7 @@ ml_phys_read_data(pmap_paddr_t paddr, int size)
 	mp_disable_preemption();
 	wimg_bits = pmap_cache_attributes(pn);
 	index = pmap_map_cpu_windows_copy(pn, VM_PROT_READ, wimg_bits);
-	copywindow_vaddr = pmap_cpu_windows_copy_addr(cpu_number(), index) | ((uint32_t)paddr & PAGE_MASK);;
+	copywindow_vaddr = pmap_cpu_windows_copy_addr(cpu_number(), index) | ((uint32_t)paddr & PAGE_MASK);
 
 	switch (size) {
 	case 1:
@@ -559,7 +559,7 @@ copypv(addr64_t source, addr64_t sink, unsigned int size, int which)
 
 	if ((which & (cppvPsrc | cppvPsnk)) == 0) {     /* Make sure that only
 		                                         * one is virtual */
-		panic("copypv: no more than 1 parameter may be virtual\n");     /* Not allowed */
+		panic("copypv: no more than 1 parameter may be virtual");     /* Not allowed */
 	}
 	if (which & cppvPsrc) {
 		from = (void *)phystokv((pmap_paddr_t)from);
@@ -696,48 +696,6 @@ copyoutstr_prevalidate(const void *__unused kaddr, user_addr_t __unused uaddr, s
 
 	return 0;
 }
-
-#if     MACH_ASSERT
-
-extern int copyinframe(vm_address_t fp, char *frame);
-
-/*
- * Machine-dependent routine to fill in an array with up to callstack_max
- * levels of return pc information.
- */
-void
-machine_callstack(
-	uintptr_t * buf,
-	vm_size_t callstack_max)
-{
-	/* Captures the USER call stack */
-	uint32_t i = 0;
-	uint32_t frame[2];
-
-	struct arm_saved_state* state = find_user_regs(current_thread());
-
-	if (!state) {
-		while (i < callstack_max) {
-			buf[i++] = 0;
-		}
-	} else {
-		buf[i++] = (uintptr_t)state->pc;
-		frame[0] = state->r[7];
-
-		while (i < callstack_max && frame[0] != 0) {
-			if (copyinframe(frame[0], (void*) frame)) {
-				break;
-			}
-			buf[i++] = (uintptr_t)frame[1];
-		}
-
-		while (i < callstack_max) {
-			buf[i++] = 0;
-		}
-	}
-}
-
-#endif                          /* MACH_ASSERT */
 
 int
 clr_be_bit(void)

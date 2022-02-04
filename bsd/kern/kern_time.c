@@ -95,15 +95,12 @@
 #define HZ      100     /* XXX */
 
 /* simple lock used to access timezone, tz structure */
-lck_spin_t * tz_slock;
-lck_grp_t * tz_slock_grp;
-lck_attr_t * tz_slock_attr;
-lck_grp_attr_t  *tz_slock_grp_attr;
+static LCK_GRP_DECLARE(tz_slock_grp, "tzlock");
+static LCK_SPIN_DECLARE(tz_slock, &tz_slock_grp);
 
 static void             setthetime(
 	struct timeval  *tv);
 
-void time_zone_slock_init(void);
 static boolean_t timeval_fixusec(struct timeval *t1);
 
 /*
@@ -151,9 +148,9 @@ gettimeofday(
 	}
 
 	if (uap->tzp) {
-		lck_spin_lock(tz_slock);
+		lck_spin_lock(&tz_slock);
 		ltz = tz;
-		lck_spin_unlock(tz_slock);
+		lck_spin_unlock(&tz_slock);
 
 		error = copyout((caddr_t)&ltz, CAST_USER_ADDR_T(uap->tzp), sizeof(tz));
 	}
@@ -179,7 +176,7 @@ settimeofday(__unused struct proc *p, struct settimeofday_args  *uap, __unused i
 	bzero(&atv, sizeof(atv));
 
 	/* Check that this task is entitled to set the time or it is root */
-	if (!IOTaskHasEntitlement(current_task(), SETTIME_ENTITLEMENT)) {
+	if (!IOCurrentTaskHasEntitlement(SETTIME_ENTITLEMENT)) {
 #if CONFIG_MACF
 		error = mac_system_check_settime(kauth_cred_get());
 		if (error) {
@@ -224,9 +221,9 @@ settimeofday(__unused struct proc *p, struct settimeofday_args  *uap, __unused i
 		setthetime(&atv);
 	}
 	if (uap->tzp) {
-		lck_spin_lock(tz_slock);
+		lck_spin_lock(&tz_slock);
 		tz = atz;
-		lck_spin_unlock(tz_slock);
+		lck_spin_unlock(&tz_slock);
 	}
 	return 0;
 }
@@ -494,7 +491,7 @@ realitexpire(
 	struct proc *r;
 	struct timeval t;
 
-	r = proc_find(p->p_pid);
+	r = proc_find(proc_getpid(p));
 
 	proc_spinlock(p);
 
@@ -588,7 +585,7 @@ proc_free_realitimer(proc_t p)
 	proc_spinlock(p);
 
 	assert(p->p_rcall != NULL);
-	assert(p->p_refcount == 0);
+	assert(proc_list_exited(p));
 
 	timerclear(&p->p_realtimer.it_interval);
 
@@ -920,21 +917,6 @@ ppsratecheck(struct timeval *lasttime, int *curpps, int maxpps)
 	return rv;
 }
 #endif /* NETWORKING */
-
-void
-time_zone_slock_init(void)
-{
-	/* allocate lock group attribute and group */
-	tz_slock_grp_attr = lck_grp_attr_alloc_init();
-
-	tz_slock_grp =  lck_grp_alloc_init("tzlock", tz_slock_grp_attr);
-
-	/* Allocate lock attribute */
-	tz_slock_attr = lck_attr_alloc_init();
-
-	/* Allocate the spin lock */
-	tz_slock = lck_spin_alloc_init(tz_slock_grp, tz_slock_attr);
-}
 
 int
 __mach_bridge_remote_time(__unused struct proc *p, struct __mach_bridge_remote_time_args *mbrt_args, uint64_t *retval)

@@ -61,8 +61,9 @@
 #include <sys/kdebug.h>
 
 
+#include <san/kcov_stksz.h>
+
 extern int debug_task;
-extern bool need_wa_rdar_55577508;
 
 /* zone for debug_state area */
 ZONE_DECLARE(ads_zone, "arm debug state", sizeof(arm_debug_state_t), ZC_NONE);
@@ -90,6 +91,8 @@ consider_machine_adjust(void)
 
 
 
+
+
 static inline void
 machine_thread_switch_cpu_data(thread_t old, thread_t new)
 {
@@ -109,32 +112,21 @@ machine_thread_switch_cpu_data(thread_t old, thread_t new)
 	new->machine.pcpu_data_base = base;
 }
 
-/*
- * Routine: machine_switch_context
+/**
+ * routine: machine_switch_pmap_and_extended_context
+ *
+ * Helper function used by machine_switch_context and machine_stack_handoff to switch the
+ * extended context and switch the pmap if necessary.
  *
  */
-thread_t
-machine_switch_context(thread_t old,
-    thread_continue_t continuation,
-    thread_t new)
+
+static inline void
+machine_switch_pmap_and_extended_context(thread_t old, thread_t new)
 {
-	thread_t retval;
-	pmap_t       new_pmap;
+	pmap_t new_pmap;
 
-#if __ARM_PAN_AVAILABLE__
-	if (__improbable(__builtin_arm_rsr("pan") == 0)) {
-		panic("context switch with PAN disabled");
-	}
-#endif
 
-#define machine_switch_context_kprintf(x...) \
-	/* kprintf("machine_switch_context: " x) */
 
-	if (old == new) {
-		panic("machine_switch_context");
-	}
-
-	kpc_off_cpu(old);
 
 
 
@@ -160,6 +152,35 @@ machine_switch_context(thread_t old,
 
 
 	machine_thread_switch_cpu_data(old, new);
+}
+
+/*
+ * Routine: machine_switch_context
+ *
+ */
+thread_t
+machine_switch_context(thread_t old,
+    thread_continue_t continuation,
+    thread_t new)
+{
+	thread_t retval;
+
+#if __ARM_PAN_AVAILABLE__
+	if (__improbable(__builtin_arm_rsr("pan") == 0)) {
+		panic("context switch with PAN disabled");
+	}
+#endif
+
+#define machine_switch_context_kprintf(x...) \
+	/* kprintf("machine_switch_context: " x) */
+
+	if (old == new) {
+		panic("machine_switch_context");
+	}
+
+	kpc_off_cpu(old);
+
+	machine_switch_pmap_and_extended_context(old, new);
 
 	machine_switch_context_kprintf("old= %x contination = %x new = %x\n", old, continuation, new);
 
@@ -181,8 +202,7 @@ machine_thread_on_core(thread_t thread)
  *
  */
 kern_return_t
-machine_thread_create(thread_t thread,
-    task_t task)
+machine_thread_create(thread_t thread, task_t task, bool first_thread)
 {
 	arm_context_t *thread_user_ss = NULL;
 	kern_return_t result = KERN_SUCCESS;
@@ -192,7 +212,7 @@ machine_thread_create(thread_t thread,
 
 	machine_thread_create_kprintf("thread = %x\n", thread);
 
-	if (current_thread() != thread) {
+	if (!first_thread) {
 		thread->machine.CpuDatap = (cpu_data_t *)0;
 		// setting this offset will cause trying to use it to panic
 		thread->machine.pcpu_data_base = (vm_offset_t)VM_MIN_KERNEL_ADDRESS;
@@ -211,12 +231,8 @@ machine_thread_create(thread_t thread,
 
 	if (task != kernel_task) {
 		/* If this isn't a kernel thread, we'll have userspace state. */
-		thread->machine.contextData = (arm_context_t *)zalloc(user_ss_zone);
-
-		if (!thread->machine.contextData) {
-			result = KERN_FAILURE;
-			goto done;
-		}
+		thread->machine.contextData = zalloc_flags(user_ss_zone,
+		    Z_WAITOK | Z_NOFAIL);
 
 		thread->machine.upcb = &thread->machine.contextData->ss;
 		thread->machine.uNeon = &thread->machine.contextData->ns;
@@ -243,7 +259,6 @@ machine_thread_create(thread_t thread,
 	bzero(&thread->machine.perfctrl_state, sizeof(thread->machine.perfctrl_state));
 	result = machine_thread_state_initialize(thread);
 
-done:
 	if (result != KERN_SUCCESS) {
 		thread_user_ss = thread->machine.contextData;
 
@@ -330,6 +345,9 @@ machine_stack_detach(thread_t thread)
 	    (uintptr_t)thread_tid(thread), thread->priority, thread->sched_pri, 0, 0);
 
 	stack = thread->kernel_stack;
+#if CONFIG_STKSZ
+	kcov_stksz_set_thread_stack(thread, stack);
+#endif
 	thread->kernel_stack = 0;
 	thread->machine.kstackptr = 0;
 
@@ -357,6 +375,9 @@ machine_stack_attach(thread_t thread,
 	    (uintptr_t)thread_tid(thread), thread->priority, thread->sched_pri, 0, 0);
 
 	thread->kernel_stack = stack;
+#if CONFIG_STKSZ
+	kcov_stksz_set_thread_stack(thread, 0);
+#endif
 	thread->machine.kstackptr = stack + kernel_stack_size - sizeof(struct thread_kernel_state);
 	thread_initialize_kernel_state(thread);
 
@@ -367,54 +388,25 @@ machine_stack_attach(thread_t thread,
 	savestate = &context->ss;
 	savestate->fp = 0;
 	savestate->sp = thread->machine.kstackptr;
-
-	/*
-	 * The PC and CPSR of the kernel stack saved state are never used by context switch
-	 * code, and should never be used on exception return either. We're going to poison
-	 * these values to ensure they never get copied to the exception frame and used to
-	 * hijack control flow or privilege level on exception return.
-	 */
-
-	const uint32_t default_cpsr = PSR64_KERNEL_POISON;
+	savestate->pc = 0;
 #if defined(HAS_APPLE_PAC)
 	/* Sign the initial kernel stack saved state */
-	boolean_t intr = ml_set_interrupts_enabled(FALSE);
+	uint64_t intr = ml_pac_safe_interrupts_disable();
 	asm volatile (
-                "mov	x0, %[ss]"                              "\n"
-
-                "mov	x1, xzr"                                "\n"
-                "str	x1, [x0, %[SS64_PC]]"                   "\n"
-
-                "mov	x2, %[default_cpsr_lo]"                 "\n"
-                "movk	x2, %[default_cpsr_hi], lsl #16"        "\n"
-                "str	w2, [x0, %[SS64_CPSR]]"                 "\n"
-
-                "adrp	x3, _thread_continue@page"              "\n"
-                "add	x3, x3, _thread_continue@pageoff"       "\n"
-                "str	x3, [x0, %[SS64_LR]]"                   "\n"
-
-                "mov	x4, xzr"                                "\n"
-                "mov	x5, xzr"                                "\n"
-                "stp	x4, x5, [x0, %[SS64_X16]]"              "\n"
-
-                "mov	x6, lr"                                 "\n"
-                "bl	_ml_sign_kernel_thread_state"                   "\n"
-                "mov	lr, x6"                                 "\n"
+                "adrp	x17, _thread_continue@page"             "\n"
+                "add	x17, x17, _thread_continue@pageoff"     "\n"
+                "ldr	x16, [%[ss], %[SS64_SP]]"               "\n"
+                "pacia1716"                                     "\n"
+                "str	x17, [%[ss], %[SS64_LR]]"               "\n"
                 :
                 : [ss]                  "r"(&context->ss),
-                  [default_cpsr_lo]     "M"(default_cpsr & 0xFFFF),
-                  [default_cpsr_hi]     "M"(default_cpsr >> 16),
-                  [SS64_X16]            "i"(offsetof(struct arm_kernel_saved_state, x[0])),
-                  [SS64_PC]             "i"(offsetof(struct arm_kernel_saved_state, pc)),
-                  [SS64_CPSR]           "i"(offsetof(struct arm_kernel_saved_state, cpsr)),
+                  [SS64_SP]             "i"(offsetof(struct arm_kernel_saved_state, sp)),
                   [SS64_LR]             "i"(offsetof(struct arm_kernel_saved_state, lr))
-                : "x0", "x1", "x2", "x3", "x4", "x5", "x6"
+                : "x16", "x17"
         );
-	ml_set_interrupts_enabled(intr);
+	ml_pac_safe_interrupts_restore(intr);
 #else
 	savestate->lr = (uintptr_t)thread_continue;
-	savestate->cpsr = default_cpsr;
-	savestate->pc = 0;
 #endif /* defined(HAS_APPLE_PAC) */
 	neon_savestate = &context->ns;
 	neon_savestate->fpcr = FPCR_DEFAULT;
@@ -431,7 +423,6 @@ machine_stack_handoff(thread_t old,
     thread_t new)
 {
 	vm_offset_t  stack;
-	pmap_t       new_pmap;
 
 #if __ARM_PAN_AVAILABLE__
 	if (__improbable(__builtin_arm_rsr("pan") == 0)) {
@@ -442,6 +433,9 @@ machine_stack_handoff(thread_t old,
 	kpc_off_cpu(old);
 
 	stack = machine_stack_detach(old);
+#if CONFIG_STKSZ
+	kcov_stksz_set_thread_stack(new, 0);
+#endif
 	new->kernel_stack = stack;
 	new->machine.kstackptr = stack + kernel_stack_size - sizeof(struct thread_kernel_state);
 	if (stack == old->reserved_stack) {
@@ -450,30 +444,7 @@ machine_stack_handoff(thread_t old,
 		new->reserved_stack = stack;
 	}
 
-
-
-
-	new_pmap = new->map->pmap;
-	if (old->map->pmap != new_pmap) {
-		pmap_switch(new_pmap);
-	} else {
-		/*
-		 * If the thread is preempted while performing cache or TLB maintenance,
-		 * it may be migrated to a different CPU between the completion of the relevant
-		 * maintenance instruction and the synchronizing DSB.   ARM requires that the
-		 * synchronizing DSB must be issued *on the PE that issued the maintenance instruction*
-		 * in order to guarantee completion of the instruction and visibility of its effects.
-		 * Issue DSB here to enforce that guarantee.  We only do this for the case in which
-		 * the pmap isn't changing, as we expect pmap_switch() to issue DSB when it updates
-		 * TTBR0.  Note also that cache maintenance may be performed in userspace, so we
-		 * cannot further limit this operation e.g. by setting a per-thread flag to indicate
-		 * a pending kernel TLB or cache maintenance instruction.
-		 */
-		__builtin_arm_dsb(DSB_ISH);
-	}
-
-
-	machine_thread_switch_cpu_data(old, new);
+	machine_switch_pmap_and_extended_context(old, new);
 
 	machine_set_current_thread(new);
 	thread_initialize_kernel_state(new);
@@ -1017,10 +988,6 @@ machine_thread_set_tsd_base(thread_t         thread,
 		return KERN_INVALID_ARGUMENT;
 	}
 
-	if (tsd_base & MACHDEP_CPUNUM_MASK) {
-		return KERN_INVALID_ARGUMENT;
-	}
-
 	if (thread_is_64bit_addr(thread)) {
 		if (tsd_base > vm_map_max(thread->map)) {
 			tsd_base = 0ULL;
@@ -1035,12 +1002,8 @@ machine_thread_set_tsd_base(thread_t         thread,
 
 	/* For current thread, make the TSD base active immediately */
 	if (thread == current_thread()) {
-		uint64_t cpunum, tpidrro_el0;
-
 		mp_disable_preemption();
-		tpidrro_el0 = get_tpidrro();
-		cpunum = tpidrro_el0 & (MACHDEP_CPUNUM_MASK);
-		set_tpidrro(tsd_base | cpunum);
+		set_tpidrro(tsd_base);
 		mp_enable_preemption();
 	}
 
@@ -1058,15 +1021,18 @@ machine_csv(__unused cpuvn_e cve)
 	return 0;
 }
 
+#if __ARM_ARCH_8_5__
+void
+arm_context_switch_requires_sync()
+{
+	current_cpu_datap()->sync_on_cswitch = 1;
+}
+#endif
 
 #if __has_feature(ptrauth_calls)
 boolean_t
 arm_user_jop_disabled(void)
 {
-#if DEVELOPMENT || DEBUG
-	return !!(BootArgs->bootFlags & kBootFlagsDisableUserJOP);
-#else
 	return FALSE;
-#endif
 }
 #endif /* __has_feature(ptrauth_calls) */

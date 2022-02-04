@@ -78,7 +78,7 @@ serverprefix vm32_;
 /* See vm_map.defs for more information */
 
 routine region(
-                target_task     : vm_map_t;
+                target_task     : vm_map_read_t;
 	inout	address		: vm32_address_t;
         out     size            : vm32_size_t;
 		flavor		: vm_region_flavor_t;
@@ -112,13 +112,13 @@ routine inherit(
 		new_inheritance	: vm_inherit_t);
 
 routine read(
-		target_task	: vm_map_t;
+		target_task	: vm_map_read_t;
 		address		: vm32_address_t;
 		size		: vm32_size_t;
 	out	data		: pointer_t);
 
 routine read_list(
-		target_task 	: vm_map_t;
+		target_task 	: vm_map_read_t;
 	inout	data_list   	: vm32_read_entry_t;
 		count		: natural_t);
 
@@ -134,7 +134,7 @@ routine copy(
 		dest_address	: vm32_address_t);
 
 routine read_overwrite(
-		target_task	: vm_map_t;
+		target_task	: vm_map_read_t;
 		address		: vm32_address_t;
 		size		: vm32_size_t;
 		data		: vm32_address_t;
@@ -199,45 +199,45 @@ routine make_memory_entry(
 		parent_entry	:mem_entry_name_port_t);
 
 routine map_page_query(
-                target_map      :vm_map_t;
+                target_map      :vm_map_read_t;
                 offset          :vm32_offset_t;
         out     disposition     :integer_t;
         out     ref_count       :integer_t);
 
 routine region_info(
-		task		: vm_map_t;
+		task		: vm_map_read_t;
 		address		: vm32_address_t;
 	out	region		: vm_info_region_t;
 	out	objects		: vm_info_object_array_t);
 
 routine mapped_pages_info(
-		task		: vm_map_t;
+		task		: vm_map_read_t;
 	out	pages		: page_address_array_t);
 
 skip; /* was vm_region_object_create */
 
 routine region_recurse(
-                target_task     : vm_map_t;
+                target_task     : vm_map_read_t;
 	inout	address		: vm32_address_t;
         out     size            : vm32_size_t;
 	inout	nesting_depth	: natural_t;
 	out	info		: vm_region_recurse_info_t,CountInOut);
 
 routine region_recurse_64(
-                target_task     : vm_map_t;
+                target_task     : vm_map_read_t;
 	inout	address		: vm32_address_t;
         out     size            : vm32_size_t;
 	inout	nesting_depth	: natural_t;
 	out	info		: vm_region_recurse_info_t,CountInOut);
 
 routine region_info_64(
-		task		: vm_map_t;
+		task		: vm_map_read_t;
 		address		: vm32_address_t;
 	out	region		: vm_info_region_64_t;
 	out	objects		: vm_info_object_array_t);
 
 routine region_64(
-                target_task     : vm_map_t;
+                target_task     : vm_map_read_t;
 	inout	address		: vm32_address_t;
         out     size            : vm32_size_t;
 		flavor		: vm_region_flavor_t;

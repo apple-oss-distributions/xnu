@@ -164,7 +164,7 @@ static int
 proc_apply_sfi_managed(proc_t p, void * arg)
 {
 	uint32_t flags = *(uint32_t *)arg;
-	pid_t pid = p->p_pid;
+	pid_t pid = proc_getpid(p);
 	boolean_t managed_enabled = (flags == SFI_PROCESS_SET_MANAGED)? TRUE : FALSE;
 
 	if (pid == 0) {         /* ignore setting on kernproc */

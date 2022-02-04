@@ -66,7 +66,9 @@
 
 #include <sys/queue.h>
 #include <sys/kern_event.h>
+#include <net/if_var.h>
 #include <net/net_kev.h>
+#include <netinet/in.h>
 
 #ifdef BSD_KERNEL_PRIVATE
 #include <net/route.h>
@@ -183,7 +185,7 @@ extern void socket_post_kev_msg_closed(struct socket *);
  */
 extern TAILQ_HEAD(in_ifaddrhead, in_ifaddr) in_ifaddrhead;
 extern TAILQ_HEAD(in_ifaddrhashhead, in_ifaddr) * in_ifaddrhashtbl;
-extern lck_rw_t *in_ifaddr_rwlock;
+extern lck_rw_t in_ifaddr_rwlock;
 
 #define INADDR_HASH(x)  (&in_ifaddrhashtbl[inaddr_hashval(x)])
 
@@ -199,7 +201,7 @@ extern  u_char  inetctlerrmap[];
 {                                                                       \
 	struct in_ifaddr *ia;                                           \
                                                                         \
-	lck_rw_lock_shared(in_ifaddr_rwlock);                           \
+	lck_rw_lock_shared(&in_ifaddr_rwlock);                          \
 	TAILQ_FOREACH(ia, INADDR_HASH((addr).s_addr), ia_hash) {        \
 	        IFA_LOCK_SPIN(&ia->ia_ifa);                             \
 	        if (IA_SIN(ia)->sin_addr.s_addr == (addr).s_addr) {     \
@@ -209,7 +211,7 @@ extern  u_char  inetctlerrmap[];
 	        IFA_UNLOCK(&ia->ia_ifa);                                \
 	}                                                               \
 	(ifp) = (ia == NULL) ? NULL : ia->ia_ifp;                       \
-	lck_rw_done(in_ifaddr_rwlock);                                  \
+	lck_rw_done(&in_ifaddr_rwlock);                                 \
 }
 
 /*
@@ -221,14 +223,14 @@ extern  u_char  inetctlerrmap[];
 	/* struct ifnet *ifp; */                                        \
 	/* struct in_ifaddr *ia; */                                     \
 {                                                                       \
-	lck_rw_lock_shared(in_ifaddr_rwlock);                           \
+	lck_rw_lock_shared(&in_ifaddr_rwlock);                          \
 	for ((ia) = TAILQ_FIRST(&in_ifaddrhead);                        \
 	    (ia) != NULL && (ia)->ia_ifp != (ifp);                      \
 	    (ia) = TAILQ_NEXT((ia), ia_link))                           \
 	        continue;                                               \
 	if ((ia) != NULL)                                               \
 	        IFA_ADDREF(&(ia)->ia_ifa);                              \
-	lck_rw_done(in_ifaddr_rwlock);                                  \
+	lck_rw_done(&in_ifaddr_rwlock);                                 \
 }
 
 /*

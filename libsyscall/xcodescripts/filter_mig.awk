@@ -6,7 +6,9 @@
 # and prepends the first line in the template file.
 
 # Example template format:
+#       %{
 #       __WATCHOS_PROHIBITED
+#       %}
 #       act_get_state
 #       thread_get_state
 # 
@@ -14,11 +16,31 @@
 # BEGIN { print ARGV[1]; print ARGV[2] }
 
 # In the first file, build array of lines
+NR==FNR && /^ *$/ {
+	next
+}
+NR==FNR && /^#/ {
+	next
+}
+NR==FNR && /%{/ {
+	parse_prefix = 1
+	prefix = ""
+	next
+}
+NR==FNR && /^%}/ {
+	parse_prefix = 0
+	next
+}
 NR==FNR {
-	if (NR==1)
-		prefix=$0
-	else
-		templates[$0];
+	if (parse_prefix && length(prefix)) {
+		prefix = sprintf("%s\n%s", prefix, $0)
+	} else if (parse_prefix) {
+		prefix = $0
+	} else if (length(templates[$0])) {
+		templates[$0] = sprintf("%s\n%s", templates[$0], prefix)
+	} else {
+		templates[$0] = prefix
+	}
 	next
 }
 
@@ -29,7 +51,7 @@ NR==FNR {
 /^kern_return_t/ {
 #	print "match"
 	if ($2 in templates) {
-		print prefix
+		print templates[$2]
 	}
 }
 

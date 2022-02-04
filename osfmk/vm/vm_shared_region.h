@@ -58,7 +58,7 @@ extern int shared_region_debug;
 
 extern int shared_region_trace_level;
 
-extern struct vm_shared_region *init_task_shared_region;
+extern struct vm_shared_region *primary_system_shared_region;
 
 #define SHARED_REGION_TRACE_NONE_LVL            0 /* no trace */
 #define SHARED_REGION_TRACE_ERROR_LVL           1 /* trace abnormal events */
@@ -213,16 +213,17 @@ struct vm_shared_region {
 	thread_call_t           sr_timer_call;
 	uuid_t                  sr_uuid;
 
-	bool                    sr_mapping_in_progress;
+	bool                    sr_mapping_in_progress; /* sr_first_mapping will be != -1 when done */
 	bool                    sr_slide_in_progress;
 	bool                    sr_64bit;
 	bool                    sr_persists;
 	bool                    sr_uuid_copied;
 	bool                    sr_stale;              /* This region should never be used again. */
+	bool                    sr_driverkit;
 
 #if __has_feature(ptrauth_calls)
 	bool                    sr_reslide;            /* Special shared region for suspected attacked processes */
-#define NUM_SR_AUTH_SECTIONS 2
+#define NUM_SR_AUTH_SECTIONS 4     /* 1 RW and 1 RO section in up to 2 files - should be made dynamic */
 	vm_shared_region_slide_info_t sr_auth_section[NUM_SR_AUTH_SECTIONS];
 	uint_t                  sr_num_auth_section;
 #endif /* __has_feature(ptrauth_calls) */
@@ -266,7 +267,8 @@ extern kern_return_t vm_shared_region_enter(
 	void                    *fsroot,
 	cpu_type_t              cpu,
 	cpu_subtype_t           cpu_subtype,
-	boolean_t               reslide);
+	boolean_t               reslide,
+	boolean_t               is_driverkit);
 extern kern_return_t vm_shared_region_remove(
 	struct _vm_map          *map,
 	struct task             *task);
@@ -275,12 +277,6 @@ extern vm_shared_region_t vm_shared_region_get(
 extern vm_shared_region_t vm_shared_region_trim_and_get(
 	struct task             *task);
 extern void vm_shared_region_deallocate(
-	struct vm_shared_region *shared_region);
-extern mach_vm_offset_t vm_shared_region_base_address(
-	struct vm_shared_region *shared_region);
-extern mach_vm_size_t vm_shared_region_size(
-	struct vm_shared_region *shared_region);
-extern ipc_port_t vm_shared_region_mem_entry(
 	struct vm_shared_region *shared_region);
 extern vm_map_t vm_shared_region_vm_map(
 	struct vm_shared_region *shared_region);
@@ -292,10 +288,12 @@ extern vm_shared_region_t vm_shared_region_lookup(
 	cpu_type_t              cpu,
 	cpu_subtype_t           cpu_subtype,
 	boolean_t               is_64bit,
-	boolean_t               reslide);
+	boolean_t               reslide,
+	boolean_t               is_driverkit);
 extern kern_return_t vm_shared_region_start_address(
 	struct vm_shared_region *shared_region,
-	mach_vm_offset_t        *start_address);
+	mach_vm_offset_t        *start_address,
+	task_t                  task);
 extern void vm_shared_region_undo_mappings(
 	vm_map_t sr_map,
 	mach_vm_offset_t sr_base_address,
@@ -305,9 +303,10 @@ extern void vm_shared_region_undo_mappings(
 __attribute__((noinline))
 extern kern_return_t vm_shared_region_map_file(
 	struct vm_shared_region *shared_region,
-	void                    *root_dir,
 	int                     sr_mappings_count,
 	struct _sr_file_mappings *sr_mappings);
+extern void *vm_shared_region_root_dir(
+	struct vm_shared_region *shared_region);
 extern kern_return_t vm_shared_region_sliding_valid(uint32_t slide);
 extern void vm_commpage_init(void);
 extern void vm_commpage_text_init(void);

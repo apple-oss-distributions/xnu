@@ -257,7 +257,7 @@ tsc_init(void)
 		busFCvtt2n = ((1 * Giga) << 32) / busFreq;
 		busFCvtn2t = 0xFFFFFFFFFFFFFFFFULL / busFCvtt2n;
 	} else {
-		panic("tsc_init: EFI not supported!\n");
+		panic("tsc_init: EFI not supported!");
 	}
 
 	kprintf(" BUS: Frequency = %6d.%06dMHz, "

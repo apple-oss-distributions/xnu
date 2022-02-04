@@ -41,6 +41,7 @@ class IOMemoryDescriptor;
 class IOBufferMemoryDescriptor;
 class IOUserClient;
 class OSAction;
+class IOServiceStateNotificationDispatchSource;
 
 typedef char IOServiceName[128];
 typedef char IOPropertyName[128];
@@ -58,6 +59,16 @@ enum {
 	kIOServicePowerCapabilityLow = 0x00010000,
 };
 
+enum {
+	_kIOPMWakeEventSource = 0x00000001,
+};
+
+// values for OSNumber kIOSystemStateHaltDescriptionKey:kIOSystemStateHaltDescriptionHaltStateKey
+enum {
+	kIOServiceHaltStatePowerOff = 0x00000001,
+	kIOServiceHaltStateRestart  = 0x00000002,
+};
+
 /*!
  * @class IOService
  *
@@ -70,7 +81,9 @@ enum {
  *
 
 @iig implementation
+#include <DriverKit/IODispatchQueue.h>
 #include <DriverKit/IOUserClient.h>
+#include <DriverKit/IOServiceStateNotificationDispatchSource.h>
 @iig end
 */
 
@@ -105,6 +118,15 @@ public:
      */
 	virtual kern_return_t
 	Stop(IOService * provider) LOCAL;
+
+	/*! @function   ClientCrashed
+	 * @discussion  Notification for kernel objects of a client crash.
+     * @param       client Attached client.
+     * @param       options No options are currently defined.
+	 * @return      kIOReturnSuccess on success. See IOReturn.h for error codes.
+	 */
+	virtual kern_return_t
+	ClientCrashed(IOService * client, uint64_t options);
 
     /*!
      * @brief       Obtain IOKit IORegistryEntryID.
@@ -154,6 +176,16 @@ public:
 	CopyDispatchQueue(
 		const IODispatchQueueName name,
 		IODispatchQueue        ** queue) override;
+
+    /*!
+     * @brief       Create the default IODispatchQueue for an IOService. IOService::init()
+     *              calls this to create its default queue.
+     * @param       queue Returned, retained queue or NULL.
+     * @return      kIOReturnSuccess on success. See IOReturn.h for error codes.
+     */
+	virtual kern_return_t
+	CreateDefaultDispatchQueue(
+		IODispatchQueue        ** queue) LOCAL;
 
     /*!
      * @brief       Obtain the IOKit registry properties for the IOService.
@@ -296,6 +328,38 @@ public:
 	RequireMaxBusStall(
 		uint64_t maxBusStall);
 
+	/*! @function AdjustBusy
+	 * @discussion Adjust the busy state of this service by applying a delta to the current busy state.
+	 *             Adjusting the busy state of a service to or from zero will change the provider's busy state by one, in the same direction.
+	 * @param       delta  The delta value to apply to the busy state.
+	 * @return      kIOReturnSuccess on success. See IOReturn.h for error codes.
+	 */
+	virtual kern_return_t
+	AdjustBusy(int32_t delta);
+
+	/*! @function GetBusyState
+	 * @discussion Get the busy state of this service.
+	 * @param      busyState The returned busy state.
+	 * @return     kIOReturnSuccess on success. See IOReturn.h for error codes.
+	 */
+	virtual kern_return_t
+	GetBusyState(uint32_t *busyState);
+
+   /*!
+    * @brief       Post an event to CoreAnalytics.
+    * @discussion  Post an event to CoreAnalytics. See the CoreAnalytics documentation for
+    *              details.
+    * @param       options No options currently defined pass zero.
+    * @param       eventName See the CoreAnalytics documentation for details.
+    * @param       eventPayload See the CoreAnalytics documentation for details.
+    * @return      kIOReturnSuccess on success. See IOReturn.h for error codes.
+    */
+	virtual kern_return_t
+	CoreAnalyticsSendEvent(
+		uint64_t       options,
+		OSString     * eventName,
+		OSDictionary * eventPayload);
+
 	/*! @function IOCreatePropertyMatchingDictionary
 	 *   @abstract Construct a matching dictionary for property matching.
 	 */
@@ -344,11 +408,127 @@ public:
 	static OSDictionary *
 	CreateNameMatchingDictionary(const char * serviceName, OSDictionary * matching) LOCALONLY;
 
+	/*! @function UpdateReport
+	 *  @abstract update an IOReporting subscription by reading out channel data.
+	 */
+	virtual IOReturn UpdateReport(OSData *channels, uint32_t action,
+                                   uint32_t *outElementCount,
+                                   uint64_t offset, uint64_t capacity,
+                                   IOMemoryDescriptor *buffer);
+
+	/*! @function ConfigureReport
+	*   @abstract Configure an IOReporting subscription
+	*   @discussion outCount is counting channels for enable,disable.  It is counting
+	*     elements for getDimensions
+	*/
+	virtual IOReturn ConfigureReport(OSData *channels, uint32_t action, uint32_t *outCount);
+
+	/*! @function SetLegend
+	 * @abstract set IORLegend and IORLegendPublic ioreg properties on this service.
+	 * @discussion For use by DriverKit userspace services, since they can't set
+	 *  registry properties directly.
+	 */
+	virtual IOReturn SetLegend(OSArray *legend, bool is_public);
+
+	/*!
+	 * @brief       Get the IORegistryEntry name.
+	 * @return      kIOReturnSuccess on success. See IOReturn.h for error codes.
+	 */
+	virtual kern_return_t
+	CopyName(OSString ** name);
+
+	/*! @function StringFromReturn
+	 *   @abstract Get a string description for an IOReturn value.
+	 *   @return   kIOReturnSuccess on success. See IOReturn.h for error codes.
+	 */
+	virtual kern_return_t
+	StringFromReturn(
+		 IOReturn    retval,
+		 OSString ** str);
+
+	virtual kern_return_t
+	_ClaimSystemWakeEvent(
+		IOService          * device,
+		uint64_t             flags,
+		const IOPropertyName reason,
+		OSContainer       *  details);
+
+#if PRIVATE_WIFI_ONLY
+	/*!
+	 * @brief      Optionally supported external method to set properties in this service.
+	 * @param      properties The properties to set.
+	 * @return     kIOReturnSuccess on success. See IOReturn.h for error codes.
+	 */
+	virtual kern_return_t
+	UserSetProperties(OSContainer * properties) LOCAL;
+#endif /* PRIVATE_WIFI_ONLY */
+
+	/*! @function RemoveProperty
+	 *   @abstract Remove a property from the IOService.
+	 *   @return   kIOReturnSuccess on success. See IOReturn.h for error codes.
+	 */
+	virtual kern_return_t
+	RemoveProperty(OSString * propertyName);
+
+	/*! @function GetProvider
+	 *   @abstract Get the provider of this IOService.
+	 *   @discussion The DriverKit runtime caches the provider passed to IOService::Start(IOService * provider).
+	 *               This method returns the cached object.
+	 */
+	IOService *
+	GetProvider() const LOCALONLY;
+
+   /*!
+    * @function CopySystemStateNotificationService
+    * @abstract Obtain the system state notification service.
+    * @param    service Return IOService object with +1 retain count, to be released
+    *           by the caller.
+    * @return   kIOReturnSuccess on success. See IOReturn.h for error codes.
+	*/
+	virtual kern_return_t
+	CopySystemStateNotificationService(IOService ** service);
+
+   /*!
+    * @function StateNotificationItemCreate
+    * @abstract Create a state notification item.
+    * @param    itemName name of the item.
+    * @param    schema dictionary describing behaviors for the item. Keys are defined in
+    *           IOKitKeys.h kIOStateNotification*
+    * @return   kIOReturnSuccess on success. See IOReturn.h for error codes.
+	*/
+	virtual kern_return_t
+	StateNotificationItemCreate(OSString * itemName, OSDictionary * schema);
+
+   /*!
+    * @function StateNotificationItemSet
+    * @abstract Set the value of a state notification item.
+    * @param    itemName name of the item.
+    * @param    value dictionary value for the item, item creator to define.
+    * @return   kIOReturnSuccess on success. See IOReturn.h for error codes.
+	*/
+	virtual kern_return_t
+	StateNotificationItemSet(OSString * itemName, OSDictionary * value);
+
+   /*!
+    * @function StateNotificationItemCopy
+    * @abstract Set the value of a state notification item.
+    * @param    itemName name of the item.
+    * @param    value dictionary value for the item, item creator to define.
+    * @return   kIOReturnSuccess on success. See IOReturn.h for error codes.
+	*/
+	virtual kern_return_t
+	StateNotificationItemCopy(OSString * itemName, OSDictionary ** value);
 
 private:
 	virtual void
 	Stop_async(
 		IOService          * provider) LOCAL;
+
+	virtual kern_return_t
+	_NewUserClient(
+		uint32_t type,
+		OSDictionary *  entitlements,
+		IOUserClient ** userClient) LOCAL;
 };
 
 #endif /* ! _IOKIT_UIOSERVICE_H */

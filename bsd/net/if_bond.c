@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2004-2020 Apple Inc. All rights reserved.
+ * Copyright (c) 2004-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -110,67 +110,32 @@ typedef struct bondport_s bondport, * bondport_ref;
 /**
 ** bond locks
 **/
-static __inline__ lck_grp_t *
-my_lck_grp_alloc_init(const char * grp_name)
-{
-	lck_grp_t *         grp;
-	lck_grp_attr_t *    grp_attrs;
 
-	grp_attrs = lck_grp_attr_alloc_init();
-	grp = lck_grp_alloc_init(grp_name, grp_attrs);
-	lck_grp_attr_free(grp_attrs);
-	return grp;
-}
-
-static __inline__ lck_mtx_t *
-my_lck_mtx_alloc_init(lck_grp_t * lck_grp)
-{
-	lck_attr_t *        lck_attrs;
-	lck_mtx_t *         lck_mtx;
-
-	lck_attrs = lck_attr_alloc_init();
-	lck_mtx = lck_mtx_alloc_init(lck_grp, lck_attrs);
-	lck_attr_free(lck_attrs);
-	return lck_mtx;
-}
-
-static lck_mtx_t *      bond_lck_mtx;
-
-static __inline__ void
-bond_lock_init(void)
-{
-	lck_grp_t *         bond_lck_grp;
-
-	bond_lck_grp = my_lck_grp_alloc_init("if_bond");
-	bond_lck_mtx = my_lck_mtx_alloc_init(bond_lck_grp);
-}
+static LCK_GRP_DECLARE(bond_lck_grp, "if_bond");
+static LCK_MTX_DECLARE(bond_lck_mtx, &bond_lck_grp);
 
 static __inline__ void
 bond_assert_lock_held(void)
 {
-	LCK_MTX_ASSERT(bond_lck_mtx, LCK_MTX_ASSERT_OWNED);
-	return;
+	LCK_MTX_ASSERT(&bond_lck_mtx, LCK_MTX_ASSERT_OWNED);
 }
 
 static __inline__ void
 bond_assert_lock_not_held(void)
 {
-	LCK_MTX_ASSERT(bond_lck_mtx, LCK_MTX_ASSERT_NOTOWNED);
-	return;
+	LCK_MTX_ASSERT(&bond_lck_mtx, LCK_MTX_ASSERT_NOTOWNED);
 }
 
 static __inline__ void
 bond_lock(void)
 {
-	lck_mtx_lock(bond_lck_mtx);
-	return;
+	lck_mtx_lock(&bond_lck_mtx);
 }
 
 static __inline__ void
 bond_unlock(void)
 {
-	lck_mtx_unlock(bond_lck_mtx);
-	return;
+	lck_mtx_unlock(&bond_lck_mtx);
 }
 
 /**
@@ -284,6 +249,26 @@ typedef u_char MuxState;
 #define PORT_CONTROL_FLAGS_LLADDR_SET            0x08
 #define PORT_CONTROL_FLAGS_MTU_SET               0x10
 #define PORT_CONTROL_FLAGS_PROMISCUOUS_SET       0x20
+#define PORT_CONTROL_FLAGS_BOND_PROMISCUOUS_SET  0x40
+
+
+static inline bool
+uint32_bit_is_set(uint32_t flags, uint32_t flags_to_test)
+{
+	return (flags & flags_to_test) != 0;
+}
+
+static inline void
+uint32_bit_set(uint32_t * flags_p, uint32_t flags_to_set)
+{
+	*flags_p |= flags_to_set;
+}
+
+static inline void
+uint32_bit_clear(uint32_t * flags_p, uint32_t flags_to_clear)
+{
+	*flags_p &= ~flags_to_clear;
+}
 
 struct bondport_s {
 	TAILQ_ENTRY(bondport_s)     po_port_list;
@@ -326,7 +311,7 @@ struct bondport_s {
 static int bond_get_status(ifbond_ref ifb, struct if_bond_req * ibr_p,
     user_addr_t datap);
 
-static __inline__ int
+static __inline__ bool
 ifbond_flags_if_detaching(ifbond_ref ifb)
 {
 	return (ifb->ifb_flags & IFBF_IF_DETACHING) != 0;
@@ -339,13 +324,13 @@ ifbond_flags_set_if_detaching(ifbond_ref ifb)
 	return;
 }
 
-static __inline__ int
+static __inline__ bool
 ifbond_flags_lladdr(ifbond_ref ifb)
 {
 	return (ifb->ifb_flags & IFBF_LLADDR) != 0;
 }
 
-static __inline__ int
+static __inline__ bool
 ifbond_flags_change_in_progress(ifbond_ref ifb)
 {
 	return (ifb->ifb_flags & IFBF_CHANGE_IN_PROGRESS) != 0;
@@ -362,6 +347,26 @@ static __inline__ void
 ifbond_flags_clear_change_in_progress(ifbond_ref ifb)
 {
 	ifb->ifb_flags &= ~IFBF_CHANGE_IN_PROGRESS;
+	return;
+}
+
+static __inline__ bool
+ifbond_flags_promisc(ifbond_ref ifb)
+{
+	return (ifb->ifb_flags & IFBF_PROMISC) != 0;
+}
+
+static __inline__ void
+ifbond_flags_set_promisc(ifbond_ref ifb)
+{
+	ifb->ifb_flags |= IFBF_PROMISC;
+	return;
+}
+
+static __inline__ void
+ifbond_flags_clear_promisc(ifbond_ref ifb)
+{
+	ifb->ifb_flags &= ~IFBF_PROMISC;
 	return;
 }
 
@@ -757,7 +762,7 @@ ifbond_wait(ifbond_ref ifb, const char * msg)
 			printf("%s: %s msleep\n", ifb->ifb_name, msg);
 		}
 		waited = 1;
-		(void)msleep(ifb, bond_lck_mtx, PZERO, msg, 0);
+		(void)msleep(ifb, &bond_lck_mtx, PZERO, msg, 0);
 	}
 	/* prevent other bond list remove/add from taking place */
 	ifbond_flags_set_change_in_progress(ifb);
@@ -947,10 +952,7 @@ bond_globals_create(lacp_system_priority sys_pri,
 {
 	bond_globals_ref    b;
 
-	b = _MALLOC(sizeof(*b), M_BOND, M_WAITOK | M_ZERO);
-	if (b == NULL) {
-		return NULL;
-	}
+	b = kalloc_type(struct bond_globals_s, Z_WAITOK | Z_ZERO | Z_NOFAIL);
 	TAILQ_INIT(&b->ifbond_list);
 	b->system = *sys;
 	b->system_priority = sys_pri;
@@ -990,7 +992,7 @@ bond_globals_init(void)
 	bond_lock();
 	if (g_bond != NULL) {
 		bond_unlock();
-		_FREE(b, M_BOND);
+		kfree_type(struct bond_globals_s, b);
 		return 0;
 	}
 	g_bond = b;
@@ -1130,7 +1132,6 @@ bond_clone_attach(void)
 	if ((error = if_clone_attach(&bond_cloner)) != 0) {
 		return error;
 	}
-	bond_lock_init();
 	return 0;
 }
 
@@ -1934,11 +1935,7 @@ bondport_create(struct ifnet * port_ifp, lacp_port_priority priority,
 	lacp_actor_partner_state    s;
 
 	*ret_error = 0;
-	p = _MALLOC(sizeof(*p), M_BOND, M_WAITOK | M_ZERO);
-	if (p == NULL) {
-		*ret_error = ENOMEM;
-		return NULL;
-	}
+	p = kalloc_type(struct bondport_s, Z_WAITOK | Z_ZERO | Z_NOFAIL);
 	multicast_list_init(&p->po_multicast);
 	if ((u_int32_t)snprintf(p->po_name, sizeof(p->po_name), "%s%d",
 	    ifnet_name(port_ifp), ifnet_unit(port_ifp))
@@ -2042,7 +2039,7 @@ bondport_free(bondport_ref p)
 	devtimer_release(p->po_periodic_timer);
 	devtimer_release(p->po_wait_while_timer);
 	devtimer_release(p->po_transmit_timer);
-	FREE(p, M_BOND);
+	kfree_type(struct bondport_s, p);
 	return;
 }
 
@@ -2173,8 +2170,7 @@ bond_add_interface(struct ifnet * ifp, struct ifnet * port_ifp)
 		ifnet_set_lladdr_and_type(ifp, IF_LLADDR(port_ifp), ETHER_ADDR_LEN,
 		    IFT_ETHER);
 	}
-
-	control_flags |= PORT_CONTROL_FLAGS_IN_LIST;
+	uint32_bit_set(&control_flags, PORT_CONTROL_FLAGS_IN_LIST);
 
 	/* allocate a larger distributing array */
 	new_array = (bondport_ref *)
@@ -2189,14 +2185,14 @@ bond_add_interface(struct ifnet * ifp, struct ifnet * port_ifp)
 	if (error) {
 		goto failed;
 	}
-	control_flags |= PORT_CONTROL_FLAGS_PROTO_ATTACHED;
+	uint32_bit_set(&control_flags, PORT_CONTROL_FLAGS_PROTO_ATTACHED);
 
 	/* attach our BOND interface filter */
 	error = bond_attach_filter(port_ifp, &filter);
 	if (error != 0) {
 		goto failed;
 	}
-	control_flags |= PORT_CONTROL_FLAGS_FILTER_ATTACHED;
+	uint32_bit_set(&control_flags, PORT_CONTROL_FLAGS_FILTER_ATTACHED);
 
 	/* set the interface MTU */
 	devmtu = bond_device_mtu(ifp, ifb);
@@ -2208,7 +2204,7 @@ bond_add_interface(struct ifnet * ifp, struct ifnet * port_ifp)
 		    ifb->ifb_name, bondport_get_name(p), devmtu, error);
 		goto failed;
 	}
-	control_flags |= PORT_CONTROL_FLAGS_MTU_SET;
+	uint32_bit_set(&control_flags, PORT_CONTROL_FLAGS_MTU_SET);
 
 	/* program the port with our multicast addresses */
 	error = multicast_list_program(&p->po_multicast, ifp, port_ifp);
@@ -2253,9 +2249,25 @@ bond_add_interface(struct ifnet * ifp, struct ifnet * port_ifp)
 			    ifb->ifb_name, bondport_get_name(p), error);
 			goto failed;
 		}
-		control_flags |= PORT_CONTROL_FLAGS_PROMISCUOUS_SET;
+		uint32_bit_set(&control_flags,
+		    PORT_CONTROL_FLAGS_PROMISCUOUS_SET);
 	} else {
-		control_flags |= PORT_CONTROL_FLAGS_LLADDR_SET;
+		uint32_bit_set(&control_flags,
+		    PORT_CONTROL_FLAGS_LLADDR_SET);
+	}
+
+	/* if we're in promiscuous mode, enable that as well */
+	if (ifbond_flags_promisc(ifb)) {
+		error = ifnet_set_promiscuous(port_ifp, 1);
+		if (error != 0) {
+			/* port doesn't support setting promiscuous mode */
+			printf("%s(%s, %s): set promiscuous failed %d\n",
+			    __func__,
+			    ifb->ifb_name, bondport_get_name(p), error);
+			goto failed;
+		}
+		uint32_bit_set(&control_flags,
+		    PORT_CONTROL_FLAGS_BOND_PROMISCUOUS_SET);
 	}
 
 	bond_lock();
@@ -2317,7 +2329,8 @@ failed:
 	if (new_array != NULL) {
 		FREE(new_array, M_BOND);
 	}
-	if ((control_flags & PORT_CONTROL_FLAGS_LLADDR_SET) != 0) {
+	if (uint32_bit_is_set(control_flags,
+	    PORT_CONTROL_FLAGS_LLADDR_SET)) {
 		int     error1;
 
 		error1 = if_siflladdr(port_ifp, &p->po_saved_addr);
@@ -2327,7 +2340,8 @@ failed:
 			    ifb->ifb_name, bondport_get_name(p), error1);
 		}
 	}
-	if ((control_flags & PORT_CONTROL_FLAGS_PROMISCUOUS_SET) != 0) {
+	if (uint32_bit_is_set(control_flags,
+	    PORT_CONTROL_FLAGS_PROMISCUOUS_SET)) {
 		int     error1;
 
 		error1 = ifnet_set_promiscuous(port_ifp, 0);
@@ -2337,13 +2351,27 @@ failed:
 			    ifb->ifb_name, bondport_get_name(p), error1);
 		}
 	}
-	if ((control_flags & PORT_CONTROL_FLAGS_PROTO_ATTACHED) != 0) {
+	if (uint32_bit_is_set(control_flags,
+	    PORT_CONTROL_FLAGS_BOND_PROMISCUOUS_SET)) {
+		int     error1;
+
+		error1 = ifnet_set_promiscuous(port_ifp, 0);
+		if (error1 != 0) {
+			printf("%s(%s, %s): promiscous mode disable failed %d\n",
+			    __func__,
+			    ifb->ifb_name, bondport_get_name(p), error1);
+		}
+	}
+	if (uint32_bit_is_set(control_flags,
+	    PORT_CONTROL_FLAGS_PROTO_ATTACHED)) {
 		(void)bond_detach_protocol(port_ifp);
 	}
-	if ((control_flags & PORT_CONTROL_FLAGS_FILTER_ATTACHED) != 0) {
+	if (uint32_bit_is_set(control_flags,
+	    PORT_CONTROL_FLAGS_FILTER_ATTACHED)) {
 		iflt_detach(filter);
 	}
-	if ((control_flags & PORT_CONTROL_FLAGS_MTU_SET) != 0) {
+	if (uint32_bit_is_set(control_flags,
+	    PORT_CONTROL_FLAGS_MTU_SET)) {
 		int error1;
 
 		error1 = siocsifmtu(port_ifp, p->po_devmtu.ifdm_current);
@@ -2355,7 +2383,8 @@ failed:
 		}
 	}
 	bond_lock();
-	if ((control_flags & PORT_CONTROL_FLAGS_IN_LIST) != 0) {
+	if (uint32_bit_is_set(control_flags,
+	    PORT_CONTROL_FLAGS_IN_LIST)) {
 		TAILQ_REMOVE(&ifb->ifb_port_list, p, po_port_list);
 		ifb->ifb_port_count--;
 	}
@@ -2474,8 +2503,8 @@ bond_remove_interface(ifbond_ref ifb, struct ifnet * port_ifp)
 		TAILQ_FOREACH(scan_port, &ifb->ifb_port_list, po_port_list) {
 			scan_ifp = scan_port->po_ifp;
 
-			if ((scan_port->po_control_flags &
-			    PORT_CONTROL_FLAGS_LLADDR_SET) == 0) {
+			if (!uint32_bit_is_set(scan_port->po_control_flags,
+			    PORT_CONTROL_FLAGS_LLADDR_SET)) {
 				/* port doesn't support setting lladdr */
 				continue;
 			}
@@ -2492,7 +2521,8 @@ bond_remove_interface(ifbond_ref ifb, struct ifnet * port_ifp)
 	}
 
 	/* restore the port's ethernet address */
-	if ((p->po_control_flags & PORT_CONTROL_FLAGS_LLADDR_SET) != 0) {
+	if (uint32_bit_is_set(p->po_control_flags,
+	    PORT_CONTROL_FLAGS_LLADDR_SET)) {
 		error = if_siflladdr(port_ifp, &p->po_saved_addr);
 		if (error != 0) {
 			printf("%s(%s, %s): if_siflladdr failed %d\n",
@@ -2502,7 +2532,19 @@ bond_remove_interface(ifbond_ref ifb, struct ifnet * port_ifp)
 	}
 
 	/* disable promiscous mode (if we enabled it) */
-	if ((p->po_control_flags & PORT_CONTROL_FLAGS_PROMISCUOUS_SET) != 0) {
+	if (uint32_bit_is_set(p->po_control_flags,
+	    PORT_CONTROL_FLAGS_PROMISCUOUS_SET)) {
+		error = ifnet_set_promiscuous(port_ifp, 0);
+		if (error != 0) {
+			printf("%s(%s, %s): disable promiscuous failed %d\n",
+			    __func__,
+			    ifb->ifb_name, bondport_get_name(p), error);
+		}
+	}
+
+	/* disable promiscous mode from bond (if we enabled it) */
+	if (uint32_bit_is_set(p->po_control_flags,
+	    PORT_CONTROL_FLAGS_BOND_PROMISCUOUS_SET)) {
 		error = ifnet_set_promiscuous(port_ifp, 0);
 		if (error != 0) {
 			printf("%s(%s, %s): disable promiscuous failed %d\n",
@@ -2721,9 +2763,85 @@ done:
 }
 
 static int
-bond_set_promisc(__unused struct ifnet *ifp)
+bond_set_promisc(struct ifnet * ifp)
 {
 	int                 error = 0;
+	ifbond_ref          ifb;
+	bool                is_promisc;
+	bondport_ref        p;
+	int                 val;
+
+	is_promisc = (ifnet_flags(ifp) & IFF_PROMISC) != 0;
+
+	/* determine whether promiscuous state needs to be changed */
+	bond_lock();
+	ifb = (ifbond_ref)ifnet_softc(ifp);
+	if (ifb == NULL) {
+		bond_unlock();
+		error = EBUSY;
+		goto done;
+	}
+	if (is_promisc == ifbond_flags_promisc(ifb)) {
+		/* already in the right state */
+		bond_unlock();
+		goto done;
+	}
+	ifbond_retain(ifb);
+	ifbond_wait(ifb, __func__);
+	if (ifbond_flags_if_detaching(ifb)) {
+		/* someone destroyed the bond while we were waiting */
+		error = EBUSY;
+		goto signal_done;
+	}
+	bond_unlock();
+
+	/* update the promiscuous state of each memeber */
+	val = is_promisc ? 1 : 0;
+	TAILQ_FOREACH(p, &ifb->ifb_port_list, po_port_list) {
+		struct ifnet *  port_ifp = p->po_ifp;
+		bool            port_is_promisc;
+
+		port_is_promisc = uint32_bit_is_set(p->po_control_flags,
+		    PORT_CONTROL_FLAGS_BOND_PROMISCUOUS_SET);
+		if (port_is_promisc == is_promisc) {
+			/* already in the right state */
+			continue;
+		}
+		error = ifnet_set_promiscuous(port_ifp, val);
+		if (error != 0) {
+			printf("%s: ifnet_set_promiscuous(%s, %d): failed %d",
+			    ifb->ifb_name, port_ifp->if_xname, val, error);
+			continue;
+		}
+		printf("%s: ifnet_set_promiscuous(%s, %d): succeeded",
+		    ifb->ifb_name, port_ifp->if_xname, val);
+		if (is_promisc) {
+			/* remember that we set it */
+			uint32_bit_set(&p->po_control_flags,
+			    PORT_CONTROL_FLAGS_BOND_PROMISCUOUS_SET);
+		} else {
+			uint32_bit_clear(&p->po_control_flags,
+			    PORT_CONTROL_FLAGS_BOND_PROMISCUOUS_SET);
+		}
+	}
+
+	/* assume that updating promiscuous state succeeded */
+	error = 0;
+	bond_lock();
+
+	/* update our internal state */
+	if (is_promisc) {
+		ifbond_flags_set_promisc(ifb);
+	} else {
+		ifbond_flags_clear_promisc(ifb);
+	}
+
+signal_done:
+	ifbond_signal(ifb, __func__);
+	bond_unlock();
+	ifbond_release(ifb);
+
+done:
 	return error;
 }
 
@@ -3036,10 +3154,8 @@ bond_ioctl(struct ifnet *ifp, u_long cmd, void * data)
 		break;
 
 	case SIOCSIFFLAGS:
-		/* enable/disable promiscuous mode */
-		bond_lock();
+		/* enable promiscuous mode on members */
 		error = bond_set_promisc(ifp);
-		bond_unlock();
 		break;
 
 	case SIOCADDMULTI:
@@ -3293,9 +3409,10 @@ bond_attach_filter(struct ifnet *ifp, interface_filter_t * filter_p)
 	iff.iff_input = bond_iff_input;
 	iff.iff_event = bond_iff_event;
 	iff.iff_detached = bond_iff_detached;
-	error = iflt_attach_internal(ifp, &iff, filter_p);
+	error = dlil_attach_filter(ifp, &iff, filter_p,
+	    DLIL_IFF_TSO | DLIL_IFF_INTERNAL);
 	if (error != 0) {
-		printf("%s: iflt_attach_internal failed %d\n", __func__, error);
+		printf("%s: dlil_attach_filter failed %d\n", __func__, error);
 	}
 	return error;
 }
@@ -3816,7 +3933,7 @@ bondport_remove_from_LAG(bondport_ref p)
 		bond->ifb_active_lag = NULL;
 		active_lag = 1;
 	}
-	FREE(lag, M_BOND);
+	kfree_type(struct LAG_s, lag);
 	return active_lag;
 }
 
@@ -3859,7 +3976,7 @@ bondport_assign_to_LAG(bondport_ref p)
 		bondport_add_to_LAG(p, lag);
 		return;
 	}
-	lag = (LAG_ref)_MALLOC(sizeof(*lag), M_BOND, M_WAITOK);
+	lag = kalloc_type(struct LAG_s, Z_WAITOK);
 	TAILQ_INIT(&lag->lag_port_list);
 	lag->lag_port_count = 0;
 	lag->lag_selected_port_count = 0;

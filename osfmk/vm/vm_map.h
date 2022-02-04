@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2020 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -103,13 +103,13 @@ extern kern_return_t    vm_map_exec(
 	void                    *fsroot,
 	cpu_type_t              cpu,
 	cpu_subtype_t           cpu_subtype,
-	boolean_t               reslide);
+	boolean_t               reslide,
+	boolean_t               is_driverkit);
 
 __END_DECLS
 
 #ifdef  MACH_KERNEL_PRIVATE
 
-#include <task_swapper.h>
 #include <mach_assert.h>
 
 #include <vm/vm_object.h>
@@ -225,6 +225,18 @@ struct vm_map_links {
 };
 
 /*
+ * Bit 3 of the protection and max_protection bitfields in a vm_map_entry
+ * does not correspond to bit 3 of a vm_prot_t, so these macros provide a means
+ * to convert between the "packed" representation in the vm_map_entry's fields
+ * and the equivalent bits defined in vm_prot_t.
+ */
+#if defined(__x86_64__)
+#define VM_VALID_VMPROTECT_FLAGS        (VM_PROT_ALL | VM_PROT_COPY | VM_PROT_UEXEC)
+#else
+#define VM_VALID_VMPROTECT_FLAGS        (VM_PROT_ALL | VM_PROT_COPY)
+#endif
+
+/*
  * FOOTPRINT ACCOUNTING:
  * The "memory footprint" is better described in the pmap layer.
  *
@@ -274,8 +286,8 @@ struct vm_map_entry {
 	/* boolean_t */ needs_copy:1,   /* object need to be copied? */
 
 	/* Only in task maps: */
-	/* vm_prot_t */ protection:3,   /* protection code */
-	/* vm_prot_t */ max_protection:3, /* maximum protection */
+	/* vm_prot_t-like */ protection:4,   /* protection code, bit3=UEXEC */
+	/* vm_prot_t-like */ max_protection:4, /* maximum protection, bit3=UEXEC */
 	/* vm_inherit_t */ inheritance:2, /* inheritance */
 	/* boolean_t */ use_pmap:1,     /*
 	                                 * use_pmap is overloaded:
@@ -294,8 +306,6 @@ struct vm_map_entry {
 	                                     * without unwiring them */
 	/* boolean_t */ used_for_jit:1,
 	/* boolean_t */ pmap_cs_associated:1, /* pmap_cs will validate */
-	/* boolean_t */ from_reserved_zone:1, /* Allocated from
-	                                       * kernel reserved zone	 */
 
 	/* iokit accounting: use the virtual size rather than resident size: */
 	/* boolean_t */ iokit_acct:1,
@@ -304,7 +314,7 @@ struct vm_map_entry {
 	/* boolean_t */ vme_atomic:1, /* entry cannot be split/coalesced */
 	/* boolean_t */ vme_no_copy_on_read:1,
 	/* boolean_t */ translated_allow_execute:1, /* execute in translated processes */
-	__unused:2;
+	/* boolean_t */ __padding:1;
 
 	unsigned short          wired_count;    /* can be paged if = 0 */
 	unsigned short          user_wired_count; /* for vm_wire */
@@ -465,11 +475,13 @@ struct _vm_map {
 #define max_offset              hdr.links.end   /* end of range */
 	pmap_t                  XNU_PTRAUTH_SIGNED_PTR("_vm_map.pmap") pmap;           /* Physical map */
 	vm_map_size_t           size;           /* virtual size */
+	uint64_t                size_limit;     /* rlimit on address space size */
+	uint64_t                data_limit;     /* rlimit on data size */
 	vm_map_size_t           user_wire_limit;/* rlimit on user locked memory */
 	vm_map_size_t           user_wire_size; /* current size of user locked memory in this map */
-#if !CONFIG_EMBEDDED
+#if XNU_TARGET_OS_OSX
 	vm_map_offset_t         vmmap_high_start;
-#endif
+#endif /* XNU_TARGET_OS_OSX */
 
 	union {
 		/*
@@ -504,31 +516,28 @@ struct _vm_map {
 #define first_free              f_s._first_free
 #define holes_list              f_s._holes
 
-	struct os_refcnt        map_refcnt;     /* Reference count */
-
-#if     TASK_SWAPPER
-	int                     res_count;      /* Residence count (swap) */
-	int                     sw_state;       /* Swap state */
-#endif  /* TASK_SWAPPER */
+	struct os_refcnt        map_refcnt;       /* Reference count */
 
 	unsigned int
 	/* boolean_t */ wait_for_space:1,         /* Should callers wait for space? */
-	/* boolean_t */ wiring_required:1,         /* All memory wired? */
-	/* boolean_t */ no_zero_fill:1,         /*No zero fill absent pages */
-	/* boolean_t */ mapped_in_other_pmaps:1,         /*has this submap been mapped in maps that use a different pmap */
-	/* boolean_t */ switch_protect:1,         /*  Protect map from write faults while switched */
-	/* boolean_t */ disable_vmentry_reuse:1,         /*  All vm entries should keep using newer and higher addresses in the map */
-	/* boolean_t */ map_disallow_data_exec:1,         /* Disallow execution from data pages on exec-permissive architectures */
+	/* boolean_t */ wiring_required:1,        /* All memory wired? */
+	/* boolean_t */ no_zero_fill:1,           /* No zero fill absent pages */
+	/* boolean_t */ mapped_in_other_pmaps:1,  /* has this submap been mapped in maps that use a different pmap */
+	/* boolean_t */ switch_protect:1,         /* Protect map from write faults while switched */
+	/* boolean_t */ disable_vmentry_reuse:1,  /* All vm entries should keep using newer and higher addresses in the map */
+	/* boolean_t */ map_disallow_data_exec:1, /* Disallow execution from data pages on exec-permissive architectures */
 	/* boolean_t */ holelistenabled:1,
 	/* boolean_t */ is_nested_map:1,
-	/* boolean_t */ map_disallow_new_exec:1,         /* Disallow new executable code */
+	/* boolean_t */ map_disallow_new_exec:1, /* Disallow new executable code */
 	/* boolean_t */ jit_entry_exists:1,
 	/* boolean_t */ has_corpse_footprint:1,
 	/* boolean_t */ terminated:1,
-	/* boolean_t */ is_alien:1,             /* for platform simulation, i.e. PLATFORM_IOS on OSX */
-	/* boolean_t */ cs_enforcement:1,       /* code-signing enforcement */
-	/* boolean_t */ reserved_regions:1,       /* has reserved regions. The map size that userspace sees should ignore these. */
-	/* reserved */ pad:16;
+	/* boolean_t */ is_alien:1,              /* for platform simulation, i.e. PLATFORM_IOS on OSX */
+	/* boolean_t */ cs_enforcement:1,        /* code-signing enforcement */
+	/* boolean_t */ cs_debugged:1,           /* code-signed but debugged */
+	/* boolean_t */ reserved_regions:1,      /* has reserved regions. The map size that userspace sees should ignore these. */
+	/* boolean_t */ single_jit:1,        /* only allow one JIT mapping */
+	/* reserved */ pad:14;
 	unsigned int            timestamp;      /* Version number */
 };
 
@@ -536,14 +545,6 @@ struct _vm_map {
 #define vm_map_to_entry(map) CAST_TO_VM_MAP_ENTRY(&(map)->hdr.links)
 #define vm_map_first_entry(map) ((map)->hdr.links.next)
 #define vm_map_last_entry(map)  ((map)->hdr.links.prev)
-
-#if     TASK_SWAPPER
-/*
- * VM map swap states.  There are no transition states.
- */
-#define MAP_SW_IN        1      /* map is swapped in; residence count > 0 */
-#define MAP_SW_OUT       2      /* map is out (res_count == 0 */
-#endif  /* TASK_SWAPPER */
 
 /*
  *	Type:		vm_map_version_t [exported; contents invisible]
@@ -723,8 +724,6 @@ int vm_self_region_page_shift_safely(vm_map_t target_map);
 /* Initialize the module */
 extern void             vm_map_init(void);
 
-extern void             vm_kernel_reserved_entry_init(void);
-
 /* Allocate a range in the specified virtual address map and
  * return the entry allocated for that range. */
 extern kern_return_t vm_map_find_space(
@@ -794,6 +793,7 @@ extern vm_map_entry_t   vm_map_entry_insert(
 	vm_map_offset_t         end,
 	vm_object_t             object,
 	vm_object_offset_t      offset,
+	vm_map_kernel_flags_t   vmk_flags,
 	boolean_t               needs_copy,
 	boolean_t               is_shared,
 	boolean_t               in_transition,
@@ -827,97 +827,9 @@ extern vm_map_entry_t   vm_map_entry_insert(
 /* Physical map associated
 * with this address map */
 
-/*
- * Macros/functions for map residence counts and swapin/out of vm maps
- */
-#if     TASK_SWAPPER
-
-#if     MACH_ASSERT
 /* Gain a reference to an existing map */
 extern void             vm_map_reference(
 	vm_map_t        map);
-/* Lose a residence count */
-extern void             vm_map_res_deallocate(
-	vm_map_t        map);
-/* Gain a residence count on a map */
-extern void             vm_map_res_reference(
-	vm_map_t        map);
-/* Gain reference & residence counts to possibly swapped-out map */
-extern void             vm_map_reference_swap(
-	vm_map_t        map);
-
-#else   /* MACH_ASSERT */
-
-#define vm_map_reference(map)           \
-MACRO_BEGIN                                      \
-	vm_map_t Map = (map);                    \
-	if (Map) {                               \
-	        lck_mtx_lock(&Map->s_lock);      \
-	        Map->res_count++;                \
-	        os_ref_retain(&Map->map_refcnt); \
-	        lck_mtx_unlock(&Map->s_lock);    \
-	}                                        \
-MACRO_END
-
-#define vm_map_res_reference(map)               \
-MACRO_BEGIN                                     \
-	vm_map_t Lmap = (map);          \
-	if (Lmap->res_count == 0) {             \
-	        lck_mtx_unlock(&Lmap->s_lock);\
-	        vm_map_lock(Lmap);              \
-	        vm_map_swapin(Lmap);            \
-	        lck_mtx_lock(&Lmap->s_lock);    \
-	        ++Lmap->res_count;              \
-	        vm_map_unlock(Lmap);            \
-	} else                                  \
-	        ++Lmap->res_count;              \
-MACRO_END
-
-#define vm_map_res_deallocate(map)              \
-MACRO_BEGIN                                     \
-	vm_map_t Map = (map);           \
-	if (--Map->res_count == 0) {    \
-	        lck_mtx_unlock(&Map->s_lock);   \
-	        vm_map_lock(Map);               \
-	        vm_map_swapout(Map);            \
-	        vm_map_unlock(Map);             \
-	        lck_mtx_lock(&Map->s_lock);     \
-	}                                       \
-MACRO_END
-
-#define vm_map_reference_swap(map)      \
-MACRO_BEGIN                             \
-	vm_map_t Map = (map);           \
-	lck_mtx_lock(&Map->s_lock);     \
-	os_ref_retain(&Map->map_refcnt);\
-	vm_map_res_reference(Map);      \
-	lck_mtx_unlock(&Map->s_lock);   \
-MACRO_END
-#endif  /* MACH_ASSERT */
-
-extern void             vm_map_swapin(
-	vm_map_t        map);
-
-extern void             vm_map_swapout(
-	vm_map_t        map);
-
-#else   /* TASK_SWAPPER */
-
-#define vm_map_reference(map)                   \
-MACRO_BEGIN                                     \
-	vm_map_t Map = (map);                   \
-	if (Map) {                              \
-	        lck_mtx_lock(&Map->s_lock);     \
-	        os_ref_retain(&Map->map_refcnt);\
-	        lck_mtx_unlock(&Map->s_lock);   \
-	}                                       \
-MACRO_END
-
-#define vm_map_reference_swap(map)      vm_map_reference(map)
-#define vm_map_res_reference(map)
-#define vm_map_res_deallocate(map)
-
-#endif  /* TASK_SWAPPER */
 
 /*
  *	Submap object.  Must be used to create memory to be put
@@ -936,28 +848,6 @@ extern vm_object_t      vm_submap_object;
 
 #define vm_map_entry_wakeup(map)        \
 	thread_wakeup((event_t)(&(map)->hdr))
-
-
-#define vm_map_ref_fast(map)                    \
-	MACRO_BEGIN                                     \
-	lck_mtx_lock(&map->s_lock);                     \
-	map->ref_count++;                               \
-	vm_map_res_reference(map);                      \
-	lck_mtx_unlock(&map->s_lock);                   \
-	MACRO_END
-
-#define vm_map_dealloc_fast(map)                \
-	MACRO_BEGIN                                     \
-	int c;                                          \
-                                                        \
-	lck_mtx_lock(&map->s_lock);                     \
-	c = --map->ref_count;                   \
-	if (c > 0)                                      \
-	        vm_map_res_deallocate(map);             \
-	lck_mtx_unlock(&map->s_lock);                   \
-	if (c == 0)                                     \
-	        vm_map_destroy(map);                    \
-	MACRO_END
 
 
 /* simplify map entries */
@@ -1142,10 +1032,6 @@ extern void vm_map_submap_pmap_clean(
 extern vm_map_t convert_port_entry_to_map(
 	ipc_port_t      port);
 
-/* Convert from a port to a vm_object */
-extern vm_object_t convert_port_entry_to_object(
-	ipc_port_t      port);
-
 
 extern kern_return_t vm_map_set_cache_attr(
 	vm_map_t        map,
@@ -1159,12 +1045,6 @@ extern kern_return_t vm_map_set_cache_attr(
 
 extern int override_nx(vm_map_t map, uint32_t user_tag);
 
-#if PMAP_CS
-extern kern_return_t vm_map_entry_cs_associate(
-	vm_map_t                map,
-	vm_map_entry_t          entry,
-	vm_map_kernel_flags_t   vmk_flags);
-#endif /* PMAP_CS */
 
 extern void vm_map_region_top_walk(
 	vm_map_entry_t entry,
@@ -1272,6 +1152,12 @@ extern boolean_t vm_map_cs_enforcement(
 extern void vm_map_cs_enforcement_set(
 	vm_map_t                map,
 	boolean_t               val);
+
+extern void vm_map_cs_debugged_set(
+	vm_map_t map,
+	boolean_t val);
+
+extern kern_return_t vm_map_cs_wx_enable(vm_map_t map);
 
 /* wire down a region */
 
@@ -1387,6 +1273,9 @@ extern kern_return_t    vm_map_enter_mem_object_control(
 extern kern_return_t    vm_map_terminate(
 	vm_map_t                map);
 
+extern void             vm_map_require(
+	vm_map_t                map);
+
 #endif /* !XNU_KERNEL_PRIVATE */
 
 /* Deallocate a region */
@@ -1478,7 +1367,6 @@ extern kern_return_t    vm_map_copy_extract(
 	vm_map_t                src_map,
 	vm_map_address_t        src_addr,
 	vm_map_size_t           len,
-	vm_prot_t               required_prot,
 	boolean_t               copy,
 	vm_map_copy_t           *copy_result,   /* OUT */
 	vm_prot_t               *cur_prot,      /* OUT */
@@ -1532,11 +1420,11 @@ extern kern_return_t    vm_map_raise_max_offset(
 extern kern_return_t    vm_map_raise_min_offset(
 	vm_map_t        map,
 	vm_map_offset_t new_min_offset);
-#if !CONFIG_EMBEDDED
+#if XNU_TARGET_OS_OSX
 extern void vm_map_set_high_start(
 	vm_map_t        map,
 	vm_map_offset_t high_start);
-#endif
+#endif /* XNU_TARGET_OS_OSX */
 
 extern vm_map_offset_t  vm_compute_max_offset(
 	boolean_t               is64);
@@ -1551,6 +1439,14 @@ extern uint64_t         vm_map_get_max_aslr_slide_pages(
 
 extern uint64_t         vm_map_get_max_loader_aslr_slide_pages(
 	vm_map_t map);
+
+extern kern_return_t    vm_map_set_size_limit(
+	vm_map_t                map,
+	uint64_t                limit);
+
+extern kern_return_t    vm_map_set_data_limit(
+	vm_map_t                map,
+	uint64_t                limit);
 
 extern void             vm_map_set_user_wire_limit(
 	vm_map_t                map,
@@ -1610,6 +1506,7 @@ mach_vm_range_overflows(mach_vm_offset_t addr, mach_vm_size_t size)
 
 #if XNU_TARGET_OS_OSX
 extern void vm_map_mark_alien(vm_map_t map);
+extern void vm_map_single_jit(vm_map_t map);
 #endif /* XNU_TARGET_OS_OSX */
 
 extern kern_return_t vm_map_page_info(
@@ -1719,7 +1616,7 @@ static inline bool
 VM_MAP_POLICY_ALLOW_MULTIPLE_JIT(
 	vm_map_t map __unused)
 {
-	if (VM_MAP_IS_ALIEN(map)) {
+	if (VM_MAP_IS_ALIEN(map) || map->single_jit) {
 		return false;
 	}
 	return true;
@@ -1800,6 +1697,7 @@ vm_prot_to_wimg(unsigned int prot, unsigned int *wimg)
 extern kern_return_t vm_map_set_page_shift(vm_map_t map, int pageshift);
 extern bool vm_map_is_exotic(vm_map_t map);
 extern bool vm_map_is_alien(vm_map_t map);
+extern pmap_t vm_map_get_pmap(vm_map_t map);
 #endif /* XNU_KERNEL_PRIVATE */
 
 #define vm_map_round_page(x, pgmask) (((vm_map_offset_t)(x) + (pgmask)) & ~((signed)(pgmask)))

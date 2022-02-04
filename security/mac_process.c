@@ -75,6 +75,8 @@
 #include <mach/mach_types.h>
 #include <kern/task.h>
 
+#include <os/hash.h>
+
 #include <security/mac_internal.h>
 #include <security/mac_mach_internal.h>
 
@@ -106,10 +108,38 @@ mac_cred_label_free(struct label *label)
 	mac_labelzone_free(label);
 }
 
-int
-mac_cred_label_compare(struct label *a, struct label *b)
+bool
+mac_cred_label_is_equal(const struct label *a, const struct label *b)
 {
-	return bcmp(a, b, sizeof(*a)) == 0;
+	if (a->l_flags != b->l_flags) {
+		return false;
+	}
+	for (int slot = 0; slot < MAC_MAX_SLOTS; slot++) {
+		const void *pa = a->l_perpolicy[slot].l_ptr;
+		const void *pb = b->l_perpolicy[slot].l_ptr;
+
+		if (pa != pb) {
+			return false;
+		}
+	}
+	return true;
+}
+
+uint32_t
+mac_cred_label_hash_update(const struct label *a, uint32_t hash)
+{
+	hash = os_hash_jenkins_update(&a->l_flags,
+	    sizeof(a->l_flags), hash);
+#if __has_feature(ptrauth_calls)
+	for (int slot = 0; slot < MAC_MAX_SLOTS; slot++) {
+		const void *ptr = a->l_perpolicy[slot].l_ptr;
+		hash = os_hash_jenkins_update(&ptr, sizeof(ptr), hash);
+	}
+#else
+	hash = os_hash_jenkins_update(&a->l_perpolicy,
+	    sizeof(a->l_perpolicy), hash);
+#endif
+	return hash;
 }
 
 int
@@ -232,7 +262,7 @@ mac_execve_enter(user_addr_t mac_p, struct image_params *imgp)
 	}
 
 	execlabel = mac_cred_label_alloc();
-	MALLOC(buffer, char *, mac.m_buflen, M_MACTEMP, M_WAITOK);
+	buffer = kalloc_data(mac.m_buflen, Z_WAITOK);
 	error = copyinstr(CAST_USER_ADDR_T(mac.m_string), buffer, mac.m_buflen, &ulen);
 	if (error) {
 		goto out;
@@ -246,7 +276,7 @@ out:
 		execlabel = NULL;
 	}
 	imgp->ip_execlabelp = execlabel;
-	FREE(buffer, M_MACTEMP);
+	kfree_data(buffer, mac.m_buflen);
 	return error;
 }
 
@@ -410,31 +440,48 @@ mac_proc_check_fork(proc_t curp)
 }
 
 int
-mac_proc_check_get_task_name(struct ucred *cred, proc_ident_t pident)
+mac_proc_check_get_task(struct ucred *cred, proc_ident_t pident, mach_task_flavor_t flavor)
 {
 	int error;
 
-	MAC_CHECK(proc_check_get_task_name, cred, pident);
+	assert(flavor <= TASK_FLAVOR_NAME);
+
+	/* Also call the old hook for compatability, deprecating in rdar://66356944. */
+	if (flavor == TASK_FLAVOR_CONTROL) {
+		MAC_CHECK(proc_check_get_task, cred, pident);
+		if (error) {
+			return error;
+		}
+	}
+
+	if (flavor == TASK_FLAVOR_NAME) {
+		MAC_CHECK(proc_check_get_task_name, cred, pident);
+		if (error) {
+			return error;
+		}
+	}
+
+	MAC_CHECK(proc_check_get_task_with_flavor, cred, pident, flavor);
 
 	return error;
 }
 
 int
-mac_proc_check_get_task(struct ucred *cred, proc_ident_t pident)
+mac_proc_check_expose_task(struct ucred *cred, proc_ident_t pident, mach_task_flavor_t flavor)
 {
 	int error;
 
-	MAC_CHECK(proc_check_get_task, cred, pident);
+	assert(flavor <= TASK_FLAVOR_NAME);
 
-	return error;
-}
+	/* Also call the old hook for compatability, deprecating in rdar://66356944. */
+	if (flavor == TASK_FLAVOR_CONTROL) {
+		MAC_CHECK(proc_check_expose_task, cred, pident);
+		if (error) {
+			return error;
+		}
+	}
 
-int
-mac_proc_check_expose_task(struct ucred *cred, proc_ident_t pident)
-{
-	int error;
-
-	MAC_CHECK(proc_check_expose_task, cred, pident);
+	MAC_CHECK(proc_check_expose_task_with_flavor, cred, pident, flavor);
 
 	return error;
 }
@@ -473,6 +520,30 @@ mac_proc_check_map_anon(proc_t proc, user_addr_t u_addr,
 
 	cred = kauth_cred_proc_ref(proc);
 	MAC_CHECK(proc_check_map_anon, proc, cred, u_addr, u_size, prot, flags, maxprot);
+	kauth_cred_unref(&cred);
+
+	return error;
+}
+
+
+int
+mac_proc_check_memorystatus_control(proc_t proc, uint32_t command, pid_t pid)
+{
+	kauth_cred_t cred;
+	int error;
+
+#if SECURITY_MAC_CHECK_ENFORCE
+	/* 21167099 - only check if we allow write */
+	if (!mac_proc_enforce) {
+		return 0;
+	}
+#endif
+	if (!mac_proc_check_enforce(proc)) {
+		return 0;
+	}
+
+	cred = kauth_cred_proc_ref(proc);
+	MAC_CHECK(proc_check_memorystatus_control, cred, command, pid);
 	kauth_cred_unref(&cred);
 
 	return error;
@@ -731,6 +802,151 @@ mac_proc_check_set_cs_info(proc_t curp, proc_t target, unsigned int op)
 	cred = kauth_cred_proc_ref(curp);
 	MAC_CHECK(proc_check_set_cs_info, cred, target, op);
 	kauth_cred_unref(&cred);
+
+	return error;
+}
+
+int
+mac_proc_check_setuid(proc_t curp, kauth_cred_t cred, uid_t uid)
+{
+	int error = 0;
+
+#if SECURITY_MAC_CHECK_ENFORCE
+	/* 21167099 - only check if we allow write */
+	if (!mac_proc_enforce) {
+		return 0;
+	}
+#endif
+	if (!mac_proc_check_enforce(curp)) {
+		return 0;
+	}
+
+	MAC_CHECK(proc_check_setuid, cred, uid);
+
+	return error;
+}
+
+int
+mac_proc_check_seteuid(proc_t curp, kauth_cred_t cred, uid_t euid)
+{
+	int error = 0;
+
+#if SECURITY_MAC_CHECK_ENFORCE
+	/* 21167099 - only check if we allow write */
+	if (!mac_proc_enforce) {
+		return 0;
+	}
+#endif
+	if (!mac_proc_check_enforce(curp)) {
+		return 0;
+	}
+
+	MAC_CHECK(proc_check_seteuid, cred, euid);
+
+	return error;
+}
+
+int
+mac_proc_check_setreuid(proc_t curp, kauth_cred_t cred, uid_t ruid, uid_t euid)
+{
+	int error = 0;
+
+#if SECURITY_MAC_CHECK_ENFORCE
+	/* 21167099 - only check if we allow write */
+	if (!mac_proc_enforce) {
+		return 0;
+	}
+#endif
+	if (!mac_proc_check_enforce(curp)) {
+		return 0;
+	}
+
+	MAC_CHECK(proc_check_setreuid, cred, ruid, euid);
+
+	return error;
+}
+
+int
+mac_proc_check_setgid(proc_t curp, kauth_cred_t cred, gid_t gid)
+{
+	int error = 0;
+
+#if SECURITY_MAC_CHECK_ENFORCE
+	/* 21167099 - only check if we allow write */
+	if (!mac_proc_enforce) {
+		return 0;
+	}
+#endif
+	if (!mac_proc_check_enforce(curp)) {
+		return 0;
+	}
+
+	MAC_CHECK(proc_check_setgid, cred, gid);
+
+	return error;
+}
+
+int
+mac_proc_check_setegid(proc_t curp, kauth_cred_t cred, gid_t egid)
+{
+	int error = 0;
+
+#if SECURITY_MAC_CHECK_ENFORCE
+	/* 21167099 - only check if we allow write */
+	if (!mac_proc_enforce) {
+		return 0;
+	}
+#endif
+	if (!mac_proc_check_enforce(curp)) {
+		return 0;
+	}
+
+	MAC_CHECK(proc_check_setegid, cred, egid);
+
+	return error;
+}
+
+int
+mac_proc_check_setregid(proc_t curp, kauth_cred_t cred, gid_t rgid, gid_t egid)
+{
+	int error = 0;
+
+#if SECURITY_MAC_CHECK_ENFORCE
+	/* 21167099 - only check if we allow write */
+	if (!mac_proc_enforce) {
+		return 0;
+	}
+#endif
+	if (!mac_proc_check_enforce(curp)) {
+		return 0;
+	}
+
+	MAC_CHECK(proc_check_setregid, cred, rgid, egid);
+
+	return error;
+}
+
+int
+mac_proc_check_settid(proc_t curp, uid_t uid, gid_t gid)
+{
+	kauth_cred_t pcred, tcred;
+	int error = 0;
+
+#if SECURITY_MAC_CHECK_ENFORCE
+	/* 21167099 - only check if we allow write */
+	if (!mac_proc_enforce) {
+		return 0;
+	}
+#endif
+	if (!mac_proc_check_enforce(curp)) {
+		return 0;
+	}
+
+	pcred = kauth_cred_proc_ref(curp);
+	tcred = kauth_cred_get_with_ref();
+	MAC_CHECK(proc_check_settid, pcred, tcred, uid, gid);
+	kauth_cred_unref(&tcred);
+	kauth_cred_unref(&pcred);
 
 	return error;
 }

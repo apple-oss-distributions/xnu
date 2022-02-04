@@ -148,7 +148,7 @@
 
 #define GET_V4(x) ((const struct in_addr *)(const void *)(&(x)->s6_addr16[1]))
 
-static lck_grp_t *stf_mtx_grp;
+static LCK_GRP_DECLARE(stf_mtx_grp, "stf");
 
 struct stf_softc {
 	ifnet_t                         sc_if;     /* common area */
@@ -167,10 +167,8 @@ struct stf_softc {
 void stfattach(void);
 
 static int ip_stf_ttl = 40;
-static int stf_init_done;
 
 static void in_stf_input(struct mbuf *, int);
-static void stfinit(void);
 
 static struct protosw in_stf_protosw =
 {
@@ -194,15 +192,6 @@ static int stf_checkaddr6(struct stf_softc *, struct in6_addr *,
 static void stf_rtrequest(int, struct rtentry *, struct sockaddr *);
 static errno_t stf_ioctl(ifnet_t ifp, u_long cmd, void *data);
 static errno_t stf_output(ifnet_t ifp, mbuf_t m);
-
-static void
-stfinit(void)
-{
-	if (!stf_init_done) {
-		stf_mtx_grp = lck_grp_alloc_init("stf", LCK_GRP_ATTR_NULL);
-		stf_init_done = 1;
-	}
-}
 
 /*
  * gif_input is the input handler for IP and IPv6 attached to gif
@@ -313,8 +302,6 @@ stfattach(void)
 	const struct encaptab *p;
 	struct ifnet_init_eparams       stf_init;
 
-	stfinit();
-
 	error = proto_register_plumber(PF_INET6, APPLE_IF_FAM_STF,
 	    stf_attach_inet6, NULL);
 	if (error != 0) {
@@ -335,7 +322,7 @@ stfattach(void)
 		return;
 	}
 	sc->encap_cookie = p;
-	lck_mtx_init(&sc->sc_ro_mtx, stf_mtx_grp, LCK_ATTR_NULL);
+	lck_mtx_init(&sc->sc_ro_mtx, &stf_mtx_grp, LCK_ATTR_NULL);
 
 	bzero(&stf_init, sizeof(stf_init));
 	stf_init.ver = IFNET_INIT_CURRENT_VERSION;
@@ -357,7 +344,7 @@ stfattach(void)
 	if (error != 0) {
 		printf("stfattach, ifnet_allocate failed - %d\n", error);
 		encap_detach(sc->encap_cookie);
-		lck_mtx_destroy(&sc->sc_ro_mtx, stf_mtx_grp);
+		lck_mtx_destroy(&sc->sc_ro_mtx, &stf_mtx_grp);
 		FREE(sc, M_DEVBUF);
 		return;
 	}
@@ -373,7 +360,7 @@ stfattach(void)
 		printf("stfattach: ifnet_attach returned error=%d\n", error);
 		encap_detach(sc->encap_cookie);
 		ifnet_release(sc->sc_if);
-		lck_mtx_destroy(&sc->sc_ro_mtx, stf_mtx_grp);
+		lck_mtx_destroy(&sc->sc_ro_mtx, &stf_mtx_grp);
 		FREE(sc, M_DEVBUF);
 		return;
 	}
@@ -484,7 +471,7 @@ stf_getsrcifa6(struct ifnet *ifp)
 		}
 		bcopy(GET_V4(&sin6->sin6_addr), &in, sizeof(in));
 		IFA_UNLOCK(ia);
-		lck_rw_lock_shared(in_ifaddr_rwlock);
+		lck_rw_lock_shared(&in_ifaddr_rwlock);
 		for (ia4 = TAILQ_FIRST(&in_ifaddrhead);
 		    ia4;
 		    ia4 = TAILQ_NEXT(ia4, ia_link)) {
@@ -495,7 +482,7 @@ stf_getsrcifa6(struct ifnet *ifp)
 			}
 			IFA_UNLOCK(&ia4->ia_ifa);
 		}
-		lck_rw_done(in_ifaddr_rwlock);
+		lck_rw_done(&in_ifaddr_rwlock);
 		if (ia4 == NULL) {
 			continue;
 		}
@@ -674,7 +661,7 @@ stf_checkaddr4(
 	/*
 	 * reject packets with broadcast
 	 */
-	lck_rw_lock_shared(in_ifaddr_rwlock);
+	lck_rw_lock_shared(&in_ifaddr_rwlock);
 	for (ia4 = TAILQ_FIRST(&in_ifaddrhead);
 	    ia4;
 	    ia4 = TAILQ_NEXT(ia4, ia_link)) {
@@ -685,12 +672,12 @@ stf_checkaddr4(
 		}
 		if (in->s_addr == ia4->ia_broadaddr.sin_addr.s_addr) {
 			IFA_UNLOCK(&ia4->ia_ifa);
-			lck_rw_done(in_ifaddr_rwlock);
+			lck_rw_done(&in_ifaddr_rwlock);
 			return -1;
 		}
 		IFA_UNLOCK(&ia4->ia_ifa);
 	}
-	lck_rw_done(in_ifaddr_rwlock);
+	lck_rw_done(&in_ifaddr_rwlock);
 
 	/*
 	 * perform ingress filter

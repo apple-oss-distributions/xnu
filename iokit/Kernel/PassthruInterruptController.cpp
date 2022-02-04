@@ -28,10 +28,10 @@
 
 extern "C" {
 #include <mach/task.h>
-#include <machine/machine_routines.h>
 #include <pexpert/pexpert.h>
 };
 
+#include <machine/machine_routines.h>
 #include <IOKit/IOPlatformExpert.h>
 #include <IOKit/IOService.h>
 #include <IOKit/PassthruInterruptController.h>

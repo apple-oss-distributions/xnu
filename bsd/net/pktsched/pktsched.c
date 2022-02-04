@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2020 Apple Inc. All rights reserved.
+ * Copyright (c) 2011-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -66,11 +66,9 @@ pktsched_init(void)
 {
 	init_machclk();
 	if (machclk_freq == 0) {
-		panic("%s: no CPU clock available!\n", __func__);
+		panic("%s: no CPU clock available!", __func__);
 		/* NOTREACHED */
 	}
-
-	netem_init();
 }
 
 static void
@@ -146,17 +144,13 @@ void
 pktsched_teardown(struct ifclassq *ifq)
 {
 	IFCQ_LOCK_ASSERT_HELD(ifq);
-
-	if_qflush(ifq->ifcq_ifp, 1);
+	if_qflush(ifq->ifcq_ifp, ifq, true);
 	VERIFY(IFCQ_IS_EMPTY(ifq));
-
 	ifq->ifcq_flags &= ~IFCQF_ENABLED;
-
 	if (ifq->ifcq_type == PKTSCHEDT_FQ_CODEL) {
 		/* Could be PKTSCHEDT_NONE */
 		fq_if_teardown_ifclassq(ifq);
 	}
-
 	return;
 }
 

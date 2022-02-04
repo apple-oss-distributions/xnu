@@ -75,6 +75,8 @@
 #include <dirent.h>
 #endif
 
+#ifndef __OBJC__
+
 /*
  * Backwards compatibility.
  */
@@ -89,5 +91,7 @@
 #undef DIRSIZ
 #define DIRSIZ(dp) \
     (((unsigned long)&((struct direct *)0)->d_name + (dp)->d_namlen+1 + 3) & ~3)
+
+#endif /* __OBJC__ */
 
 #endif /* !_SYS_DIR_H_ */

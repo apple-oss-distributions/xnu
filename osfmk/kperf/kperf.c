@@ -49,11 +49,10 @@ extern uint64_t strtouq(const char *, char **, int);
 LCK_GRP_DECLARE(kperf_lck_grp, "kperf");
 
 /* one wired sample buffer per CPU */
-static struct kperf_sample *intr_samplev;
-static unsigned int intr_samplec = 0;
+static struct kperf_sample *__zpercpu intr_samplev;
 
 /* current sampling status */
-enum kperf_sampling kperf_status = KPERF_SAMPLING_OFF;
+enum kperf_sampling _Atomic kperf_status = KPERF_SAMPLING_OFF;
 
 /*
  * Only set up kperf once.
@@ -69,12 +68,9 @@ unsigned int kperf_cpu_sample_action;
 struct kperf_sample *
 kperf_intr_sample_buffer(void)
 {
-	unsigned ncpu = cpu_number();
-
 	assert(ml_get_interrupts_enabled() == FALSE);
-	assert(ncpu < intr_samplec);
 
-	return &(intr_samplev[ncpu]);
+	return zpercpu_get(intr_samplev);
 }
 
 void
@@ -107,13 +103,9 @@ kperf_setup(void)
 		return;
 	}
 
-	intr_samplec = machine_info.logical_cpu_max;
-	size_t intr_samplev_size = intr_samplec * sizeof(*intr_samplev);
-	intr_samplev = kalloc_tag(intr_samplev_size, VM_KERN_MEMORY_DIAG);
-	memset(intr_samplev, 0, intr_samplev_size);
+	intr_samplev = zalloc_percpu_permanent_type(struct kperf_sample);
 
 	kperf_kdebug_setup();
-
 	kperf_is_setup = true;
 }
 
@@ -236,26 +228,26 @@ kperf_on_cpu_update(void)
 bool
 kperf_is_sampling(void)
 {
-	return kperf_status == KPERF_SAMPLING_ON;
+	return os_atomic_load(&kperf_status, acquire) == KPERF_SAMPLING_ON;
 }
 
 int
 kperf_enable_sampling(void)
 {
-	if (kperf_status == KPERF_SAMPLING_ON) {
-		return 0;
-	}
-
-	if (kperf_status != KPERF_SAMPLING_OFF) {
-		panic("kperf: sampling was %d when asked to enable", kperf_status);
-	}
-
-	/* make sure interrupt tables and actions are initted */
-	if (!kperf_is_setup || (kperf_action_get_count() == 0)) {
+	if (!kperf_is_setup || kperf_action_get_count() == 0) {
 		return ECANCELED;
 	}
 
-	kperf_status = KPERF_SAMPLING_ON;
+	enum kperf_sampling prev_status = KPERF_SAMPLING_ON;
+	int ok = os_atomic_cmpxchgv(&kperf_status, KPERF_SAMPLING_OFF,
+	    KPERF_SAMPLING_ON, &prev_status, seq_cst);
+	if (!ok) {
+		if (prev_status == KPERF_SAMPLING_ON) {
+			return 0;
+		}
+		panic("kperf: sampling was %d when asked to enable", prev_status);
+	}
+
 	kppet_lightweight_active_update();
 	kptimer_start();
 
@@ -265,18 +257,23 @@ kperf_enable_sampling(void)
 int
 kperf_disable_sampling(void)
 {
-	if (kperf_status != KPERF_SAMPLING_ON) {
-		return 0;
+	enum kperf_sampling prev_status = KPERF_SAMPLING_ON;
+	int ok = os_atomic_cmpxchgv(&kperf_status, KPERF_SAMPLING_ON,
+	    KPERF_SAMPLING_SHUTDOWN, &prev_status, seq_cst);
+	if (!ok) {
+		if (prev_status == KPERF_SAMPLING_OFF) {
+			return 0;
+		}
+		panic("kperf: sampling was %d when asked to disable", prev_status);
 	}
 
-	/* mark a shutting down */
-	kperf_status = KPERF_SAMPLING_SHUTDOWN;
-
-	/* tell timers to disable */
 	kptimer_stop();
 
-	/* mark as off */
-	kperf_status = KPERF_SAMPLING_OFF;
+	ok = os_atomic_cmpxchgv(&kperf_status, KPERF_SAMPLING_SHUTDOWN,
+	    KPERF_SAMPLING_OFF, &prev_status, seq_cst);
+	if (!ok) {
+		panic("kperf: sampling was %d during disable", prev_status);
+	}
 	kppet_lightweight_active_update();
 
 	return 0;
@@ -321,8 +318,9 @@ kperf_port_to_pid(mach_port_name_t portname)
 
 	pid_t pid = task_pid(task);
 
-	os_ref_count_t __assert_only count = task_deallocate_internal(task);
-	assert(count != 0);
+
+	assert(os_ref_get_count(&task->ref_count) > 1);
+	task_deallocate(task);
 
 	return pid;
 }

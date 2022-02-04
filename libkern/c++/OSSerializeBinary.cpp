@@ -308,7 +308,7 @@ OSSerialize::binarySerializeInternal(const OSMetaClassBase *o)
 		key = (kOSSerializeSymbol | len);
 		ok = addBinaryObject(o, key, sym->getCStringNoCopy(), len, NULL);
 	} else if ((str = OSDynamicCast(OSString, o))) {
-		len = (str->getLength() + ((indexData != NULL) ? 1 : 0));
+		len = str->getLength();
 		key = (kOSSerializeString | len);
 		ok = addBinaryObject(o, key, str->getCStringNoCopy(), len, NULL);
 	} else if ((ldata = OSDynamicCast(OSData, o))) {
@@ -327,28 +327,29 @@ OSSerialize::binarySerializeInternal(const OSMetaClassBase *o)
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
-#define setAtIndex(v, idx, o)                                                                                                           \
-	if (idx >= v##Capacity)                                                                                                                 \
-	{                                                                                                                                                               \
-	if (v##Capacity >= v##CapacityMax) ok = false;                                  \
-	else                                                                                                                                                    \
-	{                                                                                                                                                           \
-	    uint32_t ncap = v##Capacity + 64;                                                                               \
-	    typeof(v##Array) nbuf = (typeof(v##Array)) kalloc_container(ncap * sizeof(o)); \
-	    if (!nbuf) ok = false;                                                                                                          \
-	    else                                                                                                                                    \
-	    {                                                                                                                                   \
-	        if (v##Array)                                                                                                                   \
-	        {                                                                                                                                               \
-	            bcopy(v##Array, nbuf, v##Capacity * sizeof(o));                                             \
-	            kfree(v##Array, v##Capacity * sizeof(o));                                                   \
-	        }                                                                                                                                               \
-	        v##Array    = nbuf;                                                                                                             \
-	        v##Capacity = ncap;                                                                                                             \
-	    }                                                                                                                                   \
-	    }                                                                                                                                                       \
-	}                                                                                                                                                               \
-	if (ok) v##Array[idx] = o;
+#define setAtIndex(v, idx, o)                                                  \
+	if (idx >= v##Capacity)                                                \
+	{                                                                      \
+	if (v##Capacity >= v##CapacityMax) ok = false;                         \
+	else                                                                   \
+	{                                                                      \
+	    uint32_t ncap = v##Capacity + 64;                                  \
+	    typeof(v##Array) nbuf = kalloc_type_tag_bt(OSObject *, ncap,       \
+	            Z_WAITOK_ZERO, VM_KERN_MEMORY_LIBKERN);                    \
+	    if (!nbuf) ok = false;                                             \
+	    else                                                               \
+	    {                                                                  \
+	        if (v##Array)                                                  \
+	        {                                                              \
+	            bcopy(v##Array, nbuf, v##Capacity * sizeof(o));            \
+	            kfree_type(OSObject *, v##Capacity, v##Array);             \
+	        }                                                              \
+	        v##Array    = nbuf;                                            \
+	        v##Capacity = ncap;                                            \
+	    }                                                                  \
+	    }                                                                  \
+	}                                                                      \
+	if (ok) v##Array[idx] = o
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
@@ -479,7 +480,7 @@ OSUnserializeBinary(const char *buffer, size_t bufferSize, OSString **errorStrin
 			if (bufferPos > bufferSize) {
 				break;
 			}
-			if (len < 2) {
+			if (len < 1) {
 				break;
 			}
 			if (0 != ((const char *)next)[len - 1]) {
@@ -494,7 +495,7 @@ OSUnserializeBinary(const char *buffer, size_t bufferSize, OSString **errorStrin
 			if (bufferPos > bufferSize) {
 				break;
 			}
-			o = OSString::withStringOfLength((const char *) next, len);
+			o = OSString::withCString((const char *) next, len);
 			next += wordLen;
 			break;
 
@@ -623,10 +624,10 @@ OSUnserializeBinary(const char *buffer, size_t bufferSize, OSString **errorStrin
 		for (len = (result != NULL); len < objsIdx; len++) {
 			objsArray[len]->release();
 		}
-		kfree(objsArray, objsCapacity  * sizeof(*objsArray));
+		kfree_type(OSObject *, objsCapacity, objsArray);
 	}
 	if (stackCapacity) {
-		kfree(stackArray, stackCapacity * sizeof(*stackArray));
+		kfree_type(OSObject *, stackCapacity, stackArray);
 	}
 
 	return result;

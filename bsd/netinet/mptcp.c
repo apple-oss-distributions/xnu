@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2018 Apple Inc. All rights reserved.
+ * Copyright (c) 2012-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -165,6 +165,40 @@ uint32_t mptcp_probecnt = 5;
 SYSCTL_UINT(_net_inet_mptcp, OID_AUTO, probecnt, CTLFLAG_RW | CTLFLAG_LOCKED,
     &mptcp_probecnt, 0, "Number of probe writes");
 
+uint32_t mptcp_enable_v1 = 1;
+SYSCTL_UINT(_net_inet_mptcp, OID_AUTO, enable_v1, CTLFLAG_RW | CTLFLAG_LOCKED,
+    &mptcp_enable_v1, 0, "Enable or disable v1");
+
+static int
+sysctl_mptcp_version_check SYSCTL_HANDLER_ARGS
+{
+#pragma unused(arg1, arg2)
+	int error;
+	int new_value = *(int *)oidp->oid_arg1;
+	int old_value = *(int *)oidp->oid_arg1;
+
+	error = sysctl_handle_int(oidp, &new_value, 0, req);
+	if (!error) {
+		if (new_value != MPTCP_VERSION_0 && new_value != MPTCP_VERSION_1) {
+			return EINVAL;
+		}
+		*(int *)oidp->oid_arg1 = new_value;
+	}
+
+	os_log(OS_LOG_DEFAULT,
+	    "%s:%u sysctl net.inet.tcp.mptcp_preferred_version: %d -> %d)",
+	    proc_best_name(current_proc()), proc_selfpid(),
+	    old_value, *(int *)oidp->oid_arg1);
+
+	return error;
+}
+
+int mptcp_preferred_version = MPTCP_VERSION_0;
+SYSCTL_PROC(_net_inet_tcp, OID_AUTO, mptcp_preferred_version,
+    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED,
+    &mptcp_preferred_version, 0, &sysctl_mptcp_version_check, "I", "");
+
+
 static int
 mptcp_reass_present(struct socket *mp_so)
 {
@@ -249,12 +283,7 @@ mptcp_reass(struct socket *mp_so, struct pkthdr *phdr, int *tlenp, struct mbuf *
 	}
 
 	/* Allocate a new queue entry. If we can't, just drop the pkt. XXX */
-	te = (struct tseg_qent *) zalloc(tcp_reass_zone);
-	if (te == NULL) {
-		tcpstat.tcps_mptcp_rcvmemdrop++;
-		m_freem(m);
-		return 0;
-	}
+	te = zalloc_flags(tcp_reass_zone, Z_WAITOK | Z_NOFAIL);
 
 	mp_tp->mpt_reassqlen++;
 
@@ -379,8 +408,9 @@ mptcp_input(struct mptses *mpte, struct mbuf *m)
 	 */
 	if (mp_tp->mpt_flags & MPTCPF_FALLBACK_TO_TCP) {
 		struct mbuf *iter;
-		int mb_dfin = 0;
+		int mb_dfin;
 fallback:
+		mb_dfin = 0;
 		mptcp_sbrcv_grow(mp_tp);
 
 		iter = m;
@@ -792,7 +822,7 @@ mptcp_subflow_is_slow(struct mptses *mpte, struct mptsub *mpts)
 	struct tcpcb *tp = sototcpcb(mpts->mpts_socket);
 	int fail_thresh = mptcp_fail_thresh;
 
-	if (mpte->mpte_svctype == MPTCP_SVCTYPE_HANDOVER) {
+	if (mpte->mpte_svctype == MPTCP_SVCTYPE_HANDOVER || mpte->mpte_svctype == MPTCP_SVCTYPE_PURE_HANDOVER) {
 		fail_thresh *= 2;
 	}
 
@@ -908,7 +938,9 @@ mptcp_get_subflow(struct mptses *mpte, struct mptsub **preferred)
 	 * Second Step: Among best and second_best. Choose the one that is
 	 * most appropriate for this particular service-type.
 	 */
-	if (mpte->mpte_svctype == MPTCP_SVCTYPE_HANDOVER) {
+	if (mpte->mpte_svctype == MPTCP_SVCTYPE_PURE_HANDOVER) {
+		return mptcp_return_subflow(best);
+	} else if (mpte->mpte_svctype == MPTCP_SVCTYPE_HANDOVER) {
 		/*
 		 * Only handover if Symptoms tells us to do so.
 		 */
@@ -1363,16 +1395,6 @@ mptcp_handle_deferred_upcalls(struct mppcb *mpp, uint32_t flag)
 	}
 }
 
-void
-mptcp_ask_for_nat64(struct ifnet *ifp)
-{
-	in6_post_msg(ifp, KEV_INET6_REQUEST_NAT64_PREFIX, NULL, NULL);
-
-	os_log_info(mptcp_log_handle,
-	    "%s: asked for NAT64-prefix on %s\n", __func__,
-	    ifp->if_name);
-}
-
 static void
 mptcp_reset_itfinfo(struct mpt_itf_info *info)
 {
@@ -1517,7 +1539,7 @@ mptcp_session_necp_cb(void *handle, int action, uint32_t interface_index,
 		}
 
 		dst = mptcp_get_session_dst(mpte, has_v6, has_v4);
-		if (dst && (dst->sa_family == AF_INET || dst->sa_family == 0) &&
+		if (dst && dst->sa_family == AF_INET &&
 		    has_v6 && !has_nat64 && !has_v4) {
 			if (found_slot) {
 				mpte->mpte_itfinfo[slot_index].ifindex = ifindex;
@@ -1525,13 +1547,12 @@ mptcp_session_necp_cb(void *handle, int action, uint32_t interface_index,
 				mpte->mpte_itfinfo[slot_index].has_v6_conn = has_v6;
 				mpte->mpte_itfinfo[slot_index].has_nat64_conn = has_nat64;
 			}
-			mptcp_ask_for_nat64(ifp);
 			goto out;
 		}
 
 		if (found_slot == 0) {
 			int new_size = mpte->mpte_itfinfo_size * 2;
-			struct mpt_itf_info *info = _MALLOC(sizeof(*info) * new_size, M_TEMP, M_ZERO);
+			struct mpt_itf_info *info = kalloc_data(sizeof(*info) * new_size, Z_ZERO);
 
 			if (info == NULL) {
 				os_log_error(mptcp_log_handle, "%s - %lx: malloc failed for %u\n",
@@ -1542,7 +1563,8 @@ mptcp_session_necp_cb(void *handle, int action, uint32_t interface_index,
 			memcpy(info, mpte->mpte_itfinfo, mpte->mpte_itfinfo_size * sizeof(*info));
 
 			if (mpte->mpte_itfinfo_size > MPTE_ITFINFO_SIZE) {
-				_FREE(mpte->mpte_itfinfo, M_TEMP);
+				kfree_data(mpte->mpte_itfinfo,
+				    sizeof(*info) * mpte->mpte_itfinfo_size);
 			}
 
 			/* We allocated a new one, thus the first must be empty */

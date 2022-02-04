@@ -78,17 +78,20 @@ int ip6_use_defzone = 1;
 int ip6_use_defzone = 0;
 #endif
 
-decl_lck_mtx_data(static, scope6_lock);
+static LCK_MTX_DECLARE_ATTR(scope6_lock, &ip6_mutex_grp, &ip6_mutex_attr);
 static struct scope6_id sid_default;
 
 #define SID(ifp) &IN6_IFEXTRA(ifp)->scope6_id
 
-void
-scope6_init(lck_grp_t *grp, lck_attr_t *attr)
-{
-	bzero(&sid_default, sizeof(sid_default));
-	lck_mtx_init(&scope6_lock, grp, attr);
-}
+SYSCTL_DECL(_net_inet6_ip6);
+
+int in6_embedded_scope = 1;
+SYSCTL_INT(_net_inet6_ip6, OID_AUTO,
+    in6_embedded_scope, CTLFLAG_RW | CTLFLAG_LOCKED, &in6_embedded_scope, 0, "");
+
+int in6_embedded_scope_debug = 0;
+SYSCTL_INT(_net_inet6_ip6, OID_AUTO,
+    in6_embedded_scope_debug, CTLFLAG_RW | CTLFLAG_LOCKED, &in6_embedded_scope_debug, 0, "");
 
 void
 scope6_ifattach(struct ifnet *ifp)
@@ -183,7 +186,7 @@ in6_addr2scopeid(struct ifnet *ifp, struct in6_addr *addr)
 	sid = SID(ifp);
 	switch (scope) {
 	case IPV6_ADDR_SCOPE_NODELOCAL:
-		retid = -1;     /* XXX: is this an appropriate value? */
+		retid = sid->s6id_list[IPV6_ADDR_SCOPE_INTFACELOCAL];
 		break;
 	case IPV6_ADDR_SCOPE_LINKLOCAL:
 		retid = sid->s6id_list[IPV6_ADDR_SCOPE_LINKLOCAL];
@@ -212,7 +215,7 @@ err:
  * address.
  */
 int
-sa6_embedscope(struct sockaddr_in6 *sin6, int defaultok)
+sa6_embedscope(struct sockaddr_in6 *sin6, int defaultok, uint32_t *ret_ifscope)
 {
 	struct ifnet *ifp;
 	u_int32_t zoneid;
@@ -241,9 +244,13 @@ sa6_embedscope(struct sockaddr_in6 *sin6, int defaultok)
 		}
 		ifnet_head_done();
 		/* XXX assignment to 16bit from 32bit variable */
-		sin6->sin6_addr.s6_addr16[1] = htons(zoneid & 0xffff);
-
-		sin6->sin6_scope_id = 0;
+		if (in6_embedded_scope) {
+			sin6->sin6_addr.s6_addr16[1] = htons(zoneid & 0xffff);
+			sin6->sin6_scope_id = 0;
+		}
+		if (ret_ifscope != NULL) {
+			*ret_ifscope = zoneid;
+		}
 	}
 
 	return 0;
@@ -255,7 +262,9 @@ rtkey_to_sa6(struct rtentry *rt, struct sockaddr_in6 *sin6)
 	VERIFY(rt_key(rt)->sa_family == AF_INET6);
 
 	*sin6 = *((struct sockaddr_in6 *)(void *)rt_key(rt));
-	sin6->sin6_scope_id = 0;
+	if (in6_embedded_scope) {
+		sin6->sin6_scope_id = 0;
+	}
 }
 
 void
@@ -273,9 +282,13 @@ rtgw_to_sa6(struct rtentry *rt, struct sockaddr_in6 *sin6)
 int
 sa6_recoverscope(struct sockaddr_in6 *sin6, boolean_t attachcheck)
 {
+	if (!in6_embedded_scope) {
+		return 0;
+	}
+
 	u_int32_t zoneid;
 
-	if (sin6->sin6_scope_id != 0) {
+	if (in6_embedded_scope && sin6->sin6_scope_id != 0) {
 		log(LOG_NOTICE,
 		    "sa6_recoverscope: assumption failure (non 0 ID): %s%%%d\n",
 		    ip6_sprintf(&sin6->sin6_addr), sin6->sin6_scope_id);
@@ -429,7 +442,7 @@ in6_setscope(struct in6_addr *in6, struct ifnet *ifp, u_int32_t *ret_id)
 		*ret_id = zoneid;
 	}
 
-	if (IN6_IS_SCOPE_LINKLOCAL(in6) || IN6_IS_ADDR_MC_INTFACELOCAL(in6)) {
+	if (in6_embedded_scope && (IN6_IS_SCOPE_LINKLOCAL(in6) || IN6_IS_ADDR_MC_INTFACELOCAL(in6))) {
 		in6->s6_addr16[1] = htons(zoneid & 0xffff); /* XXX */
 	}
 	return 0;
@@ -442,6 +455,10 @@ in6_setscope(struct in6_addr *in6, struct ifnet *ifp, u_int32_t *ret_id)
 int
 in6_clearscope(struct in6_addr *in6)
 {
+	if (!in6_embedded_scope) {
+		return 0;
+	}
+
 	int modified = 0;
 
 	if (IN6_IS_SCOPE_LINKLOCAL(in6) || IN6_IS_ADDR_MC_INTFACELOCAL(in6)) {
@@ -452,4 +469,40 @@ in6_clearscope(struct in6_addr *in6)
 	}
 
 	return modified;
+}
+
+bool
+in6_are_addr_equal_scoped(const struct in6_addr *addr_a, const struct in6_addr *addr_b, uint32_t ifscope_a, uint32_t ifscope_b)
+{
+	if (!IN6_ARE_ADDR_EQUAL(addr_a, addr_b)) {
+		return false;
+	} else if (IN6_IS_SCOPE_EMBED(addr_a) && !in6_embedded_scope) {
+		return ifscope_a == ifscope_b;
+	}
+
+	return true;
+}
+
+bool
+in6_are_masked_addr_scope_equal(const struct in6_addr *addr_a, uint32_t ifscope_a, const struct in6_addr *addr_b, uint32_t ifscope_b, const struct in6_addr *m)
+{
+	if (!IN6_ARE_MASKED_ADDR_EQUAL(addr_a, addr_b, m)) {
+		return false;
+	} else if (IN6_IS_SCOPE_EMBED(addr_a) && !in6_embedded_scope) {
+		return ifscope_a == ifscope_b;
+	}
+
+	return true;
+}
+
+void
+in6_verify_ifscope(const struct in6_addr *in6, uint32_t ifscope)
+{
+	if (!in6_embedded_scope || !in6_embedded_scope_debug) {
+		return;
+	}
+
+	if (IN6_IS_SCOPE_EMBED(in6)) {
+		VERIFY(ntohs(in6->s6_addr16[1]) == ifscope);
+	}
 }

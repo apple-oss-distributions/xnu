@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2020 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -155,6 +155,10 @@ SYSCTL_SKMEM_TCP_INT(OID_AUTO, ack_compression_rate,
     CTLFLAG_RW | CTLFLAG_LOCKED, int, tcp_ack_compression_rate, TCP_COMP_CHANGE_RATE,
     "Rate at which we force sending new ACKs (in ms)");
 
+SYSCTL_SKMEM_TCP_INT(OID_AUTO, randomize_timestamps,
+    CTLFLAG_RW | CTLFLAG_LOCKED, int, tcp_randomize_timestamps, 1,
+    "Randomize TCP timestamps to prevent tracking (on: 1, off: 0)");
+
 static int
 sysctl_change_ecn_setting SYSCTL_HANDLER_ARGS
 {
@@ -274,13 +278,13 @@ extern int ipsec_bypass;
 
 extern int slowlink_wsize;      /* window correction for slow links */
 
-extern u_int32_t dlil_filter_disable_tso_count;
 extern u_int32_t kipf_count;
 
 static int tcp_ip_output(struct socket *, struct tcpcb *, struct mbuf *,
     int, struct mbuf *, int, int, boolean_t);
 static int tcp_recv_throttle(struct tcpcb *tp);
 
+__attribute__((noinline))
 static int32_t
 tcp_tfo_check(struct tcpcb *tp, int32_t len)
 {
@@ -357,6 +361,7 @@ fallback:
 }
 
 /* Returns the number of bytes written to the TCP option-space */
+__attribute__((noinline))
 static unsigned int
 tcp_tfo_write_cookie_rep(struct tcpcb *tp, unsigned int optlen, u_char *opt)
 {
@@ -384,6 +389,7 @@ tcp_tfo_write_cookie_rep(struct tcpcb *tp, unsigned int optlen, u_char *opt)
 	return ret;
 }
 
+__attribute__((noinline))
 static unsigned int
 tcp_tfo_write_cookie(struct tcpcb *tp, unsigned int optlen, int32_t len,
     u_char *opt)
@@ -1172,7 +1178,6 @@ after_sack_rexmit:
 	if (len > tp->t_maxseg) {
 		if ((tp->t_flags & TF_TSO) && tcp_do_tso && hwcksum_tx &&
 		    ip_use_randomid && kipf_count == 0 &&
-		    dlil_filter_disable_tso_count == 0 &&
 		    tp->rcv_numsacks == 0 && sack_rxmit == 0 &&
 		    sack_bytes_rxmt == 0 &&
 		    inp->inp_options == NULL &&
@@ -1209,12 +1214,15 @@ after_sack_rexmit:
 	if ((so->so_flags & SOF_MP_SUBFLOW) &&
 	    !(tp->t_mpflags & TMPF_TCP_FALLBACK)) {
 		int newlen = len;
+		struct mptcb *mp_tp = tptomptp(tp);
 		if (tp->t_state >= TCPS_ESTABLISHED &&
 		    (tp->t_mpflags & TMPF_SND_MPPRIO ||
 		    tp->t_mpflags & TMPF_SND_REM_ADDR ||
 		    tp->t_mpflags & TMPF_SND_MPFAIL ||
-		    tp->t_mpflags & TMPF_SND_KEYS ||
-		    tp->t_mpflags & TMPF_SND_JACK)) {
+		    (tp->t_mpflags & TMPF_SND_KEYS &&
+		    mp_tp->mpt_version == MPTCP_VERSION_0) ||
+		    tp->t_mpflags & TMPF_SND_JACK ||
+		    tp->t_mpflags & TMPF_MPTCP_ECHO_ADDR)) {
 			if (len > 0) {
 				len = 0;
 				tso = 0;
@@ -1284,7 +1292,17 @@ after_sack_rexmit:
 
 #if TRAFFIC_MGT
 	if (tcp_recv_bg == 1 || IS_TCP_RECV_BG(so)) {
-		if (recwin > 0 && tcp_recv_throttle(tp)) {
+		/*
+		 * Timestamp MUST be supported to use rledbat unless we haven't
+		 * yet negotiated it.
+		 */
+		if (TCP_RLEDBAT_ENABLED(tp) || (tcp_rledbat && tp->t_state <
+		    TCPS_ESTABLISHED)) {
+			if (recwin > 0 && tcp_cc_rledbat.get_rlwin != NULL) {
+				/* Min of flow control window and rledbat window */
+				recwin = imin(recwin, tcp_cc_rledbat.get_rlwin(tp));
+			}
+		} else if (recwin > 0 && tcp_recv_throttle(tp)) {
 			uint32_t min_iaj_win = tcp_min_iaj_win * tp->t_maxseg;
 			uint32_t bg_rwintop = tp->rcv_adv;
 			if (SEQ_LT(bg_rwintop, tp->rcv_nxt + min_iaj_win)) {
@@ -1636,7 +1654,7 @@ send:
 
 		/* Form timestamp option as shown in appendix A of RFC 1323. */
 		*lp++ = htonl(TCPOPT_TSTAMP_HDR);
-		*lp++ = htonl(tcp_now);
+		*lp++ = htonl(tcp_now + tp->t_ts_offset);
 		*lp   = htonl(tp->ts_recent);
 		optlen += TCPOLEN_TSTAMP_APPA;
 	}
@@ -1933,8 +1951,9 @@ send:
 			tso_maxlen = tp->tso_max_segment_size ?
 			    tp->tso_max_segment_size : TCP_MAXWIN;
 
-			if (len > tso_maxlen - hdrlen - optlen) {
-				len = tso_maxlen - hdrlen - optlen;
+			/* hdrlen includes optlen */
+			if (len > tso_maxlen - hdrlen) {
+				len = tso_maxlen - hdrlen;
 				sendalot = 1;
 			} else if (tp->t_flags & TF_NEEDFIN) {
 				sendalot = 1;
@@ -2191,7 +2210,7 @@ send:
 	if (isipv6) {
 		ip6 = mtod(m, struct ip6_hdr *);
 		th = (struct tcphdr *)(void *)(ip6 + 1);
-		tcp_fillheaders(tp, ip6, th);
+		tcp_fillheaders(m, tp, ip6, th);
 		if ((tp->ecn_flags & TE_SENDIPECT) != 0 && len &&
 		    !SEQ_LT(tp->snd_nxt, tp->snd_max) && !sack_rxmit) {
 			ip6->ip6_flow |= htonl(IPTOS_ECN_ECT0 << 20);
@@ -2205,7 +2224,7 @@ send:
 		ip = mtod(m, struct ip *);
 		th = (struct tcphdr *)(void *)(ip + 1);
 		/* this picks up the pseudo header (w/o the length) */
-		tcp_fillheaders(tp, ip, th);
+		tcp_fillheaders(m, tp, ip, th);
 		if ((tp->ecn_flags & TE_SENDIPECT) != 0 && len &&
 		    !SEQ_LT(tp->snd_nxt, tp->snd_max) &&
 		    !sack_rxmit && !(flags & TH_SYN)) {
@@ -2814,9 +2833,9 @@ out:
 		}
 		/*
 		 * Unless this is due to interface restriction policy,
-		 * treat EHOSTUNREACH/ENETDOWN as a soft error.
+		 * treat EHOSTUNREACH/ENETDOWN/EADDRNOTAVAIL as a soft error.
 		 */
-		if ((error == EHOSTUNREACH || error == ENETDOWN) &&
+		if ((error == EHOSTUNREACH || error == ENETDOWN || error == EADDRNOTAVAIL) &&
 		    TCPS_HAVERCVDSYN(tp->t_state) &&
 		    !inp_restricted_send(inp, inp->inp_last_outifp)) {
 			tp->t_softerror = error;
@@ -2848,24 +2867,34 @@ tcp_ip_output(struct socket *so, struct tcpcb *tp, struct mbuf *pkt,
 	boolean_t unlocked = FALSE;
 	boolean_t ifdenied = FALSE;
 	struct inpcb *inp = tp->t_inpcb;
-	struct ip_out_args ipoa;
-	struct route ro;
 	struct ifnet *outif = NULL;
 	bool check_qos_marking_again = (so->so_flags1 & SOF1_QOSMARKING_POLICY_OVERRIDE) ? FALSE : TRUE;
 
-	bzero(&ipoa, sizeof(ipoa));
-	ipoa.ipoa_boundif = IFSCOPE_NONE;
-	ipoa.ipoa_flags = IPOAF_SELECT_SRCIF | IPOAF_BOUND_SRCADDR;
-	ipoa.ipoa_sotc = SO_TC_UNSPEC;
-	ipoa.ipoa_netsvctype = _NET_SERVICE_TYPE_UNSPEC;
-	struct ip6_out_args ip6oa;
-	struct route_in6 ro6;
+	union {
+		struct route _ro;
+		struct route_in6 _ro6;
+	} route_u_ = {};
+#define ro route_u_._ro
+#define ro6 route_u_._ro6
 
-	bzero(&ip6oa, sizeof(ip6oa));
-	ip6oa.ip6oa_boundif = IFSCOPE_NONE;
-	ip6oa.ip6oa_flags = IP6OAF_SELECT_SRCIF | IP6OAF_BOUND_SRCADDR;
-	ip6oa.ip6oa_sotc = SO_TC_UNSPEC;
-	ip6oa.ip6oa_netsvctype = _NET_SERVICE_TYPE_UNSPEC;
+	union {
+		struct ip_out_args _ipoa;
+		struct ip6_out_args _ip6oa;
+	} out_args_u_ = {};
+#define ipoa out_args_u_._ipoa
+#define ip6oa out_args_u_._ip6oa
+
+	if (isipv6) {
+		ip6oa.ip6oa_boundif = IFSCOPE_NONE;
+		ip6oa.ip6oa_flags = IP6OAF_SELECT_SRCIF | IP6OAF_BOUND_SRCADDR;
+		ip6oa.ip6oa_sotc = SO_TC_UNSPEC;
+		ip6oa.ip6oa_netsvctype = _NET_SERVICE_TYPE_UNSPEC;
+	} else {
+		ipoa.ipoa_boundif = IFSCOPE_NONE;
+		ipoa.ipoa_flags = IPOAF_SELECT_SRCIF | IPOAF_BOUND_SRCADDR;
+		ipoa.ipoa_sotc = SO_TC_UNSPEC;
+		ipoa.ipoa_netsvctype = _NET_SERVICE_TYPE_UNSPEC;
+	}
 
 	struct flowadv *adv =
 	    (isipv6 ? &ip6oa.ip6oa_flowadv : &ipoa.ipoa_flowadv);
@@ -2879,6 +2908,9 @@ tcp_ip_output(struct socket *so, struct tcpcb *tp, struct mbuf *pkt,
 			ipoa.ipoa_boundif = inp->inp_boundifp->if_index;
 			ipoa.ipoa_flags |= IPOAF_BOUND_IF;
 		}
+	} else if (!in6_embedded_scope && isipv6 && (IN6_IS_SCOPE_EMBED(&inp->in6p_faddr))) {
+		ip6oa.ip6oa_boundif = inp->inp_fifscope;
+		ip6oa.ip6oa_flags |= IP6OAF_BOUND_IF;
 	}
 
 	if (INP_NO_CELLULAR(inp)) {
@@ -2947,6 +2979,12 @@ tcp_ip_output(struct socket *so, struct tcpcb *tp, struct mbuf *pkt,
 	} else {
 		inp_route_copyout(inp, &ro);
 	}
+#if (DEBUG || DEVELOPMENT)
+	if ((so->so_flags & SOF_MARK_WAKE_PKT) && pkt != NULL) {
+		so->so_flags &= ~SOF_MARK_WAKE_PKT;
+		pkt->m_pkthdr.pkt_flags |= PKTF_WAKE_PKT;
+	}
+#endif /* (DEBUG || DEVELOPMENT) */
 
 	/*
 	 * Make sure ACK/DELACK conditions are cleared before
@@ -3011,11 +3049,11 @@ tcp_ip_output(struct socket *so, struct tcpcb *tp, struct mbuf *pkt,
 			error = ip6_output_list(pkt, cnt,
 			    inp->in6p_outputopts, &ro6, flags, NULL, NULL,
 			    &ip6oa);
-			ifdenied = (ip6oa.ip6oa_retflags & IP6OARF_IFDENIED);
+			ifdenied = (ip6oa.ip6oa_flags & IP6OAF_R_IFDENIED);
 		} else {
 			error = ip_output_list(pkt, cnt, opt, &ro, flags, NULL,
 			    &ipoa);
-			ifdenied = (ipoa.ipoa_retflags & IPOARF_IFDENIED);
+			ifdenied = (ipoa.ipoa_flags & IPOAF_R_IFDENIED);
 		}
 
 		if (chain || error) {
@@ -3142,6 +3180,10 @@ tcp_ip_output(struct socket *so, struct tcpcb *tp, struct mbuf *pkt,
 		tp->t_timer[TCPT_REXMT] = OFFSET_FROM_START(tp, tp->t_rxtcur);
 	}
 	return error;
+#undef ro
+#undef ro6
+#undef ipoa
+#undef ip6oa
 }
 
 int tcptv_persmin_val = TCPTV_PERSMIN;

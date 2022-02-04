@@ -48,14 +48,10 @@ subsystem
 
 /*
  * OBSOLETE interfaces
- * a lock_set_t is created and destroyed through the task object.
- *      lock_set_create(task,&lock_set_t,...);
- *      lock_set_destroy(task,lock_set_t);
+ *
+ * removed from kernel.
  */
 
-/*
- * OBSOLETE interfaces
- */
 routine lock_acquire(
 		lock_set	: lock_set_t;
 		lock_id		: int);

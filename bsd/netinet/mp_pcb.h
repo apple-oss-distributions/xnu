@@ -30,6 +30,8 @@
 #define _NETINET_MP_PCB_H_
 
 #ifdef BSD_KERNEL_PRIVATE
+#include <netinet/in_pcb.h>
+
 #include <sys/domain.h>
 #include <sys/protosw.h>
 #include <sys/socketvar.h>
@@ -58,6 +60,7 @@ struct mppcb {
 
 #if NECP
 	uuid_t necp_client_uuid;
+	struct inp_necp_attributes inp_necp_attributes;
 	void (*necp_cb)(void *, int, uint32_t, uint32_t, bool *);
 #endif
 };
@@ -93,23 +96,20 @@ struct mppcbinfo {
 	TAILQ_ENTRY(mppcbinfo)  mppi_entry;     /* glue to all PCB info */
 	TAILQ_HEAD(, mppcb)     mppi_pcbs;      /* list of PCBs */
 	uint32_t                mppi_count;     /* # of PCBs in list */
+	lck_attr_t              mppi_lock_attr; /* lock attr */
 	struct zone             *mppi_zone;     /* zone for this PCB */
-	uint32_t                mppi_size;      /* size of PCB structure */
 	lck_grp_t               *mppi_lock_grp; /* lock grp */
-	lck_attr_t              *mppi_lock_attr; /* lock attr */
-	lck_grp_attr_t          *mppi_lock_grp_attr; /* lock grp attr */
 	decl_lck_mtx_data(, mppi_lock);         /* global PCB lock */
 	uint32_t (*mppi_gc)(struct mppcbinfo *); /* garbage collector func */
 	uint32_t (*mppi_timer)(struct mppcbinfo *); /* timer func */
 };
 
 __BEGIN_DECLS
-extern void mp_pcbinit(void);
 extern void mp_pcbinfo_attach(struct mppcbinfo *);
 extern int mp_pcbinfo_detach(struct mppcbinfo *);
 extern int mp_pcballoc(struct socket *, struct mppcbinfo *);
 extern void mp_pcbdetach(struct socket *);
-extern void mp_pcbdispose(struct mppcb *);
+extern void mptcp_pcbdispose(struct mppcb *);
 extern void mp_gc_sched(void);
 extern void mptcp_timer_sched(void);
 extern void mptcp_handle_deferred_upcalls(struct mppcb *mpp, uint32_t flag);

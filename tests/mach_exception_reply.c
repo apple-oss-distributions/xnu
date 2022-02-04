@@ -1,4 +1,3 @@
-#define T_NAMESPACE "xnu.ipc"
 #include <darwintest.h>
 
 #include <pthread.h>
@@ -10,7 +9,10 @@
 #include <pthread/qos_private.h>
 #include <voucher/ipc_pthread_priority_types.h>
 
-T_GLOBAL_META(T_META_RUN_CONCURRENTLY(true));
+T_GLOBAL_META(T_META_RUN_CONCURRENTLY(true),
+    T_META_NAMESPACE("xnu.ipc"),
+    T_META_RADAR_COMPONENT_NAME("xnu"),
+    T_META_RADAR_COMPONENT_VERSION("IPC"));
 
 #define MSG      1024
 #define PG_ALLOC 4096

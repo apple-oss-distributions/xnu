@@ -150,6 +150,7 @@ extern int esp_udp_encap_port;
 #include <net/content_filter.h>
 #endif /* CONTENT_FILTER */
 
+
 /*
  * UDP protocol inplementation.
  * Per RFC 768, August, 1980.
@@ -341,7 +342,7 @@ udp6_input(struct mbuf **mp, int *offp, int proto)
 		 * Locate pcb(s) for datagram.
 		 * (Algorithm copied from raw_intr().)
 		 */
-		lck_rw_lock_shared(pcbinfo->ipi_lock);
+		lck_rw_lock_shared(&pcbinfo->ipi_lock);
 
 		LIST_FOREACH(in6p, &udb, inp_list) {
 #if IPSEC
@@ -353,6 +354,13 @@ udp6_input(struct mbuf **mp, int *offp, int proto)
 			}
 
 			if (inp_restricted_recv(in6p, ifp)) {
+				continue;
+			}
+			/*
+			 * Skip unbound sockets before taking the lock on the socket as
+			 * the test with the destination port in the header will fail
+			 */
+			if (in6p->in6p_lport == 0) {
 				continue;
 			}
 
@@ -401,8 +409,8 @@ udp6_input(struct mbuf **mp, int *offp, int proto)
 				}
 			}
 			if (!IN6_IS_ADDR_UNSPECIFIED(&in6p->in6p_faddr) &&
-			    (!IN6_ARE_ADDR_EQUAL(&in6p->in6p_faddr,
-			    &ip6->ip6_src) ||
+			    (!in6_are_addr_equal_scoped(&in6p->in6p_faddr,
+			    &ip6->ip6_src, in6p->inp_fifscope, ifp->if_index) ||
 			    in6p->in6p_fport != uh->uh_sport)) {
 				udp_unlock(in6p->in6p_socket, 1, 0);
 				continue;
@@ -464,7 +472,7 @@ udp6_input(struct mbuf **mp, int *offp, int proto)
 			ip6 = mtod(m, struct ip6_hdr *);
 			uh = (struct udphdr *)(void *)((caddr_t)ip6 + off);
 		}
-		lck_rw_done(pcbinfo->ipi_lock);
+		lck_rw_done(&pcbinfo->ipi_lock);
 
 		if (mcast_delivered == 0) {
 			/*
@@ -506,7 +514,7 @@ udp6_input(struct mbuf **mp, int *offp, int proto)
 		if (uh->uh_dport != ntohs((u_short)esp_udp_encap_port)) {
 			check_esp = key_checksa_present(AF_INET6, (caddr_t)&ip6->ip6_dst,
 			    (caddr_t)&ip6->ip6_src, uh->uh_dport,
-			    uh->uh_sport);
+			    uh->uh_sport, ip6_input_getdstifscope(m), ip6_input_getsrcifscope(m));
 		}
 
 		if (check_esp) {
@@ -546,8 +554,8 @@ udp6_input(struct mbuf **mp, int *offp, int proto)
 	/*
 	 * Locate pcb for datagram.
 	 */
-	in6p = in6_pcblookup_hash(&udbinfo, &ip6->ip6_src, uh->uh_sport,
-	    &ip6->ip6_dst, uh->uh_dport, 1, m->m_pkthdr.rcvif);
+	in6p = in6_pcblookup_hash(&udbinfo, &ip6->ip6_src, uh->uh_sport, ip6_input_getsrcifscope(m),
+	    &ip6->ip6_dst, uh->uh_dport, ip6_input_getdstifscope(m), 1, m->m_pkthdr.rcvif);
 	if (in6p == NULL) {
 		IF_UDP_STATINC(ifp, port_unreach);
 
@@ -562,7 +570,7 @@ udp6_input(struct mbuf **mp, int *offp, int proto)
 				    ip6_sprintf(&ip6->ip6_src),
 				    ntohs(uh->uh_sport));
 			} else if (!(m->m_flags & (M_BCAST | M_MCAST)) &&
-			    !IN6_ARE_ADDR_EQUAL(&ip6->ip6_dst, &ip6->ip6_src)) {
+			    !in6_are_addr_equal_scoped(&ip6->ip6_dst, &ip6->ip6_src, ip6_input_getdstifscope(m), ip6_input_getsrcifscope(m))) {
 				log(LOG_INFO, "Connection attempt "
 				    "to UDP %s:%d from %s:%d\n", buf,
 				    ntohs(uh->uh_dport),
@@ -709,8 +717,8 @@ udp6_ctlinput(int cmd, struct sockaddr *sa, void *d, __unused struct ifnet *ifp)
 		bzero(&uh, sizeof(uh));
 		m_copydata(m, off, sizeof(*uhp), (caddr_t)&uh);
 
-		in6p = in6_pcblookup_hash(&udbinfo, &ip6->ip6_dst, uh.uh_dport,
-		    &ip6->ip6_src, uh.uh_sport, 0, NULL);
+		in6p = in6_pcblookup_hash(&udbinfo, &ip6->ip6_dst, uh.uh_dport, ip6_input_getdstifscope(m),
+		    &ip6->ip6_src, uh.uh_sport, ip6_input_getsrcifscope(m), 0, NULL);
 		if (cmd == PRC_MSGSIZE && in6p != NULL && !uuid_is_null(in6p->necp_client_uuid)) {
 			uuid_t null_uuid;
 			uuid_clear(null_uuid);
@@ -737,7 +745,7 @@ udp6_abort(struct socket *so)
 
 	inp = sotoinpcb(so);
 	if (inp == NULL) {
-		panic("%s: so=%p null inp\n", __func__, so);
+		panic("%s: so=%p null inp", __func__, so);
 		/* NOTREACHED */
 	}
 	soisdisconnected(so);
@@ -814,6 +822,7 @@ udp6_bind(struct socket *so, struct sockaddr *nam, struct proc *p)
 			in6_sin6_2_sin(&sin, sin6_p);
 			inp->inp_vflag |= INP_IPV4;
 			inp->inp_vflag &= ~INP_IPV6;
+			inp->inp_vflag |= INP_V4MAPPEDV6;
 			error = in_pcbbind(inp, (struct sockaddr *)&sin, p);
 			return error;
 		}
@@ -876,6 +885,7 @@ udp6_connect(struct socket *so, struct sockaddr *nam, struct proc *p)
 #endif /* NECP */
 				inp->inp_vflag |= INP_IPV4;
 				inp->inp_vflag &= ~INP_IPV6;
+				inp->inp_vflag |= INP_V4MAPPEDV6;
 				soisconnected(so);
 			}
 			return error;
@@ -927,7 +937,7 @@ do_flow_divert:
 		    inp->in6p_flags & IN6P_AUTOFLOWLABEL) {
 			inp->inp_flow &= ~IPV6_FLOWLABEL_MASK;
 			inp->inp_flow |=
-			    (htonl(inp->inp_flowhash) & IPV6_FLOWLABEL_MASK);
+			    (htonl(ip6_randomflowlabel()) & IPV6_FLOWLABEL_MASK);
 		}
 	}
 	return error;
@@ -987,6 +997,7 @@ udp6_disconnect(struct socket *so)
 	inp_reset_fc_state(inp);
 
 	inp->in6p_laddr = in6addr_any;
+	inp->inp_lifscope = IFSCOPE_NONE;
 	inp->in6p_last_outifp = NULL;
 
 	so->so_state &= ~SS_ISCONNECTED;                /* XXX */
@@ -1099,6 +1110,7 @@ do_flow_divert:
 #endif /* defined(NECP) && defined(FLOW_DIVERT) */
 
 	error = udp6_output(inp, m, addr, control, p);
+
 #if CONTENT_FILTER
 	if (cfil_tag) {
 		m_tag_free(cfil_tag);

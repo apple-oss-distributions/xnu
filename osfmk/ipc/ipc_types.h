@@ -63,33 +63,38 @@ typedef struct ipc_kmsg *ipc_kmsg_t;
 typedef uint8_t sync_qos_count_t;
 
 typedef uint64_t ipc_label_t;
-#define IPC_LABEL_NONE     ((ipc_label_t)0x0)
-#define IPC_LABEL_DEXT     ((ipc_label_t)0x1)
-#define IPC_LABEL_PLATFORM ((ipc_label_t)0x2)
-#define IPC_LABEL_SPECIAL  ((ipc_label_t)0x3)
+#define IPC_LABEL_NONE          ((ipc_label_t)0x0000)
+#define IPC_LABEL_DEXT          ((ipc_label_t)0x0001)
+#define IPC_LABEL_PLATFORM      ((ipc_label_t)0x0002)
+#define IPC_LABEL_SPECIAL       ((ipc_label_t)0x0003)
+#define IPC_LABEL_SPACE_MASK    ((ipc_label_t)0x00ff)
+
+#define IPC_LABEL_SUBST_TASK    ((ipc_label_t)0x0100)
+#define IPC_LABEL_SUBST_THREAD  ((ipc_label_t)0x0200)
+#define IPC_LABEL_SUBST_ONCE    ((ipc_label_t)0x0300)
+#define IPC_LABEL_SUBST_MASK    ((ipc_label_t)0xff00)
 
 typedef struct ipc_kobject_label *ipc_kobject_label_t;
 
-#define IE_NULL ((ipc_entry_t) 0)
+#define IE_NULL ((ipc_entry_t)NULL)
 
-#define ITS_NULL        ((ipc_table_size_t) 0)
+#define ITS_NULL        ((ipc_table_size_t)NULL)
 #define ITS_SIZE_NONE   ((ipc_table_elems_t) -1)
-#define IPR_NULL        ((ipc_port_request_t) 0)
-#define IPS_NULL        ((ipc_pset_t) 0)
-#define IKM_NULL        ((ipc_kmsg_t) 0)
+#define IPR_NULL        ((ipc_port_request_t)NULL)
+#define IPS_NULL        ((ipc_pset_t)NULL)
+#define IKM_NULL        ((ipc_kmsg_t)NULL)
 
 typedef void (*mach_msg_continue_t)(mach_msg_return_t); /* after wakeup */
-#define MACH_MSG_CONTINUE_NULL  ((mach_msg_continue_t) 0)
+#define MACH_MSG_CONTINUE_NULL  ((mach_msg_continue_t)NULL)
 
 typedef struct ipc_importance_elem *ipc_importance_elem_t;
-#define IIE_NULL        ((ipc_importance_elem_t)0)
+#define IIE_NULL        ((ipc_importance_elem_t)NULL)
 
 typedef struct ipc_importance_task *ipc_importance_task_t;
-#define IIT_NULL        ((ipc_importance_task_t)0)
+#define IIT_NULL        ((ipc_importance_task_t)NULL)
 
 typedef struct ipc_importance_inherit *ipc_importance_inherit_t;
-#define III_NULL        ((ipc_importance_inherit_t)0)
-
+#define III_NULL        ((ipc_importance_inherit_t)NULL)
 
 #else   /* MACH_KERNEL_PRIVATE */
 

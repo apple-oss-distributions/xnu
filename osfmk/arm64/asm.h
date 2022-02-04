@@ -57,11 +57,9 @@
 #ifndef	_ARM_ASM_H_
 #define	_ARM_ASM_H_
 
-#include <arm/arch.h>
+#ifdef __arm64__
 
-#ifndef __arm64__
-#error Why are we  including this?
-#endif 
+#include <arm/arch.h>
 
 /* There is another definition of ALIGN for .c sources */
 #ifdef __ASSEMBLER__
@@ -204,5 +202,7 @@
 # define BRANCH_EXTERN(x)	b	EXT(x)
 
 #endif /* __ASSEMBLER__ */
+
+#endif /* __arm64__ */
 
 #endif /* _ARM_ASM_H_ */

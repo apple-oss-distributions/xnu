@@ -9,10 +9,6 @@
 #error "Please #include <img4/firmware.h> instead of this file directly"
 #endif // __IMG4_INDIRECT
 
-#if IMG4_TAPI
-#include "tapi.h"
-#endif
-
 OS_ASSUME_NONNULL_BEGIN
 
 /*!

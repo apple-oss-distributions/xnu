@@ -121,7 +121,7 @@ au_class_protect(au_class_t old_class, au_class_t new_class)
 	    (new_class & AU_CLASS_MASK_RESERVED)) {
 		task_t task = current_task();
 		if (task != kernel_task &&
-		    !IOTaskHasEntitlement(task, AU_CLASS_RESERVED_ENTITLEMENT)) {
+		    !IOCurrentTaskHasEntitlement(AU_CLASS_RESERVED_ENTITLEMENT)) {
 			/*
 			 * If the caller isn't entitled, revert the class bit:
 			 * - First remove the reserved bit from the new_class mask
@@ -168,7 +168,7 @@ au_evclassmap_insert(au_event_t event, au_class_t class)
 	 * Pessimistically, always allocate storage before acquiring mutex.
 	 * Free if there is already a mapping for this event.
 	 */
-	evc_new = malloc(sizeof(*evc), M_AUDITEVCLASS, M_WAITOK);
+	evc_new = kalloc_type(struct evclass_elem, Z_WAITOK | Z_ZERO | Z_NOFAIL);
 
 	EVCLASS_WLOCK();
 	evcl = &evclass_hash[event % EVCLASSMAP_HASH_TABLE_SIZE];
@@ -176,7 +176,7 @@ au_evclassmap_insert(au_event_t event, au_class_t class)
 		if (evc->event == event) {
 			evc->class = au_class_protect(evc->class, class);
 			EVCLASS_WUNLOCK();
-			free(evc_new, M_AUDITEVCLASS);
+			kfree_type(struct evclass_elem, evc_new);
 			return;
 		}
 	}
@@ -825,11 +825,11 @@ audit_fcntl_command_event(int cmd, int oflags, int error)
  * directory, or the current working directory.
  */
 int
-audit_canon_path(struct vnode *cwd_vp, char *path, char *cpath)
+audit_canon_path(struct vnode *cwd_vp, const char *path, char *cpath)
 {
 	int len;
 	int ret;
-	char *bufp = path;
+	const char *bufp = path;
 
 	/*
 	 * Convert multiple leading '/' into a single '/' if the cwd_vp is

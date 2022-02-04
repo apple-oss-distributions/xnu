@@ -1,0 +1,21 @@
+# ARM64 specific blacklist
+
+[kernel-hwaddress|address]
+
+# Exclude KASan runtime
+src:./san/memory/kasan-arm64.c
+src:./san/memory/kasan-tbi.c
+src:./san/memory/kasan-classic.c
+src:./san/memory/kasan-helper.c
+src:./osfmk/arm/machine_routines_common.c
+
+# These use a local variable to work out which stack we're on, but can end up with
+# a fakestack allocation.
+fun:ml_at_interrupt_context
+fun:ml_stack_remaining
+fun:ml_stack_base
+fun:ml_stack_size
+
+# TBI specific
+src:./osfmk/arm/model_dep.c
+src:./osfmk/kern/backtrace.c

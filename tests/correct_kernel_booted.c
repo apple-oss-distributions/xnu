@@ -112,7 +112,8 @@ out:
 
 T_DECL(correct_kernel_booted,
     "Make sure the kernel on disk matches the running kernel, by UUID.",
-    T_META_RUN_CONCURRENTLY(true))
+    T_META_RUN_CONCURRENTLY(true),
+    T_META_CHECK_LEAKS(false))
 {
 	T_SETUPBEGIN;
 
@@ -164,4 +165,5 @@ T_DECL(correct_kernel_booted,
 		T_FAIL("failed to find kernel binary with UUID of the running kernel, "
 		    "wrong kernel is booted");
 	}
+	(void)closedir(kernels_dir);
 }

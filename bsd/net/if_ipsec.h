@@ -81,6 +81,14 @@ void ipsec_set_ip6oa_for_interface(ifnet_t interface, struct ip6_out_args *ip6oa
 #define IPSEC_OPT_CHANNEL_BIND_PID                      17      /* Must be set before connecting */
 #define IPSEC_OPT_KPIPE_TX_RING_SIZE                    18      /* Must be set before connecting */
 #define IPSEC_OPT_KPIPE_RX_RING_SIZE                    19      /* Must be set before connecting */
+#define IPSEC_OPT_CHANNEL_BIND_UUID                     20      /* Must be set before connecting */
+
+#define IPSEC_OPT_OUTPUT_DSCP_MAPPING                   21      /* Must be set before connecting */
+
+typedef enum {
+	IPSEC_DSCP_MAPPING_COPY = 0,             /* Copy DSCP bits from inner IP header to outer IP header */
+	IPSEC_DSCP_MAPPING_LEGACY = 1,           /* Copies bits from the outer IP header that are at TOS offset of the inner IP header, into the DSCP of the outer IP header  */
+} ipsec_dscp_mapping_t;
 
 /*
  * ipsec stats parameter structure

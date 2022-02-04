@@ -11,7 +11,10 @@
  * Ensure that mach_memory_info includes a counter for the kernelcache size.
  */
 
-T_GLOBAL_META(T_META_NAMESPACE("xnu.vm"));
+T_GLOBAL_META(
+	T_META_NAMESPACE("xnu.vm"),
+	T_META_RADAR_COMPONENT_NAME("xnu"),
+	T_META_RADAR_COMPONENT_VERSION("VM"));
 
 T_DECL(vm_kern_count_wired_kernelcache,
     "mach_memory_info returns a counter for for kernelcache",

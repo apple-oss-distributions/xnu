@@ -78,15 +78,6 @@ __BEGIN_DECLS
  */
 typedef void (*kpc_pm_handler_t)(boolean_t);
 
-/*
- * Register a CPU to kpc and allocate its buffers.
- *
- * @param cpu_data
- * CPU data associated to the CPU being registered.
- *
- * @return
- * TRUE if buffers are correctly allocated, FALSE otherwise.
- */
 struct cpu_data;
 extern boolean_t kpc_register_cpu(struct cpu_data *cpu_data);
 extern void kpc_unregister_cpu(struct cpu_data *cpu_data);
@@ -320,9 +311,10 @@ int kpc_set_config_arch(struct kpc_config_remote *mp_config);
 int kpc_set_period_arch(struct kpc_config_remote *mp_config);
 
 __options_decl(kperf_kpc_flags_t, uint16_t, {
-	KPC_KERNEL_PC = 0x01,
-	KPC_KERNEL_COUNTING = 0x02,
-	KPC_USER_COUNTING = 0x04,
+	KPC_KERNEL_PC = 0x01, // the PC is a kernel address
+	KPC_KERNEL_COUNTING = 0x02, // the counter counts while running in the kernel
+	KPC_USER_COUNTING = 0x04, // the counter counts while running in user space
+	KPC_CAPTURED_PC = 0x08, // the PC was captured by hardware
 });
 
 void kpc_sample_kperf(uint32_t actionid, uint32_t counter, uint64_t config,

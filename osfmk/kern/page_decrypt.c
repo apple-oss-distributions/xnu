@@ -32,7 +32,7 @@
 #include <kern/task.h>
 #include <machine/commpage.h>
 
-static dsmos_page_transform_hook_t dsmos_hook = NULL;
+static dsmos_page_transform_hook_t dsmos_hook;
 
 void
 dsmos_page_transform_hook(dsmos_page_transform_hook_t hook)
@@ -58,7 +58,7 @@ dsmos_page_transform(const void* from, void *to, unsigned long long src_offset, 
 }
 
 
-text_crypter_create_hook_t text_crypter_create = NULL;
+text_crypter_create_hook_t text_crypter_create;
 void
 text_crypter_create_hook_set(text_crypter_create_hook_t hook)
 {

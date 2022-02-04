@@ -1,3 +1,4 @@
+#include <TargetConditionals.h>
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -140,13 +141,7 @@ main(
 	fprintf(stdout, "%s: WARNING: unsigned code was executed\n",
 	    cmdname);
 
-#if CONFIG_EMBEDDED
 	/* fail: unsigned code was executed */
 	fprintf(stdout, "%s: FAIL\n", cmdname);
 	exit(1);
-#else /* CONFIG_EMBEDDED */
-	/* no fail: unsigned code is only prohibited on embedded platforms */
-	fprintf(stdout, "%s: SUCCESS\n", cmdname);
-	exit(0);
-#endif /* CONFIG_EMBEDDED */
 }

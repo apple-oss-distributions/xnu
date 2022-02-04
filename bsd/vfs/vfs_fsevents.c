@@ -57,6 +57,7 @@
 #include <mach/mach_time.h>
 #include <kern/thread_call.h>
 #include <kern/clock.h>
+#include <IOKit/IOBSD.h>
 
 #include <security/audit/audit.h>
 #include <bsm/audit_kevents.h>
@@ -152,16 +153,18 @@ static void fsevents_wakeup(fs_event_watcher *watcher);
 //
 // Locks
 //
-static lck_grp_attr_t *  fsevent_group_attr;
-static lck_attr_t *      fsevent_lock_attr;
-static lck_grp_t *       fsevent_mutex_group;
+static LCK_ATTR_DECLARE(fsevent_lock_attr, 0, 0);
+static LCK_GRP_DECLARE(fsevent_mutex_group, "fsevent-mutex");
+static LCK_GRP_DECLARE(fsevent_rw_group, "fsevent-rw");
 
-static lck_grp_t *       fsevent_rw_group;
-
-static lck_rw_t  event_handling_lock; // handles locking for event manipulation and recycling
-static lck_mtx_t watch_table_lock;
-static lck_mtx_t event_buf_lock;
-static lck_mtx_t event_writer_lock;
+static LCK_RW_DECLARE_ATTR(event_handling_lock, // handles locking for event manipulation and recycling
+    &fsevent_rw_group, &fsevent_lock_attr);
+static LCK_MTX_DECLARE_ATTR(watch_table_lock,
+    &fsevent_mutex_group, &fsevent_lock_attr);
+static LCK_MTX_DECLARE_ATTR(event_buf_lock,
+    &fsevent_mutex_group, &fsevent_lock_attr);
+static LCK_MTX_DECLARE_ATTR(event_writer_lock,
+    &fsevent_mutex_group, &fsevent_lock_attr);
 
 
 /* Explicitly declare qsort so compiler doesn't complain */
@@ -204,29 +207,16 @@ fsevents_internal_init(void)
 
 	memset(watcher_table, 0, sizeof(watcher_table));
 
-	fsevent_lock_attr    = lck_attr_alloc_init();
-	fsevent_group_attr   = lck_grp_attr_alloc_init();
-	fsevent_mutex_group  = lck_grp_alloc_init("fsevent-mutex", fsevent_group_attr);
-	fsevent_rw_group     = lck_grp_alloc_init("fsevent-rw", fsevent_group_attr);
-
-	lck_mtx_init(&watch_table_lock, fsevent_mutex_group, fsevent_lock_attr);
-	lck_mtx_init(&event_buf_lock, fsevent_mutex_group, fsevent_lock_attr);
-	lck_mtx_init(&event_writer_lock, fsevent_mutex_group, fsevent_lock_attr);
-
-	lck_rw_init(&event_handling_lock, fsevent_rw_group, fsevent_lock_attr);
-
 	PE_get_default("kern.maxkfsevents", &max_kfs_events, sizeof(max_kfs_events));
 
 	event_zone = zone_create_ext("fs-event-buf", sizeof(kfs_event),
 	    ZC_NOGC | ZC_NOCALLOUT, ZONE_ID_ANY, ^(zone_t z) {
 		// mark the zone as exhaustible so that it will not
 		// ever grow beyond what we initially filled it with
-		zone_set_exhaustible(z, max_kfs_events * sizeof(kfs_event));
+		zone_set_exhaustible(z, max_kfs_events);
 	});
 
-	if (zfill(event_zone, max_kfs_events) < max_kfs_events) {
-		printf("fsevents: failed to pre-fill the event zone.\n");
-	}
+	zone_fill_initially(event_zone, max_kfs_events);
 }
 
 static void
@@ -349,6 +339,7 @@ static pid_t last_pid = -1;
 int            last_coalesced = 0;
 static mach_timebase_info_data_t    sTimebaseInfo = { 0, 0 };
 
+#define MAX_HARDLINK_NOTIFICATIONS 128
 
 int
 add_fsevent(int type, vfs_context_t ctx, ...)
@@ -359,13 +350,23 @@ add_fsevent(int type, vfs_context_t ctx, ...)
 	fs_event_watcher *watcher;
 	va_list           ap;
 	int               error = 0, did_alloc = 0;
+	int64_t           orig_linkcount = -1;
 	dev_t             dev = 0;
 	uint64_t          now, elapsed;
-	char             *pathbuff = NULL;
+	uint64_t          orig_linkid = 0, next_linkid = 0;
+	char             *pathbuff = NULL, *path_override = NULL;
+	vnode_t           link_vp = NULL;
 	int               pathbuff_len;
+	uthread_t         ut = get_bsdthread_info(current_thread());
+	bool              do_all_links = true;
+
+	if (type == FSE_CONTENT_MODIFIED_NO_HLINK) {
+		do_all_links = false;
+		type = FSE_CONTENT_MODIFIED;
+	}
 
 
-
+restart:
 	va_start(ap, ctx);
 
 	// ignore bogus event types..
@@ -392,7 +393,7 @@ add_fsevent(int type, vfs_context_t ctx, ...)
 	// (as long as it's not an event type that can never be the
 	// same as a previous event)
 	//
-	if (type != FSE_CREATE_FILE && type != FSE_DELETE && type != FSE_RENAME && type != FSE_EXCHANGE && type != FSE_CHOWN && type != FSE_DOCID_CHANGED && type != FSE_DOCID_CREATED && type != FSE_CLONE) {
+	if (path_override == NULL && type != FSE_CREATE_FILE && type != FSE_DELETE && type != FSE_RENAME && type != FSE_EXCHANGE && type != FSE_CHOWN && type != FSE_DOCID_CHANGED && type != FSE_DOCID_CREATED && type != FSE_CLONE) {
 		void *ptr = NULL;
 		int   vid = 0, was_str = 0, nlen = 0;
 
@@ -434,7 +435,7 @@ add_fsevent(int type, vfs_context_t ctx, ...)
 
 		if (type == last_event_type
 		    && (elapsed < 1000000000)
-		    && (last_pid == p->p_pid)
+		    && (last_pid == proc_getpid(p))
 		    &&
 		    ((vid && vid == last_vid && last_ptr == ptr)
 		    ||
@@ -454,7 +455,7 @@ add_fsevent(int type, vfs_context_t ctx, ...)
 			last_vid = vid;
 			last_event_type = type;
 			last_coalesced_time = now;
-			last_pid = p->p_pid;
+			last_pid = proc_getpid(p);
 		}
 	}
 	va_start(ap, ctx);
@@ -536,13 +537,13 @@ add_fsevent(int type, vfs_context_t ctx, ...)
 	last_event_ptr = kfse;
 	kfse->type     = (int16_t)type;
 	kfse->abstime  = now;
-	kfse->pid      = p->p_pid;
+	kfse->pid      = proc_getpid(p);
 	if (type == FSE_RENAME || type == FSE_EXCHANGE || type == FSE_CLONE) {
 		memset(kfse_dest, 0, sizeof(kfs_event));
 		kfse_dest->refcount = 1;
 		OSBitOrAtomic16(KFSE_BEING_CREATED, &kfse_dest->flags);
 		kfse_dest->type     = (int16_t)type;
-		kfse_dest->pid      = p->p_pid;
+		kfse_dest->pid      = proc_getpid(p);
 		kfse_dest->abstime  = now;
 
 		kfse->dest = kfse_dest;
@@ -555,7 +556,7 @@ add_fsevent(int type, vfs_context_t ctx, ...)
 	LIST_INSERT_HEAD(&kfse_list_head, kfse, kevent_list);
 
 	if (kfse->refcount < 1) {
-		panic("add_fsevent: line %d: kfse recount %d but should be at least 1\n", __LINE__, kfse->refcount);
+		panic("add_fsevent: line %d: kfse recount %d but should be at least 1", __LINE__, kfse->refcount);
 	}
 
 	unlock_fs_event_list(); // at this point it's safe to unlock
@@ -648,7 +649,7 @@ add_fsevent(int type, vfs_context_t ctx, ...)
 
 			vp = va_arg(ap, struct vnode *);
 			if (vp == NULL) {
-				panic("add_fsevent: you can't pass me a NULL vnode ptr (type %d)!\n",
+				panic("add_fsevent: you can't pass me a NULL vnode ptr (type %d)!",
 				    cur->type);
 			}
 
@@ -676,10 +677,15 @@ add_fsevent(int type, vfs_context_t ctx, ...)
 				if ((vp->v_type == VDIR && va.va_dirlinkcount == 0) || (vp->v_type == VREG && va.va_nlink == 0)) {
 					cur->mode |= FSE_MODE_LAST_HLINK;
 				}
+				if (orig_linkid == 0) {
+					orig_linkid = cur->ino;
+					orig_linkcount = MIN(va.va_nlink, MAX_HARDLINK_NOTIFICATIONS);
+					link_vp = vp;
+				}
 			}
 
 			// if we haven't gotten the path yet, get it.
-			if (pathbuff == NULL) {
+			if (pathbuff == NULL && path_override == NULL) {
 				pathbuff = get_pathbuff();
 				pathbuff_len = MAXPATHLEN;
 
@@ -710,16 +716,24 @@ add_fsevent(int type, vfs_context_t ctx, ...)
 						goto clean_up;
 					}
 				}
+			} else if (path_override) {
+				pathbuff = path_override;
+				pathbuff_len = (int)strlen(path_override) + 1;
+			} else {
+				strlcpy(pathbuff, "NOPATH", MAXPATHLEN);
+				pathbuff_len = (int)strlen(pathbuff) + 1;
 			}
 
 			// store the path by adding it to the global string table
 			cur->len = (u_int16_t)pathbuff_len;
 			cur->str = vfs_addname(pathbuff, pathbuff_len, 0, 0);
 			if (cur->str == NULL || cur->str[0] == '\0') {
-				panic("add_fsevent: was not able to add path %s to event %p.\n", pathbuff, cur);
+				panic("add_fsevent: was not able to add path %s to event %p.", pathbuff, cur);
 			}
 
-			release_pathbuff(pathbuff);
+			if (pathbuff != path_override) {
+				release_pathbuff(pathbuff);
+			}
 			pathbuff = NULL;
 
 			break;
@@ -736,8 +750,14 @@ add_fsevent(int type, vfs_context_t ctx, ...)
 			cur->uid  = (uid_t)fse->uid;
 			cur->gid  = (uid_t)fse->gid;
 			// if it's a hard-link and this is the last link, flag it
-			if ((fse->mode & FSE_MODE_HLINK) && fse->nlink == 0) {
-				cur->mode |= FSE_MODE_LAST_HLINK;
+			if (fse->mode & FSE_MODE_HLINK) {
+				if (fse->nlink == 0) {
+					cur->mode |= FSE_MODE_LAST_HLINK;
+				}
+				if (orig_linkid == 0) {
+					orig_linkid = cur->ino;
+					orig_linkcount = MIN(fse->nlink, MAX_HARDLINK_NOTIFICATIONS);
+				}
 			}
 			if (cur->mode & FSE_TRUNCATED_PATH) {
 				cur->flags |= KFSE_CONTAINS_DROPPED_EVENTS;
@@ -807,7 +827,7 @@ done_with_args:
 		}
 
 		// if (kfse->refcount < 1) {
-		//    panic("add_fsevent: line %d: kfse recount %d but should be at least 1\n", __LINE__, kfse->refcount);
+		//    panic("add_fsevent: line %d: kfse recount %d but should be at least 1", __LINE__, kfse->refcount);
 		// }
 	}
 
@@ -818,6 +838,69 @@ clean_up:
 	if (pathbuff) {
 		release_pathbuff(pathbuff);
 		pathbuff = NULL;
+	}
+	// replicate events for sibling hardlinks
+	if (do_all_links && (kfse->mode & FSE_MODE_HLINK) && !(kfse->mode & FSE_MODE_LAST_HLINK) && (type == FSE_STAT_CHANGED || type == FSE_CONTENT_MODIFIED || type == FSE_FINDER_INFO_CHANGED || type == FSE_XATTR_MODIFIED)) {
+		if (orig_linkcount > 0 && orig_linkid != 0) {
+#ifndef APFSIOC_NEXT_LINK
+#define APFSIOC_NEXT_LINK  _IOWR('J', 10, uint64_t)
+#endif
+			if (path_override == NULL) {
+				path_override = get_pathbuff();
+			}
+			if (next_linkid == 0) {
+				next_linkid = orig_linkid;
+			}
+
+			if (link_vp) {
+				mount_t mp = NULL;
+				vnode_t mnt_rootvp = NULL;
+				int iret = -1;
+
+				mp = vnode_mount(link_vp);
+				if (mp) {
+					iret = VFS_ROOT(mp, &mnt_rootvp, vfs_context_kernel());
+				}
+
+				if (iret == 0 && mnt_rootvp) {
+					iret = VNOP_IOCTL(mnt_rootvp, APFSIOC_NEXT_LINK, (char *)&next_linkid, (int)0, vfs_context_kernel());
+					vnode_put(mnt_rootvp);
+				}
+
+				int32_t fsid0;
+				int path_override_len = MAXPATHLEN;
+
+				// continue resolving hardlink paths if there is a valid next_linkid retrieved
+				// file systems not supporting APFSIOC_NEXT_LINK will skip replicating events for sibling hardlinks
+				if (iret == 0 && next_linkid != 0) {
+					fsid0 = link_vp->v_mount->mnt_vfsstat.f_fsid.val[0];
+					ut->uu_flag |= UT_KERN_RAGE_VNODES;
+					if ((iret = fsgetpath_internal(ctx, fsid0, next_linkid, MAXPATHLEN, path_override, FSOPT_NOFIRMLINKPATH, &path_override_len)) == 0) {
+						orig_linkcount--;
+						ut->uu_flag &= ~UT_KERN_RAGE_VNODES;
+
+						if (orig_linkcount >= 0) {
+							release_event_ref(kfse);
+							goto restart;
+						}
+					} else {
+						// failed to get override path
+						// encountered a broken link or the linkid has been deleted before retrieving the path
+						orig_linkcount--;
+						ut->uu_flag &= ~UT_KERN_RAGE_VNODES;
+
+						if (orig_linkcount >= 0) {
+							goto clean_up;
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if (path_override) {
+		release_pathbuff(path_override);
+		path_override = NULL;
 	}
 
 	release_event_ref(kfse);
@@ -846,7 +929,7 @@ release_event_ref(kfs_event *kfse)
 	}
 
 	if (kfse->refcount < 0) {
-		panic("release_event_ref: bogus kfse refcount %d\n", kfse->refcount);
+		panic("release_event_ref: bogus kfse refcount %d", kfse->refcount);
 	}
 
 	if (kfse->refcount > 0 || kfse->type == FSE_INVALID) {
@@ -922,7 +1005,7 @@ release_event_ref(kfs_event *kfse)
 	// if we have a pointer in the union
 	if (copy.str && copy.type != FSE_DOCID_CREATED && copy.type != FSE_DOCID_CHANGED) {
 		if (copy.len == 0) { // and it's not a string
-			panic("%s:%d: no more fref.vp!\n", __FILE__, __LINE__);
+			panic("no more fref.vp!");
 			// vnode_rele_ext(copy.fref.vp, O_EVTONLY, 0);
 		} else {        // else it's a string
 			vfs_removename(copy.str);
@@ -931,13 +1014,16 @@ release_event_ref(kfs_event *kfse)
 
 	if (dest_copy.type != FSE_INVALID && dest_copy.str) {
 		if (dest_copy.len == 0) {
-			panic("%s:%d: no more fref.vp!\n", __FILE__, __LINE__);
+			panic("no more fref.vp!");
 			// vnode_rele_ext(dest_copy.fref.vp, O_EVTONLY, 0);
 		} else {
 			vfs_removename(dest_copy.str);
 		}
 	}
 }
+
+#define FSEVENTS_WATCHER_ENTITLEMENT            \
+	"com.apple.private.vfs.fsevents-watcher"
 
 static int
 add_watcher(int8_t *event_list, int32_t num_events, int32_t eventq_size, fs_event_watcher **watcher_out, void *fseh)
@@ -951,8 +1037,7 @@ add_watcher(int8_t *event_list, int32_t num_events, int32_t eventq_size, fs_even
 
 	// Note: the event_queue follows the fs_event_watcher struct
 	//       in memory so we only have to do one allocation
-	watcher = kheap_alloc(KHEAP_DEFAULT,
-	    sizeof(fs_event_watcher) + eventq_size * sizeof(kfs_event *), Z_WAITOK);
+	watcher = kalloc_type(fs_event_watcher, kfs_event *, eventq_size, Z_WAITOK);
 	if (watcher == NULL) {
 		return ENOMEM;
 	}
@@ -975,10 +1060,16 @@ add_watcher(int8_t *event_list, int32_t num_events, int32_t eventq_size, fs_even
 
 	watcher->num_dropped  = 0;  // XXXdbg - debugging
 
-	if (!strncmp(watcher->proc_name, "fseventsd", sizeof(watcher->proc_name)) ||
+	if (IOTaskHasEntitlement(current_task(),
+	    FSEVENTS_WATCHER_ENTITLEMENT)) {
+		watcher->flags |= WATCHER_APPLE_SYSTEM_SERVICE;
+	} else if (!strncmp(watcher->proc_name, "fseventsd", sizeof(watcher->proc_name)) ||
 	    !strncmp(watcher->proc_name, "coreservicesd", sizeof(watcher->proc_name)) ||
 	    !strncmp(watcher->proc_name, "revisiond", sizeof(watcher->proc_name)) ||
 	    !strncmp(watcher->proc_name, "mds", sizeof(watcher->proc_name))) {
+		printf("fsevents: watcher %s (pid: %d) needs '%s' entitlement\n",
+		    watcher->proc_name, watcher->pid,
+		    FSEVENTS_WATCHER_ENTITLEMENT);
 		watcher->flags |= WATCHER_APPLE_SYSTEM_SERVICE;
 	} else {
 		printf("fsevents: watcher %s (pid: %d) - Using /dev/fsevents directly is unsupported.  Migrate to FSEventsFramework\n",
@@ -999,8 +1090,7 @@ add_watcher(int8_t *event_list, int32_t num_events, int32_t eventq_size, fs_even
 	if (i >= MAX_WATCHERS) {
 		printf("fsevents: too many watchers!\n");
 		unlock_watch_table();
-		kheap_free(KHEAP_DEFAULT, watcher,
-		    sizeof(fs_event_watcher) + watcher->eventq_size * sizeof(kfs_event *));
+		kfree_type(fs_event_watcher, kfs_event *, watcher->eventq_size, watcher);
 		return ENOSPC;
 	}
 
@@ -1064,7 +1154,7 @@ remove_watcher(fs_event_watcher *target)
 		}
 		if (counter++ >= 5000) {
 			// printf("fsevents: close: still have readers! (%d)\n", watcher->num_readers);
-			panic("fsevents: close: still have readers! (%d)\n", watcher->num_readers);
+			panic("fsevents: close: still have readers! (%d)", watcher->num_readers);
 		}
 
 		// drain the event_queue
@@ -1081,12 +1171,9 @@ remove_watcher(fs_event_watcher *target)
 		}
 		lck_rw_unlock_exclusive(&event_handling_lock);
 
-		kheap_free(KHEAP_DEFAULT, watcher->event_list,
-		    watcher->num_events * sizeof(int8_t));
-		kheap_free(KHEAP_DEFAULT, watcher->devices_not_to_watch,
-		    watcher->num_devices * sizeof(dev_t));
-		kheap_free(KHEAP_DEFAULT, watcher,
-		    sizeof(fs_event_watcher) + watcher->eventq_size * sizeof(kfs_event *));
+		kfree_data(watcher->event_list, watcher->num_events * sizeof(int8_t));
+		kfree_data(watcher->devices_not_to_watch, watcher->num_devices * sizeof(dev_t));
+		kfree_type(fs_event_watcher, kfs_event *, watcher->eventq_size, watcher);
 		return;
 	}
 
@@ -1286,7 +1373,7 @@ copy_out_kfse(fs_event_watcher *watcher, kfs_event *kfse, struct uio *uio)
 	int      evbuff_idx = 0;
 
 	if (kfse->type == FSE_INVALID) {
-		panic("fsevents: copy_out_kfse: asked to copy out an invalid event (kfse %p, refcount %d fref ptr %p)\n", kfse, kfse->refcount, kfse->str);
+		panic("fsevents: copy_out_kfse: asked to copy out an invalid event (kfse %p, refcount %d fref ptr %p)", kfse, kfse->refcount, kfse->str);
 	}
 
 	if (kfse->flags & KFSE_BEING_CREATED) {
@@ -1556,46 +1643,37 @@ restart_watch:
 		}
 
 		if (watcher->event_list[kfse->type] == FSE_REPORT) {
-			boolean_t watcher_cares;
-
-			if (watcher->devices_not_to_watch == NULL) {
-				watcher_cares = true;
+			if (!(watcher->flags & WATCHER_APPLE_SYSTEM_SERVICE) &&
+			    kfse->type != FSE_DOCID_CREATED &&
+			    kfse->type != FSE_DOCID_CHANGED &&
+			    is_ignored_directory(kfse->str)) {
+				// If this is not an Apple System Service, skip specified directories
+				// radar://12034844
+				error = 0;
+				skipped = 1;
 			} else {
-				lock_watch_table();
-				watcher_cares = watcher_cares_about_dev(watcher, kfse->dev);
-				unlock_watch_table();
-			}
-
-			if (watcher_cares) {
-				if (!(watcher->flags & WATCHER_APPLE_SYSTEM_SERVICE) && kfse->type != FSE_DOCID_CREATED && kfse->type != FSE_DOCID_CHANGED && is_ignored_directory(kfse->str)) {
-					// If this is not an Apple System Service, skip specified directories
-					// radar://12034844
-					error = 0;
-					skipped = 1;
-				} else {
-					skipped = 0;
-					if (last_event_ptr == kfse) {
-						last_event_ptr = NULL;
-						last_event_type = -1;
-						last_coalesced_time = 0;
-					}
-					error = copy_out_kfse(watcher, kfse, uio);
-					if (error != 0) {
-						// if an event won't fit or encountered an error while
-						// we were copying it out, then backup to the last full
-						// event and just bail out.  if the error was ENOENT
-						// then we can continue regular processing, otherwise
-						// we should unlock things and return.
-						uio_setresid(uio, last_full_event_resid);
-						if (error != ENOENT) {
-							lck_rw_unlock_shared(&event_handling_lock);
-							error = 0;
-							goto get_out;
-						}
-					}
-
-					last_full_event_resid = uio_resid(uio);
+				skipped = 0;
+				if (last_event_ptr == kfse) {
+					last_event_ptr = NULL;
+					last_event_type = -1;
+					last_coalesced_time = 0;
 				}
+				error = copy_out_kfse(watcher, kfse, uio);
+				if (error != 0) {
+					// if an event won't fit or encountered an error while
+					// we were copying it out, then backup to the last full
+					// event and just bail out.  if the error was ENOENT
+					// then we can continue regular processing, otherwise
+					// we should unlock things and return.
+					uio_setresid(uio, last_full_event_resid);
+					if (error != ENOENT) {
+						lck_rw_unlock_shared(&event_handling_lock);
+						error = 0;
+						goto get_out;
+					}
+				}
+
+				last_full_event_resid = uio_resid(uio);
 			}
 		}
 
@@ -1803,12 +1881,11 @@ handle_dev_filter:
 				fseh->watcher->num_devices = new_num_devices;
 
 				unlock_watch_table();
-				kheap_free(KHEAP_DEFAULT, tmp, old_num_devices * sizeof(dev_t));
+				kfree_data(tmp, old_num_devices * sizeof(dev_t));
 				break;
 			}
 
-			devices_not_to_watch = kheap_alloc(KHEAP_DEFAULT,
-			    new_num_devices * sizeof(dev_t), Z_WAITOK);
+			devices_not_to_watch = kalloc_data(new_num_devices * sizeof(dev_t), Z_WAITOK);
 			if (devices_not_to_watch == NULL) {
 				ret = ENOMEM;
 				break;
@@ -1818,8 +1895,7 @@ handle_dev_filter:
 			    (void *)devices_not_to_watch,
 			    new_num_devices * sizeof(dev_t));
 			if (ret) {
-				kheap_free(KHEAP_DEFAULT, devices_not_to_watch,
-				    new_num_devices * sizeof(dev_t));
+				kfree_data(devices_not_to_watch, new_num_devices * sizeof(dev_t));
 				break;
 			}
 
@@ -1830,7 +1906,7 @@ handle_dev_filter:
 			fseh->watcher->devices_not_to_watch = devices_not_to_watch;
 			unlock_watch_table();
 
-			kheap_free(KHEAP_DEFAULT, tmp, old_num_devices * sizeof(dev_t));
+			kfree_data(tmp, old_num_devices * sizeof(dev_t));
 
 			break;
 		}
@@ -1909,7 +1985,7 @@ fseventsf_close(struct fileglob *fg, __unused vfs_context_t ctx)
 	fseh->watcher = NULL;
 
 	remove_watcher(watcher);
-	kheap_free(KHEAP_DEFAULT, fseh, sizeof(fsevent_handle));
+	kfree_type(fsevent_handle, fseh);
 
 	return 0;
 }
@@ -2338,17 +2414,13 @@ handle_clone:
 			return EINVAL;
 		}
 
-		fseh = kheap_alloc(KHEAP_DEFAULT, sizeof(fsevent_handle), Z_WAITOK | Z_ZERO);
-		if (fseh == NULL) {
-			return ENOMEM;
-		}
+		fseh = kalloc_type(fsevent_handle, Z_WAITOK | Z_ZERO | Z_NOFAIL);
 
 		klist_init(&fseh->knotes);
 
-		event_list = kheap_alloc(KHEAP_DEFAULT,
-		    fse_clone_args->num_events * sizeof(int8_t), Z_WAITOK);
+		event_list = kalloc_data(fse_clone_args->num_events * sizeof(int8_t), Z_WAITOK);
 		if (event_list == NULL) {
-			kheap_free(KHEAP_DEFAULT, fseh, sizeof(fsevent_handle));
+			kfree_type(fsevent_handle, fseh);
 			return ENOMEM;
 		}
 
@@ -2356,9 +2428,8 @@ handle_clone:
 		    (void *)event_list,
 		    fse_clone_args->num_events * sizeof(int8_t));
 		if (error) {
-			kheap_free(KHEAP_DEFAULT, event_list,
-			    fse_clone_args->num_events * sizeof(int8_t));
-			kheap_free(KHEAP_DEFAULT, fseh, sizeof(fsevent_handle));
+			kfree_data(event_list, fse_clone_args->num_events * sizeof(int8_t));
+			kfree_type(fsevent_handle, fseh);
 			return error;
 		}
 
@@ -2369,9 +2440,8 @@ handle_clone:
 		error = vslock((user_addr_t)fse_clone_args->fd,
 		    sizeof(int32_t));
 		if (error) {
-			kheap_free(KHEAP_DEFAULT, event_list,
-			    fse_clone_args->num_events * sizeof(int8_t));
-			kheap_free(KHEAP_DEFAULT, fseh, sizeof(fsevent_handle));
+			kfree_data(event_list, fse_clone_args->num_events * sizeof(int8_t));
+			kfree_type(fsevent_handle, fseh);
 			return error;
 		}
 
@@ -2383,9 +2453,8 @@ handle_clone:
 		if (error) {
 			vsunlock((user_addr_t)fse_clone_args->fd,
 			    sizeof(int32_t), 0);
-			kheap_free(KHEAP_DEFAULT, event_list,
-			    fse_clone_args->num_events * sizeof(int8_t));
-			kheap_free(KHEAP_DEFAULT, fseh, sizeof(fsevent_handle));
+			kfree_data(event_list, fse_clone_args->num_events * sizeof(int8_t));
+			kfree_type(fsevent_handle, fseh);
 			return error;
 		}
 
@@ -2396,9 +2465,8 @@ handle_clone:
 			remove_watcher(fseh->watcher);
 			vsunlock((user_addr_t)fse_clone_args->fd,
 			    sizeof(int32_t), 0);
-			kheap_free(KHEAP_DEFAULT, event_list,
-			    fse_clone_args->num_events * sizeof(int8_t));
-			kheap_free(KHEAP_DEFAULT, fseh, sizeof(fsevent_handle));
+			kfree_data(event_list, fse_clone_args->num_events * sizeof(int8_t));
+			kfree_type(fsevent_handle, fseh);
 			return error;
 		}
 		proc_fdlock(p);

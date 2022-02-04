@@ -147,35 +147,26 @@ extern mach_msg_return_t mach_msg_send_from_kernel_proper(
 
 #define mach_msg_send_from_kernel mach_msg_send_from_kernel_proper
 
-extern mach_msg_return_t
-mach_msg_rpc_from_kernel_proper(
+extern mach_msg_return_t mach_msg_rpc_from_kernel_proper(
 	mach_msg_header_t       *msg,
 	mach_msg_size_t         send_size,
 	mach_msg_size_t         rcv_size);
 
 #define mach_msg_rpc_from_kernel mach_msg_rpc_from_kernel_proper
 
-#ifdef XNU_KERNEL_PRIVATE
-mach_msg_return_t kernel_mach_msg_rpc(
-	mach_msg_header_t               *msg,
-	mach_msg_size_t                     send_size,
-	mach_msg_size_t                     rcv_size,
-	boolean_t                           legacy,
-	boolean_t                           *message_moved);
-#endif /* XNU_KERNEL_PRIVATE */
-
-extern void
-mach_msg_destroy_from_kernel_proper(
+extern void mach_msg_destroy_from_kernel_proper(
 	mach_msg_header_t       *msg);
 
 #define mach_msg_destroy_from_kernel mach_msg_destroy_from_kernel_proper
 
 #ifdef XNU_KERNEL_PRIVATE
-extern mach_msg_return_t mach_msg_send_from_kernel_with_options_legacy(
+
+mach_msg_return_t kernel_mach_msg_rpc(
 	mach_msg_header_t       *msg,
 	mach_msg_size_t         send_size,
-	mach_msg_option_t       option,
-	mach_msg_timeout_t      timeout_val);
+	mach_msg_size_t         rcv_size,
+	boolean_t               interruptible,
+	boolean_t               *message_moved);
 
 extern mach_msg_return_t kernel_mach_msg_send(
 	mach_msg_header_t       *msg,
@@ -184,74 +175,26 @@ extern mach_msg_return_t kernel_mach_msg_send(
 	mach_msg_timeout_t      timeout_val,
 	boolean_t               *message_moved);
 
-extern mach_msg_return_t mach_msg_send_from_kernel_with_options(
-	mach_msg_header_t       *msg,
+extern mach_msg_return_t kernel_mach_msg_send_with_builder(
 	mach_msg_size_t         send_size,
 	mach_msg_option_t       option,
-	mach_msg_timeout_t      timeout_val)
-__XNU_INTERNAL(mach_msg_send_from_kernel_with_options);
-#else
+	mach_msg_timeout_t      timeout_val,
+	boolean_t               *message_moved,
+	void                    (^builder)(mach_msg_header_t *, mach_msg_size_t));
+
 extern mach_msg_return_t mach_msg_send_from_kernel_with_options(
 	mach_msg_header_t       *msg,
 	mach_msg_size_t         send_size,
 	mach_msg_option_t       option,
 	mach_msg_timeout_t      timeout_val);
+
 #endif /* XNU_KERNEL_PRIVATE */
-
-__END_DECLS
-
 #ifdef  MACH_KERNEL_PRIVATE
 
 extern void mach_msg_receive_continue(void);
 
-/*
- * Kernel implementation of the MIG object base class
- *
- * Conforms to the MIGObjectInterface defined in <mach/mig.h>
- * Ports are automatically allocated for the duration of outstanding
- * cross-task references and then released.
- */
-
-typedef struct mig_object {
-	const IMIGObjectVtbl    *pVtbl;                 /* our interface def */
-	mach_port_t             port;                    /* our port pointer  */
-} mig_object_data_t;
-
-
-/*
- * MIG notify base class definition
- * These are chained off the mig object to which the are registered.
- * When that object triggers a notification delivery, we walk this
- * chain and deliver the appropriate notification.
- */
-typedef struct mig_notify_object {
-	const IMIGNotifyObjectVtbl *pVtbl;                 /* our interface def */
-	mach_port_t             port;                    /* our port pointer  */
-} mig_notify_object_data_t;
-
-extern kern_return_t mig_object_init(
-	mig_object_t            mig_object,
-	const IMIGObject        *interface);
-
-extern void mig_object_destroy(
-	mig_object_t            mig_object);
-
-extern void mig_object_reference(
-	mig_object_t            mig_object);
-
-extern void mig_object_deallocate(
-	mig_object_t            mig_object);
-
-extern ipc_port_t convert_mig_object_to_port(
-	mig_object_t            mig_object);
-
-extern mig_object_t convert_port_to_mig_object(
-	ipc_port_t              port,
-	const MIGIID            *iid);
-
-extern void mig_object_no_senders(
-	ipc_port_t              port);
-
 #endif  /* MACH_KERNEL_PRIVATE */
+
+__END_DECLS
 
 #endif  /* _KERN_IPC_MIG_H_ */

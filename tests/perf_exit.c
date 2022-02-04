@@ -76,7 +76,7 @@ create_stat(int proc_wired_mem, int nthreads)
 	T_ASSERT_NOTNULL(dst, "created time statistic");
 
 	dt_stat_set_variable((dt_stat_t)dst, "proc_threads", nthreads);
-	dt_stat_set_variable((dt_stat_t)dst, "proc_wired_mem", proc_wired_mem);;
+	dt_stat_set_variable((dt_stat_t)dst, "proc_wired_mem", proc_wired_mem);
 
 	return dst;
 }

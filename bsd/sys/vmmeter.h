@@ -65,6 +65,7 @@
 #define _SYS_VMMETER_H_
 
 #include <sys/appleapiopts.h>
+#include <stdint.h>
 
 #ifdef __APPLE_API_OBSOLETE
 /*

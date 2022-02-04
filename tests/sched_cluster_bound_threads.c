@@ -5,9 +5,13 @@
 #include <mach/mach.h>
 #include <mach/mach_time.h>
 #include <pthread.h>
+#include <TargetConditionals.h>
 #include <sys/sysctl.h>
 
 #include <darwintest.h>
+
+T_GLOBAL_META(T_META_RADAR_COMPONENT_NAME("xnu"),
+    T_META_RADAR_COMPONENT_VERSION("scheduler"));
 
 static mach_timebase_info_data_t timebase_info;
 
@@ -77,9 +81,8 @@ get_ncpu(void)
 #define SPINNER_THREAD_LOAD_FACTOR (4)
 
 T_DECL(test_cluster_bound_thread_timeshare, "Make sure the low priority bound threads get CPU in the presence of non-bound CPU spinners",
-    T_META_BOOTARGS_SET("enable_skstb=1"), T_META_ASROOT(true))
+    T_META_BOOTARGS_SET("enable_skstb=1"), T_META_ASROOT(true), T_META_ENABLED(TARGET_CPU_ARM64 && TARGET_OS_OSX))
 {
-#if TARGET_CPU_ARM64 && TARGET_OS_OSX
 	pthread_setname_np("main thread");
 
 	kern_return_t kr;
@@ -127,14 +130,11 @@ T_DECL(test_cluster_bound_thread_timeshare, "Make sure the low priority bound th
 
 	kr = thread_info(thread_port, THREAD_BASIC_INFO, (thread_info_t)&bound_thread_info, &count);
 	if (kr != KERN_SUCCESS) {
-		err("%#x == thread_info(bound_thread, THREAD_BASIC_INFO)", kr);
+		T_FAIL("%#x == thread_info(bound_thread, THREAD_BASIC_INFO)", kr);
 	}
 
 	uint64_t bound_usr_usec = bound_thread_info.user_time.seconds * USEC_PER_SEC + bound_thread_info.user_time.microseconds;
 
 	T_ASSERT_GT(bound_usr_usec, 75000, "Check that bound thread got atleast 75ms CPU time");
 	T_PASS("Low priority bound threads got some CPU time in the presence of high priority unbound spinners");
-#else /* TARGET_CPU_ARM64 && TARGET_OS_OSX */
-	T_SKIP("Test not supported on this platform!");
-#endif /* TARGET_CPU_ARM64 && TARGET_OS_OSX */
 }

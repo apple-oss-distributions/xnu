@@ -158,13 +158,16 @@ extern void proc_inherit_task_role(task_t new_task, task_t old_task);
 
 #if CONFIG_IOSCHED
 #define IOSCHED_METADATA_TIER                   THROTTLE_LEVEL_TIER1
+#define IOSCHED_METADATA_EXPEDITED_TIER         THROTTLE_LEVEL_TIER0
+_Static_assert(IOSCHED_METADATA_EXPEDITED_TIER < IOSCHED_METADATA_TIER,
+    "expedited metadata tier must be less than metadata tier");
 #endif /* CONFIG_IOSCHED */
 
 extern int proc_get_darwinbgstate(task_t task, uint32_t *flagsp);
 extern int task_get_apptype(task_t);
 
 #ifdef MACH_BSD
-extern void proc_apply_task_networkbg(void * bsd_info, thread_t thread);
+extern void proc_apply_task_networkbg(int pid, thread_t thread);
 #endif /* MACH_BSD */
 
 extern void thread_freeze_base_pri(thread_t thread);
@@ -267,6 +270,7 @@ extern void thread_drop_kevent_override(thread_t thread);
 /* for ipc_pset.c */
 extern thread_qos_t thread_get_requested_qos(thread_t thread, int *relpri);
 
+extern boolean_t task_is_app(task_t task);
 /*
  ******************************
  * Mach-internal functionality
@@ -326,7 +330,6 @@ extern void task_policy_create(task_t task, task_t parent_task);
 extern void thread_policy_create(thread_t thread);
 
 extern boolean_t task_is_daemon(task_t task);
-extern boolean_t task_is_app(task_t task);
 
 #if CONFIG_TASKWATCH
 /* Taskwatch related external interface */
@@ -351,7 +354,6 @@ extern boolean_t task_is_marked_importance_denap_receiver(task_t task);
 #define TASK_RUSECPU_FLAGS_FATAL_WAKEUPSMON             0x10    /* wakeups monitor violations are fatal */
 
 extern void proc_init_cpumon_params(void);
-extern void thread_policy_init(void);
 
 thread_qos_t task_compute_main_thread_qos(task_t task);
 
@@ -379,6 +381,31 @@ extern void thread_policy_update_tasklocked(thread_t thread, integer_t priority,
 kern_return_t send_resource_violation(typeof(send_cpu_usage_violation),
     task_t violator,
     struct ledger_entry_info *ledger_info,
+    resource_notify_flags_t flags);
+
+/*! @function send_resource_violation_with_fatal_port
+ *   @abstract send usage monitor violation notification
+ *
+ *   @param sendfunc function pointer of type send_port_space_violation
+ *   @param violator the task (process) violating its limits (should be the current task)
+ *   @param current_size size of the resource table
+ *   @param limit limit set on the size of the resource table
+ *   @param fatal_port used to kill the process if it hits the hard limit
+ *   @param flags see constants for type in sys/reason.h
+ *
+ *   @result KERN_SUCCESS if the message was sent
+ *
+ *   @discussion
+ *       send_resource_violation_with_fatal_port() calls the corresponding MIG routine
+ *       over the host special RESOURCE_NOTIFY port. If port is set, then deallocating
+ *       that port right, will kill the process.
+ *
+ */
+kern_return_t send_resource_violation_with_fatal_port(typeof(send_port_space_violation) sendfunc,
+    task_t violator,
+    int64_t current_size,
+    int64_t limit,
+    mach_port_t fatal_port,
     resource_notify_flags_t flags);
 
 /*! @function	trace_resource_violation

@@ -66,6 +66,10 @@
 #ifndef _VM_VM_KERN_H_
 #define _VM_VM_KERN_H_
 
+#ifdef XNU_KERNEL_PRIVATE
+#include <kern/locks.h>
+#endif /* XNU_KERNEL_PRIVATE */
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -78,32 +82,48 @@ extern "C" {
 
 #ifdef XNU_KERNEL_PRIVATE
 
-#include <kern/locks.h>
+struct vm_page;
+
+__options_decl(kma_flags_t, uint32_t, {
+	KMA_NONE        = 0x00000000,
+	KMA_HERE        = 0x00000001,
+	KMA_NOPAGEWAIT  = 0x00000002,
+	KMA_KOBJECT     = 0x00000004,
+	KMA_LOMEM       = 0x00000008,
+	KMA_GUARD_FIRST = 0x00000010,
+	KMA_GUARD_LAST  = 0x00000020,
+	KMA_PERMANENT   = 0x00000040,
+	KMA_NOENCRYPT   = 0x00000080,
+	KMA_KSTACK      = 0x00000100,
+	KMA_VAONLY      = 0x00000200,
+	/*
+	 * Pages belonging to the compressor are not on the paging queues,
+	 * nor are they counted as wired.
+	 */
+	KMA_COMPRESSOR  = 0x00000400,
+	KMA_ATOMIC      = 0x00000800,
+	KMA_ZERO        = 0x00001000,
+	KMA_PAGEABLE    = 0x00002000,
+	KMA_KHEAP       = 0x00004000,  /* Pages belonging to zones backing one of kalloc_heap. */
+});
 
 extern kern_return_t    kernel_memory_allocate(
 	vm_map_t        map,
 	vm_offset_t     *addrp,
 	vm_size_t       size,
 	vm_offset_t     mask,
-	int             flags,
+	kma_flags_t     flags,
 	vm_tag_t        tag);
 
-/* flags for kernel_memory_allocate */
-#define KMA_HERE        0x01
-#define KMA_NOPAGEWAIT  0x02
-#define KMA_KOBJECT     0x04
-#define KMA_LOMEM       0x08
-#define KMA_GUARD_FIRST 0x10
-#define KMA_GUARD_LAST  0x20
-#define KMA_PERMANENT   0x40
-#define KMA_NOENCRYPT   0x80
-#define KMA_KSTACK      0x100
-#define KMA_VAONLY      0x200
-#define KMA_COMPRESSOR  0x400   /* Pages belonging to the compressor are not on the paging queues, nor are they counted as wired. */
-#define KMA_ATOMIC      0x800
-#define KMA_ZERO        0x1000
-#define KMA_PAGEABLE    0x2000
-#define KMA_KHEAP       0x4000  /* Pages belonging to zones backing one of kalloc_heap. */
+extern kern_return_t    kernel_memory_allocate_prot(
+	vm_map_t        map,
+	vm_offset_t     *addrp,
+	vm_size_t       size,
+	vm_offset_t     mask,
+	kma_flags_t     flags,
+	vm_tag_t        tag,
+	vm_prot_t               protection,
+	vm_prot_t               max_protection);
 
 extern kern_return_t kmem_alloc(
 	vm_map_t        map,
@@ -118,7 +138,7 @@ extern kern_return_t kmem_alloc_contig(
 	vm_offset_t     mask,
 	ppnum_t         max_pnum,
 	ppnum_t         pnum_mask,
-	int             flags,
+	kma_flags_t     flags,
 	vm_tag_t        tag);
 
 extern kern_return_t    kmem_alloc_flags(
@@ -126,7 +146,7 @@ extern kern_return_t    kmem_alloc_flags(
 	vm_offset_t     *addrp,
 	vm_size_t       size,
 	vm_tag_t        tag,
-	int             flags);
+	kma_flags_t     flags);
 
 extern kern_return_t    kmem_alloc_pageable(
 	vm_map_t        map,
@@ -169,18 +189,26 @@ extern kern_return_t    kmem_alloc_kobject(
 	vm_size_t       size,
 	vm_tag_t        tag) __XNU_INTERNAL(kmem_alloc_kobject);
 
+extern void kernel_memory_populate_with_pages(
+	vm_map_t        map,
+	vm_offset_t     addr,
+	vm_size_t       size,
+	struct vm_page *page_list,
+	kma_flags_t     flags,
+	vm_tag_t        tag);
+
 extern kern_return_t kernel_memory_populate(
 	vm_map_t        map,
 	vm_offset_t     addr,
 	vm_size_t       size,
-	int             flags,
+	kma_flags_t     flags,
 	vm_tag_t        tag);
 
 extern void kernel_memory_depopulate(
 	vm_map_t        map,
 	vm_offset_t     addr,
 	vm_size_t       size,
-	int             flags,
+	kma_flags_t     flags,
 	vm_tag_t        tag);
 
 extern kern_return_t    memory_object_iopl_request(
@@ -200,6 +228,14 @@ extern kern_return_t    vm_page_diagnose(
 	uint64_t                zones_collectable_bytes);
 
 extern uint32_t         vm_page_diagnose_estimate(void);
+
+typedef enum {
+	PMAP_FEAT_UEXEC = 1
+} pmap_feature_flags_t;
+
+#if defined(__x86_64__)
+extern bool             pmap_supported_feature(pmap_t pmap, pmap_feature_flags_t feat);
+#endif
 
 #if DEBUG || DEVELOPMENT
 
@@ -221,15 +257,13 @@ extern void             vm_tag_alloc_locked(vm_allocation_site_t * site, vm_allo
 
 extern void             vm_tag_update_size(vm_tag_t tag, int64_t size);
 
-#if VM_MAX_TAG_ZONES
+#if VM_TAG_SIZECLASSES
 
 extern void             vm_allocation_zones_init(void);
-extern void             vm_tag_will_update_zone(vm_tag_t tag, uint32_t zidx);
-extern void             vm_tag_update_zone_size(vm_tag_t tag, uint32_t zidx, int64_t delta, int64_t dwaste);
+extern vm_tag_t         vm_tag_will_update_zone(vm_tag_t tag, uint32_t zidx, uint32_t zflags);
+extern void             vm_tag_update_zone_size(vm_tag_t tag, uint32_t zidx, long delta);
 
-extern vm_allocation_zone_total_t **   vm_allocation_zone_totals;
-
-#endif /* VM_MAX_TAG_ZONES */
+#endif /* VM_TAG_SIZECLASSES */
 
 extern vm_tag_t         vm_tag_bt_debug(void);
 
@@ -298,6 +332,16 @@ extern kern_return_t    copyoutmap(
 	void            *fromdata,
 	vm_map_offset_t toaddr,
 	vm_size_t       length);
+
+extern kern_return_t    copyoutmap_atomic32(
+	vm_map_t        map,
+	uint32_t        value,
+	vm_map_offset_t toaddr);
+
+extern kern_return_t    copyoutmap_atomic64(
+	vm_map_t        map,
+	uint64_t        value,
+	vm_map_offset_t toaddr);
 
 extern kern_return_t    kmem_alloc_external(
 	vm_map_t        map,

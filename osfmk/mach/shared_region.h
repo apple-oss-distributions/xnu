@@ -42,15 +42,19 @@
 #define SHARED_REGION_NESTING_MIN_I386          0x00200000ULL
 #define SHARED_REGION_NESTING_MAX_I386          0xFFE00000ULL
 
-#define SHARED_REGION_BASE_X86_64               0x00007FFF00000000ULL
-#define SHARED_REGION_SIZE_X86_64               0x00000000FFE00000ULL
-#define SHARED_REGION_NESTING_BASE_X86_64       0x00007FFF00000000ULL
-#define SHARED_REGION_NESTING_SIZE_X86_64       0x00000000FFE00000ULL
+/*
+ * Note the shared region size here seems odd for x86.
+ * The size is chosen to end the address space at a boundary
+ * that the arm64 pmap uses for pmap->max. We use this
+ * limit to prevent problems with Rosetta. Given how large
+ * the region is now, the few fewer megabytes shouldn't matter.
+ */
+#define SHARED_REGION_BASE_X86_64               0x00007FF800000000ULL
+#define SHARED_REGION_SIZE_X86_64               0x00000007FE000000ULL
+#define SHARED_REGION_NESTING_BASE_X86_64       0x00007FF800000000ULL
+#define SHARED_REGION_NESTING_SIZE_X86_64       0x00000007FE000000ULL
 #define SHARED_REGION_NESTING_MIN_X86_64        0x0000000000200000ULL
 #define SHARED_REGION_NESTING_MAX_X86_64        0xFFFFFFFFFFE00000ULL
-
-#ifdef XNU_KERNEL_PRIVATE
-#endif
 
 #define SHARED_REGION_BASE_PPC                  0x90000000ULL
 #define SHARED_REGION_SIZE_PPC                  0x20000000ULL

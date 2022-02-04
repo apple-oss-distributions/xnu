@@ -122,8 +122,8 @@ struct secasvar {
 
 /* replay prevention */
 struct secreplay {
-	u_int8_t wsize;           /* window size */
-	u_int32_t count;
+	u_int8_t wsize;         /* window size */
+	u_int32_t count;        /* used by sender/receiver */
 	u_int32_t seq;          /* used by sender */
 	u_int32_t lastseq;      /* used by sender/receiver */
 	caddr_t bitmap;         /* used by receiver */

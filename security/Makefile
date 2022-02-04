@@ -37,7 +37,7 @@ PRIVATE_KERNELFILES = \
 INSTALL_MI_LIST = ${DATAFILES}
 
 # /System/Library/Frameworks/System.framework/PrivateHeaders
-INSTALL_MI_LCL_LIST = ${PRIVATE_DATAFILES}
+INSTALL_SF_MI_LCL_LIST = $(sort ${DATAFILES} ${PRIVATE_DATAFILES})
 
 INSTALL_MI_DIR = security
 

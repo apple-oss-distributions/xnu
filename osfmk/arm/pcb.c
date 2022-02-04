@@ -52,6 +52,9 @@
 
 #include <sys/kdebug.h>
 
+#include <san/kcov_stksz.h>
+
+
 extern int      debug_task;
 
 /* zone for debug_state area */
@@ -151,18 +154,13 @@ machine_thread_on_core(thread_t thread)
  *
  */
 kern_return_t
-machine_thread_create(
-	thread_t thread,
-#if     !__ARM_USER_PROTECT__
-	__unused
-#endif
-	task_t task)
+machine_thread_create(thread_t thread, task_t task, bool first_thread)
 {
 #define machine_thread_create_kprintf(x...)     /* kprintf("machine_thread_create: " x) */
 
 	machine_thread_create_kprintf("thread = %x\n", thread);
 
-	if (current_thread() != thread) {
+	if (!first_thread) {
 		thread->machine.CpuDatap = (cpu_data_t *)0;
 		// setting this offset will cause trying to use it to panic
 		thread->machine.pcpu_data_base = -1;
@@ -177,6 +175,8 @@ machine_thread_create(
 		thread->machine.asid = new_pmap->hw_asid;
 		thread->machine.uptw_ttb = ((unsigned int) new_pmap->ttep) | TTBR_SETUP;
 	}
+#else
+	(void)task;
 #endif
 	machine_thread_state_initialize(thread);
 
@@ -243,6 +243,9 @@ machine_stack_detach(
 	    (uintptr_t)thread_tid(thread), thread->priority, thread->sched_pri, 0, 0);
 
 	stack = thread->kernel_stack;
+#if CONFIG_KCOV
+	kcov_stksz_set_thread_stack(thread, stack);
+#endif
 	thread->kernel_stack = 0;
 	thread->machine.kstackptr = 0;
 
@@ -267,6 +270,9 @@ machine_stack_attach(
 	    (uintptr_t)thread_tid(thread), thread->priority, thread->sched_pri, 0, 0);
 
 	thread->kernel_stack = stack;
+#if CONFIG_KCOV
+	kcov_stksz_set_thread_stack(thread, 0);
+#endif
 	thread->machine.kstackptr = stack + kernel_stack_size - sizeof(struct thread_kernel_state);
 	thread_initialize_kernel_state(thread);
 	savestate = (struct arm_saved_state *) thread->machine.kstackptr;
@@ -296,6 +302,9 @@ machine_stack_handoff(
 
 	stack = machine_stack_detach(old);
 	new->kernel_stack = stack;
+#if CONFIG_KCOV
+	kcov_stksz_set_thread_stack(new, 0);
+#endif
 	new->machine.kstackptr = stack + kernel_stack_size - sizeof(struct thread_kernel_state);
 	if (stack == old->reserved_stack) {
 		assert(new->reserved_stack);

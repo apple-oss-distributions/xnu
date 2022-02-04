@@ -51,11 +51,13 @@ typedef struct lowglo {
 	unsigned char   lgVerCode[8];           /* 0xffffff8000002000 System verification code */
 	uint64_t        lgZero;                 /* 0xffffff8000002008 Double constant 0 */
 	uint64_t        lgStext;                /* 0xffffff8000002010 Start of kernel text */
-	uint64_t        lgRsv018;               /* 0xffffff8000002018 Reserved */
-	uint64_t        lgRsv020;               /* 0xffffff8000002020 Reserved */
+	uint64_t        lgLayoutMajorVersion;   /* 0xffffff8000002018 Low globals layout major version */
+	uint64_t        lgLayoutMinorVersion;   /* 0xffffff8000002020 Low globals layout minor version */
 	uint64_t        lgRsv028;               /* 0xffffff8000002028 Reserved */
 	uint64_t        lgVersion;              /* 0xffffff8000002030 Pointer to kernel version string */
-	uint64_t        lgRsv038[280];          /* 0xffffff8000002038 Reserved */
+	uint64_t        lgCompressorBufferAddr; /* 0xffffff8000002038 Pointer to compressor buffer */
+	uint64_t        lgCompressorSizeAddr;   /* 0xffffff8000002040 Pointer to size of compressor buffer */
+	uint64_t        lgRsv038[278];          /* 0xffffff8000002048 Reserved */
 	uint64_t        lgKmodptr;              /* 0xffffff80000028f8 Pointer to kmod, debugging aid */
 	uint64_t        lgTransOff;             /* 0xffffff8000002900 Pointer to kdp_trans_off, debugging aid */
 	uint64_t        lgReadIO;               /* 0xffffff8000002908 Pointer to kdp_read_io, debugging aid */

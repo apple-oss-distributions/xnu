@@ -135,7 +135,7 @@ mach_port_get_srights(
 	/* port is locked and active */
 
 	srights = port->ip_srights;
-	ip_unlock(port);
+	ip_mq_unlock(port);
 
 	*srightsp = srights;
 	return KERN_SUCCESS;
@@ -203,7 +203,7 @@ mach_port_space_info(
 	}
 
 #if !(DEVELOPMENT || DEBUG) && CONFIG_MACF
-	const boolean_t dbg_ok = (mac_task_check_expose_task(kernel_task) == 0);
+	const boolean_t dbg_ok = (mac_task_check_expose_task(kernel_task, TASK_FLAVOR_CONTROL) == 0);
 #else
 	const boolean_t dbg_ok = TRUE;
 #endif
@@ -223,9 +223,11 @@ mach_port_space_info(
 			return KERN_INVALID_TASK;
 		}
 
+		table = is_active_table(space);
+		tsize = table->ie_size;
+
 		table_size_needed =
-		    vm_map_round_page((space->is_table_size
-		    * sizeof(ipc_info_name_t)),
+		    vm_map_round_page(tsize * sizeof(ipc_info_name_t),
 		    VM_MAP_PAGE_MASK(ipc_kernel_map));
 
 		if (table_size_needed == table_size) {
@@ -249,30 +251,32 @@ mach_port_space_info(
 
 	/* get the overall space info */
 	infop->iis_genno_mask = MACH_PORT_NGEN(MACH_PORT_DEAD);
-	infop->iis_table_size = space->is_table_size;
+	infop->iis_table_size = tsize;
 	infop->iis_table_next = space->is_table_next->its_size;
 
 	/* walk the table for this space */
-	table = space->is_table;
-	tsize = space->is_table_size;
 	table_info = (ipc_info_name_array_t)table_addr;
 	for (index = 0; index < tsize; index++) {
 		ipc_info_name_t *iin = &table_info[index];
 		ipc_entry_t entry = &table[index];
 		ipc_entry_bits_t bits;
 
-		bits = entry->ie_bits;
+		if (index == 0) {
+			bits = IE_BITS_GEN_MASK;
+		} else {
+			bits = entry->ie_bits;
+		}
 		iin->iin_name = MACH_PORT_MAKE(index, IE_BITS_GEN(bits));
 		iin->iin_collision = 0;
 		iin->iin_type = IE_BITS_TYPE(bits);
-		if ((entry->ie_bits & MACH_PORT_TYPE_PORT_RIGHTS) != MACH_PORT_TYPE_NONE &&
+		if ((bits & MACH_PORT_TYPE_PORT_RIGHTS) != MACH_PORT_TYPE_NONE &&
 		    entry->ie_request != IE_REQ_NONE) {
 			ipc_port_t port = ip_object_to_port(entry->ie_object);
 
 			assert(IP_VALID(port));
-			ip_lock(port);
+			ip_mq_lock(port);
 			iin->iin_type |= ipc_port_request_type(port, iin->iin_name, entry->ie_request);
-			ip_unlock(port);
+			ip_mq_unlock(port);
 		}
 
 		iin->iin_urefs = IE_BITS_UREFS(bits);
@@ -328,7 +332,7 @@ mach_port_space_info_from_user(
 {
 	kern_return_t kr;
 
-	ipc_space_t space = convert_port_to_space_check_type(port, NULL, TASK_FLAVOR_READ, FALSE);
+	ipc_space_t space = convert_port_to_space_read_no_eval(port);
 
 	if (space == IPC_SPACE_NULL) {
 		return KERN_INVALID_ARGUMENT;
@@ -367,10 +371,11 @@ mach_port_space_basic_info(
 	ipc_space_t                     space,
 	ipc_info_space_basic_t          *infop)
 {
+	ipc_entry_num_t tsize;
+
 	if (space == IS_NULL) {
 		return KERN_INVALID_TASK;
 	}
-
 
 	is_read_lock(space);
 	if (!is_active(space)) {
@@ -378,11 +383,13 @@ mach_port_space_basic_info(
 		return KERN_INVALID_TASK;
 	}
 
+	tsize = is_active_table(space)->ie_size;
+
 	/* get the basic space info */
 	infop->iisb_genno_mask = MACH_PORT_NGEN(MACH_PORT_DEAD);
-	infop->iisb_table_size = space->is_table_size;
+	infop->iisb_table_size = tsize;
 	infop->iisb_table_next = space->is_table_next->its_size;
-	infop->iisb_table_inuse = space->is_table_size - space->is_table_free - 1;
+	infop->iisb_table_inuse = tsize - space->is_table_free - 1;
 	infop->iisb_reserved[0] = 0;
 	infop->iisb_reserved[1] = 0;
 
@@ -457,7 +464,7 @@ mach_port_dnrequest_info(
 			}
 		}
 	}
-	ip_unlock(port);
+	ip_mq_unlock(port);
 
 	*totalp = total;
 	*usedp = used;
@@ -522,45 +529,37 @@ mach_port_kobject_description(
 	mach_vm_address_t               *addrp,
 	kobject_description_t           desc)
 {
-	ipc_entry_t entry;
-	ipc_port_t port;
+	ipc_entry_bits_t bits;
+	ipc_object_t object;
 	kern_return_t kr;
-	mach_vm_address_t kaddr;
+	mach_vm_address_t kaddr = 0;
 	io_object_t obj = NULL;
 
 	if (space == IS_NULL) {
 		return KERN_INVALID_TASK;
 	}
 
-	kr = ipc_right_lookup_read(space, name, &entry);
+	kr = ipc_right_lookup_read(space, name, &bits, &object);
 	if (kr != KERN_SUCCESS) {
 		return kr;
 	}
-	/* space is read-locked and active */
+	/* object is locked and active */
 
-	if ((entry->ie_bits & MACH_PORT_TYPE_SEND_RECEIVE) == 0) {
-		is_read_unlock(space);
+	if ((bits & MACH_PORT_TYPE_SEND_RECEIVE) == 0) {
+		io_unlock(object);
 		return KERN_INVALID_RIGHT;
 	}
 
-	port = ip_object_to_port(entry->ie_object);
-	assert(port != IP_NULL);
-
-	ip_lock(port);
-	is_read_unlock(space);
-
-	if (!ip_active(port)) {
-		ip_unlock(port);
-		return KERN_INVALID_RIGHT;
+	*typep = (unsigned int)io_kotype(object);
+	if (io_is_kobject(object)) {
+		ipc_port_t port = ip_object_to_port(object);
+		kaddr = (mach_vm_address_t)ipc_kobject_get_raw(port, io_kotype(object));
 	}
-
-	*typep = (unsigned int) ip_kotype(port);
-	kaddr = (mach_vm_address_t)ip_get_kobject(port);
 	*addrp = 0;
 
 	if (desc) {
 		*desc = '\0';
-		switch (ip_kotype(port)) {
+		switch (io_kotype(object)) {
 		case IKOT_IOKIT_OBJECT:
 		case IKOT_IOKIT_CONNECT:
 		case IKOT_IOKIT_IDENT:
@@ -577,7 +576,7 @@ mach_port_kobject_description(
 	*addrp = VM_KERNEL_UNSLIDE_OR_PERM(kaddr);
 #endif
 
-	ip_unlock(port);
+	io_unlock(object);
 
 	if (obj) {
 		iokit_port_object_description(obj, desc);
@@ -614,7 +613,7 @@ mach_port_kobject_description_from_user(
 {
 	kern_return_t kr;
 
-	ipc_space_t space = convert_port_to_space_check_type(port, NULL, TASK_FLAVOR_READ, FALSE);
+	ipc_space_t space = convert_port_to_space_read_no_eval(port);
 
 	if (space == IPC_SPACE_NULL) {
 		return KERN_INVALID_ARGUMENT;
@@ -698,7 +697,7 @@ mach_port_kernel_object_from_user(
 {
 	kern_return_t kr;
 
-	ipc_space_t space = convert_port_to_space_check_type(port, NULL, TASK_FLAVOR_READ, FALSE);
+	ipc_space_t space = convert_port_to_space_read_no_eval(port);
 
 	if (space == IPC_SPACE_NULL) {
 		return KERN_INVALID_ARGUMENT;
@@ -740,16 +739,14 @@ mach_port_special_reply_port_reset_link(
 	}
 
 	if (thread->ith_special_reply_port != port) {
-		ip_unlock(port);
+		ip_mq_unlock(port);
 		return KERN_INVALID_ARGUMENT;
 	}
 
-	imq_lock(&port->ip_messages);
 	*srp_lost_link = (port->ip_srp_lost_link == 1)? TRUE : FALSE;
 	port->ip_srp_lost_link = 0;
-	imq_unlock(&port->ip_messages);
 
-	ip_unlock(port);
+	ip_mq_unlock(port);
 	return KERN_SUCCESS;
 }
 #else

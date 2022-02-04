@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2020 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -67,6 +67,8 @@
 #include <net/if_mib.h>
 #include <net/if_var.h>
 
+#include <os/log.h>
+
 /*
  * A sysctl(3) MIB for generic interface information.  This information
  * is exported in the net.link.generic branch, which has the following
@@ -133,9 +135,10 @@ make_ifmibdata(struct ifnet *ifp, int *name, struct sysctl_req *req)
 			COPY(flags);
 			if_data_internal_to_if_data64(ifp, &ifp->if_data, &ifmd.ifmd_data);
 #undef COPY
-			ifmd.ifmd_snd_len = IFCQ_LEN(&ifp->if_snd);
-			ifmd.ifmd_snd_maxlen = IFCQ_MAXLEN(&ifp->if_snd);
-			ifmd.ifmd_snd_drops = (unsigned int)ifp->if_snd.ifcq_dropcnt.packets;
+			ifmd.ifmd_snd_len = IFCQ_LEN(ifp->if_snd);
+			ifmd.ifmd_snd_maxlen = IFCQ_MAXLEN(ifp->if_snd);
+			ifmd.ifmd_snd_drops =
+			    (unsigned int)ifp->if_snd->ifcq_dropcnt.packets;
 		}
 		error = SYSCTL_OUT(req, &ifmd, sizeof ifmd);
 		if (error || !req->newptr) {
@@ -159,8 +162,8 @@ make_ifmibdata(struct ifnet *ifp, int *name, struct sysctl_req *req)
 #undef DONTCOPY
 #define COPY(fld) ifp->if_##fld = ifmd.ifmd_##fld
 		COPY(data);
-		ifp->if_snd.ifq_maxlen = ifmd.ifmd_snd_maxlen;
-		ifp->if_snd.ifq_drops = ifmd.ifmd_snd_drops;
+		ifp->if_snd->ifq_maxlen = ifmd.ifmd_snd_maxlen;
+		ifp->if_snd->ifq_drops = ifmd.ifmd_snd_drops;
 #undef COPY
 #endif /* IF_MIB_WR */
 		break;
@@ -182,9 +185,14 @@ make_ifmibdata(struct ifnet *ifp, int *name, struct sysctl_req *req)
 	case IFDATA_SUPPLEMENTAL: {
 		struct ifmibdata_supplemental *ifmd_supp;
 
-		if ((ifmd_supp = _MALLOC(sizeof(*ifmd_supp), M_TEMP,
-		    M_NOWAIT | M_ZERO)) == NULL) {
+		if ((ifmd_supp = kalloc_type(struct ifmibdata_supplemental,
+		    Z_WAITOK | Z_ZERO)) == NULL) {
 			error = ENOMEM;
+#if DEVELOPMENT || DEBUG
+			os_log(OS_LOG_DEFAULT, "%s: IFDATA_SUPPLEMENTAL _MALLOC(%lu) failed with ENOMEM",
+			    __func__, sizeof(*ifmd_supp));
+#endif /* DEVELOPMENT || DEBUG */
+			kfree_type(struct ifmibdata_supplemental, ifmd_supp);
 			break;
 		}
 
@@ -200,8 +208,14 @@ make_ifmibdata(struct ifnet *ifp, int *name, struct sysctl_req *req)
 
 		error = SYSCTL_OUT(req, ifmd_supp, MIN(sizeof(*ifmd_supp),
 		    req->oldlen));
+#if DEVELOPMENT || DEBUG
+		if (error != 0) {
+			os_log(OS_LOG_DEFAULT, "%s: IFDATA_SUPPLEMENTAL SYSCTL_OUT(MIN(%lu, %lu) failed with error %d",
+			    __func__, sizeof(*ifmd_supp), req->oldlen, error);
+		}
+#endif /* DEVELOPMENT || DEBUG */
 
-		_FREE(ifmd_supp, M_TEMP);
+		kfree_type(struct ifmibdata_supplemental, ifmd_supp);
 		break;
 	}
 	}

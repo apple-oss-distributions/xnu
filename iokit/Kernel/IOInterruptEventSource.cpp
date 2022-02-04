@@ -88,13 +88,7 @@ IOInterruptEventSource::init(OSObject *inOwner,
 		return false;
 	}
 
-	reserved = IONew(ExpansionData, 1);
-
-	if (!reserved) {
-		return false;
-	}
-
-	bzero(reserved, sizeof(ExpansionData));
+	reserved = IOMallocType(ExpansionData);
 
 	provider = inProvider;
 	producerCount = consumerCount = 0;
@@ -113,17 +107,7 @@ IOInterruptEventSource::init(OSObject *inOwner,
 			 * We also avoid try to avoid interrupt accounting overhead if none of
 			 * the statistics are enabled.
 			 */
-			reserved->statistics = IONew(IOInterruptAccountingData, 1);
-
-			if (!reserved->statistics) {
-				/*
-				 * We rely on the free() routine to clean up after us if init fails
-				 * midway.
-				 */
-				return false;
-			}
-
-			bzero(reserved->statistics, sizeof(IOInterruptAccountingData));
+			reserved->statistics = IOMallocType(IOInterruptAccountingData);
 
 			reserved->statistics->owner = this;
 		}
@@ -251,10 +235,10 @@ IOInterruptEventSource::free()
 
 	if (reserved) {
 		if (reserved->statistics) {
-			IODelete(reserved->statistics, IOInterruptAccountingData, 1);
+			IOFreeType(reserved->statistics, IOInterruptAccountingData);
 		}
 
-		IODelete(reserved, ExpansionData, 1);
+		IOFreeType(reserved, ExpansionData);
 	}
 
 	super::free();

@@ -49,6 +49,7 @@ enum telemetry_pmi {
 
 #if XNU_KERNEL_PRIVATE
 
+/* boolean_t must be used since variable is loaded from assembly. */
 extern volatile boolean_t telemetry_needs_record;
 
 extern void telemetry_init(void);
@@ -57,8 +58,9 @@ extern void compute_telemetry(void *);
 
 extern void telemetry_ast(thread_t thread, uint32_t reasons);
 
-extern int telemetry_gather(user_addr_t buffer, uint32_t *length, boolean_t mark);
+extern int telemetry_gather(user_addr_t buffer, uint32_t *length, bool mark);
 
+/* boolean_t must be used since this function is called from assembly. */
 extern void telemetry_mark_curthread(boolean_t interrupted_userspace,
     boolean_t pmi);
 
@@ -68,6 +70,10 @@ extern void telemetry_global_ctl(int enable_disable);
 
 extern int telemetry_timer_event(uint64_t deadline, uint64_t interval, uint64_t leeway);
 extern int telemetry_pmi_setup(enum telemetry_pmi pmi_type, uint64_t interval);
+
+#if CONFIG_MACF
+extern int telemetry_macf_mark_curthread(void);
+#endif
 
 extern void bootprofile_init(void);
 extern void bootprofile_wake_from_sleep(void);

@@ -86,39 +86,6 @@ struct  corehdr {
 #define CORE_REMOTE_PORT 1069 /* hardwired, we can't really query the services file */
 
 #if defined(__arm__) || defined(__arm64__)
-/*
- * xnu shared memory hardware debugger support
- *
- * A hardware debugger can connect, read the consistent debug
- * header to determine the physical location of the handshake
- * structure and communicate using commands in the structure as
- * defined below.
- *
- * Currently used for sending compressed coredumps to
- * astris.
- */
-struct xnu_hw_shmem_dbg_command_info {
-	volatile uint32_t xhsdci_status;
-	uint32_t xhsdci_seq_no;
-	volatile uint64_t xhsdci_buf_phys_addr;
-	volatile uint32_t xhsdci_buf_data_length;
-	/* end of version 0 structure */
-	uint64_t xhsdci_coredump_total_size_uncomp;
-	uint64_t xhsdci_coredump_total_size_sent_uncomp;
-	uint32_t xhsdci_page_size;
-} __attribute__((packed));
-
-#define CUR_XNU_HWSDCI_STRUCT_VERS 1
-
-#define XHSDCI_STATUS_NONE              0 /* default status */
-#define XHSDCI_STATUS_KERNEL_BUSY       1 /* kernel is busy with other procedure */
-#define XHSDCI_STATUS_KERNEL_READY      2 /* kernel ready to begin command */
-#define XHSDCI_COREDUMP_BEGIN           3 /* indicates hardware debugger is ready to begin consuming coredump info */
-#define XHSDCI_COREDUMP_BUF_READY       4 /* indicates the kernel has populated the buffer */
-#define XHSDCI_COREDUMP_BUF_EMPTY       5 /* indicates hardware debugger is done consuming the current data */
-#define XHSDCI_COREDUMP_STATUS_DONE     6 /* indicates last compressed data is in buffer */
-#define XHSDCI_COREDUMP_ERROR           7 /* indicates an error was encountered */
-#define XHSDCI_COREDUMP_REMOTE_DONE     8 /* indicates that hardware debugger is done */
 
 void panic_spin_shmcon(void);
 
@@ -168,13 +135,25 @@ extern boolean_t kdp_corezip_disabled;
 #if PRIVATE
 kern_return_t kdp_core_output(void *kdp_core_out_vars, uint64_t length, void * data);
 
-kern_return_t kdp_reset_output_vars(void *kdp_core_out_vars, uint64_t totalbytes);
+/*
+ * Resets the coredump output vars such that they're ready to start writing out coredump data.
+ * Note that the 'encrypt_core' parameter instructs the output vars to encrypt the coredump data (if possible)
+ * The 'out_should_skip_coredump' parameter will be set to true if the calling code should skip this coredump (for reasons).
+ */
+kern_return_t kdp_reset_output_vars(void *kdp_core_out_vars, uint64_t totalbytes, bool encrypt_core, bool *out_should_skip_coredump);
 
-int kern_dump_record_file(void *kdp_core_out_vars, const char *filename, uint64_t file_offset, uint64_t *out_file_length);
+kern_return_t kern_dump_record_file(void *kdp_core_out_vars, const char *filename, uint64_t file_offset, uint64_t *out_file_length);
 
-int kern_dump_seek_to_next_file(void *kdp_core_out_varss, uint64_t next_file_offset);
+kern_return_t kern_dump_seek_to_next_file(void *kdp_core_out_varss, uint64_t next_file_offset);
 
 extern boolean_t bootloader_valid_page(ppnum_t ppn);
+
+/*
+ * Called whenever the encryption functionality becomes available (e.g. when an encryption Kext is loaded
+ * and registers its interface with libkern). It is expected that once encryption support is available,
+ * it will stay available for the remainder of the kernel lifetime.
+ */
+kern_return_t kdp_core_handle_encryption_available(void);
 
 #endif /* PRIVATE */
 

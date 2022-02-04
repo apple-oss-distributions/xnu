@@ -19,17 +19,14 @@ def IterateProcChannels(proc):
             kc - yields each kern_channel in the process
     """
 
-    proc_filedesc = proc.p_fd
-    proc_lastfile = unsigned(proc_filedesc.fd_lastfile)
+    proc_filedesc = addressof(proc.p_fd)
     proc_ofiles = proc_filedesc.fd_ofiles
 
-    count = 0
-    while count <= proc_lastfile:
-        if unsigned(proc_ofiles[count]) != 0:
-            proc_fd_fglob = proc_ofiles[count].fp_glob
+    for fd in xrange(0, unsigned(proc_filedesc.fd_afterlast)):
+        if unsigned(proc_ofiles[fd]) != 0:
+            proc_fd_fglob = proc_ofiles[fd].fp_glob
             if (unsigned(proc_fd_fglob.fg_ops.fo_type) == 10):
                 yield Cast(proc_fd_fglob.fg_data, 'kern_channel *')
-        count += 1
 
 def IterateKernChannelRings(kc, kind):
     """ Iterate through all rings on a given channel
@@ -172,7 +169,7 @@ def ShowSkmemCache(cmd_args=None) :
 
     for skm in IterateTAILQ_HEAD(skmhead, "skm_link") :
         format_string = "{:>4d}: 0x{:<08x} {:<4d} {:<4d} {:<4d} {:<4d} {:<4d} {:<4d} {:<4d} {:<4d} {:<4s} \"{:<s}\""
-        print format_string.format(i, skm, skm.skm_bufinuse, skm.skm_bufmax, skm.skm_rescale, skm.skm_sl_create, skm.skm_sl_destroy, skm.skm_sl_alloc, skm.skm_sl_free, skm.skm_depot_contention, SkmemCacheModeAsString(skm.skm_mode), str(skm.skm_name))
+        print format_string.format(i, skm, skm.skm_sl_bufinuse, skm.skm_sl_bufmax, skm.skm_sl_rescale, skm.skm_sl_create, skm.skm_sl_destroy, skm.skm_sl_alloc, skm.skm_sl_free, skm.skm_depot_contention, SkmemCacheModeAsString(skm.skm_mode), str(skm.skm_name))
         i += 1
 
 @lldb_command('showskmemslab')
@@ -186,13 +183,45 @@ def ShowBufCtl(cmd_args=None) :
 
     skm = kern.GetValueFromAddress(cmd_args[0], 'skmem_cache *')
 
-    for slab in IterateTAILQ_HEAD(skm.skm_sl_partial, "sl_link") :
-        format_string = "{:<08x} {:<4d} 0x{:<08x} 0x{:08x}"
+    for slab in IterateTAILQ_HEAD(skm.skm_sl_partial_list, "sl_link") :
+        format_string = "{:<18s} {:<4s} {:18s} {:18s}"
+        print format_string.format("slab", "ref", "base", "basem")
+        format_string = "0x{:<08x} {:<4d} 0x{:<08x} 0x{:08x}"
         print format_string.format(slab, slab.sl_refcnt, slab.sl_base, slab.sl_basem)
+        print "\t========================= free ========================="
+        format_string = "\t{:<18s} {:18s} {:18s}"
+        print format_string.format("bufctl", "buf_addr", "buf_addrm")
+        for bc in IterateListEntry(slab.sl_head, 'struct skmem_bufctl *',
+          'bc_link', list_prefix='s') :
+            format_string = "\t0x{:<08x} 0x{:<08x} 0x{:<08x}"
+            print format_string.format(bc, bc.bc_addr, bc.bc_addrm)
 
-    for slab in IterateTAILQ_HEAD(skm.skm_sl_empty, "sl_link") :
-        format_string = "{:<08x} {:<4d} 0x{:<08x} 0x{:08x}"
+    for slab in IterateTAILQ_HEAD(skm.skm_sl_empty_list, "sl_link") :
+        format_string = "{:<18s}  {:<4s} {:18s} {:18s}"
+        print format_string.format("slab", "ref", "base", "basem")
+        format_string = "0x{:<08x} {:<4d} 0x{:<08x} 0x{:08x}"
         print format_string.format(slab, slab.sl_refcnt, slab.sl_base, slab.sl_basem)
+        print "\t========================= free ========================="
+        format_string = "\t{:<18s} {:18s} {:18s}"
+        print format_string.format("bufctl", "buf_addr", "buf_addrm")
+        for bc in IterateListEntry(slab.sl_head, 'struct skmem_bufctl *',
+          'bc_link', list_prefix='s') :
+            format_string = "\t0x{:<08x} 0x{:<08x} 0x{:<08x}"
+            print format_string.format(bc, bc.bc_addr, bc.bc_addrm)
+
+    print " "
+    for i in range(0, skm.skm_hash_mask + 1) :
+        format_string = "{:<18s}  {:<4s}"
+        print format_string.format("bucket", "idx")
+        format_string = "0x{:<08x} {:<4d}"
+        print format_string.format(addressof(skm.skm_hash_table[i]), i)
+        print "\t====================== allocated ======================="
+        format_string = "\t{:<18s} {:18s} {:18s}"
+        print format_string.format("bufctl", "buf_addr", "buf_addrm")
+        for bc in IterateListEntry(skm.skm_hash_table[i].bcb_head,
+          'struct skmem_bufctl *', 'bc_link', list_prefix='s') :
+            format_string = "\t0x{:<08x} 0x{:<08x} 0x{:<08x}"
+            print format_string.format(bc, bc.bc_addr, bc.bc_addrm)
 
 def SkmemArenaTypeAsString(type) :
     out_string = ""
@@ -224,8 +253,8 @@ def ShowSkmemArena(cmd_args=None) :
         print format_string.format(i, ar, SkmemArenaTypeAsString(ar.ar_type), ar.ar_mapsize >> 10, str(ar.ar_name))
         i += 1
 
-@lldb_command('showskmemregion')
-def ShowSkmemRegion(cmd_args=None) :
+@lldb_command('showskmemregions')
+def ShowSkmemRegions(cmd_args=None) :
     """ Show the global list of skmem regions
     """
 
@@ -236,6 +265,39 @@ def ShowSkmemRegion(cmd_args=None) :
         format_string = "{:>4d}: 0x{:<08x} \"{:<s}\""
         print format_string.format(i, skr, str(skr.skr_name))
         i += 1
+
+@lldb_command('showskmemregion')
+def ShowSkmemRegion(cmd_args=None) :
+    """ Show segments of a skmem region
+    """
+
+    if (cmd_args == None or len(cmd_args) == 0) :
+        print "Missing argument 0 (skmem_region address)."
+        return
+
+    skr = kern.GetValueFromAddress(cmd_args[0], 'skmem_region *')
+
+    print "\t========================= free ========================="
+    for sg in IterateTAILQ_HEAD(skr.skr_seg_free, "sg_link") :
+        format_string = "{:<18s} {:<4s} {:18s} {:18s}"
+        print format_string.format("segment", "idx", "start", "end")
+        format_string = "0x{:<08x} {:<4d} 0x{:<08x} 0x{:08x}"
+        print format_string.format(sg, sg.sg_index, sg.sg_start, sg.sg_end)
+        format_string = "\t{:<18s} {:18s} {:18s}"
+        print format_string.format("bufctl", "buf_addr", "buf_addrm")
+
+    print " "
+    for i in range(0, skr.skr_hash_mask + 1) :
+        format_string = "{:<18s}  {:<4s}"
+        print format_string.format("bucket", "idx")
+        format_string = "0x{:<08x} {:<4d}"
+        print format_string.format(addressof(skr.skr_hash_table[i]), i)
+        print "\t====================== allocated ======================="
+        format_string = "\t{:<18s} {:4s} {:18s} {:18s}"
+        print format_string.format("segment", "idx", "start", "end")
+        for sg in IterateTAILQ_HEAD(skr.skr_hash_table[i].sgb_head, "sg_link") :
+            format_string = "\t0x{:<08x} {:<4d} 0x{:<08x} 0x{:<08x}"
+            print format_string.format(sg, sg.sg_index, sg.sg_start, sg.sg_end)
 
 @lldb_command('showchannelupphash')
 def ShowChannelUppHash(cmd_args=None) :
@@ -326,8 +388,21 @@ def ShowNetNS(cmd_args=None):
         print GetStructNsSummary(kern.globals.netns_global_non_wild[i])
 
 
+NETNS_LISTENER = 0x00
+NETNS_SKYWALK = 0x01
+NETNS_BSD = 0x02
+NETNS_PF = 0x03
+NETNS_OWNER_MASK = 0x7
+
+netns_flag_strings = {
+    NETNS_LISTENER : "LISTENER",
+    NETNS_SKYWALK : "SKYWALK",
+    NETNS_BSD : "BSD",
+    NETNS_PF : "PF",
+}
+
 @lldb_type_summary(['struct ns_token *'])
-@header('{:<20s} {:<5s} {:<48s} {:<12s} {:<8s} {:<38s} {:<38s} {:<12s}'.format('nt', 'proto', 'addr', 'port', 'owner', 'ifp', 'parent', 'flags'))
+@header('{:<20s} {:<5s} {:<48s} {:<12s} {:<8s} {:<38s} {:<12s}'.format('nt', 'proto', 'addr', 'port', 'owner', 'ifp', 'flags'))
 def GetNsTokenSummary(nt):
     """ Summarizes a struct ns from the netns
 
@@ -348,24 +423,13 @@ def GetNsTokenSummary(nt):
     else:
         addr = str(nt_addr) + " bad len {:u}".format(nt.nt_addr_len)
 
-    format_string = '{o:#020x} {p:<5s} {a:<48s} {pt:<12s} {wn:<8s} {ifp:38s} {pa:38s} {f:#012x}'
+    format_string = '{o:#020x} {p:<5s} {a:<48s} {pt:<12s} {wn:<8s} {ifp:38s} {f:#012x}'
 
     ports = "%u" % nt.nt_port
 
     ifp = "(struct ifnet *)" + hex(nt.nt_ifp)
 
-    if ((nt.nt_flags & 0x7) == 0x00):
-        owner = "LISTENER"
-        parent = "(void *)" + hex(nt.nt_parent)
-    elif ((nt.nt_flags & 0x7) == 0x01):
-        owner = "SKYWALK"
-        parent = "(struct flow_entry *)" + hex(nt.nt_parent_skywalk)
-    elif ((nt.nt_flags & 0x7) == 0x02): # XXX xnudefines?
-        owner = "BSD"
-        parent = "(struct inpcb *)" + hex(nt.nt_parent_bsd)
-    elif ((nt.nt_flags & 0x7) == 0x03): # XXX xnudefines?
-        owner = "PF"
-        parent = "(void *)" + hex(nt.nt_parent)
+    owner = netns_flag_strings[nt.nt_flags & NETNS_OWNER_MASK]
 
     return format_string.format(
         o=nt,
@@ -374,7 +438,6 @@ def GetNsTokenSummary(nt):
         pt=ports,
         wn=owner,
         ifp=ifp,
-        pa=parent,
         f=nt.nt_flags)
 
 @lldb_command("showallnetnstokens")
@@ -449,17 +512,14 @@ def IterateProcNECP(proc):
             necp - yields each necp_fd_data in the process
     """
 
-    proc_filedesc = proc.p_fd
-    proc_lastfile = unsigned(proc_filedesc.fd_lastfile)
+    proc_filedesc = addressof(proc.p_fd)
     proc_ofiles = proc_filedesc.fd_ofiles
 
-    count = 0
-    while count <= proc_lastfile:
-        if unsigned(proc_ofiles[count]) != 0:
-            proc_fd_fglob = proc_ofiles[count].fp_glob
+    for fd in xrange(0, unsigned(proc_filedesc.fd_afterlast)):
+        if unsigned(proc_ofiles[fd]) != 0:
+            proc_fd_fglob = proc_ofiles[fd].fp_glob
             if (unsigned(proc_fd_fglob.fg_ops.fo_type) == 9):
                 yield Cast(proc_fd_fglob.fg_data, 'necp_fd_data *')
-        count += 1
 
 def GetNECPClientBitFields(necp):
     """ Return the bit fields in necp_client as string
@@ -608,7 +668,7 @@ def ShowNexuses(cmd_args=None):
         print "{0:s}".format(nx_str)
 
 def GetSockAddr4(in_addr):
-    return inet_ntoa(struct.pack("!I", in_addr.sin_addr))
+    return inet_ntoa(struct.pack("I", unsigned(in_addr.s_addr)))
 
 def GetSockAddr6(in6_addr):
     addr = in6_addr.__u6_addr.__u6_addr8

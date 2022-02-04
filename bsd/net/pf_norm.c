@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2007-2020 Apple Inc. All rights reserved.
+ * Copyright (c) 2007-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -474,7 +474,7 @@ pf_find_fragment_by_key(struct pf_fragment *key, struct pf_frag_tree *tree)
 	return frag;
 }
 
-static __inline struct pf_fragment *
+static __attribute__((noinline)) struct pf_fragment *
 pf_find_fragment_by_ipv4_header(struct ip *ip, struct pf_frag_tree *tree)
 {
 	struct pf_fragment key;
@@ -798,7 +798,7 @@ drop_fragment:
 	return NULL;
 }
 
-static struct mbuf *
+static __attribute__((noinline)) struct mbuf *
 pf_fragcache(struct mbuf **m0, struct ip *h, struct pf_fragment **frag, int mff,
     int drop, int *nomem)
 {
@@ -1474,7 +1474,7 @@ drop_fragment:
 	return NULL;
 }
 
-static struct mbuf *
+static __attribute__((noinline)) struct mbuf *
 pf_frag6cache(struct mbuf **m0, struct ip6_hdr *h, struct ip6_frag *fh,
     struct pf_fragment **frag, int hlen, int mff, int drop, int *nomem)
 {
@@ -2223,7 +2223,7 @@ bad:
 	return PF_DROP;
 }
 
-static __inline struct pf_fragment *
+static __attribute__((noinline)) struct pf_fragment *
 pf_find_fragment_by_ipv6_header(struct ip6_hdr *ip6, struct ip6_frag *fh,
     struct pf_frag_tree *tree)
 {
@@ -3248,7 +3248,7 @@ pf_normalize_tcp_stateful(pbuf_t *pbuf, int off, struct pf_pdesc *pd,
 	return 0;
 }
 
-static int
+static __attribute__((noinline)) int
 pf_normalize_tcpopt(struct pf_rule *r, int dir, struct pfi_kif *kif,
     struct pf_pdesc *pd, pbuf_t *pbuf, struct tcphdr *th, int off,
     int *rewrptr)

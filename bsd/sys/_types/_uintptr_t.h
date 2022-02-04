@@ -27,5 +27,13 @@
  */
 #ifndef _UINTPTR_T
 #define _UINTPTR_T
+
+#ifndef __has_attribute
 typedef unsigned long           uintptr_t;
+#elif KERNEL && __has_attribute(xnu_usage_semantics)
+typedef unsigned long           uintptr_t __attribute__((xnu_usage_semantics("pointer")));
+#else
+typedef unsigned long           uintptr_t;
+#endif /* __has_attribute */
+
 #endif /* _UINTPTR_T */

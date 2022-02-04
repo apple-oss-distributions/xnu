@@ -34,6 +34,8 @@
 #include <mach/coalition.h>
 #include <kern/thread_group.h>
 
+__BEGIN_DECLS
+
 #if CONFIG_COALITIONS
 
 void coalitions_init(void);
@@ -76,8 +78,6 @@ void task_coalition_thread_group_focal_update(task_t task);
 
 void coalition_for_each_task(coalition_t coal, void *ctx,
     void (*callback)(coalition_t, void *, task_t));
-
-void coalition_set_efficient(coalition_t coal);
 
 /*  Coalition ledger  */
 struct coalition_ledger_indices {
@@ -138,7 +138,7 @@ kern_return_t coalition_request_terminate_internal(coalition_t coal);
  * KERN_RESOURCE_SHORTAGE	Unable to allocate kernel resources for a
  *				new coalition.
  */
-kern_return_t coalition_create_internal(int type, int role, boolean_t privileged, coalition_t *out, uint64_t *cid);
+kern_return_t coalition_create_internal(int type, int role, boolean_t privileged, boolean_t efficient, coalition_t *out, uint64_t *cid);
 
 boolean_t coalition_term_requested(coalition_t coal);
 boolean_t coalition_is_terminated(coalition_t coal);
@@ -198,5 +198,8 @@ coalition_for_each_task(__unused coalition_t coal,
 }
 
 #endif /* CONFIG_COALITIONS */
+
+__END_DECLS
+
 #endif /* XNU_KERNEL_PRIVATE */
 #endif /* _KERN_COALITION_H */

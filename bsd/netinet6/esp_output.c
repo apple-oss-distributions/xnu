@@ -116,8 +116,6 @@ static int esp_output(struct mbuf *, u_char *, struct mbuf *,
 extern int      esp_udp_encap_port;
 extern u_int64_t natt_now;
 
-extern lck_mtx_t *sadb_mutex;
-
 /*
  * compute ESP header size.
  */
@@ -127,7 +125,7 @@ esp_hdrsiz(__unused struct ipsecrequest *isr)
 #if 0
 	/* sanity check */
 	if (isr == NULL) {
-		panic("esp_hdrsiz: NULL was passed.\n");
+		panic("esp_hdrsiz: NULL was passed.");
 	}
 
 
@@ -569,7 +567,7 @@ esp_output(
 	if ((sav->flags & SADB_X_EXT_OLD) == 0) {
 		struct newesp *nesp;
 		nesp = (struct newesp *)esp;
-		if (sav->replay[traffic_class]->count == sav->replay[traffic_class]->lastseq) {
+		if (sav->replay[traffic_class]->seq == sav->replay[traffic_class]->lastseq) {
 			if ((sav->flags & SADB_X_EXT_CYCSEQ) == 0) {
 				/* XXX Is it noisy ? */
 				ipseclog((LOG_WARNING,
@@ -583,13 +581,14 @@ esp_output(
 		}
 		lck_mtx_lock(sadb_mutex);
 		sav->replay[traffic_class]->count++;
+		sav->replay[traffic_class]->seq++;
 		lck_mtx_unlock(sadb_mutex);
 		/*
 		 * XXX sequence number must not be cycled, if the SA is
 		 * installed by IKE daemon.
 		 */
-		nesp->esp_seq = htonl(sav->replay[traffic_class]->count);
-		seq = sav->replay[traffic_class]->count;
+		nesp->esp_seq = htonl(sav->replay[traffic_class]->seq);
+		seq = sav->replay[traffic_class]->seq;
 	}
 
 	{

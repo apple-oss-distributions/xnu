@@ -121,16 +121,14 @@ blist_create(daddr_t blocks)
 		skip = (skip + 1) << BLIST_META_RADIX_SHIFT;
 	}
 
-	bl = malloc(sizeof(struct blist), M_SWAP, M_WAITOK);
-
-	bzero(bl, sizeof(*bl));
+	bl = kalloc_type(struct blist, Z_ZERO | Z_WAITOK);
 
 	bl->bl_blocks = blocks;
 	bl->bl_radix = radix;
 	bl->bl_skip = skip;
 	bl->bl_rootblks = 1 +
 	    blst_radix_init(NULL, bl->bl_radix, bl->bl_skip, blocks);
-	bl->bl_root = malloc(sizeof(blmeta_t) * bl->bl_rootblks, M_SWAP, M_WAITOK);
+	bl->bl_root = (blmeta_t *)kalloc_data(sizeof(blmeta_t) * bl->bl_rootblks, Z_WAITOK);
 
 #if defined(BLIST_DEBUG)
 	printf(
@@ -150,8 +148,8 @@ blist_create(daddr_t blocks)
 void
 blist_destroy(blist_t bl)
 {
-	free(bl->bl_root, M_SWAP);
-	free(bl, M_SWAP);
+	kfree_data(bl->bl_root, sizeof(blmeta_t) * bl->bl_rootblks);
+	kfree_type(struct blist, bl);
 }
 
 /*

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2020 Apple Inc. All rights reserved.
+ * Copyright (c) 2008-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -70,7 +70,6 @@ typedef struct utun_nx {
 	uuid_t fsw_provider;
 	uuid_t fsw_instance;
 	uuid_t fsw_device;
-	uuid_t fsw_host;
 	uuid_t fsw_agent;
 } *utun_nx_t;
 
@@ -84,7 +83,7 @@ struct utun_pcb {
 	u_int32_t               utun_unit;
 	u_int32_t               utun_unique_id;
 	u_int32_t               utun_flags;
-	int                             utun_ext_ifdata_stats;
+	int                     utun_ext_ifdata_stats;
 	u_int32_t               utun_max_pending_packets;
 	char                    utun_if_xname[IFXNAMSIZ];
 	char                    utun_unique_name[IFXNAMSIZ];
@@ -98,8 +97,14 @@ struct utun_pcb {
 	lck_mtx_t               utun_input_chain_lock;
 
 #if UTUN_NEXUS
+	// lock to protect utun_pcb_data_move & utun_pcb_drainers
+	decl_lck_mtx_data(, utun_pcb_data_move_lock);
+	u_int32_t               utun_pcb_data_move; /* number of data moving contexts */
+	u_int32_t               utun_pcb_drainers; /* number of threads waiting to drain */
+	u_int32_t               utun_pcb_data_path_state; /* internal state of interface data path */
+
 	struct utun_nx  utun_nx;
-	int                             utun_kpipe_enabled;
+	int                     utun_kpipe_enabled;
 	uuid_t                  utun_kpipe_uuid;
 	void *                  utun_kpipe_rxring;
 	void *                  utun_kpipe_txring;
@@ -167,7 +172,22 @@ static errno_t utun_proto_pre_output(ifnet_t interface, protocol_family_t protoc
     char *frame_type, char *link_layer_dest);
 static errno_t utun_pkt_input(struct utun_pcb *pcb, mbuf_t m);
 
+/* data movement refcounting functions */
 #if UTUN_NEXUS
+static boolean_t utun_data_move_begin(struct utun_pcb *pcb);
+static void utun_data_move_end(struct utun_pcb *pcb);
+static void utun_wait_data_move_drain(struct utun_pcb *pcb);
+
+/* Data path states */
+#define UTUN_PCB_DATA_PATH_READY    0x1
+
+/* Macros to set/clear/test data path states */
+#define UTUN_SET_DATA_PATH_READY(_pcb) \
+    ((_pcb)->utun_pcb_data_path_state |= UTUN_PCB_DATA_PATH_READY)
+#define UTUN_CLR_DATA_PATH_READY(_pcb) \
+    ((_pcb)->utun_pcb_data_path_state &= ~UTUN_PCB_DATA_PATH_READY)
+#define UTUN_IS_DATA_PATH_READY(_pcb) \
+    (((_pcb)->utun_pcb_data_path_state & UTUN_PCB_DATA_PATH_READY) != 0)
 
 #define UTUN_IF_DEFAULT_SLOT_SIZE 2048
 #define UTUN_IF_DEFAULT_RING_SIZE 64
@@ -245,10 +265,9 @@ utun_kpipe_sync_rx(kern_nexus_provider_t nxprov, kern_nexus_t nexus,
 #define UTUN_HEADER_SIZE(_pcb) (sizeof(u_int32_t) + (((_pcb)->utun_flags & UTUN_FLAGS_ENABLE_PROC_UUID) ? sizeof(uuid_t) : 0))
 
 static kern_ctl_ref     utun_kctlref;
-static lck_attr_t *utun_lck_attr;
-static lck_grp_attr_t *utun_lck_grp_attr;
-static lck_grp_t *utun_lck_grp;
-static lck_mtx_t utun_lock;
+static LCK_ATTR_DECLARE(utun_lck_attr, 0, 0);
+static LCK_GRP_DECLARE(utun_lck_grp, "utun");
+static LCK_MTX_DECLARE_ATTR(utun_lock, &utun_lck_grp, &utun_lck_attr);
 
 TAILQ_HEAD(utun_list, utun_pcb) utun_head;
 
@@ -362,18 +381,26 @@ utun_netif_sync_tx(kern_nexus_provider_t nxprov, kern_nexus_t nexus,
 
 	struct netif_stats *nifs = &NX_NETIF_PRIVATE(nexus)->nif_stats;
 
+	if (!utun_data_move_begin(pcb)) {
+		os_log_info(OS_LOG_DEFAULT, "%s: data path stopped for %s\n",
+		    __func__, if_name(pcb->utun_ifp));
+		return 0;
+	}
+
 	lck_rw_lock_shared(&pcb->utun_pcb_lock);
 
 	struct kern_channel_ring_stat_increment tx_ring_stats;
 	bzero(&tx_ring_stats, sizeof(tx_ring_stats));
 	kern_channel_slot_t tx_pslot = NULL;
 	kern_channel_slot_t tx_slot = kern_channel_get_next_slot(tx_ring, NULL, NULL);
+	kern_packet_t tx_chain_ph = 0;
 
 	STATS_INC(nifs, NETIF_STATS_TX_SYNC);
 
 	if (tx_slot == NULL) {
 		// Nothing to write, don't bother signalling
 		lck_rw_unlock_shared(&pcb->utun_pcb_lock);
+		utun_data_move_end(pcb);
 		return 0;
 	}
 
@@ -385,6 +412,7 @@ utun_netif_sync_tx(kern_nexus_provider_t nxprov, kern_nexus_t nexus,
 		if (rx_ring != NULL) {
 			kern_channel_notify(rx_ring, 0);
 		}
+		utun_data_move_end(pcb);
 		return 0;
 	}
 
@@ -402,6 +430,10 @@ utun_netif_sync_tx(kern_nexus_provider_t nxprov, kern_nexus_t nexus,
 			continue;
 		}
 		(void) kern_channel_slot_detach_packet(tx_ring, tx_slot, tx_ph);
+		if (tx_chain_ph != 0) {
+			kern_packet_append(tx_ph, tx_chain_ph);
+		}
+		tx_chain_ph = tx_ph;
 
 		// Advance TX ring
 		tx_pslot = tx_slot;
@@ -482,8 +514,6 @@ utun_netif_sync_tx(kern_nexus_provider_t nxprov, kern_nexus_t nexus,
 			STATS_INC(nifs, NETIF_STATS_DROP);
 		}
 
-		kern_pbufpool_free(tx_ring->ckr_pp, tx_ph);
-
 		if (data == NULL) {
 			continue;
 		}
@@ -494,7 +524,9 @@ utun_netif_sync_tx(kern_nexus_provider_t nxprov, kern_nexus_t nexus,
 		tx_ring_stats.kcrsi_slots_transferred++;
 		tx_ring_stats.kcrsi_bytes_transferred += length;
 	}
-
+	if (tx_chain_ph != 0) {
+		kern_pbufpool_free_chain(tx_ring->ckr_pp, tx_chain_ph);
+	}
 	if (tx_pslot) {
 		kern_channel_advance_slot(tx_ring, tx_pslot);
 		kern_channel_increment_ring_net_stats(tx_ring, pcb->utun_ifp, &tx_ring_stats);
@@ -502,7 +534,7 @@ utun_netif_sync_tx(kern_nexus_provider_t nxprov, kern_nexus_t nexus,
 	}
 
 	lck_rw_unlock_shared(&pcb->utun_pcb_lock);
-
+	utun_data_move_end(pcb);
 	return 0;
 }
 
@@ -514,6 +546,12 @@ utun_netif_tx_doorbell(kern_nexus_provider_t nxprov, kern_nexus_t nexus,
 	struct utun_pcb *pcb = kern_nexus_get_context(nexus);
 	boolean_t more = false;
 	errno_t rc = 0;
+
+	if (!utun_data_move_begin(pcb)) {
+		os_log_info(OS_LOG_DEFAULT, "%s: data path stopped for %s\n",
+		    __func__, if_name(pcb->utun_ifp));
+		return 0;
+	}
 
 	/*
 	 * Refill and sync the ring; we may be racing against another thread doing
@@ -554,7 +592,7 @@ utun_netif_tx_doorbell(kern_nexus_provider_t nxprov, kern_nexus_t nexus,
 	}
 
 	kr_exit(ring);
-
+	utun_data_move_end(pcb);
 	return 0;
 }
 
@@ -569,6 +607,12 @@ utun_netif_sync_rx(kern_nexus_provider_t nxprov, kern_nexus_t nexus,
 
 	struct netif_stats *nifs = &NX_NETIF_PRIVATE(nexus)->nif_stats;
 
+	if (!utun_data_move_begin(pcb)) {
+		os_log_info(OS_LOG_DEFAULT, "%s: data path stopped for %s\n",
+		    __func__, if_name(pcb->utun_ifp));
+		return 0;
+	}
+
 	lck_rw_lock_shared(&pcb->utun_pcb_lock);
 
 	// Reclaim user-released slots
@@ -579,6 +623,7 @@ utun_netif_sync_rx(kern_nexus_provider_t nxprov, kern_nexus_t nexus,
 	uint32_t avail = kern_channel_available_slot_count(rx_ring);
 	if (avail == 0) {
 		lck_rw_unlock_shared(&pcb->utun_pcb_lock);
+		utun_data_move_end(pcb);
 		return 0;
 	}
 
@@ -691,7 +736,6 @@ utun_netif_sync_rx(kern_nexus_provider_t nxprov, kern_nexus_t nexus,
 		// Net-If TX ring not set up yet, nothing to read
 		goto done;
 	}
-
 	// Unlock utun before entering ring
 	lck_rw_unlock_shared(&pcb->utun_pcb_lock);
 
@@ -812,6 +856,7 @@ done:
 		kr_exit(tx_ring);
 	}
 
+	utun_data_move_end(pcb);
 	return 0;
 }
 
@@ -909,6 +954,7 @@ utun_nexus_ifattach(struct utun_pcb *pcb,
 	err = kern_nexus_controller_alloc_net_provider_instance(controller,
 	    pcb->utun_nx.if_provider,
 	    pcb,
+	    NULL,
 	    &pcb->utun_nx.if_instance,
 	    &net_init,
 	    ifp);
@@ -965,16 +1011,6 @@ utun_nexus_detach(struct utun_pcb *pcb)
 	nexus_controller_t controller = kern_nexus_shared_controller();
 	errno_t err;
 
-	if (!uuid_is_null(nx->fsw_host)) {
-		err = kern_nexus_ifdetach(controller,
-		    nx->fsw_instance,
-		    nx->fsw_host);
-		if (err != 0) {
-			os_log_error(OS_LOG_DEFAULT, "%s: kern_nexus_ifdetach ms host failed %d\n",
-			    __func__, err);
-		}
-	}
-
 	if (!uuid_is_null(nx->fsw_device)) {
 		err = kern_nexus_ifdetach(controller,
 		    nx->fsw_instance,
@@ -985,10 +1021,10 @@ utun_nexus_detach(struct utun_pcb *pcb)
 		}
 	}
 
-	utun_detach_provider_and_instance(nx->if_provider,
-	    nx->if_instance);
 	utun_detach_provider_and_instance(nx->fsw_provider,
 	    nx->fsw_instance);
+	utun_detach_provider_and_instance(nx->if_provider,
+	    nx->if_instance);
 
 	if (pcb->utun_netif_pp != NULL) {
 		kern_pbufpool_destroy(pcb->utun_netif_pp);
@@ -1064,7 +1100,7 @@ utun_create_fs_provider_and_instance(struct utun_pcb *pcb,
 	init.nxi_version = KERN_NEXUS_CURRENT_VERSION;
 	err = kern_nexus_controller_alloc_provider_instance(controller,
 	    *provider,
-	    NULL,
+	    NULL, NULL,
 	    instance, &init);
 	if (err != 0) {
 		os_log_error(OS_LOG_DEFAULT, "%s alloc_provider_instance %s failed, %d\n",
@@ -1105,15 +1141,6 @@ utun_flowswitch_attach(struct utun_pcb *pcb)
 		goto failed;
 	}
 
-	// Attach flowswitch to host port
-	err = kern_nexus_ifattach(controller, nx->fsw_instance,
-	    NULL, nx->if_instance,
-	    TRUE, &nx->fsw_host);
-	if (err != 0) {
-		os_log_error(OS_LOG_DEFAULT, "%s kern_nexus_ifattach ms host %d\n", __func__, err);
-		goto failed;
-	}
-
 	// Extract the agent UUID and save for later
 	struct kern_nexus *flowswitch_nx = nx_find(nx->fsw_instance, false);
 	if (flowswitch_nx != NULL) {
@@ -1137,7 +1164,7 @@ failed:
 
 	errno_t detach_error = 0;
 	if ((detach_error = ifnet_detach(pcb->utun_ifp)) != 0) {
-		panic("utun_flowswitch_attach - ifnet_detach failed: %d\n", detach_error);
+		panic("utun_flowswitch_attach - ifnet_detach failed: %d", detach_error);
 		/* NOT REACHED */
 	}
 
@@ -1266,6 +1293,9 @@ utun_disable_channel(struct utun_pcb *pcb)
 	int enabled;
 	uuid_t uuid;
 
+	/* Wait until all threads in the data paths are done. */
+	utun_wait_data_move_drain(pcb);
+
 	lck_rw_lock_exclusive(&pcb->utun_pcb_lock);
 
 	enabled = pcb->utun_kpipe_enabled;
@@ -1357,7 +1387,7 @@ utun_enable_channel(struct utun_pcb *pcb, struct proc *proc)
 	init.nxi_version = KERN_NEXUS_CURRENT_VERSION;
 	init.nxi_tx_pbufpool = pcb->utun_kpipe_pp;
 	result = kern_nexus_controller_alloc_provider_instance(utun_ncd,
-	    utun_kpipe_uuid, pcb, &pcb->utun_kpipe_uuid, &init);
+	    utun_kpipe_uuid, pcb, NULL, &pcb->utun_kpipe_uuid, &init);
 	if (result) {
 		goto done;
 	}
@@ -1443,12 +1473,6 @@ utun_register_control(void)
 		return result;
 	}
 
-	utun_lck_attr = lck_attr_alloc_init();
-	utun_lck_grp_attr = lck_grp_attr_alloc_init();
-	utun_lck_grp = lck_grp_alloc_init("utun", utun_lck_grp_attr);
-
-	lck_mtx_init(&utun_lock, utun_lck_grp, utun_lck_attr);
-
 	return 0;
 }
 
@@ -1476,9 +1500,10 @@ utun_free_pcb(struct utun_pcb *pcb, bool locked)
 #if UTUN_NEXUS
 	mbuf_freem_list(pcb->utun_input_chain);
 	pcb->utun_input_chain_count = 0;
-	lck_mtx_destroy(&pcb->utun_input_chain_lock, utun_lck_grp);
+	lck_mtx_destroy(&pcb->utun_input_chain_lock, &utun_lck_grp);
+	lck_mtx_destroy(&pcb->utun_pcb_data_move_lock, &utun_lck_grp);
 #endif // UTUN_NEXUS
-	lck_rw_destroy(&pcb->utun_pcb_lock, utun_lck_grp);
+	lck_rw_destroy(&pcb->utun_pcb_lock, &utun_lck_grp);
 	if (!locked) {
 		lck_mtx_lock(&utun_lock);
 	}
@@ -1588,10 +1613,12 @@ utun_ctl_bind(kern_ctl_ref kctlref,
 	pcb->utun_tx_fsw_ring_size = if_utun_tx_fsw_ring_size;
 	pcb->utun_rx_fsw_ring_size = if_utun_rx_fsw_ring_size;
 	pcb->utun_input_chain_count = 0;
-	lck_mtx_init(&pcb->utun_input_chain_lock, utun_lck_grp, utun_lck_attr);
+	lck_mtx_init(&pcb->utun_input_chain_lock, &utun_lck_grp, &utun_lck_attr);
+	lck_mtx_init(&pcb->utun_pcb_data_move_lock,
+	    &utun_lck_grp, &utun_lck_attr);
 #endif // UTUN_NEXUS
 
-	lck_rw_init(&pcb->utun_pcb_lock, utun_lck_grp, utun_lck_attr);
+	lck_rw_init(&pcb->utun_pcb_lock, &utun_lck_grp, &utun_lck_attr);
 
 	return 0;
 }
@@ -1715,6 +1742,12 @@ utun_ctl_connect(kern_ctl_ref kctlref,
 
 		/* Attach to bpf */
 		bpfattach(pcb->utun_ifp, DLT_NULL, UTUN_HEADER_SIZE(pcb));
+
+#if UTUN_NEXUS
+		lck_mtx_lock(&pcb->utun_pcb_data_move_lock);
+		UTUN_SET_DATA_PATH_READY(pcb);
+		lck_mtx_unlock(&pcb->utun_pcb_data_move_lock);
+#endif // UTUN_NEXUS
 	}
 
 	/* The interfaces resoures allocated, mark it as running */
@@ -1884,6 +1917,8 @@ utun_ctl_disconnect(__unused kern_ctl_ref kctlref,
 	}
 
 #if UTUN_NEXUS
+	/* Wait until all threads in the data paths are done. */
+	utun_wait_data_move_drain(pcb);
 	// Tell the nexus to stop all rings
 	if (pcb->utun_netif_nexus != NULL && pcb->utun_netif_connected) {
 		kern_nexus_stop(pcb->utun_netif_nexus);
@@ -1914,7 +1949,7 @@ utun_ctl_disconnect(__unused kern_ctl_ref kctlref,
 			/* Increment refcnt, but detach interface */
 			ifnet_incr_iorefcnt(ifp);
 			if ((result = ifnet_detach(ifp)) != 0) {
-				panic("utun_ctl_disconnect - ifnet_detach failed: %d\n", result);
+				panic("utun_ctl_disconnect - ifnet_detach failed: %d", result);
 			}
 
 			/*
@@ -2514,13 +2549,20 @@ utun_start(ifnet_t interface)
 #if UTUN_NEXUS
 	lck_rw_lock_shared(&pcb->utun_pcb_lock);
 	if (pcb->utun_kpipe_enabled) {
+		lck_rw_unlock_shared(&pcb->utun_pcb_lock);
+		if (!utun_data_move_begin(pcb)) {
+			os_log_info(OS_LOG_DEFAULT,
+			    "%s: data path stopped for %s\n",
+			    __func__, if_name(pcb->utun_ifp));
+			return;
+		}
 		/* It's possible to have channels enabled, but not yet have the channel opened,
 		 * in which case the rxring will not be set
 		 */
-		lck_rw_unlock_shared(&pcb->utun_pcb_lock);
 		if (pcb->utun_kpipe_rxring != NULL) {
 			kern_channel_notify(pcb->utun_kpipe_rxring, 0);
 		}
+		utun_data_move_end(pcb);
 		return;
 	}
 	lck_rw_unlock_shared(&pcb->utun_pcb_lock);
@@ -2858,6 +2900,13 @@ utun_pkt_input(struct utun_pcb *pcb, mbuf_t packet)
 {
 #if UTUN_NEXUS
 	if (pcb->utun_use_netif) {
+		if (!utun_data_move_begin(pcb)) {
+			os_log_info(OS_LOG_DEFAULT,
+			    "%s: data path stopped for %s\n",
+			    __func__, if_name(pcb->utun_ifp));
+			return ENXIO;
+		}
+
 		lck_rw_lock_shared(&pcb->utun_pcb_lock);
 
 		lck_mtx_lock(&pcb->utun_input_chain_lock);
@@ -2865,6 +2914,7 @@ utun_pkt_input(struct utun_pcb *pcb, mbuf_t packet)
 		if (pcb->utun_input_chain_count > (u_int32_t)if_utun_max_pending_input) {
 			lck_mtx_unlock(&pcb->utun_input_chain_lock);
 			lck_rw_unlock_shared(&pcb->utun_pcb_lock);
+			utun_data_move_end(pcb);
 			return ENOSPC;
 		}
 
@@ -2889,6 +2939,7 @@ utun_pkt_input(struct utun_pcb *pcb, mbuf_t packet)
 			kern_channel_notify(rx_ring, 0);
 		}
 
+		utun_data_move_end(pcb);
 		return 0;
 	} else
 #endif // UTUN_NEXUS
@@ -3021,6 +3072,11 @@ utun_nexus_connected(kern_nexus_provider_t nxprov, kern_nexus_t nexus,
 	if (pcb->utun_netif_nexus == nexus) {
 		pcb->utun_netif_connected = true;
 	}
+	if (ok) {
+		lck_mtx_lock(&pcb->utun_pcb_data_move_lock);
+		UTUN_SET_DATA_PATH_READY(pcb);
+		lck_mtx_unlock(&pcb->utun_pcb_data_move_lock);
+	}
 	return ok ? 0 : ENXIO;
 }
 
@@ -3028,14 +3084,20 @@ static void
 utun_nexus_pre_disconnect(kern_nexus_provider_t nxprov, kern_nexus_t nexus,
     kern_channel_t channel)
 {
-#pragma unused(nxprov, nexus, channel)
+#pragma unused(nxprov, channel)
+	struct utun_pcb *pcb = kern_nexus_get_context(nexus);
+	/* Wait until all threads in the data paths are done. */
+	utun_wait_data_move_drain(pcb);
 }
 
 static void
 utun_netif_pre_disconnect(kern_nexus_provider_t nxprov, kern_nexus_t nexus,
     kern_channel_t channel)
 {
-#pragma unused(nxprov, nexus, channel)
+#pragma unused(nxprov, channel)
+	struct utun_pcb *pcb = kern_nexus_get_context(nexus);
+	/* Wait until all threads in the data paths are done. */
+	utun_wait_data_move_drain(pcb);
 }
 
 static void
@@ -3094,10 +3156,17 @@ utun_kpipe_sync_tx(kern_nexus_provider_t nxprov, kern_nexus_t nexus,
 #pragma unused(flags)
 	struct utun_pcb *pcb = kern_nexus_get_context(nexus);
 
+	if (!utun_data_move_begin(pcb)) {
+		os_log_info(OS_LOG_DEFAULT, "%s: data path stopped for %s\n",
+		    __func__, if_name(pcb->utun_ifp));
+		return 0;
+	}
+
 	lck_rw_lock_shared(&pcb->utun_pcb_lock);
 	int channel_enabled = pcb->utun_kpipe_enabled;
 	if (!channel_enabled) {
 		lck_rw_unlock_shared(&pcb->utun_pcb_lock);
+		utun_data_move_end(pcb);
 		return 0;
 	}
 
@@ -3106,6 +3175,7 @@ utun_kpipe_sync_tx(kern_nexus_provider_t nxprov, kern_nexus_t nexus,
 		if (tx_slot == NULL) {
 			// Nothing to write, bail
 			lck_rw_unlock_shared(&pcb->utun_pcb_lock);
+			utun_data_move_end(pcb);
 			return 0;
 		}
 
@@ -3177,6 +3247,7 @@ utun_kpipe_sync_tx(kern_nexus_provider_t nxprov, kern_nexus_t nexus,
 		}
 	}
 
+	utun_data_move_end(pcb);
 	return 0;
 }
 
@@ -3189,11 +3260,18 @@ utun_kpipe_sync_rx(kern_nexus_provider_t nxprov, kern_nexus_t nexus,
 	struct utun_pcb *pcb = kern_nexus_get_context(nexus);
 	struct kern_channel_ring_stat_increment rx_ring_stats = {};
 
+	if (!utun_data_move_begin(pcb)) {
+		os_log_info(OS_LOG_DEFAULT, "%s: data path stopped for %s\n",
+		    __func__, if_name(pcb->utun_ifp));
+		return 0;
+	}
+
 	lck_rw_lock_shared(&pcb->utun_pcb_lock);
 
 	int channel_enabled = pcb->utun_kpipe_enabled;
 	if (!channel_enabled) {
 		lck_rw_unlock_shared(&pcb->utun_pcb_lock);
+		utun_data_move_end(pcb);
 		return 0;
 	}
 
@@ -3203,6 +3281,7 @@ utun_kpipe_sync_rx(kern_nexus_provider_t nxprov, kern_nexus_t nexus,
 	uint32_t avail = kern_channel_available_slot_count(rx_ring);
 	if (avail == 0) {
 		lck_rw_unlock_shared(&pcb->utun_pcb_lock);
+		utun_data_move_end(pcb);
 		return 0;
 	}
 
@@ -3212,6 +3291,7 @@ utun_kpipe_sync_rx(kern_nexus_provider_t nxprov, kern_nexus_t nexus,
 		    pcb->utun_netif_nexus == NULL) {
 			// Net-If TX ring not set up yet, nothing to read
 			lck_rw_unlock_shared(&pcb->utun_pcb_lock);
+			utun_data_move_end(pcb);
 			return 0;
 		}
 
@@ -3229,6 +3309,7 @@ utun_kpipe_sync_rx(kern_nexus_provider_t nxprov, kern_nexus_t nexus,
 			// Unlock first, then exit ring
 			lck_rw_unlock_shared(&pcb->utun_pcb_lock);
 			kr_exit(tx_ring);
+			utun_data_move_end(pcb);
 			return 0;
 		}
 
@@ -3241,13 +3322,17 @@ utun_kpipe_sync_rx(kern_nexus_provider_t nxprov, kern_nexus_t nexus,
 			// Unlock first, then exit ring
 			lck_rw_unlock_shared(&pcb->utun_pcb_lock);
 			kr_exit(tx_ring);
+			utun_data_move_end(pcb);
 			return 0;
 		}
 
 		struct kern_pbufpool *rx_pp = rx_ring->ckr_pp;
 		VERIFY(rx_pp != NULL);
+		struct kern_pbufpool *tx_pp = tx_ring->ckr_pp;
+		VERIFY(tx_pp != NULL);
 		kern_channel_slot_t rx_pslot = NULL;
 		kern_channel_slot_t rx_slot = kern_channel_get_next_slot(rx_ring, NULL, NULL);
+		kern_packet_t tx_chain_ph = 0;
 
 		while (rx_slot != NULL && tx_slot != NULL) {
 			size_t length;
@@ -3256,14 +3341,22 @@ utun_kpipe_sync_rx(kern_nexus_provider_t nxprov, kern_nexus_t nexus,
 
 			kern_packet_t tx_ph = kern_channel_slot_get_packet(tx_ring, tx_slot);
 
+			/* Skip slot if packet is zero-length or marked as dropped (QUMF_DROPPED) */
+			if (tx_ph == 0) {
+				// Advance TX ring
+				tx_pslot = tx_slot;
+				tx_slot = kern_channel_get_next_slot(tx_ring, tx_slot, NULL);
+				continue;
+			}
+			(void) kern_channel_slot_detach_packet(tx_ring, tx_slot, tx_ph);
+			if (tx_chain_ph != 0) {
+				kern_packet_append(tx_ph, tx_chain_ph);
+			}
+			tx_chain_ph = tx_ph;
+
 			// Advance TX ring
 			tx_pslot = tx_slot;
 			tx_slot = kern_channel_get_next_slot(tx_ring, tx_slot, NULL);
-
-			/* Skip slot if packet is zero-length or marked as dropped (QUMF_DROPPED) */
-			if (tx_ph == 0) {
-				continue;
-			}
 
 			// Allocate rx packet
 			kern_packet_t rx_ph = 0;
@@ -3331,11 +3424,11 @@ utun_kpipe_sync_rx(kern_nexus_provider_t nxprov, kern_nexus_t nexus,
 			af = htonl(af);
 			memcpy((void *)rx_baddr, &af, sizeof(af));
 			if (pcb->utun_flags & UTUN_FLAGS_ENABLE_PROC_UUID) {
-				kern_packet_get_euuid(tx_ph, (void *)(rx_baddr + sizeof(af)));
+				kern_packet_get_euuid(tx_ph, (void *)((uintptr_t)rx_baddr + sizeof(af)));
 			}
 
 			// Copy data from tx to rx
-			memcpy((void *)(rx_baddr + UTUN_HEADER_SIZE(pcb)), (void *)tx_baddr, length - UTUN_HEADER_SIZE(pcb));
+			memcpy((void *)((uintptr_t)rx_baddr + UTUN_HEADER_SIZE(pcb)), (void *)tx_baddr, length - UTUN_HEADER_SIZE(pcb));
 			kern_packet_clear_flow_uuid(rx_ph); // zero flow id
 
 			/* finalize and attach the packet */
@@ -3361,6 +3454,10 @@ utun_kpipe_sync_rx(kern_nexus_provider_t nxprov, kern_nexus_t nexus,
 		if (rx_pslot) {
 			kern_channel_advance_slot(rx_ring, rx_pslot);
 			kern_channel_increment_ring_net_stats(rx_ring, pcb->utun_ifp, &rx_ring_stats);
+		}
+
+		if (tx_chain_ph != 0) {
+			kern_pbufpool_free_chain(tx_pp, tx_chain_ph);
 		}
 
 		if (tx_pslot) {
@@ -3392,6 +3489,7 @@ utun_kpipe_sync_rx(kern_nexus_provider_t nxprov, kern_nexus_t nexus,
 
 		if (ifnet_dequeue_multi(pcb->utun_ifp, avail, &mb_head,
 		    &mb_tail, &mb_cnt, &mb_len) != 0) {
+			utun_data_move_end(pcb);
 			return 0;
 		}
 		VERIFY(mb_cnt <= avail);
@@ -3477,6 +3575,7 @@ utun_kpipe_sync_rx(kern_nexus_provider_t nxprov, kern_nexus_t nexus,
 		}
 	}
 
+	utun_data_move_end(pcb);
 	return 0;
 }
 
@@ -3511,3 +3610,65 @@ utun_ctl_disable_crypto_dtls(struct utun_pcb   *pcb)
 {
 #pragma unused(pcb)
 }
+
+#if UTUN_NEXUS
+static boolean_t
+utun_data_move_begin(struct utun_pcb *pcb)
+{
+	bool data_path_ready = false;
+
+	lck_mtx_lock_spin(&pcb->utun_pcb_data_move_lock);
+	if ((data_path_ready = UTUN_IS_DATA_PATH_READY(pcb))) {
+		pcb->utun_pcb_data_move++;
+	}
+	lck_mtx_unlock(&pcb->utun_pcb_data_move_lock);
+
+	return data_path_ready;
+}
+
+static void
+utun_data_move_end(struct utun_pcb *pcb)
+{
+	lck_mtx_lock_spin(&pcb->utun_pcb_data_move_lock);
+	VERIFY(pcb->utun_pcb_data_move > 0);
+	/*
+	 * if there's no more thread moving data, wakeup any
+	 * drainers that are blocked waiting for this.
+	 */
+	if (--pcb->utun_pcb_data_move == 0 && pcb->utun_pcb_drainers > 0) {
+		wakeup(&(pcb->utun_pcb_data_move));
+	}
+	lck_mtx_unlock(&pcb->utun_pcb_data_move_lock);
+}
+
+static void
+utun_data_move_drain(struct utun_pcb *pcb)
+{
+	lck_mtx_lock(&pcb->utun_pcb_data_move_lock);
+	/* data path must already be marked as not ready */
+	VERIFY(!UTUN_IS_DATA_PATH_READY(pcb));
+	pcb->utun_pcb_drainers++;
+	while (pcb->utun_pcb_data_move != 0) {
+		(void) msleep(&(pcb->utun_pcb_data_move),
+		    &pcb->utun_pcb_data_move_lock, (PZERO - 1), __func__, NULL);
+	}
+	VERIFY(!UTUN_IS_DATA_PATH_READY(pcb));
+	VERIFY(pcb->utun_pcb_drainers > 0);
+	pcb->utun_pcb_drainers--;
+	lck_mtx_unlock(&pcb->utun_pcb_data_move_lock);
+}
+
+static void
+utun_wait_data_move_drain(struct utun_pcb *pcb)
+{
+	/*
+	 * Mark the data path as not usable.
+	 */
+	lck_mtx_lock(&pcb->utun_pcb_data_move_lock);
+	UTUN_CLR_DATA_PATH_READY(pcb);
+	lck_mtx_unlock(&pcb->utun_pcb_data_move_lock);
+
+	/* Wait until all threads in the data path are done. */
+	utun_data_move_drain(pcb);
+}
+#endif // UTUN_NEXUS

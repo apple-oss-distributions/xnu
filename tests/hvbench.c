@@ -12,7 +12,10 @@ T_GLOBAL_META(
 	T_META_NAMESPACE("xnu.arm.hv"),
 	T_META_REQUIRES_SYSCTL_EQ("kern.hv_support", 1),
 	// Temporary workaround for not providing an x86_64 slice
-	T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm64", 1)
+	T_META_REQUIRES_SYSCTL_EQ("hw.optional.arm64", 1),
+	T_META_RADAR_COMPONENT_NAME("xnu"),
+	T_META_RADAR_COMPONENT_VERSION("arm - hypervisor"),
+	T_META_OWNER("p_newman")
 	);
 
 #define SET_PC(vcpu, symbol) \
@@ -97,7 +100,7 @@ mrs_bench_kernel(hv_vcpu_t vcpu, hv_vcpu_exit_t *exit, const char *name)
 		dt_stat_thread_cycles_end_batch(stat, (int)batch, start);
 		T_QUIET; T_ASSERT_EQ_UINT(exit->reason, HV_EXIT_REASON_EXCEPTION,
 		    "check for exception");
-		T_QUIET; T_ASSERT_EQ(exit->exception.syndrome >> 26, 0x16,
+		T_QUIET; T_ASSERT_EQ((uint32_t)exit->exception.syndrome >> 26, 0x16,
 		    "check for HVC64");
 	}
 	dt_stat_finalize(stat);
@@ -314,6 +317,79 @@ T_DECL(vcpu_switch_benchmark, "vcpu state-switching benchmarks",
 	T_ASSERT_POSIX_SUCCESS(pthread_join(vcpu1_thread, NULL), "join vcpu1");
 	T_ASSERT_POSIX_SUCCESS(pthread_join(vcpu2_thread, NULL), "join vcpu2");
 
+	vm_cleanup();
+}
+
+static void
+kernel_trap_loop(const char *desc)
+{
+	const int batch = 10000;
+	dt_stat_time_t s = dt_stat_time_create(desc);
+	while (!dt_stat_stable(s)) {
+		dt_stat_token start = dt_stat_time_begin(s);
+		for (int i = 0; i < batch; i++) {
+			// We don't care what this does, just that it enters and leaves the
+			// kernel and doesn't interfere with the test.
+			(void)hv_test_trap(TRAP_HV_VCPU_SYSREGS_SYNC, 0);
+		}
+		dt_stat_time_end_batch(s, batch, start);
+	}
+	dt_stat_finalize(s);
+}
+
+static void *
+invalidate_monitor(void *arg __unused, hv_vcpu_t vcpu, hv_vcpu_exit_t *exit)
+{
+	run_to_next_vm_fault(vcpu, exit);
+	T_ASSERT_EQ_UINT(exit->reason, HV_EXIT_REASON_CANCELED, "vcpu interrupted");
+	return NULL;
+}
+
+T_DECL(icache_inval_bench, "measure perf impact of IC IALLU flood",
+    // Don't run this on hardware without the filters, as the impact could
+    // cause timeouts in the host OS.
+    T_META_REQUIRES_SYSCTL_EQ("hw.optional.ic_inval_filters", 1))
+{
+	vm_setup();
+
+#define inval_vcpus 4
+	pthread_t inval_threads[inval_vcpus];
+	for (uint32_t i = 0; i < inval_vcpus; i++) {
+		inval_threads[i] = create_vcpu_thread(ic_iallu_vcpu_entry, 0,
+		    invalidate_monitor, NULL);
+	}
+
+	kernel_trap_loop("kernel trap while VCPUs executing IC IALLU");
+
+	hv_vcpu_t inval_vcpu_array[inval_vcpus];
+	for (uint32_t i = 0; i < inval_vcpus; i++) {
+		inval_vcpu_array[i] = i;
+	}
+	T_ASSERT_EQ(hv_vcpus_exit(inval_vcpu_array, inval_vcpus), HV_SUCCESS,
+	    "cancel inval vcpus");
+	for (uint32_t i = 0; i < inval_vcpus; i++) {
+		T_ASSERT_POSIX_SUCCESS(pthread_join(inval_threads[i], NULL),
+		    "join inval_threads[%u]", i);
+	}
+
+	// Repeat the test case with the same number of VCPUs, but only spinning to
+	// provide a baseline measurement.
+	for (uint32_t i = 0; i < inval_vcpus; i++) {
+		inval_threads[i] = create_vcpu_thread(spin_vcpu_entry, 0,
+		    invalidate_monitor, NULL);
+	}
+
+	kernel_trap_loop("kernel trap while VCPUs spinning");
+
+	for (uint32_t i = 0; i < inval_vcpus; i++) {
+		inval_vcpu_array[i] = i;
+	}
+	T_ASSERT_EQ(hv_vcpus_exit(inval_vcpu_array, inval_vcpus), HV_SUCCESS,
+	    "cancel inval vcpus");
+	for (uint32_t i = 0; i < inval_vcpus; i++) {
+		T_ASSERT_POSIX_SUCCESS(pthread_join(inval_threads[i], NULL),
+		    "join inval_threads[%u]", i);
+	}
 	vm_cleanup();
 }
 

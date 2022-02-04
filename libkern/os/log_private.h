@@ -86,7 +86,7 @@ typedef struct oslog_stream_buf_entry_s {
 	int offset;
 	uint16_t size;
 	oslog_stream_link_type_t type;
-	struct firehose_tracepoint_s metadata[];
+	struct firehose_tracepoint_s *metadata;
 } *oslog_stream_buf_entry_t;
 
 __END_DECLS

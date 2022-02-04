@@ -101,6 +101,10 @@ extern void             sched_rtlocal_queue_shutdown(processor_t processor);
 
 extern int64_t          sched_rtlocal_runq_count_sum(void);
 
+extern thread_t         sched_rtlocal_steal_thread(processor_set_t stealing_pset, uint64_t earliest_deadline);
+
+extern thread_t         sched_rt_choose_thread(processor_set_t pset);
+
 extern void             sched_check_spill(processor_set_t pset, thread_t thread);
 
 extern bool             sched_thread_should_yield(processor_t processor, thread_t thread);
@@ -263,10 +267,16 @@ extern processor_t              thread_bind(
 extern bool pset_has_stealable_threads(
 	processor_set_t         pset);
 
+extern bool pset_has_stealable_rt_threads(
+	processor_set_t         pset);
+
 extern processor_set_t choose_starting_pset(
 	pset_node_t  node,
 	thread_t     thread,
 	processor_t *processor_hint);
+
+extern int pset_available_cpu_count(
+	processor_set_t pset);
 
 extern pset_node_t sched_choose_node(
 	thread_t     thread);
@@ -318,6 +328,8 @@ extern void sched_pset_made_schedulable(
 	processor_set_t pset,
 	boolean_t drop_lock);
 
+extern void sched_cpu_init_completed(void);
+
 /*
  * Enum to define various events which need IPIs. The IPI policy
  * engine decides what kind of IPI to use based on destination
@@ -329,6 +341,7 @@ typedef enum {
 	SCHED_IPI_EVENT_SMT_REBAL   = 0x3,
 	SCHED_IPI_EVENT_SPILL       = 0x4,
 	SCHED_IPI_EVENT_REBALANCE   = 0x5,
+	SCHED_IPI_EVENT_RT_PREEMPT  = 0x6,
 } sched_ipi_event_t;
 
 
@@ -348,8 +361,7 @@ typedef enum {
  * - Once the pset lock is dropped, the scheduler invokes sched_ipi_perform()
  *   routine which actually sends the appropriate IPI to the destination core.
  */
-extern sched_ipi_type_t sched_ipi_action(processor_t dst, thread_t thread,
-    boolean_t dst_idle, sched_ipi_event_t event);
+extern sched_ipi_type_t sched_ipi_action(processor_t dst, thread_t thread, sched_ipi_event_t event);
 extern void sched_ipi_perform(processor_t dst, sched_ipi_type_t ipi);
 
 /* sched_ipi_policy() is the global default IPI policy for all schedulers */
@@ -358,7 +370,7 @@ extern sched_ipi_type_t sched_ipi_policy(processor_t dst, thread_t thread,
 
 /* sched_ipi_deferred_policy() is the global default deferred IPI policy for all schedulers */
 extern sched_ipi_type_t sched_ipi_deferred_policy(processor_set_t pset,
-    processor_t dst, sched_ipi_event_t event);
+    processor_t dst, thread_t thread, sched_ipi_event_t event);
 
 #if defined(CONFIG_SCHED_TIMESHARE_CORE)
 
@@ -392,8 +404,7 @@ extern void             thread_timer_expire(
 	void                    *thread,
 	void                    *p1);
 
-extern boolean_t        thread_eager_preemption(
-	thread_t thread);
+extern bool thread_is_eager_preempt(thread_t thread);
 
 extern boolean_t sched_generic_direct_dispatch_to_idle_processors;
 
@@ -498,6 +509,8 @@ extern perfcontrol_class_t thread_get_perfcontrol_class(
 /* Generic routine for Non-AMP schedulers to calculate parallelism */
 extern uint32_t sched_qos_max_parallelism(int qos, uint64_t options);
 
+extern void check_monotonic_time(uint64_t ctime);
+
 #endif /* MACH_KERNEL_PRIVATE */
 
 __BEGIN_DECLS
@@ -506,8 +519,31 @@ __BEGIN_DECLS
 
 extern void thread_bind_cluster_type(thread_t, char cluster_type, bool soft_bind);
 
+__options_decl(thread_bind_option_t, uint64_t, {
+	/* Unbind a previously cluster bound thread */
+	THREAD_UNBIND                   = 0x1,
+	/*
+	 * Soft bind the thread to the cluster; soft binding means the thread will be
+	 * moved to an available cluster if the bound cluster is de-recommended/offline.
+	 */
+	THREAD_BIND_SOFT                = 0x2,
+	/*
+	 * Bind thread to the cluster only if it is eligible to run on that cluster. If
+	 * the thread is not eligible to run on the cluster, thread_bind_cluster_id()
+	 * returns KERN_INVALID_POLICY.
+	 */
+	THREAD_BIND_ELIGIBLE_ONLY       = 0x4,
+});
+extern kern_return_t thread_bind_cluster_id(thread_t thread, uint32_t cluster_id, thread_bind_option_t options);
+
 extern int sched_get_rt_n_backup_processors(void);
 extern void sched_set_rt_n_backup_processors(int n);
+
+extern int sched_get_rt_constraint_ll(void);
+extern void sched_set_rt_constraint_ll(int new_constraint_us);
+
+extern int sched_get_rt_deadline_epsilon(void);
+extern void sched_set_rt_deadline_epsilon(int new_epsilon_us);
 
 /* Toggles a global override to turn off CPU Throttling */
 extern void     sys_override_cpu_throttle(boolean_t enable_override);
@@ -564,6 +600,8 @@ extern void             thread_set_pending_block_hint(
 
 #define QOS_PARALLELISM_COUNT_LOGICAL   0x1
 #define QOS_PARALLELISM_REALTIME        0x2
+#define QOS_PARALLELISM_CLUSTER_SHARED_RESOURCE              0x4
+
 extern uint32_t qos_max_parallelism(int qos, uint64_t options);
 #endif /* KERNEL_PRIVATE */
 
@@ -820,6 +858,7 @@ struct sched_dispatch_table {
 	void    (*rt_queue_shutdown)(processor_t processor);
 	void    (*rt_runq_scan)(sched_update_scan_context_t scan_context);
 	int64_t (*rt_runq_count_sum)(void);
+	thread_t (*rt_steal_thread)(processor_set_t pset, uint64_t earliest_deadline);
 
 	uint32_t (*qos_max_parallelism)(int qos, uint64_t options);
 	void    (*check_spill)(processor_set_t pset, thread_t thread);
@@ -839,6 +878,10 @@ struct sched_dispatch_table {
 	/* Routine to inform the scheduler when CLPC changes a thread group recommendation */
 	void (*thread_group_recommendation_change)(struct thread_group *tg, cluster_type_t new_recommendation);
 #endif
+	/* Routine to inform the scheduler when all CPUs have finished initializing */
+	void (*cpu_init_completed)(void);
+	/* Routine to check if a thread is eligible to execute on a specific pset */
+	bool (*thread_eligible_for_pset)(thread_t thread, processor_set_t pset);
 };
 
 #if defined(CONFIG_SCHED_TRADITIONAL)

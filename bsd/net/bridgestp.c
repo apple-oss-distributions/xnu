@@ -93,17 +93,18 @@
 
 #include <kern/thread.h>
 
-decl_lck_mtx_data(static, bstp_task_mtx_data);
-static lck_mtx_t                *bstp_task_mtx = &bstp_task_mtx_data;
-static lck_grp_t                *bstp_task_grp = NULL;
-static lck_attr_t               *bstp_task_attr = NULL;
-static thread_t                 bstp_task_thread;
-static TAILQ_HEAD(bstp_task_queue, bstp_task)
-bstp_task_queue = TAILQ_HEAD_INITIALIZER(bstp_task_queue);
+static LCK_GRP_DECLARE(bstp_task_grp, "bstp_task");
+#if BRIDGESTP_DEBUG
+static LCK_ATTR_DECLARE(bstp_task_attr, LCK_ATTR_DEBUG, 0);
+#else
+static LCK_ATTR_DECLARE(bstp_task_attr, 0, 0);
+#endif
+static LCK_MTX_DECLARE_ATTR(bstp_task_mtx_data, &bstp_task_grp, &bstp_task_attr);
+static lck_mtx_t        *const bstp_task_mtx = &bstp_task_mtx_data;
+static thread_t         bstp_task_thread;
+static TAILQ_HEAD(bstp_task_queue, bstp_task) bstp_task_queue =
+    TAILQ_HEAD_INITIALIZER(bstp_task_queue);
 static struct bstp_task *bstp_task_queue_running = NULL;
-
-static void bstp_create_task_thread(void);
-static void bstp_task_thread_func(void);
 
 static void bstp_task_enqueue(struct bstp_task *);
 static void bstp_task_drain(struct bstp_task *);
@@ -116,11 +117,11 @@ static void bstp_task_drain(struct bstp_task *);
 
 
 
-#define BSTP_LOCK_INIT(_bs)             (_bs)->bs_mtx = lck_mtx_alloc_init(bstp_lock_grp, bstp_lock_attr)
-#define BSTP_LOCK_DESTROY(_bs)  lck_mtx_free((_bs)->bs_mtx, bstp_lock_grp)
-#define BSTP_LOCK(_bs)                  lck_mtx_lock((_bs)->bs_mtx)
-#define BSTP_UNLOCK(_bs)                lck_mtx_unlock((_bs)->bs_mtx)
-#define BSTP_LOCK_ASSERT(_bs)   LCK_MTX_ASSERT((_bs)->bs_mtx, LCK_MTX_ASSERT_OWNED)
+#define BSTP_LOCK_INIT(_bs)     lck_mtx_init(&(_bs)->bs_mtx, &bstp_lock_grp, &bstp_lock_attr)
+#define BSTP_LOCK_DESTROY(_bs)  lck_mtx_destroy(&(_bs)->bs_mtx, &bstp_lock_grp)
+#define BSTP_LOCK(_bs)          lck_mtx_lock(&(_bs)->bs_mtx)
+#define BSTP_UNLOCK(_bs)        lck_mtx_unlock(&(_bs)->bs_mtx)
+#define BSTP_LOCK_ASSERT(_bs)   LCK_MTX_ASSERT(&(_bs)->bs_mtx, LCK_MTX_ASSERT_OWNED)
 
 
 #ifdef  BRIDGESTP_DEBUG
@@ -142,11 +143,15 @@ static void bstp_task_drain(struct bstp_task *);
 #define INFO_SAME       0
 #define INFO_WORSE      -1
 
-LIST_HEAD(, bstp_state) bstp_list;
-decl_lck_mtx_data(static, bstp_list_mtx_data);
-static lck_mtx_t                *bstp_list_mtx = &bstp_list_mtx_data;
-static lck_grp_t                *bstp_lock_grp = NULL;
-static lck_attr_t               *bstp_lock_attr = NULL;
+LIST_HEAD(, bstp_state) bstp_list = LIST_HEAD_INITIALIZER(bstp_list);
+static LCK_GRP_DECLARE(bstp_lock_grp, "btsp");
+#if BRIDGESTP_DEBUG
+static LCK_ATTR_DECLARE(bstp_lock_attr, LCK_ATTR_DEBUG, 0);
+#else
+static LCK_ATTR_DECLARE(bstp_lock_attr, 0, 0);
+#endif
+static LCK_MTX_DECLARE_ATTR(&bstp_list_mtx_data, &bstp_lock_grp, &bstp_lock_attr);
+static lck_mtx_t *const bstp_list_mtx = &bstp_list_mtx_data;
 
 static void     bstp_transmit(struct bstp_state *, struct bstp_port *);
 static void     bstp_transmit_bpdu(struct bstp_state *, struct bstp_port *);
@@ -2414,49 +2419,8 @@ bstp_destroy(struct bstp_port *bp)
 }
 
 
-__private_extern__ void
-bstp_sys_init(void)
-{
-	lck_grp_attr_t *lck_grp_attr = NULL;
-
-	lck_grp_attr = lck_grp_attr_alloc_init();
-	bstp_lock_grp = lck_grp_alloc_init("bstp", lck_grp_attr);
-	bstp_lock_attr = lck_attr_alloc_init();
-#if BRIDGE_DEBUG
-	lck_attr_setdebug(bstp_lock_attr);
-#endif
-	lck_mtx_init(bstp_list_mtx, bstp_lock_grp, bstp_lock_attr);
-	lck_grp_attr_free(lck_grp_attr);
-
-	LIST_INIT(&bstp_list);
-
-	bstp_create_task_thread();
-}
-
-
-
 static void
-bstp_create_task_thread(void)
-{
-	kern_return_t error;
-
-	lck_grp_attr_t *lck_grp_attr = NULL;
-
-	lck_grp_attr = lck_grp_attr_alloc_init();
-	bstp_task_grp = lck_grp_alloc_init("bstp_task", lck_grp_attr);
-	bstp_task_attr = lck_attr_alloc_init();
-#if BRIDGE_DEBUG
-	lck_attr_setdebug(bstp_task_attr);
-#endif
-	lck_mtx_init(bstp_task_mtx, bstp_lock_grp, bstp_lock_attr);
-	lck_grp_attr_free(lck_grp_attr);
-
-	error = kernel_thread_start((thread_continue_t)bstp_task_thread_func, NULL, &bstp_task_thread);
-}
-
-
-static void
-bstp_task_thread_func(void)
+bstp_task_thread_func(void *arg1 __unused, wait_result_t wr __unused)
 {
 	struct bstp_task *bt, *tvar;
 
@@ -2488,6 +2452,12 @@ bstp_task_thread_func(void)
 	} while (1);
 
 	/* UNREACHED */
+}
+
+__private_extern__ void
+bstp_sys_init(void)
+{
+	kernel_thread_start(bstp_task_thread_func, NULL, &bstp_task_thread);
 }
 
 static void

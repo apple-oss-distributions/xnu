@@ -30,15 +30,14 @@
 #include <stdbool.h>
 #include <strings.h>
 #include <unistd.h>
+#include <mach/vm_page_size.h>
 #include "_libkernel_init.h"
+#include "system-version-compat-support.h"
 
 extern int mach_init(void);
 
-#if TARGET_OS_OSX
+#if SYSTEM_VERSION_COMPAT_ENABLED
 
-#if !defined(__i386__)
-
-#include "system-version-compat-support.h"
 #include <sys/sysctl.h>
 
 extern bool _system_version_compat_check_path_suffix(const char *orig_path);
@@ -55,9 +54,18 @@ extern int (*system_version_compat_open_shim)(int opened_fd, int openat_fd, cons
 
 extern system_version_compat_mode_t system_version_compat_mode;
 
-int  __sysctlbyname(const char *name, size_t namelen, void *oldp, size_t *oldlenp, void *newp, size_t newlen);
-#endif /* !defined(__i386__) */
+struct _posix_spawn_args_desc;
+extern bool (*posix_spawn_with_filter)(pid_t *pid, const char *fname, char * const *argp,
+    char * const *envp, struct _posix_spawn_args_desc *adp, int *ret);
+extern bool _posix_spawn_with_filter(pid_t *pid, const char *fname, char * const *argp,
+    char * const *envp, struct _posix_spawn_args_desc *adp, int *ret);
+extern int (*execve_with_filter)(char *fname, char **argp, char **envp);
+extern int _execve_with_filter(char *fname, char **argp, char **envp);
 
+int  __sysctlbyname(const char *name, size_t namelen, void *oldp, size_t *oldlenp, void *newp, size_t newlen);
+#endif /* SYSTEM_VERSION_COMPAT_ENABLED */
+
+#if TARGET_OS_OSX
 __attribute__((visibility("default")))
 extern bool _os_xbs_chrooted;
 bool _os_xbs_chrooted;
@@ -81,6 +89,19 @@ __libkernel_init(_libkernel_functions_t fns,
 		_dlsym = fns->dlsym;
 	}
 	mach_init();
+#if TARGET_OS_OSX
+	for (size_t i = 0; envp[i]; i++) {
+
+#if defined(__i386__) || defined(__x86_64__)
+		const char *VM_KERNEL_PAGE_SHIFT_ENV = "VM_KERNEL_PAGE_SIZE_4K=1";
+		if (vm_kernel_page_shift != 12 && strcmp(VM_KERNEL_PAGE_SHIFT_ENV, envp[i]) == 0) {
+			vm_kernel_page_shift = 12;
+			vm_kernel_page_size = 1 << vm_kernel_page_shift;
+			vm_kernel_page_mask = vm_kernel_page_size - 1;
+		}
+#endif /* defined(__i386__) || defined(__x86_64__) */
+	}
+#endif /* TARGET_OS_OSX */
 }
 
 void
@@ -118,6 +139,25 @@ __libkernel_init_late(_libkernel_late_init_config_t config)
 			 * don't need to inform the kernel that this app has the SystemVersion shim enabled.
 			 */
 		}
+
+		if ((config->version >= 3) && config->enable_posix_spawn_filtering) {
+			posix_spawn_with_filter = _posix_spawn_with_filter;
+			execve_with_filter = _execve_with_filter;
+		}
 #endif /* TARGET_OS_OSX && !defined(__i386__) */
+	}
+}
+
+void
+__libkernel_init_after_boot_tasks(
+	_libkernel_init_after_boot_tasks_config_t config)
+{
+	if (config->version >= 1) {
+#if TARGET_OS_OSX && !defined(__i386__)
+		if (config->enable_posix_spawn_filtering) {
+			posix_spawn_with_filter = _posix_spawn_with_filter;
+			execve_with_filter = _execve_with_filter;
+		}
+#endif
 	}
 }

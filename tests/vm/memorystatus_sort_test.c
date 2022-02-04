@@ -12,6 +12,11 @@
 #include <sys/coalition.h>
 #include <sys/kern_memorystatus.h>
 
+T_GLOBAL_META(
+	T_META_NAMESPACE("xnu.vm"),
+	T_META_RADAR_COMPONENT_NAME("xnu"),
+	T_META_RADAR_COMPONENT_VERSION("VM"));
+
 #define JETSAM_PRIORITY_IDLE 0
 #define JETSAM_PRIORITY_FOREGROUND 10
 

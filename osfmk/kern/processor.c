@@ -95,11 +95,25 @@
  */
 #include <mach/mach_host_server.h>
 #include <mach/processor_set_server.h>
+#include <san/kcov.h>
 
+/*
+ * The first pset and the pset_node are created by default for all platforms.
+ * Those typically represent the boot-cluster. For AMP platforms, all clusters
+ * of the same type are part of the same pset_node. This allows for easier
+ * CPU selection logic.
+ */
 struct processor_set    pset0;
 struct pset_node        pset_node0;
 
-static SIMPLE_LOCK_DECLARE(pset_node_lock, 0);
+#if __AMP__
+struct pset_node        pset_node1;
+pset_node_t             ecore_node;
+pset_node_t             pcore_node;
+#endif
+
+LCK_SPIN_DECLARE(pset_node_lock, LCK_GRP_NULL);
+
 LCK_GRP_DECLARE(pset_lck_grp, "pset");
 
 queue_head_t            tasks;
@@ -108,7 +122,9 @@ queue_head_t            corpse_tasks;
 int                     tasks_count;
 int                     terminated_tasks_count;
 queue_head_t            threads;
+queue_head_t            terminated_threads;
 int                     threads_count;
+int                     terminated_threads_count;
 LCK_GRP_DECLARE(task_lck_grp, "task");
 LCK_ATTR_DECLARE(task_lck_attr, 0, 0);
 LCK_MTX_DECLARE_ATTR(tasks_threads_lock, &task_lck_grp, &task_lck_attr);
@@ -124,7 +140,7 @@ uint32_t                processor_avail_count_user;
 uint32_t                primary_processor_avail_count;
 uint32_t                primary_processor_avail_count_user;
 
-int                     master_cpu = 0;
+SECURITY_READ_ONLY_LATE(int)    master_cpu = 0;
 
 struct processor        PERCPU_DATA(processor);
 processor_t             processor_array[MAX_SCHED_CPUS] = { 0 };
@@ -173,12 +189,45 @@ int sched_enable_smt = 1;
 void
 processor_bootstrap(void)
 {
+	/* Initialize PSET node and PSET associated with boot cluster */
 	pset_node0.psets = &pset0;
-	pset_init(&pset0, &pset_node0);
+	pset_node0.pset_cluster_type = PSET_SMP;
 
+#if __AMP__
+	const ml_topology_info_t *topology_info = ml_get_topology_info();
+
+	/*
+	 * Since this is an AMP system, fill up cluster type and ID information; this should do the
+	 * same kind of initialization done via ml_processor_register()
+	 */
+	ml_topology_cluster_t *boot_cluster = topology_info->boot_cluster;
+	pset0.pset_id = boot_cluster->cluster_id;
+	pset0.pset_cluster_id = boot_cluster->cluster_id;
+	if (boot_cluster->cluster_type == CLUSTER_TYPE_E) {
+		pset0.pset_cluster_type      = PSET_AMP_E;
+		pset_node0.pset_cluster_type = PSET_AMP_E;
+		ecore_node = &pset_node0;
+
+		pset_node1.pset_cluster_type = PSET_AMP_P;
+		pcore_node = &pset_node1;
+	} else {
+		pset0.pset_cluster_type      = PSET_AMP_P;
+		pset_node0.pset_cluster_type = PSET_AMP_P;
+		pcore_node = &pset_node0;
+
+		pset_node1.pset_cluster_type = PSET_AMP_E;
+		ecore_node = &pset_node1;
+	}
+
+	/* Link pset_node1 to pset_node0 */
+	pset_node0.node_list = &pset_node1;
+#endif
+
+	pset_init(&pset0, &pset_node0);
 	queue_init(&tasks);
 	queue_init(&terminated_tasks);
 	queue_init(&threads);
+	queue_init(&terminated_threads);
 	queue_init(&corpse_tasks);
 
 	processor_init(master_processor, master_cpu, &pset0);
@@ -255,8 +304,8 @@ processor_init(
 	}
 	processor_list_tail = processor;
 	processor_count++;
-	processor_array[cpu_id] = processor;
 	simple_unlock(&processor_list_lock);
+	processor_array[cpu_id] = processor;
 }
 
 bool system_is_SMT = false;
@@ -284,6 +333,7 @@ processor_set_primary(
 
 		if (!system_is_SMT) {
 			system_is_SMT = true;
+			sched_rt_n_backup_processors = SCHED_DEFAULT_BACKUP_PROCESSORS_SMT;
 		}
 
 		processor_set_t pset = processor->processor_set;
@@ -319,7 +369,9 @@ pset_type_for_id(uint32_t cluster_id)
  * With the Edge scheduler, each pset maintains a bitmap of processors running threads
  * which are foreign to the pset/cluster. A thread is defined as foreign for a cluster
  * if its of a different type than its preferred cluster type (E/P). The bitmap should
- * be updated every time a new thread is assigned to run on a processor.
+ * be updated every time a new thread is assigned to run on a processor. Cluster shared
+ * resource intensive threads are also not counted as foreign threads since these
+ * threads should not be rebalanced when running on non-preferred clusters.
  *
  * This bitmap allows the Edge scheduler to quickly find CPUs running foreign threads
  * for rebalancing.
@@ -330,18 +382,39 @@ processor_state_update_running_foreign(processor_t processor, thread_t thread)
 	cluster_type_t current_processor_type = pset_type_for_id(processor->processor_set->pset_cluster_id);
 	cluster_type_t thread_type = pset_type_for_id(sched_edge_thread_preferred_cluster(thread));
 
-	/* Update the bitmap for the pset only for unbounded non-RT threads. */
-	if ((processor->current_pri < BASEPRI_RTQUEUES) && (thread->bound_processor == PROCESSOR_NULL) && (current_processor_type != thread_type)) {
+	boolean_t non_rt_thr = (processor->current_pri < BASEPRI_RTQUEUES);
+	boolean_t non_bound_thr = (thread->bound_processor == PROCESSOR_NULL);
+	if (non_rt_thr && non_bound_thr && (current_processor_type != thread_type)) {
 		bit_set(processor->processor_set->cpu_running_foreign, processor->cpu_id);
 	} else {
 		bit_clear(processor->processor_set->cpu_running_foreign, processor->cpu_id);
 	}
 }
-#else /* CONFIG_SCHED_EDGE */
+
+/*
+ * Cluster shared resource intensive threads
+ *
+ * With the Edge scheduler, each pset maintains a bitmap of processors running
+ * threads that are shared resource intensive. This per-thread property is set
+ * by the performance controller or explicitly via dispatch SPIs. The bitmap
+ * allows the Edge scheduler to calculate the cluster shared resource load on
+ * any given cluster and load balance intensive threads accordingly.
+ */
 static void
-processor_state_update_running_foreign(__unused processor_t processor, __unused thread_t thread)
+processor_state_update_running_cluster_shared_rsrc(processor_t processor, thread_t thread)
 {
+	if (thread_shared_rsrc_policy_get(thread, CLUSTER_SHARED_RSRC_TYPE_RR)) {
+		bit_set(processor->processor_set->cpu_running_cluster_shared_rsrc_thread[CLUSTER_SHARED_RSRC_TYPE_RR], processor->cpu_id);
+	} else {
+		bit_clear(processor->processor_set->cpu_running_cluster_shared_rsrc_thread[CLUSTER_SHARED_RSRC_TYPE_RR], processor->cpu_id);
+	}
+	if (thread_shared_rsrc_policy_get(thread, CLUSTER_SHARED_RSRC_TYPE_NATIVE_FIRST)) {
+		bit_set(processor->processor_set->cpu_running_cluster_shared_rsrc_thread[CLUSTER_SHARED_RSRC_TYPE_NATIVE_FIRST], processor->cpu_id);
+	} else {
+		bit_clear(processor->processor_set->cpu_running_cluster_shared_rsrc_thread[CLUSTER_SHARED_RSRC_TYPE_NATIVE_FIRST], processor->cpu_id);
+	}
 }
+
 #endif /* CONFIG_SCHED_EDGE */
 
 void
@@ -357,19 +430,28 @@ processor_state_update_idle(processor_t processor)
 	processor->current_urgency = THREAD_URGENCY_NONE;
 	processor->current_is_NO_SMT = false;
 	processor->current_is_bound = false;
+	processor->current_is_eagerpreempt = false;
+#if CONFIG_SCHED_EDGE
 	os_atomic_store(&processor->processor_set->cpu_running_buckets[processor->cpu_id], TH_BUCKET_SCHED_MAX, relaxed);
+	bit_clear(processor->processor_set->cpu_running_cluster_shared_rsrc_thread[CLUSTER_SHARED_RSRC_TYPE_RR], processor->cpu_id);
+	bit_clear(processor->processor_set->cpu_running_cluster_shared_rsrc_thread[CLUSTER_SHARED_RSRC_TYPE_NATIVE_FIRST], processor->cpu_id);
+#endif /* CONFIG_SCHED_EDGE */
+	sched_update_pset_load_average(processor->processor_set, 0);
 }
 
 void
-processor_state_update_from_thread(processor_t processor, thread_t thread)
+processor_state_update_from_thread(processor_t processor, thread_t thread, boolean_t pset_lock_held)
 {
 	processor->current_pri = thread->sched_pri;
 	processor->current_sfi_class = thread->sfi_class;
 	processor->current_recommended_pset_type = recommended_pset_type(thread);
+#if CONFIG_SCHED_EDGE
 	processor_state_update_running_foreign(processor, thread);
+	processor_state_update_running_cluster_shared_rsrc(processor, thread);
 	/* Since idle and bound threads are not tracked by the edge scheduler, ignore when those threads go on-core */
 	sched_bucket_t bucket = ((thread->state & TH_IDLE) || (thread->bound_processor != PROCESSOR_NULL)) ? TH_BUCKET_SCHED_MAX : thread->th_sched_bucket;
 	os_atomic_store(&processor->processor_set->cpu_running_buckets[processor->cpu_id], bucket, relaxed);
+#endif /* CONFIG_SCHED_EDGE */
 
 #if CONFIG_THREAD_GROUPS
 	processor->current_thread_group = thread_group_get(thread);
@@ -378,18 +460,27 @@ processor_state_update_from_thread(processor_t processor, thread_t thread)
 	processor->current_urgency = thread_get_urgency(thread, NULL, NULL);
 	processor->current_is_NO_SMT = thread_no_smt(thread);
 	processor->current_is_bound = thread->bound_processor != PROCESSOR_NULL;
+	processor->current_is_eagerpreempt = thread_is_eager_preempt(thread);
+	if (pset_lock_held) {
+		/* Only update the pset load average when the pset lock is held */
+		sched_update_pset_load_average(processor->processor_set, 0);
+	}
 }
 
 void
 processor_state_update_explicit(processor_t processor, int pri, sfi_class_id_t sfi_class,
-    pset_cluster_type_t pset_type, perfcontrol_class_t perfctl_class, thread_urgency_t urgency, sched_bucket_t bucket)
+    pset_cluster_type_t pset_type, perfcontrol_class_t perfctl_class, thread_urgency_t urgency, __unused sched_bucket_t bucket)
 {
 	processor->current_pri = pri;
 	processor->current_sfi_class = sfi_class;
 	processor->current_recommended_pset_type = pset_type;
 	processor->current_perfctl_class = perfctl_class;
 	processor->current_urgency = urgency;
+#if CONFIG_SCHED_EDGE
 	os_atomic_store(&processor->processor_set->cpu_running_buckets[processor->cpu_id], bucket, relaxed);
+	bit_clear(processor->processor_set->cpu_running_cluster_shared_rsrc_thread[CLUSTER_SHARED_RSRC_TYPE_RR], processor->cpu_id);
+	bit_clear(processor->processor_set->cpu_running_cluster_shared_rsrc_thread[CLUSTER_SHARED_RSRC_TYPE_NATIVE_FIRST], processor->cpu_id);
+#endif /* CONFIG_SCHED_EDGE */
 }
 
 pset_node_t
@@ -400,7 +491,10 @@ pset_node_root(void)
 
 processor_set_t
 pset_create(
-	pset_node_t                     node)
+	pset_node_t node,
+	pset_cluster_type_t pset_type,
+	uint32_t pset_cluster_id,
+	int      pset_id)
 {
 	/* some schedulers do not support multiple psets */
 	if (SCHED(multiple_psets_enabled) == FALSE) {
@@ -410,9 +504,12 @@ pset_create(
 	processor_set_t *prev, pset = zalloc_permanent_type(struct processor_set);
 
 	if (pset != PROCESSOR_SET_NULL) {
+		pset->pset_cluster_type = pset_type;
+		pset->pset_cluster_id = pset_cluster_id;
+		pset->pset_id = pset_id;
 		pset_init(pset, node);
 
-		simple_lock(&pset_node_lock, LCK_GRP_NULL);
+		lck_spin_lock(&pset_node_lock);
 
 		prev = &node->psets;
 		while (*prev != PROCESSOR_SET_NULL) {
@@ -421,7 +518,7 @@ pset_create(
 
 		*prev = pset;
 
-		simple_unlock(&pset_node_lock);
+		lck_spin_unlock(&pset_node_lock);
 	}
 
 	return pset;
@@ -436,7 +533,7 @@ pset_find(
 	uint32_t cluster_id,
 	processor_set_t default_pset)
 {
-	simple_lock(&pset_node_lock, LCK_GRP_NULL);
+	lck_spin_lock(&pset_node_lock);
 	pset_node_t node = &pset_node0;
 	processor_set_t pset = NULL;
 
@@ -449,13 +546,12 @@ pset_find(
 			pset = pset->pset_list;
 		}
 	} while (pset == NULL && (node = node->node_list) != NULL);
-	simple_unlock(&pset_node_lock);
+	lck_spin_unlock(&pset_node_lock);
 	if (pset == NULL) {
 		return default_pset;
 	}
 	return pset;
 }
-
 
 /*
  *	Initialize the given processor_set structure.
@@ -465,23 +561,9 @@ pset_init(
 	processor_set_t         pset,
 	pset_node_t                     node)
 {
-	static uint32_t pset_count = 0;
-
-	if (pset != &pset0) {
-		/*
-		 * Scheduler runqueue initialization for non-boot psets.
-		 * This initialization for pset0 happens in sched_init().
-		 */
-		SCHED(pset_init)(pset);
-		SCHED(rt_init)(pset);
-	}
-
 	pset->online_processor_count = 0;
 	pset->load_average = 0;
 	bzero(&pset->pset_load_average, sizeof(pset->pset_load_average));
-#if CONFIG_SCHED_EDGE
-	bzero(&pset->pset_execution_time, sizeof(pset->pset_execution_time));
-#endif /* CONFIG_SCHED_EDGE */
 	pset->cpu_set_low = pset->cpu_set_hi = 0;
 	pset->cpu_set_count = 0;
 	pset->last_chosen = -1;
@@ -489,7 +571,6 @@ pset_init(
 	pset->recommended_bitmask = 0;
 	pset->primary_map = 0;
 	pset->realtime_map = 0;
-	pset->cpu_running_foreign = 0;
 
 	for (uint i = 0; i < PROCESSOR_STATE_LEN; i++) {
 		pset->cpu_state_map[i] = 0;
@@ -500,29 +581,35 @@ pset_init(
 	pset->pending_deferred_AST_cpu_mask = 0;
 #endif
 	pset->pending_spill_cpu_mask = 0;
+	pset->rt_pending_spill_cpu_mask = 0;
 	pset_lock_init(pset);
 	pset->pset_self = IP_NULL;
 	pset->pset_name_self = IP_NULL;
 	pset->pset_list = PROCESSOR_SET_NULL;
-	pset->node = node;
-
-	/*
-	 * The pset_cluster_type & pset_cluster_id for all psets
-	 * on the platform are initialized as part of the SCHED(init).
-	 * That works well for small cluster platforms; for large cluster
-	 * count systems, it might be cleaner to do all the setup
-	 * dynamically in SCHED(pset_init).
-	 *
-	 * <Edge Multi-cluster Support Needed>
-	 */
 	pset->is_SMT = false;
+#if CONFIG_SCHED_EDGE
+	bzero(&pset->pset_execution_time, sizeof(pset->pset_execution_time));
+	pset->cpu_running_foreign = 0;
+	for (cluster_shared_rsrc_type_t shared_rsrc_type = CLUSTER_SHARED_RSRC_TYPE_MIN; shared_rsrc_type < CLUSTER_SHARED_RSRC_TYPE_COUNT; shared_rsrc_type++) {
+		pset->cpu_running_cluster_shared_rsrc_thread[shared_rsrc_type] = 0;
+		pset->pset_cluster_shared_rsrc_load[shared_rsrc_type] = 0;
+	}
+#endif /* CONFIG_SCHED_EDGE */
+	pset->stealable_rt_threads_earliest_deadline = UINT64_MAX;
 
-	simple_lock(&pset_node_lock, LCK_GRP_NULL);
-	pset->pset_id = pset_count++;
-	bit_set(node->pset_map, pset->pset_id);
-	simple_unlock(&pset_node_lock);
-
+	if (pset != &pset0) {
+		/*
+		 * Scheduler runqueue initialization for non-boot psets.
+		 * This initialization for pset0 happens in sched_init().
+		 */
+		SCHED(pset_init)(pset);
+		SCHED(rt_init)(pset);
+	}
 	pset_array[pset->pset_id] = pset;
+	lck_spin_lock(&pset_node_lock);
+	bit_set(node->pset_map, pset->pset_id);
+	pset->node = node;
+	lck_spin_unlock(&pset_node_lock);
 }
 
 kern_return_t
@@ -781,7 +868,7 @@ processor_start(
 		thread->bound_processor = processor;
 		processor->startup_thread = thread;
 		thread->state = TH_RUN;
-		thread->last_made_runnable_time = mach_absolute_time();
+		thread->last_made_runnable_time = thread->last_basepri_change_time = mach_absolute_time();
 		thread_unlock(thread);
 		splx(s);
 
@@ -809,9 +896,12 @@ processor_start(
 		sched_processor_enable(processor, FALSE);
 	}
 
-	ipc_processor_enable(processor);
 	ml_cpu_end_state_transition(processor->cpu_id);
 	ml_broadcast_cpu_event(CPU_ACTIVE, processor->cpu_id);
+
+#if CONFIG_KCOV
+	kcov_start_cpu(processor->cpu_id);
+#endif
 
 	return KERN_SUCCESS;
 }
@@ -1179,35 +1269,34 @@ static kern_return_t
 processor_set_things(
 	processor_set_t pset,
 	void **thing_list,
-	mach_msg_type_number_t *count,
-	int type)
+	mach_msg_type_number_t *countp,
+	int type,
+	mach_task_flavor_t flavor)
 {
 	unsigned int i;
 	task_t task;
 	thread_t thread;
 
 	task_t *task_list;
-	unsigned int actual_tasks;
-	vm_size_t task_size, task_size_needed;
+	vm_size_t actual_tasks, task_count_cur, task_count_needed;
 
 	thread_t *thread_list;
-	unsigned int actual_threads;
-	vm_size_t thread_size, thread_size_needed;
+	vm_size_t actual_threads, thread_count_cur, thread_count_needed;
 
 	void *addr, *newaddr;
-	vm_size_t size, size_needed;
+	vm_size_t count, count_needed;
 
 	if (pset == PROCESSOR_SET_NULL || pset != &pset0) {
 		return KERN_INVALID_ARGUMENT;
 	}
 
-	task_size = 0;
-	task_size_needed = 0;
+	task_count_cur = 0;
+	task_count_needed = 0;
 	task_list = NULL;
 	actual_tasks = 0;
 
-	thread_size = 0;
-	thread_size_needed = 0;
+	thread_count_cur = 0;
+	thread_count_needed = 0;
 	thread_list = NULL;
 	actual_threads = 0;
 
@@ -1216,15 +1305,15 @@ processor_set_things(
 
 		/* do we have the memory we need? */
 		if (type == PSET_THING_THREAD) {
-			thread_size_needed = threads_count * sizeof(void *);
+			thread_count_needed = threads_count;
 		}
 #if !CONFIG_MACF
 		else
 #endif
-		task_size_needed = tasks_count * sizeof(void *);
+		task_count_needed = tasks_count;
 
-		if (task_size_needed <= task_size &&
-		    thread_size_needed <= thread_size) {
+		if (task_count_needed <= task_count_cur &&
+		    thread_count_needed <= thread_count_cur) {
 			break;
 		}
 
@@ -1232,37 +1321,28 @@ processor_set_things(
 		lck_mtx_unlock(&tasks_threads_lock);
 
 		/* grow task array */
-		if (task_size_needed > task_size) {
-			if (task_size != 0) {
-				kfree(task_list, task_size);
-			}
+		if (task_count_needed > task_count_cur) {
+			kfree_type(task_t, task_count_cur, task_list);
+			assert(task_count_needed > 0);
+			task_count_cur = task_count_needed;
 
-			assert(task_size_needed > 0);
-			task_size = task_size_needed;
-
-			task_list = (task_t *)kalloc(task_size);
+			task_list = kalloc_type(task_t, task_count_cur, Z_WAITOK | Z_ZERO);
 			if (task_list == NULL) {
-				if (thread_size != 0) {
-					kfree(thread_list, thread_size);
-				}
+				kfree_type(thread_t, thread_count_cur, thread_list);
 				return KERN_RESOURCE_SHORTAGE;
 			}
 		}
 
 		/* grow thread array */
-		if (thread_size_needed > thread_size) {
-			if (thread_size != 0) {
-				kfree(thread_list, thread_size);
-			}
+		if (thread_count_needed > thread_count_cur) {
+			kfree_type(thread_t, thread_count_cur, thread_list);
 
-			assert(thread_size_needed > 0);
-			thread_size = thread_size_needed;
+			assert(thread_count_needed > 0);
+			thread_count_cur = thread_count_needed;
 
-			thread_list = (thread_t *)kalloc(thread_size);
-			if (thread_list == 0) {
-				if (task_size != 0) {
-					kfree(task_list, task_size);
-				}
+			thread_list = kalloc_type(thread_t, thread_count_cur, Z_WAITOK | Z_ZERO);
+			if (thread_list == NULL) {
+				kfree_type(task_t, task_count_cur, task_list);
 				return KERN_RESOURCE_SHORTAGE;
 			}
 		}
@@ -1272,34 +1352,40 @@ processor_set_things(
 
 	/* If we need it, get the thread list */
 	if (type == PSET_THING_THREAD) {
-		for (thread = (thread_t)queue_first(&threads);
-		    !queue_end(&threads, (queue_entry_t)thread);
-		    thread = (thread_t)queue_next(&thread->threads)) {
+		queue_iterate(&threads, thread, thread_t, threads) {
 #if defined(SECURE_KERNEL)
-			if (thread->task != kernel_task) {
+			if (thread->task == kernel_task) {
+				/* skip threads belonging to kernel_task */
+				continue;
+			}
 #endif
+			if (task_is_exec_copy_internal(thread->task)) {
+				/* skip threads belonging to tasks in the middle of exec */
+				continue;
+			}
+
 			thread_reference_internal(thread);
 			thread_list[actual_threads++] = thread;
-#if defined(SECURE_KERNEL)
-		}
-#endif
 		}
 	}
 #if !CONFIG_MACF
 	else {
 #endif
 	/* get a list of the tasks */
-	for (task = (task_t)queue_first(&tasks);
-	    !queue_end(&tasks, (queue_entry_t)task);
-	    task = (task_t)queue_next(&task->tasks)) {
+	queue_iterate(&tasks, task, task_t, tasks) {
 #if defined(SECURE_KERNEL)
-		if (task != kernel_task) {
+		if (task == kernel_task) {
+			/* skip kernel_task */
+			continue;
+		}
 #endif
-		task_reference_internal(task);
+		if (task_is_exec_copy_internal(task)) {
+			/* skip new tasks created in the middle of exec */
+			continue;
+		}
+
+		task_reference(task);
 		task_list[actual_tasks++] = task;
-#if defined(SECURE_KERNEL)
-	}
-#endif
 	}
 #if !CONFIG_MACF
 }
@@ -1312,14 +1398,14 @@ processor_set_things(
 
 	/* for each task, make sure we are allowed to examine it */
 	for (i = used = 0; i < actual_tasks; i++) {
-		if (mac_task_check_expose_task(task_list[i])) {
+		if (mac_task_check_expose_task(task_list[i], flavor)) {
 			task_deallocate(task_list[i]);
 			continue;
 		}
 		task_list[used++] = task_list[i];
 	}
 	actual_tasks = used;
-	task_size_needed = actual_tasks * sizeof(void *);
+	task_count_needed = actual_tasks;
 
 	if (type == PSET_THING_THREAD) {
 		/* for each thread (if any), make sure it's task is in the allowed list */
@@ -1340,14 +1426,14 @@ processor_set_things(
 			}
 		}
 		actual_threads = used;
-		thread_size_needed = actual_threads * sizeof(void *);
+		thread_count_needed = actual_threads;
 
 		/* done with the task list */
 		for (i = 0; i < actual_tasks; i++) {
 			task_deallocate(task_list[i]);
 		}
-		kfree(task_list, task_size);
-		task_size = 0;
+		kfree_type(task_t, task_count_cur, task_list);
+		task_count_cur = 0;
 		actual_tasks = 0;
 		task_list = NULL;
 	}
@@ -1356,36 +1442,32 @@ processor_set_things(
 	if (type == PSET_THING_THREAD) {
 		if (actual_threads == 0) {
 			/* no threads available to return */
-			assert(task_size == 0);
-			if (thread_size != 0) {
-				kfree(thread_list, thread_size);
-			}
+			assert(task_count_cur == 0);
+			kfree_type(thread_t, thread_count_cur, thread_list);
 			*thing_list = NULL;
-			*count = 0;
+			*countp = 0;
 			return KERN_SUCCESS;
 		}
-		size_needed = actual_threads * sizeof(void *);
-		size = thread_size;
+		count_needed = actual_threads;
+		count = thread_count_cur;
 		addr = thread_list;
 	} else {
 		if (actual_tasks == 0) {
 			/* no tasks available to return */
-			assert(thread_size == 0);
-			if (task_size != 0) {
-				kfree(task_list, task_size);
-			}
+			assert(thread_count_cur == 0);
+			kfree_type(task_t, task_count_cur, task_list);
 			*thing_list = NULL;
-			*count = 0;
+			*countp = 0;
 			return KERN_SUCCESS;
 		}
-		size_needed = actual_tasks * sizeof(void *);
-		size = task_size;
+		count_needed = actual_tasks;
+		count = task_count_cur;
 		addr = task_list;
 	}
 
 	/* if we allocated too much, must copy */
-	if (size_needed < size) {
-		newaddr = kalloc(size_needed);
+	if (count_needed < count) {
+		newaddr = kalloc_type(void *, count_needed, Z_WAITOK | Z_ZERO);
 		if (newaddr == 0) {
 			for (i = 0; i < actual_tasks; i++) {
 				if (type == PSET_THING_THREAD) {
@@ -1394,21 +1476,19 @@ processor_set_things(
 					task_deallocate(task_list[i]);
 				}
 			}
-			if (size) {
-				kfree(addr, size);
-			}
+			kfree_type(void *, count, addr);
 			return KERN_RESOURCE_SHORTAGE;
 		}
 
-		bcopy((void *) addr, (void *) newaddr, size_needed);
-		kfree(addr, size);
+		bcopy(addr, newaddr, count_needed * sizeof(void *));
+		kfree_type(void *, count, addr);
 
 		addr = newaddr;
-		size = size_needed;
+		count = count_needed;
 	}
 
 	*thing_list = (void **)addr;
-	*count = (unsigned int)size / sizeof(void *);
+	*countp = (mach_msg_type_number_t)count;
 
 	return KERN_SUCCESS;
 }
@@ -1423,12 +1503,12 @@ processor_set_tasks_internal(
 	processor_set_t         pset,
 	task_array_t            *task_list,
 	mach_msg_type_number_t  *count,
-	int                     flavor)
+	mach_task_flavor_t      flavor)
 {
 	kern_return_t ret;
 	mach_msg_type_number_t i;
 
-	ret = processor_set_things(pset, (void **)task_list, count, PSET_THING_TASK);
+	ret = processor_set_things(pset, (void **)task_list, count, PSET_THING_TASK, flavor);
 	if (ret != KERN_SUCCESS) {
 		return ret;
 	}
@@ -1437,7 +1517,12 @@ processor_set_tasks_internal(
 	switch (flavor) {
 	case TASK_FLAVOR_CONTROL:
 		for (i = 0; i < *count; i++) {
-			(*task_list)[i] = (task_t)convert_task_to_port((*task_list)[i]);
+			if ((*task_list)[i] == current_task()) {
+				/* if current_task(), return pinned port */
+				(*task_list)[i] = (task_t)convert_task_to_port_pinned((*task_list)[i]);
+			} else {
+				(*task_list)[i] = (task_t)convert_task_to_port((*task_list)[i]);
+			}
 		}
 		break;
 	case TASK_FLAVOR_READ:
@@ -1527,7 +1612,7 @@ processor_set_threads(
 	kern_return_t ret;
 	mach_msg_type_number_t i;
 
-	ret = processor_set_things(pset, (void **)thread_list, count, PSET_THING_THREAD);
+	ret = processor_set_things(pset, (void **)thread_list, count, PSET_THING_THREAD, TASK_FLAVOR_CONTROL);
 	if (ret != KERN_SUCCESS) {
 		return ret;
 	}
@@ -1614,10 +1699,23 @@ recommended_pset_type(thread_t thread)
 		return PSET_AMP_E;
 	}
 
-	if (thread->sched_flags & TH_SFLAG_ECORE_ONLY) {
+#if DEVELOPMENT || DEBUG
+	extern bool system_ecore_only;
+	extern int enable_task_set_cluster_type;
+	if (enable_task_set_cluster_type && (thread->task->t_flags & TF_USE_PSET_HINT_CLUSTER_TYPE)) {
+		processor_set_t pset_hint = thread->task->pset_hint;
+		if (pset_hint) {
+			return pset_hint->pset_cluster_type;
+		}
+	}
+
+	if (system_ecore_only) {
 		return PSET_AMP_E;
-	} else if (thread->sched_flags & TH_SFLAG_PCORE_ONLY) {
-		return PSET_AMP_P;
+	}
+#endif
+
+	if (thread->th_bound_cluster_id != THREAD_BOUND_CLUSTER_NONE) {
+		return pset_array[thread->th_bound_cluster_id]->pset_cluster_type;
 	}
 
 	if (thread->base_pri <= MAXPRI_THROTTLE) {
@@ -1629,17 +1727,6 @@ recommended_pset_type(thread_t thread)
 			return PSET_AMP_E;
 		}
 	}
-
-#if DEVELOPMENT || DEBUG
-	extern bool system_ecore_only;
-	extern processor_set_t pcore_set;
-	if (system_ecore_only) {
-		if (thread->task->pset_hint == pcore_set) {
-			return PSET_AMP_P;
-		}
-		return PSET_AMP_E;
-	}
-#endif
 
 	struct thread_group *tg = thread_group_get(thread);
 	cluster_type_t recommendation = thread_group_recommendation(tg);

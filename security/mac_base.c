@@ -122,7 +122,7 @@
 #if CONFIG_MACF
 SYSCTL_NODE(, OID_AUTO, security, CTLFLAG_RW | CTLFLAG_LOCKED, 0,
     "Security Controls");
-SYSCTL_NODE(_security, OID_AUTO, mac, CTLFLAG_RW | CTLFLAG_LOCKED, 0,
+SYSCTL_EXTENSIBLE_NODE(_security, OID_AUTO, mac, CTLFLAG_RW | CTLFLAG_LOCKED, 0,
     "TrustedBSD MAC policy controls");
 
 /*
@@ -240,7 +240,8 @@ SYSCTL_UINT(_security_mac, OID_AUTO, vnode_enforce, SECURITY_MAC_CTLFLAGS,
  * For a few special operations involving a change to the list of
  * active policies, the mtx itself must be held.
  */
-static lck_mtx_t *mac_policy_mtx;
+static LCK_GRP_DECLARE(mac_lck_grp, "MAC lock");
+static LCK_MTX_DECLARE(mac_policy_mtx, &mac_lck_grp);
 
 /*
  * Policy list array allocation chunk size. Each entry holds a pointer.
@@ -269,11 +270,11 @@ struct mac_label_element_list_t mac_static_label_element_list;
 static __inline void
 mac_policy_grab_exclusive(void)
 {
-	lck_mtx_lock(mac_policy_mtx);
+	lck_mtx_lock(&mac_policy_mtx);
 	while (mac_policy_busy != 0) {
-		lck_mtx_sleep(mac_policy_mtx, LCK_SLEEP_UNLOCK,
+		lck_mtx_sleep(&mac_policy_mtx, LCK_SLEEP_UNLOCK,
 		    (event_t)&mac_policy_busy, THREAD_UNINT);
-		lck_mtx_lock(mac_policy_mtx);
+		lck_mtx_lock(&mac_policy_mtx);
 	}
 }
 
@@ -282,16 +283,16 @@ mac_policy_release_exclusive(void)
 {
 	KASSERT(mac_policy_busy == 0,
 	    ("mac_policy_release_exclusive(): not exclusive"));
-	lck_mtx_unlock(mac_policy_mtx);
+	lck_mtx_unlock(&mac_policy_mtx);
 	thread_wakeup((event_t) &mac_policy_busy);
 }
 
 void
 mac_policy_list_busy(void)
 {
-	lck_mtx_lock(mac_policy_mtx);
+	lck_mtx_lock(&mac_policy_mtx);
 	mac_policy_busy++;
-	lck_mtx_unlock(mac_policy_mtx);
+	lck_mtx_unlock(&mac_policy_mtx);
 }
 
 int
@@ -303,27 +304,27 @@ mac_policy_list_conditional_busy(void)
 		return 0;
 	}
 
-	lck_mtx_lock(mac_policy_mtx);
+	lck_mtx_lock(&mac_policy_mtx);
 	if (mac_policy_list.numloaded > mac_policy_list.staticmax) {
 		mac_policy_busy++;
 		ret = 1;
 	} else {
 		ret = 0;
 	}
-	lck_mtx_unlock(mac_policy_mtx);
+	lck_mtx_unlock(&mac_policy_mtx);
 	return ret;
 }
 
 void
 mac_policy_list_unbusy(void)
 {
-	lck_mtx_lock(mac_policy_mtx);
+	lck_mtx_lock(&mac_policy_mtx);
 	mac_policy_busy--;
 	KASSERT(mac_policy_busy >= 0, ("MAC_POLICY_LIST_LOCK"));
 	if (mac_policy_busy == 0) {
 		thread_wakeup(&mac_policy_busy);
 	}
-	lck_mtx_unlock(mac_policy_mtx);
+	lck_mtx_unlock(&mac_policy_mtx);
 }
 
 /*
@@ -332,10 +333,6 @@ mac_policy_list_unbusy(void)
 void
 mac_policy_init(void)
 {
-	lck_grp_attr_t *mac_lck_grp_attr;
-	lck_attr_t *mac_lck_attr;
-	lck_grp_t *mac_lck_grp;
-
 	mac_policy_list.numloaded = 0;
 	mac_policy_list.max = MAC_POLICY_LIST_CHUNKSIZE;
 	mac_policy_list.maxindex = 0;
@@ -346,22 +343,12 @@ mac_policy_init(void)
 #if !XNU_TARGET_OS_OSX
 	mac_policy_list.entries = mac_policy_static_entries;
 #else
-	mac_policy_list.entries = kalloc_flags(
-		sizeof(struct mac_policy_list_element) * MAC_POLICY_LIST_CHUNKSIZE,
-		Z_WAITOK | Z_ZERO);
+	mac_policy_list.entries = kalloc_type(struct mac_policy_list_element,
+	    MAC_POLICY_LIST_CHUNKSIZE, Z_WAITOK | Z_ZERO);
 #endif
 
 	LIST_INIT(&mac_label_element_list);
 	LIST_INIT(&mac_static_label_element_list);
-
-	mac_lck_grp_attr = lck_grp_attr_alloc_init();
-	mac_lck_grp = lck_grp_alloc_init("MAC lock", mac_lck_grp_attr);
-	mac_lck_attr = lck_attr_alloc_init();
-	lck_attr_setdefault(mac_lck_attr);
-	mac_policy_mtx = lck_mtx_alloc_init(mac_lck_grp, mac_lck_attr);
-	lck_attr_free(mac_lck_attr);
-	lck_grp_attr_free(mac_lck_grp_attr);
-	lck_grp_free(mac_lck_grp);
 }
 
 /* Function pointer set up for loading security extensions.
@@ -461,17 +448,14 @@ mac_policy_addto_labellist(mac_policy_handle_t handle, int static_entry)
 	    sizeof(struct mac_label_element *) *
 	    mpc->mpc_labelname_count, M_MACTEMP, M_WAITOK | M_ZERO);
 	for (idx = 0; idx < mpc->mpc_labelname_count; idx++) {
-		MALLOC(new_mles[idx], struct mac_label_element *,
-		    sizeof(struct mac_label_element),
-		    M_MACTEMP, M_WAITOK);
+		new_mles[idx] = kalloc_type(struct mac_label_element, Z_WAITOK);
 	}
 	mle_free = 0;
 	MALLOC(new_mlls, struct mac_label_listener **,
 	    sizeof(struct mac_label_listener *) *
 	    mpc->mpc_labelname_count, M_MACTEMP, M_WAITOK);
 	for (idx = 0; idx < mpc->mpc_labelname_count; idx++) {
-		MALLOC(new_mlls[idx], struct mac_label_listener *,
-		    sizeof(struct mac_label_listener), M_MACTEMP, M_WAITOK);
+		new_mlls[idx] = kalloc_type(struct mac_label_listener, Z_WAITOK);
 	}
 	mll_free = 0;
 
@@ -524,11 +508,11 @@ mac_policy_addto_labellist(mac_policy_handle_t handle, int static_entry)
 
 	/* Free up any unused label elements and listeners */
 	for (idx = mle_free; idx < mpc->mpc_labelname_count; idx++) {
-		FREE(new_mles[idx], M_MACTEMP);
+		kfree_type(struct mac_label_element, new_mles[idx]);
 	}
 	FREE(new_mles, M_MACTEMP);
 	for (idx = mll_free; idx < mpc->mpc_labelname_count; idx++) {
-		FREE(new_mlls[idx], M_MACTEMP);
+		kfree_type(struct mac_label_listener, new_mlls[idx]);
 	}
 	FREE(new_mlls, M_MACTEMP);
 }
@@ -568,10 +552,10 @@ mac_policy_removefrom_labellist(mac_policy_handle_t handle)
 		LIST_FOREACH(mll, &mle->mle_listeners, mll_list) {
 			if (mll->mll_handle == handle) {
 				LIST_REMOVE(mll, mll_list);
-				FREE(mll, M_MACTEMP);
+				kfree_type(struct mac_label_listener, mll);
 				if (LIST_EMPTY(&mle->mle_listeners)) {
 					LIST_REMOVE(mle, mle_list);
-					FREE(mle, M_MACTEMP);
+					kfree_type(struct mac_label_element, mle);
 				}
 				return;
 			}
@@ -642,19 +626,19 @@ mac_policy_register(struct mac_policy_conf *mpc, mac_policy_handle_t *handlep,
 	 * contains the required fields.
 	 */
 	if (mpc->mpc_name == NULL) {
-		panic("policy's name is not set\n");
+		panic("policy's name is not set");
 	}
 
 	if (mpc->mpc_fullname == NULL) {
-		panic("policy's full name is not set\n");
+		panic("policy's full name is not set");
 	}
 
 	if (mpc->mpc_labelname_count > MAC_MAX_MANAGED_NAMESPACES) {
-		panic("policy's managed label namespaces exceeds maximum\n");
+		panic("policy's managed label namespaces exceeds maximum");
 	}
 
 	if (mpc->mpc_ops == NULL) {
-		panic("policy's OPs field is NULL\n");
+		panic("policy's OPs field is NULL");
 	}
 
 	error = 0;
@@ -672,11 +656,9 @@ mac_policy_register(struct mac_policy_conf *mpc, mac_policy_handle_t *handlep,
 #if XNU_TARGET_OS_OSX
 		/* allocate new policy list array, zero new chunk */
 		tmac_policy_list_element =
-		    kalloc((sizeof(struct mac_policy_list_element) *
-		    MAC_POLICY_LIST_CHUNKSIZE) * (mac_policy_list.chunks + 1));
-		bzero(&tmac_policy_list_element[mac_policy_list.max],
-		    sizeof(struct mac_policy_list_element) *
-		    MAC_POLICY_LIST_CHUNKSIZE);
+		    kalloc_type(struct mac_policy_list_element,
+		    MAC_POLICY_LIST_CHUNKSIZE * (mac_policy_list.chunks + 1),
+		    Z_WAITOK | Z_ZERO);
 
 		/* copy old entries into new list */
 		memcpy(tmac_policy_list_element, mac_policy_list.entries,
@@ -684,9 +666,9 @@ mac_policy_register(struct mac_policy_conf *mpc, mac_policy_handle_t *handlep,
 		    MAC_POLICY_LIST_CHUNKSIZE * mac_policy_list.chunks);
 
 		/* free old array */
-		kfree(mac_policy_list.entries,
-		    sizeof(struct mac_policy_list_element) *
-		    MAC_POLICY_LIST_CHUNKSIZE * mac_policy_list.chunks);
+		kfree_type(struct mac_policy_list_element,
+		    MAC_POLICY_LIST_CHUNKSIZE * mac_policy_list.chunks,
+		    mac_policy_list.entries);
 
 		mac_policy_list.entries = tmac_policy_list_element;
 
@@ -728,7 +710,7 @@ mac_policy_register(struct mac_policy_conf *mpc, mac_policy_handle_t *handlep,
 		struct mac_module_data *mmd = xd; /* module data from plist */
 
 		/* Make a copy of the data. */
-		mpc->mpc_data = (void *)kalloc(mmd->size);
+		mpc->mpc_data = (void *)kalloc_data(mmd->size, Z_WAITOK);
 		if (mpc->mpc_data != NULL) {
 			memcpy(mpc->mpc_data, mmd, mmd->size);
 
@@ -863,7 +845,7 @@ mac_policy_unregister(mac_policy_handle_t handle)
 
 	if (mpc->mpc_data) {
 		struct mac_module_data *mmd = mpc->mpc_data;
-		kfree(mmd, mmd->size);
+		kfree_data(mmd, mmd->size);
 		mpc->mpc_data = NULL;
 	}
 
@@ -1056,16 +1038,17 @@ mac_externalize(size_t mpo_externalize_off, struct label *label,
 	char *scratch;
 	struct sbuf sb;
 	int error = 0, len;
+	size_t buf_len = strlen(elementlist) + 1;
 
 	/* allocate a scratch buffer the size of the string */
-	MALLOC(scratch_base, char *, strlen(elementlist) + 1, M_MACTEMP, M_WAITOK);
+	scratch_base = kalloc_data(buf_len, Z_WAITOK);
 	if (scratch_base == NULL) {
 		error = ENOMEM;
 		goto out;
 	}
 
 	/* copy the elementlist to the scratch buffer */
-	strlcpy(scratch_base, elementlist, strlen(elementlist) + 1);
+	strlcpy(scratch_base, elementlist, buf_len);
 
 	/*
 	 * set up a temporary pointer that can be used to iterate the
@@ -1100,7 +1083,7 @@ mac_externalize(size_t mpo_externalize_off, struct label *label,
 
 out:
 	if (scratch_base != NULL) {
-		FREE(scratch_base, M_MACTEMP);
+		kfree_data(scratch_base, buf_len);
 	}
 
 	return error;
@@ -1226,24 +1209,24 @@ __mac_get_pid(struct proc *p, struct __mac_get_pid_args *uap, int *ret __unused)
 	tcred = kauth_cred_proc_ref(tproc);
 	proc_rele(tproc);
 
-	MALLOC(elements, char *, mac.m_buflen, M_MACTEMP, M_WAITOK);
+	elements = kalloc_data(mac.m_buflen, Z_WAITOK);
 	error = copyinstr(mac.m_string, elements, mac.m_buflen, &ulen);
 	if (error) {
-		FREE(elements, M_MACTEMP);
+		kfree_data(elements, mac.m_buflen);
 		kauth_cred_unref(&tcred);
 		return error;
 	}
 	AUDIT_ARG(mac_string, elements);
 
-	MALLOC(buffer, char *, mac.m_buflen, M_MACTEMP, M_WAITOK | M_ZERO);
+	buffer = kalloc_data(mac.m_buflen, Z_WAITOK | Z_ZERO);
 	error = mac_cred_label_externalize(tcred->cr_label, elements,
 	    buffer, mac.m_buflen, M_WAITOK);
 	if (error == 0) {
 		error = copyout(buffer, mac.m_string, strlen(buffer) + 1);
 	}
 
-	FREE(buffer, M_MACTEMP);
-	FREE(elements, M_MACTEMP);
+	kfree_data(buffer, mac.m_buflen);
+	kfree_data(elements, mac.m_buflen);
 	kauth_cred_unref(&tcred);
 	return error;
 }
@@ -1277,25 +1260,25 @@ __mac_get_proc(proc_t p, struct __mac_get_proc_args *uap, int *ret __unused)
 		return error;
 	}
 
-	MALLOC(elements, char *, mac.m_buflen, M_MACTEMP, M_WAITOK);
+	elements = kalloc_data(mac.m_buflen, Z_WAITOK);
 	error = copyinstr(mac.m_string, elements, mac.m_buflen, &ulen);
 	if (error) {
-		FREE(elements, M_MACTEMP);
+		kfree_data(elements, mac.m_buflen);
 		return error;
 	}
 	AUDIT_ARG(mac_string, elements);
 
 	cr = kauth_cred_proc_ref(p);
 
-	MALLOC(buffer, char *, mac.m_buflen, M_MACTEMP, M_WAITOK | M_ZERO);
+	buffer = kalloc_data(mac.m_buflen, Z_WAITOK | Z_ZERO);
 	error = mac_cred_label_externalize(cr->cr_label,
 	    elements, buffer, mac.m_buflen, M_WAITOK);
 	if (error == 0) {
 		error = copyout(buffer, mac.m_string, strlen(buffer) + 1);
 	}
 
-	FREE(buffer, M_MACTEMP);
-	FREE(elements, M_MACTEMP);
+	kfree_data(buffer, mac.m_buflen);
+	kfree_data(elements, mac.m_buflen);
 	kauth_cred_unref(&cr);
 	return error;
 }
@@ -1329,17 +1312,17 @@ __mac_set_proc(proc_t p, struct __mac_set_proc_args *uap, int *ret __unused)
 		return error;
 	}
 
-	MALLOC(buffer, char *, mac.m_buflen, M_MACTEMP, M_WAITOK);
+	buffer = kalloc_data(mac.m_buflen, Z_WAITOK);
 	error = copyinstr(mac.m_string, buffer, mac.m_buflen, &ulen);
 	if (error) {
-		FREE(buffer, M_MACTEMP);
+		kfree_data(buffer, mac.m_buflen);
 		return error;
 	}
 	AUDIT_ARG(mac_string, buffer);
 
 	intlabel = mac_cred_label_alloc();
 	error = mac_cred_label_internalize(intlabel, buffer);
-	FREE(buffer, M_MACTEMP);
+	kfree_data(buffer, mac.m_buflen);
 	if (error) {
 		goto out;
 	}
@@ -1394,19 +1377,19 @@ __mac_get_fd(proc_t p, struct __mac_get_fd_args *uap, int *ret __unused)
 		return error;
 	}
 
-	MALLOC(elements, char *, mac.m_buflen, M_MACTEMP, M_WAITOK);
+	elements = kalloc_data(mac.m_buflen, Z_WAITOK);
 	error = copyinstr(mac.m_string, elements, mac.m_buflen, &ulen);
 	if (error) {
-		FREE(elements, M_MACTEMP);
+		kfree_data(elements, mac.m_buflen);
 		return error;
 	}
 	AUDIT_ARG(mac_string, elements);
 
-	MALLOC(buffer, char *, mac.m_buflen, M_MACTEMP, M_WAITOK);
+	buffer = kalloc_data(mac.m_buflen, Z_WAITOK);
 	error = fp_lookup(p, uap->fd, &fp, 0);
 	if (error) {
-		FREE(buffer, M_MACTEMP);
-		FREE(elements, M_MACTEMP);
+		kfree_data(buffer, mac.m_buflen);
+		kfree_data(elements, mac.m_buflen);
 		return error;
 	}
 
@@ -1415,8 +1398,8 @@ __mac_get_fd(proc_t p, struct __mac_get_fd_args *uap, int *ret __unused)
 	kauth_cred_unref(&my_cred);
 	if (error) {
 		fp_drop(p, uap->fd, fp, 0);
-		FREE(buffer, M_MACTEMP);
-		FREE(elements, M_MACTEMP);
+		kfree_data(buffer, mac.m_buflen);
+		kfree_data(elements, mac.m_buflen);
 		return error;
 	}
 
@@ -1456,8 +1439,8 @@ __mac_get_fd(proc_t p, struct __mac_get_fd_args *uap, int *ret __unused)
 		error = copyout(buffer, mac.m_string, strlen(buffer) + 1);
 	}
 
-	FREE(buffer, M_MACTEMP);
-	FREE(elements, M_MACTEMP);
+	kfree_data(buffer, mac.m_buflen);
+	kfree_data(elements, mac.m_buflen);
 	return error;
 }
 
@@ -1494,13 +1477,13 @@ mac_get_filelink(proc_t p, user_addr_t mac_p, user_addr_t path_p, int follow)
 		return error;
 	}
 
-	MALLOC(elements, char *, mac.m_buflen, M_MACTEMP, M_WAITOK);
-	MALLOC(buffer, char *, mac.m_buflen, M_MACTEMP, M_WAITOK | M_ZERO);
+	elements = kalloc_data(mac.m_buflen, Z_WAITOK);
+	buffer = kalloc_data(mac.m_buflen, Z_WAITOK | Z_ZERO);
 
 	error = copyinstr(mac.m_string, elements, mac.m_buflen, &ulen);
 	if (error) {
-		FREE(buffer, M_MACTEMP);
-		FREE(elements, M_MACTEMP);
+		kfree_data(buffer, mac.m_buflen);
+		kfree_data(elements, mac.m_buflen);
 		return error;
 	}
 	AUDIT_ARG(mac_string, elements);
@@ -1512,8 +1495,8 @@ mac_get_filelink(proc_t p, user_addr_t mac_p, user_addr_t path_p, int follow)
 	    UIO_USERSPACE, path_p, ctx);
 	error = namei(&nd);
 	if (error) {
-		FREE(buffer, M_MACTEMP);
-		FREE(elements, M_MACTEMP);
+		kfree_data(buffer, mac.m_buflen);
+		kfree_data(elements, mac.m_buflen);
 		return error;
 	}
 	vp = nd.ni_vp;
@@ -1531,8 +1514,8 @@ mac_get_filelink(proc_t p, user_addr_t mac_p, user_addr_t path_p, int follow)
 
 	vnode_put(vp);
 
-	FREE(buffer, M_MACTEMP);
-	FREE(elements, M_MACTEMP);
+	kfree_data(buffer, mac.m_buflen);
+	kfree_data(elements, mac.m_buflen);
 
 	return error;
 }
@@ -1585,17 +1568,17 @@ __mac_set_fd(proc_t p, struct __mac_set_fd_args *uap, int *ret __unused)
 		return error;
 	}
 
-	MALLOC(buffer, char *, mac.m_buflen, M_MACTEMP, M_WAITOK);
+	buffer = kalloc_data(mac.m_buflen, Z_WAITOK);
 	error = copyinstr(mac.m_string, buffer, mac.m_buflen, &ulen);
 	if (error) {
-		FREE(buffer, M_MACTEMP);
+		kfree_data(buffer, mac.m_buflen);
 		return error;
 	}
 	AUDIT_ARG(mac_string, buffer);
 
 	error = fp_lookup(p, uap->fd, &fp, 0);
 	if (error) {
-		FREE(buffer, M_MACTEMP);
+		kfree_data(buffer, mac.m_buflen);
 		return error;
 	}
 
@@ -1603,7 +1586,7 @@ __mac_set_fd(proc_t p, struct __mac_set_fd_args *uap, int *ret __unused)
 	error = mac_file_check_set(vfs_context_ucred(ctx), fp->fp_glob, buffer, mac.m_buflen);
 	if (error) {
 		fp_drop(p, uap->fd, fp, 0);
-		FREE(buffer, M_MACTEMP);
+		kfree_data(buffer, mac.m_buflen);
 		return error;
 	}
 
@@ -1647,7 +1630,7 @@ __mac_set_fd(proc_t p, struct __mac_set_fd_args *uap, int *ret __unused)
 	}
 
 	fp_drop(p, uap->fd, fp, 0);
-	FREE(buffer, M_MACTEMP);
+	kfree_data(buffer, mac.m_buflen);
 	return error;
 }
 
@@ -1689,17 +1672,17 @@ mac_set_filelink(proc_t p, user_addr_t mac_p, user_addr_t path_p,
 		return error;
 	}
 
-	MALLOC(buffer, char *, mac.m_buflen, M_MACTEMP, M_WAITOK);
+	buffer = kalloc_data(mac.m_buflen, Z_WAITOK);
 	error = copyinstr(mac.m_string, buffer, mac.m_buflen, &ulen);
 	if (error) {
-		FREE(buffer, M_MACTEMP);
+		kfree_data(buffer, mac.m_buflen);
 		return error;
 	}
 	AUDIT_ARG(mac_string, buffer);
 
 	intlabel = mac_vnode_label_alloc();
 	error = mac_vnode_label_internalize(intlabel, buffer);
-	FREE(buffer, M_MACTEMP);
+	kfree_data(buffer, mac.m_buflen);
 	if (error) {
 		mac_vnode_label_free(intlabel);
 		return error;
@@ -1738,6 +1721,23 @@ __mac_set_link(proc_t p, struct __mac_set_link_args *uap,
 	return mac_set_filelink(p, uap->mac_p, uap->path_p, 0);
 }
 
+static int
+mac_proc_check_mac_syscall(proc_t p, const char *target, int callnum)
+{
+	int error;
+
+#if SECURITY_MAC_CHECK_ENFORCE
+	/* 21167099 - only check if we allow write */
+	if (!mac_proc_enforce) {
+		return 0;
+	}
+#endif
+
+	MAC_CHECK(proc_check_syscall_mac, p, target, callnum);
+
+	return error;
+}
+
 /*
  * __mac_syscall: Perform a MAC policy system call
  *
@@ -1768,6 +1768,11 @@ __mac_syscall(proc_t p, struct __mac_syscall_args *uap, int *retv __unused)
 	}
 	AUDIT_ARG(value32, uap->call);
 	AUDIT_ARG(mac_string, target);
+
+	error = mac_proc_check_mac_syscall(p, target, uap->call);
+	if (error) {
+		return error;
+	}
 
 	error = ENOPOLICY;
 
@@ -1834,24 +1839,24 @@ mac_mount_label_get(struct mount *mp, user_addr_t mac_p)
 		return error;
 	}
 
-	MALLOC(elements, char *, mac.m_buflen, M_MACTEMP, M_WAITOK);
+	elements = kalloc_data(mac.m_buflen, Z_WAITOK);
 	error = copyinstr(mac.m_string, elements, mac.m_buflen, &ulen);
 	if (error) {
-		FREE(elements, M_MACTEMP);
+		kfree_data(elements, mac.m_buflen);
 		return error;
 	}
 	AUDIT_ARG(mac_string, elements);
 
 	label = mp->mnt_mntlabel;
-	MALLOC(buffer, char *, mac.m_buflen, M_MACTEMP, M_WAITOK | M_ZERO);
+	buffer = kalloc_data(mac.m_buflen, Z_WAITOK | Z_ZERO);
 	error = mac_mount_label_externalize(label, elements, buffer,
 	    mac.m_buflen);
-	FREE(elements, M_MACTEMP);
+	kfree_data(elements, mac.m_buflen);
 
 	if (error == 0) {
 		error = copyout(buffer, mac.m_string, strlen(buffer) + 1);
 	}
-	FREE(buffer, M_MACTEMP);
+	kfree_data(buffer, mac.m_buflen);
 
 	return error;
 }

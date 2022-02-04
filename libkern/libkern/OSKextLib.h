@@ -41,7 +41,6 @@ __BEGIN_DECLS
 #include <libkern/OSTypes.h>
 #include <libkern/OSReturn.h>
 #else
-#include <CoreFoundation/CoreFoundation.h>
 #include <libkern/OSReturn.h>
 #endif /* KERNEL */
 

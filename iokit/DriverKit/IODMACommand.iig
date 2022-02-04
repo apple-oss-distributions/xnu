@@ -126,7 +126,8 @@ public:
 	 * @param       flags Returned bit mask of flags 
 					kIOMemoryDirectionOut the memory is readable
 					kIOMemoryDirectionIn the memory is writable
-	 * @param       segmentsCount Returned count of segements returned in segments
+	 * @param       segmentsCount In/out parameter - size of segments array on input,
+					and number of valid segments returned
 	 * @param       segments Returned DMA physical address and length segments covering the DMA
      * @return      kIOReturnSuccess on success. See IOReturn.h for error codes.
      */

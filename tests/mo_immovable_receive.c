@@ -6,7 +6,11 @@
 #include <sys/sysctl.h>
 #include <unistd.h>
 
-T_GLOBAL_META(T_META_RUN_CONCURRENTLY(true));
+T_GLOBAL_META(
+	T_META_NAMESPACE("xnu.ipc"),
+	T_META_RUN_CONCURRENTLY(TRUE),
+	T_META_RADAR_COMPONENT_NAME("xnu"),
+	T_META_RADAR_COMPONENT_VERSION("IPC"));
 
 typedef struct {
 	mach_msg_header_t   header;

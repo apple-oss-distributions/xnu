@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016 Apple Inc. All rights reserved.
+ * Copyright (c) 2016-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -78,16 +78,11 @@ MALLOC_DEFINE(M_LLTABLE, "lltable", "link level address tables");
 
 static SLIST_HEAD(, lltable) lltables = SLIST_HEAD_INITIALIZER(lltables);
 
-static lck_grp_attr_t   *lltable_rwlock_grp_attr;
-static lck_grp_t        *lltable_rwlock_grp;
-static lck_attr_t       *lltable_rwlock_attr;
+static LCK_GRP_DECLARE(lltable_rwlock_grp, "lltable_rwlock");
+LCK_RW_DECLARE(lltable_rwlock, &lltable_rwlock_grp);
 
-static lck_grp_attr_t *lle_lock_grp_attr = NULL;
-lck_grp_t      *lle_lock_grp = NULL;
-lck_attr_t     *lle_lock_attr = NULL;
-
-decl_lck_rw_data(, lltable_rwlock_data);
-lck_rw_t                *lltable_rwlock = &lltable_rwlock_data;
+LCK_GRP_DECLARE(lle_lock_grp, "lle locks");
+LCK_ATTR_DECLARE(lle_lock_attr, 0, 0);
 
 #if 0
 static void lltable_unlink(struct lltable *llt);
@@ -98,21 +93,6 @@ static void htable_unlink_entry(struct llentry *lle);
 static void htable_link_entry(struct lltable *llt, struct llentry *lle);
 static int htable_foreach_lle(struct lltable *llt, llt_foreach_cb_t *f,
     void *farg);
-
-void
-lltable_glbl_init()
-{
-	lltable_rwlock_grp_attr = lck_grp_attr_alloc_init();
-	lltable_rwlock_grp = lck_grp_alloc_init("lltable_rwlock",
-	    lltable_rwlock_grp_attr);
-	lltable_rwlock_attr = lck_attr_alloc_init();
-	lck_rw_init(lltable_rwlock, lltable_rwlock_grp,
-	    lltable_rwlock_attr);
-
-	lle_lock_grp_attr = lck_grp_attr_alloc_init();
-	lle_lock_grp = lck_grp_alloc_init("lle locks", lle_lock_grp_attr);
-	lle_lock_attr = lck_attr_alloc_init();
-}
 
 /*
  * Dump lle state for a specific address family.
@@ -274,7 +254,7 @@ static void
 htable_free_tbl(struct lltable *llt)
 {
 	FREE(llt->lle_head, M_LLTABLE);
-	FREE(llt, M_LLTABLE);
+	kfree_type(struct lltable, llt);
 }
 
 static void
@@ -660,7 +640,7 @@ lltable_allocate_htbl(uint32_t hsize)
 	struct lltable *llt;
 	int i;
 
-	MALLOC(llt, struct lltable *, sizeof(struct lltable), M_LLTABLE, M_WAITOK | M_ZERO);
+	llt = kalloc_type(struct lltable, Z_WAITOK | Z_ZERO);
 	llt->llt_hsize = hsize;
 	MALLOC(llt->lle_head, struct llentries *, sizeof(struct llentries) * hsize,
 	    M_LLTABLE, M_WAITOK | M_ZERO);

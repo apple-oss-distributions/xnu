@@ -134,7 +134,6 @@ main(
 	DECLARE("MUTEX_OWNER", offsetof(lck_mtx_t, lck_mtx_owner));
 	DECLARE("MUTEX_PTR", offsetof(lck_mtx_t, lck_mtx_ptr));
 	DECLARE("MUTEX_STATE", offsetof(lck_mtx_t, lck_mtx_state));
-	DECLARE("MUTEX_IND", LCK_MTX_TAG_INDIRECT);
 	DECLARE("MUTEX_ASSERT_OWNED", LCK_MTX_ASSERT_OWNED);
 	DECLARE("MUTEX_ASSERT_NOTOWNED", LCK_MTX_ASSERT_NOTOWNED);
 
@@ -170,7 +169,6 @@ main(
 	DECLARE("TH_PCB_IDS", offsetof(struct thread, machine.ids));
 	DECLARE("TH_PCB_FPS", offsetof(struct thread, machine.ifps));
 	DECLARE("TH_RWLOCK_COUNT", offsetof(struct thread, rwlock_count));
-	DECLARE("TH_TMP_ALLOC_CNT", offsetof(struct thread, t_temp_alloc_count));
 
 	DECLARE("MAP_PMAP", offsetof(struct _vm_map, pmap));
 
@@ -329,6 +327,7 @@ main(
 	    offsetof(cpu_data_t, cpu_interrupt_level));
 	DECLARE("CPU_NEED_SEGCHK",
 	    offsetof(cpu_data_t, cpu_curthread_do_segchk));
+	DECLARE("MTHR_SEGCHK", MTHR_SEGCHK);
 	DECLARE("CPU_NESTED_ISTACK",
 	    offsetof(cpu_data_t, cpu_nested_istack));
 	DECLARE("CPU_NUMBER_GS",

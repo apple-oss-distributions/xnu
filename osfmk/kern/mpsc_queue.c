@@ -275,11 +275,17 @@ again:
 	}
 
 	os_atomic_dependency_t dep = os_atomic_make_dependency((uintptr_t)st);
-	while ((head = mpsc_queue_dequeue_batch(&dq->mpd_queue, &tail, dep))) {
-		mpsc_queue_batch_foreach_safe(cur, head, tail) {
-			os_atomic_store(&cur->mpqc_next,
-			    MPSC_QUEUE_NOTQUEUED_MARKER, relaxed);
-			invoke(cur, dq);
+	if ((head = mpsc_queue_dequeue_batch(&dq->mpd_queue, &tail, dep))) {
+		do {
+			mpsc_queue_batch_foreach_safe(cur, head, tail) {
+				os_atomic_store(&cur->mpqc_next,
+				    MPSC_QUEUE_NOTQUEUED_MARKER, relaxed);
+				invoke(cur, dq);
+			}
+		} while ((head = mpsc_queue_dequeue_batch(&dq->mpd_queue, &tail, dep)));
+
+		if (dq->mpd_options & MPSC_QUEUE_OPTION_BATCH) {
+			invoke(MPSC_QUEUE_BATCH_END, dq);
 		}
 	}
 

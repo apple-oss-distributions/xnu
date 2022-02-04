@@ -279,6 +279,12 @@ extern int      kauth_cred_issuser(kauth_cred_t _cred);
 /* GUID, NTSID helpers */
 extern guid_t   kauth_null_guid;
 extern int      kauth_guid_equal(guid_t *_guid1, guid_t *_guid2);
+
+#ifdef KERNEL_PRIVATE
+extern int      kauth_cred_getgroups(kauth_cred_t _cred, gid_t *_groups, size_t *_groupcount);
+
+#endif /* KERNEL_PRIVATE */
+
 #ifdef XNU_KERNEL_PRIVATE
 extern int      kauth_ntsid_equal(ntsid_t *_sid1, ntsid_t *_sid2);
 
@@ -302,7 +308,6 @@ extern void     kauth_cred_uthread_update(struct uthread *, proc_t);
 #ifdef CONFIG_MACF
 extern void kauth_proc_label_update_execve(struct proc *p, struct vfs_context *ctx, struct vnode *vp, off_t offset, struct vnode *scriptvp, struct label *scriptlabel, struct label *execlabel, unsigned int *csflags, void *psattr, int *disjoint, int *update_return);
 #endif
-extern int      kauth_cred_getgroups(kauth_cred_t _cred, gid_t *_groups, size_t *_groupcount);
 extern int      kauth_cred_gid_subset(kauth_cred_t _cred1, kauth_cred_t _cred2, int *_resultp);
 struct auditinfo_addr;
 extern kauth_cred_t kauth_cred_setauditinfo(kauth_cred_t, au_session_t *);
@@ -521,11 +526,15 @@ extern int      kauth_authorize_action(kauth_scope_t _scope, kauth_cred_t _crede
 extern int      kauth_authorize_allow(kauth_cred_t _credential, void *_idata, kauth_action_t _action,
     uintptr_t _arg0, uintptr_t _arg1, uintptr_t _arg2, uintptr_t _arg3);
 
+#ifdef KERNEL_PRIVATE
+extern int      kauth_acl_evaluate(kauth_cred_t _credential, kauth_acl_eval_t _eval);
+
+#endif /* KERNEL_PRIVATE */
+
 
 #ifdef XNU_KERNEL_PRIVATE
 void            kauth_filesec_acl_setendian(int, kauth_filesec_t, kauth_acl_t);
 int             kauth_copyinfilesec(user_addr_t xsecurity, kauth_filesec_t *xsecdestpp);
-extern int      kauth_acl_evaluate(kauth_cred_t _credential, kauth_acl_eval_t _eval);
 extern int      kauth_acl_inherit(vnode_t _dvp, kauth_acl_t _initial, kauth_acl_t *_product, int _isdir, vfs_context_t _ctx);
 
 #endif /* XNU_KERNEL_PRIVATE */
@@ -782,15 +791,18 @@ void kprintf(const char *fmt, ...);
 /*
  * Initialisation.
  */
-extern lck_grp_t *kauth_lck_grp;
 #ifdef XNU_KERNEL_PRIVATE
 __BEGIN_DECLS
+
+extern lck_grp_t kauth_lck_grp;
+
 extern void     kauth_init(void);
-extern void     kauth_cred_init(void);
+/*
+ * If you need accounting for KM_KAUTH consider using
+ * KALLOC_HEAP_DEFINE to define a view.
+ */
+#define KM_KAUTH     KHEAP_DEFAULT
 #if CONFIG_EXT_RESOLVER
-extern void     kauth_identity_init(void);
-extern void     kauth_groups_init(void);
-extern void     kauth_resolver_init(void);
 extern void     kauth_resolver_identity_reset(void);
 #endif
 __END_DECLS

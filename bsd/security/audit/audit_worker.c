@@ -45,7 +45,6 @@
 #include <sys/vnode_internal.h>
 #include <sys/user.h>
 #include <sys/syscall.h>
-#include <sys/malloc.h>
 #include <sys/un.h>
 #include <sys/sysent.h>
 #include <sys/sysproto.h>
@@ -305,7 +304,7 @@ fail:
 	 */
 	if (audit_panic_on_write_fail) {
 		(void)VNOP_FSYNC(vp, MNT_WAIT, ctx);
-		panic("audit_worker: write error %d\n", error);
+		panic("audit_worker: write error %d", error);
 	} else if (ppsratecheck(&last_fail, &cur_fail, 1)) {
 		printf("audit_worker: write error %d\n", error);
 	}

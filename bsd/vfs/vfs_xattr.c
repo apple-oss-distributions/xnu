@@ -1457,7 +1457,8 @@ typedef struct attr_info {
 	 (attr_entry_t *)((u_int8_t *)(ae) + ATTR_ENTRY_LENGTH((ae)->namelen))
 
 #define ATTR_VALID(ae, ai)  \
-	((u_int8_t *)ATTR_NEXT(ae) <= ((ai).rawdata + (ai).rawsize))
+	((&(ae)->namelen < ((ai).rawdata + (ai).rawsize)) && \
+	 (u_int8_t *)ATTR_NEXT(ae) <= ((ai).rawdata + (ai).rawsize))
 
 #define SWAP16(x)  OSSwapBigToHostInt16((x))
 #define SWAP32(x)  OSSwapBigToHostInt32((x))
@@ -1977,6 +1978,11 @@ start:
 			options &= ~XATTR_REPLACE;
 			goto start; /* start over */
 		}
+	} else {
+		if (!ATTR_VALID(entry, ainfo)) {
+			error = ENOSPC;
+			goto out;
+		}
 	}
 
 	if (options & XATTR_REPLACE) {
@@ -2186,7 +2192,6 @@ default_removexattr(vnode_t vp, const char *name, __unused int options, vfs_cont
 		}
 		attrdata = (u_int8_t *)ainfo.filehdr + ainfo.finderinfo->offset;
 		bzero((caddr_t)attrdata, FINDERINFOSIZE);
-		ainfo.iosize = sizeof(attr_header_t);
 		error = write_xattrinfo(&ainfo);
 		goto out;
 	}
@@ -2463,7 +2468,8 @@ open_xattrfile(vnode_t vp, int fileflags, vnode_t *xvpp, vfs_context_t context)
 	char smallname[64];
 	char *filename = NULL;
 	const char *basename = NULL;
-	size_t len;
+	size_t alloc_len;
+	size_t copy_len;
 	errno_t error;
 	int opened = 0;
 	int referenced = 0;
@@ -2493,11 +2499,11 @@ open_xattrfile(vnode_t vp, int fileflags, vnode_t *xvpp, vfs_context_t context)
 		goto out;
 	}
 	filename = &smallname[0];
-	len = snprintf(filename, sizeof(smallname), "%s%s", ATTR_FILE_PREFIX, basename);
-	if (len >= sizeof(smallname)) {
-		len++;  /* snprintf result doesn't include '\0' */
-		filename = kheap_alloc(KHEAP_TEMP, len, Z_WAITOK);
-		len = snprintf(filename, len, "%s%s", ATTR_FILE_PREFIX, basename);
+	alloc_len = snprintf(filename, sizeof(smallname), "%s%s", ATTR_FILE_PREFIX, basename);
+	if (alloc_len >= sizeof(smallname)) {
+		alloc_len++;  /* snprintf result doesn't include '\0' */
+		filename = kalloc_data(alloc_len, Z_WAITOK);
+		copy_len = snprintf(filename, alloc_len, "%s%s", ATTR_FILE_PREFIX, basename);
 	}
 	/*
 	 * Note that the lookup here does not authorize.  Since we are looking
@@ -2508,12 +2514,12 @@ open_xattrfile(vnode_t vp, int fileflags, vnode_t *xvpp, vfs_context_t context)
 	 * file security from the EA must always get access
 	 */
 lookup:
-	nd = kheap_alloc(KHEAP_TEMP, sizeof(struct nameidata), Z_WAITOK);
+	nd = kalloc_type(struct nameidata, Z_WAITOK);
 	NDINIT(nd, LOOKUP, OP_OPEN, LOCKLEAF | NOFOLLOW | USEDVP | DONOTAUTH,
 	    UIO_SYSSPACE, CAST_USER_ADDR_T(filename), context);
 	nd->ni_dvp = dvp;
 
-	va = kheap_alloc(KHEAP_TEMP, sizeof(struct vnode_attr), Z_WAITOK);
+	va = kalloc_type(struct vnode_attr, Z_WAITOK);
 
 	if (fileflags & O_CREAT) {
 		nd->ni_cnd.cn_nameiop = CREATE;
@@ -2678,8 +2684,8 @@ out:
 		}
 	}
 	/* Release resources after error-handling */
-	kheap_free(KHEAP_TEMP, nd, sizeof(struct nameidata));
-	kheap_free(KHEAP_TEMP, va, sizeof(struct vnode_attr));
+	kfree_type(struct nameidata, nd);
+	kfree_type(struct vnode_attr, va);
 	if (dvp && (dvp != vp)) {
 		vnode_put(dvp);
 	}
@@ -2687,7 +2693,7 @@ out:
 		vnode_putname(basename);
 	}
 	if (filename && filename != &smallname[0]) {
-		kheap_free(KHEAP_TEMP, filename, len);
+		kfree_data(filename, alloc_len);
 	}
 
 	*xvpp = xvp;  /* return a referenced vnode */
@@ -2792,12 +2798,13 @@ get_xattrinfo(vnode_t xvp, int setting, attr_info_t *ainfop, vfs_context_t conte
 		iosize = MIN(ATTR_MAX_HDR_SIZE, ainfop->filesize);
 	}
 
-	if (iosize == 0) {
+	if (iosize == 0 || iosize < sizeof(apple_double_header_t)) {
 		error = ENOATTR;
 		goto bail;
 	}
+
 	ainfop->iosize = iosize;
-	buffer = kheap_alloc(KHEAP_DATA_BUFFERS, iosize, Z_WAITOK);
+	buffer = kalloc_data(iosize, Z_WAITOK | Z_ZERO);
 	if (buffer == NULL) {
 		error = ENOMEM;
 		goto bail;
@@ -2995,6 +3002,11 @@ get_xattrinfo(vnode_t xvp, int setting, attr_info_t *ainfop, vfs_context_t conte
 	    ainfop->finderinfo->length >= (sizeof(attr_header_t) - sizeof(apple_double_header_t))) {
 		attr_header_t *attrhdr = (attr_header_t*)filehdr;
 
+		if (ainfop->finderinfo->offset != offsetof(apple_double_header_t, finfo)) {
+			error = ENOATTR;
+			goto bail;
+		}
+
 		if ((error = check_and_swap_attrhdr(attrhdr, ainfop)) == 0) {
 			ainfop->attrhdr = attrhdr;  /* valid attribute header */
 			/* First attr_entry starts immediately following attribute header */
@@ -3007,7 +3019,7 @@ bail:
 	if (auio != NULL) {
 		uio_free(auio);
 	}
-	kheap_free(KHEAP_DATA_BUFFERS, buffer, iosize);
+	kfree_data(buffer, iosize);
 	return error;
 }
 
@@ -3022,8 +3034,7 @@ create_xattrfile(vnode_t xvp, u_int32_t fileid, vfs_context_t context)
 	int rsrcforksize;
 	int error;
 
-	buffer = kheap_alloc(KHEAP_TEMP, ATTR_BUF_SIZE, Z_WAITOK);
-	bzero(buffer, ATTR_BUF_SIZE);
+	buffer = kalloc_data(ATTR_BUF_SIZE, Z_WAITOK | Z_ZERO);
 
 	xah = (attr_header_t *)buffer;
 	auio = uio_create(1, 0, UIO_SYSSPACE, UIO_WRITE);
@@ -3061,7 +3072,7 @@ create_xattrfile(vnode_t xvp, u_int32_t fileid, vfs_context_t context)
 	}
 
 	uio_free(auio);
-	kheap_free(KHEAP_TEMP, buffer, ATTR_BUF_SIZE);
+	kfree_data(buffer, ATTR_BUF_SIZE);
 
 	return error;
 }
@@ -3085,7 +3096,7 @@ init_empty_resource_fork(rsrcfork_header_t * rsrcforkhdr)
 static void
 rel_xattrinfo(attr_info_t *ainfop)
 {
-	kheap_free_addr(KHEAP_DATA_BUFFERS, ainfop->filehdr);
+	kfree_data_addr(ainfop->filehdr);
 	bzero(ainfop, sizeof(attr_info_t));
 }
 
@@ -3182,6 +3193,7 @@ check_and_swap_attrhdr(attr_header_t *ah, attr_info_t *ainfop)
 	u_int32_t end;
 	int count;
 	int i;
+	uint32_t total_header_size;
 
 	if (ah == NULL) {
 		return EINVAL;
@@ -3206,6 +3218,7 @@ check_and_swap_attrhdr(attr_header_t *ah, attr_info_t *ainfop)
 	 */
 	end = ah->data_start + ah->data_length;
 	if (ah->total_size > ainfop->finderinfo->offset + ainfop->finderinfo->length ||
+	    ah->data_start < sizeof(attr_header_t) ||
 	    end < ah->data_start ||
 	    end > ah->total_size) {
 		return EINVAL;
@@ -3214,18 +3227,25 @@ check_and_swap_attrhdr(attr_header_t *ah, attr_info_t *ainfop)
 	/*
 	 * Make sure each of the attr_entry_t's fits within total_size.
 	 */
-	buf_end = ainfop->rawdata + ah->total_size;
+	buf_end = ainfop->rawdata + ah->data_start;
+	if (buf_end > ainfop->rawdata + ainfop->rawsize) {
+		return EINVAL;
+	}
 	count = ah->num_attrs;
+	if (count > 256) {
+		return EINVAL;
+	}
 	ae = (attr_entry_t *)(&ah[1]);
 
+	total_header_size = sizeof(attr_header_t);
 	for (i = 0; i < count; i++) {
 		/* Make sure the fixed-size part of this attr_entry_t fits. */
 		if ((u_int8_t *) &ae[1] > buf_end) {
 			return EINVAL;
 		}
 
-		/* Make sure the variable-length name fits (+1 is for NUL terminator) */
-		if (&ae->name[ae->namelen + 1] > buf_end) {
+		/* Make sure the variable-length name fits */
+		if (&ae->name[ae->namelen] > buf_end) {
 			return EINVAL;
 		}
 
@@ -3233,7 +3253,6 @@ check_and_swap_attrhdr(attr_header_t *ah, attr_info_t *ainfop)
 		if (strnlen((const char *)ae->name, ae->namelen) != ae->namelen - 1) {
 			return EINVAL;
 		}
-
 
 		/* Swap the attribute entry fields */
 		ae->offset      = SWAP32(ae->offset);
@@ -3251,7 +3270,16 @@ check_and_swap_attrhdr(attr_header_t *ah, attr_info_t *ainfop)
 			return EINVAL;
 		}
 
+		/* We verified namelen is ok above, so add this entry's size to a total */
+		total_header_size += ATTR_ENTRY_LENGTH(ae->namelen);
+
 		ae = ATTR_NEXT(ae);
+	}
+
+
+	/* make sure data_start is actually after all the xattr key entries */
+	if (ah->data_start < total_header_size) {
+		return EINVAL;
 	}
 
 	return 0;

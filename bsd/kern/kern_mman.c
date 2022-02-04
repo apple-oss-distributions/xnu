@@ -123,6 +123,7 @@
 #include <kern/page_decrypt.h>
 
 #include <IOKit/IOReturn.h>
+#include <IOKit/IOBSD.h>
 
 #include <vm/vm_map.h>
 #include <vm/vm_kern.h>
@@ -142,7 +143,7 @@
 static uint32_t
 proc_2020_fall_os_sdk(void)
 {
-	switch (current_proc()->p_platform) {
+	switch (proc_platform(current_proc())) {
 	case PLATFORM_MACOS:
 		return 0x000a1000; // DYLD_MACOSX_VERSION_10_16
 	case PLATFORM_IOS:
@@ -273,7 +274,7 @@ mmap(proc_t p, struct mmap_args *uap, user_addr_t *retval)
 
 
 	/* make sure mapping fits into numeric range etc */
-	if (os_add3_overflow(file_pos, user_size, PAGE_SIZE_64 - 1, &sum)) {
+	if (os_add3_overflow(file_pos, user_size, vm_map_page_size(user_map) - 1, &sum)) {
 		return EINVAL;
 	}
 
@@ -850,10 +851,10 @@ bad:
 	}
 
 	KERNEL_DEBUG_CONSTANT((BSDDBG_CODE(DBG_BSD_SC_EXTENDED_INFO, SYS_mmap) | DBG_FUNC_NONE), fd, (uint32_t)(*retval), (uint32_t)user_size, error, 0);
-#ifndef CONFIG_EMBEDDED
+#if XNU_TARGET_OS_OSX
 	KERNEL_DEBUG_CONSTANT((BSDDBG_CODE(DBG_BSD_SC_EXTENDED_INFO2, SYS_mmap) | DBG_FUNC_NONE), (uint32_t)(*retval >> 32), (uint32_t)(user_size >> 32),
 	    (uint32_t)(file_pos >> 32), (uint32_t)file_pos, 0);
-#endif
+#endif /* XNU_TARGET_OS_OSX */
 	return error;
 }
 
@@ -877,9 +878,9 @@ msync_nocancel(__unused proc_t p, struct msync_nocancel_args *uap, __unused int3
 	user_map = current_map();
 	addr = (mach_vm_offset_t) uap->addr;
 	size = (mach_vm_size_t) uap->len;
-#ifndef CONFIG_EMBEDDED
+#if XNU_TARGET_OS_OSX
 	KERNEL_DEBUG_CONSTANT((BSDDBG_CODE(DBG_BSD_SC_EXTENDED_INFO, SYS_msync) | DBG_FUNC_NONE), (uint32_t)(addr >> 32), (uint32_t)(size >> 32), 0, 0, 0);
-#endif
+#endif /* XNU_TARGET_OS_OSX */
 	if (mach_vm_range_overflows(addr, size)) {
 		return EINVAL;
 	}
@@ -1187,7 +1188,7 @@ madvise(__unused proc_t p, struct madvise_args *uap, __unused int32_t *retval)
 	    uap->behav == MADV_FREE_REUSABLE)) {
 		printf("** FOURK_COMPAT: %d[%s] "
 		    "failing madvise(0x%llx,0x%llx,%s)\n",
-		    p->p_pid, p->p_comm, start, size,
+		    proc_getpid(p), p->p_comm, start, size,
 		    ((uap->behav == MADV_FREE_REUSABLE)
 		    ? "MADV_FREE_REUSABLE"
 		    : "MADV_FREE"));
@@ -1272,8 +1273,9 @@ mincore(__unused proc_t p, struct mincore_args *uap, __unused int32_t *retval)
 
 	req_vec_size_pages = (end - addr) >> effective_page_shift;
 	cur_vec_size_pages = MIN(req_vec_size_pages, (MAX_PAGE_RANGE_QUERY >> effective_page_shift));
+	size_t kernel_vec_size = cur_vec_size_pages;
 
-	kernel_vec = (void*) _MALLOC(cur_vec_size_pages * sizeof(char), M_TEMP, M_WAITOK | M_ZERO);
+	kernel_vec = (char *)kalloc_data(kernel_vec_size, Z_WAITOK | Z_ZERO);
 
 	if (kernel_vec == NULL) {
 		return ENOMEM;
@@ -1285,10 +1287,11 @@ mincore(__unused proc_t p, struct mincore_args *uap, __unused int32_t *retval)
 	vec = uap->vec;
 
 	pqueryinfo_vec_size = cur_vec_size_pages * sizeof(struct vm_page_info_basic);
-	info = (void*) _MALLOC(pqueryinfo_vec_size, M_TEMP, M_WAITOK);
+
+	info = (struct vm_page_info_basic *)kalloc_data(pqueryinfo_vec_size, Z_WAITOK);
 
 	if (info == NULL) {
-		FREE(kernel_vec, M_TEMP);
+		kfree_data(kernel_vec, kernel_vec_size);
 		return ENOMEM;
 	}
 
@@ -1366,8 +1369,8 @@ mincore(__unused proc_t p, struct mincore_args *uap, __unused int32_t *retval)
 		first_addr = addr;
 	}
 
-	FREE(kernel_vec, M_TEMP);
-	FREE(info, M_TEMP);
+	kfree_data(info, pqueryinfo_vec_size);
+	kfree_data(kernel_vec, kernel_vec_size);
 
 	if (error) {
 		return EFAULT;
@@ -1540,6 +1543,12 @@ mremap_encrypted(__unused struct proc *p, struct mremap_encrypted_args *uap, __u
 	    __FUNCTION__, vpath, cryptid, cputype, cpusubtype, (uint64_t)user_addr, (uint64_t)user_size);
 #endif
 
+	if (user_size == 0) {
+		printf("%s:%d '%s': user_addr 0x%llx user_size 0x%llx cryptid 0x%x ignored\n", __FUNCTION__, __LINE__, vpath, user_addr, user_size, cryptid);
+		zfree(ZV_NAMEI, vpath);
+		return 0;
+	}
+
 	/* set up decrypter first */
 	crypt_file_data_t crypt_data = {
 		.filename = vpath,
@@ -1550,7 +1559,7 @@ mremap_encrypted(__unused struct proc *p, struct mremap_encrypted_args *uap, __u
 #if VM_MAP_DEBUG_APPLE_PROTECT
 	if (vm_map_debug_apple_protect) {
 		printf("APPLE_PROTECT: %d[%s] map %p [0x%llx:0x%llx] %s(%s) -> 0x%x\n",
-		    p->p_pid, p->p_comm,
+		    proc_getpid(p), p->p_comm,
 		    user_map,
 		    (uint64_t) user_addr,
 		    (uint64_t) (user_addr + user_size),

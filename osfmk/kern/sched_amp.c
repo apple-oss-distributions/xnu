@@ -108,6 +108,9 @@ sched_amp_thread_should_yield(processor_t processor, thread_t thread);
 static void
 sched_amp_thread_group_recommendation_change(struct thread_group *tg, cluster_type_t new_recommendation);
 
+static bool
+sched_amp_thread_eligible_for_pset(thread_t thread, processor_set_t pset);
+
 const struct sched_dispatch_table sched_amp_dispatch = {
 	.sched_name                                     = "amp",
 	.init                                           = sched_amp_init,
@@ -144,11 +147,12 @@ const struct sched_dispatch_table sched_amp_dispatch = {
 	.thread_avoid_processor                         = sched_amp_thread_avoid_processor,
 	.processor_balance                              = sched_amp_balance,
 
-	.rt_runq                                        = sched_amp_rt_runq,
-	.rt_init                                        = sched_amp_rt_init,
-	.rt_queue_shutdown                              = sched_amp_rt_queue_shutdown,
-	.rt_runq_scan                                   = sched_amp_rt_runq_scan,
-	.rt_runq_count_sum                              = sched_amp_rt_runq_count_sum,
+	.rt_runq                                        = sched_rtlocal_runq,
+	.rt_init                                        = sched_rtlocal_init,
+	.rt_queue_shutdown                              = sched_rtlocal_queue_shutdown,
+	.rt_runq_scan                                   = sched_rtlocal_runq_scan,
+	.rt_runq_count_sum                              = sched_rtlocal_runq_count_sum,
+	.rt_steal_thread                                = sched_rtlocal_steal_thread,
 
 	.qos_max_parallelism                            = sched_amp_qos_max_parallelism,
 	.check_spill                                    = sched_amp_check_spill,
@@ -159,6 +163,8 @@ const struct sched_dispatch_table sched_amp_dispatch = {
 	.update_thread_bucket                           = sched_update_thread_bucket,
 	.pset_made_schedulable                          = sched_pset_made_schedulable,
 	.thread_group_recommendation_change             = sched_amp_thread_group_recommendation_change,
+	.cpu_init_completed                             = NULL,
+	.thread_eligible_for_pset                       = sched_amp_thread_eligible_for_pset,
 };
 
 extern processor_set_t ecore_set;
@@ -209,6 +215,11 @@ sched_amp_processor_init(processor_t processor)
 static void
 sched_amp_pset_init(processor_set_t pset)
 {
+	if (pset->pset_cluster_type == PSET_AMP_P) {
+		pcore_set = pset;
+	} else {
+		ecore_set = pset;
+	}
 	run_queue_init(&pset->pset_runq);
 }
 
@@ -290,7 +301,7 @@ sched_amp_thread_should_yield(processor_t processor, thread_t thread)
 	}
 
 	if ((processor->processor_set->pset_cluster_type == PSET_AMP_E) && (recommended_pset_type(thread) == PSET_AMP_P)) {
-		return pcore_set->pset_runq.count > 0;
+		return pcore_set && pcore_set->pset_runq.count > 0;
 	}
 
 	return false;
@@ -483,6 +494,10 @@ sched_amp_steal_thread(processor_set_t pset)
 	bool spill_pending = bit_test(pset->pending_spill_cpu_mask, processor->cpu_id);
 	bit_clear(pset->pending_spill_cpu_mask, processor->cpu_id);
 
+	if (!pcore_set) {
+		return THREAD_NULL;
+	}
+
 	nset = pcore_set;
 
 	assert(nset != pset);
@@ -514,7 +529,7 @@ static void
 sched_amp_thread_update_scan(sched_update_scan_context_t scan_context)
 {
 	boolean_t               restart_needed = FALSE;
-	processor_t             processor = processor_list;
+	processor_t             processor;
 	processor_set_t         pset;
 	thread_t                thread;
 	spl_t                   s;
@@ -525,7 +540,12 @@ sched_amp_thread_update_scan(sched_update_scan_context_t scan_context)
 	 */
 
 	do {
-		do {
+		for (int i = 0; i < machine_info.logical_cpu_max; i++) {
+			processor = processor_array[i];
+			if (processor == NULL) {
+				continue;
+			}
+
 			pset = processor->processor_set;
 
 			s = splsched();
@@ -547,7 +567,7 @@ sched_amp_thread_update_scan(sched_update_scan_context_t scan_context)
 					break;
 				}
 			}
-		} while ((processor = processor->processor_list) != NULL);
+		}
 
 		/* Ok, we now have a collection of candidates -- fix them. */
 		thread_update_process_threads();
@@ -588,6 +608,10 @@ sched_amp_thread_update_scan(sched_update_scan_context_t scan_context)
 static bool
 pcores_recommended(thread_t thread)
 {
+	if (!pcore_set) {
+		return false;
+	}
+
 	if (pcore_set->online_processor_count == 0) {
 		/* No pcores available */
 		return false;
@@ -669,41 +693,19 @@ sched_amp_thread_group_recommendation_change(struct thread_group *tg, cluster_ty
 	sched_amp_bounce_thread_group_from_ecores(ecore_set, tg);
 }
 
-#if DEVELOPMENT || DEBUG
-extern int32_t sysctl_get_bound_cpuid(void);
-int32_t
-sysctl_get_bound_cpuid(void)
+static bool
+sched_amp_thread_eligible_for_pset(thread_t thread, processor_set_t pset)
 {
-	int32_t cpuid = -1;
-	thread_t self = current_thread();
-
-	processor_t processor = self->bound_processor;
-	if (processor == NULL) {
-		cpuid = -1;
+	if (recommended_pset_type(thread) == PSET_AMP_P) {
+		/* P-recommended threads are eligible to execute on either E or P clusters */
+		return true;
 	} else {
-		cpuid = processor->cpu_id;
+		/* E-recommended threads are eligible to execute on E clusters only */
+		return pset->pset_type == PSET_AMP_E;
 	}
-
-	return cpuid;
 }
 
-extern void sysctl_thread_bind_cpuid(int32_t cpuid);
-void
-sysctl_thread_bind_cpuid(int32_t cpuid)
-{
-	if (cpuid < 0 || cpuid >= MAX_SCHED_CPUS) {
-		return;
-	}
-
-	processor_t processor = processor_array[cpuid];
-	if (processor == PROCESSOR_NULL) {
-		return;
-	}
-
-	thread_bind(processor);
-
-	thread_block(THREAD_CONTINUE_NULL);
-}
+#if DEVELOPMENT || DEBUG
 
 extern char sysctl_get_bound_cluster_type(void);
 char
@@ -711,13 +713,13 @@ sysctl_get_bound_cluster_type(void)
 {
 	thread_t self = current_thread();
 
-	if (self->sched_flags & TH_SFLAG_ECORE_ONLY) {
+	if (self->th_bound_cluster_id == THREAD_BOUND_CLUSTER_NONE) {
+		return '0';
+	} else if (pset_array[self->th_bound_cluster_id]->pset_cluster_type == PSET_AMP_E) {
 		return 'E';
-	} else if (self->sched_flags & TH_SFLAG_PCORE_ONLY) {
+	} else {
 		return 'P';
 	}
-
-	return '0';
 }
 
 extern void sysctl_thread_bind_cluster_type(char cluster_type);
@@ -727,44 +729,6 @@ sysctl_thread_bind_cluster_type(char cluster_type)
 	thread_bind_cluster_type(current_thread(), cluster_type, false);
 }
 
-extern char sysctl_get_task_cluster_type(void);
-char
-sysctl_get_task_cluster_type(void)
-{
-	thread_t thread = current_thread();
-	task_t task = thread->task;
+#endif /* DEVELOPMENT || DEBUG */
 
-	if (task->pset_hint == ecore_set) {
-		return 'E';
-	} else if (task->pset_hint == pcore_set) {
-		return 'P';
-	}
-
-	return '0';
-}
-
-extern void sysctl_task_set_cluster_type(char cluster_type);
-void
-sysctl_task_set_cluster_type(char cluster_type)
-{
-	thread_t thread = current_thread();
-	task_t task = thread->task;
-
-	switch (cluster_type) {
-	case 'e':
-	case 'E':
-		task->pset_hint = ecore_set;
-		break;
-	case 'p':
-	case 'P':
-		task->pset_hint = pcore_set;
-		break;
-	default:
-		break;
-	}
-
-	thread_block(THREAD_CONTINUE_NULL);
-}
-#endif
-
-#endif
+#endif /* __AMP__ */

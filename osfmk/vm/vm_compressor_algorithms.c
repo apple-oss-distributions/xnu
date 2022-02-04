@@ -45,9 +45,6 @@
 #define LZ4_SCRATCH_ALIGN (64)
 #define WKC_SCRATCH_ALIGN (64)
 
-#define memcpy_T_NT memcpy
-#define memcpy_NT_T memcpy
-
 typedef union {
 	uint8_t lz4state[lz4_encode_scratch_size]__attribute((aligned(LZ4_SCRATCH_ALIGN)));
 	uint8_t wkscratch[0] __attribute((aligned(WKC_SCRATCH_ALIGN))); // TODO
@@ -222,7 +219,7 @@ WKdm_hv(uint32_t *wkbuf)
 	uint32_t *inw = (uint32_t *) wkbuf;
 	if (*inw != MZV_MAGIC) {
 		if ((*inw | *(inw + 1) | *(inw + 2)) & 0xFFFF0000) {
-			panic("WKdm(%p): invalid header 0x%x 0x%x 0x%x\n", wkbuf, *inw, *(inw + 1), *(inw + 2));
+			panic("WKdm(%p): invalid header 0x%x 0x%x 0x%x", wkbuf, *inw, *(inw + 1), *(inw + 2));
 		}
 	}
 #else /* DEVELOPMENT || DEBUG */

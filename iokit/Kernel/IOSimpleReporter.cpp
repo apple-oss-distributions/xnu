@@ -152,3 +152,20 @@ IOSimpleReporter::getValue(uint64_t channel_id)
 	unlockReporter();
 	return simple_value;
 }
+
+/* static */ OSPtr<IOReportLegendEntry>
+IOSimpleReporter::createLegend(const uint64_t *channelIDs,
+    const char **channelNames,
+    int channelCount,
+    IOReportCategories categories,
+    IOReportUnit unit)
+{
+	IOReportChannelType channelType = {
+		.categories = categories,
+		.report_format = kIOReportFormatSimple,
+		.nelements = 1,
+		.element_idx = 0
+	};
+
+	return IOReporter::legendWith(channelIDs, channelNames, channelCount, channelType, unit);
+}

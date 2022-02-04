@@ -2,28 +2,47 @@
 # Common definitions for test directories
 #
 
+ifeq ($(RC_XBS),YES)
+_v =
+XCRUN := /usr/bin/xcrun -verbose
+else ifeq ($(VERBOSE),YES)
+_v =
+XCRUN := /usr/bin/xcrun -verbose
+else
+_v = @
 XCRUN := /usr/bin/xcrun
-SDKROOT ?= macosx.internal
+endif
+
+SDKROOT ?= macosx
 
 # SDKROOT may be passed as a shorthand like "iphoneos.internal". We
 # must resolve these to a full path and override SDKROOT.
-
-SDKROOT_RESOLVED := $(shell xcrun -sdk $(SDKROOT) -show-sdk-path)
+ifeq ($(origin SDKROOT_RESOLVED),undefined)
+export SDKROOT_RESOLVED := $(shell $(XCRUN) -sdk $(SDKROOT) -show-sdk-path)
 ifeq ($(strip $(SDKROOT)_$(SDKROOT_RESOLVED)),/_)
 SDKROOT_RESOLVED := /
 endif
+endif
 override SDKROOT = $(SDKROOT_RESOLVED)
+TARGETSDK:=$(SDKROOT_RESOLVED)
+SDKROOTPATH:=$(SDKROOT_RESOLVED)
 
-SDKVERSION := $(shell $(XCRUN) -sdk $(SDKROOT) -show-sdk-version)
+ifeq ($(origin SDKVERSION),undefined)
+export SDKVERSION := $(shell $(XCRUN) -sdk $(SDKROOT) -show-sdk-version)
+endif
 
-PLATFORMPATH := $(shell xcrun -sdk $(SDKROOT) -show-sdk-platform-path)
-PLATFORM := $(shell echo $(PLATFORMPATH) | sed 's,^.*/\([^/]*\)\.platform$$,\1,')
+ifeq ($(origin PLATFORM),undefined)
+export PLATFORMPATH := $(shell $(XCRUN) -sdk $(SDKROOT) -show-sdk-platform-path)
+export PLATFORM := $(shell echo $(PLATFORMPATH) | sed 's,^.*/\([^/]*\)\.platform$$,\1,')
 
 ifeq ($(PLATFORM),watchOS)
-    PLATFORM := WatchOS
+    export PLATFORM := WatchOS
+endif
 endif
 
 SUPPORTED_EMBEDDED_PLATFORMS := iPhoneOS iPhoneOSNano tvOS AppleTVOS WatchOS BridgeOS
+
+
 Embedded = $(if $(filter $(SUPPORTED_EMBEDDED_PLATFORMS),$(PLATFORM)),YES,NO)
 
 #
@@ -49,12 +68,33 @@ endif
 
 DEPLOYMENT_TARGET_DEFINES = -DPLATFORM_$(PLATFORM)
 
-ifeq ($(RC_XBS),YES)
-_v =
-else ifeq ($(VERBOSE),YES)
-_v =
-else
-_v = @
+#
+# Locate common utilities
+# These must all be exported into the environment and checked for already being
+# set to avoid calling xcrun repeatedly during a recursive make
+#
+ifeq ($(origin CC),default)
+	export CC := $(shell $(XCRUN) -sdk "$(TARGETSDK)" -find clang)
+endif
+ifeq ($(origin MIG),undefined)
+# Since mig comes from the XcodeDefault toolchain, it may complain about an
+# invalid version number if no SDKROOT environment variable is provided.
+	export MIG := SDKROOT=$(SDKROOT) $(shell $(XCRUN) -sdk "$(TARGETSDK)" -find mig)
+endif
+ifeq ($(origin CODESIGN),undefined)
+	export CODESIGN := $(shell $(XCRUN) -sdk "$(TARGETSDK)" -find codesign)
+endif
+ifeq ($(origin CODESIGN_ALLOCATE),undefined)
+	export CODESIGN_ALLOCATE := $(shell $(XCRUN) -sdk "$(TARGETSDK)" -find codesign_allocate)
+endif
+ifeq ($(origin PLUTIL),undefined)
+	export PLUTIL := $(shell $(XCRUN) -sdk "$(TARGETSDK)" -find plutil)
+endif
+ifeq ($(origin STRIP),undefined)
+	export STRIP := $(shell $(XCRUN) -sdk "$(TARGETSDK)" -find strip)
+endif
+ifeq ($(origin DSYMUTIL),undefined)
+	export DSYMUTIL := $(shell $(XCRUN) -sdk "$(TARGETSDK)" -find dsymutil)
 endif
 
 # These are convenience functions for filtering based on substrings, as the

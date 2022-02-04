@@ -123,11 +123,12 @@ struct selinfo {
 	u_int   si_flags;               /* see below */
 };
 
-#define SI_COLL         0x0001          /* collision occurred */
+#define SI_COLL         0x0001          /* obsolete */
 #define SI_RECORDED     0x0004          /* select has been recorded */
 #define SI_INITED       0x0008          /* selinfo has been inited */
-#define SI_CLEAR        0x0010          /* selinfo has been cleared */
+#define SI_CLEAR        0x0010          /* obsolete */
 #define SI_KNPOSTING    0x0020          /* posting to knotes */
+#define SI_SELSPEC      0x0040          /* has spec_filtops knote hooked */
 
 #else
 struct selinfo;
@@ -136,9 +137,35 @@ struct selinfo;
 __BEGIN_DECLS
 
 extern int selwait;
+
+/*
+ * Now these are the laws of VNOP_SELECT, as old and as true as the sky,
+ * And the device that shall keep it may prosper, but the device that shall
+ * break it must receive ENODEV:
+ *
+ * 1. Take a lock to protect against other selects on the same vnode.
+ * 2. Return 1 if data is ready to be read.
+ * 3. Return 0 and call `selrecord` on a handy `selinfo` structure if there
+ *    is no data.
+ * 4. Call `selwakeup` when the vnode has an active `selrecord` and data
+ *    can be read or written (depending on the seltype).
+ * 5. If there's a `selrecord` and no corresponding `selwakeup`, but the
+ *    vnode is going away, call `selthreadclear`.
+ */
 void    selrecord(proc_t selector, struct selinfo *, void *);
 void    selwakeup(struct selinfo *);
 void    selthreadclear(struct selinfo *);
+
+#if XNU_KERNEL_PRIVATE
+struct  knote;
+struct  _select;
+void    select_cleanup_uthread(struct _select *);
+
+#define SELSPEC_RECORD_MARKER   ((struct waitq_set *)-1)
+typedef void (^selspec_record_hook_t)(struct selinfo *sip);
+void selspec_attach(struct knote *, struct selinfo *);
+void selspec_detach(struct knote *);
+#endif
 
 __END_DECLS
 

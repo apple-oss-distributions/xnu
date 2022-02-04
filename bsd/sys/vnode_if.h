@@ -1818,9 +1818,13 @@ extern errno_t VNOP_REMOVENAMEDSTREAM(vnode_t, vnode_t, const char *, int flags,
 
 __options_decl(vnode_verify_flags_t, uint32_t, {
 	VNODE_VERIFY_DEFAULT = 0,
+	VNODE_VERIFY_CONTEXT_ALLOC = 1,
+	VNODE_VERIFY_WITH_CONTEXT = 2,
+	VNODE_VERIFY_CONTEXT_FREE = 4,
 });
 
 #define VNODE_VERIFY_DEFAULT VNODE_VERIFY_DEFAULT
+#define VNODE_VERIFY_WITH_CONTEXT VNODE_VERIFY_WITH_CONTEXT
 
 struct vnop_verify_args {
 	struct vnodeop_desc *a_desc;
@@ -1829,6 +1833,7 @@ struct vnop_verify_args {
 	uint8_t  *a_buf;
 	size_t a_bufsize;
 	size_t *a_verifyblksize;
+	void **a_verify_ctxp;
 	vnode_verify_flags_t a_flags;
 	vfs_context_t a_context;
 };
@@ -1846,12 +1851,13 @@ struct vnop_verify_args {
  *  @param bufsize size of data buffer to be verified.
  *  @param verifyblksize pointer to size of verification block size in use for this file. If the verification block size is 0,
  *  no verification will be performed. The verification block size can be any value which is a power of two upto 128KiB.
+ *  @param verify_ctxp context for verification to allocated by the FS and used in verification.
  *  @param flags modifier flags.
  *  @param ctx Context to authenticate for verify request; currently often set to NULL.
  *  @return 0 for success, else an error code.
  */
 #ifdef XNU_KERNEL_PRIVATE
-extern errno_t VNOP_VERIFY(vnode_t, off_t, uint8_t *, size_t, size_t *, vnode_verify_flags_t, vfs_context_t);
+extern errno_t VNOP_VERIFY(vnode_t, off_t, uint8_t *, size_t, size_t *, void **, vnode_verify_flags_t, vfs_context_t);
 #endif /* XNU_KERNEL_PRIVATE */
 
 #endif // defined(__APPLE_API_UNSTABLE)

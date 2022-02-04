@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2019 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -168,7 +168,7 @@ rip6_input(
 
 	init_sin6(&rip6src, m); /* general init */
 
-	lck_rw_lock_shared(ripcbinfo.ipi_lock);
+	lck_rw_lock_shared(&ripcbinfo.ipi_lock);
 	LIST_FOREACH(in6p, &ripcb, inp_list) {
 		if ((in6p->in6p_vflag & INP_IPV6) == 0) {
 			continue;
@@ -178,11 +178,11 @@ rip6_input(
 			continue;
 		}
 		if (!IN6_IS_ADDR_UNSPECIFIED(&in6p->in6p_laddr) &&
-		    !IN6_ARE_ADDR_EQUAL(&in6p->in6p_laddr, &ip6->ip6_dst)) {
+		    !in6_are_addr_equal_scoped(&in6p->in6p_laddr, &ip6->ip6_dst, in6p->inp_lifscope, ifp->if_index)) {
 			continue;
 		}
 		if (!IN6_IS_ADDR_UNSPECIFIED(&in6p->in6p_faddr) &&
-		    !IN6_ARE_ADDR_EQUAL(&in6p->in6p_faddr, &ip6->ip6_src)) {
+		    !in6_are_addr_equal_scoped(&in6p->in6p_faddr, &ip6->ip6_src, in6p->inp_fifscope, ifp->if_index)) {
 			continue;
 		}
 
@@ -292,7 +292,7 @@ rip6_input(
 	}
 
 unlock:
-	lck_rw_done(ripcbinfo.ipi_lock);
+	lck_rw_done(&ripcbinfo.ipi_lock);
 
 	return IPPROTO_DONE;
 }
@@ -379,6 +379,7 @@ rip6_output(
 	bool cfil_faddr_use = false;
 	uint32_t cfil_so_state_change_cnt = 0;
 	uint32_t cfil_so_options = 0;
+	uint32_t sifscope = IFSCOPE_NONE, difscope = IFSCOPE_NONE;
 	struct sockaddr *cfil_faddr = NULL;
 	struct sockaddr_in6 *cfil_sin6 = NULL;
 #endif
@@ -406,7 +407,7 @@ rip6_output(
 				dstsock = cfil_sin6;
 			} else if ((so->so_state_change_cnt != cfil_so_state_change_cnt) &&
 			    (in6p->in6p_fport != cfil_sin6->sin6_port ||
-			    !IN6_ARE_ADDR_EQUAL(&in6p->in6p_faddr, &cfil_sin6->sin6_addr))) {
+			    !in6_are_addr_equal_scoped(&in6p->in6p_faddr, &cfil_sin6->sin6_addr, in6p->inp_fifscope, cfil_sin6->sin6_scope_id))) {
 				/*
 				 * Socket is connected but socket state and dest addr/port changed.
 				 * We need to use the saved faddr and socket options.
@@ -472,6 +473,9 @@ rip6_output(
 	if (in6p->inp_flags & INP_BOUND_IF) {
 		ip6oa.ip6oa_boundif = in6p->inp_boundifp->if_index;
 		ip6oa.ip6oa_flags |= IP6OAF_BOUND_IF;
+	} else if (!in6_embedded_scope && IN6_IS_SCOPE_EMBED(&in6p->in6p_faddr)) {
+		ip6oa.ip6oa_boundif = dstsock->sin6_scope_id;
+		ip6oa.ip6oa_flags |= IP6OAF_BOUND_IF;
 	}
 	if (INP_NO_CELLULAR(in6p)) {
 		ip6oa.ip6oa_flags |= IP6OAF_NO_CELLULAR;
@@ -531,7 +535,7 @@ rip6_output(
 	if (in6p->inp_flow == 0 && in6p->in6p_flags & IN6P_AUTOFLOWLABEL) {
 		in6p->inp_flow &= ~IPV6_FLOWLABEL_MASK;
 		in6p->inp_flow |=
-		    (htonl(in6p->inp_flowhash) & IPV6_FLOWLABEL_MASK);
+		    (htonl(ip6_randomflowlabel()) & IPV6_FLOWLABEL_MASK);
 	}
 
 	M_PREPEND(m, sizeof(*ip6), M_WAIT, 1);
@@ -569,8 +573,11 @@ rip6_output(
 		 */
 		ifnet_head_lock_shared();
 		if (optp && (pi = optp->ip6po_pktinfo) && pi->ipi6_ifindex) {
-			ip6->ip6_dst.s6_addr16[1] = htons((uint16_t)pi->ipi6_ifindex);
+			if (in6_embedded_scope) {
+				ip6->ip6_dst.s6_addr16[1] = htons((uint16_t)pi->ipi6_ifindex);
+			}
 			oifp = ifindex2ifnet[pi->ipi6_ifindex];
+			difscope = pi->ipi6_ifindex;
 			if (oifp != NULL) {
 				ifnet_reference(oifp);
 			}
@@ -578,7 +585,10 @@ rip6_output(
 		    im6o != NULL && im6o_multicast_ifp != NULL) {
 			oifp = im6o_multicast_ifp;
 			ifnet_reference(oifp);
-			ip6->ip6_dst.s6_addr16[1] = htons(oifp->if_index);
+			if (in6_embedded_scope) {
+				ip6->ip6_dst.s6_addr16[1] = htons(oifp->if_index);
+			}
+			difscope = oifp->if_index;
 		} else if (dstsock->sin6_scope_id) {
 			/*
 			 * boundary check
@@ -591,10 +601,15 @@ rip6_output(
 				ifnet_head_done();
 				goto bad;
 			}
-			ip6->ip6_dst.s6_addr16[1]
-			        = htons(dstsock->sin6_scope_id & 0xffff);/*XXX*/
+			if (in6_embedded_scope) {
+				ip6->ip6_dst.s6_addr16[1]
+				        = htons(dstsock->sin6_scope_id & 0xffff);        /*XXX*/
+			}
+			difscope = dstsock->sin6_scope_id;
 		}
 		ifnet_head_done();
+
+		ip6_output_setdstifscope(m, difscope, NULL);
 	}
 
 	/*
@@ -608,17 +623,34 @@ rip6_output(
 		if (israw != 0 && optp && optp->ip6po_pktinfo && !IN6_IS_ADDR_UNSPECIFIED(&optp->ip6po_pktinfo->ipi6_addr)) {
 			in6a = &optp->ip6po_pktinfo->ipi6_addr;
 			flags |= IPV6_FLAG_NOSRCIFSEL;
-		} else if ((in6a = in6_selectsrc(dstsock, optp, in6p,
-		    &in6p->in6p_route, NULL, &storage, ip6oa.ip6oa_boundif,
-		    &error)) == 0) {
-			if (error == 0) {
-				error = EADDRNOTAVAIL;
-			}
-			goto bad;
+			sifscope = optp->ip6po_pktinfo->ipi6_ifindex;
 		} else {
-			ip6oa.ip6oa_flags |= IP6OAF_BOUND_SRCADDR;
+			struct ifnet *src_ifp = NULL;
+			in6a = in6_selectsrc(dstsock, optp, in6p,
+			    &in6p->in6p_route, &src_ifp, &storage, ip6oa.ip6oa_boundif,
+			    &error);
+			if (src_ifp != NULL) {
+				in6p->inp_lifscope  = src_ifp->if_index;
+				ifnet_release(src_ifp);
+			} else {
+				in6p->inp_lifscope = ip6oa.ip6oa_boundif;
+			}
+			if (in6a != 0) {
+				ip6oa.ip6oa_flags |= IP6OAF_BOUND_SRCADDR;
+			} else {
+				if (error == 0) {
+					error = EADDRNOTAVAIL;
+				}
+				goto bad;
+			}
 		}
+
 		ip6->ip6_src = *in6a;
+		if (IN6_IS_SCOPE_EMBED(in6a) && sifscope == IFSCOPE_NONE) {
+			sifscope = difscope;
+		}
+		ip6_output_setsrcifscope(m, sifscope, NULL);
+
 		if (in6p->in6p_route.ro_rt != NULL) {
 			RT_LOCK(in6p->in6p_route.ro_rt);
 			if (in6p->in6p_route.ro_rt->rt_ifp != NULL) {
@@ -765,6 +797,12 @@ rip6_output(
 	} else {
 		m->m_pkthdr.tx_rawip_e_pid = 0;
 	}
+#if (DEBUG || DEVELOPMENT)
+	if (so->so_flags & SOF_MARK_WAKE_PKT) {
+		so->so_flags &= ~SOF_MARK_WAKE_PKT;
+		m->m_pkthdr.pkt_flags |= PKTF_WAKE_PKT;
+	}
+#endif /* (DEBUG || DEVELOPMENT) */
 
 	if (im6o != NULL) {
 		IM6O_ADDREF(im6o);
@@ -826,7 +864,7 @@ rip6_output(
 	 * If output interface was cellular/expensive, and this socket is
 	 * denied access to it, generate an event.
 	 */
-	if (error != 0 && (ip6oa.ip6oa_retflags & IP6OARF_IFDENIED) &&
+	if (error != 0 && (ip6oa.ip6oa_flags & IP6OAF_R_IFDENIED) &&
 	    (INP_NO_CELLULAR(in6p) || INP_NO_EXPENSIVE(in6p) || INP_NO_CONSTRAINED(in6p))) {
 		soevent(in6p->inp_socket, (SO_FILT_HINT_LOCKED |
 		    SO_FILT_HINT_IFDENIED));
@@ -959,11 +997,8 @@ rip6_attach(struct socket *so, int proto, struct proc *p)
 	inp->in6p_ip6_nxt = (char)proto;
 	inp->in6p_hops = -1;    /* use kernel default */
 	inp->in6p_cksum = -1;
-	MALLOC(inp->in6p_icmp6filt, struct icmp6_filter *,
-	    sizeof(struct icmp6_filter), M_PCB, M_WAITOK);
-	if (inp->in6p_icmp6filt == NULL) {
-		return ENOMEM;
-	}
+	inp->in6p_icmp6filt = kalloc_type(struct icmp6_filter,
+	    Z_WAITOK | Z_NOFAIL);
 	ICMP6_FILTER_SETPASSALL(inp->in6p_icmp6filt);
 	return 0;
 }
@@ -979,7 +1014,7 @@ rip6_detach(struct socket *so)
 	}
 	/* xxx: RSVP */
 	if (inp->in6p_icmp6filt) {
-		FREE(inp->in6p_icmp6filt, M_PCB);
+		kfree_type(struct icmp6_filter, inp->in6p_icmp6filt);
 		inp->in6p_icmp6filt = NULL;
 	}
 	in6_pcbdetach(inp);
@@ -1002,6 +1037,7 @@ rip6_disconnect(struct socket *so)
 		return ENOTCONN;
 	}
 	inp->in6p_faddr = in6addr_any;
+	inp->inp_fifscope = IFSCOPE_NONE;
 	return rip6_abort(so);
 }
 
@@ -1013,6 +1049,7 @@ rip6_bind(struct socket *so, struct sockaddr *nam, struct proc *p)
 	struct sockaddr_in6 sin6;
 	struct ifaddr *ifa = NULL;
 	struct ifnet *outif = NULL;
+	uint32_t ifscope = IFSCOPE_NONE;
 	int error;
 
 	if (inp == NULL
@@ -1034,14 +1071,16 @@ rip6_bind(struct socket *so, struct sockaddr *nam, struct proc *p)
 	bzero(&sin6, sizeof(sin6));
 	*(&sin6) = *SIN6(nam);
 
-	if ((error = sa6_embedscope(&sin6, ip6_use_defzone)) != 0) {
+	if ((error = sa6_embedscope(&sin6, ip6_use_defzone, &ifscope)) != 0) {
 		return error;
 	}
 
 	/* Sanitize local copy for address searches */
 	sin6.sin6_flowinfo = 0;
-	sin6.sin6_scope_id = 0;
 	sin6.sin6_port = 0;
+	if (in6_embedded_scope) {
+		sin6.sin6_scope_id = 0;
+	}
 
 	if (!IN6_IS_ADDR_UNSPECIFIED(&sin6.sin6_addr) &&
 	    (ifa = ifa_ifwithaddr(SA(&sin6))) == 0) {
@@ -1062,7 +1101,8 @@ rip6_bind(struct socket *so, struct sockaddr *nam, struct proc *p)
 	}
 	inp->in6p_laddr = sin6.sin6_addr;
 	inp->in6p_last_outifp = outif;
-
+	inp->inp_lifscope = ifscope;
+	in6_verify_ifscope(&inp->in6p_laddr, inp->inp_lifscope);
 	return 0;
 }
 
@@ -1112,7 +1152,7 @@ rip6_connect(struct socket *so, struct sockaddr *nam, __unused struct proc *p)
 #endif
 
 	/* KAME hack: embed scopeid */
-	if (in6_embedscope(&SIN6(nam)->sin6_addr, SIN6(nam), inp, NULL, NULL) != 0) {
+	if (in6_embedscope(&SIN6(nam)->sin6_addr, SIN6(nam), inp, NULL, NULL, IN6_NULL_IF_EMBEDDED_SCOPE(&SIN6(nam)->sin6_scope_id)) != 0) {
 		return EINVAL;
 	}
 
@@ -1120,8 +1160,17 @@ rip6_connect(struct socket *so, struct sockaddr *nam, __unused struct proc *p)
 	    inp->inp_boundifp->if_index : IFSCOPE_NONE;
 
 	/* Source address selection. XXX: need pcblookup? */
+	struct ifnet *src_ifp = NULL;
 	in6a = in6_selectsrc(addr, inp->in6p_outputopts, inp, &inp->in6p_route,
-	    NULL, &storage, ifscope, &error);
+	    &src_ifp, &storage, ifscope, &error);
+	if (src_ifp != NULL && in6a != NULL) {
+		inp->inp_lifscope = in6_addr2scopeid(src_ifp, in6a);
+		ifnet_release(src_ifp);
+	}
+	if (IN6_IS_SCOPE_EMBED(&addr->sin6_addr) && inp->inp_lifscope == IFSCOPE_NONE) {
+		inp->inp_lifscope = addr->sin6_scope_id;
+	}
+
 	if (in6a == NULL) {
 		return error ? error : EADDRNOTAVAIL;
 	}
@@ -1131,6 +1180,9 @@ rip6_connect(struct socket *so, struct sockaddr *nam, __unused struct proc *p)
 		outif = inp->in6p_route.ro_rt->rt_ifp;
 	}
 	inp->in6p_last_outifp = outif;
+	in6_verify_ifscope(&inp->in6p_laddr, inp->inp_lifscope);
+	inp->inp_fifscope = addr->sin6_scope_id;
+	in6_verify_ifscope(&inp->in6p_faddr, inp->inp_fifscope);
 
 	soisconnected(so);
 	return 0;

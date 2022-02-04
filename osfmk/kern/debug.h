@@ -37,10 +37,13 @@
 #include <uuid/uuid.h>
 #include <mach/boolean.h>
 #include <mach/kern_return.h>
+#include <mach/vm_types.h>
 
 #ifndef XNU_KERNEL_PRIVATE
 #include <TargetConditionals.h>
 #endif
+
+__BEGIN_DECLS
 
 #ifdef __APPLE_API_PRIVATE
 #ifdef __APPLE_API_UNSTABLE
@@ -211,6 +214,7 @@ enum micro_snapshot_flags {
 	kUserMode               = 0x4, /* interrupted usermode, or armed by usermode */
 	kIORecord               = 0x8,
 	kPMIRecord              = 0x10,
+	kMACFRecord             = 0x20, /* armed by MACF policy */
 };
 
 /*
@@ -261,7 +265,7 @@ __options_decl(stackshot_flags_t, uint64_t, {
 	STACKSHOT_ASID                             = 0x10000000,
 	STACKSHOT_PAGE_TABLES                      = 0x20000000,
 	STACKSHOT_DISABLE_LATENCY_INFO             = 0x40000000,
-});
+}); // Note: Add any new flags to kcdata.py (stackshot_in_flags)
 
 __options_decl(microstackshot_flags_t, uint32_t, {
 	STACKSHOT_GET_MICROSTACKSHOT               = 0x10,
@@ -286,6 +290,10 @@ __options_decl(microstackshot_flags_t, uint32_t, {
 #define KF_INTERRUPT_MASKED_DEBUG_OVRD (0x40)
 #define KF_TRAPTRACE_OVRD (0x80)
 #define KF_IOTRACE_OVRD (0x100)
+#define KF_INTERRUPT_MASKED_DEBUG_STACKSHOT_OVRD (0x200)
+#define KF_INTERRUPT_MASKED_DEBUG_PMC_OVRD (0x400)
+#define KF_RW_LOCK_DEBUG_OVRD (0x800)
+#define KF_MADVISE_FREE_DEBUG_OVRD (0x1000)
 
 boolean_t kern_feature_override(uint32_t fmask);
 
@@ -335,6 +343,7 @@ struct embedded_panic_header {
 #define EMBEDDED_PANIC_HEADER_FLAG_COREDUMP_FAILED               0x200
 #define EMBEDDED_PANIC_HEADER_FLAG_COMPRESS_FAILED               0x400
 #define EMBEDDED_PANIC_HEADER_FLAG_STACKSHOT_DATA_COMPRESSED     0x800
+#define EMBEDDED_PANIC_HEADER_FLAG_ENCRYPTED_COREDUMP_SKIPPED    0x1000
 
 #define EMBEDDED_PANIC_HEADER_CURRENT_VERSION 2
 #define EMBEDDED_PANIC_MAGIC 0x46554E4B /* FUNK */
@@ -369,6 +378,7 @@ struct macos_panic_header {
 #define MACOS_PANIC_HEADER_FLAG_COREDUMP_FAILED               0x200
 #define MACOS_PANIC_HEADER_FLAG_STACKSHOT_KERNEL_ONLY         0x400
 #define MACOS_PANIC_HEADER_FLAG_STACKSHOT_FAILED_COMPRESS     0x800
+#define MACOS_PANIC_HEADER_FLAG_ENCRYPTED_COREDUMP_SKIPPED    0x1000
 
 /*
  * Any change to the below structure should mirror the structure defined in MacEFIFirmware
@@ -404,12 +414,8 @@ struct efi_aurr_extended_panic_log {
 
 #ifdef KERNEL
 
-__BEGIN_DECLS
-
 __abortlike __printflike(1, 2)
 extern void panic(const char *string, ...);
-
-__END_DECLS
 
 #endif /* KERNEL */
 
@@ -515,25 +521,27 @@ enum {
 
 #define DEBUGGER_INTERNAL_OPTIONS_MASK              (DEBUGGER_INTERNAL_OPTION_THREAD_BACKTRACE)
 
-__BEGIN_DECLS
-
-#define panic_plain(ex, ...)  (panic)(ex, ## __VA_ARGS__)
-
 #define __STRINGIFY(x) #x
 #define LINE_NUMBER(x) __STRINGIFY(x)
+#ifdef __FILE_NAME__
+#define PANIC_LOCATION __FILE_NAME__ ":" LINE_NUMBER(__LINE__)
+#else
 #define PANIC_LOCATION __FILE__ ":" LINE_NUMBER(__LINE__)
+#define __FILE_NAME__ __FILE__
+#endif
 
-#if defined(__arm__) || defined(__arm64__)
+#if XNU_KERNEL_PRIVATE
 #define panic(ex, ...)  ({ \
-	        __asm__("" ::: "memory"); \
-	        (panic)(# ex, ## __VA_ARGS__); \
-	})
+	__asm__("" ::: "memory"); \
+	(panic)(ex " @%s:%d", ## __VA_ARGS__, __FILE_NAME__, __LINE__); \
+})
 #else
 #define panic(ex, ...)  ({ \
-	        __asm__("" ::: "memory"); \
-	        (panic)(# ex "@" PANIC_LOCATION, ## __VA_ARGS__); \
-	})
+	__asm__("" ::: "memory"); \
+	(panic)(#ex " @%s:%d", ## __VA_ARGS__, __FILE_NAME__, __LINE__); \
+})
 #endif
+#define panic_plain(ex, ...)  (panic)(ex, ## __VA_ARGS__)
 
 __abortlike __printflike(4, 5)
 void panic_with_options(unsigned int reason, void *ctx,
@@ -541,14 +549,18 @@ void panic_with_options(unsigned int reason, void *ctx,
 void Debugger(const char * message);
 void populate_model_name(char *);
 
+boolean_t panic_validate_ptr(void *ptr, vm_size_t size, const char *what);
+
+#define PANIC_VALIDATE_PTR(expr) \
+	panic_validate_ptr(expr, sizeof(*(expr)), #expr)
+
+
 #if defined(__arm__) || defined(__arm64__)
 /* Note that producer_name and buf should never be de-allocated as we reference these during panic */
 void register_additional_panic_data_buffer(const char *producer_name, void *buf, int len);
 #endif
 
 unsigned panic_active(void);
-
-__END_DECLS
 
 #endif  /* KERNEL_PRIVATE */
 
@@ -592,9 +604,6 @@ void panic_stackshot_reset_state(void);
  * @bytes_traced  a pointer to be filled with the length of the stackshot
  *
  */
-#ifdef __cplusplus
-extern "C" {
-#endif
 kern_return_t
 stack_snapshot_from_kernel(int pid, void *buf, uint32_t size, uint64_t flags,
     uint64_t delta_since_timestamp, uint32_t pagetable_mask, unsigned *bytes_traced);
@@ -610,10 +619,6 @@ boolean_t on_device_corefile_enabled(void);
  * and boot configuration.
  */
 boolean_t panic_stackshot_to_disk_enabled(void);
-
-#ifdef __cplusplus
-}
-#endif
 
 #if defined(__x86_64__)
 extern char debug_buf[];
@@ -634,6 +639,7 @@ extern size_t   panic_disk_error_description_size;
 
 extern unsigned char    *kernel_uuid;
 extern unsigned int     debug_boot_arg;
+extern int     verbose_panic_flow_logging;
 
 extern boolean_t kernelcache_uuid_valid;
 extern uuid_t kernelcache_uuid;
@@ -647,15 +653,7 @@ extern boolean_t auxkc_uuid_valid;
 extern uuid_t auxkc_uuid;
 extern uuid_string_t auxkc_uuid_string;
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
 extern boolean_t        doprnt_hide_pointers;
-
-#ifdef __cplusplus
-}
-#endif
 
 extern unsigned int     halt_in_debugger; /* pending halt in debugger after boot */
 extern unsigned int     current_debugger;
@@ -683,10 +681,25 @@ extern boolean_t debug_is_current_cpu_in_panic_state(void);
  */
 extern void phys_carveout_init(void);
 
+/*
+ * Check whether a kernel virtual address points within the physical carveout.
+ */
+extern boolean_t debug_is_in_phys_carveout(vm_map_offset_t va);
+extern boolean_t debug_is_in_phys_carveout_metadata(vm_map_offset_t va);
+
+/*
+ * Check whether the physical carveout should be included in a coredump.
+ */
+extern boolean_t debug_can_coredump_phys_carveout(void);
+
+extern vm_offset_t phys_carveout;
 extern uintptr_t phys_carveout_pa;
 extern size_t phys_carveout_size;
+extern vm_offset_t phys_carveout_metadata;
+extern uintptr_t phys_carveout_metadata_pa;
+extern size_t phys_carveout_metadata_size;
 
-extern boolean_t kernel_debugging_allowed(void);
+extern boolean_t kernel_debugging_restricted(void);
 
 #if defined (__x86_64__)
 extern void extended_debug_log_init(void);
@@ -704,15 +717,13 @@ extern size_t panic_stackshot_len;
 
 void    SavePanicInfo(const char *message, void *panic_data, uint64_t panic_options);
 void    paniclog_flush(void);
-void    panic_display_zprint(void);
+void    panic_display_zalloc(void); /* in zalloc.c */
 void    panic_display_kernel_aslr(void);
 void    panic_display_hibb(void);
 void    panic_display_model_name(void);
 void    panic_display_kernel_uuid(void);
 void    panic_display_process_name(void);
-#if CONFIG_ZLEAKS
-void    panic_display_ztrace(void);
-#endif /* CONFIG_ZLEAKS */
+void    panic_print_symbol_name(vm_address_t search);
 #if CONFIG_ECC_LOGGING
 void    panic_display_ecc_errors(void);
 #endif /* CONFIG_ECC_LOGGING */
@@ -740,7 +751,7 @@ kern_return_t DebuggerTrapWithState(debugger_op db_op, const char *db_message, c
     uint64_t db_panic_options, void *db_panic_data_ptr, boolean_t db_proceed_on_sync_failure, unsigned long db_panic_caller);
 void handle_debugger_trap(unsigned int exception, unsigned int code, unsigned int subcode, void *state);
 
-void DebuggerWithContext(unsigned int reason, void *ctx, const char *message, uint64_t debugger_options_mask);
+void DebuggerWithContext(unsigned int reason, void *ctx, const char *message, uint64_t debugger_options_mask, unsigned long debugger_caller);
 
 #if DEBUG || DEVELOPMENT
 /* leak pointer scan definitions */
@@ -757,23 +768,77 @@ enum{
 typedef void (*leak_site_proc)(void * refCon, uint32_t siteCount, uint32_t zoneSize,
     uintptr_t * backtrace, uint32_t btCount);
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
 extern kern_return_t
 zone_leaks(const char * zoneName, uint32_t nameLen, leak_site_proc proc, void * refCon);
 
 extern void
 zone_leaks_scan(uintptr_t * instances, uint32_t count, uint32_t zoneSize, uint32_t * found);
 
-#ifdef __cplusplus
-}
-#endif
-
 const char *sysctl_debug_get_preoslog(size_t *size);
 
 #endif  /* DEBUG || DEVELOPMENT */
+
+/*
+ * A callback that reads or writes data from a given offset into the corefile. It is understood that this
+ * callback should only be used from within the context where it is given. It should never be stored and
+ * reused later on.
+ */
+typedef kern_return_t (*IOCoreFileAccessCallback)(void *context, boolean_t write, uint64_t offset, int length, void *buffer);
+
+/*
+ * A callback that receives temporary file-system access to the kernel corefile
+ *
+ * Parameters:
+ *  - access:            A function to call for reading/writing the kernel corefile.
+ *  - access_context:    The context that should be passed to the 'access' function.
+ *  - recipient_context: The recipient-specific context. Can be anything.
+ */
+typedef kern_return_t (*IOCoreFileAccessRecipient)(IOCoreFileAccessCallback access, void *access_context, void *recipient_context);
+
+/*
+ * Provides safe and temporary file-system access to the kernel corefile to the given recipient callback.
+ * It does so by opening the kernel corefile, then calling the 'recipient' callback, passing it an IOCoreFileAccessCallback
+ * function that it can use to read/write data, then closing the kernel corefile as soon as the recipient returns.
+ *
+ * Parameters:
+ *  - recipient:         A function to call, providing it access to the kernel corefile.
+ *  - recipient_context: Recipient-specific context. Can be anything.
+ */
+extern kern_return_t
+IOProvideCoreFileAccess(IOCoreFileAccessRecipient recipient, void *recipient_context);
+
+struct kdp_core_encryption_key_descriptor {
+	uint64_t kcekd_format;
+	uint16_t kcekd_size;
+	void *   kcekd_key;
+};
+
+/*
+ * Registers a new kernel (and co-processor) coredump encryption key. The key format should be one of the
+ * supported "next" key formats in mach_debug_types.h. The recipient context pointer should point to a kdp_core_encryption_key_descriptor
+ * structure.
+ *
+ * Note that the given key pointer should be allocated using `kmem_alloc(kernel_map, <pointer>, <size>, VM_KERN_MEMORY_DIAG)`
+ *
+ * Note that upon successful completion, this function will adopt the given public key pointer
+ * and the caller should NOT release it.
+ */
+kern_return_t kdp_core_handle_new_encryption_key(IOCoreFileAccessCallback access_data, void *access_context, void *recipient_context);
+
+/*
+ * Enum of allowed values for the 'lbr_support' boot-arg
+ */
+typedef enum {
+	LBR_ENABLED_NONE,
+	LBR_ENABLED_USERMODE,
+	LBR_ENABLED_KERNELMODE,
+	LBR_ENABLED_ALLMODES
+} lbr_modes_t;
+
+extern lbr_modes_t last_branch_enabled_modes;
+
 #endif  /* XNU_KERNEL_PRIVATE */
+
+__END_DECLS
 
 #endif  /* _KERN_DEBUG_H_ */

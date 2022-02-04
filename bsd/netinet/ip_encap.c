@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2016 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -115,71 +115,15 @@
 MALLOC_DEFINE(M_NETADDR, "Export Host", "Export host address structure");
 #endif
 
-static void encap_init(struct protosw *, struct domain *);
 static void encap_add_locked(struct encaptab *);
 static int mask_match(const struct encaptab *, const struct sockaddr *,
     const struct sockaddr *);
 static void encap_fillarg(struct mbuf *, void *arg);
 
-#ifndef LIST_HEAD_INITIALIZER
-/* rely upon BSS initialization */
-LIST_HEAD(, encaptab) encaptab;
-#else
 LIST_HEAD(, encaptab) encaptab = LIST_HEAD_INITIALIZER(&encaptab);
-#endif
 
-decl_lck_rw_data(static, encaptab_lock);
-
-static void
-encap_init(struct protosw *pp, struct domain *dp)
-{
-#pragma unused(dp)
-	static int encap_initialized = 0;
-	lck_grp_attr_t *encaptab_grp_attrib = NULL;
-	lck_attr_t *encaptab_lck_attrib = NULL;
-	lck_grp_t *encaptab_lck_group = NULL;
-
-	VERIFY((pp->pr_flags & (PR_INITIALIZED | PR_ATTACHED)) == PR_ATTACHED);
-
-	/* This gets called by more than one protocols, so initialize once */
-	if (encap_initialized) {
-		return;
-	}
-
-	encaptab_grp_attrib = lck_grp_attr_alloc_init();
-	encaptab_lck_group = lck_grp_alloc_init("encaptab lock", encaptab_grp_attrib);
-	lck_grp_attr_free(encaptab_grp_attrib);
-
-	encaptab_lck_attrib = lck_attr_alloc_init();
-	lck_rw_init(&encaptab_lock, encaptab_lck_group, encaptab_lck_attrib);
-
-	lck_grp_free(encaptab_lck_group);
-	lck_attr_free(encaptab_lck_attrib);
-
-	encap_initialized = 1;
-#if 0
-	/*
-	 * we cannot use LIST_INIT() here, since drivers may want to call
-	 * encap_attach(), on driver attach.  encap_init() will be called
-	 * on AF_INET{,6} initialization, which happens after driver
-	 * initialization - using LIST_INIT() here can nuke encap_attach()
-	 * from drivers.
-	 */
-	LIST_INIT(&encaptab);
-#endif
-}
-
-void
-encap4_init(struct protosw *pp, struct domain *dp)
-{
-	encap_init(pp, dp);
-}
-
-void
-encap6_init(struct ip6protosw *pp, struct domain *dp)
-{
-	encap_init((struct protosw *)pp, dp);
-}
+static LCK_GRP_DECLARE(encaptab_lock_grp, "encaptab lock");
+static LCK_RW_DECLARE(encaptab_lock, &encaptab_lock_grp);
 
 #if INET
 void
@@ -394,11 +338,7 @@ encap_attach(int af, int proto, const struct sockaddr *sp,
 		goto fail;
 	}
 
-	new_ep = _MALLOC(sizeof(*new_ep), M_NETADDR, M_WAITOK | M_ZERO);
-	if (new_ep == NULL) {
-		error = ENOBUFS;
-		goto fail;
-	}
+	new_ep = kalloc_type(struct encaptab, Z_WAITOK | Z_ZERO | Z_NOFAIL);
 
 	/* check if anyone have already attached with exactly same config */
 	lck_rw_lock_exclusive(&encaptab_lock);
@@ -442,7 +382,7 @@ encap_attach(int af, int proto, const struct sockaddr *sp,
 fail_locked:
 	lck_rw_unlock_exclusive(&encaptab_lock);
 	if (new_ep != NULL) {
-		_FREE(new_ep, M_NETADDR);
+		kfree_type(struct encaptab, new_ep);
 	}
 fail:
 	return NULL;
@@ -462,11 +402,7 @@ encap_attach_func( int af, int proto,
 		goto fail;
 	}
 
-	ep = _MALLOC(sizeof(*ep), M_NETADDR, M_WAITOK | M_ZERO); /* XXX */
-	if (ep == NULL) {
-		error = ENOBUFS;
-		goto fail;
-	}
+	ep = kalloc_type(struct encaptab, Z_WAITOK | Z_ZERO | Z_NOFAIL); /* XXX */
 
 	ep->af = af;
 	ep->proto = proto;
@@ -496,7 +432,7 @@ encap_detach(const struct encaptab *cookie)
 		if (p == ep) {
 			LIST_REMOVE(p, chain);
 			lck_rw_unlock_exclusive(&encaptab_lock);
-			_FREE(p, M_NETADDR);    /*XXX*/
+			kfree_type(struct encaptab, p);    /*XXX*/
 			return 0;
 		}
 	}

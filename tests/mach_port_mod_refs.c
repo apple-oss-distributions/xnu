@@ -1,17 +1,17 @@
-#ifdef T_NAMESPACE
-#undef T_NAMESPACE
-#endif
-#define T_NAMESPACE "xnu.ipc"
 #include <darwintest.h>
 #include <mach/mach.h>
 #include <stdlib.h>
 #include <stdio.h>
 
-T_GLOBAL_META(T_META_RUN_CONCURRENTLY(true));
+T_GLOBAL_META(T_META_RUN_CONCURRENTLY(true),
+    T_META_NAMESPACE("xnu.ipc"),
+    T_META_RADAR_COMPONENT_NAME("xnu"),
+    T_META_RADAR_COMPONENT_VERSION("IPC"));
 
 T_DECL(mach_port_mod_refs, "mach_port_mod_refs"){
 	mach_port_t port_set;
 	mach_port_t port;
+	task_exc_guard_behavior_t old, new;
 	int ret;
 
 	ret = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_PORT_SET, &port_set);
@@ -20,6 +20,14 @@ T_DECL(mach_port_mod_refs, "mach_port_mod_refs"){
 	ret = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &port);
 	T_ASSERT_MACH_SUCCESS(ret, "mach_port_allocate MACH_PORT_RIGHT_RECEIVE");
 
+	/*
+	 * Disable [optional] Mach port guard exceptions to avoid fatal crash
+	 */
+	ret = task_get_exc_guard_behavior(mach_task_self(), &old);
+	T_ASSERT_MACH_SUCCESS(ret, "task_get_exc_guard_behavior");
+	new = (old & ~TASK_EXC_GUARD_MP_DELIVER);
+	ret = task_set_exc_guard_behavior(mach_task_self(), new);
+	T_ASSERT_MACH_SUCCESS(ret, "task_set_exc_guard_behavior new");
 
 	/*
 	 * Test all known variants of port rights on each type of port
@@ -81,6 +89,10 @@ T_DECL(mach_port_mod_refs, "mach_port_mod_refs"){
 	/* can't subtract an invalid right-type */
 	ret = mach_port_mod_refs(mach_task_self(), port_set, MACH_PORT_RIGHT_NUMBER + 1, -1);
 	T_ASSERT_EQ(ret, KERN_INVALID_VALUE, "mach_port_mod_refs NUMBER+1: -1 on a PORT_SET right");
+
+	/* restore the old guard behavior */
+	ret = task_set_exc_guard_behavior(mach_task_self(), old);
+	T_ASSERT_MACH_SUCCESS(ret, "task_set_exc_guard_behavior old");
 
 	/*
 	 * deallocate the ports/sets

@@ -11,7 +11,7 @@
 # define OS_HAS_RVALUE_REFERENCES 1
 #endif
 
-void* operator new(size_t, void*);
+void* operator new(size_t, void*) noexcept;
 
 namespace os {
 #if OS_HAS_NULLPTR

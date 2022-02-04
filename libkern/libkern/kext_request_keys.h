@@ -697,6 +697,15 @@ extern "C" {
  */
 #define kKextRequestArgumentLoadedStateKey             "Loaded State"
 
+/* Argument:  Enable DriverKit Shared Region
+ * Type:      Number
+ * Default:   0
+ *
+ * If this is 1, this enables using a separate shared region for DriverKit processes.
+ *
+ */
+#define kKextRequestEnableDriverKitSharedRegionKey     "Enable DriverKit Shared Region"
+
 #ifdef __cplusplus
 };
 #endif /* __cplusplus */

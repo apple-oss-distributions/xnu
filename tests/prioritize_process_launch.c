@@ -126,7 +126,7 @@ send(
 	    MACH_SEND_MSG |
 	    MACH_SEND_TIMEOUT |
 	    MACH_SEND_OVERRIDE |
-	    ((reply_port ? MACH_SEND_SYNC_OVERRIDE : 0) | options),
+	    options,
 	    send_msg.header.msgh_size,
 	    0,
 	    MACH_PORT_NULL,

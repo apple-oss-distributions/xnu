@@ -1,8 +1,3 @@
-__ZN9IODTNVRAM17getOWVariableInfoEjPPK8OSSymbolPjS4_
-__ZN9IODTNVRAM19convertObjectToPropEPhPjPK8OSSymbolP8OSObject
-__ZN9IODTNVRAM19convertPropToObjectEPhjS0_jPPK8OSSymbolPP8OSObject
-__ZN9IODTNVRAM19searchNVRAMPropertyEP17IONVRAMDescriptorPj
-__ZN9IODTNVRAM19unescapeBytesToDataEPKhj
 _cpu_number
 _dsmos_page_transform_hook
 _gPEEFIRuntimeServices
@@ -29,8 +24,6 @@ _rtc_clock_napped
 _serial_getc
 _serial_init
 _serial_putc
-_sock_release
-_sock_retain
 _tmrCvt
 _tsc_get_info
 _PE_state

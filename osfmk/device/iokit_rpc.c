@@ -41,7 +41,6 @@
 
 #include <kern/clock.h>
 #include <kern/spl.h>
-#include <kern/counters.h>
 #include <kern/queue.h>
 #include <kern/zalloc.h>
 #include <kern/thread.h>
@@ -73,6 +72,24 @@
 LCK_GRP_DECLARE(dev_lck_grp, "device");
 LCK_MTX_DECLARE(iokit_obj_to_port_binding_lock, &dev_lck_grp);
 
+static void
+iokit_no_senders( ipc_port_t port, mach_port_mscount_t mscount );
+
+/*
+ * Lifetime:
+ * - non lazy port with no-more senders
+ * - can be destroyed by iokit_destroy_object_port
+ *
+ */
+IPC_KOBJECT_DEFINE(IKOT_IOKIT_IDENT,
+    .iko_op_no_senders = iokit_no_senders);
+IPC_KOBJECT_DEFINE(IKOT_IOKIT_OBJECT,
+    .iko_op_no_senders = iokit_no_senders);
+IPC_KOBJECT_DEFINE(IKOT_IOKIT_CONNECT,
+    .iko_op_no_senders = iokit_no_senders);
+IPC_KOBJECT_DEFINE(IKOT_UEXT_OBJECT,
+    .iko_op_no_senders = iokit_no_senders);
+
 /*
  * Lookup a device by its port.
  * Doesn't consume the naked send right; produces a device reference.
@@ -80,20 +97,21 @@ LCK_MTX_DECLARE(iokit_obj_to_port_binding_lock, &dev_lck_grp);
 io_object_t
 iokit_lookup_io_object(ipc_port_t port, ipc_kobject_type_t type)
 {
-	io_object_t     obj;
+	io_object_t     obj = NULL;
 
 	if (!IP_VALID(port)) {
 		return NULL;
 	}
 
 	iokit_lock_port(port);
-	if (ip_active(port) && (ip_kotype(port) == type)) {
-		obj = (io_object_t) ip_get_kobject(port);
+	/*
+	 * iokit uses the iokit_lock_port to serialize all its updates
+	 * so we do not need to actually hold the port lock.
+	 */
+	obj = ipc_kobject_get_locked(port, type);
+	if (obj) {
 		iokit_add_reference( obj, type );
-	} else {
-		obj = NULL;
 	}
-
 	iokit_unlock_port(port);
 
 	return obj;
@@ -111,6 +129,13 @@ iokit_lookup_connect_port(
 	ipc_port_t      port)
 {
 	return iokit_lookup_io_object(port, IKOT_IOKIT_CONNECT);
+}
+
+MIGEXTERN io_object_t
+iokit_lookup_ident_port(
+	ipc_port_t      port)
+{
+	return iokit_lookup_io_object(port, IKOT_IOKIT_IDENT);
 }
 
 MIGEXTERN io_object_t
@@ -133,13 +158,17 @@ iokit_lookup_object_in_space_with_port_name(mach_port_name_t name, ipc_kobject_t
 
 		if (kr == KERN_SUCCESS) {
 			assert(IP_VALID(port));
-			require_ip_active(port);
+			assert(ip_active(port));
 			ip_reference(port);
-			ip_unlock(port);
+			ip_mq_unlock(port);
 
 			iokit_lock_port(port);
-			if (ip_kotype(port) == type) {
-				obj = (io_object_t) ip_get_kobject(port);
+			/*
+			 * iokit uses the iokit_lock_port to serialize all its updates
+			 * so we do not need to actually hold the port lock.
+			 */
+			obj = ipc_kobject_get_locked(port, type);
+			if (obj) {
 				iokit_add_reference(obj, type);
 			}
 			iokit_unlock_port(port);
@@ -169,6 +198,29 @@ iokit_lookup_uext_ref_current_task(mach_port_name_t name)
 	return iokit_lookup_object_in_space_with_port_name(name, IKOT_UEXT_OBJECT, current_space());
 }
 
+/*
+ * Look up a port given a port name.
+ * This returns the port unlocked with a +1 send right.
+ * Release with iokit_release_port_send()
+ */
+EXTERN ipc_port_t
+iokit_lookup_raw_current_task(mach_port_name_t name, ipc_kobject_type_t * type)
+{
+	ipc_port_t port = NULL;
+	if (name && MACH_PORT_VALID(name)) {
+		kern_return_t kr = ipc_object_copyin(current_space(), name, MACH_MSG_TYPE_COPY_SEND, (ipc_object_t *)&port, 0, NULL, IPC_OBJECT_COPYIN_FLAGS_NONE);
+		if (kr == KERN_SUCCESS) {
+			assert(IP_VALID(port));
+			assert(ip_active(port));
+			if (type != NULL) {
+				*type = ip_kotype(port);
+			}
+		}
+	}
+
+	return port;
+}
+
 EXTERN void
 iokit_retain_port( ipc_port_t port )
 {
@@ -179,6 +231,12 @@ EXTERN void
 iokit_release_port( ipc_port_t port )
 {
 	ipc_port_release( port );
+}
+
+EXTERN void
+iokit_make_port_send( ipc_port_t port )
+{
+	ipc_port_make_send( port );
 }
 
 EXTERN void
@@ -241,6 +299,13 @@ iokit_make_connect_port(
 	return iokit_make_port_of_type(obj, IKOT_IOKIT_CONNECT);
 }
 
+MIGEXTERN ipc_port_t
+iokit_make_ident_port(
+	io_object_t     obj )
+{
+	return iokit_make_port_of_type(obj, IKOT_IOKIT_IDENT);
+}
+
 int gIOKitPortCount;
 
 EXTERN ipc_port_t
@@ -261,16 +326,15 @@ iokit_alloc_object_port( io_object_t obj, ipc_kobject_type_t type )
 }
 
 EXTERN kern_return_t
-iokit_destroy_object_port( ipc_port_t port )
+iokit_destroy_object_port( ipc_port_t port, ipc_kobject_type_t type )
 {
 	iokit_lock_port(port);
-	ipc_kobject_set( port, IKO_NULL, IKOT_NONE);
-
+	ipc_kobject_disable(port, type);
 //    iokit_remove_reference( obj );
 	iokit_unlock_port(port);
-	ipc_port_dealloc_kernel( port);
 	gIOKitPortCount--;
 
+	ipc_kobject_dealloc_port(port, 0, type);
 	return KERN_SUCCESS;
 }
 
@@ -278,7 +342,7 @@ EXTERN kern_return_t
 iokit_switch_object_port( ipc_port_t port, io_object_t obj, ipc_kobject_type_t type )
 {
 	iokit_lock_port(port);
-	ipc_kobject_set( port, (ipc_kobject_t) obj, type);
+	ipc_kobject_enable( port, (ipc_kobject_t) obj, type);
 	iokit_unlock_port(port);
 
 	return KERN_SUCCESS;
@@ -310,9 +374,8 @@ iokit_make_send_right( task_t task, io_object_t obj, ipc_kobject_type_t type )
 		// thread-argument-passing and its value should not be garbage
 		current_thread()->ith_knote = ITH_KNOTE_NULL;
 		kr = ipc_object_copyout( task->itk_space, ip_to_object(sendPort),
-		    MACH_MSG_TYPE_PORT_SEND, NULL, NULL, &name);
+		    MACH_MSG_TYPE_PORT_SEND, IPC_OBJECT_COPYOUT_FLAGS_NONE, NULL, NULL, &name);
 		if (kr != KERN_SUCCESS) {
-			ipc_port_release_send( sendPort );
 			name = MACH_PORT_NULL;
 		}
 	} else if (sendPort == IP_NULL) {
@@ -337,73 +400,49 @@ iokit_mod_send_right( task_t task, mach_port_name_t name, mach_port_delta_t delt
  */
 
 static void
-iokit_no_senders( mach_no_senders_notification_t * notification )
+iokit_no_senders( ipc_port_t port, mach_port_mscount_t mscount )
 {
-	ipc_port_t          port;
 	io_object_t         obj = NULL;
 	ipc_kobject_type_t  type = IKOT_NONE;
-	ipc_port_t          notify;
-
-	port = notification->not_header.msgh_remote_port;
 
 	// convert a port to io_object_t.
 	if (IP_VALID(port)) {
 		iokit_lock_port(port);
 		if (ip_active(port)) {
-			obj = (io_object_t) ip_get_kobject(port);
 			type = ip_kotype( port );
-			if ((IKOT_IOKIT_OBJECT == type)
+			assert((IKOT_IOKIT_OBJECT == type)
 			    || (IKOT_IOKIT_CONNECT == type)
 			    || (IKOT_IOKIT_IDENT == type)
-			    || (IKOT_UEXT_OBJECT == type)) {
-				iokit_add_reference( obj, IKOT_IOKIT_OBJECT );
-			} else {
-				obj = NULL;
-			}
+			    || (IKOT_UEXT_OBJECT == type));
+			/*
+			 * iokit uses the iokit_lock_port to serialize all its updates
+			 * so we do not need to actually hold the port lock.
+			 */
+			obj = ipc_kobject_get_locked(port, type);
+			iokit_add_reference( obj, IKOT_IOKIT_OBJECT );
 		}
 		iokit_unlock_port(port);
+	}
 
-		if (obj) {
-			mach_port_mscount_t mscount = notification->not_count;
+	if (obj) {
+		while (iokit_client_died( obj, port, type, &mscount ) != KERN_SUCCESS) {
+			kern_return_t kr;
 
-			if (KERN_SUCCESS != iokit_client_died( obj, port, type, &mscount )) {
-				/* Re-request no-senders notifications on the port (if still active) */
-				ip_lock(port);
-				if (ip_active(port)) {
-					notify = ipc_port_make_sonce_locked(port);
-					ipc_port_nsrequest( port, mscount + 1, notify, &notify);
-					/* port unlocked */
-					if (notify != IP_NULL) {
-						ipc_port_release_sonce(notify);
-					}
-				} else {
-					ip_unlock(port);
-				}
+			/* Re-request no-senders notifications on the port (if still active) */
+			kr = ipc_kobject_nsrequest(port, mscount + 1, &mscount);
+			if (kr != KERN_FAILURE) {
+				break;
 			}
-			iokit_remove_reference( obj );
+			/*
+			 * port has no outstanding rights or pending make-sends,
+			 * and the notification would fire recursively, try again.
+			 */
 		}
+
+		iokit_remove_reference( obj );
 	}
 }
 
-
-EXTERN
-boolean_t
-iokit_notify( mach_msg_header_t * msg )
-{
-	switch (msg->msgh_id) {
-	case MACH_NOTIFY_NO_SENDERS:
-		iokit_no_senders((mach_no_senders_notification_t *) msg);
-		return TRUE;
-
-	case MACH_NOTIFY_PORT_DELETED:
-	case MACH_NOTIFY_PORT_DESTROYED:
-	case MACH_NOTIFY_SEND_ONCE:
-	case MACH_NOTIFY_DEAD_NAME:
-	default:
-		printf("iokit_notify: strange notification %d\n", msg->msgh_id);
-		return FALSE;
-	}
-}
 
 kern_return_t
 iokit_label_dext_task(task_t task)

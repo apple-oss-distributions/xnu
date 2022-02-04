@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2011-2020 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -36,10 +36,18 @@
 #include "meminfo.h"
 
 /*
+ * Dispatch sampling may need to read from compressed, file-backed pages, which
+ * incurs a steep stack usage penalty.
+ */
+struct kperf_usample_min {
+	struct kperf_thread_dispatch th_dispatch;
+};
+
+/*
  * For data that must be sampled in a fault-able context.
  */
 struct kperf_usample {
-	struct kperf_thread_dispatch th_dispatch;
+	struct kperf_usample_min *usample_min;
 	struct kp_ucallstack ucallstack;
 	struct kperf_thread_info th_info;
 };

@@ -36,10 +36,10 @@
 #define _IOKIT_CPU_H
 
 extern "C" {
-#include <machine/machine_routines.h>
 #include <pexpert/pexpert.h>
 }
 
+#include <machine/machine_routines.h>
 #include <IOKit/IOService.h>
 #include <IOKit/IOInterruptController.h>
 #include <IOKit/IOPlatformActions.h>

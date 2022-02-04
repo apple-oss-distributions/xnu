@@ -7,3 +7,4 @@ _mac_audit_text
 _VNOP_SETXATTR
 _VNOP_GETXATTR
 _mac_schedule_userret
+_mac_schedule_telemetry

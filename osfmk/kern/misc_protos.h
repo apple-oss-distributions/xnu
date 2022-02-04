@@ -144,6 +144,9 @@ extern int copyoutmsg(
 	user_addr_t     user_addr,
 	mach_msg_size_t nbytes);
 
+#if (DEBUG || DEVELOPMENT)
+extern int verify_write(const void *source, void *dst, size_t size);
+#endif
 extern int sscanf(const char *input, const char *fmt, ...) __scanflike(2, 3);
 
 /* sprintf() is being deprecated. Please use snprintf() instead. */
@@ -200,13 +203,7 @@ __doprnt(
 	int                     radix,
 	int                     is_log);
 
-extern void safe_gets(
-	char    *str,
-	int     maxlen);
-
-extern void cnputcusr(char);
-
-extern void cnputsusr(char *, int);
+extern void console_write_char(char);
 
 extern void conslog_putc(char);
 
@@ -218,9 +215,7 @@ extern void consdebug_log(char);
 
 extern void consdebug_putc_unbuffered(char);
 
-extern void cnputc(char);
-
-extern void cnputc_unbuffered(char);
+extern void console_write_unbuffered(char);
 
 extern void console_write(char *, int);
 
@@ -228,9 +223,9 @@ extern void console_suspend(void);
 
 extern void console_resume(void);
 
-extern int cngetc(void);
+extern int console_read_char(void);
 
-extern int cnmaygetc(void);
+extern int console_try_read_char(void);
 
 extern int _setjmp(
 	jmp_buf_t       *jmp_buf);
@@ -240,11 +235,6 @@ extern int _longjmp(
 	int             value);
 
 extern void bootstrap_create(void);
-
-#if     DIPC
-extern boolean_t        no_bootstrap_task(void);
-extern ipc_port_t       get_root_master_device_port(void);
-#endif  /* DIPC */
 
 extern kern_return_t    kernel_set_special_port(
 	host_priv_t     host_priv,

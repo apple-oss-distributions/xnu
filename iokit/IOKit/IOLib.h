@@ -57,6 +57,10 @@ __BEGIN_DECLS
 
 #include <kern/thread_call.h>
 #include <kern/clock.h>
+#ifdef KERNEL_PRIVATE
+#include <kern/kalloc.h>
+#include <kern/assert.h>
+#endif
 
 /*
  * min/max macros.
@@ -64,6 +68,24 @@ __BEGIN_DECLS
 
 #define min(a, b) ((a) < (b) ? (a) : (b))
 #define max(a, b) ((a) > (b) ? (a) : (b))
+
+/*
+ * Safe functions to compute array sizes (saturate to a size that can't be
+ * allocated ever and will cause the allocation to return NULL always).
+ */
+
+static inline vm_size_t
+IOMallocArraySize(vm_size_t hdr_size, vm_size_t elem_size, vm_size_t elem_count)
+{
+	/* IOMalloc() will reject this size before even asking the VM  */
+	const vm_size_t limit = 1ull << (8 * sizeof(vm_size_t) - 1);
+	vm_size_t s = hdr_size;
+
+	if (os_mul_and_add_overflow(elem_size, elem_count, s, &s) || (s & limit)) {
+		return limit;
+	}
+	return s;
+}
 
 /*
  * These are opaque to the user.
@@ -125,6 +147,24 @@ void * IOMallocZero(vm_size_t size)  __attribute__((alloc_size(1)));
  *   @param size Size of the memory allocated. Must be identical to size of
  *   @the corresponding IOMalloc */
 
+#if defined(XNU_KERNEL_PRIVATE)
+
+/*
+ * IOFree_internal allows specifying the kalloc heap to free the allocation
+ * to
+ *
+ * Note: IOFree frees to @c KHEAP_ANY so as to handle cases where allocations
+ * are IOMalloc-ed in kexts but need to be freed in xnu (or vice-versa).
+ */
+
+extern void
+IOFree_internal(
+	struct kalloc_heap * kalloc_heap_cfg,
+	void               * inAddress,
+	vm_size_t            size);
+
+#endif
+
 void   IOFree(void * address, vm_size_t size);
 
 /*! @function IOMallocAligned
@@ -155,6 +195,25 @@ void * IOMallocAligned(vm_size_t size, vm_offset_t alignment) __attribute__((all
  *   @discussion This function frees memory allocated with IOMallocAligned, it may block and so should not be called from interrupt level or while a simple lock is held.
  *   @param address Pointer to the allocated memory.
  *   @param size Size of the memory allocated. */
+
+#if defined(XNU_KERNEL_PRIVATE)
+
+/*
+ * IOFreeAligned_internal allows specifying the kalloc heap to free the
+ * allocation to
+ *
+ * Note: IOFreeAligned frees to @c KHEAP_ANY so as to handle cases where
+ * allocations are IOMalloc-ed in kexts but need to be freed in xnu
+ * (or vice-versa).
+ */
+
+extern void
+IOFreeAligned_internal(
+	struct kalloc_heap * kalloc_heap_cfg,
+	void               * address,
+	vm_size_t            size);
+
+#endif
 
 void   IOFreeAligned(void * address, vm_size_t size);
 
@@ -204,41 +263,129 @@ void * IOMallocPageableZero(vm_size_t size, vm_size_t alignment) __attribute__((
 
 void IOFreePageable(void * address, vm_size_t size);
 
+#ifdef KERNEL_PRIVATE
+/*! @function IOMallocData
+ *   @abstract Allocates wired memory in the kernel map, from a separate section meant for pure data.
+ *   @discussion Same as IOMalloc except that this function should be used for allocating pure data.
+ *   @param size Size of the memory requested.
+ *   @result Pointer to the allocated memory, or zero on failure. */
+void * IOMallocData(vm_size_t size) __attribute__((alloc_size(1)));
+
+/*! @function IOMallocZeroData
+ *   @abstract Allocates wired memory in the kernel map, from a separate section meant for pure data bytes that don't contain pointers.
+ *   @discussion Same as IOMallocData except that the memory returned is zeroed.
+ *   @param size Size of the memory requested.
+ *   @result Pointer to the allocated memory, or zero on failure. */
+void * IOMallocZeroData(vm_size_t size) __attribute__((alloc_size(1)));
+
+/*! @function IOFreeData
+ *   @abstract Frees memory allocated with IOMallocData or IOMallocZeroData.
+ *   @discussion This function frees memory allocated with IOMallocData/IOMallocZeroData, it may block and so should not be called from interrupt level or while a simple lock is held.
+ *   @param address Virtual address of the allocated memory. Passing NULL here is acceptable.
+ *   @param size Size of the memory allocated. It is acceptable to pass 0 size for a NULL address. */
+void IOFreeData(void * address, vm_size_t size);
+
 /*
  * Typed memory allocation macros. All may block.
  */
 
-#define IONew(type, count)                              \
+/*
+ * Use IOMallocType to allocate a single typed object.
+ *
+ * If you use IONew with count 1, please use IOMallocType
+ * instead. For arrays of typed objects use IONew.
+ *
+ * IOMallocType returns zeroed memory. It will not
+ * fail to allocate memory for sizes less than:
+ * - 16K (macos)
+ * - 8K  (embedded 32-bit)
+ * - 32K (embedded 64-bit)
+ */
+#define IOMallocType(type)                              \
 ({                                                      \
-    size_t __size;                                      \
-    (os_mul_overflow(sizeof(type), (count), &__size)    \
-    ? ((type *) NULL)                                   \
-    : ((type *) IOMalloc(__size)));                     \
+	static KALLOC_TYPE_DEFINE(kt_view_var, type,        \
+	    KT_SHARED_ACCT);                                \
+	(type *) IOMallocTypeImpl(kt_view_var);             \
 })
 
-#define IONewZero(type, count)                          \
+#define IOFreeType(elem, type)                          \
 ({                                                      \
-    size_t __size;                                      \
-    (os_mul_overflow(sizeof(type), (count), &__size)    \
-    ? ((type *) NULL)                                   \
-    : ((type *) IOMallocZero(__size)));                 \
+	static KALLOC_TYPE_DEFINE(kt_view_var, type,        \
+	   KT_SHARED_ACCT);                                 \
+	IOFreeTypeImpl(kt_view_var,                         \
+	    __iokit_ptr_load_and_erase(elem));              \
 })
 
-#define IODelete(ptr, type, count)                          \
-({                                                          \
-    size_t __size;                                          \
-    if (!os_mul_overflow(sizeof(type), (count), &__size)) { \
-	IOFree(ptr, __size);                                \
-    }                                                       \
+#define IONewData(type, count) \
+	((type *)IOMallocData(IOMallocArraySize(0, sizeof(type), count)))
+
+#define IONewZeroData(type, count) \
+	((type *)IOMallocZeroData(IOMallocArraySize(0, sizeof(type), count)))
+
+#define IODeleteData(ptr, type, count) ({                    \
+	vm_size_t  __count = (vm_size_t)(count);             \
+	IOFreeData(__iokit_ptr_load_and_erase(ptr),          \
+	    IOMallocArraySize(0, sizeof(type), __count));    \
 })
 
-#define IOSafeDeleteNULL(ptr, type, count)              \
-    do {                                                \
-	if (NULL != (ptr)) {                            \
-	    IODelete((ptr), type, count);               \
-	    (ptr) = NULL;                               \
-	}                                               \
-    } while (0)                                         \
+#endif /* KERNEL_PRIVATE */
+
+/*
+ * IONew/IONewZero/IODelete/IOSafeDeleteNULL
+ *
+ * Those functions come in 2 variants:
+ *
+ * 1. IONew(element_type, count)
+ *    IONewZero(element_type, count)
+ *    IODelete(ptr, element_type, count)
+ *    IOSafeDeleteNULL(ptr, element_type, count)
+ *
+ *    Those allocate/free arrays of `count` elements of type `element_type`.
+ *
+ * 2. IONew(hdr_type, element_type, count)
+ *    IONewZero(hdr_type, element_type, count)
+ *    IODelete(ptr, hdr_type, element_type, count)
+ *    IOSafeDeleteNULL(ptr, hdr_type, element_type, count)
+ *
+ *    Those allocate/free arrays with `count` elements of type `element_type`,
+ *    prefixed with a header of type `hdr_type`, like this:
+ *
+ * Those perform safe math with the sizes, checking for overflow.
+ * An overflow in the sizes will cause the allocation to return NULL.
+ */
+#define IONew(...)             __IOKIT_DISPATCH(IONew, ##__VA_ARGS__)
+#define IONewZero(...)         __IOKIT_DISPATCH(IONewZero, ##__VA_ARGS__)
+#define IODelete(...)          __IOKIT_DISPATCH(IODelete, ##__VA_ARGS__)
+#define IOSafeDeleteNULL(...)  __IOKIT_DISPATCH(IOSafeDeleteNULL, ##__VA_ARGS__)
+
+
+#define IONew_2(e_ty, count) \
+	((e_ty *)IOMalloc(IOMallocArraySize(0, sizeof(e_ty), count)))
+
+#define IONew_3(h_ty, e_ty, count) \
+	((h_ty *)IOMalloc(IOMallocArraySize(sizeof(h_ty), sizeof(e_ty), count)))
+
+#define IONewZero_2(e_ty, count) \
+	((e_ty *)IOMallocZero(IOMallocArraySize(0, sizeof(e_ty), count)))
+
+#define IONewZero_3(h_ty, e_ty, count) \
+	((h_ty *)IOMallocZero(IOMallocArraySize(sizeof(h_ty), sizeof(e_ty), count)))
+
+#define IODelete_3(ptr, e_ty, count) \
+	IOFree(ptr, IOMallocArraySize(0, sizeof(e_ty), count))
+
+#define IODelete_4(ptr, h_ty, e_ty, count) \
+	IOFree(ptr, IOMallocArraySize(sizeof(h_ty), sizeof(e_ty), count))
+
+#define IOSafeDeleteNULL_3(ptr, e_ty, count)  ({                               \
+	vm_size_t __s = IOMallocArraySize(0, sizeof(e_ty), count);             \
+	IOFree(__iokit_ptr_load_and_erase(ptr), __s);                          \
+})
+
+#define IOSafeDeleteNULL_4(ptr, h_ty, e_ty, count)  ({                         \
+	vm_size_t __s = IOMallocArraySize(sizeof(h_ty), sizeof(e_ty), count)); \
+	IOFree(__iokit_ptr_load_and_erase(ptr), __s);                          \
+})
 
 /////////////////////////////////////////////////////////////////////////////
 //
@@ -506,6 +653,40 @@ extern mach_timespec_t IOZeroTvalspec;
 #if XNU_KERNEL_PRIVATE
 vm_tag_t
 IOMemoryTag(vm_map_t map);
+
+vm_size_t
+log2up(vm_size_t size);
+#endif
+
+/*
+ * Implementation details
+ */
+#define __IOKIT_COUNT_ARGS1(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, N, ...) N
+#define __IOKIT_COUNT_ARGS(...) \
+	__IOKIT_COUNT_ARGS1(, ##__VA_ARGS__, _9, _8, _7, _6, _5, _4, _3, _2, _1, _0)
+#define __IOKIT_DISPATCH1(base, N, ...) __CONCAT(base, N)(__VA_ARGS__)
+#define __IOKIT_DISPATCH(base, ...) \
+	__IOKIT_DISPATCH1(base, __IOKIT_COUNT_ARGS(__VA_ARGS__), ##__VA_ARGS__)
+
+#define __iokit_ptr_load_and_erase(elem) ({             \
+	_Static_assert(sizeof(elem) == sizeof(void *),  \
+	    "elem isn't pointer sized");                \
+	__auto_type __eptr = &(elem);                   \
+	__auto_type __elem = *__eptr;                   \
+	*__eptr = (__typeof__(__elem))NULL;             \
+	__elem;                                         \
+})
+
+#if KERNEL_PRIVATE
+/*
+ * Implementation functions for IOMallocType/IOFreeType.
+ * Not intended to be used on their own.
+ */
+void *
+IOMallocTypeImpl(kalloc_type_view_t kt_view);
+
+void
+IOFreeTypeImpl(kalloc_type_view_t kt_view, void * address);
 #endif
 
 __END_DECLS

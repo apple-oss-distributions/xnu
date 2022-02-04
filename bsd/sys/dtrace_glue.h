@@ -215,6 +215,12 @@ typedef struct modctl {
 	vm_size_t       mod_size;       // total size (of blob)
 	UUID            mod_uuid;
 	struct dtrace_module_symbols* mod_user_symbols;
+	/*
+	 * SDT probe data are directly stored in modctl. That's fine for XNU as modctl serves
+	 * different purpose than on Solaris and is allocated/freed as required.
+	 */
+	int             mod_sdtprobecnt;  // Amount of provided SDT probes
+	void            *mod_sdtdesc;    // Pointer to sdt_probedesc_t
 } modctl_t;
 
 /* Definitions for mod_flags */

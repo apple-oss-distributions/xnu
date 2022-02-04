@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1998-2000 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 1998-2021 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -179,6 +179,8 @@
 
 #include <sys/sysctl.h>
 #include <libkern/c++/OSData.h>
+#include <IOKit/IOService.h>
+#include <IOKit/IOUserClient.h>
 #include "Tests.h"
 
 
@@ -191,6 +193,11 @@
 #include <IOKit/IOPlatformExpert.h>
 #include <IOKit/IOSharedDataQueue.h>
 #include <IOKit/IODataQueueShared.h>
+#include <IOKit/IOServiceStateNotificationEventSource.h>
+#include <IOKit/IOKitKeysPrivate.h>
+#include <IOKit/IOKitServer.h>
+#include <IOKit/IOBSD.h>
+#include <kern/ipc_kobject.h>
 #include <libkern/Block.h>
 #include <libkern/Block_private.h>
 #include <libkern/c++/OSAllocation.h>
@@ -307,6 +314,16 @@ OSCollectionTest(int newValue)
 	IOService::getPlatform()->setProperty("OSSerializer_withBlock", serializer);
 	serializer->release();
 
+	OSString * ab = OSString::withCString("abcdef", 2);
+	assert(strcmp(ab->getCStringNoCopy(), "ab") == 0);
+	OSString * defgh = OSString::withCString("defgh", 10);
+	assert(strcmp(defgh->getCStringNoCopy(), "defgh") == 0);
+	OSString * zyxwvut = OSString::withCString("zyxwvut", 7);
+	assert(strcmp(zyxwvut->getCStringNoCopy(), "zyxwvut") == 0);
+	OSSafeReleaseNULL(ab);
+	OSSafeReleaseNULL(defgh);
+	OSSafeReleaseNULL(zyxwvut);
+
 	return 0;
 }
 
@@ -331,6 +348,12 @@ OSAllocationTests(int)
 		}
 	}
 
+	OSAllocation<int> arrayZero(100, OSAllocateMemoryZero);
+	assert(arrayZero);
+	for (const auto& i : arrayZero) {
+		assert(i == 0);
+	}
+
 	// Make sure we can have two-level OSAllocations
 	{
 		OSAllocation<OSAllocation<int> > testArray(10, OSAllocateMemory);
@@ -346,6 +369,36 @@ OSAllocationTests(int)
 				assert(testArray[i][j] == i + j);
 			}
 		}
+	}
+
+	return 0;
+}
+
+static int
+OSDataAllocationTests(int)
+{
+	OSDataAllocation<int> ints(100, OSAllocateMemory);
+	assert(ints);
+
+	{
+		int counter = 0;
+		for (int& i : ints) {
+			i = counter++;
+		}
+	}
+
+	{
+		int counter = 0;
+		for (const int& i : ints) {
+			assert(i == counter);
+			++counter;
+		}
+	}
+
+	OSDataAllocation<int> arrayZero(100, OSAllocateMemoryZero);
+	assert(arrayZero);
+	for (const auto& i : arrayZero) {
+		assert(i == 0);
 	}
 
 	return 0;
@@ -400,6 +453,155 @@ OSBoundedArrayRefTests(int)
 	return 0;
 }
 
+class OSArraySubclass : public OSArray {
+	OSDeclareDefaultStructors(OSArraySubclass);
+public:
+	static OSArraySubclass * withCapacity(unsigned int inCapacity);
+	virtual unsigned int iteratorSize() const APPLE_KEXT_OVERRIDE;
+};
+
+OSDefineMetaClassAndStructors(OSArraySubclass, OSArray);
+
+OSArraySubclass *
+OSArraySubclass::withCapacity(unsigned int inCapacity)
+{
+	OSArraySubclass * me = OSTypeAlloc(OSArraySubclass);
+
+	if (me && !me->initWithCapacity(inCapacity)) {
+		return nullptr;
+	}
+
+	return me;
+}
+
+unsigned int
+OSArraySubclass::iteratorSize() const
+{
+	unsigned int result = 64;
+	// Has to be larger than the OSArray iterator size to prevent out-of-bounds writes
+	assert(result >= OSArray::iteratorSize());
+	return result;
+}
+
+class OSCISubclass : public OSCollectionIterator {
+	OSDeclareDefaultStructors(OSCISubclass);
+public:
+	static OSCISubclass * withCollection(const OSCollection * inColl);
+};
+
+OSDefineMetaClassAndStructors(OSCISubclass, OSCollectionIterator);
+
+OSCISubclass *
+OSCISubclass::withCollection(const OSCollection * inColl)
+{
+	OSCISubclass * me = OSTypeAlloc(OSCISubclass);
+
+	if (me && !me->initWithCollection(inColl)) {
+		return nullptr;
+	}
+
+	return me;
+}
+
+static int
+OSCollectionIteratorTests(int)
+{
+	OSArray * array = OSArray::withCapacity(0);
+	OSString * firstObj = OSString::withCString("test object");
+	OSString * secondObj = OSString::withCString("test object 2");
+	OSObject * current = NULL;
+	OSCollectionIterator * osci = NULL;
+	OSCISubclass * osciSubclass = NULL;
+	size_t index = 0;
+	array->setObject(firstObj);
+	array->setObject(secondObj);
+
+	// Test iteration over a normal OSArray
+	osci = OSCollectionIterator::withCollection(array);
+	assert(osci != NULL);
+
+	index = 0;
+	while ((current = osci->getNextObject()) != NULL) {
+		if (index == 0) {
+			assert(current == firstObj);
+		} else if (index == 1) {
+			assert(current == secondObj);
+		} else {
+			panic("index out of range");
+		}
+		index++;
+	}
+
+	OSSafeReleaseNULL(osci);
+
+	// Test iteration with a OSCollectionIterator subclass over a normal OSArray
+	osciSubclass = OSCISubclass::withCollection(array);
+	assert(osciSubclass != NULL);
+
+	index = 0;
+	while ((current = osciSubclass->getNextObject()) != NULL) {
+		if (index == 0) {
+			assert(current == firstObj);
+		} else if (index == 1) {
+			assert(current == secondObj);
+		} else {
+			panic("index out of range");
+		}
+		index++;
+	}
+
+	OSSafeReleaseNULL(osciSubclass);
+
+	OSSafeReleaseNULL(array);
+
+	// Create the OSArray subclass
+	OSArraySubclass * arraySubclass = OSArraySubclass::withCapacity(0);
+	arraySubclass->setObject(firstObj);
+	arraySubclass->setObject(secondObj);
+	// Test iteration over a subclassed OSArray, with a large iterator size
+	osci = OSCollectionIterator::withCollection(arraySubclass);
+	assert(osci != NULL);
+
+	index = 0;
+	while ((current = osci->getNextObject()) != NULL) {
+		if (index == 0) {
+			assert(current == firstObj);
+		} else if (index == 1) {
+			assert(current == secondObj);
+		} else {
+			panic("index out of range");
+		}
+		index++;
+	}
+
+	OSSafeReleaseNULL(osci);
+
+	// Test iteration with a OSCollectionIterator subclass over a subclassed OSArray,
+	// with a large iterator size.
+	osciSubclass = OSCISubclass::withCollection(arraySubclass);
+	assert(osciSubclass != NULL);
+
+	index = 0;
+	while ((current = osciSubclass->getNextObject()) != NULL) {
+		if (index == 0) {
+			assert(current == firstObj);
+		} else if (index == 1) {
+			assert(current == secondObj);
+		} else {
+			panic("index out of range");
+		}
+		index++;
+	}
+
+	OSSafeReleaseNULL(osciSubclass);
+
+	OSSafeReleaseNULL(arraySubclass);
+	OSSafeReleaseNULL(firstObj);
+	OSSafeReleaseNULL(secondObj);
+
+	return 0;
+}
+
 static int
 OSBoundedPtrTests(int)
 {
@@ -440,6 +642,7 @@ IOSharedDataQueue_44636964(__unused int newValue)
 	sd->enqueue(&data2, sizeof(UInt32));
 	/* something in the queue so peek() should return non-null */
 	assert(sd->peek() != NULL);
+	sd->release();
 	return KERN_SUCCESS;
 }
 
@@ -633,14 +836,302 @@ OSDynamicPtrCastTests()
 	}
 }
 
+
+class IOTestUserNotification : public IOUserNotification
+{
+	OSDeclareDefaultStructors(IOTestUserNotification);
+};
+
+OSDefineMetaClassAndStructors(IOTestUserNotification, IOUserNotification)
+
+struct IOUserNotificationTestThreadArgs {
+	IOTestUserNotification * userNotify;
+	IOLock * lock;
+	size_t * completed;
+	size_t iterations;
+};
+
+static bool
+IOUserNotificationMatchingHandler( void * target __unused,
+    void * ref __unused, IOService * newService __unused, IONotifier * notifier __unused )
+{
+	return true;
+}
+
+static void
+IOUserNotificationTestThread(void * arg, wait_result_t result __unused)
+{
+	IOUserNotificationTestThreadArgs * threadArgs = (IOUserNotificationTestThreadArgs *)arg;
+
+	OSDictionary * dict = OSDictionary::withCapacity(0);
+	OSString * rootPath = OSString::withCStringNoCopy(":/");
+	dict->setObject(gIOPathMatchKey, rootPath);
+
+	for (size_t i = 0; i < threadArgs->iterations; i++) {
+		if (i % 2 == 0) {
+			IONotifier * notify = IOService::addMatchingNotification( gIOWillTerminateNotification, dict,
+			    &IOUserNotificationMatchingHandler, NULL );
+			threadArgs->userNotify->setNotification(notify);
+		} else {
+			threadArgs->userNotify->setNotification(NULL);
+		}
+	}
+
+	threadArgs->userNotify->setNotification(NULL);
+	OSSafeReleaseNULL(rootPath);
+	OSSafeReleaseNULL(dict);
+
+	IOLockLock(threadArgs->lock);
+	*threadArgs->completed = *threadArgs->completed + 1;
+	IOLockWakeup(threadArgs->lock, (event_t)threadArgs->completed, true);
+	IOLockUnlock(threadArgs->lock);
+}
+
+static int
+IOUserNotificationTests(__unused int newValue)
+{
+	constexpr size_t numThreads = 10;
+	constexpr size_t numIterations = 500000;
+	IOTestUserNotification * userNotify = OSTypeAlloc(IOTestUserNotification);
+	IOLock * lock = IOLockAlloc();
+	size_t threadsCompleted;
+	size_t i = 0;
+	thread_t threads[numThreads];
+	kern_return_t kr;
+	bool result;
+
+	struct IOUserNotificationTestThreadArgs threadArgs = {
+		.userNotify = userNotify,
+		.lock = lock,
+		.completed = &threadsCompleted,
+		.iterations = numIterations,
+	};
+
+	result = userNotify->init();
+	assert(result);
+
+	for (i = 0; i < numThreads; i++) {
+		kr = kernel_thread_start(&IOUserNotificationTestThread, (void *)&threadArgs, &threads[i]);
+		assert(kr == KERN_SUCCESS);
+	}
+
+	IOLockLock(lock);
+	while (threadsCompleted < numThreads) {
+		IOLockSleep(lock, &threadsCompleted, THREAD_UNINT);
+		IOLog("%s: Threads completed: %zu/%zu\n", __func__, threadsCompleted, numThreads);
+	}
+	IOLockUnlock(lock);
+
+	for (i = 0; i < numThreads; i++) {
+		thread_deallocate(threads[i]);
+	}
+
+	userNotify->setNotification(NULL);
+
+	OSSafeReleaseNULL(userNotify);
+	IOLockFree(lock);
+
+	return KERN_SUCCESS;
+}
+
+static void
+IOServiceMatchingSharedPtrTests()
+{
+	const OSSymbol * name = OSSymbol::withCString("name");
+	const OSSymbol * value = OSSymbol::withCString("value");
+
+	{
+		OSSharedPtr<OSDictionary> table;
+		OSSharedPtr<OSDictionary> result = IOService::serviceMatching("name", table);
+		assert(result);
+		assert(result->getRetainCount() == 1);
+
+		table = result;
+		assert(table->getRetainCount() == 2);
+		OSSharedPtr<OSDictionary> result2 = IOService::serviceMatching("name", table);
+		assert(result2);
+		assert(result2 == table);
+		assert(result2->getRetainCount() == 3);
+	}
+
+	{
+		OSSharedPtr<OSDictionary> table;
+		OSSharedPtr<OSDictionary> result = IOService::serviceMatching(name, table);
+		assert(result);
+		assert(result->getRetainCount() == 1);
+
+		table = result;
+		assert(table->getRetainCount() == 2);
+		OSSharedPtr<OSDictionary> result2 = IOService::serviceMatching(name, table);
+		assert(result2);
+		assert(result2 == table);
+		assert(result2->getRetainCount() == 3);
+	}
+
+	{
+		OSSharedPtr<OSDictionary> table;
+		OSSharedPtr<OSDictionary> result = IOService::nameMatching("name", table);
+		assert(result);
+		assert(result->getRetainCount() == 1);
+
+		table = result;
+		assert(table->getRetainCount() == 2);
+		OSSharedPtr<OSDictionary> result2 = IOService::nameMatching("name", table);
+		assert(result2);
+		assert(result2 == table);
+		assert(result2->getRetainCount() == 3);
+	}
+
+	{
+		OSSharedPtr<OSDictionary> table;
+		OSSharedPtr<OSDictionary> result = IOService::nameMatching(name, table);
+		assert(result);
+		assert(result->getRetainCount() == 1);
+
+		table = result;
+		assert(table->getRetainCount() == 2);
+		OSSharedPtr<OSDictionary> result2 = IOService::nameMatching(name, table);
+		assert(result2);
+		assert(result2 == table);
+		assert(result2->getRetainCount() == 3);
+	}
+
+	{
+		OSSharedPtr<OSDictionary> table;
+		OSSharedPtr<OSDictionary> result = IOService::resourceMatching("name", table);
+		assert(result);
+		assert(result->getRetainCount() == 1);
+
+		table = result;
+		assert(table->getRetainCount() == 2);
+		OSSharedPtr<OSDictionary> result2 = IOService::resourceMatching("name", table);
+		assert(result2);
+		assert(result2 == table);
+		assert(result2->getRetainCount() == 3);
+	}
+
+	{
+		OSSharedPtr<OSDictionary> table;
+		OSSharedPtr<OSDictionary> result = IOService::resourceMatching(name, table);
+		assert(result);
+		assert(result->getRetainCount() == 1);
+
+		table = result;
+		assert(table->getRetainCount() == 2);
+		OSSharedPtr<OSDictionary> result2 = IOService::resourceMatching(name, table);
+		assert(result2);
+		assert(result2 == table);
+		assert(result2->getRetainCount() == 3);
+	}
+
+	{
+		OSSharedPtr<OSDictionary> table;
+		OSSharedPtr<OSDictionary> result = IOService::propertyMatching(name, value, table);
+		assert(result);
+		assert(result->getRetainCount() == 1);
+
+		table = result;
+		assert(table->getRetainCount() == 2);
+		OSSharedPtr<OSDictionary> result2 = IOService::propertyMatching(name, value, table);
+		assert(result2);
+		assert(result2 == table);
+		assert(result2->getRetainCount() == 3);
+	}
+
+	{
+		OSSharedPtr<OSDictionary> table;
+		OSSharedPtr<OSDictionary> result = IOService::registryEntryIDMatching(12, table);
+		assert(result);
+		assert(result->getRetainCount() == 1);
+
+		table = result;
+		assert(table->getRetainCount() == 2);
+		OSSharedPtr<OSDictionary> result2 = IOService::registryEntryIDMatching(12, table);
+		assert(result2);
+		assert(result2 == table);
+		assert(result2->getRetainCount() == 3);
+	}
+	OSSafeReleaseNULL(name);
+	OSSafeReleaseNULL(value);
+}
+
 static int
 OSSharedPtrTests(int)
 {
 	OSDynamicPtrCastTests();
 	OSConstPtrCastTests();
 	OSStaticPtrCastTests();
+	IOServiceMatchingSharedPtrTests();
 	return 0;
 }
+
+static int
+IOServiceStateNotificationTests(int)
+{
+	IOService * service = IOService::getSystemStateNotificationService();
+	OSString * str = OSString::withCString(kIOSystemStateClamshellKey);
+	kern_return_t kr = service->StateNotificationItemCreate(str, NULL);
+	assert(kIOReturnSuccess == kr);
+
+	void (^sendClam)(OSBoolean * state) = ^void (OSBoolean * state) {
+		OSDictionary * value;
+		kern_return_t kr;
+
+		value = OSDictionary::withCapacity(4);
+		value->setObject("value", state);
+		kr = IOService::getSystemStateNotificationService()->StateNotificationItemSet(str, value);
+		assert(kIOReturnSuccess == kr);
+		value->release();
+	};
+	sendClam(kOSBooleanTrue);
+	IOSleep(100);
+	sendClam(kOSBooleanFalse);
+	str->release();
+
+	str = OSString::withCString("test");
+	OSArray  * array = OSArray::withCapacity(4);
+	array->setObject(str);
+	IOStateNotificationListenerRef listenerRef;
+	kr = service->stateNotificationListenerAdd(array, &listenerRef, ^kern_return_t () {
+		IOLog("test handler\n");
+		kern_return_t kr;
+		OSDictionary * dict;
+		kr = service->StateNotificationItemCopy(str, &dict);
+		if (kIOReturnSuccess == kr) {
+		        OSSerialize * s = OSSerialize::withCapacity(4096);
+		        dict->serialize(s);
+		        IOLog("test handler %s\n", s->text());
+		        s->release();
+		}
+		return kIOReturnSuccess;
+	});
+	assert(kIOReturnSuccess == kr);
+
+	IOEventSource * es =
+	    IOServiceStateNotificationEventSource::serviceStateNotificationEventSource(
+		service, array,
+		^void () {
+		IOLog("test es handler\n");
+		kern_return_t kr;
+		OSDictionary * dict;
+		kr = service->StateNotificationItemCopy(str, &dict);
+		if (kIOReturnSuccess == kr) {
+		        OSSerialize * s = OSSerialize::withCapacity(4096);
+		        dict->serialize(s);
+		        IOLog("test es handler %s\n", s->text());
+		        s->release();
+		}
+	});
+	assert(es != nullptr);
+	IOService::getPlatform()->getWorkLoop()->addEventSource(es);
+	es->enable();
+	IOSleep(30 * 1000);
+	IOService::getPlatform()->getWorkLoop()->removeEventSource(es);
+	es->release();
+
+	return kIOReturnSuccess;
+}
+
 
 #endif  /* DEVELOPMENT || DEBUG */
 
@@ -710,6 +1201,10 @@ sysctl_iokittest(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused
 	}
 
 
+	if (changed && (555 == newValue)) {
+		IOServiceStateNotificationTests(newValue);
+	}
+
 	if (changed && newValue) {
 		error = IOWorkLoopTest(newValue);
 		assert(KERN_SUCCESS == error);
@@ -717,7 +1212,11 @@ sysctl_iokittest(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused
 		assert(KERN_SUCCESS == error);
 		error = OSCollectionTest(newValue);
 		assert(KERN_SUCCESS == error);
+		error = OSCollectionIteratorTests(newValue);
+		assert(KERN_SUCCESS == error);
 		error = OSAllocationTests(newValue);
+		assert(KERN_SUCCESS == error);
+		error = OSDataAllocationTests(newValue);
 		assert(KERN_SUCCESS == error);
 		error = OSBoundedArrayTests(newValue);
 		assert(KERN_SUCCESS == error);
@@ -731,6 +1230,8 @@ sysctl_iokittest(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused
 		assert(KERN_SUCCESS == error);
 		error = IOSharedDataQueue_44636964(newValue);
 		assert(KERN_SUCCESS == error);
+		error = IOUserNotificationTests(newValue);
+		assert(KERN_SUCCESS == error);
 	}
 #endif  /* DEVELOPMENT || DEBUG */
 
@@ -738,6 +1239,160 @@ sysctl_iokittest(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused
 }
 
 SYSCTL_PROC(_kern, OID_AUTO, iokittest,
-    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_NOAUTO | CTLFLAG_KERN | CTLFLAG_LOCKED,
+    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_KERN | CTLFLAG_LOCKED,
     NULL, 0, sysctl_iokittest, "I", "");
 #endif // __clang_analyzer__
+
+#if DEVELOPMENT || DEBUG
+
+/*
+ * A simple wrapper around an IOService. This terminates the IOService in free().
+ */
+class TestIOServiceHandle : public OSObject
+{
+	OSDeclareDefaultStructors(TestIOServiceHandle);
+public:
+	static TestIOServiceHandle * withService(IOService * service);
+
+private:
+	bool initWithService(IOService * service);
+	virtual void free() APPLE_KEXT_OVERRIDE;
+
+	IOService * fService;
+};
+
+OSDefineMetaClassAndStructors(TestIOServiceHandle, OSObject);
+
+TestIOServiceHandle *
+TestIOServiceHandle::withService(IOService * service)
+{
+	TestIOServiceHandle * handle = new TestIOServiceHandle;
+	if (handle && !handle->initWithService(service)) {
+		return NULL;
+	}
+	return handle;
+}
+
+bool
+TestIOServiceHandle::initWithService(IOService * service)
+{
+	fService = service;
+	fService->retain();
+	return true;
+}
+
+void
+TestIOServiceHandle::free()
+{
+	if (fService) {
+		fService->terminate();
+		OSSafeReleaseNULL(fService);
+	}
+}
+
+/*
+ * Set up test IOServices. See the available services in xnu/iokit/Tests/TestServices.
+ *
+ * xnu darwintests use this sysctl to make these test services available. A send right is pushed
+ * to the task that called the sysctl, which when deallocated removes the service. This ensures
+ * that the registry isn't polluted by misbehaving tests.
+ *
+ * Since this sysctl allows callers to instantiate arbitrary classes based on their class name,
+ * this can be a security concern. Tests that call this sysctl need the
+ * kIOServiceTestServiceManagementEntitlementKey entitlement.
+ */
+static int
+sysctl_iokit_test_service_setup(struct sysctl_oid *oidp, __unused void *arg1, __unused int arg2, struct sysctl_req *req)
+{
+	char classname[128] = {0};
+	IOService * service; // must not release
+	OSObject * obj = NULL; // must release
+	IOService * provider = NULL; // must not release
+	TestIOServiceHandle * handle = NULL; // must release
+	mach_port_name_t name __unused;
+	int error;
+
+	if (!IOTaskHasEntitlement(current_task(), kIOServiceTestServiceManagementEntitlementKey)) {
+		error = EPERM;
+		goto finish;
+	}
+
+	error = sysctl_handle_string(oidp, classname, sizeof(classname), req);
+	if (error != 0) {
+		goto finish;
+	}
+
+	/*
+	 * All test services currently attach to IOResources.
+	 */
+	provider = IOService::getResourceService();
+	if (!provider) {
+		IOLog("Failed to find IOResources\n");
+		error = ENOENT;
+		goto finish;
+	}
+
+	obj = OSMetaClass::allocClassWithName(classname);
+	if (!obj) {
+		IOLog("Failed to alloc class %s\n", classname);
+		error = ENOENT;
+		goto finish;
+	}
+
+	service = OSDynamicCast(IOService, obj);
+
+	if (!service) {
+		IOLog("Instance of class %s is not an IOService\n", classname);
+		error = EINVAL;
+		goto finish;
+	}
+
+	if (!service->init()) {
+		IOLog("Failed to initialize %s\n", classname);
+		error = EINVAL;
+		goto finish;
+	}
+
+	if (!service->attach(provider)) {
+		IOLog("Failed to attach %s\n", classname);
+		error = EINVAL;
+		goto finish;
+	}
+
+	if (!service->start(provider)) {
+		IOLog("Failed to start %s\n", classname);
+		error = EINVAL;
+		goto finish;
+	}
+
+	handle = TestIOServiceHandle::withService(service);
+	if (!handle) {
+		IOLog("Failed to create service handle\n");
+		error = ENOMEM;
+		goto finish;
+	}
+	name = iokit_make_send_right(current_task(), handle, IKOT_IOKIT_OBJECT);
+
+	error = 0;
+
+finish:
+
+	OSSafeReleaseNULL(obj);
+	OSSafeReleaseNULL(handle);
+	return error;
+}
+
+
+SYSCTL_PROC(_kern, OID_AUTO, iokit_test_service_setup,
+    CTLTYPE_STRING | CTLFLAG_WR | CTLFLAG_KERN | CTLFLAG_LOCKED,
+    NULL, 0, sysctl_iokit_test_service_setup, "-", "");
+
+#endif /* DEVELOPMENT || DEBUG */
+
+
+static __unused void
+CastCompileTest(OSObject *obj)
+{
+	OSDynamicCast(IOService, obj)->terminate();
+	OSRequiredCast(IOService, obj)->terminate();
+}

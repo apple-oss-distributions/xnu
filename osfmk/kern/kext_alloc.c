@@ -39,6 +39,7 @@
 #include <mach-o/loader.h>
 #include <libkern/kernel_mach_header.h>
 #include <libkern/prelink.h>
+#include <libkern/OSKextLibPrivate.h>
 #include <san/kasan.h>
 
 #define KASLR_IOREG_DEBUG 0
@@ -109,11 +110,11 @@ kext_alloc_init(void)
 	    VM_MAP_KERNEL_FLAGS_NONE, VM_KERN_MEMORY_KEXT,
 	    &g_kext_map);
 	if (rval != KERN_SUCCESS) {
-		panic("kext_alloc_init: kmem_suballoc failed 0x%x\n", rval);
+		panic("kext_alloc_init: kmem_suballoc failed 0x%x", rval);
 	}
 
 	if ((kext_alloc_base + kext_alloc_size) > kext_alloc_max) {
-		panic("kext_alloc_init: failed to get first 2GB\n");
+		panic("kext_alloc_init: failed to get first 2GB");
 	}
 
 	if (kernel_map->min_offset > kext_alloc_base) {
@@ -246,23 +247,57 @@ kext_free(vm_offset_t addr, vm_size_t size)
 kern_return_t
 kext_receipt(void **addrp, size_t *sizep)
 {
+	kern_return_t ret = KERN_FAILURE;
 	if (addrp == NULL || sizep == NULL) {
-		return KERN_FAILURE;
+		goto finish;
 	}
 
 	kernel_mach_header_t *kc = PE_get_kc_header(KCKindAuxiliary);
 	if (kc == NULL) {
-		return KERN_FAILURE;
+		ret = KERN_MISSING_KC;
+		goto finish;
+	}
+
+	/*
+	 * This will be set in early boot once we've successfully checked that
+	 * the AuxKC is properly linked against the BootKC. If this isn't set,
+	 * and we have a valid AuxKC mach header, then the booter gave us a
+	 * bad KC.
+	 */
+	if (auxkc_uuid_valid == FALSE) {
+		ret = KERN_INVALID_KC;
+		goto finish;
 	}
 
 	size_t size;
 	void *addr = getsectdatafromheader(kc,
 	    kReceiptInfoSegment, kAuxKCReceiptSection, &size);
 	if (addr == NULL) {
-		return KERN_FAILURE;
+		ret = KERN_INVALID_KC;
+		goto finish;
 	}
 
 	*addrp = addr;
 	*sizep = size;
-	return KERN_SUCCESS;
+	ret = KERN_SUCCESS;
+
+finish:
+	/*
+	 * If we do return success, we'll want to wait for the other side to
+	 * call kext_receipt_set_queried themselves, so we can confirm that
+	 * it made the roundtrip before allowing third party kexts to load.
+	 */
+	if (ret != KERN_SUCCESS) {
+		kext_receipt_set_queried();
+	}
+	return ret;
+}
+
+/*
+ * Returns KERN_FAILURE if the variable was already set.
+ */
+kern_return_t
+kext_receipt_set_queried()
+{
+	return OSKextSetReceiptQueried();
 }

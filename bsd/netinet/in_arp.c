@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2004-2020 Apple Inc. All rights reserved.
+ * Copyright (c) 2004-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -1233,6 +1233,53 @@ arp_is_entry_probing(route_t p_route)
 	return FALSE;
 }
 
+__attribute__((noinline))
+static void
+post_kev_in_arpfailure(struct ifnet *ifp)
+{
+	struct kev_msg ev_msg = {};
+	struct kev_in_arpfailure in_arpfailure = {};
+
+	in_arpfailure.link_data.if_family = ifp->if_family;
+	in_arpfailure.link_data.if_unit = ifp->if_unit;
+	strlcpy(in_arpfailure.link_data.if_name, ifp->if_name, IFNAMSIZ);
+	ev_msg.vendor_code = KEV_VENDOR_APPLE;
+	ev_msg.kev_class = KEV_NETWORK_CLASS;
+	ev_msg.kev_subclass = KEV_INET_SUBCLASS;
+	ev_msg.event_code = KEV_INET_ARPRTRFAILURE;
+	ev_msg.dv[0].data_ptr = &in_arpfailure;
+	ev_msg.dv[0].data_length = sizeof(struct kev_in_arpfailure);
+	dlil_post_complete_msg(NULL, &ev_msg);
+}
+
+__attribute__((noinline))
+static void
+arp_send_probe_notification(route_t route)
+{
+	route_event_enqueue_nwk_wq_entry(route, NULL,
+	    ROUTE_LLENTRY_PROBED, NULL, TRUE);
+
+	if (route->rt_flags & RTF_ROUTER) {
+		struct radix_node_head  *rnh = NULL;
+		struct route_event rt_ev;
+		route_event_init(&rt_ev, route, NULL, ROUTE_LLENTRY_PROBED);
+		/*
+		 * We already have a reference on rt. The function
+		 * frees it before returning.
+		 */
+		RT_UNLOCK(route);
+		lck_mtx_lock(rnh_lock);
+		rnh = rt_tables[AF_INET];
+
+		if (rnh != NULL) {
+			(void) rnh->rnh_walktree(rnh,
+			    route_event_walktree, (void *)&rt_ev);
+		}
+		lck_mtx_unlock(rnh_lock);
+		RT_LOCK(route);
+	}
+}
+
 /*
  * This is the ARP pre-output routine; care must be taken to ensure that
  * the "hint" route never gets freed via rtfree(), since the caller may
@@ -1254,7 +1301,7 @@ arp_lookup_ip(ifnet_t ifp, const struct sockaddr_in *net_dest,
 	struct ifaddr *rt_ifa;
 	struct sockaddr *sa;
 	uint32_t rtflags;
-	struct sockaddr_dl sdl;
+	struct sockaddr_dl sdl = {};
 	boolean_t send_probe_notif = FALSE;
 	boolean_t enqueued = FALSE;
 
@@ -1484,8 +1531,6 @@ arp_lookup_ip(ifnet_t ifp, const struct sockaddr_in *net_dest,
 		if (llinfo->la_asked == 0 || route->rt_expire != timenow) {
 			rt_setexpire(route, timenow);
 			if (llinfo->la_asked++ < llinfo->la_maxtries) {
-				struct kev_msg ev_msg;
-				struct kev_in_arpfailure in_arpfailure;
 				boolean_t sendkev = FALSE;
 
 				rt_ifa = route->rt_ifa;
@@ -1516,25 +1561,7 @@ arp_lookup_ip(ifnet_t ifp, const struct sockaddr_in *net_dest,
 				    rtflags);
 				IFA_REMREF(rt_ifa);
 				if (sendkev) {
-					bzero(&ev_msg, sizeof(ev_msg));
-					bzero(&in_arpfailure,
-					    sizeof(in_arpfailure));
-					in_arpfailure.link_data.if_family =
-					    ifp->if_family;
-					in_arpfailure.link_data.if_unit =
-					    ifp->if_unit;
-					strlcpy(in_arpfailure.link_data.if_name,
-					    ifp->if_name, IFNAMSIZ);
-					ev_msg.vendor_code = KEV_VENDOR_APPLE;
-					ev_msg.kev_class = KEV_NETWORK_CLASS;
-					ev_msg.kev_subclass = KEV_INET_SUBCLASS;
-					ev_msg.event_code =
-					    KEV_INET_ARPRTRFAILURE;
-					ev_msg.dv[0].data_ptr = &in_arpfailure;
-					ev_msg.dv[0].data_length =
-					    sizeof(struct
-					    kev_in_arpfailure);
-					dlil_post_complete_msg(NULL, &ev_msg);
+					post_kev_in_arpfailure(ifp);
 				}
 				result = EJUSTRETURN;
 				RT_LOCK(route);
@@ -1585,28 +1612,7 @@ release:
 
 	if (route != NULL) {
 		if (send_probe_notif) {
-			route_event_enqueue_nwk_wq_entry(route, NULL,
-			    ROUTE_LLENTRY_PROBED, NULL, TRUE);
-
-			if (route->rt_flags & RTF_ROUTER) {
-				struct radix_node_head  *rnh = NULL;
-				struct route_event rt_ev;
-				route_event_init(&rt_ev, route, NULL, ROUTE_LLENTRY_PROBED);
-				/*
-				 * We already have a reference on rt. The function
-				 * frees it before returning.
-				 */
-				RT_UNLOCK(route);
-				lck_mtx_lock(rnh_lock);
-				rnh = rt_tables[AF_INET];
-
-				if (rnh != NULL) {
-					(void) rnh->rnh_walktree(rnh,
-					    route_event_walktree, (void *)&rt_ev);
-				}
-				lck_mtx_unlock(rnh_lock);
-				RT_LOCK(route);
-			}
+			arp_send_probe_notification(route);
 		}
 
 		if (route == hint) {
@@ -1632,7 +1638,7 @@ arp_ip_handle_input(ifnet_t ifp, u_short arpop,
     const struct sockaddr_in *target_ip)
 {
 	char ipv4str[MAX_IPv4_STR_LEN];
-	struct sockaddr_dl proxied;
+	struct sockaddr_dl proxied = {};
 	struct sockaddr_dl *gateway, *target_hw = NULL;
 	struct ifaddr *ifa;
 	struct in_ifaddr *ia;
@@ -1672,7 +1678,7 @@ arp_ip_handle_input(ifnet_t ifp, u_short arpop,
 	/*
 	 * Determine if this ARP is for us
 	 */
-	lck_rw_lock_shared(in_ifaddr_rwlock);
+	lck_rw_lock_shared(&in_ifaddr_rwlock);
 	TAILQ_FOREACH(ia, INADDR_HASH(target_ip->sin_addr.s_addr), ia_hash) {
 		IFA_LOCK_SPIN(&ia->ia_ifa);
 		if (ia->ia_ifp == ifp &&
@@ -1681,7 +1687,7 @@ arp_ip_handle_input(ifnet_t ifp, u_short arpop,
 			best_ia_sin = best_ia->ia_addr;
 			IFA_ADDREF_LOCKED(&ia->ia_ifa);
 			IFA_UNLOCK(&ia->ia_ifa);
-			lck_rw_done(in_ifaddr_rwlock);
+			lck_rw_done(&in_ifaddr_rwlock);
 			goto match;
 		}
 		IFA_UNLOCK(&ia->ia_ifa);
@@ -1695,7 +1701,7 @@ arp_ip_handle_input(ifnet_t ifp, u_short arpop,
 			best_ia_sin = best_ia->ia_addr;
 			IFA_ADDREF_LOCKED(&ia->ia_ifa);
 			IFA_UNLOCK(&ia->ia_ifa);
-			lck_rw_done(in_ifaddr_rwlock);
+			lck_rw_done(&in_ifaddr_rwlock);
 			goto match;
 		}
 		IFA_UNLOCK(&ia->ia_ifa);
@@ -1722,14 +1728,14 @@ arp_ip_handle_input(ifnet_t ifp, u_short arpop,
 				best_ia_sin = best_ia->ia_addr;
 				IFA_ADDREF_LOCKED(&ia->ia_ifa);
 				IFA_UNLOCK(&ia->ia_ifa);
-				lck_rw_done(in_ifaddr_rwlock);
+				lck_rw_done(&in_ifaddr_rwlock);
 				goto match;
 			}
 			IFA_UNLOCK(&ia->ia_ifa);
 		}
 	}
 #undef BDG_MEMBER_MATCHES_ARP
-	lck_rw_done(in_ifaddr_rwlock);
+	lck_rw_done(&in_ifaddr_rwlock);
 
 	/*
 	 * No match, use the first inet address on the receive interface

@@ -6,9 +6,6 @@ export MakeInc_dir=${SRCROOT}/makedefs/MakeInc.dir
 include $(MakeInc_cmd)
 include $(MakeInc_def)
 
-DATAFILES = \
-	diag_entropy_sysctl.h
-
 INSTALL_MI_LIST =
 
 EXPORT_MI_LIST = ${DATAFILES}

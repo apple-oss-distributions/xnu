@@ -116,12 +116,27 @@ typedef struct vnode_resolve *vnode_resolve_t;
 
 #endif /* CONFIG_TRIGGERS */
 
+#if CONFIG_IOCOUNT_TRACE
+#define IOCOUNT_TRACE_VGET          0
+#define IOCOUNT_TRACE_VPUT          1
+#define IOCOUNT_TRACE_MAX_TYPES     2
+#define IOCOUNT_TRACE_MAX_IDX       16
+#define IOCOUNT_TRACE_MAX_FRAMES    10
+
+struct vnode_iocount_trace {
+	int idx;
+	int counts[IOCOUNT_TRACE_MAX_IDX];
+	void *stacks[IOCOUNT_TRACE_MAX_IDX][IOCOUNT_TRACE_MAX_FRAMES];
+};
+typedef struct vnode_iocount_trace *vnode_iocount_trace_t;
+#endif /* CONFIG_IOCOUNT_TRACE */
+
 /*
  * Reading or writing any of these items requires holding the appropriate lock.
  * v_freelist is locked by the global vnode_list_lock
  * v_mntvnodes is locked by the mount_lock
  * v_nclinks and v_ncchildren are protected by the global name_cache_lock
- * v_cleanblkhd and v_dirtyblkhd and v_iterblkflags are locked via the global buf_mtxp
+ * v_cleanblkhd and v_dirtyblkhd and v_iterblkflags are locked via the global buf_mtx
  * the rest of the structure is protected by the vnode_lock
  */
 struct vnode {
@@ -184,6 +199,13 @@ struct vnode {
 	                                         *  if VFLINKTARGET is set, if  VFLINKTARGET is not
 	                                         *  set, points to target */
 #endif /* CONFIG_FIRMLINKS */
+#if CONFIG_IO_COMPRESSION_STATS
+	io_compression_stats_t io_compression_stats;            /* IO compression statistics */
+#endif /* CONFIG_IO_COMPRESSION_STATS */
+
+#if CONFIG_IOCOUNT_TRACE
+	vnode_iocount_trace_t v_iocount_trace;
+#endif /* CONFIG_IOCOUNT_TRACE */
 };
 
 #define v_mountedhere   v_un.vu_mountedhere
@@ -619,7 +641,22 @@ int     vnode_materialize_dataless_file(vnode_t, uint64_t);
 
 int     vnode_isinuse_locked(vnode_t, int, int );
 
+int     fsgetpath_internal(vfs_context_t, int, uint64_t, vm_size_t, caddr_t, uint32_t options, int *);
+
 #endif /* BSD_KERNEL_PRIVATE */
+
+#if CONFIG_IO_COMPRESSION_STATS
+/*
+ * update the IO compression stats tracked at block granularity
+ */
+int vnode_updateiocompressionblockstats(vnode_t vp, uint32_t size_bucket);
+
+/*
+ * update the IO compression stats tracked for the buffer
+ */
+int vnode_updateiocompressionbufferstats(vnode_t vp, uint64_t uncompressed_size, uint64_t compressed_size, uint32_t size_bucket, uint32_t compression_bucket);
+
+#endif /* CONFIG_IO_COMPRESSION_STATS */
 
 extern bool rootvp_is_ssd;
 

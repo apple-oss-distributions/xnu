@@ -241,7 +241,7 @@ end:
 static void
 fasttrap_return_common(proc_t *p, arm_saved_state_t *regs, user_addr_t pc, user_addr_t new_pc)
 {
-	pid_t pid = p->p_pid;
+	pid_t pid = proc_getpid(p);
 	fasttrap_tracepoint_t *tp;
 	fasttrap_bucket_t *bucket;
 	fasttrap_id_t *id;
@@ -426,6 +426,7 @@ fasttrap_pid_probe(arm_saved_state_t *regs)
 	uthread->t_dtrace_scrpc = 0;
 	uthread->t_dtrace_astpc = 0;
 
+#if CONFIG_VFORK
 	/*
 	 * Treat a child created by a call to vfork(2) as if it were its
 	 * parent. We know that there's only one thread of control in such a
@@ -438,8 +439,9 @@ fasttrap_pid_probe(arm_saved_state_t *regs)
 		}
 		proc_list_unlock();
 	}
+#endif /* CONFIG_VFORK */
 
-	pid = p->p_pid;
+	pid = proc_getpid(p);
 	pid_mtx = &cpu_core[CPU->cpu_id].cpuc_pid_lock;
 	lck_mtx_lock(pid_mtx);
 	bucket = &fasttrap_tpoints.fth_table[FASTTRAP_TPOINTS_INDEX(pid, pc)];
@@ -1147,6 +1149,7 @@ fasttrap_return_probe(arm_saved_state_t *regs)
 	uthread->t_dtrace_scrpc = 0;
 	uthread->t_dtrace_astpc = 0;
 
+#if CONFIG_VFORK
 	/*
 	 * Treat a child created by a call to vfork(2) as if it were its
 	 * parent. We know that there's only one thread of control in such a
@@ -1159,6 +1162,7 @@ fasttrap_return_probe(arm_saved_state_t *regs)
 		}
 		proc_list_unlock();
 	}
+#endif /* CONFIG_VFORK */
 
 	/*
 	 * We set rp->r_pc to the address of the traced instruction so

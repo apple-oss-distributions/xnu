@@ -1,0 +1,4 @@
+module Darwin.uuid [system] {
+  header "uuid/uuid.h"
+  export *
+}

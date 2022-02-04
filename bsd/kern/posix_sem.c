@@ -181,32 +181,17 @@ static const struct fileops psemops = {
 	.fo_kqfilter = fo_no_kqfilter,
 };
 
-static lck_grp_t       *psx_sem_subsys_lck_grp;
-static lck_grp_attr_t  *psx_sem_subsys_lck_grp_attr;
-static lck_attr_t      *psx_sem_subsys_lck_attr;
-static lck_mtx_t        psx_sem_subsys_mutex;
+static LCK_GRP_DECLARE(psx_sem_subsys_lck_grp, "posix semaphores");
+static LCK_MTX_DECLARE(psx_sem_subsys_mutex, &psx_sem_subsys_lck_grp);
 
-#define PSEM_SUBSYS_LOCK() lck_mtx_lock(& psx_sem_subsys_mutex)
-#define PSEM_SUBSYS_UNLOCK() lck_mtx_unlock(& psx_sem_subsys_mutex)
+#define PSEM_SUBSYS_LOCK() lck_mtx_lock(&psx_sem_subsys_mutex)
+#define PSEM_SUBSYS_UNLOCK() lck_mtx_unlock(&psx_sem_subsys_mutex)
 #define PSEM_SUBSYS_ASSERT_HELD() LCK_MTX_ASSERT(&psx_sem_subsys_mutex, LCK_MTX_ASSERT_OWNED)
 
 
 static int psem_cache_add(struct pseminfo *psemp, struct psemname *pnp, struct psemcache *pcp);
 static void psem_cache_delete(struct psemcache *pcp);
-int psem_cache_purge_all(proc_t);
-
-
-/* Initialize the mutex governing access to the posix sem subsystem */
-__private_extern__ void
-psem_lock_init( void )
-{
-	psx_sem_subsys_lck_grp_attr = lck_grp_attr_alloc_init();
-
-	psx_sem_subsys_lck_grp = lck_grp_alloc_init("posix shared memory", psx_sem_subsys_lck_grp_attr);
-
-	psx_sem_subsys_lck_attr = lck_attr_alloc_init();
-	lck_mtx_init(&psx_sem_subsys_mutex, psx_sem_subsys_lck_grp, psx_sem_subsys_lck_attr);
-}
+int psem_cache_purge_all(void);
 
 /*
  * Lookup an entry in the cache
@@ -342,7 +327,7 @@ psem_cache_delete(struct psemcache *pcp)
  * name/path will be removed making all future lookups on the name fail.
  */
 int
-psem_cache_purge_all(__unused proc_t p)
+psem_cache_purge_all(void)
 {
 	struct psemcache *pcp, *tmppcp;
 	struct psemhashhead *pcpp;
@@ -470,17 +455,8 @@ sem_open(proc_t p, struct sem_open_args *uap, user_addr_t *retval)
 	 * allowed and the one at the front of the LRU list is in use.
 	 * Otherwise we use the one at the front of the LRU list.
 	 */
-	MALLOC(pcp, struct psemcache *, sizeof(struct psemcache), M_SHM, M_WAITOK | M_ZERO);
-	if (pcp == PSEMCACHE_NULL) {
-		error = ENOMEM;
-		goto bad;
-	}
-
-	MALLOC(new_pinfo, struct pseminfo *, sizeof(struct pseminfo), M_SHM, M_WAITOK | M_ZERO);
-	if (new_pinfo == NULL) {
-		error = ENOSPC;
-		goto bad;
-	}
+	pcp = kalloc_type(struct psemcache, Z_WAITOK | Z_ZERO | Z_NOFAIL);
+	new_pinfo = kalloc_type(struct pseminfo, Z_WAITOK | Z_ZERO | Z_NOFAIL);
 #if CONFIG_MACF
 	mac_posixsem_label_init(new_pinfo);
 #endif
@@ -517,11 +493,7 @@ sem_open(proc_t p, struct sem_open_args *uap, user_addr_t *retval)
 		}
 	}
 
-	MALLOC(new_pnode, struct psemnode *, sizeof(struct psemnode), M_SHM, M_WAITOK | M_ZERO);
-	if (new_pnode == NULL) {
-		error = ENOSPC;
-		goto bad;
-	}
+	new_pnode = kalloc_type(struct psemnode, Z_WAITOK | Z_ZERO | Z_NOFAIL);
 
 	PSEM_SUBSYS_LOCK();
 	error = psem_cache_search(&pinfo, &nd, &pcache);
@@ -567,8 +539,8 @@ sem_open(proc_t p, struct sem_open_args *uap, user_addr_t *retval)
 		pinfo->psem_name[PSEMNAMLEN] = 0;
 		pinfo->psem_flags &= ~PSEM_DEFINED;
 		pinfo->psem_flags |= PSEM_ALLOCATED;
-		pinfo->psem_creator_pid = p->p_pid;
-		pinfo->psem_creator_uniqueid = p->p_uniqueid;
+		pinfo->psem_creator_pid = proc_getpid(p);
+		pinfo->psem_creator_uniqueid = proc_uniqueid(p);
 
 #if CONFIG_MACF
 		error = mac_posixsem_check_create(kauth_cred_get(), nameptr);
@@ -616,7 +588,7 @@ sem_open(proc_t p, struct sem_open_args *uap, user_addr_t *retval)
 	 * new . and we must free them.
 	 */
 	if (incache) {
-		FREE(pcp, M_SHM);
+		kfree_type(struct psemcache, pcp);
 		pcp = PSEMCACHE_NULL;
 		if (new_pinfo != PSEMINFO_NULL) {
 			/* return value ignored - we can't _not_ do this */
@@ -624,7 +596,7 @@ sem_open(proc_t p, struct sem_open_args *uap, user_addr_t *retval)
 #if CONFIG_MACF
 			mac_posixsem_label_destroy(new_pinfo);
 #endif
-			FREE(new_pinfo, M_SHM);
+			kfree_type(struct pseminfo, new_pinfo);
 			new_pinfo = PSEMINFO_NULL;
 		}
 	}
@@ -644,13 +616,9 @@ sem_open(proc_t p, struct sem_open_args *uap, user_addr_t *retval)
 bad_locked:
 	PSEM_SUBSYS_UNLOCK();
 bad:
-	if (pcp != PSEMCACHE_NULL) {
-		FREE(pcp, M_SHM);
-	}
+	kfree_type(struct psemcache, pcp);
 
-	if (new_pnode != PSEMNODE_NULL) {
-		FREE(new_pnode, M_SHM);
-	}
+	kfree_type(struct psemnode, new_pnode);
 
 	if (fp != NULL) {
 		fp_free(p, indx, fp);
@@ -669,7 +637,7 @@ bad:
 #if CONFIG_MACF
 		mac_posixsem_label_destroy(new_pinfo);
 #endif
-		FREE(new_pinfo, M_SHM);
+		kfree_type(struct pseminfo, new_pinfo);
 	}
 
 	if (pnbuf != NULL) {
@@ -720,13 +688,13 @@ psem_unlink_internal(struct pseminfo *pinfo, struct psemcache *pcache)
 
 	if (!pinfo->psem_usecount) {
 		psem_delete(pinfo);
-		FREE(pinfo, M_SHM);
+		kfree_type(struct pseminfo, pinfo);
 	} else {
 		pinfo->psem_flags |= PSEM_REMOVED;
 	}
 
 	psem_cache_delete(pcache);
-	FREE(pcache, M_SHM);
+	kfree_type(struct psemcache, pcache);
 	return 0;
 }
 
@@ -1045,12 +1013,12 @@ psem_close(struct psemnode *pnode)
 		PSEM_SUBSYS_UNLOCK();
 		/* lock dropped as only semaphore is destroyed here */
 		error = psem_delete(pinfo);
-		FREE(pinfo, M_SHM);
+		kfree_type(struct pseminfo, pinfo);
 	} else {
 		PSEM_SUBSYS_UNLOCK();
 	}
 	/* subsystem lock is dropped when we get here */
-	FREE(pnode, M_SHM);
+	kfree_type(struct psemnode, pnode);
 	return error;
 }
 

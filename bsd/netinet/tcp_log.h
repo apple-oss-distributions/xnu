@@ -59,6 +59,7 @@ extern int tcp_log_privacy;
 	X(TLEF_CONNECTION,	0x1, connection)        \
 	X(TLEF_RTT,		0x2, rtt)               \
 	X(TLEF_KEEP_ALIVE,	0x4, ka)                \
+	X(TLEF_LOG,		0x8, log)               \
 	X(TLEF_DST_LOOPBACK,	0x10, loop)             \
 	X(TLEF_DST_LOCAL,	0x20, local)            \
 	X(TLEF_DST_GW,		0x40, gw)               \
@@ -66,8 +67,8 @@ extern int tcp_log_privacy;
 	X(TLEF_THF_FIN,		0x200, fin)             \
 	X(TLEF_THF_RST,		0x400, rst)             \
 	X(TLEF_DROP_NECP,	0x1000, dropnecp)       \
-	X(TLEF_DROP_PCB,	0x2000, droppcb)       \
-	X(TLEF_DROP_PKT,	0x4000, droppkt)       \
+	X(TLEF_DROP_PCB,	0x2000, droppcb)        \
+	X(TLEF_DROP_PKT,	0x4000, droppkt)        \
 	X(TLEF_FSW_FLOW,	0x8000, fswflow)
 
 /*
@@ -181,9 +182,8 @@ tcp_is_log_enabled(struct tcpcb *tp, uint32_t req_flags)
 #define TCP_LOG_FSW_FLOW(tp, format, ...) if (tcp_is_log_enabled(tp, TLEF_FSW_FLOW)) \
     tcp_log_fsw_flow(__func__, __LINE__, (tp), format, ##__VA_ARGS__)
 
-#define TCP_LOG(tp, format, ...) \
+#define TCP_LOG(tp, format, ...) if (tcp_is_log_enabled(tp, TLEF_LOG)) \
     tcp_log_message(__func__, __LINE__, tp, format, ## __VA_ARGS__)
-
 
 
 #endif /* BSD_KERNEL_RPIVATE */

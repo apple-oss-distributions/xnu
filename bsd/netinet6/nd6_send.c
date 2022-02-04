@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2016 Apple Inc. All rights reserved.
+ * Copyright (c) 2013-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -115,8 +115,8 @@ sysctl_cga_parameters SYSCTL_HANDLER_ARGS
 	}
 #endif
 
-	MALLOC(buffer, char *, SYSCTL_CGA_PARAMETERS_BUFFER_SIZE, M_IP6CGA,
-	    M_WAITOK | M_ZERO);
+	buffer = (char *)kalloc_data(SYSCTL_CGA_PARAMETERS_BUFFER_SIZE,
+	    Z_WAITOK | Z_ZERO);
 	if (buffer == NULL) {
 		log(LOG_ERR, "%s: could not allocate marshaling buffer.\n",
 		    __func__);
@@ -246,7 +246,7 @@ sysctl_cga_parameters SYSCTL_HANDLER_ARGS
 
 done:
 	in6_cga_node_unlock();
-	FREE(buffer, M_IP6CGA);
+	kfree_data(buffer, SYSCTL_CGA_PARAMETERS_BUFFER_SIZE);
 	return error;
 }
 

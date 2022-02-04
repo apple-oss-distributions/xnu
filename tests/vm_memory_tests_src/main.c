@@ -1,6 +1,9 @@
 #include "mach_vm_tests.h"
 
-T_GLOBAL_META(T_META_NAMESPACE("xnu.vm"));
+T_GLOBAL_META(
+	T_META_NAMESPACE("xnu.vm"),
+	T_META_RADAR_COMPONENT_NAME("xnu"),
+	T_META_RADAR_COMPONENT_VERSION("VM"));
 
 extern char **environ;
 
@@ -63,7 +66,11 @@ spawn_process(char *action, char *serviceName, char *extraArg,
 	posix_spawn_file_actions_t actions;
 	posix_spawn_file_actions_init(&actions);
 
-	T_ASSERT_POSIX_ZERO(posix_spawn(&pid, buffer, &actions, NULL, argv, environ), "spawn %s", serviceName);
+	if (use4k) {
+		T_ASSERT_POSIX_ZERO(posix_spawn(&pid, VM_SPAWN_TOOL, &actions, NULL, argv, environ), "spawn %s", serviceName);
+	} else {
+		T_ASSERT_POSIX_ZERO(posix_spawn(&pid, buffer, &actions, NULL, argv, environ), "spawn %s", serviceName);
+	}
 	posix_spawn_file_actions_destroy(&actions);
 
 	kern_return_t ret;
@@ -88,9 +95,6 @@ spawn_process(char *action, char *serviceName, char *extraArg,
 	*server_Pid = pid;
 	T_LOG("Server pid=%d port 0x%x", pid, servicePort);
 }
-
-
-
 
 void
 mach_client()
@@ -149,6 +153,14 @@ T_DECL(memory_share_tests,
 	mach_client();
 }
 
+/*
+ * This posix spawn attribute used in the 4K test should only be valid on apple
+ * silicon macs. But we've had issues in the past where it would accidently
+ * trigger incorrect behavior on other platforms.
+ * So we run the test on all platforms to catch issues like that.
+ * On all non apple silcon mac platforms, this test should be identical to
+ * running without the 4K flag.
+ */
 T_DECL_REF(memory_share_tests_4k, memory_share_tests, "vm memory sharing with 4k processes",
     T_META_ENVVAR("USE4K=YES"),
     T_META_ASROOT(true)

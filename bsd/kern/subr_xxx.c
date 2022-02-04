@@ -74,7 +74,8 @@
 #include <kern/debug.h>
 
 #if DEVELOPMENT || DEBUG
-bool send_sigsys = true;
+static TUNABLE(bool, no_sigsys, "-no_sigsys", false);
+#define send_sigsys (!no_sigsys)
 #else
 #define send_sigsys true
 #endif

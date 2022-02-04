@@ -45,11 +45,6 @@ __BEGIN_DECLS
 	                ((a)         & 0x000000FF) ) )
 #define DEBUG_RECORD_ID_SHORT(a, b, c, d) DEBUG_RECORD_ID_LONG(a,b,c,d,0,0,0,0)
 
-/*
- *      Shared Memory Console Descriptors:
- *      Record ID: One per SHMConsole
- */
-
 typedef enum {
 	DBG_PROCESSOR_AP = 1,
 	DBG_COPROCESSOR_ANS,

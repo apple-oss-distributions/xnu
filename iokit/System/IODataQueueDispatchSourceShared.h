@@ -273,6 +273,9 @@ kern_return_t
 IODataQueueDispatchSource::Cancel_Impl(
 	IODispatchSourceCancelHandler handler)
 {
+	if (handler) {
+		handler();
+	}
 	return kIOReturnSuccess;
 }
 

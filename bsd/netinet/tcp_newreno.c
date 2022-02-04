@@ -91,7 +91,7 @@ void tcp_newreno_post_fr(struct tcpcb *tp, struct tcphdr *th);
 void tcp_newreno_after_idle(struct tcpcb *tp);
 void tcp_newreno_after_timeout(struct tcpcb *tp);
 int tcp_newreno_delay_ack(struct tcpcb *tp, struct tcphdr *th);
-void tcp_newreno_switch_cc(struct tcpcb *tp, uint16_t old_index);
+void tcp_newreno_switch_cc(struct tcpcb *tp);
 
 struct tcp_cc_algo tcp_cc_newreno = {
 	.name = "newreno",
@@ -328,10 +328,8 @@ tcp_newreno_delay_ack(struct tcpcb *tp, struct tcphdr *th)
  * window and let newreno work from there.
  */
 void
-tcp_newreno_switch_cc(struct tcpcb *tp, uint16_t old_index)
+tcp_newreno_switch_cc(struct tcpcb *tp)
 {
-#pragma unused(old_index)
-
 	uint32_t cwnd = min(tp->snd_wnd, tp->snd_cwnd);
 	if (tp->snd_cwnd >= tp->snd_ssthresh) {
 		cwnd = cwnd / tp->t_maxseg;

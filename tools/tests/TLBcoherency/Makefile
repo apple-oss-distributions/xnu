@@ -1,7 +1,5 @@
 include ../Makefile.common
 
-CC:=$(shell xcrun -sdk "$(SDKROOT)" -find cc)
-
 CFLAGS := -g $(ARCH_FLAGS) -isysroot $(SDKROOT) -isystem $(SDKROOT)/System/Library/Frameworks/System.framework/PrivateHeaders
 CFLAGS += -Wl,-sectcreate,__INFO_FILTER,__disable,/dev/null
 

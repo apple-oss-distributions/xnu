@@ -60,7 +60,7 @@
 #include <sys/imageboot.h>
 #include <pexpert/pexpert.h>
 
-extern int      nfs_mountroot(void);    /* nfs_vfsops.c */
+extern int      nfs_mountroot(void);    /* nfs_boot.c */
 extern int (*mountroot)(void);
 
 extern unsigned char    rootdevice[];
@@ -308,7 +308,7 @@ static void
 save_path(char * * str_p, size_t * length_p, char * path)
 {
 	*length_p = strlen(path) + 1;
-	*str_p = (char *)kheap_alloc(KHEAP_DATA_BUFFERS, *length_p, Z_WAITOK);
+	*str_p = kalloc_data(*length_p, Z_WAITOK);
 	strlcpy(*str_p, path, *length_p);
 	return;
 }
@@ -320,8 +320,7 @@ netboot_info_init(struct in_addr iaddr)
 	struct netboot_info *       info = NULL;
 	char *                      root_path = NULL;
 
-	info = (struct netboot_info *)kalloc(sizeof(*info));
-	bzero(info, sizeof(*info));
+	info = (struct netboot_info *)kalloc_type(struct netboot_info, Z_WAITOK | Z_ZERO);
 	info->client_ip = iaddr;
 	info->image_type = kNetBootImageTypeUnknown;
 
@@ -352,11 +351,11 @@ netboot_info_init(struct in_addr iaddr)
 			info->image_type = kNetBootImageTypeNFS;
 			info->server_ip = server_ip;
 			info->server_name_length = strlen(server_name) + 1;
-			info->server_name = kheap_alloc(KHEAP_DATA_BUFFERS,
-			    info->server_name_length, Z_WAITOK);
+			info->server_name = kalloc_data(info->server_name_length,
+			    Z_WAITOK);
 			info->mount_point_length = strlen(mount_point) + 1;
-			info->mount_point = kheap_alloc(KHEAP_DATA_BUFFERS,
-			    info->mount_point_length, Z_WAITOK);
+			info->mount_point = kalloc_data(info->mount_point_length,
+			    Z_WAITOK);
 			strlcpy(info->server_name, server_name, info->server_name_length);
 			strlcpy(info->mount_point, mount_point, info->mount_point_length);
 
@@ -370,8 +369,8 @@ netboot_info_init(struct in_addr iaddr)
 					needs_slash = TRUE;
 					info->image_path_length++;
 				}
-				info->image_path = kheap_alloc(KHEAP_DATA_BUFFERS,
-				    info->image_path_length, Z_WAITOK);
+				info->image_path = kalloc_data(info->image_path_length,
+				    Z_WAITOK);
 				if (needs_slash) {
 					info->image_path[0] = '/';
 					strlcpy(info->image_path + 1, image_path,
@@ -416,23 +415,12 @@ netboot_info_free(struct netboot_info * * info_p)
 	struct netboot_info * info = *info_p;
 
 	if (info) {
-		if (info->mount_point) {
-			kheap_free(KHEAP_DATA_BUFFERS, info->mount_point,
-			    info->mount_point_length);
-		}
-		if (info->server_name) {
-			kheap_free(KHEAP_DATA_BUFFERS, info->server_name,
-			    info->server_name_length);
-		}
-		if (info->image_path) {
-			kheap_free(KHEAP_DATA_BUFFERS, info->image_path,
-			    info->image_path_length);
-		}
-		if (info->second_image_path) {
-			kheap_free(KHEAP_DATA_BUFFERS, info->second_image_path,
-			    info->second_image_path_length);
-		}
-		kfree(info, sizeof(*info));
+		kfree_data(info->mount_point, info->mount_point_length);
+		kfree_data(info->server_name, info->server_name_length);
+		kfree_data(info->image_path, info->image_path_length);
+		kfree_data(info->second_image_path,
+		    info->second_image_path_length);
+		kfree_type(struct netboot_info, info);
 	}
 	*info_p = NULL;
 }

@@ -712,4 +712,33 @@ mach_port_kobject_description(
 	out	object_addr	: mach_vm_address_t;
 	out     description     : kobject_description_t);
 
+/*
+ *	Verifies that connection port was created for this
+ *	service port and returns the filter policy id
+ *	for that connection port
+ */
+routine mach_port_is_connection_for_service(
+		task               : ipc_space_t;
+		connection_port    : mach_port_name_t;
+		service_port       : mach_port_name_t;
+	out	filter_policy_id   : uint64_t
+);
+
+/*
+ *	Get information about service ports. Supported only
+ *	on development/debug builds
+ */
+routine mach_port_get_service_port_info(
+		task		: ipc_space_read_t;
+		name		: mach_port_name_t;
+	out	sp_info_out	: mach_service_port_info_data_t
+);
+
+routine mach_port_assert_attributes(
+		task		: ipc_space_t;
+		name		: mach_port_name_t;
+		flavor		: mach_port_flavor_t;
+		info		: mach_port_info_t
+);
+
 /* vim: set ft=c : */

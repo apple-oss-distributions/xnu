@@ -346,7 +346,7 @@ pal_machine_sleep(uint8_t type_a __unused, uint8_t type_b __unused, uint32_t bit
 void
 pal_get_kern_regs( x86_saved_state_t *state )
 {
-	panic( "pal_get_kern_regs called. state %p\n", state );
+	panic( "pal_get_kern_regs called. state %p", state );
 }
 
 void

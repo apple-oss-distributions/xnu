@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2018 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2020 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -76,12 +76,15 @@
 
 #ifndef _NET_BPF_H_
 #define _NET_BPF_H_
+
+#include <stdint.h>
+
+#if !defined(DRIVERKIT)
 #include <sys/param.h>
 #include <sys/appleapiopts.h>
 #include <sys/types.h>
 #include <sys/time.h>
 #include <sys/cdefs.h>
-#include <stdint.h>
 
 #ifdef PRIVATE
 #include <net/if_var.h>
@@ -286,9 +289,10 @@ struct bpf_hdr_ext {
 	char            bh_comm[MAXCOMLEN + 1]; /* process command */
 	u_char          _bh_pad2[1];
 	u_char          bh_pktflags;
-#define BPF_PKTFLAGS_TCP_REXMT  0x0001
-#define BPF_PKTFLAGS_START_SEQ  0x0002
-#define BPF_PKTFLAGS_LAST_PKT   0x0004
+#define BPF_PKTFLAGS_TCP_REXMT  0x01
+#define BPF_PKTFLAGS_START_SEQ  0x02
+#define BPF_PKTFLAGS_LAST_PKT   0x04
+#define BPF_PKTFLAGS_WAKE_PKT   0x08
 	u_char          bh_proto;       /* kernel reserved; 0 in userland */
 	bpf_u_int32     bh_svc;         /* service class */
 	bpf_u_int32     bh_flowid;      /* kernel reserved; 0 in userland */
@@ -308,6 +312,7 @@ struct bpf_mtag {
 };
 
 #endif /* PRIVATE */
+#endif /* !defined(DRIVERKIT) */
 
 /*
  * Data-link level type codes.
@@ -1249,6 +1254,7 @@ struct bpf_mtag {
 
 #define DLT_MATCHING_MAX        266     /* highest value in the "matching" range */
 
+#if !defined(DRIVERKIT)
 /*
  * The instruction encodings.
  */
@@ -1304,6 +1310,11 @@ struct bpf_mtag {
 #define BPF_MISCOP(code) ((code) & 0xf8)
 #define         BPF_TAX         0x00
 #define         BPF_TXA         0x80
+
+/*
+ * Number of scratch memory words (for BPF_LD|BPF_MEM and BPF_ST).
+ */
+#define BPF_MEMWORDS 16
 
 /*
  * The instruction data structure.
@@ -1370,7 +1381,9 @@ extern void     bpfilterattach(int);
 extern u_int    bpf_filter(const struct bpf_insn *, u_char *, u_int, u_int);
 #endif /* KERNEL_PRIVATE */
 
-#ifdef KERNEL
+#endif /* !defined(DRIVERKIT) */
+
+#if defined(DRIVERKIT) || defined(KERNEL)
 #ifndef BPF_TAP_MODE_T
 #define BPF_TAP_MODE_T
 /*!
@@ -1392,9 +1405,11 @@ enum {
  *       @typedef bpf_tap_mode
  *       @abstract Mode for tapping. BPF_MODE_DISABLED/BPF_MODE_INPUT_OUTPUT etc.
  */
-typedef u_int32_t bpf_tap_mode;
+typedef uint32_t bpf_tap_mode;
 #endif /* !BPF_TAP_MODE_T */
+#endif /* defined(DRIVERKIT) || defined(KERNEL) */
 
+#ifdef KERNEL
 /*!
  *       @typedef bpf_send_func
  *       @discussion bpf_send_func is called when a bpf file descriptor is
@@ -1490,10 +1505,5 @@ extern void bpf_tap_out(ifnet_t interface, u_int32_t dlt, mbuf_t packet,
     void *header, size_t header_len);
 
 #endif /* KERNEL */
-
-/*
- * Number of scratch memory words (for BPF_LD|BPF_MEM and BPF_ST).
- */
-#define BPF_MEMWORDS 16
 
 #endif /* _NET_BPF_H_ */

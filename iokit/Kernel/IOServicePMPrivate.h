@@ -58,6 +58,7 @@ enum {
 	kIOPMRequestTypeSetIdleTimerPeriod          = 0x0F,
 	kIOPMRequestTypeIgnoreIdleTimer             = 0x10,
 	kIOPMRequestTypeQuiescePowerTree            = 0x11,
+	kIOPMRequestTypeDeferredActivityTickle      = 0x12,
 
 	/* Reply Types */
 	kIOPMRequestTypeReplyStart                  = 0x80,

@@ -53,6 +53,7 @@
 #include <libkern/OSAtomic.h>
 #include <stdatomic.h>
 #include <kern/remote_time.h>
+#include <machine/atomic.h>
 #include <machine/machine_remote_time.h>
 #include <machine/machine_routines.h>
 
@@ -76,11 +77,45 @@ extern user64_addr_t commpage_text64_location;
 extern user32_addr_t commpage_text32_location;
 
 /* For sysctl access from BSD side */
-extern int      gARMv81Atomics;
-extern int      gARMv8Crc32;
-extern int      gARMv82FHM;
-extern int      gARMv82SHA512;
-extern int      gARMv82SHA3;
+extern int gARMv8Crc32;
+extern int gARMv8Gpi;
+extern int gARM_FEAT_FlagM;
+extern int gARM_FEAT_FlagM2;
+extern int gARM_FEAT_FHM;
+extern int gARM_FEAT_DotProd;
+extern int gARM_FEAT_SHA3;
+extern int gARM_FEAT_RDM;
+extern int gARM_FEAT_LSE;
+extern int gARM_FEAT_SHA256;
+extern int gARM_FEAT_SHA512;
+extern int gARM_FEAT_SHA1;
+extern int gARM_FEAT_AES;
+extern int gARM_FEAT_PMULL;
+extern int gARM_FEAT_SPECRES;
+extern int gARM_FEAT_SB;
+extern int gARM_FEAT_FRINTTS;
+extern int gARM_FEAT_LRCPC;
+extern int gARM_FEAT_LRCPC2;
+extern int gARM_FEAT_FCMA;
+extern int gARM_FEAT_JSCVT;
+extern int gARM_FEAT_PAuth;
+extern int gARM_FEAT_PAuth2;
+extern int gARM_FEAT_FPAC;
+extern int gARM_FEAT_DPB;
+extern int gARM_FEAT_DPB2;
+extern int gARM_FEAT_BF16;
+extern int gARM_FEAT_I8MM;
+extern int gARM_FEAT_ECV;
+extern int gARM_FEAT_LSE2;
+extern int gARM_FEAT_CSV2;
+extern int gARM_FEAT_CSV3;
+extern int gARM_AdvSIMD;
+extern int gARM_AdvSIMD_HPFPCvt;
+extern int gARM_FEAT_FP16;
+extern int gARM_FEAT_SSBS;
+extern int gARM_FEAT_BTI;
+
+extern int      gUCNormalMem;
 
 void
 commpage_populate(void)
@@ -259,17 +294,15 @@ commpage_set_timestamp(
 
 	commpage_timeofday_datap->TimeStamp_tick = 0x0ULL;
 
-#if     (__ARM_ARCH__ >= 7)
-	__asm__ volatile ("dmb ish");
-#endif
+	__builtin_arm_dmb(DMB_ISH);
+
 	commpage_timeofday_datap->TimeStamp_sec = secs;
 	commpage_timeofday_datap->TimeStamp_frac = frac;
 	commpage_timeofday_datap->Ticks_scale = scale;
 	commpage_timeofday_datap->Ticks_per_sec = tick_per_sec;
 
-#if     (__ARM_ARCH__ >= 7)
-	__asm__ volatile ("dmb ish");
-#endif
+	__builtin_arm_dmb(DMB_ISH);
+
 	commpage_timeofday_datap->TimeStamp_tick = tbr;
 
 }
@@ -326,6 +359,253 @@ _get_commpage_text_priv_address(void)
 	return sharedpage_rw_text_addr;
 }
 
+#if defined(__arm64__)
+/**
+ * Initializes all commpage entries and sysctls for EL0 visible features in ID_AA64ISAR0_EL1
+ */
+static void
+commpage_init_arm_optional_features_isar0(uint64_t *commpage_bits)
+{
+	uint64_t bits = 0;
+	uint64_t isar0 = __builtin_arm_rsr64("ID_AA64ISAR0_EL1");
+
+	if ((isar0 & ID_AA64ISAR0_EL1_TS_MASK) >= ID_AA64ISAR0_EL1_TS_FLAGM_EN) {
+		gARM_FEAT_FlagM = 1;
+		bits |= kHasFEATFlagM;
+	}
+	if ((isar0 & ID_AA64ISAR0_EL1_TS_MASK) >= ID_AA64ISAR0_EL1_TS_FLAGM2_EN) {
+		gARM_FEAT_FlagM2 = 1;
+		bits |= kHasFEATFlagM2;
+	}
+	if ((isar0 & ID_AA64ISAR0_EL1_FHM_MASK) >= ID_AA64ISAR0_EL1_FHM_8_2) {
+		gARM_FEAT_FHM = 1;
+		bits |= kHasFeatFHM;
+	}
+	if ((isar0 & ID_AA64ISAR0_EL1_DP_MASK) >= ID_AA64ISAR0_EL1_DP_EN) {
+		gARM_FEAT_DotProd = 1;
+		bits |= kHasFeatDotProd;
+	}
+	if ((isar0 & ID_AA64ISAR0_EL1_SHA3_MASK) >= ID_AA64ISAR0_EL1_SHA3_EN) {
+		gARM_FEAT_SHA3 = 1;
+		bits |= kHasFeatSHA3;
+	}
+	if ((isar0 & ID_AA64ISAR0_EL1_RDM_MASK) >= ID_AA64ISAR0_EL1_RDM_EN) {
+		gARM_FEAT_RDM = 1;
+		bits |= kHasFeatRDM;
+	}
+	if ((isar0 & ID_AA64ISAR0_EL1_ATOMIC_MASK) >= ID_AA64ISAR0_EL1_ATOMIC_8_1) {
+		gARM_FEAT_LSE = 1;
+		bits |= kHasFeatLSE;
+	}
+	if ((isar0 & ID_AA64ISAR0_EL1_SHA2_MASK) >= ID_AA64ISAR0_EL1_SHA2_512_EN) {
+		gARM_FEAT_SHA512 = 1;
+		bits |= kHasFeatSHA512;
+	}
+	if ((isar0 & ID_AA64ISAR0_EL1_CRC32_MASK) == ID_AA64ISAR0_EL1_CRC32_EN) {
+		gARMv8Crc32 = 1;
+		bits |= kHasARMv8Crc32;
+	}
+
+#if __ARM_V8_CRYPTO_EXTENSIONS__
+	/**
+	 * T7000 has a bug in the ISAR0 register that reports that PMULL is not
+	 * supported when it actually is. To work around this, for all of the crypto
+	 * extensions, just check if they're supported using the board_config.h
+	 * values.
+	 */
+	gARM_FEAT_PMULL = 1;
+	gARM_FEAT_SHA1 = 1;
+	gARM_FEAT_AES = 1;
+	gARM_FEAT_SHA256 = 1;
+	bits |= kHasARMv8Crypto;
+#endif /* __ARM_V8_CRYPTO_EXTENSIONS__ */
+
+	*commpage_bits |= bits;
+}
+
+/**
+ * Initializes all commpage entries and sysctls for EL0 visible features in ID_AA64ISAR1_EL1
+ */
+static void
+commpage_init_arm_optional_features_isar1(uint64_t *commpage_bits)
+{
+	uint64_t bits = 0;
+	uint64_t isar1 = __builtin_arm_rsr64("ID_AA64ISAR1_EL1");
+	uint64_t sctlr = __builtin_arm_rsr64("SCTLR_EL1");
+
+	if ((isar1 & ID_AA64ISAR1_EL1_SPECRES_MASK) >= ID_AA64ISAR1_EL1_SPECRES_EN &&
+	    sctlr & SCTLR_EnRCTX) {
+		gARM_FEAT_SPECRES = 1;
+		bits |= kHasFeatSPECRES;
+	}
+	if ((isar1 & ID_AA64ISAR1_EL1_SB_MASK) >= ID_AA64ISAR1_EL1_SB_EN) {
+		gARM_FEAT_SB = 1;
+		bits |= kHasFeatSB;
+	}
+	if ((isar1 & ID_AA64ISAR1_EL1_FRINTTS_MASK) >= ID_AA64ISAR1_EL1_FRINTTS_EN) {
+		gARM_FEAT_FRINTTS = 1;
+		bits |= kHasFeatFRINTTS;
+	}
+	if ((isar1 & ID_AA64ISAR1_EL1_GPI_MASK) >= ID_AA64ISAR1_EL1_GPI_EN) {
+		gARMv8Gpi = 1;
+		bits |= kHasArmv8GPI;
+	}
+	if ((isar1 & ID_AA64ISAR1_EL1_LRCPC_MASK) >= ID_AA64ISAR1_EL1_LRCPC_EN) {
+		gARM_FEAT_LRCPC = 1;
+		bits |= kHasFeatLRCPC;
+	}
+	if ((isar1 & ID_AA64ISAR1_EL1_LRCPC_MASK) >= ID_AA64ISAR1_EL1_LRCP2C_EN) {
+		gARM_FEAT_LRCPC2 = 1;
+		bits |= kHasFeatLRCPC2;
+	}
+	if ((isar1 & ID_AA64ISAR1_EL1_FCMA_MASK) >= ID_AA64ISAR1_EL1_FCMA_EN) {
+		gARM_FEAT_FCMA = 1;
+		bits |= kHasFeatFCMA;
+	}
+	if ((isar1 & ID_AA64ISAR1_EL1_JSCVT_MASK) >= ID_AA64ISAR1_EL1_JSCVT_EN) {
+		gARM_FEAT_JSCVT = 1;
+		bits |= kHasFeatJSCVT;
+	}
+	if ((isar1 & ID_AA64ISAR1_EL1_API_MASK) >= ID_AA64ISAR1_EL1_API_PAuth_EN) {
+		gARM_FEAT_PAuth = 1;
+		bits |= kHasFeatPAuth;
+	}
+	if ((isar1 & ID_AA64ISAR1_EL1_API_MASK) >= ID_AA64ISAR1_EL1_API_PAuth2_EN) {
+		gARM_FEAT_PAuth2 = 1;
+	}
+	if ((isar1 & ID_AA64ISAR1_EL1_API_MASK) >= ID_AA64ISAR1_EL1_API_FPAC_EN) {
+		gARM_FEAT_FPAC = 1;
+	}
+	if ((isar1 & ID_AA64ISAR1_EL1_DPB_MASK) >= ID_AA64ISAR1_EL1_DPB_EN) {
+		gARM_FEAT_DPB = 1;
+		bits |= kHasFeatDPB;
+	}
+	if ((isar1 & ID_AA64ISAR1_EL1_DPB_MASK) >= ID_AA64ISAR1_EL1_DPB2_EN) {
+		gARM_FEAT_DPB2 = 1;
+		bits |= kHasFeatDPB2;
+	}
+	if ((isar1 & ID_AA64ISAR1_EL1_BF16_MASK) >= ID_AA64ISAR1_EL1_BF16_EN) {
+		gARM_FEAT_BF16 = 1;
+	}
+	if ((isar1 & ID_AA64ISAR1_EL1_I8MM_MASK) >= ID_AA64ISAR1_EL1_I8MM_EN) {
+		gARM_FEAT_I8MM = 1;
+	}
+
+	*commpage_bits |= bits;
+}
+
+/**
+ * Initializes all commpage entries and sysctls for EL0 visible features in ID_AA64MMFR0_EL1
+ */
+static void
+commpage_init_arm_optional_features_mmfr0(uint64_t *commpage_bits)
+{
+	uint64_t bits = 0;
+	uint64_t mmfr0 = __builtin_arm_rsr64("ID_AA64MMFR0_EL1");
+
+	if ((mmfr0 & ID_AA64MMFR0_EL1_ECV_MASK) >= ID_AA64MMFR0_EL1_ECV_EN) {
+		gARM_FEAT_ECV = 1;
+	}
+
+	*commpage_bits |= bits;
+}
+
+/**
+ * Initializes all commpage entries and sysctls for EL0 visible features in ID_AA64MMFR2_EL1
+ */
+static void
+commpage_init_arm_optional_features_mmfr2(uint64_t *commpage_bits)
+{
+	uint64_t bits = 0;
+	uint64_t mmfr2 = __builtin_arm_rsr64("ID_AA64MMFR2_EL1");
+
+	if ((mmfr2 & ID_AA64MMFR2_EL1_AT_MASK) >= ID_AA64MMFR2_EL1_AT_LSE2_EN) {
+		gARM_FEAT_LSE2 = 1;
+		bits |= kHasFeatLSE2;
+	}
+
+	*commpage_bits |= bits;
+}
+
+/**
+ * Initializes all commpage entries and sysctls for EL0 visible features in ID_AA64PFR0_EL1
+ */
+static void
+commpage_init_arm_optional_features_pfr0(uint64_t *commpage_bits)
+{
+	uint64_t bits = 0;
+	uint64_t pfr0 = __builtin_arm_rsr64("ID_AA64PFR0_EL1");
+
+	if ((pfr0 & ID_AA64PFR0_EL1_CSV3_MASK) >= ID_AA64PFR0_EL1_CSV3_EN) {
+		gARM_FEAT_CSV3 = 1;
+		bits |= kHasFeatCSV3;
+	}
+	if ((pfr0 & ID_AA64PFR0_EL1_CSV2_MASK) >= ID_AA64PFR0_EL1_CSV2_EN) {
+		gARM_FEAT_CSV2 = 1;
+		bits |= kHasFeatCSV2;
+	}
+	if ((pfr0 & ID_AA64PFR0_EL1_AdvSIMD_MASK) != ID_AA64PFR0_EL1_AdvSIMD_DIS) {
+		gARM_AdvSIMD = 1;
+		bits |= kHasAdvSIMD;
+		if ((pfr0 & ID_AA64PFR0_EL1_AdvSIMD_MASK) >= ID_AA64PFR0_EL1_AdvSIMD_HPFPCVT) {
+			gARM_AdvSIMD_HPFPCvt = 1;
+			bits |= kHasAdvSIMD_HPFPCvt;
+		}
+		if ((pfr0 & ID_AA64PFR0_EL1_AdvSIMD_MASK) >= ID_AA64PFR0_EL1_AdvSIMD_FP16) {
+			gARM_FEAT_FP16 = 1;
+			bits |= kHasFeatFP16;
+		}
+	}
+
+	*commpage_bits |= bits;
+}
+
+/**
+ * Initializes all commpage entries and sysctls for EL0 visible features in ID_AA64PFR1_EL1
+ */
+static void
+commpage_init_arm_optional_features_pfr1(uint64_t *commpage_bits __unused)
+{
+	uint64_t pfr1 = __builtin_arm_rsr64("ID_AA64PFR1_EL1");
+
+	if ((pfr1 & ID_AA64PFR1_EL1_SSBS_MASK) >= ID_AA64PFR1_EL1_SSBS_EN) {
+		gARM_FEAT_SSBS = 1;
+	}
+
+	if ((pfr1 & ID_AA64PFR1_EL1_BT_MASK) >= ID_AA64PFR1_EL1_BT_EN) {
+		gARM_FEAT_BTI = 1;
+	}
+}
+
+static void
+commpage_init_arm_optional_features_mmfr1(uint64_t *commpage_bits)
+{
+	uint64_t bits = 0;
+	const uint64_t mmfr1 = __builtin_arm_rsr64("ID_AA64MMFR1_EL1");
+
+	if ((mmfr1 & ID_AA64MMFR1_EL1_AFP_MASK) == ID_AA64MMFR1_EL1_AFP_EN) {
+		bits |= kHasARMv87AFP;
+	}
+
+	*commpage_bits |= bits;
+}
+
+/**
+ * Initializes all commpage entries and sysctls for ARM64 optional features accessible from EL0.
+ */
+static void
+commpage_init_arm_optional_features(uint64_t *commpage_bits)
+{
+	commpage_init_arm_optional_features_isar0(commpage_bits);
+	commpage_init_arm_optional_features_isar1(commpage_bits);
+	commpage_init_arm_optional_features_mmfr0(commpage_bits);
+	commpage_init_arm_optional_features_mmfr1(commpage_bits);
+	commpage_init_arm_optional_features_mmfr2(commpage_bits);
+	commpage_init_arm_optional_features_pfr0(commpage_bits);
+	commpage_init_arm_optional_features_pfr1(commpage_bits);
+}
+#endif /* __arm64__ */
+
 /*
  * Initialize _cpu_capabilities vector
  */
@@ -364,6 +644,7 @@ commpage_init_cpu_capabilities( void )
 
 #if     __ARM_VFP__
 	bits |= kHasVfp;
+#if defined(__arm__)
 	arm_mvfp_info_t *mvfp_info = arm_mvfp_info();
 	if (mvfp_info->neon) {
 		bits |= kHasNeon;
@@ -374,49 +655,28 @@ commpage_init_cpu_capabilities( void )
 	if (mvfp_info->neon_fp16) {
 		bits |= kHasNeonFP16;
 	}
+#endif /* defined(__arm__) */
 #endif
 #if defined(__arm64__)
 	bits |= kHasFMA;
 #endif
-#if     __ARM_ENABLE_WFE_
 	bits |= kHasEvent;
-#endif
-#if __ARM_V8_CRYPTO_EXTENSIONS__
-	bits |= kHasARMv8Crypto;
-#endif
 #ifdef __arm64__
-	uint64_t isar0 = __builtin_arm_rsr64("ID_AA64ISAR0_EL1");
-	if ((isar0 & ID_AA64ISAR0_EL1_ATOMIC_MASK) == ID_AA64ISAR0_EL1_ATOMIC_8_1) {
-		bits |= kHasARMv81Atomics;
-		gARMv81Atomics = 1;
-	}
-	if ((isar0 & ID_AA64ISAR0_EL1_CRC32_MASK) == ID_AA64ISAR0_EL1_CRC32_EN) {
-		bits |= kHasARMv8Crc32;
-		gARMv8Crc32 = 1;
-	}
-	if ((isar0 & ID_AA64ISAR0_EL1_FHM_MASK) >= ID_AA64ISAR0_EL1_FHM_8_2) {
-		bits |= kHasARMv82FHM;
-		gARMv82FHM = 1;
-	}
-
-	if ((isar0 & ID_AA64ISAR0_EL1_SHA2_MASK) > ID_AA64ISAR0_EL1_SHA2_EN) {
-		bits |= kHasARMv82SHA512;
-		gARMv82SHA512 = 1;
-	}
-	if ((isar0 & ID_AA64ISAR0_EL1_SHA3_MASK) >= ID_AA64ISAR0_EL1_SHA3_EN) {
-		bits |= kHasARMv82SHA3;
-		gARMv82SHA3 = 1;
-	}
-
+	commpage_init_arm_optional_features(&bits);
 #endif
 
 
 
+#if HAS_UCNORMAL_MEM
+	gUCNormalMem = 1;
+	bits |= kHasUCNormalMemory;
+#endif
 
 	_cpu_capabilities = bits;
 
 	*((uint32_t *)(_COMM_PAGE_CPU_CAPABILITIES + _COMM_PAGE_RW_OFFSET)) = (uint32_t)_cpu_capabilities;
 	*((uint64_t *)(_COMM_PAGE_CPU_CAPABILITIES64 + _COMM_PAGE_RW_OFFSET)) = _cpu_capabilities;
+
 }
 
 /*
@@ -490,22 +750,25 @@ void
 commpage_update_mach_approximate_time(uint64_t abstime)
 {
 #ifdef CONFIG_MACH_APPROXIMATE_TIME
-	uintptr_t approx_time_base = (uintptr_t)(_COMM_PAGE_APPROX_TIME + _COMM_PAGE_RW_OFFSET);
-	uint64_t saved_data;
-
-	if (commPagePtr) {
-		saved_data = atomic_load_explicit((_Atomic uint64_t *)approx_time_base,
-		    memory_order_relaxed);
-		if (saved_data < abstime) {
-			/* ignoring the success/fail return value assuming that
-			 * if the value has been updated since we last read it,
-			 * "someone" has a newer timestamp than us and ours is
-			 * now invalid. */
-			atomic_compare_exchange_strong_explicit((_Atomic uint64_t *)approx_time_base,
-			    &saved_data, abstime, memory_order_relaxed, memory_order_relaxed);
-		}
+	if (!commPagePtr) {
+		return;
 	}
-#else
+
+	uint64_t *approx_time_base = (uint64_t *)(uintptr_t)(_COMM_PAGE_APPROX_TIME + _COMM_PAGE_RW_OFFSET);
+
+	uint64_t saved_data = os_atomic_load_wide(approx_time_base, relaxed);
+	if (saved_data < abstime) {
+		/*
+		 * ignore the success/fail return value assuming that
+		 * if the value has been updated since we last read it,
+		 * someone else has written a timestamp that is new enough.
+		 */
+		__unused bool ret = os_atomic_cmpxchg(approx_time_base,
+		    saved_data, abstime, relaxed);
+	}
+
+
+#else /* CONFIG_MACH_APPROXIMATE_TIME */
 #pragma unused (abstime)
 #endif
 }
@@ -517,17 +780,14 @@ commpage_update_mach_approximate_time(uint64_t abstime)
 void
 commpage_update_mach_continuous_time(uint64_t sleeptime)
 {
-	if (commPagePtr) {
-#ifdef __arm64__
-		*((uint64_t *)(_COMM_PAGE_CONT_TIMEBASE + _COMM_PAGE_RW_OFFSET)) = sleeptime;
-#else
-		uint64_t *c_time_base = (uint64_t *)(_COMM_PAGE_CONT_TIMEBASE + _COMM_PAGE_RW_OFFSET);
-		uint64_t old;
-		do {
-			old = *c_time_base;
-		} while (!OSCompareAndSwap64(old, sleeptime, c_time_base));
-#endif /* __arm64__ */
+	if (!commPagePtr) {
+		return;
 	}
+
+	uint64_t *cont_time_base = (uint64_t *)(uintptr_t)(_COMM_PAGE_CONT_TIMEBASE + _COMM_PAGE_RW_OFFSET);
+
+	os_atomic_store_wide(cont_time_base, sleeptime, relaxed);
+
 }
 
 void
@@ -542,17 +802,14 @@ commpage_update_mach_continuous_time_hw_offset(uint64_t offset)
 void
 commpage_update_boottime(uint64_t value)
 {
-	if (commPagePtr) {
-#ifdef __arm64__
-		*((uint64_t *)(_COMM_PAGE_BOOTTIME_USEC + _COMM_PAGE_RW_OFFSET)) = value;
-#else
-		uint64_t *cp = (uint64_t *)(_COMM_PAGE_BOOTTIME_USEC + _COMM_PAGE_RW_OFFSET);
-		uint64_t old_value;
-		do {
-			old_value = *cp;
-		} while (!OSCompareAndSwap64(old_value, value, cp));
-#endif /* __arm64__ */
+	if (!commPagePtr) {
+		return;
 	}
+
+	uint64_t *boottime_usec = (uint64_t *)(uintptr_t)(_COMM_PAGE_BOOTTIME_USEC + _COMM_PAGE_RW_OFFSET);
+
+	os_atomic_store_wide(boottime_usec, value, relaxed);
+
 }
 
 /*
@@ -566,10 +823,10 @@ commpage_set_remotetime_params(double rate, uint64_t base_local_ts, uint64_t bas
 #ifdef __arm64__
 		struct bt_params *paramsp = (struct bt_params *)(_COMM_PAGE_REMOTETIME_PARAMS + _COMM_PAGE_RW_OFFSET);
 		paramsp->base_local_ts = 0;
-		__asm__ volatile ("dmb ish" ::: "memory");
+		__builtin_arm_dmb(DMB_ISH);
 		paramsp->rate = rate;
 		paramsp->base_remote_ts = base_remote_ts;
-		__asm__ volatile ("dmb ish" ::: "memory");
+		__builtin_arm_dmb(DMB_ISH);
 		paramsp->base_local_ts = base_local_ts;  //This will act as a generation count
 #else
 		(void)rate;

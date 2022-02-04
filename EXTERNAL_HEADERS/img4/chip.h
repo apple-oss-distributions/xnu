@@ -9,10 +9,6 @@
 #error "Please #include <img4/firmware.h> instead of this file directly"
 #endif // __IMG4_INDIRECT
 
-#if IMG4_TAPI
-#include "tapi.h"
-#endif
-
 OS_ASSUME_NONNULL_BEGIN
 
 /*!
@@ -35,7 +31,7 @@ typedef const img4_chip_t *_Nullable const *img4_chip_select_array_t;
  * The version of the {@link img4_chip_instance_t} supported by the
  * implementation.
  */
-#define IMG4_CHIP_INSTANCE_STRUCT_VERSION (1u)
+#define IMG4_CHIP_INSTANCE_STRUCT_VERSION (2u)
 
 /*!
  * @typedef img4_chip_instance_omit_t
@@ -164,6 +160,36 @@ typedef struct _img4_chip_instance {
 } img4_chip_instance_t;
 
 /*!
+ * @function IMG4_CHIP_INSTANCE_INIT
+ * A convenience initializer which can be used to initialize a chip instance to
+ * a given family.
+ *
+ * @param _family
+ * The family of chip.
+ *
+ * @result
+ * A fully-initialized structure of the appropriate version supported by the
+ * implementation. The resulting chip instance omits no identifiers.
+ */
+#define IMG4_CHIP_INSTANCE_INIT(_family) (img4_chip_instance_t){ \
+	.chid_version = IMG4_CHIP_INSTANCE_STRUCT_VERSION, \
+	.chid_chip_family = (_family), \
+	.chid_omit = 0, \
+	.chid_cepo = 0, \
+	.chid_bord = 0, \
+	.chid_chip = 0, \
+	.chid_sdom = 0, \
+	.chid_ecid = 0, \
+	.chid_cpro = false, \
+	.chid_csec = false, \
+	.chid_epro = false, \
+	.chid_esec = false, \
+	.chid_iuou = false, \
+	.chid_rsch = false, \
+	.chid_euou = false, \
+}
+
+/*!
  * @const IMG4_CHIP_AP_SHA1
  * The Application Processor on an Apple ARM SoC with an embedded sha1
  * certifcate chain.
@@ -197,10 +223,10 @@ const img4_chip_t _img4_chip_ap_sha2_384;
 
 /*!
  * @const IMG4_CHIP_AP_HYBRID
- * An Intel x86 processor whose chain of trust is rooted in an
- * {@link IMG4_CHIP_AP_SHA2_384} environment. Firmwares executed on this chip
- * are authenticated against the characteristics of the corresponding AP chip
- * environment.
+ * An Intel x86 processor whose chain of trust is rooted in an instance of a
+ * {@link IMG4_CHIP_AP_SHA2_384} chip. Firmwares executed on this chip are
+ * authenticated against the characteristics of the corresponding AP chip
+ * environment and not the characteristics of the x86 processor.
  *
  * This chip environment represents one unique instance of such a chip pair.
  */
@@ -234,7 +260,8 @@ const img4_chip_t _img4_chip_ap_reduced;
  * An Application Processor on an Apple ARM SoC operating with no secure boot
  * enforcement.
  *
- * This chip cannot be uniquely identified.
+ * This chip's identity is rooted in a device-specific authority rather than one
+ * maintained by Apple.
  */
 #if !XNU_KERNEL_PRIVATE
 IMG4_API_AVAILABLE_20200508
@@ -247,9 +274,9 @@ const img4_chip_t _img4_chip_ap_permissive;
 
 /*!
  * @const IMG4_CHIP_AP_HYBRID_MEDIUM
- * An Intel x86 processor whose chain of trust is rooted in an
- * {@link IMG4_CHIP_AP_SHA2_384} environment and is operating in a "medium
- * security" mode due to a user-approved security degradation.
+ * An Intel x86 processor whose chain of trust is rooted in an instance of a
+ * {@link IMG4_CHIP_AP_SHA2_384} chip and is operating in a "medium security"
+ * mode due to a user-approved security degradation.
  *
  * This chip cannot be uniquely identified.
  */
@@ -264,9 +291,9 @@ const img4_chip_t _img4_chip_ap_hybrid_medium;
 
 /*!
  * @const IMG4_CHIP_AP_HYBRID_RELAXED
- * An Intel x86 processor whose chain of trust is rooted in an
- * {@link IMG4_CHIP_AP_SHA2_384} environment and is operating with no secure
- * boot enforcement due to a user-approved security degradation.
+ * An Intel x86 processor whose chain of trust is rooted in an instance of a
+ * {@link IMG4_CHIP_AP_SHA2_384} chip and is operating with no secure boot
+ * due to a user-approved security degradation.
  *
  * This chip cannot be uniquely identified.
  */
@@ -315,6 +342,123 @@ const img4_chip_t _img4_chip_ap_software_ff01;
 #endif
 
 /*!
+ * @const IMG4_CHIP_AP_CATEGORY_FF02
+ * The Application Processor on an Intel Mac product.
+ *
+ * This chip environment represents one unique instance of such a chip, though
+ * the uniqueness is not enforced by a secure boot chain with anti-replay
+ * properties, and therefore this chip environment should be considered as
+ * equivalent to a global signing environment.
+ */
+#if !XNU_KERNEL_PRIVATE
+IMG4_API_AVAILABLE_20210305
+OS_EXPORT
+const img4_chip_t _img4_chip_ap_category_ff02;
+#define IMG4_CHIP_AP_CATEGORY_FF02 (&_img4_chip_ap_category_ff02)
+#else
+#define IMG4_CHIP_AP_CATEGORY_FF02 (img4if->i4if_v12.chip_ap_category_ff02)
+#endif
+
+/*!
+ * @const IMG4_CHIP_AP_CATEGORY_FF03
+ * An Intel x86 processor whose chain of trust is rooted in an instance of a
+ * {@link IMG4_CHIP_AP_SHA2_384} chip.
+ *
+ * This chip environment represents one unique instance of such a chip pair.
+ */
+#if !XNU_KERNEL_PRIVATE
+IMG4_API_AVAILABLE_20210305
+OS_EXPORT
+const img4_chip_t _img4_chip_ap_category_ff03;
+#define IMG4_CHIP_AP_CATEGORY_FF03 (&_img4_chip_ap_category_ff03)
+#else
+#define IMG4_CHIP_AP_CATEGORY_FF03 (img4if->i4if_v12.chip_ap_category_ff03)
+#endif
+
+/*!
+ * @const IMG4_CHIP_AP_CATEGORY_FF04_F0
+ * The Application Processor of an Apple ARM SoC in an Apple Silicon Mac
+ * product.
+ *
+ * This chip environment represents one unique instance of such a chip.
+ */
+#if !XNU_KERNEL_PRIVATE
+IMG4_API_AVAILABLE_20210305
+OS_EXPORT
+const img4_chip_t _img4_chip_ap_category_ff04_f0;
+#define IMG4_CHIP_AP_CATEGORY_FF04_F0 (&_img4_chip_ap_category_ff04_f0)
+#else
+#define IMG4_CHIP_AP_CATEGORY_FF04_F0 \
+		(img4if->i4if_v12.chip_ap_category_ff04_f0)
+#endif
+
+/*!
+ * @const IMG4_CHIP_AP_CATEGORY_FF04_F1
+ * The Application Processor of an Apple ARM SoC in an iPhone, iPad, or iPod
+ * touch product.
+ *
+ * This chip environment represents one unique instance of such a chip.
+ */
+#if !XNU_KERNEL_PRIVATE
+IMG4_API_AVAILABLE_20210305
+OS_EXPORT
+const img4_chip_t _img4_chip_ap_category_ff04_f1;
+#define IMG4_CHIP_AP_CATEGORY_FF04_F1 (&_img4_chip_ap_category_ff04_f1)
+#else
+#define IMG4_CHIP_AP_CATEGORY_FF04_F1 \
+		(img4if->i4if_v12.chip_ap_category_ff04_f1)
+#endif
+
+/*!
+ * @const IMG4_CHIP_AP_CATEGORY_FF04_F2
+ * The Application Processor of an Apple ARM SoC in an watch product.
+ *
+ * This chip environment represents one unique instance of such a chip.
+ */
+#if !XNU_KERNEL_PRIVATE
+IMG4_API_AVAILABLE_20210305
+OS_EXPORT
+const img4_chip_t _img4_chip_ap_category_ff04_f2;
+#define IMG4_CHIP_AP_CATEGORY_FF04_F2 (&_img4_chip_ap_category_ff04_f2)
+#else
+#define IMG4_CHIP_AP_CATEGORY_FF04_F2 \
+		(img4if->i4if_v12.chip_ap_category_ff04_f2)
+#endif
+
+/*!
+ * @const IMG4_CHIP_AP_CATEGORY_FF04_F3
+ * The Application Processor of an Apple ARM SoC in an tv or HomePod product.
+ *
+ * This chip environment represents one unique instance of such a chip.
+ */
+#if !XNU_KERNEL_PRIVATE
+IMG4_API_AVAILABLE_20210305
+OS_EXPORT
+const img4_chip_t _img4_chip_ap_category_ff04_f3;
+#define IMG4_CHIP_AP_CATEGORY_FF04_F3 (&_img4_chip_ap_category_ff04_f3)
+#else
+#define IMG4_CHIP_AP_CATEGORY_FF04_F3 \
+		(img4if->i4if_v12.chip_ap_category_ff04_f3)
+#endif
+
+/*!
+ * @const IMG4_CHIP_AP_SOFTWARE_FF06
+ * A software-defined chip environment whose firmwares are executed on any
+ * Application Processor on an Apple ARM SoC. The firmwares are loadable trust
+ * caches which are shipped in the preboot volume.
+ *
+ * This chip cannot be uniquely identified.
+ */
+#if !XNU_KERNEL_PRIVATE
+IMG4_API_AVAILABLE_20210113
+OS_EXPORT
+const img4_chip_t _img4_chip_ap_software_ff06;
+#define IMG4_CHIP_AP_SOFTWARE_FF06 (&_img4_chip_ap_software_ff06)
+#else
+#define IMG4_CHIP_AP_SOFTWARE_FF06 (img4if->i4if_v11.chip_ap_software_ff06)
+#endif
+
+/*!
  * @const IMG4_CHIP_X86
  * An Intel x86 processor which cannot be uniquely identified.
  */
@@ -349,6 +493,69 @@ const img4_chip_t _img4_chip_x86_software_8012;
 #define IMG4_CHIP_X86_SOFTWARE_8012 (&_img4_chip_x86_software_8012)
 #else
 #define IMG4_CHIP_X86_SOFTWARE_8012 (img4if->i4if_v7.chip_x86_software_8012)
+#endif
+
+/*!
+ * @const IMG4_CHIP_AP_INTRANSIGENT
+ * An Application Processor which is incapable of executing code. This chip
+ * environment's root of trust is a certificate authority which has never and
+ * will never issue any certificates.
+ */
+#if !XNU_KERNEL_PRIVATE
+IMG4_API_AVAILABLE_20210113
+OS_EXPORT
+const img4_chip_t _img4_chip_ap_intransigent;
+#define IMG4_CHIP_AP_INTRANSIGENT (&_img4_chip_ap_intransigent)
+#else
+#define IMG4_CHIP_AP_INTRANSIGENT (img4if->i4if_v11.chip_ap_intransigent)
+#endif
+
+/*!
+ * @const IMG4_CHIP_AP_SUPPLEMENTAL
+ * An Application Processor whose root of trust resides in the
+ * {@link IMG4_RUNTIME_OBJECT_SPEC_SUPPLEMENTAL_ROOT} object. Once the
+ * supplemental root object is executed on the host's AP, this chip environment
+ * is available to execute payloads.
+ */
+#if !XNU_KERNEL_PRIVATE
+IMG4_API_AVAILABLE_20210113
+OS_EXPORT
+const img4_chip_t _img4_chip_ap_supplemental;
+#define IMG4_CHIP_AP_SUPPLEMENTAL (&_img4_chip_ap_supplemental)
+#else
+#define IMG4_CHIP_AP_SUPPLEMENTAL (img4if->i4if_v11.chip_ap_supplemental)
+#endif
+
+/*!
+ * @const IMG4_CHIP_AP_VMA2
+ * The Application Processor of a virtualized Apple ARM device.
+ *
+ * This chip environment represents one unique instance of such a chip on the
+ * host device.
+ */
+#if !XNU_KERNEL_PRIVATE
+IMG4_API_AVAILABLE_20210113
+OS_EXPORT
+const img4_chip_t _img4_chip_ap_vma2;
+#define IMG4_CHIP_AP_VMA2 (&_img4_chip_ap_vma2)
+#else
+#define IMG4_CHIP_AP_VMA2 (img4if->i4if_v13.chip_ap_vma2)
+#endif
+
+/*!
+ * @const IMG4_CHIP_AP_VMA2_CLONE
+ * The Application Processor of a virtualized Apple ARM device which has been
+ * cloned from another on the same host.
+ *
+ * This chip environment cannot be uniquely identified.
+ */
+#if !XNU_KERNEL_PRIVATE
+IMG4_API_AVAILABLE_20210113
+OS_EXPORT
+const img4_chip_t _img4_chip_ap_vma2_clone;
+#define IMG4_CHIP_AP_VMA2_CLONE (&_img4_chip_ap_vma2_clone)
+#else
+#define IMG4_CHIP_AP_VMA2_CLONE (img4if->i4if_v13.chip_ap_vma2_clone)
 #endif
 
 /*!
@@ -398,6 +605,26 @@ img4_chip_select_personalized_ap(void);
 #else
 #define img4_chip_select_personalized_ap(...) \
 		(img4if->i4if_v7.chip_select_personalized_ap(__VA_ARGS__))
+#endif
+
+/*!
+ * @function img4_chip_select_categorized_ap
+ * Returns the chip appropriate for categorized verification against the host
+ * AP.
+ *
+ * @result
+ * The categorized chip environment for the host which corresponds to its
+ * silicon identity. If the host has no AP category defined for it, NULL will be
+ * returned.
+ */
+#if !XNU_KERNEL_PRIVATE
+IMG4_API_AVAILABLE_20210305
+OS_EXPORT OS_WARN_RESULT
+const img4_chip_t *_Nullable
+img4_chip_select_categorized_ap(void);
+#else
+#define img4_chip_select_categorized_ap(...) \
+		(img4if->i4if_v12.chip_select_categorized_ap(__VA_ARGS__))
 #endif
 
 /*!

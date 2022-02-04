@@ -612,7 +612,7 @@ cpu_data_alloc(boolean_t is_boot_cpu)
 	    (vm_offset_t *) &cdp->cpu_int_stack_top,
 	    INTSTACK_SIZE, VM_KERN_MEMORY_CPU);
 	if (ret != KERN_SUCCESS) {
-		panic("cpu_data_alloc() int stack failed, ret=%d\n", ret);
+		panic("cpu_data_alloc() int stack failed, ret=%d", ret);
 	}
 	bzero((void*) cdp->cpu_int_stack_top, INTSTACK_SIZE);
 	cdp->cpu_int_stack_top += INTSTACK_SIZE;
@@ -634,7 +634,7 @@ cpu_data_alloc(boolean_t is_boot_cpu)
 		vm_offset_t ldtalloc = 0, ldtallocsz = round_page_64(MAX_CPUS * sizeof(struct real_descriptor) * LDTSZ);
 		ret = kmem_alloc(kernel_map, (vm_offset_t *) &ldtalloc, ldtallocsz, VM_KERN_MEMORY_CPU);
 		if (ret != KERN_SUCCESS) {
-			panic("cpu_data_alloc() ldt failed, kmem_alloc=%d\n", ret);
+			panic("cpu_data_alloc() ldt failed, kmem_alloc=%d", ret);
 		}
 
 		simple_lock(&ncpus_lock, LCK_GRP_NULL);
@@ -787,7 +787,7 @@ cpu_data_realloc(void)
 
 	ret = kmem_alloc(kernel_map, &istk, INTSTACK_SIZE, VM_KERN_MEMORY_CPU);
 	if (ret != KERN_SUCCESS) {
-		panic("cpu_data_realloc() stack alloc, ret=%d\n", ret);
+		panic("cpu_data_realloc() stack alloc, ret=%d", ret);
 	}
 	bzero((void*) istk, INTSTACK_SIZE);
 	istk += INTSTACK_SIZE;

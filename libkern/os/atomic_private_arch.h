@@ -67,7 +67,7 @@
 #define os_atomic_clear_exclusive()  __builtin_arm_clrex()
 
 #define os_atomic_load_exclusive(p, m)  ({ \
-	__auto_type _r = __builtin_arm_ldrex(os_cast_to_nonatomic_pointer(p)); \
+	os_atomic_basetypeof(p) _r = __builtin_arm_ldrex(os_cast_to_nonatomic_pointer(p)); \
 	_os_memory_fence_after_atomic(m); \
 	_os_compiler_barrier_after_atomic(m); \
 	_r; \
@@ -162,7 +162,7 @@
 #define os_atomic_clear_exclusive()  __builtin_arm_clrex()
 
 #define os_atomic_load_exclusive(p, m)  ({ \
-	__auto_type _r = _os_atomic_mo_has_acquire(_os_atomic_mo_##m##_smp) \
+	os_atomic_basetypeof(p) _r = _os_atomic_mo_has_acquire(_os_atomic_mo_##m##_smp) \
 	    ? __builtin_arm_ldaex(os_cast_to_nonatomic_pointer(p)) \
 	    : __builtin_arm_ldrex(os_cast_to_nonatomic_pointer(p)); \
 	_os_compiler_barrier_after_atomic(m); \

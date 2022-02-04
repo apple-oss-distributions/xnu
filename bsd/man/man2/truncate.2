@@ -33,7 +33,7 @@
 .\"
 .\"     @(#)truncate.2	8.1 (Berkeley) 6/4/93
 .\"
-.Dd June 4, 1993
+.Dd June 3, 2021
 .Dt TRUNCATE 2
 .Os BSD 4.2
 .Sh NAME
@@ -146,6 +146,15 @@ The named file does not exist.
 .It Bq Er ENOTDIR
 A component of the path prefix is not a directory.
 .\" ===========
+.It Bq Er EDEADLK
+A component of the pathname refers to a
+.Dq dataless
+directory that requires materialization and the I/O policy of the current
+thread or process disallows dataless directory materialization
+.Po see
+.Xr getiopolicy_np 3
+.Pc .
+.\" ===========
 .It Bq Er EROFS
 The named file resides on a read-only file system.
 .\" ===========
@@ -173,6 +182,15 @@ argument is less than 0.
 .\" ===========
 .It Bq Er EIO
 An I/O error occurred while reading from or writing to a file system.
+.\" ===========
+.It Bq Er EDEADLK
+The file is a
+.Dq dataless
+file that requires materialization and the I/O policy of the current thread
+or process disallows dataless file materialization
+.Po see
+.Xr getiopolicy_np 3
+.Pc .
 .El
 .Sh SEE ALSO
 .Xr open 2

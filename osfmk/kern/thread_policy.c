@@ -41,6 +41,8 @@
 
 #include <mach/machine/sdt.h>
 
+extern zone_t thread_qos_override_zone;
+
 #ifdef MACH_BSD
 extern int      proc_selfpid(void);
 extern char *   proc_name_address(void *p);
@@ -49,13 +51,13 @@ extern void     rethrottle_thread(void * uthread);
 
 #define QOS_EXTRACT(q)        ((q) & 0xff)
 
-uint32_t qos_override_mode;
 #define QOS_OVERRIDE_MODE_OVERHANG_PEAK 0
 #define QOS_OVERRIDE_MODE_IGNORE_OVERRIDE 1
 #define QOS_OVERRIDE_MODE_FINE_GRAINED_OVERRIDE 2
 #define QOS_OVERRIDE_MODE_FINE_GRAINED_OVERRIDE_BUT_SINGLE_MUTEX_OVERRIDE 3
 
-extern zone_t thread_qos_override_zone;
+TUNABLE(uint32_t, qos_override_mode, "qos_override_mode",
+    QOS_OVERRIDE_MODE_FINE_GRAINED_OVERRIDE_BUT_SINGLE_MUTEX_OVERRIDE);
 
 static void
 proc_thread_qos_remove_override_internal(thread_t thread, user_addr_t resource, int resource_type, boolean_t reset);
@@ -141,16 +143,6 @@ thread_policy_update_spinlocked(thread_t thread, bool recompute_priority, task_p
 
 static void
 thread_policy_update_internal_spinlocked(thread_t thread, bool recompute_priority, task_pend_token_t pend_token);
-
-void
-thread_policy_init(void)
-{
-	if (PE_parse_boot_argn("qos_override_mode", &qos_override_mode, sizeof(qos_override_mode))) {
-		printf("QOS override mode: 0x%08x\n", qos_override_mode);
-	} else {
-		qos_override_mode = QOS_OVERRIDE_MODE_FINE_GRAINED_OVERRIDE_BUT_SINGLE_MUTEX_OVERRIDE;
-	}
-}
 
 boolean_t
 thread_has_qos_policy(thread_t thread)
@@ -284,6 +276,16 @@ thread_policy_set(
 		if (flavor == THREAD_QOS_POLICY) {
 			return KERN_INVALID_ARGUMENT;
 		}
+
+		if (flavor == THREAD_TIME_CONSTRAINT_WITH_PRIORITY_POLICY) {
+			if (count < THREAD_TIME_CONSTRAINT_WITH_PRIORITY_POLICY_COUNT) {
+				return KERN_INVALID_ARGUMENT;
+			}
+			thread_time_constraint_with_priority_policy_t info = (thread_time_constraint_with_priority_policy_t)policy_info;
+			if (info->priority != BASEPRI_RTQUEUES) {
+				return KERN_INVALID_ARGUMENT;
+			}
+		}
 	}
 
 	/* Threads without static_param set reset their QoS when other policies are applied. */
@@ -310,6 +312,11 @@ thread_policy_set(
 
 	return kr;
 }
+
+static_assert(offsetof(thread_time_constraint_with_priority_policy_data_t, period) == offsetof(thread_time_constraint_policy_data_t, period));
+static_assert(offsetof(thread_time_constraint_with_priority_policy_data_t, computation) == offsetof(thread_time_constraint_policy_data_t, computation));
+static_assert(offsetof(thread_time_constraint_with_priority_policy_data_t, constraint) == offsetof(thread_time_constraint_policy_data_t, constraint));
+static_assert(offsetof(thread_time_constraint_with_priority_policy_data_t, preemptible) == offsetof(thread_time_constraint_policy_data_t, preemptible));
 
 kern_return_t
 thread_policy_set_internal(
@@ -356,15 +363,20 @@ thread_policy_set_internal(
 	}
 
 	case THREAD_TIME_CONSTRAINT_POLICY:
+	case THREAD_TIME_CONSTRAINT_WITH_PRIORITY_POLICY:
 	{
-		thread_time_constraint_policy_t info;
+		thread_time_constraint_with_priority_policy_t info;
 
-		if (count < THREAD_TIME_CONSTRAINT_POLICY_COUNT) {
+		mach_msg_type_number_t min_count = (flavor == THREAD_TIME_CONSTRAINT_POLICY ?
+		    THREAD_TIME_CONSTRAINT_POLICY_COUNT :
+		    THREAD_TIME_CONSTRAINT_WITH_PRIORITY_POLICY_COUNT);
+
+		if (count < min_count) {
 			result = KERN_INVALID_ARGUMENT;
 			break;
 		}
 
-		info = (thread_time_constraint_policy_t)policy_info;
+		info = (thread_time_constraint_with_priority_policy_t)policy_info;
 
 
 		if (info->constraint < info->computation ||
@@ -374,13 +386,33 @@ thread_policy_set_internal(
 			break;
 		}
 
+		if (info->computation < (info->constraint / 2)) {
+			info->computation = (info->constraint / 2);
+			if (info->computation > max_rt_quantum) {
+				info->computation = max_rt_quantum;
+			}
+		}
+
+		if (flavor == THREAD_TIME_CONSTRAINT_WITH_PRIORITY_POLICY) {
+			if ((info->priority < BASEPRI_RTQUEUES) || (info->priority > MAXPRI)) {
+				result = KERN_INVALID_ARGUMENT;
+				break;
+			}
+		}
+
 		spl_t s = splsched();
 		thread_lock(thread);
 
-		thread->realtime.period         = info->period;
-		thread->realtime.computation    = info->computation;
-		thread->realtime.constraint     = info->constraint;
-		thread->realtime.preemptible    = info->preemptible;
+		thread->realtime.period          = info->period;
+		thread->realtime.computation     = info->computation;
+		thread->realtime.constraint      = info->constraint;
+		thread->realtime.preemptible     = info->preemptible;
+		if (flavor == THREAD_TIME_CONSTRAINT_WITH_PRIORITY_POLICY) {
+			thread->realtime.priority_offset = (uint8_t)(info->priority - BASEPRI_RTQUEUES);
+		} else {
+			thread->realtime.priority_offset = 0;
+			/* Or check for override from allowed thread group? */
+		}
 
 		thread_set_user_sched_mode_and_recompute_pri(thread, TH_MODE_REALTIME);
 
@@ -984,7 +1016,6 @@ thread_update_qos_cpu_time(thread_t thread)
  *
  * Called with thread_lock and thread mutex held.
  */
-extern thread_t vm_pageout_scan_thread;
 extern boolean_t vps_dynamic_priority_enabled;
 
 void
@@ -998,7 +1029,17 @@ thread_recompute_priority(
 	}
 
 	if (thread->sched_mode == TH_MODE_REALTIME) {
-		sched_set_thread_base_priority(thread, BASEPRI_RTQUEUES);
+		uint8_t i = thread->realtime.priority_offset;
+		assert((i >= 0) && (i < NRTQS));
+		priority = BASEPRI_RTQUEUES + i;
+		sched_set_thread_base_priority(thread, priority);
+		if (thread->realtime.deadline == RT_DEADLINE_NONE) {
+			/* Make sure the thread has a valid deadline */
+			uint64_t ctime = mach_absolute_time();
+			thread->realtime.deadline = thread->realtime.constraint + ctime;
+			KDBG(MACHDBG_CODE(DBG_MACH_SCHED, MACH_SET_RT_DEADLINE) | DBG_FUNC_NONE,
+			    (uintptr_t)thread_tid(thread), thread->realtime.deadline, thread->realtime.computation, 1);
+		}
 		return;
 	} else if (thread->effective_policy.thep_qos != THREAD_QOS_UNSPECIFIED) {
 		int qos = thread->effective_policy.thep_qos;
@@ -1234,15 +1275,20 @@ thread_policy_get(
 	}
 
 	case THREAD_TIME_CONSTRAINT_POLICY:
+	case THREAD_TIME_CONSTRAINT_WITH_PRIORITY_POLICY:
 	{
-		thread_time_constraint_policy_t         info;
+		thread_time_constraint_with_priority_policy_t         info;
 
-		if (*count < THREAD_TIME_CONSTRAINT_POLICY_COUNT) {
+		mach_msg_type_number_t min_count = (flavor == THREAD_TIME_CONSTRAINT_POLICY ?
+		    THREAD_TIME_CONSTRAINT_POLICY_COUNT :
+		    THREAD_TIME_CONSTRAINT_WITH_PRIORITY_POLICY_COUNT);
+
+		if (*count < min_count) {
 			result = KERN_INVALID_ARGUMENT;
 			break;
 		}
 
-		info = (thread_time_constraint_policy_t)policy_info;
+		info = (thread_time_constraint_with_priority_policy_t)policy_info;
 
 		if (!(*get_default)) {
 			spl_t s = splsched();
@@ -1254,6 +1300,9 @@ thread_policy_get(
 				info->computation = thread->realtime.computation;
 				info->constraint = thread->realtime.constraint;
 				info->preemptible = thread->realtime.preemptible;
+				if (flavor == THREAD_TIME_CONSTRAINT_WITH_PRIORITY_POLICY) {
+					info->priority = thread->realtime.priority_offset + BASEPRI_RTQUEUES;
+				}
 			} else {
 				*get_default = TRUE;
 			}
@@ -1267,6 +1316,9 @@ thread_policy_get(
 			info->computation = default_timeshare_computation;
 			info->constraint = default_timeshare_constraint;
 			info->preemptible = TRUE;
+			if (flavor == THREAD_TIME_CONSTRAINT_WITH_PRIORITY_POLICY) {
+				info->priority = BASEPRI_RTQUEUES;
+			}
 		}
 
 
@@ -1333,7 +1385,7 @@ thread_policy_get(
 		}
 
 		/* Only root can get this info */
-		if (current_task()->sec_token.val[0] != 0) {
+		if (!task_is_privileged(current_task())) {
 			result = KERN_PROTECTION_FAILURE;
 			break;
 		}
@@ -1825,7 +1877,7 @@ thread_policy_update_complete_unlocked(thread_t thread, task_pend_token_t pend_t
 {
 #ifdef MACH_BSD
 	if (pend_token->tpt_update_sockets) {
-		proc_apply_task_networkbg(thread->task->bsd_info, thread);
+		proc_apply_task_networkbg(task_pid(get_threadtask(thread)), thread);
 	}
 #endif /* MACH_BSD */
 

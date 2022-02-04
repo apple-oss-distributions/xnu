@@ -1,0 +1,17 @@
+#ifdef XNU_KERNEL_PRIVATE
+// kern/kcdata.h gets its own top level module outside of the Darwin module
+// to support building libkdd (one of our alias projects). libkdd can’t use
+// <kern/kcdata.h> because it doesn’t produce that header itself, and so Xcode
+// would pick up the old one in the SDK rather than mapping to the new one in
+// SRCROOT. To get around that, libkdd uses <kcdata.h> to not match anything in
+// the SDK and fall back on the one in SRCROOT. So far so good, but libkdd needs
+// to avoid accidentally also picking up <kern/kcdata.h> via a module, or it
+// will run into all kinds of redeclaration sadness that the include guards
+// somehow don’t block. (Maybe because <kcdata.h> isn’t modular and
+// <kern/kcdata.h> is?) libkdd uses the Darwin module, and so <kern/kcdata.h>
+// needs its own top level module that sits on top of Darwin.
+#endif
+module kcdata [system] {
+  header "kern/kcdata.h"
+  export *
+}

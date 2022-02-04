@@ -34,7 +34,7 @@
 #include <mach/mach_traps.h>
 #include <mach/vm_param.h>
 
-#include <kern/counters.h>
+#include <kern/bits.h>
 #include <kern/cpu_data.h>
 #include <arm/cpu_data_internal.h>
 #include <kern/mach_param.h>
@@ -164,11 +164,15 @@ dtrace_get_cpu_int_stack_top(void)
 	return getCpuDatap()->intstack_top;
 }
 #endif /* CONFIG_DTRACE */
-extern const char *mach_syscall_name_table[];
 
 /* ARM64_TODO: remove this. still TODO?*/
 extern struct proc* current_proc(void);
 extern int proc_pid(struct proc*);
+
+#if CONFIG_DEBUG_SYSCALL_REJECTION
+extern int debug_syscall_rejection_mode;
+extern bool debug_syscall_rejection_handle(int syscall_mach_trap_number);
+#endif /* CONFIG_DEBUG_SYSCALL_REJECTION */
 
 void
 mach_syscall(struct arm_saved_state *state)
@@ -241,7 +245,7 @@ mach_syscall(struct arm_saved_state *state)
 	 * mach_continuous_time(). See handle_svc().
 	 */
 	task_t task = current_task();
-	uint8_t *filter_mask = task->mach_trap_filter_mask;
+	uint8_t *filter_mask = task_get_mach_trap_filter_mask(task);
 
 	if (__improbable(filter_mask != NULL &&
 	    !bitstr_test(filter_mask, call_number))) {
@@ -249,15 +253,29 @@ mach_syscall(struct arm_saved_state *state)
 			retval = mac_task_mach_trap_evaluate(get_bsdtask_info(task),
 			    call_number);
 			if (retval) {
-				goto skip_machcall;
+				DEBUG_KPRINT_SYSCALL_MACH(
+					"mach_syscall: MACF retval=0x%x\n", retval);
+				goto bad;
 			}
 		}
 	}
 #endif /* CONFIG_MACF */
 
+#if CONFIG_DEBUG_SYSCALL_REJECTION
+	bitmap_t const *rejection_mask = uthread_get_syscall_rejection_mask(ut);
+	if (__improbable(rejection_mask != NULL &&
+	    debug_syscall_rejection_mode != 0) &&
+	    !bitmap_test(rejection_mask, call_number)) {
+		if (debug_syscall_rejection_handle(-call_number)) {
+			goto skip_machcall;
+		}
+	}
+#endif /* CONFIG_DEBUG_SYSCALL_REJECTION */
+
+
 	retval = mach_call(&args);
 
-#if CONFIG_MACF
+#if CONFIG_DEBUG_SYSCALL_REJECTION
 skip_machcall:
 #endif
 
@@ -278,18 +296,13 @@ skip_machcall:
 	assertf(prior == NULL, "thread_set_allocation_name(\"%s\") not cleared", kern_allocation_get_name(prior));
 #endif /* DEBUG || DEVELOPMENT */
 
-#if PROC_REF_DEBUG
-	if (__improbable(uthread_get_proc_refcount(ut) != 0)) {
-		panic("system call returned with uu_proc_refcount != 0");
-	}
-#endif
-
+	uthread_assert_zero_proc_refcount(ut);
 	return;
 
 bad:
 	exc_code = call_number;
 	exception_triage(EXC_SYSCALL, &exc_code, 1);
 	/* NOTREACHED */
-	panic("Returned from exception_triage()?\n");
+	panic("Returned from exception_triage()?");
 }
 #endif /* MACH_BSD */

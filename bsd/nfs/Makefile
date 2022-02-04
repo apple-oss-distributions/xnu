@@ -7,12 +7,20 @@ include $(MakeInc_cmd)
 include $(MakeInc_def)
 
 DATAFILES = \
-	krpc.h nfs.h nfsdiskless.h nfsm_subs.h nfsmount.h nfsnode.h \
-	nfs_lock.h nfs_gss.h nfs_ioctl.h \
-	nfsproto.h nfsrvcache.h rpcv2.h xdr_subs.h
-#	gss/gss_krb5_mech.h
+	nfs.h nfs_lock.h nfs_ioctl.h \
+	nfsproto.h rpcv2.h xdr_subs.h
+
+KERNELFILES = \
+	krpc.h nfs.h nfsproto.h rpcv2.h \
+	xdr_subs.h
 
 INSTALL_MI_LIST	= ${DATAFILES}
+
+INSTALL_KF_MI_LIST = ${KERNELFILES}
+
+INSTALL_SF_MI_LCL_LIST = ${DATAFILES}
+
+INSTALL_KF_MI_LCL_LIST = ${KERNELFILES}
 
 INSTALL_MI_DIR = nfs
 

@@ -1763,3 +1763,22 @@ def showpreoslog(cmd_args=None):
     print preoslog.data.GetString(err, 0)
     print "-----preoslog log end-------"
     return True
+
+@lldb_command('showeventsources')
+def ShowEventSources(cmd_args=None):
+    """ Show all event sources for a IOWorkLoop
+        syntax: (lldb) showeventsources <IOWorkLoop *>
+    """
+    if not cmd_args:
+        print "Please specify the address of the IOWorkLoop"
+        print ShowEventSources.__doc__
+        return
+
+    obj = kern.GetValueFromAddress(cmd_args[0], 'IOWorkLoop *')
+    idx = 0
+    event = obj.eventChain
+    while event != 0:
+        enabled = event.enabled
+        print("{}: {} [{}]".format(idx, GetObjectSummary(event), "enabled" if enabled else "disabled"))
+        event = event.eventChainNext
+        idx += 1

@@ -43,7 +43,7 @@ static struct timespec times_now[2] = {
  */
 static int
 prepare_times_array_and_attrs(struct timespec times_in[2],
-    struct timespec times_out[2], size_t *times_out_size)
+    struct timespec times_out[2], size_t *times_out_size, int *flags)
 {
 	if (times_in[0].tv_nsec == UTIME_OMIT &&
 	    times_in[1].tv_nsec == UTIME_OMIT) {
@@ -52,6 +52,7 @@ prepare_times_array_and_attrs(struct timespec times_in[2],
 
 	if (times_in[0].tv_nsec == UTIME_NOW ||
 	    times_in[1].tv_nsec == UTIME_NOW) {
+		*flags |= FSOPT_UTIMES_NULL;
 		struct timespec now = {};
 		{
 			/*
@@ -92,6 +93,8 @@ int
 futimens(int fd, const struct timespec _times_in[2])
 {
 	struct timespec times_in[2];
+	int flags_out;
+
 	if (_times_in != NULL) {
 		memcpy(&times_in, _times_in, sizeof(times_in));
 	} else {
@@ -103,7 +106,7 @@ futimens(int fd, const struct timespec _times_in[2])
 	struct attrlist a = {
 		.bitmapcount = ATTR_BIT_MAP_COUNT
 	};
-	a.commonattr = prepare_times_array_and_attrs(times_in, times_out, &attrbuf_size);
+	a.commonattr = prepare_times_array_and_attrs(times_in, times_out, &attrbuf_size, &flags_out);
 
 	return fsetattrlist(fd, &a, &times_out, attrbuf_size, 0);
 }
@@ -112,6 +115,8 @@ int
 utimensat(int fd, const char *path, const struct timespec _times_in[2], int flags)
 {
 	struct timespec times_in[2];
+	int flags_out = 0;
+
 	if (_times_in != NULL) {
 		memcpy(&times_in, _times_in, sizeof(times_in));
 	} else {
@@ -123,9 +128,8 @@ utimensat(int fd, const char *path, const struct timespec _times_in[2], int flag
 	struct attrlist a = {
 		.bitmapcount = ATTR_BIT_MAP_COUNT
 	};
-	a.commonattr = prepare_times_array_and_attrs(times_in, times_out, &attrbuf_size);
+	a.commonattr = prepare_times_array_and_attrs(times_in, times_out, &attrbuf_size, &flags_out);
 
-	int flags_out = 0;
 	if (flags & AT_SYMLINK_NOFOLLOW) {
 		flags_out |= FSOPT_NOFOLLOW;
 	}

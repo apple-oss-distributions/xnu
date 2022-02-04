@@ -37,4 +37,21 @@
 #error architecture not supported
 #endif
 
+/* Size of maximum exported thread state in 32-bit words */
+#define THREAD_STATE_MAX    1296
+
+#if XNU_KERNEL_PRIVATE
+#if defined (__i386__) || defined(__x86_64__)
+#   if THREAD_STATE_MAX < I386_THREAD_STATE_MAX
+#       error THREAD_STATE_MAX is too small
+#   endif
+#elif defined (__arm__) || defined (__arm64__)
+#   if THREAD_STATE_MAX < ARM_THREAD_STATE_MAX
+#       error THREAD_STATE_MAX is too small
+#   endif
+#else
+#error architecture not supported
+#endif
+#endif /* XNU_KERNEL_PRIVATE */
+
 #endif /* _MACH_MACHINE_THREAD_STATE_H_ */

@@ -108,7 +108,7 @@ dtrace_fasttrap_fork(proc_t *p, proc_t *cp)
  * duty to resume the task.
  */
 
-lck_mtx_t dtrace_procwaitfor_lock;
+LCK_MTX_DECLARE_ATTR(dtrace_procwaitfor_lock, &dtrace_lck_grp, &dtrace_lck_attr);
 
 typedef struct dtrace_proc_awaited_entry {
 	struct dtrace_procdesc			*pdesc;
@@ -156,7 +156,7 @@ dtrace_proc_exec_notification(proc_t *p) {
 	static char execpath[MAXPATHLEN];
 
 	ASSERT(p);
-	ASSERT(p->p_pid != -1);
+	ASSERT(proc_getpid(p) != -1);
 	ASSERT(current_task() != p->task);
 
 	lck_mtx_lock(&dtrace_procwaitfor_lock);
@@ -166,7 +166,7 @@ dtrace_proc_exec_notification(proc_t *p) {
 		char *pname = p->p_comm;
 
 		/* Already matched with another process. */
-		if ((entry->pdesc->p_pid != -1))
+		if (((entry->pdesc->p_pid) != -1))
 			continue;
 
 		/* p_comm is too short, use the execpath. */
@@ -186,7 +186,7 @@ dtrace_proc_exec_notification(proc_t *p) {
 		}
 
 		if (!strcmp(entry->pdesc->p_name, pname)) {
-			entry->pdesc->p_pid = p->p_pid;
+			entry->pdesc->p_pid = proc_getpid(p);
 			task_pidsuspend(p->task);
 			wakeup(entry);
 		}
@@ -397,10 +397,10 @@ dtrace_state_get(minor_t minor)
 dtrace_state_t*
 dtrace_state_allocate(minor_t minor)
 {
-	dtrace_state_t *state = _MALLOC(sizeof(dtrace_state_t), M_TEMP, M_ZERO | M_WAITOK);
+	dtrace_state_t *state = kalloc_type(dtrace_state_t, Z_ZERO | Z_WAITOK);
 	if (dtrace_casptr(&dtrace_clients[minor], NULL, state) != NULL) {
 		// We have been raced by another client for this number, abort
-		_FREE(state, M_TEMP);
+		kfree_type(dtrace_state_t, state);
 		return NULL;
 	}
 	return state;
@@ -411,7 +411,7 @@ dtrace_state_free(minor_t minor)
 {
 	dtrace_state_t *state = dtrace_clients[minor];
 	dtrace_clients[minor] = NULL;
-	_FREE(state, M_TEMP);
+	kfree_type(dtrace_state_t, state);
 }
 
 

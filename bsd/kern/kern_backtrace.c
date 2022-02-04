@@ -37,6 +37,7 @@
 #define MAX_BACKTRACE  (128)
 
 #define BACKTRACE_USER (0)
+#define BACKTRACE_USER_RESUME (1)
 
 static int backtrace_sysctl SYSCTL_HANDLER_ARGS;
 
@@ -51,32 +52,71 @@ SYSCTL_PROC(_kern_backtrace, OID_AUTO, user,
 static int
 backtrace_sysctl SYSCTL_HANDLER_ARGS
 {
-#pragma unused(oidp, arg2)
-	uintptr_t type = (uintptr_t)arg1;
+#pragma unused(oidp, arg1, arg2)
+	unsigned int scenario = (unsigned int)req->newlen;
 	uintptr_t *bt = NULL;
-	unsigned int bt_len = 0, bt_filled = 0;
+	unsigned int bt_len = 0, bt_filled = 0, bt_space = 0;
 	size_t bt_size = 0;
-	int error = 0;
+	errno_t error = 0;
 
-	if (type != BACKTRACE_USER) {
-		return EINVAL;
+	bool user_scenario = scenario == BACKTRACE_USER;
+	bool resume_scenario = scenario == BACKTRACE_USER_RESUME;
+	if (!user_scenario && !resume_scenario) {
+		return ENOTSUP;
 	}
 
 	if (req->oldptr == USER_ADDR_NULL || req->oldlen == 0) {
 		return EFAULT;
 	}
 
-	bt_len = req->oldlen > MAX_BACKTRACE ? MAX_BACKTRACE : (unsigned int)req->oldlen;
+	bt_len = req->oldlen > MAX_BACKTRACE ? MAX_BACKTRACE :
+	    (unsigned int)req->oldlen;
 	bt_size = sizeof(bt[0]) * bt_len;
-	bt = kheap_alloc(KHEAP_TEMP, bt_size, Z_WAITOK | Z_ZERO);
+	bt = kalloc_data(bt_size, Z_WAITOK | Z_ZERO);
 	if (!bt) {
 		return ENOBUFS;
 	}
-	bt_filled = backtrace_user(bt, bt_len, &error, NULL, NULL);
+	bt_space = resume_scenario ? bt_len / 2 : bt_len;
+	struct backtrace_user_info btinfo = BTUINFO_INIT;
+	bt_filled = backtrace_user(bt, bt_space, NULL, &btinfo);
+	error = btinfo.btui_error;
 	if (error != 0) {
 		goto out;
 	}
+	if (resume_scenario) {
+		if (!(btinfo.btui_info & BTI_TRUNCATED)) {
+			error = ENOSPC;
+			goto out;
+		}
+		struct backtrace_control ctl = {
+			.btc_frame_addr = btinfo.btui_next_frame_addr,
+		};
+		btinfo = BTUINFO_INIT;
+		unsigned int bt_more = backtrace_user(bt + bt_filled, bt_space, &ctl,
+		    &btinfo);
+		error = btinfo.btui_error;
+		if (error != 0) {
+			goto out;
+		}
+		bt_filled += bt_more;
+	}
 	bt_filled = min(bt_filled, bt_len);
+	if (btinfo.btui_async_frame_addr != 0 &&
+	    btinfo.btui_async_start_index != 0) {
+		// Put the async call stack inline after the real call stack.
+		unsigned int start_index = btinfo.btui_async_start_index;
+		uintptr_t frame_addr = btinfo.btui_async_frame_addr;
+		unsigned int bt_left = bt_len - start_index;
+		struct backtrace_control ctl = { .btc_frame_addr = frame_addr, };
+		btinfo = BTUINFO_INIT;
+		unsigned int async_filled = backtrace_user(bt + start_index, bt_left,
+		    &ctl, &btinfo);
+		error = btinfo.btui_error;
+		if (error != 0) {
+			goto out;
+		}
+		bt_filled = min(start_index + async_filled, bt_len);
+	}
 
 	error = copyout(bt, req->oldptr, sizeof(bt[0]) * bt_filled);
 	if (error) {
@@ -85,7 +125,7 @@ backtrace_sysctl SYSCTL_HANDLER_ARGS
 	req->oldidx = bt_filled;
 
 out:
-	kheap_free(KHEAP_TEMP, bt, bt_size);
+	kfree_data(bt, bt_size);
 	return error;
 }
 

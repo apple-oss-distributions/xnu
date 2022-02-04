@@ -1,0 +1,67 @@
+# -*- mode: makefile;-*-
+#
+# Copyright (C) 2021 Apple Inc. All rights reserved.
+#
+# MakeInc.san contains global definitions for building,
+# linking and installing sanitizer runtime support.
+#
+
+#
+# Generates rule to build symbolset file from specific export file.
+#
+#     $(1) - Kext name (without .symbolset suffix)
+#     $(2) - Exports name (without .exports suffix)
+
+define san_symbolset_template
+
+SYMBOL_SET_BUILD_$(1) := $$(OBJPATH)/config/$(1).symbolset
+
+# Our external dependency on config/allsymbols from config hierarchy config_all is hardcoded in the toplevel Makefile!
+$$(SYMBOL_SET_BUILD_$(1)): $$(SRCROOT)/config/$(2).exports $$(OBJPATH)/config/allsymbols $$(KEXT_CREATE_SYMBOL_SET)
+	@$$(LOG_SYMBOLSET) "$(1)$$(Color0) ($$(ColorLF)$$(CURRENT_ARCH_CONFIG_LC), $$(CURRENT_KERNEL_CONFIG_LC) $$(Color0))"
+	$$(_v)$$(KEXT_CREATE_SYMBOL_SET)			\
+		$$(ARCH_FLAGS_$$(CURRENT_ARCH_CONFIG))	\
+		-import $$(OBJPATH)/config/allsymbols		\
+		-export $$<		                \
+		-output $$@ $(_vstdout)
+
+endef
+
+#
+# Generate rule to build System.kext plugin for give sanitizer.
+#
+#     $(1) - Name of the kext plugin
+#     $(2) - Name of the kext variant binary (Kasan_kasan, Kcov, ...)
+#
+
+define san_kext_dstroot_rule_template
+
+DSTROOT_KEXT_$(2) := $$(DSTROOT_SYSTEM_KEXT_PATH)/$(1)/$(2)
+
+$$(DSTROOT_KEXT_$(2)): $$(DSTROOT_SYSTEM_KEXT_PATH)/$(1)/% : $$(SYMROOT_SYSTEM_KEXT_PATH)/$(1)/%
+	$$(_v)$$(MKDIR) $$(@D)
+	@$$(LOG_INSTALLVARIANT) "$$(Color0)symbolset $$(ColorF)$$(@F)$$(Color0) ($$(ColorLF)$$(CURRENT_KERNEL_CONFIG_LC)$$(Color0))"
+	$$(_v)$$(INSTALL) $$(EXEC_INSTALL_FLAGS) $$< $$@
+
+endef
+
+#
+# Generate rule to build System.kext plugin in SYMROOT
+#
+#     $(1) - Name of the kext plugin
+#     $(2) - Name of the kext variant binary (Kasan_kasan, Kcov, ...)
+#     $(3) - build configs to get symbolset binaries from corresponding OBJDIR
+#
+
+define san_kext_symroot_rule_template
+
+SYMROOT_KEXT_$(2) := $$(SYMROOT_SYSTEM_KEXT_PATH)/$(1)/$(2)
+
+$$(SYMROOT_KEXT_$(2)): $$(addsuffix /config/$(2).symbolset, \
+		$$(addprefix $$(OBJROOT)/,$$(foreach bc,$(3),$$(call function_convert_build_config_to_objdir,$$(bc)))))
+	@$$(LOG_INSTALLSYM) "$$(Color0)symbolset $$(ColorF)$(2)$$(Color0) ($$(ColorLF)$$(CURRENT_KERNEL_CONFIG_LC)$$(Color0))"
+	$$(_v)$$(MKDIR) $$(@D)
+	$$(_v)$$(LIPO) -create `(echo $$^ | xargs -L 1 lipo -detailed_info) | \
+		awk '/is architecture/ {s[$$$$6]=$$$$3} END {for (a in s) {print s[a]}}'` -output $$@ $$(_vstdout)
+
+endef

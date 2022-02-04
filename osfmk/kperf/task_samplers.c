@@ -68,7 +68,7 @@ kperf_task_snapshot_sample(task_t task, struct kperf_task_snapshot *tksn)
 #endif
 
 	tksn->kptksn_suspend_count = task->suspend_count;
-	tksn->kptksn_pageins = task->pageins;
+	tksn->kptksn_pageins = (integer_t) MIN(counter_load(&task->pageins), INT32_MAX);
 	tksn->kptksn_user_time_in_terminated_threads = task->total_user_time;
 	tksn->kptksn_system_time_in_terminated_threads = task->total_system_time;
 

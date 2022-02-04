@@ -27,11 +27,12 @@
  */
 
 extern "C" {
+#include <kern/debug.h>
 #include <kern/queue.h>
-#include <kern/sched_prim.h>
-#include <machine/machine_routines.h>
 }
 
+#include <kern/sched_prim.h>
+#include <machine/machine_routines.h>
 #include <IOKit/IOLib.h>
 #include <IOKit/IOPlatformExpert.h>
 #include <IOKit/IOKitKeysPrivate.h>
@@ -42,7 +43,7 @@ static IOLock *gIOPlatformActionsLock;
 
 typedef kern_return_t (*iocpu_platform_action_t)(void * refcon0, void * refcon1, uint32_t priority,
     void * param1, void * param2, void * param3,
-    const char * name);
+    const char * name, uint64_t platform_action_flags);
 
 struct iocpu_platform_action_entry {
 	queue_chain_t                     link;
@@ -65,6 +66,9 @@ enum {
 	kQueuePanic       = 5,
 	kQueueCount       = 6
 };
+
+#define PLATFORM_ACTION_FLAGS_ALLOW_NESTED_CALLOUTS 1
+#define PLATFORM_ACTION_FLAGS_NO_LOGGING            2
 
 const OSSymbol *                gIOPlatformSleepActionKey;
 const OSSymbol *                gIOPlatformWakeActionKey;
@@ -102,23 +106,23 @@ iocpu_remove_platform_action(iocpu_platform_action_entry_t * entry)
 
 static kern_return_t
 iocpu_run_platform_actions(queue_head_t * queue, uint32_t first_priority, uint32_t last_priority,
-    void * param1, void * param2, void * param3, boolean_t allow_nested_callouts)
+    void * param1, void * param2, void * param3, uint64_t platform_action_flags)
 {
 	kern_return_t                ret = KERN_SUCCESS;
 	kern_return_t                result = KERN_SUCCESS;
 	iocpu_platform_action_entry_t * next;
+	boolean_t allow_nested_callouts = (platform_action_flags & PLATFORM_ACTION_FLAGS_ALLOW_NESTED_CALLOUTS);
 
 	queue_iterate(queue, next, iocpu_platform_action_entry_t *, link)
 	{
 		uint32_t pri = (next->priority < 0) ? -next->priority : next->priority;
 		if ((pri >= first_priority) && (pri <= last_priority)) {
-			//kprintf("[%p]", next->action);
 			if (!allow_nested_callouts && !next->callout_in_progress) {
 				next->callout_in_progress = TRUE;
-				ret = (*next->action)(next->refcon0, next->refcon1, pri, param1, param2, param3, next->name);
+				ret = (*next->action)(next->refcon0, next->refcon1, pri, param1, param2, param3, next->name, platform_action_flags);
 				next->callout_in_progress = FALSE;
 			} else if (allow_nested_callouts) {
-				ret = (*next->action)(next->refcon0, next->refcon1, pri, param1, param2, param3, next->name);
+				ret = (*next->action)(next->refcon0, next->refcon1, pri, param1, param2, param3, next->name, platform_action_flags);
 			}
 		}
 		if (KERN_SUCCESS == result) {
@@ -133,7 +137,7 @@ IOCPURunPlatformQuiesceActions(void)
 {
 	assert(preemption_enabled() == false);
 	return iocpu_run_platform_actions(&gActionQueues[kQueueQuiesce], 0, 0U - 1,
-	           NULL, NULL, NULL, TRUE);
+	           NULL, NULL, NULL, PLATFORM_ACTION_FLAGS_ALLOW_NESTED_CALLOUTS);
 }
 
 extern "C" kern_return_t
@@ -142,7 +146,7 @@ IOCPURunPlatformActiveActions(void)
 	assert(preemption_enabled() == false);
 	ml_hibernate_active_pre();
 	kern_return_t result = iocpu_run_platform_actions(&gActionQueues[kQueueActive], 0, 0U - 1,
-	    NULL, NULL, NULL, TRUE);
+	    NULL, NULL, NULL, PLATFORM_ACTION_FLAGS_ALLOW_NESTED_CALLOUTS);
 	ml_hibernate_active_post();
 	return result;
 }
@@ -154,7 +158,7 @@ IOCPURunPlatformHaltRestartActions(uint32_t message)
 		return kIOReturnNotReady;
 	}
 	return iocpu_run_platform_actions(&gActionQueues[kQueueHaltRestart], 0, 0U - 1,
-	           (void *)(uintptr_t) message, NULL, NULL, TRUE);
+	           (void *)(uintptr_t) message, NULL, NULL, PLATFORM_ACTION_FLAGS_ALLOW_NESTED_CALLOUTS);
 }
 
 extern "C" kern_return_t
@@ -164,8 +168,13 @@ IOCPURunPlatformPanicActions(uint32_t message, uint32_t details)
 	if (!gActionQueues[kQueuePanic].next) {
 		return kIOReturnNotReady;
 	}
+	uint64_t platform_action_flags = 0;
+
+	if (!verbose_panic_flow_logging && (message == kPEPanicDiagnosticsInProgress)) {
+		platform_action_flags = PLATFORM_ACTION_FLAGS_NO_LOGGING;
+	}
 	return iocpu_run_platform_actions(&gActionQueues[kQueuePanic], 0, 0U - 1,
-	           (void *)(uintptr_t) message, (void *)(uintptr_t) details, NULL, FALSE);
+	           (void *)(uintptr_t) message, (void *)(uintptr_t) details, NULL, platform_action_flags);
 }
 
 extern "C" kern_return_t
@@ -189,14 +198,14 @@ void
 IOPlatformActionsPreSleep(void)
 {
 	iocpu_run_platform_actions(&gActionQueues[kQueueSleep], 0, 0U - 1,
-	    NULL, NULL, NULL, TRUE);
+	    NULL, NULL, NULL, PLATFORM_ACTION_FLAGS_ALLOW_NESTED_CALLOUTS);
 }
 
 void
 IOPlatformActionsPostResume(void)
 {
 	iocpu_run_platform_actions(&gActionQueues[kQueueWake], 0, 0U - 1,
-	    NULL, NULL, NULL, TRUE);
+	    NULL, NULL, NULL, PLATFORM_ACTION_FLAGS_ALLOW_NESTED_CALLOUTS);
 }
 
 void
@@ -225,16 +234,35 @@ IOPlatformActionsInitialize(void)
 static kern_return_t
 IOServicePlatformAction(void * refcon0, void * refcon1, uint32_t priority,
     void * param1, void * param2, void * param3,
-    const char * service_name)
+    const char * service_name, uint64_t platform_action_flags)
 {
 	IOReturn         ret;
 	IOService *      service  = (IOService *)      refcon0;
 	const OSSymbol * function = (const OSSymbol *) refcon1;
 
-	IOLog("%s -> %s\n", function->getCStringNoCopy(), service_name);
+	if (!(platform_action_flags & PLATFORM_ACTION_FLAGS_NO_LOGGING)) {
+		IOLog("%s -> %s\n", function->getCStringNoCopy(), service_name);
+	}
+
+	/*
+	 * We intentionally don't trace params that are kernel addresses,
+	 * and truncate 64 bit values to 32 bit, so they all fit into
+	 * one tracepoint along with IOService registry id.
+	 */
+	SOCD_TRACE_XNU_START(PLATFORM_ACTION,
+	    ADDR(function->getCStringNoCopy()),
+	    ADDR(service->getMetaClass()),
+	    PACK_2X32(VALUE(service->getRegistryEntryID()), VALUE(param1)),
+	    PACK_2X32(VALUE(param2), VALUE(param3)));
 
 	ret = service->callPlatformFunction(function, false,
 	    (void *)(uintptr_t) priority, param1, param2, param3);
+
+	SOCD_TRACE_XNU_END(PLATFORM_ACTION,
+	    ADDR(function->getCStringNoCopy()),
+	    ADDR(service->getMetaClass()),
+	    PACK_2X32(VALUE(service->getRegistryEntryID()), VALUE(param1)),
+	    PACK_2X32(VALUE(param2), VALUE(param3)));
 
 	return ret;
 }
@@ -268,7 +296,7 @@ IOInstallServicePlatformAction(IOService * service, uint32_t qidx)
 		}
 	}
 
-	entry = IONew(iocpu_platform_action_entry_t, 1);
+	entry = IOMallocType(iocpu_platform_action_entry_t);
 	entry->action = &IOServicePlatformAction;
 	entry->name = service->getName();
 	priority = num->unsigned32BitValue();
@@ -328,7 +356,7 @@ IORemoveServicePlatformActions(IOService * service)
 			next = (typeof(entry))queue_next(&entry->link);
 			if (service == entry->refcon0) {
 				iocpu_remove_platform_action(entry);
-				IODelete(entry, iocpu_platform_action_entry_t, 1);
+				IOFreeType(entry, iocpu_platform_action_entry_t);
 			}
 		}
 	}

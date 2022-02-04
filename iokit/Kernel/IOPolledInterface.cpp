@@ -109,7 +109,11 @@ IOPolledFilePollers::copyPollers(IOService * media)
 	IORegistryEntry * child;
 
 	if ((obj = media->copyProperty(kIOPolledInterfaceStackKey))) {
-		return OSDynamicCast(IOPolledFilePollers, obj);
+		IOPolledFilePollers * ioPFPObj = OSDynamicCast(IOPolledFilePollers, obj);
+		if (!ioPFPObj) {
+			OSSafeReleaseNULL(obj);
+		}
+		return ioPFPObj;
 	}
 
 	do{
@@ -591,19 +595,7 @@ IOGetHibernationCryptKey(uint8_t * hibernationKey,
     uint32_t *swSeed
     )
 {
-#if XNU_MONITOR_PPL_HIB
-	SEPHibernator *hibernator = SEPHibernator::sepHibernator();
-	sephib_wrapped_key_t wrappedKey = {};
-	sephib_seprom_hib_payload_t sepromPayload = {};
-	hibernator->prepareToHibernate(&wrappedKey, &sepromPayload);
-	*swSeed = sepromPayload.sw_seed;
-	assert(*keySize >= sizeof(wrappedKey.data));
-	*keySize = sizeof(wrappedKey.data);
-	memcpy(hibernationKey, wrappedKey.data, *keySize);
-	return kIOReturnSuccess;
-#else
 	return kIOReturnNotFound;
-#endif
 }
 #endif /* defined(__arm64__) */
 
@@ -629,11 +621,7 @@ IOPolledFileOpen(const char * filename,
 	AbsoluteTime         startTime, endTime;
 	uint64_t             nsec;
 
-	vars = IONew(IOPolledFileIOVars, 1);
-	if (!vars) {
-		return kIOReturnNoMemory;
-	}
-	bzero(vars, sizeof(*vars));
+	vars = IOMallocType(IOPolledFileIOVars);
 	vars->allocated = true;
 
 	do{
@@ -762,16 +750,14 @@ IOPolledFileOpen(const char * filename,
 #endif
 			if (kIOReturnSuccess != err) {
 				HIBLOG("error 0x%x getting path\n", err);
+				OSSafeReleaseNULL(keyUUID);
 				break;
 			}
 			*imagePath = data;
 		}
 
 		// Release key UUID if we have one
-		if (keyUUID) {
-			keyUUID->release();
-			keyUUID = NULL; // Just in case
-		}
+		OSSafeReleaseNULL(keyUUID);
 	}while (false);
 
 	if (kIOReturnSuccess != err) {
@@ -834,7 +820,7 @@ IOPolledFileClose(IOPolledFileIOVars ** pVars,
 	}
 
 	if (vars->allocated) {
-		IODelete(vars, IOPolledFileIOVars, 1);
+		IOFreeType(vars, IOPolledFileIOVars);
 	} else {
 		bzero(vars, sizeof(IOPolledFileIOVars));
 	}

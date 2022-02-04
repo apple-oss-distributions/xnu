@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2002-2017 Apple Inc. All rights reserved.
+ * Copyright (c) 2002-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -124,10 +124,8 @@ static uint32_t random_id_statistics = 0;
 static uint64_t random_id_collisions = 0;
 static uint64_t random_id_total = 0;
 
-decl_lck_mtx_data(static, ipid_lock);
-static lck_attr_t *ipid_lock_attr;
-static lck_grp_t *ipid_lock_grp;
-static lck_grp_attr_t *ipid_lock_grp_attr;
+static LCK_GRP_DECLARE(ipid_lock_grp, "ipid");
+static LCK_MTX_DECLARE(ipid_lock, &ipid_lock_grp);
 
 SYSCTL_UINT(_net_inet_ip, OID_AUTO, random_id_statistics,
     CTLFLAG_RW | CTLFLAG_LOCKED, &random_id_statistics, 0,
@@ -150,23 +148,17 @@ ip_initid(void)
 
 	_CASSERT(ARRAY_SIZE >= 512 && ARRAY_SIZE <= 32768);
 
-	ipid_lock_grp_attr  = lck_grp_attr_alloc_init();
-	ipid_lock_grp = lck_grp_alloc_init("ipid", ipid_lock_grp_attr);
-	ipid_lock_attr = lck_attr_alloc_init();
-	lck_mtx_init(&ipid_lock, ipid_lock_grp, ipid_lock_attr);
-
-	id_array = (uint16_t *)_MALLOC(ARRAY_SIZE * sizeof(uint16_t),
-	    M_TEMP, M_WAITOK | M_ZERO);
-	id_bits = (bitstr_t *)_MALLOC(bitstr_size(65536), M_TEMP,
-	    M_WAITOK | M_ZERO);
+	id_array = (uint16_t *)kalloc_data(ARRAY_SIZE * sizeof(uint16_t),
+	    Z_WAITOK | Z_ZERO);
+	id_bits = (bitstr_t *)kalloc_data(bitstr_size(65536), Z_WAITOK | Z_ZERO);
 	if (id_array == NULL || id_bits == NULL) {
 		/* Just in case; neither or both. */
 		if (id_array != NULL) {
-			_FREE(id_array, M_TEMP);
+			kfree_data(id_array, ARRAY_SIZE * sizeof(uint16_t));
 			id_array = NULL;
 		}
 		if (id_bits != NULL) {
-			_FREE(id_bits, M_TEMP);
+			kfree_data(id_bits, bitstr_size(65536));
 			id_bits = NULL;
 		}
 	}

@@ -97,9 +97,7 @@ const static uint32_t debugid_masks[] = {
 void
 kperf_kdebug_setup(void)
 {
-	kperf_kdebug_filter = kalloc_tag(sizeof(*kperf_kdebug_filter),
-	    VM_KERN_MEMORY_DIAG);
-	bzero(kperf_kdebug_filter, sizeof(*kperf_kdebug_filter));
+	kperf_kdebug_filter = zalloc_permanent_type(struct kperf_kdebug_filter);
 }
 
 void

@@ -99,6 +99,7 @@ L2:
 	// parent ends up here skipping child portion
 	addq	$24, %rsp   // restore the stack
 	ret
+	UNWIND_EPILOGUE
 
 #elif defined(__arm__)
 	

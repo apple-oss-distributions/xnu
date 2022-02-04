@@ -74,7 +74,7 @@
 #define KEV_DL_LINK_QUALITY_METRIC_CHANGED      20
 #define KEV_DL_NODE_PRESENCE                    21
 #define KEV_DL_NODE_ABSENCE                     22
-#define KEV_DL_MASTER_ELECTED                   23
+#define KEV_DL_PRIMARY_ELECTED                  23
 #define KEV_DL_ISSUES                           24
 #define KEV_DL_IFDELEGATE_CHANGED               25
 #define KEV_DL_AWDL_RESTRICTED                  26
@@ -82,6 +82,12 @@
 #define KEV_DL_RRC_STATE_CHANGED                28
 #define KEV_DL_QOS_MODE_CHANGED                 29
 #define KEV_DL_LOW_POWER_MODE_CHANGED           30
+
+#ifdef PRIVATE
+#define KEV_DL_MASTER_ELECTED KEV_DL_PRIMARY_ELECTED
+#else
+#define KEV_DL_MASTER_ELECTED (_Pragma("gcc warn Use KEV_DL_PRIMARY_ELECTED instead") KEV_DL_PRIMARY_ELECTED)
+#endif /* PRIVATE */
 
 #ifdef PRIVATE
 #define KEV_NETPOLICY_SUBCLASS  3       /* Network policy subclass */
@@ -149,6 +155,10 @@
 #define KEV_IPSEC_SUBCLASS      13      /* IPsec event subclass */
 #define KEV_IPSEC_WAKE_PACKET   1       /* IPsec wake packet available, the
 	                                 * first packet processed after a wake event */
+
+#define KEV_POWER_SUBCLASS              14
+#define KEV_POWER_WAKE_PACKET           1
+#define KEV_POWER_UNATTRIBUTED_WAKE     2
 
 #endif /* PRIVATE */
 #endif /* (!_POSIX_C_SOURCE || _DARWIN_C_SOURCE) */

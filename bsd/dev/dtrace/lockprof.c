@@ -123,7 +123,7 @@ lockprof_invoke(lck_grp_t *grp, lck_grp_stat_t *stat, uint64_t val)
 static int
 lockprof_lock_count(lck_grp_t *grp, int kind)
 {
-	return *(int*)((void*)(grp) + probes[kind].count_offset);
+	return *(int*)((uintptr_t)(grp) + probes[kind].count_offset);
 }
 
 static void
@@ -274,7 +274,7 @@ lockprof_provide(void *arg, const dtrace_probedesc_t *desc)
 static lck_grp_stat_t*
 lockprof_stat(lck_grp_t *grp, int kind)
 {
-	return (lck_grp_stat_t*)((void*)&grp->lck_grp_stats + probes[kind].stat_offset);
+	return (lck_grp_stat_t*)((uintptr_t)&grp->lck_grp_stats + probes[kind].stat_offset);
 }
 
 static int

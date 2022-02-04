@@ -987,6 +987,7 @@ fasttrap_pid_probe32(x86_saved_state_t *regs)
 	uthread->t_dtrace_scrpc = 0;
 	uthread->t_dtrace_astpc = 0;
 
+#if CONFIG_VFORK
 	/*
 	 * Treat a child created by a call to vfork(2) as if it were its
 	 * parent. We know that there's only one thread of control in such a
@@ -994,12 +995,14 @@ fasttrap_pid_probe32(x86_saved_state_t *regs)
 	 */
 	if (p->p_lflag & P_LINVFORK) {
 		proc_list_lock();
-		while (p->p_lflag & P_LINVFORK)
+		while (p->p_lflag & P_LINVFORK) {
 			p = p->p_pptr;
+		}
 		proc_list_unlock();
 	}
+#endif /* CONFIG_VFORK */
 
-	pid = p->p_pid;
+	pid = proc_getpid(p);
 	pid_mtx = &cpu_core[CPU->cpu_id].cpuc_pid_lock;
 	lck_mtx_lock(pid_mtx);
 	bucket = &fasttrap_tpoints.fth_table[FASTTRAP_TPOINTS_INDEX(pid, pc)];
@@ -1562,6 +1565,7 @@ fasttrap_pid_probe64(x86_saved_state_t *regs)
 	uthread->t_dtrace_astpc = 0;
 	uthread->t_dtrace_regv = 0;
 
+#if CONFIG_VFORK
 	/*
 	 * Treat a child created by a call to vfork(2) as if it were its
 	 * parent. We know that there's only one thread of control in such a
@@ -1569,12 +1573,14 @@ fasttrap_pid_probe64(x86_saved_state_t *regs)
 	 */
 	if (p->p_lflag & P_LINVFORK) {
 		proc_list_lock();
-		while (p->p_lflag & P_LINVFORK)
+		while (p->p_lflag & P_LINVFORK) {
 			p = p->p_pptr;
+		}
 		proc_list_unlock();
 	}
+#endif /* CONFIG_VFORK */
 
-	pid = p->p_pid;
+	pid = proc_getpid(p);
 	pid_mtx = &cpu_core[CPU->cpu_id].cpuc_pid_lock;
 	lck_mtx_lock(pid_mtx);
 	bucket = &fasttrap_tpoints.fth_table[FASTTRAP_TPOINTS_INDEX(pid, pc)];
@@ -2208,15 +2214,20 @@ fasttrap_return_probe(x86_saved_state_t *regs)
 	uthread->t_dtrace_scrpc = 0;
 	uthread->t_dtrace_astpc = 0;
 
+#if CONFIG_VFORK
 	/*
 	 * Treat a child created by a call to vfork(2) as if it were its
 	 * parent. We know that there's only one thread of control in such a
 	 * process: this one.
 	 */
-	proc_list_lock();
-	while (p->p_lflag & P_LINVFORK)
-		p = p->p_pptr;
-	proc_list_unlock();
+	if (p->p_lflag & P_LINVFORK) {
+		proc_list_lock();
+		while (p->p_lflag & P_LINVFORK) {
+			p = p->p_pptr;
+		}
+		proc_list_unlock();
+	}
+#endif /* CONFIG_VFORK */
 
 	/*
 	 * We set rp->r_pc to the address of the traced instruction so
@@ -2230,7 +2241,7 @@ fasttrap_return_probe(x86_saved_state_t *regs)
 	else
 		regs32->eip = pc;
 
-	fasttrap_return_common(regs, pc, p->p_pid, npc);
+	fasttrap_return_common(regs, pc, proc_getpid(p), npc);
 
 	return (0);
 }

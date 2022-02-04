@@ -156,11 +156,13 @@ LEAF(pseudo, 0)					;\
 
 #define __SYSCALL2(pseudo, name, nargs, cerror) \
 	PSEUDO(pseudo, name, nargs, cerror)			;\
-	ret
+	ret											;\
+	UNWIND_EPILOGUE
 
 #define __SYSCALL(pseudo, name, nargs)			\
 	PSEUDO(pseudo, name, nargs, cerror)			;\
-	ret
+	ret											;\
+	UNWIND_EPILOGUE
 
 #elif defined(__arm__)
 

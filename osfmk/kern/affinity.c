@@ -383,10 +383,7 @@ affinity_space_alloc(void)
 {
 	affinity_space_t        aspc;
 
-	aspc = (affinity_space_t) kalloc(sizeof(struct affinity_space));
-	if (aspc == NULL) {
-		return NULL;
-	}
+	aspc = kalloc_type(struct affinity_space, Z_WAITOK | Z_NOFAIL);
 
 	lck_mtx_init(&aspc->aspc_lock, &task_lck_grp, &task_lck_attr);
 	queue_init(&aspc->aspc_affinities);
@@ -406,7 +403,7 @@ affinity_space_free(affinity_space_t aspc)
 
 	lck_mtx_destroy(&aspc->aspc_lock, &task_lck_grp);
 	DBG("affinity_space_free(%p)\n", aspc);
-	kfree(aspc, sizeof(struct affinity_space));
+	kfree_type(struct affinity_space, aspc);
 }
 
 
@@ -419,10 +416,7 @@ affinity_set_alloc(void)
 {
 	affinity_set_t  aset;
 
-	aset = (affinity_set_t) kalloc(sizeof(struct affinity_set));
-	if (aset == NULL) {
-		return NULL;
-	}
+	aset = kalloc_type(struct affinity_set, Z_WAITOK | Z_NOFAIL);
 
 	aset->aset_thread_count = 0;
 	queue_init(&aset->aset_affinities);
@@ -445,7 +439,7 @@ affinity_set_free(affinity_set_t aset)
 	assert(queue_empty(&aset->aset_threads));
 
 	DBG("affinity_set_free(%p)\n", aset);
-	kfree(aset, sizeof(struct affinity_set));
+	kfree_type(struct affinity_set, aset);
 }
 
 /*
@@ -540,7 +534,7 @@ affinity_set_place(affinity_space_t aspc, affinity_set_t new_aset)
 
 	if (__improbable(num_cpu_asets > MAX_CPUS)) {
 		// If this triggers then the array needs to be made bigger.
-		panic("num_cpu_asets = %d > %d too big in %s\n", num_cpu_asets, MAX_CPUS, __FUNCTION__);
+		panic("num_cpu_asets = %d > %d too big in %s", num_cpu_asets, MAX_CPUS, __FUNCTION__);
 	}
 
 	/*
@@ -552,7 +546,7 @@ affinity_set_place(affinity_space_t aspc, affinity_set_t new_aset)
 		if (aset->aset_num < num_cpu_asets) {
 			set_occupancy[aset->aset_num]++;
 		} else {
-			panic("aset_num = %d in %s\n", aset->aset_num, __FUNCTION__);
+			panic("aset_num = %d in %s", aset->aset_num, __FUNCTION__);
 		}
 	}
 

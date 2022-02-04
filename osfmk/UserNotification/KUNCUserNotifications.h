@@ -233,11 +233,6 @@ KUNCUserNotificationDisplayFromBundle(
 	int                             contextKey) __attribute__((deprecated));
 
 
-kern_return_t
-KUNCUserNotificationCancel(
-	KUNCUserNotificationID  notification) __attribute__((deprecated));
-
-
 __END_DECLS
 
 #endif  /* __USERNOTIFICATION_KUNCUSERNOTIFICATIONS_H */

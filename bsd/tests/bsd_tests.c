@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019 Apple Inc. All rights reserved.
+ * Copyright (c) 2019-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -50,18 +50,15 @@
 extern kern_return_t arm64_lock_test(void);
 #endif
 #if defined(__arm__) || defined(__arm64__)
+extern kern_return_t arm_cpu_capabilities_legacy_test(void);
 extern kern_return_t pmap_test(void);
 #endif /* defined(__arm__) || defined(__arm64__) */
-kern_return_t kalloc_test(void);
 kern_return_t ipi_test(void);
 #if defined(KERNEL_INTEGRITY_CTRR)
 extern kern_return_t ctrr_test(void);
 #endif
 #if __ARM_PAN_AVAILABLE__
 extern kern_return_t arm64_late_pan_test(void);
-#endif
-#if HAS_TWO_STAGE_SPR_LOCK
-extern kern_return_t arm64_spr_lock_test(void);
 #endif
 extern kern_return_t copyio_test(void);
 
@@ -70,6 +67,7 @@ struct xnupost_test bsd_post_tests[] = {
 	XNUPOST_TEST_CONFIG_BASIC(arm64_lock_test),
 #endif
 #if defined(__arm__) || defined(__arm64__)
+	XNUPOST_TEST_CONFIG_BASIC(arm_cpu_capabilities_legacy_test),
 	XNUPOST_TEST_CONFIG_BASIC(pmap_test),
 #endif /* defined(__arm__) || defined(__arm64__) */
 #if defined(KERNEL_INTEGRITY_CTRR)
@@ -78,11 +76,7 @@ struct xnupost_test bsd_post_tests[] = {
 #if __ARM_PAN_AVAILABLE__
 	XNUPOST_TEST_CONFIG_BASIC(arm64_late_pan_test),
 #endif
-	XNUPOST_TEST_CONFIG_BASIC(kalloc_test),
 	XNUPOST_TEST_CONFIG_BASIC(ipi_test),
-#if HAS_TWO_STAGE_SPR_LOCK
-	XNUPOST_TEST_CONFIG_BASIC(arm64_spr_lock_test),
-#endif
 	XNUPOST_TEST_CONFIG_BASIC(copyio_test),
 };
 
@@ -126,30 +120,9 @@ bsd_list_tests()
 }
 
 int
-bsd_do_post()
+bsd_do_post(void)
 {
 	return xnupost_run_tests(bsd_post_tests, bsd_post_tests_count);
-}
-
-kern_return_t
-kalloc_test()
-{
-	uint64_t * data_ptr;
-	size_t alloc_size;
-
-	T_LOG("Running kalloc test.\n");
-
-	alloc_size = sizeof(uint64_t);
-	data_ptr = kalloc(alloc_size);
-	T_ASSERT_NOTNULL(data_ptr, "kalloc sizeof(uint64_t) return not null");
-	kfree(data_ptr, alloc_size);
-
-	alloc_size = 3544;
-	data_ptr = kalloc(alloc_size);
-	T_ASSERT_NOTNULL(data_ptr, "kalloc 3544 return not null");
-	kfree(data_ptr, alloc_size);
-
-	return KERN_SUCCESS;
 }
 
 /* kcdata type definition */
@@ -216,7 +189,7 @@ xnupost_copyout_test(xnupost_test_t t, mach_vm_address_t outaddr)
 	}
 	outaddr += sizeof(uint64_t);
 
-	namelen = strnlen(t->xt_name, XNUPOST_TNAME_MAXLEN);
+	namelen = strnlen(t->xt_name, XNUPOST_TNAME_MAXLEN - 1) + 1;
 	kret = copyout(t->xt_name, (user_addr_t)outaddr, namelen);
 	if (kret) {
 		return kret;

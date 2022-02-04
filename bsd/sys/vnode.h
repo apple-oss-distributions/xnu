@@ -64,13 +64,19 @@
 #ifndef _VNODE_H_
 #define _VNODE_H_
 
+#include <stdint.h>
 #include <sys/appleapiopts.h>
 #include <sys/cdefs.h>
 #ifdef KERNEL
 #include <sys/kernel_types.h>
 #include <sys/param.h>
 #include <sys/signal.h>
-#endif
+#ifdef KERNEL_PRIVATE
+#include <mach/mach_types.h>
+#endif /* KERNEL_PRIVATE */
+#else
+#include <stdint.h>
+#endif /* KERNEL */
 
 /*
  * The vnode is the focus of all file activity in UNIX.  There is a
@@ -122,6 +128,7 @@ enum vtagtype   {
 #define VNODE_READ      0x01
 #define VNODE_WRITE     0x02
 #define VNODE_BLOCKMAP_NO_TRACK 0x04 // APFS Fusion: Do not track this request
+#define VNODE_CLUSTER_VERIFY 0x08 // Verification will be performed in the cluster layer
 
 
 /* flags for VNOP_ALLOCATE */
@@ -778,6 +785,7 @@ struct vnode_attr {
 #define VA_64BITOBJIDS          0x100000        /* fileid/linkid/parentid are 64 bit */
 #define VA_REALFSID             0x200000        /* Return real fsid */
 #define VA_USEFSID              0x400000        /* Use fsid from filesystem  */
+#define VA_FILESEC_ACL          0x800000        /* ACL is interior to filesec */
 
 /*
  *  Modes.  Some values same as Ixxx entries from inode.h for now.
@@ -1200,6 +1208,15 @@ void    vnode_clearmountedon(vnode_t vp);
 int     vnode_isrecycled(vnode_t vp);
 
 /*!
+ *  @function vnode_willberecycled
+ *  @abstract Check if a vnode is marked for recycling when the last reference to it is released.
+ *  @discussion This is only a snapshot: a vnode may start to be recycled, or go from dead to in use, at any time.
+ *  @param vp The vnode to test.
+ *  @return Nonzero if vnode is marked for recycling, 0 otherwise.
+ */
+int     vnode_willberecycled(vnode_t vp);
+
+/*!
  *  @function vnode_isnocache
  *  @abstract Check if a vnode is set to not have its data cached in memory  (i.e. we write-through to disk and always read from disk).
  *  @param vp The vnode to test.
@@ -1445,6 +1462,18 @@ kauth_cred_t    vfs_context_ucred(vfs_context_t ctx);
  */
 int     vfs_context_pid(vfs_context_t ctx);
 
+#ifdef KERNEL_PRIVATE
+/*!
+ *  @function vfs_context_copy_audit_token
+ *  @abstract Copy the audit token of the BSD process associated with a vfs_context_t.
+ *  @param ctx Context whose associated process to find.
+ *  @param token Pointer to audit token buffer which will receive a copy of the audit token
+ *  @return 0 on success, non-zero if there was a problem obtaining the token
+ */
+int     vfs_context_copy_audit_token(vfs_context_t ctx, audit_token_t *token);
+
+#endif /* KERNEL_PRIVATE */
+
 /*!
  *  @function vfs_context_issignal
  *  @abstract Get a bitfield of pending signals for the BSD process associated with a vfs_context_t.
@@ -1512,6 +1541,30 @@ int     vfs_context_bind(vfs_context_t);
 int     vfs_ctx_skipatime(vfs_context_t ctx);
 
 #endif
+
+/* Supported filesystem tags for vfs_[set|get]_thread_fs_private */
+#define FS_PRIVATE_TAG_APFS (1)
+
+/*!
+ *  @function vfs_set_thread_fs_private
+ *  @abstract Set the per-thread filesystem private data field.
+ *  @discussion Allows a filesystem to store an implementation specific value in the thread struct.
+ *  Note that this field is common to all filesystems thus re-entrancy should be taken into consideration.
+ *  @param tag Filesystem identification tag.
+ *  @param fs_private The value to be set.
+ *  @return 0 for success, ENOTSUP if the filesystem tag is not supported.
+ */
+int vfs_set_thread_fs_private(uint8_t tag, uint64_t fs_private);
+
+/*!
+ *  @function vfs_get_thread_fs_private
+ *  @abstract Return the per-thread filesystem private data field.
+ *  @discussion Returns the per-thread value that was set by vfs_set_thread_fs_private().
+ *  @param tag Filesystem identification tag.
+ *  @param fs_private The stored per-thread value.
+ *  @return 0 for success, ENOTSUP if the filesystem tag is not supported.
+ */
+int vfs_get_thread_fs_private(uint8_t tag, uint64_t *fs_private);
 
 /*!
  *  @function vflush
@@ -2075,7 +2128,7 @@ int     vn_revoke(vnode_t vp, int flags, vfs_context_t ctx);
  *  @param vpp Destination for vnode pointer.
  *  @param cnp Various data about lookup, e.g. filename and intended operation.
  *  @return ENOENT: the filesystem has previously added a negative entry with cache_enter() to indicate that there is no
- *  file of the given name in "dp."  -1: successfully found a cached vnode (vpp is set).  0: No data in the cache, or operation is CRETE/RENAME.
+ *  file of the given name in "dp."  -1: successfully found a cached vnode (vpp is set).  0: No data in the cache, or operation is CREATE/RENAME.
  */
 int     cache_lookup(vnode_t dvp, vnode_t *vpp, struct componentname *cnp);
 
@@ -2276,6 +2329,22 @@ int bdevvp(dev_t dev, struct vnode **vpp);
  */
 int vnode_getfromfd(vfs_context_t ctx, int fd, vnode_t *vpp);
 
+/*
+ * @function vnode_parent
+ * @abstract Get the parent of a vnode.
+ * @param vp The vnode whose parent to grab.
+ * @return Parent if available, else NULL.
+ */
+vnode_t vnode_parent(vnode_t vp);
+
+/*
+ * @function vfs_context_thread
+ * @abstract Return the Mach thread associated with a vfs_context_t.
+ * @param ctx The context to use.
+ * @return The thread for this context, or NULL, if there is not one.
+ */
+thread_t vfs_context_thread(vfs_context_t ctx);
+
 #endif /* KERNEL_PRIVATE */
 
 #ifdef BSD_KERNEL_PRIVATE
@@ -2309,11 +2378,8 @@ boolean_t vnode_on_reliable_media(vnode_t);
  * VNOP_LOOKUP on this vnode.  Volfs will always ask for it's parent
  * object ID (instead of using the v_parent pointer).
  */
-vnode_t vnode_parent(vnode_t);
 void vnode_setparent(vnode_t, vnode_t);
 void vnode_setname(vnode_t, char *);
-/* XXX temporary until we can arrive at a KPI for NFS, Seatbelt */
-thread_t vfs_context_thread(vfs_context_t);
 #if CONFIG_IOSCHED
 vnode_t vnode_mountdevvp(vnode_t);
 #endif
@@ -2421,6 +2487,9 @@ vnode_t vfs_context_get_cwd(vfs_context_t); /* get cwd with iocount */
 int vnode_isnoflush(vnode_t);
 void vnode_setnoflush(vnode_t);
 void vnode_clearnoflush(vnode_t);
+#if CONFIG_IO_COMPRESSION_STATS
+void vnode_iocs_record_and_free(vnode_t);
+#endif /* CONFIG_IO_COMPRESSION_STATS */
 
 #define BUILDPATH_NO_FS_ENTER     0x1 /* Use cache values, do not enter file system */
 #define BUILDPATH_CHECKACCESS     0x2 /* Check if parents have search rights */
@@ -2438,5 +2507,35 @@ int vnode_issubdir(vnode_t vp, vnode_t dvp, int *is_subdir, vfs_context_t ctx);
 __END_DECLS
 
 #endif /* KERNEL */
+
+/*
+ * Structure for vnode level IO compression stats
+ */
+
+#define IOCS_BUFFER_NUM_SIZE_BUCKETS         10
+#define IOCS_BUFFER_MAX_BUCKET               9
+#define IOCS_BUFFER_NUM_COMPRESSION_BUCKETS  7
+#define IOCS_BLOCK_NUM_SIZE_BUCKETS          16
+
+struct io_compression_stats {
+	uint64_t uncompressed_size;
+	uint64_t compressed_size;
+	uint32_t buffer_size_compression_dist[IOCS_BUFFER_NUM_SIZE_BUCKETS][IOCS_BUFFER_NUM_COMPRESSION_BUCKETS];
+	uint32_t block_compressed_size_dist[IOCS_BLOCK_NUM_SIZE_BUCKETS];
+};
+typedef struct io_compression_stats *io_compression_stats_t;
+
+#define IOCS_SBE_PATH_LEN             128
+#define IOCS_PATH_START_BYTES_TO_COPY 108
+#define IOCS_PATH_END_BYTES_TO_COPY   20 /* Includes null termination */
+
+#define IOCS_SYSCTL_LIVE                  0x00000001
+#define IOCS_SYSCTL_STORE_BUFFER_RD_ONLY  0x00000002
+#define IOCS_SYSCTL_STORE_BUFFER_MARK     0x00000004
+
+struct iocs_store_buffer_entry {
+	char     path_name[IOCS_SBE_PATH_LEN];
+	struct io_compression_stats iocs;
+};
 
 #endif /* !_VNODE_H_ */

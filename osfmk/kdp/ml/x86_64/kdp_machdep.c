@@ -55,16 +55,14 @@
 extern cpu_type_t cpuid_cputype(void);
 extern cpu_subtype_t cpuid_cpusubtype(void);
 
-extern vm_offset_t machine_trace_thread_get_kva(vm_offset_t cur_target_addr, vm_map_t map, uint32_t *thread_trace_flags);
-extern void machine_trace_thread_clear_validation_cache(void);
-extern vm_map_t kernel_map;
-
 void            print_saved_state(void *);
 void            kdp_call(void);
 int             kdp_getc(void);
 void            kdp_getstate(x86_thread_state64_t *);
 void            kdp_setstate(x86_thread_state64_t *);
 unsigned machine_read64(addr64_t srcaddr, caddr_t dstaddr, uint32_t len);
+int machine_trace_thread64(thread_t thread, char * tracepos, char * tracebound,
+    int nframes, uint32_t * thread_trace_flags);
 
 void
 kdp_exception(
@@ -303,7 +301,7 @@ kdp_intr_enbl(int s)
 int
 kdp_getc(void)
 {
-	return cnmaygetc();
+	return console_try_read_char();
 }
 
 void
@@ -462,95 +460,6 @@ kdp_machine_get_breakinsn(
 	*size = 1;
 }
 
-#define RETURN_OFFSET 4
-
-int
-machine_trace_thread(thread_t thread,
-    char * tracepos,
-    char * tracebound,
-    int nframes,
-    boolean_t user_p,
-    uint32_t * thread_trace_flags)
-{
-	uint32_t * tracebuf = (uint32_t *)tracepos;
-	uint32_t framesize  = sizeof(uint32_t);
-
-	uint32_t fence             = 0;
-	uint32_t stackptr          = 0;
-	uint32_t stacklimit        = 0xfc000000;
-	int framecount             = 0;
-	uint32_t prev_eip          = 0;
-	uint32_t prevsp            = 0;
-	vm_offset_t kern_virt_addr = 0;
-	vm_map_t bt_vm_map         = VM_MAP_NULL;
-
-	nframes = (tracebound > tracepos) ? MIN(nframes, (int)((tracebound - tracepos) / framesize)) : 0;
-
-	if (user_p) {
-		x86_saved_state32_t *iss32;
-
-		iss32 = USER_REGS32(thread);
-		prev_eip = iss32->eip;
-		stackptr = iss32->ebp;
-
-		stacklimit = 0xffffffff;
-		bt_vm_map = thread->task->map;
-	} else {
-		panic("32-bit trace attempted on 64-bit kernel");
-	}
-
-	for (framecount = 0; framecount < nframes; framecount++) {
-		*tracebuf++ = prev_eip;
-
-		/* Invalid frame, or hit fence */
-		if (!stackptr || (stackptr == fence)) {
-			break;
-		}
-
-		/* Unaligned frame */
-		if (stackptr & 0x0000003) {
-			break;
-		}
-
-		if (stackptr <= prevsp) {
-			break;
-		}
-
-		if (stackptr > stacklimit) {
-			break;
-		}
-
-		kern_virt_addr = machine_trace_thread_get_kva(stackptr + RETURN_OFFSET, bt_vm_map, thread_trace_flags);
-
-		if (!kern_virt_addr) {
-			if (thread_trace_flags) {
-				*thread_trace_flags |= kThreadTruncatedBT;
-			}
-			break;
-		}
-
-		prev_eip = *(uint32_t *)kern_virt_addr;
-
-		prevsp = stackptr;
-
-		kern_virt_addr = machine_trace_thread_get_kva(stackptr, bt_vm_map, thread_trace_flags);
-
-		if (kern_virt_addr) {
-			stackptr = *(uint32_t *)kern_virt_addr;
-		} else {
-			stackptr = 0;
-			if (thread_trace_flags) {
-				*thread_trace_flags |= kThreadTruncatedBT;
-			}
-		}
-	}
-
-	machine_trace_thread_clear_validation_cache();
-
-	return (uint32_t) (((char *) tracebuf) - tracepos);
-}
-
-
 #define RETURN_OFFSET64 8
 /* Routine to encapsulate the 64-bit address read hack*/
 unsigned
@@ -564,43 +473,24 @@ machine_trace_thread64(thread_t thread,
     char * tracepos,
     char * tracebound,
     int nframes,
-    boolean_t user_p,
-    uint32_t * thread_trace_flags,
-    uint64_t *sp,
-    vm_offset_t fp)
+    uint32_t * thread_trace_flags)
 {
+	extern bool machine_trace_thread_validate_kva(vm_offset_t addr);
+
 	uint64_t * tracebuf = (uint64_t *)tracepos;
 	unsigned framesize  = sizeof(addr64_t);
 
 	uint32_t fence             = 0;
-	addr64_t stackptr          = 0;
 	int framecount             = 0;
 	addr64_t prev_rip          = 0;
 	addr64_t prevsp            = 0;
 	vm_offset_t kern_virt_addr = 0;
-	vm_map_t bt_vm_map         = VM_MAP_NULL;
 
 	nframes = (tracebound > tracepos) ? MIN(nframes, (int)((tracebound - tracepos) / framesize)) : 0;
 
-	if (user_p) {
-		x86_saved_state64_t     *iss64;
-		iss64 = USER_REGS64(thread);
-		prev_rip = iss64->isf.rip;
-		if (fp == 0) {
-			stackptr = iss64->rbp;
-		}
-		bt_vm_map = thread->task->map;
-		if (sp && user_p) {
-			*sp = iss64->isf.rsp;
-		}
-	} else {
-		if (fp == 0) {
-			stackptr = STACK_IKS(thread->kernel_stack)->k_rbp;
-		}
-		prev_rip = STACK_IKS(thread->kernel_stack)->k_rip;
-		prev_rip = VM_KERNEL_UNSLIDE(prev_rip);
-		bt_vm_map = kernel_map;
-	}
+	addr64_t stackptr = STACK_IKS(thread->kernel_stack)->k_rbp;
+	prev_rip = STACK_IKS(thread->kernel_stack)->k_rip;
+	prev_rip = VM_KERNEL_UNSLIDE(prev_rip);
 
 	for (framecount = 0; framecount < nframes; framecount++) {
 		*tracebuf++ = prev_rip;
@@ -615,34 +505,28 @@ machine_trace_thread64(thread_t thread,
 			break;
 		}
 
-		kern_virt_addr = machine_trace_thread_get_kva(stackptr + RETURN_OFFSET64, bt_vm_map, thread_trace_flags);
-		if (!kern_virt_addr) {
+		kern_virt_addr = stackptr + RETURN_OFFSET64;
+		bool ok = machine_trace_thread_validate_kva(kern_virt_addr);
+		if (!ok) {
 			if (thread_trace_flags) {
 				*thread_trace_flags |= kThreadTruncatedBT;
 			}
 			break;
 		}
 
-		prev_rip = *(uint64_t *)kern_virt_addr;
-		if (!user_p) {
-			prev_rip = VM_KERNEL_UNSLIDE(prev_rip);
-		}
-
+		prev_rip = VM_KERNEL_UNSLIDE(*(uint64_t *)kern_virt_addr);
 		prevsp = stackptr;
 
-		kern_virt_addr = machine_trace_thread_get_kva(stackptr, bt_vm_map, thread_trace_flags);
-
-		if (kern_virt_addr) {
-			stackptr = *(uint64_t *)kern_virt_addr;
-		} else {
-			stackptr = 0;
+		kern_virt_addr = stackptr;
+		ok = machine_trace_thread_validate_kva(kern_virt_addr);
+		if (!ok) {
 			if (thread_trace_flags) {
 				*thread_trace_flags |= kThreadTruncatedBT;
 			}
+			break;
 		}
+		stackptr = *(uint64_t *)kern_virt_addr;
 	}
-
-	machine_trace_thread_clear_validation_cache();
 
 	return (uint32_t) (((char *) tracebuf) - tracepos);
 }

@@ -50,7 +50,7 @@ ktest_set_current_var(const char * name, const char * value_fmt, ...)
 	va_list args;
 
 	if (ktest_current_var_index >= KTEST_MAXVARS) {
-		panic("Internal ktest error in " __func__);
+		panic("Internal ktest error");
 	}
 
 	strlcpy(ktest_current_var_names[ktest_current_var_index],

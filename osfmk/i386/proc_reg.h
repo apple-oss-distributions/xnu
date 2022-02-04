@@ -196,16 +196,8 @@
  * If thread groups are needed for x86, set this to 1
  */
 #define CONFIG_THREAD_GROUPS 0
-
-/*
- * MAX_PSETS allows the scheduler to create statically sized
- * scheduling data structures (such as an array of processor sets, clutch
- * buckets in Edge scheduler etc.).
- *
- * <Edge Multi-cluster Support Needed>
- */
-#define MAX_PSETS 64
 #define MAX_CPUS 64
+#define MAX_PSETS 64
 
 #ifndef ASSEMBLER
 

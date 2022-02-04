@@ -674,7 +674,7 @@ loopattach(void)
 
 	result = ifnet_allocate_extended(&lo_init, &lo_ifp);
 	if (result != 0) {
-		panic("%s: couldn't allocate loopback ifnet (%d)\n",
+		panic("%s: couldn't allocate loopback ifnet (%d)",
 		    __func__, result);
 		/* NOTREACHED */
 	}
@@ -692,7 +692,7 @@ loopattach(void)
 
 	result = ifnet_attach(lo_ifp, NULL);
 	if (result != 0) {
-		panic("%s: couldn't attach loopback ifnet (%d)\n",
+		panic("%s: couldn't attach loopback ifnet (%d)",
 		    __func__, result);
 		/* NOTREACHED */
 	}

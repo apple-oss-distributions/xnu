@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015 Apple Inc. All rights reserved.
+ * Copyright (c) 2015-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  *
@@ -220,16 +220,18 @@ os_log_create(const char *subsystem, const char *category);
  * @function os_log_info_enabled
  *
  * @abstract
- * Returns if development log messages are enabled for a particular log object.
+ * Returns if additional information log messages are enabled for a particular
+ * log object.
  *
  * @discussion
- * Returns if development log messages are enabled for a particular log object.
+ * Returns if additional information log messages are enabled for a particular
+ * log object.
  *
  * @param log
  * Pass OS_LOG_DEFAULT or a log object previously created with os_log_create.
  *
  * @result
- * Returns ‘true’ if debug log messages are enabled.
+ * Returns ‘true’ if additional information log messages are enabled.
  */
 __WATCHOS_AVAILABLE(3.0) __OSX_AVAILABLE(10.12) __IOS_AVAILABLE(10.0) __TVOS_AVAILABLE(10.0)
 OS_EXPORT OS_NOTHROW OS_WARN_RESULT
@@ -510,9 +512,26 @@ os_log_coprocessor(void *buff, uint64_t buff_len, os_log_type_t type,
  * @abstract
  * IOP metadata registration, intended for use by RTBuddy for
  * coprocessor os log functionality only.
+ * Will be removed after all user code will be updated to use os_log_coprocessor_register_with_type
  */
 void
 os_log_coprocessor_register(const char *uuid, const char *file_path, bool copy);
+
+typedef enum {
+	os_log_coproc_register_memory,
+	os_log_coproc_register_harvest_fs_img4,
+	os_log_coproc_register_harvest_fs_ftab,
+} os_log_coproc_reg_t;
+
+/*!
+ * @function os_log_coprocessor_register_with_type
+ *
+ * @abstract
+ * IOP metadata registration, intended for use by RTBuddy for
+ * coprocessor os log functionality only.
+ */
+void
+os_log_coprocessor_register_with_type(const char *uuid, const char *file_path, os_log_coproc_reg_t register_type);
 
 /*!
  * @function os_log_sensitive_debug

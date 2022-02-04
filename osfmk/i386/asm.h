@@ -57,6 +57,8 @@
 #ifndef	_I386_ASM_H_
 #define	_I386_ASM_H_
 
+#if defined (__i386__) || defined (__x86_64__)
+
 #if defined(__i386__)
 
 #define S_PC	 (%esp)
@@ -376,5 +378,7 @@
 #else
 #error unsupported architecture
 #endif
+
+#endif /* defined (__i386__) || defined (__x86_64__) */
 
 #endif /* _I386_ASM_H_ */

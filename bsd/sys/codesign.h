@@ -29,11 +29,7 @@
 #ifndef _SYS_CODESIGN_H_
 #define _SYS_CODESIGN_H_
 
-#if KERNEL
 #include <kern/cs_blobs.h>
-#else
-#include <System/kern/cs_blobs.h>
-#endif
 
 /* MAC flags used by F_ADDFILESIGS_* */
 #define MAC_VNODE_CHECK_DYLD_SIM 0x1   /* tells the MAC framework that dyld-sim is being loaded */
@@ -60,6 +56,7 @@
 #define CS_OPS_CLEARPLATFORM 13 /* clear platform binary status (DEVELOPMENT-only) */
 #define CS_OPS_TEAMID       14  /* get team id */
 #define CS_OPS_CLEAR_LV     15  /* clear the library validation flag */
+#define CS_OPS_DER_ENTITLEMENTS_BLOB 16  /* get der entitlements blob */
 
 #define CS_MAX_TEAMID_LEN       64
 
@@ -97,6 +94,7 @@ int csproc_forced_lv(struct proc* p);
 int     cs_system_require_lv(void);
 uint32_t cs_entitlement_flags(struct proc *p);
 int     cs_entitlements_blob_get_vnode(struct vnode *, off_t, void **, size_t *);
+int     cs_entitlements_dictionary_copy_vnode(struct vnode *, off_t, void **);
 int     cs_entitlements_blob_get(struct proc *, void **, size_t *);
 #ifdef KERNEL_PRIVATE
 int     cs_entitlements_dictionary_copy(struct proc *, void **);
@@ -122,12 +120,15 @@ unsigned int    csblob_get_signer_type(struct cs_blob *);
 void                    csproc_clear_platform_binary(struct proc *);
 #endif
 
+int csblob_register_profile(struct cs_blob *, void*, vm_size_t);
+
 void csproc_disable_enforcement(struct proc* p);
 void csproc_mark_invalid_allowed(struct proc* p);
 int csproc_check_invalid_allowed(struct proc* p);
 int csproc_hardened_runtime(struct proc* p);
 
 int             csblob_get_entitlements(struct cs_blob *, void **, size_t *);
+int             csblob_get_der_entitlements(struct cs_blob *, const CS_GenericBlob **, size_t *);
 
 const CS_GenericBlob *
     csblob_find_blob(struct cs_blob *, uint32_t, uint32_t);
@@ -136,6 +137,10 @@ const CS_GenericBlob *
 void *          csblob_entitlements_dictionary_copy(struct cs_blob *csblob);
 void            csblob_entitlements_dictionary_set(struct cs_blob *csblob, void * entitlements);
 
+// New APIs
+void            csblob_os_entitlements_set(struct cs_blob *csblob, void * entitlements);
+void *          csblob_os_entitlements_copy(struct cs_blob *csblob);
+void *          csblob_os_entitlements_get(struct cs_blob *csblob);
 /*
  * Mostly convenience functions below
  */

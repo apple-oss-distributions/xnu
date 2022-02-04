@@ -84,6 +84,7 @@
 #define UT_WORKQ_IDLE_CLEANUP          0x20 /* Thread is removing its voucher or stack */
 #define UT_WORKQ_EARLY_BOUND           0x40 /* Thread has been bound early */
 #define UT_WORKQ_CPUPERCENT            0x80 /* Thread has CPU percent policy active */
+#define UT_WORKQ_COOPERATIVE           0x100 /* Thread is part of cooperative pool */
 
 typedef union workq_threadreq_param_s {
 	struct {
@@ -168,11 +169,13 @@ __options_decl(workq_tr_flags_t, uint8_t, {
 	WORKQ_TR_FLAG_OVERCOMMIT     = 0x04,
 	WORKQ_TR_FLAG_WL_PARAMS      = 0x08,
 	WORKQ_TR_FLAG_WL_OUTSIDE_QOS = 0x10,
+	WORKQ_TR_FLAG_COOPERATIVE    = 0x20,
 });
 
 typedef struct workq_threadreq_s {
 	union {
 		struct priority_queue_entry_sched tr_entry;
+		STAILQ_ENTRY(workq_threadreq_s) tr_link;
 		thread_t tr_thread;
 	};
 	uint16_t           tr_count;
@@ -183,10 +186,9 @@ typedef struct workq_threadreq_s {
 	/* kqueue states, modified under the kqlock */
 	kq_index_t         tr_kq_override_index;   /* highest wakeup override index */
 	kq_index_t         tr_kq_qos_index;        /* QoS for the servicer */
-	bool               tr_kq_wakeup;           /* an event has fired */
 } workq_threadreq_s, *workq_threadreq_t;
 
-TAILQ_HEAD(threadreq_head, workq_threadreq_s);
+STAILQ_HEAD(workq_threadreq_tailq, workq_threadreq_s);
 
 #if defined(__LP64__)
 typedef unsigned __int128 wq_thactive_t;
@@ -217,7 +219,7 @@ struct workqueue {
 		struct mpsc_queue_chain wq_destroy_link;
 	};
 
-	lck_spin_t      wq_lock;
+	lck_ticket_t    wq_lock;
 
 	uint64_t        wq_thread_call_last_run;
 	struct os_refcnt wq_refcnt;
@@ -234,6 +236,8 @@ struct workqueue {
 	uint16_t        wq_thidlecount;
 	uint16_t        wq_thscheduled_count[WORKQ_NUM_BUCKETS]; // incl. manager
 
+	workq_threadreq_t wq_event_manager_threadreq;
+
 	_Atomic wq_thactive_t wq_thactive;
 	_Atomic uint64_t wq_lastblocked_ts[WORKQ_NUM_QOS_BUCKETS];
 
@@ -248,7 +252,13 @@ struct workqueue {
 	struct priority_queue_sched_max wq_overcommit_queue;
 	struct priority_queue_sched_max wq_constrained_queue;
 	struct priority_queue_sched_max wq_special_queue;
-	workq_threadreq_t wq_event_manager_threadreq;
+
+	// BG/MT, UT, DEF, IN, UI, AUI. No manager bucket for cooperative pool
+	uint8_t wq_cooperative_queue_scheduled_count[WORKQ_NUM_QOS_BUCKETS];
+	uint16_t wq_cooperative_queue_best_req_qos: 3,
+	    wq_cooperative_queue_has_limited_max_size:1, /* if set, max size of cooperative pool per QoS is 1 */
+	    unused:12;
+	struct workq_threadreq_tailq wq_cooperative_queue[WORKQ_NUM_QOS_BUCKETS];
 };
 
 #define WORKQUEUE_MAXTHREADS            512
@@ -276,6 +286,9 @@ __options_decl(workq_kern_threadreq_flags_t, uint32_t, {
 	WORKQ_THREADREQ_ATTEMPT_REBIND      = 0x02,
 	WORKQ_THREADREQ_CAN_CREATE_THREADS  = 0x04,
 	WORKQ_THREADREQ_MAKE_OVERCOMMIT     = 0x08,
+#if CONFIG_PREADOPT_TG
+	WORKQ_THREADREQ_REEVALUATE_PREADOPT_TG = 0x10,
+#endif
 });
 
 // called with the kq req lock held
@@ -295,6 +308,9 @@ void workq_kern_threadreq_unlock(struct proc *p);
 
 void workq_kern_threadreq_redrive(struct proc *p, workq_kern_threadreq_flags_t flags);
 
+void workq_kern_quantum_expiry_reevaluate(struct proc *p, thread_t thread);
+bool bsdthread_part_of_cooperative_workqueue(struct uthread *uth);
+
 // This enum matches _pthread_set_flags in libpthread's qos_private.h
 enum workq_set_self_flags {
 	WORKQ_SET_SELF_QOS_FLAG             = 0x01,
@@ -306,6 +322,7 @@ enum workq_set_self_flags {
 
 void workq_proc_suspended(struct proc *p);
 void workq_proc_resumed(struct proc *p);
+struct workqueue *proc_get_wqptr(struct proc *p);
 
 #endif // BSD_KERNEL_PRIVATE
 

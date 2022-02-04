@@ -52,11 +52,21 @@ uint32_t ipc_voucher_trace_contents = 0;
 
 static SECURITY_READ_ONLY_LATE(zone_t) ipc_voucher_zone;
 static ZONE_DECLARE(ipc_voucher_attr_control_zone, "ipc voucher attr controls",
-    sizeof(struct ipc_voucher_attr_control), ZC_NOENCRYPT | ZC_ZFREE_CLEARMEM);
+    sizeof(struct ipc_voucher_attr_control), ZC_ZFREE_CLEARMEM);
 
 ZONE_INIT(&ipc_voucher_zone, "ipc vouchers", sizeof(struct ipc_voucher),
-    ZC_NOENCRYPT | ZC_ZFREE_CLEARMEM | ZC_NOSEQUESTER,
-    ZONE_ID_IPC_VOUCHERS, NULL);
+    ZC_ZFREE_CLEARMEM, ZONE_ID_IPC_VOUCHERS, NULL);
+
+/* deliver voucher notifications */
+static void ipc_voucher_no_senders(ipc_port_t, mach_port_mscount_t);
+static void ipc_voucher_attr_control_no_senders(ipc_port_t, mach_port_mscount_t);
+
+IPC_KOBJECT_DEFINE(IKOT_VOUCHER,
+    .iko_op_stable     = true,
+    .iko_op_no_senders = ipc_voucher_no_senders);
+IPC_KOBJECT_DEFINE(IKOT_VOUCHER_ATTR_CONTROL,
+    .iko_op_stable     = true,
+    .iko_op_no_senders = ipc_voucher_attr_control_no_senders);
 
 #define voucher_require(v) \
 	zone_id_require(ZONE_ID_IPC_VOUCHERS, sizeof(struct ipc_voucher), v)
@@ -178,6 +188,8 @@ static void ivace_release(iv_index_t key_index, iv_index_t value_index);
 static void ivace_lookup_values(iv_index_t key_index, iv_index_t value_index,
     mach_voucher_attr_value_handle_array_t  values,
     mach_voucher_attr_value_handle_array_size_t *count);
+static ivac_entry_t ivace_lookup(ipc_voucher_attr_control_t ivac,
+    iv_index_t index);
 
 static iv_index_t iv_lookup(ipc_voucher_t, iv_index_t);
 
@@ -228,7 +240,7 @@ iv_alloc(iv_index_t entries)
 		iv_entry_t table;
 
 		/* TODO - switch to ipc_table method of allocation */
-		table = (iv_entry_t) kalloc(sizeof(*table) * entries);
+		table = (iv_entry_t) kalloc_data(sizeof(*table) * entries, Z_WAITOK);
 		if (IVE_NULL == table) {
 			zfree(ipc_voucher_zone, iv);
 			return IV_NULL;
@@ -254,14 +266,16 @@ iv_alloc(iv_index_t entries)
  *		Set the voucher's value index for a given key index.
  *	Conditions:
  *		This is only called during voucher creation, as
- *		they are immutable once references are distributed.
+ *		they are permanent once references are distributed.
  */
 static void
 iv_set(ipc_voucher_t iv,
     iv_index_t key_index,
     iv_index_t value_index)
 {
-	assert(key_index < iv->iv_table_size);
+	if (key_index >= iv->iv_table_size) {
+		panic("key_index >= iv->iv_table_size");
+	}
 	iv->iv_table[key_index] = value_index;
 }
 
@@ -296,10 +310,8 @@ iv_dealloc(ipc_voucher_t iv, boolean_t unhash)
 	 * is gone.  We can just discard it now.
 	 */
 	if (IP_VALID(port)) {
-		require_ip_active(port);
 		assert(port->ip_srights == 0);
-
-		ipc_port_dealloc_kernel(port);
+		ipc_kobject_dealloc_port(port, 0, IKOT_VOUCHER);
 	}
 
 	/* release the attribute references held by this voucher */
@@ -311,8 +323,7 @@ iv_dealloc(ipc_voucher_t iv, boolean_t unhash)
 	}
 
 	if (iv->iv_table != iv->iv_inline_table) {
-		kfree(iv->iv_table,
-		    iv->iv_table_size * sizeof(*iv->iv_table));
+		kfree_data(iv->iv_table, iv->iv_table_size * sizeof(*iv->iv_table));
 	}
 
 	zfree(ipc_voucher_zone, iv);
@@ -323,7 +334,7 @@ iv_dealloc(ipc_voucher_t iv, boolean_t unhash)
  *	Purpose:
  *		Find the voucher's value index for a given key_index
  *	Conditions:
- *		Vouchers are immutable, so no locking required to do
+ *		Vouchers are permanent, so no locking required to do
  *		a lookup.
  */
 static inline iv_index_t
@@ -353,19 +364,7 @@ unsafe_convert_port_to_voucher(
 	ipc_port_t      port)
 {
 	if (IP_VALID(port)) {
-		/* vouchers never labeled (they get transformed before use) */
-		if (ip_is_kolabeled(port)) {
-			return (uintptr_t)IV_NULL;
-		}
-
-		/*
-		 * No need to lock because we have a reference on the
-		 * port, and if it is a true voucher port, that reference
-		 * keeps the voucher bound to the port (and active).
-		 */
-		if (ip_kotype(port) == IKOT_VOUCHER) {
-			return (uintptr_t)port->ip_kobject;
-		}
+		return (uintptr_t)ipc_kobject_get_stable(port, IKOT_VOUCHER);
 	}
 	return (uintptr_t)IV_NULL;
 }
@@ -373,8 +372,7 @@ unsafe_convert_port_to_voucher(
 static ipc_voucher_t
 ip_get_voucher(ipc_port_t port)
 {
-	ipc_voucher_t voucher = (ipc_voucher_t)ip_get_kobject(port);
-	require_ip_active(port);
+	ipc_voucher_t voucher = ipc_kobject_get_stable(port, IKOT_VOUCHER);
 	voucher_require(voucher);
 	return voucher;
 }
@@ -430,7 +428,7 @@ convert_port_name_to_voucher(
 		}
 
 		iv = convert_port_to_voucher(port);
-		ip_unlock(port);
+		ip_mq_unlock(port);
 		return iv;
 	}
 	return IV_NULL;
@@ -456,16 +454,14 @@ ipc_voucher_release(ipc_voucher_t voucher)
 }
 
 /*
- * Routine:	ipc_voucher_notify
+ * Routine:	ipc_voucher_no_senders
  * Purpose:
  *	Called whenever the Mach port system detects no-senders
  *	on the voucher port.
  */
-void
-ipc_voucher_notify(mach_msg_header_t *msg)
+static void
+ipc_voucher_no_senders(ipc_port_t port, __unused mach_port_mscount_t mscount)
 {
-	mach_no_senders_notification_t *notification = (void *)msg;
-	ipc_port_t port = notification->not_header.msgh_remote_port;
 	ipc_voucher_t voucher = ip_get_voucher(port);
 
 	assert(IKOT_VOUCHER == ip_kotype(port));
@@ -488,11 +484,11 @@ convert_voucher_to_port(ipc_voucher_t voucher)
 	assert(os_ref_get_count(&voucher->iv_refs) > 0);
 
 	/*
-	 * make a send right and donate our reference for ipc_voucher_notify
+	 * make a send right and donate our reference for ipc_voucher_no_senders
 	 * if this is the first send right
 	 */
 	if (!ipc_kobject_make_send_lazy_alloc_port(&voucher->iv_port,
-	    (ipc_kobject_t)voucher, IKOT_VOUCHER, false, 0)) {
+	    (ipc_kobject_t)voucher, IKOT_VOUCHER, IPC_KOBJECT_ALLOC_NONE, 0)) {
 		ipc_voucher_release(voucher);
 	}
 	return voucher->iv_port;
@@ -540,7 +536,7 @@ ivac_alloc(iv_index_t key_index)
 	ivac->ivac_port = IP_NULL;
 
 	/* start with just the inline table */
-	table = (ivac_entry_t) kalloc(IVAC_ENTRIES_MIN * sizeof(ivac_entry));
+	table = kalloc_type(struct ivac_entry_s, IVAC_ENTRIES_MIN, Z_WAITOK | Z_ZERO);
 	ivac->ivac_table = table;
 	ivac->ivac_table_size = IVAC_ENTRIES_MIN;
 	ivac->ivac_init_table_size = IVAC_ENTRIES_MIN;
@@ -599,10 +595,8 @@ ivac_dealloc(ipc_voucher_attr_control_t ivac)
 	 * is gone.  We can just discard it now.
 	 */
 	if (IP_VALID(port)) {
-		require_ip_active(port);
 		assert(port->ip_srights == 0);
-
-		ipc_port_dealloc_kernel(port);
+		ipc_kobject_dealloc_port(port, 0, IKOT_VOUCHER_ATTR_CONTROL);
 	}
 
 	/*
@@ -613,11 +607,11 @@ ivac_dealloc(ipc_voucher_attr_control_t ivac)
 #ifdef MACH_DEBUG
 	for (i = 0; i < ivac->ivac_table_size; i++) {
 		if (ivac->ivac_table[i].ivace_refs != 0) {
-			panic("deallocing a resource manager with live refs to its attr values\n");
+			panic("deallocing a resource manager with live refs to its attr values");
 		}
 	}
 #endif
-	kfree(ivac->ivac_table, ivac->ivac_table_size * sizeof(*ivac->ivac_table));
+	kfree_type(struct ivac_entry_s, ivac->ivac_init_table_size, ivac->ivac_table);
 	ivac_lock_destroy(ivac);
 	zfree(ipc_voucher_attr_control_zone, ivac);
 }
@@ -647,45 +641,30 @@ ipc_voucher_attr_control_t
 convert_port_to_voucher_attr_control(
 	ipc_port_t      port)
 {
+	ipc_voucher_attr_control_t ivac = IVAC_NULL;
+
 	if (IP_VALID(port)) {
-		ipc_voucher_attr_control_t ivac = (ipc_voucher_attr_control_t) ip_get_kobject(port);
-
-		/*
-		 * No need to lock because we have a reference on the
-		 * port, and if it is a true voucher control port,
-		 * that reference keeps the voucher bound to the port
-		 * (and active).
-		 */
-		if (ip_kotype(port) != IKOT_VOUCHER_ATTR_CONTROL) {
-			return IVAC_NULL;
-		}
-		require_ip_active(port);
-
+		ivac = ipc_kobject_get_stable(port, IKOT_VOUCHER_ATTR_CONTROL);
+	}
+	if (ivac != IVAC_NULL) {
 		zone_require(ipc_voucher_attr_control_zone, ivac);
 		ivac_reference(ivac);
-		return ivac;
 	}
 	return IVAC_NULL;
 }
 
 /*
- * Routine:	ipc_voucher_notify
+ * Routine:	ipc_voucher_attr_control_no_senders
  * Purpose:
  *	Called whenever the Mach port system detects no-senders
  *	on the voucher attr control port.
  */
-void
-ipc_voucher_attr_control_notify(mach_msg_header_t *msg)
+static void
+ipc_voucher_attr_control_no_senders(ipc_port_t port, __unused mach_port_mscount_t mscount)
 {
-	mach_no_senders_notification_t *notification = (void *)msg;
-	ipc_port_t port = notification->not_header.msgh_remote_port;
 	ipc_voucher_attr_control_t ivac;
 
-	require_ip_active(port);
-	assert(IKOT_VOUCHER_ATTR_CONTROL == ip_kotype(port));
-
-	/* release the reference donated by convert_voucher_attr_control_to_port */
-	ivac = (ipc_voucher_attr_control_t)ip_get_kobject(port);
+	ivac = ipc_kobject_get_stable(port, IKOT_VOUCHER_ATTR_CONTROL);
 	ivac_release(ivac);
 }
 
@@ -703,10 +682,11 @@ convert_voucher_attr_control_to_port(ipc_voucher_attr_control_t control)
 
 	/*
 	 * make a send right and donate our reference for
-	 * ipc_voucher_attr_control_notify if this is the first send right
+	 * ipc_voucher_attr_control_no_senders if this is the first send right
 	 */
 	if (!ipc_kobject_make_send_lazy_alloc_port(&control->ivac_port,
-	    (ipc_kobject_t)control, IKOT_VOUCHER_ATTR_CONTROL, false, 0)) {
+	    (ipc_kobject_t)control, IKOT_VOUCHER_ATTR_CONTROL,
+	    IPC_KOBJECT_ALLOC_NONE, 0)) {
 		ivac_release(control);
 	}
 	return control->ivac_port;
@@ -738,8 +718,7 @@ ivace_lookup_values(
 	 * Get the entry and then the linked values.
 	 */
 	ivac_lock(ivac);
-	assert(value_index < ivac->ivac_table_size);
-	ivace = &ivac->ivac_table[value_index];
+	ivace = ivace_lookup(ivac, value_index);
 
 	/*
 	 * TODO: support chained values (for effective vouchers).
@@ -748,6 +727,18 @@ ivace_lookup_values(
 	values[0] = ivace->ivace_value;
 	ivac_unlock(ivac);
 	*count = 1;
+}
+
+/*
+ * Lookup the entry at the given index into the table
+ */
+static inline ivac_entry_t
+ivace_lookup(ipc_voucher_attr_control_t ivac, iv_index_t index)
+{
+	if (index >= ivac->ivac_table_size) {
+		panic("index >= ivac->ivac_table_size");
+	}
+	return &ivac->ivac_table[index];
 }
 
 /*
@@ -783,9 +774,9 @@ ivac_grow_table(ipc_voucher_attr_control_t ivac)
 	assert(new_size > old_size);
 	assert(new_size < IVAC_ENTRIES_MAX);
 
-	new_table = kalloc(sizeof(ivac_entry) * new_size);
+	new_table = kalloc_type(struct ivac_entry_s, new_size, Z_WAITOK | Z_ZERO);
 	if (!new_table) {
-		panic("Failed to grow ivac table to size %d\n", new_size);
+		panic("Failed to grow ivac table to size %d", new_size);
 		return;
 	}
 
@@ -813,7 +804,7 @@ ivac_grow_table(ipc_voucher_attr_control_t ivac)
 
 	if (old_table) {
 		ivac_unlock(ivac);
-		kfree(old_table, old_size * sizeof(ivac_entry));
+		kfree_type(struct ivac_entry_s, old_size, old_table);
 		ivac_lock(ivac);
 	}
 }
@@ -841,8 +832,7 @@ ivace_reference_by_index(
 	assert(IVAC_NULL != ivac);
 
 	ivac_lock(ivac);
-	assert(val_index < ivac->ivac_table_size);
-	ivace = &ivac->ivac_table[val_index];
+	ivace = ivace_lookup(ivac, val_index);
 
 	assert(0xdeadc0dedeadc0de != ivace->ivace_value);
 	assert(0 < ivace->ivace_refs);
@@ -872,6 +862,7 @@ ivace_reference_by_value(
 {
 	ivac_entry_t ivace = IVACE_NULL;
 	iv_index_t hash_index;
+	iv_index_t *index_p;
 	iv_index_t index;
 
 	if (IVAC_NULL == ivac) {
@@ -881,10 +872,10 @@ ivace_reference_by_value(
 	ivac_lock(ivac);
 restart:
 	hash_index = IV_HASH_VAL(ivac->ivac_init_table_size, value);
-	index = ivac->ivac_table[hash_index].ivace_index;
+	index_p = &ivace_lookup(ivac, hash_index)->ivace_index;
+	index = *index_p;
 	while (index != IV_HASH_END) {
-		assert(index < ivac->ivac_table_size);
-		ivace = &ivac->ivac_table[index];
+		ivace = ivace_lookup(ivac, index);
 		assert(!ivace->ivace_free);
 
 		if (ivace->ivace_value == value) {
@@ -917,7 +908,7 @@ restart:
 	}
 
 	/* take the entry off the freelist */
-	ivace = &ivac->ivac_table[index];
+	ivace = ivace_lookup(ivac, index);
 	ivac->ivac_freelist = ivace->ivace_next;
 
 	/* initialize the new entry */
@@ -928,8 +919,8 @@ restart:
 	ivace->ivace_persist = (flag & MACH_VOUCHER_ATTR_VALUE_FLAGS_PERSIST) ? TRUE : FALSE;
 
 	/* insert the new entry in the proper hash chain */
-	ivace->ivace_next = ivac->ivac_table[hash_index].ivace_index;
-	ivac->ivac_table[hash_index].ivace_index = index;
+	ivace->ivace_next = *index_p;
+	*index_p = index;
 	ivac_unlock(ivac);
 
 	/* donated passed in ivac reference to new entry */
@@ -956,6 +947,7 @@ ivace_release(
 	mach_voucher_attr_key_t key;
 	iv_index_t hash_index;
 	ivac_entry_t ivace;
+	ivac_entry_t ivace_tmp;
 	kern_return_t kr;
 
 	/* cant release the default value */
@@ -968,8 +960,7 @@ ivace_release(
 	assert(IVAM_NULL != ivam);
 
 	ivac_lock(ivac);
-	assert(value_index < ivac->ivac_table_size);
-	ivace = &ivac->ivac_table[value_index];
+	ivace = ivace_lookup(ivac, value_index);
 
 	assert(0 < ivace->ivace_refs);
 
@@ -1012,7 +1003,7 @@ redrive:
 
 	/* recalculate entry address as table may have changed */
 	ivac_lock(ivac);
-	ivace = &ivac->ivac_table[value_index];
+	ivace = ivace_lookup(ivac, value_index);
 	assert(value == ivace->ivace_value);
 
 	/*
@@ -1058,16 +1049,19 @@ redrive:
 	 * at this entry, and remove it from the the list there.
 	 */
 	hash_index = iv_hash_value(key_index, value);
-	if (ivac->ivac_table[hash_index].ivace_index == value_index) {
-		ivac->ivac_table[hash_index].ivace_index = ivace->ivace_next;
+	ivace_tmp = ivace_lookup(ivac, hash_index);
+	if (ivace_tmp->ivace_index == value_index) {
+		ivace_tmp->ivace_index = ivace->ivace_next;
 	} else {
-		hash_index = ivac->ivac_table[hash_index].ivace_index;
+		hash_index = ivace_tmp->ivace_index;
+		ivace_tmp = ivace_lookup(ivac, hash_index);
 		assert(IV_HASH_END != hash_index);
-		while (ivac->ivac_table[hash_index].ivace_next != value_index) {
-			hash_index = ivac->ivac_table[hash_index].ivace_next;
+		while (ivace_tmp->ivace_next != value_index) {
+			hash_index = ivace_tmp->ivace_next;
 			assert(IV_HASH_END != hash_index);
+			ivace_tmp = ivace_lookup(ivac, hash_index);
 		}
-		ivac->ivac_table[hash_index].ivace_next = ivace->ivace_next;
+		ivace_tmp->ivace_next = ivace->ivace_next;
 	}
 
 	/* Put this entry on the freelist */
@@ -1916,7 +1910,7 @@ ipc_register_well_known_mach_voucher_attr_manager(
 	/* insert the default value into the hash (in case it is returned later) */
 	hash_index = iv_hash_value(key_index, default_value);
 	assert(IV_HASH_END == new_control->ivac_table[hash_index].ivace_index);
-	new_control->ivac_table[hash_index].ivace_index = IV_UNUSED_VALINDEX;
+	ivace_lookup(new_control, hash_index)->ivace_index = IV_UNUSED_VALINDEX;
 
 	ivgt_unlock();
 
@@ -2216,7 +2210,7 @@ mach_voucher_debug_info(
 	}
 
 	voucher = convert_port_to_voucher(port);
-	ip_unlock(port);
+	ip_mq_unlock(port);
 
 	if (voucher) {
 		kr = mach_voucher_extract_all_attr_recipes(voucher, recipes, in_out_size);
@@ -2606,18 +2600,21 @@ ipc_get_pthpriority_from_kmsg_voucher(
 	ipc_kmsg_t kmsg,
 	ipc_pthread_priority_value_t *canonicalize_priority_value)
 {
+	mach_port_t voucher_port;
 	ipc_voucher_t pthread_priority_voucher;
 	mach_voucher_attr_raw_recipe_size_t content_size =
 	    sizeof(mach_voucher_attr_recipe_data_t) + sizeof(ipc_pthread_priority_value_t);
 	uint8_t content_data[content_size];
 	mach_voucher_attr_recipe_t cur_content;
+
 	kern_return_t kr = KERN_SUCCESS;
 
-	if (!IP_VALID(kmsg->ikm_voucher)) {
+	voucher_port = ipc_kmsg_get_voucher_port(kmsg);
+	if (!IP_VALID(voucher_port)) {
 		return KERN_FAILURE;
 	}
 
-	pthread_priority_voucher = ip_get_voucher(kmsg->ikm_voucher);
+	pthread_priority_voucher = ip_get_voucher(voucher_port);
 	kr = mach_voucher_extract_attr_recipe(pthread_priority_voucher,
 	    MACH_VOUCHER_ATTR_KEY_PTHPRIORITY,
 	    content_data,
@@ -2638,6 +2635,38 @@ ipc_get_pthpriority_from_kmsg_voucher(
 	return KERN_SUCCESS;
 }
 
+/*
+ *	Routine:	ipc_voucher_get_default_voucher
+ *	Purpose:
+ *		Creates process default voucher and returns it.
+ */
+ipc_voucher_t
+ipc_voucher_get_default_voucher(void)
+{
+	uint8_t recipes[sizeof(ipc_voucher_attr_recipe_data_t)];
+	ipc_voucher_attr_recipe_t recipe;
+	ipc_voucher_attr_raw_recipe_array_size_t recipe_size = sizeof(ipc_voucher_attr_recipe_data_t);
+	kern_return_t kr;
+	ipc_voucher_t recv_voucher = IPC_VOUCHER_NULL;
+	task_t task = current_task();
+
+	if (task == kernel_task || task->bank_context == NULL) {
+		return IPC_VOUCHER_NULL;
+	}
+
+	recipe = (ipc_voucher_attr_recipe_t)(void *)&recipes[0];
+	recipe->key = MACH_VOUCHER_ATTR_KEY_BANK;
+	recipe->command = MACH_VOUCHER_ATTR_BANK_CREATE;
+	recipe->previous_voucher = IPC_VOUCHER_NULL;
+	recipe->content_size = 0;
+
+	kr = ipc_create_mach_voucher(recipes,
+	    recipe_size,
+	    &recv_voucher);
+	assert(KERN_SUCCESS == kr);
+
+	return recv_voucher;
+}
 
 /*
  *	Routine:	ipc_voucher_send_preprocessing
@@ -2654,15 +2683,17 @@ ipc_voucher_send_preprocessing(ipc_kmsg_t kmsg)
 	    sizeof(ipc_voucher_attr_recipe_data_t);
 	ipc_voucher_t pre_processed_voucher;
 	ipc_voucher_t voucher_to_send;
+	ipc_port_t voucher_port;
 	kern_return_t kr;
 	int need_preprocessing = FALSE;
 
-	if (!IP_VALID(kmsg->ikm_voucher) || current_task() == kernel_task) {
+	voucher_port = ipc_kmsg_get_voucher_port(kmsg);
+	if (!IP_VALID(voucher_port) || current_task() == kernel_task) {
 		return;
 	}
 
 	/* setup recipe for preprocessing of all the attributes. */
-	pre_processed_voucher = ip_get_voucher(kmsg->ikm_voucher);
+	pre_processed_voucher = ip_get_voucher(voucher_port);
 
 	kr = ipc_voucher_prepare_processing_recipe(pre_processed_voucher,
 	    (mach_voucher_attr_raw_recipe_array_t)recipes,
@@ -2672,14 +2703,16 @@ ipc_voucher_send_preprocessing(ipc_kmsg_t kmsg)
 	assert(KERN_SUCCESS == kr);
 	/*
 	 * Only do send preprocessing if the voucher needs any pre processing.
+	 * Replace the voucher port in the kmsg, but preserve the original type.
 	 */
 	if (need_preprocessing) {
 		kr = ipc_create_mach_voucher(recipes,
 		    recipe_size,
 		    &voucher_to_send);
 		assert(KERN_SUCCESS == kr);
-		ipc_port_release_send(kmsg->ikm_voucher);
-		kmsg->ikm_voucher = convert_voucher_to_port(voucher_to_send);
+		ipc_port_release_send(voucher_port);
+		voucher_port = convert_voucher_to_port(voucher_to_send);
+		ipc_kmsg_set_voucher_port(kmsg, voucher_port, kmsg->ikm_voucher_type);
 	}
 }
 
@@ -2702,16 +2735,18 @@ ipc_voucher_receive_postprocessing(
 	    sizeof(ipc_voucher_attr_recipe_data_t);
 	ipc_voucher_t recv_voucher;
 	ipc_voucher_t sent_voucher;
+	ipc_port_t voucher_port;
 	kern_return_t kr;
 	int need_postprocessing = FALSE;
 
-	if ((option & MACH_RCV_VOUCHER) == 0 || (!IP_VALID(kmsg->ikm_voucher)) ||
+	voucher_port = ipc_kmsg_get_voucher_port(kmsg);
+	if ((option & MACH_RCV_VOUCHER) == 0 || (!IP_VALID(voucher_port)) ||
 	    current_task() == kernel_task) {
 		return;
 	}
 
 	/* setup recipe for auto redeem of all the attributes. */
-	sent_voucher = ip_get_voucher(kmsg->ikm_voucher);
+	sent_voucher = ip_get_voucher(voucher_port);
 
 	kr = ipc_voucher_prepare_processing_recipe(sent_voucher,
 	    (mach_voucher_attr_raw_recipe_array_t)recipes,
@@ -2730,8 +2765,9 @@ ipc_voucher_receive_postprocessing(
 		assert(KERN_SUCCESS == kr);
 		/* swap the voucher port (and set voucher bits in case it didn't already exist) */
 		kmsg->ikm_header->msgh_bits |= (MACH_MSG_TYPE_MOVE_SEND << 16);
-		ipc_port_release_send(kmsg->ikm_voucher);
-		kmsg->ikm_voucher = convert_voucher_to_port(recv_voucher);
+		ipc_port_release_send(voucher_port);
+		voucher_port = convert_voucher_to_port(recv_voucher);
+		ipc_kmsg_set_voucher_port(kmsg, voucher_port, MACH_MSG_TYPE_MOVE_SEND);
 	}
 }
 
@@ -2876,7 +2912,7 @@ struct user_data_value_element {
 	iv_index_t                              e_sum;
 	iv_index_t                              e_hash;
 	queue_chain_t                           e_hash_link;
-	uint8_t                                 e_data[];
+	uint8_t                                *e_data;
 };
 
 typedef struct user_data_value_element *user_data_element_t;
@@ -2967,6 +3003,13 @@ ipc_voucher_attr_control_t test_control;
 #define USER_DATA_ASSERT_KEY(key) assert(MACH_VOUCHER_ATTR_KEY_TEST == (key))
 #endif
 
+static void
+user_data_value_element_free(user_data_element_t elem)
+{
+	kfree_data(elem->e_data, elem->e_size);
+	kfree_type(struct user_data_value_element, elem);
+}
+
 /*
  *	Routine:	user_data_release_value
  *	Purpose:
@@ -2996,7 +3039,7 @@ user_data_release_value(
 	if (sync == elem->e_made) {
 		queue_remove(&user_data_bucket[hash], elem, user_data_element_t, e_hash_link);
 		user_data_unlock();
-		kfree(elem, sizeof(*elem) + elem->e_size);
+		user_data_value_element_free(elem);
 		return KERN_SUCCESS;
 	}
 	assert(sync < elem->e_made);
@@ -3076,7 +3119,7 @@ retry:
 			user_data_unlock();
 
 			if (NULL != alloc) {
-				kfree(alloc, sizeof(*alloc) + content_size);
+				user_data_value_element_free(alloc);
 			}
 
 			return elem;
@@ -3086,11 +3129,13 @@ retry:
 	if (NULL == alloc) {
 		user_data_unlock();
 
-		alloc = (user_data_element_t)kalloc(sizeof(*alloc) + content_size);
+		alloc = kalloc_type(struct user_data_value_element,
+		    Z_WAITOK | Z_NOFAIL);
 		alloc->e_made = 1;
 		alloc->e_size = content_size;
 		alloc->e_sum = sum;
 		alloc->e_hash = hash;
+		alloc->e_data = kalloc_data(content_size, Z_WAITOK | Z_NOFAIL);
 		memcpy(alloc->e_data, content, content_size);
 		goto retry;
 	}
@@ -3129,9 +3174,13 @@ user_data_get_value(
 		/* redeem of previous values is the value */
 		if (0 < prev_value_count) {
 			elem = (user_data_element_t)prev_values[0];
+
+			user_data_lock();
 			assert(0 < elem->e_made);
 			elem->e_made++;
-			*out_value = prev_values[0];
+			user_data_unlock();
+
+			*out_value = (mach_voucher_attr_value_handle_t)elem;
 			return KERN_SUCCESS;
 		}
 

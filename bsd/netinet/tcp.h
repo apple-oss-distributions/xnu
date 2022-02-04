@@ -293,7 +293,9 @@ struct tcp_notify_ack_complete {
 #define MPTCP_SVCTYPE_INTERACTIVE       1
 #define MPTCP_SVCTYPE_AGGREGATE         2
 #define MPTCP_SVCTYPE_TARGET_BASED      3
-#define MPTCP_SVCTYPE_MAX               4
+#define MPTCP_SVCTYPE_PURE_HANDOVER     4
+#define MPTCP_SVCTYPE_MAX               5
+
 /*
  * Specify minimum time in seconds before which an established
  * TCP connection will not be dropped when there is no response from the
@@ -307,6 +309,9 @@ struct tcp_notify_ack_complete {
 #define MPTCP_FORCE_ENABLE              0x217
 #define TCP_FASTOPEN_FORCE_ENABLE       0x218
 #define MPTCP_EXPECTED_PROGRESS_TARGET  0x219
+#define MPTCP_FORCE_VERSION             0x21a
+
+/* When adding new socket-options, you need to make sure MPTCP supports these as well! */
 
 /*
  * The TCP_INFO socket option is a private API and is subject to change
@@ -322,10 +327,15 @@ struct tcp_notify_ack_complete {
 #define TCPI_FLAG_STREAMING_ON  0x02    /* Streaming detection on */
 
 struct tcp_conn_status {
-	unsigned int    probe_activated : 1;
-	unsigned int    write_probe_failed : 1;
-	unsigned int    read_probe_failed : 1;
-	unsigned int    conn_probe_failed : 1;
+	union {
+		struct {
+			unsigned int    probe_activated : 1;
+			unsigned int    write_probe_failed : 1;
+			unsigned int    read_probe_failed : 1;
+			unsigned int    conn_probe_failed : 1;
+		};
+		uint32_t        pad_field;
+	};
 };
 
 /*
@@ -345,7 +355,7 @@ struct tcp_info {
 	u_int32_t       tcpi_rcv_mss;           /* Max segment size for receive. */
 
 	u_int32_t       tcpi_rttcur;            /* Most recent value of RTT */
-	u_int32_t       tcpi_srtt;                      /* Smoothed RTT */
+	u_int32_t       tcpi_srtt;              /* Sender's Smoothed RTT */
 	u_int32_t       tcpi_rttvar;            /* RTT variance */
 	u_int32_t       tcpi_rttbest;           /* Best RTT we've seen */
 
@@ -436,6 +446,9 @@ struct tcp_info {
 	u_int32_t       tcpi_flowhash;          /* Unique id for the connection */
 
 	u_int64_t       tcpi_txretransmitpackets __attribute__((aligned(8)));
+
+#define TCPINFO_HAS_RCV_RTT 1
+	u_int32_t       tcpi_rcv_srtt;          /* Receiver's Smoothed RTT */
 };
 
 struct tcp_measure_bw_burst {

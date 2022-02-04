@@ -14,6 +14,10 @@ DATAFILES = \
 	tcp_fsm.h tcp_seq.h tcp_timer.h tcp_var.h \
 	tcpip.h udp.h udp_var.h
 
+# netinet.modulemap additionally includes in6.h from ../netinet6.
+MODULEMAPFILES = \
+	netinet.modulemap
+
 KERNELFILES = \
 	kpi_ipfilter.h in_arp.h
 
@@ -51,6 +55,8 @@ PRIVATE_KERNELFILES = ${KERNELFILES} \
 
 INSTALL_MI_LIST	= ${DATAFILES}
 
+INSTALL_MODULEMAP_MI_LIST = ${MODULEMAPFILES}
+
 INSTALL_DRIVERKIT_MI_LIST = ${DRIVERKIT_DATAFILES}
 
 INSTALL_MI_DIR = netinet
@@ -59,7 +65,7 @@ EXPORT_MI_LIST = ${DATAFILES} ${KERNELFILES}
 
 EXPORT_MI_DIR = ${INSTALL_MI_DIR}
 
-INSTALL_MI_LCL_LIST = ${PRIVATE_DATAFILES}
+INSTALL_SF_MI_LCL_LIST = $(sort ${DATAFILES} ${PRIVATE_DATAFILES})
 INSTALL_KF_MI_LCL_LIST = $(sort ${DATAFILES} ${PRIVATE_DATAFILES} ${PRIVATE_KERNELFILES})
 
 include $(MakeInc_rule)

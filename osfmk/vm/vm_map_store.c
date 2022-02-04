@@ -72,7 +72,7 @@ vm_map_store_lookup_entry(
 	if (vm_map_store_has_RB_support( &map->hdr )) {
 		return vm_map_store_lookup_entry_rb( map, address, entry );
 	} else {
-		panic("VM map lookups need RB tree support.\n");
+		panic("VM map lookups need RB tree support.");
 		return FALSE; /* For compiler warning.*/
 	}
 #endif
@@ -145,7 +145,7 @@ _vm_map_store_entry_link( struct vm_map_header * mapHdr, vm_map_entry_t after_wh
 		entry->vme_end_original = entry->vme_end;
 	}
 	backtrace(&entry->vme_insertion_bt[0],
-	    (sizeof(entry->vme_insertion_bt) / sizeof(uintptr_t)), NULL);
+	    (sizeof(entry->vme_insertion_bt) / sizeof(uintptr_t)), NULL, NULL);
 #endif
 }
 
@@ -179,11 +179,7 @@ vm_map_store_entry_link(
 		}
 #endif
 	}
-#if PMAP_CS
-	(void) vm_map_entry_cs_associate(map, entry, vmk_flags);
-#else /* PMAP_CS */
 	(void) vmk_flags;
-#endif /* PMAP_CS */
 }
 
 void

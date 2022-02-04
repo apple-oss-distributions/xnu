@@ -36,6 +36,8 @@
 #ifndef _MACH_ARM_VM_PARAM_H_
 #define _MACH_ARM_VM_PARAM_H_
 
+#if defined (__arm__) || defined (__arm64__)
+
 #if defined(KERNEL_PRIVATE) && __ARM_16K_PG__
 #include <arm64/proc_reg.h>
 #endif
@@ -176,6 +178,10 @@ extern int PAGE_SHIFT_CONST;
 #define MACH_VM_MIN_ADDRESS     ((mach_vm_offset_t) MACH_VM_MIN_ADDRESS_RAW)
 #define MACH_VM_MAX_ADDRESS     ((mach_vm_offset_t) MACH_VM_MAX_ADDRESS_RAW)
 
+#define MACH_VM_MIN_GPU_CARVEOUT_ADDRESS_RAW 0x0000001000000000ULL
+#define MACH_VM_MAX_GPU_CARVEOUT_ADDRESS_RAW 0x0000007000000000ULL
+#define MACH_VM_MIN_GPU_CARVEOUT_ADDRESS     ((mach_vm_offset_t) MACH_VM_MIN_GPU_CARVEOUT_ADDRESS_RAW)
+#define MACH_VM_MAX_GPU_CARVEOUT_ADDRESS     ((mach_vm_offset_t) MACH_VM_MAX_GPU_CARVEOUT_ADDRESS_RAW)
 
 #else /* defined(__arm64__) */
 #error architecture not supported
@@ -252,16 +258,39 @@ extern int PAGE_SHIFT_CONST;
 
 #define VM_MIN_KERNEL_AND_KEXT_ADDRESS  VM_MIN_KERNEL_ADDRESS
 
+#if defined (__arm64__)
+/* Top-Byte-Ignore */
+#define TBI_MASK           0xff00000000000000ULL
+#define tbi_clear(addr)    ((typeof (addr))(((uintptr_t)(addr)) &~ (TBI_MASK)))
+#define tbi_fill(addr)     ((typeof (addr))(((uintptr_t)(addr)) | (TBI_MASK)))
+#endif /* __arm64__ */
+
+#if CONFIG_KERNEL_TBI
+/*
+ * 'strip' in PAC sense, therefore replacing the stripped bits sign extending
+ * the sign bit.
+ */
+#define VM_KERNEL_TBI_FILL(_v)  (tbi_fill(_v))
+#define VM_KERNEL_TBI_CLEAR(_v) (tbi_clear(_v))
+#define VM_KERNEL_STRIP_TBI(_v) (VM_KERNEL_TBI_FILL(_v))
+#else /* CONFIG_KERNEL_TBI */
+#define VM_KERNEL_TBI_FILL(_v)  (_v)
+#define VM_KERNEL_TBI_CLEAR(_v) (_v)
+#define VM_KERNEL_STRIP_TBI(_v) (_v)
+#endif /* CONFIG_KERNE_TBI */
+
 #if __has_feature(ptrauth_calls)
 #include <ptrauth.h>
-#define VM_KERNEL_STRIP_PTR(_v) (ptrauth_strip((void *)(uintptr_t)(_v), ptrauth_key_asia))
+#define VM_KERNEL_STRIP_PAC(_v) (ptrauth_strip((void *)(uintptr_t)(_v), ptrauth_key_asia))
 #else /* !ptrauth_calls */
-#define VM_KERNEL_STRIP_PTR(_v) (_v)
+#define VM_KERNEL_STRIP_PAC(_v) (_v)
 #endif /* ptrauth_calls */
 
+#define VM_KERNEL_STRIP_PTR(_va)        ((VM_KERNEL_STRIP_TBI(VM_KERNEL_STRIP_PAC(_va))))
+#define VM_KERNEL_STRIP_UPTR(_va)       ((vm_address_t)VM_KERNEL_STRIP_PTR((uintptr_t)(_va)))
 #define VM_KERNEL_ADDRESS(_va)  \
-	((((vm_address_t)VM_KERNEL_STRIP_PTR(_va)) >= VM_MIN_KERNEL_ADDRESS) && \
-	 (((vm_address_t)VM_KERNEL_STRIP_PTR(_va)) <= VM_MAX_KERNEL_ADDRESS))
+	((VM_KERNEL_STRIP_UPTR(_va) >= VM_MIN_KERNEL_ADDRESS) && \
+	 (VM_KERNEL_STRIP_UPTR(_va) <= VM_MAX_KERNEL_ADDRESS))
 
 #ifdef  MACH_KERNEL_PRIVATE
 /*
@@ -280,6 +309,10 @@ extern unsigned long            gVirtBase, gPhysBase, gPhysSize;
 #include <stdint.h>
 extern uint64_t                 gDramBase, gDramSize;
 #define is_dram_addr(addr)      (((uint64_t)(addr) - gDramBase) < gDramSize)
+
+#endif /* MACH_KERNEL_PRIVATE */
+
+#ifdef  XNU_KERNEL_PRIVATE
 
 #if KASAN
 /* Increase the stack sizes to account for the redzones that get added to every
@@ -301,7 +334,7 @@ extern uint64_t                 gDramBase, gDramSize;
 #define KERNEL_STACK_MULTIPLIER (1)
 #endif /* KERNEL_STACK_MULTIPLIER */
 # define KERNEL_STACK_SIZE      (4*4096*KERNEL_STACK_MULTIPLIER)
-#endif
+#endif /* XNU_KERNEL_PRIVATE */
 
 #define INTSTACK_SIZE           (4*4096)
 
@@ -335,5 +368,7 @@ extern uint64_t                 gDramBase, gDramSize;
 #endif  /* !__ASSEMBLER__ */
 
 #define SWI_SYSCALL     0x80
+
+#endif /* defined (__arm__) || defined (__arm64__) */
 
 #endif  /* _MACH_ARM_VM_PARAM_H_ */

@@ -109,6 +109,10 @@ int mptcp_developer_mode = 0;
 SYSCTL_INT(_net_inet_mptcp, OID_AUTO, allow_aggregate, CTLFLAG_RW | CTLFLAG_LOCKED,
     &mptcp_developer_mode, 0, "Allow the Multipath aggregation mode");
 
+int mptcp_no_first_party = 0;
+SYSCTL_INT(_net_inet_mptcp, OID_AUTO, no_first_party, CTLFLAG_RW | CTLFLAG_LOCKED,
+    &mptcp_no_first_party, 0, "Do not do first-party app exemptions");
+
 static unsigned long mptcp_expected_progress_headstart = 5000;
 SYSCTL_ULONG(_net_inet_mptcp, OID_AUTO, expected_progress_headstart, CTLFLAG_RW | CTLFLAG_LOCKED,
     &mptcp_expected_progress_headstart, "Headstart to give MPTCP before meeting the progress deadline");
@@ -221,6 +225,10 @@ static int
 mptcp_entitlement_check(struct socket *mp_so, uint8_t svctype)
 {
 	struct mptses *mpte = mpsotompte(mp_so);
+
+	if (mptcp_no_first_party) {
+		return 0;
+	}
 
 	/* First, check for mptcp_extended without delegation */
 	if (soopt_cred_check(mp_so, PRIV_NET_RESTRICTED_MULTIPATH_EXTENDED, TRUE, FALSE) == 0) {
@@ -341,6 +349,12 @@ mptcp_usr_connectx(struct socket *mp_so, struct sockaddr *src,
 
 	if ((mp_so->so_state & (SS_ISCONNECTED | SS_ISCONNECTING)) == 0) {
 		memcpy(&mpte->mpte_u_dst, dst, dst->sa_len);
+
+		if (dst->sa_family == AF_INET) {
+			memcpy(&mpte->mpte_sub_dst_v4, dst, dst->sa_len);
+		} else {
+			memcpy(&mpte->mpte_sub_dst_v6, dst, dst->sa_len);
+		}
 	}
 
 	if (src) {
@@ -887,7 +901,7 @@ mptcp_disconnect(struct mptses *mpte)
 	    struct socket *, mp_so, struct mptcb *, mp_tp);
 
 	/* if we're not detached, go thru socket state checks */
-	if (!(mp_so->so_flags & SOF_PCBCLEARING)) {
+	if (!(mp_so->so_flags & SOF_PCBCLEARING) && !(mp_so->so_flags & SOF_DEFUNCT)) {
 		if (!(mp_so->so_state & (SS_ISCONNECTED |
 		    SS_ISCONNECTING))) {
 			error = ENOTCONN;
@@ -953,7 +967,7 @@ mptcp_finish_usrclosed(struct mptses *mpte)
 	struct mptcb *mp_tp = mpte->mpte_mptcb;
 	struct socket *mp_so = mptetoso(mpte);
 
-	if (mp_tp->mpt_state == MPTCPS_CLOSED) {
+	if (mp_tp->mpt_state == MPTCPS_CLOSED || mp_tp->mpt_state == MPTCPS_TERMINATE) {
 		mpte = mptcp_close(mpte, mp_tp);
 	} else if (mp_tp->mpt_state >= MPTCPS_FIN_WAIT_2) {
 		soisdisconnected(mp_so);
@@ -982,7 +996,8 @@ mptcp_usrclosed(struct mptses *mpte)
 	mptcp_close_fsm(mp_tp, MPCE_CLOSE);
 
 	/* Not everything has been acknowledged - don't close the subflows! */
-	if (mp_tp->mpt_sndnxt + 1 != mp_tp->mpt_sndmax) {
+	if (mp_tp->mpt_state != MPTCPS_TERMINATE &&
+	    mp_tp->mpt_sndnxt + 1 != mp_tp->mpt_sndmax) {
 		return mpte;
 	}
 
@@ -1417,6 +1432,10 @@ mptcp_usr_socheckopt(struct socket *mp_so, struct sockopt *sopt)
 	case SO_NOWAKEFROMSLEEP:
 	case SO_NOAPNFALLBK:
 	case SO_MARK_CELLFALLBACK:
+	case SO_MARK_KNOWN_TRACKER:
+	case SO_MARK_KNOWN_TRACKER_NON_APP_INITIATED:
+	case SO_MARK_APPROVED_APP_DOMAIN:
+	case SO_FALLBACK_MODE:
 		/*
 		 * Tell the caller that these options are to be processed;
 		 * these will also be recorded later by mptcp_setopt().
@@ -1579,6 +1598,10 @@ mptcp_setopt(struct mptses *mpte, struct sockopt *sopt)
 		case SO_NOWAKEFROMSLEEP:
 		case SO_NOAPNFALLBK:
 		case SO_MARK_CELLFALLBACK:
+		case SO_MARK_KNOWN_TRACKER:
+		case SO_MARK_KNOWN_TRACKER_NON_APP_INITIATED:
+		case SO_MARK_APPROVED_APP_DOMAIN:
+		case SO_FALLBACK_MODE:
 			/* record it */
 			break;
 		case SO_FLUSH:
@@ -1631,6 +1654,12 @@ mptcp_setopt(struct mptses *mpte, struct sockopt *sopt)
 
 			goto out;
 		case SO_NECP_ATTRIBUTES:
+			error = necp_set_socket_attributes(&mpsotomppcb(mp_so)->inp_necp_attributes, sopt);
+			if (error) {
+				goto err_out;
+			}
+
+			goto out;
 #endif /* NECP */
 		default:
 			/* nothing to do; just return */
@@ -1648,6 +1677,7 @@ mptcp_setopt(struct mptses *mpte, struct sockopt *sopt)
 		case PERSIST_TIMEOUT:
 		case TCP_ADAPTIVE_READ_TIMEOUT:
 		case TCP_ADAPTIVE_WRITE_TIMEOUT:
+		case TCP_FASTOPEN_FORCE_ENABLE:
 			/* eligible; record it */
 			break;
 		case TCP_NOTSENT_LOWAT:
@@ -1729,6 +1759,27 @@ mptcp_setopt(struct mptses *mpte, struct sockopt *sopt)
 				mpte->mpte_flags |= MPTE_FORCE_ENABLE;
 			} else {
 				mpte->mpte_flags &= ~MPTE_FORCE_ENABLE;
+			}
+
+			goto out;
+		case MPTCP_FORCE_VERSION:
+			error = sooptcopyin(sopt, &optval, sizeof(optval),
+			    sizeof(optval));
+			if (error) {
+				goto err_out;
+			}
+
+			if (optval != 0 && optval != 1) {
+				error = EINVAL;
+				goto err_out;
+			}
+
+			if (optval == 0) {
+				mpte->mpte_flags |= MPTE_FORCE_V0;
+				mpte->mpte_flags &= ~MPTE_FORCE_V1;
+			} else {
+				mpte->mpte_flags |= MPTE_FORCE_V1;
+				mpte->mpte_flags &= ~MPTE_FORCE_V0;
 			}
 
 			goto out;
@@ -1925,6 +1976,7 @@ mptcp_fill_info(struct mptses *mpte, struct tcp_info *ti)
 		ti->tcpi_srtt = acttp->t_srtt >> TCP_RTT_SHIFT;
 		ti->tcpi_rttvar = acttp->t_rttvar >> TCP_RTTVAR_SHIFT;
 		ti->tcpi_rttbest = acttp->t_rttbest >> TCP_RTT_SHIFT;
+		ti->tcpi_rcv_srtt = acttp->rcv_srtt >> TCP_RTT_SHIFT;
 	}
 	/* tcpi_snd_ssthresh */
 	/* tcpi_snd_cwnd */
@@ -2011,6 +2063,7 @@ mptcp_getopt(struct mptses *mpte, struct sockopt *sopt)
 	case TCP_RXT_CONNDROPTIME:
 	case TCP_ADAPTIVE_READ_TIMEOUT:
 	case TCP_ADAPTIVE_WRITE_TIMEOUT:
+	case TCP_FASTOPEN_FORCE_ENABLE:
 	{
 		struct mptopt *mpo = mptcp_sopt_find(mpte, sopt);
 
@@ -2045,6 +2098,15 @@ mptcp_getopt(struct mptses *mpte, struct sockopt *sopt)
 		break;
 	case MPTCP_FORCE_ENABLE:
 		optval = !!(mpte->mpte_flags & MPTE_FORCE_ENABLE);
+		break;
+	case MPTCP_FORCE_VERSION:
+		if (mpte->mpte_flags & MPTE_FORCE_V0) {
+			optval = 0;
+		} else if (mpte->mpte_flags & MPTE_FORCE_V1) {
+			optval = 1;
+		} else {
+			optval = -1;
+		}
 		break;
 	case MPTCP_EXPECTED_PROGRESS_TARGET:
 		error = sooptcopyout(sopt, &mpte->mpte_time_target, sizeof(mpte->mpte_time_target));
@@ -2178,6 +2240,14 @@ mptcp_sopt2str(int level, int optname)
 			return "SO_NOAPNFALLBK";
 		case SO_MARK_CELLFALLBACK:
 			return "SO_CELLFALLBACK";
+		case SO_FALLBACK_MODE:
+			return "SO_FALLBACK_MODE";
+		case SO_MARK_KNOWN_TRACKER:
+			return "SO_MARK_KNOWN_TRACKER";
+		case SO_MARK_KNOWN_TRACKER_NON_APP_INITIATED:
+			return "SO_MARK_KNOWN_TRACKER_NON_APP_INITIATED";
+		case SO_MARK_APPROVED_APP_DOMAIN:
+			return "SO_MARK_APPROVED_APP_DOMAIN";
 		case SO_DELEGATED:
 			return "SO_DELEGATED";
 		case SO_DELEGATED_UUID:
@@ -2213,12 +2283,16 @@ mptcp_sopt2str(int level, int optname)
 			return "ADAPTIVE_READ_TIMEOUT";
 		case TCP_ADAPTIVE_WRITE_TIMEOUT:
 			return "ADAPTIVE_WRITE_TIMEOUT";
+		case TCP_FASTOPEN_FORCE_ENABLE:
+			return "TCP_FASTOPEN_FORCE_ENABLE";
 		case MPTCP_SERVICE_TYPE:
 			return "MPTCP_SERVICE_TYPE";
 		case MPTCP_ALTERNATE_PORT:
 			return "MPTCP_ALTERNATE_PORT";
 		case MPTCP_FORCE_ENABLE:
 			return "MPTCP_FORCE_ENABLE";
+		case MPTCP_FORCE_VERSION:
+			return "MPTCP_FORCE_VERSION";
 		case MPTCP_EXPECTED_PROGRESS_TARGET:
 			return "MPTCP_EXPECTED_PROGRESS_TARGET";
 		}

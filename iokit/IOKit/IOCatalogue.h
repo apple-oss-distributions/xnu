@@ -160,6 +160,11 @@ public:
 	void moduleHasLoaded( const char * name );
 
 /*!
+ *   @function personalityIsBoot
+ */
+	bool personalityIsBoot(OSDictionary * match);
+
+/*!
  *   @function terminateDrivers
  *   @abstract Terminates all instances of a driver which match the contents of the matching dictionary. Does not unload module.
  *   @param matching  A dictionary whose keys and values are used for matching personalities in the database.  For example, a matching dictionary containing a 'IOProviderClass' key with the value 'IOPCIDevice' will cause termination for all instances whose personalities have the key 'IOProviderClass' equal to 'IOPCIDevice'.

@@ -267,20 +267,18 @@ name##_SPLAY(struct name *head, struct type *elm)                       \
 static __inline struct type *                                           \
 name##_SPLAY_SEARCH(struct name *head, struct type *elm)                \
 {                                                                       \
-	struct type *__tmp;                                             \
+	struct type *__tmp = NULL;                                      \
 	int __comp;                                                     \
                                                                         \
 	__tmp = (head)->sph_root;                                       \
 	while ((__tmp != NULL) && ((__comp = (cmp)(elm, __tmp)) != 0)) { \
 	        if (__comp < 0) {                                       \
 	                __tmp = SPLAY_LEFT(__tmp, field);               \
-	        } else if (__comp > 0) {                                \
-	                __tmp = SPLAY_RIGHT(__tmp, field);              \
 	        } else {                                                \
-	               return __tmp;                                    \
+	                __tmp = SPLAY_RIGHT(__tmp, field);              \
 	        }                                                       \
 	}                                                               \
-	return (NULL);                                                  \
+	return __tmp;                                                   \
 }                                                                       \
                                                                         \
 /* Splay with either the minimum or the maximum element \

@@ -43,6 +43,143 @@
 #include <sys/kern_memorystatus.h>
 
 /*
+ * Actual syscall wrappers.
+ */
+extern int __posix_spawn(pid_t * __restrict, const char * __restrict,
+    struct _posix_spawn_args_desc *, char *const argv[__restrict],
+    char *const envp[__restrict]);
+extern int __execve(const char *fname, char * const *argp, char * const *envp);
+
+/*
+ * Function pointers that are NULL in Libsyscall_static, and get populated with
+ * the real implementations in Libsyscall_dynamic from _libkernel_init.c when
+ * os_feature_enabled(Libsystem, posix_spawn_filtering) is on.
+ *
+ * Since launchd cannot read feature flags during process startup (data volume
+ * is not mounted yet), it reads them later and sets these function pointers via
+ * Libsystem and __libkernel_init_after_boot_tasks.
+ *
+ * Usually NULL. Always NULL on customer installs.
+ */
+__attribute__((visibility("hidden")))
+bool (*posix_spawn_with_filter)(pid_t *pid, const char *fname,
+    char * const *argp, char * const *envp, struct _posix_spawn_args_desc *adp,
+    int *ret);
+
+__attribute__((visibility("hidden")))
+int (*execve_with_filter)(const char *fname, char * const *argp,
+    char * const *envp);
+
+__attribute__((visibility("hidden")))
+void
+__posix_spawnattr_init(struct _posix_spawnattr *psattrp)
+{
+	/*
+	 * The default value of this attribute shall be as if no
+	 * flags were set
+	 */
+	psattrp->psa_flags = 0;
+
+	/*
+	 * The default value of this attribute shall be an empty
+	 * signal set
+	 */
+	psattrp->psa_sigdefault = 0;
+
+	/* The default value of this attribute is unspecified */
+	psattrp->psa_sigmask = 0;
+
+	/* The default value of this attribute shall be zero */
+	psattrp->psa_pgroup = 0;     /* doesn't matter */
+
+	/* Default is no binary preferences, i.e. use normal grading */
+	memset(psattrp->psa_binprefs, 0,
+	    sizeof(psattrp->psa_binprefs));
+	memset(psattrp->psa_subcpuprefs, 0xff /* CPU_SUBTYPE_ANY */,
+	    sizeof(psattrp->psa_subcpuprefs));
+
+	/* Default is no port actions to take */
+	psattrp->psa_ports = NULL;
+
+	/*
+	 * The default value of this attribute shall be an no
+	 * process control on resource starvation
+	 */
+	psattrp->psa_pcontrol = 0;
+
+	/*
+	 * Initializing the alignment paddings.
+	 */
+
+	psattrp->short_padding = 0;
+	psattrp->flags_padding = 0;
+
+	/* Default is no new apptype requested */
+	psattrp->psa_apptype = POSIX_SPAWN_PROCESS_TYPE_DEFAULT;
+
+	/* Jetsam related */
+	psattrp->psa_jetsam_flags = 0;
+	psattrp->psa_priority = -1;
+	psattrp->psa_memlimit_active = -1;
+	psattrp->psa_memlimit_inactive = -1;
+
+	/* Default is no thread limit */
+	psattrp->psa_thread_limit = 0;
+
+	/* Default is no CPU usage monitor active. */
+	psattrp->psa_cpumonitor_percent = 0;
+	psattrp->psa_cpumonitor_interval = 0;
+
+	/* Default is no MAC policy extensions. */
+	psattrp->psa_mac_extensions = NULL;
+
+	/* Default is to inherit parent's coalition(s) */
+	psattrp->psa_coalition_info = NULL;
+
+	psattrp->psa_persona_info = NULL;
+
+	psattrp->psa_posix_cred_info = NULL;
+
+	/*
+	 * old coalition field
+	 * For backwards compatibility reasons, we set this to 1
+	 * which is the first valid coalition id. This will allow
+	 * newer user space code to properly spawn processes on
+	 * older kernels
+	 * (they will just all end up in the same coalition).
+	 */
+	psattrp->psa_reserved = 1;
+
+	/* Default is no new clamp */
+	psattrp->psa_qos_clamp = POSIX_SPAWN_PROC_CLAMP_NONE;
+
+	/* Default is no change to role */
+	psattrp->psa_darwin_role = POSIX_SPAWN_DARWIN_ROLE_NONE;
+
+	psattrp->psa_max_addr = 0;
+
+	psattrp->psa_no_smt = false;
+	psattrp->psa_tecs = false;
+
+	/* Default is no subsystem root path */
+	psattrp->psa_subsystem_root_path = NULL;
+
+	/* Default is no platform given */
+	psattrp->psa_platform = 0;
+
+	/* Default is no option */
+	psattrp->psa_options = PSA_OPTION_NONE;
+
+	/* Default is no port limit */
+	psattrp->psa_port_soft_limit = 0;
+	psattrp->psa_port_hard_limit = 0;
+
+	/* Default is no file descriptor limit */
+	psattrp->psa_filedesc_soft_limit = 0;
+	psattrp->psa_filedesc_hard_limit = 0;
+}
+
+/*
  * posix_spawnattr_init
  *
  * Description:	Initialize a spawn attributes object attr with default values
@@ -76,101 +213,7 @@ posix_spawnattr_init(posix_spawnattr_t *attr)
 	if ((*psattrp = (_posix_spawnattr_t)malloc(sizeof(struct _posix_spawnattr))) == NULL) {
 		err = ENOMEM;
 	} else {
-		/*
-		 * The default value of this attribute shall be as if no
-		 * flags were set
-		 */
-		(*psattrp)->psa_flags = 0;
-
-		/*
-		 * The default value of this attribute shall be an empty
-		 * signal set
-		 */
-		(*psattrp)->psa_sigdefault = 0;
-
-		/* The default value of this attribute is unspecified */
-		(*psattrp)->psa_sigmask = 0;
-
-		/* The default value of this attribute shall be zero */
-		(*psattrp)->psa_pgroup = 0;     /* doesn't matter */
-
-		/* Default is no binary preferences, i.e. use normal grading */
-		memset((*psattrp)->psa_binprefs, 0,
-		    sizeof((*psattrp)->psa_binprefs));
-		memset((*psattrp)->psa_subcpuprefs, 0xff /* CPU_SUBTYPE_ANY */,
-		    sizeof((*psattrp)->psa_subcpuprefs));
-
-		/* Default is no port actions to take */
-		(*psattrp)->psa_ports = NULL;
-
-		/*
-		 * The default value of this attribute shall be an no
-		 * process control on resource starvation
-		 */
-		(*psattrp)->psa_pcontrol = 0;
-
-		/*
-		 * Initializing the alignment paddings.
-		 */
-
-		(*psattrp)->short_padding = 0;
-		(*psattrp)->flags_padding = 0;
-
-		/* Default is no new apptype requested */
-		(*psattrp)->psa_apptype = POSIX_SPAWN_PROCESS_TYPE_DEFAULT;
-
-		/* Jetsam related */
-		(*psattrp)->psa_jetsam_flags = 0;
-		(*psattrp)->psa_priority = -1;
-		(*psattrp)->psa_memlimit_active = -1;
-		(*psattrp)->psa_memlimit_inactive = -1;
-
-		/* Default is no thread limit */
-		(*psattrp)->psa_thread_limit = 0;
-
-		/* Default is no CPU usage monitor active. */
-		(*psattrp)->psa_cpumonitor_percent = 0;
-		(*psattrp)->psa_cpumonitor_interval = 0;
-
-		/* Default is no MAC policy extensions. */
-		(*psattrp)->psa_mac_extensions = NULL;
-
-		/* Default is to inherit parent's coalition(s) */
-		(*psattrp)->psa_coalition_info = NULL;
-
-		(*psattrp)->psa_persona_info = NULL;
-
-		(*psattrp)->psa_posix_cred_info = NULL;
-
-		/*
-		 * old coalition field
-		 * For backwards compatibility reasons, we set this to 1
-		 * which is the first valid coalition id. This will allow
-		 * newer user space code to properly spawn processes on
-		 * older kernels
-		 * (they will just all end up in the same coalition).
-		 */
-		(*psattrp)->psa_reserved = 1;
-
-		/* Default is no new clamp */
-		(*psattrp)->psa_qos_clamp = POSIX_SPAWN_PROC_CLAMP_NONE;
-
-		/* Default is no change to role */
-		(*psattrp)->psa_darwin_role = POSIX_SPAWN_DARWIN_ROLE_NONE;
-
-		(*psattrp)->psa_max_addr = 0;
-
-		(*psattrp)->psa_no_smt = false;
-		(*psattrp)->psa_tecs = false;
-
-		/* Default is no subsystem root path */
-		(*psattrp)->psa_subsystem_root_path = NULL;
-
-		/* Default is no platform given */
-		(*psattrp)->psa_platform = 0;
-
-		/* Default is no option */
-		(*psattrp)->psa_options = PSA_OPTION_NONE;
+		__posix_spawnattr_init(*psattrp);
 	}
 
 	return err;
@@ -1101,6 +1144,26 @@ posix_spawnattr_disable_ptr_auth_a_keys_np(posix_spawnattr_t *attr, uint32_t fla
 	psattr = *(_posix_spawnattr_t *)attr;
 
 	psattr->psa_options |= PSA_OPTION_PLUGIN_HOST_DISABLE_A_KEYS;
+	(void)flags;
+	return 0;
+}
+
+/*
+ * posix_spawnattr_set_alt_rosetta_np
+ * Description: Set flag to use alternative Rosetta runtime
+ */
+int
+posix_spawnattr_set_alt_rosetta_np(posix_spawnattr_t *attr, uint32_t flags)
+{
+	_posix_spawnattr_t psattr;
+
+	if (attr == NULL || *attr == NULL) {
+		return EINVAL;
+	}
+
+	psattr = *(_posix_spawnattr_t *)attr;
+
+	psattr->psa_options |= PSA_OPTION_ALT_ROSETTA;
 	(void)flags;
 	return 0;
 }
@@ -2548,6 +2611,42 @@ posix_spawnattr_set_login_np(const posix_spawnattr_t *attr, const char *login)
 	return 0;
 }
 
+int
+posix_spawnattr_set_portlimits_ext(posix_spawnattr_t * __restrict attr,
+    uint32_t port_soft_limit, uint32_t port_hard_limit)
+{
+	_posix_spawnattr_t psattr;
+
+	if (attr == NULL || *attr == NULL) {
+		return EINVAL;
+	}
+
+	psattr = *(_posix_spawnattr_t *)attr;
+
+	psattr->psa_port_soft_limit = port_soft_limit;
+	psattr->psa_port_hard_limit = port_hard_limit;
+
+	return 0;
+}
+
+int
+posix_spawnattr_set_filedesclimit_ext(posix_spawnattr_t * __restrict attr,
+    uint32_t filedesc_soft_limit, uint32_t filedesc_hard_limit)
+{
+	_posix_spawnattr_t psattr;
+
+	if (attr == NULL || *attr == NULL) {
+		return EINVAL;
+	}
+
+	psattr = *(_posix_spawnattr_t *)attr;
+
+	psattr->psa_filedesc_soft_limit = filedesc_soft_limit;
+	psattr->psa_filedesc_hard_limit = filedesc_hard_limit;
+
+	return 0;
+}
+
 /*
  * posix_spawnattr_set_jetsam_ttr_np
  *
@@ -2647,10 +2746,6 @@ posix_spawnattr_set_jetsam_ttr_np(const posix_spawnattr_t * __restrict attr, uin
  *		call is expected to either be a 0 or an errno, rather than a
  *		0 or a -1, with the 'errno' variable being set.
  */
-extern int __posix_spawn(pid_t * __restrict, const char * __restrict,
-    struct _posix_spawn_args_desc *,
-    char *const argv[__restrict], char *const envp[__restrict]);
-
 int
 posix_spawn(pid_t * __restrict pid, const char * __restrict path,
     const posix_spawn_file_actions_t *file_actions,
@@ -2658,7 +2753,9 @@ posix_spawn(pid_t * __restrict pid, const char * __restrict path,
     char *const argv[__restrict], char *const envp[__restrict])
 {
 	int saveerrno = errno;
-	int ret;
+	int ret = 0;
+	struct _posix_spawn_args_desc ad;
+	struct _posix_spawn_args_desc *adp = NULL;
 	/*
 	 * Only do extra work if we have file actions or attributes to push
 	 * down.  We use a descriptor to push this information down, since we
@@ -2673,9 +2770,8 @@ posix_spawn(pid_t * __restrict pid, const char * __restrict path,
 	 *		the data in user space.
 	 */
 	if ((file_actions != NULL && (*file_actions != NULL) && (*(_posix_spawn_file_actions_t *)file_actions)->psfa_act_count > 0) || attrp != NULL) {
-		struct _posix_spawn_args_desc   ad;
-
 		memset(&ad, 0, sizeof(ad));
+		adp = &ad;
 		if (attrp != NULL && *attrp != NULL) {
 			_posix_spawnattr_t psattr = *(_posix_spawnattr_t *)attrp;
 			ad.attr_size = sizeof(struct _posix_spawnattr);
@@ -2733,10 +2829,11 @@ posix_spawn(pid_t * __restrict pid, const char * __restrict path,
 				ad.file_actions = psactsp;
 			}
 		}
+	}
 
-		ret = __posix_spawn(pid, path, &ad, argv, envp);
-	} else {
-		ret = __posix_spawn(pid, path, NULL, argv, envp);
+	if (!posix_spawn_with_filter ||
+	    !posix_spawn_with_filter(pid, path, argv, envp, adp, &ret)) {
+		ret = __posix_spawn(pid, path, adp, argv, envp);
 	}
 
 out:
@@ -2744,5 +2841,18 @@ out:
 		ret = errno;
 	}
 	errno = saveerrno;
+	return ret;
+}
+
+int
+execve(const char *fname, char * const *argp, char * const *envp)
+{
+	int ret;
+	if (execve_with_filter) {
+		/* Noinline slow path to avoid a large stack frame in the common case */
+		return execve_with_filter(fname, argp, envp);
+	}
+
+	ret = __execve(fname, argp, envp);
 	return ret;
 }

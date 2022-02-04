@@ -27,6 +27,7 @@
  */
 
 #include <kern/monotonic.h>
+#include <kern/perfmon.h>
 #include <machine/machine_routines.h>
 #include <machine/monotonic.h>
 #include <pexpert/pexpert.h>
@@ -60,7 +61,7 @@ static const struct cdevsw mt_cdevsw = {
 /*
  * Written at initialization, read-only thereafter.
  */
-lck_grp_t *mt_lock_grp = NULL;
+LCK_GRP_DECLARE(mt_lock_grp, MT_NODE);
 static int mt_dev_major;
 
 static mt_device_t
@@ -96,9 +97,6 @@ mt_device_assert_inuse(__assert_only mt_device_t dev)
 int
 mt_dev_init(void)
 {
-	mt_lock_grp = lck_grp_alloc_init(MT_NODE, LCK_GRP_ATTR_NULL);
-	assert(mt_lock_grp != NULL);
-
 	mt_dev_major = cdevsw_add(-1 /* allocate a major number */, &mt_cdevsw);
 	if (mt_dev_major < 0) {
 		panic("monotonic: cdevsw_add failed: %d", mt_dev_major);
@@ -123,7 +121,7 @@ mt_dev_init(void)
 			__builtin_unreachable();
 		}
 
-		lck_mtx_init(&mt_devices[i].mtd_lock, mt_lock_grp, LCK_ATTR_NULL);
+		lck_mtx_init(&mt_devices[i].mtd_lock, &mt_lock_grp, LCK_ATTR_NULL);
 	}
 
 	return 0;
@@ -136,10 +134,16 @@ mt_cdev_open(dev_t devnum, __unused int flags, __unused int devtype,
 	int error = 0;
 
 	mt_device_t dev = mt_get_device(devnum);
+	if (!perfmon_acquire(perfmon_upmu, "monotonic")) {
+		return EBUSY;
+	}
 	mt_device_lock(dev);
 	if (dev->mtd_inuse) {
 		error = EBUSY;
+	} else if (!mt_acquire_counters()) {
+		error = EBUSY;
 	} else {
+		dev->mtd_reset();
 		dev->mtd_inuse = true;
 	}
 	mt_device_unlock(dev);
@@ -153,10 +157,13 @@ mt_cdev_close(dev_t devnum, __unused int flags, __unused int devtype,
 {
 	mt_device_t dev = mt_get_device(devnum);
 
+	perfmon_release(perfmon_upmu, "monotonic");
+
 	mt_device_lock(dev);
 	mt_device_assert_inuse(dev);
 	dev->mtd_inuse = false;
 	dev->mtd_reset();
+	mt_release_counters();
 	mt_device_unlock(dev);
 
 	return 0;

@@ -1,0 +1,460 @@
+module Darwin.Mach [system] {
+  header "mach/mach.h"
+  export *
+
+  // declares string_t which sometimes conflicts with other declarations
+  explicit module audit_triggers_types {
+    header "mach/audit_triggers_types.h"
+    export *
+  }
+
+  module boolean {
+    header "mach/boolean.h"
+    export *
+  }
+
+  module bootstrap {
+    header "mach/bootstrap.h"
+    export *
+  }
+
+  module clock {
+    header "mach/clock.h"
+    export *
+  }
+
+  module clock_priv {
+    header "mach/clock_priv.h"
+    export *
+  }
+
+  module clock_reply {
+    header "mach/clock_reply.h"
+    export *
+  }
+
+  module clock_types {
+    header "mach/clock_types.h"
+    export *
+  }
+
+  module dyld_kernel {
+    header "mach/dyld_kernel.h"
+    export *
+  }
+
+  module error {
+    header "mach/error.h"
+    export *
+  }
+
+  module exc {
+    header "mach/exc.h"
+    export *
+  }
+
+  module exception {
+    header "mach/exception.h"
+    export *
+  }
+
+  module exception_types {
+    header "mach/exception_types.h"
+    export *
+  }
+
+  module host_info {
+    header "mach/host_info.h"
+    export *
+  }
+
+  module host_notify {
+    header "mach/host_notify.h"
+    export *
+  }
+
+  module host_priv {
+    header "mach/host_priv.h"
+    export *
+  }
+
+  module host_reboot {
+    header "mach/host_reboot.h"
+    export *
+  }
+
+  module host_security {
+    header "mach/host_security.h"
+    export *
+  }
+
+  module host_special_ports {
+    header "mach/host_special_ports.h"
+    export *
+  }
+
+  #ifndef PLATFORM_MacOSX
+  module hv {
+    header "arm64/hv/hv_kern_types.h"
+    export *
+  }
+
+  #endif
+  module kern_return {
+    header "mach/kern_return.h"
+    export *
+  }
+
+  module kmod {
+    header "mach/kmod.h"
+    export *
+  }
+
+  module lock_set {
+    header "mach/lock_set.h"
+    export *
+  }
+
+  module mach_error {
+    header "mach/mach_error.h"
+    export *
+  }
+
+  module mach_host {
+    header "mach/mach_host.h"
+    export *
+  }
+
+  module mach_init {
+    header "mach/mach_init.h"
+    export *
+  }
+
+  module mach_interface {
+    header "mach/mach_interface.h"
+    export *
+  }
+
+  module mach_param {
+    header "mach/mach_param.h"
+    export *
+  }
+
+  module mach_port {
+    header "mach/mach_port.h"
+    export *
+  }
+
+  module mach_right {
+    header "mach/mach_right.h"
+    export *
+  }
+
+  module mach_syscalls {
+    header "mach/mach_syscalls.h"
+    export *
+  }
+
+  module mach_time {
+    header "mach/mach_time.h"
+    export *
+  }
+
+  module mach_traps {
+    header "mach/mach_traps.h"
+    export *
+  }
+
+  module mach_types {
+    header "mach/mach_types.h"
+    export *
+  }
+
+  #ifdef XNU_KERNEL_PRIVATE
+  // usr/include/mach/mach_vm.h is public on macOS, but an #error
+  // on the other platforms. Its actual contents are installed
+  // to usr/local/include/mach/mach_vm.h on other platforms.
+  #endif
+  #ifdef PLATFORM_MacOSX
+  module mach_vm {
+    header "mach/mach_vm.h"
+    export *
+  }
+
+  #endif
+  module mach_voucher {
+    header "mach/mach_voucher.h"
+    export *
+  }
+
+  module mach_voucher_types {
+    header "mach/mach_voucher_types.h"
+    export *
+  }
+
+  module memory_entry {
+    header "mach/memory_entry.h"
+    export *
+  }
+
+  module memory_object_types {
+    header "mach/memory_object_types.h"
+    export *
+  }
+
+  module message {
+    header "mach/message.h"
+    export *
+  }
+
+  module mig {
+    header "mach/mig.h"
+    export *
+  }
+
+  module mig_errors {
+    header "mach/mig_errors.h"
+    export *
+  }
+
+  module mig_strncpy_zerofill_support {
+    header "mach/mig_strncpy_zerofill_support.h"
+    export *
+  }
+
+  module mig_voucher_support {
+    header "mach/mig_voucher_support.h"
+    export *
+  }
+
+  module ndr {
+    header "mach/ndr.h"
+    export *
+  }
+
+  module notify {
+    header "mach/notify.h"
+    export *
+  }
+
+  module policy {
+    header "mach/policy.h"
+    export *
+  }
+
+  module port {
+    header "mach/port.h"
+    export *
+  }
+
+  module port_obj {
+    header "mach/port_obj.h"
+    export *
+  }
+
+  module processor {
+    header "mach/processor.h"
+    export *
+  }
+
+  module processor_info {
+    header "mach/processor_info.h"
+    export *
+  }
+
+  module processor_set {
+    header "mach/processor_set.h"
+    export *
+  }
+
+  module rpc {
+    header "mach/rpc.h"
+    export *
+  }
+
+  #ifdef XNU_KERNEL_PRIVATE
+  // The PLATFORM_MacOSX headers are in the public SDK for macOS,
+  // but mastered out of the public SDK for the other OSes.
+  #endif
+  #ifdef PLATFORM_MacOSX
+  module sdt {
+    header "mach/sdt.h"
+    header "sys/sdt.h"
+    export *
+  }
+
+  #endif
+  module semaphore {
+    header "mach/semaphore.h"
+    export *
+  }
+
+  #ifdef PLATFORM_MacOSX
+  module shared_region {
+    header "mach/shared_region.h"
+    export *
+  }
+
+  #endif
+  module std_types {
+    header "mach/std_types.h"
+    export *
+  }
+
+  module sync {
+    header "mach/sync.h"
+    export *
+  }
+
+  module sync_policy {
+    header "mach/sync_policy.h"
+    export *
+  }
+  #ifdef XNU_KERNEL_PRIVATE
+  // usr/include/mach/syscall_sw.h is mastered out of all SDKs.
+  #endif
+
+  module task {
+    header "mach/task.h"
+    export *
+  }
+
+  module task_info {
+    header "mach/task_info.h"
+    export *
+  }
+
+  module task_inspect {
+    header "mach/task_inspect.h"
+    export *
+  }
+
+  module task_policy {
+    header "mach/task_policy.h"
+    export *
+  }
+
+  module task_special_ports {
+    header "mach/task_special_ports.h"
+    export *
+  }
+
+  module thread_act {
+    header "mach/thread_act.h"
+    export *
+  }
+
+  module thread_info {
+    header "mach/thread_info.h"
+    export *
+  }
+
+  module thread_policy {
+    header "mach/thread_policy.h"
+    export *
+  }
+
+  module thread_special_ports {
+    header "mach/thread_special_ports.h"
+    export *
+  }
+
+  module thread_state {
+    header "mach/thread_state.h"
+    export *
+  }
+
+  module thread_status {
+    header "mach/thread_status.h"
+    export *
+  }
+
+  module thread_switch {
+    header "mach/thread_switch.h"
+    export *
+  }
+
+  module time_value {
+    header "mach/time_value.h"
+    export *
+  }
+
+  module vm_attributes {
+    header "mach/vm_attributes.h"
+    export *
+  }
+
+  module vm_behavior {
+    header "mach/vm_behavior.h"
+    export *
+  }
+
+  module vm_inherit {
+    header "mach/vm_inherit.h"
+    export *
+  }
+
+  module vm_map {
+    header "mach/vm_map.h"
+    export *
+  }
+
+  module vm_page_size {
+    header "mach/vm_page_size.h"
+    export *
+  }
+
+  module vm_param {
+    header "mach/vm_param.h"
+    export *
+  }
+
+  module vm_prot {
+    header "mach/vm_prot.h"
+    export *
+  }
+
+  module vm_purgable {
+    header "mach/vm_purgable.h"
+    export *
+  }
+
+  module vm_region {
+    header "mach/vm_region.h"
+    export *
+  }
+
+  module vm_statistics {
+    header "mach/vm_statistics.h"
+    export *
+  }
+
+  module vm_sync {
+    header "mach/vm_sync.h"
+    export *
+  }
+
+  module vm_task {
+    header "mach/vm_task.h"
+    export *
+  }
+
+  module vm_types {
+    header "mach/vm_types.h"
+    export *
+  }
+
+  #ifdef XNU_KERNEL_PRIVATE
+  // mach_eventlink.h doesn't compile because it depends on
+  // mach_eventlink_types.h which is private.
+  #endif
+  exclude header "mach/mach_eventlink.h"
+
+  #ifdef PLATFORM_MacOSX
+  exclude header "mach/shared_memory_server.h" // deprecated
+
+  #endif
+  extern module machine "mach_machine.modulemap"
+
+  extern module debug "mach_debug.modulemap"
+}

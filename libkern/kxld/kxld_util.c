@@ -156,10 +156,8 @@ kxld_calloc(size_t size)
 	void * ptr = NULL;
 
 #if KERNEL
-	ptr = kalloc(size);
-	if (ptr) {
-		bzero(ptr, size);
-	}
+	ptr = kheap_alloc_tag(KHEAP_DEFAULT, size, Z_WAITOK | Z_ZERO,
+	    VM_KERN_MEMORY_OSKEXT);
 #else
 	ptr = calloc(1, size);
 #endif
@@ -180,7 +178,8 @@ kxld_alloc(size_t size)
 	void * ptr = NULL;
 
 #if KERNEL
-	ptr = kalloc(size);
+	ptr = kheap_alloc_tag(KHEAP_DEFAULT, size, Z_WAITOK | Z_ZERO,
+	    VM_KERN_MEMORY_OSKEXT);
 #else
 	ptr = malloc(size);
 #endif
@@ -201,25 +200,12 @@ void *
 kxld_page_alloc_untracked(size_t size)
 {
 	void * ptr = NULL;
-#if KERNEL
-	kern_return_t rval = 0;
-	vm_offset_t addr = 0;
-#endif /* KERNEL */
 
 	size = round_page(size);
 
 #if KERNEL
-	if (size < KALLOC_MAX) {
-		ptr = kalloc(size);
-	} else {
-		rval = kmem_alloc(kernel_map, &addr, size, VM_KERN_MEMORY_OSKEXT);
-		if (!rval) {
-			ptr = (void *) addr;
-		}
-	}
-	if (ptr) {
-		bzero(ptr, size);
-	}
+	ptr = kheap_alloc_tag(KHEAP_DEFAULT, size, Z_WAITOK | Z_ZERO,
+	    VM_KERN_MEMORY_OSKEXT);
 #else /* !KERNEL */
 	ptr = calloc(1, size);
 #endif /* KERNEL */
@@ -290,13 +276,7 @@ void
 kxld_page_free_untracked(void *ptr, size_t size __unused)
 {
 #if KERNEL
-	size = round_page(size);
-
-	if (size < KALLOC_MAX) {
-		kfree(ptr, size);
-	} else {
-		kmem_free(kernel_map, (vm_offset_t) ptr, size);
-	}
+	kfree(ptr, round_page(size));
 #else /* !KERNEL */
 	free(ptr);
 #endif /* KERNEL */

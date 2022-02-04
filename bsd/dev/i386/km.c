@@ -50,9 +50,8 @@
 
 extern int hz;
 
-extern void cnputcusr(char);
-extern void cnputsusr(char *, int);
-extern int  cngetc(void);
+extern void console_write_char(char);
+extern void console_write(char *, int);
 
 void    kminit(void);
 void    cons_cinput(char ch);
@@ -261,7 +260,7 @@ fallthrough:
 /*
  * kmputc
  *
- * Output a character to the serial console driver via cnputcusr(),
+ * Output a character to the serial console driver via console_write_char(),
  * which is exported by that driver.
  *
  * Locks:       Assumes tp in the calling tty driver code is locked on
@@ -277,9 +276,9 @@ kmputc(__unused dev_t dev, char c)
 	if (!disableConsoleOutput && initialized) {
 		/* OCRNL */
 		if (c == '\n') {
-			cnputcusr('\r');
+			console_write_char('\r');
 		}
-		cnputcusr(c);
+		console_write_char(c);
 	}
 
 	return 0;
@@ -371,7 +370,7 @@ kmoutput(struct tty *tp)
 		}
 
 		if (cc > 1) {
-			cnputsusr((char *)buf, cc);
+			console_write((char *)buf, cc);
 		} else {
 			kmputc(tp->t_dev, *buf);
 		}

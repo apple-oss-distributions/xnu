@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+        <key>CFBundleIdentifier</key>
+        <string>com.apple.jumbo_va_spaces_28530648</string>
+        <key>CFBundleName</key>
+        <string>XNU test for jumbo va spaces radar://28530648</string>
+</dict>
+</plist>
+

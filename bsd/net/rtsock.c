@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2020 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -459,7 +459,7 @@ route_output(struct mbuf *m, struct socket *so)
 			}
 		}
 		ifnet_head_done();
-		if (intcoproc_scope == ifscope && current_proc()->p_pid != 0) {
+		if (intcoproc_scope == ifscope && proc_getpid(current_proc()) != 0) {
 			senderr(EINVAL);
 		}
 	}
@@ -485,6 +485,14 @@ route_output(struct mbuf *m, struct socket *so)
 	    info.rti_info[RTAX_GATEWAY]->sa_family == AF_INET) {
 		sin_set_ifscope(info.rti_info[RTAX_GATEWAY], IFSCOPE_NONE);
 	}
+	if (info.rti_info[RTAX_DST]->sa_family == AF_INET6 &&
+	    IN6_IS_SCOPE_EMBED(&SIN6(info.rti_info[RTAX_DST])->sin6_addr) &&
+	    !IN6_IS_ADDR_UNICAST_BASED_MULTICAST(&SIN6(info.rti_info[RTAX_DST])->sin6_addr) &&
+	    SIN6(info.rti_info[RTAX_DST])->sin6_scope_id == 0) {
+		SIN6(info.rti_info[RTAX_DST])->sin6_scope_id = ntohs(SIN6(info.rti_info[RTAX_DST])->sin6_addr.s6_addr16[1]);
+		SIN6(info.rti_info[RTAX_DST])->sin6_addr.s6_addr16[1] = 0;
+	}
+
 	switch (rtm->rtm_type) {
 	case RTM_ADD:
 		if (info.rti_info[RTAX_GATEWAY] == NULL) {
@@ -1096,6 +1104,9 @@ rt_xaddrs(caddr_t cp, caddr_t cplim, struct rt_addrinfo *rtinfo)
 			rtinfo->rti_info[i] = &sa_zero;
 			return 0; /* should be EINVAL but for compat */
 		}
+		if (sa->sa_len < offsetof(struct sockaddr, sa_data)) {
+			return EINVAL;
+		}
 		/* accept it */
 		rtinfo->rti_info[i] = sa;
 		ADVANCE32(cp, sa);
@@ -1290,9 +1301,9 @@ again:
 		if (rw->w_req != NULL) {
 			if (rw->w_tmemsize < len) {
 				if (rw->w_tmem != NULL) {
-					FREE(rw->w_tmem, M_RTABLE);
+					kfree_data(rw->w_tmem, rw->w_tmemsize);
 				}
-				rw->w_tmem = _MALLOC(len, M_RTABLE, M_ZERO | M_WAITOK);
+				rw->w_tmem = (caddr_t) kalloc_data(len, Z_ZERO | Z_WAITOK);
 				if (rw->w_tmem != NULL) {
 					rw->w_tmemsize = len;
 				}
@@ -1742,7 +1753,7 @@ sysctl_iflist(int af, struct walkarg *w)
 	struct  rt_addrinfo info;
 	int     len = 0, error = 0;
 	int     pass = 0;
-	int     total_len = 0, current_len = 0;
+	int     total_len = 0, total_buffer_len = 0, current_len = 0;
 	char    *total_buffer = NULL, *cp = NULL;
 	kauth_cred_t cred;
 
@@ -1870,10 +1881,10 @@ sysctl_iflist(int af, struct walkarg *w)
 				total_len = 1;
 			}
 			total_len += total_len >> 3;
-			total_buffer = _MALLOC(total_len, M_RTABLE,
-			    M_ZERO | M_WAITOK);
+			total_buffer_len = total_len;
+			total_buffer = (char *) kalloc_data(total_len, Z_ZERO | Z_WAITOK);
 			if (total_buffer == NULL) {
-				printf("%s: _MALLOC(%d) failed\n", __func__,
+				printf("%s: kalloc_data(%d) failed\n", __func__,
 				    total_len);
 				error = ENOBUFS;
 				break;
@@ -1889,7 +1900,7 @@ sysctl_iflist(int af, struct walkarg *w)
 	}
 
 	if (total_buffer != NULL) {
-		_FREE(total_buffer, M_RTABLE);
+		kfree_data(total_buffer, total_buffer_len);
 	}
 
 	kauth_cred_unref(&cred);
@@ -1904,7 +1915,7 @@ sysctl_iflist2(int af, struct walkarg *w)
 	struct  rt_addrinfo info;
 	int     len = 0, error = 0;
 	int     pass = 0;
-	int     total_len = 0, current_len = 0;
+	int     total_len = 0, total_buffer_len = 0, current_len = 0;
 	char    *total_buffer = NULL, *cp = NULL;
 	kauth_cred_t cred;
 
@@ -1953,10 +1964,10 @@ sysctl_iflist2(int af, struct walkarg *w)
 				ifm->ifm_addrs = info.rti_addrs;
 				ifm->ifm_flags = (u_short)ifp->if_flags;
 				ifm->ifm_index = ifp->if_index;
-				ifm->ifm_snd_len = IFCQ_LEN(&ifp->if_snd);
-				ifm->ifm_snd_maxlen = IFCQ_MAXLEN(&ifp->if_snd);
+				ifm->ifm_snd_len = IFCQ_LEN(ifp->if_snd);
+				ifm->ifm_snd_maxlen = IFCQ_MAXLEN(ifp->if_snd);
 				ifm->ifm_snd_drops =
-				    (int)ifp->if_snd.ifcq_dropcnt.packets;
+				    (int)ifp->if_snd->ifcq_dropcnt.packets;
 				ifm->ifm_timer = ifp->if_timer;
 				if_data_internal_to_if_data64(ifp,
 				    &ifp->if_data, &ifm->ifm_data);
@@ -2098,10 +2109,10 @@ sysctl_iflist2(int af, struct walkarg *w)
 				total_len = 1;
 			}
 			total_len += total_len >> 3;
-			total_buffer = _MALLOC(total_len, M_RTABLE,
-			    M_ZERO | M_WAITOK);
+			total_buffer_len = total_len;
+			total_buffer = (char *) kalloc_data(total_len, Z_ZERO | Z_WAITOK);
 			if (total_buffer == NULL) {
-				printf("%s: _MALLOC(%d) failed\n", __func__,
+				printf("%s: kalloc_data(%d) failed\n", __func__,
 				    total_len);
 				error = ENOBUFS;
 				break;
@@ -2117,7 +2128,7 @@ sysctl_iflist2(int af, struct walkarg *w)
 	}
 
 	if (total_buffer != NULL) {
-		_FREE(total_buffer, M_RTABLE);
+		kfree_data(total_buffer, total_buffer_len);
 	}
 
 	kauth_cred_unref(&cred);
@@ -2203,7 +2214,7 @@ sysctl_rtsock SYSCTL_HANDLER_ARGS
 		break;
 	}
 	if (w.w_tmem != NULL) {
-		FREE(w.w_tmem, M_RTABLE);
+		kfree_data(w.w_tmem, w.w_tmemsize);
 	}
 	return error;
 }
@@ -2218,7 +2229,6 @@ static struct protosw routesw[] = {
 		.pr_flags =             PR_ATOMIC | PR_ADDR,
 		.pr_output =            route_output,
 		.pr_ctlinput =          raw_ctlinput,
-		.pr_init =              raw_init,
 		.pr_usrreqs =           &route_usrreqs,
 	}
 };

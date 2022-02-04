@@ -59,6 +59,7 @@
 #ifndef _NET_IF_LLC_H_
 #define _NET_IF_LLC_H_
 #include <sys/appleapiopts.h>
+#include <sys/types.h>
 
 /*
  * IEEE 802.2 Link Level Control headers, for use in conjunction with

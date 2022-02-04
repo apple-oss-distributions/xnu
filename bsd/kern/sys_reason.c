@@ -35,12 +35,6 @@
 #include <kern/assert.h>
 #include <kern/debug.h>
 
-#if OS_REASON_DEBUG
-#include <pexpert/pexpert.h>
-
-extern int os_reason_debug_disabled;
-#endif
-
 extern int maxproc;
 
 /*
@@ -52,24 +46,8 @@ static ZONE_DECLARE(os_reason_zone, "os reasons",
 
 os_refgrp_decl(static, os_reason_refgrp, "os_reason", NULL);
 
-#define OS_REASON_RESERVE_COUNT 100
-
 static int os_reason_alloc_buffer_internal(os_reason_t cur_reason, uint32_t osr_bufsize,
     zalloc_flags_t flags);
-
-void
-os_reason_init(void)
-{
-	int reasons_allocated = 0;
-
-	/*
-	 * We pre-fill the OS reason zone to reduce the likelihood that
-	 * the jetsam thread and others block when they create an exit
-	 * reason.
-	 */
-	reasons_allocated = zfill(os_reason_zone, OS_REASON_RESERVE_COUNT);
-	assert(reasons_allocated >= OS_REASON_RESERVE_COUNT);
-}
 
 /*
  * Creates a new reason and initializes it with the provided reason
@@ -102,8 +80,7 @@ os_reason_dealloc_buffer(os_reason_t cur_reason)
 	LCK_MTX_ASSERT(&cur_reason->osr_lock, LCK_MTX_ASSERT_OWNED);
 
 	if (cur_reason->osr_kcd_buf != NULL && cur_reason->osr_bufsize != 0) {
-		kheap_free(KHEAP_DATA_BUFFERS, cur_reason->osr_kcd_buf,
-		    cur_reason->osr_bufsize);
+		kfree_data(cur_reason->osr_kcd_buf, cur_reason->osr_bufsize);
 	}
 
 	cur_reason->osr_bufsize = 0;
@@ -172,8 +149,8 @@ os_reason_alloc_buffer_internal(os_reason_t cur_reason, uint32_t osr_bufsize,
 		return 0;
 	}
 
-	cur_reason->osr_kcd_buf = kheap_alloc_tag(KHEAP_DATA_BUFFERS, osr_bufsize,
-	    flags | Z_ZERO, VM_KERN_MEMORY_REASON);
+	cur_reason->osr_kcd_buf = kalloc_data_tag(osr_bufsize, flags | Z_ZERO,
+	    VM_KERN_MEMORY_REASON);
 
 	if (cur_reason->osr_kcd_buf == NULL) {
 		lck_mtx_unlock(&cur_reason->osr_lock);

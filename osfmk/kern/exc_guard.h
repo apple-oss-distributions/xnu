@@ -146,6 +146,22 @@
 
 #define GUARD_TYPE_VIRT_MEMORY  0x5     /* VM operation violating guard */
 
+/*
+ * Rejected syscalls use the exception codes like this:
+ *
+ * code:
+ * +-------------------------------+----------------+------------------+
+ * |[63:61] GUARD_TYPE_REJECTED_SC | [60:32] unused | [31:0] mach_trap |
+ * +-------------------------------+----------------+------------------+
+ *
+ * subcode:
+ * +----------------------------------------------------------------+
+ * |[63:0] syscall (if mach_trap field is 0), or mach trap number   |
+ * +----------------------------------------------------------------+
+ */
+
+#define GUARD_TYPE_REJECTED_SC  0x6     /* rejected system call trap */
+
 #ifdef KERNEL
 
 #define EXC_GUARD_ENCODE_TYPE(code, type) \

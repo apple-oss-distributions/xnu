@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017 Apple Inc. All rights reserved.
+ * Copyright (c) 2017-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -32,6 +32,8 @@
 #ifdef PRIVATE
 #include <stdint.h>
 
+#define NAS_HAS_FLTR_OS_COUNTS 1
+
 /*
  * net_api_stats counts the usage of the networking APIs
  *
@@ -42,6 +44,7 @@ struct net_api_stats {
 	 * Interface Filters
 	 */
 	int64_t nas_iflt_attach_count;  // Currently attached
+	int64_t nas_iflt_attach_os_count;
 	int64_t nas_iflt_attach_total;  // Total number of attachments
 	int64_t nas_iflt_attach_os_total;
 
@@ -49,6 +52,7 @@ struct net_api_stats {
 	 * IP Filters
 	 */
 	int64_t nas_ipf_add_count;      // Currently attached
+	int64_t nas_ipf_add_os_count;
 	int64_t nas_ipf_add_total;      // Total number of attachments
 	int64_t nas_ipf_add_os_total;
 
@@ -56,6 +60,7 @@ struct net_api_stats {
 	 * Socket Filters
 	 */
 	int64_t nas_sfltr_register_count;       // Currently attached
+	int64_t nas_sfltr_register_os_count;
 	int64_t nas_sfltr_register_total;       // Total number of attachments
 	int64_t nas_sfltr_register_os_total;
 

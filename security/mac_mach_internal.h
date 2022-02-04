@@ -58,6 +58,9 @@
 #warning "MAC policy is not KPI, see Technical Q&A QA1574, this header will be removed in next version"
 #endif
 
+#include <mach/mach_types.h>
+#include <stdint.h>
+
 /* mac_do_machexc() flags */
 #define	MAC_DOEXCF_TRACED	0x01	/* Only do mach exeception if
 					   being ptrace()'ed */
@@ -69,19 +72,28 @@ struct task;
 int	mac_do_machexc(int64_t code, int64_t subcode, uint32_t flags __unused);
 int	mac_schedule_userret(void);
 
+/* telemetry */
+int mac_schedule_telemetry(void);
+
 #if CONFIG_MACF
 void mac_policy_init(void);
 void mac_policy_initmach(void);
 
 /* tasks */
-int	mac_task_check_expose_task(struct task *t);
-
+int	mac_task_check_expose_task(struct task *t, mach_task_flavor_t flavor);
+int	mac_task_check_task_id_token_get_task(struct task *t, mach_task_flavor_t flavor);
 int	mac_task_check_set_host_special_port(struct task *task,
 	    int id, struct ipc_port *port);
 int	mac_task_check_set_host_exception_port(struct task *task,
 	    unsigned int exception);
 int	mac_task_check_set_host_exception_ports(struct task *task,
 	    unsigned int exception_mask);
+int	mac_task_check_get_task_special_port(struct task *task,
+	    struct task *target, int which);
+int	mac_task_check_set_task_special_port(struct task *task,
+	    struct task *target, int which, struct ipc_port *port);
+int mac_task_check_get_movable_control_port(void);
+int mac_task_check_dyld_process_info_notify_register(void);
 
 /* See rdar://problem/58989880 */
 #ifndef bitstr_test
@@ -92,7 +104,7 @@ typedef int (*mac_task_mach_filter_cbfunc_t)(struct proc *bsdinfo, int num);
 typedef int (*mac_task_kobj_filter_cbfunc_t)(struct proc *bsdinfo, int msgid, int index);
 extern mac_task_mach_filter_cbfunc_t mac_task_mach_trap_evaluate;
 extern mac_task_kobj_filter_cbfunc_t mac_task_kobj_msg_evaluate;
-extern int mach_trap_count;
+extern const int mach_trap_count;
 extern int mach_kobj_count;
 
 void mac_task_set_mach_filter_mask(struct task *task, uint8_t *maskptr);
@@ -104,6 +116,7 @@ int  mac_task_register_filter_callbacks(
 /* threads */
 void	act_set_astmacf(struct thread *);
 void	mac_thread_userret(struct thread *);
+void	mac_thread_telemetry(struct thread *, int, void *, size_t);
 
 /* exception actions */
 struct label *mac_exc_create_label(void);

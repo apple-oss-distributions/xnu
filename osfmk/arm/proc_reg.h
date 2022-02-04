@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2007-2018 Apple Inc. All rights reserved.
+ * Copyright (c) 2007-2020 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -117,21 +117,8 @@
 #define __ARM_ENABLE_WFE_ 0
 #endif /* defined(ARM_BOARD_WFE_TIMEOUT_NS) */
 
-/*
- * MAX_PSETS allows the scheduler to create statically sized
- * scheduling data structures (such as an array of processor sets, clutch
- * buckets in Edge scheduler etc.). All current AMP platforms are dual
- * pset and all non-AMP platforms are single pset architectures. This
- * define might need to be conditionalized better (or moved to a better
- * header) in the future.
- *
- * <Edge Multi-cluster Support Needed>
- */
-#if __ARM_AMP__
-#define MAX_PSETS 2
-#else /*__ARM_AMP__ */
-#define MAX_PSETS 1
-#endif /* __ARM_AMP__ */
+/* For arm platforms, create one pset per cluster */
+#define MAX_PSETS MAX_CPU_CLUSTERS
 
 /*
  * The clutch scheduler is enabled only on non-AMP platforms for now.
@@ -297,7 +284,26 @@
 #define MMU_I_CLINE     5                      /* cache line size as 1<<MMU_I_CLINE (32) */
 
 /* D-Cache */
+#define MMU_CSIZE       15                     /* cache size as 1<<MMU_CSIZE (32K) */
 #define MMU_CLINE       6                      /* cache line size as 1<<MMU_CLINE (64) */
+#define MMU_NWAY        2                      /* set associativity 1<<MMU_NWAY (4) */
+#define MMU_I7SET       6                      /* cp15 c7 set incrementer 1<<MMU_I7SET */
+#define MMU_I7WAY       30                     /* cp15 c7 way incrementer 1<<MMU_I7WAY */
+
+#define MMU_SWAY        (MMU_CSIZE - MMU_NWAY) /* set size 1<<MMU_SWAY */
+#define MMU_NSET        (MMU_SWAY - MMU_CLINE) /* lines per way 1<<MMU_NSET */
+
+#define __ARM_L2CACHE__ 1
+
+#define L2_CSIZE        20                       /* cache size as 1<<MMU_CSIZE */
+#define L2_CLINE        6                        /* cache line size as 1<<MMU_CLINE (64) */
+#define L2_NWAY         3                        /* set associativity 1<<MMU_NWAY (8) */
+#define L2_I7SET        6                        /* cp15 c7 set incrementer 1<<MMU_I7SET */
+#define L2_I7WAY        29                       /* cp15 c7 way incrementer 1<<MMU_I7WAY */
+#define L2_I9WAY        29                       /* cp15 c9 way incrementer 1<<MMU_I9WAY */
+
+#define L2_SWAY         (L2_CSIZE - L2_NWAY)     /* set size 1<<MMU_SWAY */
+#define L2_NSET         (L2_SWAY - L2_CLINE)     /* lines per way 1<<MMU_NSET */
 
 #elif defined (APPLETYPHOON)
 
@@ -347,9 +353,25 @@
 /* D-Cache, 128KB for Lightning, 8-way. 48KB for Thunder, 6-way. */
 #define MMU_CLINE   6                      /* cache line size is 1<<MMU_CLINE (64) */
 
+#elif defined (APPLEFIRESTORM)
+
+/* I-Cache, 256KB for Firestorm, 128KB for Icestorm, 6-way. */
+#define MMU_I_CLINE 6                      /* cache line size as 1<<MMU_I_CLINE (64) */
+
+/* D-Cache, 160KB for Firestorm, 8-way. 64KB for Icestorm, 6-way. */
+#define MMU_CLINE   6                      /* cache line size is 1<<MMU_CLINE (64) */
+
 #elif defined (BCM2837) /* Raspberry Pi 3 */
 
 /* I-Cache. We don't have detailed spec so we just follow the ARM technical reference. */
+#define MMU_I_CLINE 6
+
+/* D-Cache. */
+#define MMU_CLINE   6
+
+#elif defined (VMAPPLE)
+
+/* I-Cache. */
 #define MMU_I_CLINE 6
 
 /* D-Cache. */
@@ -359,6 +381,7 @@
 #error processor not supported
 #endif
 
+#define MAX_L2_CLINE_BYTES (1 << MAX_L2_CLINE)
 
 #if (__ARM_VMSA__ <= 7)
 
@@ -578,7 +601,7 @@
  *  L2 Translation table
  *
  *  Each translation table is up to 1KB
- *  4096 32-bit entries of 1MB (2^30) of address space.
+ *  256 32-bit entries of 4KB (2^12) of address space.
  */
 
 #define ARM_TT_L2_SIZE       0x00001000 /* size of area covered by a tte */
@@ -828,6 +851,8 @@
 #define ARM_PTE_PNXSHIFT       0
 #define ARM_PTE_PNX            0x00000000             /* no privilege execute. not impl */
 #define ARM_PTE_PNX_MASK       (0<<ARM_PTE_NXSHIFT)
+
+#define ARM_PTE_XMASK          (ARM_PTE_PNX_MASK | ARM_PTE_NX_MASK)
 
 #define ARM_PTE_TEX0SHIFT      6
 #define ARM_PTE_TEX0           (1<<ARM_PTE_TEX0SHIFT)

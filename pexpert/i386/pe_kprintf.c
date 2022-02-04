@@ -59,10 +59,11 @@ SECURITY_READ_ONLY_LATE(PE_kputc_t) PE_kputc;
 /* DEBUG kernel starts with true serial, but
  * may later disable or switch to video
  * console */
-SECURITY_READ_ONLY_LATE(unsigned int) disable_serial_output = FALSE;
+SECURITY_READ_ONLY_LATE(bool) disable_serial_output = false;
 #else
-SECURITY_READ_ONLY_LATE(unsigned int) disable_serial_output = TRUE;
+SECURITY_READ_ONLY_LATE(bool) disable_serial_output = true;
 #endif
+SECURITY_READ_ONLY_LATE(bool) disable_iolog_serial_output = false;
 
 static SIMPLE_LOCK_DECLARE(kprintf_lock, 0);
 
@@ -74,10 +75,10 @@ PE_init_kprintf(void)
 		panic("Platform Expert not initialized");
 	}
 
-	unsigned int new_disable_serial_output = TRUE;
+	bool new_disable_serial_output = true;
 
 	if (debug_boot_arg & DB_KPRT) {
-		new_disable_serial_output = FALSE;
+		new_disable_serial_output = false;
 	}
 
 	/* If we are newly enabling serial, make sure we only
@@ -86,7 +87,7 @@ PE_init_kprintf(void)
 	if (!new_disable_serial_output && (!disable_serial_output || pal_serial_init())) {
 		PE_kputc = pal_serial_putc;
 	} else {
-		PE_kputc = cnputc_unbuffered;
+		PE_kputc = console_write_unbuffered;
 	}
 
 	disable_serial_output = new_disable_serial_output;

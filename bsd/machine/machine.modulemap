@@ -1,0 +1,174 @@
+module Darwin.machine [system] {
+  module _limits {
+    #ifdef XNU_KERNEL_PRIVATE
+    // A few machine headers are in the public SDK for macOS, but
+    // mastered out of the public SDK for the other OSes. Oddly the
+    // corresponding arm and i386 headers are in all the public SDKs.
+    #endif
+    #ifdef PLATFORM_MacOSX
+    header "machine/_limits.h"
+    #endif
+    #if defined(PLATFORM_MacOSX) || defined(PLATFORM_iPhoneSimulator) || defined(PLATFORM_AppleTVSimulator) || defined(PLATFORM_WatchSimulator)
+    header "i386/_limits.h"
+    #endif
+    header "arm/_limits.h"
+
+    export *
+  }
+
+  module _mcontext {
+    header "machine/_mcontext.h"
+    #if defined(PLATFORM_MacOSX) || defined(PLATFORM_iPhoneSimulator) || defined(PLATFORM_AppleTVSimulator) || defined(PLATFORM_WatchSimulator)
+    header "i386/_mcontext.h"
+    #endif
+    header "arm/_mcontext.h"
+
+    export *
+  }
+
+  module _param {
+    header "machine/_param.h"
+    #if defined(PLATFORM_MacOSX) || defined(PLATFORM_iPhoneSimulator) || defined(PLATFORM_AppleTVSimulator) || defined(PLATFORM_WatchSimulator)
+    header "i386/_param.h"
+    #endif
+    header "arm/_param.h"
+
+    export *
+  }
+
+  module _types {
+    header "machine/_types.h"
+    #if defined(PLATFORM_MacOSX) || defined(PLATFORM_iPhoneSimulator) || defined(PLATFORM_AppleTVSimulator) || defined(PLATFORM_WatchSimulator)
+    header "i386/_types.h"
+    #endif
+    header "arm/_types.h"
+
+    export *
+  }
+
+  module arch {
+    header "arm/arch.h"
+    export *
+  }
+
+  #ifdef XNU_KERNEL_PRIVATE
+  // The PLATFORM_MacOSX headers are in the public SDK for macOS,
+  // but mastered out of the public SDK for the other OSes.
+  #endif
+  #ifdef PLATFORM_MacOSX
+  module byte_order {
+    header "machine/byte_order.h"
+    export *
+  }
+
+  #endif
+  #if defined(PLATFORM_MacOSX) || defined(PLATFORM_iPhoneSimulator) || defined(PLATFORM_AppleTVSimulator) || defined(PLATFORM_WatchSimulator)
+  module eflags {
+    header "i386/eflags.h"
+    export *
+  }
+  #endif
+
+  module endian {
+    header "machine/endian.h"
+    #if defined(PLATFORM_MacOSX) || defined(PLATFORM_iPhoneSimulator) || defined(PLATFORM_AppleTVSimulator) || defined(PLATFORM_WatchSimulator)
+    header "i386/endian.h"
+    #endif
+    header "arm/endian.h"
+
+    export *
+  }
+
+  #ifdef XNU_KERNEL_PRIVATE
+  // A few other machine headers are in the public SDK for macOS, but
+  // mastered out of the public SDK for the other OSes. This time the
+  // corresponding arm headers follow the machine headers, but the
+  // corresponding i386 headers are in the public SDK for simulators.
+  #endif
+  #if defined(PLATFORM_MacOSX) || defined(PLATFORM_iPhoneSimulator) || defined(PLATFORM_AppleTVSimulator) || defined(PLATFORM_WatchSimulator)
+  module fasttrap_isa {
+    #ifdef PLATFORM_MacOSX
+    header "machine/fasttrap_isa.h"
+    #endif
+    header "i386/fasttrap_isa.h"
+    #ifdef PLATFORM_MacOSX
+    header "arm/fasttrap_isa.h"
+    #endif
+
+    export *
+  }
+
+  #endif
+  module limits {
+    header "machine/limits.h"
+    #if defined(PLATFORM_MacOSX) || defined(PLATFORM_iPhoneSimulator) || defined(PLATFORM_AppleTVSimulator) || defined(PLATFORM_WatchSimulator)
+    header "i386/limits.h"
+    #endif
+    header "arm/limits.h"
+
+    export *
+  }
+
+  module param {
+    header "machine/param.h"
+    #if defined(PLATFORM_MacOSX) || defined(PLATFORM_iPhoneSimulator) || defined(PLATFORM_AppleTVSimulator) || defined(PLATFORM_WatchSimulator)
+    header "i386/param.h"
+    #endif
+    header "arm/param.h"
+
+    export *
+  }
+
+  #if defined(PLATFORM_MacOSX) || defined(PLATFORM_iPhoneSimulator) || defined(PLATFORM_AppleTVSimulator) || defined(PLATFORM_WatchSimulator)
+  module profile {
+    #ifdef PLATFORM_MacOSX
+    header "machine/profile.h"
+    #endif
+    header "i386/profile.h"
+    #ifdef PLATFORM_MacOSX
+    header "arm/profile.h"
+    #endif
+
+    export *
+  }
+
+  #endif
+  module signal {
+    header "machine/signal.h"
+    #if defined(PLATFORM_MacOSX) || defined(PLATFORM_iPhoneSimulator) || defined(PLATFORM_AppleTVSimulator) || defined(PLATFORM_WatchSimulator)
+    header "i386/signal.h"
+    #endif
+    header "arm/signal.h"
+
+    export *
+  }
+
+  module types {
+    header "machine/types.h"
+    #if defined(PLATFORM_MacOSX) || defined(PLATFORM_iPhoneSimulator) || defined(PLATFORM_AppleTVSimulator) || defined(PLATFORM_WatchSimulator)
+    header "i386/types.h"
+    #endif
+    header "arm/types.h"
+
+    export *
+  }
+  #if defined(PLATFORM_MacOSX) || defined(PLATFORM_iPhoneSimulator) || defined(PLATFORM_AppleTVSimulator) || defined(PLATFORM_WatchSimulator)
+
+  module user_ldt {
+    header "i386/user_ldt.h"
+    export *
+  }
+
+  module vmparam {
+    #ifdef PLATFORM_MacOSX
+    header "machine/vmparam.h"
+    #endif
+    header "i386/vmparam.h"
+    #ifdef PLATFORM_MacOSX
+    header "arm/vmparam.h"
+    #endif
+
+    export *
+  }
+  #endif
+}

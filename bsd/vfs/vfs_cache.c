@@ -118,7 +118,7 @@ long    numcache;                       /* number of cache entries allocated */
 int     desiredNodes;
 int     desiredNegNodes;
 int     ncs_negtotal;
-int     nc_disabled = 0;
+TUNABLE_WRITEABLE(int, nc_disabled, "-novfscache", 0);
 TAILQ_HEAD(, namecache) nchead;         /* chain of all name cache entries */
 TAILQ_HEAD(, namecache) neghead;        /* chain of only negative cache entries */
 
@@ -145,21 +145,15 @@ struct  nchstats nchstats;              /* cache effectiveness statistics */
 
 
 /* vars for name cache list lock */
-lck_grp_t * namecache_lck_grp;
-lck_grp_attr_t * namecache_lck_grp_attr;
-lck_attr_t * namecache_lck_attr;
+static LCK_GRP_DECLARE(namecache_lck_grp, "Name Cache");
+static LCK_RW_DECLARE(namecache_rw_lock, &namecache_lck_grp);
 
-lck_grp_t * strcache_lck_grp;
-lck_grp_attr_t * strcache_lck_grp_attr;
-lck_attr_t * strcache_lck_attr;
+static LCK_GRP_DECLARE(strcache_lck_grp, "String Cache");
+static LCK_ATTR_DECLARE(strcache_lck_attr, 0, 0);
+LCK_RW_DECLARE_ATTR(strtable_rw_lock, &strcache_lck_grp, &strcache_lck_attr);
 
-lck_grp_t * rootvnode_lck_grp;
-lck_grp_attr_t * rootvnode_lck_grp_attr;
-lck_attr_t * rootvnode_lck_attr;
-
-lck_rw_t  * namecache_rw_lock;
-lck_rw_t  * strtable_rw_lock;
-lck_rw_t  * rootvnode_rw_lock;
+static LCK_GRP_DECLARE(rootvnode_lck_grp, "rootvnode");
+LCK_RW_DECLARE(rootvnode_rw_lock, &rootvnode_lck_grp);
 
 #define NUM_STRCACHE_LOCKS 1024
 
@@ -459,8 +453,8 @@ build_path_with_parent(vnode_t first_vp, vnode_t parent_vp, char *buff, int bufl
 	/*
 	 * Grab the process fd so we can evaluate fd_rdir.
 	 */
-	if (vfs_context_proc(ctx)->p_fd && !(flags & BUILDPATH_NO_PROCROOT)) {
-		proc_root_dir_vp = vfs_context_proc(ctx)->p_fd->fd_rdir;
+	if (!(flags & BUILDPATH_NO_PROCROOT)) {
+		proc_root_dir_vp = vfs_context_proc(ctx)->p_fd.fd_rdir;
 	} else {
 		proc_root_dir_vp = NULL;
 	}
@@ -1377,7 +1371,8 @@ vnode_uncache_authorized_action(vnode_t vp, kauth_action_t action)
 }
 
 
-extern int bootarg_vnode_cache_defeat;  /* default = 0, from bsd_init.c */
+/* disable vnode_cache_is_authorized() by setting vnode_cache_defeat */
+static TUNABLE(int, bootarg_vnode_cache_defeat, "-vnode_cache_defeat", 0);
 
 boolean_t
 vnode_cache_is_authorized(vnode_t vp, vfs_context_t ctx, kauth_action_t action)
@@ -2400,8 +2395,6 @@ init_crc32(void)
 void
 nchinit(void)
 {
-	int     i;
-
 	desiredNegNodes = (desiredvnodes / 10);
 	desiredNodes = desiredvnodes + desiredNegNodes;
 
@@ -2416,61 +2409,27 @@ nchinit(void)
 
 	init_string_table();
 
-	/* Allocate name cache lock group attribute and group */
-	namecache_lck_grp_attr = lck_grp_attr_alloc_init();
-
-	namecache_lck_grp = lck_grp_alloc_init("Name Cache", namecache_lck_grp_attr);
-
-	/* Allocate name cache lock attribute */
-	namecache_lck_attr = lck_attr_alloc_init();
-
-	/* Allocate name cache lock */
-	namecache_rw_lock = lck_rw_alloc_init(namecache_lck_grp, namecache_lck_attr);
-
-
-	/* Allocate string cache lock group attribute and group */
-	strcache_lck_grp_attr = lck_grp_attr_alloc_init();
-
-	strcache_lck_grp = lck_grp_alloc_init("String Cache", strcache_lck_grp_attr);
-
-	/* Allocate string cache lock attribute */
-	strcache_lck_attr = lck_attr_alloc_init();
-
-	/* Allocate string cache lock */
-	strtable_rw_lock = lck_rw_alloc_init(strcache_lck_grp, strcache_lck_attr);
-
-	for (i = 0; i < NUM_STRCACHE_LOCKS; i++) {
-		lck_mtx_init(&strcache_mtx_locks[i], strcache_lck_grp, strcache_lck_attr);
+	for (int i = 0; i < NUM_STRCACHE_LOCKS; i++) {
+		lck_mtx_init(&strcache_mtx_locks[i], &strcache_lck_grp, &strcache_lck_attr);
 	}
-
-	/* Allocate root vnode lock group attribute and group */
-	rootvnode_lck_grp_attr = lck_grp_attr_alloc_init();
-
-	rootvnode_lck_grp = lck_grp_alloc_init("rootvnode", rootvnode_lck_grp_attr);
-
-	/* Allocate rootvnode lock attribute */
-	rootvnode_lck_attr = lck_attr_alloc_init();
-
-	/* Allocate rootvnode lock */
-	rootvnode_rw_lock = lck_rw_alloc_init(rootvnode_lck_grp, rootvnode_lck_attr);
 }
 
 void
 name_cache_lock_shared(void)
 {
-	lck_rw_lock_shared(namecache_rw_lock);
+	lck_rw_lock_shared(&namecache_rw_lock);
 }
 
 void
 name_cache_lock(void)
 {
-	lck_rw_lock_exclusive(namecache_rw_lock);
+	lck_rw_lock_exclusive(&namecache_rw_lock);
 }
 
 void
 name_cache_unlock(void)
 {
-	lck_rw_done(namecache_rw_lock);
+	lck_rw_done(&namecache_rw_lock);
 }
 
 
@@ -2696,7 +2655,8 @@ static uint32_t filled_buckets = 0;
 
 typedef struct string_t {
 	LIST_ENTRY(string_t)  hash_chain;
-	const char *str;
+	char                  *str;
+	uint32_t              strbuflen;
 	uint32_t              refcount;
 } string_t;
 
@@ -2718,10 +2678,10 @@ resize_string_ref_table(void)
 	 * the lock exclusively in case some other thread
 	 * beat us to the punch
 	 */
-	lck_rw_lock_exclusive(strtable_rw_lock);
+	lck_rw_lock_exclusive(&strtable_rw_lock);
 
 	if (4 * filled_buckets < ((string_table_mask + 1) * 3)) {
-		lck_rw_done(strtable_rw_lock);
+		lck_rw_done(&strtable_rw_lock);
 		return;
 	}
 	assert(string_table_mask < INT32_MAX);
@@ -2729,7 +2689,7 @@ resize_string_ref_table(void)
 
 	if (new_table == NULL) {
 		printf("failed to resize the hash table.\n");
-		lck_rw_done(strtable_rw_lock);
+		lck_rw_done(&strtable_rw_lock);
 		return;
 	}
 
@@ -2755,7 +2715,7 @@ resize_string_ref_table(void)
 			LIST_INSERT_HEAD(head, entry, hash_chain);
 		}
 	}
-	lck_rw_done(strtable_rw_lock);
+	lck_rw_done(&strtable_rw_lock);
 
 	FREE(old_table, M_CACHE);
 }
@@ -2806,17 +2766,17 @@ add_name_internal(const char *name, uint32_t len, u_int hashval, boolean_t need_
 	 * if someone else decides to grow the pool they
 	 * will take this lock exclusively
 	 */
-	lck_rw_lock_shared(strtable_rw_lock);
+	lck_rw_lock_shared(&strtable_rw_lock);
 
 	/*
 	 * If the table gets more than 3/4 full, resize it
 	 */
 	if (4 * filled_buckets >= ((string_table_mask + 1) * 3)) {
-		lck_rw_done(strtable_rw_lock);
+		lck_rw_done(&strtable_rw_lock);
 
 		resize_string_ref_table();
 
-		lck_rw_lock_shared(strtable_rw_lock);
+		lck_rw_lock_shared(&strtable_rw_lock);
 	}
 	hash_index = hashval & string_table_mask;
 	lock_index = hash_index % NUM_STRCACHE_LOCKS;
@@ -2832,19 +2792,22 @@ add_name_internal(const char *name, uint32_t len, u_int hashval, boolean_t need_
 		}
 	}
 	if (entry == NULL) {
+		const uint32_t buflen = len + 1;
+
 		lck_mtx_convert_spin(&strcache_mtx_locks[lock_index]);
 		/*
 		 * it wasn't already there so add it.
 		 */
-		entry = kheap_alloc(KHEAP_DEFAULT, sizeof(string_t) + len + 1, Z_WAITOK);
+		entry = kalloc_type(string_t, Z_WAITOK);
 
 		if (head->lh_first == NULL) {
 			OSAddAtomic(1, &filled_buckets);
 		}
-		ptr = (char *)((char *)entry + sizeof(string_t));
+		ptr = kalloc_data(buflen, Z_WAITOK);
 		strncpy(ptr, name, len);
 		ptr[len] = '\0';
 		entry->str = ptr;
+		entry->strbuflen = buflen;
 		entry->refcount = 1;
 		LIST_INSERT_HEAD(head, entry, hash_chain);
 	}
@@ -2853,7 +2816,7 @@ add_name_internal(const char *name, uint32_t len, u_int hashval, boolean_t need_
 	}
 
 	lck_mtx_unlock(&strcache_mtx_locks[lock_index]);
-	lck_rw_done(strtable_rw_lock);
+	lck_rw_done(&strtable_rw_lock);
 
 	return (const char *)entry->str;
 }
@@ -2876,7 +2839,7 @@ vfs_removename(const char *nameref)
 	 * if someone else decides to grow the pool they
 	 * will take this lock exclusively
 	 */
-	lck_rw_lock_shared(strtable_rw_lock);
+	lck_rw_lock_shared(&strtable_rw_lock);
 	/*
 	 * must compute the head behind the table lock
 	 * since the size and location of the table
@@ -2907,9 +2870,15 @@ vfs_removename(const char *nameref)
 		}
 	}
 	lck_mtx_unlock(&strcache_mtx_locks[lock_index]);
-	lck_rw_done(strtable_rw_lock);
+	lck_rw_done(&strtable_rw_lock);
 
-	kheap_free_addr(KHEAP_DEFAULT, entry);
+	if (entry) {
+		assert(entry->refcount == 0);
+		kfree_data(entry->str, entry->strbuflen);
+		entry->str = NULL;
+		entry->strbuflen = 0;
+		kfree_type(string_t, entry);
+	}
 
 	return retval;
 }
@@ -2923,7 +2892,7 @@ dump_string_table(void)
 	string_t          *entry;
 	u_long            i;
 
-	lck_rw_lock_shared(strtable_rw_lock);
+	lck_rw_lock_shared(&strtable_rw_lock);
 
 	for (i = 0; i <= string_table_mask; i++) {
 		head = &string_ref_table[i];
@@ -2931,6 +2900,6 @@ dump_string_table(void)
 			printf("%6d - %s\n", entry->refcount, entry->str);
 		}
 	}
-	lck_rw_done(strtable_rw_lock);
+	lck_rw_done(&strtable_rw_lock);
 }
 #endif  /* DUMP_STRING_TABLE */

@@ -62,4 +62,9 @@ mt_microstackshot_start_arch(__unused uint64_t period)
 	return ENOTSUP;
 }
 
+void
+mt_ownership_change(bool __unused available)
+{
+}
+
 struct mt_device mt_devices[0];

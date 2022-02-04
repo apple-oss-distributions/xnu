@@ -256,13 +256,10 @@ nullfs_getattr(struct vnop_getattr_args * args)
 	kauth_cred_t cred = vfs_context_ucred(args->a_context);
 	NULLFSDEBUG("%s %p\n", __FUNCTION__, args->a_vp);
 
-	lck_mtx_lock(&null_mp->nullm_lock);
-	if (nullfs_isspecialvp(args->a_vp)) {
+	if (nullfs_checkspecialvp(args->a_vp)) {
 		error = nullfs_special_getattr(args);
-		lck_mtx_unlock(&null_mp->nullm_lock);
 		return error;
 	}
-	lck_mtx_unlock(&null_mp->nullm_lock);
 
 	/* this will return a different inode for third than read dir will */
 	struct vnode * lowervp = NULLVPTOLOWERVP(args->a_vp);
@@ -403,6 +400,9 @@ null_get_lowerparent(vnode_t lvp, vnode_t * dvpp, vfs_context_t ctx)
 	error = vnode_getattr(lvp, &va, ctx);
 
 	if (error || !VATTR_IS_SUPPORTED(&va, va_parentid)) {
+		if (!error) {
+			error = ENOTSUP;
+		}
 		goto end;
 	}
 
@@ -424,17 +424,20 @@ null_special_lookup(struct vnop_lookup_args * ap)
 	struct vnode * ldvp         = NULL;
 	struct vnode * lvp          = NULL;
 	struct vnode * vp           = NULL;
+	struct vnode * tempvp       = NULL;
 	struct mount * mp           = vnode_mount(dvp);
 	struct null_mount * null_mp = MOUNTTONULLMOUNT(mp);
 	int error                   = ENOENT;
 	vfs_context_t ectx     = nullfs_get_patched_context(null_mp, ap->a_context);
 
+	// null_mp->nullm_lock is locked
 	if (dvp == null_mp->nullm_rootvp) {
 		/* handle . and .. */
 		if (cnp->cn_nameptr[0] == '.') {
 			if (cnp->cn_namelen == 1 || (cnp->cn_namelen == 2 && cnp->cn_nameptr[1] == '.')) {
 				/* this is the root so both . and .. give back the root */
-				vp    = dvp;
+				vp = dvp;
+				lck_mtx_unlock(&null_mp->nullm_lock);
 				error = vnode_get(vp);
 				goto end;
 			}
@@ -446,35 +449,57 @@ null_special_lookup(struct vnop_lookup_args * ap)
 		    (cnp->cn_nameptr[0] == 'd' || (null_mp->nullm_flags & NULLM_CASEINSENSITIVE ? cnp->cn_nameptr[0] == 'D' : 0))) {
 			error = 0;
 			if (null_mp->nullm_secondvp == NULL) {
+				// drop the lock before making a new vnode
+				lck_mtx_unlock(&null_mp->nullm_lock);
 				error = null_getnewvnode(mp, NULL, dvp, &vp, cnp, 0);
 				if (error) {
 					goto end;
 				}
+				// Get the lock before modifying nullm_secondvp
+				lck_mtx_lock(&null_mp->nullm_lock);
+				if (null_mp->nullm_secondvp == NULL) {
+					null_mp->nullm_secondvp = vp;
+					lck_mtx_unlock(&null_mp->nullm_lock);
+				} else {
+					/* Another thread already set null_mp->nullm_secondvp while the
+					 * lock was dropped so recycle the vnode we just made */
+					tempvp = vp;
+					vp = null_mp->nullm_secondvp;
+					lck_mtx_unlock(&null_mp->nullm_lock);
+					/* recycle will call reclaim which will get rid of the internals */
+					vnode_recycle(tempvp);
+					vnode_put(tempvp);
 
-				null_mp->nullm_secondvp = vp;
+					error = vnode_get(vp);
+				}
 			} else {
-				vp    = null_mp->nullm_secondvp;
+				vp = null_mp->nullm_secondvp;
+				lck_mtx_unlock(&null_mp->nullm_lock);
 				error = vnode_get(vp);
 			}
+		} else {
+			lck_mtx_unlock(&null_mp->nullm_lock);
 		}
 	} else if (dvp == null_mp->nullm_secondvp) {
 		/* handle . and .. */
 		if (cnp->cn_nameptr[0] == '.') {
 			if (cnp->cn_namelen == 1) {
-				vp    = dvp;
+				vp = dvp;
+				lck_mtx_unlock(&null_mp->nullm_lock);
 				error = vnode_get(vp);
 				goto end;
 			} else if (cnp->cn_namelen == 2 && cnp->cn_nameptr[1] == '.') {
 				/* parent here is the root vp */
 				vp    = null_mp->nullm_rootvp;
+				lck_mtx_unlock(&null_mp->nullm_lock);
 				error = vnode_get(vp);
 				goto end;
 			}
 		}
 		/* nullmp->nullm_lowerrootvp was set at mount time so don't need to lock to
 		 * access it */
-		/* v_name should be null terminated but cn_nameptr is not necessarily.
-		 *  cn_namelen is the number of characters before the null in either case */
+		/* Drop the global lock since we aren't accessing rootvp or secondvp any more */
+		lck_mtx_unlock(&null_mp->nullm_lock);
 		error = vnode_getwithvid(null_mp->nullm_lowerrootvp, null_mp->nullm_lowerrootvid);
 		if (error) {
 			goto end;
@@ -496,15 +521,11 @@ null_special_lookup(struct vnop_lookup_args * ap)
 			vnode_put(ldvp);
 
 			if (error == 0) {
+				// nullm_lowerrootvp is only touched during mount and unmount so we don't need the lock to check it.
 				if (lvp == null_mp->nullm_lowerrootvp) {
 					/* always check the hashmap for a vnode for this, the root of the
 					 * mirrored system */
 					error = null_nodeget(mp, lvp, dvp, &vp, cnp, 0);
-
-					if (error == 0 && null_mp->nullm_thirdcovervp == NULL) {
-						/* if nodeget succeeded then vp has an iocount*/
-						null_mp->nullm_thirdcovervp = vp;
-					}
 				} else {
 					error = ENOENT;
 				}
@@ -551,7 +572,7 @@ null_lookup(struct vnop_lookup_args * ap)
 	lck_mtx_lock(&null_mp->nullm_lock);
 	if (nullfs_isspecialvp(dvp)) {
 		error = null_special_lookup(ap);
-		lck_mtx_unlock(&null_mp->nullm_lock);
+		// null_special_lookup drops the lock
 		return error;
 	}
 	lck_mtx_unlock(&null_mp->nullm_lock);
@@ -605,11 +626,10 @@ notdot:
 		if (error == 0) {
 			*ap->a_vpp = vp;
 		}
-	}
-
-	/* if we got lvp, drop the iocount from VNOP_LOOKUP */
-	if (lvp != NULL) {
-		vnode_put(lvp);
+		/* if we got lvp, drop the iocount from VNOP_LOOKUP */
+		if (lvp != NULL) {
+			vnode_put(lvp);
+		}
 	}
 
 	nullfs_cleanup_patched_context(null_mp, ectx);
@@ -656,17 +676,13 @@ null_reclaim(struct vnop_reclaim_args * ap)
 			 *  conditions */
 			null_hashrem(xp);
 		}
-		vnode_getwithref(lowervp);
 		vnode_rele(lowervp);
-		vnode_put(lowervp);
 	}
 
 	if (vp == null_mp->nullm_rootvp) {
 		null_mp->nullm_rootvp = NULL;
 	} else if (vp == null_mp->nullm_secondvp) {
 		null_mp->nullm_secondvp = NULL;
-	} else if (vp == null_mp->nullm_thirdcovervp) {
-		null_mp->nullm_thirdcovervp = NULL;
 	}
 
 	lck_mtx_unlock(&null_mp->nullm_lock);
@@ -674,7 +690,7 @@ null_reclaim(struct vnop_reclaim_args * ap)
 	cache_purge(vp);
 	vnode_clearfsnode(vp);
 
-	FREE(xp, M_TEMP);
+	kfree_type(struct null_node, xp);
 
 	return 0;
 }
@@ -717,8 +733,10 @@ nullfs_special_readdir(struct vnop_readdir_args * ap)
 	int items                   = 0;
 	ino_t ino                   = 0;
 	const char * name           = NULL;
+	boolean_t locked = TRUE;
 
 	if (ap->a_flags & (VNODE_READDIR_EXTENDED | VNODE_READDIR_REQSEEKOFF)) {
+		lck_mtx_unlock(&null_mp->nullm_lock);
 		return EINVAL;
 	}
 
@@ -754,6 +772,9 @@ nullfs_special_readdir(struct vnop_readdir_args * ap)
 			ino  = NULL_SECOND_INO;
 			name = "d";
 		} else { /* only get here if vp matches nullm_rootvp or nullm_secondvp */
+			// drop the lock before performing operations on nullm_lowerrootvp
+			lck_mtx_unlock(&null_mp->nullm_lock);
+			locked = FALSE;
 			ino = NULL_THIRD_INO;
 			if (vnode_getwithvid(null_mp->nullm_lowerrootvp, null_mp->nullm_lowerrootvid)) {
 				/* In this case the lower file system has been ripped out from under us,
@@ -779,6 +800,9 @@ nullfs_special_readdir(struct vnop_readdir_args * ap)
 	}
 
 out:
+	if (locked) {
+		lck_mtx_unlock(&null_mp->nullm_lock);
+	}
 	if (error == EMSGSIZE) {
 		error = 0; /* return success if we ran out of space, but we wanted to make
 		            *  sure that we didn't update offset and items incorrectly */
@@ -804,7 +828,7 @@ nullfs_readdir(struct vnop_readdir_args * ap)
 	lck_mtx_lock(&null_mp->nullm_lock);
 	if (nullfs_isspecialvp(ap->a_vp)) {
 		error = nullfs_special_readdir(ap);
-		lck_mtx_unlock(&null_mp->nullm_lock);
+		// nullfs_special_readdir drops the lock
 		return error;
 	}
 	lck_mtx_unlock(&null_mp->nullm_lock);

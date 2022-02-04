@@ -596,20 +596,19 @@ def ShowKernelDebugBufferCPU(cmd_args=None):
     cpu_number = ArgumentStringToInt(cmd_args[0])
     entry_count = ArgumentStringToInt(cmd_args[1])
     debugentriesfound = 0
-    #  Check if KDBG_BFINIT (0x80000000) is set in kdebug_flags
-    if (kern.globals.kd_ctrl_page.kdebug_flags & 0x80000000):   
+    if (kern.globals.kd_ctrl_page_trace.kdebug_flags & xnudefines.KDBG_BUFINIT):   
         out_str += ShowKernelDebugBufferCPU.header + "\n"
         if entry_count == 0:
             out_str += "<count> is 0, dumping 50 entries\n"
             entry_count = 50
 
-        if cpu_number >= kern.globals.kd_ctrl_page.kdebug_cpus:
+        if cpu_number >= kern.globals.kd_ctrl_page_trace.kdebug_cpus:
             kdbg_str += "cpu number too big\n"
         else:
-            kdbp = addressof(kern.globals.kdbip[cpu_number])
+            kdbp = addressof(kern.globals.kd_data_page_trace.kdbip[cpu_number])
             kdsp = kdbp.kd_list_head
             while ((kdsp.raw != 0 and kdsp.raw != 0x00000000ffffffff) and (entry_count > 0)):
-                kd_buffer = kern.globals.kd_bufs[kdsp.buffer_index]
+                kd_buffer = kern.globals.kd_data_page_trace.kd_bufs[kdsp.buffer_index]
                 kdsp_actual = addressof(kd_buffer.kdsb_addr[kdsp.offset])
                 if kdsp_actual.kds_readlast != kdsp_actual.kds_bufindx:
                     kds_buf = kdsp_actual.kds_records[kdsp_actual.kds_bufindx]
@@ -635,14 +634,13 @@ def ShowKernelDebugBuffer(cmd_args=None):
     if cmd_args == None or len(cmd_args) < 1:
         raise ArgumentError("Invalid arguments passed.")
     
-    #  Check if KDBG_BFINIT (0x80000000) is set in kdebug_flags
-    if (kern.globals.kd_ctrl_page.kdebug_flags & 0x80000000):
+    if (kern.globals.kd_ctrl_page_trace.kdebug_flags & xnudefines.KDBG_BUFINIT):
         entrycount = ArgumentStringToInt(cmd_args[0])
         if entrycount == 0:
             print "<count> is 0, dumping 50 entries per cpu\n"
             entrycount = 50
         cpu_num = 0
-        while cpu_num < kern.globals.kd_ctrl_page.kdebug_cpus:
+        while cpu_num < kern.globals.kd_ctrl_page_trace.kdebug_cpus:
             ShowKernelDebugBufferCPU([str(cpu_num), str(entrycount)])
             cpu_num += 1
     else:
@@ -664,8 +662,7 @@ def DumpRawTraceFile(cmd_args=[], cmd_options={}):
         cf. kdbg_read()\bsd/kern/kdebug.c
     """
 
-    #  Check if KDBG_BFINIT (0x80000000) is set in kdebug_flags 
-    if (kern.globals.kd_ctrl_page.kdebug_flags & xnudefines.KDBG_BFINIT) == 0 :
+    if (kern.globals.kd_ctrl_page_trace.kdebug_flags & xnudefines.KDBG_BUFINIT) == 0 :
         print "Trace buffer not enabled\n"
         return
 
@@ -717,33 +714,33 @@ def DumpRawTraceFile(cmd_args=[], cmd_options={}):
     if opt_verbose > vHUMAN :
         print "uptime : {:d}".format(uptime)
 
-    nkdbufs = kern.globals.nkdbufs
+    nkdbufs = kern.globals.kd_data_page_trace.nkdbufs
 
-    kd_ctrl_page = kern.globals.kd_ctrl_page
-    if not kd_ctrl_page in htab :
-        htab[kd_ctrl_page] = kern.globals.kd_ctrl_page
+    kd_ctrl_page_trace = kern.globals.kd_ctrl_page_trace
+    if not kd_ctrl_page_trace in htab :
+        htab[kd_ctrl_page_trace] = kern.globals.kd_ctrl_page_trace
 
     if opt_verbose > vHUMAN :
-        print "nkdbufs {0:#x}, enabled {1:#x}, flags {2:#x}, cpus {3:#x}".format(nkdbufs, htab[kd_ctrl_page].enabled, htab[kd_ctrl_page].kdebug_flags, htab[kd_ctrl_page].kdebug_cpus)
+        print "kd_data_page_trace_nkdbufs {0:#x}, enabled {1:#x}, flags {2:#x}, cpus {3:#x}".format(nkdbufs, htab[kd_ctrl_page_trace].enabled, htab[kd_ctrl_page_trace].kdebug_flags, htab[kd_ctrl_page_trace].kdebug_cpus)
 
     if nkdbufs == 0 :
-        print "0 nkdbufs, nothing extracted"
+        print "0 kd_data_page_trace_nkdbufs, nothing extracted"
         return
 
-    if htab[kd_ctrl_page].enabled != 0 :
+    if htab[kd_ctrl_page_trace].enabled != 0 :
         barrier_max = uptime & KDBG_TIMESTAMP_MASK
 
-        f = htab[kd_ctrl_page].kdebug_flags
+        f = htab[kd_ctrl_page_trace].kdebug_flags
         wrapped = f & xnudefines.KDBG_WRAPPED
     if wrapped != 0 :
-        barrier_min = htab[kd_ctrl_page].oldest_time
-        htab[kd_ctrl_page].kdebug_flags = htab[kd_ctrl_page].kdebug_flags & ~xnudefines.KDBG_WRAPPED
-        htab[kd_ctrl_page].oldest_time = 0
+        barrier_min = htab[kd_ctrl_page_trace].oldest_time
+        htab[kd_ctrl_page_trace].kdebug_flags = htab[kd_ctrl_page_trace].kdebug_flags & ~xnudefines.KDBG_WRAPPED
+        htab[kd_ctrl_page_trace].oldest_time = 0
 
-        for cpu in range(htab[kd_ctrl_page].kdebug_cpus) :
-            kdbp = unsigned(addressof(kern.globals.kdbip[cpu]))
+        for cpu in range(htab[kd_ctrl_page_trace].kdebug_cpus) :
+            kdbp = unsigned(addressof(kern.globals.kd_data_page_trace.kdbip[cpu]))
             if not kdbp in htab :
-                htab[kdbp] = kern.globals.kdbip[cpu]
+                htab[kdbp] = kern.globals.kd_data_page_trace.kdbip[cpu]
 
             kdsp = htab[kdbp].kd_list_head.raw
             if kdsp == xnudefines.KDS_PTR_NULL :
@@ -751,9 +748,9 @@ def DumpRawTraceFile(cmd_args=[], cmd_options={}):
 
             ix = htab[kdbp].kd_list_head.buffer_index
             off = htab[kdbp].kd_list_head.offset
-            kdsp_actual = unsigned(addressof(kern.globals.kd_bufs[ix].kdsb_addr[off]))
+            kdsp_actual = unsigned(addressof(kern.globals.kd_data_page_trace.kd_bufs[ix].kdsb_addr[off]))
             if not kdsp_actual in htab :
-                htab[kdsp_actual] = kern.globals.kd_bufs[ix].kdsb_addr[off]
+                htab[kdsp_actual] = kern.globals.kd_data_page_trace.kd_bufs[ix].kdsb_addr[off]
             htab[kdsp_actual].kds_lostevents = False
 
 
@@ -767,11 +764,11 @@ def DumpRawTraceFile(cmd_args=[], cmd_options={}):
     header += "\x00" * pad_bytes
     wfd.write(buffer(header))
 
-    count = nkdbufs
+    count = kern.globals.kd_data_page_trace.nkdbufs
     while count != 0 :
         tempbuf = ""
         tempbuf_number = 0
-        tempbuf_count = min(count, xnudefines.KDCOPYBUF_COUNT)
+        tempbuf_count = min(count, kern.globals.kd_ctrl_page_trace.kdebug_kdcopybuf_count)
 
         # while space
         while tempbuf_count != 0 :
@@ -787,11 +784,11 @@ def DumpRawTraceFile(cmd_args=[], cmd_options={}):
             min_cpu = 0
 
             # Check all CPUs
-            for cpu in range(htab[kd_ctrl_page].kdebug_cpus) :
+            for cpu in range(htab[kd_ctrl_page_trace].kdebug_cpus) :
 
-                kdbp = unsigned(addressof(kern.globals.kdbip[cpu]))
+                kdbp = unsigned(addressof(kern.globals.kd_data_page_trace.kdbip[cpu]))
                 if not kdbp in htab :
-                    htab[kdbp] = kern.globals.kdbip[cpu]
+                    htab[kdbp] = kern.globals.kd_data_page_trace.kdbip[cpu]
 
                 # Skip CPUs without data.
                 kdsp = htab[kdbp].kd_list_head
@@ -803,9 +800,9 @@ def DumpRawTraceFile(cmd_args=[], cmd_options={}):
                 # Get from cpu data to buffer header to buffer
                 ix = kdsp.buffer_index
                 off = kdsp.offset
-                kdsp_actual = unsigned(addressof(kern.globals.kd_bufs[ix].kdsb_addr[off]))
+                kdsp_actual = unsigned(addressof(kern.globals.kd_data_page_trace.kd_bufs[ix].kdsb_addr[off]))
                 if not kdsp_actual in htab :
-                    htab[kdsp_actual] = kern.globals.kd_bufs[ix].kdsb_addr[off]
+                    htab[kdsp_actual] = kern.globals.kd_data_page_trace.kd_bufs[ix].kdsb_addr[off]
 
                 kdsp_actual_shadow = kdsp_actual
 
@@ -834,7 +831,7 @@ def DumpRawTraceFile(cmd_args=[], cmd_options={}):
 
                         ix  = kdsp.buffer_index
                         off = kdsp.offset
-                        kdsp_actual = unsigned(addressof(kern.globals.kd_bufs[ix].kdsb_addr[off]))
+                        kdsp_actual = unsigned(addressof(kern.globals.kd_data_page_trace.kd_bufs[ix].kdsb_addr[off]))
 
                         kdsp_actual_shadow = kdsp_actual;
                         rcursor = htab[kdsp_actual].kds_readlast;
@@ -879,9 +876,9 @@ def DumpRawTraceFile(cmd_args=[], cmd_options={}):
 
             ix = kdsp.buffer_index
             off = kdsp.offset
-            kdsp_actual = unsigned(addressof(kern.globals.kd_bufs[ix].kdsb_addr[off]))
+            kdsp_actual = unsigned(addressof(kern.globals.kd_data_page_trace.kd_bufs[ix].kdsb_addr[off]))
             if not kdsp_actual in htab :
-                htab[kdsp_actual] = kern.globals.kd_bufs[ix].kdsb_addr[off]
+                htab[kdsp_actual] = kern.globals.kd_data_page_trace.kd_bufs[ix].kdsb_addr[off]
 
             # Copy earliest event into merged events scratch buffer.
             r = htab[kdsp_actual].kds_readlast
@@ -956,15 +953,20 @@ def DumpRawTraceFile(cmd_args=[], cmd_options={}):
 
 
 def GetTimebaseInfo():
-    try:
-        tb = kern.GetValueFromAddress(
-                'RTClockData', '_rtclock_data_').rtc_timebase_const
-        numer = tb.numer
-        denom = tb.denom
-    except NameError:
-        # Intel -- use the 1-1 timebase.
-        numer = 1
-        denom = 1
+    timebase_key = 'kern.rtc_timebase'
+    numer, denom = caching.GetStaticCacheData(timebase_key, (None, None))
+    if not numer or not denom:
+        if kern.arch == 'x86_64':
+            numer = 1
+            denom = 1
+        else:
+            rtclockdata_addr = kern.GetLoadAddressForSymbol('RTClockData')
+            rtc = kern.GetValueFromAddress(
+                rtclockdata_addr, 'struct _rtclock_data_ *')
+            tb = rtc.rtc_timebase_const
+            numer = tb.numer
+            denom = tb.denom
+        caching.SaveStaticCacheData(timebase_key, (numer, denom))
     return numer, denom
 
 
@@ -1049,3 +1051,69 @@ def QIterate(cmd_args=None, cmd_options={}):
                 i = i + 1
     except:
         print "Exception while looking at queue_head: {:#x}".format(unsigned(qhead))
+
+@lldb_command('lbrbt')
+def LBRBacktrace(cmd_args=None):
+    """
+        Prints symbolicated last branch records captured on Intel systems
+        from a core file. Will not work on a live system.
+        usage:
+            lbrbt
+        options:
+            None
+    """
+    DecoratedLBRStack = SymbolicateLBR()
+    if (DecoratedLBRStack):
+        print(DecoratedLBRStack)
+
+def SymbolicateLBR():
+    lbr_size_offset = 5
+    cpu_num_offset = 4
+    LBRMagic = 0x5352424C
+    
+    try:
+        phys_carveout_addr = kern.GetLoadAddressForSymbol("phys_carveout")
+    except LookupError:
+        print("Last Branch Recoreds not present in this core file")
+        return None
+    try:
+        phys_carveout_md_addr = kern.GetLoadAddressForSymbol("phys_carveout_metadata")
+    except LookupError:
+        print("Last Branch Recoreds not present in this core file")
+        return None
+
+    metadata_ptr = kern.GetValueFromAddress(phys_carveout_md_addr, "uint64_t *")
+    metadata = kern.GetValueFromAddress(unsigned(metadata_ptr[0]), "uint8_t *")
+    carveout_ptr = kern.GetValueFromAddress(phys_carveout_addr, "uint64_t *")
+
+    metadata_hdr = kern.GetValueFromAddress(unsigned(metadata_ptr[0]), "uint32_t *")
+    if not (unsigned(metadata_hdr[0]) == LBRMagic):
+        print("'LBRS' not found at beginning of phys_carveout section, cannot proceed.")
+        return None
+
+    lbr_records = unsigned(carveout_ptr[0])
+
+    num_lbrs = int(metadata[lbr_size_offset])
+
+    header_line = "".join("{:49s} -> {:s}\n".format("From", "To"))
+    ncpus = int(metadata[cpu_num_offset])
+
+    output_lines = [] 
+
+    target = LazyTarget.GetTarget()
+
+    for cpu in range(ncpus):
+        start_addr_from = lbr_records + num_lbrs * 8 * cpu
+        start_addr_to = start_addr_from + num_lbrs * 8 * ncpus
+        from_lbr = kern.GetValueFromAddress(start_addr_from, "uint64_t *")
+        to_lbr = kern.GetValueFromAddress(start_addr_to, "uint64_t *")
+        for i in range(num_lbrs):
+            if (from_lbr[i] == 0x0 or to_lbr[i] == 0x0):
+                break
+            ## Replace newline with space to include inlined functions
+            ## in a trade off for longer output lines. 
+            fprint = str(target.ResolveLoadAddress(int(from_lbr[i]))).replace('\n', ' ')
+            tprint = str(target.ResolveLoadAddress(int(to_lbr[i]))).replace('\n', ' ')
+            output_lines.append(''.join("({:x}) {:30s} -> ({:x}) {:30s}\n".format(from_lbr[i], fprint, to_lbr[i], tprint)))
+
+    return header_line + ''.join(output_lines)

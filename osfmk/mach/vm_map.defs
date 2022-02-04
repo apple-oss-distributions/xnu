@@ -84,6 +84,13 @@ subsystem
 #define KERNEL_SERVER_SUFFIX(NAME) NAME
 #endif
 
+/* If building for Sandbox, keep NAME unchanged */
+#if SANDBOX_COMPILER
+#define KERNEL_SERVER_SUFFIX_SANDBOX(NAME) NAME
+#else
+#define KERNEL_SERVER_SUFFIX_SANDBOX(NAME) KERNEL_SERVER_SUFFIX(NAME)
+#endif
+
 /*
  *      Returns information about the contents of the virtual
  *      address space of the target task at the specified
@@ -96,7 +103,7 @@ subsystem
  *      the one specified are allocated, the call returns KERN_NO_SPACE.]
  */
 routine vm_region(
-                target_task     : vm_map_t;
+                target_task     : vm_map_read_t;
 	inout	address		: vm_address_t;
         out     size            : vm_size_t;
 		flavor		: vm_region_flavor_t;
@@ -182,7 +189,7 @@ routine vm_inherit(
  *	protection on the specified range must permit reading.]
  */
 routine PREFIX(vm_read) (
-		target_task	: vm_map_t;
+		target_task	: vm_map_read_t;
 		address		: vm_address_t;
 		size		: vm_size_t;
 	out	data		: pointer_t);
@@ -192,7 +199,7 @@ routine PREFIX(vm_read) (
  * ranges within target address space.
  */
 routine vm_read_list(
-		target_task 	: vm_map_t;
+		target_task 	: vm_map_read_t;
 	inout	data_list   	: vm_read_entry_t;
 		count		: natural_t);
 
@@ -233,7 +240,7 @@ routine vm_copy(
  *	must permit reading.]
  */
 routine vm_read_overwrite(
-		target_task	: vm_map_t;
+		target_task	: vm_map_read_t;
 		address		: vm_address_t;
 		size		: vm_size_t;
 		data		: vm_address_t;
@@ -361,7 +368,7 @@ routine mach_make_memory_entry(
  *      address space.  If a page is mapped return ref and dirty info.
  */
 routine vm_map_page_query(
-                target_map      :vm_map_t;
+                target_map      :vm_map_read_t;
                 offset          :vm_offset_t;
         out     disposition     :integer_t;
         out     ref_count       :integer_t);
@@ -373,13 +380,13 @@ routine vm_map_page_query(
  *      otherwise returns KERN_FAILURE.
  */
 routine mach_vm_region_info(
-		task		: vm_map_t;
+		task		: vm_map_read_t;
 		address		: vm_address_t;
 	out	region		: vm_info_region_t;
 	out	objects		: vm_info_object_array_t);
 
-routine	vm_mapped_pages_info(
-		task		: vm_map_t;
+routine	vm_mapped_pages_info(  /* OBSOLETE */
+		task		: vm_map_read_t;
 	out	pages		: page_address_array_t);
 
 #if 0
@@ -403,7 +410,7 @@ skip; /* was vm_region_object_create */
  *	address space.
  */
 routine vm_region_recurse(
-                target_task     : vm_map_t;
+                target_task     : vm_map_read_t;
 	inout	address		: vm_address_t;
         out     size            : vm_size_t;
 	inout	nesting_depth	: natural_t;
@@ -417,20 +424,20 @@ routine vm_region_recurse(
 
 
 routine vm_region_recurse_64(
-                target_task     : vm_map_t;
+                target_task     : vm_map_read_t;
 	inout	address		: vm_address_t;
         out     size            : vm_size_t;
 	inout	nesting_depth	: natural_t;
 	out	info		: vm_region_recurse_info_t,CountInOut);
 
-routine mach_vm_region_info_64(
-		task		: vm_map_t;
+routine mach_vm_region_info_64( /* OBSOLETE */
+		task		: vm_map_read_t;
 		address		: vm_address_t;
 	out	region		: vm_info_region_64_t;
 	out	objects		: vm_info_object_array_t);
 
 routine vm_region_64(
-                target_task     : vm_map_t;
+                target_task     : vm_map_read_t;
 	inout	address		: vm_address_t;
         out     size            : vm_size_t;
 		flavor		: vm_region_flavor_t;
@@ -496,8 +503,12 @@ skip; /* was vm_upl_unmap */
  *	specified.  See the routine implementation for a complete
  *	definition of the routine.
  */
-routine PREFIX(vm_purgable_control) (
+routine PREFIX(KERNEL_SERVER_SUFFIX_SANDBOX(vm_purgable_control)) (
+#if KERNEL_SERVER
+		target_tport: mach_port_t;
+#else
 		target_task	: vm_map_t;
+#endif
 		address		: vm_address_t;
 		control		: vm_purgable_t;
 	inout	state		: int);
@@ -506,5 +517,21 @@ routine PREFIX(vm_purgable_control) (
 routine vm_map_exec_lockdown(
 		target_task 	: vm_map_t);
 
+routine PREFIX(KERNEL_SERVER_SUFFIX(vm_remap_new)) (
+		target_task	: vm_map_t;
+inout	target_address	: vm_address_t;
+		size		: vm_size_t;
+		mask		: vm_address_t;
+		flags		: int;
+#ifdef KERNEL_SERVER
+		src_tport   : mach_port_t;
+#else
+		src_task	: vm_map_read_t;
+#endif
+		src_address	: vm_address_t;
+		copy		: boolean_t;
+inout	cur_protection	: vm_prot_t;
+inout	max_protection	: vm_prot_t;
+		inheritance	: vm_inherit_t);
 
 /* vim: set ft=c : */

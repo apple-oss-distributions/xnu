@@ -85,20 +85,21 @@
 #ifdef MACH_KERNEL_PRIVATE
 #include <kern/macro_help.h>
 #include <kern/kern_types.h>
+#include <kern/hazard.h>
 #include <kern/locks.h>
 #include <kern/task.h>
 #include <kern/zalloc.h>
 #include <ipc/ipc_entry.h>
 #include <ipc/ipc_types.h>
 
-#include <libkern/OSAtomic.h>
+#include <os/refcnt.h>
 
 /*
  *	Every task has a space of IPC capabilities.
  *	IPC operations like send and receive use this space.
  *	IPC kernel calls manipulate the space of the target task.
  *
- *	Every space has a non-NULL is_table with is_table_size entries.
+ *	Every space has a non-NULL is_table with is_table[0].ie_size entries.
  *
  *	Only one thread can be growing the space at a time.  Others
  *	that need it grown wait for the first.  We do almost all the
@@ -107,117 +108,155 @@
  */
 
 typedef natural_t ipc_space_refs_t;
-#define IS_REFS_MAX     0x0fffffff
-#define IS_INACTIVE     0x40000000      /* space is inactive */
-#define IS_GROWING      0x20000000      /* space is growing */
-#define IS_ENTROPY_CNT  1               /* per-space entropy pool size */
+#define IS_ENTROPY_CNT                 1        /* per-space entropy pool size */
+
+#define IS_FLAGS_BITS                  6
+#if CONFIG_PROC_RESOURCE_LIMITS
+#define IS_ABOVE_SOFT_LIMIT_NOTIFY     0x01     /* space has hit the soft limit */
+#define IS_ABOVE_HARD_LIMIT_NOTIFY     0x02     /* space has hit the hard limit */
+#define IS_SOFT_LIMIT_NOTIFIED         0x04     /* Sent soft limit notification */
+#define IS_HARD_LIMIT_NOTIFIED         0x08     /* Sent hard limit notification */
+#endif /* CONFIG_PROC_RESOURCE_LIMITS */
+#define IS_AT_MAX_LIMIT_NOTIFY         0x10     /* space has hit the max limit */
+#define IS_AT_MAX_LIMIT_NOTIFIED       0x20     /* sent max limit notification */
 
 struct ipc_space {
-	lck_spin_t      is_lock_data;
-	ipc_space_refs_t is_bits;       /* holds refs, active, growing */
-	ipc_entry_num_t is_table_size;  /* current size of table */
+	lck_ticket_t    is_lock;
+	os_ref_atomic_t is_bits;        /* holds refs, active, growing */
 	ipc_entry_num_t is_table_hashed;/* count of hashed elements */
 	ipc_entry_num_t is_table_free;  /* count of free elements */
-	ipc_entry_t XNU_PTRAUTH_SIGNED_PTR("ipc_space.is_table") is_table; /* an array of entries */
+	HAZARD_POINTER(ipc_entry_t XNU_PTRAUTH_SIGNED_PTR("ipc_space.is_table")) is_table; /* an array of entries */
 	struct ipc_table_size * XNU_PTRAUTH_SIGNED_PTR("ipc_space.is_table_next") is_table_next; /* info for larger table */
 	task_t XNU_PTRAUTH_SIGNED_PTR("ipc_space.is_task") is_task; /* associated task */
-	ipc_label_t is_label;           /* [private] mandatory access label */
+	thread_t        is_grower;      /* thread growing the space */
+	ipc_label_t     is_label;       /* [private] mandatory access label */
 	ipc_entry_num_t is_low_mod;     /* lowest modified entry during growth */
 	ipc_entry_num_t is_high_mod;    /* highest modified entry during growth */
 	struct bool_gen bool_gen;       /* state for boolean RNG */
-	unsigned int is_entropy[IS_ENTROPY_CNT]; /* pool of entropy taken from RNG */
-	int is_node_id;                 /* HOST_LOCAL_NODE, or remote node if proxy space */
+	unsigned int    is_entropy[IS_ENTROPY_CNT]; /* pool of entropy taken from RNG */
+	int             is_node_id;     /* HOST_LOCAL_NODE, or remote node if proxy space */
+#if CONFIG_PROC_RESOURCE_LIMITS
+	ipc_entry_num_t is_table_size_soft_limit; /* resource_notify is sent when the table size hits this limit */
+	ipc_entry_num_t is_table_size_hard_limit; /* same as soft limit except the task is killed soon after data collection */
+#endif /* CONFIG_PROC_RESOURCE_LIMITS */
 };
 
 #define IS_NULL                 ((ipc_space_t) 0)
 #define IS_INSPECT_NULL         ((ipc_space_inspect_t) 0)
 
-#define is_active(is)           (((is)->is_bits & IS_INACTIVE) != IS_INACTIVE)
-
-static inline void
-is_mark_inactive(ipc_space_t is)
+static inline bool
+is_bits_set(ipc_space_t is, uint32_t bit)
 {
-	assert(is_active(is));
-	OSBitOrAtomic(IS_INACTIVE, &is->is_bits);
+	return (os_atomic_or_orig(&is->is_bits, bit, relaxed) & bit) == 0;
 }
 
-#define is_growing(is)          (((is)->is_bits & IS_GROWING) == IS_GROWING)
+static inline bool
+is_bits_clear(ipc_space_t is, uint32_t bit)
+{
+	return (os_atomic_andnot_orig(&is->is_bits, bit, relaxed) & bit) != 0;
+}
+
+static inline bool
+is_bits_test(ipc_space_t is, uint32_t bit)
+{
+	return os_ref_get_raw_mask(&is->is_bits) & bit;
+}
+
+#define is_active(is)           (hazard_ptr_load(&(is)->is_table) != NULL)
+#define is_growing(is)          ((is)->is_grower != THREAD_NULL)
+
+static inline ipc_entry_t
+is_active_table(ipc_space_t space)
+{
+	ipc_entry_t table = hazard_ptr_serialized_load(&space->is_table);
+	assert(table != NULL);
+	return table;
+}
+
+#if CONFIG_PROC_RESOURCE_LIMITS
+#define is_above_soft_limit_notify(is)      is_bits_test(is, IS_ABOVE_SOFT_LIMIT_NOTIFY)
+#define is_above_hard_limit_notify(is)      is_bits_test(is, IS_ABOVE_HARD_LIMIT_NOTIFY)
 
 static inline void
-is_start_growing(ipc_space_t is)
+is_above_soft_limit_send_notification(ipc_space_t is)
 {
-	assert(!is_growing(is));
-	OSBitOrAtomic(IS_GROWING, &is->is_bits);
+	is_bits_set(is, IS_ABOVE_SOFT_LIMIT_NOTIFY);
 }
 
 static inline void
-is_done_growing(ipc_space_t is)
+is_above_hard_limit_send_notification(ipc_space_t is)
 {
-	assert(is_growing(is));
-	OSBitAndAtomic((ipc_space_refs_t)~IS_GROWING, &is->is_bits);
+	is_bits_set(is, IS_ABOVE_HARD_LIMIT_NOTIFY);
 }
 
-extern zone_t ipc_space_zone;
+#define is_soft_limit_already_notified(is)  is_bits_test(is, IS_SOFT_LIMIT_NOTIFIED)
+#define is_hard_limit_already_notified(is)  is_bits_test(is, IS_HARD_LIMIT_NOTIFIED)
 
-#define is_alloc()              ((ipc_space_t) zalloc(ipc_space_zone))
-#define is_free(is)             zfree(ipc_space_zone, (is))
+static inline void
+is_soft_limit_notified(ipc_space_t is)
+{
+	is_bits_set(is, IS_SOFT_LIMIT_NOTIFIED);
+}
+
+static inline void
+is_hard_limit_notified(ipc_space_t is)
+{
+	is_bits_set(is, IS_HARD_LIMIT_NOTIFIED);
+}
+
+#endif /* CONFIG_PROC_RESOURCE_LIMITS */
+
+#define is_at_max_limit_notify(is)                is_bits_test(is, IS_AT_MAX_LIMIT_NOTIFY)
+#define is_at_max_limit_already_notified(is)      is_bits_test(is, IS_AT_MAX_LIMIT_NOTIFIED)
+
+static inline void
+is_at_max_limit_send_notification(ipc_space_t is)
+{
+	is_bits_set(is, IS_AT_MAX_LIMIT_NOTIFY);
+}
+
+static inline void
+is_at_max_limit_notified(ipc_space_t is)
+{
+	is_bits_set(is, IS_AT_MAX_LIMIT_NOTIFIED);
+}
 
 extern ipc_space_t ipc_space_kernel;
 extern ipc_space_t ipc_space_reply;
-#if     DIPC
-extern ipc_space_t ipc_space_remote;
-#endif  /* DIPC */
-#if     DIPC
-extern ipc_space_t default_pager_space;
-#endif  /* DIPC */
+extern lck_grp_t   ipc_lck_grp;
+extern lck_attr_t  ipc_lck_attr;
 
-extern lck_grp_t        ipc_lck_grp;
-extern lck_attr_t       ipc_lck_attr;
+#define is_read_lock(is)        ipc_space_lock(is)
+#define is_read_unlock(is)      ipc_space_unlock(is)
 
-#define is_lock_init(is)        lck_spin_init(&(is)->is_lock_data, &ipc_lck_grp, &ipc_lck_attr)
-#define is_lock_destroy(is)     lck_spin_destroy(&(is)->is_lock_data, &ipc_lck_grp)
+#define is_write_lock(is)       ipc_space_lock(is)
+#define is_write_unlock(is)     ipc_space_unlock(is)
+#define is_write_sleep(is)      ipc_space_lock_sleep(is)
 
-#define is_read_lock(is)        lck_spin_lock_grp(&(is)->is_lock_data, &ipc_lck_grp)
-#define is_read_unlock(is)      lck_spin_unlock(&(is)->is_lock_data)
-#define is_read_sleep(is)       lck_spin_sleep_grp(&(is)->is_lock_data,     \
-	                                                LCK_SLEEP_DEFAULT,                                      \
-	                                                (event_t)(is),                                          \
-	                                                THREAD_UNINT,                                           \
-	                                                &ipc_lck_grp)
-
-#define is_write_lock(is)       lck_spin_lock_grp(&(is)->is_lock_data, &ipc_lck_grp)
-#define is_write_unlock(is)     lck_spin_unlock(&(is)->is_lock_data)
-#define is_write_sleep(is)      lck_spin_sleep_grp(&(is)->is_lock_data,     \
-	                                                LCK_SLEEP_DEFAULT,                                      \
-	                                                (event_t)(is),                                          \
-	                                                THREAD_UNINT,                                           \
-	                                                &ipc_lck_grp)
-
-#define is_refs(is)             ((is)->is_bits & IS_REFS_MAX)
-
-static inline void
-is_reference(ipc_space_t is)
-{
-	assert(is_refs(is) > 0 && is_refs(is) < IS_REFS_MAX);
-	OSIncrementAtomic(&(is->is_bits));
-}
-
-
-static inline void
-is_release(ipc_space_t is)
-{
-	assert(is_refs(is) > 0);
-
-	/* If we just removed the last reference count */
-	if (1 == (OSDecrementAtomic(&(is->is_bits)) & IS_REFS_MAX)) {
-		assert(!is_active(is));
-		is_lock_destroy(is);
-		is_free(is);
-	}
-}
+#define is_reference(is)        ipc_space_reference(is)
+#define is_release(is)          ipc_space_release(is)
 
 #define current_space_fast()    (current_task_fast()->itk_space)
 #define current_space()         (current_space_fast())
+
+extern void         ipc_space_lock(
+	ipc_space_t     space);
+
+extern void         ipc_space_unlock(
+	ipc_space_t     space);
+
+extern void         ipc_space_lock_sleep(
+	ipc_space_t     space);
+
+extern void         ipc_space_free_table(
+	ipc_entry_t     table);
+
+#if MACH_LOCKFREE_SPACE
+extern void         ipc_space_retire_table(
+	ipc_entry_t     table);
+#else
+#define ipc_space_retire_table  ipc_space_free_table
+#endif
 
 /* Create a special IPC space */
 extern kern_return_t ipc_space_create_special(
@@ -243,10 +282,6 @@ extern kern_return_t ipc_space_add_label(
 extern void ipc_space_terminate(
 	ipc_space_t     space);
 
-/* Clean up the entries - but leave the space alive */
-extern void ipc_space_clean(
-	ipc_space_t     space);
-
 /* Permute the order of a range within an IPC space */
 extern void ipc_space_rand_freelist(
 	ipc_space_t             space,
@@ -257,12 +292,25 @@ extern void ipc_space_rand_freelist(
 /* Generate a new gencount rollover point from a space's entropy pool */
 extern ipc_entry_bits_t ipc_space_get_rollpoint(ipc_space_t space);
 
-/* Allocate a new port/set/dead-name in a space */
-extern kern_return_t mach_port_allocate_internal(
-	ipc_space_t       space,
-	mach_port_right_t right,
-	mach_port_qos_t   *qosp,
-	mach_port_name_t  *namep);
+#if CONFIG_PROC_RESOURCE_LIMITS
+/* Set limits on a space's size */
+extern kern_return_t ipc_space_set_table_size_limits(
+	ipc_space_t     space,
+	ipc_entry_num_t soft_limit,
+	ipc_entry_num_t hard_limit);
+
+extern void ipc_space_check_limit_exceeded(
+	ipc_space_t space);
+#endif /* CONFIG_PROC_RESOURCE_LIMITS */
+
+extern kern_return_t ipc_space_get_table_size_and_limits(
+	ipc_space_t space,
+	ipc_entry_num_t *current_limit,
+	ipc_entry_num_t *soft_limit,
+	ipc_entry_num_t *hard_limit);
+
+extern void ipc_space_set_at_max_limit(
+	ipc_space_t space);
 
 #endif /* MACH_KERNEL_PRIVATE */
 #endif /* __APPLE_API_PRIVATE */

@@ -87,7 +87,7 @@ enum {
 	UART_MCR = 4, /* modem control register        */
 	UART_LSR = 5, /* line status register          */
 	UART_MSR = 6, /* modem status register         */
-	UART_SCR = 7 /* scratch register              */
+	UART_SCR = 7  /* scratch register              */
 };
 
 enum {
@@ -168,9 +168,9 @@ legacy_uart_init( void )
 	IO_WRITE( MCR, 0 );
 	IO_WRITE( IER, 0 );
 
-	/* Disable FIFO's for 16550 devices */
+	/* Enable FIFO's for 16550 devices */
 
-	IO_WRITE( FCR, 0 );
+	IO_WRITE( FCR, 1 );
 
 	/* Set for 8-bit, no parity, DLAB bit cleared */
 
@@ -233,18 +233,18 @@ static struct pe_serial_functions legacy_uart_serial_functions = {
 #define MMIO_READ(r)      ml_phys_read_word(mmio_uart_base + MMIO_UART_##r)
 
 enum {
-	MMIO_UART_RBR = 0x0, /* receive buffer Register   (R) */
-	MMIO_UART_THR = 0x0, /* transmit holding register (W) */
-	MMIO_UART_DLL = 0x0, /* DLAB = 1, divisor latch (LSB) */
-	MMIO_UART_IER = 0x4, /* interrupt enable register     */
-	MMIO_UART_DLM = 0x4, /* DLAB = 1, divisor latch (MSB) */
-	MMIO_UART_FCR = 0x8, /* fifo control register (W)     */
-	MMIO_UART_LCR = 0xc, /* line control register         */
-	MMIO_UART_MCR = 0x10, /* modem control register        */
-	MMIO_UART_LSR = 0x14, /* line status register          */
-	MMIO_UART_SCR = 0x1c, /* scratch register              */
+	MMIO_UART_RBR = 0x0,   /* receive buffer Register   (R) */
+	MMIO_UART_THR = 0x0,   /* transmit holding register (W) */
+	MMIO_UART_DLL = 0x0,   /* DLAB = 1, divisor latch (LSB) */
+	MMIO_UART_IER = 0x4,   /* interrupt enable register     */
+	MMIO_UART_DLM = 0x4,   /* DLAB = 1, divisor latch (MSB) */
+	MMIO_UART_FCR = 0x8,   /* fifo control register (W)     */
+	MMIO_UART_LCR = 0xc,   /* line control register         */
+	MMIO_UART_MCR = 0x10,  /* modem control register        */
+	MMIO_UART_LSR = 0x14,  /* line status register          */
+	MMIO_UART_SCR = 0x1c,  /* scratch register              */
 	MMIO_UART_CLK = 0x200, /* clocks register               */
-	MMIO_UART_RST = 0x204 /* Reset register              */
+	MMIO_UART_RST = 0x204  /* reset register                */
 };
 
 static vm_offset_t mmio_uart_base = 0;
@@ -331,9 +331,9 @@ mmio_uart_init( void )
 	MMIO_WRITE( MCR, 0 );
 	MMIO_WRITE( IER, 0 );
 
-	/* Disable FIFO's for 16550 devices */
+	/* Enable FIFO's for 16550 devices */
 
-	MMIO_WRITE( FCR, 0 );
+	MMIO_WRITE( FCR, 1 );
 
 	/* Set for 8-bit, no parity, DLAB bit cleared */
 
@@ -402,19 +402,19 @@ lpss_uart_re_init( void )
 {
 	uint32_t register_read;
 
-	MMIO_WRITE(RST, 0x7);                           /* LPSS UART2 controller out ot reset */
+	MMIO_WRITE(RST, 0x7);                   /* LPSS UART2 controller out of reset */
 	register_read = MMIO_READ(RST);
 
 	MMIO_WRITE(LCR, UART_LCR_DLAB);         /* Set DLAB bit to enable reading/writing of DLL, DLH */
 	register_read = MMIO_READ(LCR);
 
-	MMIO_WRITE(DLL, 1);                             /* Divisor Latch Low Register */
+	MMIO_WRITE(DLL, 1);                     /* Divisor Latch Low Register */
 	register_read = MMIO_READ(DLL);
 
-	MMIO_WRITE(DLM, 0);                             /* Divisor Latch High Register */
+	MMIO_WRITE(DLM, 0);                     /* Divisor Latch High Register */
 	register_read = MMIO_READ(DLM);
 
-	MMIO_WRITE(FCR, 1);                             /* Enable FIFO */
+	MMIO_WRITE(FCR, 1);                     /* Enable FIFO */
 	register_read = MMIO_READ(FCR);
 
 	MMIO_WRITE(LCR, UART_LCR_8BITS);        /* Set 8 bits, clear DLAB */
@@ -455,16 +455,19 @@ static struct pe_serial_functions mmio_uart_serial_functions = {
 #define PCIE_MMIO_READ(r)      ml_phys_read_byte(pcie_mmio_uart_base + PCIE_MMIO_UART_##r)
 
 enum {
-	PCIE_MMIO_UART_RBR = 0x0, /* receive buffer Register   (R) */
-	PCIE_MMIO_UART_THR = 0x0, /* transmit holding register (W) */
-	PCIE_MMIO_UART_IER = 0x1, /* interrupt enable register     */
-	PCIE_MMIO_UART_FCR = 0x2, /* fifo control register (W)     */
-	PCIE_MMIO_UART_LCR = 0x4, /* line control register         */
-	PCIE_MMIO_UART_MCR = 0x4, /* modem control register        */
-	PCIE_MMIO_UART_LSR = 0x5, /* line status register          */
-	PCIE_MMIO_UART_DLL = 0x8, /* DLAB = 1, divisor latch (LSB) */
-	PCIE_MMIO_UART_DLM = 0x9, /* DLAB = 1, divisor latch (MSB) */
-	PCIE_MMIO_UART_SCR = 0x30, /* scratch register              */
+	PCIE_MMIO_UART_RBR = 0x0, /* receive buffer Register   (R)       */
+	PCIE_MMIO_UART_THR = 0x0, /* transmit holding register (W)       */
+	PCIE_MMIO_UART_IER = 0x1, /* interrupt enable register           */
+	PCIE_MMIO_UART_FCR = 0x2, /* fifo control register (W)           */
+	PCIE_MMIO_UART_LCR = 0x4, /* line control register               */
+	PCIE_MMIO_UART_MCR = 0x4, /* modem control register              */
+	PCIE_MMIO_UART_LSR = 0x5, /* line status register                */
+	PCIE_MMIO_UART_SFR = 0x7, /* special function register           */
+	PCIE_MMIO_UART_DLL = 0x8, /* DLAB = 1, divisor latch (LSB)       */
+	PCIE_MMIO_UART_DLM = 0x9, /* DLAB = 1, divisor latch (MSB)       */
+	PCIE_MMIO_UART_EFR = 0xA, /* Enhanced function register          */
+#define PCIE_UART_ENHANCED_MODE (1U << 4)       /* EFR register bit 4 => 1 == enhanced mode (128-bit FIFOs) */
+	PCIE_MMIO_UART_SCR = 0x30 /* scratch register (not in datasheet) */
 };
 
 static vm_offset_t pcie_mmio_uart_base = 0;
@@ -540,6 +543,15 @@ pcie_mmio_uart_td0( int c )
 static void
 pcie_mmio_uart_init( void )
 {
+	/* Temporarily disable the FIFOs */
+	PCIE_MMIO_WRITE(FCR, 0);
+
+	/* Enable enhanced mode */
+	PCIE_MMIO_WRITE(EFR, PCIE_MMIO_READ(EFR) | PCIE_UART_ENHANCED_MODE);
+
+	/* Enable FIFOs */
+	PCIE_MMIO_WRITE(FCR, 1);
+
 	uart_initted = 1;
 }
 
@@ -631,6 +643,12 @@ uart_getc(void)
 		return gPESF->rd0();
 	}
 	return -1;
+}
+
+void
+serial_putc_options( char c, __unused bool poll )
+{
+	serial_putc(c);
 }
 
 void

@@ -314,7 +314,8 @@ extern int route_op_entitlement_check(struct socket *, kauth_cred_t, int, boolea
 #define RTF_PROXY       0x8000000       /* proxying, no interface scope */
 #define RTF_ROUTER      0x10000000      /* host is a router */
 #define RTF_DEAD        0x20000000      /* Route entry is being freed */
-                                        /* 0x40000000 and up unassigned */
+#define RTF_GLOBAL      0x40000000      /* route to destination of the global internet */
+                                        /* 0x80000000 unassigned */
 
 #define RTPRF_OURS      RTF_PROTO3      /* set on routes we manage */
 #define RTF_BITS \
@@ -322,7 +323,7 @@ extern int route_op_entitlement_check(struct socket *, kauth_cred_t, int, boolea
 	"\10DELCLONE\11CLONING\12XRESOLVE\13LLINFO\14STATIC\15BLACKHOLE" \
 	"\16NOIFREF\17PROTO2\20PROTO1\21PRCLONING\22WASCLONED\23PROTO3" \
 	"\25PINNED\26LOCAL\27BROADCAST\30MULTICAST\31IFSCOPE\32CONDEMNED" \
-	"\33IFREF\34PROXY\35ROUTER"
+	"\33IFREF\34PROXY\35ROUTER\37GLOBAL"
 
 #define IS_DIRECT_HOSTROUTE(rt) \
 	(((rt)->rt_flags & (RTF_HOST | RTF_GATEWAY)) == RTF_HOST)
@@ -493,6 +494,7 @@ struct rt_addrinfo {
  * For scoped routing; a zero interface scope value means nil/no scope.
  */
 #define IFSCOPE_NONE    0
+#define IFSCOPE_UNKNOWN IFSCOPE_NONE
 #endif /* PRIVATE */
 
 #ifdef BSD_KERNEL_PRIVATE
@@ -571,7 +573,8 @@ extern void ctrace_record(ctrace_t *);
 
 extern unsigned int rt_verbose;
 extern struct radix_node_head *rt_tables[AF_MAX + 1];
-extern lck_mtx_t *rnh_lock;
+extern lck_mtx_t rnh_lock_data;
+#define rnh_lock (&rnh_lock_data)
 extern uint32_t route_genid_inet;       /* INET route generation count */
 extern uint32_t route_genid_inet6;      /* INET6 route generation count */
 extern int rttrash;
@@ -615,8 +618,8 @@ extern void rtref(struct rtentry *);
  */
 extern int rtunref(struct rtentry *);
 extern void rtsetifa(struct rtentry *, struct ifaddr *);
-extern int rtinit(struct ifaddr *, int, int);
-extern int rtinit_locked(struct ifaddr *, int, int);
+extern int rtinit(struct ifaddr *, uint8_t, int);
+extern int rtinit_locked(struct ifaddr *, uint8_t, int);
 extern int rtioctl(unsigned long, caddr_t, struct proc *);
 extern void rtredirect(struct ifnet *, struct sockaddr *, struct sockaddr *,
     struct sockaddr *, int, struct sockaddr *, struct rtentry **);

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2017 Apple Inc. All rights reserved.
+ * Copyright (c) 2008-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -243,7 +243,6 @@ __NKE_API_DEPRECATED;
 extern errno_t ipf_inject_output(mbuf_t data, ipfilter_t filter_ref,
     ipf_pktopts_t options)
 __NKE_API_DEPRECATED;
-
 __END_DECLS
 #undef __NKE_API_DEPRECATED
 #endif /* __KPI_IPFILTER__ */

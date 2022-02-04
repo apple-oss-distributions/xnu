@@ -58,8 +58,12 @@
  * most Mach exceptions.
  */
 
-static const void                      *ux_handler_kobject    = NULL;
-SECURITY_READ_ONLY_LATE(ipc_port_t)     ux_handler_port       = IP_NULL;
+static SECURITY_READ_ONLY_LATE(const void *)    ux_handler_kobject    = NULL;
+SECURITY_READ_ONLY_LATE(ipc_port_t)             ux_handler_port       = IP_NULL;
+
+IPC_KOBJECT_DEFINE(IKOT_UX_HANDLER,
+    .iko_op_stable    = true,
+    .iko_op_permanent = true);
 
 /*
  * init is called early in Mach initialization
@@ -83,7 +87,7 @@ ux_handler_setup(void)
 	ipc_port_t ux_handler_send_right = ipc_port_make_send(ux_handler_port);
 
 	if (!IP_VALID(ux_handler_send_right)) {
-		panic("Couldn't allocate send right for ux_handler_port!\n");
+		panic("Couldn't allocate send right for ux_handler_port!");
 	}
 
 	kern_return_t kr = KERN_SUCCESS;
@@ -94,7 +98,7 @@ ux_handler_setup(void)
 	 * Instruments uses the RPC_ALERT port, so don't register for that.
 	 */
 	kr = host_set_exception_ports(host_priv_self(),
-	    EXC_MASK_ALL & ~(EXC_MASK_RPC_ALERT),
+	    EXC_MASK_ALL & ~(EXC_MASK_RPC_ALERT | EXC_MASK_GUARD),
 	    ux_handler_send_right,
 	    EXCEPTION_DEFAULT | MACH_EXCEPTION_CODES,
 	    0);
@@ -255,6 +259,18 @@ catch_mach_exception_raise_state_identity(
 	__unused mach_msg_type_number_t        old_stateCnt,
 	__unused thread_state_t                new_state,
 	__unused mach_msg_type_number_t       *new_stateCnt)
+{
+	return KERN_INVALID_ARGUMENT;
+}
+
+kern_return_t
+catch_mach_exception_raise_identity_protected(
+	__unused mach_port_t               exception_port,
+	__unused uint64_t                  thread_id,
+	__unused mach_port_t               task_id_token,
+	__unused exception_type_t          exception,
+	__unused mach_exception_data_t     code,
+	__unused mach_msg_type_number_t    codeCnt)
 {
 	return KERN_INVALID_ARGUMENT;
 }

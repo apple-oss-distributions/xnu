@@ -52,7 +52,7 @@ def ShowIfConfiguration(ifnet):
         out_string += format_string.format(iface.if_xname, (iface.if_flags & 0xffff), GetIfFlagsAsString(iface.if_flags), iface.if_index, iface.if_data.ifi_mtu)
         out_string += "\n\tdlil flags=" + hex(dlifnet.dl_if_flags)+ " <" + GetDlilIfFlagsAsString(dlifnet.dl_if_flags) + ">"
         out_string += "\n\t(struct ifnet *)" + hex(ifnet)
-        if iface.if_snd.ifcq_len :
+        if iface.if_snd and iface.if_snd.ifcq_len :
             out_string += "\n\t" + str(iface.if_snd.ifcq_len)
         if dlifnet.dl_if_inpstorage.dlth_pkts.qlen :
             out_string += "\n\t" + str(dlifnet.dl_if_inpstorage.dlth_pkts.qlen)
@@ -283,7 +283,7 @@ def GetCapabilitiesAsString(flags):
     return rstrip(out_string, ",")
 
 def GetIfEflagsAsString(if_eflags):
-    """ Return a formatted string description of the interface flags
+    """ Return a formatted string description of the interface extra flags
     """
     out_string = ""
     flags = unsigned(if_eflags)
@@ -292,6 +292,20 @@ def GetIfEflagsAsString(if_eflags):
     while num <= flags:
         if flags & num:
             out_string += if_eflags_strings[i] + ","
+        i += 1
+        num = num << 1
+    return rstrip(out_string, ",")
+
+def GetIfXflagsAsString(if_xflags):
+    """ Return a formatted string description of the interface extended flags
+    """
+    out_string = ""
+    flags = unsigned(if_xflags)
+    i = 0
+    num = 1
+    while num <= flags:
+        if flags & num:
+            out_string += if_xflags_strings[i] + ","
         i += 1
         num = num << 1
     return rstrip(out_string, ",")
@@ -312,6 +326,7 @@ def ShowDlilIfnetConfiguration(dlil_ifnet, show_all) :
         out_string  += "*"
     format_string = "{0: <s}: flags={1: <x} <{2: <s}> index {3: <d} mtu {4: <d}"
     extended_flags_format_string = "\n\teflags={0: <x} <{1: <s}>"
+    extra_flags_format_string = "\n\txflags={0: <x} <{1: <s}>"
     capenabled_format_string = "\n\toptions={0: <x} <{1: <s}>"
     if (dlil_iface.dl_if_flags & DLIF_INUSE) :
         out_string += format_string.format(iface.if_xname, (iface.if_flags & 0xffff), GetIfFlagsAsString(iface.if_flags), iface.if_index, iface.if_data.ifi_mtu)
@@ -319,6 +334,8 @@ def ShowDlilIfnetConfiguration(dlil_ifnet, show_all) :
         out_string += format_string.format("[" + str(iface.if_name) + str(int(iface.if_unit)) + "]", (iface.if_flags & 0xffff), GetIfFlagsAsString(iface.if_flags), iface.if_index, iface.if_data.ifi_mtu)
     if (iface.if_eflags) :
         out_string += extended_flags_format_string.format(iface.if_eflags, GetIfEflagsAsString(iface.if_eflags))
+    if (iface.if_xflags) :
+        out_string += extra_flags_format_string.format(iface.if_xflags, GetIfXflagsAsString(iface.if_xflags))
     if (iface.if_capenable) :
         out_string += capenabled_format_string.format(iface.if_capenable, GetCapabilitiesAsString(iface.if_capenable))
     out_string += "\n\t(struct ifnet *)" + hex(dlil_ifnet) + "\n"
@@ -604,23 +621,21 @@ def GetProcSockets(proc, total_snd_cc, total_rcv_cc):
         snd_cc = 0
         rcv_cc = 0
         sock_fd_seen = 0
-        count = 0
         """struct  filedesc *"""
-        proc_filedesc = proc.p_fd
+        proc_filedesc = addressof(proc.p_fd)
         """struct  fileproc **"""
         proc_ofiles = proc_filedesc.fd_ofiles
         """ high-water mark of fd_ofiles """
-        proc_lastfile = unsigned(proc_filedesc.fd_lastfile)
         if proc_filedesc.fd_nfiles != 0:
-            while count <= proc_lastfile:
-                if (unsigned(proc_ofiles[count]) != 0 and proc_ofiles[count].fp_glob != 0):
-                        fg = proc_ofiles[count].fp_glob
+            for fd in xrange(0, unsigned(proc_filedesc.fd_afterlast)):
+                if (unsigned(proc_ofiles[fd]) != 0 and proc_ofiles[fd].fp_glob != 0):
+                        fg = proc_ofiles[fd].fp_glob
                         if (int(fg.fg_ops.fo_type) == 2):
-                            if (proc_filedesc.fd_ofileflags[count] & 4):
+                            if (proc_filedesc.fd_ofileflags[fd] & 4):
                                 out_string += "U: "
                             else:
                                 out_string += " "
-                            out_string += "fd = " + str(count) + " "
+                            out_string += "fd = " + str(fd) + " "
                             if (fg.fg_data != 0):
                                 out_string += GetSocket(unsigned(fg.fg_data))
                                 out_string += "\n"
@@ -633,7 +648,6 @@ def GetProcSockets(proc, total_snd_cc, total_rcv_cc):
                                 sock_fd_seen += 1
                             else:
                                 out_string += ""
-                count += 1
         out_string += "total sockets " + str(int(sock_fd_seen)) + " snd_cc " + str(int(snd_cc)) + " rcv_cc " + str(int(rcv_cc)) + "\n"
     return out_string
 
@@ -1671,7 +1685,12 @@ def GetInPcb(pcb, proto):
     out_string += "\n\t"
     so = pcb.inp_socket
     if (so != 0):
-        out_string += "so=" + str(so) + " s=" + str(int(so.so_snd.sb_cc)) + " r=" + str(int(so.so_rcv.sb_cc)) + " usecnt=" + str(int(so.so_usecount)) + ", "
+        out_string += "so=" + str(so) + " s=" + str(int(so.so_snd.sb_cc)) + " r=" + str(int(so.so_rcv.sb_cc))
+        if proto == IPPROTO_TCP :
+            tcpcb = cast(pcb.inp_ppcb, 'tcpcb *')
+            out_string += " reass=" + str(int(tcpcb.t_reassqlen))
+
+        out_string += " usecnt=" + str(int(so.so_usecount)) + ", "
 
     if (pcb.inp_state == 0 or pcb.inp_state == INPCB_STATE_INUSE):
         out_string += "inuse"
@@ -1706,8 +1725,70 @@ def CalcMbufInSB(so, snd_cc, snd_buf, rcv_cc, rcv_buf, snd_record_cnt, rcv_recor
     mpkt = so.so_rcv.sb_mb
     CalcMbufInList(mpkt, rcv_record_cnt, rcv_buf, rcv_mbuf_cnt, rcv_mbuf_cluster_cnt)
 
+def GetMptcpInfo():
+    mptcp = kern.globals.mtcbinfo
+
+    mppcb = cast(mptcp.mppi_pcbs.tqh_first, 'mppcb *')
+    pcbseen = 0
+    reinject_cnt=[0]
+    reinject_byte_cnt=[0] * (Mbuf_Type.MT_LAST + 1)
+    reinject_mbuf_cnt=[0]
+    reinject_mbuf_cluster_cnt=[0]
+
+    snd_mbuf_cnt = [0]
+    snd_mbuf_cluster_cnt = [0]
+    snd_record_cnt = [0]
+    snd_cc = [0]
+    snd_buf = [0] * (Mbuf_Type.MT_LAST + 1)
+    rcv_mbuf_cnt = [0]
+    rcv_mbuf_cluster_cnt = [0]
+    rcv_record_cnt = [0]
+    rcv_cc = [0]
+    rcv_buf = [0] * (Mbuf_Type.MT_LAST + 1)
+    total_mbuf_bytes = 0
+    while mppcb != 0:
+        mpte = mppcb.mpp_pcbe
+        pcbseen += 1
+        CalcMbufInList(mpte.mpte_reinjectq, reinject_cnt, reinject_byte_cnt, reinject_mbuf_cnt, reinject_mbuf_cluster_cnt)
+
+        socket = mppcb.mpp_socket
+        if socket != 0:
+            CalcMbufInSB(socket, snd_cc, snd_buf, rcv_cc, rcv_buf, snd_record_cnt, rcv_record_cnt, snd_mbuf_cnt, rcv_mbuf_cnt, snd_mbuf_cluster_cnt, rcv_mbuf_cluster_cnt)
+
+        mppcb = cast(mppcb.mpp_entry.tqe_next, 'mppcb *')
+
+    out_string = ""
+    out_string += "total pcbs seen: " + str(int(pcbseen)) + "\n"
+    out_string += "total reinject mbuf count: " + str(int(reinject_mbuf_cnt[0])) + "\n"
+    out_string += "total reinject mbuf cluster count: " + str(int(reinject_mbuf_cluster_cnt[0])) + "\n"
+    out_string += "total reinject record count: " + str(int(reinject_cnt[0])) + "\n"
+    for x in range(Mbuf_Type.MT_LAST):
+        if (reinject_byte_cnt[x] != 0):
+            out_string += "total reinject bytes of type " + Mbuf_Type.reverse_mapping[x] + " : " + str(int(reinject_byte_cnt[x])) + "\n"
+            total_mbuf_bytes += reinject_byte_cnt[x]
+
+
+    out_string += "total send mbuf count: " + str(int(snd_mbuf_cnt[0])) + " receive mbuf count: " + str(int(rcv_mbuf_cnt[0])) + "\n"
+    out_string += "total send mbuf cluster count: " + str(int(snd_mbuf_cluster_cnt[0])) + " receive mbuf cluster count: " + str(int(rcv_mbuf_cluster_cnt[0])) + "\n"
+    out_string += "total send record count: " + str(int(snd_record_cnt[0])) + " receive record count: " + str(int(rcv_record_cnt[0])) + "\n"
+    out_string += "total snd_cc (total bytes in send buffers): " + str(int(snd_cc[0])) + " rcv_cc (total bytes in receive buffers): " + str(int(rcv_cc[0])) + "\n"
+    out_string += "total snd_buf bytes " + str(int(snd_buf[Mbuf_Type.MT_LAST])) + " rcv_buf bytes " + str(int(rcv_buf[Mbuf_Type.MT_LAST])) + "\n"
+    for x in range(Mbuf_Type.MT_LAST):
+        if (snd_buf[x] != 0 or rcv_buf[x] != 0):
+            out_string += "total snd_buf bytes of type " + Mbuf_Type.reverse_mapping[x] + " : " + str(int(snd_buf[x])) + " total recv_buf bytes of type " + Mbuf_Type.reverse_mapping[x] + " : " + str(int(rcv_buf[x])) + "\n"
+            total_mbuf_bytes += snd_buf[x] + rcv_buf[x]
+
+    out_string += "total mbuf bytes used by MPTCP: "+ str(total_mbuf_bytes) + "\n"
+    print out_string
+
+    #pcb = 
+
 def GetPcbInfo(pcbi, proto):
-    tcp_reassqlen = 0
+    tcp_reassqlen = [0]
+    tcp_reassq_bytes = 0
+    mbuf_reassq_cnt = [0]
+    mbuf_reassq_bytes = [0] * (Mbuf_Type.MT_LAST + 1)
+    mbuf_reassq_cluster = [0]
     out_string = ""
     snd_mbuf_cnt = [0]
     snd_mbuf_cluster_cnt = [0]
@@ -1754,7 +1835,14 @@ def GetPcbInfo(pcbi, proto):
                     CalcMbufInSB(so, snd_cc, snd_buf, rcv_cc, rcv_buf, snd_record_cnt, rcv_record_cnt, snd_mbuf_cnt, rcv_mbuf_cnt, snd_mbuf_cluster_cnt, rcv_mbuf_cluster_cnt)
                 if proto == IPPROTO_TCP and pcb.inp_ppcb:
                     tcpcb = cast(pcb.inp_ppcb, 'tcpcb *')
-                    tcp_reassqlen += tcpcb.t_reassqlen
+                    reass_entry = cast(tcpcb.t_segq.lh_first, 'tseg_qent *')
+                    curr_reass = 0
+                    while reass_entry != 0:
+                        CalcMbufInList(reass_entry.tqe_m, tcp_reassqlen, mbuf_reassq_bytes, mbuf_reassq_cnt, mbuf_reassq_cluster)
+                        tcp_reassq_bytes += reass_entry.tqe_len
+                        curr_reass += reass_entry.tqe_len
+
+                        reass_entry = reass_entry.tqe_q.le_next
 
                 pcb = cast(pcb.inp_hash.le_next, 'inpcb *')
             i += 1
@@ -1770,7 +1858,11 @@ def GetPcbInfo(pcbi, proto):
             out_string += "total snd_buf bytes of type " + Mbuf_Type.reverse_mapping[x] + " : " + str(int(snd_buf[x])) + " total recv_buf bytes of type " + Mbuf_Type.reverse_mapping[x] + " : " + str(int(rcv_buf[x])) + "\n"
     out_string += "port hash base is " + hex(pcbi.ipi_porthashbase) + "\n"
     if proto == IPPROTO_TCP:
-        out_string += "TCP reassembly queue length: " + str(tcp_reassqlen) + "\n"
+        out_string += "TCP reassembly queue length: " + str(tcp_reassqlen[0]) + " TCP-payload bytes: " + str(tcp_reassq_bytes) + "\n"
+
+        for x in range(Mbuf_Type.MT_LAST):
+            if mbuf_reassq_bytes[x] != 0:
+                out_string += "total reassq bytes of type " + Mbuf_Type.reverse_mapping[x] + " : " + str(mbuf_reassq_bytes[x]) + "\n"
 
     i = 0
     hashbase = pcbi.ipi_porthashbase
@@ -1908,46 +2000,13 @@ def ShowRipPcbInfo(cmd_args=None):
     print GetPcbInfo(addressof(kern.globals.ripcbinfo), IPPROTO_RAW)
 # EndMacro:  show_rip_pcbinfo
 
-# Macro: show_tcp_timewaitslots
-@lldb_command('show_tcp_timewaitslots')
-def ShowTcpTimeWaitSlots(cmd_args=None):
-    """ Display the list of the TCP protocol control blocks in TIMEWAIT
+# Macro: show_mptcp_pcbinfo
+@lldb_command('show_mptcp_pcbinfo')
+def ShowMptcpPcbInfo(cmd_args=None):
+    """ Display the list of MPTCP protocol control block information
     """
-    out_string = ""
-    slot = -1
-    _all = 0
-
-    if len(cmd_args) > 0:
-        if (int(cmd_args[0]) == -1):
-            _all = 1
-        else:
-            slot = int(cmd_args[0])
-
-    out_string += "time wait slot size " + str(N_TIME_WAIT_SLOTS) + " cur_tw_slot " + str(int(kern.globals.cur_tw_slot)) + "\n"
-    i = 0
-
-    while (i < N_TIME_WAIT_SLOTS):
-        perslot = 0
-        head = kern.globals.time_wait_slots[i]
-        if (i == slot or slot == -1):
-            pcb0 = cast(head.lh_first, 'inpcb *')
-            while (pcb0 != 0):
-                perslot += 1
-                pcb0 = pcb0.inp_list.le_next
-
-            out_string += "  slot " + str(i) + " count " + str(perslot) + "\n"
-
-        if (_all or i == slot):
-            pcb0 = cast(head.lh_first, 'inpcb *')
-            while (pcb0 != 0):
-                out_string += "\t"
-                out_string += GetInPcb(pcb0, IPPROTO_TCP)
-                out_string += "\n"
-                pcb0 = pcb0.inp_list.le_next
-
-        i += 1
-    print out_string
-# EndMacro: show_tcp_timewaitslots
+    GetMptcpInfo()
+# EndMacro:  show_mptcp_pcbinfo
 
 # Macro: show_domains
 @lldb_command('show_domains')
@@ -2068,3 +2127,51 @@ def ShowDomains(cmd_args=None):
 
         print out_string
 # EndMacro: show_domains
+
+# Macro: tcp_count_rxt_segments
+@lldb_command('tcp_count_rxt_segments')
+def TCPCountRxtSegments(cmd_args=None):
+    """ Size of the t_rxt_segments chain
+    """
+    if not cmd_args:
+        raise ArgumentError("Missing argument 0 in user function.")
+
+    tp = kern.GetValueFromAddress(cmd_args[0], 'tcpcb *')
+    rxseg = cast(tp.t_rxt_segments.slh_first, 'tcp_rxt_seg *')
+    cnt = 0
+    while rxseg != 0:
+        cnt += 1
+        rxseg = rxseg.rx_link.sle_next
+        if (cnt % 1000 == 0):
+            print " running count: {:d}".format(cnt)
+    print " total count: {:d}".format(cnt)
+# EndMacro: tcp_count_rxt_segments
+
+# Macro: tcp_walk_rxt_segments
+@lldb_command('tcp_walk_rxt_segments')
+def TCPWalkRxtSegments(cmd_args=None):
+    """ Walk the t_rxt_segments chain
+    """
+    if not cmd_args:
+        raise ArgumentError("Missing argument 0 in user function.")
+
+    tp = kern.GetValueFromAddress(cmd_args[0], 'tcpcb *')
+    rxseg = cast(tp.t_rxt_segments.slh_first, 'tcp_rxt_seg *')
+    cnt = 0
+    while rxseg != 0:
+        cnt += 1
+        rxseg = rxseg.rx_link.sle_next
+        if (cnt % 1000 == 0):
+            print " running count: {:d}".format(cnt)
+    print " total count: {:d}".format(cnt)
+    rxseg = cast(tp.t_rxt_segments.slh_first, 'tcp_rxt_seg *')
+    cnt = 0
+    while rxseg != 0:
+        cnt += 1
+        out_string = ""
+        span = rxseg.rx_end - rxseg.rx_start
+        rxseg_format = "{0:4d} 0x{1:x} rx_start 0x{2:x} rx_end 0x{3:x} rx_count {4:4d} rx_flags 0x{5:x} span {6:d}"
+        out_string += rxseg_format.format(cnt, rxseg, rxseg.rx_start, rxseg.rx_end, rxseg.rx_count, rxseg.rx_flags, abs(span))
+        print out_string
+        rxseg = rxseg.rx_link.sle_next
+# EndMacro: tcp_walk_rxt_segments

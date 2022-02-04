@@ -70,6 +70,11 @@ __options_decl(thread_work_interval_options_t, uint32_t, {
 });
 
 static kern_return_t thread_set_work_interval(thread_t, struct work_interval *, thread_work_interval_options_t);
+static void work_interval_port_no_senders(ipc_port_t, mach_port_mscount_t);
+
+IPC_KOBJECT_DEFINE(IKOT_WORK_INTERVAL,
+    .iko_op_stable     = true,
+    .iko_op_no_senders = work_interval_port_no_senders);
 
 #if CONFIG_SCHED_AUTO_JOIN
 /* MPSC queue used to defer deallocate work intervals */
@@ -299,7 +304,7 @@ work_interval_deallocate(struct work_interval *work_interval)
 	thread_group_release(work_interval->wi_group);
 	work_interval->wi_group = NULL;
 #endif /* CONFIG_THREAD_GROUPS */
-	kfree(work_interval, sizeof(struct work_interval));
+	kfree_type(struct work_interval, work_interval);
 }
 
 /*
@@ -457,10 +462,11 @@ work_interval_deallocate_queue_invoke(mpsc_queue_chain_t e,
 
 #endif /* CONFIG_SCHED_AUTO_JOIN */
 
-void
+#if CONFIG_SCHED_AUTO_JOIN
+__startup_func
+static void
 work_interval_subsystem_init(void)
 {
-#if CONFIG_SCHED_AUTO_JOIN
 	/*
 	 * The work interval deallocation queue must be a thread call based queue
 	 * because it is woken up from contexts where the thread lock is held. The
@@ -470,8 +476,9 @@ work_interval_subsystem_init(void)
 	 */
 	mpsc_daemon_queue_init_with_thread_call(&work_interval_deallocate_queue,
 	    work_interval_deallocate_queue_invoke, THREAD_CALL_PRIORITY_KERNEL);
-#endif /* CONFIG_SCHED_AUTO_JOIN */
 }
+STARTUP(THREAD_CALL, STARTUP_RANK_MIDDLE, work_interval_subsystem_init);
+#endif /* CONFIG_SCHED_AUTO_JOIN */
 
 /*
  * work_interval_port_convert
@@ -484,21 +491,12 @@ work_interval_port_convert_locked(ipc_port_t port)
 {
 	struct work_interval *work_interval = NULL;
 
-	if (!IP_VALID(port)) {
-		return NULL;
+	if (IP_VALID(port)) {
+		work_interval = ipc_kobject_get_stable(port, IKOT_WORK_INTERVAL);
+		if (work_interval) {
+			work_interval_retain(work_interval);
+		}
 	}
-
-	if (!ip_active(port)) {
-		return NULL;
-	}
-
-	if (IKOT_WORK_INTERVAL != ip_kotype(port)) {
-		return NULL;
-	}
-
-	work_interval = (struct work_interval *) ip_get_kobject(port);
-
-	work_interval_retain(work_interval);
 
 	return work_interval;
 }
@@ -541,7 +539,7 @@ port_name_to_work_interval(mach_port_name_t     name,
 		kr = KERN_INVALID_CAPABILITY;
 	}
 
-	ip_unlock(port);
+	ip_mq_unlock(port);
 
 	if (kr == KERN_SUCCESS) {
 		*work_interval = converted_work_interval;
@@ -552,7 +550,7 @@ port_name_to_work_interval(mach_port_name_t     name,
 
 
 /*
- * work_interval_port_notify
+ * work_interval_port_no_senders
  *
  * Description: Handle a no-senders notification for a work interval port.
  *              Destroys the port and releases its reference on the work interval.
@@ -563,51 +561,16 @@ port_name_to_work_interval(mach_port_name_t     name,
  *       if the ability to extract another send right after creation is added,
  *       this will have to change to handle make-send counts correctly.
  */
-void
-work_interval_port_notify(mach_msg_header_t *msg)
+static void
+work_interval_port_no_senders(ipc_port_t port, mach_port_mscount_t mscount)
 {
-	mach_no_senders_notification_t *notification = (void *)msg;
-	ipc_port_t port = notification->not_header.msgh_remote_port;
 	struct work_interval *work_interval = NULL;
 
-	if (!IP_VALID(port)) {
-		panic("work_interval_port_notify(): invalid port");
-	}
-
-	ip_lock(port);
-
-	if (!ip_active(port)) {
-		panic("work_interval_port_notify(): inactive port %p", port);
-	}
-
-	if (ip_kotype(port) != IKOT_WORK_INTERVAL) {
-		panic("work_interval_port_notify(): not the right kobject: %p, %d\n",
-		    port, ip_kotype(port));
-	}
-
-	if (port->ip_mscount != notification->not_count) {
-		panic("work_interval_port_notify(): unexpected make-send count: %p, %d, %d",
-		    port, port->ip_mscount, notification->not_count);
-	}
-
-	if (port->ip_srights != 0) {
-		panic("work_interval_port_notify(): unexpected send right count: %p, %d",
-		    port, port->ip_srights);
-	}
-
-	work_interval = (struct work_interval *) ip_get_kobject(port);
-
-	if (work_interval == NULL) {
-		panic("work_interval_port_notify(): missing kobject: %p", port);
-	}
-
-	ipc_kobject_set_atomically(port, IKO_NULL, IKOT_NONE);
+	work_interval = ipc_kobject_dealloc_port(port, mscount,
+	    IKOT_WORK_INTERVAL);
 
 	work_interval->wi_port = MACH_PORT_NULL;
 
-	ip_unlock(port);
-
-	ipc_port_dealloc_kernel(port);
 	work_interval_release(work_interval, THREAD_WI_THREAD_LOCK_NEEDED);
 }
 
@@ -764,7 +727,14 @@ thread_set_work_interval(thread_t thread,
 
 #if CONFIG_THREAD_GROUPS
 	struct thread_group *new_tg = (work_interval) ? (work_interval->wi_group) : NULL;
-	thread_set_work_interval_thread_group(thread, new_tg, (options & THREAD_WI_AUTO_JOIN_POLICY));
+
+	if (options & THREAD_WI_AUTO_JOIN_POLICY) {
+#if CONFIG_SCHED_AUTO_JOIN
+		thread_set_autojoin_thread_group_locked(thread, new_tg);
+#endif
+	} else {
+		thread_set_work_interval_thread_group(thread, new_tg);
+	}
 #endif /* CONFIG_THREAD_GROUPS */
 
 	if (old_th_wi != NULL) {
@@ -905,9 +875,8 @@ kern_work_interval_create(thread_t thread,
 	}
 #endif /* CONFIG_SCHED_AUTO_JOIN */
 
-	struct work_interval *work_interval = kalloc_flags(sizeof(*work_interval),
-	    Z_WAITOK | Z_ZERO);
-	assert(work_interval != NULL);
+	struct work_interval *work_interval = kalloc_type(struct work_interval,
+	    Z_WAITOK | Z_ZERO | Z_NOFAIL);
 
 	uint64_t work_interval_id = os_atomic_inc(&unique_work_interval_id, relaxed);
 
@@ -931,7 +900,7 @@ kern_work_interval_create(thread_t thread,
 		snprintf(name, sizeof(name), "WI[%d] #%lld",
 		    work_interval->wi_creator_pid, work_interval_id);
 
-		tg = thread_group_create_and_retain();
+		tg = thread_group_create_and_retain(FALSE);
 
 		thread_group_set_name(tg, name);
 

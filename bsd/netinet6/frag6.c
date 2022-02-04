@@ -129,10 +129,8 @@ static void ip6q_updateparams(void);
 static struct ip6asfrag *ip6af_alloc(int);
 static void ip6af_free(struct ip6asfrag *);
 
-decl_lck_mtx_data(static, ip6qlock);
-static lck_attr_t       *ip6qlock_attr;
-static lck_grp_t        *ip6qlock_grp;
-static lck_grp_attr_t   *ip6qlock_grp_attr;
+static LCK_GRP_DECLARE(ip6qlock_grp, "ip6qlock");
+static LCK_MTX_DECLARE(ip6qlock, &ip6qlock_grp);
 
 /* IPv6 fragment reassembly queues (protected by ip6qlock) */
 static struct ip6q ip6q;                /* ip6 reassembly queues */
@@ -173,12 +171,6 @@ frag6_init(void)
 	_CASSERT(sizeof(struct ip6q) <= _MLEN);
 	/* ip6af_alloc() uses mbufs for IPv6 fragment queue structures */
 	_CASSERT(sizeof(struct ip6asfrag) <= _MLEN);
-
-	/* IPv6 fragment reassembly queue lock */
-	ip6qlock_grp_attr  = lck_grp_attr_alloc_init();
-	ip6qlock_grp = lck_grp_alloc_init("ip6qlock", ip6qlock_grp_attr);
-	ip6qlock_attr = lck_attr_alloc_init();
-	lck_mtx_init(&ip6qlock, ip6qlock_grp, ip6qlock_attr);
 
 	lck_mtx_lock(&ip6qlock);
 	/* Initialize IPv6 reassembly queue. */
@@ -467,8 +459,8 @@ frag6_input(struct mbuf **mp, int *offp, int proto)
 
 	for (q6 = ip6q.ip6q_next; q6 != &ip6q; q6 = q6->ip6q_next) {
 		if (ip6f->ip6f_ident == q6->ip6q_ident &&
-		    IN6_ARE_ADDR_EQUAL(&ip6->ip6_src, &q6->ip6q_src) &&
-		    IN6_ARE_ADDR_EQUAL(&ip6->ip6_dst, &q6->ip6q_dst)) {
+		    in6_are_addr_equal_scoped(&ip6->ip6_src, &q6->ip6q_src, ip6_input_getsrcifscope(m), q6->ip6q_src_ifscope) &&
+		    in6_are_addr_equal_scoped(&ip6->ip6_dst, &q6->ip6q_dst, ip6_input_getdstifscope(m), q6->ip6q_dst_ifscope)) {
 			break;
 		}
 	}
@@ -500,6 +492,8 @@ frag6_input(struct mbuf **mp, int *offp, int proto)
 		q6->ip6q_ttl    = IPV6_FRAGTTL;
 		q6->ip6q_src    = ip6->ip6_src;
 		q6->ip6q_dst    = ip6->ip6_dst;
+		q6->ip6q_dst_ifscope = IN6_IS_SCOPE_EMBED(&q6->ip6q_dst) ? ip6_input_getdstifscope(m) : IFSCOPE_NONE;
+		q6->ip6q_src_ifscope = IN6_IS_SCOPE_EMBED(&q6->ip6q_src) ? ip6_input_getsrcifscope(m) : IFSCOPE_NONE;
 		q6->ip6q_ecn    =
 		    (ntohl(ip6->ip6_flow) >> 20) & IPTOS_ECN_MASK;
 		q6->ip6q_unfrglen = -1; /* The 1st fragment has not arrived. */
@@ -601,7 +595,8 @@ frag6_input(struct mbuf **mp, int *offp, int proto)
 				 */
 				ip6err->ip6_src = q6->ip6q_src;
 				ip6err->ip6_dst = q6->ip6q_dst;
-
+				ip6_output_setdstifscope(m, q6->ip6q_dst_ifscope, NULL);
+				ip6_output_setsrcifscope(m, q6->ip6q_src_ifscope, NULL);
 				frag6_save_context(merr,
 				    erroff - sizeof(struct ip6_frag) +
 				    offsetof(struct ip6_frag, ip6f_offlg));
@@ -834,6 +829,8 @@ insert:
 	ip6->ip6_plen = htons((uint16_t)(next + offset - sizeof(struct ip6_hdr)));
 	ip6->ip6_src = q6->ip6q_src;
 	ip6->ip6_dst = q6->ip6q_dst;
+	ip6_output_setdstifscope(m, q6->ip6q_dst_ifscope, NULL);
+	ip6_output_setsrcifscope(m, q6->ip6q_src_ifscope, NULL);
 	if (q6->ip6q_ecn == IPTOS_ECN_CE) {
 		ip6->ip6_flow |= htonl(IPTOS_ECN_CE << 20);
 	}
@@ -975,6 +972,8 @@ frag6_purgef(struct ip6q *q6, struct fq6_head *dfq6, struct fq6_head *diq6)
 			/* restore source and destination addresses */
 			ip6->ip6_src = q6->ip6q_src;
 			ip6->ip6_dst = q6->ip6q_dst;
+			ip6_output_setdstifscope(m, q6->ip6q_dst_ifscope, NULL);
+			ip6_output_setsrcifscope(m, q6->ip6q_src_ifscope, NULL);
 			MBUFQ_ENQUEUE(diq6, m);
 		} else {
 			MBUFQ_ENQUEUE(dfq6, m);

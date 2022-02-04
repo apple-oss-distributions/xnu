@@ -169,12 +169,20 @@ static os_ref_count_t os_ref_get_count(struct os_refcnt *rc);
 #define os_ref_init_raw(rc, grp) os_ref_init_count_raw((rc), (grp), 1)
 static void os_ref_init_count_raw(os_ref_atomic_t *, struct os_refgrp *, os_ref_count_t count)
 os_error_if(count == 0, "Reference count must be non-zero initialized");
+static void os_ref_retain_floor(struct os_refcnt *, os_ref_count_t f)
+os_error_if(!__builtin_constant_p(f) || f == 0, "refcount floor must be >= 1");
 static void os_ref_retain_raw(os_ref_atomic_t *, struct os_refgrp *);
+static void os_ref_retain_floor_raw(os_ref_atomic_t *, os_ref_count_t f, struct os_refgrp *)
+os_error_if(!__builtin_constant_p(f) || f == 0, "refcount floor must be >= 1");
 static os_ref_count_t os_ref_release_raw(os_ref_atomic_t *, struct os_refgrp *) OS_WARN_RESULT;
 static os_ref_count_t os_ref_release_raw_relaxed(os_ref_atomic_t *, struct os_refgrp *) OS_WARN_RESULT;
 static void os_ref_release_live_raw(os_ref_atomic_t *, struct os_refgrp *);
 static bool os_ref_retain_try_raw(os_ref_atomic_t *, struct os_refgrp *) OS_WARN_RESULT;
+static bool os_ref_retain_floor_try_raw(os_ref_atomic_t *, os_ref_count_t f, struct os_refgrp *) OS_WARN_RESULT
+    os_error_if(!__builtin_constant_p(f) || f == 0, "refcount floor must be >= 1");
 static void os_ref_retain_locked_raw(os_ref_atomic_t *, struct os_refgrp *);
+static void os_ref_retain_floor_locked_raw(os_ref_atomic_t *, os_ref_count_t f, struct os_refgrp *)
+os_error_if(!__builtin_constant_p(f) || f == 0, "refcount floor must be >= 1");
 static os_ref_count_t os_ref_release_locked_raw(os_ref_atomic_t *, struct os_refgrp *) OS_WARN_RESULT;
 static os_ref_count_t os_ref_get_count_raw(os_ref_atomic_t *rc);
 
@@ -218,7 +226,7 @@ static void
 os_ref_retain_mask(os_ref_atomic_t *rc, uint32_t b, struct os_refgrp *grp);
 static void
 os_ref_retain_acquire_mask(os_ref_atomic_t *rc, uint32_t b, struct os_refgrp *grp);
-static bool
+static uint32_t
 os_ref_retain_try_mask(os_ref_atomic_t *, uint32_t b, uint32_t reject_mask,
     struct os_refgrp *grp) OS_WARN_RESULT;
 static bool
@@ -233,6 +241,8 @@ static os_ref_count_t
 os_ref_release_mask(os_ref_atomic_t *rc, uint32_t b, struct os_refgrp *grp) OS_WARN_RESULT;
 static os_ref_count_t
 os_ref_release_relaxed_mask(os_ref_atomic_t *rc, uint32_t b, struct os_refgrp *grp) OS_WARN_RESULT;
+static uint32_t
+os_ref_release_live_raw_mask(os_ref_atomic_t *rc, uint32_t b, struct os_refgrp *grp);
 static void
 os_ref_release_live_mask(os_ref_atomic_t *rc, uint32_t b, struct os_refgrp *grp);
 

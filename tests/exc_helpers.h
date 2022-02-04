@@ -37,19 +37,54 @@
  * Callback invoked by run_exception_handler() when a Mach exception is
  * received.
  *
- * @param type  exception type received from the kernel
- * @param codes exception codes received from the kernel
+ * @param task      the task causing the exception
+ * @param thread    the task causing the exception
+ * @param type      exception type received from the kernel
+ * @param codes     exception codes received from the kernel
  *
  * @return      how much the exception handler should advance the program
  *              counter, in bytes (in order to move past the code causing the
  *              exception)
  */
-typedef size_t (*exc_handler_callback_t)(exception_type_t type, mach_exception_data_t codes);
+typedef size_t (*exc_handler_callback_t)(mach_port_t task, mach_port_t thread,
+    exception_type_t type, mach_exception_data_t codes);
 
+typedef size_t (*exc_handler_protected_callback_t)(task_id_token_t token, uint64_t thread_d,
+    exception_type_t type, mach_exception_data_t codes);
+/**
+ * Allocates a Mach port and configures it to receive exception messages.
+ *
+ * @param exception_mask exception types that this Mach port should receive
+ *
+ * @return a newly-allocated and -configured Mach port
+ */
 mach_port_t
 create_exception_port(exception_mask_t exception_mask);
 
+mach_port_t
+create_exception_port_behavior64(exception_mask_t exception_mask, exception_behavior_t behavior);
+
+/**
+ * Handles one exception received on the provided Mach port, by running the
+ * provided callback.
+ *
+ * @param exc_port Mach port configured to receive exception messages
+ * @param callback callback to run when an exception is received
+ */
 void
 run_exception_handler(mach_port_t exc_port, exc_handler_callback_t callback);
+
+void
+run_exception_handler_behavior64(mach_port_t exc_port, void *callback, exception_behavior_t behavior);
+
+/**
+ * Handles every exception received on the provided Mach port, by running the
+ * provided callback.
+ *
+ * @param exc_port Mach port configured to receive exception messages
+ * @param callback callback to run when an exception is received
+ */
+void
+repeat_exception_handler(mach_port_t exc_port, exc_handler_callback_t callback);
 
 #endif /* EXC_HELPERS_H */

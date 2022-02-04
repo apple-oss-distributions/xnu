@@ -70,12 +70,12 @@ struct rt_addrinfo;
 struct llentry;
 LIST_HEAD(llentries, llentry);
 
-extern lck_rw_t                *lltable_rwlock;
-#define LLTABLE_RLOCK()         lck_rw_lock_shared(lltable_rwlock)
-#define LLTABLE_RUNLOCK()       lck_rw_done(lltable_rwlock)
-#define LLTABLE_WLOCK()         lck_rw_lock_exclusive(lltable_rwlock)
-#define LLTABLE_WUNLOCK()       lck_rw_done(lltable_rwlock)
-#define LLTABLE_LOCK_ASSERT()   LCK_RW_ASSERT(lltable_rwlock, LCK_RW_ASSERT_EXCLUSIVE)
+extern lck_rw_t                 lltable_rwlock;
+#define LLTABLE_RLOCK()         lck_rw_lock_shared(&lltable_rwlock)
+#define LLTABLE_RUNLOCK()       lck_rw_done(&lltable_rwlock)
+#define LLTABLE_WLOCK()         lck_rw_lock_exclusive(&lltable_rwlock)
+#define LLTABLE_WUNLOCK()       lck_rw_done(&lltable_rwlock)
+#define LLTABLE_LOCK_ASSERT()   LCK_RW_ASSERT(&lltable_rwlock, LCK_RW_ASSERT_EXCLUSIVE)
 
 #define LLE_MAX_LINKHDR         24      /* Full IB header */
 /*
@@ -123,8 +123,8 @@ struct llentry {
 	decl_lck_mtx_data(, req_mtx);
 };
 
-extern lck_grp_t      *lle_lock_grp;
-extern lck_attr_t     *lle_lock_attr;
+extern lck_grp_t       lle_lock_grp;
+extern lck_attr_t      lle_lock_attr;
 
 #define LLE_WLOCK(lle)          lck_rw_lock_exclusive(&(lle)->lle_lock)
 #define LLE_RLOCK(lle)          lck_rw_lock_shared(&(lle)->lle_lock)
@@ -132,12 +132,12 @@ extern lck_attr_t     *lle_lock_attr;
 #define LLE_RUNLOCK(lle)        lck_rw_done(&(lle)->lle_lock)
 #define LLE_DOWNGRADE(lle)      lck_rw_lock_exclusive_to_shared(&(lle)->lle_lock)
 #define LLE_TRY_UPGRADE(lle)    lck_rw_lock_shared_to_exclusive(&(lle)->lle_lock)
-#define LLE_LOCK_INIT(lle)      lck_rw_init(&(lle)->lle_lock, lle_lock_grp, lle_lock_attr)
-#define LLE_LOCK_DESTROY(lle)   lck_rw_destroy(&(lle)->lle_lock, lle_lock_grp)
+#define LLE_LOCK_INIT(lle)      lck_rw_init(&(lle)->lle_lock, &lle_lock_grp, &lle_lock_attr)
+#define LLE_LOCK_DESTROY(lle)   lck_rw_destroy(&(lle)->lle_lock, &lle_lock_grp)
 #define LLE_WLOCK_ASSERT(lle)   LCK_RW_ASSERT(&(lle)->lle_lock, LCK_RW_ASSERT_EXCLUSIVE)
 
-#define LLE_REQ_INIT(lle)       lck_mtx_init(&(lle)->req_mtx, lle_lock_grp, lle_lock_attr)
-#define LLE_REQ_DESTROY(lle)    lck_mtx_destroy(&(lle)->req_mtx, lle_lock_grp)
+#define LLE_REQ_INIT(lle)       lck_mtx_init(&(lle)->req_mtx, &lle_lock_grp, &lle_lock_attr)
+#define LLE_REQ_DESTROY(lle)    lck_mtx_destroy(&(lle)->req_mtx, &lle_lock_grp)
 #define LLE_REQ_LOCK(lle)       lck_mtx_lock(&(lle)->req_mtx)
 #define LLE_REQ_UNLOCK(lle)     lck_mtx_unlock(&(lle)->req_mtx)
 
@@ -241,7 +241,6 @@ MALLOC_DECLARE(M_LLTABLE);
 #define LLATBL_HASH(key, mask) \
     (((((((key >> 8) ^ key) >> 8) ^ key) >> 8) ^ key) & mask)
 
-void lltable_glbl_init(void);
 struct lltable *lltable_allocate_htbl(uint32_t hsize);
 void lltable_free(struct lltable *);
 void lltable_link(struct lltable *llt);

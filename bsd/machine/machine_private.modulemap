@@ -1,0 +1,18 @@
+module DarwinPrivate.machine [system] {
+  #ifndef PLATFORM_MacOSX
+  module _limits {
+    header "machine/_limits.h"
+    export *
+  }
+
+  #endif
+  module cpu_capabilities {
+    header "machine/cpu_capabilities.h"
+    #if defined(PLATFORM_MacOSX) || defined(PLATFORM_iPhoneSimulator) || defined(PLATFORM_AppleTVSimulator) || defined(PLATFORM_WatchSimulator)
+    header "i386/cpu_capabilities.h"
+    #endif
+    header "arm/cpu_capabilities.h"
+
+    export *
+  }
+}

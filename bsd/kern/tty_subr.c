@@ -103,16 +103,15 @@ cinit(void)
 int
 clalloc(struct clist *clp, int size, int quot)
 {
-	clp->c_cs = kheap_alloc(KHEAP_DATA_BUFFERS, size, Z_WAITOK | Z_ZERO);
+	clp->c_cs = kalloc_data(size, Z_WAITOK | Z_ZERO);
 	if (!clp->c_cs) {
 		return -1;
 	}
 
 	if (quot) {
-		clp->c_cq = kheap_alloc(KHEAP_DATA_BUFFERS,
-		    QMEM(size), Z_WAITOK | Z_ZERO);
+		clp->c_cq = kalloc_data(QMEM(size), Z_WAITOK | Z_ZERO);
 		if (!clp->c_cq) {
-			kheap_free(KHEAP_DATA_BUFFERS, clp->c_cs, size);
+			kfree_data(clp->c_cs, size);
 			return -1;
 		}
 	} else {
@@ -130,10 +129,10 @@ void
 clfree(struct clist *clp)
 {
 	if (clp->c_cs) {
-		kheap_free(KHEAP_DATA_BUFFERS, clp->c_cs, clp->c_cn);
+		kfree_data(clp->c_cs, clp->c_cn);
 	}
 	if (clp->c_cq) {
-		kheap_free(KHEAP_DATA_BUFFERS, clp->c_cq, QMEM(clp->c_cn));
+		kfree_data(clp->c_cq, QMEM(clp->c_cn));
 	}
 	clp->c_cs = clp->c_cq = (u_char *)0;
 }

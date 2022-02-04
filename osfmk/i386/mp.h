@@ -109,11 +109,8 @@ extern  volatile boolean_t mp_kdp_trap;
 extern  volatile boolean_t mp_kdp_is_NMI;
 extern  volatile boolean_t force_immediate_debugger_NMI;
 extern  volatile boolean_t pmap_tlb_flush_timeout;
-extern  volatile usimple_lock_t spinlock_timed_out;
-extern  volatile uint32_t spinlock_owner_cpu;
-extern  uint32_t spinlock_timeout_NMI(uintptr_t thread_addr);
 
-extern  uint64_t        LastDebuggerEntryAllowance;
+extern  uint64_t  LastDebuggerEntryAllowance;
 
 extern  void      mp_kdp_enter(boolean_t proceed_on_failure);
 extern  void      mp_kdp_exit(void);

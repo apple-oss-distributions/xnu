@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2016 Apple Inc. All rights reserved.
+ * Copyright (c) 2008-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -86,8 +86,6 @@
 #define ESP_GCM_SALT_LEN 4   // RFC 4106 Section 4
 #define ESP_GCM_IVLEN 8
 #define ESP_GCM_ALIGN 16
-
-extern lck_mtx_t *sadb_mutex;
 
 typedef struct {
 	ccgcm_ctx *decrypt;
@@ -299,13 +297,13 @@ esp_cbc_decrypt_aes(
 					m_freem(d0);
 				}
 				if (sp_aligned != NULL) {
-					FREE(sp_aligned, M_SECA);
+					kfree_data(sp_aligned, MAX_REALIGN_LEN);
 					sp_aligned = NULL;
 				}
 				return ENOBUFS;
 			}
 			if (sp_aligned == NULL) {
-				sp_aligned = (u_int8_t *)_MALLOC(MAX_REALIGN_LEN, M_SECA, M_DONTWAIT);
+				sp_aligned = (u_int8_t *)kalloc_data(MAX_REALIGN_LEN, Z_NOWAIT);
 				if (sp_aligned == NULL) {
 					m_freem(m);
 					if (d0 != NULL) {
@@ -348,13 +346,13 @@ esp_cbc_decrypt_aes(
 
 	// free memory
 	if (sp_aligned != NULL) {
-		FREE(sp_aligned, M_SECA);
+		kfree_data(sp_aligned, MAX_REALIGN_LEN);
 		sp_aligned = NULL;
 	}
 
 	/* just in case */
-	bzero(iv, sizeof(iv));
-	bzero(sbuf, sizeof(sbuf));
+	cc_clear(sizeof(iv), iv);
+	cc_clear(sizeof(sbuf), sbuf);
 
 	return 0;
 }
@@ -515,13 +513,13 @@ esp_cbc_encrypt_aes(
 					m_freem(d0);
 				}
 				if (sp_aligned != NULL) {
-					FREE(sp_aligned, M_SECA);
+					kfree_data(sp_aligned, MAX_REALIGN_LEN);
 					sp_aligned = NULL;
 				}
 				return ENOBUFS;
 			}
 			if (sp_aligned == NULL) {
-				sp_aligned = (u_int8_t *)_MALLOC(MAX_REALIGN_LEN, M_SECA, M_DONTWAIT);
+				sp_aligned = (u_int8_t *)kalloc_data(MAX_REALIGN_LEN, Z_NOWAIT);
 				if (sp_aligned == NULL) {
 					m_freem(m);
 					if (d0) {
@@ -575,12 +573,12 @@ esp_cbc_encrypt_aes(
 
 	// free memory
 	if (sp_aligned != NULL) {
-		FREE(sp_aligned, M_SECA);
+		kfree_data(sp_aligned, MAX_REALIGN_LEN);
 		sp_aligned = NULL;
 	}
 
 	/* just in case */
-	bzero(sbuf, sizeof(sbuf));
+	cc_clear(sizeof(sbuf), sbuf);
 	key_sa_stir_iv(sav);
 
 	return 0;
@@ -599,25 +597,39 @@ esp_gcm_schedule( __unused const struct esp_algorithm *algo,
 {
 	LCK_MTX_ASSERT(sadb_mutex, LCK_MTX_ASSERT_OWNED);
 	aes_gcm_ctx *ctx = (aes_gcm_ctx*)P2ROUNDUP(sav->sched, ESP_GCM_ALIGN);
-	u_int ivlen = sav->ivlen;
+	const u_int ivlen = sav->ivlen;
+	const bool implicit_iv = ((sav->flags & SADB_X_EXT_IIV) != 0);
 	unsigned char nonce[ESP_GCM_SALT_LEN + ivlen];
 	int rc;
 
 	ctx->decrypt = &ctx->ctxt[0];
 	ctx->encrypt = &ctx->ctxt[aes_decrypt_get_ctx_size_gcm() / sizeof(ccgcm_ctx)];
 
+	if (ivlen != (implicit_iv ? 0 : ESP_GCM_IVLEN)) {
+		ipseclog((LOG_ERR, "%s: unsupported ivlen %d\n", __FUNCTION__, ivlen));
+		return EINVAL;
+	}
+
 	rc = aes_decrypt_key_gcm((const unsigned char *) _KEYBUF(sav->key_enc), _KEYLEN(sav->key_enc) - ESP_GCM_SALT_LEN, ctx->decrypt);
 	if (rc) {
 		return rc;
 	}
 
-	bzero(nonce, ESP_GCM_SALT_LEN + ivlen);
-	memcpy(nonce, _KEYBUF(sav->key_enc) + _KEYLEN(sav->key_enc) - ESP_GCM_SALT_LEN, ESP_GCM_SALT_LEN);
-	memcpy(nonce + ESP_GCM_SALT_LEN, sav->iv, ivlen);
+	if (!implicit_iv) {
+		memset(nonce, 0, ESP_GCM_SALT_LEN + ivlen);
+		memcpy(nonce, _KEYBUF(sav->key_enc) + _KEYLEN(sav->key_enc) - ESP_GCM_SALT_LEN, ESP_GCM_SALT_LEN);
+		memcpy(nonce + ESP_GCM_SALT_LEN, sav->iv, ivlen);
 
-	rc = aes_encrypt_key_with_iv_gcm((const unsigned char *) _KEYBUF(sav->key_enc), _KEYLEN(sav->key_enc) - ESP_GCM_SALT_LEN, nonce, ctx->encrypt);
-	if (rc) {
-		return rc;
+		rc = aes_encrypt_key_with_iv_gcm((const unsigned char *) _KEYBUF(sav->key_enc), _KEYLEN(sav->key_enc) - ESP_GCM_SALT_LEN, nonce, ctx->encrypt);
+		cc_clear(sizeof(nonce), nonce);
+		if (rc) {
+			return rc;
+		}
+	} else {
+		rc = aes_encrypt_key_gcm((const unsigned char *) _KEYBUF(sav->key_enc), _KEYLEN(sav->key_enc) - ESP_GCM_SALT_LEN, ctx->encrypt);
+		if (rc) {
+			return rc;
+		}
 	}
 
 	rc = aes_encrypt_reset_gcm(ctx->encrypt);
@@ -626,6 +638,21 @@ esp_gcm_schedule( __unused const struct esp_algorithm *algo,
 	}
 
 	return rc;
+}
+
+int
+esp_gcm_ivlen(const struct esp_algorithm *algo,
+    struct secasvar *sav)
+{
+	if (!algo) {
+		panic("esp_gcm_ivlen: unknown algorithm");
+	}
+
+	if (sav != NULL && ((sav->flags & SADB_X_EXT_IIV) != 0)) {
+		return 0;
+	} else {
+		return algo->ivlenval;
+	}
 }
 
 int
@@ -657,31 +684,27 @@ esp_gcm_encrypt_aes(
 	struct mbuf *d, *d0, *dp;
 	int soff;       /* offset from the head of chain, to head of this mbuf */
 	int sn, dn;     /* offset from the head of the mbuf, to meat */
-	size_t ivoff, bodyoff;
+	const size_t ivoff = off + sizeof(struct newesp);
+	const size_t bodyoff = ivoff + ivlen;
 	u_int8_t *dptr, *sp, *sp_unaligned, *sp_aligned = NULL;
 	aes_gcm_ctx *ctx;
 	struct mbuf *scut;
 	int scutoff;
 	int i, len;
-	unsigned char nonce[ESP_GCM_SALT_LEN + ivlen];
+	const bool implicit_iv = ((sav->flags & SADB_X_EXT_IIV) != 0);
+	struct newesp esp;
+	unsigned char nonce[ESP_GCM_SALT_LEN + ESP_GCM_IVLEN];
 
-	if (ivlen != ESP_GCM_IVLEN) {
+	VERIFY(off <= INT_MAX);
+	VERIFY(ivoff <= INT_MAX);
+	VERIFY(bodyoff <= INT_MAX);
+
+	if (ivlen != (implicit_iv ? 0 : ESP_GCM_IVLEN)) {
 		ipseclog((LOG_ERR, "%s: unsupported ivlen %d\n", __FUNCTION__, ivlen));
 		m_freem(m);
 		return EINVAL;
 	}
 
-	if (sav->flags & SADB_X_EXT_OLD) {
-		/* RFC 1827 */
-		ivoff = off + sizeof(struct esp);
-		bodyoff = off + sizeof(struct esp) + ivlen;
-	} else {
-		ivoff = off + sizeof(struct newesp);
-		bodyoff = off + sizeof(struct newesp) + ivlen;
-	}
-
-	bzero(nonce, ESP_GCM_SALT_LEN + ivlen);
-	/* generate new iv */
 	ctx = (aes_gcm_ctx *)P2ROUNDUP(sav->sched, ESP_GCM_ALIGN);
 
 	if (aes_encrypt_reset_gcm(ctx->encrypt)) {
@@ -690,25 +713,46 @@ esp_gcm_encrypt_aes(
 		return EINVAL;
 	}
 
-	if (aes_encrypt_inc_iv_gcm((unsigned char *)nonce, ctx->encrypt)) {
-		ipseclog((LOG_ERR, "%s: iv generation failure\n", __FUNCTION__));
-		m_freem(m);
-		return EINVAL;
+	/* Copy the ESP header */
+	m_copydata(m, (int)off, sizeof(esp), (caddr_t) &esp);
+
+	/* Construct the IV */
+	memset(nonce, 0, sizeof(nonce));
+	if (!implicit_iv) {
+		/* generate new iv */
+		if (aes_encrypt_inc_iv_gcm((unsigned char *)nonce, ctx->encrypt)) {
+			ipseclog((LOG_ERR, "%s: iv generation failure\n", __FUNCTION__));
+			m_freem(m);
+			return EINVAL;
+		}
+
+		/*
+		 * The IV is now generated within corecrypto and
+		 * is provided to ESP using aes_encrypt_inc_iv_gcm().
+		 * This makes the sav->iv redundant and is no longer
+		 * used in GCM operations. But we still copy the IV
+		 * back to sav->iv to ensure that any future code reading
+		 * this value will get the latest IV.
+		 */
+		memcpy(sav->iv, (nonce + ESP_GCM_SALT_LEN), ivlen);
+		m_copyback(m, (int)ivoff, ivlen, sav->iv);
+		cc_clear(sizeof(nonce), nonce);
+	} else {
+		/* Use the ESP sequence number in the header to form the
+		 * nonce according to RFC 8750. The first 4 bytes are the
+		 * salt value, the next 4 bytes are zeroes, and the final
+		 * 4 bytes are the ESP sequence number.
+		 */
+		memcpy(nonce, _KEYBUF(sav->key_enc) + _KEYLEN(sav->key_enc) - ESP_GCM_SALT_LEN, ESP_GCM_SALT_LEN);
+		memcpy(nonce + sizeof(nonce) - sizeof(esp.esp_seq), &esp.esp_seq, sizeof(esp.esp_seq));
+		int rc = aes_encrypt_set_iv_gcm((const unsigned char *)nonce, sizeof(nonce), ctx->encrypt);
+		cc_clear(sizeof(nonce), nonce);
+		if (rc) {
+			ipseclog((LOG_ERR, "%s: iv set failure\n", __FUNCTION__));
+			m_freem(m);
+			return EINVAL;
+		}
 	}
-
-	VERIFY(ivoff <= INT_MAX);
-
-	/*
-	 * The IV is now generated within corecrypto and
-	 * is provided to ESP using aes_encrypt_inc_iv_gcm().
-	 * This makes the sav->iv redundant and is no longer
-	 * used in GCM operations. But we still copy the IV
-	 * back to sav->iv to ensure that any future code reading
-	 * this value will get the latest IV.
-	 */
-	memcpy(sav->iv, (nonce + ESP_GCM_SALT_LEN), ivlen);
-	m_copyback(m, (int)ivoff, ivlen, sav->iv);
-	bzero(nonce, ESP_GCM_SALT_LEN + ivlen);
 
 	if (m->m_pkthdr.len < bodyoff) {
 		ipseclog((LOG_ERR, "%s: bad len %d/%u\n", __FUNCTION__,
@@ -717,17 +761,12 @@ esp_gcm_encrypt_aes(
 		return EINVAL;
 	}
 
-	VERIFY(off <= INT_MAX);
 
 	/* Set Additional Authentication Data */
-	if (!(sav->flags & SADB_X_EXT_OLD)) {
-		struct newesp esp;
-		m_copydata(m, (int)off, sizeof(esp), (caddr_t) &esp);
-		if (aes_encrypt_aad_gcm((unsigned char*)&esp, sizeof(esp), ctx->encrypt)) {
-			ipseclog((LOG_ERR, "%s: packet decryption AAD failure\n", __FUNCTION__));
-			m_freem(m);
-			return EINVAL;
-		}
+	if (aes_encrypt_aad_gcm((unsigned char*)&esp, sizeof(esp), ctx->encrypt)) {
+		ipseclog((LOG_ERR, "%s: packet encryption AAD failure\n", __FUNCTION__));
+		m_freem(m);
+		return EINVAL;
 	}
 
 	s = m;
@@ -821,13 +860,13 @@ esp_gcm_encrypt_aes(
 					m_freem(d0);
 				}
 				if (sp_aligned != NULL) {
-					FREE(sp_aligned, M_SECA);
+					kfree_data(sp_aligned, MAX_REALIGN_LEN);
 					sp_aligned = NULL;
 				}
 				return ENOBUFS;
 			}
 			if (sp_aligned == NULL) {
-				sp_aligned = (u_int8_t *)_MALLOC(MAX_REALIGN_LEN, M_SECA, M_DONTWAIT);
+				sp_aligned = (u_int8_t *)kalloc_data(MAX_REALIGN_LEN, Z_NOWAIT);
 				if (sp_aligned == NULL) {
 					m_freem(m);
 					if (d0) {
@@ -870,7 +909,7 @@ esp_gcm_encrypt_aes(
 
 	// free memory
 	if (sp_aligned != NULL) {
-		FREE(sp_aligned, M_SECA);
+		kfree_data(sp_aligned, MAX_REALIGN_LEN);
 		sp_aligned = NULL;
 	}
 
@@ -889,28 +928,26 @@ esp_gcm_decrypt_aes(
 	struct mbuf *d, *d0, *dp;
 	int soff;       /* offset from the head of chain, to head of this mbuf */
 	int sn, dn;     /* offset from the head of the mbuf, to meat */
-	size_t ivoff, bodyoff;
-	u_int8_t iv[ESP_GCM_IVLEN] __attribute__((aligned(4))), *dptr;
+	const size_t ivoff = off + sizeof(struct newesp);
+	const size_t bodyoff = ivoff + ivlen;
+	u_int8_t *dptr;
 	u_int8_t *sp, *sp_unaligned, *sp_aligned = NULL;
 	aes_gcm_ctx *ctx;
 	struct mbuf *scut;
 	int scutoff;
 	int     i, len;
-	unsigned char nonce[ESP_GCM_SALT_LEN + ivlen];
+	const bool implicit_iv = ((sav->flags & SADB_X_EXT_IIV) != 0);
+	struct newesp esp;
+	unsigned char nonce[ESP_GCM_SALT_LEN + ESP_GCM_IVLEN];
 
-	if (ivlen != ESP_GCM_IVLEN) {
+	VERIFY(off <= INT_MAX);
+	VERIFY(ivoff <= INT_MAX);
+	VERIFY(bodyoff <= INT_MAX);
+
+	if (ivlen != (implicit_iv ? 0 : ESP_GCM_IVLEN)) {
 		ipseclog((LOG_ERR, "%s: unsupported ivlen %d\n", __FUNCTION__, ivlen));
 		m_freem(m);
 		return EINVAL;
-	}
-
-	if (sav->flags & SADB_X_EXT_OLD) {
-		/* RFC 1827 */
-		ivoff = off + sizeof(struct esp);
-		bodyoff = off + sizeof(struct esp) + ivlen;
-	} else {
-		ivoff = off + sizeof(struct newesp);
-		bodyoff = off + sizeof(struct newesp) + ivlen;
 	}
 
 	if (m->m_pkthdr.len < bodyoff) {
@@ -920,34 +957,39 @@ esp_gcm_decrypt_aes(
 		return EINVAL;
 	}
 
-	VERIFY(ivoff <= INT_MAX);
+	/* Copy the ESP header */
+	m_copydata(m, (int)off, sizeof(esp), (caddr_t) &esp);
 
-	/* grab iv */
-	m_copydata(m, (int)ivoff, ivlen, (caddr_t) iv);
-
-	/* Set IV */
+	/* Construct IV starting with salt */
+	memset(nonce, 0, sizeof(nonce));
 	memcpy(nonce, _KEYBUF(sav->key_enc) + _KEYLEN(sav->key_enc) - ESP_GCM_SALT_LEN, ESP_GCM_SALT_LEN);
-	memcpy(nonce + ESP_GCM_SALT_LEN, iv, ivlen);
+	if (!implicit_iv) {
+		/* grab IV from packet */
+		u_int8_t iv[ESP_GCM_IVLEN] __attribute__((aligned(4)));
+		m_copydata(m, (int)ivoff, ivlen, (caddr_t) iv);
+		memcpy(nonce + ESP_GCM_SALT_LEN, iv, ivlen);
+		/* just in case */
+		cc_clear(sizeof(iv), iv);
+	} else {
+		/* Use the ESP sequence number in the header to form the
+		 * rest of the nonce according to RFC 8750.
+		 */
+		memcpy(nonce + sizeof(nonce) - sizeof(esp.esp_seq), &esp.esp_seq, sizeof(esp.esp_seq));
+	}
 
 	ctx = (aes_gcm_ctx *)P2ROUNDUP(sav->sched, ESP_GCM_ALIGN);
-	if (aes_decrypt_set_iv_gcm(nonce, sizeof(nonce), ctx->decrypt)) {
+	int rc = aes_decrypt_set_iv_gcm(nonce, sizeof(nonce), ctx->decrypt);
+	cc_clear(sizeof(nonce), nonce);
+	if (rc) {
 		ipseclog((LOG_ERR, "%s: failed to set IV\n", __FUNCTION__));
 		m_freem(m);
-		bzero(nonce, sizeof(nonce));
 		return EINVAL;
 	}
-	bzero(nonce, sizeof(nonce));
-
-	VERIFY(off <= INT_MAX);
 
 	/* Set Additional Authentication Data */
-	if (!(sav->flags & SADB_X_EXT_OLD)) {
-		struct newesp esp;
-		m_copydata(m, (int)off, sizeof(esp), (caddr_t) &esp);
-		if (aes_decrypt_aad_gcm((unsigned char*)&esp, sizeof(esp), ctx->decrypt)) {
-			ipseclog((LOG_ERR, "%s: packet decryption AAD failure\n", __FUNCTION__));
-			return EINVAL;
-		}
+	if (aes_decrypt_aad_gcm((unsigned char*)&esp, sizeof(esp), ctx->decrypt)) {
+		ipseclog((LOG_ERR, "%s: packet decryption AAD failure\n", __FUNCTION__));
+		return EINVAL;
 	}
 
 	s = m;
@@ -1041,13 +1083,13 @@ esp_gcm_decrypt_aes(
 					m_freem(d0);
 				}
 				if (sp_aligned != NULL) {
-					FREE(sp_aligned, M_SECA);
+					kfree_data(sp_aligned, MAX_REALIGN_LEN);
 					sp_aligned = NULL;
 				}
 				return ENOBUFS;
 			}
 			if (sp_aligned == NULL) {
-				sp_aligned = (u_int8_t *)_MALLOC(MAX_REALIGN_LEN, M_SECA, M_DONTWAIT);
+				sp_aligned = (u_int8_t *)kalloc_data(MAX_REALIGN_LEN, Z_NOWAIT);
 				if (sp_aligned == NULL) {
 					m_freem(m);
 					if (d0) {
@@ -1091,12 +1133,9 @@ esp_gcm_decrypt_aes(
 
 	// free memory
 	if (sp_aligned != NULL) {
-		FREE(sp_aligned, M_SECA);
+		kfree_data(sp_aligned, MAX_REALIGN_LEN);
 		sp_aligned = NULL;
 	}
-
-	/* just in case */
-	bzero(iv, sizeof(iv));
 
 	return 0;
 }

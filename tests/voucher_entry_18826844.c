@@ -10,7 +10,11 @@
 #include <mach/mach.h>
 #include <darwintest.h>
 
-T_GLOBAL_META(T_META_RUN_CONCURRENTLY(true));
+T_GLOBAL_META(
+	T_META_NAMESPACE("xnu.ipc"),
+	T_META_RUN_CONCURRENTLY(TRUE),
+	T_META_RADAR_COMPONENT_NAME("xnu"),
+	T_META_RADAR_COMPONENT_VERSION("IPC"));
 
 T_DECL(voucher_entry, "voucher_entry", T_META_CHECK_LEAKS(false), T_META_ALL_VALID_ARCHS(true))
 {

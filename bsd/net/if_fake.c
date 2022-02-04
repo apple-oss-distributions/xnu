@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015-2020 Apple Inc. All rights reserved.
+ * Copyright (c) 2015-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -370,6 +370,74 @@ SYSCTL_PROC(_net_link_fake, OID_AUTO, tx_drops,
     feth_fake_tx_drops_sysctl, "IU",
     "Fake interface will intermittently drop packets on Tx path");
 
+/* sysctl net.link.fake.llink_cnt */
+
+/* The maximum number of logical links (including default link) */
+#define FETH_MAX_LLINKS 16
+/*
+ * The default number of logical links (including default link).
+ * Zero means logical link mode is disabled.
+ */
+#define FETH_DEF_LLINKS 0
+
+static uint32_t if_fake_llink_cnt = FETH_DEF_LLINKS;
+static int
+feth_fake_llink_cnt_sysctl SYSCTL_HANDLER_ARGS
+{
+#pragma unused(oidp, arg1, arg2)
+	unsigned int new_value;
+	int changed;
+	int error;
+
+	error = sysctl_io_number(req, if_fake_llink_cnt,
+	    sizeof(if_fake_llink_cnt), &new_value, &changed);
+	if (error == 0 && changed != 0) {
+		if (new_value > FETH_MAX_LLINKS) {
+			return EINVAL;
+		}
+		if_fake_llink_cnt = new_value;
+	}
+	return 0;
+}
+
+SYSCTL_PROC(_net_link_fake, OID_AUTO, llink_cnt,
+    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED, 0, 0,
+    feth_fake_llink_cnt_sysctl, "IU",
+    "Fake interface logical link count");
+
+/* sysctl net.link.fake.qset_cnt */
+
+/* The maximum number of qsets for each logical link */
+#define FETH_MAX_QSETS  16
+/* The default number of qsets for each logical link */
+#define FETH_DEF_QSETS  4
+
+static uint32_t if_fake_qset_cnt = FETH_DEF_QSETS;
+static int
+feth_fake_qset_cnt_sysctl SYSCTL_HANDLER_ARGS
+{
+#pragma unused(oidp, arg1, arg2)
+	unsigned int new_value;
+	int changed;
+	int error;
+
+	error = sysctl_io_number(req, if_fake_qset_cnt,
+	    sizeof(if_fake_qset_cnt), &new_value, &changed);
+	if (error == 0 && changed != 0) {
+		if (new_value == 0 ||
+		    new_value > FETH_MAX_QSETS) {
+			return EINVAL;
+		}
+		if_fake_qset_cnt = new_value;
+	}
+	return 0;
+}
+
+SYSCTL_PROC(_net_link_fake, OID_AUTO, qset_cnt,
+    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED, 0, 0,
+    feth_fake_qset_cnt_sysctl, "IU",
+    "Fake interface queue set count");
+
 /**
 ** virtual ethernet structures, types
 **/
@@ -378,6 +446,10 @@ SYSCTL_PROC(_net_link_fake, OID_AUTO, tx_drops,
 #define IFF_NUM_RX_RINGS_WMM_MODE       1
 #define IFF_MAX_TX_RINGS        IFF_NUM_TX_RINGS_WMM_MODE
 #define IFF_MAX_RX_RINGS        IFF_NUM_RX_RINGS_WMM_MODE
+#define IFF_NUM_TX_QUEUES_WMM_MODE      4
+#define IFF_NUM_RX_QUEUES_WMM_MODE      1
+#define IFF_MAX_TX_QUEUES       IFF_NUM_TX_QUEUES_WMM_MODE
+#define IFF_MAX_RX_QUEUES       IFF_NUM_RX_QUEUES_WMM_MODE
 
 #define IFF_MAX_BATCH_SIZE 32
 
@@ -494,69 +566,20 @@ static int default_media_words[] = {
 /**
 ** veth locks
 **/
-static inline lck_grp_t *
-my_lck_grp_alloc_init(const char * grp_name)
-{
-	lck_grp_t *             grp;
-	lck_grp_attr_t *        grp_attrs;
 
-	grp_attrs = lck_grp_attr_alloc_init();
-	grp = lck_grp_alloc_init(grp_name, grp_attrs);
-	lck_grp_attr_free(grp_attrs);
-	return grp;
-}
-
-static inline lck_mtx_t *
-my_lck_mtx_alloc_init(lck_grp_t * lck_grp)
-{
-	lck_attr_t *    lck_attrs;
-	lck_mtx_t *             lck_mtx;
-
-	lck_attrs = lck_attr_alloc_init();
-	lck_mtx = lck_mtx_alloc_init(lck_grp, lck_attrs);
-	lck_attr_free(lck_attrs);
-	return lck_mtx;
-}
-
-static lck_mtx_t *      feth_lck_mtx;
-
-static inline void
-feth_lock_init(void)
-{
-	lck_grp_t *             feth_lck_grp;
-
-	feth_lck_grp = my_lck_grp_alloc_init("fake");
-	feth_lck_mtx = my_lck_mtx_alloc_init(feth_lck_grp);
-}
-
-#if 0
-static inline void
-feth_assert_lock_held(void)
-{
-	LCK_MTX_ASSERT(feth_lck_mtx, LCK_MTX_ASSERT_OWNED);
-	return;
-}
-
-static inline void
-feth_assert_lock_not_held(void)
-{
-	LCK_MTX_ASSERT(feth_lck_mtx, LCK_MTX_ASSERT_NOTOWNED);
-	return;
-}
-#endif
+static LCK_GRP_DECLARE(feth_lck_grp, "fake");
+static LCK_MTX_DECLARE(feth_lck_mtx, &feth_lck_grp);
 
 static inline void
 feth_lock(void)
 {
-	lck_mtx_lock(feth_lck_mtx);
-	return;
+	lck_mtx_lock(&feth_lck_mtx);
 }
 
 static inline void
 feth_unlock(void)
 {
-	lck_mtx_unlock(feth_lck_mtx);
-	return;
+	lck_mtx_unlock(&feth_lck_mtx);
 }
 
 static inline int
@@ -845,7 +868,7 @@ copy_mbuf(struct mbuf *m)
 			    frag_len, (pkt_len - offset));
 			goto failed;
 		}
-		m_copydata(m, 0, frag_len, mtod(copy_m, void *) + offset);
+		m_copydata(m, 0, frag_len, mtodo(copy_m, offset));
 		offset += frag_len;
 		m = m->m_next;
 	}
@@ -1435,7 +1458,6 @@ if_fake_init(void)
 {
 	int error;
 
-	feth_lock_init();
 	error = if_clone_attach(&feth_cloner);
 	if (error != 0) {
 		return;

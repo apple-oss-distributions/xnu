@@ -30,6 +30,7 @@
 #include <IOKit/pwr_mgt/IOPM.h>
 #include <IOKit/IOMessage.h>
 #include <IOKit/IOLib.h>
+#include <os/log.h>
 
 #define super IOService
 
@@ -207,7 +208,11 @@ IOPMPowerSource::updateStatus(void)
 	settingsChangedSinceUpdate = false;
 
 	// And up goes the flare
-	messageClients(kIOPMMessageBatteryStatusHasChanged);
+	IOMessage notifyMessage = kIOPMMessageBatteryStatusHasChanged;
+#if DEVELOPMENT || DEBUG
+	os_log(OS_LOG_DEFAULT, "notify clients '%u'\n", (unsigned int)notifyMessage);
+#endif
+	messageClients(notifyMessage);
 }
 
 

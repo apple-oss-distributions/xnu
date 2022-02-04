@@ -210,8 +210,8 @@ in6_addroute(void *v_arg, void *n_arg, struct radix_node_head *head,
 	 */
 	if (rt->rt_flags & RTF_HOST) {
 		IFA_LOCK_SPIN(rt->rt_ifa);
-		if (IN6_ARE_ADDR_EQUAL(&satosin6(rt->rt_ifa->ifa_addr)->
-		    sin6_addr, &sin6->sin6_addr)) {
+		if (in6_are_addr_equal_scoped(&satosin6(rt->rt_ifa->ifa_addr)->
+		    sin6_addr, &sin6->sin6_addr, satosin6(rt->rt_ifa->ifa_addr)->sin6_scope_id, sin6->sin6_scope_id)) {
 			rt->rt_flags |= RTF_LOCAL;
 		}
 		IFA_UNLOCK(rt->rt_ifa);

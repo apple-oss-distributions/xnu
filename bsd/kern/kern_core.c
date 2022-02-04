@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2006 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2021 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -247,7 +247,6 @@ coredump(proc_t core_proc, uint32_t reserve_mb, int coredump_flags)
 	mach_vm_size_t  vmsize;
 	vm_prot_t       prot;
 	vm_prot_t       maxprot;
-	vm_inherit_t    inherit;
 	int             error1 = 0;
 	char            stack_name[MAXCOMLEN + 6];
 	char            *alloced_name = NULL;
@@ -295,22 +294,22 @@ coredump(proc_t core_proc, uint32_t reserve_mb, int coredump_flags)
 	mapsize = get_vmmap_size(map);
 
 	if (((coredump_flags & COREDUMP_IGNORE_ULIMIT) == 0) &&
-	    (mapsize >= proc_limitgetcur(core_proc, RLIMIT_CORE, FALSE))) {
+	    (mapsize >= proc_limitgetcur(core_proc, RLIMIT_CORE))) {
 		error = EFAULT;
 		goto out2;
 	}
 
 	(void) task_suspend_internal(task);
 
-	MALLOC(alloced_name, char *, MAXPATHLEN, M_TEMP, M_NOWAIT | M_ZERO);
+	alloced_name = zalloc_flags(ZV_NAMEI, Z_NOWAIT | Z_ZERO);
 
 	/* create name according to sysctl'able format string */
 	/* if name creation fails, fall back to historical behaviour... */
 	if (alloced_name == NULL ||
 	    proc_core_name(core_proc->p_comm, kauth_cred_getuid(cred),
-	    core_proc->p_pid, alloced_name, MAXPATHLEN)) {
+	    proc_getpid(core_proc), alloced_name, MAXPATHLEN)) {
 		snprintf(stack_name, sizeof(stack_name),
-		    "/cores/core.%d", core_proc->p_pid);
+		    "/cores/core.%d", proc_getpid(core_proc));
 		name = stack_name;
 	} else {
 		name = alloced_name;
@@ -387,7 +386,7 @@ coredump(proc_t core_proc, uint32_t reserve_mb, int coredump_flags)
 		goto out;
 	}
 
-	if (kmem_alloc(kernel_map, &header, (vm_size_t)header_size, VM_KERN_MEMORY_DIAG) != KERN_SUCCESS) {
+	if (kmem_alloc_flags(kernel_map, &header, (vm_size_t)header_size, VM_KERN_MEMORY_DIAG, KMA_ZERO) != KERN_SUCCESS) {
 		error = ENOMEM;
 		goto out;
 	}
@@ -403,7 +402,6 @@ coredump(proc_t core_proc, uint32_t reserve_mb, int coredump_flags)
 		mh64->filetype = MH_CORE;
 		mh64->ncmds = (uint32_t)(segment_count + thread_count);
 		mh64->sizeofcmds = (uint32_t)command_size;
-		mh64->reserved = 0;             /* 8 byte alignment */
 	} else {
 		mh = (struct mach_header *)header;
 		mh->magic = MH_MAGIC;
@@ -462,10 +460,60 @@ coredump(proc_t core_proc, uint32_t reserve_mb, int coredump_flags)
 
 		prot = vbr.protection;
 		maxprot = vbr.max_protection;
-		inherit = vbr.inheritance;
+
+		if ((prot | maxprot) == VM_PROT_NONE) {
+			/*
+			 * Elide unreadable (likely reserved) segments
+			 */
+			vmoffset += vmsize;
+			continue;
+		}
+
+		/*
+		 * Try as hard as possible to get read access to the data.
+		 */
+		if ((prot & VM_PROT_READ) == 0) {
+			mach_vm_protect(map, vmoffset, vmsize, FALSE,
+			    prot | VM_PROT_READ);
+		}
+
+		/*
+		 * But only try and perform the write if we can read it.
+		 */
+		int64_t fsize = ((maxprot & VM_PROT_READ) == VM_PROT_READ
+		    && vbr.user_tag != VM_MEMORY_IOKIT
+		    && coredumpok(map, vmoffset)) ? vmsize : 0;
+
+		if (fsize) {
+			int64_t resid = 0;
+			const enum uio_seg sflg = IS_64BIT_PROCESS(core_proc) ?
+			    UIO_USERSPACE64 : UIO_USERSPACE32;
+
+			error = vn_rdwr_64(UIO_WRITE, vp, vmoffset, fsize,
+			    foffset, sflg, IO_NOCACHE | IO_NODELOCKED | IO_UNIT,
+			    cred, &resid, core_proc);
+
+			if (error) {
+				/*
+				 * Mark segment as empty
+				 */
+				fsize = 0;
+			} else if (resid) {
+				/*
+				 * Partial write. Extend the file size so
+				 * that the segment command contains a valid
+				 * range of offsets, possibly creating a hole.
+				 */
+				VATTR_INIT(&va);
+				VATTR_SET(&va, va_data_size, foffset + fsize);
+				vnode_setattr(vp, &va, ctx);
+			}
+		}
+
 		/*
 		 *	Fill in segment command structure.
 		 */
+
 		if (is_64) {
 			sc64 = (struct segment_command_64 *)(header + hoffset);
 			sc64->cmd = LC_SEGMENT_64;
@@ -475,7 +523,7 @@ coredump(proc_t core_proc, uint32_t reserve_mb, int coredump_flags)
 			sc64->vmaddr = vmoffset;
 			sc64->vmsize = vmsize;
 			sc64->fileoff = foffset;
-			sc64->filesize = vmsize;
+			sc64->filesize = fsize;
 			sc64->maxprot = maxprot;
 			sc64->initprot = prot;
 			sc64->nsects = 0;
@@ -489,36 +537,15 @@ coredump(proc_t core_proc, uint32_t reserve_mb, int coredump_flags)
 			sc->vmaddr = CAST_DOWN_EXPLICIT(uint32_t, vmoffset);
 			sc->vmsize = CAST_DOWN_EXPLICIT(uint32_t, vmsize);
 			sc->fileoff = CAST_DOWN_EXPLICIT(uint32_t, foffset); /* will never truncate */
-			sc->filesize = CAST_DOWN_EXPLICIT(uint32_t, vmsize); /* will never truncate */
+			sc->filesize = CAST_DOWN_EXPLICIT(uint32_t, fsize); /* will never truncate */
 			sc->maxprot = maxprot;
 			sc->initprot = prot;
 			sc->nsects = 0;
 			sc->flags = 0;
 		}
 
-		/*
-		 *	Write segment out.  Try as hard as possible to
-		 *	get read access to the data.
-		 */
-		if ((prot & VM_PROT_READ) == 0) {
-			mach_vm_protect(map, vmoffset, vmsize, FALSE,
-			    prot | VM_PROT_READ);
-		}
-		/*
-		 *	Only actually perform write if we can read.
-		 *	Note: if we can't read, then we end up with
-		 *	a hole in the file.
-		 */
-		if ((maxprot & VM_PROT_READ) == VM_PROT_READ
-		    && vbr.user_tag != VM_MEMORY_IOKIT
-		    && coredumpok(map, vmoffset)) {
-			error = vn_rdwr_64(UIO_WRITE, vp, vmoffset, vmsize, foffset,
-			    (IS_64BIT_PROCESS(core_proc) ? UIO_USERSPACE64 : UIO_USERSPACE32),
-			    IO_NOCACHE | IO_NODELOCKED | IO_UNIT, cred, (int64_t *) 0, core_proc);
-		}
-
 		hoffset += segment_command_sz;
-		foffset += vmsize;
+		foffset += fsize;
 		vmoffset += vmsize;
 		segment_count--;
 	}
@@ -562,7 +589,7 @@ out2:
 	audit_proc_coredump(core_proc, name, error);
 #endif
 	if (alloced_name != NULL) {
-		FREE(alloced_name, M_TEMP);
+		zfree(ZV_NAMEI, alloced_name);
 	}
 	if (error == 0) {
 		error = error1;

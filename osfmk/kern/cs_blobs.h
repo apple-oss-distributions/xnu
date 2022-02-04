@@ -62,7 +62,8 @@
 #define CS_EXEC_INHERIT_SIP         0x00800000  /* set CS_INSTALLER on any exec'ed process */
 
 #define CS_KILLED                   0x01000000  /* was killed by kernel for invalidity */
-#define CS_DYLD_PLATFORM            0x02000000  /* dyld used to load this is a platform binary */
+#define CS_NO_UNTRUSTED_HELPERS     0x02000000  /* kernel did not load a non-platform-binary dyld or Rosetta runtime */
+#define CS_DYLD_PLATFORM            CS_NO_UNTRUSTED_HELPERS /* old name */
 #define CS_PLATFORM_BINARY          0x04000000  /* this is a platform binary */
 #define CS_PLATFORM_PATH            0x08000000  /* platform binary by the fact of path (osx only) */
 
@@ -93,6 +94,7 @@ enum {
 	CSMAGIC_EMBEDDED_SIGNATURE = 0xfade0cc0, /* embedded form of signature data */
 	CSMAGIC_EMBEDDED_SIGNATURE_OLD = 0xfade0b02,    /* XXX */
 	CSMAGIC_EMBEDDED_ENTITLEMENTS = 0xfade7171,     /* embedded entitlements */
+	CSMAGIC_EMBEDDED_DER_ENTITLEMENTS = 0xfade7172, /* embedded DER encoded entitlements */
 	CSMAGIC_DETACHED_SIGNATURE = 0xfade0cc1, /* multi-arch collection of embedded signatures */
 	CSMAGIC_BLOBWRAPPER = 0xfade0b01,       /* CMS Signature, among other things */
 
@@ -109,6 +111,7 @@ enum {
 	CSSLOT_RESOURCEDIR = 3,
 	CSSLOT_APPLICATION = 4,
 	CSSLOT_ENTITLEMENTS = 5,
+	CSSLOT_DER_ENTITLEMENTS = 7,
 
 	CSSLOT_ALTERNATE_CODEDIRECTORIES = 0x1000, /* first alternate CodeDirectory, if any */
 	CSSLOT_ALTERNATE_CODEDIRECTORY_MAX = 5,         /* max number of alternate CD slots */

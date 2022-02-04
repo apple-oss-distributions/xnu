@@ -35,11 +35,11 @@
 #include <mach/kern_return.h>
 #include <mach/processor_info.h>
 #include <kern/kern_types.h>
+#include <kern/sched_urgency.h>
+#include <kern/startup.h>
 #include <kern/thread_group.h>
-
 #include <kern/work_interval.h>
 
-#include <kern/sched_urgency.h>
 
 /*
  * Machine support declarations.
@@ -118,14 +118,6 @@ extern void halt_all_cpus(
 extern char *machine_boot_info(
 	char                *buf,
 	vm_size_t           buf_len);
-
-/*
- * Machine-dependent routine to fill in an array with up to callstack_max
- * levels of return pc information.
- */
-extern void machine_callstack(
-	uintptr_t           *buf,
-	vm_size_t           callstack_max);
 
 extern void consider_machine_collect(void);
 

@@ -77,10 +77,8 @@ machine_task_set_state(
 		}
 
 		if (task->task_debug == NULL) {
-			task->task_debug = zalloc(ads_zone);
-			if (task->task_debug == NULL) {
-				return KERN_FAILURE;
-			}
+			task->task_debug = zalloc_flags(ads_zone,
+			    Z_WAITOK | Z_NOFAIL);
 		}
 
 		copy_debug_state(tstate, (arm_debug_state_t*) task->task_debug, FALSE);

@@ -34,7 +34,6 @@
 #include <mach/thread_status.h>
 #include <mach/vm_param.h>
 
-#include <kern/counters.h>
 #include <kern/cpu_data.h>
 #include <kern/mach_param.h>
 #include <kern/task.h>
@@ -292,7 +291,7 @@ __attribute__((noreturn))
 void
 machdep_syscall(x86_saved_state_t *state)
 {
-	int                     args[machdep_call_count];
+	int                     args[MACHDEP_MAX_ARGS] = { 0 };
 	int                     trapno;
 	int                     nargs;
 	const machdep_call_t    *entry;
@@ -327,6 +326,11 @@ machdep_syscall(x86_saved_state_t *state)
 			/* NOTREACHED */
 		}
 	}
+
+	static_assert(MACHDEP_MAX_ARGS >= 4);
+	KDBG(MACHDBG_CODE(DBG_MACH_MACHDEP_EXCP_SC_x86, trapno) | DBG_FUNC_START,
+	    args[0], args[1], args[2], args[3]);
+
 	switch (nargs) {
 	case 0:
 		regs->eax = (*entry->routine.args_0)();
@@ -370,6 +374,8 @@ machdep_syscall(x86_saved_state_t *state)
 	assertf(prior == NULL, "thread_set_allocation_name(\"%s\") not cleared", kern_allocation_get_name(prior));
 #endif /* DEBUG || DEVELOPMENT */
 
+	KDBG(MACHDBG_CODE(DBG_MACH_MACHDEP_EXCP_SC_x86, trapno) | DBG_FUNC_END, regs->eax);
+
 	throttle_lowpri_io(1);
 
 	thread_exception_return();
@@ -399,6 +405,9 @@ machdep_syscall64(x86_saved_state_t *state)
 		/* NOTREACHED */
 	}
 	entry = &machdep_call_table64[trapno];
+
+	KDBG(MACHDBG_CODE(DBG_MACH_MACHDEP_EXCP_SC_x86, trapno) | DBG_FUNC_START,
+	    regs->rdi, regs->rsi, regs->rdx);
 
 	switch (entry->nargs) {
 	case 0:
@@ -438,6 +447,8 @@ machdep_syscall64(x86_saved_state_t *state)
 	prior __assert_only = thread_get_kernel_state(current_thread())->allocation_name;
 	assertf(prior == NULL, "thread_set_allocation_name(\"%s\") not cleared", kern_allocation_get_name(prior));
 #endif /* DEBUG || DEVELOPMENT */
+
+	KDBG(MACHDBG_CODE(DBG_MACH_MACHDEP_EXCP_SC_x86, trapno) | DBG_FUNC_END, regs->rax);
 
 	throttle_lowpri_io(1);
 
@@ -483,7 +494,7 @@ mach_call_arg_munger32(uint32_t sp, struct mach_call_args *args, const mach_trap
 
 __private_extern__ void mach_call_munger(x86_saved_state_t *state);
 
-extern const char *mach_syscall_name_table[];
+extern const char *const mach_syscall_name_table[];
 
 __attribute__((noreturn))
 void
@@ -559,7 +570,7 @@ mach_call_munger(x86_saved_state_t *state)
 #if CONFIG_MACF
 	/* Check mach trap filter mask, if exists. */
 	task_t task = current_task();
-	uint8_t *filter_mask = task->mach_trap_filter_mask;
+	uint8_t *filter_mask = task_get_mach_trap_filter_mask(task);
 
 	if (__improbable(filter_mask != NULL &&
 	    !bitstr_test(filter_mask, call_number))) {
@@ -567,18 +578,17 @@ mach_call_munger(x86_saved_state_t *state)
 		if (mac_task_mach_trap_evaluate != NULL) {
 			retval = mac_task_mach_trap_evaluate(get_bsdtask_info(task),
 			    call_number);
-			if (retval) {
-				goto skip_machcall;
+			if (retval != KERN_SUCCESS) {
+				DEBUG_KPRINT_SYSCALL_MACH(
+					"mach_call_munger: MACF retval=0x%x\n", retval);
+				i386_exception(EXC_SYSCALL, call_number, 1);
+				/* NOTREACHED */
 			}
 		}
 	}
 #endif /* CONFIG_MACF */
 
 	retval = mach_call(&args);
-
-#if CONFIG_MACF
-skip_machcall:
-#endif
 
 	DEBUG_KPRINT_SYSCALL_MACH("mach_call_munger: retval=0x%x\n", retval);
 
@@ -596,12 +606,7 @@ skip_machcall:
 
 	throttle_lowpri_io(1);
 
-#if PROC_REF_DEBUG
-	if (__improbable(uthread_get_proc_refcount(ut) != 0)) {
-		panic("system call returned with uu_proc_refcount != 0");
-	}
-#endif
-
+	uthread_assert_zero_proc_refcount(ut);
 	thread_exception_return();
 	/* NOTREACHED */
 }
@@ -682,26 +687,22 @@ mach_call_munger64(x86_saved_state_t *state)
 #if CONFIG_MACF
 	/* Check syscall filter mask, if exists. */
 	task_t task = current_task();
-	uint8_t *filter_mask = task->mach_trap_filter_mask;
+	uint8_t *filter_mask = task_get_mach_trap_filter_mask(task);
 
 	if (__improbable(filter_mask != NULL &&
 	    !bitstr_test(filter_mask, call_number))) {
 		/* Not in filter mask, evaluate policy. */
 		if (mac_task_mach_trap_evaluate != NULL) {
-			regs->rax = mac_task_mach_trap_evaluate(get_bsdtask_info(task),
-			    call_number);
-			if (regs->rax) {
-				goto skip_machcall;
+			if (mac_task_mach_trap_evaluate(get_bsdtask_info(task),
+			    call_number) != KERN_SUCCESS) {
+				i386_exception(EXC_SYSCALL, regs->rax, 1);
+				/* NOTREACHED */
 			}
 		}
 	}
 #endif /* CONFIG_MACF */
 
 	regs->rax = (uint64_t)mach_call((void *)&args);
-
-#if CONFIG_MACF
-skip_machcall:
-#endif
 
 	DEBUG_KPRINT_SYSCALL_MACH( "mach_call_munger64: retval=0x%llx\n", regs->rax);
 
@@ -717,12 +718,7 @@ skip_machcall:
 
 	throttle_lowpri_io(1);
 
-#if PROC_REF_DEBUG
-	if (__improbable(uthread_get_proc_refcount(ut) != 0)) {
-		panic("system call returned with uu_proc_refcount != 0");
-	}
-#endif
-
+	uthread_assert_zero_proc_refcount(ut);
 	thread_exception_return();
 	/* NOTREACHED */
 }

@@ -49,6 +49,7 @@
 #include <libkern/OSAtomic.h>
 #include <stdbool.h>
 
+
 static errno_t sock_send_internal(socket_t, const struct msghdr *,
     mbuf_t, int, size_t *);
 
@@ -189,9 +190,7 @@ check_again:
 		}
 		memcpy(from, sa, fromlen);
 	}
-	if (sa != NULL) {
-		FREE(sa, M_SONAME);
-	}
+	free_sockaddr(sa);
 
 	/*
 	 * If the socket has been marked as inactive by sosetdefunct(),
@@ -230,27 +229,22 @@ sock_bind(socket_t sock, const struct sockaddr *to)
 	int error = 0;
 	struct sockaddr *sa = NULL;
 	struct sockaddr_storage ss;
-	boolean_t want_free = TRUE;
 
 	if (sock == NULL || to == NULL) {
 		return EINVAL;
 	}
 
 	if (to->sa_len > sizeof(ss)) {
-		MALLOC(sa, struct sockaddr *, to->sa_len, M_SONAME, M_WAITOK);
-		if (sa == NULL) {
-			return ENOBUFS;
-		}
+		sa = kalloc_data(to->sa_len, Z_WAITOK | Z_ZERO | Z_NOFAIL);
 	} else {
 		sa = (struct sockaddr *)&ss;
-		want_free = FALSE;
 	}
 	memcpy(sa, to, to->sa_len);
 
 	error = sobindlock(sock, sa, 1);        /* will lock socket */
 
-	if (sa != NULL && want_free == TRUE) {
-		FREE(sa, M_SONAME);
+	if (sa != (struct sockaddr *)&ss) {
+		kfree_data(sa, sa->sa_len);
 	}
 
 	return error;
@@ -263,21 +257,19 @@ sock_connect(socket_t sock, const struct sockaddr *to, int flags)
 	lck_mtx_t *mutex_held;
 	struct sockaddr *sa = NULL;
 	struct sockaddr_storage ss;
-	boolean_t want_free = TRUE;
 
 	if (sock == NULL || to == NULL) {
 		return EINVAL;
 	}
 
 	if (to->sa_len > sizeof(ss)) {
-		MALLOC(sa, struct sockaddr *, to->sa_len, M_SONAME,
-		    (flags & MSG_DONTWAIT) ? M_NOWAIT : M_WAITOK);
+		sa = kalloc_data(to->sa_len,
+		    (flags & MSG_DONTWAIT) ? Z_NOWAIT : Z_WAITOK);
 		if (sa == NULL) {
 			return ENOBUFS;
 		}
 	} else {
 		sa = (struct sockaddr *)&ss;
-		want_free = FALSE;
 	}
 	memcpy(sa, to, to->sa_len);
 
@@ -288,7 +280,11 @@ sock_connect(socket_t sock, const struct sockaddr *to, int flags)
 		error = EALREADY;
 		goto out;
 	}
+
+
 	error = soconnectlock(sock, sa, 0);
+
+
 	if (!error) {
 		if ((sock->so_state & SS_ISCONNECTING) &&
 		    ((sock->so_state & SS_NBIO) != 0 ||
@@ -322,8 +318,8 @@ sock_connect(socket_t sock, const struct sockaddr *to, int flags)
 out:
 	socket_unlock(sock, 1);
 
-	if (sa != NULL && want_free == TRUE) {
-		FREE(sa, M_SONAME);
+	if (sa != (struct sockaddr *)&ss) {
+		kfree_data(sa, sa->sa_len);
 	}
 
 	return error;
@@ -432,7 +428,7 @@ sock_getpeername(socket_t sock, struct sockaddr *peername, int peernamelen)
 			peernamelen = sa->sa_len;
 		}
 		memcpy(peername, sa, peernamelen);
-		FREE(sa, M_SONAME);
+		free_sockaddr(sa);
 	}
 	return error;
 }
@@ -455,7 +451,7 @@ sock_getsockname(socket_t sock, struct sockaddr *sockname, int socknamelen)
 			socknamelen = sa->sa_len;
 		}
 		memcpy(sockname, sa, socknamelen);
-		FREE(sa, M_SONAME);
+		free_sockaddr(sa);
 	}
 	return error;
 }
@@ -475,9 +471,8 @@ sogetaddr_locked(struct socket *so, struct sockaddr **psa, int peer)
 
 	if (error == 0 && *psa == NULL) {
 		error = ENOMEM;
-	} else if (error != 0 && *psa != NULL) {
-		FREE(*psa, M_SONAME);
-		*psa = NULL;
+	} else if (error != 0) {
+		free_sockaddr(*psa);
 	}
 	return error;
 }
@@ -501,9 +496,7 @@ sock_getaddr(socket_t sock, struct sockaddr **psa, int peer)
 void
 sock_freeaddr(struct sockaddr *sa)
 {
-	if (sa != NULL) {
-		FREE(sa, M_SONAME);
-	}
+	free_sockaddr(sa);
 }
 
 errno_t
@@ -723,7 +716,7 @@ sock_receive_internal(socket_t sock, struct msghdr *msg, mbuf_t *data,
 	int error = 0;
 	user_ssize_t length = 0;
 	struct sockaddr *fromsa = NULL;
-	char uio_buf[UIO_SIZEOF((msg != NULL) ? msg->msg_iovlen : 0)];
+	uio_stackbuf_t uio_buf[UIO_SIZEOF((msg != NULL) ? msg->msg_iovlen : 0)];
 
 	if (sock == NULL) {
 		return EINVAL;
@@ -806,9 +799,7 @@ cleanup:
 	if (control != NULL) {
 		m_freem(control);
 	}
-	if (fromsa != NULL) {
-		FREE(fromsa, M_SONAME);
-	}
+	free_sockaddr(fromsa);
 	return error;
 }
 
@@ -844,7 +835,7 @@ sock_send_internal(socket_t sock, const struct msghdr *msg, mbuf_t data,
 	struct mbuf *control = NULL;
 	int error = 0;
 	user_ssize_t datalen = 0;
-	char uio_buf[UIO_SIZEOF((msg != NULL ? msg->msg_iovlen : 1))];
+	char *uio_bufp = NULL;
 
 	if (sock == NULL) {
 		error = EINVAL;
@@ -854,8 +845,25 @@ sock_send_internal(socket_t sock, const struct msghdr *msg, mbuf_t data,
 	if (data == NULL && msg != NULL) {
 		struct iovec *tempp = msg->msg_iov;
 
+		MALLOC(uio_bufp, char *, UIO_SIZEOF(msg->msg_iovlen), M_TEMP, M_WAITOK);
+		if (uio_bufp == NULL) {
+#if (DEBUG || DEVELOPMENT)
+			printf("sock_send_internal: so %p MALLOC(%lu) failed, ENOMEM\n",
+			    sock, UIO_SIZEOF(msg->msg_iovlen));
+#endif /* (DEBUG || DEVELOPMENT) */
+			error = ENOMEM;
+			goto errorout;
+		}
 		auio = uio_createwithbuffer(msg->msg_iovlen, 0,
-		    UIO_SYSSPACE, UIO_WRITE, &uio_buf[0], sizeof(uio_buf));
+		    UIO_SYSSPACE, UIO_WRITE, uio_bufp, UIO_SIZEOF(msg->msg_iovlen));
+		if (auio == NULL) {
+#if (DEBUG || DEVELOPMENT)
+			printf("sock_send_internal: so %p uio_createwithbuffer(%lu) failed, ENOMEM\n",
+			    sock, UIO_SIZEOF(msg->msg_iovlen));
+#endif /* (DEBUG || DEVELOPMENT) */
+			error = ENOMEM;
+			goto errorout;
+		}
 		if (tempp != NULL) {
 			int i;
 
@@ -903,9 +911,11 @@ sock_send_internal(socket_t sock, const struct msghdr *msg, mbuf_t data,
 		control->m_len = msg->msg_controllen;
 	}
 
+
 	error = sock->so_proto->pr_usrreqs->pru_sosend(sock, msg != NULL ?
 	    (struct sockaddr *)msg->msg_name : NULL, auio, data,
 	    control, flags);
+
 
 	/*
 	 * Residual data is possible in the case of IO vectors but not
@@ -926,6 +936,9 @@ sock_send_internal(socket_t sock, const struct msghdr *msg, mbuf_t data,
 			*sentlen = datalen;
 		}
 	}
+	if (uio_bufp != NULL) {
+		FREE(uio_bufp, M_TEMP);
+	}
 
 	return error;
 
@@ -943,6 +956,9 @@ errorout:
 	}
 	if (sentlen) {
 		*sentlen = 0;
+	}
+	if (uio_bufp != NULL) {
+		FREE(uio_bufp, M_TEMP);
 	}
 	return error;
 }
@@ -1072,7 +1088,7 @@ sock_release(socket_t sock)
 
 	sock->so_retaincnt--;
 	if (sock->so_retaincnt < 0) {
-		panic("%s: negative retain count (%d) for sock=%p\n",
+		panic("%s: negative retain count (%d) for sock=%p",
 		    __func__, sock->so_retaincnt, sock);
 		/* NOTREACHED */
 	}

@@ -124,6 +124,9 @@ public:
 	    const OSMetaClassBase * obj2,
 	    void * context);
 
+	typedef int32_t (^OSOrderBlock)(const OSMetaClassBase * obj1,
+	    const OSMetaClassBase * obj2);
+
 protected:
 	struct _Element * array;
 	OSOrderFunction   ordering;
@@ -188,6 +191,10 @@ public:
 		unsigned int      capacity,
 		OSOrderFunction   orderFunc = NULL,
 		void            * orderingContext = NULL);
+
+	static OSPtr<OSOrderedSet> withCapacity(
+		unsigned int      capacity,
+		OSOrderBlock      orderBlock);
 
 
 /*!

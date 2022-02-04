@@ -463,3 +463,16 @@ PE_update_panicheader_nestedpanic()
 
 	return;
 }
+
+vm_size_t
+PE_init_socd_client(void)
+{
+	/* not implemented */
+	return 0;
+}
+
+void
+PE_write_socd_client_buffer(__unused vm_offset_t offset, __unused const void *buff, __unused vm_size_t size)
+{
+	/* not implemented */
+}

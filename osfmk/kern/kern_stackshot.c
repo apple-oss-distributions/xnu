@@ -49,16 +49,18 @@
 
 #include <string.h> /* bcopy */
 
-#include <kern/cambria_layout.h>
+#include <kern/backtrace.h>
 #include <kern/coalition.h>
 #include <kern/processor.h>
 #include <kern/host_statistics.h>
+#include <kern/counter.h>
 #include <kern/thread.h>
 #include <kern/thread_group.h>
 #include <kern/task.h>
 #include <kern/telemetry.h>
 #include <kern/clock.h>
 #include <kern/policy_internal.h>
+#include <kern/socd_client.h>
 #include <vm/vm_map.h>
 #include <vm/vm_kern.h>
 #include <vm/vm_pageout.h>
@@ -89,7 +91,6 @@
 
 extern unsigned int not_in_kdp;
 
-
 /* indicate to the compiler that some accesses are unaligned */
 typedef uint64_t unaligned_u64 __attribute__((aligned(1)));
 
@@ -115,6 +116,17 @@ static boolean_t panic_stackshot;
 static boolean_t stack_enable_faulting = FALSE;
 static struct stackshot_fault_stats fault_stats;
 
+/*
+ * Experimentally, our current estimates are 20% short 96% of the time; 40 gets
+ * us into 99.9%+ territory.  In the longer run, we need to make stackshot
+ * estimates use a better approach (rdar://78880038); this is intended to be a
+ * short-term fix.
+ */
+uint32_t stackshot_estimate_adj = 40; /* experiment factor: 0-100, adjust our estimate up by this amount */
+
+static uint32_t stackshot_initial_estimate;
+static uint32_t stackshot_initial_estimate_adj;
+static uint64_t stackshot_duration_prior_abs;   /* prior attempts, abs */
 static unaligned_u64 * stackshot_duration_outer;
 static uint64_t stackshot_microsecs;
 
@@ -123,13 +135,9 @@ int kernel_stackshot_buf_size = 0;
 
 void * stackshot_snapbuf = NULL; /* Used by stack_snapshot2 (to be removed) */
 
-#if INTERRUPT_MASKED_DEBUG
-extern boolean_t interrupt_masked_debug;
-#endif
-
 __private_extern__ void stackshot_init( void );
 static boolean_t memory_iszero(void *addr, size_t size);
-uint32_t                get_stackshot_estsize(uint32_t prev_size_hint);
+uint32_t                get_stackshot_estsize(uint32_t prev_size_hint, uint32_t adj);
 kern_return_t           kern_stack_snapshot_internal(int stackshot_config_version, void *stackshot_config,
     size_t stackshot_config_size, boolean_t stackshot_from_user);
 kern_return_t           do_stackshot(void *);
@@ -186,13 +194,21 @@ extern kern_return_t stack_microstackshot(user_addr_t tracebuf, uint32_t tracebu
 extern kern_return_t kern_stack_snapshot_with_reason(char* reason);
 extern kern_return_t kern_stack_snapshot_internal(int stackshot_config_version, void *stackshot_config, size_t stackshot_config_size, boolean_t stackshot_from_user);
 
+static size_t _stackshot_get_page_size(vm_map_t, size_t *page_mask_out);
+
 /*
- * Validates that the given address is both a valid page and has
- * default caching attributes for the current map.  Returns
- * 0 if the address is invalid, and a kernel virtual address for
- * the given address if it is valid.
+ * Validates that the given address for a word is both a valid page and has
+ * default caching attributes for the current map.
  */
-vm_offset_t machine_trace_thread_get_kva(vm_offset_t cur_target_addr, vm_map_t map, uint32_t *thread_trace_flags);
+bool machine_trace_thread_validate_kva(vm_offset_t);
+/*
+ * Validates a region that stackshot will potentially inspect.
+ */
+static bool _stackshot_validate_kva(vm_offset_t, size_t);
+/*
+ * Must be called whenever stackshot is re-driven.
+ */
+static void _stackshot_validation_reset(void);
 
 #define KDP_FAULT_RESULT_PAGED_OUT   0x1 /* some data was unable to be retrieved */
 #define KDP_FAULT_RESULT_TRIED_FAULT 0x2 /* tried to fault in data */
@@ -205,13 +221,8 @@ vm_offset_t machine_trace_thread_get_kva(vm_offset_t cur_target_addr, vm_map_t m
  */
 vm_offset_t kdp_find_phys(vm_map_t map, vm_offset_t target_addr, boolean_t try_fault, uint32_t *kdp_fault_results);
 
-static size_t stackshot_strlcpy(char *dst, const char *src, size_t maxlen);
+static size_t _stackshot_strlcpy(char *dst, const char *src, size_t maxlen);
 void stackshot_memcpy(void *dst, const void *src, size_t len);
-
-/* Clears caching information used by the above validation routine
- * (in case the current map has been changed or cleared).
- */
-void machine_trace_thread_clear_validation_cache(void);
 
 #define MAX_FRAMES 1000
 #define MAX_LOADINFOS 500
@@ -223,13 +234,6 @@ typedef struct task_snapshot *task_snapshot_t;
 #if CONFIG_KDP_INTERACTIVE_DEBUGGING
 extern kdp_send_t    kdp_en_send_pkt;
 #endif
-
-/*
- * Globals to support machine_trace_thread_get_kva.
- */
-static vm_offset_t prev_target_page = 0;
-static vm_offset_t prev_target_kva = 0;
-static boolean_t validate_next_addr = TRUE;
 
 /*
  * Stackshot locking and other defines.
@@ -385,7 +389,18 @@ stack_snapshot_from_kernel(int pid, void *buf, uint32_t size, uint64_t flags, ui
 		goto out;
 	}
 
+	stackshot_initial_estimate = 0;
+	stackshot_duration_prior_abs = 0;
+	stackshot_duration_outer = NULL;
+
+	KDBG_RELEASE(MACHDBG_CODE(DBG_MACH_STACKSHOT, STACKSHOT_KERN_RECORD) | DBG_FUNC_START,
+	    flags, size, pid, delta_since_timestamp);
+
 	istate = ml_set_interrupts_enabled(FALSE);
+	uint64_t time_start      = mach_absolute_time();
+
+	/* Emit a SOCD tracepoint that we are initiating a stackshot */
+	SOCD_TRACE_XNU_START(STACKSHOT);
 
 	/* Preload trace parameters*/
 	kdp_snapshot_preflight(pid, buf, size, flags, &kcdata,
@@ -397,10 +412,20 @@ stack_snapshot_from_kernel(int pid, void *buf, uint32_t size, uint64_t flags, ui
 	 */
 	error = stackshot_trap();
 
+	uint64_t time_end               = mach_absolute_time();
+
+	/* Emit a SOCD tracepoint that we have completed the stackshot */
+	SOCD_TRACE_XNU_END(STACKSHOT);
+
 	ml_set_interrupts_enabled(istate);
 
+	if (stackshot_duration_outer) {
+		*stackshot_duration_outer = time_end - time_start;
+	}
 	*bytes_traced = kdp_stack_snapshot_bytes_traced();
 
+	KDBG_RELEASE(MACHDBG_CODE(DBG_MACH_STACKSHOT, STACKSHOT_KERN_RECORD) | DBG_FUNC_END,
+	    error, (time_end - time_start), size, *bytes_traced);
 out:
 	stackshot_kcdata_p = NULL;
 	STACKSHOT_SUBSYS_UNLOCK();
@@ -449,7 +474,7 @@ stack_microstackshot(user_addr_t tracebuf, uint32_t tracebuf_size, uint32_t flag
 
 		bytes_traced = tracebuf_size;
 		error = telemetry_gather(tracebuf, &bytes_traced,
-		    (flags & STACKSHOT_SET_MICROSTACKSHOT_MARK) ? TRUE : FALSE);
+		    (flags & STACKSHOT_SET_MICROSTACKSHOT_MARK) ? true : false);
 		*retval = (int)bytes_traced;
 		goto unlock_exit;
 	}
@@ -464,15 +489,25 @@ exit:
 /*
  * Return the estimated size of a stackshot based on the
  * number of currently running threads and tasks.
+ *
+ * adj is an adjustment in units of percentage
+ *
+ * This function is mostly unhinged from reality; struct thread_snapshot and
+ * struct task_stackshot are legacy, much larger versions of the structures we
+ * actually use, and there's no accounting for how we actually generate
+ * task & thread information.  rdar://78880038 intends to replace this all.
  */
 uint32_t
-get_stackshot_estsize(uint32_t prev_size_hint)
+get_stackshot_estsize(uint32_t prev_size_hint, uint32_t adj)
 {
 	vm_size_t thread_total;
 	vm_size_t task_total;
+	uint64_t size;
 	uint32_t estimated_size;
 	size_t est_thread_size = sizeof(struct thread_snapshot);
 	size_t est_task_size = sizeof(struct task_snapshot) + TASK_UUID_AVG_SIZE;
+
+	adj = MIN(adj, 100u);   /* no more than double our estimate */
 
 #if STACKSHOT_COLLECTS_LATENCY_INFO
 	if (collect_latency_info) {
@@ -484,10 +519,11 @@ get_stackshot_estsize(uint32_t prev_size_hint)
 	thread_total = (threads_count * est_thread_size);
 	task_total = (tasks_count  * est_task_size);
 
-	estimated_size = (uint32_t) VM_MAP_ROUND_PAGE((thread_total + task_total + STACKSHOT_SUPP_SIZE), PAGE_MASK);
-	if (estimated_size < prev_size_hint) {
-		estimated_size = (uint32_t) VM_MAP_ROUND_PAGE(prev_size_hint, PAGE_MASK);
-	}
+	size = thread_total + task_total + STACKSHOT_SUPP_SIZE;                 /* estimate */
+	size += (size * adj) / 100;                                                                     /* add adj */
+	size = MAX(size, prev_size_hint);                                                               /* allow hint to increase */
+	size = MIN(size, VM_MAP_TRUNC_PAGE(UINT32_MAX, PAGE_MASK));             /* avoid overflow */
+	estimated_size = (uint32_t) VM_MAP_ROUND_PAGE(size, PAGE_MASK); /* round to pagesize */
 
 	return estimated_size;
 }
@@ -543,12 +579,15 @@ kern_stack_snapshot_internal(int stackshot_config_version, void *stackshot_confi
 	int error = 0;
 	boolean_t prev_interrupt_state;
 	uint32_t bytes_traced = 0;
+	uint32_t stackshot_estimate = 0;
 	uint32_t stackshotbuf_size = 0;
 	void * stackshotbuf = NULL;
 	kcdata_descriptor_t kcdata_p = NULL;
 
 	void * buf_to_free = NULL;
 	int size_to_free = 0;
+	bool is_traced = false;    /* has FUNC_START tracepoint fired? */
+	uint64_t tot_interrupts_off_abs = 0; /* sum(time with interrupts off) */
 
 	/* Parsed arguments */
 	uint64_t                out_buffer_addr;
@@ -691,7 +730,15 @@ kern_stack_snapshot_internal(int stackshot_config_version, void *stackshot_confi
 		goto error_exit;
 	}
 
-	stackshotbuf_size = get_stackshot_estsize(size_hint);
+	stackshot_duration_prior_abs = 0;
+	stackshot_initial_estimate_adj = os_atomic_load(&stackshot_estimate_adj, relaxed);
+	stackshotbuf_size = stackshot_estimate =
+	    get_stackshot_estsize(size_hint, stackshot_initial_estimate_adj);
+	stackshot_initial_estimate = stackshot_estimate;
+
+	KDBG_RELEASE(MACHDBG_CODE(DBG_MACH_STACKSHOT, STACKSHOT_RECORD) | DBG_FUNC_START,
+	    flags, stackshotbuf_size, pid, since_timestamp);
+	is_traced = true;
 
 	for (; stackshotbuf_size <= max_tracebuf_size; stackshotbuf_size <<= 1) {
 		if (kmem_alloc_flags(kernel_map, (vm_offset_t *)&stackshotbuf, stackshotbuf_size, VM_KERN_MEMORY_DIAG, KMA_ZERO) != KERN_SUCCESS) {
@@ -707,7 +754,6 @@ kern_stack_snapshot_internal(int stackshot_config_version, void *stackshot_confi
 		    KCFLAG_USE_MEMCOPY | KCFLAG_NO_AUTO_ENDBUFFER);
 
 		stackshot_duration_outer = NULL;
-		uint64_t time_start      = mach_absolute_time();
 
 		/* if compression was requested, allocate the extra zlib scratch area */
 		if (flags & STACKSHOT_DO_COMPRESS) {
@@ -725,6 +771,10 @@ kern_stack_snapshot_internal(int stackshot_config_version, void *stackshot_confi
 		 * Disable interrupts and save the current interrupt state.
 		 */
 		prev_interrupt_state = ml_set_interrupts_enabled(FALSE);
+		uint64_t time_start      = mach_absolute_time();
+
+		/* Emit a SOCD tracepoint that we are initiating a stackshot */
+		SOCD_TRACE_XNU_START(STACKSHOT);
 
 		/*
 		 * Load stackshot parameters.
@@ -734,14 +784,17 @@ kern_stack_snapshot_internal(int stackshot_config_version, void *stackshot_confi
 
 		error = stackshot_trap();
 
+		/* record the duration that interupts were disabled */
+		uint64_t time_end = mach_absolute_time();
+
+		/* Emit a SOCD tracepoint that we have completed the stackshot */
+		SOCD_TRACE_XNU_END(STACKSHOT);
 		ml_set_interrupts_enabled(prev_interrupt_state);
 
-		/* record the duration that interupts were disabled */
-
-		uint64_t time_end = mach_absolute_time();
 		if (stackshot_duration_outer) {
 			*stackshot_duration_outer = time_end - time_start;
 		}
+		tot_interrupts_off_abs += time_end - time_start;
 
 		if (error != KERN_SUCCESS) {
 			if (kcdata_p != NULL) {
@@ -755,6 +808,9 @@ kern_stack_snapshot_internal(int stackshot_config_version, void *stackshot_confi
 				/*
 				 * If we didn't allocate a big enough buffer, deallocate and try again.
 				 */
+				KDBG_RELEASE(MACHDBG_CODE(DBG_MACH_STACKSHOT, STACKSHOT_RECORD_SHORT) | DBG_FUNC_NONE,
+				    time_end - time_start, stackshot_estimate, stackshotbuf_size);
+				stackshot_duration_prior_abs += (time_end - time_start);
 				continue;
 			} else {
 				goto error_exit;
@@ -762,7 +818,6 @@ kern_stack_snapshot_internal(int stackshot_config_version, void *stackshot_confi
 		}
 
 		bytes_traced = kdp_stack_snapshot_bytes_traced();
-
 		if (bytes_traced <= 0) {
 			error = KERN_ABORTED;
 			goto error_exit;
@@ -802,6 +857,10 @@ kern_stack_snapshot_internal(int stackshot_config_version, void *stackshot_confi
 	}
 
 error_exit:
+	if (is_traced) {
+		KDBG_RELEASE(MACHDBG_CODE(DBG_MACH_STACKSHOT, STACKSHOT_RECORD) | DBG_FUNC_END,
+		    error, tot_interrupts_off_abs, stackshotbuf_size, bytes_traced);
+	}
 	if (kcdata_p != NULL) {
 		kcdata_memory_destroy(kcdata_p);
 		kcdata_p = NULL;
@@ -880,6 +939,40 @@ memory_iszero(void *addr, size_t size)
 		}
 	}
 	return TRUE;
+}
+
+/*
+ * Keep a simple cache of the most recent validation done at a page granularity
+ * to avoid the expensive software KVA-to-phys translation in the VM.
+ */
+
+struct _stackshot_validation_state {
+	vm_offset_t last_valid_page_kva;
+	size_t last_valid_size;
+} g_validation_state;
+
+static void
+_stackshot_validation_reset(void)
+{
+	g_validation_state.last_valid_page_kva = -1;
+	g_validation_state.last_valid_size = 0;
+}
+
+static bool
+_stackshot_validate_kva(vm_offset_t addr, size_t size)
+{
+	vm_offset_t page_addr = atop_kernel(addr);
+	if (g_validation_state.last_valid_page_kva == page_addr &&
+	    g_validation_state.last_valid_size <= size) {
+		return true;
+	}
+
+	if (ml_validate_nofault(addr, size)) {
+		g_validation_state.last_valid_page_kva = page_addr;
+		g_validation_state.last_valid_size = size;
+		return true;
+	}
+	return false;
 }
 
 #define kcd_end_address(kcd) ((void *)((uint64_t)((kcd)->kcd_addr_begin) + kcdata_memory_get_used_bytes((kcd))))
@@ -968,16 +1061,25 @@ kcdata_record_shared_cache_info(kcdata_descriptor_t kcd, task_t task, unaligned_
 	kern_return_t error = KERN_SUCCESS;
 
 	uint64_t shared_cache_slide = 0;
-	uint64_t shared_cache_base_address = 0;
+	uint64_t shared_cache_first_mapping = 0;
 	uint32_t kdp_fault_results = 0;
-	struct dyld_uuid_info_64_v2 shared_cache_data = {0};
+	struct dyld_shared_cache_loadinfo shared_cache_data = {0};
 
 
 	assert(task_snap_ss_flags != NULL);
 
-	if (task->shared_region && ml_validate_nofault((vm_offset_t)task->shared_region, sizeof(struct vm_shared_region))) {
+	/* Get basic info about the shared region pointer, regardless of any failures */
+	if (task->shared_region == NULL) {
+		*task_snap_ss_flags |= kTaskSharedRegionNone;
+	} else if (task->shared_region == primary_system_shared_region) {
+		*task_snap_ss_flags |= kTaskSharedRegionSystem;
+	} else {
+		*task_snap_ss_flags |= kTaskSharedRegionOther;
+	}
+
+	if (task->shared_region && _stackshot_validate_kva((vm_offset_t)task->shared_region, sizeof(struct vm_shared_region))) {
 		struct vm_shared_region *sr = task->shared_region;
-		shared_cache_base_address = sr->sr_base_address + sr->sr_first_mapping;
+		shared_cache_first_mapping = sr->sr_base_address + sr->sr_first_mapping;
 
 	} else {
 		*task_snap_ss_flags |= kTaskSharedRegionInfoUnavailable;
@@ -985,7 +1087,7 @@ kcdata_record_shared_cache_info(kcdata_descriptor_t kcd, task_t task, unaligned_
 	}
 
 	/* We haven't copied in the shared region UUID yet as part of setup */
-	if (!shared_cache_base_address || !task->shared_region->sr_uuid_copied) {
+	if (!shared_cache_first_mapping || !task->shared_region->sr_uuid_copied) {
 		goto error_exit;
 	}
 
@@ -995,15 +1097,27 @@ kcdata_record_shared_cache_info(kcdata_descriptor_t kcd, task_t task, unaligned_
 	 */
 	shared_cache_slide = task->shared_region->sr_slide;
 
-	if (task->shared_region == init_task_shared_region) {
+	if (task->shared_region == primary_system_shared_region) {
 		/* skip adding shared cache info -- it's the same as the system level one */
 		goto error_exit;
 	}
 
-	shared_cache_data.imageLoadAddress = shared_cache_slide;
-	stackshot_memcpy(&shared_cache_data.imageUUID, task->shared_region->sr_uuid, sizeof(task->shared_region->sr_uuid));
-	shared_cache_data.imageSlidBaseAddress = shared_cache_base_address;
-	kcd_exit_on_error(kcdata_push_data(kcd, STACKSHOT_KCTYPE_SHAREDCACHE_LOADINFO, sizeof(struct dyld_uuid_info_64_v2), &shared_cache_data));
+	/*
+	 * Historically, this data was in a dyld_uuid_info_64 structure, but the
+	 * naming of both the structure and fields for this use wasn't great.  The
+	 * dyld_shared_cache_loadinfo structure has better names, but the same
+	 * layout and content as the original.
+	 *
+	 * The imageSlidBaseAddress/sharedCacheUnreliableSlidBaseAddress field
+	 * has been used inconsistently for STACKSHOT_COLLECT_SHAREDCACHE_LAYOUT
+	 * entries; here, it's the slid first mapping, and we leave it that way
+	 * for backwards compatibility.
+	 */
+	shared_cache_data.sharedCacheSlide = shared_cache_slide;
+	stackshot_memcpy(&shared_cache_data.sharedCacheUUID, task->shared_region->sr_uuid, sizeof(task->shared_region->sr_uuid));
+	shared_cache_data.sharedCacheUnreliableSlidBaseAddress = shared_cache_first_mapping;
+	shared_cache_data.sharedCacheSlidFirstMapping = shared_cache_first_mapping;
+	kcd_exit_on_error(kcdata_push_data(kcd, STACKSHOT_KCTYPE_SHAREDCACHE_LOADINFO, sizeof(shared_cache_data), &shared_cache_data));
 
 error_exit:
 	if (kdp_fault_results & KDP_FAULT_RESULT_PAGED_OUT) {
@@ -1080,7 +1194,7 @@ kcdata_record_uuid_info(kcdata_descriptor_t kcd, task_t task, uint64_t trace_fla
 	}
 
 	if (have_pmap && task_pid == 0) {
-		if (save_kextloadinfo_p && ml_validate_nofault((vm_offset_t)(gLoadedKextSummaries), sizeof(OSKextLoadedKextSummaryHeader))) {
+		if (save_kextloadinfo_p && _stackshot_validate_kva((vm_offset_t)(gLoadedKextSummaries), sizeof(OSKextLoadedKextSummaryHeader))) {
 			uuid_info_count = gLoadedKextSummaries->numSummaries + 1; /* include main kernel UUID */
 		} else {
 			uuid_info_count = 1; /* include kernelcache UUID (embedded) or kernel UUID (desktop) */
@@ -1149,7 +1263,7 @@ kcdata_record_uuid_info(kcdata_descriptor_t kcd, task_t task, uint64_t trace_fla
 			}
 #endif /* defined(__arm__) || defined(__arm64__) */
 
-			if (!kernel_uuid || !ml_validate_nofault((vm_offset_t)kernel_uuid, sizeof(uuid_t))) {
+			if (!kernel_uuid || !_stackshot_validate_kva((vm_offset_t)kernel_uuid, sizeof(uuid_t))) {
 				/* Kernel UUID not found or inaccessible */
 				break;
 			}
@@ -1187,8 +1301,8 @@ kcdata_record_uuid_info(kcdata_descriptor_t kcd, task_t task, uint64_t trace_fla
 			stackshot_memcpy(&uuid_info_array[0].imageUUID, kernel_uuid, sizeof(uuid_t));
 
 			if (save_kextloadinfo_p &&
-			    ml_validate_nofault((vm_offset_t)(gLoadedKextSummaries), sizeof(OSKextLoadedKextSummaryHeader)) &&
-			    ml_validate_nofault((vm_offset_t)(&gLoadedKextSummaries->summaries[0]),
+			    _stackshot_validate_kva((vm_offset_t)(gLoadedKextSummaries), sizeof(OSKextLoadedKextSummaryHeader)) &&
+			    _stackshot_validate_kva((vm_offset_t)(&gLoadedKextSummaries->summaries[0]),
 			    gLoadedKextSummaries->entry_size * gLoadedKextSummaries->numSummaries)) {
 				uint32_t kexti;
 				for (kexti = 0; kexti < gLoadedKextSummaries->numSummaries; kexti++) {
@@ -1291,6 +1405,50 @@ kcdata_record_task_cpu_architecture(kcdata_descriptor_t kcd, task_t task)
 }
 
 static kern_return_t
+kcdata_record_transitioning_task_snapshot(kcdata_descriptor_t kcd, task_t task, unaligned_u64 task_snap_ss_flags, uint64_t transition_type)
+{
+	kern_return_t error                 = KERN_SUCCESS;
+	mach_vm_address_t out_addr          = 0;
+	struct transitioning_task_snapshot * cur_tsnap = NULL;
+
+	int task_pid           = pid_from_task(task);
+	/* Is returning -1 ok for terminating task ok ??? */
+	uint64_t task_uniqueid = get_task_uniqueid(task);
+
+	if (task_pid && (task_did_exec_internal(task) || task_is_exec_copy_internal(task))) {
+		/*
+		 * if this task is a transit task from another one, show the pid as
+		 * negative
+		 */
+		task_pid = 0 - task_pid;
+	}
+
+	/* the task_snapshot_v2 struct is large - avoid overflowing the stack */
+	kcdata_compression_window_open(kcd);
+	kcd_exit_on_error(kcdata_get_memory_addr(kcd, STACKSHOT_KCTYPE_TRANSITIONING_TASK_SNAPSHOT, sizeof(struct transitioning_task_snapshot), &out_addr));
+	cur_tsnap = (struct transitioning_task_snapshot *)out_addr;
+	bzero(cur_tsnap, sizeof(*cur_tsnap));
+
+	cur_tsnap->tts_unique_pid = task_uniqueid;
+	cur_tsnap->tts_ss_flags = kcdata_get_task_ss_flags(task);
+	cur_tsnap->tts_ss_flags |= task_snap_ss_flags;
+	cur_tsnap->tts_transition_type = transition_type;
+	cur_tsnap->tts_pid = task_pid;
+
+	/* Add the BSD process identifiers */
+	if (task_pid != -1 && task->bsd_info != NULL) {
+		proc_name_kdp(task, cur_tsnap->tts_p_comm, sizeof(cur_tsnap->tts_p_comm));
+	} else {
+		cur_tsnap->tts_p_comm[0] = '\0';
+	}
+
+	kcd_exit_on_error(kcdata_compression_window_close(kcd));
+
+error_exit:
+	return error;
+}
+
+static kern_return_t
 #if STACKSHOT_COLLECTS_LATENCY_INFO
 kcdata_record_task_snapshot(kcdata_descriptor_t kcd, task_t task, uint64_t trace_flags, boolean_t have_pmap, unaligned_u64 task_snap_ss_flags, struct stackshot_latency_task *latency_info)
 #else
@@ -1347,9 +1505,9 @@ kcdata_record_task_snapshot(kcdata_descriptor_t kcd, task_t task, uint64_t trace
 	cur_tsnap->ts_did_throttle = (uint32_t) proc_did_throttle_from_task(task);
 
 	cur_tsnap->ts_suspend_count = task->suspend_count;
-	cur_tsnap->ts_faults = task->faults;
-	cur_tsnap->ts_pageins = task->pageins;
-	cur_tsnap->ts_cow_faults = task->cow_faults;
+	cur_tsnap->ts_faults = counter_load(&task->faults);
+	cur_tsnap->ts_pageins = counter_load(&task->pageins);
+	cur_tsnap->ts_cow_faults = counter_load(&task->cow_faults);
 	cur_tsnap->ts_latency_qos = (task->effective_policy.tep_latency_qos == LATENCY_QOS_TIER_UNSPECIFIED) ?
 	    LATENCY_QOS_TIER_UNSPECIFIED : ((0xFF << 16) | task->effective_policy.tep_latency_qos);
 	cur_tsnap->ts_pid = task_pid;
@@ -1361,7 +1519,7 @@ kcdata_record_task_snapshot(kcdata_descriptor_t kcd, task_t task, uint64_t trace
 		cur_tsnap->ts_p_comm[0] = '\0';
 #if IMPORTANCE_INHERITANCE && (DEVELOPMENT || DEBUG)
 		if (task->task_imp_base != NULL) {
-			stackshot_strlcpy(cur_tsnap->ts_p_comm, &task->task_imp_base->iit_procname[0],
+			_stackshot_strlcpy(cur_tsnap->ts_p_comm, &task->task_imp_base->iit_procname[0],
 			    MIN((int)sizeof(task->task_imp_base->iit_procname), (int)sizeof(cur_tsnap->ts_p_comm)));
 		}
 #endif /* IMPORTANCE_INHERITANCE && (DEVELOPMENT || DEBUG) */
@@ -1471,9 +1629,9 @@ kcdata_record_task_delta_snapshot(kcdata_descriptor_t kcd, task_t task, uint64_t
 
 	cur_tsnap->tds_max_resident_size = get_task_resident_max(task);
 	cur_tsnap->tds_suspend_count = task->suspend_count;
-	cur_tsnap->tds_faults            = task->faults;
-	cur_tsnap->tds_pageins           = task->pageins;
-	cur_tsnap->tds_cow_faults        = task->cow_faults;
+	cur_tsnap->tds_faults            = counter_load(&task->faults);
+	cur_tsnap->tds_pageins           = counter_load(&task->pageins);
+	cur_tsnap->tds_cow_faults        = counter_load(&task->cow_faults);
 	cur_tsnap->tds_was_throttled     = (uint32_t)proc_was_throttled_from_task(task);
 	cur_tsnap->tds_did_throttle      = (uint32_t)proc_did_throttle_from_task(task);
 	cur_tsnap->tds_latency_qos       = (task->effective_policy.tep_latency_qos == LATENCY_QOS_TIER_UNSPECIFIED)
@@ -1531,6 +1689,66 @@ error_exit:
 	return error;
 }
 
+bool
+machine_trace_thread_validate_kva(vm_offset_t addr)
+{
+	return _stackshot_validate_kva(addr, sizeof(uintptr_t));
+}
+
+struct _stackshot_backtrace_context {
+	vm_map_t sbc_map;
+	vm_offset_t sbc_prev_page;
+	vm_offset_t sbc_prev_kva;
+	uint32_t sbc_flags;
+	bool sbc_allow_faulting;
+};
+
+static errno_t
+_stackshot_backtrace_copy(void *vctx, void *dst, user_addr_t src, size_t size)
+{
+	struct _stackshot_backtrace_context *ctx = vctx;
+	size_t map_page_mask = 0;
+	size_t __assert_only map_page_size = _stackshot_get_page_size(ctx->sbc_map,
+	    &map_page_mask);
+	assert(size < map_page_size);
+	if (src & (size - 1)) {
+		// The source should be aligned to the size passed in, like a stack
+		// frame or word.
+		return EINVAL;
+	}
+
+	vm_offset_t src_page = src & ~map_page_mask;
+	vm_offset_t src_kva = 0;
+
+	if (src_page != ctx->sbc_prev_page) {
+		uint32_t res = 0;
+		uint32_t flags = 0;
+		vm_offset_t src_pa = kdp_find_phys(ctx->sbc_map, src,
+		    ctx->sbc_allow_faulting, &res);
+
+		flags |= (res & KDP_FAULT_RESULT_PAGED_OUT) ? kThreadTruncatedBT : 0;
+		flags |= (res & KDP_FAULT_RESULT_TRIED_FAULT) ? kThreadTriedFaultBT : 0;
+		flags |= (res & KDP_FAULT_RESULT_FAULTED_IN) ? kThreadFaultedBT : 0;
+		ctx->sbc_flags |= flags;
+		if (src_pa == 0) {
+			return EFAULT;
+		}
+
+		src_kva = phystokv(src_pa);
+		ctx->sbc_prev_page = src_page;
+		ctx->sbc_prev_kva = (src_kva & ~map_page_mask);
+	} else {
+		src_kva = ctx->sbc_prev_kva + (src & map_page_mask);
+	}
+
+#if KASAN
+	kasan_notify_address(src_kva, size);
+#endif
+	memcpy(dst, (const void *)src_kva, size);
+
+	return 0;
+}
+
 static kern_return_t
 kcdata_record_thread_snapshot(
 	kcdata_descriptor_t kcd, thread_t thread, task_t task, uint64_t trace_flags, boolean_t have_pmap, boolean_t thread_on_core)
@@ -1555,7 +1773,6 @@ kcdata_record_thread_snapshot(
 	struct thread_snapshot_v4 * cur_thread_snap = NULL;
 	char cur_thread_name[STACKSHOT_MAX_THREAD_NAME_SIZE];
 	uint64_t tval    = 0;
-	const boolean_t is_64bit_data = task_has_64Bit_data(task);
 
 	kcd_exit_on_error(kcdata_get_memory_addr(kcd, STACKSHOT_KCTYPE_THREAD_SNAPSHOT, sizeof(struct thread_snapshot_v4), &out_addr));
 	cur_thread_snap = (struct thread_snapshot_v4 *)out_addr;
@@ -1615,7 +1832,7 @@ kcdata_record_thread_snapshot(
 						if (len > 0) {
 							mach_vm_address_t label_addr = 0;
 							kcd_exit_on_error(kcdata_get_memory_addr(kcd, STACKSHOT_KCTYPE_THREAD_DISPATCH_QUEUE_LABEL, len, &label_addr));
-							stackshot_strlcpy((char*)label_addr, &label_buf[0], len);
+							_stackshot_strlcpy((char*)label_addr, &label_buf[0], len);
 						}
 					}
 				}
@@ -1729,50 +1946,101 @@ kcdata_record_thread_snapshot(
 
 	/* Trace user stack, if any */
 	if (!active_kthreads_only_p && task->active && thread->task->map != kernel_map) {
-		uint32_t thread_snapshot_flags = 0;
+		uint32_t user_ths_ss_flags = 0;
 
-		/* Uses 64-bit machine state? */
-		if (is_64bit_data) {
-			uint64_t sp = 0;
-			out_addr    = (mach_vm_address_t)kcd_end_address(kcd);
+		/*
+		 * This relies on knowing the "end" address points to the start of the
+		 * next elements data and, in the case of arrays, the elements.
+		 */
+		out_addr = (mach_vm_address_t)kcd_end_address(kcd);
+		mach_vm_address_t max_addr = (mach_vm_address_t)kcd_max_address(kcd);
+		assert(out_addr <= max_addr);
+		size_t avail_frames = (max_addr - out_addr) / sizeof(uintptr_t);
+		size_t max_frames = MIN(avail_frames, MAX_FRAMES);
+		if (max_frames == 0) {
+			error = KERN_RESOURCE_SHORTAGE;
+			goto error_exit;
+		}
+		struct _stackshot_backtrace_context ctx = {
+			.sbc_map = thread->task->map,
+			.sbc_allow_faulting = stack_enable_faulting,
+			.sbc_prev_page = -1,
+			.sbc_prev_kva = -1,
+		};
+		struct backtrace_control ctl = {
+			.btc_user_thread = thread,
+			.btc_user_copy = _stackshot_backtrace_copy,
+			.btc_user_copy_context = &ctx,
+		};
+		struct backtrace_user_info info = BTUINFO_INIT;
 
-			uintptr_t fp = 0;
-
-
-			saved_count = machine_trace_thread64(thread, (char *)out_addr, (char *)kcd_max_address(kcd), MAX_FRAMES, TRUE,
-			    &thread_snapshot_flags, &sp, fp);
-			if (saved_count > 0) {
-				int frame_size = sizeof(uint64_t);
-				kcd_exit_on_error(kcdata_get_memory_addr_for_array(kcd, STACKSHOT_KCTYPE_USER_STACKLR64,
-				    frame_size, saved_count / frame_size, &out_addr));
-				cur_thread_snap->ths_ss_flags |= kUser64_p;
+		saved_count = backtrace_user((uintptr_t *)out_addr, max_frames, &ctl,
+		    &info);
+		if (saved_count > 0) {
+#if __LP64__
+#define STACKLR_WORDS STACKSHOT_KCTYPE_USER_STACKLR64
+#else // __LP64__
+#define STACKLR_WORDS STACKSHOT_KCTYPE_USER_STACKLR
+#endif // !__LP64__
+			mach_vm_address_t out_addr_array;
+			kcd_exit_on_error(kcdata_get_memory_addr_for_array(kcd,
+			    STACKLR_WORDS, sizeof(uintptr_t), saved_count,
+			    &out_addr_array));
+			/*
+			 * Ensure the kcd_end_address (above) trick worked.
+			 */
+			assert(out_addr == out_addr_array);
+			if (info.btui_info & BTI_64_BIT) {
+				user_ths_ss_flags |= kUser64_p;
 			}
-#if __x86_64__
-			if (sp) {
-				// I'm using 8 here and not sizeof(stack_contents) because this
-				// code would not work if you just made stack_contents bigger.
-				vm_offset_t kern_virt_addr = machine_trace_thread_get_kva(sp, thread->task->map, &thread_snapshot_flags);
-				if (kern_virt_addr && (kern_virt_addr % 8) == 0) {
-					kcd_exit_on_error(kcdata_get_memory_addr(kcd, STACKSHOT_KCTYPE_USER_STACKTOP, sizeof(struct stack_snapshot_stacktop), &out_addr));
-					struct stack_snapshot_stacktop *stacktop = (struct stack_snapshot_stacktop *)out_addr;
-					stacktop->sp = sp;
-					memcpy(stacktop->stack_contents, (void*) kern_virt_addr, 8);
+			if ((info.btui_info & BTI_TRUNCATED) ||
+			    (ctx.sbc_flags & kThreadTruncatedBT)) {
+				user_ths_ss_flags |= kThreadTruncatedBT;
+				user_ths_ss_flags |= kThreadTruncUserBT;
+			}
+			user_ths_ss_flags |= ctx.sbc_flags;
+			ctx.sbc_flags = 0;
+#if __LP64__
+			/* We only support async stacks on 64-bit kernels */
+			if (info.btui_async_frame_addr != 0) {
+				uint32_t async_start_offset = info.btui_async_start_index;
+				kcd_exit_on_error(kcdata_push_data(kcd, STACKSHOT_KCTYPE_USER_ASYNC_START_INDEX,
+				    sizeof(async_start_offset), &async_start_offset));
+				out_addr = (mach_vm_address_t)kcd_end_address(kcd);
+				assert(out_addr <= max_addr);
+
+				avail_frames = (max_addr - out_addr) / sizeof(uintptr_t);
+				max_frames = MIN(avail_frames, MAX_FRAMES);
+				if (max_frames == 0) {
+					error = KERN_RESOURCE_SHORTAGE;
+					goto error_exit;
+				}
+				ctl.btc_frame_addr = info.btui_async_frame_addr;
+				ctl.btc_addr_offset = BTCTL_ASYNC_ADDR_OFFSET;
+				info = BTUINFO_INIT;
+				unsigned int async_count = backtrace_user((uintptr_t *)out_addr, max_frames, &ctl,
+				    &info);
+				if (async_count > 0) {
+					mach_vm_address_t async_out_addr;
+					kcd_exit_on_error(kcdata_get_memory_addr_for_array(kcd,
+					    STACKSHOT_KCTYPE_USER_ASYNC_STACKLR64, sizeof(uintptr_t), async_count,
+					    &async_out_addr));
+					/*
+					 * Ensure the kcd_end_address (above) trick worked.
+					 */
+					assert(out_addr == async_out_addr);
+					if ((info.btui_info & BTI_TRUNCATED) ||
+					    (ctx.sbc_flags & kThreadTruncatedBT)) {
+						user_ths_ss_flags |= kThreadTruncatedBT;
+						user_ths_ss_flags |= kThreadTruncUserAsyncBT;
+					}
+					user_ths_ss_flags |= ctx.sbc_flags;
 				}
 			}
-#endif /* __x86_64__ */
-		} else {
-			out_addr    = (mach_vm_address_t)kcd_end_address(kcd);
-			saved_count = machine_trace_thread(thread, (char *)out_addr, (char *)kcd_max_address(kcd), MAX_FRAMES, TRUE,
-			    &thread_snapshot_flags);
-			if (saved_count > 0) {
-				int frame_size = sizeof(uint32_t);
-				kcd_exit_on_error(kcdata_get_memory_addr_for_array(kcd, STACKSHOT_KCTYPE_USER_STACKLR,
-				    frame_size, saved_count / frame_size, &out_addr));
-			}
+#endif /* _LP64 */
 		}
-
-		if (thread_snapshot_flags != 0) {
-			cur_thread_snap->ths_ss_flags |= thread_snapshot_flags;
+		if (user_ths_ss_flags != 0) {
+			cur_thread_snap->ths_ss_flags |= user_ths_ss_flags;
 		}
 	}
 
@@ -1785,30 +2053,34 @@ kcdata_record_thread_snapshot(
 	 * Frames are added past the snapshot header.
 	 */
 	if (thread->kernel_stack != 0) {
-		uint32_t thread_snapshot_flags = 0;
+		uint32_t kern_ths_ss_flags = 0;
+		out_addr = (mach_vm_address_t)kcd_end_address(kcd);
 #if defined(__LP64__)
-		out_addr    = (mach_vm_address_t)kcd_end_address(kcd);
-		saved_count = machine_trace_thread64(thread, (char *)out_addr, (char *)kcd_max_address(kcd), MAX_FRAMES, FALSE,
-		    &thread_snapshot_flags, NULL, 0);
+		uint32_t stack_kcdata_type = STACKSHOT_KCTYPE_KERN_STACKLR64;
+		extern int machine_trace_thread64(thread_t thread, char *tracepos,
+		    char *tracebound, int nframes, uint32_t *thread_trace_flags);
+		saved_count = machine_trace_thread64(
+#else
+		uint32_t stack_kcdata_type = STACKSHOT_KCTYPE_KERN_STACKLR;
+		extern int machine_trace_thread(thread_t thread, char *tracepos,
+		    char *tracebound, int nframes, uint32_t *thread_trace_flags);
+		saved_count = machine_trace_thread(
+#endif
+			thread, (char *)out_addr, (char *)kcd_max_address(kcd), MAX_FRAMES,
+			&kern_ths_ss_flags);
 		if (saved_count > 0) {
-			int frame_size = sizeof(uint64_t);
+			int frame_size = sizeof(uintptr_t);
+#if defined(__LP64__)
 			cur_thread_snap->ths_ss_flags |= kKernel64_p;
-			kcd_exit_on_error(kcdata_get_memory_addr_for_array(kcd, STACKSHOT_KCTYPE_KERN_STACKLR64,
+#endif
+			kcd_exit_on_error(kcdata_get_memory_addr_for_array(kcd, stack_kcdata_type,
 			    frame_size, saved_count / frame_size, &out_addr));
 		}
-#else
-		out_addr             = (mach_vm_address_t)kcd_end_address(kcd);
-		saved_count = machine_trace_thread(thread, (char *)out_addr, (char *)kcd_max_address(kcd), MAX_FRAMES, FALSE,
-		    &thread_snapshot_flags);
-		if (saved_count > 0) {
-			int frame_size = sizeof(uint32_t);
-			kcd_exit_on_error(
-				kcdata_get_memory_addr_for_array(kcd, STACKSHOT_KCTYPE_KERN_STACKLR, frame_size,
-				saved_count / frame_size, &out_addr));
+		if (kern_ths_ss_flags & kThreadTruncatedBT) {
+			kern_ths_ss_flags |= kThreadTruncKernBT;
 		}
-#endif
-		if (thread_snapshot_flags != 0) {
-			cur_thread_snap->ths_ss_flags |= thread_snapshot_flags;
+		if (kern_ths_ss_flags != 0) {
+			cur_thread_snap->ths_ss_flags |= kern_ths_ss_flags;
 		}
 	}
 
@@ -1836,8 +2108,8 @@ kcdata_record_thread_snapshot(
 
 		kcd_exit_on_error(kcdata_get_memory_addr(kcd, STACKSHOT_KCTYPE_INSTRS_CYCLES, sizeof(struct instrs_cycles_snapshot), &out_addr));
 		struct instrs_cycles_snapshot *instrs_cycles = (struct instrs_cycles_snapshot *)out_addr;
-		instrs_cycles->ics_instructions = instrs;
-		instrs_cycles->ics_cycles = cycles;
+		    instrs_cycles->ics_instructions = instrs;
+		    instrs_cycles->ics_cycles = cycles;
 	}
 #endif /* MONOTONIC */
 
@@ -1919,10 +2191,8 @@ enum thread_classification {
 };
 
 static enum thread_classification
-classify_thread(thread_t thread, boolean_t * thread_on_core_p, uint64_t trace_flags)
+classify_thread(thread_t thread, boolean_t * thread_on_core_p, boolean_t collect_delta_stackshot)
 {
-	boolean_t collect_delta_stackshot = ((trace_flags & STACKSHOT_COLLECT_DELTA_SNAPSHOT) != 0);
-
 	processor_t last_processor = thread->last_processor;
 
 	boolean_t thread_on_core =
@@ -1981,15 +2251,25 @@ kdp_stackshot_record_task(struct stackshot_context *ctx, task_t task)
 	}
 #endif
 
-	if ((task == NULL) || !ml_validate_nofault((vm_offset_t)task, sizeof(struct task))) {
+	if ((task == NULL) || !_stackshot_validate_kva((vm_offset_t)task, sizeof(struct task))) {
 		error = KERN_FAILURE;
 		goto error_exit;
 	}
 
-	have_map = (task->map != NULL) && (ml_validate_nofault((vm_offset_t)(task->map), sizeof(struct _vm_map)));
-	have_pmap = have_map && (task->map->pmap != NULL) && (ml_validate_nofault((vm_offset_t)(task->map->pmap), sizeof(struct pmap)));
+	boolean_t task_in_teardown        = (task->bsd_info == NULL) || proc_in_teardown(task->bsd_info);// has P_LPEXIT set during proc_exit()
+	boolean_t task_in_transition      = task_in_teardown;         // here we can add other types of transition.
+	uint32_t  container_type          = (task_in_transition) ? STACKSHOT_KCCONTAINER_TRANSITIONING_TASK : STACKSHOT_KCCONTAINER_TASK;
+	uint32_t  transition_type         = (task_in_teardown) ? kTaskIsTerminated : 0;
+
+	if (task_in_transition) {
+		collect_delta_stackshot = FALSE;
+	}
+
+	have_map = (task->map != NULL) && (_stackshot_validate_kva((vm_offset_t)(task->map), sizeof(struct _vm_map)));
+	have_pmap = have_map && (task->map->pmap != NULL) && (_stackshot_validate_kva((vm_offset_t)(task->map->pmap), sizeof(struct pmap)));
 
 	task_pid = pid_from_task(task);
+	/* Is returning -1 ok for terminating task ok ??? */
 	task_uniqueid = get_task_uniqueid(task);
 
 	if (!task->active || task_is_a_corpse(task) || task_is_a_corpse_fork(task)) {
@@ -2013,7 +2293,7 @@ kdp_stackshot_record_task(struct stackshot_context *ctx, task_t task)
 	if ((ctx->pid == -1) || (ctx->pid == task_pid)) {
 		/* add task snapshot marker */
 		kcd_exit_on_error(kcdata_add_container_marker(stackshot_kcdata_p, KCDATA_TYPE_CONTAINER_BEGIN,
-		    STACKSHOT_KCCONTAINER_TASK, task_uniqueid));
+		    container_type, task_uniqueid));
 
 		if (collect_delta_stackshot) {
 			/*
@@ -2023,7 +2303,7 @@ kdp_stackshot_record_task(struct stackshot_context *ctx, task_t task)
 			thread_t thread = THREAD_NULL;
 			queue_iterate(&task->threads, thread, thread_t, task_threads)
 			{
-				if ((thread == NULL) || !ml_validate_nofault((vm_offset_t)thread, sizeof(struct thread))) {
+				if ((thread == NULL) || !_stackshot_validate_kva((vm_offset_t)thread, sizeof(struct thread))) {
 					error = KERN_FAILURE;
 					goto error_exit;
 				}
@@ -2033,7 +2313,7 @@ kdp_stackshot_record_task(struct stackshot_context *ctx, task_t task)
 				}
 
 				boolean_t thread_on_core;
-				enum thread_classification thread_classification = classify_thread(thread, &thread_on_core, ctx->trace_flags);
+				enum thread_classification thread_classification = classify_thread(thread, &thread_on_core, collect_delta_stackshot);
 
 				switch (thread_classification) {
 				case tc_full_snapshot:
@@ -2051,14 +2331,15 @@ kdp_stackshot_record_task(struct stackshot_context *ctx, task_t task)
 		}
 
 		/* Next record any relevant UUID info and store the task snapshot */
-		if (!collect_delta_stackshot ||
+		if (task_in_transition ||
+		    !collect_delta_stackshot ||
 		    (task_start_abstime == 0) ||
 		    (task_start_abstime > stack_snapshot_delta_since_timestamp) ||
 		    some_thread_ran) {
 			/*
 			 * Collect full task information in these scenarios:
 			 *
-			 * 1) a full stackshot
+			 * 1) a full stackshot or the task is in transition
 			 * 2) a delta stackshot where the task started after the previous full stackshot
 			 * 3) a delta stackshot where any thread from the task has run since the previous full stackshot
 			 *
@@ -2068,9 +2349,17 @@ kdp_stackshot_record_task(struct stackshot_context *ctx, task_t task)
 			kcd_exit_on_error(kcdata_record_shared_cache_info(stackshot_kcdata_p, task, &task_snap_ss_flags));
 			kcd_exit_on_error(kcdata_record_uuid_info(stackshot_kcdata_p, task, ctx->trace_flags, have_pmap, &task_snap_ss_flags));
 #if STACKSHOT_COLLECTS_LATENCY_INFO
-			kcd_exit_on_error(kcdata_record_task_snapshot(stackshot_kcdata_p, task, ctx->trace_flags, have_pmap, task_snap_ss_flags, &latency_info));
+			if (!task_in_transition) {
+				kcd_exit_on_error(kcdata_record_task_snapshot(stackshot_kcdata_p, task, ctx->trace_flags, have_pmap, task_snap_ss_flags, &latency_info));
+			} else {
+				kcd_exit_on_error(kcdata_record_transitioning_task_snapshot(stackshot_kcdata_p, task, task_snap_ss_flags, transition_type));
+			}
 #else
-			kcd_exit_on_error(kcdata_record_task_snapshot(stackshot_kcdata_p, task, ctx->trace_flags, have_pmap, task_snap_ss_flags));
+			if (!task_in_transition) {
+				kcd_exit_on_error(kcdata_record_task_snapshot(stackshot_kcdata_p, task, ctx->trace_flags, have_pmap, task_snap_ss_flags));
+			} else {
+				kcd_exit_on_error(kcdata_record_transitioning_task_snapshot(stackshot_kcdata_p, task, task_snap_ss_flags, transition_type));
+			}
 #endif /* STACKSHOT_COLLECTS_LATENCY_INFO */
 		} else {
 			kcd_exit_on_error(kcdata_record_task_delta_snapshot(stackshot_kcdata_p, task, ctx->trace_flags, have_pmap, task_snap_ss_flags));
@@ -2100,7 +2389,7 @@ kdp_stackshot_record_task(struct stackshot_context *ctx, task_t task)
 		thread_t thread = THREAD_NULL;
 		queue_iterate(&task->threads, thread, thread_t, task_threads)
 		{
-			if ((thread == NULL) || !ml_validate_nofault((vm_offset_t)thread, sizeof(struct thread))) {
+			if ((thread == NULL) || !_stackshot_validate_kva((vm_offset_t)thread, sizeof(struct thread))) {
 				error = KERN_FAILURE;
 				goto error_exit;
 			}
@@ -2112,7 +2401,7 @@ kdp_stackshot_record_task(struct stackshot_context *ctx, task_t task)
 			thread_uniqueid = thread_tid(thread);
 
 			boolean_t thread_on_core;
-			enum thread_classification thread_classification = classify_thread(thread, &thread_on_core, ctx->trace_flags);
+			enum thread_classification thread_classification = classify_thread(thread, &thread_on_core, collect_delta_stackshot);
 
 			switch (thread_classification) {
 			case tc_full_snapshot:
@@ -2265,7 +2554,7 @@ kdp_stackshot_record_task(struct stackshot_context *ctx, task_t task)
 #endif /* STACKSHOT_COLLECTS_LATENCY_INFO */
 
 		/* mark end of task snapshot data */
-		kcd_exit_on_error(kcdata_add_container_marker(stackshot_kcdata_p, KCDATA_TYPE_CONTAINER_END, STACKSHOT_KCCONTAINER_TASK,
+		kcd_exit_on_error(kcdata_add_container_marker(stackshot_kcdata_p, KCDATA_TYPE_CONTAINER_END, container_type,
 		    task_uniqueid));
 	}
 
@@ -2334,6 +2623,8 @@ kdp_stackshot_kcdata_format(int pid, uint64_t trace_flags, uint32_t * pBytesTrac
 		goto error_exit;
 	}
 
+	_stackshot_validation_reset();
+
 	/* setup mach_absolute_time and timebase info -- copy out in some cases and needed to convert since_timestamp to seconds for proc start time */
 	clock_timebase_info(&timebase);
 
@@ -2347,6 +2638,10 @@ kdp_stackshot_kcdata_format(int pid, uint64_t trace_flags, uint32_t * pBytesTrac
 	kcd_exit_on_error(kcdata_add_uint64_with_description(stackshot_kcdata_p, system_state_flags, "system_state_flags"));
 	if (trace_flags & STACKSHOT_PAGE_TABLES) {
 		kcd_exit_on_error(kcdata_add_uint32_with_description(stackshot_kcdata_p, stack_snapshot_pagetable_mask, "stackshot_pagetable_mask"));
+	}
+	if (stackshot_initial_estimate != 0) {
+		kcd_exit_on_error(kcdata_add_uint32_with_description(stackshot_kcdata_p, stackshot_initial_estimate, "stackshot_size_estimate"));
+		kcd_exit_on_error(kcdata_add_uint32_with_description(stackshot_kcdata_p, stackshot_initial_estimate_adj, "stackshot_size_estimate_adj"));
 	}
 
 #if STACKSHOT_COLLECTS_LATENCY_INFO
@@ -2383,28 +2678,41 @@ kdp_stackshot_kcdata_format(int pid, uint64_t trace_flags, uint32_t * pBytesTrac
 	kcd_exit_on_error(kcdata_push_data(stackshot_kcdata_p, KCDATA_TYPE_USECS_SINCE_EPOCH, sizeof(uint64_t), &stackshot_microsecs));
 
 	/* record system level shared cache load info (if available) */
-	if (!collect_delta_stackshot && init_task_shared_region &&
-	    ml_validate_nofault((vm_offset_t)init_task_shared_region, sizeof(struct vm_shared_region))) {
-		struct dyld_uuid_info_64_v2 sys_shared_cache_info = {0};
+	if (!collect_delta_stackshot && primary_system_shared_region &&
+	    _stackshot_validate_kva((vm_offset_t)primary_system_shared_region, sizeof(struct vm_shared_region))) {
+		struct dyld_shared_cache_loadinfo sys_shared_cache_info = {0};
 
-		stackshot_memcpy(sys_shared_cache_info.imageUUID, &init_task_shared_region->sr_uuid, sizeof(init_task_shared_region->sr_uuid));
-		sys_shared_cache_info.imageLoadAddress =
-		    init_task_shared_region->sr_slide;
-		sys_shared_cache_info.imageSlidBaseAddress =
-		    init_task_shared_region->sr_slide + init_task_shared_region->sr_base_address;
+		/*
+		 * Historically, this data was in a dyld_uuid_info_64 structure, but the
+		 * naming of both the structure and fields for this use isn't great.  The
+		 * dyld_shared_cache_loadinfo structure has better names, but the same
+		 * layout and content as the original.
+		 *
+		 * The imageSlidBaseAddress/sharedCacheUnreliableSlidBaseAddress field
+		 * has been used inconsistently for STACKSHOT_COLLECT_SHAREDCACHE_LAYOUT
+		 * entries; here, it's the slid base address, and we leave it that way
+		 * for backwards compatibility.
+		 */
+		stackshot_memcpy(sys_shared_cache_info.sharedCacheUUID, &primary_system_shared_region->sr_uuid, sizeof(primary_system_shared_region->sr_uuid));
+		sys_shared_cache_info.sharedCacheSlide =
+		    primary_system_shared_region->sr_slide;
+		sys_shared_cache_info.sharedCacheUnreliableSlidBaseAddress =
+		    primary_system_shared_region->sr_slide + primary_system_shared_region->sr_base_address;
+		sys_shared_cache_info.sharedCacheSlidFirstMapping =
+		    primary_system_shared_region->sr_base_address + primary_system_shared_region->sr_first_mapping;
 
 		kcd_exit_on_error(kcdata_push_data(stackshot_kcdata_p, STACKSHOT_KCTYPE_SHAREDCACHE_LOADINFO,
-		    sizeof(struct dyld_uuid_info_64_v2), &sys_shared_cache_info));
+		    sizeof(sys_shared_cache_info), &sys_shared_cache_info));
 
 		if (trace_flags & STACKSHOT_COLLECT_SHAREDCACHE_LAYOUT) {
 			/*
 			 * Include a map of the system shared cache layout if it has been populated
 			 * (which is only when the system is using a custom shared cache).
 			 */
-			if (init_task_shared_region->sr_images && ml_validate_nofault((vm_offset_t)init_task_shared_region->sr_images,
-			    (init_task_shared_region->sr_images_count * sizeof(struct dyld_uuid_info_64)))) {
-				assert(init_task_shared_region->sr_images_count != 0);
-				kcd_exit_on_error(kcdata_push_array(stackshot_kcdata_p, STACKSHOT_KCTYPE_SYS_SHAREDCACHE_LAYOUT, sizeof(struct dyld_uuid_info_64), init_task_shared_region->sr_images_count, init_task_shared_region->sr_images));
+			if (primary_system_shared_region->sr_images && _stackshot_validate_kva((vm_offset_t)primary_system_shared_region->sr_images,
+			    (primary_system_shared_region->sr_images_count * sizeof(struct dyld_uuid_info_64)))) {
+				assert(primary_system_shared_region->sr_images_count != 0);
+				kcd_exit_on_error(kcdata_push_array(stackshot_kcdata_p, STACKSHOT_KCTYPE_SYS_SHAREDCACHE_LAYOUT, sizeof(struct dyld_uuid_info_64), primary_system_shared_region->sr_images_count, primary_system_shared_region->sr_images));
 			}
 		}
 	}
@@ -2502,7 +2810,7 @@ kdp_stackshot_kcdata_format(int pid, uint64_t trace_flags, uint32_t * pBytesTrac
 		if (!panic_stackshot && (trace_flags & STACKSHOT_SAVE_JETSAM_COALITIONS)) {
 			coalition_begin_cpu_cycle_count = mt_cur_cpu_cycles();
 		}
-#endif
+#endif /* INTERRUPT_MASKED_DEBUG && MONOTONIC */
 
 		/* Iterate over coalitions */
 		if (trace_flags & STACKSHOT_SAVE_JETSAM_COALITIONS) {
@@ -2530,7 +2838,7 @@ kdp_stackshot_kcdata_format(int pid, uint64_t trace_flags, uint32_t * pBytesTrac
 			kcd_exit_on_error(kcdata_add_uint64_with_description(stackshot_kcdata_p, (mt_cur_cpu_cycles() - coalition_begin_cpu_cycle_count),
 			    "coalitions_cpu_cycle_count"));
 		}
-#endif
+#endif /* INTERRUPT_MASKED_DEBUG && MONOTONIC */
 	}
 #else
 	trace_flags &= ~(STACKSHOT_SAVE_JETSAM_COALITIONS);
@@ -2542,21 +2850,19 @@ kdp_stackshot_kcdata_format(int pid, uint64_t trace_flags, uint32_t * pBytesTrac
 
 	/*
 	 * Iterate over the tasks in the terminated tasks list. We only inspect
-	 * tasks that have a valid bsd_info pointer where P_LPEXIT is NOT set.
-	 * We're only interested in tasks that have remaining threads (which
-	 * could be involved in a deadlock, etc), and the last thread that tears
-	 * itself down during exit sets P_LPEXIT during proc_exit().
+	 * tasks that have a valid bsd_info pointer. The check for task transition
+	 * like past P_LPEXIT during proc_exit() is now checked for inside the
+	 * kdp_stackshot_record_task(), and then a safer and minimal
+	 * transitioning_task_snapshot struct is collected via
+	 * kcdata_record_transitioning_task_snapshot()
 	 */
 	queue_iterate(&terminated_tasks, task, task_t, tasks)
 	{
-		if (task->bsd_info && !proc_in_teardown(task->bsd_info)) {
-			error = kdp_stackshot_record_task(&ctx, task);
-			if (error) {
-				goto error_exit;
-			}
+		error = kdp_stackshot_record_task(&ctx, task);
+		if (error) {
+			goto error_exit;
 		}
 	}
-
 
 #if STACKSHOT_COLLECTS_LATENCY_INFO
 	latency_info.total_terminated_task_iteration_latency = mach_absolute_time() - latency_info.total_terminated_task_iteration_latency;
@@ -2576,22 +2882,22 @@ kdp_stackshot_kcdata_format(int pid, uint64_t trace_flags, uint32_t * pBytesTrac
 
 	/* update timestamp of the stackshot */
 	abs_time_end = mach_absolute_time();
-#if DEVELOPMENT || DEBUG
-	struct stackshot_duration stackshot_duration;
-	stackshot_duration.stackshot_duration         = (abs_time_end - abs_time);
-	stackshot_duration.stackshot_duration_outer   = 0;
+	struct stackshot_duration_v2 stackshot_duration = {
+		.stackshot_duration         = (abs_time_end - abs_time),
+		.stackshot_duration_outer   = 0,
+		.stackshot_duration_prior   = stackshot_duration_prior_abs,
+	};
 
 	if ((trace_flags & STACKSHOT_DO_COMPRESS) == 0) {
 		kcd_exit_on_error(kcdata_get_memory_addr(stackshot_kcdata_p, STACKSHOT_KCTYPE_STACKSHOT_DURATION,
-		    sizeof(struct stackshot_duration), &out_addr));
-		struct stackshot_duration *duration_p = (void *) out_addr;
+		    sizeof(struct stackshot_duration_v2), &out_addr));
+		struct stackshot_duration_v2 *duration_p = (void *) out_addr;
 		stackshot_memcpy(duration_p, &stackshot_duration, sizeof(*duration_p));
 		stackshot_duration_outer                   = (unaligned_u64 *)&duration_p->stackshot_duration_outer;
 	} else {
 		kcd_exit_on_error(kcdata_push_data(stackshot_kcdata_p, STACKSHOT_KCTYPE_STACKSHOT_DURATION, sizeof(stackshot_duration), &stackshot_duration));
 		stackshot_duration_outer = NULL;
 	}
-#endif
 
 #if INTERRUPT_MASKED_DEBUG && MONOTONIC
 	if (!panic_stackshot) {
@@ -2610,24 +2916,29 @@ kdp_stackshot_kcdata_format(int pid, uint64_t trace_flags, uint32_t * pBytesTrac
 	*pBytesTraced = (uint32_t) kcdata_memory_get_used_bytes(stackshot_kcdata_p);
 	*pBytesUncompressed = (uint32_t) kcdata_memory_get_uncompressed_bytes(stackshot_kcdata_p);
 
-error_exit:
+error_exit:;
 
 #if INTERRUPT_MASKED_DEBUG
-	if (trace_flags & STACKSHOT_DO_COMPRESS) {
+	bool disable_interrupts_masked_check = kern_feature_override(
+		KF_INTERRUPT_MASKED_DEBUG_STACKSHOT_OVRD) ||
+	    (trace_flags & STACKSHOT_DO_COMPRESS) != 0;
+
+#if STACKSHOT_INTERRUPTS_MASKED_CHECK_DISABLED
+	disable_interrupts_masked_check = true;
+#endif /* STACKSHOT_INTERRUPTS_MASKED_CHECK_DISABLED */
+
+	if (disable_interrupts_masked_check) {
 		ml_spin_debug_clear_self();
 	}
-#if defined(STACKSHOT_INTERRUPTS_MASKED_CHECK_DISABLED)
-	ml_spin_debug_clear_self();
-#endif
 
-	if (!panic_stackshot && interrupt_masked_debug) {
+	if (!panic_stackshot && interrupt_masked_debug_mode) {
 		/*
 		 * Try to catch instances where stackshot takes too long BEFORE returning from
 		 * the debugger
 		 */
-		ml_check_stackshot_interrupt_disabled_duration(current_thread());
+		ml_handle_stackshot_interrupt_disabled_duration(current_thread());
 	}
-#endif
+#endif /* INTERRUPT_MASKED_DEBUG */
 
 	stack_enable_faulting = FALSE;
 
@@ -2668,10 +2979,8 @@ kdp_mem_and_io_snapshot(struct mem_and_io_snapshot *memio_snap)
 	uint64_t compressions = 0;
 	uint64_t decompressions = 0;
 
-	percpu_foreach(stat, vm_stat) {
-		compressions += stat->compressions;
-		decompressions += stat->decompressions;
-	}
+	compressions = counter_load(&vm_statistics_compressions);
+	decompressions = counter_load(&vm_statistics_decompressions);
 
 	memio_snap->snapshot_magic = STACKSHOT_MEM_AND_IO_SNAPSHOT_MAGIC;
 	memio_snap->free_pages = vm_page_free_count;
@@ -2714,8 +3023,8 @@ stackshot_memcpy(void *dst, const void *src, size_t len)
 	memcpy(dst, src, len);
 }
 
-size_t
-stackshot_strlcpy(char *dst, const char *src, size_t maxlen)
+static size_t
+_stackshot_strlcpy(char *dst, const char *src, size_t maxlen)
 {
 	const size_t srclen = strlen(src);
 
@@ -2729,15 +3038,20 @@ stackshot_strlcpy(char *dst, const char *src, size_t maxlen)
 	return srclen;
 }
 
-static inline void
-kdp_extract_page_mask_and_size(vm_map_t map, int *effective_page_mask, int *effective_page_size)
+/*
+ * Sets the appropriate page mask and size to use for dealing with pages --
+ * it's important that this is a "min" of page size to account for both K16/U4
+ * (Rosetta) and K4/U16 (armv7k) environments.
+ */
+static inline size_t
+_stackshot_get_page_size(vm_map_t map, size_t *effective_page_mask)
 {
 	if (VM_MAP_PAGE_SHIFT(map) < PAGE_SHIFT) {
 		*effective_page_mask = VM_MAP_PAGE_MASK(map);
-		*effective_page_size = VM_MAP_PAGE_SIZE(map);
+		return VM_MAP_PAGE_SIZE(map);
 	} else {
 		*effective_page_mask = PAGE_MASK;
-		*effective_page_size = PAGE_SIZE;
+		return PAGE_SIZE;
 	}
 }
 
@@ -2749,15 +3063,10 @@ vm_offset_t
 kdp_find_phys(vm_map_t map, vm_offset_t target_addr, boolean_t try_fault, uint32_t *kdp_fault_results)
 {
 	vm_offset_t cur_phys_addr;
-	unsigned cur_wimg_bits;
-	uint64_t fault_start_time = 0;
-	int effective_page_mask, effective_page_size;
 
 	if (map == VM_MAP_NULL) {
 		return 0;
 	}
-
-	kdp_extract_page_mask_and_size(map, &effective_page_mask, &effective_page_size);
 
 	cur_phys_addr = kdp_vtophys(map->pmap, target_addr);
 	if (!pmap_valid_page((ppnum_t) atop(cur_phys_addr))) {
@@ -2773,7 +3082,10 @@ kdp_find_phys(vm_map_t map, vm_offset_t target_addr, boolean_t try_fault, uint32
 		 * The pmap doesn't have a valid page so we start at the top level
 		 * vm map and try a lightweight fault. Update fault path usage stats.
 		 */
-		fault_start_time = mach_absolute_time();
+		uint64_t fault_start_time = mach_absolute_time();
+		size_t effective_page_mask;
+		(void)_stackshot_get_page_size(map, &effective_page_mask);
+
 		cur_phys_addr = kdp_lightweight_fault(map, (target_addr & ~effective_page_mask));
 		fault_stats.sfs_time_spent_faulting += (mach_absolute_time() - fault_start_time);
 
@@ -2800,7 +3112,7 @@ kdp_find_phys(vm_map_t map, vm_offset_t target_addr, boolean_t try_fault, uint32
 		/*
 		 * This check is done in kdp_lightweight_fault for the fault path.
 		 */
-		cur_wimg_bits = pmap_cache_attributes((ppnum_t) atop(cur_phys_addr));
+		unsigned int cur_wimg_bits = pmap_cache_attributes((ppnum_t) atop(cur_phys_addr));
 
 		if ((cur_wimg_bits & VM_WIMG_MASK) != VM_WIMG_DEFAULT) {
 			return 0;
@@ -2831,10 +3143,9 @@ kdp_copyin_string_slowpath(
 	int i;
 	uint64_t validated = 0, valid_from;
 	uint64_t phys_src, phys_dest;
-	int effective_page_mask, effective_page_size;
 	vm_map_t map = task->map;
-
-	kdp_extract_page_mask_and_size(map, &effective_page_mask, &effective_page_size);
+	size_t effective_page_mask;
+	size_t effective_page_size = _stackshot_get_page_size(map, &effective_page_mask);
 
 	for (i = 0; i < buf_sz; i++) {
 		if (validated == 0) {
@@ -2892,9 +3203,8 @@ kdp_copyin(vm_map_t map, uint64_t uaddr, void *dest, size_t size, boolean_t try_
 {
 	size_t rem = size;
 	char *kvaddr = dest;
-	int effective_page_mask, effective_page_size;
-
-	kdp_extract_page_mask_and_size(map, &effective_page_mask, &effective_page_size);
+	size_t effective_page_mask;
+	size_t effective_page_size = _stackshot_get_page_size(map, &effective_page_mask);
 
 #if defined(__arm__) || defined(__arm64__)
 	/* Identify if destination buffer is in panic storage area */
@@ -2953,79 +3263,6 @@ do_stackshot(void *context)
 
 	kdp_snapshot--;
 	return stack_snapshot_ret;
-}
-
-/*
- * A fantastical routine that tries to be fast about returning
- * translations.  Caches the last page we found a translation
- * for, so that we can be quick about multiple queries to the
- * same page.  It turns out this is exactly the workflow
- * machine_trace_thread and its relatives tend to throw at us.
- *
- * Please zero the nasty global this uses after a bulk lookup;
- * this isn't safe across a switch of the map or changes
- * to a pmap.
- *
- * This also means that if zero is a valid KVA, we are
- * screwed.  Sucks to be us.  Fortunately, this should never
- * happen.
- */
-vm_offset_t
-machine_trace_thread_get_kva(vm_offset_t cur_target_addr, vm_map_t map, uint32_t *thread_trace_flags)
-{
-	vm_offset_t cur_target_page;
-	vm_offset_t cur_phys_addr;
-	vm_offset_t kern_virt_target_addr;
-	uint32_t kdp_fault_results = 0;
-
-	cur_target_page = atop(cur_target_addr);
-
-	if ((cur_target_page != prev_target_page) || validate_next_addr) {
-		/*
-		 * Alright; it wasn't our previous page.  So
-		 * we must validate that there is a page
-		 * table entry for this address under the
-		 * current pmap, and that it has default
-		 * cache attributes (otherwise it may not be
-		 * safe to access it).
-		 */
-		cur_phys_addr = kdp_find_phys(map, cur_target_addr, stack_enable_faulting, &kdp_fault_results);
-		if (thread_trace_flags) {
-			if (kdp_fault_results & KDP_FAULT_RESULT_PAGED_OUT) {
-				*thread_trace_flags |= kThreadTruncatedBT;
-			}
-
-			if (kdp_fault_results & KDP_FAULT_RESULT_TRIED_FAULT) {
-				*thread_trace_flags |= kThreadTriedFaultBT;
-			}
-
-			if (kdp_fault_results & KDP_FAULT_RESULT_FAULTED_IN) {
-				*thread_trace_flags |= kThreadFaultedBT;
-			}
-		}
-
-		if (cur_phys_addr == 0) {
-			return 0;
-		}
-		kern_virt_target_addr = phystokv(cur_phys_addr);
-		prev_target_page = cur_target_page;
-		prev_target_kva = (kern_virt_target_addr & ~PAGE_MASK);
-		validate_next_addr = FALSE;
-	} else {
-		/* We found a translation, so stash this page */
-		kern_virt_target_addr = prev_target_kva + (cur_target_addr & PAGE_MASK);
-	}
-
-#if KASAN
-	kasan_notify_address(kern_virt_target_addr, sizeof(uint64_t));
-#endif
-	return kern_virt_target_addr;
-}
-
-void
-machine_trace_thread_clear_validation_cache(void)
-{
-	validate_next_addr = TRUE;
 }
 
 boolean_t
@@ -3105,7 +3342,7 @@ stackshot_thread_group_snapshot(void *arg, int i, struct thread_group *tg)
 {
 	struct thread_group_snapshot_v2 *thread_groups = (struct thread_group_snapshot_v2 *)arg;
 	struct thread_group_snapshot_v2 *tgs = &thread_groups[i];
-	uint64_t flags = kdp_thread_group_get_flags(tg);
+	uint32_t flags = thread_group_get_flags(tg);
 	tgs->tgs_id = thread_group_get_id(tg);
 	stackshot_memcpy(tgs->tgs_name, thread_group_get_name(tg), THREAD_GROUP_MAXNAME);
 	tgs->tgs_flags = ((flags & THREAD_GROUP_FLAGS_EFFICIENT) ? kThreadGroupEfficient : 0) |

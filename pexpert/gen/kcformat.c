@@ -100,7 +100,7 @@ PE_set_kc_header(kc_kind_t type, kernel_mach_header_t *header, uintptr_t slide)
 		}
 	}
 
-	collection_base_pointers[i] = (void *)(uintptr_t)lowest_vmaddr + slide;
+	collection_base_pointers[i] = (void *)((uintptr_t)lowest_vmaddr + slide);
 	assert((uint64_t)(uintptr_t)collection_base_pointers[i] != ~0ULL);
 }
 

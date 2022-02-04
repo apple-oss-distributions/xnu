@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2005-2006 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2005-2020 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -39,6 +39,7 @@
 extern "C" {
 #endif
 
+#include <stdbool.h>
 
 void serial_keyboard_init(void);
 void serial_keyboard_start(void) __dead2;
@@ -46,26 +47,25 @@ void serial_keyboard_poll(void) __dead2;
 
 extern uint32_t serialmode;
 
-#define SERIALMODE_OUTPUT    0x1
-#define SERIALMODE_INPUT     0x2
-#define SERIALMODE_SYNCDRAIN 0x4
-#define SERIALMODE_BASE_TTY  0x8 /* Load Base/Recovery/FVUnlock TTY */
+#define SERIALMODE_OUTPUT    0x01
+#define SERIALMODE_INPUT     0x02
+#define SERIALMODE_SYNCDRAIN 0x04
+#define SERIALMODE_BASE_TTY  0x08 /* Load Base/Recovery/FVUnlock TTY */
+#define SERIALMODE_NO_IOLOG  0x10 /* prevent IOLogs writing to serial */
 
 extern uint32_t cons_ops_index;
 extern const uint32_t nconsops;
-extern unsigned int disable_serial_output;
-#if defined(__arm__) || defined(__arm64__)
-/* ARM64_TODO */
-extern void *console_cpu_alloc(boolean_t);
-extern void console_cpu_free(void *);
-void console_init(void);
-#endif
+extern bool disable_serial_output;
+extern bool disable_iolog_serial_output;
 
-int _serial_getc(int unit, int line, boolean_t wait, boolean_t raw);
+void console_init(void);
+
+int _serial_getc(bool wait);
+int _vcgetc(bool wait);
 
 struct console_ops {
-	void    (*putc)(int, int, int);
-	int     (*getc)(int, int, boolean_t, boolean_t);
+	void (*putc)(char, bool);
+	int (*getc)(bool);
 };
 
 boolean_t console_is_serial(void);

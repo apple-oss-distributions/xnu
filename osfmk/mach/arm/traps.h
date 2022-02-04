@@ -26,7 +26,17 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 
+#ifndef _MACH_ARM_TRAPS_H_
+#define _MACH_ARM_TRAPS_H_
+
+#if defined (__arm__) || defined (__arm64__)
+
 #pragma once
 
 #define MACH_ARM_TRAP_ABSTIME -3
 #define MACH_ARM_TRAP_CONTTIME -4
+
+
+#endif /* defined (__arm__) || defined (__arm64__) */
+
+#endif /* _MACH_ARM_TRAPS_H_ */

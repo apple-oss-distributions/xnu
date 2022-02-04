@@ -6,10 +6,14 @@ export MakeInc_dir=${SRCROOT}/makedefs/MakeInc.dir
 include $(MakeInc_cmd)
 include $(MakeInc_def)
 
+# in6.h is covered by ../netinet/netinet.modulemap.
 DATAFILES = \
 	ah.h ipsec.h \
 	esp.h in6.h ipcomp.h raw_ip6.h \
 	scope6_var.h in6_var.h nd6.h
+
+MODULEMAPFILES = \
+	netinet6.modulemap
 
 PRIVATE_DATAFILES = \
 	in6.h \
@@ -30,6 +34,8 @@ PRIVATE_KERNELFILES = \
 
 INSTALL_MI_LIST	= ${DATAFILES}
 
+INSTALL_MODULEMAP_MI_LIST = ${MODULEMAPFILES}
+
 INSTALL_DRIVERKIT_MI_LIST = ${DRIVERKIT_DATAFILES}
 
 INSTALL_MI_DIR = netinet6
@@ -38,7 +44,7 @@ EXPORT_MI_LIST = ${DATAFILES}
 
 EXPORT_MI_DIR = ${INSTALL_MI_DIR}
 
-INSTALL_MI_LCL_LIST = ${PRIVATE_DATAFILES}
+INSTALL_SF_MI_LCL_LIST = $(sort ${DATAFILES} ${PRIVATE_DATAFILES})
 
 INSTALL_KF_MI_LCL_LIST = $(sort ${DATAFILES} ${PRIVATE_DATAFILES} ${PRIVATE_KERNELFILES})
 

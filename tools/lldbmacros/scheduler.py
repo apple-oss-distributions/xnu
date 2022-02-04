@@ -651,13 +651,17 @@ def ShowRunQSummary(runq):
 
 def ShowRTRunQSummary(rt_runq):
     if (hex(rt_runq.count) == hex(0xfdfdfdfd)) :
-        print "    Realtime Queue ({:<#012x}) uninitialized\n".format(addressof(rt_runq.queue))
+        print "    Realtime Queue ({:<#012x}) uninitialized\n".format(rt_runq)
         return
-    print "    Realtime Queue ({:<#012x}) Count {:d}\n".format(addressof(rt_runq.queue), rt_runq.count)
+    print "    Realtime Queue ({:<#012x}) Count {:d}\n".format(rt_runq, rt_runq.count)
     if rt_runq.count != 0:
-        print "\t" + GetThreadSummary.header + "\n"
-        for rt_runq_thread in ParanoidIterateLinkageChain(rt_runq.queue, "thread_t", "runq_links", circleQueue=True):
-            print "\t" + GetThreadSummary(rt_runq_thread) + "\n"
+        rt_pri_bitmap = int(rt_runq.bitmap[0])
+        for rt_index in IterateBitmap(rt_pri_bitmap):
+            rt_pri_rq = addressof(rt_runq.rt_queue_pri[rt_index])
+            print "        Realtime Queue Index {:d} ({:<#012x}) Count {:d}\n".format(rt_index, rt_pri_rq, rt_pri_rq.pri_count)
+            print "\t" + GetThreadSummary.header + "\n"
+            for rt_runq_thread in ParanoidIterateLinkageChain(rt_pri_rq.pri_queue, "thread_t", "runq_links", circleQueue=False):
+                print "\t" + GetThreadSummary(rt_runq_thread) + "\n"
 
 def ShowGrrrSummary(grrr_runq):
     """ Internal function to print summary of grrr_run_queue

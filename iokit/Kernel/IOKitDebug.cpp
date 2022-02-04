@@ -47,14 +47,8 @@ extern "C" {
 
 #include "IOKitKernelInternal.h"
 
-#ifdef IOKITDEBUG
-#define DEBUG_INIT_VALUE IOKITDEBUG
-#else
-#define DEBUG_INIT_VALUE 0
-#endif
-
-SInt64          gIOKitDebug = DEBUG_INIT_VALUE;
-SInt64          gIOKitTrace = 0;
+TUNABLE_WRITEABLE(SInt64, gIOKitDebug, "io", DEBUG_INIT_VALUE);
+TUNABLE(SInt64, gIOKitTrace, "iotrace", 0);
 
 #if DEVELOPMENT || DEBUG
 #define IODEBUG_CTLFLAGS        CTLFLAG_RW
@@ -77,7 +71,7 @@ sysctl_debug_iokit
 }
 
 SYSCTL_PROC(_debug, OID_AUTO, iokit,
-    CTLTYPE_QUAD | IODEBUG_CTLFLAGS | CTLFLAG_NOAUTO | CTLFLAG_KERN | CTLFLAG_LOCKED,
+    CTLTYPE_QUAD | IODEBUG_CTLFLAGS | CTLFLAG_KERN | CTLFLAG_LOCKED,
     &gIOKitDebug, 0, sysctl_debug_iokit, "Q", "boot_arg io");
 
 size_t          debug_malloc_size;
@@ -285,6 +279,10 @@ struct IOTrackingCallSite {
 	IOTrackingCallSiteUser     user[0];
 };
 
+struct IOTrackingCallSiteWithUser {
+	struct IOTrackingCallSite     site;
+	struct IOTrackingCallSiteUser user;
+};
 
 struct IOTrackingLeaksRef {
 	uintptr_t * instances;
@@ -356,9 +354,7 @@ IOTrackingQueueAlloc(const char * name, uintptr_t btEntry,
 	if (!numSiteQs) {
 		numSiteQs = 1;
 	}
-	queue = (typeof(queue))kalloc(sizeof(IOTrackingQueue) + numSiteQs * sizeof(queue->sites[0]));
-	bzero(queue, sizeof(IOTrackingQueue));
-
+	queue = kalloc_type(IOTrackingQueue, queue_head_t, numSiteQs, Z_WAITOK_ZERO);
 	queue->name           = name;
 	queue->btEntry        = btEntry;
 	queue->allocSize      = allocSize;
@@ -400,7 +396,7 @@ IOTrackingQueueFree(IOTrackingQueue * queue)
 
 	lck_mtx_free(queue->lock.mutex, IOLockGroup);
 
-	kfree(queue, sizeof(IOTrackingQueue) + queue->numSiteQs * sizeof(queue->sites[0]));
+	kfree_type(IOTrackingQueue, queue_head_t, queue->numSiteQs, queue);
 };
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
@@ -508,14 +504,14 @@ IOTrackingAddUser(IOTrackingQueue * queue, IOTrackingUser * mem, vm_size_t size)
 
 	assert(!mem->link.next);
 
-	num = backtrace(&mem->bt[0], kIOTrackingCallSiteBTs, NULL);
+	num = backtrace(&mem->bt[0], kIOTrackingCallSiteBTs, NULL, NULL);
 	num = 0;
 	if ((kernel_task != current_task()) && (pid = proc_selfpid())) {
-		bool user_64 = false;
-		mem->btPID  = pid;
-		num = backtrace_user(&mem->btUser[0], kIOTrackingCallSiteBTs - 1, NULL,
-		    &user_64, NULL);
-		mem->user32 = !user_64;
+		struct backtrace_user_info btinfo = BTUINFO_INIT;
+		mem->btPID = pid;
+		num = backtrace_user(&mem->btUser[0], kIOTrackingCallSiteBTs - 1,
+		    NULL, &btinfo);
+		mem->user32 = !(btinfo.btui_info & BTI_64_BIT);
 	}
 	assert(num <= kIOTrackingCallSiteBTs);
 	static_assert(kIOTrackingCallSiteBTs <= UINT8_MAX);
@@ -556,7 +552,6 @@ IOTrackingAdd(IOTrackingQueue * queue, IOTracking * mem, size_t size, bool addre
 	bool                 user;
 	int                  pid;
 	int                  userCount;
-	bool                 user64;
 
 	if (mem->site) {
 		return;
@@ -572,7 +567,7 @@ IOTrackingAdd(IOTrackingQueue * queue, IOTracking * mem, size_t size, bool addre
 
 	assert(!mem->link.next);
 
-	num  = backtrace(&bt[0], kIOTrackingCallSiteBTs + 1, NULL);
+	num  = backtrace(&bt[0], kIOTrackingCallSiteBTs + 1, NULL, NULL);
 	if (!num) {
 		return;
 	}
@@ -580,12 +575,15 @@ IOTrackingAdd(IOTrackingQueue * queue, IOTracking * mem, size_t size, bool addre
 	crc = fasthash32(&bt[1], num * sizeof(bt[0]), 0x04C11DB7);
 
 	userCount = 0;
-	user64 = false;
 	pid = 0;
+	backtrace_info_t btinfo = BTI_NONE;
 	if (user) {
 		if ((kernel_task != current_task()) && (pid = proc_selfpid())) {
-			userCount = backtrace_user(&btUser[0], kIOTrackingCallSiteBTs, NULL, &user64, NULL);
+			struct backtrace_user_info btuinfo = BTUINFO_INIT;
+			userCount = backtrace_user(&btUser[0], kIOTrackingCallSiteBTs,
+			    NULL, &btuinfo);
 			assert(userCount <= kIOTrackingCallSiteBTs);
+			btinfo = btuinfo.btui_info;
 			crc = fasthash32(&btUser[0], userCount * sizeof(bt[0]), crc);
 		}
 	}
@@ -606,11 +604,13 @@ IOTrackingAdd(IOTrackingQueue * queue, IOTracking * mem, size_t size, bool addre
 	}
 
 	if (queue_end(que, (queue_entry_t) site)) {
-		size_t siteSize = sizeof(IOTrackingCallSite);
 		if (user) {
-			siteSize += sizeof(IOTrackingCallSiteUser);
+			site = &kalloc_type(IOTrackingCallSiteWithUser,
+			    Z_WAITOK_ZERO_NOFAIL)->site;
+		} else {
+			site = kalloc_type(IOTrackingCallSite,
+			    Z_WAITOK_ZERO_NOFAIL);
 		}
-		site = (typeof(site))kalloc(siteSize);
 
 		queue_init(&site->instances);
 		site->addresses  = (IOTracking *) &site->instances;
@@ -627,7 +627,7 @@ IOTrackingAdd(IOTrackingQueue * queue, IOTracking * mem, size_t size, bool addre
 			assert(userCount <= kIOTrackingCallSiteBTs);
 			bzero(&site->user[0].bt[userCount], (kIOTrackingCallSiteBTs - userCount) * sizeof(site->user[0].bt[0]));
 			site->user[0].pid  = pid;
-			site->user[0].user32 = !user64;
+			site->user[0].user32 = !(btinfo & BTI_64_BIT);
 			static_assert(kIOTrackingCallSiteBTs <= UINT8_MAX);
 			site->user[0].userCount = ((uint8_t) userCount);
 		}
@@ -681,11 +681,11 @@ IOTrackingRemove(IOTrackingQueue * queue, IOTracking * mem, size_t size)
 			remque(&mem->site->link);
 			assert(queue->siteCount);
 			queue->siteCount--;
-			size_t siteSize = sizeof(IOTrackingCallSite);
 			if (kIOTrackingQueueTypeUser & queue->type) {
-				siteSize += sizeof(IOTrackingCallSiteUser);
+				kfree_type(IOTrackingCallSiteWithUser, mem->site);
+			} else {
+				kfree_type(IOTrackingCallSite, mem->site);
 			}
-			kfree(mem->site, siteSize);
 		}
 		mem->site = NULL;
 	}
@@ -707,8 +707,7 @@ IOTrackingAlloc(IOTrackingQueue * queue, uintptr_t address, size_t size)
 	}
 
 	address = ~address;
-	tracking = (typeof(tracking))kalloc(sizeof(IOTrackingAddress));
-	bzero(tracking, sizeof(IOTrackingAddress));
+	tracking = kalloc_type(IOTrackingAddress, (zalloc_flags_t)(Z_WAITOK | Z_ZERO));
 	IOTrackingAddressFlags(tracking) |= kTrackingAddressFlagAllocated;
 	tracking->address = address;
 	tracking->size    = size;
@@ -736,7 +735,7 @@ IOTrackingFree(IOTrackingQueue * queue, uintptr_t address, size_t size)
 			while (!queue_end(&site->instances, &tracking->tracking.link)) {
 				if ((done = (address == tracking->address))) {
 					IOTrackingRemove(queue, &tracking->tracking, size);
-					kfree(tracking, sizeof(IOTrackingAddress));
+					kfree_type(IOTrackingAddress, tracking);
 					break;
 				} else {
 					tracking = (IOTrackingAddress *) queue_next(&tracking->tracking.link);
@@ -797,15 +796,15 @@ IOTrackingReset(IOTrackingQueue * queue)
 					if (addresses) {
 						trackingAddress = (typeof(trackingAddress))tracking;
 						if (kTrackingAddressFlagAllocated & IOTrackingAddressFlags(trackingAddress)) {
-							kfree(tracking, sizeof(IOTrackingAddress));
+							kfree_type(IOTrackingAddress, tracking);
 						}
 					}
 				}
-				size_t siteSize = sizeof(IOTrackingCallSite);
 				if (kIOTrackingQueueTypeUser & queue->type) {
-					siteSize += sizeof(IOTrackingCallSiteUser);
+					kfree_type(IOTrackingCallSiteWithUser, site);
+				} else {
+					kfree_type(IOTrackingCallSite, site);
 				}
-				kfree(site, siteSize);
 			}
 		}
 	}
@@ -1031,7 +1030,7 @@ zone_leaks_scan(uintptr_t * instances, uint32_t count, uint32_t zoneSize, uint32
 
 static void
 ZoneSiteProc(void * refCon, uint32_t siteCount, uint32_t zoneSize,
-    uintptr_t * backtrace, uint32_t btCount)
+    uintptr_t * btrace, uint32_t btCount)
 {
 	IOTrackingCallSiteInfo siteInfo;
 	OSData               * leakData;
@@ -1044,7 +1043,7 @@ ZoneSiteProc(void * refCon, uint32_t siteCount, uint32_t zoneSize,
 	siteInfo.size[0] = zoneSize * siteCount;
 
 	for (idx = 0; (idx < btCount) && (idx < kIOTrackingCallSiteBTs); idx++) {
-		siteInfo.bt[0][idx] = VM_KERNEL_UNSLIDE(backtrace[idx]);
+		siteInfo.bt[0][idx] = VM_KERNEL_UNSLIDE(btrace[idx]);
 	}
 
 	leakData->appendBytes(&siteInfo, sizeof(siteInfo));
@@ -1109,7 +1108,7 @@ IOTrackingLeaks(LIBKERN_CONSUMED OSData * data)
 		}
 		siteInfo.count   = siteCount;
 		siteInfo.size[0] = (site->size[0] * site->count) / siteCount;
-		siteInfo.size[1] = (site->size[1] * site->count) / siteCount;;
+		siteInfo.size[1] = (site->size[1] * site->count) / siteCount;
 		CopyOutBacktraces(site, &siteInfo);
 		leakData->appendBytes(&siteInfo, sizeof(siteInfo));
 	}

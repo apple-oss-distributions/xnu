@@ -42,12 +42,14 @@ typedef x86_saved_state_t savearea_t;
 #include <sys/dtrace.h>
 #include <sys/dtrace_impl.h>
 #include <libkern/OSAtomic.h>
+#include <kern/hvg_hypercall.h>
 #include <kern/thread_call.h>
 #include <kern/task.h>
 #include <kern/sched_prim.h>
 #include <miscfs/devfs/devfs.h>
 #include <mach/vm_param.h>
 #include <machine/pal_routines.h>
+#include <i386/cpuid.h>
 #include <i386/mp.h>
 #include <machine/trap.h>
 
@@ -163,15 +165,6 @@ dtrace_xcall(processorid_t cpu, dtrace_xcall_t f, void *arg)
 	else {
 		mp_cpus_call (cpu_to_cpumask((cpu_t)cpu), ASYNC, xcRemote, (void*)&xcArg);
 	}
-}
-
-/*
- * Initialization
- */
-void
-dtrace_isa_init(void)
-{
-	return;
 }
 
 /*
@@ -291,6 +284,152 @@ dtrace_getvmreg(uint_t ndx)
 	}
 
 	return reg;
+}
+
+static void
+dtrace_vmcall(x86_saved_state_t *regs, uint64_t *rflags)
+{
+	uint64_t flags = 0;
+
+	/*
+	 * No constraints available for r8 or r9 which means they must be
+	 * handled explicitly.
+	 */
+	__asm__ volatile (
+	     "   movq %12, %%r8  \n"
+	     "   movq %13, %%r9  \n"
+	     "   vmcall          \n"
+	     "   movq %%r8, %5   \n"
+	     "   movq %%r9, %6   \n"
+	     "   pushfq          \n"
+	     "   popq %7         \n"
+
+	    : "=a" (regs->ss_64.rax),
+	      "=D" (regs->ss_64.rdi),
+	      "=S" (regs->ss_64.rsi),
+	      "=d" (regs->ss_64.rdx),
+	      "=c" (regs->ss_64.rcx),
+	      "=r" (regs->ss_64.r8),  /* %5 */
+	      "=r" (regs->ss_64.r9),  /* %6 */
+	      "=r" (flags)            /* %7 */
+
+	    : "a"  (regs->ss_64.rax),
+	      "D"  (regs->ss_64.rdi),
+	      "S"  (regs->ss_64.rsi),
+	      "d"  (regs->ss_64.rdx),
+	      "c"  (regs->ss_64.rcx),
+	      "r"  (regs->ss_64.r8),  /* %12 */
+	      "r"  (regs->ss_64.r9)   /* %13 */
+
+	    : "memory", "r8", "r9");
+
+	*rflags = flags;
+
+	return;
+}
+
+static inline void
+dtrace_cpuid(x86_saved_state_t *regs)
+{
+	__asm__ volatile (
+	     "cpuid"
+	    : "=a" (regs->ss_64.rax),
+	      "=b" (regs->ss_64.rbx),
+	      "=c" (regs->ss_64.rcx),
+	      "=d" (regs->ss_64.rdx)
+
+	    : "a"  (regs->ss_64.rax),
+	      "b"  (regs->ss_64.rbx),
+	      "c"  (regs->ss_64.rcx),
+	      "d"  (regs->ss_64.rdx));
+}
+
+static bool
+dtrace_applepv_available(uint64_t flag)
+{
+	static bool checked = false;
+	static uint64_t features = 0;
+
+	if (checked) {
+		return (features & flag) != 0;
+	}
+
+	x86_saved_state_t regs = {0};
+
+	regs.ss_64.rax = 1;
+	dtrace_cpuid(&regs);
+
+	/* Bit 31 - HV bit. */
+	if ((regs.ss_64.rcx & _Bit(31)) != 0) {
+		for (uint32_t base = 0x40000100; base < 0x40010000; base += 0x100) {
+			regs.ss_64.rax = base;
+			dtrace_cpuid(&regs);
+
+			/* "apple-pv-xnu" */
+			if (regs.ss_64.rbx != 0x6c707061 ||
+			    regs.ss_64.rcx != 0x76702d65 ||
+			    regs.ss_64.rdx != 0x756e782d) {
+				continue;
+			}
+
+			uint64_t feature_leaf = regs.ss_64.rax;
+
+			regs.ss_64.rax = base + APPLEPV_INTERFACE_LEAF_INDEX;
+			dtrace_cpuid(&regs);
+
+			/* "AH#1" */
+			if (regs.ss_64.rax != 0x31234841) {
+				continue;
+			}
+
+			/* Find features. */
+			regs.ss_64.rax = feature_leaf;
+			dtrace_cpuid(&regs);
+
+			features = regs.ss_64.rdx;
+			break;
+		}
+	}
+
+	checked = true;
+	return (features & flag) != 0;
+}
+
+void
+dtrace_livedump(char *filename, size_t len)
+{
+	x86_saved_state_t regs = {
+	    .ss_64.rax = HVG_HCALL_CODE(HVG_HCALL_TRIGGER_DUMP),
+	    .ss_64.rdi = HVG_HCALL_DUMP_OPTION_REGULAR,
+	};
+
+	if (len > 0) {
+		filename[0] = '\0';
+	}
+
+	if (!dtrace_applepv_available(CPUID_LEAF_FEATURE_COREDUMP)) {
+		DTRACE_CPUFLAG_SET(CPU_DTRACE_ILLOP);
+		return;
+	}
+
+	uint64_t rflags = 0;
+	dtrace_vmcall(&regs, &rflags);
+	if ((rflags & EFL_CF) != 0) {
+		/* An empty filename indicates failure to dump. */
+		return;
+	}
+
+	/* Extract the filename. */
+	char str[57] = {'\0'};
+	memcpy(&str[0],  &regs.ss_64.rax, 8);
+	memcpy(&str[8],  &regs.ss_64.rdi, 8);
+	memcpy(&str[16], &regs.ss_64.rsi, 8);
+	memcpy(&str[24], &regs.ss_64.rdx, 8);
+	memcpy(&str[32], &regs.ss_64.rcx, 8);
+	memcpy(&str[40], &regs.ss_64.r8,  8);
+	memcpy(&str[48], &regs.ss_64.r9,  8);
+
+	(void) strlcpy(filename, str, len);
 }
 
 #define RETURN_OFFSET 4

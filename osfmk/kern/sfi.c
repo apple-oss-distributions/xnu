@@ -227,7 +227,6 @@ void
 sfi_init(void)
 {
 	sfi_class_id_t i;
-	kern_return_t kret;
 
 	simple_lock_init(&sfi_lock, 0);
 	timer_call_setup(&sfi_timer_call_entry, sfi_timer_global_off, NULL);
@@ -241,8 +240,7 @@ sfi_init(void)
 			timer_call_setup(&sfi_classes[i].on_timer, sfi_timer_per_class_on, (void *)(uintptr_t)i);
 			sfi_classes[i].on_timer_programmed = FALSE;
 
-			kret = waitq_init(&sfi_classes[i].waitq, SYNC_POLICY_FIFO | SYNC_POLICY_DISABLE_IRQ);
-			assert(kret == KERN_SUCCESS);
+			waitq_init(&sfi_classes[i].waitq, SYNC_POLICY_FIFO | SYNC_POLICY_DISABLE_IRQ);
 		} else {
 			/* The only allowed gap is for SFI_CLASS_UNSPECIFIED */
 			if (i != SFI_CLASS_UNSPECIFIED) {

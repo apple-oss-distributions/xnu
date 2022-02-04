@@ -5,6 +5,8 @@
 #ifndef _BSD_ARM_VMPARAM_H_
 #define _BSD_ARM_VMPARAM_H_ 1
 
+#if defined (__arm__) || defined (__arm64__)
+
 #include <sys/resource.h>
 
 #ifndef KERNEL
@@ -26,7 +28,7 @@
 #ifndef DFLSSIZ
 /* XXX stack size default is a platform property: use getrlimit(2) */
 #if (defined(TARGET_OS_OSX) && (TARGET_OS_OSX != 0)) || \
-        (defined(KERNEL) && !defined(CONFIG_EMBEDDED) || (CONFIG_EMBEDDED == 0))
+        (defined(KERNEL) && XNU_TARGET_OS_OSX)
 #define DFLSSIZ         (8*1024*1024 - 16*1024)
 #else
 #define DFLSSIZ         (1024*1024 - 16*1024)   /* initial stack size limit */
@@ -35,7 +37,7 @@
 #ifndef MAXSSIZ
 /* XXX stack size limit is a platform property: use getrlimit(2) */
 #if (defined(TARGET_OS_OSX) && (TARGET_OS_OSX != 0)) || \
-        (defined(KERNEL) && !defined(CONFIG_EMBEDDED) || (CONFIG_EMBEDDED == 0))
+        (defined(KERNEL) && XNU_TARGET_OS_OSX)
 #define MAXSSIZ         (64*1024*1024)          /* max stack size */
 #else
 #define MAXSSIZ         (1024*1024)             /* max stack size */
@@ -47,5 +49,7 @@
 #ifndef MAXCSIZ
 #define MAXCSIZ         (RLIM_INFINITY)         /* max core size */
 #endif  /* MAXCSIZ */
+
+#endif /* defined (__arm__) || defined (__arm64__) */
 
 #endif  /* _BSD_ARM_VMPARAM_H_ */

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2020 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -181,6 +181,10 @@ static int bpf_debug = 0;
 SYSCTL_INT(_debug, OID_AUTO, bpf_debug, CTLFLAG_RW | CTLFLAG_LOCKED,
     &bpf_debug, 0, "");
 
+static unsigned long bpf_trunc_overflow = 0;
+SYSCTL_ULONG(_debug, OID_AUTO, bpf_trunc_overflow, CTLFLAG_RD | CTLFLAG_LOCKED,
+    &bpf_trunc_overflow, "");
+
 /*
  *  bpf_iflist is the list of interfaces; each corresponds to an ifnet
  *  bpf_dtab holds pointer to the descriptors, indexed by minor device #
@@ -202,11 +206,9 @@ static struct bpf_d     **bpf_dtab = NULL;
 static unsigned int bpf_dtab_size = 0;
 static unsigned int     nbpfilter = 0;
 
-decl_lck_mtx_data(static, bpf_mlock_data);
-static lck_mtx_t                *bpf_mlock = &bpf_mlock_data;
-static lck_grp_t                *bpf_mlock_grp;
-static lck_grp_attr_t   *bpf_mlock_grp_attr;
-static lck_attr_t               *bpf_mlock_attr;
+static LCK_GRP_DECLARE(bpf_mlock_grp, "bpf");
+static LCK_MTX_DECLARE(bpf_mlock_data, &bpf_mlock_grp);
+static lck_mtx_t *const bpf_mlock = &bpf_mlock_data;
 
 #endif /* __APPLE__ */
 
@@ -219,7 +221,7 @@ static int      bpf_movein(struct uio *, int,
 static int      bpf_setif(struct bpf_d *, ifnet_t ifp, bool, bool);
 static void     bpf_timed_out(void *, void *);
 static void     bpf_wakeup(struct bpf_d *);
-static u_int    get_pkt_trunc_len(u_char *, u_int);
+static uint32_t get_pkt_trunc_len(struct bpf_packet *);
 static void     catchpacket(struct bpf_d *, struct bpf_packet *, u_int, int);
 static void     reset_d(struct bpf_d *);
 static int      bpf_setf(struct bpf_d *, u_int, user_addr_t, u_long);
@@ -348,11 +350,12 @@ bpf_movein(struct uio *uio, int linktype, struct mbuf **mp,
 	}
 
 	// LP64todo - fix this!
-	len = uio_resid(uio);
-	*datlen = len - hlen;
-	if ((unsigned)len > MCLBYTES) {
+	len = (int)uio_resid(uio);
+	if (len < hlen || (unsigned)len > MCLBYTES || len - hlen > MCLBYTES) {
 		return EIO;
 	}
+
+	*datlen = len - hlen;
 
 	if (sockp) {
 		/*
@@ -691,7 +694,7 @@ bpf_start_timer(struct bpf_d *d)
 		tv.tv_usec = (d->bd_rtout % hz) * tick;
 
 		clock_interval_to_deadline(
-			(uint64_t)tv.tv_sec * USEC_PER_SEC + tv.tv_usec,
+			(uint32_t)tv.tv_sec * USEC_PER_SEC + tv.tv_usec,
 			NSEC_PER_USEC, &deadline);
 		/*
 		 * The state is BPF_IDLE, so the timer hasn't
@@ -762,7 +765,7 @@ bpf_release_d(struct bpf_d *d)
 			panic("%s: %p BPF_DETACHED not set", __func__, d);
 		}
 
-		_FREE(d, M_DEVBUF);
+		kfree_type(struct bpf_d, d);
 	}
 }
 
@@ -811,8 +814,7 @@ bpfopen(dev_t dev, int flags, __unused int fmt,
 		lck_mtx_unlock(bpf_mlock);
 		return EBUSY;
 	}
-	d = (struct bpf_d *)_MALLOC(sizeof(struct bpf_d), M_DEVBUF,
-	    M_WAIT | M_ZERO);
+	d = kalloc_type(struct bpf_d, M_WAIT | Z_ZERO);
 	if (d == NULL) {
 		/* this really is a catastrophic failure */
 		printf("bpfopen: malloc bpf_d failed\n");
@@ -1765,7 +1767,7 @@ bpfioctl(dev_t dev, u_long cmd, caddr_t addr, __unused int flags,
 		struct bpf_program64 prg64;
 
 		bcopy(addr, &prg64, sizeof(prg64));
-		error = bpf_setf(d, prg64.bf_len, prg64.bf_insns, cmd);
+		error = bpf_setf(d, prg64.bf_len, CAST_USER_ADDR_T(prg64.bf_insns), cmd);
 		break;
 	}
 
@@ -1903,7 +1905,7 @@ bpfioctl(dev_t dev, u_long cmd, caddr_t addr, __unused int flags,
 		struct timeval tv;
 
 		bcopy(addr, &_tv, sizeof(_tv));
-		tv.tv_sec  = _tv.tv_sec;
+		tv.tv_sec  = (__darwin_time_t)_tv.tv_sec;
 		tv.tv_usec = _tv.tv_usec;
 
 		/*
@@ -1956,7 +1958,7 @@ bpfioctl(dev_t dev, u_long cmd, caddr_t addr, __unused int flags,
 	 * Set immediate mode.
 	 */
 	case BIOCIMMEDIATE:             /* u_int */
-		d->bd_immediate = *(u_int *)(void *)addr;
+		d->bd_immediate = *(u_char *)(void *)addr;
 		break;
 
 	case BIOCVERSION: {             /* struct bpf_version */
@@ -2195,7 +2197,7 @@ bpf_setf(struct bpf_d *d, u_int bf_len, user_addr_t bf_insns,
 		d->bd_filter = NULL;
 		reset_d(d);
 		if (old != 0) {
-			FREE(old, M_DEVBUF);
+			kfree_data_addr(old);
 		}
 		return 0;
 	}
@@ -2205,7 +2207,7 @@ bpf_setf(struct bpf_d *d, u_int bf_len, user_addr_t bf_insns,
 	}
 
 	size = flen * sizeof(struct bpf_insn);
-	fcode = (struct bpf_insn *) _MALLOC(size, M_DEVBUF, M_WAIT);
+	fcode = (struct bpf_insn *) kalloc_data(size, M_WAIT);
 #ifdef __APPLE__
 	if (fcode == NULL) {
 		return ENOBUFS;
@@ -2220,12 +2222,12 @@ bpf_setf(struct bpf_d *d, u_int bf_len, user_addr_t bf_insns,
 		}
 
 		if (old != 0) {
-			FREE(old, M_DEVBUF);
+			kfree_data_addr(old);
 		}
 
 		return 0;
 	}
-	FREE(fcode, M_DEVBUF);
+	kfree_data(fcode, size);
 	return EINVAL;
 }
 
@@ -2693,7 +2695,7 @@ bpf_mcopy(struct mbuf * m, void *dst_arg, size_t len)
 		if (m == 0) {
 			panic("bpf_mcopy");
 		}
-		count = min(m->m_len, len);
+		count = MIN(m->m_len, (u_int)len);
 		bcopy(mbuf_data(m), dst, count);
 		m = m->m_next;
 		dst += count;
@@ -2743,10 +2745,10 @@ bpf_tap_imp(
 	if (bp == NULL) {
 		goto done;
 	}
-	for (d = bp->bif_dlist; d; d = d->bd_next) {
+	for (d = bp->bif_dlist; d != NULL; d = d->bd_next) {
 		struct bpf_packet *bpf_pkt_saved = bpf_pkt;
-		struct bpf_packet bpf_pkt_tmp;
-		struct pktap_header_buffer bpfp_header_tmp;
+		struct bpf_packet bpf_pkt_tmp = {};
+		struct pktap_header_buffer bpfp_header_tmp = {};
 
 		if (outbound && !d->bd_seesent) {
 			continue;
@@ -2754,9 +2756,13 @@ bpf_tap_imp(
 
 		++d->bd_rcount;
 		slen = bpf_filter(d->bd_filter, (u_char *)bpf_pkt,
-		    bpf_pkt->bpfp_total_length, 0);
+		    (u_int)bpf_pkt->bpfp_total_length, 0);
+
 		if (bp->bif_ifp->if_type == IFT_PKTAP &&
 		    bp->bif_dlt == DLT_PKTAP) {
+			if (d->bd_flags & BPF_TRUNCATE) {
+				slen = min(slen, get_pkt_trunc_len(bpf_pkt));
+			}
 			/*
 			 * Need to copy the bpf_pkt because the conversion
 			 * to v2 pktap header modifies the content of the
@@ -2775,12 +2781,6 @@ bpf_tap_imp(
 
 				convert_to_pktap_header_to_v2(bpf_pkt,
 				    !!(d->bd_flags & BPF_TRUNCATE));
-			}
-
-			if (d->bd_flags & BPF_TRUNCATE) {
-				slen = min(slen,
-				    get_pkt_trunc_len((u_char *)bpf_pkt,
-				    bpf_pkt->bpfp_total_length));
 			}
 		}
 		if (slen != 0) {
@@ -2875,10 +2875,10 @@ copy_bpf_packet(struct bpf_packet * pkt, void * dst, size_t len)
 {
 	/* copy the optional header */
 	if (pkt->bpfp_header_length != 0) {
-		size_t  count = min(len, pkt->bpfp_header_length);
+		size_t  count = MIN(len, pkt->bpfp_header_length);
 		bcopy(pkt->bpfp_header, dst, count);
 		len -= count;
-		dst += count;
+		dst = (void *)((uintptr_t)dst + count);
 	}
 	if (len == 0) {
 		/* nothing past the header */
@@ -2894,14 +2894,14 @@ copy_bpf_packet(struct bpf_packet * pkt, void * dst, size_t len)
 	}
 }
 
-static uint16_t
-get_esp_trunc_len(__unused struct bpf_packet *pkt, __unused uint16_t off,
-    const uint16_t remaining_caplen)
+static uint32_t
+get_esp_trunc_len(__unused struct bpf_packet *pkt, __unused uint32_t off,
+    const uint32_t remaining_caplen)
 {
 	/*
 	 * For some reason tcpdump expects to have one byte beyond the ESP header
 	 */
-	uint16_t trunc_len = ESP_HDR_SIZE + 1;
+	uint32_t trunc_len = ESP_HDR_SIZE + 1;
 
 	if (trunc_len > remaining_caplen) {
 		return remaining_caplen;
@@ -2910,14 +2910,14 @@ get_esp_trunc_len(__unused struct bpf_packet *pkt, __unused uint16_t off,
 	return trunc_len;
 }
 
-static uint16_t
-get_isakmp_trunc_len(__unused struct bpf_packet *pkt, __unused uint16_t off,
-    const uint16_t remaining_caplen)
+static uint32_t
+get_isakmp_trunc_len(__unused struct bpf_packet *pkt, __unused uint32_t off,
+    const uint32_t remaining_caplen)
 {
 	/*
 	 * Include the payload generic header
 	 */
-	uint16_t trunc_len = ISAKMP_HDR_SIZE;
+	uint32_t trunc_len = ISAKMP_HDR_SIZE;
 
 	if (trunc_len > remaining_caplen) {
 		return remaining_caplen;
@@ -2926,12 +2926,12 @@ get_isakmp_trunc_len(__unused struct bpf_packet *pkt, __unused uint16_t off,
 	return trunc_len;
 }
 
-static uint16_t
-get_isakmp_natt_trunc_len(struct bpf_packet *pkt, uint16_t off,
-    const uint16_t remaining_caplen)
+static uint32_t
+get_isakmp_natt_trunc_len(struct bpf_packet *pkt, uint32_t off,
+    const uint32_t remaining_caplen)
 {
 	int err = 0;
-	uint16_t trunc_len = 0;
+	uint32_t trunc_len = 0;
 	char payload[remaining_caplen];
 
 	err = bpf_copydata(pkt, off, remaining_caplen, payload);
@@ -2961,11 +2961,11 @@ get_isakmp_natt_trunc_len(struct bpf_packet *pkt, uint16_t off,
 	return trunc_len;
 }
 
-static uint16_t
-get_udp_trunc_len(struct bpf_packet *pkt, uint16_t off, const uint16_t remaining_caplen)
+static uint32_t
+get_udp_trunc_len(struct bpf_packet *pkt, uint32_t off, const uint32_t remaining_caplen)
 {
 	int err = 0;
-	uint16_t trunc_len = sizeof(struct udphdr); /* By default no UDP payload */
+	uint32_t trunc_len = sizeof(struct udphdr); /* By default no UDP payload */
 
 	if (trunc_len >= remaining_caplen) {
 		return remaining_caplen;
@@ -3010,11 +3010,11 @@ get_udp_trunc_len(struct bpf_packet *pkt, uint16_t off, const uint16_t remaining
 	return trunc_len;
 }
 
-static uint16_t
-get_tcp_trunc_len(struct bpf_packet *pkt, uint16_t off, const uint16_t remaining_caplen)
+static uint32_t
+get_tcp_trunc_len(struct bpf_packet *pkt, uint32_t off, const uint32_t remaining_caplen)
 {
 	int err = 0;
-	uint16_t trunc_len = sizeof(struct tcphdr); /* By default no TCP payload */
+	uint32_t trunc_len = sizeof(struct tcphdr); /* By default no TCP payload */
 	if (trunc_len >= remaining_caplen) {
 		return remaining_caplen;
 	}
@@ -3035,7 +3035,7 @@ get_tcp_trunc_len(struct bpf_packet *pkt, uint16_t off, const uint16_t remaining
 		 */
 		trunc_len = remaining_caplen;
 	} else {
-		trunc_len = tcphdr.th_off << 2;
+		trunc_len = (uint16_t)(tcphdr.th_off << 2);
 	}
 	if (trunc_len >= remaining_caplen) {
 		return remaining_caplen;
@@ -3044,10 +3044,10 @@ get_tcp_trunc_len(struct bpf_packet *pkt, uint16_t off, const uint16_t remaining
 	return trunc_len;
 }
 
-static uint16_t
-get_proto_trunc_len(uint8_t proto, struct bpf_packet *pkt, uint16_t off, const uint16_t remaining_caplen)
+static uint32_t
+get_proto_trunc_len(uint8_t proto, struct bpf_packet *pkt, uint32_t off, const uint32_t remaining_caplen)
 {
-	uint16_t trunc_len;
+	uint32_t trunc_len;
 
 	switch (proto) {
 	case IPPROTO_ICMP: {
@@ -3098,11 +3098,11 @@ get_proto_trunc_len(uint8_t proto, struct bpf_packet *pkt, uint16_t off, const u
 	return trunc_len;
 }
 
-static uint16_t
-get_ip_trunc_len(struct bpf_packet *pkt, uint16_t off, const uint16_t remaining_caplen)
+static uint32_t
+get_ip_trunc_len(struct bpf_packet *pkt, uint32_t off, const uint32_t remaining_caplen)
 {
 	int err = 0;
-	uint16_t iplen = sizeof(struct ip);
+	uint32_t iplen = sizeof(struct ip);
 	if (iplen >= remaining_caplen) {
 		return remaining_caplen;
 	}
@@ -3115,7 +3115,7 @@ get_ip_trunc_len(struct bpf_packet *pkt, uint16_t off, const uint16_t remaining_
 
 	uint8_t proto = 0;
 
-	iplen = iphdr.ip_hl << 2;
+	iplen = (uint16_t)(iphdr.ip_hl << 2);
 	if (iplen >= remaining_caplen) {
 		return remaining_caplen;
 	}
@@ -3130,11 +3130,11 @@ get_ip_trunc_len(struct bpf_packet *pkt, uint16_t off, const uint16_t remaining_
 	return iplen;
 }
 
-static uint16_t
-get_ip6_trunc_len(struct bpf_packet *pkt, uint16_t off, const uint16_t remaining_caplen)
+static uint32_t
+get_ip6_trunc_len(struct bpf_packet *pkt, uint32_t off, const uint32_t remaining_caplen)
 {
 	int err = 0;
-	uint16_t iplen = sizeof(struct ip6_hdr);
+	uint32_t iplen = sizeof(struct ip6_hdr);
 	if (iplen >= remaining_caplen) {
 		return remaining_caplen;
 	}
@@ -3160,99 +3160,126 @@ get_ip6_trunc_len(struct bpf_packet *pkt, uint16_t off, const uint16_t remaining
 	return iplen;
 }
 
-static uint16_t
-get_ether_trunc_len(struct bpf_packet *pkt, int off, const uint16_t remaining_caplen)
+static uint32_t
+get_ether_trunc_len(struct bpf_packet *pkt, uint32_t off, const uint32_t remaining_caplen)
 {
 	int err = 0;
-	uint16_t ethlen = sizeof(struct ether_header);
+	uint32_t ethlen = sizeof(struct ether_header);
 	if (ethlen >= remaining_caplen) {
 		return remaining_caplen;
 	}
 
-	struct ether_header eh;
-	u_short type;
+	struct ether_header eh = {};
 	err = bpf_copydata(pkt, off, sizeof(struct ether_header), &eh);
 	if (err != 0) {
 		return remaining_caplen;
 	}
 
-	type = EXTRACT_SHORT(&eh.ether_type);
+	u_short type = EXTRACT_SHORT(&eh.ether_type);
 	/* Include full ARP */
 	if (type == ETHERTYPE_ARP) {
 		ethlen = remaining_caplen;
-	} else if (type != ETHERTYPE_IP && type != ETHERTYPE_IPV6) {
-		ethlen = min(BPF_MIN_PKT_SIZE, remaining_caplen);
+	} else if (type == ETHERTYPE_IP) {
+		ethlen += get_ip_trunc_len(pkt, off + sizeof(struct ether_header),
+		    remaining_caplen - ethlen);
+	} else if (type == ETHERTYPE_IPV6) {
+		ethlen += get_ip6_trunc_len(pkt, off + sizeof(struct ether_header),
+		    remaining_caplen - ethlen);
 	} else {
-		if (type == ETHERTYPE_IP) {
-			ethlen += get_ip_trunc_len(pkt, sizeof(struct ether_header),
-			    remaining_caplen);
-		} else if (type == ETHERTYPE_IPV6) {
-			ethlen += get_ip6_trunc_len(pkt, sizeof(struct ether_header),
-			    remaining_caplen);
-		}
+		ethlen = MIN(BPF_MIN_PKT_SIZE, remaining_caplen);
 	}
 	return ethlen;
 }
 
+#include <kern/assert.h>
+
 static uint32_t
-get_pkt_trunc_len(u_char *p, u_int len)
+get_pkt_trunc_len(struct bpf_packet *pkt)
 {
-	struct bpf_packet *pkt = (struct bpf_packet *)(void *) p;
 	struct pktap_header *pktap = (struct pktap_header *) (pkt->bpfp_header);
-	uint32_t out_pkt_len = 0, tlen = 0;
+	uint32_t in_pkt_len = 0;
+	uint32_t out_pkt_len = 0;
+	uint32_t tlen = 0;
+	uint32_t pre_adjust;    // L2 header not in mbuf or kern_packet
+
+	// bpfp_total_length must contain the BPF packet header
+	assert3u(pkt->bpfp_total_length, >=, pkt->bpfp_header_length);
+
+	// The BPF packet header must contain the pktap header
+	assert3u(pkt->bpfp_header_length, >=, pktap->pth_length);
+
+	// The pre frame length (L2 header) must be contained in the packet
+	assert3u(pkt->bpfp_total_length, >=, pktap->pth_length + pktap->pth_frame_pre_length);
+
 	/*
-	 * pktap->pth_frame_pre_length is L2 header length and accounts
-	 * for both pre and pre_adjust.
-	 * pktap->pth_length is sizeof(pktap_header) (excl the pre/pre_adjust)
+	 * pktap->pth_frame_pre_length is the L2 header length and accounts
+	 * for both L2 header in the packet payload and pre_adjust.
+	 *
+	 * pre_adjust represents an adjustment for a pseudo L2 header that is not
+	 * part of packet payload -- not in the mbuf or kern_packet -- and comes
+	 * just after the pktap header.
+	 *
+	 * pktap->pth_length is the size of the pktap header (exclude pre_adjust)
+	 *
 	 * pkt->bpfp_header_length is (pktap->pth_length + pre_adjust)
-	 * pre is the offset to the L3 header after the bpfp_header, or length
-	 * of L2 header after bpfp_header, if present.
 	 */
-	int32_t pre = pktap->pth_frame_pre_length -
-	    (pkt->bpfp_header_length - pktap->pth_length);
+	pre_adjust = (uint32_t)(pkt->bpfp_header_length - pktap->pth_length);
 
-	/* Length of the input packet starting from  L3 header */
-	uint32_t in_pkt_len = len - pkt->bpfp_header_length - pre;
-	if (pktap->pth_protocol_family == AF_INET ||
-	    pktap->pth_protocol_family == AF_INET6) {
-		/* Contains L2 header */
-		if (pre > 0) {
-			if (pre < (int32_t)sizeof(struct ether_header)) {
-				goto too_short;
-			}
+	if (pktap->pth_iftype == IFT_ETHER) {
+		/*
+		 * We need to parse the Ethernet header to find the network layer
+		 * protocol
+		 */
+		in_pkt_len = (uint32_t)(pkt->bpfp_total_length - pktap->pth_length - pre_adjust);
 
-			out_pkt_len = get_ether_trunc_len(pkt, 0, in_pkt_len);
-		} else if (pre == 0) {
-			if (pktap->pth_protocol_family == AF_INET) {
-				out_pkt_len = get_ip_trunc_len(pkt, pre, in_pkt_len);
-			} else if (pktap->pth_protocol_family == AF_INET6) {
-				out_pkt_len = get_ip6_trunc_len(pkt, pre, in_pkt_len);
-			}
-		} else {
-			/* Ideally pre should be >= 0. This is an exception */
-			out_pkt_len = min(BPF_MIN_PKT_SIZE, in_pkt_len);
-		}
+		out_pkt_len = get_ether_trunc_len(pkt, 0, in_pkt_len);
+
+		tlen = pktap->pth_length + pre_adjust + out_pkt_len;
 	} else {
-		if (pktap->pth_iftype == IFT_ETHER) {
-			if (in_pkt_len < sizeof(struct ether_header)) {
-				goto too_short;
-			}
-			/* At most include the Ethernet header and 16 bytes */
-			out_pkt_len = MIN(sizeof(struct ether_header) + 16,
-			    in_pkt_len);
+		/*
+		 * For other interface types, we only know to parse IPv4 and IPv6.
+		 *
+		 * To get to the beginning of the IPv4 or IPv6 packet, we need to to skip
+		 * over the L2 header that is the actual packet payload (mbuf or kern_packet)
+		 */
+		uint32_t off;   // offset past the L2 header in the actual packet payload
+
+		off = pktap->pth_frame_pre_length - pre_adjust;
+
+		in_pkt_len = (uint32_t)(pkt->bpfp_total_length - pktap->pth_length - pktap->pth_frame_pre_length);
+
+		if (pktap->pth_protocol_family == AF_INET) {
+			out_pkt_len = get_ip_trunc_len(pkt, off, in_pkt_len);
+		} else if (pktap->pth_protocol_family == AF_INET6) {
+			out_pkt_len = get_ip6_trunc_len(pkt, off, in_pkt_len);
 		} else {
-			/*
-			 * For unknown protocols include at most 16 bytes
-			 */
-			out_pkt_len = MIN(16, in_pkt_len);
+			out_pkt_len = MIN(BPF_MIN_PKT_SIZE, in_pkt_len);
 		}
+		tlen = pktap->pth_length + pktap->pth_frame_pre_length + out_pkt_len;
 	}
-done:
-	tlen = pkt->bpfp_header_length + out_pkt_len + pre;
+
+	// Verify we do not overflow the buffer
+	if (__improbable(tlen > pkt->bpfp_total_length)) {
+		bool do_panic = bpf_debug != 0 ? true : false;
+
+#if DEBUG
+		do_panic = true;
+#endif /* DEBUG */
+		if (do_panic) {
+			panic("%s:%d tlen %u > bpfp_total_length %lu bpfp_header_length %lu pth_frame_pre_length %u pre_adjust %u in_pkt_len %u out_pkt_len %u\n",
+			    __func__, __LINE__,
+			    tlen, pkt->bpfp_total_length, pkt->bpfp_header_length, pktap->pth_frame_pre_length, pre_adjust, in_pkt_len, out_pkt_len);
+		} else {
+			os_log(OS_LOG_DEFAULT,
+			    "%s:%d tlen %u > bpfp_total_length %lu bpfp_header_length %lu pth_frame_pre_length %u pre_adjust %u in_pkt_len %u out_pkt_len %u",
+			    __func__, __LINE__,
+			    tlen, pkt->bpfp_total_length, pkt->bpfp_header_length, pktap->pth_frame_pre_length, pre_adjust, in_pkt_len, out_pkt_len);
+		}
+		bpf_trunc_overflow += 1;
+		tlen = (uint32_t)pkt->bpfp_total_length;
+	}
+
 	return tlen;
-too_short:
-	out_pkt_len = in_pkt_len;
-	goto done;
 }
 
 /*
@@ -3280,7 +3307,7 @@ catchpacket(struct bpf_d *d, struct bpf_packet * pkt,
 	 * much.  Otherwise, transfer the whole packet (unless
 	 * we hit the buffer size limit).
 	 */
-	totlen = hdrlen + min(snaplen, pkt->bpfp_total_length);
+	totlen = hdrlen + MIN(snaplen, (int)pkt->bpfp_total_length);
 	if (totlen > d->bd_bufsize) {
 		totlen = d->bd_bufsize;
 	}
@@ -3341,61 +3368,62 @@ catchpacket(struct bpf_d *d, struct bpf_packet * pkt,
 	 */
 	microtime(&tv);
 	if (d->bd_flags & BPF_EXTENDED_HDR) {
-		struct mbuf *m;
-
-		m = (pkt->bpfp_type == BPF_PACKET_TYPE_MBUF)
-		    ? pkt->bpfp_mbuf : NULL;
 		ehp = (struct bpf_hdr_ext *)(void *)(d->bd_sbuf + curlen);
 		memset(ehp, 0, sizeof(*ehp));
-		ehp->bh_tstamp.tv_sec = tv.tv_sec;
+		ehp->bh_tstamp.tv_sec = (int)tv.tv_sec;
 		ehp->bh_tstamp.tv_usec = tv.tv_usec;
 
-		ehp->bh_datalen = pkt->bpfp_total_length;
-		ehp->bh_hdrlen = hdrlen;
+		ehp->bh_datalen = (bpf_u_int32)pkt->bpfp_total_length;
+		ehp->bh_hdrlen = (u_short)hdrlen;
 		caplen = ehp->bh_caplen = totlen - hdrlen;
-		if (m == NULL) {
-			if (outbound) {
-				ehp->bh_flags |= BPF_HDR_EXT_FLAGS_DIR_OUT;
-			} else {
-				ehp->bh_flags |= BPF_HDR_EXT_FLAGS_DIR_IN;
-			}
-		} else if (outbound) {
-			ehp->bh_flags |= BPF_HDR_EXT_FLAGS_DIR_OUT;
+		payload = (u_char *)ehp + hdrlen;
 
-			/* only do lookups on non-raw INPCB */
-			if ((m->m_pkthdr.pkt_flags & (PKTF_FLOW_ID |
-			    PKTF_FLOW_LOCALSRC | PKTF_FLOW_RAWSOCK)) ==
-			    (PKTF_FLOW_ID | PKTF_FLOW_LOCALSRC) &&
-			    m->m_pkthdr.pkt_flowsrc == FLOWSRC_INPCB) {
-				ehp->bh_flowid = m->m_pkthdr.pkt_flowid;
-				ehp->bh_proto = m->m_pkthdr.pkt_proto;
-			}
-			ehp->bh_svc = so_svc2tc(m->m_pkthdr.pkt_svc);
-			if (m->m_pkthdr.pkt_flags & PKTF_TCP_REXMT) {
-				ehp->bh_pktflags |= BPF_PKTFLAGS_TCP_REXMT;
-			}
-			if (m->m_pkthdr.pkt_flags & PKTF_START_SEQ) {
-				ehp->bh_pktflags |= BPF_PKTFLAGS_START_SEQ;
-			}
-			if (m->m_pkthdr.pkt_flags & PKTF_LAST_PKT) {
-				ehp->bh_pktflags |= BPF_PKTFLAGS_LAST_PKT;
-			}
-			if (m->m_pkthdr.pkt_flags & PKTF_VALID_UNSENT_DATA) {
-				ehp->bh_unsent_bytes =
-				    m->m_pkthdr.bufstatus_if;
-				ehp->bh_unsent_snd =
-				    m->m_pkthdr.bufstatus_sndbuf;
-			}
+		if (outbound) {
+			ehp->bh_flags |= BPF_HDR_EXT_FLAGS_DIR_OUT;
 		} else {
 			ehp->bh_flags |= BPF_HDR_EXT_FLAGS_DIR_IN;
 		}
-		payload = (u_char *)ehp + hdrlen;
+
+		if (pkt->bpfp_type == BPF_PACKET_TYPE_MBUF) {
+			struct mbuf *m = pkt->bpfp_mbuf;
+
+			if (outbound) {
+				/* only do lookups on non-raw INPCB */
+				if ((m->m_pkthdr.pkt_flags & (PKTF_FLOW_ID |
+				    PKTF_FLOW_LOCALSRC | PKTF_FLOW_RAWSOCK)) ==
+				    (PKTF_FLOW_ID | PKTF_FLOW_LOCALSRC) &&
+				    m->m_pkthdr.pkt_flowsrc == FLOWSRC_INPCB) {
+					ehp->bh_flowid = m->m_pkthdr.pkt_flowid;
+					ehp->bh_proto = m->m_pkthdr.pkt_proto;
+				}
+				ehp->bh_svc = so_svc2tc(m->m_pkthdr.pkt_svc);
+				if (m->m_pkthdr.pkt_flags & PKTF_TCP_REXMT) {
+					ehp->bh_pktflags |= BPF_PKTFLAGS_TCP_REXMT;
+				}
+				if (m->m_pkthdr.pkt_flags & PKTF_START_SEQ) {
+					ehp->bh_pktflags |= BPF_PKTFLAGS_START_SEQ;
+				}
+				if (m->m_pkthdr.pkt_flags & PKTF_LAST_PKT) {
+					ehp->bh_pktflags |= BPF_PKTFLAGS_LAST_PKT;
+				}
+				if (m->m_pkthdr.pkt_flags & PKTF_VALID_UNSENT_DATA) {
+					ehp->bh_unsent_bytes =
+					    m->m_pkthdr.bufstatus_if;
+					ehp->bh_unsent_snd =
+					    m->m_pkthdr.bufstatus_sndbuf;
+				}
+			} else {
+				if (m->m_pkthdr.pkt_flags & PKTF_WAKE_PKT) {
+					ehp->bh_pktflags |= BPF_PKTFLAGS_WAKE_PKT;
+				}
+			}
+		}
 	} else {
 		hp = (struct bpf_hdr *)(void *)(d->bd_sbuf + curlen);
-		hp->bh_tstamp.tv_sec = tv.tv_sec;
+		hp->bh_tstamp.tv_sec = (int)tv.tv_sec;
 		hp->bh_tstamp.tv_usec = tv.tv_usec;
-		hp->bh_datalen = pkt->bpfp_total_length;
-		hp->bh_hdrlen = hdrlen;
+		hp->bh_datalen = (bpf_u_int32)pkt->bpfp_total_length;
+		hp->bh_hdrlen = (u_short)hdrlen;
 		caplen = hp->bh_caplen = totlen - hdrlen;
 		payload = (u_char *)hp + hdrlen;
 	}
@@ -3418,26 +3446,26 @@ static int
 bpf_allocbufs(struct bpf_d *d)
 {
 	if (d->bd_sbuf != NULL) {
-		FREE(d->bd_sbuf, M_DEVBUF);
+		kfree_data_addr(d->bd_sbuf);
 		d->bd_sbuf = NULL;
 	}
 	if (d->bd_hbuf != NULL) {
-		FREE(d->bd_hbuf, M_DEVBUF);
+		kfree_data_addr(d->bd_hbuf);
 		d->bd_hbuf = NULL;
 	}
 	if (d->bd_fbuf != NULL) {
-		FREE(d->bd_fbuf, M_DEVBUF);
+		kfree_data_addr(d->bd_fbuf);
 		d->bd_fbuf = NULL;
 	}
 
-	d->bd_fbuf = (caddr_t) _MALLOC(d->bd_bufsize, M_DEVBUF, M_WAIT);
+	d->bd_fbuf = (caddr_t) kalloc_data(d->bd_bufsize, M_WAIT);
 	if (d->bd_fbuf == NULL) {
 		return ENOBUFS;
 	}
 
-	d->bd_sbuf = (caddr_t) _MALLOC(d->bd_bufsize, M_DEVBUF, M_WAIT);
+	d->bd_sbuf = (caddr_t) kalloc_data(d->bd_bufsize, M_WAIT);
 	if (d->bd_sbuf == NULL) {
-		FREE(d->bd_fbuf, M_DEVBUF);
+		kfree_data(d->bd_fbuf, d->bd_bufsize);
 		d->bd_fbuf = NULL;
 		return ENOBUFS;
 	}
@@ -3465,16 +3493,16 @@ bpf_freed(struct bpf_d *d)
 	}
 
 	if (d->bd_sbuf != 0) {
-		FREE(d->bd_sbuf, M_DEVBUF);
+		kfree_data_addr(d->bd_sbuf);
 		if (d->bd_hbuf != 0) {
-			FREE(d->bd_hbuf, M_DEVBUF);
+			kfree_data_addr(d->bd_hbuf);
 		}
 		if (d->bd_fbuf != 0) {
-			FREE(d->bd_fbuf, M_DEVBUF);
+			kfree_data_addr(d->bd_fbuf);
 		}
 	}
 	if (d->bd_filter) {
-		FREE(d->bd_filter, M_DEVBUF);
+		kfree_data_addr(d->bd_filter);
 	}
 }
 
@@ -3504,8 +3532,7 @@ bpf_attach(
 	struct bpf_if *bp_last = NULL;
 	boolean_t found;
 
-	bp_new = (struct bpf_if *) _MALLOC(sizeof(*bp_new), M_DEVBUF,
-	    M_WAIT | M_ZERO);
+	bp_new = kalloc_type(struct bpf_if, M_WAIT | Z_ZERO);
 	if (bp_new == 0) {
 		panic("bpfattach");
 	}
@@ -3540,7 +3567,7 @@ bpf_attach(
 		lck_mtx_unlock(bpf_mlock);
 		printf("bpfattach - %s with dlt %d is already attached\n",
 		    if_name(ifp), dlt);
-		FREE(bp_new, M_DEVBUF);
+		kfree_type(struct bpf_if, bp_new);
 		return EEXIST;
 	}
 
@@ -3655,37 +3682,18 @@ void
 bpf_init(__unused void *unused)
 {
 #ifdef __APPLE__
-	int     i;
 	int     maj;
 
 	if (bpf_devsw_installed == 0) {
 		bpf_devsw_installed = 1;
-		bpf_mlock_grp_attr = lck_grp_attr_alloc_init();
-		bpf_mlock_grp = lck_grp_alloc_init("bpf", bpf_mlock_grp_attr);
-		bpf_mlock_attr = lck_attr_alloc_init();
-		lck_mtx_init(bpf_mlock, bpf_mlock_grp, bpf_mlock_attr);
 		maj = cdevsw_add(CDEV_MAJOR, &bpf_cdevsw);
 		if (maj == -1) {
-			if (bpf_mlock_attr) {
-				lck_attr_free(bpf_mlock_attr);
-			}
-			if (bpf_mlock_grp) {
-				lck_grp_free(bpf_mlock_grp);
-			}
-			if (bpf_mlock_grp_attr) {
-				lck_grp_attr_free(bpf_mlock_grp_attr);
-			}
-
-			bpf_mlock = NULL;
-			bpf_mlock_attr = NULL;
-			bpf_mlock_grp = NULL;
-			bpf_mlock_grp_attr = NULL;
 			bpf_devsw_installed = 0;
 			printf("bpf_init: failed to allocate a major number\n");
 			return;
 		}
 
-		for (i = 0; i < NBPFILTER; i++) {
+		for (int i = 0; i < NBPFILTER; i++) {
 			bpf_make_dev_t(maj);
 		}
 	}

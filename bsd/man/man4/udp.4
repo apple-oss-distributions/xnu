@@ -103,6 +103,17 @@ transport level may be used with
 .Tn UDP ;
 see
 .Xr ip 4 .
+.Pp
+Using
+.Xr sendmsg 2
+with
+.Dv IP_PKTINFO
+as ancillary data with a non NULL interface index or a local address
+can remove the local IP address that was assigned by a previous call to
+.Xr bind 2
+and leave the UDP socket in an unbound state with
+.Dv INADDR_ANY
+as the local address.
 .Sh DIAGNOSTICS
 A socket operation may fail with one of the following errors returned:
 .Bl -tag -width [EADDRNOTAVAIL]
@@ -127,11 +138,13 @@ socket with a network address for which no network interface
 exists.
 .El
 .Sh SEE ALSO
+.Xr bind 2 ,
 .Xr connect 2 ,
 .Xr connectx 2 ,
 .Xr getsockopt 2 ,
 .Xr recv 2 ,
 .Xr send 2 ,
+.Xr sendmsg 2 ,
 .Xr socket 2 ,
 .Xr inet 4 ,
 .Xr intro 4 ,

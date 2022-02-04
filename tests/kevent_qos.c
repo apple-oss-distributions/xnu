@@ -25,7 +25,9 @@
 #include <mach/mach_port.h>
 #include <mach/mach_sync_ipc.h>
 
-T_GLOBAL_META(T_META_NAMESPACE("xnu.kevent_qos"));
+T_GLOBAL_META(T_META_NAMESPACE("xnu.kevent_qos"),
+    T_META_RADAR_COMPONENT_NAME("xnu"),
+    T_META_RADAR_COMPONENT_VERSION("kevent"));
 
 #define ARRAYLEN(arr) (sizeof(arr) / sizeof(arr[0]))
 
@@ -131,9 +133,7 @@ workloop_cb_test_intransit(uint64_t *workloop_id __unused, void **eventslist, in
 	sleep(2 * RECV_TIMEOUT_SECS);
 
 	/* Skip the test if we can't check Qos */
-	if (geteuid() != 0) {
-		T_SKIP("kevent_qos test requires root privileges to run.");
-	}
+	T_ASSERT_EQ(geteuid(), 0, "kevent_qos test requires root privileges to run.");
 
 	/* The effective Qos should be the one expected after override */
 	EXPECT_QOS_EQ(g_expected_qos[ENV_QOS_AFTER_OVERRIDE],
@@ -153,9 +153,28 @@ workloop_cb_test_sync_send(uint64_t *workloop_id __unused, void **eventslist, in
 
 	EXPECT_TEST_MSG(*eventslist);
 
-	if (geteuid() != 0) {
-		T_SKIP("kevent_qos test requires root privileges to run.");
-	}
+	T_ASSERT_EQ(geteuid(), 0, "kevent_qos test requires root privileges to run.");
+
+	/* The effective Qos should be the one expected after override */
+	EXPECT_QOS_EQ(g_expected_qos[ENV_QOS_AFTER_OVERRIDE],
+	    "dispatch_source event handler QoS should be %s", g_expected_qos_name[ENV_QOS_AFTER_OVERRIDE]);
+
+	*events = 0;
+	T_END;
+}
+
+/*
+ * WL handler which checks if the servicer thread has correct Qos.
+ */
+static void
+workloop_cb_test_kernel_sync_send(uint64_t *workloop_id __unused, void **eventslist, int *events)
+{
+	T_LOG("Workloop handler workloop_cb_test_kernel_sync_send called");
+
+	T_ASSERT_EQ(geteuid(), 0, "kevent_qos test requires root privileges to run.");
+
+	/* Wait for the kernel upcall to block on receive */
+	sleep(2 * RECV_TIMEOUT_SECS);
 
 	/* The effective Qos should be the one expected after override */
 	EXPECT_QOS_EQ(g_expected_qos[ENV_QOS_AFTER_OVERRIDE],
@@ -179,9 +198,7 @@ workloop_cb_test_sync_send_and_enable(uint64_t *workloop_id, struct kevent_qos_s
 
 	EXPECT_TEST_MSG(*eventslist);
 
-	if (geteuid() != 0) {
-		T_SKIP("kevent_qos test requires root privileges to run.");
-	}
+	T_ASSERT_EQ(geteuid(), 0, "kevent_qos test requires root privileges to run.");
 
 	/* The effective Qos should be the one expected after override */
 	EXPECT_QOS_EQ(g_expected_qos[ENV_QOS_AFTER_OVERRIDE],
@@ -221,9 +238,7 @@ workloop_cb_test_sync_send_and_enable_handoff(uint64_t *workloop_id, struct keve
 
 	EXPECT_TEST_MSG(*eventslist);
 
-	if (geteuid() != 0) {
-		T_SKIP("kevent_qos test requires root privileges to run.");
-	}
+	T_ASSERT_EQ(geteuid(), 0, "kevent_qos test requires root privileges to run.");
 
 	/* The effective Qos should be the one expected after override */
 	EXPECT_QOS_EQ(g_expected_qos[ENV_QOS_AFTER_OVERRIDE],
@@ -275,9 +290,7 @@ workloop_cb_test_send_two_sync(uint64_t *workloop_id __unused, struct kevent_qos
 
 	EXPECT_TEST_MSG(*eventslist);
 
-	if (geteuid() != 0) {
-		T_SKIP("kevent_qos test requires root privileges to run.");
-	}
+	T_ASSERT_EQ(geteuid(), 0, "kevent_qos test requires root privileges to run.");
 
 	T_LOG("Number of events received is %d\n", *events);
 
@@ -313,9 +326,7 @@ workloop_cb_test_two_send_and_destroy(uint64_t *workloop_id __unused, struct kev
 
 	EXPECT_TEST_MSG(*eventslist);
 
-	if (geteuid() != 0) {
-		T_SKIP("kevent_qos test requires root privileges to run.");
-	}
+	T_ASSERT_EQ(geteuid(), 0, "kevent_qos test requires root privileges to run.");
 
 	if (two_send_and_destroy_handler == 0) {
 		/* Sleep to make sure the mqueue gets full */
@@ -430,9 +441,7 @@ workloop_cb_test_sync_send_reply(uint64_t *workloop_id __unused, struct kevent_q
 {
 	T_LOG("Workloop handler workloop_cb_test_sync_send_reply called");
 
-	if (geteuid() != 0) {
-		T_SKIP("kevent_qos test requires root privileges to run.");
-	}
+	T_ASSERT_EQ(geteuid(), 0, "kevent_qos test requires root privileges to run.");
 
 	T_QUIET; T_ASSERT_EQ_INT(*events, 1, "events received");
 	T_QUIET; T_ASSERT_EQ_INT((*eventslist)->filter, EVFILT_MACHPORT, "received EVFILT_MACHPORT");
@@ -454,9 +463,7 @@ workloop_cb_test_sync_send_deallocate(uint64_t *workloop_id __unused, struct kev
 
 	T_LOG("Workloop handler workloop_cb_test_sync_send_deallocate called");
 
-	if (geteuid() != 0) {
-		T_SKIP("kevent_qos test requires root privileges to run.");
-	}
+	T_ASSERT_EQ(geteuid(), 0, "kevent_qos test requires root privileges to run.");
 
 	T_QUIET; T_ASSERT_EQ_INT(*events, 1, "events received");
 	T_QUIET; T_ASSERT_EQ_INT((*eventslist)->filter, EVFILT_MACHPORT, "received EVFILT_MACHPORT");
@@ -482,9 +489,7 @@ workloop_cb_test_sync_send_reply_kevent(uint64_t *workloop_id, struct kevent_qos
 {
 	T_LOG("Workloop handler workloop_cb_test_sync_send_reply_kevent called");
 
-	if (geteuid() != 0) {
-		T_SKIP("kevent_qos test requires root privileges to run.");
-	}
+	T_ASSERT_EQ(geteuid(), 0, "kevent_qos test requires root privileges to run.");
 
 	T_QUIET; T_ASSERT_EQ_INT(*events, 1, "events received");
 	T_QUIET; T_ASSERT_EQ_INT(((*eventslist)->filter), EVFILT_MACHPORT, "received EVFILT_MACHPORT");
@@ -510,9 +515,7 @@ workloop_cb_test_sync_send_reply_kevent_pthread(uint64_t *workloop_id __unused, 
 {
 	T_LOG("Workloop handler workloop_cb_test_sync_send_reply_kevent_pthread called");
 
-	if (geteuid() != 0) {
-		T_SKIP("kevent_qos test requires root privileges to run.");
-	}
+	T_ASSERT_EQ(geteuid(), 0, "kevent_qos test requires root privileges to run.");
 
 	T_QUIET; T_ASSERT_EQ_INT(*events, 1, "events received");
 	T_QUIET; T_ASSERT_EQ_INT((*eventslist)->filter, EVFILT_MACHPORT, "received EVFILT_MACHPORT");
@@ -537,9 +540,7 @@ workloop_cb_test_sync_send_kevent_reply(uint64_t *workloop_id, struct kevent_qos
 {
 	T_LOG("workloop handler workloop_cb_test_sync_send_kevent_reply called");
 
-	if (geteuid() != 0) {
-		T_SKIP("kevent_qos test requires root privileges to run.");
-	}
+	T_ASSERT_EQ(geteuid(), 0, "kevent_qos test requires root privileges to run.");
 
 	T_QUIET; T_ASSERT_EQ_INT(*events, 1, "events received");
 	T_QUIET; T_ASSERT_EQ_INT((*eventslist)->filter, EVFILT_MACHPORT, "received EVFILT_MACHPORT");
@@ -566,9 +567,7 @@ workloop_cb_test_sync_send_do_nothing(uint64_t *workloop_id __unused, struct kev
 {
 	T_LOG("Workloop handler workloop_cb_test_sync_send_do_nothing called");
 
-	if (geteuid() != 0) {
-		T_SKIP("kevent_qos test requires root privileges to run.");
-	}
+	T_ASSERT_EQ(geteuid(), 0, "kevent_qos test requires root privileges to run.");
 
 	T_QUIET; T_ASSERT_EQ_INT(*events, 1, "events received");
 	T_QUIET; T_ASSERT_EQ_INT((*eventslist)->filter, EVFILT_MACHPORT, "received EVFILT_MACHPORT");
@@ -588,9 +587,7 @@ workloop_cb_test_sync_send_do_nothing_kevent_pthread(uint64_t *workloop_id __unu
 {
 	T_LOG("Workloop handler workloop_cb_test_sync_send_do_nothing_kevent_pthread called");
 
-	if (geteuid() != 0) {
-		T_SKIP("kevent_qos test requires root privileges to run.");
-	}
+	T_ASSERT_EQ(geteuid(), 0, "kevent_qos test requires root privileges to run.");
 
 	T_QUIET; T_ASSERT_EQ_INT(*events, 1, "events received");
 	T_QUIET; T_ASSERT_EQ_INT((*eventslist)->filter, EVFILT_MACHPORT, "received EVFILT_MACHPORT");
@@ -611,9 +608,7 @@ workloop_cb_test_sync_send_do_nothing_exit(uint64_t *workloop_id __unused, struc
 {
 	T_LOG("workloop handler workloop_cb_test_sync_send_do_nothing_exit called");
 
-	if (geteuid() != 0) {
-		T_SKIP("kevent_qos test requires root privileges to run.");
-	}
+	T_ASSERT_EQ(geteuid(), 0, "kevent_qos test requires root privileges to run.");
 
 	T_QUIET; T_ASSERT_EQ_INT(*events, 1, "events received");
 	T_QUIET; T_ASSERT_EQ_INT((*eventslist)->filter, EVFILT_MACHPORT, "received EVFILT_MACHPORT");
@@ -632,9 +627,7 @@ workloop_cb_test_sync_send_reply_kevent_reply_kevent(uint64_t *workloop_id __unu
 {
 	T_LOG("Workloop handler workloop_cb_test_sync_send_reply_kevent_reply_kevent called");
 
-	if (geteuid() != 0) {
-		T_SKIP("kevent_qos test requires root privileges to run.");
-	}
+	T_ASSERT_EQ(geteuid(), 0, "kevent_qos test requires root privileges to run.");
 
 	T_QUIET; T_ASSERT_EQ_INT(*events, 1, "events received");
 	T_QUIET; T_ASSERT_EQ_INT((*eventslist)->filter, EVFILT_MACHPORT, "received EVFILT_MACHPORT");
@@ -662,9 +655,7 @@ workloop_cb_test_sync_send_kevent_reply_reply_kevent(uint64_t *workloop_id, stru
 {
 	T_LOG("workloop handler workloop_cb_test_sync_send_kevent_reply_reply_kevent called");
 
-	if (geteuid() != 0) {
-		T_SKIP("kevent_qos test requires root privileges to run.");
-	}
+	T_ASSERT_EQ(geteuid(), 0, "kevent_qos test requires root privileges to run.");
 
 	T_QUIET; T_ASSERT_EQ_INT(*events, 1, "events received");
 	T_QUIET; T_ASSERT_EQ_INT((*eventslist)->filter, EVFILT_MACHPORT, "received EVFILT_MACHPORT");
@@ -705,9 +696,7 @@ workloop_cb_test_sync_send_kevent_reply_kevent_reply(uint64_t *workloop_id, stru
 {
 	T_LOG("workloop handler workloop_cb_test_sync_send_kevent_reply_kevent_reply called");
 
-	if (geteuid() != 0) {
-		T_SKIP("kevent_qos test requires root privileges to run.");
-	}
+	T_ASSERT_EQ(geteuid(), 0, "kevent_qos test requires root privileges to run.");
 
 	T_QUIET; T_ASSERT_EQ_INT(*events, 1, "events received");
 	T_QUIET; T_ASSERT_EQ_INT((*eventslist)->filter, EVFILT_MACHPORT, "received EVFILT_MACHPORT");
@@ -736,9 +725,7 @@ workloop_cb_test_sync_send_reply_kevent_kevent_reply(uint64_t *workloop_id, stru
 {
 	T_LOG("workloop handler workloop_cb_test_sync_send_reply_kevent_kevent_reply called");
 
-	if (geteuid() != 0) {
-		T_SKIP("kevent_qos test requires root privileges to run.");
-	}
+	T_ASSERT_EQ(geteuid(), 0, "kevent_qos test requires root privileges to run.");
 
 	T_QUIET; T_ASSERT_EQ_INT(*events, 1, "events received");
 	T_QUIET; T_ASSERT_EQ_INT((*eventslist)->filter, EVFILT_MACHPORT, "received EVFILT_MACHPORT");
@@ -904,9 +891,6 @@ send(
 	}
 
 	mach_msg_option_t send_opts = options;
-	if (reply_port) {
-		send_opts |= MACH_SEND_SYNC_OVERRIDE;
-	}
 	send_opts |= MACH_SEND_MSG | MACH_SEND_TIMEOUT | MACH_SEND_OVERRIDE;
 
 	ret = mach_msg(&send_msg.header, send_opts, send_msg.header.msgh_size,
@@ -1348,6 +1332,37 @@ T_HELPER_DECL(qos_client_send_sync_msg_with_pri,
 }
 
 static void *
+qos_client_kernel_upcall_send_sync_msg(void *arg __unused)
+{
+	mach_port_t qos_send_port;
+
+	kern_return_t kr = bootstrap_look_up(bootstrap_port,
+	    KEVENT_QOS_SERVICE_NAME, &qos_send_port);
+	T_QUIET; T_ASSERT_MACH_SUCCESS(kr, "client bootstrap_look_up");
+
+	/* Call task_test_sync_upcall to perform a sync kernel upcall */
+	kr = task_test_sync_upcall(mach_task_self(), qos_send_port);
+	if (kr == KERN_NOT_SUPPORTED) {
+		T_QUIET; T_SKIP("QOS Client Kernel Upcall test called on release kernel, skipping\n");
+	}
+
+	T_QUIET; T_ASSERT_MACH_SUCCESS(kr, "task_test_sync_upcall");
+
+	T_LOG("Client done doing upcall, now waiting for server to end the test");
+	sleep(2 * SEND_TIMEOUT_SECS);
+
+	T_ASSERT_FAIL("client timed out");
+	return NULL;
+}
+
+T_HELPER_DECL(qos_client_send_kernel_upcall_sync_msg_with_pri,
+    "Send Kernel upcall sync message and wait for reply")
+{
+	thread_create_at_qos(g_expected_qos[ENV_QOS_AFTER_OVERRIDE], qos_client_kernel_upcall_send_sync_msg);
+	sleep(HELPER_TIMEOUT_SECS);
+}
+
+static void *
 qos_client_send_two_sync_msg_high_qos(void *arg __unused)
 {
 	mach_port_t qos_send_port;
@@ -1551,8 +1566,8 @@ run_client_server(const char *server_name, const char *client_name, qos_class_t 
 	}
 
 	dt_helper_t helpers[] = {
-		dt_launchd_helper_env("com.apple.xnu.test.kevent_qos.plist",
-	    server_name, env),
+		dt_launchd_helper_domain("com.apple.xnu.test.kevent_qos.plist",
+	    server_name, env, LAUNCH_SYSTEM_DOMAIN),
 		dt_fork_helper(client_name)
 	};
 	dt_run_helpers(helpers, 2, HELPER_TIMEOUT_SECS);
@@ -1643,6 +1658,10 @@ expect_kevent_id_recv(mach_port_t port, qos_class_t qos[], const char *qos_name[
 		T_QUIET; T_ASSERT_POSIX_ZERO(_pthread_workqueue_init_with_workloop(
 			    worker_cb, event_cb,
 			    (pthread_workqueue_function_workloop_t)workloop_cb_test_sync_send_reply_kevent_kevent_reply, 0, 0), NULL);
+	} else if (strcmp(wl_function, "workloop_cb_test_kernel_sync_send") == 0) {
+		T_QUIET; T_ASSERT_POSIX_ZERO(_pthread_workqueue_init_with_workloop(
+			    worker_cb, event_cb,
+			    (pthread_workqueue_function_workloop_t)workloop_cb_test_kernel_sync_send, 0, 0), NULL);
 	} else {
 		T_ASSERT_FAIL("no workloop function specified \n");
 	}
@@ -1955,3 +1974,14 @@ TEST_QOS("server_kevent_id", "qos_client_send_2sync_msg_with_link_check_incorrec
     QOS_CLASS_DEFAULT, "default",
     QOS_CLASS_DEFAULT, "default",
     QOS_CLASS_DEFAULT, "default")
+
+/*
+ * Test 26: test sending sync ipc from kernel (at IN qos) to port will override the servicer
+ *
+ * Do a kernel upcall at IN qos to a port and check if the servicer
+ * of the workloop on other side gets sync ipc override.
+ */
+TEST_QOS("server_kevent_id", "qos_client_send_kernel_upcall_sync_msg_with_pri", kernel_send_sync_IN, "workloop_cb_test_kernel_sync_send",
+    QOS_CLASS_MAINTENANCE, "maintenance",
+    QOS_CLASS_MAINTENANCE, "maintenance",
+    QOS_CLASS_USER_INITIATED, "user initiated")

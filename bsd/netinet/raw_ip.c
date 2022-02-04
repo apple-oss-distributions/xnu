@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2020 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -167,18 +167,14 @@ rip_init(struct protosw *pp, struct domain *dp)
 	/*
 	 * allocate lock group attribute and group for udp pcb mutexes
 	 */
-	pcbinfo->ipi_lock_grp_attr = lck_grp_attr_alloc_init();
-	pcbinfo->ipi_lock_grp = lck_grp_alloc_init("ripcb", pcbinfo->ipi_lock_grp_attr);
+	pcbinfo->ipi_lock_grp = lck_grp_alloc_init("ripcb", LCK_GRP_ATTR_NULL);
 
 	/*
 	 * allocate the lock attribute for udp pcb mutexes
 	 */
-	pcbinfo->ipi_lock_attr = lck_attr_alloc_init();
-	if ((pcbinfo->ipi_lock = lck_rw_alloc_init(pcbinfo->ipi_lock_grp,
-	    pcbinfo->ipi_lock_attr)) == NULL) {
-		panic("%s: unable to allocate PCB lock\n", __func__);
-		/* NOTREACHED */
-	}
+	lck_attr_setdefault(&pcbinfo->ipi_lock_attr);
+	lck_rw_init(&pcbinfo->ipi_lock, pcbinfo->ipi_lock_grp,
+	    &pcbinfo->ipi_lock_attr);
 
 	in_pcbinfo_attach(&ripcbinfo);
 }
@@ -210,7 +206,7 @@ rip_input(struct mbuf *m, int iphlen)
 	MBUF_STRICT_DATA_ALIGNMENT_CHECK_32(m);
 
 	ripsrc.sin_addr = ip->ip_src;
-	lck_rw_lock_shared(ripcbinfo.ipi_lock);
+	lck_rw_lock_shared(&ripcbinfo.ipi_lock);
 	LIST_FOREACH(inp, &ripcb, inp_list) {
 		if ((inp->inp_vflag & INP_IPV4) == 0) {
 			continue;
@@ -346,7 +342,7 @@ unlock:
 	 * Keep the list locked because socket filter may force the socket lock
 	 * to be released when calling sbappendaddr() -- see rdar://7627704
 	 */
-	lck_rw_done(ripcbinfo.ipi_lock);
+	lck_rw_done(&ripcbinfo.ipi_lock);
 }
 
 /*
@@ -612,7 +608,6 @@ rip_output(
 	if ((so->so_flags1 & SOF1_QOSMARKING_ALLOWED)) {
 		ipoa.ipoa_flags |= IPOAF_QOSMARKING_ALLOWED;
 	}
-
 #if IPSEC
 	if (inp->inp_sp != NULL && ipsec_setsocket(m, so) != 0) {
 		m_freem(m);
@@ -637,6 +632,12 @@ rip_output(
 	} else {
 		m->m_pkthdr.tx_rawip_e_pid = 0;
 	}
+#if (DEBUG || DEVELOPMENT)
+	if (so->so_flags & SOF_MARK_WAKE_PKT) {
+		so->so_flags &= ~SOF_MARK_WAKE_PKT;
+		m->m_pkthdr.pkt_flags |= PKTF_WAKE_PKT;
+	}
+#endif /* (DEBUG || DEVELOPMENT) */
 
 	imo = inp->inp_moptions;
 	if (imo != NULL) {
@@ -693,7 +694,7 @@ rip_output(
 	 * If output interface was cellular/expensive/constrained, and this socket is
 	 * denied access to it, generate an event.
 	 */
-	if (error != 0 && (ipoa.ipoa_retflags & IPOARF_IFDENIED) &&
+	if (error != 0 && (ipoa.ipoa_flags & IPOAF_R_IFDENIED) &&
 	    (INP_NO_CELLULAR(inp) || INP_NO_EXPENSIVE(inp) || INP_NO_CONSTRAINED(inp))) {
 		soevent(so, (SO_FILT_HINT_LOCKED | SO_FILT_HINT_IFDENIED));
 	}
@@ -836,7 +837,7 @@ rip_ctlinput(
 
 	switch (cmd) {
 	case PRC_IFDOWN:
-		lck_rw_lock_shared(in_ifaddr_rwlock);
+		lck_rw_lock_shared(&in_ifaddr_rwlock);
 		for (ia = in_ifaddrhead.tqh_first; ia;
 		    ia = ia->ia_link.tqe_next) {
 			IFA_LOCK(&ia->ia_ifa);
@@ -845,7 +846,7 @@ rip_ctlinput(
 				done = 1;
 				IFA_ADDREF_LOCKED(&ia->ia_ifa);
 				IFA_UNLOCK(&ia->ia_ifa);
-				lck_rw_done(in_ifaddr_rwlock);
+				lck_rw_done(&in_ifaddr_rwlock);
 				lck_mtx_lock(rnh_lock);
 				/*
 				 * in_ifscrub kills the interface route.
@@ -865,12 +866,12 @@ rip_ctlinput(
 			IFA_UNLOCK(&ia->ia_ifa);
 		}
 		if (!done) {
-			lck_rw_done(in_ifaddr_rwlock);
+			lck_rw_done(&in_ifaddr_rwlock);
 		}
 		break;
 
 	case PRC_IFUP:
-		lck_rw_lock_shared(in_ifaddr_rwlock);
+		lck_rw_lock_shared(&in_ifaddr_rwlock);
 		for (ia = in_ifaddrhead.tqh_first; ia;
 		    ia = ia->ia_link.tqe_next) {
 			IFA_LOCK(&ia->ia_ifa);
@@ -885,12 +886,12 @@ rip_ctlinput(
 			if (ia != NULL) {
 				IFA_UNLOCK(&ia->ia_ifa);
 			}
-			lck_rw_done(in_ifaddr_rwlock);
+			lck_rw_done(&in_ifaddr_rwlock);
 			return;
 		}
 		IFA_ADDREF_LOCKED(&ia->ia_ifa);
 		IFA_UNLOCK(&ia->ia_ifa);
-		lck_rw_done(in_ifaddr_rwlock);
+		lck_rw_done(&in_ifaddr_rwlock);
 
 		flags = RTF_UP;
 		iaifp = ia->ia_ifa.ifa_ifp;
@@ -933,6 +934,9 @@ rip_attach(struct socket *so, int proto, struct proc *p)
 	}
 	if ((so->so_state & SS_PRIV) == 0) {
 		return EPERM;
+	}
+	if (proto > UINT8_MAX) {
+		return EINVAL;
 	}
 
 	error = soreserve(so, rip_sendspace, rip_recvspace);
@@ -1130,7 +1134,7 @@ rip_unlock(struct socket *so, int refcount, void *debug)
 
 	if (refcount) {
 		if (so->so_usecount <= 0) {
-			panic("rip_unlock: bad refoucnt so=%p val=%x lrh= %s\n",
+			panic("rip_unlock: bad refoucnt so=%p val=%x lrh= %s",
 			    so, so->so_usecount, solockhistory_nr(so));
 			/* NOTREACHED */
 		}
@@ -1138,7 +1142,7 @@ rip_unlock(struct socket *so, int refcount, void *debug)
 		if (so->so_usecount == 0 && (inp->inp_wantcnt == WNT_STOPUSING)) {
 			/* cleanup after last reference */
 			lck_mtx_unlock(so->so_proto->pr_domain->dom_mtx);
-			lck_rw_lock_exclusive(ripcbinfo.ipi_lock);
+			lck_rw_lock_exclusive(&ripcbinfo.ipi_lock);
 			if (inp->inp_state != INPCB_STATE_DEAD) {
 				if (SOCK_CHECK_DOM(so, PF_INET6)) {
 					in6_pcbdetach(inp);
@@ -1147,7 +1151,7 @@ rip_unlock(struct socket *so, int refcount, void *debug)
 				}
 			}
 			in_pcbdispose(inp);
-			lck_rw_done(ripcbinfo.ipi_lock);
+			lck_rw_done(&ripcbinfo.ipi_lock);
 			return 0;
 		}
 	}
@@ -1170,17 +1174,17 @@ rip_pcblist SYSCTL_HANDLER_ARGS
 	 * The process of preparing the TCB list is too time-consuming and
 	 * resource-intensive to repeat twice on every request.
 	 */
-	lck_rw_lock_exclusive(ripcbinfo.ipi_lock);
+	lck_rw_lock_exclusive(&ripcbinfo.ipi_lock);
 	if (req->oldptr == USER_ADDR_NULL) {
 		n = ripcbinfo.ipi_count;
 		req->oldidx = 2 * (sizeof xig)
 		    + (n + n / 8) * sizeof(struct xinpcb);
-		lck_rw_done(ripcbinfo.ipi_lock);
+		lck_rw_done(&ripcbinfo.ipi_lock);
 		return 0;
 	}
 
 	if (req->newptr != USER_ADDR_NULL) {
-		lck_rw_done(ripcbinfo.ipi_lock);
+		lck_rw_done(&ripcbinfo.ipi_lock);
 		return EPERM;
 	}
 
@@ -1197,20 +1201,20 @@ rip_pcblist SYSCTL_HANDLER_ARGS
 	xig.xig_sogen = so_gencnt;
 	error = SYSCTL_OUT(req, &xig, sizeof xig);
 	if (error) {
-		lck_rw_done(ripcbinfo.ipi_lock);
+		lck_rw_done(&ripcbinfo.ipi_lock);
 		return error;
 	}
 	/*
 	 * We are done if there is no pcb
 	 */
 	if (n == 0) {
-		lck_rw_done(ripcbinfo.ipi_lock);
+		lck_rw_done(&ripcbinfo.ipi_lock);
 		return 0;
 	}
 
 	inp_list = _MALLOC(n * sizeof *inp_list, M_TEMP, M_WAITOK);
 	if (inp_list == 0) {
-		lck_rw_done(ripcbinfo.ipi_lock);
+		lck_rw_done(&ripcbinfo.ipi_lock);
 		return ENOMEM;
 	}
 
@@ -1254,7 +1258,7 @@ rip_pcblist SYSCTL_HANDLER_ARGS
 		error = SYSCTL_OUT(req, &xig, sizeof xig);
 	}
 	FREE(inp_list, M_TEMP);
-	lck_rw_done(ripcbinfo.ipi_lock);
+	lck_rw_done(&ripcbinfo.ipi_lock);
 	return error;
 }
 
@@ -1277,17 +1281,17 @@ rip_pcblist64 SYSCTL_HANDLER_ARGS
 	 * The process of preparing the TCB list is too time-consuming and
 	 * resource-intensive to repeat twice on every request.
 	 */
-	lck_rw_lock_exclusive(ripcbinfo.ipi_lock);
+	lck_rw_lock_exclusive(&ripcbinfo.ipi_lock);
 	if (req->oldptr == USER_ADDR_NULL) {
 		n = ripcbinfo.ipi_count;
 		req->oldidx = 2 * (sizeof xig)
 		    + (n + n / 8) * sizeof(struct xinpcb64);
-		lck_rw_done(ripcbinfo.ipi_lock);
+		lck_rw_done(&ripcbinfo.ipi_lock);
 		return 0;
 	}
 
 	if (req->newptr != USER_ADDR_NULL) {
-		lck_rw_done(ripcbinfo.ipi_lock);
+		lck_rw_done(&ripcbinfo.ipi_lock);
 		return EPERM;
 	}
 
@@ -1304,20 +1308,20 @@ rip_pcblist64 SYSCTL_HANDLER_ARGS
 	xig.xig_sogen = so_gencnt;
 	error = SYSCTL_OUT(req, &xig, sizeof xig);
 	if (error) {
-		lck_rw_done(ripcbinfo.ipi_lock);
+		lck_rw_done(&ripcbinfo.ipi_lock);
 		return error;
 	}
 	/*
 	 * We are done if there is no pcb
 	 */
 	if (n == 0) {
-		lck_rw_done(ripcbinfo.ipi_lock);
+		lck_rw_done(&ripcbinfo.ipi_lock);
 		return 0;
 	}
 
 	inp_list = _MALLOC(n * sizeof *inp_list, M_TEMP, M_WAITOK);
 	if (inp_list == 0) {
-		lck_rw_done(ripcbinfo.ipi_lock);
+		lck_rw_done(&ripcbinfo.ipi_lock);
 		return ENOMEM;
 	}
 
@@ -1360,7 +1364,7 @@ rip_pcblist64 SYSCTL_HANDLER_ARGS
 		error = SYSCTL_OUT(req, &xig, sizeof xig);
 	}
 	FREE(inp_list, M_TEMP);
-	lck_rw_done(ripcbinfo.ipi_lock);
+	lck_rw_done(&ripcbinfo.ipi_lock);
 	return error;
 }
 

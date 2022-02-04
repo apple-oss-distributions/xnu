@@ -67,7 +67,9 @@ enum{
 	kInternalFlagPhysical      = 0x00000001,
 	kInternalFlagPageSized     = 0x00000002,
 	kInternalFlagPageAllocated = 0x00000004,
-	kInternalFlagInit          = 0x00000008
+	kInternalFlagInit          = 0x00000008,
+	kInternalFlagHasPointers   = 0x00000010,
+	kInternalFlagGuardPages    = 0x00000020,
 };
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
@@ -79,19 +81,16 @@ OSDefineMetaClassAndStructorsWithZone(IOBufferMemoryDescriptor,
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
 static uintptr_t
-IOBMDPageProc(iopa_t * a)
+IOBMDPageProc(kalloc_heap_t kheap, iopa_t * a)
 {
 	kern_return_t kr;
 	vm_address_t  vmaddr  = 0;
-	int           options = 0;// KMA_LOMEM;
 
-	kr = kernel_memory_allocate(kernel_map, &vmaddr,
-	    page_size, 0, options, VM_KERN_MEMORY_IOKIT);
+	kr = kernel_memory_allocate(kheap->kh_fallback_map, &vmaddr,
+	    page_size, 0, (kma_flags_t) (KMA_NONE | KMA_ZERO), VM_KERN_MEMORY_IOKIT);
 
 	if (KERN_SUCCESS != kr) {
 		vmaddr = 0;
-	} else {
-		bzero((void *) vmaddr, page_size);
 	}
 
 	return (uintptr_t) vmaddr;
@@ -132,10 +131,7 @@ IOBufferMemoryDescriptor::withCopy(
 		if (!inst) {
 			break;
 		}
-		inst->_ranges.v64 = IONew(IOAddressRange, 1);
-		if (!inst->_ranges.v64) {
-			break;
-		}
+		inst->_ranges.v64 = IOMallocType(IOAddressRange);
 
 		err = vm_map_copyin(sourceMap, source, size,
 		    false /* src_destroy */, &copy);
@@ -178,7 +174,7 @@ IOBufferMemoryDescriptor::initWithPhysicalMask(
 	mach_vm_address_t physicalMask)
 {
 	task_t                mapTask = NULL;
-	vm_map_t              vmmap = NULL;
+	kalloc_heap_t         kheap = KHEAP_DATA_BUFFERS;
 	mach_vm_address_t     highestMask = 0;
 	IOOptionBits          iomdOptions = kIOMemoryTypeVirtual64 | kIOMemoryAsReference;
 	IODMAMapSpecification mapSpec;
@@ -186,21 +182,26 @@ IOBufferMemoryDescriptor::initWithPhysicalMask(
 	bool                  withCopy = false;
 	bool                  mappedOrShared = false;
 
+	/*
+	 * Temporarily use default heap on intel due to rdar://74982985
+	 */
+#if __x86_64__
+	kheap = KHEAP_DEFAULT;
+#endif
+
 	if (!capacity) {
 		return false;
 	}
 
+	/*
+	 * The IOKit constructor requests the allocator for zeroed memory
+	 * so the members of the class do not need to be explicitly zeroed.
+	 */
 	_options          = options;
 	_capacity         = capacity;
-	_internalFlags    = 0;
-	_internalReserved = 0;
-	_buffer           = NULL;
 
 	if (!_ranges.v64) {
-		_ranges.v64 = IONew(IOAddressRange, 1);
-		if (!_ranges.v64) {
-			return false;
-		}
+		_ranges.v64 = IOMallocType(IOAddressRange);
 		_ranges.v64->address = 0;
 		_ranges.v64->length  = 0;
 	} else {
@@ -216,6 +217,14 @@ IOBufferMemoryDescriptor::initWithPhysicalMask(
 		_buffer = (void *) _ranges.v64->address;
 		withCopy = true;
 	}
+
+	/*
+	 * Set kalloc_heap to default if allocation contains pointers
+	 */
+	if (kInternalFlagHasPointers & _internalFlags) {
+		kheap = KHEAP_DEFAULT;
+	}
+
 	//  make sure super::free doesn't dealloc _ranges before super::init
 	_flags = kIOMemoryAsReference;
 
@@ -275,13 +284,15 @@ IOBufferMemoryDescriptor::initWithPhysicalMask(
 	// set memory entry cache mode, pageable, purgeable
 	iomdOptions |= ((options & kIOMapCacheMask) >> kIOMapCacheShift) << kIOMemoryBufferCacheShift;
 	if (options & kIOMemoryPageable) {
+		if (_internalFlags & kInternalFlagGuardPages) {
+			printf("IOBMD: Unsupported use of guard pages with pageable memory.\n");
+			return false;
+		}
 		iomdOptions |= kIOMemoryBufferPageable;
 		if (options & kIOMemoryPurgeable) {
 			iomdOptions |= kIOMemoryBufferPurgeable;
 		}
 	} else {
-		vmmap = kernel_map;
-
 		// Buffer shouldn't auto prepare they should be prepared explicitly
 		// But it never was enforced so what are you going to do?
 		iomdOptions |= kIOMemoryAutoPrepare;
@@ -301,6 +312,10 @@ IOBufferMemoryDescriptor::initWithPhysicalMask(
 
 		mappedOrShared = (mapped || (0 != (kIOMemorySharingTypeMask & options)));
 		if (contig || highestMask || (alignment > page_size)) {
+			if (_internalFlags & kInternalFlagGuardPages) {
+				printf("IOBMD: Unsupported use of guard pages with physical mask or contiguous memory.\n");
+				return false;
+			}
 			_internalFlags |= kInternalFlagPhysical;
 			if (highestMask) {
 				_internalFlags |= kInternalFlagPageSized;
@@ -308,12 +323,33 @@ IOBufferMemoryDescriptor::initWithPhysicalMask(
 					return false;
 				}
 			}
-			_buffer = (void *) IOKernelAllocateWithPhysicalRestrict(
-				capacity, highestMask, alignment, contig);
+			_buffer = (void *) IOKernelAllocateWithPhysicalRestrict(kheap,
+			    capacity, highestMask, alignment, contig);
+		} else if (_internalFlags & kInternalFlagGuardPages) {
+			vm_offset_t address = 0;
+			kern_return_t kr;
+			uintptr_t alignMask;
+
+			if (((uint32_t) alignment) != alignment) {
+				return NULL;
+			}
+
+			alignMask = (1UL << log2up((uint32_t) alignment)) - 1;
+			kr = kernel_memory_allocate(kheap->kh_fallback_map, &address,
+			    capacity + page_size * 2, alignMask, (kma_flags_t)(KMA_GUARD_FIRST | KMA_GUARD_LAST), IOMemoryTag(kernel_map));
+			if (kr != KERN_SUCCESS || address == 0) {
+				return false;
+			}
+#if IOALLOCDEBUG
+			OSAddAtomicLong(capacity, &debug_iomalloc_size);
+#endif
+			IOStatisticsAlloc(kIOStatisticsMallocAligned, capacity);
+			_buffer = (void *)(address + page_size);
 		} else if (mappedOrShared
 		    && (capacity + alignment) <= (page_size - gIOPageAllocChunkBytes)) {
 			_internalFlags |= kInternalFlagPageAllocated;
-			_buffer         = (void *) iopa_alloc(&gIOBMDPageAllocator, &IOBMDPageProc, capacity, alignment);
+			_buffer         = (void *) iopa_alloc(&gIOBMDPageAllocator,
+			    &IOBMDPageProc, kheap, capacity, alignment);
 			if (_buffer) {
 				IOStatisticsAlloc(kIOStatisticsMallocAligned, capacity);
 #if IOALLOCDEBUG
@@ -321,9 +357,9 @@ IOBufferMemoryDescriptor::initWithPhysicalMask(
 #endif
 			}
 		} else if (alignment > 1) {
-			_buffer = IOMallocAligned(capacity, alignment);
+			_buffer = IOMallocAligned_internal(kheap, capacity, alignment);
 		} else {
-			_buffer = IOMalloc(capacity);
+			_buffer = IOMalloc_internal(kheap, capacity);
 		}
 		if (!_buffer) {
 			return false;
@@ -385,7 +421,7 @@ IOBufferMemoryDescriptor::initWithPhysicalMask(
 
 	if (mapTask) {
 		if (!reserved) {
-			reserved = IONew( ExpansionData, 1 );
+			reserved = IOMallocType(ExpansionData);
 			if (!reserved) {
 				return false;
 			}
@@ -409,6 +445,37 @@ IOBufferMemoryDescriptor::initWithPhysicalMask(
 	setLength(_capacity);
 
 	return true;
+}
+
+bool
+IOBufferMemoryDescriptor::initControlWithPhysicalMask(
+	task_t            inTask,
+	IOOptionBits      options,
+	mach_vm_size_t    capacity,
+	mach_vm_address_t alignment,
+	mach_vm_address_t physicalMask)
+{
+	_internalFlags = kInternalFlagHasPointers;
+	return initWithPhysicalMask(inTask, options, capacity, alignment,
+	           physicalMask);
+}
+
+bool
+IOBufferMemoryDescriptor::initWithGuardPages(
+	task_t            inTask,
+	IOOptionBits      options,
+	mach_vm_size_t    capacity)
+{
+	mach_vm_size_t roundedCapacity;
+
+	_internalFlags = kInternalFlagGuardPages;
+
+	if (round_page_overflow(capacity, &roundedCapacity)) {
+		return false;
+	}
+
+	return initWithPhysicalMask(inTask, options, roundedCapacity, page_size,
+	           (mach_vm_address_t)0);
 }
 
 OSSharedPtr<IOBufferMemoryDescriptor>
@@ -457,6 +524,20 @@ IOBufferMemoryDescriptor::inTaskWithPhysicalMask(
 	OSSharedPtr<IOBufferMemoryDescriptor> me = OSMakeShared<IOBufferMemoryDescriptor>();
 
 	if (me && !me->initWithPhysicalMask(inTask, options, capacity, 1, physicalMask)) {
+		me.reset();
+	}
+	return me;
+}
+
+OSSharedPtr<IOBufferMemoryDescriptor>
+IOBufferMemoryDescriptor::inTaskWithGuardPages(
+	task_t            inTask,
+	IOOptionBits      options,
+	mach_vm_size_t    capacity)
+{
+	OSSharedPtr<IOBufferMemoryDescriptor> me = OSMakeShared<IOBufferMemoryDescriptor>();
+
+	if (me && !me->initWithGuardPages(inTask, options, capacity)) {
 		me.reset();
 	}
 	return me;
@@ -585,6 +666,14 @@ IOBufferMemoryDescriptor::free()
 	IOMemoryMap *    map       = NULL;
 	IOAddressRange * range     = _ranges.v64;
 	vm_offset_t      alignment = _alignment;
+	kalloc_heap_t    kheap     = KHEAP_DATA_BUFFERS;
+
+	/*
+	 * Temporarily use default heap on intel due to rdar://74982985
+	 */
+#if __x86_64__
+	kheap = KHEAP_DEFAULT;
+#endif
 
 	if (alignment >= page_size) {
 		size = round_page(size);
@@ -592,7 +681,7 @@ IOBufferMemoryDescriptor::free()
 
 	if (reserved) {
 		map = reserved->map;
-		IODelete( reserved, ExpansionData, 1 );
+		IOFreeType(reserved, ExpansionData);
 		if (map) {
 			map->release();
 		}
@@ -601,6 +690,10 @@ IOBufferMemoryDescriptor::free()
 	if ((options & kIOMemoryPageable)
 	    || (kInternalFlagPageSized & internalFlags)) {
 		size = round_page(size);
+	}
+
+	if (internalFlags & kInternalFlagHasPointers) {
+		kheap = KHEAP_DEFAULT;
 	}
 
 #if IOTRACKING
@@ -620,25 +713,32 @@ IOBufferMemoryDescriptor::free()
 #endif
 	} else if (buffer) {
 		if (kInternalFlagPhysical & internalFlags) {
-			IOKernelFreePhysical((mach_vm_address_t) buffer, size);
+			IOKernelFreePhysical(kheap, (mach_vm_address_t) buffer, size);
 		} else if (kInternalFlagPageAllocated & internalFlags) {
 			uintptr_t page;
 			page = iopa_free(&gIOBMDPageAllocator, (uintptr_t) buffer, size);
 			if (page) {
-				kmem_free(kernel_map, page, page_size);
+				kmem_free(kheap->kh_fallback_map, page, page_size);
 			}
 #if IOALLOCDEBUG
 			OSAddAtomicLong(-size, &debug_iomalloc_size);
 #endif
 			IOStatisticsAlloc(kIOStatisticsFreeAligned, size);
+		} else if (kInternalFlagGuardPages & internalFlags) {
+			vm_offset_t allocation = (vm_offset_t)buffer - page_size;
+			kmem_free(kheap->kh_fallback_map, allocation, size + page_size * 2);
+#if IOALLOCDEBUG
+			OSAddAtomicLong(-size, &debug_iomalloc_size);
+#endif
+			IOStatisticsAlloc(kIOStatisticsFreeAligned, size);
 		} else if (alignment > 1) {
-			IOFreeAligned(buffer, size);
+			IOFreeAligned_internal(kheap, buffer, size);
 		} else {
-			IOFree(buffer, size);
+			IOFree_internal(kheap, buffer, size);
 		}
 	}
 	if (range && (kIOMemoryAsReference & flags)) {
-		IODelete(range, IOAddressRange, 1);
+		IOFreeType(range, IOAddressRange);
 	}
 }
 

@@ -155,11 +155,11 @@ handle_ux_exception(thread_t                    thread,
 			if ((p->p_sigignore & mask) ||
 			    (ut->uu_sigwait & mask) ||
 			    (ut->uu_sigmask & mask) ||
-			    (ps->ps_sigact[SIGSEGV] == SIG_IGN) ||
+			    (SIGACTION(p, SIGSEGV) == SIG_IGN) ||
 			    (!(ps->ps_sigonstack & mask))) {
 				p->p_sigignore &= ~mask;
 				p->p_sigcatch &= ~mask;
-				ps->ps_sigact[SIGSEGV] = SIG_DFL;
+				proc_set_sigact(p, SIGSEGV, SIG_DFL);
 				ut->uu_sigwait &= ~mask;
 				ut->uu_sigmask &= ~mask;
 			}

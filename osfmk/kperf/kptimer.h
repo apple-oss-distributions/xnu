@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2018 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2011-2021 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -137,6 +137,16 @@ void kptimer_start(void);
  * Stop all active timers, waiting for them to stop.  The ktrace lock must be held.
  */
 void kptimer_stop(void);
+
+/*
+ * Cancel outstanding kperf timer for this CPU.
+ */
+void kptimer_stop_curcpu(void);
+
+/*
+ * Reconfigure this CPU's kptimer expiration when it's brought online
+ */
+void kptimer_curcpu_up(void);
 
 /*
  * To indicate the next timer has expired.

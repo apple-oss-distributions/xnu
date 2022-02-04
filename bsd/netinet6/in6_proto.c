@@ -295,7 +295,6 @@ struct ip6protosw inet6sw[] = {
 		.pr_input =             encap6_input,
 		.pr_output =            rip6_pr_output,
 		.pr_ctloutput =         rip6_ctloutput,
-		.pr_init =              encap6_init,
 		.pr_usrreqs =           &rip6_usrreqs,
 		.pr_unlock =            rip_unlock,
 		.pr_update_last_owner = inp_update_last_owner,
@@ -309,7 +308,6 @@ struct ip6protosw inet6sw[] = {
 		.pr_input =             encap6_input,
 		.pr_output =            rip6_pr_output,
 		.pr_ctloutput =         rip6_ctloutput,
-		.pr_init =              encap6_init,
 		.pr_usrreqs =           &rip6_usrreqs,
 		.pr_unlock =            rip_unlock,
 		.pr_update_last_owner = inp_update_last_owner,
@@ -417,7 +415,7 @@ rip6_pr_output(struct mbuf *m, struct socket *so, struct sockaddr_in6 *sin6,
     struct mbuf *m1)
 {
 #pragma unused(m, so, sin6, m1)
-	panic("%s\n", __func__);
+	panic("%s", __func__);
 	/* NOTREACHED */
 	return 0;
 }
@@ -485,9 +483,11 @@ u_int32_t       rip6_recvspace = RIPV6RCVQ;
 /* ICMPV6 parameters */
 int     icmp6_rediraccept = 1;          /* accept and process redirects */
 int     icmp6_redirtimeout = 10 * 60;   /* 10 minutes */
-int     icmp6errppslim = 500;           /* 500 packets per second */
+uint32_t     icmp6errppslim = 500;           /* 500 packets per second */
+uint32_t     icmp6errppslim_random_incr = 500; /* We further randomize icmp6errppslim
+                                                *  with this during icmpv6 initialization*/
 int     icmp6rappslim = 10;             /* 10 packets per second */
-int     icmp6_nodeinfo = 3;             /* enable/disable NI response */
+int     icmp6_nodeinfo = 0;             /* enable/disable NI response */
 
 /* UDP on IP6 parameters */
 int     udp6_sendspace = 9216;          /* really max datagram size */
@@ -643,6 +643,8 @@ SYSCTL_INT(_net_inet6_ip6, IPV6CTL_RR_PRUNE,
     rr_prune, CTLFLAG_RW | CTLFLAG_LOCKED, &ip6_rr_prune, 0, "");
 SYSCTL_INT(_net_inet6_ip6, IPV6CTL_USETEMPADDR,
     use_tempaddr, CTLFLAG_RW | CTLFLAG_LOCKED, &ip6_use_tempaddr, 0, "");
+SYSCTL_INT(_net_inet6_ip6, IPV6CTL_ULA_USETEMPADDR,
+    ula_use_tempaddr, CTLFLAG_RW | CTLFLAG_LOCKED, &ip6_ula_use_tempaddr, 0, "");
 SYSCTL_OID(_net_inet6_ip6, IPV6CTL_TEMPPLTIME, temppltime,
     CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED, &ip6_temp_preferred_lifetime, 0,
     sysctl_ip6_temppltime, "I", "");
@@ -749,6 +751,8 @@ SYSCTL_INT(_net_inet6_icmp6, ICMPV6CTL_NODEINFO,
     nodeinfo, CTLFLAG_RW | CTLFLAG_LOCKED, &icmp6_nodeinfo, 0, "");
 SYSCTL_INT(_net_inet6_icmp6, ICMPV6CTL_ERRPPSLIMIT,
     errppslimit, CTLFLAG_RW | CTLFLAG_LOCKED, &icmp6errppslim, 0, "");
+SYSCTL_INT(_net_inet6_icmp6, ICMPV6CTL_ERRPPSLIMIT_RANDOM_INCR,
+    errppslimit_random_incr, CTLFLAG_RW | CTLFLAG_LOCKED, &icmp6errppslim_random_incr, 0, "");
 SYSCTL_INT(_net_inet6_icmp6, OID_AUTO,
     rappslimit, CTLFLAG_RW | CTLFLAG_LOCKED, &icmp6rappslim, 0, "");
 SYSCTL_INT(_net_inet6_icmp6, ICMPV6CTL_ND6_DEBUG,

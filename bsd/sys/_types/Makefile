@@ -14,6 +14,7 @@ EXPINC_SUBDIRS =
 #	  $(DSTROOT)/System/Library/Frameworks/System.framework/Headers
 #	  $(DSTROOT)/System/Library/Frameworks/System.framework/PrivateHeaders
 #	  $(DSTROOT)/usr/include/
+# These are covered by ../darwin_posix_sys_types.modulemap.
 DATAFILES = \
 	_blkcnt_t.h \
 	_blksize_t.h \
@@ -170,7 +171,7 @@ EXPORT_MI_GEN_LIST =
 EXPORT_MI_DIR = sys/_types
 
 # /System/Library/Frameworks/System.framework/PrivateHeaders
-INSTALL_MI_LCL_LIST = ${PRIVATE_DATAFILES}
+INSTALL_SF_MI_LCL_LIST = ${DATAFILES} ${PRIVATE_DATAFILES}
 
 # /System/Library/Frameworks/Kernel.framework/PrivateHeaders
 INSTALL_KF_MI_LCL_LIST =  ${KERNELFILES} ${PRIVATE_KERNELFILES}

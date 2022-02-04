@@ -34,6 +34,7 @@
 #define tlbi_asid(x) (((uintptr_t)(x) & TLBI_ASID_MASK) << TLBI_ASID_SHIFT)
 
 extern void sync_tlb_flush(void);
+extern void sync_tlb_flush_local(void);
 extern void flush_mmu_tlb_async(void);
 extern void flush_mmu_tlb(void);
 extern void flush_core_tlb_async(void);

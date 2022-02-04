@@ -204,7 +204,7 @@ sendsig(struct proc *p, user_addr_t ua_catcher, int sig, int mask, __unused uint
 	}
 
 	oonstack = ut->uu_sigstk.ss_flags & SA_ONSTACK;
-	trampact = ps->ps_trampact[sig];
+	trampact = SIGTRAMP(p, sig);
 	sigonstack = (ps->ps_sigonstack & sigmask(sig));
 
 	/*
@@ -851,7 +851,7 @@ sigreturn(struct proc *p, struct sigreturn_args *uap, __unused int *retval)
 		if ((user64_addr_t)uap->token != token) {
 #if DEVELOPMENT || DEBUG
 			printf("process %s[%d] sigreturn token mismatch: received 0x%llx expected 0x%llx\n",
-			    p->p_comm, p->p_pid, (user64_addr_t)uap->token, token);
+			    p->p_comm, proc_getpid(p), (user64_addr_t)uap->token, token);
 #endif /* DEVELOPMENT || DEBUG */
 			if (sigreturn_validation != PS_SIGRETURN_VALIDATION_DISABLED) {
 				rval = EINVAL;
@@ -885,7 +885,7 @@ sigreturn(struct proc *p, struct sigreturn_args *uap, __unused int *retval)
 		if ((user32_addr_t)uap->token != token) {
 #if DEVELOPMENT || DEBUG
 			printf("process %s[%d] sigreturn token mismatch: received 0x%x expected 0x%x\n",
-			    p->p_comm, p->p_pid, (user32_addr_t)uap->token, token);
+			    p->p_comm, proc_getpid(p), (user32_addr_t)uap->token, token);
 #endif /* DEVELOPMENT || DEBUG */
 			if (sigreturn_validation != PS_SIGRETURN_VALIDATION_DISABLED) {
 				rval = EINVAL;
@@ -915,7 +915,7 @@ sigreturn(struct proc *p, struct sigreturn_args *uap, __unused int *retval)
 		rval = EINVAL;
 #if DEVELOPMENT || DEBUG
 		printf("process %s[%d] sigreturn thread_setstatus error %d\n",
-		    p->p_comm, p->p_pid, rval);
+		    p->p_comm, proc_getpid(p), rval);
 #endif /* DEVELOPMENT || DEBUG */
 		goto error_ret;
 	}
@@ -926,7 +926,7 @@ sigreturn(struct proc *p, struct sigreturn_args *uap, __unused int *retval)
 		rval = EINVAL;
 #if DEVELOPMENT || DEBUG
 		printf("process %s[%d] sigreturn thread_setstatus error %d\n",
-		    p->p_comm, p->p_pid, rval);
+		    p->p_comm, proc_getpid(p), rval);
 #endif /* DEVELOPMENT || DEBUG */
 		goto error_ret;
 	}

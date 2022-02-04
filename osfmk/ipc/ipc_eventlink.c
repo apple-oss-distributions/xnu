@@ -34,7 +34,6 @@
 
 #include <kern/misc_protos.h>
 #include <kern/spl.h>
-#include <kern/ipc_sync.h>
 #include <kern/ipc_tt.h>
 #include <kern/thread.h>
 #include <kern/clock.h>
@@ -51,7 +50,11 @@
 #include <libkern/OSAtomic.h>
 
 static ZONE_DECLARE(ipc_eventlink_zone, "ipc_eventlink",
-    sizeof(struct ipc_eventlink_base), ZC_NONE);
+    sizeof(struct ipc_eventlink_base),
+#if CONFIG_WAITQ_IRQSAFE_ALLOW_INVALID
+    ZC_NOGZALLOC | ZC_KASAN_NOQUARANTINE | ZC_SEQUESTER |
+#endif
+    ZC_ZFREE_CLEARMEM);
 
 os_refgrp_decl(static, ipc_eventlink_refgrp, "eventlink", NULL);
 
@@ -70,6 +73,11 @@ static LCK_SPIN_DECLARE(global_ipc_eventlink_lock, &ipc_eventlink_dev_lock_grp);
 #endif /* DEVELOPMENT || DEBUG */
 
 /* Forward declarations */
+static void
+ipc_eventlink_no_senders(
+	ipc_port_t          port,
+	mach_port_mscount_t mscount);
+
 static struct ipc_eventlink_base *
 ipc_eventlink_alloc(void);
 
@@ -120,6 +128,9 @@ port_name_to_eventlink(
 	mach_port_name_t              name,
 	struct ipc_eventlink          **ipc_eventlink_ptr);
 
+IPC_KOBJECT_DEFINE(IKOT_EVENTLINK,
+    .iko_op_no_senders = ipc_eventlink_no_senders);
+
 /*
  * Name: ipc_eventlink_alloc
  *
@@ -162,18 +173,11 @@ static void
 ipc_eventlink_initialize(
 	struct ipc_eventlink_base *ipc_eventlink_base)
 {
-	int i;
-	kern_return_t kr;
-
-	kr = waitq_init(&ipc_eventlink_base->elb_waitq, SYNC_POLICY_DISABLE_IRQ);
-	assert(kr == KERN_SUCCESS);
-
 	/* Initialize the count to 2, refs for each ipc eventlink port */
 	os_ref_init_count(&ipc_eventlink_base->elb_ref_count, &ipc_eventlink_refgrp, 2);
-	ipc_eventlink_base->elb_active = TRUE;
 	ipc_eventlink_base->elb_type = IPC_EVENTLINK_TYPE_NO_COPYIN;
 
-	for (i = 0; i < 2; i++) {
+	for (int i = 0; i < 2; i++) {
 		struct ipc_eventlink *ipc_eventlink = &(ipc_eventlink_base->elb_eventlink[i]);
 
 		ipc_eventlink->el_port = ipc_kobject_alloc_port((ipc_kobject_t)ipc_eventlink,
@@ -184,6 +188,9 @@ ipc_eventlink_initialize(
 		ipc_eventlink->el_wait_counter = UINT64_MAX;
 		ipc_eventlink->el_base = ipc_eventlink_base;
 	}
+
+	/* Must be done last */
+	waitq_init(&ipc_eventlink_base->elb_waitq, SYNC_POLICY_DISABLE_IRQ);
 }
 
 /*
@@ -259,7 +266,6 @@ ipc_eventlink_destroy_internal(
 	struct ipc_eventlink *ipc_eventlink)
 {
 	spl_t s;
-	int i;
 	struct ipc_eventlink_base *ipc_eventlink_base;
 	thread_t associated_thread[2] = {};
 	ipc_port_t ipc_eventlink_port = IPC_PORT_NULL;
@@ -281,7 +287,7 @@ ipc_eventlink_destroy_internal(
 		return KERN_TERMINATED;
 	}
 
-	for (i = 0; i < 2; i++) {
+	for (int i = 0; i < 2; i++) {
 		struct ipc_eventlink *temp_ipc_eventlink = &ipc_eventlink_base->elb_eventlink[i];
 
 		/* Wakeup threads sleeping on eventlink */
@@ -312,24 +318,20 @@ ipc_eventlink_destroy_internal(
 	}
 
 	/* Mark the eventlink as inactive */
-	ipc_eventlink_base->elb_active = FALSE;
+	waitq_invalidate(&ipc_eventlink_base->elb_waitq);
 
 	ipc_eventlink_unlock(ipc_eventlink);
 	splx(s);
 
 	/* Destroy the local eventlink port */
-	ipc_port_dealloc_kernel(ipc_eventlink_port);
+	ipc_kobject_dealloc_port(ipc_eventlink_port, 0, IKOT_EVENTLINK);
 	/* Drops port reference */
 
 	/* Clear the remote eventlink port without destroying it */
-	ip_lock(ipc_eventlink_port_remote);
-	if (ip_active(ipc_eventlink_port_remote)) {
-		ipc_kobject_set_atomically(ipc_eventlink_port_remote, IKO_NULL, IKOT_EVENTLINK);
-	}
-	ip_unlock(ipc_eventlink_port_remote);
+	(void)ipc_kobject_disable(ipc_eventlink_port_remote, IKOT_EVENTLINK);
 	ip_release(ipc_eventlink_port_remote);
 
-	for (i = 0; i < 2; i++) {
+	for (int i = 0; i < 2; i++) {
 		if (associated_thread[i] != THREAD_NULL &&
 		    associated_thread[i] != THREAD_ASSOCIATE_WILD) {
 			thread_deallocate(associated_thread[i]);
@@ -840,7 +842,7 @@ ipc_eventlink_convert_wait_result(int wait_result)
 		return KERN_TERMINATED;
 
 	default:
-		panic("ipc_eventlink_wait_block\n");
+		panic("ipc_eventlink_wait_block");
 		return KERN_FAILURE;
 	}
 }
@@ -944,6 +946,8 @@ ipc_eventlink_deallocate(
 		return;
 	}
 
+	waitq_deinit(&ipc_eventlink_base->elb_waitq);
+
 	assert(!ipc_eventlink_active(ipc_eventlink));
 
 #if DEVELOPMENT || DEBUG
@@ -976,9 +980,9 @@ convert_port_to_eventlink(
 	struct ipc_eventlink *ipc_eventlink = IPC_EVENTLINK_NULL;
 
 	if (IP_VALID(port)) {
-		ip_lock(port);
+		ip_mq_lock(port);
 		convert_port_to_eventlink_locked(port, &ipc_eventlink);
-		ip_unlock(port);
+		ip_mq_unlock(port);
 	}
 
 	return ipc_eventlink;
@@ -1007,10 +1011,8 @@ convert_port_to_eventlink_locked(
 	kern_return_t kr = KERN_INVALID_CAPABILITY;
 	struct ipc_eventlink *ipc_eventlink = IPC_EVENTLINK_NULL;
 
-	if (ip_active(port) &&
-	    ip_kotype(port) == IKOT_EVENTLINK) {
-		ipc_eventlink = (struct ipc_eventlink *)port->ip_kobject;
-
+	if (ip_active(port) && ip_kotype(port) == IKOT_EVENTLINK) {
+		ipc_eventlink = ipc_kobject_get_raw(port, IKOT_EVENTLINK);
 		if (ipc_eventlink) {
 			ipc_eventlink_reference(ipc_eventlink);
 			kr = KERN_SUCCESS;
@@ -1059,29 +1061,23 @@ port_name_to_eventlink(
 	assert(IP_VALID(kern_port));
 
 	kr = convert_port_to_eventlink_locked(kern_port, ipc_eventlink_ptr);
-	ip_unlock(kern_port);
+	ip_mq_unlock(kern_port);
 
 	return kr;
 }
 
 /*
- * Name: ipc_eventlink_notify
+ * Name: ipc_eventlink_no_senders
  *
  * Description: Destroy an ipc_eventlink, wakeup all threads.
- *
- * Args:
- *   msg: msg contaning eventlink port
  *
  * Returns:
  *   None.
  */
-void
-ipc_eventlink_notify(
-	mach_msg_header_t *msg)
+static void
+ipc_eventlink_no_senders(ipc_port_t port, mach_port_mscount_t mscount)
 {
 	kern_return_t kr;
-	mach_no_senders_notification_t *notification = (void *)msg;
-	ipc_port_t port = notification->not_header.msgh_remote_port;
 	struct ipc_eventlink *ipc_eventlink;
 
 	if (!ip_active(port)) {
@@ -1089,21 +1085,21 @@ ipc_eventlink_notify(
 	}
 
 	/* Get ipc_eventlink reference */
-	ip_lock(port);
+	ip_mq_lock(port);
 
 	/* Make sure port is still active */
 	if (!ip_active(port)) {
-		ip_unlock(port);
+		ip_mq_unlock(port);
 		return;
 	}
 
 	convert_port_to_eventlink_locked(port, &ipc_eventlink);
-	ip_unlock(port);
+	ip_mq_unlock(port);
 
 	kr = ipc_eventlink_destroy_internal(ipc_eventlink);
 	if (kr == KERN_TERMINATED) {
 		/* eventlink is already inactive, destroy the port */
-		ipc_port_dealloc_kernel(port);
+		ipc_kobject_dealloc_port(port, mscount, IKOT_EVENTLINK);
 	}
 
 	/* Drop the reference returned by convert_port_to_eventlink_locked */

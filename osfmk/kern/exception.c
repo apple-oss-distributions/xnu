@@ -76,7 +76,6 @@
 #include <ipc/ipc_pset.h>
 #include <ipc/ipc_machdep.h>
 
-#include <kern/counters.h>
 #include <kern/ipc_tt.h>
 #include <kern/task.h>
 #include <kern/thread.h>
@@ -86,6 +85,7 @@
 #include <kern/host.h>
 #include <kern/misc_protos.h>
 #include <kern/ux_handler.h>
+#include <kern/task_ident.h>
 
 #include <vm/vm_map.h>
 
@@ -94,14 +94,16 @@
 
 #include <pexpert/pexpert.h>
 
+#include <os/log.h>
+
+#include <libkern/coreanalytics/coreanalytics.h>
+
 bool panic_on_exception_triage = false;
 
 unsigned long c_thr_exc_raise = 0;
+unsigned long c_thr_exc_raise_identity_token = 0;
 unsigned long c_thr_exc_raise_state = 0;
 unsigned long c_thr_exc_raise_state_id = 0;
-unsigned long c_tsk_exc_raise = 0;
-unsigned long c_tsk_exc_raise_state = 0;
-unsigned long c_tsk_exc_raise_state_id = 0;
 
 /* forward declarations */
 kern_return_t exception_deliver(
@@ -131,9 +133,17 @@ extern int exit_with_pac_exception(
 	exception_type_t         exception,
 	mach_exception_code_t    code,
 	mach_exception_subcode_t subcode);
-
-extern bool proc_is_traced(void *p);
 #endif /* __has_feature(ptrauth_calls) */
+
+#ifdef MACH_BSD
+extern bool proc_is_traced(void *p);
+extern int      proc_selfpid(void);
+extern char     *proc_name_address(struct proc *p);
+#endif /* MACH_BSD */
+
+#if (DEVELOPMENT || DEBUG)
+TUNABLE_WRITEABLE(unsigned int, exception_log_max_pid, "exception_log_max_pid", 0);
+#endif /* (DEVELOPMENT || DEBUG) */
 
 /*
  * Routine: exception_init
@@ -150,6 +160,12 @@ exception_init(void)
 	if (PE_parse_boot_argn("-panic_on_exception_triage", &tmp, sizeof(tmp))) {
 		panic_on_exception_triage = true;
 	}
+
+#if (DEVELOPMENT || DEBUG)
+	if (exception_log_max_pid) {
+		printf("Logging all exceptions where pid < exception_log_max_pid (%d)\n", exception_log_max_pid);
+	}
+#endif /* (DEVELOPMENT || DEBUG) */
 }
 
 /*
@@ -180,7 +196,10 @@ exception_deliver(
 	int                     flavor;
 	kern_return_t           kr;
 	task_t task;
-	ipc_port_t thread_port = IPC_PORT_NULL, task_port = IPC_PORT_NULL;
+	task_id_token_t task_token;
+	ipc_port_t thread_port = IPC_PORT_NULL,
+	    task_port = IPC_PORT_NULL,
+	    task_token_port = IPC_PORT_NULL;
 
 	/*
 	 *  Save work if we are terminating.
@@ -218,15 +237,15 @@ exception_deliver(
 		lck_mtx_unlock(mutex);
 		return KERN_FAILURE;
 	}
-	ip_lock(exc_port);
+	ip_mq_lock(exc_port);
 	if (!ip_active(exc_port)) {
-		ip_unlock(exc_port);
+		ip_mq_unlock(exc_port);
 		lck_mtx_unlock(mutex);
 		return KERN_FAILURE;
 	}
 	ip_reference(exc_port);
 	exc_port->ip_srights++;
-	ip_unlock(exc_port);
+	ip_mq_unlock(exc_port);
 
 	flavor = excp->flavor;
 	behavior = excp->behavior;
@@ -258,13 +277,21 @@ exception_deliver(
 	}
 #endif
 
-	if (behavior != EXCEPTION_STATE) {
+	if ((behavior != EXCEPTION_STATE) && (behavior != EXCEPTION_IDENTITY_PROTECTED)) {
 		task_reference(task);
 		task_port = convert_task_to_port(task);
 		/* task ref consumed */
 		thread_reference(thread);
 		thread_port = convert_thread_to_port(thread);
 		/* thread ref consumed */
+	}
+
+	if (behavior == EXCEPTION_IDENTITY_PROTECTED) {
+		kr = task_create_identity_token(task, &task_token);
+		/* task_token now represents a task, or corpse */
+		assert(kr == KERN_SUCCESS);
+		task_token_port = convert_task_id_token_to_port(task_token);
+		/* task token ref consumed */
 	}
 
 	switch (behavior) {
@@ -307,7 +334,7 @@ exception_deliver(
 		goto out_release_right;
 	}
 
-	case EXCEPTION_DEFAULT:
+	case EXCEPTION_DEFAULT: {
 		c_thr_exc_raise++;
 		if (code64) {
 			kr = mach_exception_raise(exc_port,
@@ -326,6 +353,23 @@ exception_deliver(
 		}
 
 		goto out_release_right;
+	}
+
+	case EXCEPTION_IDENTITY_PROTECTED: {
+		c_thr_exc_raise_identity_token++;
+		if (code64) {
+			kr = mach_exception_raise_identity_protected(exc_port,
+			    thread->thread_id,
+			    task_token_port,
+			    exception,
+			    code,
+			    codeCnt);
+		} else {
+			panic("mach_exception_raise_identity_protected() must be code64");
+		}
+
+		goto out_release_right;
+	}
 
 	case EXCEPTION_STATE_IDENTITY: {
 		mach_msg_type_number_t state_cnt;
@@ -392,6 +436,10 @@ out_release_right:
 		ipc_port_release_send(exc_port);
 	}
 
+	if (task_token_port) {
+		ipc_port_release_send(task_token_port);
+	}
+
 	return kr;
 }
 
@@ -424,9 +472,7 @@ check_exc_receiver_dependency(
 	task_t task = current_task();
 	lck_mtx_lock(mutex);
 	ipc_port_t xport = excp[exception].port;
-	if (IP_VALID(xport)
-	    && ip_active(xport)
-	    && task->itk_space == xport->ip_receiver) {
+	if (IP_VALID(xport) && ip_in_space_noauth(xport, task->itk_space)) {
 		retval = KERN_FAILURE;
 	}
 	lck_mtx_unlock(mutex);
@@ -518,6 +564,57 @@ out:
 	return kr;
 }
 
+#if __has_feature(ptrauth_calls)
+
+CA_EVENT(pac_exception_event,
+    CA_INT, exception,
+    CA_INT, exception_code_0,
+    CA_INT, exception_code_1,
+    CA_STATIC_STRING(CA_PROCNAME_LEN), proc_name);
+
+static void
+pac_exception_triage(
+	exception_type_t        exception,
+	mach_exception_data_t   code)
+{
+	boolean_t traced_flag = FALSE;
+	task_t task = current_thread()->task;
+	void *proc = task->bsd_info;
+	char *proc_name = (char *) "unknown";
+	int pid = 0;
+
+#ifdef MACH_BSD
+	pid = proc_selfpid();
+	if (proc) {
+		traced_flag = proc_is_traced(proc);
+		/* Should only be called on current proc */
+		proc_name = proc_name_address(proc);
+
+		/*
+		 * For a ptrauth violation, check if process isn't being ptraced and
+		 * the task has the TF_PAC_EXC_FATAL flag set. If both conditions are true,
+		 * terminate the task via exit_with_reason
+		 */
+		if (!traced_flag) {
+			ca_event_t ca_event = CA_EVENT_ALLOCATE(pac_exception_event);
+			CA_EVENT_TYPE(pac_exception_event) * pexc_event = ca_event->data;
+			pexc_event->exception = exception;
+			pexc_event->exception_code_0 = code[0];
+			pexc_event->exception_code_1 = code[1];
+			strlcpy(pexc_event->proc_name, proc_name, CA_PROCNAME_LEN);
+			CA_EVENT_SEND(ca_event);
+			if (task_is_pac_exception_fatal(task)) {
+				os_log_error(OS_LOG_DEFAULT, "%s: process %s[%d] hit a pac violation\n", __func__, proc_name, pid);
+				exit_with_pac_exception(proc, exception, code[0], code[1]);
+				thread_exception_return();
+				/* NOT_REACHABLE */
+			}
+		}
+	}
+#endif /* MACH_BSD */
+}
+#endif /* __has_feature(ptrauth_calls) */
+
 /*
  *	Routine:	exception_triage
  *	Purpose:
@@ -542,30 +639,23 @@ exception_triage(
 	if (VM_MAP_PAGE_SIZE(thread->task->map) < PAGE_SIZE) {
 		DEBUG4K_EXC("thread %p task %p map %p exception %d codes 0x%llx 0x%llx \n", thread, thread->task, thread->task->map, exception, code[0], code[1]);
 		if (debug4k_panic_on_exception) {
-			panic("DEBUG4K %s:%d thread %p task %p map %p exception %d codes 0x%llx 0x%llx \n", __FUNCTION__, __LINE__, thread, thread->task, thread->task->map, exception, code[0], code[1]);
+			panic("DEBUG4K %s:%d thread %p task %p map %p exception %d codes 0x%llx 0x%llx", __FUNCTION__, __LINE__, thread, thread->task, thread->task->map, exception, code[0], code[1]);
 		}
 	}
+
+#if (DEVELOPMENT || DEBUG)
+#ifdef MACH_BSD
+	if (proc_pid(thread->task->bsd_info) <= exception_log_max_pid) {
+		printf("exception_log_max_pid: pid %d (%s): sending exception %d (0x%llx 0x%llx)\n", proc_pid(thread->task->bsd_info), proc_name_address(thread->task->bsd_info), exception, code[0], code[1]);
+	}
+#endif /* MACH_BSD */
+#endif /* DEVELOPMENT || DEBUG */
+
 #if __has_feature(ptrauth_calls)
-	/*
-	 * If it is a ptrauth violation, then check if the task has the TF_PAC_EXC_FATAL
-	 * flag set and isn't being ptraced. If so, terminate the task via exit_with_reason
-	 */
 	if (exception & EXC_PTRAUTH_BIT) {
 		exception &= ~EXC_PTRAUTH_BIT;
-
-		boolean_t traced_flag = FALSE;
-		task_t task = thread->task;
-		void *proc = task->bsd_info;
-
-		if (task->bsd_info) {
-			traced_flag = proc_is_traced(proc);
-		}
-
-		if (task_is_pac_exception_fatal(current_task()) && !traced_flag) {
-			exit_with_pac_exception(proc, exception, code[0], code[1]);
-			thread_exception_return();
-			/* NOT_REACHABLE */
-		}
+		assert(codeCnt == 2);
+		pac_exception_triage(exception, code);
 	}
 #endif /* __has_feature(ptrauth_calls) */
 	return exception_triage_thread(exception, code, codeCnt, thread);
@@ -636,15 +726,18 @@ sys_perf_notify(thread_t thread, int pid)
 	code[0] = 0xFF000001;           /* Set terminate code */
 	code[1] = pid;          /* Pass out the pid */
 
-	struct task *task = thread->task;
+	lck_mtx_lock(&hostp->lock);
 	xport = hostp->exc_actions[EXC_RPC_ALERT].port;
 
 	/* Make sure we're not catching our own exception */
 	if (!IP_VALID(xport) ||
 	    !ip_active(xport) ||
-	    task->itk_space == xport->data.receiver) {
+	    ip_in_space_noauth(xport, thread->task->itk_space)) {
+		lck_mtx_unlock(&hostp->lock);
 		return KERN_FAILURE;
 	}
+
+	lck_mtx_unlock(&hostp->lock);
 
 	wsave = thread_interrupt_level(THREAD_UNINT);
 	ret = exception_deliver(

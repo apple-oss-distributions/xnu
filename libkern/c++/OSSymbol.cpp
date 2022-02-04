@@ -158,21 +158,20 @@ public:
 };
 
 void *
-OSSymbolPool::operator new(size_t size)
+OSSymbolPool::operator new(__assert_only size_t size)
 {
-	void *mem = (void *)kalloc_tag(size, VM_KERN_MEMORY_LIBKERN);
 	OSMETA_ACCUMSIZE(size);
-	assert(mem);
-	bzero(mem, size);
+	assert(size == sizeof(OSSymbolPool));
 
-	return mem;
+	return (void *)kalloc_type_tag(OSSymbolPool, Z_WAITOK_ZERO_NOFAIL,
+	           VM_KERN_MEMORY_LIBKERN);
 }
 
 void
-OSSymbolPool::operator delete(void *mem, size_t size)
+OSSymbolPool::operator delete(void *mem, __assert_only size_t size)
 {
-	kfree(mem, size);
-	OSMETA_ACCUMSIZE(-size);
+	assert(size == sizeof(OSSymbolPool));
+	kfree_type(OSSymbolPool, mem);
 }
 
 extern lck_grp_t *IOLockGroup;
@@ -182,12 +181,12 @@ OSSymbolPool::init()
 {
 	count = 0;
 	nBuckets = INITIAL_POOL_SIZE;
-	buckets = (Bucket *) kalloc_tag(nBuckets * sizeof(Bucket), VM_KERN_MEMORY_LIBKERN);
-	OSMETA_ACCUMSIZE(nBuckets * sizeof(Bucket));
+	buckets = kalloc_type_tag(Bucket, nBuckets, Z_WAITOK_ZERO,
+	    VM_KERN_MEMORY_LIBKERN);
 	if (!buckets) {
 		return false;
 	}
-	bzero(buckets, nBuckets * sizeof(Bucket));
+	OSMETA_ACCUMSIZE(nBuckets * sizeof(Bucket));
 
 	poolGate = lck_rw_alloc_init(IOLockGroup, LCK_ATTR_NULL);
 
@@ -209,11 +208,11 @@ OSSymbolPool::~OSSymbolPool()
 		Bucket *thisBucket;
 		for (thisBucket = &buckets[0]; thisBucket < &buckets[nBuckets]; thisBucket++) {
 			if (thisBucket->count > 1) {
-				kfree(thisBucket->symbolP, thisBucket->count * sizeof(OSSymbol *));
+				kfree_type(OSSymbol *, thisBucket->count, thisBucket->symbolP);
 				OSMETA_ACCUMSIZE(-(thisBucket->count * sizeof(OSSymbol *)));
 			}
 		}
-		kfree(buckets, nBuckets * sizeof(Bucket));
+		kfree_type(Bucket, nBuckets, buckets);
 		OSMETA_ACCUMSIZE(-(nBuckets * sizeof(Bucket)));
 	}
 
@@ -299,10 +298,10 @@ OSSymbolPool::reconstructSymbols(bool grow)
 
 	count = 0;
 	nBuckets = new_nBuckets;
-	buckets = (Bucket *) kalloc_tag(nBuckets * sizeof(Bucket), VM_KERN_MEMORY_LIBKERN);
+	buckets = kalloc_type_tag(Bucket, nBuckets, Z_WAITOK_ZERO,
+	    VM_KERN_MEMORY_LIBKERN);
 	OSMETA_ACCUMSIZE(nBuckets * sizeof(Bucket));
 	/* @@@ gvdl: Zero test and panic if can't set up pool */
-	bzero(buckets, nBuckets * sizeof(Bucket));
 
 	state = old.initHashState();
 	while ((insert = old.nextHashState(&state))) {
@@ -381,7 +380,8 @@ OSSymbolPool::insertSymbol(OSSymbol *sym)
 			return ret;
 		}
 
-		list = (OSSymbol **) kalloc_tag(2 * sizeof(OSSymbol *), VM_KERN_MEMORY_LIBKERN);
+		list = kalloc_type_tag(OSSymbol *, 2, Z_WAITOK_ZERO_NOFAIL,
+		    VM_KERN_MEMORY_LIBKERN);
 		OSMETA_ACCUMSIZE(2 * sizeof(OSSymbol *));
 		/* @@@ gvdl: Zero test and panic if can't set up pool */
 		list[0] = sym;
@@ -406,13 +406,14 @@ OSSymbolPool::insertSymbol(OSSymbol *sym)
 
 	j = thisBucket->count++;
 	count++;
-	list = (OSSymbol **) kalloc_tag(thisBucket->count * sizeof(OSSymbol *), VM_KERN_MEMORY_LIBKERN);
-	OSMETA_ACCUMSIZE(thisBucket->count * sizeof(OSSymbol *));
+	list = kalloc_type_tag(OSSymbol *, thisBucket->count, Z_WAITOK_ZERO,
+	    VM_KERN_MEMORY_LIBKERN);
 	/* @@@ gvdl: Zero test and panic if can't set up pool */
 	list[0] = sym;
 	bcopy(thisBucket->symbolP, list + 1, j * sizeof(OSSymbol *));
-	kfree(thisBucket->symbolP, j * sizeof(OSSymbol *));
-	OSMETA_ACCUMSIZE(-(j * sizeof(OSSymbol *)));
+	kfree_type(OSSymbol *, j, thisBucket->symbolP);
+
+	OSMETA_ACCUMSIZE((thisBucket->count - j) * sizeof(OSSymbol *));
 	thisBucket->symbolP = list;
 	GROW_POOL();
 
@@ -456,7 +457,7 @@ OSSymbolPool::removeSymbol(OSSymbol *sym)
 		probeSymbol = list[0];
 		if (probeSymbol == sym) {
 			thisBucket->symbolP = (OSSymbol **) list[1];
-			kfree(list, 2 * sizeof(OSSymbol *));
+			kfree_type(OSSymbol *, 2, list);
 			OSMETA_ACCUMSIZE(-(2 * sizeof(OSSymbol *)));
 			count--;
 			thisBucket->count--;
@@ -467,7 +468,7 @@ OSSymbolPool::removeSymbol(OSSymbol *sym)
 		probeSymbol = list[1];
 		if (probeSymbol == sym) {
 			thisBucket->symbolP = (OSSymbol **) list[0];
-			kfree(list, 2 * sizeof(OSSymbol *));
+			kfree_type(OSSymbol *, 2, list);
 			OSMETA_ACCUMSIZE(-(2 * sizeof(OSSymbol *)));
 			count--;
 			thisBucket->count--;
@@ -482,9 +483,8 @@ OSSymbolPool::removeSymbol(OSSymbol *sym)
 	for (; j--; list++) {
 		probeSymbol = *list;
 		if (probeSymbol == sym) {
-			list = (OSSymbol **)
-			    kalloc_tag((thisBucket->count - 1) * sizeof(OSSymbol *), VM_KERN_MEMORY_LIBKERN);
-			OSMETA_ACCUMSIZE((thisBucket->count - 1) * sizeof(OSSymbol *));
+			list = kalloc_type_tag(OSSymbol *, thisBucket->count - 1,
+			    Z_WAITOK, VM_KERN_MEMORY_LIBKERN);
 			if (thisBucket->count - 1 != j) {
 				bcopy(thisBucket->symbolP, list,
 				    (thisBucket->count - 1 - j) * sizeof(OSSymbol *));
@@ -494,8 +494,8 @@ OSSymbolPool::removeSymbol(OSSymbol *sym)
 				    list + thisBucket->count - 1 - j,
 				    j * sizeof(OSSymbol *));
 			}
-			kfree(thisBucket->symbolP, thisBucket->count * sizeof(OSSymbol *));
-			OSMETA_ACCUMSIZE(-(thisBucket->count * sizeof(OSSymbol *)));
+			kfree_type(OSSymbol *, thisBucket->count, thisBucket->symbolP);
+			OSMETA_ACCUMSIZE(-sizeof(OSSymbol *));
 			thisBucket->symbolP = list;
 			count--;
 			thisBucket->count--;

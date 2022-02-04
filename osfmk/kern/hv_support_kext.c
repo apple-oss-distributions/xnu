@@ -33,6 +33,7 @@
 #include <libkern/OSAtomic.h>
 #include <vm/vm_pageout.h>
 #include <mach/sdt.h>
+#include <sys/kdebug.h>
 
 #if defined(__x86_64__) && CONFIG_VMX
 #include <i386/vmx/vmx_cpu.h>
@@ -52,6 +53,8 @@ hv_callbacks_t hv_callbacks = {
 	.thread_destroy = NULL, /* thread is being destroyed */
 	.task_destroy = NULL,   /* task is being destroyed */
 	.volatile_state = NULL, /* thread state is becoming volatile */
+	.resume = NULL,         /* system is being resumed */
+	.memory_pressure = NULL,/* (unused) */
 };
 
 /* trap tables for hv_*_trap syscalls */
@@ -192,7 +195,8 @@ hv_release_callbacks(void)
 		.suspend = NULL,
 		.thread_destroy = NULL,
 		.task_destroy = NULL,
-		.volatile_state = NULL
+		.volatile_state = NULL,
+		.resume = NULL,
 	};
 
 	hv_callbacks_enabled = 0;
@@ -208,6 +212,15 @@ hv_suspend(void)
 	}
 }
 
+/* system resume notification */
+void
+hv_resume(void)
+{
+	if (hv_callbacks_enabled && hv_callbacks.resume) {
+		hv_callbacks.resume();
+	}
+}
+
 /* dispatch hv_task_trap/hv_thread_trap syscalls to trap handlers,
  *  fail for invalid index or absence of trap handlers, trap handler is
  *  responsible for validating targets */
@@ -219,35 +232,33 @@ hv_suspend(void)
 kern_return_t
 hv_task_trap(uint64_t index, uint64_t arg)
 {
-	return HV_TRAP_DISPATCH(HV_TASK_TRAP, index, hv_get_task_target(), arg);
+	KDBG(MACHDBG_CODE(DBG_MACH_HV, HV_X86_TRAP_TASK) | DBG_FUNC_START, index, arg);
+	DTRACE_HV2(task__trap__begin, uint64_t, index, uint64_t, arg);
+
+	kern_return_t ret = HV_TRAP_DISPATCH(HV_TASK_TRAP, index, hv_get_task_target(), arg);
+
+	DTRACE_HV2(task__trap__end, uint64_t, index, uint64_t, ret);
+	KDBG(MACHDBG_CODE(DBG_MACH_HV, HV_X86_TRAP_TASK) | DBG_FUNC_END, index, ret);
+
+	return ret;
 }
 
 kern_return_t
 hv_thread_trap(uint64_t index, uint64_t arg)
 {
-	return HV_TRAP_DISPATCH(HV_THREAD_TRAP, index, hv_get_thread_target(), arg);
+	KDBG(MACHDBG_CODE(DBG_MACH_HV, HV_X86_TRAP_THREAD) | DBG_FUNC_START, index, arg);
+	DTRACE_HV2(thread__trap__begin, uint64_t, index, uint64_t, arg);
+
+	kern_return_t ret = HV_TRAP_DISPATCH(HV_THREAD_TRAP, index, hv_get_thread_target(), arg);
+
+	DTRACE_HV2(thread__trap__end, uint64_t, index, uint64_t, ret);
+	KDBG(MACHDBG_CODE(DBG_MACH_HV, HV_X86_TRAP_THREAD) | DBG_FUNC_END, index, ret);
+
+	return ret;
 }
 
 boolean_t
 hv_ast_pending(void)
 {
 	return current_cpu_datap()->cpu_pending_ast != 0;
-}
-
-void __attribute__((__noreturn__))
-hv_port_notify(mach_msg_header_t *msg __unused)
-{
-	panic("%s: not supported in this configuration", __func__);
-}
-
-void
-hv_trace_guest_enter(uint32_t vcpu_id, uint64_t *vcpu_regs)
-{
-	DTRACE_HV2(guest__enter, uint32_t, vcpu_id, uint64_t *, vcpu_regs);
-}
-
-void
-hv_trace_guest_exit(uint32_t vcpu_id, uint64_t *vcpu_regs)
-{
-	DTRACE_HV2(guest__exit, uint32_t, vcpu_id, uint64_t *, vcpu_regs);
 }

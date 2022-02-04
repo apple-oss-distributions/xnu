@@ -93,6 +93,8 @@ $(eval $(call RECURSIVE_BUILD_RULES_template,config_all,$(CONFIG_SUBDIRS),do_con
 #
 $(eval $(call RECURSIVE_BUILD_RULES_template,build_install_primary,$(INST_SUBDIRS),do_build_install_primary,1))
 $(eval $(call RECURSIVE_BUILD_RULES_template,build_install_non_primary,$(INST_SUBDIRS),do_build_install_non_primary,1))
+$(eval $(call RECURSIVE_BUILD_RULES_template,config_install_primary,$(CONFIG_SUBDIRS),do_config_install_primary,1))
+$(eval $(call RECURSIVE_BUILD_RULES_template,config_install_variant,$(CONFIG_SUBDIRS),do_config_install_variant,1))
 $(eval $(call RECURSIVE_BUILD_RULES_template,config_install,$(CONFIG_SUBDIRS),do_config_install,1))
 
 #

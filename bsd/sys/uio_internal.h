@@ -109,7 +109,7 @@ __private_extern__ void uio_pushback( uio_t a_uio, user_size_t a_count );
 
 /* use kern_iovec for system space requests */
 struct kern_iovec {
-	u_int64_t       iov_base;       /* Base address. */
+	u_int64_t       iov_base;       /* Base address; PAC signed, diversified with length. */
 	u_int64_t       iov_len;        /* Length. */
 };
 
@@ -139,15 +139,15 @@ union iovecs {
 /* WARNING - use accessor calls for uio_iov and uio_resid since these */
 /* fields vary depending on the originating address space. */
 struct uio {
-	union iovecs    uio_iovs;               /* current iovec */
-	int                             uio_iovcnt;             /* active iovecs */
-	off_t                   uio_offset;
+	void * XNU_PTRAUTH_SIGNED_PTR("uio.uio_iovs") uio_iovs;       /* current iovec */
+	void * XNU_PTRAUTH_SIGNED_PTR("uio.uio_iovbase") uio_iovbase; /* iovec base */
+	int             uio_max_iovs;   /* max number of iovecs this uio_t can hold */
+	int             uio_iovcnt;     /* active iovecs */
+	off_t           uio_offset;
 	enum uio_seg    uio_segflg;
 	enum uio_rw     uio_rw;
 	user_size_t     uio_resid_64;
-	int                             uio_size;               /* size for use with kfree */
-	int                             uio_max_iovs;   /* max number of iovecs this uio_t can hold */
-	u_int32_t               uio_flags;
+	u_int32_t       uio_flags;
 };
 
 /* values for uio_flags */
@@ -157,13 +157,20 @@ struct uio {
 
 __END_DECLS
 
+#define UIO_SIZEOF_IOVS( a_iovcount ) \
+	( MAX(sizeof(struct user_iovec), sizeof(struct kern_iovec)) * (a_iovcount) )
+
 /*
  * UIO_SIZEOF - return the amount of space a uio_t requires to
  *	contain the given number of iovecs.  Use this macro to
- *  create a stack buffer that can be passed to uio_createwithbuffer.
+ *  create a stack buffer (of type uio_stackbuf_t to ensure
+ *  alignment requirements) that can be passed to
+ *  uio_createwithbuffer.
  */
 #define UIO_SIZEOF( a_iovcount ) \
-	( sizeof(struct uio) + (MAX(sizeof(struct user_iovec), sizeof(struct kern_iovec)) * (a_iovcount)) )
+	( sizeof(struct uio) + UIO_SIZEOF_IOVS(a_iovcount) )
+
+typedef char __attribute__((aligned(_Alignof(union iovecs)))) uio_stackbuf_t;
 
 #define UIO_IS_USER_SPACE32( a_uio_t )  \
 	( (a_uio_t)->uio_segflg == UIO_USERSPACE32 || (a_uio_t)->uio_segflg == UIO_PHYS_USERSPACE32 || \

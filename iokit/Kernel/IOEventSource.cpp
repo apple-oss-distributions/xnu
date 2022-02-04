@@ -169,10 +169,7 @@ IOEventSource::init(OSObject *inOwner,
 	enabled = true;
 
 	if (!reserved) {
-		reserved = IONew(ExpansionData, 1);
-		if (!reserved) {
-			return false;
-		}
+		reserved = IOMallocType(ExpansionData);
 	}
 
 	IOStatisticsRegisterCounter();
@@ -190,7 +187,7 @@ IOEventSource::free( void )
 	}
 
 	if (reserved) {
-		IODelete(reserved, ExpansionData, 1);
+		IOFreeType(reserved, ExpansionData);
 	}
 
 	super::free();

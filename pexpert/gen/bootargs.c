@@ -376,16 +376,7 @@ getval(
 boolean_t
 PE_imgsrc_mount_supported()
 {
-#if CONFIG_LOCKERBOOT
-	/*
-	 * Booting from a locker requires that we be able to mount the containing
-	 * volume inside the locker. This looks redundant, but this is here in case
-	 * the other conditional needs to be modified for some reason.
-	 */
 	return TRUE;
-#else
-	return TRUE;
-#endif
 }
 
 boolean_t

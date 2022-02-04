@@ -192,6 +192,8 @@ typedef struct namespace_handler_data {
 
 #define NSPACE_REARM_NO_ARG ((void *)1)
 int resolve_nspace_item(struct vnode *vp, uint64_t op);
+int vfs_materialize_file(struct vnode *vp, uint64_t op, int64_t offset, int64_t size);
+int vfs_materialize_dir(struct vnode *vp, uint64_t op, char *file_name, size_t namelen);
 int nspace_snapshot_event(vnode_t vp, time_t ctime, uint64_t op_type, void *arg);
 
 #endif // defined(KERNEL_PRIVATE)
@@ -212,6 +214,8 @@ int nspace_snapshot_event(vnode_t vp, time_t ctime, uint64_t op_type, void *arg)
 #define NAMESPACE_HANDLER_NSPACE_EVENT        0x1000
 #define NAMESPACE_HANDLER_SNAPSHOT_EVENT      0x0100
 #define NAMESPACE_HANDLER_TRACK_EVENT         0x2000
+
+#define NAMESPACE_HANDLER_LOOKUP_OP           0x4000
 
 #define NAMESPACE_HANDLER_EVENT_TYPE_MASK (NAMESPACE_HANDLER_NSPACE_EVENT | NAMESPACE_HANDLER_SNAPSHOT_EVENT | NAMESPACE_HANDLER_TRACK_EVENT)
 

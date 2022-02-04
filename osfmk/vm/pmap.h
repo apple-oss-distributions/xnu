@@ -73,9 +73,11 @@
 #include <mach/vm_attributes.h>
 #include <mach/boolean.h>
 #include <mach/vm_prot.h>
-
 #include <kern/trustcache.h>
 
+#if __has_include(<CoreEntitlements/CoreEntitlements.h>)
+#include <CoreEntitlements/CoreEntitlements.h>
+#endif
 
 #ifdef  KERNEL_PRIVATE
 
@@ -115,13 +117,41 @@ extern kern_return_t    copypv(
 
 extern boolean_t pmap_has_managed_page(ppnum_t first, ppnum_t last);
 
+#if MACH_KERNEL_PRIVATE || BSD_KERNEL_PRIVATE
+#include <mach/mach_types.h>
+#include <vm/memory_types.h>
+
+/*
+ * Routines used during BSD process creation.
+ */
+
+extern pmap_t           pmap_create_options(    /* Create a pmap_t. */
+	ledger_t        ledger,
+	vm_map_size_t   size,
+	unsigned int    flags);
+
+#if __has_feature(ptrauth_calls) && defined(XNU_TARGET_OS_OSX)
+/**
+ * Informs the pmap layer that a process will be running with user JOP disabled,
+ * as if PMAP_CREATE_DISABLE_JOP had been passed during pmap creation.
+ *
+ * @note This function cannot be used once the target process has started
+ * executing code.  It is intended for cases where user JOP is disabled based on
+ * the code signature (e.g., special "keys-off" entitlements), which is too late
+ * to change the flags passed to pmap_create_options.
+ *
+ * @param pmap	The pmap belonging to the target process
+ */
+extern void             pmap_disable_user_jop(
+	pmap_t          pmap);
+#endif /* __has_feature(ptrauth_calls) && defined(XNU_TARGET_OS_OSX) */
+#endif /* MACH_KERNEL_PRIVATE || BSD_KERNEL_PRIVATE */
+
 #ifdef  MACH_KERNEL_PRIVATE
 
 #include <mach_assert.h>
 
 #include <machine/pmap.h>
-#include <vm/memory_types.h>
-
 /*
  *	Routines used for initialization.
  *	There is traditionally also a pmap_bootstrap,
@@ -138,6 +168,9 @@ extern void *pmap_steal_memory(vm_size_t size); /* Early memory allocation */
 extern void *pmap_steal_freeable_memory(vm_size_t size); /* Early memory allocation */
 
 extern uint_t pmap_free_pages(void); /* report remaining unused physical pages */
+#if defined(__arm__) || defined(__arm64__)
+extern uint_t pmap_free_pages_span(void); /* report phys address range of unused physical pages */
+#endif /* defined(__arm__) || defined(__arm64__) */
 
 extern void pmap_startup(vm_offset_t *startp, vm_offset_t *endp); /* allocate vm_page structs */
 
@@ -185,11 +218,6 @@ extern void pmap_virtual_space(
 /*
  * Routines to manage the physical map data structure.
  */
-extern pmap_t           pmap_create_options(    /* Create a pmap_t. */
-	ledger_t        ledger,
-	vm_map_size_t   size,
-	unsigned int    flags);
-
 extern pmap_t(pmap_kernel)(void);               /* Return the kernel's pmap */
 extern void             pmap_reference(pmap_t pmap);    /* Gain a reference. */
 extern void             pmap_destroy(pmap_t pmap); /* Release a reference. */
@@ -339,17 +367,11 @@ extern void pmap_sync_page_attributes_phys(ppnum_t pa);
  * the given physical page is mapped into no pmap.
  * pmap_assert_free() will panic() if pn is not free.
  */
-extern boolean_t        pmap_verify_free(ppnum_t pn);
+extern bool pmap_verify_free(ppnum_t pn);
 #if MACH_ASSERT
 extern void pmap_assert_free(ppnum_t pn);
 #endif
 
-/*
- *	Statistics routines
- */
-extern int(pmap_compressed)(pmap_t pmap);
-extern int(pmap_resident_count)(pmap_t pmap);
-extern int(pmap_resident_max)(pmap_t pmap);
 
 /*
  *	Sundry required (internal) routines
@@ -644,9 +666,6 @@ extern void(pmap_pageable)(
 
 extern uint64_t pmap_shared_region_size_min(pmap_t map);
 
-/* TODO: <rdar://problem/65247502> Completely remove pmap_nesting_size_max() */
-extern uint64_t pmap_nesting_size_max(pmap_t map);
-
 extern kern_return_t pmap_nest(pmap_t,
     pmap_t,
     addr64_t,
@@ -694,7 +713,11 @@ extern pmap_t   kernel_pmap;                    /* The kernel's map */
 #else
 
 #define PMAP_CREATE_STAGE2         0
+#if __arm64e__
+#define PMAP_CREATE_DISABLE_JOP    0x4
+#else
 #define PMAP_CREATE_DISABLE_JOP    0
+#endif
 #if __ARM_MIXED_PAGE_SIZE__
 #define PMAP_CREATE_FORCE_4K_PAGES 0x8
 #else
@@ -819,13 +842,6 @@ extern kern_return_t pmap_query_page_info(
 	vm_map_offset_t va,
 	int             *disp);
 
-#if CONFIG_PGTRACE
-int pmap_pgtrace_add_page(pmap_t pmap, vm_map_offset_t start, vm_map_offset_t end);
-int pmap_pgtrace_delete_page(pmap_t pmap, vm_map_offset_t start, vm_map_offset_t end);
-kern_return_t pmap_pgtrace_fault(pmap_t pmap, vm_map_offset_t va, arm_saved_state_t *ss);
-#endif
-
-
 #ifdef PLATFORM_BridgeOS
 struct pmap_legacy_trust_cache {
 	struct pmap_legacy_trust_cache *next;
@@ -847,6 +863,9 @@ typedef enum {
 	PMAP_TC_TYPE_ENGINEERING,
 	PMAP_TC_TYPE_GLOBAL_FF00,
 	PMAP_TC_TYPE_GLOBAL_FF01,
+	PMAP_TC_TYPE_GLOBAL_FF06,
+	PMAP_TC_TYPE_DDI,
+	PMAP_TC_TYPE_EPHEMERAL_CRYPTEX,
 } pmap_tc_type_t;
 
 #define PMAP_IMAGE4_TRUST_CACHE_HAS_TYPE 1
@@ -881,11 +900,15 @@ typedef enum {
 	PMAP_TC_CRYPTO_WRONG = -12,
 	PMAP_TC_OBJECT_WRONG = -13,
 	PMAP_TC_UNKNOWN_CALLER = -14,
-	PMAP_TC_UNKNOWN_FAILURE = -15,
+	PMAP_TC_NOT_SUPPORTED = -15,
+	PMAP_TC_UNKNOWN_FAILURE = -16,
 } pmap_tc_ret_t;
 
 #define PMAP_HAS_LOCKDOWN_IMAGE4_SLAB 1
 extern void pmap_lockdown_image4_slab(vm_offset_t slab, vm_size_t slab_len, uint64_t flags);
+
+#define PMAP_HAS_LOCKDOWN_IMAGE4_LATE_SLAB 1
+extern void pmap_lockdown_image4_late_slab(vm_offset_t slab, vm_size_t slab_len, uint64_t flags);
 
 extern pmap_tc_ret_t pmap_load_image4_trust_cache(
 	struct pmap_image4_trust_cache *trust_cache, vm_size_t trust_cache_len,
@@ -898,20 +921,92 @@ extern bool pmap_is_trust_cache_loaded(const uuid_t uuid);
 extern uint32_t pmap_lookup_in_static_trust_cache(const uint8_t cdhash[CS_CDHASH_LEN]);
 extern bool pmap_lookup_in_loaded_trust_caches(const uint8_t cdhash[CS_CDHASH_LEN]);
 
+extern void pmap_set_compilation_service_cdhash(const uint8_t cdhash[CS_CDHASH_LEN]);
+extern bool pmap_match_compilation_service_cdhash(const uint8_t cdhash[CS_CDHASH_LEN]);
+
 extern bool pmap_in_ppl(void);
+extern bool pmap_has_ppl(void);
 
 extern void *pmap_claim_reserved_ppl_page(void);
 extern void pmap_free_reserved_ppl_page(void *kva);
 
-extern void pmap_ledger_alloc_init(size_t);
+extern void pmap_ledger_verify_size(size_t);
 extern ledger_t pmap_ledger_alloc(void);
 extern void pmap_ledger_free(ledger_t);
+
+extern bool pmap_is_bad_ram(ppnum_t ppn);
+extern void pmap_retire_page(ppnum_t ppn);
+extern kern_return_t pmap_cs_allow_invalid(pmap_t pmap);
 
 #if __arm64__
 extern bool pmap_is_exotic(pmap_t pmap);
 #else /* __arm64__ */
 #define pmap_is_exotic(pmap) false
 #endif /* __arm64__ */
+
+extern bool pmap_cs_enabled(void);
+
+
+/*
+ * Returns a subset of pmap_cs non-default configuration,
+ * e.g. loosening up of some restrictions through pmap_cs or amfi
+ * boot-args. The return value is a bit field with possible bits
+ * described below. If default, the function will return 0. Note that
+ * this does not work the other way: 0 does not imply that pmap_cs
+ * runs in default configuration, and only a small configuration
+ * subset is returned by this function.
+ *
+ * Never assume the system is "secure" if this returns 0.
+ */
+
+extern int pmap_cs_configuration(void);
+
+extern kern_return_t pmap_cs_fork_prepare(
+	pmap_t old_pmap,
+	pmap_t new_pmap
+	);
+
+/*
+ * The PMAP layer is responsible for holding on to the local signing key so that
+ * we can re-use the code for multiple different layers. By keeping our local
+ * signing public key here, we can safeguard it with PMAP_CS, and also use it
+ * within PMAP_CS for validation.
+ *
+ * Moreover, we present an API which can be used by AMFI to query the key when
+ * it needs to.
+ */
+#define PMAP_ECC_P384_PUBLIC_KEY_SIZE 97
+extern void pmap_set_local_signing_public_key(
+	const uint8_t public_key[PMAP_ECC_P384_PUBLIC_KEY_SIZE]
+	);
+
+extern uint8_t *pmap_get_local_signing_public_key(void);
+
+/*
+ * We require AMFI call into the PMAP layer to unrestrict a particular CDHash
+ * for local signing. This only needs to happen for arm devices since x86 devices
+ * don't have PMAP_CS.
+ *
+ * For now, we make the configuration available for x86 devices as well. When
+ * AMFI stop calling into this API, we'll remove it.
+ */
+#define PMAP_SUPPORTS_RESTRICTED_LOCAL_SIGNING 1
+extern void pmap_unrestrict_local_signing(
+	const uint8_t cdhash[CS_CDHASH_LEN]
+	);
+
+#if __has_include(<CoreEntitlements/CoreEntitlements.h>)
+/*
+ * The PMAP layer provides an API to query entitlements through the CoreEntitlements
+ * layer.
+ */
+extern bool pmap_query_entitlements(
+	pmap_t pmap,
+	CEQuery_t query,
+	size_t queryLength,
+	CEQueryContext_t finalContext
+	);
+#endif
 
 #endif  /* KERNEL_PRIVATE */
 

@@ -204,9 +204,7 @@ void  mac_policy_list_busy(void);
 int   mac_policy_list_conditional_busy(void);
 void  mac_policy_list_unbusy(void);
 
-void           mac_labelzone_init(void);
-struct label  *mac_labelzone_alloc(int flags);
-void           mac_labelzone_free(struct label *label);
+void  mac_labelzone_init(void);
 
 void  mac_label_init(struct label *label);
 void  mac_label_destroy(struct label *label);
@@ -222,40 +220,43 @@ int mac_vnode_label_externalize(struct label *, char *e, char *out, size_t olen,
 int mac_cred_label_internalize(struct label *label, char *string);
 int mac_vnode_label_internalize(struct label *label, char *string);
 
+#define MAC_POLICY_ITERATE(...) do {                                \
+    struct mac_policy_conf *mpc;                                    \
+    u_int i;                                                        \
+                                                                    \
+    for (i = 0; i < mac_policy_list.staticmax; i++) {               \
+	    mpc = mac_policy_list.entries[i].mpc;                       \
+	    if (mpc == NULL)                                            \
+	            continue;                                           \
+                                                                    \
+	    __VA_ARGS__                                                 \
+    }                                                               \
+    if (mac_policy_list_conditional_busy() != 0) {                  \
+	    for (; i <= mac_policy_list.maxindex; i++) {                \
+	            mpc = mac_policy_list.entries[i].mpc;               \
+	            if (mpc == NULL)                                    \
+	                    continue;                                   \
+                                                                    \
+	            __VA_ARGS__                                         \
+	    }                                                           \
+	    mac_policy_list_unbusy();                                   \
+    }                                                               \
+} while (0)
+
 /*
  * MAC_CHECK performs the designated check by walking the policy
  * module list and checking with each as to how it feels about the
  * request.  Note that it returns its value via 'error' in the scope
  * of the caller.
  */
-#define MAC_CHECK(check, args...) do {                                  \
-	struct mac_policy_conf *mpc;                                    \
-	u_int i;                                                        \
-                                                                        \
-	error = 0;                                                      \
-	for (i = 0; i < mac_policy_list.staticmax; i++) {               \
-	        mpc = mac_policy_list.entries[i].mpc;                   \
-	        if (mpc == NULL)                                        \
-	                continue;                                       \
-                                                                        \
-	        if (mpc->mpc_ops->mpo_ ## check != NULL)                \
-	                error = mac_error_select(                       \
+#define MAC_CHECK(check, args...) do {                              \
+    error = 0;                                                      \
+    MAC_POLICY_ITERATE({                                            \
+	    if (mpc->mpc_ops->mpo_ ## check != NULL)                    \
+	            error = mac_error_select(                           \
 	                    mpc->mpc_ops->mpo_ ## check (args),         \
 	                    error);                                     \
-	}                                                               \
-	if (mac_policy_list_conditional_busy() != 0) {                  \
-	        for (; i <= mac_policy_list.maxindex; i++) {            \
-	                mpc = mac_policy_list.entries[i].mpc;           \
-	                if (mpc == NULL)                                \
-	                        continue;                               \
-                                                                        \
-	                if (mpc->mpc_ops->mpo_ ## check != NULL)        \
-	                        error = mac_error_select(               \
-	                            mpc->mpc_ops->mpo_ ## check (args), \
-	                            error);                             \
-	        }                                                       \
-	        mac_policy_list_unbusy();                               \
-	}                                                               \
+    });                                                             \
 } while (0)
 
 /*
@@ -265,110 +266,35 @@ int mac_vnode_label_internalize(struct label *label, char *string);
  * and otherwise returns EPERM.  Note that it returns its value via
  * 'error' in the scope of the caller.
  */
-#define MAC_GRANT(check, args...) do {                                  \
-	struct mac_policy_conf *mpc;                                    \
-	u_int i;                                                        \
-                                                                        \
-	error = EPERM;                                                  \
-	for (i = 0; i < mac_policy_list.staticmax; i++) {               \
-	        mpc = mac_policy_list.entries[i].mpc;                   \
-	        if (mpc == NULL)                                        \
-	                continue;                                       \
-                                                                        \
-	        if (mpc->mpc_ops->mpo_ ## check != NULL) {              \
-	                if (mpc->mpc_ops->mpo_ ## check (args) == 0)    \
-	                        error = 0;                              \
-	        }                                                       \
-	}                                                               \
-	if (mac_policy_list_conditional_busy() != 0) {                  \
-	        for (; i <= mac_policy_list.maxindex; i++) {            \
-	                mpc = mac_policy_list.entries[i].mpc;           \
-	                if (mpc == NULL)                                \
-	                        continue;                               \
-                                                                        \
-	                if (mpc->mpc_ops->mpo_ ## check != NULL) {      \
-	                        if (mpc->mpc_ops->mpo_ ## check (args)  \
-	                            == 0)                               \
-	                                error = 0;                      \
-	                }                                               \
-	        }                                                       \
-	        mac_policy_list_unbusy();                               \
-	}                                                               \
+#define MAC_GRANT(check, args...) do {                              \
+    error = EPERM;                                                  \
+    MAC_POLICY_ITERATE({                                            \
+	    if (mpc->mpc_ops->mpo_ ## check != NULL) {                  \
+	            if (mpc->mpc_ops->mpo_ ## check (args) == 0) {      \
+	                    error = 0;                                  \
+	            }                                                   \
+	    }                                                           \
+    });                                                             \
 } while (0)
 
-/*
- * MAC_BOOLEAN performs the designated boolean composition by walking
- * the module list, invoking each instance of the operation, and
- * combining the results using the passed C operator.  Note that it
- * returns its value via 'result' in the scope of the caller, which
- * should be initialized by the caller in a meaningful way to get
- * a meaningful result.
- */
-#define MAC_BOOLEAN(operation, composition, args...) do {               \
-	struct mac_policy_conf *mpc;                                    \
-	u_int i;                                                        \
-                                                                        \
-	for (i = 0; i < mac_policy_list.staticmax; i++) {               \
-	        mpc = mac_policy_list.entries[i].mpc;                   \
-	        if (mpc == NULL)                                        \
-	                continue;                                       \
-                                                                        \
-	        if (mpc->mpc_ops->mpo_ ## operation != NULL)            \
-	                result = result composition                     \
-	                    mpc->mpc_ops->mpo_ ## operation             \
-	                    (args);                                     \
-	}                                                               \
-	if (mac_policy_list_conditional_busy() != 0) {                  \
-	        for (; i <= mac_policy_list.maxindex; i++) {            \
-	                mpc = mac_policy_list.entries[i].mpc;           \
-	                if (mpc == NULL)                                \
-	                        continue;                               \
-                                                                        \
-	                if (mpc->mpc_ops->mpo_ ## operation != NULL)    \
-	                        result = result composition             \
-	                            mpc->mpc_ops->mpo_ ## operation     \
-	                            (args);                             \
-	        }                                                       \
-	        mac_policy_list_unbusy();                               \
-	}                                                               \
-} while (0)
+#define MAC_INTERNALIZE(obj, label, instring)                       \
+    mac_internalize(offsetof(struct mac_policy_ops, mpo_ ## obj ## _label_internalize), label, instring)
 
-#define MAC_INTERNALIZE(obj, label, instring)                           \
-	mac_internalize(offsetof(struct mac_policy_ops, mpo_ ## obj ## _label_internalize), label, instring)
+#define MAC_EXTERNALIZE(obj, label, elementlist, outbuf, outbuflen) \
+    mac_externalize(offsetof(struct mac_policy_ops, mpo_ ## obj ## _label_externalize), label, elementlist, outbuf, outbuflen)
 
-#define MAC_EXTERNALIZE(obj, label, elementlist, outbuf, outbuflen)     \
-	mac_externalize(offsetof(struct mac_policy_ops, mpo_ ## obj ## _label_externalize), label, elementlist, outbuf, outbuflen)
-
-#define MAC_EXTERNALIZE_AUDIT(obj, label, outbuf, outbuflen)    \
-	mac_externalize(offsetof(struct mac_policy_ops, mpo_ ## obj ## _label_externalize_audit), label, "*", outbuf, outbuflen)
+#define MAC_EXTERNALIZE_AUDIT(obj, label, outbuf, outbuflen)        \
+    mac_externalize(offsetof(struct mac_policy_ops, mpo_ ## obj ## _label_externalize_audit), label, "*", outbuf, outbuflen)
 
 /*
  * MAC_PERFORM performs the designated operation by walking the policy
  * module list and invoking that operation for each policy.
  */
-#define MAC_PERFORM(operation, args...) do {                            \
-	struct mac_policy_conf *mpc;                                    \
-	u_int i;                                                        \
-                                                                        \
-	for (i = 0; i < mac_policy_list.staticmax; i++) {               \
-	        mpc = mac_policy_list.entries[i].mpc;                   \
-	        if (mpc == NULL)                                        \
-	                continue;                                       \
-                                                                        \
-	        if (mpc->mpc_ops->mpo_ ## operation != NULL)            \
-	                mpc->mpc_ops->mpo_ ## operation (args);         \
-	}                                                               \
-	if (mac_policy_list_conditional_busy() != 0) {                  \
-	        for (; i <= mac_policy_list.maxindex; i++) {            \
-	                mpc = mac_policy_list.entries[i].mpc;           \
-	                if (mpc == NULL)                                \
-	                        continue;                               \
-                                                                        \
-	                if (mpc->mpc_ops->mpo_ ## operation != NULL)    \
-	                        mpc->mpc_ops->mpo_ ## operation (args); \
-	        }                                                       \
-	        mac_policy_list_unbusy();                               \
-	}                                                               \
+#define MAC_PERFORM(operation, args...) do {                        \
+    MAC_POLICY_ITERATE({                                            \
+	    if (mpc->mpc_ops->mpo_ ## operation != NULL)                \
+	            mpc->mpc_ops->mpo_ ## operation (args);             \
+    });                                                             \
 } while (0)
 
 struct __mac_get_pid_args;

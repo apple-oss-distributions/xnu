@@ -57,6 +57,18 @@ tables, ... Available hooks are:
 - Rank 1: `TUNABLE`, `TUNABLE_WRITEABLE`
 - Middle: globals that require complex initialization (e.g. SFI classes).
 
+`STARTUP_SUB_TIMEOUTS`
+----------------------
+
+## Description
+
+Initializes machine timeouts, which are device-tree/boot-args
+configurable timeouts for low level machine code.
+
+See the comments for the MACHINE_TIMEOUT macro on how they are used in
+detail.
+
+- Rank 1: `MACHINE_TIMEOUT`
 
 `STARTUP_SUB_LOCKS_EARLY`
 -------------------------
@@ -189,6 +201,8 @@ Initializes the percpu subsystem.
 Rank 1: allocates the percpu memory, `percpu_foreach_base` and `percpu_foreach`
         become usable.
 
+Rank 2: sets up static percpu counters.
+
 
 `STARTUP_SUB_LOCKS`
 -------------------
@@ -204,7 +218,6 @@ tracing features). Available hooks are:
 ### Rank usage
 
 - Rank 1: `LCK_MTX_DECLARE`.
-
 
 `STARTUP_SUB_CODESIGNING`
 -------------------------
@@ -231,7 +244,7 @@ Initializes the `os_log` facilities.
 
 
 `STARTUP_SUB_MACH_IPC`
--------------------
+----------------------
 
 ### Description
 
@@ -241,6 +254,34 @@ Initializes the Mach IPC subsystem.
 
 - Rank 1: Initializes IPC submodule globals (ipc tables, voucher hashes, ...)
 - Rank last: Final IPC initialization.
+
+
+`STARTUP_SUB_THREAD_CALL`
+-------------------------
+
+### Description
+
+Initializes the Thread call subsystem (and dependent subsystems).
+
+### Rank usage
+
+- Rank 1: Initiailizes the thread call subsystem
+- Rank Middle: Initialize modules needing thread calls
+
+
+`STARTUP_SUB_SYSCTL`
+--------------------
+
+### Description
+
+Initializes the sysctl kernel subsystem
+
+### Rank usage
+
+- Rank 1: automatic `SYSCTL_NODE` registration.
+- Rank 2: automatic `SYSCTL_OID` registration.
+- Middle: other manual early registrations.
+- Last: registrations of dummy nodes in the constant nodes to allow extension.
 
 
 `STARTUP_SUB_EARLY_BOOT`
@@ -253,7 +294,8 @@ interrupts or preemption enabled may begin enforcement.
 
 ### Rank usage
 
-N/A.
+- Rank 1: Initialize some BSD globals
+- Middle: Initialize some early BSD subsystems
 
 
 `STARTUP_SUB_LOCKDOWN`
@@ -271,5 +313,3 @@ When the kernel locks down:
 ### Rank usage
 
 N/A.
-
-

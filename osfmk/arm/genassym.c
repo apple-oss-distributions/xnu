@@ -147,8 +147,6 @@ main(
 #endif
 	DECLARE("ACT_DEBUGDATA", offsetof(struct thread, machine.DebugData));
 	DECLARE("TH_IOTIER_OVERRIDE", offsetof(struct thread, iotier_override));
-	DECLARE("TH_RWLOCK_CNT", offsetof(struct thread, rwlock_count));
-	DECLARE("TH_TMP_ALLOC_CNT", offsetof(struct thread, t_temp_alloc_count));
 	DECLARE("TH_SCHED_FLAGS", offsetof(struct thread, sched_flags));
 	DECLARE("TH_SFLAG_RW_PROMOTED", TH_SFLAG_RW_PROMOTED);
 
@@ -348,15 +346,6 @@ main(
 	    offsetof(struct boot_args, memSize));
 	DECLARE("BA_TOP_OF_KERNEL_DATA",
 	    offsetof(struct boot_args, topOfKernelData));
-
-	DECLARE("ENTROPY_SAMPLE_COUNT",
-	    offsetof(entropy_data_t, sample_count));
-	DECLARE("ENTROPY_BUFFER",
-	    offsetof(entropy_data_t, buffer));
-	DECLARE("ENTROPY_BUFFER_INDEX_MASK",
-	    offsetof(entropy_data_t, buffer_index_mask));
-	DECLARE("ENTROPY_BUFFER_ROR_MASK",
-	    offsetof(entropy_data_t, ror_mask));
 
 	return 0;
 }

@@ -31,6 +31,7 @@
 
 #include "IOReportTypes.h"
 #include <string.h>
+#include <os/overflow.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -123,12 +124,17 @@ do {  \
  *    void* simp_buf - ptr to memory initialized by SIMPLEREPORT_INIT()
  * int64_t increment - amount by which to increment the value
  */
-#define SIMPLEREPORT_INCREMENTVALUE(simp_buf, new_value)  \
+#define SIMPLEREPORT_INCREMENTVALUE(simp_buf, increment_by)  \
 do {  \
     IOReportElement *__elem = (IOReportElement *)(simp_buf);  \
     IOSimpleReportValues *__vals;  \
     __vals = (IOSimpleReportValues*)&__elem->values;  \
-    __vals->simple_value += (new_value);  \
+    int64_t __simple_value = INT64_MAX;  \
+    if (os_add_overflow(__vals->simple_value, (increment_by), &__simple_value)) {  \
+    __vals->simple_value = INT64_MAX;  \
+    } else {  \
+    __vals->simple_value = __simple_value;  \
+    }  \
 } while(0)
 
 
@@ -343,7 +349,9 @@ do {  \
     int *__nElements = (int *)(result);  \
     if (((action) == kIOReportGetDimensions) || ((action) == kIOReportCopyChannelData)) {  \
 	__elem =  &(__info->elem[0]);  \
-	*__nElements += __elem->channel_type.nelements;  \
+    if (os_add_overflow(*__nElements, __elem->channel_type.nelements, __nElements)) {  \
+	*__nElements = INT_MAX;  \
+    }  \
     }  \
 } while (0)
 
@@ -485,7 +493,9 @@ do {  \
 #define SIMPLEARRAY_INCREMENTVALUE(array_buf, idx, value)  \
 do {  \
     __SA_FINDREP((array_buf), (idx)) \
-	__rep->simple_values[__valueIdx] += (value);  \
+    if (os_add_overflow(__rep->simple_values[__valueIdx], (value), &__rep->simple_values[__valueIdx])) {  \
+	__rep->simple_values[__valueIdx] = INT64_MAX;  \
+    } \
     } \
 } while(0)
 
@@ -523,7 +533,9 @@ do {  \
     int *__nElements = (int *)(result);  \
     __elem = &(((IOReportElement *)(array_buf))[0]);  \
     if (((action) == kIOReportGetDimensions) || ((action) == kIOReportCopyChannelData)) {  \
-	*__nElements += __elem->channel_type.nelements;  \
+    if (os_add_overflow(*__nElements, __elem->channel_type.nelements, __nElements)) {  \
+	*__nElements = INT_MAX;  \
+    }  \
     }  \
 } while (0)
 
@@ -640,7 +652,12 @@ do {  \
 	    else if ((value) > __rep->bucket_max) {  \
 	        __rep->bucket_max = (value);  \
 	    }  \
-	    __rep->bucket_sum += (value);  \
+	int64_t __sum = 0;  \
+	if (os_add_overflow(__rep->bucket_sum, (value), &__sum)) {  \
+	    __rep->bucket_sum = INT64_MAX;  \
+	} else {  \
+	    __rep->bucket_sum = __sum;  \
+	}  \
 	    __rep->bucket_hits++;  \
 	    break;  \
 	}  \
@@ -678,7 +695,9 @@ do {  \
     IOHistReportInfo   *__info = (IOHistReportInfo *)(hist_buf);  \
     int *__nElements = (int *)(result);  \
     if (((action) == kIOReportGetDimensions) || ((action) == kIOReportCopyChannelData)) {  \
-	*__nElements += __info->elem[0].channel_type.nelements;  \
+	if (os_add_overflow(*__nElements, __info->elem[0].channel_type.nelements, __nElements)) {  \
+	    *__nElements = INT_MAX;  \
+	}  \
     }  \
 } while (0)
 

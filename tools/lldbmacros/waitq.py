@@ -15,7 +15,7 @@ def GetWaitqStateStr(waitq):
 
 def GetWaitqBitsStr(waitq):
     out_str = ""
-    if (Cast(waitq.waitq_interlock, 'int') != 0):
+    if int(waitq.waitq_interlock.nticket) != int(waitq.waitq_interlock.cticket):
         if waitq.waitq_irq:
             out_str += '!'
         else:
@@ -49,25 +49,18 @@ def WaitqTableElemValid(e):
 def WaitqTableElemRefcnt(e):
     return (e.wqte.lt_bits & 0x1fffffff)
 
+LTABLE_ID_GEN_SHIFT = 0
+LTABLE_ID_GEN_BITS  = 46
+LTABLE_ID_GEN_MASK  = 0x00003fffffffffff
+LTABLE_ID_IDX_SHIFT = LTABLE_ID_GEN_BITS
+LTABLE_ID_IDX_BITS  = 18
+LTABLE_ID_IDX_MASK  = 0xffffc00000000000
+
 def WaitqTableIdxFromId(id):
-    if hasattr(kern.globals, 'g_lt_idx_max'):
-        idx = id & unsigned(kern.globals.g_lt_idx_max)
-    else:
-        # best guess
-        idx = id & 0x000000000003ffff
-    return int(idx)
+    return int((id & LTABLE_ID_IDX_MASK) >> LTABLE_ID_IDX_SHIFT)
 
 def WaitqTableGenFromId(id):
-    if hasattr(kern.globals, 'g_lt_idx_max'):
-        msk = ~unsigned(kern.globals.g_lt_idx_max)
-    else:
-        # best guess
-        msk = ~0x000000000003ffff
-    shift = 0
-    while (msk & 0x1) == 0:
-        msk >>= 1
-        shift += 1
-    return (unsigned(id) >> shift) & msk
+    return (unsigned(id) & LTABLE_ID_GEN_MASK) >> LTABLE_ID_GEN_SHIFT
 
 def GetWaitqLink(id):
     if int(id) == 0:
@@ -113,37 +106,26 @@ def GetWaitqPrepost(id):
 def GetWaitqSetidString(setid):
     idx = WaitqTableIdxFromId(setid)
     gen = WaitqTableGenFromId(setid)
-    # This must match the format used in WaitqSetsFromLink
     str = "{:>7d}/{:<#14x}".format(unsigned(idx), unsigned(gen))
     return str
 
 
-def WaitqSetsFromLink(link, sets, depth):
-    if int(link) == 0:
-        sets.append("{: <22s}".format("<link:NULL>"))
-        return
-    if WaitqTableElemType(link) == "ELEM":
-        #sets.append("{: <#18x}".format(unsigned(link.wql_wqs.wql_set)))
-        #sets.append("{:>7d}/{:<#14x}".format(unsigned(id.idx),unsigned(id.generation)))
-        sets.append(GetWaitqSetidString(link.wqte.lt_id.id))
-        return
-    if depth >= 950:
-        sets.append("{: <22s}".format("!recursion limit!"))
-        return
-    left_link = GetWaitqLink(link.wql_link.left_setid)[0]
-    right_link = GetWaitqLink(link.wql_link.right_setid)[0]
-    WaitqSetsFromLink(left_link, sets, depth + 1)
-    WaitqSetsFromLink(right_link, sets, depth + 1)
-    return
-
 def GetWaitqSets(waitq):
     sets = []
+
     if int(waitq) == 0:
         return sets
-    if waitq.waitq_set_id == 0:
-        return sets
-    link = GetWaitqLink(waitq.waitq_set_id)[0]
-    WaitqSetsFromLink(link, sets, 0)
+
+    ref = waitq.waitq_set_id
+    while int(ref.wqr_value) != 0:
+        if int(ref.wqr_value) & 1:
+            sets.append(GetWaitqSetidString(ref.wqr_value))
+            break
+
+        link = Cast(ref.wqr_value, 'struct waitq_link *')
+        sets.append(GetWaitqSetidString(link.wql_node))
+        ref  = link.wql_next
+
     return sets
 
 def GetFrameString(pc, compact=True):
@@ -183,23 +165,21 @@ def GetWaitqSetidLinkSummary(link, verbose=False):
     refcnt = WaitqTableElemRefcnt(link)
     out_str = fmt_str.format(l=link, v=v, t=type, rcnt=refcnt)
     if type == "WQS":
-        out_str += "wqs:{0: <#18x}".format(unsigned(link.wql_wqs.wql_set))
+        out_str += "wqs:{0: <#18x}".format(unsigned(link.wql_set))
     elif type == "LINK":
-        lID = link.wql_link.left_setid
-        rID = link.wql_link.right_setid
-        left = GetWaitqLink(lID)[0]
-        right = GetWaitqLink(rID)[0]
-        ltype = "<invalid>"
-        if WaitqTableElemValid(left):
-            ltype = WaitqTableElemType(left)
-            if ltype == "ELEM":
-                ltype = "WQS"
-        rtype = "<invalid>"
-        if WaitqTableElemValid(right):
-            rtype = WaitqTableElemType(right)
-            if rtype == "ELEM":
-                rtype = "WQS"
-        out_str += "left:{:<#x}({:s}), right:{:<#x}({:s})".format(lID, ltype, rID, rtype)
+        sID = link.wql_node
+        stype = "<invalid>"
+        if WaitqTableElemValid(GetWaitqLink(sID)[0]):
+            stype = "WQS"
+        if int(link.wql_next.wqr_value) & 1:
+            nID = link.wql_next.wqr_value
+            ntype = "<invalid>"
+            if WaitqTableElemValid(GetWaitqLink(nID)[0]):
+                ntype = "WQS"
+        else:
+            nID = WaitqTableElemId(Cast(link.wql_next.wqr_value, 'struct waitq_link *'))
+            ntype = "LINK"
+        out_str += "set:{:<#x}({:s}), next:{:<#x}({:s})".format(sID, stype, nID, ntype)
     if hasattr(link, 'sl_alloc_bt') and unsigned(link.sl_alloc_bt[0]) > 0:
         fmt_str = "\n{:s}alloc_bt({:d}):[".format(' '*87, link.sl_alloc_ts)
         f = 0
@@ -241,29 +221,28 @@ def GetWaitqSetidLinkSummary(link, verbose=False):
 def PrintWaitqSetidLinkTree(link, verbose, sets, indent=87):
     if not WaitqTableElemType(link) == "LINK":
         return
-    lID = link.wql_link.left_setid
-    rID = link.wql_link.right_setid
-    left = GetWaitqLink(lID)[0]
-    right = GetWaitqLink(rID)[0]
 
-    ltype = "<invalid>"
-    if WaitqTableElemValid(left):
-        ltype = WaitqTableElemType(left)
-        if ltype == "ELEM":
-            ltype = "WQS"
-    lstr = "L:{:<#x}({:s})".format(lID, ltype)
+    # set
+    sID = link.wql_node
+    sset = GetWaitqLink(nID)[0]
+    stype = "<invalid>"
+    if WaitqTableElemValid(sset):
+        sets.append(addressof(sset.wql_set.wqset_q))
+        stype = "WQS"
+    lstr = "S:{:<#x}({:s})".format(sID, stype)
 
-    rtype = "<invalid>"
-    if WaitqTableElemValid(right):
-        rtype = WaitqTableElemType(right)
-        if rtype == "ELEM":
-            rtype = "WQS"
-    rstr = "R:{:<#x}({:s})".format(rID, rtype)
-
-    if ltype == "WQS":
-        sets.append(addressof(left.wql_wqs.wql_set.wqset_q))
-    if rtype == "WQS":
-        sets.append(addressof(right.wql_wqs.wql_set.wqset_q))
+    # next
+    if int(link.wql_next.wqr_value) & 1:
+        nID = link.wql_next.wqr_value
+        nset = GetWaitqLink(nID)[0]
+        ntype = "<invalid>"
+        if WaitqTableElemValid():
+            sets.append(addressof(sset.wql_set.wqset_q))
+            ntype = "WQS"
+    else:
+        nID = WaitqTableElemId(Cast(link.wql_next.wqr_value, 'struct waitq_link *'))
+        ntype = "LINK"
+    rstr = "P:{:<#x}({:s})".format(sID, stype)
 
     print "{:s}`->{:s}, {:s}".format(' '*indent, lstr, rstr)
     if ltype == "WQS":
@@ -297,7 +276,7 @@ def ShowSetidLink(cmd_args=None, cmd_options={}):
     if "-T" in cmd_options:
         showtree = 1
     if "-S" in cmd_options:
-        id = unsigned(kern.GetValueFromAddress(cmd_options["-S"], 'uint64_t *'))
+        id = value(kern.GetValueFromAddress(0).GetSBValue().CreateValueFromExpression(None, '(uint64_t)'+cmd_options["-S"]))
         link, warn_str = GetWaitqLink(id)
         if not link:
             if warn_str != '':
@@ -350,246 +329,6 @@ def ShowWaitqLink(cmd_args=None, cmd_options={}):
     """ Print waitq_link structure summary
     """
     ShowSetidLink(cmd_args, cmd_options)
-
-
-# Macro: showallsetidlinks
-@lldb_command('showallsetidlinks', 'V:T:S:F:XQ')
-def ShowAllSetidLinks(cmd_args=None, cmd_options={}):
-    """ Dump / summarize all waitq set linktable elements
-
-        usage: showallsetidlinks [options]
-            -V {0,1}  : only show [1 == valid/live links, 0 == invalid links]
-            -T {type} : only display objects of type {type}
-            -S {desc} : only display objects of type {type} which fit {desc}
-                        -T LINK -S {desc} can be:
-                            iL   : Invalid left-link pointer (only)
-                            iR   : Invalid right-link pointer (only)
-                            iLR  : Invalid left+right link pointers
-                            iLRI : Invalid left+right link pointers AND dead allocating process
-                        w/o "-T" -S {desc} can be:
-                            iP   : Invalid / Dead allocating process
-            -F n      : summarize the backtraces at frame level 'n'
-            -X        : cross-check waitq pointers in link table
-            -Q        : be quiet, only summarize
-    """
-    opt_summary = 0
-    opt_type_filt = ""
-    opt_valid_only = 0
-    opt_invalid_only = 0
-    opt_bt_idx = 0
-    opt_cross_check = 0
-    opt_validate_links = 0
-    opt_subtype_filter = 0
-    verbose = False
-    if config['verbosity'] > vHUMAN:
-        verbose = True
-    if "-Q" in cmd_options:
-        opt_summary = 1
-    if "-V" in cmd_options:
-        if int(cmd_options["-V"]) == 1:
-            opt_valid_only = 1
-        elif int(cmd_options["-V"]) == 0:
-            opt_invalid_only = 1
-        else:
-            raise ArgumentError("Invalid parameter to -V '{:s}': expecting 0 or 1".format(cmd_options["-V"]))
-    if "-X" in cmd_options:
-        opt_cross_check = 1
-        nunique_wqs = 0
-        nduplicated_wqs = 0
-        max_wqs_dupes = 0
-    if "-F" in cmd_options:
-        opt_bt_idx = unsigned(cmd_options["-F"])
-        if hasattr(kern.globals, "g_nwaitq_btframes"):
-            if opt_bt_idx >= unsigned(kern.globals.g_nwaitq_btframes):
-                raise ArgumentError("Invalid BT index '{:s}' max:{:d}".format(cmd_options["-F"], unsigned(kern.globals.g_nwaitq_btframes) - 1))
-    if "-T" in cmd_options:
-        opt_type_filt = cmd_options["-T"]
-        if opt_type_filt == "FREE" or opt_type_filt == "RSVD" or opt_type_filt == "LINK":
-            pass
-        elif opt_type_filt == "WQS":
-            opt_type_filt = "ELEM"
-        else:
-            raise ArgumentError("Invalid type filter'{:s}'".format(cmd_options["-T"]))
-    if "-S" in cmd_options:
-        opt_subtype_filter = cmd_options["-S"]
-        if opt_type_filt == "LINK":
-            if not (opt_subtype_filter == "iL" or \
-                    opt_subtype_filter == "iR" or \
-                    opt_subtype_filter == "iLR" or \
-                    opt_subtype_filter == "iLRI"):
-                raise ArgumentError("Invalid LINK sub-type filter \{desc\}: {:s}".format(opt_subtype_filter))
-        elif opt_type_filt == "":
-            if not opt_subtype_filter == "iP":
-                raise ArgumentError("Invalid sub-type filter \{desc\}: {:s}".format(opt_subtype_filter))
-    table = kern.globals.g_wqlinktable
-    nelem = int(table.nelem)
-    wq_ptr = {}
-    bt_summary = {}
-    nfree = 0
-    ninv = 0
-    nwqs = 0
-    nlink = 0
-    nrsvd = 0
-    hdr_str = "Looking through {:d} waitq_link objects from g_wqlinktable@{:<#x}".format(nelem, addressof(kern.globals.g_wqlinktable))
-    if opt_type_filt != "" or opt_valid_only != 0:
-        hdr_str += "\n\t`-> for "
-        if opt_valid_only:
-            hdr_str += "valid "
-        else:
-            hdr_str += "all "
-        if opt_type_filt == "":
-            hdr_str += "objects"
-        else:
-            hdr_str += "{:s} objects".format(opt_type_filt)
-    else:
-        if opt_valid_only:
-            hdr_str += "\n\t`-> showing only VALID links"
-        elif opt_invalid_only:
-            hdr_str += "\n\t`-> showing only INVALID links"
-    if opt_subtype_filter != 0:
-        if opt_type_filt != "LINK" and opt_type_filt != "":
-            raise ArgumentError("Subtype (-S {desc}) can only be used with (-T LINK) or no type filter at all")
-        hdr_str += "\n\t`-> filtering {:s} objects through '{:s}'".format(opt_type_filt, opt_subtype_filter)
-    if opt_cross_check:
-        hdr_str += "\n\t`-> cross-checking WQS elements for duplicates"
-    hdr_str += "\n\n"
-    print hdr_str
-    if not opt_summary:
-        print GetWaitqSetidLinkSummary.header
-    id = 0
-    while id < nelem:
-        if id == 0:
-            # Set a generation count to differentiate from an invalid ID
-            first_entry = Cast(kern.globals.g_wqlinktable.table[0], 'lt_elem *')
-            link = GetWaitqLink(first_entry.lt_id.id)[0]
-        else:
-            link = GetWaitqLink(id)[0]
-        if not link:
-            print "<<<invalid link:{:d}>>>".format(id)
-            ninv += 1
-        else:
-            lt = WaitqTableElemType(link)
-            isvalid = WaitqTableElemValid(link)
-            inconsistent = 0
-            do_print = not ( (isvalid and opt_invalid_only) or (not isvalid and opt_valid_only) )
-            if do_print and opt_subtype_filter != 0 and lt == "LINK":
-                lID = link.wql_link.left_setid
-                rID = link.wql_link.right_setid
-                left = GetWaitqLink(lID)[0]
-                right = GetWaitqLink(rID)[0]
-                lValid = WaitqTableElemValid(left)
-                rValid = WaitqTableElemValid(right)
-                if opt_subtype_filter == "iL":
-                    if lValid or (not lValid and not rValid):
-                        do_print = False
-                elif opt_subtype_filter == "iR":
-                    if rValid or (not rValid and not lValid):
-                        do_print = False
-                elif opt_subtype_filter == "iLR":
-                    if rValid or lValid:
-                        do_print = False
-                elif opt_subtype_filter == "iLRI" and hasattr(link, 'sl_alloc_task'):
-                    # only print this if both left and right are invalid
-                    # and the allocating task is unknown/dead
-                    do_print = False
-                    is_dead = 0
-                    pid = -1
-                    try:
-                        pid = GetProcPIDForTask(link.sl_alloc_task)
-                    except:
-                        if link.sl_alloc_task:
-                            pid = unsigned(link.sl_alloc_task.audit_token.val[5])
-                    if pid < 0:
-                        is_dead = 1
-                    else:
-                        pidnm = GetProcNameForPid(pid)
-                        if pidnm == "Unknown":
-                            is_dead = 1
-                    if (not rValid) and (not lValid) and is_dead:
-                        do_print = True
-
-            if do_print and opt_type_filt == "" and opt_subtype_filter == "iP" and hasattr(link, 'sl_alloc_task'):
-                # Only print non-free table objects that were allocated by
-                # dead processes
-                do_print = False
-                is_dead = 0
-                pid = -1
-                try:
-                    pid = GetProcPIDForTask(link.sl_alloc_task)
-                except:
-                    if link.sl_alloc_task:
-                        pid = unsigned(link.sl_alloc_task.audit_token.val[5])
-                if pid < 0:
-                    is_dead = 1
-                else:
-                    pidnm = GetProcNameForPid(pid)
-                    if pidnm == "Unknown":
-                        is_dead = 1
-                if is_dead:
-                    do_print = True
-
-            if (opt_type_filt == "" or opt_type_filt == lt) and do_print:
-                if lt == "ELEM":
-                    nwqs += 1
-                elif lt == "LINK":
-                    nlink += 1
-                elif lt == "RSVD":
-                    nrsvd += 1
-                elif lt == "FREE":
-                    nfree += 1
-                else:
-                    ninv += 1
-                    inconsistent = 1
-                if hasattr(link, 'sl_alloc_bt'):
-                    pc = unsigned(link.sl_alloc_bt[opt_bt_idx])
-                    pc_str = str(pc)
-                    if pc > 0:
-                        if pc_str in bt_summary:
-                            bt_summary[pc_str] += 1
-                        else:
-                            bt_summary[pc_str] = 1
-                if not opt_summary:
-                    print GetWaitqSetidLinkSummary(link, verbose)
-                if inconsistent:
-                    ninconsistent += 1
-                    # print out warnings about inconsistent state as we parse
-                    # the list - even if the caller wants a summary
-                    print "[WARNING] inconsistent state in idx: {:d} ({:s} element)".format(link.wqte.lt_id.idx, lt)
-            if opt_cross_check == 1 and lt == "ELEM":
-                wq = unsigned(addressof(link.wql_wqs.wql_set.wqset_q))
-                if wq in wq_ptr:
-                    wq_ptr[wq].append(id)
-                    l = len(wq_ptr[wq])
-                    if l == 2:
-                        nduplicated_wqs += 1
-                    if l > max_wqs_dupes:
-                        max_wqs_dupes = l
-                else:
-                    wq_ptr[wq] = [ id ]
-                    nunique_wqs += 1
-        id += 1
-        if opt_summary or verbose:
-            if verbose and opt_cross_check:
-                sys.stderr.write('[{:d}|{:d}|{:d}] id: {:d}/{:d}...          \r'.format(nunique_wqs, nduplicated_wqs, max_wqs_dupes, id, nelem))
-            else:
-                sys.stderr.write('id: {:d}/{:d}...          \r'.format(id, nelem))
-
-    nused = nwqs + nlink + nrsvd
-    nfound = nused + nfree + ninv
-    print "\n\nFound {:d} objects: {:d} WQS, {:d} LINK, {:d} RSVD, {:d} FREE".format(nfound, nwqs, nlink, nrsvd, nfree)
-    if (opt_type_filt == "" and opt_valid_only == 0) and (nused != table.used_elem):
-        print"\tWARNING: inconsistent state! Table reports {:d}/{:d} used elem, found {:d}/{:d}".format(table.used_elem, nelem, nused, nfound)
-    if len(bt_summary) > 0:
-        print "Link allocation BT (frame={:d})".format(opt_bt_idx)
-    for k,v in bt_summary.iteritems():
-        print "\t[{:d}] from: {:s}".format(v, GetSourceInformationForAddress(unsigned(k)))
-    if opt_cross_check:
-        print "\n{:d} Duplicated WQS objects:".format(nduplicated_wqs)
-        for wq in wq_ptr:
-            l = len(wq_ptr[wq])
-            if l > 1:
-                print "\tWQS:{:#x} ({:d} {:s}".format(wq, l, str(wq_ptr[wq]))
-# EndMacro: showallsetidlinks
 
 
 # Macro: showallpreposts
@@ -819,6 +558,8 @@ def GetPrepostChain(head_id, inv_ok = False, pp_arr = 0):
     pp = []
     if unsigned(head_id) == 0:
         return [ "{0: <#18x}:{1: <18s}".format(head_id, "<invalid>") ]
+    if unsigned(head_id) == 0xffffffffffffffff:
+        return [ "{0: <#18x}:{1: <18s}".format(head_id, "<anonymous>") ]
     wqp = GetWaitqPrepost(head_id)[0]
     if wqp != 0:
         WaitqPrepostFromObj(wqp, head_id, inv_ok, pp, pp_arr)
@@ -832,10 +573,6 @@ def GetWaitqPreposts(waitq):
     wqset = Cast(waitq, 'waitq_set *')
     if wqset.wqset_prepost_id == 0:
         return []
-    if not wqset.wqset_q.waitq_prepost:
-        # If the "prepost_id" is non-zero, but the 'waitq_prepost' bit is
-        # *not* set, then this waitq actually has a prepost hook!
-        return [ "{0: <#18x}:{1: <18s}".format(wqset.wqset_prepost_id, "<hook>") ]
     return GetPrepostChain(wqset.wqset_prepost_id)
 
 
@@ -972,7 +709,7 @@ def ShowWaitq(cmd_args=None, cmd_options={}):
                 raise ArgumentError("Invalid link ID {:s}".format(cmd_options["-S"]))
         if WaitqTableElemType(link) != "ELEM":
             raise ArgumentError("Link ID {:s} points to a SLT_LINK object, not an SLT_WQS!".format(cmd_options["-S"]))
-        waitq = addressof(link.wql_wqs.wql_set.wqset_q)
+        waitq = addressof(link.wql_set.wqset_q)
 
     if not waitq and not cmd_args:
         raise ArgumentError("Please pass the address of a waitq!")

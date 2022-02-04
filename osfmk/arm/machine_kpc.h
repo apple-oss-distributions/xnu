@@ -28,6 +28,8 @@
 #ifndef _MACHINE_ARM_KPC_H
 #define _MACHINE_ARM_KPC_H
 
+#include <stdint.h>
+
 #ifdef ARMA7
 
 #define KPC_ARM_FIXED_COUNT             1

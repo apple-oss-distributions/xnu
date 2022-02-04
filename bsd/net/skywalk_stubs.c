@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015-2020 Apple Inc. All rights reserved.
+ * Copyright (c) 2015-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -68,6 +68,9 @@ STUB(kern_channel_increment_ring_stats);
 STUB(kern_channel_increment_ring_net_stats);
 STUB(kern_channel_tx_refill);
 STUB(kern_channel_get_service_class);
+STUB(kern_netif_queue_rx_enqueue);
+STUB(kern_netif_queue_tx_dequeue);
+STUB(kern_netif_queue_get_service_class);
 STUB(kern_copy_and_inet_checksum);
 STUB(kern_inet_checksum);
 STUB(kern_nexus_attr_create);
@@ -90,6 +93,8 @@ STUB(kern_nexus_get_default_domain_provider);
 STUB(kern_nexus_get_context);
 STUB(kern_nexus_get_pbufpool);
 STUB(kern_nexus_register_domain_provider);
+STUB(kern_nexus_netif_llink_add);
+STUB(kern_nexus_netif_llink_remove);
 STUB(kern_packet_clear_flow_uuid);
 STUB(kern_packet_clone);
 STUB(kern_packet_clone_nosleep);
@@ -151,11 +156,18 @@ STUB(kern_packet_set_vlan_tag);
 STUB(kern_packet_get_vlan_tag);
 STUB(kern_packet_get_vlan_id);
 STUB(kern_packet_get_vlan_priority);
+STUB(kern_packet_set_wake_flag);
+STUB(kern_packet_get_wake_flag);
 STUB(kern_packet_add_buflet);
 STUB(kern_packet_append);
 STUB(kern_packet_get_next);
+STUB(kern_packet_set_next);
 STUB(kern_packet_set_chain_counts);
 STUB(kern_packet_get_chain_counts);
+STUB(kern_packet_set_trace_id);
+STUB(kern_packet_get_trace_id);
+STUB(kern_packet_trace_event);
+STUB(kern_packet_copy_bytes);
 STUB(kern_pbufpool_alloc);
 STUB(kern_pbufpool_alloc_batch);
 STUB(kern_pbufpool_alloc_batch_callback);

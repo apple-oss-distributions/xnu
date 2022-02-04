@@ -30,9 +30,6 @@
 
 __BEGIN_DECLS
 
-extern int netem_init(void);
-extern void netem_fini(void);
-
 extern int netem_config(struct netem **ne, const char *name,
     const struct if_netem_params *p, void *output_handle,
     int (*output)(void *handle, pktsched_pkt_t *pkts, uint32_t n_pkts),

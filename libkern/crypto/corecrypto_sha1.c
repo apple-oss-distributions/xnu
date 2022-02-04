@@ -69,15 +69,6 @@ SHA1Final(void *digest, SHA1_CTX *ctx)
 	ccdigest_final(di, di_ctx, digest);
 }
 
-#ifdef XNU_KERNEL_PRIVATE
-void
-SHA1UpdateUsePhysicalAddress(SHA1_CTX *ctx, const void *data, size_t len)
-{
-	//TODO: What the hell ?
-	SHA1Update(ctx, data, len);
-}
-#endif
-
 /* This is not publicised in header, but exported in libkern.exports */
 void SHA1Final_r(SHA1_CTX *context, void *digest);
 void
@@ -108,7 +99,7 @@ sha1_hardware_hook(Boolean option, InKernelPerformSHA1Func func, void *ref)
 		OSCompareAndSwapPtr((void*)NULL, (void*)ref, (void * volatile*)&SHA1Ref);
 
 		if (!OSCompareAndSwapPtr((void *)NULL, (void *)func, (void * volatile *)&performSHA1WithinKernelOnly)) {
-			panic("sha1_hardware_hook: Called twice.. Should never happen\n");
+			panic("sha1_hardware_hook: Called twice.. Should never happen");
 		}
 	} else {
 		// The hardware is going away. Tear down the hook.

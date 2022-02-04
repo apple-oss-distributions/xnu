@@ -43,6 +43,7 @@ class IOMemoryMap;
 
 // IOMemoryDescriptor Create options
 enum {
+	kIOMemoryDirectionNone       = 0x00000000,
 	kIOMemoryDirectionIn         = 0x00000001,
 	kIOMemoryDirectionOut        = 0x00000002,
 	kIOMemoryDirectionOutIn      = kIOMemoryDirectionIn | kIOMemoryDirectionOut,
@@ -54,6 +55,11 @@ enum {
 enum {
 	kIOMemoryMapFixedAddress          = 0x00000001,
 	kIOMemoryMapReadOnly              = 0x00000002,
+	kIOMemoryMapGuardedMask           = 0x0000001C,
+	kIOMemoryMapGuardedDefault        = 0x00000000,
+	kIOMemoryMapGuardedNone           = 0x00000004,
+	kIOMemoryMapGuardedSmall          = 0x00000008,
+	kIOMemoryMapGuardedLarge          = 0x0000000C,
 	kIOMemoryMapCacheModeDefault      = 0x00000000,
 	kIOMemoryMapCacheModeInhibit      = 0x00000100,
 	kIOMemoryMapCacheModeCopyback     = 0x00000200,

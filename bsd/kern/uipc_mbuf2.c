@@ -869,7 +869,7 @@ m_sum16(struct mbuf *m, uint32_t off, uint32_t len)
 	 * a M_PKTHDR one.
 	 */
 	if ((mlen = m_length2(m, NULL)) < (off + len)) {
-		panic("%s: mbuf %p len (%d) < off+len (%d+%d)\n", __func__,
+		panic("%s: mbuf %p len (%d) < off+len (%d+%d)", __func__,
 		    m, mlen, off, len);
 		/* NOTREACHED */
 	}

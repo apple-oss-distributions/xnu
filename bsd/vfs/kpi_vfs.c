@@ -145,13 +145,17 @@ static void xattrfile_setattr(vnode_t dvp, const char * basename,
     struct vnode_attr * vap, vfs_context_t ctx);
 #endif /* CONFIG_APPLEDOUBLE */
 
-extern lck_rw_t * rootvnode_rw_lock;
+extern lck_rw_t rootvnode_rw_lock;
 
 static errno_t post_rename(vnode_t fdvp, vnode_t fvp, vnode_t tdvp, vnode_t tvp);
 
-static ZONE_VIEW_DEFINE(ZV_VFS_CONTEXT, "vfs_context",
-    KHEAP_ID_DEFAULT, sizeof(struct vfs_context));
+KALLOC_TYPE_DEFINE(KT_VFS_CONTEXT, struct vfs_context, KT_PRIV_ACCT);
 
+extern int fstypenumstart;
+char vfs_typenum_arr[13];
+
+LCK_GRP_DECLARE(typenum_arr_grp, "typenum array group");
+LCK_MTX_DECLARE(vfs_typenum_mtx, &typenum_arr_grp);
 /*
  * vnode_setneedinactive
  *
@@ -941,15 +945,40 @@ vfs_fsadd(struct vfs_fsentry *vfe, vfstable_t *handle)
 		return EINVAL;
 	}
 
-	newvfstbl = kheap_alloc(KHEAP_TEMP, sizeof(struct vfstable),
-	    Z_WAITOK | Z_ZERO);
+	newvfstbl = kalloc_type(struct vfstable, Z_WAITOK | Z_ZERO);
 	newvfstbl->vfc_vfsops = vfe->vfe_vfsops;
 	strncpy(&newvfstbl->vfc_name[0], vfe->vfe_fsname, MFSNAMELEN);
 	if ((vfe->vfe_flags & VFS_TBLNOTYPENUM)) {
-		newvfstbl->vfc_typenum = maxvfstypenum++;
+		int tmp;
+		int found = 0;
+		lck_mtx_lock(&vfs_typenum_mtx);
+		for (tmp = fstypenumstart; tmp < OID_AUTO_START; tmp++) {
+			if (isclr(vfs_typenum_arr, tmp)) {
+				newvfstbl->vfc_typenum = tmp;
+				setbit(vfs_typenum_arr, tmp);
+				found = 1;
+				break;
+			}
+		}
+		if (!found) {
+			lck_mtx_unlock(&vfs_typenum_mtx);
+			return EINVAL;
+		}
+		if (maxvfstypenum < OID_AUTO_START) {
+			/* getvfsbyname checks up to but not including maxvfstypenum */
+			maxvfstypenum = newvfstbl->vfc_typenum + 1;
+		}
+		lck_mtx_unlock(&vfs_typenum_mtx);
 	} else {
 		newvfstbl->vfc_typenum = vfe->vfe_fstypenum;
+		lck_mtx_lock(&vfs_typenum_mtx);
+		setbit(vfs_typenum_arr, newvfstbl->vfc_typenum);
+		if (newvfstbl->vfc_typenum >= maxvfstypenum) {
+			maxvfstypenum = newvfstbl->vfc_typenum + 1;
+		}
+		lck_mtx_unlock(&vfs_typenum_mtx);
 	}
+
 
 	newvfstbl->vfc_refcount = 0;
 	newvfstbl->vfc_flags = 0;
@@ -1005,8 +1034,8 @@ vfs_fsadd(struct vfs_fsentry *vfe, vfstable_t *handle)
 	 */
 	/* XXX - shouldn't be M_TEMP */
 
-	descsize = desccount * vfs_opv_numops * sizeof(PFI);
-	descptr = kheap_alloc(KHEAP_DEFAULT, descsize, Z_WAITOK | Z_ZERO);
+	descsize = desccount * vfs_opv_numops;
+	descptr = kalloc_type(PFI, descsize, Z_WAITOK | Z_ZERO);
 
 	newvfstbl->vfc_descptr = descptr;
 	newvfstbl->vfc_descsize = descsize;
@@ -1063,7 +1092,6 @@ vfs_fsadd(struct vfs_fsentry *vfe, vfstable_t *handle)
 			    opve_descp->opve_impl;
 		}
 
-
 		/*
 		 * Finally, go back and replace unfilled routines
 		 * with their default.  (Sigh, an O(n^3) algorithm.  I
@@ -1086,13 +1114,7 @@ vfs_fsadd(struct vfs_fsentry *vfe, vfstable_t *handle)
 		}
 	} /* end of each vnodeopv_desc parsing */
 
-
-
 	*handle = vfstable_add(newvfstbl);
-
-	if (newvfstbl->vfc_typenum <= maxvfstypenum) {
-		maxvfstypenum = newvfstbl->vfc_typenum + 1;
-	}
 
 	if (newvfstbl->vfc_vfsops->vfs_init) {
 		struct vfsconf vfsc;
@@ -1108,7 +1130,7 @@ vfs_fsadd(struct vfs_fsentry *vfe, vfstable_t *handle)
 		(*newvfstbl->vfc_vfsops->vfs_init)(&vfsc);
 	}
 
-	kheap_free(KHEAP_TEMP, newvfstbl, sizeof(struct vfstable));
+	kfree_type(struct vfstable, newvfstbl);
 
 	return 0;
 }
@@ -1133,6 +1155,14 @@ vfs_fsremove(vfstable_t handle)
 		return EBUSY;
 	}
 
+	/* Free the spot in vfs_typenum_arr */
+	lck_mtx_lock(&vfs_typenum_mtx);
+	clrbit(vfs_typenum_arr, handle->vfc_typenum);
+	if (maxvfstypenum == handle->vfc_typenum) {
+		maxvfstypenum--;
+	}
+	lck_mtx_unlock(&vfs_typenum_mtx);
+
 	/*
 	 * save the old descriptor; the free cannot occur unconditionally,
 	 * since vfstable_del() may fail.
@@ -1147,7 +1177,7 @@ vfs_fsremove(vfstable_t handle)
 
 	/* free the descriptor if the delete was successful */
 	if (err == 0) {
-		kheap_free(KHEAP_DEFAULT, old_desc, descsize);
+		kfree_type(PFI, descsize, old_desc);
 	}
 
 	return err;
@@ -1186,6 +1216,28 @@ int
 vfs_context_pid(vfs_context_t ctx)
 {
 	return proc_pid(vfs_context_proc(ctx));
+}
+
+int
+vfs_context_copy_audit_token(vfs_context_t ctx, audit_token_t *token)
+{
+	kern_return_t           err;
+	task_t                  task = NULL;
+	mach_msg_type_number_t  info_size = TASK_AUDIT_TOKEN_COUNT;
+
+	if (ctx != NULL && ctx->vc_thread != NULL) {
+		task = get_threadtask(ctx->vc_thread);
+	}
+
+	if (task == NULL) {
+		// Not sure how this would happen; we are supposed to be
+		// in the middle of using the context. Regardless, don't
+		// wander off a NULL pointer.
+		return ESRCH;
+	}
+
+	err = task_info(task, TASK_AUDIT_TOKEN, (integer_t *)token, &info_size);
+	return (err) ? ESRCH : 0;
 }
 
 int
@@ -1267,9 +1319,11 @@ vfs_context_proc(vfs_context_t ctx)
 	if (ctx != NULL && ctx->vc_thread != NULL) {
 		proc = (proc_t)get_bsdthreadtask_info(ctx->vc_thread);
 	}
-	if (proc != NULL && (proc->p_fd == NULL || (proc->p_lflag & P_LVFORK))) {
+#if CONFIG_VFORK
+	if (proc != NULL && (proc->p_lflag & P_LVFORK)) {
 		proc = NULL;
 	}
+#endif /* CONFIG_VFORK */
 
 	return proc == NULL ? current_proc() : proc;
 }
@@ -1376,9 +1430,8 @@ vfs_context_cwd(vfs_context_t ctx)
 		 * from the process, instead.
 		 */
 		if ((cwd = uth->uu_cdir) == NULLVP &&
-		    (proc = (proc_t)get_bsdthreadtask_info(ctx->vc_thread)) != NULL &&
-		    proc->p_fd != NULL) {
-			cwd = proc->p_fd->fd_cdir;
+		    (proc = (proc_t)get_bsdthreadtask_info(ctx->vc_thread)) != NULL) {
+			cwd = proc->p_fd.fd_cdir;
 		}
 	}
 
@@ -1403,23 +1456,21 @@ vfs_context_create(vfs_context_t ctx)
 {
 	vfs_context_t newcontext;
 
-	newcontext = zalloc_flags(ZV_VFS_CONTEXT, Z_WAITOK | Z_ZERO);
+	newcontext = zalloc_flags(KT_VFS_CONTEXT, Z_WAITOK | Z_ZERO | Z_NOFAIL);
 
-	if (newcontext) {
-		kauth_cred_t safecred;
-		if (ctx) {
-			newcontext->vc_thread = ctx->vc_thread;
-			safecred = ctx->vc_ucred;
-		} else {
-			newcontext->vc_thread = current_thread();
-			safecred = kauth_cred_get();
-		}
-		if (IS_VALID_CRED(safecred)) {
-			kauth_cred_ref(safecred);
-		}
-		newcontext->vc_ucred = safecred;
-		return newcontext;
+	kauth_cred_t safecred;
+	if (ctx) {
+		newcontext->vc_thread = ctx->vc_thread;
+		safecred = ctx->vc_ucred;
+	} else {
+		newcontext->vc_thread = current_thread();
+		safecred = kauth_cred_get();
 	}
+	if (IS_VALID_CRED(safecred)) {
+		kauth_cred_ref(safecred);
+	}
+	newcontext->vc_ucred = safecred;
+	return newcontext;
 	return NULL;
 }
 
@@ -1477,7 +1528,7 @@ vfs_context_rele(vfs_context_t ctx)
 		if (IS_VALID_CRED(ctx->vc_ucred)) {
 			kauth_cred_unref(&ctx->vc_ucred);
 		}
-		zfree(ZV_VFS_CONTEXT, ctx);
+		zfree(KT_VFS_CONTEXT, ctx);
 	}
 	return 0;
 }
@@ -1526,6 +1577,36 @@ vfs_context_bind(vfs_context_t ctx)
 }
 
 int
+vfs_set_thread_fs_private(uint8_t tag, uint64_t fs_private)
+{
+	struct uthread *ut;
+
+	if (tag != FS_PRIVATE_TAG_APFS) {
+		return ENOTSUP;
+	}
+
+	ut = get_bsdthread_info(current_thread());
+	ut->t_fs_private = fs_private;
+
+	return 0;
+}
+
+int
+vfs_get_thread_fs_private(uint8_t tag, uint64_t *fs_private)
+{
+	struct uthread *ut;
+
+	if (tag != FS_PRIVATE_TAG_APFS) {
+		return ENOTSUP;
+	}
+
+	ut = get_bsdthread_info(current_thread());
+	*fs_private = ut->t_fs_private;
+
+	return 0;
+}
+
+int
 vfs_isswapmount(mount_t mnt)
 {
 	return mnt && ISSET(mnt->mnt_kern_flag, MNTK_SWAP_MOUNT) ? 1 : 0;
@@ -1565,18 +1646,19 @@ vnode_makeimode(int indx, int mode)
 vnode_t
 vfs_rootvnode(void)
 {
-	int error;
+	vnode_t vp = NULLVP;
 
-	lck_rw_lock_shared(rootvnode_rw_lock);
-	error = vnode_get(rootvnode);
-	lck_rw_unlock_shared(rootvnode_rw_lock);
-	if (error) {
-		return (vnode_t)0;
-	} else {
-		return rootvnode;
+	if (rootvnode) {
+		lck_rw_lock_shared(&rootvnode_rw_lock);
+		vp = rootvnode;
+		if (vp && (vnode_get(vp) != 0)) {
+			vp = NULLVP;
+		}
+		lck_rw_unlock_shared(&rootvnode_rw_lock);
 	}
-}
 
+	return vp;
+}
 
 uint32_t
 vnode_vid(vnode_t vp)
@@ -1703,6 +1785,14 @@ vnode_isrecycled(vnode_t vp)
 	return ret;
 }
 
+/* is this vnode marked for termination */
+int
+vnode_willberecycled(vnode_t vp)
+{
+	return (vp->v_lflag & VL_MARKTERM) ? 1 : 0;
+}
+
+
 /* vnode was created by background task requesting rapid aging
  *  and has not since been referenced by a normal task */
 int
@@ -1813,7 +1903,7 @@ vnode_lookup_continue_needed(vnode_t vp, struct componentname *cnp)
 	struct nameidata *ndp = cnp->cn_ndp;
 
 	if (ndp == NULL) {
-		panic("vnode_lookup_continue_needed(): cnp->cn_ndp is NULL\n");
+		panic("vnode_lookup_continue_needed(): cnp->cn_ndp is NULL");
 	}
 
 	if (vnode_isdir(vp)) {
@@ -4222,7 +4312,7 @@ vn_rename(struct vnode *fdvp, struct vnode **fvpp, struct componentname *fcnp, s
 		/* Get source attribute file name. */
 		xfromname_len = fcnp->cn_namelen + 3;
 		if (xfromname_len > sizeof(smallname1)) {
-			xfromname = kheap_alloc(KHEAP_TEMP, xfromname_len, Z_WAITOK);
+			xfromname = kalloc_data(xfromname_len, Z_WAITOK);
 		} else {
 			xfromname = &smallname1[0];
 		}
@@ -4232,7 +4322,7 @@ vn_rename(struct vnode *fdvp, struct vnode **fvpp, struct componentname *fcnp, s
 		/* Get destination attribute file name. */
 		xtoname_len = tcnp->cn_namelen + 3;
 		if (xtoname_len > sizeof(smallname2)) {
-			xtoname = kheap_alloc(KHEAP_TEMP, xtoname_len, Z_WAITOK);
+			xtoname = kalloc_data(xtoname_len, Z_WAITOK);
 		} else {
 			xtoname = &smallname2[0];
 		}
@@ -4245,7 +4335,7 @@ vn_rename(struct vnode *fdvp, struct vnode **fvpp, struct componentname *fcnp, s
 		 * in the rename syscall. It's OK if the source file does not exist, since this
 		 * is only for AppleDouble files.
 		 */
-		fromnd = kheap_alloc(KHEAP_TEMP, sizeof(struct nameidata), Z_WAITOK);
+		fromnd = kalloc_type(struct nameidata, Z_WAITOK);
 		NDINIT(fromnd, RENAME, OP_RENAME, NOFOLLOW | USEDVP | CN_NBMOUNTLOOK,
 		    UIO_SYSSPACE, CAST_USER_ADDR_T(xfromname), ctx);
 		fromnd->ni_dvp = fdvp;
@@ -4321,10 +4411,16 @@ vn_rename(struct vnode *fdvp, struct vnode **fvpp, struct componentname *fcnp, s
 
 #if CONFIG_MACF
 	if (_err == 0) {
-		mac_vnode_notify_rename(ctx, *fvpp, tdvp, tcnp);
-		if (flags & VFS_RENAME_SWAP) {
-			mac_vnode_notify_rename(ctx, *tvpp, fdvp, fcnp);
-		}
+		mac_vnode_notify_rename(
+			ctx,                        /* ctx */
+			*fvpp,                      /* fvp */
+			fdvp,                       /* fdvp */
+			fcnp,                       /* fcnp */
+			*tvpp,                      /* tvp */
+			tdvp,                       /* tdvp */
+			tcnp,                       /* tcnp */
+			(flags & VFS_RENAME_SWAP)   /* swap */
+			);
 	}
 #endif
 
@@ -4340,7 +4436,7 @@ vn_rename(struct vnode *fdvp, struct vnode **fvpp, struct componentname *fcnp, s
 		 * Note that tdvp already has an iocount reference. Make sure to check that we
 		 * get a valid vnode from namei.
 		 */
-		tond = kheap_alloc(KHEAP_TEMP, sizeof(struct nameidata), Z_WAITOK);
+		tond = kalloc_type(struct nameidata, Z_WAITOK);
 		NDINIT(tond, RENAME, OP_RENAME,
 		    NOCACHE | NOFOLLOW | USEDVP | CN_NBMOUNTLOOK, UIO_SYSSPACE,
 		    CAST_USER_ADDR_T(xtoname), ctx);
@@ -4434,14 +4530,14 @@ ad_error:
 		nameidone(tond);
 	}
 	if (xfromname && xfromname != &smallname1[0]) {
-		kheap_free(KHEAP_TEMP, xfromname, xfromname_len);
+		kfree_data(xfromname, xfromname_len);
 	}
 	if (xtoname && xtoname != &smallname2[0]) {
-		kheap_free(KHEAP_TEMP, xtoname, xtoname_len);
+		kfree_data(xtoname, xtoname_len);
 	}
 #endif /* CONFIG_APPLEDOUBLE */
-	kheap_free(KHEAP_TEMP, fromnd, sizeof(struct nameidata));
-	kheap_free(KHEAP_TEMP, tond, sizeof(struct nameidata));
+	kfree_type(struct nameidata, fromnd);
+	kfree_type(struct nameidata, tond);
 	return _err;
 }
 
@@ -4918,7 +5014,7 @@ xattrfile_remove(vnode_t dvp, const char * basename, vfs_context_t ctx, int forc
 	alloc_len = snprintf(filename, sizeof(smallname), "._%s", basename);
 	if (alloc_len >= sizeof(smallname)) {
 		alloc_len++;  /* snprintf result doesn't include '\0' */
-		filename = kheap_alloc(KHEAP_TEMP, alloc_len, Z_WAITOK);
+		filename = kalloc_data(alloc_len, Z_WAITOK);
 		copy_len = snprintf(filename, alloc_len, "._%s", basename);
 	}
 	NDINIT(&nd, DELETE, OP_UNLINK, WANTPARENT | LOCKLEAF | NOFOLLOW | USEDVP, UIO_SYSSPACE,
@@ -4975,7 +5071,7 @@ out1:
 	vnode_put(xvp);
 out2:
 	if (filename && filename != &smallname[0]) {
-		kheap_free(KHEAP_TEMP, filename, alloc_len);
+		kfree_data(filename, alloc_len);
 	}
 }
 
@@ -4990,7 +5086,8 @@ xattrfile_setattr(vnode_t dvp, const char * basename, struct vnode_attr * vap,
 	struct nameidata nd;
 	char smallname[64];
 	char *filename = NULL;
-	size_t len;
+	size_t alloc_len;
+	size_t copy_len;
 
 	if ((dvp == NULLVP) ||
 	    (basename == NULL) || (basename[0] == '\0') ||
@@ -4998,11 +5095,11 @@ xattrfile_setattr(vnode_t dvp, const char * basename, struct vnode_attr * vap,
 		return;
 	}
 	filename = &smallname[0];
-	len = snprintf(filename, sizeof(smallname), "._%s", basename);
-	if (len >= sizeof(smallname)) {
-		len++;  /* snprintf result doesn't include '\0' */
-		filename = kheap_alloc(KHEAP_TEMP, len, Z_WAITOK);
-		len = snprintf(filename, len, "._%s", basename);
+	alloc_len = snprintf(filename, sizeof(smallname), "._%s", basename);
+	if (alloc_len >= sizeof(smallname)) {
+		alloc_len++;  /* snprintf result doesn't include '\0' */
+		filename = kalloc_data(alloc_len, Z_WAITOK);
+		copy_len = snprintf(filename, alloc_len, "._%s", basename);
 	}
 	NDINIT(&nd, LOOKUP, OP_SETATTR, NOFOLLOW | USEDVP, UIO_SYSSPACE,
 	    CAST_USER_ADDR_T(filename), ctx);
@@ -5028,7 +5125,7 @@ xattrfile_setattr(vnode_t dvp, const char * basename, struct vnode_attr * vap,
 	vnode_put(xvp);
 out2:
 	if (filename && filename != &smallname[0]) {
-		kheap_free(KHEAP_TEMP, filename, len);
+		kfree_data(filename, alloc_len);
 	}
 }
 #endif /* CONFIG_APPLEDOUBLE */
@@ -5436,7 +5533,8 @@ VNOP_ADVLOCK(struct vnode *vp, caddr_t id, int op, struct flock *fl, int flags, 
 			_err = (*vp->v_op[vnop_advlock_desc.vdesc_offset])(&a);
 		}
 		DTRACE_FSINFO(advlock, vnode_t, vp);
-		if (op == F_UNLCK && flags == F_FLOCK) {
+		if (op == F_UNLCK &&
+		    (flags & (F_FLOCK | F_OFD_LOCK)) != 0) {
 			post_event_if_success(vp, _err, NOTE_FUNLOCK);
 		}
 	}
@@ -5887,6 +5985,7 @@ struct vnop_verify_args {
 	char *a_buf;
 	size_t a_bufsize;
 	size_t *a_verifyblksize;
+	void **a_verify_ctxp;
 	int a_flags;
 	vfs_context_t a_context;
 };
@@ -5894,13 +5993,14 @@ struct vnop_verify_args {
 
 errno_t
 VNOP_VERIFY(struct vnode *vp, off_t foffset, uint8_t *buf, size_t bufsize,
-    size_t *verify_block_size, vnode_verify_flags_t flags, vfs_context_t ctx)
+    size_t *verify_block_size, void **verify_ctxp, vnode_verify_flags_t flags,
+    vfs_context_t ctx)
 {
 	int _err;
 	struct vnop_verify_args a;
 
 	if (ctx == NULL) {
-		ctx = vfs_context_current();
+		ctx = vfs_context_kernel();
 	}
 	a.a_desc = &vnop_verify_desc;
 	a.a_vp = vp;
@@ -5909,6 +6009,7 @@ VNOP_VERIFY(struct vnode *vp, off_t foffset, uint8_t *buf, size_t bufsize,
 	a.a_bufsize = bufsize;
 	a.a_verifyblksize = verify_block_size;
 	a.a_flags = flags;
+	a.a_verify_ctxp = verify_ctxp;
 	a.a_context = ctx;
 
 	_err = (*vp->v_op[vnop_verify_desc.vdesc_offset])(&a);

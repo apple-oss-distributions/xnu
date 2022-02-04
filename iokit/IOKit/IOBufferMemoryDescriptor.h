@@ -103,6 +103,45 @@ public:
 		mach_vm_address_t alignment,
 		mach_vm_address_t physicalMask);
 
+#ifdef XNU_KERNEL_PRIVATE
+/*
+ * By default the buffer allocated in IOBufferMemoryDescriptor is
+ * considered to contain "pure data" and no kernel pointers. It
+ * is therefore colocated with other data buffers.
+ *
+ * This API allows to create a buffer that contains pointers and
+ * will not be redirected to the data heap/map.
+ */
+	bool initControlWithPhysicalMask(
+		task_t            inTask,
+		IOOptionBits      options,
+		mach_vm_size_t    capacity,
+		mach_vm_address_t alignment,
+		mach_vm_address_t physicalMask);
+#endif
+
+#ifdef KERNEL_PRIVATE
+	/*
+	 * Create an IOBufferMemoryDescriptor with guard pages on each side of the buffer allocation.
+	 * @param inTask The task the buffer will be allocated in.
+	 * @param options Options for the IOBufferMemoryDescriptor. See inTaskWithOptions for a description of available options.
+	 *                Some options are not available when using guard pages. Specifically, physically contiguous memory and pageable memory
+	 *                options are not supported. If these options are used, this will fail to create the memory descriptor and return NULL.
+	 * @param capacity The number of bytes to allocate. Due to how memory with guard pages is allocated, this will be rounded up to page size.
+	 *                 The buffer will also always be aligned to the page size.
+	 * @result Returns an instance of class IOBufferMemoryDescriptor to be released by the caller, which will free the memory descriptor and associated buffer.
+	 */
+	static OSPtr<IOBufferMemoryDescriptor> inTaskWithGuardPages(
+		task_t            inTask,
+		IOOptionBits      options,
+		mach_vm_size_t    capacity);
+
+	bool initWithGuardPages(
+		task_t            inTask,
+		IOOptionBits      options,
+		mach_vm_size_t    capacity);
+#endif
+
 #ifdef __LP64__
 	OSMetaClassDeclareReservedUnused(IOBufferMemoryDescriptor, 0);
 	OSMetaClassDeclareReservedUnused(IOBufferMemoryDescriptor, 1);

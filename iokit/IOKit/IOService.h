@@ -56,6 +56,12 @@
 #include <DriverKit/IOService.h>
 #include <libkern/c++/OSPtr.h>
 
+#if __cplusplus >= 201703L
+extern "C++" {
+#include <libkern/c++/OSSharedPtr.h>
+}
+#endif
+
 extern "C" {
 #include <kern/thread_call.h>
 }
@@ -76,7 +82,11 @@ enum {
 	kIOServiceRegisteredState   = 0x00000002,
 	kIOServiceMatchedState  = 0x00000004,
 	kIOServiceFirstPublishState = 0x00000008,
-	kIOServiceFirstMatchState   = 0x00000010
+	kIOServiceFirstMatchState   = 0x00000010,
+	kIOServiceReservedMatchState   = 0x80000000,
+#if XNU_KERNEL_PRIVATE
+	kIOServiceUserInvisibleMatchState = kIOServiceReservedMatchState,
+#endif /* XNU_KERNEL_PRIVATE */
 };
 
 enum {
@@ -87,6 +97,7 @@ enum {
 	kIOServiceRequired      = 0x00000001,
 	kIOServiceTerminate     = 0x00000004,
 	kIOServiceTerminateWithRematch = 0x00000010,
+	kIOServiceTerminateWithRematchCurrentDext = 0x00000020,
 
 	// options for registerService() & terminate()
 	kIOServiceSynchronous   = 0x00000002,
@@ -138,6 +149,7 @@ extern const OSSymbol *     gIOUserServerClassKey;
 extern const OSSymbol *     gIOUserServerNameKey;
 extern const OSSymbol *     gIOUserServerTagKey;
 extern const OSSymbol *     gIOUserUserClientKey;
+extern const OSSymbol *     gIOAssociatedServicesKey;
 
 extern const OSSymbol *     gIOKitDebugKey;
 extern const OSSymbol *     gIOServiceKey;
@@ -178,7 +190,9 @@ extern const OSSymbol *     gIODriverKitEntitlementKey;
 extern const OSSymbol *     gIOServiceDEXTEntitlementsKey;
 extern const OSSymbol *     gIODriverKitUserClientEntitlementsKey;
 extern const OSSymbol *     gIODriverKitUserClientEntitlementAllowAnyKey;
+extern const OSSymbol *     gIODriverKitRequiredEntitlementsKey;
 extern const OSSymbol *     gIOMatchDeferKey;
+
 extern const OSSymbol *     gIOAllCPUInitializedKey;
 
 #if XNU_KERNEL_PRIVATE && !defined(IOServiceTrace)
@@ -208,7 +222,11 @@ typedef void (*IOInterruptAction)( OSObject * target, void * refCon,
 
 #ifdef __BLOCKS__
 typedef void (^IOInterruptActionBlock)(IOService * nub, int source);
+typedef kern_return_t (^IOStateNotificationHandler)(void);
 #endif /* __BLOCKS__ */
+
+typedef void * IOStateNotificationListenerRef;
+class IOStateNotificationItem;
 
 /*! @typedef IOServiceNotificationHandler
  *   @param target Reference supplied when the notification was registered.
@@ -367,6 +385,8 @@ class IOUserServerCheckInToken;
 struct IOInterruptAccountingData;
 struct IOInterruptAccountingReporter;
 struct OSObjectUserVars;
+struct IOServiceStateChangeVars;
+struct IOInterruptSourcePrivate;
 
 class IOService : public IORegistryEntry
 {
@@ -394,6 +414,9 @@ protected:
 		int interruptStatisticsArrayCount;
 
 		OSObjectUserVars * uvars;
+		IOServiceStateChangeVars * svars;
+
+		IOInterruptSourcePrivate * interruptSourcesPrivate;
 	};
 
 /*! @var reserved
@@ -506,6 +529,18 @@ public:
  *   @param destination  - destination for this update (action-specific)
  */
 	virtual IOReturn updateReport(IOReportChannelList      *channels,
+	    IOReportUpdateAction      action,
+	    void                     *result,
+	    void                     *destination);
+
+protected:
+
+	/* these are helper methods for DriverKit */
+	IOReturn _ConfigureReport(IOReportChannelList   *channels,
+	    IOReportConfigureAction action,
+	    void                  *result,
+	    void                  *destination);
+	IOReturn _UpdateReport(IOReportChannelList      *channels,
 	    IOReportUpdateAction      action,
 	    void                     *result,
 	    void                     *destination);
@@ -918,6 +953,18 @@ public:
 	static OSPtr<OSDictionary>  serviceMatching( const char * className,
 	    OSDictionary * table = NULL );
 
+#if __cplusplus >= 201703L
+/*! @function serviceMatching
+ *   @abstract Creates a matching dictionary, or adds matching properties to an existing dictionary, that specify an IOService class match.
+ *   @discussion A very common matching criteria for IOService object is based on its class. <code>serviceMatching</code> creates a matching dictionary that specifies any IOService object of a class, or its subclasses. The class is specified by name, and an existing dictionary may be passed in, in which case the matching properties will be added to that dictionary rather than creating a new one.
+ *   @param className The class name, as a const C string. Class matching is successful on IOService objects of this class or any subclass.
+ *   @param table If zero, <code>serviceMatching</code> creates a matching dictionary and returns a reference to it, otherwise the matching properties are added to the specified dictionary.
+ *   @result The matching dictionary created, or passed in, is returned on success, or zero on failure. */
+
+	static OSSharedPtr<OSDictionary> serviceMatching( const char * className,
+	    OSSharedPtr<OSDictionary> table);
+#endif
+
 /*! @function serviceMatching
  *   @abstract Creates a matching dictionary, or adds matching properties to an existing dictionary, that specify an IOService class match.
  *   @discussion A very common matching criteria for IOService object is based on its class. <code>serviceMatching</code> creates a matching dictionary that specifies any IOService of a class, or its subclasses. The class is specified by name, and an existing dictionary may be passed in, in which case the matching properties will be added to that dictionary rather than creating a new one.
@@ -927,6 +974,18 @@ public:
 
 	static OSPtr<OSDictionary>  serviceMatching( const OSString * className,
 	    OSDictionary * table = NULL );
+
+#if __cplusplus >= 201703L
+/*! @function serviceMatching
+ *   @abstract Creates a matching dictionary, or adds matching properties to an existing dictionary, that specify an IOService class match.
+ *   @discussion A very common matching criteria for IOService object is based on its class. <code>serviceMatching</code> creates a matching dictionary that specifies any IOService of a class, or its subclasses. The class is specified by name, and an existing dictionary may be passed in, in which case the matching properties will be added to that dictionary rather than creating a new one.
+ *   @param className The class name, as an OSString (which includes OSSymbol). Class matching is successful on IOService objects of this class or any subclass.
+ *   @param table If zero, <code>serviceMatching</code> creates a matching dictionary and returns a reference to it, otherwise the matching properties are added to the specified dictionary.
+ *   @result The matching dictionary created, or passed in, is returned on success, or zero on failure. */
+
+	static OSSharedPtr<OSDictionary> serviceMatching( const OSString * className,
+	    OSSharedPtr<OSDictionary> table);
+#endif
 
 /*! @function nameMatching
  *   @abstract Creates a matching dictionary, or adds matching properties to an existing dictionary, that specify an IOService name match.
@@ -938,6 +997,18 @@ public:
 	static OSPtr<OSDictionary>  nameMatching( const char * name,
 	    OSDictionary * table = NULL );
 
+#if __cplusplus >= 201703L
+/*! @function nameMatching
+ *   @abstract Creates a matching dictionary, or adds matching properties to an existing dictionary, that specify an IOService name match.
+ *   @discussion A very common matching criteria for IOService object is based on its name. <code>nameMatching</code> creates a matching dictionary that specifies any IOService object which responds successfully to the @link //apple_ref/cpp/instm/IORegistryEntry/compareName/virtualbool/(OSString*,OSString**) IORegistryEntry::compareName@/link method. An existing dictionary may be passed in, in which case the matching properties will be added to that dictionary rather than creating a new one.
+ *   @param name The service's name, as a const C string. Name matching is successful on IOService objects that respond successfully to the <code>IORegistryEntry::compareName</code> method.
+ *   @param table If zero, <code>nameMatching</code> creates a matching dictionary and returns a reference to it, otherwise the matching properties are added to the specified dictionary.
+ *   @result The matching dictionary created, or passed in, is returned on success, or zero on failure. */
+
+	static OSSharedPtr<OSDictionary> nameMatching( const char * name,
+	    OSSharedPtr<OSDictionary> table);
+#endif
+
 /*! @function nameMatching
  *   @abstract Creates a matching dictionary, or adds matching properties to an existing dictionary, that specify an IOService name match.
  *   @discussion A very common matching criteria for IOService object is based on its name. <code>nameMatching</code> creates a matching dictionary that specifies any IOService object which responds successfully to the @link //apple_ref/cpp/instm/IORegistryEntry/compareName/virtualbool/(OSString*,OSString**) IORegistryEntry::compareName@/link method. An existing dictionary may be passed in, in which case the matching properties will be added to that dictionary rather than creating a new one.
@@ -947,6 +1018,18 @@ public:
 
 	static OSPtr<OSDictionary>  nameMatching( const OSString* name,
 	    OSDictionary * table = NULL );
+
+#if __cplusplus >= 201703L
+/*! @function nameMatching
+ *   @abstract Creates a matching dictionary, or adds matching properties to an existing dictionary, that specify an IOService name match.
+ *   @discussion A very common matching criteria for IOService object is based on its name. <code>nameMatching</code> creates a matching dictionary that specifies any IOService object which responds successfully to the @link //apple_ref/cpp/instm/IORegistryEntry/compareName/virtualbool/(OSString*,OSString**) IORegistryEntry::compareName@/link method. An existing dictionary may be passed in, in which case the matching properties will be added to that dictionary rather than creating a new one.
+ *   @param name The service's name, as an OSString (which includes OSSymbol). Name matching is successful on IOService objects that respond successfully to the <code>IORegistryEntry::compareName</code> method.
+ *   @param table If zero, <code>nameMatching</code> creates a matching dictionary and returns a reference to it, otherwise the matching properties are added to the specified dictionary.
+ *   @result The matching dictionary created, or passed in, is returned on success, or zero on failure. */
+
+	static OSSharedPtr<OSDictionary> nameMatching( const OSString* name,
+	    OSSharedPtr<OSDictionary> table);
+#endif
 
 /*! @function resourceMatching
  *   @abstract Creates a matching dictionary, or adds matching properties to an existing dictionary, that specify a resource service match.
@@ -958,6 +1041,18 @@ public:
 	static OSPtr<OSDictionary>  resourceMatching( const char * name,
 	    OSDictionary * table = NULL );
 
+#if __cplusplus >= 201703L
+/*! @function resourceMatching
+ *   @abstract Creates a matching dictionary, or adds matching properties to an existing dictionary, that specify a resource service match.
+ *   @discussion IOService maintains a resource service IOResources that allows objects to be published and found globally in the I/O Kit based on a name, using the standard IOService matching and notification calls.
+ *   @param name The resource name, as a const C string. Resource matching is successful when an object by that name has been published with the <code>publishResource</code> method.
+ *   @param table If zero, <code>resourceMatching</code> creates a matching dictionary and returns a reference to it, otherwise the matching properties are added to the specified dictionary.
+ *   @result The matching dictionary created, or passed in, is returned on success, or zero on failure. */
+
+	static OSSharedPtr<OSDictionary> resourceMatching( const char * name,
+	    OSSharedPtr<OSDictionary> table);
+#endif
+
 /*! @function resourceMatching
  *   @abstract Creates a matching dictionary, or adds matching properties to an existing dictionary, that specify a resource service match.
  *   @discussion IOService maintains a resource service IOResources that allows objects to be published and found globally in the I/O Kit based on a name, using the standard IOService matching and notification calls.
@@ -967,6 +1062,18 @@ public:
 
 	static OSPtr<OSDictionary>  resourceMatching( const OSString * name,
 	    OSDictionary * table = NULL );
+
+#if __cplusplus >= 201703L
+/*! @function resourceMatching
+ *   @abstract Creates a matching dictionary, or adds matching properties to an existing dictionary, that specify a resource service match.
+ *   @discussion IOService maintains a resource service IOResources that allows objects to be published and found globally in the I/O Kit based on a name, using the standard IOService matching and notification calls.
+ *   @param name The resource name, as an OSString (which includes OSSymbol). Resource matching is successful when an object by that name has been published with the <code>publishResource</code> method.
+ *   @param table If zero, <code>resourceMatching</code> creates a matching dictionary and returns a reference to it, otherwise the matching properties are added to the specified dictionary.
+ *   @result The matching dictionary created, or passed in, is returned on success, or zero on failure. */
+
+	static OSSharedPtr<OSDictionary> resourceMatching( const OSString * name,
+	    OSSharedPtr<OSDictionary> table);
+#endif
 
 
 /*! @function propertyMatching
@@ -980,6 +1087,19 @@ public:
 	static OSPtr<OSDictionary>  propertyMatching( const OSSymbol * key, const OSObject * value,
 	    OSDictionary * table = NULL );
 
+#if __cplusplus >= 201703L
+/*! @function propertyMatching
+ *   @abstract Creates a matching dictionary, or adds matching properties to an existing dictionary, that specify an IOService phandle match.
+ *   @discussion TODO A very common matching criteria for IOService is based on its name. nameMatching will create a matching dictionary that specifies any IOService which respond successfully to the IORegistryEntry method compareName. An existing dictionary may be passed in, in which case the matching properties will be added to that dictionary rather than creating a new one.
+ *   @param key The service's phandle, as a const UInt32. PHandle matching is successful on IOService objects that respond successfully to the IORegistryEntry method compareName.
+ *   @param value The service's phandle, as a const UInt32. PHandle matching is successful on IOService's which respond successfully to the IORegistryEntry method compareName.
+ *   @param table If zero, nameMatching will create a matching dictionary and return a reference to it, otherwise the matching properties are added to the specified dictionary.
+ *   @result The matching dictionary created, or passed in, is returned on success, or zero on failure. */
+
+	static OSSharedPtr<OSDictionary>  propertyMatching( const OSSymbol * key, const OSObject * value,
+	    OSSharedPtr<OSDictionary> table);
+#endif
+
 /*! @function registryEntryIDMatching
  *   @abstract Creates a matching dictionary, or adds matching properties to an existing dictionary, that specify a IORegistryEntryID match.
  *   @discussion <code>registryEntryIDMatching</code> creates a matching dictionary that specifies the IOService object with the assigned registry entry ID (returned by <code>IORegistryEntry::getRegistryEntryID()</code>). An existing dictionary may be passed in, in which case the matching properties will be added to that dictionary rather than creating a new one.
@@ -989,6 +1109,18 @@ public:
 
 	static OSDictionary * registryEntryIDMatching( uint64_t entryID,
 	    OSDictionary * table = NULL );
+
+#if __cplusplus >= 201703L
+/*! @function registryEntryIDMatching
+ *   @abstract Creates a matching dictionary, or adds matching properties to an existing dictionary, that specify a IORegistryEntryID match.
+ *   @discussion <code>registryEntryIDMatching</code> creates a matching dictionary that specifies the IOService object with the assigned registry entry ID (returned by <code>IORegistryEntry::getRegistryEntryID()</code>). An existing dictionary may be passed in, in which case the matching properties will be added to that dictionary rather than creating a new one.
+ *   @param entryID The service's ID. Matching is successful on the IOService object that return that ID from the <code>IORegistryEntry::getRegistryEntryID()</code> method.
+ *   @param table If zero, <code>registryEntryIDMatching</code> creates a matching dictionary and returns a reference to it, otherwise the matching properties are added to the specified dictionary.
+ *   @result The matching dictionary created, or passed in, is returned on success, or zero on failure. */
+
+	static OSSharedPtr<OSDictionary> registryEntryIDMatching( uint64_t entryID,
+	    OSSharedPtr<OSDictionary> table);
+#endif
 
 
 /*! @function addLocation
@@ -1143,6 +1275,8 @@ public:
  *   @result A pointer to the IOResources instance. It should not be released by the caller. */
 
 	static IOService * getResourceService( void );
+
+	static IOService * getSystemStateNotificationService(void);
 
 /* Allocate resources for a matched service */
 
@@ -1434,6 +1568,12 @@ public:
 	static void userSpaceWillReboot();
 	static void userSpaceDidReboot();
 
+	IOStateNotificationItem * stateNotificationItemCopy(OSString * itemName, OSDictionary * schema);
+	kern_return_t stateNotificationListenerAdd(OSArray * items,
+	    IOStateNotificationListenerRef * outRef,
+	    IOStateNotificationHandler handler);
+	kern_return_t stateNotificationListenerRemove(IOStateNotificationListenerRef ref);
+
 private:
 	static IOReturn waitMatchIdle( UInt32 ms );
 	static OSPtr<IONotifier>  installNotification(
@@ -1484,6 +1624,12 @@ private:
 	APPLE_KEXT_COMPATIBILITY_VIRTUAL
 	void doServiceTerminate( IOOptionBits options );
 
+	bool hasParent(IOService * root);
+	static void setRootMedia(IOService * root);
+	static void publishHiddenMedia(IOService * parent);
+	static bool publishHiddenMediaApplier(const OSObject * entry, void * context);
+	bool canTerminateForReplacement(IOService * client);
+
 private:
 
 	bool matchPassive(OSDictionary * table, uint32_t options);
@@ -1508,7 +1654,7 @@ private:
 	static bool syncNotificationHandler( void * target, void * ref,
 	    IOService * newService, IONotifier * notifier  );
 
-	static void userServerCheckInTokenNotificationHandler(
+	static void userServerCheckInTokenCancellationHandler(
 		IOUserServerCheckInToken * token,
 		void * ref);
 
@@ -2078,10 +2224,13 @@ private:
 	void handlePMstop( IOPMRequest * request );
 	void handleRegisterPowerDriver( IOPMRequest * request );
 	bool handleAcknowledgePowerChange( IOPMRequest * request );
+	bool handleAcknowledgeSetPowerState( IOPMRequest * request );
 	void handlePowerDomainWillChangeTo( IOPMRequest * request );
 	void handlePowerDomainDidChangeTo( IOPMRequest * request );
 	void handleRequestPowerState( IOPMRequest * request );
 	void handlePowerOverrideChanged( IOPMRequest * request );
+	bool _activityTickle( unsigned long type, unsigned long stateNumber );
+	void handleDeferredActivityTickle( IOPMRequest * request );
 	void handleActivityTickle( IOPMRequest * request );
 	void handleInterestChanged( IOPMRequest * request );
 	void handleSynchronizePowerTree( IOPMRequest * request );

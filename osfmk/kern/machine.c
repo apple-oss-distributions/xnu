@@ -75,7 +75,6 @@
 #include <mach/processor_server.h>
 
 #include <kern/kern_types.h>
-#include <kern/counters.h>
 #include <kern/cpu_data.h>
 #include <kern/cpu_quiesce.h>
 #include <kern/ipc_host.h>
@@ -88,6 +87,10 @@
 #include <kern/startup.h>
 #include <kern/task.h>
 #include <kern/thread.h>
+
+#include <libkern/OSDebug.h>
+
+#include <pexpert/device_tree.h>
 
 #include <machine/commpage.h>
 #include <machine/machine_routines.h>
@@ -103,7 +106,6 @@ extern void (*dtrace_cpu_state_changed_hook)(int, boolean_t);
 
 #if defined(__x86_64__)
 #include <i386/panic_notify.h>
-#include <libkern/OSDebug.h>
 #endif
 
 /*
@@ -175,8 +177,6 @@ host_reboot(
 		return KERN_INVALID_HOST;
 	}
 
-	assert(host_priv == &realhost);
-
 #if DEVELOPMENT || DEBUG
 	if (options & HOST_REBOOT_DEBUGGER) {
 		Debugger("Debugger");
@@ -233,7 +233,7 @@ processor_shutdown(
 		splx(s);
 		ml_cpu_end_state_transition(processor->cpu_id);
 
-		return KERN_FAILURE;
+		return KERN_NOT_SUPPORTED;
 	}
 
 	if (processor->state == PROCESSOR_START) {
@@ -385,7 +385,7 @@ processor_offline(
 	 * Ensure that primitives that need scheduling (like mutexes) know this.
 	 */
 	if (enforce_quiesce_safety) {
-		disable_preemption();
+		disable_preemption_without_measurements();
 	}
 
 	/* convince slave_main to come back here */
@@ -466,8 +466,6 @@ host_get_boot_info(
 		return KERN_INVALID_HOST;
 	}
 
-	assert(host_priv == &realhost);
-
 	/*
 	 * Copy first operator string terminated by '\0' followed by
 	 *	standardized strings generated from boot string.
@@ -484,6 +482,30 @@ host_get_boot_info(
 #include <mach/sdt.h>
 #endif
 
+
+// These are configured through sysctls.
+#if DEVELOPMENT || DEBUG
+uint32_t phy_read_panic = 1;
+uint32_t phy_write_panic = 1;
+uint64_t simulate_stretched_io = 0;
+#else
+uint32_t phy_read_panic = 0;
+uint32_t phy_write_panic = 0;
+#endif
+
+#if !defined(__x86_64__)
+// The MACHINE_TIMEOUT facility only exists on ARM.
+MACHINE_TIMEOUT32_WRITEABLE(report_phy_read_delay_to, "report-phy-read-delay", 0, MACHINE_TIMEOUT_UNIT_TIMEBASE, NULL);
+MACHINE_TIMEOUT32_WRITEABLE(report_phy_write_delay_to, "report-phy-write-delay", 0, MACHINE_TIMEOUT_UNIT_TIMEBASE, NULL);
+MACHINE_TIMEOUT32_WRITEABLE(trace_phy_read_delay_to, "trace-phy-read-delay", 0, MACHINE_TIMEOUT_UNIT_TIMEBASE, NULL);
+MACHINE_TIMEOUT32_WRITEABLE(trace_phy_write_delay_to, "trace-phy-write-delay", 0, MACHINE_TIMEOUT_UNIT_TIMEBASE, NULL);
+
+unsigned int report_phy_read_osbt;
+unsigned int report_phy_write_osbt;
+
+extern pmap_paddr_t kvtophys(vm_offset_t va);
+#endif
+
 unsigned long long
 ml_io_read(uintptr_t vaddr, int size)
 {
@@ -491,26 +513,31 @@ ml_io_read(uintptr_t vaddr, int size)
 	unsigned char s1;
 	unsigned short s2;
 
-#if defined(__x86_64__)
+#ifdef ML_IO_VERIFY_UNCACHEABLE
+	uintptr_t const paddr = pmap_verify_noncacheable(vaddr);
+#endif /*  ML_IO_VERIFY_UNCACHEABLE */
+
+#ifdef ML_IO_TIMEOUTS_ENABLED
 	uint64_t sabs, eabs;
 	boolean_t istate, timeread = FALSE;
-#if DEVELOPMENT || DEBUG
-	extern uint64_t simulate_stretched_io;
-	uintptr_t paddr = pmap_verify_noncacheable(vaddr);
-#endif /* x86_64 DEVELOPMENT || DEBUG */
-	if (__improbable(reportphyreaddelayabs != 0)) {
+
+#if !defined(__x86_64__)
+	uint32_t const report_phy_read_delay = os_atomic_load(&report_phy_read_delay_to, relaxed);
+	uint32_t const trace_phy_read_delay = os_atomic_load(&trace_phy_read_delay_to, relaxed);
+#endif /* !defined(__x86_64__) */
+
+	if (__improbable(report_phy_read_delay != 0)) {
 		istate = ml_set_interrupts_enabled(FALSE);
 		sabs = mach_absolute_time();
 		timeread = TRUE;
 	}
 
-#if DEVELOPMENT || DEBUG
+#ifdef ML_IO_SIMULATE_STRETCHED_ENABLED
 	if (__improbable(timeread && simulate_stretched_io)) {
 		sabs -= simulate_stretched_io;
 	}
-#endif /* x86_64 DEVELOPMENT || DEBUG */
-
-#endif /* x86_64 */
+#endif /* ML_IO_SIMULATE_STRETCHED_ENABLED */
+#endif /* ML_IO_TIMEOUTS_ENABLED */
 
 	switch (size) {
 	case 1:
@@ -532,30 +559,32 @@ ml_io_read(uintptr_t vaddr, int size)
 		break;
 	}
 
-#if defined(__x86_64__)
+#ifdef ML_IO_TIMEOUTS_ENABLED
 	if (__improbable(timeread == TRUE)) {
 		eabs = mach_absolute_time();
 
-#if DEVELOPMENT || DEBUG
+#ifdef ML_IO_IOTRACE_ENABLED
 		iotrace(IOTRACE_IO_READ, vaddr, paddr, size, result, sabs, eabs - sabs);
-#endif
+#endif /*  ML_IO_IOTRACE_ENABLED */
 
-		if (__improbable((eabs - sabs) > reportphyreaddelayabs)) {
-#if !(DEVELOPMENT || DEBUG)
-			uintptr_t paddr = kvtophys(vaddr);
-#endif
+		if (__improbable((eabs - sabs) > report_phy_read_delay)) {
+#ifndef ML_IO_VERIFY_UNCACHEABLE
+			uintptr_t const paddr = kvtophys(vaddr);
+#endif /* ML_IO_VERIFY_UNCACHEABLE */
 
-			(void)ml_set_interrupts_enabled(istate);
-
-			if (phyreadpanic && (machine_timeout_suspended() == FALSE)) {
+			if (phy_read_panic && (machine_timeout_suspended() == FALSE)) {
+#if defined(__x86_64__)
 				panic_notify();
+#endif /* defined(__x86_64__) */
 				panic("Read from IO vaddr 0x%lx paddr 0x%lx took %llu ns, "
 				    "result: 0x%llx (start: %llu, end: %llu), ceiling: %llu",
 				    vaddr, paddr, (eabs - sabs), result, sabs, eabs,
-				    reportphyreaddelayabs);
+				    (uint64_t)report_phy_read_delay);
 			}
 
-			if (reportphyreadosbt) {
+			(void)ml_set_interrupts_enabled(istate);
+
+			if (report_phy_read_osbt) {
 				OSReportWithBacktrace("ml_io_read(v=%p, p=%p) size %d result 0x%llx "
 				    "took %lluus",
 				    (void *)vaddr, (void *)paddr, size, result,
@@ -565,10 +594,10 @@ ml_io_read(uintptr_t vaddr, int size)
 			DTRACE_PHYSLAT5(physioread, uint64_t, (eabs - sabs),
 			    uint64_t, vaddr, uint32_t, size, uint64_t, paddr, uint64_t, result);
 #endif /* CONFIG_DTRACE */
-		} else if (__improbable(tracephyreaddelayabs > 0 && (eabs - sabs) > tracephyreaddelayabs)) {
-#if !(DEVELOPMENT || DEBUG)
-			uintptr_t paddr = kvtophys(vaddr);
-#endif
+		} else if (__improbable(trace_phy_read_delay > 0 && (eabs - sabs) > trace_phy_read_delay)) {
+#ifndef ML_IO_VERIFY_UNCACHEABLE
+			uintptr_t const __unused paddr = kvtophys(vaddr);
+#endif /* ML_IO_VERIFY_UNCACHEABLE */
 
 			KDBG(MACHDBG_CODE(DBG_MACH_IO, DBC_MACH_IO_MMIO_READ),
 			    (eabs - sabs), VM_KERNEL_UNSLIDE_OR_PERM(vaddr), paddr, result);
@@ -578,7 +607,7 @@ ml_io_read(uintptr_t vaddr, int size)
 			(void)ml_set_interrupts_enabled(istate);
 		}
 	}
-#endif /* x86_64 */
+#endif /*  ML_IO_TIMEOUTS_ENABLED */
 	return result;
 }
 
@@ -611,25 +640,28 @@ ml_io_read64(uintptr_t vaddr)
 void
 ml_io_write(uintptr_t vaddr, uint64_t val, int size)
 {
-#if defined(__x86_64__)
+#ifdef ML_IO_VERIFY_UNCACHEABLE
+	uintptr_t const paddr = pmap_verify_noncacheable(vaddr);
+#endif
+#ifdef ML_IO_TIMEOUTS_ENABLED
 	uint64_t sabs, eabs;
 	boolean_t istate, timewrite = FALSE;
-#if DEVELOPMENT || DEBUG
-	extern uint64_t simulate_stretched_io;
-	uintptr_t paddr = pmap_verify_noncacheable(vaddr);
-#endif /* x86_64 DEVELOPMENT || DEBUG */
-	if (__improbable(reportphywritedelayabs != 0)) {
+#if !defined(__x86_64__)
+	uint32_t report_phy_write_delay = os_atomic_load(&report_phy_write_delay_to, relaxed);
+	uint32_t trace_phy_write_delay = os_atomic_load(&trace_phy_write_delay_to, relaxed);
+#endif /* !defined(__x86_64__) */
+	if (__improbable(report_phy_write_delay != 0)) {
 		istate = ml_set_interrupts_enabled(FALSE);
 		sabs = mach_absolute_time();
 		timewrite = TRUE;
 	}
 
-#if DEVELOPMENT || DEBUG
+#ifdef ML_IO_SIMULATE_STRETCHED_ENABLED
 	if (__improbable(timewrite && simulate_stretched_io)) {
 		sabs -= simulate_stretched_io;
 	}
-#endif /* x86_64 DEVELOPMENT || DEBUG */
-#endif /* x86_64 */
+#endif /* DEVELOPMENT || DEBUG */
+#endif /* ML_IO_TIMEOUTS_ENABLED */
 
 	switch (size) {
 	case 1:
@@ -649,30 +681,32 @@ ml_io_write(uintptr_t vaddr, uint64_t val, int size)
 		break;
 	}
 
-#if defined(__x86_64__)
+#ifdef ML_IO_TIMEOUTS_ENABLED
 	if (__improbable(timewrite == TRUE)) {
 		eabs = mach_absolute_time();
 
-#if DEVELOPMENT || DEBUG
+#ifdef ML_IO_IOTRACE_ENABLED
 		iotrace(IOTRACE_IO_WRITE, vaddr, paddr, size, val, sabs, eabs - sabs);
-#endif
+#endif /* ML_IO_IOTRACE_ENABLED */
 
-		if (__improbable((eabs - sabs) > reportphywritedelayabs)) {
-#if !(DEVELOPMENT || DEBUG)
-			uintptr_t paddr = kvtophys(vaddr);
-#endif
+		if (__improbable((eabs - sabs) > report_phy_write_delay)) {
+#ifndef ML_IO_VERIFY_UNCACHEABLE
+			uintptr_t const paddr = kvtophys(vaddr);
+#endif /* ML_IO_VERIFY_UNCACHEABLE */
 
-			(void)ml_set_interrupts_enabled(istate);
-
-			if (phywritepanic && (machine_timeout_suspended() == FALSE)) {
+			if (phy_write_panic && (machine_timeout_suspended() == FALSE)) {
+#if defined(__x86_64__)
 				panic_notify();
+#endif /*  defined(__x86_64__) */
 				panic("Write to IO vaddr %p paddr %p val 0x%llx took %llu ns,"
 				    " (start: %llu, end: %llu), ceiling: %llu",
 				    (void *)vaddr, (void *)paddr, val, (eabs - sabs), sabs, eabs,
-				    reportphywritedelayabs);
+				    (uint64_t)report_phy_write_delay);
 			}
 
-			if (reportphywriteosbt) {
+			(void)ml_set_interrupts_enabled(istate);
+
+			if (report_phy_write_osbt) {
 				OSReportWithBacktrace("ml_io_write size %d (v=%p, p=%p, 0x%llx) "
 				    "took %lluus",
 				    size, (void *)vaddr, (void *)paddr, val, (eabs - sabs) / NSEC_PER_USEC);
@@ -681,10 +715,10 @@ ml_io_write(uintptr_t vaddr, uint64_t val, int size)
 			DTRACE_PHYSLAT5(physiowrite, uint64_t, (eabs - sabs),
 			    uint64_t, vaddr, uint32_t, size, uint64_t, paddr, uint64_t, val);
 #endif /* CONFIG_DTRACE */
-		} else if (__improbable(tracephywritedelayabs > 0 && (eabs - sabs) > tracephywritedelayabs)) {
-#if !(DEVELOPMENT || DEBUG)
-			uintptr_t paddr = kvtophys(vaddr);
-#endif
+		} else if (__improbable(trace_phy_write_delay > 0 && (eabs - sabs) > trace_phy_write_delay)) {
+#ifndef ML_IO_VERIFY_UNCACHEABLE
+			uintptr_t const __unused paddr = kvtophys(vaddr);
+#endif /* ML_IO_VERIFY_UNCACHEABLE */
 
 			KDBG(MACHDBG_CODE(DBG_MACH_IO, DBC_MACH_IO_MMIO_WRITE),
 			    (eabs - sabs), VM_KERNEL_UNSLIDE_OR_PERM(vaddr), paddr, val);
@@ -694,7 +728,7 @@ ml_io_write(uintptr_t vaddr, uint64_t val, int size)
 			(void)ml_set_interrupts_enabled(istate);
 		}
 	}
-#endif /* x86_64 */
+#endif /* ML_IO_TIMEOUTS_ENABLED */
 }
 
 void
@@ -765,4 +799,225 @@ ml_broadcast_cpu_event(enum cpu_event event, unsigned int cpu_or_cluster)
 	for (; cursor != NULL; cursor = cursor->next) {
 		cursor->fn(cursor->param, event, cpu_or_cluster);
 	}
+}
+
+// Initialize Machine Timeouts (see the MACHINE_TIMEOUT macro
+// definition)
+
+void
+machine_timeout_init_with_suffix(const struct machine_timeout_spec *spec, char const *suffix)
+{
+	if (spec->skip_predicate != NULL && spec->skip_predicate(spec)) {
+		// This timeout should be disabled.
+		if (spec->is32) {
+			os_atomic_store((uint32_t*)spec->ptr, 0, relaxed);
+		} else {
+			os_atomic_store_wide((uint64_t*)spec->ptr, 0, relaxed);
+		}
+		return;
+	}
+
+	assert(suffix != NULL);
+	assert(strlen(spec->name) <= MACHINE_TIMEOUT_MAX_NAME_LEN);
+
+	size_t const suffix_len = strlen(suffix);
+
+	size_t const dt_name_size = MACHINE_TIMEOUT_MAX_NAME_LEN + suffix_len + 1;
+	char dt_name[dt_name_size];
+
+	strlcpy(dt_name, spec->name, dt_name_size);
+	strlcat(dt_name, suffix, dt_name_size);
+
+	size_t const scale_name_size = MACHINE_TIMEOUT_MAX_NAME_LEN + suffix_len + strlen("-scale") + 1;
+	char scale_name[scale_name_size];
+
+	strlcpy(scale_name, spec->name, scale_name_size);
+	strlcat(scale_name, suffix, scale_name_size);
+	strlcat(scale_name, "-scale", scale_name_size);
+
+	size_t const boot_arg_name_size = MACHINE_TIMEOUT_MAX_NAME_LEN + strlen("ml-timeout-") + suffix_len + 1;
+	char boot_arg_name[boot_arg_name_size];
+
+	strlcpy(boot_arg_name, "ml-timeout-", boot_arg_name_size);
+	strlcat(boot_arg_name, spec->name, boot_arg_name_size);
+	strlcat(boot_arg_name, suffix, boot_arg_name_size);
+
+	size_t const boot_arg_scale_name_size = MACHINE_TIMEOUT_MAX_NAME_LEN +
+	    strlen("ml-timeout-") + strlen("-scale") + suffix_len + 1;
+	char boot_arg_scale_name[boot_arg_scale_name_size];
+
+	strlcpy(boot_arg_scale_name, "ml-timeout-", boot_arg_scale_name_size);
+	strlcat(boot_arg_scale_name, spec->name, boot_arg_scale_name_size);
+	strlcat(boot_arg_scale_name, suffix, boot_arg_name_size);
+	strlcat(boot_arg_scale_name, "-scale", boot_arg_scale_name_size);
+
+
+	/*
+	 * Determine base value from DT and boot-args.
+	 */
+
+	DTEntry base, chosen;
+
+	if (SecureDTLookupEntry(NULL, "/machine-timeouts", &base) != kSuccess) {
+		base = NULL;
+	}
+
+	if (SecureDTLookupEntry(NULL, "/chosen/machine-timeouts", &chosen) != kSuccess) {
+		chosen = NULL;
+	}
+
+	uint64_t timeout = spec->default_value;
+	bool found = false;
+
+	uint64_t const *data = NULL;
+	unsigned int data_size = sizeof(*data);
+
+	/* First look in /machine-timeouts/<name> */
+	if (base != NULL && SecureDTGetProperty(base, dt_name, (const void **)&data, &data_size) == kSuccess) {
+		if (data_size != sizeof(*data)) {
+			panic("%s: unexpected machine timeout data_size %u for /machine-timeouts/%s", __func__, data_size, dt_name);
+		}
+
+		timeout = *data;
+		found = true;
+	}
+
+	/* A value in /chosen/machine-timeouts/<name> overrides */
+	if (chosen != NULL && SecureDTGetProperty(chosen, dt_name, (const void **)&data, &data_size) == kSuccess) {
+		if (data_size != sizeof(*data)) {
+			panic("%s: unexpected machine timeout data_size %u for /chosen/machine-timeouts/%s", __func__, data_size, dt_name);
+		}
+
+		timeout = *data;
+		found = true;
+	}
+
+	/* A boot-arg ml-timeout-<name> overrides */
+	uint64_t boot_arg = 0;
+
+	if (PE_parse_boot_argn(boot_arg_name, &boot_arg, sizeof(boot_arg))) {
+		timeout = boot_arg;
+		found = true;
+	}
+
+
+	/*
+	 * Determine scale value from DT and boot-args.
+	 */
+
+	uint32_t scale = 1;
+	uint32_t const *scale_data;
+	unsigned int scale_size = sizeof(scale_data);
+
+	/* If there is a scale factor /machine-timeouts/<name>-scale,
+	 * apply it. */
+	if (base != NULL && SecureDTGetProperty(base, scale_name, (const void **)&scale_data, &scale_size) == kSuccess) {
+		if (scale_size != sizeof(*scale_data)) {
+			panic("%s: unexpected machine timeout data_size %u for /machine-timeouts/%s-scale", __func__, scale_size, dt_name);
+		}
+
+		scale *= *scale_data;
+	}
+
+	/* If there is a scale factor /chosen/machine-timeouts/<name>-scale,
+	 * apply it as well. */
+	if (chosen != NULL && SecureDTGetProperty(chosen, scale_name, (const void **)&scale_data, &scale_size) == kSuccess) {
+		if (scale_size != sizeof(*scale_data)) {
+			panic("%s: unexpected machine timeout data_size %u for /chosen/machine-timeouts/%s-scale", __func__,
+			    scale_size, dt_name);
+		}
+
+		scale *= *scale_data;
+	}
+
+	/* Finally, a boot-arg ml-timeout-<name>-scale applies as well. */
+	if (PE_parse_boot_argn(boot_arg_scale_name, &boot_arg, sizeof(boot_arg))) {
+		scale *= boot_arg;
+	}
+
+	static bool global_scale_set;
+	static uint32_t global_scale;
+
+	if (!global_scale_set) {
+		/* Apply /machine-timeouts/global-scale if present */
+		if (SecureDTGetProperty(base, "global-scale", (const void **)&scale_data, &scale_size) == kSuccess) {
+			if (scale_size != sizeof(*scale_data)) {
+				panic("%s: unexpected machine timeout data_size %u for /machine-timeouts/global-scale", __func__,
+				    scale_size);
+			}
+
+			global_scale *= *scale_data;
+			global_scale_set = true;
+		}
+
+		/* Apply /chosen/machine-timeouts/global-scale if present */
+		if (SecureDTGetProperty(chosen, "global-scale", (const void **)&scale_data, &scale_size) == kSuccess) {
+			if (scale_size != sizeof(*scale_data)) {
+				panic("%s: unexpected machine timeout data_size %u for /chosen/machine-timeouts/global-scale", __func__,
+				    scale_size);
+			}
+
+			global_scale *= *scale_data;
+			global_scale_set = true;
+		}
+
+		/* Finally, the boot-arg ml-timeout-global-scale applies */
+		if (PE_parse_boot_argn("ml-timeout-global-scale", &boot_arg, sizeof(boot_arg))) {
+			global_scale *= boot_arg;
+			global_scale_set = true;
+		}
+	}
+
+	if (global_scale_set) {
+		scale *= global_scale;
+	}
+
+	/* Compute the final timeout, and done. */
+	if (found && timeout > 0) {
+		/* Only apply inherent unit scale if the value came in
+		 * externally. */
+
+		if (spec->unit_scale == MACHINE_TIMEOUT_UNIT_TIMEBASE) {
+			uint64_t nanoseconds = timeout / 1000;
+			nanoseconds_to_absolutetime(nanoseconds, &timeout);
+		} else {
+			timeout /= spec->unit_scale;
+		}
+
+		if (timeout == 0) {
+			/* Ensure unit scaling did not disable the timeout. */
+			timeout = 1;
+		}
+	}
+
+	if (os_mul_overflow(timeout, scale, &timeout)) {
+		timeout = UINT64_MAX; // clamp
+	}
+
+	if (spec->is32) {
+		os_atomic_store((uint32_t*)spec->ptr, timeout > UINT32_MAX ? UINT32_MAX : (uint32_t)timeout, relaxed);
+	} else {
+		os_atomic_store_wide((uint64_t*)spec->ptr, timeout, relaxed);
+	}
+}
+
+void
+machine_timeout_init(const struct machine_timeout_spec *spec)
+{
+	machine_timeout_init_with_suffix(spec, "");
+}
+
+/*
+ * Late timeout (re-)initialization, at the end of bsd_init()
+ */
+void
+machine_timeout_bsd_init(void)
+{
+	char const * const __unused mt_suffix = "-b";
+#if INTERRUPT_MASKED_DEBUG
+	machine_timeout_init_with_suffix(MACHINE_TIMEOUT_SPEC_REF(interrupt_masked_timeout), mt_suffix);
+#endif
+#if SCHED_PREEMPTION_DISABLE_DEBUG
+	machine_timeout_init_with_suffix(MACHINE_TIMEOUT_SPEC_REF(sched_preemption_disable_threshold_mt), mt_suffix);
+#endif
 }

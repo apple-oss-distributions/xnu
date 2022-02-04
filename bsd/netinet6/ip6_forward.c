@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2009-2020 Apple Inc. All rights reserved.
+ * Copyright (c) 2009-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -452,7 +452,7 @@ skip_ipsec:
 		}
 		RT_LOCK_ASSERT_HELD(rt);
 	} else if (ROUTE_UNUSABLE(ip6forward_rt) ||
-	    !IN6_ARE_ADDR_EQUAL(&ip6->ip6_dst, &dst->sin6_addr)) {
+	    !in6_are_addr_equal_scoped(&ip6->ip6_dst, &dst->sin6_addr, ip6_input_getdstifscope(m), dst->sin6_scope_id)) {
 		if (rt != NULL) {
 			/* Release extra ref */
 			RT_REMREF_LOCKED(rt);
@@ -733,7 +733,6 @@ skip_ipsec:
 		struct ip_fw_args args;
 		bzero(&args, sizeof(args));
 
-		args.fwa_m = m;
 		args.fwa_oif = ifp;
 		args.fwa_oflags = 0;
 		args.fwa_ro6 = ip6forward_rt;
@@ -748,7 +747,7 @@ skip_ipsec:
 #endif /* !DUMMYNET */
 		if (error != 0 || m == NULL) {
 			if (m != NULL) {
-				panic("%s: unexpected packet %p\n", __func__, m);
+				panic("%s: unexpected packet %p", __func__, m);
 				/* NOTREACHED */
 			}
 			/* Already freed by callee */

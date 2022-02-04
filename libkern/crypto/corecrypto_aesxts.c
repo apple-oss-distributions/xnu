@@ -49,14 +49,14 @@ xts_start(uint32_t cipher __unused, // ignored - we're doing this for xts-aes on
 	const struct ccmode_xts *enc, *dec;
 
 	if (!g_crypto_funcs) {
-		panic("%s: corecrypto not registered!\n", __FUNCTION__);
+		panic("%s: corecrypto not registered!", __FUNCTION__);
 	}
 
 	enc = g_crypto_funcs->ccaes_xts_encrypt;
 	dec = g_crypto_funcs->ccaes_xts_decrypt;
 
 	if (!enc || !dec) {
-		panic("%s: xts mode not registered? enc=%p, dec=%p\n", __FUNCTION__, enc, dec);
+		panic("%s: xts mode not registered? enc=%p, dec=%p", __FUNCTION__, enc, dec);
 	}
 
 	/* Make sure the context size for the mode fits in the one we have */
@@ -80,7 +80,7 @@ xts_encrypt(const uint8_t *pt, unsigned long ptlen,
 	ccxts_tweak_decl(xtsenc->tweak_size, tweak);
 
 	if (ptlen % 16) {
-		panic("xts encrypt not a multiple of block size\n");
+		panic("xts encrypt not a multiple of block size");
 	}
 
 	int rc = xtsenc->set_tweak(xts->enc, tweak, iv);
@@ -102,7 +102,7 @@ xts_decrypt(const uint8_t *ct, unsigned long ptlen,
 	ccxts_tweak_decl(xtsdec->tweak_size, tweak);
 
 	if (ptlen % 16) {
-		panic("xts decrypt not a multiple of block size\n");
+		panic("xts decrypt not a multiple of block size");
 	}
 
 	int rc = xtsdec->set_tweak(xts->dec, tweak, iv);

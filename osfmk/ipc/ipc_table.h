@@ -114,33 +114,17 @@ extern struct ipc_table_size ipc_table_requests[];
  *	be held across them.
  */
 
-/* Allocate a table */
-extern void * ipc_table_alloc(
-	vm_size_t       size);
+#define it_entries_alloc(its) \
+	kalloc_type(struct ipc_entry, (its)->its_size, Z_WAITOK | Z_ZERO)
 
-/* Free a table */
-extern void ipc_table_free(
-	vm_size_t       size,
-	void *          table);
+#define it_entries_free(count, table) \
+	kfree_type(struct ipc_entry, count, table)
 
-#define it_entries_alloc(its)                                           \
-	((ipc_entry_t)                                                  \
-	 ipc_table_alloc((its)->its_size * sizeof(struct ipc_entry)))
+#define it_requests_alloc(its) \
+	kalloc_type(struct ipc_port_request, (its)->its_size, Z_WAITOK | Z_ZERO)
 
-#define it_entries_free(its, table)                                     \
-	ipc_table_free((its)->its_size * sizeof(struct ipc_entry),      \
-	               (void *)(table))
-
-
-#define it_requests_alloc(its)                                          \
-	((ipc_port_request_t)                                           \
-	 ipc_table_alloc((its)->its_size *                              \
-	                 sizeof(struct ipc_port_request)))
-
-#define it_requests_free(its, table)                                    \
-	ipc_table_free((its)->its_size *                                \
-	               sizeof(struct ipc_port_request),                 \
-	               (void *)(table))
+#define it_requests_free(its, table) \
+	kfree_type(struct ipc_port_request, (its)->its_size, table)
 
 extern unsigned int ipc_table_max_entries(void);
 extern unsigned int ipc_table_max_requests(void);

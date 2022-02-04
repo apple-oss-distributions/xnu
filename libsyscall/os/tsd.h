@@ -44,9 +44,14 @@
 #define __TSD_MACH_SPECIAL_REPLY 8
 #define __TSD_SEMAPHORE_CACHE 9
 
+
+#define __TPIDR_CPU_NUM_MASK 0x0000000000000fff
+#define __TPIDR_CPU_NUM_SHIFT 0
+
 #ifndef __ASSEMBLER__
 
 #include <stdint.h>
+#include <TargetConditionals.h>
 
 #ifdef __arm__
 #include <arm/arch.h>
@@ -54,21 +59,25 @@
 
 extern void _thread_set_tsd_base(void *tsd_base);
 
+/*
+ * The implementation details of this function are not ABI and are subject to change,
+ * do not copy them in another project
+ */
 __attribute__((always_inline))
 static __inline__ unsigned int
 _os_cpu_number(void)
 {
 #if defined(__arm__)
 	uintptr_t p;
-	__asm__("mrc	p15, 0, %[p], c13, c0, 3" : [p] "=&r" (p));
+	__asm__ __volatile__ ("mrc	p15, 0, %[p], c13, c0, 3" : [p] "=&r" (p));
 	return (unsigned int)(p & 0x3ul);
 #elif defined(__arm64__)
 	uint64_t p;
-	__asm__("mrs	%[p], TPIDRRO_EL0" : [p] "=&r" (p));
-	return (unsigned int)p & 0x7;
+	__asm__ __volatile__ ("mrs %0, TPIDR_EL0" : "=r" (p));
+	return (p & __TPIDR_CPU_NUM_MASK) >> __TPIDR_CPU_NUM_SHIFT;
 #elif defined(__x86_64__) || defined(__i386__)
 	struct { uintptr_t p1, p2; } p;
-	__asm__("sidt %[p]" : [p] "=&m" (p));
+	__asm__ __volatile__ ("sidt %[p]" : [p] "=&m" (p));
 	return (unsigned int)(p.p1 & 0xfff);
 #else
 #error _os_cpu_number not implemented on this architecture
@@ -112,7 +121,7 @@ _os_tsd_set_direct(unsigned long slot, void *val)
 
 #elif defined(__arm__) || defined(__arm64__)
 
-__attribute__((always_inline, pure))
+__attribute__((always_inline, const))
 static __inline__ void**
 _os_tsd_get_base(void)
 {
@@ -122,10 +131,13 @@ _os_tsd_get_base(void)
                 "bic %0, %0, #0x3\n" : "=r" (tsd));
 	/* lower 2-bits contain CPU number */
 #elif defined(__arm64__)
+	/*
+	 * <rdar://73762648> Do not use __builtin_arm_rsr64("TPIDRRO_EL0")
+	 * so that the "const" attribute takes effect and repeated use
+	 * is coalesced properly.
+	 */
 	uint64_t tsd;
-	__asm__("mrs %0, TPIDRRO_EL0\n"
-                "bic %0, %0, #0x7\n" : "=r" (tsd));
-	/* lower 3-bits contain CPU number */
+	__asm__ ("mrs %0, TPIDRRO_EL0" : "=r" (tsd));
 #endif
 
 	return (void**)(uintptr_t)tsd;
@@ -153,14 +165,14 @@ _os_tsd_set_direct(unsigned long slot, void *val)
 }
 #endif
 
-__attribute__((always_inline, pure))
+__attribute__((always_inline, const))
 static __inline__ uintptr_t
 _os_ptr_munge_token(void)
 {
 	return (uintptr_t)_os_tsd_get_direct(__TSD_PTR_MUNGE);
 }
 
-__attribute__((always_inline, pure))
+__attribute__((always_inline, const))
 static __inline__ uintptr_t
 _os_ptr_munge(uintptr_t ptr)
 {
@@ -195,7 +207,6 @@ _os_ptr_munge(uintptr_t ptr)
 
 #define _OS_PTR_MUNGE_TOKEN(_reg, _token) \
 	mrs _reg, TPIDRRO_EL0 %% \
-	and	_reg, _reg, #~0x7 %% \
 	ldr	_token, [ _reg,  #_OS_TSD_OFFSET(__TSD_PTR_MUNGE) ]
 
 #endif // defined(__arm64__)

@@ -18,11 +18,16 @@ DATAFILES = \
 PRIVATE_DATAFILES = \
 	syscall_sw.h
 
+# These are covered by ../machine/mach_machine.modulemap.
 INSTALL_MD_LIST = ${DATAFILES}
 
-INSTALL_MD_LCL_LIST = ${PRIVATE_DATAFILES}
+INSTALL_SF_MD_LCL_LIST = ${DATAFILES} ${PRIVATE_DATAFILES}
 
+# These are covered by ../machine/mach_machine.modulemap.
 INSTALL_MD_GEN_LIST = \
+	asm.h
+
+INSTALL_SF_MD_LCL_GEN_LIST = \
 	asm.h
 
 INSTALL_MD_DIR = mach/i386

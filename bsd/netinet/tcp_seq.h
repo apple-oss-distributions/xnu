@@ -103,7 +103,7 @@
  * sequence numbers.
  */
 #define tcp_rcvseqinit(tp) \
-	(tp)->rcv_adv = (tp)->rcv_nxt = (tp)->irs + 1
+	(tp)->rcv_adv = (tp)->rcv_nxt = (tp)->rcv_high = (tp)->irs + 1
 
 #define tcp_sendseqinit(tp) \
 	(tp)->snd_una = (tp)->snd_nxt = (tp)->snd_max = (tp)->snd_up = \

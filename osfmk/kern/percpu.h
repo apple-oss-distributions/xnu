@@ -35,7 +35,6 @@ __BEGIN_DECLS
 
 #if XNU_KERNEL_PRIVATE
 #include <libkern/section_keywords.h>
-#include <os/atomic_private.h>
 
 #pragma GCC visibility push(hidden)
 
@@ -107,6 +106,17 @@ __BEGIN_DECLS
  * @see PERCPU_GET() for conditions of use.
  */
 extern vm_offset_t current_percpu_base(void);
+
+/*!
+ * @function other_percpu_base()
+ *
+ * @abstract
+ * Returns an offset that can be passed to @c PERCPU_GET_WITH_BASE(),
+ * for the speficied cpu number.
+ *
+ * @param cpu_number    the cpu number for which we want a base.
+ */
+extern vm_offset_t other_percpu_base(int cpu_number);
 
 /*!
  * @macro PERCPU_GET_MASTER
@@ -260,14 +270,14 @@ extern struct percpu_base {
 static __pure2 inline vm_offset_t
 percpu_section_start(void)
 {
-	extern char __percpu_section_start[] __SECTION_START_SYM("__DATA", "__percpu");
+	extern char __percpu_section_start[0] __SECTION_START_SYM("__DATA", "__percpu");
 	return (vm_offset_t)__percpu_section_start;
 }
 
 static __pure2 inline vm_offset_t
 percpu_section_end(void)
 {
-	extern char __percpu_section_end[] __SECTION_END_SYM("__DATA", "__percpu");
+	extern char __percpu_section_end[0] __SECTION_END_SYM("__DATA", "__percpu");
 	return (vm_offset_t)__percpu_section_end;
 }
 

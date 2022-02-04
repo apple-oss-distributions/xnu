@@ -37,16 +37,10 @@
 
 MALLOC_DEFINE(M_NWKWQ, "nwkwq", "Network work-queue");
 
-static TAILQ_HEAD(, nwk_wq_entry) nwk_wq_head;
-decl_lck_mtx_data(static, nwk_wq_lock);
-
-/* Lock group and attributes */
-static lck_grp_attr_t *nwk_wq_lock_grp_attributes = NULL;
-static lck_grp_t *nwk_wq_lock_group = NULL;
-
-/* Lock and lock attributes */
-static lck_attr_t *nwk_wq_lock_attributes = NULL;
-decl_lck_mtx_data(static, nwk_wq_lock);
+static TAILQ_HEAD(, nwk_wq_entry) nwk_wq_head =
+    TAILQ_HEAD_INITIALIZER(nwk_wq_head);
+static LCK_GRP_DECLARE(nwk_wq_lock_group, "Network work queue lock");
+static LCK_MTX_DECLARE(nwk_wq_lock, &nwk_wq_lock_group);
 
 /* Wait channel for Network work queue */
 static void *nwk_wq_waitch = NULL;
@@ -60,13 +54,6 @@ nwk_wq_init(void)
 {
 	thread_t nwk_wq_thread = THREAD_NULL;
 
-	TAILQ_INIT(&nwk_wq_head);
-	nwk_wq_lock_grp_attributes = lck_grp_attr_alloc_init();
-	nwk_wq_lock_group = lck_grp_alloc_init("Network work queue lock",
-	    nwk_wq_lock_grp_attributes);
-
-	nwk_wq_lock_attributes = lck_attr_alloc_init();
-	lck_mtx_init(&nwk_wq_lock, nwk_wq_lock_group, nwk_wq_lock_attributes);
 	if (kernel_thread_start(nwk_wq_thread_func,
 	    NULL, &nwk_wq_thread) != KERN_SUCCESS) {
 		panic_plain("%s: couldn't create network work queue thread", __func__);

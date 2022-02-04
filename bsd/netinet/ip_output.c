@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2020 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -223,8 +223,35 @@ static unsigned int imo_debug = 1;      /* debugging (enabled) */
 #else
 static unsigned int imo_debug;          /* debugging (disabled) */
 #endif /* !DEBUG */
+
 static struct zone *imo_zone;           /* zone for ip_moptions */
 #define IMO_ZONE_NAME           "ip_moptions"   /* zone name */
+
+#if PF
+__attribute__((noinline))
+static int
+ip_output_pf_dn_hook(struct ifnet *ifp, struct mbuf **mppn, struct mbuf **mp,
+    struct pf_rule *dn_pf_rule, struct route *ro, struct sockaddr_in *dst, int flags,
+    struct ip_out_args *ipoa)
+{
+	int rc;
+	struct ip_fw_args args = {};
+
+	args.fwa_pf_rule = dn_pf_rule;
+	args.fwa_oif = ifp;
+	args.fwa_ro = ro;
+	args.fwa_dst = dst;
+	args.fwa_oflags = flags;
+	if (flags & IP_OUTARGS) {
+		args.fwa_ipoa = ipoa;
+	}
+	rc = pf_af_hook(ifp, mppn, mp, AF_INET, FALSE, &args);
+
+	return rc;
+}
+
+#endif /* PF */
+
 
 /*
  * IP output.  The packet in mbuf chain m contains a skeletal IP
@@ -295,14 +322,12 @@ ip_output_list(struct mbuf *m0, int packetchain, struct mbuf *opt,
 		struct route necp_route;
 #endif /* NECP */
 #if DUMMYNET
-		struct ip_fw_args args;
 		struct route saved_route;
 #endif /* DUMMYNET */
 		struct ipf_pktopts ipf_pktopts;
 	} ipobz;
 #define ipsec_state     ipobz.ipsec_state
 #define necp_route      ipobz.necp_route
-#define args            ipobz.args
 #define sro_fwd         ipobz.sro_fwd
 #define saved_route     ipobz.saved_route
 #define ipf_pktopts     ipobz.ipf_pktopts
@@ -321,7 +346,7 @@ ip_output_list(struct mbuf *m0, int packetchain, struct mbuf *opt,
 	} ipobf = { .raw = 0 };
 
 	int interface_mtu = 0;
-
+	struct pf_rule *dn_pf_rule = NULL;
 /*
  * Here we check for restrictions when sending frames.
  * N.B.: IPv4 over internal co-processor interfaces is not allowed.
@@ -356,7 +381,7 @@ ip_output_list(struct mbuf *m0, int packetchain, struct mbuf *opt,
 		struct dn_pkt_tag       *dn_tag;
 
 		dn_tag = (struct dn_pkt_tag *)(tag + 1);
-		args.fwa_pf_rule = dn_tag->dn_pf_rule;
+		dn_pf_rule = dn_tag->dn_pf_rule;
 		opt = NULL;
 		saved_route = dn_tag->dn_ro;
 		ro = &saved_route;
@@ -446,7 +471,7 @@ ipfw_tags_done:
 		}
 		adv = &ipoa->ipoa_flowadv;
 		adv->code = FADV_SUCCESS;
-		ipoa->ipoa_retflags = 0;
+		ipoa->ipoa_flags &= ~IPOAF_RET_MASK;
 	}
 
 #if IPSEC
@@ -459,7 +484,7 @@ ipfw_tags_done:
 #endif /* IPSEC */
 
 #if DUMMYNET
-	if (args.fwa_pf_rule != NULL) {
+	if (dn_pf_rule != NULL) {
 		/* dummynet already saw us */
 		ip = mtod(m, struct ip *);
 		hlen = IP_VHL_HL(ip->ip_vhl) << 2;
@@ -475,9 +500,7 @@ ipfw_tags_done:
 			RT_UNLOCK(ro->ro_rt);
 		}
 
-		if (args.fwa_pf_rule != NULL) {
-			goto sendit;
-		}
+		goto sendit;
 	}
 #endif /* DUMMYNET */
 
@@ -670,7 +693,7 @@ loopit:
 				ia0 = NULL;
 				error = EHOSTUNREACH;
 				if (flags & IP_OUTARGS) {
-					ipoa->ipoa_retflags |= IPOARF_IFDENIED;
+					ipoa->ipoa_flags |= IPOAF_R_IFDENIED;
 				}
 				goto bad;
 			}
@@ -772,8 +795,8 @@ loopit:
 					RT_UNLOCK(ro->ro_rt);
 					ROUTE_RELEASE(ro);
 					if (flags & IP_OUTARGS) {
-						ipoa->ipoa_retflags |=
-						    IPOARF_IFDENIED;
+						ipoa->ipoa_flags |=
+						    IPOAF_R_IFDENIED;
 					}
 				} else {
 					RT_UNLOCK(ro->ro_rt);
@@ -830,7 +853,7 @@ loopit:
 		 */
 		if (ia != NULL && (ifp->if_flags & IFF_LOOPBACK) &&
 		    !IN_MULTICAST(ntohl(pkt_dst.s_addr))) {
-			uint32_t srcidx;
+			uint16_t srcidx;
 
 			m->m_pkthdr.rcvif = ia->ia_ifa.ifa_ifp;
 
@@ -902,7 +925,7 @@ loopit:
 		 */
 		if (ip->ip_src.s_addr == INADDR_ANY) {
 			struct in_ifaddr *ia1;
-			lck_rw_lock_shared(in_ifaddr_rwlock);
+			lck_rw_lock_shared(&in_ifaddr_rwlock);
 			TAILQ_FOREACH(ia1, &in_ifaddrhead, ia_link) {
 				IFA_LOCK_SPIN(&ia1->ia_ifa);
 				if (ia1->ia_ifp == ifp) {
@@ -913,7 +936,7 @@ loopit:
 				}
 				IFA_UNLOCK(&ia1->ia_ifa);
 			}
-			lck_rw_done(in_ifaddr_rwlock);
+			lck_rw_done(&in_ifaddr_rwlock);
 			if (ip->ip_src.s_addr == INADDR_ANY) {
 				error = ENETUNREACH;
 				goto bad;
@@ -1052,15 +1075,7 @@ sendit:
 
 		m0 = m; /* Save for later */
 #if DUMMYNET
-		args.fwa_m = m;
-		args.fwa_oif = ifp;
-		args.fwa_ro = ro;
-		args.fwa_dst = dst;
-		args.fwa_oflags = flags;
-		if (flags & IP_OUTARGS) {
-			args.fwa_ipoa = ipoa;
-		}
-		rc = pf_af_hook(ifp, mppn, &m, AF_INET, FALSE, &args);
+		rc = ip_output_pf_dn_hook(ifp, mppn, &m, dn_pf_rule, ro, dst, flags, ipoa);
 #else /* DUMMYNET */
 		rc = pf_af_hook(ifp, mppn, &m, AF_INET, FALSE, NULL);
 #endif /* DUMMYNET */
@@ -1865,6 +1880,7 @@ ip_fragment(struct mbuf *m, struct ifnet *ifp, uint32_t mtu, int sw_csum)
 
 		M_COPY_CLASSIFIER(m, m0);
 		M_COPY_PFTAG(m, m0);
+		M_COPY_NECPTAG(m, m0);
 
 #if BYTE_ORDER != BIG_ENDIAN
 		HTONS(mhip->ip_off);
@@ -2801,7 +2817,7 @@ imo_addref(struct ip_moptions *imo, int locked)
 	}
 
 	if (++imo->imo_refcnt == 0) {
-		panic("%s: imo %p wraparound refcnt\n", __func__, imo);
+		panic("%s: imo %p wraparound refcnt", __func__, imo);
 		/* NOTREACHED */
 	} else if (imo->imo_trace != NULL) {
 		(*imo->imo_trace)(imo, TRUE);
@@ -2859,7 +2875,7 @@ imo_remref(struct ip_moptions *imo)
 	}
 	IMO_UNLOCK(imo);
 
-	lck_mtx_destroy(&imo->imo_lock, ifa_mtx_grp);
+	lck_mtx_destroy(&imo->imo_lock, &ifa_mtx_grp);
 
 	if (!(imo->imo_debug & IFD_ALLOC)) {
 		panic("%s: imo %p cannot be freed", __func__, imo);
@@ -2899,7 +2915,7 @@ ip_allocmoptions(zalloc_flags_t how)
 
 	imo = zalloc_flags(imo_zone, how | Z_ZERO);
 	if (imo != NULL) {
-		lck_mtx_init(&imo->imo_lock, ifa_mtx_grp, ifa_mtx_attr);
+		lck_mtx_init(&imo->imo_lock, &ifa_mtx_grp, &ifa_mtx_attr);
 		imo->imo_debug |= IFD_ALLOC;
 		if (imo_debug != 0) {
 			imo->imo_debug |= IFD_DEBUG;
@@ -2991,7 +3007,7 @@ ip_mloopback(struct ifnet *srcifp, struct ifnet *origifp, struct mbuf *m,
 	if (srcifp == NULL) {
 		struct in_ifaddr *ia;
 
-		lck_rw_lock_shared(in_ifaddr_rwlock);
+		lck_rw_lock_shared(&in_ifaddr_rwlock);
 		TAILQ_FOREACH(ia, INADDR_HASH(ip->ip_src.s_addr), ia_hash) {
 			IFA_LOCK_SPIN(&ia->ia_ifa);
 			if (IA_SIN(ia)->sin_addr.s_addr == ip->ip_src.s_addr) {
@@ -3001,7 +3017,7 @@ ip_mloopback(struct ifnet *srcifp, struct ifnet *origifp, struct mbuf *m,
 			}
 			IFA_UNLOCK(&ia->ia_ifa);
 		}
-		lck_rw_done(in_ifaddr_rwlock);
+		lck_rw_done(&in_ifaddr_rwlock);
 	}
 	if (srcifp != NULL) {
 		ip_setsrcifaddr_info(copym, srcifp->if_index, NULL);

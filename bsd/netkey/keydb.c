@@ -72,12 +72,11 @@
 #include <netinet/in.h>
 
 #include <net/pfkeyv2.h>
+#include <netkey/key.h>
 #include <netkey/keydb.h>
 #include <netinet6/ipsec.h>
 
 #include <net/net_osdep.h>
-
-extern lck_mtx_t  *sadb_mutex;
 
 MALLOC_DEFINE(M_SECA, "key mgmt", "security associations, key management");
 
@@ -89,18 +88,15 @@ MALLOC_DEFINE(M_SECA, "key mgmt", "security associations, key management");
 struct secpolicy *
 keydb_newsecpolicy(void)
 {
-	struct secpolicy *p;
-
 	LCK_MTX_ASSERT(sadb_mutex, LCK_MTX_ASSERT_NOTOWNED);
 
-	return (struct secpolicy *)_MALLOC(sizeof(*p), M_SECA,
-	           M_WAITOK | M_ZERO);
+	return kalloc_type(struct secpolicy, Z_WAITOK | Z_ZERO);
 }
 
 void
 keydb_delsecpolicy(struct secpolicy *p)
 {
-	_FREE(p, M_SECA);
+	kfree_type(struct secpolicy, p);
 }
 
 /*
@@ -203,11 +199,10 @@ keydb_newsecreplay(u_int8_t wsize)
 
 	LCK_MTX_ASSERT(sadb_mutex, LCK_MTX_ASSERT_OWNED);
 
-	p = (struct secreplay *)_MALLOC(sizeof(*p), M_SECA, M_NOWAIT | M_ZERO);
+	p = kalloc_type(struct secreplay, Z_NOWAIT | Z_ZERO);
 	if (!p) {
 		lck_mtx_unlock(sadb_mutex);
-		p = (struct secreplay *)_MALLOC(sizeof(*p), M_SECA,
-		    M_WAITOK | M_ZERO);
+		p = kalloc_type(struct secreplay, Z_WAITOK | Z_ZERO);
 		lck_mtx_lock(sadb_mutex);
 	}
 	if (!p) {
@@ -215,14 +210,13 @@ keydb_newsecreplay(u_int8_t wsize)
 	}
 
 	if (wsize != 0) {
-		p->bitmap = (caddr_t)_MALLOC(wsize, M_SECA, M_NOWAIT | M_ZERO);
+		p->bitmap = (caddr_t)kalloc_data(wsize, Z_NOWAIT | Z_ZERO);
 		if (!p->bitmap) {
 			lck_mtx_unlock(sadb_mutex);
-			p->bitmap = (caddr_t)_MALLOC(wsize, M_SECA,
-			    M_WAITOK | M_ZERO);
+			p->bitmap = (caddr_t)kalloc_data(wsize, Z_WAITOK | Z_ZERO);
 			lck_mtx_lock(sadb_mutex);
 			if (!p->bitmap) {
-				_FREE(p, M_SECA);
+				kfree_type(struct secreplay, p);
 				return NULL;
 			}
 		}
@@ -235,9 +229,9 @@ void
 keydb_delsecreplay(struct secreplay *p)
 {
 	if (p->bitmap) {
-		_FREE(p->bitmap, M_SECA);
+		kfree_data(p->bitmap, p->wsize);
 	}
-	_FREE(p, M_SECA);
+	kfree_type(struct secreplay, p);
 }
 
 #if 0

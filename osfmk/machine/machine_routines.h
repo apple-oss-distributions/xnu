@@ -52,13 +52,6 @@ __BEGIN_DECLS
 bool ml_cpu_can_exit(int cpu_id);
 
 /*!
- * @function      ml_cpu_init_state
- * @brief         Needs to be called from schedulable context prior to using
- *                the ml_cpu_*_state_transition or ml_cpu_*_loop functions.
- */
-void ml_cpu_init_state(void);
-
-/*!
  * @function      ml_cpu_begin_state_transition
  * @brief         Tell the platform code that processor_start() or
  *                processor_exit() is about to begin for |cpu_id|.  This
@@ -160,6 +153,75 @@ void cpu_event_unregister_callback(cpu_callback_t fn);
  */
 void ml_broadcast_cpu_event(enum cpu_event event, unsigned int cpu_or_cluster);
 #endif
+
+/*!
+ * @function      ml_io_read()
+ * @brief         Perform an MMIO read access
+ *
+ * @return        The value resulting from the read.
+ *
+ */
+unsigned long long ml_io_read(uintptr_t iovaddr, int iovsz);
+unsigned int ml_io_read8(uintptr_t iovaddr);
+unsigned int ml_io_read16(uintptr_t iovaddr);
+unsigned int ml_io_read32(uintptr_t iovaddr);
+unsigned long long ml_io_read64(uintptr_t iovaddr);
+
+/*!
+ * @function      ml_io_write()
+ * @brief         Perform an MMIO write access
+ *
+ */
+void ml_io_write(uintptr_t vaddr, uint64_t val, int size);
+void ml_io_write8(uintptr_t vaddr, uint8_t val);
+void ml_io_write16(uintptr_t vaddr, uint16_t val);
+void ml_io_write32(uintptr_t vaddr, uint32_t val);
+void ml_io_write64(uintptr_t vaddr, uint64_t val);
+
+#if XNU_KERNEL_PRIVATE
+/*
+ * ml_io access timeouts and tracing.
+ *
+ * We are specific in what to compile in, in order to not burden
+ * heavily used code with paths that will never be used on common
+ * configurations.
+ */
+
+/* ml_io_read/write timeouts are generally enabled on macOS, because
+ * they may help developers. */
+#if  (XNU_TARGET_OS_OSX || DEVELOPMENT || DEBUG)
+
+#define ML_IO_TIMEOUTS_ENABLED 1
+/* ... but tracing is only present internally (and not ported to arm yet). */
+#if  (ML_IO_TIMEOUTS_ENABLED && defined(__x86_64__) && (DEVELOPMENT || DEBUG))
+#define ML_IO_IOTRACE_ENABLED 1
+#endif
+
+/* Simulating stretched IO is only for DEVELOPMENT || DEBUG. */
+#if DEVELOPMENT || DEBUG
+#define ML_IO_SIMULATE_STRETCHED_ENABLED 1
+#endif
+
+/* We also check that the memory is mapped non-cacheable on x86 internally. */
+#if defined(__x86_64__) && (DEVELOPMENT || DEBUG)
+#define ML_IO_VERIFY_UNCACHEABLE 1
+#endif
+
+#endif /* (XNU_TARGET_OS_OSX || DEVELOPMENT || DEBUG) */
+
+#if ML_IO_TIMEOUTS_ENABLED && !defined(__x86_64__)
+/* x86 does not have the MACHINE_TIMEOUTs types, and the variables are
+ * declared elsewhere. */
+extern machine_timeout32_t report_phy_read_delay_to;
+extern machine_timeout32_t report_phy_write_delay_to;
+extern machine_timeout32_t report_phy_read_delay_to;
+extern machine_timeout32_t trace_phy_read_delay_to;
+extern machine_timeout32_t trace_phy_write_delay_to;
+extern unsigned int report_phy_read_osbt;
+extern unsigned int report_phy_write_osbt;
+#endif /* ML_IO_TIMEOUTS_ENABLED */
+
+#endif /* XNU_KERNEL_PRIVATE */
 
 __END_DECLS
 

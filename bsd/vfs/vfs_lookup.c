@@ -125,7 +125,7 @@ static int              lookup_handle_emptyname(struct nameidata *ndp, struct co
 static int              lookup_handle_rsrc_fork(vnode_t dp, struct nameidata *ndp, struct componentname *cnp, int wantparent, vfs_context_t ctx);
 #endif
 
-extern lck_rw_t * rootvnode_rw_lock;
+extern lck_rw_t rootvnode_rw_lock;
 
 /*
  * Convert a pathname into a pointer to a locked inode.
@@ -165,7 +165,6 @@ extern lck_rw_t * rootvnode_rw_lock;
 int
 namei(struct nameidata *ndp)
 {
-	struct filedesc *fdp;   /* pointer to file descriptor state */
 	struct vnode *dp;       /* the directory we are searching */
 	struct vnode *usedvp = ndp->ni_dvp;  /* store pointer to vp in case we must loop due to
 	                                      *                                          heavy vnode pressure */
@@ -188,8 +187,6 @@ namei(struct nameidata *ndp)
 	vnode_t usedvp_dp = NULLVP;
 	int32_t old_count = 0;
 	bool dp_has_iocount = false;
-
-	fdp = p->p_fd;
 
 #if DIAGNOSTIC
 	if (!vfs_context_ucred(ctx) || !p) {
@@ -224,7 +221,7 @@ namei(struct nameidata *ndp)
 		}
 		if (keep_going) {
 			if ((cnp->cn_flags & ISSYMLINK) == 0) {
-				panic("We need to keep going on a continued lookup, but for vp type %d (tag %d)\n", ndp->ni_vp->v_type, ndp->ni_vp->v_tag);
+				panic("We need to keep going on a continued lookup, but for vp type %d (tag %d)", ndp->ni_vp->v_type, ndp->ni_vp->v_tag);
 			}
 			goto continue_symlink;
 		}
@@ -246,7 +243,7 @@ vnode_recycled:
 	if ((UIO_SEG_IS_USER_SPACE(ndp->ni_segflg) == 0)
 	    && (ndp->ni_segflg != UIO_SYSSPACE)
 	    && (ndp->ni_segflg != UIO_SYSSPACE32)) {
-		panic("%s :%d - invalid ni_segflg\n", __FILE__, __LINE__);
+		panic("invalid ni_segflg");
 	}
 #endif /* LP64_DEBUG */
 
@@ -356,22 +353,22 @@ retry_copy:
 	 * determine the starting point for the translation.
 	 */
 	proc_dirs_lock_shared(p);
-	lck_rw_lock_shared(rootvnode_rw_lock);
+	lck_rw_lock_shared(&rootvnode_rw_lock);
 
-	if (!(fdp->fd_flags & FD_CHROOT)) {
-		ndp->ni_rootdir = rootvnode;
+	if (fdt_flag_test(&p->p_fd, FD_CHROOT)) {
+		ndp->ni_rootdir = p->p_fd.fd_rdir;
 	} else {
-		ndp->ni_rootdir = fdp->fd_rdir;
+		ndp->ni_rootdir = rootvnode;
 	}
 
 	if (!ndp->ni_rootdir) {
-		if (!(fdp->fd_flags & FD_CHROOT)) {
-			printf("rootvnode is not set\n");
-		} else {
+		if (fdt_flag_test(&p->p_fd, FD_CHROOT)) {
 			/* This should be a panic */
-			printf("fdp->fd_rdir is not set\n");
+			printf("p->p_fd.fd_rdir is not set\n");
+		} else {
+			printf("rootvnode is not set\n");
 		}
-		lck_rw_unlock_shared(rootvnode_rw_lock);
+		lck_rw_unlock_shared(&rootvnode_rw_lock);
 		proc_dirs_unlock_shared(p);
 		error = ENOENT;
 		goto error_out;
@@ -397,7 +394,7 @@ retry_copy:
 
 	if (dp == NULLVP || (dp->v_lflag & VL_DEAD)) {
 		dp = NULLVP;
-		lck_rw_unlock_shared(rootvnode_rw_lock);
+		lck_rw_unlock_shared(&rootvnode_rw_lock);
 		proc_dirs_unlock_shared(p);
 		error = ENOENT;
 		goto error_out;
@@ -417,7 +414,7 @@ retry_copy:
 	 * and will be highly contended and degrade performance. Since we have
 	 * an existing usecount protected by the locks we hold, we'll just use
 	 * an atomic op to increment the usecount on a vnode which already has one
-	 * and can't be released becasue we have the locks which protect against that
+	 * and can't be released because we have the locks which protect against that
 	 * happening.
 	 */
 	rootdir_with_usecount = ndp->ni_rootdir;
@@ -440,7 +437,7 @@ retry_copy:
 	}
 
 	/* Now that we have our usecount, release the locks */
-	lck_rw_unlock_shared(rootvnode_rw_lock);
+	lck_rw_unlock_shared(&rootvnode_rw_lock);
 	proc_dirs_unlock_shared(p);
 
 	ndp->ni_dvp = NULLVP;
@@ -477,7 +474,7 @@ retry_copy:
 				startdir_with_usecount = NULLVP;
 			}
 			if (rootdir_with_usecount) {
-				lck_rw_lock_shared(rootvnode_rw_lock);
+				lck_rw_lock_shared(&rootvnode_rw_lock);
 				if (rootdir_with_usecount == rootvnode) {
 					old_count = os_atomic_dec_orig(&rootdir_with_usecount->v_usecount, relaxed);
 					if (old_count < 2) {
@@ -489,7 +486,7 @@ retry_copy:
 					}
 					rootdir_with_usecount = NULLVP;
 				}
-				lck_rw_unlock_shared(rootvnode_rw_lock);
+				lck_rw_unlock_shared(&rootvnode_rw_lock);
 				if (rootdir_with_usecount) {
 					vnode_rele(rootdir_with_usecount);
 					rootdir_with_usecount = NULLVP;
@@ -537,7 +534,7 @@ error_out:
 		startdir_with_usecount = NULLVP;
 	}
 	if (rootdir_with_usecount) {
-		lck_rw_lock_shared(rootvnode_rw_lock);
+		lck_rw_lock_shared(&rootvnode_rw_lock);
 		if (rootdir_with_usecount == rootvnode) {
 			old_count = os_atomic_dec_orig(&rootdir_with_usecount->v_usecount, relaxed);
 			if (old_count < 2) {
@@ -547,9 +544,9 @@ error_out:
 				panic("(4) Unexpected pre-decrement value (%d) of usecount for rootvnode %p",
 				    old_count, rootdir_with_usecount);
 			}
-			lck_rw_unlock_shared(rootvnode_rw_lock);
+			lck_rw_unlock_shared(&rootvnode_rw_lock);
 		} else {
-			lck_rw_unlock_shared(rootvnode_rw_lock);
+			lck_rw_unlock_shared(&rootvnode_rw_lock);
 			vnode_rele(rootdir_with_usecount);
 		}
 		rootdir_with_usecount = NULLVP;
@@ -811,7 +808,7 @@ lookup_handle_found_vnode(struct nameidata *ndp, struct componentname *cnp, int 
 	*keep_going = 0;
 
 	if (ndp->ni_vp == NULLVP) {
-		panic("NULL ni_vp in %s\n", __FUNCTION__);
+		panic("NULL ni_vp in %s", __FUNCTION__);
 	}
 
 	if (atroot) {
@@ -1265,7 +1262,9 @@ dirloop:
 	/*
 	 * We now have a segment name to search for, and a directory to search.
 	 */
+#if CONFIG_UNION_MOUNTS
 unionlookup:
+#endif /* CONFIG_UNION_MOUNTS */
 	ndp->ni_vp = NULLVP;
 
 	if (dp->v_type != VDIR) {
@@ -1322,6 +1321,7 @@ unionlookup:
 
 	if (error) {
 lookup_error:
+#if CONFIG_UNION_MOUNTS
 		if ((error == ENOENT) &&
 		    (dp->v_mount != NULL) &&
 		    (dp->v_mount->mnt_flag & MNT_UNION)) {
@@ -1337,6 +1337,7 @@ lookup_error:
 			dp_authorized = 0;
 			goto unionlookup;
 		}
+#endif /* CONFIG_UNION_MOUNTS */
 
 		if (error != EJUSTRETURN) {
 			goto bad;
@@ -1443,6 +1444,7 @@ bad:
 	return error;
 }
 
+#if CONFIG_UNION_MOUNTS
 /*
  * Given a vnode in a union mount, traverse to the equivalent
  * vnode in the underlying mount.
@@ -1467,11 +1469,7 @@ lookup_traverse_union(vnode_t dvp, vnode_t *new_dvp, vfs_context_t ctx)
 		return 0;
 	}
 
-	path = (char *) zalloc(ZV_NAMEI);
-	if (path == NULL) {
-		error = ENOMEM;
-		goto done;
-	}
+	path = zalloc_flags(ZV_NAMEI, Z_WAITOK | Z_NOFAIL);
 
 	/*
 	 * Walk back up to the mountpoint following the
@@ -1519,6 +1517,7 @@ done:
 	}
 	return error;
 }
+#endif /* CONFIG_UNION_MOUNTS */
 
 int
 lookup_validate_creation_path(struct nameidata *ndp)
@@ -1607,7 +1606,7 @@ restart:
 		ndp->ni_vp = dp = tdp;
 		if (dp->v_type != VDIR) {
 #if DEVELOPMENT || DEBUG
-			panic("%s : Root of filesystem not a directory\n",
+			panic("%s : Root of filesystem not a directory",
 			    __FUNCTION__);
 #else
 			break;
@@ -1667,14 +1666,7 @@ lookup_handle_symlink(struct nameidata *ndp, vnode_t *new_dp, bool *new_dp_has_i
 	int error;
 	char *cp;               /* pointer into pathname argument */
 	uio_t auio;
-	union {
-		union {
-			struct user_iovec s_uiovec;
-			struct kern_iovec s_kiovec;
-		} u_iovec;
-		struct uio s_uio;
-		char uio_buf[UIO_SIZEOF(1)];
-	} u_uio_buf; /* union only for aligning uio_buf correctly */
+	uio_stackbuf_t uio_buf[UIO_SIZEOF(1)];
 	int need_newpathbuf;
 	u_int linklen;
 	struct componentname *cnp = &ndp->ni_cnd;
@@ -1702,12 +1694,35 @@ lookup_handle_symlink(struct nameidata *ndp, vnode_t *new_dp, bool *new_dp_has_i
 	} else {
 		cp = cnp->cn_pnbuf;
 	}
-	auio = uio_createwithbuffer(1, 0, UIO_SYSSPACE, UIO_READ,
-	    &u_uio_buf.uio_buf[0], sizeof(u_uio_buf.uio_buf));
+	auio = uio_createwithbuffer(1, 0, UIO_SYSSPACE, UIO_READ, &uio_buf[0], sizeof(uio_buf));
 
 	uio_addiov(auio, CAST_USER_ADDR_T(cp), MAXPATHLEN);
 
 	error = VNOP_READLINK(ndp->ni_vp, auio, ctx);
+
+	if (!error) {
+		user_ssize_t resid = uio_resid(auio);
+
+		assert(resid <= MAXPATHLEN);
+
+		if (resid == MAXPATHLEN) {
+			linklen = 0;
+		} else {
+			/*
+			 * Safe to set unsigned with a [larger] signed type here
+			 * because 0 <= uio_resid <= MAXPATHLEN and MAXPATHLEN
+			 * is only 1024.
+			 */
+			linklen = (u_int)strnlen(cp, MAXPATHLEN - (u_int)resid);
+		}
+
+		if (linklen == 0) {
+			error = ENOENT;
+		} else if (linklen + ndp->ni_pathlen + rsrclen > MAXPATHLEN) {
+			error = ENAMETOOLONG;
+		}
+	}
+
 	if (error) {
 		if (need_newpathbuf) {
 			zfree(ZV_NAMEI, cp);
@@ -1715,19 +1730,6 @@ lookup_handle_symlink(struct nameidata *ndp, vnode_t *new_dp, bool *new_dp_has_i
 		return error;
 	}
 
-	/*
-	 * Safe to set unsigned with a [larger] signed type here
-	 * because 0 <= uio_resid <= MAXPATHLEN and MAXPATHLEN
-	 * is only 1024.
-	 */
-	linklen = MAXPATHLEN - (u_int)uio_resid(auio);
-	if (linklen + ndp->ni_pathlen + rsrclen > MAXPATHLEN) {
-		if (need_newpathbuf) {
-			zfree(ZV_NAMEI, cp);
-		}
-
-		return ENAMETOOLONG;
-	}
 	if (need_newpathbuf) {
 		tmppn = cnp->cn_pnbuf;
 		bcopy(ndp->ni_next, cp + linklen, ndp->ni_pathlen);
@@ -1760,20 +1762,23 @@ lookup_handle_symlink(struct nameidata *ndp, vnode_t *new_dp, bool *new_dp_has_i
 	ndp->ni_vp = NULLVP;
 	ndp->ni_dvp = NULLVP;
 
+	dp_has_iocount = true;
+
 	/*
 	 * Check if symbolic link restarts us at the root
 	 */
 	if (*(cnp->cn_nameptr) == '/') {
-		vnode_put(dp); /* ALWAYS have a dvp for a symlink */
 		while (*(cnp->cn_nameptr) == '/') {
 			cnp->cn_nameptr++;
 			ndp->ni_pathlen--;
 		}
-		if ((dp = ndp->ni_rootdir) == NULLVP) {
-			return ENOENT;
+		if (linklen != 0) {
+			vnode_put(dp); /* ALWAYS have a dvp for a symlink */
+			dp_has_iocount = false;
+			if ((dp = ndp->ni_rootdir) == NULLVP) {
+				return ENOENT;
+			}
 		}
-	} else {
-		dp_has_iocount = true;
 	}
 
 	*new_dp = dp;
@@ -1797,7 +1802,7 @@ relookup(struct vnode *dvp, struct vnode **vpp, struct componentname *cnp)
 	int i, newhash;                 /* DEBUG: check name hash */
 	char *cp;                       /* DEBUG: check name ptr/len */
 #endif
-	vfs_context_t ctx = cnp->cn_context;;
+	vfs_context_t ctx = cnp->cn_context;
 
 	/*
 	 * Setup: break out flag bits into variables.
@@ -1873,7 +1878,7 @@ relookup(struct vnode *dvp, struct vnode **vpp, struct componentname *cnp)
 	 * Check for symbolic link
 	 */
 	if (dp->v_type == VLNK && (cnp->cn_flags & FOLLOW)) {
-		panic("relookup: symlink found.\n");
+		panic("relookup: symlink found.");
 	}
 #endif
 
@@ -2151,7 +2156,7 @@ void
 lookup_compound_vnop_post_hook(int error, vnode_t dvp, vnode_t vp, struct nameidata *ndp, int did_create)
 {
 	if (error == 0 && vp == NULLVP) {
-		panic("NULL vp with error == 0.\n");
+		panic("NULL vp with error == 0.");
 	}
 
 	/*

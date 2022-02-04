@@ -1,10 +1,12 @@
-#define T_NAMESPACE "xnu.ipc"
 #include <darwintest.h>
 #include <mach/mach.h>
 #include <stdlib.h>
 #include <stdio.h>
 
-T_GLOBAL_META(T_META_RUN_CONCURRENTLY(true));
+T_GLOBAL_META(T_META_RUN_CONCURRENTLY(true),
+    T_META_NAMESPACE("xnu.ipc"),
+    T_META_RADAR_COMPONENT_NAME("xnu"),
+    T_META_RADAR_COMPONENT_VERSION("IPC"));
 
 #define NR_PORTS 4
 

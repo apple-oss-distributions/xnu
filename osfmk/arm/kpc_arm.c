@@ -545,7 +545,7 @@ save_regs(void)
 	int cpuid = cpu_number();
 	uint32_t PMCR = 0;
 
-	__asm__ volatile ("dmb ish");
+	__builtin_arm_dmb(DMB_ISH);
 
 	/* Clear master enable */
 	__asm__ volatile ("mcr p15, 0, %0, c9, c12, 0;" : : "r" (PMCR));

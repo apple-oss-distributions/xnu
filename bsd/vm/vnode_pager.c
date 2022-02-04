@@ -56,7 +56,6 @@
 
 #include <mach/mach_types.h>
 #include <mach/memory_object_types.h>
-#include <mach/memory_object_control.h>
 #include <mach/vm_map.h>
 #include <mach/mach_vm.h>
 #include <mach/upl.h>
@@ -79,6 +78,7 @@
 
 #include <vm/vm_protos.h>
 
+#include <sys/kdebug_triage.h>
 #include <vfs/vfs_disk_conditioner.h>
 
 void
@@ -634,6 +634,7 @@ vnode_pagein(
 			ubc_upl_abort_range(upl, upl_offset, size, UPL_ABORT_FREE_ON_EMPTY | UPL_ABORT_ERROR);
 		}
 
+		kernel_triage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_VM, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_VM_VNODEPAGEIN_NO_UBCINFO), 0 /* arg */);
 		goto out;
 	}
 	if (upl == (upl_t)NULL) {
@@ -662,6 +663,7 @@ vnode_pagein(
 				set_thread_pagein_error(current_thread(), error);
 				result = PAGER_ERROR;
 				error  = PAGER_ERROR;
+				kernel_triage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_VM, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_VM_VNODEPAGEIN_FSPAGEIN_FAIL), 0 /* arg */);
 			}
 			goto out;
 		}
@@ -670,6 +672,7 @@ vnode_pagein(
 		if (upl == (upl_t)NULL) {
 			result =  PAGER_ABSENT;
 			error = PAGER_ABSENT;
+			kernel_triage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_VM, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_VM_VNODEPAGEIN_NO_UPL), 0 /* arg */);
 			goto out;
 		}
 		ubc_upl_range_needed(upl, upl_offset / PAGE_SIZE, 1);
@@ -806,6 +809,7 @@ vnode_pagein(
 				set_thread_pagein_error(current_thread(), error);
 				result = PAGER_ERROR;
 				error  = PAGER_ERROR;
+				kernel_triage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_VM, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_VM_VNODEPAGEIN_FSPAGEIN_FAIL), 0 /* arg */);
 			}
 		}
 	}

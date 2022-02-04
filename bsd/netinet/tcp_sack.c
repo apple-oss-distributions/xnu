@@ -253,10 +253,7 @@ tcp_sackhole_alloc(struct tcpcb *tp, tcp_seq start, tcp_seq end)
 		return NULL;
 	}
 
-	hole = (struct sackhole *)zalloc(sack_hole_zone);
-	if (hole == NULL) {
-		return NULL;
-	}
+	hole = zalloc_flags(sack_hole_zone, Z_WAITOK | Z_NOFAIL);
 
 	hole->start = start;
 	hole->end = end;

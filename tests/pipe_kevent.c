@@ -39,6 +39,9 @@
 #include <string.h>
 #include <errno.h>
 
+T_GLOBAL_META(T_META_RADAR_COMPONENT_NAME("xnu"),
+    T_META_RADAR_COMPONENT_VERSION("kevent"));
+
 T_DECL(pipe_noblock_kevent,
     "Set a pipe and no block and setup EVFLT_WRITE kevent on it and make sure it does not fire when the pipe is full")
 {

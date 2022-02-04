@@ -33,6 +33,7 @@
 #endif
 
 #include <sys/cdefs.h>
+#include <kern/thread.h>
 
 __BEGIN_DECLS
 
@@ -47,7 +48,6 @@ __BEGIN_DECLS
 #include <IOKit/assert.h>  /* Must be before other includes of kern/assert.h */
 
 #include <kern/kern_types.h>
-#include <kern/thread.h>
 #include <kern/debug.h>
 #include <kern/task.h>
 #include <kern/sched_prim.h>

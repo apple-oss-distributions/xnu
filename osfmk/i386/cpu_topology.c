@@ -54,8 +54,8 @@ static int              x86_affinity_count = 0;
 extern cpu_data_t cpshadows[];
 
 #if DEVELOPMENT || DEBUG
-void iotrace_init(int ncpus);
-void traptrace_init(int ncpus);
+void iotrace_init(void);
+void traptrace_init(void);
 #endif /* DEVELOPMENT || DEBUG */
 
 
@@ -157,8 +157,8 @@ cpu_topology_sort(int ncpus)
 	TOPO_DBG("cpu_topology_start() LLC is L%d\n", topoParms.LLCDepth + 1);
 
 #if DEVELOPMENT || DEBUG
-	iotrace_init(ncpus);
-	traptrace_init(ncpus);
+	iotrace_init();
+	traptrace_init();
 #endif /* DEVELOPMENT || DEBUG */
 
 	/*
@@ -173,6 +173,8 @@ cpu_topology_sort(int ncpus)
 	 * into which each logical processor is added.
 	 */
 	TOPO_DBG("cpu_topology_start() creating affinity sets:ncpus=%d max_cpus=%d\n", ncpus, machine_info.max_cpus);
+
+	uint32_t pset_cluster_id = 0;
 	for (i = 0; i < machine_info.max_cpus; i++) {
 		cpu_data_t              *cpup = cpu_datap(i);
 		x86_lcpu_t              *lcpup = cpu_to_lcpu(i);
@@ -183,19 +185,19 @@ cpu_topology_sort(int ncpus)
 		assert(LLC_cachep->type == CPU_CACHE_TYPE_UNIF);
 		aset = find_cache_affinity(LLC_cachep);
 		if ((aset == NULL) || ((cpus_per_pset != 0) && (i % cpus_per_pset) == 0)) {
-			aset = (x86_affinity_set_t *) kalloc(sizeof(*aset));
-			if (aset == NULL) {
-				panic("cpu_topology_start() failed aset alloc");
-			}
+			aset = kalloc_type(x86_affinity_set_t, Z_WAITOK | Z_NOFAIL);
 			aset->next = x86_affinities;
 			x86_affinities = aset;
 			aset->num = x86_affinity_count++;
 			aset->cache = LLC_cachep;
-			aset->pset = (i == master_cpu) ?
-			    processor_pset(master_processor) :
-			    pset_create(pset_node_root());
-			if (aset->pset == PROCESSOR_SET_NULL) {
-				panic("cpu_topology_start: pset_create");
+			if (i == master_cpu) {
+				aset->pset = processor_pset(master_processor);
+			} else {
+				pset_cluster_id++;
+				aset->pset = pset_create(pset_node_root(), PSET_SMP, pset_cluster_id, pset_cluster_id);
+				if (aset->pset == PROCESSOR_SET_NULL) {
+					panic("cpu_topology_start: pset_create");
+				}
 			}
 			TOPO_DBG("\tnew set %p(%d) pset %p for cache %p\n",
 			    aset, aset->num, aset->pset, aset->cache);
@@ -313,8 +315,8 @@ ml_cpu_cache_size(unsigned int level)
 	}
 }
 
-uint64_t
-ml_cpu_cache_sharing(unsigned int level)
+unsigned int
+ml_cpu_cache_sharing(unsigned int level, cluster_type_t cluster_type __unused, bool include_all_cpu_types __unused)
 {
 	x86_cpu_cache_t *cachep;
 
@@ -330,70 +332,37 @@ ml_cpu_cache_sharing(unsigned int level)
 
 #if     DEVELOPMENT || DEBUG
 volatile int mmiotrace_enabled = 1;
-int iotrace_generators = 0;
-int iotrace_entries_per_cpu = 0;
-int *iotrace_next;
-iotrace_entry_t **iotrace_ring;
+uint32_t iotrace_entries_per_cpu = 0;
+uint32_t PERCPU_DATA(iotrace_next);
+iotrace_entry_t *PERCPU_DATA(iotrace_ring);
 
 volatile int traptrace_enabled = 1;
-int traptrace_generators = 0;
-int traptrace_entries_per_cpu = 0;
-int *traptrace_next;
-traptrace_entry_t **traptrace_ring;
+uint32_t traptrace_entries_per_cpu = 0;
+uint32_t PERCPU_DATA(traptrace_next);
+traptrace_entry_t *PERCPU_DATA(traptrace_ring);
 
 static void
-init_trace_bufs(int cpucnt, int entries_per_cpu, void ***ring, int entry_size,
-    int **next_array, int *allocated_entries_per_cpu, int *allocated_generator_count)
+init_iotrace_bufs(int entries_per_cpu)
 {
-	int i;
+	size_t size = entries_per_cpu * sizeof(iotrace_entry_t);
 
-	*next_array = kalloc_tag(cpucnt * sizeof(int), VM_KERN_MEMORY_DIAG);
-	if (__improbable(*next_array == NULL)) {
-		*allocated_generator_count = 0;
-		return;
-	} else {
-		bzero(*next_array, cpucnt * sizeof(int));
-	}
+	percpu_foreach(ring, iotrace_ring) {
+		*ring = zalloc_permanent(size, 64);
+	};
 
-	*ring = kalloc_tag(cpucnt * sizeof(void *), VM_KERN_MEMORY_DIAG);
-	if (__improbable(*ring == NULL)) {
-		kfree(*next_array, cpucnt * sizeof(int));
-		*next_array = NULL;
-		*allocated_generator_count = 0;
-		return;
-	}
-	for (i = 0; i < cpucnt; i++) {
-		(*ring)[i] = kalloc_tag(entries_per_cpu * entry_size, VM_KERN_MEMORY_DIAG);
-		if (__improbable((*ring)[i] == NULL)) {
-			kfree(*next_array, cpucnt * sizeof(int));
-			*next_array = NULL;
-			for (int j = 0; j < i; j++) {
-				kfree((*ring)[j], entries_per_cpu * entry_size);
-			}
-			kfree(*ring, cpucnt * sizeof(void *));
-			*ring = NULL;
-			return;
-		}
-		bzero((*ring)[i], entries_per_cpu * entry_size);
-	}
-
-	*allocated_entries_per_cpu = entries_per_cpu;
-	*allocated_generator_count = cpucnt;
-}
-
-
-static void
-init_iotrace_bufs(int cpucnt, int entries_per_cpu)
-{
-	init_trace_bufs(cpucnt, entries_per_cpu, (void ***)&iotrace_ring, sizeof(iotrace_entry_t),
-	    &iotrace_next, &iotrace_entries_per_cpu, &iotrace_generators);
+	iotrace_entries_per_cpu = entries_per_cpu;
 }
 
 static void
-init_traptrace_bufs(int cpucnt, int entries_per_cpu)
+init_traptrace_bufs(int entries_per_cpu)
 {
-	init_trace_bufs(cpucnt, entries_per_cpu, (void ***)&traptrace_ring, sizeof(traptrace_entry_t),
-	    &traptrace_next, &traptrace_entries_per_cpu, &traptrace_generators);
+	size_t size = entries_per_cpu * sizeof(traptrace_entry_t);
+
+	percpu_foreach(ring, traptrace_ring) {
+		*ring = zalloc_permanent(size, 64);
+	};
+
+	traptrace_entries_per_cpu = entries_per_cpu;
 }
 
 static void
@@ -417,7 +386,7 @@ gentrace_configure_from_bootargs(const char *ena_prop, int *ena_valp, const char
 }
 
 void
-iotrace_init(int ncpus)
+iotrace_init(void)
 {
 	int entries_per_cpu = DEFAULT_IOTRACE_ENTRIES_PER_CPU;
 	int enable = mmiotrace_enabled;
@@ -428,12 +397,12 @@ iotrace_init(int ncpus)
 	mmiotrace_enabled = enable;
 
 	if (mmiotrace_enabled) {
-		init_iotrace_bufs(ncpus, entries_per_cpu);
+		init_iotrace_bufs(entries_per_cpu);
 	}
 }
 
 void
-traptrace_init(int ncpus)
+traptrace_init(void)
 {
 	int entries_per_cpu = DEFAULT_TRAPTRACE_ENTRIES_PER_CPU;
 	int enable = traptrace_enabled;
@@ -444,7 +413,7 @@ traptrace_init(int ncpus)
 	traptrace_enabled = enable;
 
 	if (traptrace_enabled) {
-		init_traptrace_bufs(ncpus, entries_per_cpu);
+		init_traptrace_bufs(entries_per_cpu);
 	}
 }
 

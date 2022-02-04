@@ -102,6 +102,7 @@
 #include <sys/ioctl.h>
 #include <sys/proc.h>
 #include <sys/mount_internal.h>
+#include <sys/vnode_internal.h>
 #include <sys/kpi_mbuf.h>
 
 #include <sys/malloc.h>
@@ -120,6 +121,11 @@
 #include <nfs/nfs.h>
 #include <nfs/nfsdiskless.h>
 #include <nfs/krpc.h>
+#include <nfs/xdr_subs.h>
+
+#if CONFIG_MACF
+#include <security/mac_framework.h>
+#endif
 
 #include <pexpert/pexpert.h>
 
@@ -127,6 +133,12 @@
 
 #include <libkern/libkern.h>
 
+#if CONFIG_NETBOOT
+static int      nfs_mount_diskless(struct nfs_dlmount *, const char *, int, vnode_t *, mount_t *, vfs_context_t);
+#if !defined(NO_MOUNT_PRIVATE)
+static int      nfs_mount_diskless_private(struct nfs_dlmount *, const char *, int, vnode_t *, mount_t *, vfs_context_t);
+#endif /* NO_MOUNT_PRIVATE */
+#endif
 
 #if NETHER == 0
 
@@ -805,5 +817,619 @@ out:
 }
 
 #endif /* NETHER */
+
+/*
+ * Mount a remote root fs via. nfs. This depends on the info in the
+ * nfs_diskless structure that has been filled in properly by some primary
+ * bootstrap.
+ * It goes something like this:
+ * - do enough of "ifconfig" by calling ifioctl() so that the system
+ *   can talk to the server
+ * - If nfs_diskless.mygateway is filled in, use that address as
+ *   a default gateway.
+ * - hand craft the swap nfs vnode hanging off a fake mount point
+ *	if swdevt[0].sw_dev == NODEV
+ * - build the rootfs mount point and call mountnfs() to do the rest.
+ */
+#if CONFIG_NETBOOT
+int
+nfs_mountroot(void)
+{
+	struct nfs_diskless nd;
+	mount_t mp = NULL;
+	vnode_t vp = NULL;
+	vfs_context_t ctx;
+	int error;
+#if !defined(NO_MOUNT_PRIVATE)
+	mount_t mppriv = NULL;
+	vnode_t vppriv = NULL;
+#endif /* NO_MOUNT_PRIVATE */
+	int v3, sotype;
+
+	/*
+	 * Call nfs_boot_init() to fill in the nfs_diskless struct.
+	 * Note: networking must already have been configured before
+	 * we're called.
+	 */
+	bzero((caddr_t) &nd, sizeof(nd));
+	error = nfs_boot_init(&nd);
+	if (error) {
+		panic("nfs_boot_init: unable to initialize NFS root system information, "
+		    "error %d, check configuration: %s\n", error, PE_boot_args());
+	}
+
+	/*
+	 * Try NFSv3 first, then fallback to NFSv2.
+	 * Likewise, try TCP first, then fall back to UDP.
+	 */
+	v3 = 1;
+	sotype = SOCK_STREAM;
+
+tryagain:
+	error = nfs_boot_getfh(&nd, v3, sotype);
+	if (error) {
+		if (error == EHOSTDOWN || error == EHOSTUNREACH) {
+			if (nd.nd_root.ndm_mntfrom) {
+				NFS_ZFREE(ZV_NAMEI, nd.nd_root.ndm_mntfrom);
+			}
+			if (nd.nd_root.ndm_path) {
+				NFS_ZFREE(ZV_NAMEI, nd.nd_root.ndm_path);
+			}
+			if (nd.nd_private.ndm_mntfrom) {
+				NFS_ZFREE(ZV_NAMEI, nd.nd_private.ndm_mntfrom);
+			}
+			if (nd.nd_private.ndm_path) {
+				NFS_ZFREE(ZV_NAMEI, nd.nd_private.ndm_path);
+			}
+			return error;
+		}
+		if (v3) {
+			if (sotype == SOCK_STREAM) {
+				printf("NFS mount (v3,TCP) failed with error %d, trying UDP...\n", error);
+				sotype = SOCK_DGRAM;
+				goto tryagain;
+			}
+			printf("NFS mount (v3,UDP) failed with error %d, trying v2...\n", error);
+			v3 = 0;
+			sotype = SOCK_STREAM;
+			goto tryagain;
+		} else if (sotype == SOCK_STREAM) {
+			printf("NFS mount (v2,TCP) failed with error %d, trying UDP...\n", error);
+			sotype = SOCK_DGRAM;
+			goto tryagain;
+		} else {
+			printf("NFS mount (v2,UDP) failed with error %d, giving up...\n", error);
+		}
+		switch (error) {
+		case EPROGUNAVAIL:
+			panic("NFS mount failed: NFS server mountd not responding, check server configuration: %s", PE_boot_args());
+		case EACCES:
+		case EPERM:
+			panic("NFS mount failed: NFS server refused mount, check server configuration: %s", PE_boot_args());
+		default:
+			panic("NFS mount failed with error %d, check configuration: %s", error, PE_boot_args());
+		}
+	}
+
+	ctx = vfs_context_kernel();
+
+	/*
+	 * Create the root mount point.
+	 */
+#if !defined(NO_MOUNT_PRIVATE)
+	{
+		//PWC hack until we have a real "mount" tool to remount root rw
+		int rw_root = 0;
+		int flags = MNT_ROOTFS | MNT_RDONLY;
+		PE_parse_boot_argn("-rwroot_hack", &rw_root, sizeof(rw_root));
+		if (rw_root) {
+			flags = MNT_ROOTFS;
+			kprintf("-rwroot_hack in effect: mounting root fs read/write\n");
+		}
+
+		if ((error = nfs_mount_diskless(&nd.nd_root, "/", flags, &vp, &mp, ctx)))
+#else
+	if ((error = nfs_mount_diskless(&nd.nd_root, "/", MNT_ROOTFS, &vp, &mp, ctx)))
+#endif /* NO_MOUNT_PRIVATE */
+		{
+			if (v3) {
+				if (sotype == SOCK_STREAM) {
+					printf("NFS root mount (v3,TCP) failed with %d, trying UDP...\n", error);
+					sotype = SOCK_DGRAM;
+					goto tryagain;
+				}
+				printf("NFS root mount (v3,UDP) failed with %d, trying v2...\n", error);
+				v3 = 0;
+				sotype = SOCK_STREAM;
+				goto tryagain;
+			} else if (sotype == SOCK_STREAM) {
+				printf("NFS root mount (v2,TCP) failed with %d, trying UDP...\n", error);
+				sotype = SOCK_DGRAM;
+				goto tryagain;
+			} else {
+				printf("NFS root mount (v2,UDP) failed with error %d, giving up...\n", error);
+			}
+			panic("NFS root mount failed with error %d, check configuration: %s", error, PE_boot_args());
+		}
+	}
+	printf("root on %s\n", nd.nd_root.ndm_mntfrom);
+
+	vfs_unbusy(mp);
+	mount_list_add(mp);
+	rootvp = vp;
+
+#if !defined(NO_MOUNT_PRIVATE)
+	if (nd.nd_private.ndm_saddr.sin_addr.s_addr) {
+		error = nfs_mount_diskless_private(&nd.nd_private, "/private",
+		    0, &vppriv, &mppriv, ctx);
+		if (error) {
+			panic("NFS /private mount failed with error %d, check configuration: %s", error, PE_boot_args());
+		}
+		printf("private on %s\n", nd.nd_private.ndm_mntfrom);
+
+		vfs_unbusy(mppriv);
+		mount_list_add(mppriv);
+	}
+
+#endif /* NO_MOUNT_PRIVATE */
+
+	if (nd.nd_root.ndm_mntfrom) {
+		NFS_ZFREE(ZV_NAMEI, nd.nd_root.ndm_mntfrom);
+	}
+	if (nd.nd_root.ndm_path) {
+		NFS_ZFREE(ZV_NAMEI, nd.nd_root.ndm_path);
+	}
+	if (nd.nd_private.ndm_mntfrom) {
+		NFS_ZFREE(ZV_NAMEI, nd.nd_private.ndm_mntfrom);
+	}
+	if (nd.nd_private.ndm_path) {
+		NFS_ZFREE(ZV_NAMEI, nd.nd_private.ndm_path);
+	}
+
+	return 0;
+}
+
+/*
+ * Internal version of mount system call for diskless setup.
+ */
+static int
+nfs_mount_diskless(
+	struct nfs_dlmount *ndmntp,
+	const char *mntname,
+	int mntflag,
+	vnode_t *vpp,
+	mount_t *mpp,
+	vfs_context_t ctx)
+{
+	mount_t mp;
+	vnode_t vp = NULLVP;
+	int error, numcomps;
+	char *xdrbuf, *p, *cp, *frompath, *endserverp;
+	char uaddr[MAX_IPv4_STR_LEN];
+	struct xdrbuf xb;
+	uint32_t mattrs[NFS_MATTR_BITMAP_LEN];
+	uint32_t mflags_mask[NFS_MFLAG_BITMAP_LEN];
+	uint32_t mflags[NFS_MFLAG_BITMAP_LEN];
+	uint64_t argslength_offset, attrslength_offset, end_offset;
+
+	if ((error = vfs_rootmountalloc("nfs", ndmntp->ndm_mntfrom, &mp))) {
+		printf("nfs_mount_diskless: NFS not configured\n");
+		return error;
+	}
+
+	mp->mnt_kern_flag |= MNTK_KERNEL_MOUNT; /* mark as kernel mount */
+	vfs_setflags(mp, mntflag);
+	if (!vfs_isrdonly(mp)) {
+		vfs_clearflags(mp, MNT_RDONLY);
+	}
+
+	/* find the server-side path being mounted */
+	frompath = ndmntp->ndm_mntfrom;
+	if (*frompath == '[') {  /* skip IPv6 literal address */
+		while (*frompath && (*frompath != ']')) {
+			frompath++;
+		}
+		if (*frompath == ']') {
+			frompath++;
+		}
+	}
+	while (*frompath && (*frompath != ':')) {
+		frompath++;
+	}
+	endserverp = frompath;
+	while (*frompath && (*frompath == ':')) {
+		frompath++;
+	}
+	/* count fs location path components */
+	p = frompath;
+	while (*p && (*p == '/')) {
+		p++;
+	}
+	numcomps = 0;
+	while (*p) {
+		numcomps++;
+		while (*p && (*p != '/')) {
+			p++;
+		}
+		while (*p && (*p == '/')) {
+			p++;
+		}
+	}
+
+	/* convert address to universal address string */
+	if (inet_ntop(AF_INET, &ndmntp->ndm_saddr.sin_addr, uaddr, sizeof(uaddr)) != uaddr) {
+		printf("nfs_mount_diskless: bad address\n");
+		return EINVAL;
+	}
+
+	/* prepare mount attributes */
+	NFS_BITMAP_ZERO(mattrs, NFS_MATTR_BITMAP_LEN);
+	NFS_BITMAP_SET(mattrs, NFS_MATTR_NFS_VERSION);
+	NFS_BITMAP_SET(mattrs, NFS_MATTR_SOCKET_TYPE);
+	NFS_BITMAP_SET(mattrs, NFS_MATTR_NFS_PORT);
+	NFS_BITMAP_SET(mattrs, NFS_MATTR_FH);
+	NFS_BITMAP_SET(mattrs, NFS_MATTR_FS_LOCATIONS);
+	NFS_BITMAP_SET(mattrs, NFS_MATTR_MNTFLAGS);
+
+	/* prepare mount flags */
+	NFS_BITMAP_ZERO(mflags_mask, NFS_MFLAG_BITMAP_LEN);
+	NFS_BITMAP_ZERO(mflags, NFS_MFLAG_BITMAP_LEN);
+	NFS_BITMAP_SET(mflags_mask, NFS_MFLAG_RESVPORT);
+	NFS_BITMAP_SET(mflags, NFS_MFLAG_RESVPORT);
+
+	/* build xdr buffer */
+	xb_init_buffer(&xb, NULL, 0);
+	xb_add_32(error, &xb, NFS_ARGSVERSION_XDR);
+	argslength_offset = xb_offset(&xb);
+	xb_add_32(error, &xb, 0); // args length
+	xb_add_32(error, &xb, NFS_XDRARGS_VERSION_0);
+	xb_add_bitmap(error, &xb, mattrs, NFS_MATTR_BITMAP_LEN);
+	attrslength_offset = xb_offset(&xb);
+	xb_add_32(error, &xb, 0); // attrs length
+	xb_add_32(error, &xb, ndmntp->ndm_nfsv3 ? 3 : 2); // NFS version
+	xb_add_string(error, &xb, ((ndmntp->ndm_sotype == SOCK_DGRAM) ? "udp" : "tcp"), 3);
+	xb_add_32(error, &xb, ntohs(ndmntp->ndm_saddr.sin_port)); // NFS port
+	xb_add_fh(error, &xb, &ndmntp->ndm_fh[0], ndmntp->ndm_fhlen);
+	/* fs location */
+	xb_add_32(error, &xb, 1); /* fs location count */
+	xb_add_32(error, &xb, 1); /* server count */
+	xb_add_string(error, &xb, ndmntp->ndm_mntfrom, (endserverp - ndmntp->ndm_mntfrom)); /* server name */
+	xb_add_32(error, &xb, 1); /* address count */
+	xb_add_string(error, &xb, uaddr, strlen(uaddr)); /* address */
+	xb_add_32(error, &xb, 0); /* empty server info */
+	xb_add_32(error, &xb, numcomps); /* pathname component count */
+	p = frompath;
+	while (*p && (*p == '/')) {
+		p++;
+	}
+	while (*p) {
+		cp = p;
+		while (*p && (*p != '/')) {
+			p++;
+		}
+		xb_add_string(error, &xb, cp, (p - cp)); /* component */
+		if (error) {
+			break;
+		}
+		while (*p && (*p == '/')) {
+			p++;
+		}
+	}
+	xb_add_32(error, &xb, 0); /* empty fsl info */
+	xb_add_32(error, &xb, mntflag); /* MNT flags */
+	xb_build_done(error, &xb);
+
+	/* update opaque counts */
+	end_offset = xb_offset(&xb);
+	if (!error) {
+		error = xb_seek(&xb, argslength_offset);
+		xb_add_32(error, &xb, end_offset - argslength_offset + XDRWORD /*version*/);
+	}
+	if (!error) {
+		error = xb_seek(&xb, attrslength_offset);
+		xb_add_32(error, &xb, end_offset - attrslength_offset - XDRWORD /*don't include length field*/);
+	}
+	if (error) {
+		printf("nfs_mount_diskless: error %d assembling mount args\n", error);
+		xb_cleanup(&xb);
+		return error;
+	}
+	/* grab the assembled buffer */
+	xdrbuf = xb_buffer_base(&xb);
+
+	/* do the mount */
+	if ((error = VFS_MOUNT(mp, vp, CAST_USER_ADDR_T(xdrbuf), ctx))) {
+		printf("nfs_mountroot: mount %s failed: %d\n", mntname, error);
+		// XXX vfs_rootmountfailed(mp);
+		mount_list_lock();
+		mp->mnt_vtable->vfc_refcount--;
+		mount_list_unlock();
+		vfs_unbusy(mp);
+		mount_lock_destroy(mp);
+#if CONFIG_MACF
+		mac_mount_label_destroy(mp);
+#endif
+		NFS_ZFREE(mount_zone, mp);
+	} else {
+		*mpp = mp;
+		error = VFS_ROOT(mp, vpp, ctx);
+	}
+	xb_cleanup(&xb);
+	return error;
+}
+
+#if !defined(NO_MOUNT_PRIVATE)
+/*
+ * Internal version of mount system call to mount "/private"
+ * separately in diskless setup
+ */
+static int
+nfs_mount_diskless_private(
+	struct nfs_dlmount *ndmntp,
+	const char *mntname,
+	int mntflag,
+	vnode_t *vpp,
+	mount_t *mpp,
+	vfs_context_t ctx)
+{
+	mount_t mp;
+	vnode_t vp = NULLVP;
+	int error, numcomps;
+	proc_t procp;
+	struct vfstable *vfsp;
+	struct nameidata nd;
+	char *xdrbuf = NULL, *p, *cp, *frompath, *endserverp;
+	char uaddr[MAX_IPv4_STR_LEN];
+	struct xdrbuf xb;
+	uint32_t mattrs[NFS_MATTR_BITMAP_LEN];
+	uint32_t mflags_mask[NFS_MFLAG_BITMAP_LEN], mflags[NFS_MFLAG_BITMAP_LEN];
+	uint64_t argslength_offset, attrslength_offset, end_offset;
+	struct vfsioattr ioattr;
+
+	procp = current_proc(); /* XXX */
+	xb_init(&xb, XDRBUF_NONE);
+
+	{
+		/*
+		 * mimic main()!. Temporarily set up rootvnode and other stuff so
+		 * that namei works. Need to undo this because main() does it, too
+		 */
+		struct filedesc *fdp = &procp->p_fd;
+		vfs_setflags(mountlist.tqh_first, MNT_ROOTFS);
+
+		/* Get the vnode for '/'. Set fdp->fd_cdir to reference it. */
+		if (VFS_ROOT(mountlist.tqh_first, &rootvnode, NULL)) {
+			panic("cannot find root vnode");
+		}
+		error = vnode_ref(rootvnode);
+		if (error) {
+			printf("nfs_mountroot: vnode_ref() failed on root vnode!\n");
+			goto out;
+		}
+		fdp->fd_cdir = rootvnode;
+		fdp->fd_rdir = NULL;
+	}
+
+	/*
+	 * Get vnode to be covered
+	 */
+	NDINIT(&nd, LOOKUP, OP_LOOKUP, FOLLOW | LOCKLEAF, UIO_SYSSPACE,
+	    CAST_USER_ADDR_T(mntname), ctx);
+	error = namei(&nd);
+	{
+		/* undo vnode_ref() in mimic main()! */
+		vnode_rele(rootvnode);
+	}
+	if (error) {
+		printf("nfs_mountroot: private namei failed!\n");
+		goto out;
+	}
+	nameidone(&nd);
+	vp = nd.ni_vp;
+
+	if ((error = VNOP_FSYNC(vp, MNT_WAIT, ctx)) ||
+	    (error = buf_invalidateblks(vp, BUF_WRITE_DATA, 0, 0))) {
+		vnode_put(vp);
+		goto out;
+	}
+	if (vnode_vtype(vp) != VDIR) {
+		vnode_put(vp);
+		error = ENOTDIR;
+		goto out;
+	}
+	for (vfsp = vfsconf; vfsp; vfsp = vfsp->vfc_next) {
+		if (!strncmp(vfsp->vfc_name, "nfs", sizeof(vfsp->vfc_name))) {
+			break;
+		}
+	}
+	if (vfsp == NULL) {
+		printf("nfs_mountroot: private NFS not configured\n");
+		vnode_put(vp);
+		error = ENODEV;
+		goto out;
+	}
+	if (vnode_mountedhere(vp) != NULL) {
+		vnode_put(vp);
+		error = EBUSY;
+		goto out;
+	}
+
+	/*
+	 * Allocate and initialize the filesystem.
+	 */
+	mp = zalloc_flags(mount_zone, Z_WAITOK | Z_ZERO);
+	/* Initialize the default IO constraints */
+	bzero(&ioattr, sizeof(ioattr));
+	ioattr.io_maxreadcnt = ioattr.io_maxwritecnt = MAXPHYS;
+	ioattr.io_segreadcnt = ioattr.io_segwritecnt = 32;
+	vfs_setioattr(mp, &ioattr);
+	mp->mnt_realrootvp = NULLVP;
+	vfs_setauthcache_ttl(mp, 0); /* Allways go to our lookup */
+	mp->mnt_kern_flag |= MNTK_KERNEL_MOUNT; /* mark as kernel mount */
+
+	mount_lock_init(mp);
+	TAILQ_INIT(&mp->mnt_vnodelist);
+	TAILQ_INIT(&mp->mnt_workerqueue);
+	TAILQ_INIT(&mp->mnt_newvnodes);
+	(void)vfs_busy(mp, LK_NOWAIT);
+	TAILQ_INIT(&mp->mnt_vnodelist);
+	mount_list_lock();
+	vfsp->vfc_refcount++;
+	mount_list_unlock();
+	mp->mnt_vtable = vfsp;
+	mp->mnt_op = vfsp->vfc_vfsops;
+	vfs_setflags(mp, mntflag);
+	vfs_setflags(mp, vfsp->vfc_flags);
+	strncpy(vfs_statfs(mp)->f_fstypename, vfsp->vfc_name, MFSNAMELEN - 1);
+	vp->v_mountedhere = mp;
+	mp->mnt_vnodecovered = vp;
+	vp = NULLVP;
+	vfs_statfs(mp)->f_owner = kauth_cred_getuid(kauth_cred_get());
+	(void) copystr(mntname, vfs_statfs(mp)->f_mntonname, MAXPATHLEN - 1, 0);
+	(void) copystr(ndmntp->ndm_mntfrom, vfs_statfs(mp)->f_mntfromname, MAXPATHLEN - 1, 0);
+#if CONFIG_MACF
+	mac_mount_label_init(mp);
+	mac_mount_label_associate(ctx, mp);
+#endif
+
+	/* find the server-side path being mounted */
+	frompath = ndmntp->ndm_mntfrom;
+	if (*frompath == '[') {  /* skip IPv6 literal address */
+		while (*frompath && (*frompath != ']')) {
+			frompath++;
+		}
+		if (*frompath == ']') {
+			frompath++;
+		}
+	}
+	while (*frompath && (*frompath != ':')) {
+		frompath++;
+	}
+	endserverp = frompath;
+	while (*frompath && (*frompath == ':')) {
+		frompath++;
+	}
+	/* count fs location path components */
+	p = frompath;
+	while (*p && (*p == '/')) {
+		p++;
+	}
+	numcomps = 0;
+	while (*p) {
+		numcomps++;
+		while (*p && (*p != '/')) {
+			p++;
+		}
+		while (*p && (*p == '/')) {
+			p++;
+		}
+	}
+
+	/* convert address to universal address string */
+	if (inet_ntop(AF_INET, &ndmntp->ndm_saddr.sin_addr, uaddr, sizeof(uaddr)) != uaddr) {
+		printf("nfs_mountroot: bad address\n");
+		error = EINVAL;
+		goto out;
+	}
+
+	/* prepare mount attributes */
+	NFS_BITMAP_ZERO(mattrs, NFS_MATTR_BITMAP_LEN);
+	NFS_BITMAP_SET(mattrs, NFS_MATTR_NFS_VERSION);
+	NFS_BITMAP_SET(mattrs, NFS_MATTR_SOCKET_TYPE);
+	NFS_BITMAP_SET(mattrs, NFS_MATTR_NFS_PORT);
+	NFS_BITMAP_SET(mattrs, NFS_MATTR_FH);
+	NFS_BITMAP_SET(mattrs, NFS_MATTR_FS_LOCATIONS);
+	NFS_BITMAP_SET(mattrs, NFS_MATTR_MNTFLAGS);
+
+	/* prepare mount flags */
+	NFS_BITMAP_ZERO(mflags_mask, NFS_MFLAG_BITMAP_LEN);
+	NFS_BITMAP_ZERO(mflags, NFS_MFLAG_BITMAP_LEN);
+	NFS_BITMAP_SET(mflags_mask, NFS_MFLAG_RESVPORT);
+	NFS_BITMAP_SET(mflags, NFS_MFLAG_RESVPORT);
+
+	/* build xdr buffer */
+	xb_init_buffer(&xb, NULL, 0);
+	xb_add_32(error, &xb, NFS_ARGSVERSION_XDR);
+	argslength_offset = xb_offset(&xb);
+	xb_add_32(error, &xb, 0); // args length
+	xb_add_32(error, &xb, NFS_XDRARGS_VERSION_0);
+	xb_add_bitmap(error, &xb, mattrs, NFS_MATTR_BITMAP_LEN);
+	attrslength_offset = xb_offset(&xb);
+	xb_add_32(error, &xb, 0); // attrs length
+	xb_add_32(error, &xb, ndmntp->ndm_nfsv3 ? 3 : 2); // NFS version
+	xb_add_string(error, &xb, ((ndmntp->ndm_sotype == SOCK_DGRAM) ? "udp" : "tcp"), 3);
+	xb_add_32(error, &xb, ntohs(ndmntp->ndm_saddr.sin_port)); // NFS port
+	xb_add_fh(error, &xb, &ndmntp->ndm_fh[0], ndmntp->ndm_fhlen);
+	/* fs location */
+	xb_add_32(error, &xb, 1); /* fs location count */
+	xb_add_32(error, &xb, 1); /* server count */
+	xb_add_string(error, &xb, ndmntp->ndm_mntfrom, (endserverp - ndmntp->ndm_mntfrom)); /* server name */
+	xb_add_32(error, &xb, 1); /* address count */
+	xb_add_string(error, &xb, uaddr, strlen(uaddr)); /* address */
+	xb_add_32(error, &xb, 0); /* empty server info */
+	xb_add_32(error, &xb, numcomps); /* pathname component count */
+	p = frompath;
+	while (*p && (*p == '/')) {
+		p++;
+	}
+	while (*p) {
+		cp = p;
+		while (*p && (*p != '/')) {
+			p++;
+		}
+		xb_add_string(error, &xb, cp, (p - cp)); /* component */
+		if (error) {
+			break;
+		}
+		while (*p && (*p == '/')) {
+			p++;
+		}
+	}
+	xb_add_32(error, &xb, 0); /* empty fsl info */
+	xb_add_32(error, &xb, mntflag); /* MNT flags */
+	xb_build_done(error, &xb);
+
+	/* update opaque counts */
+	end_offset = xb_offset(&xb);
+	if (!error) {
+		error = xb_seek(&xb, argslength_offset);
+		xb_add_32(error, &xb, end_offset - argslength_offset + XDRWORD /*version*/);
+	}
+	if (!error) {
+		error = xb_seek(&xb, attrslength_offset);
+		xb_add_32(error, &xb, end_offset - attrslength_offset - XDRWORD /*don't include length field*/);
+	}
+	if (error) {
+		printf("nfs_mountroot: error %d assembling mount args\n", error);
+		goto out;
+	}
+	/* grab the assembled buffer */
+	xdrbuf = xb_buffer_base(&xb);
+
+	/* do the mount */
+	if ((error = VFS_MOUNT(mp, vp, CAST_USER_ADDR_T(xdrbuf), ctx))) {
+		printf("nfs_mountroot: mount %s failed: %d\n", mntname, error);
+		vnode_put(mp->mnt_vnodecovered);
+		mount_list_lock();
+		vfsp->vfc_refcount--;
+		mount_list_unlock();
+		vfs_unbusy(mp);
+		mount_lock_destroy(mp);
+#if CONFIG_MACF
+		mac_mount_label_destroy(mp);
+#endif
+		NFS_ZFREE(mount_zone, mp);
+		goto out;
+	} else {
+		*mpp = mp;
+		error = VFS_ROOT(mp, vpp, ctx);
+	}
+out:
+	xb_cleanup(&xb);
+	return error;
+}
+#endif /* NO_MOUNT_PRIVATE */
+
+#endif /* CONFIG_NETBOOT */
 
 #endif /* CONFIG_NFS_CLIENT */

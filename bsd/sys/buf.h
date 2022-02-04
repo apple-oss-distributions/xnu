@@ -324,6 +324,17 @@ void    buf_reset(buf_t bp, int32_t flags);
 errno_t buf_map(buf_t bp, caddr_t *io_addr);
 
 /*!
+ *  @function buf_map_range
+ *  @abstract Get virtual mappings for buffer data.
+ *  @discussion Similar to buf_map but the focus is on a range
+ *  of the UPL. The b_uploffset and b_count control what part of the UPL will be mapped.
+ *  @param bp Buffer whose mapping to find or create.
+ *  @param io_addr Destination for mapping address.
+ *  @return 0 for success, ENOMEM if unable to map the buffer.
+ */
+errno_t buf_map_range(buf_t bp, caddr_t *io_addr);
+
+/*!
  *  @function buf_unmap
  *  @abstract Release mappings for buffer data.
  *  @discussion For buffers created through buf_getblk() (i.e. traditional buffer cache usage),
@@ -337,6 +348,16 @@ errno_t buf_map(buf_t bp, caddr_t *io_addr);
  *  @return 0 for success, EINVAL if unable to unmap buffer.
  */
 errno_t buf_unmap(buf_t bp);
+
+/*!
+ *  @function buf_unmap_range
+ *  @abstract Release mappings for buffer data.
+ *  @discussion Similar to buf_unmap but the focus is on a range
+ *  of the UPL. The b_uploffset and b_count control what part of the UPL will be unmapped.
+ *  @param bp Buffer whose mapping to find or create.
+ *  @return 0 for success, EINVAL if unable to unmap buffer.
+ */
+errno_t buf_unmap_range(buf_t bp);
 
 /*!
  *  @function buf_setdrvdata
@@ -393,6 +414,16 @@ daddr64_t buf_blkno(buf_t bp);
 daddr64_t buf_lblkno(buf_t bp);
 
 /*!
+ *  @function buf_lblksize
+ *  @abstract Get the block size used to calculate the logical block number associated with a buffer.
+ *  @discussion Logical block number is set on traditionally-used buffers by an argument passed to buf_getblk(),
+ *  for example by buf_bread(). Block size is the block size used to calculate the file offset.
+ *  @param bp Buffer whose logical block size to get.
+ *  @return Block size.
+ */
+uint32_t buf_lblksize(buf_t bp);
+
+/*!
  *  @function buf_setblkno
  *  @abstract Set physical block number associated with a buffer.
  *  @discussion Physical block number is generally set by the cluster layer or by buf_getblk().
@@ -410,6 +441,16 @@ void    buf_setblkno(buf_t bp, daddr64_t blkno);
  *  @param lblkno Block number to set.
  */
 void    buf_setlblkno(buf_t bp, daddr64_t lblkno);
+
+/*!
+ *  @function buf_setlblksize
+ *  @abstract Set block size used to set the logical block number associated with a buffer.
+ *  @discussion Logical block number is set on traditionally-used buffers by an argument passed to buf_getblk(),
+ *  for example by buf_bread().
+ *  @param bp Buffer whose logical block size to set.
+ *  @param lblksize Block size to set.
+ */
+void    buf_setlblksize(buf_t bp, uint32_t lblksize);
 
 /*!
  *  @function buf_count
@@ -1036,6 +1077,22 @@ void bufattr_markioscheduled(bufattr_t bap);
  */
 int bufattr_ioscheduled(bufattr_t bap);
 
+/*!
+ *  @function bufattr_markexpeditedmeta
+ *  @abstract Mark a metadata I/O buffer as expedited (i.e. requires a high I/O tier).
+ *  @param bap Buffer attributes to mark.
+ *  @discussion Marks the buffer so that spec_strategy() will know that it should be expedited
+ */
+void bufattr_markexpeditedmeta(bufattr_t bap);
+
+/*!
+ *  @function bufattr_expeditedmeta
+ *  @abstract Check if a buffer is marked as expedited metadata I/O.
+ *  @param bap Buffer attributes to test.
+ *  @return Nonzero if the buffer is marked expedited metadata I/O, 0 otherwise.
+ */
+int bufattr_expeditedmeta(bufattr_t bap);
+
 #ifdef KERNEL_PRIVATE
 void    buf_setfilter(buf_t, void (*)(buf_t, void *), void *, void(**)(buf_t, void *), void **);
 
@@ -1124,6 +1181,14 @@ int     bufattr_isochronous(bufattr_t bap);
  *  @return Nonzero if the buffer is throttled, 0 otherwise.
  */
 int bufattr_throttled(bufattr_t bap);
+
+/*!
+ *  @function bufattr_willverify
+ *  @abstract Check if a buffer is verified by the cluster layer.
+ *  @param bap Buffer attribute to test.
+ *  @return Nonzero if the buffer will be verified, 0 otherwise.
+ */
+int bufattr_willverify(bufattr_t bap);
 
 /*!
  *  @function bufattr_passive

@@ -70,6 +70,19 @@
 
 #include <sys/appleapiopts.h>
 #include <sys/cdefs.h>
+#include <sys/socket.h>
+#include <sys/mount.h>
+
+#ifdef KERNEL
+#include <sys/vnode.h>
+#include <sys/user.h>
+#include <net/radix.h>
+#include <kern/locks.h>
+#include <kern/lock_group.h>
+#endif
+
+#include <nfs/rpcv2.h>
+#include <nfs/nfsproto.h>
 
 #ifdef __APPLE_API_PRIVATE
 /*
@@ -120,6 +133,10 @@ extern int nfs_ticks;
 /* default values for unresponsive mount timeouts */
 #define NFS_TPRINTF_INITIAL_DELAY       5
 #define NFS_TPRINTF_DELAY               30
+
+/* NFS client mount timeouts */
+#define NFS_MOUNT_TIMEOUT               30
+#define NFS_MOUNT_QUICK_TIMEOUT         8
 
 /*
  * Oddballs
@@ -595,6 +612,8 @@ struct nfs_export_options {
 struct nfs_netopt {
 	struct radix_node               no_rnodes[2];   /* radix tree glue */
 	struct nfs_export_options       no_opt;         /* export options */
+	struct sockaddr                 *no_addr;       /* net address to which exported */
+	struct sockaddr                 *no_mask;       /* mask for net address */
 };
 
 /* statistic counters for each exported directory
@@ -632,7 +651,7 @@ extern uint32_t nfsrv_user_stat_enabled;                /* enable/disable active
 extern uint32_t nfsrv_user_stat_node_count;             /* current count of user stat nodes */
 extern uint32_t nfsrv_user_stat_max_idle_sec;   /* idle seconds (node no longer considered active) */
 extern uint32_t nfsrv_user_stat_max_nodes;              /* active user list size limit */
-extern lck_grp_t *nfsrv_active_user_mutex_group;
+extern lck_grp_t nfsrv_active_user_mutex_group;
 
 /* An active user node represented in the kernel */
 struct nfs_user_stat_node {
@@ -718,14 +737,15 @@ struct nfsrv_fmod {
 #define NFSRVFMODHASH(vp) (((uintptr_t) vp) & nfsrv_fmod_hash)
 extern LIST_HEAD(nfsrv_fmod_hashhead, nfsrv_fmod) * nfsrv_fmod_hashtbl;
 extern u_long nfsrv_fmod_hash;
-extern lck_mtx_t *nfsrv_fmod_mutex;
+extern lck_mtx_t nfsrv_fmod_mutex;
 extern int nfsrv_fmod_pending, nfsrv_fsevents_enabled;
 #endif
 
 extern int nfsrv_async, nfsrv_export_hash_size,
     nfsrv_reqcache_size, nfsrv_sock_max_rec_queue_length;
 extern uint32_t nfsrv_gss_context_ttl;
-extern struct nfsstats nfsstats;
+extern struct nfsclntstats nfsclntstats;
+extern struct nfsrvstats nfsrvstats;
 #define NFS_UC_Q_DEBUG
 #ifdef NFS_UC_Q_DEBUG
 extern int nfsrv_uc_use_proxy;
@@ -743,7 +763,7 @@ extern volatile uint32_t nfsrv_uc_queue_count;
 /*
  * Stats structure
  */
-struct nfsstats {
+struct nfsclntstats {
 	uint64_t        attrcache_hits;
 	uint64_t        attrcache_misses;
 	uint64_t        lookupcache_hits;
@@ -760,31 +780,41 @@ struct nfsstats {
 	uint64_t        readlink_bios;
 	uint64_t        biocache_readdirs;
 	uint64_t        readdir_bios;
-	uint64_t        rpccnt[NFS_NPROCS];
+	uint64_t        rpccntv3[NFS_NPROCS];
+	uint64_t        opcntv4[NFS_OP_COUNT];
 	uint64_t        rpcretries;
-	uint64_t        srvrpccnt[NFS_NPROCS];
-	uint64_t        srvrpc_errs;
-	uint64_t        srv_errs;
 	uint64_t        rpcrequests;
 	uint64_t        rpctimeouts;
 	uint64_t        rpcunexpected;
 	uint64_t        rpcinvalid;
+	uint64_t        pageins;
+	uint64_t        pageouts;
+};
+
+struct nfsrvstats {
+	uint64_t        srvrpccntv3[NFS_NPROCS];
+	uint64_t        srvrpc_errs;
+	uint64_t        srv_errs;
 	uint64_t        srvcache_inproghits;
 	uint64_t        srvcache_idemdonehits;
 	uint64_t        srvcache_nonidemdonehits;
 	uint64_t        srvcache_misses;
 	uint64_t        srvvop_writes;
-	uint64_t        pageins;
-	uint64_t        pageouts;
 };
+
 #endif
 
 /*
  * Flags for nfssvc() system call.
  */
-#define NFSSVC_NFSD     0x004
-#define NFSSVC_ADDSOCK  0x008
-#define NFSSVC_EXPORT   0x200
+#define NFSSVC_NFSD             0x004
+#define NFSSVC_ADDSOCK          0x008
+#define NFSSVC_EXPORTSTATS      0x010    /* gets exported directory stats */
+#define NFSSVC_USERSTATS        0x020    /* gets exported directory active user stats */
+#define NFSSVC_USERCOUNT        0x040    /* gets current count of active nfs users */
+#define NFSSVC_ZEROSTATS        0x080    /* zero nfs server statistics */
+#define NFSSVC_SRVSTATS         0x100    /* struct: struct nfsrvstats */
+#define NFSSVC_EXPORT           0x200
 
 /*
  * Flags for nfsclnt() system call.
@@ -792,6 +822,9 @@ struct nfsstats {
 #define NFSCLNT_LOCKDANS        0x200
 #define NFSCLNT_LOCKDNOTIFY     0x400
 #define NFSCLNT_TESTIDMAP       0x001
+
+/* nfsclnt() system call character device */
+#define NFSCLNT_DEVICE         "nfsclnt"
 
 #include <sys/_types/_guid_t.h> /* for guid_t below */
 #define MAXIDNAMELEN            1024
@@ -812,12 +845,9 @@ struct nfs_testmapid {
 /*
  * fs.nfs sysctl(3) identifiers
  */
-#define NFS_NFSSTATS        1       /* struct: struct nfsstats */
-#define NFS_EXPORTSTATS     3       /* gets exported directory stats */
-#define NFS_USERSTATS       4       /* gets exported directory active user stats */
-#define NFS_USERCOUNT       5       /* gets current count of active nfs users */
+#define NFS_NFSSTATS        1       /* struct: struct nfsclntstats */
 #define NFS_MOUNTINFO       6       /* gets information about an NFS mount */
-#define NFS_NFSZEROSTATS    7       /* zero nfs statistics */
+#define NFS_NFSZEROSTATS    7       /* zero nfs client statistics */
 
 #ifndef NFS_WDELAYHASHSIZ
 #define NFS_WDELAYHASHSIZ 16    /* and with this */
@@ -827,6 +857,30 @@ struct nfs_testmapid {
 #include <sys/kernel_types.h>
 #include <kern/thread_call.h>
 #include <sys/kdebug.h>
+
+#ifdef KERNEL_PRIVATE
+
+/* NFS hooks */
+
+/* NFS hooks struct */
+struct nfs_hooks {
+	int       (*f_vinvalbuf)(vnode_t, int, vfs_context_t, int);
+	int       (*f_buf_page_inval)(vnode_t, off_t);
+};
+
+/* NFS hooks registration functions */
+void nfs_register_hooks(struct nfs_hooks *hooks);
+void nfs_unregister_hooks(void);
+
+#ifdef XNU_KERNEL_PRIVATE
+
+/* NFS hooks wrappers */
+int           nfs_vinvalbuf(vnode_t, int, vfs_context_t, int);
+int           nfs_buf_page_inval(vnode_t, off_t);
+
+#endif /* XNU_KERNEL_PRIVATE */
+
+#endif /* KERNEL_PRIVATE */
 
 #define NFS_KERNEL_DEBUG KERNEL_DEBUG
 
@@ -848,6 +902,7 @@ MALLOC_DECLARE(M_NFSDIROFF);
 MALLOC_DECLARE(M_NFSRVDESC);
 MALLOC_DECLARE(M_NFSD);
 MALLOC_DECLARE(M_NFSBIGFH);
+MALLOC_DECLARE(M_FHANDLE);
 #endif
 
 struct vnode_attr; struct nameidata; struct dqblk; struct sockaddr_in; /* XXX */
@@ -988,7 +1043,7 @@ struct nfsreq {
  */
 TAILQ_HEAD(nfs_reqqhead, nfsreq);
 extern struct nfs_reqqhead nfs_reqq;
-extern lck_grp_t *nfs_request_grp;
+extern lck_grp_t nfs_request_grp;
 
 #define R_XID32(x)      ((x) & 0xffffffff)
 
@@ -1031,11 +1086,12 @@ extern int nfs_access_cache_timeout, nfs_access_delete, nfs_access_dotzfs, nfs_a
 extern int nfs_lockd_mounts, nfs_lockd_request_sent;
 extern int nfs_tprintf_initial_delay, nfs_tprintf_delay;
 extern int nfsiod_thread_count, nfsiod_thread_max, nfs_max_async_writes;
-extern int nfs_idmap_ctrl, nfs_callback_port;
+extern int nfs_idmap_ctrl, nfs_callback_port, nfs_split_open_owner;
 extern int nfs_is_mobile, nfs_readlink_nocache, nfs_root_steals_ctx;
+extern int nfs_mount_timeout, nfs_mount_quick_timeout;
 extern uint32_t nfs_tcp_sockbuf;
 extern uint32_t nfs_squishy_flags;
-extern uint32_t nfs_debug_ctl;
+extern uint32_t nfsclnt_debug_ctl, nfsrv_debug_ctl;
 
 /* bits for nfs_idmap_ctrl: */
 #define NFS_IDMAP_CTRL_USE_IDMAP_SERVICE                0x00000001 /* use the ID mapping service */
@@ -1115,8 +1171,8 @@ extern TAILQ_HEAD(nfsrv_sockhead, nfsrv_sock) nfsrv_socklist, nfsrv_sockwg,
 nfsrv_sockwait, nfsrv_sockwork;
 
 /* lock groups for nfsrv_sock's */
-extern lck_grp_t *nfsrv_slp_rwlock_group;
-extern lck_grp_t *nfsrv_slp_mutex_group;
+extern lck_grp_t nfsrv_slp_rwlock_group;
+extern lck_grp_t nfsrv_slp_mutex_group;
 
 /*
  * One of these structures is allocated for each nfsd.
@@ -1169,15 +1225,15 @@ typedef int (*nfsrv_proc_t)(struct nfsrv_descript *, struct nfsrv_sock *,
     vfs_context_t, mbuf_t *);
 
 /* mutex for nfs server */
-extern lck_mtx_t *nfsd_mutex;
+extern lck_mtx_t nfsd_mutex;
 extern int nfsd_thread_count, nfsd_thread_max;
 
 /* request list mutex */
-extern lck_mtx_t *nfs_request_mutex;
+extern lck_mtx_t nfs_request_mutex;
 extern int nfs_request_timer_on;
 
 /* mutex for nfs client globals */
-extern lck_mtx_t *nfs_global_mutex;
+extern lck_mtx_t nfs_global_mutex;
 
 #if CONFIG_NFS4
 /* NFSv4 callback globals */
@@ -1206,9 +1262,11 @@ int     vtonfsv2_mode(enum vtype, mode_t);
 
 void    nfs_mbuf_init(void);
 
-void    nfs_nhinit(void);
 void    nfs_nhinit_finish(void);
 u_long  nfs_hash(u_char *, int);
+
+/* nfsclnt() system call character device setup */
+int     nfsclnt_device_add(void);
 
 #if CONFIG_NFS4
 int     nfs4_init_clientid(struct nfsmount *);
@@ -1247,8 +1305,8 @@ int     nfs_getattrcache(nfsnode_t, struct nfs_vattr *, int);
 int     nfs_loadattrcache(nfsnode_t, struct nfs_vattr *, u_int64_t *, int);
 long    nfs_attrcachetimeout(nfsnode_t);
 
-int     nfs_buf_page_inval(vnode_t vp, off_t offset);
-int     nfs_vinvalbuf(vnode_t, int, vfs_context_t, int);
+int     nfs_buf_page_inval_internal(vnode_t vp, off_t offset);
+int     nfs_vinvalbuf1(vnode_t, int, vfs_context_t, int);
 int     nfs_vinvalbuf2(vnode_t, int, thread_t, kauth_cred_t, int);
 int     nfs_vinvalbuf_internal(nfsnode_t, int, thread_t, kauth_cred_t, int, int);
 void    nfs_wait_bufs(nfsnode_t);
@@ -1331,7 +1389,7 @@ void    nfs_vnode_notify(nfsnode_t, uint32_t);
 void    nfs_avoid_needless_id_setting_on_create(nfsnode_t, struct vnode_attr *, vfs_context_t);
 int     nfs_open_state_set_busy(nfsnode_t, thread_t);
 void    nfs_open_state_clear_busy(nfsnode_t);
-struct nfs_open_owner *nfs_open_owner_find(struct nfsmount *, kauth_cred_t, int);
+struct nfs_open_owner *nfs_open_owner_find(struct nfsmount *, kauth_cred_t, proc_t, int);
 void    nfs_open_owner_destroy(struct nfs_open_owner *);
 void    nfs_open_owner_ref(struct nfs_open_owner *);
 void    nfs_open_owner_rele(struct nfs_open_owner *);
@@ -1346,21 +1404,21 @@ void    nfs_open_file_clear_busy(struct nfs_open_file *);
 void    nfs_open_file_add_open(struct nfs_open_file *, uint32_t, uint32_t, int);
 void    nfs_open_file_remove_open_find(struct nfs_open_file *, uint32_t, uint32_t, uint8_t *, uint8_t *, int *);
 void    nfs_open_file_remove_open(struct nfs_open_file *, uint32_t, uint32_t);
-void    nfs_get_stateid(nfsnode_t, thread_t, kauth_cred_t, nfs_stateid *);
+void    nfs_get_stateid(nfsnode_t, thread_t, kauth_cred_t, nfs_stateid *, int);
 int     nfs_check_for_locks(struct nfs_open_owner *, struct nfs_open_file *);
 int     nfs_close(nfsnode_t, struct nfs_open_file *, uint32_t, uint32_t, vfs_context_t);
 
 void    nfs_release_open_state_for_node(nfsnode_t, int);
 void    nfs_revoke_open_state_for_node(nfsnode_t);
-struct nfs_lock_owner *nfs_lock_owner_find(nfsnode_t, proc_t, int);
+struct nfs_lock_owner *nfs_lock_owner_find(nfsnode_t, proc_t, caddr_t, int);
 void    nfs_lock_owner_destroy(struct nfs_lock_owner *);
 void    nfs_lock_owner_ref(struct nfs_lock_owner *);
-void    nfs_lock_owner_rele(struct nfs_lock_owner *);
+void    nfs_lock_owner_rele(nfsnode_t, struct nfs_lock_owner *, thread_t, kauth_cred_t);
 int     nfs_lock_owner_set_busy(struct nfs_lock_owner *, thread_t);
 void    nfs_lock_owner_clear_busy(struct nfs_lock_owner *);
 void    nfs_lock_owner_insert_held_lock(struct nfs_lock_owner *, struct nfs_file_lock *);
 struct nfs_file_lock *nfs_file_lock_alloc(struct nfs_lock_owner *);
-void    nfs_file_lock_destroy(struct nfs_file_lock *);
+void    nfs_file_lock_destroy(nfsnode_t, struct nfs_file_lock *, thread_t, kauth_cred_t);
 int     nfs_file_lock_conflict(struct nfs_file_lock *, struct nfs_file_lock *, int *);
 int     nfs_unlock_rpc(nfsnode_t, struct nfs_lock_owner *, int, uint64_t, uint64_t, thread_t, kauth_cred_t, int);
 int     nfs_advlock_getlock(nfsnode_t, struct nfs_lock_owner *, struct flock *, uint64_t, uint64_t, vfs_context_t);
@@ -1368,6 +1426,7 @@ int     nfs_advlock_setlock(nfsnode_t, struct nfs_open_file *, struct nfs_lock_o
 int     nfs_advlock_unlock(nfsnode_t, struct nfs_open_file *, struct nfs_lock_owner *, uint64_t, uint64_t, int, vfs_context_t);
 
 #if CONFIG_NFS4
+int     nfs4_release_lockowner_rpc(nfsnode_t, struct nfs_lock_owner *, thread_t, kauth_cred_t);
 int     nfs4_create_rpc(vfs_context_t, nfsnode_t, struct componentname *, struct vnode_attr *, int, char *, nfsnode_t *);
 int     nfs4_open(nfsnode_t, struct nfs_open_file *, uint32_t, uint32_t, vfs_context_t);
 int     nfs4_open_delegated(nfsnode_t, struct nfs_open_file *, uint32_t, uint32_t, vfs_context_t);
@@ -1541,6 +1600,9 @@ void    nfs_up(struct nfsmount *, thread_t, int, const char *);
 void    nfs_down(struct nfsmount *, thread_t, int, int, const char *, int);
 int     nfs_msg(thread_t, const char *, const char *, int);
 
+int     nfs_maperr(const char *, int);
+#define NFS_MAPERR(ERR) nfs_maperr(__FUNCTION__, (ERR))
+
 int     nfs_mountroot(void);
 struct nfs_diskless;
 int     nfs_boot_init(struct nfs_diskless *);
@@ -1562,31 +1624,47 @@ void nfsrv_uc_addsock(struct nfsrv_sock *, int);
 void nfsrv_uc_dequeue(struct nfsrv_sock *);
 
 /* Debug support */
-#define NFS_DEBUG_LEVEL   (nfs_debug_ctl & 0xf)
-#define NFS_DEBUG_FACILITY ((nfs_debug_ctl >> 4) & 0xfff)
-#define NFS_DEBUG_FLAGS ((nfs_debug_ctl >> 16) & 0xf)
-#define NFS_DEBUG_VALUE ((nfs_debug_ctl >> 20) & 0xfff)
-#define NFS_FAC_SOCK    0x001
-#define NFS_FAC_STATE   0x002
-#define NFS_FAC_NODE    0x004
-#define NFS_FAC_VNOP    0x008
-#define NFS_FAC_BIO     0x010
-#define NFS_FAC_GSS     0x020
-#define NFS_FAC_VFS     0x040
-#define NFS_FAC_SRV     0x080
-
-#define NFS_IS_DBG(fac, lev) \
-	(__builtin_expect((NFS_DEBUG_FACILITY & (fac)) && ((lev) <= NFS_DEBUG_LEVEL), 0))
-#define NFS_DBG(fac, lev, fmt, ...)  nfs_printf((fac), (lev), "%s: %d: " fmt, __func__, __LINE__, ## __VA_ARGS__)
-
-void nfs_printf(unsigned int, unsigned int, const char *, ...) __printflike(3, 4);
+#define __NFS_DEBUG_LEVEL(dbgctl)              ((dbgctl) & 0xf)
+#define __NFS_DEBUG_FACILITY(dbgctl)           (((dbgctl) >> 4) & 0xfff)
+#define __NFS_DEBUG_FLAGS(dbgctl)              (((dbgctl) >> 16) & 0xf)
+#define __NFS_DEBUG_VALUE(dbgctl)              (((dbgctl) >> 20) & 0xfff)
+#define __NFS_IS_DBG(dbgctl, fac, lev)         (__builtin_expect((__NFS_DEBUG_FACILITY(dbgctl) & (fac)) && ((lev) <= __NFS_DEBUG_LEVEL(dbgctl)), 0))
+#define __NFS_DBG(dbgctl, fac, lev, fmt, ...)  nfs_printf((dbgctl), (fac), (lev), "%s: %d: " fmt, __func__, __LINE__, ## __VA_ARGS__)
+void nfs_printf(unsigned int, unsigned int, unsigned int, const char *, ...) __printflike(4, 5);
 void nfs_dump_mbuf(const char *, int, const char *, mbuf_t);
 int  nfs_mountopts(struct nfsmount *, char *, int);
+
+/* Client debug support */
+#define NFSCLNT_FAC_SOCK                 0x001
+#define NFSCLNT_FAC_STATE                0x002
+#define NFSCLNT_FAC_NODE                 0x004
+#define NFSCLNT_FAC_VNOP                 0x008
+#define NFSCLNT_FAC_BIO                  0x010
+#define NFSCLNT_FAC_GSS                  0x020
+#define NFSCLNT_FAC_VFS                  0x040
+#define NFSCLNT_FAC_SRV                  0x080
+#define NFSCLNT_DEBUG_LEVEL              __NFS_DEBUG_LEVEL(nfsclnt_debug_ctl)
+#define NFSCLNT_DEBUG_FACILITY           __NFS_DEBUG_FACILITY(nfsclnt_debug_ctl)
+#define NFSCLNT_DEBUG_FLAGS              __NFS_DEBUG_FLAGS(nfsclnt_debug_ctl)
+#define NFSCLNT_DEBUG_VALUE              __NFS_DEBUG_VALUE(nfsclnt_debug_ctl)
+#define NFSCLNT_IS_DBG(fac, lev)         __NFS_IS_DBG(nfsclnt_debug_ctl, fac, lev)
+#define NFSCLNT_DBG(fac, lev, fmt, ...)  __NFS_DBG(nfsclnt_debug_ctl, fac, lev, fmt, ## __VA_ARGS__)
+
+/* Server debug support */
+#define NFSRV_FAC_GSS                    0x001
+#define NFSRV_FAC_SRV                    0x002
+#define NFSRV_DEBUG_LEVEL                __NFS_DEBUG_LEVEL(nfsrv_debug_ctl)
+#define NFSRV_DEBUG_FACILITY             __NFS_DEBUG_FACILITY(nfsrv_debug_ctl)
+#define NFSRV_DEBUG_FLAGS                __NFS_DEBUG_FLAGS(nfsrv_debug_ctl)
+#define NFSRV_DEBUG_VALUE                __NFS_DEBUG_VALUE(nfsrv_debug_ctl)
+#define NFSRV_IS_DBG(fac, lev)           __NFS_IS_DBG(nfsrv_debug_ctl, fac, lev)
+#define NFSRV_DBG(fac, lev, fmt, ...)    __NFS_DBG(nfsrv_debug_ctl, fac, lev, fmt, ## __VA_ARGS__)
 
 #if XNU_KERNEL_PRIVATE
 #include <kern/kalloc.h>
 
 ZONE_VIEW_DECLARE(ZV_NFSDIROFF);
+KALLOC_TYPE_DECLARE(KT_NFS_VATTR);
 extern zone_t nfs_buf_zone;
 extern zone_t nfsrv_descript_zone;
 extern zone_t nfsnode_zone;

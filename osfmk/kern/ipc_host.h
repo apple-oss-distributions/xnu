@@ -69,24 +69,12 @@ extern void ipc_host_init(void);
 extern void ipc_processor_init(
 	processor_t     processor);
 
-/* Enable ipc control of processor by setting port object */
-extern void ipc_processor_enable(
-	processor_t     processor);
-
 /* Initialize ipc control of a processor set */
 extern void ipc_pset_init(
 	processor_set_t         pset);
 
-/* Enable ipc access to a processor set */
-extern void ipc_pset_enable(
-	processor_set_t         pset);
-
 /* Initialize ipc control of a clock */
 extern void ipc_clock_init(
-	clock_t         clock);
-
-/* Enable ipc access to a clock */
-extern void ipc_clock_enable(
 	clock_t         clock);
 
 /* Convert from a port to a clock */
@@ -148,10 +136,5 @@ extern ipc_port_t convert_pset_to_port(
 /* Convert from a processor set name to a port */
 extern ipc_port_t convert_pset_name_to_port(
 	processor_set_t         processor);
-
-/* Convert from a port to a host security port */
-extern host_t convert_port_to_host_security(
-	ipc_port_t      port);
-
 
 #endif  /* _KERN_IPC_HOST_H_ */

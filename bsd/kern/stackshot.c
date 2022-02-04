@@ -27,6 +27,14 @@
 #include <sys/proc_internal.h>
 #include <sys/stackshot.h>
 #include <sys/sysproto.h>
+#include <sys/sysctl.h>
+#include <pexpert/device_tree.h>
+#include <pexpert/pexpert.h>
+
+extern uint32_t stackshot_estimate_adj;
+EXPERIMENT_FACTOR_UINT(_kern, stackshot_estimate_adj, &stackshot_estimate_adj, 0, 100,
+    "adjust stackshot estimates up by this percentage");
+
 
 /*
  * Stackshot system calls

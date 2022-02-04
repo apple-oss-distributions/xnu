@@ -82,6 +82,14 @@ The caller must be the owner of the file or be the super-user.
 .Pp
 In either case, the inode-change-time of the file is set to the current
 time.
+.Sh NOTE
+In case of a symbolic link 
+.Fn utimes
+function will set file access and modification times to the file the link 
+references. The 
+.Xr lutimes 3 
+function will set the access and modification times to the symbolic link 
+file.  
 .Sh RETURN VALUES
 .Rv -std
 .Sh ERRORS
@@ -180,7 +188,8 @@ The file system containing the file is mounted read-only.
 .El
 .Sh SEE ALSO
 .Xr stat 2 ,
-.Xr utime 3
+.Xr utime 3 ,
+.Xr lutimes 3
 .Sh HISTORY
 The
 .Fn utimes

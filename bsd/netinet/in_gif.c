@@ -381,7 +381,7 @@ gif_encapcheck4(
 		return 0;
 	}
 	/* reject packets with broadcast on source */
-	lck_rw_lock_shared(in_ifaddr_rwlock);
+	lck_rw_lock_shared(&in_ifaddr_rwlock);
 	for (ia4 = TAILQ_FIRST(&in_ifaddrhead); ia4;
 	    ia4 = TAILQ_NEXT(ia4, ia_link)) {
 		if ((ifnet_flags(ia4->ia_ifa.ifa_ifp) & IFF_BROADCAST) == 0) {
@@ -390,12 +390,12 @@ gif_encapcheck4(
 		IFA_LOCK(&ia4->ia_ifa);
 		if (ip.ip_src.s_addr == ia4->ia_broadaddr.sin_addr.s_addr) {
 			IFA_UNLOCK(&ia4->ia_ifa);
-			lck_rw_done(in_ifaddr_rwlock);
+			lck_rw_done(&in_ifaddr_rwlock);
 			return 0;
 		}
 		IFA_UNLOCK(&ia4->ia_ifa);
 	}
-	lck_rw_done(in_ifaddr_rwlock);
+	lck_rw_done(&in_ifaddr_rwlock);
 
 	/* ingress filters on outer source */
 	if ((ifnet_flags(sc->gif_if) & IFF_LINK2) == 0 &&

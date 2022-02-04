@@ -227,8 +227,8 @@ ptmx_init( __unused int config_count)
 	    DEVFS_CHAR, UID_ROOT, GID_TTY, 0666,
 	    ptmx_clone, PTMX_TEMPLATE);
 
-	_ptmx_driver.master = ptmx_major;
-	_ptmx_driver.slave = ptsd_major;
+	_ptmx_driver.primary = ptmx_major;
+	_ptmx_driver.replica = ptsd_major;
 	_ptmx_driver.fix_7828447 = 1;
 	_ptmx_driver.fix_7070978 = 1;
 #if CONFIG_MACF
@@ -257,8 +257,8 @@ static struct _ptmx_ioctl_state {
  * one if possible.
  *
  * Parameters:	minor			Minor number of ptmx device
- *		open_flag		PF_OPEN_M	First open of master
- *					PF_OPEN_S	First open of slave
+ *		open_flag		PF_OPEN_M	First open of primary
+ *					PF_OPEN_S	First open of replica
  *					0		Just want ioctl struct
  *
  * Returns:	NULL			Did not exist/could not create
@@ -290,13 +290,11 @@ ptmx_get_ioctl(int minor, int open_flag)
 		}
 		DEVFS_UNLOCK();
 
-		MALLOC(new_ptmx_ioctl, struct ptmx_ioctl *, sizeof(struct ptmx_ioctl), M_TTYS, M_WAITOK | M_ZERO);
-		if (new_ptmx_ioctl == NULL) {
-			return NULL;
-		}
+		new_ptmx_ioctl = kalloc_type(struct ptmx_ioctl,
+		    Z_WAITOK | Z_ZERO | Z_NOFAIL);
 
 		if ((new_ptmx_ioctl->pt_tty = ttymalloc()) == NULL) {
-			FREE(new_ptmx_ioctl, M_TTYS);
+			kfree_type(struct ptmx_ioctl, new_ptmx_ioctl);
 			return NULL;
 		}
 
@@ -315,7 +313,7 @@ ptmx_get_ioctl(int minor, int open_flag)
 		if ((_state.pis_total - _state.pis_free) >= ptmx_max) {
 			ttyfree(new_ptmx_ioctl->pt_tty);
 			DEVFS_UNLOCK();
-			FREE(new_ptmx_ioctl, M_TTYS);
+			kfree_type(struct ptmx_ioctl, new_ptmx_ioctl);
 			return NULL;
 		}
 
@@ -323,39 +321,40 @@ ptmx_get_ioctl(int minor, int open_flag)
 		if (_state.pis_free == 0) {
 			struct ptmx_ioctl **new_pis_ioctl_list;
 			struct ptmx_ioctl **old_pis_ioctl_list = NULL;
+			size_t old_pis_total = 0;
 
 			/* Yes. */
-			MALLOC(new_pis_ioctl_list, struct ptmx_ioctl **, sizeof(struct ptmx_ioctl *) * (_state.pis_total + PTMX_GROW_VECTOR), M_TTYS, M_WAITOK | M_ZERO);
+			new_pis_ioctl_list = kalloc_type(struct ptmx_ioctl *,
+			    _state.pis_total + PTMX_GROW_VECTOR, Z_WAITOK | Z_ZERO);
 			if (new_pis_ioctl_list == NULL) {
 				ttyfree(new_ptmx_ioctl->pt_tty);
 				DEVFS_UNLOCK();
-				FREE(new_ptmx_ioctl, M_TTYS);
+				kfree_type(struct ptmx_ioctl, new_ptmx_ioctl);
 				return NULL;
 			}
 
 			/* If this is not the first time, copy the old over */
 			bcopy(_state.pis_ioctl_list, new_pis_ioctl_list, sizeof(struct ptmx_ioctl *) * _state.pis_total);
 			old_pis_ioctl_list = _state.pis_ioctl_list;
+			old_pis_total = _state.pis_total;
 			_state.pis_ioctl_list = new_pis_ioctl_list;
 			_state.pis_free += PTMX_GROW_VECTOR;
 			_state.pis_total += PTMX_GROW_VECTOR;
-			if (old_pis_ioctl_list) {
-				FREE(old_pis_ioctl_list, M_TTYS);
-			}
+			kfree_type(struct ptmx_ioctl *, old_pis_total, old_pis_ioctl_list);
 		}
 
 		/* is minor in range now? */
 		if (minor < 0 || minor >= _state.pis_total) {
 			ttyfree(new_ptmx_ioctl->pt_tty);
 			DEVFS_UNLOCK();
-			FREE(new_ptmx_ioctl, M_TTYS);
+			kfree_type(struct ptmx_ioctl, new_ptmx_ioctl);
 			return NULL;
 		}
 
 		if (_state.pis_ioctl_list[minor] != NULL) {
 			ttyfree(new_ptmx_ioctl->pt_tty);
 			DEVFS_UNLOCK();
-			FREE(new_ptmx_ioctl, M_TTYS);
+			kfree_type(struct ptmx_ioctl, new_ptmx_ioctl);
 
 			/* Special error value so we know to redrive the open, we've been raced */
 			return (struct ptmx_ioctl*)-1;
@@ -415,7 +414,7 @@ ptmx_free_ioctl(int minor, int open_flag)
 	/*
 	 * Was this the last close?  We will recognize it because we only get
 	 * a notification on the last close of a device, and we will have
-	 * cleared both the master and the slave open bits in the flags.
+	 * cleared both the primary and the replica open bits in the flags.
 	 */
 	if (!(_state.pis_ioctl_list[minor]->pt_flags & (PF_OPEN_M | PF_OPEN_S))) {
 		/* Mark as free so it can be reallocated later */
@@ -437,7 +436,7 @@ ptmx_free_ioctl(int minor, int open_flag)
 			devfs_remove(old_ptmx_ioctl->pt_devhandle);
 		}
 		ttyfree(old_ptmx_ioctl->pt_tty);
-		FREE(old_ptmx_ioctl, M_TTYS);
+		kfree_type(struct ptmx_ioctl, old_ptmx_ioctl);
 	}
 
 	return 0;     /* Success */
@@ -524,7 +523,7 @@ SECURITY_READ_ONLY_EARLY(struct filterops) ptsd_kqops = {
 
 /*
  * In the normal case, by the time the driver_close() routine is called
- * on the slave, all knotes have been detached.  However in the revoke(2)
+ * on the replica, all knotes have been detached.  However in the revoke(2)
  * case, the driver's close routine is called while there are knotes active
  * that reference the handlers below.  And we have no obvious means to
  * reach from the driver out to the kqueue's that reference them to get
@@ -857,18 +856,12 @@ ptmx_kqops_common(struct knote *kn, struct kevent_qos_s *kev,
 		break;
 
 	case EVFILT_WRITE:
-		if (pti->pt_flags & PF_REMOTE) {
-			if (tp->t_canq.c_cc == 0) {
-				retval = TTYHOG - 1;
-			}
-		} else {
-			retval = (TTYHOG - 2) - (tp->t_rawq.c_cc + tp->t_canq.c_cc);
-			if (tp->t_canq.c_cc == 0 && (tp->t_lflag & ICANON)) {
-				retval = 1;
-			}
-			if (retval < 0) {
-				retval = 0;
-			}
+		retval = (TTYHOG - 2) - (tp->t_rawq.c_cc + tp->t_canq.c_cc);
+		if (tp->t_canq.c_cc == 0 && (tp->t_lflag & ICANON)) {
+			retval = 1;
+		}
+		if (retval < 0) {
+			retval = 0;
 		}
 		break;
 

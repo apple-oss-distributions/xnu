@@ -260,7 +260,7 @@ int kpersona_find_by_type(int persona_type, uid_t *id, size_t *idlen);
 #include <os/log.h>
 #define persona_dbg(fmt, ...) \
 	os_log(OS_LOG_DEFAULT, "[%4d] %s:  " fmt "\n", \
-	       current_proc() ? current_proc()->p_pid : -1, \
+	       current_proc() ? proc_getpid(current_proc()) : -1, \
 	       __func__, ## __VA_ARGS__)
 #else
 #define persona_dbg(fmt, ...) do { } while (0)
@@ -405,6 +405,9 @@ int persona_find(const char *login, uid_t uid,
 /* returns a reference that must be released with persona_put() */
 struct persona *persona_proc_get(pid_t pid);
 
+/* returns the persona id tied to the current thread (also uses adopted voucher) */
+uid_t current_persona_get_id(void);
+
 /* returns a reference to the persona tied to the current thread (also uses adopted voucher) */
 struct persona *current_persona_get(void);
 
@@ -442,8 +445,6 @@ int persona_find_by_type(persona_type_t persona_type, struct persona **persona,
  * In-kernel persona API
  */
 extern const uint32_t g_max_personas;
-
-void personas_bootstrap(void);
 
 struct persona *persona_alloc(uid_t id, const char *login,
     persona_type_t type, char *path, int *error);

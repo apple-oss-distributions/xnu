@@ -60,6 +60,8 @@
 #ifndef _I386_USER_LDT_H_
 #define _I386_USER_LDT_H_
 
+#if defined (__i386__) || defined (__x86_64__)
+
 /*
  * User LDT management.
  *
@@ -94,5 +96,7 @@ int i386_get_ldt(int, union ldt_entry *, int);
 int i386_set_ldt(int, const union ldt_entry *, int);
 __END_DECLS
 #endif /* KERNEL */
+
+#endif /* defined (__i386__) || defined (__x86_64__) */
 
 #endif  /* _I386_USER_LDT_H_ */

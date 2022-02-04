@@ -10,7 +10,7 @@ PRODUCT=`sw_vers -productName`
 COUNT=
 
 # params are: record_perf_data(metric, unit, value, description)
-function record_perf_data() {
+record_perf_data() {
     local METRIC=$1
     local UNIT=$2
     local DATA=$3
@@ -19,7 +19,7 @@ function record_perf_data() {
 }
 
 PERFDATA_DIR=$BATS_TMP_DIR
-if [ "${PERFDATA_DIR}" == "" ]; then
+if [ "${PERFDATA_DIR}" = "" ]; then
 	PERFDATA_DIR=/tmp/
 fi
 

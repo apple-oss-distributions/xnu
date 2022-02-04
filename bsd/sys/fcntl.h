@@ -149,8 +149,11 @@
 #define FNORDAHEAD      0x00080000      /* fcntl(F_RDAHEAD, 0) */
 #endif
 
-#if !defined(_POSIX_C_SOURCE) || defined(_DARWIN_C_SOURCE)
+#if __DARWIN_C_LEVEL >= 200809L
 #define O_DIRECTORY     0x00100000
+#endif
+
+#if !defined(_POSIX_C_SOURCE) || defined(_DARWIN_C_SOURCE)
 #define O_SYMLINK       0x00200000      /* allow open of a symlink */
 #endif
 
@@ -305,7 +308,13 @@
 
 #define F_LOG2PHYS_EXT  65              /* file offset to device offset, extended */
 
-#define F_GETLKPID              66              /* get record locking information, per-process */
+#define F_GETLKPID              66      /* See man fcntl(2) F_GETLK
+	                                 * Similar to F_GETLK but in addition l_pid is treated as an input parameter
+	                                 * which is used as a matching value when searching locks on the file
+	                                 * so that only locks owned by the process with pid l_pid are returned.
+	                                 * However, any flock(2) type lock will also be found with the returned value
+	                                 * of l_pid set to -1 (as with F_GETLK).
+	                                 */
 
 /* See F_DUPFD_CLOEXEC below for 67 */
 

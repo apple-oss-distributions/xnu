@@ -59,8 +59,15 @@ enum{
 	kIOMountChangeDidResize  = 0x00000202,
 };
 extern void IOBSDMountChange(struct mount *mp, uint32_t op);
+/*
+ *       Tests that the entitlement is present and true
+ */
+extern boolean_t IOCurrentTaskHasEntitlement(const char * entitlement);
 extern boolean_t IOTaskHasEntitlement(task_t task, const char *entitlement);
 extern boolean_t IOVnodeHasEntitlement(struct vnode *vnode, int64_t off, const char *entitlement);
+/*
+ * IOVnodeGetEntitlement returns a null-terminated string that must be freed with kfree_data().
+ */
 extern char *IOVnodeGetEntitlement(struct vnode *vnode, int64_t offset, const char *entitlement);
 
 typedef enum {

@@ -44,9 +44,11 @@
 /* AAPCS-64 Page 14
  *
  * A subroutine invocation must preserve the contents of the registers r19-r29
- * and SP. We also save IP0 and IP1, as machine_idle uses IP0 for saving the LR.
+ * and SP.
  */
-	stp		x16, x17, [$0, SS64_KERNEL_X16]
+#if __has_feature(ptrauth_calls)
+	paciasp
+#endif
 	stp		x19, x20, [$0, SS64_KERNEL_X19]
 	stp		x21, x22, [$0, SS64_KERNEL_X21]
 	stp		x23, x24, [$0, SS64_KERNEL_X23]
@@ -54,32 +56,6 @@
 	stp		x27, x28, [$0, SS64_KERNEL_X27]
 	stp		fp, lr, [$0, SS64_KERNEL_FP]
 	str		xzr, [$0, SS64_KERNEL_PC]
-	MOV32	w$1, PSR64_KERNEL_POISON
-	str		w$1, [$0, SS64_KERNEL_CPSR]	
-#ifdef HAS_APPLE_PAC
-	stp		x0, x1, [sp, #-16]!
-	stp		x2, x3, [sp, #-16]!
-	stp		x4, x5, [sp, #-16]!
-
-	/*
-	 * Arg0: The ARM context pointer
-	 * Arg1: PC value to sign
-	 * Arg2: CPSR value to sign
-	 * Arg3: LR to sign
-	 */
-	mov		x0, $0
-	mov		x1, #0
-	mov		w2, w$1
-	mov		x3, lr
-	mov		x4, x16
-	mov		x5, x17
-	bl		EXT(ml_sign_kernel_thread_state)
-
-	ldp		x4, x5, [sp], #16
-	ldp		x2, x3, [sp], #16
-	ldp		x0, x1, [sp], #16
-	ldp		fp, lr, [$0, SS64_KERNEL_FP]
-#endif /* defined(HAS_APPLE_PAC) */
 	mov		x$1, sp
 	str		x$1, [$0, SS64_KERNEL_SP]
 
@@ -110,30 +86,17 @@
  *   arg1 - Scratch register
  */
 .macro	load_general_registers
-	mov		x20, x0
-	mov		x21, x1
-	mov		x22, x2
-
-	mov		x0, $0
-	AUTH_KERNEL_THREAD_STATE_IN_X0	x23, x24, x25, x26, x27
-
-	mov		x0, x20
-	mov		x1, x21
-	mov		x2, x22
-
 	ldr		w$1, [$0, NS64_KERNEL_FPCR]
 	mrs		x19, FPCR
 	CMSR FPCR, x19, x$1, 1
 1:
 
-	// Skip x16, x17 - already loaded + authed by AUTH_THREAD_STATE_IN_X0
 	ldp		x19, x20, [$0, SS64_KERNEL_X19]
 	ldp		x21, x22, [$0, SS64_KERNEL_X21]
 	ldp		x23, x24, [$0, SS64_KERNEL_X23]
 	ldp		x25, x26, [$0, SS64_KERNEL_X25]
 	ldp		x27, x28, [$0, SS64_KERNEL_X27]
-	ldr		fp, [$0, SS64_KERNEL_FP]
-	// Skip lr - already loaded + authed by AUTH_THREAD_STATE_IN_X0
+	ldp		fp, lr, [$0, SS64_KERNEL_FP]
 	ldr		x$1, [$0, SS64_KERNEL_SP]
 	mov		sp, x$1
 
@@ -146,6 +109,19 @@
 	ldr		d14,[$0, NS64_KERNEL_D14]
 	ldr		d15,[$0, NS64_KERNEL_D15]
 .endmacro
+
+/*
+ * cswitch_epilogue
+ *
+ * Returns to the address reloaded into LR, authenticating if needed.
+ */
+.macro	cswitch_epilogue
+#if __has_feature(ptrauth_calls)
+	retaa
+#else
+	ret
+#endif
+.endm
 
 
 /*
@@ -160,17 +136,21 @@
 	msr		TPIDR_EL1, $0						// Write new thread pointer to TPIDR_EL1
 	ldr		$1, [$0, ACT_CPUDATAP]
 	str		$0, [$1, CPU_ACTIVE_THREAD]
+
+	ldrsh	$2, [$1, CPU_NUMBER_GS]
+	msr		TPIDR_EL0, $2
+
 	ldr		$1, [$0, TH_CTH_SELF]				// Get cthread pointer
-	mrs		$2, TPIDRRO_EL0						// Extract cpu number from TPIDRRO_EL0
-	and		$2, $2, #(MACHDEP_CPUNUM_MASK)
-	orr		$2, $1, $2							// Save new cthread/cpu to TPIDRRO_EL0
-	msr		TPIDRRO_EL0, $2
-	msr		TPIDR_EL0, xzr
+	msr		TPIDRRO_EL0, $1
+
 #if DEBUG || DEVELOPMENT
 	ldr		$1, [$0, TH_THREAD_ID]				// Save the bottom 32-bits of the thread ID into
 	msr		CONTEXTIDR_EL1, $1					// CONTEXTIDR_EL1 (top 32-bits are RES0).
 #endif /* DEBUG || DEVELOPMENT */
 .endmacro
+
+#define CSWITCH_ROP_KEYS	(HAS_APPLE_PAC && HAS_PARAVIRTUALIZED_PAC)
+#define CSWITCH_JOP_KEYS	(HAS_APPLE_PAC && HAS_PARAVIRTUALIZED_PAC)
 
 /*
  * set_process_dependent_keys_and_sync_context
@@ -195,38 +175,44 @@
 	ldr		\cpudatap, [\thread, ACT_CPUDATAP]
 #endif /* defined(__ARM_ARCH_8_5__) || defined(HAS_APPLE_PAC) */
 
+#if defined(__ARM_ARCH_8_5__)
+	ldrb	\wsync, [\cpudatap, CPU_SYNC_ON_CSWITCH]
+#else /* defined(__ARM_ARCH_8_5__) */
 	mov		\wsync, #0
+#endif
 
-
-#if defined(HAS_APPLE_PAC)
+#if CSWITCH_ROP_KEYS
 	ldr		\new_key, [\thread, TH_ROP_PID]
-	ldr		\tmp_key, [\cpudatap, CPU_ROP_KEY]
-	cmp		\new_key, \tmp_key
-	b.eq	1f
-	str		\new_key, [\cpudatap, CPU_ROP_KEY]
-	msr		APIBKeyLo_EL1, \new_key
-	add		\new_key, \new_key, #1
-	msr		APIBKeyHi_EL1, \new_key
-	add		\new_key, \new_key, #1
-	msr		APDBKeyLo_EL1, \new_key
-	add		\new_key, \new_key, #1
-	msr		APDBKeyHi_EL1, \new_key
+	REPROGRAM_ROP_KEYS	Lskip_rop_keys_\@, \new_key, \cpudatap, \tmp_key
+#if HAS_PARAVIRTUALIZED_PAC
+	/* xnu hypervisor guarantees context synchronization during guest re-entry */
+	mov		\wsync, #0
+#else
 	mov		\wsync, #1
-1:
+#endif
+Lskip_rop_keys_\@:
+#endif /* CSWITCH_ROP_KEYS */
 
-#if HAS_PAC_FAST_A_KEY_SWITCHING
-	IF_PAC_SLOW_A_KEY_SWITCHING	Lskip_jop_keys_\@, \new_key
+#if CSWITCH_JOP_KEYS
 	ldr		\new_key, [\thread, TH_JOP_PID]
 	REPROGRAM_JOP_KEYS	Lskip_jop_keys_\@, \new_key, \cpudatap, \tmp_key
+#if HAS_PARAVIRTUALIZED_PAC
+	mov		\wsync, #0
+#else
 	mov		\wsync, #1
+#endif
 Lskip_jop_keys_\@:
-#endif /* HAS_PAC_FAST_A_KEY_SWITCHING */
-
-#endif /* defined(HAS_APPLE_PAC) */
+#endif /* CSWITCH_JOP_KEYS */
 
 	cbz		\wsync, 1f
 	isb 	sy
 
+#if HAS_PARAVIRTUALIZED_PAC
+1:	/* guests need to clear the sync flag even after skipping the isb, in case they synced via hvc instead */
+#endif
+#if defined(__ARM_ARCH_8_5__)
+	strb	wzr, [\cpudatap, CPU_SYNC_ON_CSWITCH]
+#endif
 1:
 .endmacro
 
@@ -246,7 +232,7 @@ LEXT(machine_load_context)
 	load_general_registers 	x1, 2
 	set_process_dependent_keys_and_sync_context	x0, x1, x2, x3, w4
 	mov		x0, #0								// Clear argument to thread_continue
-	ret
+	cswitch_epilogue
 
 /*
  *  typedef void (*thread_continue_t)(void *param, wait_result_t)
@@ -309,7 +295,7 @@ Lswitch_threads:
 	ldr		x3, [x2, TH_KSTACKPTR]
 	load_general_registers	x3, 4
 	set_process_dependent_keys_and_sync_context	x2, x3, x4, x5, w6
-	ret
+	cswitch_epilogue
 
 /*
  *	thread_t Shutdown_context(void (*doshutdown)(processor_t), processor_t processor)
@@ -359,7 +345,7 @@ LEXT(Idle_load_context)
 	ldr		x1, [x0, TH_KSTACKPTR]				// Get the top of the kernel stack
 	load_general_registers	x1, 2
 	set_process_dependent_keys_and_sync_context	x0, x1, x2, x3, w4
-	ret
+	cswitch_epilogue
 
 	.align	2
 	.globl	EXT(machine_set_current_thread)

@@ -131,7 +131,10 @@ thread_quantum_expire(
 		    (thread->quantum_remaining - thread->t_deduct_bank_ledger_time));
 	}
 	thread->t_deduct_bank_ledger_time = 0;
+
 	ctime = mach_absolute_time();
+
+	check_monotonic_time(ctime);
 
 #ifdef CONFIG_MACH_APPROXIMATE_TIME
 	commpage_update_mach_approximate_time(ctime);
@@ -233,6 +236,13 @@ thread_quantum_expire(
 	ast_propagate(thread);
 
 	thread_unlock(thread);
+
+	/* Now that the processor->thread_timer has been updated, evaluate to see if
+	 * the workqueue quantum expired and set AST_KEVENT if it has */
+	if (thread_get_tag(thread) & THREAD_TAG_WORKQUEUE) {
+		thread_evaluate_workqueue_quantum_expiry(thread);
+	}
+
 	running_timer_enter(processor, RUNNING_TIMER_QUANTUM, thread,
 	    processor->quantum_end, ctime);
 
@@ -272,7 +282,7 @@ sched_set_thread_base_priority(thread_t thread, int priority)
 	uint64_t ctime = 0;
 
 	if (thread->sched_mode == TH_MODE_REALTIME) {
-		assert(priority <= BASEPRI_RTQUEUES);
+		assert((priority >= BASEPRI_RTQUEUES) && (priority <= MAXPRI));
 	} else {
 		assert(priority < BASEPRI_RTQUEUES);
 	}
@@ -411,6 +421,10 @@ thread_recompute_sched_pri(thread_t thread, set_sched_pri_options_t options)
 
 			if (sched_flags & TH_SFLAG_EXEC_PROMOTED) {
 				priority = MAX(priority, MINPRI_EXEC);
+			}
+
+			if (sched_flags & TH_SFLAG_FLOOR_PROMOTED) {
+				priority = MAX(priority, MINPRI_FLOOR);
 			}
 		}
 	}
@@ -1043,10 +1057,14 @@ sched_thread_promote_reason(thread_t    thread,
 		    thread_tid(thread), thread->sched_pri,
 		    thread->base_pri, trace_obj);
 		break;
+	case TH_SFLAG_FLOOR_PROMOTED:
+		KDBG(MACHDBG_CODE(DBG_MACH_SCHED, MACH_FLOOR_PROMOTE),
+		    thread_tid(thread), thread->sched_pri,
+		    thread->base_pri, trace_obj);
+		break;
 	}
 
 	thread->sched_flags |= reason;
-
 	thread_recompute_sched_pri(thread, SETPRI_DEFAULT);
 }
 
@@ -1077,6 +1095,11 @@ sched_thread_unpromote_reason(thread_t  thread,
 		break;
 	case TH_SFLAG_EXEC_PROMOTED:
 		KDBG(MACHDBG_CODE(DBG_MACH_SCHED, MACH_EXEC_DEMOTE),
+		    thread_tid(thread), thread->sched_pri,
+		    thread->base_pri, trace_obj);
+		break;
+	case TH_SFLAG_FLOOR_PROMOTED:
+		KDBG(MACHDBG_CODE(DBG_MACH_SCHED, MACH_FLOOR_DEMOTE),
 		    thread_tid(thread), thread->sched_pri,
 		    thread->base_pri, trace_obj);
 		break;

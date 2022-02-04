@@ -124,7 +124,7 @@ struct snprintf_arg {
  */
 extern const char       *debugger_panic_str;
 
-extern  void cnputc(char);              /* standard console putc */
+extern  void console_write_char(char);  /* standard console putc */
 
 extern  struct tty cons;                /* standard console tty */
 extern struct   tty *constty;           /* pointer to console "window" tty */
@@ -152,6 +152,25 @@ struct putchar_args {
 };
 static void putchar(int c, void *arg);
 
+static void
+putchar_args_init(struct putchar_args *pca, struct session *sessp)
+{
+	session_lock(sessp);
+	pca->flags = TOTTY;
+	pca->tty   = sessp->s_ttyp;
+	if (pca->tty != TTY_NULL) {
+		ttyhold(pca->tty);
+	}
+	session_unlock(sessp);
+}
+
+static void
+putchar_args_destroy(struct putchar_args *pca)
+{
+	if (pca->tty != TTY_NULL) {
+		ttyfree(pca->tty);
+	}
+}
 
 /*
  * Uprintf prints to the controlling terminal for the current process.
@@ -163,14 +182,14 @@ uprintf(const char *fmt, ...)
 {
 	struct proc *p = current_proc();
 	struct putchar_args pca;
+	struct pgrp *pg;
 	va_list ap;
-	struct session *sessp;
 
-	sessp = proc_session(p);
+	pg = proc_pgrp(p, NULL);
 
-	if (p->p_flag & P_CONTROLT && sessp != SESSION_NULL && sessp->s_ttyvp) {
-		pca.flags = TOTTY;
-		pca.tty   = SESSION_TP(sessp);
+	if ((p->p_flag & P_CONTROLT) && pg) {
+		putchar_args_init(&pca, pg->pg_session);
+
 		if (pca.tty != NULL) {
 			tty_lock(pca.tty);
 		}
@@ -180,35 +199,33 @@ uprintf(const char *fmt, ...)
 		if (pca.tty != NULL) {
 			tty_unlock(pca.tty);
 		}
+
+		putchar_args_destroy(&pca);
 	}
-	if (sessp != SESSION_NULL) {
-		session_rele(sessp);
-	}
+
+	pgrp_rele(pg);
 }
 
 tpr_t
 tprintf_open(struct proc *p)
 {
-	struct session * sessp;
+	struct session *sessp;
+	struct pgrp *pg;
 
-	sessp = proc_session(p);
+	pg = proc_pgrp(p, &sessp);
 
-	if (p->p_flag & P_CONTROLT && sessp->s_ttyvp) {
-		return (tpr_t)sessp;
-	}
-	if (sessp != SESSION_NULL) {
-		session_rele(sessp);
+	if ((p->p_flag & P_CONTROLT) && sessp->s_ttyvp) {
+		return pg;
 	}
 
-	return (tpr_t) NULL;
+	pgrp_rele(pg);
+	return PGRP_NULL;
 }
 
 void
-tprintf_close(tpr_t sessp)
+tprintf_close(tpr_t pg)
 {
-	if (sessp) {
-		session_rele((struct session *) sessp);
-	}
+	pgrp_rele(pg);
 }
 
 /*
@@ -220,23 +237,25 @@ tprintf_close(tpr_t sessp)
 void
 tprintf(tpr_t tpr, const char *fmt, ...)
 {
-	struct session *sess = (struct session *)tpr;
-	struct tty *tp;
 	va_list ap;
 	struct putchar_args pca;
 
-	if (sess && (tp = SESSION_TP(sess)) != TTY_NULL) {
-		/* ttycheckoutq(), tputchar() require a locked tp */
-		tty_lock(tp);
-		if (ttycheckoutq(tp, 0)) {
-			pca.flags = TOTTY;
-			/* going to the tty; leave locked */
-			pca.tty = tp;
-			va_start(ap, fmt);
-			__doprnt(fmt, ap, putchar, &pca, 10, FALSE);
-			va_end(ap);
+	if (tpr) {
+		putchar_args_init(&pca, tpr->pg_session);
+
+		if (pca.tty) {
+			/* ttycheckoutq(), tputchar() require a locked tp */
+			tty_lock(pca.tty);
+			if (ttycheckoutq(pca.tty, 0)) {
+				/* going to the tty; leave locked */
+				va_start(ap, fmt);
+				__doprnt(fmt, ap, putchar, &pca, 10, FALSE);
+				va_end(ap);
+			}
+			tty_unlock(pca.tty);
 		}
-		tty_unlock(tp);
+
+		putchar_args_destroy(&pca);
 	}
 
 	va_start(ap, fmt);
@@ -385,7 +404,7 @@ putchar(int c, void *arg)
 		log_putc_locked(msgbufp, (char)c);
 	}
 	if ((pca->flags & TOCONS) && constty == 0 && c != '\0') {
-		cnputc((char)c);
+		console_write_char((char)c);
 	}
 	if (pca->flags & TOSTR) {
 		**sp = (char)c;
@@ -409,15 +428,18 @@ printf_log_locked(bool addcr, const char *fmt, ...)
 }
 
 bool
-vprintf_log_locked(const char *fmt, va_list ap, bool addcr)
+vprintf_log_locked(const char *fmt, va_list ap, bool driverkit)
 {
 	struct putchar_args pca;
 
 	pca.flags = TOLOGLOCKED;
+	if (driverkit) {
+		pca.flags |= TOCONS;
+	}
 	pca.tty   = NULL;
 	pca.last_char_was_cr = false;
 	__doprnt(fmt, ap, putchar, &pca, 10, TRUE);
-	if (addcr) {
+	if (driverkit) {
 		putchar('\n', &pca);
 	}
 	return pca.last_char_was_cr;

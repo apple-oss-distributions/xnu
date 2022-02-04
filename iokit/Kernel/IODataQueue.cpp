@@ -105,11 +105,7 @@ IODataQueue::initWithCapacity(UInt32 size)
 	}
 
 	assert(!notifyMsg);
-	notifyMsg = IONew(IODataQueueInternal, 1);
-	if (!notifyMsg) {
-		return false;
-	}
-	bzero(notifyMsg, sizeof(IODataQueueInternal));
+	notifyMsg = IOMallocType(IODataQueueInternal);
 	((IODataQueueInternal *)notifyMsg)->queueSize = size;
 
 	dataQueue = (IODataQueueMemory *)IOMallocAligned(allocSize, PAGE_SIZE);
@@ -150,7 +146,7 @@ IODataQueue::free()
 			dataQueue = NULL;
 		}
 
-		IODelete(notifyMsg, IODataQueueInternal, 1);
+		IOFreeType(notifyMsg, IODataQueueInternal);
 		notifyMsg = NULL;
 	}
 

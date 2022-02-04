@@ -14,9 +14,16 @@ DATAFILES = \
 	traps.h vm_param.h vm_types.h \
 	syscall_sw.h _structs.h sdt_isa.h
 
+# These are covered by ../machine/mach_machine.modulemap.
 INSTALL_MD_LIST = ${DATAFILES}
 
+INSTALL_SF_MD_LCL_LIST = ${DATAFILES}
+
+# These are covered by ../machine/mach_machine.modulemap.
 INSTALL_MD_GEN_LIST = \
+	asm.h
+
+INSTALL_SF_MD_LCL_GEN_LIST = \
 	asm.h
 
 INSTALL_MD_DIR = mach/arm

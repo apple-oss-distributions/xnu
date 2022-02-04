@@ -32,11 +32,16 @@
 #include <mach/memory_object.h>
 #include <mach/vm_map.h>
 
+#include <kern/ledger.h>
+
 #include <vm/memory_object.h>
 #include <vm/vm_fault.h>
 #include <vm/vm_map.h>
 #include <vm/vm_object.h>
 #include <vm/vm_protos.h>
+
+#include <mach/mach_vm.h>
+extern ledger_template_t        task_ledger_template;
 
 extern kern_return_t
 vm_map_copy_adjust_to_target(
@@ -195,7 +200,7 @@ vm_test_collapse_compressor(void)
 		printf("VM_TEST_COLLAPSE_COMPRESSOR: not collapsed\n");
 		printf("VM_TEST_COLLAPSE_COMPRESSOR: FAIL\n");
 		if (vm_object_collapse_compressor_allowed) {
-			panic("VM_TEST_COLLAPSE_COMPRESSOR: FAIL\n");
+			panic("VM_TEST_COLLAPSE_COMPRESSOR: FAIL");
 		}
 	} else {
 		/* check the contents of the mapping */
@@ -227,7 +232,7 @@ vm_test_collapse_compressor(void)
 		    expect[8],
 		    errors);
 		if (errors) {
-			panic("VM_TEST_COLLAPSE_COMPRESSOR: FAIL\n");
+			panic("VM_TEST_COLLAPSE_COMPRESSOR: FAIL");
 		} else {
 			printf("VM_TEST_COLLAPSE_COMPRESSOR: PASS\n");
 		}
@@ -238,8 +243,6 @@ vm_test_collapse_compressor(void)
 #endif /* VM_TEST_COLLAPSE_COMPRESSOR */
 
 #if VM_TEST_WIRE_AND_EXTRACT
-extern ledger_template_t        task_ledger_template;
-#include <mach/mach_vm.h>
 extern ppnum_t vm_map_get_phys_page(vm_map_t map,
     vm_offset_t offset);
 static void
@@ -256,7 +259,9 @@ vm_test_wire_and_extract(void)
 
 	ledger = ledger_instantiate(task_ledger_template,
 	    LEDGER_CREATE_ACTIVE_ENTRIES);
-	user_map = vm_map_create(pmap_create_options(ledger, 0, PMAP_CREATE_64BIT),
+	pmap_t user_pmap = pmap_create_options(ledger, 0, PMAP_CREATE_64BIT);
+	assert(user_pmap);
+	user_map = vm_map_create(user_pmap,
 	    0x100000000ULL,
 	    0x200000000ULL,
 	    TRUE);
@@ -304,7 +309,7 @@ vm_test_wire_and_extract(void)
 		if (kr != KERN_SUCCESS ||
 		    wire_ppnum == 0 ||
 		    wire_ppnum != user_ppnum) {
-			panic("VM_TEST_WIRE_AND_EXTRACT: FAIL\n");
+			panic("VM_TEST_WIRE_AND_EXTRACT: FAIL");
 		}
 	}
 	cur_offset -= PAGE_SIZE;
@@ -322,7 +327,7 @@ vm_test_wire_and_extract(void)
 	if (kr != KERN_SUCCESS ||
 	    wire_ppnum == 0 ||
 	    wire_ppnum != user_ppnum) {
-		panic("VM_TEST_WIRE_AND_EXTRACT: FAIL\n");
+		panic("VM_TEST_WIRE_AND_EXTRACT: FAIL");
 	}
 
 	printf("VM_TEST_WIRE_AND_EXTRACT: PASS\n");
@@ -349,7 +354,7 @@ vm_test_page_wire_overflow_panic(void)
 	} while (page->wire_count != 0);
 	vm_page_unlock_queues();
 	vm_object_unlock(object);
-	panic("FBDP(%p,%p): wire_count overflow not detected\n",
+	panic("FBDP(%p,%p): wire_count overflow not detected",
 	    object, page);
 }
 #else /* VM_TEST_PAGE_WIRE_OVERFLOW_PANIC */
@@ -373,7 +378,7 @@ vm_test_kernel_object_fault(void)
 	    KMA_GUARD_FIRST | KMA_GUARD_LAST),
 	    VM_KERN_MEMORY_STACK);
 	if (kr != KERN_SUCCESS) {
-		panic("VM_TEST_KERNEL_OBJECT_FAULT: kernel_memory_allocate kr 0x%x\n", kr);
+		panic("VM_TEST_KERNEL_OBJECT_FAULT: kernel_memory_allocate kr 0x%x", kr);
 	}
 	ret = copyinframe((uintptr_t)stack, (char *)frameb, TRUE);
 	if (ret != 0) {
@@ -892,17 +897,19 @@ vm_test_map_copy_adjust_to_target(void)
 	mach_memory_entry_port_release(mem_entry);
 
 	/* create 4k copy map */
+	curprot = VM_PROT_NONE;
+	maxprot = VM_PROT_NONE;
 	kr = vm_map_copy_extract(map4k, addr4k, 0x3000,
-	    VM_PROT_READ, FALSE,
-	    &copy4k, &curprot, &maxprot,
+	    FALSE, &copy4k, &curprot, &maxprot,
 	    VM_INHERIT_DEFAULT, VM_MAP_KERNEL_FLAGS_NONE);
 	assert(kr == KERN_SUCCESS);
 	assert(copy4k->size == 0x3000);
 
 	/* create 16k copy map */
+	curprot = VM_PROT_NONE;
+	maxprot = VM_PROT_NONE;
 	kr = vm_map_copy_extract(map16k, addr16k, 0x4000,
-	    VM_PROT_READ, FALSE,
-	    &copy16k, &curprot, &maxprot,
+	    FALSE, &copy16k, &curprot, &maxprot,
 	    VM_INHERIT_DEFAULT, VM_MAP_KERNEL_FLAGS_NONE);
 	assert(kr == KERN_SUCCESS);
 	assert(copy16k->size == 0x4000);
@@ -937,6 +944,80 @@ vm_test_map_copy_adjust_to_target(void)
 }
 #endif /* MACH_ASSERT */
 
+void vm_test_watch3_overmap(void);
+void
+vm_test_watch3_overmap(void)
+{
+#if __arm && !__arm64__
+	kern_return_t kr;
+	ledger_t ledger;
+	pmap_t user_pmap;
+	vm_map_t user_map;
+	vm_object_t object;
+	vm_map_address_t address;
+	int chunk;
+
+	if (PAGE_SIZE != FOURK_PAGE_SIZE) {
+		printf("VM_TESTS: %s:%d SKIP (PAGE_SIZE 0x%x)\n",
+		    __FUNCTION__, __LINE__, PAGE_SIZE);
+		return;
+	}
+	printf("VM_TESTS: %s:%d\n", __FUNCTION__, __LINE__);
+	ledger = ledger_instantiate(task_ledger_template,
+	    LEDGER_CREATE_ACTIVE_ENTRIES);
+	assert(ledger);
+	user_pmap = pmap_create_options(ledger, 0, 0);
+	assert(user_pmap);
+	ledger_dereference(ledger);
+	user_map = vm_map_create(user_pmap,
+	    0x1000000ULL,
+	    0x2000000ULL,
+	    TRUE);
+	assert(user_map);
+	vm_map_set_page_shift(user_map, SIXTEENK_PAGE_SHIFT);
+	object = vm_object_allocate(FOURK_PAGE_SIZE);
+	assert(object);
+	address = 0;
+	kr = vm_map_enter(user_map,
+	    &address,
+	    SIXTEENK_PAGE_SIZE,
+	    0,               /* mask */
+	    VM_FLAGS_ANYWHERE,
+	    VM_MAP_KERNEL_FLAGS_NONE,
+	    0,               /* alias */
+	    object,
+	    0,               /* offset */
+	    FALSE,
+	    VM_PROT_DEFAULT,
+	    VM_PROT_DEFAULT,
+	    VM_INHERIT_DEFAULT);
+	assertf(kr == KERN_SUCCESS, "kr 0x%x", kr);
+	kr = vm_fault(user_map,
+	    address,
+	    VM_PROT_READ,
+	    FALSE,
+	    0,
+	    TRUE,
+	    NULL,
+	    0);
+	assert(kr == KERN_SUCCESS);
+	for (chunk = 1; chunk < 4; chunk++) {
+		kr = vm_fault(user_map,
+		    address + (chunk * FOURK_PAGE_SIZE),
+		    VM_PROT_READ,
+		    FALSE,
+		    0,
+		    TRUE,
+		    NULL,
+		    0);
+		assertf(kr == KERN_MEMORY_ERROR, "kr 0x%x", kr);
+	}
+	vm_map_deallocate(user_map);
+	printf("VM_TESTS: %s:%d PASS\n", __FUNCTION__, __LINE__);
+#endif /* __arm__ && !__arm64__ */
+}
+
+
 boolean_t vm_tests_in_progress = FALSE;
 
 kern_return_t
@@ -955,6 +1036,7 @@ vm_tests(void)
 #if PMAP_CREATE_FORCE_4K_PAGES && MACH_ASSERT
 	vm_test_4k();
 #endif /* PMAP_CREATE_FORCE_4K_PAGES && MACH_ASSERT */
+	vm_test_watch3_overmap();
 
 	vm_tests_in_progress = FALSE;
 

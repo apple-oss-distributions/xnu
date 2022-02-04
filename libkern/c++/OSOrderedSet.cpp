@@ -59,8 +59,6 @@ OSOrderedSet::
 initWithCapacity(unsigned int inCapacity,
     OSOrderFunction inOrdering, void *inOrderingRef)
 {
-	unsigned int size;
-
 	if (!super::init()) {
 		return false;
 	}
@@ -69,8 +67,8 @@ initWithCapacity(unsigned int inCapacity,
 		return false;
 	}
 
-	size = sizeof(_Element) * inCapacity;
-	array = (_Element *) kalloc_container(size);
+	array = kalloc_type_tag_bt(_Element, inCapacity, Z_WAITOK_ZERO,
+	    VM_KERN_MEMORY_LIBKERN);
 	if (!array) {
 		return false;
 	}
@@ -81,8 +79,7 @@ initWithCapacity(unsigned int inCapacity,
 	ordering = inOrdering;
 	orderingRef = inOrderingRef;
 
-	bzero(array, size);
-	OSCONTAINER_ACCUMSIZE(size);
+	OSCONTAINER_ACCUMSIZE(sizeof(_Element) * inCapacity);
 
 	return true;
 }
@@ -101,6 +98,29 @@ withCapacity(unsigned int capacity,
 	return me;
 }
 
+static SInt32
+OSOrderedSetBlockToFunc(const OSMetaClassBase * obj1,
+    const OSMetaClassBase * obj2,
+    void * context)
+{
+	OSOrderedSet::OSOrderBlock ordering = (typeof(ordering))context;
+
+	return ordering(obj1, obj2);
+}
+
+
+OSSharedPtr<OSOrderedSet>
+OSOrderedSet::withCapacity(unsigned int capacity, OSOrderBlock ordering)
+{
+	auto me = OSMakeShared<OSOrderedSet>();
+
+	if (me && !me->initWithCapacity(capacity, &OSOrderedSetBlockToFunc, ordering)) {
+		return nullptr;
+	}
+
+	return me;
+}
+
 void
 OSOrderedSet::free()
 {
@@ -108,7 +128,7 @@ OSOrderedSet::free()
 	flushCollection();
 
 	if (array) {
-		kfree(array, sizeof(_Element) * capacity);
+		kfree_type(_Element, capacity, array);
 		OSCONTAINER_ACCUMSIZE( -(sizeof(_Element) * capacity));
 	}
 
@@ -142,7 +162,6 @@ OSOrderedSet::ensureCapacity(unsigned int newCapacity)
 {
 	_Element *newArray;
 	vm_size_t finalCapacity;
-	vm_size_t oldSize, newSize;
 
 	if (newCapacity <= capacity) {
 		return capacity;
@@ -154,25 +173,21 @@ OSOrderedSet::ensureCapacity(unsigned int newCapacity)
 	if (finalCapacity < newCapacity) {
 		return capacity;
 	}
-	newSize = sizeof(_Element) * finalCapacity;
 
-	newArray = (_Element *) kallocp_container(&newSize);
+	newArray = kallocp_type_tag_bt(_Element, &finalCapacity, Z_WAITOK_ZERO,
+	    VM_KERN_MEMORY_LIBKERN);
 	if (newArray) {
 		// use all of the actual allocation size
-		finalCapacity = (newSize / sizeof(_Element));
 		if (finalCapacity > UINT_MAX) {
 			// failure, too large
-			kfree(newArray, newSize);
+			kfree_type(_Element, finalCapacity, newArray);
 			return capacity;
 		}
 
-		oldSize = sizeof(_Element) * capacity;
+		OSCONTAINER_ACCUMSIZE(sizeof(_Element) * (finalCapacity - capacity));
 
-		OSCONTAINER_ACCUMSIZE(((size_t)newSize) - ((size_t)oldSize));
-
-		bcopy(array, newArray, oldSize);
-		bzero(&newArray[capacity], newSize - oldSize);
-		kfree(array, oldSize);
+		bcopy(array, newArray, capacity * sizeof(_Element));
+		kfree_type(_Element, capacity, array);
 		array = newArray;
 		capacity = (unsigned int) finalCapacity;
 	}

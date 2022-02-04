@@ -75,7 +75,10 @@
 #ifndef _SYS_PROC_INTERNAL_H_
 #define _SYS_PROC_INTERNAL_H_
 
+#include <kern/hazard.h>
+#include <kern/kalloc.h>
 #include <libkern/OSAtomic.h>
+#include <sys/filedesc.h>
 #include <sys/proc.h>
 #include <mach/resource_monitors.h>     // command/proc_name_t
 
@@ -92,93 +95,124 @@ __END_DECLS
 
 /*
  * The short form for various locks that protect fields in the data structures.
- * PL = Process Lock
- * PGL = Process Group Lock
- * PFDL = Process File Desc Lock
+ * PL   = Process Lock
+ * PGL  = Process Group Lock
  * PUCL = Process User Credentials Lock
- * PSL = Process Spin Lock
- * LL = List Lock
- * SL = Session Lock
+ * PSL  = Process Spin Lock
+ * LL   = List Lock
+ * SL   = Session Lock
+ * TTYL = TTY Lock
+ *
+ * C    = constant/static
  */
 struct label;
 
 /*
- * One structure allocated per session.
+ * Flags kept in the low bits of `struct session::s_refcount`
  */
-struct  session {
-	int                     s_count;                /* Ref cnt; pgrps in session. (LL) */
-	struct  proc *          s_leader;               /* Session leader.(static) */
-	struct  vnode *         s_ttyvp;                /* Vnode of controlling terminal.(SL) */
-	int                     s_ttyvid;               /* Vnode id of the controlling terminal (SL) */
-	struct  tty *           s_ttyp;                 /* Controlling terminal. (SL + ttyvp != NULL) */
-	pid_t                   s_ttypgrpid;            /* tty's pgrp id */
-	pid_t                   s_sid;                  /* Session ID (static) */
-	char                    s_login[MAXLOGNAME];    /* Setlogin() name.(SL) */
-	int                     s_flags;                /* Session flags (s_mlock)  */
-	LIST_ENTRY(session)     s_hash;                 /* Hash chain.(LL) */
-	lck_mtx_t               s_mlock;                /* mutex lock to protect session */
-	int                     s_listflags;
-};
+__options_decl(session_ref_bits_t, uint32_t, {
+	S_DEFAULT        = 0x00,
+	S_NOCTTY         = 0x01,      /* Do not associate controlling tty */
+	S_CTTYREF        = 0x02,      /* vnode ref taken by cttyopen      */
+});
+#define SESSION_REF_BITS  4           /* 2 is enough, 4 is easier in hex  */
+#define SESSION_REF_MASK  ((1u << PGRP_REF_BITS) - 1)
 
-#define SESSION_NULL (struct session *)NULL
+#define SESSION_NULL ((struct session *)NULL)
 
-/*
- * accessor for s_ttyp which treats it as invalid if s_ttyvp is not valid;
- * note that s_ttyp is not a reference in the session structre, so it can
- * become invalid out from under the session if the device is closed, without
- * this protection.  We can't safely make it into a reference without reflexive
- * close notification of tty devices through cdevsw[].
+/*!
+ * @struct session
  *
- * NB:	<sys/tty.h> is not in scope and there is not typedef type enforcement,
- *	or '0' below would be 'TTY_NULL'.
+ * @brief
+ * Structure to keep track of process sessions
+ *
+ * @discussion
+ * Sessions hang (with +1's) from:
+ * - process groups (@c pgrp::pg_session)
+ * - ttys (@c tty::t_session)
+ *
+ * Lock ordering: TTYL > LL > SL
  */
-#define SESSION_TP(sp)  (((sp)->s_ttyvp != 0) ? (sp)->s_ttyp : 0)
-
-/*
- * Session flags; used to tunnel information to lower layers and line
- * disciplines, etc.
- */
-#define S_DEFAULT       0x00000000      /* No flags set */
-#define S_NOCTTY        0x00000001      /* Do not associate controlling tty */
-#define S_CTTYREF       0x00000010      /* vnode ref taken by cttyopen */
-
-
-#define S_LIST_TERM     1               /* marked for termination */
-#define S_LIST_DEAD     2               /* already dead */
-/*
- * One structure allocated per process group.
- */
-struct  pgrp {
-	LIST_ENTRY(pgrp)        pg_hash;        /* Hash chain. (LL) */
-	LIST_HEAD(, proc)       pg_members;     /* Pointer to pgrp members. (PGL) */
-	struct  session *       pg_session;     /* Pointer to session. (LL ) */
-	pid_t                   pg_id;          /* Pgrp id. (static) */
-	int                     pg_jobc;        /* # procs qualifying pgrp for job control (PGL) */
-	int                     pg_membercnt;   /* Number of processes in the pgrocess group (PGL) */
-	int                     pg_refcount;    /* number of current iterators (LL) */
-	unsigned int            pg_listflags;   /* (LL) */
-	lck_mtx_t               pg_mlock;       /* mutex lock to protect pgrp */
+struct session {
+	lck_mtx_t               s_mlock;             /* session lock          */
+	LIST_ENTRY(session)     s_hash;              /* (LL) hash linkage     */
+	struct proc            *s_leader;            /* (C)  session leader   */
+	struct vnode           *s_ttyvp;             /* (SL) Vnode of controlling terminal */
+	struct tty             *s_ttyp;              /* (SL) Controlling terminal */
+	uint32_t                s_ttyvid;            /* (SL) Vnode id of the controlling terminal */
+	pid_t                   s_ttypgrpid;         /* (SL) tty's pgrp id    */
+	dev_t _Atomic           s_ttydev;            /* (SL) tty's device     */
+	pid_t                   s_sid;               /* (C)  Session ID       */
+	os_ref_atomic_t         s_refcount;
+	char                    s_login[MAXLOGNAME]; /* (SL) Setlogin() name  */
 };
 
-#define PGRP_FLAG_TERMINATE     1
-#define PGRP_FLAG_WAITTERMINATE 2
-#define PGRP_FLAG_DEAD          4
-#define PGRP_FLAG_ITERABEGIN    8
-#define PGRP_FLAG_ITERWAIT      0x10
 
-#define PGRP_NULL (struct pgrp *)NULL
-struct proc;
+/*
+ * Flags for pg_refcnt
+ */
+__options_decl(pggrp_ref_bits_t, uint32_t, {
+	PGRP_REF_NONE    = 0x00,
+	PGRP_REF_EMPTY   = 0x01, /* the process group has no members */
+});
+#define PGRP_REF_BITS  1
+#define PGRP_REF_MASK  ((1u << PGRP_REF_BITS) - 1)
 
-#define PROC_NULL (struct proc *)NULL
+HAZARD_POINTER_DECL(pgrp_hp, struct pgrp *);
+#define PGRP_NULL ((struct pgrp *)NULL)
 
-#define PROC_UPDATE_CREDS_ONPROC(p) { \
-	p->p_uid =  kauth_cred_getuid(p->p_ucred); \
-	p->p_gid =  kauth_cred_getgid(p->p_ucred); \
-	p->p_ruid =  kauth_cred_getruid(p->p_ucred); \
-	p->p_rgid =  kauth_cred_getrgid(p->p_ucred); \
-	p->p_svuid =  kauth_cred_getsvuid(p->p_ucred); \
-	p->p_svgid =  kauth_cred_getsvgid(p->p_ucred); \
-	}
+/*!
+ * @struct pgrp
+ *
+ * @abstract
+ * Describes a process group membership.
+ *
+ * @discussion
+ * <b>locking rules</b>
+ *
+ * Process groups have a static ID (@c pg_id) and session (@c pg_session),
+ * and groups hold a reference on their session.
+ *
+ * Process group membership is protected by the @c pgrp_lock().
+ *
+ * Lock ordering: TTYL > LL > PGL
+ *
+ * <b>lifetime</b>
+ * Process groups are refcounted, with a packed bit that tracks whether
+ * the group is orphaned (has no members), which prevents it
+ * from being looked up.
+ *
+ * Process groups are retired through @c hazard_retire().
+ *
+ * Process groups are hashed in a global hash table that can be consulted
+ * while holding the @c proc_list_lock() with @c pghash_find_locked()
+ * or using hazard pointers with @c pgrp_find().
+ */
+struct pgrp {
+	lck_mtx_t               pg_mlock;       /* process group lock   (PGL) */
+	struct pgrp_hp          pg_hash;        /* hash chain           (PLL) */
+	LIST_HEAD(, proc)       pg_members;     /* group members        (PGL) */
+	struct session         *pg_session;     /* session           (static) */
+	pid_t                   pg_id;          /* group ID          (static) */
+	int                     pg_jobc;        /* # procs qualifying pgrp for job control (PGL) */
+	os_ref_atomic_t         pg_refcount;
+};
+
+
+__options_decl(proc_ref_bits_t, uint32_t, {
+	P_REF_NONE       = 0x00u,
+	P_REF_NEW        = 0x01u, /* the proc is being initialized */
+	P_REF_DEAD       = 0x02u, /* the proc is becoming a zombie */
+	P_REF_WILL_EXEC  = 0x04u, /* see proc_refdrain_will_exec() */
+	P_REF_IN_EXEC    = 0x08u, /* see proc_refdrain_will_exec() */
+	P_REF_DRAINING   = 0x10u, /* someone is in proc_refdrain() */
+});
+#define P_REF_BITS   5
+#define P_REF_MASK   ((1u << P_REF_BITS) - 1)
+
+HAZARD_POINTER_DECL(proc_hp, struct proc *);
+#define PROC_NULL ((struct proc *)NULL)
+
 /*
  * Description of a process.
  *
@@ -190,7 +224,7 @@ struct proc;
  * which might be addressible only on a processor on which the process
  * is running.
  */
-struct  proc {
+struct proc {
 	LIST_ENTRY(proc) p_list;                /* List of all processes. */
 
 	void *          XNU_PTRAUTH_SIGNED_PTR("proc.task") task;       /* corresponding task (static)*/
@@ -214,26 +248,26 @@ struct  proc {
 	char            p_kdebug;               /* P_KDEBUG eq (CC)*/
 	char            p_btrace;               /* P_BTRACE eq (CC)*/
 
-	LIST_ENTRY(proc) p_pglist;              /* List of processes in pgrp.(PGL) */
-	LIST_ENTRY(proc) p_sibling;             /* List of sibling processes. (LL)*/
-	LIST_HEAD(, proc) p_children;           /* Pointer to list of children. (LL)*/
-	TAILQ_HEAD(, uthread) p_uthlist;        /* List of uthreads  (PL) */
+	LIST_ENTRY(proc) p_pglist;              /* List of processes in pgrp (PGL) */
+	LIST_ENTRY(proc) p_sibling;             /* List of sibling processes (LL)*/
+	LIST_HEAD(, proc) p_children;           /* Pointer to list of children (LL)*/
+	TAILQ_HEAD(, uthread) p_uthlist;        /* List of uthreads (PL) */
 
-	LIST_ENTRY(proc) p_hash;                /* Hash chain. (LL)*/
+	struct proc_hp  p_hash;                 /* Hash chain (LL)*/
 
 #if CONFIG_PERSONAS
 	struct persona  *p_persona;
 	LIST_ENTRY(proc) p_persona_list;
 #endif
 
-	lck_mtx_t       p_fdmlock;              /* proc lock to protect fdesc */
 	lck_mtx_t       p_ucred_mlock;          /* mutex lock to protect p_ucred */
 
 	/* substructures: */
-	kauth_cred_t    XNU_PTRAUTH_SIGNED_PTR("proc.p_ucred") p_ucred; /* Process owner's identity. (PUCL) */
-	struct  filedesc *p_fd;                 /* Ptr to open files structure. (PFDL) */
-	struct  pstats *p_stats;                /* Accounting/statistics (PL). */
-	struct  plimit *p_limit;                /* Process limits.(PL) */
+	kauth_cred_t    XNU_PTRAUTH_SIGNED_PTR("proc.p_ucred") p_ucred; /* Process owner's identity (PUCL) */
+	struct  filedesc p_fd;                  /* open files structure */
+	struct  pstats *p_stats;                /* Accounting/statistics (PL) */
+	HAZARD_POINTER(struct plimit *) p_limit;/* Process limits (PL) */
+	HAZARD_POINTER(struct pgrp *XNU_PTRAUTH_SIGNED_PTR("proc.p_pgrp")) p_pgrp; /* Pointer to process group. (LL) */
 
 	struct  sigacts *p_sigacts;             /* Signal actions, state (PL) */
 	lck_spin_t      p_slock;                /* spin lock for itimer/profil protection */
@@ -243,7 +277,8 @@ struct  proc {
 	unsigned int    p_lflag;                /* local flags  (PL) */
 	unsigned int    p_listflag;             /* list flags (LL) */
 	unsigned int    p_ladvflag;             /* local adv flags (atomic) */
-	int             p_refcount;             /* number of outstanding users(LL) */
+	os_ref_atomic_t p_refcount;             /* number of outstanding users */
+	os_ref_atomic_t p_waitref;              /* number of users pending transition */
 	int             p_childrencnt;          /* children holding ref on parent (LL) */
 	int             p_parentref;            /* children lookup ref on parent (LL) */
 	pid_t           p_oppid;                /* Save parent pid during ptrace. XXX */
@@ -266,9 +301,10 @@ struct  proc {
 	boolean_t       sigwait;        /* indication to suspend (PL) */
 	void    *sigwait_thread;        /* 'thread' holding sigwait(PL)  */
 	void    *exit_thread;           /* Which thread is exiting(PL)  */
+#if CONFIG_VFORK
 	void *  p_vforkact;             /* activation running this vfork proc)(static)  */
 	int     p_vforkcnt;             /* number of outstanding vforks(PL)  */
-	int     p_fpdrainwait;          /* (PFDL) */
+#endif /* CONFIG_VFORK */
 	/* Following fields are info from SIGCHLD (PL) */
 	pid_t   si_pid;                 /* (PL) */
 	u_int   si_status;              /* (PL) */
@@ -315,7 +351,6 @@ struct  proc {
 	uint8_t p_xhighbits;    /* Stores the top byte of exit status to avoid truncation*/
 	pid_t   p_contproc;     /* last PID to send us a SIGCONT (PL) */
 
-	struct  pgrp *  XNU_PTRAUTH_SIGNED_PTR("proc.p_pgrp") p_pgrp; /* Pointer to process group. (LL) */
 	uint32_t        p_csflags;      /* flags for codesign (PL) */
 	uint32_t        p_pcaction;     /* action  for process control on starvation */
 	uint8_t p_uuid[16];             /* from LC_UUID load command */
@@ -377,6 +412,8 @@ struct  proc {
 	uint64_t        p_dispatchqueue_label_offset;
 	uint64_t        p_return_to_kernel_offset;
 	uint64_t        p_mach_thread_self_offset;
+	/* The offset is set to 0 if userspace is not requesting for this feature */
+	uint64_t        p_pthread_wq_quantum_offset;
 #if VM_PRESSURE_EVENTS
 	struct timeval  vm_pressure_last_notify_tstamp;
 #endif
@@ -389,6 +426,9 @@ struct  proc {
 	int32_t           p_memstat_requestedpriority;  /* active priority */
 	int32_t           p_memstat_assertionpriority;  /* assertion driven priority */
 	uint32_t          p_memstat_dirty;              /* dirty state */
+#if CONFIG_FREEZE
+	uint8_t           p_memstat_freeze_skip_reason; /* memorystaus_freeze_skipped_reason_t. Protected by the freezer mutex. */
+#endif
 	uint64_t          p_memstat_userdata;           /* user state */
 	uint64_t          p_memstat_idledeadline;       /* time at which process became clean */
 	uint64_t          p_memstat_idle_start;         /* abstime process transitions into the idle band */
@@ -401,6 +441,7 @@ struct  proc {
 	uint32_t          p_memstat_freeze_sharedanon_pages; /* shared pages left behind after freeze */
 	uint32_t          p_memstat_frozen_count;
 	uint32_t          p_memstat_thaw_count;
+	uint32_t          p_memstat_last_thaw_interval; /* In which freezer interval was this last thawed? */
 #endif /* CONFIG_FREEZE */
 #endif /* CONFIG_MEMORYSTATUS */
 
@@ -417,7 +458,6 @@ struct  proc {
 #endif /* CONFIG_PROC_UDATA_STORAGE */
 
 	char * p_subsystem_root_path;
-	lck_rw_t        p_dirs_lock;                    /* keeps fd_cdir and fd_rdir stable across a lookup */
 	pid_t           p_sessionid;
 };
 
@@ -434,27 +474,14 @@ struct proc_ident {
 #define PGRPID_DEAD 0xdeaddead
 
 /* p_listflag */
-#define P_LIST_DRAIN                    0x00000001
-#define P_LIST_DRAINWAIT                0x00000002
-#define P_LIST_DRAINED                  0x00000004
-#define P_LIST_DEAD                             0x00000008
-#define P_LIST_WAITING                  0x00000010
-#define P_LIST_EXITED                   0x00000040
+#define P_LIST_WAITING          0x00000010
 #define P_LIST_CHILDDRSTART     0x00000080
 #define P_LIST_CHILDDRAINED     0x00000100
 #define P_LIST_CHILDDRWAIT      0x00000200
 #define P_LIST_CHILDLKWAIT      0x00000400
 #define P_LIST_DEADPARENT       0x00000800
 #define P_LIST_PARENTREFWAIT    0x00001000
-#define P_LIST_INCREATE                 0x00002000
-/* 0x4000 &  0x8000 Not used */
-#define P_LIST_INHASH                   0x00010000      /* process is in hash */
-#define P_LIST_INPGRP                   0x00020000      /* process is in pgrp */
-#define P_LIST_PGRPTRANS                0x00040000      /* pgrp is getting replaced */
-#define P_LIST_PGRPTRWAIT               0x00080000      /* wait for pgrp replacement */
-#define P_LIST_EXITCOUNT                0x00100000      /* counted for process exit */
-#define P_LIST_REFWAIT                  0x00200000      /* wait to take a ref */
-
+#define P_LIST_EXITCOUNT        0x00100000      /* counted for process exit */
 
 /* local flags */
 #define P_LDELAYTERM    0x00000001      /* */
@@ -465,15 +492,17 @@ struct proc_ident {
 #define P_LTRANSCOMMIT  0x00000020      /* process is committed to trans */
 #define P_LINTRANSIT    0x00000040      /* process in exec or in creation */
 #define P_LTRANSWAIT    0x00000080      /* waiting for trans to complete */
+#if CONFIG_VFORK
 #define P_LVFORK        0x00000100      /* parent proc of a vfork */
 #define P_LINVFORK      0x00000200      /* child proc of a vfork */
+#endif /* CONFIG_VFORK */
 #define P_LTRACED       0x00000400      /* */
 #define P_LSIGEXC       0x00000800      /* */
 #define P_LNOATTACH     0x00001000      /* */
 #define P_LPPWAIT       0x00002000      /* */
-#define P_LKQWDRAIN     0x00004000
-#define P_LKQWDRAINWAIT 0x00008000
-#define P_LKQWDEAD      0x00010000
+#define P_LPTHREADJITALLOWLIST  0x00004000      /* process has pthread JIT write function allowlist */
+/* was #define P_LKQWDRAINWAIT 0x00008000, free for re-use */
+/* was #define P_LKQWDEAD      0x00010000, free for re-use */
 #define P_LLIMCHANGE    0x00020000      /* process is changing its plimit (rlim_cur, rlim_max) */
 #define P_LLIMWAIT      0x00040000
 #define P_LWAITED       0x00080000
@@ -523,7 +552,11 @@ struct proc_ident {
 #define P_VFS_IOPOLICY_STATFS_NO_DATA_VOLUME            0x0008
 #define P_VFS_IOPOLICY_TRIGGER_RESOLVE_DISABLE          0x0010
 #define P_VFS_IOPOLICY_IGNORE_CONTENT_PROTECTION        0x0020
-#define P_VFS_IOPOLICY_VALID_MASK                       (P_VFS_IOPOLICY_ATIME_UPDATES | P_VFS_IOPOLICY_FORCE_HFS_CASE_SENSITIVITY | P_VFS_IOPOLICY_MATERIALIZE_DATALESS_FILES | P_VFS_IOPOLICY_STATFS_NO_DATA_VOLUME | P_VFS_IOPOLICY_TRIGGER_RESOLVE_DISABLE | P_VFS_IOPOLICY_IGNORE_CONTENT_PROTECTION)
+#define P_VFS_IOPOLICY_IGNORE_NODE_PERMISSIONS          0x0040
+#define P_VFS_IOPOLICY_SKIP_MTIME_UPDATE                0x0080
+#define P_VFS_IOPOLICY_ALLOW_LOW_SPACE_WRITES           0x0100
+#define P_VFS_IOPOLICY_VALID_MASK                       (P_VFS_IOPOLICY_ATIME_UPDATES | P_VFS_IOPOLICY_FORCE_HFS_CASE_SENSITIVITY | P_VFS_IOPOLICY_MATERIALIZE_DATALESS_FILES | P_VFS_IOPOLICY_STATFS_NO_DATA_VOLUME | \
+	        P_VFS_IOPOLICY_TRIGGER_RESOLVE_DISABLE | P_VFS_IOPOLICY_IGNORE_CONTENT_PROTECTION | P_VFS_IOPOLICY_IGNORE_NODE_PERMISSIONS | P_VFS_IOPOLICY_SKIP_MTIME_UPDATE|P_VFS_IOPOLICY_ALLOW_LOW_SPACE_WRITES)
 
 /* process creation arguments */
 #define PROC_CREATE_FORK        0       /* independent child (running) */
@@ -653,28 +686,9 @@ struct user64_extern_proc {
 };
 #endif  /* KERNEL */
 
-#ifdef BSD_KERNEL_PRIVATE
+#pragma GCC visibility push(hidden)
 
-#include <os/refcnt.h>    /* for struct os_refcnt pl_refcnt */
-
-/*
- * Kernel shareable process resource limits:
- * Because this structure is moderately large but changed infrequently, it is normally
- * shared copy-on-write after a fork. The pl_refcnt variable records the number of
- * "processes" (NOT threads) currently sharing the plimit. A plimit is freed when the
- * last referencing process exits the system. The refcnt of the plimit is a race-free
- * _Atomic variable. We allocate new plimits in proc_limitupdate and free them
- * in proc_limitdrop/proc_limitupdate.
- */
-struct plimit {
-	struct  rlimit   pl_rlimit[RLIM_NLIMITS];
-	os_refcnt_t      pl_refcnt;                /* number of processes using this plimit */
-};
-
-extern rlim_t proc_limitgetcur(proc_t p, int which, boolean_t to_lock_proc);
-extern void proc_limitsetcur_internal(proc_t p, int which, rlim_t value);
 extern struct proc proc0;
-#endif /* BSD_KERNEL_PRIVATE */
 
 /*
  * We use process IDs <= PID_MAX; PID_MAX + 1 must also fit in a pid_t,
@@ -687,8 +701,7 @@ extern unsigned int proc_shutdown_exitcount;
 
 #define PID_MAX         99999
 #define NO_PID          100000
-extern lck_mtx_t * proc_list_mlock;
-extern lck_mtx_t * proc_klist_mlock;
+extern lck_mtx_t proc_list_mlock;
 
 #define BSD_SIMUL_EXECS         33 /* 32 , allow for rounding */
 #define BSD_PAGEABLE_SIZE_PER_EXEC      (NCARGS + PAGE_SIZE + PAGE_SIZE) /* page for apple vars, page for executable header */
@@ -698,34 +711,25 @@ extern vm_offset_t * execargs_cache;
 
 #define SESS_LEADER(p, sessp)   ((sessp)->s_leader == (p))
 
-#define PIDHASH(pid)    (&pidhashtbl[(pid) & pidhash])
-extern LIST_HEAD(pidhashhead, proc) * pidhashtbl;
-extern u_long pidhash;
-
-#define PGRPHASH(pgid)  (&pgrphashtbl[(pgid) & pgrphash])
-extern LIST_HEAD(pgrphashhead, pgrp) * pgrphashtbl;
-extern u_long pgrphash;
 #define SESSHASH(sessid) (&sesshashtbl[(sessid) & sesshash])
 extern LIST_HEAD(sesshashhead, session) * sesshashtbl;
 extern u_long sesshash;
 
-extern lck_grp_t * proc_lck_grp;
-extern lck_grp_t * proc_fdmlock_grp;
-extern lck_grp_t * proc_kqhashlock_grp;
-extern lck_grp_t * proc_knhashlock_grp;
-extern lck_grp_t * proc_mlock_grp;
-extern lck_grp_t * proc_ucred_mlock_grp;
-extern lck_grp_t * proc_slock_grp;
-extern lck_grp_t * proc_dirslock_grp;
-extern lck_grp_attr_t * proc_lck_grp_attr;
-extern lck_attr_t * proc_lck_attr;
+extern lck_attr_t proc_lck_attr;
+extern lck_grp_t proc_fdmlock_grp;
+extern lck_grp_t proc_lck_grp;
+extern lck_grp_t proc_kqhashlock_grp;
+extern lck_grp_t proc_knhashlock_grp;
+extern lck_grp_t proc_slock_grp;
+extern lck_grp_t proc_mlock_grp;
+extern lck_grp_t proc_ucred_mlock_grp;
+extern lck_grp_t proc_dirslock_grp;
 
 LIST_HEAD(proclist, proc);
 extern struct proclist allproc;         /* List of all processes. */
 extern struct proclist zombproc;        /* List of zombie processes. */
 
 extern struct proc * XNU_PTRAUTH_SIGNED_PTR("initproc") initproc;
-extern void procinit(void);
 extern void proc_lock(struct proc *);
 extern void proc_unlock(struct proc *);
 extern void proc_spinlock(struct proc *);
@@ -744,6 +748,7 @@ extern void proc_dirs_lock_exclusive(struct proc *);
 extern void proc_dirs_unlock_exclusive(struct proc *);
 extern void proc_ucred_lock(struct proc *);
 extern void proc_ucred_unlock(struct proc *);
+extern void proc_update_creds_onproc(struct proc *);
 __private_extern__ int proc_core_name(const char *name, uid_t uid, pid_t pid,
     char *cr_name, size_t cr_name_len);
 extern int isinferior(struct proc *, struct proc *);
@@ -761,51 +766,61 @@ extern int      setgroups_internal(proc_t p, u_int gidsetsize, gid_t *gidset, ui
 extern int      enterpgrp(struct proc *p, pid_t pgid, int mksess);
 extern void     fixjobc(struct proc *p, struct pgrp *pgrp, int entering);
 extern int      inferior(struct proc *p);
-extern int      leavepgrp(struct proc *p);
 extern void     resetpriority(struct proc *);
 extern void     setrunnable(struct proc *);
 extern void     setrunqueue(struct proc *);
-extern int      sleep(void *chan, int pri);
+extern int      sleep(void *chan, int pri) __exported;
 extern int      tsleep0(void *chan, int pri, const char *wmesg, int timo, int (*continuation)(int));
 extern int      tsleep1(void *chan, int pri, const char *wmesg, u_int64_t abstime, int (*continuation)(int));
-extern int      msleep0(void *chan, lck_mtx_t *mtx, int pri, const char *wmesg, int timo, int (*continuation)(int));
-extern void     vfork_return(struct proc *child, int32_t *retval, int rval);
 extern int      exit1(struct proc *, int, int *);
 extern int      exit1_internal(struct proc *, int, int *, boolean_t, boolean_t, int);
 extern int      exit_with_reason(struct proc *, int, int *, boolean_t, boolean_t, int, struct os_reason *);
 extern int      fork1(proc_t, thread_t *, int, coalition_t *);
-extern void vfork_exit_internal(struct proc *p, int rv, int forced);
+#if CONFIG_VFORK
+extern void     vfork_return(struct proc *child, int32_t *retval, int rval);
+extern void     vfork_exit_internal(struct proc *p, int rv, int forced);
+#endif /* CONFIG_VFORK */
 extern void proc_reparentlocked(struct proc *child, struct proc * newparent, int cansignal, int locked);
 
-extern proc_t proc_findinternal(int pid, int locked);
+extern bool   proc_list_exited(proc_t p);
+extern proc_t proc_find_locked(int pid);
 extern proc_t proc_findthread(thread_t thread);
 extern void proc_refdrain(proc_t);
-extern proc_t proc_refdrain_with_refwait(proc_t p, boolean_t get_ref_and_allow_wait);
-extern void proc_refwake(proc_t p);
+extern proc_t proc_refdrain_will_exec(proc_t p);
+extern void proc_refwake_did_exec(proc_t p);
 extern void proc_childdrainlocked(proc_t);
 extern void proc_childdrainstart(proc_t);
 extern void proc_childdrainend(proc_t);
 extern void  proc_checkdeadrefs(proc_t);
-struct proc *pfind_locked(pid_t);
-extern struct pgrp *pgfind(pid_t);
-extern void pg_rele(struct pgrp * pgrp);
+struct proc *phash_find_locked(pid_t);
+extern void phash_insert_locked(pid_t pid, struct proc *);
+extern void phash_remove_locked(pid_t pid, struct proc *);
+struct pgrp *pghash_find_locked(pid_t);
+extern void pghash_insert_locked(pid_t pgid, struct pgrp *);
+extern struct pgrp *pgrp_find(pid_t);
+extern void pgrp_rele(struct pgrp * pgrp);
 extern struct session * session_find_internal(pid_t sessid);
-extern struct pgrp * proc_pgrp(proc_t);
-extern struct pgrp * tty_pgrp(struct tty * tp);
-extern struct pgrp * pgfind_internal(pid_t);
-extern struct session * proc_session(proc_t);
+extern struct pgrp *proc_pgrp(proc_t, struct session **);
+extern struct pgrp *pgrp_leave_locked(struct proc *p);
+extern struct pgrp *pgrp_enter_locked(struct proc *parent, struct proc *p);
+extern struct pgrp *tty_pgrp_locked(struct tty * tp);
+struct pgrp *pgrp_alloc(pid_t pgid, pggrp_ref_bits_t bits);
 extern void pgrp_lock(struct pgrp * pgrp);
 extern void pgrp_unlock(struct pgrp * pgrp);
+extern struct session *session_find_locked(pid_t sessid);
+extern struct session *session_alloc(struct proc *leader);
 extern void session_lock(struct session * sess);
 extern void session_unlock(struct session * sess);
-extern struct session * pgrp_session(struct pgrp * pgrp);
-extern void     session_rele(struct session *sess);
-extern int isbackground(proc_t p, struct tty  *tp);
+extern struct session *session_ref(struct session *sess);
+extern void session_rele(struct session *sess);
+extern struct tty *session_set_tty_locked(struct session *sessp, struct tty *);
+extern struct tty *session_clear_tty_locked(struct session *sess);
+extern struct tty *session_tty(struct session *sess);
 extern proc_t proc_parentholdref(proc_t);
 extern int proc_parentdropref(proc_t, int);
-int     itimerfix(struct timeval *tv);
-int     itimerdecr(struct proc * p, struct itimerval *itp, int usec);
-void    proc_free_realitimer(proc_t proc);
+int  itimerfix(struct timeval *tv);
+int  itimerdecr(struct proc * p, struct itimerval *itp, int usec);
+void proc_free_realitimer(proc_t proc);
 int  timespec_is_valid(const struct timespec *);
 void proc_signalstart(struct proc *, int locked);
 void proc_signalend(struct proc *, int locked);
@@ -813,12 +828,14 @@ int  proc_transstart(struct proc *, int locked, int non_blocking);
 void proc_transcommit(struct proc *, int locked);
 void proc_transend(struct proc *, int locked);
 int  proc_transwait(struct proc *, int locked);
-void  proc_rele_locked(struct proc *  p);
-struct proc *proc_ref_locked(struct proc *  p);
+struct proc *proc_ref(struct proc *p, int locked);
+void proc_wait_release(struct proc *p);
 void proc_knote(struct proc * p, long hint);
 void proc_knote_drain(struct proc *p);
 void proc_setregister(proc_t p);
 void proc_resetregister(proc_t p);
+bool proc_get_pthread_jit_allowlist(proc_t p);
+void proc_set_pthread_jit_allowlist(proc_t p);
 /* returns the first thread_t in the process, or NULL XXX for NFS, DO NOT USE */
 thread_t proc_thread(proc_t);
 extern int proc_pendingsignals(proc_t, sigset_t);
@@ -835,8 +852,31 @@ extern lck_mtx_t * pthread_list_mlock;
 #endif /* PSYNCH */
 struct uthread * current_uthread(void);
 
+extern void proc_set_task(proc_t, task_t);
+extern void proc_setpidversion(proc_t, int);
+extern uint64_t proc_getcsflags(proc_t);
+extern void proc_csflags_update(proc_t, uint64_t);
+extern void proc_csflags_set(proc_t, uint64_t);
+extern void proc_csflags_clear(proc_t, uint64_t);
+extern uint8_t *proc_syscall_filter_mask(proc_t);
+extern void proc_syscall_filter_mask_set(proc_t, uint8_t *);
+extern pid_t proc_getpid(proc_t);
+extern void proc_setplatformdata(proc_t, uint32_t, uint32_t, uint32_t);
+extern void proc_set_sigact(proc_t, int, user_addr_t);
+extern void proc_set_trampact(proc_t, int, user_addr_t);
+extern void proc_set_sigact_trampact(proc_t, int, user_addr_t, user_addr_t);
+extern void proc_reset_sigact(proc_t, sigset_t);
+extern void proc_set_ucred(proc_t, kauth_cred_t);
+extern void proc_setexecutableuuid(proc_t, const uuid_t);
+extern const unsigned char *proc_executableuuid_addr(proc_t);
 
-/* process iteration */
+#pragma mark - process iteration
+
+/*
+ * ALLPROC_FOREACH cannot be used to access the task, as the field may be
+ * swapped out during exec.  With `proc_iterate`, find threads by iterating the
+ * `p_uthlist` field of the proc, under the `proc_lock`.
+ */
 
 #define ALLPROC_FOREACH(var) \
 	LIST_FOREACH((var), &allproc, p_list)
@@ -867,22 +907,20 @@ typedef int (*proc_iterate_fn_t)(proc_t, void *);
 /*
  * pgrp_iterate walks the provided process group, calling `filterfn` with
  * `filterarg` for each process.  For processes where `filterfn` returned
- * non-zero, `callout` is called with `arg`.  If `PGRP_DROPREF` is supplied in
- * `flags`, a reference will be dropped from the process group after obtaining
- * the list of processes to call `callout` on.
+ * non-zero, `callout` is called with `arg`.
  *
  * `PGMEMBERS_FOREACH` might also be used under the pgrp_lock to achieve a
  * similar effect.
  */
-#define PGRP_DROPREF (1)
 
-extern void pgrp_iterate(struct pgrp *pgrp, unsigned int flags, proc_iterate_fn_t callout, void *arg, proc_iterate_fn_t filterfn, void *filterarg);
+extern void pgrp_iterate(struct pgrp *pgrp, proc_iterate_fn_t callout,
+    void *arg, bool (^filterfn)(proc_t));
 
 /*
  * proc_iterate walks the `allproc` and/or `zombproc` lists, calling `filterfn`
  * with `filterarg` for each process.  For processes where `filterfn` returned
  * non-zero, `callout` is called with `arg`.  If the `PROC_NOWAITTRANS` flag is
- * set, this function waits for transitions.
+ * unset, this function waits for transitions.
  *
  * `ALLPROC_FOREACH` or `ZOMBPROC_FOREACH` might also be used under the
  * `proc_list_lock` to achieve a similar effect.
@@ -891,7 +929,8 @@ extern void pgrp_iterate(struct pgrp *pgrp, unsigned int flags, proc_iterate_fn_
 #define PROC_ZOMBPROCLIST (1U << 1) /* walk the zombie list */
 #define PROC_NOWAITTRANS  (1U << 2) /* do not wait for transitions (checkdirs only) */
 
-extern void proc_iterate(unsigned int flags, proc_iterate_fn_t callout, void *arg, proc_iterate_fn_t filterfn, void *filterarg);
+extern void proc_iterate(unsigned int flags, proc_iterate_fn_t callout,
+    void *arg, proc_iterate_fn_t filterfn, void *filterarg);
 
 /*
  * proc_childrenwalk walks the children of process `p`, calling `callout` for
@@ -905,16 +944,29 @@ extern void proc_childrenwalk(proc_t p, proc_iterate_fn_t callout, void *arg);
 /*
  * proc_rebootscan should only be used by kern_shutdown.c
  */
-extern void proc_rebootscan(proc_iterate_fn_t callout, void *arg, proc_iterate_fn_t filterfn, void *filterarg);
+extern void proc_rebootscan(proc_iterate_fn_t callout, void *arg,
+    proc_iterate_fn_t filterfn, void *filterarg);
 
 pid_t dtrace_proc_selfpid(void);
 pid_t dtrace_proc_selfppid(void);
 uid_t dtrace_proc_selfruid(void);
 
+os_refgrp_decl_extern(p_refgrp);
+KALLOC_TYPE_DECLARE(proc_stats_zone);
 extern zone_t proc_zone;
-extern zone_t proc_stats_zone;
 extern zone_t proc_sigacts_zone;
 
 extern struct proc_ident proc_ident(proc_t p);
 
+#if CONFIG_PROC_RESOURCE_LIMITS
+int proc_set_filedesc_limits(proc_t p, int soft_limit, int hard_limit);
+#endif /* CONFIG_PROC_RESOURCE_LIMITS */
+
+/*
+ * True if the process ignores file permissions in case it owns the
+ * file/directory
+ */
+bool proc_ignores_node_permissions(proc_t proc);
+
+#pragma GCC visibility pop
 #endif  /* !_SYS_PROC_INTERNAL_H_ */

@@ -1,0 +1,36 @@
+[.*]
+src:./san/memory/ubsan.c
+src:./san/memory/ubsan_log.c
+
+[bounds]
+src:./osfmk/corecrypto/*
+
+[alignment]
+
+src:./libsa/bootstrap.cpp
+src:./bsd/net/necp_client.c
+src:./pexpert/arm/pe_identify_machine.c
+
+[object-size]
+src:./osfmk/i386/locks_i386.c
+
+
+[signed-integer-overflow]
+
+# rdar://77997115&rdar://78024928
+src:./osfmk/console/video_console.c
+
+# rdar://77999724
+src:./osfmk/kern/ledger.c
+
+# rdar://78030612
+fun:memorystatus_cmd_get_memlimit_excess_np
+
+# rdar://79501524
+src:./osfmk/kern/clock.c
+
+# rdar://80254468
+fun:wait4_nocancel
+
+# rdar://79446799 (only the biggest offender, tcp_xmit_timer)
+fun:tcp_xmit_timer

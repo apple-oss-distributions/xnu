@@ -77,7 +77,7 @@ static void
 timebase_callback(struct timebase_freq_t * freq);
 
 #if DEVELOPMENT || DEBUG
-uint32_t absolute_time_validation = 0;
+uint32_t timebase_validation = 0;
 #endif
 
 /*
@@ -92,14 +92,14 @@ rtclock_early_init(void)
 
 #if defined(APPLE_ARM64_ARCH_FAMILY)
 	/* Enable MAT validation on A0 hardware by default. */
-	absolute_time_validation = ml_get_topology_info()->chip_revision == CPU_VERSION_A0;
+	timebase_validation = ml_get_topology_info()->chip_revision == CPU_VERSION_A0;
 #endif
 
 	if (kern_feature_override(KF_MATV_OVRD)) {
-		absolute_time_validation = 0;
+		timebase_validation = 0;
 	}
 	if (PE_parse_boot_argn("timebase_validation", &tmp_mv, sizeof(tmp_mv))) {
-		absolute_time_validation = tmp_mv;
+		timebase_validation = tmp_mv;
 	}
 #endif
 }
@@ -164,11 +164,12 @@ rtclock_init(void)
 	return 1;
 }
 
+
 uint64_t
 mach_absolute_time(void)
 {
 #if DEVELOPMENT || DEBUG
-	if (__improbable(absolute_time_validation == 1)) {
+	if (__improbable(timebase_validation)) {
 		static volatile uint64_t s_last_absolute_time = 0;
 		uint64_t                 new_absolute_time, old_absolute_time;
 		int                      attempts = 0;
@@ -194,26 +195,21 @@ mach_absolute_time(void)
 			attempts++;
 			old_absolute_time = s_last_absolute_time;
 
-#if __arm64__
-			__asm__ volatile ("dsb ld" ::: "memory");
-#else
-			OSSynchronizeIO(); // See osfmk/arm64/rtclock.c
-#endif
+			__builtin_arm_dsb(DSB_ISHLD);
 
 			new_absolute_time = ml_get_timebase();
 		} while (attempts < MAX_TIMEBASE_TRIES && !OSCompareAndSwap64(old_absolute_time, new_absolute_time, &s_last_absolute_time));
 
 		if (attempts < MAX_TIMEBASE_TRIES && old_absolute_time > new_absolute_time) {
-			panic("mach_absolute_time returning non-monotonically increasing value 0x%llx (old value 0x%llx\n)\n",
+			timebase_validation = 0; // we know it's bad, now prevent nested panics
+			panic("mach_absolute_time returning non-monotonically increasing value 0x%llx (old value 0x%llx\n)",
 			    new_absolute_time, old_absolute_time);
 		}
 		return new_absolute_time;
-	} else {
-		return ml_get_timebase();
 	}
-#else
+#endif /* DEVELOPMENT || DEBUG */
+
 	return ml_get_timebase();
-#endif
 }
 
 uint64_t
@@ -488,10 +484,7 @@ machine_delay_until(uint64_t interval,
 	uint64_t now;
 
 	do {
-#if     __ARM_ENABLE_WFE_
 		__builtin_arm_wfe();
-#endif /* __ARM_ENABLE_WFE_ */
-
 		now = mach_absolute_time();
 	} while (now < deadline);
 }

@@ -133,12 +133,7 @@ IOWorkLoop::init()
 
 	// Allocate our ExpansionData if it hasn't been allocated already.
 	if (!reserved) {
-		reserved = IONew(ExpansionData, 1);
-		if (!reserved) {
-			return false;
-		}
-
-		bzero(reserved, sizeof(ExpansionData));
+		reserved = IOMallocType(ExpansionData);
 	}
 
 	if (gateLock == NULL) {
@@ -203,12 +198,7 @@ IOWorkLoop::workLoopWithOptions(IOOptionBits options)
 	IOWorkLoop *me = new IOWorkLoop;
 
 	if (me && options) {
-		me->reserved = IONew(ExpansionData, 1);
-		if (!me->reserved) {
-			me->release();
-			return NULL;
-		}
-		bzero(me->reserved, sizeof(ExpansionData));
+		me->reserved = IOMallocType(ExpansionData);
 		me->reserved->options = options;
 	}
 
@@ -298,7 +288,7 @@ IOWorkLoop::free()
 		IOStatisticsUnregisterCounter();
 
 		if (reserved) {
-			IODelete(reserved, ExpansionData, 1);
+			IOFreeType(reserved, ExpansionData);
 			reserved = NULL;
 		}
 

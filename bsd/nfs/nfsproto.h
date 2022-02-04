@@ -741,6 +741,7 @@ extern uint32_t nfs4_getattr_write_bitmap[NFS_ATTR_BITMAP_LEN];
 #define NFS_OP_WRITE                            38
 #define NFS_OP_RELEASE_LOCKOWNER                39
 #define NFS_OP_ILLEGAL                          10044
+#define NFS_OP_COUNT                            40
 /* NFSv4 callback opcodes */
 #define NFS_OP_CB_GETATTR                       3
 #define NFS_OP_CB_RECALL                        4

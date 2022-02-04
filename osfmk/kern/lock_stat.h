@@ -121,18 +121,18 @@ enum lockstat_probe_id {
 
 #if CONFIG_DTRACE
 extern uint32_t lockstat_probemap[LS_NPROBES];
-extern void (*lockstat_probe)(uint32_t, uint64_t, uint64_t,
+extern void dtrace_probe(uint32_t, uint64_t, uint64_t,
     uint64_t, uint64_t, uint64_t);
 /*
  * Macros to record lockstat probes.
  */
 #define LOCKSTAT_RECORD4(probe, lp, arg0, arg1, arg2, arg3)             \
-	{                                                               \
-	        uint32_t id;                                         \
-	        if (__improbable(id = lockstat_probemap[(probe)])) {            \
-	                (*lockstat_probe)(id, (uintptr_t)(lp), (arg0),  \
-	                    (arg1), (arg2), (arg3));                    \
-	        }                                                       \
+	{                                                                   \
+	        uint32_t id;                                                \
+	        if (__improbable(id = lockstat_probemap[(probe)])) {        \
+	                dtrace_probe(id, (uintptr_t)(lp), (arg0),           \
+	                    (arg1), (arg2), (arg3));                        \
+	        }                                                           \
 	}
 #define LOCKSTAT_RECORD_(probe, lp, arg0, arg1, arg2, arg3, ...) LOCKSTAT_RECORD4(probe, lp, arg0, arg1, arg2, arg3)
 #define LOCKSTAT_RECORD__(probe, lp, arg0, arg1, arg2, arg3, ...) LOCKSTAT_RECORD_(probe, lp, arg0, arg1, arg2, arg3)
@@ -145,7 +145,7 @@ extern void (*lockstat_probe)(uint32_t, uint64_t, uint64_t,
  * Time threshold before dtrace lockstat spin
  * probes are triggered
  */
-extern uint64_t dtrace_spin_threshold;
+extern machine_timeout32_t dtrace_spin_threshold;
 
 #if CONFIG_DTRACE
 void lockprof_invoke(lck_grp_t*, lck_grp_stat_t*, uint64_t);
@@ -242,7 +242,7 @@ lck_grp_spin_update_spin(void *lock LCK_GRP_ARG(lck_grp_t *grp), uint64_t time)
 {
 #pragma unused(lock, time)
 #if CONFIG_DTRACE
-	if (time > dtrace_spin_threshold) {
+	if (time > os_atomic_load(&dtrace_spin_threshold, relaxed)) {
 		LOCKSTAT_RECORD(LS_LCK_SPIN_LOCK_SPIN, lock, time LCK_GRP_ARG((uintptr_t)grp));
 	}
 #endif /* CONFIG_DTRACE */
@@ -317,7 +317,7 @@ lck_grp_ticket_update_spin(void *lock LCK_GRP_ARG(lck_grp_t *grp), uint64_t time
 {
 #pragma unused(lock, time)
 #if CONFIG_DTRACE
-	if (time > dtrace_spin_threshold) {
+	if (time > os_atomic_load(&dtrace_spin_threshold, relaxed)) {
 		LOCKSTAT_RECORD(LS_LCK_TICKET_LOCK_SPIN, lock, time LCK_GRP_ARG((uintptr_t)grp));
 	}
 #endif /* CONFIG_DTRACE */

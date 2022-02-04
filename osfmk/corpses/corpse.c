@@ -130,6 +130,7 @@
 #include <kern/kern_cdata.h>
 #include <mach/mach_vm.h>
 #include <kern/exc_guard.h>
+#include <os/log.h>
 
 #if CONFIG_MACF
 #include <security/mac_mach_internal.h>
@@ -150,16 +151,19 @@ union corpse_creation_gate {
 
 static _Atomic uint32_t inflight_corpses;
 unsigned long  total_corpses_created = 0;
-boolean_t corpse_enabled_config = TRUE;
 
+static TUNABLE(bool, corpses_disabled, "-no_corpses", false);
+
+#if DEBUG || DEVELOPMENT
 /* bootarg to generate corpse with size up to max_footprint_mb */
-boolean_t corpse_threshold_system_limit = FALSE;
+TUNABLE(bool, corpse_threshold_system_limit, "corpse_threshold_system_limit", false);
+#endif /* DEBUG || DEVELOPMENT */
 
 /* bootarg to turn on corpse forking for EXC_RESOURCE */
-int exc_via_corpse_forking = 1;
+TUNABLE(bool, exc_via_corpse_forking, "exc_via_corpse_forking", true);
 
 /* bootarg to generate corpse for fatal high memory watermark violation */
-int corpse_for_fatal_memkill = 1;
+TUNABLE(bool, corpse_for_fatal_memkill, "corpse_for_fatal_memkill", true);
 
 #ifdef  __arm__
 static inline int
@@ -172,41 +176,18 @@ extern int IS_64BIT_PROCESS(void *);
 #endif /* __arm__ */
 extern void gather_populate_corpse_crashinfo(void *p, task_t task,
     mach_exception_data_type_t code, mach_exception_data_type_t subcode,
-    uint64_t *udata_buffer, int num_udata, void *reason);
+    uint64_t *udata_buffer, int num_udata, void *reason, exception_type_t etype);
 extern void *proc_find(int pid);
 extern int proc_rele(void *p);
-
-
-void
-corpses_init()
-{
-	char temp_buf[20];
-	int exc_corpse_forking;
-	int fatal_memkill;
-	if (PE_parse_boot_argn("-no_corpses", temp_buf, sizeof(temp_buf))) {
-		corpse_enabled_config = FALSE;
-	}
-	if (PE_parse_boot_argn("exc_via_corpse_forking", &exc_corpse_forking, sizeof(exc_corpse_forking))) {
-		exc_via_corpse_forking = exc_corpse_forking;
-	}
-	if (PE_parse_boot_argn("corpse_for_fatal_memkill", &fatal_memkill, sizeof(fatal_memkill))) {
-		corpse_for_fatal_memkill = fatal_memkill;
-	}
-#if DEBUG || DEVELOPMENT
-	if (PE_parse_boot_argn("-corpse_threshold_system_limit", &corpse_threshold_system_limit, sizeof(corpse_threshold_system_limit))) {
-		corpse_threshold_system_limit = TRUE;
-	}
-#endif /* DEBUG || DEVELOPMENT */
-}
 
 /*
  * Routine: corpses_enabled
  * returns FALSE if not enabled
  */
 boolean_t
-corpses_enabled()
+corpses_enabled(void)
 {
-	return corpse_enabled_config;
+	return !corpses_disabled;
 }
 
 unsigned long
@@ -218,6 +199,9 @@ total_corpses_count(void)
 	return gate.corpses;
 }
 
+extern char *proc_best_name(struct proc *);
+extern int proc_pid(struct proc *);
+
 /*
  * Routine: task_crashinfo_get_ref()
  *          Grab a slot at creating a corpse.
@@ -227,6 +211,7 @@ static kern_return_t
 task_crashinfo_get_ref(corpse_flags_t kcd_u_flags)
 {
 	union corpse_creation_gate oldgate, newgate;
+	struct proc *p = (void *)current_proc();
 
 	assert(kcd_u_flags & CORPSE_CRASHINFO_HAS_REF);
 
@@ -235,10 +220,14 @@ task_crashinfo_get_ref(corpse_flags_t kcd_u_flags)
 		newgate = oldgate;
 		if (kcd_u_flags & CORPSE_CRASHINFO_USER_FAULT) {
 			if (newgate.user_faults++ >= TOTAL_USER_FAULTS_ALLOWED) {
+				os_log(OS_LOG_DEFAULT, "%s[%d] Corpse failure, too many faults %d\n",
+				    proc_best_name(p), proc_pid(p), newgate.user_faults);
 				return KERN_RESOURCE_SHORTAGE;
 			}
 		}
 		if (newgate.corpses++ >= TOTAL_CORPSES_ALLOWED) {
+			os_log(OS_LOG_DEFAULT, "%s[%d] Corpse failure, too many %d\n",
+			    proc_best_name(p), proc_pid(p), newgate.corpses);
 			return KERN_RESOURCE_SHORTAGE;
 		}
 
@@ -246,6 +235,8 @@ task_crashinfo_get_ref(corpse_flags_t kcd_u_flags)
 		if (atomic_compare_exchange_strong_explicit(&inflight_corpses,
 		    &oldgate.value, newgate.value, memory_order_relaxed,
 		    memory_order_relaxed)) {
+			os_log(OS_LOG_DEFAULT, "%s[%d] Corpse allowed %d of %d\n",
+			    proc_best_name(p), proc_pid(p), newgate.corpses, TOTAL_CORPSES_ALLOWED);
 			return KERN_SUCCESS;
 		}
 	}
@@ -277,6 +268,7 @@ task_crashinfo_release_ref(corpse_flags_t kcd_u_flags)
 		if (atomic_compare_exchange_strong_explicit(&inflight_corpses,
 		    &oldgate.value, newgate.value, memory_order_relaxed,
 		    memory_order_relaxed)) {
+			os_log(OS_LOG_DEFAULT, "Corpse released, count at %d\n", newgate.corpses);
 			return KERN_SUCCESS;
 		}
 	}
@@ -396,6 +388,38 @@ task_purge_all_corpses(void)
 }
 
 /*
+ * Routine: find_corpse_task_by_uniqueid_grp
+ * params: task_uniqueid - uniqueid of the corpse
+ *         target - target task [Out Param]
+ *                 grp - task reference group
+ * returns:
+ *         KERN_SUCCESS if a matching corpse if found, gives a ref.
+ *         KERN_FAILURE corpse with given uniqueid is not found.
+ */
+kern_return_t
+find_corpse_task_by_uniqueid_grp(
+	uint64_t   task_uniqueid,
+	task_t     *target,
+	task_grp_t grp)
+{
+	task_t task;
+
+	lck_mtx_lock(&tasks_corpse_lock);
+
+	queue_iterate(&corpse_tasks, task, task_t, corpse_tasks) {
+		if (task->task_uniqueid == task_uniqueid) {
+			lck_mtx_unlock(&tasks_corpse_lock);
+			task_reference_grp(task, grp);
+			*target = task;
+			return KERN_SUCCESS;
+		}
+	}
+
+	lck_mtx_unlock(&tasks_corpse_lock);
+	return KERN_FAILURE;
+}
+
+/*
  * Routine: task_generate_corpse
  * params: task - task to fork a corpse
  *         corpse_task - task port of the generated corpse
@@ -413,7 +437,6 @@ task_generate_corpse(
 	kern_return_t kr;
 	thread_t thread, th_iter;
 	ipc_port_t corpse_port;
-	ipc_port_t old_notify;
 
 	if (task == kernel_task || task == TASK_NULL) {
 		return KERN_INVALID_ARGUMENT;
@@ -450,15 +473,9 @@ task_generate_corpse(
 	task_unlock(new_task);
 
 	/* transfer the task ref to port and arm the no-senders notification */
-	corpse_port = convert_task_to_port(new_task);
+	corpse_port = convert_corpse_to_port_and_nsrequest(new_task);
 	assert(IP_NULL != corpse_port);
 
-	ip_lock(corpse_port);
-	require_ip_active(corpse_port);
-	ipc_port_nsrequest(corpse_port, corpse_port->ip_mscount, ipc_port_make_sonce_locked(corpse_port), &old_notify);
-	/* port unlocked */
-
-	assert(IP_NULL == old_notify);
 	*corpse_task_port = corpse_port;
 	return KERN_SUCCESS;
 }
@@ -550,6 +567,11 @@ task_generate_corpse_internal(
 		return KERN_NOT_SUPPORTED;
 	}
 
+	if (task_corpse_forking_disabled(task)) {
+		os_log(OS_LOG_DEFAULT, "corpse for pid %d disabled via SPI\n", task_pid(task));
+		return KERN_FAILURE;
+	}
+
 	if (etype == EXC_GUARD && EXC_GUARD_DECODE_GUARD_TYPE(code) == GUARD_TYPE_USER) {
 		kc_u_flags |= CORPSE_CRASHINFO_USER_FAULT;
 	}
@@ -595,7 +617,7 @@ task_generate_corpse_internal(
 
 	/* Create and copy threads from task, returns a ref to thread */
 	kr = task_duplicate_map_and_threads(task, p, new_task, &thread,
-	    &udata_buffer, &size, &num_udata);
+	    &udata_buffer, &size, &num_udata, (etype != 0));
 	if (kr != KERN_SUCCESS) {
 		goto error_task_generate_corpse;
 	}
@@ -624,7 +646,7 @@ task_generate_corpse_internal(
 
 	/* Populate the corpse blob, use the proc struct of task instead of corpse task */
 	gather_populate_corpse_crashinfo(p, new_task,
-	    code, subcode, udata_buffer, num_udata, reason);
+	    code, subcode, udata_buffer, num_udata, reason, etype);
 
 	/* Add it to global corpse task list */
 	task_add_to_corpse_task_list(new_task);
@@ -668,9 +690,7 @@ error_task_generate_corpse:
 		}
 	}
 	/* Free the udata buffer allocated in task_duplicate_map_and_threads */
-	if (udata_buffer != NULL) {
-		kheap_free(KHEAP_DATA_BUFFERS, udata_buffer, size);
-	}
+	kfree_data(udata_buffer, size);
 
 	return kr;
 }

@@ -109,10 +109,8 @@
 #if SYSV_SHM
 static int shminit(void);
 
-static lck_grp_t       *sysv_shm_subsys_lck_grp;
-static lck_grp_attr_t  *sysv_shm_subsys_lck_grp_attr;
-static lck_attr_t      *sysv_shm_subsys_lck_attr;
-static lck_mtx_t        sysv_shm_subsys_mutex;
+static LCK_GRP_DECLARE(sysv_shm_subsys_lck_grp, "sysv_shm_subsys_lock");
+static LCK_MTX_DECLARE(sysv_shm_subsys_mutex, &sysv_shm_subsys_lck_grp);
 
 #define SYSV_SHM_SUBSYS_LOCK() lck_mtx_lock(&sysv_shm_subsys_mutex)
 #define SYSV_SHM_SUBSYS_UNLOCK() lck_mtx_unlock(&sysv_shm_subsys_mutex)
@@ -182,8 +180,6 @@ struct shminfo shminfo = {
 #define SHMID_SENTINEL    (-2)
 
 #endif /* __APPLE_API_PRIVATE */
-
-void sysv_shm_lock_init(void);
 
 static __inline__ time_t
 sysv_shmtime(void)
@@ -277,7 +273,7 @@ shm_deallocate_segment(struct shmid_kernel *shmseg)
 	    shm_handle = shm_handle_next) {
 		shm_handle_next = shm_handle->shm_handle_next;
 		mach_memory_entry_port_release(shm_handle->shm_object);
-		FREE(shm_handle, M_SHM);
+		kfree_type(struct shm_handle, shm_handle);
 	}
 	shmseg->u.shm_internal = USER_ADDR_NULL;                /* tunnel */
 	size = vm_map_round_page(shmseg->u.shm_segsz,
@@ -380,7 +376,7 @@ shmdt_out:
 int
 shmat(struct proc *p, struct shmat_args *uap, user_addr_t *retval)
 {
-	int error, i, flags;
+	int error, flags;
 	struct shmid_kernel     *shmseg;
 	struct shmmap_state     *shmmap_s = NULL;
 	struct shm_handle       *shm_handle;
@@ -388,8 +384,7 @@ shmat(struct proc *p, struct shmat_args *uap, user_addr_t *retval)
 	mach_vm_address_t       shmlba;
 	mach_vm_size_t          map_size;       /* size of map entry */
 	mach_vm_size_t          mapped_size;
-	vm_prot_t           prot;
-	size_t              size;
+	vm_prot_t               prot;
 	kern_return_t           rv;
 	int                     shmat_ret;
 	int                     vm_flags;
@@ -416,22 +411,17 @@ shmat(struct proc *p, struct shmat_args *uap, user_addr_t *retval)
 		}
 
 		/* +1 for the sentinel */
-		if (os_add_and_mul_overflow(nsegs, 1, sizeof(struct shmmap_state), &size)) {
-			shmat_ret = ENOMEM;
-			goto shmat_out;
-		}
-
-		MALLOC(shmmap_s, struct shmmap_state *, size, M_SHM, M_WAITOK | M_NULL);
+		shmmap_s = kalloc_type(struct shmmap_state, nsegs + 1, Z_WAITOK);
 		if (shmmap_s == NULL) {
 			shmat_ret = ENOMEM;
 			goto shmat_out;
 		}
 
 		/* initialize the entries */
-		for (i = 0; i < nsegs; i++) {
+		for (int i = 0; i < nsegs; i++) {
 			shmmap_s[i].shmid = SHMID_UNALLOCATED;
 		}
-		shmmap_s[i].shmid = SHMID_SENTINEL;
+		shmmap_s[nsegs].shmid = SHMID_SENTINEL;
 
 		p->vm_shm = (caddr_t)shmmap_s;
 	}
@@ -556,7 +546,7 @@ shmat(struct proc *p, struct shmat_args *uap, user_addr_t *retval)
 	}
 
 	shmmap_s->shmid = uap->shmid;
-	shmseg->u.shm_lpid = p->p_pid;
+	shmseg->u.shm_lpid = proc_getpid(p);
 	shmseg->u.shm_atime = sysv_shmtime();
 	shmseg->u.shm_nattch++;
 	*retval = shmmap_s->va; /* XXX return -1 on error */
@@ -838,13 +828,7 @@ shmget_allocate_segment(struct proc *p, struct shmget_args *uap, int mode,
 			goto out;
 		}
 
-		MALLOC(shm_handle, struct shm_handle *, sizeof(struct shm_handle), M_SHM, M_WAITOK);
-		if (shm_handle == NULL) {
-			kret = KERN_NO_SPACE;
-			mach_memory_entry_port_release(mem_object);
-			mem_object = NULL;
-			goto out;
-		}
+		shm_handle = kalloc_type(struct shm_handle, Z_WAITOK | Z_NOFAIL);
 		shm_handle->shm_object = mem_object;
 		shm_handle->shm_handle_size = size;
 		shm_handle->shm_handle_next = NULL;
@@ -863,7 +847,7 @@ shmget_allocate_segment(struct proc *p, struct shmget_args *uap, int mode,
 	shmseg->u.shm_perm.mode = (shmseg->u.shm_perm.mode & SHMSEG_WANTED) |
 	    (mode & ACCESSPERMS) | SHMSEG_ALLOCATED;
 	shmseg->u.shm_segsz = uap->size;
-	shmseg->u.shm_cpid = p->p_pid;
+	shmseg->u.shm_cpid = proc_getpid(p);
 	shmseg->u.shm_lpid = shmseg->u.shm_nattch = 0;
 	shmseg->u.shm_atime = shmseg->u.shm_dtime = 0;
 #if CONFIG_MACF
@@ -891,7 +875,7 @@ out:
 		    shm_handle = shm_handle_next) {
 			shm_handle_next = shm_handle->shm_handle_next;
 			mach_memory_entry_port_release(shm_handle->shm_object);
-			FREE(shm_handle, M_SHM);
+			kfree_type(struct shm_handle, shm_handle);
 		}
 		shmseg->u.shm_internal = USER_ADDR_NULL; /* tunnel */
 	}
@@ -983,7 +967,6 @@ int
 shmfork(struct proc *p1, struct proc *p2)
 {
 	struct shmmap_state *shmmap_s;
-	size_t size;
 	int nsegs = 0;
 	int ret = 0;
 
@@ -1002,17 +985,13 @@ shmfork(struct proc *p1, struct proc *p2)
 		nsegs++;
 	}
 
-	if (os_add_and_mul_overflow(nsegs, 1, sizeof(struct shmmap_state), &size)) {
-		ret = 1;
-		goto shmfork_out;
-	}
-	MALLOC(shmmap_s, struct shmmap_state *, size, M_SHM, M_WAITOK);
+	shmmap_s = kalloc_type(struct shmmap_state, nsegs + 1, Z_WAITOK);
 	if (shmmap_s == NULL) {
 		ret = 1;
 		goto shmfork_out;
 	}
 
-	bcopy(src, (caddr_t)shmmap_s, size);
+	bcopy(src, (caddr_t)shmmap_s, (nsegs + 1) * sizeof(struct shmmap_state));
 	p2->vm_shm = (caddr_t)shmmap_s;
 	for (; shmmap_s->shmid != SHMID_SENTINEL; shmmap_s++) {
 		if (SHMID_IS_VALID(shmmap_s->shmid)) {
@@ -1029,11 +1008,13 @@ static void
 shmcleanup(struct proc *p, int deallocate)
 {
 	struct shmmap_state *shmmap_s;
+	int nsegs = 0;
 
 	SYSV_SHM_SUBSYS_LOCK();
 
 	shmmap_s = (struct shmmap_state *)p->vm_shm;
 	for (; shmmap_s->shmid != SHMID_SENTINEL; shmmap_s++) {
+		nsegs++;
 		if (SHMID_IS_VALID(shmmap_s->shmid)) {
 			/*
 			 * XXX: Should the MAC framework enforce
@@ -1043,8 +1024,7 @@ shmcleanup(struct proc *p, int deallocate)
 		}
 	}
 
-	FREE(p->vm_shm, M_SHM);
-	p->vm_shm = NULL;
+	kfree_type(struct shmmap_state, nsegs + 1, p->vm_shm);
 	SYSV_SHM_SUBSYS_UNLOCK();
 }
 
@@ -1084,7 +1064,7 @@ shminit(void)
 			return ENOMEM;
 		}
 
-		MALLOC(shmsegs, struct shmid_kernel *, sz, M_SHM, M_WAITOK | M_ZERO);
+		shmsegs = zalloc_permanent(sz, ZALIGN_PTR);
 		if (shmsegs == NULL) {
 			return ENOMEM;
 		}
@@ -1102,18 +1082,6 @@ shminit(void)
 	}
 
 	return 0;
-}
-
-/* Initialize the mutex governing access to the SysV shm subsystem */
-__private_extern__ void
-sysv_shm_lock_init( void )
-{
-	sysv_shm_subsys_lck_grp_attr = lck_grp_attr_alloc_init();
-
-	sysv_shm_subsys_lck_grp = lck_grp_alloc_init("sysv_shm_subsys_lock", sysv_shm_subsys_lck_grp_attr);
-
-	sysv_shm_subsys_lck_attr = lck_attr_alloc_init();
-	lck_mtx_init(&sysv_shm_subsys_mutex, sysv_shm_subsys_lck_grp, sysv_shm_subsys_lck_attr);
 }
 
 /* (struct sysctl_oid *oidp, void *arg1, int arg2, \

@@ -7,7 +7,11 @@
 #include <darwintest.h>
 #include <darwintest_utils.h>
 
-T_GLOBAL_META(T_META_RUN_CONCURRENTLY(true));
+T_GLOBAL_META(
+	T_META_NAMESPACE("xnu.vm"),
+	T_META_RADAR_COMPONENT_NAME("xnu"),
+	T_META_RADAR_COMPONENT_VERSION("VM"),
+	T_META_RUN_CONCURRENTLY(true));
 
 #define GB (1ULL * 1024 * 1024 * 1024)
 
@@ -23,7 +27,6 @@ T_GLOBAL_META(T_META_RUN_CONCURRENTLY(true));
 T_DECL(TESTNAME,
 	"Verify that a required entitlement is present in order to be granted an extra-large "
 	"VA space on arm64",
-	T_META_NAMESPACE("xnu.vm"),
 	T_META_CHECK_LEAKS(false))
 {
 	int	i;

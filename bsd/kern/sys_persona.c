@@ -102,7 +102,7 @@ kpersona_alloc_syscall(user_addr_t infop, user_addr_t idp, user_addr_t path)
 	const char *login;
 	char *pna_path = NULL;
 
-	if (!IOTaskHasEntitlement(current_task(), PERSONA_MGMT_ENTITLEMENT)) {
+	if (!IOCurrentTaskHasEntitlement(PERSONA_MGMT_ENTITLEMENT)) {
 		return EPERM;
 	}
 
@@ -210,7 +210,7 @@ kpersona_dealloc_syscall(user_addr_t idp)
 	uid_t persona_id;
 	struct persona *persona;
 
-	if (!IOTaskHasEntitlement(current_task(), PERSONA_MGMT_ENTITLEMENT)) {
+	if (!IOCurrentTaskHasEntitlement(PERSONA_MGMT_ENTITLEMENT)) {
 		return EPERM;
 	}
 
@@ -239,10 +239,13 @@ static int
 kpersona_get_syscall(user_addr_t idp)
 {
 	int error;
+	uid_t current_persona_id;
 	struct persona *persona;
 
-	persona = current_persona_get();
+	current_persona_id = current_persona_get_id();
 
+	/* Make sure the persona is still valid */
+	persona = persona_lookup(current_persona_id);
 	if (!persona) {
 		return ESRCH;
 	}
@@ -260,7 +263,7 @@ kpersona_getpath_syscall(user_addr_t idp, user_addr_t path)
 	uid_t persona_id;
 	struct persona *persona;
 	size_t pathlen;
-	uid_t current_persona_id = PERSONA_ID_NONE;
+	uid_t lookup_persona_id = PERSONA_ID_NONE;
 
 	if (!path) {
 		return EINVAL;
@@ -274,21 +277,17 @@ kpersona_getpath_syscall(user_addr_t idp, user_addr_t path)
 	/* Get current thread's persona id to compare if the
 	 * input persona_id matches the current persona id
 	 */
-	persona = current_persona_get();
-	if (persona) {
-		current_persona_id = persona->pna_id;
-	}
+	lookup_persona_id = current_persona_get_id();
 
-	if (persona_id && persona_id != current_persona_id) {
-		/* Release the reference on the current persona id's persona */
-		persona_put(persona);
+	if (persona_id && persona_id != lookup_persona_id) {
 		if (!kauth_cred_issuser(kauth_cred_get()) &&
-		    !IOTaskHasEntitlement(current_task(), PERSONA_MGMT_ENTITLEMENT)) {
+		    !IOCurrentTaskHasEntitlement(PERSONA_MGMT_ENTITLEMENT)) {
 			return EPERM;
 		}
-		persona = persona_lookup(persona_id);
+		lookup_persona_id = persona_id;
 	}
 
+	persona = persona_lookup(lookup_persona_id);
 	if (!persona) {
 		return ESRCH;
 	}
@@ -306,10 +305,10 @@ static int
 kpersona_info_syscall(user_addr_t idp, user_addr_t infop)
 {
 	int error;
-	uid_t current_persona_id = PERSONA_ID_NONE;
 	uid_t persona_id;
 	struct persona *persona;
 	struct kpersona_info kinfo;
+	uid_t lookup_persona_id = PERSONA_ID_NONE;
 
 	error = copyin(idp, &persona_id, sizeof(persona_id));
 	if (error) {
@@ -319,21 +318,17 @@ kpersona_info_syscall(user_addr_t idp, user_addr_t infop)
 	/* Get current thread's persona id to compare if the
 	 * input persona_id matches the current persona id
 	 */
-	persona = current_persona_get();
-	if (persona) {
-		current_persona_id = persona->pna_id;
-	}
+	lookup_persona_id = current_persona_get_id();
 
-	if (persona_id && persona_id != current_persona_id) {
-		/* Release the reference on the current persona id's persona */
-		persona_put(persona);
+	if (persona_id && persona_id != lookup_persona_id) {
 		if (!kauth_cred_issuser(kauth_cred_get()) &&
-		    !IOTaskHasEntitlement(current_task(), PERSONA_MGMT_ENTITLEMENT)) {
+		    !IOCurrentTaskHasEntitlement(PERSONA_MGMT_ENTITLEMENT)) {
 			return EPERM;
 		}
-		persona = persona_lookup(persona_id);
+		lookup_persona_id = persona_id;
 	}
 
+	persona = persona_lookup(lookup_persona_id);
 	if (!persona) {
 		return ESRCH;
 	}
@@ -379,7 +374,7 @@ kpersona_pidinfo_syscall(user_addr_t idp, user_addr_t infop)
 	}
 
 	if (!kauth_cred_issuser(kauth_cred_get())
-	    && (pid != current_proc()->p_pid)) {
+	    && (pid != proc_getpid(current_proc()))) {
 		return EPERM;
 	}
 
@@ -433,8 +428,7 @@ kpersona_find_syscall(user_addr_t infop, user_addr_t idp, user_addr_t idlenp)
 	login = kinfo.persona_name[0] ? kinfo.persona_name : NULL;
 
 	if (u_idlen > 0) {
-		MALLOC(persona, struct persona **, sizeof(*persona) * u_idlen,
-		    M_TEMP, M_WAITOK | M_ZERO);
+		persona = kalloc_type(struct persona *, u_idlen, Z_WAITOK | Z_ZERO);
 		if (!persona) {
 			error = ENOMEM;
 			goto out;
@@ -465,7 +459,7 @@ out:
 		for (size_t i = 0; i < u_idlen; i++) {
 			persona_put(persona[i]);
 		}
-		FREE(persona, M_TEMP);
+		kfree_type(struct persona *, u_idlen, persona);
 	}
 
 	(void)copyout(&k_idlen, idlenp, sizeof(u_idlen));

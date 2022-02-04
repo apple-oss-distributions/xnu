@@ -13,7 +13,10 @@
 #include <darwintest.h>
 #include <darwintest_utils.h>
 
-T_GLOBAL_META(T_META_RUN_CONCURRENTLY(true), T_META_NAMESPACE("xnu.ipc"));
+T_GLOBAL_META(T_META_RUN_CONCURRENTLY(true),
+    T_META_NAMESPACE("xnu.ipc"),
+    T_META_RADAR_COMPONENT_NAME("xnu"),
+    T_META_RADAR_COMPONENT_VERSION("IPC"));
 
 T_DECL(test_task_filter_msg_flag, "Set the filter msg flag on the task and check if the forked child inherits it",
     T_META_ASROOT(true), T_META_CHECK_LEAKS(false))
@@ -35,11 +38,8 @@ T_DECL(test_task_filter_msg_flag, "Set the filter msg flag on the task and check
 
 	int cur_filter_flag = 0;
 	int new_filter_flag = 1;
-	ret = sysctlbyname("kern.task_set_filter_msg_flag", &cur_filter_flag, &sysctl_size, &new_filter_flag, sizeof(new_filter_flag));
+	ret = sysctlbyname("kern.task_set_filter_msg_flag", NULL, 0, &new_filter_flag, sizeof(new_filter_flag));
 	T_ASSERT_POSIX_SUCCESS(ret, "sysctlbyname");
-	T_ASSERT_EQ(cur_filter_flag, 0, "Task should not have filtering on");
-
-	cur_filter_flag = 0;
 	ret = sysctlbyname("kern.task_set_filter_msg_flag", &cur_filter_flag, &sysctl_size, NULL, 0);
 	T_ASSERT_POSIX_SUCCESS(ret, "sysctlbyname");
 	T_ASSERT_EQ(cur_filter_flag, 1, "Task should have filtering on");

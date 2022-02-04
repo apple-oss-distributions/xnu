@@ -7,9 +7,8 @@
 #include <fcntl.h>
 
 T_GLOBAL_META(
-	T_META_RUN_CONCURRENTLY(true),
-	T_META_LTEPHASE(LTE_POSTINIT)
-	);
+	T_META_NAMESPACE("xnu.fd"),
+	T_META_RUN_CONCURRENTLY(true));
 
 T_DECL(fd_invalid_pread, "Test for 66711697: make sure we get EFAULT")
 {

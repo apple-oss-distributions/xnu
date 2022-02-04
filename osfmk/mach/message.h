@@ -390,6 +390,16 @@ typedef struct{
 #endif
 } mach_msg_port_descriptor_t;
 
+#if MACH_KERNEL_PRIVATE
+typedef struct {
+	mach_port_name_t              name;
+	mach_msg_size_t               pad1;
+	uint32_t                      pad2 : 16;
+	mach_msg_type_name_t          disposition : 8;
+	mach_msg_descriptor_type_t    type : 8;
+} mach_msg_user_port_descriptor_t;
+#endif /* MACH_KERNEL_PRIVATE */
+
 typedef struct{
 	uint32_t                      address;
 	mach_msg_size_t               size;
@@ -529,25 +539,41 @@ typedef struct{
 	mach_msg_size_t msgh_descriptor_count;
 } mach_msg_body_t;
 
-#define MACH_MSG_BODY_NULL (mach_msg_body_t *) 0
-#define MACH_MSG_DESCRIPTOR_NULL (mach_msg_descriptor_t *) 0
+#define MACH_MSG_BODY_NULL            ((mach_msg_body_t *) 0)
+#define MACH_MSG_DESCRIPTOR_NULL      ((mach_msg_descriptor_t *) 0)
 
 typedef struct{
-	mach_msg_bits_t       msgh_bits;
-	mach_msg_size_t       msgh_size;
-	mach_port_t           msgh_remote_port;
-	mach_port_t           msgh_local_port;
-	mach_port_name_t      msgh_voucher_port;
-	mach_msg_id_t         msgh_id;
+	mach_msg_bits_t               msgh_bits;
+	mach_msg_size_t               msgh_size;
+	mach_port_t                   msgh_remote_port;
+	mach_port_t                   msgh_local_port;
+	mach_port_name_t              msgh_voucher_port;
+	mach_msg_id_t                 msgh_id;
 } mach_msg_header_t;
 
-#define msgh_reserved           msgh_voucher_port
-#define MACH_MSG_NULL   (mach_msg_header_t *) 0
+#define msgh_reserved                 msgh_voucher_port
+#define MACH_MSG_NULL                 ((mach_msg_header_t *) 0)
 
 typedef struct{
-	mach_msg_header_t       header;
-	mach_msg_body_t         body;
+	mach_msg_header_t             header;
+	mach_msg_body_t               body;
 } mach_msg_base_t;
+
+#if MACH_KERNEL_PRIVATE
+typedef struct {
+	mach_msg_bits_t               msgh_bits;
+	mach_msg_size_t               msgh_size;
+	mach_port_name_t              msgh_remote_port;
+	mach_port_name_t              msgh_local_port;
+	mach_port_name_t              msgh_voucher_port;
+	mach_msg_id_t                 msgh_id;
+} mach_msg_user_header_t;
+
+typedef struct {
+	mach_msg_user_header_t        header;
+	mach_msg_body_t               body;
+} mach_msg_user_base_t;
+#endif /* MACH_KERNEL_PRIVATE */
 
 typedef unsigned int mach_msg_trailer_type_t;
 
@@ -853,11 +879,12 @@ typedef integer_t mach_msg_option_t;
 #define MACH_SEND_INTERRUPT     0x00000040      /* don't restart interrupted sends */
 #define MACH_SEND_NOTIFY        0x00000080      /* arm send-possible notify */
 #define MACH_SEND_ALWAYS        0x00010000      /* ignore qlimits - kernel only */
+#define MACH_SEND_FILTER_NONFATAL        0x00010000      /* rejection by message filter should return failure - user only */
 #define MACH_SEND_TRAILER       0x00020000      /* sender-provided trailer */
 #define MACH_SEND_NOIMPORTANCE  0x00040000      /* msg won't carry importance */
 #define MACH_SEND_NODENAP       MACH_SEND_NOIMPORTANCE
 #define MACH_SEND_IMPORTANCE    0x00080000      /* msg carries importance - kernel only */
-#define MACH_SEND_SYNC_OVERRIDE 0x00100000      /* msg should do sync ipc override */
+#define MACH_SEND_SYNC_OVERRIDE 0x00100000      /* msg should do sync IPC override (on legacy kernels) */
 #define MACH_SEND_PROPAGATE_QOS 0x00200000      /* IPC should propagate the caller's QoS */
 #define MACH_SEND_SYNC_USE_THRPRI       MACH_SEND_PROPAGATE_QOS /* obsolete name */
 #define MACH_SEND_KERNEL        0x00400000      /* full send from kernel space - kernel only */
@@ -914,7 +941,10 @@ typedef integer_t mach_msg_option_t;
 #define GET_RCV_ELEMENTS(y) (((y) >> 24) & 0xf)
 
 #ifdef MACH_KERNEL_PRIVATE
-/* The options that the kernel honors when passed from user space */
+/*
+ * The options that the kernel honors when passed from user space, not including
+ * user-only options that alias kernel-only options.
+ */
 #define MACH_SEND_USER (MACH_SEND_MSG | MACH_SEND_TIMEOUT | \
 	                                        MACH_SEND_NOTIFY | MACH_SEND_OVERRIDE | \
 	                                        MACH_SEND_TRAILER | MACH_SEND_NOIMPORTANCE | \

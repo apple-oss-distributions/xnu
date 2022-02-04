@@ -224,10 +224,6 @@ ml_static_mfree(
 
 		pmap_remove(kernel_pmap, vaddr_cur, vaddr_cur + map_size);
 		while (map_size > 0) {
-			if (++kernel_pmap->stats.resident_count > kernel_pmap->stats.resident_max) {
-				kernel_pmap->stats.resident_max = kernel_pmap->stats.resident_count;
-			}
-
 			assert(pmap_valid_page(ppn));
 			if (IS_MANAGED_PAGE(ppn)) {
 				vm_page_create(ppn, (ppn + 1));
@@ -534,11 +530,6 @@ register_cpu(
 	 */
 	this_cpu_datap->cpu_phys_number = lapic_id;
 
-	this_cpu_datap->cpu_console_buf = console_cpu_alloc(boot_cpu);
-	if (this_cpu_datap->cpu_console_buf == NULL) {
-		goto failed;
-	}
-
 #if KPC
 	if (kpc_register_cpu(this_cpu_datap) != TRUE) {
 		goto failed;
@@ -562,7 +553,6 @@ register_cpu(
 	return KERN_SUCCESS;
 
 failed:
-	console_cpu_free(this_cpu_datap->cpu_console_buf);
 #if KPC
 	kpc_unregister_cpu(this_cpu_datap);
 #endif /* KPC */
@@ -607,7 +597,7 @@ ml_processor_register(
 	cpunum = ml_get_cpuid( lapic_id );
 
 	if (cpunum == 0xFFFFFFFF) { /* never heard of it? */
-		panic( "trying to start invalid/unregistered CPU %d\n", lapic_id );
+		panic( "trying to start invalid/unregistered CPU %d", lapic_id );
 	}
 
 	this_cpu_datap = cpu_datap(cpunum);
@@ -630,7 +620,7 @@ ml_processor_register(
 
 
 void
-ml_cpu_get_info(ml_cpu_info_t *cpu_infop)
+ml_cpu_get_info_type(ml_cpu_info_t *cpu_infop, cluster_type_t cluster_type __unused)
 {
 	boolean_t       os_supports_sse;
 	i386_cpu_info_t *cpuid_infop;
@@ -687,6 +677,41 @@ ml_cpu_get_info(ml_cpu_info_t *cpu_infop)
 		cpu_infop->l3_settings = 0;
 		cpu_infop->l3_cache_size = 0xFFFFFFFF;
 	}
+}
+
+/*
+ *	Routine:        ml_cpu_get_info
+ *	Function: Fill out the ml_cpu_info_t structure with parameters associated
+ *	with the boot cluster.
+ */
+void
+ml_cpu_get_info(ml_cpu_info_t * ml_cpu_info)
+{
+	ml_cpu_get_info_type(ml_cpu_info, CLUSTER_TYPE_SMP);
+}
+
+unsigned int
+ml_get_cpu_number_type(cluster_type_t cluster_type __unused, bool logical, bool available)
+{
+	/*
+	 * At present no supported x86 system features more than 1 CPU type. Because
+	 * of this, the cluster_type parameter is ignored.
+	 */
+	if (logical && available) {
+		return machine_info.logical_cpu;
+	} else if (logical && !available) {
+		return machine_info.logical_cpu_max;
+	} else if (!logical && available) {
+		return machine_info.physical_cpu;
+	} else {
+		return machine_info.physical_cpu_max;
+	}
+}
+
+unsigned int
+ml_get_cpu_types(void)
+{
+	return 1 << CLUSTER_TYPE_SMP;
 }
 
 int
@@ -816,6 +841,12 @@ virtual_timeout_inflate_us(unsigned int vti, uint64_t timeout)
 	return virtual_timeout_inflate32(vti, timeout, max_timeout);
 }
 
+uint64_t
+ml_get_timebase_entropy(void)
+{
+	return __builtin_ia32_rdtsc();
+}
+
 /*
  *	Routine:        ml_init_lock_timeout
  *	Function:
@@ -861,27 +892,27 @@ ml_init_lock_timeout(void)
 	}
 
 #if DEVELOPMENT || DEBUG
-	reportphyreaddelayabs = LockTimeOut >> 1;
+	report_phy_read_delay = LockTimeOut >> 1;
 #endif
 	if (PE_parse_boot_argn("phyreadmaxus", &slto, sizeof(slto))) {
 		default_timeout_ns = slto * NSEC_PER_USEC;
 		nanoseconds_to_absolutetime(default_timeout_ns, &abstime);
-		reportphyreaddelayabs = abstime;
+		report_phy_read_delay = abstime;
 	}
 
 	if (PE_parse_boot_argn("phywritemaxus", &slto, sizeof(slto))) {
 		nanoseconds_to_absolutetime((uint64_t)slto * NSEC_PER_USEC, &abstime);
-		reportphywritedelayabs = abstime;
+		report_phy_write_delay = abstime;
 	}
 
 	if (PE_parse_boot_argn("tracephyreadus", &slto, sizeof(slto))) {
 		nanoseconds_to_absolutetime((uint64_t)slto * NSEC_PER_USEC, &abstime);
-		tracephyreaddelayabs = abstime;
+		trace_phy_read_delay = abstime;
 	}
 
 	if (PE_parse_boot_argn("tracephywriteus", &slto, sizeof(slto))) {
 		nanoseconds_to_absolutetime((uint64_t)slto * NSEC_PER_USEC, &abstime);
-		tracephywritedelayabs = abstime;
+		trace_phy_write_delay = abstime;
 	}
 
 	if (PE_parse_boot_argn("mtxspin", &mtxspin, sizeof(mtxspin))) {
@@ -933,13 +964,20 @@ MACRO_BEGIN                                                \
 	_timeout = virtual_timeout_inflate_us(vti, _timeout);  \
 	kprintf("-> 0x%08x\n",  _timeout);                     \
 MACRO_END
+		/*
+		 * These timeout values are inflated because they cause
+		 * the kernel to panic when they expire.
+		 * (Needed when running as a guest VM as the host OS
+		 * may not always schedule vcpu threads in time to
+		 * meet the deadline implied by the narrower time
+		 * window used on hardware.)
+		 */
 		VIRTUAL_TIMEOUT_INFLATE_US(LockTimeOutUsec);
 		VIRTUAL_TIMEOUT_INFLATE_ABS(LockTimeOut);
 		VIRTUAL_TIMEOUT_INFLATE_TSC(LockTimeOutTSC);
 		VIRTUAL_TIMEOUT_INFLATE_ABS(TLBTimeOut);
-		VIRTUAL_TIMEOUT_INFLATE_ABS(MutexSpin);
-		VIRTUAL_TIMEOUT_INFLATE_ABS(low_MutexSpin);
-		VIRTUAL_TIMEOUT_INFLATE_ABS(reportphyreaddelayabs);
+		VIRTUAL_TIMEOUT_INFLATE_ABS(report_phy_read_delay);
+		VIRTUAL_TIMEOUT_INFLATE_TSC(lock_panic_timeout);
 	}
 
 	interrupt_latency_tracker_setup();
@@ -1102,6 +1140,20 @@ ml_stack_size(void)
 }
 #endif
 
+#if CONFIG_KCOV
+kcov_cpu_data_t *
+current_kcov_data(void)
+{
+	return &current_cpu_datap()->cpu_kcov_data;
+}
+
+kcov_cpu_data_t *
+cpu_kcov_data(int cpuid)
+{
+	return &cpu_datap(cpuid)->cpu_kcov_data;
+}
+#endif /* CONFIG_KCOV */
+
 void
 kernel_preempt_check(void)
 {
@@ -1131,7 +1183,9 @@ kernel_preempt_check(void)
 boolean_t
 machine_timeout_suspended(void)
 {
-	return pmap_tlb_flush_timeout || spinlock_timed_out || panic_active() || mp_recent_debugger_activity() || ml_recent_wake();
+	return pmap_tlb_flush_timeout || lck_spinlock_timeout_in_progress ||
+	       panic_active() || mp_recent_debugger_activity() ||
+	       ml_recent_wake();
 }
 
 /* Eagerly evaluate all pending timer and thread callouts
@@ -1159,30 +1213,6 @@ boolean_t
 ml_timer_forced_evaluation(void)
 {
 	return ml_timer_evaluation_in_progress;
-}
-
-/* 32-bit right-rotate n bits */
-static inline uint32_t
-ror32(uint32_t val, const unsigned int n)
-{
-	__asm__ volatile ("rorl %%cl,%0" : "=r" (val) : "0" (val), "c" (n));
-	return val;
-}
-
-void
-ml_entropy_collect(void)
-{
-	uint32_t        tsc_lo, tsc_hi;
-	uint32_t        *ep;
-
-	assert(cpu_number() == master_cpu);
-
-	/* update buffer pointer cyclically */
-	ep = EntropyData.buffer + (EntropyData.sample_count & EntropyData.buffer_index_mask);
-	EntropyData.sample_count += 1;
-
-	rdtsc_nofence(tsc_lo, tsc_hi);
-	*ep = (ror32(*ep, 9) & EntropyData.ror_mask) ^ tsc_lo;
 }
 
 uint64_t
@@ -1253,11 +1283,6 @@ bool
 ml_cpu_can_exit(__unused int cpu_id)
 {
 	return true;
-}
-
-void
-ml_cpu_init_state(void)
-{
 }
 
 void

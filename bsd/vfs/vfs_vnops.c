@@ -172,14 +172,14 @@ vn_open_modflags(struct nameidata *ndp, int *fmodep, int cmode)
 	int error;
 	struct vnode_attr *vap;
 
-	vap = kheap_alloc(KHEAP_TEMP, sizeof(struct vnode_attr), M_WAITOK);
+	vap = kalloc_type(struct vnode_attr, Z_WAITOK);
 
 	VATTR_INIT(vap);
 	VATTR_SET(vap, va_mode, (mode_t)cmode);
 
 	error = vn_open_auth(ndp, fmodep, vap);
 
-	kheap_free(KHEAP_TEMP, vap, sizeof(struct vnode_attr));
+	kfree_type(struct vnode_attr, vap);
 
 	return error;
 }
@@ -617,7 +617,7 @@ continue_create_lookup:
 			/* Don't allow unencrypted io request from user space unless entitled */
 			boolean_t entitled = FALSE;
 #if !SECURE_KERNEL
-			entitled = IOTaskHasEntitlement(current_task(), "com.apple.private.security.file-unencrypt-access");
+			entitled = IOCurrentTaskHasEntitlement("com.apple.private.security.file-unencrypt-access");
 #endif
 			if (!entitled) {
 				error = EPERM;
@@ -844,7 +844,7 @@ vn_read_swapfile(
 
 	while (swap_count > 0) {
 		if (my_swap_page == NULL) {
-			my_swap_page = kheap_alloc(KHEAP_TEMP, PAGE_SIZE, Z_WAITOK | Z_ZERO);
+			my_swap_page = kalloc_data(PAGE_SIZE, Z_WAITOK | Z_ZERO);
 			/* add an end-of-line to keep line counters happy */
 			my_swap_page[PAGE_SIZE - 1] = '\n';
 		}
@@ -862,7 +862,7 @@ vn_read_swapfile(
 		}
 		swap_count -= (prev_resid - uio_resid(uio));
 	}
-	kheap_free(KHEAP_TEMP, my_swap_page, PAGE_SIZE);
+	kfree_data(my_swap_page, PAGE_SIZE);
 
 	return error;
 }
@@ -926,7 +926,7 @@ vn_rdwr_64(
 	int spacetype;
 	struct vfs_context context;
 	int error = 0;
-	char uio_buf[UIO_SIZEOF(1)];
+	uio_stackbuf_t uio_buf[UIO_SIZEOF(1)];
 
 	context.vc_thread = current_thread();
 	context.vc_ucred = cred;
@@ -981,7 +981,7 @@ vn_rdwr_64(
 	return error;
 }
 
-static inline void
+void
 vn_offset_lock(struct fileglob *fg)
 {
 	lck_mtx_lock_spin(&fg->fg_lock);
@@ -994,7 +994,7 @@ vn_offset_lock(struct fileglob *fg)
 	lck_mtx_unlock(&fg->fg_lock);
 }
 
-static inline void
+void
 vn_offset_unlock(struct fileglob *fg)
 {
 	int lock_wanted = 0;
@@ -1031,17 +1031,33 @@ vn_read(struct fileproc *fp, struct uio *uio, int flags, vfs_context_t ctx)
 	}
 	adjusted_read_len = read_len;
 	clippedsize = 0;
-	offset_locked = false;
 
+	if ((flags & FOF_OFFSET) == 0) {
+		vn_offset_lock(fp->fp_glob);
+		offset_locked = true;
+	} else {
+		offset_locked = false;
+	}
 	vp = (struct vnode *)fp->fp_glob->fg_data;
 	if ((error = vnode_getwithref(vp))) {
+		if (offset_locked) {
+			vn_offset_unlock(fp->fp_glob);
+		}
 		return error;
+	}
+
+	if (offset_locked && (vnode_vtype(vp) != VREG || vnode_isswap(vp))) {
+		vn_offset_unlock(fp->fp_glob);
+		offset_locked = false;
 	}
 
 #if CONFIG_MACF
 	error = mac_vnode_check_read(ctx, vfs_context_ucred(ctx), vp);
 	if (error) {
 		(void)vnode_put(vp);
+		if (offset_locked) {
+			vn_offset_unlock(fp->fp_glob);
+		}
 		return error;
 	}
 #endif
@@ -1069,10 +1085,6 @@ vn_read(struct fileproc *fp, struct uio *uio, int flags, vfs_context_t ctx)
 	}
 
 	if ((flags & FOF_OFFSET) == 0) {
-		if ((vnode_vtype(vp) == VREG) && !vnode_isswap(vp)) {
-			vn_offset_lock(fp->fp_glob);
-			offset_locked = true;
-		}
 		read_offset = fp->fp_glob->fg_offset;
 		uio_setoffset(uio, read_offset);
 	} else {
@@ -1150,7 +1162,7 @@ vn_write(struct fileproc *fp, struct uio *uio, int flags, vfs_context_t ctx)
 	user_ssize_t clippedsize;
 	bool offset_locked;
 	proc_t p = vfs_context_proc(ctx);
-	rlim_t rlim_cur_fsize = p ? proc_limitgetcur(p, RLIMIT_FSIZE, TRUE) : 0;
+	rlim_t rlim_cur_fsize = p ? proc_limitgetcur(p, RLIMIT_FSIZE) : 0;
 
 	write_len = uio_resid(uio);
 	if (write_len < 0 || write_len > INT_MAX) {
@@ -1158,17 +1170,34 @@ vn_write(struct fileproc *fp, struct uio *uio, int flags, vfs_context_t ctx)
 	}
 	adjusted_write_len = write_len;
 	clippedsize = 0;
-	offset_locked = false;
+
+	if ((flags & FOF_OFFSET) == 0) {
+		vn_offset_lock(fp->fp_glob);
+		offset_locked = true;
+	} else {
+		offset_locked = false;
+	}
 
 	vp = (struct vnode *)fp->fp_glob->fg_data;
 	if ((error = vnode_getwithref(vp))) {
+		if (offset_locked) {
+			vn_offset_unlock(fp->fp_glob);
+		}
 		return error;
+	}
+
+	if (offset_locked && (vnode_vtype(vp) != VREG || vnode_isswap(vp))) {
+		vn_offset_unlock(fp->fp_glob);
+		offset_locked = false;
 	}
 
 #if CONFIG_MACF
 	error = mac_vnode_check_write(ctx, vfs_context_ucred(ctx), vp);
 	if (error) {
 		(void)vnode_put(vp);
+		if (offset_locked) {
+			vn_offset_unlock(fp->fp_glob);
+		}
 		return error;
 	}
 #endif
@@ -1211,10 +1240,6 @@ vn_write(struct fileproc *fp, struct uio *uio, int flags, vfs_context_t ctx)
 	}
 
 	if ((flags & FOF_OFFSET) == 0) {
-		if ((vnode_vtype(vp) == VREG) && !vnode_isswap(vp)) {
-			vn_offset_lock(fp->fp_glob);
-			offset_locked = true;
-		}
 		write_offset = fp->fp_glob->fg_offset;
 		uio_setoffset(uio, write_offset);
 	} else {
@@ -1588,7 +1613,6 @@ vn_ioctl(struct fileproc *fp, u_long com, caddr_t data, vfs_context_t ctx)
 	off_t file_size;
 	int error;
 	struct vnode *ttyvp;
-	struct session * sessp;
 
 	if ((error = vnode_getwithref(vp))) {
 		return error;
@@ -1665,14 +1689,18 @@ vn_ioctl(struct fileproc *fp, u_long com, caddr_t data, vfs_context_t ctx)
 		error = VNOP_IOCTL(vp, com, data, fp->fp_glob->fg_flag, ctx);
 
 		if (error == 0 && com == TIOCSCTTY) {
-			sessp = proc_session(vfs_context_proc(ctx));
+			struct session *sessp;
+			struct pgrp *pg;
+
+			pg = proc_pgrp(vfs_context_proc(ctx), &sessp);
 
 			session_lock(sessp);
 			ttyvp = sessp->s_ttyvp;
 			sessp->s_ttyvp = vp;
 			sessp->s_ttyvid = vnode_vid(vp);
 			session_unlock(sessp);
-			session_rele(sessp);
+
+			pgrp_rele(pg);
 		}
 	}
 out:
@@ -2039,7 +2067,7 @@ filt_vnode_common(struct knote *kn, struct kevent_qos_s *kev, vnode_t vp, long h
 			activate = (kn->kn_fflags != 0);
 			break;
 		default:
-			panic("Invalid knote filter on a vnode!\n");
+			panic("Invalid knote filter on a vnode!");
 		}
 	}
 

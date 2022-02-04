@@ -37,6 +37,7 @@
 #include <kern/affinity.h>
 #include <kern/zalloc.h>
 #include <kern/policy_internal.h>
+#include <kern/sync_sema.h>
 
 #include <machine/machine_routines.h>
 #include <mach/task.h>
@@ -70,7 +71,6 @@ static_assert((sizeof(struct pthread_callbacks_s) - offsetof(struct pthread_call
 
 /* old pthread code had definitions for these as they don't exist in headers */
 extern kern_return_t mach_port_deallocate(ipc_space_t, mach_port_name_t);
-extern kern_return_t semaphore_signal_internal_trap(mach_port_name_t);
 extern void thread_deallocate_safe(thread_t thread);
 
 #define PTHREAD_STRUCT_ACCESSOR(get, set, rettype, structtype, member) \
@@ -97,6 +97,12 @@ static void
 proc_set_dispatchqueue_offset(struct proc *p, uint64_t offset)
 {
 	p->p_dispatchqueue_offset = offset;
+}
+
+static void
+proc_set_workqueue_quantum_offset(struct proc *p, uint64_t offset)
+{
+	p->p_pthread_wq_quantum_offset = offset;
 }
 
 static void
@@ -503,15 +509,18 @@ static const struct pthread_callbacks_s pthread_callbacks = {
 	.proc_get_wqthread = proc_get_wqthread,
 	.proc_set_wqthread = proc_set_wqthread,
 	.proc_set_dispatchqueue_offset = proc_set_dispatchqueue_offset,
+	.proc_set_workqueue_quantum_offset = proc_set_workqueue_quantum_offset,
 	.proc_get_pthhash = proc_get_pthhash,
 	.proc_set_pthhash = proc_set_pthhash,
 	.proc_get_register = proc_get_register,
 	.proc_set_register = proc_set_register,
+	.proc_get_pthread_jit_allowlist = proc_get_pthread_jit_allowlist,
 
 	/* kernel IPI interfaces */
 	.ipc_port_copyout_send = ipc_port_copyout_send,
 	.task_get_ipcspace = get_task_ipcspace,
 	.vm_map_page_info = vm_map_page_info,
+	.ipc_port_copyout_send_pinned = ipc_port_copyout_send_pinned,
 	.thread_set_wq_state32 = thread_set_wq_state32,
 #if !defined(__arm__)
 	.thread_set_wq_state64 = thread_set_wq_state64,
@@ -535,11 +544,14 @@ static const struct pthread_callbacks_s pthread_callbacks = {
 	.semaphore_signal_internal_trap = semaphore_signal_internal_trap,
 	.current_map = _current_map,
 	.thread_create = thread_create,
+	.thread_create_immovable = thread_create_immovable,
+	.thread_terminate_pinned = thread_terminate_pinned,
 	.thread_resume = thread_resume,
 
 	.kevent_workq_internal = kevent_workq_internal,
 
 	.convert_thread_to_port = convert_thread_to_port,
+	.convert_thread_to_port_pinned = convert_thread_to_port_pinned,
 
 	.proc_get_stack_addr_hint = proc_get_stack_addr_hint,
 	.proc_set_stack_addr_hint = proc_set_stack_addr_hint,

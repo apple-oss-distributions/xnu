@@ -34,6 +34,8 @@
 #define IOKIT 1
 #endif /* !IOKIT */
 
+#include <sys/cdefs.h>
+
 #if KERNEL
 #include <IOKit/system.h>
 #else
@@ -88,9 +90,9 @@ typedef UInt32  IOPhysicalLength32;
 typedef UInt64  IOPhysicalLength64;
 
 #if !defined(__arm__) && !defined(__i386__)
-typedef mach_vm_address_t       IOVirtualAddress;
+typedef mach_vm_address_t       IOVirtualAddress __kernel_ptr_semantics;
 #else
-typedef vm_address_t            IOVirtualAddress;
+typedef vm_address_t            IOVirtualAddress __kernel_ptr_semantics;
 #endif
 
 #if !defined(__arm__) && !defined(__i386__) && !(defined(__x86_64__) && !defined(KERNEL)) && !(defined(__arm64__) && !defined(__LP64__))
@@ -182,6 +184,7 @@ typedef mach_port_t     io_object_t;
 
 typedef io_object_t     io_connect_t;
 typedef io_object_t     io_enumerator_t;
+typedef io_object_t     io_ident_t;
 typedef io_object_t     io_iterator_t;
 typedef io_object_t     io_registry_entry_t;
 typedef io_object_t     io_service_t;
@@ -191,54 +194,7 @@ typedef io_object_t     uext_object_t;
 
 #endif /* MACH_KERNEL */
 
-// IOConnectMapMemory memoryTypes
-enum {
-	kIODefaultMemoryType        = 0
-};
-
-enum {
-	kIODefaultCache             = 0,
-	kIOInhibitCache             = 1,
-	kIOWriteThruCache           = 2,
-	kIOCopybackCache            = 3,
-	kIOWriteCombineCache        = 4,
-	kIOCopybackInnerCache       = 5,
-	kIOPostedWrite              = 6,
-	kIORealTimeCache            = 7,
-	kIOPostedReordered          = 8,
-	kIOPostedCombinedReordered  = 9,
-};
-
-// IOMemory mapping options
-enum {
-	kIOMapAnywhere                = 0x00000001,
-
-	kIOMapCacheMask               = 0x00000f00,
-	kIOMapCacheShift              = 8,
-	kIOMapDefaultCache            = kIODefaultCache            << kIOMapCacheShift,
-	kIOMapInhibitCache            = kIOInhibitCache            << kIOMapCacheShift,
-	kIOMapWriteThruCache          = kIOWriteThruCache          << kIOMapCacheShift,
-	kIOMapCopybackCache           = kIOCopybackCache           << kIOMapCacheShift,
-	kIOMapWriteCombineCache       = kIOWriteCombineCache       << kIOMapCacheShift,
-	kIOMapCopybackInnerCache      = kIOCopybackInnerCache      << kIOMapCacheShift,
-	kIOMapPostedWrite             = kIOPostedWrite             << kIOMapCacheShift,
-	kIOMapRealTimeCache           = kIORealTimeCache           << kIOMapCacheShift,
-	kIOMapPostedReordered         = kIOPostedReordered         << kIOMapCacheShift,
-	kIOMapPostedCombinedReordered = kIOPostedCombinedReordered << kIOMapCacheShift,
-
-	kIOMapUserOptionsMask         = 0x00000fff,
-
-	kIOMapReadOnly                = 0x00001000,
-
-	kIOMapStatic                  = 0x01000000,
-	kIOMapReference               = 0x02000000,
-	kIOMapUnique                  = 0x04000000,
-#ifdef XNU_KERNEL_PRIVATE
-	kIOMap64Bit                   = 0x08000000,
-#endif
-	kIOMapPrefault                = 0x10000000,
-	kIOMapOverwrite               = 0x20000000
-};
+#include <IOKit/IOMapTypes.h>
 
 /*! @enum Scale Factors
  *   @discussion Used when a scale_factor parameter is required to define a unit of time.

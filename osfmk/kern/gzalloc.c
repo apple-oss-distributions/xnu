@@ -204,11 +204,11 @@ gzalloc_empty_free_cache(zone_t zone)
 	}
 
 	/* Reset gzalloc_data. */
-	lock_zone(zone);
+	zone_lock(zone);
 	memcpy((void *)gzfc_copy, (void *)zone->gz.gzfc, gzfcsz);
 	bzero((void *)zone->gz.gzfc, gzfcsz);
 	zone->gz.gzfc_index = 0;
-	unlock_zone(zone);
+	zone_unlock(zone);
 
 	/* Free up all the cached elements. */
 	for (uint32_t index = 0; index < gzfc_size; index++) {
@@ -233,10 +233,10 @@ gzalloc_empty_free_cache(zone_t zone)
 	 */
 
 	/* Decrement zone counters. */
-	lock_zone(zone);
-	zone->countfree += freed_elements;
-	zone->page_count -= freed_elements;
-	unlock_zone(zone);
+	zone_lock(zone);
+	zone->z_elems_free += freed_elements;
+	zone->z_wired_cur -= freed_elements;
+	zone_unlock(zone);
 
 	kmem_free(kernel_map, gzfc_copy, gzfcsz);
 }
@@ -357,6 +357,7 @@ gzalloc_alloc(zone_t zone, zone_stats_t zstats, zalloc_flags_t flags)
 	vm_offset_t residue = rounded_size - zone_elem_size(zone);
 	vm_offset_t gzaddr = 0;
 	gzhdr_t *gzh, *gzhcopy = NULL;
+	bool new_va = false;
 
 	if (!kmem_ready || (vm_page_zone == ZONE_NULL)) {
 		/* Early allocations are supplied directly from the
@@ -381,6 +382,7 @@ gzalloc_alloc(zone_t zone, zone_stats_t zstats, zalloc_flags_t flags)
 			panic("gzalloc: kernel_memory_allocate for size 0x%llx failed with %d",
 			    (uint64_t)rounded_size, kr);
 		}
+		new_va = true;
 	}
 
 	if (gzalloc_uf_mode) {
@@ -396,21 +398,10 @@ gzalloc_alloc(zone_t zone, zone_stats_t zstats, zalloc_flags_t flags)
 		addr = (gzaddr + residue);
 	}
 
-	if (zone->zfree_clear_mem) {
-		bzero((void *)gzaddr, rounded_size);
-	} else {
-		/* Fill with a pattern on allocation to trap uninitialized
-		 * data use. Since the element size may be "rounded up"
-		 * by higher layers such as the kalloc layer, this may
-		 * also identify overruns between the originally requested
-		 * size and the rounded size via visual inspection.
-		 * TBD: plumb through the originally requested size,
-		 * prior to rounding by kalloc/IOMalloc etc.
-		 * We also add a signature and the zone of origin in a header
-		 * prefixed to the allocation.
-		 */
-		memset((void *)gzaddr, gzalloc_fill_pattern, rounded_size);
-	}
+	/*
+	 * All zone allocations are always zeroed
+	 */
+	bzero((void *)gzaddr, rounded_size);
 
 	gzh->gzone = (kmem_ready && vm_page_zone) ? zone : GZDEADZONE;
 	gzh->gzsize = (uint32_t)zone_elem_size(zone);
@@ -424,15 +415,15 @@ gzalloc_alloc(zone_t zone, zone_stats_t zstats, zalloc_flags_t flags)
 		*gzhcopy = *gzh;
 	}
 
-	lock_zone(zone);
+	zone_lock(zone);
 	assert(zone->z_self == zone);
-	zone->countfree--;
-	zone->page_count += 1;
+	zone->z_elems_free--;
+	if (new_va) {
+		zone->z_va_cur += 1;
+	}
+	zone->z_wired_cur += 1;
 	zpercpu_get(zstats)->zs_mem_allocated += rounded_size;
-#if ZALLOC_DETAILED_STATS
-	zpercpu_get(zstats)->zs_mem_wasted += rounded_size - zone_elem_size(zone);
-#endif /* ZALLOC_DETAILED_STATS */
-	unlock_zone(zone);
+	zone_unlock(zone);
 
 	OSAddAtomic64((SInt32) rounded_size, &gzalloc_allocated);
 	OSAddAtomic64((SInt32) (rounded_size - zone_elem_size(zone)), &gzalloc_wasted);
@@ -468,7 +459,7 @@ gzalloc_free(zone_t zone, zone_stats_t zstats, void *addr)
 	}
 
 	if (gzfc_size && gzalloc_dfree_check) {
-		lock_zone(zone);
+		zone_lock(zone);
 		assert(zone->z_self == zone);
 		for (uint32_t gd = 0; gd < gzfc_size; gd++) {
 			if (zone->gz.gzfc[gd] != saddr) {
@@ -478,7 +469,7 @@ gzalloc_free(zone_t zone, zone_stats_t zstats, void *addr)
 			    "current free cache index: %d, freed index: %d",
 			    __func__, saddr, zone->gz.gzfc_index, gd);
 		}
-		unlock_zone(zone);
+		zone_unlock(zone);
 	}
 
 	if (gzalloc_consistency_checks) {
@@ -549,7 +540,7 @@ gzalloc_free(zone_t zone, zone_stats_t zstats, void *addr)
 		free_addr = saddr;
 	}
 
-	lock_zone(zone);
+	zone_lock(zone);
 	assert(zone->z_self == zone);
 
 	/* Insert newly freed element into the protected free element
@@ -564,12 +555,12 @@ gzalloc_free(zone_t zone, zone_stats_t zstats, void *addr)
 	}
 
 	if (free_addr) {
-		zone->countfree++;
-		zone->page_count -= 1;
+		zone->z_elems_free++;
+		zone->z_wired_cur -= 1;
 	}
 
 	zpercpu_get(zstats)->zs_mem_freed += rounded_size;
-	unlock_zone(zone);
+	zone_unlock(zone);
 
 	if (free_addr) {
 		// TODO: consider using physical reads to check for
@@ -600,7 +591,7 @@ gzalloc_element_size(void *gzaddr, zone_t *z, vm_size_t *gzsz)
 		vmef = vm_map_lookup_entry(gzalloc_map, (vm_map_offset_t)a, &gzvme);
 		vm_map_unlock(gzalloc_map);
 		if (vmef == FALSE) {
-			panic("GZALLOC: unable to locate map entry for %p\n", (void *)a);
+			panic("GZALLOC: unable to locate map entry for %p", (void *)a);
 		}
 		assertf(gzvme->vme_atomic != 0, "GZALLOC: VM map entry inconsistency, "
 		    "vme: %p, start: %llu end: %llu", gzvme, gzvme->vme_start, gzvme->vme_end);
@@ -640,7 +631,7 @@ gzalloc_element_size(void *gzaddr, zone_t *z, vm_size_t *gzsz)
 
 		*gzsz = zone_elem_size(gzh->gzone);
 		if (__improbable(!gzh->gzone->gzalloc_tracked)) {
-			panic("GZALLOC: zone mismatch (%p)\n", gzh->gzone);
+			panic("GZALLOC: zone mismatch (%p)", gzh->gzone);
 		}
 
 		if (z) {

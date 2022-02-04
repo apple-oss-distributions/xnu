@@ -33,6 +33,9 @@
 #include <sys/errno.h>
 #include <sys/vm.h>
 #include <kperf/buffer.h>
+#if MONOTONIC
+#include <kern/monotonic.h>
+#endif /* MONOTONIC */
 #include <kern/thread.h>
 #if defined(__arm64__) || defined(__arm__)
 #include <arm/cpu_data_internal.h>
@@ -62,9 +65,6 @@ static boolean_t force_all_ctrs = FALSE;
 static kpc_pm_handler_t kpc_pm_handler;
 static boolean_t kpc_pm_has_custom_config;
 static uint64_t kpc_pm_pmc_mask;
-#if MACH_ASSERT
-static bool kpc_calling_pm = false;
-#endif /* MACH_ASSERT */
 
 boolean_t kpc_context_switch_active = FALSE;
 bool kpc_supported = true;
@@ -72,16 +72,14 @@ bool kpc_supported = true;
 static uint64_t *
 kpc_percpu_alloc(void)
 {
-	return kheap_alloc_tag(KHEAP_DATA_BUFFERS, COUNTERBUF_SIZE_PER_CPU,
-	           Z_WAITOK | Z_ZERO, VM_KERN_MEMORY_DIAG);
+	return kalloc_data_tag(COUNTERBUF_SIZE_PER_CPU, Z_WAITOK | Z_ZERO,
+	           VM_KERN_MEMORY_DIAG);
 }
 
 static void
 kpc_percpu_free(uint64_t *buf)
 {
-	if (buf) {
-		kheap_free(KHEAP_DATA_BUFFERS, buf, COUNTERBUF_SIZE_PER_CPU);
-	}
+	kfree_data(buf, COUNTERBUF_SIZE_PER_CPU);
 }
 
 boolean_t
@@ -147,7 +145,6 @@ kpc_unregister_cpu(struct cpu_data *cpu_data)
 	}
 }
 
-
 static void
 kpc_task_set_forced_all_ctrs(task_t task, boolean_t state)
 {
@@ -188,15 +185,13 @@ kpc_force_all_ctrs(task_t task, int val)
 		return 0;
 	}
 
+#if MONOTONIC
+	mt_ownership_change(new_state);
+#endif /* MONOTONIC */
+
 	/* notify the power manager */
 	if (kpc_pm_handler) {
-#if MACH_ASSERT
-		kpc_calling_pm = true;
-#endif /* MACH_ASSERT */
-		kpc_pm_handler( new_state ? FALSE : TRUE );
-#if MACH_ASSERT
-		kpc_calling_pm = false;
-#endif /* MACH_ASSERT */
+		kpc_pm_handler(new_state ? FALSE : TRUE);
 	}
 
 	/*
@@ -225,7 +220,6 @@ kpc_pm_acknowledge(boolean_t available_to_pm)
 	/*
 	 * Make sure power management isn't playing games with us.
 	 */
-	assert(kpc_calling_pm == true);
 
 	/*
 	 * Counters being available means no one is forcing all counters.
@@ -444,7 +438,8 @@ kpc_get_config_count(uint32_t classes)
 		count += kpc_configurable_config_count(pmc_mask);
 	}
 
-	if ((classes & KPC_CLASS_RAWPMU_MASK) && !kpc_multiple_clients()) {
+	if ((classes & KPC_CLASS_RAWPMU_MASK) &&
+	    (!kpc_multiple_clients() || force_all_ctrs)) {
 		count += kpc_rawpmu_config_count();
 	}
 
@@ -479,7 +474,7 @@ kpc_get_config(uint32_t classes, kpc_config_t *current_config)
 		// Client shouldn't ask for config words that aren't available.
 		// Most likely, they'd misinterpret the returned buffer if we
 		// allowed this.
-		if (kpc_multiple_clients()) {
+		if (kpc_multiple_clients() && !force_all_ctrs) {
 			return EPERM;
 		}
 		kpc_get_rawpmu_config(&current_config[count]);
@@ -501,7 +496,8 @@ kpc_set_config(uint32_t classes, kpc_config_t *configv)
 	assert(configv);
 
 	/* don't allow RAWPMU configuration when sharing counters */
-	if ((classes & KPC_CLASS_RAWPMU_MASK) && kpc_multiple_clients()) {
+	if ((classes & KPC_CLASS_RAWPMU_MASK) && kpc_multiple_clients() &&
+	    !force_all_ctrs) {
 		return EPERM;
 	}
 
@@ -535,16 +531,14 @@ kpc_get_counterbuf_size(void)
 uint64_t *
 kpc_counterbuf_alloc(void)
 {
-	return kheap_alloc_tag(KHEAP_DATA_BUFFERS, COUNTERBUF_SIZE,
-	           Z_WAITOK | Z_ZERO, VM_KERN_MEMORY_DIAG);
+	return kalloc_data_tag(COUNTERBUF_SIZE, Z_WAITOK | Z_ZERO,
+	           VM_KERN_MEMORY_DIAG);
 }
 
 void
 kpc_counterbuf_free(uint64_t *buf)
 {
-	if (buf) {
-		kheap_free(KHEAP_DATA_BUFFERS, buf, COUNTERBUF_SIZE);
-	}
+	kfree_data(buf, COUNTERBUF_SIZE);
 }
 
 void

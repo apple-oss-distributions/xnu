@@ -36,7 +36,9 @@
 #include <sys/proc.h>
 #include <sys/proc_internal.h>
 #include <sys/kauth.h>
+
 #include <kern/task.h>
+#include <kern/telemetry.h>
 
 #include <security/mac_framework.h>
 #include <security/mac_internal.h>
@@ -75,9 +77,11 @@ mac_task_get_proc(struct task *task)
 }
 
 int
-mac_task_check_expose_task(struct task *task)
+mac_task_check_expose_task(struct task *task, mach_task_flavor_t flavor)
 {
 	int error;
+
+	assert(flavor <= TASK_FLAVOR_NAME);
 
 	struct proc *p = mac_task_get_proc(task);
 	if (p == NULL) {
@@ -87,7 +91,58 @@ mac_task_check_expose_task(struct task *task)
 
 	struct ucred *cred = kauth_cred_get();
 	proc_rele(p);
-	MAC_CHECK(proc_check_expose_task, cred, &pident);
+
+	/* Also call the old hook for compatability, deprecating in rdar://66356944. */
+	if (flavor == TASK_FLAVOR_CONTROL) {
+		MAC_CHECK(proc_check_expose_task, cred, &pident);
+		if (error) {
+			return error;
+		}
+	}
+
+	MAC_CHECK(proc_check_expose_task_with_flavor, cred, &pident, flavor);
+
+	return error;
+}
+
+int
+mac_task_check_task_id_token_get_task(struct task *task, mach_task_flavor_t flavor)
+{
+	int error;
+	struct proc *target_proc = NULL;
+	struct proc_ident *pidentp = NULL;
+	struct proc_ident pident;
+
+	assert(flavor <= TASK_FLAVOR_NAME);
+
+	if (!is_corpsetask(task)) {
+		/* only live task has proc */
+		target_proc = mac_task_get_proc(task);
+		if (target_proc == NULL) {
+			return ESRCH;
+		}
+		pident = proc_ident(target_proc);
+		pidentp = &pident;
+		proc_rele(target_proc);
+	}
+
+	kauth_cred_t cred = kauth_cred_proc_ref(current_proc());
+
+	/* pidentp is NULL for corpse task */
+	MAC_CHECK(proc_check_task_id_token_get_task, cred, pidentp, flavor);
+	kauth_cred_unref(&cred);
+	return error;
+}
+
+int
+mac_task_check_get_movable_control_port(void)
+{
+	int error;
+	struct proc *p = current_proc();
+
+	kauth_cred_t cred = kauth_cred_proc_ref(p);
+	MAC_CHECK(proc_check_get_movable_control_port, cred);
+	kauth_cred_unref(&cred);
 	return error;
 }
 
@@ -126,6 +181,84 @@ mac_task_check_set_host_exception_port(struct task *task, unsigned int exception
 }
 
 int
+mac_task_check_get_task_special_port(struct task *task, struct task *target, int which)
+{
+	int error;
+	struct proc *target_proc = NULL;
+	struct proc_ident *pidentp = NULL;
+	struct proc_ident pident;
+
+	struct proc *p = mac_task_get_proc(task);
+	if (p == NULL) {
+		return ESRCH;
+	}
+
+	if (!is_corpsetask(target)) {
+		/* only live task has proc */
+		target_proc = mac_task_get_proc(target);
+		if (target_proc == NULL) {
+			proc_rele(p);
+			return ESRCH;
+		}
+		pident = proc_ident(target_proc);
+		pidentp = &pident;
+		proc_rele(target_proc);
+	}
+
+	kauth_cred_t cred = kauth_cred_proc_ref(p);
+	proc_rele(p);
+
+	/* pidentp is NULL for corpse task */
+	MAC_CHECK(proc_check_get_task_special_port, cred, pidentp, which);
+	kauth_cred_unref(&cred);
+	return error;
+}
+
+int
+mac_task_check_set_task_special_port(struct task *task, struct task *target, int which, struct ipc_port *port)
+{
+	int error;
+
+	struct proc *p = mac_task_get_proc(task);
+	if (p == NULL) {
+		return ESRCH;
+	}
+
+	/*
+	 * task_set_special_port() is a CONTROL level interface, so we are guaranteed
+	 * by MIG intrans that target is not a corpse.
+	 */
+	assert(!is_corpsetask(target));
+
+	struct proc *targetp = mac_task_get_proc(target);
+	if (targetp == NULL) {
+		proc_rele(p);
+		return ESRCH;
+	}
+
+	struct proc_ident pident = proc_ident(targetp);
+	kauth_cred_t cred = kauth_cred_proc_ref(p);
+	proc_rele(targetp);
+	proc_rele(p);
+
+	MAC_CHECK(proc_check_set_task_special_port, cred, &pident, which, port);
+	kauth_cred_unref(&cred);
+	return error;
+}
+
+int
+mac_task_check_dyld_process_info_notify_register(void)
+{
+	int error;
+	struct proc *p = current_proc();
+
+	kauth_cred_t cred = kauth_cred_proc_ref(p);
+	MAC_CHECK(proc_check_dyld_process_info_notify_register, cred);
+	kauth_cred_unref(&cred);
+	return error;
+}
+
+int
 mac_task_check_set_host_exception_ports(struct task *task, unsigned int exception_mask)
 {
 	int error = 0;
@@ -154,6 +287,12 @@ void
 mac_thread_userret(struct thread *td)
 {
 	MAC_PERFORM(thread_userret, td);
+}
+
+void
+mac_thread_telemetry(struct thread *t, int err, void *data, size_t length)
+{
+	MAC_PERFORM(thread_telemetry, t, err, data, length);
 }
 
 void
@@ -303,4 +442,10 @@ mac_exc_action_check_exception_send(struct task *victim_task, struct exception_a
 	}
 
 	return error;
+}
+
+int
+mac_schedule_telemetry(void)
+{
+	return telemetry_macf_mark_curthread();
 }

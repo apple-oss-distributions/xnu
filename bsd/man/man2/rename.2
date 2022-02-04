@@ -33,7 +33,7 @@
 .\"
 .\"     @(#)rename.2	8.1 (Berkeley) 6/4/93
 .\"
-.Dd September 18, 2008
+.Dd June 3, 2021
 .Dt RENAME 2
 .Os BSD 4.2
 .Sh NAME
@@ -345,6 +345,27 @@ and the file named by
 are on different logical devices (file systems).
 Note that this error code will not be returned
 if the implementation permits cross-device links.
+.\" ===========
+.It Bq Er EDEADLK
+A component of either pathname refers to a
+.Dq dataless
+directory that requires materialization and the I/O policy of the current
+thread or process disallows dataless directory materialization
+.Po see
+.Xr getiopolicy_np 3
+.Pc .
+.\" ===========
+.It Bq Er EDEADLK
+The
+.Fa from
+pathname refers to a
+.Dq dataless
+file or directory that must be materialized before being moved to its new
+location and the I/O policy of the current thread or process disallows file
+or directory materialization
+.Po see
+.Xr getiopolicy_np 3
+.Pc .
 .El
 .Pp
 The

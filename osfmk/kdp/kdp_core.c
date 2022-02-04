@@ -26,6 +26,29 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 
+/*
+ * The main orchestrator for kernel (and co-processor) coredumps. Here's a very simplistic view of
+ * the flow:
+ *
+ * At kernel initialization time (kdp_core_init):
+ * ----------------------------------------------
+ *
+ * - kdp_core_init() takes care of allocating all necessary data structures and initializes the
+ *   coredump output stages
+ *
+ * At coredump time (do_kern_dump):
+ * --------------------------------
+ *
+ * - Depending on the coredump variant, we chain the necessary output stages together in chain_output_stages()
+ * - [Disk only] We initialize the corefile header
+ * - [Disk only] We stream the stackshot out through the output stages and update the corefile header
+ * - We perform the kernel coredump, streaming it out through the output stages
+ * - [Disk only] We update the corefile header
+ * - [Disk only] We perform the co-processor coredumps (driven by kern_do_coredump), streaming each out
+ *               through the output stages and updating the corefile header.
+ * - [Disk only] We save the coredump log to the corefile
+ */
+
 #ifdef CONFIG_KDP_INTERACTIVE_DEBUGGING
 
 #include <mach/mach_types.h>
@@ -38,15 +61,18 @@
 #include <machine/cpu_capabilities.h>
 #include <libsa/types.h>
 #include <libkern/kernel_mach_header.h>
-#include <libkern/zlib.h>
+#include <kern/locks.h>
 #include <kdp/kdp_internal.h>
 #include <kdp/kdp_core.h>
+#include <kdp/output_stages/output_stages.h>
 #include <kdp/processor_core.h>
-#include <IOKit/IOPolledInterface.h>
+#include <IOKit/IOTypes.h>
 #include <IOKit/IOBSD.h>
 #include <sys/errno.h>
 #include <sys/msgbuf.h>
 #include <san/kasan.h>
+#include <kern/debug.h>
+#include <pexpert/pexpert.h>
 
 #if defined(__x86_64__)
 #include <i386/pmap_internal.h>
@@ -54,19 +80,8 @@
 #include <kern/debug.h>
 #endif /* defined(__x86_64__) */
 
-#if defined(__arm__) || defined(__arm64__)
-#include <arm/cpuid.h>
-#include <arm/caches_internal.h>
-#include <pexpert/arm/consistent_debug.h>
-
-#if !defined(ROUNDUP)
-#define ROUNDUP(a, b) (((a) + ((b) - 1)) & (~((b) - 1)))
-#endif
-
-#if !defined(ROUNDDOWN)
-#define ROUNDDOWN(a, b) ((a) & ~((b) - 1))
-#endif
-#endif /* defined(__arm__) || defined(__arm64__) */
+kern_return_t kdp_core_polled_io_polled_file_available(IOCoreFileAccessCallback access_data, void *access_context, void *recipient_context);
+kern_return_t kdp_core_polled_io_polled_file_unavailable(void);
 
 typedef int (*pmap_traverse_callback)(vm_map_offset_t start,
     vm_map_offset_t end,
@@ -81,7 +96,7 @@ extern int pmap_traverse_present_mappings(pmap_t pmap,
 static int kern_dump_save_summary(void *refcon, core_save_summary_cb callback, void *context);
 static int kern_dump_save_seg_descriptions(void *refcon, core_save_segment_descriptions_cb callback, void *context);
 static int kern_dump_save_thread_state(void *refcon, void *buf, core_save_thread_state_cb callback, void *context);
-static int kern_dump_save_sw_vers(void *refcon, core_save_sw_vers_cb callback, void *context);
+static int kern_dump_save_sw_vers_detail(void *refcon, core_save_sw_vers_detail_cb callback, void *context);
 static int kern_dump_save_segment_data(void *refcon, core_save_segment_data_cb callback, void *context);
 
 static int
@@ -98,72 +113,37 @@ kern_dump_pmap_traverse_send_segdata_callback(vm_map_offset_t start,
     vm_map_offset_t end,
     void *context);
 
-struct kdp_core_out_vars;
-typedef int (*kern_dump_output_proc)(unsigned int request, char *corename,
-    uint64_t length, void *panic_data);
-
-struct kdp_core_out_vars {
-	kern_dump_output_proc outproc;
-	z_output_func         zoutput;
-	size_t                zipped;
-	uint64_t              totalbytes;
-	uint64_t              lastpercent;
-	IOReturn              error;
-	unsigned              outremain;
-	unsigned              outlen;
-	unsigned              writes;
-	Bytef *               outbuf;
-};
+static struct kdp_output_stage disk_output_stage = {};
+static struct kdp_output_stage zlib_output_stage = {};
+static struct kdp_output_stage buffer_output_stage = {};
+static struct kdp_output_stage net_output_stage = {};
+static struct kdp_output_stage progress_notify_output_stage = {};
+#ifdef CONFIG_KDP_COREDUMP_ENCRYPTION
+static struct kdp_output_stage aea_output_stage = {};
+#endif // CONFIG_KDP_COREDUMP_ENCRYPTION
+#if defined(__arm__) || defined(__arm64__)
+static struct kdp_output_stage shmem_output_stage = {};
+#endif /* defined(__arm__) || defined(__arm64__) */
 
 extern uint32_t kdp_crashdump_pkt_size;
 
-static vm_offset_t kdp_core_zmem;
-static size_t      kdp_core_zsize;
-static size_t      kdp_core_zoffset;
-static z_stream    kdp_core_zs;
-
-static uint64_t    kdp_core_total_size;
-static uint64_t    kdp_core_total_size_sent_uncomp;
-#if defined(__arm__) || defined(__arm64__)
-struct xnu_hw_shmem_dbg_command_info *hwsd_info = NULL;
-
-#define KDP_CORE_HW_SHMEM_DBG_NUM_BUFFERS 2
-#define KDP_CORE_HW_SHMEM_DBG_TOTAL_BUF_SIZE 64 * 1024
-
-/*
- * Astris can read up to 4064 bytes at a time over
- * the probe, so we should try to make our buffer
- * size a multiple of this to make reads by astris
- * (the bottleneck) most efficient.
- */
-#define OPTIMAL_ASTRIS_READSIZE 4064
-
-struct kdp_hw_shmem_dbg_buf_elm {
-	vm_offset_t khsd_buf;
-	uint32_t    khsd_data_length;
-	STAILQ_ENTRY(kdp_hw_shmem_dbg_buf_elm) khsd_elms;
-};
-
-static STAILQ_HEAD(, kdp_hw_shmem_dbg_buf_elm) free_hw_shmem_dbg_bufs =
-    STAILQ_HEAD_INITIALIZER(free_hw_shmem_dbg_bufs);
-static STAILQ_HEAD(, kdp_hw_shmem_dbg_buf_elm) hw_shmem_dbg_bufs_to_flush =
-    STAILQ_HEAD_INITIALIZER(hw_shmem_dbg_bufs_to_flush);
-
-static struct kdp_hw_shmem_dbg_buf_elm *currently_filling_buf = NULL;
-static struct kdp_hw_shmem_dbg_buf_elm *currently_flushing_buf = NULL;
-
-static uint32_t kdp_hw_shmem_dbg_bufsize = 0;
-
-static uint32_t kdp_hw_shmem_dbg_seq_no = 0;
-static uint64_t kdp_hw_shmem_dbg_contact_deadline = 0;
-static uint64_t kdp_hw_shmem_dbg_contact_deadline_interval = 0;
-
-#define KDP_HW_SHMEM_DBG_TIMEOUT_DEADLINE_SECS 30
-#endif /* defined(__arm__) || defined(__arm64__) */
-
 static boolean_t kern_dump_successful = FALSE;
 
-struct mach_core_fileheader kdp_core_header = { };
+static const size_t kdp_core_header_size = sizeof(struct mach_core_fileheader_v2) + (KERN_COREDUMP_MAX_CORES * sizeof(struct mach_core_details_v2));
+static struct mach_core_fileheader_v2 *kdp_core_header = NULL;
+
+static lck_grp_t *kdp_core_initialization_lock_group = NULL;
+static lck_mtx_t *kdp_core_disk_stage_lock = NULL;
+static bool kdp_core_is_initializing_disk_stage = false;
+
+#ifdef CONFIG_KDP_COREDUMP_ENCRYPTION
+static const size_t PUBLIC_KEY_RESERVED_LENGTH = roundup(4096, KERN_COREDUMP_BEGIN_FILEBYTES_ALIGN);
+static void *kdp_core_public_key = NULL;
+static lck_mtx_t *kdp_core_encryption_stage_lock = NULL;
+static bool kdp_core_is_initializing_encryption_stage = false;
+
+static bool kern_dump_should_enforce_encryption(void);
+#endif // CONFIG_KDP_COREDUMP_ENCRYPTION
 
 /*
  * These variables will be modified by the BSD layer if the root device is
@@ -171,6 +151,9 @@ struct mach_core_fileheader kdp_core_header = { };
  */
 uint64_t kdp_core_ramdisk_addr = 0;
 uint64_t kdp_core_ramdisk_size = 0;
+
+#define COREDUMP_ENCRYPTION_OVERRIDES_AVAILABILITY (1 << 0)
+#define COREDUMP_ENCRYPTION_OVERRIDES_ENFORCEMENT  (1 << 1)
 
 boolean_t
 kdp_has_polled_corefile(void)
@@ -184,505 +167,31 @@ kdp_polled_corefile_error(void)
 	return gIOPolledCoreFileOpenRet;
 }
 
-#if defined(__arm__) || defined(__arm64__)
-/*
- * Whenever we start a coredump, make sure the buffers
- * are all on the free queue and the state is as expected.
- * The buffers may have been left in a different state if
- * a previous coredump attempt failed.
- */
-static void
-kern_dump_hw_shmem_dbg_reset(void)
-{
-	struct kdp_hw_shmem_dbg_buf_elm *cur_elm = NULL, *tmp_elm = NULL;
-
-	STAILQ_FOREACH(cur_elm, &free_hw_shmem_dbg_bufs, khsd_elms) {
-		cur_elm->khsd_data_length = 0;
-	}
-
-	if (currently_filling_buf != NULL) {
-		currently_filling_buf->khsd_data_length = 0;
-
-		STAILQ_INSERT_HEAD(&free_hw_shmem_dbg_bufs, currently_filling_buf, khsd_elms);
-		currently_filling_buf = NULL;
-	}
-
-	if (currently_flushing_buf != NULL) {
-		currently_flushing_buf->khsd_data_length = 0;
-
-		STAILQ_INSERT_HEAD(&free_hw_shmem_dbg_bufs, currently_flushing_buf, khsd_elms);
-		currently_flushing_buf = NULL;
-	}
-
-	STAILQ_FOREACH_SAFE(cur_elm, &hw_shmem_dbg_bufs_to_flush, khsd_elms, tmp_elm) {
-		cur_elm->khsd_data_length = 0;
-
-		STAILQ_REMOVE(&hw_shmem_dbg_bufs_to_flush, cur_elm, kdp_hw_shmem_dbg_buf_elm, khsd_elms);
-		STAILQ_INSERT_HEAD(&free_hw_shmem_dbg_bufs, cur_elm, khsd_elms);
-	}
-
-	hwsd_info->xhsdci_status = XHSDCI_COREDUMP_BUF_EMPTY;
-	kdp_hw_shmem_dbg_seq_no = 0;
-	hwsd_info->xhsdci_buf_phys_addr = 0;
-	hwsd_info->xhsdci_buf_data_length = 0;
-	hwsd_info->xhsdci_coredump_total_size_uncomp = 0;
-	hwsd_info->xhsdci_coredump_total_size_sent_uncomp = 0;
-	hwsd_info->xhsdci_page_size = PAGE_SIZE;
-	FlushPoC_DcacheRegion((vm_offset_t) hwsd_info, sizeof(*hwsd_info));
-
-	kdp_hw_shmem_dbg_contact_deadline = mach_absolute_time() + kdp_hw_shmem_dbg_contact_deadline_interval;
-}
-
-/*
- * Tries to move buffers forward in 'progress'. If
- * the hardware debugger is done consuming the current buffer, we
- * can put the next one on it and move the current
- * buffer back to the free queue.
- */
-static int
-kern_dump_hw_shmem_dbg_process_buffers(void)
-{
-	FlushPoC_DcacheRegion((vm_offset_t) hwsd_info, sizeof(*hwsd_info));
-	if (hwsd_info->xhsdci_status == XHSDCI_COREDUMP_ERROR) {
-		kern_coredump_log(NULL, "Detected remote error, terminating...\n");
-		return -1;
-	} else if (hwsd_info->xhsdci_status == XHSDCI_COREDUMP_BUF_EMPTY) {
-		if (hwsd_info->xhsdci_seq_no != (kdp_hw_shmem_dbg_seq_no + 1)) {
-			kern_coredump_log(NULL, "Detected stale/invalid seq num. Expected: %d, received %d\n",
-			    (kdp_hw_shmem_dbg_seq_no + 1), hwsd_info->xhsdci_seq_no);
-			hwsd_info->xhsdci_status = XHSDCI_COREDUMP_ERROR;
-			FlushPoC_DcacheRegion((vm_offset_t) hwsd_info, sizeof(*hwsd_info));
-			return -1;
-		}
-
-		kdp_hw_shmem_dbg_seq_no = hwsd_info->xhsdci_seq_no;
-
-		if (currently_flushing_buf != NULL) {
-			currently_flushing_buf->khsd_data_length = 0;
-			STAILQ_INSERT_TAIL(&free_hw_shmem_dbg_bufs, currently_flushing_buf, khsd_elms);
-		}
-
-		currently_flushing_buf = STAILQ_FIRST(&hw_shmem_dbg_bufs_to_flush);
-		if (currently_flushing_buf != NULL) {
-			STAILQ_REMOVE_HEAD(&hw_shmem_dbg_bufs_to_flush, khsd_elms);
-
-			FlushPoC_DcacheRegion((vm_offset_t) hwsd_info, sizeof(*hwsd_info));
-			hwsd_info->xhsdci_buf_phys_addr = kvtophys(currently_flushing_buf->khsd_buf);
-			hwsd_info->xhsdci_buf_data_length = currently_flushing_buf->khsd_data_length;
-			hwsd_info->xhsdci_coredump_total_size_uncomp = kdp_core_total_size;
-			hwsd_info->xhsdci_coredump_total_size_sent_uncomp = kdp_core_total_size_sent_uncomp;
-			FlushPoC_DcacheRegion((vm_offset_t) hwsd_info, KDP_CORE_HW_SHMEM_DBG_TOTAL_BUF_SIZE);
-			hwsd_info->xhsdci_seq_no = ++kdp_hw_shmem_dbg_seq_no;
-			hwsd_info->xhsdci_status = XHSDCI_COREDUMP_BUF_READY;
-			FlushPoC_DcacheRegion((vm_offset_t) hwsd_info, sizeof(*hwsd_info));
-		}
-
-		kdp_hw_shmem_dbg_contact_deadline = mach_absolute_time() +
-		    kdp_hw_shmem_dbg_contact_deadline_interval;
-
-		return 0;
-	} else if (mach_absolute_time() > kdp_hw_shmem_dbg_contact_deadline) {
-		kern_coredump_log(NULL, "Kernel timed out waiting for hardware debugger to update handshake structure.");
-		kern_coredump_log(NULL, "No contact in %d seconds\n", KDP_HW_SHMEM_DBG_TIMEOUT_DEADLINE_SECS);
-
-		hwsd_info->xhsdci_status = XHSDCI_COREDUMP_ERROR;
-		FlushPoC_DcacheRegion((vm_offset_t) hwsd_info, sizeof(*hwsd_info));
-		return -1;
-	}
-
-	return 0;
-}
-
-/*
- * Populates currently_filling_buf with a new buffer
- * once one becomes available. Returns 0 on success
- * or the value returned by kern_dump_hw_shmem_dbg_process_buffers()
- * if it is non-zero (an error).
- */
-static int
-kern_dump_hw_shmem_dbg_get_buffer(void)
-{
-	int ret = 0;
-
-	assert(currently_filling_buf == NULL);
-
-	while (STAILQ_EMPTY(&free_hw_shmem_dbg_bufs)) {
-		ret = kern_dump_hw_shmem_dbg_process_buffers();
-		if (ret) {
-			return ret;
-		}
-	}
-
-	currently_filling_buf = STAILQ_FIRST(&free_hw_shmem_dbg_bufs);
-	STAILQ_REMOVE_HEAD(&free_hw_shmem_dbg_bufs, khsd_elms);
-
-	assert(currently_filling_buf->khsd_data_length == 0);
-	return ret;
-}
-
-/*
- * Output procedure for hardware shared memory core dumps
- *
- * Tries to fill up the buffer completely before flushing
- */
-static int
-kern_dump_hw_shmem_dbg_buffer_proc(unsigned int request, __unused char *corename,
-    uint64_t length, void * data)
-{
-	int ret = 0;
-
-	assert(length < UINT32_MAX);
-	uint32_t bytes_remaining =  (uint32_t) length;
-	uint32_t bytes_to_copy;
-
-	if (request == KDP_EOF) {
-		assert(currently_filling_buf == NULL);
-
-		/*
-		 * Wait until we've flushed all the buffers
-		 * before setting the connection status to done.
-		 */
-		while (!STAILQ_EMPTY(&hw_shmem_dbg_bufs_to_flush) ||
-		    currently_flushing_buf != NULL) {
-			ret = kern_dump_hw_shmem_dbg_process_buffers();
-			if (ret) {
-				return ret;
-			}
-		}
-
-		/*
-		 * If the last status we saw indicates that the buffer was
-		 * empty and we didn't flush any new data since then, we expect
-		 * the sequence number to still match the last we saw.
-		 */
-		if (hwsd_info->xhsdci_seq_no < kdp_hw_shmem_dbg_seq_no) {
-			kern_coredump_log(NULL, "EOF Flush: Detected stale/invalid seq num. Expected: %d, received %d\n",
-			    kdp_hw_shmem_dbg_seq_no, hwsd_info->xhsdci_seq_no);
-			return -1;
-		}
-
-		kdp_hw_shmem_dbg_seq_no = hwsd_info->xhsdci_seq_no;
-
-		kern_coredump_log(NULL, "Setting coredump status as done!\n");
-		hwsd_info->xhsdci_seq_no = ++kdp_hw_shmem_dbg_seq_no;
-		hwsd_info->xhsdci_status = XHSDCI_COREDUMP_STATUS_DONE;
-		FlushPoC_DcacheRegion((vm_offset_t) hwsd_info, sizeof(*hwsd_info));
-
-		return ret;
-	}
-
-	assert(request == KDP_DATA);
-
-	/*
-	 * The output procedure is called with length == 0 and data == NULL
-	 * to flush any remaining output at the end of the coredump before
-	 * we call it a final time to mark the dump as done.
-	 */
-	if (length == 0) {
-		assert(data == NULL);
-
-		if (currently_filling_buf != NULL) {
-			STAILQ_INSERT_TAIL(&hw_shmem_dbg_bufs_to_flush, currently_filling_buf, khsd_elms);
-			currently_filling_buf = NULL;
-		}
-
-		/*
-		 * Move the current buffer along if possible.
-		 */
-		ret = kern_dump_hw_shmem_dbg_process_buffers();
-		return ret;
-	}
-
-	while (bytes_remaining != 0) {
-		/*
-		 * Make sure we have a buffer to work with.
-		 */
-		while (currently_filling_buf == NULL) {
-			ret = kern_dump_hw_shmem_dbg_get_buffer();
-			if (ret) {
-				return ret;
-			}
-		}
-
-		assert(kdp_hw_shmem_dbg_bufsize >= currently_filling_buf->khsd_data_length);
-		bytes_to_copy = MIN(bytes_remaining, kdp_hw_shmem_dbg_bufsize -
-		    currently_filling_buf->khsd_data_length);
-		bcopy(data, (void *)(currently_filling_buf->khsd_buf + currently_filling_buf->khsd_data_length),
-		    bytes_to_copy);
-
-		currently_filling_buf->khsd_data_length += bytes_to_copy;
-
-		if (currently_filling_buf->khsd_data_length == kdp_hw_shmem_dbg_bufsize) {
-			STAILQ_INSERT_TAIL(&hw_shmem_dbg_bufs_to_flush, currently_filling_buf, khsd_elms);
-			currently_filling_buf = NULL;
-
-			/*
-			 * Move it along if possible.
-			 */
-			ret = kern_dump_hw_shmem_dbg_process_buffers();
-			if (ret) {
-				return ret;
-			}
-		}
-
-		bytes_remaining -= bytes_to_copy;
-		data = (void *) ((uintptr_t)data + bytes_to_copy);
-	}
-
-	return ret;
-}
-#endif /* defined(__arm__) || defined(__arm64__) */
-
-static IOReturn
-kern_dump_disk_proc(unsigned int request, __unused char *corename,
-    uint64_t length, void * data)
-{
-	uint64_t        noffset;
-	uint32_t        err = kIOReturnSuccess;
-
-	switch (request) {
-	case KDP_WRQ:
-		err = IOPolledFileSeek(gIOPolledCoreFileVars, 0);
-		if (kIOReturnSuccess != err) {
-			kern_coredump_log(NULL, "IOPolledFileSeek(gIOPolledCoreFileVars, 0) returned 0x%x\n", err);
-			break;
-		}
-		err = IOPolledFilePollersOpen(gIOPolledCoreFileVars, kIOPolledBeforeSleepState, false);
-		break;
-
-	case KDP_SEEK:
-		noffset = *((uint64_t *) data);
-		err = IOPolledFileWrite(gIOPolledCoreFileVars, 0, 0, NULL);
-		if (kIOReturnSuccess != err) {
-			kern_coredump_log(NULL, "IOPolledFileWrite (during seek) returned 0x%x\n", err);
-			break;
-		}
-		err = IOPolledFileSeek(gIOPolledCoreFileVars, noffset);
-		if (kIOReturnSuccess != err) {
-			kern_coredump_log(NULL, "IOPolledFileSeek(0x%llx) returned 0x%x\n", noffset, err);
-		}
-		break;
-
-	case KDP_DATA:
-		err = IOPolledFileWrite(gIOPolledCoreFileVars, data, length, NULL);
-		if (kIOReturnSuccess != err) {
-			kern_coredump_log(NULL, "IOPolledFileWrite(gIOPolledCoreFileVars, %p, 0x%llx, NULL) returned 0x%x\n",
-			    data, length, err);
-			break;
-		}
-		break;
-
-#if defined(__arm__) || defined(__arm64__)
-	/* Only supported on embedded by the underlying polled mode driver */
-	case KDP_FLUSH:
-		err = IOPolledFileFlush(gIOPolledCoreFileVars);
-		if (kIOReturnSuccess != err) {
-			kern_coredump_log(NULL, "IOPolledFileFlush() returned 0x%x\n", err);
-			break;
-		}
-		break;
-#endif /* defined(__arm__) || defined(__arm64__) */
-
-	case KDP_EOF:
-		err = IOPolledFileWrite(gIOPolledCoreFileVars, 0, 0, NULL);
-		if (kIOReturnSuccess != err) {
-			kern_coredump_log(NULL, "IOPolledFileWrite (during EOF) returned 0x%x\n", err);
-			break;
-		}
-		err = IOPolledFilePollersClose(gIOPolledCoreFileVars, kIOPolledBeforeSleepState);
-		if (kIOReturnSuccess != err) {
-			kern_coredump_log(NULL, "IOPolledFilePollersClose (during EOF) returned 0x%x\n", err);
-			break;
-		}
-		break;
-	}
-
-	return err;
-}
-
-/*
- * flushes any data to the output proc immediately
- */
-static int
-kdp_core_zoutput(z_streamp strm, Bytef *buf, unsigned len)
-{
-	struct kdp_core_out_vars * vars = (typeof(vars))strm->opaque;
-	IOReturn                   ret;
-
-	vars->zipped += len;
-
-	if (vars->error >= 0) {
-		if ((ret = (*vars->outproc)(KDP_DATA, NULL, len, buf)) != kIOReturnSuccess) {
-			kern_coredump_log(NULL, "(kdp_core_zoutput) outproc(KDP_DATA, NULL, 0x%x, %p) returned 0x%x\n",
-			    len, buf, ret);
-			vars->error = ret;
-		}
-		if (!buf && !len) {
-			kern_coredump_log(NULL, "100..");
-		}
-	}
-	return len;
-}
-
-/*
- * tries to fill the buffer with data before flushing it via the output proc.
- */
-static int
-kdp_core_zoutputbuf(z_streamp strm, Bytef *inbuf, unsigned inlen)
-{
-	struct kdp_core_out_vars * vars = (typeof(vars))strm->opaque;
-	unsigned remain;
-	IOReturn ret;
-	unsigned chunk;
-	boolean_t flush;
-
-	remain = inlen;
-	vars->zipped += inlen;
-	flush = (!inbuf && !inlen);
-
-	while ((vars->error >= 0) && (remain || flush)) {
-		chunk = vars->outremain;
-		if (chunk > remain) {
-			chunk = remain;
-		}
-		if (!inbuf) {
-			bzero(&vars->outbuf[vars->outlen - vars->outremain], chunk);
-		} else {
-			bcopy(inbuf, &vars->outbuf[vars->outlen - vars->outremain], chunk);
-			inbuf       += chunk;
-		}
-		vars->outremain -= chunk;
-		remain          -= chunk;
-
-		if (vars->outremain && !flush) {
-			break;
-		}
-		if ((ret = (*vars->outproc)(KDP_DATA, NULL,
-		    vars->outlen - vars->outremain,
-		    vars->outbuf)) != kIOReturnSuccess) {
-			kern_coredump_log(NULL, "(kdp_core_zoutputbuf) outproc(KDP_DATA, NULL, 0x%x, %p) returned 0x%x\n",
-			    (vars->outlen - vars->outremain), vars->outbuf, ret);
-			vars->error = ret;
-		}
-		if (flush) {
-			kern_coredump_log(NULL, "100..");
-			flush = false;
-		}
-		vars->outremain = vars->outlen;
-	}
-	return inlen;
-}
-
-static int
-kdp_core_zinput(z_streamp strm, Bytef *buf, unsigned size)
-{
-	struct kdp_core_out_vars * vars = (typeof(vars))strm->opaque;
-	uint64_t                   percent, total_in = 0;
-	unsigned                   len;
-
-	len = strm->avail_in;
-	if (len > size) {
-		len = size;
-	}
-	if (len == 0) {
-		return 0;
-	}
-
-	if (strm->next_in != (Bytef *) strm) {
-		memcpy(buf, strm->next_in, len);
-	} else {
-		bzero(buf, len);
-	}
-	strm->adler = z_crc32(strm->adler, buf, len);
-
-	strm->avail_in -= len;
-	strm->next_in  += len;
-	strm->total_in += len;
-
-	if (0 == (511 & vars->writes++)) {
-		total_in = strm->total_in;
-		kdp_core_total_size_sent_uncomp = strm->total_in;
-
-		percent = (total_in * 100) / vars->totalbytes;
-		if ((percent - vars->lastpercent) >= 10) {
-			vars->lastpercent = percent;
-			kern_coredump_log(NULL, "%lld..\n", percent);
-		}
-	}
-
-	return (int)len;
-}
-
-static IOReturn
-kdp_core_stream_output_chunk(struct kdp_core_out_vars * vars, unsigned length, void * data)
-{
-	z_stream * zs;
-	int        zr;
-	boolean_t  flush;
-
-	zs = &kdp_core_zs;
-
-	if (kdp_corezip_disabled) {
-		(*vars->zoutput)(zs, data, length);
-	} else {
-		flush = (!length && !data);
-		zr = Z_OK;
-
-		assert(!zs->avail_in);
-
-		while (vars->error >= 0) {
-			if (!zs->avail_in && !flush) {
-				if (!length) {
-					break;
-				}
-				zs->next_in = data ? data : (Bytef *) zs /* zero marker */;
-				zs->avail_in = length;
-				length = 0;
-			}
-			if (!zs->avail_out) {
-				zs->next_out  = (Bytef *) zs;
-				zs->avail_out = UINT32_MAX;
-			}
-			zr = deflate(zs, flush ? Z_FINISH : Z_NO_FLUSH);
-			if (Z_STREAM_END == zr) {
-				break;
-			}
-			if (zr != Z_OK) {
-				kern_coredump_log(NULL, "ZERR %d\n", zr);
-				vars->error = zr;
-			}
-		}
-
-		if (flush) {
-			(*vars->zoutput)(zs, NULL, 0);
-		}
-	}
-
-	return vars->error;
-}
-
 kern_return_t
-kdp_core_output(void *kdp_core_out_vars, uint64_t length, void * data)
+kdp_core_output(void *kdp_core_out_state, uint64_t length, void * data)
 {
-	IOReturn     err;
-	unsigned int chunk;
-	enum       { kMaxZLibChunk = 1024 * 1024 * 1024 };
-	struct kdp_core_out_vars *vars = (struct kdp_core_out_vars *)kdp_core_out_vars;
+	kern_return_t              err = KERN_SUCCESS;
+	uint64_t                   percent;
+	struct kdp_core_out_state *vars = (struct kdp_core_out_state *)kdp_core_out_state;
+	struct kdp_output_stage   *first_stage = STAILQ_FIRST(&vars->kcos_out_stage);
 
-	do{
-		if (length <= kMaxZLibChunk) {
-			chunk = (typeof(chunk))length;
+	if (vars->kcos_error == KERN_SUCCESS) {
+		if ((err = first_stage->kos_funcs.kosf_outproc(first_stage, KDP_DATA, NULL, length, data)) != KERN_SUCCESS) {
+			kern_coredump_log(NULL, "(kdp_core_output) outproc(KDP_DATA, NULL, 0x%llx, %p) returned 0x%x\n",
+			    length, data, err);
+			vars->kcos_error = err;
+		}
+		if (!data && !length) {
+			kern_coredump_log(NULL, "100..");
 		} else {
-			chunk = kMaxZLibChunk;
+			vars->kcos_bytes_written += length;
+			percent = (vars->kcos_bytes_written * 100) / vars->kcos_totalbytes;
+			if ((percent - vars->kcos_lastpercent) >= 10) {
+				vars->kcos_lastpercent = percent;
+				kern_coredump_log(NULL, "%lld..\n", percent);
+			}
 		}
-		err = kdp_core_stream_output_chunk(vars, chunk, data);
-
-		length -= chunk;
-		if (data) {
-			data = (void *) (((uintptr_t) data) + chunk);
-		}
-	}while (length && (kIOReturnSuccess == err));
-
+	}
 	return err;
 }
 
@@ -692,6 +201,62 @@ extern struct vm_object pmap_object_store;
 #endif
 extern vm_offset_t c_buffers;
 extern vm_size_t   c_buffers_size;
+
+static bool
+kernel_vaddr_in_coredump_stage(const struct kdp_output_stage *stage, uint64_t vaddr, uint64_t *vincr)
+{
+	uint64_t start_addr = (uint64_t)stage->kos_data;
+	uint64_t end_addr = start_addr + stage->kos_data_size;
+
+	if (!stage->kos_data) {
+		return false;
+	}
+
+	if (vaddr >= start_addr && vaddr < end_addr) {
+		*vincr = stage->kos_data_size - (vaddr - start_addr);
+		return true;
+	}
+
+	return false;
+}
+
+static bool
+kernel_vaddr_in_coredump_stages(uint64_t vaddr, uint64_t *vincr)
+{
+	if (kernel_vaddr_in_coredump_stage(&disk_output_stage, vaddr, vincr)) {
+		return true;
+	}
+
+	if (kernel_vaddr_in_coredump_stage(&zlib_output_stage, vaddr, vincr)) {
+		return true;
+	}
+
+	if (kernel_vaddr_in_coredump_stage(&buffer_output_stage, vaddr, vincr)) {
+		return true;
+	}
+
+	if (kernel_vaddr_in_coredump_stage(&net_output_stage, vaddr, vincr)) {
+		return true;
+	}
+
+	if (kernel_vaddr_in_coredump_stage(&progress_notify_output_stage, vaddr, vincr)) {
+		return true;
+	}
+
+#ifdef CONFIG_KDP_COREDUMP_ENCRYPTION
+	if (kernel_vaddr_in_coredump_stage(&aea_output_stage, vaddr, vincr)) {
+		return true;
+	}
+#endif // CONFIG_KDP_COREDUMP_ENCRYPTION
+
+#if defined(__arm__) || defined(__arm64__)
+	if (kernel_vaddr_in_coredump_stage(&shmem_output_stage, vaddr, vincr)) {
+		return true;
+	}
+#endif /* defined(__arm__) || defined(__arm64__) */
+
+	return false;
+}
 
 ppnum_t
 kernel_pmap_present_mapping(uint64_t vaddr, uint64_t * pvincr, uintptr_t * pvphysaddr)
@@ -706,21 +271,13 @@ kernel_pmap_present_mapping(uint64_t vaddr, uint64_t * pvincr, uintptr_t * pvphy
 		/* compressor data */
 		ppn = 0;
 		vincr = c_buffers_size;
-	} else if (vaddr == kdp_core_zmem) {
-		/* zlib working memory */
+	} else if (kernel_vaddr_in_coredump_stages(vaddr, &vincr)) {
+		/* coredump output stage working memory */
 		ppn = 0;
-		vincr = kdp_core_zsize;
 	} else if ((kdp_core_ramdisk_addr != 0) && (vaddr == kdp_core_ramdisk_addr)) {
 		ppn = 0;
 		vincr = kdp_core_ramdisk_size;
 	} else
-#if defined(__arm64__) && defined(CONFIG_XNUPOST)
-	if (vaddr == _COMM_HIGH_PAGE64_BASE_ADDRESS) {
-		/* not readable */
-		ppn = 0;
-		vincr = _COMM_PAGE_AREA_LENGTH;
-	} else
-#endif /* defined(__arm64__) */
 #if defined(__arm__) || defined(__arm64__)
 	if (vaddr == phystokv(avail_start)) {
 		/* physical memory map */
@@ -834,6 +391,11 @@ pmap_traverse_present_mappings(pmap_t __unused pmap,
 #endif
 			    ) {
 				/* not something we want */
+				ppn = 0;
+			}
+			/* include the phys carveout only if explictly marked */
+			if ((debug_is_in_phys_carveout(vcur) || debug_is_in_phys_carveout_metadata(vcur)) &&
+			    !debug_can_coredump_phys_carveout()) {
 				ppn = 0;
 			}
 		}
@@ -1005,10 +567,11 @@ kern_dump_save_thread_state(__unused void *refcon, void *buf, core_save_thread_s
 	return KERN_SUCCESS;
 }
 
+
 static int
-kern_dump_save_sw_vers(__unused void *refcon, core_save_sw_vers_cb callback, void *context)
+kern_dump_save_sw_vers_detail(__unused void *refcon, core_save_sw_vers_detail_cb callback, void *context)
 {
-	return callback(&kdp_kernelversion_string, sizeof(kdp_kernelversion_string), context);
+	return callback(vm_kernel_stext, kernel_uuid, 0, context);
 }
 
 static int
@@ -1033,108 +596,121 @@ kern_dump_save_segment_data(__unused void *refcon, core_save_segment_data_cb cal
 }
 
 kern_return_t
-kdp_reset_output_vars(void *kdp_core_out_vars, uint64_t totalbytes)
+kdp_reset_output_vars(void *kdp_core_out_state, uint64_t totalbytes, bool encrypt_core, bool *out_should_skip_coredump)
 {
-	struct kdp_core_out_vars *outvars = (struct kdp_core_out_vars *)kdp_core_out_vars;
+	struct kdp_core_out_state *outstate = (struct kdp_core_out_state *)kdp_core_out_state;
+	struct kdp_output_stage *current_stage = NULL;
 
-	/* Re-initialize kdp_outvars */
-	outvars->zipped = 0;
-	outvars->totalbytes = totalbytes;
-	outvars->lastpercent = 0;
-	outvars->error = kIOReturnSuccess;
-	outvars->outremain = 0;
-	outvars->outlen = 0;
-	outvars->writes = 0;
-	outvars->outbuf = NULL;
+	/* Re-initialize kdp_outstate */
+	outstate->kcos_totalbytes = totalbytes;
+	outstate->kcos_bytes_written = 0;
+	outstate->kcos_lastpercent = 0;
+	outstate->kcos_error = KERN_SUCCESS;
 
-	if (outvars->outproc == &kdp_send_crashdump_data) {
-		/* KERN_DUMP_NET */
-		outvars->outbuf = (Bytef *) (kdp_core_zmem + kdp_core_zoffset);
-		outvars->outremain = outvars->outlen = kdp_crashdump_pkt_size;
+	/* Reset the output stages */
+	STAILQ_FOREACH(current_stage, &outstate->kcos_out_stage, kos_next) {
+		current_stage->kos_funcs.kosf_reset(current_stage);
 	}
 
-	kdp_core_total_size = totalbytes;
-
-	/* Re-initialize zstream variables */
-	kdp_core_zs.avail_in  = 0;
-	kdp_core_zs.next_in   = NULL;
-	kdp_core_zs.avail_out = 0;
-	kdp_core_zs.next_out  = NULL;
-	kdp_core_zs.opaque    = outvars;
-
-	deflateResetWithIO(&kdp_core_zs, kdp_core_zinput, outvars->zoutput);
+	*out_should_skip_coredump = false;
+	if (encrypt_core) {
+		if (outstate->kcos_enforce_encryption && !outstate->kcos_encryption_stage) {
+			*out_should_skip_coredump = true;
+#if defined(__arm__) || defined(__arm64__)
+			panic_info->eph_panic_flags |= EMBEDDED_PANIC_HEADER_FLAG_ENCRYPTED_COREDUMP_SKIPPED;
+#else
+			panic_info->mph_panic_flags |= MACOS_PANIC_HEADER_FLAG_ENCRYPTED_COREDUMP_SKIPPED;
+#endif
+			kern_coredump_log(NULL, "(kdp_reset_output_vars) Encryption requested, is unavailable, and enforcement is active. Skipping current core.\n");
+		}
+	} else if (outstate->kcos_encryption_stage) {
+		outstate->kcos_encryption_stage->kos_bypass = true;
+	}
 
 	return KERN_SUCCESS;
 }
 
-static int
-kern_dump_update_header(struct kdp_core_out_vars *outvars)
+static kern_return_t
+kern_dump_update_header(struct kdp_core_out_state *outstate)
 {
+	struct kdp_output_stage *first_stage = STAILQ_FIRST(&outstate->kcos_out_stage);
 	uint64_t foffset;
-	int ret;
+	kern_return_t ret;
 
 	/* Write the file header -- first seek to the beginning of the file */
 	foffset = 0;
-	if ((ret = (outvars->outproc)(KDP_SEEK, NULL, sizeof(foffset), &foffset)) != kIOReturnSuccess) {
+	if ((ret = (first_stage->kos_funcs.kosf_outproc)(first_stage, KDP_SEEK, NULL, sizeof(foffset), &foffset)) != KERN_SUCCESS) {
 		kern_coredump_log(NULL, "(kern_dump_update_header) outproc(KDP_SEEK, NULL, %lu, %p) foffset = 0x%llx returned 0x%x\n",
 		    sizeof(foffset), &foffset, foffset, ret);
 		return ret;
 	}
 
-	if ((ret = (outvars->outproc)(KDP_DATA, NULL, sizeof(kdp_core_header), &kdp_core_header)) != kIOReturnSuccess) {
+	if ((ret = (first_stage->kos_funcs.kosf_outproc)(first_stage, KDP_DATA, NULL, kdp_core_header_size, kdp_core_header)) != KERN_SUCCESS) {
 		kern_coredump_log(NULL, "(kern_dump_update_header) outproc(KDP_DATA, NULL, %lu, %p) returned 0x%x\n",
-		    sizeof(kdp_core_header), &kdp_core_header, ret);
+		    kdp_core_header_size, kdp_core_header, ret);
 		return ret;
 	}
 
-	if ((ret = (outvars->outproc)(KDP_DATA, NULL, 0, NULL)) != kIOReturnSuccess) {
+	if ((ret = (first_stage->kos_funcs.kosf_outproc)(first_stage, KDP_DATA, NULL, 0, NULL)) != KERN_SUCCESS) {
 		kern_coredump_log(NULL, "(kern_dump_update_header) outproc data flush returned 0x%x\n", ret);
 		return ret;
 	}
 
 #if defined(__arm__) || defined(__arm64__)
-	if ((ret = (outvars->outproc)(KDP_FLUSH, NULL, 0, NULL)) != kIOReturnSuccess) {
+	if ((ret = (first_stage->kos_funcs.kosf_outproc)(first_stage, KDP_FLUSH, NULL, 0, NULL)) != KERN_SUCCESS) {
 		kern_coredump_log(NULL, "(kern_dump_update_header) outproc explicit flush returned 0x%x\n", ret);
 		return ret;
 	}
 #endif /* defined(__arm__) || defined(__arm64__) */
 
-	return KERN_SUCCESS;
+	return ret;
 }
 
-int
-kern_dump_record_file(void *kdp_core_out_vars, const char *filename, uint64_t file_offset, uint64_t *out_file_length)
+kern_return_t
+kern_dump_record_file(void *kdp_core_out_state, const char *filename, uint64_t file_offset, uint64_t *out_file_length)
 {
-	int ret = 0;
-	struct kdp_core_out_vars *outvars = (struct kdp_core_out_vars *)kdp_core_out_vars;
+	kern_return_t ret = KERN_SUCCESS;
+	uint64_t bytes_written = 0;
+	struct mach_core_details_v2 *core_details = NULL;
+	struct kdp_output_stage *last_stage;
+	struct kdp_core_out_state *outstate = (struct kdp_core_out_state *)kdp_core_out_state;
 
-	assert(kdp_core_header.num_files < KERN_COREDUMP_MAX_CORES);
+	assert(kdp_core_header->num_files < KERN_COREDUMP_MAX_CORES);
 	assert(out_file_length != NULL);
 	*out_file_length = 0;
 
-	kdp_core_header.files[kdp_core_header.num_files].gzip_offset = file_offset;
-	kdp_core_header.files[kdp_core_header.num_files].gzip_length = outvars->zipped;
-	strncpy((char *)&kdp_core_header.files[kdp_core_header.num_files].core_name, filename,
-	    MACH_CORE_FILEHEADER_NAMELEN);
-	kdp_core_header.files[kdp_core_header.num_files].core_name[MACH_CORE_FILEHEADER_NAMELEN - 1] = '\0';
-	kdp_core_header.num_files++;
-	kdp_core_header.signature = MACH_CORE_FILEHEADER_SIGNATURE;
+	last_stage = STAILQ_LAST(&outstate->kcos_out_stage, kdp_output_stage, kos_next);
+	bytes_written = last_stage->kos_bytes_written;
 
-	ret = kern_dump_update_header(outvars);
+	core_details = &(kdp_core_header->files[kdp_core_header->num_files]);
+	core_details->flags = MACH_CORE_DETAILS_V2_FLAG_COMPRESSED_ZLIB;
+	if (outstate->kcos_encryption_stage && outstate->kcos_encryption_stage->kos_bypass == false) {
+		core_details->flags |= MACH_CORE_DETAILS_V2_FLAG_ENCRYPTED_AEA;
+	}
+	core_details->offset = file_offset;
+	core_details->length = bytes_written;
+	strncpy((char *)&core_details->core_name, filename,
+	    MACH_CORE_FILEHEADER_NAMELEN);
+	core_details->core_name[MACH_CORE_FILEHEADER_NAMELEN - 1] = '\0';
+
+	kdp_core_header->num_files++;
+
+	ret = kern_dump_update_header(outstate);
 	if (ret == KERN_SUCCESS) {
-		*out_file_length = outvars->zipped;
+		*out_file_length = bytes_written;
 	}
 
 	return ret;
 }
 
-int
-kern_dump_seek_to_next_file(void *kdp_core_out_vars, uint64_t next_file_offset)
+kern_return_t
+kern_dump_seek_to_next_file(void *kdp_core_out_state, uint64_t next_file_offset)
 {
-	struct kdp_core_out_vars *outvars = (struct kdp_core_out_vars *)kdp_core_out_vars;
-	int ret;
+	struct kdp_core_out_state *outstate = (struct kdp_core_out_state *)kdp_core_out_state;
+	struct kdp_output_stage *first_stage = STAILQ_FIRST(&outstate->kcos_out_stage);
+	kern_return_t ret;
 
-	if ((ret = (outvars->outproc)(KDP_SEEK, NULL, sizeof(next_file_offset), &next_file_offset)) != kIOReturnSuccess) {
+	if ((ret = (first_stage->kos_funcs.kosf_outproc)(first_stage, KDP_SEEK, NULL, sizeof(next_file_offset), &next_file_offset)) != KERN_SUCCESS) {
 		kern_coredump_log(NULL, "(kern_dump_seek_to_next_file) outproc(KDP_SEEK, NULL, %lu, %p) foffset = 0x%llx returned 0x%x\n",
 		    sizeof(next_file_offset), &next_file_offset, next_file_offset, ret);
 	}
@@ -1142,16 +718,150 @@ kern_dump_seek_to_next_file(void *kdp_core_out_vars, uint64_t next_file_offset)
 	return ret;
 }
 
-static int
-do_kern_dump(kern_dump_output_proc outproc, enum kern_dump_type kd_variant)
-{
-	struct kdp_core_out_vars outvars = { };
+#ifdef CONFIG_KDP_COREDUMP_ENCRYPTION
 
+static kern_return_t
+kern_dump_write_public_key(struct kdp_core_out_state *outstate)
+{
+	struct kdp_output_stage *first_stage = STAILQ_FIRST(&outstate->kcos_out_stage);
+	uint64_t foffset;
+	uint64_t remainder = PUBLIC_KEY_RESERVED_LENGTH - kdp_core_header->pub_key_length;
+	kern_return_t ret;
+
+	if (kdp_core_header->pub_key_offset == 0 || kdp_core_header->pub_key_length == 0) {
+		// Nothing to do
+		return KERN_SUCCESS;
+	}
+
+	/* Write the public key -- first seek to the appropriate offset */
+	foffset = kdp_core_header->pub_key_offset;
+	if ((ret = (first_stage->kos_funcs.kosf_outproc)(first_stage, KDP_SEEK, NULL, sizeof(foffset), &foffset)) != KERN_SUCCESS) {
+		kern_coredump_log(NULL, "(kern_dump_write_public_key) outproc(KDP_SEEK, NULL, %lu, %p) foffset = 0x%llx returned 0x%x\n",
+		    sizeof(foffset), &foffset, foffset, ret);
+		return ret;
+	}
+
+	// Write the public key
+	if ((ret = (first_stage->kos_funcs.kosf_outproc)(first_stage, KDP_DATA, NULL, kdp_core_header->pub_key_length, kdp_core_public_key)) != KERN_SUCCESS) {
+		kern_coredump_log(NULL, "(kern_dump_write_public_key) outproc(KDP_DATA, NULL, %u, %p) returned 0x%x\n",
+		    kdp_core_header->pub_key_length, kdp_core_public_key, ret);
+		return ret;
+	}
+
+	// Fill out the remainder of the block with zeroes
+	if ((ret = (first_stage->kos_funcs.kosf_outproc)(first_stage, KDP_DATA, NULL, remainder, NULL)) != KERN_SUCCESS) {
+		kern_coredump_log(NULL, "(kern_dump_write_public_key) outproc(KDP_DATA, NULL, %llu, NULL) returned 0x%x\n",
+		    remainder, ret);
+		return ret;
+	}
+
+	// Do it once more to write the "next" public key
+	if ((ret = (first_stage->kos_funcs.kosf_outproc)(first_stage, KDP_DATA, NULL, kdp_core_header->pub_key_length, kdp_core_public_key)) != KERN_SUCCESS) {
+		kern_coredump_log(NULL, "(kern_dump_write_public_key) outproc(KDP_DATA, NULL, %u, %p) returned 0x%x\n",
+		    kdp_core_header->pub_key_length, kdp_core_public_key, ret);
+		return ret;
+	}
+
+	if ((ret = (first_stage->kos_funcs.kosf_outproc)(first_stage, KDP_DATA, NULL, remainder, NULL)) != KERN_SUCCESS) {
+		kern_coredump_log(NULL, "(kern_dump_write_public_key) outproc(KDP_DATA, NULL, %llu, NULL) returned 0x%x\n",
+		    remainder, ret);
+		return ret;
+	}
+
+	if ((ret = (first_stage->kos_funcs.kosf_outproc)(first_stage, KDP_DATA, NULL, 0, NULL)) != KERN_SUCCESS) {
+		kern_coredump_log(NULL, "(kern_dump_write_public_key) outproc data flush returned 0x%x\n", ret);
+		return ret;
+	}
+
+#if defined(__arm__) || defined(__arm64__)
+	if ((ret = (first_stage->kos_funcs.kosf_outproc)(first_stage, KDP_FLUSH, NULL, 0, NULL)) != KERN_SUCCESS) {
+		kern_coredump_log(NULL, "(kern_dump_write_public_key) outproc explicit flush returned 0x%x\n", ret);
+		return ret;
+	}
+#endif /* defined(__arm__) || defined(__arm64__) */
+
+	return ret;
+}
+
+#endif // CONFIG_KDP_COREDUMP_ENCRYPTION
+
+static kern_return_t
+chain_output_stages(enum kern_dump_type kd_variant, struct kdp_core_out_state *outstate)
+{
+	struct kdp_output_stage *current = NULL;
+
+	switch (kd_variant) {
+	case KERN_DUMP_STACKSHOT_DISK:
+		OS_FALLTHROUGH;
+	case KERN_DUMP_DISK:
+		if (!kdp_corezip_disabled) {
+			STAILQ_INSERT_TAIL(&outstate->kcos_out_stage, &zlib_output_stage, kos_next);
+		}
+		STAILQ_INSERT_TAIL(&outstate->kcos_out_stage, &progress_notify_output_stage, kos_next);
+#ifdef CONFIG_KDP_COREDUMP_ENCRYPTION
+		if (kdp_core_is_initializing_encryption_stage) {
+			kern_coredump_log(NULL, "We were in the middle of initializing encryption. Marking it as unavailable\n");
+		} else if (aea_output_stage.kos_initialized) {
+			STAILQ_INSERT_TAIL(&outstate->kcos_out_stage, &aea_output_stage, kos_next);
+			outstate->kcos_encryption_stage = &aea_output_stage;
+		}
+		outstate->kcos_enforce_encryption = kern_dump_should_enforce_encryption();
+#endif // CONFIG_KDP_COREDUMP_ENCRYPTION
+		if (kdp_core_is_initializing_disk_stage) {
+			kern_coredump_log(NULL, "We were in the middle of initializing the disk stage. Cannot write a coredump to disk\n");
+			return KERN_FAILURE;
+		} else if (disk_output_stage.kos_initialized == false) {
+			kern_coredump_log(NULL, "Corefile is not yet initialized. Cannot write a coredump to disk\n");
+			return KERN_FAILURE;
+		}
+		STAILQ_INSERT_TAIL(&outstate->kcos_out_stage, &disk_output_stage, kos_next);
+		break;
+	case KERN_DUMP_NET:
+		if (!kdp_corezip_disabled) {
+			STAILQ_INSERT_TAIL(&outstate->kcos_out_stage, &zlib_output_stage, kos_next);
+		}
+		STAILQ_INSERT_TAIL(&outstate->kcos_out_stage, &progress_notify_output_stage, kos_next);
+		STAILQ_INSERT_TAIL(&outstate->kcos_out_stage, &buffer_output_stage, kos_next);
+		STAILQ_INSERT_TAIL(&outstate->kcos_out_stage, &net_output_stage, kos_next);
+		break;
+#if defined(__arm__) || defined(__arm64__)
+	case KERN_DUMP_HW_SHMEM_DBG:
+		if (!kdp_corezip_disabled) {
+			STAILQ_INSERT_TAIL(&outstate->kcos_out_stage, &zlib_output_stage, kos_next);
+		}
+		STAILQ_INSERT_TAIL(&outstate->kcos_out_stage, &shmem_output_stage, kos_next);
+		break;
+#endif /* defined(__arm__) || defined(__arm64__) */
+	}
+
+	STAILQ_FOREACH(current, &outstate->kcos_out_stage, kos_next) {
+		current->kos_outstate = outstate;
+	}
+
+	return KERN_SUCCESS;
+}
+
+static int
+do_kern_dump(enum kern_dump_type kd_variant)
+{
+	struct kdp_core_out_state outstate = { };
+	struct kdp_output_stage *first_stage = NULL;
 	char *coredump_log_start = NULL, *buf = NULL;
 	size_t reserved_debug_logsize = 0, prior_debug_logsize = 0;
 	uint64_t foffset = 0;
-	int ret = 0;
+	kern_return_t ret = KERN_SUCCESS;
 	boolean_t output_opened = FALSE, dump_succeeded = TRUE;
+
+	/* Initialize output context */
+
+	bzero(&outstate, sizeof(outstate));
+	STAILQ_INIT(&outstate.kcos_out_stage);
+	ret = chain_output_stages(kd_variant, &outstate);
+	if (KERN_SUCCESS != ret) {
+		dump_succeeded = FALSE;
+		goto exit;
+	}
+	first_stage = STAILQ_FIRST(&outstate.kcos_out_stage);
 
 	/*
 	 * Record the initial panic log buffer length so we can dump the coredump log
@@ -1175,7 +885,7 @@ do_kern_dump(kern_dump_output_proc outproc, enum kern_dump_type kd_variant)
 
 	if ((kd_variant == KERN_DUMP_DISK) || (kd_variant == KERN_DUMP_STACKSHOT_DISK)) {
 		/* Open the file for output */
-		if ((ret = (*outproc)(KDP_WRQ, NULL, 0, NULL)) != kIOReturnSuccess) {
+		if ((ret = first_stage->kos_funcs.kosf_outproc(first_stage, KDP_WRQ, NULL, 0, NULL)) != KERN_SUCCESS) {
 			kern_coredump_log(NULL, "outproc(KDP_WRQ, NULL, 0, NULL) returned 0x%x\n", ret);
 			dump_succeeded = FALSE;
 			goto exit;
@@ -1183,67 +893,80 @@ do_kern_dump(kern_dump_output_proc outproc, enum kern_dump_type kd_variant)
 	}
 	output_opened = true;
 
-	/* Initialize gzip, output context */
-	bzero(&outvars, sizeof(outvars));
-	outvars.outproc = outproc;
-
 	if ((kd_variant == KERN_DUMP_DISK) || (kd_variant == KERN_DUMP_STACKSHOT_DISK)) {
-		outvars.zoutput     = kdp_core_zoutput;
+		const size_t aligned_corefile_header_size = roundup(kdp_core_header_size, KERN_COREDUMP_BEGIN_FILEBYTES_ALIGN);
+#ifdef CONFIG_KDP_COREDUMP_ENCRYPTION
+		const size_t aligned_public_key_size = PUBLIC_KEY_RESERVED_LENGTH * 2;
+#else
+		const size_t aligned_public_key_size = 0;
+#endif // CONFIG_KDP_COREDUMP_ENCRYPTION
+
 		reserved_debug_logsize = prior_debug_logsize + KERN_COREDUMP_MAXDEBUGLOGSIZE;
-		/* Space for file header, panic log, core log */
-		foffset = ((KERN_COREDUMP_HEADERSIZE + reserved_debug_logsize + (KERN_COREDUMP_BEGIN_FILEBYTES_ALIGN - 1)) \
-		    & ~(KERN_COREDUMP_BEGIN_FILEBYTES_ALIGN - 1));
-		kdp_core_header.log_offset = KERN_COREDUMP_HEADERSIZE;
+
+		/* Space for file header, public key, panic log, core log */
+		foffset = roundup(aligned_corefile_header_size + aligned_public_key_size + reserved_debug_logsize, KERN_COREDUMP_BEGIN_FILEBYTES_ALIGN);
+		kdp_core_header->log_offset = aligned_corefile_header_size + aligned_public_key_size;
+
+#ifdef CONFIG_KDP_COREDUMP_ENCRYPTION
+		/* Write the public key */
+		ret = kern_dump_write_public_key(&outstate);
+		if (KERN_SUCCESS != ret) {
+			kern_coredump_log(NULL, "(do_kern_dump write public key) returned 0x%x\n", ret);
+			dump_succeeded = FALSE;
+			goto exit;
+		}
+#endif // CONFIG_KDP_COREDUMP_ENCRYPTION
 
 		/* Seek the calculated offset (we'll scrollback later to flush the logs and header) */
-		if ((ret = (*outproc)(KDP_SEEK, NULL, sizeof(foffset), &foffset)) != kIOReturnSuccess) {
+		if ((ret = first_stage->kos_funcs.kosf_outproc(first_stage, KDP_SEEK, NULL, sizeof(foffset), &foffset)) != KERN_SUCCESS) {
 			kern_coredump_log(NULL, "(do_kern_dump seek begin) outproc(KDP_SEEK, NULL, %lu, %p) foffset = 0x%llx returned 0x%x\n",
 			    sizeof(foffset), &foffset, foffset, ret);
 			dump_succeeded = FALSE;
 			goto exit;
 		}
-	} else if (kd_variant == KERN_DUMP_NET) {
-		assert((kdp_core_zoffset + kdp_crashdump_pkt_size) <= kdp_core_zsize);
-		outvars.zoutput = kdp_core_zoutputbuf;
-#if defined(__arm__) || defined(__arm64__)
-	} else { /* KERN_DUMP_HW_SHMEM_DBG */
-		outvars.zoutput = kdp_core_zoutput;
-		kern_dump_hw_shmem_dbg_reset();
-#endif
 	}
 
 #if defined(__arm__) || defined(__arm64__)
 	flush_mmu_tlb();
 #endif
 
-	kern_coredump_log(NULL, "%s", (kd_variant == KERN_DUMP_DISK) ? "Writing local cores..." :
+	kern_coredump_log(NULL, "%s", (kd_variant == KERN_DUMP_DISK) ? "Writing local cores...\n" :
 	    "Transmitting kernel state, please wait:\n");
 
 
 #if defined(__x86_64__)
 	if (((kd_variant == KERN_DUMP_STACKSHOT_DISK) || (kd_variant == KERN_DUMP_DISK)) && ((panic_stackshot_buf != 0) && (panic_stackshot_len != 0))) {
-		uint64_t compressed_stackshot_len = 0;
+		bool should_skip = false;
 
-		if ((ret = kdp_reset_output_vars(&outvars, panic_stackshot_len)) != KERN_SUCCESS) {
-			kern_coredump_log(NULL, "Failed to reset outvars for stackshot with len 0x%zx, returned 0x%x\n", panic_stackshot_len, ret);
+		kern_coredump_log(NULL, "\nBeginning dump of kernel stackshot\n");
+
+		ret = kdp_reset_output_vars(&outstate, panic_stackshot_len, true, &should_skip);
+
+		if (ret != KERN_SUCCESS) {
+			kern_coredump_log(NULL, "Failed to reset outstate for stackshot with len 0x%zx, returned 0x%x\n", panic_stackshot_len, ret);
 			dump_succeeded = FALSE;
-		} else if ((ret = kdp_core_output(&outvars, panic_stackshot_len, (void *)panic_stackshot_buf)) != KERN_SUCCESS) {
-			kern_coredump_log(NULL, "Failed to write panic stackshot to file, kdp_coreoutput(outvars, %lu, %p) returned 0x%x\n",
-			    panic_stackshot_len, (void *) panic_stackshot_buf, ret);
-			dump_succeeded = FALSE;
-		} else if ((ret = kdp_core_output(&outvars, 0, NULL)) != KERN_SUCCESS) {
-			kern_coredump_log(NULL, "Failed to flush stackshot data : kdp_core_output(%p, 0, NULL) returned 0x%x\n", &outvars, ret);
-			dump_succeeded = FALSE;
-		} else if ((ret = kern_dump_record_file(&outvars, "panic_stackshot.kcdata", foffset, &compressed_stackshot_len)) != KERN_SUCCESS) {
-			kern_coredump_log(NULL, "Failed to record panic stackshot in corefile header, kern_dump_record_file returned 0x%x\n", ret);
-			dump_succeeded = FALSE;
-		} else {
-			kern_coredump_log(NULL, "Recorded panic stackshot in corefile at offset 0x%llx, compressed to %llu bytes\n", foffset, compressed_stackshot_len);
-			foffset = roundup((foffset + compressed_stackshot_len), KERN_COREDUMP_BEGIN_FILEBYTES_ALIGN);
-			if ((ret = kern_dump_seek_to_next_file(&outvars, foffset)) != kIOReturnSuccess) {
-				kern_coredump_log(NULL, "Failed to seek to stackshot file offset 0x%llx, kern_dump_seek_to_next_file returned 0x%x\n", foffset, ret);
+		} else if (!should_skip) {
+			uint64_t compressed_stackshot_len = 0;
+			if ((ret = kdp_core_output(&outstate, panic_stackshot_len, (void *)panic_stackshot_buf)) != KERN_SUCCESS) {
+				kern_coredump_log(NULL, "Failed to write panic stackshot to file, kdp_coreoutput(outstate, %lu, %p) returned 0x%x\n",
+				    panic_stackshot_len, (void *) panic_stackshot_buf, ret);
 				dump_succeeded = FALSE;
+			} else if ((ret = kdp_core_output(&outstate, 0, NULL)) != KERN_SUCCESS) {
+				kern_coredump_log(NULL, "Failed to flush stackshot data : kdp_core_output(%p, 0, NULL) returned 0x%x\n", &outstate, ret);
+				dump_succeeded = FALSE;
+			} else if ((ret = kern_dump_record_file(&outstate, "panic_stackshot.kcdata", foffset, &compressed_stackshot_len)) != KERN_SUCCESS) {
+				kern_coredump_log(NULL, "Failed to record panic stackshot in corefile header, kern_dump_record_file returned 0x%x\n", ret);
+				dump_succeeded = FALSE;
+			} else {
+				kern_coredump_log(NULL, "Recorded panic stackshot in corefile at offset 0x%llx, compressed to %llu bytes\n", foffset, compressed_stackshot_len);
+				foffset = roundup((foffset + compressed_stackshot_len), KERN_COREDUMP_BEGIN_FILEBYTES_ALIGN);
+				if ((ret = kern_dump_seek_to_next_file(&outstate, foffset)) != KERN_SUCCESS) {
+					kern_coredump_log(NULL, "Failed to seek to stackshot file offset 0x%llx, kern_dump_seek_to_next_file returned 0x%x\n", foffset, ret);
+					dump_succeeded = FALSE;
+				}
 			}
+		} else {
+			kern_coredump_log(NULL, "Skipping stackshot dump\n");
 		}
 	}
 #endif
@@ -1253,12 +976,12 @@ do_kern_dump(kern_dump_output_proc outproc, enum kern_dump_type kd_variant)
 		 * Dump co-processors as well, foffset will be overwritten with the
 		 * offset of the next location in the file to be written to.
 		 */
-		if (kern_do_coredump(&outvars, FALSE, foffset, &foffset) != 0) {
+		if (kern_do_coredump(&outstate, FALSE, foffset, &foffset) != 0) {
 			dump_succeeded = FALSE;
 		}
 	} else if (kd_variant != KERN_DUMP_STACKSHOT_DISK) {
 		/* Only the kernel */
-		if (kern_do_coredump(&outvars, TRUE, foffset, &foffset) != 0) {
+		if (kern_do_coredump(&outstate, TRUE, foffset, &foffset) != 0) {
 			dump_succeeded = FALSE;
 		}
 	}
@@ -1268,8 +991,8 @@ do_kern_dump(kern_dump_output_proc outproc, enum kern_dump_type kd_variant)
 		size_t remaining_debug_logspace = reserved_debug_logsize;
 
 		/* Write the debug log -- first seek to the end of the corefile header */
-		foffset = KERN_COREDUMP_HEADERSIZE;
-		if ((ret = (*outproc)(KDP_SEEK, NULL, sizeof(foffset), &foffset)) != kIOReturnSuccess) {
+		foffset = kdp_core_header->log_offset;
+		if ((ret = first_stage->kos_funcs.kosf_outproc(first_stage, KDP_SEEK, NULL, sizeof(foffset), &foffset)) != KERN_SUCCESS) {
 			kern_coredump_log(NULL, "(do_kern_dump seek logfile) outproc(KDP_SEEK, NULL, %lu, %p) foffset = 0x%llx returned 0x%x\n",
 			    sizeof(foffset), &foffset, foffset, ret);
 			dump_succeeded = FALSE;
@@ -1289,7 +1012,7 @@ do_kern_dump(kern_dump_output_proc outproc, enum kern_dump_type kd_variant)
 #endif
 
 		buf = debug_buf_base;
-		if ((ret = (*outproc)(KDP_DATA, NULL, initial_log_length, buf)) != kIOReturnSuccess) {
+		if ((ret = first_stage->kos_funcs.kosf_outproc(first_stage, KDP_DATA, NULL, initial_log_length, buf)) != KERN_SUCCESS) {
 			kern_coredump_log(NULL, "(do_kern_dump paniclog) outproc(KDP_DATA, NULL, %lu, %p) returned 0x%x\n",
 			    initial_log_length, buf, ret);
 			dump_succeeded = FALSE;
@@ -1321,20 +1044,20 @@ do_kern_dump(kern_dump_output_proc outproc, enum kern_dump_type kd_variant)
 		}
 
 		/* Write the coredump log */
-		if ((ret = (*outproc)(KDP_DATA, NULL, other_log_length, buf)) != kIOReturnSuccess) {
+		if ((ret = first_stage->kos_funcs.kosf_outproc(first_stage, KDP_DATA, NULL, other_log_length, buf)) != KERN_SUCCESS) {
 			kern_coredump_log(NULL, "(do_kern_dump coredump log) outproc(KDP_DATA, NULL, %lu, %p) returned 0x%x\n",
 			    other_log_length, buf, ret);
 			dump_succeeded = FALSE;
 			goto exit;
 		}
 
-		kdp_core_header.log_length = initial_log_length + other_log_length;
-		kern_dump_update_header(&outvars);
+		kdp_core_header->log_length = initial_log_length + other_log_length;
+		kern_dump_update_header(&outstate);
 	}
 
 exit:
 	/* close / last packet */
-	if (output_opened && (ret = (*outproc)(KDP_EOF, NULL, 0, ((void *) 0))) != kIOReturnSuccess) {
+	if (output_opened && (ret = first_stage->kos_funcs.kosf_outproc(first_stage, KDP_EOF, NULL, 0, ((void *) 0))) != KERN_SUCCESS) {
 		kern_coredump_log(NULL, "(do_kern_dump close) outproc(KDP_EOF, NULL, 0, 0) returned 0x%x\n", ret);
 		dump_succeeded = FALSE;
 	}
@@ -1367,7 +1090,7 @@ kern_dump(enum kern_dump_type kd_variant)
 	static boolean_t local_dump_in_progress = FALSE, dumped_local = FALSE;
 	int ret = -1;
 #if KASAN
-	kasan_disable();
+	kasan_kdp_disable();
 #endif
 	if ((kd_variant == KERN_DUMP_DISK) || (kd_variant == KERN_DUMP_STACKSHOT_DISK)) {
 		if (dumped_local) {
@@ -1378,11 +1101,9 @@ kern_dump(enum kern_dump_type kd_variant)
 		}
 		local_dump_in_progress = TRUE;
 #if defined(__arm__) || defined(__arm64__)
-		if (hwsd_info != NULL) {
-			hwsd_info->xhsdci_status = XHSDCI_STATUS_KERNEL_BUSY;
-		}
+		shmem_mark_as_busy();
 #endif
-		ret = do_kern_dump(&kern_dump_disk_proc, kd_variant);
+		ret = do_kern_dump(kd_variant);
 		if (ret == 0) {
 			dumped_local = TRUE;
 			kern_dump_successful = TRUE;
@@ -1392,14 +1113,14 @@ kern_dump(enum kern_dump_type kd_variant)
 		return ret;
 #if defined(__arm__) || defined(__arm64__)
 	} else if (kd_variant == KERN_DUMP_HW_SHMEM_DBG) {
-		ret =  do_kern_dump(&kern_dump_hw_shmem_dbg_buffer_proc, KERN_DUMP_HW_SHMEM_DBG);
+		ret = do_kern_dump(kd_variant);
 		if (ret == 0) {
 			kern_dump_successful = TRUE;
 		}
 		return ret;
 #endif
 	} else {
-		ret = do_kern_dump(&kdp_send_crashdump_data, KERN_DUMP_NET);
+		ret = do_kern_dump(kd_variant);
 		if (ret == 0) {
 			kern_dump_successful = TRUE;
 		}
@@ -1407,179 +1128,423 @@ kern_dump(enum kern_dump_type kd_variant)
 	}
 }
 
-#if defined(__arm__) || defined(__arm64__)
-void
-panic_spin_shmcon(void)
+static kern_return_t
+kdp_core_init_output_stages(void)
 {
-	if (!PE_i_can_has_debugger(NULL)) {
-		return;
+	kern_return_t ret = KERN_SUCCESS;
+
+	// We only zero-out the disk stage. It will be initialized
+	// later on when the corefile is initialized
+	bzero(&disk_output_stage, sizeof(disk_output_stage));
+
+	bzero(&zlib_output_stage, sizeof(zlib_output_stage));
+	ret = zlib_stage_initialize(&zlib_output_stage);
+	if (KERN_SUCCESS != ret) {
+		return ret;
 	}
 
-	if (hwsd_info == NULL) {
-		kern_coredump_log(NULL, "handshake structure not initialized\n");
-		return;
+	bzero(&buffer_output_stage, sizeof(buffer_output_stage));
+	ret = buffer_stage_initialize(&buffer_output_stage, kdp_crashdump_pkt_size);
+	if (KERN_SUCCESS != ret) {
+		return ret;
 	}
 
-	kern_coredump_log(NULL, "\nPlease go to https://panic.apple.com to report this panic\n");
-	kern_coredump_log(NULL, "Waiting for hardware shared memory debugger, handshake structure is at virt: %p, phys %p\n",
-	    hwsd_info, (void *)kvtophys((vm_offset_t)hwsd_info));
+	bzero(&net_output_stage, sizeof(net_output_stage));
+	ret = net_stage_initialize(&net_output_stage);
+	if (KERN_SUCCESS != ret) {
+		return ret;
+	}
 
-	hwsd_info->xhsdci_status = XHSDCI_STATUS_KERNEL_READY;
-	hwsd_info->xhsdci_seq_no = 0;
-	FlushPoC_DcacheRegion((vm_offset_t) hwsd_info, sizeof(*hwsd_info));
+	bzero(&progress_notify_output_stage, sizeof(progress_notify_output_stage));
+	ret = progress_notify_stage_initialize(&progress_notify_output_stage);
+	if (KERN_SUCCESS != ret) {
+		return ret;
+	}
 
-	for (;;) {
-		FlushPoC_DcacheRegion((vm_offset_t) hwsd_info, sizeof(*hwsd_info));
-		if (hwsd_info->xhsdci_status == XHSDCI_COREDUMP_BEGIN) {
-			kern_dump(KERN_DUMP_HW_SHMEM_DBG);
+#ifdef CONFIG_KDP_COREDUMP_ENCRYPTION
+	// We only zero-out the AEA stage. It will be initialized
+	// later on, if it's supported and needed
+	bzero(&aea_output_stage, sizeof(aea_output_stage));
+	aea_stage_monitor_availability();
+#endif // CONFIG_KDP_COREDUMP_ENCRYPTION
+
+#if defined(__arm__) || defined(__arm64__)
+	bzero(&shmem_output_stage, sizeof(shmem_output_stage));
+	if (PE_consistent_debug_enabled() && PE_i_can_has_debugger(NULL)) {
+		ret = shmem_stage_initialize(&shmem_output_stage);
+		if (KERN_SUCCESS != ret) {
+			return ret;
 		}
-
-		if ((hwsd_info->xhsdci_status == XHSDCI_COREDUMP_REMOTE_DONE) ||
-		    (hwsd_info->xhsdci_status == XHSDCI_COREDUMP_ERROR)) {
-			hwsd_info->xhsdci_status = XHSDCI_STATUS_KERNEL_READY;
-			hwsd_info->xhsdci_seq_no = 0;
-			FlushPoC_DcacheRegion((vm_offset_t) hwsd_info, sizeof(*hwsd_info));
-		}
 	}
-}
 #endif /* defined(__arm__) || defined(__arm64__) */
 
-static void *
-kdp_core_zalloc(void * __unused ref, u_int items, u_int size)
-{
-	void * result;
-
-	result = (void *) (kdp_core_zmem + kdp_core_zoffset);
-	kdp_core_zoffset += ~31L & (31 + (items * size)); // 32b align for vector crc
-	assert(kdp_core_zoffset <= kdp_core_zsize);
-
-	return result;
+	return ret;
 }
 
-static void
-kdp_core_zfree(void * __unused ref, void * __unused ptr)
+#ifdef CONFIG_KDP_COREDUMP_ENCRYPTION
+
+static bool
+kern_dump_should_enforce_encryption(void)
 {
+	static int enforce_encryption = -1;
+
+	// Only check once
+	if (enforce_encryption == -1) {
+		uint32_t coredump_encryption_flags = 0;
+
+		// When set, the boot-arg is the sole decider
+		if (!kernel_debugging_restricted() &&
+		    PE_parse_boot_argn("coredump_encryption", &coredump_encryption_flags, sizeof(coredump_encryption_flags))) {
+			enforce_encryption = (coredump_encryption_flags & COREDUMP_ENCRYPTION_OVERRIDES_ENFORCEMENT) != 0 ? 1 : 0;
+		} else {
+			enforce_encryption = 0;
+		}
+	}
+
+	return enforce_encryption != 0;
 }
 
+static bool
+kern_dump_is_encryption_available(void)
+{
+	// Default to feature enabled unless boot-arg says otherwise
+	uint32_t coredump_encryption_flags = COREDUMP_ENCRYPTION_OVERRIDES_AVAILABILITY;
 
-#if defined(__arm__) || defined(__arm64__)
-#define LEVEL Z_BEST_SPEED
-#define NETBUF 0
+	if (!kernel_debugging_restricted()) {
+		PE_parse_boot_argn("coredump_encryption", &coredump_encryption_flags, sizeof(coredump_encryption_flags));
+	}
+
+	if ((coredump_encryption_flags & COREDUMP_ENCRYPTION_OVERRIDES_AVAILABILITY) == 0) {
+		return false;
+	}
+
+	return aea_stage_is_available();
+}
+
+/*
+ * Initialize (or de-initialize) the encryption stage. This is done in a way such that if initializing the
+ * encryption stage with a new key fails, then the existing encryption stage is left untouched. Once
+ * the new stage is initialized, the old stage is uninitialized.
+ *
+ * This function is called whenever we have a new public key (whether from someone calling our sysctl, or because
+ * we read it out of a corefile), or when encryption becomes available.
+ *
+ * Parameters:
+ *  - public_key:      The public key to use when initializing the encryption stage. Can be NULL to indicate that
+ *                     the encryption stage should be de-initialized.
+ *  - public_key_size: The size of the given public key.
+ */
+static kern_return_t
+kdp_core_init_encryption_stage(void *public_key, size_t public_key_size)
+{
+	kern_return_t ret = KERN_SUCCESS;
+	struct kdp_output_stage new_encryption_stage = {};
+	struct kdp_output_stage old_encryption_stage = {};
+
+	lck_mtx_assert(kdp_core_encryption_stage_lock, LCK_MTX_ASSERT_OWNED);
+
+	bzero(&new_encryption_stage, sizeof(new_encryption_stage));
+
+	if (public_key && kern_dump_is_encryption_available()) {
+		ret = aea_stage_initialize(&new_encryption_stage, public_key, public_key_size);
+		if (KERN_SUCCESS != ret) {
+			printf("(kdp_core_init_encryption_stage) Failed to initialize the encryption stage. Error 0x%x\n", ret);
+			return ret;
+		}
+	}
+
+	bcopy(&aea_output_stage, &old_encryption_stage, sizeof(aea_output_stage));
+
+	bcopy(&new_encryption_stage, &aea_output_stage, sizeof(new_encryption_stage));
+
+	if (old_encryption_stage.kos_initialized && old_encryption_stage.kos_funcs.kosf_free) {
+		old_encryption_stage.kos_funcs.kosf_free(&old_encryption_stage);
+	}
+
+	return KERN_SUCCESS;
+}
+
+kern_return_t
+kdp_core_handle_new_encryption_key(IOCoreFileAccessCallback access_data, void *access_context, void *recipient_context)
+{
+	kern_return_t ret = KERN_SUCCESS;
+	struct kdp_core_encryption_key_descriptor *key_descriptor = (struct kdp_core_encryption_key_descriptor *) recipient_context;
+	void *old_public_key = NULL;
+	size_t old_public_key_size = 0;
+
+	if (!key_descriptor) {
+		return kIOReturnBadArgument;
+	}
+
+	lck_mtx_lock(kdp_core_encryption_stage_lock);
+	kdp_core_is_initializing_encryption_stage = true;
+
+	do {
+		// Do the risky part first, and bail out cleanly if it fails
+		ret = kdp_core_init_encryption_stage(key_descriptor->kcekd_key, key_descriptor->kcekd_size);
+		if (ret != KERN_SUCCESS) {
+			printf("kdp_core_handle_new_encryption_key failed to re-initialize encryption stage. Error 0x%x\n", ret);
+			break;
+		}
+
+		// The rest of this function should technically never fail
+
+		old_public_key = kdp_core_public_key;
+		old_public_key_size = kdp_core_header->pub_key_length;
+
+		kdp_core_public_key = key_descriptor->kcekd_key;
+		kdp_core_header->flags &= ~MACH_CORE_FILEHEADER_V2_FLAGS_NEXT_COREFILE_KEY_FORMAT_MASK;
+		kdp_core_header->flags &= ~MACH_CORE_FILEHEADER_V2_FLAGS_EXISTING_COREFILE_KEY_FORMAT_MASK;
+		if (key_descriptor->kcekd_key) {
+			kdp_core_header->flags |= key_descriptor->kcekd_format & MACH_CORE_FILEHEADER_V2_FLAGS_NEXT_COREFILE_KEY_FORMAT_MASK;
+			kdp_core_header->flags |= MACH_CORE_FILEHEADER_V2_FLAGS_NEXT_KEY_FORMAT_TO_KEY_FORMAT(key_descriptor->kcekd_format);
+			kdp_core_header->pub_key_offset = roundup(kdp_core_header_size, KERN_COREDUMP_BEGIN_FILEBYTES_ALIGN);
+			kdp_core_header->pub_key_length = key_descriptor->kcekd_size;
+		} else {
+			kdp_core_header->pub_key_offset = 0;
+			kdp_core_header->pub_key_length = 0;
+		}
+
+		if (old_public_key) {
+			kmem_free(kernel_map, (vm_offset_t) old_public_key, old_public_key_size);
+		}
+
+		// If this stuff fails, we have bigger problems
+		struct mach_core_fileheader_v2 existing_header;
+		bool used_existing_header = false;
+		ret = access_data(access_context, FALSE, 0, sizeof(existing_header), &existing_header);
+		if (ret != KERN_SUCCESS) {
+			printf("kdp_core_handle_new_encryption_key failed to read the existing corefile header. Error 0x%x\n", ret);
+			break;
+		}
+
+		if (existing_header.signature == MACH_CORE_FILEHEADER_V2_SIGNATURE
+		    && existing_header.version == 2
+		    && (existing_header.pub_key_length == 0
+		    || kdp_core_header->pub_key_length == 0
+		    || existing_header.pub_key_length == kdp_core_header->pub_key_length)) {
+			used_existing_header = true;
+			existing_header.flags &= ~MACH_CORE_FILEHEADER_V2_FLAGS_NEXT_COREFILE_KEY_FORMAT_MASK;
+
+			if (kdp_core_public_key) {
+				existing_header.flags |= key_descriptor->kcekd_format & MACH_CORE_FILEHEADER_V2_FLAGS_NEXT_COREFILE_KEY_FORMAT_MASK;
+
+				if (existing_header.pub_key_offset == 0) {
+					existing_header.pub_key_offset = kdp_core_header->pub_key_offset;
+					existing_header.pub_key_length = kdp_core_header->pub_key_length;
+				}
+			}
+
+			ret = access_data(access_context, TRUE, 0, sizeof(existing_header), &existing_header);
+			if (ret != KERN_SUCCESS) {
+				printf("kdp_core_handle_new_encryption_key failed to update the existing corefile header. Error 0x%x\n", ret);
+				break;
+			}
+		} else {
+			ret = access_data(access_context, TRUE, 0, sizeof(struct mach_core_fileheader_v2), kdp_core_header);
+			if (ret != KERN_SUCCESS) {
+				printf("kdp_core_handle_new_encryption_key failed to write the corefile header. Error 0x%x\n", ret);
+				break;
+			}
+		}
+
+		if (kdp_core_header->pub_key_length) {
+			uint64_t offset = used_existing_header ? existing_header.pub_key_offset : kdp_core_header->pub_key_offset;
+			ret = access_data(access_context, TRUE, offset + PUBLIC_KEY_RESERVED_LENGTH, kdp_core_header->pub_key_length, kdp_core_public_key);
+			if (ret != KERN_SUCCESS) {
+				printf("kdp_core_handle_new_encryption_key failed to write the next public key. Error 0x%x\n", ret);
+				break;
+			}
+
+			if (!used_existing_header) {
+				// Everything that happens here is optional. It's not the end of the world if this stuff fails, so we don't return
+				// any errors
+				// Since we're writing out a completely new header, we make sure to zero-out the region that's reserved for the public key.
+				// This allows us consumers of the corefile to know for sure that this corefile is not encrypted (yet). Once we actually
+				// write out a corefile, we'll overwrite this region with the key that we ended up using at the time.
+				// If we fail to zero-out this region, consumers would read garbage data and properly fail to interpret it as a public key,
+				// which is why it is OK for us to fail here (it's hard to interpret garbage data as a valid key, and even then, they wouldn't
+				// find a matching private key anyway)
+				void *empty_key = NULL;
+				kern_return_t temp_ret = KERN_SUCCESS;
+
+				temp_ret = kmem_alloc_flags(kernel_map, (vm_offset_t *) &empty_key, PUBLIC_KEY_RESERVED_LENGTH, VM_KERN_MEMORY_DIAG, KMA_ZERO);
+				if (temp_ret != KERN_SUCCESS) {
+					printf("kdp_core_handle_new_encryption_key failed to allocate an empty key. Error 0x%x\n", temp_ret);
+					break;
+				}
+
+				temp_ret = access_data(access_context, TRUE, offset, PUBLIC_KEY_RESERVED_LENGTH, empty_key);
+				kmem_free(kernel_map, (vm_offset_t) empty_key, PUBLIC_KEY_RESERVED_LENGTH);
+
+				if (temp_ret != KERN_SUCCESS) {
+					printf("kdp_core_handle_new_encryption_key failed to zero-out the public key region. Error 0x%x\n", temp_ret);
+					break;
+				}
+			}
+		}
+	} while (0);
+
+	kdp_core_is_initializing_encryption_stage = false;
+	lck_mtx_unlock(kdp_core_encryption_stage_lock);
+
+	return ret;
+}
+
+kern_return_t
+kdp_core_handle_encryption_available(void)
+{
+	kern_return_t ret;
+
+	lck_mtx_lock(kdp_core_encryption_stage_lock);
+	kdp_core_is_initializing_encryption_stage = true;
+
+	ret = kdp_core_init_encryption_stage(kdp_core_public_key, kdp_core_header->pub_key_length);
+
+	kdp_core_is_initializing_encryption_stage = false;
+	lck_mtx_unlock(kdp_core_encryption_stage_lock);
+
+	return ret;
+}
+
+#endif // CONFIG_KDP_COREDUMP_ENCRYPTION
+
+kern_return_t
+kdp_core_polled_io_polled_file_available(IOCoreFileAccessCallback access_data, void *access_context, __unused void *recipient_context)
+{
+	kern_return_t ret = KERN_SUCCESS;
+
+	lck_mtx_lock(kdp_core_disk_stage_lock);
+	kdp_core_is_initializing_disk_stage = true;
+
+	ret = disk_stage_initialize(&disk_output_stage);
+
+	kdp_core_is_initializing_disk_stage = false;
+	lck_mtx_unlock(kdp_core_disk_stage_lock);
+
+	if (KERN_SUCCESS != ret) {
+		return ret;
+	}
+
+#ifdef CONFIG_KDP_COREDUMP_ENCRYPTION
+	// If someone has already provided a new public key,
+	// there's no sense in reading the old one from the corefile.
+	if (kdp_core_public_key != NULL) {
+		return KERN_SUCCESS;
+	}
+
+	// The kernel corefile is now available. Let's try to retrieve the public key from its
+	// header (if available and supported).
+
+	// First let's read the corefile header itself
+	struct mach_core_fileheader_v2 temp_header = {};
+	ret = access_data(access_context, FALSE, 0, sizeof(temp_header), &temp_header);
+	if (KERN_SUCCESS != ret) {
+		printf("kdp_core_polled_io_polled_file_available failed to read corefile header. Error 0x%x\n", ret);
+		return ret;
+	}
+
+	// Check if the corefile header is initialized, and whether it's initialized to values that we support
+	// (for backwards and forwards) compatibility, and check whether the header indicates that the corefile has
+	// has a public key stashed inside of it.
+	if (temp_header.signature == MACH_CORE_FILEHEADER_V2_SIGNATURE
+	    && temp_header.version == 2
+	    && temp_header.pub_key_offset != 0
+	    && temp_header.pub_key_length != 0
+	    /* Future-proofing: make sure it's the key format that we support */
+	    && (temp_header.flags & MACH_CORE_FILEHEADER_V2_FLAGS_NEXT_COREFILE_KEY_FORMAT_MASK) == MACH_CORE_FILEHEADER_V2_FLAG_NEXT_COREFILE_KEY_FORMAT_NIST_P256
+	    /* Add some extra sanity checks. These are not necessary */
+	    && temp_header.pub_key_length <= 4096
+	    && temp_header.pub_key_offset < 65535) {
+		// The corefile header is properly initialized, is supported, and contains a public key.
+		// Let's adopt that public key for our encryption needs
+		void *public_key = NULL;
+
+		ret = kmem_alloc(kernel_map, (vm_offset_t *) &public_key, temp_header.pub_key_length, VM_KERN_MEMORY_DIAG);
+		assert(KERN_SUCCESS == ret);
+
+		// Read the public key from the corefile. Note that the key we're trying to adopt is the "next" key, which is
+		// PUBLIC_KEY_RESERVED_LENGTH bytes after the public key.
+		ret = access_data(access_context, FALSE, temp_header.pub_key_offset + PUBLIC_KEY_RESERVED_LENGTH, temp_header.pub_key_length, public_key);
+		if (KERN_SUCCESS != ret) {
+			printf("kdp_core_polled_io_polled_file_available failed to read the public key. Error 0x%x\n", ret);
+			kmem_free(kernel_map, (vm_offset_t) public_key, temp_header.pub_key_length);
+			return ret;
+		}
+
+		lck_mtx_lock(kdp_core_encryption_stage_lock);
+		kdp_core_is_initializing_encryption_stage = true;
+
+		ret = kdp_core_init_encryption_stage(public_key, temp_header.pub_key_length);
+		if (KERN_SUCCESS == ret) {
+			kdp_core_header->flags |= temp_header.flags & MACH_CORE_FILEHEADER_V2_FLAGS_NEXT_COREFILE_KEY_FORMAT_MASK;
+			kdp_core_header->flags |= MACH_CORE_FILEHEADER_V2_FLAGS_NEXT_KEY_FORMAT_TO_KEY_FORMAT(temp_header.flags);
+			kdp_core_header->pub_key_offset = roundup(kdp_core_header_size, KERN_COREDUMP_BEGIN_FILEBYTES_ALIGN);
+			kdp_core_header->pub_key_length = temp_header.pub_key_length;
+			kdp_core_public_key = public_key;
+		}
+
+		kdp_core_is_initializing_encryption_stage = false;
+		lck_mtx_unlock(kdp_core_encryption_stage_lock);
+	}
 #else
-#define LEVEL Z_BEST_SPEED
-#define NETBUF 1440
-#endif
+#pragma unused(access_data, access_context)
+#endif // CONFIG_KDP_COREDUMP_ENCRYPTION
+
+	return ret;
+}
+
+kern_return_t
+kdp_core_polled_io_polled_file_unavailable(void)
+{
+	lck_mtx_lock(kdp_core_disk_stage_lock);
+	kdp_core_is_initializing_disk_stage = true;
+
+	if (disk_output_stage.kos_initialized && disk_output_stage.kos_funcs.kosf_free) {
+		disk_output_stage.kos_funcs.kosf_free(&disk_output_stage);
+	}
+
+	kdp_core_is_initializing_disk_stage = false;
+	lck_mtx_unlock(kdp_core_disk_stage_lock);
+
+	return KERN_SUCCESS;
+}
 
 void
 kdp_core_init(void)
 {
-	int wbits = 12;
-	int memlevel = 3;
 	kern_return_t kr;
-#if defined(__arm__) || defined(__arm64__)
-	int i = 0;
-	vm_offset_t kdp_core_hw_shmem_buf = 0;
-	struct kdp_hw_shmem_dbg_buf_elm *cur_elm = NULL;
-	cache_info_t   *cpuid_cache_info = NULL;
-#endif /* defined(__arm__) || defined(__arm64__) */
 	kern_coredump_callback_config core_config = { };
 
-	if (kdp_core_zs.zalloc) {
-		return;
-	}
-	kdp_core_zsize = round_page(NETBUF + zlib_deflate_memory_size(wbits, memlevel));
-	printf("kdp_core zlib memory 0x%lx\n", kdp_core_zsize);
-	kr = kmem_alloc(kernel_map, &kdp_core_zmem, kdp_core_zsize, VM_KERN_MEMORY_DIAG);
+	/* Initialize output stages */
+	kr = kdp_core_init_output_stages();
 	assert(KERN_SUCCESS == kr);
 
-	kdp_core_zoffset = 0;
-	kdp_core_zs.zalloc = kdp_core_zalloc;
-	kdp_core_zs.zfree  = kdp_core_zfree;
+	kr = kmem_alloc(kernel_map, (vm_offset_t*) &kdp_core_header, kdp_core_header_size, VM_KERN_MEMORY_DIAG);
+	assert(KERN_SUCCESS == kr);
 
-	if (deflateInit2(&kdp_core_zs, LEVEL, Z_DEFLATED,
-	    wbits + 16 /*gzip mode*/, memlevel, Z_DEFAULT_STRATEGY)) {
-		/* Allocation failed */
-		bzero(&kdp_core_zs, sizeof(kdp_core_zs));
-		kdp_core_zoffset = 0;
-	}
+	bzero(kdp_core_header, kdp_core_header_size);
+	kdp_core_header->signature = MACH_CORE_FILEHEADER_V2_SIGNATURE;
+	kdp_core_header->version = 2;
 
-	bzero(&kdp_core_header, sizeof(kdp_core_header));
+	kdp_core_initialization_lock_group = lck_grp_alloc_init("KDPCoreStageInit", LCK_GRP_ATTR_NULL);
+	kdp_core_disk_stage_lock = lck_mtx_alloc_init(kdp_core_initialization_lock_group, LCK_ATTR_NULL);
+
+#ifdef CONFIG_KDP_COREDUMP_ENCRYPTION
+	kdp_core_encryption_stage_lock = lck_mtx_alloc_init(kdp_core_initialization_lock_group, LCK_ATTR_NULL);
+
+	(void) kern_dump_should_enforce_encryption();
+#endif // CONFIG_KDP_COREDUMP_ENCRYPTION
 
 	core_config.kcc_coredump_init = NULL; /* TODO: consider doing mmu flush from an init function */
 	core_config.kcc_coredump_get_summary = kern_dump_save_summary;
 	core_config.kcc_coredump_save_segment_descriptions = kern_dump_save_seg_descriptions;
 	core_config.kcc_coredump_save_thread_state = kern_dump_save_thread_state;
-	core_config.kcc_coredump_save_sw_vers = kern_dump_save_sw_vers;
+	core_config.kcc_coredump_save_sw_vers_detail = kern_dump_save_sw_vers_detail;
 	core_config.kcc_coredump_save_segment_data = kern_dump_save_segment_data;
-	core_config.kcc_coredump_save_misc_data = NULL;
 
 	kr = kern_register_xnu_coredump_helper(&core_config);
 	assert(KERN_SUCCESS == kr);
-
-#if defined(__arm__) || defined(__arm64__)
-	if (!PE_consistent_debug_enabled()) {
-		return;
-	}
-
-	if (!PE_i_can_has_debugger(NULL)) {
-		return;
-	}
-
-	/*
-	 * We need to allocate physically contiguous memory since astris isn't capable
-	 * of doing address translations while the CPUs are running.
-	 */
-	kdp_hw_shmem_dbg_bufsize = KDP_CORE_HW_SHMEM_DBG_TOTAL_BUF_SIZE;
-	kr = kmem_alloc_contig(kernel_map, &kdp_core_hw_shmem_buf,
-	    kdp_hw_shmem_dbg_bufsize, VM_MAP_PAGE_MASK(kernel_map),
-	    0, 0, KMA_KOBJECT, VM_KERN_MEMORY_DIAG);
-	assert(KERN_SUCCESS == kr);
-
-	/*
-	 * Put the connection info structure at the beginning of this buffer and adjust
-	 * the buffer size accordingly.
-	 */
-	hwsd_info = (struct xnu_hw_shmem_dbg_command_info *) kdp_core_hw_shmem_buf;
-	hwsd_info->xhsdci_status = XHSDCI_STATUS_NONE;
-	hwsd_info->xhsdci_seq_no = 0;
-	hwsd_info->xhsdci_buf_phys_addr = 0;
-	hwsd_info->xhsdci_buf_data_length = 0;
-	hwsd_info->xhsdci_coredump_total_size_uncomp = 0;
-	hwsd_info->xhsdci_coredump_total_size_sent_uncomp = 0;
-	hwsd_info->xhsdci_page_size = PAGE_SIZE;
-
-	cpuid_cache_info = cache_info();
-	assert(cpuid_cache_info != NULL);
-
-	kdp_core_hw_shmem_buf += sizeof(*hwsd_info);
-	/* Leave the handshake structure on its own cache line so buffer writes don't cause flushes of old handshake data */
-	kdp_core_hw_shmem_buf = ROUNDUP(kdp_core_hw_shmem_buf, (uint64_t) cpuid_cache_info->c_linesz);
-	kdp_hw_shmem_dbg_bufsize -= (uint32_t) (kdp_core_hw_shmem_buf - (vm_offset_t) hwsd_info);
-	kdp_hw_shmem_dbg_bufsize /= KDP_CORE_HW_SHMEM_DBG_NUM_BUFFERS;
-	/* The buffer size should be a cache-line length multiple */
-	kdp_hw_shmem_dbg_bufsize -= (kdp_hw_shmem_dbg_bufsize % ROUNDDOWN(OPTIMAL_ASTRIS_READSIZE, cpuid_cache_info->c_linesz));
-
-	STAILQ_INIT(&free_hw_shmem_dbg_bufs);
-	STAILQ_INIT(&hw_shmem_dbg_bufs_to_flush);
-
-	for (i = 0; i < KDP_CORE_HW_SHMEM_DBG_NUM_BUFFERS; i++) {
-		cur_elm = zalloc_permanent_type(typeof(*cur_elm));
-		assert(cur_elm != NULL);
-
-		cur_elm->khsd_buf = kdp_core_hw_shmem_buf;
-		cur_elm->khsd_data_length = 0;
-
-		kdp_core_hw_shmem_buf += kdp_hw_shmem_dbg_bufsize;
-
-		STAILQ_INSERT_HEAD(&free_hw_shmem_dbg_bufs, cur_elm, khsd_elms);
-	}
-
-	nanoseconds_to_absolutetime(KDP_HW_SHMEM_DBG_TIMEOUT_DEADLINE_SECS * NSEC_PER_SEC,
-	    &kdp_hw_shmem_dbg_contact_deadline_interval);
-
-	PE_consistent_debug_register(kDbgIdAstrisConnection, kvtophys((vm_offset_t) hwsd_info), sizeof(pmap_paddr_t));
-	PE_consistent_debug_register(kDbgIdAstrisConnectionVers, CUR_XNU_HWSDCI_STRUCT_VERS, sizeof(uint32_t));
-#endif /* defined(__arm__) || defined(__arm64__) */
 }
 
 #endif /* CONFIG_KDP_INTERACTIVE_DEBUGGING */

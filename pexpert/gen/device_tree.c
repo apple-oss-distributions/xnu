@@ -62,7 +62,7 @@ static inline void
 assert_in_dt_region(vm_offset_t const start, vm_offset_t const end, void const *p)
 {
 	if ((vm_offset_t)p < start || (vm_offset_t)p > end) {
-		panic("Device tree pointer outside of device tree region: pointer %p, DTEnd %lx\n", p, (unsigned long)DTEnd);
+		panic("Device tree pointer outside of device tree region: pointer %p, DTEnd %lx", p, (unsigned long)DTEnd);
 	}
 }
 #define ASSERT_IN_DT(p) assert_in_dt_region((vm_offset_t)DTRootNode, (vm_offset_t)DTEnd, (p))
@@ -74,7 +74,7 @@ assert_prop_in_dt_region(vm_offset_t const start, vm_offset_t const end, DeviceT
 
 	assert_in_dt_region(start, end, prop);
 	if (os_add3_overflow((vm_offset_t)prop, sizeof(DeviceTreeNodeProperty), prop->length, &prop_end)) {
-		panic("Device tree property overflow: prop %p, length 0x%x\n", prop, prop->length);
+		panic("Device tree property overflow: prop %p, length 0x%x", prop, prop->length);
 	}
 	assert_in_dt_region(start, end, (void*)prop_end);
 }
@@ -113,7 +113,7 @@ next_prop_region(vm_offset_t const start, vm_offset_t end, DeviceTreeNodePropert
 	ASSERT_HEADER_IN_DT_REGION(start, end, prop, sizeof(DeviceTreeNode));
 
 	if (os_add3_overflow((uintptr_t)prop, prop->length, sizeof(DeviceTreeNodeProperty) + 3, &next_addr)) {
-		panic("Device tree property overflow: prop %p, length 0x%x\n", prop, prop->length);
+		panic("Device tree property overflow: prop %p, length 0x%x", prop, prop->length);
 	}
 
 	next_addr &= ~(3ULL);
@@ -259,7 +259,7 @@ SecureDTIsLockedDown(void)
 	addr64_t exec_header_phys = kvtophys((vm_offset_t)&_mh_execute_header);
 
 	if (kvtophys((vm_offset_t)DTRootNode) < exec_header_phys) {
-		assert(kvtophys(DTEnd) < exec_header_phys);
+		assert(kvtophys(DTEnd) <= exec_header_phys);
 		return true;
 	}
 
@@ -397,7 +397,7 @@ SecureDTEnterEntry(DTEntryIterator iter, DTEntry childEntry)
 	if (childEntry == NULL) {
 		return kError;
 	}
-	newScope = (DTSavedScopePtr) kalloc(sizeof(struct DTSavedScope));
+	newScope = (DTSavedScopePtr) kalloc_type(struct DTSavedScope, Z_WAITOK);
 	newScope->nextScope = iter->savedScope;
 	newScope->scope = iter->currentScope;
 	newScope->entry = iter->currentEntry;
@@ -426,7 +426,7 @@ SecureDTExitEntry(DTEntryIterator iter, DTEntry *currentPosition)
 	iter->currentIndex = newScope->index;
 	*currentPosition = iter->currentEntry;
 
-	kfree(newScope, sizeof(struct DTSavedScope));
+	kfree_type(struct DTSavedScope, newScope);
 
 	return kSuccess;
 }
@@ -509,14 +509,12 @@ SecureDTGetProperty(const DTEntry entry, const char *propertyName, void const **
 	           (vm_offset_t)DTRootNode, (vm_size_t)((uintptr_t)DTEnd - (uintptr_t)DTRootNode));
 }
 
-#if defined(__i386__) || defined(__x86_64__)
 int
 SecureDTGetPropertyRegion(const DTEntry entry, const char *propertyName, void const **propertyValue, unsigned int *propertySize, vm_offset_t const region_start, vm_size_t region_size)
 {
 	return SecureDTGetPropertyInternal(entry, propertyName, propertyValue, propertySize,
 	           region_start, region_size);
 }
-#endif
 
 
 int

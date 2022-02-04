@@ -35,7 +35,7 @@
 .\"
 .Dd May 15, 2008
 .Dt STAT 2
-.Os BSD 4
+.Os
 .Sh NAME
 .Nm fstat ,
 .Nm fstat64 ,
@@ -86,8 +86,8 @@
 .Fa "struct stat64 *restrict buf"
 .Fc ;
 .Sh DESCRIPTION
-The 
-.Fn stat 
+The
+.Fn stat
 function obtains information about the file pointed to by
 .Fa path .
 Read, write or execute
@@ -107,11 +107,11 @@ while
 returns information about the file the link references.
 For symbolic links, the st_mode member contains meaningful information
 when used with the file type macros, and the st_size member contains
-the length of the pathname contained in the symbolic link. File mode
-bits and the contents of the remaining members of the stat structure
-are unspecified. The value returned in the st_size member is the
-length of the contents of the symbolic link, and does not count any
-trailing null.
+the length of the pathname contained in the symbolic link.
+File mode bits and the contents of the remaining members of the stat
+structure are unspecified.
+The value returned in the st_size member is the length of the contents of
+the symbolic link, and does not count any trailing null.
 .Pp
 The
 .Fn fstat
@@ -165,7 +165,7 @@ The
 .Fa buf
 argument is a pointer to a
 .Fa stat
-structure 
+structure
 as defined by
 .Aq Pa sys/stat.h
 and into which information is placed concerning the file.
@@ -256,9 +256,11 @@ and
 .Xr write 2
 system calls.
 .It st_birthtime
-Time of file creation. Only set once when the file is created. This field is 
-only available in the 64 bit inode variants. On filesystems where birthtime is 
-not available, this field is set to 0 (i.e. epoch).
+Time of file creation.
+Only set once when the file is created.
+This field is only available in the 64 bit inode variants.
+On filesystems where birthtime is not available, this field is set to 0
+(i.e. epoch).
 .El
 .Pp
 The size-related fields of the structures are as follows:
@@ -305,7 +307,7 @@ field, see
 and
 .Xr chflags 2 .
 .Sh _DARWIN_FEATURE_64_BIT_INODE
-In order to accommodate advanced capabilities of newer file systems, the 
+In order to accommodate advanced capabilities of newer file systems, the
 .Fa struct stat ,
 .Fa struct statfs ,
 and
@@ -314,9 +316,10 @@ data structures were updated in Mac OSX 10.5.
 .Pp
 The most obvious change is the increased size of
 .Fa ino_t
-from 32 bits to 64 bits.  As a consequence, storing an ino_t in an int is
-no longer safe, and file formats storing ino_t as 32-bit values may need to
-be updated.  There are other changes as well, such as the widening of
+from 32 bits to 64 bits.
+As a consequence, storing an ino_t in an int is no longer safe, and file
+formats storing ino_t as 32-bit values may need to be updated.
+There are other changes as well, such as the widening of
 .Fa f_fstypename ,
 .Fa f_mntonname ,
 and
@@ -330,24 +333,30 @@ for more detail on the specific changes to the other affected data structures.
 On platforms that existed before these updates were available, ABI
 compatibility is achieved by providing two implementations for related
 functions: one using the legacy data structures and one using the updated
-data structures.  Variants which make use of the newer structures have their
-symbols suffixed with $INODE64.  These $INODE64 suffixes are automatically
-appended by the compiler tool-chain and should not be used directly.
+data structures.
+Variants which make use of the newer structures have their symbols suffixed
+with $INODE64.
+These $INODE64 suffixes are automatically appended by the compiler
+tool-chain and should not be used directly.
 .Pp
 Platforms that were released after these updates only have the newer variants
-available to them.  These platforms have the macro
+available to them.
+These platforms have the macro
 .Dv _DARWIN_FEATURE_ONLY_64_BIT_INODE
 defined.
 .Pp
 The
 .Dv _DARWIN_FEATURE_64_BIT_INODE
-macro should not be set directly.  Instead, developers should make use of the
+macro should not be set directly.
+Instead, developers should make use of the
 .Dv _DARWIN_NO_64_BIT_INODE
 or
 .Dv _DARWIN_USE_64_BIT_INODE
-macros when the default variant is not desired.  The following table details
-the effects of defining these macros for different deployment targets.
+macros when the default variant is not desired.
+The following table details the effects of defining these macros for
+different deployment targets.
 .Pp
+.hy 0
 .TS
 center;
 c s s s
@@ -356,49 +365,49 @@ c | c c c
 c | c c c
 l | c c c.
 T{
-.Dv _DARWIN_FEATURE_ONLY_64_BIT_INODE Sy not defined
+_DARWIN_FEATURE_ONLY_64_BIT_INODE \fBnot defined\fP
 T}
 =
 	Deployment Target
 user defines:	< 10.5	10.5	> 10.5
 _
 T{
-.Em (none)
+\fI(none)\fP
 T}	32-bit	32-bit	64-bit
 T{
-.Dv _DARWIN_NO_64_BIT_INODE
+_DARWIN_NO_64_BIT_INODE
 T}	32-bit	32-bit	32-bit
 T{
-.Dv _DARWIN_USE_64_BIT_INODE
+_DARWIN_USE_64_BIT_INODE
 T}	32-bit	64-bit	64-bit
 _
 .T&
 c s s s
-c s s s
+c | s s
 c | l s s
 c | c c c
 l | c c c.
 
 T{
-.Dv _DARWIN_FEATURE_ONLY_64_BIT_INODE Sy defined
+_DARWIN_FEATURE_ONLY_64_BIT_INODE \fBdefined\fP
 T}
 =
 user defines:	Any Deployment Target
 _
 T{
-.Em (none)
+\fI(none)\fP
 T}	64-bit-only
 T{
-.Dv _DARWIN_NO_64_BIT_INODE
+_DARWIN_NO_64_BIT_INODE
 T}	T{
-.Em (error)
+\fI(error)\fP
 T}
 T{
-.Dv _DARWIN_USE_64_BIT_INODE
+_DARWIN_USE_64_BIT_INODE
 T}	64-bit-only
 _
 .TE
-.Pp
+.hy
 .Bl -tag -width 64-bit-only -offset indent
 .It 32-bit
 32-bit inode values are enabled, and the legacy structures involving the
@@ -432,11 +441,12 @@ and make use of
 when targeting Mac OSX 10.5.
 .Pp
 In addition to the $INODE64 suffixed symbols, variants suffixed with 64 are
-also available for related functions.  These functions were provided as a way
-for developers to use the updated structures in code that also made use of
-the legacy structures.  The enlarged stat structures were also prefixed with
-64 to distinguish them from their legacy variants.  These functions have been
-deprecated and should be avoided.
+also available for related functions.
+These functions were provided as a way for developers to use the updated
+structures in code that also made use of the legacy structures.
+The enlarged stat structures were also prefixed with 64 to distinguish them
+from their legacy variants.
+These functions have been deprecated and should be avoided.
 .Sh RETURN VALUES
 Upon successful completion a value of 0 is returned.
 Otherwise, a value of -1 is returned and
@@ -454,19 +464,16 @@ and
 .Li st_blocks
 fields.
 .Sh ERRORS
-.Bl -tag -width Er
 The
 .Fn fstat
 system call will fail if:
-.\" ===========
+.Bl -tag -width Er
 .It Bq Er EBADF
 .Fa fildes
 is not a valid open file descriptor.
-.\" ===========
 .It Bq Er EFAULT
 .Fa Sb
 points to an invalid address.
-.\" ===========
 .It Bq Er EIO
 An I/O error occurs while reading from or writing to the file system.
 .El
@@ -517,7 +524,7 @@ system calls will fail if:
 .Bl -tag -width Er
 .\" ===========
 .It Bq Er EOVERFLOW
-The file size in bytes 
+The file size in bytes
 or the number of blocks allocated to the file
 or the file serial number cannot be represented correctly
 in the structure pointed to by
@@ -563,7 +570,8 @@ The fields in the stat structure currently marked
 and
 .Fa st_spare3
 are present in preparation for inode time stamps expanding
-to 64 bits.  This, however, can break certain programs that
+to 64 bits.
+This, however, can break certain programs that
 depend on the time stamps being contiguous (in calls to
 .Xr utimes 2 ) .
 .Sh TRANSITIONAL DESCRIPTION (NOW DEPRECATED)
@@ -589,13 +597,13 @@ structure when 64-bit inodes are in effect (see above).
 .Xr chflags 2 ,
 .Xr chmod 2 ,
 .Xr chown 2 ,
+.Xr statfs 2 ,
 .Xr utimes 2 ,
 .Xr compat 5 ,
-.Xr statfs 2 ,
 .Xr symlink 7
 .Sh BUGS
 Applying
-.Xr fstat
+.Fn fstat
 to a socket (and thus to a pipe)
 returns a zero'd buffer,
 except for the blocksize field,
@@ -605,7 +613,7 @@ The
 .Fn stat
 and
 .Fn fstat
-function calls are expected to conform to 
+function calls are expected to conform to
 .St -p1003.1-88 .
 The
 .Fn fstatat
@@ -615,7 +623,7 @@ An
 .Fn lstat
 function call appeared in
 .Bx 4.2 .
-The 
+The
 .Fn stat64 ,
 .Fn fstat64 ,
 and

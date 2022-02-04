@@ -586,7 +586,7 @@ pipespace(struct pipe *cpipe, int size)
 		return EINVAL;
 	}
 
-	buffer = (vm_offset_t)kheap_alloc(KHEAP_DATA_BUFFERS, size, Z_WAITOK);
+	buffer = (vm_offset_t)kalloc_data(size, Z_WAITOK);
 	if (!buffer) {
 		return ENOMEM;
 	}
@@ -611,19 +611,14 @@ pipespace(struct pipe *cpipe, int size)
 static int
 pipepair_alloc(struct pipe **rp_out, struct pipe **wp_out)
 {
-	struct pipepair *pp = zalloc(pipe_zone);
+	struct pipepair *pp = zalloc_flags(pipe_zone, Z_WAITOK | Z_ZERO | Z_NOFAIL);
 	struct pipe *rpipe = &pp->pp_rpipe;
 	struct pipe *wpipe = &pp->pp_wpipe;
-
-	if (pp == NULL) {
-		return ENOMEM;
-	}
 
 	/*
 	 * protect so pipespace or pipeclose don't follow a junk pointer
 	 * if pipespace() fails.
 	 */
-	bzero(pp, sizeof(struct pipepair));
 	pp->pp_pipe_id = os_atomic_inc_orig(&pipe_unique_id, relaxed);
 	lck_mtx_init(&pp->pp_mtx, &pipe_mtx_grp, LCK_ATTR_NULL);
 
@@ -715,8 +710,9 @@ pipeio_unlock(struct pipe *cpipe)
 static void
 pipeselwakeup(struct pipe *cpipe, struct pipe *spipe)
 {
-	if (cpipe->pipe_state & PIPE_SEL) {
-		cpipe->pipe_state &= ~PIPE_SEL;
+	if (cpipe->pipe_state & PIPE_EOF) {
+		selthreadclear(&cpipe->pipe_sel);
+	} else {
 		selwakeup(&cpipe->pipe_sel);
 	}
 
@@ -731,6 +727,20 @@ pipeselwakeup(struct pipe *cpipe, struct pipe *spipe)
 	}
 }
 
+static void
+pipe_check_bounds_panic(struct pipe *cpipe)
+{
+	caddr_t start = cpipe->pipe_buffer.buffer;
+	u_int size = cpipe->pipe_buffer.size;
+	u_int in = cpipe->pipe_buffer.in;
+	u_int out = cpipe->pipe_buffer.out;
+
+	kalloc_data_require(start, size);
+
+	if (__improbable(in > size || out > size)) {
+		panic("%s: corrupted pipe read/write pointer or size.", __func__);
+	}
+}
 /*
  * Read n bytes from the buffer. Semantics are similar to file read.
  * returns: number of bytes read from the buffer
@@ -780,6 +790,7 @@ pipe_read(struct fileproc *fp, struct uio *uio, __unused int flags,
 			    (user_size_t)uio_resid(uio)));
 
 			PIPE_UNLOCK(rpipe); /* we still hold io lock.*/
+			pipe_check_bounds_panic(rpipe);
 			error = uiomove(
 				&rpipe->pipe_buffer.buffer[rpipe->pipe_buffer.out],
 				size, uio);
@@ -1043,6 +1054,7 @@ retrywrite:
 				/* Transfer first segment */
 
 				PIPE_UNLOCK(rpipe);
+				pipe_check_bounds_panic(wpipe);
 				error = uiomove(&wpipe->pipe_buffer.buffer[wpipe->pipe_buffer.in],
 				    (int)segsize, uio);
 				PIPE_LOCK(rpipe);
@@ -1060,6 +1072,7 @@ retrywrite:
 					}
 
 					PIPE_UNLOCK(rpipe);
+					pipe_check_bounds_panic(wpipe);
 					error = uiomove(
 						&wpipe->pipe_buffer.buffer[0],
 						(int)(size - segsize), uio);
@@ -1262,7 +1275,6 @@ pipe_select(struct fileproc *fp, int which, void *wql, vfs_context_t ctx)
 		    (fileproc_get_vflags(fp) & FPV_DRAIN)) {
 			retnum = 1;
 		} else {
-			rpipe->pipe_state |= PIPE_SEL;
 			selrecord(vfs_context_proc(ctx), &rpipe->pipe_sel, wql);
 		}
 		break;
@@ -1277,12 +1289,10 @@ pipe_select(struct fileproc *fp, int which, void *wql, vfs_context_t ctx)
 		    (MAX_PIPESIZE(wpipe) - wpipe->pipe_buffer.cnt) >= PIPE_BUF)) {
 			retnum = 1;
 		} else {
-			wpipe->pipe_state |= PIPE_SEL;
 			selrecord(vfs_context_proc(ctx), &wpipe->pipe_sel, wql);
 		}
 		break;
 	case 0:
-		rpipe->pipe_state |= PIPE_SEL;
 		selrecord(vfs_context_proc(ctx), &rpipe->pipe_sel, wql);
 		break;
 	}
@@ -1315,8 +1325,7 @@ pipe_free_kmem(struct pipe *cpipe)
 	if (cpipe->pipe_buffer.buffer != NULL) {
 		OSAddAtomic(-(cpipe->pipe_buffer.size), &amountpipekva);
 		OSAddAtomic(-1, &amountpipes);
-		kheap_free(KHEAP_DATA_BUFFERS, cpipe->pipe_buffer.buffer,
-		    cpipe->pipe_buffer.size);
+		kfree_data(cpipe->pipe_buffer.buffer, cpipe->pipe_buffer.size);
 		cpipe->pipe_buffer.buffer = NULL;
 		cpipe->pipe_buffer.size = 0;
 	}

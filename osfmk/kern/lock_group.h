@@ -29,7 +29,11 @@
 #define _KERN_LOCK_GROUP_H
 
 #include <kern/queue.h>
-#include <mach/mach_types.h>
+#include <kern/lock_types.h>
+#if XNU_KERNEL_PRIVATE
+#include <kern/startup.h>
+#include <os/refcnt.h>
+#endif /* XNU_KERNEL_PRIVATE */
 
 __BEGIN_DECLS
 
@@ -43,9 +47,6 @@ typedef enum lck_type {
 } lck_type_t;
 
 #if XNU_KERNEL_PRIVATE
-#include <kern/startup.h>
-#include <os/refcnt.h>
-
 /*
  * Arguments wrapped in LCK_GRP_ARG() will be elided
  * when LOCK_STATS is not set.

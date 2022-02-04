@@ -76,7 +76,7 @@ enum kperf_sampling {
 	KPERF_SAMPLING_ON,
 };
 
-extern enum kperf_sampling kperf_status;
+extern enum kperf_sampling _Atomic kperf_status;
 
 #pragma mark - external callbacks
 
@@ -145,7 +145,7 @@ kperf_make_runnable(thread_t thread, int interrupt)
 static inline void
 kperf_running_setup(processor_t processor, uint64_t now)
 {
-	if (kperf_status == KPERF_SAMPLING_ON) {
+	if (kperf_is_sampling()) {
 		extern void kptimer_running_setup(processor_t, uint64_t now);
 		kptimer_running_setup(processor, now);
 	}

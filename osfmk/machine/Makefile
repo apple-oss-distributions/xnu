@@ -21,6 +21,7 @@ KERNELFILES = \
 	machine_remote_time.h \
 	machine_routines.h	\
 	machine_kpc.h		\
+	machine_perfmon.h   \
 	memory_types.h		\
 	monotonic.h \
 	pal_routines.h		\
@@ -32,7 +33,10 @@ KERNELFILES = \
 EXPORT_FILES = \
 	machine_remote_time.h
 
+# These are covered by ../../bsd/machine/machine_private.modulemap.
 INSTALL_MI_LCL_LIST = ${PRIVATE_DATAFILES}
+
+INSTALL_SF_MI_LCL_LIST = ${PRIVATE_DATAFILES}
 
 INSTALL_KF_MD_LCL_LIST = ${EXPORT_FILES}
 

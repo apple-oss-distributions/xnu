@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2018 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -81,6 +81,10 @@
 #if MONOTONIC
 #include <kern/monotonic.h>
 #endif /* MONOTONIC */
+
+#if KPERF
+#include <kperf/kptimer.h>
+#endif /* KPERF */
 
 #if CONFIG_SLEEP
 extern void     acpi_sleep_cpu(acpi_sleep_callback, void * refcon);
@@ -218,6 +222,9 @@ acpi_sleep_kernel(acpi_sleep_callback func, void *refcon)
 #if MONOTONIC
 	mt_cpu_down(cdp);
 #endif /* MONOTONIC */
+#if KPERF
+	kptimer_stop_curcpu();
+#endif /* KPERF */
 
 	/* Save power management timer state */
 	pmTimerSave();
@@ -272,7 +279,7 @@ acpi_sleep_kernel(acpi_sleep_callback func, void *refcon)
 	 * for compatibility with firewire kprintf.
 	 */
 
-	if (FALSE == disable_serial_output) {
+	if (false == disable_serial_output) {
 		pal_serial_init();
 	}
 
@@ -347,6 +354,12 @@ acpi_sleep_kernel(acpi_sleep_callback func, void *refcon)
 	init_fpu();
 	clear_ts();
 
+
+#if HYPERVISOR
+	/* Notify hypervisor that we are about to resume */
+	hv_resume();
+#endif
+
 	IOCPURunPlatformActiveActions();
 
 	KDBG(IOKDBG_CODE(DBG_HIBERNATE, 0) | DBG_FUNC_END, start, elapsed,
@@ -361,17 +374,19 @@ acpi_sleep_kernel(acpi_sleep_callback func, void *refcon)
 	/* Restart timer interrupts */
 	rtc_timer_start();
 
-
 #if MONOTONIC
 	mt_cpu_up(cdp);
 #endif /* MONOTONIC */
+#if KPERF
+	kptimer_curcpu_up();
+#endif /* KPERF */
 
 #if HIBERNATION
 	kprintf("ret from acpi_sleep_cpu hib=%d\n", did_hibernate);
 #endif /* HIBERNATION */
 
 #if CONFIG_SLEEP
-	/* Becase we don't save the bootstrap page, and we share it
+	/* Because we don't save the bootstrap page, and we share it
 	 * between sleep and mp slave init, we need to recreate it
 	 * after coming back from sleep or hibernate */
 	install_real_mode_bootstrap(slave_pstart);
@@ -424,6 +439,9 @@ acpi_idle_kernel(acpi_sleep_callback func, void *refcon)
 #if MONOTONIC
 	mt_cpu_down(cpu_datap(0));
 #endif /* MONOTONIC */
+#if KPERF
+	kptimer_stop_curcpu();
+#endif /* KPERF */
 
 	/* Cancel any pending deadline */
 	setPop(0);

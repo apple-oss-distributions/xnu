@@ -51,19 +51,26 @@
 /* This file implements an alternate TCP congestion control algorithm
  * for background transport developed by LEDBAT working group at IETF and
  * described in draft: draft-ietf-ledbat-congestion-02
+ *
+ * Currently, it also implements LEDBAT++ as described in draft
+ * draft-irtf-iccrg-ledbat-plus-plus-01.
  */
+
+#define GAIN_CONSTANT               (16)
+#define DEFER_SLOWDOWN_DURATION     (30 * 1000) /* 30s */
 
 int tcp_ledbat_init(struct tcpcb *tp);
 int tcp_ledbat_cleanup(struct tcpcb *tp);
 void tcp_ledbat_cwnd_init(struct tcpcb *tp);
 void tcp_ledbat_congestion_avd(struct tcpcb *tp, struct tcphdr *th);
 void tcp_ledbat_ack_rcvd(struct tcpcb *tp, struct tcphdr *th);
+static void ledbat_pp_ack_rcvd(struct tcpcb *tp, uint32_t bytes_acked);
 void tcp_ledbat_pre_fr(struct tcpcb *tp);
 void tcp_ledbat_post_fr(struct tcpcb *tp, struct tcphdr *th);
 void tcp_ledbat_after_idle(struct tcpcb *tp);
 void tcp_ledbat_after_timeout(struct tcpcb *tp);
 static int tcp_ledbat_delay_ack(struct tcpcb *tp, struct tcphdr *th);
-void tcp_ledbat_switch_cc(struct tcpcb *tp, uint16_t old_cc_index);
+void tcp_ledbat_switch_cc(struct tcpcb *tp);
 
 struct tcp_cc_algo tcp_cc_ledbat = {
 	.name = "ledbat",
@@ -88,9 +95,11 @@ struct tcp_cc_algo tcp_cc_ledbat = {
  *
  * The LEDBAT draft says that target queue delay MUST be 100 ms for
  * inter-operability.
+ * As we are enabling LEDBAT++ by default, we are updating the target
+ * queuing delay to 60ms as recommended by the draft.
  */
 SYSCTL_SKMEM_TCP_INT(OID_AUTO, bg_target_qdelay, CTLFLAG_RW | CTLFLAG_LOCKED,
-    int, target_qdelay, 100, "Target queuing delay");
+    int, target_qdelay, 40, "Target queuing delay");
 
 /* Allowed increase and tether are used to place an upper bound on
  * congestion window based on the amount of data that is outstanding.
@@ -125,25 +134,33 @@ SYSCTL_SKMEM_TCP_INT(OID_AUTO, bg_tether_shift, CTLFLAG_RW | CTLFLAG_LOCKED,
 SYSCTL_SKMEM_TCP_INT(OID_AUTO, bg_ss_fltsz, CTLFLAG_RW | CTLFLAG_LOCKED,
     uint32_t, bg_ss_fltsz, 2, "Initial congestion window for background transport");
 
+SYSCTL_SKMEM_TCP_INT(OID_AUTO, ledbat_plus_plus, CTLFLAG_RW | CTLFLAG_LOCKED,
+    int, tcp_ledbat_plus_plus, 1, "Use LEDBAT++");
+
 extern int rtt_samples_per_slot;
 
+#if DEVELOPMENT || DEBUG
 static void
-update_cwnd(struct tcpcb *tp, uint32_t incr)
+update_cwnd(struct tcpcb *tp, uint32_t update, bool is_incr)
+#else
+static void
+update_cwnd(struct tcpcb *tp, uint32_t update, __unused bool is_incr)
+#endif
 {
 	uint32_t max_allowed_cwnd = 0, flight_size = 0;
-	uint32_t base_rtt;
-
-	base_rtt = get_base_rtt(tp);
+	uint32_t base_rtt = get_base_rtt(tp);
+	uint32_t curr_rtt = tcp_use_min_curr_rtt ? tp->curr_rtt_min :
+	    tp->t_rttcur;
 
 	/* If we do not have a good RTT measurement yet, increment
 	 * congestion window by the default value.
 	 */
-	if (base_rtt == 0 || tp->t_rttcur == 0) {
-		tp->snd_cwnd += incr;
+	if (base_rtt == 0 || curr_rtt == 0) {
+		tp->snd_cwnd += update;
 		goto check_max;
 	}
 
-	if (tp->t_rttcur <= (base_rtt + target_qdelay)) {
+	if (curr_rtt <= (base_rtt + target_qdelay)) {
 		/*
 		 * Delay decreased or remained the same, we can increase
 		 * the congestion window according to RFC 3465.
@@ -156,20 +173,28 @@ update_cwnd(struct tcpcb *tp, uint32_t incr)
 		if (tp->bg_ssthresh < tp->snd_cwnd) {
 			tp->bg_ssthresh = tp->snd_cwnd;
 		}
-		tp->snd_cwnd += incr;
+		tp->snd_cwnd += update;
+		tp->snd_cwnd = tcp_round_to(tp->snd_cwnd, tp->t_maxseg);
 	} else {
-		/* In response to an increase in rtt, reduce the congestion
-		 * window by one-eighth. This will help to yield immediately
-		 * to a competing stream.
-		 */
-		uint32_t redwin;
+		if (tcp_ledbat_plus_plus) {
+			assert(is_incr == false);
+			tp->snd_cwnd -= update;
+		} else {
+			/* In response to an increase in rtt, reduce the congestion
+			 * window by one-eighth. This will help to yield immediately
+			 * to a competing stream.
+			 */
+			uint32_t redwin;
 
-		redwin = tp->snd_cwnd >> 3;
-		tp->snd_cwnd -= redwin;
+			redwin = tp->snd_cwnd >> 3;
+			tp->snd_cwnd -= redwin;
+		}
+
 		if (tp->snd_cwnd < bg_ss_fltsz * tp->t_maxseg) {
 			tp->snd_cwnd = bg_ss_fltsz * tp->t_maxseg;
 		}
 
+		tp->snd_cwnd = tcp_round_to(tp->snd_cwnd, tp->t_maxseg);
 		/* Lower background slow-start threshold so that the connection
 		 * will go into congestion avoidance phase
 		 */
@@ -178,22 +203,34 @@ update_cwnd(struct tcpcb *tp, uint32_t incr)
 		}
 	}
 check_max:
-	/* Calculate the outstanding flight size and restrict the
-	 * congestion window to a factor of flight size.
-	 */
-	flight_size = tp->snd_max - tp->snd_una;
+	if (!tcp_ledbat_plus_plus) {
+		/* Calculate the outstanding flight size and restrict the
+		 * congestion window to a factor of flight size.
+		 */
+		flight_size = tp->snd_max - tp->snd_una;
 
-	max_allowed_cwnd = (allowed_increase * tp->t_maxseg)
-	    + (flight_size << tether_shift);
-	tp->snd_cwnd = min(tp->snd_cwnd, max_allowed_cwnd);
-	return;
+		max_allowed_cwnd = (allowed_increase * tp->t_maxseg)
+		    + (flight_size << tether_shift);
+		tp->snd_cwnd = min(tp->snd_cwnd, max_allowed_cwnd);
+	} else {
+		tp->snd_cwnd = min(tp->snd_cwnd, TCP_MAXWIN << tp->snd_scale);
+	}
+}
+
+static inline void
+tcp_ledbat_clear_state(struct tcpcb *tp)
+{
+	tp->t_ccstate->ledbat_slowdown_events = 0;
+	tp->t_ccstate->ledbat_slowdown_ts = 0;
+	tp->t_ccstate->ledbat_slowdown_begin = 0;
+	tp->t_ccstate->ledbat_md_bytes_acked = 0;
 }
 
 int
 tcp_ledbat_init(struct tcpcb *tp)
 {
-#pragma unused(tp)
 	OSIncrementAtomic((volatile SInt32 *)&tcp_cc_ledbat.num_sockets);
+	tcp_ledbat_clear_state(tp);
 	return 0;
 }
 
@@ -205,10 +242,9 @@ tcp_ledbat_cleanup(struct tcpcb *tp)
 	return 0;
 }
 
-/* Initialize the congestion window for a connection
- *
+/*
+ * Initialize the congestion window for a connection
  */
-
 void
 tcp_ledbat_cwnd_init(struct tcpcb *tp)
 {
@@ -227,16 +263,183 @@ tcp_ledbat_congestion_avd(struct tcpcb *tp, struct tcphdr *th)
 	u_int32_t incr = 0;
 
 	acked = BYTES_ACKED(th, tp);
-	tp->t_bytes_acked += acked;
-	if (tp->t_bytes_acked > tp->snd_cwnd) {
-		tp->t_bytes_acked -= tp->snd_cwnd;
-		incr = tp->t_maxseg;
-	}
 
-	if (tp->snd_cwnd < tp->snd_wnd && incr > 0) {
-		update_cwnd(tp, incr);
+	if (tcp_ledbat_plus_plus) {
+		ledbat_pp_ack_rcvd(tp, acked);
+	} else {
+		tp->t_bytes_acked += acked;
+		if (tp->t_bytes_acked > tp->snd_cwnd) {
+			tp->t_bytes_acked -= tp->snd_cwnd;
+			incr = tp->t_maxseg;
+		}
+
+		if (tp->snd_cwnd < tp->snd_wnd && incr > 0) {
+			update_cwnd(tp, incr, true);
+		}
 	}
 }
+
+/*
+ * Compute the denominator
+ * MIN(16, ceil(2 * TARGET / base))
+ */
+static uint32_t
+ledbat_gain(uint32_t base_rtt)
+{
+	return MIN(GAIN_CONSTANT, tcp_ceil(2 * target_qdelay /
+	           (double)base_rtt));
+}
+
+/*
+ * Congestion avoidance for ledbat++
+ */
+static void
+ledbat_pp_congestion_avd(struct tcpcb *tp, uint32_t bytes_acked,
+    uint32_t base_rtt, uint32_t curr_rtt)
+{
+	uint32_t update = 0;
+	/*
+	 * Set the next slowdown time i.e. 9 times the duration
+	 * of previous slowdown except the initial slowdown.
+	 */
+	if (tp->t_ccstate->ledbat_slowdown_ts == 0) {
+		uint32_t slowdown_duration = 0;
+		if (tp->t_ccstate->ledbat_slowdown_events > 0) {
+			slowdown_duration = tcp_now -
+			    tp->t_ccstate->ledbat_slowdown_begin;
+
+			if (tp->bg_ssthresh > tp->snd_cwnd) {
+				/*
+				 * Special case for slowdowns (other than initial)
+				 * where cwnd doesn't recover fully to previous
+				 * ssthresh
+				 */
+				slowdown_duration *= 2;
+			}
+		}
+		tp->t_ccstate->ledbat_slowdown_ts = tcp_now +
+		    (9 * slowdown_duration);
+		if (slowdown_duration == 0) {
+			tp->t_ccstate->ledbat_slowdown_ts += (2 * (tp->t_srtt >> TCP_RTT_SHIFT));
+		}
+		/* Reset the start */
+		tp->t_ccstate->ledbat_slowdown_begin = 0;
+
+		/* On exit slow start due to higher qdelay, cap the ssthresh */
+		if (tp->bg_ssthresh > tp->snd_cwnd) {
+			tp->bg_ssthresh = tp->snd_cwnd;
+		}
+	}
+
+	if (curr_rtt <= base_rtt + target_qdelay) {
+		/* Additive increase */
+		tp->t_bytes_acked += bytes_acked;
+		if (tp->t_bytes_acked >= tp->snd_cwnd) {
+			update = tp->t_maxseg;
+			tp->t_bytes_acked -= tp->snd_cwnd;
+			update_cwnd(tp, update, true);
+		}
+	} else {
+		/*
+		 * Multiplicative decrease
+		 * W -= min(W * (qdelay/target - 1), W/2) (per RTT)
+		 * To calculate per bytes acked, it becomes
+		 * W -= min((qdelay/target - 1), 1/2) * bytes_acked
+		 */
+		uint32_t qdelay = curr_rtt > base_rtt ?
+		    (curr_rtt - base_rtt) : 0;
+
+		tp->t_ccstate->ledbat_md_bytes_acked += bytes_acked;
+		if (tp->t_ccstate->ledbat_md_bytes_acked >= tp->snd_cwnd) {
+			update = (uint32_t)(MIN(((double)qdelay / target_qdelay
+			    - 1), 0.5) * (double)tp->snd_cwnd);
+			tp->t_ccstate->ledbat_md_bytes_acked -= tp->snd_cwnd;
+			update_cwnd(tp, update, false);
+
+			if (tp->t_ccstate->ledbat_slowdown_ts != 0) {
+				/*
+				 * As the window has been reduced,
+				 * defer the slowdown.
+				 */
+				tp->t_ccstate->ledbat_slowdown_ts = tcp_now +
+				    DEFER_SLOWDOWN_DURATION;
+			}
+		}
+	}
+}
+
+/*
+ * Different handling for ack received for ledbat++
+ */
+static void
+ledbat_pp_ack_rcvd(struct tcpcb *tp, uint32_t bytes_acked)
+{
+	uint32_t update = 0;
+	const uint32_t base_rtt = get_base_rtt(tp);
+	const uint32_t curr_rtt = tcp_use_min_curr_rtt ? tp->curr_rtt_min :
+	    tp->t_rttcur;
+	const uint32_t ss_target = (uint32_t)(3 * target_qdelay / 4);
+
+	/*
+	 * Slowdown period - first slowdown
+	 * is 2RTT after we exit initial slow start.
+	 * Subsequent slowdowns are after 9 times the
+	 * previous slow down durations.
+	 */
+	if (tp->t_ccstate->ledbat_slowdown_ts != 0 &&
+	    tcp_now >= tp->t_ccstate->ledbat_slowdown_ts) {
+		if (tp->t_ccstate->ledbat_slowdown_begin == 0) {
+			tp->t_ccstate->ledbat_slowdown_begin = tcp_now;
+			tp->t_ccstate->ledbat_slowdown_events++;
+		}
+		if (tcp_now < tp->t_ccstate->ledbat_slowdown_ts +
+		    (2 * (tp->t_srtt >> TCP_RTT_SHIFT))) {
+			// Set cwnd to 2 packets and return
+			if (tp->snd_cwnd > bg_ss_fltsz * tp->t_maxseg) {
+				if (tp->bg_ssthresh < tp->snd_cwnd) {
+					tp->bg_ssthresh = tp->snd_cwnd;
+				}
+				tp->snd_cwnd = bg_ss_fltsz * tp->t_maxseg;
+				/* Reset total bytes acked */
+				tp->t_bytes_acked = 0;
+			}
+			return;
+		}
+	}
+	if (curr_rtt == 0 || base_rtt == 0) {
+		update = MIN(bytes_acked, TCP_CC_CWND_INIT_PKTS *
+		    tp->t_maxseg);
+		update_cwnd(tp, update, true);
+	} else if (tp->snd_cwnd < tp->bg_ssthresh &&
+	    ((tp->t_ccstate->ledbat_slowdown_events > 0 &&
+	    curr_rtt <= (base_rtt + target_qdelay)) ||
+	    curr_rtt <= (base_rtt + ss_target))) {
+		/*
+		 * Modified slow start with a dynamic GAIN
+		 * If the queuing delay is larger than 3/4 of the target
+		 * delay, exit slow start, iff, it is the initial slow start.
+		 * After the initial slow start, during CA, window growth
+		 * will be bound by ssthresh.
+		 */
+		tp->t_bytes_acked += bytes_acked;
+		uint32_t gain_factor = ledbat_gain(base_rtt);
+		if (tp->t_bytes_acked >= tp->t_maxseg * gain_factor) {
+			update = MIN(tp->t_bytes_acked / gain_factor,
+			    TCP_CC_CWND_INIT_PKTS * tp->t_maxseg);
+			tp->t_bytes_acked = 0;
+			update_cwnd(tp, update, true);
+		}
+
+		/* Reset the next slowdown timestamp */
+		if (tp->t_ccstate->ledbat_slowdown_ts != 0) {
+			tp->t_ccstate->ledbat_slowdown_ts = 0;
+		}
+	} else {
+		/* Congestion avoidance */
+		ledbat_pp_congestion_avd(tp, bytes_acked, base_rtt, curr_rtt);
+	}
+}
+
 /* Function to process an ack.
  */
 void
@@ -260,7 +463,14 @@ tcp_ledbat_ack_rcvd(struct tcpcb *tp, struct tcphdr *th)
 	uint32_t acked = 0;
 
 	acked = BYTES_ACKED(th, tp);
+
+	if (tcp_ledbat_plus_plus) {
+		ledbat_pp_ack_rcvd(tp, acked);
+		return;
+	}
+
 	tp->t_bytes_acked += acked;
+
 	if (cw >= tp->bg_ssthresh) {
 		/* congestion-avoidance */
 		if (tp->t_bytes_acked < cw) {
@@ -285,7 +495,7 @@ tcp_ledbat_ack_rcvd(struct tcpcb *tp, struct tcphdr *th)
 		tp->t_bytes_acked -= cw;
 	}
 	if (incr > 0) {
-		update_cwnd(tp, incr);
+		update_cwnd(tp, incr, true);
 	}
 }
 
@@ -294,12 +504,21 @@ tcp_ledbat_pre_fr(struct tcpcb *tp)
 {
 	uint32_t win;
 
-	win = min(tp->snd_wnd, tp->snd_cwnd) /
-	    2 / tp->t_maxseg;
-	if (win < 2) {
-		win = 2;
+	win = min(tp->snd_wnd, tp->snd_cwnd);
+
+	if (tp->t_flagsext & TF_CWND_NONVALIDATED) {
+		tp->t_lossflightsize = tp->snd_max - tp->snd_una;
+		win = max(tp->t_pipeack, tp->t_lossflightsize);
+	} else {
+		tp->t_lossflightsize = 0;
 	}
-	tp->snd_ssthresh = win * tp->t_maxseg;
+
+	win = win / 2;
+	win = tcp_round_to(win, tp->t_maxseg);
+	if (win < 2 * tp->t_maxseg) {
+		win = 2 * tp->t_maxseg;
+	}
+	tp->snd_ssthresh = win;
 	if (tp->bg_ssthresh > tp->snd_ssthresh) {
 		tp->bg_ssthresh = tp->snd_ssthresh;
 	}
@@ -337,6 +556,7 @@ tcp_ledbat_post_fr(struct tcpcb *tp, struct tcphdr *th)
 		tp->snd_cwnd = tp->snd_ssthresh;
 	}
 	tp->t_bytes_acked = 0;
+	tp->t_ccstate->ledbat_md_bytes_acked = 0;
 }
 
 /*
@@ -347,8 +567,11 @@ tcp_ledbat_post_fr(struct tcpcb *tp, struct tcphdr *th)
 void
 tcp_ledbat_after_idle(struct tcpcb *tp)
 {
+	tcp_ledbat_clear_state(tp);
 	/* Reset the congestion window */
 	tp->snd_cwnd = tp->t_maxseg * bg_ss_fltsz;
+	tp->t_bytes_acked = 0;
+	tp->t_ccstate->ledbat_md_bytes_acked = 0;
 }
 
 /* Function to change the congestion window when the retransmit
@@ -362,18 +585,9 @@ void
 tcp_ledbat_after_timeout(struct tcpcb *tp)
 {
 	if (tp->t_state >= TCPS_ESTABLISHED) {
-		u_int win = min(tp->snd_wnd, tp->snd_cwnd) / 2 / tp->t_maxseg;
-		if (win < 2) {
-			win = 2;
-		}
-		tp->snd_ssthresh = win * tp->t_maxseg;
-
-		if (tp->bg_ssthresh > tp->snd_ssthresh) {
-			tp->bg_ssthresh = tp->snd_ssthresh;
-		}
-
+		tcp_ledbat_clear_state(tp);
+		tcp_ledbat_pre_fr(tp);
 		tp->snd_cwnd = tp->t_maxseg;
-		tcp_cc_resize_sndbuf(tp);
 	}
 }
 
@@ -409,10 +623,10 @@ tcp_ledbat_delay_ack(struct tcpcb *tp, struct tcphdr *th)
  * if it needs to be.
  */
 void
-tcp_ledbat_switch_cc(struct tcpcb *tp, uint16_t old_cc_index)
+tcp_ledbat_switch_cc(struct tcpcb *tp)
 {
-#pragma unused(old_cc_index)
 	uint32_t cwnd;
+	tcp_ledbat_clear_state(tp);
 
 	if (tp->bg_ssthresh == 0 || tp->bg_ssthresh > tp->snd_ssthresh) {
 		tp->bg_ssthresh = tp->snd_ssthresh;

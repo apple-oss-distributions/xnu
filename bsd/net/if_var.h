@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2020 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -64,6 +64,9 @@
 #ifndef _NET_IF_VAR_H_
 #define _NET_IF_VAR_H_
 
+#ifdef DRIVERKIT
+#include <stddef.h>
+#else
 #include <sys/appleapiopts.h>
 #include <stdint.h>
 #include <sys/types.h>
@@ -686,6 +689,10 @@ struct chain_len_stats {
 	uint64_t        cls_five_or_more;
 } __attribute__((__aligned__(sizeof(uint64_t))));
 
+#endif /* PRIVATE */
+#endif /* DRIVERKIT */
+
+#if defined (PRIVATE) || defined (DRIVERKIT_PRIVATE)
 /*
  * This structure is used to define the parameters for advisory notifications
  * on an interface.
@@ -754,10 +761,55 @@ struct ifnet_interface_advisory {
 	 * unit: milliseconds (ms)
 	 */
 	uint32_t    average_delay;
+	/*
+	 * Current frequency band (enumeration).
+	 */
+#define IF_INTERFACE_ADVISORY_FREQ_BAND_NOT_AVAIL     0
+#define IF_INTERFACE_ADVISORY_FREQ_BAND_WIFI_24GHZ    1
+#define IF_INTERFACE_ADVISORY_FREQ_BAND_WIFI_5GHZ     2
+#define IF_INTERFACE_ADVISORY_FREQ_BAND_WIFI_6GHZ     3
+	uint8_t    frequency_band;
+	/*
+	 * Intermittent WiFi state [true(1)/false(0)]
+	 */
+	uint8_t     intermittent_state;
+	/*
+	 * Estimated period for which intermittent state is expected to last.
+	 * 1 tick -> 1 ms UNDEF => UINT16_MAX
+	 */
+	uint16_t    estimated_intermittent_period;
+	/*
+	 * Expected wifi outage period during intermittent state
+	 * 1 tick -> 1 ms UNDEF => UINT16_MAX
+	 */
+	uint16_t    single_outage_period;
+
+	/*
+	 * WiFi-BT coexistence, 1-ON, 0-OFF
+	 */
+	uint8_t     bt_coex;
+	/*
+	 * on scale of 1 to 5
+	 */
+	uint8_t     quality_score_delay;
+	/*
+	 * on scale of 1 to 5
+	 */
+	uint8_t     quality_score_loss;
+	/*
+	 * on scale of 1 to 5
+	 */
+	uint8_t     quality_score_channel;
 } __attribute__((aligned(sizeof(uint64_t))));
 #pragma pack(pop)
 
-#endif /* PRIVATE */
+#else
+
+struct ifnet_interface_advisory;
+
+#endif /* defined (PRIVATE) || defined (DRIVERKIT_PRIVATE) */
+
+#ifndef DRIVERKIT
 
 #pragma pack()
 
@@ -883,7 +935,7 @@ TAILQ_HEAD(tailq_head, tqdummy);
 TAILQ_HEAD(ifnet_filter_head, ifnet_filter);
 TAILQ_HEAD(ddesc_head_name, dlil_demux_desc);
 
-extern boolean_t intcoproc_unrestricted;
+extern bool intcoproc_unrestricted;
 #endif /* BSD_KERNEL_PRIVATE */
 
 #ifdef PRIVATE
@@ -1018,7 +1070,7 @@ struct ifnet {
 	ifnet_del_proto_func    if_del_proto;
 	ifnet_check_multi       if_check_multi;
 	struct proto_hash_entry *if_proto_hash;
-	void                    *if_kpi_storage;
+	ifnet_detached_func     if_detach;
 
 	u_int32_t               if_flowhash;    /* interface flow control ID */
 
@@ -1036,7 +1088,7 @@ struct ifnet {
 	struct timespec         if_start_cycle;  /* restart interval */
 	struct thread           *if_start_thread;
 
-	struct ifclassq         if_snd;         /* transmit queue */
+	struct ifclassq         *if_snd;         /* transmit queue */
 	u_int32_t               if_output_sched_model;  /* tx sched model */
 
 	struct if_bandwidths    if_output_bw;
@@ -1049,6 +1101,8 @@ struct ifnet {
 	u_int32_t               if_flt_busy;
 	u_int32_t               if_flt_waiters;
 	struct ifnet_filter_head if_flt_head;
+	uint32_t                if_flt_non_os_count;
+	uint32_t                if_flt_no_tso_count;
 
 	struct ifmultihead      if_multiaddrs;  /* multicast addresses */
 	u_int32_t               if_updatemcasts; /* mcast addrs need updating */
@@ -1066,6 +1120,7 @@ struct ifnet {
 		u_int32_t       poll_flags;
 #define IF_POLLF_READY          0x1     /* poll thread is ready */
 #define IF_POLLF_RUNNING        0x2     /* poll thread is running/active */
+#define IF_POLLF_TERMINATING    0x4     /* poll thread is terminating */
 #define IF_POLLF_EMBRYONIC      0x8000  /* poll thread is being setup */
 		struct timespec poll_cycle;  /* poll interval */
 		struct thread   *poll_thread;
@@ -1144,7 +1199,6 @@ struct ifnet {
 
 	void                    *if_bridge;     /* bridge glue */
 
-	u_int32_t               if_want_aggressive_drain;
 	u_int32_t               if_idle_flags;  /* idle flags */
 	u_int32_t               if_idle_new_flags; /* temporary idle flags */
 	u_int32_t               if_idle_new_flags_mask; /* temporary mask */
@@ -1214,6 +1268,11 @@ struct ifnet {
 
 	ipv6_router_mode_t if_ipv6_router_mode; /* see <netinet6/in6_var.h> */
 
+	u_int8_t        if_estimated_up_bucket;
+	u_int8_t        if_estimated_down_bucket;
+	u_int8_t        if_radio_type;
+	u_int8_t        if_radio_channel;
+
 	uint8_t         network_id[IFNET_NETWORK_ID_LEN];
 	uint8_t         network_id_len;
 };
@@ -1265,6 +1324,7 @@ EVENTHANDLER_DECLARE(ifnet_event, ifnet_event_fn);
  * Valid values for if_start_flags
  */
 #define IFSF_FLOW_CONTROLLED    0x1     /* flow controlled */
+#define IFSF_TERMINATING        0x2     /* terminating */
 
 /*
  * Structure describing a `cloning' interface.
@@ -1584,7 +1644,8 @@ struct ifmultiaddr {
 #define IFNET_IS_WIFI_INFRA(_ifp)                               \
 	((_ifp)->if_family == IFNET_FAMILY_ETHERNET &&          \
 	(_ifp)->if_subfamily == IFNET_SUBFAMILY_WIFI &&         \
-	!((_ifp)->if_eflags & IFEF_AWDL))
+	!((_ifp)->if_eflags & IFEF_AWDL) &&                     \
+	!((_ifp)->if_xflags & IFXF_LOW_LATENCY))
 
 /*
  * Indicate whether or not the immediate interface is a companion link
@@ -1630,6 +1691,16 @@ struct ifmultiaddr {
 	((_ifp)->if_family == IFNET_FAMILY_ETHERNET &&                  \
 	 (_ifp)->if_subfamily == IFNET_SUBFAMILY_INTCOPROC)
 
+#define IFNET_IS_VMNET(_ifp)                                            \
+	((_ifp)->if_family == IFNET_FAMILY_ETHERNET &&                  \
+	 (_ifp)->if_subfamily == IFNET_SUBFAMILY_VMNET)
+/*
+ * Indicate whether or not the immediate interface is IP over Thunderbolt.
+ */
+#define IFNET_IS_THUNDERBOLT_IP(_ifp)                                \
+	((_ifp)->if_family == IFNET_FAMILY_ETHERNET &&               \
+	 (_ifp)->if_subfamily == IFNET_SUBFAMILY_THUNDERBOLT)
+
 extern struct ifnethead ifnet_head;
 extern struct ifnethead ifnet_ordered_head;
 extern struct ifnet **ifindex2ifnet;
@@ -1637,11 +1708,12 @@ extern u_int32_t if_sndq_maxlen;
 extern u_int32_t if_rcvq_maxlen;
 extern int if_index;
 extern struct ifaddr **ifnet_addrs;
-extern lck_attr_t *ifa_mtx_attr;
-extern lck_grp_t *ifa_mtx_grp;
-extern lck_grp_t *ifnet_lock_group;
-extern lck_attr_t *ifnet_lock_attr;
+extern lck_attr_t ifa_mtx_attr;
+extern lck_grp_t ifa_mtx_grp;
+extern lck_grp_t ifnet_lock_group;
+extern lck_attr_t ifnet_lock_attr;
 extern ifnet_t lo_ifp;
+extern uint32_t net_wake_pkt_debug;
 
 extern int if_addmulti(struct ifnet *, const struct sockaddr *,
     struct ifmultiaddr **);
@@ -1661,7 +1733,8 @@ extern struct ifnet *ifunit(const char *);
 extern struct ifnet *ifunit_ref(const char *);
 extern int ifunit_extract(const char *src, char *dst, size_t dstlen, int *unit);
 extern struct ifnet *if_withname(struct sockaddr *);
-extern void if_qflush(struct ifnet *, int);
+extern void if_qflush(struct ifnet *, struct ifclassq *, bool);
+extern void if_qflush_snd(struct ifnet *, bool);
 extern void if_qflush_sc(struct ifnet *, mbuf_svc_class_t, u_int32_t,
     u_int32_t *, u_int32_t *, int);
 
@@ -2041,4 +2114,5 @@ extern void if_clear_xflags(ifnet_t, u_int32_t);
 /* for uuid.c */
 __private_extern__ int uuid_get_ethernet(u_int8_t *);
 #endif /* XNU_KERNEL_PRIVATE */
+#endif /* DRIVERKIT */
 #endif /* !_NET_IF_VAR_H_ */

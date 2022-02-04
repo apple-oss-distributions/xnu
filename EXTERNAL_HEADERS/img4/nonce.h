@@ -49,10 +49,6 @@
 #error "Please #include <img4/firmware.h> instead of this file directly"
 #endif // __IMG4_INDIRECT
 
-#if IMG4_TAPI
-#include "tapi.h"
-#endif
-
 /*!
  * @typedef img4_nonce_domain_t
  * An opaque type describing a nonce domain.
@@ -74,6 +70,44 @@ typedef struct _img4_nonce_domain img4_nonce_domain_t;
  * hash.
  */
 #define IMG4_NONCE_MAX_LENGTH (48u)
+
+/*!
+ * @typedef img4_nonce_domain_index_t
+ * An enumeration describing nonce domains.
+ *
+ * @const IMG4_NONCE_DOMAIN_INDEX_TEST
+ * The enumerated constant corresponding to the internal test nonce domain.
+ *
+ * @const IMG4_NONCE_DOMAIN_INDEX_TRUST_CACHE
+ * The enumerated constant corresponding to
+ * {@link IMG4_NONCE_DOMAIN_TRUST_CACHE}.
+ *
+ * @const IMG4_NONCE_DOMAIN_INDEX_PDI
+ * The enumerated constant corresponding to {@link IMG4_NONCE_DOMAIN_TRUST_PDI}.
+ *
+ * @const IMG4_NONCE_DOMAIN_INDEX_CRYPTEX
+ * The enumerated constant corresponding to {@link IMG4_NONCE_DOMAIN_CRYPTEX}.
+ *
+ * @const IMG4_NONCE_DOMAIN_INDEX_DDI
+ * The enumerated constant corresponding to {@link IMG4_NONCE_DOMAIN_DDI}.
+ *
+ * @const IMG4_NONCE_DOMAIN_INDEX_EPHEMERAL_CRYPTEX
+ * The enumerated constant corresponding to
+ * {@link IMG4_NONCE_DOMAIN_EPHEMERAL_CRYPTEX}.
+ *
+ * @const _IMG4_NONCE_DOMAIN_INDEX_CNT
+ * A sentinel value indicating the number of nonce domains.
+ */
+IMG4_API_AVAILABLE_20210521
+OS_CLOSED_ENUM(img4_nonce_domain_index, uint64_t,
+	IMG4_NONCE_DOMAIN_INDEX_TEST = 0,
+	IMG4_NONCE_DOMAIN_INDEX_TRUST_CACHE,
+	IMG4_NONCE_DOMAIN_INDEX_PDI,
+	IMG4_NONCE_DOMAIN_INDEX_CRYPTEX,
+	IMG4_NONCE_DOMAIN_INDEX_DDI,
+	IMG4_NONCE_DOMAIN_INDEX_EPHEMERAL_CRYPTEX,
+	_IMG4_NONCE_DOMAIN_INDEX_CNT,
+);
 
 /*!
  * @typedef img4_nonce_t
@@ -180,6 +214,44 @@ const struct _img4_nonce_domain _img4_nonce_domain_cryptex;
 #endif
 
 /*!
+ * @const IMG4_NONCE_DOMAIN_DDI
+ * The nonce domain governing developer disk image personalizations. Use of this
+ * domain requires the
+ *
+ *     com.apple.private.img4.nonce.ddi
+ *
+ * entitlement.
+ */
+#if !XNU_KERNEL_PRIVATE
+IMG4_API_AVAILABLE_20181106
+OS_EXPORT
+const struct _img4_nonce_domain _img4_nonce_domain_ddi;
+#define IMG4_NONCE_DOMAIN_DDI (&_img4_nonce_domain_ddi)
+#else
+#define IMG4_NONCE_DOMAIN_DDI (img4if->i4if_v12.nonce_domain_ddi)
+#endif
+
+/*!
+ * @const IMG4_NONCE_DOMAIN_EPHEMERAL_CRYPTEX
+ * The nonce domain governing ephemeral cryptex personalizations. Use of this
+ * domain requires the
+ *
+ *     com.apple.private.img4.nonce.ephemeral-cryptex
+ *
+ * entitlement.
+ */
+#if !XNU_KERNEL_PRIVATE
+IMG4_API_AVAILABLE_20210305
+OS_EXPORT
+const struct _img4_nonce_domain _img4_nonce_domain_ephemeral_cryptex;
+#define IMG4_NONCE_DOMAIN_EPHEMERAL_CRYPTEX \
+		(&_img4_nonce_domain_ephemeral_cryptex)
+#else
+#define IMG4_NONCE_DOMAIN_EPHEMERAL_CRYPTEX \
+		(img4if->i4if_v12.nonce_domain_ephemeral_cryptex)
+#endif
+
+/*!
  * @function img4_nonce_domain_copy_nonce
  * Copies the current value of the nonce in the given domain.
  *
@@ -201,7 +273,7 @@ const struct _img4_nonce_domain _img4_nonce_domain_cryptex;
  *                  given nonce
  */
 #if !XNU_KERNEL_PRIVATE
-IMG4_API_AVAILABLE_20181106
+IMG4_API_AVAILABLE_20210305
 OS_EXPORT OS_WARN_RESULT OS_NONNULL1 OS_NONNULL2
 errno_t
 img4_nonce_domain_copy_nonce(const img4_nonce_domain_t *nd, img4_nonce_t *n);

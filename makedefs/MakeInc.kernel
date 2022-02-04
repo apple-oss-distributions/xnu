@@ -1,6 +1,6 @@
 # -*- mode: makefile;-*-
 #
-# Copyright (C) 1999-2016 Apple Inc. All rights reserved.
+# Copyright (C) 1999-2020 Apple Inc. All rights reserved.
 #
 # MakeInc.kernel augments the single-architecture
 # recursive build system with rules specific
@@ -46,13 +46,22 @@ endif
 # Rules for the highly parallel "build" phase, where each build configuration
 # writes into their own $(TARGET) independent of other build configs
 #
-# There are 4 primary build outputs:
+# There are 5 primary build outputs:
 # 1) $(KERNEL_FILE_NAME).unstripped    (raw linked kernel, unstripped)
 # 2) $(KERNEL_FILE_NAME)               (stripped kernel, with optional CTF data)
 # 3) $(KERNEL_FILE_NAME).dSYM          (dSYM)
 # 4) $(KERNEL_FILE_NAME).link          (bits for static linking)
+# 5) lib$(KERNEL_FILE_NAME).a          (static archive for testing)
 
 ifeq ($(BUILD_STATIC_LINK),1)
+ifeq ($(BUILD_XNU_LIBRARY),1)
+
+KERNEL_STATIC_LINK_TARGETS = \
+	$(TARGET)/lib$(KERNEL_FILE_NAME).a
+KERNEL_STATIC_LINK_DST = \
+	$(DSTROOT)/$(INSTALL_KERNEL_DIR)/lib$(KERNEL_FILE_NAME).a
+
+else
 
 KERNEL_STATIC_LINK_TARGETS = \
 	$(TARGET)/$(KERNEL_FILE_NAME).link/$(KERNEL_FILE_NAME).a
@@ -67,10 +76,16 @@ KERNEL_STATIC_LINK_DST = \
 			$(DSTROOT)/$(INSTALL_KERNEL_DIR)/$(KERNEL_FILE_NAME).link/$(KERNEL_FILE_NAME).dSYM/$(DSYMLLDBMACROSDIR)/$(KERNEL_LLDBBOOTSTRAP_NAME)
 
 endif
+endif
 
 do_build_all:: do_build_kernel
 
 .PHONY: do_build_kernel
+
+ifeq ($(BUILD_XNU_LIBRARY),1)
+do_build_kernel: $(KERNEL_STATIC_LINK_TARGETS)
+
+else
 
 do_build_kernel: $(TARGET)/$(KERNEL_FILE_NAME) $(TARGET)/$(KERNEL_FILE_NAME).unstripped $(KERNEL_STATIC_LINK_TARGETS)
 	@:
@@ -83,6 +98,8 @@ endif
 
 do_build_kernel_dSYM: $(TARGET)/$(KERNEL_FILE_NAME).dSYM
 	@:
+
+endif
 
 .LDFLAGS: ALWAYS
 	$(_v)$(REPLACECONTENTS) $@ $(LD) $(LDFLAGS_KERNEL) $(LDFLAGS_KERNEL_ONLY) $(LD_KERNEL_LIBS)
@@ -109,34 +126,59 @@ endif
 
 $(TARGET)/$(KERNEL_FILE_NAME).dSYM: $(TARGET)/$(KERNEL_FILE_NAME).unstripped
 	@$(LOG_DSYMUTIL) "$(@F)"
-	$(_v)bash -c "$(DSYMUTIL) $(DSYMUTIL_FLAGS) $< -o $@ $(_vstdout) 2> >(grep -v '^warning:.*could not find object file symbol for symbol' 1>&2)"
+	$(_v)$(BASH) -c "$(DSYMUTIL) $(DSYMUTIL_FLAGS) $< -o $@ $(_vstdout) 2> >(grep -v '^warning:.*could not find object file symbol for symbol' 1>&2)"
 	$(_v)$(MV) $@/$(DSYMDWARFDIR)/$(KERNEL_FILE_NAME).unstripped $@/$(DSYMDWARFDIR)/$(KERNEL_FILE_NAME)
 	$(_v)$(TOUCH) $@
 
-$(TARGET)/$(KERNEL_FILE_NAME).unstripped: $(addprefix $(TARGET)/,$(foreach component,$(COMPONENT_LIST),$(component)/$(CURRENT_KERNEL_CONFIG)/$(component).filelist)) lastkerneldataconst.o lastkernelconstructor.o nonlto.o $(SRCROOT)/config/version.c $(SRCROOT)/config/MasterVersion .LDFLAGS $(filter %/MakeInc.kernel,$(MAKEFILE_LIST))
+ifeq ($(BUILD_XNU_LIBRARY),1)
+$(TARGET)/lib$(KERNEL_FILE_NAME).a: $(addprefix $(TARGET)/,$(foreach component,$(COMPONENT_LIST),$(component)/$(CURRENT_KERNEL_CONFIG)/$(component).libfilelist)) nonlto.o $(SRCROOT)/config/version.c $(SRCROOT)/config/MasterVersion .LDFLAGS $(filter %/MakeInc.kernel,$(MAKEFILE_LIST))
+	$(_v)${MAKE} -f $(firstword $(MAKEFILE_LIST)) version.o
+	@$(LOG_LIBTOOL) "$(@F)"
+	$(_v)$(CAT) $(filter %.libfilelist,$+) < /dev/null > link.filelist
+	$(_v)$(LIBTOOL) -static -csD -filelist link.filelist -o $@
+	$(_v)$(LN) $(call function_convert_build_config_to_objdir,$(CURRENT_BUILD_CONFIG))/lib$(KERNEL_FILE_NAME).a $(OBJROOT)/lib$(KERNEL_FILE_NAME).a
+endif
+
+$(TARGET)/$(KERNEL_FILE_NAME).unstripped: $(addprefix $(TARGET)/,$(foreach component,$(COMPONENT_LIST),$(component)/$(CURRENT_KERNEL_CONFIG)/$(component).filelist)) lastkerneldataconst.o lastkernelconstructor.o nonlto.o $(SRCROOT)/config/version.c $(SRCROOT)/config/MasterVersion $(LDFILES_KERNEL_ONLY) .LDFLAGS $(filter %/MakeInc.kernel,$(MAKEFILE_LIST))
 	$(_v)${MAKE} -f $(firstword $(MAKEFILE_LIST)) version.o
 ifeq ($(PRE_LTO),1)
 	@$(LOG_LTO) "$(@F)"
-	$(_v)rm -f ltolink.filelist
-	$(_v)rm -f nonltolink.filelist
+	$(_v)$(RM) ltolink.filelist
+	$(_v)$(RM) nonltolink.filelist
+	$(_v)$(RM) -r $(TARGET)/justlto.o
 	$(_v)files="$$($(CAT) $(filter %.filelist,$+)) version.o $(filter %.o,$+)"; \
 	for ofile in $$files; \
 	do \
 		hdr=$$(od -An -N 4 -t x4 $$ofile); \
-		if [ $$hdr == "0b17c0de" ]; \
+		if [ $$hdr = "0b17c0de" ]; \
 			then \
-				lto="$$lto$$ofile"$$'\n'; \
+				if [ -z "$$lto" ]; \
+					then \
+						lto="$$ofile"; \
+					else \
+						lto="$$(printf '%s\n%s' "$$lto" "$$ofile")"; \
+				fi; \
 			else \
-				nonlto="$$nonlto$$ofile"$$'\n'; \
+				if [ -z "$$nonlto" ]; \
+					then \
+						nonlto="$$ofile"; \
+					else \
+						nonlto="$$(printf '%s\n%s' "$$nonlto" "$$ofile")"; \
+				fi; \
 			fi; \
 	done; \
-	printf "$$lto" >ltolink.filelist; \
-	printf "$$nonlto" >nonltolink.filelist
+	printf '%s\n' "$$lto" >ltolink.filelist; \
+	printf '%s\n' "$$nonlto" >nonltolink.filelist
 	@$(LOG_LD) "$(@F)"
 	$(_v)if [ -s ltolink.filelist ]; \
 	then \
 		$(LD) $($(addsuffix $(CURRENT_ARCH_CONFIG),ARCH_FLAGS_)) -r nonlto.o -filelist ltolink.filelist $(LDFLAGS_KERNEL_LTO) -Wl,-object_path_lto,$(TARGET)/justlto.o -o $(TARGET)/justlto.tmp.o && \
-		$(LD) $(LDFLAGS_KERNEL) $(LDFLAGS_KERNEL_ONLY) -filelist nonltolink.filelist $(TARGET)/justlto.o $(LDFLAGS_KERNEL_STRIP_LTO) -o $@ $(LD_KERNEL_LIBS) $(LD_KERNEL_ARCHIVES); \
+		if test -d $(TARGET)/justlto.o; \
+		then \
+		    $(LD) $(LDFLAGS_KERNEL) $(LDFLAGS_KERNEL_ONLY) -filelist nonltolink.filelist $(TARGET)/justlto.o/*.o $(LDFLAGS_KERNEL_STRIP_LTO) -o $@ $(LD_KERNEL_LIBS) $(LD_KERNEL_ARCHIVES); \
+		else \
+		    $(LD) $(LDFLAGS_KERNEL) $(LDFLAGS_KERNEL_ONLY) -filelist nonltolink.filelist $(TARGET)/justlto.o $(LDFLAGS_KERNEL_STRIP_LTO) -o $@ $(LD_KERNEL_LIBS) $(LD_KERNEL_ARCHIVES); \
+		fi; \
 	else \
 		$(LD) $(LDFLAGS_KERNEL) $(LDFLAGS_KERNEL_ONLY) -filelist nonltolink.filelist -o $@ $(LD_KERNEL_LIBS) $(LD_KERNEL_ARCHIVES); \
 	fi
@@ -153,7 +195,12 @@ $(TARGET)/$(KERNEL_FILE_NAME).link/$(KERNEL_FILE_NAME).a:   $(TARGET)/$(KERNEL_F
 	@$(LOG_LIBTOOL) "$(@F)"
 	$(_v)$(MKDIR) $(dir $@)
 ifeq ($(PRE_LTO),1)
-	$(_v)$(LIBTOOL) -ca $(TARGET)/justlto.o -filelist nonltolink.filelist -o $@
+	$(_v)if [ -d $(TARGET)/justlto.o ]; \
+	then \
+	    $(LIBTOOL) -ca $(TARGET)/justlto.o/*.o -filelist nonltolink.filelist -o $@; \
+	else \
+	    $(LIBTOOL) -ca $(TARGET)/justlto.o -filelist nonltolink.filelist -o $@; \
+	fi
 else
 	$(_v)$(LIBTOOL) -ca -filelist link.filelist version.o lastkerneldataconst.o lastkernelconstructor.o -o $@
 endif
@@ -242,6 +289,7 @@ do_build_install_non_primary:: do_install_machine_specific_KDK_dSYM
 endif
 endif
 
+ifneq ($(BUILD_XNU_LIBRARY),1)
 ifeq ($(INSTALL_XNU_DEBUG_FILES),1)
 do_build_install_primary:: do_install_xnu_debug_files
 endif
@@ -250,6 +298,7 @@ endif
 
 do_install_xnu_debug_files:	$(DSTROOT)/$(DEVELOPER_EXTRAS_DIR)/README.DEBUG-kernel.txt
 	@:
+endif
 
 #
 # If the timestamp indicates the DSTROOT kernel is out of
@@ -263,7 +312,9 @@ do_install_xnu_debug_files:	$(DSTROOT)/$(DEVELOPER_EXTRAS_DIR)/README.DEBUG-kern
 $(DSTROOT)/$(INSTALL_KERNEL_DIR)/$(KERNEL_FILE_NAME): $(TARGET)/$(KERNEL_FILE_NAME) ALWAYS
 	$(_v)$(MKDIR) $(dir $@)
 	@$(LOG_INSTALL) "$(@F)$(Color0) ($(ColorLF)$(CURRENT_ARCH_CONFIG_LC)$(Color0))"
-	$(_v)if [ $(OBJROOT)/.mach_kernel.timestamp -nt $@ ]; then	\
+    # -nt and -ot are evaluated differently by bash, dash, and zsh (and are not part of the POSIX specification).
+    # Explicitly specify what should happen when the right hand file doesn't exist.
+	$(_v)if [ $(OBJROOT)/.mach_kernel.timestamp -nt $@ -o \( -e $(OBJROOT)/.mach_kernel.timestamp -a \! -e $@ \) ]; then	\
 		$(INSTALL) $(EXEC_INSTALL_FLAGS) $< $@;			\
 		cmdstatus=$$?;						\
 	else								\
@@ -273,7 +324,14 @@ $(DSTROOT)/$(INSTALL_KERNEL_DIR)/$(KERNEL_FILE_NAME): $(TARGET)/$(KERNEL_FILE_NA
 	exit $$cmdstatus
 
 ifeq ($(BUILD_STATIC_LINK),1)
+ifeq ($(BUILD_XNU_LIBRARY),1)
 
+$(DSTROOT)/$(INSTALL_KERNEL_DIR)/lib$(KERNEL_FILE_NAME).a: $(TARGET)/lib$(KERNEL_FILE_NAME).a ALWAYS
+	$(_v)$(MKDIR) $(dir $@)
+	@$(LOG_INSTALL) "$(@F)"
+	$(_v)$(INSTALL) $(INSTALL_FLAGS) $< $@
+
+else
 $(DSTROOT)/$(INSTALL_KERNEL_DIR)/$(KERNEL_FILE_NAME).link/$(KERNEL_FILE_NAME).a: $(TARGET)/$(KERNEL_FILE_NAME).link/$(KERNEL_FILE_NAME).a ALWAYS
 	$(_v)$(MKDIR) $(dir $@)
 	@$(LOG_INSTALL) "$(@F)"
@@ -298,6 +356,7 @@ $(DSTROOT)/$(INSTALL_KERNEL_DIR)/$(KERNEL_FILE_NAME).link/$(KERNEL_FILE_NAME).al
 	$(_v)$(MKDIR) $(dir $@)
 	@$(LOG_INSTALL) "$(@F)"
 	$(_v)$(INSTALL) $(INSTALL_FLAGS) $< $@
+endif
 
 # BUILD_STATIC_LINK
 endif
@@ -305,7 +364,9 @@ endif
 $(SYMROOT)/$(KERNEL_FILE_NAME): $(TARGET)/$(KERNEL_FILE_NAME).unstripped ALWAYS
 	$(_v)$(MKDIR) $(dir $@)
 	@$(LOG_INSTALLSYM) "$(@F)$(Color0) ($(ColorLF)$(CURRENT_ARCH_CONFIG_LC)$(Color0))"
-	$(_v)if [ $(OBJROOT)/.mach_kernel.timestamp -nt $@ ]; then		\
+    # -nt and -ot are evaluated differently by bash, dash, and zsh (and are not part of the POSIX specification).
+    # Explicitly specify what should happen when the right hand file doesn't exist.
+	$(_v)if [ $(OBJROOT)/.mach_kernel.timestamp -nt $@ -o \( -e $(OBJROOT)/.mach_kernel.timestamp -a \! -e $@ \) ]; then		\
 		$(INSTALL) $(EXEC_INSTALL_FLAGS) $< $@;				\
 		cmdstatus=$$?;							\
 	else									\
@@ -345,7 +406,9 @@ $(SYMROOT)/$(KERNEL_FILE_NAME).dSYM/$(DSYMINFODIR)/Info.plist $(DSTROOT)/$(INSTA
 $(SYMROOT)/$(KERNEL_FILE_NAME).dSYM/$(DSYMDWARFDIR)/$(KERNEL_FILE_NAME) $(DSTROOT)/$(INSTALL_KERNEL_SYM_DIR)/$(KERNEL_FILE_NAME).dSYM/$(DSYMDWARFDIR)/$(KERNEL_FILE_NAME): $(TARGET)/$(KERNEL_FILE_NAME).dSYM/$(DSYMDWARFDIR)/$(KERNEL_FILE_NAME) ALWAYS
 	$(_v)$(MKDIR) $(dir $@)
 	@$(LOG_INSTALLSYM) "$(ColorL)dSYM$(Color0) $(ColorF)$(@F).dSYM$(ColorF) ($(ColorLF)$(CURRENT_ARCH_CONFIG_LC)$(Color0))"
-	$(_v)if [ $(OBJROOT)/.mach_kernel.timestamp -nt $@ ]; then			\
+    # -nt and -ot are evaluated differently by bash, dash, and zsh (and are not part of the POSIX specification).
+    # Explicitly specify what should happen when the right hand file doesn't exist.
+	$(_v)if [ $(OBJROOT)/.mach_kernel.timestamp -nt $@ -o \( -e $(OBJROOT)/.mach_kernel.timestamp -a \! -e $@ \) ]; then			\
 		$(INSTALL) $(EXEC_INSTALL_FLAGS) $< $@;					\
 		cmdstatus=$$?;								\
 	else										\
@@ -355,6 +418,16 @@ $(SYMROOT)/$(KERNEL_FILE_NAME).dSYM/$(DSYMDWARFDIR)/$(KERNEL_FILE_NAME) $(DSTROO
 	exit $$cmdstatus
 
 .PHONY: do_install_machine_specific_kernel do_install_machine_specific_kernel_dSYM
+.PHONY: do_install_machine_specific_KDK_dSYM
+
+ifeq ($(BUILD_XNU_LIBRARY),1)
+
+do_install_machine_specific_kernel: $(KERNEL_STATIC_LINK_DST)
+	@:
+do_install_machine_specific_kernel_dSYM:
+	@:
+
+else
 
 do_install_machine_specific_kernel: $(DSTROOT)/$(INSTALL_KERNEL_DIR)/$(KERNEL_FILE_NAME)                \
 			$(SYMROOT)/$(KERNEL_FILE_NAME)                                                              \
@@ -368,14 +441,14 @@ do_install_machine_specific_kernel_dSYM: \
 			$(SYMROOT)/$(KERNEL_FILE_NAME).dSYM/$(DSYMDWARFDIR)/$(KERNEL_FILE_NAME)
 	@:
 
-.PHONY: do_install_machine_specific_KDK_dSYM
-
 do_install_machine_specific_KDK_dSYM: \
 			$(DSTROOT)/$(INSTALL_KERNEL_SYM_DIR)/$(KERNEL_FILE_NAME).dSYM/$(DSYMINFODIR)/Info.plist \
 			$(DSTROOT)/$(INSTALL_KERNEL_SYM_DIR)/$(KERNEL_FILE_NAME).dSYM/$(DSYMLLDBMACROSDIR)/lldbmacros \
 			$(DSTROOT)/$(INSTALL_KERNEL_SYM_DIR)/$(KERNEL_FILE_NAME).dSYM/$(DSYMLLDBMACROSDIR)/$(KERNEL_LLDBBOOTSTRAP_NAME) \
 			$(DSTROOT)/$(INSTALL_KERNEL_SYM_DIR)/$(KERNEL_FILE_NAME).dSYM/$(DSYMDWARFDIR)/$(KERNEL_FILE_NAME)
 	@:
+
+endif
 
 # The $(RM) is needed so that the $(LN) doesn't dereference an existing
 # symlink during incremental builds and create a new symlink inside
@@ -416,3 +489,5 @@ install_alias: $(DSTROOT)/$(INSTALL_KERNEL_DIR)/$(ALIAS_FILE_NAME)
 
 print_exports:
 	$(_v)printenv | sort
+
+# vim: set ft=make:

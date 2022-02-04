@@ -710,6 +710,30 @@ protected:
 	virtual IOReturn copyElementValues(int element_index,
 	    IOReportElementValues *elementValues);
 
+/*! @function   IOReporter::legendWith
+ *   @abstract   Internal method to help create legend entries
+ *
+ *   @param  channelIDs - array of uint64_t channels IDs.
+ *   @param  channelNames - parrallel array of const char* channel names
+ *   @param  channelCount - number of channels, and size of channelIDs and channelNames
+ *   @param  channelType - the type of all channels in this legend
+ *   @param  unit - The unit for the quantity recorded by this reporter object
+ *
+ *   @result     An IOReportLegendEntry object or NULL on failure
+ *
+ *   @discussion
+ *       This static method is variant of IOReporter::legendWith that takes
+ *       raw arrays for the channelIDs and channelNames. It supports the static
+ *       createLegend() methods for the IOReporter subclasses.
+ *
+ *   Locking: SAFE to call concurrently (no static globals), MAY BLOCK
+ */
+	static OSPtr<IOReportLegendEntry> legendWith(const uint64_t *channelIDs,
+	    const char **channelNames,
+	    int channelCount,
+	    IOReportChannelType channelType,
+	    IOReportUnit unit);
+
 // private methods
 private:
 /*! @function   IOReporter::copyChannelIDs
@@ -859,6 +883,29 @@ public:
  *   Locking: same-instance concurrency SAFE, WILL NOT BLOCK
  */
 	int64_t getValue(uint64_t channel_id);
+
+/*! @function   IOSimpleReporter::createLegend
+ *   @abstract   Creates a legend entry for an IOSimpleReporter
+ *
+ *   @param  channelIDs - array of uint64_t channels IDs.
+ *   @param  channelNames - parrallel array of const char* channel names
+ *   @param  channelCount - number of channels, and size of channelIDs and channelNames
+ *   @param  categories - The category in which the report should be classified
+ *   @param  unit - The unit for the quantity recorded by the reporter object
+ *
+ *   @result     An IOReportLegendEntry object or NULL on failure
+ *
+ *   @discussion
+ *       This static method supports creating a legend entry for an IOSimpleReporter
+ *       without actually having an IOSimpleReporter instance.
+ *       This can be used to lazily create IOReporters in IOService::configureReport()
+ *       rather than during driver initialization.
+ */
+	static OSPtr<IOReportLegendEntry> createLegend(const uint64_t *channelIDs,
+	    const char **channelNames,
+	    int channelCount,
+	    IOReportCategories categories,
+	    IOReportUnit unit);
 
 protected:
 
@@ -1289,6 +1336,31 @@ public:
  */
 	uint64_t getStateLastChannelUpdateTime(uint64_t channel_id) __deprecated;
 
+/*! @function   IOStateReporter::createLegend
+ *   @abstract   Creates a legend entry for an IOStateReporter
+ *
+ *   @param  channelIDs - array of uint64_t channels IDs.
+ *   @param  channelNames - parrallel array of const char* channel names
+ *   @param  channelCount - number of channels, and size of channelIDs and channelNames
+ *   @param  nstates - Maximum number of states for this reporter's channels
+ *   @param  categories - The category in which the report should be classified
+ *   @param  unit - The unit for the quantity recorded by the reporter object
+ *
+ *   @result     An IOReportLegendEntry object or NULL on failure
+ *
+ *   @discussion
+ *       This static method supports creating a legend entry for an IOStateReporter
+ *       without actually having an IOStateReporter instance.
+ *       This can be used to lazily create IOReporters in IOService::configureReport()
+ *       rather than during driver initialization.
+ */
+	static OSPtr<IOReportLegendEntry> createLegend(const uint64_t *channelIDs,
+	    const char **channelNames,
+	    int channelCount,
+	    int nstates,
+	    IOReportCategories categories,
+	    IOReportUnit unit);
+
 /*! @function   IOStateReporter::free
  *   @abstract   Releases the object and all its resources.
  *
@@ -1545,6 +1617,31 @@ public:
  *   Locking: same-instance concurrency SAFE, WILL NOT BLOCK
  */
 	int tallyValue(int64_t value);
+
+/*! @function   IOHistogramReporter::createLegend
+ *   @abstract   Creates a legend entry for an IOStateReporter
+ *
+ *   @param  channelID - uint64_t channel identifier
+ *   @param  channelName - rich channel name as char*
+ *   @param  segmentCount - Number of segments to be extracted from the config data structure
+ *   @param  config - Histograms require the caller to pass a configuration by segments
+ *   @param  categories - The category in which the report should be classified
+ *   @param  unit - The unit for the quantity recorded by the reporter object
+ *
+ *   @result     An IOReportLegendEntry object or NULL on failure
+ *
+ *   @discussion
+ *       This static method supports creating a legend entry for an IOStateReporter
+ *       without actually having an IOStateReporter instance.
+ *       This can be used to lazily create IOReporters in IOService::configureReport()
+ *       rather than during driver initialization.
+ */
+	static OSPtr<IOReportLegendEntry> createLegend(const uint64_t channelID,
+	    const char *channelName,
+	    int segmentCount,
+	    IOHistogramSegmentConfig *config,
+	    IOReportCategories categories,
+	    IOReportUnit unit);
 
 /*! @function   IOHistogramReporter::free
  *   @abstract   Releases the object and all its resources.

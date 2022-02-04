@@ -9,7 +9,17 @@ include $(MakeInc_def)
 INSTINC_SUBDIRS = \
 	altq classq pktsched
 
-DATAFILES= \
+# Files that are public on macOS, but private on embedded
+EMBEDDED_PRIVATE_DATAFILES = \
+	if_media.h
+
+ifeq ($(filter $(SUPPORTED_EMBEDDED_PLATFORMS) $(SUPPORTED_SIMULATOR_PLATFORMS),$(PLATFORM)),)
+EXTRA_DATAFILES = $(EMBEDDED_PRIVATE_DATAFILES)
+else
+EXTRA_PRIVATE_DATAFILES = $(EMBEDDED_PRIVATE_DATAFILES)
+endif
+
+DATAFILES= $(sort \
 	bpf.h \
 	dlil.h \
 	ethernet.h \
@@ -17,7 +27,6 @@ DATAFILES= \
 	if_arp.h \
 	if_dl.h \
 	if_llc.h \
-	if_media.h \
 	if_mib.h \
 	if_types.h \
 	if_var.h \
@@ -26,13 +35,17 @@ DATAFILES= \
 	ndrv.h \
 	pfkeyv2.h \
 	route.h	\
-	net_kev.h
+	net_kev.h \
+	$(EXTRA_DATAFILES))
+
+MODULEMAPFILES = \
+	net.modulemap
 
 KERNELFILES= \
 	kpi_interface.h kpi_interfacefilter.h kpi_protocol.h \
 	if_ether.h init.h radix.h
 
-PRIVATE_DATAFILES = \
+PRIVATE_DATAFILES = $(sort \
 	bpf.h \
 	content_filter.h \
 	etherdefs.h \
@@ -75,9 +88,18 @@ PRIVATE_DATAFILES = \
 	net_kev.h \
 	sixxlowpan.h \
 	frame802154.h \
-	nat464_utils.h
+	nat464_utils.h \
+	$(EXTRA_PRIVATE_DATAFILES))
+
+ifneq ($(EXTRA_PRIVATE_DATAFILES),)
+PRIVATE_MODULEMAPFILES = \
+	net_private.modulemap
+endif
 
 DRIVERKIT_DATAFILES = \
+	bpf.h \
+	if.h \
+	if_var.h \
 	if_media.h \
 	ethernet.h
 
@@ -88,15 +110,21 @@ PRIVATE_KERNELFILES = $(filter-out radix.h,${KERNELFILES}) \
 
 INSTALL_MI_LIST	= ${DATAFILES}
 
+INSTALL_MODULEMAP_MI_LIST = ${MODULEMAPFILES}
+
 INSTALL_DRIVERKIT_MI_LIST = ${DRIVERKIT_DATAFILES}
 
 INSTALL_MI_DIR = net
 
-EXPORT_MI_LIST	= ${INSTALL_MI_LIST} ${KERNELFILES}
+INSTALL_MI_LCL_LIST = ${EXTRA_PRIVATE_DATAFILES}
+
+INSTALL_MODULEMAP_MI_LCL_LIST = ${PRIVATE_MODULEMAPFILES}
+
+EXPORT_MI_LIST	= ${INSTALL_MI_LIST} ${INSTALL_MI_LCL_LIST} ${KERNELFILES}
 
 EXPORT_MI_DIR = ${INSTALL_MI_DIR}
 
-INSTALL_MI_LCL_LIST = ${PRIVATE_DATAFILES}
+INSTALL_SF_MI_LCL_LIST = $(sort ${DATAFILES} ${PRIVATE_DATAFILES})
 
 INSTALL_KF_MI_LCL_LIST = $(sort ${DATAFILES} ${PRIVATE_DATAFILES} ${PRIVATE_KERNELFILES})
 

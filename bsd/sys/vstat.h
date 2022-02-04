@@ -35,6 +35,7 @@
 
 #include <sys/appleapiopts.h>
 #include <sys/cdefs.h>
+#include <sys/_types/_fsid_t.h>
 
 #warning obsolete header! delete the include from your sources
 

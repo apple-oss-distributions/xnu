@@ -533,7 +533,7 @@ extern uint64_t max_preemption_latency_tsc;
 #if PMAP_INTR_DEBUG
 #define pmap_intr_assert() {                                                    \
 	if (processor_avail_count > 1 && !ml_get_interrupts_enabled())          \
-	        panic("pmap interrupt assert %d %s, %d", processor_avail_count, __FILE__, __LINE__); \
+	        panic("pmap interrupt assert %d", processor_avail_count); \
 }
 #else
 #define pmap_intr_assert()

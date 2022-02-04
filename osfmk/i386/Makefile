@@ -18,6 +18,7 @@ EXPORT_ONLY_FILES =	\
 		    cpuid.h \
 		    eflags.h \
 		    fpu.h \
+			x86_hypercall.h \
 		    io_map_entries.h \
 		    lapic.h \
 		    lock.h \
@@ -49,9 +50,13 @@ EXPORT_ONLY_FILES =	\
 
 INSTALL_MD_DIR = i386
 
+# These are covered by ../../bsd/machine/machine.modulemap.
 INSTALL_MD_LIST = eflags.h user_ldt.h
 
+# These are covered by ../../bsd/machine/machine_private.modulemap.
 INSTALL_MD_LCL_LIST = cpu_capabilities.h
+
+INSTALL_SF_MD_LCL_LIST = ${INSTALL_MD_LIST} ${INSTALL_MD_LCL_LIST}
 
 INSTALL_KF_MD_LIST = asm.h cpuid.h eflags.h locks.h machine_routines.h proc_reg.h vmx.h
 

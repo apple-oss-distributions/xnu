@@ -202,10 +202,11 @@ void     audit_arg_rgid(struct kaudit_record *ar, gid_t rgid);
 void     audit_arg_ruid(struct kaudit_record *ar, uid_t ruid);
 void     audit_arg_sgid(struct kaudit_record *ar, gid_t sgid);
 void     audit_arg_suid(struct kaudit_record *ar, uid_t suid);
-void     audit_arg_groupset(struct kaudit_record *ar, gid_t *gidset,
+void     audit_arg_groupset(struct kaudit_record *ar, const gid_t *gidset,
     u_int gidset_size);
-void     audit_arg_login(struct kaudit_record *ar, char *login);
-void     audit_arg_ctlname(struct kaudit_record *ar, int *name, int namelen);
+void     audit_arg_login(struct kaudit_record *ar, const char *login);
+void     audit_arg_ctlname(struct kaudit_record *ar, const int *name,
+    int namelen);
 void     audit_arg_mask(struct kaudit_record *ar, int mask);
 void     audit_arg_mode(struct kaudit_record *ar, mode_t mode);
 void     audit_arg_value32(struct kaudit_record *ar, uint32_t value32);
@@ -220,35 +221,37 @@ void     audit_arg_sockaddr(struct kaudit_record *ar, struct vnode *cwd_vp,
     struct sockaddr *so);
 void     audit_arg_auid(struct kaudit_record *ar, uid_t auid);
 void     audit_arg_auditinfo(struct kaudit_record *ar,
-    struct auditinfo *au_info);
+    const struct auditinfo *au_info);
 void     audit_arg_auditinfo_addr(struct kaudit_record *ar,
-    struct auditinfo_addr *au_info);
+    const struct auditinfo_addr *au_info);
 void     audit_arg_upath(struct kaudit_record *ar, struct vnode *cwd_vp,
-    char *upath, u_int64_t flags);
+    const char *upath, u_int64_t flags);
 void     audit_arg_kpath(struct kaudit_record *ar,
-    char *kpath, u_int64_t flags);
+    const char *kpath, u_int64_t flags);
 void     audit_arg_vnpath(struct kaudit_record *ar, struct vnode *vp,
     u_int64_t flags);
 void     audit_arg_vnpath_withref(struct kaudit_record *ar, struct vnode *vp,
     u_int64_t flags);
-void     audit_arg_text(struct kaudit_record *ar, char *text);
-void     audit_arg_opaque(struct kaudit_record *ar, void *data, size_t size);
-void     audit_arg_data(struct kaudit_record *ar, void *data, size_t size,
+void     audit_arg_text(struct kaudit_record *ar, const char *text);
+void     audit_arg_opaque(struct kaudit_record *ar, const void *data,
+    size_t size);
+void     audit_arg_data(struct kaudit_record *ar, const void *data, size_t size,
     size_t number);
 void     audit_arg_cmd(struct kaudit_record *ar, int cmd);
 void     audit_arg_svipc_cmd(struct kaudit_record *ar, int cmd);
-void     audit_arg_svipc_perm(struct kaudit_record *ar, struct ipc_perm *perm);
+void     audit_arg_svipc_perm(struct kaudit_record *ar,
+    const struct ipc_perm *perm);
 void     audit_arg_svipc_id(struct kaudit_record *ar, int id);
 void     audit_arg_svipc_addr(struct kaudit_record *ar, user_addr_t addr);
 void     audit_arg_posix_ipc_perm(struct kaudit_record *ar, uid_t uid,
     gid_t gid, mode_t mode);
 void     audit_arg_auditon(struct kaudit_record *ar,
-    union auditon_udata *udata);
+    const union auditon_udata *udata);
 void     audit_arg_file(struct kaudit_record *ar, struct proc *p,
     struct fileproc *fp);
-void     audit_arg_argv(struct kaudit_record *ar, char *argv, int argc,
+void     audit_arg_argv(struct kaudit_record *ar, const char *argv, int argc,
     size_t length);
-void     audit_arg_envv(struct kaudit_record *ar, char *envv, int envc,
+void     audit_arg_envv(struct kaudit_record *ar, const char *envv, int envc,
     size_t length);
 void    audit_arg_identity(struct kaudit_record *ar);
 
@@ -256,7 +259,7 @@ void     audit_arg_mach_port1(struct kaudit_record *ar, mach_port_name_t port);
 void     audit_arg_mach_port2(struct kaudit_record *ar, mach_port_name_t port);
 void     audit_sysclose(struct kaudit_record *ar, struct proc *p, int fd);
 
-void     audit_proc_coredump(proc_t proc, char *path, int errcode);
+void     audit_proc_coredump(proc_t proc, const char *path, int errcode);
 void     audit_proc_init(struct proc *p);
 void     audit_proc_fork(struct proc *parent, struct proc *child);
 void     audit_proc_free(struct proc *p);

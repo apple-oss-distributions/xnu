@@ -3,7 +3,11 @@
 #include <mach/message.h>
 #include <darwintest.h>
 
-T_GLOBAL_META(T_META_RUN_CONCURRENTLY(true));
+T_GLOBAL_META(
+	T_META_NAMESPACE("xnu.ipc"),
+	T_META_RUN_CONCURRENTLY(TRUE),
+	T_META_RADAR_COMPONENT_NAME("xnu"),
+	T_META_RADAR_COMPONENT_VERSION("IPC"));
 
 static inline mach_port_type_t
 get_port_type(mach_port_t mp)
@@ -35,13 +39,14 @@ T_DECL(mach_port_insert_right, "insert send right for an existing right", T_META
 	    "0x%x should be a send-receive right", port);
 
 	mach_port_name_t name = 123;
-
+	/* 0x7B, lower two bits are 0b11 which is valid gen number, but index is invalid (0) */
 	retval = mach_port_insert_right(task, name, port, MACH_MSG_TYPE_MAKE_SEND);
 	T_ASSERT_MACH_ERROR(retval, KERN_FAILURE, "insert a send right for port=[%d] with name=[%d]", port, name);
 
-	name = port + 1;
+	name = 122;
+	/* invalid gen number, should return KERN_INVALID_VALUE */
 	retval = mach_port_insert_right(task, name, port, MACH_MSG_TYPE_MAKE_SEND);
-	T_ASSERT_MACH_ERROR(retval, KERN_FAILURE, "insert a send right for port=[%d] with name=[%d]", port, name);
+	T_ASSERT_MACH_ERROR(retval, KERN_INVALID_VALUE, "insert a send right for port=[%d] with name=[%d]", port, name);
 
 	retval = mach_port_allocate(task, MACH_PORT_RIGHT_RECEIVE, &port2);
 	T_ASSERT_MACH_SUCCESS(retval, "allocate a port=[%d]", port2);

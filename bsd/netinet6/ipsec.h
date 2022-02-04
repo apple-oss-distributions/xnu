@@ -47,13 +47,6 @@
 
 #include <os/log.h>
 
-/* lock for IPsec stats */
-extern lck_grp_t         *sadb_stat_mutex_grp;
-extern lck_grp_attr_t    *sadb_stat_mutex_grp_attr;
-extern lck_attr_t        *sadb_stat_mutex_attr;
-extern lck_mtx_t         *sadb_stat_mutex;
-
-
 #define IPSEC_STAT_INCREMENT(x) \
 	OSIncrementAtomic64((SInt64 *)&x)
 
@@ -320,6 +313,7 @@ struct ipsec_output_state {
 	struct route_in6 ro;
 	struct sockaddr *dst;
 	u_int outgoing_if;
+	u_int32_t dscp_mapping;
 };
 
 struct ipsec_history {

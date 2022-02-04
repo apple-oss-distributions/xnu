@@ -49,7 +49,6 @@
 #include <sys/vnode_internal.h>
 #include <sys/user.h>
 #include <sys/syscall.h>
-#include <sys/malloc.h>
 #include <sys/un.h>
 #include <sys/sysent.h>
 #include <sys/sysproto.h>
@@ -177,8 +176,7 @@ audit(proc_t p, struct audit_args *uap, __unused int32_t *retval)
 		 * If a process is not running as root but is properly
 		 * entitled, allow it to audit non-kernel events only.
 		 */
-		if (!IOTaskHasEntitlement(current_task(),
-		    AU_AUDIT_USER_ENTITLEMENT)) {
+		if (!IOCurrentTaskHasEntitlement(AU_AUDIT_USER_ENTITLEMENT)) {
 			goto free_out;
 		}
 	} else {
@@ -189,8 +187,7 @@ audit(proc_t p, struct audit_args *uap, __unused int32_t *retval)
 	max_record_length = MIN(audit_qctrl.aq_bufsz, MAX_AUDIT_RECORD_SIZE);
 	mtx_unlock(&audit_mtx);
 
-	if (IOTaskHasEntitlement(current_task(),
-	    AU_CLASS_RESERVED_ENTITLEMENT)) {
+	if (IOCurrentTaskHasEntitlement(AU_CLASS_RESERVED_ENTITLEMENT)) {
 		/* Entitled tasks are trusted to add appropriate identity info */
 		add_identity_token = 0;
 	} else {
@@ -233,7 +230,7 @@ audit(proc_t p, struct audit_args *uap, __unused int32_t *retval)
 		ar = uthr->uu_ar;
 	}
 
-	rec = malloc(uap->length, M_AUDITDATA, M_WAITOK);
+	rec = kalloc_data(uap->length, Z_WAITOK);
 	if (!rec) {
 		error = ENOMEM;
 		goto free_out;
@@ -273,7 +270,7 @@ audit(proc_t p, struct audit_args *uap, __unused int32_t *retval)
 		}
 
 		/* Splice the record together using a new buffer */
-		full_rec = malloc(uap->length + id_tok->len, M_AUDITDATA, M_WAITOK);
+		full_rec = kalloc_data(uap->length + id_tok->len, Z_WAITOK);
 		if (!full_rec) {
 			error = ENOMEM;
 			goto free_out;
@@ -287,12 +284,13 @@ audit(proc_t p, struct audit_args *uap, __unused int32_t *retval)
 		bytes_copied = uap->length - AUDIT_TRAILER_SIZE;
 
 		/* Copy the identity token */
-		memcpy(full_rec + bytes_copied, id_tok->t_data, id_tok->len);
+		memcpy((void *)((uintptr_t)full_rec + bytes_copied), id_tok->t_data, id_tok->len);
 		bytes_copied += id_tok->len;
 
 		/* Copy the old trailer */
-		memcpy(full_rec + bytes_copied,
-		    rec + (uap->length - AUDIT_TRAILER_SIZE), AUDIT_TRAILER_SIZE);
+		memcpy((void *)((uintptr_t)full_rec + bytes_copied),
+		    (const void *)((uintptr_t)rec + (uap->length - AUDIT_TRAILER_SIZE)),
+		    AUDIT_TRAILER_SIZE);
 		bytes_copied += AUDIT_TRAILER_SIZE;
 
 		/* Fix the record size stored in the header token */
@@ -301,7 +299,7 @@ audit(proc_t p, struct audit_args *uap, __unused int32_t *retval)
 
 		/* Fix the record size stored in the trailer token */
 		trl = (struct trl_tok_partial*)
-		    (full_rec + bytes_copied - AUDIT_TRAILER_SIZE);
+		    ((uintptr_t)full_rec + bytes_copied - AUDIT_TRAILER_SIZE);
 		trl->len = htonl(bytes_copied);
 
 		udata = full_rec;
@@ -344,20 +342,18 @@ free_out:
 	 * will be attached to the kernel structure).
 	 */
 	if (rec && (add_identity_token || error)) {
-		free(rec, M_AUDITDATA);
+		kfree_data_addr(rec);
 	}
 
 	/* Only free full_rec if an error occurred */
 	if (full_rec && error) {
-		free(full_rec, M_AUDITDATA);
+		kfree_data_addr(full_rec);
 	}
 
 	audit_identity_info_destruct(&id_info);
 	if (id_tok) {
-		if (id_tok->t_data) {
-			free(id_tok->t_data, M_AUDITBSM);
-		}
-		free(id_tok, M_AUDITBSM);
+		kfree_data(id_tok->t_data, id_tok->len);
+		kfree_type(struct au_token, id_tok);
 	}
 
 	return error;
@@ -453,8 +449,7 @@ auditon(proc_t p, struct auditon_args *uap, __unused int32_t *retval)
 		break;
 	case A_SETCTLMODE:
 	case A_SETEXPAFTER:
-		if (!IOTaskHasEntitlement(current_task(),
-		    AU_CLASS_RESERVED_ENTITLEMENT)) {
+		if (!IOCurrentTaskHasEntitlement(AU_CLASS_RESERVED_ENTITLEMENT)) {
 			error = EPERM;
 		}
 		break;
@@ -476,8 +471,7 @@ auditon(proc_t p, struct auditon_args *uap, __unused int32_t *retval)
 		case A_SETFSIZE:
 		case A_SETPOLICY:
 		case A_SETQCTRL:
-			if (!IOTaskHasEntitlement(current_task(),
-			    AU_CLASS_RESERVED_ENTITLEMENT)) {
+			if (!IOCurrentTaskHasEntitlement(AU_CLASS_RESERVED_ENTITLEMENT)) {
 				error = EPERM;
 			}
 			break;
@@ -1185,7 +1179,7 @@ auditctl(proc_t p, struct auditctl_args *uap, __unused int32_t *retval)
 	 * Do not allow setting of a path when auditing is in reserved mode
 	 */
 	if (ctlmode == AUDIT_CTLMODE_EXTERNAL &&
-	    !IOTaskHasEntitlement(current_task(), AU_AUDITCTL_RESERVED_ENTITLEMENT)) {
+	    !IOCurrentTaskHasEntitlement(AU_AUDITCTL_RESERVED_ENTITLEMENT)) {
 		return EPERM;
 	}
 

@@ -231,44 +231,6 @@ typedef struct vm_purgeable_info        *vm_purgeable_info_t;
 #define VM_PAGE_QUERY_PAGE_CS_NX        0x400
 #define VM_PAGE_QUERY_PAGE_REUSABLE     0x800
 
-#ifdef  MACH_KERNEL_PRIVATE
-
-/*
- *	Each machine dependent implementation is expected to
- *	keep certain statistics.  They may do this anyway they
- *	so choose, but are expected to return the statistics
- *	in the following structure.
- */
-
-struct pmap_statistics {
-	integer_t       resident_count; /* # of pages mapped (total)*/
-	integer_t       resident_max;   /* # of pages mapped (peak) */
-	integer_t       wired_count;    /* # of pages wired */
-
-	integer_t       device;
-	integer_t       device_peak;
-	integer_t       internal;
-	integer_t       internal_peak;
-	integer_t       external;
-	integer_t       external_peak;
-	integer_t       reusable;
-	integer_t       reusable_peak;
-	uint64_t        compressed __attribute__((aligned(8)));
-	uint64_t        compressed_peak __attribute__((aligned(8)));
-	uint64_t        compressed_lifetime __attribute__((aligned(8)));
-};
-
-typedef struct pmap_statistics  *pmap_statistics_t;
-
-#define PMAP_STATS_PEAK(field)                  \
-	MACRO_BEGIN                             \
-	if (field > field##_peak) {             \
-	        field##_peak = field;           \
-	}                                       \
-	MACRO_END
-
-#endif  /* MACH_KERNEL_PRIVATE */
-
 /*
  * VM allocation flags:
  *
@@ -309,6 +271,7 @@ typedef struct pmap_statistics  *pmap_statistics_t;
 #define VM_FLAGS_NO_CACHE       0x0010
 #define VM_FLAGS_RESILIENT_CODESIGN     0x0020
 #define VM_FLAGS_RESILIENT_MEDIA        0x0040
+#define VM_FLAGS_PERMANENT      0x0080
 #define VM_FLAGS_OVERWRITE      0x4000  /* delete any existing mappings first */
 /*
  * VM_FLAGS_SUPERPAGE_MASK
@@ -334,6 +297,7 @@ typedef struct pmap_statistics  *pmap_statistics_t;
 	                         VM_FLAGS_4GB_CHUNK |           \
 	                         VM_FLAGS_RANDOM_ADDR |         \
 	                         VM_FLAGS_NO_CACHE |            \
+	                         VM_FLAGS_PERMANENT |           \
 	                         VM_FLAGS_OVERWRITE |           \
 	                         VM_FLAGS_SUPERPAGE_MASK |      \
 	                         VM_FLAGS_ALIAS_MASK)
@@ -449,8 +413,9 @@ typedef struct {
 #define VM_LEDGER_TAG_NEURAL    0x00000005
 #define VM_LEDGER_TAG_MAX       0x00000005
 /* individual bits: */
-#define VM_LEDGER_FLAG_NO_FOOTPRINT     0x00000001
-#define VM_LEDGER_FLAGS (VM_LEDGER_FLAG_NO_FOOTPRINT)
+#define VM_LEDGER_FLAG_NO_FOOTPRINT               (1 << 0)
+#define VM_LEDGER_FLAG_NO_FOOTPRINT_FOR_DEBUG    (1 << 1)
+#define VM_LEDGER_FLAGS (VM_LEDGER_FLAG_NO_FOOTPRINT | VM_LEDGER_FLAG_NO_FOOTPRINT_FOR_DEBUG)
 
 
 #define VM_MEMORY_MALLOC 1
@@ -467,7 +432,8 @@ typedef struct {
 
 #define VM_MEMORY_MALLOC_NANO 11
 #define VM_MEMORY_MALLOC_MEDIUM 12
-#define VM_MEMORY_MALLOC_PGUARD 13
+#define VM_MEMORY_MALLOC_PGUARD 13  // Will be removed
+#define VM_MEMORY_MALLOC_PROB_GUARD 13
 
 #define VM_MEMORY_MACH_MSG 20
 #define VM_MEMORY_IOKIT 21
@@ -634,6 +600,9 @@ typedef struct {
 /* CoreUI cached image data */
 #define VM_MEMORY_COREUI_CACHED_IMAGE_DATA 103
 
+/* ColorSync is using mmap for read-only copies of ICC profile data */
+#define VM_MEMORY_COLORSYNC 104
+
 /* Reserve 230-239 for Rosetta */
 #define VM_MEMORY_ROSETTA 230
 #define VM_MEMORY_ROSETTA_THREAD_CONTEXT 231
@@ -688,8 +657,12 @@ typedef struct {
 #define VM_KERN_MEMORY_SKYWALK          26
 #define VM_KERN_MEMORY_LTABLE           27
 #define VM_KERN_MEMORY_HV               28
+#define VM_KERN_MEMORY_KALLOC_DATA      29
+#define VM_KERN_MEMORY_RETIRED          30
+#define VM_KERN_MEMORY_KALLOC_TYPE      31
+#define VM_KERN_MEMORY_TRIAGE           32
+#define VM_KERN_MEMORY_FIRST_DYNAMIC    33
 
-#define VM_KERN_MEMORY_FIRST_DYNAMIC    29
 /* out of tags: */
 #define VM_KERN_MEMORY_ANY              255
 #define VM_KERN_MEMORY_COUNT            256
@@ -707,6 +680,7 @@ typedef struct {
 #define VM_KERN_SITE_NAMED              0x00000400
 #define VM_KERN_SITE_ZONE               0x00000800
 #define VM_KERN_SITE_ZONE_VIEW          0x00001000
+#define VM_KERN_SITE_KALLOC             0x00002000      /* zone field is size class */
 
 #define VM_KERN_COUNT_MANAGED           0
 #define VM_KERN_COUNT_RESERVED          1
@@ -725,7 +699,11 @@ typedef struct {
 /* The number of bytes from the kernel cache that are wired in memory */
 #define VM_KERN_COUNT_WIRED_STATIC_KERNELCACHE 11
 
-#define VM_KERN_COUNTER_COUNT           12
+#define VM_KERN_COUNT_MAP_KALLOC_LARGE  VM_KERN_COUNT_MAP_KALLOC
+#define VM_KERN_COUNT_MAP_KALLOC_LARGE_DATA     12
+#define VM_KERN_COUNT_MAP_KERNEL_DATA   13
+
+#define VM_KERN_COUNTER_COUNT           14
 
 #endif /* KERNEL_PRIVATE */
 

@@ -829,7 +829,7 @@ patch_vtables(KXLDKext *kext, KXLDDict *patched_vtables,
 	char final_sym_name[KXLD_MAX_NAME_LEN];
 	char *demangled_name1 = NULL;
 	char *demangled_name2 = NULL;
-	size_t demangled_length1 = 0;;
+	size_t demangled_length1 = 0;
 	size_t demangled_length2 = 0;
 	size_t len = 0;
 	u_int nvtables = 0;

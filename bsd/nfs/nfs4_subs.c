@@ -122,7 +122,7 @@ nfs4_init_clientid(struct nfsmount *nmp)
 	static uint8_t en0addr[6];
 	static uint8_t en0addr_set = 0;
 
-	lck_mtx_lock(nfs_global_mutex);
+	lck_mtx_lock(&nfs_global_mutex);
 	if (!en0addr_set) {
 		ifnet_t interface = NULL;
 		error = ifnet_find_by_name("en0", &interface);
@@ -139,9 +139,9 @@ nfs4_init_clientid(struct nfsmount *nmp)
 			ifnet_release(interface);
 		}
 	}
-	lck_mtx_unlock(nfs_global_mutex);
+	lck_mtx_unlock(&nfs_global_mutex);
 
-	MALLOC(ncip, struct nfs_client_id *, sizeof(struct nfs_client_id), M_TEMP, M_WAITOK);
+	ncip = kalloc_type(struct nfs_client_id, Z_WAITOK);
 	if (!ncip) {
 		return ENOMEM;
 	}
@@ -153,9 +153,9 @@ nfs4_init_clientid(struct nfsmount *nmp)
 	if (ncip->nci_idlen > NFS4_OPAQUE_LIMIT) {
 		ncip->nci_idlen = NFS4_OPAQUE_LIMIT;
 	}
-	MALLOC(ncip->nci_id, char *, ncip->nci_idlen, M_TEMP, M_WAITOK);
+	ncip->nci_id = kalloc_data(ncip->nci_idlen, Z_WAITOK);
 	if (!ncip->nci_id) {
-		FREE(ncip, M_TEMP);
+		kfree_type(struct nfs_client_id, ncip);
 		return ENOMEM;
 	}
 
@@ -185,7 +185,7 @@ nfs4_init_clientid(struct nfsmount *nmp)
 	}
 
 	/* make sure the ID is unique, and add it to the sorted list */
-	lck_mtx_lock(nfs_global_mutex);
+	lck_mtx_lock(&nfs_global_mutex);
 	TAILQ_FOREACH(ncip2, &nfsclientids, nci_link) {
 		if (ncip->nci_idlen > ncip2->nci_idlen) {
 			continue;
@@ -220,7 +220,7 @@ nfs4_init_clientid(struct nfsmount *nmp)
 		TAILQ_INSERT_TAIL(&nfsclientids, ncip, nci_link);
 	}
 	nmp->nm_longid = ncip;
-	lck_mtx_unlock(nfs_global_mutex);
+	lck_mtx_unlock(&nfs_global_mutex);
 
 	return 0;
 }
@@ -260,7 +260,7 @@ nfs4_setclientid(struct nfsmount *nmp)
 	nfsm_chain_build_alloc_init(error, &nmreq, 14 * NFSX_UNSIGNED + nmp->nm_longid->nci_idlen);
 	nfsm_chain_add_compound_header(error, &nmreq, "setclid", nmp->nm_minor_vers, numops);
 	numops--;
-	nfsm_chain_add_32(error, &nmreq, NFS_OP_SETCLIENTID);
+	nfsm_chain_add_v4_op(error, &nmreq, NFS_OP_SETCLIENTID);
 	/* nfs_client_id4  client; */
 	nfsm_chain_add_64(error, &nmreq, nmp->nm_mounttime);
 	nfsm_chain_add_32(error, &nmreq, nmp->nm_longid->nci_idlen);
@@ -331,7 +331,7 @@ nfs4_setclientid(struct nfsmount *nmp)
 	nfsm_chain_build_alloc_init(error, &nmreq, 15 * NFSX_UNSIGNED);
 	nfsm_chain_add_compound_header(error, &nmreq, "setclid_conf", nmp->nm_minor_vers, numops);
 	numops--;
-	nfsm_chain_add_32(error, &nmreq, NFS_OP_SETCLIENTID_CONFIRM);
+	nfsm_chain_add_v4_op(error, &nmreq, NFS_OP_SETCLIENTID_CONFIRM);
 	nfsm_chain_add_64(error, &nmreq, nmp->nm_clientid);
 	nfsm_chain_add_64(error, &nmreq, verifier);
 	nfsm_chain_build_done(error, &nmreq);
@@ -358,10 +358,10 @@ nfs4_setclientid(struct nfsmount *nmp)
 	nfsm_chain_build_alloc_init(error, &nmreq, 23 * NFSX_UNSIGNED);
 	nfsm_chain_add_compound_header(error, &nmreq, "setclid_attr", nmp->nm_minor_vers, numops);
 	numops--;
-	nfsm_chain_add_32(error, &nmreq, NFS_OP_PUTFH);
+	nfsm_chain_add_v4_op(error, &nmreq, NFS_OP_PUTFH);
 	nfsm_chain_add_fh(error, &nmreq, nmp->nm_vers, nmp->nm_dnp->n_fhp, nmp->nm_dnp->n_fhsize);
 	numops--;
-	nfsm_chain_add_32(error, &nmreq, NFS_OP_GETATTR);
+	nfsm_chain_add_v4_op(error, &nmreq, NFS_OP_GETATTR);
 	NFS_CLEAR_ATTRIBUTES(bitmap);
 	NFS4_PER_FS_ATTRIBUTES(bitmap);
 	nfsm_chain_add_bitmap(error, &nmreq, bitmap, NFS_ATTR_BITMAP_LEN);
@@ -413,7 +413,7 @@ nfs4_renew(struct nfsmount *nmp, int rpcflag)
 	nfsm_chain_build_alloc_init(error, &nmreq, 8 * NFSX_UNSIGNED);
 	nfsm_chain_add_compound_header(error, &nmreq, "renew", nmp->nm_minor_vers, numops);
 	numops--;
-	nfsm_chain_add_32(error, &nmreq, NFS_OP_RENEW);
+	nfsm_chain_add_v4_op(error, &nmreq, NFS_OP_RENEW);
 	nfsm_chain_add_64(error, &nmreq, nmp->nm_clientid);
 	nfsm_chain_build_done(error, &nmreq);
 	nfsm_assert(error, (numops == 0), EPROTO);
@@ -467,8 +467,10 @@ out:
 	if ((interval < 1) || (nmp->nm_state & NFSSTA_RECOVER)) {
 		interval = 1;
 	}
+	if (nmp->nm_renew_timer) {
+		nfs_interval_timer_start(nmp->nm_renew_timer, interval * 1000);
+	}
 	lck_mtx_unlock(&nmp->nm_lock);
-	nfs_interval_timer_start(nmp->nm_renew_timer, interval * 1000);
 }
 
 /*
@@ -582,13 +584,13 @@ gotargs:
 	nfsm_chain_add_compound_header(error, &nmreq, "secinfo", nmp->nm_minor_vers, numops);
 	numops--;
 	if (fhp) {
-		nfsm_chain_add_32(error, &nmreq, NFS_OP_PUTFH);
+		nfsm_chain_add_v4_op(error, &nmreq, NFS_OP_PUTFH);
 		nfsm_chain_add_fh(error, &nmreq, nfsvers, fhp, fhsize);
 	} else {
-		nfsm_chain_add_32(error, &nmreq, NFS_OP_PUTROOTFH);
+		nfsm_chain_add_v4_op(error, &nmreq, NFS_OP_PUTROOTFH);
 	}
 	numops--;
-	nfsm_chain_add_32(error, &nmreq, NFS_OP_SECINFO);
+	nfsm_chain_add_v4_op(error, &nmreq, NFS_OP_SECINFO);
 	nfsm_chain_add_name(error, &nmreq, name, namelen, nmp);
 	nfsm_chain_build_done(error, &nmreq);
 	nfsm_assert(error, (numops == 0), EPROTO);
@@ -727,13 +729,13 @@ nfs4_get_fs_locations(
 	nfsm_chain_build_alloc_init(error, &nmreq, 18 * NFSX_UNSIGNED);
 	nfsm_chain_add_compound_header(error, &nmreq, "fs_locations", nmp->nm_minor_vers, numops);
 	numops--;
-	nfsm_chain_add_32(error, &nmreq, NFS_OP_PUTFH);
+	nfsm_chain_add_v4_op(error, &nmreq, NFS_OP_PUTFH);
 	nfsm_chain_add_fh(error, &nmreq, NFS_VER4, fhp, fhsize);
 	numops--;
-	nfsm_chain_add_32(error, &nmreq, NFS_OP_LOOKUP);
+	nfsm_chain_add_v4_op(error, &nmreq, NFS_OP_LOOKUP);
 	nfsm_chain_add_name(error, &nmreq, name, strlen(name), nmp);
 	numops--;
-	nfsm_chain_add_32(error, &nmreq, NFS_OP_GETATTR);
+	nfsm_chain_add_v4_op(error, &nmreq, NFS_OP_GETATTR);
 	NFS_CLEAR_ATTRIBUTES(bitmap);
 	NFS_BITMAP_SET(bitmap, NFS_FATTR_FS_LOCATIONS);
 	nfsm_chain_add_bitmap(error, &nmreq, bitmap, NFS_ATTR_BITMAP_LEN);
@@ -1271,7 +1273,7 @@ nfs4_map_domain(char *id, char **atp)
 		size_t new_id_len = otw_id_2_at_len + dsnode_len + 1;
 		char tmp;
 
-		MALLOC(new_id, char*, new_id_len, M_TEMP, M_WAITOK);
+		new_id = kalloc_data(new_id_len, Z_WAITOK);
 		tmp = *otw_nfs4domain;
 		*otw_nfs4domain = '\0';  /* Chop of the old domain */
 		strlcpy(new_id, id, MAXPATHLEN);
@@ -1397,7 +1399,7 @@ nfs4_id2guid(/*const*/ char *id, guid_t *guidp, int isgroup)
 
 	/* free mapped domain id string */
 	if (new_id) {
-		FREE(new_id, M_TEMP);
+		kfree_data_addr(new_id);
 	}
 
 	return error;
@@ -1773,8 +1775,8 @@ nfs4_parsefattr(
 	struct dqblk *dqbp,
 	struct nfs_fs_locations *nfslsp)
 {
-	int error = 0, error2, rderror = 0, attrbytes;
-	uint32_t val, val2, val3, i;
+	int error = 0, error2, rderror = 0, attrbytes = 0;
+	uint32_t val = 0, i;
 	uint32_t bitmap[NFS_ATTR_BITMAP_LEN], len;
 	size_t slen;
 	char sbuf[64], *s;
@@ -1791,7 +1793,7 @@ nfs4_parsefattr(
 		nfsap = &nfsa_dummy;
 	}
 	if (!nvap) {
-		MALLOC(nva_dummy, struct nfs_vattr *, sizeof(*nva_dummy), M_TEMP, M_WAITOK);
+		nva_dummy = kalloc_type(struct nfs_vattr, Z_WAITOK);
 		nvap = nva_dummy;
 	}
 	if (!dqbp) {
@@ -1802,13 +1804,13 @@ nfs4_parsefattr(
 	}
 	bzero(nfslsp, sizeof(*nfslsp));
 
-	attrbytes = val = val2 = val3 = 0;
 	s = sbuf;
 	slen = sizeof(sbuf);
 	NVATTR_INIT(nvap);
 
 	len = NFS_ATTR_BITMAP_LEN;
 	nfsm_chain_get_bitmap(error, nmc, bitmap, len);
+	nfsmout_if(error);
 	/* add bits to object/fs attr bitmaps */
 	for (i = 0; i < NFS_ATTR_BITMAP_LEN; i++) {
 		nvap->nva_bitmap[i] |= bitmap[i] & nfs_object_attr_bitmap[i];
@@ -1933,12 +1935,12 @@ nfs4_parsefattr(
 			acl->acl_ace[i].ace_rights = nfs4_ace_nfsmask_to_vfsrights(ace_mask);
 			if (!error && !error2 && (len >= slen)) {
 				if (s != sbuf) {
-					FREE(s, M_TEMP);
+					kfree_data(s, slen);
 					s = sbuf;
 					slen = sizeof(sbuf);
 				}
 				/* Let's add a bit more if we can to the allocation as to try and avoid future allocations */
-				MALLOC(s, char*, (len + 16 < NFS_MAX_WHO) ? len + 16 : NFS_MAX_WHO, M_TEMP, M_WAITOK);
+				s = kalloc_data((len + 16 < NFS_MAX_WHO) ? len + 16 : NFS_MAX_WHO, Z_WAITOK);
 				if (s) {
 					slen = (len + 16 < NFS_MAX_WHO) ? len + 16 : NFS_MAX_WHO;
 				} else {
@@ -2099,7 +2101,7 @@ nfs4_parsefattr(
 				error = EBADRPC;
 			}
 			nfsmout_if(error);
-			MALLOC(fsp->np_components[comp], char *, val + 1, M_TEMP, M_WAITOK | M_ZERO);
+			fsp->np_components[comp] = kalloc_data(val + 1, Z_WAITOK | Z_ZERO);
 			if (!fsp->np_components[comp]) {
 				error = ENOMEM;
 			}
@@ -2123,7 +2125,7 @@ nfs4_parsefattr(
 		nfsmout_if(error);
 		for (loc = 0; loc < nfslsp->nl_numlocs; loc++) {
 			nfsmout_if(error);
-			MALLOC(fsl, struct nfs_fs_location *, sizeof(struct nfs_fs_location), M_TEMP, M_WAITOK | M_ZERO);
+			fsl = kalloc_type(struct nfs_fs_location, Z_WAITOK | Z_ZERO);
 			if (!fsl) {
 				error = ENOMEM;
 			}
@@ -2141,7 +2143,7 @@ nfs4_parsefattr(
 			}
 			for (serv = 0; serv < fsl->nl_servcount; serv++) {
 				nfsmout_if(error);
-				MALLOC(fss, struct nfs_fs_server *, sizeof(struct nfs_fs_server), M_TEMP, M_WAITOK | M_ZERO);
+				fss = kalloc_type(struct nfs_fs_server, Z_WAITOK | Z_ZERO);
 				if (!fss) {
 					error = ENOMEM;
 				}
@@ -2152,7 +2154,7 @@ nfs4_parsefattr(
 					error = EINVAL;
 				}
 				nfsmout_if(error);
-				MALLOC(fss->ns_name, char *, val + 1, M_TEMP, M_WAITOK | M_ZERO);
+				fss->ns_name = kalloc_data(val + 1, Z_WAITOK | Z_ZERO);
 				if (!fss->ns_name) {
 					error = ENOMEM;
 				}
@@ -2167,7 +2169,7 @@ nfs4_parsefattr(
 						error = ENOMEM;
 					}
 					nfsmout_if(error);
-					MALLOC(fss->ns_addresses[0], char *, val + 1, M_TEMP, M_WAITOK | M_ZERO);
+					fss->ns_addresses[0] = kalloc_data(val + 1, Z_WAITOK | Z_ZERO);
 					if (!fss->ns_addresses[0]) {
 						error = ENOMEM;
 					}
@@ -2212,7 +2214,7 @@ nfs4_parsefattr(
 					error = EINVAL;
 				}
 				nfsmout_if(error);
-				MALLOC(fsp->np_components[comp], char *, val + 1, M_TEMP, M_WAITOK | M_ZERO);
+				fsp->np_components[comp] = kalloc_data(val + 1, Z_WAITOK | Z_ZERO);
 				if (!fsp->np_components[comp]) {
 					error = ENOMEM;
 				}
@@ -2302,12 +2304,12 @@ nfs4_parsefattr(
 		}
 		if (!error && (len >= slen)) {
 			if (s != sbuf) {
-				FREE(s, M_TEMP);
+				kfree_data(s, slen);
 				s = sbuf;
 				slen = sizeof(sbuf);
 			}
 			/* Let's add a bit more if we can to the allocation as to try and avoid future allocations */
-			MALLOC(s, char*, (len + 16 < NFS_MAX_WHO) ? len + 16 : NFS_MAX_WHO, M_TEMP, M_WAITOK);
+			s = kalloc_data((len + 16 < NFS_MAX_WHO) ? len + 16 : NFS_MAX_WHO, Z_WAITOK);
 			if (s) {
 				slen = (len + 16 < NFS_MAX_WHO) ? len + 16 : NFS_MAX_WHO;
 			} else {
@@ -2341,12 +2343,12 @@ nfs4_parsefattr(
 		}
 		if (!error && (len >= slen)) {
 			if (s != sbuf) {
-				FREE(s, M_TEMP);
+				kfree_data(s, slen);
 				s = sbuf;
 				slen = sizeof(sbuf);
 			}
 			/* Let's add a bit more if we can to the allocation as to try and avoid future allocations */
-			MALLOC(s, char*, (len + 16 < NFS_MAX_WHO) ? len + 16 : NFS_MAX_WHO, M_TEMP, M_WAITOK);
+			s = kalloc_data((len + 16 < NFS_MAX_WHO) ? len + 16 : NFS_MAX_WHO, Z_WAITOK);
 			if (s) {
 				slen = (len + 16 < NFS_MAX_WHO) ? len + 16 : NFS_MAX_WHO;
 			} else {
@@ -2469,7 +2471,7 @@ nfsmout:
 	}
 	/* free up temporary resources */
 	if (s && (s != sbuf)) {
-		FREE(s, M_TEMP);
+		kfree_data(s, slen);
 	}
 	if (acl) {
 		kauth_acl_free(acl);
@@ -2478,7 +2480,7 @@ nfsmout:
 		kauth_acl_free(nvap->nva_acl);
 		nvap->nva_acl = NULL;
 	}
-	FREE(nva_dummy, M_TEMP);
+	kfree_type(struct nfs_vattr, nva_dummy);
 	return error;
 }
 
@@ -2490,7 +2492,7 @@ nfsm_chain_add_fattr4_f(struct nfsm_chain *nmc, struct vnode_attr *vap, struct n
 {
 	int error = 0, attrbytes, i, isgroup;
 	size_t slen, len;
-	uint32_t *pattrbytes, val, acecount;;
+	uint32_t *pattrbytes, val, acecount;
 	uint32_t bitmap[NFS_ATTR_BITMAP_LEN];
 	char sbuf[64], *s;
 	kauth_acl_t acl;
@@ -2539,11 +2541,11 @@ nfsm_chain_add_fattr4_f(struct nfsm_chain *nmc, struct vnode_attr *vap, struct n
 			error = nfs4_guid2id(&acl->acl_ace[i].ace_applicable, s, &len, isgroup);
 			if (error == ENOSPC) {
 				if (s != sbuf) {
-					FREE(s, M_TEMP);
+					kfree_data(s, slen);
 					s = sbuf;
 				}
 				len += 8;
-				MALLOC(s, char*, len, M_TEMP, M_WAITOK);
+				s = kalloc_data(len, Z_WAITOK);
 				if (s) {
 					slen = len;
 					error = nfs4_guid2id(&acl->acl_ace[i].ace_applicable, s, &len, isgroup);
@@ -2579,11 +2581,11 @@ nfsm_chain_add_fattr4_f(struct nfsm_chain *nmc, struct vnode_attr *vap, struct n
 		error = nfs4_guid2id(&vap->va_uuuid, s, &len, 0);
 		if (error == ENOSPC) {
 			if (s != sbuf) {
-				FREE(s, M_TEMP);
+				kfree_data(s, slen);
 				s = sbuf;
 			}
 			len += 8;
-			MALLOC(s, char*, len, M_TEMP, M_WAITOK);
+			s = kalloc_data(len, Z_WAITOK);
 			if (s) {
 				slen = len;
 				error = nfs4_guid2id(&vap->va_uuuid, s, &len, 0);
@@ -2605,11 +2607,11 @@ nfsm_chain_add_fattr4_f(struct nfsm_chain *nmc, struct vnode_attr *vap, struct n
 		error = nfs4_guid2id(&vap->va_guuid, s, &len, 1);
 		if (error == ENOSPC) {
 			if (s != sbuf) {
-				FREE(s, M_TEMP);
+				kfree_data(s, slen);
 				s = sbuf;
 			}
 			len += 8;
-			MALLOC(s, char*, len, M_TEMP, M_WAITOK);
+			s = kalloc_data(len, Z_WAITOK);
 			if (s) {
 				slen = len;
 				error = nfs4_guid2id(&vap->va_guuid, s, &len, 1);
@@ -2658,7 +2660,7 @@ nfsm_chain_add_fattr4_f(struct nfsm_chain *nmc, struct vnode_attr *vap, struct n
 	*pattrbytes = txdr_unsigned(attrbytes);
 nfsmout:
 	if (s && (s != sbuf)) {
-		FREE(s, M_TEMP);
+		kfree_data(s, slen);
 	}
 	return error;
 }
@@ -2892,7 +2894,7 @@ restart:
 			    (!nofp->nof_rw_drw && !nofp->nof_w_drw && !nofp->nof_r_drw &&
 			    !nofp->nof_rw_dw && !nofp->nof_w_dw && !nofp->nof_r_dw &&
 			    !nofp->nof_rw && !nofp->nof_w && !nofp->nof_r)) {
-				if (!error && !nfs_open_state_set_busy(nofp->nof_np, NULL)) {
+				if (!error && (error = nfs_open_state_set_busy(nofp->nof_np, NULL)) == 0) {
 					error = nfs4_claim_delegated_state_for_node(nofp->nof_np, R_RECOVER);
 					if (!error && (nofp->nof_flags & NFS_OPEN_FILE_REOPEN)) {
 						reopen = EAGAIN;

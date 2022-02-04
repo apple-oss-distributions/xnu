@@ -92,31 +92,85 @@
 #define NUM_SEQ_ENTRIES 8
 #endif
 
-ZONE_DECLARE(ipc_space_zone, "ipc spaces",
-    sizeof(struct ipc_space), ZC_NOENCRYPT);
+os_refgrp_decl(static, is_refgrp, "is", NULL);
+static ZONE_DECLARE(ipc_space_zone, "ipc spaces",
+    sizeof(struct ipc_space), ZC_ZFREE_CLEARMEM);
 
-ipc_space_t ipc_space_kernel;
-ipc_space_t ipc_space_reply;
+SECURITY_READ_ONLY_LATE(ipc_space_t) ipc_space_kernel;
+SECURITY_READ_ONLY_LATE(ipc_space_t) ipc_space_reply;
 
-/*
- *	Routine:	ipc_space_reference
- *	Routine:	ipc_space_release
- *	Purpose:
- *		Function versions of the IPC space inline reference.
- */
+static ipc_space_t
+ipc_space_alloc(void)
+{
+	ipc_space_t space;
+
+	space = zalloc_flags(ipc_space_zone, Z_WAITOK | Z_ZERO | Z_NOFAIL);
+	lck_ticket_init(&space->is_lock, &ipc_lck_grp);
+
+	return space;
+}
+
+__attribute__((noinline))
+static void
+ipc_space_free(ipc_space_t space)
+{
+	assert(!is_active(space));
+	lck_ticket_destroy(&space->is_lock, &ipc_lck_grp);
+	zfree(ipc_space_zone, space);
+}
+
+void
+ipc_space_free_table(ipc_entry_t table)
+{
+	it_entries_free(table->ie_size, table);
+}
+
+#if MACH_LOCKFREE_SPACE
+void
+ipc_space_retire_table(ipc_entry_t table)
+{
+	hazard_retire(table, sizeof(struct ipc_entry) * table->ie_size,
+	    (void (*)(void*))ipc_space_free_table);
+}
+#endif /* MACH_LOCKFREE_SPACE */
 
 void
 ipc_space_reference(
 	ipc_space_t     space)
 {
-	is_reference(space);
+	os_ref_retain_mask(&space->is_bits, IS_FLAGS_BITS, &is_refgrp);
 }
 
 void
 ipc_space_release(
 	ipc_space_t     space)
 {
-	is_release(space);
+	if (os_ref_release_mask(&space->is_bits, IS_FLAGS_BITS, &is_refgrp) == 0) {
+		ipc_space_free(space);
+	}
+}
+
+void
+ipc_space_lock(
+	ipc_space_t     space)
+{
+	lck_ticket_lock(&space->is_lock, &ipc_lck_grp);
+}
+
+void
+ipc_space_unlock(
+	ipc_space_t     space)
+{
+	lck_ticket_unlock(&space->is_lock);
+}
+
+void
+ipc_space_lock_sleep(
+	ipc_space_t     space)
+{
+	lck_ticket_sleep_with_inheritor(&space->is_lock, &ipc_lck_grp,
+	    LCK_SLEEP_DEFAULT, (event_t)space, space->is_grower,
+	    THREAD_UNINT, TIMEOUT_WAIT_FOREVER);
 }
 
 /*      Routine:		ipc_space_get_rollpoint
@@ -141,6 +195,7 @@ ipc_space_get_rollpoint(
  *	Arguments:
  *		space:	the ipc space to initialize.
  *		table:	the corresponding ipc table to initialize.
+ *			the table is 0 initialized.
  *		bottom:	the start of the range to initialize (inclusive).
  *		top:	the end of the range to initialize (noninclusive).
  */
@@ -149,7 +204,7 @@ ipc_space_rand_freelist(
 	ipc_space_t             space,
 	ipc_entry_t             table,
 	mach_port_index_t       bottom,
-	mach_port_index_t       top)
+	mach_port_index_t       size)
 {
 	int at_start = (bottom == 0);
 #ifdef CONFIG_SEMI_RANDOM_ENTRIES
@@ -162,6 +217,8 @@ ipc_space_rand_freelist(
 
 	/* First entry in the free list is always free, and is the start of the free list. */
 	mach_port_index_t curr = bottom;
+	mach_port_index_t top = size;
+
 	bottom++;
 	top--;
 
@@ -204,21 +261,11 @@ ipc_space_rand_freelist(
 		 */
 		entry->ie_bits   = IE_BITS_GEN_MASK;
 		entry->ie_next   = next;
-		entry->ie_object = IO_NULL;
-		entry->ie_dist   = 0;
-		entry->ie_index  = 0;
 		curr = next;
 	}
-	table[curr].ie_next   = 0;
-	table[curr].ie_object = IO_NULL;
-	table[curr].ie_index  = 0;
-	table[curr].ie_dist   = 0;
 	table[curr].ie_bits   = IE_BITS_GEN_MASK;
 
-	/* The freelist head should always have generation number set to 0 */
-	if (at_start) {
-		table[0].ie_bits = 0;
-	}
+	table[0].ie_size = size;
 }
 
 
@@ -246,38 +293,24 @@ ipc_space_create(
 	ipc_entry_t table;
 	ipc_entry_num_t new_size;
 
-	space = is_alloc();
-	if (space == IS_NULL) {
-		return KERN_RESOURCE_SHORTAGE;
-	}
-
-	table = it_entries_alloc(initial);
+	table = it_entries_alloc(initial); /* zero-initialized */
 	if (table == IE_NULL) {
-		is_free(space);
 		return KERN_RESOURCE_SHORTAGE;
 	}
 
+	space = ipc_space_alloc();
 	new_size = initial->its_size;
-	memset((void *) table, 0, new_size * sizeof(struct ipc_entry));
-
-	/* Set to 0 so entropy pool refills */
-	memset((void *) space->is_entropy, 0, sizeof(space->is_entropy));
 
 	random_bool_init(&space->bool_gen);
 	ipc_space_rand_freelist(space, table, 0, new_size);
 
-	is_lock_init(space);
-	space->is_bits = 2; /* 2 refs, active, not growing */
-	space->is_table_hashed = 0;
-	space->is_table_size = new_size;
+	os_ref_init_count_mask(&space->is_bits, IS_FLAGS_BITS, &is_refgrp, 2, 0);
 	space->is_table_free = new_size - 1;
-	space->is_table = table;
 	space->is_table_next = initial + 1;
-	space->is_task = NULL;
 	space->is_label = label;
 	space->is_low_mod = new_size;
-	space->is_high_mod = 0;
 	space->is_node_id = HOST_LOCAL_NODE; /* HOST_LOCAL_NODE, except proxy spaces */
+	hazard_ptr_init(&space->is_table, table);
 
 	*spacep = space;
 	return KERN_SUCCESS;
@@ -365,86 +398,14 @@ ipc_space_create_special(
 {
 	ipc_space_t space;
 
-	space = is_alloc();
-	if (space == IS_NULL) {
-		return KERN_RESOURCE_SHORTAGE;
-	}
-
-	is_lock_init(space);
-
-	space->is_bits       = IS_INACTIVE | 1; /* 1 ref, not active, not growing */
-	space->is_table      = IE_NULL;
-	space->is_task       = TASK_NULL;
+	space = ipc_space_alloc();
+	os_ref_init_count_mask(&space->is_bits, IS_FLAGS_BITS, &is_refgrp, 1, 0);
 	space->is_label      = IPC_LABEL_SPECIAL;
-	space->is_table_next = 0;
-	space->is_low_mod    = 0;
-	space->is_high_mod   = 0;
 	space->is_node_id = HOST_LOCAL_NODE; /* HOST_LOCAL_NODE, except proxy spaces */
 
 	*spacep = space;
 	return KERN_SUCCESS;
 }
-
-/*
- * ipc_space_clean - remove all port references from an ipc space.
- *
- * In order to follow the traditional semantic, ipc_space_destroy
- * will not destroy the entire port table of a shared space.  Instead
- * it will simply clear its own sub-space.
- */
-void
-ipc_space_clean(
-	ipc_space_t space)
-{
-	ipc_entry_t table;
-	ipc_entry_num_t size;
-	mach_port_index_t index;
-
-	/*
-	 *	If somebody is trying to grow the table,
-	 *	we must wait until they finish and figure
-	 *	out the space died.
-	 */
-retry:
-	is_write_lock(space);
-	while (is_growing(space)) {
-		is_write_sleep(space);
-	}
-
-	if (!is_active(space)) {
-		is_write_unlock(space);
-		return;
-	}
-
-	/*
-	 *	Now we can futz with it	since we have the write lock.
-	 */
-
-	table = space->is_table;
-	size = space->is_table_size;
-
-	for (index = 0; index < size; index++) {
-		ipc_entry_t entry = &table[index];
-		mach_port_type_t type;
-
-		type = IE_BITS_TYPE(entry->ie_bits);
-		if (type != MACH_PORT_TYPE_NONE) {
-			mach_port_name_t name = MACH_PORT_MAKE(index,
-			    IE_BITS_GEN(entry->ie_bits));
-			ipc_right_destroy(space, name, entry, FALSE, 0); /* unlocks space */
-			goto retry;
-		}
-	}
-
-	/*
-	 * JMM - Now the table is cleaned out.  We don't bother shrinking the
-	 * size of the table at this point, but we probably should if it is
-	 * really large.
-	 */
-
-	is_write_unlock(space);
-}
-
 
 /*
  *	Routine:	ipc_space_terminate
@@ -461,7 +422,6 @@ ipc_space_terminate(
 {
 	ipc_entry_t table;
 	ipc_entry_num_t size;
-	mach_port_index_t index;
 
 	assert(space != IS_NULL);
 
@@ -470,7 +430,9 @@ ipc_space_terminate(
 		is_write_unlock(space);
 		return;
 	}
-	is_mark_inactive(space);
+
+	table = hazard_ptr_serialized_load(&space->is_table);
+	hazard_ptr_clear(&space->is_table);
 
 	/*
 	 *	If somebody is trying to grow the table,
@@ -486,12 +448,30 @@ ipc_space_terminate(
 
 	/*
 	 *	Now we can futz with it	unlocked.
+	 *
+	 *	First destroy receive rights, then the rest.
+	 *	This will cut down the number of notifications
+	 *	being sent when the notification destination
+	 *	was a receive right in this space.
 	 */
 
-	table = space->is_table;
-	size = space->is_table_size;
+	size = table->ie_size;
 
-	for (index = 0; index < size; index++) {
+	for (mach_port_index_t index = 1; index < size; index++) {
+		ipc_entry_t entry = &table[index];
+		mach_port_type_t type;
+
+		type = IE_BITS_TYPE(entry->ie_bits);
+		if (type & MACH_PORT_TYPE_RECEIVE) {
+			mach_port_name_t name;
+
+			name = MACH_PORT_MAKE(index,
+			    IE_BITS_GEN(entry->ie_bits));
+			ipc_right_terminate(space, name, entry);
+		}
+	}
+
+	for (mach_port_index_t index = 1; index < size; index++) {
 		ipc_entry_t entry = &table[index];
 		mach_port_type_t type;
 
@@ -505,8 +485,7 @@ ipc_space_terminate(
 		}
 	}
 
-	it_entries_free(space->is_table_next - 1, table);
-	space->is_table_size = 0;
+	ipc_space_retire_table(table);
 	space->is_table_free = 0;
 
 	/*
@@ -515,4 +494,143 @@ ipc_space_terminate(
 	 *	Our caller still has his reference.
 	 */
 	is_release(space);
+}
+
+#if CONFIG_PROC_RESOURCE_LIMITS
+/*
+ *	ipc_space_set_table_size_limits:
+ *
+ *	Set the table size's soft and hard limit.
+ */
+kern_return_t
+ipc_space_set_table_size_limits(
+	ipc_space_t     space,
+	ipc_entry_num_t soft_limit,
+	ipc_entry_num_t hard_limit)
+{
+	if (space == IS_NULL) {
+		return KERN_INVALID_TASK;
+	}
+
+	is_write_lock(space);
+
+	if (!is_active(space)) {
+		is_write_unlock(space);
+		return KERN_INVALID_TASK;
+	}
+
+	if (hard_limit && soft_limit >= hard_limit) {
+		soft_limit = 0;
+	}
+
+	space->is_table_size_soft_limit = soft_limit;
+	space->is_table_size_hard_limit = hard_limit;
+
+	is_write_unlock(space);
+
+	return KERN_SUCCESS;
+}
+
+/*
+ * Check if port space has exceeded its limits.
+ * Should be called with the space write lock held.
+ */
+void
+ipc_space_check_limit_exceeded(ipc_space_t space)
+{
+	ipc_entry_num_t size = is_active_table(space)->ie_size;
+
+	if (!is_above_soft_limit_notify(space) && space->is_table_size_soft_limit &&
+	    ((size - space->is_table_free) > space->is_table_size_soft_limit)) {
+		is_above_soft_limit_send_notification(space);
+		act_set_astproc_resource(current_thread());
+	} else if (!is_above_hard_limit_notify(space) && space->is_table_size_hard_limit &&
+	    ((size - space->is_table_free) > space->is_table_size_hard_limit)) {
+		is_above_hard_limit_send_notification(space);
+		act_set_astproc_resource(current_thread());
+	}
+}
+#endif /* CONFIG_PROC_RESOURCE_LIMITS */
+
+kern_return_t
+ipc_space_get_table_size_and_limits(
+	ipc_space_t     space,
+	ipc_entry_num_t *current_size,
+	ipc_entry_num_t *soft_limit,
+	ipc_entry_num_t *hard_limit)
+{
+	kern_return_t kr = KERN_SUCCESS;
+
+	if (space == IS_NULL) {
+		return KERN_INVALID_TASK;
+	}
+
+	is_write_lock(space);
+
+	if (!is_active(space)) {
+		kr = KERN_INVALID_TASK;
+		goto exit;
+	}
+
+	*current_size = is_active_table(space)->ie_size - space->is_table_free;
+	if (is_at_max_limit_notify(space)) {
+		if (is_at_max_limit_already_notified(space)) {
+			kr = KERN_FAILURE;
+		} else {
+			*soft_limit = 0;
+			*hard_limit = 0;
+			is_at_max_limit_notified(space);
+		}
+		goto exit;
+	}
+
+#if CONFIG_PROC_RESOURCE_LIMITS
+	*soft_limit = space->is_table_size_soft_limit;
+	*hard_limit = space->is_table_size_hard_limit;
+
+	if (!*soft_limit && !*hard_limit) {
+		kr = KERN_INVALID_VALUE;
+		goto exit;
+	}
+
+	/*
+	 * Check if the thread sending the soft limit notification arrives after
+	 * the one that sent the hard limit notification
+	 */
+	if (is_hard_limit_already_notified(space)) {
+		kr = KERN_FAILURE;
+		goto exit;
+	}
+
+	if (*hard_limit > 0 && *current_size >= *hard_limit) {
+		*soft_limit = 0;
+		is_hard_limit_notified(space);
+	} else {
+		if (is_soft_limit_already_notified(space)) {
+			kr = KERN_FAILURE;
+			goto exit;
+		}
+		if (*soft_limit > 0 && *current_size >= *soft_limit) {
+			*hard_limit = 0;
+			is_soft_limit_notified(space);
+		}
+	}
+#endif /* CONFIG_PROC_RESOURCE_LIMITS */
+
+exit:
+	is_write_unlock(space);
+	return kr;
+}
+
+/*
+ * Set an ast if port space is at its max limit.
+ * Should be called with the space write lock held.
+ */
+void
+ipc_space_set_at_max_limit(ipc_space_t space)
+{
+	if (!is_at_max_limit_notify(space)) {
+		is_at_max_limit_send_notification(space);
+		act_set_astproc_resource(current_thread());
+	}
 }

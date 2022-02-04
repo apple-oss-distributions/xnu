@@ -117,7 +117,7 @@ Best practices for the use of atomics in XNU
 --------------------------------------------
 
 For most generic code, the `os_atomic_*` functions from
-`<os/atomic_private.h>` are the perferred interfaces.
+`<os/atomic_private.h>` are the preferred interfaces.
 
 `__sync_*`, `__c11_*` and `__atomic_*` compiler builtins should not be used.
 

@@ -30,11 +30,6 @@
 #define LIBKERN_LOCKS_H
 
 #include <sys/cdefs.h>
-
-__BEGIN_DECLS
-
 #include <kern/locks.h>
-
-__END_DECLS
 
 #endif  /* LIBKERN_LOCKS_H */

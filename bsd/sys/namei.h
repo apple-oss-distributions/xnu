@@ -262,7 +262,9 @@ void    nameidone(struct nameidata *);
 int     lookup(struct nameidata *ndp);
 int     relookup(struct vnode *dvp, struct vnode **vpp,
     struct componentname *cnp);
+#if CONFIG_UNION_MOUNTS
 int     lookup_traverse_union(vnode_t dvp, vnode_t *new_dvp, vfs_context_t ctx);
+#endif /* CONFIG_UNION_MOUNTS */
 void    lookup_compound_vnop_post_hook(int error, vnode_t dvp, vnode_t vp, struct nameidata *ndp, int did_create);
 void    kdebug_lookup(struct vnode *dp, struct componentname *cnp);
 

@@ -264,6 +264,11 @@ _save_restore_debug_regs_entry:
     notq %rbx
     movq %rbx, %dr0
 
+    movq $0xEEEEEEEEEEEEEEEE, %rbx
+    movq %dr0, %rax
+    cmpq %rbx, %rax
+    jne .foul
+
     incq %rcx
     movq $0x2222222222222222, %rbx
     movq %dr1, %rax
@@ -325,7 +330,16 @@ _save_restore_debug_regs_entry:
     movq %rbx, %dr7
 
     popq %rax
+    notq %rax
     vmcall
+
+    pushq %rax
+
+    inc %rcx
+    movq $0xEEEEEEEEEEEEEEEE, %rbx
+    movq %dr0, %rax
+    cmpq %rbx, %rax
+    jne .foul
 
     movq %dr0, %rbx
     notq %rbx
@@ -357,6 +371,8 @@ _save_restore_debug_regs_entry:
     movq $0xffff0fff, %rax
     andq %rax, %rbx
     movq %rbx, %dr7
+
+    popq %rax
 
     jmp _save_restore_debug_regs_entry // 2nd pass
 
@@ -480,6 +496,43 @@ _radar60691363_entry:
 
 	movq $0x4567, %rax
 
+	vmcall
+
+.code16
+
+	// Perform a fixed number of port I/Os with various arguments.
+	.global _pio_entry
+_pio_entry:
+
+	movl	$0xaa, %eax
+
+	outl	%eax, $0xab
+
+	movl	$3, %ecx
+1:	outb	%al, $0xab
+	loop	1b
+
+	movl	$10, %ecx
+1:	outb	%al, $0xcd
+	loop	1b
+
+	movl	$10, %ecx
+1:	outb	%al, $0xef
+	loop	1b
+
+	movl	$0x23456, %eax
+	vmcall
+
+.code16
+	// Perform 10 port I/Os on 0xef.
+	.global _pio_entry_basic
+_pio_entry_basic:
+
+	movl	$10, %ecx
+1:	outb	%al, $0xef
+	loop	1b
+
+	movl	$0x23456, %eax
 	vmcall
 
 	.global _hvtest_end

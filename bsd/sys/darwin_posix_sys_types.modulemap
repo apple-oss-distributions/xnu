@@ -1,0 +1,8 @@
+module Darwin.POSIX.sys.types [system] {
+  header "sys/types.h"
+  header "sys/_types.h"
+  umbrella "sys/_types"
+
+  export *
+  module * { export * }
+}

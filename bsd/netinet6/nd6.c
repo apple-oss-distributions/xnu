@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2020 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -168,9 +168,8 @@ struct llinfo_nd6 llinfo_nd6 = {
 	.ln_prev = &llinfo_nd6,
 };
 
-static lck_grp_attr_t   *nd_if_lock_grp_attr = NULL;
-static lck_grp_t        *nd_if_lock_grp = NULL;
-static lck_attr_t       *nd_if_lock_attr = NULL;
+static LCK_GRP_DECLARE(nd_if_lock_grp, "nd_if_lock");
+static LCK_ATTR_DECLARE(nd_if_lock_attr, 0, 0);
 
 /* Protected by nd6_mutex */
 struct nd_drhead nd_defrouter_list;
@@ -203,7 +202,6 @@ int nd6_recalc_reachtm_interval = ND6_RECALC_REACHTM_INTERVAL;
 static struct sockaddr_in6 all1_sa;
 
 static int regen_tmpaddr(struct in6_ifaddr *);
-extern lck_mtx_t *nd6_mutex;
 
 static struct llinfo_nd6 *nd6_llinfo_alloc(zalloc_flags_t);
 static void nd6_llinfo_free(void *);
@@ -298,10 +296,6 @@ nd6_init(void)
 	/* initialization of the default router list */
 	TAILQ_INIT(&nd_defrouter_list);
 	TAILQ_INIT(&nd_rti_list);
-
-	nd_if_lock_grp_attr = lck_grp_attr_alloc_init();
-	nd_if_lock_grp = lck_grp_alloc_init("nd_if_lock", nd_if_lock_grp_attr);
-	nd_if_lock_attr = lck_attr_alloc_init();
 
 	nd6_nbr_init();
 	nd6_rtr_init();
@@ -514,7 +508,7 @@ nd6_ifattach(struct ifnet *ifp)
 
 	VERIFY(NULL != ndi);
 	if (!ndi->initialized) {
-		lck_mtx_init(&ndi->lock, nd_if_lock_grp, nd_if_lock_attr);
+		lck_mtx_init(&ndi->lock, &nd_if_lock_grp, &nd_if_lock_attr);
 		ndi->flags = ND6_IFF_PERFORMNUD;
 		ndi->flags |= ND6_IFF_DAD;
 		ndi->initialized = TRUE;
@@ -619,10 +613,10 @@ nd6_option(union nd_opts *ndopts)
 	int olen;
 
 	if (!ndopts) {
-		panic("ndopts == NULL in nd6_option\n");
+		panic("ndopts == NULL in nd6_option");
 	}
 	if (!ndopts->nd_opts_last) {
-		panic("uninitialized ndopts in nd6_option\n");
+		panic("uninitialized ndopts in nd6_option");
 	}
 	if (!ndopts->nd_opts_search) {
 		return NULL;
@@ -927,6 +921,16 @@ again:
 		}
 
 		ndi = ND_IFINFO(ifp);
+		/*
+		 * The IPv6 initialization of the loopback interface
+		 * may happen after another interface gets assigned
+		 * an IPv6 address
+		 */
+		if (ndi == NULL && ifp == lo_ifp) {
+			RT_UNLOCK(rt);
+			ln = next;
+			continue;
+		}
 		VERIFY(ndi->initialized);
 		retrans = ndi->retrans;
 		flags = ndi->flags;
@@ -2470,8 +2474,8 @@ nd6_is_new_addr_neighbor(struct sockaddr_in6 *addr, struct ifnet *ifp)
 			NDPR_UNLOCK(pr);
 			continue;
 		}
-		if (IN6_ARE_MASKED_ADDR_EQUAL(&pr->ndpr_prefix.sin6_addr,
-		    &addr->sin6_addr, &pr->ndpr_mask)) {
+		if (in6_are_masked_addr_scope_equal(&pr->ndpr_prefix.sin6_addr, pr->ndpr_prefix.sin6_scope_id,
+		    &addr->sin6_addr, addr->sin6_scope_id, &pr->ndpr_mask)) {
 			NDPR_UNLOCK(pr);
 			return 1;
 		}
@@ -3024,10 +3028,8 @@ nd6_siocgdrlst(void *data, int data_is_64)
 	if (data_is_64) {
 		struct in6_drlist_64 *drl_64;
 
-		drl_64 = _MALLOC(sizeof(*drl_64), M_TEMP, M_WAITOK | M_ZERO);
-		if (drl_64 == NULL) {
-			return ENOMEM;
-		}
+		drl_64 = kalloc_type(struct in6_drlist_64,
+		    Z_WAITOK | Z_ZERO | Z_NOFAIL);
 
 		/* preserve the interface name */
 		bcopy(data, drl_64, sizeof(drl_64->ifname));
@@ -3052,15 +3054,12 @@ nd6_siocgdrlst(void *data, int data_is_64)
 			dr = TAILQ_NEXT(dr, dr_entry);
 		}
 		bcopy(drl_64, data, sizeof(*drl_64));
-		_FREE(drl_64, M_TEMP);
+		kfree_type(struct in6_drlist_64, drl_64);
 		return 0;
 	}
 
 	/* For 32-bit process */
-	drl_32 = _MALLOC(sizeof(*drl_32), M_TEMP, M_WAITOK | M_ZERO);
-	if (drl_32 == NULL) {
-		return ENOMEM;
-	}
+	drl_32 = kalloc_type(struct in6_drlist_32, Z_WAITOK | Z_ZERO | Z_NOFAIL);
 
 	/* preserve the interface name */
 	bcopy(data, drl_32, sizeof(drl_32->ifname));
@@ -3084,7 +3083,7 @@ nd6_siocgdrlst(void *data, int data_is_64)
 		dr = TAILQ_NEXT(dr, dr_entry);
 	}
 	bcopy(drl_32, data, sizeof(*drl_32));
-	_FREE(drl_32, M_TEMP);
+	kfree_type(struct in6_drlist_32, drl_32);
 	return 0;
 }
 
@@ -3109,10 +3108,8 @@ nd6_siocgprlst(void *data, int data_is_64)
 	if (data_is_64) {
 		struct in6_prlist_64 *prl_64;
 
-		prl_64 = _MALLOC(sizeof(*prl_64), M_TEMP, M_WAITOK | M_ZERO);
-		if (prl_64 == NULL) {
-			return ENOMEM;
-		}
+		prl_64 = kalloc_type(struct in6_prlist_64,
+		    Z_WAITOK | Z_ZERO | Z_NOFAIL);
 
 		/* preserve the interface name */
 		bcopy(data, prl_64, sizeof(prl_64->ifname));
@@ -3120,10 +3117,12 @@ nd6_siocgprlst(void *data, int data_is_64)
 		while (pr && i < PRLSTSIZ) {
 			struct nd_pfxrouter *pfr;
 			int j;
+			uint32_t ifscope;
 
 			NDPR_LOCK(pr);
 			(void) in6_embedscope(&prl_64->prefix[i].prefix,
-			    &pr->ndpr_prefix, NULL, NULL, NULL);
+			    &pr->ndpr_prefix, NULL, NULL, NULL, &ifscope);
+			prl_64->prefix[i].prefix.s6_addr16[1] = htons((uint16_t)ifscope);
 			prl_64->prefix[i].raflags = pr->ndpr_raf;
 			prl_64->prefix[i].prefixlen = pr->ndpr_plen;
 			prl_64->prefix[i].vltime = pr->ndpr_vltime;
@@ -3161,15 +3160,12 @@ nd6_siocgprlst(void *data, int data_is_64)
 			pr = pr->ndpr_next;
 		}
 		bcopy(prl_64, data, sizeof(*prl_64));
-		_FREE(prl_64, M_TEMP);
+		kfree_type(struct in6_prlist_64, prl_64);
 		return 0;
 	}
 
 	/* For 32-bit process */
-	prl_32 = _MALLOC(sizeof(*prl_32), M_TEMP, M_WAITOK | M_ZERO);
-	if (prl_32 == NULL) {
-		return ENOMEM;
-	}
+	prl_32 = kalloc_type(struct in6_prlist_32, Z_WAITOK | Z_ZERO | Z_NOFAIL);
 
 	/* preserve the interface name */
 	bcopy(data, prl_32, sizeof(prl_32->ifname));
@@ -3177,10 +3173,12 @@ nd6_siocgprlst(void *data, int data_is_64)
 	while (pr && i < PRLSTSIZ) {
 		struct nd_pfxrouter *pfr;
 		int j;
+		uint32_t ifscope;
 
 		NDPR_LOCK(pr);
 		(void) in6_embedscope(&prl_32->prefix[i].prefix,
-		    &pr->ndpr_prefix, NULL, NULL, NULL);
+		    &pr->ndpr_prefix, NULL, NULL, NULL, &ifscope);
+		prl_32->prefix[i].prefix.s6_addr16[1] = htons((uint16_t)ifscope);
 		prl_32->prefix[i].raflags = pr->ndpr_raf;
 		prl_32->prefix[i].prefixlen = pr->ndpr_plen;
 		prl_32->prefix[i].vltime = pr->ndpr_vltime;
@@ -3218,7 +3216,7 @@ nd6_siocgprlst(void *data, int data_is_64)
 		pr = pr->ndpr_next;
 	}
 	bcopy(prl_32, data, sizeof(*prl_32));
-	_FREE(prl_32, M_TEMP);
+	kfree_type(struct in6_prlist_32, prl_32);
 	return 0;
 }
 
@@ -3485,8 +3483,8 @@ nd6_ioctl(u_long cmd, caddr_t data, struct ifnet *ifp)
 		 * XXX: KAME specific hack for scoped addresses
 		 *      XXXX: for other scopes than link-local?
 		 */
-		if (IN6_IS_ADDR_LINKLOCAL(&nbi_32.addr) ||
-		    IN6_IS_ADDR_MC_LINKLOCAL(&nbi_32.addr)) {
+		if (in6_embedded_scope && (IN6_IS_ADDR_LINKLOCAL(&nbi_32.addr) ||
+		    IN6_IS_ADDR_MC_LINKLOCAL(&nbi_32.addr))) {
 			u_int16_t *idp =
 			    (u_int16_t *)(void *)&nb_addr.s6_addr[2];
 
@@ -3523,8 +3521,8 @@ nd6_ioctl(u_long cmd, caddr_t data, struct ifnet *ifp)
 		 * XXX: KAME specific hack for scoped addresses
 		 *      XXXX: for other scopes than link-local?
 		 */
-		if (IN6_IS_ADDR_LINKLOCAL(&nbi_64.addr) ||
-		    IN6_IS_ADDR_MC_LINKLOCAL(&nbi_64.addr)) {
+		if (in6_embedded_scope && (IN6_IS_ADDR_LINKLOCAL(&nbi_64.addr) ||
+		    IN6_IS_ADDR_MC_LINKLOCAL(&nbi_64.addr))) {
 			u_int16_t *idp =
 			    (u_int16_t *)(void *)&nb_addr.s6_addr[2];
 
@@ -4234,7 +4232,9 @@ lookup:
 		 * Clear out Scope ID field in case it is set.
 		 */
 		sin6 = *dst;
-		sin6.sin6_scope_id = 0;
+		if (in6_embedded_scope) {
+			sin6.sin6_scope_id = 0;
+		}
 		/*
 		 * Since nd6_is_addr_neighbor() internally calls nd6_lookup(),
 		 * the condition below is not very efficient.  But we believe

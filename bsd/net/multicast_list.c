@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2004-2010 Apple Inc. All rights reserved.
+ * Copyright (c) 2004-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -73,7 +73,7 @@ multicast_list_remove(struct multicast_list * mc_list)
 		}
 		SLIST_REMOVE_HEAD(mc_list, mc_entries);
 		ifmaddr_release(mc->mc_ifma);
-		FREE(mc, M_DEVBUF);
+		kfree_type(struct multicast_entry, mc);
 	}
 	return result;
 }
@@ -101,7 +101,7 @@ multicast_list_program(struct multicast_list * mc_list,
 	int                         i;
 	struct multicast_entry *    mc = NULL;
 	struct multicast_list       new_mc_list;
-	struct sockaddr_dl          source_sdl;
+	struct sockaddr_dl          source_sdl = {};
 	ifmultiaddr_t *             source_multicast_list;
 	struct sockaddr_dl          target_sdl;
 
@@ -129,16 +129,12 @@ multicast_list_program(struct multicast_list * mc_list,
 		    || source_sdl.sdl_family != AF_LINK) {
 			continue;
 		}
-		mc = _MALLOC(sizeof(struct multicast_entry), M_DEVBUF, M_WAITOK);
-		if (mc == NULL) {
-			error = ENOBUFS;
-			break;
-		}
+		mc = kalloc_type(struct multicast_entry, Z_WAITOK | Z_NOFAIL);
 		bcopy(LLADDR(&source_sdl), LLADDR(&target_sdl), alen);
 		error = ifnet_add_multicast(target_ifp, (struct sockaddr *)&target_sdl,
 		    &mc->mc_ifma);
 		if (error != 0) {
-			FREE(mc, M_DEVBUF);
+			kfree_type(struct multicast_entry, mc);
 			break;
 		}
 		SLIST_INSERT_HEAD(&new_mc_list, mc, mc_entries);

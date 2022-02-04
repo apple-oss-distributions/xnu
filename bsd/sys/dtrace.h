@@ -150,6 +150,8 @@ typedef va_list __va_list;
 
 /* Solaris proc_t is the struct. Darwin's proc_t is a pointer to it. */
 #define proc_t struct proc /* Steer clear of the Darwin typedef for proc_t */
+
+#include <os/overflow.h>
 #endif /* __APPLE__ */
 
 /*
@@ -410,7 +412,8 @@ typedef enum dtrace_probespec {
 #define DIF_SUBR_PHYSMEM_READ		204
 #define DIF_SUBR_PHYSMEM_WRITE		205
 #define DIF_SUBR_KVTOPHYS		206
-#define DIF_SUBR_APPLE_MAX		206      /* max apple-specific subroutine value */
+#define DIF_SUBR_LIVEDUMP		207
+#define DIF_SUBR_APPLE_MAX		207      /* max apple-specific subroutine value */
 #endif /* __APPLE__ */
 
 typedef uint32_t dif_instr_t;
@@ -1465,8 +1468,20 @@ typedef struct dtrace_module_symbols {
 	dtrace_symbol_t	dtmodsyms_symbols[1];
 } dtrace_module_symbols_t;
 
-#define DTRACE_MODULE_SYMBOLS_SIZE(count) (sizeof(dtrace_module_symbols_t) + ((count - 1) * sizeof(dtrace_symbol_t)))
-#define DTRACE_MODULE_SYMBOLS_COUNT(size) ((size - sizeof(dtrace_module_symbols_t)) / sizeof(dtrace_symbol_t) + 1)
+/*
+ * Safely compute the size in bytes of space we need to copyin module's symbols from userspace.
+ * Assumes that count has been checked to be at least 1.
+ */
+#define DTRACE_MODULE_SYMBOLS_SIZE(count) ({\
+		size_t _sym_count = (size_t)(count - 1); \
+		size_t _buf_size = 0; \
+		if (os_mul_and_add_overflow(_sym_count, \
+									sizeof(dtrace_symbol_t), \
+									sizeof(dtrace_module_symbols_t), \
+									&_buf_size)) { \
+			_buf_size = 0; \
+		} \
+		_buf_size; })
 
 typedef struct dtrace_module_uuids_list {
 	uint64_t	dtmul_count;

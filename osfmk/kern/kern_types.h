@@ -51,7 +51,7 @@ struct wait_queue { unsigned char opaque[32]; };
 #endif  /* MACH_KERNEL_PRIVATE */
 
 typedef struct zone                     *zone_t;
-#define         ZONE_NULL                       ((zone_t) 0)
+#define         ZONE_NULL               ((zone_t) 0)
 
 typedef struct wait_queue               *wait_queue_t;
 #define         WAIT_QUEUE_NULL         ((wait_queue_t) 0)
@@ -351,6 +351,21 @@ typedef union sched_clutch_edge {
 	};
 	uint64_t sce_edge_packed;
 } sched_clutch_edge;
+
+/*
+ * Cluster shared resource management
+ *
+ * The options describe the various shared cluster resource
+ * types that can be contended under load and need special
+ * handling from the scheduler.
+ */
+__options_decl(cluster_shared_rsrc_type_t, uint32_t, {
+	CLUSTER_SHARED_RSRC_TYPE_RR                     = 0,
+	CLUSTER_SHARED_RSRC_TYPE_NATIVE_FIRST           = 1,
+	CLUSTER_SHARED_RSRC_TYPE_COUNT                  = 2,
+	CLUSTER_SHARED_RSRC_TYPE_MIN                    = CLUSTER_SHARED_RSRC_TYPE_RR,
+	CLUSTER_SHARED_RSRC_TYPE_NONE                   = CLUSTER_SHARED_RSRC_TYPE_COUNT,
+});
 
 #endif  /* KERNEL_PRIVATE */
 

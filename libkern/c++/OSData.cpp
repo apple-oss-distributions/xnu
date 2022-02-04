@@ -29,9 +29,7 @@
 
 #include <string.h>
 
-__BEGIN_DECLS
 #include <vm/vm_kern.h>
-__END_DECLS
 
 #define IOKIT_ENABLE_SHARED_PTR
 
@@ -55,6 +53,15 @@ OSMetaClassDefineReservedUnused(OSData, 7);
 
 #define EXTERNAL ((unsigned int) -1)
 
+static SECURITY_READ_ONLY_LATE(vm_map_t) alloc_map;
+__startup_func
+static void
+getAllocMap(void)
+{
+	alloc_map = KHEAP_DATA_BUFFERS->kh_fallback_map;
+}
+STARTUP(ZALLOC, STARTUP_RANK_LAST, getAllocMap);
+
 bool
 OSData::initWithCapacity(unsigned int inCapacity)
 {
@@ -67,7 +74,7 @@ OSData::initWithCapacity(unsigned int inCapacity)
 			if (capacity < page_size) {
 				kfree_data_container(data, capacity);
 			} else {
-				kmem_free(kernel_map, (vm_offset_t)data, capacity);
+				kmem_free(alloc_map, (vm_offset_t)data, capacity);
 			}
 			data = NULL;
 			capacity = 0;
@@ -86,7 +93,8 @@ OSData::initWithCapacity(unsigned int inCapacity)
 			if (round_page_overflow(inCapacity, &inCapacity)) {
 				kr = KERN_RESOURCE_SHORTAGE;
 			} else {
-				kr = kmem_alloc(kernel_map, (vm_offset_t *)&_data, inCapacity, IOMemoryTag(kernel_map));
+				kr = kmem_alloc_flags(alloc_map, (vm_offset_t *)&_data, inCapacity,
+				    IOMemoryTag(alloc_map), KMA_ATOMIC);
 				data = _data;
 			}
 			if (KERN_SUCCESS != kr) {
@@ -225,7 +233,7 @@ OSData::free()
 		if (capacity < page_size) {
 			kfree_data_container(data, capacity);
 		} else {
-			kmem_free(kernel_map, (vm_offset_t)data, capacity);
+			kmem_free(alloc_map, (vm_offset_t)data, capacity);
 		}
 		OSCONTAINER_ACCUMSIZE( -((size_t)capacity));
 	} else if (capacity == EXTERNAL) {
@@ -235,7 +243,7 @@ OSData::free()
 		}
 	}
 	if (reserved) {
-		kfree(reserved, sizeof(ExpansionData));
+		kfree_type(ExpansionData, reserved);
 	}
 	super::free();
 }
@@ -296,14 +304,15 @@ OSData::ensureCapacity(unsigned int newCapacity)
 		}
 		if (capacity >= page_size) {
 			copydata = NULL;
-			kr = kmem_realloc(kernel_map,
+			kr = kmem_realloc(alloc_map,
 			    (vm_offset_t)data,
 			    capacity,
 			    (vm_offset_t *)&newData,
 			    finalCapacity,
-			    IOMemoryTag(kernel_map));
+			    IOMemoryTag(alloc_map));
 		} else {
-			kr = kmem_alloc(kernel_map, (vm_offset_t *)&newData, finalCapacity, IOMemoryTag(kernel_map));
+			kr = kmem_alloc_flags(alloc_map, (vm_offset_t *)&newData,
+			    finalCapacity, IOMemoryTag(alloc_map), KMA_ATOMIC);
 		}
 		if (KERN_SUCCESS != kr) {
 			newData = NULL;
@@ -321,7 +330,7 @@ OSData::ensureCapacity(unsigned int newCapacity)
 			if (capacity < page_size) {
 				kfree_data_container(data, capacity);
 			} else {
-				kmem_free(kernel_map, (vm_offset_t)data, capacity);
+				kmem_free(alloc_map, (vm_offset_t)data, capacity);
 			}
 		}
 		OSCONTAINER_ACCUMSIZE(((size_t)finalCapacity) - ((size_t)capacity));
@@ -585,11 +594,10 @@ void
 OSData::setDeallocFunction(DeallocFunction func)
 {
 	if (!reserved) {
-		reserved = (typeof(reserved))kalloc_container(sizeof(ExpansionData));
+		reserved = (typeof(reserved))kalloc_type(ExpansionData, (zalloc_flags_t)(Z_WAITOK | Z_ZERO));
 		if (!reserved) {
 			return;
 		}
-		bzero(reserved, sizeof(ExpansionData));
 	}
 	reserved->deallocFunction = func;
 }
@@ -598,11 +606,10 @@ void
 OSData::setSerializable(bool serializable)
 {
 	if (!reserved) {
-		reserved = (typeof(reserved))kalloc_container(sizeof(ExpansionData));
+		reserved = (typeof(reserved))kalloc_type(ExpansionData, (zalloc_flags_t)(Z_WAITOK | Z_ZERO));
 		if (!reserved) {
 			return;
 		}
-		bzero(reserved, sizeof(ExpansionData));
 	}
 	reserved->disableSerialization = (!serializable);
 }

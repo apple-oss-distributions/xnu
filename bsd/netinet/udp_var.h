@@ -65,6 +65,8 @@
 
 #include <sys/appleapiopts.h>
 #include <sys/sysctl.h>
+#include <netinet/ip_var.h>
+#include <netinet/udp.h>
 
 /*
  * UDP kernel structures and variables.
@@ -173,7 +175,7 @@ extern int udp_shutdown(struct socket *so);
 extern int udp_lock(struct socket *, int, void *);
 extern int udp_unlock(struct socket *, int, void *);
 extern lck_mtx_t *udp_getlock(struct socket *, int);
-extern void udp_get_ports_used(u_int32_t, int, u_int32_t, bitstr_t *);
+extern void udp_get_ports_used(ifnet_t ifp, int, u_int32_t, bitstr_t *);
 extern uint32_t udp_count_opportunistic(unsigned int, u_int32_t);
 extern uint32_t udp_find_anypcb_byaddr(struct ifaddr *);
 

@@ -225,7 +225,7 @@ static integer_t        drain_depth_limit;
 static integer_t        drain_ceiling;
 
 static ZONE_DECLARE(sched_group_zone, "sched groups",
-    sizeof(struct sched_group), ZC_NOENCRYPT | ZC_NOCALLOUT);
+    sizeof(struct sched_group), ZC_NOCALLOUT);
 
 static uint64_t         num_sched_groups = 0;
 static queue_head_t     sched_groups;
@@ -329,6 +329,7 @@ const struct sched_dispatch_table sched_multiq_dispatch = {
 	.rt_queue_shutdown                              = sched_rtlocal_queue_shutdown,
 	.rt_runq_scan                                   = sched_rtlocal_runq_scan,
 	.rt_runq_count_sum                              = sched_rtlocal_runq_count_sum,
+	.rt_steal_thread                                = sched_rtlocal_steal_thread,
 
 	.qos_max_parallelism                            = sched_qos_max_parallelism,
 	.check_spill                                    = sched_check_spill,
@@ -338,6 +339,8 @@ const struct sched_dispatch_table sched_multiq_dispatch = {
 	.run_count_decr                                 = sched_run_decr,
 	.update_thread_bucket                           = sched_update_thread_bucket,
 	.pset_made_schedulable                          = sched_pset_made_schedulable,
+	.cpu_init_completed                             = NULL,
+	.thread_eligible_for_pset                       = NULL,
 };
 
 
@@ -401,9 +404,7 @@ sched_group_create(void)
 		return SCHED_GROUP_NULL;
 	}
 
-	sched_group = (sched_group_t)zalloc(sched_group_zone);
-
-	bzero(sched_group, sizeof(struct sched_group));
+	sched_group = zalloc_flags(sched_group_zone, Z_WAITOK | Z_ZERO);
 
 	run_queue_init(&sched_group->runq);
 

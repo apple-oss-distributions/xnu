@@ -69,86 +69,64 @@ struct suid_cred {
 };
 
 static ZONE_DECLARE(suid_cred_zone, "suid_cred",
-    sizeof(struct suid_cred), ZC_NONE);
+    sizeof(struct suid_cred), ZC_ZFREE_CLEARMEM);
+
+static void suid_cred_no_senders(ipc_port_t port, mach_port_mscount_t mscount);
+static void suid_cred_destroy(ipc_port_t port);
+
+IPC_KOBJECT_DEFINE(IKOT_SUID_CRED,
+    .iko_op_no_senders = suid_cred_no_senders,
+    .iko_op_destroy    = suid_cred_destroy);
+
 
 /* Allocs a new suid credential. The vnode reference will be owned by the newly
  * created suid_cred_t. */
 static suid_cred_t
 suid_cred_alloc(struct vnode *vnode, uint32_t uid)
 {
-	suid_cred_t sc = SUID_CRED_NULL;
+	suid_cred_t sc;
 
 	assert(vnode != NULL);
 
-	sc = zalloc(suid_cred_zone);
-	if (sc != NULL) {
-		// Lazily allocated in convert_suid_cred_to_port().
-		sc->port = IP_NULL;
-		sc->vnode = vnode;
-		sc->uid = uid;
-	}
-
+	sc = zalloc_flags(suid_cred_zone, Z_WAITOK | Z_ZERO | Z_NOFAIL);
+	sc->vnode = vnode;
+	sc->uid = uid;
+	sc->port = ipc_kobject_alloc_port(sc, IKOT_SUID_CRED,
+	    IPC_KOBJECT_ALLOC_MAKE_SEND | IPC_KOBJECT_ALLOC_NSREQUEST);
 	return sc;
 }
 
 static void
 suid_cred_free(suid_cred_t sc)
 {
-	assert(sc != NULL);
-	assert(sc->vnode != NULL);
-
 	vnode_put(sc->vnode);
-
-	sc->uid = UINT32_MAX;
-	sc->vnode = NULL;
-	sc->port = IP_NULL;
-
 	zfree(suid_cred_zone, sc);
 }
 
-void
+static void
 suid_cred_destroy(ipc_port_t port)
 {
-	suid_cred_t sc = NULL;
-
-	ip_lock(port);
-	assert(ip_kotype(port) == IKOT_SUID_CRED);
-	sc = (suid_cred_t)port->ip_kobject;
-	ipc_kobject_set_atomically(port, IKO_NULL, IKOT_NONE);
-	ip_unlock(port);
+	suid_cred_t sc = ipc_kobject_disable(port, IKOT_SUID_CRED);
 
 	assert(sc->port == port);
 
 	suid_cred_free(sc);
 }
 
-void
-suid_cred_notify(mach_msg_header_t *msg)
+static void
+suid_cred_no_senders(ipc_port_t port, mach_port_mscount_t mscount)
 {
-	assert(msg->msgh_id == MACH_NOTIFY_NO_SENDERS);
-
-	mach_no_senders_notification_t *not = (mach_no_senders_notification_t *)msg;
-	ipc_port_t port = not->not_header.msgh_remote_port;
-
-	if (IP_VALID(port)) {
-		ipc_port_dealloc_kernel(port);
-	}
+	ipc_kobject_dealloc_port(port, mscount, IKOT_SUID_CRED);
 }
 
 ipc_port_t
 convert_suid_cred_to_port(suid_cred_t sc)
 {
-	if (sc == NULL) {
-		return IP_NULL;
+	if (sc) {
+		zone_require(suid_cred_zone, sc);
+		return sc->port;
 	}
-
-	if (!ipc_kobject_make_send_lazy_alloc_port(&sc->port,
-	    (ipc_kobject_t) sc, IKOT_SUID_CRED, false, 0)) {
-		suid_cred_free(sc);
-		return IP_NULL;
-	}
-
-	return sc->port;
+	return IP_NULL;
 }
 
 /*
@@ -158,37 +136,24 @@ convert_suid_cred_to_port(suid_cred_t sc)
 int
 suid_cred_verify(ipc_port_t port, struct vnode *vnode, uint32_t *uid)
 {
-	suid_cred_t sc = NULL;
-	int ret = -1;
+	suid_cred_t sc;
 
 	if (!IP_VALID(port)) {
 		return -1;
 	}
 
-	ip_lock(port);
+	ip_mq_lock(port);
+	sc = ipc_kobject_get_locked(port, IKOT_SUID_CRED);
 
-	if (ip_kotype(port) != IKOT_SUID_CRED) {
-		ip_unlock(port);
-		return -1;
+	if (sc && sc->vnode == vnode) {
+		*uid = sc->uid;
+		ipc_port_destroy(port);
+		/* port unlocked */
+		return 0;
 	}
 
-	if (!ip_active(port)) {
-		ip_unlock(port);
-		return -1;
-	}
-
-	sc = (suid_cred_t)port->ip_kobject;
-
-	if (vnode != sc->vnode) {
-		ip_unlock(port);
-		return -1;
-	}
-
-	*uid = sc->uid;
-	ret = 0;
-
-	ipc_port_destroy(port);
-	return ret;
+	ip_mq_unlock(port);
+	return -1;
 }
 
 kern_return_t
@@ -198,7 +163,6 @@ task_create_suid_cred(
 	suid_cred_uid_t uid,
 	suid_cred_t *sc_p)
 {
-	suid_cred_t sc = NULL;
 	struct vnode *vnode;
 	int  err = -1;
 
@@ -222,13 +186,6 @@ task_create_suid_cred(
 		return KERN_INVALID_ARGUMENT;
 	}
 
-	sc = suid_cred_alloc(vnode, uid);
-	if (sc == NULL) {
-		(void) vnode_put(vnode);
-		return KERN_RESOURCE_SHORTAGE;
-	}
-
-	*sc_p = sc;
-
+	*sc_p = suid_cred_alloc(vnode, uid);
 	return KERN_SUCCESS;
 }

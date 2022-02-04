@@ -6,6 +6,8 @@ export MakeInc_dir=${SRCROOT}/makedefs/MakeInc.dir
 include $(MakeInc_cmd)
 include $(MakeInc_def)
 
+# These are covered by CoreOSModuleMaps because they're
+# mixed in with headers from other projects in pthread/.
 DATAFILES = \
 	bsdthread_private.h \
 	priority_private.h \
@@ -19,12 +21,12 @@ PRIVATE_DATAFILES = \
 KERNELFILES = \
 
 PRIVATE_KERNELFILES = \
-
-INTERNAL_KERNELFILES = \
 	bsdthread_private.h \
 	priority_private.h \
+	workqueue_syscalls.h
+
+INTERNAL_KERNELFILES = \
 	workqueue_internal.h \
-	workqueue_syscalls.h \
 	workqueue_trace.h
 
 INSTALL_MI_DIR = pthread
@@ -33,7 +35,7 @@ INSTALL_MI_DIR = pthread
 # /System/Library/Frameworks/System.framework/PrivateHeaders
 INCDIR = $(SDKHEADERSROOT)/usr/local/include
 INSTALL_MI_LIST = ${DATAFILES}
-INSTALL_MI_LCL_LIST = ${PRIVATE_DATAFILES}
+INSTALL_SF_MI_LCL_LIST = $(sort ${DATAFILES} ${PRIVATE_DATAFILES})
 
 # /System/Library/Frameworks/Kernel.framework/Headers
 # /System/Library/Frameworks/Kernel.framework/PrivateHeaders

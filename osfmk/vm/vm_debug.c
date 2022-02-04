@@ -563,6 +563,9 @@ vm32_mapped_pages_info(
 {
 #if !MACH_VM_DEBUG
 	return KERN_FAILURE;
+#elif 1 /* pmap_resident_count is gone with rdar://68290810 */
+	(void)map; (void)pages; (void)pages_count;
+	return KERN_FAILURE;
 #else
 	pmap_t          pmap;
 	vm_size_t       size, size_used;

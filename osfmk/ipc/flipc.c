@@ -59,7 +59,7 @@
 /*** FLIPC Internal Implementation (private to flipc.c) ***/
 
 ZONE_DECLARE(flipc_port_zone, "flipc ports",
-    sizeof(struct flipc_port), ZC_NOENCRYPT);
+    sizeof(struct flipc_port), ZC_ZFREE_CLEARMEM);
 
 /*  Get the mnl_name associated with local ipc_port <lport>.
  *  Returns MNL_NAME_NULL if <lport> is invalid or not a flipc port.
@@ -70,7 +70,7 @@ mnl_name_from_port(ipc_port_t lport)
 	mnl_name_t name = MNL_NAME_NULL;
 
 	if (IP_VALID(lport)) {
-		flipc_port_t fport = lport->ip_messages.data.port.fport;
+		flipc_port_t fport = lport->ip_messages.imq_fport;
 		if (FPORT_VALID(fport)) {
 			name = fport->obj.name;
 		}
@@ -111,11 +111,10 @@ flipc_port_create(ipc_port_t lport, mach_node_t node, mnl_name_t name)
 	assert(!FPORT_VALID(lport->ip_messages.imq_fport));
 
 	/* Allocate and initialize a flipc port */
-	flipc_port_t fport = (flipc_port_t) zalloc(flipc_port_zone);
+	flipc_port_t fport = zalloc_flags(flipc_port_zone, Z_WAITOK | Z_ZERO);
 	if (!FPORT_VALID(fport)) {
 		return KERN_RESOURCE_SHORTAGE;
 	}
-	bzero(fport, sizeof(struct flipc_port));
 	fport->obj.name = name;
 	fport->hostnode = node;
 	if (node == localnode) {
@@ -151,12 +150,12 @@ flipc_port_destroy(ipc_port_t lport)
 	/* Ensure parameter is valid, and linked to an fport with a valid name */
 	assert(IP_VALID(lport));
 	ipc_mqueue_t port_mq = &lport->ip_messages;
-	flipc_port_t fport = port_mq->data.port.fport;
+	flipc_port_t fport = port_mq->imq_fport;
 	assert(FPORT_VALID(fport));
 	assert(MNL_NAME_VALID(fport->obj.name));
 
 	/* Dispose of any undelivered messages */
-	int m = port_mq->data.port.msgcount;
+	int m = port_mq->imq_msgcount;
 	if (m > 0) {
 		ipc_kmsg_t kmsg;
 #if DEBUG
@@ -171,14 +170,14 @@ flipc_port_destroy(ipc_port_t lport)
 			if (fport->state == FPORT_STATE_PRINCIPAL) {
 				flipc_msg_ack(kmsg->ikm_node, port_mq, FALSE);
 			}
-			ipc_mqueue_release_msgcount(port_mq, NULL);
+			ipc_mqueue_release_msgcount(port_mq);
 			port_mq->imq_seqno++;
 		}
 	}
 
 	/* Remove from name hash table, unlink co-structures, and free fport */
 	mnl_obj_remove(fport->obj.name);
-	lport->ip_messages.data.port.fport = FPORT_NULL;
+	lport->ip_messages.imq_fport = FPORT_NULL;
 	fport->lport = IP_NULL;
 	zfree(flipc_port_zone, fport);
 }
@@ -236,7 +235,7 @@ mnl_msg_from_kmsg(ipc_kmsg_t kmsg, mnl_msg_t *fmsgp)
 	fmsg->node_id = localnode_id;   // Message is from us
 	fmsg->qos = 0; // not used
 	fmsg->size = fsize; // Payload size (does NOT include mnl_msg header)
-	fmsg->object = kmsg->ikm_header->msgh_remote_port->ip_messages.data.port.fport->obj.name;
+	fmsg->object = kmsg->ikm_header->msgh_remote_port->ip_messages.imq_fport->obj.name;
 
 	/* Copy body of message */
 	bcopy((const void*)kmsg->ikm_header, (void*)MNL_MSG_PAYLOAD(fmsg), fsize);
@@ -326,21 +325,19 @@ flipc_cmd_ack(flipc_ack_msg_t   fmsg,
 	flipc_port_t fport = (flipc_port_t)mnl_obj_lookup(fmsg->mnl.object);
 
 	ipc_port_t lport = fport->lport;
-	ip_lock(lport);
+	ip_mq_lock(lport); // Revisit the lock when enabling flipc
 
 	ipc_mqueue_t lport_mq = &lport->ip_messages;
-	imq_lock(lport_mq);
 
 	assert(fport->peek_count >= msg_count); // Can't ack what we haven't peeked!
 
 	while (msg_count--) {
-		ipc_mqueue_select_on_thread(lport_mq, IMQ_NULL, 0, 0, thread);
+		ipc_mqueue_select_on_thread_locked(lport_mq, NULL, 0, thread);
 		fport->peek_count--;
 		kick |= ipc_kmsg_delayed_destroy(thread->ith_kmsg);
 	}
 
-	imq_unlock(lport_mq);
-	ip_unlock(lport);
+	ip_mq_unlock(lport);
 
 	if (kick) {
 		ipc_kmsg_reap_delayed();
@@ -368,12 +365,12 @@ flipc_node_prepare(mach_node_t node)
 	ipc_port_t bs_port = node->bootstrap_port;
 	assert(IP_VALID(bs_port));
 
-	ip_lock(bs_port);
+	ip_mq_lock(bs_port);
 
 	kr = flipc_port_create(bs_port,
 	    node,
 	    MNL_NAME_BOOTSTRAP(node->info.node_id));
-	ip_unlock(bs_port);
+	ip_mq_unlock(bs_port);
 
 	return kr;
 }
@@ -395,9 +392,9 @@ flipc_node_retire(mach_node_t node)
 
 	ipc_port_t bs_port = node->bootstrap_port;
 	if (IP_VALID(bs_port)) {
-		ip_lock(bs_port);
+		ip_mq_lock(bs_port);  // Revisit the lock when enabling flipc
 		flipc_port_destroy(bs_port);
-		ip_unlock(bs_port);
+		ip_mq_unlock(bs_port);
 	}
 
 	return KERN_SUCCESS;
@@ -422,12 +419,12 @@ flipc_msg_to_remote_node(mach_node_t  to_node,
 	assert(to_node != localnode);
 	assert(get_preemption_level() == 0);
 
-	ipc_mqueue_t portset_mq = &to_node->proxy_port_set->ips_messages;
+	struct waitq *pset_waitq = &to_node->proxy_port_set->ips_wqset.wqset_q;
 	ipc_mqueue_t port_mq = IMQ_NULL;
 
 	while (!to_node->dead) {
 		/* Fetch next message from proxy port */
-		ipc_mqueue_receive(portset_mq, MACH_PEEK_MSG, 0, 0, THREAD_ABORTSAFE);
+		ipc_mqueue_receive(pset_waitq, MACH_PEEK_MSG, 0, 0, THREAD_ABORTSAFE);
 
 		thread_t thread = current_thread();
 		if (thread->ith_state == MACH_PEEK_READY) {
@@ -439,16 +436,15 @@ flipc_msg_to_remote_node(mach_node_t  to_node,
 		}
 
 		assert(get_preemption_level() == 0);
-		imq_lock(port_mq);
 
-		flipc_port_t fport = port_mq->data.port.fport;
+		flipc_port_t fport = port_mq->imq_fport;
 
 		if (FPORT_VALID(fport)) {
-			msgoff = port_mq->data.port.fport->peek_count;
+			msgoff = port_mq->imq_fport->peek_count;
 
 			ipc_mqueue_peek_locked(port_mq, &msgoff, NULL, NULL, NULL, &kmsg);
 			if (kmsg != IKM_NULL) {
-				port_mq->data.port.fport->peek_count++;
+				port_mq->imq_fport->peek_count++;
 			}
 
 			/* Clean up outstanding prepost on port_mq.
@@ -467,15 +463,14 @@ flipc_msg_to_remote_node(mach_node_t  to_node,
 			}
 		} else {
 			/* Must be from the control_port, which is not a flipc port */
-			assert(!FPORT_VALID(port_mq->data.port.fport));
+			assert(!FPORT_VALID(port_mq->imq_fport));
 
 			/* This is a simplified copy of ipc_mqueue_select_on_thread() */
 			kmsg = ipc_kmsg_queue_first(&port_mq->imq_messages);
 			assert(kmsg != IKM_NULL);
 			ipc_kmsg_rmqueue(&port_mq->imq_messages, kmsg);
-			ipc_mqueue_release_msgcount(port_mq, portset_mq);
-			imq_unlock(port_mq);
-			current_task()->messages_received++;
+			ipc_mqueue_release_msgcount(port_mq);
+			counter_inc(&current_task()->messages_received);
 			ip_release(to_node->control_port); // Should derive ref from port_mq
 
 			/* We just pass the kmsg payload as the fmsg.
@@ -581,9 +576,9 @@ flipc_msg_ack(mach_node_t   node,
 	mach_node_id_t nid = HOST_LOCAL_NODE;
 	ipc_port_t ack_port = IP_NULL;
 
-	ip_lock(fport->lport);
+	ip_mq_lock(fport->lport);
 	name = fport->obj.name;
-	ip_unlock(fport->lport);
+	ip_mq_unlock(fport->lport);
 
 	if (!MNL_NAME_VALID(name)) {
 		return;
@@ -601,7 +596,7 @@ flipc_msg_ack(mach_node_t   node,
 	}
 
 	/* We have a valid node id & obj name, and a port to send the ack to. */
-	ipc_kmsg_t kmsg = ipc_kmsg_alloc(sizeof(struct flipc_ack_msg) + MAX_TRAILER_SIZE);
+	ipc_kmsg_t kmsg = ipc_kmsg_alloc(sizeof(struct flipc_ack_msg), IPC_KMSG_ALLOC_KERNEL);
 	assert((unsigned long long)kmsg >= 4ULL);//!= IKM_NULL);
 	mach_msg_header_t *msg = kmsg->ikm_header;
 
@@ -632,13 +627,11 @@ flipc_msg_ack(mach_node_t   node,
 	mach_msg_return_t mmr;
 	ipc_mqueue_t ack_mqueue;
 
-	ip_lock(ack_port);
+	ip_mq_lock(ack_port); // Revisit the lock when enabling flipc
 	ack_mqueue = &ack_port->ip_messages;
-	imq_lock(ack_mqueue);
-	ip_unlock(ack_port);
 
 	/* ipc_mqueue_send() unlocks ack_mqueue */
-	mmr = ipc_mqueue_send(ack_mqueue, kmsg, 0, 0);
+	mmr = ipc_mqueue_send_locked(ack_mqueue, kmsg, 0, 0);
 #else
 	kern_return_t kr;
 	kr = ipc_kmsg_send(kmsg,

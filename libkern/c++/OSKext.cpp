@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2016 Apple Inc. All rights reserved.
+ * Copyright (c) 2008-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -36,7 +36,6 @@ extern "C" {
 #include <firehose/tracepoint_private.h>
 #include <firehose/chunk_private.h>
 #include <os/firehose_buffer_private.h>
-#include <vm/vm_kern.h>
 #include <vm/vm_map.h>
 #include <kextd/kextd_mach.h>
 #include <libkern/kernel_mach_header.h>
@@ -49,17 +48,11 @@ extern "C" {
 #include <mach/host_special_ports.h>
 #include <mach/mach_vm.h>
 #include <mach/mach_time.h>
-#include <sys/sysctl.h>
 #include <uuid/uuid.h>
 #include <sys/random.h>
 #include <pexpert/pexpert.h>
 
 #include <sys/pgo.h>
-
-#if CONFIG_MACF
-#include <sys/kauth.h>
-#include <security/mac_framework.h>
-#endif
 
 #if CONFIG_CSR
 #include <sys/csr.h>
@@ -68,6 +61,14 @@ extern "C" {
 #endif /* CONFIG_CSR */
 };
 
+#if CONFIG_MACF
+#include <sys/kauth.h>
+#include <security/mac_framework.h>
+#endif
+
+#include <vm/vm_kern.h>
+#include <sys/sysctl.h>
+#include <kern/task.h>
 #include <os/cpp_util.h>
 
 #include <libkern/OSKextLibPrivate.h>
@@ -232,10 +233,11 @@ static void OSKextLogKextInfo(OSKext *aKext, uint64_t address, uint64_t size, fi
 #define _kOSKextExecutableExternalDataKey    "_OSKextExecutableExternalData"
 
 #define OS_LOG_HDR_VERSION  1
-#define NUM_OS_LOG_SECTIONS 2
+#define NUM_OS_LOG_SECTIONS 3
 
-#define OS_LOG_SECT_IDX     0
-#define CSTRING_SECT_IDX    1
+#define OS_LOG_SECT_IDX         0
+#define CSTRING_SECT_IDX        1
+#define ASAN_CSTRING_SECT_IDX   2
 
 #if PRAGMA_MARK
 #pragma mark Typedefs
@@ -450,7 +452,9 @@ vm_tag_t                      gIOSurfaceTag;
  **********/
 static IORecursiveLock *    sKextInnerLock             = NULL;
 
+#if XNU_TARGET_OS_OSX
 static bool                 sAutounloadEnabled         = true;
+#endif
 static bool                 sConsiderUnloadsCalled     = false;
 static bool                 sConsiderUnloadsPending    = false;
 
@@ -975,7 +979,9 @@ OSKext::removeKextBootstrap(void)
 	int                        dt_symtab_size        = 0;
 	int                        dt_result             = 0;
 
-	kernel_segment_command_t * seg_to_remove         = NULL;
+	kernel_segment_command_t * seg_kld               = NULL;
+	kernel_segment_command_t * seg_klddata           = NULL;
+	kernel_segment_command_t * seg_linkedit          = NULL;
 
 	const char __unused      * dt_segment_name       = NULL;
 	void       __unused      * segment_paddress      = NULL;
@@ -1015,41 +1021,59 @@ OSKext::removeKextBootstrap(void)
 	}
 
 	/*****
-	 * KLD bootstrap segment.
+	 * KLD & KLDDATA bootstrap segments.
 	 */
 	// xxx - should rename KLD segment
-	seg_to_remove = getsegbyname("__KLD");
-	if (seg_to_remove) {
-		OSRuntimeUnloadCPPForSegment(seg_to_remove);
+	seg_kld = getsegbyname("__KLD");
+	seg_klddata = getsegbyname("__KLDDATA");
+	if (seg_klddata) {
+		// __mod_term_func is part of __KLDDATA
+		OSRuntimeUnloadCPPForSegment(seg_klddata);
 	}
 
 #if __arm__ || __arm64__
-	/* Free the memory that was set up by bootx.
+	/* Free the memory that was set up by iBoot.
+	 */
+#if !defined(KERNEL_INTEGRITY_KTRR) && !defined(KERNEL_INTEGRITY_CTRR)
+	/* We cannot free the KLD segment with CTRR enabled as it contains text and
+	 * is covered by the contiguous rorgn.
 	 */
 	dt_segment_name = "Kernel-__KLD";
 	if (0 == IODTGetLoaderInfo(dt_segment_name, &segment_paddress, &segment_size)) {
-		/* We cannot free this with KTRR enabled, as we cannot
-		 * update the permissions on the KLD range this late
-		 * in the boot process.
-		 */
 		IODTFreeLoaderInfo(dt_segment_name, (void *)segment_paddress,
-		    (int)segment_size);
+		    (int)segment_size); // calls ml_static_mfree
+	} else if (seg_kld && seg_kld->vmaddr && seg_kld->vmsize) {
+		/* With fileset KCs, the Kernel KLD segment is not recorded in the DT. */
+		ml_static_mfree(ml_static_ptovirt(seg_kld->vmaddr - gVirtBase + gPhysBase),
+		    seg_kld->vmsize);
+	}
+#endif
+	dt_segment_name = "Kernel-__KLDDATA";
+	if (0 == IODTGetLoaderInfo(dt_segment_name, &segment_paddress, &segment_size)) {
+		IODTFreeLoaderInfo(dt_segment_name, (void *)segment_paddress,
+		    (int)segment_size);  // calls ml_static_mfree
+	} else if (seg_klddata && seg_klddata->vmaddr && seg_klddata->vmsize) {
+		/* With fileset KCs, the Kernel KLDDATA segment is not recorded in the DT. */
+		ml_static_mfree(ml_static_ptovirt(seg_klddata->vmaddr - gVirtBase + gPhysBase),
+		    seg_klddata->vmsize);
 	}
 #elif __i386__ || __x86_64__
 	/* On x86, use the mapping data from the segment load command to
-	 * unload KLD directly.
+	 * unload KLD & KLDDATA directly.
 	 * This may invalidate any assumptions about  "avail_start"
 	 * defining the lower bound for valid physical addresses.
 	 */
-	if (seg_to_remove && seg_to_remove->vmaddr && seg_to_remove->vmsize) {
-		bzero((void *)seg_to_remove->vmaddr, seg_to_remove->vmsize);
-		ml_static_mfree(seg_to_remove->vmaddr, seg_to_remove->vmsize);
+	if (seg_kld && seg_kld->vmaddr && seg_kld->vmsize) {
+		bzero((void *)seg_kld->vmaddr, seg_kld->vmsize);
+		ml_static_mfree(seg_kld->vmaddr, seg_kld->vmsize);
+	}
+	if (seg_klddata && seg_klddata->vmaddr && seg_klddata->vmsize) {
+		bzero((void *)seg_klddata->vmaddr, seg_klddata->vmsize);
+		ml_static_mfree(seg_klddata->vmaddr, seg_klddata->vmsize);
 	}
 #else
 #error arch
 #endif
-
-	seg_to_remove = NULL;
 
 	/*****
 	 * Prelinked kernel's symtab (if there is one).
@@ -1062,7 +1086,7 @@ OSKext::removeKextBootstrap(void)
 		}
 	}
 
-	seg_to_remove = (kernel_segment_command_t *)getsegbyname("__LINKEDIT");
+	seg_linkedit = (kernel_segment_command_t *)getsegbyname("__LINKEDIT");
 
 	/* kxld always needs the kernel's __LINKEDIT segment, but we can make it
 	 * pageable, unless keepsyms is set.  To do that, we have to copy it from
@@ -1084,9 +1108,9 @@ OSKext::removeKextBootstrap(void)
 		vm_map_offset_t seg_copy_offset = 0;
 		vm_map_size_t seg_length = 0;
 
-		seg_data = (void *) seg_to_remove->vmaddr;
-		seg_offset = (vm_map_offset_t) seg_to_remove->vmaddr;
-		seg_length = (vm_map_size_t) seg_to_remove->vmsize;
+		seg_data = (void *) seg_linkedit->vmaddr;
+		seg_offset = (vm_map_offset_t) seg_linkedit->vmaddr;
+		seg_length = (vm_map_size_t) seg_linkedit->vmsize;
 
 		/* Allocate space for the LINKEDIT copy.
 		 */
@@ -1161,6 +1185,10 @@ OSKext::removeKextBootstrap(void)
 			IODTFreeLoaderInfo(dt_segment_name, (void *)segment_paddress,
 			    (int)segment_size);
 		}
+	} else if (!sKeepSymbols && kc_format == KCFormatFileset) {
+		/* Remove the linkedit segment of the Boot KC */
+		kernel_mach_header_t *mh = (kernel_mach_header_t *)PE_get_kc_header(KCKindPrimary);
+		OSKext::jettisonFileSetLinkeditSegment(mh);
 	} else {
 		OSKextLog(/* kext */ NULL,
 		    kOSKextLogBasicLevel |
@@ -1168,8 +1196,6 @@ OSKext::removeKextBootstrap(void)
 		    "keepsyms boot arg specified; keeping linkedit segment for symbols.");
 	}
 #endif // VM_MAPPED_KEXTS
-
-	seg_to_remove = NULL;
 
 	result = kOSReturnSuccess;
 
@@ -1449,6 +1475,7 @@ OSKext::resetAfterUserspaceReboot(void)
 	IORecursiveLockLock(sKextLock);
 	gIOCatalogue->resetAfterUserspaceReboot();
 	IOService::userSpaceDidReboot();
+	OSKext::removeDaemonExitRequests();
 	OSKext::setLoadEnabled(true);
 	OSKext::setUnloadEnabled(true);
 	OSKext::setAutounloadsEnabled(true);
@@ -1461,6 +1488,36 @@ extern "C" void
 OSKextResetAfterUserspaceReboot(void)
 {
 	OSKext::resetAfterUserspaceReboot();
+}
+
+/*
+ * Remove daemon exit requests from sKernelRequests
+ *
+ * If we sent a daemon exit request during a userspace reboot and launchd
+ * killed the IOKit daemon before it was able to dequeue the exit request, the
+ * next time the daemon starts up it will immediately exit as it gets the old exit request.
+ *
+ * This removes exit requests so that this does not happen.
+ */
+void
+OSKext::removeDaemonExitRequests(void)
+{
+	OSDictionary * current = NULL;
+	OSString     * predicate = NULL;
+	size_t         index     = 0;
+	OSSharedPtr<const OSSymbol> predicateKey = OSSymbol::withCString(kKextRequestPredicateKey);
+
+	while (index < sKernelRequests->getCount()) {
+		current = OSDynamicCast(OSDictionary, sKernelRequests->getObject(index));
+		if (current) {
+			predicate = OSDynamicCast(OSString, current->getObject(predicateKey.get()));
+			if (predicate && predicate->isEqualTo(kKextRequestPredicateRequestDaemonExit)) {
+				sKernelRequests->removeObject(index);
+				continue;
+			}
+		}
+		index++;
+	}
 }
 
 /*********************************************************************
@@ -1545,12 +1602,16 @@ OSKext::setUnloadEnabled(bool flag)
 bool
 OSKext::getAutounloadEnabled(void)
 {
+#if XNU_TARGET_OS_OSX
 	bool result;
 
 	IORecursiveLockLock(sKextInnerLock);
 	result = sAutounloadEnabled ? true : false;
 	IORecursiveLockUnlock(sKextInnerLock);
 	return result;
+#else
+	return false;
+#endif /* XNU_TARGET_OS_OSX */
 }
 
 /*********************************************************************
@@ -1560,6 +1621,7 @@ OSKext::getAutounloadEnabled(void)
 bool
 OSKext::setAutounloadsEnabled(bool flag)
 {
+#if XNU_TARGET_OS_OSX
 	bool result;
 
 	IORecursiveLockLock(sKextInnerLock);
@@ -1581,6 +1643,10 @@ OSKext::setAutounloadsEnabled(bool flag)
 	IORecursiveLockUnlock(sKextInnerLock);
 
 	return result;
+#else
+	(void)flag;
+	return false;
+#endif /* XNU_TARGET_OS_OSX */
 }
 
 /*********************************************************************
@@ -1590,7 +1656,7 @@ bool
 OSKext::setAutounloadEnabled(bool flag)
 {
 	bool result = flags.autounloadEnabled ? true : false;
-	flags.autounloadEnabled = flag ? 1 : 0;
+	flags.autounloadEnabled = flag ? (0 == flags.unloadUnsupported) : 0;
 
 	if (result != (flag ? true : false)) {
 		OSKextLog(this,
@@ -1891,6 +1957,8 @@ OSKext::initWithPrelinkedInfoDict(
 				getPropertyForHostArch(kOSBundleAllowUserLoadKey) == kOSBooleanTrue);
 			if (shouldSaveSegments) {
 				flags.resetSegmentsFromImmutableCopy = 1;
+			} else {
+				flags.unloadUnsupported = 1;
 			}
 			break;
 		case KCKindPageable:
@@ -1901,6 +1969,8 @@ OSKext::initWithPrelinkedInfoDict(
 				flags.resetSegmentsFromImmutableCopy = 1;
 			} else if (resetAuxKCSegmentOnUnload) {
 				flags.resetSegmentsFromVnode = 1;
+			} else {
+				flags.unloadUnsupported = 1;
 			}
 			break;
 		default:
@@ -2863,7 +2933,7 @@ OSKext::free(void)
 	driverKitUUID.reset();
 
 	if (isInterface() && kmod_info) {
-		kfree(kmod_info, sizeof(kmod_info_t));
+		kfree_type(kmod_info_t, kmod_info);
 	}
 
 	super::free();
@@ -3287,14 +3357,14 @@ z_alloc(void * notused __unused, u_int num_items, u_int size)
 	uint64_t   total = ((uint64_t)num_items) * ((uint64_t)size);
 	//Check for overflow due to multiplication
 	if (total > UINT32_MAX) {
-		panic("z_alloc(%p, %x, %x): overflow caused by %x * %x\n",
+		panic("z_alloc(%p, %x, %x): overflow caused by %x * %x",
 		    notused, num_items, size, num_items, size);
 	}
 
 	uint64_t   allocSize64 =  total + ((uint64_t)sizeof(zmem));
 	//Check for overflow due to addition
 	if (allocSize64 > UINT32_MAX) {
-		panic("z_alloc(%p, %x, %x): overflow caused by %x + %lx\n",
+		panic("z_alloc(%p, %x, %x): overflow caused by %x + %lx",
 		    notused, num_items, size, (uint32_t)total, sizeof(zmem));
 	}
 	uint32_t allocSize = (uint32_t)allocSize64;
@@ -3828,11 +3898,13 @@ OSKext::lookupKextWithAddress(vm_address_t address)
 	OSSharedPtr<OSKext> foundKext;             // returned
 	uint32_t count, i;
 	kmod_info_t *kmod_info;
+	vm_address_t originalAddress;
 #if defined(__arm64__)
 	uint64_t   textExecBase;
 	size_t     textExecSize;
 #endif /* defined(__arm64__) */
 
+	originalAddress = address;
 #if  __has_feature(ptrauth_calls)
 	address = (vm_address_t)VM_KERNEL_STRIP_PTR(address);
 #endif /*  __has_feature(ptrauth_calls) */
@@ -3868,7 +3940,8 @@ OSKext::lookupKextWithAddress(vm_address_t address)
 	}
 	/*
 	 * DriverKit userspace executables do not have a kernel linkedExecutable,
-	 * so we "fake" their address range with the LoadTag.
+	 * so we "fake" their address range with the LoadTag. We cannot use the ptrauth-stripped address
+	 * here, so use the original address passed to this method.
 	 *
 	 * This is supposed to be used for logging reasons only. When logd
 	 * calls this function it ors the address with FIREHOSE_TRACEPOINT_PC_KERNEL_MASK, so we
@@ -3876,7 +3949,7 @@ OSKext::lookupKextWithAddress(vm_address_t address)
 	 * Also we need to remove FIREHOSE_TRACEPOINT_PC_DYNAMIC_BIT set when emitting the log line.
 	 */
 
-	address = address & ~(FIREHOSE_TRACEPOINT_PC_KERNEL_MASK | FIREHOSE_TRACEPOINT_PC_DYNAMIC_BIT);
+	address = originalAddress & ~(FIREHOSE_TRACEPOINT_PC_KERNEL_MASK | FIREHOSE_TRACEPOINT_PC_DYNAMIC_BIT);
 	count = sLoadedDriverKitKexts->getCount();
 	for (i = 0; i < count; i++) {
 		OSKext * thisKext = OSDynamicCast(OSKext, sLoadedDriverKitKexts->getObject(i));
@@ -3901,14 +3974,6 @@ OSKext::copyKextUUIDForAddress(OSNumber *address)
 		return NULL;
 	}
 
-	uintptr_t addr = ml_static_slide((uintptr_t)address->unsigned64BitValue());
-	if (addr == 0) {
-		return NULL;
-	}
-#if  __has_feature(ptrauth_calls)
-	addr = (uintptr_t)VM_KERNEL_STRIP_PTR(addr);
-#endif /*  __has_feature(ptrauth_calls) */
-
 #if CONFIG_MACF
 	/* Is the calling process allowed to query kext info? */
 	if (current_task() != kernel_task) {
@@ -3928,10 +3993,28 @@ OSKext::copyKextUUIDForAddress(OSNumber *address)
 		}
 	}
 #endif
-	kext = lookupKextWithAddress(addr);
-	if (kext) {
-		uuid = kext->copyTextUUID();
+
+	uintptr_t slidAddress = ml_static_slide((uintptr_t)address->unsigned64BitValue());
+	if (slidAddress != 0) {
+		kext = lookupKextWithAddress(slidAddress);
+		if (kext) {
+			uuid = kext->copyTextUUID();
+		}
 	}
+
+	if (!uuid) {
+		/*
+		 * If we still don't have a UUID, then we failed to match the slid + stripped address with
+		 * a kext. This might have happened because the log message came from a dext.
+		 *
+		 * Try again with the original address.
+		 */
+		kext = lookupKextWithAddress((vm_address_t)address->unsigned64BitValue());
+		if (kext && kext->isDriverKit()) {
+			uuid = kext->copyTextUUID();
+		}
+	}
+
 	return uuid;
 }
 
@@ -4069,6 +4152,15 @@ OSKext::removeKext(
 
 		/* make sure there are no resource requests in flight - 17187548 */
 		if (aKext->countRequestCallbacks()) {
+			goto finish;
+		}
+		if (aKext->flags.unloadUnsupported) {
+			result = kOSKextReturnInUse;
+			OSKextLog(aKext,
+			    kOSKextLogErrorLevel |
+			    kOSKextLogKextBookkeepingFlag,
+			    "Can't remove kext %s; unsupported by cache.",
+			    aKext->getIdentifierCString());
 			goto finish;
 		}
 
@@ -4315,7 +4407,7 @@ OSKext::createExcludeListFromBooterData(
 			boolean_t updated = updateExcludeList(theInfoDict);
 			if (!updated) {
 				/* 25322874 */
-				panic("Missing OSKextExcludeList dictionary\n");
+				panic("Missing OSKextExcludeList dictionary");
 			}
 			break;
 		}
@@ -4350,7 +4442,7 @@ OSKext::createExcludeListFromPrelinkInfo( OSArray * theInfoArray )
 			boolean_t updated = updateExcludeList(myInfoDict);
 			if (!updated) {
 				/* 25322874 */
-				panic("Missing OSKextExcludeList dictionary\n");
+				panic("Missing OSKextExcludeList dictionary");
 			}
 			break;
 		}
@@ -4816,8 +4908,7 @@ makeHostArchKey(const char * key, size_t * keySizeOut)
 	/* Add 1 for the ARCH_SEPARATOR_CHAR, and 1 for the '\0'.
 	 */
 	keySize = 1 + 1 + keyLength + strlen(ARCHNAME);
-	result = (char *)kheap_alloc_tag(KHEAP_TEMP, keySize,
-	    Z_WAITOK, VM_KERN_MEMORY_OSKEXT);
+	result = (char *)kalloc_data_tag(keySize, Z_WAITOK, VM_KERN_MEMORY_OSKEXT);
 
 	if (!result) {
 		goto finish;
@@ -4868,7 +4959,7 @@ OSKext::getPropertyForHostArch(const char * key)
 
 finish:
 	if (hostArchKey) {
-		kheap_free(KHEAP_TEMP, hostArchKey, hostArchKeySize);
+		kfree_data(hostArchKey, hostArchKeySize);
 	}
 	return result;
 }
@@ -5392,10 +5483,8 @@ OSKext::loadCodelessKext(OSString *kextIdentifier, OSDictionary *requestDict)
 		OSKext::recordIdentifierRequest(OSDynamicCast(OSString, newKext->getIdentifier()));
 
 		result = kOSReturnSuccess;
-		/* send the kext's personalities to the IOCatalog */
-		if (!newKext->flags.requireExplicitLoad) {
-			result = newKext->sendPersonalitiesToCatalog(true, NULL);
-		}
+		/* Send the kext's personalities to the IOCatalog. This is an explicit load. */
+		result = newKext->sendPersonalitiesToCatalog(true, NULL);
 	}
 
 finish:
@@ -5520,22 +5609,27 @@ OSKext::load(
 		goto loaded;
 	}
 
-#if CONFIG_MACF && XNU_TARGET_OS_OSX
-#if CONFIG_KXLD
-	if (current_task() != kernel_task) {
-#else
+#if CONFIG_MACF
 	/*
-	 * On non-kxld systems, only check the mac-hook for kexts in the
-	 * Pageable and Aux KCs. This means on Apple silicon devices that
-	 * the mac hook will only be useful to block 3rd party kexts.
+	 * On kxld and on embedded, only call into the MAC hook when on a
+	 * user thread, for access control over userspace kextloads.
+	 *
+	 * On non-kxld systems, additionally check the MAC hook for kexts in
+	 * the Pageable and Aux KCs, regardless of whether we are on a user
+	 * thread or not. This means on Apple silicon devices that the MAC
+	 * hook will only be useful to block 3rd party kexts loaded via
+	 * matching, and any kexts loaded from userspace kextloads.
 	 *
 	 * Note that this should _not_ be called on kexts loaded from the
 	 * kernel bootstrap thread as the kernel proc's cred struct is not
 	 * yet initialized! This won't happen on macOS because all the kexts
 	 * in the BootKC are self-contained and their kc_type = KCKindPrimary.
 	 */
-	if (kc_type != KCKindPrimary && kc_type != KCKindUnknown) {
-#endif /* CONFIG_KXLD */
+	if (current_task() != kernel_task
+#if XNU_TARGET_OS_OSX && !CONFIG_KXLD
+	    || (kc_type != KCKindPrimary && kc_type != KCKindUnknown)
+#endif
+	    ) {
 		int                 macCheckResult      = 0;
 		kauth_cred_t        cred                = NULL;
 
@@ -5552,7 +5646,7 @@ OSKext::load(
 			goto finish;
 		}
 	}
-#endif
+#endif /* CONFIG_MACF */
 
 	if (!sLoadEnabled) {
 		OSKextLog(this,
@@ -5727,15 +5821,21 @@ OSKext::load(
 	// The kernel PRNG is not initialized when the first kext is
 	// loaded, so use early random
 	uuid_generate_early_random(instance_uuid);
-	account = IONew(OSKextAccount, 1);
-	if (!account) {
-		result = KERN_MEMORY_ERROR;
-		goto finish;
-	}
-	bzero(account, sizeof(*account));
+	account = IOMallocType(OSKextAccount);
+
 	account->loadTag = kmod_info->id;
 	account->site.refcount = 0;
 	account->site.flags = VM_TAG_KMOD;
+
+#if DEVELOPMENT || DEBUG
+	/* Setup the task reference group. */
+	(void)snprintf(account->task_refgrp_name, sizeof(account->task_refgrp_name),
+	    "task_%s", getIdentifierCString());
+	account->task_refgrp.grp_name = account->task_refgrp_name;
+	account->task_refgrp.grp_parent = &task_external_refgrp;
+	os_ref_log_init(&account->task_refgrp);
+#endif /* DEVELOPMENT || DEBUG */
+
 	account->kext = this;
 	if (gIOSurfaceIdentifier == bundleID) {
 		vm_tag_alloc(&account->site);
@@ -6220,7 +6320,7 @@ OSKext::loadExecutable()
 	}
 
 	/* <rdar://problem/21444003> all callers must be entitled */
-	if (FALSE == IOTaskHasEntitlement(current_task(), kOSKextCollectionManagementEntitlement)) {
+	if (FALSE == IOCurrentTaskHasEntitlement(kOSKextCollectionManagementEntitlement)) {
 		OSKextLog(this,
 		    kOSKextLogErrorLevel | kOSKextLogLoadFlag,
 		    "Not entitled to link kext '%s'",
@@ -6284,7 +6384,7 @@ OSKext::loadExecutable()
 		goto finish;
 	}
 
-	kxlddeps = (KXLDDependency *)kalloc_tag(num_kxlddeps * sizeof(*kxlddeps), VM_KERN_MEMORY_OSKEXT);
+	kxlddeps = kalloc_type_tag(KXLDDependency, num_kxlddeps, Z_WAITOK, VM_KERN_MEMORY_OSKEXT);
 	if (!kxlddeps) {
 		OSKextLog(this,
 		    kOSKextLogErrorLevel |
@@ -6401,7 +6501,7 @@ register_kmod:
 	if (isInterface()) {
 		/* Whip up a fake kmod_info entry for the interface kext.
 		 */
-		kmod_info = (kmod_info_t *)kalloc_tag(sizeof(kmod_info_t), VM_KERN_MEMORY_OSKEXT);
+		kmod_info = kalloc_type(kmod_info_t, (zalloc_flags_t)(Z_WAITOK | Z_ZERO));
 		if (!kmod_info) {
 			result = KERN_MEMORY_ERROR;
 			goto finish;
@@ -6409,8 +6509,6 @@ register_kmod:
 
 		/* A pseudokext has almost nothing in its kmod_info struct.
 		 */
-		bzero(kmod_info, sizeof(kmod_info_t));
-
 		kmod_info->info_version = KMOD_INFO_VERSION;
 
 		/* An interface kext doesn't have a linkedExecutable, so save a
@@ -6436,14 +6534,12 @@ register_kmod:
 	 */
 	num_kmod_refs = getNumDependencies();
 	if (num_kmod_refs) {
-		kmod_info->reference_list = (kmod_reference_t *)kalloc_tag(
-			num_kmod_refs * sizeof(kmod_reference_t), VM_KERN_MEMORY_OSKEXT);
+		kmod_info->reference_list = kalloc_type_tag(kmod_reference_t,
+		    num_kmod_refs, Z_WAITOK_ZERO, VM_KERN_MEMORY_OSKEXT);
 		if (!kmod_info->reference_list) {
 			result = KERN_MEMORY_ERROR;
 			goto finish;
 		}
-		bzero(kmod_info->reference_list,
-		    num_kmod_refs * sizeof(kmod_reference_t));
 		for (uint32_t refIndex = 0; refIndex < num_kmod_refs; refIndex++) {
 			kmod_reference_t * ref = &(kmod_info->reference_list[refIndex]);
 			OSKext * refKext = OSDynamicCast(OSKext, dependencies->getObject(refIndex));
@@ -6543,7 +6639,7 @@ finish:
 		}
 	}
 	if (kxlddeps) {
-		kfree(kxlddeps, (num_kxlddeps * sizeof(*kxlddeps)));
+		kfree_type(KXLDDependency, num_kxlddeps, kxlddeps);
 	}
 #endif // CONFIG_KXLD
 
@@ -6560,11 +6656,11 @@ finish:
 		    getIdentifierCString());
 
 		if (kmod_info && kmod_info->reference_list) {
-			kfree(kmod_info->reference_list,
-			    num_kmod_refs * sizeof(kmod_reference_t));
+			kfree_type(kmod_reference_t, num_kmod_refs,
+			    kmod_info->reference_list);
 		}
 		if (isInterface()) {
-			kfree(kmod_info, sizeof(kmod_info_t));
+			kfree_type(kmod_info_t, kmod_info);
 			kmod_info = NULL;
 		}
 		if (kc_type == KCKindUnknown) {
@@ -6578,7 +6674,6 @@ finish:
 	return result;
 }
 
-#if VM_MAPPED_KEXTS
 /* static */
 void
 OSKext::jettisonFileSetLinkeditSegment(kernel_mach_header_t *mh)
@@ -6586,8 +6681,11 @@ OSKext::jettisonFileSetLinkeditSegment(kernel_mach_header_t *mh)
 	kernel_segment_command_t *linkeditseg = NULL;
 
 	linkeditseg = getsegbynamefromheader(mh, SEG_LINKEDIT);
-	assert(linkeditseg != NULL);
+	if (linkeditseg == NULL) {
+		panic("FileSet booted with no Linkedit segment");
+	}
 
+#if VM_MAPPED_KEXTS
 	/* BootKC on x86_64 is not vm mapped */
 	ml_static_mfree(linkeditseg->vmaddr, linkeditseg->vmsize);
 
@@ -6596,8 +6694,19 @@ OSKext::jettisonFileSetLinkeditSegment(kernel_mach_header_t *mh)
 	    kOSKextLogGeneralFlag,
 	    "Jettisoning fileset Linkedit segments from vmaddr %llx with size %llu",
 	    linkeditseg->vmaddr, linkeditseg->vmsize);
-}
+#else
+	/* BootKC on arm64 is not vm mapped, but is slid */
+	vm_offset_t linkedit_vmaddr = ml_static_ptovirt((vm_offset_t)(linkeditseg->vmaddr - gVirtBase + gPhysBase));
+
+	ml_static_mfree(linkedit_vmaddr, (vm_size_t)linkeditseg->vmsize);
+
+	OSKextLog(/* kext */ NULL,
+	    kOSKextLogProgressLevel |
+	    kOSKextLogGeneralFlag,
+	    "Jettisoning fileset Linkedit segments from vmaddr %llx with size %llu",
+	    (unsigned long long)linkedit_vmaddr, (unsigned long long)linkeditseg->vmsize);
 #endif /* VM_MAPPED_KEXTS */
+}
 
 /*********************************************************************
 * The linkedit segment is used by the kext linker for dependency
@@ -6805,17 +6914,20 @@ OSKext::registerWithDTrace(void)
 		uint32_t modflag = 0;
 		OSObject * forceInit = getPropertyForHostArch("OSBundleForceDTraceInit");
 
-#if VM_MAPPED_KEXTS
+#if XNU_TARGET_OS_OSX
 		if (!sKeepSymbols && kc_type == KCKindPrimary) {
 			if (forceInit == kOSBooleanTrue) {
-				/* Make sure the kext is not from the Boot KC */
-				panic("OSBundleForceDTraceInit key specified for the Boot KC kext : %s", getIdentifierCString());
-			} else {
-				/* Linkedit segment of the Boot KC is gone, make sure fbt_provide_module don't use kernel symbols */
-				modflag |= KMOD_DTRACE_NO_KERNEL_SYMS;
+				OSKextLog(this,
+				    kOSKextLogBasicLevel |
+				    kOSKextLogGeneralFlag,
+				    "Ignoring OSBundleForceDTraceInit for Boot KC Kext %s",
+				    getIdentifierCString());
+				forceInit = kOSBooleanFalse;
 			}
+			/* Linkedit segment of the Boot KC is gone, make sure fbt_provide_module don't use kernel symbols */
+			modflag |= KMOD_DTRACE_NO_KERNEL_SYMS;
 		}
-#endif /* VM_MAPPED_KEXTS */
+#endif /* XNU_TARGET_OS_OSX */
 		if (forceInit == kOSBooleanTrue) {
 			modflag |= KMOD_DTRACE_FORCE_INIT;
 		}
@@ -7750,8 +7862,8 @@ OSKext::unload(void)
 			kmod_reference_t * ref = &(kmod_info->reference_list[refIndex]);
 			ref->info->reference_count--;
 		}
-		kfree(kmod_info->reference_list,
-		    num_kmod_refs * sizeof(kmod_reference_t));
+		kfree_type(kmod_reference_t, num_kmod_refs,
+		    kmod_info->reference_list);
 	}
 
 #if CONFIG_DTRACE
@@ -7768,9 +7880,15 @@ OSKext::unload(void)
 	} else {
 		freeAccount = account;
 	}
+
+#if DEVELOPMENT || DEBUG
+	assertf(account->task_refgrp.grp_count == 0,
+	    "unloading a kext with active task references");
+#endif /* DEVELOPMENT || DEBUG */
+
 	IOSimpleLockUnlock(sKextAccountsLock);
 	if (freeAccount) {
-		IODelete(freeAccount, OSKextAccount, 1);
+		IOFreeType(freeAccount, OSKextAccount);
 	}
 
 	/* Unwire and free the linked executable.
@@ -7852,7 +7970,7 @@ OSKext::unload(void)
 	 * so we have to free it.
 	 */
 	if (isInterface()) {
-		kfree(kmod_info, sizeof(kmod_info_t));
+		kfree_type(kmod_info_t, kmod_info);
 		kmod_info = NULL;
 	}
 
@@ -8967,7 +9085,7 @@ OSKext::addClass(
 				    getIdentifierCString(),
 				    aClass->getClassName());
 
-				flags.autounloadEnabled = 1;
+				flags.autounloadEnabled = (0 == flags.unloadUnsupported);
 				break;
 			}
 		}
@@ -9322,8 +9440,8 @@ OSKext::handleRequest(
 			    "Access Failure - must be root user.");
 			goto finish;
 		}
-		taskCanManageAllKCs = IOTaskHasEntitlement(current_task(), kOSKextCollectionManagementEntitlement) == TRUE;
-		taskOnlyManagesBootKC = IOTaskHasEntitlement(current_task(), kOSKextOnlyBootKCManagementEntitlement) == TRUE;
+		taskCanManageAllKCs = IOCurrentTaskHasEntitlement(kOSKextCollectionManagementEntitlement) == TRUE;
+		taskOnlyManagesBootKC = IOCurrentTaskHasEntitlement(kOSKextOnlyBootKCManagementEntitlement) == TRUE;
 
 		if (!taskCanManageAllKCs && !taskOnlyManagesBootKC) {
 			OSKextLog(/* kext */ NULL,
@@ -10538,7 +10656,7 @@ OSKext::copyKextCollectionInfo(
 
 			thisKext = OSDynamicCast(OSKext, obj);
 			if (!thisKext) {
-			        return false;;
+			        return false;
 			}
 
 			/*
@@ -10674,13 +10792,13 @@ OSKext::copyLoadedKextInfo(
 
 			thisKext = OSDynamicCast(OSKext, obj);
 			if (!thisKext) {
-			        return false;;
+			        return false;
 			}
 
 			/* Skip current kext if not yet started and caller didn't request all.
 			 */
 			if (onlyLoaded && (-1U == sLoadedKexts->getNextIndexOfObject(thisKext, 0))) {
-			        return false;;
+			        return false;
 			}
 
 			/* Skip current kext if we have a list of bundle IDs and
@@ -10859,26 +10977,33 @@ OSKext::copyInfo(OSArray * infoKeys)
 				osLogDataHeaderRef *header;
 				char headerBytes[offsetof(osLogDataHeaderRef, sections) + NUM_OS_LOG_SECTIONS * sizeof(header->sections[0])];
 
-				void *os_log_data          = NULL;
-				void *cstring_data         = NULL;
-				unsigned long os_log_size  = 0;
-				unsigned long cstring_size = 0;
-				uint32_t os_log_offset     = 0;
-				uint32_t cstring_offset    = 0;
+				void *os_log_data               = NULL;
+				void *cstring_data              = NULL;
+				void *asan_cstring_data         = NULL;
+				unsigned long os_log_size       = 0;
+				unsigned long cstring_size      = 0;
+				unsigned long asan_cstring_size = 0;
+				uint32_t os_log_offset          = 0;
+				uint32_t cstring_offset         = 0;
+				uint32_t asan_cstring_offset    = 0;
 				bool res;
 
-				os_log_data       = getsectdatafromheader(kext_mach_hdr, "__TEXT", "__os_log", &os_log_size);
-				os_log_offset     = (uintptr_t)os_log_data - (uintptr_t)kext_mach_hdr;
-				cstring_data      = getsectdatafromheader(kext_mach_hdr, "__TEXT", "__cstring", &cstring_size);
-				cstring_offset    = (uintptr_t)cstring_data - (uintptr_t)kext_mach_hdr;
+				os_log_data         = getsectdatafromheader(kext_mach_hdr, "__TEXT", "__os_log", &os_log_size);
+				os_log_offset       = (uintptr_t)os_log_data - (uintptr_t)kext_mach_hdr;
+				cstring_data        = getsectdatafromheader(kext_mach_hdr, "__TEXT", "__cstring", &cstring_size);
+				cstring_offset      = (uintptr_t)cstring_data - (uintptr_t)kext_mach_hdr;
+				asan_cstring_data   = getsectdatafromheader(kext_mach_hdr, "__TEXT", "__asan_cstring", &asan_cstring_size);
+				asan_cstring_offset = (uintptr_t)asan_cstring_data - (uintptr_t)kext_mach_hdr;
 
 				header             = (osLogDataHeaderRef *) headerBytes;
 				header->version    = OS_LOG_HDR_VERSION;
 				header->sect_count = NUM_OS_LOG_SECTIONS;
-				header->sections[OS_LOG_SECT_IDX].sect_offset  = os_log_offset;
-				header->sections[OS_LOG_SECT_IDX].sect_size    = (uint32_t) os_log_size;
-				header->sections[CSTRING_SECT_IDX].sect_offset = cstring_offset;
-				header->sections[CSTRING_SECT_IDX].sect_size   = (uint32_t) cstring_size;
+				header->sections[OS_LOG_SECT_IDX].sect_offset       = os_log_offset;
+				header->sections[OS_LOG_SECT_IDX].sect_size         = (uint32_t) os_log_size;
+				header->sections[CSTRING_SECT_IDX].sect_offset      = cstring_offset;
+				header->sections[CSTRING_SECT_IDX].sect_size        = (uint32_t) cstring_size;
+				header->sections[ASAN_CSTRING_SECT_IDX].sect_offset = asan_cstring_offset;
+				header->sections[ASAN_CSTRING_SECT_IDX].sect_size   = (uint32_t) asan_cstring_size;
 
 
 				logData = OSData::withBytes(header, (u_int) (sizeof(osLogDataHeaderRef)));
@@ -10897,6 +11022,12 @@ OSKext::copyInfo(OSArray * infoKeys)
 				}
 				if (cstring_data) {
 					res = logData->appendBytes(cstring_data, (u_int)header->sections[CSTRING_SECT_IDX].sect_size);
+					if (!res) {
+						goto finish;
+					}
+				}
+				if (asan_cstring_data) {
+					res = logData->appendBytes(asan_cstring_data, (u_int)header->sections[ASAN_CSTRING_SECT_IDX].sect_size);
 					if (!res) {
 						goto finish;
 					}
@@ -10932,10 +11063,12 @@ OSKext::copyInfo(OSArray * infoKeys)
 				header             = (osLogDataHeaderRef *) headerBytes;
 				header->version    = OS_LOG_HDR_VERSION;
 				header->sect_count = NUM_OS_LOG_SECTIONS;
-				header->sections[OS_LOG_SECT_IDX].sect_offset  = 0;
-				header->sections[OS_LOG_SECT_IDX].sect_size    = (uint32_t) 0;
-				header->sections[CSTRING_SECT_IDX].sect_offset = 0;
-				header->sections[CSTRING_SECT_IDX].sect_size   = (uint32_t) 0;
+				header->sections[OS_LOG_SECT_IDX].sect_offset       = 0;
+				header->sections[OS_LOG_SECT_IDX].sect_size         = (uint32_t) 0;
+				header->sections[CSTRING_SECT_IDX].sect_offset      = 0;
+				header->sections[CSTRING_SECT_IDX].sect_size        = (uint32_t) 0;
+				header->sections[ASAN_CSTRING_SECT_IDX].sect_offset = 0;
+				header->sections[ASAN_CSTRING_SECT_IDX].sect_size   = (uint32_t) 0;
 
 				logData = OSData::withBytes(header, (u_int) (sizeof(osLogDataHeaderRef)));
 				if (!logData) {
@@ -10999,8 +11132,8 @@ OSKext::copyInfo(OSArray * infoKeys)
 			// +1 for slash, +1 for \0
 			executablePathCStringSize = pathLength + executableRelPath->getLength() + 2;
 
-			executablePathCString = (char *)kheap_alloc_tag(KHEAP_TEMP,
-			    executablePathCStringSize, Z_WAITOK, VM_KERN_MEMORY_OSKEXT);         // +1 for \0
+			executablePathCString = (char *)kalloc_data_tag(executablePathCStringSize,
+			    Z_WAITOK, VM_KERN_MEMORY_OSKEXT);         // +1 for \0
 			if (!executablePathCString) {
 				goto finish;
 			}
@@ -11026,8 +11159,8 @@ OSKext::copyInfo(OSArray * infoKeys)
 				uint32_t pathLength = path->getLength();
 				executablePathCStringSize = pathLength + 2;
 
-				executablePathCString = (char *)kheap_alloc_tag(KHEAP_TEMP,
-				    executablePathCStringSize, Z_WAITOK, VM_KERN_MEMORY_OSKEXT);
+				executablePathCString = (char *)kalloc_data_tag(executablePathCStringSize,
+				    Z_WAITOK, VM_KERN_MEMORY_OSKEXT);
 				if (!executablePathCString) {
 					goto finish;
 				}
@@ -11372,7 +11505,7 @@ OSKext::copyInfo(OSArray * infoKeys)
 
 finish:
 	if (executablePathCString) {
-		kheap_free(KHEAP_TEMP, executablePathCString, executablePathCStringSize);
+		kfree_data(executablePathCString, executablePathCStringSize);
 	}
 	if (!success) {
 		result.reset();
@@ -11579,35 +11712,13 @@ OSKext::requestDaemonLaunch(
 	OSString *kextIdentifier,
 	OSString *serverName,
 	OSNumber *serverTag,
-	OSSharedPtr<IOUserServerCheckInToken> &checkInToken)
-{
-	OSReturn result;
-	IOUserServerCheckInToken * checkInTokenRaw = NULL;
-
-	result = requestDaemonLaunch(kextIdentifier, serverName,
-	    serverTag, &checkInTokenRaw);
-
-	if (kOSReturnSuccess == result) {
-		checkInToken.reset(checkInTokenRaw, OSNoRetain);
-	}
-
-	return result;
-}
-
-OSReturn
-OSKext::requestDaemonLaunch(
-	OSString *kextIdentifier,
-	OSString *serverName,
-	OSNumber *serverTag,
-	IOUserServerCheckInToken ** checkInToken)
+	IOUserServerCheckInToken * checkInToken)
 {
 	OSReturn       result        = kOSReturnError;
 	OSSharedPtr<OSDictionary> requestDict;
-	OSSharedPtr<IOUserServerCheckInToken> token;
 
-	if (!kextIdentifier || !serverName || !serverTag) {
-		result = kOSKextReturnInvalidArgument;
-		goto finish;
+	if (!kextIdentifier || !serverName || !serverTag || !checkInToken) {
+		return kOSKextReturnInvalidArgument;
 	}
 
 	IORecursiveLockLock(sKextLock);
@@ -11626,12 +11737,6 @@ OSKext::requestDaemonLaunch(
 		goto finish;
 	}
 
-	token.reset(IOUserServerCheckInToken::create(), OSNoRetain);
-	if (!token) {
-		result = kOSKextReturnNoMemory;
-		goto finish;
-	}
-
 	if (!_OSKextSetRequestArgument(requestDict.get(),
 	    kKextRequestArgumentBundleIdentifierKey, kextIdentifier) ||
 	    !_OSKextSetRequestArgument(requestDict.get(),
@@ -11639,7 +11744,7 @@ OSKext::requestDaemonLaunch(
 	    !_OSKextSetRequestArgument(requestDict.get(),
 	    kKextRequestArgumentDriverExtensionServerTag, serverTag) ||
 	    !_OSKextSetRequestArgument(requestDict.get(),
-	    kKextRequestArgumentCheckInToken, token.get())) {
+	    kKextRequestArgumentCheckInToken, checkInToken)) {
 		result = kOSKextReturnNoMemory;
 		goto finish;
 	}
@@ -11651,7 +11756,6 @@ OSKext::requestDaemonLaunch(
 		result = kOSKextReturnNoMemory;
 		goto finish;
 	}
-	*checkInToken = token.detach();
 	OSKext::pingIOKitDaemon();
 
 	result = kOSReturnSuccess;
@@ -11781,6 +11885,8 @@ OSKext::pendingIOKitDaemonRequests(void)
 	return sRequestCallbackRecords && sRequestCallbackRecords->getCount();
 }
 
+extern "C" int vm_enable_driverkit_shared_region;
+
 /*********************************************************************
 * Acquires and releases sKextLock
 *
@@ -11819,6 +11925,24 @@ OSKext::loadFileSetKexts(OSDictionary * requestDict __unused)
 #endif
 
 	/*
+	 * Change with 70582300
+	 */
+#if 0 || !defined(VM_MAPPED_KEXTS)
+	/*
+	 * On platforms that don't support the SystemKC or a file-backed
+	 * AuxKC, the kext receipt for 3rd party kexts loaded by the booter
+	 * needs to be queried before we load any codeless kexts or release
+	 * any 3rd party kexts to run. On platforms that support a file-backed
+	 * AuxKC, this process is done via the kext audit mechanism.
+	 */
+
+	printf("KextLog: waiting for kext receipt to be queried.\n");
+	while (!IOServiceWaitForMatchingResource(kOSKextReceiptQueried, UINT64_MAX)) {
+		IOSleep(30);
+	}
+#endif /* !VM_MAPPED_KEXTS */
+
+	/*
 	 * Get the args from the request. Right now we need the file
 	 * name for the pageable and the aux kext collection file sets.
 	 */
@@ -11826,6 +11950,7 @@ OSKext::loadFileSetKexts(OSDictionary * requestDict __unused)
 	OSString     * pageable_filepath          = NULL;        // do not release
 	OSString     * aux_filepath               = NULL;        // do not release
 	OSArray      * codeless_kexts             = NULL;        // do not release
+	OSNumber     * enable_dk_shared_region    = NULL;        // do not release
 
 	kernel_mach_header_t *akc_mh              = NULL;
 
@@ -11842,6 +11967,13 @@ OSKext::loadFileSetKexts(OSDictionary * requestDict __unused)
 	ret = kOSKextReturnDisabled;
 
 	IORecursiveLockLock(sKextLock);
+
+	if (!sLoadEnabled) {
+		OSKextLog(NULL, kOSKextLogErrorLevel | kOSKextLogIPCFlag,
+		    "KextLog: Kext loading is disabled (attempt to load KCs).");
+		IORecursiveLockUnlock(sKextLock);
+		return ret;
+	}
 
 	pageable_filepath = OSDynamicCast(OSString,
 	    requestArgs->getObject(kKextRequestArgumentPageableKCFilename));
@@ -11892,6 +12024,21 @@ try_auxkc:
 		OSDictionary          *infoDict;
 		parsedXML = consumeDeferredKextCollection(KCKindAuxiliary);
 		infoDict = OSDynamicCast(OSDictionary, parsedXML.get());
+#if !defined(VM_MAPPED_KEXTS)
+		/*
+		 * On platforms where we don't dynamically wire-down / page-in
+		 * kext memory, we need to maintain the invariant that if the
+		 * AuxKC in memory does not contain a kext receipt, then we
+		 * should not load any of the kexts.
+		 */
+		size_t receipt_sz = 0;
+		if (getsectdatafromheader(akc_mh, kReceiptInfoSegment, kAuxKCReceiptSection, &receipt_sz) == NULL || receipt_sz == 0) {
+			OSKextLog(/* kext */ NULL, kOSKextLogErrorLevel | kOSKextLogArchiveFlag,
+			    "KextLog: WARNING: Failed to load AuxKC from memory: missing receipt");
+			ret = kOSKextReturnKCLoadFailure;
+			goto try_codeless;
+		}
+#endif
 		if (infoDict) {
 			bool added;
 			printf("KextLog: Adding kexts from in-memory AuxKC\n");
@@ -11986,6 +12133,14 @@ try_codeless:
 			ret = kOSReturnSuccess;
 		}
 		start_matching = true;
+	}
+
+	enable_dk_shared_region = OSDynamicCast(OSNumber,
+	    requestArgs->getObject(kKextRequestEnableDriverKitSharedRegionKey));
+	if (enable_dk_shared_region != NULL && enable_dk_shared_region->unsigned64BitValue() == 1) {
+		OSKextLog(NULL, kOSKextLogDebugLevel | kOSKextLogIPCFlag,
+		    "KextLog: Enabling DriverKit shared region.");
+		vm_enable_driverkit_shared_region = 1;
 	}
 
 	/* send personalities to the IOCatalog once */
@@ -12666,8 +12821,8 @@ allocate_kcfileset_map_entry_list(void)
 {
 	struct kcfileset_map_entry_list *entry_list;
 
-	entry_list = (struct kcfileset_map_entry_list *)kalloc(sizeof(struct kcfileset_map_entry_list) +
-	    (sizeof(struct kcfileset_map_entry) * KCFILESET_MAP_ENTRY_MAX));
+	entry_list = kalloc_type(struct kcfileset_map_entry_list,
+	    struct kcfileset_map_entry, KCFILESET_MAP_ENTRY_MAX, Z_WAITOK_ZERO);
 
 	entry_list->kme_list_count = KCFILESET_MAP_ENTRY_MAX;
 	entry_list->kme_list_index = 0;
@@ -12687,7 +12842,7 @@ add_kcfileset_map_entry(
 	struct kcfileset_map_entry_list *entry_list = (struct kcfileset_map_entry_list *)map_entry_list;
 
 	if (entry_list->kme_list_index >= entry_list->kme_list_count) {
-		panic("Ran out of map kc fileset list\n");
+		panic("Ran out of map kc fileset list");
 	}
 
 	entry_list->kme_list[entry_list->kme_list_index].me_start = start;
@@ -12716,8 +12871,8 @@ deallocate_kcfileset_map_entry_list_and_unmap_entries(
 		PE_reset_kc_header(pageable ? KCKindPageable : KCKindAuxiliary);
 	}
 
-	kfree(entry_list, sizeof(struct kcfileset_map_entry_list) +
-	    (sizeof(struct kcfileset_map_entry) * KCFILESET_MAP_ENTRY_MAX));
+	kfree_type(struct kcfileset_map_entry_list, struct kcfileset_map_entry,
+	    KCFILESET_MAP_ENTRY_MAX, entry_list);
 }
 
 /*********************************************************************
@@ -13960,8 +14115,8 @@ OSKextVLog(
 	va_end(argList);
 
 	if (length + 1 >= sizeof(stackBuffer)) {
-		allocBuffer = (char *)kheap_alloc_tag(KHEAP_TEMP,
-		    length + 1, Z_WAITOK, VM_KERN_MEMORY_OSKEXT);
+		allocBuffer = (char *)kalloc_data_tag(length + 1,
+		    Z_WAITOK, VM_KERN_MEMORY_OSKEXT);
 		if (!allocBuffer) {
 			goto finish;
 		}
@@ -14007,7 +14162,7 @@ finish:
 	IOLockUnlock(sKextLoggingLock);
 
 	if (allocBuffer) {
-		kheap_free(KHEAP_TEMP, allocBuffer, (length + 1) * sizeof(char));
+		kfree_data(allocBuffer, length + 1);
 	}
 	return;
 }
@@ -14763,7 +14918,7 @@ OSKext::saveLoadedKextPanicList(void)
 	uint32_t   newlist_size   = 0;
 
 	newlist_size = KEXT_PANICLIST_SIZE;
-	newlist = (char *)kheap_alloc_tag(KHEAP_DATA_BUFFERS, newlist_size,
+	newlist = (char *)kalloc_data_tag(newlist_size,
 	    Z_WAITOK, VM_KERN_MEMORY_OSKEXT);
 
 	if (!newlist) {
@@ -14801,7 +14956,7 @@ OSKext::saveLoadedKextPanicList(void)
 
 finish:
 	if (newlist) {
-		kheap_free(KHEAP_TEMP, newlist, newlist_size);
+		kfree_data(newlist, newlist_size);
 	}
 	return;
 }
@@ -15233,6 +15388,17 @@ OSKextSavedMutableSegment::restoreContents(kernel_segment_command_t *seg)
 	return kOSReturnSuccess;
 }
 
+extern "C" kern_return_t
+OSKextSetReceiptQueried(void)
+{
+	OSKextLog(/* kext */ NULL,
+	    kOSKextLogStepLevel | kOSKextLogGeneralFlag,
+	    "Setting kext receipt as queried");
+
+	IOService::publishResource(kOSKextReceiptQueried, kOSBooleanTrue);
+	return KERN_SUCCESS;
+}
+
 extern "C" const vm_allocation_site_t *
 OSKextGetAllocationSiteForCaller(uintptr_t address)
 {
@@ -15273,6 +15439,37 @@ OSKextGetAllocationSiteForCaller(uintptr_t address)
 	return site;
 }
 
+#if DEVELOPMENT || DEBUG
+extern "C" void
+OSKextGetRefGrpForCaller(uintptr_t address, void (^cb)(struct os_refgrp *))
+{
+	OSKextActiveAccount *  active;
+
+	uint32_t baseIdx;
+	uint32_t lim;
+#if  __has_feature(ptrauth_calls)
+	address = (uintptr_t)VM_KERNEL_STRIP_PTR(address);
+#endif /*  __has_feature(ptrauth_calls) */
+
+	IOSimpleLockLock(sKextAccountsLock);
+
+	// bsearch sKextAccounts list
+	for (baseIdx = 0, lim = sKextAccountsCount; lim; lim >>= 1) {
+		active = &sKextAccounts[baseIdx + (lim >> 1)];
+		if ((address >= active->address) && (address < active->address_end)) {
+			cb(&active->account->task_refgrp);
+			break;
+		} else if (address > active->address) {
+			// move right
+			baseIdx += (lim >> 1) + 1;
+			lim--;
+		}
+		// else move left
+	}
+	IOSimpleLockUnlock(sKextAccountsLock);
+}
+#endif /* DEVELOPMENT || DEBUG */
+
 extern "C" uint32_t
 OSKextGetKmodIDForSite(const vm_allocation_site_t * site, char * name, vm_size_t namelen)
 {
@@ -15295,7 +15492,7 @@ extern "C" void
 OSKextFreeSite(vm_allocation_site_t * site)
 {
 	OSKextAccount * freeAccount = (typeof(freeAccount))site;
-	IODelete(freeAccount, OSKextAccount, 1);
+	IOFreeType(freeAccount, OSKextAccount);
 }
 
 /*********************************************************************

@@ -68,6 +68,9 @@
 #define _NETINET_IGMP_VAR_H_
 #include <sys/appleapiopts.h>
 
+#include <stdint.h>
+#include <sys/types.h>
+
 /*
  * Internet Group Management Protocol (IGMP),
  * implementation-specific definitions.

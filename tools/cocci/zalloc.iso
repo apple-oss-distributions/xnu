@@ -1,0 +1,64 @@
+// ---------------------------------------------------------------------------
+// zalloc
+// ---------------------------------------------------------------------------
+
+Expression
+@@
+expression E, F;
+type T;
+@@
+ memset(E, 0, F) <=> bzero(E, F) <=> bzero((T)E, F)
+
+Expression
+@@
+expression E;
+type T;
+@@
+ (T)zalloc(E) <=> zalloc(E)
+
+Expression
+@@
+expression E, F;
+type T;
+@@
+ (T)zalloc_flags(E, F) <=> zalloc_flags(E, F)
+
+Expression
+@@
+expression E;
+type T;
+@@
+ (T)kalloc(E) <=> kalloc(E)
+
+Expression
+@@
+expression E, F;
+type T;
+@@
+ (T)kalloc_flags(E, F) <=> kalloc_flags(E, F)
+
+Expression
+@@
+expression E, F;
+type T;
+@@
+ (T)kalloc_data(E, F) <=> kalloc_data(E, F)
+
+Expression
+@@
+expression E, F;
+type T;
+@@
+ (T)kalloc_type(E, F) <=> kalloc_type(E, F)
+
+Expression
+@@
+expression E;
+@@
+ zalloc(E) <=> zalloc_flags(E, Z_WAITOK)
+
+Expression
+@@
+expression E;
+@@
+ kalloc(E) <=> kalloc_flags(E, Z_WAITOK)

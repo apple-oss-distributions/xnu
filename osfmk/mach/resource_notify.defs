@@ -40,7 +40,7 @@ import <System/mach/clock_types.h>;
 // match struct proc.p_name / proc_name_t as of January 2016
 #define MAXCOMLEN 16
 type proc_name_t = array [2*MAXCOMLEN+1] of char;
-type posix_path_t = array [512] of char;    // ?? can't compile w/1024?
+type posix_path_t = array [1024] of char; /* 1024 == PATH_MAX */
 type resource_notify_flags_t = uint64_t;
 
 /* The kernel sends the message, so we compile with KernelUser when
@@ -112,5 +112,45 @@ SimpleRoutine disk_writes_violation(
     bytes_dirtied_allowed   : int64_t;
     limit_window_nsecs      : int64_t;      /* over this period */
 
+    flags                   : resource_notify_flags_t
+);
+
+SimpleRoutine port_space_violation(
+    receiver                : mach_port_t;
+
+    /* violator */
+    procname                : proc_name_t;
+    pid                     : int;
+
+    /* violation */
+    timestamp               : mach_timespec_t;
+    observed_ports          : int64_t;
+
+    /* threshold */
+    ports_allowed           : int64_t;
+
+    /* kill port */
+    fatal_port              : mach_port_copy_send_t;
+
+    flags                   : resource_notify_flags_t
+);
+
+SimpleRoutine file_descriptors_violation(
+    receiver                : mach_port_t;
+
+    /* violator */
+    procname                : proc_name_t;
+    pid                     : int;
+
+    /* violation */
+    timestamp               : mach_timespec_t;
+    observed_filedesc       : int64_t;
+
+    /* threshold */
+    filedesc_allowed        : int64_t;
+
+    /* kill port */
+    fatal_port              : mach_port_copy_send_t;
+    
     flags                   : resource_notify_flags_t
 );

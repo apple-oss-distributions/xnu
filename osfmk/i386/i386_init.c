@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2003-2019 Apple Inc. All rights reserved.
+ * Copyright (c) 2003-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -112,6 +112,10 @@ extern void xcpm_bootstrap(void);
 #include <kern/monotonic.h>
 #endif /* MONOTONIC */
 
+#if KPERF
+#include <kperf/kptimer.h>
+#endif /* KPERF */
+
 #include <san/kasan.h>
 
 #if DEBUG || DEVELOPMENT
@@ -128,6 +132,8 @@ extern void xcpm_bootstrap(void);
 int                     debug_task;
 
 int                     early_boot = 1;
+
+bool                    serial_console_enabled = false;
 
 static boot_args        *kernelBootArgs;
 
@@ -163,7 +169,7 @@ int panic_on_cacheline_mismatch = -1;
 char panic_on_trap_procname[64];
 uint32_t panic_on_trap_mask;
 #endif
-bool last_branch_support_enabled;
+lbr_modes_t last_branch_enabled_modes;
 int insn_copyin_count;
 #if DEVELOPMENT || DEBUG
 #define DEFAULT_INSN_COPYIN_COUNT x86_INSTRUCTION_STATE_MAX_INSN_BYTES
@@ -910,10 +916,10 @@ i386_init(void)
 	}
 #endif
 	/* But allow that to be overridden via boot-arg: */
-	if (!PE_parse_boot_argn("lbr_support", &last_branch_support_enabled,
-	    sizeof(last_branch_support_enabled))) {
+	if (!PE_parse_boot_argn("lbr_support", &last_branch_enabled_modes,
+	    sizeof(last_branch_enabled_modes))) {
 		/* Disable LBR support by default due to its high context switch overhead */
-		last_branch_support_enabled = false;
+		last_branch_enabled_modes = LBR_ENABLED_NONE;
 	}
 
 	serialmode = 0;
@@ -921,6 +927,7 @@ i386_init(void)
 		/* We want a serial keyboard and/or console */
 		kprintf("Serial mode specified: %08X\n", serialmode);
 		int force_sync = serialmode & SERIALMODE_SYNCDRAIN;
+		disable_iolog_serial_output = (serialmode & SERIALMODE_NO_IOLOG) != 0;
 		if (force_sync || PE_parse_boot_argn("drain_uart_sync", &force_sync, sizeof(force_sync))) {
 			if (force_sync) {
 				serialmode |= SERIALMODE_SYNCDRAIN;
@@ -932,6 +939,7 @@ i386_init(void)
 		}
 	}
 	if (serialmode & SERIALMODE_OUTPUT) {
+		serial_console_enabled = true;
 		(void)switch_to_serial_console();
 		disableConsoleOutput = FALSE; /* Allow printfs to happen */
 	}
@@ -1081,6 +1089,20 @@ do_init_slave(boolean_t fast_restart)
 #if MONOTONIC
 	mt_cpu_up(current_cpu_datap());
 #endif /* MONOTONIC */
+
+#if KPERF
+	/*
+	 * We can only directly invoke kptimer_curcpu_up() when there is already an
+	 * active thread (that is, that this CPU has already been started at some point),
+	 * otherwise the ktrace calls within the kptimer operations will try to deref
+	 * the current thread and will instead cause a system reset.
+	 * If this is the first time the CPU is being started, we don't need to call
+	 * kptimer_curcpu_up().
+	 */
+	if (current_processor()->active_thread != THREAD_NULL) {
+		kptimer_curcpu_up();
+	}
+#endif /* KPERF */
 
 	slave_main(init_param);
 

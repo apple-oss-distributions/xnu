@@ -553,7 +553,7 @@ utf8_decodestr(const u_int8_t* utf8p, size_t utf8len, u_int16_t* ucsp,
 			}
 			if (decompose) {
 				if (unicode_decomposeable((u_int16_t)ucs_ch)) {
-					u_int16_t sequence[8];
+					u_int16_t sequence[8] = {0};
 					int count, i;
 
 					count = unicode_decompose((u_int16_t)ucs_ch, sequence);
@@ -851,7 +851,7 @@ nonASCII:
 	if (unicode_bytes <= sizeof(unicodebuf)) {
 		unistr = &unicodebuf[0];
 	} else {
-		unistr = kheap_alloc(KHEAP_DATA_BUFFERS, unicode_bytes, Z_WAITOK);
+		unistr = kalloc_data(unicode_bytes, Z_WAITOK);
 	}
 
 	/* Normalize the string. */
@@ -864,7 +864,7 @@ nonASCII:
 		outstr = outbufstart + uft8_bytes;
 	}
 	if (unistr && unistr != &unicodebuf[0]) {
-		kheap_free(KHEAP_DATA_BUFFERS, unistr, unicode_bytes);
+		kfree_data(unistr, unicode_bytes);
 	}
 	goto exit;
 }

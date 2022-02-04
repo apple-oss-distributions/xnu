@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2004-2020 Apple Inc. All rights reserved.
+ * Copyright (c) 2004-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -113,10 +113,13 @@ static errno_t ifnet_awdl_check_eflags(ifnet_t, u_int32_t *, u_int32_t *);
 static void
 ifnet_kpi_free(ifnet_t ifp)
 {
-	ifnet_detached_func detach_func = ifp->if_kpi_storage;
+	if ((ifp->if_refflags & IFRF_EMBRYONIC) == 0) {
+		ifnet_detached_func detach_func;
 
-	if (detach_func != NULL) {
-		detach_func(ifp);
+		detach_func = ifp->if_detach;
+		if (detach_func != NULL) {
+			(*detach_func)(ifp);
+		}
 	}
 
 	ifnet_dispose(ifp);
@@ -169,6 +172,28 @@ errno_t
 ifnet_allocate(const struct ifnet_init_params *init, ifnet_t *ifp)
 {
 	return ifnet_allocate_common(init, ifp, false);
+}
+
+static void
+ifnet_set_broadcast_addr(ifnet_t ifp, const void * broadcast_addr,
+    u_int32_t broadcast_len)
+{
+	if (broadcast_len == 0 || broadcast_addr == NULL) {
+		/* no broadcast address */
+		bzero(&ifp->if_broadcast, sizeof(ifp->if_broadcast));
+	} else if (broadcast_len > sizeof(ifp->if_broadcast.u.buffer)) {
+		ifp->if_broadcast.u.ptr
+		        = (u_char *)kalloc_data(broadcast_len,
+		    Z_WAITOK | Z_NOFAIL);
+		bcopy(broadcast_addr,
+		    ifp->if_broadcast.u.ptr,
+		    broadcast_len);
+	} else {
+		bcopy(broadcast_addr,
+		    ifp->if_broadcast.u.buffer,
+		    broadcast_len);
+	}
+	ifp->if_broadcast.length = broadcast_len;
 }
 
 errno_t
@@ -284,7 +309,7 @@ ifnet_allocate_extended(const struct ifnet_init_eparams *einit0,
 		ifp->if_set_bpf_tap     = einit.set_bpf_tap;
 		ifp->if_free            = (einit.free != NULL) ? einit.free : ifnet_kpi_free;
 		ifp->if_event           = einit.event;
-		ifp->if_kpi_storage     = einit.detach;
+		ifp->if_detach          = einit.detach;
 
 		/* Initialize Network ID */
 		ifp->network_id_len     = 0;
@@ -393,44 +418,31 @@ ifnet_allocate_extended(const struct ifnet_init_eparams *einit0,
 		VERIFY(!(einit.flags & IFNET_INIT_INPUT_POLL) ||
 		    (ifp->if_input_poll != NULL && ifp->if_input_ctl != NULL));
 
-		if (einit.broadcast_len && einit.broadcast_addr) {
-			if (einit.broadcast_len >
-			    sizeof(ifp->if_broadcast.u.buffer)) {
-				MALLOC(ifp->if_broadcast.u.ptr, u_char *,
-				    einit.broadcast_len, M_IFADDR, M_NOWAIT);
-				if (ifp->if_broadcast.u.ptr == NULL) {
-					error = ENOMEM;
-				} else {
-					bcopy(einit.broadcast_addr,
-					    ifp->if_broadcast.u.ptr,
-					    einit.broadcast_len);
-				}
-			} else {
-				bcopy(einit.broadcast_addr,
-				    ifp->if_broadcast.u.buffer,
-				    einit.broadcast_len);
-			}
-			ifp->if_broadcast.length = einit.broadcast_len;
-		} else {
-			bzero(&ifp->if_broadcast, sizeof(ifp->if_broadcast));
-		}
+		ifnet_set_broadcast_addr(ifp, einit.broadcast_addr,
+		    einit.broadcast_len);
 
 		if_clear_xflags(ifp, -1);
 		/* legacy interface */
 		if_set_xflags(ifp, IFXF_LEGACY);
 
+		if ((ifp->if_snd = ifclassq_alloc()) == NULL) {
+			panic_plain("%s: ifp=%p couldn't allocate class queues",
+			    __func__, ifp);
+			/* NOTREACHED */
+		}
+
 		/*
 		 * output target queue delay is specified in millisecond
 		 * convert it to nanoseconds
 		 */
-		IFCQ_TARGET_QDELAY(&ifp->if_snd) =
+		IFCQ_TARGET_QDELAY(ifp->if_snd) =
 		    einit.output_target_qdelay * 1000 * 1000;
-		IFCQ_MAXLEN(&ifp->if_snd) = einit.sndq_maxlen;
+		IFCQ_MAXLEN(ifp->if_snd) = einit.sndq_maxlen;
 
 		ifnet_enqueue_multi_setup(ifp, einit.start_delay_qlen,
 		    einit.start_delay_timeout);
 
-		IFCQ_PKT_DROP_LIMIT(&ifp->if_snd) = IFCQ_DEFAULT_PKT_DROP_LIMIT;
+		IFCQ_PKT_DROP_LIMIT(ifp->if_snd) = IFCQ_DEFAULT_PKT_DROP_LIMIT;
 
 		/*
 		 * Set embryonic flag; this will be cleared
@@ -452,14 +464,7 @@ ifnet_allocate_extended(const struct ifnet_init_eparams *einit0,
 				net_api_stats.nas_ifnet_alloc_os_total);
 		}
 
-		if (error == 0) {
-			*interface = ifp;
-			// temporary - this should be done in dlil_if_acquire
-			ifnet_reference(ifp);
-		} else {
-			dlil_if_release(ifp);
-			*interface = NULL;
-		}
+		*interface = ifp;
 	}
 	return error;
 }
@@ -473,11 +478,6 @@ ifnet_reference(ifnet_t ifp)
 void
 ifnet_dispose(ifnet_t ifp)
 {
-	if (ifp->if_broadcast.length > sizeof(ifp->if_broadcast.u.buffer)) {
-		FREE(ifp->if_broadcast.u.ptr, M_IFADDR);
-		ifp->if_broadcast.u.ptr = NULL;
-	}
-
 	dlil_if_release(ifp);
 }
 
@@ -703,13 +703,9 @@ ifnet_eflags(ifnet_t interface)
 errno_t
 ifnet_set_idle_flags_locked(ifnet_t ifp, u_int32_t new_flags, u_int32_t mask)
 {
-	int before, after;
-
 	if (ifp == NULL) {
 		return EINVAL;
 	}
-
-	LCK_MTX_ASSERT(rnh_lock, LCK_MTX_ASSERT_OWNED);
 	ifnet_lock_assert(ifp, IFNET_LCK_ASSERT_EXCLUSIVE);
 
 	/*
@@ -725,17 +721,7 @@ ifnet_set_idle_flags_locked(ifnet_t ifp, u_int32_t new_flags, u_int32_t mask)
 		ifp->if_idle_new_flags = ifp->if_idle_new_flags_mask = 0;
 	}
 
-	before = ifp->if_idle_flags;
 	ifp->if_idle_flags = (new_flags & mask) | (ifp->if_idle_flags & ~mask);
-	after = ifp->if_idle_flags;
-
-	if ((after - before) < 0 && ifp->if_idle_flags == 0 &&
-	    ifp->if_want_aggressive_drain != 0) {
-		ifp->if_want_aggressive_drain = 0;
-	} else if ((after - before) > 0 && ifp->if_want_aggressive_drain == 0) {
-		ifp->if_want_aggressive_drain++;
-	}
-
 	return 0;
 }
 
@@ -744,11 +730,9 @@ ifnet_set_idle_flags(ifnet_t ifp, u_int32_t new_flags, u_int32_t mask)
 {
 	errno_t err;
 
-	lck_mtx_lock(rnh_lock);
 	ifnet_lock_exclusive(ifp);
 	err = ifnet_set_idle_flags_locked(ifp, new_flags, mask);
 	ifnet_lock_done(ifp);
-	lck_mtx_unlock(rnh_lock);
 
 	return err;
 }
@@ -1381,7 +1365,7 @@ ifnet_set_output_bandwidths(struct ifnet *ifp, struct if_bandwidths *bw,
 
 	VERIFY(ifp != NULL && bw != NULL);
 
-	ifq = &ifp->if_snd;
+	ifq = ifp->if_snd;
 	if (!locked) {
 		IFCQ_LOCK(ifq);
 	}
@@ -1489,16 +1473,16 @@ ifnet_set_input_bandwidths(struct ifnet *ifp, struct if_bandwidths *bw)
 u_int64_t
 ifnet_output_linkrate(struct ifnet *ifp)
 {
-	struct ifclassq *ifq = &ifp->if_snd;
+	struct ifclassq *ifq = ifp->if_snd;
 	u_int64_t rate;
 
 	IFCQ_LOCK_ASSERT_HELD(ifq);
 
 	rate = ifp->if_output_bw.eff_bw;
 	if (IFCQ_TBR_IS_ENABLED(ifq)) {
-		u_int64_t tbr_rate = ifp->if_snd.ifcq_tbr.tbr_rate_raw;
+		u_int64_t tbr_rate = ifq->ifcq_tbr.tbr_rate_raw;
 		VERIFY(tbr_rate > 0);
-		rate = MIN(rate, ifp->if_snd.ifcq_tbr.tbr_rate_raw);
+		rate = MIN(rate, ifq->ifcq_tbr.tbr_rate_raw);
 	}
 
 	return rate;
@@ -1556,7 +1540,7 @@ ifnet_set_output_latencies(struct ifnet *ifp, struct if_latencies *lt,
 
 	VERIFY(ifp != NULL && lt != NULL);
 
-	ifq = &ifp->if_snd;
+	ifq = ifp->if_snd;
 	if (!locked) {
 		IFCQ_LOCK(ifq);
 	}
@@ -1879,6 +1863,8 @@ ifnet_updown_delta(ifnet_t interface, struct timeval *updown_delta)
 	updown_delta->tv_sec = (time_t)net_uptime();
 	if (updown_delta->tv_sec > interface->if_data.ifi_lastupdown.tv_sec) {
 		updown_delta->tv_sec -= interface->if_data.ifi_lastupdown.tv_sec;
+	} else {
+		updown_delta->tv_sec = 0;
 	}
 	updown_delta->tv_usec = 0;
 
@@ -1966,8 +1952,7 @@ one:
 					IFA_UNLOCK(ifa);
 					continue;
 				}
-				MALLOC(ifal, struct ifnet_addr_list *,
-				    sizeof(*ifal), M_TEMP, how);
+				ifal = kalloc_type(struct ifnet_addr_list, how);
 				if (ifal == NULL) {
 					IFA_UNLOCK(ifa);
 					ifnet_lock_done(ifp);
@@ -2024,7 +2009,7 @@ done:
 		} else {
 			IFA_REMREF(ifal->ifal_ifa);
 		}
-		FREE(ifal, M_TEMP);
+		kfree_type(struct ifnet_addr_list, ifal);
 	}
 
 	VERIFY(err == 0 || *addresses == NULL);
@@ -2431,8 +2416,7 @@ ifnet_list_get_common(ifnet_family_t family, boolean_t get_all, ifnet_t **list,
 	ifnet_head_lock_shared();
 	TAILQ_FOREACH(ifp, &ifnet_head, if_link) {
 		if (family == IFNET_FAMILY_ANY || ifp->if_family == family) {
-			MALLOC(ifl, struct ifnet_list *, sizeof(*ifl),
-			    M_TEMP, M_NOWAIT);
+			ifl = kalloc_type(struct ifnet_list, Z_NOWAIT);
 			if (ifl == NULL) {
 				ifnet_head_done();
 				err = ENOMEM;
@@ -2468,7 +2452,7 @@ done:
 		} else {
 			ifnet_release(ifl->ifl_ifp);
 		}
-		FREE(ifl, M_TEMP);
+		kfree_type(struct ifnet_list, ifl);
 	}
 
 	return err;
@@ -2861,18 +2845,23 @@ ifnet_get_local_ports_extended(ifnet_t ifp, protocol_family_t protocol,
 	/* bit string is long enough to hold 16-bit port values */
 	bzero(bitfield, bitstr_size(IP_PORTRANGE_SIZE));
 
+	/* no point in continuing if no address is assigned */
+	if (ifp != NULL && TAILQ_EMPTY(&ifp->if_addrhead)) {
+		return 0;
+	}
+
 	if_ports_used_update_wakeuuid(ifp);
 
 
 	ifindex = (ifp != NULL) ? ifp->if_index : 0;
 
 	if (!(flags & IFNET_GET_LOCAL_PORTS_TCPONLY)) {
-		udp_get_ports_used(ifindex, protocol, flags,
+		udp_get_ports_used(ifp, protocol, flags,
 		    bitfield);
 	}
 
 	if (!(flags & IFNET_GET_LOCAL_PORTS_UDPONLY)) {
-		tcp_get_ports_used(ifindex, protocol, flags,
+		tcp_get_ports_used(ifp, protocol, flags,
 		    bitfield);
 	}
 
@@ -2949,13 +2938,13 @@ ifnet_notice_node_absence(ifnet_t ifp, struct sockaddr *sa)
 }
 
 errno_t
-ifnet_notice_master_elected(ifnet_t ifp)
+ifnet_notice_primary_elected(ifnet_t ifp)
 {
 	if (ifp == NULL) {
 		return EINVAL;
 	}
 
-	dlil_post_msg(ifp, KEV_DL_SUBCLASS, KEV_DL_MASTER_ELECTED, NULL, 0);
+	dlil_post_msg(ifp, KEV_DL_SUBCLASS, KEV_DL_PRIMARY_ELECTED, NULL, 0);
 	return 0;
 }
 
@@ -3200,8 +3189,7 @@ ifnet_link_status_report(ifnet_t ifp, const void *buffer,
 	 * to store it.
 	 */
 	if (ifp->if_link_status == NULL) {
-		MALLOC(ifp->if_link_status, struct if_link_status *,
-		    sizeof(struct if_link_status), M_TEMP, M_ZERO);
+		ifp->if_link_status = kalloc_type(struct if_link_status, Z_ZERO);
 		if (ifp->if_link_status == NULL) {
 			err = ENOMEM;
 			goto done;
@@ -3373,7 +3361,7 @@ ifnet_get_unsent_bytes(ifnet_t interface, int64_t *unsent_bytes)
 	bytes = interface->if_sndbyte_unsent;
 
 	if (interface->if_eflags & IFEF_TXSTART) {
-		bytes += IFCQ_BYTES(&interface->if_snd);
+		bytes += IFCQ_BYTES(interface->if_snd);
 	}
 	*unsent_bytes = bytes;
 
@@ -3394,7 +3382,7 @@ ifnet_get_buffer_status(const ifnet_t ifp, ifnet_buffer_status_t *buf_status)
 	}
 
 	if (ifp->if_eflags & IFEF_TXSTART) {
-		buf_status->buf_interface = IFCQ_BYTES(&ifp->if_snd);
+		buf_status->buf_interface = IFCQ_BYTES(ifp->if_snd);
 	}
 
 	buf_status->buf_sndbuf = ((buf_status->buf_interface != 0) ||
@@ -3421,7 +3409,7 @@ ifnet_normalise_unsent_data(void)
 		}
 
 		if (ifp->if_sndbyte_total > 0 ||
-		    IFCQ_BYTES(&ifp->if_snd) > 0) {
+		    IFCQ_BYTES(ifp->if_snd) > 0) {
 			ifp->if_unsent_data_cnt++;
 		}
 
@@ -3458,9 +3446,7 @@ errno_t
 ifnet_interface_advisory_report(ifnet_t ifp,
     const struct ifnet_interface_advisory *advisory)
 {
-
 #pragma unused(ifp)
 #pragma unused(advisory)
 	return ENOTSUP;
-
 }

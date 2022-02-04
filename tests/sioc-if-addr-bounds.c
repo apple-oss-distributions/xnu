@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020 Apple Inc. All rights reserved.
+ * Copyright (c) 2020-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -33,6 +33,7 @@
 #include <sys/sockio.h>
 
 #include <net/if.h>
+#include <net/if_dl.h>
 
 #include <netinet/in.h>
 #include <netinet/in_var.h>
@@ -921,4 +922,124 @@ T_DECL(sioc_ifr_dstaddr_leak, "test bound checks on socket address passed to int
 	close(s);
 
 	T_EXPECT_EQ(check_rt_if_list_for_pattern("AFTER", pattern, PATTERN_SIZE), 0, "pattern should not be found");
+}
+
+static struct ioc_ifreq ioc_list_config[] = {
+	{ SIOCSIFADDR, sizeof(struct sockaddr_in), AF_INET, "0.0.0.0", EINVAL },
+	{ SIOCSIFADDR, sizeof(struct sockaddr_in), AF_INET, "255.255.255.255", EINVAL },
+	{ SIOCSIFADDR, sizeof(struct sockaddr_in), AF_INET, "238.207.49.91", EINVAL },
+
+	{ SIOCAIFADDR_IN6, sizeof(struct sockaddr_in6), AF_INET6, "::", EINVAL },
+	{ SIOCAIFADDR_IN6, sizeof(struct sockaddr_in6), AF_INET6, "ff33:40:fd25:549c:675b::1", EINVAL },
+	{ SIOCAIFADDR_IN6, sizeof(struct sockaddr_in6), AF_INET6, "::ffff:0a0a:0a0a", EINVAL },
+	{ SIOCAIFADDR_IN6, sizeof(struct sockaddr_in6), AF_INET6, "::0a0a:0a0a", EINVAL },
+
+	{ 0, 0, 0, "", -1 },
+};
+
+static void
+test_sioc_ifr_addr_config_v4(struct ioc_ifreq *ioc_ifreq, int s, const char *ifname)
+{
+	struct ifreq ifr = {};
+	struct sockaddr_in *sin;
+
+	T_LOG("");
+	T_LOG("TEST CASE: %s ioctl(%s, sa_len %u, sa_family %u, %s) -> %d", __func__,
+	    ioc_str(ioc_ifreq->ioc_cmd), ioc_ifreq->salen, ioc_ifreq->safamily, ioc_ifreq->sastr, ioc_ifreq->error);
+
+
+	strlcpy(ifr.ifr_name, ifname, sizeof(ifr.ifr_name));
+
+	sin = (struct sockaddr_in *)(void *)&ifr.ifr_addr;
+	sin->sin_len = ioc_ifreq->salen;
+	sin->sin_family = ioc_ifreq->safamily;
+	sin->sin_addr.s_addr = inet_addr(ioc_ifreq->sastr);
+
+	int retval;
+	if (ioc_ifreq->error == 0) {
+		T_EXPECT_POSIX_SUCCESS(retval = ioctl(s, ioc_ifreq->ioc_cmd, &ifr),
+		    "%s, %s: retval %d", ioc_str(ioc_ifreq->ioc_cmd), ioc_ifreq->sastr, retval);
+	} else {
+		T_EXPECT_POSIX_FAILURE(retval = ioctl(s, ioc_ifreq->ioc_cmd, &ifr), ioc_ifreq->error,
+		    "%s, %s: retval %d errno %s", ioc_str(ioc_ifreq->ioc_cmd), ioc_ifreq->sastr, retval, strerror(errno));
+	}
+
+	fflush(stdout);
+	fflush(stderr);
+}
+
+static void
+test_sioc_ifr_addr_config_v6(struct ioc_ifreq *ioc_ifreq, int s, const char *ifname)
+{
+	struct in6_aliasreq     ifra = {{ 0 }, { 0 }, { 0 }, { 0 }, 0, { 0, 0, ND6_INFINITE_LIFETIME, ND6_INFINITE_LIFETIME }};
+	struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *)(void *)&ifra.ifra_addr;
+	struct sockaddr_in6 *mask6 = (struct sockaddr_in6 *)(void *)&ifra.ifra_prefixmask;
+	T_LOG("");
+	T_LOG("TEST CASE: %s ioctl(%s, sa_len %u, sa_family %u, %s) -> %d", __func__,
+	    ioc_str(ioc_ifreq->ioc_cmd), ioc_ifreq->salen, ioc_ifreq->safamily, ioc_ifreq->sastr, ioc_ifreq->error);
+
+	strlcpy(ifra.ifra_name, ifname, sizeof(ifra.ifra_name));
+
+	sin6->sin6_len = ioc_ifreq->salen;
+	sin6->sin6_family = ioc_ifreq->safamily;
+	T_ASSERT_EQ(inet_pton(AF_INET6, ioc_ifreq->sastr, &sin6->sin6_addr), 1, NULL);
+	sin6->sin6_scope_id = if_nametoindex(ifname);
+
+	mask6->sin6_len = ioc_ifreq->salen;
+	mask6->sin6_family = ioc_ifreq->safamily;
+	T_ASSERT_EQ(inet_pton(AF_INET6, "ffff:ffff:ffff:ffff::", &mask6->sin6_addr), 1, NULL);
+
+	ifra.ifra_lifetime.ia6t_vltime = ND6_INFINITE_LIFETIME;
+	ifra.ifra_lifetime.ia6t_pltime = ND6_INFINITE_LIFETIME;
+
+	int retval;
+	if (ioc_ifreq->error == 0) {
+		T_EXPECT_POSIX_SUCCESS(retval = ioctl(s, ioc_ifreq->ioc_cmd, &ifra),
+		    "%s, %s: retval %d", ioc_str(ioc_ifreq->ioc_cmd), ioc_ifreq->sastr, retval);
+	} else {
+		T_EXPECT_POSIX_FAILURE(retval = ioctl(s, ioc_ifreq->ioc_cmd, &ifra), ioc_ifreq->error,
+		    "%s, %s: retval %d errno %s", ioc_str(ioc_ifreq->ioc_cmd), ioc_ifreq->sastr, retval, strerror(errno));
+	}
+
+	fflush(stdout);
+	fflush(stderr);
+}
+
+
+T_DECL(sioc_ifr_addr_config, "test failure cases for interface address configuration ioctls",
+    T_META_ASROOT(true))
+{
+	int s = -1;
+	int s6 = -1;
+	char ifname[IFNAMSIZ];
+
+	T_LOG("%s", __func__);
+
+	T_QUIET; T_EXPECT_POSIX_SUCCESS(s = socket(AF_INET, SOCK_DGRAM, 0), "socket");
+	T_QUIET; T_EXPECT_POSIX_SUCCESS(s6 = socket(AF_INET6, SOCK_DGRAM, 0), "socket");
+
+	strlcpy(ifname, IF_NAME, sizeof(ifname));
+
+	int error = 0;
+	if ((error = ifnet_create(s, ifname, sizeof(ifname))) != 0) {
+		if (error == EINVAL) {
+			T_SKIP("The system does not support the %s cloning interface", IF_NAME);
+		}
+		T_SKIP("This test failed creating a %s cloning interface", IF_NAME);
+	}
+	T_LOG("created clone interface '%s'", ifname);
+
+	struct ioc_ifreq *ioc_ifreq;
+	for (ioc_ifreq = ioc_list_config; ioc_ifreq->error != -1; ioc_ifreq++) {
+		if (ioc_ifreq->safamily == AF_INET) {
+			test_sioc_ifr_addr_config_v4(ioc_ifreq, s, ifname);
+		} else if (ioc_ifreq->safamily == AF_INET6) {
+			test_sioc_ifr_addr_config_v6(ioc_ifreq, s6, ifname);
+		}
+	}
+	print_rt_iflist2(__func__);
+	(void)ifnet_destroy(s, ifname, true);
+
+	close(s);
+	close(s6);
 }

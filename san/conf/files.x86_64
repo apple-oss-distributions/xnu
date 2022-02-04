@@ -1,2 +1,3 @@
-san/kasan-x86_64.c          optional config_kasan
-san/kasan-test-x86_64.s     optional config_kasan
+san/memory/kasan-x86_64.c          optional config_kasan
+san/memory/kasan-test-x86_64.s     optional config_kasan
+san/memory/kasan-classic.c         optional config_kasan

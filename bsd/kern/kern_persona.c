@@ -25,10 +25,13 @@
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
+
 #include <sys/kernel.h>
+#include <sys/commpage.h>
 #include <sys/kernel_types.h>
 #include <sys/persona.h>
 #include <pexpert/pexpert.h>
+#include <machine/cpu_capabilities.h>
 
 #if CONFIG_PERSONAS
 #include <machine/atomic.h>
@@ -45,6 +48,8 @@
 #include <sys/kauth.h>
 #include <sys/proc_info.h>
 #include <sys/resourcevar.h>
+
+#include <security/audit/audit.h>
 
 #include <os/log.h>
 #define pna_err(fmt, ...) \
@@ -69,11 +74,7 @@ static uint32_t g_total_personas;
 const uint32_t g_max_personas = MAX_PERSONAS;
 struct persona *system_persona = NULL;
 struct persona *proxy_system_persona = NULL;
-#if !defined(XNU_TARGET_OS_OSX)
-int unique_persona = 1;
-#else
-int unique_persona = 0;
-#endif
+TUNABLE(bool, unique_persona, "unique_persona", true);
 
 static uid_t g_next_persona_id;
 
@@ -84,8 +85,7 @@ os_refgrp_decl(static, persona_refgrp, "persona", NULL);
 
 static ZONE_DECLARE(persona_zone, "personas", sizeof(struct persona), ZC_ZFREE_CLEARMEM);
 
-kauth_cred_t g_default_persona_cred;
-extern struct auditinfo_addr * const audit_default_aia_p;
+static SECURITY_READ_ONLY_LATE(kauth_cred_t) g_default_persona_cred;
 
 #define lock_personas()    lck_mtx_lock(&all_personas_lock)
 #define unlock_personas()  lck_mtx_unlock(&all_personas_lock)
@@ -97,11 +97,10 @@ extern kern_return_t bank_get_bank_ledger_thread_group_and_persona(void *voucher
 void
 ipc_voucher_release(void *voucher);
 
-void
+static void
 personas_bootstrap(void)
 {
 	struct posix_cred pcred;
-	int unique_persona_bootarg;
 
 	persona_dbg("Initializing persona subsystem");
 	LIST_INIT(&all_personas);
@@ -129,10 +128,8 @@ personas_bootstrap(void)
 	/* posix_cred_create() sets this value to NULL */
 	g_default_persona_cred->cr_audit.as_aia_p = audit_default_aia_p;
 #endif
-	if (PE_parse_boot_argn("unique_persona", &unique_persona_bootarg, sizeof(unique_persona_bootarg))) {
-		unique_persona = !!unique_persona_bootarg;
-	}
 }
+STARTUP(EARLY_BOOT, STARTUP_RANK_MIDDLE, personas_bootstrap);
 
 struct persona *
 persona_alloc(uid_t id, const char *login, persona_type_t type, char *path, int *error)
@@ -156,15 +153,7 @@ persona_alloc(uid_t id, const char *login, persona_type_t type, char *path, int 
 		return NULL;
 	}
 
-	persona = (struct persona *)zalloc(persona_zone);
-	if (!persona) {
-		if (error) {
-			*error = ENOMEM;
-		}
-		return NULL;
-	}
-
-	bzero(persona, sizeof(*persona));
+	persona = zalloc_flags(persona_zone, Z_WAITOK | Z_ZERO | Z_NOFAIL);
 
 	if (os_atomic_inc(&g_total_personas, relaxed) > MAX_PERSONAS) {
 		/* too many personas! */
@@ -506,7 +495,7 @@ persona_put(struct persona *persona)
 	if (persona_valid(persona)) {
 		LIST_REMOVE(persona, pna_list);
 		if (os_atomic_dec_orig(&g_total_personas, relaxed) == 0) {
-			panic("persona count underflow!\n");
+			panic("persona count underflow!");
 		}
 		persona_mkinvalid(persona);
 	}
@@ -572,7 +561,7 @@ persona_lookup_and_invalidate(uid_t id)
 				assert(persona != NULL);
 				LIST_REMOVE(persona, pna_list);
 				if (os_atomic_dec_orig(&g_total_personas, relaxed) == 0) {
-					panic("persona ref count underflow!\n");
+					panic("persona ref count underflow!");
 				}
 				persona_mkinvalid(persona);
 			}
@@ -681,10 +670,9 @@ persona_proc_get(pid_t pid)
 	return persona;
 }
 
-struct persona *
-current_persona_get(void)
+uid_t
+current_persona_get_id(void)
 {
-	struct persona *persona = NULL;
 	uid_t current_persona_id = PERSONA_ID_NONE;
 	ipc_voucher_t voucher;
 
@@ -699,14 +687,21 @@ current_persona_get(void)
 		bank_get_bank_ledger_thread_group_and_persona(voucher, NULL,
 		    NULL, &current_persona_id);
 		ipc_voucher_release(voucher);
-		persona = persona_lookup(current_persona_id);
 	} else {
 		/* Fallback - get the proc's persona */
-		proc_t p = current_proc();
-		proc_lock(p);
-		persona = persona_get(p->p_persona);
-		proc_unlock(p);
+		current_persona_id = proc_persona_id(current_proc());
 	}
+	return current_persona_id;
+}
+
+struct persona *
+current_persona_get(void)
+{
+	struct persona *persona = NULL;
+	uid_t current_persona_id = PERSONA_ID_NONE;
+
+	current_persona_id = current_persona_get_id();
+	persona = persona_lookup(current_persona_id);
 	return persona;
 }
 
@@ -727,7 +722,7 @@ persona_proc_inherit(proc_t child, proc_t parent)
 		return 0;
 	}
 
-	return persona_proc_adopt(child, parent->p_persona, parent->p_ucred);
+	return persona_proc_adopt(child, parent->p_persona, proc_ucred(parent));
 }
 
 int
@@ -819,7 +814,7 @@ proc_set_cred_internal(proc_t p, struct persona *persona,
 	kauth_cred_t my_cred, my_new_cred;
 	uid_t old_uid, new_uid;
 	size_t count;
-	rlim_t nproc = proc_limitgetcur(p, RLIMIT_NPROC, TRUE);
+	rlim_t nproc = proc_limitgetcur(p, RLIMIT_NPROC);
 
 	/*
 	 * This operation must be done under the proc trans lock
@@ -868,7 +863,7 @@ proc_set_cred_internal(proc_t p, struct persona *persona,
 	if (new_uid != 0 &&
 	    (rlim_t)chgproccnt(new_uid, 0) > nproc) {
 		pna_err("PID:%d hit proc rlimit in new persona(%d): %s",
-		    p->p_pid, new_uid, persona_desc(persona, 1));
+		    proc_getpid(p), new_uid, persona_desc(persona, 1));
 		*rlim_error = EACCES;
 		if (old_persona) {
 			(void)proc_reset_persona_internal(p, PROC_RESET_OLD_PERSONA,
@@ -884,7 +879,7 @@ proc_set_cred_internal(proc_t p, struct persona *persona,
 set_proc_cred:
 	my_cred = kauth_cred_proc_ref(p);
 	persona_dbg("proc_adopt PID:%d, %s -> %s",
-	    p->p_pid,
+	    proc_getpid(p),
 	    persona_desc(old_persona, 1),
 	    persona_desc(persona, 1));
 
@@ -900,7 +895,7 @@ set_proc_cred:
 		 * reference.  If p_ucred has changed then we should
 		 * restart this again with the new cred.
 		 */
-		if (p->p_ucred != my_cred) {
+		if (proc_ucred(p) != my_cred) {
 			proc_ucred_unlock(p);
 			kauth_cred_unref(&my_cred);
 			/* try again */
@@ -909,11 +904,11 @@ set_proc_cred:
 
 		/* update the credential and take a ref for the proc */
 		kauth_cred_ref(my_new_cred);
-		p->p_ucred = my_new_cred;
+		proc_set_ucred(p, my_new_cred);
 
 		/* update cred on proc (and current thread) */
 		mach_kauth_cred_uthread_update();
-		PROC_UPDATE_CREDS_ONPROC(p);
+		proc_update_creds_onproc(p);
 
 		/* drop the proc's old ref on the credential */
 		kauth_cred_unref(&old_cred);
@@ -991,23 +986,24 @@ persona_proc_adopt(proc_t p, struct persona *persona, kauth_cred_t auth_override
 	if (persona->pna_pgid) {
 		uid_t uid = kauth_cred_getuid(persona->pna_cred);
 		persona_dbg(" PID:%d, pgid:%d%s",
-		    p->p_pid, persona->pna_pgid,
+		    proc_getpid(p), persona->pna_pgid,
 		    persona->pna_pgid == uid ? ", new_session" : ".");
 		enterpgrp(p, persona->pna_pgid, persona->pna_pgid == uid);
 	}
 
 	/* Only Multiuser Mode needs to update the session login name to the persona name */
-#if (TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR)
-	volatile uint32_t *multiuser_flag_address = (volatile uint32_t *)(uintptr_t)(_COMM_PAGE_MULTIUSER_CONFIG);
-	uint32_t multiuser_flags = *multiuser_flag_address;
+#if XNU_TARGET_OS_IOS
+	uint32_t multiuser_flags = COMM_PAGE_READ(uint32_t, MULTIUSER_CONFIG);
 	/* set the login name of the session */
 	if (multiuser_flags) {
-		struct session * sessp = proc_session(p);
-		if (sessp != SESSION_NULL) {
+		struct pgrp *pg;
+		struct session *sessp;
+
+		if ((pg = proc_pgrp(p, &sessp)) != PGRP_NULL) {
 			session_lock(sessp);
 			bcopy(persona->pna_login, sessp->s_login, MAXLOGNAME);
 			session_unlock(sessp);
-			session_rele(sessp);
+			pgrp_rele(pg);
 		}
 	}
 #endif
@@ -1031,7 +1027,7 @@ persona_proc_drop(proc_t p)
 {
 	struct persona *persona = NULL;
 
-	persona_dbg("PID:%d, %s -> <none>", p->p_pid, persona_desc(p->p_persona, 0));
+	persona_dbg("PID:%d, %s -> <none>", proc_getpid(p), persona_desc(p->p_persona, 0));
 
 	/*
 	 * There are really no other credentials for us to assume,
@@ -1056,7 +1052,7 @@ try_again:
 		LIST_REMOVE(p, p_persona_list);
 		p->p_persona = NULL;
 
-		ruid = kauth_cred_getruid(p->p_ucred);
+		ruid = kauth_cred_getruid(proc_ucred(p));
 		puid = kauth_cred_getuid(persona->pna_cred);
 		proc_unlock(p);
 		(void)chgproccnt(ruid, 1);
@@ -1433,6 +1429,12 @@ struct persona *
 persona_proc_get(__unused pid_t pid)
 {
 	return NULL;
+}
+
+uid_t
+current_persona_get_id(void)
+{
+	return PERSONA_ID_NONE;
 }
 
 struct persona *

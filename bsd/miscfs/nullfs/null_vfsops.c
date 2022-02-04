@@ -142,7 +142,7 @@ nullfs_mount(struct mount * mp, __unused vnode_t devvp, user_addr_t user_data, v
 	}
 
 	/* check entitlement */
-	if (!IOTaskHasEntitlement(current_task(), NULLFS_ENTITLEMENT)) {
+	if (!IOCurrentTaskHasEntitlement(NULLFS_ENTITLEMENT)) {
 		return EPERM;
 	}
 
@@ -191,11 +191,7 @@ nullfs_mount(struct mount * mp, __unused vnode_t devvp, user_addr_t user_data, v
 
 	NULLFSDEBUG("mount %s\n", path);
 
-	MALLOC(xmp, struct null_mount *, sizeof(*xmp), M_TEMP, M_WAITOK | M_ZERO);
-	if (xmp == NULL) {
-		error = ENOMEM;
-		goto error;
-	}
+	xmp = kalloc_type(struct null_mount, Z_WAITOK | Z_ZERO | Z_NOFAIL);
 
 	/*
 	 * Grab the uid/gid of the caller, which may be used for unveil later
@@ -221,10 +217,7 @@ nullfs_mount(struct mount * mp, __unused vnode_t devvp, user_addr_t user_data, v
 	vnode_ref(vp);
 	vnode_put(vp);
 
-	error = nullfs_init_lck(&xmp->nullm_lock);
-	if (error) {
-		goto error;
-	}
+	nullfs_init_lck(&xmp->nullm_lock);
 
 	xmp->nullm_rootvp = vp;
 
@@ -310,7 +303,7 @@ nullfs_mount(struct mount * mp, __unused vnode_t devvp, user_addr_t user_data, v
 
 error:
 	if (xmp) {
-		FREE(xmp, M_TEMP);
+		kfree_type(struct null_mount, xmp);
 	}
 	if (lowerrootvp) {
 		vnode_getwithref(lowerrootvp);
@@ -341,7 +334,7 @@ nullfs_unmount(struct mount * mp, int mntflags, __unused vfs_context_t ctx)
 	NULLFSDEBUG("nullfs_unmount: mp = %p\n", (void *)mp);
 
 	/* check entitlement or superuser*/
-	if (!IOTaskHasEntitlement(current_task(), NULLFS_ENTITLEMENT) &&
+	if (!IOCurrentTaskHasEntitlement(NULLFS_ENTITLEMENT) &&
 	    vfs_context_suser(ctx) != 0) {
 		return EPERM;
 	}
@@ -390,7 +383,7 @@ nullfs_unmount(struct mount * mp, int mntflags, __unused vfs_context_t ctx)
 
 	nullfs_destroy_lck(&mntdata->nullm_lock);
 
-	FREE(mntdata, M_TEMP);
+	kfree_type(struct null_mount, mntdata);
 
 	uint64_t vflags = vfs_flags(mp);
 	vfs_setflags(mp, vflags & ~MNT_LOCAL);

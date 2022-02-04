@@ -96,6 +96,8 @@ int cs_entitlements_blob_get(proc_t, void **, size_t *);
 int cs_blob_get(proc_t, void **, size_t *);
 const char *cs_identity_get(proc_t);
 
+int UBCINFOEXISTS(const struct vnode *);
+
 #endif
 
 /* cluster IO routines */
@@ -138,6 +140,8 @@ int     ubc_create_upl(vnode_t, off_t, int, upl_t *, upl_page_info_t **, int);
 #endif /* XNU_KERNEL_PRIVATE */
 int     ubc_upl_map(upl_t, vm_offset_t *);
 int     ubc_upl_unmap(upl_t);
+int     ubc_upl_map_range(upl_t, vm_offset_t, vm_size_t, vm_prot_t, vm_offset_t *);
+int     ubc_upl_unmap_range(upl_t, vm_offset_t, vm_size_t);
 int     ubc_upl_commit(upl_t);
 int     ubc_upl_commit_range(upl_t, upl_offset_t, upl_size_t, int);
 int     ubc_upl_abort(upl_t, int);

@@ -28,6 +28,9 @@
 #ifndef FSEVENT_H
 #define FSEVENT_H 1
 
+#include <stdint.h>
+#include <sys/types.h>
+
 // Event types that you can ask to listen for
 #define FSE_INVALID             -1
 #define FSE_CREATE_FILE          0
@@ -47,6 +50,9 @@
 #define FSE_CLONE               14
 
 #define FSE_MAX_EVENTS          15
+#ifdef BSD_KERNEL_PRIVATE
+#define FSE_CONTENT_MODIFIED_NO_HLINK  997
+#endif /* BSD_KERNEL_PRIVATE */
 #define FSE_ALL_EVENTS         998
 
 #define FSE_EVENTS_DROPPED     999

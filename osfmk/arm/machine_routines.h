@@ -43,8 +43,12 @@
 
 #include <stdarg.h>
 
-__BEGIN_DECLS
+#ifdef XNU_KERNEL_PRIVATE
+#include <kern/sched_hygiene.h>
+#include <kern/startup.h>
+#endif /* XNU_KERNEL_PRIVATE */
 
+__BEGIN_DECLS
 #ifdef XNU_KERNEL_PRIVATE
 #ifdef __arm64__
 typedef bool (*expected_fault_handler_t)(arm_saved_state_t *);
@@ -67,6 +71,10 @@ void    ml_init_interrupt(void);
 boolean_t ml_get_interrupts_enabled(void);
 
 /* Set Interrupts Enabled */
+#if __has_feature(ptrauth_calls)
+uint64_t ml_pac_safe_interrupts_disable(void);
+void ml_pac_safe_interrupts_restore(uint64_t);
+#endif /* __has_feature(ptrauth_calls) */
 boolean_t ml_set_interrupts_enabled(boolean_t enable);
 boolean_t ml_early_set_interrupts_enabled(boolean_t enable);
 
@@ -76,30 +84,49 @@ boolean_t ml_at_interrupt_context(void);
 /* Generate a fake interrupt */
 void ml_cause_interrupt(void);
 
+
+#ifdef XNU_KERNEL_PRIVATE
 /* Clear interrupt spin debug state for thread */
+
+#if SCHED_PREEMPTION_DISABLE_DEBUG
+void ml_adjust_preemption_disable_time(thread_t thread, int64_t duration);
+#else
+#define ml_adjust_preemption_disable_time(t, d) { (void)(t); (void)(d); /* no op */ }
+#endif /* SCHED_PREEMPTION_DISABLE_DEBUG */
+
 #if INTERRUPT_MASKED_DEBUG
-extern boolean_t interrupt_masked_debug;
-extern uint64_t interrupt_masked_timeout;
-extern uint64_t stackshot_interrupt_masked_timeout;
+void mt_cur_cpu_cycles_instrs_speculative(uint64_t *cycles, uint64_t *instrs);
+
+#if MONOTONIC
+#define INTERRUPT_MASKED_DEBUG_CAPTURE_PMC(thread)                                          \
+	    if (interrupt_masked_debug_pmc) {                                                   \
+	        mt_cur_cpu_cycles_instrs_speculative(&thread->machine.intmask_cycles,           \
+	                &thread->machine.intmask_instr);                                        \
+	    }
+#else
+#define INTERRUPT_MASKED_DEBUG_CAPTURE_PMC(thread)
+#endif
 
 #define INTERRUPT_MASKED_DEBUG_START(handler_addr, type)                                    \
 do {                                                                                        \
-    if (interrupt_masked_debug) {                                                           \
+	if (interrupt_masked_debug_mode && os_atomic_load(&interrupt_masked_timeout, relaxed) > 0) { \
 	    thread_t thread = current_thread();                                                 \
 	    thread->machine.int_type = type;                                                    \
-	    thread->machine.int_handler_addr = (uintptr_t)VM_KERNEL_STRIP_PTR(handler_addr);    \
-	    thread->machine.inthandler_timestamp = ml_get_timebase();                           \
+	    thread->machine.int_handler_addr = (uintptr_t)VM_KERNEL_STRIP_UPTR(handler_addr);    \
+	    thread->machine.inthandler_timestamp = ml_get_speculative_timebase();               \
+	    INTERRUPT_MASKED_DEBUG_CAPTURE_PMC(thread);                                         \
 	    thread->machine.int_vector = (uintptr_t)NULL;                                       \
     }                                                                                       \
 } while (0)
 
-#define INTERRUPT_MASKED_DEBUG_END()                                                        \
-do {                                                                                        \
-	if (interrupt_masked_debug) {                                                           \
-	    thread_t thread = current_thread();                                                 \
-	    ml_check_interrupt_handler_duration(thread);                                        \
-	}                                                                                       \
-} while (0)
+#define INTERRUPT_MASKED_DEBUG_END()                                                                                   \
+    do {                                                                                                               \
+	if (interrupt_masked_debug_mode && os_atomic_load(&interrupt_masked_timeout, relaxed) > 0) {                  \
+	    thread_t thread = current_thread();                                                                        \
+	    ml_handle_interrupt_handler_duration(thread);                                                               \
+	    thread->machine.inthandler_timestamp = 0;                                                                  \
+	}                                                                                                              \
+    } while (0)
 
 void ml_irq_debug_start(uintptr_t handler, uintptr_t vector);
 void ml_irq_debug_end(void);
@@ -107,15 +134,14 @@ void ml_irq_debug_end(void);
 void ml_spin_debug_reset(thread_t thread);
 void ml_spin_debug_clear(thread_t thread);
 void ml_spin_debug_clear_self(void);
-void ml_check_interrupts_disabled_duration(thread_t thread);
-void ml_check_stackshot_interrupt_disabled_duration(thread_t thread);
-void ml_check_interrupt_handler_duration(thread_t thread);
+void ml_handle_interrupts_disabled_duration(thread_t thread);
+void ml_handle_stackshot_interrupt_disabled_duration(thread_t thread);
+void ml_handle_interrupt_handler_duration(thread_t thread);
 #else
 #define INTERRUPT_MASKED_DEBUG_START(handler_addr, type)
 #define INTERRUPT_MASKED_DEBUG_END()
 #endif
 
-#ifdef XNU_KERNEL_PRIVATE
 extern bool ml_snoop_thread_is_on_core(thread_t thread);
 extern boolean_t ml_is_quiescing(void);
 extern void ml_set_is_quiescing(boolean_t);
@@ -231,16 +257,30 @@ ex_cb_action_t ex_cb_invoke(
 	ex_cb_class_t   cb_class,
 	vm_offset_t         far);
 
+typedef enum {
+	CLUSTER_TYPE_SMP,
+	CLUSTER_TYPE_E,
+	CLUSTER_TYPE_P,
+	MAX_CPU_TYPES,
+} cluster_type_t;
 
 void ml_parse_cpu_topology(void);
 
 unsigned int ml_get_cpu_count(void);
+
+unsigned int ml_get_cpu_number_type(cluster_type_t cluster_type, bool logical, bool available);
+
+unsigned int ml_cpu_cache_sharing(unsigned int level, cluster_type_t cluster_type, bool include_all_cpu_types);
+
+unsigned int ml_get_cpu_types(void);
 
 unsigned int ml_get_cluster_count(void);
 
 int ml_get_boot_cpu_number(void);
 
 int ml_get_cpu_number(uint32_t phys_id);
+
+unsigned int ml_get_cpu_number_local(void);
 
 int ml_get_cluster_number(uint32_t phys_id);
 
@@ -252,7 +292,6 @@ unsigned int ml_get_first_cpu_id(unsigned int cluster_id);
 
 #ifdef __arm64__
 int ml_get_cluster_number_local(void);
-unsigned int ml_get_cpu_number_local(void);
 #endif /* __arm64__ */
 
 /* Struct for ml_cpu_get_info */
@@ -268,48 +307,13 @@ struct ml_cpu_info {
 };
 typedef struct ml_cpu_info ml_cpu_info_t;
 
-typedef enum {
-	CLUSTER_TYPE_SMP,
-} cluster_type_t;
+cluster_type_t ml_get_boot_cluster_type(void);
 
-cluster_type_t ml_get_boot_cluster(void);
-
-/*!
- * @typedef ml_topology_cpu_t
- * @brief Describes one CPU core in the topology.
- *
- * @field cpu_id            Logical CPU ID (EDT: cpu-id): 0, 1, 2, 3, 4, ...
- * @field phys_id           Physical CPU ID (EDT: reg).  Same as MPIDR[15:0], i.e.
- *                          (cluster_id << 8) | core_number_within_cluster
- * @field cluster_id        Cluster ID (EDT: cluster-id)
- * @field die_id            Die ID (EDT: die-id)
- * @field cluster_type      The type of CPUs found in this cluster.
- * @field l2_access_penalty Indicates that the scheduler should try to de-prioritize a core because
- *                          L2 accesses are slower than on the boot processor.
- * @field l2_cache_size     Size of the L2 cache, in bytes.  0 if unknown or not present.
- * @field l2_cache_id       l2-cache-id property read from EDT.
- * @field l3_cache_size     Size of the L3 cache, in bytes.  0 if unknown or not present.
- * @field l3_cache_id       l3-cache-id property read from EDT.
- * @field cpu_IMPL_regs     IO-mapped virtual address of cpuX_IMPL (implementation-defined) register block.
- * @field cpu_IMPL_pa       Physical address of cpuX_IMPL register block.
- * @field cpu_IMPL_len      Length of cpuX_IMPL register block.
- * @field cpu_UTTDBG_regs   IO-mapped virtual address of cpuX_UTTDBG register block.
- * @field cpu_UTTDBG_pa     Physical address of cpuX_UTTDBG register block, if set in DT, else zero
- * @field cpu_UTTDBG_len    Length of cpuX_UTTDBG register block, if set in DT, else zero
- * @field coresight_regs    IO-mapped virtual address of CoreSight debug register block.
- * @field coresight_pa      Physical address of CoreSight register block.
- * @field coresight_len     Length of CoreSight register block.
- * @field self_ipi_irq      AIC IRQ vector for self IPI (cpuX->cpuX).  0 if unsupported.
- * @field other_ipi_irq     AIC IRQ vector for other IPI (cpuX->cpuY).  0 if unsupported.
- * @field pmi_irq           AIC IRQ vector for performance management IRQ.  0 if unsupported.
- * @field die_cluster_id    Cluster ID within the local die (EDT: die-cluster-id)
- * @field cluster_core_id   Core ID within the local cluster (EDT: cluster-core-id)
- */
 typedef struct ml_topology_cpu {
 	unsigned int                    cpu_id;
 	uint32_t                        phys_id;
 	unsigned int                    cluster_id;
-	unsigned int                    die_id;
+	unsigned int                    reserved;
 	cluster_type_t                  cluster_type;
 	uint32_t                        l2_access_penalty;
 	uint32_t                        l2_cache_size;
@@ -325,9 +329,6 @@ typedef struct ml_topology_cpu {
 	vm_offset_t                     coresight_regs;
 	uint64_t                        coresight_pa;
 	uint64_t                        coresight_len;
-	int                             self_ipi_irq;
-	int                             other_ipi_irq;
-	int                             pmi_irq;
 	unsigned int                    die_cluster_id;
 	unsigned int                    cluster_core_id;
 } ml_topology_cpu_t;
@@ -394,12 +395,14 @@ typedef struct ml_topology_info {
 	unsigned int                    max_cpu_id;
 	unsigned int                    num_clusters;
 	unsigned int                    max_cluster_id;
-	unsigned int                    max_die_id;
+	unsigned int                    reserved;
 	ml_topology_cpu_t               *cpus;
 	ml_topology_cluster_t           *clusters;
 	ml_topology_cpu_t               *boot_cpu;
 	ml_topology_cluster_t           *boot_cluster;
 	unsigned int                    chip_revision;
+	unsigned int                    cluster_types;
+	unsigned int                    cluster_type_num_cpus[MAX_CPU_TYPES];
 } ml_topology_info_t;
 
 /*!
@@ -560,18 +563,6 @@ unsigned int ml_phys_read_word(
 unsigned int ml_phys_read_word_64(
 	addr64_t paddr);
 
-unsigned long long ml_io_read(uintptr_t iovaddr, int iovsz);
-unsigned int ml_io_read8(uintptr_t iovaddr);
-unsigned int ml_io_read16(uintptr_t iovaddr);
-unsigned int ml_io_read32(uintptr_t iovaddr);
-unsigned long long ml_io_read64(uintptr_t iovaddr);
-
-extern void ml_io_write(uintptr_t vaddr, uint64_t val, int size);
-extern void ml_io_write8(uintptr_t vaddr, uint8_t val);
-extern void ml_io_write16(uintptr_t vaddr, uint16_t val);
-extern void ml_io_write32(uintptr_t vaddr, uint32_t val);
-extern void ml_io_write64(uintptr_t vaddr, uint64_t val);
-
 /* Read physical address double word */
 unsigned long long ml_phys_read_double(
 	vm_offset_t paddr);
@@ -622,6 +613,7 @@ vm_offset_t ml_vtophys(
 
 /* Get processor cache info */
 void ml_cpu_get_info(ml_cpu_info_t *ml_cpu_info);
+void ml_cpu_get_info_type(ml_cpu_info_t * ml_cpu_info, cluster_type_t cluster_type);
 
 #endif /* __APPLE_API_UNSTABLE */
 
@@ -674,6 +666,10 @@ void ml_init_timebase(
 	vm_offset_t     int_value);
 
 uint64_t ml_get_timebase(void);
+
+uint64_t ml_get_speculative_timebase(void);
+
+uint64_t ml_get_timebase_entropy(void);
 
 void ml_init_lock_timeout(void);
 
@@ -733,7 +729,7 @@ void bzero_phys_nc(addr64_t src64, vm_size_t bytes);
  */
 void fill32_dczva(addr64_t, vm_size_t);
 void fill32_nt(addr64_t, vm_size_t, uint32_t);
-int cpu_interrupt_is_pending(void);
+bool cpu_interrupt_is_pending(void);
 #endif
 #endif
 
@@ -769,6 +765,7 @@ vm_map_offset_t ml_get_max_offset(
 #define MACHINE_MAX_OFFSET_DEVICE       0x08
 #endif
 
+extern void     ml_cpu_init_completed(void);
 extern void     ml_cpu_up(void);
 extern void     ml_cpu_down(void);
 extern void     ml_arm_sleep(void);
@@ -951,6 +948,12 @@ struct perfcontrol_cpu_counters {
 	uint64_t        cycles;
 };
 
+__options_decl(perfcontrol_thread_flags_mask_t, uint64_t, {
+	PERFCTL_THREAD_FLAGS_MASK_CLUSTER_SHARED_RSRC_RR = 1 << 0,
+	        PERFCTL_THREAD_FLAGS_MASK_CLUSTER_SHARED_RSRC_NATIVE_FIRST = 1 << 1,
+});
+
+
 /*
  * Structure used to pass information about a thread to CLPC
  */
@@ -978,6 +981,10 @@ struct perfcontrol_thread_data {
 	void                *thread_group_data;
 	/* perfctl state pointer */
 	void                *perfctl_state;
+	/* Bitmask to indicate which thread flags have been updated as part of the callout */
+	perfcontrol_thread_flags_mask_t thread_flags_mask;
+	/* Actual values for the flags that are getting updated in the callout */
+	perfcontrol_thread_flags_mask_t thread_flags;
 };
 
 /*
@@ -1135,6 +1142,7 @@ typedef void (*sched_perfcontrol_thread_group_unblocked_t)(
 #define SCHED_PERFCONTROL_CALLBACKS_VERSION_6 (6) /* up-to thread_group_flags_update */
 #define SCHED_PERFCONTROL_CALLBACKS_VERSION_7 (7) /* up-to work_interval_ctl */
 #define SCHED_PERFCONTROL_CALLBACKS_VERSION_8 (8) /* up-to thread_group_unblocked */
+#define SCHED_PERFCONTROL_CALLBACKS_VERSION_9 (9) /* allows CLPC to specify resource contention flags */
 #define SCHED_PERFCONTROL_CALLBACKS_VERSION_CURRENT SCHED_PERFCONTROL_CALLBACKS_VERSION_6
 
 struct sched_perfcontrol_callbacks {
@@ -1170,6 +1178,7 @@ extern void sched_perfcontrol_thread_group_recommend(void *data, cluster_type_t 
 extern void sched_override_recommended_cores_for_sleep(void);
 extern void sched_restore_recommended_cores_after_sleep(void);
 extern void sched_perfcontrol_inherit_recommendation_from_tg(perfcontrol_class_t perfctl_class, boolean_t inherit);
+extern const char* sched_perfcontrol_thread_group_get_name(void *data);
 
 extern void sched_usercontrol_update_recommended_cores(uint64_t recommended_cores);
 
@@ -1263,6 +1272,7 @@ uint32_t ml_update_cluster_wfe_recommendation(uint32_t wfe_cluster_id, uint64_t 
 #define UNSIGN_PTR(p) \
 	SIGN(p) ? ((p) | PAC_MASK) : ((p) & ~PAC_MASK)
 
+uint64_t ml_default_rop_pid(void);
 uint64_t ml_default_jop_pid(void);
 void ml_task_set_rop_pid(task_t task, task_t parent_task, boolean_t inherit);
 void ml_task_set_jop_pid(task_t task, task_t parent_task, boolean_t inherit);
@@ -1272,18 +1282,6 @@ void ml_thread_set_disable_user_jop(thread_t thread, uint8_t disable_user_jop);
 void ml_thread_set_jop_pid(thread_t thread, task_t task);
 void *ml_auth_ptr_unchecked(void *ptr, unsigned key, uint64_t modifier);
 
-/**
- * Temporarily enables a userspace JOP key in kernel space, so that the kernel
- * can sign or auth pointers on that process's behalf.
- *
- * @note The caller must disable interrupts before calling
- * ml_enable_user_jop_key(), and may only re-enable interrupts after the
- * complementary ml_disable_user_jop_key() call.
- *
- * @param user_jop_key  The userspace JOP key to temporarily use
- * @return              Saved JOP state, to be passed to the complementary
- *                      ml_disable_user_jop_key() call
- */
 uint64_t ml_enable_user_jop_key(uint64_t user_jop_key);
 
 /**
@@ -1298,7 +1296,7 @@ uint64_t ml_enable_user_jop_key(uint64_t user_jop_key);
 void ml_disable_user_jop_key(uint64_t user_jop_key, uint64_t saved_jop_state);
 #endif /* defined(HAS_APPLE_PAC) */
 
-
+void ml_enable_monitor(void);
 
 #endif /* KERNEL_PRIVATE */
 
@@ -1331,6 +1329,12 @@ extern void ml_expect_fault_begin(expected_fault_handler_t, uintptr_t);
 extern void ml_expect_fault_end(void);
 #endif /* __arm64__ && defined(CONFIG_XNUPOST) && defined(XNU_KERNEL_PRIVATE) */
 
+
+extern uint32_t phy_read_panic;
+extern uint32_t phy_write_panic;
+#if DEVELOPMENT || DEBUG
+extern uint64_t simulate_stretched_io;
+#endif
 
 void ml_hibernate_active_pre(void);
 void ml_hibernate_active_post(void);

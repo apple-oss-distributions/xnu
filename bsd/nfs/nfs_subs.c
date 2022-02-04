@@ -123,8 +123,112 @@
 /*
  * NFS globals
  */
-struct nfsstats __attribute__((aligned(8))) nfsstats;
+struct nfsclntstats __attribute__((aligned(8))) nfsclntstats;
+struct nfsrvstats __attribute__((aligned(8))) nfsrvstats;
 size_t nfs_mbuf_mhlen = 0, nfs_mbuf_minclsize = 0;
+
+/* NFS debugging support */
+uint32_t nfsclnt_debug_ctl;
+uint32_t nfsrv_debug_ctl;
+
+#include <libkern/libkern.h>
+#include <stdarg.h>
+
+void
+nfs_printf(unsigned int debug_control, unsigned int facility, unsigned int level, const char *fmt, ...)
+{
+	va_list ap;
+
+	if (__NFS_IS_DBG(debug_control, facility, level)) {
+		va_start(ap, fmt);
+		vprintf(fmt, ap);
+		va_end(ap);
+	}
+}
+
+
+#define DISPLAYLEN 16
+
+static bool
+isprint(int ch)
+{
+	return ch >= 0x20 && ch <= 0x7e;
+}
+
+static void
+hexdump(void *data, size_t len)
+{
+	size_t i, j;
+	unsigned char *d = data;
+	char *p, disbuf[3 * DISPLAYLEN + 1];
+
+	for (i = 0; i < len; i += DISPLAYLEN) {
+		for (p = disbuf, j = 0; (j + i) < len && j < DISPLAYLEN; j++, p += 3) {
+			snprintf(p, 4, "%2.2x ", d[i + j]);
+		}
+		for (; j < DISPLAYLEN; j++, p += 3) {
+			snprintf(p, 4, "   ");
+		}
+		printf("%s    ", disbuf);
+		for (p = disbuf, j = 0; (j + i) < len && j < DISPLAYLEN; j++, p++) {
+			snprintf(p, 2, "%c", isprint(d[i + j]) ? d[i + j] : '.');
+		}
+		printf("%s\n", disbuf);
+	}
+}
+
+void
+nfs_dump_mbuf(const char *func, int lineno, const char *msg, mbuf_t mb)
+{
+	mbuf_t m;
+
+	printf("%s:%d %s\n", func, lineno, msg);
+	for (m = mb; m; m = mbuf_next(m)) {
+		hexdump(mbuf_data(m), mbuf_len(m));
+	}
+}
+
+int
+nfs_maperr(const char *func, int error)
+{
+	if (error < NFSERR_BADHANDLE || error > NFSERR_DIRBUFDROPPED) {
+		return error;
+	}
+	switch (error) {
+	case NFSERR_BADOWNER:
+		printf("%s: No name and/or group mapping err=%d\n", func, error);
+		return EPERM;
+	case NFSERR_BADNAME:
+	case NFSERR_BADCHAR:
+		printf("%s: nfs char/name not handled by server err=%d\n", func, error);
+		return ENOENT;
+	case NFSERR_STALE_CLIENTID:
+	case NFSERR_STALE_STATEID:
+	case NFSERR_EXPIRED:
+	case NFSERR_BAD_STATEID:
+		printf("%s: nfs recover err returned %d\n", func, error);
+		return EIO;
+	case NFSERR_BADHANDLE:
+	case NFSERR_SERVERFAULT:
+	case NFSERR_BADTYPE:
+	case NFSERR_FHEXPIRED:
+	case NFSERR_RESOURCE:
+	case NFSERR_MOVED:
+	case NFSERR_NOFILEHANDLE:
+	case NFSERR_MINOR_VERS_MISMATCH:
+	case NFSERR_OLD_STATEID:
+	case NFSERR_BAD_SEQID:
+	case NFSERR_LEASE_MOVED:
+	case NFSERR_RECLAIM_BAD:
+	case NFSERR_BADXDR:
+	case NFSERR_OP_ILLEGAL:
+		printf("%s: nfs client/server protocol prob err=%d\n", func, error);
+		return EIO;
+	default:
+		printf("%s: nfs err=%d\n", func, error);
+		return EIO;
+	}
+}
 
 /*
  * functions to convert between NFS and VFS types
@@ -215,14 +319,14 @@ vtonfsv2_mode(enum vtype vtype, mode_t m)
 	case VCHR:
 	case VLNK:
 	case VSOCK:
-		return vnode_makeimode(vtype, m);
+		return MAKEIMODE(vtype, m);
 	case VFIFO:
-		return vnode_makeimode(VCHR, m);
+		return MAKEIMODE(VCHR, m);
 	case VBAD:
 	case VSTR:
 	case VCPLX:
 	default:
-		return vnode_makeimode(VNON, m);
+		return MAKEIMODE(VNON, m);
 	}
 }
 
@@ -303,6 +407,19 @@ nfs_mbuf_init(void)
 }
 
 #if CONFIG_NFS_SERVER
+
+static void
+nfs_netopt_free(struct nfs_netopt *no)
+{
+	if (no->no_addr) {
+		kfree_data(no->no_addr, no->no_addr->sa_len);
+	}
+	if (no->no_mask) {
+		kfree_data(no->no_mask, no->no_mask->sa_len);
+	}
+
+	kfree_type(struct nfs_netopt, no);
+}
 
 /*
  * allocate a list of mbufs to hold the given amount of data
@@ -870,6 +987,33 @@ nfsm_chain_add_string_nfc(struct nfsm_chain *nmc, const uint8_t *s, size_t slen)
 }
 
 /*
+ * Add a verifier that can reasonably be expected to be unique.
+ */
+int
+nfsm_chaim_add_exclusive_create_verifier(int error, struct nfsm_chain *nmreq, struct nfsmount *nmp)
+{
+	uint32_t val;
+	uint64_t xid;
+	struct sockaddr ss;
+
+	nfs_get_xid(&xid);
+	val = (uint32_t)(xid >> 32);
+
+	if (nmp->nm_nso && !sock_getsockname(nmp->nm_nso->nso_so, (struct sockaddr*)&ss, sizeof(ss))) {
+		if (nmp->nm_saddr->sa_family == AF_INET) {
+			val = ((struct sockaddr_in*)&ss)->sin_addr.s_addr;
+		} else if (nmp->nm_saddr->sa_family == AF_INET6) {
+			val = ((struct sockaddr_in6*)&ss)->sin6_addr.__u6_addr.__u6_addr32[3];
+		}
+	}
+
+	nfsm_chain_add_32(error, nmreq, val);
+	nfsm_chain_add_32(error, nmreq, (uint32_t)xid);
+
+	return error;
+}
+
+/*
  * Add an NFSv2 "sattr" structure to an mbuf chain
  */
 int
@@ -1040,7 +1184,7 @@ nfs_get_xid(uint64_t *xidp)
 {
 	struct timeval tv;
 
-	lck_mtx_lock(nfs_request_mutex);
+	lck_mtx_lock(&nfs_request_mutex);
 	if (!nfs_xid) {
 		/*
 		 * Derive initial xid from system time.
@@ -1059,7 +1203,7 @@ nfs_get_xid(uint64_t *xidp)
 		nfs_xid++;
 	}
 	*xidp = nfs_xid + (nfs_xidwrap << 32);
-	lck_mtx_unlock(nfs_request_mutex);
+	lck_mtx_unlock(&nfs_request_mutex);
 }
 
 /*
@@ -1657,6 +1801,7 @@ nfs_loadattrcache(
 	}
 	if (NFS_BITMAP_ISSET(nvap->nva_bitmap, NFS_FATTR_ACL)) {
 		/* update the ACL timestamp */
+		microuptime(&now);
 		np->n_aclstamp = now.tv_sec;
 	} else {
 		/* we aren't updating the ACL, so restore original values */
@@ -1797,7 +1942,7 @@ nfs_getattrcache(nfsnode_t np, struct nfs_vattr *nvaper, int flags)
 	/* Check if the attributes are valid. */
 	if (!NATTRVALID(np) || ((flags & NGA_ACL) && !NACLVALID(np))) {
 		FSDBG(528, np, 0, 0xffffff01, ENOENT);
-		OSAddAtomic64(1, &nfsstats.attrcache_misses);
+		OSAddAtomic64(1, &nfsclntstats.attrcache_misses);
 		return ENOENT;
 	}
 
@@ -1822,19 +1967,19 @@ nfs_getattrcache(nfsnode_t np, struct nfs_vattr *nvaper, int flags)
 		timeo = nfs_attrcachetimeout(np);
 		if ((nowup.tv_sec - np->n_attrstamp) >= timeo) {
 			FSDBG(528, np, 0, 0xffffff02, ENOENT);
-			OSAddAtomic64(1, &nfsstats.attrcache_misses);
+			OSAddAtomic64(1, &nfsclntstats.attrcache_misses);
 			return ENOENT;
 		}
 		if ((flags & NGA_ACL) && ((nowup.tv_sec - np->n_aclstamp) >= timeo)) {
 			FSDBG(528, np, 0, 0xffffff02, ENOENT);
-			OSAddAtomic64(1, &nfsstats.attrcache_misses);
+			OSAddAtomic64(1, &nfsclntstats.attrcache_misses);
 			return ENOENT;
 		}
 	}
 
 	nvap = &np->n_vattr;
 	FSDBG(528, np, nvap->nva_size, np->n_size, 0xcace);
-	OSAddAtomic64(1, &nfsstats.attrcache_hits);
+	OSAddAtomic64(1, &nfsclntstats.attrcache_hits);
 
 	if (nvap->nva_type != VREG) {
 		np->n_size = nvap->nva_size;
@@ -2151,67 +2296,6 @@ nfs_uaddr2sockaddr(const char *uaddr, struct sockaddr *addr)
 		}
 	}
 	return 1;
-}
-
-
-/* NFS Client debugging support */
-uint32_t nfs_debug_ctl;
-
-#include <libkern/libkern.h>
-#include <stdarg.h>
-
-void
-nfs_printf(unsigned int facility, unsigned int level, const char *fmt, ...)
-{
-	va_list ap;
-
-	if (NFS_IS_DBG(facility, level)) {
-		va_start(ap, fmt);
-		vprintf(fmt, ap);
-		va_end(ap);
-	}
-}
-
-
-#define DISPLAYLEN 16
-
-static bool
-isprint(int ch)
-{
-	return ch >= 0x20 && ch <= 0x7e;
-}
-
-static void
-hexdump(void *data, size_t len)
-{
-	size_t i, j;
-	unsigned char *d = data;
-	char *p, disbuf[3 * DISPLAYLEN + 1];
-
-	for (i = 0; i < len; i += DISPLAYLEN) {
-		for (p = disbuf, j = 0; (j + i) < len && j < DISPLAYLEN; j++, p += 3) {
-			snprintf(p, 4, "%2.2x ", d[i + j]);
-		}
-		for (; j < DISPLAYLEN; j++, p += 3) {
-			snprintf(p, 4, "   ");
-		}
-		printf("%s    ", disbuf);
-		for (p = disbuf, j = 0; (j + i) < len && j < DISPLAYLEN; j++, p++) {
-			snprintf(p, 2, "%c", isprint(d[i + j]) ? d[i + j] : '.');
-		}
-		printf("%s\n", disbuf);
-	}
-}
-
-void
-nfs_dump_mbuf(const char *func, int lineno, const char *msg, mbuf_t mb)
-{
-	mbuf_t m;
-
-	printf("%s:%d %s\n", func, lineno, msg);
-	for (m = mb; m; m = mbuf_next(m)) {
-		hexdump(mbuf_data(m), mbuf_len(m));
-	}
 }
 
 /* Is a mount gone away? */
@@ -2755,13 +2839,14 @@ nfsrv_hang_addrlist(struct nfs_export *nx, struct user_nfs_export_args *unxa)
 	struct radix_node *rn;
 	struct sockaddr *saddr, *smask;
 	struct domain *dom;
-	size_t i;
+	size_t i, ss_minsize;
 	int error;
 	unsigned int net;
 	user_addr_t uaddr;
 	kauth_cred_t cred;
 
 	uaddr = unxa->nxa_nets;
+	ss_minsize = sizeof(((struct sockaddr_storage *)0)->ss_len) + sizeof(((struct sockaddr_storage *)0)->ss_family);
 	for (net = 0; net < unxa->nxa_netcount; net++, uaddr += sizeof(nxna)) {
 		error = copyin(uaddr, &nxna, sizeof(nxna));
 		if (error) {
@@ -2769,7 +2854,9 @@ nfsrv_hang_addrlist(struct nfs_export *nx, struct user_nfs_export_args *unxa)
 		}
 
 		if (nxna.nxna_addr.ss_len > sizeof(struct sockaddr_storage) ||
+		    (nxna.nxna_addr.ss_len != 0 && nxna.nxna_addr.ss_len < ss_minsize) ||
 		    nxna.nxna_mask.ss_len > sizeof(struct sockaddr_storage) ||
+		    (nxna.nxna_mask.ss_len != 0 && nxna.nxna_mask.ss_len < ss_minsize) ||
 		    nxna.nxna_addr.ss_family > AF_MAX ||
 		    nxna.nxna_mask.ss_family > AF_MAX) {
 			return EINVAL;
@@ -2807,28 +2894,23 @@ nfsrv_hang_addrlist(struct nfs_export *nx, struct user_nfs_export_args *unxa)
 			continue;
 		}
 
-		i = sizeof(struct nfs_netopt);
-		i += nxna.nxna_addr.ss_len + nxna.nxna_mask.ss_len;
-		MALLOC(no, struct nfs_netopt *, i, M_NETADDR, M_WAITOK);
-		if (!no) {
-			if (IS_VALID_CRED(cred)) {
-				kauth_cred_unref(&cred);
-			}
-			return ENOMEM;
-		}
-		bzero(no, sizeof(struct nfs_netopt));
+		no = kalloc_type(struct nfs_netopt, Z_WAITOK | Z_ZERO | Z_NOFAIL);
 		no->no_opt.nxo_flags = nxna.nxna_flags;
 		no->no_opt.nxo_cred = cred;
 		bcopy(&nxna.nxna_sec, &no->no_opt.nxo_sec, sizeof(struct nfs_sec));
 
-		saddr = (struct sockaddr *)(no + 1);
-		bcopy(&nxna.nxna_addr, saddr, nxna.nxna_addr.ss_len);
-		if (nxna.nxna_mask.ss_len) {
-			smask = (struct sockaddr *)((caddr_t)saddr + nxna.nxna_addr.ss_len);
-			bcopy(&nxna.nxna_mask, smask, nxna.nxna_mask.ss_len);
-		} else {
-			smask = NULL;
+		if (nxna.nxna_addr.ss_len) {
+			no->no_addr = kalloc_data(nxna.nxna_addr.ss_len, M_WAITOK);
+			bcopy(&nxna.nxna_addr, no->no_addr, nxna.nxna_addr.ss_len);
 		}
+		saddr = no->no_addr;
+
+		if (nxna.nxna_mask.ss_len) {
+			no->no_mask = kalloc_data(nxna.nxna_mask.ss_len, M_WAITOK);
+			bcopy(&nxna.nxna_mask, no->no_mask, nxna.nxna_mask.ss_len);
+		}
+		smask = no->no_mask;
+
 		sa_family_t family = saddr->sa_family;
 		if ((rnh = nx->nx_rtable[family]) == 0) {
 			/*
@@ -2846,7 +2928,7 @@ nfsrv_hang_addrlist(struct nfs_export *nx, struct user_nfs_export_args *unxa)
 				if (IS_VALID_CRED(cred)) {
 					kauth_cred_unref(&cred);
 				}
-				_FREE(no, M_NETADDR);
+				nfs_netopt_free(no);
 				return ENOBUFS;
 			}
 		}
@@ -2906,7 +2988,7 @@ nfsrv_hang_addrlist(struct nfs_export *nx, struct user_nfs_export_args *unxa)
 			if (IS_VALID_CRED(cred)) {
 				kauth_cred_unref(&cred);
 			}
-			_FREE(no, M_NETADDR);
+			nfs_netopt_free(no);
 			if (matched) {
 				continue;
 			}
@@ -2940,7 +3022,7 @@ nfsrv_free_netopt(struct radix_node *rn, void *w)
 	if (IS_VALID_CRED(nno->no_opt.nxo_cred)) {
 		kauth_cred_unref(&nno->no_opt.nxo_cred);
 	}
-	_FREE((caddr_t)rn, M_NETADDR);
+	nfs_netopt_free(nno);
 	*cnt -= 1;
 	return 0;
 }
@@ -2956,6 +3038,7 @@ nfsrv_free_addrlist(struct nfs_export *nx, struct user_nfs_export_args *unxa)
 	struct radix_node *rn;
 	struct nfsrv_free_netopt_arg fna;
 	struct nfs_netopt *nno;
+	size_t ss_minsize;
 	user_addr_t uaddr;
 	unsigned int net;
 	int i, error;
@@ -2976,6 +3059,7 @@ nfsrv_free_addrlist(struct nfs_export *nx, struct user_nfs_export_args *unxa)
 
 	/* delete only the exports specified */
 	uaddr = unxa->nxa_nets;
+	ss_minsize = sizeof(((struct sockaddr_storage *)0)->ss_len) + sizeof(((struct sockaddr_storage *)0)->ss_family);
 	for (net = 0; net < unxa->nxa_netcount; net++, uaddr += sizeof(nxna)) {
 		error = copyin(uaddr, &nxna, sizeof(nxna));
 		if (error) {
@@ -2991,6 +3075,20 @@ nfsrv_free_addrlist(struct nfs_export *nx, struct user_nfs_export_args *unxa)
 				}
 				nx->nx_expcnt--;
 			}
+			continue;
+		}
+
+		if (nxna.nxna_addr.ss_len > sizeof(struct sockaddr_storage) ||
+		    (nxna.nxna_addr.ss_len != 0 && nxna.nxna_addr.ss_len < ss_minsize) ||
+		    nxna.nxna_addr.ss_family > AF_MAX) {
+			printf("nfsrv_free_addrlist: invalid socket address (%u)\n", net);
+			continue;
+		}
+
+		if (nxna.nxna_mask.ss_len > sizeof(struct sockaddr_storage) ||
+		    (nxna.nxna_mask.ss_len != 0 && nxna.nxna_mask.ss_len < ss_minsize) ||
+		    nxna.nxna_mask.ss_family > AF_MAX) {
+			printf("nfsrv_free_addrlist: invalid socket mask (%u)\n", net);
 			continue;
 		}
 
@@ -3016,7 +3114,7 @@ nfsrv_free_addrlist(struct nfs_export *nx, struct user_nfs_export_args *unxa)
 		if (IS_VALID_CRED(nno->no_opt.nxo_cred)) {
 			kauth_cred_unref(&nno->no_opt.nxo_cred);
 		}
-		_FREE((caddr_t)rn, M_NETADDR);
+		nfs_netopt_free(nno);
 
 		nx->nx_expcnt--;
 		if (nx->nx_expcnt == ((nx->nx_flags & NX_DEFAULTEXPORT) ? 1 : 0)) {
@@ -3031,21 +3129,24 @@ nfsrv_free_addrlist(struct nfs_export *nx, struct user_nfs_export_args *unxa)
 
 void enablequotas(struct mount *mp, vfs_context_t ctx); // XXX
 
+#define DATA_VOLUME_MP "/System/Volumes/Data" // PLATFORM_DATA_VOLUME_MOUNT_POINT
+
 int
 nfsrv_export(struct user_nfs_export_args *unxa, vfs_context_t ctx)
 {
 	int error = 0;
-	size_t pathlen;
+	size_t pathlen, nxfs_pathlen;
 	struct nfs_exportfs *nxfs, *nxfs2, *nxfs3;
 	struct nfs_export *nx, *nx2, *nx3;
 	struct nfs_filehandle nfh;
 	struct nameidata mnd, xnd;
 	vnode_t mvp = NULL, xvp = NULL;
 	mount_t mp = NULL;
-	char path[MAXPATHLEN];
+	char path[MAXPATHLEN], *nxfs_path;
 	char fl_pathbuff[MAXPATHLEN];
 	int fl_pathbuff_len = MAXPATHLEN;
 	int expisroot;
+	size_t datavol_len = strlen(DATA_VOLUME_MP);
 
 	if (unxa->nxa_flags == NXA_CHECK) {
 		/* just check if the path is an NFS-exportable file system */
@@ -3108,12 +3209,12 @@ nfsrv_export(struct user_nfs_export_args *unxa, vfs_context_t ctx)
 				}
 				/* free active user list for this export */
 				nfsrv_free_user_list(&nx->nx_user_list);
-				FREE(nx->nx_path, M_TEMP);
-				FREE(nx, M_TEMP);
+				kfree_data_addr(nx->nx_path);
+				kfree_type(struct nfs_export, nx);
 			}
 			LIST_REMOVE(nxfs, nxfs_next);
-			FREE(nxfs->nxfs_path, M_TEMP);
-			FREE(nxfs, M_TEMP);
+			kfree_data_addr(nxfs->nxfs_path);
+			kfree_type(struct nfs_exportfs, nxfs);
 		}
 		if (nfsrv_export_hashtbl) {
 			/* all exports deleted, clean up export hash table */
@@ -3147,7 +3248,8 @@ nfsrv_export(struct user_nfs_export_args *unxa, vfs_context_t ctx)
 	}
 	if (nxfs) {
 		/* verify exported FS path matches given path */
-		if (strncmp(path, nxfs->nxfs_path, MAXPATHLEN)) {
+		if (strncmp(path, nxfs->nxfs_path, MAXPATHLEN) &&
+		    (strncmp(path, DATA_VOLUME_MP, datavol_len) || strncmp(path + datavol_len, nxfs->nxfs_path, MAXPATHLEN - datavol_len))) {
 			error = EEXIST;
 			goto unlock_out;
 		}
@@ -3169,10 +3271,10 @@ nfsrv_export(struct user_nfs_export_args *unxa, vfs_context_t ctx)
 			mp = vfs_getvfs_by_mntonname(nxfs->nxfs_path);
 			if (!mp) {
 				/* check for firmlink-free path */
-				if (vn_getpath_no_firmlink(mvp, fl_pathbuff, &fl_pathbuff_len) == 0 &&
+				if (vn_getpath_ext(mvp, NULLVP, fl_pathbuff, &fl_pathbuff_len, VN_GETPATH_NO_FIRMLINK) == 0 &&
 				    fl_pathbuff_len > 0 &&
 				    !strncmp(nxfs->nxfs_path, fl_pathbuff, MAXPATHLEN)) {
-					mp = vfs_getvfs_by_mntonname(vnode_mount(mvp)->mnt_vfsstat.f_mntonname);
+					mp = vfs_getvfs_by_mntonname(vfs_statfs(vnode_mount(mvp))->f_mntonname);
 				}
 			}
 			if (mp) {
@@ -3232,20 +3334,22 @@ nfsrv_export(struct user_nfs_export_args *unxa, vfs_context_t ctx)
 		}
 
 		/* add an exportfs for it */
-		MALLOC(nxfs, struct nfs_exportfs *, sizeof(struct nfs_exportfs), M_TEMP, M_WAITOK);
-		if (!nxfs) {
-			error = ENOMEM;
-			goto out;
-		}
-		bzero(nxfs, sizeof(struct nfs_exportfs));
+		nxfs = kalloc_type(struct nfs_exportfs, Z_WAITOK | Z_ZERO | Z_NOFAIL);
 		nxfs->nxfs_id = unxa->nxa_fsid;
-		MALLOC(nxfs->nxfs_path, char*, pathlen, M_TEMP, M_WAITOK);
+		if (mp) {
+			nxfs_path = mp->mnt_vfsstat.f_mntonname;
+			nxfs_pathlen = sizeof(mp->mnt_vfsstat.f_mntonname);
+		} else {
+			nxfs_path = path;
+			nxfs_pathlen = pathlen;
+		}
+		nxfs->nxfs_path = kalloc_data(nxfs_pathlen, Z_WAITOK);
 		if (!nxfs->nxfs_path) {
-			FREE(nxfs, M_TEMP);
+			kfree_type(struct nfs_exportfs, nxfs);
 			error = ENOMEM;
 			goto out;
 		}
-		bcopy(path, nxfs->nxfs_path, pathlen);
+		bcopy(nxfs_path, nxfs->nxfs_path, nxfs_pathlen);
 		/* insert into list in reverse-sorted order */
 		nxfs3 = NULL;
 		LIST_FOREACH(nxfs2, &nfsrv_exports, nxfs_next) {
@@ -3291,19 +3395,14 @@ nfsrv_export(struct user_nfs_export_args *unxa, vfs_context_t ctx)
 				goto out;
 			}
 			/* add an export for it */
-			MALLOC(nx, struct nfs_export *, sizeof(struct nfs_export), M_TEMP, M_WAITOK);
-			if (!nx) {
-				error = ENOMEM;
-				goto out1;
-			}
-			bzero(nx, sizeof(struct nfs_export));
+			nx = kalloc_type(struct nfs_export, Z_WAITOK | Z_ZERO | Z_NOFAIL);
 			nx->nx_id = unxa->nxa_expid;
 			nx->nx_fs = nxfs;
 			microtime(&nx->nx_exptime);
-			MALLOC(nx->nx_path, char*, pathlen, M_TEMP, M_WAITOK);
+			nx->nx_path = kalloc_data(pathlen, Z_WAITOK);
 			if (!nx->nx_path) {
 				error = ENOMEM;
-				FREE(nx, M_TEMP);
+				kfree_type(struct nfs_export, nx);
 				nx = NULL;
 				goto out1;
 			}
@@ -3393,17 +3492,12 @@ nfsrv_export(struct user_nfs_export_args *unxa, vfs_context_t ctx)
 					xvp = mvp;
 					vnode_get(xvp);
 				} else {
-					xnd.ni_cnd.cn_nameiop = LOOKUP;
-#if CONFIG_TRIGGERS
-					xnd.ni_op = OP_LOOKUP;
-#endif
-					xnd.ni_cnd.cn_flags = LOCKLEAF;
+					NDINIT(&xnd, LOOKUP, OP_LOOKUP, LOCKLEAF, UIO_SYSSPACE, CAST_USER_ADDR_T(path), ctx);
 					xnd.ni_pathlen = (uint32_t)pathlen - 1; // pathlen max value is equal to MAXPATHLEN
 					xnd.ni_cnd.cn_nameptr = xnd.ni_cnd.cn_pnbuf = path;
 					xnd.ni_startdir = mvp;
 					xnd.ni_usedvp   = mvp;
 					xnd.ni_rootdir = rootvnode;
-					xnd.ni_cnd.cn_context = ctx;
 					while ((error = lookup(&xnd)) == ERECYCLE) {
 						xnd.ni_cnd.cn_flags = LOCKLEAF;
 						xnd.ni_cnd.cn_nameptr = xnd.ni_cnd.cn_pnbuf;
@@ -3460,8 +3554,8 @@ nfsrv_export(struct user_nfs_export_args *unxa, vfs_context_t ctx)
 				}
 				/* delete active user list for this export */
 				nfsrv_free_user_list(&nx->nx_user_list);
-				FREE(nx->nx_path, M_TEMP);
-				FREE(nx, M_TEMP);
+				kfree_data_addr(nx->nx_path);
+				kfree_type(struct nfs_export, nx);
 			}
 			goto out1;
 		} else if (!unxa->nxa_netcount) {
@@ -3502,14 +3596,14 @@ out1:
 		LIST_REMOVE(nx, nx_hash);
 		/* delete active user list for this export */
 		nfsrv_free_user_list(&nx->nx_user_list);
-		FREE(nx->nx_path, M_TEMP);
-		FREE(nx, M_TEMP);
+		kfree_data_addr(nx->nx_path);
+		kfree_type(struct nfs_export, nx);
 	}
 	if (LIST_EMPTY(&nxfs->nxfs_exports)) {
 		/* exported file system has no more exports */
 		LIST_REMOVE(nxfs, nxfs_next);
-		FREE(nxfs->nxfs_path, M_TEMP);
-		FREE(nxfs, M_TEMP);
+		kfree_data_addr(nxfs->nxfs_path);
+		kfree_type(struct nfs_exportfs, nxfs);
 		if (mp) {
 			vfs_clearflags(mp, MNT_EXPORTED);
 		}
@@ -3957,12 +4051,8 @@ nfsrv_get_user_stat_node(struct nfs_active_user_list *list, struct sockaddr *sad
 
 	if (list->node_count < nfsrv_user_stat_max_nodes) {
 		/* Allocate a new node */
-		MALLOC(unode, struct nfs_user_stat_node *, sizeof(struct nfs_user_stat_node),
-		    M_TEMP, M_WAITOK | M_ZERO);
-
-		if (!unode) {
-			return NULL;
-		}
+		unode = kalloc_type(struct nfs_user_stat_node,
+		    Z_WAITOK | Z_ZERO | Z_NOFAIL);
 
 		/* increment node count */
 		OSAddAtomic(1, &nfsrv_user_stat_node_count);
@@ -4052,7 +4142,7 @@ nfsrv_init_user_list(struct nfs_active_user_list *ulist)
 	}
 	ulist->node_count = 0;
 
-	lck_mtx_init(&ulist->user_mutex, nfsrv_active_user_mutex_group, LCK_ATTR_NULL);
+	lck_mtx_init(&ulist->user_mutex, &nfsrv_active_user_mutex_group, LCK_ATTR_NULL);
 }
 
 /* Free all nodes in an active user list */
@@ -4069,14 +4159,14 @@ nfsrv_free_user_list(struct nfs_active_user_list *ulist)
 		/* Remove node and free */
 		TAILQ_REMOVE(&ulist->user_lru, unode, lru_link);
 		LIST_REMOVE(unode, hash_link);
-		FREE(unode, M_TEMP);
+		kfree_type(struct nfs_user_stat_node, unode);
 
 		/* decrement node count */
 		OSAddAtomic(-1, &nfsrv_user_stat_node_count);
 	}
 	ulist->node_count = 0;
 
-	lck_mtx_destroy(&ulist->user_mutex, nfsrv_active_user_mutex_group);
+	lck_mtx_destroy(&ulist->user_mutex, &nfsrv_active_user_mutex_group);
 }
 
 /* Reclaim old expired user nodes from active user lists. */
@@ -4129,7 +4219,7 @@ nfsrv_active_user_list_reclaim(void)
 	/* Free expired nodes */
 	while ((unode = LIST_FIRST(&oldlist))) {
 		LIST_REMOVE(unode, hash_link);
-		FREE(unode, M_TEMP);
+		kfree_type(struct nfs_user_stat_node, unode);
 	}
 }
 

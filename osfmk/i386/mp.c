@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2020 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -82,6 +82,10 @@
 #if MONOTONIC
 #include <kern/monotonic.h>
 #endif /* MONOTONIC */
+
+#if KPERF
+#include <kperf/kptimer.h>
+#endif /* KPERF */
 
 #if     MP_DEBUG
 #define PAUSE           delay(1000000)
@@ -584,9 +588,14 @@ NMIInterruptHandler(x86_saved_state_t *regs)
 	}
 
 	if (NMI_panic_reason == SPINLOCK_TIMEOUT) {
+		lck_spinlock_to_info_t lsti;
+
+		lsti = os_atomic_load(&lck_spinlock_timeout_in_progress, acquire);
 		snprintf(&pstr[0], sizeof(pstr),
-		    "Panic(CPU %d, time %llu): NMIPI for spinlock acquisition timeout, spinlock: %p, spinlock owner: %p, current_thread: %p, spinlock_owner_cpu: 0x%x\n",
-		    cpu_number(), now, spinlock_timed_out, (void *) spinlock_timed_out->interlock.lock_data, current_thread(), spinlock_owner_cpu);
+		    "Panic(CPU %d, time %llu): NMIPI for spinlock acquisition timeout, spinlock: %p, "
+		    "spinlock owner: %p, current_thread: %p, spinlock_owner_cpu: 0x%x\n",
+		    cpu_number(), now, lsti->lock, (void *)lsti->owner_thread_cur,
+		    current_thread(), lsti->owner_cpu);
 		panic_i386_backtrace(stackptr, 64, &pstr[0], TRUE, regs);
 	} else if (NMI_panic_reason == TLB_FLUSH_TIMEOUT) {
 		snprintf(&pstr[0], sizeof(pstr),
@@ -624,9 +633,11 @@ NMIInterruptHandler(x86_saved_state_t *regs)
 		 */
 		if (__sync_bool_compare_and_swap(&mp_kdp_is_NMI, FALSE, TRUE)) {
 			kprintf_break_lock();
-			kprintf("Debugger entry requested by NMI\n");
-			kdp_i386_trap(T_DEBUG, saved_state64(regs), 0, 0);
-			printf("Debugger entry requested by NMI\n");
+
+			DebuggerWithContext(EXC_BREAKPOINT, saved_state64(regs),
+			    "requested by NMI", DEBUGGER_OPTION_NONE,
+			    (unsigned long)(char *)__builtin_return_address(0));
+
 			mp_kdp_is_NMI = FALSE;
 		} else {
 			mp_kdp_wait(FALSE, FALSE);
@@ -641,7 +652,6 @@ NMIInterruptHandler(x86_saved_state_t *regs)
 NMExit:
 	return 1;
 }
-
 
 /*
  * cpu_interrupt is really just to be used by the scheduler to
@@ -810,23 +820,27 @@ mp_safe_spin_lock(usimple_lock_t lock)
 	if (ml_get_interrupts_enabled()) {
 		simple_lock(lock, LCK_GRP_NULL);
 		return TRUE;
-	} else {
-		uint64_t tsc_spin_start = rdtsc64();
-		while (!simple_lock_try(lock, LCK_GRP_NULL)) {
-			cpu_signal_handler(NULL);
-			if (mp_spin_timeout(tsc_spin_start)) {
-				uint32_t lock_cpu;
-				uintptr_t lowner = (uintptr_t)
-				    lock->interlock.lock_data;
-				spinlock_timed_out = lock;
-				lock_cpu = spinlock_timeout_NMI(lowner);
-				NMIPI_panic(cpu_to_cpumask(lock_cpu), SPINLOCK_TIMEOUT);
-				panic("mp_safe_spin_lock() timed out, lock: %p, owner thread: 0x%lx, current_thread: %p, owner on CPU 0x%x, time: %llu",
-				    lock, lowner, current_thread(), lock_cpu, mach_absolute_time());
-			}
-		}
-		return FALSE;
 	}
+
+	lck_spinlock_to_info_t lsti;
+	uint64_t tsc_spin_start = rdtsc64();
+
+	while (!simple_lock_try(lock, LCK_GRP_NULL)) {
+		cpu_signal_handler(NULL);
+		if (mp_spin_timeout(tsc_spin_start)) {
+			uintptr_t lowner = (uintptr_t)lock->interlock.lock_data;
+
+			lsti = lck_spinlock_timeout_hit(lock, lowner);
+			NMIPI_panic(cpu_to_cpumask(lsti->owner_cpu), SPINLOCK_TIMEOUT);
+			panic("mp_safe_spin_lock() timed out, lock: %p, "
+			    "owner thread: 0x%lx, current_thread: %p, "
+			    "owner on CPU 0x%x, time: %llu",
+			    lock, lowner, current_thread(),
+			    lsti->owner_cpu, mach_absolute_time());
+		}
+	}
+
+	return FALSE;
 }
 
 /*
@@ -1555,6 +1569,9 @@ i386_deactivate_cpu(void)
 #if MONOTONIC
 	mt_cpu_down(cdp);
 #endif /* MONOTONIC */
+#if KPERF
+	kptimer_stop_curcpu();
+#endif /* KPERF */
 
 	/*
 	 * Open an interrupt window
@@ -1947,6 +1964,12 @@ current_percpu_base(void)
 	return get_current_percpu_base();
 }
 
+vm_offset_t
+other_percpu_base(int cpu)
+{
+	return cpu_datap(cpu)->cpu_pcpu_base;
+}
+
 static void
 cpu_prewarm_init()
 {
@@ -2027,7 +2050,7 @@ ml_interrupt_prewarm(
 	cpu_t ct;
 
 	if (ml_get_interrupts_enabled() == FALSE) {
-		panic("%s: Interrupts disabled?\n", __FUNCTION__);
+		panic("%s: Interrupts disabled?", __FUNCTION__);
 	}
 
 	/*

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2020 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -124,11 +124,10 @@
 
 extern const char *proc_name_address(struct proc *);
 
-static lck_grp_t        *inpcb_lock_grp;
-static lck_attr_t       *inpcb_lock_attr;
-static lck_grp_attr_t   *inpcb_lock_grp_attr;
-decl_lck_mtx_data(static, inpcb_lock);          /* global INPCB lock */
-decl_lck_mtx_data(static, inpcb_timeout_lock);
+static LCK_GRP_DECLARE(inpcb_lock_grp, "inpcb");
+static LCK_ATTR_DECLARE(inpcb_lock_attr, 0, 0);
+static LCK_MTX_DECLARE_ATTR(inpcb_lock, &inpcb_lock_grp, &inpcb_lock_attr);
+static LCK_MTX_DECLARE_ATTR(inpcb_timeout_lock, &inpcb_lock_grp, &inpcb_lock_attr);
 
 static TAILQ_HEAD(, inpcbinfo) inpcb_head = TAILQ_HEAD_INITIALIZER(inpcb_head);
 
@@ -300,7 +299,7 @@ static struct inpcb *inp_fc_getinp(u_int32_t, u_int32_t);
 static void inp_fc_feedback(struct inpcb *);
 extern void tcp_remove_from_time_wait(struct inpcb *inp);
 
-decl_lck_mtx_data(static, inp_fc_lck);
+static LCK_MTX_DECLARE_ATTR(inp_fc_lck, &inpcb_lock_grp, &inpcb_lock_attr);
 
 RB_HEAD(inp_fc_tree, inpcb) inp_fc_tree;
 RB_PROTOTYPE(inp_fc_tree, inpcb, infc_link, infc_cmp);
@@ -324,15 +323,11 @@ in_pcbinit(void)
 	VERIFY(!inpcb_initialized);
 	inpcb_initialized = 1;
 
-	inpcb_lock_grp_attr = lck_grp_attr_alloc_init();
-	inpcb_lock_grp = lck_grp_alloc_init("inpcb", inpcb_lock_grp_attr);
-	inpcb_lock_attr = lck_attr_alloc_init();
-	lck_mtx_init(&inpcb_lock, inpcb_lock_grp, inpcb_lock_attr);
-	lck_mtx_init(&inpcb_timeout_lock, inpcb_lock_grp, inpcb_lock_attr);
 	inpcb_thread_call = thread_call_allocate_with_priority(inpcb_timeout,
 	    NULL, THREAD_CALL_PRIORITY_KERNEL);
+	/* Give it an arg so that we know that this is the fast timer */
 	inpcb_fast_thread_call = thread_call_allocate_with_priority(
-		inpcb_timeout, NULL, THREAD_CALL_PRIORITY_KERNEL);
+		inpcb_timeout, &inpcb_timeout, THREAD_CALL_PRIORITY_KERNEL);
 	if (inpcb_thread_call == NULL || inpcb_fast_thread_call == NULL) {
 		panic("unable to alloc the inpcb thread call");
 	}
@@ -341,7 +336,6 @@ in_pcbinit(void)
 	 * Initialize data structures required to deliver
 	 * flow advisories.
 	 */
-	lck_mtx_init(&inp_fc_lck, inpcb_lock_grp, inpcb_lock_attr);
 	lck_mtx_lock(&inp_fc_lck);
 	RB_INIT(&inp_fc_tree);
 	bzero(&key_inp, sizeof(key_inp));
@@ -353,7 +347,7 @@ in_pcbinit(void)
 static void
 inpcb_timeout(void *arg0, void *arg1)
 {
-#pragma unused(arg0, arg1)
+#pragma unused(arg1)
 	struct inpcbinfo *ipi;
 	boolean_t t, gc;
 	struct intimercount gccnt, tmcnt;
@@ -419,10 +413,14 @@ inpcb_timeout(void *arg0, void *arg1)
 		inpcb_ticking = INPCB_HAVE_TIMER_REQ(tmcnt);
 	}
 
-	/* re-arm the timer if there's work to do */
+	/* arg0 will be set if we are the fast timer */
+	if (arg0 != NULL) {
+		inpcb_fast_timer_on = FALSE;
+	}
 	inpcb_timeout_run--;
 	VERIFY(inpcb_timeout_run >= 0 && inpcb_timeout_run < 2);
 
+	/* re-arm the timer if there's work to do */
 	if (gccnt.intimer_nodelay > 0 || tmcnt.intimer_nodelay > 0) {
 		inpcb_sched_timeout();
 	} else if ((gccnt.intimer_fast + tmcnt.intimer_fast) <= 5) {
@@ -460,7 +458,7 @@ _inpcb_sched_timeout(unsigned int offset)
 		inpcb_timeout_run++;
 		if (offset == 0) {
 			inpcb_fast_timer_on = TRUE;
-			thread_call_enter_delayed(inpcb_thread_call,
+			thread_call_enter_delayed(inpcb_fast_thread_call,
 			    deadline);
 		} else {
 			inpcb_fast_timer_on = FALSE;
@@ -545,7 +543,7 @@ in_pcbinfo_attach(struct inpcbinfo *ipi)
 	lck_mtx_lock(&inpcb_lock);
 	TAILQ_FOREACH(ipi0, &inpcb_head, ipi_entry) {
 		if (ipi0 == ipi) {
-			panic("%s: ipi %p already in the list\n",
+			panic("%s: ipi %p already in the list",
 			    __func__, ipi);
 			/* NOTREACHED */
 		}
@@ -591,11 +589,8 @@ in_pcballoc(struct socket *so, struct inpcbinfo *pcbinfo, struct proc *p)
 	caddr_t temp;
 
 	if ((so->so_flags1 & SOF1_CACHED_IN_SOCK_LAYER) == 0) {
-		inp = (struct inpcb *)zalloc(pcbinfo->ipi_zone);
-		if (inp == NULL) {
-			return ENOBUFS;
-		}
-		bzero((caddr_t)inp, sizeof(*inp));
+		inp = zalloc_flags(pcbinfo->ipi_zone,
+		    Z_WAITOK | Z_ZERO | Z_NOFAIL);
 	} else {
 		inp = (struct inpcb *)(void *)so->so_saved_pcb;
 		temp = inp->inp_saved_ppcb;
@@ -646,7 +641,7 @@ in_pcballoc(struct socket *so, struct inpcbinfo *pcbinfo, struct proc *p)
 
 	if (so->so_proto->pr_flags & PR_PCBLOCK) {
 		lck_mtx_init(&inp->inpcb_mtx, pcbinfo->ipi_lock_grp,
-		    pcbinfo->ipi_lock_attr);
+		    &pcbinfo->ipi_lock_attr);
 	}
 
 	if (SOCK_DOM(so) == PF_INET6 && !ip6_mapped_addr_on) {
@@ -662,11 +657,11 @@ in_pcballoc(struct socket *so, struct inpcbinfo *pcbinfo, struct proc *p)
 
 	(void) inp_update_policy(inp);
 
-	lck_rw_lock_exclusive(pcbinfo->ipi_lock);
+	lck_rw_lock_exclusive(&pcbinfo->ipi_lock);
 	inp->inp_gencnt = ++pcbinfo->ipi_gencnt;
 	LIST_INSERT_HEAD(pcbinfo->ipi_listhead, inp, inp_list);
 	pcbinfo->ipi_count++;
-	lck_rw_done(pcbinfo->ipi_lock);
+	lck_rw_done(&pcbinfo->ipi_lock);
 	return 0;
 }
 
@@ -770,17 +765,17 @@ in_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct proc *p)
 	bzero(&laddr, sizeof(laddr));
 
 	socket_unlock(so, 0); /* keep reference on socket */
-	lck_rw_lock_exclusive(pcbinfo->ipi_lock);
+	lck_rw_lock_exclusive(&pcbinfo->ipi_lock);
 	if (inp->inp_lport != 0 || inp->inp_laddr.s_addr != INADDR_ANY) {
 		/* another thread completed the bind */
-		lck_rw_done(pcbinfo->ipi_lock);
+		lck_rw_done(&pcbinfo->ipi_lock);
 		socket_lock(so, 0);
 		return EINVAL;
 	}
 
 	if (nam != NULL) {
 		if (nam->sa_len != sizeof(struct sockaddr_in)) {
-			lck_rw_done(pcbinfo->ipi_lock);
+			lck_rw_done(&pcbinfo->ipi_lock);
 			socket_lock(so, 0);
 			return EINVAL;
 		}
@@ -790,7 +785,7 @@ in_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct proc *p)
 		 * incorrectly fail to initialize it.
 		 */
 		if (nam->sa_family != AF_INET) {
-			lck_rw_done(pcbinfo->ipi_lock);
+			lck_rw_done(&pcbinfo->ipi_lock);
 			socket_lock(so, 0);
 			return EAFNOSUPPORT;
 		}
@@ -820,7 +815,7 @@ in_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct proc *p)
 
 			ifa = ifa_ifwithaddr(SA(&sin));
 			if (ifa == NULL) {
-				lck_rw_done(pcbinfo->ipi_lock);
+				lck_rw_done(&pcbinfo->ipi_lock);
 				socket_lock(so, 0);
 				return EADDRNOTAVAIL;
 			} else {
@@ -853,7 +848,7 @@ in_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct proc *p)
 				    PRIV_NETINET_RESERVEDPORT, 0);
 				kauth_cred_unref(&cred);
 				if (error != 0) {
-					lck_rw_done(pcbinfo->ipi_lock);
+					lck_rw_done(&pcbinfo->ipi_lock);
 					socket_lock(so, 0);
 					return EACCES;
 				}
@@ -864,7 +859,7 @@ in_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct proc *p)
 			 */
 			if (!current_task_can_use_restricted_in_port(lport,
 			    (uint8_t)so->so_proto->pr_protocol, PORT_FLAGS_BSD)) {
-				lck_rw_done(pcbinfo->ipi_lock);
+				lck_rw_done(&pcbinfo->ipi_lock);
 				socket_lock(so, 0);
 				return EADDRINUSE;
 			}
@@ -890,7 +885,7 @@ in_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct proc *p)
 					conflict = 1;
 				}
 
-				lck_rw_done(pcbinfo->ipi_lock);
+				lck_rw_done(&pcbinfo->ipi_lock);
 
 				if (conflict) {
 					in_pcb_conflict_post_msg(lport);
@@ -916,7 +911,7 @@ in_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct proc *p)
 						conflict = 1;
 					}
 
-					lck_rw_done(pcbinfo->ipi_lock);
+					lck_rw_done(&pcbinfo->ipi_lock);
 
 					if (conflict) {
 						in_pcb_conflict_post_msg(lport);
@@ -959,7 +954,7 @@ in_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct proc *p)
 			    PRIV_NETINET_RESERVEDPORT, 0);
 			kauth_cred_unref(&cred);
 			if (error != 0) {
-				lck_rw_done(pcbinfo->ipi_lock);
+				lck_rw_done(&pcbinfo->ipi_lock);
 				socket_lock(so, 0);
 				return error;
 			}
@@ -1002,7 +997,7 @@ in_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct proc *p)
 			found = false;
 			do {
 				if (count-- < 0) {      /* completely used? */
-					lck_rw_done(pcbinfo->ipi_lock);
+					lck_rw_done(&pcbinfo->ipi_lock);
 					socket_lock(so, 0);
 					return EADDRNOTAVAIL;
 				}
@@ -1042,7 +1037,7 @@ in_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct proc *p)
 			found = false;
 			do {
 				if (count-- < 0) {      /* completely used? */
-					lck_rw_done(pcbinfo->ipi_lock);
+					lck_rw_done(&pcbinfo->ipi_lock);
 					socket_lock(so, 0);
 					return EADDRNOTAVAIL;
 				}
@@ -1073,12 +1068,12 @@ in_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct proc *p)
 	 * Checking if world has changed since.
 	 */
 	if (inp->inp_state == INPCB_STATE_DEAD) {
-		lck_rw_done(pcbinfo->ipi_lock);
+		lck_rw_done(&pcbinfo->ipi_lock);
 		return ECONNABORTED;
 	}
 
 	if (inp->inp_lport != 0 || inp->inp_laddr.s_addr != INADDR_ANY) {
-		lck_rw_done(pcbinfo->ipi_lock);
+		lck_rw_done(&pcbinfo->ipi_lock);
 		return EINVAL;
 	}
 
@@ -1099,10 +1094,10 @@ in_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct proc *p)
 		if (anonport) {
 			inp->inp_flags &= ~INP_ANONPORT;
 		}
-		lck_rw_done(pcbinfo->ipi_lock);
+		lck_rw_done(&pcbinfo->ipi_lock);
 		return EAGAIN;
 	}
-	lck_rw_done(pcbinfo->ipi_lock);
+	lck_rw_done(&pcbinfo->ipi_lock);
 	sflt_notify(so, sock_evt_bound, NULL);
 	return 0;
 }
@@ -1324,7 +1319,7 @@ in_pcbladdr(struct inpcb *inp, struct sockaddr *nam, struct in_addr *laddr,
 	 */
 	if (raw == 0 && (SIN(nam)->sin_addr.s_addr == INADDR_ANY ||
 	    SIN(nam)->sin_addr.s_addr == (u_int32_t)INADDR_BROADCAST)) {
-		lck_rw_lock_shared(in_ifaddr_rwlock);
+		lck_rw_lock_shared(&in_ifaddr_rwlock);
 		if (!TAILQ_EMPTY(&in_ifaddrhead)) {
 			ia = TAILQ_FIRST(&in_ifaddrhead);
 			IFA_LOCK_SPIN(&ia->ia_ifa);
@@ -1337,7 +1332,7 @@ in_pcbladdr(struct inpcb *inp, struct sockaddr *nam, struct in_addr *laddr,
 			IFA_UNLOCK(&ia->ia_ifa);
 			ia = NULL;
 		}
-		lck_rw_done(in_ifaddr_rwlock);
+		lck_rw_done(&in_ifaddr_rwlock);
 	}
 	/*
 	 * Otherwise, if the socket has already bound the source, just use it.
@@ -1505,7 +1500,7 @@ done:
 			if (ia != NULL) {
 				IFA_REMREF(&ia->ia_ifa);
 			}
-			lck_rw_lock_shared(in_ifaddr_rwlock);
+			lck_rw_lock_shared(&in_ifaddr_rwlock);
 			TAILQ_FOREACH(ia, &in_ifaddrhead, ia_link) {
 				if (ia->ia_ifp == ifp) {
 					break;
@@ -1514,7 +1509,7 @@ done:
 			if (ia != NULL) {
 				IFA_ADDREF(&ia->ia_ifa);
 			}
-			lck_rw_done(in_ifaddr_rwlock);
+			lck_rw_done(&in_ifaddr_rwlock);
 			if (ia == NULL) {
 				error = EADDRNOTAVAIL;
 			} else {
@@ -1633,13 +1628,13 @@ in_pcbconnect(struct inpcb *inp, struct sockaddr *nam, struct proc *p,
 				return error;
 			}
 		}
-		if (!lck_rw_try_lock_exclusive(inp->inp_pcbinfo->ipi_lock)) {
+		if (!lck_rw_try_lock_exclusive(&inp->inp_pcbinfo->ipi_lock)) {
 			/*
 			 * Lock inversion issue, mostly with udp
 			 * multicast packets.
 			 */
 			socket_unlock(so, 0);
-			lck_rw_lock_exclusive(inp->inp_pcbinfo->ipi_lock);
+			lck_rw_lock_exclusive(&inp->inp_pcbinfo->ipi_lock);
 			socket_lock(so, 0);
 		}
 		inp->inp_laddr = laddr;
@@ -1658,13 +1653,13 @@ in_pcbconnect(struct inpcb *inp, struct sockaddr *nam, struct proc *p,
 		if (inp->inp_lport == 0) {
 			return EINVAL;
 		}
-		if (!lck_rw_try_lock_exclusive(inp->inp_pcbinfo->ipi_lock)) {
+		if (!lck_rw_try_lock_exclusive(&inp->inp_pcbinfo->ipi_lock)) {
 			/*
 			 * Lock inversion issue, mostly with udp
 			 * multicast packets.
 			 */
 			socket_unlock(so, 0);
-			lck_rw_lock_exclusive(inp->inp_pcbinfo->ipi_lock);
+			lck_rw_lock_exclusive(&inp->inp_pcbinfo->ipi_lock);
 			socket_lock(so, 0);
 		}
 	}
@@ -1674,7 +1669,7 @@ in_pcbconnect(struct inpcb *inp, struct sockaddr *nam, struct proc *p,
 		nstat_pcb_invalidate_cache(inp);
 	}
 	in_pcbrehash(inp);
-	lck_rw_done(inp->inp_pcbinfo->ipi_lock);
+	lck_rw_done(&inp->inp_pcbinfo->ipi_lock);
 	return 0;
 }
 
@@ -1696,15 +1691,15 @@ in_pcbdisconnect(struct inpcb *inp)
 	}
 #endif
 
-	if (!lck_rw_try_lock_exclusive(inp->inp_pcbinfo->ipi_lock)) {
+	if (!lck_rw_try_lock_exclusive(&inp->inp_pcbinfo->ipi_lock)) {
 		/* lock inversion issue, mostly with udp multicast packets */
 		socket_unlock(so, 0);
-		lck_rw_lock_exclusive(inp->inp_pcbinfo->ipi_lock);
+		lck_rw_lock_exclusive(&inp->inp_pcbinfo->ipi_lock);
 		socket_lock(so, 0);
 	}
 
 	in_pcbrehash(inp);
-	lck_rw_done(inp->inp_pcbinfo->ipi_lock);
+	lck_rw_done(&inp->inp_pcbinfo->ipi_lock);
 	/*
 	 * A multipath subflow socket would have its SS_NOFDREF set by default,
 	 * so check for SOF_MP_SUBFLOW socket flag before detaching the PCB;
@@ -1722,7 +1717,7 @@ in_pcbdetach(struct inpcb *inp)
 
 	if (so->so_pcb == NULL) {
 		/* PCB has been disposed */
-		panic("%s: inp=%p so=%p proto=%d so_pcb is null!\n", __func__,
+		panic("%s: inp=%p so=%p proto=%d so_pcb is null!", __func__,
 		    inp, so, SOCK_PROTO(so));
 		/* NOTREACHED */
 	}
@@ -1750,13 +1745,13 @@ in_pcbdetach(struct inpcb *inp)
 
 	/* Free memory buffer held for generating keep alives */
 	if (inp->inp_keepalive_data != NULL) {
-		FREE(inp->inp_keepalive_data, M_TEMP);
+		kfree_data(inp->inp_keepalive_data, inp->inp_keepalive_datalen);
 		inp->inp_keepalive_data = NULL;
 	}
 
 	/* mark socket state as dead */
 	if (in_pcb_checkstate(inp, WNT_STOPUSING, 1) != WNT_STOPUSING) {
-		panic("%s: so=%p proto=%d couldn't set to STOPUSING\n",
+		panic("%s: so=%p proto=%d couldn't set to STOPUSING",
 		    __func__, so, SOCK_PROTO(so));
 		/* NOTREACHED */
 	}
@@ -1827,7 +1822,7 @@ in_pcbdispose(struct inpcb *inp)
 	struct inpcbinfo *ipi = inp->inp_pcbinfo;
 
 	if (so != NULL && so->so_usecount != 0) {
-		panic("%s: so %p [%d,%d] usecount %d lockhistory %s\n",
+		panic("%s: so %p [%d,%d] usecount %d lockhistory %s",
 		    __func__, so, SOCK_DOM(so), SOCK_TYPE(so), so->so_usecount,
 		    solockhistory_nr(so));
 		/* NOTREACHED */
@@ -1841,13 +1836,13 @@ in_pcbdispose(struct inpcb *inp)
 			    so->so_flags, solockhistory_nr(so));
 			/* NOTREACHED */
 		} else {
-			panic("%s: inp %p invalid wantcnt %d no socket\n",
+			panic("%s: inp %p invalid wantcnt %d no socket",
 			    __func__, inp, inp->inp_wantcnt);
 			/* NOTREACHED */
 		}
 	}
 
-	LCK_RW_ASSERT(ipi->ipi_lock, LCK_RW_ASSERT_EXCLUSIVE);
+	LCK_RW_ASSERT(&ipi->ipi_lock, LCK_RW_ASSERT_EXCLUSIVE);
 
 	inp->inp_gencnt = ++ipi->ipi_gencnt;
 	/* access ipi in in_pcbremlists */
@@ -1865,7 +1860,7 @@ in_pcbdispose(struct inpcb *inp)
 				sbrelease(&so->so_snd);
 			}
 			if (so->so_head != NULL) {
-				panic("%s: so=%p head still exist\n",
+				panic("%s: so=%p head still exist",
 				    __func__, so);
 				/* NOTREACHED */
 			}
@@ -1913,16 +1908,13 @@ in_getsockaddr(struct socket *so, struct sockaddr **nam)
 	/*
 	 * Do the malloc first in case it blocks.
 	 */
-	MALLOC(sin, struct sockaddr_in *, sizeof(*sin), M_SONAME, M_WAITOK);
-	if (sin == NULL) {
-		return ENOBUFS;
-	}
-	bzero(sin, sizeof(*sin));
+	sin = (struct sockaddr_in *)alloc_sockaddr(sizeof(*sin),
+	    Z_WAITOK | Z_NOFAIL);
+
 	sin->sin_family = AF_INET;
-	sin->sin_len = sizeof(*sin);
 
 	if ((inp = sotoinpcb(so)) == NULL) {
-		FREE(sin, M_SONAME);
+		free_sockaddr(sin);
 		return EINVAL;
 	}
 	sin->sin_port = inp->inp_lport;
@@ -1962,16 +1954,13 @@ in_getpeeraddr(struct socket *so, struct sockaddr **nam)
 	/*
 	 * Do the malloc first in case it blocks.
 	 */
-	MALLOC(sin, struct sockaddr_in *, sizeof(*sin), M_SONAME, M_WAITOK);
-	if (sin == NULL) {
-		return ENOBUFS;
-	}
-	bzero((caddr_t)sin, sizeof(*sin));
+	sin = (struct sockaddr_in *)alloc_sockaddr(sizeof(*sin),
+	    Z_WAITOK | Z_NOFAIL);
+
 	sin->sin_family = AF_INET;
-	sin->sin_len = sizeof(*sin);
 
 	if ((inp = sotoinpcb(so)) == NULL) {
-		FREE(sin, M_SONAME);
+		free_sockaddr(sin);
 		return EINVAL;
 	}
 	sin->sin_port = inp->inp_fport;
@@ -1987,7 +1976,7 @@ in_pcbnotifyall(struct inpcbinfo *pcbinfo, struct in_addr faddr,
 {
 	struct inpcb *inp;
 
-	lck_rw_lock_shared(pcbinfo->ipi_lock);
+	lck_rw_lock_shared(&pcbinfo->ipi_lock);
 
 	LIST_FOREACH(inp, pcbinfo->ipi_listhead, inp_list) {
 		if (!(inp->inp_vflag & INP_IPV4)) {
@@ -2005,7 +1994,7 @@ in_pcbnotifyall(struct inpcbinfo *pcbinfo, struct in_addr faddr,
 		(void) in_pcb_checkstate(inp, WNT_RELEASE, 1);
 		socket_unlock(inp->inp_socket, 1);
 	}
-	lck_rw_done(pcbinfo->ipi_lock);
+	lck_rw_done(&pcbinfo->ipi_lock);
 }
 
 /*
@@ -2205,7 +2194,7 @@ in_pcblookup_hash_exists(struct inpcbinfo *pcbinfo, struct in_addr faddr,
 	 * We may have found the pcb in the last lookup - check this first.
 	 */
 
-	lck_rw_lock_shared(pcbinfo->ipi_lock);
+	lck_rw_lock_shared(&pcbinfo->ipi_lock);
 
 	/*
 	 * First look for an exact match.
@@ -2239,7 +2228,7 @@ in_pcblookup_hash_exists(struct inpcbinfo *pcbinfo, struct in_addr faddr,
 				*gid = kauth_cred_getgid(
 					inp->inp_socket->so_cred);
 			}
-			lck_rw_done(pcbinfo->ipi_lock);
+			lck_rw_done(&pcbinfo->ipi_lock);
 			return found;
 		}
 	}
@@ -2248,7 +2237,7 @@ in_pcblookup_hash_exists(struct inpcbinfo *pcbinfo, struct in_addr faddr,
 		/*
 		 * Not found.
 		 */
-		lck_rw_done(pcbinfo->ipi_lock);
+		lck_rw_done(&pcbinfo->ipi_lock);
 		return 0;
 	}
 
@@ -2277,7 +2266,7 @@ in_pcblookup_hash_exists(struct inpcbinfo *pcbinfo, struct in_addr faddr,
 					*gid = kauth_cred_getgid(
 						inp->inp_socket->so_cred);
 				}
-				lck_rw_done(pcbinfo->ipi_lock);
+				lck_rw_done(&pcbinfo->ipi_lock);
 				return found;
 			} else if (inp->inp_laddr.s_addr == INADDR_ANY) {
 				if (inp->inp_socket &&
@@ -2297,10 +2286,10 @@ in_pcblookup_hash_exists(struct inpcbinfo *pcbinfo, struct in_addr faddr,
 				*gid = kauth_cred_getgid(
 					local_wild_mapped->inp_socket->so_cred);
 			}
-			lck_rw_done(pcbinfo->ipi_lock);
+			lck_rw_done(&pcbinfo->ipi_lock);
 			return found;
 		}
-		lck_rw_done(pcbinfo->ipi_lock);
+		lck_rw_done(&pcbinfo->ipi_lock);
 		return 0;
 	}
 	if ((found = (local_wild->inp_socket != NULL))) {
@@ -2309,7 +2298,7 @@ in_pcblookup_hash_exists(struct inpcbinfo *pcbinfo, struct in_addr faddr,
 		*gid = kauth_cred_getgid(
 			local_wild->inp_socket->so_cred);
 	}
-	lck_rw_done(pcbinfo->ipi_lock);
+	lck_rw_done(&pcbinfo->ipi_lock);
 	return found;
 }
 
@@ -2331,7 +2320,7 @@ in_pcblookup_hash(struct inpcbinfo *pcbinfo, struct in_addr faddr,
 	 * We may have found the pcb in the last lookup - check this first.
 	 */
 
-	lck_rw_lock_shared(pcbinfo->ipi_lock);
+	lck_rw_lock_shared(&pcbinfo->ipi_lock);
 
 	/*
 	 * First look for an exact match.
@@ -2361,11 +2350,11 @@ in_pcblookup_hash(struct inpcbinfo *pcbinfo, struct in_addr faddr,
 			 */
 			if (in_pcb_checkstate(inp, WNT_ACQUIRE, 0) !=
 			    WNT_STOPUSING) {
-				lck_rw_done(pcbinfo->ipi_lock);
+				lck_rw_done(&pcbinfo->ipi_lock);
 				return inp;
 			} else {
 				/* it's there but dead, say it isn't found */
-				lck_rw_done(pcbinfo->ipi_lock);
+				lck_rw_done(&pcbinfo->ipi_lock);
 				return NULL;
 			}
 		}
@@ -2375,7 +2364,7 @@ in_pcblookup_hash(struct inpcbinfo *pcbinfo, struct in_addr faddr,
 		/*
 		 * Not found.
 		 */
-		lck_rw_done(pcbinfo->ipi_lock);
+		lck_rw_done(&pcbinfo->ipi_lock);
 		return NULL;
 	}
 
@@ -2400,11 +2389,11 @@ in_pcblookup_hash(struct inpcbinfo *pcbinfo, struct in_addr faddr,
 			if (inp->inp_laddr.s_addr == laddr.s_addr) {
 				if (in_pcb_checkstate(inp, WNT_ACQUIRE, 0) !=
 				    WNT_STOPUSING) {
-					lck_rw_done(pcbinfo->ipi_lock);
+					lck_rw_done(&pcbinfo->ipi_lock);
 					return inp;
 				} else {
 					/* it's dead; say it isn't found */
-					lck_rw_done(pcbinfo->ipi_lock);
+					lck_rw_done(&pcbinfo->ipi_lock);
 					return NULL;
 				}
 			} else if (inp->inp_laddr.s_addr == INADDR_ANY) {
@@ -2420,25 +2409,25 @@ in_pcblookup_hash(struct inpcbinfo *pcbinfo, struct in_addr faddr,
 		if (local_wild_mapped != NULL) {
 			if (in_pcb_checkstate(local_wild_mapped,
 			    WNT_ACQUIRE, 0) != WNT_STOPUSING) {
-				lck_rw_done(pcbinfo->ipi_lock);
+				lck_rw_done(&pcbinfo->ipi_lock);
 				return local_wild_mapped;
 			} else {
 				/* it's dead; say it isn't found */
-				lck_rw_done(pcbinfo->ipi_lock);
+				lck_rw_done(&pcbinfo->ipi_lock);
 				return NULL;
 			}
 		}
-		lck_rw_done(pcbinfo->ipi_lock);
+		lck_rw_done(&pcbinfo->ipi_lock);
 		return NULL;
 	}
 	if (in_pcb_checkstate(local_wild, WNT_ACQUIRE, 0) != WNT_STOPUSING) {
-		lck_rw_done(pcbinfo->ipi_lock);
+		lck_rw_done(&pcbinfo->ipi_lock);
 		return local_wild;
 	}
 	/*
 	 * It's either not found or is already dead.
 	 */
-	lck_rw_done(pcbinfo->ipi_lock);
+	lck_rw_done(&pcbinfo->ipi_lock);
 	return NULL;
 }
 
@@ -2461,13 +2450,13 @@ in_pcbinshash(struct inpcb *inp, int locked)
 	u_int32_t hashkey_faddr;
 
 	if (!locked) {
-		if (!lck_rw_try_lock_exclusive(pcbinfo->ipi_lock)) {
+		if (!lck_rw_try_lock_exclusive(&pcbinfo->ipi_lock)) {
 			/*
 			 * Lock inversion issue, mostly with udp
 			 * multicast packets
 			 */
 			socket_unlock(inp->inp_socket, 0);
-			lck_rw_lock_exclusive(pcbinfo->ipi_lock);
+			lck_rw_lock_exclusive(&pcbinfo->ipi_lock);
 			socket_lock(inp->inp_socket, 0);
 		}
 	}
@@ -2480,7 +2469,7 @@ in_pcbinshash(struct inpcb *inp, int locked)
 	 */
 	if (inp->inp_state == INPCB_STATE_DEAD) {
 		if (!locked) {
-			lck_rw_done(pcbinfo->ipi_lock);
+			lck_rw_done(&pcbinfo->ipi_lock);
 		}
 		return ECONNABORTED;
 	}
@@ -2513,14 +2502,7 @@ in_pcbinshash(struct inpcb *inp, int locked)
 	 * If none exists, malloc one and tack it on.
 	 */
 	if (phd == NULL) {
-		MALLOC(phd, struct inpcbport *, sizeof(struct inpcbport),
-		    M_PCB, M_WAITOK);
-		if (phd == NULL) {
-			if (!locked) {
-				lck_rw_done(pcbinfo->ipi_lock);
-			}
-			return ENOBUFS; /* XXX */
-		}
+		phd = kalloc_type(struct inpcbport, Z_WAITOK | Z_NOFAIL);
 		phd->phd_port = inp->inp_lport;
 		LIST_INIT(&phd->phd_pcblist);
 		LIST_INSERT_HEAD(pcbporthash, phd, phd_hash);
@@ -2535,7 +2517,7 @@ in_pcbinshash(struct inpcb *inp, int locked)
 	inp->inp_flags2 |= INP2_INHASHLIST;
 
 	if (!locked) {
-		lck_rw_done(pcbinfo->ipi_lock);
+		lck_rw_done(&pcbinfo->ipi_lock);
 	}
 
 #if NECP
@@ -2611,7 +2593,7 @@ in_pcbremlists(struct inpcb *inp)
 		inp->inp_portlist.le_prev = NULL;
 		if (LIST_EMPTY(&phd->phd_pcblist)) {
 			LIST_REMOVE(phd, phd_hash);
-			FREE(phd, M_PCB);
+			kfree_type(struct inpcbport, phd);
 		}
 		inp->inp_phd = NULL;
 		inp->inp_flags2 &= ~INP2_INHASHLIST;
@@ -2667,7 +2649,7 @@ in_pcb_checkstate(struct inpcb *pcb, int mode, int locked)
 
 stopusing:
 		if (pcb->inp_socket->so_usecount < 0) {
-			panic("%s: pcb=%p so=%p usecount is negative\n",
+			panic("%s: pcb=%p so=%p usecount is negative",
 			    __func__, pcb, pcb->inp_socket);
 			/* NOTREACHED */
 		}
@@ -2734,7 +2716,7 @@ stopusing:
 			goto stopusing;
 		}
 		if (pcb->inp_socket->so_usecount < 0) {
-			panic("%s: RELEASE pcb=%p so=%p usecount is negative\n",
+			panic("%s: RELEASE pcb=%p so=%p usecount is negative",
 			    __func__, pcb, pcb->inp_socket);
 			/* NOTREACHED */
 		}
@@ -2745,7 +2727,7 @@ stopusing:
 		return WNT_RELEASE;
 
 	default:
-		panic("%s: so=%p not a valid state =%x\n", __func__,
+		panic("%s: so=%p not a valid state =%x", __func__,
 		    pcb->inp_socket, mode);
 		/* NOTREACHED */
 	}
@@ -3336,7 +3318,7 @@ inp_findinpcb_procinfo(struct inpcbinfo *pcbinfo, uint32_t flowhash,
 		return -1;
 	}
 
-	lck_rw_lock_shared(pcbinfo->ipi_lock);
+	lck_rw_lock_shared(&pcbinfo->ipi_lock);
 	LIST_FOREACH(inp, pcbinfo->ipi_listhead, inp_list) {
 		if (inp->inp_state != INPCB_STATE_DEAD &&
 		    inp->inp_socket != NULL &&
@@ -3346,7 +3328,7 @@ inp_findinpcb_procinfo(struct inpcbinfo *pcbinfo, uint32_t flowhash,
 			break;
 		}
 	}
-	lck_rw_done(pcbinfo->ipi_lock);
+	lck_rw_done(&pcbinfo->ipi_lock);
 
 	return found;
 }
@@ -3598,7 +3580,7 @@ inp_restricted_recv(struct inpcb *inp, struct ifnet *ifp)
 	ret = _inp_restricted_recv(inp, ifp);
 	if (ret == TRUE && log_restricted) {
 		printf("pid %d (%s) is unable to receive packets on %s\n",
-		    current_proc()->p_pid, proc_best_name(current_proc()),
+		    proc_getpid(current_proc()), proc_best_name(current_proc()),
 		    ifp->if_xname);
 	}
 	return ret;
@@ -3656,7 +3638,7 @@ inp_restricted_send(struct inpcb *inp, struct ifnet *ifp)
 	ret = _inp_restricted_send(inp, ifp);
 	if (ret == TRUE && log_restricted) {
 		printf("pid %d (%s) is unable to transmit packets on %s\n",
-		    current_proc()->p_pid, proc_best_name(current_proc()),
+		    proc_getpid(current_proc()), proc_best_name(current_proc()),
 		    ifp->if_xname);
 	}
 	return ret;
@@ -3707,8 +3689,11 @@ inp_decr_sndbytes_total(struct socket *so, int32_t len)
 	struct ifnet *ifp = inp->inp_last_outifp;
 
 	if (ifp != NULL) {
-		VERIFY(ifp->if_sndbyte_total >= len);
-		OSAddAtomic64(-len, &ifp->if_sndbyte_total);
+		if (ifp->if_sndbyte_total >= len) {
+			OSAddAtomic64(-len, &ifp->if_sndbyte_total);
+		} else {
+			ifp->if_sndbyte_total = 0;
+		}
 	}
 }
 

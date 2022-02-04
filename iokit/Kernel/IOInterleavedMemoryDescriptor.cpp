@@ -83,8 +83,8 @@ IOInterleavedMemoryDescriptor::initWithCapacity(
 	_tag                    = 0;
 	_descriptorCount        = 0;
 	_descriptors            = IONew(IOMemoryDescriptor *, capacity);
-	_descriptorOffsets      = IONew(IOByteCount, capacity);
-	_descriptorLengths      = IONew(IOByteCount, capacity);
+	_descriptorOffsets      = IONewData(IOByteCount, capacity);
+	_descriptorLengths      = IONewData(IOByteCount, capacity);
 
 	if ((_descriptors == NULL) || (_descriptorOffsets == NULL) || (_descriptorLengths == NULL)) {
 		return false;
@@ -171,11 +171,11 @@ IOInterleavedMemoryDescriptor::free()
 		}
 
 		if (_descriptorOffsets != NULL) {
-			IODelete(_descriptorOffsets, IOMemoryDescriptor *, _descriptorCapacity);
+			IODeleteData(_descriptorOffsets, IOByteCount, _descriptorCapacity);
 		}
 
 		if (_descriptorLengths != NULL) {
-			IODelete(_descriptorLengths, IOMemoryDescriptor *, _descriptorCapacity);
+			IODeleteData(_descriptorLengths, IOByteCount, _descriptorCapacity);
 		}
 	}
 

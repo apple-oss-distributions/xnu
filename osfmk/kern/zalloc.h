@@ -72,6 +72,10 @@
 #include <kern/kern_types.h>
 #include <sys/cdefs.h>
 
+#ifdef XNU_KERNEL_PRIVATE
+#include <kern/startup.h>
+#endif /* XNU_KERNEL_PRIVATE */
+
 #if XNU_KERNEL_PRIVATE && !defined(ZALLOC_ALLOW_DEPRECATED)
 #define __zalloc_deprecated(msg)       __deprecated_msg(msg)
 #else
@@ -79,6 +83,15 @@
 #endif
 
 __BEGIN_DECLS
+
+/*!
+ * @macro __zpercpu
+ *
+ * @abstract
+ * Annotation that helps denoting a per-cpu pointer that requires usage of
+ * @c zpercpu_*() for access.
+ */
+#define __zpercpu
 
 /*!
  * @typedef zone_id_t
@@ -112,6 +125,8 @@ __options_decl(zone_create_flags_t, uint64_t, {
 	/** Disable per-CPU zone caching for this zone */
 	ZC_NOCACHING            = 0x00000020,
 
+	/** Allocate zone pages as Read-only **/
+	ZC_READONLY             = 0x00800000,
 
 	/** Mark zone as a per-cpu zone */
 	ZC_PERCPU               = 0x01000000,
@@ -138,6 +153,11 @@ __options_decl(zone_create_flags_t, uint64_t, {
 	ZC_DESTRUCTIBLE         = 0x80000000,
 
 #ifdef XNU_KERNEL_PRIVATE
+	/** Zone doesn't support TBI tagging */
+	ZC_NOTBITAG             = 0x0200000000000000,
+
+	/** This zone will back a kalloc type */
+	ZC_KALLOC_TYPE          = 0x0400000000000000,
 
 	/** This zone will back a kalloc heap */
 	ZC_KALLOC_HEAP          = 0x0800000000000000,
@@ -145,14 +165,20 @@ __options_decl(zone_create_flags_t, uint64_t, {
 	/** This zone can be crammed with foreign pages */
 	ZC_ALLOW_FOREIGN        = 0x1000000000000000,
 
-	/** This zone contains bytes / data buffers only */
-	ZC_DATA_BUFFERS         = 0x2000000000000000,
+	/** This zone belongs to the VM submap */
+	ZC_VM                   = 0x2000000000000000,
+#if __LP64__
+#define ZC_VM_LP64 ZC_VM
+#else
+#define ZC_VM_LP64 ZC_NONE
+#endif
 
 	/** Disable kasan quarantine for this zone */
 	ZC_KASAN_NOQUARANTINE   = 0x4000000000000000,
 
 	/** Disable kasan redzones for this zone */
 	ZC_KASAN_NOREDZONE      = 0x8000000000000000,
+
 #endif
 });
 
@@ -167,12 +193,15 @@ __options_decl(zone_create_flags_t, uint64_t, {
  * zones and zone views.
  */
 union zone_or_view {
-	struct zone_view *zov_view;
-	struct zone      *zov_zone;
+	struct zone_view           *zov_view;
+	struct zone                *zov_zone;
+	struct kalloc_type_view    *zov_kt_heap;
 #ifdef __cplusplus
 	inline zone_or_view(struct zone_view *zv) : zov_view(zv) {
 	}
 	inline zone_or_view(struct zone *z) : zov_zone(z) {
+	}
+	inline zone_or_view(struct kalloc_type_view *kth) : zov_kt_heap(kth) {
 	}
 #endif
 };
@@ -239,6 +268,46 @@ extern void     zone_require(
 	void           *addr);
 
 /*!
+ * @function zone_require_ro
+ *
+ * @abstract
+ * Version of zone require intended for zones created with ZC_READONLY
+ *
+ * @discussion
+ * This check is not sufficient to fully trust the element.
+ *
+ * Another check of its content must be performed to prove
+ * that the element is "the right one", a typical technique
+ * for when the RO data structure is 1:1 with a mutable one,
+ * is a simple circularity check with a very strict lifetime
+ * (both the mutable and read-only data structures are made
+ * and destroyed as close as possible).
+ *
+ * @param zone_id       the zone id the address needs to belong to.
+ * @param elem_size     the element size for this zone.
+ * @param addr          the element address to check.
+ */
+extern void     zone_require_ro(
+	zone_id_t       zone_id,
+	vm_size_t       elem_size,
+	void           *addr);
+
+/*!
+ * @function zone_require_ro_range_contains
+ *
+ * @abstract
+ * Version of zone require intended for zones created with ZC_READONLY
+ * that only checks that the zone is RO and that the address is in
+ * the zone's submap
+ *
+ * @param zone_id       the zone id the address needs to belong to.
+ * @param addr          the element address to check.
+ */
+extern void     zone_require_ro_range_contains(
+	zone_id_t       zone_id,
+	void           *addr);
+
+/*!
  * @enum zalloc_flags_t
  *
  * @brief
@@ -276,6 +345,9 @@ extern void     zone_require(
  *
  #if XNU_KERNEL_PRIVATE
  *
+ * @const Z_NOZZC
+ * Used internally to mark allocations that will skip zero validation.
+ *
  * @const Z_VM_TAG_MASK
  * Represents bits in which a vm_tag_t for the allocation can be passed.
  * (used by kalloc for the zone tagging debugging feature).
@@ -289,7 +361,14 @@ __options_decl(zalloc_flags_t, uint32_t, {
 	Z_ZERO          = 0x0004,
 
 	Z_NOFAIL        = 0x8000,
+
+	/* convenient c++ spellings */
+	Z_NOWAIT_ZERO          = Z_NOWAIT | Z_ZERO,
+	Z_WAITOK_ZERO          = Z_WAITOK | Z_ZERO,
+	Z_WAITOK_ZERO_NOFAIL   = Z_WAITOK | Z_ZERO | Z_NOFAIL, /* convenient spelling for c++ */
 #if XNU_KERNEL_PRIVATE
+	Z_NOZZC         = 0x4000,
+
 	/** used by kalloc to propagate vm tags for -zt */
 	Z_VM_TAG_MASK   = 0xffff0000,
 
@@ -347,6 +426,76 @@ extern void    *zalloc_flags(
 	zalloc_flags_t  flags);
 
 /*!
+ * @function zalloc_ro
+ *
+ * @abstract
+ * Allocates an element from a specified read-only zone.
+ *
+ * @param zone_id       the zone id to allocate from
+ * @param flags         a collection of @c zalloc_flags_t.
+ *
+ * @returns             NULL or the allocated element
+ */
+extern void    *zalloc_ro(
+	zone_id_t       zone_id,
+	zalloc_flags_t  flags);
+
+/*!
+ * @function zalloc_ro_mut
+ *
+ * @abstract
+ * Modifies an element from a specified read-only zone.
+ *
+ * @discussion
+ * Modifying compiler-assisted authenticated pointers using this function will
+ * not result in a signed pointer being written.  The caller is expected to
+ * sign the value appropriately beforehand if they wish to do this.
+ *
+ * @param zone_id       the zone id to allocate from
+ * @param elem	        element to be modified
+ * @param offset        offset from element
+ * @param new_data	    pointer to new data
+ * @param new_data_size	size of modification
+ *
+ */
+extern void    zalloc_ro_mut(
+	zone_id_t       zone_id,
+	void           *elem,
+	vm_offset_t     offset,
+	const void     *new_data,
+	vm_size_t       new_data_size);
+
+/*!
+ * @function zalloc_ro_update_elem
+ *
+ * @abstract
+ * Calls zalloc_ro_mut.
+ * Assumes entire element is getting modified.
+ *
+ * @param zone_id       the zone id to allocate from
+ * @param elem	        element to be modified
+ * @param new_data	    pointer to new data
+ *
+ */
+extern void zalloc_ro_update_elem(
+	zone_id_t       zone_id,
+	void           *elem,
+	const void     *new_data);
+
+/*!
+ * @function zfree_ro()
+ *
+ * @abstract
+ * Frees an element previously allocated with @c zalloc_ro().
+ *
+ * @param zone_id       the zone id to free the element to.
+ * @param addr          the address to free
+ */
+extern void     zfree_ro(
+	zone_id_t       zone_id,
+	void           *addr);
+
+/*!
  * @function zfree
  *
  * @abstract
@@ -363,6 +512,22 @@ extern void     zfree(
 	zone_or_view_t  zone_or_view,
 	void            *elem);
 
+/*
+ * This macro sets "elem" to NULL on free.
+ *
+ * Note: all values passed to zfree*() might be in the element to be freed,
+ *       temporaries must be taken, and the resetting to be done prior to free.
+ */
+#define zfree(zone, elem) ({ \
+	__auto_type __zfree_zone = (zone); \
+	(zfree)(__zfree_zone, (void *)__zalloc_ptr_load_and_erase(elem)); \
+})
+
+#define zfree_ro(zid, elem) ({ \
+	__auto_type __zfree_zid = (zid); \
+	(zfree_ro)(__zfree_zid, (void *)__zalloc_ptr_load_and_erase(elem)); \
+})
+
 /* deprecated KPIS */
 
 __zalloc_deprecated("use zone_create()")
@@ -372,9 +537,122 @@ extern zone_t   zinit(
 	vm_size_t       alloc,          /* allocation size */
 	const char      *name);         /* a name for the zone */
 
+
+#pragma mark: zone views
+/*!
+ * @typedef zone_stats_t
+ *
+ * @abstract
+ * The opaque type for per-cpu zone stats that are accumulated per zone
+ * or per zone-view.
+ */
+typedef struct zone_stats *__zpercpu zone_stats_t;
+
+/*!
+ * @typedef zone_view_t
+ *
+ * @abstract
+ * A view on a zone for accounting purposes.
+ *
+ * @discussion
+ * A zone view uses the zone it references for the allocations backing store,
+ * but does the allocation accounting at the view level.
+ *
+ * These accounting are surfaced by @b zprint(1) and similar tools,
+ * which allow for cheap but finer grained understanding of allocations
+ * without any fragmentation cost.
+ *
+ * Zone views are protected by the kernel lockdown and can't be initialized
+ * dynamically. They must be created using @c ZONE_VIEW_DEFINE().
+ */
+typedef struct zone_view *zone_view_t;
+struct zone_view {
+	zone_t          zv_zone;
+	zone_stats_t    zv_stats;
+	const char     *zv_name;
+	zone_view_t     zv_next;
+};
+
+#ifdef XNU_KERNEL_PRIVATE
+/*!
+ * @enum zone_kheap_id_t
+ *
+ * @brief
+ * Enumerate a particular kalloc heap.
+ *
+ * @discussion
+ * More documentation about heaps is available in @c <kern/kalloc.h>.
+ *
+ * @const KHEAP_ID_NONE
+ * This value denotes regular zones, not used by kalloc.
+ *
+ * @const KHEAP_ID_DEFAULT
+ * Indicates zones part of the KHEAP_DEFAULT heap.
+ *
+ * @const KHEAP_ID_DATA_BUFFERS
+ * Indicates zones part of the KHEAP_DATA_BUFFERS heap.
+ *
+ * @const KHEAP_ID_KEXT
+ * Indicates zones part of the KHEAP_KEXT heap.
+ */
+__enum_decl(zone_kheap_id_t, uint32_t, {
+	KHEAP_ID_NONE,
+	KHEAP_ID_DEFAULT,
+	KHEAP_ID_DATA_BUFFERS,
+	KHEAP_ID_KEXT,
+
+#define KHEAP_ID_COUNT (KHEAP_ID_KEXT + 1)
+});
+
+/*!
+ * @macro ZONE_VIEW_DECLARE
+ *
+ * @abstract
+ * (optionally) declares a zone view (in a header).
+ *
+ * @param var           the name for the zone view.
+ */
+#define ZONE_VIEW_DECLARE(var) \
+	extern struct zone_view var[1]
+
+/*!
+ * @macro ZONE_VIEW_DEFINE
+ *
+ * @abstract
+ * Defines a given zone view and what it points to.
+ *
+ * @discussion
+ * Zone views can either share a pre-existing zone,
+ * or perform a lookup into a kalloc heap for the zone
+ * backing the bucket of the proper size.
+ *
+ * Zone views are initialized during the @c STARTUP_SUB_ZALLOC phase,
+ * as the last rank. If views on zones are created, these must have been
+ * created before this stage.
+ *
+ * This macro should not be used to create zone views from default
+ * kalloc heap, KALLOC_TYPE_DEFINE should be used instead.
+ *
+ * @param var           the name for the zone view.
+ * @param name          a string describing the zone view.
+ * @param heap_or_zone  a @c KHEAP_ID_* constant or a pointer to a zone.
+ * @param size          the element size to be allocated from this view.
+ */
+#define ZONE_VIEW_DEFINE(var, name, heap_or_zone, size) \
+	SECURITY_READ_ONLY_LATE(struct zone_view) var[1] = { { \
+	    .zv_name = name, \
+	} }; \
+	static __startup_data struct zone_view_startup_spec \
+	__startup_zone_view_spec_ ## var = { var, { heap_or_zone }, size }; \
+	STARTUP_ARG(ZALLOC, STARTUP_RANK_LAST, zone_view_startup_init, \
+	    &__startup_zone_view_spec_ ## var)
+
+#endif /* XNU_KERNEL_PRIVATE */
+
+
 #ifdef XNU_KERNEL_PRIVATE
 #pragma mark - XNU only interfaces
-#include <kern/startup.h>
+
 #include <kern/cpu_number.h>
 
 #pragma GCC visibility push(hidden)
@@ -425,16 +703,16 @@ extern void    *zalloc_permanent(
 #define zalloc_permanent_type(type_t) \
 	((type_t *)zalloc_permanent(sizeof(type_t), ZALIGN(type_t)))
 
-#pragma mark XNU only: per-cpu allocations
-
 /*!
- * @macro __zpercpu
+ * @function zalloc_first_proc_made()
  *
  * @abstract
- * Annotation that helps denoting a per-cpu pointer that requires usage of
- * @c zpercpu_*() for access.
+ * Declare that the "early" allocation phase is done.
  */
-#define __zpercpu
+extern void
+zalloc_first_proc_made(void);
+
+#pragma mark XNU only: per-cpu allocations
 
 /*!
  * @macro zpercpu_get_cpu()
@@ -555,112 +833,6 @@ extern void    *zalloc_percpu_permanent(
 #define zalloc_percpu_permanent_type(type_t) \
 	((type_t *)zalloc_percpu_permanent(sizeof(type_t), ZALIGN(type_t)))
 
-#pragma mark XNU only: zone views
-
-/*!
- * @enum zone_kheap_id_t
- *
- * @brief
- * Enumerate a particular kalloc heap.
- *
- * @discussion
- * More documentation about heaps is available in @c <kern/kalloc.h>.
- *
- * @const KHEAP_ID_NONE
- * This value denotes regular zones, not used by kalloc.
- *
- * @const KHEAP_ID_DEFAULT
- * Indicates zones part of the KHEAP_DEFAULT heap.
- *
- * @const KHEAP_ID_DATA_BUFFERS
- * Indicates zones part of the KHEAP_DATA_BUFFERS heap.
- *
- * @const KHEAP_ID_KEXT
- * Indicates zones part of the KHEAP_KEXT heap.
- */
-__enum_decl(zone_kheap_id_t, uint32_t, {
-	KHEAP_ID_NONE,
-	KHEAP_ID_DEFAULT,
-	KHEAP_ID_DATA_BUFFERS,
-	KHEAP_ID_KEXT,
-
-#define KHEAP_ID_COUNT (KHEAP_ID_KEXT + 1)
-});
-
-/*!
- * @typedef zone_stats_t
- *
- * @abstract
- * The opaque type for per-cpu zone stats that are accumulated per zone
- * or per zone-view.
- */
-typedef struct zone_stats *__zpercpu zone_stats_t;
-
-/*!
- * @typedef zone_view_t
- *
- * @abstract
- * A view on a zone for accounting purposes.
- *
- * @discussion
- * A zone view uses the zone it references for the allocations backing store,
- * but does the allocation accounting at the view level.
- *
- * These accounting are surfaced by @b zprint(1) and similar tools,
- * which allow for cheap but finer grained understanding of allocations
- * without any fragmentation cost.
- *
- * Zone views are protected by the kernel lockdown and can't be initialized
- * dynamically. They must be created using @c ZONE_VIEW_DEFINE().
- */
-typedef struct zone_view *zone_view_t;
-struct zone_view {
-	zone_t          zv_zone;
-	zone_stats_t    zv_stats;
-	const char     *zv_name;
-	zone_view_t     zv_next;
-};
-
-/*!
- * @macro ZONE_VIEW_DECLARE
- *
- * @abstract
- * (optionally) declares a zone view (in a header).
- *
- * @param var           the name for the zone view.
- */
-#define ZONE_VIEW_DECLARE(var) \
-	extern struct zone_view var[1]
-
-/*!
- * @macro ZONE_VIEW_DEFINE
- *
- * @abstract
- * Defines a given zone view and what it points to.
- *
- * @discussion
- * Zone views can either share a pre-existing zone,
- * or perform a lookup into a kalloc heap for the zone
- * backing the bucket of the proper size.
- *
- * Zone views are initialized during the @c STARTUP_SUB_ZALLOC phase,
- * as the last rank. If views on zones are created, these must have been
- * created before this stage.
- *
- * @param var           the name for the zone view.
- * @param name          a string describing the zone view.
- * @param heap_or_zone  a @c KHEAP_ID_* constant or a pointer to a zone.
- * @param size          the element size to be allocated from this view.
- */
-#define ZONE_VIEW_DEFINE(var, name, heap_or_zone, size) \
-	SECURITY_READ_ONLY_LATE(struct zone_view) var[1] = { { \
-	    .zv_name = name, \
-	} }; \
-	static __startup_data struct zone_view_startup_spec \
-	__startup_zone_view_spec_ ## var = { var, { heap_or_zone }, size }; \
-	STARTUP_ARG(ZALLOC, STARTUP_RANK_LAST, zone_view_startup_init, \
-	    &__startup_zone_view_spec_ ## var)
-
 
 #pragma mark XNU only: zone creation (extended)
 
@@ -685,13 +857,26 @@ __enum_decl(zone_reserved_id_t, zone_id_t, {
 	ZONE_ID_PERMANENT,
 	ZONE_ID_PERCPU_PERMANENT,
 
+	ZONE_ID_TEST_RO,
+
+	ZONE_ID__FIRST_RO = ZONE_ID_TEST_RO,
+	ZONE_ID__LAST_RO = ZONE_ID_TEST_RO,
+
+	ZONE_ID_PMAP,
+	ZONE_ID_VM_MAP,
+	ZONE_ID_VM_MAP_COPY,
+	ZONE_ID_VM_MAP_ENTRY,
+	ZONE_ID_VM_MAP_HOLES,
+	ZONE_ID_VM_PAGES,
 	ZONE_ID_IPC_PORT,
 	ZONE_ID_IPC_PORT_SET,
 	ZONE_ID_IPC_VOUCHERS,
 	ZONE_ID_TASK,
 	ZONE_ID_PROC,
-	ZONE_ID_VM_MAP_COPY,
-	ZONE_ID_PMAP,
+	ZONE_ID_THREAD,
+	ZONE_ID_KAUTH_CRED,
+	ZONE_ID_TURNSTILE,
+	ZONE_ID_SEMAPHORE,
 
 	ZONE_ID__FIRST_DYNAMIC,
 });
@@ -702,6 +887,12 @@ __enum_decl(zone_reserved_id_t, zone_id_t, {
  * Zone ID.
  */
 #define ZONE_ID_ANY ((zone_id_t)-1)
+
+/*!
+ * @const ZONE_ID_INVALID
+ * An invalid zone_id_t that corresponds to nothing.
+ */
+#define ZONE_ID_INVALID ((zone_id_t)-2)
 
 /**!
  * @function zone_name
@@ -721,15 +912,6 @@ const char     *zone_name(
 const char     *zone_heap_name(
 	zone_t                  zone);
 
-/**!
- * @function zone_submap
- *
- * @param zone          the specified zone
- * @returns             the zone (sub)map this zone allocates from.
- */
-extern vm_map_t zone_submap(
-	zone_t                  zone);
-
 /*!
  * @function zone_create_ext
  *
@@ -747,7 +929,6 @@ extern vm_map_t zone_submap(
  * @param extra_setup   a block that can perform non trivial initialization
  *                      on the zone before it is marked valid.
  *                      This block can call advanced setups like:
- *                      - zone_set_submap_idx()
  *                      - zone_set_exhaustible()
  *                      - zone_set_noexpand()
  *
@@ -813,6 +994,8 @@ extern zone_t   zone_create_ext(
  * - isn't sensitive to @c zone_t::elem_size being compromised,
  * - is slightly faster as it saves one load and a multiplication.
  *
+ * @warning: zones using foreign memory can't use this interface.
+ *
  * @param zone_id       the zone ID the address needs to belong to.
  * @param elem_size     the size of elements for this zone.
  * @param addr          the element address to check.
@@ -822,73 +1005,79 @@ extern void     zone_id_require(
 	vm_size_t               elem_size,
 	void                   *addr);
 
+/*!
+ * @function zone_id_require_allow_foreign
+ *
+ * @abstract
+ * Requires for a given pointer to belong to the specified zone, by ID and size.
+ *
+ * @discussion
+ * This is a version of @c zone_id_require() that works with zones allowing
+ * foreign memory.
+ */
+extern void     zone_id_require_allow_foreign(
+	zone_id_t               zone_id,
+	vm_size_t               elem_size,
+	void                   *addr);
+
 /*
  * Zone submap indices
  *
- * Z_SUBMAP_IDX_VA_RESTRICTED_MAP (LP64)
- * used to restrict VM allocations lower in the kernel VA space,
- * for pointer packing
+ * Z_SUBMAP_IDX_VM
+ * this map has the special property that its allocations
+ * can be done without ever locking the submap, and doesn't use
+ * VM entries in the map (which limits certain VM map operations on it).
  *
- * Z_SUBMAP_IDX_GENERAL_MAP
+ * On ILP32 a single zone lives here (the vm_map_entry_reserved_zone).
+ *
+ * On LP64 it is also used to restrict VM allocations on LP64 lower
+ * in the kernel VA space, for pointer packing purposes.
+ *
+ * Z_SUBMAP_IDX_GENERAL
  * used for unrestricted allocations
  *
- * Z_SUBMAP_IDX_BAG_OF_BYTES_MAP
+ * Z_SUBMAP_IDX_BAG_OF_BYTES
  * used to sequester bags of bytes from all other allocations and allow VA reuse
  * within the map
+ *
+ * Z_SUBMAP_IDX_READ_ONLY
+ * used for the read-only allocator
  */
-#if !defined(__LP64__)
-#define Z_SUBMAP_IDX_GENERAL_MAP        0
-#define Z_SUBMAP_IDX_BAG_OF_BYTES_MAP   1
-#define Z_SUBMAP_IDX_COUNT              2
-#else
-#define Z_SUBMAP_IDX_VA_RESTRICTED_MAP  0
-#define Z_SUBMAP_IDX_GENERAL_MAP        1
-#define Z_SUBMAP_IDX_BAG_OF_BYTES_MAP   2
-#define Z_SUBMAP_IDX_COUNT              3
-#endif
-
-/* Change zone sub-map, to be called from the zone_create_ext() setup hook */
-extern void     zone_set_submap_idx(
-	zone_t          zone,
-	unsigned int    submap_idx);
+#define Z_SUBMAP_IDX_VM             0
+#define Z_SUBMAP_IDX_READ_ONLY      1
+#define Z_SUBMAP_IDX_GENERAL        2
+#define Z_SUBMAP_IDX_BAG_OF_BYTES   3
+#define Z_SUBMAP_IDX_COUNT          4
 
 /* Make zone as non expandable, to be called from the zone_create_ext() setup hook */
 extern void     zone_set_noexpand(
 	zone_t          zone,
-	vm_size_t       maxsize);
+	vm_size_t       max_elements);
 
 /* Make zone exhaustible, to be called from the zone_create_ext() setup hook */
 extern void     zone_set_exhaustible(
 	zone_t          zone,
-	vm_size_t       maxsize);
+	vm_size_t       max_elements);
 
-/* Initially fill zone with specified number of elements */
-extern int      zfill(
+/*!
+ * @function zone_fill_initially
+ *
+ * @brief
+ * Initially fill a non collectable zone to have the specified amount of
+ * elements.
+ *
+ * @discussion
+ * This function must be called on a non collectable permanent zone before it
+ * has been used yet.
+ *
+ * @param zone          The zone to fill.
+ * @param nelems        The number of elements to be able to hold.
+ */
+extern void     zone_fill_initially(
 	zone_t          zone,
-	int             nelem);
-
-/* Fill zone with memory */
-extern void     zcram(
-	zone_t          zone,
-	vm_offset_t     newmem,
-	vm_size_t       size);
+	vm_size_t       nelems);
 
 #pragma mark XNU only: misc & implementation details
-
-/*
- * This macro sets "elem" to NULL on free.
- *
- * Note: all values passed to zfree() might be in the element to be freed,
- *       temporaries must be taken, and the resetting to be done prior to free.
- */
-#define zfree(zone, elem) ({ \
-	_Static_assert(sizeof(elem) == sizeof(void *), "elem isn't pointer sized"); \
-	__auto_type __zfree_zone = (zone); \
-	__auto_type __zfree_eptr = &(elem); \
-	__auto_type __zfree_elem = *__zfree_eptr; \
-	*__zfree_eptr = (__typeof__(__zfree_elem))NULL; \
-	(zfree)(__zfree_zone, (void *)__zfree_elem); \
-})
 
 struct zone_create_startup_spec {
 	zone_t                 *z_var;
@@ -915,7 +1104,7 @@ struct zone_view_startup_spec {
 	zone_view_t         zv_view;
 	union {
 		zone_kheap_id_t zv_heapid;
-		zone_t          zv_zone;
+		zone_t         *zv_zone;
 	};
 	vm_size_t           zv_size;
 };
@@ -923,6 +1112,7 @@ struct zone_view_startup_spec {
 extern void zone_view_startup_init(
 	struct zone_view_startup_spec *spec);
 
+extern void zone_userspace_reboot_checks(void);
 
 #if DEBUG || DEVELOPMENT
 #  if __LP64__
@@ -939,6 +1129,26 @@ extern void zone_view_startup_init(
 #define __zpcpu_addr(e)         ((vm_address_t)(e))
 #define __zpcpu_cast(ptr, e)    ((typeof(ptr))(e))
 #define __zpcpu_next(ptr)       __zpcpu_cast(ptr, __zpcpu_addr(ptr) + PAGE_SIZE)
+
+/**
+ * @macro __zpcpu_mangle_for_boot()
+ *
+ * @discussion
+ * Per-cpu variables allocated in zones (as opposed to percpu globals) that need
+ * to function early during boot (before @c STARTUP_SUB_ZALLOC) might use static
+ * storage marked @c __startup_data and replace it with the proper allocation
+ * at the end of the @c STARTUP_SUB_ZALLOC phase (@c STARTUP_RANK_LAST).
+ *
+ * However, some devices boot from a cpu where @c cpu_number() != 0. This macro
+ * provides the proper mangling of the storage into a "fake" percpu pointer so
+ * that accesses through @c zpercpu_get() functions properly.
+ *
+ * This is invalid to use after the @c STARTUP_SUB_ZALLOC phase has completed.
+ */
+#define __zpcpu_mangle_for_boot(ptr)  ({ \
+	assert(startup_phase < STARTUP_SUB_ZALLOC); \
+	__zpcpu_cast(ptr, __zpcpu_mangle(__zpcpu_addr(ptr) - ptoa(cpu_number()))); \
+})
 
 extern unsigned zpercpu_count(void) __pure2;
 
@@ -959,16 +1169,20 @@ extern vm_size_t zleak_per_zone_tracking_threshold;
 extern int get_zleak_state(void);
 
 #endif /* CONFIG_ZLEAKS */
-#if DEBUG || DEVELOPMENT
 
-extern boolean_t run_zone_test(void);
-extern void zone_gc_replenish_test(void);
-extern void zone_alloc_replenish_test(void);
-
-#endif /* DEBUG || DEVELOPMENT */
+extern zone_t percpu_u64_zone;
 
 #pragma GCC visibility pop
 #endif /* XNU_KERNEL_PRIVATE */
+
+#define __zalloc_ptr_load_and_erase(elem) ({            \
+	_Static_assert(sizeof(elem) == sizeof(void *),  \
+	    "elem isn't pointer sized");                \
+	__auto_type __eptr = &(elem);                   \
+	__auto_type __elem = *__eptr;                   \
+	*__eptr = (__typeof__(__elem))NULL;             \
+	__elem;                                         \
+})
 
 __END_DECLS
 

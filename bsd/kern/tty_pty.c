@@ -164,8 +164,8 @@ pty_init(int n_ptys)
 	}
 
 done:
-	_pty_driver.master = PTC_MAJOR;
-	_pty_driver.slave = PTS_MAJOR;
+	_pty_driver.primary = PTC_MAJOR;
+	_pty_driver.replica = PTS_MAJOR;
 	_pty_driver.open_reset = 1;
 	_pty_driver.open = &pty_get_ioctl;
 	_pty_driver.name = &pty_get_name;

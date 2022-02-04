@@ -107,6 +107,10 @@ kernel_section_t *getsectbynamefromheader(
 	kernel_mach_header_t    *header,
 	const char              *seg_name,
 	const char              *sect_name);
+kernel_section_t *getsectbynamefromseg(
+	kernel_segment_command_t        *sgp,
+	const char                      *segname,
+	const char                      *sectname);
 uint32_t getsectoffsetfromheader(
 	kernel_mach_header_t *mhp,
 	const char *segname,

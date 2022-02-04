@@ -106,6 +106,7 @@ bool
 OSString::initWithStringOfLength(const char *cString, size_t inlength)
 {
 	unsigned int   newLength;
+	unsigned int   cStringLength;
 	char         * newString;
 
 	if (!cString || !super::init()) {
@@ -116,8 +117,10 @@ OSString::initWithStringOfLength(const char *cString, size_t inlength)
 		return false;
 	}
 
-	if (strnlen(cString, inlength) < inlength) {
-		return false;
+	cStringLength = (unsigned int)strnlen(cString, inlength);
+
+	if (cStringLength < inlength) {
+		inlength = cStringLength;
 	}
 
 	newLength = (unsigned int) (inlength + 1);
@@ -199,7 +202,7 @@ OSString::withCStringNoCopy(const char *cString)
 }
 
 OSSharedPtr<OSString>
-OSString::withStringOfLength(const char *cString, size_t length)
+OSString::withCString(const char *cString, size_t length)
 {
 	OSSharedPtr<OSString> me = OSMakeShared<OSString>();
 
@@ -325,7 +328,7 @@ OSString::isEqualTo(const OSData *obj) const
 		return false;
 	}
 
-	unsigned int dataLen = obj->getLength();;
+	unsigned int dataLen = obj->getLength();
 	const char * dataPtr = (const char *) obj->getBytesNoCopy();
 
 	if (dataLen != length) {

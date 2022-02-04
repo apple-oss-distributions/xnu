@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2019 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -179,6 +179,7 @@ udp6_output(struct in6pcb *in6p, struct mbuf *m, struct sockaddr *addr6,
 	struct sockaddr_in6 *cfil_sin6 = NULL;
 #endif
 	bool check_qos_marking_again = (so->so_flags1 & SOF1_QOSMARKING_POLICY_OVERRIDE) ? FALSE : TRUE;
+	uint32_t lifscope = IFSCOPE_NONE, fifscope = IFSCOPE_NONE;
 
 	bzero(&ip6oa, sizeof(ip6oa));
 	ip6oa.ip6oa_boundif = IFSCOPE_NONE;
@@ -194,6 +195,9 @@ udp6_output(struct in6pcb *in6p, struct mbuf *m, struct sockaddr *addr6,
 
 	if (in6p->inp_flags & INP_BOUND_IF) {
 		ip6oa.ip6oa_boundif = in6p->inp_boundifp->if_index;
+		ip6oa.ip6oa_flags |= IP6OAF_BOUND_IF;
+	} else if (!in6_embedded_scope && IN6_IS_SCOPE_EMBED(&in6p->in6p_faddr)) {
+		ip6oa.ip6oa_boundif = in6p->inp_fifscope;
 		ip6oa.ip6oa_flags |= IP6OAF_BOUND_IF;
 	}
 	if (INP_NO_CELLULAR(in6p)) {
@@ -223,7 +227,7 @@ udp6_output(struct in6pcb *in6p, struct mbuf *m, struct sockaddr *addr6,
 			cfil_sin6 = (struct sockaddr_in6 *)(void *)cfil_faddr;
 			if ((so->so_state_change_cnt != cfil_so_state_change_cnt) &&
 			    (in6p->in6p_fport != cfil_sin6->sin6_port ||
-			    !IN6_ARE_ADDR_EQUAL(&in6p->in6p_faddr, &cfil_sin6->sin6_addr))) {
+			    !in6_are_addr_equal_scoped(&in6p->in6p_faddr, &cfil_sin6->sin6_addr, in6p->inp_fifscope, cfil_sin6->sin6_scope_id))) {
 				/*
 				 * Socket is connected but socket state and dest addr/port changed.
 				 * We need to use the saved faddr info.
@@ -307,17 +311,24 @@ udp6_output(struct in6pcb *in6p, struct mbuf *m, struct sockaddr *addr6,
 
 		/* KAME hack: embed scopeid */
 		if (in6_embedscope(&sin6->sin6_addr, sin6, in6p, NULL,
-		    optp) != 0) {
+		    optp, IN6_NULL_IF_EMBEDDED_SCOPE(&sin6->sin6_scope_id)) != 0) {
 			error = EINVAL;
 			goto release;
 		}
+		fifscope = sin6->sin6_scope_id;
 
 		if (!IN6_IS_ADDR_V4MAPPED(faddr)) {
+			struct ifnet *src_ifp = NULL;
 			laddr = in6_selectsrc(sin6, optp,
-			    in6p, &in6p->in6p_route, NULL, &storage,
+			    in6p, &in6p->in6p_route, &src_ifp, &storage,
 			    ip6oa.ip6oa_boundif, &error);
+			if (src_ifp != NULL) {
+				lifscope = src_ifp->if_index;
+				ifnet_release(src_ifp);
+			}
 		} else {
 			laddr = &in6p->in6p_laddr;      /* XXX */
+			lifscope = in6p->inp_lifscope;
 		}
 		if (laddr == NULL) {
 			if (error == 0) {
@@ -337,10 +348,13 @@ udp6_output(struct in6pcb *in6p, struct mbuf *m, struct sockaddr *addr6,
 		laddr = &in6p->in6p_laddr;
 		faddr = &in6p->in6p_faddr;
 		fport = in6p->in6p_fport;
+		fifscope = in6p->inp_fifscope;
+		lifscope = in6p->inp_lifscope;
 #if CONTENT_FILTER
 		if (cfil_faddr_use) {
 			faddr = &((struct sockaddr_in6 *)(void *)cfil_faddr)->sin6_addr;
 			fport = ((struct sockaddr_in6 *)(void *)cfil_faddr)->sin6_port;
+			fifscope = ((struct sockaddr_in6 *)(void *)cfil_faddr)->sin6_scope_id;
 
 			/* Do not use cached route */
 			ROUTE_RELEASE(&in6p->in6p_route);
@@ -372,7 +386,7 @@ udp6_output(struct in6pcb *in6p, struct mbuf *m, struct sockaddr *addr6,
 	if (in6p->inp_flow == 0 && in6p->in6p_flags & IN6P_AUTOFLOWLABEL) {
 		in6p->inp_flow &= ~IPV6_FLOWLABEL_MASK;
 		in6p->inp_flow |=
-		    (htonl(in6p->inp_flowhash) & IPV6_FLOWLABEL_MASK);
+		    (htonl(ip6_randomflowlabel()) & IPV6_FLOWLABEL_MASK);
 	}
 
 	if (af == AF_INET) {
@@ -467,6 +481,10 @@ udp6_output(struct in6pcb *in6p, struct mbuf *m, struct sockaddr *addr6,
 				((struct sockaddr_in6 *)(void *)&in6p->inp_route.ro_dst)->sin6_addr =
 				    *faddr;
 
+				if (!in6_embedded_scope) {
+					((struct sockaddr_in6 *)(void *)&in6p->inp_route.ro_dst)->sin6_scope_id =
+					    IN6_IS_SCOPE_EMBED(faddr) ? fifscope : IFSCOPE_NONE;
+				}
 				rtalloc_scoped(&in6p->inp_route, ip6oa.ip6oa_boundif);
 
 				inp_update_necp_policy(in6p, (struct sockaddr *)&from,
@@ -525,6 +543,12 @@ udp6_output(struct in6pcb *in6p, struct mbuf *m, struct sockaddr *addr6,
 		} else {
 			m->m_pkthdr.tx_udp_e_pid = 0;
 		}
+#if (DEBUG || DEVELOPMENT)
+		if (so->so_flags & SOF_MARK_WAKE_PKT) {
+			so->so_flags &= ~SOF_MARK_WAKE_PKT;
+			m->m_pkthdr.pkt_flags |= PKTF_WAKE_PKT;
+		}
+#endif /* (DEBUG || DEVELOPMENT) */
 
 		im6o = in6p->in6p_moptions;
 		if (im6o != NULL) {
@@ -537,6 +561,9 @@ udp6_output(struct in6pcb *in6p, struct mbuf *m, struct sockaddr *addr6,
 			}
 			IM6O_UNLOCK(im6o);
 		}
+
+		ip6_output_setdstifscope(m, fifscope, NULL);
+		ip6_output_setsrcifscope(m, lifscope, NULL);
 
 		socket_unlock(so, 0);
 		error = ip6_output(m, optp, &ro, flags, im6o, NULL, &ip6oa);
@@ -656,7 +683,7 @@ udp6_output(struct in6pcb *in6p, struct mbuf *m, struct sockaddr *addr6,
 		 * If output interface was cellular/expensive, and this
 		 * socket is denied access to it, generate an event.
 		 */
-		if (error != 0 && (ip6oa.ip6oa_retflags & IP6OARF_IFDENIED) &&
+		if (error != 0 && (ip6oa.ip6oa_flags & IP6OAF_R_IFDENIED) &&
 		    (INP_NO_CELLULAR(in6p) || INP_NO_EXPENSIVE(in6p) || INP_NO_CONSTRAINED(in6p))) {
 			soevent(in6p->inp_socket, (SO_FILT_HINT_LOCKED |
 			    SO_FILT_HINT_IFDENIED));

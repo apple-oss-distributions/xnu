@@ -72,10 +72,12 @@ extern btlog_t *btlog_create(size_t numrecords,
     size_t record_btdepth,
     boolean_t caller_will_remove_entries_for_element);
 
-extern void btlog_add_entry(btlog_t *btlog,
+extern void btlog_destroy(btlog_t *);
+
+extern void btlog_add_entry(btlog_t * btlog,
     void *element,
     uint8_t operation,
-    void *bt[],
+    void **__counted_by(btcount) bt,
     size_t btcount);
 
 extern void btlog_remove_entries_for_element(btlog_t *btlog,

@@ -1,10 +1,5 @@
 include ../Makefile.common
 
-CC = $(shell xcrun -sdk "$(SDKROOT)" -find cc)
-STRIP = $(shell xcrun -sdk "$(SDKROOT)" -find strip)
-CODESIGN = $(shell xcrun -sdk "$(SDKROOT)" -find codesign)
-export CODESIGN_ALLOCATE := $(shell xcrun -sdk "$(SDKROOT)" -find codesign_allocate)
-DSYMUTIL = $(shell xcrun -sdk "$(SDKROOT)" -find dsymutil)
 CFLAGS = -O0 -g -isysroot $(SDKROOT) $(ARCH_FLAGS)
 CFLAGS += -Wl,-sectcreate,__INFO_FILTER,__disable,/dev/null
 LDFLAGS = -dead_strip \

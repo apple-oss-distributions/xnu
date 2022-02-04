@@ -1,0 +1,203 @@
+module Darwin.Mach.machine [system] {
+  header "mach/machine.h"
+  export *
+
+  #ifdef XNU_KERNEL_PRIVATE
+  // mach/machine/asm.h is in the public SDK for all OSes, but it
+  // includes mach/arm64/asm.h in __arm64__, and that's only public
+  // in macOS.
+  #endif
+  // declares Value macro which can cause problems in other headers
+  explicit module asm {
+    #ifdef PLATFORM_MacOSX
+    header "mach/machine/asm.h"
+    #endif
+    #if defined(PLATFORM_MacOSX) || defined(PLATFORM_iPhoneSimulator) || defined(PLATFORM_AppleTVSimulator) || defined(PLATFORM_WatchSimulator)
+    header "mach/i386/asm.h"
+    #endif
+    header "mach/arm/asm.h"
+    #ifdef PLATFORM_MacOSX
+    header "mach/arm64/asm.h"
+    #endif
+
+    export *
+  }
+
+  module _structs {
+    header "mach/machine/_structs.h"
+    #if defined(PLATFORM_MacOSX) || defined(PLATFORM_iPhoneSimulator) || defined(PLATFORM_AppleTVSimulator) || defined(PLATFORM_WatchSimulator)
+    header "mach/i386/_structs.h"
+    #endif
+    header "mach/arm/_structs.h"
+
+    export *
+  }
+
+  module boolean {
+    header "mach/machine/boolean.h"
+    #if defined(PLATFORM_MacOSX) || defined(PLATFORM_iPhoneSimulator) || defined(PLATFORM_AppleTVSimulator) || defined(PLATFORM_WatchSimulator)
+    header "mach/i386/boolean.h"
+    #endif
+    header "mach/arm/boolean.h"
+
+    export *
+  }
+
+  module exception {
+    header "mach/machine/exception.h"
+    #if defined(PLATFORM_MacOSX) || defined(PLATFORM_iPhoneSimulator) || defined(PLATFORM_AppleTVSimulator) || defined(PLATFORM_WatchSimulator)
+    header "mach/i386/exception.h"
+    #endif
+    header "mach/arm/exception.h"
+
+    export *
+  }
+
+  #if defined(PLATFORM_MacOSX) || defined(PLATFORM_iPhoneSimulator) || defined(PLATFORM_AppleTVSimulator) || defined(PLATFORM_WatchSimulator)
+  module fp_reg {
+    header "mach/i386/fp_reg.h"
+    export *
+  }
+
+  #endif
+  module kern_return {
+    header "mach/machine/kern_return.h"
+    #if defined(PLATFORM_MacOSX) || defined(PLATFORM_iPhoneSimulator) || defined(PLATFORM_AppleTVSimulator) || defined(PLATFORM_WatchSimulator)
+    header "mach/i386/kern_return.h"
+    #endif
+    header "mach/arm/kern_return.h"
+
+    export *
+  }
+
+  // ndr_def.h defines a non-external global variable and can only
+  // be included from a single implementation file.
+  explicit module ndr_def {
+    header "mach/machine/ndr_def.h"
+    export *
+
+    #ifdef XNU_KERNEL_PRIVATE
+    // mach/{i386,arm}/ndr_def.h are conceptually a part of mach/machine/ndr_def.h,
+    // and so belong to this module, but need to be excluded or else clang will
+    // attempt to compile {i386,arm}/ndr_def.h independently. And that fails
+    // because {i386,arm}/ndr_def.h can only be included once, which is from
+    // mach/machine/ndr_def.h.
+    #endif
+    #if defined(PLATFORM_MacOSX) || defined(PLATFORM_iPhoneSimulator) || defined(PLATFORM_AppleTVSimulator) || defined(PLATFORM_WatchSimulator)
+    exclude header "mach/i386/ndr_def.h"
+    #endif
+    exclude header "mach/arm/ndr_def.h"
+  }
+
+  module processor_info {
+    header "mach/machine/processor_info.h"
+    #if defined(PLATFORM_MacOSX) || defined(PLATFORM_iPhoneSimulator) || defined(PLATFORM_AppleTVSimulator) || defined(PLATFORM_WatchSimulator)
+    header "mach/i386/processor_info.h"
+    #endif
+    header "mach/arm/processor_info.h"
+
+    export *
+  }
+
+  module rpc {
+    header "mach/machine/rpc.h"
+    #if defined(PLATFORM_MacOSX) || defined(PLATFORM_iPhoneSimulator) || defined(PLATFORM_AppleTVSimulator) || defined(PLATFORM_WatchSimulator)
+    header "mach/i386/rpc.h"
+    #endif
+    header "mach/arm/rpc.h"
+
+    export *
+  }
+
+  #ifdef XNU_KERNEL_PRIVATE
+  // The PLATFORM_MacOSX headers are in the public SDK for macOS,
+  // but mastered out of the public SDK for the other OSes.
+  #endif
+  #ifdef PLATFORM_MacOSX
+  module sdt {
+    header "mach/machine/sdt.h"
+    export *
+  }
+
+  #endif
+  #if defined(PLATFORM_MacOSX) || defined(PLATFORM_iPhoneSimulator) || defined(PLATFORM_AppleTVSimulator) || defined(PLATFORM_WatchSimulator)
+  module sdt_isa {
+    #ifdef PLATFORM_MacOSX
+    header "mach/machine/sdt_isa.h"
+    #endif
+    header "mach/i386/sdt_isa.h"
+    #ifdef PLATFORM_MacOSX
+    header "mach/arm/sdt_isa.h"
+    #endif
+
+    export *
+  }
+
+  #endif
+  #ifdef XNU_KERNEL_PRIVATE
+  // usr/include/mach/machine/syscall_sw.h and usr/include/mach/i386/syscall_sw.h
+  // are mastered out of all SDKs.
+  #endif
+  module thread_state {
+    header "mach/machine/thread_state.h"
+    #if defined(PLATFORM_MacOSX) || defined(PLATFORM_iPhoneSimulator) || defined(PLATFORM_AppleTVSimulator) || defined(PLATFORM_WatchSimulator)
+    header "mach/i386/thread_state.h"
+    #endif
+    header "mach/arm/thread_state.h"
+
+    export *
+  }
+
+  module thread_status {
+    header "mach/machine/thread_status.h"
+    #if defined(PLATFORM_MacOSX) || defined(PLATFORM_iPhoneSimulator) || defined(PLATFORM_AppleTVSimulator) || defined(PLATFORM_WatchSimulator)
+    header "mach/i386/thread_status.h"
+    #endif
+    header "mach/arm/thread_status.h"
+
+    export *
+  }
+
+  module traps {
+    header "mach/arm/traps.h"
+    export *
+  }
+
+  module vm_param {
+    header "mach/machine/vm_param.h"
+    #if defined(PLATFORM_MacOSX) || defined(PLATFORM_iPhoneSimulator) || defined(PLATFORM_AppleTVSimulator) || defined(PLATFORM_WatchSimulator)
+    header "mach/i386/vm_param.h"
+    #endif
+    header "mach/arm/vm_param.h"
+
+    export *
+  }
+
+  module vm_types {
+    header "mach/machine/vm_types.h"
+    #if defined(PLATFORM_MacOSX) || defined(PLATFORM_iPhoneSimulator) || defined(PLATFORM_AppleTVSimulator) || defined(PLATFORM_WatchSimulator)
+    header "mach/i386/vm_types.h"
+    #endif
+    header "mach/arm/vm_types.h"
+
+    export *
+  }
+  #ifdef XNU_KERNEL_PRIVATE
+  // mach/machine/asm.h is in the public SDK for all OSes, but it
+  // includes mach/arm64/asm.h in __arm64__, and that's only public
+  // in macOS.
+  #endif
+  #ifndef PLATFORM_MacOSX
+
+  exclude header "mach/machine/asm.h"
+  #endif
+  #ifdef XNU_KERNEL_PRIVATE
+  // arm/syscall_sw.h is in the public SDK for macOS, but mastered
+  // out of the public SDK for the other OSes. However, it doesn't
+  // compile (missing include?).
+  #endif
+  #ifdef PLATFORM_MacOSX
+
+  exclude header "mach/arm/syscall_sw.h"
+  #endif
+}

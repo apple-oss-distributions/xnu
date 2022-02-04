@@ -182,6 +182,14 @@
 	    type3, arg3, type4, arg4)                                           \
 	DTRACE_PROBE4(__sched_, name, arg1, arg2, arg3, arg4);
 
+#define DTRACE_SCHED5(name, type1, arg1, type2, arg2,                   \
+	    type3, arg3, type4, arg4, type5, arg5)                              \
+	DTRACE_PROBE5(__sched_, name, arg1, arg2, arg3, arg4, arg5, arg6);
+
+#define DTRACE_SCHED6(name, type1, arg1, type2, arg2,                   \
+	    type3, arg3, type4, arg4, type5, arg5, type6, arg6)                 \
+	DTRACE_PROBE6(__sched_, name, arg1, arg2, arg3, arg4, arg5, arg6);
+
 #define DTRACE_PROC(name)                                               \
 	DTRACE_PROBE(__proc_, name);
 
@@ -449,6 +457,19 @@
 #endif /* PRIVATE */
 
 #ifdef PRIVATE
+#define DTRACE_KCOV1(name, type1, arg1)                            \
+	DTRACE_PROBE1(__kcov_, name, arg1)
+
+#endif /* PRIVATE */
+
+#ifdef PRIVATE
+
+/*
+ * The AppleHV kext uses its own variants of these macros to avoid storing
+ * arguments as intermediate values on the stack (to lessen the overhead).
+ * If/When the mechanism by which SDT probes are generated changes, AppleHV
+ * should be updated too.
+ */
 #define DTRACE_HV(name)                                            \
 	DTRACE_PROBE(__hv_, name)
 

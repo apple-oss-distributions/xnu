@@ -73,7 +73,9 @@
 #include <sys/cdefs.h>
 #include <sys/termios.h>
 #include <sys/select.h>         /* For struct selinfo. */
-
+#if XNU_KERNEL_PRIVATE
+#include <os/refcnt.h>
+#endif
 
 #ifdef KERNEL
 
@@ -124,8 +126,8 @@ struct tty {
 	int     t_state;                /* Device and driver (TS*) state. */
 	int     t_flags;                /* Tty flags. */
 	int     t_timeout;              /* Timeout for ttywait() */
-	struct  pgrp *t_pgrp;           /* Foreground process group. */
-	struct  session *t_session;     /* Enclosing session. */
+	struct  pgrp *t_pgrp;           /* (TTYL+LL) Foreground process group. */
+	struct  session *t_session;     /* (TTYL+LL) Enclosing session. */
 	struct  selinfo t_rsel;         /* Tty read/oob select. */
 	struct  selinfo t_wsel;         /* Tty write select. */
 	struct  termios t_termios;      /* Termios state. */
@@ -143,7 +145,11 @@ struct tty {
 	int     t_lowat;                /* Low water mark. */
 	int     t_gen;                  /* Generation number. */
 	void    *t_iokit;               /* IOKit management */
+#if XNU_KERNEL_PRIVATE
+	os_ref_atomic_t t_refcnt;
+#else
 	int     t_refcnt;               /* reference count */
+#endif
 };
 
 #define TTY_NULL (struct tty *)NULL
@@ -336,6 +342,11 @@ extern void ttyhold(struct tty *tp);
 
 #define PTS_MAJOR 4
 #define PTC_MAJOR 5
+/*
+ * If you need accounting consider using
+ * KALLOC_HEAP_DEFINE to define a view.
+ */
+#define KM_TTYS     KHEAP_DEFAULT
 #endif /* defined(XNU_KERNEL_PRIVATE) */
 
 __END_DECLS

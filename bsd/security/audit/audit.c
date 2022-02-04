@@ -52,7 +52,6 @@
 #include <sys/vnode_internal.h>
 #include <sys/user.h>
 #include <sys/syscall.h>
-#include <sys/malloc.h>
 #include <sys/un.h>
 #include <sys/sysent.h>
 #include <sys/sysproto.h>
@@ -86,7 +85,6 @@
 MALLOC_DEFINE(M_AUDITDATA, "audit_data", "Audit data storage");
 MALLOC_DEFINE(M_AUDITPATH, "audit_path", "Audit path storage");
 MALLOC_DEFINE(M_AUDITTEXT, "audit_text", "Audit text storage");
-KALLOC_HEAP_DEFINE(KHEAP_AUDIT, "Audit", KHEAP_ID_DEFAULT);
 
 /*
  * Audit control settings that are set/read by system calls and are hence
@@ -245,7 +243,7 @@ audit_record_ctor(proc_t p, struct kaudit_record *ar)
 		ar->k_ar.ar_subj_ruid = kauth_cred_getruid(cred);
 		ar->k_ar.ar_subj_rgid = kauth_cred_getrgid(cred);
 		ar->k_ar.ar_subj_egid = kauth_cred_getgid(cred);
-		ar->k_ar.ar_subj_pid = p->p_pid;
+		ar->k_ar.ar_subj_pid = proc_getpid(p);
 		ar->k_ar.ar_subj_auid = cred->cr_audit.as_aia_p->ai_auid;
 		ar->k_ar.ar_subj_asid = cred->cr_audit.as_aia_p->ai_asid;
 		bcopy(&cred->cr_audit.as_mask, &ar->k_ar.ar_subj_amask,
@@ -260,34 +258,34 @@ static void
 audit_record_dtor(struct kaudit_record *ar)
 {
 	if (ar->k_ar.ar_arg_upath1 != NULL) {
-		free(ar->k_ar.ar_arg_upath1, M_AUDITPATH);
+		zfree(ZV_NAMEI, ar->k_ar.ar_arg_upath1);
 	}
 	if (ar->k_ar.ar_arg_upath2 != NULL) {
-		free(ar->k_ar.ar_arg_upath2, M_AUDITPATH);
+		zfree(ZV_NAMEI, ar->k_ar.ar_arg_upath2);
 	}
 	if (ar->k_ar.ar_arg_kpath1 != NULL) {
-		free(ar->k_ar.ar_arg_kpath1, M_AUDITPATH);
+		zfree(ZV_NAMEI, ar->k_ar.ar_arg_kpath1);
 	}
 	if (ar->k_ar.ar_arg_kpath2 != NULL) {
-		free(ar->k_ar.ar_arg_kpath2, M_AUDITPATH);
+		zfree(ZV_NAMEI, ar->k_ar.ar_arg_kpath2);
 	}
 	if (ar->k_ar.ar_arg_text != NULL) {
-		free(ar->k_ar.ar_arg_text, M_AUDITTEXT);
+		zfree(ZV_NAMEI, ar->k_ar.ar_arg_text);
 	}
 	if (ar->k_ar.ar_arg_opaque != NULL) {
-		free(ar->k_ar.ar_arg_opaque, M_AUDITDATA);
+		kfree_data(ar->k_ar.ar_arg_opaque, ar->k_ar.ar_arg_opq_size);
 	}
 	if (ar->k_ar.ar_arg_data != NULL) {
-		free(ar->k_ar.ar_arg_data, M_AUDITDATA);
+		kfree_data_addr(ar->k_ar.ar_arg_data);
 	}
 	if (ar->k_udata != NULL) {
-		free(ar->k_udata, M_AUDITDATA);
+		kfree_data_addr(ar->k_udata);
 	}
 	if (ar->k_ar.ar_arg_argv != NULL) {
-		free(ar->k_ar.ar_arg_argv, M_AUDITTEXT);
+		kfree_data_addr(ar->k_ar.ar_arg_argv);
 	}
 	if (ar->k_ar.ar_arg_envv != NULL) {
-		free(ar->k_ar.ar_arg_envv, M_AUDITTEXT);
+		kfree_data_addr(ar->k_ar.ar_arg_envv);
 	}
 	audit_identity_info_destruct(&ar->k_ar.ar_arg_identity);
 }
@@ -414,10 +412,7 @@ audit_new(int event, proc_t p, __unused struct uthread *uthread)
 	 * limited to the number of concurrent threads servicing system calls
 	 * in the kernel.
 	 */
-	ar = zalloc(audit_record_zone);
-	if (ar == NULL) {
-		return NULL;
-	}
+	ar = zalloc_flags(audit_record_zone, Z_WAITOK | Z_NOFAIL);
 	audit_record_ctor(p, ar);
 	ar->k_ar.ar_event = event;
 
@@ -905,7 +900,7 @@ kau_will_audit(void)
 
 #if CONFIG_COREDUMP
 void
-audit_proc_coredump(proc_t proc, char *path, int errcode)
+audit_proc_coredump(proc_t proc, const char *path, int errcode)
 {
 	struct kaudit_record *ar;
 	struct au_mask *aumask;
@@ -955,10 +950,10 @@ audit_proc_coredump(proc_t proc, char *path, int errcode)
 	}
 	if (path != NULL) {
 		pathp = &ar->k_ar.ar_arg_upath1;
-		*pathp = malloc(MAXPATHLEN, M_AUDITPATH, M_WAITOK);
+		*pathp = zalloc(ZV_NAMEI);
 		if (audit_canon_path(vfs_context_cwd(vfs_context_current()), path,
 		    *pathp)) {
-			free(*pathp, M_AUDITPATH);
+			zfree(ZV_NAMEI, *pathp);
 		} else {
 			ARG_SET_VALID(ar, ARG_UPATH1);
 		}

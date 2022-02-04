@@ -161,19 +161,42 @@ _MALLOC_external(size_t size, int type, int flags)
 		.tag = VM_KERN_MEMORY_KALLOC,
 		.flags = VM_TAG_BT,
 	};
-	return __MALLOC_ext(size, type, flags, &site, KHEAP_KEXT);
+	kalloc_heap_t heap = KHEAP_KEXT;
+
+	if (type == M_SONAME) {
+#if !XNU_TARGET_OS_OSX
+		assert3u(size, <=, UINT8_MAX);
+#endif /* XNU_TARGET_OS_OSX */
+		heap = KHEAP_SONAME;
+	}
+
+	return __MALLOC_ext(size, type, flags, &site, heap);
 }
 
 void
 _FREE_external(void *addr, int type);
 void
-_FREE_external(void *addr, int type __unused)
+_FREE_external(void *addr, int type)
 {
 	/*
 	 * hashinit and other functions allocate on behalf of kexts and do not have
 	 * a matching hashdestroy, so we sadly have to allow this for now.
 	 */
-	kheap_free_addr(KHEAP_ANY, addr);
+	kalloc_heap_t heap = KHEAP_ANY;
+
+	if (type == M_SONAME) {
+		/*
+		 * On macOS, some KEXT is known to use M_SONAME for M_TEMP allocation
+		 */
+#if !XNU_TARGET_OS_OSX
+		kheap_free_bounded(KHEAP_SONAME, addr, 1, UINT8_MAX);
+#else
+		kheap_free_addr(heap, addr);
+#endif /* XNU_TARGET_OS_OSX */
+		return;
+	}
+
+	kheap_free_addr(heap, addr);
 }
 
 void
@@ -228,26 +251,6 @@ sysctl_zone_map_size_and_capacity SYSCTL_HANDLER_ARGS
 SYSCTL_PROC(_kern, OID_AUTO, zone_map_size_and_capacity,
     CTLTYPE_QUAD | CTLFLAG_RD | CTLFLAG_MASKED | CTLFLAG_LOCKED,
     0, 0, &sysctl_zone_map_size_and_capacity, "Q", "Current size and capacity of the zone map");
-
-
-extern boolean_t run_zone_test(void);
-
-static int
-sysctl_run_zone_test SYSCTL_HANDLER_ARGS
-{
-#pragma unused(oidp, arg1, arg2)
-	/* require setting this sysctl to prevent sysctl -a from running this */
-	if (!req->newptr) {
-		return 0;
-	}
-
-	int ret_val = run_zone_test();
-	return SYSCTL_OUT(req, &ret_val, sizeof(ret_val));
-}
-
-SYSCTL_PROC(_kern, OID_AUTO, run_zone_test,
-    CTLTYPE_INT | CTLFLAG_WR | CTLFLAG_MASKED | CTLFLAG_LOCKED,
-    0, 0, &sysctl_run_zone_test, "I", "Test zone allocator KPI");
 
 #endif /* DEBUG || DEVELOPMENT */
 
@@ -383,43 +386,3 @@ sysctl_zones_collectable_bytes SYSCTL_HANDLER_ARGS
 SYSCTL_PROC(_kern, OID_AUTO, zones_collectable_bytes,
     CTLTYPE_QUAD | CTLFLAG_RD | CTLFLAG_MASKED | CTLFLAG_LOCKED,
     0, 0, &sysctl_zones_collectable_bytes, "Q", "Collectable memory in zones");
-
-
-#if DEBUG || DEVELOPMENT
-
-static int
-sysctl_zone_gc_replenish_test SYSCTL_HANDLER_ARGS
-{
-#pragma unused(oidp, arg1, arg2)
-	/* require setting this sysctl to prevent sysctl -a from running this */
-	if (!req->newptr) {
-		return 0;
-	}
-
-	int ret_val = 0;
-	zone_gc_replenish_test();
-	return SYSCTL_OUT(req, &ret_val, sizeof(ret_val));
-}
-
-static int
-sysctl_zone_alloc_replenish_test SYSCTL_HANDLER_ARGS
-{
-#pragma unused(oidp, arg1, arg2)
-	/* require setting this sysctl to prevent sysctl -a from running this */
-	if (!req->newptr) {
-		return 0;
-	}
-
-	int ret_val = 0;
-	zone_alloc_replenish_test();
-	return SYSCTL_OUT(req, &ret_val, sizeof(ret_val));
-}
-
-SYSCTL_PROC(_kern, OID_AUTO, zone_gc_replenish_test,
-    CTLTYPE_INT | CTLFLAG_MASKED | CTLFLAG_LOCKED | CTLFLAG_WR,
-    0, 0, &sysctl_zone_gc_replenish_test, "I", "Test zone GC replenish");
-SYSCTL_PROC(_kern, OID_AUTO, zone_alloc_replenish_test,
-    CTLTYPE_INT | CTLFLAG_MASKED | CTLFLAG_LOCKED | CTLFLAG_WR,
-    0, 0, &sysctl_zone_alloc_replenish_test, "I", "Test zone alloc replenish");
-
-#endif /* DEBUG || DEVELOPMENT */

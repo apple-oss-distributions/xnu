@@ -140,7 +140,7 @@ ptrace(struct proc *p, struct ptrace_args *uap, int32_t *retval)
 		if (ISSET(p->p_lflag, P_LTRACED)) {
 			proc_unlock(p);
 			KERNEL_DEBUG_CONSTANT(BSDDBG_CODE(DBG_BSD_PROC, BSD_PROC_FRCEXIT) | DBG_FUNC_NONE,
-			    p->p_pid, W_EXITCODE(ENOTSUP, 0), 4, 0, 0);
+			    proc_getpid(p), W_EXITCODE(ENOTSUP, 0), 4, 0, 0);
 			exit1(p, W_EXITCODE(ENOTSUP, 0), retval);
 
 			thread_exception_return();
@@ -195,7 +195,7 @@ retry_trace_me: ;
 #endif
 		proc_lock(p);
 		/* Make sure the process wasn't re-parented. */
-		if (p->p_ppid != pproc->p_pid) {
+		if (p->p_ppid != proc_getpid(pproc)) {
 			proc_unlock(p);
 			proc_rele(pproc);
 			goto retry_trace_me;
@@ -257,8 +257,10 @@ retry_trace_me: ;
 		}
 #endif
 
-		if (kauth_authorize_process(proc_ucred(p), KAUTH_PROCESS_CANTRACE,
-		    t, (uintptr_t)&err, 0, 0) == 0) {
+		err = kauth_authorize_process(kauth_cred_get(), KAUTH_PROCESS_CANTRACE,
+		    t, (uintptr_t)&err, 0, 0);
+
+		if (err == 0) {
 			/* it's OK to attach */
 			proc_lock(t);
 			SET(t->p_lflag, P_LTRACED);
@@ -469,7 +471,7 @@ resume:
 			goto out;
 		}
 		th_act = port_name_to_thread(CAST_MACH_PORT_TO_NAME(uap->addr),
-		    PORT_TO_THREAD_NONE);
+		    PORT_INTRANS_OPTIONS_NONE);
 		if (th_act == THREAD_NULL) {
 			error = ESRCH;
 			goto out;
@@ -507,11 +509,12 @@ int
 cantrace(proc_t cur_procp, kauth_cred_t creds, proc_t traced_procp, int *errp)
 {
 	int             my_err;
+	kauth_cred_t    traced_cred;
 	/*
 	 * You can't trace a process if:
 	 *	(1) it's the process that's doing the tracing,
 	 */
-	if (traced_procp->p_pid == cur_procp->p_pid) {
+	if (proc_getpid(traced_procp) == proc_getpid(cur_procp)) {
 		*errp = EINVAL;
 		return 0;
 	}
@@ -528,12 +531,15 @@ cantrace(proc_t cur_procp, kauth_cred_t creds, proc_t traced_procp, int *errp)
 	 *	(3) it's not owned by you, or is set-id on exec
 	 *	    (unless you're root).
 	 */
-	if ((kauth_cred_getruid(creds) != kauth_cred_getruid(proc_ucred(traced_procp)) ||
+	traced_cred = kauth_cred_proc_ref(traced_procp);
+	if ((kauth_cred_getruid(creds) != kauth_cred_getruid(traced_cred) ||
 	    ISSET(traced_procp->p_flag, P_SUGID)) &&
 	    (my_err = suser(creds, &cur_procp->p_acflag)) != 0) {
+		kauth_cred_unref(&traced_cred);
 		*errp = my_err;
 		return 0;
 	}
+	kauth_cred_unref(&traced_cred);
 
 	if ((cur_procp->p_lflag & P_LTRACED) && isinferior(cur_procp, traced_procp)) {
 		*errp = EPERM;

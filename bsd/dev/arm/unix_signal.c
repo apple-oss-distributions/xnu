@@ -312,7 +312,7 @@ sendsig(
 		infostyle = UC_TRAD;
 	}
 
-	trampact = ps->ps_trampact[sig];
+	trampact = SIGTRAMP(p, sig);
 	oonstack = ut->uu_sigstk.ss_flags & SA_ONSTACK;
 
 	/*
@@ -323,7 +323,7 @@ sendsig(
 		int ret = 0;
 		if ((ret = sendsig_get_state64(th_act, &ts.ts64.ss, &user_frame.uf64.mctx)) != 0) {
 #if DEVELOPMENT || DEBUG
-			printf("process [%s][%d] sendsig_get_state64 failed with ret %d, expected 0", p->p_comm, p->p_pid, ret);
+			printf("process [%s][%d] sendsig_get_state64 failed with ret %d, expected 0", p->p_comm, proc_getpid(p), ret);
 #endif
 			goto bad2;
 		}
@@ -334,7 +334,7 @@ sendsig(
 		int ret = 0;
 		if ((ret = sendsig_get_state32(th_act, &ts.ts32.ss, &user_frame.uf32.mctx)) != 0) {
 #if DEVELOPMENT || DEBUG
-			printf("process [%s][%d] sendsig_get_state32 failed with ret %d, expected 0", p->p_comm, p->p_pid, ret);
+			printf("process [%s][%d] sendsig_get_state32 failed with ret %d, expected 0", p->p_comm, proc_getpid(p), ret);
 #endif
 			goto bad2;
 		}
@@ -576,7 +576,7 @@ sendsig(
 		int ret = 0;
 		if ((ret = copyout(&user_frame.uf64, sp, sizeof(user_frame.uf64))) != 0) {
 #if DEVELOPMENT || DEBUG
-			printf("process [%s][%d] copyout of user_frame to  (sp, size) = (0x%llx, %zu) failed with ret %d, expected 0\n", p->p_comm, p->p_pid, sp, sizeof(user_frame.uf64), ret);
+			printf("process [%s][%d] copyout of user_frame to  (sp, size) = (0x%llx, %zu) failed with ret %d, expected 0\n", p->p_comm, proc_getpid(p), sp, sizeof(user_frame.uf64), ret);
 #endif
 			goto bad;
 		}
@@ -585,7 +585,7 @@ sendsig(
 		    catcher, infostyle, sig, (user64_addr_t)&((struct user_sigframe64*)sp)->sinfo,
 		    (user64_addr_t)p_uctx, token, trampact, sp, th_act)) != KERN_SUCCESS) {
 #if DEVELOPMENT || DEBUG
-			printf("process [%s][%d] sendsig_set_thread_state64 failed with kr %d, expected 0", p->p_comm, p->p_pid, kr);
+			printf("process [%s][%d] sendsig_set_thread_state64 failed with kr %d, expected 0", p->p_comm, proc_getpid(p), kr);
 #endif
 			goto bad;
 		}
@@ -846,7 +846,7 @@ sigreturn(
 		if ((user64_addr_t)uap->token != token) {
 #if DEVELOPMENT || DEBUG
 			printf("process %s[%d] sigreturn token mismatch: received 0x%llx expected 0x%llx\n",
-			    p->p_comm, p->p_pid, (user64_addr_t)uap->token, token);
+			    p->p_comm, proc_getpid(p), (user64_addr_t)uap->token, token);
 #endif /* DEVELOPMENT || DEBUG */
 			if (sigreturn_validation != PS_SIGRETURN_VALIDATION_DISABLED) {
 				return EINVAL;
@@ -856,7 +856,7 @@ sigreturn(
 		if (error != 0) {
 #if DEVELOPMENT || DEBUG
 			printf("process %s[%d] sigreturn set_state64 error %d\n",
-			    p->p_comm, p->p_pid, error);
+			    p->p_comm, proc_getpid(p), error);
 #endif /* DEVELOPMENT || DEBUG */
 			return error;
 		}
@@ -869,7 +869,7 @@ sigreturn(
 		if ((user32_addr_t)uap->token != token) {
 #if DEVELOPMENT || DEBUG
 			printf("process %s[%d] sigreturn token mismatch: received 0x%x expected 0x%x\n",
-			    p->p_comm, p->p_pid, (user32_addr_t)uap->token, token);
+			    p->p_comm, proc_getpid(p), (user32_addr_t)uap->token, token);
 #endif /* DEVELOPMENT || DEBUG */
 			if (sigreturn_validation != PS_SIGRETURN_VALIDATION_DISABLED) {
 				return EINVAL;
@@ -879,7 +879,7 @@ sigreturn(
 		if (error != 0) {
 #if DEVELOPMENT || DEBUG
 			printf("process %s[%d] sigreturn sigreturn_set_state32 error %d\n",
-			    p->p_comm, p->p_pid, error);
+			    p->p_comm, proc_getpid(p), error);
 #endif /* DEVELOPMENT || DEBUG */
 			return error;
 		}

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1997-2014 Apple Inc. All rights reserved.
+ * Copyright (c) 1997-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -170,7 +170,7 @@ ndrv_input(
 	char                            *frame_header)
 {
 	struct socket *so;
-	struct sockaddr_dl ndrvsrc;
+	struct sockaddr_dl ndrvsrc = {};
 	struct ndrv_cb *np;
 	int error = 0;
 
@@ -238,12 +238,8 @@ ndrv_attach(struct socket *so, int proto, __unused struct proc *p)
 		return error;
 	}
 
-	MALLOC(np, struct ndrv_cb *, sizeof(*np), M_PCB, M_WAITOK);
-	if (np == NULL) {
-		return ENOMEM;
-	}
+	np = kalloc_type(struct ndrv_cb, Z_WAITOK | Z_ZERO | Z_NOFAIL);
 	so->so_pcb = (caddr_t)np;
-	bzero(np, sizeof(*np));
 #if NDRV_DEBUG
 	printf("NDRV attach: %x, %x, %x\n", so, proto, np);
 #endif
@@ -309,9 +305,12 @@ ndrv_connect(struct socket *so, struct sockaddr *nam, __unused struct proc *p)
 		return EISCONN;
 	}
 
+	if (nam->sa_len < sizeof(struct sockaddr_ndrv)) {
+		return EINVAL;
+	}
+
 	/* Allocate memory to store the remote address */
-	MALLOC(np->nd_faddr, struct sockaddr_ndrv*,
-	    nam->sa_len, M_IFADDR, M_WAITOK);
+	np->nd_faddr = (struct sockaddr_ndrv *) kalloc_data(nam->sa_len, Z_WAITOK);
 	if (np->nd_faddr == NULL) {
 		return ENOMEM;
 	}
@@ -362,10 +361,7 @@ ndrv_bind(struct socket *so, struct sockaddr *nam, __unused struct proc *p)
 		return EINVAL;                  /* XXX */
 	}
 	/* I think we just latch onto a copy here; the caller frees */
-	np->nd_laddr = _MALLOC(sizeof(struct sockaddr_ndrv), M_IFADDR, M_WAITOK);
-	if (np->nd_laddr == NULL) {
-		return ENOMEM;
-	}
+	np->nd_laddr = kalloc_type(struct sockaddr_ndrv, Z_WAITOK | Z_NOFAIL);
 	bcopy((caddr_t) sa, (caddr_t) np->nd_laddr, sizeof(struct sockaddr_ndrv));
 	dname = (char *) sa->snd_name;
 	np->nd_laddr->snd_len = sizeof(struct sockaddr_ndrv);
@@ -497,10 +493,9 @@ ndrv_sockaddr(struct socket *so, struct sockaddr **nam)
 	}
 
 	len = np->nd_laddr->snd_len;
-	MALLOC(*nam, struct sockaddr *, len, M_SONAME, M_WAITOK);
-	if (*nam == NULL) {
-		return ENOMEM;
-	}
+	*nam = (struct sockaddr *)alloc_sockaddr(len,
+	    Z_WAITOK | Z_NOFAIL);
+
 	bcopy((caddr_t)np->nd_laddr, *nam,
 	    (unsigned)len);
 	return 0;
@@ -522,10 +517,9 @@ ndrv_peeraddr(struct socket *so, struct sockaddr **nam)
 	}
 
 	len = np->nd_faddr->snd_len;
-	MALLOC(*nam, struct sockaddr *, len, M_SONAME, M_WAITOK);
-	if (*nam == NULL) {
-		return ENOMEM;
-	}
+	*nam = (struct sockaddr *)alloc_sockaddr(len,
+	    Z_WAITOK | Z_NOFAIL);
+
 	bcopy((caddr_t)np->nd_faddr, *nam,
 	    (unsigned)len);
 	return 0;
@@ -615,10 +609,10 @@ ndrv_do_detach(struct ndrv_cb *np)
 		}
 	}
 	if (np->nd_laddr != NULL) {
-		FREE(np->nd_laddr, M_IFADDR);
+		kfree_type(struct sockaddr_ndrv, np->nd_laddr);
 		np->nd_laddr = NULL;
 	}
-	FREE(np, M_PCB);
+	kfree_type(struct ndrv_cb, np);
 	so->so_pcb = 0;
 	so->so_flags |= SOF_PCBCLEARING;
 	sofree(so);
@@ -633,7 +627,7 @@ ndrv_do_disconnect(struct ndrv_cb *np)
 	printf("NDRV disconnect: %x\n", np);
 #endif
 	if (np->nd_faddr) {
-		FREE(np->nd_faddr, M_IFADDR);
+		kfree_data(np->nd_faddr, np->nd_faddr->snd_len);
 		np->nd_faddr = 0;
 	}
 	/*
@@ -676,6 +670,7 @@ ndrv_setspec(struct ndrv_cb *np, struct sockopt *sopt)
 	struct ifnet_attach_proto_param proto_param;
 	struct ndrv_protocol_desc       ndrvSpec;
 	struct ndrv_demux_desc*         ndrvDemux = NULL;
+	size_t                          ndrvDemuxSize = 0;
 	int                                                     error = 0;
 	struct socket *                         so = np->nd_socket;
 	user_addr_t                                     user_addr;
@@ -737,8 +732,8 @@ ndrv_setspec(struct ndrv_cb *np, struct sockopt *sopt)
 	proto_param.demux_count = ndrvSpec.demux_count;
 
 	/* Allocate storage for demux array */
-	MALLOC(ndrvDemux, struct ndrv_demux_desc*, proto_param.demux_count *
-	    sizeof(struct ndrv_demux_desc), M_TEMP, M_WAITOK);
+	ndrvDemuxSize = proto_param.demux_count * sizeof(struct ndrv_demux_desc);
+	ndrvDemux = (struct ndrv_demux_desc*) kalloc_data(ndrvDemuxSize, Z_WAITOK);
 	if (ndrvDemux == NULL) {
 		return ENOMEM;
 	}
@@ -792,7 +787,7 @@ ndrv_setspec(struct ndrv_cb *np, struct sockopt *sopt)
 		FREE(proto_param.demux_array, M_TEMP);
 	}
 	if (ndrvDemux) {
-		FREE(ndrvDemux, M_TEMP);
+		kfree_data(ndrvDemux, ndrvDemuxSize);
 	}
 
 	return error;
@@ -969,8 +964,7 @@ ndrv_do_remove_multicast(struct ndrv_cb *np, struct sockopt *sopt)
 	}
 
 	// Allocate storage
-	MALLOC(multi_addr, struct sockaddr*, sopt->sopt_valsize,
-	    M_TEMP, M_WAITOK);
+	multi_addr = (struct sockaddr*) kalloc_data(sopt->sopt_valsize, Z_WAITOK);
 	if (multi_addr == NULL) {
 		return ENOMEM;
 	}
@@ -1019,7 +1013,7 @@ ndrv_do_remove_multicast(struct ndrv_cb *np, struct sockopt *sopt)
 		// Free the memory
 		FREE(ndrv_entry, M_IFADDR);
 	}
-	FREE(multi_addr, M_TEMP);
+	kfree_data(multi_addr, multi_addr->sa_len);
 
 	return result;
 }

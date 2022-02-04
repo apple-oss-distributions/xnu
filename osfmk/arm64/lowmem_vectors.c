@@ -45,6 +45,8 @@ extern void     *osversion;
 extern void     *flag_kdp_trigger_reboot;
 extern void     *manual_pkt;
 extern struct vm_object pmap_object_store;      /* store pt pages */
+extern vm_offset_t  c_buffers;
+extern vm_size_t    c_buffers_size;
 
 lowglo lowGlo __attribute__ ((aligned(PAGE_MAX_SIZE))) = {
 	// Increment the major version for changes that break the current Astris
@@ -52,7 +54,7 @@ lowglo lowGlo __attribute__ ((aligned(PAGE_MAX_SIZE))) = {
 	// Increment the minor version for changes that provide additonal info/function
 	// but does not break current usage
 	.lgLayoutMajorVersion = 3,
-	.lgLayoutMinorVersion = 2,
+	.lgLayoutMinorVersion = 3,
 	.lgLayoutMagic = LOWGLO_LAYOUT_MAGIC,
 	.lgVerCode = { 'K', 'r', 'a', 'k', 'e', 'n', ' ', ' ' },
 	.lgZero = 0,
@@ -81,7 +83,9 @@ lowglo lowGlo __attribute__ ((aligned(PAGE_MAX_SIZE))) = {
 	.lgPhysMapBase = -1,
 	.lgPhysMapEnd = -1,
 	.lgPmapIoRangePtr = -1,
-	.lgNumPmapIoRanges = -1
+	.lgNumPmapIoRanges = -1,
+	.lgCompressorBufferAddr = (uint64_t) &c_buffers,  // added in 3.3
+	.lgCompressorSizeAddr   = (uint64_t) &c_buffers_size // added in 3.3
 };
 
 void

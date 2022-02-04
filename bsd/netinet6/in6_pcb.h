@@ -103,16 +103,16 @@ extern void in6_pcbdisconnect(struct inpcb *);
 extern int in6_pcbladdr(struct inpcb *, struct sockaddr *,
     struct in6_addr *, struct ifnet **);
 extern struct inpcb *in6_pcblookup_local(struct inpcbinfo *, struct in6_addr *,
-    u_int, int);
+    u_int, uint32_t, int);
 extern struct inpcb *in6_pcblookup_hash(struct inpcbinfo *, struct in6_addr *,
-    u_int, struct in6_addr *, u_int, int, struct ifnet *);
+    u_int, uint32_t, struct in6_addr *, u_int, uint32_t, int, struct ifnet *);
 extern int in6_pcblookup_hash_exists(struct inpcbinfo *, struct in6_addr *,
-    u_int, struct in6_addr *, u_int, int, uid_t *, gid_t *, struct ifnet *);
+    u_int, uint32_t, struct in6_addr *, u_int, uint32_t, int, uid_t *, gid_t *, struct ifnet *, bool);
 extern void in6_pcbnotify(struct inpcbinfo *, struct sockaddr *, u_int,
     const struct sockaddr *, u_int, int, void *, void (*)(struct inpcb *, int));
 extern void in6_rtchange(struct inpcb *, int);
-extern struct sockaddr *in6_sockaddr(in_port_t port, struct in6_addr *addr_p);
-extern void in6_sockaddr_s(in_port_t, struct in6_addr *, struct sockaddr_in6 *);
+extern struct sockaddr *in6_sockaddr(in_port_t port, struct in6_addr *addr_p, uint32_t ifscope);
+extern void in6_sockaddr_s(in_port_t, struct in6_addr *, struct sockaddr_in6 *, uint32_t);
 extern int in6_getpeeraddr(struct socket *, struct sockaddr **);
 extern int in6_getsockaddr(struct socket *, struct sockaddr **);
 extern int in6_getsockaddr_s(struct socket *, struct sockaddr_in6 *);

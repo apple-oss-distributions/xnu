@@ -38,7 +38,6 @@
 
 #include <kern/kern_types.h>
 #include <kern/clock.h>
-#include <kern/counters.h>
 #include <kern/cpu_number.h>
 #include <kern/cpu_data.h>
 #include <kern/debug.h>
@@ -231,6 +230,7 @@ const struct sched_dispatch_table sched_grrr_dispatch = {
 	.rt_queue_shutdown                              = sched_rtlocal_queue_shutdown,
 	.rt_runq_scan                                   = sched_rtlocal_runq_scan,
 	.rt_runq_count_sum                              = sched_rtlocal_runq_count_sum,
+	.rt_steal_thread                                = sched_rtlocal_steal_thread,
 
 	.qos_max_parallelism                            = sched_qos_max_parallelism,
 	.check_spill                                    = sched_check_spill,
@@ -240,6 +240,8 @@ const struct sched_dispatch_table sched_grrr_dispatch = {
 	.run_count_decr                                 = sched_run_decr,
 	.update_thread_bucket                           = sched_update_thread_bucket,
 	.pset_made_schedulable                          = sched_pset_made_schedulable,
+	.cpu_init_completed                             = NULL,
+	.thread_eligible_for_pset                       = NULL,
 };
 
 extern int      max_unsafe_quanta;

@@ -178,6 +178,7 @@ static const struct bsm_domain bsm_domains[] = {
 	  .bd_local_domain = PF_NO_LOCAL_MAPPING
 #endif
 	},
+	{ .bd_bsm_domain = BSM_PF_INET6, .bd_local_domain = PF_INET6 },
 	{ .bd_bsm_domain = BSM_PF_KEY, .bd_local_domain = PF_KEY },
 	{ .bd_bsm_domain = BSM_PF_NCA,
 #ifdef PF_NCA

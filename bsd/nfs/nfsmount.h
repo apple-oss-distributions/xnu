@@ -370,6 +370,7 @@ struct nfsmount {
 /*
  * NFS mount state flags (nm_state)
  */
+#define NFSSTA_SPLIT_OPEN_OWNER 0x00000020  /* open-owner is based on uid and pid */
 #define NFSSTA_MOUNT_THREAD     0x00000040  /* nfs_mount_connect_thread running */
 #define NFSSTA_MONITOR_SCAN     0x00000080  /* scan of monitored nodes in progress */
 #define NFSSTA_UNMOUNTING       0x00000100  /* an unmount attempt is in progress */

@@ -29,6 +29,7 @@
 
 #include <kern/kern_types.h>
 #include <machine/locks.h>
+#include <machine/endian.h>
 
 #if CONFIG_LTABLE_DEBUG
 #define ltdbg(fmt, ...) \
@@ -58,22 +59,29 @@
  *
  * ---------------------------------------------------------------------- */
 
+#define LTABLE_ID_GEN_SHIFT    0
+#define LTABLE_ID_GEN_BITS    46
+#define LTABLE_ID_GEN_MASK    ((1ull << LTABLE_ID_GEN_BITS) - 1)
+#define LTABLE_ID_IDX_SHIFT   (LTABLE_ID_GEN_BITS)
+#define LTABLE_ID_IDX_BITS    18
+#define LTABLE_ID_IDX_MASK    ((1ull << LTABLE_ID_IDX_BITS) - 1)
+
+#define LT_IDX_MAX            LTABLE_ID_IDX_MASK
+
 struct ltable_id {
 	union {
 		uint64_t id;
 		struct {
-			/*
-			 * this bitfield is OK because we don't need to
-			 * enforce a particular memory layout
-			 */
-			uint64_t idx:18, /* allows indexing up to 8MB of 32byte objects */
-			    generation:46;
+#if BYTE_ORDER == LITTLE_ENDIAN
+			uint64_t generation : LTABLE_ID_GEN_BITS;
+			uint64_t idx : LTABLE_ID_IDX_BITS;
+#else
+			uint64_t idx : LTABLE_ID_IDX_BITS;
+			uint64_t generation : LTABLE_ID_GEN_BITS;
+#endif
 		};
 	};
 };
-
-/* this _must_ match the idx bitfield definition in struct ltable_id */
-#define LT_IDX_MAX  (0x3ffff)
 
 extern vm_size_t     g_lt_max_tbl_size;
 
@@ -232,6 +240,11 @@ extern void ltable_realloc_elem(struct link_table *table,
  */
 extern struct lt_elem *ltable_get_elem(struct link_table *table, uint64_t id);
 
+/**
+ * ltable_elem_valid: returns whether an element ID looks valid.
+ */
+extern bool ltable_elem_valid(struct link_table *table, uint64_t id);
+
 
 /**
  * ltable_put_elem: release a reference to table element
@@ -300,17 +313,6 @@ extern struct lt_elem *lt_elem_list_first(struct link_table *table, uint64_t id)
  * Note that this will return NULL if 'elem' is actually the end of the list.
  */
 extern struct lt_elem *lt_elem_list_next(struct link_table *table,
-    struct lt_elem *elem);
-
-
-/**
- * lt_elem_list_break: break a list in two around 'elem'
- *
- * This function will reset the next_idx field of 'elem' (making it the end of
- * the list), and return the element subsequent to 'elem' in the list
- * (which could be NULL)
- */
-extern struct lt_elem *lt_elem_list_break(struct link_table *table,
     struct lt_elem *elem);
 
 

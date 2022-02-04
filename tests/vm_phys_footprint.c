@@ -18,7 +18,6 @@
 #include <Kernel/kern/ledger.h>
 extern int ledger(int cmd, caddr_t arg1, caddr_t arg2, caddr_t arg3);
 
-T_GLOBAL_META(T_META_RUN_CONCURRENTLY(true));
 boolean_t legacy_footprint;
 
 #if LEGACY_FOOTPRINT_ENTITLED && defined(__arm64__)
@@ -26,6 +25,12 @@ boolean_t legacy_footprint;
 #else /* ENTITLED && __arm64__ */
 #define TEST_VM_NAMESPACE "xnu.vm"
 #endif /* ENTITLED && __arm64__ */
+
+T_GLOBAL_META(
+	T_META_NAMESPACE(TEST_VM_NAMESPACE),
+	T_META_RADAR_COMPONENT_NAME("xnu"),
+	T_META_RADAR_COMPONENT_VERSION("VM"),
+	T_META_RUN_CONCURRENTLY(true));
 
 #define MEM_SIZE (100 * 1024 * 1024) /* 100 MB */
 
@@ -219,7 +224,6 @@ pre_warm(
 
 T_DECL(phys_footprint_anonymous,
     "phys_footprint for anonymous memory",
-    T_META_NAMESPACE(TEST_VM_NAMESPACE),
     T_META_LTEPHASE(LTE_POSTINIT))
 {
 	uint64_t                footprint_before, pagetable_before;
@@ -292,7 +296,6 @@ T_DECL(phys_footprint_anonymous,
 
 T_DECL(phys_footprint_file,
     "phys_footprint for mapped file",
-    T_META_NAMESPACE(TEST_VM_NAMESPACE),
     T_META_LTEPHASE(LTE_POSTINIT))
 {
 	uint64_t                footprint_before, pagetable_before;
@@ -392,7 +395,6 @@ T_DECL(phys_footprint_file,
 
 T_DECL(phys_footprint_purgeable,
     "phys_footprint for purgeable memory",
-    T_META_NAMESPACE(TEST_VM_NAMESPACE),
     T_META_LTEPHASE(LTE_POSTINIT))
 {
 	uint64_t                footprint_before, pagetable_before;
@@ -511,7 +513,6 @@ T_DECL(phys_footprint_purgeable,
 
 T_DECL(phys_footprint_purgeable_ownership,
     "phys_footprint for owned purgeable memory",
-    T_META_NAMESPACE(TEST_VM_NAMESPACE),
     T_META_LTEPHASE(LTE_POSTINIT))
 {
 	uint64_t                footprint_before, pagetable_before;
@@ -675,7 +676,6 @@ T_DECL(phys_footprint_purgeable_ownership,
 #ifdef MAP_MEM_LEDGER_TAGGED
 T_DECL(phys_footprint_ledger_purgeable_owned,
     "phys_footprint for ledger-tagged purgeable memory ownership",
-    T_META_NAMESPACE(TEST_VM_NAMESPACE),
     T_META_LTEPHASE(LTE_POSTINIT))
 {
 	uint64_t                footprint_before, pagetable_before;
@@ -848,7 +848,6 @@ T_DECL(phys_footprint_ledger_purgeable_owned,
 
 T_DECL(phys_footprint_ledger_owned,
     "phys_footprint for ledger-tagged memory ownership",
-    T_META_NAMESPACE(TEST_VM_NAMESPACE),
     T_META_LTEPHASE(LTE_POSTINIT))
 {
 	uint64_t                footprint_before, pagetable_before;
@@ -1148,7 +1147,6 @@ CreateSurface(uint32_t pixelsWide, uint32_t pixelsHigh, uint32_t rowBytesAlignme
 }
 T_DECL(phys_footprint_purgeable_iokit,
     "phys_footprint for purgeable IOKit memory",
-    T_META_NAMESPACE(TEST_VM_NAMESPACE),
     T_META_LTEPHASE(LTE_POSTINIT))
 {
 	uint64_t        footprint_before, pagetable_before;
@@ -1276,7 +1274,6 @@ T_DECL(phys_footprint_purgeable_iokit,
 #if (TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR)
 T_DECL(phys_footprint_nonpurgeable_iokit,
     "phys_footprint for non-purgeable IOKit memory",
-    T_META_NAMESPACE(TEST_VM_NAMESPACE),
     T_META_LTEPHASE(LTE_POSTINIT))
 {
 	uint64_t        footprint_before, pagetable_before;

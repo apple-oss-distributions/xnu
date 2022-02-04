@@ -41,6 +41,7 @@ extern void bsd_ast(thread_t);
 
 #define AST_KEVENT_RETURN_TO_KERNEL  0x0001
 #define AST_KEVENT_REDRIVE_THREADREQ 0x0002
+#define AST_KEVENT_WORKQ_QUANTUM_EXPIRED 0x0004
 
 extern void kevent_ast(thread_t thread, uint16_t bits);
 extern void act_set_astkevent(thread_t thread, uint16_t bits);
@@ -51,4 +52,6 @@ extern void act_set_ast_reset_pcs(thread_t thread);
 extern void ast_dtrace_on(void);
 #endif
 
+extern void act_set_astproc_resource(thread_t);
+extern void proc_filedesc_ast(task_t task);
 #endif  /* _KERN_AST_H_ */

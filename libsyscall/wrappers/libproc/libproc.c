@@ -301,6 +301,33 @@ proc_pidpath_audittoken(audit_token_t *audittoken, void * buffer, uint32_t buffe
 }
 
 int
+proc_current_thread_schedinfo(void *buffer, size_t buffersize)
+{
+	extern uint64_t __thread_selfid(void);
+
+	int retval;
+
+	if (buffersize < PROC_PIDTHREADSCHEDINFO_SIZE) {
+		errno = ENOMEM;
+		return errno;
+	}
+	if (buffersize > PROC_PIDTHREADSCHEDINFO_SIZE) {
+		errno = EOVERFLOW;
+		return errno;
+	}
+
+	pid_t pid = getpid();
+	uint64_t threadid = __thread_selfid();
+
+	retval = __proc_info(PROC_INFO_CALL_PIDINFO, pid, PROC_PIDTHREADSCHEDINFO, threadid, buffer, buffersize);
+
+	if (retval == -1) {
+		return errno;
+	}
+	return 0;
+}
+
+int
 proc_libversion(int *major, int * minor)
 {
 	if (major != NULL) {

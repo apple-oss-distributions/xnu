@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2020 Apple Inc. All rights reserved.
+ * Copyright (c) 2008-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -120,17 +120,8 @@
 
 #define FULLMASK        0xff
 
-lck_grp_t         *sadb_mutex_grp;
-lck_grp_attr_t    *sadb_mutex_grp_attr;
-lck_attr_t        *sadb_mutex_attr;
-decl_lck_mtx_data(, sadb_mutex_data);
-lck_mtx_t         *sadb_mutex = &sadb_mutex_data;
-
-lck_grp_t         *pfkey_stat_mutex_grp;
-lck_grp_attr_t    *pfkey_stat_mutex_grp_attr;
-lck_attr_t        *pfkey_stat_mutex_attr;
-decl_lck_mtx_data(, pfkey_stat_mutex_data);
-lck_mtx_t         *pfkey_stat_mutex = &pfkey_stat_mutex_data;
+static LCK_GRP_DECLARE(sadb_mutex_grp, "sadb");
+LCK_MTX_DECLARE(sadb_mutex_data, &sadb_mutex_grp);
 
 /*
  * Note on SA reference counting:
@@ -561,11 +552,10 @@ void key_init(struct protosw *, struct domain *);
 
 /*
  * PF_KEY init
- * setup locks, call raw_init(), and then init timer and associated data
- *
+ * setup locks, and then init timer and associated data
  */
 void
-key_init(struct protosw *pp, struct domain *dp)
+key_init(struct protosw *pp, struct domain *dp __unused)
 {
 	static int key_initialized = 0;
 	int i;
@@ -580,23 +570,9 @@ key_init(struct protosw *pp, struct domain *dp)
 	}
 	key_initialized = 1;
 
-	sadb_mutex_grp_attr = lck_grp_attr_alloc_init();
-	sadb_mutex_grp = lck_grp_alloc_init("sadb", sadb_mutex_grp_attr);
-	sadb_mutex_attr = lck_attr_alloc_init();
-
-	lck_mtx_init(sadb_mutex, sadb_mutex_grp, sadb_mutex_attr);
-
-	pfkey_stat_mutex_grp_attr = lck_grp_attr_alloc_init();
-	pfkey_stat_mutex_grp = lck_grp_alloc_init("pfkey_stat", pfkey_stat_mutex_grp_attr);
-	pfkey_stat_mutex_attr = lck_attr_alloc_init();
-
-	lck_mtx_init(pfkey_stat_mutex, pfkey_stat_mutex_grp, pfkey_stat_mutex_attr);
-
 	for (i = 0; i < SPIHASHSIZE; i++) {
 		LIST_INIT(&spihash[i]);
 	}
-
-	raw_init(pp, dp);
 
 	bzero((caddr_t)&key_cb, sizeof(key_cb));
 
@@ -671,7 +647,7 @@ key_allocsp(
 	LCK_MTX_ASSERT(sadb_mutex, LCK_MTX_ASSERT_NOTOWNED);
 	/* sanity check */
 	if (spidx == NULL) {
-		panic("key_allocsp: NULL pointer is passed.\n");
+		panic("key_allocsp: NULL pointer is passed.");
 	}
 
 	/* check direction */
@@ -680,7 +656,7 @@ key_allocsp(
 	case IPSEC_DIR_OUTBOUND:
 		break;
 	default:
-		panic("key_allocsp: Invalid direction is passed.\n");
+		panic("key_allocsp: Invalid direction is passed.");
 	}
 
 	/* get a SP entry */
@@ -922,7 +898,7 @@ key_checkrequest(
 
 	/* sanity check */
 	if (isr == NULL || saidx == NULL) {
-		panic("key_checkrequest: NULL pointer is passed.\n");
+		panic("key_checkrequest: NULL pointer is passed.");
 	}
 
 	/* check mode */
@@ -932,7 +908,7 @@ key_checkrequest(
 		break;
 	case IPSEC_MODE_ANY:
 	default:
-		panic("key_checkrequest: Invalid policy defined.\n");
+		panic("key_checkrequest: Invalid policy defined.");
 	}
 
 	/* get current level */
@@ -1048,7 +1024,7 @@ key_send_delete(struct secasvar *sav)
 	key_sa_chgstate(sav, SADB_SASTATE_DEAD);
 
 	if ((satype = key_proto2satype(sav->sah->saidx.proto)) == 0) {
-		panic("key_do_allocsa_policy: invalid proto is passed.\n");
+		panic("key_do_allocsa_policy: invalid proto is passed.");
 	}
 
 	m = key_setsadbmsg(SADB_DELETE, 0,
@@ -1262,16 +1238,18 @@ key_allocsa(
 	u_int family,
 	caddr_t src,
 	caddr_t dst,
+	uint32_t dst_ifscope,
 	u_int proto,
 	u_int32_t spi)
 {
-	return key_allocsa_extended(family, src, dst, proto, spi, NULL);
+	return key_allocsa_extended(family, src, dst, dst_ifscope, proto, spi, NULL);
 }
 
 struct secasvar *
 key_allocsa_extended(u_int family,
     caddr_t src,
     caddr_t dst,
+    uint32_t dst_ifscope,
     u_int proto,
     u_int32_t spi,
     ifnet_t interface)
@@ -1287,7 +1265,7 @@ key_allocsa_extended(u_int family,
 
 	/* sanity check */
 	if (src == NULL || dst == NULL) {
-		panic("key_allocsa: NULL pointer is passed.\n");
+		panic("key_allocsa: NULL pointer is passed.");
 	}
 
 	/*
@@ -1364,9 +1342,13 @@ key_allocsa_extended(u_int family,
 			    sizeof(sin6.sin6_addr));
 			if (IN6_IS_SCOPE_LINKLOCAL(&sin6.sin6_addr)) {
 				/* kame fake scopeid */
-				sin6.sin6_scope_id =
-				    ntohs(sin6.sin6_addr.s6_addr16[1]);
-				sin6.sin6_addr.s6_addr16[1] = 0;
+				sin6.sin6_scope_id = dst_ifscope;
+				if (in6_embedded_scope) {
+					in6_verify_ifscope(&sin6.sin6_addr, sin6.sin6_scope_id);
+					sin6.sin6_scope_id =
+					    ntohs(sin6.sin6_addr.s6_addr16[1]);
+					sin6.sin6_addr.s6_addr16[1] = 0;
+				}
 			}
 			if (key_sockaddrcmp((struct sockaddr*)&sin6,
 			    (struct sockaddr *)&sav->sah->saidx.dst, 0) != 0) {
@@ -1409,13 +1391,15 @@ key_checksa_present(u_int family,
     caddr_t local_addr,
     caddr_t remote_addr,
     u_int16_t local_port,
-    u_int16_t remote_port)
+    u_int16_t remote_port,
+    uint32_t source_ifscope,
+    uint32_t remote_ifscope)
 {
 	LCK_MTX_ASSERT(sadb_mutex, LCK_MTX_ASSERT_NOTOWNED);
 
 	/* sanity check */
 	if (local_addr == NULL || remote_addr == NULL) {
-		panic("key_allocsa: NULL pointer is passed.\n");
+		panic("key_allocsa: NULL pointer is passed.");
 	}
 
 	/*
@@ -1465,9 +1449,13 @@ key_checksa_present(u_int family,
 			memcpy(&src_in6.sin6_addr, local_addr, sizeof(src_in6.sin6_addr));
 			if (IN6_IS_SCOPE_LINKLOCAL(&src_in6.sin6_addr)) {
 				/* kame fake scopeid */
-				src_in6.sin6_scope_id =
-				    ntohs(src_in6.sin6_addr.s6_addr16[1]);
-				src_in6.sin6_addr.s6_addr16[1] = 0;
+				src_in6.sin6_scope_id = source_ifscope;
+				if (in6_embedded_scope) {
+					in6_verify_ifscope(&src_in6.sin6_addr, src_in6.sin6_scope_id);
+					src_in6.sin6_scope_id =
+					    ntohs(src_in6.sin6_addr.s6_addr16[1]);
+					src_in6.sin6_addr.s6_addr16[1] = 0;
+				}
 			}
 			if (key_sockaddrcmp((struct sockaddr*)&src_in6,
 			    (struct sockaddr *)&sah->saidx.src, 0) != 0) {
@@ -1502,9 +1490,12 @@ key_checksa_present(u_int family,
 			memcpy(&dest_in6.sin6_addr, remote_addr, sizeof(dest_in6.sin6_addr));
 			if (IN6_IS_SCOPE_LINKLOCAL(&dest_in6.sin6_addr)) {
 				/* kame fake scopeid */
-				dest_in6.sin6_scope_id =
-				    ntohs(dest_in6.sin6_addr.s6_addr16[1]);
-				dest_in6.sin6_addr.s6_addr16[1] = 0;
+				dest_in6.sin6_scope_id = remote_ifscope;
+				if (in6_embedded_scope) {
+					in6_verify_ifscope(&dest_in6.sin6_addr, dest_in6.sin6_scope_id);
+					dest_in6.sin6_scope_id = ntohs(dest_in6.sin6_addr.s6_addr16[1]);
+					dest_in6.sin6_addr.s6_addr16[1] = 0;
+				}
 			}
 			if (key_sockaddrcmp((struct sockaddr*)&dest_in6,
 			    (struct sockaddr *)&sah->saidx.dst, 0) != 0) {
@@ -1539,7 +1530,7 @@ key_checksa_present(u_int family,
 				if (sav->natt_encapsulated_src_port != local_port) {
 					continue;
 				}
-				found_sa = true;;
+				found_sa = true;
 				break;
 			}
 		}
@@ -1683,7 +1674,7 @@ key_freesp(
 {
 	/* sanity check */
 	if (sp == NULL) {
-		panic("key_freesp: NULL pointer is passed.\n");
+		panic("key_freesp: NULL pointer is passed.");
 	}
 
 	if (!locked) {
@@ -1717,7 +1708,7 @@ key_freesav(
 {
 	/* sanity check */
 	if (sav == NULL) {
-		panic("key_freesav: NULL pointer is passed.\n");
+		panic("key_freesav: NULL pointer is passed.");
 	}
 
 	if (!locked) {
@@ -1750,7 +1741,7 @@ key_delsp(
 {
 	/* sanity check */
 	if (sp == NULL) {
-		panic("key_delsp: NULL pointer is passed.\n");
+		panic("key_delsp: NULL pointer is passed.");
 	}
 
 	LCK_MTX_ASSERT(sadb_mutex, LCK_MTX_ASSERT_OWNED);
@@ -1809,7 +1800,7 @@ key_getsp(
 
 	/* sanity check */
 	if (spidx == NULL) {
-		panic("key_getsp: NULL pointer is passed.\n");
+		panic("key_getsp: NULL pointer is passed.");
 	}
 
 	LIST_FOREACH(sp, &sptree[spidx->dir], chain) {
@@ -1909,10 +1900,10 @@ key_msg2sp(
 
 	/* sanity check */
 	if (xpl0 == NULL) {
-		panic("key_msg2sp: NULL pointer was passed.\n");
+		panic("key_msg2sp: NULL pointer was passed.");
 	}
 	if (len < sizeof(*xpl0)) {
-		panic("key_msg2sp: invalid length.\n");
+		panic("key_msg2sp: invalid length.");
 	}
 	if (len != PFKEY_EXTLEN(xpl0)) {
 		ipseclog((LOG_DEBUG, "key_msg2sp: Invalid msg length.\n"));
@@ -2213,7 +2204,7 @@ key_sp2msg(
 
 	/* sanity check. */
 	if (sp == NULL) {
-		panic("key_sp2msg: NULL pointer was passed.\n");
+		panic("key_sp2msg: NULL pointer was passed.");
 	}
 
 	tlen = key_getspreqmsglen(sp);
@@ -2392,7 +2383,7 @@ key_spdadd(
 
 	/* sanity check */
 	if (so == NULL || m == NULL || mhp == NULL || mhp->msg == NULL) {
-		panic("key_spdadd: NULL pointer is passed.\n");
+		panic("key_spdadd: NULL pointer is passed.");
 	}
 
 	if (mhp->ext[SADB_X_EXT_ADDR_RANGE_SRC_START] != NULL && mhp->ext[SADB_X_EXT_ADDR_RANGE_SRC_END] != NULL) {
@@ -2796,7 +2787,7 @@ key_spddelete(
 
 	/* sanity check */
 	if (so == NULL || m == NULL || mhp == NULL || mhp->msg == NULL) {
-		panic("key_spddelete: NULL pointer is passed.\n");
+		panic("key_spddelete: NULL pointer is passed.");
 	}
 
 	if (mhp->ext[SADB_X_EXT_ADDR_RANGE_SRC_START] != NULL && mhp->ext[SADB_X_EXT_ADDR_RANGE_SRC_END] != NULL) {
@@ -2944,7 +2935,7 @@ key_spddelete2(
 
 	/* sanity check */
 	if (so == NULL || m == NULL || mhp == NULL || mhp->msg == NULL) {
-		panic("key_spddelete2: NULL pointer is passed.\n");
+		panic("key_spddelete2: NULL pointer is passed.");
 	}
 
 	if (mhp->ext[SADB_X_EXT_POLICY] == NULL ||
@@ -3040,7 +3031,7 @@ key_spdenable(
 
 	/* sanity check */
 	if (so == NULL || m == NULL || mhp == NULL || mhp->msg == NULL) {
-		panic("key_spdenable: NULL pointer is passed.\n");
+		panic("key_spdenable: NULL pointer is passed.");
 	}
 
 	if (mhp->ext[SADB_X_EXT_POLICY] == NULL ||
@@ -3105,7 +3096,7 @@ key_spddisable(
 
 	/* sanity check */
 	if (so == NULL || m == NULL || mhp == NULL || mhp->msg == NULL) {
-		panic("key_spddisable: NULL pointer is passed.\n");
+		panic("key_spddisable: NULL pointer is passed.");
 	}
 
 	if (mhp->ext[SADB_X_EXT_POLICY] == NULL ||
@@ -3183,7 +3174,7 @@ key_spdget(
 
 	/* sanity check */
 	if (so == NULL || m == NULL || mhp == NULL || mhp->msg == NULL) {
-		panic("key_spdget: NULL pointer is passed.\n");
+		panic("key_spdget: NULL pointer is passed.");
 	}
 
 	if (mhp->ext[SADB_X_EXT_POLICY] == NULL ||
@@ -3240,13 +3231,13 @@ key_spdacquire(
 
 	/* sanity check */
 	if (sp == NULL) {
-		panic("key_spdacquire: NULL pointer is passed.\n");
+		panic("key_spdacquire: NULL pointer is passed.");
 	}
 	if (sp->req != NULL) {
-		panic("key_spdacquire: called but there is request.\n");
+		panic("key_spdacquire: called but there is request.");
 	}
 	if (sp->policy != IPSEC_POLICY_IPSEC) {
-		panic("key_spdacquire: policy mismathed. IPsec is expected.\n");
+		panic("key_spdacquire: policy mismathed. IPsec is expected.");
 	}
 
 	/* get a entry to check whether sent message or not. */
@@ -3326,7 +3317,7 @@ key_spdflush(
 
 	/* sanity check */
 	if (so == NULL || m == NULL || mhp == NULL || mhp->msg == NULL) {
-		panic("key_spdflush: NULL pointer is passed.\n");
+		panic("key_spdflush: NULL pointer is passed.");
 	}
 
 	if (m->m_len != PFKEY_ALIGN8(sizeof(struct sadb_msg))) {
@@ -3385,7 +3376,7 @@ key_spddump(
 
 	/* sanity check */
 	if (so == NULL || m == NULL || mhp == NULL || mhp->msg == NULL) {
-		panic("key_spddump: NULL pointer is passed.\n");
+		panic("key_spddump: NULL pointer is passed.");
 	}
 
 	if ((bufcount = ipsec_policy_count) == 0) {
@@ -3399,7 +3390,7 @@ key_spddump(
 	}
 
 	if (os_mul_overflow(bufcount, sizeof(struct secpolicy *), &total_req_size)) {
-		panic("key_spddump spbuf requested memory overflow %u\n", bufcount);
+		panic("key_spddump spbuf requested memory overflow %u", bufcount);
 	}
 
 	KMALLOC_WAIT(spbuf, struct secpolicy**, total_req_size);
@@ -3624,7 +3615,7 @@ key_spdexpire(
 
 	/* sanity check */
 	if (sp == NULL) {
-		panic("key_spdexpire: NULL pointer is passed.\n");
+		panic("key_spdexpire: NULL pointer is passed.");
 	}
 
 	/* set msg header */
@@ -3782,7 +3773,7 @@ key_newsah(struct secasindex *saidx,
 
 	/* sanity check */
 	if (saidx == NULL) {
-		panic("key_newsaidx: NULL pointer is passed.\n");
+		panic("key_newsaidx: NULL pointer is passed.");
 	}
 
 	VERIFY(flags == SECURITY_ASSOCIATION_PFKEY || flags == SECURITY_ASSOCIATION_CUSTOM_IPSEC);
@@ -3837,7 +3828,7 @@ key_newsah(struct secasindex *saidx,
 }
 
 /*
- * delete SA index and all SA registerd.
+ * delete SA index and all SA registered.
  */
 void
 key_delsah(
@@ -3851,14 +3842,14 @@ key_delsah(
 
 	/* sanity check */
 	if (sah == NULL) {
-		panic("key_delsah: NULL pointer is passed.\n");
+		panic("key_delsah: NULL pointer is passed.");
 	}
 
 	if (sah->use_count > 0) {
 		return;
 	}
 
-	/* searching all SA registerd in the secindex. */
+	/* searching all SA registered in the secindex. */
 	for (stateidx = 0;
 	    stateidx < _ARRAYLEN(saorder_state_any);
 	    stateidx++) {
@@ -3934,7 +3925,7 @@ key_newsav(
 
 	/* sanity check */
 	if (m == NULL || mhp == NULL || mhp->msg == NULL || sah == NULL) {
-		panic("key_newsa: NULL pointer is passed.\n");
+		panic("key_newsa: NULL pointer is passed.");
 	}
 
 	KMALLOC_NOWAIT(newsav, struct secasvar *, sizeof(struct secasvar));
@@ -3999,19 +3990,12 @@ key_newsav(
 		lft0 = (struct sadb_lifetime *)(void *)mhp->ext[SADB_EXT_LIFETIME_HARD];
 		if (lft0 != NULL) {
 			/* make lifetime for CURRENT */
-			KMALLOC_NOWAIT(newsav->lft_c, struct sadb_lifetime *,
-			    sizeof(struct sadb_lifetime));
+			newsav->lft_c = kalloc_type(struct sadb_lifetime, Z_NOWAIT);
 			if (newsav->lft_c == NULL) {
 				lck_mtx_unlock(sadb_mutex);
-				KMALLOC_WAIT(newsav->lft_c, struct sadb_lifetime *,
-				    sizeof(struct sadb_lifetime));
+				newsav->lft_c = kalloc_type(struct sadb_lifetime,
+				    Z_WAITOK | Z_NOFAIL);
 				lck_mtx_lock(sadb_mutex);
-				if (newsav->lft_c == NULL) {
-					ipseclog((LOG_DEBUG, "key_newsa: No more memory.\n"));
-					key_delsav(newsav);
-					*errp = ENOBUFS;
-					return NULL;
-				}
 			}
 
 			microtime(&tv);
@@ -4085,7 +4069,7 @@ key_reset_sav(struct secasvar *sav)
 
 	/* sanity check */
 	if (sav == NULL) {
-		panic("key_delsav: NULL pointer is passed.\n");
+		panic("key_delsav: NULL pointer is passed.");
 	}
 
 	sav->remote_ike_port = 0;
@@ -4103,7 +4087,7 @@ key_reset_sav(struct secasvar *sav)
 	}
 	if (sav->sched) {
 		bzero(sav->sched, sav->schedlen);
-		KFREE(sav->sched);
+		kfree_data(sav->sched, sav->schedlen);
 		sav->sched = NULL;
 		sav->schedlen = 0;
 	}
@@ -4115,7 +4099,7 @@ key_reset_sav(struct secasvar *sav)
 		}
 	}
 	if (sav->lft_c != NULL) {
-		KFREE(sav->lft_c);
+		kfree_type(struct sadb_lifetime, sav->lft_c);
 		sav->lft_c = NULL;
 	}
 	if (sav->lft_h != NULL) {
@@ -4127,7 +4111,7 @@ key_reset_sav(struct secasvar *sav)
 		sav->lft_s = NULL;
 	}
 	if (sav->iv != NULL) {
-		KFREE(sav->iv);
+		kfree_data(sav->iv, sav->ivlen);
 		sav->iv = NULL;
 	}
 
@@ -4145,7 +4129,7 @@ key_delsav(
 
 	/* sanity check */
 	if (sav == NULL) {
-		panic("key_delsav: NULL pointer is passed.\n");
+		panic("key_delsav: NULL pointer is passed.");
 	}
 
 	if (sav->refcnt > 0) {
@@ -4340,7 +4324,7 @@ key_setsaval(
 
 	/* sanity check */
 	if (m == NULL || mhp == NULL || mhp->msg == NULL) {
-		panic("key_setsaval: NULL pointer is passed.\n");
+		panic("key_setsaval: NULL pointer is passed.");
 	}
 
 	/* initialization */
@@ -4395,7 +4379,8 @@ key_setsaval(
 		if ((sa0->sadb_sa_flags & SADB_X_EXT_OLD) == 0) {
 			if ((sav->flags2 & SADB_X_EXT_SA2_SEQ_PER_TRAFFIC_CLASS) ==
 			    SADB_X_EXT_SA2_SEQ_PER_TRAFFIC_CLASS) {
-				uint32_t range = (1ULL << (sizeof(((struct secreplay *)0)->count) * 8)) / MAX_REPLAY_WINDOWS;
+				const uint32_t range =
+				    (1ULL << (sizeof(((struct secreplay *)0)->seq) * 8)) / MAX_REPLAY_WINDOWS;
 				for (int i = 0; i < MAX_REPLAY_WINDOWS; i++) {
 					sav->replay[i] = keydb_newsecreplay(sa0->sadb_sa_replay);
 					if (sav->replay[i] == NULL) {
@@ -4404,7 +4389,7 @@ key_setsaval(
 						goto fail;
 					}
 					/* Allowed range for sequence per traffic class */
-					sav->replay[i]->count = i * range;
+					sav->replay[i]->seq = i * range;
 					sav->replay[i]->lastseq = ((i + 1) * range) - 1;
 				}
 			} else {
@@ -4511,10 +4496,10 @@ key_setsaval(
 		if (sav->ivlen == 0) {
 			break;
 		}
-		KMALLOC_NOWAIT(sav->iv, caddr_t, sav->ivlen);
+		sav->iv = (caddr_t) kalloc_data(sav->ivlen, Z_NOWAIT);
 		if (sav->iv == 0) {
 			lck_mtx_unlock(sadb_mutex);
-			KMALLOC_WAIT(sav->iv, caddr_t, sav->ivlen);
+			sav->iv = (caddr_t) kalloc_data(sav->ivlen, Z_WAITOK);
 			lck_mtx_lock(sadb_mutex);
 			if (sav->iv == 0) {
 				ipseclog((LOG_DEBUG, "key_setsaval: No more memory.\n"));
@@ -4523,12 +4508,8 @@ key_setsaval(
 			}
 		}
 
-		/* initialize */
-		if (sav->alg_enc == SADB_X_EALG_AES_GCM) {
-			bzero(sav->iv, sav->ivlen);
-		} else {
-			key_randomfill(sav->iv, sav->ivlen);
-		}
+		/* initialize IV with random bytes */
+		key_randomfill(sav->iv, sav->ivlen);
 #endif
 		break;
 	case SADB_SATYPE_AH:
@@ -4544,18 +4525,12 @@ key_setsaval(
 	sav->created = tv.tv_sec;
 
 	/* make lifetime for CURRENT */
-	KMALLOC_NOWAIT(sav->lft_c, struct sadb_lifetime *,
-	    sizeof(struct sadb_lifetime));
+	sav->lft_c = kalloc_type(struct sadb_lifetime, Z_NOWAIT);
 	if (sav->lft_c == NULL) {
 		lck_mtx_unlock(sadb_mutex);
-		KMALLOC_WAIT(sav->lft_c, struct sadb_lifetime *,
-		    sizeof(struct sadb_lifetime));
+		sav->lft_c = kalloc_type(struct sadb_lifetime,
+		    Z_WAITOK | Z_NOFAIL);
 		lck_mtx_lock(sadb_mutex);
-		if (sav->lft_c == NULL) {
-			ipseclog((LOG_DEBUG, "key_setsaval: No more memory.\n"));
-			error = ENOBUFS;
-			goto fail;
-		}
 	}
 
 	microtime(&tv);
@@ -5325,13 +5300,13 @@ key_ismyaddr(
 
 	/* sanity check */
 	if (sa == NULL) {
-		panic("key_ismyaddr: NULL pointer is passed.\n");
+		panic("key_ismyaddr: NULL pointer is passed.");
 	}
 
 	switch (sa->sa_family) {
 #if INET
 	case AF_INET:
-		lck_rw_lock_shared(in_ifaddr_rwlock);
+		lck_rw_lock_shared(&in_ifaddr_rwlock);
 		sin = (struct sockaddr_in *)(void *)sa;
 		for (ia = in_ifaddrhead.tqh_first; ia;
 		    ia = ia->ia_link.tqe_next) {
@@ -5340,12 +5315,12 @@ key_ismyaddr(
 			    sin->sin_len == ia->ia_addr.sin_len &&
 			    sin->sin_addr.s_addr == ia->ia_addr.sin_addr.s_addr) {
 				IFA_UNLOCK(&ia->ia_ifa);
-				lck_rw_done(in_ifaddr_rwlock);
+				lck_rw_done(&in_ifaddr_rwlock);
 				return 1;
 			}
 			IFA_UNLOCK(&ia->ia_ifa);
 		}
-		lck_rw_done(in_ifaddr_rwlock);
+		lck_rw_done(&in_ifaddr_rwlock);
 		break;
 #endif
 	case AF_INET6:
@@ -5909,7 +5884,7 @@ key_timehandler(void)
 		}
 
 		if (os_mul_overflow(spbufcount, sizeof(struct secpolicy *), &total_req_size)) {
-			panic("key_timehandler spbuf requested memory overflow %u\n", spbufcount);
+			panic("key_timehandler spbuf requested memory overflow %u", spbufcount);
 		}
 		KMALLOC_WAIT(spbuf, struct secpolicy **, total_req_size);
 		if (spbuf) {
@@ -5922,7 +5897,7 @@ key_timehandler(void)
 			savbufcount = ipsec_sav_count;
 		}
 		if (os_mul_overflow(savbufcount, sizeof(struct secasvar *), &total_req_size)) {
-			panic("key_timehandler savexbuf requested memory overflow %u\n", savbufcount);
+			panic("key_timehandler savexbuf requested memory overflow %u", savbufcount);
 		}
 		KMALLOC_WAIT(savexbuf, struct secasvar **, total_req_size);
 		if (savexbuf) {
@@ -6502,7 +6477,7 @@ key_getspi(
 
 	/* sanity check */
 	if (so == NULL || m == NULL || mhp == NULL || mhp->msg == NULL) {
-		panic("key_getspi: NULL pointer is passed.\n");
+		panic("key_getspi: NULL pointer is passed.");
 	}
 
 	if (mhp->ext[SADB_EXT_ADDRESS_SRC] == NULL ||
@@ -6654,6 +6629,7 @@ key_getspi(
 	}
 #endif
 	newsah->use_count--;
+	u_int32_t newsav_seq = newsav->seq;
 	lck_mtx_unlock(sadb_mutex);
 
 	{
@@ -6722,7 +6698,7 @@ key_getspi(
 		}
 
 		newmsg = mtod(n, struct sadb_msg *);
-		newmsg->sadb_msg_seq = newsav->seq;
+		newmsg->sadb_msg_seq = newsav_seq;
 		newmsg->sadb_msg_errno = 0;
 		VERIFY(PFKEY_UNIT64(n->m_pkthdr.len) <= UINT16_MAX);
 		newmsg->sadb_msg_len = (u_int16_t)PFKEY_UNIT64(n->m_pkthdr.len);
@@ -6832,7 +6808,7 @@ key_update(
 
 	/* sanity check */
 	if (so == NULL || m == NULL || mhp == NULL || mhp->msg == NULL) {
-		panic("key_update: NULL pointer is passed.\n");
+		panic("key_update: NULL pointer is passed.");
 	}
 
 	/* map satype to proto */
@@ -6934,6 +6910,11 @@ key_update(
 	}
 
 	/* copy sav values */
+	sav->flags2 = flags2;
+	if (flags2 & SADB_X_EXT_SA2_DELETE_ON_DETACH) {
+		sav->so = so;
+	}
+
 	error = key_setsaval(sav, m, mhp);
 	if (error) {
 		goto fail;
@@ -6944,11 +6925,6 @@ key_update(
 		    "key_update: security association head is dead\n"));
 		error = EINVAL;
 		goto fail;
-	}
-
-	sav->flags2 = flags2;
-	if (flags2 & SADB_X_EXT_SA2_DELETE_ON_DETACH) {
-		sav->so = so;
 	}
 
 	/*
@@ -7020,7 +6996,7 @@ key_migrate(struct socket *so,
 
 	/* sanity check */
 	if (so == NULL || m == NULL || mhp == NULL || mhp->msg == NULL) {
-		panic("key_migrate: NULL pointer is passed.\n");
+		panic("key_migrate: NULL pointer is passed.");
 	}
 
 	/* map satype to proto */
@@ -7216,7 +7192,7 @@ key_add(
 
 	/* sanity check */
 	if (so == NULL || m == NULL || mhp == NULL || mhp->msg == NULL) {
-		panic("key_add: NULL pointer is passed.\n");
+		panic("key_add: NULL pointer is passed.");
 	}
 
 	/* map satype to proto */
@@ -7385,7 +7361,7 @@ key_getmsgbuf_x1(
 
 	/* sanity check */
 	if (m == NULL || mhp == NULL || mhp->msg == NULL) {
-		panic("key_getmsgbuf_x1: NULL pointer is passed.\n");
+		panic("key_getmsgbuf_x1: NULL pointer is passed.");
 	}
 
 	/* create new sadb_msg to reply. */
@@ -7440,7 +7416,7 @@ key_delete(
 
 	/* sanity check */
 	if (so == NULL || m == NULL || mhp == NULL || mhp->msg == NULL) {
-		panic("key_delete: NULL pointer is passed.\n");
+		panic("key_delete: NULL pointer is passed.");
 	}
 
 	/* map satype to proto */
@@ -7675,7 +7651,7 @@ key_get(
 
 	/* sanity check */
 	if (so == NULL || m == NULL || mhp == NULL || mhp->msg == NULL) {
-		panic("key_get: NULL pointer is passed.\n");
+		panic("key_get: NULL pointer is passed.");
 	}
 
 	/* map satype to proto */
@@ -8103,10 +8079,10 @@ key_acquire(
 
 	/* sanity check */
 	if (saidx == NULL) {
-		panic("key_acquire: NULL pointer is passed.\n");
+		panic("key_acquire: NULL pointer is passed.");
 	}
 	if ((satype = key_proto2satype(saidx->proto)) == 0) {
-		panic("key_acquire: invalid proto is passed.\n");
+		panic("key_acquire: invalid proto is passed.");
 	}
 
 #ifndef IPSEC_NONBLOCK_ACQUIRE
@@ -8365,7 +8341,7 @@ key_acquire2(
 
 	/* sanity check */
 	if (so == NULL || m == NULL || mhp == NULL || mhp->msg == NULL) {
-		panic("key_acquire2: NULL pointer is passed.\n");
+		panic("key_acquire2: NULL pointer is passed.");
 	}
 
 	/*
@@ -8500,7 +8476,7 @@ key_register(
 
 	/* sanity check */
 	if (so == NULL || m == NULL || mhp == NULL || mhp->msg == NULL) {
-		panic("key_register: NULL pointer is passed.\n");
+		panic("key_register: NULL pointer is passed.");
 	}
 
 	/* check for invalid register message */
@@ -8711,7 +8687,7 @@ key_freereg(
 
 	/* sanity check */
 	if (so == NULL) {
-		panic("key_freereg: NULL pointer is passed.\n");
+		panic("key_freereg: NULL pointer is passed.");
 	}
 
 	/*
@@ -8759,13 +8735,13 @@ key_expire(
 
 	/* sanity check */
 	if (sav == NULL) {
-		panic("key_expire: NULL pointer is passed.\n");
+		panic("key_expire: NULL pointer is passed.");
 	}
 	if (sav->sah == NULL) {
-		panic("key_expire: Why was SA index in SA NULL.\n");
+		panic("key_expire: Why was SA index in SA NULL.");
 	}
 	if ((satype = key_proto2satype(sav->sah->saidx.proto)) == 0) {
-		panic("key_expire: invalid proto is passed.\n");
+		panic("key_expire: invalid proto is passed.");
 	}
 
 	/* set msg header */
@@ -8895,7 +8871,7 @@ key_flush(
 
 	/* sanity check */
 	if (so == NULL || mhp == NULL || mhp->msg == NULL) {
-		panic("key_flush: NULL pointer is passed.\n");
+		panic("key_flush: NULL pointer is passed.");
 	}
 
 	/* map satype to proto */
@@ -8994,7 +8970,7 @@ key_dump(
 
 	/* sanity check */
 	if (so == NULL || m == NULL || mhp == NULL || mhp->msg == NULL) {
-		panic("key_dump: NULL pointer is passed.\n");
+		panic("key_dump: NULL pointer is passed.");
 	}
 
 	/* map satype to proto */
@@ -9014,7 +8990,7 @@ key_dump(
 	}
 
 	if (os_mul_overflow(bufcount, sizeof(struct sav_dump_elem), &total_req_size)) {
-		panic("key_dump savbuf requested memory overflow %u\n", bufcount);
+		panic("key_dump savbuf requested memory overflow %u", bufcount);
 	}
 
 	KMALLOC_WAIT(savbuf, struct sav_dump_elem*, total_req_size);
@@ -9116,7 +9092,7 @@ key_promisc(
 
 	/* sanity check */
 	if (so == NULL || m == NULL || mhp == NULL || mhp->msg == NULL) {
-		panic("key_promisc: NULL pointer is passed.\n");
+		panic("key_promisc: NULL pointer is passed.");
 	}
 
 	olen = PFKEY_UNUNIT64(mhp->msg->sadb_msg_len);
@@ -9355,7 +9331,7 @@ key_parse(
 
 	/* sanity check */
 	if (m == NULL || so == NULL) {
-		panic("key_parse: NULL pointer is passed.\n");
+		panic("key_parse: NULL pointer is passed.");
 	}
 
 #if 0   /*kdebug_sadb assumes msg in linear buffer*/
@@ -9606,7 +9582,7 @@ key_align(
 
 	/* sanity check */
 	if (m == NULL || mhp == NULL) {
-		panic("key_align: NULL pointer is passed.\n");
+		panic("key_align: NULL pointer is passed.");
 	}
 	if (m->m_len < sizeof(struct sadb_msg)) {
 		panic("invalid mbuf passed to key_align");
@@ -10067,7 +10043,7 @@ key_getsastat(struct socket *so,
 
 	/* sanity check */
 	if (so == NULL || m == NULL || mhp == NULL || mhp->msg == NULL) {
-		panic("%s: NULL pointer is passed.\n", __FUNCTION__);
+		panic("%s: NULL pointer is passed.", __FUNCTION__);
 	}
 
 	if (mhp->ext[SADB_EXT_SESSION_ID] == NULL) {
@@ -10097,16 +10073,15 @@ key_getsastat(struct socket *so,
 	}
 
 	if (os_mul_overflow(ipsec_sav_count + 1, sizeof(*sa_stats_sav), &bufsize)) {
-		panic("key_getsastat bufsize requested memory overflow %u\n", ipsec_sav_count);
+		panic("key_getsastat bufsize requested memory overflow %u", ipsec_sav_count);
 	}
 
-	KMALLOC_WAIT(sa_stats_sav, __typeof__(sa_stats_sav), bufsize);
+	sa_stats_sav = (__typeof__(sa_stats_sav))kalloc_data(bufsize, Z_WAITOK | Z_ZERO);
 	if (sa_stats_sav == NULL) {
 		printf("%s: No more memory.\n", __FUNCTION__);
 		error = ENOMEM;
 		goto end;
 	}
-	bzero(sa_stats_sav, bufsize);
 
 	sa_stats_arg = (__typeof__(sa_stats_arg))
 	    (void *)mhp->ext[SADB_EXT_SASTAT];
@@ -10160,7 +10135,7 @@ key_getsastat(struct socket *so,
 	key_sendup_mbuf(so, n, KEY_SENDUP_ALL);
 end:
 	if (sa_stats_sav) {
-		KFREE(sa_stats_sav);
+		kfree_data(sa_stats_sav, bufsize);
 	}
 
 	if (error) {

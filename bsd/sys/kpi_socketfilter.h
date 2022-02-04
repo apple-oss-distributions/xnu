@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2017 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2008-2021 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -737,6 +737,6 @@ __NKE_API_DEPRECATED;
 extern errno_t sockopt_copyout(sockopt_t sopt, void *data, size_t length)
 __NKE_API_DEPRECATED;
 
-__END_DECLS
 #undef __NKE_API_DEPRECATED
+__END_DECLS
 #endif /* __KPI_SOCKETFILTER__ */

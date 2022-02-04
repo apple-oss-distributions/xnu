@@ -1,7 +1,12 @@
 #include <darwintest.h>
 #include <sys/sysctl.h>
 
-T_GLOBAL_META(T_META_NAMESPACE("xnu.arm"));
+T_GLOBAL_META(
+	T_META_NAMESPACE("xnu.arm"),
+	T_META_RADAR_COMPONENT_NAME("xnu"),
+	T_META_RADAR_COMPONENT_VERSION("arm"),
+	T_META_OWNER("mwm")
+	);
 
 T_DECL(ptrauth_data_tests, "invoke the PAC unit tests", T_META_ASROOT(true))
 {

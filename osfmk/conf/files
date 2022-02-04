@@ -33,7 +33,6 @@ OPTIONS/encrypted_swap		optional encrypted_swap
 OPTIONS/kdebug			optional kdebug
 OPTIONS/mach_assert		optional mach_assert
 OPTIONS/mach_debug		optional mach_debug
-#
 OPTIONS/mach_cluster_stats	optional mach_cluster_stats
 OPTIONS/mach_counters		optional mach_counters
 OPTIONS/mach_flipc		optional mach_flipc
@@ -49,17 +48,14 @@ OPTIONS/mach_vm_debug		optional mach_vm_debug
 OPTIONS/mach_page_hash_stats    optional mach_page_hash_stats
 OPTIONS/mig_debug		optional mig_debug
 OPTIONS/vm_cpm			optional vm_cpm
-OPTIONS/task_swapper		optional task_swapper
 OPTIONS/stack_usage		optional stack_usage
 OPTIONS/importance_inheritance	optional importance_inheritance
 OPTIONS/importance_debug	optional importance_debug
 OPTIONS/config_ecc_logging	optional config_ecc_logging
-
 OPTIONS/config_dtrace		optional config_dtrace
-
 OPTIONS/no_kextd		optional no_kextd
-
 OPTIONS/config_quiesce_counter  optional config_quiesce_counter
+OPTIONS/config_perfmon          optional config_perfmon
 
 #
 # gssd files
@@ -79,14 +75,21 @@ OPTIONS/config_quiesce_counter  optional config_quiesce_counter
 #
 # UserNotification files
 #
-./UserNotification/UNDRequest.c			standard
-./UserNotification/UNDReplyServer.c		standard
+./UserNotification/UNDRequest.c			optional config_user_notification
+./UserNotification/UNDReplyServer.c		optional config_user_notification
 osfmk/UserNotification/KUNCUserNotifications.c	standard
 
 osfmk/kdp/kdp.c			optional config_kdp_interactive_debugging
 osfmk/kern/kern_stackshot.c	standard
 osfmk/kdp/kdp_udp.c			optional mach_kdp
 osfmk/kdp/kdp_core.c			optional mach_kdp
+osfmk/kdp/output_stages/out_aea.c	optional config_kdp_coredump_encryption
+osfmk/kdp/output_stages/out_buffer.c	optional mach_kdp
+osfmk/kdp/output_stages/out_disk.c	optional mach_kdp
+osfmk/kdp/output_stages/out_net.c	optional mach_kdp
+osfmk/kdp/output_stages/out_progress_notify.c	optional mach_kdp
+osfmk/kdp/output_stages/out_shmem.c	optional mach_kdp
+osfmk/kdp/output_stages/out_zlib.c	optional mach_kdp
 osfmk/kdp/processor_core.c		optional mach_kdp
 osfmk/kdp/kdp_serial.c			optional config_serial_kdp
 osfmk/ipc/ipc_entry.c			standard
@@ -102,6 +105,7 @@ osfmk/ipc/ipc_port.c			standard
 osfmk/ipc/ipc_pset.c			standard
 osfmk/ipc/ipc_right.c			standard
 osfmk/ipc/ipc_space.c			standard
+osfmk/ipc/ipc_service_port.c		standard
 osfmk/ipc/ipc_table.c			standard
 osfmk/ipc/ipc_voucher.c			standard
 osfmk/ipc/flipc.c			optional mach_flipc
@@ -120,13 +124,15 @@ osfmk/kern/build_config.c		standard
 osfmk/kern/clock.c			standard
 osfmk/kern/clock_oldops.c		standard
 osfmk/kern/coalition.c			optional config_coalitions
-osfmk/kern/counters.c			standard
+osfmk/kern/core_analytics.c		standard
+osfmk/kern/counter_common.c		standard
 osfmk/kern/cpu_quiesce.c		optional config_quiesce_counter
 osfmk/kern/debug.c			standard
 osfmk/kern/ecc_logging.c			optional config_ecc_logging
 osfmk/kern/energy_perf.c		standard
 osfmk/kern/exception.c		standard
 osfmk/kern/extmod_statistics.c		standard
+osfmk/kern/hazard.c		standard
 osfmk/kern/host.c			standard
 osfmk/kern/host_notify.c		standard
 osfmk/kern/ipc_clock.c		standard
@@ -134,24 +140,24 @@ osfmk/kern/ipc_host.c			standard
 osfmk/kern/ipc_kobject.c		standard
 osfmk/kern/ipc_mig.c			standard
 osfmk/kern/ipc_misc.c			standard
-osfmk/kern/ipc_sync.c			standard
 osfmk/kern/ipc_tt.c			standard
 osfmk/kern/kalloc.c			standard
 osfmk/kern/ktrace_background_notify.c	standard
 osfmk/kern/ledger.c			standard
 osfmk/kern/locks.c			standard
-osfmk/kern/tlock.c			standard
+osfmk/kern/lock_ticket.c		standard
 osfmk/kern/ltable.c			standard
 osfmk/kern/mach_node.c			standard
 osfmk/kern/machine.c			standard
 osfmk/kern/mk_sp.c			standard
 osfmk/kern/mk_timer.c		standard
 osfmk/kern/mpsc_queue.c		standard
-osfmk/kern/page_decrypt.c	standard
+osfmk/kern/page_decrypt.c	standard bound-checks
 osfmk/kern/printf.c			standard
 osfmk/kern/priority.c			standard
 osfmk/kern/processor.c		standard
 osfmk/kern/restartable.c		standard
+osfmk/kern/lock_rw.c			standard
 osfmk/kern/sched_average.c		standard
 #ifdef __AMP__
 osfmk/kern/sched_amp.c		optional config_sched_multiq
@@ -167,7 +173,6 @@ osfmk/kern/sched_multiq.c	optional config_sched_multiq
 osfmk/kern/sfi.c			standard
 osfmk/kern/stack.c			standard
 osfmk/kern/startup.c			standard
-osfmk/kern/sync_lock.c		standard
 osfmk/kern/sync_sema.c		standard
 osfmk/kern/syscall_emulation.c	standard
 osfmk/kern/syscall_subr.c		standard
@@ -175,7 +180,7 @@ osfmk/kern/syscall_sw.c		standard
 osfmk/kern/sysdiagnose.c	optional config_sysdiagnose
 osfmk/kern/task.c			standard
 osfmk/kern/task_policy.c	standard
-osfmk/kern/task_swap.c		standard
+osfmk/kern/task_ref.c		standard
 osfmk/kern/test_lock.c		optional development
 osfmk/kern/test_lock.c		optional debug
 osfmk/kern/test_mpsc_queue.c	optional development
@@ -192,7 +197,6 @@ osfmk/kern/ux_handler.c		standard
 osfmk/kern/waitq.c			standard
 osfmk/kern/work_interval.c		standard
 osfmk/kern/zalloc.c			standard
-osfmk/kern/zcache.c		optional config_zcache
 osfmk/kern/gzalloc.c		optional config_gzalloc
 osfmk/kern/bsd_kern.c		optional mach_bsd
 osfmk/kern/hibernate.c		optional hibernation
@@ -200,6 +204,8 @@ osfmk/kern/remote_time.c        standard
 osfmk/kern/memset_s.c		standard
 osfmk/kern/copyout_shim.c	optional copyout_shim
 osfmk/kern/suid_cred.c		standard
+osfmk/kern/task_ident.c     standard
+osfmk/kern/socd_client.c   	standard
 
 ./mach/clock_server.c			standard
 ./mach/clock_priv_server.c		standard
@@ -208,9 +214,7 @@ osfmk/kern/suid_cred.c		standard
 ./mach/exc_server.c			optional mach_bsd
 ./mach/mach_eventlink_server.c		standard
 ./mach/host_priv_server.c		standard
-./mach/host_security_server.c		standard
 ./mach/ktrace_background_user.c		standard
-./mach/lock_set_server.c		standard
 ./mach/mach_exc_user.c			standard
 ./mach/mach_exc_server.c		optional mach_bsd
 ./mach/mach_host_server.c		standard
@@ -250,6 +254,7 @@ osfmk/voucher/ipc_pthread_priority.c		standard
 ./mach/fairplayd_notification_user.c optional config_arcade
 ./mach/arcade_upcall_user.c optional config_arcade
 ./mach/arcade_register_server.c optional config_arcade
+./mach/iocompressionstats_notification_user.c optional config_io_compression_stats
 
 #
 # For now, no external pagers
@@ -262,7 +267,9 @@ osfmk/voucher/ipc_pthread_priority.c		standard
 ./mach/task_server.c			standard
 ./mach/thread_act_server.c		standard
 ./mach/vm32_map_server.c		standard
+./mach/mach_test_upcall_user.c		standard
 
+osfmk/vm/analytics.c			standard
 osfmk/vm/bsd_vm.c			optional mach_bsd
 osfmk/vm/vm_compressor.c		standard
 osfmk/vm/vm_compressor_pager.c		standard
@@ -325,6 +332,8 @@ osfmk/kern/kpc_thread.c                 optional kpc
 osfmk/kern/kpc_common.c                 optional kpc
 
 osfmk/kern/kern_monotonic.c optional monotonic
+
+osfmk/kern/kern_perfmon.c optional config_perfmon
 
 osfmk/console/serial_general.c	standard
 osfmk/console/serial_console.c	optional	serial_console

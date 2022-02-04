@@ -567,7 +567,7 @@ fpu_load_registers(void *fstate)
 	}
 	if (fpu_YMM_capable) {
 		if (layout != XSAVE32 && layout != XSAVE64) {
-			panic("Inappropriate layout: %u\n", layout);
+			panic("Inappropriate layout: %u", layout);
 		}
 	}
 #endif  /* DEBUG */
@@ -586,7 +586,7 @@ fpu_load_registers(void *fstate)
 		xrstor(ifps, xstate_xmask[current_xstate()]);
 		break;
 	default:
-		panic("fpu_load_registers() bad layout: %d\n", layout);
+		panic("fpu_load_registers() bad layout: %d", layout);
 	}
 }
 
@@ -617,7 +617,7 @@ fpu_store_registers(void *fstate, boolean_t is64)
 		}
 		break;
 	default:
-		panic("fpu_store_registers() bad xstate: %d\n", xs);
+		panic("fpu_store_registers() bad xstate: %d", xs);
 	}
 }
 
@@ -629,7 +629,7 @@ void
 fpu_module_init(void)
 {
 	if (!IS_VALID_XSTATE(fpu_default)) {
-		panic("fpu_module_init: invalid extended state %u\n",
+		panic("fpu_module_init: invalid extended state %u",
 		    fpu_default);
 	}
 
@@ -669,7 +669,7 @@ fpu_switch_context(thread_t old, thread_t new)
 	ifps = (old)->machine.ifps;
 #if     DEBUG
 	if (ifps && ((ifps->fp_valid != FALSE) && (ifps->fp_valid != TRUE))) {
-		panic("ifps->fp_valid: %u\n", ifps->fp_valid);
+		panic("ifps->fp_valid: %u", ifps->fp_valid);
 	}
 #endif
 	if (ifps != 0 && (ifps->fp_valid == FALSE)) {
@@ -1296,10 +1296,10 @@ fpextovrflt(void)
 	intr = ml_set_interrupts_enabled(FALSE);
 
 	if (get_interrupt_level()) {
-		panic("FPU segment overrun exception at interrupt context\n");
+		panic("FPU segment overrun exception at interrupt context");
 	}
 	if (current_task() == kernel_task) {
-		panic("FPU segment overrun exception in kernel thread context\n");
+		panic("FPU segment overrun exception in kernel thread context");
 	}
 
 	/*
@@ -1330,8 +1330,6 @@ fpextovrflt(void)
 	}
 }
 
-extern void fpxlog(int, uint32_t, uint32_t, uint32_t);
-
 /*
  * FPU error. Called by AST.
  */
@@ -1340,16 +1338,15 @@ void
 fpexterrflt(void)
 {
 	thread_t        thr_act = current_thread();
-	struct x86_fx_thread_state *ifps = thr_act->machine.ifps;
 	boolean_t       intr;
 
 	intr = ml_set_interrupts_enabled(FALSE);
 
 	if (get_interrupt_level()) {
-		panic("FPU error exception at interrupt context\n");
+		panic("FPU error exception at interrupt context");
 	}
 	if (current_task() == kernel_task) {
-		panic("FPU error exception in kernel thread context\n");
+		panic("FPU error exception in kernel thread context");
 	}
 
 	/*
@@ -1358,12 +1355,6 @@ fpexterrflt(void)
 	fp_save(thr_act);
 
 	(void)ml_set_interrupts_enabled(intr);
-
-	const uint32_t mask = ifps->fx_control &
-	    (FPC_IM | FPC_DM | FPC_ZM | FPC_OM | FPC_UE | FPC_PE);
-	const uint32_t xcpt = ~mask & (ifps->fx_status &
-	    (FPS_IE | FPS_DE | FPS_ZE | FPS_OE | FPS_UE | FPS_PE));
-	fpxlog(EXC_I386_EXTERR, ifps->fx_status, ifps->fx_control, xcpt);
 }
 
 /*
@@ -1408,7 +1399,7 @@ fp_load(
 	assert(ifps);
 #if     DEBUG
 	if (ifps->fp_valid != FALSE && ifps->fp_valid != TRUE) {
-		panic("fp_load() invalid fp_valid: %u, fp_save_layout: %u\n",
+		panic("fp_load() invalid fp_valid: %u, fp_save_layout: %u",
 		    ifps->fp_valid, ifps->fp_save_layout);
 	}
 #endif
@@ -1430,34 +1421,25 @@ void
 fpSSEexterrflt(void)
 {
 	thread_t        thr_act = current_thread();
-	struct x86_fx_thread_state *ifps = thr_act->machine.ifps;
 	boolean_t       intr;
 
 	intr = ml_set_interrupts_enabled(FALSE);
 
 	if (get_interrupt_level()) {
-		panic("SSE exception at interrupt context\n");
+		panic("SSE exception at interrupt context");
 	}
 	if (current_task() == kernel_task) {
-		panic("SSE exception in kernel thread context\n");
+		panic("SSE exception in kernel thread context");
 	}
 
 	/*
 	 * Save the FPU state and turn off the FPU.
 	 */
 	fp_save(thr_act);
+	/* Set TS to ensure we catch attempts to use the FPU before returning from trap handling */
+	set_ts();
 
 	(void)ml_set_interrupts_enabled(intr);
-	/*
-	 * Raise FPU exception.
-	 * Locking not needed on pcb->ifps,
-	 * since thread is running.
-	 */
-	const uint32_t mask = (ifps->fx_MXCSR >> 7) &
-	    (FPC_IM | FPC_DM | FPC_ZM | FPC_OM | FPC_UE | FPC_PE);
-	const uint32_t xcpt = ~mask & (ifps->fx_MXCSR &
-	    (FPS_IE | FPS_DE | FPS_ZE | FPS_OE | FPS_UE | FPS_PE));
-	fpxlog(EXC_I386_SSEEXTERR, ifps->fx_MXCSR, ifps->fx_MXCSR, xcpt);
 }
 
 
@@ -1592,6 +1574,15 @@ fpUDflt(user_addr_t rip)
 	uint8_t         instruction_prefix;
 	boolean_t       is_AVX512_instruction = FALSE;
 	user_addr_t     original_rip = rip;
+
+	/*
+	 * If this thread's xstate is already AVX512, then this #UD is
+	 * a true #UD.
+	 */
+	if (thread_xstate(current_thread()) == AVX512) {
+		return 1;
+	}
+
 	do {
 		/* TODO: as an optimisation, copy up to the lesser of the
 		 * next page boundary or maximal prefix length in one pass

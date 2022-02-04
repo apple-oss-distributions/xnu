@@ -206,7 +206,7 @@ copyio(int copy_type, user_addr_t user_addr, char *kernel_addr,
 			 * Size of elements in the permanent zone is not saved as a part of the
 			 * zone's info
 			 */
-			if (__improbable(src_zone && !src_zone->permanent &&
+			if (__improbable(src_zone && !src_zone->z_permanent &&
 			    kernel_buf_size < nbytes)) {
 				panic("copyio: kernel buffer %p has size %lu < nbytes %lu", kernel_addr, kernel_buf_size, nbytes);
 			}
@@ -240,7 +240,6 @@ copyio(int copy_type, user_addr_t user_addr, char *kernel_addr,
 	case COPYOUTATOMIC32:
 	case COPYOUTATOMIC64:
 		__asan_loadN((uptr)kernel_addr, nbytes);
-		kasan_check_uninitialized((vm_address_t)kernel_addr, nbytes);
 		break;
 	}
 #endif
@@ -517,6 +516,17 @@ copyout(const void *kernel_addr, user_addr_t user_addr, vm_size_t nbytes)
 	return copyio(COPYOUT, user_addr, (char *)(uintptr_t)kernel_addr, nbytes, NULL, 0);
 }
 
+#if (DEBUG || DEVELOPMENT)
+int
+verify_write(const void *source, void *dst, size_t size)
+{
+	int rc;
+	disable_preemption();
+	rc = _bcopy((const char*)source, (char*)dst, size);
+	enable_preemption();
+	return rc;
+}
+#endif
 
 kern_return_t
 copypv(addr64_t src64, addr64_t snk64, unsigned int size, int which)
@@ -528,7 +538,7 @@ copypv(addr64_t src64, addr64_t snk64, unsigned int size, int which)
 	    (unsigned)snk64, size, which, 0);
 
 	if ((which & (cppvPsrc | cppvPsnk)) == 0) {                             /* Make sure that only one is virtual */
-		panic("copypv: no more than 1 parameter may be virtual\n");     /* Not allowed */
+		panic("copypv: no more than 1 parameter may be virtual");     /* Not allowed */
 	}
 	if ((which & (cppvPsrc | cppvPsnk)) == (cppvPsrc | cppvPsnk)) {
 		bothphys = 1;                                                   /* both are physical */

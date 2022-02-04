@@ -69,10 +69,7 @@ IOPMPowerStateQueue::submitPowerEvent(
 {
 	PowerEventEntry * entry;
 
-	entry = IONew(PowerEventEntry, 1);
-	if (!entry) {
-		return false;
-	}
+	entry = IOMallocType(PowerEventEntry);
 
 	entry->eventType = eventType;
 	entry->arg0 = arg0;
@@ -98,7 +95,7 @@ IOPMPowerStateQueue::checkForWork( void )
 		IOLockUnlock(queueLock);
 
 		(*queueAction)(owner, entry->eventType, entry->arg0, entry->arg1);
-		IODelete(entry, PowerEventEntry, 1);
+		IOFreeType(entry, PowerEventEntry);
 
 		IOLockLock(queueLock);
 	}

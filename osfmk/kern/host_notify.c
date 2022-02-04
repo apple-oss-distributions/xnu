@@ -67,11 +67,12 @@ STARTUP(MACH_IPC, STARTUP_RANK_FIRST, host_notify_init);
 
 kern_return_t
 host_request_notification(
-	host_t                                  host,
-	host_flavor_t                   notify_type,
-	ipc_port_t                              port)
+	host_t          host,
+	host_flavor_t   notify_type,
+	ipc_port_t      port)
 {
-	host_notify_t           entry;
+	host_notify_t entry;
+	kern_return_t kr;
 
 	if (host == HOST_NULL) {
 		return KERN_INVALID_ARGUMENT;
@@ -85,61 +86,48 @@ host_request_notification(
 		return KERN_INVALID_ARGUMENT;
 	}
 
-	entry = (host_notify_t)zalloc(host_notify_zone);
-	if (entry == NULL) {
-		return KERN_RESOURCE_SHORTAGE;
-	}
+	entry = zalloc_flags(host_notify_zone, Z_WAITOK | Z_ZERO | Z_NOFAIL);
+	entry->port = port;
 
 	lck_mtx_lock(&host_notify_lock);
-
-	ip_lock(port);
-	if (!ip_active(port) || port->ip_tempowner || port->ip_specialreply ||
-	    ip_is_kolabeled(port) || ip_kotype(port) != IKOT_NONE) {
-		ip_unlock(port);
-
-		lck_mtx_unlock(&host_notify_lock);
-		zfree(host_notify_zone, entry);
-
-		return KERN_FAILURE;
+	kr = ipc_kobject_upgrade(port, entry, IKOT_HOST_NOTIFY);
+	if (kr == KERN_SUCCESS) {
+		enqueue_tail(&host_notify_queue[notify_type], (queue_entry_t)entry);
 	}
-
-	entry->port = port;
-	ipc_kobject_set_atomically(port, (ipc_kobject_t)entry, IKOT_HOST_NOTIFY);
-	ip_unlock(port);
-
-	enqueue_tail(&host_notify_queue[notify_type], (queue_entry_t)entry);
 	lck_mtx_unlock(&host_notify_lock);
 
-	return KERN_SUCCESS;
+	if (kr != KERN_SUCCESS) {
+		zfree(host_notify_zone, entry);
+	}
+
+	return kr;
 }
 
-void
+static void
 host_notify_port_destroy(
-	ipc_port_t                      port)
+	ipc_port_t      port)
 {
-	host_notify_t           entry;
+	host_notify_t entry;
 
 	lck_mtx_lock(&host_notify_lock);
 
-	ip_lock(port);
-	if (ip_kotype(port) == IKOT_HOST_NOTIFY) {
-		entry = (host_notify_t)ip_get_kobject(port);
-		assert(entry != NULL);
-		ipc_kobject_set_atomically(port, IKO_NULL, IKOT_NONE);
-		ip_unlock(port);
-
+	entry = ipc_kobject_downgrade_host_notify(port);
+	if (entry) {
 		assert(entry->port == port);
 		remqueue((queue_entry_t)entry);
-		lck_mtx_unlock(&host_notify_lock);
-		zfree(host_notify_zone, entry);
-
-		ipc_port_release_sonce(port);
-		return;
 	}
-	ip_unlock(port);
 
 	lck_mtx_unlock(&host_notify_lock);
+
+	if (entry) {
+		zfree(host_notify_zone, entry);
+		ipc_port_release_sonce(port);
+	}
 }
+
+IPC_KOBJECT_DEFINE(IKOT_HOST_NOTIFY,
+    .iko_op_allow_upgrade   = true,
+    .iko_op_destroy         = host_notify_port_destroy);
 
 static void
 host_notify_all(
@@ -147,13 +135,13 @@ host_notify_all(
 	mach_msg_header_t       *msg,
 	mach_msg_size_t         msg_size)
 {
-	queue_t         notify_queue = &host_notify_queue[notify_type];
+	queue_t notify_queue = &host_notify_queue[notify_type];
 
 	lck_mtx_lock(&host_notify_lock);
 
 	if (!queue_empty(notify_queue)) {
-		queue_head_t            send_queue;
-		host_notify_t           entry;
+		queue_head_t  send_queue;
+		host_notify_t entry;
 
 		send_queue = *notify_queue;
 		queue_init(notify_queue);
@@ -168,23 +156,17 @@ host_notify_all(
 		msg->msgh_id = host_notify_replyid[notify_type];
 
 		while ((entry = (host_notify_t)dequeue(&send_queue)) != NULL) {
-			ipc_port_t              port;
+			ipc_port_t port = entry->port;
 
-			port = entry->port;
-			assert(port != IP_NULL);
-
-			ip_lock(port);
-			assert(ip_kotype(port) == IKOT_HOST_NOTIFY);
-			assert(ip_get_kobject(port) == (ipc_kobject_t)entry);
-			ipc_kobject_set_atomically(port, IKO_NULL, IKOT_NONE);
-			ip_unlock(port);
+			ipc_kobject_downgrade_host_notify(port);
 
 			lck_mtx_unlock(&host_notify_lock);
+
 			zfree(host_notify_zone, entry);
 
 			msg->msgh_remote_port = port;
 
-			(void) mach_msg_send_from_kernel_proper(msg, msg_size);
+			(void)mach_msg_send_from_kernel_proper(msg, msg_size);
 
 			lck_mtx_lock(&host_notify_lock);
 		}

@@ -63,16 +63,18 @@
 #ifndef _NET_IF_H_
 #define _NET_IF_H_
 
-#include <sys/cdefs.h>
-#include <net/net_kev.h>
-
 #define IF_NAMESIZE     16
 
 #if !defined(_POSIX_C_SOURCE) || defined(_DARWIN_C_SOURCE)
+#ifdef DRIVERKIT
+#include <stddef.h>
+#else
+#include <sys/cdefs.h>
 #include <sys/appleapiopts.h>
 #ifdef __APPLE__
 
 #include <net/if_var.h>
+#include <net/net_kev.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 
@@ -82,7 +84,13 @@
 #include <mach/vm_types.h>
 #endif /* PRIVATE */
 #endif
+#endif /* DRIVERKIT */
 
+#ifndef IFNAMSIZ
+#define IFNAMSIZ        IF_NAMESIZE
+#endif
+
+#ifndef DRIVERKIT
 struct if_clonereq {
 	int     ifcr_total;             /* total cloners (out) */
 	int     ifcr_count;             /* room for this many in user buffer */
@@ -185,6 +193,7 @@ struct if_clonereq32 {
 #define IFXF_MPK_LOG                    0x00000100 /* Multi-layer Packet Logging */
 #define IFXF_CONSTRAINED                0x00000200 /* Constrained - Save Data Mode */
 #define IFXF_LOW_LATENCY                0x00000400 /* Low latency interface */
+#define IFXF_MARK_WAKE_PKT              0x00000800 /* Mark next input packet as wake packet */
 /*
  * Current requirements for an AWDL interface.  Setting/clearing IFEF_AWDL
  * will also trigger the setting/clearing of the rest of the flags.  Once
@@ -401,9 +410,6 @@ struct ifkpi {
  * remainder may be interface specific.
  */
 struct  ifreq {
-#ifndef IFNAMSIZ
-#define IFNAMSIZ        IF_NAMESIZE
-#endif
 	char    ifr_name[IFNAMSIZ];             /* if name, e.g. "en0" */
 	union {
 		struct  sockaddr ifru_addr;
@@ -511,6 +517,7 @@ struct  ifreq {
 #define IFRTYPE_QOSMARKING_MODE_NONE            0
 #define IFRTYPE_QOSMARKING_FASTLANE     1       /* supported: socket/channel */
 #define IFRTYPE_QOSMARKING_RFC4594      2       /* supported: channel only */
+#define IFRTYPE_QOSMARKING_CUSTOM       3       /* supported: socket/channel */
 		u_int32_t ifru_qosmarking_enabled;
 		u_int32_t ifru_disable_output;
 		u_int32_t ifru_low_internet;
@@ -521,6 +528,14 @@ struct  ifreq {
 		u_int32_t ifru_tcp_kao_max;
 		int ifru_mpk_log;        /* Multi Layer Packet Log */
 		u_int32_t ifru_noack_prio;
+		struct {
+			u_int8_t up_bucket;
+			u_int8_t down_bucket;
+		} ifru_estimated_throughput;
+		struct {
+			u_int8_t technology;
+			u_int8_t channel;
+		} ifru_radio_details;
 #endif /* PRIVATE */
 	} ifr_ifru;
 #define ifr_addr        ifr_ifru.ifru_addr      /* address */
@@ -576,6 +591,8 @@ struct  ifreq {
 #define ifr_tcp_kao_max         ifr_ifru.ifru_tcp_kao_max
 #define ifr_mpk_log             ifr_ifru.ifru_mpk_log
 #define ifr_noack_prio          ifr_ifru.ifru_noack_prio
+#define ifr_estimated_throughput  ifr_ifru.ifru_estimated_throughput
+#define ifr_radio_details       ifr_ifru.ifru_radio_details
 
 #endif /* PRIVATE */
 };
@@ -636,7 +653,7 @@ struct ifmediareq32 {
 };
 #pragma pack()
 #endif /* KERNEL_PRIVATE */
-
+#endif /* DRIVERKIT */
 
 #pragma pack(4)
 struct  ifdrv {
@@ -647,6 +664,7 @@ struct  ifdrv {
 };
 #pragma pack()
 
+#ifndef DRIVERKIT
 #ifdef KERNEL_PRIVATE
 #pragma pack(4)
 struct ifdrv32 {
@@ -1094,8 +1112,10 @@ MALLOC_DECLARE(M_IFADDR);
 MALLOC_DECLARE(M_IFMADDR);
 #endif
 #endif
+#endif /* DRIVERKIT */
 #endif /* (_POSIX_C_SOURCE && !_DARWIN_C_SOURCE) */
 
+#ifndef DRIVERKIT
 #ifndef KERNEL
 struct if_nameindex {
 	unsigned int     if_index;      /* 1, 2, ... */
@@ -1108,7 +1128,8 @@ char            *if_indextoname(unsigned int, char *);
 struct           if_nameindex *if_nameindex(void);
 void             if_freenameindex(struct if_nameindex *);
 __END_DECLS
-#endif
+#endif /* KERNEL */
+#endif /* DRIVERKIT */
 
 #ifdef KERNEL
 #include <net/kpi_interface.h>

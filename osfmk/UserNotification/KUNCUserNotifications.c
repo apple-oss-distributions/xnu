@@ -49,6 +49,7 @@
 #include <IOKit/IOCFUnserialize.h>
 #endif
 
+#if CONFIG_USER_NOTIFICATION
 /*
  * DEFINES AND STRUCTURES
  */
@@ -61,34 +62,17 @@ struct UNDReply {
 	ipc_port_t                      self_port;      /* Our port */
 };
 
+static void
+UNDReply_no_senders(ipc_port_t port, mach_port_mscount_t mscount);
+
+IPC_KOBJECT_DEFINE(IKOT_UND_REPLY,
+    .iko_op_stable     = true,
+    .iko_op_no_senders = UNDReply_no_senders);
+
 #define UNDReply_lock(reply)            lck_mtx_lock(&reply->lock)
 #define UNDReply_unlock(reply)          lck_mtx_unlock(&reply->lock)
 
 extern lck_grp_t LockCompatGroup;
-
-/* forward declarations */
-void UNDReply_deallocate(
-	UNDReplyRef             reply);
-
-
-void
-UNDReply_deallocate(
-	UNDReplyRef             reply)
-{
-	ipc_port_t port;
-
-	UNDReply_lock(reply);
-	port = reply->self_port;
-	assert(IP_VALID(port));
-	ipc_kobject_set(port, IKO_NULL, IKOT_NONE);
-	reply->self_port = IP_NULL;
-	UNDReply_unlock(reply);
-
-	ipc_port_dealloc_kernel(port);
-	lck_mtx_destroy(&reply->lock, &LockCompatGroup);
-	kfree(reply, sizeof(struct UNDReply));
-	return;
-}
 
 static UNDServerRef
 UNDServer_reference(void)
@@ -160,7 +144,7 @@ UNDAlertCompletedWithResult_rpc(
 	reply->inprogress = FALSE;
 	reply->userLandNotificationKey = -1;
 	UNDReply_unlock(reply);
-	UNDReply_deallocate(reply);
+
 	return KERN_SUCCESS;
 }
 
@@ -201,17 +185,25 @@ KUNCGetNotificationID(void)
 {
 	UNDReplyRef reply;
 
-	reply = (UNDReplyRef) kalloc(sizeof(struct UNDReply));
-	if (reply != UND_REPLY_NULL) {
-		reply->self_port = ipc_kobject_alloc_port((ipc_kobject_t)reply,
-		    IKOT_UND_REPLY, IPC_KOBJECT_ALLOC_NONE);
-		lck_mtx_init(&reply->lock, &LockCompatGroup, LCK_ATTR_NULL);
-		reply->userLandNotificationKey = -1;
-		reply->inprogress = FALSE;
-	}
+	reply = kalloc_type(struct UNDReply, Z_WAITOK | Z_ZERO | Z_NOFAIL);
+	reply->self_port = ipc_kobject_alloc_port((ipc_kobject_t)reply,
+	    IKOT_UND_REPLY, IPC_KOBJECT_ALLOC_NSREQUEST);
+	lck_mtx_init(&reply->lock, &LockCompatGroup, LCK_ATTR_NULL);
+	reply->userLandNotificationKey = -1;
+	reply->inprogress = FALSE;
+
 	return (KUNCUserNotificationID) reply;
 }
 
+static void
+UNDReply_no_senders(ipc_port_t port, mach_port_mscount_t mscount)
+{
+	UNDReplyRef reply;
+
+	reply = ipc_kobject_dealloc_port(port, mscount, IKOT_UND_REPLY);
+	lck_mtx_destroy(&reply->lock, &LockCompatGroup);
+	kfree_type(struct UNDReply, reply);
+}
 
 kern_return_t
 KUNCExecute(char executionPath[1024], int uid, int gid)
@@ -226,46 +218,6 @@ KUNCExecute(char executionPath[1024], int uid, int gid)
 		return kr;
 	}
 	return MACH_SEND_INVALID_DEST;
-}
-
-kern_return_t
-KUNCUserNotificationCancel(
-	KUNCUserNotificationID id)
-{
-	UNDReplyRef reply = (UNDReplyRef)id;
-	kern_return_t kr;
-	int ulkey;
-
-	if (reply == UND_REPLY_NULL) {
-		return KERN_INVALID_ARGUMENT;
-	}
-
-	UNDReply_lock(reply);
-	if (!reply->inprogress) {
-		UNDReply_unlock(reply);
-		return KERN_INVALID_ARGUMENT;
-	}
-
-	reply->inprogress = FALSE;
-	if ((ulkey = reply->userLandNotificationKey) != 0) {
-		UNDServerRef UNDServer;
-
-		reply->userLandNotificationKey = 0;
-		UNDReply_unlock(reply);
-
-		UNDServer = UNDServer_reference();
-		if (IP_VALID(UNDServer)) {
-			kr = UNDCancelNotification_rpc(UNDServer, ulkey);
-			UNDServer_deallocate(UNDServer);
-		} else {
-			kr = MACH_SEND_INVALID_DEST;
-		}
-	} else {
-		UNDReply_unlock(reply);
-		kr = KERN_SUCCESS;
-	}
-	UNDReply_deallocate(reply);
-	return kr;
 }
 
 kern_return_t
@@ -394,21 +346,14 @@ UNDReplyRef
 convert_port_to_UNDReply(
 	ipc_port_t port)
 {
+	UNDReplyRef reply = NULL;
 	if (IP_VALID(port)) {
-		UNDReplyRef reply;
-
-		ip_lock(port);
-		if (!ip_active(port) || (ip_kotype(port) != IKOT_UND_REPLY)) {
-			ip_unlock(port);
-			return UND_REPLY_NULL;
-		}
-		reply = (UNDReplyRef) ip_get_kobject(port);
-		assert(reply != UND_REPLY_NULL);
-		ip_unlock(port);
-		return reply;
+		reply = ipc_kobject_get_stable(port, IKOT_UND_REPLY);
 	}
-	return UND_REPLY_NULL;
+
+	return reply;
 }
+#endif
 
 /*
  *      User interface for setting the host UserNotification Daemon port.
@@ -419,7 +364,12 @@ host_set_UNDServer(
 	host_priv_t     host_priv,
 	UNDServerRef    server)
 {
+#if CONFIG_USER_NOTIFICATION
 	return host_set_user_notification_port(host_priv, server);
+#else
+#pragma unused(host_priv, server)
+	return KERN_NOT_SUPPORTED;
+#endif
 }
 
 /*
@@ -431,5 +381,10 @@ host_get_UNDServer(
 	host_priv_t     host_priv,
 	UNDServerRef    *serverp)
 {
+#if CONFIG_USER_NOTIFICATION
 	return host_get_user_notification_port(host_priv, serverp);
+#else
+#pragma unused(host_priv, serverp)
+	return KERN_NOT_SUPPORTED;
+#endif
 }

@@ -111,6 +111,7 @@ typedef int  stop_fcn_t(struct tty *tp, int rw);
 typedef int  reset_fcn_t(int uban);
 typedef int  select_fcn_t(dev_t dev, int which, void * wql, struct proc *p);
 typedef int  mmap_fcn_t(void);
+typedef int  rsvd_fcn_t(void);
 
 #define d_open_t        open_close_fcn_t
 #define d_close_t       open_close_fcn_t
@@ -144,8 +145,8 @@ __END_DECLS
 #define eno_select              ((select_fcn_t *)&enodev)
 
 /* For source backward compatibility only! */
-#define eno_getc                ((void *)&enodev)
-#define eno_putc                ((void *)&enodev)
+#define eno_getc                ((rsvd_fcn_t *)&enodev)
+#define eno_putc                ((rsvd_fcn_t *)&enodev)
 
 /*
  * Block device switch table
@@ -192,8 +193,8 @@ struct cdevsw {
 	select_fcn_t            *d_select;
 	mmap_fcn_t              *d_mmap;
 	strategy_fcn_t          *d_strategy;
-	void                    *d_reserved_1;
-	void                    *d_reserved_2;
+	rsvd_fcn_t              *d_reserved_1;
+	rsvd_fcn_t              *d_reserved_2;
 	int                     d_type;
 };
 
@@ -206,14 +207,6 @@ extern uint64_t cdevsw_flags[];
 #define CDEVSW_IS_PTS        0x08
 
 struct thread;
-
-typedef struct devsw_lock {
-	TAILQ_ENTRY(devsw_lock)         dl_list;
-	struct thread                   *dl_thread;
-	dev_t                           dl_dev;
-	int                             dl_mode;
-} *devsw_lock_t;
-
 #endif /* BSD_KERNEL_PRIVATE */
 
 
@@ -295,7 +288,6 @@ extern struct swdevt swdevt[];
  */
 __BEGIN_DECLS
 #ifdef KERNEL_PRIVATE
-void devsw_init(void);
 extern struct cdevsw cdevsw[];
 extern int cdevsw_setkqueueok(int, const struct cdevsw*, int);
 #endif /* KERNEL_PRIVATE */

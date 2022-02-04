@@ -14,6 +14,9 @@
 
 T_GLOBAL_META(
 	T_META_NAMESPACE("xnu.stackshot"),
+	T_META_RADAR_COMPONENT_NAME("xnu"),
+	T_META_RADAR_COMPONENT_VERSION("stackshot"),
+	T_META_OWNER("jonathan_w_adams"),
 	T_META_CHECK_LEAKS(false),
 	T_META_ASROOT(true)
 	);

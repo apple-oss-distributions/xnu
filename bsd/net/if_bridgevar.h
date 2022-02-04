@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2004-2014 Apple Inc. All rights reserved.
+ * Copyright (c) 2004-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -152,8 +152,8 @@
 #define BRDGSIFAMAX             33      /* set max interface addrs (ifbreq) */
 #define BRDGGHOSTFILTER         34      /* get host filter (ifbrhostfilter) */
 #define BRDGSHOSTFILTER         35      /* set host filter (ifbrhostfilter) */
-#define BRDGGMACNATLIST         36      /* get MAC NAT list */
-
+#define BRDGGMACNATLIST         36      /* get MAC NAT list (ifbrmnelist) */
+#define BRDGGIFSTATS            37      /* member stats (ifbrmreq+ifbrmstats) */
 
 /*
  * Generic bridge control request.
@@ -192,11 +192,15 @@ struct ifbreq {
 #define IFBIF_BSTP_ADMCOST      0x0400  /* member stp admin path cost */
 #define IFBIF_PRIVATE           0x0800  /* if is a private segment */
 #define IFBIF_MAC_NAT           0x8000  /* member requires MAC NAT */
+#define IFBIF_CHECKSUM_OFFLOAD  0x10000 /* checksum inbound packets,
+	                                 * drop outbound packets with
+	                                 * bad checksum
+	                                 */
 
 #define IFBIFBITS       "\020\001LEARNING\002DISCOVER\003STP\004SPAN" \
 	"\005STICKY\006EDGE\007AUTOEDGE\010PTP"                       \
 	"\011AUTOPTP\014PRIVATE"                                      \
-	"\020MACNAT"
+	"\020MACNAT\021CSUM"
 
 #define IFBIFMASK       ~(IFBIF_BSTP_EDGE|IFBIF_BSTP_AUTOEDGE|IFBIF_BSTP_PTP| \
 	                IFBIF_BSTP_AUTOPTP|IFBIF_BSTP_ADMEDGE| \
@@ -373,9 +377,9 @@ struct ifbrparam {
  * Bridge current operational parameters structure.
  */
 
-#pragma pack(4)
-
 #ifndef XNU_KERNEL_PRIVATE
+
+#pragma pack(4)
 
 struct ifbropreq {
 	uint8_t         ifbop_holdcount;
@@ -392,7 +396,14 @@ struct ifbropreq {
 	struct timeval  ifbop_last_tc_time;
 };
 
+#pragma pack()
+
 #else /* XNU_KERNEL_PRIVATE */
+
+#include <sys/_types/_timeval32.h>
+#include <sys/_types/_timeval64.h>
+
+#pragma pack(4)
 
 struct ifbropreq32 {
 	uint8_t         ifbop_holdcount;
@@ -406,7 +417,7 @@ struct ifbropreq32 {
 	uint64_t        ifbop_bridgeid;
 	uint64_t        ifbop_designated_root;
 	uint64_t        ifbop_designated_bridge;
-	struct timeval  ifbop_last_tc_time;
+	struct timeval32  ifbop_last_tc_time;
 };
 
 struct ifbropreq64 {
@@ -421,12 +432,12 @@ struct ifbropreq64 {
 	uint64_t        ifbop_bridgeid;
 	uint64_t        ifbop_designated_root;
 	uint64_t        ifbop_designated_bridge;
-	struct timeval  ifbop_last_tc_time;
+	struct timeval64  ifbop_last_tc_time;
 };
 
-#endif
-
 #pragma pack()
+
+#endif
 
 /*
  * Bridge member operational STP params structure.
@@ -550,11 +561,11 @@ int     bridgeattach(int);
 #endif /* XNU_KERNEL_PRIVATE */
 
 
+#pragma pack(4)
+
 /*
  * MAC NAT entry list
  */
-
-#pragma pack(4)
 
 union ifbrip {
 	struct in_addr  ifbrip_addr;
@@ -576,7 +587,7 @@ struct ifbrmne {
 
 struct ifbrmnelist {
 	uint32_t        ifbml_len;      /* buffer size (multiple of elsize) */
-	uint16_t        ifbml_elsize;   /* sizeof(ifbrmacnatent) */
+	uint16_t        ifbml_elsize;   /* sizeof(ifbrmne) */
 	uint16_t        ifbml_pad;
 	caddr_t         ifbml_buf;
 };
@@ -585,19 +596,90 @@ struct ifbrmnelist {
 
 struct ifbrmnelist32 {
 	uint32_t        ifbml_len;      /* buffer size */
-	uint16_t        ifbml_elsize;   /* sizeof(ifbrmacnatent) */
+	uint16_t        ifbml_elsize;   /* sizeof(ifbrmne) */
 	uint16_t        ifbml_pad;
 	user32_addr_t   ifbml_buf;
 };
 
 struct ifbrmnelist64 {
 	uint32_t        ifbml_len;      /* buffer size */
-	uint16_t        ifbml_elsize;   /* sizeof(ifbrmacnatent) */
+	uint16_t        ifbml_elsize;   /* sizeof(ifbrmne) */
 	uint16_t        ifbml_pad;
 	user64_addr_t   ifbml_buf;
 };
 
 #endif /* XNU_KERNEL_PRIVATE */
+
+
+/*
+ * Bridge member-specific request structure
+ */
+
+#ifndef XNU_KERNEL_PRIVATE
+
+struct ifbrmreq {
+	char            brmr_ifname[IFNAMSIZ]; /* member if name */
+	uint32_t        brmr_len;      /* buffer size (in/out) */
+	uint32_t        brmr_elsize;   /* element size (out) */
+	caddr_t         brmr_buf;      /* buffer */
+};
+
+#else /* XNU_KERNEL_PRIVATE */
+
+struct ifbrmreq32 {
+	char            brmr_ifname[IFNAMSIZ]; /* member if name */
+	uint32_t        brmr_len;      /* buffer size (in/out) */
+	uint32_t        brmr_elsize;   /* element size (out) */
+	user32_addr_t   brmr_buf;      /* buffer */
+};
+
+struct ifbrmreq64 {
+	char            brmr_ifname[IFNAMSIZ]; /* member if name */
+	uint32_t        brmr_len;      /* buffer size (in/out) */
+	uint32_t        brmr_elsize;   /* element size (out) */
+	user64_addr_t   brmr_buf;      /* buffer */
+};
+
+#endif /* XNU_KERNEL_PRIVATE */
+
+struct bripstats {
+	uint64_t        bips_ip;
+	uint64_t        bips_ip6;
+	uint64_t        bips_udp;
+	uint64_t        bips_tcp;
+
+	uint64_t        bips_bad_ip;
+	uint64_t        bips_bad_ip6;
+	uint64_t        bips_bad_udp;
+	uint64_t        bips_bad_tcp;
+};
+
+struct brcsumstats {
+	uint64_t        brcs_ip_checksum;
+	uint64_t        brcs_udp_checksum;
+	uint64_t        brcs_tcp_checksum;
+};
+
+/*
+ * Bridge member statistics
+ * - "in" and "out" are from the perspective of the bridge:
+ *      in: packets received from the bridge member
+ *      out: packets destined to the bridge member
+ * - only available when IFBIF_CHECKSUM_OFFLOAD is enabled on the
+ *   interface
+ */
+struct ifbrmstats {
+	struct bripstats        brms_in_ip;
+	struct bripstats        brms_out_ip;
+
+	struct brcsumstats      brms_in_computed_cksum;
+
+	struct brcsumstats      brms_out_cksum_good;
+	struct brcsumstats      brms_out_cksum_good_hw;
+
+	struct brcsumstats      brms_out_cksum_bad;
+	struct brcsumstats      brms_out_cksum_bad_hw;
+};
 
 #pragma pack()
 

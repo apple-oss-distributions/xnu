@@ -8,9 +8,14 @@ include $(MakeInc_def)
 
 DATAFILES =
 
-EXPORT_ONLY_FILES = \
+PRIVATE_DATAFILES =
+
+KERNELFILES = \
 	memory_types.h \
 	pmap.h \
+	lz4.h \
+	lz4_constants.h \
+	lz4_assembly_select.h \
 	vm_fault.h \
 	vm_kern.h \
 	vm_map.h \
@@ -21,11 +26,25 @@ EXPORT_ONLY_FILES = \
 	vm_compressor_algorithms.h \
 	WKdm_new.h
 
+PRIVATE_KERNELFILES = \
+	pmap_cs.h
+
+# /usr/include
 INSTALL_MI_LIST = ${DATAFILES}
+
+# /System/Library/Frameworks/System.framework/PrivateHeaders
+INSTALL_SF_MI_LCL_LIST = ${DATAFILES} ${PRIVATE_DATAFILES}
+
+# /System/Library/Frameworks/Kernel.framework/Headers
+INSTALL_KF_MI_LIST = ${KERNELFILES}
+
+# /System/Library/Frameworks/Kernel.framework/PrivateHeaders
+INSTALL_KF_MI_LCL_LIST = ${KERNELFILES} ${PRIVATE_KERNELFILES}
 
 INSTALL_MI_DIR = vm
 
-EXPORT_MI_LIST = ${DATAFILES} ${EXPORT_ONLY_FILES}
+# Exported to rest of XNU for compilation
+EXPORT_MI_LIST = ${KERNELFILES} ${PRIVATE_KERNELFILES}
 
 EXPORT_MI_DIR = vm
 

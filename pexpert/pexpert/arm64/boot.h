@@ -42,6 +42,7 @@ struct Boot_Video {
 #define kBootVideoDepthDepthShift       (0)
 #define kBootVideoDepthRotateShift      (8)
 #define kBootVideoDepthScaleShift       (16)
+#define kBootVideoDepthBootRotateShift  (24)
 
 #define kBootFlagsDarkBoot              (1ULL << 0)
 
@@ -74,14 +75,8 @@ typedef struct boot_args {
 
 #define PC_TRACE_BUF_SIZE               1024
 
-#if SHMCON
-#define SHMCON_MEM 0x4000
-#else
-#define SHMCON_MEM 0
-#endif
-
 #define CDBG_MEM ((sizeof(dbg_registry_t) + PAGE_SIZE - 1) & ~PAGE_MASK)
 
-#define PE_EARLY_BOOT_VA (SHMCON_MEM + CDBG_MEM)
+#define PE_EARLY_BOOT_VA (CDBG_MEM)
 
 #endif /* _PEXPERT_ARM64_BOOT_H_ */

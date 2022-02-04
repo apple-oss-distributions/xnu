@@ -88,8 +88,12 @@
  * submited asynchronously over the intrinsic priority of the queue/thread the
  * work is submitted to.
  *
- * @const _PTHREAD_PRIORITY_OVERRIDE_FLAG
- * No longer used
+ * @const _PTHREAD_PRIORITY_COOPERATIVE_FLAG
+ * Used to convey that a thread is part of the cooperative pool
+ *
+ * @const _PTHREAD_PRIORITY_THREAD_TYPE_MASK
+ * The set of bits that encode information about the thread type - whether it is
+ * overcommit, non-overcommit or cooperative
  */
 typedef unsigned long pthread_priority_t;
 
@@ -102,11 +106,13 @@ typedef unsigned long pthread_priority_t;
 #define _PTHREAD_PRIORITY_SCHED_PRI_FLAG                0x20000000u
 #define _PTHREAD_PRIORITY_SCHED_PRI_MASK                0x0000ffffu
 #define _PTHREAD_PRIORITY_ENFORCE_FLAG                  0x10000000u /* dispatch only */
-#define _PTHREAD_PRIORITY_OVERRIDE_FLAG                 0x08000000u /* unused */
 #define _PTHREAD_PRIORITY_FALLBACK_FLAG                 0x04000000u
+#define _PTHREAD_PRIORITY_COOPERATIVE_FLAG              0x08000000u
 #define _PTHREAD_PRIORITY_EVENT_MANAGER_FLAG            0x02000000u
 #define _PTHREAD_PRIORITY_NEEDS_UNBIND_FLAG             0x01000000u
 #define _PTHREAD_PRIORITY_DEFAULTQUEUE_FLAG             _PTHREAD_PRIORITY_FALLBACK_FLAG // compat
+
+#define _PTHREAD_PRIORITY_THREAD_TYPE_MASK              (_PTHREAD_PRIORITY_COOPERATIVE_FLAG | _PTHREAD_PRIORITY_OVERCOMMIT_FLAG)
 
 #define _PTHREAD_PRIORITY_ENCODING_MASK                 0x00a00000u
 #define _PTHREAD_PRIORITY_ENCODING_SHIFT                (22ull)
@@ -214,7 +220,28 @@ _pthread_priority_relpri(pthread_priority_t pp)
 	return 0;
 }
 
-#if KERNEL
+__attribute__((always_inline, const))
+static inline bool
+_pthread_priority_is_overcommit(pthread_priority_t pp)
+{
+	return pp & _PTHREAD_PRIORITY_OVERCOMMIT_FLAG;
+}
+
+__attribute__((always_inline, const))
+static inline bool
+_pthread_priority_is_cooperative(pthread_priority_t pp)
+{
+	return pp & _PTHREAD_PRIORITY_COOPERATIVE_FLAG;
+}
+
+__attribute__((always_inline, const))
+static inline bool
+_pthread_priority_is_nonovercommit(pthread_priority_t pp)
+{
+	return !_pthread_priority_is_cooperative(pp) && !_pthread_priority_is_overcommit(pp);
+}
+
+#if XNU_KERNEL_PRIVATE
 // Interfaces only used by the kernel and not implemented in userspace.
 
 /*
@@ -241,7 +268,7 @@ __attribute__((const))
 pthread_priority_compact_t
 _pthread_priority_combine(pthread_priority_t base_pp, thread_qos_t qos);
 
-#endif // KERNEL
+#endif // XNU_KERNEL_PRIVATE
 #endif // __PTHREAD_EXPOSE_INTERNALS__
 #endif // PRIVATE
 #endif // _PTHREAD_PRIORITY_PRIVATE_H_

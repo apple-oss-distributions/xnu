@@ -56,7 +56,7 @@
 .\"
 .\"     @(#)fcntl.2	8.2 (Berkeley) 1/12/94
 .\"
-.Dd August 8, 2018
+.Dd June 17, 2021
 .Dt FCNTL 2
 .Os BSD 4.2
 .Sh NAME
@@ -154,8 +154,8 @@ The argument must be a buffer of size
 .Sy MAXPATHLEN
 or greater.
 .It Dv F_PREALLOCATE
-Preallocate file storage space. Note: upon success, 
-the space that is allocated can be the size requested,
+Preallocate file storage space.
+Note: upon success, the space that is allocated can be the size requested,
 larger than the size requested, or (if the
 .Dv F_ALLOCATEALL
 flag is not provided) smaller than the space requested.
@@ -286,9 +286,9 @@ commands are as follows:
 .Bl -tag -width O_NONBLOCKX -offset indent
 .It Dv O_NONBLOCK
 Non-blocking I/O; if no data is available to a
-.Xr read
+.Xr read 2
 call, or if a
-.Xr write
+.Xr write 2
 operation would block,
 the read or write call returns -1 with the error
 .Er EAGAIN .
@@ -337,6 +337,18 @@ If no lock is found that would prevent this lock from being created,
 the structure is left unchanged by this function call except for the
 lock type which is set to
 .Dv F_UNLCK .
+If a lock that does not support the discovery of lock ownership by process
+(one created by the
+.Xr flock 2
+system call or the
+.Xr open 2
+system call with the
+.Dv O_SHLOCK
+or
+.Dv O_EXLOCK
+flag) is found,
+.Fa l_pid
+is set to -1.
 .It Dv F_SETLK
 Set or clear a file segment lock according to the lock description
 pointed to by the third argument,
@@ -477,7 +489,7 @@ to their children.
 Note that 
 .Xr flock 2
 and 
-.Xr fcntl 2
+.Nm fcntl
 locks may be safely used concurrently.
 .Pp
 All locks associated with a file for a given process are
@@ -509,7 +521,9 @@ The flags (fst_flags) for the
 command are as follows:
 .Bl -tag -width F_ALLOCATECONTIGX -offset indent
 .It Dv F_ALLOCATECONTIG
-Allocate contiguous space.
+Allocate contiguous space. (Note that the file system may ignore this request if
+.Fa fst_length
+is very large.)
 .It Dv F_ALLOCATEALL
 Allocate all requested space or no space at all.
 .El
@@ -552,18 +566,6 @@ user to the system:
            off_t   ra_offset;  /* offset into the file */
            int     ra_count;   /* size of the read     */
         };
-.Ed
-.Pp
-The
-.Dv F_READBOOTSTRAP and F_WRITEBOOTSTRAP
-commands operate on the following structure.
-.ne 7v
-.Bd -literal
-        typedef struct fbootstraptransfer {
-            off_t fbt_offset;       /* IN: offset to start read/write */
-            size_t fbt_length;      /* IN: number of bytes to transfer */
-            void *fbt_buffer;       /* IN: buffer to be read/written */
-        } fbootstraptransfer_t;
 .Ed
 .Pp
 The
@@ -712,6 +714,18 @@ is
 .Dv F_SETLKW ,
 and a deadlock condition was detected.
 .\" ==========
+.It Bq Er EFBIG
+The argument
+.Fa cmd
+is
+.Dv F_PREALLOCATE ,
+.Dv F_PEOFPOSMODE
+is set and preallocating
+.Fa fst_length
+bytes on
+.Fa fildes
+would exceed the maximum file size.
+.\" ==========
 .It Bq Er EINTR
 The argument
 .Fa cmd
@@ -774,14 +788,6 @@ are negative, or both
 and
 .Fa fp_length
 are not multiples of the file system block size.
-.Pp
-The argument
-.Fa cmd
-is either
-.Dv F_READBOOTSTRAP
-or
-.Dv F_WRITEBOOTSTRAP
-and the operation was attempted on a non-HFS disk type.
 .\" ==========
 .It Bq Er EMFILE
 .Fa Cmd
@@ -864,8 +870,8 @@ the process ID given as argument is not in use.
 .Xr getdtablesize 2 ,
 .Xr open 2 ,
 .Xr pipe 2 ,
-.Xr socket 2 ,
 .Xr setsockopt 2 ,
+.Xr socket 2 ,
 .Xr sigaction 3
 .Sh HISTORY
 The

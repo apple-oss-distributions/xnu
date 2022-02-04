@@ -1,0 +1,183 @@
+.\" Copyright (c) 2021, Apple Inc.  All rights reserved.
+.
+.Dd February 15, 2021
+.Dt BACKTRACE 9
+.Os Darwin
+.
+.Sh NAME
+.Nm backtrace ,
+.Nm backtrace_user ,
+.Nd gather the PC and return addresses of a thread's kernel or user call stack
+.
+.Sh SYNOPSIS
+.In kern/backtrace.h
+.Ft unsigned int
+.Fo backtrace
+.Fa "uintptr_t *bt"
+.Fa "unsigned int btlen"
+.Fa "struct backtrace_control *ctl"
+.Fa "backtrace_info_t *info_out"
+.Fc
+.
+.Ft unsigned int
+.Fo backtrace_user
+.Fa "uintptr_t *bt"
+.Fa "unsigned int btlen"
+.Fa "struct backtrace_control *ctl"
+.Fa "struct backtrace_user_info *info_out"
+.Fc
+.
+.Sh DESCRIPTION
+The
+.Nm backtrace
+and
+.Nm backtrace_user
+functions fill a buffer with the current PC and return addresses of a thread's
+kernel and user call stack, respectively.
+This is only possible when frame pointers are pushed to the stack, alongside the
+return addresses.
+.Xr clang 1 ,
+disables this behavior with the
+.Fl fomit-frame-pointer
+flag, so it will prevent these functions from working.
+Furthermore, leaf functions and inlined function calls can also prevent
+backtracing from reporting the source-level function control flow.
+.Fn backtrace_user
+operates on user call stacks, while
+.Fn backtrace
+captures the current kernel call stack.
+Calling
+.Fn backtrace_user
+on a kernel thread
+.Pq which lacks a user context
+is undefined.
+.Pp
+Up to
+.Fa btlen
+instruction addresses are written to the buffer at
+.Fa bt .
+These functions also accept
+.Fa ctl
+and
+.Fa info_out
+arguments, described in
+.Sx BACKTRACE_CONTROL
+and
+.Sx BACKTRACE_INFO ,
+respectively.
+.Pp
+.Fn backtrace
+records the kernel PC and call stack of the current thread.
+.Pp
+.Fn backtrace_user
+records the user PC and call stack of the current thread, which must be
+associated with a user space task.
+.
+.Sh RETURN VALUES
+The
+.Nm
+functions return the number of PC and return address elements written to the
+provided buffer.
+If there is space, the buffer is terminated with a NULL entry.
+The
+.Fa info_out
+argument will be set with information about the provided call stack.
+.Fn backtrace_user
+will set
+.Ft btui_error
+to an error of the
+.Xr copyin 9
+routine if an error occurred during call stack traversal.
+.
+.Sh BACKTRACE_CONTROL
+The
+.Nm
+functions accept a
+.Ft struct backtrace_control
+control argument to alter their behavior,
+with the following fields:
+.Bl -tag -width btc_user_thread
+.It Ft btc_flags
+These flags control the backtracer's behavior:
+.Bl -tag -width BTF_KERN_INTERRUPTED
+.It Dv BTF_KERN_INTERRUPTED
+For
+.Fn backtrace
+only, record the PC and return addresses of the interrupted call stack.
+.El
+.It Ft btc_frame_addr
+Start backtracing from the provided frame address.
+.It Ft btc_user_thread
+Capture the backtrace of the provided thread pointer.
+This must be either the current thread or a different thread that is suspended
+and unable to run in user space.
+.It Ft btc_user_copy
+For
+.Fn backtrace_user
+only, the function to use instead of
+.Xr copyin 9
+to copy data from the thread's user space virtual address space into the kernel.
+.It Ft btc_user_copy_context
+Additional data that's passed to the custom copy routine to act as private
+context.
+.El
+.
+.Sh BACKTRACE_INFO
+The
+.Nm
+functions report additional information through a
+.Ft backtrace_info_t
+flags out-parameter,
+with the following options:
+.Bl -tag -width BTI_TRUNCATED
+.It Dv BTI_64_BIT
+The PC and call stack return addresses are 64-bit quantities.
+.It Dv BTI_TRUNCATED
+The backtrace has been truncated and does not terminate with the base frame.
+.El
+.Pp
+The
+.Fn backtrace_user
+variant uses an out-parameter structure
+.Ft struct backtrace_user_info
+to return additional context:
+.Bl -tag -width btui_
+.It Ft btui_info
+The
+.Ft backtrace_info_t
+flags, described above.
+.It Ft btui_error
+Any error encountered while copying data.
+.It Ft btui_async_start_index
+For Swift continuations
+.Pq async stacks ,
+the location where the continuation hint was found and where it logically
+branches from the standard call stack.
+.It Ft btui_async_frame_addr
+The frame address of the Swift continuation to pass in to a subsequent call
+to
+.Fn backtrace_user
+.Pq as the control structure's frame address field
+to follow the corresponding async stack.
+.It Ft btui_next_frame_addr
+In the case of a truncated backtrace due to lack of space in the destination
+buffer, the next frame address to resume the backtrace operation.
+.El
+.
+.Sh EXAMPLE
+.Bd -literal
+uintptr_t bt[8] = {};
+enum backtrace_info bti = BTI_NONE;
+unsigned int len = backtrace(bt, sizeof(bt) / sizeof(bt[0]), NULL, &bti);
+for (unsigned int i = 0; i < len; i++)  {
+	printf("%d: 0x%lx\\n", i, bt[i]);
+}
+if (bti & BTI_TRUNCATED) {
+	printf("[... TRUNCATED ...]\\n");
+}
+.Ed
+.
+.Sh SEE ALSO
+.Xr backtrace 3
+and
+.Xr copyin 9

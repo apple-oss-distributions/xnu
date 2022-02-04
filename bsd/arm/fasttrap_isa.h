@@ -27,8 +27,11 @@
  * Use is subject to license terms.
  */
 
-#ifndef _FASTTRAP_ISA_H
+#ifndef _ARM_FASTTRAP_ISA_H
+#define _ARM_FASTTRAP_ISA_H
 #define _FASTTRAP_ISA_H
+
+#if defined (__arm__) || defined (__arm64__)
 
 #include <sys/types.h>
 #include <stdint.h>
@@ -231,4 +234,6 @@ typedef struct fasttrap_machtp {
 }
 #endif
 
-#endif  /* _FASTTRAP_ISA_H */
+#endif /* defined (__arm__) || defined (__arm64__) */
+
+#endif  /* _ARM_FASTTRAP_ISA_H */

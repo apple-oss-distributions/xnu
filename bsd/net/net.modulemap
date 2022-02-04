@@ -1,0 +1,100 @@
+module Darwin.POSIX.net [system] {
+  module dl {
+    header "net/if_dl.h"
+    export *
+  }
+
+  module if {
+    header "net/if.h"
+    export *
+  }
+
+  module types {
+    header "net/if_types.h"
+    export *
+  }
+}
+
+module Darwin.net [system] {
+  #ifdef XNU_KERNEL_PRIVATE
+  // The PLATFORM_MacOSX headers are in the public SDK for macOS,
+  // but mastered out of the public SDK for the other OSes.
+  #endif
+  #ifdef PLATFORM_MacOSX
+  module bpf {
+    header "net/bpf.h"
+    export *
+  }
+
+  module dlil {
+    header "net/dlil.h"
+    export *
+  }
+
+  #endif
+  module ethernet {
+    header "net/ethernet.h"
+    export *
+  }
+
+  #ifdef PLATFORM_MacOSX
+  module if_arp {
+    header "net/if_arp.h"
+    export *
+  }
+
+  module if_llc {
+    header "net/if_llc.h"
+    export *
+  }
+
+  module if_media {
+    header "net/if_media.h"
+    export *
+  }
+
+  module if_mib {
+    header "net/if_mib.h"
+    export *
+  }
+
+  module if_utun {
+    header "net/if_utun.h"
+    export *
+  }
+
+  #endif
+  module if_var {
+    header "net/if_var.h"
+    export *
+  }
+
+  #ifdef PLATFORM_MacOSX
+  module kext_net {
+    header "net/kext_net.h"
+    export *
+  }
+
+  module ndrv {
+    header "net/ndrv.h"
+    export *
+  }
+
+  #endif
+  module net_kev {
+    header "net/net_kev.h"
+    export *
+  }
+
+  module pfkeyv2 {
+    header "net/pfkeyv2.h"
+    export *
+  }
+  #ifdef PLATFORM_MacOSX
+
+  module route {
+    header "net/route.h"
+    export *
+  }
+  #endif
+}

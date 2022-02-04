@@ -85,6 +85,10 @@
 #include <sys/eventhandler.h>
 #endif /* BSD_KERNEL_PRIVATE */
 #endif /* KERNEL_PRIVATE */
+#if !KERNEL
+#include <TargetConditionals.h>
+#include <uuid/uuid.h>
+#endif
 
 typedef u_quad_t so_gen_t;
 
@@ -211,7 +215,7 @@ struct socket {
 	so_gen_t so_gencnt;             /* generation count */
 	STAILQ_ENTRY(socket) so_cache_ent;      /* socache entry */
 	caddr_t         so_saved_pcb;           /* Saved pcb when cacheing */
-	u_int32_t       cache_timestamp;        /* time socket was cached */
+	u_int64_t       cache_timestamp;        /* time socket was cached */
 
 	pid_t           last_pid;       /* pid of most recent accessor */
 	u_int64_t       last_upid;      /* upid of most recent accessor */
@@ -244,6 +248,8 @@ struct socket {
 #define SOF_NOTSENT_LOWAT       0x00080000 /* A different lowat on not sent
 	                                    *    data has been set */
 #define SOF_KNOTE               0x00100000 /* socket is on the EV_SOCK klist */
+#define SOF_MARK_WAKE_PKT       0x00200000 /* Mark next packet as wake packet, one shot */
+#define SOF_RECV_WAKE_PKT       0x00400000 /* Receive wake packet indication as ancillary data */
 #define SOF_FLOW_DIVERT         0x00800000 /* Flow Divert is enabled */
 #define SOF_MP_SUBFLOW          0x01000000 /* is a multipath subflow socket */
 #define SOF_MP_SEC_SUBFLOW      0x04000000 /* Set up secondary flow */
@@ -331,8 +337,18 @@ struct socket {
 #define SOF1_INBOUND                    0x01000000 /* Created via a passive listener */
 #define SOF1_WANT_KEV_SOCK_CLOSED       0x02000000 /* Want generation of KEV_SOCKET_CLOSED event */
 #define SOF1_FLOW_DIVERT_SKIP           0x04000000 /* Flow divert already declined to handle the socket */
+#define SOF1_KNOWN_TRACKER              0x08000000 /* Socket is a connection to a known tracker */
+#define SOF1_TRACKER_NON_APP_INITIATED  0x10000000 /* Tracker connection is non-app initiated */
+#define SOF1_APPROVED_APP_DOMAIN            0x20000000 /* Connection is for an approved associated app domain */
 
 	u_int64_t       so_extended_bk_start;
+
+	u_int8_t        so_fallback_mode;
+#define SO_FALLBACK_MODE_NONE             0 /* No fallback */
+#define SO_FALLBACK_MODE_FAILOVER         1 /* Fell back after failing over */
+#define SO_FALLBACK_MODE_SLOW             2 /* Fell back after a slow timer */
+#define SO_FALLBACK_MODE_FAST             3 /* Fell back after a fast timer */
+#define SO_FALLBACK_MODE_PREFER           4 /* Fell back with a headstart */
 
 	u_int8_t        so_log_seqn;    /* Multi-layer Packet Logging rolling sequence number */
 	uuid_t          so_mpkl_send_uuid;
@@ -433,7 +449,7 @@ struct  xsocket {
 	uid_t                   so_uid;         /* XXX */
 };
 
-#if XNU_TARGET_OS_OSX || !(TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR)
+#if XNU_TARGET_OS_OSX || KERNEL || !(TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR)
 struct  xsocket64 {
 	u_int32_t               xso_len;        /* length of this structure */
 	u_int64_t               xso_so;         /* makes a convenient handle */
@@ -455,7 +471,7 @@ struct  xsocket64 {
 	struct xsockbuf         so_snd;
 	uid_t                   so_uid;         /* XXX */
 };
-#endif /* XNU_TARGET_OS_OSX || !(TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR) */
+#endif /* XNU_TARGET_OS_OSX || KERNEL || !(TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR) */
 
 #ifdef PRIVATE
 #define XSO_SOCKET      0x001
@@ -552,7 +568,6 @@ struct sockopt {
 
 #ifdef MALLOC_DECLARE
 MALLOC_DECLARE(M_PCB);
-MALLOC_DECLARE(M_SONAME);
 #endif /* MALLOC_DECLARE */
 
 #ifdef BSD_KERNEL_PRIVATE
@@ -827,6 +842,21 @@ extern void sballoc(struct sockbuf *sb, struct mbuf *m);
 extern void sbfree(struct sockbuf *sb, struct mbuf *m);
 extern void sbfree_chunk(struct sockbuf *sb, struct mbuf *m);
 
+/* Note: zero out the buffer and set sa_len to size */
+extern void *alloc_sockaddr(size_t size, zalloc_flags_t flags);
+
+#if XNU_TARGET_OS_OSX
+#define free_sockaddr(sa) do {                                  \
+	kheap_free_addr(KHEAP_SONAME, (sa));                    \
+} while (0)
+#else /* XNU_TARGET_OS_OSX */
+#define free_sockaddr(sa) do {                                  \
+if ((sa) != NULL) {                                             \
+	kheap_free_bounded(KHEAP_SONAME, (sa), 1, UINT8_MAX);   \
+}                                                               \
+} while (0)
+#endif /* XNU_TARGET_OS_OSX */
+
 /*
  * Flags to sblock().
  */
@@ -916,6 +946,23 @@ extern int soo_stat(struct socket *, void *, int);
 extern int soo_select(struct fileproc *, int, void *, vfs_context_t);
 extern int soo_kqfilter(struct fileproc *, struct knote *, struct kevent_qos_s *);
 
+#define TRACKER_DOMAIN_MAX              253
+#define TRACKER_DOMAIN_SHORT_MAX        63
+
+typedef struct tracker_metadata {
+	uint32_t flags;
+	char domain[TRACKER_DOMAIN_MAX + 1];
+	char domain_owner[TRACKER_DOMAIN_MAX + 1];
+} tracker_metadata_t;
+
+typedef struct tracker_metadata_short {
+	uint32_t flags;
+	char domain[TRACKER_DOMAIN_SHORT_MAX + 1];
+	char domain_owner[TRACKER_DOMAIN_SHORT_MAX + 1];
+} tracker_metadata_short_t;
+
+extern int tracker_lookup(uuid_t app_uuid, struct sockaddr *, tracker_metadata_t *metadata);
+
 /* Service class flags used for setting service class on a packet */
 #define PKT_SCF_IPV6            0x00000001      /* IPv6 packet */
 #define PKT_SCF_TCP_ACK         0x00000002      /* Pure TCP ACK */
@@ -952,7 +999,6 @@ extern int so_set_effective_pid(struct socket *so, int epid, struct proc *p, boo
 extern int so_set_effective_uuid(struct socket *so, uuid_t euuid, struct proc *p, boolean_t check_cred);
 extern int so_set_restrictions(struct socket *, uint32_t);
 extern uint32_t so_get_restrictions(struct socket *);
-extern void socket_tclass_init(void);
 #if (DEVELOPMENT || DEBUG)
 extern int so_set_tcdbg(struct socket *, struct so_tcdbg *);
 extern int sogetopt_tcdbg(struct socket *, struct sockopt *);
@@ -987,4 +1033,38 @@ void sbtoxsockstat_n(struct socket *, struct xsockstat_n *);
 __END_DECLS
 #endif /* BSD_KERNEL_PRIVATE */
 #endif /* KERNEL_PRIVATE */
+
+// Tracker actions
+enum so_tracker_action {
+	SO_TRACKER_ACTION_INVALID = 0,
+	SO_TRACKER_ACTION_ADD = 1,
+	SO_TRACKER_ACTION_DUMP_BY_APP = 2,
+	SO_TRACKER_ACTION_DUMP_ALL = 3,
+	SO_TRACKER_ACTION_DUMP_MAX,
+};
+
+// Tracker TLV attributes
+enum so_tracker_attribute {
+	SO_TRACKER_ATTRIBUTE_INVALID = 0,
+	SO_TRACKER_ATTRIBUTE_ADDRESS_FAMILY = 1,
+	SO_TRACKER_ATTRIBUTE_ADDRESS  = 2,
+	SO_TRACKER_ATTRIBUTE_APP_UUID = 3,
+	SO_TRACKER_ATTRIBUTE_DOMAIN = 4,
+	SO_TRACKER_ATTRIBUTE_DOMAIN_OWNER = 5,
+	SO_TRACKER_ATTRIBUTE_FLAGS = 6,
+	SO_TRACKER_ATTRIBUTE_DUMP_ENTRY = 7,
+	SO_TRACKER_ATTRIBUTE_MEMORY_USED = 8,
+	SO_TRACKER_ATTRIBUTE_MAX,
+};
+
+// Tracker flags
+#define SO_TRACKER_ATTRIBUTE_FLAGS_APP_APPROVED     0x00000001
+#define SO_TRACKER_ATTRIBUTE_FLAGS_TRACKER          0x00000002
+#define SO_TRACKER_ATTRIBUTE_FLAGS_DOMAIN_SHORT     0x00000004
+
+#ifndef KERNEL
+#define SO_TRACKER_TRANSPARENCY_VERSION         3
+extern int tracker_action(int action, char *buffer, size_t buffer_size);
+#endif
+
 #endif /* !_SYS_SOCKETVAR_H_ */

@@ -2,14 +2,14 @@
 .\" Copyright (c) 2008 Apple Inc.  All rights reserved.
 .\"
 .\" @APPLE_LICENSE_HEADER_START@
-.\" 
+.\"
 .\" This file contains Original Code and/or Modifications of Original Code
 .\" as defined in and that are subject to the Apple Public Source License
 .\" Version 2.0 (the 'License'). You may not use this file except in
 .\" compliance with the License. Please obtain a copy of the License at
 .\" http://www.opensource.apple.com/apsl/ and read it before using this
 .\" file.
-.\" 
+.\"
 .\" The Original Code and all software distributed under the License are
 .\" distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
 .\" EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
@@ -17,7 +17,7 @@
 .\" FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
 .\" Please see the License for the specific language governing rights and
 .\" limitations under the License.
-.\" 
+.\"
 .\" @APPLE_LICENSE_HEADER_END@
 .\"
 .\"
@@ -107,7 +107,8 @@
 The
 .Nm
 functions are designed to copy contiguous data from one address
-to another.  All but
+to another.
+All but
 .Fn copystr
 copy data from user-space to kernel-space or vice-versa.
 .Pp
@@ -171,7 +172,8 @@ functions return 0 on success or the following error on failure:
 .\" ========
 .Bl -tag -width Er
 .It Bq EFAULT
-If a bad address is encountered. When this error is returned, the contents of the destination buffer (
+If a bad address is encountered.
+When this error is returned, the contents of the destination buffer (
 .Fa *kaddr
 for
 .Fn copyin ,
@@ -181,7 +183,8 @@ and
 .Fa *uaddr
 for
 .Fn copyout )
-are undefined. For
+are undefined.
+For
 .Fn copyinstr
 and
 .Fn copystr ,
@@ -204,10 +207,11 @@ on failure will return:
 .It Bq ENAMETOLONG
 When the string is longer than
 .Pa len
-bytes. On this error return, the destination buffer is not null-terminated, but the
+bytes.
+On this error return, the destination buffer is not null-terminated, but the
 .Fa *done
 parameter is maintained.
-.EL
+.El
 .Sh SEE ALSO
 .Xr fetch 9 ,
 .Xr store 9

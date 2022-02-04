@@ -24,10 +24,15 @@
 #include <machine/cpu_capabilities.h>
 #include <mach/mach_time.h>
 #include <os/base.h>
+#include <stdbool.h>
 #if KERNEL
 #include <atm/atm_internal.h>
 #endif
+#if __has_include(<os/atomic_private.h>)
 #include <os/atomic_private.h>
+#else
+#include <os/internal/internal_shared.h>
+#endif
 #include "firehose_types_private.h"
 
 OS_ASSUME_NONNULL_BEGIN
@@ -170,7 +175,7 @@ __OSX_AVAILABLE(10.12) __IOS_AVAILABLE(10.0)
 __TVOS_AVAILABLE(10.0) __WATCHOS_AVAILABLE(3.0)
 void
 firehose_trace_metadata(firehose_stream_t stream, firehose_tracepoint_id_u ftid,
-    uint64_t stamp, const void* pubdata, size_t publen);
+    uint64_t stamp, const void *pubdata, size_t publen);
 #endif
 __END_DECLS
 

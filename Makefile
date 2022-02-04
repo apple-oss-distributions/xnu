@@ -1,5 +1,5 @@
 #
-# Copyright (C) 1999-2016 Apple Inc. All rights reserved.
+# Copyright (C) 1999-2020 Apple Inc. All rights reserved.
 #
 ifndef VERSDIR
 export VERSDIR := $(shell /bin/pwd)
@@ -31,6 +31,17 @@ export MakeInc_def=${VERSDIR}/makedefs/MakeInc.def
 export MakeInc_rule=${VERSDIR}/makedefs/MakeInc.rule
 export MakeInc_dir=${VERSDIR}/makedefs/MakeInc.dir
 
+.DEFAULT_GOAL := default
+
+export PATCH_PREFIX ?= change-under-test_
+export PATCH_GLOB ?= $(PATCH_PREFIX)*.diff
+
+
+skip:
+	@echo "Skipping $(RC_ProjectName)"
+
+.PHONY: skip
+
 #
 # Dispatch non-xnu build aliases to their own build
 # systems. All xnu variants start with MakeInc_top.
@@ -39,6 +50,8 @@ export MakeInc_dir=${VERSDIR}/makedefs/MakeInc.dir
 ifneq ($(findstring Libsyscall,$(RC_ProjectName)),)
 
 include $(MakeInc_cmd)
+include $(MakeInc_def)
+include $(MakeInc_rule)
 
 ifeq ($(RC_ProjectName),Libsyscall_headers_Sim)
 TARGET=-target Libsyscall_headers_Sim
@@ -48,12 +61,16 @@ ifeq ($(RC_ProjectName),Libsyscall_driverkit)
 TARGET=-target Libsyscall_driverkit
 endif
 
-default: install
-
 # default to OS X
 SDKROOT ?= macosx.internal
 
-installhdrs install:
+default: install
+
+Libsyscall_driverkit: install
+
+.PHONY: Libsyscall_driverkit
+
+installhdrs install::
 	cd libsyscall ; \
 		xcodebuild $@ $(TARGET)	\
 			$(MAKEOVERRIDES)	\
@@ -63,9 +80,14 @@ installhdrs install:
 			"DSTROOT=$(DSTROOT)"						\
 			"SDKROOT=$(SDKROOT)"
 
-Libsyscall_driverkit: install
+installhdrs install:: do_unifdef_headers
 
-.PHONY: Libsyscall_driverkit
+$(eval $(call LIBSYSCALL_DO_UNIFDEF_HEADERS_RULE_template,$(DSTROOT)/$(INCDIR),$(SINCFRAME_UNIFDEF)))
+$(eval $(call LIBSYSCALL_DO_UNIFDEF_HEADERS_RULE_template,$(DSTROOT)/$(LCLDIR),$(SPINCFRAME_UNIFDEF)))
+ifeq ($(DRIVERKIT),1)
+$(eval $(call LIBSYSCALL_DO_UNIFDEF_HEADERS_RULE_template,$(DSTROOT)/$(DRIVERKITINCDIR),$(DKINCFRAME_UNIFDEF)))
+$(eval $(call LIBSYSCALL_DO_UNIFDEF_HEADERS_RULE_template,$(DSTROOT)/$(DRIVERKITLCLDIR),$(DKPINCFRAME_UNIFDEF)))
+endif
 
 clean:
 
@@ -186,8 +208,7 @@ TOP_TARGETS = \
 	install install_desktop install_embedded \
 	install_release_embedded install_development_embedded \
 	install_kernels \
-	installopensource \
-	cscope tags TAGS checkstyle restyle check_uncrustify uncrustify \
+	cscope tags TAGS \
 	help
 
 DEFAULT_TARGET = all
@@ -235,6 +256,8 @@ ALL_SUBDIRS = \
 	san
 
 CONFIG_SUBDIRS = config tools san
+# Hack to handle san external dependency on config_all allsymbols target
+config_all_recurse_into_san: config_all_recurse_into_config
 
 INSTINC_SUBDIRS = $(ALL_SUBDIRS) EXTERNAL_HEADERS
 INSTINC_SUBDIRS_X86_64 = $(INSTINC_SUBDIRS)
@@ -317,6 +340,9 @@ xnu_tests_driverkit:
 	$(MAKE) -C $(SRCROOT)/tests/driverkit $(if $(filter -j,$(MAKEFLAGS)),,$(MAKEJOBS)) \
 		SRCROOT=$(SRCROOT)/tests/driverkit
 
+
+include $(MakeInc_cmd)
+
 #
 # The "analyze" target defined below invokes Clang Static Analyzer
 # with a predefined set of checks and options for the project.
@@ -338,16 +364,19 @@ STATIC_ANALYZER_TARGET ?=
 STATIC_ANALYZER_EXTRA_FLAGS ?=
 
 analyze:
-	# This is where the reports are going to be available.
-	# Old reports are deleted on make clean only.
-	mkdir -p $(STATIC_ANALYZER_OUTPUT_DIR)
+# This is where the reports are going to be available.
+# Old reports are deleted on make clean only.
+	$(_v)$(MKDIR) $(STATIC_ANALYZER_OUTPUT_DIR)
 
-	# Recursively build the requested target under scan-build.
-	# Exclude checks that weren't deemed to be security critical,
-	# like null pointer dereferences.
-	xcrun scan-build -o $(STATIC_ANALYZER_OUTPUT_DIR) \
+# Recursively build the requested target under scan-build.
+# Exclude checks that weren't deemed to be security critical,
+# like null pointer dereferences.
+	$(_v)$(XCRUN) $(SCAN_BUILD) -o $(STATIC_ANALYZER_OUTPUT_DIR) \
 		-disable-checker deadcode.DeadStores \
 		-disable-checker core.NullDereference \
 		-disable-checker core.DivideZero \
+		--exclude BUILD \
 		$(STATIC_ANALYZER_EXTRA_FLAGS) \
-		make $(STATIC_ANALYZER_TARGET)
+		$(MAKE) $(STATIC_ANALYZER_TARGET) QUIET=1 2>&1 | $(GREP) "^scan-build:"
+
+.PHONY: analyze

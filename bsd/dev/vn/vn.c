@@ -252,7 +252,7 @@ file_io(struct vnode * vp, vfs_context_t ctx,
 {
 	uio_t           auio;
 	int             error;
-	char            uio_buf[UIO_SIZEOF(1)];
+	uio_stackbuf_t  uio_buf[UIO_SIZEOF(1)];
 
 	auio = uio_createwithbuffer(1, offset, UIO_SYSSPACE, op,
 	    &uio_buf[0], sizeof(uio_buf));
@@ -354,7 +354,7 @@ vncopy_block_to_shadow(struct vn_softc * vn, vfs_context_t ctx,
 	int     error;
 	char *  tmpbuf;
 
-	tmpbuf = _MALLOC(vn->sc_secsize, M_TEMP, M_WAITOK);
+	tmpbuf = (char *)kalloc_data(vn->sc_secsize, Z_WAITOK);
 	if (tmpbuf == NULL) {
 		return ENOMEM;
 	}
@@ -370,7 +370,7 @@ vncopy_block_to_shadow(struct vn_softc * vn, vfs_context_t ctx,
 	    tmpbuf, shadow_block * vn->sc_secsize,
 	    vn->sc_secsize, NULL);
 done:
-	FREE(tmpbuf, M_TEMP);
+	kfree_data(tmpbuf, vn->sc_secsize);
 	return error;
 }
 
@@ -1277,9 +1277,9 @@ setcred(struct vnode * vp, kauth_cred_t cred)
 	 */
 	context.vc_thread = current_thread();
 	context.vc_ucred = cred;
-	tmpbuf = _MALLOC(DEV_BSIZE, M_TEMP, M_WAITOK);
+	tmpbuf = (char *)kalloc_data(DEV_BSIZE, Z_WAITOK);
 	error = file_io(vp, &context, UIO_READ, tmpbuf, 0, DEV_BSIZE, NULL);
-	FREE(tmpbuf, M_TEMP);
+	kfree_data(tmpbuf, DEV_BSIZE);
 	return error;
 }
 

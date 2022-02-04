@@ -1,0 +1,35 @@
+module DarwinPrivate.Mach [system] {
+  module mach_right {
+    header "mach/mach_right_private.h"
+    export *
+  }
+
+  module mach_sync_ipc {
+    header "mach/mach_sync_ipc.h"
+    export *
+  }
+
+  #ifndef PLATFORM_MacOSX
+  module mach_vm {
+    header "mach/mach_vm.h"
+    export *
+  }
+
+  #endif
+  module port_descriptions {
+    header "mach/port_descriptions.h"
+    export *
+  }
+
+  module resource_monitors {
+    header "mach/resource_monitors.h"
+    export *
+  }
+  #ifndef PLATFORM_MacOSX
+
+  module shared_region {
+    header "mach/shared_region.h"
+    export *
+  }
+  #endif
+}

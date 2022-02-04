@@ -666,7 +666,7 @@ private:
 // Pref: idle time before idle sleep
 	bool                    idleSleepEnabled;
 	uint32_t                sleepSlider;
-	uint32_t                idleSeconds;
+	uint32_t                idleMilliSeconds;
 
 // Difference between sleepSlider and longestNonSleepSlider
 	uint32_t                extraSleepDelay;
@@ -845,7 +845,6 @@ public:
 private:
 	uint8_t              _aotNow;
 	uint8_t              _aotTasksSuspended;
-	uint8_t              _aotExit;
 	uint8_t              _aotTimerScheduled;
 	uint8_t              _aotReadyToFullWake;
 	uint64_t             _aotLastWakeTime;
@@ -893,7 +892,7 @@ private:
 
 	IOReturn    setPMSetting(const OSSymbol *, OSObject *);
 
-	void        startIdleSleepTimer( uint32_t inSeconds );
+	void        startIdleSleepTimer( uint32_t inMilliSeconds );
 	void        cancelIdleSleepTimer( void );
 	uint32_t    getTimeToIdleSleep( void );
 

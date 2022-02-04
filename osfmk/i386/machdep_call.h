@@ -36,6 +36,9 @@
  *	Created.
  */
 
+/* The maximum number of fixed arguments any machdep routine takes. */
+#define MACHDEP_MAX_ARGS 4
+
 typedef union {
 	kern_return_t           (*args_0)(void);
 	kern_return_t           (*args_1)(uint32_t);

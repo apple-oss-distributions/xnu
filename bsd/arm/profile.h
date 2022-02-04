@@ -9,6 +9,8 @@
 #ifndef _BSD_ARM_PROFILE_H_
 #define _BSD_ARM_PROFILE_H_
 
+#if defined (__arm__) || defined (__arm64__)
+
 #include <sys/appleapiopts.h>
 
 #ifdef KERNEL
@@ -28,5 +30,7 @@
 
 #endif /* __APPLE_API_UNSTABLE */
 #endif /* KERNEL */
+
+#endif /* defined (__arm__) || defined (__arm64__) */
 
 #endif /* _BSD_ARM_PROFILE_H_ */

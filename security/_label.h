@@ -83,7 +83,7 @@
 struct label {
 	int     l_flags;
 	union {
-		void    * XNU_PTRAUTH_SIGNED_PTR("label.l_ptr") l_ptr;
+		void    * XNU_PTRAUTH_SIGNED_PTR_AUTH_NULL("label.l_ptr") l_ptr;
 		long     l_long;
 	}       l_perpolicy[MAC_MAX_SLOTS];
 };

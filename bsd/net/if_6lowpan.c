@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017-2019 Apple Inc. All rights reserved.
+ * Copyright (c) 2017-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -109,69 +109,33 @@ extern errno_t nd6_lookup_ipv6(ifnet_t interface,
 typedef int (bpf_callback_func)(struct ifnet *, struct mbuf *);
 typedef int (if_set_bpf_tap_func)(struct ifnet *ifp, int mode, bpf_callback_func * func);
 
-static __inline__ lck_grp_t *
-my_lck_grp_alloc_init(const char * grp_name)
-{
-	lck_grp_t *             grp;
-	lck_grp_attr_t *        grp_attrs;
-
-	grp_attrs = lck_grp_attr_alloc_init();
-	grp = lck_grp_alloc_init(grp_name, grp_attrs);
-	lck_grp_attr_free(grp_attrs);
-	return grp;
-}
-
-static __inline__ lck_mtx_t *
-my_lck_mtx_alloc_init(lck_grp_t * lck_grp)
-{
-	lck_attr_t *    lck_attrs;
-	lck_mtx_t *             lck_mtx;
-
-	lck_attrs = lck_attr_alloc_init();
-	lck_mtx = lck_mtx_alloc_init(lck_grp, lck_attrs);
-	lck_attr_free(lck_attrs);
-	return lck_mtx;
-}
-
-static lck_mtx_t *sixlowpan_lck_mtx;
-
-static __inline__ void
-sixlowpan_lock_init(void)
-{
-	lck_grp_t *lck_grp;
-
-	lck_grp = my_lck_grp_alloc_init("if_6lowpan");
-	sixlowpan_lck_mtx = my_lck_mtx_alloc_init(lck_grp);
-}
+static LCK_GRP_DECLARE(sixlowpan_lck_grp, "if_6lowpan");
+static LCK_MTX_DECLARE(sixlowpan_lck_mtx, &sixlowpan_lck_grp);
 
 static __inline__ void
 sixlowpan_assert_lock_held(void)
 {
-	lck_mtx_assert(sixlowpan_lck_mtx, LCK_MTX_ASSERT_OWNED);
-	return;
+	LCK_MTX_ASSERT(&sixlowpan_lck_mtx, LCK_MTX_ASSERT_OWNED);
 }
 
 #ifdef __UNUSED__
 static __inline__ void
 sixlowpan_assert_lock_not_held(void)
 {
-	lck_mtx_assert(sixlowpan_lck_mtx, LCK_MTX_ASSERT_NOTOWNED);
-	return;
+	LCK_MTX_ASSERT(&sixlowpan_lck_mtx, LCK_MTX_ASSERT_NOTOWNED);
 }
 #endif
 
 static __inline__ void
 sixlowpan_lock(void)
 {
-	lck_mtx_lock(sixlowpan_lck_mtx);
-	return;
+	lck_mtx_lock(&sixlowpan_lck_mtx);
 }
 
 static __inline__ void
 sixlowpan_unlock(void)
 {
-	lck_mtx_unlock(sixlowpan_lck_mtx);
-	return;
+	lck_mtx_unlock(&sixlowpan_lck_mtx);
 }
 
 struct if6lpan;
@@ -278,10 +242,10 @@ static void
 if6lpan_retain(if6lpan_ref ifl)
 {
 	if (ifl->if6lpan_signature != IF6LPAN_SIGNATURE) {
-		panic("if6lpan_retain: bad signature\n");
+		panic("if6lpan_retain: bad signature");
 	}
 	if (ifl->if6lpan_retain_count == 0) {
-		panic("if6lpan_retain: retain count is 0\n");
+		panic("if6lpan_retain: retain count is 0");
 	}
 	OSIncrementAtomic(&ifl->if6lpan_retain_count);
 }
@@ -292,12 +256,12 @@ if6lpan_release(if6lpan_ref ifl)
 	u_int32_t old_retain_count;
 
 	if (ifl->if6lpan_signature != IF6LPAN_SIGNATURE) {
-		panic("if6lpan_release: bad signature\n");
+		panic("if6lpan_release: bad signature");
 	}
 	old_retain_count = OSDecrementAtomic(&ifl->if6lpan_retain_count);
 	switch (old_retain_count) {
 	case 0:
-		panic("if6lpan_release: retain count is 0\n");
+		panic("if6lpan_release: retain count is 0");
 		break;
 	case 1:
 		ifl->if6lpan_signature = 0;
@@ -343,7 +307,6 @@ sixlowpan_clone_attach(void)
 	if (error != 0) {
 		return error;
 	}
-	sixlowpan_lock_init();
 	return 0;
 }
 
@@ -633,7 +596,7 @@ sixlowpan_input(ifnet_t p, __unused protocol_family_t protocol,
 
 	p = p_6lowpan_ifnet;
 	mc->m_pkthdr.rcvif = p;
-	if (len > mc->m_pkthdr.len) {
+	if (len > mc->m_pkthdr.len || len > MCLBYTES) {
 		err = -1;
 		goto err_out;
 	}
@@ -664,7 +627,11 @@ sixlowpan_input(ifnet_t p, __unused protocol_family_t protocol,
 
 	/* Parse the 802.15.4 frame header */
 	bzero(&ieee02154hdr, sizeof(ieee02154hdr));
-	frame802154_parse(mtod(mc, uint8_t *), len, &ieee02154hdr, &payload);
+	/*
+	 * Use returned payload pointer to evaluate success
+	 * vs failure.
+	 */
+	(void)frame802154_parse(mtod(mc, uint8_t *), len, &ieee02154hdr, &payload);
 	if (payload == NULL) {
 		err = -1;
 		goto err_out;
@@ -918,7 +885,7 @@ sixlowpan_proto_pre_output(ifnet_t ifp,
 {
 #pragma unused(protocol_family)
 	errno_t result = 0;
-	struct sockaddr_dl sdl;
+	struct sockaddr_dl sdl = {};
 	struct sockaddr_in6 *dest6 =  (struct sockaddr_in6 *)(uintptr_t)(size_t)dest;
 
 	if (!IN6_IS_ADDR_MULTICAST(&dest6->sin6_addr)) {
@@ -977,7 +944,7 @@ sixlowpan_framer_extended(struct ifnet *ifp, struct mbuf **m,
 	 *
 	 * Allocate for the worst case.
 	 */
-	payload = _MALLOC(m_pktlen(*m) + 1, M_TEMP, M_WAITOK | M_ZERO);
+	payload = (uint8_t *)kalloc_data(m_pktlen(*m) + 1, Z_WAITOK | Z_ZERO);
 	if (payload == NULL) {
 		err = -1;
 		goto err_out;
@@ -1049,7 +1016,7 @@ sixlowpan_framer_extended(struct ifnet *ifp, struct mbuf **m,
 
 err_out:
 	if (payload != NULL) {
-		_FREE(payload, M_TEMP);
+		kfree_data(payload, m_pktlen(*m) + 1);
 	}
 	m_freem(*m);
 	*m = mc;

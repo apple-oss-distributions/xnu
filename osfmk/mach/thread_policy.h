@@ -131,7 +131,11 @@ typedef struct thread_extended_policy   *thread_extended_policy_t;
  *
  * computation: This is the nominal amount of computation
  * time needed during a separate processing arrival, specified
- * in absolute time units.
+ * in absolute time units.  The thread may be preempted after
+ * the computation time has elapsed.
+ * If (computation < constraint/2) it will be forced to
+ * constraint/2 to avoid unintended preemption and associated
+ * timer interrupts.
  *
  * constraint: This is the maximum amount of real time that
  * may elapse from the start of a separate processing arrival
@@ -139,11 +143,11 @@ typedef struct thread_extended_policy   *thread_extended_policy_t;
  * specified in absolute time units.  Must be (>= computation).
  * Note that latency = (constraint - computation).
  *
- * preemptible: This indicates that the computation may be
- * interrupted, subject to the constraint specified above.
+ * preemptible: IGNORED (This indicates that the computation may be
+ * interrupted, subject to the constraint specified above.)
  */
 
-#define THREAD_TIME_CONSTRAINT_POLICY   2
+#define THREAD_TIME_CONSTRAINT_POLICY           2
 
 struct thread_time_constraint_policy {
 	uint32_t                period;
@@ -293,7 +297,6 @@ typedef struct thread_policy_state              *thread_policy_state_t;
  * THREAD_QOS_POLICY:
  */
 #define THREAD_QOS_POLICY               9
-#define THREAD_QOS_POLICY_OVERRIDE      10
 
 typedef uint8_t thread_qos_t;
 #define THREAD_QOS_UNSPECIFIED          0
@@ -361,6 +364,72 @@ typedef struct thread_qos_policy      *thread_qos_policy_t;
 
 #define THREAD_QOS_POLICY_COUNT    ((mach_msg_type_number_t) \
 	(sizeof (thread_qos_policy_data_t) / sizeof (integer_t)))
+
+/*
+ * THREAD_TIME_CONSTRAINT_WITH_PRIORITY_POLICY:
+ *
+ * This scheduling mode is for threads which have real time
+ * constraints on their execution with support for multiple
+ * real time priorities.
+ *
+ * Threads are ordered by highest priority first then, for
+ * threads of the same priority, by earliest deadline first.
+ * But if sched_rt_runq_strict_priority is false, a lower priority
+ * thread with an earlier deadline will be preferred over a higher
+ * priority thread with a later deadline, as long as both threads'
+ * computations will fit before the later deadline.
+ *
+ * Parameters:
+ *
+ * period: This is the nominal amount of time between separate
+ * processing arrivals, specified in absolute time units.  A
+ * value of 0 indicates that there is no inherent periodicity in
+ * the computation.
+ *
+ * computation: This is the nominal amount of computation
+ * time needed during a separate processing arrival, specified
+ * in absolute time units.  The thread may be preempted after
+ * the computation time has elapsed.
+ * If (computation < constraint/2) it will be forced to
+ * constraint/2 to avoid unintended preemption and associated
+ * timer interrupts.
+ *
+ * constraint: This is the maximum amount of real time that
+ * may elapse from the start of a separate processing arrival
+ * to the end of computation for logically correct functioning,
+ * specified in absolute time units.  Must be (>= computation).
+ * Note that latency = (constraint - computation).
+ *
+ * preemptible: IGNORED (This indicates that the computation may be
+ * interrupted, subject to the constraint specified above.)
+ *
+ * priority: This is the scheduling priority of the thread.
+ * User processes may only set the default priority of
+ * TIME_CONSTRAINT_POLICY_DEFAULT_PRIORITY.  Higher priorities
+ * up to TIME_CONSTRAINT_POLICY_MAXIMUM_PRIORITY are reserved
+ * for system use and attempts to set them will fail.
+ */
+
+#define THREAD_TIME_CONSTRAINT_WITH_PRIORITY_POLICY     10
+
+struct thread_time_constraint_with_priority_policy {
+	uint32_t                period;
+	uint32_t                computation;
+	uint32_t                constraint;
+	boolean_t               preemptible;
+	uint32_t                priority;
+};
+
+typedef struct thread_time_constraint_with_priority_policy    \
+        thread_time_constraint_with_priority_policy_data_t;
+typedef struct thread_time_constraint_with_priority_policy    \
+        *thread_time_constraint_with_priority_policy_t;
+
+#define THREAD_TIME_CONSTRAINT_WITH_PRIORITY_POLICY_COUNT     ((mach_msg_type_number_t) \
+	(sizeof (thread_time_constraint_with_priority_policy_data_t) / sizeof (integer_t)))
+
+#define TIME_CONSTRAINT_POLICY_DEFAULT_PRIORITY          97
+#define TIME_CONSTRAINT_POLICY_MAXIMUM_PRIORITY         127
 
 #endif /* PRIVATE */
 

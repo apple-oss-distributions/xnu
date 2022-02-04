@@ -18,9 +18,12 @@ typedef void (*PE_kputc_t)(char);
 SECURITY_READ_ONLY_LATE(PE_kputc_t) PE_kputc;
 
 // disable_serial_output disables kprintf() *and* unbuffered panic output.
+SECURITY_READ_ONLY_LATE(bool) disable_serial_output = true;
 // disable_kprintf_output only disables kprintf().
-SECURITY_READ_ONLY_LATE(unsigned int) disable_serial_output = TRUE;
-static SECURITY_READ_ONLY_LATE(unsigned int) disable_kprintf_output = TRUE;
+SECURITY_READ_ONLY_LATE(bool) disable_kprintf_output = true;
+// disable_iolog_serial_output only disables IOLog, controlled by
+// SERIALMODE_NO_IOLOG.
+SECURITY_READ_ONLY_LATE(bool) disable_iolog_serial_output = false;
 
 static SIMPLE_LOCK_DECLARE(kprintf_lock, 0);
 
@@ -28,29 +31,41 @@ static void serial_putc_crlf(char c);
 
 __startup_func
 static void
-PE_init_kprintf(void)
+PE_init_kprintf_config(void)
 {
 	if (PE_state.initialized == FALSE) {
 		panic("Platform Expert not initialized");
 	}
 
 	if (debug_boot_arg & DB_KPRT) {
-		disable_serial_output = FALSE;
+		disable_serial_output = false;
 	}
 
 #if DEBUG
-	disable_kprintf_output = FALSE;
+	disable_kprintf_output = false;
 #elif DEVELOPMENT
 	bool enable_kprintf_spam = false;
 	if (PE_parse_boot_argn("-enable_kprintf_spam", &enable_kprintf_spam, sizeof(enable_kprintf_spam))) {
-		disable_kprintf_output = FALSE;
+		disable_kprintf_output = false;
 	}
 #endif
+}
+// Do this early, so other code can depend on whether kprintf is enabled.
+STARTUP(TUNABLES, STARTUP_RANK_LAST, PE_init_kprintf_config);
 
+__startup_func
+static void
+PE_init_kprintf(void)
+{
 	if (serial_init()) {
 		PE_kputc = serial_putc_crlf;
 	} else {
-		PE_kputc = cnputc_unbuffered;
+		/**
+		 * If serial failed to initialize then fall back to using the console,
+		 * and assume the console is using the video console (because clearly
+		 * serial doesn't work).
+		 */
+		PE_kputc = console_write_unbuffered;
 	}
 }
 STARTUP(KPRINTF, STARTUP_RANK_FIRST, PE_init_kprintf);
@@ -141,6 +156,12 @@ serial_putc_crlf(char c)
 		uart_putc('\r');
 	}
 	uart_putc(c);
+}
+
+void
+serial_putc_options(char c, bool poll)
+{
+	uart_putc_options(c, poll);
 }
 
 void

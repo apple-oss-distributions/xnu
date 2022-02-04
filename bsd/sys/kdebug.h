@@ -139,6 +139,7 @@ __BEGIN_DECLS
 #define DBG_IMG         49
 #define DBG_UMALLOC     51
 #define DBG_TURNSTILE   53
+#define DBG_AUDIO       54
 
 #define DBG_MIG         255
 
@@ -182,6 +183,10 @@ __BEGIN_DECLS
 #define DBG_MACH_SCHED_CLUTCH   0xA9 /* Clutch scheduler */
 #define DBG_MACH_IO             0xAA /* I/O */
 #define DBG_MACH_WORKGROUP      0xAB /* Workgroup subsystem */
+#define DBG_MACH_HV             0xAC /* Hypervisor subsystem */
+#define DBG_MACH_KCOV           0xAD /* Kernel coverage sanitizer */
+#define DBG_MACH_MACHDEP_EXCP_SC_x86 0xAE /* Machine Dependent System Calls on x86 */
+#define DBG_MACH_MACHDEP_EXCP_SC_ARM 0xAF /* Machine Dependent System Calls on arm */
 
 /* Codes for DBG_MACH_IO */
 #define DBC_MACH_IO_MMIO_READ           0x1
@@ -260,7 +265,20 @@ __BEGIN_DECLS
 #define MACH_TURNSTILE_KERNEL_CHANGE 0x40 /* sched priority change because of turnstile */
 #define MACH_SCHED_WI_AUTO_JOIN      0x41 /* work interval auto join events */
 #define MACH_SCHED_WI_DEFERRED_FINISH 0x42 /* work interval pending finish events for auto-join thread groups */
+#define MACH_SET_RT_DEADLINE       0x43 /* set thread->realtime.deadline */
+#define MACH_CANCEL_RT_DEADLINE    0x44 /* cancel thread->realtime.deadline */
+#define MACH_RT_SIGNAL_SPILL       0x45 /* RT spill signal sent to cpuid */
+#define MACH_RT_STEAL              0x46 /* RT thread stolen or spilled */
+#define MACH_PENDING_AST_URGENT    0x47 /* CPU pending_AST_URGENT set/cleared */
+#define MACH_SCHED_THREAD_SELECT   0x48 /* Result of thread_select */
+#define MACH_SCHED_NEXT_PROCESSOR  0x49 /* Result of choose_next_rt_processor_for_IPI */
 #define MACH_PSET_AVG_EXEC_TIME    0x50
+#define MACH_SUSPEND_USERSPACE     0x51    /* userspace threads are suspended */
+#define MACH_PREEMPTION_EXPIRED    0x52 /* preemption disable threshold crossed */
+#define MACH_FLOOR_PROMOTE         0x53 /* promoted upon request */
+#define MACH_FLOOR_DEMOTE          0x54 /* unpromoted upon request */
+#define MACH_INT_MASKED_EXPIRED    0x55    /* interrupt masked threshold crossed */
+#define MACH_INT_HANDLED_EXPIRED   0x56    /* interrupt handling threshold crossed */
 
 /* Codes for Clutch/Edge Scheduler (DBG_MACH_SCHED_CLUTCH) */
 #define MACH_SCHED_CLUTCH_ROOT_BUCKET_STATE     0x0 /* __unused */
@@ -276,6 +294,9 @@ __BEGIN_DECLS
 #define MACH_SCHED_EDGE_SHOULD_YIELD            0x9 /* Edge decisions for thread yield */
 #define MACH_SCHED_CLUTCH_THR_COUNT             0xa /* Clutch scheduler runnable thread counts */
 #define MACH_SCHED_EDGE_LOAD_AVG                0xb /* Per-cluster load average */
+#define MACH_SCHED_EDGE_CLUSTER_SHARED_LOAD     0xc /* Per-cluster shared resource load */
+#define MACH_SCHED_EDGE_RSRC_HEAVY_THREAD       0xd /* Resource heavy thread state */
+#define MACH_SCHED_EDGE_SHARED_RSRC_MIGRATE     0xe /* Migrating a shared resource thread due to cluster load imbalance */
 
 /* Codes for workgroup interval subsystem (DBG_MACH_WORKGROUP) */
 #define WORKGROUP_INTERVAL_CREATE               0x0 /* work interval creation */
@@ -284,6 +305,11 @@ __BEGIN_DECLS
 #define WORKGROUP_INTERVAL_START                0x3 /* work interval start call */
 #define WORKGROUP_INTERVAL_UPDATE               0x4 /* work interval update call */
 #define WORKGROUP_INTERVAL_FINISH               0x5 /* work interval finish call */
+
+/* Codes for coverage sanitizer */
+#define KCOV_STKSZ_THRESHOLD_ABOVE           0x0 /* thread stack is above threshold */
+#define KCOV_STKSZ_THRESHOLD_BELOW           0x1 /* thread stack is below threshold */
+#define KCOV_STKSZ_DELTA                     0X2 /* thread stack change is larger than delta. */
 
 /* Variants for MACH_MULTIQ_DEQUEUE */
 #define MACH_MULTIQ_BOUND     1
@@ -327,6 +353,10 @@ __BEGIN_DECLS
 #define MACH_THREAD_GROUP_NAME_FREE     0x4
 #define MACH_THREAD_GROUP_FLAGS         0x5
 #define MACH_THREAD_GROUP_BLOCK         0x6
+#define MACH_THREAD_GROUP_PREADOPT      0x7
+#define MACH_THREAD_GROUP_PREADOPT_NEXTTIME  0x8
+#define MACH_THREAD_GROUP_PREADOPT_CLEAR 0x9
+#define MACH_THREAD_GROUP_PREADOPT_NA 0xa
 
 /* Codes for coalitions (DBG_MACH_COALITION) */
 #define MACH_COALITION_NEW                      0x0
@@ -360,6 +390,13 @@ __BEGIN_DECLS
 #define PMAP__UPDATE_CACHING    0x15
 #define PMAP__ATTRIBUTE_CLEAR_RANGE 0x16
 #define PMAP__CLEAR_USER_TTB    0x17
+#define PMAP__IOMMU_INIT        0x18
+#define PMAP__IOMMU_IOVMALLOC   0x19
+#define PMAP__IOMMU_IOVMFREE    0x1a
+#define PMAP__IOMMU_MAP         0x1b
+#define PMAP__IOMMU_UNMAP       0x1c
+#define PMAP__IOMMU_IOCTL       0x1d
+#define PMAP__IOMMU_GRANT_PAGE  0x1e
 
 /* Codes for clock (DBG_MACH_CLOCK) */
 #define MACH_EPOCH_CHANGE       0x0     /* wake epoch change */
@@ -374,6 +411,9 @@ __BEGIN_DECLS
 /* Codes for Stackshot/Microstackshot (DBG_MACH_STACKSHOT) */
 #define MICROSTACKSHOT_RECORD   0x0
 #define MICROSTACKSHOT_GATHER   0x1
+#define STACKSHOT_RECORD        0x2     /* START/END, syscall stackshot */
+#define STACKSHOT_RECORD_SHORT  0x3     /* ran out of space inside stackshot, growing buffer */
+#define STACKSHOT_KERN_RECORD   0x4     /* START/END, internal stackshot */
 
 /* Codes for sysdiagnose (DBG_MACH_SYSDIAGNOSE) */
 #define SYSDIAGNOSE_NOTIFY_USER 0x0
@@ -419,6 +459,54 @@ __BEGIN_DECLS
 #define RMON_LOGWRITES_VIOLATED_K32A    0x024
 #define RMON_LOGWRITES_VIOLATED_K32B    0x025
 #define RMON_DISABLE_IO_MONITOR         0x02f
+
+/* Codes for x86 Hypervisor (DBG_MACH_HV) */
+#define HV_X86_ENTER                     0x00
+#define HV_X86_ENTER_ERROR               0x01
+#define HV_X86_TRAP_TASK                 0x02
+#define HV_X86_TRAP_THREAD               0x03
+#define HV_X86_INTERRUPT_INJECT          0x04
+#define HV_X86_INTERRUPT_RECV            0x05
+#define HV_X86_INTERRUPT_SEND            0x06
+#define HV_X86_IPI_SEND                  0x07
+#define HV_X86_NMI_INJECT                0x08
+#define HV_X86_NMI_SEND                  0x09
+#define HV_X86_LSC_HIT                   0x0a
+#define HV_X86_LSC_INSERT                0x0b
+#define HV_X86_LSC_INSERT_IMM32          0x0c
+#define HV_X86_LSC_INVALID               0x0d
+#define HV_X86_LSC_INVALIDATE            0x0e
+#define HV_X86_LSC_MISS                  0x0f
+#define HV_X86_TIMER_CANCEL              0x10
+#define HV_X86_TIMER_FIRE                0x11
+#define HV_X86_TIMER_SCHEDULE            0x12
+#define HV_X86_APIC_ACCESS_EXIT          0x13
+#define HV_X86_APIC_WRITE_EXIT           0x14
+#define HV_X86_EPT_VIOLATION_EXIT        0x15
+#define HV_X86_EXC_NMI_EXIT              0x16
+#define HV_X86_HLT_EXIT                  0x17
+#define HV_X86_IO_EXIT                   0x18
+#define HV_X86_IRQ_EXIT                  0x19
+#define HV_X86_IRQ_WND_EXIT              0x1a
+#define HV_X86_MOV_DR_EXIT               0x1b
+#define HV_X86_NMI_WND_EXIT              0x1c
+#define HV_X86_RDMSR_EXIT                0x1d
+#define HV_X86_RDPMC_EXIT                0x1e
+#define HV_X86_TPR_THRESHOLD_EXIT        0x1f
+#define HV_X86_VMX_TIMER_EXPIRED_EXIT    0x20
+#define HV_X86_WRMSR_EXIT                0x21
+#define HV_X86_VCPU_READ_APIC_TRAP       0x22
+#define HV_X86_VCPU_READ_VMCS_TRAP       0x23
+#define HV_X86_VCPU_RUN_TRAP             0x24
+#define HV_X86_VCPU_RUN_UNTIL_TRAP       0x25
+#define HV_X86_VCPU_WRITE_APIC_TRAP      0x26
+#define HV_X86_VM_ADDRSPACE_CREATE_TRAP  0x27
+#define HV_X86_VM_ADDRSPACE_DESTROY_TRAP 0x28
+#define HV_X86_VM_INTR_MSI_TRAP          0x29
+#define HV_X86_VM_MAP_TRAP               0x2a
+#define HV_X86_VM_PROTECT_TRAP           0x2b
+#define HV_X86_VM_UNMAP_TRAP             0x2c
+#define HV_X86_TSC_OFFSET_SET            0x2d
 
 /* **** The Kernel Debug Sub Classes for Network (DBG_NETWORK) **** */
 #define DBG_NETIP       1       /* Internet Protocol */
@@ -525,6 +613,7 @@ __BEGIN_DECLS
 #define DBG_DRVETHERNET      28 /* Ethernet */
 #define DBG_DRVMCC           29 /* Memory Cache Controller */
 #define DBG_DRVACCESSORY     30 /* Accessories */
+#define DBG_SOCDIAGS         31 /* SoC Diagnostics */
 
 /* Backwards compatibility */
 #define DBG_DRVPOINTING         DBG_DRVHID      /* OBSOLETE: Use DBG_DRVHID instead */
@@ -569,6 +658,11 @@ __BEGIN_DECLS
 #define DBG_HFS_UPDATE_DATEADDED 0x20
 #define DBG_HFS_UPDATE_MINOR     0x40
 #define DBG_HFS_UPDATE_SKIPPED   0x80
+
+/*
+ * Codes for Kernel Debug Sub Class DBG_VFS
+ */
+#define DBG_VFS_IO_COMPRESSION_STATS 0x1000
 
 /* The Kernel Debug Sub Classes for BSD */
 #define DBG_BSD_PROC              0x01 /* process/signals related */
@@ -939,9 +1033,9 @@ __BEGIN_DECLS
 
 __END_DECLS
 
-#if defined(__has_include) && __has_include(<sys/kdebug_private.h>)
+#if defined(KERNEL) || defined(PRIVATE)
 #include <sys/kdebug_private.h>
-#endif /* __has_include(<sys/kdebug_private.h>) */
+#endif /* defined(KERNEL) || defined(PRIVATE) */
 
 #ifdef KERNEL
 #include <sys/kdebug_kernel.h>

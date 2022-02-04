@@ -245,7 +245,6 @@ clock_service_create(void)
 		clock_t clock = &clock_list[i];
 		if (clock->cl_ops) {
 			ipc_clock_init(clock);
-			ipc_clock_enable(clock);
 		}
 	}
 }
@@ -484,10 +483,7 @@ clock_alarm(
 	LOCK_ALARM(s);
 	if ((alarm = alrmfree) == 0) {
 		UNLOCK_ALARM(s);
-		alarm = (alarm_t) zalloc(alarm_zone);
-		if (alarm == 0) {
-			return KERN_RESOURCE_SHORTAGE;
-		}
+		alarm = zalloc_flags(alarm_zone, Z_WAITOK | Z_NOFAIL);
 		LOCK_ALARM(s);
 	} else {
 		alrmfree = alarm->al_next;
@@ -592,10 +588,7 @@ clock_sleep_internal(
 		LOCK_ALARM(s);
 		if ((alarm = alrmfree) == 0) {
 			UNLOCK_ALARM(s);
-			alarm = (alarm_t) zalloc(alarm_zone);
-			if (alarm == 0) {
-				return KERN_RESOURCE_SHORTAGE;
-			}
+			alarm = zalloc_flags(alarm_zone, Z_WAITOK | Z_NOFAIL);
 			LOCK_ALARM(s);
 		} else {
 			alrmfree = alarm->al_next;

@@ -66,6 +66,16 @@
 #ifndef _IPC_IPC_NOTIFY_H_
 #define _IPC_IPC_NOTIFY_H_
 
+#include <mach/port.h>
+
+#pragma GCC visibility push(hidden)
+
+typedef struct ipc_notify_nsenders {
+	ipc_port_t              ns_notify;
+	mach_port_mscount_t     ns_mscount;
+	boolean_t               ns_is_kobject;
+} ipc_notify_nsenders_t;
+
 /*
  * Exported interfaces
  */
@@ -87,16 +97,34 @@ extern void ipc_notify_port_destroyed(
 
 /* Send a no-senders notification */
 extern void ipc_notify_no_senders(
-	ipc_port_t              port,
-	mach_port_mscount_t     mscount);
+	ipc_port_t              notify,
+	mach_port_mscount_t     mscount,
+	boolean_t               kobject);
+
+extern ipc_notify_nsenders_t ipc_notify_no_senders_prepare(
+	ipc_port_t              port);
+
+static inline void
+ipc_notify_no_senders_emit(ipc_notify_nsenders_t nsrequest)
+{
+	if (nsrequest.ns_notify) {
+		ipc_notify_no_senders(nsrequest.ns_notify,
+		    nsrequest.ns_mscount, nsrequest.ns_is_kobject);
+	}
+}
+
+extern void ipc_notify_no_senders_consume(
+	ipc_notify_nsenders_t   nsrequest);
 
 /* Send a send-once notification */
-extern void ipc_notify_send_once(
+extern void ipc_notify_send_once_and_unlock(
 	ipc_port_t              port);
 
 /* Send a dead-name notification */
 extern void ipc_notify_dead_name(
 	ipc_port_t              port,
 	mach_port_name_t        name);
+
+#pragma GCC visibility pop
 
 #endif  /* _IPC_IPC_NOTIFY_H_ */

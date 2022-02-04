@@ -43,6 +43,8 @@ COMP_SUBDIRS =
 
 %OBJS
 
+%LIBOBJS
+
 %CFILES
 
 %CXXFILES
@@ -65,35 +67,35 @@ OSKext.cpo_CXXWARNFLAGS_ADD += -Wno-cast-align
 OSKextLib.cpo_CXXWARNFLAGS_ADD += -Wno-cast-align
 OSMetaClass.cpo_CXXWARNFLAGS_ADD += -Wno-cast-align
 OSUnserialize.cpo_CXXWARNFLAGS_ADD += -Wno-cast-align
-corecrypto_md5.o_CFLAGS_ADD += -Wno-cast-align
-corecrypto_sha1.o_CFLAGS_ADD += -Wno-cast-align
+corecrypto_md5.o_CWARNFLAGS_ADD += -Wno-cast-align
+corecrypto_sha1.o_CWARNFLAGS_ADD += -Wno-cast-align
 # -Wno-cast-qual
 OSKext.cpo_CXXWARNFLAGS_ADD += -Wno-cast-qual
-compress.o_CFLAGS_ADD += -Wno-cast-qual
-deflate.o_CFLAGS_ADD += -Wno-cast-qual
+compress.o_CWARNFLAGS_ADD += -Wno-cast-qual
+deflate.o_CWARNFLAGS_ADD += -Wno-cast-qual
 runtime.cpo_CXXWARNFLAGS_ADD += -Wno-cast-qual
-trees.o_CFLAGS_ADD += -Wno-cast-qual
-uncompr.o_CFLAGS_ADD += -Wno-cast-qual
+trees.o_CWARNFLAGS_ADD += -Wno-cast-qual
+uncompr.o_CWARNFLAGS_ADD += -Wno-cast-qual
 # -Wno-implicit-int-conversion
 OSUnserialize.cpo_CXXWARNFLAGS_ADD += -Wno-implicit-int-conversion
 OSUnserializeXML.cpo_CXXWARNFLAGS_ADD += -Wno-implicit-int-conversion
-kxld_sym.o_CFLAGS_ADD += -Wno-implicit-int-conversion
-log.o_CFLAGS_ADD += -Wno-implicit-int-conversion
-scanf.o_CFLAGS_ADD += -Wno-implicit-int-conversion
+kxld_sym.o_CWARNFLAGS_ADD += -Wno-implicit-int-conversion
+log.o_CWARNFLAGS_ADD += -Wno-implicit-int-conversion
+scanf.o_CWARNFLAGS_ADD += -Wno-implicit-int-conversion
 # -Wno-missing-prototypes
 OSRuntime.cpo_CXXWARNFLAGS_ADD += -Wno-missing-prototypes
 # -Wno-shorten-64-to-32
 OSKext.cpo_CXXWARNFLAGS_ADD += -Wno-shorten-64-to-32
 OSUnserialize.cpo_CXXWARNFLAGS_ADD += -Wno-shorten-64-to-32
 OSUnserializeXML.cpo_CXXWARNFLAGS_ADD += -Wno-shorten-64-to-32
-log.o_CFLAGS_ADD += -Wno-shorten-64-to-32
-scanf.o_CFLAGS_ADD += -Wno-shorten-64-to-32
+log.o_CWARNFLAGS_ADD += -Wno-shorten-64-to-32
+scanf.o_CWARNFLAGS_ADD += -Wno-shorten-64-to-32
 # -Wno-sign-conversion
 OSCollection.cpo_CXXWARNFLAGS_ADD += -Wno-sign-conversion
 OSData.cpo_CXXWARNFLAGS_ADD += -Wno-sign-conversion
 OSDebug.cpo_CXXWARNFLAGS_ADD += -Wno-sign-conversion
 OSKext.cpo_CXXWARNFLAGS_ADD += -Wno-sign-conversion
-OSKextVersion.o_CFLAGS_ADD += -Wno-sign-conversion
+OSKextVersion.o_CWARNFLAGS_ADD += -Wno-sign-conversion
 OSMetaClass.cpo_CXXWARNFLAGS_ADD += -Wno-sign-conversion
 OSNumber.cpo_CXXWARNFLAGS_ADD += -Wno-sign-conversion
 OSObject.cpo_CXXWARNFLAGS_ADD += -Wno-sign-conversion
@@ -103,26 +105,26 @@ OSSet.cpo_CXXWARNFLAGS_ADD += -Wno-sign-conversion
 OSString.cpo_CXXWARNFLAGS_ADD += -Wno-sign-conversion
 OSUnserialize.cpo_CXXWARNFLAGS_ADD += -Wno-sign-conversion
 OSUnserializeXML.cpo_CXXWARNFLAGS_ADD += -Wno-sign-conversion
-adler32.o_CFLAGS_ADD += -Wno-sign-conversion
-corecrypto_aes.o_CFLAGS_ADD += -Wno-sign-conversion
-corecrypto_aesxts.o_CFLAGS_ADD += -Wno-sign-conversion
-deflate.o_CFLAGS_ADD += -Wno-sign-conversion
-inet_aton.o_CFLAGS_ADD += -Wno-sign-conversion
-infback.o_CFLAGS_ADD += -Wno-sign-conversion
-inflate.o_CFLAGS_ADD += -Wno-sign-conversion
-kxld_array.o_CFLAGS_ADD += -Wno-sign-conversion
-kxld_copyright.o_CFLAGS_ADD += -Wno-sign-conversion
-kxld_dict.o_CFLAGS_ADD += -Wno-sign-conversion
-kxld_object.o_CFLAGS_ADD += -Wno-sign-conversion
-kxld_reloc.o_CFLAGS_ADD += -Wno-sign-conversion
-kxld_sym.o_CFLAGS_ADD += -Wno-sign-conversion
-kxld_symtab.o_CFLAGS_ADD += -Wno-sign-conversion
-kxld_util.o_CFLAGS_ADD += -Wno-sign-conversion
-log.o_CFLAGS_ADD += -Wno-sign-conversion
-refcnt.o_CFLAGS_ADD += -Wno-sign-conversion
-scanf.o_CFLAGS_ADD += -Wno-sign-conversion
-trees.o_CFLAGS_ADD += -Wno-sign-conversion
-uuid.o_CFLAGS_ADD += -Wno-sign-conversion
+adler32.o_CWARNFLAGS_ADD += -Wno-sign-conversion
+corecrypto_aes.o_CWARNFLAGS_ADD += -Wno-sign-conversion
+corecrypto_aesxts.o_CWARNFLAGS_ADD += -Wno-sign-conversion
+deflate.o_CWARNFLAGS_ADD += -Wno-sign-conversion
+inet_aton.o_CWARNFLAGS_ADD += -Wno-sign-conversion
+infback.o_CWARNFLAGS_ADD += -Wno-sign-conversion
+inflate.o_CWARNFLAGS_ADD += -Wno-sign-conversion
+kxld_array.o_CWARNFLAGS_ADD += -Wno-sign-conversion
+kxld_copyright.o_CWARNFLAGS_ADD += -Wno-sign-conversion
+kxld_dict.o_CWARNFLAGS_ADD += -Wno-sign-conversion
+kxld_object.o_CWARNFLAGS_ADD += -Wno-sign-conversion
+kxld_reloc.o_CWARNFLAGS_ADD += -Wno-sign-conversion
+kxld_sym.o_CWARNFLAGS_ADD += -Wno-sign-conversion
+kxld_symtab.o_CWARNFLAGS_ADD += -Wno-sign-conversion
+kxld_util.o_CWARNFLAGS_ADD += -Wno-sign-conversion
+log.o_CWARNFLAGS_ADD += -Wno-sign-conversion
+refcnt.o_CWARNFLAGS_ADD += -Wno-sign-conversion
+scanf.o_CWARNFLAGS_ADD += -Wno-sign-conversion
+trees.o_CWARNFLAGS_ADD += -Wno-sign-conversion
+uuid.o_CWARNFLAGS_ADD += -Wno-sign-conversion
 # -Wno-unreachable-code
 OSUnserialize.cpo_CXXWARNFLAGS_ADD += -Wno-unreachable-code
 OSUnserializeXML.cpo_CXXWARNFLAGS_ADD += -Wno-unreachable-code
@@ -157,7 +159,17 @@ $(COMPONENT).filelist: $(OBJS)
 		 $(ECHO) $(TARGET)/$(CURRENT_KERNEL_CONFIG)/$${obj}; \
 	done > $(COMPONENT).filelist
 
+$(COMPONENT).libfilelist: $(LIBOBJS)
+	@$(LOG_LDFILELIST) "lib$(COMPONENT)"
+	$(_v)for obj in ${LIBOBJS}; do	\
+		 $(ECHO) $(TARGET)/$(CURRENT_KERNEL_CONFIG)/$${obj}; \
+	done > $(COMPONENT).libfilelist
+
+ifeq ($(RC_ProjectName),xnu_libraries)
+do_all: $(COMPONENT).libfilelist
+else
 do_all: $(COMPONENT).filelist
+endif
 
 do_build_all:: do_all
 

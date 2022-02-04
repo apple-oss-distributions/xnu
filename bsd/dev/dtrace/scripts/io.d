@@ -240,8 +240,8 @@ translator fileinfo_t < struct fileglob *F > {
 };
 
 inline fileinfo_t fds[int fd] = xlate <fileinfo_t> (
-	(fd >= 0 && fd <= curproc->p_fd->fd_lastfile) ?
-		(struct fileglob *)(curproc->p_fd->fd_ofiles[fd]->fp_glob) :
+	(fd >= 0 && fd < curproc->p_fd.fd_afterlast) ?
+		(struct fileglob *)(curproc->p_fd.fd_ofiles[fd]->fp_glob) :
 		(struct fileglob *)NULL);
 
 #pragma D attributes Stable/Stable/Common fds

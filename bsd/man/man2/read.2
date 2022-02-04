@@ -32,7 +32,7 @@
 .\"     @(#)read.2	8.4 (Berkeley) 2/26/94
 .\" $FreeBSD: src/lib/libc/sys/read.2,v 1.9.2.6 2001/12/14 18:34:01 ru Exp $
 .\"
-.Dd February 26, 1994
+.Dd June 3, 2021
 .Dt READ 2
 .Os
 .Sh NAME
@@ -230,6 +230,21 @@ the server.
 The connection timed out while reading a remote file from a soft mounted NFS
 volume (see
 .Xr mount_nfs 8 ) .
+.\" ===========
+.It Bq Er ETIMEDOUT
+The file is a
+.Dq dataless
+file that requires materialization and materialization timed out or
+encountered some other temporary failure.
+.\" ===========
+.It Bq Er EDEADLK
+The file is a
+.Dq dataless
+file that requires materialization and the I/O policy of the current thread
+or process disallows dataless file materialization
+.Po see
+.Xr getiopolicy_np 3
+.Pc .
 .El
 .Pp
 .Fn pread

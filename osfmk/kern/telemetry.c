@@ -47,6 +47,7 @@
 
 #include <pexpert/pexpert.h>
 
+#include <string.h>
 #include <vm/vm_kern.h>
 #include <vm/vm_shared_region.h>
 
@@ -54,6 +55,9 @@
 #include <kern/backtrace.h>
 #include <kern/monotonic.h>
 
+#include <security/mac_mach_internal.h>
+
+#include <sys/errno.h>
 #include <sys/kdebug.h>
 #include <uuid/uuid.h>
 #include <kdp/kdp_dyld.h>
@@ -77,8 +81,39 @@ struct micro_snapshot_buffer {
 	uint32_t                end_point;
 };
 
-void telemetry_take_sample(thread_t thread, uint8_t microsnapshot_flags, struct micro_snapshot_buffer * current_buffer);
-int telemetry_buffer_gather(user_addr_t buffer, uint32_t *length, boolean_t mark, struct micro_snapshot_buffer * current_buffer);
+static bool telemetry_task_ready_for_sample(task_t task);
+
+static void telemetry_instrumentation_begin(
+	struct micro_snapshot_buffer *buffer, enum micro_snapshot_flags flags);
+
+static void telemetry_instrumentation_end(struct micro_snapshot_buffer *buffer);
+
+static void telemetry_take_sample(thread_t thread, enum micro_snapshot_flags flags);
+
+#if CONFIG_MACF
+static void telemetry_macf_take_sample(thread_t thread, enum micro_snapshot_flags flags);
+#endif
+
+struct telemetry_target {
+	thread_t                         thread;
+	uintptr_t                       *frames;
+	size_t                           frames_count;
+	bool                             user64_regs;
+	enum micro_snapshot_flags        microsnapshot_flags;
+	struct micro_snapshot_buffer    *buffer;
+	lck_mtx_t                       *buffer_mtx;
+};
+
+static int telemetry_process_sample(
+	const struct telemetry_target *target,
+	bool release_buffer_lock,
+	uint32_t *out_current_record_start);
+
+static int telemetry_buffer_gather(
+	user_addr_t buffer,
+	uint32_t *length,
+	bool mark,
+	struct micro_snapshot_buffer *current_buffer);
 
 #define TELEMETRY_DEFAULT_SAMPLE_RATE (1) /* 1 sample every 1 second */
 #define TELEMETRY_DEFAULT_BUFFER_SIZE (16*1024)
@@ -87,7 +122,7 @@ int telemetry_buffer_gather(user_addr_t buffer, uint32_t *length, boolean_t mark
 #define TELEMETRY_DEFAULT_NOTIFY_LEEWAY (4*1024) // Userland gets 4k of leeway to collect data after notification
 #define TELEMETRY_MAX_UUID_COUNT (128) // Max of 128 non-shared-cache UUIDs to log for symbolication
 
-uint32_t                        telemetry_sample_rate = 0;
+uint32_t                telemetry_sample_rate = 0;
 volatile boolean_t      telemetry_needs_record = FALSE;
 volatile boolean_t      telemetry_needs_timer_arming_record = FALSE;
 
@@ -95,8 +130,8 @@ volatile boolean_t      telemetry_needs_timer_arming_record = FALSE;
  * If TRUE, record micro-stackshot samples for all tasks.
  * If FALSE, only sample tasks which are marked for telemetry.
  */
-boolean_t telemetry_sample_all_tasks = FALSE;
-boolean_t telemetry_sample_pmis = FALSE;
+bool     telemetry_sample_all_tasks = false;
+bool     telemetry_sample_pmis = false;
 uint32_t telemetry_active_tasks = 0; // Number of tasks opted into telemetry
 
 uint32_t telemetry_timestamp = 0;
@@ -114,12 +149,27 @@ struct micro_snapshot_buffer telemetry_buffer = {
 	.end_point = 0
 };
 
+#if CONFIG_MACF
+#define TELEMETRY_MACF_DEFAULT_BUFFER_SIZE (16*1024)
+/*
+ * The MAC framework uses its own telemetry buffer for the purposes of auditing
+ * security-related work being done by userland threads.
+ */
+struct micro_snapshot_buffer telemetry_macf_buffer = {
+	.buffer = 0,
+	.size = 0,
+	.current_position = 0,
+	.end_point = 0
+};
+#endif
+
 int                                     telemetry_bytes_since_last_mark = -1; // How much data since buf was last marked?
 int                                     telemetry_buffer_notify_at = 0;
 
 LCK_GRP_DECLARE(telemetry_lck_grp, "telemetry group");
 LCK_MTX_DECLARE(telemetry_mtx, &telemetry_lck_grp);
 LCK_MTX_DECLARE(telemetry_pmi_mtx, &telemetry_lck_grp);
+LCK_MTX_DECLARE(telemetry_macf_mtx, &telemetry_lck_grp);
 
 #define TELEMETRY_LOCK() do { lck_mtx_lock(&telemetry_mtx); } while (0)
 #define TELEMETRY_TRY_SPIN_LOCK() lck_mtx_try_lock_spin(&telemetry_mtx)
@@ -127,6 +177,9 @@ LCK_MTX_DECLARE(telemetry_pmi_mtx, &telemetry_lck_grp);
 
 #define TELEMETRY_PMI_LOCK() do { lck_mtx_lock(&telemetry_pmi_mtx); } while (0)
 #define TELEMETRY_PMI_UNLOCK() do { lck_mtx_unlock(&telemetry_pmi_mtx); } while (0)
+
+#define TELEMETRY_MACF_LOCK() do { lck_mtx_lock(&telemetry_macf_mtx); } while (0)
+#define TELEMETRY_MACF_UNLOCK() do { lck_mtx_unlock(&telemetry_macf_mtx); } while (0)
 
 void
 telemetry_init(void)
@@ -175,9 +228,9 @@ telemetry_init(void)
 	if (!PE_parse_boot_argn("telemetry_sample_all_tasks",
 	    &telemetry_sample_all_tasks, sizeof(telemetry_sample_all_tasks))) {
 #if !defined(XNU_TARGET_OS_OSX) && !(DEVELOPMENT || DEBUG)
-		telemetry_sample_all_tasks = FALSE;
+		telemetry_sample_all_tasks = false;
 #else
-		telemetry_sample_all_tasks = TRUE;
+		telemetry_sample_all_tasks = true;
 #endif /* !defined(XNU_TARGET_OS_OSX) && !(DEVELOPMENT || DEBUG) */
 	}
 
@@ -196,9 +249,9 @@ void
 telemetry_global_ctl(int enable_disable)
 {
 	if (enable_disable == 1) {
-		telemetry_sample_all_tasks = TRUE;
+		telemetry_sample_all_tasks = true;
 	} else {
-		telemetry_sample_all_tasks = FALSE;
+		telemetry_sample_all_tasks = false;
 	}
 }
 
@@ -261,25 +314,25 @@ telemetry_task_ctl_locked(task_t task, uint32_t reasons, int enable_disable)
  * telemetry_active_tasks: Count of tasks opted in.
  * task->t_flags & TF_TELEMETRY: This task is opted in.
  */
-static boolean_t
+static bool
 telemetry_is_active(thread_t thread)
 {
 	task_t task = thread->task;
 
 	if (task == kernel_task) {
 		/* Kernel threads never return to an AST boundary, and are ineligible */
-		return FALSE;
+		return false;
 	}
 
 	if (telemetry_sample_all_tasks || telemetry_sample_pmis) {
-		return TRUE;
+		return true;
 	}
 
 	if ((telemetry_active_tasks > 0) && ((thread->task->t_flags & TF_TELEMETRY) != 0)) {
-		return TRUE;
+		return true;
 	}
 
-	return FALSE;
+	return false;
 }
 
 /*
@@ -292,7 +345,7 @@ telemetry_timer_event(__unused uint64_t deadline, __unused uint64_t interval, __
 {
 	if (telemetry_needs_timer_arming_record == TRUE) {
 		telemetry_needs_timer_arming_record = FALSE;
-		telemetry_take_sample(current_thread(), kTimerArmingRecord | kUserMode, &telemetry_buffer);
+		telemetry_take_sample(current_thread(), (enum micro_snapshot_flags)(kTimerArmingRecord | kUserMode));
 	}
 
 	return 0;
@@ -310,8 +363,8 @@ int
 telemetry_pmi_setup(enum telemetry_pmi pmi_ctr, uint64_t period)
 {
 #if defined(MT_CORE_INSTRS) && defined(MT_CORE_CYCLES)
-	static boolean_t sample_all_tasks_aside = FALSE;
-	static uint32_t active_tasks_aside = FALSE;
+	static bool sample_all_tasks_aside = false;
+	static uint32_t active_tasks_aside = false;
 	int error = 0;
 	const char *name = "?";
 
@@ -326,7 +379,7 @@ telemetry_pmi_setup(enum telemetry_pmi pmi_ctr, uint64_t period)
 			goto out;
 		}
 
-		telemetry_sample_pmis = FALSE;
+		telemetry_sample_pmis = false;
 		telemetry_sample_all_tasks = sample_all_tasks_aside;
 		telemetry_active_tasks = active_tasks_aside;
 		error = mt_microstackshot_stop();
@@ -350,10 +403,10 @@ telemetry_pmi_setup(enum telemetry_pmi pmi_ctr, uint64_t period)
 		goto out;
 	}
 
-	telemetry_sample_pmis = TRUE;
+	telemetry_sample_pmis = true;
 	sample_all_tasks_aside = telemetry_sample_all_tasks;
 	active_tasks_aside = telemetry_active_tasks;
-	telemetry_sample_all_tasks = FALSE;
+	telemetry_sample_all_tasks = false;
 	telemetry_active_tasks = 0;
 
 	error = mt_microstackshot_start(ctr, period, telemetry_pmi_handler, NULL);
@@ -384,7 +437,7 @@ telemetry_mark_curthread(boolean_t interrupted_userspace, boolean_t pmi)
 	 * If telemetry isn't active for this thread, return and try
 	 * again next time.
 	 */
-	if (telemetry_is_active(thread) == FALSE) {
+	if (telemetry_is_active(thread) == false) {
 		return;
 	}
 
@@ -440,19 +493,254 @@ telemetry_ast(thread_t thread, ast_t reasons)
 		    kInterruptRecord;
 	}
 
-	uint8_t user_telemetry = (reasons & AST_TELEMETRY_USER) ? kUserMode : 0;
+	if ((reasons & AST_TELEMETRY_MACF) != 0) {
+		record_type |= kMACFRecord;
+	}
 
-	uint8_t microsnapshot_flags = record_type | user_telemetry;
+	enum micro_snapshot_flags user_telemetry = (reasons & AST_TELEMETRY_USER) ? kUserMode : 0;
+	enum micro_snapshot_flags microsnapshot_flags = record_type | user_telemetry;
 
-	telemetry_take_sample(thread, microsnapshot_flags, &telemetry_buffer);
+	if ((reasons & AST_TELEMETRY_MACF) != 0) {
+		telemetry_macf_take_sample(thread, microsnapshot_flags);
+	}
+
+	if ((reasons & (AST_TELEMETRY_IO | AST_TELEMETRY_KERNEL | AST_TELEMETRY_PMI
+	    | AST_TELEMETRY_USER)) != 0) {
+		telemetry_take_sample(thread, microsnapshot_flags);
+	}
+}
+
+bool
+telemetry_task_ready_for_sample(task_t task)
+{
+	return task != TASK_NULL &&
+	       task != kernel_task &&
+	       !task_did_exec(task) &&
+	       !task_is_exec_copy(task);
 }
 
 void
-telemetry_take_sample(thread_t thread, uint8_t microsnapshot_flags, struct micro_snapshot_buffer * current_buffer)
+telemetry_instrumentation_begin(
+	__unused struct micro_snapshot_buffer *buffer,
+	__unused enum micro_snapshot_flags flags)
 {
+	/* telemetry_XXX accessed outside of lock for instrumentation only */
+	KDBG(MACHDBG_CODE(DBG_MACH_STACKSHOT, MICROSTACKSHOT_RECORD) | DBG_FUNC_START,
+	    flags, telemetry_bytes_since_last_mark, 0,
+	    (&telemetry_buffer != buffer));
+}
+
+void
+telemetry_instrumentation_end(__unused struct micro_snapshot_buffer *buffer)
+{
+	/* telemetry_XXX accessed outside of lock for instrumentation only */
+	KDBG(MACHDBG_CODE(DBG_MACH_STACKSHOT, MICROSTACKSHOT_RECORD) | DBG_FUNC_END,
+	    (&telemetry_buffer == buffer), telemetry_bytes_since_last_mark,
+	    buffer->current_position, buffer->end_point);
+}
+
+void
+telemetry_take_sample(thread_t thread, enum micro_snapshot_flags flags)
+{
+	task_t                      task;
+	uintptr_t                   frames[128];
+	uint32_t                    btcount;
+	struct backtrace_user_info  btinfo = BTUINFO_INIT;
+
+	if (thread == THREAD_NULL) {
+		return;
+	}
+
+	/* Ensure task is ready for taking a sample. */
+	task = thread->task;
+	if (!telemetry_task_ready_for_sample(task)) {
+		return;
+	}
+
+	telemetry_instrumentation_begin(&telemetry_buffer, flags);
+
+	/* Collect backtrace from user thread. */
+	btcount = backtrace_user(
+		frames,                                 /* bt */
+		sizeof(frames) / sizeof(frames[0]),     /* btlen */
+		NULL,                                   /* ctl */
+		&btinfo                                 /* info_out */
+		);
+
+	if (btinfo.btui_error != 0) {
+		return;
+	}
+
+	/* Process the backtrace. */
+	struct telemetry_target target = {
+		.thread = thread,
+		.frames = frames,
+		.frames_count = btcount,
+		.user64_regs = (btinfo.btui_info & BTI_64_BIT) != 0,
+		.microsnapshot_flags = flags,
+		.buffer = &telemetry_buffer,
+		.buffer_mtx = &telemetry_mtx
+	};
+	telemetry_process_sample(&target, true, NULL);
+
+	telemetry_instrumentation_end(&telemetry_buffer);
+}
+
+#if CONFIG_MACF
+void
+telemetry_macf_take_sample(thread_t thread, enum micro_snapshot_flags flags)
+{
+	task_t                        task;
+
+	vm_size_t                     btcapacity     = 128;
+	uintptr_t                     frames_stack[btcapacity];
+	uint32_t                      btcount        = 0;
+	uintptr_t                    *frames         = frames_stack;
+	bool                          alloced_frames = false;
+
+	struct backtrace_user_info    btinfo         = BTUINFO_INIT;
+	struct backtrace_control      btctl          = BTCTL_INIT;
+
+	uint32_t                      retry_count    = 0;
+	const uint32_t                max_retries    = 10;
+
+	bool                          initialized    = false;
+	struct micro_snapshot_buffer *telbuf         = &telemetry_macf_buffer;
+	uint32_t                      record_start   = 0;
+	bool                          did_process    = false;
+	int                           rv             = 0;
+
+	if (thread == THREAD_NULL) {
+		return;
+	}
+
+	telemetry_instrumentation_begin(telbuf, flags);
+
+	/* Ensure task is ready for taking a sample. */
+	task = thread->task;
+	if (!telemetry_task_ready_for_sample(task)) {
+		rv = EBUSY;
+		goto out;
+	}
+
+	/* Ensure MACF telemetry buffer was initialized. */
+	TELEMETRY_MACF_LOCK();
+	initialized = (telbuf->size > 0);
+	TELEMETRY_MACF_UNLOCK();
+
+	if (!initialized) {
+		rv = ENOMEM;
+		goto out;
+	}
+
+	/* Collect backtrace from user thread. */
+	while (retry_count < max_retries) {
+		btcount += backtrace_user(frames + btcount, btcapacity - btcount, &btctl, &btinfo);
+
+		if ((btinfo.btui_info & BTI_TRUNCATED) != 0 && btinfo.btui_next_frame_addr != 0) {
+			/*
+			 * Fast path uses stack memory to avoid an allocation. We must
+			 * pivot to heap memory in the case where we cannot write the
+			 * complete backtrace to this buffer.
+			 */
+			if (frames == frames_stack) {
+				btcapacity += 128;
+				frames = kalloc_data(btcapacity * sizeof(*frames), Z_WAITOK);
+
+				if (frames == NULL) {
+					break;
+				}
+
+				alloced_frames = true;
+
+				assert(btcapacity > sizeof(frames_stack) / sizeof(frames_stack[0]));
+				memcpy(frames, frames_stack, sizeof(frames_stack));
+			} else {
+				assert(alloced_frames);
+				frames = krealloc_data(frames,
+				    btcapacity * sizeof(*frames),
+				    (btcapacity + 128) * sizeof(*frames),
+				    Z_WAITOK);
+
+				if (frames == NULL) {
+					break;
+				}
+
+				btcapacity += 128;
+			}
+
+			btctl.btc_frame_addr = btinfo.btui_next_frame_addr;
+			++retry_count;
+		} else {
+			break;
+		}
+	}
+
+	if (frames == NULL) {
+		rv = ENOMEM;
+		goto out;
+	} else if (btinfo.btui_error != 0) {
+		rv = btinfo.btui_error;
+		goto out;
+	}
+
+	/* Process the backtrace. */
+	struct telemetry_target target = {
+		.thread = thread,
+		.frames = frames,
+		.frames_count = btcount,
+		.user64_regs = (btinfo.btui_info & BTI_64_BIT) != 0,
+		.microsnapshot_flags = flags,
+		.buffer = telbuf,
+		.buffer_mtx = &telemetry_macf_mtx
+	};
+	rv = telemetry_process_sample(&target, false, &record_start);
+	did_process = true;
+
+out:
+	/* Immediately deliver the collected sample to MAC clients. */
+	if (rv == 0) {
+		assert(telbuf->current_position >= record_start);
+		mac_thread_telemetry(thread,
+		    0,
+		    (void *)(telbuf->buffer + record_start),
+		    telbuf->current_position - record_start);
+	} else {
+		mac_thread_telemetry(thread, rv, NULL, 0);
+	}
+
+	/*
+	 * The lock was taken by telemetry_process_sample, and we asked it not to
+	 * unlock upon completion, so we must release the lock here.
+	 */
+	if (did_process) {
+		TELEMETRY_MACF_UNLOCK();
+	}
+
+	if (alloced_frames && frames != NULL) {
+		kfree_data(frames, btcapacity * sizeof(*frames));
+	}
+
+	telemetry_instrumentation_end(telbuf);
+}
+#endif /* CONFIG_MACF */
+
+int
+telemetry_process_sample(const struct telemetry_target *target,
+    bool release_buffer_lock,
+    uint32_t *out_current_record_start)
+{
+	thread_t thread = target->thread;
+	uintptr_t *frames = target->frames;
+	size_t btcount = target->frames_count;
+	bool user64_regs = target->user64_regs;
+	enum micro_snapshot_flags microsnapshot_flags = target->microsnapshot_flags;
+	struct micro_snapshot_buffer *current_buffer = target->buffer;
+	lck_mtx_t *buffer_mtx = target->buffer_mtx;
+
 	task_t task;
 	void *p;
-	uint32_t btcount = 0, bti;
+	uint32_t bti;
 	struct micro_snapshot *msnap;
 	struct task_snapshot *tsnap;
 	struct thread_snapshot *thsnap;
@@ -461,64 +749,16 @@ telemetry_take_sample(thread_t thread, uint8_t microsnapshot_flags, struct micro
 	vm_size_t framesize;
 	uint32_t current_record_start;
 	uint32_t tmp = 0;
-	boolean_t notify = FALSE;
+	bool notify = false;
+	int     rv = 0;
 
 	if (thread == THREAD_NULL) {
-		return;
+		return EINVAL;
 	}
 
 	task = thread->task;
-	if ((task == TASK_NULL) || (task == kernel_task) || task_did_exec(task) || task_is_exec_copy(task)) {
-		return;
-	}
-
-	/* telemetry_XXX accessed outside of lock for instrumentation only */
-	KDBG(MACHDBG_CODE(DBG_MACH_STACKSHOT, MICROSTACKSHOT_RECORD) | DBG_FUNC_START,
-	    microsnapshot_flags, telemetry_bytes_since_last_mark, 0,
-	    (&telemetry_buffer != current_buffer));
-
 	p = get_bsdtask_info(task);
-
-	/*
-	 * Gather up the data we'll need for this sample. The sample is written into the kernel
-	 * buffer with the global telemetry lock held -- so we must do our (possibly faulting)
-	 * copies from userland here, before taking the lock.
-	 */
-
-	uintptr_t frames[128];
-	bool user64_regs = false;
-	int bterror = 0;
-	btcount = backtrace_user(frames,
-	    sizeof(frames) / sizeof(frames[0]), &bterror, &user64_regs, NULL);
-	if (bterror != 0) {
-		return;
-	}
 	bool user64_va = task_has_64Bit_addr(task);
-
-	/*
-	 * Find the actual [slid] address of the shared cache's UUID, and copy it in from userland.
-	 */
-	int shared_cache_uuid_valid = 0;
-	uint64_t shared_cache_base_address = 0;
-	struct _dyld_cache_header shared_cache_header = {};
-	uint64_t shared_cache_slide = 0;
-
-	/*
-	 * Don't copy in the entire shared cache header; we only need the UUID. Calculate the
-	 * offset of that one field.
-	 */
-	int sc_header_uuid_offset = (char *)&shared_cache_header.uuid - (char *)&shared_cache_header;
-	vm_shared_region_t sr = vm_shared_region_get(task);
-	if (sr != NULL) {
-		if ((vm_shared_region_start_address(sr, &shared_cache_base_address) == KERN_SUCCESS) &&
-		    (copyin(shared_cache_base_address + sc_header_uuid_offset, (char *)&shared_cache_header.uuid,
-		    sizeof(shared_cache_header.uuid)) == 0)) {
-			shared_cache_uuid_valid = 1;
-			shared_cache_slide = sr->sr_slide;
-		}
-		// vm_shared_region_get() gave us a reference on the shared region.
-		vm_shared_region_deallocate(sr);
-	}
 
 	/*
 	 * Retrieve the array of UUID's for binaries used by this task.
@@ -566,10 +806,9 @@ telemetry_take_sample(thread_t thread, uint8_t microsnapshot_flags, struct micro
 	char     *uuid_info_array = NULL;
 
 	if (uuid_info_count > 0) {
-		uuid_info_array = kheap_alloc(KHEAP_TEMP,
-		    uuid_info_array_size, Z_WAITOK);
+		uuid_info_array = kalloc_data(uuid_info_array_size, Z_WAITOK);
 		if (uuid_info_array == NULL) {
-			return;
+			return ENOMEM;
 		}
 
 		/*
@@ -577,7 +816,7 @@ telemetry_take_sample(thread_t thread, uint8_t microsnapshot_flags, struct micro
 		 * It may be nonresident, in which case just fix up nloadinfos to 0 in the task snapshot.
 		 */
 		if (copyin(uuid_info_addr, uuid_info_array, uuid_info_array_size) != 0) {
-			kheap_free(KHEAP_TEMP, uuid_info_array, uuid_info_array_size);
+			kfree_data(uuid_info_array, uuid_info_array_size);
 			uuid_info_array = NULL;
 			uuid_info_array_size = 0;
 		}
@@ -604,7 +843,7 @@ telemetry_take_sample(thread_t thread, uint8_t microsnapshot_flags, struct micro
 
 	clock_get_calendar_microtime(&secs, &usecs);
 
-	TELEMETRY_LOCK();
+	lck_mtx_lock(buffer_mtx);
 
 	/*
 	 * If our buffer is not backed by anything,
@@ -612,6 +851,7 @@ telemetry_take_sample(thread_t thread, uint8_t microsnapshot_flags, struct micro
 	 * buffer if it is disabled.
 	 */
 	if (!current_buffer->buffer) {
+		rv = EINVAL;
 		goto cancel_sample;
 	}
 
@@ -636,6 +876,7 @@ copytobuffer:
 		current_buffer->current_position = 0;
 		if (current_record_start == 0) {
 			/* This sample is too large to fit in the buffer even when we started at 0, so skip it */
+			rv = ERANGE;
 			goto cancel_sample;
 		}
 		goto copytobuffer;
@@ -643,7 +884,7 @@ copytobuffer:
 
 	msnap = (struct micro_snapshot *)(uintptr_t)(current_buffer->buffer + current_buffer->current_position);
 	msnap->snapshot_magic = STACKSHOT_MICRO_SNAPSHOT_MAGIC;
-	msnap->ms_flags = microsnapshot_flags;
+	msnap->ms_flags = (uint8_t)microsnapshot_flags;
 	msnap->ms_opaque_flags = 0; /* namespace managed by userspace */
 	msnap->ms_cpu = cpu_number();
 	msnap->ms_time = secs;
@@ -656,6 +897,7 @@ copytobuffer:
 		current_buffer->current_position = 0;
 		if (current_record_start == 0) {
 			/* This sample is too large to fit in the buffer even when we started at 0, so skip it */
+			rv = ERANGE;
 			goto cancel_sample;
 		}
 		goto copytobuffer;
@@ -670,9 +912,9 @@ copytobuffer:
 	tsnap->system_time_in_terminated_threads = task->total_system_time;
 	tsnap->suspend_count = task->suspend_count;
 	tsnap->task_size = (typeof(tsnap->task_size))(get_task_phys_footprint(task) / PAGE_SIZE);
-	tsnap->faults = task->faults;
-	tsnap->pageins = task->pageins;
-	tsnap->cow_faults = task->cow_faults;
+	tsnap->faults = counter_load(&task->faults);
+	tsnap->pageins = counter_load(&task->pageins);
+	tsnap->cow_faults = counter_load(&task->cow_faults);
 	/*
 	 * The throttling counters are maintained as 64-bit counters in the proc
 	 * structure. However, we reserve 32-bits (each) for them in the task_snapshot
@@ -713,9 +955,11 @@ copytobuffer:
 		tsnap->ss_flags |= kUser64_p;
 	}
 
-	if (shared_cache_uuid_valid) {
-		tsnap->shared_cache_slide = shared_cache_slide;
-		bcopy(shared_cache_header.uuid, tsnap->shared_cache_identifier, sizeof(shared_cache_header.uuid));
+
+	if (task->task_shared_region_slide != -1) {
+		tsnap->shared_cache_slide = task->task_shared_region_slide;
+		bcopy(task->task_shared_region_uuid, tsnap->shared_cache_identifier,
+		    sizeof(task->task_shared_region_uuid));
 	}
 
 	current_buffer->current_position += sizeof(struct task_snapshot);
@@ -729,6 +973,7 @@ copytobuffer:
 		current_buffer->current_position = 0;
 		if (current_record_start == 0) {
 			/* This sample is too large to fit in the buffer even when we started at 0, so skip it */
+			rv = ERANGE;
 			goto cancel_sample;
 		}
 		goto copytobuffer;
@@ -754,6 +999,7 @@ copytobuffer:
 		current_buffer->current_position = 0;
 		if (current_record_start == 0) {
 			/* This sample is too large to fit in the buffer even when we started at 0, so skip it */
+			rv = ERANGE;
 			goto cancel_sample;
 		}
 		goto copytobuffer;
@@ -801,6 +1047,7 @@ copytobuffer:
 			current_buffer->current_position = 0;
 			if (current_record_start == 0) {
 				/* This sample is too large to fit in the buffer even when we started at 0, so skip it */
+				rv = ERANGE;
 				goto cancel_sample;
 			}
 			goto copytobuffer;
@@ -827,6 +1074,7 @@ copytobuffer:
 		current_buffer->current_position = 0;
 		if (current_record_start == 0) {
 			/* This sample is too large to fit in the buffer even when we started at 0, so skip it */
+			rv = ERANGE;
 			goto cancel_sample;
 		}
 		goto copytobuffer;
@@ -858,24 +1106,28 @@ copytobuffer:
 	if (current_buffer == &telemetry_buffer) {
 		telemetry_bytes_since_last_mark += (current_buffer->current_position - current_record_start);
 		if (telemetry_bytes_since_last_mark > telemetry_buffer_notify_at) {
-			notify = TRUE;
+			notify = true;
 		}
 	}
 
-cancel_sample:
-	TELEMETRY_UNLOCK();
+	if (out_current_record_start != NULL) {
+		*out_current_record_start = current_record_start;
+	}
 
-	KDBG(MACHDBG_CODE(DBG_MACH_STACKSHOT, MICROSTACKSHOT_RECORD) | DBG_FUNC_END,
-	    notify, telemetry_bytes_since_last_mark,
-	    current_buffer->current_position, current_buffer->end_point);
+cancel_sample:
+	if (release_buffer_lock) {
+		lck_mtx_unlock(buffer_mtx);
+	}
 
 	if (notify) {
 		telemetry_notify_user();
 	}
 
 	if (uuid_info_array != NULL) {
-		kheap_free(KHEAP_TEMP, uuid_info_array, uuid_info_array_size);
+		kfree_data(uuid_info_array, uuid_info_array_size);
 	}
+
+	return rv;
 }
 
 #if TELEMETRY_DEBUG
@@ -902,13 +1154,13 @@ log_telemetry_output(vm_offset_t buf, uint32_t pos, uint32_t sz)
 #endif
 
 int
-telemetry_gather(user_addr_t buffer, uint32_t *length, boolean_t mark)
+telemetry_gather(user_addr_t buffer, uint32_t *length, bool mark)
 {
 	return telemetry_buffer_gather(buffer, length, mark, &telemetry_buffer);
 }
 
 int
-telemetry_buffer_gather(user_addr_t buffer, uint32_t *length, boolean_t mark, struct micro_snapshot_buffer * current_buffer)
+telemetry_buffer_gather(user_addr_t buffer, uint32_t *length, bool mark, struct micro_snapshot_buffer * current_buffer)
 {
 	int result = 0;
 	uint32_t oldest_record_offset;
@@ -1010,6 +1262,62 @@ out:
 
 	return result;
 }
+
+#if CONFIG_MACF
+static int
+telemetry_macf_init_locked(size_t buffer_size)
+{
+	kern_return_t   kr;
+
+	if (buffer_size > TELEMETRY_MAX_BUFFER_SIZE) {
+		buffer_size = TELEMETRY_MAX_BUFFER_SIZE;
+	}
+
+	telemetry_macf_buffer.size = buffer_size;
+
+	kr = kmem_alloc(
+		kernel_map,
+		&telemetry_macf_buffer.buffer,
+		telemetry_macf_buffer.size,
+		VM_KERN_MEMORY_SECURITY);
+
+	if (kr != KERN_SUCCESS) {
+		kprintf("Telemetry (MACF): Allocation failed: %d\n", kr);
+		return ENOMEM;
+	}
+
+	bzero((void *)telemetry_macf_buffer.buffer, telemetry_macf_buffer.size);
+
+	return 0;
+}
+
+int
+telemetry_macf_mark_curthread(void)
+{
+	thread_t thread = current_thread();
+	task_t   task   = thread->task;
+	int      rv     = 0;
+
+	if (task == kernel_task) {
+		/* Kernel threads never return to an AST boundary, and are ineligible */
+		return EINVAL;
+	}
+
+	/* Initialize the MACF telemetry buffer if needed. */
+	TELEMETRY_MACF_LOCK();
+	if (__improbable(telemetry_macf_buffer.size == 0)) {
+		rv = telemetry_macf_init_locked(TELEMETRY_MACF_DEFAULT_BUFFER_SIZE);
+
+		if (rv != 0) {
+			return rv;
+		}
+	}
+	TELEMETRY_MACF_UNLOCK();
+
+	act_set_macf_telemetry_ast(thread);
+	return 0;
+}
+#endif /* CONFIG_MACF */
 
 /************************/
 /* BOOT PROFILE SUPPORT */
@@ -1143,7 +1451,7 @@ bootprofile_init(void)
 		    bootprofile_next_deadline,
 		    0,
 		    TIMER_CALL_SYS_NORMAL,
-		    FALSE);
+		    false);
 	}
 }
 
@@ -1157,7 +1465,7 @@ bootprofile_wake_from_sleep(void)
 		    bootprofile_next_deadline,
 		    0,
 		    TIMER_CALL_SYS_NORMAL,
-		    FALSE);
+		    false);
 	}
 }
 
@@ -1262,7 +1570,7 @@ reprogram:
 	    bootprofile_next_deadline,
 	    0,
 	    TIMER_CALL_SYS_NORMAL,
-	    FALSE);
+	    false);
 }
 
 void

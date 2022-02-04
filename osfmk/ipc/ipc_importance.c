@@ -149,9 +149,9 @@ static queue_head_t global_iit_alloc_queue =
 #endif
 
 static ZONE_DECLARE(ipc_importance_task_zone, "ipc task importance",
-    sizeof(struct ipc_importance_task), ZC_NOENCRYPT);
+    sizeof(struct ipc_importance_task), ZC_ZFREE_CLEARMEM);
 static ZONE_DECLARE(ipc_importance_inherit_zone, "ipc importance inherit",
-    sizeof(struct ipc_importance_inherit), ZC_NOENCRYPT);
+    sizeof(struct ipc_importance_inherit), ZC_ZFREE_CLEARMEM);
 static zone_t ipc_importance_inherit_zone;
 
 static ipc_voucher_attr_control_t ipc_importance_control;
@@ -726,10 +726,10 @@ ipc_importance_task_propagate_helper(
 		/* determine the task importance to adjust as result (if any) */
 		port = hdr->msgh_remote_port;
 		assert(IP_VALID(port));
-		ip_lock(port);
+		ip_mq_lock(port);
 		temp_task_imp = IIT_NULL;
 		if (!ipc_port_importance_delta_internal(port, IPID_OPTION_NORMAL, &delta, &temp_task_imp)) {
-			ip_unlock(port);
+			ip_mq_unlock(port);
 		}
 
 		/* no task importance to adjust associated with the port? */
@@ -1708,7 +1708,7 @@ boolean_t
 ipc_importance_task_is_never_donor(ipc_importance_task_t task_imp)
 {
 	if (IIT_NULL == task_imp) {
-		return FALSE;
+		return TRUE;
 	}
 	return !ipc_importance_task_is_marked_donor(task_imp) &&
 	       !ipc_importance_task_is_marked_live_donor(task_imp) &&
@@ -1969,7 +1969,7 @@ retry:
 
 	/* we won the race */
 	task->task_imp_base = task_elem;
-	task_reference(task);
+	task_reference_grp(task, TASK_GRP_INTERNAL);
 #if DEVELOPMENT || DEBUG
 	queue_enter(&global_iit_alloc_queue, task_elem, ipc_importance_task_t, iit_allocation);
 	task_importance_update_owner_info(task);
@@ -1996,6 +1996,16 @@ task_importance_update_owner_info(task_t task)
 	}
 }
 #endif
+
+static int
+task_importance_task_get_pid(ipc_importance_task_t iit)
+{
+#if DEVELOPMENT || DEBUG
+	return (int)iit->iit_bsd_pid;
+#else
+	return task_pid(iit->iit_task);
+#endif
+}
 
 /*
  *	Routine:	ipc_importance_reset_locked
@@ -2033,13 +2043,6 @@ ipc_importance_reset_locked(ipc_importance_task_t task_imp, boolean_t donor)
 	task_imp->iit_legacy_externcnt = 0;
 	task_imp->iit_legacy_externdrop = 0;
 	after_donor = ipc_importance_task_is_donor(task_imp);
-
-#if DEVELOPMENT || DEBUG
-	if (task_imp->iit_assertcnt > 0 && task_imp->iit_live_donor) {
-		printf("Live donor task %s[%d] still has %d importance assertions after reset\n",
-		    task_imp->iit_procname, task_imp->iit_bsd_pid, task_imp->iit_assertcnt);
-	}
-#endif
 
 	/* propagate a downstream drop if there was a change in donor status */
 	if (after_donor != before_donor) {
@@ -2114,7 +2117,7 @@ ipc_importance_disconnect_task(task_t task)
 	/* importance unlocked */
 
 	/* deallocate the task now that the importance is unlocked */
-	task_deallocate(task);
+	task_deallocate_grp(task, TASK_GRP_INTERNAL);
 }
 
 /*
@@ -2202,6 +2205,7 @@ ipc_importance_check_circularity(
 	ipc_port_t base;
 	struct turnstile *send_turnstile = TURNSTILE_NULL;
 	struct task_watchport_elem *watchport_elem = NULL;
+	bool took_base_ref = false;
 
 	assert(port != IP_NULL);
 	assert(dest != IP_NULL);
@@ -2224,7 +2228,7 @@ ipc_importance_check_circularity(
 	 *	First try a quick check that can run in parallel.
 	 *	No circularity if dest is not in transit.
 	 */
-	ip_lock(port);
+	ip_mq_lock(port);
 
 	/*
 	 * Even if port is just carrying assertions for others,
@@ -2232,25 +2236,23 @@ ipc_importance_check_circularity(
 	 */
 	if (port->ip_impcount > 0 && !imp_lock_held) {
 		if (!ipc_importance_lock_try()) {
-			ip_unlock(port);
+			ip_mq_unlock(port);
 			ipc_importance_lock();
-			ip_lock(port);
+			ip_mq_lock(port);
 		}
 		imp_lock_held = TRUE;
 	}
 
-	if (ip_lock_try(dest)) {
-		if (!ip_active(dest) ||
-		    (dest->ip_receiver_name != MACH_PORT_NULL) ||
-		    (dest->ip_destination == IP_NULL)) {
+	if (ip_mq_lock_try(dest)) {
+		if (!ip_in_transit(dest)) {
 			goto not_circular;
 		}
 
 		/* dest is in transit; further checking necessary */
 
-		ip_unlock(dest);
+		ip_mq_unlock(dest);
 	}
-	ip_unlock(port);
+	ip_mq_unlock(port);
 
 	/*
 	 * We're about to pay the cost to serialize,
@@ -2263,23 +2265,7 @@ ipc_importance_check_circularity(
 
 	ipc_port_multiple_lock(); /* massive serialization */
 
-	/*
-	 *	Search for the end of the chain (a port not in transit),
-	 *	acquiring locks along the way.
-	 */
-
-	for (;;) {
-		ip_lock(base);
-
-		if (!ip_active(base) ||
-		    (base->ip_receiver_name != MACH_PORT_NULL) ||
-		    (base->ip_destination == IP_NULL)) {
-			break;
-		}
-
-		base = base->ip_destination;
-	}
-
+	took_base_ref = ipc_port_destination_chain_lock(dest, &base);
 	/* all ports in chain from dest to base, inclusive, are locked */
 
 	if (port == base) {
@@ -2290,8 +2276,8 @@ ipc_importance_check_circularity(
 		/* port (== base) is in limbo */
 
 		require_ip_active(port);
-		assert(port->ip_receiver_name == MACH_PORT_NULL);
-		assert(port->ip_destination == IP_NULL);
+		assert(ip_in_limbo(port));
+		assert(!took_base_ref);
 
 		base = dest;
 		while (base != IP_NULL) {
@@ -2301,9 +2287,8 @@ ipc_importance_check_circularity(
 
 			require_ip_active(base);
 			assert(base->ip_receiver_name == MACH_PORT_NULL);
-
-			next = base->ip_destination;
-			ip_unlock(base);
+			next = ip_get_destination(base);
+			ip_mq_unlock(base);
 			base = next;
 		}
 
@@ -2321,16 +2306,13 @@ ipc_importance_check_circularity(
 	 *	add port to the chain, and unlock everything.
 	 */
 
-	ip_lock(port);
+	ip_mq_lock(port);
 	ipc_port_multiple_unlock();
 
 not_circular:
 	/* port is in limbo */
-	imq_lock(&port->ip_messages);
-
 	require_ip_active(port);
-	assert(port->ip_receiver_name == MACH_PORT_NULL);
-	assert(port->ip_destination == IP_NULL);
+	assert(ip_in_limbo(port));
 
 	/* Port is being enqueued in a kmsg, remove the watchport boost in order to push on destination port */
 	watchport_elem = ipc_port_clear_watchport_elem_internal(port);
@@ -2341,6 +2323,9 @@ not_circular:
 	}
 
 	ip_reference(dest);
+
+	/* port transitions to IN-TRANSIT state */
+	assert(port->ip_receiver_name == MACH_PORT_NULL);
 	port->ip_destination = dest;
 
 	/* must have been in limbo or still bound to a task */
@@ -2351,7 +2336,7 @@ not_circular:
 	 * Cache that info now (we'll drop assertions and the
 	 * task reference below).
 	 */
-	release_imp_task = port->ip_imp_task;
+	release_imp_task = ip_get_imp_task(port);
 	if (IIT_NULL != release_imp_task) {
 		port->ip_imp_task = IIT_NULL;
 	}
@@ -2375,11 +2360,9 @@ not_circular:
 
 		/* update complete and turnstile complete called after dropping all locks */
 	}
-	imq_unlock(&port->ip_messages);
-
 	/* now unlock chain */
 
-	ip_unlock(port);
+	ip_mq_unlock(port);
 
 	for (;;) {
 		ipc_port_t next;
@@ -2393,19 +2376,16 @@ not_circular:
 		/* port is in transit */
 
 		require_ip_active(dest);
-		assert(dest->ip_receiver_name == MACH_PORT_NULL);
-		assert(dest->ip_destination != IP_NULL);
+		assert(ip_in_transit(dest));
 		assert(dest->ip_tempowner == 0);
 
-		next = dest->ip_destination;
-		ip_unlock(dest);
+		next = ip_get_destination(dest);
+		ip_mq_unlock(dest);
 		dest = next;
 	}
 
 	/* base is not in transit */
-	assert(!ip_active(base) ||
-	    (base->ip_receiver_name != MACH_PORT_NULL) ||
-	    (base->ip_destination == IP_NULL));
+	assert(!ip_in_transit(base));
 
 	/*
 	 * Find the task to boost (if any).
@@ -2416,15 +2396,14 @@ not_circular:
 	if (ip_active(base) && (assertcnt > 0)) {
 		assert(imp_lock_held);
 		if (base->ip_tempowner != 0) {
-			if (IIT_NULL != base->ip_imp_task) {
+			if (IIT_NULL != ip_get_imp_task(base)) {
 				/* specified tempowner task */
-				imp_task = base->ip_imp_task;
+				imp_task = ip_get_imp_task(base);
 				assert(ipc_importance_task_is_any_receiver_type(imp_task));
 			}
 			/* otherwise don't boost current task */
-		} else if (base->ip_receiver_name != MACH_PORT_NULL) {
-			ipc_space_t space = base->ip_receiver;
-
+		} else if (ip_in_a_space(base)) {
+			ipc_space_t space = ip_get_receiver(base);
 			/* only spaces with boost-accepting tasks */
 			if (space->is_task != TASK_NULL &&
 			    ipc_importance_task_is_any_receiver_type(space->is_task->task_imp_base)) {
@@ -2438,17 +2417,17 @@ not_circular:
 		}
 	}
 
-	ip_unlock(base);
+	ip_mq_unlock(base);
 
 	/* All locks dropped, call turnstile_update_inheritor_complete for source port's turnstile */
 	if (send_turnstile) {
 		turnstile_update_inheritor_complete(send_turnstile, TURNSTILE_INTERLOCK_NOT_HELD);
 
-		/* Take the mq lock to call turnstile complete */
-		imq_lock(&port->ip_messages);
+		/* Take the port lock to call turnstile complete */
+		ip_mq_lock(port);
 		turnstile_complete((uintptr_t)port, port_send_turnstile_address(port), NULL, TURNSTILE_SYNC_IPC);
 		send_turnstile = TURNSTILE_NULL;
-		imq_unlock(&port->ip_messages);
+		ip_mq_unlock(port);
 		turnstile_cleanup();
 	}
 
@@ -2479,6 +2458,10 @@ not_circular:
 
 	if (imp_lock_held) {
 		ipc_importance_unlock();
+	}
+
+	if (took_base_ref) {
+		ip_release(base);
 	}
 
 	if (imp_task != IIT_NULL) {
@@ -2512,6 +2495,7 @@ ipc_importance_send(
 	mach_msg_option_t       option)
 {
 	ipc_port_t port = kmsg->ikm_header->msgh_remote_port;
+	ipc_port_t voucher_port;
 	boolean_t port_lock_dropped = FALSE;
 	ipc_importance_elem_t elem;
 	task_t task;
@@ -2533,14 +2517,13 @@ ipc_importance_send(
 		/* acquire the importance lock while trying to hang on to port lock */
 		if (!ipc_importance_lock_try()) {
 			port_lock_dropped = TRUE;
-			ip_unlock(port);
+			ip_mq_unlock(port);
 			ipc_importance_lock();
 		}
 		goto portupdate;
 	}
 
 	task_imp = task->task_imp_base;
-	assert(IIT_NULL != task_imp);
 
 	/* If the sender can never donate importance, nothing to do */
 	if (ipc_importance_task_is_never_donor(task_imp)) {
@@ -2550,14 +2533,16 @@ ipc_importance_send(
 	elem = IIE_NULL;
 
 	/* If importance receiver and passing a voucher, look for importance in there */
-	if (IP_VALID(kmsg->ikm_voucher) &&
+	voucher_port = ipc_kmsg_get_voucher_port(kmsg);
+	if (IP_VALID(voucher_port) &&
 	    ipc_importance_task_is_marked_receiver(task_imp)) {
 		mach_voucher_attr_value_handle_t vals[MACH_VOUCHER_ATTR_VALUE_MAX_NESTED];
 		mach_voucher_attr_value_handle_array_size_t val_count;
 		ipc_voucher_t voucher;
 
-		assert(ip_kotype(kmsg->ikm_voucher) == IKOT_VOUCHER);
-		voucher = (ipc_voucher_t)ip_get_kobject(kmsg->ikm_voucher);
+		assert(ip_kotype(voucher_port) == IKOT_VOUCHER);
+		voucher = (ipc_voucher_t)ipc_kobject_get_raw(voucher_port,
+		    IKOT_VOUCHER);
 
 		/* check to see if the voucher has an importance attribute */
 		val_count = MACH_VOUCHER_ATTR_VALUE_MAX_NESTED;
@@ -2597,7 +2582,7 @@ ipc_importance_send(
 	/* acquire the importance lock while trying to hang on to port lock */
 	if (!ipc_importance_lock_try()) {
 		port_lock_dropped = TRUE;
-		ip_unlock(port);
+		ip_mq_unlock(port);
 		ipc_importance_lock();
 	}
 
@@ -2613,7 +2598,7 @@ ipc_importance_send(
 
 		/* re-acquire port lock, if needed */
 		if (TRUE == port_lock_dropped) {
-			ip_lock(port);
+			ip_mq_lock(port);
 		}
 
 		return port_lock_dropped;
@@ -2630,7 +2615,7 @@ portupdate:
 	 * the sender lost donor status.
 	 */
 	if (TRUE == port_lock_dropped) {
-		ip_lock(port);
+		ip_mq_lock(port);
 	}
 
 	ipc_importance_assert_held();
@@ -2663,7 +2648,7 @@ portupdate:
 			/* can't hold the port lock during task transition(s) */
 			if (!need_port_lock) {
 				need_port_lock = TRUE;
-				ip_unlock(port);
+				ip_mq_unlock(port);
 			}
 			ipc_importance_task_propagate_assertion_locked(task_imp, IIT_UPDATE_HOLD, TRUE);
 		}
@@ -2678,7 +2663,7 @@ portupdate:
 
 	if (need_port_lock) {
 		port_lock_dropped = TRUE;
-		ip_lock(port);
+		ip_mq_lock(port);
 	}
 
 	return port_lock_dropped;
@@ -2935,10 +2920,10 @@ out_locked:
 	 * the importance lock
 	 */
 	if (donating || cleared_self_donation) {
-		ip_lock(port);
+		ip_mq_lock(port);
 		/* drop importance from port and destination task */
 		if (ipc_port_importance_delta(port, IPID_OPTION_NORMAL, -1) == FALSE) {
-			ip_unlock(port);
+			ip_mq_unlock(port);
 		}
 	}
 
@@ -3162,14 +3147,18 @@ ipc_importance_receive(
 		sizeof(mach_voucher_attr_value_handle_t)];
 		ipc_voucher_attr_raw_recipe_array_size_t recipe_size = 0;
 		ipc_voucher_attr_recipe_t recipe = (ipc_voucher_attr_recipe_t)recipes;
+		ipc_port_t voucher_port = ipc_kmsg_get_voucher_port(kmsg);
 		ipc_voucher_t recv_voucher;
 		mach_voucher_attr_value_handle_t handle;
 		ipc_importance_inherit_t inherit;
 		kern_return_t kr;
 
 		/* set up recipe to copy the old voucher */
-		if (IP_VALID(kmsg->ikm_voucher)) {
-			ipc_voucher_t sent_voucher = (ipc_voucher_t)ip_get_kobject(kmsg->ikm_voucher);
+		if (IP_VALID(voucher_port)) {
+			ipc_voucher_t sent_voucher;
+
+			sent_voucher = (ipc_voucher_t)ipc_kobject_get_raw(voucher_port,
+			    IKOT_VOUCHER);
 
 			recipe->key = MACH_VOUCHER_ATTR_KEY_ALL;
 			recipe->command = MACH_VOUCHER_ATTR_COPY;
@@ -3194,7 +3183,7 @@ ipc_importance_receive(
 		 * we have a valid incoming voucher. If we have neither of
 		 * these things then there is no need to create a new voucher.
 		 */
-		if (IP_VALID(kmsg->ikm_voucher) || inherit != III_NULL) {
+		if (IP_VALID(voucher_port) || inherit != III_NULL) {
 			/* replace the importance attribute with the handle we created */
 			/*  our made reference on the inherit is donated to the voucher */
 			recipe = (ipc_voucher_attr_recipe_t)&recipes[recipe_size];
@@ -3213,8 +3202,9 @@ ipc_importance_receive(
 
 			/* swap the voucher port (and set voucher bits in case it didn't already exist) */
 			kmsg->ikm_header->msgh_bits |= (MACH_MSG_TYPE_MOVE_SEND << 16);
-			ipc_port_release_send(kmsg->ikm_voucher);
-			kmsg->ikm_voucher = convert_voucher_to_port(recv_voucher);
+			ipc_port_release_send(voucher_port);
+			voucher_port = convert_voucher_to_port(recv_voucher);
+			ipc_kmsg_set_voucher_port(kmsg, voucher_port, MACH_MSG_TYPE_MOVE_SEND);
 			if (III_NULL != inherit) {
 				impresult = 2;
 			}
@@ -3252,9 +3242,9 @@ ipc_importance_receive(
 			}
 
 			/* Drop the boost on the port and the owner of the receive right */
-			ip_lock(port);
+			ip_mq_lock(port);
 			if (ipc_port_importance_delta(port, IPID_OPTION_NORMAL, -1) == FALSE) {
-				ip_unlock(port);
+				ip_mq_unlock(port);
 			}
 		}
 	}
@@ -3271,7 +3261,8 @@ ipc_importance_receive(
 		 * will trigger the probe in ipc_importance_task_externalize_assertion()
 		 * above and have impresult==1 here.
 		 */
-		DTRACE_BOOST5(receive_boost, task_t, task_self, int, task_pid(task_self), int, sender_pid, int, 1, int, task_self->task_imp_base->iit_assertcnt);
+		DTRACE_BOOST5(receive_boost, task_t, task_self, int, task_pid(task_self),
+		    int, sender_pid, int, 1, int, task_self->task_imp_base->iit_assertcnt);
 	}
 #endif /* IMPORTANCE_TRACE */
 }
@@ -3298,11 +3289,12 @@ ipc_importance_unreceive(
 
 		kmsg->ikm_header->msgh_bits &= ~MACH_MSGH_BITS_RAISEIMP;
 		task_imp = current_task()->task_imp_base;
-		if (!IP_VALID(kmsg->ikm_voucher) && IIT_NULL != task_imp) {
+
+		if (!IP_VALID(ipc_kmsg_get_voucher_port(kmsg)) && IIT_NULL != task_imp) {
 			ipc_importance_task_drop_legacy_external_assertion(task_imp, 1);
 		}
 		/*
-		 * ipc_kmsg_copyout_dest() will consume the voucher
+		 * ipc_kmsg_copyout_dest_to_user() will consume the voucher
 		 * and any contained importance.
 		 */
 	}
@@ -3341,11 +3333,11 @@ ipc_importance_clean(
 		kmsg->ikm_header->msgh_bits &= ~MACH_MSGH_BITS_RAISEIMP;
 		port = kmsg->ikm_header->msgh_remote_port;
 		if (IP_VALID(port)) {
-			ip_lock(port);
+			ip_mq_lock(port);
 			/* inactive ports already had their importance boosts dropped */
 			if (!ip_active(port) ||
 			    ipc_port_importance_delta(port, IPID_OPTION_NORMAL, -1) == FALSE) {
-				ip_unlock(port);
+				ip_mq_unlock(port);
 			}
 		}
 	}
@@ -3598,59 +3590,61 @@ ipc_importance_extract_content(
 	mach_voucher_attr_content_t                     out_content,
 	mach_voucher_attr_content_size_t                *in_out_content_size)
 {
-	mach_voucher_attr_content_size_t size = 0;
 	ipc_importance_elem_t elem;
 	unsigned int i;
+
+	char *buf = (char *)out_content;
+	mach_voucher_attr_content_size_t size = *in_out_content_size;
+	mach_voucher_attr_content_size_t pos = 0;
+	__unused int pid;
 
 	IMPORTANCE_ASSERT_MANAGER(manager);
 	IMPORTANCE_ASSERT_KEY(key);
 
 	/* the first non-default value provides the data */
-	for (i = 0; i < value_count && *in_out_content_size > 0; i++) {
+	for (i = 0; i < value_count; i++) {
 		elem = (ipc_importance_elem_t)values[i];
 		if (IIE_NULL == elem) {
 			continue;
 		}
 
-		snprintf((char *)out_content, *in_out_content_size, "Importance for pid ");
-		size = (mach_voucher_attr_content_size_t)strlen((char *)out_content);
+		pos += scnprintf(buf + pos, size - pos, "Importance for ");
 
 		for (;;) {
 			ipc_importance_inherit_t inherit = III_NULL;
 			ipc_importance_task_t task_imp;
-			task_t task;
-			int t_pid;
 
 			if (IIE_TYPE_TASK == IIE_TYPE(elem)) {
 				task_imp = (ipc_importance_task_t)elem;
-				task = task_imp->iit_task;
-				t_pid = (TASK_NULL != task) ?
-				    task_pid(task) : -1;
-				snprintf((char *)out_content + size, *in_out_content_size - size, "%d", t_pid);
 			} else {
 				inherit = (ipc_importance_inherit_t)elem;
 				task_imp = inherit->iii_to_task;
-				task = task_imp->iit_task;
-				t_pid = (TASK_NULL != task) ?
-				    task_pid(task) : -1;
-				snprintf((char *)out_content + size, *in_out_content_size - size,
-				    "%d (%d of %d boosts) %s from pid ", t_pid,
-				    III_EXTERN(inherit), inherit->iii_externcnt,
-				    (inherit->iii_donating) ? "donated" : "linked");
 			}
-
-			size = (mach_voucher_attr_content_size_t)strlen((char *)out_content);
+#if DEVELOPMENT || DEBUG
+			pos += scnprintf(buf + pos, size - pos, "%s[%d]",
+			    task_imp->iit_procname, task_imp->iit_bsd_pid);
+#else
+			ipc_importance_lock();
+			pid = task_importance_task_get_pid(task_imp);
+			ipc_importance_unlock();
+			pos += scnprintf(buf + pos, size - pos, "pid %d", pid);
+#endif /* DEVELOPMENT || DEBUG */
 
 			if (III_NULL == inherit) {
 				break;
 			}
-
+			pos += scnprintf(buf + pos, size - pos,
+			    " (%d of %d boosts) %s from ",
+			    III_EXTERN(inherit), inherit->iii_externcnt,
+			    (inherit->iii_donating) ? "donated" : "linked");
 			elem = inherit->iii_from_elem;
 		}
-		size++; /* account for NULL */
+
+		pos++; /* account for terminating \0 */
+		break;
 	}
 	*out_command = MACH_VOUCHER_ATTR_NOOP; /* cannot be used to regenerate value */
-	*in_out_content_size = size;
+	*in_out_content_size = pos;
 	return KERN_SUCCESS;
 }
 
@@ -3829,7 +3823,8 @@ ipc_importance_init(void)
  *	Conditions:
  *		Thread-call mechanism is already initialized.
  */
-void
+__startup_func
+static void
 ipc_importance_thread_call_init(void)
 {
 	/* initialize delayed drop queue and thread-call */
@@ -3840,6 +3835,7 @@ ipc_importance_thread_call_init(void)
 		panic("ipc_importance_init");
 	}
 }
+STARTUP(THREAD_CALL, STARTUP_RANK_MIDDLE, ipc_importance_thread_call_init);
 
 /*
  * Routing: task_importance_list_pids
@@ -3874,14 +3870,7 @@ task_importance_list_pids(task_t task, int flags, char *pid_list, unsigned int m
 		target_pid = -1;
 
 		if (temp_inherit->iii_donating) {
-#if DEVELOPMENT || DEBUG
-			target_pid = temp_inherit->iii_to_task->iit_bsd_pid;
-#else
-			temp_task = temp_inherit->iii_to_task->iit_task;
-			if (temp_task != TASK_NULL) {
-				target_pid = task_pid(temp_task);
-			}
-#endif
+			target_pid = task_importance_task_get_pid(temp_inherit->iii_to_task);
 		}
 
 		if (target_pid != -1 && previous_pid != target_pid) {
@@ -3909,19 +3898,12 @@ task_importance_list_pids(task_t task, int flags, char *pid_list, unsigned int m
 			continue;
 		}
 
-		if (IIE_TYPE_TASK == IIE_TYPE(elem) &&
-		    (((ipc_importance_task_t)elem)->iit_task != TASK_NULL)) {
-			target_pid = task_pid(((ipc_importance_task_t)elem)->iit_task);
+		if (IIE_TYPE_TASK == IIE_TYPE(elem)) {
+			ipc_importance_task_t temp_iit = (ipc_importance_task_t)elem;
+			target_pid = task_importance_task_get_pid(temp_iit);
 		} else {
 			temp_inherit = (ipc_importance_inherit_t)elem;
-#if DEVELOPMENT || DEBUG
-			target_pid = temp_inherit->iii_to_task->iit_bsd_pid;
-#else
-			temp_task = temp_inherit->iii_to_task->iit_task;
-			if (temp_task != TASK_NULL) {
-				target_pid = task_pid(temp_task);
-			}
-#endif
+			target_pid = task_importance_task_get_pid(temp_inherit->iii_to_task);
 		}
 
 		if (target_pid != -1 && previous_pid != target_pid) {

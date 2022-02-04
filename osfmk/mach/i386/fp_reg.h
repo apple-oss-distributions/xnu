@@ -59,6 +59,8 @@
 #ifndef _I386_FP_SAVE_H_
 #define _I386_FP_SAVE_H_
 
+#if defined (__i386__) || defined (__x86_64__)
+
 #ifdef  MACH_KERNEL_PRIVATE
 
 
@@ -193,5 +195,7 @@ typedef union {
 #define FP_287          2               /* 80287 */
 #define FP_387          3               /* 80387 or 80486 */
 #define FP_FXSR         4               /* Fast save/restore SIMD Extension */
+
+#endif /* defined (__i386__) || defined (__x86_64__) */
 
 #endif  /* _I386_FP_SAVE_H_ */

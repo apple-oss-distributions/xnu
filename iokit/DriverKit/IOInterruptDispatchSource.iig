@@ -42,6 +42,12 @@ enum {
 	kIOInterruptDispatchSourceTypeLevel = 0x00000001
 };
 
+enum {
+	kIOInterruptSourceIndexMask      = 0x0000FFFF,
+	kIOInterruptSourceAbsoluteTime   = 0x00000000,
+	kIOInterruptSourceContinuousTime = 0x00010000
+};
+
 /*!
  * @class IOInterruptDispatchSource
  *
@@ -61,7 +67,8 @@ public:
     /*!
      * @brief       Create an IOInterruptDispatchSource for an interrupt by index from an IOService provider.
      * @param       provider The IOService object representing the HW device producing the interrupt.
-     * @param       index Index for the interrupt.
+     * @param       index Index for the interrupt, optionally or'ed with one of the following constants:
+                    kIOInterruptSourceContinuousTime time values sent to the InterruptOccurred() method will be in mach_continuous_time() units.
      * @param       queue Target queue to run the handler block.
      * @param       source Created source with +1 retain count to be released by the caller.
      * @return      kIOReturnSuccess on success. See IOReturn.h for error codes.

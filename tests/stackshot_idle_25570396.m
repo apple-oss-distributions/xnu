@@ -22,6 +22,14 @@
 #define NUMENQUEUES 16 // number of blocking jobs to enqueue
 #define NUMTHREADS  (NUMENQUEUES + 2) // total number of threads (including numenqueues)
 
+T_GLOBAL_META(
+        T_META_NAMESPACE("xnu.stackshot"),
+        T_META_RADAR_COMPONENT_NAME("xnu"),
+        T_META_RADAR_COMPONENT_VERSION("stackshot"),
+        T_META_OWNER("jonathan_w_adams"),
+        T_META_ASROOT(true)
+);
+
 volatile static int spin_threads = 1;
 
 static void *
@@ -240,7 +248,7 @@ spinning_non_work_queue_thread(void * ignored)
 	return NULL;
 }
 
-T_DECL(stackshot_idle_25570396, "Tests that stackshot can properly recognize idle and non-idle threads", T_META_ASROOT(true))
+T_DECL(stackshot_idle_25570396, "Tests that stackshot can properly recognize idle and non-idle threads")
 {
 	int ret;
 	uint64_t initial_stackshot_time;

@@ -121,6 +121,7 @@ enum fs_type_num {
 	FT_MOCKFS  = 0x6D6F636B
 };
 
+int fstypenumstart = FT_BINDFS + 1;
 /*
  * Set up the filesystem operations for vnodes.
  */

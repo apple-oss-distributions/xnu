@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2020 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -75,9 +75,12 @@
 /* For memory_object_data_{request,unlock} */
 #include <mach/sdt.h>
 
+#include <pexpert/pexpert.h>
+#include <pexpert/device_tree.h>
+
 #include <kern/kern_types.h>
 #include <kern/host_statistics.h>
-#include <kern/counters.h>
+#include <kern/counter.h>
 #include <kern/task.h>
 #include <kern/thread.h>
 #include <kern/sched_prim.h>
@@ -107,7 +110,10 @@
 #include <sys/reason.h>
 #include <sys/signalvar.h>
 
+#include <sys/kdebug_triage.h>
+
 #include <san/kasan.h>
+#include <libkern/coreanalytics/coreanalytics.h>
 
 #define VM_FAULT_CLASSIFY       0
 
@@ -137,6 +143,9 @@ extern struct vnode *vnode_pager_lookup_vnode(memory_object_t);
 
 uint64_t vm_hard_throttle_threshold;
 
+#if DEBUG || DEVELOPMENT
+static bool vmtc_panic_instead = false;
+#endif /* DEBUG || DEVELOPMENT */
 
 OS_ALWAYS_INLINE
 boolean_t
@@ -157,7 +166,7 @@ NEED_TO_HARD_THROTTLE_THIS_TASK(void)
 
 #define VM_STAT_DECOMPRESSIONS()        \
 MACRO_BEGIN                             \
-	VM_STAT_INCR(decompressions);       \
+	counter_inc(&vm_statistics_decompressions); \
 	current_thread()->decompressions++; \
 MACRO_END
 
@@ -208,10 +217,6 @@ unsigned long vm_cs_revalidates = 0;
 unsigned long vm_cs_query_modified = 0;
 unsigned long vm_cs_validated_dirtied = 0;
 unsigned long vm_cs_bitmap_validated = 0;
-#if PMAP_CS
-uint64_t vm_cs_defer_to_pmap_cs = 0;
-uint64_t vm_cs_defer_to_pmap_cs_not = 0;
-#endif /* PMAP_CS */
 
 void vm_pre_fault(vm_map_offset_t, vm_prot_t);
 
@@ -236,6 +241,27 @@ static void vm_record_rtfault(thread_t, uint64_t, vm_map_offset_t, int);
 extern lck_grp_t vm_page_lck_grp_bucket;
 extern lck_attr_t vm_page_lck_attr;
 LCK_SPIN_DECLARE_ATTR(vm_rtfr_slock, &vm_page_lck_grp_bucket, &vm_page_lck_attr);
+
+#if DEVELOPMENT || DEBUG
+extern int madvise_free_debug;
+#endif /* DEVELOPMENT || DEBUG */
+
+#if CONFIG_FREEZE
+__startup_func
+static bool
+osenvironment_is_diagnostics(void)
+{
+	DTEntry chosen;
+	const char *osenvironment;
+	unsigned int size;
+	if (kSuccess == SecureDTLookupEntry(0, "/chosen", &chosen)) {
+		if (kSuccess == SecureDTGetProperty(chosen, "osenvironment", (void const **) &osenvironment, &size)) {
+			return strcmp(osenvironment, "diagnostics") == 0;
+		}
+	}
+	return false;
+}
+#endif /* CONFIG_FREEZE */
 
 /*
  *	Routine:	vm_fault_init
@@ -275,15 +301,34 @@ vm_fault_init(void)
 			printf("Ignoring \"vm_compressor\" boot arg %d\n", vm_compressor_temp);
 		}
 	}
+#if CONFIG_FREEZE
+	if (need_default_val) {
+		if (osenvironment_is_diagnostics()) {
+			printf("osenvironment == \"diagnostics\". Setting \"vm_compressor_mode\" to in-core compressor only\n");
+			vm_compressor_mode = VM_PAGER_COMPRESSOR_NO_SWAP;
+			need_default_val = false;
+		}
+	}
+#endif /* CONFIG_FREEZE */
 	if (need_default_val) {
 		/* If no boot arg or incorrect boot arg, try device tree. */
 		PE_get_default("kern.vm_compressor", &vm_compressor_mode, sizeof(vm_compressor_mode));
 	}
 	printf("\"vm_compressor_mode\" is %d\n", vm_compressor_mode);
+	vm_config_init();
 
 	PE_parse_boot_argn("vm_protect_privileged_from_untrusted",
 	    &vm_protect_privileged_from_untrusted,
 	    sizeof(vm_protect_privileged_from_untrusted));
+
+#if DEBUG || DEVELOPMENT
+	(void)PE_parse_boot_argn("text_corruption_panic", &vmtc_panic_instead, sizeof(vmtc_panic_instead));
+
+	if (kern_feature_override(KF_MADVISE_FREE_DEBUG_OVRD)) {
+		madvise_free_debug = 0;
+	}
+
+#endif /* DEBUG || DEVELOPMENT */
 }
 
 __startup_func
@@ -732,6 +777,13 @@ vm_fault_check(vm_object_t object, vm_page_t m, vm_page_t first_m, wait_interrup
 
 		thread_interrupt_level(interruptible_state);
 
+		if (VM_OBJECT_PURGEABLE_FAULT_ERROR(object)) {
+			kernel_triage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_VM, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_VM_PURGEABLE_FAULT_ERROR), 0 /* arg */);
+		}
+
+		if (object->shadow_severed) {
+			kernel_triage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_VM, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_VM_OBJECT_SHADOW_SEVERED), 0 /* arg */);
+		}
 		return VM_FAULT_MEMORY_ERROR;
 	}
 	if (page_throttle == TRUE) {
@@ -751,10 +803,12 @@ vm_fault_check(vm_object_t object, vm_page_t m, vm_page_t first_m, wait_interrup
 
 			if (current_thread_aborted()) {
 				thread_interrupt_level(interruptible_state);
+				kernel_triage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_VM, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_VM_FAULT_INTERRUPTED), 0 /* arg */);
 				return VM_FAULT_INTERRUPTED;
 			}
 			thread_interrupt_level(interruptible_state);
 
+			kernel_triage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_VM, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_VM_MEMORY_SHORTAGE), 0 /* arg */);
 			return VM_FAULT_MEMORY_SHORTAGE;
 		}
 	}
@@ -835,7 +889,7 @@ vm_fault_zero_page(vm_page_t m, boolean_t no_zero_fill)
 	} else {
 		vm_page_zero_fill(m);
 
-		VM_STAT_INCR(zero_fill_count);
+		counter_inc(&vm_statistics_zero_fill_count);
 		DTRACE_VM2(zfod, int, 1, (uint64_t *), NULL);
 	}
 	assert(!m->vmp_laundry);
@@ -953,6 +1007,7 @@ vm_fault_page(
 	memory_object_t         pager;
 	vm_fault_return_t       retval;
 	int                     grab_options;
+	bool                    clear_absent_on_error = false;
 
 /*
  * MUST_ASK_PAGER() evaluates to TRUE if the page specified by object/offset is
@@ -980,6 +1035,12 @@ vm_fault_page(
 	PAGE_WAKEUP_DONE(m);                            \
 	if ( !VM_PAGE_PAGEABLE(m)) {                    \
 	        vm_page_lockspin_queues();              \
+	        if (clear_absent_on_error && m->vmp_absent) {\
+	                vm_page_zero_fill(m);           \
+	                counter_inc(&vm_statistics_zero_fill_count);\
+	                DTRACE_VM2(zfod, int, 1, (uint64_t *), NULL);\
+	                m->vmp_absent = false;          \
+	        }                                       \
 	        if ( !VM_PAGE_PAGEABLE(m)) {            \
 	                if (VM_CONFIG_COMPRESSOR_IS_ACTIVE)     \
 	                        vm_page_deactivate(m);          \
@@ -988,6 +1049,7 @@ vm_fault_page(
 	        }                                               \
 	        vm_page_unlock_queues();                        \
 	}                                                       \
+	clear_absent_on_error = false;                  \
 	MACRO_END
 
 #if TRACEFAULTPAGE
@@ -1032,6 +1094,8 @@ vm_fault_page(
 	 * default type of fault
 	 */
 	my_fault = DBG_CACHE_HIT_FAULT;
+	thread_pri_floor_t token;
+	bool    drop_floor = false;
 
 	while (TRUE) {
 #if TRACEFAULTPAGE
@@ -1053,6 +1117,7 @@ vm_fault_page(
 			vm_fault_cleanup(object, first_m);
 			thread_interrupt_level(interruptible_state);
 
+			kernel_triage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_VM, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_VM_OBJECT_NOT_ALIVE), 0 /* arg */);
 			return VM_FAULT_MEMORY_ERROR;
 		}
 
@@ -1117,8 +1182,6 @@ vm_fault_page(
 #endif
 				wait_result = PAGE_SLEEP(object, m, interruptible);
 
-				counter(c_vm_fault_page_block_busy_kernel++);
-
 				if (wait_result != THREAD_AWAKENED) {
 					vm_fault_cleanup(object, first_m);
 					thread_interrupt_level(interruptible_state);
@@ -1126,6 +1189,7 @@ vm_fault_page(
 					if (wait_result == THREAD_RESTART) {
 						return VM_FAULT_RETRY;
 					} else {
+						kernel_triage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_VM, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_VM_BUSYPAGE_WAIT_INTERRUPTED), 0 /* arg */);
 						return VM_FAULT_INTERRUPTED;
 					}
 				}
@@ -1165,6 +1229,7 @@ vm_fault_page(
 					 */
 					vm_fault_cleanup(object, first_m);
 					thread_interrupt_level(interruptible_state);
+					kernel_triage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_VM, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_VM_GUARDPAGE_FAULT), 0 /* arg */);
 					return VM_FAULT_MEMORY_ERROR;
 				}
 			}
@@ -1184,6 +1249,7 @@ vm_fault_page(
 				vm_fault_cleanup(object, first_m);
 				thread_interrupt_level(interruptible_state);
 
+				kernel_triage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_VM, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_VM_PAGE_HAS_ERROR), 0 /* arg */);
 				return VM_FAULT_MEMORY_ERROR;
 			}
 			if (m->vmp_restart) {
@@ -1201,6 +1267,7 @@ vm_fault_page(
 				vm_fault_cleanup(object, first_m);
 				thread_interrupt_level(interruptible_state);
 
+				kernel_triage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_VM, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_VM_PAGE_HAS_RESTART), 0 /* arg */);
 				return VM_FAULT_RETRY;
 			}
 			if (m->vmp_absent) {
@@ -1273,6 +1340,7 @@ vm_fault_page(
 					}
 					if (fault_info->mark_zf_absent && no_zero_fill == TRUE) {
 						m->vmp_absent = TRUE;
+						clear_absent_on_error = true;
 					}
 					/*
 					 * zero-fill the page and put it on
@@ -1338,7 +1406,6 @@ vm_fault_page(
 
 				vm_fault_cleanup(object, first_m);
 
-				counter(c_vm_fault_page_block_backoff_kernel++);
 				vm_object_lock(object);
 				assert(object->ref_count > 0);
 
@@ -1415,6 +1482,33 @@ vm_fault_page(
 			break;
 		}
 
+#if __arm__ && !__arm64__
+		if (__improbable(object->internal &&
+		    offset >= object->vo_size &&
+		    offset < ((object->vo_size + SIXTEENK_PAGE_MASK) & ~SIXTEENK_PAGE_MASK) &&
+		    PAGE_SIZE == FOURK_PAGE_SIZE)) {
+			/*
+			 * On devices with a 4k kernel page size
+			 * and a 16k user page size (i.e. 32-bit watches),
+			 * IOKit could have created a VM object with a
+			 * 4k-aligned size.
+			 * IOKit could have then mapped that VM object
+			 * in a user address space, and VM would have extended
+			 * the mapping to the next 16k boundary.
+			 * So we could now be, somewhat illegally, trying to
+			 * access one of the up to 3 non-existent 4k pages
+			 * beyond the end of the VM object.
+			 * We would not be allowed to insert a page beyond the
+			 * the end of the object, so let's fail the fault.
+			 */
+			DTRACE_VM2(vm_fault_page_beyond_end_of_internal,
+			    vm_object_offset_t, offset,
+			    vm_object_size_t, object->vo_size);
+			vm_fault_cleanup(object, first_m);
+			thread_interrupt_level(interruptible_state);
+			return VM_FAULT_MEMORY_ERROR;
+		}
+#endif /* __arm__ && !__arm64__ */
 
 		/*
 		 * we get here when there is no page present in the object at
@@ -1465,6 +1559,7 @@ vm_fault_page(
 				vm_fault_cleanup(object, first_m);
 				thread_interrupt_level(interruptible_state);
 
+				kernel_triage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_VM, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_VM_MEMORY_SHORTAGE), 0 /* arg */);
 				return VM_FAULT_MEMORY_SHORTAGE;
 			}
 
@@ -1497,7 +1592,6 @@ vm_fault_page(
 				 */
 				vm_object_reference_locked(object);
 				vm_fault_cleanup(object, first_m);
-				counter(c_vm_fault_page_block_backoff_kernel++);
 
 				vm_object_lock(object);
 				assert(object->ref_count > 0);
@@ -1539,8 +1633,6 @@ vm_fault_page(
 
 				vm_fault_cleanup(object, first_m);
 
-				counter(c_vm_fault_page_block_backoff_kernel++);
-
 				vm_object_lock(object);
 				assert(object->ref_count > 0);
 
@@ -1577,6 +1669,7 @@ vm_fault_page(
 						vm_fault_cleanup(object, first_m);
 						thread_interrupt_level(interruptible_state);
 
+						kernel_triage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_VM, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_VM_MEMORY_SHORTAGE), 0 /* arg */);
 						return VM_FAULT_MEMORY_SHORTAGE;
 					}
 
@@ -1710,6 +1803,7 @@ vm_fault_page(
 			if (pager == MEMORY_OBJECT_NULL) {
 				vm_fault_cleanup(object, first_m);
 				thread_interrupt_level(interruptible_state);
+				kernel_triage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_VM, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_VM_OBJECT_NO_PAGER), 0 /* arg */);
 				return VM_FAULT_MEMORY_ERROR;
 			}
 
@@ -1719,7 +1813,15 @@ vm_fault_page(
 			 */
 
 			if (object->object_is_shared_cache) {
-				set_thread_rwlock_boost();
+				token = thread_priority_floor_start();
+				/*
+				 * A non-native shared cache object might
+				 * be getting set up in parallel with this
+				 * fault and so we can't assume that this
+				 * check will be valid after we drop the
+				 * object lock below.
+				 */
+				drop_floor = true;
 			}
 
 			vm_object_unlock(object);
@@ -1803,14 +1905,17 @@ vm_fault_page(
 #endif
 			vm_object_lock(object);
 
-			if (object->object_is_shared_cache) {
-				clear_thread_rwlock_boost();
+			if (drop_floor && object->object_is_shared_cache) {
+				thread_priority_floor_end(&token);
+				drop_floor = false;
 			}
 
 data_requested:
 			if (rc != KERN_SUCCESS) {
 				vm_fault_cleanup(object, first_m);
 				thread_interrupt_level(interruptible_state);
+
+				kernel_triage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_VM, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_VM_NO_DATA), 0 /* arg */);
 
 				return (rc == MACH_SEND_INTERRUPTED) ?
 				       VM_FAULT_INTERRUPTED :
@@ -1829,6 +1934,7 @@ data_requested:
 				vm_fault_cleanup(object, first_m);
 				thread_interrupt_level(interruptible_state);
 
+				kernel_triage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_VM, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_VM_FAULT_INTERRUPTED), 0 /* arg */);
 				return VM_FAULT_INTERRUPTED;
 			}
 			if (force_fault_retry == TRUE) {
@@ -1932,6 +2038,7 @@ dont_look_for_page:
 			}
 			if (fault_info->mark_zf_absent && no_zero_fill == TRUE) {
 				m->vmp_absent = TRUE;
+				clear_absent_on_error = true;
 			}
 
 			my_fault = vm_fault_zero_page(m, no_zero_fill);
@@ -2033,6 +2140,7 @@ dont_look_for_page:
 				vm_fault_cleanup(object, first_m);
 				thread_interrupt_level(interruptible_state);
 
+				kernel_triage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_VM, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_VM_MEMORY_SHORTAGE), 0 /* arg */);
 				return VM_FAULT_MEMORY_SHORTAGE;
 			}
 
@@ -2079,9 +2187,9 @@ dont_look_for_page:
 			vm_object_unlock(object);
 
 			my_fault = DBG_COW_FAULT;
-			VM_STAT_INCR(cow_faults);
+			counter_inc(&vm_statistics_cow_faults);
 			DTRACE_VM2(cow_fault, int, 1, (uint64_t *), NULL);
-			current_task()->cow_faults++;
+			counter_inc(&current_task()->cow_faults);
 
 			object = first_object;
 			offset = first_offset;
@@ -2198,11 +2306,9 @@ dont_look_for_page:
 				vm_object_reference_locked(copy_object);
 				vm_object_unlock(copy_object);
 				vm_fault_cleanup(object, first_m);
-				counter(c_vm_fault_page_block_backoff_kernel++);
 
 				vm_object_lock(copy_object);
 				assert(copy_object->ref_count > 0);
-				VM_OBJ_RES_DECR(copy_object);
 				vm_object_lock_assert_exclusive(copy_object);
 				copy_object->ref_count--;
 				assert(copy_object->ref_count > 0);
@@ -2241,7 +2347,6 @@ dont_look_for_page:
 			if (copy_m == VM_PAGE_NULL) {
 				RELEASE_PAGE(m);
 
-				VM_OBJ_RES_DECR(copy_object);
 				vm_object_lock_assert_exclusive(copy_object);
 				copy_object->ref_count--;
 				assert(copy_object->ref_count > 0);
@@ -2250,6 +2355,7 @@ dont_look_for_page:
 				vm_fault_cleanup(object, first_m);
 				thread_interrupt_level(interruptible_state);
 
+				kernel_triage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_VM, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_VM_MEMORY_SHORTAGE), 0 /* arg */);
 				return VM_FAULT_MEMORY_SHORTAGE;
 			}
 			/*
@@ -2357,7 +2463,6 @@ dont_look_for_page:
 		copy_object->ref_count--;
 		assert(copy_object->ref_count > 0);
 
-		VM_OBJ_RES_DECR(copy_object);
 		vm_object_unlock(copy_object);
 
 		break;
@@ -2406,6 +2511,7 @@ done:
 			*type_of_fault = my_fault;
 		}
 	} else {
+		kernel_triage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_VM, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_VM_SUCCESS_NO_PAGE), 0 /* arg */);
 		retval = VM_FAULT_SUCCESS_NO_VM_PAGE;
 		assert(first_m == VM_PAGE_NULL);
 		assert(object == first_object);
@@ -2422,6 +2528,7 @@ backoff:
 	thread_interrupt_level(interruptible_state);
 
 	if (wait_result == THREAD_INTERRUPTED) {
+		kernel_triage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_VM, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_VM_FAULT_INTERRUPTED), 0 /* arg */);
 		return VM_FAULT_INTERRUPTED;
 	}
 	return VM_FAULT_RETRY;
@@ -2429,8 +2536,14 @@ backoff:
 #undef  RELEASE_PAGE
 }
 
+#if MACH_ASSERT && (PLATFORM_WatchOS || __x86_64__)
+#define PANIC_ON_CS_KILLED_DEFAULT true
+#else
+#define PANIC_ON_CS_KILLED_DEFAULT false
+#endif
+static TUNABLE(bool, panic_on_cs_killed, "panic_on_cs_killed",
+    PANIC_ON_CS_KILLED_DEFAULT);
 
-extern int panic_on_cs_killed;
 extern int proc_selfpid(void);
 extern char *proc_name_address(void *p);
 unsigned long cs_enter_tainted_rejected = 0;
@@ -2550,28 +2663,7 @@ vm_fault_cs_check_violation(
 		/* VM map is locked, so 1 ref will remain on VM object -
 		 * so no harm if vm_page_validate_cs drops the object lock */
 
-#if PMAP_CS
-		if (fault_info->pmap_cs_associated &&
-		    pmap_cs_enforced(pmap) &&
-		    !VMP_CS_VALIDATED(m, fault_page_size, fault_phys_offset) &&
-		    !VMP_CS_TAINTED(m, fault_page_size, fault_phys_offset) &&
-		    !VMP_CS_NX(m, fault_page_size, fault_phys_offset) &&
-		    (prot & VM_PROT_EXECUTE) &&
-		    (caller_prot & VM_PROT_EXECUTE)) {
-			/*
-			 * With pmap_cs, the pmap layer will validate the
-			 * code signature for any executable pmap mapping.
-			 * No need for us to validate this page too:
-			 * in pmap_cs we trust...
-			 */
-			vm_cs_defer_to_pmap_cs++;
-		} else {
-			vm_cs_defer_to_pmap_cs_not++;
-			vm_page_validate_cs(m, fault_page_size, fault_phys_offset);
-		}
-#else /* PMAP_CS */
 		vm_page_validate_cs(m, fault_page_size, fault_phys_offset);
-#endif /* PMAP_CS */
 	}
 
 	/* If the map is switched, and is switch-protected, we must protect
@@ -2595,6 +2687,7 @@ vm_fault_cs_check_violation(
 	    map_is_switch_protected &&
 	    vm_fault_cs_page_immutable(m, fault_page_size, fault_phys_offset, prot) &&
 	    (prot & VM_PROT_WRITE)) {
+		kernel_triage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_VM, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_VM_FAILED_IMMUTABLE_PAGE_WRITE), 0 /* arg */);
 		return KERN_CODESIGN_ERROR;
 	}
 
@@ -2604,6 +2697,7 @@ vm_fault_cs_check_violation(
 		if (cs_debug) {
 			printf("page marked to be NX, not letting it be mapped EXEC\n");
 		}
+		kernel_triage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_VM, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_VM_FAILED_NX_PAGE_EXEC_MAPPING), 0 /* arg */);
 		return KERN_CODESIGN_ERROR;
 	}
 
@@ -2647,15 +2741,6 @@ vm_fault_cs_check_violation(
 		*cs_violation = TRUE;
 	} else if (!VMP_CS_VALIDATED(m, fault_page_size, fault_phys_offset) &&
 	    (prot & VM_PROT_EXECUTE)
-#if PMAP_CS
-	    /*
-	     * Executable pages will be validated by pmap_cs;
-	     * in pmap_cs we trust...
-	     * If pmap_cs is turned off, this is a code-signing
-	     * violation.
-	     */
-	    && !(pmap_cs_enforced(pmap))
-#endif /* PMAP_CS */
 	    ) {
 		*cs_violation = TRUE;
 	} else {
@@ -2769,7 +2854,7 @@ vm_fault_cs_handle_violation(
 		truncated_path = FALSE;
 		/* no pager -> no file -> no pathname, use "<nil>" in that case */
 		if (file_object->pager != NULL) {
-			pathname = kheap_alloc(KHEAP_TEMP, __PATH_MAX * 2, Z_WAITOK);
+			pathname = kalloc_data(__PATH_MAX * 2, Z_WAITOK);
 			if (pathname) {
 				pathname[0] = '\0';
 				pathname_len = __PATH_MAX;
@@ -2790,7 +2875,7 @@ vm_fault_cs_handle_violation(
 					    &mtime,
 					    &cs_mtime);
 				} else {
-					kheap_free(KHEAP_TEMP, pathname, __PATH_MAX * 2);
+					kfree_data(pathname, __PATH_MAX * 2);
 					pathname = NULL;
 					filename = NULL;
 					pathname_len = 0;
@@ -2894,7 +2979,7 @@ vm_fault_cs_handle_violation(
 			char *tainted_contents;
 			vm_map_offset_t src_vaddr;
 			src_vaddr = (vm_map_offset_t) phystokv((pmap_paddr_t)VM_PAGE_GET_PHYS_PAGE(m) << PAGE_SHIFT);
-			tainted_contents = kalloc(PAGE_SIZE);
+			tainted_contents = kalloc_data(PAGE_SIZE, Z_WAITOK);
 			bcopy((const char *)src_vaddr, tainted_contents, PAGE_SIZE);
 			printf("CODE SIGNING: tainted page %p phys 0x%x phystokv 0x%llx copied to %p\n", m, VM_PAGE_GET_PHYS_PAGE(m), (uint64_t)src_vaddr, tainted_contents);
 			panic("CODE SIGNING: process %d[%s]: "
@@ -2929,7 +3014,7 @@ vm_fault_cs_handle_violation(
 			vm_object_unlock(file_object);
 		}
 		if (pathname_len != 0) {
-			kheap_free(KHEAP_TEMP, pathname, __PATH_MAX * 2);
+			kfree_data(pathname, __PATH_MAX * 2);
 			pathname = NULL;
 			filename = NULL;
 		}
@@ -2980,7 +3065,7 @@ vm_fault_cs_handle_violation(
 		}
 #if !SECURE_KERNEL
 		if (cs_enforcement_panic) {
-			panic("CODESIGNING: panicking on invalid page\n");
+			panic("CODESIGNING: panicking on invalid page");
 		}
 #endif
 	}
@@ -3330,23 +3415,6 @@ vm_fault_attempt_pmap_enter(
 	    wired,
 	    pmap_options,
 	    kr);
-#if PMAP_CS
-	/*
-	 * Retry without execute permission if we encountered a codesigning
-	 * failure on a non-execute fault.  This allows applications which
-	 * don't actually need to execute code to still map it for read access.
-	 */
-	if ((kr == KERN_CODESIGN_ERROR) && pmap_cs_enforced(pmap) &&
-	    (*prot & VM_PROT_EXECUTE) && !(caller_prot & VM_PROT_EXECUTE)) {
-		*prot &= ~VM_PROT_EXECUTE;
-		PMAP_ENTER_OPTIONS(pmap, vaddr,
-		    fault_phys_offset,
-		    m, *prot, fault_type, 0,
-		    wired,
-		    pmap_options,
-		    kr);
-	}
-#endif
 	return kr;
 }
 
@@ -3459,6 +3527,7 @@ vm_fault_pmap_enter_with_object_lock(
 			 * drop both locks.
 			 */
 			*need_retry = TRUE;
+			kernel_triage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_VM, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_VM_PMAP_ENTER_RESOURCE_SHORTAGE), 0 /* arg */);
 			vm_pmap_enter_retried++;
 			goto done;
 		}
@@ -3538,11 +3607,6 @@ vm_fault_enter_prepare(
 #if KASAN
 	if (pmap == kernel_pmap) {
 		kasan_notify_address(vaddr, PAGE_SIZE);
-	}
-#endif
-#if PMAP_CS
-	if (pmap_cs_exempt(pmap)) {
-		cs_bypass = TRUE;
 	}
 #endif
 
@@ -3933,6 +3997,22 @@ vm_fault_type_for_tracing(boolean_t need_copy_on_read, int type_of_fault)
 	return type_of_fault;
 }
 
+uint64_t vm_fault_resilient_media_initiate = 0;
+uint64_t vm_fault_resilient_media_retry = 0;
+uint64_t vm_fault_resilient_media_proceed = 0;
+uint64_t vm_fault_resilient_media_release = 0;
+uint64_t vm_fault_resilient_media_abort1 = 0;
+uint64_t vm_fault_resilient_media_abort2 = 0;
+
+#if MACH_ASSERT
+int vm_fault_resilient_media_inject_error1_rate = 0;
+int vm_fault_resilient_media_inject_error1 = 0;
+int vm_fault_resilient_media_inject_error2_rate = 0;
+int vm_fault_resilient_media_inject_error2 = 0;
+int vm_fault_resilient_media_inject_error3_rate = 0;
+int vm_fault_resilient_media_inject_error3 = 0;
+#endif /* MACH_ASSERT */
+
 kern_return_t
 vm_fault_internal(
 	vm_map_t        map,
@@ -3989,9 +4069,11 @@ vm_fault_internal(
 	vm_map_offset_t         trace_real_vaddr;
 	vm_map_size_t           fault_page_size;
 	vm_map_size_t           fault_page_mask;
+	int                     fault_page_shift;
 	vm_map_offset_t         fault_phys_offset;
 	vm_map_offset_t         real_vaddr;
-	bool                    resilient_media_retry = FALSE;
+	bool                    resilient_media_retry = false;
+	bool                    resilient_media_ref_transfer = false;
 	vm_object_t             resilient_media_object = VM_OBJECT_NULL;
 	vm_object_offset_t      resilient_media_offset = (vm_object_offset_t)-1;
 	bool                    page_needs_data_sync = false;
@@ -4010,6 +4092,7 @@ vm_fault_internal(
 		fault_phys_offset = (vm_map_offset_t)-1;
 		fault_page_size = VM_MAP_PAGE_SIZE(original_map);
 		fault_page_mask = VM_MAP_PAGE_MASK(original_map);
+		fault_page_shift = VM_MAP_PAGE_SHIFT(original_map);
 		if (fault_page_size < PAGE_SIZE) {
 			DEBUG4K_FAULT("map %p vaddr 0x%llx caller_prot 0x%x\n", map, (uint64_t)trace_real_vaddr, caller_prot);
 			vaddr = vm_map_trunc_page(vaddr, fault_page_mask);
@@ -4018,6 +4101,7 @@ vm_fault_internal(
 		fault_phys_offset = 0;
 		fault_page_size = PAGE_SIZE;
 		fault_page_mask = PAGE_MASK;
+		fault_page_shift = PAGE_SHIFT;
 		vaddr = vm_map_trunc_page(vaddr, PAGE_MASK);
 	}
 
@@ -4045,6 +4129,7 @@ vm_fault_internal(
 		    0,
 		    0);
 
+		kernel_triage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_VM, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_VM_NONZERO_PREEMPTION_LEVEL), 0 /* arg */);
 		return KERN_FAILURE;
 	}
 
@@ -4060,8 +4145,8 @@ vm_fault_internal(
 
 	fault_type = (change_wiring ? VM_PROT_NONE : caller_prot);
 
-	VM_STAT_INCR(faults);
-	current_task()->faults++;
+	counter_inc(&vm_statistics_faults);
+	counter_inc(&current_task()->faults);
 	original_fault_type = fault_type;
 
 	need_copy = FALSE;
@@ -4112,6 +4197,7 @@ RetryFault:
 		 */
 		need_copy = TRUE;
 		object_lock_type = OBJECT_LOCK_EXCLUSIVE;
+		vm_fault_resilient_media_retry++;
 	}
 
 	kr = vm_map_lookup_locked(&map, vaddr,
@@ -4124,6 +4210,17 @@ RetryFault:
 
 	if (kr != KERN_SUCCESS) {
 		vm_map_unlock_read(map);
+		/*
+		 * This can be seen in a crash report if indeed the
+		 * thread is crashing due to an invalid access in a non-existent
+		 * range.
+		 * Turning this OFF for now because it is noisy and not always fatal
+		 * eg prefaulting.
+		 *
+		 * if (kr == KERN_INVALID_ADDRESS) {
+		 *	kernel_triage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_VM, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_VM_ADDRESS_NOT_FOUND), 0);
+		 * }
+		 */
 		goto done;
 	}
 
@@ -4144,10 +4241,15 @@ RetryFault:
 		 */
 		assert(resilient_media_object != VM_OBJECT_NULL);
 		assert(resilient_media_offset != (vm_object_offset_t)-1);
-		if (object != VM_OBJECT_NULL &&
+		if ((object != VM_OBJECT_NULL &&
 		    object == resilient_media_object &&
 		    offset == resilient_media_offset &&
-		    fault_info.resilient_media) {
+		    fault_info.resilient_media)
+#if MACH_ASSERT
+		    && (vm_fault_resilient_media_inject_error1_rate == 0 ||
+		    (++vm_fault_resilient_media_inject_error1 % vm_fault_resilient_media_inject_error1_rate) != 0)
+#endif /* MACH_ASSERT */
+		    ) {
 			/*
 			 * This mapping still points at the same object
 			 * and is still "resilient_media": proceed in
@@ -4155,15 +4257,24 @@ RetryFault:
 			 * insert a zero-filled page in the top object.
 			 */
 //                     printf("RESILIENT_MEDIA %s:%d recovering for object %p offset 0x%llx\n", __FUNCTION__, __LINE__, object, offset);
+			vm_fault_resilient_media_proceed++;
 		} else {
-			/* not recovering: reset state */
+			/* not recovering: reset state and retry fault */
 //                     printf("RESILIENT_MEDIA %s:%d no recovery resilient %d object %p/%p offset 0x%llx/0x%llx\n", __FUNCTION__, __LINE__, fault_info.resilient_media, object, resilient_media_object, offset, resilient_media_offset);
-			resilient_media_retry = FALSE;
+			vm_object_unlock(object);
+			if (real_map != map) {
+				vm_map_unlock(real_map);
+			}
+			vm_map_unlock_read(map);
 			/* release our extra reference on failed object */
 //                     printf("FBDP %s:%d resilient_media_object %p deallocate\n", __FUNCTION__, __LINE__, resilient_media_object);
+			vm_object_lock_assert_notheld(resilient_media_object);
 			vm_object_deallocate(resilient_media_object);
 			resilient_media_object = VM_OBJECT_NULL;
 			resilient_media_offset = (vm_object_offset_t)-1;
+			resilient_media_retry = false;
+			vm_fault_resilient_media_abort1++;
+			goto RetryFault;
 		}
 	} else {
 		assert(resilient_media_object == VM_OBJECT_NULL);
@@ -4288,6 +4399,39 @@ RetryFault:
 			break;
 		}
 
+#if __arm__ && !__arm64__
+		if (__improbable(cur_object->internal &&
+		    cur_offset >= cur_object->vo_size &&
+		    cur_offset < VM_MAP_ROUND_PAGE(cur_object->vo_size, VM_MAP_PAGE_MASK(map)) &&
+		    VM_MAP_PAGE_SHIFT(map) > PAGE_SHIFT)) {
+			/*
+			 * On devices with a 4k kernel page size
+			 * and a 16k user page size (i.e. 32-bit watches),
+			 * IOKit could have created a VM object with a
+			 * 4k-aligned size.
+			 * IOKit could have then mapped that VM object
+			 * in a user address space, and VM would have extended
+			 * the mapping to the next 16k boundary.
+			 * So we could now be, somewhat illegally, trying to
+			 * access one of the up to 3 non-existent 4k pages
+			 * beyond the end of the VM object.
+			 * We would not be allowed to insert a page beyond the
+			 * the end of the object, so let's fail the fault.
+			 */
+			DTRACE_VM3(vm_fault_beyond_end_of_internal,
+			    vm_object_offset_t, offset,
+			    vm_object_size_t, object->vo_size,
+			    vm_map_address_t, vaddr);
+			vm_object_unlock(object);
+			vm_map_unlock_read(map);
+			if (real_map != map) {
+				vm_map_unlock(real_map);
+			}
+			kr = KERN_MEMORY_ERROR;
+			goto done;
+		}
+#endif /* __arm__ && !__arm64__ */
+
 		m = vm_page_lookup(cur_object, vm_object_trunc_page(cur_offset));
 		m_object = NULL;
 
@@ -4379,13 +4523,12 @@ RetryFault:
 
 				if (result == THREAD_WAITING) {
 					result = thread_block(THREAD_CONTINUE_NULL);
-
-					counter(c_vm_fault_page_block_busy_kernel++);
 				}
 				if (result == THREAD_AWAKENED || result == THREAD_RESTART) {
 					goto RetryFault;
 				}
 
+				kernel_triage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_VM, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_VM_BUSYPAGE_WAIT_INTERRUPTED), 0 /* arg */);
 				kr = KERN_ABORTED;
 				goto done;
 			}
@@ -4447,6 +4590,7 @@ reclaimed_from_pageout:
 					vm_map_unlock(real_map);
 				}
 				vm_object_unlock(cur_object);
+				kernel_triage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_VM, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_VM_PURGEABLE_FAULT_ERROR), 0 /* arg */);
 				kr = KERN_MEMORY_ERROR;
 				goto done;
 			}
@@ -4511,9 +4655,7 @@ upgrade_lock_and_retry:
 			    !cur_object->internal &&
 			    !cur_object->pager_trusted &&
 			    vm_protect_privileged_from_untrusted &&
-			    !((prot & VM_PROT_EXECUTE) &&
-			    cur_object->code_signed &&
-			    pmap_get_vm_map_cs_enforced(caller_pmap ? caller_pmap : pmap)) &&
+			    !cur_object->code_signed &&
 			    current_proc_is_privileged()) {
 				/*
 				 * We're faulting on a page in "object" and
@@ -4731,6 +4873,17 @@ FastPmapEnter:
 				goto upgrade_lock_and_retry;
 			}
 
+#if MACH_ASSERT
+			if (resilient_media_retry &&
+			    vm_fault_resilient_media_inject_error2_rate != 0 &&
+			    (++vm_fault_resilient_media_inject_error2 % vm_fault_resilient_media_inject_error2_rate) == 0) {
+				/* inject an error */
+				cur_m = m;
+				m = VM_PAGE_NULL;
+				m_object = VM_OBJECT_NULL;
+				break;
+			}
+#endif /* MACH_ASSERT */
 			/*
 			 * Allocate a page in the original top level
 			 * object. Give up if allocate fails.  Also
@@ -4849,9 +5002,9 @@ FastPmapEnter:
 			vm_fault_collapse_total++;
 
 			type_of_fault = DBG_COW_FAULT;
-			VM_STAT_INCR(cow_faults);
+			counter_inc(&vm_statistics_cow_faults);
 			DTRACE_VM2(cow_fault, int, 1, (uint64_t *), NULL);
-			current_task()->cow_faults++;
+			counter_inc(&current_task()->cow_faults);
 
 			goto FastPmapEnter;
 		} else {
@@ -5014,6 +5167,7 @@ FastPmapEnter:
 						if (real_map != map) {
 							vm_map_unlock(real_map);
 						}
+
 						goto done;
 					} else if (kr != KERN_SUCCESS) {
 						break;
@@ -5131,6 +5285,13 @@ FastPmapEnter:
 					if (real_map != map) {
 						vm_map_unlock(real_map);
 					}
+					if (VM_OBJECT_PURGEABLE_FAULT_ERROR(cur_object)) {
+						kernel_triage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_VM, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_VM_PURGEABLE_FAULT_ERROR), 0 /* arg */);
+					}
+
+					if (cur_object->shadow_severed) {
+						kernel_triage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_VM, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_VM_OBJECT_SHADOW_SEVERED), 0 /* arg */);
+					}
 
 					kr = KERN_MEMORY_ERROR;
 					goto done;
@@ -5161,6 +5322,15 @@ FastPmapEnter:
 				if (!object->internal) {
 					panic("%s:%d should not zero-fill page at offset 0x%llx in external object %p", __FUNCTION__, __LINE__, (uint64_t)offset, object);
 				}
+#if MACH_ASSERT
+				if (resilient_media_retry &&
+				    vm_fault_resilient_media_inject_error3_rate != 0 &&
+				    (++vm_fault_resilient_media_inject_error3 % vm_fault_resilient_media_inject_error3_rate) == 0) {
+					/* inject an error */
+					m_object = NULL;
+					break;
+				}
+#endif /* MACH_ASSERT */
 				m = vm_page_alloc(object, vm_object_trunc_page(offset));
 				m_object = NULL;
 
@@ -5243,7 +5413,7 @@ FastPmapEnter:
 						 *   lock across the zero fill.
 						 */
 						vm_page_zero_fill(m);
-						VM_STAT_INCR(zero_fill_count);
+						counter_inc(&vm_statistics_zero_fill_count);
 						DTRACE_VM2(zfod, int, 1, (uint64_t *), NULL);
 					}
 					if (page_needs_data_sync) {
@@ -5402,6 +5572,7 @@ handle_copy_delay:
 	assert(object != kernel_object);
 	assert(object != vm_submap_object);
 
+	resilient_media_ref_transfer = false;
 	if (resilient_media_retry) {
 		/*
 		 * We could get here if we failed to get a free page
@@ -5412,10 +5583,22 @@ handle_copy_delay:
 		assert(resilient_media_offset != (vm_object_offset_t)-1);
 		/* release our extra reference on failed object */
 //             printf("FBDP %s:%d resilient_media_object %p deallocate\n", __FUNCTION__, __LINE__, resilient_media_object);
-		vm_object_deallocate(resilient_media_object);
+		if (object == resilient_media_object) {
+			/*
+			 * We're holding "object"'s lock, so we can't release
+			 * our extra reference at this point.
+			 * We need an extra reference on "object" anyway
+			 * (see below), so let's just transfer this reference.
+			 */
+			resilient_media_ref_transfer = true;
+		} else {
+			vm_object_lock_assert_notheld(resilient_media_object);
+			vm_object_deallocate(resilient_media_object);
+		}
 		resilient_media_object = VM_OBJECT_NULL;
 		resilient_media_offset = (vm_object_offset_t)-1;
-		resilient_media_retry = FALSE;
+		resilient_media_retry = false;
+		vm_fault_resilient_media_abort2++;
 	}
 
 	/*
@@ -5425,7 +5608,12 @@ handle_copy_delay:
 	 * to be diddled.  Since objects reference their
 	 * shadows (and copies), they will stay around as well.
 	 */
-	vm_object_reference_locked(object);
+	if (resilient_media_ref_transfer) {
+		/* we already have an extra reference on this object */
+		resilient_media_ref_transfer = false;
+	} else {
+		vm_object_reference_locked(object);
+	}
 	vm_object_paging_begin(object);
 
 	set_thread_pagein_error(cthread, 0);
@@ -5472,10 +5660,11 @@ handle_copy_delay:
 			assert(!resilient_media_retry); /* no double retry */
 			assert(resilient_media_object == VM_OBJECT_NULL);
 			assert(resilient_media_offset == (vm_object_offset_t)-1);
-			resilient_media_retry = TRUE;
+			resilient_media_retry = true;
 			resilient_media_object = object;
 			resilient_media_offset = offset;
 //                     printf("FBDP %s:%d resilient_media_object %p offset 0x%llx kept reference\n", __FUNCTION__, __LINE__, resilient_media_object, resilient_mmedia_offset);
+			vm_fault_resilient_media_initiate++;
 			goto RetryFault;
 		} else {
 			/*
@@ -5496,8 +5685,10 @@ handle_copy_delay:
 			    THREAD_ABORTSAFE)) {
 				goto RetryFault;
 			}
+			kernel_triage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_VM, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_VM_MEMORY_SHORTAGE), 0 /* arg */);
 			OS_FALLTHROUGH;
 		case VM_FAULT_INTERRUPTED:
+			kernel_triage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_VM, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_VM_FAULT_INTERRUPTED), 0 /* arg */);
 			kr = KERN_ABORTED;
 			goto done;
 		case VM_FAULT_RETRY:
@@ -5632,6 +5823,9 @@ handle_copy_delay:
 			}
 			vm_object_deallocate(object);
 
+			if (kr == KERN_INVALID_ADDRESS) {
+				kernel_triage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_VM, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_VM_ADDRESS_NOT_FOUND), 0 /* arg */);
+			}
 			goto done;
 		}
 		vm_object_unlock(retry_object);
@@ -5707,9 +5901,7 @@ handle_copy_delay:
 	    VM_PAGE_OBJECT(m) != object &&
 	    !VM_PAGE_OBJECT(m)->pager_trusted &&
 	    vm_protect_privileged_from_untrusted &&
-	    !((prot & VM_PROT_EXECUTE) &&
-	    VM_PAGE_OBJECT(m)->code_signed &&
-	    pmap_get_vm_map_cs_enforced(caller_pmap ? caller_pmap : pmap)) &&
+	    !VM_PAGE_OBJECT(m)->code_signed &&
 	    current_proc_is_privileged()) {
 		/*
 		 * We found the page we want in an "untrusted" VM object
@@ -5866,8 +6058,7 @@ handle_copy_delay:
 		real_map = map;
 
 		laddr = vaddr;
-		hdelta = 0xFFFFF000;
-		ldelta = 0xFFFFF000;
+		hdelta = ldelta = (vm_map_offset_t)0xFFFFFFFFFFFFF000ULL;
 
 		while (vm_map_lookup_entry(map, laddr, &entry)) {
 			if (ldelta > (laddr - entry->vme_start)) {
@@ -5923,12 +6114,12 @@ handle_copy_delay:
 				/*
 				 * Set up a block mapped area
 				 */
-				assert((uint32_t)((ldelta + hdelta) >> PAGE_SHIFT) == ((ldelta + hdelta) >> PAGE_SHIFT));
-				kr = pmap_map_block(caller_pmap,
+				assert((uint32_t)((ldelta + hdelta) >> fault_page_shift) == ((ldelta + hdelta) >> fault_page_shift));
+				kr = pmap_map_block_addr(caller_pmap,
 				    (addr64_t)(caller_pmap_addr - ldelta),
-				    (ppnum_t)((((vm_map_offset_t) (VME_OBJECT(entry)->vo_shadow_offset)) +
-				    VME_OFFSET(entry) + (laddr - entry->vme_start) - ldelta) >> PAGE_SHIFT),
-				    (uint32_t)((ldelta + hdelta) >> PAGE_SHIFT), prot,
+				    (pmap_paddr_t)(((vm_map_offset_t) (VME_OBJECT(entry)->vo_shadow_offset)) +
+				    VME_OFFSET(entry) + (laddr - entry->vme_start) - ldelta),
+				    (uint32_t)((ldelta + hdelta) >> fault_page_shift), prot,
 				    (VM_WIMG_MASK & (int)object->wimg_bits) | superpage, 0);
 
 				if (kr != KERN_SUCCESS) {
@@ -5938,12 +6129,12 @@ handle_copy_delay:
 				/*
 				 * Set up a block mapped area
 				 */
-				assert((uint32_t)((ldelta + hdelta) >> PAGE_SHIFT) == ((ldelta + hdelta) >> PAGE_SHIFT));
-				kr = pmap_map_block(real_map->pmap,
+				assert((uint32_t)((ldelta + hdelta) >> fault_page_shift) == ((ldelta + hdelta) >> fault_page_shift));
+				kr = pmap_map_block_addr(real_map->pmap,
 				    (addr64_t)(vaddr - ldelta),
-				    (ppnum_t)((((vm_map_offset_t)(VME_OBJECT(entry)->vo_shadow_offset)) +
-				    VME_OFFSET(entry) + (laddr - entry->vme_start) - ldelta) >> PAGE_SHIFT),
-				    (uint32_t)((ldelta + hdelta) >> PAGE_SHIFT), prot,
+				    (pmap_paddr_t)(((vm_map_offset_t)(VME_OBJECT(entry)->vo_shadow_offset)) +
+				    VME_OFFSET(entry) + (laddr - entry->vme_start) - ldelta),
+				    (uint32_t)((ldelta + hdelta) >> fault_page_shift), prot,
 				    (VM_WIMG_MASK & (int)object->wimg_bits) | superpage, 0);
 
 				if (kr != KERN_SUCCESS) {
@@ -6000,10 +6191,12 @@ done:
 		assert(resilient_media_offset != (vm_object_offset_t)-1);
 		/* release extra reference on failed object */
 //             printf("FBDP %s:%d resilient_media_object %p deallocate\n", __FUNCTION__, __LINE__, resilient_media_object);
+		vm_object_lock_assert_notheld(resilient_media_object);
 		vm_object_deallocate(resilient_media_object);
 		resilient_media_object = VM_OBJECT_NULL;
 		resilient_media_offset = (vm_object_offset_t)-1;
-		resilient_media_retry = FALSE;
+		resilient_media_retry = false;
+		vm_fault_resilient_media_release++;
 	}
 	assert(!resilient_media_retry);
 
@@ -6358,10 +6551,10 @@ vm_fault_wire_fast(
 	vm_map_offset_t         fault_phys_offset;
 	struct vm_object_fault_info fault_info = {};
 
-	VM_STAT_INCR(faults);
+	counter_inc(&vm_statistics_faults);
 
 	if (thread != THREAD_NULL && thread->task != TASK_NULL) {
-		thread->task->faults++;
+		counter_inc(&thread->task->faults);
 	}
 
 /*
@@ -7285,13 +7478,11 @@ vm_page_validate_cs_mapped(
 	}
 }
 
-void
-vm_page_validate_cs(
-	vm_page_t       page,
-	vm_map_size_t   fault_page_size,
-	vm_map_offset_t fault_phys_offset)
+static void
+vm_page_map_and_validate_cs(
+	vm_object_t     object,
+	vm_page_t       page)
 {
-	vm_object_t             object;
 	vm_object_offset_t      offset;
 	vm_map_offset_t         koffset;
 	vm_map_size_t           ksize;
@@ -7300,12 +7491,6 @@ vm_page_validate_cs(
 	boolean_t               busy_page;
 	boolean_t               need_unmap;
 
-	object = VM_PAGE_OBJECT(page);
-	vm_object_lock_assert_held(object);
-
-	if (vm_page_validate_cs_fast(page, fault_page_size, fault_phys_offset)) {
-		return;
-	}
 	vm_object_lock_assert_exclusive(object);
 
 	assert(object->code_signed);
@@ -7337,7 +7522,7 @@ vm_page_validate_cs(
 	    &koffset,
 	    &need_unmap);
 	if (kr != KERN_SUCCESS) {
-		panic("%s: could not map page: 0x%x\n", __FUNCTION__, kr);
+		panic("%s: could not map page: 0x%x", __FUNCTION__, kr);
 	}
 	kaddr = CAST_DOWN(vm_offset_t, koffset);
 
@@ -7359,6 +7544,23 @@ vm_page_validate_cs(
 		kaddr = 0;
 	}
 	vm_object_paging_end(object);
+}
+
+void
+vm_page_validate_cs(
+	vm_page_t       page,
+	vm_map_size_t   fault_page_size,
+	vm_map_offset_t fault_phys_offset)
+{
+	vm_object_t             object;
+
+	object = VM_PAGE_OBJECT(page);
+	vm_object_lock_assert_held(object);
+
+	if (vm_page_validate_cs_fast(page, fault_page_size, fault_phys_offset)) {
+		return;
+	}
+	vm_page_map_and_validate_cs(object, page);
 }
 
 void
@@ -7460,16 +7662,18 @@ vm_record_rtfault(thread_t cthread, uint64_t fstart, vm_map_offset_t fault_vaddr
 	uint64_t cupid = get_current_unique_pid();
 
 	uintptr_t bpc = 0;
-	int btr = 0;
-	bool u64 = false;
+	errno_t btr = 0;
 
-	/* Capture a single-frame backtrace; this extracts just the program
-	 * counter at the point of the fault into "bpc", and should perform no
-	 * further user stack traversals, thus avoiding copyin()s and further
-	 * faults.
+	/*
+	 * Capture a single-frame backtrace.  This extracts just the program
+	 * counter at the point of the fault, and should not use copyin to get
+	 * Rosetta save state.
 	 */
-	unsigned int bfrs = backtrace_thread_user(cthread, &bpc, 1U, &btr, &u64, NULL, false);
-
+	struct backtrace_control ctl = {
+		.btc_user_thread = cthread,
+		.btc_user_copy = backtrace_user_copy_error,
+	};
+	unsigned int bfrs = backtrace_user(&bpc, 1U, &ctl, NULL);
 	if ((btr == 0) && (bfrs > 0)) {
 		cfpc = bpc;
 	}
@@ -7533,3 +7737,583 @@ vmrtf_extract(uint64_t cupid, __unused boolean_t isroot, unsigned long vrecordsz
 	*vmrtfrv = numextracted;
 	return early_exit;
 }
+
+/*
+ * Only allow one diagnosis to be in flight at a time, to avoid
+ * creating too much additional memory usage.
+ */
+static volatile uint_t vmtc_diagnosing;
+unsigned int vmtc_total = 0;
+
+/*
+ * Type used to update telemetry for the diagnosis counts.
+ */
+CA_EVENT(vmtc_telemetry,
+    CA_INT, vmtc_num_byte,            /* number of corrupt bytes found */
+    CA_BOOL, vmtc_undiagnosed,        /* undiagnosed because more than 1 at a time */
+    CA_BOOL, vmtc_not_eligible,       /* the page didn't qualify */
+    CA_BOOL, vmtc_copyin_fail,        /* unable to copy in the page */
+    CA_BOOL, vmtc_not_found,          /* no corruption found even though CS failed */
+    CA_BOOL, vmtc_one_bit_flip,       /* single bit flip */
+    CA_BOOL, vmtc_testing);           /* caused on purpose by testing */
+
+#if DEVELOPMENT || DEBUG
+/*
+ * Buffers used to compare before/after page contents.
+ * Stashed to aid when debugging crashes.
+ */
+static size_t vmtc_last_buffer_size = 0;
+static uint64_t *vmtc_last_before_buffer = NULL;
+static uint64_t *vmtc_last_after_buffer = NULL;
+
+/*
+ * Needed to record corruptions due to testing.
+ */
+static uintptr_t corruption_test_va = 0;
+#endif /* DEVELOPMENT || DEBUG */
+
+/*
+ * Stash a copy of data from a possibly corrupt page.
+ */
+static uint64_t *
+vmtc_get_page_data(
+	vm_map_offset_t code_addr,
+	vm_page_t       page)
+{
+	uint64_t        *buffer = NULL;
+	addr64_t        buffer_paddr;
+	addr64_t        page_paddr;
+	extern void     bcopy_phys(addr64_t from, addr64_t to, vm_size_t bytes);
+	uint_t          size = MIN(vm_map_page_size(current_map()), PAGE_SIZE);
+
+	/*
+	 * Need an aligned buffer to do a physical copy.
+	 */
+	if (kmem_alloc_aligned(kernel_map, (vm_offset_t *)&buffer, size, VM_KERN_MEMORY_DIAG) != KERN_SUCCESS) {
+		return NULL;
+	}
+	buffer_paddr = kvtophys((vm_offset_t)buffer);
+	page_paddr = ptoa(VM_PAGE_GET_PHYS_PAGE(page));
+
+	/* adjust the page start address if we need only 4K of a 16K page */
+	if (size < PAGE_SIZE) {
+		uint_t subpage_start = ((code_addr & (PAGE_SIZE - 1)) & ~(size - 1));
+		page_paddr += subpage_start;
+	}
+
+	bcopy_phys(page_paddr, buffer_paddr, size);
+	return buffer;
+}
+
+/*
+ * Set things up so we can diagnose a potential text page corruption.
+ */
+static uint64_t *
+vmtc_text_page_diagnose_setup(
+	vm_map_offset_t code_addr,
+	vm_page_t       page,
+	CA_EVENT_TYPE(vmtc_telemetry) *event)
+{
+	uint64_t        *buffer = NULL;
+
+	/*
+	 * If another is being diagnosed, skip this one.
+	 */
+	if (!OSCompareAndSwap(0, 1, &vmtc_diagnosing)) {
+		event->vmtc_undiagnosed = true;
+		return NULL;
+	}
+
+	/*
+	 * Get the contents of the corrupt page.
+	 */
+	buffer = vmtc_get_page_data(code_addr, page);
+	if (buffer == NULL) {
+		event->vmtc_copyin_fail = true;
+		if (!OSCompareAndSwap(1, 0, &vmtc_diagnosing)) {
+			panic("Bad compare and swap in setup!");
+		}
+		return NULL;
+	}
+	return buffer;
+}
+
+/*
+ * Diagnose the text page by comparing its contents with
+ * the one we've previously saved.
+ */
+static void
+vmtc_text_page_diagnose(
+	vm_map_offset_t code_addr,
+	uint64_t        *old_code_buffer,
+	CA_EVENT_TYPE(vmtc_telemetry) *event)
+{
+	uint64_t        *new_code_buffer;
+	size_t          size = MIN(vm_map_page_size(current_map()), PAGE_SIZE);
+	uint_t          count = (uint_t)size / sizeof(uint64_t);
+	uint_t          diff_count = 0;
+	bool            bit_flip = false;
+	uint_t          b;
+	uint64_t        *new;
+	uint64_t        *old;
+
+	new_code_buffer = kalloc_data(size, Z_WAITOK);
+	assert(new_code_buffer != NULL);
+	if (copyin((user_addr_t)vm_map_trunc_page(code_addr, size - 1), new_code_buffer, size) != 0) {
+		/* copyin error, so undo things */
+		event->vmtc_copyin_fail = true;
+		goto done;
+	}
+
+	new = new_code_buffer;
+	old = old_code_buffer;
+	for (; count-- > 0; ++new, ++old) {
+		if (*new == *old) {
+			continue;
+		}
+
+		/*
+		 * On first diff, check for a single bit flip
+		 */
+		if (diff_count == 0) {
+			uint64_t x = (*new ^ *old);
+			assert(x != 0);
+			if ((x & (x - 1)) == 0) {
+				bit_flip = true;
+				++diff_count;
+				continue;
+			}
+		}
+
+		/*
+		 * count up the number of different bytes.
+		 */
+		for (b = 0; b < sizeof(uint64_t); ++b) {
+			char *n = (char *)new;
+			char *o = (char *)old;
+			if (n[b] != o[b]) {
+				++diff_count;
+			}
+		}
+	}
+
+	if (diff_count > 1) {
+		bit_flip = false;
+	}
+
+	if (diff_count == 0) {
+		event->vmtc_not_found = true;
+	} else {
+		event->vmtc_num_byte = diff_count;
+	}
+	if (bit_flip) {
+		event->vmtc_one_bit_flip = true;
+	}
+
+done:
+	/*
+	 * Free up the code copy buffers, but save the last
+	 * set on development / debug kernels in case they
+	 * can provide evidence for debugging memory stomps.
+	 */
+#if DEVELOPMENT || DEBUG
+	if (vmtc_last_before_buffer != NULL) {
+		kmem_free(kernel_map, (vm_offset_t)vmtc_last_before_buffer, vmtc_last_buffer_size);
+	}
+	if (vmtc_last_after_buffer != NULL) {
+		kfree_data(vmtc_last_after_buffer, vmtc_last_buffer_size);
+	}
+	vmtc_last_before_buffer = old_code_buffer;
+	vmtc_last_after_buffer = new_code_buffer;
+	vmtc_last_buffer_size = size;
+#else /* DEVELOPMENT || DEBUG */
+	kfree_data(new_code_buffer, size);
+	kmem_free(kernel_map, (vm_offset_t)old_code_buffer, size);
+#endif /* DEVELOPMENT || DEBUG */
+
+	/*
+	 * We're finished, so clear the diagnosing flag.
+	 */
+	if (!OSCompareAndSwap(1, 0, &vmtc_diagnosing)) {
+		panic("Bad compare and swap in diagnose!");
+	}
+}
+
+/*
+ * For the given map, virt address, find the object, offset, and page.
+ * This has to lookup the map entry, verify protections, walk any shadow chains.
+ * If found, returns with the object locked.
+ */
+static kern_return_t
+vmtc_revalidate_lookup(
+	vm_map_t               map,
+	vm_map_offset_t        vaddr,
+	vm_object_t            *ret_object,
+	vm_object_offset_t     *ret_offset,
+	vm_page_t              *ret_page)
+{
+	vm_object_t            object;
+	vm_object_offset_t     offset;
+	vm_page_t              page;
+	kern_return_t          kr = KERN_SUCCESS;
+	uint8_t                object_lock_type = OBJECT_LOCK_EXCLUSIVE;
+	vm_map_version_t       version;
+	boolean_t              wired;
+	struct vm_object_fault_info fault_info = {};
+	vm_map_t               real_map = NULL;
+	vm_prot_t              prot;
+	vm_object_t            shadow;
+
+	/*
+	 * Find the object/offset for the given location/map.
+	 * Note this returns with the object locked.
+	 */
+restart:
+	vm_map_lock_read(map);
+	object = VM_OBJECT_NULL;        /* in case we come around the restart path */
+	kr = vm_map_lookup_locked(&map, vaddr, VM_PROT_READ,
+	    object_lock_type, &version, &object, &offset, &prot, &wired,
+	    &fault_info, &real_map, NULL);
+	vm_map_unlock_read(map);
+	if (real_map != NULL && real_map != map) {
+		vm_map_unlock(real_map);
+	}
+
+	/*
+	 * If there's no mapping here, or if we fail because the page
+	 * wasn't mapped executable, we can ignore this.
+	 */
+	if (kr != KERN_SUCCESS ||
+	    object == NULL ||
+	    !(prot & VM_PROT_EXECUTE)) {
+		kr = KERN_FAILURE;
+		goto done;
+	}
+
+	/*
+	 * Chase down any shadow chains to find the actual page.
+	 */
+	for (;;) {
+		/*
+		 * See if the page is on the current object.
+		 */
+		page = vm_page_lookup(object, vm_object_trunc_page(offset));
+		if (page != NULL) {
+			/* restart the lookup */
+			if (page->vmp_restart) {
+				vm_object_unlock(object);
+				goto restart;
+			}
+
+			/*
+			 * If this page is busy, we need to wait for it.
+			 */
+			if (page->vmp_busy) {
+				PAGE_SLEEP(object, page, TRUE);
+				vm_object_unlock(object);
+				goto restart;
+			}
+			break;
+		}
+
+		/*
+		 * If the object doesn't have the page and
+		 * has no shadow, then we can quit.
+		 */
+		shadow = object->shadow;
+		if (shadow == NULL) {
+			kr = KERN_FAILURE;
+			goto done;
+		}
+
+		/*
+		 * Move to the next object
+		 */
+		offset += object->vo_shadow_offset;
+		vm_object_lock(shadow);
+		vm_object_unlock(object);
+		object = shadow;
+		shadow = VM_OBJECT_NULL;
+	}
+	*ret_object = object;
+	*ret_offset = vm_object_trunc_page(offset);
+	*ret_page = page;
+
+done:
+	if (kr != KERN_SUCCESS && object != NULL) {
+		vm_object_unlock(object);
+	}
+	return kr;
+}
+
+/*
+ * Check if a page is wired, needs extra locking.
+ */
+static bool
+is_page_wired(vm_page_t page)
+{
+	bool result;
+	vm_page_lock_queues();
+	result = VM_PAGE_WIRED(page);
+	vm_page_unlock_queues();
+	return result;
+}
+
+/*
+ * A fatal process error has occurred in the given task.
+ * Recheck the code signing of the text page at the given
+ * address to check for a text page corruption.
+ *
+ * Returns KERN_FAILURE if a page was found to be corrupt
+ * by failing to match its code signature. KERN_SUCCESS
+ * means the page is either valid or we don't have the
+ * information to say it's corrupt.
+ */
+kern_return_t
+revalidate_text_page(task_t task, vm_map_offset_t code_addr)
+{
+	kern_return_t          kr;
+	vm_map_t               map;
+	vm_object_t            object = NULL;
+	vm_object_offset_t     offset;
+	vm_page_t              page = NULL;
+	struct vnode           *vnode;
+	uint64_t               *diagnose_buffer = NULL;
+	CA_EVENT_TYPE(vmtc_telemetry) * event = NULL;
+	ca_event_t ca_event = NULL;
+
+	map = task->map;
+	if (task->map == NULL) {
+		return KERN_SUCCESS;
+	}
+
+	kr = vmtc_revalidate_lookup(map, code_addr, &object, &offset, &page);
+	if (kr != KERN_SUCCESS) {
+		goto done;
+	}
+
+	/*
+	 * The object needs to have a pager.
+	 */
+	if (object->pager == NULL) {
+		goto done;
+	}
+
+	/*
+	 * Needs to be a vnode backed page to have a signature.
+	 */
+	vnode = vnode_pager_lookup_vnode(object->pager);
+	if (vnode == NULL) {
+		goto done;
+	}
+
+	/*
+	 * Object checks to see if we should proceed.
+	 */
+	if (!object->code_signed ||     /* no code signature to check */
+	    object->internal ||         /* internal objects aren't signed */
+	    object->terminating ||      /* the object and its pages are already going away */
+	    !object->pager_ready) {     /* this should happen, but check shouldn't hurt */
+		goto done;
+	}
+
+	/*
+	 * Check the code signature of the page in question.
+	 */
+	vm_page_map_and_validate_cs(object, page);
+
+	/*
+	 * At this point:
+	 * vmp_cs_validated |= validated (set if a code signature exists)
+	 * vmp_cs_tainted |= tainted (set if code signature violation)
+	 * vmp_cs_nx |= nx;  ??
+	 *
+	 * if vmp_pmapped then have to pmap_disconnect..
+	 * other flags to check on object or page?
+	 */
+	if (page->vmp_cs_tainted != VMP_CS_ALL_FALSE) {
+#if DEBUG || DEVELOPMENT
+		/*
+		 * On development builds, a boot-arg can be used to cause
+		 * a panic, instead of a quiet repair.
+		 */
+		if (vmtc_panic_instead) {
+			panic("Text page corruption detected: vm_page_t 0x%llx", (long long)(uintptr_t)page);
+		}
+#endif /* DEBUG || DEVELOPMENT */
+
+		/*
+		 * We're going to invalidate this page. Grab a copy of it for comparison.
+		 */
+		ca_event = CA_EVENT_ALLOCATE(vmtc_telemetry);
+		event = ca_event->data;
+		diagnose_buffer = vmtc_text_page_diagnose_setup(code_addr, page, event);
+
+		/*
+		 * Invalidate, i.e. toss, the corrupted page.
+		 */
+		if (!page->vmp_cleaning &&
+		    !page->vmp_laundry &&
+		    !page->vmp_fictitious &&
+		    !page->vmp_precious &&
+		    !page->vmp_absent &&
+		    !page->vmp_error &&
+		    !page->vmp_dirty &&
+		    !is_page_wired(page)) {
+			if (page->vmp_pmapped) {
+				int refmod = pmap_disconnect(VM_PAGE_GET_PHYS_PAGE(page));
+				if (refmod & VM_MEM_MODIFIED) {
+					SET_PAGE_DIRTY(page, FALSE);
+				}
+				if (refmod & VM_MEM_REFERENCED) {
+					page->vmp_reference = TRUE;
+				}
+			}
+			/* If the page seems intentionally modified, don't trash it. */
+			if (!page->vmp_dirty) {
+				VM_PAGE_FREE(page);
+			} else {
+				event->vmtc_not_eligible = true;
+			}
+		} else {
+			event->vmtc_not_eligible = true;
+		}
+		vm_object_unlock(object);
+		object = VM_OBJECT_NULL;
+
+		/*
+		 * Now try to diagnose the type of failure by faulting
+		 * in a new copy and diff'ing it with what we saved.
+		 */
+		if (diagnose_buffer != NULL) {
+			vmtc_text_page_diagnose(code_addr, diagnose_buffer, event);
+		}
+#if DEBUG || DEVELOPMENT
+		if (corruption_test_va != 0) {
+			corruption_test_va = 0;
+			event->vmtc_testing = true;
+		}
+#endif /* DEBUG || DEVELOPMENT */
+		kernel_triage_record(thread_tid(current_thread()),
+		    KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_VM, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_VM_TEXT_CORRUPTION),
+		    0 /* arg */);
+		CA_EVENT_SEND(ca_event);
+		printf("Text page corruption detected for pid %d\n", proc_selfpid());
+		++vmtc_total;
+		return KERN_FAILURE;
+	}
+done:
+	if (object != NULL) {
+		vm_object_unlock(object);
+	}
+	return KERN_SUCCESS;
+}
+
+#if DEBUG || DEVELOPMENT
+/*
+ * For implementing unit tests - ask the pmap to corrupt a text page.
+ * We have to find the page, to get the physical address, then invoke
+ * the pmap.
+ */
+extern kern_return_t vm_corrupt_text_addr(uintptr_t);
+
+kern_return_t
+vm_corrupt_text_addr(uintptr_t va)
+{
+	task_t                 task = current_task();
+	vm_map_t               map;
+	kern_return_t          kr = KERN_SUCCESS;
+	vm_object_t            object = VM_OBJECT_NULL;
+	vm_object_offset_t     offset;
+	vm_page_t              page = NULL;
+	pmap_paddr_t           pa;
+
+	map = task->map;
+	if (task->map == NULL) {
+		printf("corrupt_text_addr: no map\n");
+		return KERN_FAILURE;
+	}
+
+	kr = vmtc_revalidate_lookup(map, (vm_map_offset_t)va, &object, &offset, &page);
+	if (kr != KERN_SUCCESS) {
+		printf("corrupt_text_addr: page lookup failed\n");
+		return kr;
+	}
+	/* get the physical address to use */
+	pa = ptoa(VM_PAGE_GET_PHYS_PAGE(page)) + (va - vm_object_trunc_page(va));
+
+	/*
+	 * Check we have something we can work with.
+	 * Due to racing with pageout as we enter the sysctl,
+	 * it's theoretically possible to have the page disappear, just
+	 * before the lookup.
+	 *
+	 * That's highly likely to happen often. I've filed a radar 72857482
+	 * to bubble up the error here to the sysctl result and have the
+	 * test not FAIL in that case.
+	 */
+	if (page->vmp_busy) {
+		printf("corrupt_text_addr: vmp_busy\n");
+		kr = KERN_FAILURE;
+	}
+	if (page->vmp_cleaning) {
+		printf("corrupt_text_addr: vmp_cleaning\n");
+		kr = KERN_FAILURE;
+	}
+	if (page->vmp_laundry) {
+		printf("corrupt_text_addr: vmp_cleaning\n");
+		kr = KERN_FAILURE;
+	}
+	if (page->vmp_fictitious) {
+		printf("corrupt_text_addr: vmp_fictitious\n");
+		kr = KERN_FAILURE;
+	}
+	if (page->vmp_precious) {
+		printf("corrupt_text_addr: vmp_precious\n");
+		kr = KERN_FAILURE;
+	}
+	if (page->vmp_absent) {
+		printf("corrupt_text_addr: vmp_absent\n");
+		kr = KERN_FAILURE;
+	}
+	if (page->vmp_error) {
+		printf("corrupt_text_addr: vmp_error\n");
+		kr = KERN_FAILURE;
+	}
+	if (page->vmp_dirty) {
+		printf("corrupt_text_addr: vmp_dirty\n");
+		kr = KERN_FAILURE;
+	}
+	if (is_page_wired(page)) {
+		printf("corrupt_text_addr: wired\n");
+		kr = KERN_FAILURE;
+	}
+	if (!page->vmp_pmapped) {
+		printf("corrupt_text_addr: !vmp_pmapped\n");
+		kr = KERN_FAILURE;
+	}
+
+	if (kr == KERN_SUCCESS) {
+		printf("corrupt_text_addr: using physaddr 0x%llx\n", (long long)pa);
+		kr = pmap_test_text_corruption(pa);
+		if (kr != KERN_SUCCESS) {
+			printf("corrupt_text_addr: pmap error %d\n", kr);
+		} else {
+			corruption_test_va = va;
+		}
+	} else {
+		printf("corrupt_text_addr: object %p\n", object);
+		printf("corrupt_text_addr: offset 0x%llx\n", (uint64_t)offset);
+		printf("corrupt_text_addr: va 0x%llx\n", (uint64_t)va);
+		printf("corrupt_text_addr: vm_object_trunc_page(va) 0x%llx\n", (uint64_t)vm_object_trunc_page(va));
+		printf("corrupt_text_addr: vm_page_t %p\n", page);
+		printf("corrupt_text_addr: ptoa(PHYS_PAGE) 0x%llx\n", (uint64_t)ptoa(VM_PAGE_GET_PHYS_PAGE(page)));
+		printf("corrupt_text_addr: using physaddr 0x%llx\n", (uint64_t)pa);
+	}
+
+	if (object != VM_OBJECT_NULL) {
+		vm_object_unlock(object);
+	}
+	return kr;
+}
+#endif /* DEBUG || DEVELOPMENT */

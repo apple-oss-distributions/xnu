@@ -63,7 +63,6 @@
 #include <mach/thread_status.h>
 #include <mach/vm_param.h>
 
-#include <kern/counters.h>
 #include <kern/mach_param.h>
 #include <kern/processor.h>
 #include <kern/cpu_data.h>
@@ -95,6 +94,7 @@
 #include <i386/thread.h>
 #include <i386/seg.h>
 #include <i386/machine_routines.h>
+#include <i386/lbr.h>
 
 #if HYPERVISOR
 #include <kern/hv_support.h>
@@ -207,23 +207,43 @@ i386_lbr_disable(void)
 void __attribute__((no_sanitize("address")))
 i386_lbr_enable(void)
 {
-	if (last_branch_support_enabled) {
+	/* last_branch_kmode_only_enabled controls LBR data collection for core files and paniclogs */
+	switch (last_branch_enabled_modes) {
+	case LBR_ENABLED_USERMODE:
+	case LBR_ENABLED_KERNELMODE:
 		/* Enable LBRs */
 		wrmsr64(MSR_IA32_DEBUGCTLMSR, rdmsr64(MSR_IA32_DEBUGCTLMSR) | DEBUGCTL_LBR_ENA);
+		break;
+	case LBR_ENABLED_NONE:
+	case LBR_ENABLED_ALLMODES:
+	default:
+		break;
 	}
 }
 
 void __attribute__((no_sanitize("address")))
 i386_lbr_init(i386_cpu_info_t *info_p, bool is_master)
 {
-	if (!last_branch_support_enabled) {
+	if (last_branch_enabled_modes == LBR_ENABLED_NONE) {
 		i386_lbr_disable();
 		return;
+	}
+	if (last_branch_enabled_modes == LBR_ENABLED_ALLMODES) {
+		panic("Collecting LBR data from both user and kernel mode is not supported.");
 	}
 
 	if (is_master) {
 		/* All NHM+ CPUs support PERF_CAPABILITIES, so no need to check cpuid for its presence */
 		cpu_lbr_type = PERFCAP_LBR_TYPE(rdmsr64(MSR_IA32_PERF_CAPABILITIES));
+
+		/* Sanity-check the LBR type -- some VMMs do not properly support it */
+		if (cpu_lbr_type < PERFCAP_LBR_TYPE_MISPRED || cpu_lbr_type > PERFCAP_LBR_TYPE_EIP_WITH_LBRINFO) {
+			kprintf("CPU-reported LBR type is invalid or is not supported (%d)."
+			    "  Disabling LBR support.\n", cpu_lbr_type);
+			last_branch_enabled_modes = LBR_ENABLED_NONE;
+			i386_lbr_disable();
+			return;
+		}
 
 		switch (info_p->cpuid_cpufamily) {
 		case CPUFAMILY_INTEL_NEHALEM:
@@ -253,22 +273,76 @@ i386_lbr_init(i386_cpu_info_t *info_p, bool is_master)
 		default:
 			panic("Unknown CPU family");
 		}
+		if (last_branch_enabled_modes == LBR_ENABLED_KERNELMODE) {
+			/* This depends on cpu_lbr_setp being setup first */
+			lbr_for_kmode_init(cpu_lbr_setp->lbr_count);
+		}
 	}
 
-	/* Configure LBR_SELECT for CPL > 0 records only */
-	wrmsr64(MSR_IA32_LBR_SELECT, LBR_SELECT_CPL_EQ_0);
+	/* Configure LBR_SELECT for CPL > 0 records only or CPL = 0 for use in panic logs and core files */
+	switch (last_branch_enabled_modes) {
+	case LBR_ENABLED_USERMODE:
+		wrmsr64(MSR_IA32_LBR_SELECT, LBR_SELECT_CPL_EQ_0);
+		break;
+	case LBR_ENABLED_KERNELMODE:
+#if DEBUG || DEVELOPMENT
+		wrmsr64(MSR_IA32_LBR_SELECT, 0);
+#else
+		wrmsr64(MSR_IA32_LBR_SELECT, LBR_SELECT_CPL_NEQ_0);
+#endif
+		break;
+	case LBR_ENABLED_NONE:
+	case LBR_ENABLED_ALLMODES:
+	default:
+		break;
+	}
 
 	/* Enable LBRs */
 	wrmsr64(MSR_IA32_DEBUGCTLMSR, rdmsr64(MSR_IA32_DEBUGCTLMSR) | DEBUGCTL_LBR_ENA);
 }
 
-int
-i386_lbr_native_state_to_mach_thread_state(pcb_t pcb, last_branch_state_t *machlbrp)
+static uint64_t
+lbr_mode_based_filter(uint64_t record, __unused boolean_t from_userspace)
+{
+	uint64_t filtered_record;
+#define LBR_SENTINEL_KERNEL_MODE (0x66726d6b65726e6cULL /* "frmkernl" */ )
+#define LBR_SENTINEL_USER_MODE (0x757365726C616E64ULL /* "userland" */ )
+	switch (last_branch_enabled_modes) {
+	case LBR_ENABLED_USERMODE:
+		filtered_record = (record > VM_MAX_USER_PAGE_ADDRESS) ? LBR_SENTINEL_KERNEL_MODE : record;
+		break;
+	case LBR_ENABLED_KERNELMODE:
+		/* For internal builds don't filter out userspace addresses from panic logs and core files. */
+#if DEBUG || DEVELOPMENT
+		filtered_record = record;
+#else
+		/* If coming from user space use the correct filter in release builds
+		 * When LBRs are enabled for kernel mode and user space requests LBR data: remove kernel addresses
+		 * "								   " and kernel mode requests LBR data: remove usermode addresses
+		 */
+		if (from_userspace) {
+			filtered_record = (record > VM_MAX_USER_PAGE_ADDRESS) ? LBR_SENTINEL_KERNEL_MODE : record;
+		} else {
+			filtered_record = (VM_KERNEL_ADDRESS(record)) ? record : LBR_SENTINEL_USER_MODE;
+		}
+#endif
+		break;
+	case LBR_ENABLED_ALLMODES:
+	case LBR_ENABLED_NONE:
+	default:
+		/* Set LBR to 0 for unsupported use cases */
+		filtered_record = 0x0;
+		break;
+	}
+	return filtered_record;
+}
+
+static int
+i386_lbr_native_state_to_mach_thread_state(pcb_t pcb, last_branch_state_t *machlbrp, boolean_t from_userspace)
 {
 	int last_entry;
 	int i, j, lbr_tos;
 	uint64_t from_rip, to_rip;
-#define LBR_SENTINEL_KERNEL_MODE (0x66726d6b65726e6cULL /* "frmkernl" */ )
 
 	machlbrp->lbr_count = cpu_lbr_setp->lbr_count;
 	lbr_tos = pcb->lbrs.lbr_tos & (X86_MAX_LBRS - 1);
@@ -281,9 +355,9 @@ i386_lbr_native_state_to_mach_thread_state(pcb_t pcb, last_branch_state_t *machl
 		machlbrp->lbr_supported_cycle_count = 0;
 		for (j = 0, i = lbr_tos;; (i = (i == 0) ? (cpu_lbr_setp->lbr_count - 1) : (i - 1)), j++) {
 			to_rip = pcb->lbrs.lbrs[i].to_rip;
-			machlbrp->lbrs[j].to_ip = (to_rip > VM_MAX_USER_PAGE_ADDRESS) ? LBR_SENTINEL_KERNEL_MODE : to_rip;
+			machlbrp->lbrs[j].to_ip = lbr_mode_based_filter(to_rip, from_userspace);
 			from_rip = LBR_TYPE_MISPRED_FROMRIP(pcb->lbrs.lbrs[i].from_rip);
-			machlbrp->lbrs[j].from_ip = (from_rip > VM_MAX_USER_PAGE_ADDRESS) ? LBR_SENTINEL_KERNEL_MODE : from_rip;
+			machlbrp->lbrs[j].from_ip = lbr_mode_based_filter(from_rip, from_userspace);
 			machlbrp->lbrs[j].mispredict = LBR_TYPE_MISPRED_MISPREDICT(pcb->lbrs.lbrs[i].from_rip);
 			machlbrp->lbrs[j].tsx_abort = machlbrp->lbrs[j].in_tsx = 0;     /* Not Supported */
 			if (i == last_entry) {
@@ -298,10 +372,10 @@ i386_lbr_native_state_to_mach_thread_state(pcb_t pcb, last_branch_state_t *machl
 		machlbrp->lbr_supported_cycle_count = 0;
 		for (j = 0, i = lbr_tos;; (i = (i == 0) ? (cpu_lbr_setp->lbr_count - 1) : (i - 1)), j++) {
 			to_rip = pcb->lbrs.lbrs[i].to_rip;
-			machlbrp->lbrs[j].to_ip = (to_rip > VM_MAX_USER_PAGE_ADDRESS) ? LBR_SENTINEL_KERNEL_MODE : to_rip;
+			machlbrp->lbrs[j].to_ip = lbr_mode_based_filter(to_rip, from_userspace);
 
 			from_rip = LBR_TYPE_TSXINFO_FROMRIP(pcb->lbrs.lbrs[i].from_rip);
-			machlbrp->lbrs[j].from_ip = (from_rip > VM_MAX_USER_PAGE_ADDRESS) ? LBR_SENTINEL_KERNEL_MODE : from_rip;
+			machlbrp->lbrs[j].from_ip = lbr_mode_based_filter(from_rip, from_userspace);
 			machlbrp->lbrs[j].mispredict = LBR_TYPE_TSXINFO_MISPREDICT(pcb->lbrs.lbrs[i].from_rip);
 			if (cpuid_tsx_supported) {
 				machlbrp->lbrs[j].tsx_abort = LBR_TYPE_TSXINFO_TSX_ABORT(pcb->lbrs.lbrs[i].from_rip);
@@ -322,9 +396,9 @@ i386_lbr_native_state_to_mach_thread_state(pcb_t pcb, last_branch_state_t *machl
 		machlbrp->lbr_supported_cycle_count = 1;
 		for (j = 0, i = lbr_tos;; (i = (i == 0) ? (cpu_lbr_setp->lbr_count - 1) : (i - 1)), j++) {
 			from_rip = pcb->lbrs.lbrs[i].from_rip;
-			machlbrp->lbrs[j].from_ip = (from_rip > VM_MAX_USER_PAGE_ADDRESS) ? LBR_SENTINEL_KERNEL_MODE : from_rip;
+			machlbrp->lbrs[j].from_ip = lbr_mode_based_filter(from_rip, from_userspace);
 			to_rip = pcb->lbrs.lbrs[i].to_rip;
-			machlbrp->lbrs[j].to_ip = (to_rip > VM_MAX_USER_PAGE_ADDRESS) ? LBR_SENTINEL_KERNEL_MODE : to_rip;
+			machlbrp->lbrs[j].to_ip = lbr_mode_based_filter(to_rip, from_userspace);
 			machlbrp->lbrs[j].mispredict = LBR_TYPE_EIP_WITH_LBRINFO_MISPREDICT(pcb->lbrs.lbrs[i].info);
 			machlbrp->lbrs[j].tsx_abort = LBR_TYPE_EIP_WITH_LBRINFO_TSX_ABORT(pcb->lbrs.lbrs[i].info);
 			machlbrp->lbrs[j].in_tsx = LBR_TYPE_EIP_WITH_LBRINFO_IN_TSX(pcb->lbrs.lbrs[i].info);
@@ -337,6 +411,7 @@ i386_lbr_native_state_to_mach_thread_state(pcb_t pcb, last_branch_state_t *machl
 
 	default:
 #if DEBUG || DEVELOPMENT
+		/* This should be impossible, based on the filtering we do in i386_lbr_init() */
 		panic("Unknown LBR format: %d!", cpu_lbr_type);
 		/*NOTREACHED*/
 #else
@@ -345,6 +420,21 @@ i386_lbr_native_state_to_mach_thread_state(pcb_t pcb, last_branch_state_t *machl
 	}
 
 	return 0;
+}
+
+int
+i386_filtered_lbr_state_to_mach_thread_state(thread_t thr_act, last_branch_state_t *machlbrp, boolean_t from_userspace)
+{
+	boolean_t istate;
+
+	istate = ml_set_interrupts_enabled(FALSE);
+	/* If the current thread is asking for its own LBR data, synch the LBRs first */
+	if (thr_act == current_thread()) {
+		i386_lbr_synch(thr_act);
+	}
+	ml_set_interrupts_enabled(istate);
+
+	return i386_lbr_native_state_to_mach_thread_state(THREAD_TO_PCB(thr_act), machlbrp, from_userspace);
 }
 
 void
@@ -545,12 +635,12 @@ act_machine_switch_pcb(thread_t old, thread_t new)
 
 	cdp->cpu_curthread_do_segchk = new->machine.mthr_do_segchk;
 
-	if (last_branch_support_enabled) {
+	if (last_branch_enabled_modes == LBR_ENABLED_USERMODE) {
 		i386_switch_lbrs(old, new);
 	}
 
 	/*
-	 * Set the thread`s LDT or LDT entry.
+	 * Set the thread's LDT or LDT entry.
 	 */
 	if (__probable(new->task == TASK_NULL || new->task->i386_ldt == 0)) {
 		/*
@@ -662,14 +752,20 @@ thread_set_wq_state64(thread_t thread, thread_state_t tstate)
 kern_return_t
 machine_thread_create(
 	thread_t                thread,
-	task_t                  task)
+	task_t                  task,
+	bool                    first_thread __unused)
 {
 	pcb_t                   pcb = THREAD_TO_PCB(thread);
 
 	if ((task->t_flags & TF_TECS) || __improbable(force_thread_policy_tecs)) {
-		thread->machine.mthr_do_segchk = 1;
+		thread->machine.mthr_do_segchk = MTHR_SEGCHK;
 	} else {
 		thread->machine.mthr_do_segchk = 0;
+	}
+
+	if (task != kernel_task &&
+	    __improbable((cpuid_wa_required(CPU_INTEL_RSBST) & CWA_ON) != 0)) {
+		thread->machine.mthr_do_segchk |= MTHR_RSBST;
 	}
 
 	/*
@@ -677,10 +773,7 @@ machine_thread_create(
 	 */
 	if (pcb->iss == NULL) {
 		assert((get_preemption_level() == 0));
-		pcb->iss = (x86_saved_state_t *) zalloc(iss_zone);
-		if (pcb->iss == NULL) {
-			panic("iss_zone");
-		}
+		pcb->iss = zalloc_flags(iss_zone, Z_WAITOK | Z_NOFAIL);
 	}
 
 	/*
@@ -734,6 +827,8 @@ machine_thread_create(
 		pcb->insn_state->insn_stream_valid_bytes = -1;
 	}
 
+	pcb->insn_copy_optout = (task->t_flags & TF_INSN_COPY_OPTOUT) ? true : false;
+
 	return KERN_SUCCESS;
 }
 
@@ -766,10 +861,11 @@ machine_thread_destroy(
 	}
 
 	if (pcb->insn_state != 0) {
-		kfree(pcb->insn_state, sizeof(x86_instruction_state_t));
+		kfree_data(pcb->insn_state, sizeof(x86_instruction_state_t));
 		pcb->insn_state = 0;
 	}
 	pcb->insn_state_copyin_failure_errorcode = 0;
+	pcb->insn_copy_optout = false;
 }
 
 kern_return_t
@@ -841,6 +937,12 @@ machine_tecs(thread_t thr)
 	if (tecs_mode_supported) {
 		thr->machine.mthr_do_segchk = 1;
 	}
+}
+
+void
+machine_thread_set_insn_copy_optout(thread_t thr)
+{
+	thr->machine.insn_copy_optout = true;
 }
 
 int

@@ -63,6 +63,16 @@ struct netagent_client_message {
 	uuid_t                  client_id;
 };
 
+struct netagent_client_error_message {
+	uuid_t                  client_id;
+	int32_t                 error_code;
+};
+
+struct netagent_client_group_message {
+	uuid_t                  client_id;
+	u_int8_t                group_members[0];
+};
+
 struct netagent_assign_nexus_message {
 	uuid_t                  assign_client_id;
 	u_int8_t                assign_necp_results[0];
@@ -90,6 +100,17 @@ struct netagent_assign_nexus_message {
 #define NETAGENT_OPTION_TYPE_ASSIGN_NEXUS               NETAGENT_MESSAGE_TYPE_ASSIGN_NEXUS      // Pass struct netagent_assign_nexus_message
 #define NETAGENT_OPTION_TYPE_USE_COUNT                  16                                                                      // Pass use count to set, get current use count
 #define NETAGENT_MESSAGE_TYPE_ABORT_NEXUS               17      // Kernel private
+#define NETAGENT_MESSAGE_TYPE_ADD_GROUP_MEMBERS         18      // Kernel initiated, struct netagent_client_group_message
+#define NETAGENT_MESSAGE_TYPE_REMOVE_GROUP_MEMBERS      19      // Kernel initiated, struct netagent_client_group_message
+#define NETAGENT_MESSAGE_TYPE_ASSIGN_GROUP_MEMBERS      20      // Pass struct netagent_assign_nexus_message
+#define NETAGENT_OPTION_TYPE_ADD_TOKEN                 21      // Set new token bytes
+#define NETAGENT_OPTION_TYPE_FLUSH_TOKENS              22      // Flush all tokens
+#define NETAGENT_OPTION_TYPE_TOKEN_COUNT               23      // Get remaining token count (uint32_t)
+#define NETAGENT_OPTION_TYPE_TOKEN_LOW_WATER           24      // Set/get token low water mark (uint32_t)
+#define NETAGENT_MESSAGE_TYPE_TOKENS_NEEDED            25      // Kernel intiated, no content
+#define NETAGENT_MESSAGE_TYPE_CLIENT_ERROR             26      // Kernel intiated, struct netagent_client_error_message
+#define NETAGENT_OPTION_TYPE_RESET_CLIENT_ERROR        27      // Call to reset client error and counts
+
 
 #define NETAGENT_MESSAGE_FLAGS_RESPONSE                 0x01    // Used for acks, errors, and query responses
 
@@ -106,7 +127,10 @@ struct netagent_assign_nexus_message {
 #define NETAGENT_TYPESIZE               32
 #define NETAGENT_DESCSIZE               128
 
-#define NETAGENT_MAX_DATA_SIZE  4096
+#define NETAGENT_MAX_DATA_SIZE                  4096
+
+#define NETAGENT_MAX_TOKEN_COUNT                256
+
 
 #define NETAGENT_FLAG_REGISTERED                0x0001 // Agent is registered
 #define NETAGENT_FLAG_ACTIVE                    0x0002 // Agent is active
@@ -124,9 +148,10 @@ struct netagent_assign_nexus_message {
 #define NETAGENT_FLAG_CUSTOM_IP_NEXUS           0x4000 // Agent provides a custom IP nexus
 #define NETAGENT_FLAG_INTERPOSE_NEXUS           0x8000 // Agent provides an interpose nexus
 #define NETAGENT_FLAG_SUPPORTS_RESOLVE          0x10000 // Assertions will cause agent to fill in resolved endpoints
+#define NETAGENT_FLAG_SUPPORTS_GROUPS           0x20000 // Group actions can be performed
 
 #define NETAGENT_NEXUS_MAX_REQUEST_TYPES                        16
-#define NETAGENT_NEXUS_MAX_RESOLUTION_TYPE_PAIRS        16
+#define NETAGENT_NEXUS_MAX_RESOLUTION_TYPE_PAIRS        15
 
 #define NETAGENT_NEXUS_FRAME_TYPE_UNKNOWN               0
 #define NETAGENT_NEXUS_FRAME_TYPE_LINK                  1
@@ -148,8 +173,12 @@ struct netagent_nexus {
 	u_int32_t       endpoint_assignment_type;
 	u_int32_t       endpoint_request_types[NETAGENT_NEXUS_MAX_REQUEST_TYPES];
 	u_int32_t       endpoint_resolution_type_pairs[NETAGENT_NEXUS_MAX_RESOLUTION_TYPE_PAIRS * 2];
+	u_int32_t       nexus_max_buf_size;
+	u_int32_t       reserved;
 	u_int32_t       nexus_flags;
 };
+
+#define NETAGENT_NEXUS_HAS_MAX_BUF_SIZE    1 // struct netagent_nexus includes nexus_max_buf_size
 
 #define NETAGENT_TRIGGER_FLAG_USER              0x0001  // Userspace triggered agent
 #define NETAGENT_TRIGGER_FLAG_KERNEL            0x0002  // Kernel triggered agent
@@ -242,6 +271,8 @@ extern int netagent_client_message_with_params(uuid_t agent_uuid,
     size_t *assigned_results_length);
 
 extern int netagent_copyout(uuid_t uuid, user_addr_t user_addr, u_int32_t user_size);
+
+extern int netagent_acquire_token(uuid_t uuid, user_addr_t user_addr, u_int32_t user_size, int *retval);
 
 
 // Kernel agent management

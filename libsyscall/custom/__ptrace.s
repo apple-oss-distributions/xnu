@@ -49,6 +49,7 @@ LEAF(___ptrace, 0)
 	movl	%eax,(%r11)
 	UNIX_SYSCALL_NONAME(ptrace, 4, cerror)
 	ret
+	UNWIND_EPILOGUE
 
 #elif defined(__arm__)
 

@@ -109,18 +109,21 @@
 #endif
 
 struct ipc_entry {
-	struct ipc_object  *XNU_PTRAUTH_SIGNED_PTR("ipc_entry.ie_object") ie_object;
-	ipc_entry_bits_t    ie_bits;
+	union {
+		struct ipc_object *XNU_PTRAUTH_SIGNED_PTR("ipc_entry.ie_object") ie_object;
+		struct ipc_object *XNU_PTRAUTH_SIGNED_PTR("ipc_entry.ie_object") volatile ie_volatile_object;
+	};
+	union {
+		ipc_entry_bits_t  ie_bits;
+		ipc_entry_num_t   ie_size;
+	};
 	uint32_t            ie_dist  : IPC_ENTRY_DIST_BITS;
 	mach_port_index_t   ie_index : IPC_ENTRY_INDEX_BITS;
 	union {
-		mach_port_index_t next;         /* next in freelist, or...  */
-		ipc_table_index_t request;      /* dead name request notify */
-	} index;
+		mach_port_index_t ie_next;         /* next in freelist, or...  */
+		ipc_table_index_t ie_request;      /* dead name request notify */
+	};
 };
-
-#define ie_request      index.request
-#define ie_next         index.next
 
 #define IE_REQ_NONE             0               /* no request */
 
@@ -232,18 +235,14 @@ extern kern_return_t ipc_entries_hold(
 /* claim and initialize a held entry in a locked space */
 extern kern_return_t ipc_entry_claim(
 	ipc_space_t             space,
-	mach_port_name_t        *namep,
-	ipc_entry_t             *entryp);
-
-/* Allocate an entry in a space */
-extern kern_return_t ipc_entry_get(
-	ipc_space_t             space,
+	ipc_object_t            object,
 	mach_port_name_t        *namep,
 	ipc_entry_t             *entryp);
 
 /* Allocate an entry in a space, growing the space if necessary */
 extern kern_return_t ipc_entry_alloc(
 	ipc_space_t             space,
+	ipc_object_t            object,
 	mach_port_name_t        *namep,
 	ipc_entry_t             *entryp);
 
@@ -256,6 +255,7 @@ extern kern_return_t ipc_entry_alloc_name(
 /* Deallocate an entry from a space */
 extern void ipc_entry_dealloc(
 	ipc_space_t             space,
+	ipc_object_t            object,
 	mach_port_name_t        name,
 	ipc_entry_t             entry);
 

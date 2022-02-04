@@ -300,7 +300,7 @@ typedef struct _dk_cs_pin {
 /* The following are modifiers to _DKIOCCSPINEXTENT/cp_flags operation */
 #define _DKIOCCSPINTOFASTMEDIA          (0)                     /* Pin extent to the fast (SSD) media             */
 #define _DKIOCCSPINFORHIBERNATION       (1 << 0)        /* Pin of hibernation file, content not preserved */
-#define _DKIOCCSPINDISCARDBLACKLIST     (1 << 1)        /* Hibernation complete/error, stop blacklisting  */
+#define _DKIOCCSPINDISCARDDENYLIST      (1 << 1)        /* Hibernation complete/error, stop denylist-ing  */
 #define _DKIOCCSPINTOSLOWMEDIA          (1 << 2)        /* Pin extent to the slow (HDD) media             */
 #define _DKIOCCSTEMPORARYPIN            (1 << 3)        /* Relocate, but do not pin, to indicated media   */
 #define _DKIOCCSHIBERNATEIMGSIZE        (1 << 4)        /* Anticipate/Max size of the upcoming hibernate  */

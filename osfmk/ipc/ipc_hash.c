@@ -109,7 +109,7 @@ ipc_hash_lookup(
 	mach_port_name_t        *namep,
 	ipc_entry_t             *entryp)
 {
-	return ipc_hash_table_lookup(space->is_table, space->is_table_size, obj, namep, entryp);
+	return ipc_hash_table_lookup(is_active_table(space), obj, namep, entryp);
 }
 
 /*
@@ -132,7 +132,7 @@ ipc_hash_insert(
 
 	index = MACH_PORT_INDEX(name);
 	space->is_table_hashed++;
-	ipc_hash_table_insert(space->is_table, space->is_table_size, obj, index, entry);
+	ipc_hash_table_insert(is_active_table(space), obj, index, entry);
 }
 
 /*
@@ -154,7 +154,7 @@ ipc_hash_delete(
 
 	index = MACH_PORT_INDEX(name);
 	space->is_table_hashed--;
-	ipc_hash_table_delete(space->is_table, space->is_table_size, obj, index, entry);
+	ipc_hash_table_delete(is_active_table(space), obj, index, entry);
 }
 
 /*
@@ -201,12 +201,12 @@ ipc_hash_delete(
 boolean_t
 ipc_hash_table_lookup(
 	ipc_entry_t             table,
-	ipc_entry_num_t         size,
 	ipc_object_t            obj,
 	mach_port_name_t        *namep,
 	ipc_entry_t             *entryp)
 {
 	mach_port_index_t hindex, index, hdist;
+	ipc_entry_num_t   size = table->ie_size;
 
 	if (obj == IO_NULL) {
 		return FALSE;
@@ -273,12 +273,12 @@ ipc_hash_table_lookup(
 void
 ipc_hash_table_insert(
 	ipc_entry_t                     table,
-	ipc_entry_num_t                 size,
 	ipc_object_t                    obj,
 	mach_port_index_t               index,
 	__assert_only ipc_entry_t       entry)
 {
 	mach_port_index_t hindex, hdist;
+	ipc_entry_num_t   size = table->ie_size;
 
 	assert(index != 0);
 	assert(obj != IO_NULL);
@@ -330,12 +330,12 @@ ipc_hash_table_insert(
 void
 ipc_hash_table_delete(
 	ipc_entry_t                     table,
-	ipc_entry_num_t                 size,
 	ipc_object_t                    obj,
 	mach_port_index_t               index,
 	__assert_only ipc_entry_t       entry)
 {
 	mach_port_index_t hindex, dindex, dist;
+	ipc_entry_num_t   size = table->ie_size;
 
 	assert(index != MACH_PORT_NULL);
 	assert(obj != IO_NULL);

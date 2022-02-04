@@ -110,8 +110,15 @@
 // Property is an array of strings containing CFBundleIdentifiers of service being opened
 #define kIODriverKitUserClientEntitlementsKey "com.apple.developer.driverkit.userclient-access"
 
+// Allows the entitled process to open a user client connection to any dext that has specific entitlements
+// Property is an array of strings containing entitlements, one of which needs to be present
+// in the dext providing the user client being opened
+#define kIODriverKitRequiredEntitlementsKey "com.apple.private.driverkit.driver-access"
+
 // Entitlement of a dext that allows any task to open one of its IOUserClients
 #define kIODriverKitUserClientEntitlementAllowAnyKey "com.apple.developer.driverkit.allow-any-userclient-access"
+
+#define kIODriverKitUserClientEntitlementAdministratorKey "com.apple.developer.driverkit.administrator"
 
 // Other DriverKit entitlements
 #define kIODriverKitUSBTransportEntitlementKey "com.apple.developer.driverkit.transport.usb"
@@ -159,6 +166,8 @@
 #define kIOUserServerCDHashKey          "IOUserServerCDHash"
 
 #define kIOUserUserClientKey                    "IOUserUserClient"
+
+#define kIOUserServerOneProcessKey      "IOUserServerOneProcess"
 
 
 // IOService notification types
@@ -241,5 +250,27 @@
 
 // keys for OS Version information
 #define kOSBuildVersionKey              "OS Build Version"
+
+//
+#define kIOStateNotificationItemCreateKey                               "com.apple.iokit.statenotification.create"
+#define kIOStateNotificationItemSetKey                                  "com.apple.iokit.statenotification.set"
+#define kIOStateNotificationItemCopyKey                                 "com.apple.iokit.statenotification.copy"
+
+#define kIOStateNotificationNameKey                                             "com.apple.iokit.statenotification.name"
+#define kIOStateNotificationEntitlementSetKey           "com.apple.iokit.statenotification.entitlement-set"
+#define kIOStateNotificationEntitlementGetKey           "com.apple.iokit.statenotification.entitlement-get"
+
+//
+#define kIOSystemStateClamshellKey      "com.apple.iokit.pm.clamshell"
+
+#define kIOSystemStateSleepDescriptionKey                               "com.apple.iokit.pm.sleepdescription"
+#define kIOSystemStateSleepDescriptionReasonKey                 "com.apple.iokit.pm.sleepreason"
+#define kIOSystemStateSleepDescriptionHibernateStateKey      "com.apple.iokit.pm.hibernatestate"
+
+#define kIOSystemStateHaltDescriptionKey                               "com.apple.iokit.pm.haltdescription"
+#define kIOSystemStateHaltDescriptionHaltStateKey      "com.apple.iokit.pm.haltstate"
+
+#define kIOSystemStatePowerSourceDescriptionKey                               "com.apple.iokit.pm.powersourcedescription"
+#define kIOSystemStatePowerSourceDescriptionACAttachedKey      "com.apple.iokit.pm.acattached"
 
 #endif /* ! _IOKIT_IOKITKEYS_H */

@@ -36,6 +36,7 @@ OPTIONS/compat_43			optional compat_43
 OPTIONS/diagnostic			optional diagnostic
 OPTIONS/config_dtrace			optional config_dtrace
 OPTIONS/profiling			optional profiling
+OPTIONS/config_perfmon      optional config_perfmon
 OPTIONS/vndevice			optional vndevice
 OPTIONS/config_audit			optional config_audit
 OPTIONS/config_fse			optional config_fse
@@ -149,6 +150,7 @@ bsd/dev/vn/vn.c				optional vndevice
 bsd/dev/vn/shadow.c			optional vndevice
 
 bsd/dev/monotonic.c optional monotonic
+bsd/dev/dev_perfmon.c optional config_perfmon
 
 bsd/libkern/crc16.c			standard
 bsd/libkern/crc32.c			standard
@@ -167,6 +169,7 @@ bsd/vfs/vfs_conf.c			standard
 bsd/vfs/vfs_conf.c			optional config_nfs4
 bsd/vfs/vfs_fslog.c			standard
 bsd/vfs/vfs_init.c			standard
+bsd/vfs/vfs_io_compression_stats.c	optional config_io_compression_stats
 bsd/vfs/vfs_lookup.c			standard
 bsd/vfs/vfs_quota.c			optional quota
 bsd/vfs/vfs_subr.c			standard
@@ -266,7 +269,6 @@ bsd/net/skmem_sysctl.c		optional skywalk
 bsd/net/restricted_in_port.c		optional networking
 
 bsd/net/classq/classq.c			optional networking
-bsd/net/classq/classq_sfb.c		optional networking
 bsd/net/classq/classq_subr.c		optional networking
 bsd/net/classq/classq_util.c		optional networking
 bsd/net/classq/classq_fq_codel.c	optional networking
@@ -307,6 +309,7 @@ bsd/netinet/tcp_newreno.c		optional inet
 bsd/netinet/tcp_cubic.c			optional inet
 bsd/netinet/cbrtf.c			optional inet
 bsd/netinet/tcp_ledbat.c		optional inet
+bsd/netinet/tcp_rledbat.c		optional inet
 bsd/netinet/tcp_log.c			optional inet
 bsd/netinet/udp_usrreq.c		optional inet
 bsd/netinet/in_gif.c      		optional gif inet
@@ -371,7 +374,7 @@ bsd/netkey/keydb.c      		optional ipsec
 
 bsd/net/multi_layer_pkt_log.c		optional inet inet ipsec ipsec_esp
 
-bsd/crypto/entropy/diag_entropy_sysctl.c standard
+bsd/crypto/entropy/entropy_sysctl.c standard
 
 #bsd/netpm/pm_aTT.c        optional pm
 #bsd/netpm/pm_ams.c        optional pm
@@ -407,6 +410,8 @@ bsd/pthread/pthread_workqueue.c		standard
 
 bsd/kern/bsd_init.c			standard
 ./init_sysent.c				standard
+bsd/kern/kdebug_common.c		standard
+bsd/kern/kdebug_triage.c		standard
 bsd/kern/kdebug.c			standard
 bsd/kern/kern_acct.c			standard
 bsd/kern/kern_aio.c			standard
@@ -417,6 +422,7 @@ bsd/kern/kern_core.c			optional config_coredump
 bsd/kern/kern_credential.c		standard
 bsd/kern/kern_cs.c			standard
 bsd/kern/kern_csr.c			optional config_csr
+bsd/kern/kern_debug.c			standard
 bsd/kern/kern_symfile.c			standard
 bsd/kern/kern_descrip.c			standard
 bsd/kern/kern_guarded.c			standard
@@ -457,6 +463,8 @@ bsd/kern/subr_log.c			standard
 bsd/kern/subr_prf.c			standard
 bsd/kern/subr_sbuf.c			standard
 bsd/kern/subr_xxx.c			standard
+bsd/kern/counter_test.c			optional development
+bsd/kern/counter_test.c			optional debug
 bsd/kern/sys_eventlink.c		standard
 bsd/kern/sys_generic.c			standard
 bsd/kern/sys_pipe.c			standard
@@ -494,7 +502,7 @@ bsd/kern/mach_loader.c			standard
 bsd/kern/posix_sem.c			standard
 bsd/kern/posix_shm.c			standard
 # XXXdbg - I need this in the journaling and block cache code
-bsd/kern/qsort.c				standard
+bsd/kern/qsort.c				standard xnu-library
 bsd/kern/kpi_socket.c			optional sockets
 bsd/kern/kpi_socketfilter.c		optional sockets
 bsd/kern/proc_info.c			standard
@@ -503,6 +511,7 @@ bsd/kern/kern_overrides.c 		standard
 bsd/kern/socket_info.c			optional sockets
 bsd/kern/subr_eventhandler.c		standard
 bsd/kern/sys_reason.c			standard
+bsd/kern/tracker.c			optional sockets
 
 bsd/vm/vnode_pager.c			standard
 bsd/vm/vm_unix.c				standard

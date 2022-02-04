@@ -38,6 +38,10 @@
 #include <sys/socketvar.h>
 #endif /* BSD_KERNEL_PRIVATE */
 
+#ifndef XNU_KERNEL_PRIVATE
+#include <TargetConditionals.h>
+#endif
+
 __BEGIN_DECLS
 
 #ifdef PRIVATE
@@ -72,6 +76,12 @@ typedef uint64_t cfil_sock_id_t;
 #define CFIL_OPT_GET_SOCKET_INFO        2       /* uint32_t */
 
 /*
+ * CFIL_OPT_PRESERVE_CONNECTIONS
+ * To set or get the preserve-connections setting for the filter
+ */
+#define CFIL_OPT_PRESERVE_CONNECTIONS   3       /* uint32_t */
+
+/*
  * struct cfil_opt_sock_info
  *
  * Contains information about a socket that is being filtered.
@@ -92,11 +102,20 @@ struct cfil_opt_sock_info {
 /*
  * How many filter may be active simultaneously
  */
-#if !TARGET_OS_OSX && !defined(XNU_TARGET_OS_OSX)
+
+#ifdef XNU_KERNEL_PRIVATE
+#if !XNU_TARGET_OS_OSX
 #define CFIL_MAX_FILTER_COUNT   2
 #else
 #define CFIL_MAX_FILTER_COUNT   8
-#endif
+#endif /* !XNU_TARGET_OS_OSX */
+#else
+#if !TARGET_OS_OSX
+#define CFIL_MAX_FILTER_COUNT   2
+#else
+#define CFIL_MAX_FILTER_COUNT   8
+#endif /* !TARGET_OS_OSX */
+#endif /* XNU_KERNEL_PRIVATE */
 
 
 /*

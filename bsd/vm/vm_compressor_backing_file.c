@@ -227,7 +227,7 @@ vm_swapfile_io(vnode_t vp, uint64_t offset, uint64_t start, int npages, int flag
 	    VM_KERN_MEMORY_OSFMK);
 
 	if (kr != KERN_SUCCESS || (upl_size != io_size)) {
-		panic("vm_map_create_upl failed with %d\n", kr);
+		panic("vm_map_create_upl failed with %d", kr);
 	}
 
 	if (flags & SWAP_READ) {
@@ -313,8 +313,7 @@ vnode_trim_list(vnode_t vp, struct trim_list *tl, boolean_t route_only)
 	devvp = vp->v_mount->mnt_devvp;
 	blocksize = vp->v_mount->mnt_devblocksize;
 
-	extents = kheap_alloc(KHEAP_TEMP,
-	    sizeof(dk_extent_t) * MAX_BATCH_TO_TRIM, Z_WAITOK);
+	extents = kalloc_data(sizeof(dk_extent_t) * MAX_BATCH_TO_TRIM, Z_WAITOK);
 
 	if (vp->v_mount->mnt_ioflags & MNT_IOFLAGS_CSUNMAP_SUPPORTED) {
 		memset(&cs_unmap, 0, sizeof(_dk_cs_unmap_t));
@@ -392,7 +391,7 @@ vnode_trim_list(vnode_t vp, struct trim_list *tl, boolean_t route_only)
 		}
 	}
 trim_exit:
-	kheap_free(KHEAP_TEMP, extents, sizeof(dk_extent_t) * MAX_BATCH_TO_TRIM);
+	kfree_data(extents, sizeof(dk_extent_t) * MAX_BATCH_TO_TRIM);
 
 	return error;
 }

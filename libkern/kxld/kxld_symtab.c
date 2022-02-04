@@ -231,8 +231,8 @@ finish:
 /*******************************************************************************
 * Temporary workaround for PR-6668105
 * new, new[], delete, and delete[] may be overridden globally in a kext.
-* We should do this with some sort of weak symbols, but we'll use a whitelist
-* for now to minimize risk.
+* We should do this with some sort of weak symbols, but we'll flag these
+* symbols as private for now to minimize risk.
 *******************************************************************************/
 static void
 restrict_private_symbols(KXLDSymtab *symtab)

@@ -3,6 +3,7 @@ from __future__ import print_function
 import os
 import sys
 import re
+import subprocess
 
 PY3 = sys.version_info > (3,)
 
@@ -65,19 +66,52 @@ def GetSourcePathSettings(binary_path, symbols_path):
     retval =  cmd.format(srcpath, new_path)
     return retval
 
+def CheckLLDB(debugger):
+    """ Checks compatibility with current debugger. """
 
-def __lldb_init_module(debugger, internal_dict):
-    debug_session_enabled = False
-    if "DEBUG_XNU_LLDBMACROS" in os.environ and len(os.environ['DEBUG_XNU_LLDBMACROS']) > 0:
-        debug_session_enabled = True
-    prev_os_plugin = "".join(GetSettingsValues(debugger, 'target.process.python-os-plugin-path'))
+    # Collect lldb_host version
+    ver_str = debugger.GetVersionString()
+    lldb_ver = re.search("^lldb.*-(.*)$", ver_str, re.MULTILINE).group(1)
+    ver = tuple(map(int, lldb_ver.split('.')))
+
+    # Display warning when running in Python 3 mode.
     if PY3:
         print("#" * 30)
         print("WARNING! Python version 3 is not supported for xnu lldbmacros.")
         print("Please restart your debugging session with the following workaround")
-        print("\ndefaults write com.apple.dt.lldb DefaultPythonVersion 2\n")
+
+        if ver[0] == 1205:
+            print("\ndefaults write com.apple.dt.lldb DefaultPythonVersion 2\n")
+
+        if ver[0] == 1300 and ver[1] == 2:
+            print("\ndefaults write com.apple.dt.lldb LegacyPythonVersion 2\n")
+            print("\nOR relaunch lldb session with env LLDB_DEFAULT_PYTHON_VERSION=2\n")
+
+        if ver[0] == 1300 and ver[1] == 0:
+            release = subprocess.check_output(['sw_vers', '-releaseType'])
+            release = release.strip(b'\n')
+
+            if release == b'Internal':
+                print("\nRelaunch lldb with xcrun from internal SDK\n")
+                print("\n    xcrun -sdk <internal SDK> lldb\n")
+            else:
+                print("\nThis LLDB cannot debug kernel. Check KDK documentation.")
+
         print("#" * 30)
         print("\n")
+        return False
+
+    return True
+
+def __lldb_init_module(debugger, internal_dict):
+
+    if not CheckLLDB(debugger):
+        return
+
+    debug_session_enabled = False
+    if "DEBUG_XNU_LLDBMACROS" in os.environ and len(os.environ['DEBUG_XNU_LLDBMACROS']) > 0:
+        debug_session_enabled = True
+    prev_os_plugin = "".join(GetSettingsValues(debugger, 'target.process.python-os-plugin-path'))
     print("Loading kernel debugging from %s" % __file__)
     print("LLDB version %s" % debugger.GetVersionString())
     self_path = "{}".format(__file__)
@@ -90,6 +124,10 @@ def __lldb_init_module(debugger, internal_dict):
     xnu_debug_path = base_dir_name + "/lldbmacros/xnu.py"
     xnu_load_cmd = "command script import \"%s\"" % xnu_debug_path
     disable_optimization_warnings_cmd = "settings set target.process.optimization-warnings false"
+
+    # Single stepping support
+    report_all_threads_cmd = "settings set target.process.experimental.os-plugin-reports-all-threads false"
+    step_mode_cmd = "settings set target.process.run-all-threads true"
 
     source_map_cmd = ""
     try:
@@ -112,6 +150,10 @@ def __lldb_init_module(debugger, internal_dict):
         debugger.HandleCommand(xnu_load_cmd)
         print(disable_optimization_warnings_cmd)
         debugger.HandleCommand(disable_optimization_warnings_cmd)
+        print(report_all_threads_cmd)
+        debugger.HandleCommand(report_all_threads_cmd)
+        print(step_mode_cmd)
+        debugger.HandleCommand(step_mode_cmd)
         if source_map_cmd:
             print(source_map_cmd)
             debugger.HandleCommand(source_map_cmd)

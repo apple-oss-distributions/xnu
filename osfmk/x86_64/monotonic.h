@@ -32,7 +32,7 @@
 
 #define MT_NDEVS 1
 
-#define MT_CORE_NFIXED 3
+#define MT_CORE_NFIXED 4
 
 #define MT_CORE_INSTRS 0
 #define MT_CORE_CYCLES 1

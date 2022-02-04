@@ -41,7 +41,10 @@
 #include <sys/sysctl.h>
 #include <time.h>
 
-T_GLOBAL_META(T_META_NAMESPACE("xnu.vm"));
+T_GLOBAL_META(
+	T_META_NAMESPACE("xnu.vm"),
+	T_META_RADAR_COMPONENT_NAME("xnu"),
+	T_META_RADAR_COMPONENT_VERSION("VM"));
 
 /**************************/
 /**************************/
@@ -459,7 +462,7 @@ memory_entry(mach_vm_size_t * size)
 	T_QUIET; T_ASSERT_MACH_SUCCESS(mach_make_memory_entry_64(mach_task_self(), size, (memory_object_offset_t)0,
 	    (MAP_MEM_NAMED_CREATE | VM_PROT_ALL), &object_handle, 0),
 	    "mach_make_memory_entry_64()");
-	T_QUIET; T_ASSERT_EQ(*size, round_page_kernel(original_size),
+	T_QUIET; T_ASSERT_EQ(*size, round_page(original_size),
 	    "mach_make_memory_entry_64() unexpectedly returned a named "
 	    "entry of size 0x%jx (%ju).\n"
 	    "Should have returned a "
@@ -819,7 +822,7 @@ get_mask()
 mach_vm_size_t
 aligned_size(mach_vm_address_t address, mach_vm_size_t size)
 {
-	return round_page_kernel(address - mach_vm_trunc_page(address) + size);
+	return round_page(address - mach_vm_trunc_page(address) + size);
 }
 
 /********************/
@@ -1037,7 +1040,7 @@ get_fixed_address(mach_vm_size_t size)
 	 * non-zero to have at least an extra couple pages.
 	 */
 	if (size != 0) {
-		size = round_page_kernel(size + 2 * vm_page_size);
+		size = round_page(size + 2 * vm_page_size);
 	}
 
 	assert_allocate_success(&address, size, VM_FLAGS_ANYWHERE);
@@ -1169,7 +1172,7 @@ allocate(mach_vm_size_t size)
 	logv(
 		"Memory of rounded size 0x%jx (%ju) allocated at "
 		"address 0x%jx.",
-		(uintmax_t)round_page_kernel(size), (uintmax_t)round_page_kernel(size), (uintmax_t)address);
+		(uintmax_t)round_page(size), (uintmax_t)round_page(size), (uintmax_t)address);
 	/* Fixed allocation address is truncated to the allocator
 	 *  boundary. */
 	if (!(flag & VM_FLAGS_ANYWHERE)) {
@@ -1193,7 +1196,7 @@ allocate_buffer(mach_vm_size_t buffer_size)
 	logv(
 		"Memory of rounded size 0x%jx (%ju) allocated at "
 		"address 0x%jx.",
-		(uintmax_t)round_page_kernel(buffer_size), (uintmax_t)round_page_kernel(buffer_size), (uintmax_t)data);
+		(uintmax_t)round_page(buffer_size), (uintmax_t)round_page(buffer_size), (uintmax_t)data);
 	data += get_buffer_offset();
 	T_QUIET; T_ASSERT_EQ((vm_offset_t)data, data,
 	    "Address 0x%jx "
@@ -1555,31 +1558,31 @@ test_zero_filled()
 void
 test_write_address_filled()
 {
-	write_and_verify_pattern(empty, TRUE, get_vm_address(), round_page_kernel(get_vm_size()), "address-filled");
+	write_and_verify_pattern(empty, TRUE, get_vm_address(), round_page(get_vm_size()), "address-filled");
 }
 
 void
 test_write_checkerboard()
 {
-	write_and_verify_pattern(checkerboard, FALSE, get_vm_address(), round_page_kernel(get_vm_size()), "checkerboard");
+	write_and_verify_pattern(checkerboard, FALSE, get_vm_address(), round_page(get_vm_size()), "checkerboard");
 }
 
 void
 test_write_reverse_checkerboard()
 {
-	write_and_verify_pattern(checkerboard, TRUE, get_vm_address(), round_page_kernel(get_vm_size()), "reverse checkerboard");
+	write_and_verify_pattern(checkerboard, TRUE, get_vm_address(), round_page(get_vm_size()), "reverse checkerboard");
 }
 
 void
 test_write_page_ends()
 {
-	write_and_verify_pattern(page_ends, FALSE, get_vm_address(), round_page_kernel(get_vm_size()), "page ends");
+	write_and_verify_pattern(page_ends, FALSE, get_vm_address(), round_page(get_vm_size()), "page ends");
 }
 
 void
 test_write_page_interiors()
 {
-	write_and_verify_pattern(page_ends, TRUE, get_vm_address(), round_page_kernel(get_vm_size()), "page interiors");
+	write_and_verify_pattern(page_ends, TRUE, get_vm_address(), round_page(get_vm_size()), "page interiors");
 }
 
 /*********************************/
@@ -1945,14 +1948,14 @@ test_access_deallocated_range_start()
 void
 test_access_deallocated_range_middle()
 {
-	access_deallocated_range_address(get_vm_address() + (round_page_kernel(get_vm_size()) >> 1), "middle");
+	access_deallocated_range_address(get_vm_address() + (round_page(get_vm_size()) >> 1), "middle");
 }
 
 /* End of deallocated range is inaccessible. */
 void
 test_access_deallocated_range_end()
 {
-	access_deallocated_range_address(round_page_kernel(get_vm_size()) - vm_address_size + get_vm_address(), "end");
+	access_deallocated_range_address(round_page(get_vm_size()) - vm_address_size + get_vm_address(), "end");
 }
 
 /* Deallocating almost the whole address space causes a SIGSEGV or SIGBUS. We
@@ -2484,9 +2487,9 @@ test_write_on_partially_unwritable_range()
 void
 test_zero_filled_write()
 {
-	verify_pattern(empty, FALSE, mach_vm_trunc_page(get_vm_address()), round_page_kernel(get_vm_size() + 1), "zero-filled");
+	verify_pattern(empty, FALSE, mach_vm_trunc_page(get_vm_address()), round_page(get_vm_size() + 1), "zero-filled");
 	verify_pattern(empty, FALSE, mach_vm_trunc_page(get_buffer_address()),
-	    round_page_kernel(get_buffer_size() + get_buffer_offset()), "zero-filled");
+	    round_page(get_buffer_size() + get_buffer_offset()), "zero-filled");
 }
 
 /* Write a pattern on a buffer, write the buffer into some destination
@@ -2690,9 +2693,9 @@ test_copy_reverse_checkerboard()
 void
 test_zero_filled_copy_dest()
 {
-	verify_pattern(empty, FALSE, mach_vm_trunc_page(get_vm_address()), round_page_kernel(get_vm_size() + 1), "zero-filled");
+	verify_pattern(empty, FALSE, mach_vm_trunc_page(get_vm_address()), round_page(get_vm_size() + 1), "zero-filled");
 	verify_pattern(empty, FALSE, mach_vm_trunc_page(get_buffer_address()),
-	    round_page_kernel(get_buffer_size() + get_buffer_offset()), "zero-filled");
+	    round_page(get_buffer_size() + get_buffer_offset()), "zero-filled");
 }
 
 /****************************************/
@@ -2977,7 +2980,7 @@ test_copy_source_on_partially_unreadable_range()
 void
 test_zero_filled_extended()
 {
-	verify_pattern(empty, FALSE, mach_vm_trunc_page(get_vm_address()), round_page_kernel(get_vm_size() + 1), "zero-filled");
+	verify_pattern(empty, FALSE, mach_vm_trunc_page(get_vm_address()), round_page(get_vm_size() + 1), "zero-filled");
 }
 
 /* Allocated region is still zero-filled after read-protecting it and
@@ -3076,7 +3079,7 @@ test_access_readprotected_range_middle()
 void
 test_access_readprotected_range_end()
 {
-	access_readprotected_range_address(round_page_kernel(get_vm_address() + get_vm_size()) - vm_address_size, "end");
+	access_readprotected_range_address(round_page(get_vm_address() + get_vm_size()) - vm_address_size, "end");
 }
 
 /* Addresses in write-protected range are unwritable. */
@@ -3109,7 +3112,7 @@ test_write_writeprotected_range_middle()
 void
 test_write_writeprotected_range_end()
 {
-	write_writeprotected_range_address(round_page_kernel(get_vm_address() + get_vm_size()) - vm_address_size, "end");
+	write_writeprotected_range_address(round_page(get_vm_address() + get_vm_size()) - vm_address_size, "end");
 }
 
 /*************************************/

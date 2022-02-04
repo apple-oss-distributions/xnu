@@ -44,7 +44,7 @@ get_pri(thread_t thread_port)
 	if (kr != KERN_SUCCESS) {
 		printf("thread info failed to get current priority of the thread\n");
 	}
-	return extended_info.pth_curpri;
+	return extended_info.pth_priority;
 }
 
 static void
@@ -103,7 +103,7 @@ send(
 	    MACH_SEND_MSG |
 	    MACH_SEND_TIMEOUT |
 	    MACH_SEND_OVERRIDE |
-	    ((reply_port ? MACH_SEND_SYNC_OVERRIDE : 0) | options),
+	    options,
 	    send_msg.header.msgh_size,
 	    0,
 	    MACH_PORT_NULL,

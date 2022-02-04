@@ -82,11 +82,13 @@ int serial_init(void);
 void serial_putc(char);
 int serial_getc(void);
 
+#ifdef PRIVATE
+void serial_putc_options(char, bool);
+#endif /* PRIVATE */
+
 /* ------------------------------------------------------------------------
  * from osfmk/kern/misc_protos.h
  */
-void cnputc(char);
-void cnputc_unbuffered(char);
-int cngetc(void);
+void console_write_unbuffered(char);
 
 #endif /* _PEXPERT_I386_PROTOS_H */

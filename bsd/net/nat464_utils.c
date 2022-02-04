@@ -169,7 +169,7 @@ nat464_synthesize_ipv6(ifnet_t ifp, const struct in_addr *addrv4, struct in6_add
 		memcpy(ptr + 4, ptrv4, 4);
 		break;
 	default:
-		panic("NAT64-prefix len is wrong: %u\n", prefix_len);
+		panic("NAT64-prefix len is wrong: %u", prefix_len);
 	}
 
 	if (clat_debug) {
@@ -234,7 +234,7 @@ nat464_synthesize_ipv4(ifnet_t ifp, const struct in6_addr *addr, struct in_addr 
 		memcpy(ptrv4, ptr + 4, 4);
 		break;
 	default:
-		panic("NAT64-prefix len is wrong: %u\n",
+		panic("NAT64-prefix len is wrong: %u",
 		    prefix_len);
 	}
 

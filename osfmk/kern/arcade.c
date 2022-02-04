@@ -73,6 +73,10 @@ struct arcade_register {
 };
 typedef struct arcade_register *arcade_register_t;
 
+IPC_KOBJECT_DEFINE(IKOT_ARCADE_REG,
+    .iko_op_stable    = true,
+    .iko_op_permanent = true);
+
 static struct arcade_register arcade_register_global;
 
 void
@@ -117,10 +121,8 @@ convert_port_to_arcade_register(
 	arcade_register_t arcade_reg = ARCADE_REG_NULL;
 
 	if (IP_VALID(port)) {
-		/* No need to lock port because of how refs managed */
-		if (ip_kotype(port) == IKOT_ARCADE_REG) {
-			assert(ip_active(port));
-			arcade_reg = (arcade_register_t)ip_get_kobject(port);
+		arcade_reg = ipc_kobject_get_stable(port, IKOT_ARCADE_REG);
+		if (arcade_reg) {
 			assert(arcade_reg == &arcade_register_global);
 			assert(arcade_reg->ar_port == port);
 		}
@@ -151,7 +153,7 @@ arcade_register_new_upcall(
 	assert(arcade_reg == &arcade_register_global);
 
 	/* Check to see if this is the real arcade subscription service */
-	if (!IOTaskHasEntitlement(current_task(), "com.apple.arcade.fpsd")) {
+	if (!IOCurrentTaskHasEntitlement("com.apple.arcade.fpsd")) {
 		return KERN_INVALID_VALUE;
 	}
 

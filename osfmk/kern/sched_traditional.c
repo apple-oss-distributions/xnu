@@ -173,6 +173,7 @@ const struct sched_dispatch_table sched_traditional_dispatch = {
 	.rt_queue_shutdown                              = sched_rtlocal_queue_shutdown,
 	.rt_runq_scan                                   = sched_rtlocal_runq_scan,
 	.rt_runq_count_sum                              = sched_rtlocal_runq_count_sum,
+	.rt_steal_thread                                = sched_rtlocal_steal_thread,
 
 	.qos_max_parallelism                            = sched_qos_max_parallelism,
 	.check_spill                                    = sched_check_spill,
@@ -182,6 +183,8 @@ const struct sched_dispatch_table sched_traditional_dispatch = {
 	.run_count_decr                                 = sched_run_decr,
 	.update_thread_bucket                           = sched_update_thread_bucket,
 	.pset_made_schedulable                          = sched_pset_made_schedulable,
+	.cpu_init_completed                             = NULL,
+	.thread_eligible_for_pset                       = NULL,
 };
 
 const struct sched_dispatch_table sched_traditional_with_pset_runqueue_dispatch = {
@@ -225,6 +228,7 @@ const struct sched_dispatch_table sched_traditional_with_pset_runqueue_dispatch 
 	.rt_queue_shutdown                              = sched_rtlocal_queue_shutdown,
 	.rt_runq_scan                                   = sched_rtlocal_runq_scan,
 	.rt_runq_count_sum                              = sched_rtlocal_runq_count_sum,
+	.rt_steal_thread                                = sched_rtlocal_steal_thread,
 
 	.qos_max_parallelism                            = sched_qos_max_parallelism,
 	.check_spill                                    = sched_check_spill,
@@ -234,6 +238,8 @@ const struct sched_dispatch_table sched_traditional_with_pset_runqueue_dispatch 
 	.run_count_decr                                 = sched_run_decr,
 	.update_thread_bucket                           = sched_update_thread_bucket,
 	.pset_made_schedulable                          = sched_pset_made_schedulable,
+	.cpu_init_completed                             = NULL,
+	.thread_eligible_for_pset                       = NULL,
 };
 
 static void

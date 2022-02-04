@@ -1175,9 +1175,7 @@ lags1:
 	msr		spsr_cxsf, r4						// Restore spsr
 
 	clrex										// clear exclusive memory tag
-#if	__ARM_ENABLE_WFE_
 	sev
-#endif
 
 #if __ARM_VFP__
 	add		r0, sp, SS_SIZE					// Get vfp state pointer
@@ -1360,21 +1358,9 @@ fleh_irq_handler:
 	movs	r8, r8
 	COND_EXTERN_BLNE(interrupt_trace_exit)
 #endif
-	mrc		p15, 0, r9, c13, c0, 4				// Reload r9 from TPIDRPRW
-	bl		EXT(ml_get_timebase)				// get current timebase
-	LOAD_ADDR(r3, EntropyData)
-	ldr		r1, [r3, ENTROPY_SAMPLE_COUNT]
-	ldr		r2, [r3, ENTROPY_BUFFER_INDEX_MASK]
-	add		r4, r1, 1
-	and		r5, r1, r2
-	str		r4, [r3, ENTROPY_SAMPLE_COUNT]
-	ldr		r1, [r3, ENTROPY_BUFFER]
-	ldr		r2, [r3, ENTROPY_BUFFER_ROR_MASK]
-	ldr		r4, [r1, r5, lsl #2]
-	and		r4, r4, r2
-	eor		r0, r0, r4, ror #9
-	str		r0, [r1, r5, lsl #2]
+	bl		EXT(entropy_collect)
 return_from_irq:
+	mrc		p15, 0, r9, c13, c0, 4				// Reload r9 from TPIDRPRW
 	mov		r5, #0
 	ldr		r4, [r9, ACT_CPUDATAP]				// Get current cpu
 	str		r5, [r4, CPU_INT_STATE]				// Clear cpu_int_state
@@ -1569,8 +1555,6 @@ fleh_decirq_handler:
 	COND_EXTERN_BLNE(interrupt_trace_exit)
 #endif
 
-	mrc		p15, 0, r9, c13, c0, 4				// Reload r9 from TPIDRPRW
-
 	b		return_from_irq
 
 
@@ -1750,9 +1734,7 @@ LEXT(fleh_dec)
 #endif
 
 	clrex										// clear exclusive memory tag
-#if	__ARM_ENABLE_WFE_
 	sev
-#endif
 #if __ARM_USER_PROTECT__
 	mcr		p15, 0, r10, c2, c0, 0				// Set TTBR0
 	mcr		p15, 0, r11, c13, c0, 1				// Set CONTEXTIDR
@@ -1815,8 +1797,6 @@ LEXT(fleh_dec)
 	COND_EXTERN_BLNE(interrupt_trace_exit)
 #endif
 	UNALIGN_STACK
-
-	mrc		p15, 0, r9, c13, c0, 4				// Reload r9 from TPIDRPRW
 
 	b       return_from_irq
 
@@ -1889,21 +1869,7 @@ return_to_user_now:
 	ldr		r1, [r9, ACT_PREEMPT_CNT]			// Load preemption count
 	cmp		r1, #0						// Test
 	bne		L_lagu_preempt_panic				// Panic if not zero
-
-/*
- * Assert that the preemption level is zero prior to the return to user space
- */
-	ldr		r2, [r9, TH_RWLOCK_CNT]				// Load RW lock count
-	cmp		r2, #0						// Test
-	bne		L_lagu_rwlock_cnt_panic				// Panic if not zero
 #endif
-
-/*
- * Assert that we aren't leaking KHEAP_TEMP allocations prior to the return to user space
- */
-	ldr		r1, [r9, TH_TMP_ALLOC_CNT]			// Load temp alloc count
-	cmp		r1, #0						// Test
-	bne		L_lagu_temp_alloc_cnt_panic			// Panic if not zero
 
 #if	!CONFIG_SKIP_PRECISE_USER_KERNEL_TIME
 	bl		EXT(timer_state_event_kernel_to_user)
@@ -1934,9 +1900,7 @@ return_to_user_now:
 	mov		sp, r0								// Get User PCB
 
 	clrex										// clear exclusive memory tag
-#if	__ARM_ENABLE_WFE_
 	sev
-#endif
 #if __ARM_USER_PROTECT__
 	ldr     r3, [r9, ACT_UPTW_TTB]              // Load thread ttb
 	mcr		p15, 0, r3, c2, c0, 0				// Set TTBR0
@@ -1949,14 +1913,6 @@ return_to_user_now:
 	nop											// Hardware problem
 	movs	pc, lr								// Return to user
 
-/*
- * r1: tmp alloc count
- * r9: current_thread()
- */
-L_lagu_temp_alloc_cnt_panic:
-	mov		r0, r9						// Thread argument
-	blx		EXT(kheap_temp_leak_panic)			// Finally, panic
-
 #if MACH_ASSERT
 /*
  * r1: current preemption count
@@ -1966,24 +1922,11 @@ L_lagu_preempt_panic:
 	adr		r0, L_lagu_preempt_panic_str			// Load the panic string...
 	blx		EXT(panic)					// Finally, panic
 
-/*
- * r2: rwlock count
- * r9: current_thread()
- */
-L_lagu_rwlock_cnt_panic:
-	adr		r0, L_lagu_rwlock_cnt_panic_str			// Load the panic string...
-	mov		r1, r9						// Thread argument for panic string
-	blx		EXT(panic)					// Finally, panic
-
 	.align  2
 L_lagu_preempt_panic_str:
 	.asciz  "load_and_go_user: preemption_level %d"
 	.align  2
 
-	.align  2
-L_lagu_rwlock_cnt_panic_str:
-	.asciz  "load_and_go_user: RW lock count not 0 on thread %p (%u)"
-	.align  2
 #endif /* MACH_ASSERT */
 
 	.align  2

@@ -97,7 +97,7 @@ IOCommandQueue::init(OSObject *inOwner,
 
 	size = inSize + 1; /* Allocate one more entry than needed */
 
-	queue = (void *)kalloc(size * sizeof(commandEntryT));
+	queue = (void *)kalloc_type(commandEntryT, size, Z_WAITOK_ZERO);
 	if (!queue) {
 		return false;
 	}
@@ -140,7 +140,7 @@ void
 IOCommandQueue::free()
 {
 	if (queue) {
-		kfree(queue, size * sizeof(commandEntryT));
+		kfree_type(commandEntryT, size, queue);
 	}
 	if (producerSema) {
 		semaphore_destroy(kernel_task, producerSema);

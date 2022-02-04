@@ -167,7 +167,7 @@ mac_vnop_setxattr(struct vnode *vp, const char *name, char *buf, size_t len)
 {
 	vfs_context_t ctx;
 	int options = XATTR_NOSECURITY;
-	char uio_buf[UIO_SIZEOF(1)];
+	uio_stackbuf_t uio_buf[UIO_SIZEOF(1)];
 	uio_t auio;
 	int error;
 
@@ -198,7 +198,7 @@ mac_vnop_getxattr(struct vnode *vp, const char *name, char *buf, size_t len,
 {
 	vfs_context_t ctx = vfs_context_current();
 	int options = XATTR_NOSECURITY;
-	char uio_buf[UIO_SIZEOF(1)];
+	uio_stackbuf_t uio_buf[UIO_SIZEOF(1)];
 	uio_t auio;
 	int error;
 

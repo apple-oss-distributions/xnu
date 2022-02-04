@@ -29,12 +29,12 @@
 #define IOKIT_ENABLE_SHARED_PTR
 
 extern "C" {
-#include <machine/machine_routines.h>
 #include <pexpert/pexpert.h>
 #include <kern/cpu_number.h>
 extern void kperf_kernel_configure(char *);
 }
 
+#include <machine/machine_routines.h>
 #include <IOKit/IOLib.h>
 #include <IOKit/IOPlatformExpert.h>
 #include <IOKit/pwr_mgt/RootDomain.h>
@@ -564,11 +564,8 @@ IOCPUInterruptController::initCPUInterruptController(int sources, int cpus)
 	numSources = sources;
 	numCPUs = cpus;
 
-	vectors = (IOInterruptVector *)IOMalloc(numSources * sizeof(IOInterruptVector));
-	if (vectors == NULL) {
-		return kIOReturnNoMemory;
-	}
-	bzero(vectors, numSources * sizeof(IOInterruptVector));
+	vectors = (IOInterruptVector *)zalloc_permanent(numSources *
+	    sizeof(IOInterruptVector), ZALIGN(IOInterruptVector));
 
 	// Allocate a lock for each vector
 	for (cnt = 0; cnt < numSources; cnt++) {

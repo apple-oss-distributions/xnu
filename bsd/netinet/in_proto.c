@@ -239,7 +239,6 @@ static struct protosw inetsw[] = {
 		.pr_flags =             PR_ATOMIC | PR_ADDR | PR_LASTHDR,
 		.pr_input =             encap4_input,
 		.pr_ctloutput =         rip_ctloutput,
-		.pr_init =              encap4_init,
 		.pr_usrreqs =           &rip_usrreqs,
 		.pr_unlock =            rip_unlock,
 		.pr_update_last_owner = inp_update_last_owner,
@@ -251,7 +250,6 @@ static struct protosw inetsw[] = {
 		.pr_flags =             PR_ATOMIC | PR_ADDR | PR_LASTHDR,
 		.pr_input =             encap4_input,
 		.pr_ctloutput =         rip_ctloutput,
-		.pr_init =              encap4_init,
 		.pr_usrreqs =           &rip_usrreqs,
 		.pr_unlock =            rip_unlock,
 		.pr_update_last_owner = inp_update_last_owner,
@@ -319,7 +317,7 @@ in_dinit(struct domain *dp)
 	unguard = domain_unguard_deploy();
 	i = proto_register_input(PF_INET, ip_proto_input, NULL, 1);
 	if (i != 0) {
-		panic("%s: failed to register PF_INET protocol: %d\n",
+		panic("%s: failed to register PF_INET protocol: %d",
 		    __func__, i);
 		/* NOTREACHED */
 	}

@@ -73,12 +73,8 @@ typedef struct vc_progress_user_options vc_progress_user_options;
 
 #if XNU_KERNEL_PRIVATE
 
-void vcputc(int, int, int);
-
-int vcgetc(     int             l,
-    int             u,
-    boolean_t       wait,
-    boolean_t       raw );
+void vcputc(char);
+void vcputc_options(char, bool);
 
 void video_scroll_up(   void    *start,
     void    *end,

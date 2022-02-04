@@ -16,7 +16,7 @@
 .\" 
 .\"     @(#)clonefile.2
 .
-.Dd December 04, 2015
+.Dd June 3, 2021
 .Dt CLONEFILE 2
 .Os Darwin
 .Sh NAME
@@ -44,7 +44,7 @@ The cloned file
 .Fa dst
 shares its data blocks with the
 .Fa src
-file but has its own copy of attributes, extended attributes and ACL's which are identical to
+file but has its own copy of attributes and extended attributes which are identical to
 those of the named file
 .Fa src
 with the exceptions listed below
@@ -240,6 +240,26 @@ names an  existing file that is  neither a directory nor a symbolic link to a di
 or the path argument contains at least one non <slash> character and ends with one or
 more trailing <slash> characters and the last pathname component names an existing file that
 is neither a directory nor a symbolic link to a directory.
+.
+.It Bq Er EDEADLK
+A component of either pathname refers to a
+.Dq dataless
+directory that requires materialization and the I/O policy of the current
+thread or process disallows dataless directory materialization
+.Po see
+.Xr getiopolicy_np 3
+.Pc .
+.
+.It Bq Er EDEADLK
+The
+.Fa src
+pathname refers to a
+.Dq dataless
+file that must be materialized before being cloned and the I/O policy of
+the current thread or process disallows file materialization
+.Po see
+.Xr getiopolicy_np 3
+.Pc .
 .El
 .Pp
 In addition, the
@@ -273,6 +293,7 @@ or
 is neither                                                                         
 .Dv AT_FDCWD                                                                       
 nor a file descriptor associated with a directory.                              
+.
 .El  
 .
 .Pp

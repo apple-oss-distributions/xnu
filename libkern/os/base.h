@@ -151,6 +151,12 @@
 #define OS_OVERLOADABLE
 #endif
 
+#if __has_attribute(analyzer_suppress)
+#define OS_ANALYZER_SUPPRESS(RADAR) __attribute__((analyzer_suppress))
+#else
+#define OS_ANALYZER_SUPPRESS(RADAR)
+#endif
+
 #if __has_attribute(enum_extensibility)
 #define __OS_ENUM_ATTR __attribute__((enum_extensibility(open)))
 #define __OS_ENUM_ATTR_CLOSED __attribute__((enum_extensibility(closed)))
@@ -334,10 +340,12 @@ typedef void (^os_block_t)(void);
 #if __has_feature(ptrauth_calls)
 #include <ptrauth.h>
 #define OS_PTRAUTH_SIGNED_PTR(type) __ptrauth(ptrauth_key_process_independent_data, 1, ptrauth_string_discriminator(type))
+#define OS_PTRAUTH_SIGNED_PTR_AUTH_NULL(type) __ptrauth(ptrauth_key_process_independent_data, 1, ptrauth_string_discriminator(type), "authenticates-null-values")
 #define OS_PTRAUTH_DISCRIMINATOR(str) ptrauth_string_discriminator(str)
 #define __ptrauth_only
 #else //  __has_feature(ptrauth_calls)
 #define OS_PTRAUTH_SIGNED_PTR(type)
+#define OS_PTRAUTH_SIGNED_PTR_AUTH_NULL(type)
 #define OS_PTRAUTH_DISCRIMINATOR(str) 0
 #define __ptrauth_only __unused
 #endif // __has_feature(ptrauth_calls)
@@ -345,6 +353,7 @@ typedef void (^os_block_t)(void);
 
 #if KERNEL_PRIVATE
 #define XNU_PTRAUTH_SIGNED_PTR OS_PTRAUTH_SIGNED_PTR
+#define XNU_PTRAUTH_SIGNED_PTR_AUTH_NULL OS_PTRAUTH_SIGNED_PTR_AUTH_NULL
 #endif // KERNEL_PRIVATE
 
 #endif // __OS_BASE__

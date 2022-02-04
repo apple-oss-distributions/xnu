@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2004 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2021 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -56,13 +56,9 @@ net_init_add(
 		return EALREADY;
 	}
 
-	entry = kalloc(sizeof(*entry));
-	if (entry == 0) {
-		printf("net_init_add: no memory\n");
-		return ENOMEM;
-	}
+	entry = kalloc_type(struct init_list_entry,
+	    Z_WAITOK | Z_ZERO | Z_NOFAIL);
 
-	bzero(entry, sizeof(*entry));
 	entry->func = init_func;
 
 	do {
@@ -70,7 +66,7 @@ net_init_add(
 
 		if (entry->next == LIST_RAN) {
 			/* List already ran, cleanup and call the function */
-			kfree(entry, sizeof(*entry));
+			kfree_type(struct init_list_entry, entry);
 			return EALREADY;
 		}
 	} while (!OSCompareAndSwapPtr(entry->next, entry, &list_head));
@@ -106,6 +102,6 @@ net_init_run(void)
 		current = forward_head;
 		forward_head = current->next;
 		current->func();
-		kfree(current, sizeof(*current));
+		kfree_type(struct init_list_entry, current);
 	}
 }

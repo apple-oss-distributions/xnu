@@ -45,6 +45,7 @@
  */
 #if MACH_KERNEL_PRIVATE || !_DARWIN_BUILDING_PROJECT_APPLEIMAGE4
 #include <img4/firmware.h>
+#include <img4/nonce.h>
 #endif
 
 /*!
@@ -54,7 +55,7 @@
  * it can be tested at build-time and not require rev-locked submissions of xnu
  * and AppleImage4.
  */
-#define IMG4_INTERFACE_VERSION (10u)
+#define IMG4_INTERFACE_VERSION (13u)
 
 /*!
  * @typegroup
@@ -184,6 +185,10 @@ typedef const img4_chip_t *(*img4_firmware_select_chip_t)(
 	size_t acceptable_chips_cnt
 	);
 
+typedef const img4_runtime_object_spec_t *(*img4_runtime_find_object_spec_t)(
+	img4_4cc_t _4cc
+	);
+
 typedef struct _img4_interface {
 	const uint32_t i4if_version;
 	img4_retired_t i4if_init;
@@ -263,6 +268,42 @@ typedef struct _img4_interface {
 	struct {
 		img4_firmware_select_chip_t firmware_select_chip;
 	} i4if_v10;
+	struct {
+		// The following fields are ultimately going to be NULL and unused due
+		// to development churn
+		//
+		//     chip_ap_datacenter_development
+		//     chip_ap_category
+		//     chip_ap_ddi
+		//     chip_ap_developer_disk_image
+		const img4_chip_t *chip_ap_datacenter_development;
+		const img4_chip_t *chip_ap_intransigent;
+		const img4_chip_t *chip_ap_category;
+		const img4_chip_t *chip_ap_ddi;
+		const img4_chip_t *chip_ap_developer_disk_image;
+		const img4_chip_t *chip_ap_software_ff06;
+		const img4_chip_t *chip_ap_supplemental;
+		const img4_runtime_object_spec_t *runtime_object_spec_supplemental_root;
+		img4_runtime_find_object_spec_t runtime_find_object_spec;
+		img4_runtime_execute_object_t runtime_execute_object;
+		img4_runtime_copy_object_t runtime_copy_object;
+	} i4if_v11;
+	struct {
+		const img4_nonce_domain_t *nonce_domain_ddi;
+		const img4_nonce_domain_t *nonce_domain_ephemeral_cryptex;
+		const img4_chip_t *chip_ap_category_ff02;
+		const img4_chip_t *chip_ap_category_ff03;
+		const img4_chip_t *chip_ap_category_ff04_f0;
+		const img4_chip_t *chip_ap_category_ff04_f1;
+		const img4_chip_t *chip_ap_category_ff04_f2;
+		const img4_chip_t *chip_ap_category_ff04_f3;
+		img4_chip_select_personalized_ap_t chip_select_categorized_ap;
+	} i4if_v12;
+	struct {
+		const img4_chip_t *chip_ap_vma2;
+		const img4_chip_t *chip_ap_vma2_clone;
+		const img4_object_spec_t *pmap_data_spec;
+	} i4if_v13;
 } img4_interface_t;
 
 __BEGIN_DECLS

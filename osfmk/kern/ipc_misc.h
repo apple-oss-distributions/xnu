@@ -35,8 +35,8 @@ struct fileglob *fileport_port_to_fileglob(ipc_port_t);
 void fileport_notify(mach_msg_header_t *);
 kern_return_t fileport_invoke(task_t, mach_port_name_t,
     int (*)(mach_port_name_t, struct fileglob *, void *), void *, int *);
-kern_return_t fileport_walk(task_t,
-    int (*)(mach_port_name_t, struct fileglob *, void *), void *);
+kern_return_t fileport_walk(task_t, size_t *count,
+    bool (^cb)(size_t i, mach_port_name_t, struct fileglob *));
 
 #endif /* _KERN_IPC_MISC_H_ */
 #endif /* KERNEL_PRIVATE */

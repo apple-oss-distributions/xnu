@@ -67,10 +67,12 @@
 #ifndef _MACH_I386_THREAD_STATUS_H_
 #define _MACH_I386_THREAD_STATUS_H_
 
+#if defined (__i386__) || defined (__x86_64__)
+
 #include <mach/machine/_structs.h>
+#include <mach/machine/thread_state.h>
 #include <mach/message.h>
 #include <mach/i386/fp_reg.h>
-#include <mach/i386/thread_state.h>
 #include <i386/eflags.h>
 
 #ifdef KERNEL_PRIVATE
@@ -499,5 +501,7 @@ saved_state64(x86_saved_state_t *iss)
 }
 
 #endif /* XNU_KERNEL_PRIVATE */
+
+#endif /* defined (__i386__) || defined (__x86_64__) */
 
 #endif  /* _MACH_I386_THREAD_STATUS_H_ */

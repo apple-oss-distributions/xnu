@@ -88,11 +88,10 @@ kau_open(void)
 {
 	struct au_record *rec;
 
-	rec = malloc(sizeof(*rec), M_AUDITBSM, M_WAITOK);
-	rec->data = NULL;
+	rec = kalloc_type(struct au_record, Z_WAITOK | Z_ZERO | Z_NOFAIL);
 	TAILQ_INIT(&rec->token_q);
-	rec->len = 0;
 	rec->used = 1;
+	rec->data = NULL;
 
 	return rec;
 }
@@ -113,7 +112,7 @@ kau_write(struct au_record *rec, struct au_token *tok)
  * Close out the audit record by adding the header token, identifying any
  * missing tokens.  Write out the tokens to the record memory.
  */
-static void
+static int
 kau_close(struct au_record *rec, struct timespec *ctime, short event)
 {
 	u_char *dptr;
@@ -140,7 +139,10 @@ kau_close(struct au_record *rec, struct timespec *ctime, short event)
 		panic("kau_close: invalid address family");
 	}
 	tot_rec_size = rec->len + AUDIT_HEADER_SIZE + AUDIT_TRAILER_SIZE;
-	rec->data = malloc(tot_rec_size, M_AUDITBSM, M_WAITOK | M_ZERO);
+	rec->data = kalloc_data(tot_rec_size, Z_WAITOK | Z_ZERO);
+	if (rec->data == NULL) {
+		return ENOMEM;
+	}
 
 	tm.tv_usec = ctime->tv_nsec / 1000;
 	tm.tv_sec = ctime->tv_sec;
@@ -160,6 +162,8 @@ kau_close(struct au_record *rec, struct timespec *ctime, short event)
 		memcpy(dptr, cur->t_data, cur->len);
 		dptr += cur->len;
 	}
+
+	return 0;
 }
 
 /*
@@ -174,14 +178,14 @@ kau_free(struct au_record *rec)
 	/* Free the token list. */
 	while ((tok = TAILQ_FIRST(&rec->token_q))) {
 		TAILQ_REMOVE(&rec->token_q, tok, tokens);
-		free(tok->t_data, M_AUDITBSM);
-		free(tok, M_AUDITBSM);
+		kfree_data(tok->t_data, tok->len);
+		kfree_type(token_t, tok);
 	}
 
-	rec->used = 0;
-	rec->len = 0;
-	free(rec->data, M_AUDITBSM);
-	free(rec, M_AUDITBSM);
+	if (rec->data != NULL) {
+		kfree_data(rec->data, rec->len);
+	}
+	kfree_type(struct au_record, rec);
 }
 
 /*
@@ -606,11 +610,12 @@ int
 kaudit_to_bsm(struct kaudit_record *kar, struct au_record **pau)
 {
 	struct au_token *tok = NULL, *subj_tok;
-	struct au_record *rec;
+	struct au_record *rec = NULL;
 	au_tid_t tid;
 	struct audit_record *ar;
 	int ctr;
 	u_int uctr;
+	int rv;
 
 	KASSERT(kar != NULL, ("kaudit_to_bsm: kar == NULL"));
 
@@ -2062,7 +2067,11 @@ kaudit_to_bsm(struct kaudit_record *kar, struct au_record **pau)
 		kau_write(rec, tok);
 	}
 
-	kau_close(rec, &ar->ar_endtime, ar->ar_event);
+	rv = kau_close(rec, &ar->ar_endtime, ar->ar_event);
+	if (rv != 0) {
+		kau_free(rec);
+		return BSM_FAILURE;
+	}
 
 	*pau = rec;
 	return BSM_SUCCESS;
@@ -2091,7 +2100,7 @@ bsm_rec_verify(void *rec, int length, boolean_t kern_events_allowed)
 		return 0;
 	}
 
-	trl = (struct trl_tok_partial*)(rec + (length - AUDIT_TRAILER_SIZE));
+	trl = (struct trl_tok_partial*)((uintptr_t)rec + (length - AUDIT_TRAILER_SIZE));
 
 	/* Ensure the buffer contains what look like header and trailer tokens */
 	if (((hdr->type != AUT_HEADER32) && (hdr->type != AUT_HEADER32_EX) &&

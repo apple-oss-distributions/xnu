@@ -161,7 +161,7 @@ struct dtrace_ptss_page*
 dtrace_ptss_allocate_page(struct proc* p)
 {
 	// Allocate the kernel side data
-	struct dtrace_ptss_page* ptss_page = _MALLOC(sizeof(struct dtrace_ptss_page), M_TEMP, M_ZERO | M_WAITOK);
+	struct dtrace_ptss_page* ptss_page = kalloc_type(struct dtrace_ptss_page, Z_ZERO | Z_WAITOK);
 	if (ptss_page == NULL) {
 		return NULL;
 	}
@@ -217,7 +217,7 @@ dtrace_ptss_allocate_page(struct proc* p)
 	return ptss_page;
 
 err:
-	_FREE(ptss_page, M_TEMP);
+	kfree_type(struct dtrace_ptss_page, ptss_page);
 
 	if (map) {
 		vm_map_deallocate(map);
@@ -301,7 +301,7 @@ dtrace_ptss_exec_exit(struct proc* p)
 		// vm_map_t may already be toast.
 
 		// Must be certain to free the kernel memory!
-		_FREE(temp, M_TEMP);
+		kfree_type(struct dtrace_ptss_page, temp);
 		temp = next;
 	}
 }

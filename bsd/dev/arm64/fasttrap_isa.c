@@ -187,7 +187,7 @@ end:
 static void
 fasttrap_return_common(proc_t *p, arm_saved_state_t *regs, user_addr_t pc, user_addr_t new_pc)
 {
-	pid_t pid = p->p_pid;
+	pid_t pid = proc_getpid(p);
 	fasttrap_tracepoint_t *tp;
 	fasttrap_bucket_t *bucket;
 	fasttrap_id_t *id;
@@ -452,23 +452,23 @@ get_saved_state64_regno(arm_saved_state64_t *regs64, uint32_t regno, int use_xzr
 }
 
 static void
-set_saved_state64_regno(arm_saved_state64_t *regs64, uint32_t regno, int use_xzr, register_t value)
+set_saved_state_regno(arm_saved_state_t *state, uint32_t regno, int use_xzr, register_t value)
 {
 	/* Set PC to register value */
 	switch (regno) {
 	case 29:
-		regs64->fp = value;
+		set_saved_state_fp(state, value);
 		break;
 	case 30:
-		regs64->lr = value;
+		set_saved_state_lr(state, value);
 		break;
 	case 31:
 		if (!use_xzr) {
-			regs64->sp = value;
+			set_saved_state_sp(state, value);
 		}
 		break;
 	default:
-		regs64->x[regno] = value;
+		set_saved_state_reg(state, regno, value);
 		break;
 	}
 }
@@ -567,13 +567,13 @@ fasttrap_pid_probe_handle_patched_instr64(arm_saved_state_t *state, fasttrap_tra
 	/* is-enabled probe: set x0 to 1 and step forwards */
 	if (is_enabled) {
 		regs64->x[0] = 1;
-		set_saved_state_pc(state, regs64->pc + 4);
+		add_saved_state_pc(state, 4);
 		return;
 	}
 
 	/* For USDT probes, bypass all the emulation logic for the nop instruction */
 	if (IS_ARM64_NOP(tp->ftt_instr)) {
-		set_saved_state_pc(state, regs64->pc + 4);
+		add_saved_state_pc(state, 4);
 		return;
 	}
 
@@ -673,13 +673,13 @@ fasttrap_pid_probe_handle_patched_instr64(arm_saved_state_t *state, fasttrap_tra
 		/* Stash in correct register slot */
 		switch (tp->ftt_type) {
 		case FASTTRAP_T_ARM64_LDR_W_PC_REL:
-			set_saved_state64_regno(regs64, regno, 1, value.val32);
+			set_saved_state_regno(state, regno, 1, value.val32);
 			break;
 		case FASTTRAP_T_ARM64_LDRSW_PC_REL:
-			set_saved_state64_regno(regs64, regno, 1, sign_extend(value.val32, 31));
+			set_saved_state_regno(state, regno, 1, sign_extend(value.val32, 31));
 			break;
 		case FASTTRAP_T_ARM64_LDR_X_PC_REL:
-			set_saved_state64_regno(regs64, regno, 1, value.val64);
+			set_saved_state_regno(state, regno, 1, value.val64);
 			break;
 		case FASTTRAP_T_ARM64_LDR_S_PC_REL:
 			ns64->v.s[regno][0] = value.val32;
@@ -801,7 +801,7 @@ fasttrap_pid_probe_handle_patched_instr64(arm_saved_state_t *state, fasttrap_tra
 
 		/* Update LR if appropriate */
 		if (tp->ftt_type == FASTTRAP_T_ARM64_BL) {
-			regs64->lr = regs64->pc + 4;
+			set_saved_state_lr(state, regs64->pc + 4);
 		}
 
 		/* Compute PC (unsigned addition for defined overflow) */
@@ -821,7 +821,7 @@ fasttrap_pid_probe_handle_patched_instr64(arm_saved_state_t *state, fasttrap_tra
 
 		/* Update LR if appropriate */
 		if (tp->ftt_type == FASTTRAP_T_ARM64_BLR) {
-			regs64->lr = regs64->pc + 4;
+			set_saved_state_lr(state, regs64->pc + 4);
 		}
 
 		/* Update PC in saved state */
@@ -890,7 +890,7 @@ fasttrap_pid_probe_handle_patched_instr64(arm_saved_state_t *state, fasttrap_tra
 		}
 
 		/* xzr, not sp */
-		set_saved_state64_regno(regs64, regno, 1, result);
+		set_saved_state_regno(state, regno, 1, result);
 
 		/* Move PC forward */
 		new_pc = regs64->pc + 4;
@@ -913,7 +913,7 @@ fasttrap_pid_probe_handle_patched_instr64(arm_saved_state_t *state, fasttrap_tra
 	}
 	default:
 	{
-		panic("An instruction DTrace doesn't expect: %d\n", tp->ftt_type);
+		panic("An instruction DTrace doesn't expect: %d", tp->ftt_type);
 		break;
 	}
 	}
@@ -962,6 +962,7 @@ fasttrap_pid_probe(arm_saved_state_t *state)
 	uthread->t_dtrace_astpc = 0;
 	uthread->t_dtrace_reg = 0;
 
+#if CONFIG_VFORK
 	/*
 	 * Treat a child created by a call to vfork(2) as if it were its
 	 * parent. We know that there's only one thread of control in such a
@@ -974,8 +975,9 @@ fasttrap_pid_probe(arm_saved_state_t *state)
 		}
 		proc_list_unlock();
 	}
+#endif /* CONFIG_VFORK */
 
-	pid = p->p_pid;
+	pid = proc_getpid(p);
 	pid_mtx = &cpu_core[CPU->cpu_id].cpuc_pid_lock;
 	lck_mtx_lock(pid_mtx);
 	bucket = &fasttrap_tpoints.fth_table[FASTTRAP_TPOINTS_INDEX(pid, pc)];
@@ -1149,6 +1151,7 @@ fasttrap_return_probe(arm_saved_state_t *regs)
 	uthread->t_dtrace_scrpc = 0;
 	uthread->t_dtrace_astpc = 0;
 
+#if CONFIG_VFORK
 	/*
 	 * Treat a child created by a call to vfork(2) as if it were its
 	 * parent. We know that there's only one thread of control in such a
@@ -1161,6 +1164,7 @@ fasttrap_return_probe(arm_saved_state_t *regs)
 		}
 		proc_list_unlock();
 	}
+#endif /* CONFIG_VFORK */
 
 	/*
 	 * We set rp->r_pc to the address of the traced instruction so

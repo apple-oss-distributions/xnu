@@ -109,10 +109,7 @@ kcdata_memory_alloc_init(mach_vm_address_t buffer_addr_p, unsigned data_type, un
 	mach_vm_address_t user_addr = 0;
 	uint16_t clamped_flags = (uint16_t) flags;
 
-	data = kalloc_flags(sizeof(struct kcdata_descriptor), Z_WAITOK | Z_ZERO);
-	if (data == NULL) {
-		return NULL;
-	}
+	data = kalloc_type(struct kcdata_descriptor, Z_WAITOK | Z_ZERO | Z_NOFAIL);
 	data->kcd_addr_begin = buffer_addr_p;
 	data->kcd_addr_end = buffer_addr_p;
 	data->kcd_flags = (clamped_flags & KCFLAG_USE_COPYOUT) ? clamped_flags : clamped_flags | KCFLAG_USE_MEMCOPY;
@@ -198,7 +195,7 @@ kcdata_memory_destroy(kcdata_descriptor_t data)
 	 * data->kcd_addr_begin points to memory in not tracked by
 	 * kcdata lib. So not clearing that here.
 	 */
-	kfree(data, sizeof(struct kcdata_descriptor));
+	kfree_type(struct kcdata_descriptor, data);
 	return KERN_SUCCESS;
 }
 
@@ -210,7 +207,7 @@ kcdata_compress_zalloc(void *opaque, u_int items, u_int size)
 	struct kcdata_compress_descriptor *cd = opaque;
 	int alloc_size = ~31L & (31 + (items * size));
 
-	result = (void *)(cd->kcd_cd_base + cd->kcd_cd_offset);
+	result = (void *)((uintptr_t)cd->kcd_cd_base + cd->kcd_cd_offset);
 	if ((uintptr_t) result + alloc_size > (uintptr_t) cd->kcd_cd_base + cd->kcd_cd_maxoffset) {
 		result = Z_NULL;
 	} else {
@@ -270,7 +267,7 @@ kcdata_init_compress_state(kcdata_descriptor_t data, void (*memcpy_f)(void *, co
 		cd->kcd_cd_zs.opaque = cd;
 		cd->kcd_cd_zs.zalloc = kcdata_compress_zalloc;
 		cd->kcd_cd_zs.zfree = kcdata_compress_zfree;
-		cd->kcd_cd_base = (void *) data->kcd_addr_begin + data->kcd_length - size;
+		cd->kcd_cd_base = (void *)(data->kcd_addr_begin + data->kcd_length - size);
 		data->kcd_length -= size;
 		cd->kcd_cd_offset = 0;
 		cd->kcd_cd_maxoffset = size;
@@ -393,7 +390,7 @@ kcdata_do_compress_zlib(kcdata_descriptor_t data, void *inbuffer,
 		 * Should only fail with catastrophic, unrecoverable cases (i.e.,
 		 * corrupted z_stream, or incorrect configuration)
 		 */
-		panic("zlib kcdata compression ret = %d\n", ret);
+		panic("zlib kcdata compression ret = %d", ret);
 	}
 
 	kcdata_debug_printf("%s: %p (%zu) <- %p (%zu); flush: %d; ret = %ld\n",
@@ -537,7 +534,7 @@ kcdata_compress_chunk_with_flags(kcdata_descriptor_t data, uint32_t type, const 
 		return kr;
 	}
 	kcdata_debug_printf("%s: first wrote = %zu\n", __func__, wrote);
-	space_ptr  += wrote;
+	space_ptr = (void *)((uintptr_t)space_ptr + wrote);
 	total_uncompressed_space_remaining -= wrote;
 
 	/* If there is input provided, compress that here */
@@ -550,7 +547,7 @@ kcdata_compress_chunk_with_flags(kcdata_descriptor_t data, uint32_t type, const 
 			return kr;
 		}
 		kcdata_debug_printf("%s: 2nd wrote = %zu\n", __func__, wrote);
-		space_ptr  += wrote;
+		space_ptr = (void *)((uintptr_t)space_ptr + wrote);
 		total_uncompressed_space_remaining -= wrote;
 	}
 
@@ -567,14 +564,14 @@ kcdata_compress_chunk_with_flags(kcdata_descriptor_t data, uint32_t type, const 
 		if (wrote == 0) {
 			return KERN_FAILURE;
 		}
-		space_ptr  += wrote;
+		space_ptr = (void *)((uintptr_t)space_ptr + wrote);
 		total_uncompressed_space_remaining -= wrote;
 	}
 
-	assert((size_t)(space_ptr - space_start) <= total_uncompressed_size);
+	assert((size_t)((uintptr_t)space_ptr - (uintptr_t)space_start) <= total_uncompressed_size);
 
 	/* move the end marker forward */
-	data->kcd_addr_end = (mach_vm_address_t) (space_start + (total_uncompressed_size - total_uncompressed_space_remaining));
+	data->kcd_addr_end = (mach_vm_address_t) space_start + (total_uncompressed_size - total_uncompressed_space_remaining);
 
 	return KERN_SUCCESS;
 }
@@ -742,10 +739,10 @@ kcdata_compression_window_close(kcdata_descriptor_t data)
 	if (wrote == 0) {
 		return KERN_FAILURE;
 	}
-	space_ptr   += wrote;
+	space_ptr = (void *)((uintptr_t)space_ptr + wrote);
 	total_uncompressed_space_remaining  -= wrote;
 
-	assert((size_t)(space_ptr - space_start) <= max_size);
+	assert((size_t)((uintptr_t)space_ptr - (uintptr_t)space_start) <= max_size);
 
 	/* copy to the original location */
 	kcdata_memcpy(data, cd->kcd_cd_mark_begin, space_start, (uint32_t) (max_size - total_uncompressed_space_remaining));
@@ -780,6 +777,7 @@ kcdata_get_compression_stats(kcdata_descriptor_t data, uint64_t *totalout, uint6
 		kr = kcdata_get_compression_stats_zlib(data, totalout, totalin);
 		break;
 	case KCDCT_NONE:
+		*totalout = *totalin = kcdata_memory_get_used_bytes(data);
 		kr = KERN_SUCCESS;
 		break;
 	default:

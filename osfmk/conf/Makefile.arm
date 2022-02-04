@@ -13,11 +13,11 @@ vfp_state_test.o_CFLAGS_ADD += -mno-implicit-float
 # DO NOT ADD MORE HERE.
 #
 # -Wno-implicit-int-conversion
-vm_fault.o_CFLAGS_ADD += -Wno-implicit-int-conversion
-vm_map.o_CFLAGS_ADD += -Wno-implicit-int-conversion
+vm_fault.o_CWARNFLAGS_ADD += -Wno-implicit-int-conversion
+vm_map.o_CWARNFLAGS_ADD += -Wno-implicit-int-conversion
 # -Wno-shorten-64-to-32
-vm_fault.o_CFLAGS_ADD += -Wno-shorten-64-to-32
-vm_map.o_CFLAGS_ADD += -Wno-shorten-64-to-32
+vm_fault.o_CWARNFLAGS_ADD += -Wno-shorten-64-to-32
+vm_map.o_CWARNFLAGS_ADD += -Wno-shorten-64-to-32
 ######################################################################
 #END	Machine dependent Makefile fragment for arm
 ######################################################################

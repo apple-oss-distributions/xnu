@@ -189,6 +189,13 @@ csr_bootstrap(void)
 		csr_config |= CSR_ALLOW_APPLE_INTERNAL;
 	}
 
+	// Unrestrict filesystem access in recovery.
+	// This is required so the MSU stack can mount/unmount the update volume
+	// during paired recovery.
+	if (_csr_is_recovery_environment()) {
+		csr_config |= CSR_ALLOW_UNRESTRICTED_FS;
+	}
+
 	if (_csr_should_allow_device_configuration()) {
 		csr_config |= CSR_ALLOW_DEVICE_CONFIGURATION;
 	}

@@ -56,7 +56,7 @@
 .\"
 .\"     @(#)open.2	8.2 (Berkeley) 11/16/93
 .\"
-.Dd November 10, 2010
+.Dd June 3, 2021
 .Dt OPEN 2
 .Os BSD 4
 .Sh NAME
@@ -149,6 +149,7 @@ O_TRUNC		truncate size to 0
 O_EXCL		error if O_CREAT and the file exists
 O_SHLOCK	atomically obtain a shared lock
 O_EXLOCK	atomically obtain an exclusive lock
+O_DIRECTORY	restrict open to a directory
 O_NOFOLLOW	do not follow symlinks
 O_SYMLINK	allow open of symlinks
 O_EVTONLY	descriptor requested for event notifications only
@@ -203,6 +204,14 @@ If creating a file with
 .Dv O_CREAT ,
 the request for the lock will never fail
 (provided that the underlying filesystem supports locking).
+.Pp
+If
+.Dv O_DIRECTORY
+is used in the mask and the target file passed to
+.Fn open
+is not a directory then the
+.Fn open
+will fail.
 .Pp
 If
 .Dv O_NOFOLLOW
@@ -361,6 +370,10 @@ characters.
 .It Bq Er ENFILE
 The system file table is full.
 .\" ===========
+.It Bq Er ENOTDIR
+.Dv O_DIRECTORY
+was specified and the target is not a directory.
+.\" ===========
 .It Bq Er ELOOP
 .Dv O_NOFOLLOW
 was specified and the target is a symbolic link.
@@ -394,6 +407,15 @@ file is being created.
 .\" ===========
 .It Bq Er ENOTDIR
 A component of the path prefix is not a directory.
+ .\" ===========
+.It Bq Er EDEADLK
+A component of the pathname refers to a
+.Dq dataless
+directory that requires materialization and the I/O policy of the current
+thread or process disallows dataless directory materialization
+.Po see
+.Xr getiopolicy_np 3
+.Pc .
 .\" ===========
 .It Bq Er ENXIO
 The named file is a character-special or block-special file
@@ -425,7 +447,7 @@ The file is a pure procedure (shared text) file that is being
 executed and the
 .Fn open
 call requests write access.
-.It Bq Eq EBADF
+.It Bq Er EBADF
 The
 .Fa path
 argument does not specify an absolute path and the
@@ -434,7 +456,7 @@ argument is
 neither
 .Dv AT_FDCWD
 nor a valid file descriptor open for searching.
-.It Bq Eq ENOTDIR
+.It Bq Er ENOTDIR
 The
 .Fa path
 argument is not an absolute path and
@@ -442,7 +464,7 @@ argument is not an absolute path and
 is neither
 .Dv AT_FDCWD
 nor a file descriptor associated with a directory.
-.It Bq Eq EILSEQ
+.It Bq Er EILSEQ
 The filename does not match the encoding rules.
 .El
 .Sh COMPATIBILITY

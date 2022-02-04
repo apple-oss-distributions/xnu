@@ -79,7 +79,9 @@ enum {
 	kPEPagingOff,
 	kPEPanicBegin,
 	kPEPanicEnd,
-	kPEPanicRestartCPUNoCallouts
+	kPEPanicRestartCPUNoCallouts,
+	kPEPanicDiagnosticsDone,
+	kPEPanicDiagnosticsInProgress,
 };
 
 /* Bitmask of details related to panic callouts */
@@ -95,8 +97,9 @@ extern int PEHaltRestartInternal(unsigned int type, uint32_t details);
 enum {
 	kIOSystemShutdownNotificationStageProcessExit = 0,
 	kIOSystemShutdownNotificationStageRootUnmount = 1,
+	kIOSystemShutdownNotificationTerminateDEXTs   = 2,
 };
-extern void IOSystemShutdownNotification(int stage);
+extern void IOSystemShutdownNotification(int howto, int stage);
 
 extern uint32_t gEnforceQuiesceSafety;
 #endif /* XNU_KERNEL_PRIVATE */

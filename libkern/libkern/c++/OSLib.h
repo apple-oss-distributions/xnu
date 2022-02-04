@@ -51,17 +51,11 @@ __END_DECLS
 #include <libkern/OSAtomic.h>
 #include <libkern/c++/OSCPPDebug.h>
 
-#define kalloc_container(size)  \
-	kalloc_tag_bt(size, VM_KERN_MEMORY_LIBKERN)
-
 #define kalloc_data_container(size, flags)  \
 	kheap_alloc_tag_bt(KHEAP_DATA_BUFFERS, size, flags, VM_KERN_MEMORY_LIBKERN)
 
 #define kfree_data_container(buffer, size) \
 	kheap_free(KHEAP_DATA_BUFFERS, buffer, size)
-
-#define kallocp_container(size) \
-	kallocp_tag_bt(size, VM_KERN_MEMORY_LIBKERN)
 
 #if OSALLOCDEBUG
 

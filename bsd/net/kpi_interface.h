@@ -57,7 +57,7 @@ struct ifnet_interface_advisory;
 #endif /* PRIVATE */
 
 #ifdef XNU_KERNEL_PRIVATE
-#if !XNU_TARGET_OS_OSX || (TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR)
+#if !XNU_TARGET_OS_OSX
 #define KPI_INTERFACE_EMBEDDED 1
 #else /* XNU_TARGET_OS_OSX && !(TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR) */
 #define KPI_INTERFACE_EMBEDDED 0
@@ -147,6 +147,7 @@ enum {
 	IFNET_SUBFAMILY_INTCOPROC       = 6,
 	IFNET_SUBFAMILY_QUICKRELAY      = 7,
 	IFNET_SUBFAMILY_DEFAULT         = 8,
+	IFNET_SUBFAMILY_VMNET           = 9,
 };
 
 /*
@@ -214,13 +215,13 @@ typedef u_int32_t protocol_family_t;
  *       @constant IFNET_TSO_IPV4 Hardware supports IPv4 TCP Segment Offloading.
  *               If the Interface driver sets this flag, TCP will send larger frames (up to 64KB) as one
  *               frame to the adapter which will perform the final packetization. The maximum TSO segment
- *               supported by the interface can be set with "ifnet_set_tso_mtu". To retreive the real MTU
+ *               supported by the interface can be set with "ifnet_set_tso_mtu". To retrieve the real MTU
  *               for the TCP connection the function "mbuf_get_tso_requested" is used by the driver. Note
  *               that if TSO is active, all the packets will be flagged for TSO, not just large packets.
  *       @constant IFNET_TSO_IPV6 Hardware supports IPv6 TCP Segment Offloading.
  *               If the Interface driver sets this flag, TCP IPv6 will send larger frames (up to 64KB) as one
  *               frame to the adapter which will perform the final packetization. The maximum TSO segment
- *               supported by the interface can be set with "ifnet_set_tso_mtu". To retreive the real MTU
+ *               supported by the interface can be set with "ifnet_set_tso_mtu". To retrieve the real MTU
  *               for the TCP IPv6 connection the function "mbuf_get_tso_requested" is used by the driver.
  *               Note that if TSO is active, all the packets will be flagged for TSO, not just large packets.
  *       @constant IFNET_TX_STATUS Driver supports returning a per packet
@@ -2685,7 +2686,7 @@ __NKE_API_DEPRECATED;
  *               promiscuous mode only once for every time you enable it.
  *       @param interface The interface to toggle promiscuous mode on.
  *       @param on If set, the number of promicuous on requests will be
- *               incremented. If this is the first requrest, promiscuous mode
+ *               incremented. If this is the first request, promiscuous mode
  *               will be enabled. If this is not set, the number of promiscous
  *               clients will be decremented. If this causes the number to reach
  *               zero, promiscuous mode will be disabled.
@@ -3479,13 +3480,19 @@ ifnet_notice_node_presence_v2(ifnet_t ifp, struct sockaddr *sa, struct sockaddr_
     int lqm, int npm, u_int8_t srvinfo[48]);
 
 /*
- *       @function ifnet_notice_master_elected
+ *       @function ifnet_notice_primary_elected
  *       @discussion Provided for network interface drivers to notify the system
  *               that the nodes with a locally detected presence on the attached
- *               link have elected a new master.
- *       @param ifp The interface attached to the link where the new master has
+ *               link have elected a new primary.
+ *       @param ifp The interface attached to the link where the new primary has
  *               been elected.
  *       @result Returns 0 on success, or EINVAL if arguments are invalid.
+ */
+extern errno_t ifnet_notice_primary_elected(ifnet_t ifp);
+
+/*
+ *       @function ifnet_notice_master_elected
+ *       @discussion Obsolete, use ifnet_notice_primary_elected instead
  */
 extern errno_t ifnet_notice_master_elected(ifnet_t ifp);
 

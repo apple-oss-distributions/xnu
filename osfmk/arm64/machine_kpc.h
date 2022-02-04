@@ -29,15 +29,22 @@
 #define _MACHINE_ARM64_KPC_H
 
 #include <pexpert/arm64/board_config.h>
+#include <stdint.h>
 
 typedef uint64_t kpc_config_t;
 
 #define KPC_ARM64_FIXED_COUNT        (2)
 #define KPC_ARM64_CONFIGURABLE_COUNT (CORE_NCTRS - KPC_ARM64_FIXED_COUNT)
 
+#if CPMU_64BIT_PMCS
+#define KPC_ARM64_COUNTER_WIDTH    (63)
+#define KPC_ARM64_COUNTER_OVF_BIT  (63)
+#else // CPMU_64BIT_PMCS
 #define KPC_ARM64_COUNTER_WIDTH    (47)
-#define KPC_ARM64_COUNTER_MASK     ((UINT64_C(1) << KPC_ARM64_COUNTER_WIDTH) - 1)
 #define KPC_ARM64_COUNTER_OVF_BIT  (47)
+#endif // !CPMU_64BIT_PMCS
+
+#define KPC_ARM64_COUNTER_MASK     ((UINT64_C(1) << KPC_ARM64_COUNTER_WIDTH) - 1)
 #define KPC_ARM64_COUNTER_OVF_MASK (UINT64_C(1) << KPC_ARM64_COUNTER_OVF_BIT)
 
 /* arm64 uses fixed counter shadows */

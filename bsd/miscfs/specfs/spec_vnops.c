@@ -95,10 +95,13 @@
 #include <kern/waitq.h>
 
 #include <pexpert/pexpert.h>
-#include <IOKit/IOBSD.h>
 
 #include <sys/kdebug.h>
 #include <libkern/section_keywords.h>
+
+#if CONFIG_IO_COMPRESSION_STATS
+#include <vfs/vfs_io_compression_stats.h>
+#endif /* CONFIG_IO_COMPRESSION_STATS */
 
 /* XXX following three prototypes should be in a header file somewhere */
 extern dev_t    chrtoblk(dev_t dev);
@@ -300,8 +303,6 @@ set_fsblocksize(struct vnode *vp)
 int
 spec_open(struct vnop_open_args *ap)
 {
-	static const char *OPEN_MOUNTED_ENTITLEMENT = "com.apple.private.vfs.open-mounted";
-
 	struct proc *p = vfs_context_proc(ap->a_context);
 	kauth_cred_t cred = vfs_context_ucred(ap->a_context);
 	struct vnode *vp = ap->a_vp;
@@ -406,10 +407,8 @@ spec_open(struct vnop_open_args *ap)
 		 * Do not allow opens of block devices that are
 		 * currently mounted.
 		 */
-		if (!IOTaskHasEntitlement(current_task(), OPEN_MOUNTED_ENTITLEMENT)) {
-			if ((error = vfs_mountedon(vp))) {
-				return error;
-			}
+		if ((error = vfs_mountedon(vp))) {
+			return error;
 		}
 
 		devsw_lock(dev, S_IFBLK);
@@ -501,7 +500,7 @@ spec_read(struct vnop_read_args *ap)
 		int ddisk = 0;
 		int ktrace_code = DKIO_READ;
 		devBlockSize = vp->v_specsize;
-		uintptr_t our_id;
+		uintptr_t our_id = 0;
 
 		if (cdevsw[major(vp->v_rdev)].d_type == D_DISK) {
 			ddisk = 1;
@@ -642,7 +641,7 @@ spec_write(struct vnop_write_args *ap)
 		uint64_t blkno = 0;
 		int ddisk = 0;
 		int ktrace_code = 0;  // write is implied; read must be OR'd in.
-		uintptr_t our_id;
+		uintptr_t our_id = 0;
 
 		if (cdevsw[major(dev)].d_type == D_DISK) {
 			ddisk = 1;
@@ -828,8 +827,6 @@ spec_select(struct vnop_select_args *ap)
 	}
 }
 
-static int filt_specattach(struct knote *kn, struct kevent_qos_s *kev);
-
 int
 spec_kqfilter(vnode_t vp, struct knote *kn, struct kevent_qos_s *kev)
 {
@@ -879,11 +876,12 @@ spec_kqfilter(vnode_t vp, struct knote *kn, struct kevent_qos_s *kev)
 		 * counts, so it must go through the select fallback.
 		 */
 		kn->kn_filtid = EVFILTID_TTY;
-		return knote_fops(kn)->f_attach(kn, kev);
+	} else {
+		/* Try to attach to other char special devices */
+		kn->kn_filtid = EVFILTID_SPEC;
 	}
 
-	/* Try to attach to other char special devices */
-	return filt_specattach(kn, kev);
+	return knote_fops(kn)->f_attach(kn, kev);
 }
 
 /*
@@ -943,9 +941,7 @@ SYSCTL_INT(_debug, OID_AUTO, lowpri_throttle_tier3_io_period_ssd_msecs, CTLFLAG_
 SYSCTL_INT(_debug, OID_AUTO, lowpri_throttle_enabled, CTLFLAG_RW | CTLFLAG_LOCKED, &lowpri_throttle_enabled, 0, "");
 
 
-static lck_grp_t        *throttle_lock_grp;
-static lck_attr_t       *throttle_lock_attr;
-static lck_grp_attr_t   *throttle_lock_grp_attr;
+static LCK_GRP_DECLARE(throttle_lock_grp, "throttle I/O");
 
 
 /*
@@ -997,8 +993,8 @@ throttle_info_rel(struct _throttle_io_info_t *info)
 	if ((info->throttle_refcnt == 0) && (info->throttle_alloc)) {
 		DEBUG_ALLOC_THROTTLE_INFO("Freeing info = %p\n", info);
 
-		lck_mtx_destroy(&info->throttle_lock, throttle_lock_grp);
-		FREE(info, M_TEMP);
+		lck_mtx_destroy(&info->throttle_lock, &throttle_lock_grp);
+		kfree_type(struct _throttle_io_info_t, info);
 	}
 	return oldValue;
 }
@@ -1018,7 +1014,7 @@ throttle_info_ref(struct _throttle_io_info_t *info)
 	    info, (int)(oldValue - 1), info );
 	/* Allocated items should never have a reference of zero */
 	if (info->throttle_alloc && (oldValue == 0)) {
-		panic("Taking a reference without calling create throttle info!\n");
+		panic("Taking a reference without calling create throttle info!");
 	}
 
 	return oldValue;
@@ -1324,6 +1320,13 @@ throttle_init_throttle_window(void)
 	 * All values are specified in msecs.
 	 */
 
+#if (XNU_TARGET_OS_OSX && __arm64__)
+	/*
+	 * IO Tier EDT overrides are meant for
+	 * some arm platforms but not for
+	 * macs.
+	 */
+#else /* (XNU_TARGET_OS_OSX && __arm64__) */
 	/* Override global values with device-tree properties */
 	if (PE_get_default("kern.io_throttle_window_tier1", &throttle_window_size, sizeof(throttle_window_size))) {
 		throttle_windows_msecs[THROTTLE_LEVEL_TIER1] = throttle_window_size;
@@ -1336,6 +1339,7 @@ throttle_init_throttle_window(void)
 	if (PE_get_default("kern.io_throttle_window_tier3", &throttle_window_size, sizeof(throttle_window_size))) {
 		throttle_windows_msecs[THROTTLE_LEVEL_TIER3] = throttle_window_size;
 	}
+#endif /* (XNU_TARGET_OS_OSX && __arm64__) */
 
 	/* Override with boot-args */
 	if (PE_parse_boot_argn("io_throttle_window_tier1", &throttle_window_size, sizeof(throttle_window_size))) {
@@ -1371,6 +1375,13 @@ throttle_init_throttle_period(struct _throttle_io_info_t *info, boolean_t isssd)
 		info->throttle_io_periods = &throttle_io_period_msecs[0];
 	}
 
+#if (XNU_TARGET_OS_OSX && __arm64__)
+	/*
+	 * IO Tier EDT overrides are meant for
+	 * some arm platforms but not for
+	 * macs.
+	 */
+#else /* (XNU_TARGET_OS_OSX && __arm64__) */
 	/* Override global values with device-tree properties */
 	if (PE_get_default("kern.io_throttle_period_tier1", &throttle_period_size, sizeof(throttle_period_size))) {
 		info->throttle_io_periods[THROTTLE_LEVEL_TIER1] = throttle_period_size;
@@ -1383,6 +1394,7 @@ throttle_init_throttle_period(struct _throttle_io_info_t *info, boolean_t isssd)
 	if (PE_get_default("kern.io_throttle_period_tier3", &throttle_period_size, sizeof(throttle_period_size))) {
 		info->throttle_io_periods[THROTTLE_LEVEL_TIER3] = throttle_period_size;
 	}
+#endif /* (XNU_TARGET_OS_OSX && __arm64__) */
 
 	/* Override with boot-args */
 	if (PE_parse_boot_argn("io_throttle_period_tier1", &throttle_period_size, sizeof(throttle_period_size))) {
@@ -1412,24 +1424,14 @@ throttle_init(void)
 #if CONFIG_IOSCHED
 	int     iosched;
 #endif
-	/*
-	 * allocate lock group attribute and group
-	 */
-	throttle_lock_grp_attr = lck_grp_attr_alloc_init();
-	throttle_lock_grp = lck_grp_alloc_init("throttle I/O", throttle_lock_grp_attr);
 
 	/* Update throttle parameters based on device tree configuration */
 	throttle_init_throttle_window();
 
-	/*
-	 * allocate the lock attribute
-	 */
-	throttle_lock_attr = lck_attr_alloc_init();
-
 	for (i = 0; i < LOWPRI_MAX_NUM_DEV; i++) {
 		info = &_throttle_io_info[i];
 
-		lck_mtx_init(&info->throttle_lock, throttle_lock_grp, throttle_lock_attr);
+		lck_mtx_init(&info->throttle_lock, &throttle_lock_grp, LCK_ATTR_NULL);
 		info->throttle_timer_call = thread_call_allocate((thread_call_func_t)throttle_timer, (thread_call_param_t)info);
 
 		for (level = 0; level <= THROTTLE_LEVEL_END; level++) {
@@ -1538,16 +1540,13 @@ throttle_info_create(void)
 	struct _throttle_io_info_t *info;
 	int     level;
 
-	MALLOC(info, struct _throttle_io_info_t *, sizeof(*info), M_TEMP, M_ZERO | M_WAITOK);
-	/* Should never happen but just in case */
-	if (info == NULL) {
-		return NULL;
-	}
+	info = kalloc_type(struct _throttle_io_info_t,
+	    Z_ZERO | Z_WAITOK | Z_NOFAIL);
 	/* Mark that this one was allocated and needs to be freed */
 	DEBUG_ALLOC_THROTTLE_INFO("Creating info = %p\n", info, info );
 	info->throttle_alloc = TRUE;
 
-	lck_mtx_init(&info->throttle_lock, throttle_lock_grp, throttle_lock_attr);
+	lck_mtx_init(&info->throttle_lock, &throttle_lock_grp, LCK_ATTR_NULL);
 	info->throttle_timer_call = thread_call_allocate((thread_call_func_t)throttle_timer, (thread_call_param_t)info);
 
 	for (level = 0; level <= THROTTLE_LEVEL_END; level++) {
@@ -2127,6 +2126,12 @@ throttle_get_thread_effective_io_policy()
 	return proc_get_effective_thread_policy(current_thread(), TASK_POLICY_IO);
 }
 
+int
+throttle_thread_io_tier_above_metadata(void)
+{
+	return throttle_get_thread_effective_io_policy() < IOSCHED_METADATA_TIER;
+}
+
 void
 throttle_info_reset_window(uthread_t ut)
 {
@@ -2256,7 +2261,7 @@ throttle_info_update_internal(struct _throttle_io_info_t *info, uthread_t ut, in
 				microuptime(&info->throttle_window_start_timestamp[thread_throttle_level]);
 			}
 			KERNEL_DEBUG_CONSTANT((FSDBG_CODE(DBG_THROTTLE, OPEN_THROTTLE_WINDOW)) | DBG_FUNC_NONE,
-			    current_proc()->p_pid, thread_throttle_level, 0, 0, 0);
+			    proc_getpid(current_proc()), thread_throttle_level, 0, 0, 0);
 		}
 		microuptime(&info->throttle_last_IO_timestamp[thread_throttle_level]);
 	}
@@ -2515,20 +2520,27 @@ spec_strategy(struct vnop_strategy_args *ap)
 
 #if CONFIG_IOSCHED
 	/*
-	 * For I/O Scheduling, we currently do not have a way to track and expedite metadata I/Os.
-	 * To ensure we dont get into priority inversions due to metadata I/Os, we use the following rules:
-	 * For metadata reads, ceil all I/Os to IOSCHED_METADATA_TIER & mark them passive if the I/O tier was upgraded
-	 * For metadata writes, unconditionally mark them as IOSCHED_METADATA_TIER and passive
+	 * For metadata reads, ceil the I/O tier to IOSCHED_METADATA_EXPEDITED_TIER if they are expedited, otherwise
+	 * ceil it to IOSCHED_METADATA_TIER. Mark them passive if the I/O tier was upgraded.
+	 * For metadata writes, set the I/O tier to IOSCHED_METADATA_EXPEDITED_TIER if they are expedited. Otherwise
+	 * set it to IOSCHED_METADATA_TIER. In addition, mark them as passive.
 	 */
 	if (bap->ba_flags & BA_META) {
 		if ((mp && (mp->mnt_ioflags & MNT_IOFLAGS_IOSCHED_SUPPORTED)) || (bap->ba_flags & BA_IO_SCHEDULED)) {
 			if (bp->b_flags & B_READ) {
-				if (io_tier > IOSCHED_METADATA_TIER) {
+				if ((bap->ba_flags & BA_EXPEDITED_META_IO) && (io_tier > IOSCHED_METADATA_EXPEDITED_TIER)) {
+					io_tier = IOSCHED_METADATA_EXPEDITED_TIER;
+					passive = 1;
+				} else if (io_tier > IOSCHED_METADATA_TIER) {
 					io_tier = IOSCHED_METADATA_TIER;
 					passive = 1;
 				}
 			} else {
-				io_tier = IOSCHED_METADATA_TIER;
+				if (bap->ba_flags & BA_EXPEDITED_META_IO) {
+					io_tier = IOSCHED_METADATA_EXPEDITED_TIER;
+				} else {
+					io_tier = IOSCHED_METADATA_TIER;
+				}
 				passive = 1;
 			}
 		}
@@ -2591,6 +2603,11 @@ spec_strategy(struct vnop_strategy_args *ap)
 		    buf_kernel_addrperm_addr(bp), bdev, buf_blkno(bp), buf_count(bp), 0);
 	}
 
+#if CONFIG_IO_COMPRESSION_STATS
+	if (!is_vm_privileged()) {
+		io_compression_stats(bp);
+	}
+#endif /* CONFIG_IO_COMPRESSION_STATS */
 	thread_update_io_stats(current_thread(), buf_count(bp), code);
 
 	if (mp != NULL) {
@@ -2692,6 +2709,7 @@ spec_close(struct vnop_close_args *ap)
 	int flags = ap->a_fflag;
 	struct proc *p = vfs_context_proc(ap->a_context);
 	struct session *sessp;
+	struct pgrp *pg;
 
 	switch (vp->v_type) {
 	case VCHR:
@@ -2704,7 +2722,7 @@ spec_close(struct vnop_close_args *ap)
 		 * if the reference count is 1 (this is the very
 		 * last close)
 		 */
-		sessp = proc_session(p);
+		pg = proc_pgrp(p, &sessp);
 		devsw_lock(dev, S_IFCHR);
 		if (sessp != SESSION_NULL) {
 			if (vp == sessp->s_ttyvp && vcount(vp) == 1) {
@@ -2713,11 +2731,7 @@ spec_close(struct vnop_close_args *ap)
 				devsw_unlock(dev, S_IFCHR);
 				session_lock(sessp);
 				if (vp == sessp->s_ttyvp) {
-					tp = SESSION_TP(sessp);
-					sessp->s_ttyvp = NULL;
-					sessp->s_ttyvid = 0;
-					sessp->s_ttyp = TTY_NULL;
-					sessp->s_ttypgrpid = NO_PID;
+					tp = session_clear_tty_locked(sessp);
 				}
 				session_unlock(sessp);
 
@@ -2726,8 +2740,8 @@ spec_close(struct vnop_close_args *ap)
 				}
 				devsw_lock(dev, S_IFCHR);
 			}
-			session_rele(sessp);
 		}
+		pgrp_rele(pg);
 
 		if (--vp->v_specinfo->si_opencount < 0) {
 			panic("negative open count (c, %u, %u)", major(dev), minor(dev));
@@ -2879,11 +2893,11 @@ spec_offtoblk(struct vnop_offtoblk_args *ap)
 	return 0;
 }
 
+static int filt_specattach(struct knote *kn, struct kevent_qos_s *kev);
 static void filt_specdetach(struct knote *kn);
 static int filt_specevent(struct knote *kn, long hint);
 static int filt_spectouch(struct knote *kn, struct kevent_qos_s *kev);
 static int filt_specprocess(struct knote *kn, struct kevent_qos_s *kev);
-static int filt_specpeek(struct knote *kn);
 
 SECURITY_READ_ONLY_EARLY(struct filterops) spec_filtops = {
 	.f_isfd    = 1,
@@ -2892,171 +2906,101 @@ SECURITY_READ_ONLY_EARLY(struct filterops) spec_filtops = {
 	.f_event   = filt_specevent,
 	.f_touch   = filt_spectouch,
 	.f_process = filt_specprocess,
-	.f_peek    = filt_specpeek
 };
 
-
-/*
- * Given a waitq that is assumed to be embedded within a selinfo structure,
- * return the containing selinfo structure. While 'wq' is not really a queue
- * element, this macro simply does the offset_of calculation to get back to a
- * containing struct given the struct type and member name.
- */
-#define selinfo_from_waitq(wq) \
-	qe_element((wq), struct selinfo, si_waitq)
-
-static int
-spec_knote_select_and_link(struct knote *kn)
+static void
+filt_spec_make_eof(struct knote *kn)
 {
-	uthread_t uth;
-	vfs_context_t ctx;
-	vnode_t vp;
-	struct waitq_set *old_wqs;
-	uint64_t rsvd, rsvd_arg;
-	uint64_t *rlptr = NULL;
-	struct selinfo *si = NULL;
-	int selres = 0;
-
-	uth = get_bsdthread_info(current_thread());
-
-	ctx = vfs_context_current();
-	vp = (vnode_t)kn->kn_fp->fp_glob->fg_data;
-
-	int error = vnode_getwithvid(vp, vnode_vid(vp));
-	if (error != 0) {
-		knote_set_error(kn, ENOENT);
-		return 0;
-	}
-
 	/*
-	 * This function may be called many times to link or re-link the
-	 * underlying vnode to the kqueue.  If we've already linked the two,
-	 * we will have a valid kn_hook_waitqid which ties us to the underlying
-	 * device's waitq via a the waitq's prepost table object. However,
-	 * devices can abort any select action by calling selthreadclear().
-	 * This is OK because the table object will be invalidated by the
-	 * driver (through a call to selthreadclear), so any attempt to access
-	 * the associated waitq will fail because the table object is invalid.
-	 *
-	 * Even if we've already registered, we need to pass a pointer
-	 * to a reserved link structure. Otherwise, selrecord() will
-	 * infer that we're in the second pass of select() and won't
-	 * actually do anything!
+	 * The spec filter might touch kn_flags from f_event
+	 * without holding "the primitive lock", so make it atomic.
 	 */
-	rsvd = rsvd_arg = waitq_link_reserve(NULL);
-	rlptr = (void *)&rsvd_arg;
-
-	/*
-	 * Trick selrecord() into hooking kqueue's wait queue set into the device's
-	 * selinfo wait queue.
-	 */
-	old_wqs = uth->uu_wqset;
-	uth->uu_wqset = &(knote_get_kq(kn)->kq_wqs);
-
-	/*
-	 * Be sure that the waitq set is linked
-	 * before calling select to avoid possible
-	 * allocation under spinlocks.
-	 */
-	waitq_set_lazy_init_link(uth->uu_wqset);
-
-	/*
-	 * Now these are the laws of VNOP_SELECT, as old and as true as the sky,
-	 * And the device that shall keep it may prosper, but the device that shall
-	 * break it must receive ENODEV:
-	 *
-	 * 1. Take a lock to protect against other selects on the same vnode.
-	 * 2. Return 1 if data is ready to be read.
-	 * 3. Return 0 and call `selrecord` on a handy `selinfo` structure if there
-	 *    is no data.
-	 * 4. Call `selwakeup` when the vnode has an active `selrecord` and data
-	 *    can be read or written (depending on the seltype).
-	 * 5. If there's a `selrecord` and no corresponding `selwakeup`, but the
-	 *    vnode is going away, call `selthreadclear`.
-	 */
-	selres = VNOP_SELECT(vp, knote_get_seltype(kn), 0, rlptr, ctx);
-	uth->uu_wqset = old_wqs;
-
-	/*
-	 * Make sure to cleanup the reserved link - this guards against
-	 * drivers that may not actually call selrecord().
-	 */
-	waitq_link_release(rsvd);
-	if (rsvd != rsvd_arg) {
-		/* The driver / handler called selrecord() */
-		struct waitq *wq;
-		memcpy(&wq, rlptr, sizeof(void *));
-
-		/*
-		 * The waitq is part of the selinfo structure managed by the
-		 * driver. For certain drivers, we want to hook the knote into
-		 * the selinfo structure's si_note field so selwakeup can call
-		 * KNOTE.
-		 */
-		si = selinfo_from_waitq(wq);
-
-		/*
-		 * The waitq_get_prepost_id() function will (potentially)
-		 * allocate a prepost table object for the waitq and return
-		 * the table object's ID to us.  It will also set the
-		 * waitq_prepost_id field within the waitq structure.
-		 *
-		 * We can just overwrite kn_hook_waitqid because it's simply a
-		 * table ID used to grab a reference when needed.
-		 *
-		 * We have a reference on the vnode, so we know that the
-		 * device won't go away while we get this ID.
-		 *
-		 * Note: on 32bit this field is 32bit only.
-		 */
-		kn->kn_hook_waitqid = (typeof(kn->kn_hook_waitqid))waitq_get_prepost_id(wq);
-	} else if (selres == 0) {
-		/*
-		 * The device indicated that there's no data to read, but didn't call
-		 * `selrecord`.  Nothing will be notified of changes to this vnode, so
-		 * return an error back to user space, to make it clear that the knote
-		 * is not attached.
-		 */
-		knote_set_error(kn, ENODEV);
-	}
-
-	vnode_put(vp);
-
-	return selres;
+	os_atomic_or(&kn->kn_flags, EV_EOF | EV_ONESHOT, relaxed);
 }
 
 static int
-filt_spec_common(struct knote *kn, struct kevent_qos_s *kev, int selres)
+filt_spec_common(struct knote *kn, struct kevent_qos_s *kev, bool attach)
 {
-	int64_t data;
-	int ret;
+	uthread_t uth = current_uthread();
+	vfs_context_t ctx = vfs_context_current();
+	vnode_t vp = kn->kn_fp->fp_glob->fg_data;
+	__block bool selrecorded = false;
+	struct waitq_set *old_wqs;
+	int64_t data = 0;
+	int ret, selret;
+
+	if (kn->kn_flags & EV_EOF) {
+		ret = FILTER_ACTIVE;
+		goto out;
+	}
+
+	if (!attach && vnode_getwithvid(vp, vnode_vid(vp)) != 0) {
+		filt_spec_make_eof(kn);
+		ret = FILTER_ACTIVE;
+		goto out;
+	}
+
+	selspec_record_hook_t cb = ^(struct selinfo *si) {
+		selspec_attach(kn, si);
+		selrecorded = true;
+	};
+
+	old_wqs = uth->uu_wqset;
+	uth->uu_wqset = SELSPEC_RECORD_MARKER;
+	selret = VNOP_SELECT(vp, knote_get_seltype(kn), 0, cb, ctx);
+	uth->uu_wqset = old_wqs;
+
+	if (!attach) {
+		vnode_put(vp);
+	}
+
+	if (!selrecorded && selret == 0) {
+		/*
+		 * The device indicated that there's no data to read,
+		 * but didn't call `selrecord`.
+		 *
+		 * Nothing will be notified of changes to this vnode,
+		 * so return an error back to user space on attach,
+		 * or pretend the knote disappeared for other cases,
+		 * to make it clear that the knote is not attached.
+		 */
+		if (attach) {
+			knote_set_error(kn, ENODEV);
+			return 0;
+		}
+
+		filt_spec_make_eof(kn);
+		ret = FILTER_ACTIVE;
+		goto out;
+	}
 
 	if (kn->kn_vnode_use_ofst) {
-		if (kn->kn_fp->fp_glob->fg_offset >= (uint32_t)selres) {
+		if (kn->kn_fp->fp_glob->fg_offset >= (uint32_t)selret) {
 			data = 0;
 		} else {
-			data = ((uint32_t)selres) - kn->kn_fp->fp_glob->fg_offset;
+			data = ((uint32_t)selret) - kn->kn_fp->fp_glob->fg_offset;
 		}
 	} else {
-		data = selres;
+		data = selret;
 	}
 
-	ret = data >= knote_low_watermark(kn);
-
-	if (ret && kev) {
+	if (data >= knote_low_watermark(kn)) {
+		ret = FILTER_ACTIVE;
+	} else {
+		ret = 0;
+	}
+out:
+	if (ret) {
 		knote_fill_kevent(kn, kev, data);
 	}
-
 	return ret;
 }
 
 static int
 filt_specattach(struct knote *kn, __unused struct kevent_qos_s *kev)
 {
-	vnode_t vp;
+	vnode_t vp = kn->kn_fp->fp_glob->fg_data; /* Already have iocount, and vnode is alive */
 	dev_t dev;
-
-	vp = (vnode_t)kn->kn_fp->fp_glob->fg_data; /* Already have iocount, and vnode is alive */
 
 	assert(vnode_ischr(vp));
 
@@ -3075,55 +3019,26 @@ filt_specattach(struct knote *kn, __unused struct kevent_qos_s *kev)
 		return 0;
 	}
 
-	/*
-	 * This forces the select fallback to call through VNOP_SELECT and hook
-	 * up selinfo on every filter routine.
-	 *
-	 * Pseudo-terminal controllers are opted out of native kevent support --
-	 * remove this when they get their own EVFILTID.
-	 */
-	if (cdevsw_flags[major(dev)] & CDEVSW_IS_PTC) {
-		kn->kn_vnode_kqok = 0;
-	}
-
-	kn->kn_filtid = EVFILTID_SPEC;
-	kn->kn_hook_waitqid = 0;
-
-	knote_markstayactive(kn);
-	return spec_knote_select_and_link(kn);
+	return filt_spec_common(kn, kev, true);
 }
 
 static void
 filt_specdetach(struct knote *kn)
 {
-	knote_clearstayactive(kn);
-
-	/*
-	 * This is potentially tricky: the device's selinfo waitq that was
-	 * tricked into being part of this knote's waitq set may not be a part
-	 * of any other set, and the device itself may have revoked the memory
-	 * in which the waitq was held. We use the knote's kn_hook_waitqid field
-	 * to keep the ID of the waitq's prepost table object. This
-	 * object keeps a pointer back to the waitq, and gives us a safe way
-	 * to decouple the dereferencing of driver allocated memory: if the
-	 * driver goes away (taking the waitq with it) then the prepost table
-	 * object will be invalidated. The waitq details are handled in the
-	 * waitq API invoked here.
-	 */
-	if (kn->kn_hook_waitqid) {
-		waitq_unlink_by_prepost_id(kn->kn_hook_waitqid, &(knote_get_kq(kn)->kq_wqs));
-		kn->kn_hook_waitqid = 0;
-	}
+	selspec_detach(kn);
 }
 
 static int
-filt_specevent(struct knote *kn, __unused long hint)
+filt_specevent(struct knote *kn, long hint)
 {
-	/*
-	 * Nothing should call knote or knote_vanish on this knote.
-	 */
-	panic("filt_specevent(%p)", kn);
-	return 0;
+	/* knote_post() will have cleared it for us */
+	assert(kn->kn_hook == NULL);
+
+	/* called by selwakeup with the selspec_lock lock held */
+	if (hint & NOTE_REVOKE) {
+		filt_spec_make_eof(kn);
+	}
+	return FILTER_ACTIVE;
 }
 
 static int
@@ -3132,47 +3047,11 @@ filt_spectouch(struct knote *kn, struct kevent_qos_s *kev)
 	kn->kn_sdata = kev->data;
 	kn->kn_sfflags = kev->fflags;
 
-	if (kev->flags & EV_ENABLE) {
-		return spec_knote_select_and_link(kn);
-	}
-
-	return 0;
+	return filt_spec_common(kn, kev, false);
 }
 
 static int
 filt_specprocess(struct knote *kn, struct kevent_qos_s *kev)
 {
-	vnode_t vp;
-	uthread_t uth;
-	vfs_context_t ctx;
-	int res;
-	int selres;
-	int error;
-
-	uth = get_bsdthread_info(current_thread());
-	ctx = vfs_context_current();
-	vp = (vnode_t)kn->kn_fp->fp_glob->fg_data;
-
-	error = vnode_getwithvid(vp, vnode_vid(vp));
-	if (error != 0) {
-		kn->kn_flags |= (EV_EOF | EV_ONESHOT);
-		knote_fill_kevent(kn, kev, 0);
-		return 1;
-	}
-
-	selres = spec_knote_select_and_link(kn);
-	res = filt_spec_common(kn, kev, selres);
-
-	vnode_put(vp);
-
-	return res;
-}
-
-static int
-filt_specpeek(struct knote *kn)
-{
-	int selres = 0;
-
-	selres = spec_knote_select_and_link(kn);
-	return filt_spec_common(kn, NULL, selres);
+	return filt_spec_common(kn, kev, false);
 }

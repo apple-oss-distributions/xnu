@@ -156,6 +156,7 @@ grab_pgo_data(struct proc *p,
     register_t *retval)
 {
 	char *buffer = NULL;
+	uint64_t size64 = 0;
 	int err = 0;
 
 	(void) p;
@@ -209,8 +210,6 @@ grab_pgo_data(struct proc *p,
 		}
 
 		if (uap->buffer == 0 && uap->size == 0) {
-			uint64_t size64;
-
 			if (uap->flags & PGO_WAIT_FOR_UNLOAD) {
 				err = EINVAL;
 				goto out;
@@ -238,8 +237,6 @@ grab_pgo_data(struct proc *p,
 			err = EINVAL;
 			goto out;
 		} else {
-			uint64_t size64 = 0;
-
 			err = OSKextGrabPgoData(uuid, &size64, NULL, 0,
 			    false,
 			    !!(uap->flags & PGO_METADATA));
@@ -256,7 +253,7 @@ grab_pgo_data(struct proc *p,
 				goto out;
 			}
 
-			MALLOC(buffer, char *, size64, M_TEMP, M_WAITOK | M_ZERO);
+			buffer = kalloc_data(size64, Z_WAITOK | Z_ZERO);
 			if (!buffer) {
 				err = ENOMEM;
 				goto out;
@@ -289,7 +286,7 @@ grab_pgo_data(struct proc *p,
 
 #ifdef PROFILE
 
-	uint64_t size64 = get_size_for_buffer(uap->flags);
+	size64 = get_size_for_buffer(uap->flags);
 	ssize_t size = size64;
 
 	if (uap->flags & (PGO_WAIT_FOR_UNLOAD | PGO_METADATA)) {
@@ -312,8 +309,8 @@ grab_pgo_data(struct proc *p,
 		err = EINVAL;
 		goto out;
 	} else {
-		MALLOC(buffer, char *, size, M_TEMP, M_WAITOK | M_ZERO);
-		if (!buffer) {
+		buffer = kalloc_data(size, Z_WAITOK | Z_ZERO)
+		    if (!buffer) {
 			err = ENOMEM;
 			goto out;
 		}
@@ -343,7 +340,7 @@ grab_pgo_data(struct proc *p,
 
 out:
 	if (buffer) {
-		FREE(buffer, M_TEMP);
+		kfree_data(buffer, size64);
 	}
 	if (err) {
 		*retval = -1;

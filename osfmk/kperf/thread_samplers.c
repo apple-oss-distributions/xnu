@@ -33,6 +33,7 @@
 #include <kern/timer.h> /* timer_data_t */
 #include <kern/policy_internal.h> /* TASK_POLICY_* */
 #include <mach/mach_types.h>
+#include <sys/errno.h>
 
 #include <kperf/kperf.h>
 #include <kperf/buffer.h>
@@ -287,40 +288,83 @@ kperf_thread_dispatch_sample(struct kperf_thread_dispatch *thdi,
 
 	thread_t thread = context->cur_thread;
 
-	BUF_INFO(PERF_TI_DISPSAMPLE | DBG_FUNC_START, (uintptr_t)thread_tid(thread));
+	BUF_INFO(PERF_TI_DISPSAMPLE | DBG_FUNC_START,
+	    (uintptr_t)thread_tid(thread));
 
 	task_t task = thread->task;
-	boolean_t task_64 = task_has_64Bit_addr(task);
-	size_t user_addr_size = task_64 ? 8 : 4;
+	size_t user_addr_size = task_has_64Bit_addr(task) ? 8 : 4;
+	thdi->kpthdi_dq_serialno = 0;
+	thdi->kpthdi_dq_label[0] = '\0';
+	int error = 0;
 
+	/*
+	 * The dispatch queue address points to a struct that contains
+	 * information about the dispatch queue.  Use task-level offsets to
+	 * find the serial number and label of the dispatch queue.
+	 */
 	assert(thread->task != kernel_task);
 	uint64_t user_dq_key_addr = thread_dispatchqaddr(thread);
 	if (user_dq_key_addr == 0) {
-		goto error;
-	}
-
-	uint64_t user_dq_addr;
-	if ((copyin((user_addr_t)user_dq_key_addr,
-	    (char *)&user_dq_addr,
-	    user_addr_size) != 0) ||
-	    (user_dq_addr == 0)) {
-		goto error;
-	}
-
-	uint64_t user_dq_serialno_addr =
-	    user_dq_addr + get_task_dispatchqueue_serialno_offset(task);
-
-	if (copyin((user_addr_t)user_dq_serialno_addr,
-	    (char *)&(thdi->kpthdi_dq_serialno),
-	    user_addr_size) == 0) {
+		error = ENOENT;
 		goto out;
 	}
 
-error:
-	thdi->kpthdi_dq_serialno = 0;
+	uint64_t user_dq_addr = 0;
+	if ((error = copyin((user_addr_t)user_dq_key_addr, &user_dq_addr,
+	    user_addr_size)) != 0) {
+		goto out;
+	}
+
+	if (user_dq_addr == 0) {
+		error = EINVAL;
+		goto out;
+	}
+
+	uint64_t serialno_offset = get_task_dispatchqueue_serialno_offset(task);
+	uint64_t user_dq_serialno_addr = 0;
+	if (os_add_overflow(user_dq_addr, serialno_offset,
+	    &user_dq_serialno_addr)) {
+		error = EOVERFLOW;
+		goto out;
+	}
+
+	if ((error = copyin((user_addr_t)user_dq_serialno_addr,
+	    &(thdi->kpthdi_dq_serialno), user_addr_size)) != 0) {
+		goto out;
+	}
+
+	uint64_t lbl_offset = get_task_dispatchqueue_label_offset(task);
+	if (lbl_offset == 0) {
+		error = ENOBUFS;
+		goto out;
+	}
+
+	uint64_t user_dqlbl_ptr_addr = 0;
+	if (os_add_overflow(user_dq_addr, lbl_offset, &user_dqlbl_ptr_addr)) {
+		error = EOVERFLOW;
+		goto out;
+	}
+
+	uint64_t user_dqlbl_addr = 0;
+	/*
+	 * The label isn't embedded in the struct -- it just holds a
+	 * pointer to the label string, NUL-terminated.
+	 */
+	if ((error = copyin((user_addr_t)user_dqlbl_ptr_addr, &user_dqlbl_addr,
+	    user_addr_size)) != 0) {
+		goto out;
+	}
+
+	vm_size_t copied = 0;
+	if ((error = copyinstr((user_addr_t)user_dqlbl_addr,
+	    thdi->kpthdi_dq_label, sizeof(thdi->kpthdi_dq_label),
+	    &copied)) != 0) {
+		goto out;
+	}
+	thdi->kpthdi_dq_label[sizeof(thdi->kpthdi_dq_label) - 1] = '\0';
 
 out:
-	BUF_VERB(PERF_TI_DISPSAMPLE | DBG_FUNC_END);
+	BUF_VERB(PERF_TI_DISPSAMPLE | DBG_FUNC_END, error);
 }
 
 int
@@ -341,6 +385,10 @@ kperf_thread_dispatch_log(struct kperf_thread_dispatch *thdi)
 	BUF_DATA(PERF_TI_DISPDATA_32, UPPER_32(thdi->kpthdi_dq_serialno),
 	    LOWER_32(thdi->kpthdi_dq_serialno));
 #endif /* defined(__LP64__) */
+
+	if (thdi->kpthdi_dq_label[0] != '\0') {
+		kernel_debug_string_simple(PERF_TI_DISPLABEL, thdi->kpthdi_dq_label);
+	}
 }
 
 /*

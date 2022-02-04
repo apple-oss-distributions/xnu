@@ -65,7 +65,7 @@ static char sccsid[] __attribute__((used)) = "@(#)mkmakefile.c	5.21 (Berkeley) 6
 #include "config.h"
 
 void    read_files(void);
-void    do_objs(FILE *fp, const char *msg, int ext);
+void    do_objs(FILE *fp, const char *msg, int ext, int flags);
 void    do_files(FILE *fp, const char *msg, char ext);
 void    do_machdep(FILE *ofp);
 void    do_rules(FILE *f);
@@ -243,16 +243,18 @@ makefile(void)
 		continue;
 percent:
 		if (eq(line, "%OBJS\n")) {
-			do_objs(ofp, "OBJS=", -1);
+			do_objs(ofp, "OBJS=", -1, 0);
+		} else if (eq(line, "%LIBOBJS\n")) {
+			do_objs(ofp, "LIBOBJS=", -1, LIBRARYDEP);
 		} else if (eq(line, "%CFILES\n")) {
 			do_files(ofp, "CFILES=", 'c');
-			do_objs(ofp, "COBJS=", 'c');
+			do_objs(ofp, "COBJS=", 'c', 0);
 		} else if (eq(line, "%CXXFILES\n")) {
 			do_files(ofp, "CXXFILES=", 'p');
-			do_objs(ofp, "CXXOBJS=", 'p');
+			do_objs(ofp, "CXXOBJS=", 'p', 0);
 		} else if (eq(line, "%SFILES\n")) {
 			do_files(ofp, "SFILES=", 's');
-			do_objs(ofp, "SOBJS=", 's');
+			do_objs(ofp, "SOBJS=", 's', 0);
 		} else if (eq(line, "%MACHDEP\n")) {
 			do_machdep(ofp);
 		} else if (eq(line, "%RULES\n")) {
@@ -287,6 +289,7 @@ read_files(void)
 	const char *devorprof;
 	int options;
 	int not_option;
+	int f_flags;
 	char pname[BUFSIZ];
 	char fname[1024];
 	char *rest = (char *) 0;
@@ -346,6 +349,7 @@ next:
 	nreqs = 0;
 	devorprof = "";
 	needs = 0;
+	f_flags = 0;
 	if (eq(wd, "standard")) {
 		goto checkdev;
 	}
@@ -370,6 +374,14 @@ nextopt:
 	if (eq(wd, "device-driver") || eq(wd, "profiling-routine")) {
 		next_word(fp, wd);
 		goto save;
+	}
+	if (eq(wd, "xnu-library")) {
+		f_flags |= LIBRARYDEP;
+		goto nextopt;
+	}
+	if (eq(wd, "bound-checks")) {
+		f_flags |= BOUND_CHECKS;
+		goto nextopt;
 	}
 	nreqs++;
 	if (needs == 0 && nreqs == 1) {
@@ -469,9 +481,21 @@ checkdev:
 			goto getrest;
 		}
 		next_word(fp, wd);
-		if (wd) {
+		while (wd) {
+			if (eq(wd, "xnu-library")) {
+				f_flags |= LIBRARYDEP;
+				next_word(fp, wd);
+				continue;
+			}
+			if (eq(wd, "bound-checks")) {
+				f_flags |= BOUND_CHECKS;
+				next_word(fp, wd);
+				continue;
+			}
+
 			devorprof = wd;
 			next_word(fp, wd);
+			break;
 		}
 	}
 
@@ -503,7 +527,7 @@ getrest:
 	} else {
 		tp->f_type = NORMAL;
 	}
-	tp->f_flags = 0;
+	tp->f_flags = f_flags;
 	tp->f_needs = needs;
 	if (pf && pf->f_type == INVISIBLE) {
 		pf->f_flags = 1;                /* mark as duplicate */
@@ -541,7 +565,7 @@ put_source_file_name(FILE *fp, struct file_list *tp)
 }
 
 void
-do_objs(FILE *fp, const char *msg, int ext)
+do_objs(FILE *fp, const char *msg, int ext, int flags)
 {
 	struct file_list *tp;
 	int lpos, len;
@@ -553,6 +577,13 @@ do_objs(FILE *fp, const char *msg, int ext)
 	lpos = strlen(msg);
 	for (tp = ftab; tp != 0; tp = tp->f_next) {
 		if (tp->f_type == INVISIBLE) {
+			continue;
+		}
+
+		/*
+		 * Check flags (if any)
+		 */
+		if (flags && ((tp->f_flags & flags) != flags)) {
 			continue;
 		}
 
@@ -697,10 +728,13 @@ do_rules(FILE *f)
 		*cp = '\0';
 		tp = tail(np);  /* dvw: init tp before 'if' */
 		fprintf(f, "-include %sd\n", tp);
+		if (ftp->f_flags & BOUND_CHECKS) {
+			fprintf(f, "%so_CFLAGS_ADD += ${CFLAGS_BOUND_CHECKS}\n", tp);
+		}
 		fprintf(f, "%so: %s%s%c\n", tp, source_dir, np, och);
 		if (och == 's') {
 			fprintf(f, "\t${S_RULE_0}\n");
-			fprintf(f, "\t${S_RULE_1A}%s%.*s${S_RULE_1B}%s\n",
+			fprintf(f, "\t${S_RULE_1A} %s%.*s${S_RULE_1B}%s\n",
 			    source_dir, (int)(tp - np), np, nl);
 			fprintf(f, "\t${S_RULE_2}%s\n", nl);
 			continue;
@@ -735,7 +769,7 @@ common:
 			if (ftp->f_extra) {
 				fprintf(f, "%s", ftp->f_extra);
 			}
-			fprintf(f, "%s%.*s${%c_RULE_1B%s}%s\n",
+			fprintf(f, " %s%.*s${%c_RULE_1B%s}%s\n",
 			    source_dir, (int)(tp - np), np, och_upper, extras, nl);
 
 			fprintf(f, "\t${%c_RULE_2%s}%s\n", och_upper, extras, nl);

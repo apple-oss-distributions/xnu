@@ -71,7 +71,7 @@
 #include <libkern/OSAtomic.h>
 #include "gss_krb5_mech.h"
 
-lck_grp_t *gss_krb5_mech_grp;
+LCK_GRP_DECLARE(gss_krb5_mech_grp, "gss_krb5_mech");
 
 typedef struct crypt_walker_ctx {
 	size_t length;
@@ -100,9 +100,10 @@ void do_crypt_init(crypt_walker_ctx_t, int, crypto_ctx_t, cccbc_ctx *);
 int do_crypt(void *, uint8_t *, size_t);
 void do_hmac_init(hmac_walker_ctx_t, crypto_ctx_t, void *);
 int do_hmac(void *, uint8_t *, size_t);
+void do_hmac_destroy(hmac_walker_ctx_t, crypto_ctx_t);
 
 void krb5_make_usage(uint32_t, uint8_t, uint8_t[KRB5_USAGE_LEN]);
-void krb5_key_derivation(crypto_ctx_t, const void *, size_t, void **, size_t);
+void krb5_key_derivation(crypto_ctx_t, const void *, size_t, krb5_key_t *, size_t);
 void cc_key_schedule_create(crypto_ctx_t);
 void gss_crypto_ctx_free(crypto_ctx_t);
 int gss_crypto_ctx_init(struct crypto_ctx *, lucid_context_t);
@@ -180,6 +181,29 @@ gss_krb5_mech_is_initialized(void)
 	return gss_krb5_mech_initted == GSS_KRB5_NOT_INITIALIZED;
 }
 
+static void
+gss_krb5_key_set(krb5_key_t *krb_key, void *key, size_t len)
+{
+	krb_key->key_val = key;
+	krb_key->key_len = len;
+}
+
+static void
+gss_krb5_key_free(krb5_key_t *krb_key, int free)
+{
+	if (free) {
+		cc_clear(krb_key->key_len, krb_key->key_val);
+		kfree_data(krb_key->key_val, krb_key->key_len);
+	}
+	memset(krb_key, 0, sizeof(krb5_key_t));
+}
+
+static void
+gss_krb5_key_ctx_free(krb5_key_t *krb_key, void *ctx_key)
+{
+	gss_krb5_key_free(krb_key, krb_key->key_val && ctx_key != krb_key->key_val);
+}
+
 void
 gss_krb5_mech_init(void)
 {
@@ -198,7 +222,6 @@ gss_krb5_mech_init(void)
 		}
 		return;
 	}
-	gss_krb5_mech_grp = lck_grp_alloc_init("gss_krb5_mech", LCK_GRP_ATTR_NULL);
 	gss_krb5_mech_initted = GSS_KRB5_INITIALIZED;
 }
 
@@ -209,7 +232,7 @@ gss_release_buffer(uint32_t *minor, gss_buffer_t buf)
 		*minor = 0;
 	}
 	if (buf->value) {
-		FREE(buf->value, M_TEMP);
+		kfree_data(buf->value, buf->length);
 	}
 	buf->value = NULL;
 	buf->length = 0;
@@ -481,8 +504,12 @@ mbuf_walk(mbuf_t mbp, size_t offset, size_t len, size_t blocksize, int (*crypto_
 		 */
 		if (residue) {
 			mbuf_t nmb = mbuf_next(mb);
-			uint8_t *nptr = NULL, block[blocksize];
+			uint8_t *nptr = NULL, *block = NULL;
 
+			block = kalloc_data(blocksize, Z_WAITOK | Z_ZERO);
+			if (block == NULL) {
+				return ENOMEM;
+			}
 			assert(nmb);
 			len -= residue;
 			offset = blocksize - residue;
@@ -492,7 +519,7 @@ mbuf_walk(mbuf_t mbp, size_t offset, size_t len, size_t blocksize, int (*crypto_
 				 * We don't have enough bytes so zero the block
 				 * so that any trailing bytes will be zero.
 				 */
-				cc_clear(sizeof(block), block);
+				cc_clear(blocksize, block);
 			}
 			memcpy(block, ptr, residue);
 			if (len && nmb) {
@@ -501,6 +528,7 @@ mbuf_walk(mbuf_t mbp, size_t offset, size_t len, size_t blocksize, int (*crypto_
 					error = mbuf_pullup(&nmb, offset - mlen);
 					if (error) {
 						mbuf_setnext(mb, NULL);
+						kfree_data(block, blocksize);
 						return error;
 					}
 				}
@@ -508,14 +536,16 @@ mbuf_walk(mbuf_t mbp, size_t offset, size_t len, size_t blocksize, int (*crypto_
 				memcpy(block + residue, nptr, offset);
 			}
 			len -= offset;
-			error = crypto_fn(ctx, block, sizeof(block));
+			error = crypto_fn(ctx, block, blocksize);
 			if (error) {
+				kfree_data(block, blocksize);
 				break;
 			}
 			memcpy(ptr, block, residue);
 			if (nptr) {
 				memcpy(nptr, block + residue, offset);
 			}
+			kfree_data(block, blocksize);
 		}
 	}
 
@@ -529,7 +559,7 @@ do_crypt_init(crypt_walker_ctx_t wctx, int encrypt, crypto_ctx_t cctx, cccbc_ctx
 	wctx->length = 0;
 	wctx->ccmode = encrypt ? cctx->enc_mode : cctx->dec_mode;
 	wctx->crypt_ctx = ks;
-	MALLOC(wctx->iv, cccbc_iv *, wctx->ccmode->block_size, M_TEMP, M_WAITOK | M_ZERO);
+	wctx->iv = kalloc_data(wctx->ccmode->block_size, Z_WAITOK | Z_ZERO);
 	cccbc_set_iv(wctx->ccmode, wctx->iv, NULL);
 }
 
@@ -553,7 +583,7 @@ do_hmac_init(hmac_walker_ctx_t wctx, crypto_ctx_t cctx, void *key)
 	size_t alloc_size = cchmac_di_size(cctx->di);
 
 	wctx->di = cctx->di;
-	MALLOC(wctx->hmac_ctx, struct cchmac_ctx *, alloc_size, M_TEMP, M_WAITOK | M_ZERO);
+	wctx->hmac_ctx = kalloc_data(alloc_size, Z_WAITOK | Z_ZERO);
 	cchmac_init(cctx->di, wctx->hmac_ctx, cctx->keylen, key);
 }
 
@@ -567,27 +597,37 @@ do_hmac(void *walker, uint8_t *data, size_t len)
 	return 0;
 }
 
+void
+do_hmac_destroy(hmac_walker_ctx_t wctx, crypto_ctx_t cctx)
+{
+	size_t alloc_size = cchmac_di_size(cctx->di);
+	kfree_data(wctx->hmac_ctx, alloc_size);
+}
 
 int
 krb5_mic(crypto_ctx_t ctx, gss_buffer_t header, gss_buffer_t bp, gss_buffer_t trailer, uint8_t *mic, int *verify, int ikey, int reverse)
 {
-	uint8_t digest[ctx->di->output_size];
+	uint8_t *digest = NULL;
 	cchmac_di_decl(ctx->di, hmac_ctx);
 	int kdx = (verify == NULL) ? (reverse ? GSS_RCV : GSS_SND) : (reverse ? GSS_SND : GSS_RCV);
 	void *key2use;
 
+	digest = kalloc_data(ctx->di->output_size, Z_WAITOK | Z_ZERO);
+	if (digest == NULL) {
+		return ENOMEM;
+	}
 	if (ikey) {
 		if (!(ctx->flags & CRYPTO_KS_ALLOCED)) {
-			lck_mtx_lock(ctx->lock);
+			lck_mtx_lock(&ctx->lock);
 			if (!(ctx->flags & CRYPTO_KS_ALLOCED)) {
 				cc_key_schedule_create(ctx);
 			}
 			ctx->flags |= CRYPTO_KS_ALLOCED;
-			lck_mtx_unlock(ctx->lock);
+			lck_mtx_unlock(&ctx->lock);
 		}
-		key2use = ctx->ks.ikey[kdx];
+		key2use = ctx->ks.ikeys[kdx].key_val;
 	} else {
-		key2use = ctx->ckey[kdx];
+		key2use = ctx->ckeys[kdx].key_val;
 	}
 
 	cchmac_init(ctx->di, hmac_ctx, ctx->keylen, key2use);
@@ -610,6 +650,7 @@ krb5_mic(crypto_ctx_t ctx, gss_buffer_t header, gss_buffer_t bp, gss_buffer_t tr
 		memcpy(mic, digest, ctx->digest_size);
 	}
 
+	kfree_data(digest, ctx->di->output_size);
 	return 0;
 }
 
@@ -618,23 +659,27 @@ krb5_mic_mbuf(crypto_ctx_t ctx, gss_buffer_t header,
     mbuf_t mbp, size_t offset, size_t len, gss_buffer_t trailer, uint8_t *mic, int *verify, int ikey, int reverse)
 {
 	struct hmac_walker_ctx wctx;
-	uint8_t digest[ctx->di->output_size];
+	uint8_t *digest = NULL;
 	int error;
 	int kdx = (verify == NULL) ? (reverse ? GSS_RCV : GSS_SND) : (reverse ? GSS_SND : GSS_RCV);
 	void *key2use;
 
+	digest = kalloc_data(ctx->di->output_size, Z_WAITOK | Z_ZERO);
+	if (digest == NULL) {
+		return ENOMEM;
+	}
 	if (ikey) {
 		if (!(ctx->flags & CRYPTO_KS_ALLOCED)) {
-			lck_mtx_lock(ctx->lock);
+			lck_mtx_lock(&ctx->lock);
 			if (!(ctx->flags & CRYPTO_KS_ALLOCED)) {
 				cc_key_schedule_create(ctx);
 			}
 			ctx->flags |= CRYPTO_KS_ALLOCED;
-			lck_mtx_unlock(ctx->lock);
+			lck_mtx_unlock(&ctx->lock);
 		}
-		key2use = ctx->ks.ikey[kdx];
+		key2use = ctx->ks.ikeys[kdx].key_val;
 	} else {
-		key2use = ctx->ckey[kdx];
+		key2use = ctx->ckeys[kdx].key_val;
 	}
 
 	do_hmac_init(&wctx, ctx, key2use);
@@ -646,6 +691,7 @@ krb5_mic_mbuf(crypto_ctx_t ctx, gss_buffer_t header,
 	error = mbuf_walk(mbp, offset, len, 1, do_hmac, &wctx);
 
 	if (error) {
+		kfree_data(digest, ctx->di->output_size);
 		return error;
 	}
 	if (trailer) {
@@ -653,17 +699,19 @@ krb5_mic_mbuf(crypto_ctx_t ctx, gss_buffer_t header,
 	}
 
 	cchmac_final(ctx->di, wctx.hmac_ctx, digest);
-	FREE(wctx.hmac_ctx, M_TEMP);
+	do_hmac_destroy(&wctx, ctx);
 
 	if (verify) {
 		*verify = (memcmp(mic, digest, ctx->digest_size) == 0);
 		if (!*verify) {
+			kfree_data(digest, ctx->di->output_size);
 			return EBADRPC;
 		}
 	} else {
 		memcpy(mic, digest, ctx->digest_size);
 	}
 
+	kfree_data(digest, ctx->di->output_size);
 	return 0;
 }
 
@@ -679,23 +727,27 @@ krb5_crypt_mbuf(crypto_ctx_t ctx, mbuf_t *mbp, size_t len, int encrypt, cccbc_ct
 	int error;
 
 	if (!(ctx->flags & CRYPTO_KS_ALLOCED)) {
-		lck_mtx_lock(ctx->lock);
+		lck_mtx_lock(&ctx->lock);
 		if (!(ctx->flags & CRYPTO_KS_ALLOCED)) {
 			cc_key_schedule_create(ctx);
 		}
 		ctx->flags |= CRYPTO_KS_ALLOCED;
-		lck_mtx_unlock(ctx->lock);
+		lck_mtx_unlock(&ctx->lock);
 	}
 	if (!ks) {
 		ks = encrypt ? ctx->ks.enc : ctx->ks.dec;
 	}
 
 	if ((ctx->flags & CRYPTO_CTS_ENABLE) && ctx->mpad == 1) {
-		uint8_t block[ccmode->block_size];
+		uint8_t *block = NULL;
+
+		block = kalloc_data(ccmode->block_size, Z_WAITOK | Z_ZERO);
+		if (block == NULL) {
+			return ENOMEM;
+		}
 		/* if the length is less than or equal to a blocksize. We just encrypt the block */
 		if (len <= ccmode->block_size) {
 			if (len < ccmode->block_size) {
-				memset(block, 0, sizeof(block));
 				gss_append_mbuf(*mbp, block, ccmode->block_size);
 			}
 			plen = ccmode->block_size;
@@ -716,16 +768,22 @@ krb5_crypt_mbuf(crypto_ctx_t ctx, mbuf_t *mbp, size_t len, int encrypt, cccbc_ct
 				assert(gss_mbuf_len(lmb, 0) == cts_len);
 			}
 		}
+		kfree_data(block, ccmode->block_size);
 	} else if (len % ctx->mpad) {
-		uint8_t pad_block[ctx->mpad];
+		uint8_t *pad_block = NULL;
 		size_t padlen = ctx->mpad - (len % ctx->mpad);
 
-		memset(pad_block, 0, padlen);
+		pad_block = kalloc_data(ctx->mpad, Z_WAITOK | Z_ZERO);
+		if (pad_block == NULL) {
+			return ENOMEM;
+		}
 		error = gss_append_mbuf(*mbp, pad_block, padlen);
 		if (error) {
+			kfree_data(pad_block, ctx->mpad);
 			return error;
 		}
 		plen = len + padlen;
+		kfree_data(pad_block, ctx->mpad);
 	}
 	do_crypt_init(&wctx, encrypt, ctx, ks);
 	if (plen) {
@@ -736,17 +794,21 @@ krb5_crypt_mbuf(crypto_ctx_t ctx, mbuf_t *mbp, size_t len, int encrypt, cccbc_ct
 	}
 
 	if ((ctx->flags & CRYPTO_CTS_ENABLE) && cts_len) {
-		uint8_t cts_pad[2 * ccmode->block_size];
+		uint8_t *cts_pad = NULL;
 		ccpad_func do_ccpad = encrypt ? ccpad_cts3_encrypt : ccpad_cts3_decrypt;
 
+		cts_pad = kalloc_data(2 * ccmode->block_size, Z_WAITOK | Z_ZERO);
+		if (cts_pad == NULL) {
+			return ENOMEM;
+		}
 		assert(cts_len <= 2 * ccmode->block_size && cts_len > ccmode->block_size);
-		memset(cts_pad, 0, sizeof(cts_pad));
 		mbuf_copydata(lmb, 0, cts_len, cts_pad);
 		mbuf_freem(lmb);
 		do_ccpad(ccmode, wctx.crypt_ctx, wctx.iv, cts_len, cts_pad, cts_pad);
 		gss_append_mbuf(*mbp, cts_pad, cts_len);
+		kfree_data(cts_pad, 2 * ccmode->block_size);
 	}
-	FREE(wctx.iv, M_TEMP);
+	kfree_data(wctx.iv, wctx.ccmode->block_size);
 
 	return 0;
 }
@@ -759,12 +821,14 @@ static int
 rr13(unsigned char *buf, size_t len)
 {
 	size_t bytes = (len + 7) / 8;
-	unsigned char tmp[bytes];
+	unsigned char *tmp = NULL;
 	size_t i;
 
 	if (len == 0) {
 		return 0;
 	}
+
+	tmp = kalloc_data(bytes, Z_WAITOK | Z_ZERO);
 
 	{
 		const int bits = 13 % len;
@@ -800,6 +864,7 @@ rr13(unsigned char *buf, size_t len)
 			buf[i] = 0xff & ((tmp[b1] << s1) | (tmp[b2] >> s2));
 		}
 	}
+	kfree_data(tmp, bytes);
 	return 0;
 }
 
@@ -832,8 +897,11 @@ krb5_n_fold(const void *instr, size_t len, void *foldstr, size_t size)
 	int ret = 0;
 	size_t maxlen = 2 * lmax(size, len);
 	size_t l = 0;
-	unsigned char tmp[maxlen];
-	unsigned char buf[len];
+	unsigned char *tmp = NULL;
+	unsigned char *buf = NULL;
+
+	tmp = kalloc_data(maxlen, Z_WAITOK | Z_ZERO);
+	buf = kalloc_data(len, Z_WAITOK | Z_ZERO);
 
 	memcpy(buf, instr, len);
 	memset(foldstr, 0, size);
@@ -855,6 +923,8 @@ krb5_n_fold(const void *instr, size_t len, void *foldstr, size_t size)
 	} while (l != 0);
 out:
 
+	kfree_data(tmp, maxlen);
+	kfree_data(buf, len);
 	return ret;
 }
 
@@ -870,7 +940,7 @@ krb5_make_usage(uint32_t usage_no, uint8_t suffix, uint8_t usage_string[KRB5_USA
 }
 
 void
-krb5_key_derivation(crypto_ctx_t ctx, const void *cons, size_t conslen, void **dkey, size_t dklen)
+krb5_key_derivation(crypto_ctx_t ctx, const void *cons, size_t conslen, krb5_key_t *dkey, size_t dklen)
 {
 	size_t blocksize = ctx->enc_mode->block_size;
 	cccbc_iv_decl(blocksize, iv);
@@ -878,10 +948,11 @@ krb5_key_derivation(crypto_ctx_t ctx, const void *cons, size_t conslen, void **d
 	size_t ksize = 8 * dklen;
 	size_t nblocks = (ksize + 8 * blocksize - 1) / (8 * blocksize);
 	uint8_t *dkptr;
-	uint8_t block[blocksize];
+	uint8_t *block = NULL;
 
-	MALLOC(*dkey, void *, nblocks * blocksize, M_TEMP, M_WAITOK | M_ZERO);
-	dkptr = *dkey;
+	block = kalloc_data(blocksize, Z_WAITOK | Z_ZERO);
+	gss_krb5_key_set(dkey, kalloc_data(nblocks * blocksize, Z_WAITOK | Z_ZERO), nblocks * blocksize);
+	dkptr = dkey->key_val;
 
 	krb5_n_fold(cons, conslen, block, blocksize);
 	cccbc_init(ctx->enc_mode, enc_ctx, ctx->keylen, ctx->key);
@@ -891,6 +962,7 @@ krb5_key_derivation(crypto_ctx_t ctx, const void *cons, size_t conslen, void **d
 		memcpy(dkptr, block, blocksize);
 		dkptr += blocksize;
 	}
+	kfree_data(block, blocksize);
 }
 
 static void
@@ -907,16 +979,18 @@ des_make_key(const uint8_t rawkey[7], uint8_t deskey[8])
 }
 
 static void
-krb5_3des_key_derivation(crypto_ctx_t ctx, const void *cons, size_t conslen, void **des3key)
+krb5_3des_key_derivation(crypto_ctx_t ctx, const void *cons, size_t conslen, krb5_key_t *des3key)
 {
 	const struct ccmode_cbc *cbcmode = ctx->enc_mode;
-	void *rawkey;
+	krb5_key_t rawkey;
+	size_t rawkey_len;
 	uint8_t *kptr, *rptr;
 
-	MALLOC(*des3key, void *, 3 * cbcmode->block_size, M_TEMP, M_WAITOK | M_ZERO);
-	krb5_key_derivation(ctx, cons, conslen, &rawkey, 3 * (cbcmode->block_size - 1));
-	kptr = (uint8_t *)*des3key;
-	rptr = (uint8_t *)rawkey;
+	gss_krb5_key_set(des3key, kalloc_data(3 * cbcmode->block_size, Z_WAITOK | Z_ZERO), 3 * cbcmode->block_size);
+	rawkey_len = 3 * (cbcmode->block_size - 1);
+	krb5_key_derivation(ctx, cons, conslen, &rawkey, rawkey_len);
+	kptr = des3key->key_val;
+	rptr = rawkey.key_val;
 
 	for (int i = 0; i < 3; i++) {
 		des_make_key(rptr, kptr);
@@ -924,8 +998,7 @@ krb5_3des_key_derivation(crypto_ctx_t ctx, const void *cons, size_t conslen, voi
 		kptr += cbcmode->block_size;
 	}
 
-	cc_clear(3 * (cbcmode->block_size - 1), rawkey);
-	FREE(rawkey, M_TEMP);
+	gss_krb5_key_free(&rawkey, 1);
 }
 
 /*
@@ -937,16 +1010,16 @@ cc_key_schedule_create(crypto_ctx_t ctx)
 {
 	uint8_t usage_string[KRB5_USAGE_LEN];
 	lucid_context_t lctx = ctx->gss_ctx;
-	void *ekey;
+	krb5_key_t ekey;
 
 	switch (lctx->key_data.proto) {
 	case 0: {
 		if (ctx->ks.enc == NULL) {
-			MALLOC(ctx->ks.enc, cccbc_ctx *, ctx->enc_mode->size, M_TEMP, M_WAITOK | M_ZERO);
+			ctx->ks.enc = kalloc_data(ctx->enc_mode->size, Z_WAITOK | Z_ZERO);
 			cccbc_init(ctx->enc_mode, ctx->ks.enc, ctx->keylen, ctx->key);
 		}
 		if (ctx->ks.dec == NULL) {
-			MALLOC(ctx->ks.dec, cccbc_ctx *, ctx->dec_mode->size, M_TEMP, M_WAITOK | M_ZERO);
+			ctx->ks.dec = kalloc_data(ctx->dec_mode->size, Z_WAITOK | Z_ZERO);
 			cccbc_init(ctx->dec_mode, ctx->ks.dec, ctx->keylen, ctx->key);
 		}
 	}
@@ -957,30 +1030,30 @@ cc_key_schedule_create(crypto_ctx_t ctx)
 			    KRB5_USAGE_INITIATOR_SEAL : KRB5_USAGE_ACCEPTOR_SEAL,
 			    0xAA, usage_string);
 			krb5_key_derivation(ctx, usage_string, KRB5_USAGE_LEN, &ekey, ctx->keylen);
-			MALLOC(ctx->ks.enc, cccbc_ctx *, ctx->enc_mode->size, M_TEMP, M_WAITOK | M_ZERO);
-			cccbc_init(ctx->enc_mode, ctx->ks.enc, ctx->keylen, ekey);
-			FREE(ekey, M_TEMP);
+			ctx->ks.enc = kalloc_data(ctx->enc_mode->size, Z_WAITOK | Z_ZERO);
+			cccbc_init(ctx->enc_mode, ctx->ks.enc, ctx->keylen, ekey.key_val);
+			gss_krb5_key_free(&ekey, 1);
 		}
 		if (ctx->ks.dec == NULL) {
 			krb5_make_usage(lctx->initiate ?
 			    KRB5_USAGE_ACCEPTOR_SEAL : KRB5_USAGE_INITIATOR_SEAL,
 			    0xAA, usage_string);
 			krb5_key_derivation(ctx, usage_string, KRB5_USAGE_LEN, &ekey, ctx->keylen);
-			MALLOC(ctx->ks.dec, cccbc_ctx *, ctx->dec_mode->size, M_TEMP, M_WAITOK | M_ZERO);
-			cccbc_init(ctx->dec_mode, ctx->ks.dec, ctx->keylen, ekey);
-			FREE(ekey, M_TEMP);
+			ctx->ks.dec = kalloc_data(ctx->dec_mode->size, Z_WAITOK | Z_ZERO);
+			cccbc_init(ctx->dec_mode, ctx->ks.dec, ctx->keylen, ekey.key_val);
+			gss_krb5_key_free(&ekey, 1);
 		}
-		if (ctx->ks.ikey[GSS_SND] == NULL) {
+		if (ctx->ks.ikeys[GSS_SND].key_val == NULL) {
 			krb5_make_usage(lctx->initiate ?
 			    KRB5_USAGE_INITIATOR_SEAL : KRB5_USAGE_ACCEPTOR_SEAL,
 			    0x55, usage_string);
-			krb5_key_derivation(ctx, usage_string, KRB5_USAGE_LEN, &ctx->ks.ikey[GSS_SND], ctx->keylen);
+			krb5_key_derivation(ctx, usage_string, KRB5_USAGE_LEN, &ctx->ks.ikeys[GSS_SND], ctx->keylen);
 		}
-		if (ctx->ks.ikey[GSS_RCV] == NULL) {
+		if (ctx->ks.ikeys[GSS_RCV].key_val == NULL) {
 			krb5_make_usage(lctx->initiate ?
 			    KRB5_USAGE_ACCEPTOR_SEAL : KRB5_USAGE_INITIATOR_SEAL,
 			    0x55, usage_string);
-			krb5_key_derivation(ctx, usage_string, KRB5_USAGE_LEN, &ctx->ks.ikey[GSS_RCV], ctx->keylen);
+			krb5_key_derivation(ctx, usage_string, KRB5_USAGE_LEN, &ctx->ks.ikeys[GSS_RCV], ctx->keylen);
 		}
 	}
 	}
@@ -989,32 +1062,20 @@ cc_key_schedule_create(crypto_ctx_t ctx)
 void
 gss_crypto_ctx_free(crypto_ctx_t ctx)
 {
-	ctx->ks.ikey[GSS_SND] = NULL;
-	if (ctx->ks.ikey[GSS_RCV] && ctx->key != ctx->ks.ikey[GSS_RCV]) {
-		cc_clear(ctx->keylen, ctx->ks.ikey[GSS_RCV]);
-		FREE(ctx->ks.ikey[GSS_RCV], M_TEMP);
-	}
-	ctx->ks.ikey[GSS_RCV] = NULL;
+	lck_mtx_destroy(&ctx->lock, &gss_krb5_mech_grp);
+
+	gss_krb5_key_ctx_free(&ctx->ks.ikeys[GSS_SND], ctx->key);
+	gss_krb5_key_ctx_free(&ctx->ks.ikeys[GSS_RCV], ctx->key);
 	if (ctx->ks.enc) {
 		cccbc_ctx_clear(ctx->enc_mode->size, ctx->ks.enc);
-		FREE(ctx->ks.enc, M_TEMP);
-		ctx->ks.enc = NULL;
+		kfree_data(ctx->ks.enc, ctx->enc_mode->size);
 	}
 	if (ctx->ks.dec) {
 		cccbc_ctx_clear(ctx->dec_mode->size, ctx->ks.dec);
-		FREE(ctx->ks.dec, M_TEMP);
-		ctx->ks.dec = NULL;
+		kfree_data(ctx->ks.dec, ctx->dec_mode->size);
 	}
-	if (ctx->ckey[GSS_SND] && ctx->ckey[GSS_SND] != ctx->key) {
-		cc_clear(ctx->keylen, ctx->ckey[GSS_SND]);
-		FREE(ctx->ckey[GSS_SND], M_TEMP);
-	}
-	ctx->ckey[GSS_SND] = NULL;
-	if (ctx->ckey[GSS_RCV] && ctx->ckey[GSS_RCV] != ctx->key) {
-		cc_clear(ctx->keylen, ctx->ckey[GSS_RCV]);
-		FREE(ctx->ckey[GSS_RCV], M_TEMP);
-	}
-	ctx->ckey[GSS_RCV] = NULL;
+	gss_krb5_key_ctx_free(&ctx->ckeys[GSS_SND], ctx->key);
+	gss_krb5_key_ctx_free(&ctx->ckeys[GSS_RCV], ctx->key);
 	ctx->key = NULL;
 	ctx->keylen = 0;
 }
@@ -1048,33 +1109,33 @@ gss_crypto_ctx_init(struct crypto_ctx *ctx, lucid_context_t lucid)
 		krb5_make_usage(ctx->gss_ctx->initiate ?
 		    KRB5_USAGE_INITIATOR_SIGN : KRB5_USAGE_ACCEPTOR_SIGN,
 		    0x99, usage_string);
-		krb5_key_derivation(ctx, usage_string, KRB5_USAGE_LEN, &ctx->ckey[GSS_SND], ctx->keylen);
+		krb5_key_derivation(ctx, usage_string, KRB5_USAGE_LEN, &ctx->ckeys[GSS_SND], ctx->keylen);
 		krb5_make_usage(ctx->gss_ctx->initiate ?
 		    KRB5_USAGE_ACCEPTOR_SIGN : KRB5_USAGE_INITIATOR_SIGN,
 		    0x99, usage_string);
-		krb5_key_derivation(ctx, usage_string, KRB5_USAGE_LEN, &ctx->ckey[GSS_RCV], ctx->keylen);
+		krb5_key_derivation(ctx, usage_string, KRB5_USAGE_LEN, &ctx->ckeys[GSS_RCV], ctx->keylen);
 		break;
 	case DES3_CBC_SHA1_KD:
 		ctx->enc_mode = ccdes3_cbc_encrypt_mode();
 		assert(ctx->enc_mode);
 		ctx->dec_mode = ccdes3_cbc_decrypt_mode();
 		assert(ctx->dec_mode);
-		ctx->ks.ikey[GSS_SND]  = ctx->key;
-		ctx->ks.ikey[GSS_RCV]  = ctx->key;
+		gss_krb5_key_set(&ctx->ks.ikeys[GSS_SND], ctx->key, ctx->keylen);
+		gss_krb5_key_set(&ctx->ks.ikeys[GSS_RCV], ctx->key, ctx->keylen);
 		ctx->di = ccsha1_di();
 		assert(ctx->di);
 		ctx->flags = 0;
 		ctx->mpad = ctx->enc_mode->block_size;
 		ctx->digest_size = 20; /* 160 bits */
 		krb5_make_usage(KRB5_USAGE_ACCEPTOR_SIGN, 0x99, usage_string);
-		krb5_3des_key_derivation(ctx, usage_string, KRB5_USAGE_LEN, &ctx->ckey[GSS_SND]);
-		krb5_3des_key_derivation(ctx, usage_string, KRB5_USAGE_LEN, &ctx->ckey[GSS_RCV]);
+		krb5_3des_key_derivation(ctx, usage_string, KRB5_USAGE_LEN, &ctx->ckeys[GSS_SND]);
+		krb5_3des_key_derivation(ctx, usage_string, KRB5_USAGE_LEN, &ctx->ckeys[GSS_RCV]);
 		break;
 	default:
 		return ENOTSUP;
 	}
 
-	ctx->lock = lck_mtx_alloc_init(gss_krb5_mech_grp, LCK_ATTR_NULL);
+	lck_mtx_init(&ctx->lock, &gss_krb5_mech_grp, LCK_ATTR_NULL);
 
 	return 0;
 }
@@ -1176,7 +1237,7 @@ gss_krb5_cfx_get_mic(uint32_t *minor,           /* minor_status */
 	*minor = 0;
 	token = mic_cfx_token;
 	mic->length = sizeof(token) + cctx->digest_size;
-	MALLOC(mic->value, void *, mic->length, M_TEMP, M_WAITOK | M_ZERO);
+	mic->value = kalloc_data(mic->length, Z_WAITOK | Z_ZERO);
 	if (!lctx->initiate) {
 		token.Flags |= CFXSentByAcceptor;
 	}
@@ -1192,8 +1253,7 @@ gss_krb5_cfx_get_mic(uint32_t *minor,           /* minor_status */
 
 	if (*minor) {
 		mic->length = 0;
-		FREE(mic->value, M_TEMP);
-		mic->value = NULL;
+		kfree_data(mic->value, mic->length);
 	} else {
 		memcpy(mic->value, &token, sizeof(token));
 	}
@@ -1271,7 +1331,7 @@ gss_krb5_cfx_get_mic_mbuf(uint32_t *minor,      /* minor_status */
 
 	token = mic_cfx_token;
 	mic->length = sizeof(token) + cctx->digest_size;
-	MALLOC(mic->value, void *, mic->length, M_TEMP, M_WAITOK | M_ZERO);
+	mic->value = kalloc_data(mic->length, Z_WAITOK | Z_ZERO);
 	if (!lctx->initiate) {
 		token.Flags |= CFXSentByAcceptor;
 	}
@@ -1290,8 +1350,7 @@ gss_krb5_cfx_get_mic_mbuf(uint32_t *minor,      /* minor_status */
 
 	if (*minor) {
 		mic->length = 0;
-		FREE(mic->value, M_TEMP);
-		mic->value = NULL;
+		kfree_data(mic->value, mic->length);
 	} else {
 		memcpy(mic->value, &token, sizeof(token));
 	}
@@ -1351,17 +1410,23 @@ errno_t
 krb5_cfx_crypt_mbuf(crypto_ctx_t ctx, mbuf_t *mbp, size_t *len, int encrypt, int reverse)
 {
 	const struct ccmode_cbc *ccmode = encrypt ? ctx->enc_mode : ctx->dec_mode;
-	uint8_t confounder[ccmode->block_size];
-	uint8_t digest[ctx->digest_size];
+	uint8_t *confounder = NULL;
+	uint8_t *mpad = NULL;
+	uint8_t digest[CRYPTO_MAX_DIGSET_SIZE];
 	size_t tlen, r = 0;
 	errno_t error;
 
+	confounder = kalloc_data(ccmode->block_size, Z_WAITOK | Z_ZERO);
+	if (confounder == NULL) {
+		error = ENOMEM;
+		goto out;
+	}
 	if (encrypt) {
 		assert(ccmode->block_size <= UINT_MAX);
 		read_random(confounder, (u_int)ccmode->block_size);
 		error = gss_prepend_mbuf(mbp, confounder, ccmode->block_size);
 		if (error) {
-			return error;
+			goto out;
 		}
 		tlen = *len + ccmode->block_size;
 		if (ctx->mpad > 1) {
@@ -1369,34 +1434,39 @@ krb5_cfx_crypt_mbuf(crypto_ctx_t ctx, mbuf_t *mbp, size_t *len, int encrypt, int
 		}
 		/* We expect that r == 0 from krb5_cfx_wrap */
 		if (r != 0) {
-			uint8_t mpad[r];
-			memset(mpad, 0, r);
+			mpad = kalloc_data(r, Z_WAITOK | Z_ZERO);
+			if (mpad == NULL) {
+				error = ENOMEM;
+				goto out;
+			}
 			error = gss_append_mbuf(*mbp, mpad, r);
 			if (error) {
-				return error;
+				goto out;
 			}
 		}
 		tlen += r;
 		error = krb5_mic_mbuf(ctx, NULL, *mbp, 0, tlen, NULL, digest, NULL, 1, 0);
 		if (error) {
-			return error;
+			goto out;
 		}
 		error = krb5_crypt_mbuf(ctx, mbp, tlen, 1, NULL);
 		if (error) {
-			return error;
+			goto out;
 		}
 		error = gss_append_mbuf(*mbp, digest, ctx->digest_size);
 		if (error) {
-			return error;
+			goto out;
 		}
 		*len = tlen + ctx->digest_size;
-		return 0;
+		error = 0;
+		goto out;
 	} else {
 		int verf;
 		cccbc_ctx *ks = NULL;
 
 		if (*len < ctx->digest_size + sizeof(confounder)) {
-			return EBADRPC;
+			error = EBADRPC;
+			goto out;
 		}
 		tlen = *len - ctx->digest_size;
 		/* get the digest */
@@ -1404,7 +1474,7 @@ krb5_cfx_crypt_mbuf(crypto_ctx_t ctx, mbuf_t *mbp, size_t *len, int encrypt, int
 		/* Remove the digest from the mbuffer */
 		error = gss_strip_mbuf(*mbp, -ctx->digest_size);
 		if (error) {
-			return error;
+			goto out;
 		}
 
 		if (reverse) {
@@ -1414,7 +1484,7 @@ krb5_cfx_crypt_mbuf(crypto_ctx_t ctx, mbuf_t *mbp, size_t *len, int encrypt, int
 			 * resending. We do that because the RPCSEC_GSS sequence number in
 			 * the rpc header is prepended to the body of the message before wrapping.
 			 */
-			void *ekey;
+			krb5_key_t ekey;
 			uint8_t usage_string[KRB5_USAGE_LEN];
 			lucid_context_t lctx = ctx->gss_ctx;
 
@@ -1422,31 +1492,37 @@ krb5_cfx_crypt_mbuf(crypto_ctx_t ctx, mbuf_t *mbp, size_t *len, int encrypt, int
 			    KRB5_USAGE_INITIATOR_SEAL : KRB5_USAGE_ACCEPTOR_SEAL,
 			    0xAA, usage_string);
 			krb5_key_derivation(ctx, usage_string, KRB5_USAGE_LEN, &ekey, ctx->keylen);
-			MALLOC(ks, cccbc_ctx *, ctx->dec_mode->size, M_TEMP, M_WAITOK | M_ZERO);
-			cccbc_init(ctx->dec_mode, ks, ctx->keylen, ekey);
-			FREE(ekey, M_TEMP);
+			ks = kalloc_data(ctx->dec_mode->size, Z_WAITOK | Z_ZERO);
+			cccbc_init(ctx->dec_mode, ks, ctx->keylen, ekey.key_val);
+			gss_krb5_key_free(&ekey, 1);
 		}
 		error = krb5_crypt_mbuf(ctx, mbp, tlen, 0, ks);
-		FREE(ks, M_TEMP);
+		kfree_data(ks, ctx->dec_mode->size);
 		if (error) {
-			return error;
+			goto out;
 		}
 		error = krb5_mic_mbuf(ctx, NULL, *mbp, 0, tlen, NULL, digest, &verf, 1, reverse);
 		if (error) {
-			return error;
+			goto out;
 		}
 		if (!verf) {
-			return EBADRPC;
+			error = EBADRPC;
+			goto out;
 		}
 		/* strip off the confounder */
 		assert(ccmode->block_size <= INT_MAX);
 		error = gss_strip_mbuf(*mbp, (int)ccmode->block_size);
 		if (error) {
-			return error;
+			goto out;
 		}
 		*len = tlen - ccmode->block_size;
 	}
-	return 0;
+
+	error = 0;
+out:
+	kfree_data(mpad, r);
+	kfree_data(confounder, ccmode->block_size);
+	return error;
 }
 
 uint32_t
@@ -1483,11 +1559,15 @@ gss_krb5_cfx_wrap_mbuf(uint32_t *minor,         /* minor_status */
 	memcpy(&token.SND_SEQ, &seq, sizeof(uint64_t));
 	lctx->send_seq++;
 	if (conf_flag) {
-		uint8_t pad[cctx->mpad];
+		uint8_t *pad = NULL;
 		size_t plen = 0;
 
+		pad = kalloc_data(cctx->mpad, Z_WAITOK | Z_ZERO);
+		if (pad == NULL) {
+			*minor = ENOMEM;
+			return GSS_S_FAILURE;
+		}
 		token.Flags |= CFXSealed;
-		memset(pad, 0, cctx->mpad);
 		if (cctx->mpad > 1) {
 			size_t val = cctx->mpad - ((len + sizeof(gss_cfx_wrap_token_desc)) % cctx->mpad);
 			plen = sizeof(val) > sizeof(uint32_t) ? htonll(val) : htonl(val);
@@ -1508,8 +1588,9 @@ gss_krb5_cfx_wrap_mbuf(uint32_t *minor,         /* minor_status */
 		if (error == 0) {
 			error = gss_prepend_mbuf(mbp, (uint8_t *)&token, sizeof(gss_cfx_wrap_token_desc));
 		}
+		kfree_data(pad, cctx->mpad);
 	} else {
-		uint8_t digest[cctx->digest_size];
+		uint8_t digest[CRYPTO_MAX_DIGSET_SIZE];
 		gss_buffer_desc header;
 
 		header.length = sizeof(token);
@@ -1619,7 +1700,7 @@ gss_krb5_cfx_unwrap_mbuf(uint32_t * minor,      /* minor_status */
 		gss_strip_mbuf(*mbp, -(sizeof(gss_cfx_wrap_token_desc) + ec));
 		len -= (sizeof(gss_cfx_wrap_token_desc) + ec);
 	} else {
-		uint8_t digest[cctx->digest_size];
+		uint8_t digest[CRYPTO_MAX_DIGSET_SIZE];
 		int verf;
 		gss_buffer_desc header;
 
@@ -1796,7 +1877,7 @@ gss_krb5_3des_token_put(gss_ctx_id_t ctx, gss_1964_tok_type body, gss_buffer_t h
 	size_t alloclen = toklen + sizeof(gss_1964_header_desc) + gss_krb5_der_length_size(toklen + datalen);
 	uint8_t *tokptr;
 
-	MALLOC(token, gss_1964_header, alloclen, M_TEMP, M_WAITOK | M_ZERO);
+	token = kalloc_data(alloclen, Z_WAITOK | Z_ZERO);
 	*token = tok_1964_header;
 	tokptr = token->AppLen;
 	gss_krb5_der_length_put(&tokptr, toklen + datalen);
@@ -1921,7 +2002,7 @@ gss_krb5_3des_get_mic(uint32_t *minor,          /* minor status */
 	crypto_ctx_t cctx = &ctx->gss_cryptor;
 	gss_buffer_desc hash;
 	gss_buffer_desc header;
-	uint8_t hashval[cctx->digest_size];
+	uint8_t hashval[CRYPTO_MAX_DIGSET_SIZE];
 
 	hash.length = cctx->digest_size;
 	hash.value = hashval;
@@ -1950,7 +2031,7 @@ gss_krb5_3des_verify_mic(uint32_t *minor,
     gss_qop_t *qop)
 {
 	crypto_ctx_t cctx = &ctx->gss_cryptor;
-	uint8_t hashval[cctx->digest_size];
+	uint8_t hashval[CRYPTO_MAX_DIGSET_SIZE];
 	gss_buffer_desc hash;
 	gss_1964_mic_token_desc mtok = mic_1964_token;
 	gss_buffer_desc header;
@@ -1993,7 +2074,7 @@ gss_krb5_3des_get_mic_mbuf(uint32_t *minor,
 	crypto_ctx_t cctx = &ctx->gss_cryptor;
 	gss_buffer_desc header;
 	gss_buffer_desc hash;
-	uint8_t hashval[cctx->digest_size];
+	uint8_t hashval[CRYPTO_MAX_DIGSET_SIZE];
 
 	hash.length = cctx->digest_size;
 	hash.value = hashval;
@@ -2024,7 +2105,7 @@ gss_krb5_3des_verify_mic_mbuf(uint32_t *minor,
     gss_qop_t *qop)
 {
 	crypto_ctx_t cctx = &ctx->gss_cryptor;
-	uint8_t hashval[cctx->digest_size];
+	uint8_t hashval[CRYPTO_MAX_DIGSET_SIZE];
 	gss_buffer_desc header;
 	gss_buffer_desc hash;
 	gss_1964_mic_token_desc mtok = mic_1964_token;
@@ -2067,13 +2148,18 @@ gss_krb5_3des_wrap_mbuf(uint32_t *minor,
 	const struct ccmode_cbc *ccmode = cctx->enc_mode;
 	uint8_t padlen;
 	uint8_t pad[8];
-	uint8_t confounder[ccmode->block_size];
+	uint8_t *confounder = NULL;
 	gss_1964_wrap_token_desc tokbody = wrap_1964_token;
 	gss_buffer_desc header;
 	gss_buffer_desc mic;
 	gss_buffer_desc hash;
-	uint8_t hashval[cctx->digest_size];
+	uint8_t hashval[CRYPTO_MAX_DIGSET_SIZE];
 
+	confounder = kalloc_data(ccmode->block_size, Z_WAITOK | Z_ZERO);
+	if (confounder == NULL) {
+		*minor = ENOMEM;
+		goto out;
+	}
 	if (conf_state) {
 		*conf_state = conf_flag;
 	}
@@ -2093,7 +2179,7 @@ gss_krb5_3des_wrap_mbuf(uint32_t *minor,
 	read_random(confounder, (u_int)ccmode->block_size);
 	*minor = gss_prepend_mbuf(mbp, confounder, ccmode->block_size);
 	if (*minor) {
-		return GSS_S_FAILURE;
+		goto out;
 	}
 
 	/* Append trailer of up to 8 bytes and set pad length in each trailer byte */
@@ -2103,7 +2189,7 @@ gss_krb5_3des_wrap_mbuf(uint32_t *minor,
 	}
 	*minor = gss_append_mbuf(*mbp, pad, padlen);
 	if (*minor) {
-		return GSS_S_FAILURE;
+		goto out;
 	}
 
 	len += ccmode->block_size + padlen;
@@ -2111,7 +2197,7 @@ gss_krb5_3des_wrap_mbuf(uint32_t *minor,
 	/* Hash the data */
 	*minor = krb5_mic_mbuf(cctx, &header, *mbp, 0, len, NULL, hashval, NULL, 0, 0);
 	if (*minor) {
-		return GSS_S_FAILURE;
+		goto out;
 	}
 
 	/* Make the token */
@@ -2120,12 +2206,14 @@ gss_krb5_3des_wrap_mbuf(uint32_t *minor,
 	if (conf_flag) {
 		*minor = krb5_crypt_mbuf(cctx, mbp, len, 1, 0);
 		if (*minor) {
-			return GSS_S_FAILURE;
+			goto out;
 		}
 	}
 
 	*minor = gss_prepend_mbuf(mbp, mic.value, mic.length);
 
+out:
+	kfree_data(confounder, ccmode->block_size);
 	return *minor ? GSS_S_FAILURE : GSS_S_COMPLETE;
 }
 
@@ -2141,9 +2229,9 @@ gss_krb5_3des_unwrap_mbuf(uint32_t *minor,
 	const struct ccmode_cbc *ccmode = cctx->dec_mode;
 	size_t length = 0, offset = 0;
 	gss_buffer_desc hash;
-	uint8_t hashval[cctx->digest_size];
+	uint8_t hashval[CRYPTO_MAX_DIGSET_SIZE];
 	gss_buffer_desc itoken;
-	uint8_t tbuffer[GSS_KRB5_3DES_MAXTOKSZ + cctx->digest_size];
+	uint8_t tbuffer[GSS_KRB5_3DES_MAXTOKSZ + CRYPTO_MAX_DIGSET_SIZE];
 	itoken.length = GSS_KRB5_3DES_MAXTOKSZ + cctx->digest_size;
 	itoken.value = tbuffer;
 	gss_1964_wrap_token_desc wrap = wrap_1964_token;
@@ -2689,10 +2777,10 @@ gss_krb5_make_context(void *data, uint32_t datalen)
 	}
 
 	gss_krb5_mech_init();
-	MALLOC(ctx, gss_ctx_id_t, sizeof(struct gss_ctx_id_desc), M_TEMP, M_WAITOK | M_ZERO);
+	ctx = kalloc_type(struct gss_ctx_id_desc, Z_WAITOK | Z_ZERO);
 	if (xdr_lucid_context(data, datalen, &ctx->gss_lucid_ctx) ||
 	    !supported_etype(ctx->gss_lucid_ctx.key_data.proto, ctx->gss_lucid_ctx.ctx_key.etype)) {
-		FREE(ctx, M_TEMP);
+		kfree_type(struct gss_ctx_id_desc, ctx);
 		FREE(data, M_TEMP);
 		return NULL;
 	}
@@ -2713,5 +2801,5 @@ gss_krb5_destroy_context(gss_ctx_id_t ctx)
 	gss_crypto_ctx_free(&ctx->gss_cryptor);
 	FREE(ctx->gss_lucid_ctx.ctx_key.key.key_val, M_TEMP);
 	cc_clear(sizeof(lucid_context_t), &ctx->gss_lucid_ctx);
-	FREE(ctx, M_TEMP);
+	kfree_type(struct gss_ctx_id_desc, ctx);
 }

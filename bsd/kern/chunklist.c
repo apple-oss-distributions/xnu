@@ -55,7 +55,6 @@
 
 #define AUTHDBG(fmt, args...) do { printf("%s: " fmt "\n", __func__, ##args); } while (0)
 #define AUTHPRNT(fmt, args...) do { printf("%s: " fmt "\n", __func__, ##args); } while (0)
-#define kheap_free_safe(h, x, l) do { if ((x)) { kheap_free(h, x, l); (x) = NULL; } } while (0)
 
 static const char *libkern_path = "/System/Library/Extensions/System.kext/PlugIns/Libkern.kext/Libkern";
 static const char *libkern_bundle = "com.apple.kpi.libkern";
@@ -135,12 +134,12 @@ validate_signature(const uint8_t *key_msb, size_t keylen, uint8_t *sig_msb, size
 	uint8_t *modulus;
 
 
-	modulus = kheap_alloc(KHEAP_TEMP, keylen, Z_WAITOK | Z_ZERO);
-	rsa_ctx = kheap_alloc(KHEAP_TEMP, sizeof(rsa_pub_ctx),
-	    Z_WAITOK | Z_ZERO);
-	sig = kheap_alloc(KHEAP_TEMP, siglen, Z_WAITOK | Z_ZERO);
+	rsa_ctx = kalloc_type(rsa_pub_ctx,
+	    Z_WAITOK | Z_ZERO | Z_NOFAIL);
+	modulus = (uint8_t *)kalloc_data(keylen, Z_WAITOK | Z_ZERO);
+	sig = (uint8_t *)kalloc_data(siglen, Z_WAITOK | Z_ZERO);
 
-	if (modulus == NULL || rsa_ctx == NULL || sig == NULL) {
+	if (modulus == NULL || sig == NULL) {
 		err = ENOMEM;
 		goto out;
 	}
@@ -167,9 +166,9 @@ validate_signature(const uint8_t *key_msb, size_t keylen, uint8_t *sig_msb, size
 	}
 
 out:
-	kheap_free_safe(KHEAP_TEMP, sig, siglen);
-	kheap_free_safe(KHEAP_TEMP, rsa_ctx, sizeof(*rsa_ctx));
-	kheap_free_safe(KHEAP_TEMP, modulus, keylen);
+	kfree_data(sig, siglen);
+	kfree_type(rsa_pub_ctx, rsa_ctx);
+	kfree_data(modulus, keylen);
 
 	if (err) {
 		return err;
@@ -214,13 +213,13 @@ validate_root_image(const char *root_path, void *chunklist)
 	/*
 	 * Iterate the chunk list and check each chunk
 	 */
-	chk = chunklist + hdr->cl_chunk_offset;
+	chk = (struct chunklist_chunk *)((uintptr_t)chunklist + hdr->cl_chunk_offset);
 	for (ch = 0; ch < hdr->cl_chunk_count; ch++) {
 		int resid = 0;
 
 		if (!buf) {
 			/* allocate buffer based on first chunk size */
-			buf = kheap_alloc(KHEAP_TEMP, chk->chunk_size, Z_WAITOK);
+			buf = kalloc_data(chk->chunk_size, Z_WAITOK);
 			if (buf == NULL) {
 				err = ENOMEM;
 				goto out;
@@ -274,7 +273,7 @@ validate_root_image(const char *root_path, void *chunklist)
 	}
 
 out:
-	kheap_free_safe(KHEAP_TEMP, buf, bufsz);
+	kfree_data(buf, bufsz);
 	if (doclose) {
 		VNOP_CLOSE(vp, FREAD, ctx);
 	}
@@ -307,7 +306,7 @@ getuuidfromheader_safe(const void *buf, size_t bufsz, size_t *uuidsz)
 	/* iterate the load commands */
 	size_t offset = sizeof(kernel_mach_header_t);
 	for (size_t i = 0; i < mh->ncmds; i++) {
-		cmd = buf + offset;
+		cmd = (const struct uuid_command *)((uintptr_t)buf + offset);
 
 		if (cmd->cmd == LC_UUID) {
 			*uuidsz = sizeof(cmd->uuid);
@@ -530,7 +529,8 @@ validate_chunklist(void *buf, size_t len)
 		AUTHDBG("validating rev1 chunklist signature against rev1 pub keys");
 		for (size_t i = 0; i < rev1_chunklist_num_pubkeys; i++) {
 			const struct chunklist_pubkey *key = &rev1_chunklist_pubkeys[i];
-			err = validate_signature(key->key, CHUNKLIST_PUBKEY_LEN, buf + hdr->cl_sig_offset, CHUNKLIST_SIGNATURE_LEN, sha_digest);
+			err = validate_signature(key->key, CHUNKLIST_PUBKEY_LEN, (uint8_t *)((uintptr_t)buf + hdr->cl_sig_offset),
+			    CHUNKLIST_SIGNATURE_LEN, sha_digest);
 			if (err == 0) {
 				AUTHDBG("validated rev1 chunklist signature with rev1 key %lu (prod=%d)", i, key->is_production);
 				valid_sig = key->is_production;
@@ -593,7 +593,7 @@ authenticate_root_with_chunklist(const char *rootdmg_path, boolean_t *out_enforc
 	 * the chunklist.
 	 */
 	AUTHDBG("reading chunklist");
-	err = imageboot_read_file(KHEAP_TEMP, chunklist_path, &chunklist_buf, &chunklist_len);
+	err = imageboot_read_file(chunklist_path, &chunklist_buf, &chunklist_len);
 	if (err) {
 		AUTHPRNT("failed to read chunklist");
 		goto out;
@@ -629,7 +629,7 @@ out:
 	if (out_enforced != NULL) {
 		*out_enforced = enforced;
 	}
-	kheap_free_safe(KHEAP_TEMP, chunklist_buf, chunklist_len);
+	kfree_data(chunklist_buf, chunklist_len);
 	zfree(ZV_NAMEI, chunklist_path);
 	return err;
 }
@@ -656,7 +656,7 @@ authenticate_bootkc_uuid(void)
 	size_t bufsz = 1 * 1024 * 1024UL;
 
 	/* get the UUID of the bootkc in /S/L/KC */
-	err = imageboot_read_file(KHEAP_TEMP, bootkc_path, &buf, &bufsz);
+	err = imageboot_read_file(bootkc_path, &buf, &bufsz);
 	if (err) {
 		goto out;
 	}
@@ -691,7 +691,7 @@ authenticate_bootkc_uuid(void)
 
 	/* UUID matches! */
 out:
-	kheap_free_safe(KHEAP_TEMP, buf, bufsz);
+	kfree_data(buf, bufsz);
 	return err;
 }
 
@@ -706,7 +706,7 @@ authenticate_libkern_uuid(void)
 	size_t bufsz = 4 * 1024 * 1024UL;
 
 	/* get the UUID of the libkern in /S/L/E */
-	err = imageboot_read_file(KHEAP_TEMP, libkern_path, &buf, &bufsz);
+	err = imageboot_read_file(libkern_path, &buf, &bufsz);
 	if (err) {
 		goto out;
 	}
@@ -718,10 +718,10 @@ authenticate_libkern_uuid(void)
 			err = EINVAL;
 			goto out;
 		}
-		kheap_free_safe(KHEAP_TEMP, buf, bufsz);
+		kfree_data(buf, bufsz);
 		buf = NULL;
 		bufsz = MIN(fat_arch.size, 4 * 1024 * 1024UL);
-		err = imageboot_read_file_from_offset(KHEAP_TEMP, libkern_path, fat_arch.offset, &buf, &bufsz);
+		err = imageboot_read_file_from_offset(libkern_path, fat_arch.offset, &buf, &bufsz);
 		if (err) {
 			goto out;
 		}
@@ -759,6 +759,6 @@ authenticate_libkern_uuid(void)
 
 	/* UUID matches! */
 out:
-	kheap_free_safe(KHEAP_TEMP, buf, bufsz);
+	kfree_data(buf, bufsz);
 	return err;
 }

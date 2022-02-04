@@ -5,7 +5,6 @@
     If you define a variable which has been copied/referred over from C code and has high chance of changing over time. It would
     be best to define a supporting function of format "populate_<variable_name>". This will help in running them to repopulate.
 
-    Please take a look at example of kobject_types below before making changes to this file.
     Note: The Format of the function has to be populate_<variable_name> so that the automated updating will pick it up.
 """
 import os, re
@@ -40,11 +39,19 @@ def GetStateString(strings_dict, state):
 
     return output
 
+KDBG_NOWRAP           = 0x00000002
+KDBG_WRAPPED          = 0x00000008
+KDBG_TYPEFILTER_CHECK = 0x00400000
+KDBG_BUFINIT          = 0x80000000
+KDCOPYBUF_COUNT       = 8192
+KDS_PTR_NULL          = 0xffffffff
+DBG_FUNC_START        = 0x01
+DBG_FUNC_END          = 0x02
+
 kdebug_flags_strings = { 0x00100000: 'RANGECHECK',
                          0x00200000: 'VALCHECK',
-                         0x00400000: 'TYPEFILTER_CHECK',
-                         0x80000000: 'BUFINIT' }
-kdebug_typefilter_check = 0x00400000
+                         KDBG_TYPEFILTER_CHECK: 'TYPEFILTER_CHECK',
+                         KDBG_BUFINIT: 'BUFINIT' }
 
 kperf_samplers_strings = { 1 << 0: 'TH_INFO',
                            1 << 1: 'TH_SNAP',
@@ -70,36 +77,6 @@ arm_level2_access_strings = [ " noaccess",
                               " "
                              ]
 
-kq_state_strings = { 0x0000: '',
-                     0x0001: 'SEL',
-                     0x0002: 'SLEEP',
-                     0x0004: 'PROCWAIT',
-                     0x0008: '32',
-                     0x0010: '64',
-                     0x0020: 'QOS',
-                     0x0040: 'WQ',
-                     0x0080: 'WL',
-                     0x0100: 'PROCESS',
-                     0x0200: 'DRAIN',
-                     0x0400: 'WAKEUP',
-                     0x0800: 'DYN',
-                     0x1000: 'R2K',
-                     0x2000: 'TS' }
-
-kn_state_strings = { 0x0000: '',
-                     0x0001: 'ACTIVE',
-                     0x0002: 'QUEUED',
-                     0x0004: 'DISABLED',
-                     0x0008: 'DROPPING',
-                     0x0010: 'LOCKED',
-                     0x0020: 'POSTING',
-                     0x0040: 'STAYACTIVE',
-                     0x0080: 'DEFERDELETE',
-                     0x0100: 'MERGE_QOS',
-                     0x0200: 'REQVANISH',
-                     0x0400: 'VANISHED',
-                     0x0800: 'SUPPRESS' }
-
 thread_qos_short_strings = { 0: '--',
                              1: 'MT',
                              2: 'BG',
@@ -109,10 +86,8 @@ thread_qos_short_strings = { 0: '--',
                              6: 'UI',
                              7: 'MG' }
 
-KQ_WORKQ = 0x40
-KQ_WORKLOOP = 0x80
-KQWQ_NBUCKETS = 8
-KQWL_NBUCKETS = 8
+KQWQ_NBUCKETS = 7
+KQWL_NBUCKETS = 6
 
 DTYPE_VNODE = 1
 DTYPE_SOCKET = 2
@@ -171,32 +146,9 @@ proc_flag_explain_strings = ["!0x00000004 - process is 32 bit",  #only exception
                              "0x40000000 - no zombies when children exit",
                              "0x80000000 - don't hang on remote FS ops"
                              ]
-#File: xnu/osfmk/kern/ipc_kobject.h
-# string representations for Kobject types
-kobject_types = ['', 'THREAD_CONTROL', 'TASK_CONTROL', 'HOST', 'HOST_PRIV', 'PROCESSOR', 'PSET', 'PSET_NAME', 'TIMER', 'PAGER_REQ', 'DEVICE', 'XMM_OBJECT', 'XMM_PAGER', 'XMM_KERNEL', 'XMM_REPLY',
-                     'NOTDEF 15', 'NOTDEF 16', 'HOST_SEC', 'LEDGER', 'MASTER_DEV', 'TASK_NAME', 'SUBSYTEM', 'IO_DONE_QUE', 'SEMAPHORE', 'LOCK_SET', 'CLOCK', 'CLOCK_CTRL' , 'IOKIT_SPARE',
-                      'NAMED_MEM', 'IOKIT_CON', 'IOKIT_OBJ', 'UPL', 'MEM_OBJ_CONTROL', 'AU_SESSIONPORT', 'FILEPORT', 'LABELH', 'TASK_RESUME', 'VOUCHER', 'VOUCHER_ATTR_CONTROL', 'WORK_INTERVAL',
-                      'UX_HANDLER', 'UEXT_OBJECT', 'ARCADE_REG', 'TASK_INSPECT', 'TASK_READ', 'THREAD_INSPECT', 'THREAD_READ']
-
-def populate_kobject_types(xnu_dir_path):
-    """ Function to read data from header file xnu/osfmk/kern/ipc_kobject.h
-        and populate the known kobject types.
-    """
-    filename = os.path.join(xnu_dir_path, 'osfmk', 'kern', 'ipc_kobject.h')
-    filedata = open(filename).read()
-    object_regex = re.compile("^#define\s+(IKOT_[A-Z_]*)\s+(\d+)\s*",re.MULTILINE|re.DOTALL)
-    kobject_found_types =[]
-    for v in object_regex.findall(filedata):
-        kobject_found_types.append(v[0])
-    return kobject_found_types
 
 FSHIFT = 11
 FSCALE = 1 << FSHIFT
-
-KDBG_BFINIT         = 0x80000000
-KDBG_WRAPPED        = 0x008
-KDCOPYBUF_COUNT     = 8192
-KDS_PTR_NULL        = 0xffffffff
 
 DBG_TRACE               = 1
 DBG_TRACE_INFO          = 2
@@ -228,6 +180,7 @@ P_PLATFORM_TVOSSIMULATOR = 8
 P_PLATFORM_WATCHOSSIMULATOR = 9
 P_PLATFORM_DRIVERKIT = 10
 
+
 if __name__ == "__main__":
-    populate_kobject_types("../../")
+    pass
 

@@ -93,7 +93,6 @@ extern int raw_attach(struct socket *, int);
 extern void raw_ctlinput(int, struct sockaddr *, void *, struct ifnet *);
 extern void raw_detach(struct rawcb *);
 extern void raw_disconnect(struct rawcb *);
-extern void raw_init(struct protosw *, struct domain *);
 extern void raw_input(struct mbuf *, struct sockproto *, struct sockaddr *,
     struct sockaddr *);
 __END_DECLS

@@ -58,6 +58,7 @@
 #define WQ_FLAG_THREAD_TSD_BASE_SET             0x00200000  /* tsd base has already been set */
 #define WQ_FLAG_THREAD_WORKLOOP                 0x00400000  /* workloop thread */
 #define WQ_FLAG_THREAD_OUTSIDEQOS               0x00800000  /* thread qos changes should not be sent to kernel */
+#define WQ_FLAG_THREAD_COOPERATIVE              0x01000000  /* thread is part of cooperative thread pool */
 
 #define WQ_KEVENT_LIST_LEN  16 // WORKQ_KEVENT_EVENT_BUFFER_LEN
 #define WQ_KEVENT_DATA_SIZE (32 * 1024)

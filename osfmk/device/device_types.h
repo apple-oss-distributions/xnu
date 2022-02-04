@@ -73,6 +73,7 @@
 #ifdef MACH_KERNEL_PRIVATE
 #include <mach_debug/mach_debug_types.h>
 #endif
+#include <stdint.h>
 
 #if PRIVATE
 #define IOKIT_SERVER_VERSION    20190926
@@ -98,10 +99,10 @@ typedef char                    io_struct_inband_t[4096];
 
 #if KERNEL
 typedef uint64_t                io_user_scalar_t;
-typedef uint64_t                io_user_reference_t;
+typedef uint64_t                io_user_reference_t __kernel_ptr_semantics;
 typedef int                     io_scalar_inband_t[16];
 // must be the same type as OSAsyncReference
-typedef natural_t               io_async_ref_t[8];
+typedef natural_t               io_async_ref_t[8] __kernel_ptr_semantics;
 typedef io_user_scalar_t        io_scalar_inband64_t[16];
 typedef io_user_reference_t     io_async_ref64_t[8];
 #elif __LP64__
@@ -124,6 +125,7 @@ typedef uint64_t                io_async_ref64_t[8];
 
 typedef struct IOObject * io_object_t;
 typedef io_object_t io_connect_t;
+typedef io_object_t io_ident_t;
 typedef io_object_t uext_object_t;
 
 extern void iokit_add_reference( io_object_t obj, natural_t type );
@@ -133,12 +135,12 @@ extern void iokit_port_object_description(io_object_t obj, kobject_description_t
 
 extern io_object_t iokit_lookup_object_port( ipc_port_t port );
 extern io_connect_t iokit_lookup_connect_port( ipc_port_t port );
+extern io_ident_t iokit_lookup_ident_port( ipc_port_t port );
 extern uext_object_t iokit_lookup_uext_object_port( ipc_port_t port );
 
 extern ipc_port_t iokit_make_object_port( io_object_t obj );
 extern ipc_port_t iokit_make_connect_port( io_connect_t obj );
-
-extern boolean_t iokit_notify( mach_msg_header_t *msg );
+extern ipc_port_t iokit_make_ident_port( io_ident_t obj );
 
 #else
 

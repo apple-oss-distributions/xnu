@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2007-2019 Apple Inc. All rights reserved.
+ * Copyright (c) 2007-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -102,8 +102,8 @@ extern "C" {
 
 #define be64toh(x)      htobe64(x)
 
-extern lck_rw_t *pf_perim_lock;
-extern lck_mtx_t *pf_lock;
+extern lck_rw_t pf_perim_lock;
+extern lck_mtx_t pf_lock;
 
 struct pool {
 	struct zone     *pool_zone;     /* pointer to backend zone */
@@ -1469,7 +1469,8 @@ struct pf_pdesc {
 #define PFRES_SRCLIMIT  13              /* Source node/conn limit */
 #define PFRES_SYNPROXY  14              /* SYN proxy */
 #define PFRES_DUMMYNET  15              /* Dummynet */
-#define PFRES_MAX       16              /* total+1 */
+#define PFRES_INVPORT   16              /* Invalid TCP/UDP port */
+#define PFRES_MAX       17              /* total+1 */
 
 #define PFRES_NAMES { \
 	"match", \
@@ -1488,6 +1489,7 @@ struct pf_pdesc {
 	"src-limit", \
 	"synproxy", \
 	"dummynet", \
+	"invalid-port", \
 	NULL \
 }
 
@@ -2197,14 +2199,10 @@ struct ip_fw_args;
 extern boolean_t is_nlc_enabled_glb;
 
 #if INET
-__private_extern__ int pf_test(int, struct ifnet *, pbuf_t **,
-    struct ether_header *, struct ip_fw_args *);
 __private_extern__ int pf_test_mbuf(int, struct ifnet *, struct mbuf **,
     struct ether_header *, struct ip_fw_args *);
 #endif /* INET */
 
-__private_extern__ int pf_test6(int, struct ifnet *, pbuf_t **,
-    struct ether_header *, struct ip_fw_args *);
 __private_extern__ int pf_test6_mbuf(int, struct ifnet *, struct mbuf **,
     struct ether_header *, struct ip_fw_args *);
 __private_extern__ void pf_poolmask(struct pf_addr *, struct pf_addr *,

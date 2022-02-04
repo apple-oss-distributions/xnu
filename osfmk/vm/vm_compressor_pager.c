@@ -75,6 +75,8 @@
 #include <vm/vm_pageout.h>
 #include <vm/vm_protos.h>
 
+#include <sys/kdebug_triage.h>
+
 /* memory_object interfaces */
 void compressor_memory_object_reference(memory_object_t mem_obj);
 void compressor_memory_object_deallocate(memory_object_t mem_obj);
@@ -133,6 +135,7 @@ const struct memory_object_pager_ops compressor_pager_ops = {
 	.memory_object_map = compressor_memory_object_map,
 	.memory_object_last_unmap = compressor_memory_object_last_unmap,
 	.memory_object_data_reclaim = compressor_memory_object_data_reclaim,
+	.memory_object_backing_object = NULL,
 	.memory_object_pager_name = "compressor pager"
 };
 
@@ -156,7 +159,11 @@ typedef struct compressor_pager {
 
 	/* pager-specific data */
 	lck_mtx_t                       cpgr_lock;
-	unsigned int                    cpgr_references;
+#if MEMORY_OBJECT_HAS_REFCOUNT
+#define cpgr_references                 cpgr_hdr.mo_ref
+#else
+	os_ref_atomic_t                 cpgr_references;
+#endif
 	unsigned int                    cpgr_num_slots;
 	unsigned int                    cpgr_num_slots_occupied;
 	union {
@@ -176,7 +183,10 @@ typedef struct compressor_pager {
 	}                                                               \
 	MACRO_END
 
-zone_t compressor_pager_zone;
+/* embedded slot pointers in compressor_pager get packed, so VA restricted */
+static ZONE_DECLARE(compressor_pager_zone, "compressor_pager",
+    sizeof(struct compressor_pager),
+    ZC_NOENCRYPT | ZC_VM_LP64 | ZC_NOTBITAG);
 
 LCK_GRP_DECLARE(compressor_pager_lck_grp, "compressor_pager");
 
@@ -264,7 +274,7 @@ compressor_memory_object_synchronize(
 	__unused memory_object_size_t   length,
 	__unused vm_sync_t              flags)
 {
-	panic("compressor_memory_object_synchronize: memory_object_synchronize no longer supported\n");
+	panic("compressor_memory_object_synchronize: memory_object_synchronize no longer supported");
 	return KERN_FAILURE;
 }
 
@@ -339,8 +349,7 @@ compressor_memory_object_reference(
 	}
 
 	compressor_pager_lock(pager);
-	assert(pager->cpgr_references > 0);
-	pager->cpgr_references++;
+	os_ref_retain_locked_raw(&pager->cpgr_references, NULL);
 	compressor_pager_unlock(pager);
 }
 
@@ -364,7 +373,7 @@ compressor_memory_object_deallocate(
 	}
 
 	compressor_pager_lock(pager);
-	if (--pager->cpgr_references > 0) {
+	if (os_ref_release_locked_raw(&pager->cpgr_references, NULL) > 0) {
 		compressor_pager_unlock(pager);
 		return;
 	}
@@ -404,8 +413,8 @@ compressor_memory_object_deallocate(
 				zfree_slot_array(chunk, COMPRESSOR_SLOTS_CHUNK_SIZE);
 			}
 		}
-		kheap_free(KHEAP_DEFAULT, pager->cpgr_slots.cpgr_islots,
-		    num_chunks * sizeof(pager->cpgr_slots.cpgr_islots[0]));
+		kfree_type(compressor_slot_t *, num_chunks,
+		    pager->cpgr_slots.cpgr_islots);
 		pager->cpgr_slots.cpgr_islots = NULL;
 	} else if (pager->cpgr_num_slots > 2) {
 		chunk = pager->cpgr_slots.cpgr_dslots;
@@ -455,7 +464,7 @@ compressor_memory_object_data_request(
 	}
 
 	if ((uint32_t)(offset / PAGE_SIZE) != (offset / PAGE_SIZE)) {
-		panic("%s: offset 0x%llx overflow\n",
+		panic("%s: offset 0x%llx overflow",
 		    __FUNCTION__, (uint64_t) offset);
 		return KERN_FAILURE;
 	}
@@ -567,26 +576,22 @@ compressor_memory_object_create(
 
 	if ((uint32_t)(new_size / PAGE_SIZE) != (new_size / PAGE_SIZE)) {
 		/* 32-bit overflow for number of pages */
-		panic("%s: size 0x%llx overflow\n",
+		panic("%s: size 0x%llx overflow",
 		    __FUNCTION__, (uint64_t) new_size);
 		return KERN_INVALID_ARGUMENT;
 	}
 
-	pager = (compressor_pager_t) zalloc(compressor_pager_zone);
-	if (pager == NULL) {
-		return KERN_RESOURCE_SHORTAGE;
-	}
+	pager = zalloc_flags(compressor_pager_zone, Z_WAITOK | Z_NOFAIL);
 
 	compressor_pager_lock_init(pager);
-	pager->cpgr_references = 1;
+	os_ref_init_raw(&pager->cpgr_references, NULL);
 	pager->cpgr_num_slots = (uint32_t)(new_size / PAGE_SIZE);
 	pager->cpgr_num_slots_occupied = 0;
 
 	num_chunks = (pager->cpgr_num_slots + COMPRESSOR_SLOTS_PER_CHUNK - 1) / COMPRESSOR_SLOTS_PER_CHUNK;
 	if (num_chunks > 1) {
-		pager->cpgr_slots.cpgr_islots = kheap_alloc(KHEAP_DEFAULT,
-		    num_chunks * sizeof(pager->cpgr_slots.cpgr_islots[0]),
-		    Z_WAITOK | Z_ZERO);
+		pager->cpgr_slots.cpgr_islots = kalloc_type(compressor_slot_t *,
+		    num_chunks, Z_WAITOK | Z_ZERO);
 	} else if (pager->cpgr_num_slots > 2) {
 		pager->cpgr_slots.cpgr_dslots = zalloc_slot_array(pager->cpgr_num_slots *
 		    sizeof(pager->cpgr_slots.cpgr_dslots[0]), Z_WAITOK | Z_ZERO);
@@ -660,7 +665,7 @@ compressor_pager_slot_lookup(
 	page_num = (uint32_t)(offset / PAGE_SIZE);
 	if (page_num != (offset / PAGE_SIZE)) {
 		/* overflow */
-		panic("%s: offset 0x%llx overflow\n",
+		panic("%s: offset 0x%llx overflow",
 		    __FUNCTION__, (uint64_t) offset);
 		*slot_pp = NULL;
 		return;
@@ -718,33 +723,19 @@ compressor_pager_slot_lookup(
 	}
 }
 
-void
-vm_compressor_pager_init(void)
+#if defined(__LP64__)
+__startup_func
+static void
+vm_compressor_slots_init(void)
 {
-	/* embedded slot pointers in compressor_pager get packed, so VA restricted */
-	compressor_pager_zone = zone_create_ext("compressor_pager",
-	    sizeof(struct compressor_pager), ZC_NOENCRYPT,
-	    ZONE_ID_ANY, ^(zone_t z){
-#if defined(__LP64__)
-		zone_set_submap_idx(z, Z_SUBMAP_IDX_VA_RESTRICTED_MAP);
-#else
-		(void)z;
-#endif /* defined(__LP64__) */
-	});
-
-#if defined(__LP64__)
 	for (unsigned int idx = 0; idx < NUM_SLOTS_ZONES; idx++) {
-		compressor_slots_zones[idx] = zone_create_ext(
+		compressor_slots_zones[idx] = zone_create(
 			compressor_slots_zones_names[idx],
-			compressor_slots_zones_sizes[idx], ZC_NONE,
-			ZONE_ID_ANY, ^(zone_t z){
-			zone_set_submap_idx(z, Z_SUBMAP_IDX_VA_RESTRICTED_MAP);
-		});
+			compressor_slots_zones_sizes[idx], ZC_VM_LP64 | ZC_NOTBITAG);
 	}
-#endif /* defined(__LP64__) */
-
-	vm_compressor_init();
 }
+STARTUP(ZALLOC, STARTUP_RANK_MIDDLE, vm_compressor_slots_init);
+#endif /* defined(__LP64__) */
 
 static compressor_slot_t *
 zalloc_slot_array(size_t size, zalloc_flags_t flags)
@@ -762,7 +753,7 @@ zalloc_slot_array(size_t size, zalloc_flags_t flags)
 	}
 	return slots;
 #else  /* defined(__LP64__) */
-	return kheap_alloc(KHEAP_DATA_BUFFERS, size, flags);
+	return kalloc_data(size, flags);
 #endif /* !defined(__LP64__) */
 }
 
@@ -779,7 +770,7 @@ zfree_slot_array(compressor_slot_t *slots, size_t size)
 		break;
 	}
 #else  /* defined(__LP64__) */
-	kheap_free(KHEAP_DATA_BUFFERS, slots, size);
+	kfree_data(slots, size);
 #endif /* !defined(__LP64__) */
 }
 
@@ -811,7 +802,7 @@ vm_compressor_pager_put(
 
 	if ((uint32_t)(offset / PAGE_SIZE) != (offset / PAGE_SIZE)) {
 		/* overflow */
-		panic("%s: offset 0x%llx overflow\n",
+		panic("%s: offset 0x%llx overflow",
 		    __FUNCTION__, (uint64_t) offset);
 		return KERN_RESOURCE_SHORTAGE;
 	}
@@ -867,7 +858,7 @@ vm_compressor_pager_get(
 	*compressed_count_delta_p = 0;
 
 	if ((uint32_t)(offset / PAGE_SIZE) != (offset / PAGE_SIZE)) {
-		panic("%s: offset 0x%llx overflow\n",
+		panic("%s: offset 0x%llx overflow",
 		    __FUNCTION__, (uint64_t) offset);
 		return KERN_MEMORY_ERROR;
 	}
@@ -879,9 +870,11 @@ vm_compressor_pager_get(
 
 	if (offset / PAGE_SIZE >= pager->cpgr_num_slots) {
 		/* out of range */
+		kernel_triage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_VM, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_VM_COMPRESSOR_GET_OUT_OF_RANGE), 0 /* arg */);
 		kr = KERN_MEMORY_FAILURE;
 	} else if (slot_p == NULL || *slot_p == 0) {
 		/* compressor does not have this page */
+		kernel_triage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_VM, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_VM_COMPRESSOR_GET_NO_PAGE), 0 /* arg */);
 		kr = KERN_MEMORY_ERROR;
 	} else {
 		/* compressor does have this page */
@@ -895,11 +888,13 @@ vm_compressor_pager_get(
 		/* get the page from the compressor */
 		retval = vm_compressor_get(ppnum, slot_p, flags);
 		if (retval == -1) {
+			kernel_triage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_VM, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_VM_COMPRESSOR_DECOMPRESS_FAILED), 0 /* arg */);
 			kr = KERN_MEMORY_FAILURE;
 		} else if (retval == 1) {
 			*my_fault_type = DBG_COMPRESSOR_SWAPIN_FAULT;
 		} else if (retval == -2) {
 			assert((flags & C_DONT_BLOCK));
+			kernel_triage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_VM, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_VM_COMPRESSOR_BLOCKING_OP_FAILED), 0 /* arg */);
 			kr = KERN_FAILURE;
 		}
 	}
@@ -935,7 +930,7 @@ vm_compressor_pager_state_clr(
 
 	if ((uint32_t)(offset / PAGE_SIZE) != (offset / PAGE_SIZE)) {
 		/* overflow */
-		panic("%s: offset 0x%llx overflow\n",
+		panic("%s: offset 0x%llx overflow",
 		    __FUNCTION__, (uint64_t) offset);
 		return 0;
 	}
@@ -969,7 +964,7 @@ vm_compressor_pager_state_get(
 
 	if ((uint32_t)(offset / PAGE_SIZE) != (offset / PAGE_SIZE)) {
 		/* overflow */
-		panic("%s: offset 0x%llx overflow\n",
+		panic("%s: offset 0x%llx overflow",
 		    __FUNCTION__, (uint64_t) offset);
 		return VM_EXTERNAL_STATE_ABSENT;
 	}

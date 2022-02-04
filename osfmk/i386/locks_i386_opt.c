@@ -91,7 +91,7 @@ lck_mtx_check_preemption(void)
 		return;
 	}
 
-	panic("preemption_level(%d) != 0\n", get_preemption_level());
+	panic("preemption_level(%d) != 0", get_preemption_level());
 }
 
 #else /* DEVELOPMENT || DEBUG */

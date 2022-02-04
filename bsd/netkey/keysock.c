@@ -84,7 +84,7 @@
 #include <netkey/keysock.h>
 #include <netkey/key_debug.h>
 
-extern lck_mtx_t *raw_mtx;
+extern lck_mtx_t raw_mtx;
 extern void key_init(struct protosw *, struct domain *);
 
 struct sockaddr key_dst = { .sa_len = 2, .sa_family = PF_KEY, .sa_data = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, } };
@@ -97,7 +97,8 @@ struct pfkeystat pfkeystat;
 
 static struct domain *keydomain = NULL;
 
-extern lck_mtx_t *pfkey_stat_mutex;
+static LCK_GRP_DECLARE(pfkey_stat_mutex_grp, "pfkey_stat");
+LCK_MTX_DECLARE(pfkey_stat_mutex, &pfkey_stat_mutex_grp);
 
 /*
  * key_output()
@@ -128,14 +129,14 @@ va_dcl
 #endif
 
 	if (m == 0) {
-		panic("key_output: NULL pointer was passed.\n");
+		panic("key_output: NULL pointer was passed.");
 	}
 
 	socket_unlock(so, 0);
-	lck_mtx_lock(pfkey_stat_mutex);
+	lck_mtx_lock(&pfkey_stat_mutex);
 	pfkeystat.out_total++;
 	pfkeystat.out_bytes += m->m_pkthdr.len;
-	lck_mtx_unlock(pfkey_stat_mutex);
+	lck_mtx_unlock(&pfkey_stat_mutex);
 
 	len = m->m_pkthdr.len;
 	if (len < sizeof(struct sadb_msg)) {
@@ -248,16 +249,16 @@ key_sendup_mbuf(struct socket *so, struct mbuf *m, int target)
 	int error = 0;
 
 	if (m == NULL) {
-		panic("key_sendup_mbuf: NULL pointer was passed.\n");
+		panic("key_sendup_mbuf: NULL pointer was passed.");
 	}
 	if (so == NULL && target == KEY_SENDUP_ONE) {
-		panic("key_sendup_mbuf: NULL pointer was passed.\n");
+		panic("key_sendup_mbuf: NULL pointer was passed.");
 	}
 
-	lck_mtx_lock(pfkey_stat_mutex);
+	lck_mtx_lock(&pfkey_stat_mutex);
 	pfkeystat.in_total++;
 	pfkeystat.in_bytes += m->m_pkthdr.len;
-	lck_mtx_unlock(pfkey_stat_mutex);
+	lck_mtx_unlock(&pfkey_stat_mutex);
 	if (m->m_len < sizeof(struct sadb_msg)) {
 #if 1
 		m = m_pullup(m, sizeof(struct sadb_msg));
@@ -275,7 +276,7 @@ key_sendup_mbuf(struct socket *so, struct mbuf *m, int target)
 		PFKEY_STAT_INCREMENT(pfkeystat.in_msgtype[msg->sadb_msg_type]);
 	}
 
-	lck_mtx_lock(raw_mtx);
+	lck_mtx_lock(&raw_mtx);
 	LIST_FOREACH(rp, &rawcb_list, list)
 	{
 		if (rp->rcb_proto.sp_family != PF_KEY) {
@@ -336,7 +337,7 @@ key_sendup_mbuf(struct socket *so, struct mbuf *m, int target)
 			m_freem(m);
 			PFKEY_STAT_INCREMENT(pfkeystat.in_nomem);
 			socket_unlock(rp->rcb_socket, 1);
-			lck_mtx_unlock(raw_mtx);
+			lck_mtx_unlock(&raw_mtx);
 			return ENOBUFS;
 		}
 
@@ -350,7 +351,7 @@ key_sendup_mbuf(struct socket *so, struct mbuf *m, int target)
 		n = NULL;
 	}
 
-	lck_mtx_unlock(raw_mtx);
+	lck_mtx_unlock(&raw_mtx);
 	if (so) {
 		socket_lock(so, 1);
 		error = key_sendup0(sotorawcb(so), m, 0);

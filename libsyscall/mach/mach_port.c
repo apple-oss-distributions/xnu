@@ -439,7 +439,7 @@ mach_port_space_basic_info(
 }
 
 static inline mach_port_t
-_tsd_get_special_reply_port()
+_tsd_get_special_reply_port(void)
 {
 	return (mach_port_t)(uintptr_t)_os_tsd_get_direct(__TSD_MACH_SPECIAL_REPLY);
 }
@@ -790,6 +790,49 @@ mach_port_swap_guard(
 	kern_return_t rv;
 
 	rv = _kernelrpc_mach_port_swap_guard(task, name, (uint64_t)old_guard, (uint64_t)new_guard);
+
+	return rv;
+}
+
+kern_return_t
+mach_port_is_connection_for_service(
+	ipc_space_t task,
+	mach_port_name_t connection_port_name,
+	mach_port_name_t service_port_name,
+	uint64_t *filter_policy_id)
+{
+	kern_return_t rv;
+
+	rv = _kernelrpc_mach_port_is_connection_for_service(task, connection_port_name, service_port_name, filter_policy_id);
+
+	return rv;
+}
+
+kern_return_t
+mach_port_get_service_port_info(
+	ipc_space_read_t task,
+	mach_port_name_t name,
+	mach_service_port_info_data_t *sp_info_out)
+{
+	kern_return_t rv;
+
+	rv = _kernelrpc_mach_port_get_service_port_info(task, name, sp_info_out);
+
+	return rv;
+}
+
+kern_return_t
+mach_port_assert_attributes(
+	ipc_space_t task,
+	mach_port_name_t name,
+	mach_port_flavor_t flavor,
+	mach_port_info_t info,
+	mach_msg_type_number_t infoCnt)
+{
+	kern_return_t rv;
+
+	rv = _kernelrpc_mach_port_assert_attributes(task, name, flavor,
+	    info, infoCnt);
 
 	return rv;
 }

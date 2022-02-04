@@ -28,6 +28,8 @@
 #ifndef _MACHINE_X86_64_KPC_H
 #define _MACHINE_X86_64_KPC_H
 
+#include <stdint.h>
+
 /* x86 config registers are 64-bit */
 typedef uint64_t kpc_config_t;
 

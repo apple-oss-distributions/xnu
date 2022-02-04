@@ -5,7 +5,6 @@ _mountroot_post_hook
 _unmountroot_pre_hook
 _vfs_addtrigger
 _vfs_settriggercallback
-_vfs_resolver_result
 _vnode_trigger_update
 _dqfileclose
 _dqfileopen

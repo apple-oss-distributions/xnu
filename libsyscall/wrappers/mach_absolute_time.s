@@ -224,6 +224,16 @@ _mach_continuous_time_kernel:
 #include <mach/arm/syscall_sw.h>
 #include <mach/arm/traps.h>
 
+.macro CALC_MACH_ABSOLUTE_TIME reg
+1:
+	ldr	x1, [x3]			// Load the offset
+	mrs	x0, \reg			// Read the timebase
+	ldr	x2, [x3]			// Load the offset
+	cmp	x1, x2				// Compare our offset values...
+	b.ne	1b				// If they changed, try again
+	add	x0, x0, x1			// Construct mach_absolute_time
+.endm
+
 /*
  * If userspace access to the timebase is supported (indicated through the commpage),
  * directly reads the timebase and uses it and the current timebase offset (also in
@@ -244,17 +254,20 @@ _mach_absolute_time:
 	movk	x3, #(((_COMM_PAGE_TIMEBASE_OFFSET) >> 16) & 0x000000000000FFFF), lsl #16
 	movk	x3, #((_COMM_PAGE_TIMEBASE_OFFSET) & 0x000000000000FFFF)
 	ldrb	w2, [x3, #((_COMM_PAGE_USER_TIMEBASE) - (_COMM_PAGE_TIMEBASE_OFFSET))]
+
 	cmp	x2, #USER_TIMEBASE_NONE		// Are userspace reads supported?
 	b.eq	_mach_absolute_time_kernel	// If not, go to the kernel
+	cmp	x2, #USER_TIMEBASE_NOSPEC
+	b.eq	L_mach_absolute_time_user_nospec
+	// Fallthrough to USER_TIMEBASE_SPEC case below
+
 	isb					// Prevent speculation on CNTVCT across calls
-						// (see ARMV7C.b section B8.1.2, ARMv8 section D6.1.2)
-L_mach_absolute_time_user:
-	ldr	x1, [x3]			// Load the offset
-	mrs	x0, CNTVCT_EL0			// Read the timebase
-	ldr	x2, [x3]			// Load the offset
-	cmp	x1, x2				// Compare our offset values...
-	b.ne	L_mach_absolute_time_user	// If they changed, try again
-	add	x0, x0, x1			// Construct mach_absolute_time
+	CALC_MACH_ABSOLUTE_TIME	CNTVCT_EL0	// (see ARMV7C.b section B8.1.2, ARMv8 section D6.1.2)
+	ret
+
+L_mach_absolute_time_user_nospec:
+#define CNTVCTSS_EL0    S3_3_c14_c0_6
+	CALC_MACH_ABSOLUTE_TIME	CNTVCTSS_EL0
 	ret
 
 

@@ -23,7 +23,6 @@ OS_PUBLIC_HEADERS_FOLDER_PATH = $(SDK_INSTALL_HEADERS_ROOT)/usr/include/os
 EXECUTABLE_PREFIX = libsystem_
 PRODUCT_NAME = kernel
 ALWAYS_SEARCH_USER_PATHS = NO
-ORDER_FILE[sdk=iphoneos*] = $(SDKROOT)/$(APPLE_INTERNAL_DIR)/OrderFiles/libsystem_kernel.order
 OTHER_CFLAGS = -fdollars-in-identifiers -no-cpp-precomp -fno-common -fno-stack-protector -fno-stack-check -momit-leaf-frame-pointer -DLIBSYSCALL_INTERFACE -D__DARWIN_VERS_1050=1 -DNO_SYSCALL_LEGACY
 OTHER_CFLAGS[sdk=macosx*][arch=i386] = $(inherited) -UNO_SYSCALL_LEGACY -DSYSCALL_PRE1050
 OTHER_CFLAGS[sdk=macosx*][arch=x86_64*] = $(inherited) -DSYSCALL_PRE1050
@@ -62,12 +61,7 @@ CLANG_WARN_SUSPICIOUS_MOVE = YES
 
 CODE_SIGN_IDENTITY = -
 DYLIB_CURRENT_VERSION = $(RC_ProjectSourceVersion)
-DYLIB_LDFLAGS = -umbrella System -all_load
-DYLIB_LDFLAGS[sdk=iphoneos*] = $(inherited) -Wl,-sectalign,__DATA,__data,1000
-DYLIB_LDFLAGS[sdk=watchos*] = $(inherited) -Wl,-sectalign,__DATA,__data,1000
-DYLIB_LDFLAGS[sdk=tvos*] = $(inherited) -Wl,-sectalign,__DATA,__data,1000
-DYLIB_LDFLAGS[sdk=appletvos*] = $(inherited) -Wl,-sectalign,__DATA,__data,1000
-DYLIB_LDFLAGS[sdk=bridgeos*] = $(inherited) -Wl,-sectalign,__DATA,__data,1000
+DYLIB_LDFLAGS = -umbrella System -all_load $(BUILT_PRODUCTS_DIR)/$(EXECUTABLE_PREFIX)$(PRODUCT_NAME).a
 OTHER_LDFLAGS = $(SIMULATOR_LDFLAGS)
 SIMULATOR_LDFLAGS =
 SIMULATOR_LDFLAGS[sdk=macosx*] = -Wl,-simulator_support

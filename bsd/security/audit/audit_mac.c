@@ -79,19 +79,20 @@ audit_mac_new(proc_t p, struct kaudit_record *ar)
 	/*
 	 * Retrieve the MAC labels for the process.
 	 */
-	ar->k_ar.ar_cred_mac_labels = (char *)zalloc(audit_mac_label_zone);
-	if (ar->k_ar.ar_cred_mac_labels == NULL) {
-		return 1;
-	}
+	ar->k_ar.ar_cred_mac_labels = zalloc_flags(audit_mac_label_zone,
+	    Z_WAITOK | Z_NOFAIL);
 	mac.m_buflen = MAC_AUDIT_LABEL_LEN;
 	mac.m_string = ar->k_ar.ar_cred_mac_labels;
-	mac_cred_label_externalize_audit(p, &mac);
+	if (mac_cred_label_externalize_audit(p, &mac)) {
+		zfree(audit_mac_label_zone, ar->k_ar.ar_cred_mac_labels);
+		return 1;
+	}
 
 	/*
 	 * grab space for the reconds.
 	 */
 	ar->k_ar.ar_mac_records = (struct mac_audit_record_list_t *)
-	    kheap_alloc(KHEAP_AUDIT, sizeof(*ar->k_ar.ar_mac_records), Z_WAITOK);
+	    kalloc_type(struct mac_audit_record_list_t, Z_WAITOK);
 	if (ar->k_ar.ar_mac_records == NULL) {
 		zfree(audit_mac_label_zone, ar->k_ar.ar_cred_mac_labels);
 		return 1;
@@ -117,7 +118,7 @@ audit_mac_free(struct kaudit_record *ar)
 		zfree(audit_mac_label_zone, ar->k_ar.ar_cred_mac_labels);
 	}
 	if (ar->k_ar.ar_arg_mac_string != NULL) {
-		kheap_free(KHEAP_AUDIT, ar->k_ar.ar_arg_mac_string,
+		kfree_data(ar->k_ar.ar_arg_mac_string,
 		    MAC_MAX_LABEL_BUF_LEN + MAC_ARG_PREFIX_LEN);
 	}
 
@@ -128,11 +129,10 @@ audit_mac_free(struct kaudit_record *ar)
 	while (head != NULL) {
 		next = LIST_NEXT(head, records);
 		zfree(mac_audit_data_zone, head->data);
-		kheap_free(KHEAP_AUDIT, head, sizeof(*head));
+		kfree_type(struct mac_audit_record, head);
 		head = next;
 	}
-	kheap_free(KHEAP_AUDIT, ar->k_ar.ar_mac_records,
-	    sizeof(*ar->k_ar.ar_mac_records));
+	kfree_type(struct mac_audit_record_list_t, ar->k_ar.ar_mac_records);
 }
 
 int
@@ -214,11 +214,7 @@ audit_mac_data(int type, int len, u_char *data)
 	 * allocation fails - this is consistent with the rest of the
 	 * audit implementation.
 	 */
-	record = kheap_alloc(KHEAP_AUDIT, sizeof(*record), Z_WAITOK);
-	if (record == NULL) {
-		zfree(mac_audit_data_zone, data);
-		return 0;
-	}
+	record = kalloc_type(struct mac_audit_record, Z_WAITOK | Z_NOFAIL);
 
 	record->type = type;
 	record->length = len;
@@ -232,20 +228,17 @@ void
 audit_arg_mac_string(struct kaudit_record *ar, char *string)
 {
 	if (ar->k_ar.ar_arg_mac_string == NULL) {
-		ar->k_ar.ar_arg_mac_string = kheap_alloc(KHEAP_AUDIT,
-		    MAC_MAX_LABEL_BUF_LEN + MAC_ARG_PREFIX_LEN, Z_WAITOK);
+		ar->k_ar.ar_arg_mac_string = kalloc_data(MAC_MAX_LABEL_BUF_LEN + MAC_ARG_PREFIX_LEN, Z_WAITOK);
 	}
 
 	/*
-	 * XXX This should be a rare event. If kheap_alloc() returns NULL,
+	 * XXX This should be a rare event. If kalloc_data() returns NULL,
 	 * the system is low on kernel virtual memory. To be
 	 * consistent with the rest of audit, just return
 	 * (may need to panic if required to for audit).
 	 */
 	if (ar->k_ar.ar_arg_mac_string == NULL) {
-		if (ar->k_ar.ar_arg_mac_string == NULL) {
-			return;
-		}
+		return;
 	}
 
 	strlcpy(ar->k_ar.ar_arg_mac_string, MAC_ARG_PREFIX,

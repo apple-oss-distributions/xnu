@@ -101,12 +101,14 @@ int hard_maxproc = HNPROC;      /* hardcoded limit */
 
 int nprocs = 0; /* XXX */
 
-//#define	NTEXT (80 + NPROC / 8)			/* actually the object cache */
-int desiredvnodes = 0;                          /* desiredvnodes is set explicitly in unix_startup.c */
-uint32_t kern_maxvnodes = 0;            /* global, to be read from the device tree */
+int desiredvnodes = 0;          /* desiredvnodes is set explicitly in unix_startup.c */
+uint32_t kern_maxvnodes = 0;    /* global, to be read from the device tree */
 
-#define MAXFILES (OPEN_MAX + 2048)
-int     maxfiles = MAXFILES;
+#if __LP64__
+int     maxfiles = 3 * OPEN_MAX;
+#else
+int     maxfiles = OPEN_MAX + 2048;
+#endif
 
 unsigned int    ncallout = 16 + 2 * NPROC;
 unsigned int nmbclusters = NMBCLUSTERS;

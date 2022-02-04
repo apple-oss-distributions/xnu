@@ -232,7 +232,7 @@ struct mount {
 #define MNT_IOSCALE(ioqueue_depth)      ((ioqueue_depth + (MNT_DEFAULT_IOQUEUE_DEPTH - 1)) / MNT_DEFAULT_IOQUEUE_DEPTH)
 
 /* mount point to which dead vps point to */
-extern struct mount * dead_mountp;
+extern struct mount * const dead_mountp;
 
 /*
  * Internal filesystem control flags stored in mnt_kern_flag.
@@ -298,27 +298,6 @@ extern struct mount * dead_mountp;
 #define MNT_LDEAD               0x00000100      /* mount already unmounted*/
 #define MNT_LNOSUB              0x00000200      /* submount - no recursion */
 
-
-/*
- * Generic file handle
- */
-#define NFS_MAX_FH_SIZE         NFSV4_MAX_FH_SIZE
-#define NFSV4_MAX_FH_SIZE       128
-#define NFSV3_MAX_FH_SIZE       64
-#define NFSV2_MAX_FH_SIZE       32
-
-#ifdef MALLOC_DECLARE
-MALLOC_DECLARE(M_FHANDLE);
-#endif
-
-struct fhandle {
-	unsigned int    fh_len;                         /* length of file handle */
-	unsigned char   fh_data[NFS_MAX_FH_SIZE];       /* file handle value */
-};
-typedef struct fhandle  fhandle_t;
-
-
-
 /*
  * Filesystem configuration information. One of these exists for each
  * type of filesystem supported by the kernel. These are searched at
@@ -326,17 +305,17 @@ typedef struct fhandle  fhandle_t;
  */
 struct vfstable {
 	const struct vfsops *vfc_vfsops;/* filesystem operations vector */
-	char    vfc_name[MFSNAMELEN];   /* filesystem type name */
-	int     vfc_typenum;            /* historic filesystem type number */
-	int     vfc_refcount;           /* number mounted of this type */
-	int     vfc_flags;              /* permanent flags */
-	int     (*vfc_mountroot)(mount_t, vnode_t, vfs_context_t);      /* if != NULL, routine to mount root */
-	struct  vfstable *vfc_next;     /* next in list */
-	int32_t vfc_reserved1;
-	int32_t vfc_reserved2;
-	int             vfc_vfsflags;   /* for optional types */
-	void *          vfc_descptr;    /* desc table allocated address */
-	int                     vfc_descsize;   /* size allocated for desc table */
+	char        vfc_name[MFSNAMELEN];   /* filesystem type name */
+	int         vfc_typenum;            /* historic filesystem type number */
+	int         vfc_refcount;           /* number mounted of this type */
+	int         vfc_flags;              /* permanent flags */
+	int         (*vfc_mountroot)(mount_t, vnode_t, vfs_context_t);      /* if != NULL, routine to mount root */
+	struct      vfstable *vfc_next;     /* next in list */
+	int32_t     vfc_reserved1;
+	int32_t     vfc_reserved2;
+	int         vfc_vfsflags;           /* for optional types */
+	void       *vfc_descptr;            /* desc table allocated address */
+	uint32_t    vfc_descsize;           /* number of elements in desc table */
 	struct sysctl_oid       *vfc_sysctl;    /* dynamically registered sysctl node */
 };
 
@@ -474,7 +453,7 @@ typedef uint32_t vfs_switch_root_flags_t;
 int vfs_switch_root(const char *, const char *, vfs_switch_root_flags_t);
 
 int     vfs_mountroot(void);
-void    vfs_unmountall(void);
+void    vfs_unmountall(int only_non_system);
 int     safedounmount(struct mount *, int, vfs_context_t);
 int     dounmount(struct mount *, int, int, vfs_context_t);
 void    dounmount_submounts(struct mount *, int, vfs_context_t);
@@ -502,19 +481,17 @@ void mount_iterreset(mount_t);
 #define KERNEL_MOUNT_PREBOOTVOL         0x20 /* mount the Preboot volume */
 #define KERNEL_MOUNT_RECOVERYVOL        0x40 /* mount the Recovery volume */
 #define KERNEL_MOUNT_BASESYSTEMROOT     0x80 /* mount a base root volume "instead of" the full root volume (only used during bsd_init) */
+#define KERNEL_MOUNT_DEVFS             0x100 /* kernel startup mount of devfs */
 
 /* mask for checking if any of the "mount volume by role" flags are set */
 #define KERNEL_MOUNT_VOLBYROLE_MASK (KERNEL_MOUNT_DATAVOL | KERNEL_MOUNT_VMVOL | KERNEL_MOUNT_PREBOOTVOL | KERNEL_MOUNT_RECOVERYVOL)
 
 
-#if NFSCLIENT || DEVFS || ROUTEFS
 /*
  * NOTE: kernel_mount() does not force MNT_NOSUID, MNT_NOEXEC, or MNT_NODEC for non-privileged
  * mounting credentials, as the mount(2) system call does.
  */
-int kernel_mount(char *, vnode_t, vnode_t, const char *, void *, size_t, int, uint32_t, vfs_context_t);
-boolean_t vfs_iskernelmount(mount_t);
-#endif
+int kernel_mount(const char *, vnode_t, vnode_t, const char *, void *, size_t, int, uint32_t, vfs_context_t);
 
 /* Throttled I/O API.  KPI/SPI is in systm.h. */
 
@@ -529,8 +506,6 @@ void rethrottle_thread(uthread_t ut);
 extern int num_trailing_0(uint64_t n);
 
 /* sync lock */
-extern lck_mtx_t * sync_mtx_lck;
-
 extern int sync_timeout_seconds;
 
 extern zone_t mount_zone;

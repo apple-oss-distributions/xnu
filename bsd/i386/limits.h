@@ -36,6 +36,8 @@
 #ifndef _I386_LIMITS_H_
 #define _I386_LIMITS_H_
 
+#if defined (__i386__) || defined (__x86_64__)
+
 #include <sys/cdefs.h>
 #ifndef DRIVERKIT
 #include <i386/_limits.h>
@@ -107,5 +109,7 @@
 
 #endif /* (!_POSIX_C_SOURCE && !_XOPEN_SOURCE) || _DARWIN_C_SOURCE */
 #endif /* !_ANSI_SOURCE */
+
+#endif /* defined (__i386__) || defined (__x86_64__) */
 
 #endif /* _I386_LIMITS_H_ */

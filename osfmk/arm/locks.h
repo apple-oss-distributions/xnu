@@ -31,23 +31,30 @@
 
 #include <kern/kern_types.h>
 #ifdef  MACH_KERNEL_PRIVATE
+#include <kern/sched_hygiene.h>
+#include <kern/startup.h>
 #include <arm/hw_lock_types.h>
 #endif
 
-
 #ifdef  MACH_KERNEL_PRIVATE
+#if DEBUG || DEVELOPMENT
+#define LOCKS_INDIRECT_ALLOW    1
+#else
+#define LOCKS_INDIRECT_ALLOW    0
+#endif
 
 #define enaLkDeb                0x00000001      /* Request debug in default attribute */
 #define enaLkStat               0x00000002      /* Request statistic in default attribute */
 #define disLkRWPrio             0x00000004      /* Disable RW lock priority promotion */
 #define enaLkTimeStat           0x00000008      /* Request time statistics in default attribute */
+#define disLkRWDebug            0x00000010      /* Disable RW lock best-effort debugging */
 
 #define disLkType               0x80000000      /* Disable type checking */
 #define disLktypeb              0
 #define disLkThread             0x40000000      /* Disable ownership checking */
-#define disLkThreadb    1
-#define enaLkExtStck    0x20000000      /* Enable extended backtrace */
-#define enaLkExtStckb   2
+#define disLkThreadb            1
+#define enaLkExtStck            0x20000000      /* Enable extended backtrace */
+#define enaLkExtStckb           2
 #define disLkMyLck              0x10000000      /* Disable recursive lock dectection */
 #define disLkMyLckb             3
 
@@ -56,20 +63,20 @@
 #ifdef  MACH_KERNEL_PRIVATE
 typedef struct {
 	struct hslock   hwlock;
-	uintptr_t               type;
+	uintptr_t       type __kernel_data_semantics;
 } lck_spin_t;
 
 #define lck_spin_data hwlock.lock_data
 
 #define LCK_SPIN_TAG_DESTROYED  0xdead  /* lock marked as Destroyed */
 
-#define LCK_SPIN_TYPE                   0x00000011
+#define LCK_SPIN_TYPE           0x00000011
 
 #else
 #ifdef  KERNEL_PRIVATE
 
 typedef struct {
-	uintptr_t               opaque[2];
+	uintptr_t       opaque[2] __kernel_data_semantics;
 } lck_spin_t;
 
 #else
@@ -79,38 +86,52 @@ typedef struct __lck_spin_t__   lck_spin_t;
 
 #ifdef  MACH_KERNEL_PRIVATE
 typedef struct _lck_mtx_ {
+	/*
+	 * The mtx_data which holds a thread_t can be "data semantics"
+	 * because any dereference of it that leads to mutation
+	 * will zone_id_require() that it is indeed a proper thread
+	 * from the thread zone.
+	 *
+	 * This allows us to leave pure data with a lock into
+	 * the kalloc data heap.
+	 */
 	union {
-		uintptr_t                                       lck_mtx_data;   /* Thread pointer plus lock bits */
-		uintptr_t                                       lck_mtx_tag;    /* Tag for type */
-	};                                                                                              /* arm: 4   arm64: 8 */
+		uintptr_t                       lck_mtx_data __kernel_data_semantics;   /* Thread pointer plus lock bits */
+		uintptr_t                       lck_mtx_tag __kernel_data_semantics;    /* Tag for type */
+	};                                                      /* arm: 4   arm64: 8 */
 	union {
 		struct {
-			uint16_t                                lck_mtx_waiters;/* Number of waiters */
-			uint8_t                                 lck_mtx_pri;    /* unused */
-			uint8_t                                 lck_mtx_type;   /* Type */
+			uint16_t                lck_mtx_waiters;/* Number of waiters */
+			uint8_t                 lck_mtx_pri;    /* unused */
+			uint8_t                 lck_mtx_type;   /* Type */
 		};
+#if LOCKS_INDIRECT_ALLOW
 		struct {
-			struct _lck_mtx_ext_    *lck_mtx_ptr;   /* Indirect pointer */
+			/* Marked as data as it is only dereferenced under LCK_ATTR_DEBUG */
+			struct _lck_mtx_ext_    *lck_mtx_ptr __kernel_data_semantics;   /* Indirect pointer */
 		};
-	};                                                                                              /* arm: 4   arm64: 8 */
-} lck_mtx_t;                                                                            /* arm: 8  arm64: 16 */
+#endif /* LOCKS_INDIRECT_ALLOW */
+	};                                                      /* arm: 4   arm64: 8 */
+} lck_mtx_t;                                                    /* arm: 8  arm64: 16 */
 
 /* Shared between mutex and read-write locks */
 #define LCK_ILOCK_BIT           0
 #define ARM_LCK_WAITERS_BIT     1
-#define LCK_ILOCK                       (1 << LCK_ILOCK_BIT)
+#define LCK_ILOCK               (1 << LCK_ILOCK_BIT)
 #define ARM_LCK_WAITERS         (1 << ARM_LCK_WAITERS_BIT)
 
-#define LCK_MTX_TYPE                                    0x22            /* lock type */
+#define LCK_MTX_TYPE            0x22            /* lock type */
 
-#define LCK_MTX_TAG_INDIRECT                    0x00001007      /* lock marked as Indirect  */
-#define LCK_MTX_TAG_DESTROYED                   0x00002007      /* lock marked as Destroyed */
+#if LOCKS_INDIRECT_ALLOW
+#define LCK_MTX_TAG_INDIRECT    0x00001007      /* lock marked as Indirect  */
+#endif /* LOCKS_INDIRECT_ALLOW */
+#define LCK_MTX_TAG_DESTROYED   0x00002007      /* lock marked as Destroyed */
 
-#define LCK_FRAMES_MAX  8
+#define LCK_FRAMES_MAX          8
 
-extern uint64_t         MutexSpin;
-extern uint64_t         low_MutexSpin;
-extern int64_t          high_MutexSpin;
+extern machine_timeout32_t MutexSpin;
+extern uint64_t            low_MutexSpin;
+extern int64_t             high_MutexSpin;
 
 typedef struct {
 	unsigned int            type;
@@ -125,7 +146,7 @@ typedef struct {
 } lck_mtx_stat_t;
 
 typedef struct _lck_mtx_ext_ {
-	lck_mtx_t                       lck_mtx;        /* arm: 12  arm64: 24 */
+	lck_mtx_t               lck_mtx;        /* arm: 12  arm64: 24 */
 	struct _lck_grp_        *lck_mtx_grp;   /* arm: 4   arm64: 8 */
 	unsigned int            lck_mtx_attr;   /* arm: 4   arm64: 4 */
 	lck_mtx_stat_t          lck_mtx_stat;   /* arm: 4   arm64: 4 */
@@ -143,7 +164,7 @@ typedef struct _lck_mtx_ext_ {
 #else
 #ifdef  KERNEL_PRIVATE
 typedef struct {
-	uintptr_t        opaque[2];
+	uintptr_t        opaque[2] __kernel_data_semantics;
 } lck_mtx_t;
 
 typedef struct {
@@ -161,79 +182,6 @@ typedef struct __lck_mtx_t__    lck_mtx_t;
 
 #ifdef  MACH_KERNEL_PRIVATE
 
-typedef union {
-	struct {
-		uint16_t        shared_count;           /* No. of shared granted request */
-		uint16_t        interlock:              1,      /* Interlock */
-		    priv_excl:              1,                          /* priority for Writer */
-		    want_upgrade:   1,                          /* Read-to-write upgrade waiting */
-		    want_excl:              1,                          /* Writer is waiting, or locked for write */
-		    r_waiting:              1,                          /* Someone is sleeping on lock */
-		    w_waiting:              1,                          /* Writer is sleeping on lock */
-		    can_sleep:              1,                          /* Can attempts to lock go to sleep? */
-		    _pad2:                  8,                          /* padding */
-		    tag_valid:              1;                          /* Field is actually a tag, not a bitfield */
-#if __arm64__
-		uint32_t        _pad4;
-#endif
-	};
-	struct {
-		uint32_t        data;                                           /* Single word version of bitfields and shared count */
-#if __arm64__
-		uint32_t        lck_rw_pad4;
-#endif
-	};
-} lck_rw_word_t;
-
-typedef struct {
-	lck_rw_word_t   word;
-	thread_t                lck_rw_owner;
-} lck_rw_t;     /* arm: 8  arm64: 16 */
-
-#define lck_rw_shared_count     word.shared_count
-#define lck_rw_interlock        word.interlock
-#define lck_rw_priv_excl        word.priv_excl
-#define lck_rw_want_upgrade     word.want_upgrade
-#define lck_rw_want_excl        word.want_excl
-#define lck_r_waiting           word.r_waiting
-#define lck_w_waiting           word.w_waiting
-#define lck_rw_can_sleep        word.can_sleep
-#define lck_rw_data                     word.data
-// tag and data reference the same memory. When the tag_valid bit is set,
-// the data word should be treated as a tag instead of a bitfield.
-#define lck_rw_tag_valid        word.tag_valid
-#define lck_rw_tag                      word.data
-
-#define LCK_RW_SHARED_READER_OFFSET      0
-#define LCK_RW_INTERLOCK_BIT            16
-#define LCK_RW_PRIV_EXCL_BIT            17
-#define LCK_RW_WANT_UPGRADE_BIT         18
-#define LCK_RW_WANT_EXCL_BIT            19
-#define LCK_RW_R_WAITING_BIT            20
-#define LCK_RW_W_WAITING_BIT            21
-#define LCK_RW_CAN_SLEEP_BIT            22
-//									23-30
-#define LCK_RW_TAG_VALID_BIT            31
-
-#define LCK_RW_INTERLOCK                (1U << LCK_RW_INTERLOCK_BIT)
-#define LCK_RW_R_WAITING                (1U << LCK_RW_R_WAITING_BIT)
-#define LCK_RW_W_WAITING                (1U << LCK_RW_W_WAITING_BIT)
-#define LCK_RW_WANT_UPGRADE             (1U << LCK_RW_WANT_UPGRADE_BIT)
-#define LCK_RW_WANT_EXCL                (1U << LCK_RW_WANT_EXCL_BIT)
-#define LCK_RW_TAG_VALID                (1U << LCK_RW_TAG_VALID_BIT)
-#define LCK_RW_PRIV_EXCL                (1U << LCK_RW_PRIV_EXCL_BIT)
-#define LCK_RW_SHARED_MASK              (0xffff << LCK_RW_SHARED_READER_OFFSET)
-#define LCK_RW_SHARED_READER    (0x1 << LCK_RW_SHARED_READER_OFFSET)
-
-#define LCK_RW_TAG_DESTROYED            ((LCK_RW_TAG_VALID | 0xdddddeadu))      /* lock marked as Destroyed */
-
-#define LCK_RW_WRITER_EVENT(lck)                (event_t)((uintptr_t)(lck)+1)
-#define LCK_RW_READER_EVENT(lck)                (event_t)((uintptr_t)(lck)+2)
-#define WRITE_EVENT_TO_RWLOCK(event)    ((lck_rw_t *)((uintptr_t)(event)-1))
-#define READ_EVENT_TO_RWLOCK(event)             ((lck_rw_t *)((uintptr_t)(event)-2))
-
-#if __ARM_ENABLE_WFE_
-
 #define wait_for_event()        __builtin_arm_wfe()
 #if __arm__
 #define set_event()                     do{__builtin_arm_dsb(DSB_ISHST);__builtin_arm_sev();}while(0)
@@ -243,19 +191,11 @@ typedef struct {
 #define LOCK_SNOOP_SPINS        0x300
 #endif
 
-#else
-
-#define wait_for_event()        __builtin_arm_clrex()
-#define set_event()             do{}while(0)
-#define LOCK_SNOOP_SPINS        0x300
-
-#endif // __ARM_ENABLE_WFE_
-
 #if LOCK_PRIVATE
 
-#define LOCK_PANIC_TIMEOUT      0xc00000        // 12.5 m ticks ~= 524ms with 24MHz OSC
+extern machine_timeout32_t lock_panic_timeout;
 
-#define PLATFORM_LCK_ILOCK LCK_ILOCK
+#define PLATFORM_LCK_ILOCK      LCK_ILOCK
 
 #if defined(__ARM_ARCH_8_2__)
 #define __ARM_ATOMICS_8_1       1       // ARMv8.1 atomic instructions are available
@@ -276,9 +216,27 @@ typedef struct {
  */
 #define LCK_MTX_THREAD_MASK (~(uintptr_t)(LCK_ILOCK | ARM_LCK_WAITERS))
 
-#define disable_preemption_for_thread(t) os_atomic_store(&(t->machine.preemption_count), t->machine.preemption_count + 1, compiler_acq_rel)
-#define preemption_disabled_for_thread(t) (t->machine.preemption_count > 0)
+#if SCHED_PREEMPTION_DISABLE_DEBUG
 
+#define lock_disable_preemption_for_thread(t)                                                                      \
+    do {                                                                                                           \
+	unsigned int const count = t->machine.preemption_count;                                                        \
+	os_atomic_store(&(t->machine.preemption_count), t->machine.preemption_count + 1, compiler_acq_rel);            \
+                                                                                                                   \
+	if (count == 0 && sched_preemption_disable_debug_mode) {                                                       \
+	    _prepare_preemption_disable_measurement(t);                                                                \
+	}                                                                                                              \
+    } while (0);
+
+#else /* SCHED_PREEMPTION_DISABLE_DEBUG */
+
+#define lock_disable_preemption_for_thread(t)     \
+	os_atomic_store(&(t->machine.preemption_count), t->machine.preemption_count + 1, compiler_acq_rel)
+
+#endif /* SCHED_PREEMPTION_DISABLE_DEBUG */
+
+#define lock_enable_preemption enable_preemption
+#define lock_preemption_disabled_for_thread(t) (t->machine.preemption_count > 0)
 
 __unused static void
 disable_interrupts_noread(void)
@@ -286,7 +244,7 @@ disable_interrupts_noread(void)
 #if __arm__
 	__asm__ volatile ("cpsid if" ::: "memory"); // Mask IRQ FIQ
 #else
-	__builtin_arm_wsr64("DAIFSet", (DAIFSC_IRQF | DAIFSC_FIQF));    // Mask IRQ FIQ
+	__builtin_arm_wsr64("DAIFSet", DAIFSC_STANDARD_DISABLE);    // Mask IRQ FIQ ASYNCF
 #endif
 }
 
@@ -325,14 +283,6 @@ restore_interrupts(long state)
 
 #endif // LOCK_PRIVATE
 
-#else
-#ifdef  KERNEL_PRIVATE
-typedef struct {
-	uintptr_t                    opaque[2];
-} lck_rw_t;
-#else
-typedef struct __lck_rw_t__     lck_rw_t;
-#endif
-#endif
+#endif // MACH_KERNEL_PRIVATE
 
 #endif  /* _ARM_LOCKS_H_ */

@@ -53,10 +53,14 @@ typedef union {
 } firehose_chunk_pos_u;
 
 typedef struct firehose_chunk_s {
-	uint8_t  fc_start[0];
-	firehose_chunk_pos_u fc_pos;
-	uint64_t fc_timestamp;
-	uint8_t  fc_data[FIREHOSE_CHUNK_SIZE - 8 - 8];
+	union {
+		uint8_t fc_start[FIREHOSE_CHUNK_SIZE];
+		struct {
+			firehose_chunk_pos_u fc_pos;
+			uint64_t fc_timestamp;
+			uint8_t  fc_data[FIREHOSE_CHUNK_SIZE - 8 - 8];
+		};
+	};
 } *firehose_chunk_t;
 
 typedef struct firehose_chunk_range_s {
@@ -64,6 +68,7 @@ typedef struct firehose_chunk_range_s {
 	uint16_t fcr_length;
 } *firehose_chunk_range_t;
 
+#if __has_include(<os/atomic_private.h>)
 #if defined(KERNEL) || defined(OS_FIREHOSE_SPI)
 
 OS_ALWAYS_INLINE
@@ -142,7 +147,7 @@ firehose_chunk_tracepoint_try_reserve(firehose_chunk_t fc, uint64_t stamp,
 		return FIREHOSE_CHUNK_TRY_RESERVE_FAIL_ENQUEUE;
 	}
 	if (privptr) {
-		*privptr = (uint8_t *)((uintptr_t)fc->fc_start + pos.fcp_private_offs);
+		*privptr = fc->fc_start + pos.fcp_private_offs;
 	}
 	return orig.fcp_next_entry_offs;
 }
@@ -153,7 +158,7 @@ firehose_chunk_tracepoint_begin(firehose_chunk_t fc, uint64_t stamp,
     uint16_t pubsize, uint64_t thread_id, long offset)
 {
 	firehose_tracepoint_t ft = (firehose_tracepoint_t)
-	    __builtin_assume_aligned((void *)((uintptr_t)fc->fc_start + (uintptr_t)offset), 8);
+	    __builtin_assume_aligned(fc->fc_start + offset, 8);
 	stamp -= fc->fc_timestamp;
 	stamp |= (uint64_t)pubsize << 48;
 	// The compiler barrier is needed for userland process death handling, see
@@ -181,6 +186,7 @@ firehose_chunk_tracepoint_end(firehose_chunk_t fc,
 #endif // OS_ATOMIC_HAS_STARVATION_FREE_RMW || !OS_ATOMIC_CONFIG_STARVATION_FREE_ONLY
 
 #endif // defined(KERNEL) || defined(OS_FIREHOSE_SPI)
+#endif // __has_include(<os/atomic_private.h>)
 
 __END_DECLS
 

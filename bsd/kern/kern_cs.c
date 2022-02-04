@@ -63,6 +63,7 @@
 #include <kern/task.h>
 
 #include <vm/vm_map.h>
+#include <vm/pmap.h>
 #include <vm/vm_kern.h>
 
 
@@ -74,6 +75,7 @@
 
 #include <libkern/section_keywords.h>
 #include <libkern/ptrauth_utils.h>
+#include <libkern/amfi/amfi.h>
 
 
 unsigned long cs_procs_killed = 0;
@@ -133,8 +135,6 @@ SECURITY_READ_ONLY_LATE(int) cs_library_val_enable = DEFAULT_CS_LIBRARY_VA_ENABL
 #endif /* !SECURE_KERNEL */
 int cs_all_vnodes = 0;
 
-static lck_grp_t *cs_lockgrp;
-
 SYSCTL_INT(_vm, OID_AUTO, cs_force_kill, CTLFLAG_RW | CTLFLAG_LOCKED, &cs_force_kill, 0, "");
 SYSCTL_INT(_vm, OID_AUTO, cs_force_hard, CTLFLAG_RW | CTLFLAG_LOCKED, &cs_force_hard, 0, "");
 SYSCTL_INT(_vm, OID_AUTO, cs_debug, CTLFLAG_RW | CTLFLAG_LOCKED, &cs_debug, 0, "");
@@ -157,19 +157,10 @@ SYSCTL_INT(_vm, OID_AUTO, cs_library_validation, CTLFLAG_RD | CTLFLAG_LOCKED, &c
 #endif
 #endif /* !SECURE_KERNEL */
 
-int panic_on_cs_killed = 0;
-
 __startup_func
 static void
 cs_init(void)
 {
-#if MACH_ASSERT
-#if PLATFORM_WatchOS || __x86_64__
-	panic_on_cs_killed = 1;
-#endif /* watchos || x86_64 */
-#endif /* MACH_ASSERT */
-	PE_parse_boot_argn("panic_on_cs_killed", &panic_on_cs_killed,
-	    sizeof(panic_on_cs_killed));
 #if !SECURE_KERNEL
 	int disable_cs_enforcement = 0;
 	PE_parse_boot_argn("cs_enforcement_disable", &disable_cs_enforcement,
@@ -194,16 +185,14 @@ cs_init(void)
 	    sizeof(cs_library_val_enable));
 #endif
 #endif /* !SECURE_KERNEL */
-
-	lck_grp_attr_t *attr = lck_grp_attr_alloc_init();
-	cs_lockgrp = lck_grp_alloc_init("KERNCS", attr);
-	lck_grp_attr_free(attr);
 }
 STARTUP(CODESIGNING, STARTUP_RANK_FIRST, cs_init);
 
 int
 cs_allow_invalid(struct proc *p)
 {
+	uint64_t flags;
+
 #if MACH_ASSERT
 	lck_mtx_assert(&p->p_mlock, LCK_MTX_ASSERT_NOTOWNED);
 #endif
@@ -217,28 +206,42 @@ cs_allow_invalid(struct proc *p)
 		if (cs_debug) {
 			printf("CODE SIGNING: cs_allow_invalid() "
 			    "not allowed: pid %d\n",
-			    p->p_pid);
+			    proc_getpid(p));
 		}
 		return 0;
 	}
 	if (cs_debug) {
 		printf("CODE SIGNING: cs_allow_invalid() "
 		    "allowed: pid %d\n",
-		    p->p_pid);
+		    proc_getpid(p));
 	}
 	proc_lock(p);
-	p->p_csflags &= ~(CS_KILL | CS_HARD);
-	if (p->p_csflags & CS_VALID) {
-		p->p_csflags |= CS_DEBUGGED;
+	flags = proc_getcsflags(p) & ~(CS_KILL | CS_HARD);
+	if (flags & CS_VALID) {
+		flags |= CS_DEBUGGED;
 	}
+	proc_csflags_update(p, flags);
+#if PMAP_CS
+	task_t procTask = proc_task(p);
+	if (procTask) {
+		vm_map_t proc_map = get_task_map_reference(procTask);
+		if (proc_map) {
+			if (vm_map_cs_wx_enable(proc_map) != KERN_SUCCESS) {
+				printf("CODE SIGNING: cs_allow_invalid() not allowed by pmap: pid %d\n", proc_getpid(p));
+			}
+			vm_map_deallocate(proc_map);
+		}
+	}
+#endif // MAP_CS
 	proc_unlock(p);
 
 	/* allow a debugged process to hide some (debug-only!) memory */
 	task_set_memory_ownership_transfer(p->task, TRUE);
 
 	vm_map_switch_protect(get_task_map(p->task), FALSE);
+	vm_map_cs_debugged_set(get_task_map(p->task), TRUE);
 #endif
-	return (p->p_csflags & (CS_KILL | CS_HARD)) == 0;
+	return (proc_getcsflags(p) & (CS_KILL | CS_HARD)) == 0;
 }
 
 int
@@ -246,41 +249,48 @@ cs_invalid_page(addr64_t vaddr, boolean_t *cs_killed)
 {
 	struct proc     *p;
 	int             send_kill = 0, retval = 0, verbose = cs_debug;
+	uint64_t flags;
 
 	p = current_proc();
 
 	if (verbose) {
 		printf("CODE SIGNING: cs_invalid_page(0x%llx): p=%d[%s]\n",
-		    vaddr, p->p_pid, p->p_comm);
+		    vaddr, proc_getpid(p), p->p_comm);
 	}
 
 	proc_lock(p);
 
+	flags = proc_getcsflags(p);
+
 	/* XXX for testing */
 	if (cs_force_kill) {
-		p->p_csflags |= CS_KILL;
+		flags |= CS_KILL;
 	}
 	if (cs_force_hard) {
-		p->p_csflags |= CS_HARD;
+		flags |= CS_HARD;
 	}
 
 	/* CS_KILL triggers a kill signal, and no you can't have the page. Nothing else. */
-	if (p->p_csflags & CS_KILL) {
-		p->p_csflags |= CS_KILLED;
+	if (flags & CS_KILL) {
+		flags |= CS_KILLED;
 		cs_procs_killed++;
 		send_kill = 1;
 		retval = 1;
 	}
 
 	/* CS_HARD means fail the mapping operation so the process stays valid. */
-	if (p->p_csflags & CS_HARD) {
+	if (flags & CS_HARD) {
 		retval = 1;
+		proc_csflags_update(p, flags);
 	} else {
-		if (p->p_csflags & CS_VALID) {
-			p->p_csflags &= ~CS_VALID;
+		if (flags & CS_VALID) {
+			flags &= ~CS_VALID;
 			cs_procs_invalidated++;
 			verbose = 1;
+			proc_csflags_update(p, flags);
 			cs_process_invalidated(NULL);
+		} else {
+			proc_csflags_update(p, flags);
 		}
 	}
 	proc_unlock(p);
@@ -288,7 +298,7 @@ cs_invalid_page(addr64_t vaddr, boolean_t *cs_killed)
 	if (verbose) {
 		printf("CODE SIGNING: cs_invalid_page(0x%llx): "
 		    "p=%d[%s] final status 0x%x, %s page%s\n",
-		    vaddr, p->p_pid, p->p_comm, p->p_csflags,
+		    vaddr, proc_getpid(p), p->p_comm, (unsigned int)proc_getcsflags(p),
 		    retval ? "denying" : "allowing (remove VALID)",
 		    send_kill ? " sending SIGKILL" : "");
 	}
@@ -341,7 +351,7 @@ cs_process_enforcement(struct proc *p)
 		p = current_proc();
 	}
 
-	if (p != NULL && (p->p_csflags & CS_ENFORCEMENT)) {
+	if (p != NULL && (proc_getcsflags(p) & CS_ENFORCEMENT)) {
 		return 1;
 	}
 
@@ -377,7 +387,7 @@ cs_valid(struct proc *p)
 		p = current_proc();
 	}
 
-	if (p != NULL && (p->p_csflags & CS_VALID)) {
+	if (p != NULL && (proc_getcsflags(p) & CS_VALID)) {
 		return 1;
 	}
 
@@ -398,7 +408,7 @@ cs_require_lv(struct proc *p)
 		p = current_proc();
 	}
 
-	if (p != NULL && (p->p_csflags & CS_REQUIRE_LV)) {
+	if (p != NULL && (proc_getcsflags(p) & CS_REQUIRE_LV)) {
 		return 1;
 	}
 
@@ -411,7 +421,7 @@ csproc_forced_lv(struct proc* p)
 	if (p == NULL) {
 		p = current_proc();
 	}
-	if (p != NULL && (p->p_csflags & CS_FORCED_LV)) {
+	if (p != NULL && (proc_getcsflags(p) & CS_FORCED_LV)) {
 		return 1;
 	}
 	return 0;
@@ -461,7 +471,7 @@ csblob_get_size(struct cs_blob *blob)
 vm_address_t
 csblob_get_addr(struct cs_blob *blob)
 {
-	return blob->csb_mem_kaddr;
+	return (vm_address_t)blob->csb_mem_kaddr;
 }
 
 /*
@@ -521,7 +531,7 @@ csproc_get_blob(struct proc *p)
 		return NULL;
 	}
 
-	if ((p->p_csflags & CS_SIGNED) == 0) {
+	if ((proc_getcsflags(p) & CS_SIGNED) == 0) {
 		return NULL;
 	}
 
@@ -610,18 +620,46 @@ csblob_entitlements_dictionary_copy(struct cs_blob *csblob)
 	if (!csblob->csb_entitlements) {
 		return NULL;
 	}
-	osobject_retain(csblob->csb_entitlements);
-	return csblob->csb_entitlements;
+	if (!amfi) {
+		panic("CoreEntitlements: missing AMFI bridge\n");
+	}
+	return amfi->OSEntitlements_asdict(csblob->csb_entitlements);
+}
+
+OS_NORETURN
+void
+csblob_entitlements_dictionary_set(struct cs_blob __unused *csblob, void  __unused *entitlements)
+{
+	panic("CoreEntitlements: This API is no longer supported\n");
 }
 
 void
-csblob_entitlements_dictionary_set(struct cs_blob *csblob, void * entitlements)
+csblob_os_entitlements_set(struct cs_blob *csblob, void * entitlements)
 {
 	assert(csblob->csb_entitlements == NULL);
 	if (entitlements) {
 		osobject_retain(entitlements);
 	}
 	csblob->csb_entitlements = entitlements;
+}
+
+void *
+csblob_os_entitlements_copy(struct cs_blob *csblob)
+{
+	if (!csblob->csb_entitlements) {
+		return NULL;
+	}
+	osobject_retain(csblob->csb_entitlements);
+	return csblob->csb_entitlements;
+}
+
+void *
+csblob_os_entitlements_get(struct cs_blob *csblob)
+{
+	if (!csblob->csb_entitlements) {
+		return NULL;
+	}
+	return csblob->csb_entitlements;
 }
 
 /*
@@ -737,7 +775,7 @@ csproc_clear_platform_binary(struct proc *p)
 	}
 
 	if (cs_debug) {
-		printf("clearing platform binary on proc/task: pid = %d\n", p->p_pid);
+		printf("clearing platform binary on proc/task: pid = %d\n", proc_getpid(p));
 	}
 
 	csblob->csb_platform_binary = 0;
@@ -752,7 +790,7 @@ csproc_disable_enforcement(struct proc* __unused p)
 #if !CONFIG_ENFORCE_SIGNED_CODE
 	if (p != NULL) {
 		proc_lock(p);
-		p->p_csflags &= (~CS_ENFORCEMENT);
+		proc_csflags_clear(p, CS_ENFORCEMENT);
 		vm_map_cs_enforcement_set(get_task_map(p->task), FALSE);
 		proc_unlock(p);
 	}
@@ -771,7 +809,7 @@ csproc_mark_invalid_allowed(struct proc* __unused p)
 #if !CONFIG_ENFORCE_SIGNED_CODE
 	if (p != NULL) {
 		proc_lock(p);
-		p->p_csflags |= CS_INVALID_ALLOWED;
+		proc_csflags_set(p, CS_INVALID_ALLOWED);
 		proc_unlock(p);
 	}
 #endif
@@ -791,7 +829,7 @@ csproc_check_invalid_allowed(struct proc* __unused p)
 		p = current_proc();
 	}
 
-	if (p != NULL && (p->p_csflags & CS_INVALID_ALLOWED)) {
+	if (p != NULL && (proc_getcsflags(p) & CS_INVALID_ALLOWED)) {
 		return 1;
 	}
 #endif
@@ -808,7 +846,7 @@ csproc_check_invalid_allowed(struct proc* __unused p)
 int
 csproc_get_prod_signed(struct proc *p)
 {
-	return (p->p_csflags & CS_DEV_CODE) == 0;
+	return (proc_getcsflags(p) & CS_DEV_CODE) == 0;
 }
 
 
@@ -1365,19 +1403,19 @@ csproc_get_platform_identifier(struct proc *p)
 uint32_t
 cs_entitlement_flags(struct proc *p)
 {
-	return p->p_csflags & CS_ENTITLEMENT_FLAGS;
+	return proc_getcsflags(p) & CS_ENTITLEMENT_FLAGS;
 }
 
 int
 cs_restricted(struct proc *p)
 {
-	return (p->p_csflags & CS_RESTRICT) ? 1 : 0;
+	return (proc_getcsflags(p) & CS_RESTRICT) ? 1 : 0;
 }
 
 int
 csproc_hardened_runtime(struct proc* p)
 {
-	return (p->p_csflags & CS_RUNTIME) ? 1 : 0;
+	return (proc_getcsflags(p) & CS_RUNTIME) ? 1 : 0;
 }
 
 /*
@@ -1435,6 +1473,35 @@ cs_entitlements_blob_get_vnode(vnode_t vnode, off_t offset, void **out_start, si
 	return csblob_get_entitlements(csblob, out_start, out_length);
 }
 
+
+/* Retrieve the cached entitlements for a vnode
+ * Returns:
+ *   EINVAL	no vnode
+ *   EBADEXEC   invalid code signing data
+ *   0		no error occurred
+ *
+ * Note: the entitlements may be NULL if there is nothing cached.
+ */
+
+int
+cs_entitlements_dictionary_copy_vnode(vnode_t vnode, off_t offset, void **entitlements)
+{
+	struct cs_blob *csblob;
+
+	*entitlements = NULL;
+
+	if (vnode == NULL) {
+		return EINVAL;
+	}
+
+	if ((csblob = ubc_cs_blob_get(vnode, -1, -1, offset)) == NULL) {
+		return 0;
+	}
+
+	*entitlements = csblob_entitlements_dictionary_copy(csblob);
+	return 0;
+}
+
 /*
  * Retrieve the entitlements blob for a process.
  * Returns:
@@ -1449,7 +1516,7 @@ cs_entitlements_blob_get_vnode(vnode_t vnode, off_t offset, void **out_start, si
 int
 cs_entitlements_blob_get(proc_t p, void **out_start, size_t *out_length)
 {
-	if ((p->p_csflags & CS_SIGNED) == 0) {
+	if ((proc_getcsflags(p) & CS_SIGNED) == 0) {
 		return 0;
 	}
 
@@ -1473,7 +1540,7 @@ cs_entitlements_dictionary_copy(proc_t p, void **entitlements)
 
 	*entitlements = NULL;
 
-	if ((p->p_csflags & CS_SIGNED) == 0) {
+	if ((proc_getcsflags(p) & CS_SIGNED) == 0) {
 		return 0;
 	}
 
@@ -1500,7 +1567,7 @@ cs_identity_get(proc_t p)
 {
 	struct cs_blob *csblob;
 
-	if ((p->p_csflags & CS_SIGNED) == 0) {
+	if ((proc_getcsflags(p) & CS_SIGNED) == 0) {
 		return NULL;
 	}
 
@@ -1540,7 +1607,7 @@ cs_blob_get(proc_t p, void **out_start, size_t *out_length)
 		return 0;
 	}
 
-	*out_start = (void *)csblob->csb_mem_kaddr;
+	*out_start = csblob->csb_mem_kaddr;
 	*out_length = csblob->csb_mem_size;
 
 	return 0;
@@ -1555,7 +1622,7 @@ cs_get_cdhash(struct proc *p)
 {
 	struct cs_blob *csblob;
 
-	if ((p->p_csflags & CS_SIGNED) == 0) {
+	if ((proc_getcsflags(p) & CS_SIGNED) == 0) {
 		return NULL;
 	}
 

@@ -56,11 +56,11 @@
 #include <string.h>
 
 #if CONFIG_AUDIT
-#define GET_TOKEN_AREA(t, dptr, length) do {                            \
-	t = malloc(sizeof(token_t), M_AUDITBSM, M_WAITOK);              \
-	t->t_data = malloc(length, M_AUDITBSM, M_WAITOK | M_ZERO);      \
-	t->len = length;                                                \
-	dptr = t->t_data;                                               \
+#define GET_TOKEN_AREA(t, dptr, length) do {                       \
+	t = kalloc_type(token_t, Z_WAITOK | Z_NOFAIL);                 \
+	t->t_data = kalloc_data(length, Z_WAITOK | Z_ZERO | Z_NOFAIL); \
+	t->len = length;                                               \
+	dptr = t->t_data;                                              \
 } while (0)
 
 /*
@@ -76,12 +76,16 @@ au_to_arg32(char n, const char *text, u_int32_t v)
 	token_t *t;
 	u_char *dptr = NULL;
 	u_int16_t textlen;
+	size_t tokenlen;
 
 	textlen = strlen(text);
 	textlen += 1;
 
-	GET_TOKEN_AREA(t, dptr, 2 * sizeof(u_char) + sizeof(u_int32_t) +
-	    sizeof(u_int16_t) + textlen);
+	tokenlen = 2 * sizeof(u_char) + sizeof(u_int32_t) + sizeof(u_int16_t) + textlen;
+	KASSERT(tokenlen <= KALLOC_SAFE_ALLOC_SIZE,
+	    ("au_to_arg32: token length (%zu) exceeds maximum allowed size", tokenlen));
+
+	GET_TOKEN_AREA(t, dptr, tokenlen);
 
 	ADD_U_CHAR(dptr, AUT_ARG32);
 	ADD_U_CHAR(dptr, n);
@@ -98,12 +102,16 @@ au_to_arg64(char n, const char *text, u_int64_t v)
 	token_t *t;
 	u_char *dptr = NULL;
 	u_int16_t textlen;
+	size_t tokenlen;
 
 	textlen = strlen(text);
 	textlen += 1;
 
-	GET_TOKEN_AREA(t, dptr, 2 * sizeof(u_char) + sizeof(u_int64_t) +
-	    sizeof(u_int16_t) + textlen);
+	tokenlen = 2 * sizeof(u_char) + sizeof(u_int64_t) + sizeof(u_int16_t) + textlen;
+	KASSERT(tokenlen <= KALLOC_SAFE_ALLOC_SIZE,
+	    ("au_to_arg64: token length (%zu) exceeds maximum allowed size", tokenlen));
+
+	GET_TOKEN_AREA(t, dptr, tokenlen);
 
 	ADD_U_CHAR(dptr, AUT_ARG64);
 	ADD_U_CHAR(dptr, n);
@@ -237,7 +245,7 @@ au_to_data(char unit_print, char unit_type, char unit_count, const char *p)
 {
 	token_t *t;
 	u_char *dptr = NULL;
-	size_t datasize, totdata;
+	size_t datasize, totdata, tokenlen;
 
 	/* Determine the size of the basic unit. */
 	switch (unit_type) {
@@ -267,7 +275,11 @@ au_to_data(char unit_print, char unit_type, char unit_count, const char *p)
 
 	totdata = datasize * (size_t)unit_count;
 
-	GET_TOKEN_AREA(t, dptr, 4 * sizeof(u_char) + totdata);
+	tokenlen = 4 * sizeof(u_char) + totdata;
+	KASSERT(tokenlen <= KALLOC_SAFE_ALLOC_SIZE,
+	    ("au_to_data: token length (%zu) exceeds maximum allowed size", tokenlen));
+
+	GET_TOKEN_AREA(t, dptr, tokenlen);
 
 	ADD_U_CHAR(dptr, AUT_DATA);
 	ADD_U_CHAR(dptr, unit_print);
@@ -317,9 +329,15 @@ au_to_newgroups(u_int16_t n, gid_t *groups)
 	token_t *t;
 	u_char *dptr = NULL;
 	int i;
+	size_t tokenlen;
 
-	GET_TOKEN_AREA(t, dptr, sizeof(u_char) + sizeof(u_int16_t) +
-	    n * sizeof(u_int32_t));
+	KASSERT(n <= AUDIT_MAX_GROUPS, "au_to_newgroups: groups exceed maximum number of those allowed");
+
+	tokenlen = sizeof(u_char) + sizeof(u_int16_t) + n * sizeof(u_int32_t);
+	KASSERT(tokenlen <= KALLOC_SAFE_ALLOC_SIZE,
+	    ("au_to_newgroups: token length (%zu) exceeds maximum allowed size", tokenlen));
+
+	GET_TOKEN_AREA(t, dptr, tokenlen);
 
 	ADD_U_CHAR(dptr, AUT_NEWGROUPS);
 	ADD_U_INT16(dptr, n);
@@ -484,8 +502,13 @@ au_to_opaque(const char *data, uint16_t bytes)
 {
 	token_t *t;
 	u_char *dptr = NULL;
+	size_t tokenlen;
 
-	GET_TOKEN_AREA(t, dptr, sizeof(u_char) + sizeof(u_int16_t) + bytes);
+	tokenlen = sizeof(u_char) + sizeof(u_int16_t) + bytes;
+	KASSERT(tokenlen <= KALLOC_SAFE_ALLOC_SIZE,
+	    ("au_to_opaque: token length (%zu) exceeds maximum allowed size", tokenlen));
+
+	GET_TOKEN_AREA(t, dptr, tokenlen);
 
 	ADD_U_CHAR(dptr, AUT_OPAQUE);
 	ADD_U_INT16(dptr, bytes);
@@ -508,12 +531,16 @@ au_to_file(const char *file, struct timeval tm)
 	u_char *dptr = NULL;
 	u_int16_t filelen;
 	u_int32_t timems;
+	size_t tokenlen;
 
 	filelen = strlen(file);
 	filelen += 1;
 
-	GET_TOKEN_AREA(t, dptr, sizeof(u_char) + 2 * sizeof(u_int32_t) +
-	    sizeof(u_int16_t) + filelen);
+	tokenlen = sizeof(u_char) + 2 * sizeof(u_int32_t) + sizeof(u_int16_t) + filelen;
+	KASSERT(tokenlen <= KALLOC_SAFE_ALLOC_SIZE,
+	    ("au_to_file: token length (%zu) exceeds maximum allowed size", tokenlen));
+
+	GET_TOKEN_AREA(t, dptr, tokenlen);
 
 	timems = tm.tv_usec / 1000;
 
@@ -537,11 +564,16 @@ au_to_text(const char *text)
 	token_t *t;
 	u_char *dptr = NULL;
 	u_int16_t textlen;
+	size_t tokenlen;
 
 	textlen = strlen(text);
 	textlen += 1;
 
-	GET_TOKEN_AREA(t, dptr, sizeof(u_char) + sizeof(u_int16_t) + textlen);
+	tokenlen = sizeof(u_char) + sizeof(u_int16_t) + textlen;
+	KASSERT(tokenlen <= KALLOC_SAFE_ALLOC_SIZE,
+	    ("au_to_text: token length (%zu) exceeds maximum allowed size", tokenlen));
+
+	GET_TOKEN_AREA(t, dptr, tokenlen);
 
 	ADD_U_CHAR(dptr, AUT_TEXT);
 	ADD_U_INT16(dptr, textlen);
@@ -561,11 +593,16 @@ au_to_path(const char *text)
 	token_t *t;
 	u_char *dptr = NULL;
 	u_int16_t textlen;
+	size_t tokenlen;
 
 	textlen = strlen(text);
 	textlen += 1;
 
-	GET_TOKEN_AREA(t, dptr, sizeof(u_char) + sizeof(u_int16_t) + textlen);
+	tokenlen = sizeof(u_char) + sizeof(u_int16_t) + textlen;
+	KASSERT(tokenlen <= KALLOC_SAFE_ALLOC_SIZE,
+	    ("au_to_path: token length (%zu) exceeds maximum allowed size", tokenlen));
+
+	GET_TOKEN_AREA(t, dptr, tokenlen);
 
 	ADD_U_CHAR(dptr, AUT_PATH);
 	ADD_U_INT16(dptr, textlen);
@@ -864,6 +901,8 @@ au_to_sock_unix(struct sockaddr_un *so)
 	u_char *dptr;
 	size_t slen;
 
+	static_assert(3 * sizeof(u_char) + sizeof(so->sun_path) + 1 <= KALLOC_SAFE_ALLOC_SIZE);
+
 	/*
 	 * Please note that sun_len may not be correctly set and sun_path may
 	 * not be NULL terminated.
@@ -1140,15 +1179,29 @@ au_to_exec_strings(const char *strs, int count, u_char type)
 	u_int32_t totlen;
 	int ctr;
 	const char *p;
+	size_t nextlen;
+	size_t tokenlen;
+	const size_t totlen_max = KALLOC_SAFE_ALLOC_SIZE - sizeof(u_char) - sizeof(u_int32_t);
 
 	totlen = 0;
 	ctr = count;
 	p = strs;
 	while (ctr-- > 0) {
-		totlen += strlen(p) + 1;
+		nextlen = strlen(p);
+
+		if (totlen + nextlen + 1 >= totlen_max) {
+			break;
+		}
+
+		totlen += nextlen + 1;
 		p = strs + totlen;
 	}
-	GET_TOKEN_AREA(t, dptr, sizeof(u_char) + sizeof(u_int32_t) + totlen);
+
+	tokenlen = sizeof(u_char) + sizeof(u_int32_t) + totlen;
+	KASSERT(tokenlen <= KALLOC_SAFE_ALLOC_SIZE,
+	    ("au_to_exec_strings: token length (%zu) exceeds maximum allowed size", tokenlen));
+
+	GET_TOKEN_AREA(t, dptr, tokenlen);
 	ADD_U_CHAR(dptr, type);
 	ADD_U_INT32(dptr, count);
 	ADD_STRING(dptr, strs, totlen);
@@ -1211,22 +1264,31 @@ au_to_exec_args(char **argv)
 	token_t *t;
 	u_char *dptr = NULL;
 	const char *nextarg;
+	size_t nextlen;
 	int i, count = 0;
 	size_t totlen = 0;
+	size_t tokenlen;
+	const size_t totlen_max = KALLOC_SAFE_ALLOC_SIZE - sizeof(u_char) - sizeof(u_int32_t);
 
 	nextarg = *argv;
 
 	while (nextarg != NULL) {
-		int nextlen;
-
 		nextlen = strlen(nextarg);
+
+		if (totlen + nextlen + 1 >= totlen_max) {
+			break;
+		}
+
 		totlen += nextlen + 1;
 		count++;
 		nextarg = *(argv + count);
 	}
 
-	totlen += count * sizeof(char); /* nul terminations. */
-	GET_TOKEN_AREA(t, dptr, sizeof(u_char) + sizeof(u_int32_t) + totlen);
+	tokenlen = sizeof(u_char) + sizeof(u_int32_t) + totlen;
+	KASSERT(tokenlen <= KALLOC_SAFE_ALLOC_SIZE,
+	    ("au_to_exec_args: token length (%zu) exceeds maximum allowed size", tokenlen));
+
+	GET_TOKEN_AREA(t, dptr, tokenlen);
 
 	ADD_U_CHAR(dptr, AUT_EXEC_ARGS);
 	ADD_U_INT32(dptr, count);
@@ -1249,11 +1311,17 @@ au_to_zonename(char *zonename)
 {
 	u_char *dptr = NULL;
 	u_int16_t textlen;
+	size_t tokenlen;
 	token_t *t;
 
 	textlen = strlen(zonename);
 	textlen += 1;
-	GET_TOKEN_AREA(t, dptr, sizeof(u_char) + sizeof(u_int16_t) + textlen);
+
+	tokenlen = sizeof(u_char) + sizeof(u_int16_t) + textlen;
+	KASSERT(tokenlen <= KALLOC_SAFE_ALLOC_SIZE,
+	    ("au_to_zonename: token length (%zu) exceeds maximum allowed size", tokenlen));
+
+	GET_TOKEN_AREA(t, dptr, tokenlen);
 	ADD_U_CHAR(dptr, AUT_ZONENAME);
 	ADD_U_INT16(dptr, textlen);
 	ADD_STRING(dptr, zonename, textlen);
@@ -1271,21 +1339,31 @@ au_to_exec_env(char **envp)
 	token_t *t;
 	u_char *dptr = NULL;
 	int i, count = 0;
+	size_t nextlen;
 	size_t totlen = 0;
 	const char *nextenv;
+	size_t tokenlen;
+	const size_t totlen_max = KALLOC_SAFE_ALLOC_SIZE - sizeof(u_char) - sizeof(u_int32_t);
 
 	nextenv = *envp;
 
 	while (nextenv != NULL) {
-		int nextlen;
-
 		nextlen = strlen(nextenv);
+
+		if (totlen + nextlen + 1 >= totlen_max) {
+			break;
+		}
+
 		totlen += nextlen + 1;
 		count++;
 		nextenv = *(envp + count);
 	}
 
-	GET_TOKEN_AREA(t, dptr, sizeof(u_char) + sizeof(u_int32_t) + totlen);
+	tokenlen = sizeof(u_char) + sizeof(u_int32_t) + totlen;
+	KASSERT(tokenlen <= KALLOC_SAFE_ALLOC_SIZE,
+	    ("au_to_exec_env: token length (%zu) exceeds maximum allowed size", tokenlen));
+
+	GET_TOKEN_AREA(t, dptr, tokenlen);
 
 	ADD_U_CHAR(dptr, AUT_EXEC_ENV);
 	ADD_U_INT32(dptr, count);
@@ -1344,6 +1422,8 @@ au_to_identity(uint32_t signer_type, const char* signing_id,
 	    sizeof(uint16_t) +      // cdhash length
 	    cdhash_len;             // cdhash buffer
 
+	KASSERT(totlen <= KALLOC_SAFE_ALLOC_SIZE,
+	    ("au_to_identity: token length (%zu) exceeds maximum allowed size", tokenlen));
 	GET_TOKEN_AREA(t, dptr, totlen);
 
 	ADD_U_CHAR(dptr, AUT_IDENTITY);                // token id
@@ -1381,14 +1461,19 @@ au_to_header32_ex_tm(int rec_size, au_event_t e_type, au_emod_t e_mod,
 	u_char *dptr = NULL;
 	u_int32_t timems;
 	struct au_tid_addr *tid;
+	size_t tokenlen;
 
 	tid = &aia->ai_termid;
 	KASSERT(tid->at_type == AU_IPv4 || tid->at_type == AU_IPv6,
 	    ("au_to_header32_ex_tm: invalid address family"));
 
-	GET_TOKEN_AREA(t, dptr, sizeof(u_char) + sizeof(u_int32_t) +
+	tokenlen = sizeof(u_char) + sizeof(u_int32_t) +
 	    sizeof(u_char) + 2 * sizeof(u_int16_t) + 3 * sizeof(u_int32_t) +
-	    tid->at_type);
+	    tid->at_type;
+	KASSERT(tokenlen <= KALLOC_SAFE_ALLOC_SIZE,
+	    ("au_to_header32_ex_tm: token length (%zu) exceeds maximum allowed size", tokenlen));
+
+	GET_TOKEN_AREA(t, dptr, tokenlen);
 
 	ADD_U_CHAR(dptr, AUT_HEADER32_EX);
 	ADD_U_INT32(dptr, rec_size);

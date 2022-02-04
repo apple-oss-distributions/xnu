@@ -45,6 +45,7 @@ PSEUDO(___pipe, pipe, 0, cerror_nocancel)
 	movl	%edx, 4(%rdi)
 	xorl	%eax, %eax
 	ret
+	UNWIND_EPILOGUE
 
 #elif defined(__arm__)
 

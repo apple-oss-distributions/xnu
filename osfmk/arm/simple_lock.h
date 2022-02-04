@@ -73,8 +73,8 @@
 
 #ifdef MACH_KERNEL_PRIVATE
 
-extern uint32_t LockTimeOut;                    /* Number of hardware ticks of a lock timeout */
-extern uint32_t LockTimeOutUsec;                /* Number of microseconds for lock timeout */
+extern machine_timeout32_t LockTimeOut;     /* Number of hardware ticks of a lock timeout */
+extern machine_timeout32_t LockTimeOutUsec; /* Number of microseconds for lock timeout */
 
 typedef lck_spin_t usimple_lock_data_t, *usimple_lock_t;
 #else /* MACH_KERNEL_PRIVATE */

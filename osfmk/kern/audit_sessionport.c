@@ -59,7 +59,8 @@ audit_session_mksend(struct auditinfo_addr *aia_p, ipc_port_t *sessionport)
 {
 	audit_session_aiaref(aia_p);
 	if (!ipc_kobject_make_send_lazy_alloc_port(sessionport,
-	    (ipc_kobject_t)aia_p, IKOT_AU_SESSIONPORT, false, 0)) {
+	    (ipc_kobject_t)aia_p, IKOT_AU_SESSIONPORT,
+	    IPC_KOBJECT_ALLOC_NONE, 0)) {
 		audit_session_aiaunref(aia_p);
 	}
 
@@ -79,7 +80,7 @@ audit_session_mksend(struct auditinfo_addr *aia_p, ipc_port_t *sessionport)
  *	       !NULL		The audit session info that is associated with
  *				the Mach port.
  *
- * Notes: The caller must have a reference on the sessionport.
+ * Notes: The caller must hold an outstanding send-right on the sessionport.
  */
 struct auditinfo_addr *
 audit_session_porttoaia(ipc_port_t port)
@@ -87,12 +88,7 @@ audit_session_porttoaia(ipc_port_t port)
 	struct auditinfo_addr *aia_p = NULL;
 
 	if (IP_VALID(port)) {
-		ip_lock(port);
-		if (IKOT_AU_SESSIONPORT == ip_kotype(port)) {
-			require_ip_active(port);
-			aia_p = (struct auditinfo_addr *)ip_get_kobject(port);
-		}
-		ip_unlock(port);
+		aia_p = ipc_kobject_get_stable(port, IKOT_AU_SESSIONPORT);
 	}
 
 	return aia_p;
@@ -100,42 +96,46 @@ audit_session_porttoaia(ipc_port_t port)
 
 
 /*
- * audit_session_nosenders
+ * audit_session_no_senders
  *
  * Description: Handle a no-senders notification for a sessionport.
- *
- * Parameters: msg		A Mach no-senders notification message.
  *
  * Notes: It is possible that new send rights are created after a
  *	  no-senders notification has been sent, but they will be protected
  *	  by another aia reference.
  */
-void
-audit_session_nosenders(mach_msg_header_t *msg)
+static void
+audit_session_no_senders(ipc_port_t port, __unused mach_port_mscount_t mscount)
 {
-	mach_no_senders_notification_t *notification = (void *)msg;
-	ipc_port_t port = notification->not_header.msgh_remote_port;
-	struct auditinfo_addr *port_aia_p = NULL;
+	struct auditinfo_addr *aia_p = NULL;
 
-	require_ip_active(port);
-	assert(IKOT_AU_SESSIONPORT == ip_kotype(port));
-	port_aia_p = (struct auditinfo_addr *)ip_get_kobject(port);
-	assert(NULL != port_aia_p);
+	aia_p = ipc_kobject_get_stable(port, IKOT_AU_SESSIONPORT);
+	assert(NULL != aia_p);
 
-	audit_session_aiaunref(port_aia_p);
+	audit_session_aiaunref(aia_p);
 }
 
+/*
+ * audit_session_portdestroy
+ *
+ * Description: Destroy the kobject associated with the audit_session
+ *
+ * Notes: It is called when there is no outstanding references on the aia
+ *        anymore (it also won't have any outstanding send rights)
+ */
 void
 audit_session_portdestroy(ipc_port_t *sessionport)
 {
 	ipc_port_t port = *sessionport;
 
+	*sessionport = IP_NULL;
 	if (IP_VALID(port)) {
-		require_ip_active(port);
-		assert(IKOT_AU_SESSIONPORT == ip_kotype(port));
-		ipc_kobject_set_atomically(port, IKO_NULL, IKOT_NONE);
-		ipc_port_dealloc_kernel(port);
-		*sessionport = IP_NULL;
+		ipc_kobject_dealloc_port(port, 0, IKOT_AU_SESSIONPORT);
 	}
 }
+
+IPC_KOBJECT_DEFINE(IKOT_AU_SESSIONPORT,
+    .iko_op_stable     = true,
+    .iko_op_no_senders = audit_session_no_senders);
+
 #endif /* CONFIG_AUDIT */

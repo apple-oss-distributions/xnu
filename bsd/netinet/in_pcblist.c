@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2010-2020 Apple Inc. All rights reserved.
+ * Copyright (c) 2010-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -302,7 +302,7 @@ get_pcblist_n(short proto, struct sysctl_req *req, struct inpcbinfo *pcbinfo)
 	 * The process of preparing the PCB list is too time-consuming and
 	 * resource-intensive to repeat twice on every request.
 	 */
-	lck_rw_lock_exclusive(pcbinfo->ipi_lock);
+	lck_rw_lock_exclusive(&pcbinfo->ipi_lock);
 	/*
 	 * OK, now we're committed to doing something.
 	 */
@@ -325,7 +325,7 @@ get_pcblist_n(short proto, struct sysctl_req *req, struct inpcbinfo *pcbinfo)
 		goto done;
 	}
 
-	buf = _MALLOC(item_size, M_TEMP, M_WAITOK);
+	buf = kalloc_data(item_size, Z_WAITOK);
 	if (buf == NULL) {
 		error = ENOMEM;
 		goto done;
@@ -417,19 +417,19 @@ get_pcblist_n(short proto, struct sysctl_req *req, struct inpcbinfo *pcbinfo)
 		error = SYSCTL_OUT(req, &xig, sizeof(xig));
 	}
 done:
-	lck_rw_done(pcbinfo->ipi_lock);
+	lck_rw_done(&pcbinfo->ipi_lock);
 
 	if (inp_list != NULL) {
 		FREE(inp_list, M_TEMP);
 	}
 	if (buf != NULL) {
-		FREE(buf, M_TEMP);
+		kfree_data(buf, item_size);
 	}
 	return error;
 }
 
-__private_extern__ void
-inpcb_get_ports_used(uint32_t ifindex, int protocol, uint32_t flags,
+static void
+inpcb_get_if_ports_used(ifnet_t ifp, int protocol, uint32_t flags,
     bitstr_t *bitfield, struct inpcbinfo *pcbinfo)
 {
 	struct inpcb *inp;
@@ -440,6 +440,10 @@ inpcb_get_ports_used(uint32_t ifindex, int protocol, uint32_t flags,
 	bool activeonly;
 	bool anytcpstateok;
 
+	if (ifp == NULL) {
+		return;
+	}
+
 	wildcardok = ((flags & IFNET_GET_LOCAL_PORTS_WILDCARDOK) != 0);
 	nowakeok = ((flags & IFNET_GET_LOCAL_PORTS_NOWAKEUPOK) != 0);
 	recvanyifonly = ((flags & IFNET_GET_LOCAL_PORTS_RECVANYIFONLY) != 0);
@@ -447,7 +451,7 @@ inpcb_get_ports_used(uint32_t ifindex, int protocol, uint32_t flags,
 	activeonly = ((flags & IFNET_GET_LOCAL_PORTS_ACTIVEONLY) != 0);
 	anytcpstateok = ((flags & IFNET_GET_LOCAL_PORTS_ANYTCPSTATEOK) != 0);
 
-	lck_rw_lock_shared(pcbinfo->ipi_lock);
+	lck_rw_lock_shared(&pcbinfo->ipi_lock);
 	gencnt = pcbinfo->ipi_gencnt;
 
 	for (inp = LIST_FIRST(pcbinfo->ipi_listhead); inp;
@@ -536,8 +540,7 @@ inpcb_get_ports_used(uint32_t ifindex, int protocol, uint32_t flags,
 		}
 
 		if (!iswildcard &&
-		    !(ifindex == 0 || inp->inp_last_outifp == NULL ||
-		    ifindex == inp->inp_last_outifp->if_index)) {
+		    !(inp->inp_last_outifp == NULL || ifp == inp->inp_last_outifp)) {
 			continue;
 		}
 
@@ -608,11 +611,40 @@ inpcb_get_ports_used(uint32_t ifindex, int protocol, uint32_t flags,
 			}
 		}
 
-		bitstr_set(bitfield, ntohs(inp->inp_lport));
-
-		if_ports_used_add_inpcb(ifindex, inp);
+		if (if_ports_used_add_inpcb(ifp->if_index, inp)) {
+			bitstr_set(bitfield, ntohs(inp->inp_lport));
+		}
 	}
-	lck_rw_done(pcbinfo->ipi_lock);
+	lck_rw_done(&pcbinfo->ipi_lock);
+}
+
+__private_extern__ void
+inpcb_get_ports_used(ifnet_t ifp, int protocol, uint32_t flags,
+    bitstr_t *bitfield, struct inpcbinfo *pcbinfo)
+{
+	if (ifp != NULL) {
+		inpcb_get_if_ports_used(ifp, protocol, flags, bitfield, pcbinfo);
+	} else {
+		errno_t error;
+		ifnet_t *ifp_list;
+		uint32_t count, i;
+
+		error = ifnet_list_get_all(IFNET_FAMILY_ANY, &ifp_list, &count);
+		if (error != 0) {
+			os_log_error(OS_LOG_DEFAULT,
+			    "%s: ifnet_list_get_all() failed %d",
+			    __func__, error);
+			return;
+		}
+		for (i = 0; i < count; i++) {
+			if (TAILQ_EMPTY(&ifp_list[i]->if_addrhead)) {
+				continue;
+			}
+			inpcb_get_if_ports_used(ifp_list[i], protocol, flags,
+			    bitfield, pcbinfo);
+		}
+		ifnet_list_free(ifp_list);
+	}
 }
 
 __private_extern__ uint32_t
@@ -623,7 +655,7 @@ inpcb_count_opportunistic(unsigned int ifindex, struct inpcbinfo *pcbinfo,
 	struct inpcb *inp;
 	inp_gen_t gencnt;
 
-	lck_rw_lock_shared(pcbinfo->ipi_lock);
+	lck_rw_lock_shared(&pcbinfo->ipi_lock);
 	gencnt = pcbinfo->ipi_gencnt;
 	for (inp = LIST_FIRST(pcbinfo->ipi_listhead);
 	    inp != NULL; inp = LIST_NEXT(inp, inp_list)) {
@@ -660,7 +692,7 @@ inpcb_count_opportunistic(unsigned int ifindex, struct inpcbinfo *pcbinfo,
 		}
 	}
 
-	lck_rw_done(pcbinfo->ipi_lock);
+	lck_rw_done(&pcbinfo->ipi_lock);
 
 	return opportunistic;
 }
@@ -678,7 +710,7 @@ inpcb_find_anypcb_byaddr(struct ifaddr *ifa, struct inpcbinfo *pcbinfo)
 		return 0;
 	}
 
-	lck_rw_lock_shared(pcbinfo->ipi_lock);
+	lck_rw_lock_shared(&pcbinfo->ipi_lock);
 	for (inp = LIST_FIRST(pcbinfo->ipi_listhead);
 	    inp != NULL; inp = LIST_NEXT(inp, inp_list)) {
 		if (inp->inp_gencnt <= gencnt &&
@@ -696,20 +728,19 @@ inpcb_find_anypcb_byaddr(struct ifaddr *ifa, struct inpcbinfo *pcbinfo)
 			if (af == AF_INET) {
 				if (inp->inp_laddr.s_addr ==
 				    (satosin(ifa->ifa_addr))->sin_addr.s_addr) {
-					lck_rw_done(pcbinfo->ipi_lock);
+					lck_rw_done(&pcbinfo->ipi_lock);
 					return 1;
 				}
 			}
 			if (af == AF_INET6) {
-				if (IN6_ARE_ADDR_EQUAL(IFA_IN6(ifa),
-				    &inp->in6p_laddr)) {
-					lck_rw_done(pcbinfo->ipi_lock);
+				if (in6_are_addr_equal_scoped(IFA_IN6(ifa), &inp->in6p_laddr, ((struct sockaddr_in6 *)(void *)(ifa->ifa_addr))->sin6_scope_id, inp->inp_lifscope)) {
+					lck_rw_done(&pcbinfo->ipi_lock);
 					return 1;
 				}
 			}
 		}
 	}
-	lck_rw_done(pcbinfo->ipi_lock);
+	lck_rw_done(&pcbinfo->ipi_lock);
 	return 0;
 }
 
@@ -798,7 +829,7 @@ inp_limit_companion_link(struct inpcbinfo *pcbinfo, u_int32_t limit)
 	struct inpcb *inp;
 	struct socket *so = NULL;
 
-	lck_rw_lock_shared(pcbinfo->ipi_lock);
+	lck_rw_lock_shared(&pcbinfo->ipi_lock);
 	inp_gen_t gencnt = pcbinfo->ipi_gencnt;
 	for (inp = LIST_FIRST(pcbinfo->ipi_listhead);
 	    inp != NULL; inp = LIST_NEXT(inp, inp_list)) {
@@ -818,7 +849,7 @@ inp_limit_companion_link(struct inpcbinfo *pcbinfo, u_int32_t limit)
 			so->so_snd.sb_flags |= SB_LIMITED;
 		}
 	}
-	lck_rw_done(pcbinfo->ipi_lock);
+	lck_rw_done(&pcbinfo->ipi_lock);
 	return 0;
 }
 
@@ -829,7 +860,7 @@ inp_recover_companion_link(struct inpcbinfo *pcbinfo)
 	inp_gen_t gencnt = pcbinfo->ipi_gencnt;
 	struct socket *so = NULL;
 
-	lck_rw_lock_shared(pcbinfo->ipi_lock);
+	lck_rw_lock_shared(&pcbinfo->ipi_lock);
 	for (inp = LIST_FIRST(pcbinfo->ipi_listhead);
 	    inp != NULL; inp = LIST_NEXT(inp, inp_list)) {
 		if (inp->inp_gencnt <= gencnt &&
@@ -845,6 +876,6 @@ inp_recover_companion_link(struct inpcbinfo *pcbinfo)
 			so->so_snd.sb_flags &= ~SB_LIMITED;
 		}
 	}
-	lck_rw_done(pcbinfo->ipi_lock);
+	lck_rw_done(&pcbinfo->ipi_lock);
 	return 0;
 }

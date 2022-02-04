@@ -49,6 +49,8 @@
 #include <machine/monotonic.h>
 #endif /* MONOTONIC */
 
+#include <san/kcov_data.h>
+
 #define NSEC_PER_HZ     (NSEC_PER_SEC / 100)
 
 typedef struct reset_handler_data {
@@ -72,7 +74,7 @@ static_assert(sizeof(cpumap_t) * CHAR_BIT >= MAX_CPUS, "cpumap_t bitvector is to
 #define CPUWINDOWS_BASE                 (VM_MAX_KERNEL_ADDRESS & CPUWINDOWS_BASE_MASK)
 #define CPUWINDOWS_TOP                  (CPUWINDOWS_BASE + (MAX_CPUS * CPUWINDOWS_MAX * ARM_PGBYTES))
 
-static_assert((CPUWINDOWS_BASE >= VM_MIN_KERNEL_ADDRESS) && (CPUWINDOWS_TOP <= VM_MAX_KERNEL_ADDRESS),
+static_assert((CPUWINDOWS_BASE >= VM_MIN_KERNEL_ADDRESS) && ((CPUWINDOWS_TOP - 1) <= VM_MAX_KERNEL_ADDRESS),
     "CPU copy windows too large for CPUWINDOWS_BASE_MASK value");
 
 typedef struct cpu_data_entry {
@@ -116,7 +118,7 @@ typedef struct {
 } cpu_stat_t;
 
 typedef struct cpu_data {
-	unsigned short                  cpu_number;
+	short                           cpu_number;
 	unsigned short                  cpu_flags;
 	int                             cpu_type;
 	int                             cpu_subtype;
@@ -169,6 +171,9 @@ typedef struct cpu_data {
 	bool                            cpu_hibernate; /* This cpu is currently hibernating the system */
 	bool                            cpu_running;
 	bool                            cluster_master;
+#if __ARM_ARCH_8_5__
+	bool                            sync_on_cswitch;
+#endif /* __ARM_ARCH_8_5__ */
 	/* true if processor_start() or processor_exit() is operating on this CPU */
 	bool                            in_state_transition;
 
@@ -179,8 +184,6 @@ typedef struct cpu_data {
 
 	void                            *cpu_tbd_hardware_addr;
 	void                            *cpu_tbd_hardware_val;
-
-	void                            *cpu_console_buf;
 
 	processor_idle_t                cpu_idle_notify;
 	uint64_t                        cpu_idle_latency;
@@ -281,6 +284,18 @@ typedef struct cpu_data {
 	uint64_t                        wfe_count;
 	uint64_t                        wfe_deadline_checks;
 	uint64_t                        wfe_terminations;
+#endif
+#if CONFIG_KCOV
+	kcov_cpu_data_t                 cpu_kcov_data;
+#endif
+#if __arm64__
+	/**
+	 * Stash the state of the system when an IPI is received. This will be
+	 * dumped in the case a panic is getting triggered.
+	 */
+	uint64_t ipi_pc;
+	uint64_t ipi_lr;
+	uint64_t ipi_fp;
 #endif
 } cpu_data_t;
 

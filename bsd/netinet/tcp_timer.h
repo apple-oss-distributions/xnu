@@ -188,6 +188,8 @@ extern int tcptv_persmin_val;
 #define TCPTV_REXMTMAX  ( 64*TCP_RETRANSHZ )    /* max REXMT value */
 #define TCPTV_REXMTMIN  ( TCP_RETRANSHZ/33 )    /* min REXMT for non-local connections */
 
+#define TCPTV_FINWAIT2  ( 60*TCP_RETRANSHZ)     /* timeout to get out of FIN_WAIT_2 */
+
 /*
  * Window for counting received bytes to see if ack-stretching
  * can start (default 100 ms)
@@ -243,10 +245,8 @@ LIST_HEAD(timerlisthead, tcptimerentry);
 
 struct tcptimerlist {
 	struct timerlisthead lhead;     /* head of the list */
-	lck_mtx_t *mtx;         /* lock to protect the list */
-	lck_attr_t *mtx_attr;   /* mutex attributes */
+	lck_mtx_t mtx;          /* lock to protect the list */
 	lck_grp_t *mtx_grp;     /* mutex group definition */
-	lck_grp_attr_t *mtx_grp_attr;   /* mutex group attributes */
 	thread_call_t call;     /* call entry */
 	uint32_t runtime;       /* time at which this list is going to run */
 	uint32_t schedtime;     /* time at which this list was scheduled */

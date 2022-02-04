@@ -248,9 +248,6 @@ extern void ipc_importance_assert_clean(ipc_kmsg_t kmsg);
 /* initialize the ipc importance subsystem */
 extern void ipc_importance_init(void);
 
-/* initialize the ipc importance delayed calls */
-extern void ipc_importance_thread_call_init(void);
-
 #if DEVELOPMENT || DEBUG
 extern void task_importance_update_owner_info(task_t task);
 #endif

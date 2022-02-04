@@ -36,9 +36,10 @@
 #include <mach/machine/vm_types.h>
 
 #include <stdint.h>
+#include <sys/cdefs.h>
 
-typedef vm_offset_t             pointer_t;
-typedef vm_offset_t             vm_address_t;
+typedef vm_offset_t             pointer_t __kernel_ptr_semantics;
+typedef vm_offset_t             vm_address_t __kernel_ptr_semantics;
 
 /*
  * We use addr64_t for 64-bit addresses that are used on both
@@ -70,8 +71,6 @@ typedef uint32_t ppnum_t;               /* Physical page number */
 
 
 #ifdef  KERNEL_PRIVATE
-
-#include <sys/cdefs.h>
 
 #ifndef MACH_KERNEL_PRIVATE
 /*
@@ -134,17 +133,21 @@ typedef uint16_t vm_tag_t;
 #define VM_TAG_UNLOAD           0x0100
 #define VM_TAG_KMOD             0x0200
 
-#if DEBUG || DEVELOPMENT
-#if __LP64__
-#define VM_MAX_TAG_ZONES        84
+#if !KASAN && (DEBUG || DEVELOPMENT)
+/*
+ * To track the utilization of memory at every kalloc callsite, zone tagging
+ * allocates an array of stats (of size VM_TAG_SIZECLASSES), one for each
+ * size class exposed by kalloc.
+ *
+ * If VM_TAG_SIZECLASSES is modified ensure that z_tags_sizeclass
+ * has sufficient bits to represent all values (max value exclusive).
+ */
+#define VM_TAG_SIZECLASSES      32
 #else
-#define VM_MAX_TAG_ZONES        31
-#endif
-#else
-#define VM_MAX_TAG_ZONES        0
+#define VM_TAG_SIZECLASSES      0
 #endif
 
-#if VM_MAX_TAG_ZONES
+#if VM_TAG_SIZECLASSES
 // must be multiple of 64
 #define VM_MAX_TAG_VALUE        1536
 #else
@@ -160,10 +163,8 @@ struct vm_allocation_total {
 };
 
 struct vm_allocation_zone_total {
-	uint64_t  total;
-	uint64_t  peak;
-	uint32_t  waste;
-	uint32_t  wastediv;
+	vm_size_t vazt_total;
+	vm_size_t vazt_peak;
 };
 typedef struct vm_allocation_zone_total vm_allocation_zone_total_t;
 

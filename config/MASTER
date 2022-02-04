@@ -92,6 +92,7 @@ options		SYSV_SEM	# SVID semaphores		# <sysv_sem>
 options		SYSV_MSG	# SVID messages			# <sysv_msg>
 options		SYSV_SHM	# SVID shared mem		# <sysv_shm>
 options		PSYNCH		# pthread synch			# <psynch>
+options		CONFIG_VFORK	# vfork support			# <vfork>
 options		FLOW_DIVERT								# <flow_divert>
 options		NECP									# <necp>
 options		CONTENT_FILTER	#						# <content_filter>
@@ -112,7 +113,6 @@ options		SENDFILE	# sendfile					# <sendfile>
 options		NETWORKING	# networking layer		# <inet>
 options		CONFIG_FSE	# file system events		# <config_fse>
 options		CONFIG_IMAGEBOOT	# local image boot	# <config_imageboot>
-options		CONFIG_LOCKERBOOT 	# locker boot 	# <config_lockerboot>
 options		CONFIG_MBUF_JUMBO	# jumbo cluster pool	# <config_mbuf_jumbo>
 options		CONFIG_IMAGEBOOT_IMG4	# authenticate image with AppleImage4	# <config_imageboot_img4>
 options		CONFIG_IMAGEBOOT_CHUNKLIST	# authenticate image with a chunk list	# <config_imageboot_chunklist>
@@ -152,8 +152,13 @@ options 	CONFIG_MOUNT_VM # mount VM volume on startup # <config_mount_vm>
 options 	CONFIG_MOUNT_PREBOOTRECOVERY # mount Preboot and/or Recovery volume on startup # <config_mount_prebootrecovery>
 options		CONFIG_DATALESS_FILES # support dataless file materialization # <config_dataless_files>
 options         CONFIG_BASESYSTEMROOT # mount BaseSystem as initial root filesystem on some kinds of startup # <config_basesystemroot>
+options         CONFIG_UNION_MOUNTS # support union mounts # <config_union_mounts>
 
 #
+# VFS debugging
+#
+options		CONFIG_IOCOUNT_TRACE	# enable vnode's iocount tracing # <config_iocount_trace>
+
 # NFS support
 #
 options		NFSCLIENT	# Be an NFS client		# <nfsclient>
@@ -293,9 +298,9 @@ options   CONFIG_MFCTBLSIZ=16			# <bsmall>
 #
 # configurable kernel message buffer size
 #
-options   CONFIG_MSG_BSIZE_REL=4096		# <msgb_small>
-options   CONFIG_MSG_BSIZE_DEV=4096		# <msgb_small>
-options   CONFIG_MSG_BSIZE_REL=16384		# <msgb_large>
+options   CONFIG_MSG_BSIZE_REL=16384		# <msgb_small>
+options   CONFIG_MSG_BSIZE_DEV=131072		# <msgb_small>
+options   CONFIG_MSG_BSIZE_REL=131072		# <msgb_large>
 options   CONFIG_MSG_BSIZE_DEV=131072		# <msgb_large>
 options   CONFIG_MSG_BSIZE=CONFIG_MSG_BSIZE_REL	# <!development,debug>
 options   CONFIG_MSG_BSIZE=CONFIG_MSG_BSIZE_DEV	# <development,debug>
@@ -305,6 +310,12 @@ options   CONFIG_MSG_BSIZE=CONFIG_MSG_BSIZE_DEV	# <development,debug>
 #
 options   CONFIG_IPC_TABLE_ENTRIES_STEPS=64  	# 137898 entries	# <bsmall,small,xsmall>
 options   CONFIG_IPC_TABLE_ENTRIES_STEPS=256 	# 300714 entries	# <medium,large,xlarge>
+
+#
+# maximum copyout size for IPC debugging tools
+#
+options CONFIG_IPC_KERNEL_MAP_SIZE=16	# 16M	# <bsmall,small,xsmall>
+options CONFIG_IPC_KERNEL_MAP_SIZE=64	# 64M	# <medium,large,xlarge>
 
 #
 #  configurable kernel - use these options to strip strings from panic
@@ -325,6 +336,9 @@ options   CONFIG_EMBEDDED			# <config_embedded>
 
 options   CONFIG_ARROW              # <config_arrow>
 
+
+options   NOS_ARM_ASM			# <nos_arm_asm>
+options   NOS_ARM_PMAP			# <nos_arm_pmap>
 
 # support dynamic signing of code
 #
@@ -366,10 +380,6 @@ options		CONFIG_VPS_DYNAMIC_PRIO		# <vps_dynamic_prio>
 options		CONFIG_MEMORYSTATUS		# <memorystatus>
 
 #
-# enable per-process dirty-status tracking
-#
-options		CONFIG_DIRTYSTATUS_TRACKING	# <dirtystatus_tracking>
-#
 # enable jetsam - used on embedded
 #
 options		CONFIG_JETSAM			# <jetsam>
@@ -386,6 +396,7 @@ options		CONFIG_LTABLE_DEBUG			# <config_ltable_debug>
 #
 options		CONFIG_WAITQ_STATS			# <config_waitq_stats>
 options		CONFIG_WAITQ_DEBUG			# <config_waitq_debug>
+options		CONFIG_WAITQ_IRQSAFE_ALLOW_INVALID	# <config_waitq_irqsafe_allow_invalid>
 
 #
 # enable freezing of suspended processes - used on embedded
@@ -508,6 +519,8 @@ pseudo-device	fbt		1	init	fbt_init	# <config_dtrace>
 pseudo-device	profile_prvd	1	init	profile_init	# <config_dtrace>
 
 
+pseudo-device perfmon 1 init perfmon_dev_init # <config_perfmon>
+
 #
 # IOKit configuration options
 #
@@ -567,16 +580,11 @@ options		CONFIG_SECURE_BSD_ROOT	# secure BSD root	# <config_secure_bsd_root>
 
 options		CONFIG_KAS_INFO		# kas_info support	# <config_kas_info>
 
-options		CONFIG_ZALLOC_SEQUESTER		# Sequester VA for zones # <config_zalloc_sequester>
+options		CONFIG_PROC_RESOURCE_LIMITS	# Per process limits for resources like file descriptors and mach ports  # <config_proc_resource_limits>
 
 #
 # MACH configuration options.
 #
-# TASK_SWAPPER enables code that manages demand for physical memory by
-#	forcibly suspending tasks when the demand exceeds supply. This
-#	option should be on.
-#
-options		TASK_SWAPPER	#	<task_swapper_disabled>
 
 #
 # This defines configuration options that are normally used only during
@@ -599,6 +607,7 @@ options		MACH_ASSERT	#		# <mach_assert>
 #
 options		MACH_DEBUG	# IPC debugging interface	# <mdebug>
 options		MACH_IPC_DEBUG	# Enable IPC debugging calls	# <ipc_debug>
+options		MACH_LOCKFREE_SPACE	# Enable lockfree IPC space # <ipc_lockfree_space>
 options		MACH_VM_DEBUG	#				# <debug>
 #
 # MACH_MP_DEBUG control the possible dead locks that may occur by controlling
@@ -606,7 +615,6 @@ options		MACH_VM_DEBUG	#				# <debug>
 #	hardclock device driver.
 #
 options		MACH_MP_DEBUG	#				# <debug>
-options		CONFIG_ZCACHE 	# Enable per-cpu caching for zones	# <config_zcache>
 options		CONFIG_ZLEAKS	# Live zone leak debugging	# <zleaks>
 
 #
@@ -647,11 +655,13 @@ options     KPERF                  # <kperf>
 options     KPC                    # <kpc>
 
 
-options     PGO                    # <pgo>
-
-# MACH_COUNTERS enables code that handles various counters in the system.
 #
-options		MACH_COUNTERS	#			    # <debug>
+# CONFIG_PERFMON enables code to interface with performance monitoring hardware,
+# which count hardware events like cache misses and branch mispredicts.
+#
+options     CONFIG_PERFMON         # <config_perfmon>
+
+options     PGO                    # <pgo>
 
 # DEVELOPMENT define for development builds
 options		DEVELOPMENT	# dev kernel	    	    # <development>
@@ -726,6 +736,9 @@ options		CONFIG_SCHED_SFI		# <config_sched_sfi>
 options		CONFIG_GZALLOC			# <config_gzalloc>
 options		CONFIG_SCHED_DEFERRED_AST	# <config_sched_deferred_ast>
 
+options		CONFIG_PREADOPT_TG			# <config_preadopt_tg>
+options		CONFIG_PREADOPT_TG_DEBUG	# <config_preadopt_tg_debug>
+
 # Enable allocation of contiguous physical memory through vm_map_enter_cpm()
 options		VM_CPM				# <vm_cpm>
 
@@ -739,8 +752,10 @@ options 	CONFIG_NOMONITORS			# <config_nomonitors>
 options		MACH_KDP	    # KDP		# <mach_kdp>
 options		CONFIG_SERIAL_KDP   # KDP over serial	# <config_serial_kdp>
 options		CONFIG_KDP_INTERACTIVE_DEBUGGING	# <kdp_interactive_debugging>
+options		CONFIG_KDP_COREDUMP_ENCRYPTION	# Support for encrypting kernel coredumps	# <config_kdp_coredump_encryption>
 
 options 	CONFIG_TASKWATCH
+options 	CONFIG_USER_NOTIFICATION		# <config_user_notification>
 #
 # Kernel Power On Self Tests
 #
@@ -750,11 +765,6 @@ options		CONFIG_XNUPOST				# <config_xnupost>
 # Kernel proc reference instrumentation
 #
 options PROC_REF_DEBUG					# <proc_ref_debug>
-
-#
-# Kernel OS reason debug instrumentation
-#
-options OS_REASON_DEBUG					# <os_reason_debug>
 
 #
 # Kernel Voucher Attr Manager for Activity Trace
@@ -770,6 +780,9 @@ options		CONFIG_SYSDIAGNOSE			# <config_sysdiagnose>
 # Configurable Security Restrictions
 options		CONFIG_CSR				# <config_csr>
 options		CONFIG_CSR_FROM_DT		# <config_csr_from_dt>
+
+# Enable collection of IO Compression statistics
+options		CONFIG_IO_COMPRESSION_STATS		# <config_io_compression_stats>
 
 #
 # Console options
@@ -806,7 +819,10 @@ options		CONFIG_ARM_PFZ	# Support for PFZ on ARM # <config_arm_pfz>
 #
 options		CONFIG_KASAN		# <config_kasan>
 options		CONFIG_UBSAN		# <config_ubsan>
+
+options		CONFIG_KCOV			# <config_kcov>
 options		CONFIG_KSANCOV		# <config_ksancov>
+options		CONFIG_STKSZ		# <config_stksz>
 
 # dark boot support
 options		CONFIG_DARKBOOT		# <config_darkboot>
@@ -819,6 +835,13 @@ options		CONFIG_PROC_UDATA_STORAGE # <config_proc_udata_storage>
 
 pseudo-device ksancov 1 init ksancov_init_dev # <config_ksancov>
 
-# debug instrumentation to catch code that leaves interrupts masked
+# Debug instrumentation to catch code that leaves interrupts masked
 # for an excessive period of time
-options   INTERRUPT_MASKED_DEBUG # <interrupt_masked_debug>
+options		INTERRUPT_MASKED_DEBUG # <interrupt_masked_debug>
+
+# Statistics for disabled preemption duration and emitting trace points
+# or panicking when the duration crosses a threshold.
+options		SCHED_PREEMPTION_DISABLE_DEBUG # <sched_preemption_disable_debug>
+
+# support for system call rejection/tracing
+options		CONFIG_DEBUG_SYSCALL_REJECTION	# <config_debug_syscall_rejection>

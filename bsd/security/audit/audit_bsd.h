@@ -142,7 +142,7 @@ struct  au_malloc_type {
 typedef struct au_malloc_type   au_malloc_type_t;
 
 #define MALLOC_DEFINE(type, shortdesc, longdesc)                \
-	au_malloc_type_t  audit_##type[1] = {                   \
+	__unused au_malloc_type_t  audit_##type[1] = {          \
 	        {M_MAGIC, shortdesc }                           \
 	}
 
@@ -153,18 +153,6 @@ typedef struct au_malloc_type   au_malloc_type_t;
 #endif
 #define MALLOC_DECLARE(type) \
 	extern au_malloc_type_t audit_##type[]
-
-#if AUDIT_MALLOC_DEBUG
-#define malloc(sz, tp, fl)      _audit_malloc(sz, audit_##tp, fl, __FUNCTION__)
-void *_audit_malloc(size_t size, au_malloc_type_t *type, int flags,
-    const char *fn);
-#else
-#define malloc(sz, tp, fl)      _audit_malloc(sz, audit_##tp, fl)
-void *_audit_malloc(size_t size, au_malloc_type_t *type, int flags);
-#endif
-
-#define free(ad, tp)            _audit_free(ad, audit_##tp)
-void _audit_free(void *addr, au_malloc_type_t *type);
 
 /*
  * BSD condition variable.

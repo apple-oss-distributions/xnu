@@ -149,11 +149,30 @@ enum {
 #define DKS                "%s-0x%qx"
 #define DKN(s)              s->getName(), s->getRegistryEntryID()
 
+#ifdef IOKITDEBUG
+#define DEBUG_INIT_VALUE IOKITDEBUG
+#else
+#define DEBUG_INIT_VALUE 0
+#endif
+
 #endif /* XNU_KERNEL_PRIVATE */
 
 extern SInt64    gIOKitDebug;
 extern SInt64    gIOKitTrace;
 extern SInt64    gIODKDebug;
+
+#ifdef __cplusplus
+
+typedef kern_return_t (*IOCoreAnalyticsSendEventProc)(
+	uint64_t       options,
+	OSString     * eventName,
+	OSDictionary * eventPayload);
+
+#if XNU_KERNEL_PRIVATE
+extern IOCoreAnalyticsSendEventProc gIOCoreAnalyticsSendEventProc;
+#endif /* XNU_KERNEL_PRIVATE */
+
+#endif /* __cplusplus */
 
 #ifdef __cplusplus
 extern "C" {
@@ -175,7 +194,10 @@ extern void    OSPrintMemory( void );
 #endif
 #define IOPrintMemory OSPrintMemory
 
-
+#if defined(KERNEL) && defined(__cplusplus)
+kern_return_t
+IOSetCoreAnalyticsSendEventProc(IOCoreAnalyticsSendEventProc proc);
+#endif /* defined(KERNEL) && defined(__cplusplus) */
 
 #define kIOKitDiagnosticsClientClassName "IOKitDiagnosticsClient"
 

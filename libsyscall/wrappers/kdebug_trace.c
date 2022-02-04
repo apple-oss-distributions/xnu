@@ -21,12 +21,14 @@
  * @APPLE_LICENSE_HEADER_END@
  */
 
+#include <mach/mach_time.h>
 #include <stdint.h>
 #include <stdbool.h>
 #include <stdlib.h>
 #include <stdatomic.h>
 #include <machine/cpu_capabilities.h>
 #include <sys/kdebug.h>
+#include <sys/kdebug_private.h>
 #include <sys/kdebug_signpost.h>
 #include <sys/errno.h>
 #include <sys/param.h>
@@ -84,7 +86,7 @@ kdebug_typefilter(void)
 bool
 kdebug_is_enabled(uint32_t debugid)
 {
-	uint32_t state = *((volatile uint32_t *)(uintptr_t)(_COMM_PAGE_KDEBUG_ENABLE));
+	uint32_t state = COMM_PAGE_READ(uint32_t, KDEBUG_ENABLE);
 
 	if (state == 0) {
 		return FALSE;
@@ -119,8 +121,35 @@ kdebug_is_enabled(uint32_t debugid)
 bool
 kdebug_using_continuous_time(void)
 {
-	uint32_t state = *((volatile uint32_t *)(uintptr_t)(_COMM_PAGE_KDEBUG_ENABLE));
-	return state & KDEBUG_ENABLE_CONT_TIME;
+	uint32_t state = COMM_PAGE_READ(uint32_t, KDEBUG_ENABLE);
+	return state & KDEBUG_COMMPAGE_CONTINUOUS;
+}
+
+uint64_t
+kdebug_timestamp(void)
+{
+	return kdebug_using_continuous_time() ? mach_continuous_time() :
+	       mach_absolute_time();
+}
+
+uint64_t
+kdebug_timestamp_from_absolute(uint64_t abstime)
+{
+	if (kdebug_using_continuous_time()) {
+		return abstime + *(volatile uint64_t*)_COMM_PAGE_CONT_TIMEBASE;
+	} else {
+		return abstime;
+	}
+}
+
+uint64_t
+kdebug_timestamp_from_continuous(uint64_t conttime)
+{
+	if (kdebug_using_continuous_time()) {
+		return conttime;
+	} else {
+		return conttime - *(volatile uint64_t*)_COMM_PAGE_CONT_TIMEBASE;
+	}
 }
 
 int
@@ -129,9 +158,9 @@ kdebug_trace(uint32_t debugid, uint64_t arg1, uint64_t arg2, uint64_t arg3,
 {
 	if (!kdebug_is_enabled(debugid)) {
 		return 0;
+	} else {
+		return __kdebug_trace64(debugid, arg1, arg2, arg3, arg4);
 	}
-
-	return __kdebug_trace64(debugid, arg1, arg2, arg3, arg4);
 }
 
 uint64_t

@@ -10,7 +10,12 @@ INSTINC_SUBDIRS = \
     machine \
     c++ \
     crypto \
-    img4
+    img4 \
+    coretrust \
+    apple_encrypted_archive \
+    amfi \
+    coreanalytics
+
 INSTINC_SUBDIRS_X86_64 = \
         i386
 INSTINC_SUBDIRS_X86_64H = \
@@ -26,19 +31,31 @@ EXPINC_SUBDIRS_X86_64H = ${INSTINC_SUBDIRS_X86_64H}
 EXPINC_SUBDIRS_ARM = ${INSTINC_SUBDIRS_ARM}
 EXPINC_SUBDIRS_ARM64 = ${INSTINC_SUBDIRS_ARM64}
 
-DATAFILES = \
-	OSByteOrder.h \
-	_OSByteOrder.h \
+# Files that are public on macOS, but private on embedded
+EMBEDDED_PRIVATE_DATAFILES = \
 	OSDebug.h \
 	OSKextLib.h \
 	OSReturn.h \
 	OSTypes.h
 
+ifeq ($(filter $(SUPPORTED_EMBEDDED_PLATFORMS) $(SUPPORTED_SIMULATOR_PLATFORMS),$(PLATFORM)),)
+EXTRA_DATAFILES = $(EMBEDDED_PRIVATE_DATAFILES)
+else
+EXTRA_PRIVATE_DATAFILES = $(EMBEDDED_PRIVATE_DATAFILES)
+endif
+
+# These are covered by CoreOSModuleMaps because they're mixed in with headers
+# from other projects in libkern/.
+DATAFILES = $(sort \
+	OSByteOrder.h \
+	_OSByteOrder.h \
+	$(EXTRA_DATAFILES))
+
 DRIVERKIT_DATAFILES = \
 	OSByteOrder.h \
 	_OSByteOrder.h
 
-KERNELFILES = \
+KERNELFILES = $(sort \
 	${DATAFILES} \
 	OSAtomic.h \
 	OSBase.h \
@@ -49,7 +66,8 @@ KERNELFILES = \
 	zconf.h	\
 	zlib.h \
 	crc.h \
-	Block.h
+	Block.h \
+	$(EXTRA_PRIVATE_DATAFILES))
 
 PRIVATE_KERNELFILES = \
 	OSKextLibPrivate.h \
@@ -62,11 +80,14 @@ PRIVATE_KERNELFILES = \
 	Block_private.h \
 	ptrauth_utils.h
 
-PRIVATE_DATAFILES = \
+PRIVATE_DATAFILES = $(sort \
 	${PRIVATE_KERNELFILES} \
-	tree.h
+	tree.h \
+	$(EXTRA_PRIVATE_DATAFILES))
 
 INSTALL_MI_LIST	= ${DATAFILES}
+
+INSTALL_MI_LCL_LIST = $(sort OSKextLibPrivate.h ${EXTRA_PRIVATE_DATAFILES})
 
 INSTALL_DRIVERKIT_MI_LIST = ${DRIVERKIT_DATAFILES}
 
@@ -74,7 +95,8 @@ DRIVERKITINCDIR = $(DRIVERKITSDKHEADERSROOT)/usr/local/include
 
 INSTALL_MI_DIR = libkern
 
-INSTALL_MI_LCL_LIST =        \
+INSTALL_SF_MI_LCL_LIST =        \
+	${DATAFILES} \
 	${PRIVATE_DATAFILES} \
 	kext_panic_report.h  \
 	OSCrossEndian.h

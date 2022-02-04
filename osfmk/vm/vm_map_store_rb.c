@@ -333,14 +333,14 @@ update_holes_on_entry_deletion(vm_map_t map, vm_map_entry_t old_entry)
 
 		if (hole_entry != CAST_TO_VM_MAP_ENTRY(map->holes_list)) {
 			if (hole_entry->vme_start > old_entry->vme_start) {
-				panic("Hole hint failed: Hole entry start: 0x%llx, entry start: 0x%llx, map hole start: 0x%llx, map hint start: 0x%llx\n",
+				panic("Hole hint failed: Hole entry start: 0x%llx, entry start: 0x%llx, map hole start: 0x%llx, map hint start: 0x%llx",
 				    (unsigned long long)hole_entry->vme_start,
 				    (unsigned long long)old_entry->vme_start,
 				    (unsigned long long)map->holes_list->start,
 				    (unsigned long long)map->hole_hint->start);
 			}
 			if (hole_entry->vme_end > old_entry->vme_start) {
-				panic("Hole hint failed: Hole entry end: 0x%llx, entry start: 0x%llx, map hole start: 0x%llx, map hint start: 0x%llx\n",
+				panic("Hole hint failed: Hole entry end: 0x%llx, entry start: 0x%llx, map hole start: 0x%llx, map hint start: 0x%llx",
 				    (unsigned long long)hole_entry->vme_end,
 				    (unsigned long long)old_entry->vme_start,
 				    (unsigned long long)map->holes_list->start,
@@ -635,7 +635,7 @@ update_holes_on_entry_creation(vm_map_t map, vm_map_entry_t new_entry)
 		}
 	}
 
-	panic("Illegal action: h1: %p, s:0x%llx, e:0x%llx...h2:%p, s:0x%llx, e:0x%llx...h3:0x%p, s:0x%llx, e:0x%llx\n",
+	panic("Illegal action: h1: %p, s:0x%llx, e:0x%llx...h2:%p, s:0x%llx, e:0x%llx...h3:0x%p, s:0x%llx, e:0x%llx",
 	    hole_entry->vme_prev,
 	    (unsigned long long)hole_entry->vme_prev->vme_start,
 	    (unsigned long long)hole_entry->vme_prev->vme_end,

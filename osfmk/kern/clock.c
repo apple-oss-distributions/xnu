@@ -106,24 +106,22 @@ uint32_t        hz_tick_interval = 1;
 static uint64_t has_monotonic_clock = 0;
 #endif /* ENABLE_LEGACY_CLOCK_CODE */
 
-SIMPLE_LOCK_DECLARE(clock_lock, 0);
+lck_ticket_t clock_lock;
 
 static LCK_GRP_DECLARE(settime_lock_grp, "settime");
 static LCK_MTX_DECLARE(settime_lock, &settime_lock_grp);
 
 #define clock_lock()    \
-	simple_lock(&clock_lock, LCK_GRP_NULL)
+	lck_ticket_lock(&clock_lock, LCK_GRP_NULL)
 
 #define clock_unlock()  \
-	simple_unlock(&clock_lock)
+	lck_ticket_unlock(&clock_lock)
 
-#ifdef kdp_simple_lock_is_acquired
 boolean_t
 kdp_clock_is_locked()
 {
-	return kdp_simple_lock_is_acquired(&clock_lock);
+	return kdp_lck_ticket_is_acquired(&clock_lock);
 }
-#endif
 
 struct bintime {
 	time_t  sec;
@@ -357,6 +355,8 @@ MACRO_END
 void
 clock_config(void)
 {
+	lck_ticket_init(&clock_lock, 0);
+
 	clock_oldconfig();
 
 	ntp_init();

@@ -29,13 +29,16 @@
 #ifndef __SYS_RANDOM_H__
 #define __SYS_RANDOM_H__
 
+#ifndef KERNEL
+#include <Availability.h>
+#include <stddef.h>
+#endif
 #include <sys/appleapiopts.h>
 #include <sys/cdefs.h>
 
 #ifndef KERNEL
 __BEGIN_DECLS
-    __OSX_AVAILABLE(10.12) __IOS_AVAILABLE(10.0) __TVOS_AVAILABLE(10.0) __WATCHOS_AVAILABLE(3.0)
-int getentropy(void* buffer, size_t size);
+int getentropy(void* buffer, size_t size) __OSX_AVAILABLE(10.12) __IOS_AVAILABLE(10.0) __TVOS_AVAILABLE(10.0) __WATCHOS_AVAILABLE(3.0);
 __END_DECLS
 
 #else /* KERNEL */

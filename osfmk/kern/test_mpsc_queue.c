@@ -81,6 +81,7 @@ mpsc_test_pingpong(uint64_t count, uint64_t *out)
 	struct mpsc_test_pingpong_queue ping, pong;
 	kern_return_t kr;
 	wait_result_t wr;
+	uint32_t timeout = 5;
 
 	if (count < 1000 || count > 1000 * 1000) {
 		return EINVAL;
@@ -106,8 +107,12 @@ mpsc_test_pingpong(uint64_t count, uint64_t *out)
 	ping.other = &pong;
 	pong.other = &ping;
 
+#if KASAN
+	timeout = 30;
+#endif
+
 	assert_wait_timeout(&mpsc_test_pingpong_invoke, THREAD_UNINT,
-	    5000, 1000 * NSEC_PER_USEC);
+	    timeout, NSEC_PER_SEC);
 	start = mach_absolute_time();
 	mpsc_daemon_enqueue(&ping.queue, &ping.link, MPSC_QUEUE_DISABLE_PREEMPTION);
 

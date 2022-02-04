@@ -216,7 +216,7 @@ typedef struct aio_anchor_cb aio_anchor_cb;
 
 #define ASSERT_AIO_FROM_PROC(aiop, theproc)     \
 	if ((aiop)->procp != (theproc)) {       \
-	        panic("AIO on a proc list that does not belong to that proc.\n"); \
+	        panic("AIO on a proc list that does not belong to that proc."); \
 	}
 
 /*
@@ -322,7 +322,7 @@ aio_workq_remove_entry_locked(aio_workq_t queue, aio_workq_entry *entryp)
 	ASSERT_AIO_WORKQ_LOCK_OWNED(queue);
 
 	if (entryp->aio_workq_link.tqe_prev == NULL) {
-		panic("Trying to remove an entry from a work queue, but it is not on a queue\n");
+		panic("Trying to remove an entry from a work queue, but it is not on a queue");
 	}
 
 	TAILQ_REMOVE(&queue->aioq_entries, entryp, aio_workq_link);
@@ -395,7 +395,7 @@ aio_proc_remove_done_locked(proc_t procp, aio_workq_entry *entryp)
 	TAILQ_REMOVE(&procp->p_aio_doneq, entryp, aio_proc_link);
 	entryp->aio_proc_link.tqe_prev = NULL;
 	if (os_atomic_dec_orig(&aio_anchor.aio_total_count, relaxed) <= 0) {
-		panic("Negative total AIO count!\n");
+		panic("Negative total AIO count!");
 	}
 	if (procp->p_aio_total_count-- <= 0) {
 		panic("proc %p: p_aio_total_count accounting mismatch", procp);
@@ -931,7 +931,7 @@ again:
 			/* mark the entry as blocking close or exit/exec */
 			entryp->flags |= reason;
 			if ((entryp->flags & AIO_EXIT_WAIT) && (entryp->flags & AIO_CLOSE_WAIT)) {
-				panic("Close and exit flags set at the same time\n");
+				panic("Close and exit flags set at the same time");
 			}
 		}
 
@@ -1083,7 +1083,7 @@ aio_suspend_nocancel(proc_t p, struct aio_suspend_nocancel_args *uap, int *retva
 		clock_absolutetime_interval_to_deadline(abstime, &abstime);
 	}
 
-	aiocbpp = kheap_alloc(KHEAP_TEMP, aiocbpp_size, Z_WAITOK);
+	aiocbpp = (user_addr_t *)kalloc_data(aiocbpp_size, Z_WAITOK);
 	if (aiocbpp == NULL || aio_copy_in_list(p, uap->aiocblist, aiocbpp, uap->nent)) {
 		error = EAGAIN;
 		goto ExitThisRoutine;
@@ -1145,7 +1145,7 @@ check_for_our_aiocbp:
 
 ExitThisRoutine:
 	if (aiocbpp != NULL) {
-		kheap_free(KHEAP_TEMP, aiocbpp, aiocbpp_size);
+		kfree_data(aiocbpp, aiocbpp_size);
 	}
 
 	KERNEL_DEBUG(BSDDBG_CODE(DBG_BSD_AIO, AIO_suspend) | DBG_FUNC_END,

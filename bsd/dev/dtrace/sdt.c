@@ -73,9 +73,7 @@ extern kern_return_t fbt_perfCallback(int, struct savearea_t *, uintptr_t *, int
 
 #define SDT_PROBETAB_SIZE       0x1000          /* 4k entries -- 16K total */
 
-#define DTRACE_PROBE_PREFIX "_dtrace_probe$"
-
-static int                      sdt_verbose = 0;
+static int              sdt_verbose = 0;
 sdt_probe_t             **sdt_probetab;
 int                     sdt_probetab_size;
 int                     sdt_probetab_mask;
@@ -85,7 +83,6 @@ static void
 __sdt_provide_module(void *arg, struct modctl *ctl)
 {
 #pragma unused(arg)
-	struct module *mp = (struct module *)ctl->mod_address;
 	char *modname = ctl->mod_modname;
 	sdt_probedesc_t *sdpd;
 	sdt_probe_t *sdp, *old;
@@ -101,15 +98,15 @@ __sdt_provide_module(void *arg, struct modctl *ctl)
 		}
 	}
 
-	if (!mp || mp->sdt_nprobes != 0 || (sdpd = mp->sdt_probes) == NULL) {
+	/* Nothing to do. Module is either invalid or we haven't found any SDT probe descriptions. */
+	if (!ctl || ctl->mod_sdtprobecnt != 0 || (sdpd = ctl->mod_sdtdesc) == NULL) {
 		return;
 	}
 
-	for (sdpd = mp->sdt_probes; sdpd != NULL; sdpd = sdpd->sdpd_next) {
-		const char *func;
+	for (sdpd = ctl->mod_sdtdesc; sdpd != NULL; sdpd = sdpd->sdpd_next) {
 		dtrace_id_t id;
 
-		/* Validate probe's provider name. Do not provide probes for unknown providers. */
+		/* Validate probe's provider name.  Do not provide probes for unknown providers. */
 		for (prov = sdt_providers; prov->sdtp_name != NULL; prov++) {
 			if (strcmp(prov->sdtp_prefix, sdpd->sdpd_prov) == 0) {
 				break;
@@ -121,21 +118,28 @@ __sdt_provide_module(void *arg, struct modctl *ctl)
 			continue;
 		}
 
+		if (sdpd->sdpd_func == NULL) {
+			/*
+			 * Ignore probes for which we don't have any symbol.  That's likely some problem with
+			 * __sdt section processing.
+			 */
+			printf("Ignoring probe %s (no symbol name)\n", sdpd->sdpd_name);
+			continue;
+		}
+
 		sdp = kmem_zalloc(sizeof(sdt_probe_t), KM_SLEEP);
 		sdp->sdp_loadcnt = ctl->mod_loadcnt;
 		sdp->sdp_ctl = ctl;
 		sdp->sdp_name = kmem_alloc(strlen(sdpd->sdpd_name) + 1, KM_SLEEP);
-		strncpy(sdp->sdp_name, sdpd->sdpd_name, strlen(sdpd->sdpd_name) + 1);
+		(void) strlcpy(sdp->sdp_name, sdpd->sdpd_name, strlen(sdpd->sdpd_name) + 1);
 		sdp->sdp_namelen = strlen(sdpd->sdpd_name) + 1;
 		sdp->sdp_provider = prov;
-
-		func = (sdpd->sdpd_func != NULL) ? sdpd->sdpd_func : "<unknown>";
 
 		/*
 		 * We have our provider.  Now create the probe.
 		 */
 		if ((id = dtrace_probe_lookup(prov->sdtp_id, modname,
-		    func, sdp->sdp_name)) != DTRACE_IDNONE) {
+		    sdpd->sdpd_func, sdp->sdp_name)) != DTRACE_IDNONE) {
 			old = dtrace_probe_arg(prov->sdtp_id, id);
 			ASSERT(old != NULL);
 
@@ -144,9 +148,9 @@ __sdt_provide_module(void *arg, struct modctl *ctl)
 			old->sdp_next = sdp;
 		} else {
 			sdp->sdp_id = dtrace_probe_create(prov->sdtp_id,
-			    modname, func, sdp->sdp_name, SDT_AFRAMES, sdp);
+			    modname, sdpd->sdpd_func, sdp->sdp_name, SDT_AFRAMES, sdp);
 
-			mp->sdt_nprobes++;
+			ctl->mod_sdtprobecnt++;
 		}
 
 #if 0
@@ -172,19 +176,15 @@ sdt_destroy(void *arg, dtrace_id_t id, void *parg)
 	sdt_probe_t *sdp = parg, *old, *last, *hash;
 	int ndx;
 
-#if !defined(__APPLE__)
-	/*
-	 * APPLE NOTE:  sdt probes for kexts not yet implemented
-	 */
 	struct modctl *ctl = sdp->sdp_ctl;
 
-	if (ctl != NULL && ctl->mod_loadcnt == sdp->sdp_loadcnt) {
-		if ((ctl->mod_loadcnt == sdp->sdp_loadcnt &&
-		    ctl->mod_loaded)) {
-			((struct module *)(ctl->mod_mp))->sdt_nprobes--;
-		}
+	/*
+	 * Decrement SDT probe counts only when a probe being destroyed belongs to the
+	 * currently loaded version of a module and not the stale one.
+	 */
+	if (ctl != NULL && ctl->mod_loadcnt == sdp->sdp_loadcnt && ctl->mod_loaded) {
+		ctl->mod_sdtprobecnt--;
 	}
-#endif /* __APPLE__ */
 
 	while (sdp != NULL) {
 		old = sdp;
@@ -421,8 +421,6 @@ static const struct cdevsw sdt_cdevsw =
 	.d_reserved_2 = eno_putc,
 };
 
-static struct modctl g_sdt_kernctl;
-static struct module g_sdt_mach_module;
 
 #include <mach-o/nlist.h>
 #include <libkern/kernel_mach_header.h>
@@ -459,97 +457,205 @@ sdt_strdup_name(const char *name)
 	return nname;
 }
 
-void
-sdt_early_init( void )
+/*
+ * Returns Mach-O header that should be used for given modctl.
+ */
+static kernel_mach_header_t *
+sdt_get_module_mh(struct modctl *ctl)
 {
-	if (dtrace_sdt_probes_restricted()) {
+	kernel_mach_header_t *mh = (kernel_mach_header_t *)ctl->mod_address;
+
+	/* Static KEXTs have their __sdt section merged into kernel's __sdt. */
+	if (MOD_IS_STATIC_KEXT(ctl)) {
+		mh = &_mh_execute_header;
+	}
+
+	if (mh->magic != MH_MAGIC_KERNEL) {
+		return NULL;
+	}
+
+	return mh;
+}
+
+/*
+ * Finds symbol table for given kernel module.
+ */
+static uint32_t
+sdt_find_symbol_table(struct modctl *ctl, kernel_nlist_t **sym, char **strings)
+{
+	kernel_mach_header_t        *mh = sdt_get_module_mh(ctl);
+	struct load_command         *cmd = (struct load_command *)&mh[1];
+	kernel_segment_command_t    *orig_le = NULL;
+	struct symtab_command       *orig_st = NULL;
+
+	for (int i = 0; i < mh->ncmds; i++) {
+		if (cmd->cmd == LC_SEGMENT_KERNEL) {
+			kernel_segment_command_t *orig_sg = (kernel_segment_command_t *) cmd;
+
+			if (LIT_STRNEQL(orig_sg->segname, SEG_LINKEDIT)) {
+				orig_le = orig_sg;
+			}
+		} else if (cmd->cmd == LC_SYMTAB) {
+			orig_st = (struct symtab_command *) cmd;
+		}
+
+		cmd = (struct load_command *) ((uintptr_t) cmd + cmd->cmdsize);
+	}
+
+	if ((orig_st == NULL) || (orig_le == NULL)) {
+		return 0;
+	}
+
+	*sym = (kernel_nlist_t *)(orig_le->vmaddr + orig_st->symoff - orig_le->fileoff);
+	*strings = (char *)(orig_le->vmaddr + orig_st->stroff - orig_le->fileoff);
+
+	return orig_st->nsyms;
+}
+
+/* Last kernel address. */
+static SECURITY_READ_ONLY_LATE(vm_address_t) kern_end = (vm_address_t)-1;
+
+void
+sdt_early_init(void)
+{
+	kernel_mach_header_t        *mh = &_mh_execute_header;
+	kernel_section_t            *sec_ks = NULL;
+	kc_format_t                 kc_format;
+
+	if (!PE_get_primary_kc_format(&kc_format)) {
+		kc_format = KCFormatUnknown;
+	}
+
+	/*
+	 * Detects end of kernel's text in static kernel cache. It is the last text address before
+	 * the first kext text section start.
+	 */
+	if (kc_format == KCFormatStatic) {
+		if ((sec_ks = getsectbynamefromheader(mh, "__PRELINK_INFO", "__kmod_start")) == NULL) {
+			printf("SDT: unable to find prelink info\n");
+			return;
+		}
+
+		/* find the MIN(start_address) of all kexts in this image. */
+		const uint64_t *start_addr = (const uint64_t *)sec_ks->addr;
+		for (int i = 0; i < sec_ks->size / sizeof(uint64_t); i++) {
+			if (kern_end > start_addr[i]) {
+				kern_end = start_addr[i];
+			}
+		}
+	}
+}
+
+/*
+ * Finds TEXT range that belongs to given module.
+ */
+static int
+sdt_find_module_text_range(struct modctl *ctl, vm_address_t *start, vm_address_t *end)
+{
+	kc_format_t                 kc_format;
+
+	if (!PE_get_primary_kc_format(&kc_format)) {
+		kc_format = KCFormatUnknown;
+	}
+
+	/* Adjust kernel region for static kernel cache. */
+	*start = ctl->mod_address;
+
+	if (MOD_IS_MACH_KERNEL(ctl) && kc_format == KCFormatStatic) {
+		*end = kern_end;
+	} else {
+		*end = ctl->mod_address + ctl->mod_size;
+	}
+
+	return 1;
+}
+
+/*
+ * Processes SDT section in given Mach-O header
+ */
+void
+sdt_load_machsect(struct modctl *ctl)
+{
+	kernel_mach_header_t        *mh = sdt_get_module_mh(ctl);
+	kernel_section_t            *sec_sdt = NULL;
+	char                        *strings = NULL;
+	kernel_nlist_t              *sym = NULL;
+	vm_address_t                text_start, text_end;
+	unsigned int                len;
+	uint32_t                    nsyms = 0;
+
+	const bool ctl_has_kernel_symbols = MOD_HAS_KERNEL_SYMBOLS(ctl);
+
+	if (mh == NULL) {
 		return;
 	}
-	if (MH_MAGIC_KERNEL != _mh_execute_header.magic) {
-		g_sdt_kernctl.mod_address = (vm_address_t)NULL;
-		g_sdt_kernctl.mod_size = 0;
-	} else {
-		kernel_mach_header_t        *mh;
-		struct load_command         *cmd;
-		kernel_segment_command_t    *orig_ts = NULL, *orig_le = NULL;
-		kernel_section_t            *orig_dt = NULL;
-		struct symtab_command       *orig_st = NULL;
-		kernel_nlist_t              *sym = NULL;
-		char                        *strings;
-		unsigned int                i;
-		unsigned int                len;
 
-		g_sdt_mach_module.sdt_nprobes = 0;
-		g_sdt_mach_module.sdt_probes = NULL;
+	/* Ignore SDT definitions if we don't know where they belong. */
+	if (!sdt_find_module_text_range(ctl, &text_start, &text_end)) {
+		printf("SDT: Unable to determine text range for %s\n", ctl->mod_modname);
+		return;
+	}
 
-		g_sdt_kernctl.mod_address = (vm_address_t)&g_sdt_mach_module;
-		g_sdt_kernctl.mod_size = 0;
-		strncpy((char *)&(g_sdt_kernctl.mod_modname), "mach_kernel", KMOD_MAX_NAME);
+	/* Do not load SDTs when asked to use kernel symbols but symbol table is not available. */
+	if (ctl_has_kernel_symbols && (nsyms = sdt_find_symbol_table(ctl, &sym, &strings)) == 0) {
+		printf("SDT: No kernel symbols for %s\n", ctl->mod_modname);
+		return;
+	}
 
-		g_sdt_kernctl.mod_next = NULL;
-		g_sdt_kernctl.mod_stale = NULL;
-		g_sdt_kernctl.mod_id = 0;
-		g_sdt_kernctl.mod_loadcnt = 1;
-		g_sdt_kernctl.mod_loaded = 1;
-		g_sdt_kernctl.mod_flags = 0;
-		g_sdt_kernctl.mod_nenabled = 0;
+	/* Locate DTrace SDT section in the object. */
+	if ((sec_sdt = getsectbynamefromheader(mh, "__DATA", "__sdt")) == NULL) {
+		return;
+	}
 
-		mh = &_mh_execute_header;
-		cmd = (struct load_command*) &mh[1];
-		for (i = 0; i < mh->ncmds; i++) {
-			if (cmd->cmd == LC_SEGMENT_KERNEL) {
-				kernel_segment_command_t *orig_sg = (kernel_segment_command_t *) cmd;
+	/*
+	 * Iterate over SDT section and establish all SDT probe descriptions.
+	 */
+	dtrace_sdt_def_t *sdtdef = (dtrace_sdt_def_t *)(sec_sdt->addr);
+	for (size_t k = 0; k < sec_sdt->size / sizeof(dtrace_sdt_def_t); k++, sdtdef++) {
+		const char *funcname;
+		unsigned long best = 0;
 
-				if (LIT_STRNEQL(orig_sg->segname, SEG_TEXT)) {
-					orig_ts = orig_sg;
-				} else if (LIT_STRNEQL(orig_sg->segname, SEG_LINKEDIT)) {
-					orig_le = orig_sg;
-				} else if (LIT_STRNEQL(orig_sg->segname, "")) {
-					orig_ts = orig_sg; /* kexts have a single unnamed segment */
-				}
-			} else if (cmd->cmd == LC_SYMTAB) {
-				orig_st = (struct symtab_command *) cmd;
-			}
-
-			cmd = (struct load_command *) ((uintptr_t) cmd + cmd->cmdsize);
-		}
-
-		/* Locate DTrace SDT section in the object. */
-		if ((orig_dt = getsectbyname("__DATA", "__sdt")) == NULL) {
-			printf("DTrace section not found.\n");
-			return;
-		}
-
-		if ((orig_ts == NULL) || (orig_st == NULL) || (orig_le == NULL)) {
-			return;
-		}
-
-		sym = (kernel_nlist_t *)(orig_le->vmaddr + orig_st->symoff - orig_le->fileoff);
-		strings = (char *)(orig_le->vmaddr + orig_st->stroff - orig_le->fileoff);
+#if defined(__arm__)
+		/* PR8353094 - mask off thumb-bit */
+		sdtdef->dsd_addr &= ~0x1U;
+#elif defined(__arm64__)
+		sdtdef->dsd_addr &= ~0x1LU;
+#endif  /* __arm__ */
 
 		/*
-		 * Iterate over SDT section and establish all SDT probes.
+		 * Static KEXTs share __sdt section with kernel after linking. It is required
+		 * to filter out description and pick only those that belong to requested
+		 * module or kernel itself.
 		 */
-		dtrace_sdt_def_t *sdtdef = (dtrace_sdt_def_t *)(orig_dt->addr);
-		for (size_t k = 0; k < orig_dt->size / sizeof(dtrace_sdt_def_t); k++, sdtdef++) {
-			const char *funcname;
-			unsigned long best;
+		if (MOD_IS_STATIC_KEXT(ctl) || MOD_IS_MACH_KERNEL(ctl)) {
+			if ((sdtdef->dsd_addr < text_start) || (sdtdef->dsd_addr > text_end)) {
+				continue;
+			}
+		} else {
+			/* Skip over probe descripton that do not belong to current module. */
+			if (!dtrace_addr_in_module((void *)sdtdef->dsd_addr, ctl)) {
+				continue;
+			}
+		}
 
-			sdt_probedesc_t *sdpd = kmem_alloc(sizeof(sdt_probedesc_t), KM_SLEEP);
+		sdt_probedesc_t *sdpd = kmem_alloc(sizeof(sdt_probedesc_t), KM_SLEEP);
 
-			/* Unescape probe name and keep a note of the size of original memory allocation. */
-			sdpd->sdpd_name = sdt_strdup_name(sdtdef->dsd_name);
-			sdpd->sdpd_namelen = strlen(sdtdef->dsd_name) + 1;
+		/* Unescape probe name and keep a note of the size of original memory allocation. */
+		sdpd->sdpd_name = sdt_strdup_name(sdtdef->dsd_name);
+		sdpd->sdpd_namelen = strlen(sdtdef->dsd_name) + 1;
 
-			/* Used only for provider structure lookup so there is no need to make dynamic copy. */
-			sdpd->sdpd_prov = sdtdef->dsd_prov;
+		/* Used only for provider structure lookup so there is no need to make dynamic copy. */
+		sdpd->sdpd_prov = sdtdef->dsd_prov;
 
-			/*
-			 * Find the symbol immediately preceding the sdt probe site just discovered,
-			 * that symbol names the function containing the sdt probe.
-			 */
-			funcname = "<unknown>";
-			for (i = 0; i < orig_st->nsyms; i++) {
+		/*
+		 * Find the symbol immediately preceding the sdt probe site just discovered,
+		 * that symbol names the function containing the sdt probe.
+		 */
+		sdpd->sdpd_func = NULL;
+
+		if (ctl_has_kernel_symbols) {
+			funcname = NULL;
+			for (int i = 0; i < nsyms; i++) {
 				uint8_t jn_type = sym[i].n_type & N_TYPE;
 				char *jname = strings + sym[i].n_un.n_strx;
 
@@ -575,21 +681,17 @@ sdt_early_init( void )
 				}
 			}
 
-			len = strlen(funcname) + 1;
-			sdpd->sdpd_func = kmem_alloc(len, KM_SLEEP);
-			strncpy(sdpd->sdpd_func, funcname, len);
-
-			sdpd->sdpd_offset = sdtdef->dsd_addr;
-#if defined(__arm__)
-			/* PR8353094 - mask off thumb-bit */
-			sdpd->sdpd_offset &= ~0x1U;
-#elif defined(__arm64__)
-			sdpd->sdpd_offset &= ~0x1LU;
-#endif  /* __arm__ */
-
-			sdpd->sdpd_next = g_sdt_mach_module.sdt_probes;
-			g_sdt_mach_module.sdt_probes = sdpd;
+			if (funcname) {
+				len = strlen(funcname) + 1;
+				sdpd->sdpd_func = kmem_alloc(len, KM_SLEEP);
+				(void) strlcpy(sdpd->sdpd_func, funcname, len);
+			}
 		}
+
+		sdpd->sdpd_offset = sdtdef->dsd_addr;
+
+		sdpd->sdpd_next = (sdt_probedesc_t *)ctl->mod_sdtdesc;
+		ctl->mod_sdtdesc = sdpd;
 	}
 }
 
@@ -612,11 +714,69 @@ sdt_init( void )
 
 #undef SDT_MAJOR
 
+/*
+ * Provide SDT modules with userspace symbols.
+ *
+ * A module contains only partially filled in SDT probe descriptions because symbols were
+ * not available at the time when __sdt section was loaded. Fixup descriptons before providing
+ * the probes.
+ */
+static void
+sdt_provide_module_user_syms(void *arg, struct modctl *ctl)
+{
+	sdt_probedesc_t *sdpd;
+	dtrace_module_symbols_t *mod_sym = ctl->mod_user_symbols;
+
+	if (mod_sym == NULL) {
+		printf("DTrace missing userspace symbols for module %s\n", ctl->mod_modname);
+		return;
+	}
+
+	/* Fixup missing probe description parts. */
+	for (sdpd = ctl->mod_sdtdesc; sdpd != NULL; sdpd = sdpd->sdpd_next) {
+		ASSERT(sdpd->sdpd_func == NULL);
+
+		/* Look for symbol that contains SDT probe offset. */
+		for (int i = 0; i < mod_sym->dtmodsyms_count; i++) {
+			dtrace_symbol_t *symbol = &mod_sym->dtmodsyms_symbols[i];
+			char *name = symbol->dtsym_name;
+
+			/*
+			 * Every function symbol gets extra '_' prepended in the Mach-O symbol table.
+			 * Strip it away to make a probe's function name match source code.
+			 */
+			if (*name == '_') {
+				name += 1;
+			}
+
+			if (!symbol->dtsym_addr) {
+				continue;
+			}
+
+			/* Ignore symbols that do not belong to this module. */
+			if (!dtrace_addr_in_module((void *)symbol->dtsym_addr, ctl)) {
+				continue;
+			}
+
+			/* Pick symbol name when we found match. */
+			if ((symbol->dtsym_addr <= sdpd->sdpd_offset) &&
+			    (sdpd->sdpd_offset < symbol->dtsym_addr + symbol->dtsym_size)) {
+				size_t len = strlen(name) + 1;
+				sdpd->sdpd_func = kmem_alloc(len, KM_SLEEP);
+				(void) strlcpy(sdpd->sdpd_func, name, len);
+				break;
+			}
+		}
+	}
+
+	/* Probe descriptionds are now fixed up.  Provide them as usual. */
+	__sdt_provide_module(arg, ctl);
+}
+
 /*ARGSUSED*/
 void
 sdt_provide_module(void *arg, struct modctl *ctl)
 {
-#pragma unused(arg)
 	ASSERT(ctl != NULL);
 	ASSERT(dtrace_kernel_symbol_mode != DTRACE_KERNEL_SYMBOLS_NEVER);
 	LCK_MTX_ASSERT(&mod_lock, LCK_MTX_ASSERT_OWNED);
@@ -625,24 +785,35 @@ sdt_provide_module(void *arg, struct modctl *ctl)
 		return;
 	}
 
-	if (MOD_IS_MACH_KERNEL(ctl)) {
-		__sdt_provide_module(arg, &g_sdt_kernctl);
+	if (MOD_HAS_KERNEL_SYMBOLS(ctl)) {
+		__sdt_provide_module(arg, ctl);
+		ctl->mod_flags |= MODCTL_SDT_PROBES_PROVIDED;
+		return;
+	}
 
-		sdt_probedesc_t *sdpd = g_sdt_mach_module.sdt_probes;
+	if (MOD_HAS_USERSPACE_SYMBOLS(ctl)) {
+		sdt_provide_module_user_syms(arg, ctl);
+		ctl->mod_flags |= MODCTL_SDT_PROBES_PROVIDED;
+		return;
+	}
+
+	/*
+	 * The SDT provider's module is not detachable so we don't have to re-provide SDT
+	 * probes if that happens.  After succesfull providing, the probe descriptions are
+	 * no longer required.  If module gets re-loaded it will get a new set of probe
+	 * descriptions from its __sdt section.
+	 */
+	if (MOD_SDT_PROBES_PROVIDED(ctl)) {
+		sdt_probedesc_t *sdpd = ctl->mod_sdtdesc;
 		while (sdpd) {
 			sdt_probedesc_t *this_sdpd = sdpd;
 			kmem_free((void *)sdpd->sdpd_name, sdpd->sdpd_namelen);
-			kmem_free((void *)sdpd->sdpd_func, strlen(sdpd->sdpd_func) + 1);
+			if (sdpd->sdpd_func) {
+				kmem_free((void *)sdpd->sdpd_func, strlen(sdpd->sdpd_func) + 1);
+			}
 			sdpd = sdpd->sdpd_next;
 			kmem_free((void *)this_sdpd, sizeof(sdt_probedesc_t));
 		}
-		g_sdt_mach_module.sdt_probes = NULL;
-	} else {
-		/*
-		 * APPLE NOTE:  sdt probes for kexts not yet implemented
-		 */
+		ctl->mod_sdtdesc = NULL;
 	}
-
-	/* Need to mark this module as completed */
-	ctl->mod_flags |= MODCTL_SDT_PROBES_PROVIDED;
 }

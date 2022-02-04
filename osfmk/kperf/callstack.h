@@ -50,10 +50,14 @@
 #define CALLSTACK_TRANSLATED   (1U << 7)
 /* the last frame could be the real PC */
 #define CALLSTACK_FIXUP_PC     (1U << 8)
+/* the stack also contains an async stack */
+#define CALLSTACK_HAS_ASYNC    (1U << 9)
 
 struct kp_ucallstack {
 	uint32_t kpuc_flags;
 	uint32_t kpuc_nframes;
+	uint32_t kpuc_async_index;
+	uint32_t kpuc_async_nframes;
 	uintptr_t kpuc_frames[MAX_UCALLSTACK_FRAMES];
 };
 
@@ -62,7 +66,7 @@ struct kp_kcallstack {
 	uint32_t kpkc_nframes;
 	union {
 		uintptr_t kpkc_word_frames[MAX_KCALLSTACK_FRAMES];
-		uint64_t kpkc_frames[MAX_KCALLSTACK_FRAMES];
+		uint64_t kpkc_frames[MAX_KCALLSTACK_FRAMES] __kernel_ptr_semantics;
 	};
 };
 

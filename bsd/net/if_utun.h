@@ -30,6 +30,8 @@
 #ifndef _NET_IF_UTUN_H_
 #define _NET_IF_UTUN_H_
 
+#include <sys/types.h>
+
 #ifdef KERNEL_PRIVATE
 
 #include <sys/kern_control.h>

@@ -32,7 +32,7 @@
 .\"     @(#)write.2	8.5 (Berkeley) 4/2/94
 .\" $FreeBSD: src/lib/libc/sys/write.2,v 1.12.2.7 2001/12/14 18:34:02 ru Exp $
 .\"
-.Dd March 18, 2015 
+.Dd June 3, 2021
 .Dt WRITE 2
 .Os
 .Sh NAME
@@ -241,6 +241,15 @@ for reading by any process.
 An attempt is made to write to a socket of type
 .Dv SOCK_STREAM
 that is not connected to a peer socket.
+.\" ===========
+.It Bq Er EDEADLK
+The file is a
+.Dq dataless
+file that requires materialization and the I/O policy of the current thread
+or process disallows dataless file materialization
+.Po see
+.Xr getiopolicy_np 3
+.Pc .
 .El
 .Pp
 The

@@ -32,9 +32,9 @@
 
 subsystem
 #if KERNEL_USER
-    KernelUser
+KernelUser
 #endif /* KERNEL_USER */
-    vfs_nspace 867800; /* 'V''N'00 */
+vfs_nspace 867800;     /* 'V''N'00 */
 
 #include <mach/std_types.defs>
 #include <mach/mach_types.defs>
@@ -45,24 +45,74 @@ UserPrefix   send_;
 
 /* DEPRECATED */
 routine nspace_handle(
-              nspace_handler_port : mach_port_t;
-              pid                 : uint32_t;
-           in path                : vfs_path_t;
-          out handler_error       : int
+        nspace_handler_port : mach_port_t;
+        pid                 : uint32_t;
+     in path                : vfs_path_t;
+    out handler_error       : int
 );
 
 routine nspace_resolve_cancel(
-              nspace_handler_port : mach_port_t;
-              req_id              : uint32_t
+        nspace_handler_port : mach_port_t;
+        req_id              : uint32_t
 );
 
+/*
+ * nspace_resolve_path should not be moved even after it's not used, it's going
+ * to mess up the calls numbering in mig.
+ */
 routine nspace_resolve_path(
-              nspace_handler_port : mach_port_t;
-              req_id              : uint32_t;
-              pid                 : uint32_t;
-              op                  : uint32_t;
-           in path                : nspace_path_t;
-          out xxx_rdar44371223    : int
+        nspace_handler_port : mach_port_t;
+        req_id              : uint32_t;
+        pid                 : uint32_t;
+        op                  : uint32_t;
+     in path                : nspace_path_t;
+    out xxx_rdar44371223    : int
+);
+
+/*
+ * vfs_resolve_file is deprecated in favor of vfs_resolve_file_with_audit_token.
+ */
+routine vfs_resolve_file(
+        nspace_handler_port : mach_port_t;
+        req_id              : uint32_t;
+        pid                 : uint32_t;
+        op                  : uint32_t;
+        offset              : int64_t;
+        size                : int64_t;
+     in path                : nspace_path_t
+);
+
+/*
+ * vfs_resolve_dir is deprecated in favor of vfs_resolve_dir_with_audit_token.
+ */
+routine vfs_resolve_dir(
+        nspace_handler_port : mach_port_t;
+        req_id              : uint32_t;
+        pid                 : uint32_t;
+        op                  : uint32_t;
+     in file_name           : nspace_name_t;
+     in path                : nspace_path_t
+);
+
+routine vfs_resolve_file_with_audit_token(
+        nspace_handler_port : mach_port_t;
+        req_id              : uint32_t;
+        op                  : uint32_t;
+        offset              : int64_t;
+        size                : int64_t;
+     in path                : nspace_path_t;
+     in req_atoken          : audit_token_t;	/* audit token of requester */
+ServerAuditToken atoken     : audit_token_t
+);
+
+routine vfs_resolve_dir_with_audit_token(
+        nspace_handler_port : mach_port_t;
+        req_id              : uint32_t;
+        op                  : uint32_t;
+     in file_name           : nspace_name_t;
+     in path                : nspace_path_t;
+     in req_atoken          : audit_token_t;	/* audit token of requester */
+ServerAuditToken atoken     : audit_token_t
 );
 
 /* vim: set ft=c : */

@@ -110,7 +110,7 @@ struct acct {
  */
 #define AHZ     64
 
-#ifdef KERNEL
+#ifdef XNU_KERNEL_PRIVATE
 #ifdef __APPLE_API_PRIVATE
 extern struct vnode     *acctp;
 
@@ -119,6 +119,6 @@ int     acct_process(struct proc *p);
 __END_DECLS
 
 #endif /* __APPLE_API_PRIVATE */
-#endif /* KERNEL */
+#endif /* XNU_KERNEL_PRIVATE */
 
 #endif /* ! _SYS_ACCT_H_ */

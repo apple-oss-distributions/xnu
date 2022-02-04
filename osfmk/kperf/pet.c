@@ -104,11 +104,11 @@ static struct {
 	 */
 	thread_t *g_threads;
 	unsigned int g_nthreads;
-	size_t g_threads_size;
+	size_t g_threads_count;
 
 	task_t *g_tasks;
 	unsigned int g_ntasks;
-	size_t g_tasks_size;
+	size_t g_tasks_count;
 } kppet = {
 	.g_actionid = 0,
 	.g_idle_rate = KPERF_PET_DEFAULT_IDLE_RATE,
@@ -226,27 +226,30 @@ kppet_config(unsigned int actionid)
 
 	if (actionid > 0) {
 		if (!kppet.g_sample) {
-			kppet.g_sample = kalloc_tag(sizeof(*kppet.g_sample),
-			    VM_KERN_MEMORY_DIAG);
+			kppet.g_sample = kalloc_type_tag(struct kperf_sample,
+			    Z_WAITOK | Z_NOFAIL, VM_KERN_MEMORY_DIAG);
+			kppet.g_sample->usample.usample_min = kalloc_type_tag(
+				struct kperf_usample_min, Z_WAITOK | Z_NOFAIL, VM_KERN_MEMORY_DIAG);
 		}
 	} else {
 		if (kppet.g_tasks) {
-			assert(kppet.g_tasks_size != 0);
-			kfree(kppet.g_tasks, kppet.g_tasks_size);
+			assert(kppet.g_tasks_count != 0);
+			kfree_type(task_t, kppet.g_tasks_count, kppet.g_tasks);
 			kppet.g_tasks = NULL;
-			kppet.g_tasks_size = 0;
+			kppet.g_tasks_count = 0;
 			kppet.g_ntasks = 0;
 		}
 		if (kppet.g_threads) {
-			assert(kppet.g_threads_size != 0);
-			kfree(kppet.g_threads, kppet.g_threads_size);
+			assert(kppet.g_threads_count != 0);
+			kfree_type(thread_t, kppet.g_threads_count, kppet.g_tasks);
 			kppet.g_threads = NULL;
-			kppet.g_threads_size = 0;
+			kppet.g_threads_count = 0;
 			kppet.g_nthreads = 0;
 		}
 		if (kppet.g_sample != NULL) {
-			kfree(kppet.g_sample, sizeof(*kppet.g_sample));
-			kppet.g_sample = NULL;
+			kfree_type(struct kperf_usample_min,
+			    kppet.g_sample->usample.usample_min);
+			kfree_type(struct kperf_sample, kppet.g_sample);
 		}
 	}
 
@@ -332,7 +335,7 @@ kppet_threads_prepare(task_t task)
 {
 	kppet_lock_assert_owned();
 
-	vm_size_t threads_size_needed;
+	vm_size_t count_needed;
 
 	for (;;) {
 		task_lock(task);
@@ -346,8 +349,8 @@ kppet_threads_prepare(task_t task)
 		 * With the task locked, figure out if enough space has been allocated to
 		 * contain all of the thread references.
 		 */
-		threads_size_needed = task->thread_count * sizeof(thread_t);
-		if (threads_size_needed <= kppet.g_threads_size) {
+		count_needed = task->thread_count;
+		if (count_needed <= kppet.g_threads_count) {
 			break;
 		}
 
@@ -356,16 +359,15 @@ kppet_threads_prepare(task_t task)
 		 */
 		task_unlock(task);
 
-		if (kppet.g_threads_size != 0) {
-			kfree(kppet.g_threads, kppet.g_threads_size);
-		}
+		kfree_type(thread_t, kppet.g_threads_count, kppet.g_threads);
 
-		assert(threads_size_needed > 0);
-		kppet.g_threads_size = threads_size_needed;
+		assert(count_needed > 0);
+		kppet.g_threads_count = count_needed;
 
-		kppet.g_threads = kalloc_tag(kppet.g_threads_size, VM_KERN_MEMORY_DIAG);
+		kppet.g_threads = kalloc_type_tag(thread_t, kppet.g_threads_count,
+		    Z_WAITOK | Z_ZERO, VM_KERN_MEMORY_DIAG);
 		if (kppet.g_threads == NULL) {
-			kppet.g_threads_size = 0;
+			kppet.g_threads_count = 0;
 			return KERN_RESOURCE_SHORTAGE;
 		}
 	}
@@ -455,7 +457,7 @@ kppet_tasks_prepare(void)
 {
 	kppet_lock_assert_owned();
 
-	vm_size_t size_needed = 0;
+	vm_size_t count_needed = 0;
 
 	for (;;) {
 		lck_mtx_lock(&tasks_threads_lock);
@@ -464,8 +466,8 @@ kppet_tasks_prepare(void)
 		 * With the lock held, break out of the lock/unlock loop if
 		 * there's enough space to store all the tasks.
 		 */
-		size_needed = tasks_count * sizeof(task_t);
-		if (size_needed <= kppet.g_tasks_size) {
+		count_needed = tasks_count;
+		if (count_needed <= kppet.g_tasks_count) {
 			break;
 		}
 
@@ -474,17 +476,18 @@ kppet_tasks_prepare(void)
 		 */
 		lck_mtx_unlock(&tasks_threads_lock);
 
-		if (size_needed > kppet.g_tasks_size) {
-			if (kppet.g_tasks_size != 0) {
-				kfree(kppet.g_tasks, kppet.g_tasks_size);
+		if (count_needed > kppet.g_tasks_count) {
+			if (kppet.g_tasks_count != 0) {
+				kfree_type(task_t, kppet.g_tasks_count, kppet.g_tasks);
 			}
 
-			assert(size_needed > 0);
-			kppet.g_tasks_size = size_needed;
+			assert(count_needed > 0);
+			kppet.g_tasks_count = count_needed;
 
-			kppet.g_tasks = kalloc_tag(kppet.g_tasks_size, VM_KERN_MEMORY_DIAG);
+			kppet.g_tasks = kalloc_type_tag(task_t, kppet.g_tasks_count,
+			    Z_WAITOK | Z_ZERO, VM_KERN_MEMORY_DIAG);
 			if (!kppet.g_tasks) {
-				kppet.g_tasks_size = 0;
+				kppet.g_tasks_count = 0;
 				return KERN_RESOURCE_SHORTAGE;
 			}
 		}
@@ -495,7 +498,7 @@ kppet_tasks_prepare(void)
 	queue_iterate(&tasks, task, task_t, tasks) {
 		bool eligible_task = task != kernel_task;
 		if (eligible_task) {
-			task_reference_internal(task);
+			task_reference(task);
 			kppet.g_tasks[kppet.g_ntasks++] = task;
 		}
 	}

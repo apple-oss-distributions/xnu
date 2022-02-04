@@ -60,6 +60,7 @@ def GetWQThreadSummary(th, uth):
         idle = "%#.03f" % (ts)
     if uth.uu_workq_flags & 0x04: uu_workq_flags.append("DYING")
     if uth.uu_workq_flags & 0x08: uu_workq_flags.append("OVERCOMMIT")
+    if uth.uu_workq_flags & 0x100: uu_workq_flags.append("COOPERATIVE")
     if uth.uu_workq_flags & 0x10: uu_workq_flags.append("OUTSIDE_QOS")
     if uth.uu_workq_flags & 0x20: uu_workq_flags.append("IDLE_CLEANUP")
     if uth.uu_workq_flags & 0x40: uu_workq_flags.append("EARLY_BOUND")
@@ -95,9 +96,9 @@ def GetWorkqueueThreadRequestSummary(proc, req):
     if req.tr_flags & 0x04: tr_flags.append("OVERCOMMIT")
     if req.tr_flags & 0x08: tr_flags.append("PARAMS")
     if req.tr_flags & 0x10: tr_flags.append("OUTSIDE_QOS")
+    if req.tr_flags & 0x20: tr_flags.append("COOPERATIVE")
 
     state = {0: "IDLE", 1: "NEW", 2: "QUEUED", 3: "CANCELED", 4: "BINDING", 5: "BOUND" }[int(req.tr_state)]
-    if req.tr_kq_wakeup: state += "*"
 
     thread = 0
     if int(req.tr_state) in [4, 5]: # BINDING or BOUND
@@ -165,6 +166,13 @@ def ShowProcWorkqueue(cmd_args=None, cmd_options={}, O=None):
                 print GetWorkqueueThreadRequestSummary(proc, req)
             for req in IterateSchedPriorityQueue(wq.wq_special_queue, 'struct workq_threadreq_s', 'tr_entry'):
                 print GetWorkqueueThreadRequestSummary(proc, req)
+            for qos in xnudefines.thread_qos_short_strings:
+                bucket = 0;
+                if qos > 2: #Greater than BG
+                    bucket = qos - 2;
+                for req in IterateSTAILQ_HEAD(wq.wq_cooperative_queue[bucket], "tr_link"):
+                    print GetWorkqueueThreadRequestSummary(proc, req)
+
 
         with O.table(GetWQThreadSummary.header, indent=True):
             print ""

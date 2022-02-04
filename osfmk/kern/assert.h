@@ -80,7 +80,10 @@ extern void     Assert(
 
 extern int kext_assertions_enable;
 
-#define __Panic(fmt, args...) panic(fmt, ##args)
+#ifndef __FILE_NAME__
+#define __FILE_NAME__ __FILE__
+#endif
+#define __Panic(fmt, args...) (panic)(fmt, ##args)
 
 __END_DECLS
 
@@ -91,17 +94,60 @@ __END_DECLS
 #if     MACH_ASSERT
 
 #define assert(ex)  \
-	(__builtin_expect(!!((ex)), 1L) ? (void)0 : Assert(__FILE__, __LINE__, # ex))
+	(__builtin_expect(!!((ex)), 1L) ? (void)0 : Assert(__FILE_NAME__, __LINE__, # ex))
 #define assertf(ex, fmt, args...) \
-	(__builtin_expect(!!((ex)), 1L) ? (void)0 : __Panic("%s:%d Assertion failed: %s : " fmt, __FILE__, __LINE__, # ex, ##args))
+	(__builtin_expect(!!((ex)), 1L) ? (void)0 : __Panic("%s:%d Assertion failed: %s : " fmt, __FILE_NAME__, __LINE__, # ex, ##args))
+
+/*
+ * Each of the following three macros takes three arguments instead of one for
+ * the assertion. The suffixes, 's', u' and 'p' indicate the type of arguments
+ * expected: 'signed', 'unsigned' or 'pointer' respectively.
+ *
+ * assert(a > b)     -> file.c:123 Assertion failed: a > b
+ * assert3u(a, >, b) -> file.c:124 Assertion failed: a > b (1 >= 10)
+ *
+ */
+#define assert3u(a, op, b)                                                        \
+	do {                                                                      \
+	        const unsigned long long a_ = (a);                                \
+	        const unsigned long long b_ = (b);                                \
+                                                                                  \
+	        if (__builtin_expect(!(a_ op b_), 0L)) {                          \
+	                __Panic("%s:%d Assertion failed: %s (0x%llx %s 0x%llx)",  \
+	                    __FILE_NAME__, __LINE__,  #a " " #op " " #b, a_, #op, b_); \
+	        }                                                                 \
+	} while (0)
+
+#define assert3s(a, op, b)                                                        \
+	do {                                                                      \
+	        const signed long long a_ = (a);                                  \
+	        const signed long long b_ = (b);                                  \
+                                                                                  \
+	        if (__builtin_expect(!(a_ op b_), 0L)) {                          \
+	                __Panic("%s:%d Assertion failed: %s (0x%llx %s 0x%llx)",  \
+	                    __FILE_NAME__, __LINE__,  #a " " #op " " #b, a_, #op, b_); \
+	        }                                                                 \
+	} while (0)
+
+#define assert3p(a, op, b)                                                        \
+	do {                                                                      \
+	        const void *a_ = (a);                                             \
+	        const void *b_ = (b);                                             \
+                                                                                  \
+	        if (__builtin_expect(!(a_ op b_), 0L)) {                          \
+	                __Panic("%s:%d Assertion failed: %s (0x%p %s 0x%p)",      \
+	                    __FILE_NAME__, __LINE__,  #a " " #op " " #b, a_, #op, b_); \
+	        }                                                                 \
+	} while (0)
+
 #define __assert_only
 
 #elif APPLE_KEXT_ASSERTIONS && !XNU_KERNEL_PRIVATE      /* MACH_ASSERT */
 
 #define assert(ex)  \
-	(__builtin_expect(!!(((!kext_assertions_enable) || (ex))), 1L) ? (void)0 : Assert(__FILE__, __LINE__, # ex))
+	(__builtin_expect(!!(((!kext_assertions_enable) || (ex))), 1L) ? (void)0 : Assert(__FILE_NAME__, __LINE__, # ex))
 #define assertf(ex, fmt, args...) \
-	(__builtin_expect(!!(((!kext_assertions_enable) || (ex))), 1L) ? (void)0 : __Panic("%s:%d Assertion failed: %s : " fmt, __FILE__, __LINE__, # ex, ##args))
+	(__builtin_expect(!!(((!kext_assertions_enable) || (ex))), 1L) ? (void)0 : __Panic("%s:%d Assertion failed: %s : " fmt, __FILE_NAME__, __LINE__, # ex, ##args))
 #define __assert_only
 
 #else                           /* APPLE_KEXT_ASSERTIONS && !XNU_KERNEL_PRIVATE */
@@ -109,6 +155,10 @@ __END_DECLS
 #define assert(ex) ((void)0)
 #define assertf(ex, fmt, args...) ((void)0)
 #define __assert_only __unused
+
+#define assert3s(a, op, b) ((void)0)
+#define assert3u(a, op, b) ((void)0)
+#define assert3p(a, op, b) ((void)0)
 
 #endif  /* MACH_ASSERT */
 

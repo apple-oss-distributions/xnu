@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2010-2020 Apple Inc. All rights reserved.
+ * Copyright (c) 2010-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -49,6 +49,7 @@
 #include <net/if_var.h>
 #include <net/if_types.h>
 #include <net/route.h>
+#include <net/dlil.h>
 
 // These includes appear in ntstat.h but we include them here first so they won't trigger
 // any clang diagnostic errors.
@@ -98,6 +99,10 @@ static int nstat_debug = 0;
 SYSCTL_INT(_net_stats, OID_AUTO, debug, CTLFLAG_RW | CTLFLAG_LOCKED,
     &nstat_debug, 0, "");
 
+static int nstat_debug_pid = 0; // Only log socket level debug for specified pid
+SYSCTL_INT(_net_stats, OID_AUTO, debug_pid, CTLFLAG_RW | CTLFLAG_LOCKED,
+    &nstat_debug_pid, 0, "");
+
 static int nstat_sendspace = 2048;
 SYSCTL_INT(_net_stats, OID_AUTO, sendspace, CTLFLAG_RW | CTLFLAG_LOCKED,
     &nstat_sendspace, 0, "");
@@ -136,6 +141,17 @@ static u_int32_t net_api_stats_report_interval = NET_API_STATS_REPORT_INTERVAL;
 SYSCTL_UINT(_net_stats, OID_AUTO, api_report_interval,
     CTLFLAG_RW | CTLFLAG_LOCKED, &net_api_stats_report_interval, 0, "");
 #endif /* DEBUG || DEVELOPMENT */
+
+#define NSTAT_DEBUG_SOCKET_PID_MATCHED(so) \
+    (so && (nstat_debug_pid == (so->so_flags & SOF_DELEGATED ? so->e_pid : so->last_pid)))
+
+#define NSTAT_DEBUG_SOCKET_ON(so) \
+    ((nstat_debug && (!nstat_debug_pid || NSTAT_DEBUG_SOCKET_PID_MATCHED(so))) ? nstat_debug : 0)
+
+#define NSTAT_DEBUG_SOCKET_LOG(so, fmt, ...)                                                                    \
+    if (NSTAT_DEBUG_SOCKET_ON(so)) {                                                                            \
+	printf("NSTAT_DEBUG_SOCKET <pid %d>: " fmt "\n", (so->so_flags & SOF_DELEGATED ? so->e_pid : so->last_pid), ##__VA_ARGS__); \
+    }
 
 enum{
 	NSTAT_FLAG_CLEANUP              = (1 << 0),
@@ -189,6 +205,7 @@ typedef struct nstat_provider {
 	errno_t                 (*nstat_copy_descriptor)(nstat_provider_cookie_t cookie, void *data, size_t len);
 	void                    (*nstat_release)(nstat_provider_cookie_t cookie, boolean_t locked);
 	bool                    (*nstat_reporting_allowed)(nstat_provider_cookie_t cookie, nstat_provider_filter *filter);
+	size_t                  (*nstat_domain_info)(nstat_provider_cookie_t cookie, nstat_domain_info *domain_info);
 } nstat_provider;
 
 typedef STAILQ_HEAD(, nstat_src)        stailq_head_nstat_src;
@@ -241,7 +258,9 @@ static KALLOC_HEAP_DEFINE(KHEAP_NET_STAT, NET_STAT_CONTROL_NAME,
     KHEAP_ID_DEFAULT);
 static nstat_control_state      *nstat_controls = NULL;
 static uint64_t                  nstat_idle_time = 0;
-static decl_lck_mtx_data(, nstat_mtx);
+static LCK_GRP_DECLARE(nstat_lck_grp, "network statistics kctl");
+static LCK_MTX_DECLARE(nstat_mtx, &nstat_lck_grp);
+
 
 /* some extern definitions */
 extern void mbuf_report_peak_usage(void);
@@ -262,10 +281,12 @@ nstat_copy_sa_out(
 	    src->sa_len >= sizeof(struct sockaddr_in6)) {
 		struct sockaddr_in6     *sin6 = (struct sockaddr_in6*)(void *)dst;
 		if (IN6_IS_SCOPE_EMBED(&sin6->sin6_addr)) {
-			if (sin6->sin6_scope_id == 0) {
+			sin6->sin6_scope_id = ((const struct sockaddr_in6*)(const void*)(src))->sin6_scope_id;
+			if (in6_embedded_scope) {
+				in6_verify_ifscope(&sin6->sin6_addr, sin6->sin6_scope_id);
 				sin6->sin6_scope_id = ntohs(sin6->sin6_addr.s6_addr16[1]);
+				sin6->sin6_addr.s6_addr16[1] = 0;
 			}
-			sin6->sin6_addr.s6_addr16[1] = 0;
 		}
 	}
 }
@@ -329,20 +350,45 @@ nstat_ifnet_to_flags(
 	if (IFNET_IS_CONSTRAINED(ifp)) {
 		flags |= NSTAT_IFNET_IS_CONSTRAINED;
 	}
+	if (ifp->if_xflags & IFXF_LOW_LATENCY) {
+		flags |= NSTAT_IFNET_IS_WIFI;
+		flags |= NSTAT_IFNET_IS_LLW;
+	}
 
 	return flags;
 }
 
-static u_int16_t
+static u_int32_t
+extend_ifnet_flags(
+	u_int16_t condensed_flags)
+{
+	u_int32_t extended_flags = (u_int32_t)condensed_flags;
+
+	if ((extended_flags & NSTAT_IFNET_IS_WIFI) && ((extended_flags & (NSTAT_IFNET_IS_AWDL | NSTAT_IFNET_IS_LLW)) == 0)) {
+		extended_flags |= NSTAT_IFNET_IS_WIFI_INFRA;
+	}
+	return extended_flags;
+}
+
+static u_int32_t
+nstat_ifnet_to_flags_extended(
+	struct ifnet *ifp)
+{
+	u_int32_t flags = extend_ifnet_flags(nstat_ifnet_to_flags(ifp));
+
+	return flags;
+}
+
+static u_int32_t
 nstat_inpcb_to_flags(
 	const struct inpcb *inp)
 {
-	u_int16_t flags = 0;
+	u_int32_t flags = 0;
 
 	if (inp != NULL) {
 		if (inp->inp_last_outifp != NULL) {
 			struct ifnet *ifp = inp->inp_last_outifp;
-			flags = nstat_ifnet_to_flags(ifp);
+			flags = nstat_ifnet_to_flags_extended(ifp);
 
 			struct tcpcb  *tp = intotcpcb(inp);
 			if (tp) {
@@ -434,7 +480,7 @@ nstat_malloc_aligned(
 	if (length > (64 * 1024)) {
 		return NULL;
 	}
-	u_int8_t *buffer = kheap_alloc(KHEAP_NET_STAT, size, flags);
+	u_int8_t *buffer = (u_int8_t *)kalloc_data(size, flags);
 	if (buffer == NULL) {
 		return NULL;
 	}
@@ -454,7 +500,8 @@ nstat_free_aligned(
 	void            *buffer)
 {
 	struct align_header *hdr = (struct align_header*)(void *)((u_int8_t*)buffer - sizeof(*hdr));
-	(kheap_free)(KHEAP_NET_STAT, (char *)buffer - hdr->offset, hdr->length);
+	char *offset_buffer = (char *)buffer - hdr->offset;
+	kfree_data(offset_buffer, hdr->length);
 }
 
 #pragma mark -- Route Provider --
@@ -733,7 +780,7 @@ nstat_route_reporting_allowed(nstat_provider_cookie_t cookie, nstat_provider_fil
 		struct ifnet *ifp = rt->rt_ifp;
 
 		if (ifp) {
-			uint16_t interface_properties = nstat_ifnet_to_flags(ifp);
+			uint32_t interface_properties = nstat_ifnet_to_flags_extended(ifp);
 
 			if ((filter->npf_flags & interface_properties) == 0) {
 				retval = false;
@@ -989,7 +1036,7 @@ struct nstat_tucookie {
 		struct sockaddr_in6     v6;
 	} remote;
 	unsigned int    if_index;
-	uint16_t        ifnet_properties;
+	uint32_t        ifnet_properties;
 };
 
 static struct nstat_tucookie *
@@ -1000,18 +1047,15 @@ nstat_tucookie_alloc_internal(
 {
 	struct nstat_tucookie *cookie;
 
-	cookie = kheap_alloc(KHEAP_NET_STAT, sizeof(*cookie), Z_WAITOK);
-	if (cookie == NULL) {
-		return NULL;
-	}
+	cookie = kalloc_type(struct nstat_tucookie,
+	    Z_WAITOK | Z_ZERO | Z_NOFAIL);
 	if (!locked) {
 		LCK_MTX_ASSERT(&nstat_mtx, LCK_MTX_ASSERT_NOTOWNED);
 	}
 	if (ref && in_pcb_checkstate(inp, WNT_ACQUIRE, locked) == WNT_STOPUSING) {
-		kheap_free(KHEAP_NET_STAT, cookie, sizeof(*cookie));
+		kfree_type(struct nstat_tucookie, cookie);
 		return NULL;
 	}
-	bzero(cookie, sizeof(*cookie));
 	cookie->inp = inp;
 	proc_name(inp->inp_socket->last_pid, cookie->pname,
 	    sizeof(cookie->pname));
@@ -1056,7 +1100,7 @@ nstat_tucookie_release_internal(
 		OSDecrementAtomic(&cookie->inp->inp_nstat_refcnt);
 	}
 	in_pcb_checkstate(cookie->inp, WNT_RELEASE, inplock);
-	kheap_free(KHEAP_NET_STAT, cookie, sizeof(*cookie));
+	kfree_type(struct nstat_tucookie, cookie);
 }
 
 static void
@@ -1073,6 +1117,61 @@ nstat_tucookie_release_locked(
 	nstat_tucookie_release_internal(cookie, true);
 }
 
+
+static size_t
+nstat_generic_domain_info(nstat_provider_cookie_t cookie, nstat_domain_info *domain_info)
+{
+	struct nstat_tucookie *tucookie =  (struct nstat_tucookie *)cookie;
+	struct inpcb          *inp = tucookie->inp;
+	struct socket         *so = inp->inp_socket;
+
+	if (so == NULL) {
+		return 0;
+	}
+
+	NSTAT_DEBUG_SOCKET_LOG(so, "NSTAT: Collecting stats");
+
+	if (domain_info == NULL) {
+		return sizeof(nstat_domain_info);
+	}
+
+	bzero(domain_info, sizeof(*domain_info));
+
+	domain_info->is_tracker = !!(so->so_flags1 & SOF1_KNOWN_TRACKER);
+	domain_info->is_non_app_initiated = !!(so->so_flags1 & SOF1_TRACKER_NON_APP_INITIATED);
+	if (domain_info->is_tracker &&
+	    inp->inp_necp_attributes.inp_tracker_domain != NULL) {
+		strlcpy(domain_info->domain_name, inp->inp_necp_attributes.inp_tracker_domain,
+		    sizeof(domain_info->domain_name));
+	} else if (inp->inp_necp_attributes.inp_domain != NULL) {
+		strlcpy(domain_info->domain_name, inp->inp_necp_attributes.inp_domain,
+		    sizeof(domain_info->domain_name));
+	}
+	if (inp->inp_necp_attributes.inp_domain_owner != NULL) {
+		strlcpy(domain_info->domain_owner, inp->inp_necp_attributes.inp_domain_owner,
+		    sizeof(domain_info->domain_owner));
+	}
+	if (inp->inp_necp_attributes.inp_domain_context != NULL) {
+		strlcpy(domain_info->domain_tracker_ctxt, inp->inp_necp_attributes.inp_domain_context,
+		    sizeof(domain_info->domain_tracker_ctxt));
+	}
+
+	if (domain_info) {
+		NSTAT_DEBUG_SOCKET_LOG(so, "NSTAT: <pid %d> Collected stats - domain <%s> owner <%s> ctxt <%s> bundle id <%s> "
+		    "is_tracker %d is_non_app_initiated %d is_silent %d",
+		    so->so_flags & SOF_DELEGATED ? so->e_pid : so->last_pid,
+		    domain_info->domain_name,
+		    domain_info->domain_owner,
+		    domain_info->domain_tracker_ctxt,
+		    domain_info->domain_attributed_bundle_id,
+		    domain_info->is_tracker,
+		    domain_info->is_non_app_initiated,
+		    domain_info->is_silent);
+	}
+
+	/* XXX tracking context is not provided through kernel for socket flows */
+	return sizeof(nstat_domain_info);
+}
 
 static nstat_provider   nstat_tcp_provider;
 
@@ -1128,8 +1227,8 @@ nstat_tcpudp_lookup(
 		local.in6c = &param->local.v6.sin6_addr;
 		remote.in6c = &param->remote.v6.sin6_addr;
 
-		inp = in6_pcblookup_hash(inpinfo, remote.in6, param->remote.v6.sin6_port,
-		    local.in6, param->local.v6.sin6_port, 1, NULL);
+		inp = in6_pcblookup_hash(inpinfo, remote.in6, param->remote.v6.sin6_port, param->remote.v6.sin6_scope_id,
+		    local.in6, param->local.v6.sin6_port, param->local.v6.sin6_scope_id, 1, NULL);
 	}
 	break;
 
@@ -1254,7 +1353,7 @@ nstat_tcp_add_watcher(
 
 	errno_t result;
 
-	lck_rw_lock_shared(tcbinfo.ipi_lock);
+	lck_rw_lock_shared(&tcbinfo.ipi_lock);
 	result = nstat_set_provider_filter(state, req);
 	if (result == 0) {
 		OSIncrementAtomic(&nstat_tcp_watchers);
@@ -1276,7 +1375,7 @@ nstat_tcp_add_watcher(
 		}
 	}
 
-	lck_rw_done(tcbinfo.ipi_lock);
+	lck_rw_done(&tcbinfo.ipi_lock);
 
 	return result;
 }
@@ -1429,10 +1528,12 @@ nstat_pcb_cache(struct inpcb *inp)
 				if (inp->inp_vflag & INP_IPV6) {
 					in6_ip6_to_sockaddr(&inp->in6p_laddr,
 					    inp->inp_lport,
+					    inp->inp_lifscope,
 					    &tucookie->local.v6,
 					    sizeof(tucookie->local));
 					in6_ip6_to_sockaddr(&inp->in6p_faddr,
 					    inp->inp_fport,
+					    inp->inp_fifscope,
 					    &tucookie->remote.v6,
 					    sizeof(tucookie->remote));
 				} else if (inp->inp_vflag & INP_IPV4) {
@@ -1510,9 +1611,9 @@ nstat_tcp_copy_descriptor(
 	bzero(desc, sizeof(*desc));
 
 	if (inp->inp_vflag & INP_IPV6) {
-		in6_ip6_to_sockaddr(&inp->in6p_laddr, inp->inp_lport,
+		in6_ip6_to_sockaddr(&inp->in6p_laddr, inp->inp_lport, inp->inp_lifscope,
 		    &desc->local.v6, sizeof(desc->local));
-		in6_ip6_to_sockaddr(&inp->in6p_faddr, inp->inp_fport,
+		in6_ip6_to_sockaddr(&inp->in6p_faddr, inp->inp_fport, inp->inp_fifscope,
 		    &desc->remote.v6, sizeof(desc->remote));
 	} else if (inp->inp_vflag & INP_IPV4) {
 		nstat_ip_to_sockaddr(&inp->inp_laddr, inp->inp_lport,
@@ -1576,7 +1677,7 @@ nstat_tcp_copy_descriptor(
 	}
 
 	tcp_get_connectivity_status(tp, &desc->connstatus);
-	desc->ifnet_properties = nstat_inpcb_to_flags(inp);
+	desc->ifnet_properties = (uint16_t)nstat_inpcb_to_flags(inp);
 	inp_get_activity_bitmap(inp, &desc->activity_bitmap);
 	desc->start_timestamp = inp->inp_start_timestamp;
 	desc->timestamp = mach_continuous_time();
@@ -1594,7 +1695,7 @@ nstat_tcpudp_reporting_allowed(nstat_provider_cookie_t cookie, nstat_provider_fi
 
 		/* Only apply interface filter if at least one is allowed. */
 		if ((filter->npf_flags & NSTAT_FILTER_IFNET_FLAGS) != 0) {
-			uint16_t interface_properties = nstat_inpcb_to_flags(inp);
+			uint32_t interface_properties = nstat_inpcb_to_flags(inp);
 
 			if ((filter->npf_flags & interface_properties) == 0) {
 				// For UDP, we could have an undefined interface and yet transfers may have occurred.
@@ -1654,6 +1755,16 @@ nstat_tcp_reporting_allowed(nstat_provider_cookie_t cookie, nstat_provider_filte
 	return nstat_tcpudp_reporting_allowed(cookie, filter, FALSE);
 }
 
+static size_t
+nstat_tcp_domain_info(nstat_provider_cookie_t cookie, nstat_domain_info *domain_info)
+{
+	if (nstat_tcp_gone(cookie)) {
+		return 0;
+	}
+
+	return nstat_generic_domain_info(cookie, domain_info);
+}
+
 static void
 nstat_init_tcp_provider(void)
 {
@@ -1668,6 +1779,7 @@ nstat_init_tcp_provider(void)
 	nstat_tcp_provider.nstat_watcher_remove = nstat_tcp_remove_watcher;
 	nstat_tcp_provider.nstat_copy_descriptor = nstat_tcp_copy_descriptor;
 	nstat_tcp_provider.nstat_reporting_allowed = nstat_tcp_reporting_allowed;
+	nstat_tcp_provider.nstat_domain_info = nstat_tcp_domain_info;
 	nstat_tcp_provider.next = nstat_providers;
 	nstat_providers = &nstat_tcp_provider;
 }
@@ -1763,7 +1875,7 @@ nstat_udp_add_watcher(
 
 	errno_t result;
 
-	lck_rw_lock_shared(udbinfo.ipi_lock);
+	lck_rw_lock_shared(&udbinfo.ipi_lock);
 	result = nstat_set_provider_filter(state, req);
 
 	if (result == 0) {
@@ -1787,7 +1899,7 @@ nstat_udp_add_watcher(
 		}
 	}
 
-	lck_rw_done(udbinfo.ipi_lock);
+	lck_rw_done(&udbinfo.ipi_lock);
 
 	return result;
 }
@@ -1857,9 +1969,9 @@ nstat_udp_copy_descriptor(
 
 	if (tucookie->cached == false) {
 		if (inp->inp_vflag & INP_IPV6) {
-			in6_ip6_to_sockaddr(&inp->in6p_laddr, inp->inp_lport,
+			in6_ip6_to_sockaddr(&inp->in6p_laddr, inp->inp_lport, inp->inp_lifscope,
 			    &desc->local.v6, sizeof(desc->local.v6));
-			in6_ip6_to_sockaddr(&inp->in6p_faddr, inp->inp_fport,
+			in6_ip6_to_sockaddr(&inp->in6p_faddr, inp->inp_fport, inp->inp_fifscope,
 			    &desc->remote.v6, sizeof(desc->remote.v6));
 		} else if (inp->inp_vflag & INP_IPV4) {
 			nstat_ip_to_sockaddr(&inp->inp_laddr, inp->inp_lport,
@@ -1867,7 +1979,7 @@ nstat_udp_copy_descriptor(
 			nstat_ip_to_sockaddr(&inp->inp_faddr, inp->inp_fport,
 			    &desc->remote.v4, sizeof(desc->remote.v4));
 		}
-		desc->ifnet_properties = nstat_inpcb_to_flags(inp);
+		desc->ifnet_properties = (uint16_t)nstat_inpcb_to_flags(inp);
 	} else {
 		if (inp->inp_vflag & INP_IPV6) {
 			memcpy(&desc->local.v6, &tucookie->local.v6,
@@ -1933,6 +2045,16 @@ nstat_udp_reporting_allowed(nstat_provider_cookie_t cookie, nstat_provider_filte
 	return nstat_tcpudp_reporting_allowed(cookie, filter, TRUE);
 }
 
+static size_t
+nstat_udp_domain_info(nstat_provider_cookie_t cookie, nstat_domain_info *domain_info)
+{
+	if (nstat_udp_gone(cookie)) {
+		return 0;
+	}
+
+	return nstat_generic_domain_info(cookie, domain_info);
+}
+
 
 static void
 nstat_init_udp_provider(void)
@@ -1948,6 +2070,7 @@ nstat_init_udp_provider(void)
 	nstat_udp_provider.nstat_copy_descriptor = nstat_udp_copy_descriptor;
 	nstat_udp_provider.nstat_release = nstat_udp_release;
 	nstat_udp_provider.nstat_reporting_allowed = nstat_udp_reporting_allowed;
+	nstat_udp_provider.nstat_domain_info = nstat_udp_domain_info;
 	nstat_udp_provider.next = nstat_providers;
 	nstat_providers = &nstat_udp_provider;
 }
@@ -1990,14 +2113,15 @@ nstat_ifnet_lookup(
 			return result;
 		}
 	}
-	cookie = kheap_alloc(KHEAP_NET_STAT, sizeof(*cookie), Z_WAITOK | Z_ZERO);
-	if (cookie == NULL) {
-		return ENOMEM;
-	}
+	cookie = kalloc_type(struct nstat_ifnet_cookie,
+	    Z_WAITOK | Z_ZERO | Z_NOFAIL);
 
 	ifnet_head_lock_shared();
 	TAILQ_FOREACH(ifp, &ifnet_head, if_link)
 	{
+		if (!ifnet_is_attached(ifp, 1)) {
+			continue;
+		}
 		ifnet_lock_exclusive(ifp);
 		if (ifp->if_index == param->ifindex) {
 			cookie->ifp = ifp;
@@ -2010,9 +2134,11 @@ nstat_ifnet_lookup(
 			}
 			ifnet_lock_done(ifp);
 			ifnet_reference(ifp);
+			ifnet_decr_iorefcnt(ifp);
 			break;
 		}
 		ifnet_lock_done(ifp);
+		ifnet_decr_iorefcnt(ifp);
 	}
 	ifnet_head_done();
 
@@ -2038,7 +2164,7 @@ nstat_ifnet_lookup(
 		lck_mtx_unlock(&nstat_mtx);
 	}
 	if (cookie->ifp == NULL) {
-		kheap_free(KHEAP_NET_STAT, cookie, sizeof(*cookie));
+		kfree_type(struct nstat_ifnet_cookie, cookie);
 	}
 
 	return ifp ? 0 : EINVAL;
@@ -2144,7 +2270,7 @@ nstat_ifnet_release(
 		ifnet_decr_iorefcnt(ifp);
 	}
 	ifnet_release(ifp);
-	kheap_free(KHEAP_NET_STAT, ifcookie, sizeof(*ifcookie));
+	kfree_type(struct nstat_ifnet_cookie, ifcookie);
 }
 
 static void
@@ -2812,7 +2938,8 @@ nstat_sysinfo_send_data_internal(
 	countsize += sizeof(nstat_sysinfo_keyval) * nkeyvals;
 	allocsize += countsize;
 
-	syscnt = kheap_alloc(KHEAP_TEMP, allocsize, Z_WAITOK | Z_ZERO);
+	syscnt = (nstat_msg_sysinfo_counts *) kalloc_data(allocsize,
+	    Z_WAITOK | Z_ZERO);
 	if (syscnt == NULL) {
 		return;
 	}
@@ -3416,7 +3543,7 @@ nstat_sysinfo_send_data_internal(
 		if (result != 0) {
 			nstat_stats.nstat_sysinfofailures += 1;
 		}
-		kheap_free(KHEAP_TEMP, syscnt, allocsize);
+		kfree_data(syscnt, allocsize);
 	}
 	return;
 }
@@ -3566,7 +3693,6 @@ nstat_net_api_report_stats(void)
 #pragma mark -- Kernel Control Socket --
 
 static kern_ctl_ref     nstat_ctlref = NULL;
-static lck_grp_t        *nstat_lck_grp = NULL;
 
 static errno_t  nstat_control_connect(kern_ctl_ref kctl, struct sockaddr_ctl *sac, void **uinfo);
 static errno_t  nstat_control_disconnect(kern_ctl_ref kctl, u_int32_t unit, void *uinfo);
@@ -3807,14 +3933,6 @@ nstat_idle_check(
 static void
 nstat_control_register(void)
 {
-	// Create our lock group first
-	lck_grp_attr_t  *grp_attr = lck_grp_attr_alloc_init();
-	lck_grp_attr_setdefault(grp_attr);
-	nstat_lck_grp = lck_grp_alloc_init("network statistics kctl", grp_attr);
-	lck_grp_attr_free(grp_attr);
-
-	lck_mtx_init(&nstat_mtx, nstat_lck_grp, NULL);
-
 	// Register the control
 	struct kern_ctl_reg     nstat_control;
 	bzero(&nstat_control, sizeof(nstat_control));
@@ -3849,7 +3967,7 @@ nstat_control_cleanup_source(
 	}
 	// Cleanup the source if we found it.
 	src->provider->nstat_release(src->cookie, locked);
-	kheap_free(KHEAP_NET_STAT, src, sizeof(*src));
+	kfree_type(struct nstat_src, src);
 }
 
 
@@ -3873,13 +3991,13 @@ nstat_control_connect(
 	struct sockaddr_ctl *sac,
 	void                **uinfo)
 {
-	nstat_control_state *state = kheap_alloc(KHEAP_NET_STAT,
-	    sizeof(*state), Z_WAITOK | Z_ZERO);
+	nstat_control_state *state = kalloc_type(nstat_control_state,
+	    Z_WAITOK | Z_ZERO);
 	if (state == NULL) {
 		return ENOMEM;
 	}
 
-	lck_mtx_init(&state->ncs_mtx, nstat_lck_grp, NULL);
+	lck_mtx_init(&state->ncs_mtx, &nstat_lck_grp, NULL);
 	state->ncs_kctl = kctl;
 	state->ncs_unit = sac->sc_unit;
 	state->ncs_flags = NSTAT_FLAG_REQCOUNTS;
@@ -3952,8 +4070,8 @@ nstat_control_disconnect(
 		nstat_control_cleanup_source(NULL, src, FALSE);
 	}
 
-	lck_mtx_destroy(&state->ncs_mtx, nstat_lck_grp);
-	kheap_free(KHEAP_NET_STAT, state, sizeof(*state));
+	lck_mtx_destroy(&state->ncs_mtx, &nstat_lck_grp);
+	kfree_type(struct nstat_control_state, state);
 
 	return 0;
 }
@@ -4125,6 +4243,22 @@ nstat_control_append_description(
 	return nstat_accumulate_msg(state, &desc->hdr, size);
 }
 
+static boolean_t
+nstat_is_domain_info_allowed(
+	nstat_control_state *state,
+	nstat_src           *src)
+{
+	VERIFY(state != NULL & src != NULL);
+	nstat_provider_id_t provider_id = src->provider->nstat_provider_id;
+
+	if (state->ncs_provider_filters[provider_id].npf_flags &
+	    NSTAT_FILTER_DOMAIN_INFO) {
+		return TRUE;
+	}
+
+	return FALSE;
+}
+
 static int
 nstat_control_send_update(
 	nstat_control_state *state,
@@ -4146,8 +4280,23 @@ nstat_control_send_update(
 	unsigned int    one = 1;
 	size_t          size = offsetof(nstat_msg_src_update, data) +
 	    src->provider->nstat_descriptor_length;
+	size_t          domain_info_size = 0;
+
+	if (nstat_is_domain_info_allowed(state, src) &&
+	    src->provider->nstat_domain_info != NULL) {
+		domain_info_size = src->provider->nstat_domain_info(src->cookie, NULL);
+		if (domain_info_size != 0) {
+			size += domain_info_size;
+			size += sizeof(nstat_msg_src_extended_item_hdr);
+		}
+	}
 	assert(size <= MAX_NSTAT_MSG_HDR_LENGTH);
 
+	/*
+	 * XXX Would be interesting to see how extended updates affect mbuf
+	 * allocations, given the max segments defined as 1, one may get
+	 * allocations with higher fragmentation.
+	 */
 	if (mbuf_allocpacket(MBUF_DONTWAIT, size, &one, &msg) != 0) {
 		return ENOMEM;
 	}
@@ -4155,13 +4304,21 @@ nstat_control_send_update(
 	nstat_msg_src_update *desc = (nstat_msg_src_update*)mbuf_data(msg);
 	bzero(desc, size);
 	desc->hdr.context = context;
-	desc->hdr.type = NSTAT_MSG_TYPE_SRC_UPDATE;
+	desc->hdr.type = (domain_info_size == 0) ? NSTAT_MSG_TYPE_SRC_UPDATE :
+	    NSTAT_MSG_TYPE_SRC_EXTENDED_UPDATE;
 	desc->hdr.length = (u_int16_t)size;
 	desc->hdr.flags = hdr_flags;
 	desc->srcref = src->srcref;
 	desc->event_flags = event;
 	desc->provider = src->provider->nstat_provider_id;
 
+	/*
+	 * XXX The following two lines are only valid when max-segments is passed
+	 * as one.
+	 * Other computations with offset also depend on that being true.
+	 * Be aware of that before making any modifications that changes that
+	 * behavior.
+	 */
 	mbuf_setlen(msg, size);
 	mbuf_pkthdr_setlen(msg, mbuf_len(msg));
 
@@ -4174,6 +4331,16 @@ nstat_control_send_update(
 			mbuf_freem(msg);
 			return result;
 		}
+	}
+
+
+	if (domain_info_size != 0) {
+		nstat_msg_src_extended_item_hdr *p_extension_hdr = (nstat_msg_src_extended_item_hdr *)(void *)((char *)mbuf_data(msg) +
+		    sizeof(nstat_msg_src_update_hdr) + src->provider->nstat_descriptor_length);
+		nstat_domain_info *p_domain_info = (nstat_domain_info *)(void *)(p_extension_hdr + 1);;
+
+		p_extension_hdr->type = NSTAT_EXTENDED_UPDATE_TYPE_DOMAIN;
+		p_extension_hdr->length = src->provider->nstat_domain_info(src->cookie, p_domain_info);
 	}
 
 	if (src->provider->nstat_counts) {
@@ -4203,9 +4370,32 @@ nstat_control_append_update(
 	int                 *gone)
 {
 	size_t  size = offsetof(nstat_msg_src_update, data) + src->provider->nstat_descriptor_length;
-	if (size > 512 || ((src->provider->nstat_descriptor_length == 0 ||
+	size_t  domain_info_size = 0;
+
+	if ((src->provider->nstat_descriptor_length == 0 ||
 	    src->provider->nstat_copy_descriptor == NULL) &&
-	    src->provider->nstat_counts == NULL)) {
+	    src->provider->nstat_counts == NULL) {
+		return EOPNOTSUPP;
+	}
+
+	if (nstat_is_domain_info_allowed(state, src) &&
+	    src->provider->nstat_domain_info != NULL) {
+		domain_info_size = src->provider->nstat_domain_info(src->cookie, NULL);
+		if (domain_info_size != 0) {
+			size += domain_info_size;
+			size += sizeof(nstat_msg_src_extended_item_hdr);
+		}
+	}
+
+	/*
+	 * This kind of limits extensions.
+	 * The optimization is around being able to deliver multiple
+	 * of updates bundled together.
+	 * Increasing the size runs the risk of too much stack usage.
+	 * One could potentially changed the allocation below to be on heap.
+	 * For now limiting it to half of NSTAT_MAX_MSG_SIZE.
+	 */
+	if (size > (NSTAT_MAX_MSG_SIZE >> 1)) {
 		return EOPNOTSUPP;
 	}
 
@@ -4214,7 +4404,8 @@ nstat_control_append_update(
 	bzero(buffer, size);
 
 	nstat_msg_src_update    *desc = (nstat_msg_src_update*)buffer;
-	desc->hdr.type = NSTAT_MSG_TYPE_SRC_UPDATE;
+	desc->hdr.type = (domain_info_size == 0) ? NSTAT_MSG_TYPE_SRC_UPDATE :
+	    NSTAT_MSG_TYPE_SRC_EXTENDED_UPDATE;
 	desc->hdr.length = (u_int16_t)size;
 	desc->srcref = src->srcref;
 	desc->event_flags = 0;
@@ -4233,6 +4424,15 @@ nstat_control_append_update(
 			}
 			return result;
 		}
+	}
+
+	if (domain_info_size != 0) {
+		nstat_msg_src_extended_item_hdr *p_extension_hdr = (nstat_msg_src_extended_item_hdr *)(void *)((char *)buffer +
+		    sizeof(nstat_msg_src_update_hdr) + src->provider->nstat_descriptor_length);
+		nstat_domain_info *p_domain_info = (nstat_domain_info *)(void *)(p_extension_hdr + 1);
+
+		p_extension_hdr->type = NSTAT_EXTENDED_UPDATE_TYPE_DOMAIN;
+		p_extension_hdr->length = src->provider->nstat_domain_info(src->cookie, p_domain_info);
 	}
 
 	if (src->provider->nstat_counts) {
@@ -4299,7 +4499,7 @@ nstat_control_handle_add_request(
 	nstat_msg_add_src_req   *req = mbuf_data(m);
 	if (mbuf_pkthdr_len(m) > mbuf_len(m)) {
 		// parameter is too large, we need to make a contiguous copy
-		void *data = kheap_alloc(KHEAP_TEMP, paramlength, Z_WAITOK);
+		void *data = (void *) kalloc_data(paramlength, Z_WAITOK);
 
 		if (!data) {
 			return ENOMEM;
@@ -4308,7 +4508,7 @@ nstat_control_handle_add_request(
 		if (result == 0) {
 			result = nstat_lookup_entry(req->provider, data, paramlength, &provider, &cookie);
 		}
-		kheap_free(KHEAP_TEMP, data, paramlength);
+		kfree_data(data, paramlength);
 	} else {
 		result = nstat_lookup_entry(req->provider, (void*)&req->param, paramlength, &provider, &cookie);
 	}
@@ -4445,7 +4645,7 @@ nstat_control_source_add(
 	}
 
 	// Allocate storage for the source
-	nstat_src *src = kheap_alloc(KHEAP_NET_STAT, sizeof(*src), Z_WAITOK);
+	nstat_src *src = kalloc_type(struct nstat_src, Z_WAITOK);
 	if (src == NULL) {
 		if (msg) {
 			mbuf_freem(msg);
@@ -4463,7 +4663,7 @@ nstat_control_source_add(
 
 	if (state->ncs_flags & NSTAT_FLAG_CLEANUP || src->srcref == NSTAT_SRC_REF_INVALID) {
 		lck_mtx_unlock(&state->ncs_mtx);
-		kheap_free(KHEAP_NET_STAT, src, sizeof(*src));
+		kfree_type(struct nstat_src, src);
 		if (msg) {
 			mbuf_freem(msg);
 		}
@@ -4481,7 +4681,7 @@ nstat_control_source_add(
 		if (result != 0) {
 			nstat_stats.nstat_srcaddedfailures += 1;
 			lck_mtx_unlock(&state->ncs_mtx);
-			kheap_free(KHEAP_NET_STAT, src, sizeof(*src));
+			kfree_type(struct nstat_src, src);
 			mbuf_freem(msg);
 			return result;
 		}
@@ -5082,8 +5282,27 @@ nstat_control_send(
 }
 
 
+/* Performs interface matching based on NSTAT_IFNET_IS… filter flags provided by an external caller */
+static bool
+nstat_interface_matches_filter_flag(uint32_t filter_flags, struct ifnet *ifp)
+{
+	bool result = false;
+
+	if (ifp) {
+		uint32_t flag_mask = (NSTAT_FILTER_IFNET_FLAGS & ~(NSTAT_IFNET_IS_NON_LOCAL | NSTAT_IFNET_IS_LOCAL));
+		filter_flags &= flag_mask;
+
+		uint32_t flags = nstat_ifnet_to_flags_extended(ifp);
+		if (filter_flags & flags) {
+			result = true;
+		}
+	}
+	return result;
+}
+
+
 static int
-tcp_progress_indicators_for_interface(unsigned int ifindex, uint64_t recentflow_maxduration, uint16_t filter_flags, struct xtcpprogress_indicators *indicators)
+tcp_progress_indicators_for_interface(unsigned int ifindex, uint64_t recentflow_maxduration, uint32_t filter_flags, struct xtcpprogress_indicators *indicators)
 {
 	int error = 0;
 	struct inpcb *inp;
@@ -5092,20 +5311,40 @@ tcp_progress_indicators_for_interface(unsigned int ifindex, uint64_t recentflow_
 	min_recent_start_time = mach_continuous_time() - recentflow_maxduration;
 	bzero(indicators, sizeof(*indicators));
 
-	lck_rw_lock_shared(tcbinfo.ipi_lock);
+#if NSTAT_DEBUG
+	/* interface index -1 may be passed in to only match against the filters specified in the flags */
+	if (ifindex < UINT_MAX) {
+		printf("%s - for interface index %u with flags %x\n", __func__, ifindex, filter_flags);
+	} else {
+		printf("%s - for matching interface with flags %x\n", __func__, filter_flags);
+	}
+#endif
+
+	lck_rw_lock_shared(&tcbinfo.ipi_lock);
 	/*
 	 * For progress indicators we don't need to special case TCP to collect time wait connections
 	 */
 	LIST_FOREACH(inp, tcbinfo.ipi_listhead, inp_list)
 	{
 		struct tcpcb  *tp = intotcpcb(inp);
-		if (tp && inp->inp_last_outifp &&
-		    inp->inp_last_outifp->if_index == ifindex &&
+		/* radar://57100452
+		 * The conditional logic implemented below performs an *inclusive* match based on the desired interface index in addition to any filter values.
+		 * While the general expectation is that only one criteria normally is used for queries, the capability exists satisfy any eccentric future needs.
+		 */
+		if (tp &&
 		    inp->inp_state != INPCB_STATE_DEAD &&
-		    ((filter_flags == 0) ||
+		    inp->inp_last_outifp &&
+		    /* matches the given interface index, or against any provided filter flags */
+		    (((inp->inp_last_outifp->if_index == ifindex) ||
+		    nstat_interface_matches_filter_flag(filter_flags, inp->inp_last_outifp)) &&
+		    /* perform flow state matching based any provided filter flags */
+		    (((filter_flags & (NSTAT_IFNET_IS_NON_LOCAL | NSTAT_IFNET_IS_LOCAL)) == 0) ||
 		    ((filter_flags & NSTAT_IFNET_IS_NON_LOCAL) && !(tp->t_flags & TF_LOCAL)) ||
-		    ((filter_flags & NSTAT_IFNET_IS_LOCAL) && (tp->t_flags & TF_LOCAL)))) {
+		    ((filter_flags & NSTAT_IFNET_IS_LOCAL) && (tp->t_flags & TF_LOCAL))))) {
 			struct tcp_conn_status connstatus;
+#if NSTAT_DEBUG
+			printf("%s - *matched non-Skywalk* [filter match: %d]\n", __func__, nstat_interface_matches_filter_flag(filter_flags, inp->inp_last_outifp));
+#endif
 			indicators->xp_numflows++;
 			tcp_get_connectivity_status(tp, &connstatus);
 			if (connstatus.write_probe_failed) {
@@ -5135,7 +5374,37 @@ tcp_progress_indicators_for_interface(unsigned int ifindex, uint64_t recentflow_
 			}
 		}
 	}
-	lck_rw_done(tcbinfo.ipi_lock);
+	lck_rw_done(&tcbinfo.ipi_lock);
+
+	return error;
+}
+
+
+static int
+tcp_progress_probe_enable_for_interface(unsigned int ifindex, uint32_t filter_flags, uint32_t enable_flags)
+{
+	int error = 0;
+	struct ifnet *ifp;
+
+#if NSTAT_DEBUG
+	printf("%s - for interface index %u with flags %d\n", __func__, ifindex, filter_flags);
+#endif
+
+	ifnet_head_lock_shared();
+	TAILQ_FOREACH(ifp, &ifnet_head, if_link)
+	{
+		if ((ifp->if_index == ifindex) ||
+		    nstat_interface_matches_filter_flag(filter_flags, ifp)) {
+#if NSTAT_DEBUG
+			printf("%s - *matched* interface index %d, enable: %d\n", __func__, ifp->if_index, enable_flags);
+#endif
+			error = if_probe_connectivity(ifp, enable_flags);
+			if (error) {
+				printf("%s (%d) - nstat set tcp probe %d for interface index %d\n", __func__, error, enable_flags, ifp->if_index);
+			}
+		}
+	}
+	ifnet_head_done();
 
 	return error;
 }
@@ -5161,7 +5430,7 @@ ntstat_tcp_progress_indicators(struct sysctl_req *req)
 	if (error != 0) {
 		return error;
 	}
-	error = tcp_progress_indicators_for_interface((unsigned int)requested.ifindex, requested.recentflow_maxduration, (uint16_t)requested.filter_flags, &indicators);
+	error = tcp_progress_indicators_for_interface((unsigned int)requested.ifindex, requested.recentflow_maxduration, (uint32_t)requested.filter_flags, &indicators);
 	if (error != 0) {
 		return error;
 	}
@@ -5171,5 +5440,28 @@ ntstat_tcp_progress_indicators(struct sysctl_req *req)
 }
 
 
+__private_extern__ int
+ntstat_tcp_progress_enable(struct sysctl_req *req)
+{
+	int error = 0;
+	struct tcpprobereq requested;
+
+	if (priv_check_cred(kauth_cred_get(), PRIV_NET_PRIVILEGED_NETWORK_STATISTICS, 0) != 0) {
+		return EACCES;
+	}
+	if (req->newptr == USER_ADDR_NULL) {
+		return EINVAL;
+	}
+	if (req->newlen < sizeof(req)) {
+		return EINVAL;
+	}
+	error = SYSCTL_IN(req, &requested, sizeof(requested));
+	if (error != 0) {
+		return error;
+	}
+	error = tcp_progress_probe_enable_for_interface((unsigned int)requested.ifindex, (uint32_t)requested.filter_flags, (uint32_t)requested.enable);
+
+	return error;
+}
 
 

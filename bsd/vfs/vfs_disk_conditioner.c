@@ -218,7 +218,7 @@ disk_conditioner_set_info(mount_t mp, disk_conditioner_info *uinfo)
 	disk_conditioner_info *info;
 	struct saved_mount_fields *mnt_fields;
 
-	if (!kauth_cred_issuser(kauth_cred_get()) || !IOTaskHasEntitlement(current_task(), DISK_CONDITIONER_SET_ENTITLEMENT)) {
+	if (!kauth_cred_issuser(kauth_cred_get()) || !IOCurrentTaskHasEntitlement(DISK_CONDITIONER_SET_ENTITLEMENT)) {
 		return EPERM;
 	}
 
@@ -230,8 +230,8 @@ disk_conditioner_set_info(mount_t mp, disk_conditioner_info *uinfo)
 
 	internal_info = mp->mnt_disk_conditioner_info;
 	if (!internal_info) {
-		internal_info = kalloc(sizeof(struct _disk_conditioner_info_t));
-		bzero(internal_info, sizeof(struct _disk_conditioner_info_t));
+		internal_info = kalloc_type(struct _disk_conditioner_info_t,
+		    Z_WAITOK | Z_ZERO);
 		mp->mnt_disk_conditioner_info = internal_info;
 		mnt_fields = &(internal_info->mnt_fields);
 
@@ -303,7 +303,7 @@ disk_conditioner_unmount(mount_t mp)
 		disk_conditioner_restore_mount_fields(mp, &(internal_info->mnt_fields));
 	}
 	mp->mnt_disk_conditioner_info = NULL;
-	kfree(internal_info, sizeof(struct _disk_conditioner_info_t));
+	kfree_type(struct _disk_conditioner_info_t, internal_info);
 }
 
 boolean_t

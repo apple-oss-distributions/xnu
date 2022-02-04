@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1999-2020 Apple Inc. All rights reserved.
+ * Copyright (c) 1999-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -329,7 +329,7 @@ extern int dlil_post_complete_msg(struct ifnet *, struct kev_msg *);
 
 extern int dlil_alloc_local_stats(struct ifnet *);
 
-extern void ifnet_filter_update_tso(boolean_t filter_enable);
+extern void ifnet_filter_update_tso(struct ifnet *, boolean_t filter_enable);
 extern errno_t dlil_rxpoll_validate_params(struct ifnet_poll_params *);
 extern void dlil_rxpoll_update_params(struct ifnet *,
     struct ifnet_poll_params *);
@@ -378,6 +378,7 @@ extern errno_t dlil_output_handler(struct ifnet *, struct mbuf *);
 extern errno_t dlil_input_handler(struct ifnet *, struct mbuf *,
     struct mbuf *, const struct ifnet_stat_increment_param *,
     boolean_t, struct thread *);
+extern void dlil_ifclassq_setup(struct ifnet *, struct ifclassq *);
 
 
 /*

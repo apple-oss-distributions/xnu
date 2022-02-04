@@ -38,11 +38,7 @@ struct vnode;
 
 extern ipc_port_t convert_suid_cred_to_port(suid_cred_t);
 
-extern void suid_cred_notify(mach_msg_header_t *msg);
-
 extern int suid_cred_verify(ipc_port_t port, struct vnode *vnode, uint32_t *uid);
-
-extern void suid_cred_destroy(ipc_port_t port);
 
 #endif /* XNU_KERNEL_PRIVATE */
 

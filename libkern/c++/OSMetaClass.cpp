@@ -580,8 +580,7 @@ OSMetaClass::OSMetaClass(
 	classSize = inClassSize;
 	superClassLink = inSuperClass;
 
-	reserved = IONew(ExpansionData, 1);
-	bzero(reserved, sizeof(ExpansionData));
+	reserved = IOMallocType(ExpansionData);
 #if IOTRACKING
 	uint32_t numSiteQs = 0;
 	if ((this == &OSSymbol    ::gMetaClass)
@@ -618,21 +617,22 @@ OSMetaClass::OSMetaClass(
 		// Grow stalled array if neccessary
 		if (sStalled->count >= sStalled->capacity) {
 			OSMetaClass **oldStalled = sStalled->classes;
-			int oldSize = sStalled->capacity * sizeof(OSMetaClass *);
-			int newSize = oldSize
-			    + kKModCapacityIncrement * sizeof(OSMetaClass *);
+			int oldCount = sStalled->capacity;
+			int newCount = oldCount + kKModCapacityIncrement;
 
-			sStalled->classes = (OSMetaClass **)kalloc_tag(newSize, VM_KERN_MEMORY_OSKEXT);
+			sStalled->classes = kalloc_type_tag(OSMetaClass *, newCount,
+			    Z_WAITOK_ZERO, VM_KERN_MEMORY_OSKEXT);
 			if (!sStalled->classes) {
 				sStalled->classes = oldStalled;
 				sStalled->result = kOSMetaClassNoTempData;
 				return;
 			}
 
-			sStalled->capacity += kKModCapacityIncrement;
-			memmove(sStalled->classes, oldStalled, oldSize);
-			kfree(oldStalled, oldSize);
-			OSMETA_ACCUMSIZE(((size_t)newSize) - ((size_t)oldSize));
+			sStalled->capacity = newCount;
+			memmove(sStalled->classes, oldStalled,
+			    sizeof(OSMetaClass *) * oldCount);
+			kfree_type(OSMetaClass *, oldCount, oldStalled);
+			OSMETA_ACCUMSIZE(sizeof(OSMetaClass *) * (newCount - oldCount));
 		}
 
 		sStalled->classes[sStalled->count++] = this;
@@ -713,7 +713,7 @@ OSMetaClass::~OSMetaClass()
 #if IOTRACKING
 	IOTrackingQueueFree(reserved->tracking);
 #endif
-	IODelete(reserved, ExpansionData, 1);
+	IOFreeType(reserved, ExpansionData);
 }
 
 /*********************************************************************
@@ -782,23 +782,21 @@ OSMetaClass::preModLoad(const char * kextIdentifier)
 	IOLockLock(sStalledClassesLock);
 
 	assert(sStalled == NULL);
-	sStalled = (StalledData *)kalloc_tag(sizeof(*sStalled), VM_KERN_MEMORY_OSKEXT);
-	if (sStalled) {
-		sStalled->classes = (OSMetaClass **)
-		    kalloc_tag(kKModCapacityIncrement * sizeof(OSMetaClass *), VM_KERN_MEMORY_OSKEXT);
-		if (!sStalled->classes) {
-			kfree(sStalled, sizeof(*sStalled));
-			return NULL;
-		}
-		OSMETA_ACCUMSIZE((kKModCapacityIncrement * sizeof(OSMetaClass *)) +
-		    sizeof(*sStalled));
+	sStalled = kalloc_type(StalledData, Z_WAITOK_ZERO_NOFAIL);
 
-		sStalled->result   = kOSReturnSuccess;
-		sStalled->capacity = kKModCapacityIncrement;
-		sStalled->count    = 0;
-		sStalled->kextIdentifier = kextIdentifier;
-		bzero(sStalled->classes, kKModCapacityIncrement * sizeof(OSMetaClass *));
+	sStalled->classes = kalloc_type_tag(OSMetaClass *,
+	    kKModCapacityIncrement, Z_WAITOK_ZERO, VM_KERN_MEMORY_OSKEXT);
+	if (!sStalled->classes) {
+		kfree_type(StalledData, sStalled);
+		return NULL;
 	}
+	OSMETA_ACCUMSIZE((kKModCapacityIncrement * sizeof(OSMetaClass *)) +
+	    sizeof(*sStalled));
+
+	sStalled->result   = kOSReturnSuccess;
+	sStalled->capacity = kKModCapacityIncrement;
+	sStalled->count    = 0;
+	sStalled->kextIdentifier = kextIdentifier;
 
 	// keep sStalledClassesLock locked until postModLoad
 
@@ -970,8 +968,8 @@ finish:
 	if (sStalled) {
 	        OSMETA_ACCUMSIZE(-(sStalled->capacity * sizeof(OSMetaClass *) +
 	            sizeof(*sStalled)));
-	        kfree(sStalled->classes, sStalled->capacity * sizeof(OSMetaClass *));
-	        kfree(sStalled, sizeof(*sStalled));
+	        kfree_type(OSMetaClass *, sStalled->capacity, sStalled->classes);
+	        kfree_type(StalledData, sStalled);
 	        sStalled = NULL;
 	}
 
@@ -1107,8 +1105,8 @@ OSMetaClass::applyToInstances(OSOrderedSet * set,
 
         maxDepth = sDeepestClass;
         if (maxDepth > kLocalDepth) {
-                nextIndex = IONew(typeof(nextIndex[0]), maxDepth);
-                sets      = IONew(typeof(sets[0]), maxDepth);
+                nextIndex = IONewData(typeof(nextIndex[0]), maxDepth);
+                sets      = IONewData(typeof(sets[0]), maxDepth);
 	}
         done = false;
         level = 0;
@@ -1139,8 +1137,8 @@ OSMetaClass::applyToInstances(OSOrderedSet * set,
 		}
 	}while (!done);
         if (maxDepth > kLocalDepth) {
-                IODelete(nextIndex, typeof(nextIndex[0]), maxDepth);
-                IODelete(sets, typeof(sets[0]), maxDepth);
+                IODeleteData(nextIndex, typeof(nextIndex[0]), maxDepth);
+                IODeleteData(sets, typeof(sets[0]), maxDepth);
 	}
 }
 
@@ -1480,7 +1478,7 @@ OSMetaClass::printInstanceCounts()
 OSDictionary *
 OSMetaClass::getClassDictionary()
 {
-        panic("OSMetaClass::getClassDictionary() is obsoleted.\n");
+        panic("OSMetaClass::getClassDictionary() is obsoleted.");
         return NULL;
 }
 
@@ -1489,7 +1487,7 @@ OSMetaClass::getClassDictionary()
 bool
 OSMetaClass::serialize(__unused OSSerialize * s) const
 {
-        panic("OSMetaClass::serialize(): Obsoleted\n");
+        panic("OSMetaClass::serialize(): Obsoleted");
         return false;
 }
 

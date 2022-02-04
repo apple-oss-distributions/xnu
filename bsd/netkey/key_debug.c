@@ -84,7 +84,7 @@ struct sadb_msg *base;
 
 	/* sanity check */
 	if (base == NULL) {
-		panic("kdebug_sadb: NULL pointer was passed.\n");
+		panic("kdebug_sadb: NULL pointer was passed.");
 	}
 
 	printf("sadb_msg{ version=%u type=%u errno=%u satype=%u\n",
@@ -180,7 +180,7 @@ struct sadb_ext *ext;
 
 	/* sanity check */
 	if (ext == NULL) {
-		panic("kdebug_sadb_prop: NULL pointer was passed.\n");
+		panic("kdebug_sadb_prop: NULL pointer was passed.");
 	}
 
 	len = (PFKEY_UNUNIT64(prop->sadb_prop_len) - sizeof(*prop))
@@ -230,7 +230,7 @@ struct sadb_ext *ext;
 
 	/* sanity check */
 	if (ext == NULL) {
-		panic("kdebug_sadb_identity: NULL pointer was passed.\n");
+		panic("kdebug_sadb_identity: NULL pointer was passed.");
 	}
 
 	len = PFKEY_UNUNIT64(id->sadb_ident_len) - sizeof(*id);
@@ -276,7 +276,7 @@ struct sadb_ext *ext;
 
 	/* sanity check */
 	if (ext == NULL) {
-		panic("kdebug_sadb_supported: NULL pointer was passed.\n");
+		panic("kdebug_sadb_supported: NULL pointer was passed.");
 	}
 
 	len = (PFKEY_UNUNIT64(sup->sadb_supported_len) - sizeof(*sup))
@@ -323,7 +323,7 @@ struct sadb_ext *ext;
 
 	/* sanity check */
 	if (ext == NULL) {
-		panic("kdebug_sadb_sa: NULL pointer was passed.\n");
+		panic("kdebug_sadb_sa: NULL pointer was passed.");
 	}
 
 	printf("sadb_sa{ spi=%u replay=%u state=%u\n",
@@ -343,7 +343,7 @@ struct sadb_ext *ext;
 
 	/* sanity check */
 	if (ext == NULL) {
-		panic("kdebug_sadb_address: NULL pointer was passed.\n");
+		panic("kdebug_sadb_address: NULL pointer was passed.");
 	}
 
 	printf("sadb_address{ proto=%u prefixlen=%u reserved=0x%02x%02x }\n",
@@ -364,7 +364,7 @@ struct sadb_ext *ext;
 
 	/* sanity check */
 	if (ext == NULL) {
-		panic("kdebug_sadb_key: NULL pointer was passed.\n");
+		panic("kdebug_sadb_key: NULL pointer was passed.");
 	}
 
 	printf("sadb_key{ bits=%u reserved=%u\n",
@@ -393,7 +393,7 @@ struct sadb_ext *ext;
 
 	/* sanity check */
 	if (ext == NULL) {
-		panic("kdebug_sadb_x_sa2: NULL pointer was passed.\n");
+		panic("kdebug_sadb_x_sa2: NULL pointer was passed.");
 	}
 
 	printf("sadb_x_sa2{ mode=%u reqid=%u\n",
@@ -413,7 +413,7 @@ struct sadb_ext *ext;
 
 	/* sanity check */
 	if (ext == NULL) {
-		panic("kdebug_sadb_session_id: NULL pointer was passed.\n");
+		panic("kdebug_sadb_session_id: NULL pointer was passed.");
 	}
 
 	printf("sadb_session_id{ id0=%llx, id1=%llx}\n",
@@ -433,7 +433,7 @@ struct sadb_ext *ext;
 
 	/* sanity check */
 	if (ext == NULL) {
-		panic("kdebug_sadb_sastat: NULL pointer was passed.\n");
+		panic("kdebug_sadb_sastat: NULL pointer was passed.");
 	}
 
 	printf("sadb_sastat{ dir=%u num=%u\n",
@@ -457,7 +457,7 @@ struct sadb_ext *ext;
 
 	/* sanity check */
 	if (ext == NULL) {
-		panic("kdebug_sadb_x_policy: NULL pointer was passed.\n");
+		panic("kdebug_sadb_x_policy: NULL pointer was passed.");
 	}
 
 	printf("sadb_x_policy{ type=%u dir=%u id=%x }\n",
@@ -507,7 +507,7 @@ struct sadb_ext *ext;
 		}
 
 		if (tlen != 0) {
-			panic("kdebug_sadb_x_policy: wrong policy struct.\n");
+			panic("kdebug_sadb_x_policy: wrong policy struct.");
 		}
 	}
 
@@ -522,7 +522,7 @@ struct secpolicy *sp;
 {
 	/* sanity check */
 	if (sp == NULL) {
-		panic("kdebug_secpolicy: NULL pointer was passed.\n");
+		panic("kdebug_secpolicy: NULL pointer was passed.");
 	}
 
 	printf("secpolicy{ refcnt=%u state=%u policy=%u\n",
@@ -569,7 +569,7 @@ struct secpolicyindex *spidx;
 {
 	/* sanity check */
 	if (spidx == NULL) {
-		panic("kdebug_secpolicyindex: NULL pointer was passed.\n");
+		panic("kdebug_secpolicyindex: NULL pointer was passed.");
 	}
 
 	printf("secpolicyindex{ dir=%u prefs=%u prefd=%u ul_proto=%u internal_if=%s\n",
@@ -592,7 +592,7 @@ struct secasindex *saidx;
 {
 	/* sanity check */
 	if (saidx == NULL) {
-		panic("kdebug_secpolicyindex: NULL pointer was passed.\n");
+		panic("kdebug_secpolicyindex: NULL pointer was passed.");
 	}
 
 	printf("secasindex{ mode=%u proto=%u\n",
@@ -614,7 +614,7 @@ struct secasvar *sav;
 {
 	/* sanity check */
 	if (sav == NULL) {
-		panic("kdebug_secasv: NULL pointer was passed.\n");
+		panic("kdebug_secasv: NULL pointer was passed.");
 	}
 
 	printf("secas{");
@@ -666,7 +666,7 @@ struct secreplay *rpl;
 
 	/* sanity check */
 	if (rpl == NULL) {
-		panic("kdebug_secreplay: NULL pointer was passed.\n");
+		panic("kdebug_secreplay: NULL pointer was passed.");
 	}
 
 	printf(" secreplay{ count=%u wsize=%zu seq=%u lastseq=%u",
@@ -760,7 +760,7 @@ struct sockaddr *addr;
 
 	/* sanity check */
 	if (addr == NULL) {
-		panic("kdebug_sockaddr: NULL pointer was passed.\n");
+		panic("kdebug_sockaddr: NULL pointer was passed.");
 	}
 
 	/* NOTE: We deal with port number as host byte order. */

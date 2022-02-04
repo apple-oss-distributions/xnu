@@ -90,8 +90,6 @@ extern lck_mtx_t domainname_lock;
 /* 1.2 */
 extern int stathz;              /* statistics clock's frequency */
 extern int profhz;              /* profiling clock's frequency */
-
-extern bool send_sigsys;
 #endif /* BSD_KERNEL_PRIVATE */
 
 

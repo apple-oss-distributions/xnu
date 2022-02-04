@@ -43,19 +43,23 @@ typedef int sync_policy_t;
 #define SYNC_POLICY_ORDER_MASK          0x3
 #define SYNC_POLICY_LIFO                (SYNC_POLICY_FIFO|SYNC_POLICY_REVERSED)
 
-#ifdef  KERNEL_PRIVATE
+#if KERNEL_PRIVATE
 
-/*
- *	These options provide addition (kernel-private) behaviors
- */
+#define SYNC_POLICY_PREPOST             0x4 /* obsolete but kexts use it */
 
-#define SYNC_POLICY_PREPOST             0x4
-#define SYNC_POLICY_DISABLE_IRQ         0x8
+#endif /* KERNEL_PRIVATE */
+#ifdef XNU_KERNEL_PRIVATE
+
+/* SYNC_POLICY_FIXED_PRIORITY is no longer supported */
+#define SYNC_POLICY_USER_MASK \
+	(SYNC_POLICY_FIFO | SYNC_POLICY_LIFO | SYNC_POLICY_PREPOST)
+
+#define SYNC_POLICY_DISABLE_IRQ         0x08
 #define SYNC_POLICY_TURNSTILE           0x10
 #define SYNC_POLICY_TURNSTILE_PROXY     0x20
+#define SYNC_POLICY_INIT_LOCKED         0x40
+#define SYNC_POLICY_PORT_SET            0x80
 
-#endif  /* KERNEL_PRIVATE */
-
-#define SYNC_POLICY_MAX                 0x7
+#endif  /* XNU_KERNEL_PRIVATE */
 
 #endif  /* _MACH_SYNC_POLICY_H_ */

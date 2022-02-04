@@ -79,8 +79,12 @@
 #include <device/device_types.h>
 #include <device/device_port.h>
 
-ipc_port_t      master_device_port;
-void           *master_device_kobject;
+static SECURITY_READ_ONLY_LATE(void *) master_device_kobject;
+SECURITY_READ_ONLY_LATE(ipc_port_t) master_device_port;
+
+IPC_KOBJECT_DEFINE(IKOT_MASTER_DEVICE,
+    .iko_op_stable    = true,
+    .iko_op_permanent = true);
 
 void
 device_service_create(void)

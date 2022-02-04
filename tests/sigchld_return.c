@@ -8,7 +8,7 @@
 
 #include <darwintest.h>
 
-T_GLOBAL_META(T_META_RUN_CONCURRENTLY(true));
+T_GLOBAL_META(T_META_RUN_CONCURRENTLY(true), T_META_IGNORECRASHES("sigchld.*"));
 
 static int exitcode = 0x6789BEEF;
 static int should_exit = 0;

@@ -39,6 +39,8 @@
  *	packet.
  */
 
+#include <netinet/in.h>
+#include <netinet/ip.h>
 #include <netinet/udp.h>
 
 #define iaddr_t struct in_addr

@@ -97,7 +97,6 @@ void
 cpu_sleep(void)
 {
 	cpu_data_t     *cpu_data_ptr = getCpuDatap();
-	pmap_switch_user_ttb(kernel_pmap);
 	cpu_data_ptr->cpu_active_thread = current_thread();
 	cpu_data_ptr->cpu_reset_handler = (vm_offset_t) start_cpu_paddr;
 	cpu_data_ptr->cpu_flags |= SleepState;
@@ -128,12 +127,7 @@ cpu_idle(void)
 	}
 	lastPop = cpu_data_ptr->rtcPop;
 
-	pmap_switch_user_ttb(kernel_pmap);
 	cpu_data_ptr->cpu_active_thread = current_thread();
-	if (cpu_data_ptr->cpu_user_debug) {
-		arm_debug_set(NULL);
-	}
-	cpu_data_ptr->cpu_user_debug = NULL;
 
 	if (cpu_data_ptr->cpu_idle_notify != NULL) {
 		cpu_data_ptr->cpu_idle_notify(cpu_data_ptr->cpu_id, TRUE, &new_idle_timeout_ticks);
@@ -182,10 +176,6 @@ cpu_idle_exit(boolean_t from_reset __unused)
 #if KPC
 	kpc_idle_exit();
 #endif
-
-
-	pmap_set_pmap(cpu_data_ptr->cpu_active_thread->map->pmap, current_thread());
-
 	if (cpu_data_ptr->cpu_idle_notify != NULL) {
 		cpu_data_ptr->cpu_idle_notify(cpu_data_ptr->cpu_id, FALSE, &new_idle_timeout_ticks);
 	}
@@ -218,7 +208,6 @@ cpu_init(void)
 
 		if (cdp == &BootCpuData) {
 			do_cpuid();
-			do_cacheid();
 			do_mvfpid();
 		} else {
 			/*
@@ -227,6 +216,9 @@ cpu_init(void)
 			 */
 			pmap_cpu_data_init();
 		}
+
+		do_cacheid();
+
 		/* ARM_SMP: Assuming identical cpu */
 		do_debugid();
 
@@ -287,7 +279,7 @@ cpu_stack_alloc(cpu_data_t *cpu_data_ptr)
 	    KMA_GUARD_FIRST | KMA_GUARD_LAST | KMA_KSTACK | KMA_KOBJECT,
 	    VM_KERN_MEMORY_STACK);
 	if (kr != KERN_SUCCESS) {
-		panic("Unable to allocate cpu interrupt stack\n");
+		panic("Unable to allocate cpu interrupt stack");
 	}
 
 	cpu_data_ptr->intstack_top = irq_stack + PAGE_SIZE + INTSTACK_SIZE;
@@ -299,7 +291,7 @@ cpu_stack_alloc(cpu_data_t *cpu_data_ptr)
 	    KMA_GUARD_FIRST | KMA_GUARD_LAST | KMA_KSTACK | KMA_KOBJECT,
 	    VM_KERN_MEMORY_STACK);
 	if (kr != KERN_SUCCESS) {
-		panic("Unable to allocate cpu exception stack\n");
+		panic("Unable to allocate cpu exception stack");
 	}
 
 	cpu_data_ptr->fiqstack_top = fiq_stack + PAGE_SIZE + FIQSTACK_SIZE;
@@ -522,11 +514,11 @@ ml_arm_sleep(void)
 
 	__builtin_arm_dsb(DSB_SY);
 	while (TRUE) {
-#if     __ARM_ENABLE_WFE_
 		__builtin_arm_wfe();
-#endif
 	} /* Spin */
 }
+
+TUNABLE(unsigned int, wfi, "wfi", 1);
 
 void
 cpu_machine_idle_init(boolean_t from_boot)
@@ -538,8 +530,6 @@ cpu_machine_idle_init(boolean_t from_boot)
 
 	if (from_boot) {
 		unsigned int    jtag = 0;
-		unsigned int    wfi;
-
 
 		if (PE_parse_boot_argn("jtag", &jtag, sizeof(jtag))) {
 			if (jtag != 0) {
@@ -549,10 +539,6 @@ cpu_machine_idle_init(boolean_t from_boot)
 			}
 		} else {
 			idle_enable = TRUE;
-		}
-
-		if (!PE_parse_boot_argn("wfi", &wfi, sizeof(wfi))) {
-			wfi = 1;
 		}
 
 		if (wfi == 0) {

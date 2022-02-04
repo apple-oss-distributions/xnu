@@ -38,6 +38,17 @@ class OSCollectionIterator;
 
 typedef OSCollectionIterator* OSCollectionIteratorPtr;
 
+#if XNU_KERNEL_PRIVATE
+
+__enum_closed_decl(OSCollectionIteratorStorageType, uint8_t, {
+	OSCollectionIteratorStorageUnallocated = 0,
+	OSCollectionIteratorStorageInvalid = 1,
+	OSCollectionIteratorStorageInline = 2,
+	OSCollectionIteratorStoragePointer = 3, /* two bits set, matches top bits of kernel pointer */
+});
+
+#endif /* XNU_KERNEL_PRIVATE */
+
 /*!
  * @header
  *
@@ -99,9 +110,56 @@ class OSCollectionIterator : public OSIterator
 protected:
 // xx-review: Do we want to document these?
 	OSPtr<const OSCollection> collection;
-	void               * collIterator;
+#if __LP64__ && XNU_KERNEL_PRIVATE
+	union {
+		struct {
+			uint8_t inlineStorage[4];
+			uint8_t __padding[4];
+		};
+		void * collIterator;
+	};
+#else
+	void * collIterator;
+#endif /* __LP64__ && XNU_KERNEL_PRIVATE */
 	unsigned int         initialUpdateStamp;
 	bool                 valid;
+
+#if XNU_KERNEL_PRIVATE
+private:
+	/*
+	 * Returns true if this object is an instance of a OSCollectionIterator subclass
+	 */
+	bool   isSubclassed();
+
+	/*
+	 * Initialize iterator storage.
+	 *
+	 * If storage is already initialized, return false. Otherwise, return true.
+	 */
+	bool   initializeIteratorStorage();
+
+	/*
+	 * Get the iterator storage. If storage is not initialized, this returns NULL.
+	 */
+	void * getIteratorStorage();
+
+	/*
+	 * Free iterator storage. If storage is not initialized, this has no effect.
+	 */
+	void   freeIteratorStorage();
+
+	/*
+	 * Determine if storage is unallocated, allocated, or inline.
+	 */
+	OSCollectionIteratorStorageType getStorageType();
+
+	/*
+	 * Set the storage type. The expectation is that this is called AFTER the conditions
+	 * for the storage type have been set. For example, collIterator must be set to a valid
+	 * pointer before calling setStorageType(OSCollectionIteratorStoragePointer)
+	 */
+	void setStorageType(OSCollectionIteratorStorageType storageType);
+#endif
 
 public:
 /*!

@@ -417,7 +417,7 @@ kdp_register_send_receive(
 {
 	unsigned int debug = debug_boot_arg;
 
-	if (!kernel_debugging_allowed()) {
+	if (kernel_debugging_restricted()) {
 		return;
 	}
 
@@ -500,7 +500,7 @@ kdp_unregister_send_receive(
 static void
 kdp_schedule_debugger_reentry(unsigned interval)
 {
-	uint64_t deadline;;
+	uint64_t deadline;
 
 	clock_interval_to_deadline(interval, 1000 * 1000, &deadline);
 	thread_call_enter_delayed(kdp_timer_call, deadline);
@@ -1499,6 +1499,18 @@ kdp_reset(void)
 	pkt.len = pkt.off = manual_pkt.len = 0;
 }
 
+static void
+kdp_setup_packet_size(void)
+{
+	/* Override default packet size from boot arguments (if present). */
+	kdp_crashdump_pkt_size = KDP_LARGE_CRASHDUMP_PKT_SIZE;
+	if (PE_parse_boot_argn("kdp_crashdump_pkt_size", &kdp_crashdump_pkt_size, sizeof(kdp_crashdump_pkt_size)) &&
+	    (kdp_crashdump_pkt_size > KDP_LARGE_CRASHDUMP_PKT_SIZE)) {
+		kdp_crashdump_pkt_size = KDP_LARGE_CRASHDUMP_PKT_SIZE;
+		printf("kdp_crashdump_pkt_size is too large. Reverting to %d\n", kdp_crashdump_pkt_size);
+	}
+}
+
 struct corehdr *
 create_panic_header(unsigned int request, const char *corename,
     unsigned length, unsigned int block)
@@ -1563,7 +1575,7 @@ create_panic_header(unsigned int request, const char *corename,
 		    - sizeof(kdp_crashdump_feature_mask) - sizeof(kdp_crashdump_pkt_size));
 
 		/* account for the extra NULL characters that have been added historically */
-		int len = snprintf(cp, length_remaining, "%s%c%s%c%s", corename, '\0', mode, '\0', KDP_FEATURE_MASK_STRING);
+		int len = snprintf(cp, length_remaining, "%s%c%s%c%s%c", corename, '\0', mode, '\0', KDP_FEATURE_MASK_STRING, '\0');
 		if (len < 0) {
 			kdb_printf("Unable to create core header packet.\n");
 			return NULL;
@@ -1577,13 +1589,8 @@ create_panic_header(unsigned int request, const char *corename,
 		bcopy(&kdp_crashdump_feature_mask, cp, sizeof(kdp_crashdump_feature_mask));
 		cp += sizeof(kdp_crashdump_feature_mask);
 
-		/* Override default packet size from boot arguments (if present). */
-		kdp_crashdump_pkt_size = KDP_LARGE_CRASHDUMP_PKT_SIZE;
-		if (PE_parse_boot_argn("kdp_crashdump_pkt_size", &kdp_crashdump_pkt_size, sizeof(kdp_crashdump_pkt_size)) &&
-		    (kdp_crashdump_pkt_size > KDP_LARGE_CRASHDUMP_PKT_SIZE)) {
-			kdp_crashdump_pkt_size = KDP_LARGE_CRASHDUMP_PKT_SIZE;
-			kdb_printf("kdp_crashdump_pkt_size is too large. Reverting to %d\n", kdp_crashdump_pkt_size);
-		}
+		// Make sure we advertise the maximum supported packet size
+		kdp_setup_packet_size();
 
 		uint32_t pktsz = htonl(kdp_crashdump_pkt_size);
 		bcopy(&pktsz, cp, sizeof(uint32_t));
@@ -2249,6 +2256,8 @@ kdp_init(void)
 
 	kdp_timer_callout_init();
 	kdp_crashdump_feature_mask = htonl(kdp_crashdump_feature_mask);
+	// Figure out the initial packet size
+	kdp_setup_packet_size();
 	kdp_core_init();
 
 #if CONFIG_SERIAL_KDP
@@ -2397,7 +2406,7 @@ kdp_raise_exception(
 #endif
 {
 #if defined(__arm__) || defined(__arm64__)
-	assert(kernel_debugging_allowed());
+	assert(!kernel_debugging_restricted());
 #endif
 
 #if CONFIG_KDP_INTERACTIVE_DEBUGGING

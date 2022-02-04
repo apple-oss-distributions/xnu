@@ -39,6 +39,8 @@
 #define KEY_SADB_LOCKED         1
 
 extern struct key_cb key_cb;
+extern lck_mtx_t sadb_mutex_data;
+#define sadb_mutex (&sadb_mutex_data)
 
 struct secpolicy;
 struct secpolicyindex;
@@ -63,11 +65,11 @@ extern struct secasvar *key_alloc_outbound_sav_for_interface(ifnet_t interface, 
 extern int key_checkrequest(struct ipsecrequest *isr, struct secasindex *,
     struct secasvar **sav);
 extern struct secasvar *key_allocsa(u_int, caddr_t, caddr_t,
-    u_int, u_int32_t);
+    uint32_t, u_int, u_int32_t);
 struct secasvar *
-key_allocsa_extended(u_int family, caddr_t src, caddr_t dst,
+key_allocsa_extended(u_int family, caddr_t src, caddr_t dst, uint32_t dst_ifscope,
     u_int proto, u_int32_t spi, ifnet_t interface);
-extern bool key_checksa_present(u_int family, caddr_t src, caddr_t dst, u_int16_t src_port, u_int16_t dst_port);
+extern bool key_checksa_present(u_int family, caddr_t src, caddr_t dst, u_int16_t src_port, u_int16_t dst_port, uint32_t src_ifscope, uint32_t dst_ifscope);
 extern u_int16_t key_natt_get_translated_port(struct secasvar *);
 extern void key_freesp(struct secpolicy *, int);
 extern void key_freesav(struct secasvar *, int);

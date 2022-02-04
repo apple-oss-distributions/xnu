@@ -37,26 +37,19 @@
 #include <libkern/crypto/aes.h>
 #include <kern/host_statistics.h>
 
-#if CONFIG_EMBEDDED
+#if !XNU_TARGET_OS_OSX
 
 #define MIN_SWAP_FILE_SIZE              (64 * 1024 * 1024ULL)
 
 #define MAX_SWAP_FILE_SIZE              (128 * 1024 * 1024ULL)
 
-#else /* CONFIG_EMBEDDED */
+#else /* !XNU_TARGET_OS_OSX */
 
 #define MIN_SWAP_FILE_SIZE              (256 * 1024 * 1024ULL)
 
 #define MAX_SWAP_FILE_SIZE              (1 * 1024 * 1024 * 1024ULL)
 
-#endif /* CONFIG_EMBEDDED */
-
-#define COMPRESSED_SWAP_CHUNK_SIZE      (C_SEG_BUFSIZE)
-
-#define VM_SWAPFILE_HIWATER_SEGS        (MIN_SWAP_FILE_SIZE / COMPRESSED_SWAP_CHUNK_SIZE)
-
-#define SWAPFILE_RECLAIM_THRESHOLD_SEGS ((17 * (MAX_SWAP_FILE_SIZE / COMPRESSED_SWAP_CHUNK_SIZE)) / 10)
-#define SWAPFILE_RECLAIM_MINIMUM_SEGS   ((13 * (MAX_SWAP_FILE_SIZE / COMPRESSED_SWAP_CHUNK_SIZE)) / 10)
+#endif /* !XNU_TARGET_OS_OSX */
 
 #if defined(XNU_TARGET_OS_OSX)
 #define SWAP_FILE_NAME          "/System/Volumes/VM/swapfile"
@@ -94,7 +87,6 @@ struct swapout_io_completion {
 void vm_swapout_iodone(void *, int);
 
 
-static void vm_swapout_finish(c_segment_t, uint64_t, uint32_t, kern_return_t);
 kern_return_t vm_swap_put_finish(struct swapfile *, uint64_t *, int, boolean_t);
 kern_return_t vm_swap_put(vm_offset_t, uint64_t*, uint32_t, c_segment_t, struct swapout_io_completion *);
 
@@ -105,6 +97,7 @@ uint64_t vm_swap_get_total_space(void);
 uint64_t vm_swap_get_used_space(void);
 uint64_t vm_swap_get_free_space(void);
 uint64_t vm_swap_get_max_configured_space(void);
+void vm_swap_reset_max_segs_tracking(uint64_t *alloced_max, uint64_t *used_max);
 
 struct vnode;
 extern void vm_swapfile_open(const char *path, struct vnode **vp);

@@ -111,7 +111,7 @@ common_hook(void)
 
 		/* Panic */
 		if (policy_flags & CHECK_POLICY_PANIC) {
-			panic("calling MACF hook with mutex count %d\n", i);
+			panic("calling MACF hook with mutex count %d", i);
 		}
 
 		/* count for non-fatal tracing */
@@ -121,7 +121,7 @@ common_hook(void)
 	return rv;
 }
 
-#if (MAC_POLICY_OPS_VERSION != 69)
+#if (MAC_POLICY_OPS_VERSION != 80)
 # error "struct mac_policy_ops doesn't match definition in mac_policy.h"
 #endif
 /*
@@ -198,8 +198,9 @@ const static struct mac_policy_ops policy_ops = {
 	.mpo_reserved22 = (mpo_reserved_hook_t *)common_hook,
 	.mpo_reserved23 = (mpo_reserved_hook_t *)common_hook,
 	.mpo_reserved24 = (mpo_reserved_hook_t *)common_hook,
-	.mpo_reserved25 = (mpo_reserved_hook_t *)common_hook,
-	.mpo_reserved26 = (mpo_reserved_hook_t *)common_hook,
+
+	CHECK_SET_HOOK(necp_check_open)
+	CHECK_SET_HOOK(necp_check_client_action)
 
 	CHECK_SET_HOOK(file_check_library_validation)
 
@@ -211,19 +212,21 @@ const static struct mac_policy_ops policy_ops = {
 	CHECK_SET_HOOK(vnode_notify_setowner)
 	CHECK_SET_HOOK(vnode_notify_setutimes)
 	CHECK_SET_HOOK(vnode_notify_truncate)
+	CHECK_SET_HOOK(vnode_check_getattrlistbulk)
 
-	.mpo_reserved27 = (mpo_reserved_hook_t *)common_hook,
-	.mpo_reserved28 = (mpo_reserved_hook_t *)common_hook,
-	.mpo_reserved29 = (mpo_reserved_hook_t *)common_hook,
-	.mpo_reserved30 = (mpo_reserved_hook_t *)common_hook,
+	CHECK_SET_HOOK(proc_check_get_task_special_port)
+	CHECK_SET_HOOK(proc_check_set_task_special_port)
+
+	CHECK_SET_HOOK(vnode_notify_swap)
+
 	.mpo_reserved31 = (mpo_reserved_hook_t *)common_hook,
 	.mpo_reserved32 = (mpo_reserved_hook_t *)common_hook,
 	.mpo_reserved33 = (mpo_reserved_hook_t *)common_hook,
 	.mpo_reserved34 = (mpo_reserved_hook_t *)common_hook,
 	.mpo_reserved35 = (mpo_reserved_hook_t *)common_hook,
-	.mpo_reserved36 = (mpo_reserved_hook_t *)common_hook,
-	.mpo_reserved37 = (mpo_reserved_hook_t *)common_hook,
+	CHECK_SET_HOOK(vnode_check_copyfile)
 
+	CHECK_SET_HOOK(mount_check_quotactl)
 	CHECK_SET_HOOK(mount_check_fsctl)
 	CHECK_SET_HOOK(mount_check_getattr)
 	CHECK_SET_HOOK(mount_check_label_update)
@@ -238,9 +241,9 @@ const static struct mac_policy_ops policy_ops = {
 	CHECK_SET_HOOK(mount_label_init)
 	CHECK_SET_HOOK(mount_label_internalize)
 
-	.mpo_reserved38 = (mpo_reserved_hook_t *)common_hook,
-	.mpo_reserved39 = (mpo_reserved_hook_t *)common_hook,
-	.mpo_reserved40 = (mpo_reserved_hook_t *)common_hook,
+	CHECK_SET_HOOK(proc_check_expose_task_with_flavor)
+	CHECK_SET_HOOK(proc_check_get_task_with_flavor)
+	CHECK_SET_HOOK(proc_check_task_id_token_get_task)
 
 	CHECK_SET_HOOK(pipe_check_ioctl)
 	CHECK_SET_HOOK(pipe_check_kqfilter)
@@ -255,7 +258,7 @@ const static struct mac_policy_ops policy_ops = {
 	.mpo_reserved43 = (mpo_reserved_hook_t *)common_hook,
 	CHECK_SET_HOOK(pipe_label_init)
 	.mpo_reserved44 = (mpo_reserved_hook_t *)common_hook,
-	.mpo_reserved45 = (mpo_reserved_hook_t *)common_hook,
+	CHECK_SET_HOOK(proc_check_syscall_mac)
 
 	CHECK_SET_HOOK(policy_destroy)
 	/* special hooks for policy init's */
@@ -339,19 +342,22 @@ const static struct mac_policy_ops policy_ops = {
 	CHECK_SET_HOOK(socket_check_setsockopt)
 	CHECK_SET_HOOK(socket_check_getsockopt)
 
-	.mpo_reserved50 = (mpo_reserved_hook_t *)common_hook,
-	.mpo_reserved51 = (mpo_reserved_hook_t *)common_hook,
-	.mpo_reserved52 = (mpo_reserved_hook_t *)common_hook,
-	.mpo_reserved53 = (mpo_reserved_hook_t *)common_hook,
-	.mpo_reserved54 = (mpo_reserved_hook_t *)common_hook,
-	.mpo_reserved55 = (mpo_reserved_hook_t *)common_hook,
-	.mpo_reserved56 = (mpo_reserved_hook_t *)common_hook,
-	.mpo_reserved57 = (mpo_reserved_hook_t *)common_hook,
-	.mpo_reserved58 = (mpo_reserved_hook_t *)common_hook,
-	.mpo_reserved59 = (mpo_reserved_hook_t *)common_hook,
+	CHECK_SET_HOOK(proc_check_get_movable_control_port)
+	CHECK_SET_HOOK(proc_check_dyld_process_info_notify_register)
+	CHECK_SET_HOOK(proc_check_setuid)
+	CHECK_SET_HOOK(proc_check_seteuid)
+	CHECK_SET_HOOK(proc_check_setreuid)
+	CHECK_SET_HOOK(proc_check_setgid)
+	CHECK_SET_HOOK(proc_check_setegid)
+	CHECK_SET_HOOK(proc_check_setregid)
+	CHECK_SET_HOOK(proc_check_settid)
+	CHECK_SET_HOOK(proc_check_memorystatus_control)
+
 	.mpo_reserved60 = (mpo_reserved_hook_t *)common_hook,
-	.mpo_reserved61 = (mpo_reserved_hook_t *)common_hook,
-	.mpo_reserved62 = (mpo_reserved_hook_t *)common_hook,
+
+	CHECK_SET_HOOK(thread_telemetry)
+
+	CHECK_SET_HOOK(iokit_check_open_service)
 
 	CHECK_SET_HOOK(system_check_acct)
 	CHECK_SET_HOOK(system_check_audit)

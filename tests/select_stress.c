@@ -38,7 +38,7 @@ static mach_timebase_info_data_t g_timebase;
 static int g_sleep_iterations = 150000;
 static int g_sleep_usecs = 30;
 static int g_stress_nthreads = 100;
-static uint64_t g_stress_duration = 60;
+static uint64_t g_stress_duration = 5;
 
 static inline uint64_t
 ns_to_abs(uint64_t ns)

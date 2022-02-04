@@ -127,6 +127,7 @@ L2:
 	lock
 	addl		$1, (%rdx)
 	jmp		*%rdi
+	UNWIND_EPILOGUE
 
 #elif defined(__arm__)
 

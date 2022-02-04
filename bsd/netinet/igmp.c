@@ -252,9 +252,8 @@ SYSCTL_NODE(_net_inet_igmp, OID_AUTO, ifinfo, CTLFLAG_RD | CTLFLAG_LOCKED,
     sysctl_igmp_ifinfo, "Per-interface IGMPv3 state");
 
 /* Lock group and attribute for igmp_mtx */
-static lck_attr_t       *igmp_mtx_attr;
-static lck_grp_t        *igmp_mtx_grp;
-static lck_grp_attr_t   *igmp_mtx_grp_attr;
+static LCK_ATTR_DECLARE(igmp_mtx_attr, 0, 0);
+static LCK_GRP_DECLARE(igmp_mtx_grp, "igmp_mtx");
 
 /*
  * Locking and reference counting:
@@ -286,7 +285,7 @@ static lck_grp_attr_t   *igmp_mtx_grp_attr;
  * Any may be taken independently, but if any are held at the same time,
  * the above lock order must be followed.
  */
-static decl_lck_mtx_data(, igmp_mtx);
+static LCK_MTX_DECLARE_ATTR(igmp_mtx, &igmp_mtx_grp, &igmp_mtx_attr);
 static int igmp_timers_are_running;
 
 #define IGMP_ADD_DETACHED_INM(_head, _inm) {                            \
@@ -697,7 +696,7 @@ igi_delete(const struct ifnet *ifp, struct igmp_inm_relhead *inm_dthead)
 		}
 		IGI_UNLOCK(igi);
 	}
-	panic("%s: igmp_ifinfo not found for ifp %p(%s)\n", __func__,
+	panic("%s: igmp_ifinfo not found for ifp %p(%s)", __func__,
 	    ifp, ifp->if_xname);
 }
 
@@ -745,7 +744,7 @@ igi_alloc(zalloc_flags_t how)
 {
 	struct igmp_ifinfo *igi = zalloc_flags(igi_zone, how | Z_ZERO);
 	if (igi != NULL) {
-		lck_mtx_init(&igi->igi_lock, igmp_mtx_grp, igmp_mtx_attr);
+		lck_mtx_init(&igi->igi_lock, &igmp_mtx_grp, &igmp_mtx_attr);
 		igi->igi_debug |= IFD_ALLOC;
 	}
 	return igi;
@@ -771,7 +770,7 @@ igi_free(struct igmp_ifinfo *igi)
 	igi->igi_debug &= ~IFD_ALLOC;
 	IGI_UNLOCK(igi);
 
-	lck_mtx_destroy(&igi->igi_lock, igmp_mtx_grp);
+	lck_mtx_destroy(&igi->igi_lock, &igmp_mtx_grp);
 	zfree(igi_zone, igi);
 }
 
@@ -4094,12 +4093,6 @@ igmp_init(struct protosw *pp, struct domain *dp)
 	IGMP_PRINTF(("%s: initializing\n", __func__));
 
 	igmp_timers_are_running = 0;
-
-	/* Setup lock group and attribute for igmp_mtx */
-	igmp_mtx_grp_attr = lck_grp_attr_alloc_init();
-	igmp_mtx_grp = lck_grp_alloc_init("igmp_mtx", igmp_mtx_grp_attr);
-	igmp_mtx_attr = lck_attr_alloc_init();
-	lck_mtx_init(&igmp_mtx, igmp_mtx_grp, igmp_mtx_attr);
 
 	LIST_INIT(&igi_head);
 	m_raopt = igmp_ra_alloc();

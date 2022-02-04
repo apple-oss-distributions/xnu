@@ -55,7 +55,7 @@
 bool mt_core_supported = false;
 
 /*
- * PMC[0-2]_{RD,WR} allow reading and writing the fixed PMCs.
+ * PMC[0-3]_{RD,WR} allow reading and writing the fixed PMCs.
  *
  * There are separate defines for access type because the read side goes through
  * the rdpmc instruction, which has a different counter encoding than the msr
@@ -69,6 +69,8 @@ bool mt_core_supported = false;
 #define PMC1_WR PMC_FIXED_WR(1)
 #define PMC2_RD PMC_FIXED_RD(2)
 #define PMC2_WR PMC_FIXED_WR(2)
+#define PMC3_RD PMC_FIXED_RD(3)
+#define PMC3_WR PMC_FIXED_WR(3)
 
 struct mt_cpu *
 mt_cur_cpu(void)
@@ -79,7 +81,7 @@ mt_cur_cpu(void)
 uint64_t
 mt_core_snap(unsigned int ctr)
 {
-	if (!mt_core_supported) {
+	if (!mt_core_supported || ctr >= kpc_fixed_count()) {
 		return 0;
 	}
 
@@ -90,6 +92,8 @@ mt_core_snap(unsigned int ctr)
 		return __builtin_ia32_rdpmc(PMC1_RD);
 	case 2:
 		return __builtin_ia32_rdpmc(PMC2_RD);
+	case 3:
+		return __builtin_ia32_rdpmc(PMC3_RD);
 	default:
 		panic("monotonic: invalid core counter read: %u", ctr);
 		__builtin_unreachable();
@@ -99,7 +103,7 @@ mt_core_snap(unsigned int ctr)
 void
 mt_core_set_snap(unsigned int ctr, uint64_t count)
 {
-	if (!mt_core_supported) {
+	if (!mt_core_supported || ctr >= kpc_fixed_count()) {
 		return;
 	}
 
@@ -113,6 +117,9 @@ mt_core_set_snap(unsigned int ctr, uint64_t count)
 	case 2:
 		wrmsr64(PMC2_WR, count);
 		break;
+	case 3:
+		wrmsr64(PMC3_WR, count);
+		break;
 	default:
 		panic("monotonic: invalid core counter write: %u", ctr);
 		__builtin_unreachable();
@@ -120,22 +127,36 @@ mt_core_set_snap(unsigned int ctr, uint64_t count)
 }
 
 /*
- * FIXED_CTR_CTRL controls which rings fixed counters are enabled in and if they
- * deliver PMIs.
+ * MSR_IA32_PERF_FIXED_CTR_CTRL controls which rings fixed counters are
+ * enabled in and if they deliver PMIs.
  *
  * Each fixed counters has 4 bits: [0:1] controls which ring it's enabled in,
  * [2] counts all hardware threads in each logical core (we don't want this),
  * and [3] enables PMIs on overflow.
  */
 
-#define FIXED_CTR_CTRL 0x38d
-
 /*
- * Fixed counters are enabled in all rings, so hard-code this register state to
- * enable in all rings and deliver PMIs.
+ * Fixed counters are enabled in all rings, so each _SINGLE definition is
+ * compounded in successive nibbles, dependent upon how many fixed counters
+ * are reported by cpuid.
  */
-#define FIXED_CTR_CTRL_INIT (0x888)
-#define FIXED_CTR_CTRL_ENABLE (0x333)
+#define FIXED_CTR_CTRL_INIT_SINGLE (0x8)
+#define FIXED_CTR_CTRL_ENABLE_SINGLE (0x3)
+
+inline void
+mt_fixed_counter_set_ctrl_mask(uint8_t ctrlbits)
+{
+	uint64_t mask = 0;
+
+	assert((ctrlbits & 0xF0) == 0);
+
+	for (uint32_t i = 0; i < kpc_fixed_count(); i++) {
+		mask |= ctrlbits << (4 * i);
+	}
+
+	wrmsr64(MSR_IA32_PERF_FIXED_CTR_CTRL, mask);
+}
+
 
 /*
  * GLOBAL_CTRL controls which counters are enabled -- the high 32-bits control
@@ -145,9 +166,11 @@ mt_core_set_snap(unsigned int ctr, uint64_t count)
 #define GLOBAL_CTRL 0x38f
 
 /*
- * Fixed counters are always enabled -- and there are three of them.
+ * Fixed counters are always enabled -- and there are three of them (except on
+ * Icelake, where there are four).
  */
-#define GLOBAL_CTRL_FIXED_EN (((UINT64_C(1) << 3) - 1) << 32)
+#define GLOBAL_CTRL_FIXED_EN_3FIXED (((UINT64_C(1) << 3) - 1) << 32)
+#define GLOBAL_CTRL_FIXED_EN_4FIXED (((UINT64_C(1) << 4) - 1) << 32)
 
 /*
  * GLOBAL_STATUS reports the state of counters, like those that have overflowed.
@@ -164,9 +187,10 @@ static void mt_check_for_pmi(struct mt_cpu *mtc, x86_saved_state_t *state);
 static void
 enable_counters(void)
 {
-	wrmsr64(FIXED_CTR_CTRL, FIXED_CTR_CTRL_INIT | FIXED_CTR_CTRL_ENABLE);
+	mt_fixed_counter_set_ctrl_mask(FIXED_CTR_CTRL_INIT_SINGLE | FIXED_CTR_CTRL_ENABLE_SINGLE);
 
-	uint64_t global_en = GLOBAL_CTRL_FIXED_EN;
+	int fixed_count = kpc_fixed_count();
+	uint64_t global_en = (fixed_count == 4) ? GLOBAL_CTRL_FIXED_EN_4FIXED : GLOBAL_CTRL_FIXED_EN_3FIXED;
 	if (kpc_get_running() & KPC_CLASS_CONFIGURABLE_MASK) {
 		global_en |= kpc_get_configurable_pmc_mask(KPC_CLASS_CONFIGURABLE_MASK);
 	}
@@ -207,7 +231,7 @@ core_up(cpu_data_t *cpu)
 
 	mtc = &cpu->cpu_monotonic;
 
-	for (int i = 0; i < MT_CORE_NFIXED; i++) {
+	for (uint32_t i = 0; i < kpc_fixed_count(); i++) {
 		mt_core_set_snap(i, mtc->mtc_snaps[i]);
 	}
 	enable_counters();
@@ -250,8 +274,7 @@ mt_check_for_pmi(struct mt_cpu *mtc, x86_saved_state_t *state)
 	if (mtc->mtc_active) {
 		disable_counters();
 	}
-
-	for (unsigned int i = 0; i < MT_CORE_NFIXED; i++) {
+	for (uint32_t i = 0; i < kpc_fixed_count(); i++) {
 		if (status & CTR_FIX_POS(i)) {
 			uint64_t prior = CTR_MAX - mtc->mtc_snaps[i];
 			assert(prior <= CTR_MAX);
@@ -298,21 +321,26 @@ mt_pmi_x86_64(x86_saved_state_t *state)
 	return 0;
 }
 
+void
+mt_ownership_change(bool __unused available)
+{
+}
+
 static void
 mt_microstackshot_start_remote(__unused void *arg)
 {
 	struct mt_cpu *mtc = mt_cur_cpu();
 
-	wrmsr64(FIXED_CTR_CTRL, FIXED_CTR_CTRL_INIT);
+	mt_fixed_counter_set_ctrl_mask(FIXED_CTR_CTRL_INIT_SINGLE);
 
-	for (int i = 0; i < MT_CORE_NFIXED; i++) {
+	for (uint32_t i = 0; i < kpc_fixed_count(); i++) {
 		uint64_t delta = mt_mtc_update_count(mtc, i);
 		mtc->mtc_counts[i] += delta;
 		mt_core_set_snap(i, mt_core_reset_values[i]);
 		mtc->mtc_snaps[i] = mt_core_reset_values[i];
 	}
 
-	wrmsr64(FIXED_CTR_CTRL, FIXED_CTR_CTRL_INIT | FIXED_CTR_CTRL_ENABLE);
+	mt_fixed_counter_set_ctrl_mask(FIXED_CTR_CTRL_INIT_SINGLE | FIXED_CTR_CTRL_ENABLE_SINGLE);
 }
 
 int

@@ -365,7 +365,7 @@ __doprnt(
 
 		if (c == 'z' || c == 'Z') {
 			c = *++fmt;
-			if (sizeof(size_t) == sizeof(unsigned long)) {
+			if (sizeof(size_t) == sizeof(unsigned long long)) {
 				long_long = 1;
 			}
 		}
@@ -822,65 +822,16 @@ bsd_log_unlock(void)
 	simple_unlock(&bsd_log_spinlock);
 }
 
-/* derived from boot_gets */
-void
-safe_gets(
-	char    *str,
-	int     maxlen)
-{
-	char *lp;
-	char c;
-	char *strmax = str + maxlen - 1; /* allow space for trailing 0 */
-
-	lp = str;
-	for (;;) {
-		c = (char)cngetc();
-		switch (c) {
-		case '\n':
-		case '\r':
-			printf("\n");
-			*lp++ = 0;
-			return;
-
-		case '\b':
-		case '#':
-		case '\177':
-			if (lp > str) {
-				printf("\b \b");
-				lp--;
-			}
-			continue;
-
-		case '@':
-		case 'u'&037:
-			lp = str;
-			printf("\n\r");
-			continue;
-
-		default:
-			if (c >= ' ' && c < '\177') {
-				if (lp < strmax) {
-					*lp++ = c;
-					printf("%c", c);
-				} else {
-					printf("%c", '\007'); /* beep */
-				}
-			}
-		}
-	}
-}
-
 extern int disableConsoleOutput;
 
 void
-conslog_putc(
-	char c)
+conslog_putc(char c)
 {
 	if (!disableConsoleOutput) {
-		cnputc(c);
+		console_write_char(c);
 	}
 
-#ifdef  MACH_BSD
+#ifdef MACH_BSD
 	if (!kernel_debugger_entry_count) {
 		log_putc(c);
 	}
@@ -888,37 +839,24 @@ conslog_putc(
 }
 
 void
-cons_putc_locked(
-	char c)
+cons_putc_locked(char c)
 {
 	if (!disableConsoleOutput) {
-		cnputc(c);
+		console_write_char(c);
 	}
 }
 
 static int
 vprintf_internal(const char *fmt, va_list ap_in, void *caller)
 {
-	cpu_data_t * cpu_data_p;
 	if (fmt) {
 		struct console_printbuf_state info_data;
-		cpu_data_p = current_cpu_datap();
 
 		va_list ap;
 		va_copy(ap, ap_in);
-		/*
-		 * for early boot printf()s console may not be setup,
-		 * fallback to good old cnputc
-		 */
-		if (cpu_data_p->cpu_console_buf != NULL) {
-			console_printbuf_state_init(&info_data, TRUE, TRUE);
-			__doprnt(fmt, ap, console_printbuf_putc, &info_data, 16, TRUE);
-			console_printbuf_clear(&info_data);
-		} else {
-			disable_preemption();
-			_doprnt_log(fmt, &ap, cons_putc_locked, 16);
-			enable_preemption();
-		}
+		console_printbuf_state_init(&info_data, TRUE, TRUE);
+		__doprnt(fmt, ap, console_printbuf_putc, &info_data, 16, TRUE);
+		console_printbuf_clear(&info_data);
 
 		va_end(ap);
 
@@ -952,7 +890,7 @@ void
 consdebug_putc(char c)
 {
 	if (!disableConsoleOutput) {
-		cnputc(c);
+		console_write_char(c);
 	}
 
 	debug_putc(c);
@@ -966,7 +904,7 @@ void
 consdebug_putc_unbuffered(char c)
 {
 	if (!disableConsoleOutput) {
-		cnputc_unbuffered(c);
+		console_write_unbuffered(c);
 	}
 
 	debug_putc(c);

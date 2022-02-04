@@ -14,6 +14,12 @@
 
 #include <IOKit/IOKitLib.h>
 
+T_GLOBAL_META(
+	T_META_NAMESPACE("xnu.ipc"),
+	T_META_RUN_CONCURRENTLY(TRUE),
+	T_META_RADAR_COMPONENT_NAME("xnu"),
+	T_META_RADAR_COMPONENT_VERSION("IPC"));
+
 #define TASK_EXC_GUARD_MP_DELIVER 0x10
 #define MAX_ARGV 2
 
@@ -149,7 +155,7 @@ exception_server_thread(void *arg)
 	return NULL;
 }
 
-T_DECL(catch_exception, "Send guard port descriptor to another process", T_META_IGNORECRASHES(".*immovable_send_client.*"))
+T_DECL(catch_immovable_send_exception, "Send guard port descriptor to another process", T_META_IGNORECRASHES(".*immovable_send_client.*"))
 {
 	uint32_t task_exc_guard = 0;
 	size_t te_size = sizeof(&task_exc_guard);

@@ -77,8 +77,6 @@ kern_work_interval_notify(thread_t thread, struct kern_work_interval_args* kwi_a
 
 #ifdef MACH_KERNEL_PRIVATE
 
-extern void work_interval_port_notify(mach_msg_header_t *msg);
-void work_interval_subsystem_init(void);
 bool work_interval_port_type_render_server(mach_port_name_t port_name);
 
 #if CONFIG_SCHED_AUTO_JOIN

@@ -535,7 +535,7 @@ IOSharedInterruptController::initInterruptController(IOInterruptController *pare
 	provider = this;
 
 	// Allocate the IOInterruptSource so this can act like a nub.
-	_interruptSources = (IOInterruptSource *)IOMalloc(sizeof(IOInterruptSource));
+	_interruptSources = IONew(IOInterruptSource, 1);
 	if (_interruptSources == NULL) {
 		return kIOReturnNoMemory;
 	}
@@ -557,12 +557,11 @@ IOSharedInterruptController::initInterruptController(IOInterruptController *pare
 
 	// Allocate the memory for the vectors
 	numVectors = kIOSharedInterruptControllerDefaultVectors; // For now a constant number.
-	vectors = (IOInterruptVector *)IOMalloc(numVectors * sizeof(IOInterruptVector));
+	vectors = IONewZero(IOInterruptVector, numVectors);
 	if (vectors == NULL) {
-		IOFree(_interruptSources, sizeof(IOInterruptSource));
+		IODelete(_interruptSources, IOInterruptSource, 1);
 		return kIOReturnNoMemory;
 	}
-	bzero(vectors, numVectors * sizeof(IOInterruptVector));
 
 	// Allocate the lock for the controller.
 	controllerLock = IOSimpleLockAlloc();

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2013 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2020 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -65,6 +65,9 @@
 #define _NETINET_ICMP_VAR_H_
 #include <sys/appleapiopts.h>
 
+#include <netinet/ip_icmp.h>
+#include <sys/types.h>
+
 /*
  * Variables related to this implementation
  * of the internet control message protocol.
@@ -93,7 +96,8 @@ struct  icmpstat {
 #define ICMPCTL_STATS           2       /* statistics (read-only) */
 #define ICMPCTL_ICMPLIM         3
 #define ICMPCTL_TIMESTAMP       4       /* allow replies to time stamp requests */
-#define ICMPCTL_MAXID           5
+#define ICMPCTL_ICMPLIM_INCR    5
+#define ICMPCTL_MAXID           6
 
 #ifdef BSD_KERNEL_PRIVATE
 #define ICMPCTL_NAMES { \

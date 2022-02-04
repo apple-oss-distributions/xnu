@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018 Apple Inc. All rights reserved.
+ * Copyright (c) 2018-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -65,10 +65,7 @@ enum {
 
 extern kern_return_t thread_terminate(thread_t);
 
-static lck_attr_t       *netem_lock_attr;
-static lck_grp_t        *netem_lock_group;
-static lck_grp_attr_t   *netem_lock_group_attr;
-static int              __netem_inited = 0;
+static LCK_GRP_DECLARE(netem_lock_group, "pktsched_netem_lock");
 
 static const int32_t NORM_DIST_SCALE = 8192;
 /* normal distribution lookup table */
@@ -697,7 +694,7 @@ heap_create(uint64_t limit)
 	// verify limit
 	size_t size = sizeof(struct heap) + sizeof(struct heap_elem) * limit;
 
-	h = _MALLOC(size, M_DEVBUF, M_WAITOK | M_ZERO);
+	h = (struct heap *)kalloc_data(size, Z_WAITOK | Z_ZERO);
 	if (h == NULL) {
 		return NULL;
 	}
@@ -713,7 +710,7 @@ heap_destroy(struct heap *h)
 {
 	ASSERT(h->size == 0);
 
-	_FREE(h, M_DEVBUF);
+	kfree_data(h, sizeof(struct heap) + sizeof(struct heap_elem) * h->limit);
 }
 
 #define HEAP_FATHER(child) (((child) - 1) / 2)
@@ -1209,20 +1206,6 @@ netem_output_thread_func(void *v, wait_result_t w)
 	__builtin_unreachable();
 }
 
-int
-netem_init(void)
-{
-	ASSERT(!__netem_inited);
-	__netem_inited = 1;
-
-	netem_lock_attr = lck_attr_alloc_init();
-	netem_lock_group_attr = lck_grp_attr_alloc_init();
-	netem_lock_group = lck_grp_alloc_init("pktsched_netem_lock",
-	    netem_lock_group_attr);
-
-	return 0;
-}
-
 static struct netem *
 netem_create(const char *name, void *output_handle,
     int (*output)(void *handle, pktsched_pkt_t *pkts, uint32_t n_pkts),
@@ -1230,9 +1213,9 @@ netem_create(const char *name, void *output_handle,
 {
 	struct netem *ne;
 
-	ne = _MALLOC(sizeof(struct netem), M_DEVBUF, M_WAITOK | M_ZERO);
+	ne = kalloc_type(struct netem, Z_WAITOK | Z_ZERO);
 
-	lck_mtx_init(&ne->netem_lock, netem_lock_group, netem_lock_attr);
+	lck_mtx_init(&ne->netem_lock, &netem_lock_group, LCK_ATTR_NULL);
 
 	ne->netem_heap = heap_create(NETEM_HEAP_SIZE);
 	ne->netem_flags = NETEMF_INITIALIZED;
@@ -1294,14 +1277,14 @@ netem_destroy(struct netem *ne)
 	}
 	ASSERT(ne->netem_output_thread == THREAD_NULL);
 
-	lck_mtx_destroy(&ne->netem_lock, netem_lock_group);
+	lck_mtx_destroy(&ne->netem_lock, &netem_lock_group);
 
 	while ((ret = heap_extract(ne->netem_heap, &key, &pkt)) == 0) {
 		pktsched_free_pkt(&pkt);
 	}
 	heap_destroy(ne->netem_heap);
 
-	_FREE(ne, M_DEVBUF);
+	kfree_type(struct netem, ne);
 }
 
 static int
@@ -1519,12 +1502,6 @@ done:
 }
 
 #else /* !CONFIG_NETEM */
-
-int
-netem_init(void)
-{
-	return 0;
-}
 
 int
 netem_config(struct netem **ne, const char *name,

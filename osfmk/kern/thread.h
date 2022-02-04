@@ -95,7 +95,6 @@
 
 #include <kern/kern_types.h>
 #include <vm/vm_kern.h>
-
 #include <sys/cdefs.h>
 
 #ifdef XNU_KERNEL_PRIVATE
@@ -140,6 +139,7 @@ __options_closed_decl(thread_tag_t, uint16_t, {
 
 #include <kern/waitq.h>
 #include <san/kasan.h>
+#include <san/kcov_data.h>
 #include <os/refcnt.h>
 
 #include <ipc/ipc_kmsg.h>
@@ -206,7 +206,10 @@ struct thread {
 	struct priority_queue_sched_max base_inheritor_queue; /* Inheritor queue for user promotion */
 
 #if CONFIG_SCHED_EDGE
-	boolean_t               th_bound_cluster_enqueued;
+	bool            th_bound_cluster_enqueued;
+	bool            th_shared_rsrc_enqueued[CLUSTER_SHARED_RSRC_TYPE_COUNT];
+	bool            th_shared_rsrc_heavy_user[CLUSTER_SHARED_RSRC_TYPE_COUNT];
+	bool            th_shared_rsrc_heavy_perf_control[CLUSTER_SHARED_RSRC_TYPE_COUNT];
 #endif /* CONFIG_SCHED_EDGE */
 
 #if CONFIG_SCHED_CLUTCH
@@ -256,17 +259,22 @@ struct thread {
 	vm_offset_t             kernel_stack;   /* current kernel stack */
 	vm_offset_t             reserved_stack; /* reserved kernel stack */
 
+	/*** Machine-dependent state ***/
+	struct machine_thread   machine;
+
 #if KASAN
 	struct kasan_thread_data kasan_data;
 #endif
-#if CONFIG_KSANCOV
-	void                   *ksancov_data;
+#if CONFIG_KCOV
+	kcov_thread_data_t       kcov_data;
 #endif
 
 	/* Thread state: */
 	int                     state;
 /*
  *	Thread states [bits or'ed]
+ * All but TH_WAIT_REPORT are encoded in SS_TH_FLAGS
+ * All are encoded in kcdata.py ('ths_state')
  */
 #define TH_WAIT                 0x01            /* queued for waiting */
 #define TH_SUSP                 0x02            /* stopped or requested to stop */
@@ -308,8 +316,8 @@ struct thread {
 #define TH_SFLAG_WAITQ_PROMOTED         0x1000          /* promote reason: waitq wakeup (generally for IPC receive) */
 
 #if __AMP__
-#define TH_SFLAG_ECORE_ONLY             0x2000          /* Bind thread to E core processor set */
-#define TH_SFLAG_PCORE_ONLY             0x4000          /* Bind thread to P core processor set */
+#define TH_SFLAG_ECORE_ONLY             0x2000          /* (unused) Bind thread to E core processor set */
+#define TH_SFLAG_PCORE_ONLY             0x4000          /* (unused) Bind thread to P core processor set */
 #endif
 
 #define TH_SFLAG_EXEC_PROMOTED          0x8000          /* promote reason: thread is in an exec */
@@ -318,10 +326,15 @@ struct thread {
 #if __AMP__
 #define TH_SFLAG_BOUND_SOFT             0x20000         /* thread is soft bound to a cluster; can run anywhere if bound cluster unavailable */
 #endif /* __AMP__ */
-/* 'promote reasons' that request a priority floor only, not a custom priority */
-#define TH_SFLAG_PROMOTE_REASON_MASK    (TH_SFLAG_RW_PROMOTED | TH_SFLAG_WAITQ_PROMOTED | TH_SFLAG_EXEC_PROMOTED)
 
-#define TH_SFLAG_RW_PROMOTED_BIT        (10)    /* 0x400 */
+#if CONFIG_PREADOPT_TG
+#define TH_SFLAG_REEVALUTE_TG_HIERARCHY_LATER 0x40000   /* thread needs to reevaluate its TG hierarchy */
+#endif
+
+#define TH_SFLAG_FLOOR_PROMOTED               0x80000   /* promote reason: boost requested */
+
+/* 'promote reasons' that request a priority floor only, not a custom priority */
+#define TH_SFLAG_PROMOTE_REASON_MASK    (TH_SFLAG_RW_PROMOTED | TH_SFLAG_WAITQ_PROMOTED | TH_SFLAG_EXEC_PROMOTED | TH_SFLAG_FLOOR_PROMOTED)
 
 	int16_t                 sched_pri;              /* scheduled (current) priority */
 	int16_t                 base_pri;               /* effective base priority (equal to req_base_pri unless TH_SFLAG_BASE_PRI_FROZEN) */
@@ -329,17 +342,16 @@ struct thread {
 	int16_t                 max_priority;           /* copy of max base priority */
 	int16_t                 task_priority;          /* copy of task base priority */
 	int16_t                 promotion_priority;     /* priority thread is currently promoted to */
+	uint16_t                priority_floor_count;   /* number of push to boost the floor priority */
+	int16_t                 suspend_count;          /* Kernel holds on this thread  */
 
 	int                     iotier_override;        /* atomic operations to set, cleared on ret to user */
 	os_refcnt_t             ref_count;              /* number of references to me */
 
-	lck_mtx_t*              waiting_for_mutex;      /* points to mutex we're waiting for until we acquire it */
-
 	uint32_t                rwlock_count;           /* Number of lck_rw_t locks held by thread */
-	uint32_t                t_temp_alloc_count;     /* In flight temporary allocations */
-#if DEBUG || DEVELOPMENT
-	queue_head_t            t_temp_alloc_list;
-#endif /* DEBUG || DEVELOPMENT */
+#ifdef DEBUG_RW
+	rw_lock_debug_t         rw_lock_held;           /* rw_locks currently held by the thread */
+#endif /* DEBUG_RW */
 
 	integer_t               importance;             /* task-relative importance */
 
@@ -352,7 +364,8 @@ struct thread {
 		uint32_t            period;
 		uint32_t            computation;
 		uint32_t            constraint;
-		boolean_t           preemptible;
+		bool                preemptible;
+		uint8_t             priority_offset;   /* base_pri = BASEPRI_RTQUEUES + priority_offset */
 		uint64_t            deadline;
 	}                       realtime;
 
@@ -360,6 +373,46 @@ struct thread {
 	uint64_t                last_made_runnable_time;        /* time when thread was unblocked or preempted */
 	uint64_t                last_basepri_change_time;       /* time when thread was last changed in basepri while runnable */
 	uint64_t                same_pri_latency;
+	/*
+	 * workq_quantum_deadline is the workq thread's next runtime deadline. This
+	 * value is set to 0 if the thread has no such deadline applicable to it.
+	 *
+	 * The synchronization for this field is due to how this field is modified
+	 * 1) This field is always modified on the thread by itself or on the thread
+	 * when it is not running/runnable
+	 * 2) Change of this field is immediately followed by a
+	 * corresponding change to the AST_KEVENT to either set or clear the
+	 * AST_KEVENT_WORKQ_QUANTUM_EXPIRED bit
+	 *
+	 * workq_quantum_deadline can be modified by the thread on itself during
+	 * interrupt context. However, due to (2) and due to the fact that the
+	 * change to the AST_KEVENT is volatile, this forces the compiler to
+	 * guarantee the order between the write to workq_quantum_deadline and the
+	 * kevent field and therefore guarantees the correct synchronization.
+	 */
+	uint64_t                workq_quantum_deadline;
+
+#if WORKQ_QUANTUM_HISTORY_DEBUG
+
+#define WORKQ_QUANTUM_HISTORY_COUNT 16
+	struct workq_quantum_history {
+		uint64_t time;
+		uint64_t deadline;
+		bool arm;
+	} workq_quantum_history[WORKQ_QUANTUM_HISTORY_COUNT];
+	uint64_t workq_quantum_history_index;
+
+#define WORKQ_QUANTUM_HISTORY_WRITE_ENTRY(thread, ...)  ({\
+	        thread_t __th = (thread); \
+	        uint64_t __index = os_atomic_inc_orig(&thread->workq_quantum_history_index, relaxed); \
+	        struct workq_quantum_history _wq_quantum_history = { mach_approximate_time(), __VA_ARGS__}; \
+	        __th->workq_quantum_history[__index % WORKQ_QUANTUM_HISTORY_COUNT] = \
+	                        (struct workq_quantum_history) _wq_quantum_history; \
+	})
+#else /* WORKQ_QUANTUM_HISTORY_DEBUG */
+#define WORKQ_QUANTUM_HISTORY_WRITE_ENTRY(thread, ...)
+#endif /* WORKQ_QUANTUM_HISTORY_DEBUG */
+
 #define THREAD_NOT_RUNNABLE (~0ULL)
 
 #if CONFIG_THREAD_GROUPS
@@ -478,17 +531,15 @@ struct thread {
 		} guard_exc_info;
 	};
 
-	/* Kernel holds on this thread  */
-	int16_t                 suspend_count;
 	/* User level suspensions */
-	int16_t                 user_stop_count;
+	int32_t                 user_stop_count;
 
 	/* IPC data structures */
 #if IMPORTANCE_INHERITANCE
 	natural_t ith_assertions;                       /* assertions pending drop */
 #endif
 	struct ipc_kmsg_queue ith_messages;             /* messages to reap */
-	mach_port_t ith_rpc_reply;                      /* reply port for kernel RPCs */
+	mach_port_t ith_kernel_reply_port;              /* reply port for kernel RPCs */
 
 	/* Pending thread ast(s) */
 	ast_t                   ast;
@@ -516,13 +567,14 @@ struct thread {
 
 	/* Miscellaneous bits guarded by mutex */
 	uint32_t
-	    active:1,                                   /* Thread is active and has not been terminated */
-	    started:1,                                  /* Thread has been started after creation */
-	    static_param:1,                             /* Disallow policy parameter changes */
-	    inspection:1,                               /* TRUE when task is being inspected by crash reporter */
-	    policy_reset:1,                             /* Disallow policy parameter changes on terminating threads */
-	    suspend_parked:1,                           /* thread parked in thread_suspended */
-	    corpse_dup:1,                               /* TRUE when thread is an inactive duplicate in a corpse */
+	    active:1,           /* Thread is active and has not been terminated */
+	    ipc_active:1,       /* IPC with the thread ports is allowed */
+	    started:1,          /* Thread has been started after creation */
+	    static_param:1,     /* Disallow policy parameter changes */
+	    inspection:1,       /* TRUE when task is being inspected by crash reporter */
+	    policy_reset:1,     /* Disallow policy parameter changes on terminating threads */
+	    suspend_parked:1,   /* thread parked in thread_suspended */
+	    corpse_dup:1,       /* TRUE when thread is an inactive duplicate in a corpse */
 	:0;
 
 	decl_lck_mtx_data(, mutex);
@@ -531,8 +583,9 @@ struct thread {
 	 * Different flavors of thread port.
 	 * These flavors THREAD_FLAVOR_* are defined in mach_types.h
 	 */
-	struct ipc_port         *ith_self[THREAD_SELF_PORT_COUNT];        /* does not hold right */
+	struct ipc_port         *ith_thread_ports[THREAD_SELF_PORT_COUNT];        /* does not hold right */
 	struct ipc_port         *ith_settable_self;        /* a send right */
+	struct ipc_port         *ith_self;                 /* immovable/pinned thread port */
 	struct ipc_port         *ith_special_reply_port;   /* ref to special reply port */
 	struct exception_action *exc_actions;
 
@@ -593,9 +646,6 @@ struct thread {
 	void                   *hv_thread_target;
 #endif /* HYPERVISOR */
 
-	/*** Machine-dependent state ***/
-	struct machine_thread   machine;
-
 	/* Statistics accumulated per-thread and aggregated per-task */
 	uint32_t                syscalls_unix;
 	uint32_t                syscalls_mach;
@@ -651,13 +701,84 @@ struct thread {
 
 	mach_port_name_t        ith_voucher_name;
 	ipc_voucher_t           ith_voucher;
-#if CONFIG_IOSCHED
-	void                   *decmp_upl;
-#endif /* CONFIG_IOSCHED */
 
-	/* work interval (if any) associated with the thread. Uses thread mutex */
+
+#if CONFIG_THREAD_GROUPS
+
+#if CONFIG_PREADOPT_TG
+	/* The preadopt thread group is set on the thread
+	 *
+	 *   a) By another thread when it is a creator and it is scheduled with the
+	 *   thread group on the TR
+	 *   b) On itself when it binds a thread request and becomes a
+	 *   servicer or when it rebinds to the thread request
+	 *   c) On itself when it processes knotes and finds the first
+	 *   EVFILT_MACHPORT event to deliver to userspace
+	 *
+	 * Note that this is a full reference owned by the thread_t and not a
+	 * borrowed reference.
+	 *
+	 * This reference is cleared from the thread_t by the thread itself at the
+	 * following times:
+	 *   a) When it explicitly adopts a work interval or a bank voucher
+	 *   b) If it still exists on the thread, after it has unbound and is about
+	 *   to park
+	 *   c) During thread termination if one still exists
+	 *   d) When a different preadoption thread group is set on the thread
+	 *
+	 * It is modified under the thread lock.
+	 */
+	struct thread_group     *preadopt_thread_group;
+
+	/* This field here is present in order to make sure that the t->thread_group
+	 * is always pointing to a valid thread group and isn't a dangling pointer.
+	 *
+	 * Consider the following scenario:
+	 *	a) t->thread_group points to the preadoption thread group
+	 *	b) The preadoption thread group is modified on the thread but we are
+	 *	unable to resolve the hierarchy immediately due to the current state of
+	 *	the thread
+	 *
+	 *	In order to make sure that t->thread_group points to a valid thread
+	 *	group until we can resolve the hierarchy again, we save the existing
+	 *	thread_group it points to in old_preadopt_thread_group. The next time a
+	 *	hierarchy resolution is done, we know that t->thread_group will not point
+	 *	to this field anymore so we can clear it.
+	 *
+	 *	 This field is always going to take the reference that was previously in
+	 *	 preadopt_thread_group so it will have a full +1
+	 */
+	struct thread_group     *old_preadopt_thread_group;
+#endif /* CONFIG_PREADOPT_TG */
+
+	/* This is a borrowed reference to the TG from the ith_voucher and is saved
+	 * here since we may not always be in the right context to able to do the
+	 * lookups.
+	 *
+	 * It is set always set on self under the thread lock */
+	struct thread_group     *bank_thread_group;
+
+	/*  Whether this is the autojoin thread group or the work interval thread
+	 *  group depends on whether the thread's sched_flags has the
+	 *  TH_SFLAG_THREAD_GROUP_AUTO_JOIN bit set */
+	union {
+		/* This is a borrowed reference to the auto join thread group from the
+		 * work_interval. It is set with the thread lock held */
+		struct thread_group             *auto_join_thread_group;
+		/* This is a borrowed reference to the explicit work_interval thread group
+		 * and is always set on self */
+		struct thread_group             *work_interval_thread_group;
+	};
+#endif /* CONFIG_THREAD_GROUPS */
+
+	/* work interval (if any) associated with the thread. Only modified by
+	 * current thread on itself or when another thread when the thread is held
+	 * off of runq */
 	struct work_interval            *th_work_interval;
 	thread_work_interval_flags_t    th_work_interval_flags;
+
+#define THREAD_BOUND_CLUSTER_NONE       (UINT32_MAX)
+	uint32_t                 th_bound_cluster_id;
 
 #if     SCHED_TRACE_THREAD_WAKEUPS
 	uintptr_t               thread_wakeup_bt[64];
@@ -665,10 +786,13 @@ struct thread {
 	turnstile_update_flags_t inheritor_flags; /* inheritor flags for inheritor field */
 	block_hint_t            pending_block_hint;
 	block_hint_t            block_hint;      /* What type of primitive last caused us to block. */
-	integer_t               decompressions;  /* Per-thread decompressions counter to be added to per-task decompressions counter */
+	uint32_t                decompressions;  /* Per-thread decompressions counter to be added to per-task decompressions counter */
 	int                     thread_region_page_shift; /* Page shift that this thread would like to use when */
 	                                                  /* introspecting a task. This is currently being used */
 	                                                  /* by footprint which uses a thread for each task being inspected. */
+#if CONFIG_IOSCHED
+	void                   *decmp_upl;
+#endif /* CONFIG_IOSCHED */
 };
 
 #define ith_state           saved.receive.state
@@ -720,14 +844,15 @@ extern void                     thread_init(void);
 
 extern void                     thread_daemon_init(void);
 
-#define thread_reference_internal(thread)       \
-	                os_ref_retain(&(thread)->ref_count);
+static inline void
+thread_reference_internal(thread_t thread)
+{
+	zone_id_require(ZONE_ID_THREAD, sizeof(struct thread), thread);
+	os_ref_retain(&thread->ref_count);
+}
 
-#define thread_reference(thread)                                        \
-MACRO_BEGIN                                                                                     \
-	if ((thread) != THREAD_NULL)                                    \
-	        thread_reference_internal(thread);              \
-MACRO_END
+extern void                     thread_reference(
+	thread_t                thread);
 
 extern void                     thread_deallocate(
 	thread_t                thread);
@@ -736,12 +861,12 @@ extern void                     thread_inspect_deallocate(
 	thread_inspect_t        thread);
 
 extern void                     thread_read_deallocate(
-	thread_read_t        thread);
+	thread_read_t           thread);
 
 extern void                     thread_terminate_self(void);
 
 extern kern_return_t    thread_terminate_internal(
-	thread_t                thread);
+	thread_t                    thread);
 
 extern void                     thread_start(
 	thread_t                        thread) __attribute__ ((noinline));
@@ -808,9 +933,6 @@ extern boolean_t                stack_alloc_try(
 	thread_t            thread);
 
 extern void                             stack_collect(void);
-
-extern void                             stack_init(void);
-
 
 extern kern_return_t    thread_info_internal(
 	thread_t                                thread,
@@ -900,7 +1022,8 @@ extern void             machine_thread_template_init(thread_t thr_template);
 
 extern kern_return_t    machine_thread_create(
 	thread_t                thread,
-	task_t                  task);
+	task_t                  task,
+	bool                    first_thread);
 extern void             machine_thread_switch_addrmode(
 	thread_t                 thread);
 
@@ -965,15 +1088,18 @@ extern void                     thread_deallocate(
 
 #if BSD_KERNEL_PRIVATE
 /* Duplicated from osfmk/kern/ipc_tt.h */
-__options_decl(port_to_thread_options_t, uint32_t, {
-	PORT_TO_THREAD_NONE               = 0x0000,
-	PORT_TO_THREAD_IN_CURRENT_TASK    = 0x0001,
-	PORT_TO_THREAD_NOT_CURRENT_THREAD = 0x0002,
+__options_decl(port_intrans_options_t, uint32_t, {
+	PORT_INTRANS_OPTIONS_NONE              = 0x0000,
+	PORT_INTRANS_THREAD_IN_CURRENT_TASK    = 0x0001,
+	PORT_INTRANS_THREAD_NOT_CURRENT_THREAD = 0x0002,
+
+	PORT_INTRANS_SKIP_TASK_EVAL            = 0x0004,
+	PORT_INTRANS_ALLOW_CORPSE_TASK         = 0x0008,
 });
 
 extern thread_t port_name_to_thread(
 	mach_port_name_t            port_name,
-	port_to_thread_options_t    options);
+	port_intrans_options_t    options);
 #endif /* BSD_KERNEL_PRIVATE */
 
 __END_DECLS
@@ -984,20 +1110,8 @@ __END_DECLS
 
 __BEGIN_DECLS
 
-extern void                     thread_deallocate_safe(
-	thread_t                thread);
-
 extern uint64_t                 thread_dispatchqaddr(
 	thread_t thread);
-
-extern uint64_t                 thread_rettokern_addr(
-	thread_t thread);
-
-extern integer_t        thread_kern_get_pri(thread_t thr) __attribute__((const));
-
-extern void             thread_kern_set_pri(thread_t thr, integer_t pri);
-
-extern integer_t        thread_kern_get_kernel_maxpri(void) __attribute__((const));
 
 __END_DECLS
 
@@ -1016,8 +1130,37 @@ __BEGIN_DECLS
 
 #ifdef  XNU_KERNEL_PRIVATE
 
+extern void                     thread_require(
+	thread_t        thread);
+
+extern void                     thread_deallocate_safe(
+	thread_t                thread);
+
+extern uint64_t                 thread_rettokern_addr(
+	thread_t thread);
+
+extern uint64_t                 thread_wqquantum_addr(
+	thread_t thread);
+
+extern integer_t        thread_kern_get_pri(thread_t thr) __attribute__((const));
+
+extern void             thread_kern_set_pri(thread_t thr, integer_t pri);
+
+extern integer_t        thread_kern_get_kernel_maxpri(void) __attribute__((const));
+
 uint16_t        thread_set_tag(thread_t thread, uint16_t tag);
 uint16_t        thread_get_tag(thread_t thread);
+
+__options_decl(shared_rsrc_policy_agent_t, uint32_t, {
+	SHARED_RSRC_POLICY_AGENT_DISPATCH = 0,
+	SHARED_RSRC_POLICY_AGENT_SYSCTL = 1,
+	SHARED_RSRC_POLICY_AGENT_PERFCTL_CSW = 2,
+	SHARED_RSRC_POLICY_AGENT_PERFCTL_QUANTUM = 3,
+});
+
+boolean_t       thread_shared_rsrc_policy_get(thread_t thread, cluster_shared_rsrc_type_t type);
+kern_return_t   thread_shared_rsrc_policy_set(thread_t thread, uint32_t index, cluster_shared_rsrc_type_t type, shared_rsrc_policy_agent_t agent);
+kern_return_t   thread_shared_rsrc_policy_clear(thread_t thread, cluster_shared_rsrc_type_t type, shared_rsrc_policy_agent_t agent);
 
 #ifdef MACH_KERNEL_PRIVATE
 static inline thread_tag_t
@@ -1056,6 +1199,8 @@ extern kern_return_t    thread_getstatus(
 	thread_state_t                  tstate,
 	mach_msg_type_number_t  *count);
 
+extern void main_thread_set_immovable_pinned(thread_t thread);
+
 extern kern_return_t    thread_getstatus_to_user(
 	thread_t                                thread,
 	int                                             flavor,
@@ -1067,10 +1212,19 @@ extern kern_return_t    thread_create_with_continuation(
 	thread_t *new_thread,
 	thread_continue_t continuation);
 
-extern kern_return_t thread_create_waiting(task_t               task,
-    thread_continue_t    continuation,
-    event_t              event,
-    thread_t             *new_thread);
+/* thread_create_waiting options */
+__options_decl(th_create_waiting_options_t, uint32_t, {
+	TH_CREATE_WAITING_OPTION_NONE      = 0x00,
+	TH_CREATE_WAITING_OPTION_PINNED    = 0x10,
+	TH_CREATE_WAITING_OPTION_IMMOVABLE = 0x20,
+});
+#define TH_CREATE_WAITING_OPTION_MASK          0x30
+
+extern kern_return_t thread_create_waiting(task_t    task,
+    thread_continue_t              continuation,
+    event_t                        event,
+    th_create_waiting_options_t    options,
+    thread_t                       *new_thread);
 
 extern kern_return_t    thread_create_workq_waiting(
 	task_t                  task,
@@ -1207,9 +1361,13 @@ extern void             uthread_zone_free(void *);
 extern void             uthread_cred_free(void *);
 extern void             uthread_reset_proc_refcount(void *);
 #if PROC_REF_DEBUG
-extern int              uthread_get_proc_refcount(void *);
-extern int              proc_ref_tracking_disabled;
+extern void             uthread_assert_zero_proc_refcount(void *);
+#else
+#define uthread_assert_zero_proc_refcount(uth) ((void)(uth))
 #endif
+#if CONFIG_DEBUG_SYSCALL_REJECTION
+extern uint64_t         *uthread_get_syscall_rejection_mask(void *);
+#endif /* CONFIG_DEBUG_SYSCALL_REJECTION */
 
 extern boolean_t        thread_should_halt(
 	thread_t                thread);
@@ -1223,6 +1381,10 @@ extern void act_set_kperf(thread_t);
 extern void act_set_astledger(thread_t thread);
 extern void act_set_astledger_async(thread_t thread);
 extern void act_set_io_telemetry_ast(thread_t);
+extern void act_set_macf_telemetry_ast(thread_t);
+extern void act_set_astproc_resource(thread_t);
+
+extern vm_offset_t thread_get_kernel_stack(thread_t);
 
 extern uint32_t dtrace_get_thread_predcache(thread_t);
 extern int64_t dtrace_get_thread_vtime(thread_t);
@@ -1230,6 +1392,7 @@ extern int64_t dtrace_get_thread_tracing(thread_t);
 extern uint16_t dtrace_get_thread_inprobe(thread_t);
 extern int dtrace_get_thread_last_cpu_id(thread_t);
 extern vm_offset_t dtrace_get_kernel_stack(thread_t);
+#define dtrace_get_kernel_stack thread_get_kernel_stack
 extern void dtrace_set_thread_predcache(thread_t, uint32_t);
 extern void dtrace_set_thread_vtime(thread_t, int64_t);
 extern void dtrace_set_thread_tracing(thread_t, int64_t);
@@ -1272,9 +1435,6 @@ extern void thread_update_io_stats(thread_t, int size, int io_flags);
 extern kern_return_t    thread_set_voucher_name(mach_port_name_t name);
 extern kern_return_t thread_get_current_voucher_origin_pid(int32_t *pid);
 
-extern void set_thread_rwlock_boost(void);
-extern void clear_thread_rwlock_boost(void);
-
 extern void thread_enable_send_importance(thread_t thread, boolean_t enable);
 
 /*
@@ -1292,6 +1452,9 @@ typedef enum cpuvn {
 } cpuvn_e;
 
 extern int machine_csv(cpuvn_e cve);
+#if defined(__x86_64__)
+extern void machine_thread_set_insn_copy_optout(thread_t thr);
+#endif
 
 /*
  * Translate array of function pointer syscall arguments from userspace representation
@@ -1303,40 +1466,48 @@ extern kern_return_t    machine_thread_function_pointers_convert_from_user(
 	uint32_t count);
 
 /*
- * Get a backtrace for a threads kernel or user stack (user_p), using fp to start the
- * backtrace if provided.
- *
- * Returns bytes added to buffer, and kThreadTruncatedBT in thread_trace_flags if a
- * user page is not present after kdp_lightweight_fault() is * called.
- */
-
-extern int machine_trace_thread(
-	thread_t thread,
-	char *tracepos,
-	char *tracebound,
-	int nframes,
-	boolean_t user_p,
-	uint32_t *thread_trace_flags);
-
-extern int machine_trace_thread64(thread_t thread,
-    char *tracepos,
-    char *tracebound,
-    int nframes,
-    boolean_t user_p,
-    uint32_t *thread_trace_flags,
-    uint64_t *sp,
-    vm_offset_t fp);
-
-/*
  * Get the duration of the given thread's last wait.
  */
 uint64_t thread_get_last_wait_duration(thread_t thread);
 
 extern bool thread_get_no_smt(void);
+#if defined(__x86_64__)
+extern bool curtask_get_insn_copy_optout(void);
+extern void curtask_set_insn_copy_optout(void);
+#endif /* defined(__x86_64__) */
 
 #endif  /* XNU_KERNEL_PRIVATE */
 
 #ifdef KERNEL_PRIVATE
+typedef struct thread_pri_floor {
+	thread_t thread;
+} thread_pri_floor_t;
+
+#ifdef MACH_KERNEL_PRIVATE
+extern void thread_floor_boost_ast(thread_t thread);
+extern void thread_floor_boost_set_promotion_locked(thread_t thread);
+#endif /* MACH_KERNEL_PRIVATE */
+
+/*!  @function thread_priority_floor_start
+ *   @abstract boost the current thread priority to floor.
+ *   @discussion Increase the priority of the current thread to at least MINPRI_FLOOR.
+ *       The boost will be mantained until a corresponding thread_priority_floor_end()
+ *       is called. Every call of thread_priority_floor_start() needs to have a corresponding
+ *       call to thread_priority_floor_end() from the same thread.
+ *       No thread can return to userspace before calling thread_priority_floor_end().
+ *
+ *       NOTE: avoid to use this function. Try to use gate_t or sleep_with_inheritor()
+ *       instead.
+ *   @result a token to be given to the corresponding thread_priority_floor_end()
+ */
+extern thread_pri_floor_t thread_priority_floor_start(void);
+/*!  @function thread_priority_floor_end
+ *   @abstract ends the floor boost.
+ *   @param token the token obtained from thread_priority_floor_start()
+ *   @discussion ends the priority floor boost started with thread_priority_floor_start()
+ */
+extern void thread_priority_floor_end(thread_pri_floor_t *token);
+
 extern void thread_set_no_smt(bool set);
 #endif /* KERNEL_PRIVATE */
 
@@ -1359,6 +1530,13 @@ extern void thread_set_thread_name(thread_t th, const char* name);
 #ifdef XNU_KERNEL_PRIVATE
 extern void
 thread_get_thread_name(thread_t th, char* name);
+
+extern bool thread_supports_cooperative_workqueue(thread_t thread);
+extern void thread_arm_workqueue_quantum(thread_t thread);
+extern void thread_disarm_workqueue_quantum(thread_t thread);
+
+extern void thread_evaluate_workqueue_quantum_expiry(thread_t thread);
+extern bool thread_has_expired_workqueue_quantum(thread_t thread, bool should_trace);
 #endif /* XNU_KERNEL_PRIVATE */
 
 /*! @function kernel_thread_start
@@ -1376,11 +1554,13 @@ extern kern_return_t    kernel_thread_start(
 	thread_t                        *new_thread);
 
 #ifdef KERNEL_PRIVATE
+bool thread_is_eager_preempt(thread_t thread);
 void thread_set_eager_preempt(thread_t thread);
 void thread_clear_eager_preempt(thread_t thread);
 void thread_set_honor_qlimit(thread_t thread);
 void thread_clear_honor_qlimit(thread_t thread);
 extern ipc_port_t convert_thread_to_port(thread_t);
+extern ipc_port_t convert_thread_to_port_pinned(thread_t);
 extern ipc_port_t convert_thread_inspect_to_port(thread_inspect_t);
 extern ipc_port_t convert_thread_read_to_port(thread_read_t);
 extern boolean_t is_vm_privileged(void);
@@ -1388,9 +1568,12 @@ extern boolean_t set_vm_privilege(boolean_t);
 extern kern_allocation_name_t thread_set_allocation_name(kern_allocation_name_t new_name);
 extern void *thread_iokit_tls_get(uint32_t index);
 extern void thread_iokit_tls_set(uint32_t index, void * data);
-extern void thread_port_with_flavor_notify(mach_msg_header_t *msg);
 extern int thread_self_region_page_shift(void);
 extern void thread_self_region_page_shift_set(int pgshift);
+extern kern_return_t thread_create_immovable(task_t task, thread_t *new_thread);
+extern kern_return_t thread_terminate_pinned(thread_t thread);
+
+
 #endif /* KERNEL_PRIVATE */
 
 __END_DECLS

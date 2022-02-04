@@ -190,12 +190,8 @@ devfs_mount(struct mount *mp, __unused vnode_t devvp, __unused user_addr_t data,
 	 * HERE we should check to see if we are already mounted here.
 	 */
 
-	MALLOC(devfs_mp_p, struct devfsmount *, sizeof(struct devfsmount),
-	    M_DEVFSMNT, M_WAITOK);
-	if (devfs_mp_p == NULL) {
-		return ENOMEM;
-	}
-	bzero(devfs_mp_p, sizeof(*devfs_mp_p));
+	devfs_mp_p = kalloc_type(struct devfsmount,
+	    Z_WAITOK | Z_ZERO | Z_NOFAIL);
 	devfs_mp_p->mount = mp;
 
 	/*-
@@ -212,7 +208,7 @@ devfs_mount(struct mount *mp, __unused vnode_t devvp, __unused user_addr_t data,
 
 	if (error) {
 		mp->mnt_data = (qaddr_t)0;
-		FREE(devfs_mp_p, M_DEVFSMNT);
+		kfree_type(struct devfsmount, devfs_mp_p);
 		return error;
 	} else {
 		DEVFS_INCR_MOUNTS();
@@ -265,7 +261,7 @@ devfs_unmount( struct mount *mp, int mntflags, __unused vfs_context_t ctx)
 
 	DEVFS_DECR_MOUNTS();
 
-	FREE(devfs_mp_p, M_DEVFSMNT);
+	kfree_type(struct devfsmount, devfs_mp_p);
 	mp->mnt_data = (qaddr_t)0;
 	mp->mnt_flag &= ~MNT_LOCAL;
 
@@ -495,7 +491,7 @@ devfs_kernel_mount(char * mntname)
 	vfs_context_t ctx = vfs_context_kernel();
 	char fsname[] = "devfs";
 
-	error = kernel_mount(fsname, NULLVP, NULLVP, mntname, NULL, 0, MNT_DONTBROWSE, KERNEL_MOUNT_NOAUTH, ctx);
+	error = kernel_mount(fsname, NULLVP, NULLVP, mntname, NULL, 0, MNT_DONTBROWSE, KERNEL_MOUNT_NOAUTH | KERNEL_MOUNT_DEVFS, ctx);
 	if (error) {
 		printf("devfs_kernel_mount: kernel_mount failed: %d\n", error);
 		return error;

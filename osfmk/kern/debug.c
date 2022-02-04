@@ -67,6 +67,7 @@
 #include <kern/thread.h>
 #include <kern/assert.h>
 #include <kern/sched_prim.h>
+#include <kern/socd_client.h>
 #include <kern/misc_protos.h>
 #include <kern/clock.h>
 #include <kern/telemetry.h>
@@ -91,6 +92,7 @@
 
 #include <i386/cpu_threads.h>
 #include <i386/pmCPU.h>
+#include <i386/lbr.h>
 #endif
 
 #include <IOKit/IOPlatformExpert.h>
@@ -113,6 +115,8 @@
 #include <arm/misc_protos.h>
 extern volatile struct xnu_hw_shmem_dbg_command_info *hwsd_info;
 #endif
+
+#include <san/kcov.h>
 
 #if CONFIG_XNUPOST
 #include <tests/xnupost.h>
@@ -272,6 +276,7 @@ boolean_t auxkc_uuid_valid = FALSE;
 uuid_t auxkc_uuid;
 uuid_string_t auxkc_uuid_string;
 
+
 /*
  * By default we treat Debugger() the same as calls to panic(), unless
  * we have debug boot-args present and the DB_KERN_DUMP_ON_NMI *NOT* set.
@@ -282,6 +287,8 @@ uuid_string_t auxkc_uuid_string;
 static boolean_t debugger_is_panic = TRUE;
 
 TUNABLE(unsigned int, debug_boot_arg, "debug", 0);
+
+TUNABLE(int, verbose_panic_flow_logging, "verbose_panic_flow_logging", 0);
 
 char kernel_uuid_string[37]; /* uuid_string_t */
 char kernelcache_uuid_string[37]; /* uuid_string_t */
@@ -300,22 +307,32 @@ int kext_assertions_enable =
  * Maintain the physically-contiguous carveout for the `phys_carveout_mb`
  * boot-arg.
  */
+
+TUNABLE(size_t, phys_carveout_mb, "phys_carveout_mb", 0);
+TUNABLE_WRITEABLE(boolean_t, phys_carveout_core, "phys_carveout_core", 0);
 SECURITY_READ_ONLY_LATE(vm_offset_t) phys_carveout = 0;
 SECURITY_READ_ONLY_LATE(uintptr_t) phys_carveout_pa = 0;
 SECURITY_READ_ONLY_LATE(size_t) phys_carveout_size = 0;
+SECURITY_READ_ONLY_LATE(vm_offset_t) phys_carveout_metadata = 0;
+SECURITY_READ_ONLY_LATE(uintptr_t) phys_carveout_metadata_pa = 0;
+SECURITY_READ_ONLY_LATE(size_t) phys_carveout_metadata_size = 0;
 
+/*
+ * Returns whether kernel debugging is expected to be restricted
+ * on the device currently based on CSR or other platform restrictions.
+ */
 boolean_t
-kernel_debugging_allowed(void)
+kernel_debugging_restricted(void)
 {
 #if XNU_TARGET_OS_OSX
 #if CONFIG_CSR
 	if (csr_check(CSR_ALLOW_KERNEL_DEBUGGER) != 0) {
-		return FALSE;
+		return TRUE;
 	}
 #endif /* CONFIG_CSR */
-	return TRUE;
+	return FALSE;
 #else /* XNU_TARGET_OS_OSX */
-	return PE_i_can_has_debugger(NULL);
+	return FALSE;
 #endif /* XNU_TARGET_OS_OSX */
 }
 
@@ -336,7 +353,7 @@ panic_init(void)
 	 * Take the value of the debug boot-arg into account
 	 */
 #if MACH_KDP
-	if (kernel_debugging_allowed() && debug_boot_arg) {
+	if (!kernel_debugging_restricted() && debug_boot_arg) {
 		if (debug_boot_arg & DB_HALT) {
 			halt_in_debugger = 1;
 		}
@@ -392,7 +409,7 @@ extended_debug_log_init(void)
 	 * so we can accurately calculate the CRC for the region without needing to flush the
 	 * full region over SMC.
 	 */
-	char *new_debug_buf = kalloc_flags(EXTENDED_DEBUG_BUF_SIZE, Z_WAITOK | Z_ZERO);
+	char *new_debug_buf = kalloc_data(EXTENDED_DEBUG_BUF_SIZE, Z_WAITOK | Z_ZERO);
 
 	panic_info = (struct macos_panic_header *)new_debug_buf;
 	debug_buf_ptr = debug_buf_base = (new_debug_buf + offsetof(struct macos_panic_header, mph_data));
@@ -452,34 +469,72 @@ phys_carveout_init(void)
 		return;
 	}
 
-	unsigned int phys_carveout_mb = 0;
-
-	if (!PE_parse_boot_argn("phys_carveout_mb", &phys_carveout_mb,
-	    sizeof(phys_carveout_mb))) {
-		return;
-	}
 	if (phys_carveout_mb == 0) {
 		return;
 	}
 
-	size_t size = 0;
-	if (os_mul_overflow(phys_carveout_mb, 1024 * 1024, &size)) {
-		printf("phys_carveout_mb size overflowed (%uMB)\n",
+	size_t temp_phys_carveout_size = 0;
+	if (os_mul_overflow(phys_carveout_mb, 1024 * 1024, &temp_phys_carveout_size)) {
+		panic("phys_carveout_mb size overflowed (%luMB)",
 		    phys_carveout_mb);
 		return;
 	}
 
-	kern_return_t kr = kmem_alloc_contig(kernel_map, &phys_carveout, size,
+	kern_return_t kr = kmem_alloc_contig(kernel_map, &phys_carveout, temp_phys_carveout_size,
 	    VM_MAP_PAGE_MASK(kernel_map), 0, 0, KMA_NOPAGEWAIT,
 	    VM_KERN_MEMORY_DIAG);
 	if (kr != KERN_SUCCESS) {
-		printf("failed to allocate %uMB for phys_carveout_mb: %u\n",
+		panic("failed to allocate %luMB for phys_carveout_mb: %u",
 		    phys_carveout_mb, (unsigned int)kr);
 		return;
 	}
 
 	phys_carveout_pa = kvtophys(phys_carveout);
-	phys_carveout_size = size;
+	phys_carveout_size = temp_phys_carveout_size;
+
+	/*
+	 * Record and dump carveout metadata region into corefile. Smallest unit (a
+	 * page) is allocated as storage for panic_trace_header_t content, which is
+	 * unfortunately wasteful but simplifies usage logic rather than stealing
+	 * bytes from prior phys_carveout.
+	 */
+	if (debug_can_coredump_phys_carveout()) {
+		size_t temp_phys_carveout_metadata_size = PAGE_SIZE;
+		kr = kmem_alloc_contig(kernel_map, &phys_carveout_metadata, temp_phys_carveout_metadata_size,
+		    VM_MAP_PAGE_MASK(kernel_map), 0, 0,
+		    KMA_NOPAGEWAIT, VM_KERN_MEMORY_DIAG);
+		if (kr != KERN_SUCCESS) {
+			panic("failed to allocate %u for phys_carveout_metadata: %u",
+			    (unsigned int)temp_phys_carveout_metadata_size, (unsigned int)kr);
+			return;
+		}
+		phys_carveout_metadata_size = temp_phys_carveout_metadata_size;
+		phys_carveout_metadata_pa = kvtophys(phys_carveout_metadata);
+	}
+
+#if (__arm__ || __arm64__) && (DEVELOPMENT || DEBUG)
+	/* likely panic_trace boot-arg is also set so check and enable tracing if necessary into new carveout */
+	PE_arm_debug_enable_trace();
+#endif /* (__arm__ || __arm64__) && (DEVELOPMENT || DEBUG) */
+}
+
+boolean_t
+debug_is_in_phys_carveout(vm_map_offset_t va)
+{
+	return phys_carveout_size && va >= phys_carveout &&
+	       va < (phys_carveout + phys_carveout_size);
+}
+
+boolean_t
+debug_is_in_phys_carveout_metadata(vm_map_offset_t va)
+{
+	return phys_carveout_metadata_size && va >= phys_carveout_metadata && va < (phys_carveout_metadata + phys_carveout_metadata_size);
+}
+
+boolean_t
+debug_can_coredump_phys_carveout(void)
+{
+	return phys_carveout_core;
 }
 
 static void
@@ -519,12 +574,13 @@ DebuggerUnlock(void)
 }
 
 static kern_return_t
-DebuggerHaltOtherCores(boolean_t proceed_on_failure)
+DebuggerHaltOtherCores(boolean_t proceed_on_failure, bool is_stackshot)
 {
 #if defined(__arm__) || defined(__arm64__)
-	return DebuggerXCallEnter(proceed_on_failure);
+	return DebuggerXCallEnter(proceed_on_failure, is_stackshot);
 #else /* defined(__arm__) || defined(__arm64__) */
 #pragma unused(proceed_on_failure)
+#pragma unused(is_stackshot)
 	mp_kdp_enter(proceed_on_failure);
 	return KERN_SUCCESS;
 #endif
@@ -630,16 +686,19 @@ debug_is_current_cpu_in_panic_state(void)
 void
 Debugger(const char *message)
 {
-	DebuggerWithContext(0, NULL, message, DEBUGGER_OPTION_NONE);
+	DebuggerWithContext(0, NULL, message, DEBUGGER_OPTION_NONE, (unsigned long)(char *)__builtin_return_address(0));
 }
 
 void
 DebuggerWithContext(unsigned int reason, void *ctx, const char *message,
-    uint64_t debugger_options_mask)
+    uint64_t debugger_options_mask, unsigned long debugger_caller)
 {
 	spl_t previous_interrupts_state;
 	boolean_t old_doprnt_hide_pointers = doprnt_hide_pointers;
 
+#if defined(__x86_64__) && (DEVELOPMENT || DEBUG)
+	read_lbr();
+#endif
 	previous_interrupts_state = ml_set_interrupts_enabled(FALSE);
 	disable_preemption();
 
@@ -669,12 +728,17 @@ DebuggerWithContext(unsigned int reason, void *ctx, const char *message,
 		panic_spin_forever();
 	}
 
+	#pragma unused(debugger_caller) // lies!
+	SOCD_TRACE_XNU(PANIC, PACK_2X32(VALUE(CPUDEBUGGERCOUNT), VALUE(cpu_number())), VALUE(debugger_options_mask), ADDR(message), ADDR(debugger_caller));
+
 	/* Handle any necessary platform specific actions before we proceed */
 	PEInitiatePanic();
 
 #if DEVELOPMENT || DEBUG
 	DEBUGGER_DEBUGGING_NESTED_PANIC_IF_REQUESTED((debugger_options_mask & DEBUGGER_OPTION_RECURPANIC_ENTRY));
 #endif
+
+	PE_panic_hook(message);
 
 	doprnt_hide_pointers = FALSE;
 
@@ -711,10 +775,7 @@ kdp_register_callout(kdp_callout_fn_t fn, void * arg)
 	struct kdp_callout * kcp;
 	struct kdp_callout * list_head;
 
-	kcp = kalloc(sizeof(*kcp));
-	if (kcp == NULL) {
-		panic("kdp_register_callout() kalloc failed");
-	}
+	kcp = zalloc_permanent_type(struct kdp_callout);
 
 	kcp->callout_fn = fn;
 	kcp->callout_arg = arg;
@@ -769,7 +830,7 @@ register_additional_panic_data_buffer(const char *producer_name, void *buf, int 
 		panic("register_additional_panic_data_buffer called with invalid length");
 	}
 
-	struct additional_panic_data_buffer *new_panic_data_buffer = kalloc(sizeof(struct additional_panic_data_buffer));
+	struct additional_panic_data_buffer *new_panic_data_buffer = zalloc_permanent_type(struct additional_panic_data_buffer);
 	new_panic_data_buffer->producer_name = producer_name;
 	new_panic_data_buffer->buf = buf;
 	new_panic_data_buffer->len = len;
@@ -815,6 +876,23 @@ panic_with_options(unsigned int reason, void *ctx, uint64_t debugger_options_mas
 	va_end(panic_str_args);
 }
 
+boolean_t
+panic_validate_ptr(void *ptr, vm_size_t size, const char *what)
+{
+	if (ptr == NULL) {
+		paniclog_append_noflush("NULL %s pointer\n", what);
+		return false;
+	}
+
+	if (!ml_validate_nofault((vm_offset_t)ptr, size)) {
+		paniclog_append_noflush("Invalid %s pointer: %p (size %d)\n",
+		    what, ptr, (uint32_t)size);
+		return false;
+	}
+
+	return true;
+}
+
 #if defined (__x86_64__)
 /*
  * panic_with_thread_context() is used on x86 platforms to specify a different thread that should be backtraced in the paniclog.
@@ -854,6 +932,7 @@ panic_trap_to_debugger(const char *panic_format_str, va_list *panic_args, unsign
 #pragma clang diagnostic pop
 
 #if defined(__x86_64__) && (DEVELOPMENT || DEBUG)
+	read_lbr();
 	/* Turn off I/O tracing once we've panicked */
 	mmiotrace_enabled = 0;
 #endif
@@ -886,6 +965,7 @@ panic_trap_to_debugger(const char *panic_format_str, va_list *panic_args, unsign
 		panic_spin_forever();
 	}
 
+	SOCD_TRACE_XNU(PANIC, PACK_2X32(VALUE(CPUDEBUGGERCOUNT), VALUE(cpu_number())), VALUE(panic_options_mask), ADDR(panic_format_str), ADDR(panic_caller));
 	/* Handle any necessary platform specific actions before we proceed */
 	PEInitiatePanic();
 
@@ -903,7 +983,7 @@ panic_trap_to_debugger(const char *panic_format_str, va_list *panic_args, unsign
 		if (get_preemption_level() == 0 && !ml_at_interrupt_context()) {
 			ml_set_interrupts_enabled(TRUE);
 			KDBG_RELEASE(TRACE_PANIC);
-			kdbg_dump_trace_to_file(KDBG_TRACE_PANIC_FILENAME);
+			kdbg_dump_trace_to_file(KDBG_TRACE_PANIC_FILENAME, false);
 		}
 	}
 
@@ -1004,6 +1084,11 @@ debugger_collect_diagnostics(unsigned int exception, unsigned int code, unsigned
 		}
 	}
 
+#ifdef CONFIG_KCOV
+	/* Try not to break core dump path by sanitizer. */
+	kcov_panic_disable();
+#endif
+
 	if ((debugger_current_op == DBOP_PANIC) ||
 	    ((debugger_current_op == DBOP_DEBUGGER) && debugger_is_panic)) {
 		/*
@@ -1058,7 +1143,7 @@ debugger_collect_diagnostics(unsigned int exception, unsigned int code, unsigned
 	 * conventional sense.
 	 */
 	if (debugger_current_op == DBOP_PANIC || ((debugger_current_op == DBOP_DEBUGGER) && debugger_is_panic))
-#endif
+#endif /* __x86_64__ */
 	{
 		kdp_callouts(KDP_EVENT_PANICLOG);
 
@@ -1075,6 +1160,7 @@ debugger_collect_diagnostics(unsigned int exception, unsigned int code, unsigned
 
 		/* DEBUGGER_OPTION_PANICLOGANDREBOOT is used for two finger resets on embedded so we get a paniclog */
 		if (debugger_panic_options & DEBUGGER_OPTION_PANICLOGANDREBOOT) {
+			PEHaltRestart(kPEPanicDiagnosticsDone);
 			PEHaltRestart(kPEPanicRestartCPUNoCallouts);
 		}
 	}
@@ -1087,6 +1173,7 @@ debugger_collect_diagnostics(unsigned int exception, unsigned int code, unsigned
 	 */
 	if ((debugger_panic_options & DEBUGGER_OPTION_SKIP_LOCAL_COREDUMP) &&
 	    (debug_boot_arg & DB_REBOOT_POST_CORE)) {
+		PEHaltRestart(kPEPanicDiagnosticsDone);
 		kdp_machine_reboot_type(kPEPanicRestartCPU, debugger_panic_options);
 	}
 
@@ -1097,7 +1184,7 @@ debugger_collect_diagnostics(unsigned int exception, unsigned int code, unsigned
 	if (on_device_corefile_enabled()) {
 		if (!kdp_has_polled_corefile()) {
 			if (debug_boot_arg & (DB_KERN_DUMP_ON_PANIC | DB_KERN_DUMP_ON_NMI)) {
-				paniclog_append_noflush("skipping local kernel core because core file could not be opened prior to panic (error : 0x%x)",
+				paniclog_append_noflush("skipping local kernel core because core file could not be opened prior to panic (error : 0x%x)\n",
 				    kdp_polled_corefile_error());
 #if defined(__arm__) || defined(__arm64__)
 				panic_info->eph_panic_flags |= EMBEDDED_PANIC_HEADER_FLAG_COREDUMP_FAILED;
@@ -1112,7 +1199,7 @@ debugger_collect_diagnostics(unsigned int exception, unsigned int code, unsigned
 		}
 #if XNU_MONITOR
 		else if ((pmap_get_cpu_data()->ppl_state == PPL_STATE_PANIC) && (debug_boot_arg & (DB_KERN_DUMP_ON_PANIC | DB_KERN_DUMP_ON_NMI))) {
-			paniclog_append_noflush("skipping local kernel core because the PPL is in PANIC state");
+			paniclog_append_noflush("skipping local kernel core because the PPL is in PANIC state\n");
 			panic_info->eph_panic_flags |= EMBEDDED_PANIC_HEADER_FLAG_COREDUMP_FAILED;
 			paniclog_flush();
 		}
@@ -1145,9 +1232,15 @@ debugger_collect_diagnostics(unsigned int exception, unsigned int code, unsigned
 			 */
 			if ((debug_boot_arg & DB_REBOOT_POST_CORE) &&
 			    ((ret == 0) || (debugger_panic_options & DEBUGGER_OPTION_ATTEMPTCOREDUMPANDREBOOT))) {
+				PEHaltRestart(kPEPanicDiagnosticsDone);
 				kdp_machine_reboot_type(kPEPanicRestartCPU, debugger_panic_options);
 			}
 		}
+	}
+
+	if (debugger_current_op == DBOP_PANIC ||
+	    ((debugger_current_op == DBOP_DEBUGGER) && debugger_is_panic)) {
+		PEHaltRestart(kPEPanicDiagnosticsDone);
 	}
 
 	if (debug_boot_arg & DB_REBOOT_ALWAYS) {
@@ -1179,6 +1272,11 @@ debugger_collect_diagnostics(unsigned int exception, unsigned int code, unsigned
 		panic_spin_shmcon();
 	}
 #endif /* defined(__arm__) || defined(__arm64__) */
+
+#else /* CONFIG_KDP_INTERACTIVE_DEBUGGING */
+
+	PEHaltRestart(kPEPanicDiagnosticsDone);
+
 #endif /* CONFIG_KDP_INTERACTIVE_DEBUGGING */
 
 	if (!panicDebugging) {
@@ -1205,7 +1303,7 @@ handle_debugger_trap(unsigned int exception, unsigned int code, unsigned int sub
 	DEBUGGER_TRAP_TIMESTAMP(0);
 
 	DebuggerLock();
-	ret = DebuggerHaltOtherCores(CPUDEBUGGERSYNC);
+	ret = DebuggerHaltOtherCores(CPUDEBUGGERSYNC, (CPUDEBUGGEROP == DBOP_STACKSHOT));
 
 	DEBUGGER_TRAP_TIMESTAMP(1);
 
@@ -1478,8 +1576,8 @@ panic_display_process_name(void)
 
 out:
 	proc_name[sizeof(proc_name) - 1] = '\0';
-	paniclog_append_noflush("\nProcess name corresponding to current thread: %s\n",
-	    proc_name[0] != '\0' ? proc_name : "Unknown");
+	paniclog_append_noflush("\nProcess name corresponding to current thread (%p): %s\n",
+	    current_thread(), proc_name[0] != '\0' ? proc_name : "Unknown");
 }
 
 unsigned
@@ -1533,20 +1631,21 @@ panic_display_kernel_aslr(void)
 
 	if (kc_format == KCFormatFileset) {
 		void *kch = PE_get_kc_header(KCKindPrimary);
-
 		paniclog_append_noflush("KernelCache slide: 0x%016lx\n", (unsigned long) vm_kernel_slide);
 		paniclog_append_noflush("KernelCache base:  %p\n", (void*) kch);
 		paniclog_append_noflush("Kernel slide:      0x%016lx\n", vm_kernel_stext - (unsigned long)kch + vm_kernel_slide);
+		paniclog_append_noflush("Kernel text base:  %p\n", (void *) vm_kernel_stext);
+#if defined(__arm64__)
+		extern vm_offset_t segTEXTEXECB;
+		paniclog_append_noflush("Kernel text exec slide: 0x%016lx\n", (unsigned long)segTEXTEXECB - (unsigned long)kch + vm_kernel_slide);
+		paniclog_append_noflush("Kernel text exec base:  0x%016lx\n", (unsigned long)segTEXTEXECB);
+#endif /* defined(__arm64__) */
 	} else if (vm_kernel_slide) {
 		paniclog_append_noflush("Kernel slide:      0x%016lx\n", (unsigned long) vm_kernel_slide);
+		paniclog_append_noflush("Kernel text base:  %p\n", (void *)vm_kernel_stext);
+	} else {
+		paniclog_append_noflush("Kernel text base:  %p\n", (void *)vm_kernel_stext);
 	}
-	paniclog_append_noflush("Kernel text base:  %p\n", (void *) vm_kernel_stext);
-#if defined(__arm64__)
-	if (kc_format == KCFormatFileset) {
-		extern vm_offset_t segTEXTEXECB;
-		paniclog_append_noflush("Kernel text exec base:  0x%016lx\n", (unsigned long)segTEXTEXECB);
-	}
-#endif
 }
 
 void
@@ -1555,59 +1654,6 @@ panic_display_hibb(void)
 #if defined(__i386__) || defined (__x86_64__)
 	paniclog_append_noflush("__HIB  text base: %p\n", (void *) vm_hib_base);
 #endif
-}
-
-extern unsigned int     stack_total;
-extern unsigned long long stack_allocs;
-
-#if defined (__x86_64__)
-extern unsigned int     inuse_ptepages_count;
-extern long long alloc_ptepages_count;
-#endif
-
-extern boolean_t panic_include_zprint;
-extern mach_memory_info_t *panic_kext_memory_info;
-extern vm_size_t panic_kext_memory_size;
-
-__private_extern__ void
-panic_display_zprint(void)
-{
-	if (panic_include_zprint == TRUE) {
-		struct zone     zone_copy;
-
-		paniclog_append_noflush("%-20s %10s %10s\n", "Zone Name", "Cur Size", "Free Size");
-		zone_index_foreach(i) {
-			if (ml_nofault_copy((vm_offset_t)&zone_array[i],
-			    (vm_offset_t)&zone_copy, sizeof(struct zone)) == sizeof(struct zone)) {
-				if (zone_copy.page_count > atop(1024 * 1024)) {
-					paniclog_append_noflush("%-8s%-20s %10llu %10lu\n",
-					    zone_heap_name(&zone_copy),
-					    zone_copy.z_name, ptoa_64(zone_copy.page_count),
-					    (uintptr_t)zone_size_free(&zone_copy));
-				}
-			}
-		}
-
-		paniclog_append_noflush("%-20s %10lu\n", "Kernel Stacks",
-		    (uintptr_t)(kernel_stack_size * stack_total));
-#if defined (__x86_64__)
-		paniclog_append_noflush("%-20s %10lu\n", "PageTables",
-		    (uintptr_t)ptoa(inuse_ptepages_count));
-#endif
-		paniclog_append_noflush("%-20s %10lu\n", "Kalloc.Large",
-		    (uintptr_t)kalloc_large_total);
-
-		if (panic_kext_memory_info) {
-			mach_memory_info_t *mem_info = panic_kext_memory_info;
-			paniclog_append_noflush("\n%-5s %10s\n", "Kmod", "Size");
-			for (uint32_t i = 0; i < (panic_kext_memory_size / sizeof(mach_zone_info_t)); i++) {
-				if (((mem_info[i].flags & VM_KERN_SITE_TYPE) == VM_KERN_SITE_KMOD) &&
-				    (mem_info[i].size > (1024 * 1024))) {
-					paniclog_append_noflush("%-5lld %10lld\n", mem_info[i].site, mem_info[i].size);
-				}
-			}
-		}
-	}
 }
 
 #if CONFIG_ECC_LOGGING
@@ -1622,49 +1668,9 @@ panic_display_ecc_errors(void)
 }
 #endif /* CONFIG_ECC_LOGGING */
 
-#if CONFIG_ZLEAKS
-extern boolean_t        panic_include_ztrace;
-extern struct ztrace* top_ztrace;
-void panic_print_symbol_name(vm_address_t search);
-
-/*
- * Prints the backtrace most suspected of being a leaker, if we paniced in the zone allocator.
- * top_ztrace and panic_include_ztrace comes from osfmk/kern/zalloc.c
- */
-__private_extern__ void
-panic_display_ztrace(void)
-{
-	if (panic_include_ztrace == TRUE) {
-		unsigned int i = 0;
-		boolean_t keepsyms = FALSE;
-
-		PE_parse_boot_argn("keepsyms", &keepsyms, sizeof(keepsyms));
-		struct ztrace top_ztrace_copy;
-
-		/* Make sure not to trip another panic if there's something wrong with memory */
-		if (ml_nofault_copy((vm_offset_t)top_ztrace, (vm_offset_t)&top_ztrace_copy, sizeof(struct ztrace)) == sizeof(struct ztrace)) {
-			paniclog_append_noflush("\nBacktrace suspected of leaking: (outstanding bytes: %lu)\n", (uintptr_t)top_ztrace_copy.zt_size);
-			/* Print the backtrace addresses */
-			for (i = 0; (i < top_ztrace_copy.zt_depth && i < MAX_ZTRACE_DEPTH); i++) {
-				paniclog_append_noflush("%p ", top_ztrace_copy.zt_stack[i]);
-				if (keepsyms) {
-					panic_print_symbol_name((vm_address_t)top_ztrace_copy.zt_stack[i]);
-				}
-				paniclog_append_noflush("\n");
-			}
-			/* Print any kexts in that backtrace, along with their link addresses so we can properly blame them */
-			kmod_panic_dump((vm_offset_t *)&top_ztrace_copy.zt_stack[0], top_ztrace_copy.zt_depth);
-		} else {
-			paniclog_append_noflush("\nCan't access top_ztrace...\n");
-		}
-		paniclog_append_noflush("\n");
-	}
-}
-#endif /* CONFIG_ZLEAKS */
-
 #if !CONFIG_TELEMETRY
 int
-telemetry_gather(user_addr_t buffer __unused, uint32_t *length __unused, boolean_t mark __unused)
+telemetry_gather(user_addr_t buffer __unused, uint32_t *length __unused, bool mark __unused)
 {
 	return KERN_NOT_SUPPORTED;
 }
@@ -1672,7 +1678,7 @@ telemetry_gather(user_addr_t buffer __unused, uint32_t *length __unused, boolean
 
 #include <machine/machine_cpu.h>
 
-uint32_t kern_feature_overrides = 0;
+SECURITY_READ_ONLY_LATE(uint32_t) kern_feature_overrides = 0;
 
 boolean_t
 kern_feature_override(uint32_t fmask)

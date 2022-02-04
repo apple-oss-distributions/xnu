@@ -1,6 +1,6 @@
 # -*- mode: makefile;-*-
 #
-# Copyright (C) 2010-2016 Apple Inc. All rights reserved.
+# Copyright (C) 2010-2020 Apple Inc. All rights reserved.
 #
 # MakeInc.top is the top-level makefile for the xnu
 # build system. All the main XBS targets
@@ -95,8 +95,8 @@ else ifneq ($(findstring _host,$(RC_ProjectName)),)
 override DEFAULT_ARM_MACHINE_CONFIG	:= NONE
 override DEFAULT_ARM64_MACHINE_CONFIG	:= NONE
 else
-override DEFAULT_ARM_MACHINE_CONFIG	:= T8002
-override DEFAULT_ARM64_MACHINE_CONFIG	:= T7000
+override DEFAULT_ARM_MACHINE_CONFIG	:= NONE
+override DEFAULT_ARM64_MACHINE_CONFIG	:= VMAPPLE
 endif
 
 # This is typically never specified (TARGET_CONFIGS is used)
@@ -242,6 +242,9 @@ else ifneq ($(filter %_embedded,$(MAKECMDGOALS)),)
 # generate TARGET_CONFIGS for all kernel configs and products in the device map
 TARGET_CONFIGS := $(foreach my_devicemap_config,$(foreach my_arch_config,$(ARCH_CONFIGS_EMBEDDED),$(foreach my_product_config,$(DEVICEMAP_PRODUCTS_$(my_arch_config)),$(call function_lookup_product,$(my_product_config)))),$(foreach my_kernel_config,$(KERNEL_CONFIGS_EMBEDDED),$(my_kernel_config) $(subst ;, ,$(my_devicemap_config))))
 TARGET_CONFIGS_ALIASES := $(foreach my_devicemap_config,$(foreach my_arch_config,$(ARCH_CONFIGS_EMBEDDED),$(foreach my_product_config,$(DEVICEMAP_PRODUCTS_$(my_arch_config)),$(call function_lookup_product_alias,$(my_product_config)))),$(foreach my_kernel_config,$(KERNEL_CONFIGS_EMBEDDED),$(my_kernel_config) $(subst ;, ,$(my_devicemap_config))))
+else ifeq (xnu_headers_driverkit,$(RC_ProjectName))
+# generate TARGET_CONFIGS for all kernel configs for B&I
+TARGET_CONFIGS = DEVELOPMENT arm64 DEFAULT DEVELOPMENT X86_64 DEFAULT
 else ifneq ($(filter %_desktop,$(MAKECMDGOALS)),)
 # generate TARGET_CONFIGS for all kernel configs for B&I
 TARGET_CONFIGS := $(foreach my_kern_config, $(KERNEL_CONFIGS_DESKTOP), $(foreach my_arch_config, $(ARCH_CONFIGS_DESKTOP), $(foreach my_machine_config, $(MACHINE_CONFIGS), $(my_kern_config) $(my_arch_config) $(my_machine_config))))
@@ -270,6 +273,9 @@ TARGET_CONFIGS_ALIASES_UC := $(strip $(shell printf "%s" "$(TARGET_CONFIGS_ALIAS
 # "RELEASE^I386^NONE DEVELOPMENT^ARM^T8002", which can be looped
 # over trivially. PRIMARY_BUILD_CONFIGS is the first config
 # for each architecture, used primarily for machine-dependent recursion.
+# VARIANT_CONFIGS contains one build configuration for each combination
+# of kernel architecture and configuration. It is used for variant
+# installation recursion.
 
 BUILD_CONFIGS = $(call function_create_build_configs, $(TARGET_CONFIGS_UC))
 
@@ -277,6 +283,15 @@ PRIMARY_ARCHS = $(strip $(sort $(foreach build_config, $(BUILD_CONFIGS), $(call 
 PRIMARY_BUILD_CONFIGS = $(strip $(foreach arch, $(PRIMARY_ARCHS), $(firstword $(foreach build_config, $(BUILD_CONFIGS), $(if $(filter $(arch),$(call function_extract_arch_config_from_build_config, $(build_config))), $(build_config), )))))
 NON_PRIMARY_BUILD_CONFIGS = $(strip $(filter-out $(PRIMARY_BUILD_CONFIGS), $(BUILD_CONFIGS)))
 FIRST_BUILD_CONFIG = $(firstword $(BUILD_CONFIGS))
+
+# Build list of all kernel configurations present in all build configs.
+PRIMARY_KERNEL_CONFIGS = $(strip $(sort $(foreach build_config, $(BUILD_CONFIGS), $(call function_extract_kernel_config_from_build_config, $(build_config)))))
+
+# Pick one build configuration for each kernel configuration.
+# This will be used to populate System.kext variants in SYMROOT / DSTROOT.
+VARIANT_CONFIGS = $(strip \
+                    $(foreach kernel_config, $(PRIMARY_KERNEL_CONFIGS), \
+                      $(firstword $(call function_match_build_config_for_kernel_config, $(BUILD_CONFIGS), $(kernel_config)))))
 
 ifneq ($(TARGET_CONFIGS_ALIASES_UC),)
 ALIAS_CONFIGS = $(call function_create_alias_configs, $(TARGET_CONFIGS_ALIASES_UC))
@@ -291,6 +306,8 @@ endif
 # $(warning NON_PRIMARY_BUILD_CONFIGS is $(NON_PRIMARY_BUILD_CONFIGS))
 # $(warning TARGET_CONFIGS_ALIASES is $(TARGET_CONFIGS_ALIASES))
 # $(warning ALIAS_CONFIGS is $(ALIAS_CONFIGS))
+# $(warning PRIMARY_KERNEL_CONFIGS is $(PRIMARY_KERNEL_CONFIGS))
+# $(warning VARIANT_CONFIGS is $(VARIANT_CONFIGS))
 
 MEMORY_SIZE := $(shell /usr/sbin/sysctl -n hw.memsize)
 
@@ -346,7 +363,7 @@ $$($(1)_bootstrap_target_list): $(1)_bootstrap_% : $(1)_stripe_dep_for_% $$(adds
 		CURRENT_ARCH_CONFIG=$$(call function_extract_arch_config_from_build_config,$$(patsubst $(1)_bootstrap_%,%,$$@))	  \
 		CURRENT_MACHINE_CONFIG=$$(call function_extract_machine_config_from_build_config,$$(patsubst $(1)_bootstrap_%,%,$$@))	\
 		CURRENT_BUILD_CONFIG=$$(patsubst $(1)_bootstrap_%,%,$$@)							\
-		PRIMARY_BUILD_CONFIGS="$(PRIMARY_BUILD_CONFIGS)"							\
+		PRIMARY_BUILD_CONFIGS="$(PRIMARY_BUILD_CONFIGS)" BUILD_CONFIGS="$(BUILD_CONFIGS)"				\
 		SOURCE=$${SRCROOT}/												\
 		RELATIVE_SOURCE_PATH=.											\
 		TARGET=$${OBJROOT}/$$(call function_convert_build_config_to_objdir,$$(patsubst $(1)_bootstrap_%,%,$$@))$(2)/	\
@@ -399,13 +416,15 @@ $(eval $(generated_top_level_build_setup))
 # invalidate current kernel in $(SYMROOT). Timestamp must be +1 from a previous kernel build
 setup: build_setup_bootstrap
 	$(_v)$(TOUCH) $(OBJROOT)/.mach_kernel.timestamp.new
-	$(_v)while [ \! $(OBJROOT)/.mach_kernel.timestamp.new -nt $(OBJROOT)/.mach_kernel.timestamp ]; do \
+    # -nt and -ot are evaluated differently by bash, dash, and zsh (and are not part of the POSIX specification).
+    # Explicitly specify what should happen when the right hand file doesn't exist.
+	$(_v)while [ \! $(OBJROOT)/.mach_kernel.timestamp.new -nt $(OBJROOT)/.mach_kernel.timestamp -a \( \! -e $(OBJROOT)/.mach_kernel.timestamp.new -o -e $(OBJROOT)/.mach_kernel.timestamp \) ]; do \
 		$(SLEEP) 1;					\
 		$(TOUCH) $(OBJROOT)/.mach_kernel.timestamp.new;	\
 	done
 	$(_v)$(MV) $(OBJROOT)/.mach_kernel.timestamp.new $(OBJROOT)/.mach_kernel.timestamp
 	$(_v)$(TOUCH) $(OBJROOT)/.symbolset.timestamp.new
-	$(_v)while [ \! $(OBJROOT)/.symbolset.timestamp.new -nt $(OBJROOT)/.symbolset.timestamp ]; do \
+	$(_v)while [ $(OBJROOT)/.symbolset.timestamp.new -ot $(OBJROOT)/.symbolset.timestamp ]; do \
 		$(SLEEP) 1;					\
 		$(TOUCH) $(OBJROOT)/.symbolset.timestamp.new;	\
 	done
@@ -573,7 +592,29 @@ $(eval $(generated_top_level_build_install_non_primary))
 
 install_non_primary: build_install_non_primary_bootstrap
 
-generated_top_level_config_install = $(call TOP_LEVEL_EACH_BUILD_CONFIG_BOOTSTRAP_template,config_install,,setup,config_all,1,$(PRIMARY_BUILD_CONFIGS))
+generated_top_level_config_install_primary = $(call TOP_LEVEL_EACH_BUILD_CONFIG_BOOTSTRAP_template,config_install_primary,,setup,config_all,1,$(PRIMARY_BUILD_CONFIGS))
+ifeq ($(VERBOSE_GENERATED_MAKE_FRAGMENTS),YES)
+$(warning Generate makefile fragment: $(generated_top_level_config_install_primary))
+endif
+$(eval $(generated_top_level_config_install_primary))
+
+.PHONY: install_config_primary
+
+install_config_primary: config_install_primary_bootstrap
+
+# config_install_variant iterates through products from all BUILD_CONFIGS so depends on config_all having completed overall
+generated_top_level_config_install_variant = $(call TOP_LEVEL_EACH_BUILD_CONFIG_BOOTSTRAP_template,config_install_variant,,config_all_bootstrap,,1,$(VARIANT_CONFIGS))
+ifeq ($(VERBOSE_GENERATED_MAKE_FRAGMENTS),YES)
+$(warning Generate makefile fragment: $(generated_top_level_config_install_variant))
+endif
+$(eval $(generated_top_level_config_install_variant))
+
+.PHONY: install_config_variant
+
+install_config_variant: config_install_variant_bootstrap
+
+# config_install iterates through products from all BUILD_CONFIGS so depends on config_all having completed overall
+generated_top_level_config_install = $(call TOP_LEVEL_EACH_BUILD_CONFIG_BOOTSTRAP_template,config_install,,config_all_bootstrap,,1,$(FIRST_BUILD_CONFIG))
 ifeq ($(VERBOSE_GENERATED_MAKE_FRAGMENTS),YES)
 $(warning Generate makefile fragment: $(generated_top_level_config_install))
 endif
@@ -581,10 +622,11 @@ $(eval $(generated_top_level_config_install))
 
 .PHONY: install_config final_touch_config_timestamps
 
-install_config: config_install_bootstrap final_touch_config_timestamps
+install_config: config_install_bootstrap install_config_primary install_config_variant final_touch_config_timestamps
+
 
 # Tell the next build the latest timestamp of any potential file in DSTROOT/SYMROOT
-final_touch_config_timestamps: config_install_bootstrap
+final_touch_config_timestamps: config_install_bootstrap install_config_primary install_config_variant
 	$(_v)$(TOUCH) $(OBJROOT)/.symbolset.timestamp
 
 #
@@ -602,11 +644,12 @@ install: installhdrs
 else ifneq ($(filter $(RC_ProjectName),xnu_headers_host),)
 install: installhdrs
 export INSTALLHDRS_SKIP_HOST=YES
+export INSTALLHDRS_MODULEMAPS_SKIP_HOST=YES
 else ifneq ($(filter $(RC_ProjectName),xnu_headers_driverkit),)
 install: installhdrs_desktop
 else
 
-install: installhdrs install_textfiles install_config install_kernels install_aliases checkstyle
+install: installhdrs install_textfiles install_config install_kernels install_aliases
 endif
 
 .PHONY: install_embedded install_release_embedded install_development_embedded install_desktop
@@ -724,20 +767,6 @@ TAGS: cscope.files
 	@-cat cscope.files | etags -l auto -S - 2> /dev/null
 	@rm -f cscope.files 2> /dev/null
 
-#
-# Check or reformat source code for official xnu code style
-#
-.PHONY: checkstyle restyle check_uncrustify uncrustify
-
-# User-friendly aliases for those who prefer to remember the name of the tool.
-check_uncrustify: checkstyle
-uncrustify: restyle
-
-checkstyle:
-	${_V}$(SRCROOT)/tools/uncrustify.sh
-
-restyle:
-	${_V}$(SRCROOT)/tools/uncrustify.sh -f
 
 .PHONY: help
 
@@ -758,3 +787,5 @@ $(eval $(generated_top_level_print_exports))
 .PHONY: print_exports_first_build_config
 
 print_exports_first_build_config: print_exports_bootstrap
+
+# vim: set ft=make:

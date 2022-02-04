@@ -148,7 +148,7 @@ IORecursiveLockAllocWithLockGroup( lck_grp_t * lockGroup )
 		return NULL;
 	}
 
-	lock = IONew( _IORecursiveLock, 1 );
+	lock = IOMallocType( _IORecursiveLock );
 	if (!lock) {
 		return NULL;
 	}
@@ -174,7 +174,7 @@ IORecursiveLockFree( IORecursiveLock * _lock )
 	_IORecursiveLock * lock = (_IORecursiveLock *)_lock;
 
 	lck_mtx_destroy(&lock->mutex, lock->group);
-	IODelete( lock, _IORecursiveLock, 1 );
+	IOFreeType( lock, _IORecursiveLock );
 }
 
 lck_mtx_t *

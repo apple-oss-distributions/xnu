@@ -86,6 +86,7 @@ int nfsm_chain_add_fattr4_f(struct nfsm_chain *, struct vnode_attr *, struct nfs
 int nfsm_chain_add_v2sattr_f(struct nfsm_chain *, struct vnode_attr *, uint32_t);
 int nfsm_chain_add_v3sattr_f(struct nfsmount *, struct nfsm_chain *, struct vnode_attr *);
 int nfsm_chain_add_string_nfc(struct nfsm_chain *, const uint8_t *, size_t);
+int nfsm_chaim_add_exclusive_create_verifier(int, struct nfsm_chain *, struct nfsmount *);
 
 int nfsm_chain_advance(struct nfsm_chain *, size_t);
 size_t nfsm_chain_offset(struct nfsm_chain *);
@@ -296,6 +297,14 @@ int nfsm_chain_trim_data(struct nfsm_chain *, int, int *);
 	        *((uint32_t*)(NMC)->nmc_ptr) = txdr_unsigned(VAL); \
 	        (NMC)->nmc_ptr += NFSX_UNSIGNED; \
 	        (NMC)->nmc_left -= NFSX_UNSIGNED; \
+	} while (0)
+
+/* update NFSv4 RPC statistics and add 32bit value to mbuf chain  */
+#define nfsm_chain_add_v4_op(E, NMC, OP) \
+	do { \
+	        nfsm_chain_add_32(E, NMC, OP); \
+	        if (OP < NFS_OP_COUNT) \
+	                OSAddAtomic64(1, &nfsclntstats.opcntv4[OP]); \
 	} while (0)
 
 /* add a 64bit value to an mbuf chain */
@@ -533,6 +542,19 @@ int nfsm_chain_trim_data(struct nfsm_chain *, int, int *);
 	        nfsm_chain_add_32((E), (NMC), (SID)->other[0]); \
 	        nfsm_chain_add_32((E), (NMC), (SID)->other[1]); \
 	        nfsm_chain_add_32((E), (NMC), (SID)->other[2]); \
+	} while (0)
+
+/* Add an NFSv4 "open-owner" structure to an mbuf chain */
+#define nfsm_chain_add_openowner(E, NMC, NMP, NOOP) \
+	do { \
+	        nfsm_chain_add_64(error, &nmreq, (NMP)->nm_clientid); \
+	        if (ISSET((NMP)->nm_state, NFSSTA_SPLIT_OPEN_OWNER)) { \
+	                nfsm_chain_add_32(error, &nmreq, NFSX_UNSIGNED * 2); \
+	                nfsm_chain_add_32(error, &nmreq, (NOOP)->noo_pid); \
+	        } else { \
+	               nfsm_chain_add_32(error, &nmreq, NFSX_UNSIGNED); \
+	        } \
+	        nfsm_chain_add_32(error, &nmreq, kauth_cred_getuid((NOOP)->noo_cred)); \
 	} while (0)
 
 /* add an NFSv4 lock owner structure to an mbuf chain */

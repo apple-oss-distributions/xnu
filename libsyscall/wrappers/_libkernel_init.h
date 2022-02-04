@@ -106,8 +106,15 @@ typedef const struct _libkernel_voucher_functions {
 
 typedef struct _libkernel_late_init_config {
 	unsigned long version;
+
+	/* Version 1 fields */
 	bool enable_system_version_compat;
+
+	/* Version 2 fields */
 	bool enable_ios_version_compat;
+
+	/* Version 3 fields */
+	bool enable_posix_spawn_filtering;
 } *_libkernel_late_init_config_t;
 
 struct ProgramVars; /* forward reference */
@@ -120,5 +127,15 @@ kern_return_t __libkernel_platform_init(_libkernel_string_functions_t fns);
 kern_return_t __libkernel_voucher_init(_libkernel_voucher_functions_t fns);
 
 void __libkernel_init_late(_libkernel_late_init_config_t config);
+
+typedef struct _libkernel_init_after_boot_tasks_config {
+	unsigned long version;
+
+	/* Version 1 fields */
+	bool enable_posix_spawn_filtering;
+} *_libkernel_init_after_boot_tasks_config_t;
+
+void __libkernel_init_after_boot_tasks(
+	_libkernel_init_after_boot_tasks_config_t config);
 
 #endif // __LIBKERNEL_INIT_H

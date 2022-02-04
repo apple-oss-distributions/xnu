@@ -40,6 +40,8 @@ COMP_SUBDIRS =
 
 %OBJS
 
+%LIBOBJS
+
 %CFILES
 
 %CXXFILES
@@ -66,7 +68,9 @@ KLD_FILES = $(OBJS)
 
 $(COMPONENT).filelist: $(OBJS)
 	$(_v)for kld_file in ${KLD_FILES}; do      \
-		$(SEG_HACK) -n __KLD -o $${kld_file}__ $${kld_file} || exit 1; \
+		$(SEG_HACK) -s __TEXT -n __KLD -o $${kld_file}__ $${kld_file} || exit 1; \
+		mv $${kld_file}__ $${kld_file} || exit 1; \
+		$(SEG_HACK) -i __KLD -n __KLDDATA -o $${kld_file}__ $${kld_file} || exit 1; \
 		mv $${kld_file}__ $${kld_file} || exit 1; \
 	done
 	@$(LOG_LDFILELIST) "$(COMPONENT)"
@@ -74,8 +78,18 @@ $(COMPONENT).filelist: $(OBJS)
 		 $(ECHO) $(TARGET)/$(CURRENT_KERNEL_CONFIG)/$${obj}; \
 	done > $(COMPONENT).filelist
 
+$(COMPONENT).libfilelist: $(LIBOBJS)
+	@$(LOG_LDFILELIST) "lib$(COMPONENT)"
+	$(_v)for obj in ${LIBOBJS}; do	\
+		 $(ECHO) $(TARGET)/$(CURRENT_KERNEL_CONFIG)/$${obj}; \
+	done > $(COMPONENT).libfilelist
 
+
+ifeq ($(RC_ProjectName),xnu_libraries)
+do_all: $(COMPONENT).libfilelist
+else
 do_all: $(COMPONENT).filelist
+endif
 
 do_build_all:: do_all
 

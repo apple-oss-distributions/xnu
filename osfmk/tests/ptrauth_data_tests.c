@@ -65,11 +65,11 @@ kern_return_t ptrauth_data_tests(void);
  * which should be subject to pointer signing.
  */
 #define ALLOC_VALIDATE_DATA_PTR(structure, decl, member, discr) { \
-	structure *tmp =  kheap_alloc(KHEAP_TEMP, sizeof(structure), Z_WAITOK | Z_ZERO); \
+	structure *tmp =  kalloc_flags(sizeof(structure), Z_WAITOK | Z_ZERO); \
 	if (!tmp) return KERN_NO_SPACE; \
 	tmp->member = (void*)0xffffffff41414141; \
 	VALIDATE_DATA_PTR(decl, tmp->member, discr) \
-	kheap_free(KHEAP_TEMP, tmp, sizeof(structure)); \
+	kfree(tmp, sizeof(structure)); \
 }
 
 #define VALIDATE_DATA_PTR(decl, ptr, discr) VALIDATE_PTR(decl, ptr, ptrauth_key_process_independent_data, discr)
@@ -85,31 +85,24 @@ ptrauth_data_tests(void)
 
 	/* task_t */
 	ALLOC_VALIDATE_DATA_PTR(struct task, vm_map_t, map, "task.map");
-	ALLOC_VALIDATE_DATA_PTR(struct task, struct ipc_port *, itk_self[0], "task.itk_self");
+	ALLOC_VALIDATE_DATA_PTR(struct task, struct ipc_port *, itk_task_ports[0], "task.itk_task_ports");
 	ALLOC_VALIDATE_DATA_PTR(struct task, struct ipc_port *, itk_settable_self, "task.itk_settable_self");
 	ALLOC_VALIDATE_DATA_PTR(struct task, struct ipc_port *, itk_host, "task.itk_host");
 	ALLOC_VALIDATE_DATA_PTR(struct task, struct ipc_port *, itk_bootstrap, "task.itk_bootstrap");
 	ALLOC_VALIDATE_DATA_PTR(struct task, struct ipc_port *, itk_debug_control, "task.itk_debug_control");
 	ALLOC_VALIDATE_DATA_PTR(struct task, struct ipc_space *, itk_space, "task.itk_space");
 	ALLOC_VALIDATE_DATA_PTR(struct task, void *, bsd_info, "task.bsd_info");
-	ALLOC_VALIDATE_DATA_PTR(struct task, struct ipc_port *, itk_gssd, "task.itk_gssd");
 	ALLOC_VALIDATE_DATA_PTR(struct task, struct ipc_port *, itk_task_access, "task.itk_task_access");
 	ALLOC_VALIDATE_DATA_PTR(struct task, struct ipc_port *, itk_resume, "task.itk_resume");
-	ALLOC_VALIDATE_DATA_PTR(struct task, struct ipc_port *, itk_seatbelt, "task.itk_seatbelt");
 
 	/* _vm_map */
 	ALLOC_VALIDATE_DATA_PTR(struct _vm_map, pmap_t, pmap, "_vm_map.pmap");
 
-	/* pmap */
-	ALLOC_VALIDATE_DATA_PTR(struct pmap, tt_entry_t *, tte, "pmap.tte");
-	ALLOC_VALIDATE_DATA_PTR(struct pmap, pmap_t, nested_pmap, "pmap.nested_pmap");
-
 	/* ipc_port */
-	ALLOC_VALIDATE_DATA_PTR(struct ipc_port, ipc_kobject_t, ip_kobject, "ipc_port.kobject");
 	ALLOC_VALIDATE_DATA_PTR(struct ipc_port, ipc_kobject_label_t, ip_kolabel, "ipc_port.kolabel");
 
 	/* ipc_kobject_label */
-	ALLOC_VALIDATE_DATA_PTR(struct ipc_kobject_label, ipc_kobject_t, ikol_kobject, "ipc_kobject_label.ikol_kobject");
+	ALLOC_VALIDATE_DATA_PTR(struct ipc_kobject_label, ipc_kobject_t, ikol_alt_port, "ipc_kobject_label.ikol_alt_port");
 
 	/* ipc_entry */
 	ALLOC_VALIDATE_DATA_PTR(struct ipc_entry, struct ipc_object *, ie_object, "ipc_entry.ie_object");
@@ -118,7 +111,7 @@ ptrauth_data_tests(void)
 	ALLOC_VALIDATE_DATA_PTR(struct ipc_kmsg, struct ipc_port *, ikm_prealloc, "kmsg.ikm_prealloc");
 	ALLOC_VALIDATE_DATA_PTR(struct ipc_kmsg, void *, ikm_data, "kmsg.ikm_data");
 	ALLOC_VALIDATE_DATA_PTR(struct ipc_kmsg, mach_msg_header_t *, ikm_header, "kmsg.ikm_header");
-	ALLOC_VALIDATE_DATA_PTR(struct ipc_kmsg, struct ipc_port *, ikm_voucher, "kmsg.ikm_voucher");
+	ALLOC_VALIDATE_DATA_PTR(struct ipc_kmsg, struct ipc_port *, ikm_voucher_port, "kmsg.ikm_voucher_port");
 
 	return kr;
 }

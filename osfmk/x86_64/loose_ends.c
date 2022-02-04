@@ -115,7 +115,6 @@ extern void             mapping_set_ref(ppnum_t pn);
 extern void             ovbcopy(const char      *from,
     char            *to,
     vm_size_t       nbytes);
-void machine_callstack(uintptr_t *buf, vm_size_t callstack_max);
 
 
 #define value_64bit(value)  ((value) & 0xFFFFFFFF00000000ULL)
@@ -300,22 +299,18 @@ ovbcopy(
  *  Read data from a physical address. Memory should not be cache inhibited.
  */
 
-uint64_t reportphyreaddelayabs;
-uint64_t reportphywritedelayabs;
-uint32_t reportphyreadosbt;
-uint32_t reportphywriteosbt;
+uint64_t report_phy_read_delay;
+uint64_t report_phy_write_delay;
+uint32_t report_phy_read_osbt;
+uint32_t report_phy_write_osbt;
 
 #if DEVELOPMENT || DEBUG
-uint32_t phyreadpanic = 1;
-uint32_t phywritepanic = 1;
-uint64_t tracephyreaddelayabs = 50 * NSEC_PER_USEC;
-uint64_t tracephywritedelayabs = 50 * NSEC_PER_USEC;
-uint64_t simulate_stretched_io = 0;
+uint64_t trace_phy_read_delay = 50 * NSEC_PER_USEC;
+uint64_t trace_phy_write_delay = 50 * NSEC_PER_USEC;
+extern uint64_t simulate_stretched_io;
 #else
-uint32_t phyreadpanic = 0;
-uint32_t phywritepanic = 0;
-uint64_t tracephyreaddelayabs = 0;
-uint64_t tracephywritedelayabs = 0;
+uint64_t trace_phy_read_delay = 0;
+uint64_t trace_phy_write_delay = 0;
 #endif
 
 __private_extern__ uint64_t
@@ -328,10 +323,10 @@ ml_phys_read_data(uint64_t paddr, int size)
 	uint64_t sabs = 0, eabs;
 
 	if (__improbable(!physmap_enclosed(paddr))) {
-		panic("%s: 0x%llx out of bounds\n", __FUNCTION__, paddr);
+		panic("%s: 0x%llx out of bounds", __FUNCTION__, paddr);
 	}
 
-	if (__improbable(reportphyreaddelayabs != 0)) {
+	if (__improbable(report_phy_read_delay != 0)) {
 		istate = ml_set_interrupts_enabled(FALSE);
 		sabs = mach_absolute_time();
 		timeread = TRUE;
@@ -369,18 +364,18 @@ ml_phys_read_data(uint64_t paddr, int size)
 		iotrace(IOTRACE_PHYS_READ, 0, paddr, size, result, sabs, eabs - sabs);
 #endif
 
-		if (__improbable((eabs - sabs) > reportphyreaddelayabs)) {
+		if (__improbable((eabs - sabs) > report_phy_read_delay)) {
 			(void)ml_set_interrupts_enabled(istate);
 
-			if (phyreadpanic && (machine_timeout_suspended() == FALSE)) {
+			if (phy_read_panic && (machine_timeout_suspended() == FALSE)) {
 				panic_notify();
 				panic("Read from physical addr 0x%llx took %llu ns, "
 				    "result: 0x%llx (start: %llu, end: %llu), ceiling: %llu",
 				    paddr, (eabs - sabs), result, sabs, eabs,
-				    reportphyreaddelayabs);
+				    report_phy_read_delay);
 			}
 
-			if (reportphyreadosbt) {
+			if (report_phy_read_osbt) {
 				OSReportWithBacktrace("ml_phys_read_data took %lluus",
 				    (eabs - sabs) / NSEC_PER_USEC);
 			}
@@ -388,7 +383,7 @@ ml_phys_read_data(uint64_t paddr, int size)
 			DTRACE_PHYSLAT4(physread, uint64_t, (eabs - sabs),
 			    uint64_t, paddr, uint32_t, size, uint64_t, result);
 #endif /* CONFIG_DTRACE */
-		} else if (__improbable(tracephyreaddelayabs > 0 && (eabs - sabs) > tracephyreaddelayabs)) {
+		} else if (__improbable(trace_phy_read_delay > 0 && (eabs - sabs) > trace_phy_read_delay)) {
 			KDBG(MACHDBG_CODE(DBG_MACH_IO, DBC_MACH_IO_PHYS_READ),
 			    (eabs - sabs), sabs, paddr, result);
 
@@ -480,10 +475,10 @@ ml_phys_write_data(uint64_t paddr, unsigned long long data, int size)
 	uint64_t sabs = 0, eabs;
 
 	if (__improbable(!physmap_enclosed(paddr))) {
-		panic("%s: 0x%llx out of bounds\n", __FUNCTION__, paddr);
+		panic("%s: 0x%llx out of bounds", __FUNCTION__, paddr);
 	}
 
-	if (__improbable(reportphywritedelayabs != 0)) {
+	if (__improbable(report_phy_write_delay != 0)) {
 		istate = ml_set_interrupts_enabled(FALSE);
 		sabs = mach_absolute_time();
 		timewrite = TRUE;
@@ -519,18 +514,18 @@ ml_phys_write_data(uint64_t paddr, unsigned long long data, int size)
 		iotrace(IOTRACE_PHYS_WRITE, 0, paddr, size, data, sabs, eabs - sabs);
 #endif
 
-		if (__improbable((eabs - sabs) > reportphywritedelayabs)) {
+		if (__improbable((eabs - sabs) > report_phy_write_delay)) {
 			(void)ml_set_interrupts_enabled(istate);
 
-			if (phywritepanic && (machine_timeout_suspended() == FALSE)) {
+			if (phy_write_panic && (machine_timeout_suspended() == FALSE)) {
 				panic_notify();
 				panic("Write to physical addr 0x%llx took %llu ns, "
 				    "data: 0x%llx (start: %llu, end: %llu), ceiling: %llu",
 				    paddr, (eabs - sabs), data, sabs, eabs,
-				    reportphywritedelayabs);
+				    report_phy_write_delay);
 			}
 
-			if (reportphywriteosbt) {
+			if (report_phy_write_osbt) {
 				OSReportWithBacktrace("ml_phys_write_data (%p, 0x%llx) "
 				    "took %lluus",
 				    paddr, data, (eabs - sabs) / NSEC_PER_USEC);
@@ -539,7 +534,7 @@ ml_phys_write_data(uint64_t paddr, unsigned long long data, int size)
 			DTRACE_PHYSLAT4(physwrite, uint64_t, (eabs - sabs),
 			    uint64_t, paddr, uint32_t, size, uint64_t, data);
 #endif /* CONFIG_DTRACE */
-		} else if (__improbable(tracephywritedelayabs > 0 && (eabs - sabs) > tracephywritedelayabs)) {
+		} else if (__improbable(trace_phy_write_delay > 0 && (eabs - sabs) > trace_phy_write_delay)) {
 			KDBG(MACHDBG_CODE(DBG_MACH_IO, DBC_MACH_IO_PHYS_WRITE),
 			    (eabs - sabs), sabs, paddr, data);
 
@@ -618,7 +613,7 @@ ml_port_io_read(uint16_t ioport, int size)
 	uint64_t sabs, eabs;
 	boolean_t istate, timeread = FALSE;
 
-	if (__improbable(reportphyreaddelayabs != 0)) {
+	if (__improbable(report_phy_read_delay != 0)) {
 		istate = ml_set_interrupts_enabled(FALSE);
 		sabs = mach_absolute_time();
 		timeread = TRUE;
@@ -652,18 +647,18 @@ ml_port_io_read(uint16_t ioport, int size)
 		iotrace(IOTRACE_PORTIO_READ, 0, ioport, size, result, sabs, eabs - sabs);
 #endif
 
-		if (__improbable((eabs - sabs) > reportphyreaddelayabs)) {
+		if (__improbable((eabs - sabs) > report_phy_read_delay)) {
 			(void)ml_set_interrupts_enabled(istate);
 
-			if (phyreadpanic && (machine_timeout_suspended() == FALSE)) {
+			if (phy_read_panic && (machine_timeout_suspended() == FALSE)) {
 				panic_notify();
 				panic("Read from IO port 0x%x took %llu ns, "
 				    "result: 0x%x (start: %llu, end: %llu), ceiling: %llu",
 				    ioport, (eabs - sabs), result, sabs, eabs,
-				    reportphyreaddelayabs);
+				    report_phy_read_delay);
 			}
 
-			if (reportphyreadosbt) {
+			if (report_phy_read_osbt) {
 				OSReportWithBacktrace("ml_port_io_read(0x%x) took %lluus",
 				    ioport, (eabs - sabs) / NSEC_PER_USEC);
 			}
@@ -671,7 +666,7 @@ ml_port_io_read(uint16_t ioport, int size)
 			DTRACE_PHYSLAT3(portioread, uint64_t, (eabs - sabs),
 			    uint16_t, ioport, uint32_t, size);
 #endif /* CONFIG_DTRACE */
-		} else if (__improbable(tracephyreaddelayabs > 0 && (eabs - sabs) > tracephyreaddelayabs)) {
+		} else if (__improbable(trace_phy_read_delay > 0 && (eabs - sabs) > trace_phy_read_delay)) {
 			KDBG(MACHDBG_CODE(DBG_MACH_IO, DBC_MACH_IO_PORTIO_READ),
 			    (eabs - sabs), sabs, ioport, result);
 
@@ -690,7 +685,7 @@ ml_port_io_write(uint16_t ioport, uint32_t val, int size)
 	uint64_t sabs, eabs;
 	boolean_t istate, timewrite = FALSE;
 
-	if (__improbable(reportphywritedelayabs != 0)) {
+	if (__improbable(report_phy_write_delay != 0)) {
 		istate = ml_set_interrupts_enabled(FALSE);
 		sabs = mach_absolute_time();
 		timewrite = TRUE;
@@ -723,18 +718,18 @@ ml_port_io_write(uint16_t ioport, uint32_t val, int size)
 		iotrace(IOTRACE_PORTIO_WRITE, 0, ioport, size, val, sabs, eabs - sabs);
 #endif
 
-		if (__improbable((eabs - sabs) > reportphywritedelayabs)) {
+		if (__improbable((eabs - sabs) > report_phy_write_delay)) {
 			(void)ml_set_interrupts_enabled(istate);
 
-			if (phywritepanic && (machine_timeout_suspended() == FALSE)) {
+			if (phy_write_panic && (machine_timeout_suspended() == FALSE)) {
 				panic_notify();
 				panic("Write to IO port 0x%x took %llu ns, val: 0x%x"
 				    " (start: %llu, end: %llu), ceiling: %llu",
 				    ioport, (eabs - sabs), val, sabs, eabs,
-				    reportphywritedelayabs);
+				    report_phy_write_delay);
 			}
 
-			if (reportphywriteosbt) {
+			if (report_phy_write_osbt) {
 				OSReportWithBacktrace("ml_port_io_write(0x%x, %d, 0x%llx) "
 				    "took %lluus",
 				    ioport, size, val, (eabs - sabs) / NSEC_PER_USEC);
@@ -744,7 +739,7 @@ ml_port_io_write(uint16_t ioport, uint32_t val, int size)
 			DTRACE_PHYSLAT4(portiowrite, uint64_t, (eabs - sabs),
 			    uint16_t, ioport, uint32_t, size, uint64_t, val);
 #endif /* CONFIG_DTRACE */
-		} else if (__improbable(tracephywritedelayabs > 0 && (eabs - sabs) > tracephywritedelayabs)) {
+		} else if (__improbable(trace_phy_write_delay > 0 && (eabs - sabs) > trace_phy_write_delay)) {
 			KDBG(MACHDBG_CODE(DBG_MACH_IO, DBC_MACH_IO_PORTIO_WRITE),
 			    (eabs - sabs), sabs, ioport, val);
 
@@ -943,21 +938,6 @@ strlen(
 	return string - 1 - ret;
 }
 
-#if     MACH_ASSERT
-
-/*
- * Machine-dependent routine to fill in an array with up to callstack_max
- * levels of return pc information.
- */
-void
-machine_callstack(
-	__unused uintptr_t      *buf,
-	__unused vm_size_t      callstack_max)
-{
-}
-
-#endif  /* MACH_ASSERT */
-
 void
 fillPage(ppnum_t pa, unsigned int fill)
 {
@@ -1047,7 +1027,7 @@ cache_flush_page_phys(ppnum_t pa)
 
 	cacheline_size = cpuid_infop->cache_linesize;
 	if (cacheline_size == 0) {
-		panic("cacheline_size=0 cpuid_infop=%p\n", cpuid_infop);
+		panic("cacheline_size=0 cpuid_infop=%p", cpuid_infop);
 	}
 	cachelines_to_flush = PAGE_SIZE / cacheline_size;
 

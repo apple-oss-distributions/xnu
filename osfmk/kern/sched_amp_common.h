@@ -66,13 +66,6 @@ void sched_amp_balance(processor_t cprocessor, processor_set_t cpset);
 /* IPI policy */
 sched_ipi_type_t sched_amp_ipi_policy(processor_t dst, thread_t thread, boolean_t dst_idle, sched_ipi_event_t event);
 
-/* AMP realtime runq management */
-rt_queue_t sched_amp_rt_runq(processor_set_t pset);
-void sched_amp_rt_init(processor_set_t pset);
-void sched_amp_rt_queue_shutdown(processor_t processor);
-void sched_amp_rt_runq_scan(sched_update_scan_context_t scan_context);
-int64_t sched_amp_rt_runq_count_sum(void);
-
 uint32_t sched_amp_qos_max_parallelism(int qos, uint64_t options);
 void sched_amp_bounce_thread_group_from_ecores(processor_set_t pset, struct thread_group *tg);
 

@@ -79,10 +79,8 @@ machine_task_set_state(
 		}
 
 		if (task->task_debug == NULL) {
-			task->task_debug = zalloc(ads_zone);
-			if (task->task_debug == NULL) {
-				return KERN_FAILURE;
-			}
+			task->task_debug = zalloc_flags(ads_zone,
+			    Z_WAITOK | Z_NOFAIL);
 		}
 
 		copy_legacy_debug_state(tstate, (arm_legacy_debug_state_t *) task->task_debug, FALSE); /* FALSE OR TRUE doesn't matter since we are ignoring it for arm */
@@ -99,10 +97,8 @@ machine_task_set_state(
 		}
 
 		if (task->task_debug == NULL) {
-			task->task_debug = zalloc(ads_zone);
-			if (task->task_debug == NULL) {
-				return KERN_FAILURE;
-			}
+			task->task_debug = zalloc_flags(ads_zone,
+			    Z_WAITOK | Z_NOFAIL);
 		}
 
 		copy_debug_state32(tstate, (arm_debug_state32_t *) task->task_debug, FALSE); /* FALSE OR TRUE doesn't matter since we are ignoring it for arm */
@@ -120,10 +116,8 @@ machine_task_set_state(
 		}
 
 		if (task->task_debug == NULL) {
-			task->task_debug = zalloc(ads_zone);
-			if (task->task_debug == NULL) {
-				return KERN_FAILURE;
-			}
+			task->task_debug = zalloc_flags(ads_zone,
+			    Z_WAITOK | Z_NOFAIL);
 		}
 
 		copy_debug_state64(tstate, (arm_debug_state64_t *) task->task_debug, FALSE); /* FALSE OR TRUE doesn't matter since we are ignoring it for arm */

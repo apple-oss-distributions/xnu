@@ -69,6 +69,7 @@
 #include <ipc/ipc_port.h>
 #include <ipc/ipc_entry.h>
 #include <kern/kalloc.h>
+#include <kern/hazard.h>
 #include <vm/vm_kern.h>
 
 #define IPC_TABLE_ENTRIES_SIZE CONFIG_IPC_TABLE_ENTRIES_STEPS
@@ -174,37 +175,4 @@ ipc_table_max_requests(void)
 {
 	static_assert(IPC_TABLE_REQUESTS_SIZE >= 2);
 	return (unsigned int)ipc_table_requests[IPC_TABLE_REQUESTS_SIZE - 2].its_size;
-}
-
-
-/*
- *	Routine:	ipc_table_alloc
- *	Purpose:
- *		Allocate a table.
- *	Conditions:
- *		May block.
- */
-
-void *
-ipc_table_alloc(
-	vm_size_t       size)
-{
-	return kalloc(size);
-}
-
-
-/*
- *	Routine:	ipc_table_free
- *	Purpose:
- *		Free a table allocated with ipc_table_alloc.
- *	Conditions:
- *		May block.
- */
-
-void
-ipc_table_free(
-	vm_size_t       size,
-	void *          table)
-{
-	kfree(table, size);
 }

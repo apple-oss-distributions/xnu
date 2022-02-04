@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2019 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -282,7 +282,7 @@ struct dn_flow_queue {
 	int avg;                /* average queue length est. (scaled) */
 	int count;              /* arrivals since last RED drop */
 	int random;             /* random value (scaled) */
-	u_int32_t q_time;       /* start of queue idle time */
+	u_int64_t q_time;       /* start of queue idle time */
 
 	/* WF2Q+ support */
 	struct dn_flow_set *fs; /* parent flow set */

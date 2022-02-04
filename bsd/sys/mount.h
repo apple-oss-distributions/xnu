@@ -1334,12 +1334,14 @@ void *  vfs_mntlabel(mount_t mp); /* Safe to cast to "struct label*"; returns "v
 void    vfs_setcompoundopen(mount_t mp);
 uint64_t vfs_throttle_mask(mount_t mp);
 int vfs_isswapmount(mount_t mp);
+int     vfs_context_dataless_materialization_is_prevented(vfs_context_t);
 boolean_t vfs_context_is_dataless_manipulator(vfs_context_t);
 boolean_t vfs_context_can_resolve_triggers(vfs_context_t);
 void    vfs_setmntsystem(mount_t mp);
 void    vfs_setmntsystemdata(mount_t mp);
 void    vfs_setmntswap(mount_t mp);
 boolean_t vfs_is_basesystem(mount_t mp);
+boolean_t vfs_iskernelmount(mount_t mp);
 
 OS_ENUM(bsd_bootfail_mode, uint32_t,
     BSD_BOOTFAIL_SEAL_BROKEN = 1,
@@ -1434,12 +1436,30 @@ void vfs_get_statfs64(struct mount *mp, struct statfs64 *sfs);
  */
 uint64_t vfs_mount_id(mount_t mp);
 
+/*!
+ * @function vfs_mount_at_path
+ * @abstract A wrapper around kernel_mount() to be used only in special
+ * circumstances.
+ */
+int vfs_mount_at_path(const char *fstype, const char *path,
+    vnode_t pvp, vnode_t vp, void *data, size_t datalen, int mnt_flags,
+    int flags);
+
+/*!
+ * @function vfs_mount_override_type_name
+ * @abstract override the fstypename for statfs.
+ * @param mp Mountpint for which to override the type name.
+ * @param name Name to override.
+ */
+int vfs_mount_override_type_name(mount_t mp, const char *name);
+
+#define VFS_MOUNT_FLAG_NOAUTH           0x01 /* Don't check the UID of the directory we are mounting on */
+#define VFS_MOUNT_FLAG_PERMIT_UNMOUNT   0x02 /* Allow (non-forced) unmounts by users other the one who mounted the volume */
+
 #endif  /* KERNEL_PRIVATE */
 __END_DECLS
 
 #endif /* KERNEL */
-
-#ifndef KERNEL
 
 /*
  * Generic file handle
@@ -1454,6 +1474,8 @@ struct fhandle {
 };
 typedef struct fhandle  fhandle_t;
 
+
+#ifndef KERNEL
 
 __BEGIN_DECLS
 int     fhopen(const struct fhandle *, int);

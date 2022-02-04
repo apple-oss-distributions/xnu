@@ -40,6 +40,7 @@
 #include <libkern/libkern.h>
 #include <i386/lapic.h>
 #include <i386/mp.h>
+#include <kern/hvg_hypercall.h>
 #include <kern/kalloc.h>
 
 
@@ -325,13 +326,13 @@ x86_cpu_tsc_deltas(__unused struct sysctl_oid *oidp, __unused void *arg1, __unus
 	int err;
 	uint32_t ncpus = ml_wait_max_cpus();
 	uint32_t buflen = (2 /* hex digits */ * sizeof(uint64_t) + 3 /* for "0x" + " " */) * ncpus + 1;
-	char *buf = kalloc(buflen);
+	char *buf = (char *)kalloc_data(buflen, Z_WAITOK);
 
 	cpu_data_tsc_sync_deltas_string(buf, buflen, 0, ncpus - 1);
 
 	err = sysctl_io_string(req, buf, buflen, 0, 0);
 
-	kfree(buf, buflen);
+	kfree_data(buf, buflen);
 
 	return err;
 }
@@ -911,28 +912,28 @@ SYSCTL_PROC(_machdep_misc, OID_AUTO, kernel_timeout_spin,
 
 SYSCTL_QUAD(_machdep, OID_AUTO, reportphyreadabs,
     CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
-    &reportphyreaddelayabs, "");
+    &report_phy_read_delay, "");
 SYSCTL_QUAD(_machdep, OID_AUTO, reportphywriteabs,
     CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
-    &reportphywritedelayabs, "");
+    &report_phy_write_delay, "");
 SYSCTL_QUAD(_machdep, OID_AUTO, tracephyreadabs,
     CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
-    &tracephyreaddelayabs, "");
+    &trace_phy_read_delay, "");
 SYSCTL_QUAD(_machdep, OID_AUTO, tracephywriteabs,
     CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
-    &tracephywritedelayabs, "");
+    &trace_phy_write_delay, "");
 SYSCTL_INT(_machdep, OID_AUTO, reportphyreadosbt,
     CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
-    &reportphyreadosbt, 0, "");
+    &report_phy_read_osbt, 0, "");
 SYSCTL_INT(_machdep, OID_AUTO, reportphywriteosbt,
     CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
-    &reportphywriteosbt, 0, "");
+    &report_phy_write_osbt, 0, "");
 SYSCTL_INT(_machdep, OID_AUTO, phyreaddelaypanic,
     CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
-    &phyreadpanic, 0, "");
+    &phy_read_panic, 0, "");
 SYSCTL_INT(_machdep, OID_AUTO, phywritedelaypanic,
     CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
-    &phywritepanic, 0, "");
+    &phy_write_panic, 0, "");
 #if DEVELOPMENT || DEBUG
 extern uint64_t simulate_stretched_io;
 SYSCTL_QUAD(_machdep, OID_AUTO, sim_stretched_io_ns,
@@ -1053,6 +1054,30 @@ extern uint64_t x86_isr_fp_simd_use;
 SYSCTL_QUAD(_machdep, OID_AUTO, x86_fp_simd_isr_uses,
     CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
     &x86_isr_fp_simd_use, "");
+
+static int
+sysctl_kern_insn_copy_optout_task SYSCTL_HANDLER_ARGS
+{
+#pragma unused(oidp, arg1, arg2)
+	uint32_t soflags = 0;
+	uint32_t old_value = curtask_get_insn_copy_optout() ? 1 : 0;
+
+	int error = SYSCTL_IN(req, &soflags, sizeof(soflags));
+	if (error) {
+		return error;
+	}
+
+	if (soflags) {
+		curtask_set_insn_copy_optout();
+	}
+
+	return SYSCTL_OUT(req, &old_value, sizeof(old_value));
+}
+SYSCTL_PROC(_machdep, OID_AUTO, insn_copy_optout_task,
+    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_MASKED | CTLFLAG_ANYBODY,
+    0, 0, sysctl_kern_insn_copy_optout_task, "I", "");
+
+
 #if DEVELOPMENT || DEBUG
 
 extern int plctrace_enabled;
@@ -1104,3 +1129,86 @@ SYSCTL_INT(_machdep_misc, OID_AUTO, traptrace_enabled,
     &traptrace_enabled, 0, "Enabled/disable trap trace");
 
 #endif /* DEVELOPMENT || DEBUG */
+
+/*
+ * Trigger a guest kernel core dump (macOS VM only)
+ * Usage: sysctl kern.trigger_kernel_coredump = 1
+ * (option selector must be 1, other values reserved)
+ */
+
+static int
+sysctl_trigger_kernel_coredump(struct sysctl_oid *oidp __unused, void *arg1, int arg2, struct sysctl_req *req)
+{
+	int error = 0;
+	hvg_hcall_return_t hv_ret;
+	char buf[3]; // 1 digit for dump option + 1 '\0' from userspace sysctl + 1 '\0'
+
+	if (req->newptr) {
+		// Write request
+		// single digit (1 byte) + 1 terminating byte added by system_cmd sysctl
+		if (req->newlen > 2) {
+			return EINVAL;
+		}
+		error = SYSCTL_IN(req, buf, req->newlen);
+		buf[req->newlen] = '\0';
+		if (!error) {
+			if (strcmp(buf, "1") != 0) {
+				return EINVAL;
+			}
+			/* Issue hypercall to trigger a dump */
+			hv_ret = hvg_hcall_trigger_dump(arg1, HVG_HCALL_DUMP_OPTION_REGULAR);
+
+			/* Translate hypercall error code to syscall error code */
+			switch (hv_ret) {
+			case HVG_HCALL_SUCCESS:
+				error = SYSCTL_OUT(req, arg1, 41);
+				break;
+			case HVG_HCALL_ACCESS_DENIED:
+				error = EPERM;
+				break;
+			case HVG_HCALL_INVALID_CODE:
+			case HVG_HCALL_INVALID_PARAMETER:
+				error = EINVAL;
+				break;
+			case HVG_HCALL_IO_FAILED:
+				error = EIO;
+				break;
+			case HVG_HCALL_FEAT_DISABLED:
+			case HVG_HCALL_UNSUPPORTED:
+				error = ENOTSUP;
+				break;
+			default:
+				error = ENODEV;
+			}
+		}
+	} else {
+		// Read request
+		error = SYSCTL_OUT(req, arg1, arg2);
+	}
+	return error;
+}
+
+
+static hvg_hcall_vmcore_file_t sysctl_vmcore;
+
+void
+hvg_bsd_init(void)
+{
+	if (!cpuid_vmm_present()) {
+		return;
+	}
+
+	if ((cpuid_vmm_get_applepv_features() & CPUID_LEAF_FEATURE_COREDUMP) != 0) {
+		/* Register an OID in the sysctl MIB tree for kern.trigger_kernel_coredump */
+		struct sysctl_oid *hcall_trigger_dump_oid = zalloc_permanent(sizeof(struct sysctl_oid), ZALIGN(struct sysctl_oid));
+		struct sysctl_oid oid = SYSCTL_STRUCT_INIT(_kern,
+		    OID_AUTO,
+		    trigger_kernel_coredump,
+		    CTLTYPE_STRING | CTLFLAG_RW,
+		    &sysctl_vmcore, sizeof(sysctl_vmcore),
+		    sysctl_trigger_kernel_coredump,
+		    "A", "Request that the hypervisor take a live kernel dump");
+		*hcall_trigger_dump_oid = oid;
+		sysctl_register_oid(hcall_trigger_dump_oid);
+	}
+}

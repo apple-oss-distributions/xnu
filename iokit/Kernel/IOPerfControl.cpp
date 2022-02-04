@@ -29,7 +29,7 @@ IOPerfControlClient::init(IOService *driver, uint64_t maxWorkCapacity)
 	shared = atomic_load_explicit(&gIOPerfControlClientShared, memory_order_acquire);
 	if (shared == nullptr) {
 		IOPerfControlClient::IOPerfControlClientShared *expected = shared;
-		shared = reinterpret_cast<IOPerfControlClient::IOPerfControlClientShared*>(kalloc(sizeof(IOPerfControlClientShared)));
+		shared = kalloc_type(IOPerfControlClientShared, Z_WAITOK);
 		if (!shared) {
 			return false;
 		}
@@ -37,7 +37,7 @@ IOPerfControlClient::init(IOService *driver, uint64_t maxWorkCapacity)
 		atomic_init(&shared->maxDriverIndex, 0);
 
 		shared->interface = PerfControllerInterface{
-			.version = 0,
+			.version = PERFCONTROL_INTERFACE_VERSION_NONE,
 			.registerDevice =
 		    [](IOService *device) {
 			    return kIOReturnSuccess;
@@ -59,6 +59,9 @@ IOPerfControlClient::init(IOService *driver, uint64_t maxWorkCapacity)
 			.workEnd =
 			    [](IOService *device, uint64_t token, PerfControllerInterface::WorkState *state, WorkEndArgs *args, bool done) {
 			    },
+			.workUpdate =
+			    [](IOService *device, uint64_t token, PerfControllerInterface::WorkState *state, WorkUpdateArgs *args) {
+			    },
 		};
 
 		shared->interfaceLock = IOLockAlloc();
@@ -75,10 +78,12 @@ IOPerfControlClient::init(IOService *driver, uint64_t maxWorkCapacity)
 		    memory_order_acquire)) {
 			IOLockFree(shared->interfaceLock);
 			shared->deviceRegistrationList->release();
-			kfree(shared, sizeof(*shared));
+			kfree_type(IOPerfControlClientShared, shared);
 			shared = expected;
 		}
 	}
+	workTable = NULL;
+	workTableLock = NULL;
 
 	// Note: driverIndex is not guaranteed to be unique if maxDriverIndex wraps around. It is intended for debugging only.
 	driverIndex = atomic_fetch_add_explicit(&shared->maxDriverIndex, 1, memory_order_relaxed) + 1;
@@ -87,11 +92,10 @@ IOPerfControlClient::init(IOService *driver, uint64_t maxWorkCapacity)
 	workTableLength = maxWorkCapacity + 1;
 	assertf(workTableLength <= kWorkTableMaxSize, "%zu exceeds max allowed capacity of %zu", workTableLength, kWorkTableMaxSize);
 	if (maxWorkCapacity > 0) {
-		workTable = reinterpret_cast<WorkTableEntry*>(kalloc(workTableLength * sizeof(WorkTableEntry)));
+		workTable = kalloc_type(WorkTableEntry, workTableLength, Z_WAITOK_ZERO);
 		if (!workTable) {
 			goto error;
 		}
-		bzero(workTable, workTableLength * sizeof(WorkTableEntry));
 		workTableNextIndex = 1;
 
 		workTableLock = IOSimpleLockAlloc();
@@ -100,14 +104,18 @@ IOPerfControlClient::init(IOService *driver, uint64_t maxWorkCapacity)
 		}
 	}
 
+	bzero(&clientData, sizeof(clientData));
+
 	return true;
 
 error:
 	if (workTable) {
-		kfree(workTable, maxWorkCapacity * sizeof(WorkTableEntry));
+		kfree_type(WorkTableEntry, workTableLength, workTable);
+		workTable = NULL;
 	}
 	if (workTableLock) {
 		IOSimpleLockFree(workTableLock);
+		workTableLock = NULL;
 	}
 	return false;
 shared_init_error:
@@ -118,10 +126,22 @@ shared_init_error:
 		if (shared->deviceRegistrationList) {
 			shared->deviceRegistrationList->release();
 		}
-		kfree(shared, sizeof(*shared));
+		kfree_type(IOPerfControlClientShared, shared);
 		shared = nullptr;
 	}
 	return false;
+}
+
+void
+IOPerfControlClient::free()
+{
+	if (workTable) {
+		kfree_type(WorkTableEntry, workTableLength, workTable);
+	}
+	if (workTableLock) {
+		IOSimpleLockFree(workTableLock);
+	}
+	super::free();
 }
 
 IOPerfControlClient *
@@ -187,7 +207,7 @@ IOPerfControlClient::allocateToken(thread_group *thread_group)
 		 * this code will have to be modified to support dynamic table growth to support larger
 		 * numbers of tokens.
 		 */
-		panic("Tokens allocated for this device exceeded maximum of %zu.\n",
+		panic("Tokens allocated for this device exceeded maximum of %zu.",
 		    workTableLength - 1); // - 1 since entry 0 is for kIOPerfControlClientWorkUntracked
 	}
 #endif
@@ -249,36 +269,92 @@ IOPerfControlClient::markEntryStarted(uint64_t token, bool started)
 	workTable[token].started = started;
 }
 
+#if CONFIG_THREAD_GROUPS
+
+static struct thread_group *
+threadGroupForDextService(IOService *device)
+{
+	assert(device);
+
+	if (!device->hasUserServer()) {
+		return NULL;
+	}
+
+	// Devices associated with a dext driver, must be called from dext
+	// context to ensure that thread_group reference is valid.
+	thread_t thread = current_thread();
+	assert(get_threadtask(thread) != kernel_task);
+	struct thread_group * thread_group = thread_group_get(thread);
+	assert(thread_group != nullptr);
+	return thread_group;
+}
+
+#endif /* CONFIG_THREAD_GROUPS */
+
 IOReturn
-IOPerfControlClient::registerDevice(__unused IOService *driver, IOService *device)
+IOPerfControlClient::registerDevice(IOService *driver, IOService *device)
 {
 	IOReturn ret = kIOReturnSuccess;
-
+#if CONFIG_THREAD_GROUPS
 	IOLockLock(shared->interfaceLock);
 
-	if (shared->interface.version > 0) {
+	clientData.device = device;
+
+	if (device) {
+		struct thread_group *dext_thread_group = threadGroupForDextService(device);
+		if (dext_thread_group) {
+			if (clientData.driverState.has_target_thread_group) {
+				panic("driverState has already been initialized");
+			}
+			clientData.driverState.has_target_thread_group = true;
+			clientData.driverState.target_thread_group_id = thread_group_get_id(dext_thread_group);
+			clientData.driverState.target_thread_group_data = thread_group_get_machine_data(dext_thread_group);
+
+			clientData.target_thread_group = dext_thread_group;
+			thread_group_retain(dext_thread_group);
+		}
+	}
+
+	if (shared->interface.version >= PERFCONTROL_INTERFACE_VERSION_3) {
+		ret = shared->interface.registerDriverDevice(driver, device, &clientData.driverState);
+	} else if (shared->interface.version >= PERFCONTROL_INTERFACE_VERSION_1) {
 		ret = shared->interface.registerDevice(device);
 	} else {
-		shared->deviceRegistrationList->setObject(device);
+		shared->deviceRegistrationList->setObject(this);
 	}
 
 	IOLockUnlock(shared->interfaceLock);
-
+#endif
 	return ret;
 }
 
 void
-IOPerfControlClient::unregisterDevice(__unused IOService *driver, IOService *device)
+IOPerfControlClient::unregisterDevice(IOService *driver, IOService *device)
 {
+#if CONFIG_THREAD_GROUPS
 	IOLockLock(shared->interfaceLock);
 
-	if (shared->interface.version > 0) {
+	if (shared->interface.version >= PERFCONTROL_INTERFACE_VERSION_3) {
+		shared->interface.unregisterDriverDevice(driver, device, &clientData.driverState);
+	} else if (shared->interface.version >= PERFCONTROL_INTERFACE_VERSION_1) {
 		shared->interface.unregisterDevice(device);
 	} else {
-		shared->deviceRegistrationList->removeObject(device);
+		shared->deviceRegistrationList->removeObject(this);
 	}
 
+	if (clientData.driverState.has_target_thread_group) {
+		thread_group_release(clientData.target_thread_group);
+		clientData.target_thread_group = nullptr;
+
+		clientData.driverState.has_target_thread_group = false;
+		clientData.driverState.target_thread_group_id = ~0ull;
+		clientData.driverState.target_thread_group_data = nullptr;
+	}
+
+	clientData.device = nullptr;
+
 	IOLockUnlock(shared->interfaceLock);
+#endif
 }
 
 uint64_t
@@ -296,6 +372,7 @@ IOPerfControlClient::workSubmit(IOService *device, WorkSubmitArgs *args)
 		.work_data = nullptr,
 		.work_data_size = 0,
 		.started = false,
+		.driver_state = &clientData.driverState
 	};
 	if (!shared->interface.workCanSubmit(device, &state, args)) {
 		return kIOPerfControlClientWorkUntracked;
@@ -328,6 +405,7 @@ IOPerfControlClient::workSubmitAndBegin(IOService *device, WorkSubmitArgs *submi
 		.work_data = nullptr,
 		.work_data_size = 0,
 		.started = false,
+		.driver_state = &clientData.driverState
 	};
 	if (!shared->interface.workCanSubmit(device, &state, submitArgs)) {
 		return kIOPerfControlClientWorkUntracked;
@@ -366,6 +444,7 @@ IOPerfControlClient::workBegin(IOService *device, uint64_t token, WorkBeginArgs 
 		.work_data = &entry->perfcontrol_data,
 		.work_data_size = sizeof(entry->perfcontrol_data),
 		.started = true,
+		.driver_state = &clientData.driverState
 	};
 	shared->interface.workBegin(device, tokenToGlobalUniqueToken(token), &state, args);
 	markEntryStarted(token, true);
@@ -387,6 +466,7 @@ IOPerfControlClient::workEnd(IOService *device, uint64_t token, WorkEndArgs *arg
 		.work_data = &entry->perfcontrol_data,
 		.work_data_size = sizeof(entry->perfcontrol_data),
 		.started = entry->started,
+		.driver_state = &clientData.driverState
 	};
 	shared->interface.workEnd(device, tokenToGlobalUniqueToken(token), &state, args, done);
 
@@ -457,7 +537,7 @@ IOPerfControlClient::copyWorkContext()
 		return nullptr;
 	}
 
-	return OSDynamicCast(OSObject, context);
+	return context;
 }
 
 bool
@@ -477,6 +557,7 @@ IOPerfControlClient::workSubmitAndBeginWithContext(IOService *device, OSObject *
 		.work_data = &work_context->perfcontrol_data,
 		.work_data_size = sizeof(work_context->perfcontrol_data),
 		.started = true,
+		.driver_state = &clientData.driverState
 	};
 
 	shared->interface.workBegin(device, work_context->id, &state, beginArgs);
@@ -511,6 +592,7 @@ IOPerfControlClient::workSubmitWithContext(IOService *device, OSObject *context,
 		.work_data = nullptr,
 		.work_data_size = 0,
 		.started = false,
+		.driver_state = &clientData.driverState
 	};
 	if (!shared->interface.workCanSubmit(device, &state, args)) {
 		return false;
@@ -526,6 +608,32 @@ IOPerfControlClient::workSubmitWithContext(IOService *device, OSObject *context,
 	return true;
 #else
 	return false;
+#endif
+}
+
+void
+IOPerfControlClient::workUpdateWithContext(IOService *device, OSObject *context, WorkUpdateArgs *args)
+{
+#if CONFIG_THREAD_GROUPS
+	IOPerfControlWorkContext *work_context = OSDynamicCast(IOPerfControlWorkContext, context);
+
+	if (work_context == nullptr) {
+		return;
+	}
+
+	if (work_context->thread_group == nullptr) {
+		// This Work Context has not taken a refcount on a TG
+		return;
+	}
+
+	PerfControllerInterface::WorkState state{
+		.thread_group_id = thread_group_get_id(work_context->thread_group),
+		.thread_group_data = thread_group_get_machine_data(work_context->thread_group),
+		.work_data = &work_context->perfcontrol_data,
+		.work_data_size = sizeof(work_context->perfcontrol_data),
+		.driver_state = &clientData.driverState
+	};
+	shared->interface.workUpdate(device, work_context->id, &state, args);
 #endif
 }
 
@@ -552,6 +660,7 @@ IOPerfControlClient::workBeginWithContext(IOService *device, OSObject *context, 
 		.work_data = &work_context->perfcontrol_data,
 		.work_data_size = sizeof(work_context->perfcontrol_data),
 		.started = true,
+		.driver_state = &clientData.driverState
 	};
 	shared->interface.workBegin(device, work_context->id, &state, args);
 
@@ -579,6 +688,7 @@ IOPerfControlClient::workEndWithContext(IOService *device, OSObject *context, Wo
 		.work_data = &work_context->perfcontrol_data,
 		.work_data_size = sizeof(work_context->perfcontrol_data),
 		.started = work_context->started,
+		.driver_state = &clientData.driverState
 	};
 
 	shared->interface.workEnd(device, work_context->id, &state, args, done);
@@ -597,26 +707,52 @@ IOPerfControlClient::workEndWithContext(IOService *device, OSObject *context, Wo
 }
 
 IOReturn
-IOPerfControlClient::registerPerformanceController(PerfControllerInterface pci)
+IOPerfControlClient::registerPerformanceController(PerfControllerInterface *pci)
 {
 	IOReturn result = kIOReturnError;
 
 	IOLockLock(shared->interfaceLock);
 
-	if (shared->interface.version == 0 && pci.version > 0) {
-		assert(pci.registerDevice && pci.unregisterDevice && pci.workCanSubmit && pci.workSubmit && pci.workBegin && pci.workEnd);
+	if (shared->interface.version == PERFCONTROL_INTERFACE_VERSION_NONE) {
+		shared->interface.version = pci->version;
+
+		if (pci->version >= PERFCONTROL_INTERFACE_VERSION_1) {
+			assert(pci->registerDevice && pci->unregisterDevice && pci->workCanSubmit && pci->workSubmit && pci->workBegin && pci->workEnd);
+			shared->interface.registerDevice = pci->registerDevice;
+			shared->interface.unregisterDevice = pci->unregisterDevice;
+			shared->interface.workCanSubmit = pci->workCanSubmit;
+			shared->interface.workSubmit = pci->workSubmit;
+			shared->interface.workBegin = pci->workBegin;
+			shared->interface.workEnd = pci->workEnd;
+		}
+
+		if (pci->version >= PERFCONTROL_INTERFACE_VERSION_2) {
+			if (pci->workUpdate != nullptr) {
+				shared->interface.workUpdate = pci->workUpdate;
+			}
+		}
+
+		if (pci->version >= PERFCONTROL_INTERFACE_VERSION_3) {
+			assert(pci->registerDriverDevice && pci->unregisterDriverDevice);
+			shared->interface.registerDriverDevice = pci->registerDriverDevice;
+			shared->interface.unregisterDriverDevice = pci->unregisterDriverDevice;
+		}
+
 		result = kIOReturnSuccess;
 
 		OSObject *obj;
 		while ((obj = shared->deviceRegistrationList->getAnyObject())) {
-			IOService *device = OSDynamicCast(IOService, obj);
-			if (device) {
-				pci.registerDevice(device);
+			IOPerfControlClient *client = OSDynamicCast(IOPerfControlClient, obj);
+			IOPerfControlClientData *clientData = client->getClientData();
+			if (clientData && clientData->device) {
+				if (pci->version >= PERFCONTROL_INTERFACE_VERSION_3) {
+					pci->registerDriverDevice(clientData->device->getProvider(), clientData->device, &(clientData->driverState));
+				} else if (pci->version >= PERFCONTROL_INTERFACE_VERSION_1) {
+					pci->registerDevice(clientData->device);
+				}
 			}
 			shared->deviceRegistrationList->removeObject(obj);
 		}
-
-		shared->interface = pci;
 	}
 
 	IOLockUnlock(shared->interfaceLock);

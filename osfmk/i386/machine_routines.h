@@ -80,9 +80,9 @@ void ml_install_interrupt_handler(
 	IOInterruptHandler handler,
 	void *refCon);
 
-void ml_entropy_collect(void);
-
 uint64_t ml_get_timebase(void);
+uint64_t ml_get_timebase_entropy(void);
+
 void ml_init_lock_timeout(void);
 void ml_init_delay_spin_threshold(int);
 
@@ -129,8 +129,12 @@ boolean_t ml_validate_nofault(
 	vm_offset_t virtsrc, vm_size_t size);
 
 /* Machine topology info */
+typedef enum {
+	CLUSTER_TYPE_SMP,
+	MAX_CPU_TYPES,
+} cluster_type_t;
+
 uint64_t ml_cpu_cache_size(unsigned int level);
-uint64_t ml_cpu_cache_sharing(unsigned int level);
 
 /* Set the maximum number of CPUs */
 void ml_set_max_cpus(
@@ -246,18 +250,6 @@ unsigned long long ml_phys_read_double(
 unsigned long long ml_phys_read_double_64(
 	addr64_t paddr);
 
-unsigned long long ml_io_read(uintptr_t iovaddr, int iovsz);
-unsigned int ml_io_read8(uintptr_t iovaddr);
-unsigned int ml_io_read16(uintptr_t iovaddr);
-unsigned int ml_io_read32(uintptr_t iovaddr);
-unsigned long long ml_io_read64(uintptr_t iovaddr);
-
-extern void ml_io_write(uintptr_t vaddr, uint64_t val, int size);
-extern void ml_io_write8(uintptr_t vaddr, uint8_t val);
-extern void ml_io_write16(uintptr_t vaddr, uint16_t val);
-extern void ml_io_write32(uintptr_t vaddr, uint32_t val);
-extern void ml_io_write64(uintptr_t vaddr, uint64_t val);
-
 extern uint32_t ml_port_io_read(uint16_t ioport, int size);
 extern uint8_t ml_port_io_read8(uint16_t ioport);
 extern uint16_t ml_port_io_read16(uint16_t ioport);
@@ -309,10 +301,6 @@ struct ml_cpu_info {
 
 typedef struct ml_cpu_info ml_cpu_info_t;
 
-typedef enum {
-	CLUSTER_TYPE_SMP,
-} cluster_type_t;
-
 /* Get processor info */
 void ml_cpu_get_info(ml_cpu_info_t *ml_cpu_info);
 
@@ -362,6 +350,10 @@ boolean_t ml_at_interrupt_context(void);
 extern boolean_t ml_is_quiescing(void);
 extern void ml_set_is_quiescing(boolean_t);
 extern uint64_t ml_get_booter_memory_size(void);
+unsigned int ml_cpu_cache_sharing(unsigned int level, cluster_type_t cluster_type, bool include_all_cpu_types);
+void ml_cpu_get_info_type(ml_cpu_info_t * ml_cpu_info, cluster_type_t cluster_type);
+unsigned int ml_get_cpu_number_type(cluster_type_t cluster_type, bool logical, bool available);
+unsigned int ml_get_cpu_types(void);
 #endif
 
 /* Zero bytes starting at a physical address */
@@ -372,7 +364,6 @@ void bzero_phys(
 /* Bytes available on current stack */
 vm_offset_t ml_stack_remaining(void);
 
-__END_DECLS
 #if defined(MACH_KERNEL_PRIVATE)
 __private_extern__ uint64_t ml_phys_read_data(uint64_t paddr, int psz);
 __private_extern__ void ml_phys_write_data(uint64_t paddr,
@@ -406,11 +397,11 @@ struct machine_thread;
 /* LBR support */
 void i386_lbr_init(struct i386_cpu_info *info_p, bool is_master);
 void i386_switch_lbrs(thread_t old, thread_t new);
-int i386_lbr_native_state_to_mach_thread_state(struct machine_thread *pcb, last_branch_state_t *machlbrp);
+int i386_filtered_lbr_state_to_mach_thread_state(thread_t thr_act, last_branch_state_t *machlbrp, boolean_t from_userspace);
 void i386_lbr_synch(thread_t thr);
 void i386_lbr_enable(void);
 void i386_lbr_disable(void);
-extern bool last_branch_support_enabled;
+extern lbr_modes_t last_branch_enabled_modes;
 #endif
 
 #define ALL_CORES_RECOMMENDED   (~(uint64_t)0)
@@ -418,17 +409,20 @@ extern bool last_branch_support_enabled;
 extern void sched_usercontrol_update_recommended_cores(uint64_t recommended_cores);
 
 
-extern uint64_t reportphyreaddelayabs;
-extern uint64_t reportphywritedelayabs;
-extern uint32_t reportphyreadosbt;
-extern uint32_t reportphywriteosbt;
-extern uint32_t phyreadpanic;
-extern uint32_t phywritepanic;
-extern uint64_t tracephyreaddelayabs;
-extern uint64_t tracephywritedelayabs;
+extern uint64_t report_phy_read_delay;
+extern uint64_t report_phy_write_delay;
+extern uint32_t report_phy_read_osbt;
+extern uint32_t report_phy_write_osbt;
+extern uint32_t phy_read_panic;
+extern uint32_t phy_write_panic;
+extern uint64_t trace_phy_read_delay;
+extern uint64_t trace_phy_write_delay;
 
 void ml_hibernate_active_pre(void);
 void ml_hibernate_active_post(void);
 
 #endif /* XNU_KERNEL_PRIVATE */
+
+__END_DECLS
+
 #endif /* _I386_MACHINE_ROUTINES_H_ */

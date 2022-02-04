@@ -32,6 +32,12 @@
 #define KASAN_ONLY(s)
 #endif /* KASAN */
 
+#if CONFIG_UBSAN_MINIMAL
+#define UBSAN_MINIMAL_ONLY(s) #s,
+#else
+#define UBSAN_MINIMAL_ONLY(s)
+#endif
+
 #if defined(__arm__) || defined(__arm64__)
 #define ARM_ONLY(s) #s,
 #else
@@ -84,8 +90,10 @@ const char * fbt_blacklist[] =
 	ARM_ONLY(__div)
 	CLOSURE(__dtrace_probe)
 	KASAN_ONLY(__kasan)
+	ARM_ONLY(__ml)
 	ARM_ONLY(__mod)
 	CRITICAL(__strlcpy_chk)
+	UBSAN_MINIMAL_ONLY(__ubsan)
 	ARM_ONLY(__udiv)
 	ARM_ONLY(__umod)
 	CRITICAL(_disable_preemption)
@@ -98,13 +106,12 @@ const char * fbt_blacklist[] =
 	ARM_ONLY(arm_init_idle_cpu)
 	CLOSURE(ast_dtrace_on)
 	CLOSURE(ast_pending)
+	CRITICAL(backtrace_)
 	CRITICAL(bcopy)
 	CLOSURE(clean_dcache)
 	CLOSURE(clean_mmu_dcache)
 	CRITICAL(clock_)
 	X86_ONLY(commpage_)
-	CRITICAL(console_cpu_alloc)
-	CRITICAL(console_cpu_free)
 	CLOSURE(copyin)
 	CLOSURE(copyout)
 	CRITICAL(cpu_)
@@ -206,6 +213,7 @@ const char * fbt_blacklist[] =
 	CLOSURE(prf)
 	CLOSURE(proc_best_name)
 	CLOSURE(proc_is64bit)
+	CLOSURE(proc_require)
 	CRITICAL(rbtrace_bt)
 	CRITICAL(register_cpu_setup_func)
 	CRITICAL(ret64_iret)
@@ -241,6 +249,11 @@ const char * fbt_blacklist[] =
 	CRITICAL(uread)
 	CRITICAL(uwrite)
 	CRITICAL(vstart)
+	CLOSURE(zone_has_index)
+	CLOSURE(zone_id_require)
+	CLOSURE(zone_id_require_panic)
+	CLOSURE(zone_range_contains)
+	CLOSURE(zone_require_panic)
 };
 #define BLACKLIST_COUNT (sizeof(fbt_blacklist)/sizeof(fbt_blacklist[0]))
 

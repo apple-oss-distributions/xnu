@@ -29,6 +29,7 @@ class IOPerfControlClient final : public OSObject
 
 protected:
 	virtual bool init(IOService *driver, uint64_t maxWorkCapacity);
+	virtual void free() APPLE_KEXT_OVERRIDE;
 
 public:
 /*!
@@ -213,10 +214,61 @@ public:
 	void workEndWithContext(IOService *device, OSObject *context, WorkEndArgs *args = nullptr, bool done = true);
 
 /*!
+ * @struct WorkUpdateArgs
+ * @discussion Drivers may submit additional device-specific arguments related to a work item by passing a
+ * struct with WorkUpdateArgs as its first member. Note: Drivers are responsible for publishing
+ * a header file describing these arguments.
+ */
+	struct WorkUpdateArgs {
+		uint32_t version;
+		uint32_t size;
+		uint64_t update_time;
+		uint64_t reserved[4];
+		void *driver_data;
+	};
+
+/*!
+ * @function workUpdateWithContext
+ * @abstract Provide and receive additional information from the performance controller. If this call is
+ * made at all, it should be between workSubmit and workEnd. The purpose and implementation of this call are
+ * device specific, and may do nothing on some devices.
+ * @param device The device that submitted the work. Some platforms require device to be a
+ * specific subclass of IOService.
+ * @param context An OSObject returned by copyWorkContext() and provided to the previous call to workSubmitWithContext().
+ * @param args Optional device-specific arguments.
+ */
+	void workUpdateWithContext(IOService *device, OSObject *context, WorkUpdateArgs *args = nullptr);
+
+/*
+ * Callers should always use the CURRENT version so that the kernel can detect both older
+ * and newer structure layouts. New callbacks should always be added at the end of the
+ * structure, and xnu should expect existing source recompiled against newer headers
+ * to pass NULL for unimplemented callbacks.
+ */
+
+#define PERFCONTROL_INTERFACE_VERSION_NONE (0) /* no interface */
+#define PERFCONTROL_INTERFACE_VERSION_1 (1) /* up-to workEnd */
+#define PERFCONTROL_INTERFACE_VERSION_2 (2) /* up-to workUpdate */
+#define PERFCONTROL_INTERFACE_VERSION_3 (3) /* up-to (un)registerDriverDevice */
+#define PERFCONTROL_INTERFACE_VERSION_CURRENT PERFCONTROL_INTERFACE_VERSION_3
+
+/*!
  * @struct PerfControllerInterface
  * @discussion Function pointers necessary to register a performance controller. Not for general driver use.
  */
 	struct PerfControllerInterface {
+		struct DriverState {
+			uint32_t has_target_thread_group : 1;
+			uint32_t has_device_info : 1;
+			uint32_t reserved : 30;
+
+			uint64_t target_thread_group_id;
+			void *target_thread_group_data;
+
+			uint32_t device_type;
+			uint32_t instance_id;
+		};
+
 		struct WorkState {
 			uint64_t thread_group_id;
 			void *thread_group_data;
@@ -224,13 +276,16 @@ public:
 			uint32_t work_data_size;
 			uint32_t started : 1;
 			uint32_t reserved : 31;
+			const DriverState* driver_state;
 		};
 
 		using RegisterDeviceFunction = IOReturn (*)(IOService *);
+		using RegisterDriverDeviceFunction = IOReturn (*)(IOService *, IOService *, DriverState *);
 		using WorkCanSubmitFunction = bool (*)(IOService *, WorkState *, WorkSubmitArgs *);
 		using WorkSubmitFunction = void (*)(IOService *, uint64_t, WorkState *, WorkSubmitArgs *);
 		using WorkBeginFunction = void (*)(IOService *, uint64_t, WorkState *, WorkBeginArgs *);
 		using WorkEndFunction = void (*)(IOService *, uint64_t, WorkState *, WorkEndArgs *, bool);
+		using WorkUpdateFunction = void (*)(IOService *, uint64_t, WorkState *, WorkUpdateArgs *);
 
 		uint64_t version;
 		RegisterDeviceFunction registerDevice;
@@ -239,6 +294,9 @@ public:
 		WorkSubmitFunction workSubmit;
 		WorkBeginFunction workBegin;
 		WorkEndFunction workEnd;
+		WorkUpdateFunction workUpdate;
+		RegisterDriverDeviceFunction registerDriverDevice;
+		RegisterDriverDeviceFunction unregisterDriverDevice;
 	};
 
 	struct IOPerfControlClientShared {
@@ -248,13 +306,29 @@ public:
 		OSSet *deviceRegistrationList;
 	};
 
+	struct IOPerfControlClientData {
+		struct thread_group *target_thread_group;
+		PerfControllerInterface::DriverState driverState;
+		IOService* device;
+	};
 /*!
  * @function registerPerformanceController
  * @abstract Register a performance controller to receive callbacks. Not for general driver use.
  * @param interface Struct containing callback functions implemented by the performance controller.
  * @returns kIOReturnSuccess or kIOReturnError if the interface was already registered.
  */
-	virtual IOReturn registerPerformanceController(PerfControllerInterface interface);
+	virtual IOReturn registerPerformanceController(PerfControllerInterface *interface);
+
+/*!
+ * @function getClientData
+ * @abstract Not for general driver use. Only used by registerPerformanceController(). Allows performanceController to register existing IOPerfControlClient.
+ * @returns IOPerfControlData associated with a IOPerfControlClient
+ */
+	IOPerfControlClientData *
+	getClientData()
+	{
+		return &clientData;
+	}
 
 private:
 	struct WorkTableEntry {
@@ -281,6 +355,8 @@ private:
 	size_t workTableLength;
 	size_t workTableNextIndex;
 	IOSimpleLock *workTableLock;
+
+	IOPerfControlClientData clientData;
 };
 
 #endif /* __cplusplus */

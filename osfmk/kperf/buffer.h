@@ -80,6 +80,7 @@
 #define PERF_TI_SCHEDDATA2_32_2 PERF_TI_CODE(20)
 #define PERF_TI_SCHEDDATA3_32   PERF_TI_CODE(21)
 #define PERF_TI_SCHEDDATA_3     PERF_TI_CODE(22)
+#define PERF_TI_DISPLABEL       PERF_TI_CODE(23)
 
 #define PERF_CS_CODE(code) PERF_CODE(PERF_CALLSTACK, code)
 #define PERF_CS_KSAMPLE    PERF_CS_CODE(0)
@@ -150,6 +151,7 @@
 #define PERF_MI_DATA       PERF_MI_CODE(1)
 #define PERF_MI_SYS_DATA   PERF_MI_CODE(2)
 #define PERF_MI_SYS_DATA_2 PERF_MI_CODE(3)
+#define PERF_MI_SYS_DATA_3 PERF_MI_CODE(4)
 
 /* error sub-codes for trace data */
 enum{

@@ -70,7 +70,7 @@ while [ $# -gt 0 ]; do
     esac    
 done
 
-function CreateFile() {
+CreateFile() {
     local string="$1"
     local filepath="$2"
     echo "${string}" > "${filepath}.new"

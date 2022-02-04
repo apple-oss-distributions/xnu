@@ -186,7 +186,7 @@ hibernate_page_list_allocate(boolean_t log)
 		size += sizeof(hibernate_bitmap_t) + ((pages + 31) >> 5) * sizeof(uint32_t);
 	}
 
-	list = (hibernate_page_list_t *)kalloc(size);
+	list = kalloc_data(size, Z_WAITOK);
 	if (!list) {
 		return list;
 	}

@@ -225,6 +225,9 @@ void PE_install_interrupt_handler(
 	void *target, IOInterruptHandler handler, void *refCon);
 #endif
 
+extern bool disable_serial_output;
+extern bool disable_kprintf_output;
+
 #ifndef _FN_KPRINTF
 #define _FN_KPRINTF
 void kprintf(const char *fmt, ...) __printflike(1, 2);
@@ -410,6 +413,15 @@ extern kern_return_t PE_cpu_perfmon_interrupt_install_handler(perfmon_interrupt_
 extern void PE_cpu_perfmon_interrupt_enable(cpu_id_t target, boolean_t enable);
 
 #if DEVELOPMENT || DEBUG
+/* panic_trace boot-arg modes */
+typedef enum {
+	panic_trace_disabled = 0,       /* Tracing disabled (default) */
+	panic_trace_unused,             /* Unused for backward compatibility */
+	panic_trace_enabled,            /* Tracing enabled to SRAM */
+	panic_trace_alt_enabled,        /* Tracing enabled to L2 */
+} panic_trace_t;
+extern panic_trace_t panic_trace;
+
 extern void PE_arm_debug_enable_trace(void);
 extern void (*PE_arm_debug_panic_hook)(const char *str);
 #else
@@ -480,6 +492,9 @@ typedef struct PE_panic_save_context {
 	uint32_t psc_length;
 } PE_panic_save_context_t;
 #endif
+
+extern vm_size_t PE_init_socd_client(void);
+extern void PE_write_socd_client_buffer(vm_offset_t offset, const void *buff, vm_size_t size);
 
 __END_DECLS
 

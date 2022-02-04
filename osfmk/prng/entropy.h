@@ -29,65 +29,106 @@
 #ifndef _PRNG_ENTROPY_H_
 #define _PRNG_ENTROPY_H_
 
+#include <kern/kern_types.h>
+#include <kern/bits.h>
+#include <sys/cdefs.h>
+
 __BEGIN_DECLS
 
-#ifdef XNU_KERNEL_PRIVATE
+// This module is used to accumulate entropy from hardware interrupts
+// for consumption by a higher-level PRNG.
+//
+// The raw entropy samples are collected from CPU counters during
+// hardware interrupts. We do not perform synchronization before
+// reading the counter (unlike ml_get_timebase and similar functions).
+//
+// This entropy accumulator performs continuous health tests in
+// accordance with NIST SP 800-90B. The parameters have been chosen
+// with the expectation that test failures should never occur except
+// in case of catastrophic hardware failure.
 
-// The below three definitions are utilized when the kernel is in
-// "normal" operation, that is when we are *not* interested in collecting
-// entropy.
+typedef uint32_t entropy_sample_t;
 
-// Indicates the number of bytes in the entropy buffer
-#define ENTROPY_BUFFER_BYTE_SIZE 32
+// Called during startup to initialize internal data structures.
+void entropy_init(void);
 
-// Indicates the number of uint32_t's in the entropy buffer
-#define ENTROPY_BUFFER_SIZE (ENTROPY_BUFFER_BYTE_SIZE / sizeof(uint32_t))
+// Called during hardware interrupts to collect entropy in per-CPU
+// structures.
+void entropy_collect(void);
 
-// Mask applied to EntropyData.sample_count to get an
-// index suitable for storing the next sample in
-// EntropyData.buffer. Note that ENTROPY_BUFFER_SIZE must be a power
-// of two for the following mask calculation to be valid.
-#define ENTROPY_BUFFER_INDEX_MASK (ENTROPY_BUFFER_SIZE - 1)
+// Called by the higher-level PRNG. The module performs continuous
+// health tests and decides whether to release entropy based on the
+// values of various counters. Returns negative in case of error
+// (e.g. health test failure).
+int32_t entropy_provide(size_t *entropy_size, void *entropy, void *arg);
 
-typedef struct entropy_data {
-	/*
-	 * TODO: Should sample_count be volatile?  Are we exposed to any races that
-	 * we care about if it is not?
-	 */
+// Called internally when entropy_provide() is called or when exporting
+// analysis entropy with the "kern.entropy.analysis.filter" sysctl. This
+// function applies a filter to input entropy and returns a bitmap indicating
+// whether a particular sample is counted. The return value is the count of
+// samples that passed the filter. "filter" may be NULL in which case only
+// the number of unfiltered samples that passed the filter will be calculated.
+//
+// Each bit in the bitmap_t "filter" indicates whether a sample
+// is kept (when the bit is set) or filtered (when the bit is not set).
+// In other words, "bitmap_test(filter, n)" indicates whether
+// "sample[n]" is kept.
+uint32_t entropy_filter(uint32_t sample_count, entropy_sample_t *samples, uint32_t filter_count, bitmap_t *filter);
 
-	// At 32 bits, this counter can overflow. Since we're primarily
-	// interested in the delta from one read to the next, we don't
-	// worry about this too much.
-	uint32_t sample_count;
+#if (DEVELOPMENT || DEBUG)
+#define ENTROPY_ANALYSIS_SUPPORTED 1
+#else
+#define ENTROPY_ANALYSIS_SUPPORTED 0
+#endif
 
-	// We point to either a static array when operating normally or
-	// a dynamically allocated array when we wish to collect entropy
-	// data. This decision is based on the presence of the boot
-	// argument "ebsz".
-	uint32_t *buffer;
+#define ENTROPY_ANALYSIS_BOOTARG "entropy-analysis-sample-count"
 
-	// The entropy buffer size in bytes. This must be a power of 2.
-	uint32_t buffer_size;
+#if ENTROPY_ANALYSIS_SUPPORTED
+// Whether analysis is enabled via the "ENTROPY_ANALYSIS_BOOTARG" boot-arg
+extern int entropy_analysis_enabled;
 
-	// The mask used to index into the entropy buffer for storing
-	// the next entropy sample.
-	uint32_t buffer_index_mask;
+// The size (in bytes) of the filter
+extern uint32_t entropy_analysis_filter_size;
 
-	// The mask used to include the previous entropy buffer contents
-	// when updating the entropy buffer. When in entropy collection
-	// mode this is set to zero so that we can gather the raw entropy.
-	// In normal operation this is set to (uint32_t) -1.
-	uint32_t ror_mask;
-} entropy_data_t;
+// The size (in bytes) of the entropy analysis buffer
+extern uint32_t entropy_analysis_buffer_size;
+// The maximum number of entropy_sample_t elements in the analysis buffer
+extern uint32_t entropy_analysis_max_sample_count;
 
-extern entropy_data_t EntropyData;
+// The number of entropy_sample_t elements in the analysis buffer
+extern uint32_t entropy_analysis_sample_count;
 
-/* Trace codes for DBG_SEC_KERNEL: */
-#define ENTROPY_READ(n) SECURITYDBG_CODE(DBG_SEC_KERNEL, n) /* n: 0 .. 3 */
+extern entropy_sample_t *entropy_analysis_buffer;
+#endif  // ENTROPY_ANALYSIS_SUPPORTED
 
-#endif /* XNU_KERNEL_PRIVATE */
+typedef struct entropy_health_stats {
+	// A total count of times the test has been reset with a new
+	// initial observation. This can be thought of as the number of
+	// tests, but note that a single "test" can theoretically accrue
+	// multiple failures.
+	uint32_t reset_count;
 
-void entropy_buffer_init(void);
+	// A total count of failures of this test instance since
+	// boot. Since we do not expect any test failures (ever) in
+	// practice, this counter should always be zero.
+	uint32_t failure_count;
+
+	// The maximum count of times an initial observation has recurred
+	// across all instances of this test.
+	uint32_t max_observation_count;
+} entropy_health_stats_t;
+
+extern int entropy_health_startup_done;
+extern entropy_health_stats_t entropy_health_rct_stats;
+extern entropy_health_stats_t entropy_health_apt_stats;
+
+// The total number of samples processed
+extern uint64_t entropy_filter_total_sample_count;
+// The number of samples that passed the filter
+extern uint64_t entropy_filter_accepted_sample_count;
+// The number of samples that were rejected by the filters
+extern uint64_t entropy_filter_rejected_sample_count;
+
 
 __END_DECLS
 

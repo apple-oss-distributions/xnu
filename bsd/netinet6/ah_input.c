@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2020 Apple Inc. All rights reserved.
+ * Copyright (c) 2008-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -116,8 +116,6 @@
 
 #define IPLEN_FLIPPED
 
-extern lck_mtx_t  *sadb_mutex;
-
 #if INET
 void
 ah4_input(struct mbuf *m, int off)
@@ -161,7 +159,7 @@ ah4_input(struct mbuf *m, int off)
 	spi = ah->ah_spi;
 
 	if ((sav = key_allocsa(AF_INET,
-	    (caddr_t)&ip->ip_src, (caddr_t)&ip->ip_dst,
+	    (caddr_t)&ip->ip_src, (caddr_t)&ip->ip_dst, IFSCOPE_NONE,
 	    IPPROTO_AH, spi)) == 0) {
 		ipseclog((LOG_WARNING,
 		    "IPv4 AH input: no key association found for spi %u\n",
@@ -274,7 +272,7 @@ ah4_input(struct mbuf *m, int off)
 	 * alright, it seems sane.  now we are going to check the
 	 * cryptographic checksum.
 	 */
-	cksum = _MALLOC(siz1, M_TEMP, M_NOWAIT);
+	cksum = (u_char *)kalloc_data(siz1, Z_NOWAIT);
 	if (!cksum) {
 		ipseclog((LOG_DEBUG, "IPv4 AH input: "
 		    "couldn't alloc temporary region for cksum\n"));
@@ -297,7 +295,7 @@ ah4_input(struct mbuf *m, int off)
 	ip->ip_len = htons((u_int16_t)(ip->ip_len + hlen));
 	ip->ip_off = htons(ip->ip_off);
 	if (ah4_calccksum(m, (caddr_t)cksum, siz1, algo, sav)) {
-		FREE(cksum, M_TEMP);
+		kfree_data(cksum, siz1);
 		IPSEC_STAT_INCREMENT(ipsecstat.in_inval);
 		goto fail;
 	}
@@ -323,13 +321,13 @@ ah4_input(struct mbuf *m, int off)
 			ipseclog((LOG_WARNING,
 			    "checksum mismatch in IPv4 AH input: %s %s\n",
 			    ipsec4_logpacketstr(ip, spi), ipsec_logsastr(sav)));
-			FREE(cksum, M_TEMP);
+			kfree_data(cksum, siz1);
 			IPSEC_STAT_INCREMENT(ipsecstat.in_ahauthfail);
 			goto fail;
 		}
 	}
 
-	FREE(cksum, M_TEMP);
+	kfree_data(cksum, siz1);
 
 	m->m_flags |= M_AUTHIPHDR;
 	m->m_flags |= M_AUTHIPDGM;
@@ -620,7 +618,7 @@ ah6_input(struct mbuf **mp, int *offp, int proto)
 	}
 
 	if ((sav = key_allocsa(AF_INET6,
-	    (caddr_t)&ip6->ip6_src, (caddr_t)&ip6->ip6_dst,
+	    (caddr_t)&ip6->ip6_src, (caddr_t)&ip6->ip6_dst, ip6_input_getsrcifscope(m),
 	    IPPROTO_AH, spi)) == 0) {
 		ipseclog((LOG_WARNING,
 		    "IPv6 AH input: no key association found for spi %u\n",
@@ -707,7 +705,7 @@ ah6_input(struct mbuf **mp, int *offp, int proto)
 	 * alright, it seems sane.  now we are going to check the
 	 * cryptographic checksum.
 	 */
-	cksum = _MALLOC(siz1, M_TEMP, M_NOWAIT);
+	cksum = (u_char *)kalloc_data(siz1, Z_NOWAIT);
 	if (!cksum) {
 		ipseclog((LOG_DEBUG, "IPv6 AH input: "
 		    "couldn't alloc temporary region for cksum\n"));
@@ -716,7 +714,7 @@ ah6_input(struct mbuf **mp, int *offp, int proto)
 	}
 
 	if (ah6_calccksum(m, (caddr_t)cksum, siz1, algo, sav)) {
-		FREE(cksum, M_TEMP);
+		kfree_data(cksum, siz1);
 		IPSEC_STAT_INCREMENT(ipsec6stat.in_inval);
 		goto fail;
 	}
@@ -737,13 +735,13 @@ ah6_input(struct mbuf **mp, int *offp, int proto)
 			ipseclog((LOG_WARNING,
 			    "checksum mismatch in IPv6 AH input: %s %s\n",
 			    ipsec6_logpacketstr(ip6, spi), ipsec_logsastr(sav)));
-			FREE(cksum, M_TEMP);
+			kfree_data(cksum, siz1);
 			IPSEC_STAT_INCREMENT(ipsec6stat.in_ahauthfail);
 			goto fail;
 		}
 	}
 
-	FREE(cksum, M_TEMP);
+	kfree_data(cksum, siz1);
 
 	m->m_flags |= M_AUTHIPHDR;
 	m->m_flags |= M_AUTHIPDGM;
@@ -1020,6 +1018,7 @@ ah6_ctlinput(int cmd, struct sockaddr *sa, void *d)
 			sav = key_allocsa(AF_INET6,
 			    (caddr_t)&sa6_src->sin6_addr,
 			    (caddr_t)&sa6_dst->sin6_addr,
+			    sa6_dst->sin6_scope_id,
 			    IPPROTO_AH, ahp->ah_spi);
 			if (sav) {
 				if (sav->state == SADB_SASTATE_MATURE ||

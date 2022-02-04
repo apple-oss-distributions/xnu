@@ -29,6 +29,7 @@
 #ifndef _MACH_RESOURCE_MONITORS_H_
 #define _MACH_RESOURCE_MONITORS_H_
 
+#include <stdint.h>
 #include <sys/syslimits.h>      /* PATH_MAX */
 #ifndef XNU_KERNEL_PRIVATE
 #include <TargetConditionals.h>
@@ -52,6 +53,12 @@ typedef uint64_t resource_notify_flags_t;
 
 /* TEMPORARY compatibility, to be removed */
 #define kCPUTriggerFatalFlag kRNFatalLimitFlag
+
+/* Soft limit on the resource table size */
+#define kRNSoftLimitFlag            (1ULL < 2)
+
+/* Hard limit on the resource table size */
+#define kRNHardLimitFlag            (1ULL < 3)
 
 
 

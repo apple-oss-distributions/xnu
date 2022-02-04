@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2019 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -169,7 +169,7 @@ extern int pmap_asserts_traced;
 #endif
 
 #if PMAP_ASSERT
-#define pmap_assert(ex) (pmap_asserts_enabled ? ((ex) ? (void)0 : Assert(__FILE__, __LINE__, # ex)) : (void)0)
+#define pmap_assert(ex) (pmap_asserts_enabled ? ((ex) ? (void)0 : Assert(__FILE_NAME__, __LINE__, # ex)) : (void)0)
 
 #define pmap_assert2(ex, fmt, args...)                                  \
 	do {                                                            \
@@ -178,8 +178,8 @@ extern int pmap_asserts_traced;
 	                        KERNEL_DEBUG_CONSTANT(0xDEAD1000, __builtin_return_address(0), __LINE__, 0, 0, 0); \
 	                        kdebug_enable = 0;                      \
 	                } else {                                        \
-	                                kprintf("Assertion %s failed (%s:%d, caller %p) " fmt , #ex, __FILE__, __LINE__, __builtin_return_address(0),  ##args); \
-	                                panic("Assertion %s failed (%s:%d, caller %p) " fmt , #ex, __FILE__, __LINE__, __builtin_return_address(0),  ##args); \
+	                                kprintf("Assertion %s failed (%s:%d, caller %p) " fmt , #ex, __FILE_NAME__, __LINE__, __builtin_return_address(0),  ##args); \
+	                                panic("Assertion %s failed (%s:%d, caller %p) " fmt , #ex, __FILE_NAME__, __LINE__, __builtin_return_address(0),  ##args); \
 	                }                                               \
 	        }                                                       \
 	} while(0)
@@ -335,11 +335,12 @@ extern int      kernPhysPML4EntryCount;
 
 #define INTEL_EPT_READ          0x00000001ULL
 #define INTEL_EPT_WRITE         0x00000002ULL
-#define INTEL_EPT_EX            0x00000004ULL
+#define INTEL_EPT_EX            0x00000004ULL   /* Supervisor-execute when MBE is enabled */
 #define INTEL_EPT_IPAT          0x00000040ULL
 #define INTEL_EPT_PS            0x00000080ULL
 #define INTEL_EPT_REF           0x00000100ULL
 #define INTEL_EPT_MOD           0x00000200ULL
+#define INTEL_EPT_UEX           0x00000400ULL   /* User-execute when MBE is enabled (ignored otherwise) */
 
 #define INTEL_EPT_CACHE_MASK    0x00000038ULL
 #define INTEL_EPT_NCACHE        0x00000000ULL
@@ -370,6 +371,12 @@ pte_set_ex(pt_entry_t pte, boolean_t is_ept)
 	}
 
 	return pte | INTEL_EPT_EX;
+}
+
+static inline pt_entry_t
+pte_set_uex(pt_entry_t pte)
+{
+	return pte | INTEL_EPT_UEX;
 }
 
 static inline pt_entry_t
@@ -413,10 +420,10 @@ ept_refmod_to_physmap(pt_entry_t ept_pte)
  */
 extern boolean_t pmap_ept_support_ad;
 
-#define PTE_VALID_MASK(is_ept)  ((is_ept) ? (INTEL_EPT_READ | INTEL_EPT_WRITE | INTEL_EPT_EX) : INTEL_PTE_VALID)
+#define PTE_VALID_MASK(is_ept)  ((is_ept) ? (INTEL_EPT_READ | INTEL_EPT_WRITE | INTEL_EPT_EX | INTEL_EPT_UEX) : INTEL_PTE_VALID)
 #define PTE_READ(is_ept)        ((is_ept) ? INTEL_EPT_READ : INTEL_PTE_VALID)
 #define PTE_WRITE(is_ept)       ((is_ept) ? INTEL_EPT_WRITE : INTEL_PTE_WRITE)
-#define PTE_IS_EXECUTABLE(is_ept, pte)  ((is_ept) ? (((pte) & INTEL_EPT_EX) != 0) : (((pte) & INTEL_PTE_NX) == 0))
+#define PTE_IS_EXECUTABLE(is_ept, pte)  ((is_ept) ? (((pte) & (INTEL_EPT_EX | INTEL_EPT_UEX)) != 0) : (((pte) & INTEL_PTE_NX) == 0))
 #define PTE_PS                  INTEL_PTE_PS
 #define PTE_COMPRESSED          INTEL_PTE_COMPRESSED
 #define PTE_COMPRESSED_ALT      INTEL_PTE_COMPRESSED_ALT
@@ -562,7 +569,6 @@ struct pmap {
 	int             nx_enabled;
 #endif
 	ledger_t        ledger;         /* ledger tracking phys mappings */
-	struct pmap_statistics  stats;  /* map statistics */
 	uint64_t        corrected_compressed_ptes_count;
 #if MACH_ASSERT
 	boolean_t       pmap_stats_assert;
@@ -706,6 +712,14 @@ pmap_mark_range(pmap_t npmap, uint64_t sv, uint64_t nxrosz, boolean_t NX,
  */
 extern  unsigned        pmap_get_cache_attributes(ppnum_t, boolean_t is_ept);
 
+extern kern_return_t    pmap_map_block_addr(
+	pmap_t pmap,
+	addr64_t va,
+	pmap_paddr_t pa,
+	uint32_t size,
+	vm_prot_t prot,
+	int attr,
+	unsigned int flags);
 extern kern_return_t    pmap_map_block(
 	pmap_t pmap,
 	addr64_t va,
@@ -731,6 +745,12 @@ extern void pmap_pagetable_corruption_msg_log(int (*)(const char * fmt, ...)__pr
 extern void x86_64_protect_data_const(void);
 
 extern uint64_t pmap_commpage_size_min(pmap_t pmap);
+
+extern void pmap_ro_zone_memcpy(zone_t zone, vm_offset_t va, vm_offset_t offset,
+    vm_offset_t new_data, vm_size_t new_data_size);
+extern void pmap_ro_zone_bzero(zone_t zone, vm_offset_t va, vm_offset_t offset, vm_size_t size);
+extern void pmap_phys_write_enable_pages(zone_t zone, vm_address_t va, size_t size);
+extern void pmap_phys_write_disable_pages(zone_t zone, vm_address_t va, size_t size);
 
 /*
  *	Macros for speed.
@@ -823,16 +843,12 @@ extern uint64_t pmap_commpage_size_min(pmap_t pmap);
 	 (((vm_offset_t) (VA)) <= vm_max_kernel_address))
 
 
-#define pmap_compressed(pmap)           ((pmap)->stats.compressed)
-#define pmap_resident_count(pmap)       ((pmap)->stats.resident_count)
-#define pmap_resident_max(pmap)         ((pmap)->stats.resident_max)
 #define pmap_copy(dst_pmap, src_pmap, dst_addr, len, src_addr)
 #define pmap_attribute(pmap, addr, size, attr, value) \
 	                                (KERN_INVALID_ADDRESS)
 #define pmap_attribute_cache_sync(addr, size, attr, value) \
 	                                (KERN_INVALID_ADDRESS)
 
-#define MACHINE_PMAP_IS_EMPTY   1
 extern boolean_t pmap_is_empty(pmap_t           pmap,
     vm_map_offset_t  start,
     vm_map_offset_t  end);
@@ -841,6 +857,10 @@ extern boolean_t pmap_is_empty(pmap_t           pmap,
 
 kern_return_t
     pmap_permissions_verify(pmap_t, vm_map_t, vm_offset_t, vm_offset_t);
+
+#if DEVELOPMENT || DEBUG
+extern kern_return_t pmap_test_text_corruption(pmap_paddr_t);
+#endif /* DEVELOPMENT || DEBUG */
 
 #if MACH_ASSERT
 extern int pmap_stats_assert;

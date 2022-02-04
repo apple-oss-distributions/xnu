@@ -61,12 +61,8 @@
 #ifdef TEST_SHADOW
 #include <unistd.h>
 #include <stdlib.h>
-#define my_malloc(a)    malloc(a)
-#define my_free(a)      free(a)
 #else /* !TEST_SHADOW */
 #include <sys/malloc.h>
-#define my_malloc(a)    _MALLOC(a, M_TEMP, M_WAITOK)
-#define my_free(a)      FREE(a, M_TEMP)
 #include <libkern/libkern.h>
 #endif /* TEST_SHADOW */
 
@@ -583,22 +579,20 @@ shadow_map_create(off_t file_size, off_t shadow_size,
 
 	/* create a block bitmap, one bit per block */
 	bitmap_size = block_bitmap_size(file_size, block_size);
-	block_bitmap = my_malloc(bitmap_size);
+	block_bitmap = kalloc_data(bitmap_size, Z_ZERO);
 	if (block_bitmap == NULL) {
 		printf("failed to allocate bitmap\n");
 		goto failure;
 	}
-	bzero(block_bitmap, bitmap_size);
 
 	/* get the band map */
-	bands = (band_number_t *)my_malloc(n_bands * sizeof(band_number_t));
+	bands = (band_number_t *)kalloc_data(n_bands * sizeof(band_number_t), Z_ZERO);
 	if (bands == NULL) {
 		printf("failed to allocate bands\n");
 		goto failure;
 	}
-	bzero(bands, n_bands * sizeof(band_number_t));
 
-	map = my_malloc(sizeof(*map));
+	map = kalloc_type(shadow_map_t, 0);
 	if (map == NULL) {
 		printf("failed to allocate map\n");
 		goto failure;
@@ -615,10 +609,10 @@ shadow_map_create(off_t file_size, off_t shadow_size,
 
 failure:
 	if (block_bitmap) {
-		my_free(block_bitmap);
+		kfree_data(block_bitmap, bitmap_size);
 	}
 	if (bands) {
-		my_free(bands);
+		kfree_data(bands, n_bands * sizeof(band_number_t));
 	}
 	return NULL;
 }
@@ -632,14 +626,14 @@ void
 shadow_map_free(shadow_map_t * map)
 {
 	if (map->block_bitmap) {
-		my_free(map->block_bitmap);
+		kfree_data_addr(map->block_bitmap);
 	}
 	if (map->bands) {
-		my_free(map->bands);
+		kfree_data(map->bands, (map->file_size_blocks / map->blocks_per_band) * sizeof(band_number_t));
 	}
 	map->block_bitmap = NULL;
 	map->bands = NULL;
-	my_free(map);
+	kfree_type(shadow_map_t, map);
 	return;
 }
 

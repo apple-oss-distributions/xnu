@@ -31,6 +31,8 @@
 #ifndef _MACH_ARM__STRUCTS_H_
 #define _MACH_ARM__STRUCTS_H_
 
+#if defined (__arm__) || defined (__arm64__)
+
 #include <sys/cdefs.h> /* __DARWIN_UNIX03 */
 #include <machine/types.h> /* __uint32_t */
 
@@ -642,5 +644,7 @@ _STRUCT_ARM_CPMU_STATE64
 	__uint64_t ctrs[16];
 };
 #endif /* !__DARWIN_UNIX03 */
+
+#endif /* defined (__arm__) || defined (__arm64__) */
 
 #endif /* _MACH_ARM__STRUCTS_H_ */

@@ -58,22 +58,16 @@ int machine_trace_thread(thread_t thread,
     char * tracepos,
     char * tracebound,
     int nframes,
-    boolean_t user_p,
     uint32_t * thread_trace_flags);
 int machine_trace_thread64(thread_t thread,
     char * tracepos,
     char * tracebound,
     int nframes,
-    boolean_t user_p,
-    uint32_t * thread_trace_flags,
-    uint64_t *sp,
-    vm_offset_t fp);
+    uint32_t * thread_trace_flags);
 
 void kdp_trap(unsigned int, struct arm_saved_state * saved_state);
 
-extern vm_offset_t machine_trace_thread_get_kva(vm_offset_t cur_target_addr, vm_map_t map, uint32_t *thread_trace_flags);
-extern void machine_trace_thread_clear_validation_cache(void);
-extern vm_map_t kernel_map;
+extern bool machine_trace_thread_validate_kva(vm_offset_t addr);
 
 #if CONFIG_KDP_INTERACTIVE_DEBUGGING
 void
@@ -216,6 +210,7 @@ kdp_setintegerstate(char * state_in)
 	assert(is_saved_state64(saved_state));
 
 	thread_state64_to_saved_state(&thread_state64, saved_state);
+	set_saved_state_cpsr(saved_state, thread_state64.cpsr); /* override CPSR sanitization */
 #else
 #error Unknown architecture.
 #endif
@@ -299,7 +294,7 @@ kdp_call(void)
 int
 kdp_getc(void)
 {
-	return cnmaygetc();
+	return console_try_read_char();
 }
 
 void
@@ -390,12 +385,13 @@ kdp_trap(unsigned int exception, struct arm_saved_state * saved_state)
  */
 typedef uint32_t uint32_align2_t __attribute__((aligned(2)));
 
+#if !defined(__arm64__)
+
 int
 machine_trace_thread(thread_t thread,
     char * tracepos,
     char * tracebound,
     int nframes,
-    boolean_t user_p,
     uint32_t * thread_trace_flags)
 {
 	uint32_align2_t * tracebuf = (uint32_align2_t *)tracepos;
@@ -412,7 +408,6 @@ machine_trace_thread(thread_t thread,
 	uint32_t prevlr               = 0;
 	struct arm_saved_state * state;
 	vm_offset_t kern_virt_addr = 0;
-	vm_map_t bt_vm_map            = VM_MAP_NULL;
 
 	nframes = (tracebound > tracepos) ? MIN(nframes, (int)((tracebound - tracepos) / framesize)) : 0;
 	if (!nframes) {
@@ -420,31 +415,15 @@ machine_trace_thread(thread_t thread,
 	}
 	framecount = 0;
 
-	if (user_p) {
-		/* Examine the user savearea */
-		state = get_user_regs(thread);
-		stacklimit = VM_MAX_ADDRESS;
-		stacklimit_bottom = VM_MIN_ADDRESS;
+#if defined(__arm__)
+	/* kstackptr may not always be there, so recompute it */
+	state = &thread_get_kernel_state(thread)->machine;
 
-		/* Fake up a stack frame for the PC */
-		*tracebuf++ = (uint32_t)get_saved_state_pc(state);
-		framecount++;
-		bt_vm_map = thread->task->map;
-	} else {
-#if defined(__arm64__)
-		panic("Attempted to trace kernel thread_t %p as a 32-bit context", thread);
-		return 0;
-#elif defined(__arm__)
-		/* kstackptr may not always be there, so recompute it */
-		state = &thread_get_kernel_state(thread)->machine;
-
-		stacklimit = VM_MAX_KERNEL_ADDRESS;
-		stacklimit_bottom = VM_MIN_KERNEL_ADDRESS;
-		bt_vm_map = kernel_map;
+	stacklimit = VM_MAX_KERNEL_ADDRESS;
+	stacklimit_bottom = VM_MIN_KERNEL_ADDRESS;
 #else
 #error Unknown architecture.
 #endif
-	}
 
 	/* Get the frame pointer */
 	fp = get_saved_state_fp(state);
@@ -454,14 +433,11 @@ machine_trace_thread(thread_t thread,
 	pc = get_saved_state_pc(state);
 	sp = get_saved_state_sp(state);
 
-	if (!user_p && !prevlr && !fp && !sp && !pc) {
+	if (!prevlr && !fp && !sp && !pc) {
 		return 0;
 	}
 
-	if (!user_p) {
-		/* This is safe since we will panic above on __arm64__ if !user_p */
-		prevlr = (uint32_t)VM_KERNEL_UNSLIDE(prevlr);
-	}
+	prevlr = (uint32_t)VM_KERNEL_UNSLIDE(prevlr);
 
 	for (; framecount < nframes; framecount++) {
 		*tracebuf++ = prevlr;
@@ -485,39 +461,30 @@ machine_trace_thread(thread_t thread,
 		if (fp < prevfp) {
 			boolean_t prev_in_interrupt_stack = FALSE;
 
-			if (!user_p) {
-				/*
-				 * As a special case, sometimes we are backtracing out of an interrupt
-				 * handler, and the stack jumps downward because of the memory allocation
-				 * pattern during early boot due to KASLR.
-				 */
-				int cpu;
-				int max_cpu = ml_get_max_cpu_number();
+			/*
+			 * As a special case, sometimes we are backtracing out of an interrupt
+			 * handler, and the stack jumps downward because of the memory allocation
+			 * pattern during early boot due to KASLR.
+			 */
+			int cpu;
+			int max_cpu = ml_get_max_cpu_number();
 
-				for (cpu = 0; cpu <= max_cpu; cpu++) {
-					cpu_data_t      *target_cpu_datap;
+			for (cpu = 0; cpu <= max_cpu; cpu++) {
+				cpu_data_t      *target_cpu_datap;
 
-					target_cpu_datap = (cpu_data_t *)CpuDataEntries[cpu].cpu_data_vaddr;
-					if (target_cpu_datap == (cpu_data_t *)NULL) {
-						continue;
-					}
+				target_cpu_datap = (cpu_data_t *)CpuDataEntries[cpu].cpu_data_vaddr;
+				if (target_cpu_datap == (cpu_data_t *)NULL) {
+					continue;
+				}
 
-					if (prevfp >= (target_cpu_datap->intstack_top - INTSTACK_SIZE) && prevfp < target_cpu_datap->intstack_top) {
-						prev_in_interrupt_stack = TRUE;
-						break;
-					}
+				if (prevfp >= (target_cpu_datap->intstack_top - INTSTACK_SIZE) && prevfp < target_cpu_datap->intstack_top) {
+					prev_in_interrupt_stack = TRUE;
+					break;
+				}
 
-#if defined(__arm__)
-					if (prevfp >= (target_cpu_datap->fiqstack_top - FIQSTACK_SIZE) && prevfp < target_cpu_datap->fiqstack_top) {
-						prev_in_interrupt_stack = TRUE;
-						break;
-					}
-#elif defined(__arm64__)
-					if (prevfp >= (target_cpu_datap->excepstack_top - EXCEPSTACK_SIZE) && prevfp < target_cpu_datap->excepstack_top) {
-						prev_in_interrupt_stack = TRUE;
-						break;
-					}
-#endif
+				if (prevfp >= (target_cpu_datap->fiqstack_top - FIQSTACK_SIZE) && prevfp < target_cpu_datap->fiqstack_top) {
+					prev_in_interrupt_stack = TRUE;
+					break;
 				}
 			}
 
@@ -527,57 +494,49 @@ machine_trace_thread(thread_t thread,
 			}
 		}
 		/* Assume there's a saved link register, and read it */
-		kern_virt_addr = machine_trace_thread_get_kva(fp + ARM32_LR_OFFSET, bt_vm_map, thread_trace_flags);
-
-		if (!kern_virt_addr) {
-			if (thread_trace_flags) {
+		kern_virt_addr = fp + ARM32_LR_OFFSET;
+		bool ok = machine_trace_thread_validate_kva(kern_virt_addr);
+		if (!ok) {
+			if (thread_trace_flags != NULL) {
 				*thread_trace_flags |= kThreadTruncatedBT;
 			}
 			break;
 		}
 
-		prevlr = *(uint32_t *)kern_virt_addr;
-		if (!user_p) {
-			/* This is safe since we will panic above on __arm64__ if !user_p */
-			prevlr = (uint32_t)VM_KERNEL_UNSLIDE(prevlr);
-		}
-
+		prevlr = (uint32_t)VM_KERNEL_UNSLIDE(*(uint32_t *)kern_virt_addr);
 		prevfp = fp;
 
 		/*
 		 * Next frame; read the fp value into short_fp first
 		 * as it is 32-bit.
 		 */
-		kern_virt_addr = machine_trace_thread_get_kva(fp, bt_vm_map, thread_trace_flags);
-
-		if (kern_virt_addr) {
-			short_fp = *(uint32_t *)kern_virt_addr;
-			fp = (vm_offset_t) short_fp;
-		} else {
-			fp = 0;
-			if (thread_trace_flags) {
+		kern_virt_addr = fp;
+		ok = machine_trace_thread_validate_kva(kern_virt_addr);
+		if (!ok) {
+			if (thread_trace_flags != NULL) {
 				*thread_trace_flags |= kThreadTruncatedBT;
 			}
+			fp = 0;
+			break;
 		}
+
+		short_fp = *(uint32_t *)kern_virt_addr;
+		fp = (vm_offset_t) short_fp;
 	}
-	/* Reset the target pmap */
-	machine_trace_thread_clear_validation_cache();
 	return (int)(((char *)tracebuf) - tracepos);
 }
+
+#endif // !defined(__arm64__)
 
 int
 machine_trace_thread64(thread_t thread,
     char * tracepos,
     char * tracebound,
     int nframes,
-    boolean_t user_p,
-    uint32_t * thread_trace_flags,
-    uint64_t *sp_out,
-    vm_offset_t fp)
+    uint32_t * thread_trace_flags)
 {
-#pragma unused(sp_out)
 #if defined(__arm__)
-#pragma unused(thread, tracepos, tracebound, nframes, user_p, thread_trace_flags, fp)
+#pragma unused(thread, tracepos, tracebound, nframes, thread_trace_flags)
 	return 0;
 #elif defined(__arm64__)
 
@@ -588,13 +547,11 @@ machine_trace_thread64(thread_t thread,
 	vm_offset_t stacklimit_bottom = 0;
 	int framecount                = 0;
 	vm_offset_t pc                = 0;
+	vm_offset_t fp                = 0;
 	vm_offset_t sp                = 0;
 	vm_offset_t prevfp            = 0;
 	uint64_t prevlr               = 0;
 	vm_offset_t kern_virt_addr    = 0;
-	vm_map_t bt_vm_map            = VM_MAP_NULL;
-
-	const boolean_t is_64bit_addr = thread_is_64bit_addr(thread);
 
 	nframes = (tracebound > tracepos) ? MIN(nframes, (int)((tracebound - tracepos) / framesize)) : 0;
 	if (!nframes) {
@@ -602,51 +559,31 @@ machine_trace_thread64(thread_t thread,
 	}
 	framecount = 0;
 
-	if (user_p) {
-		/* Examine the user savearea */
-		struct arm_saved_state * state = thread->machine.upcb;
-		stacklimit = (is_64bit_addr) ? MACH_VM_MAX_ADDRESS : VM_MAX_ADDRESS;
-		stacklimit_bottom = (is_64bit_addr) ? MACH_VM_MIN_ADDRESS : VM_MIN_ADDRESS;
+	struct arm_saved_state *state = thread->machine.kpcb;
+	if (state != NULL) {
+		fp = state->ss_64.fp;
 
-		/* Fake up a stack frame for the PC */
-		*tracebuf++ = get_saved_state_pc(state);
-		framecount++;
-		bt_vm_map = thread->task->map;
-
-		/* Get the frame pointer */
-		if (fp == 0) {
-			fp = get_saved_state_fp(state);
-		}
-
-		/* Fill in the current link register */
-		prevlr = get_saved_state_lr(state);
-		pc = get_saved_state_pc(state);
-		sp = get_saved_state_sp(state);
+		prevlr = state->ss_64.lr;
+		pc = state->ss_64.pc;
+		sp = state->ss_64.sp;
 	} else {
 		/* kstackptr may not always be there, so recompute it */
-		struct arm_kernel_saved_state * state = &thread_get_kernel_state(thread)->machine.ss;
-		stacklimit = VM_MAX_KERNEL_ADDRESS;
-		stacklimit_bottom = VM_MIN_KERNEL_ADDRESS;
-		bt_vm_map = kernel_map;
+		arm_kernel_saved_state_t *kstate = &thread_get_kernel_state(thread)->machine.ss;
 
-		/* Get the frame pointer */
-		if (fp == 0) {
-			fp = state->fp;
-		}
-
-		/* Fill in the current link register */
-		prevlr = state->lr;
-		pc = state->pc;
-		sp = state->sp;
+		fp = kstate->fp;
+		prevlr = kstate->lr;
+		pc = kstate->pc;
+		sp = kstate->sp;
 	}
 
-	if (!user_p && !prevlr && !fp && !sp && !pc) {
+	stacklimit = VM_MAX_KERNEL_ADDRESS;
+	stacklimit_bottom = VM_MIN_KERNEL_ADDRESS;
+
+	if (!prevlr && !fp && !sp && !pc) {
 		return 0;
 	}
 
-	if (!user_p) {
-		prevlr = VM_KERNEL_UNSLIDE(prevlr);
-	}
+	prevlr = VM_KERNEL_UNSLIDE(prevlr);
 
 	for (; framecount < nframes; framecount++) {
 		*tracebuf++ = prevlr;
@@ -672,53 +609,51 @@ machine_trace_thread64(thread_t thread,
 		}
 		/* Stack grows downward */
 		if (fp < prevfp) {
-			boolean_t switched_stacks = FALSE;
+			bool switched_stacks = false;
 
-			if (!user_p) {
-				/*
-				 * As a special case, sometimes we are backtracing out of an interrupt
-				 * handler, and the stack jumps downward because of the memory allocation
-				 * pattern during early boot due to KASLR.
-				 */
-				int cpu;
-				int max_cpu = ml_get_max_cpu_number();
+			/*
+			 * As a special case, sometimes we are backtracing out of an interrupt
+			 * handler, and the stack jumps downward because of the memory allocation
+			 * pattern during early boot due to KASLR.
+			 */
+			int cpu;
+			int max_cpu = ml_get_max_cpu_number();
 
-				for (cpu = 0; cpu <= max_cpu; cpu++) {
-					cpu_data_t      *target_cpu_datap;
+			for (cpu = 0; cpu <= max_cpu; cpu++) {
+				cpu_data_t      *target_cpu_datap;
 
-					target_cpu_datap = (cpu_data_t *)CpuDataEntries[cpu].cpu_data_vaddr;
-					if (target_cpu_datap == (cpu_data_t *)NULL) {
-						continue;
-					}
-
-					if (prevfp >= (target_cpu_datap->intstack_top - INTSTACK_SIZE) && prevfp < target_cpu_datap->intstack_top) {
-						switched_stacks = TRUE;
-						break;
-					}
-#if defined(__arm__)
-					if (prevfp >= (target_cpu_datap->fiqstack_top - FIQSTACK_SIZE) && prevfp < target_cpu_datap->fiqstack_top) {
-						switched_stacks = TRUE;
-						break;
-					}
-#elif defined(__arm64__)
-					if (prevfp >= (target_cpu_datap->excepstack_top - EXCEPSTACK_SIZE) && prevfp < target_cpu_datap->excepstack_top) {
-						switched_stacks = TRUE;
-						break;
-					}
-#endif
+				target_cpu_datap = (cpu_data_t *)CpuDataEntries[cpu].cpu_data_vaddr;
+				if (target_cpu_datap == (cpu_data_t *)NULL) {
+					continue;
 				}
 
-#if XNU_MONITOR
-				vm_offset_t cpu_base = (vm_offset_t)pmap_stacks_start;
-				vm_offset_t cpu_top = (vm_offset_t)pmap_stacks_end;
-
-				if (((prevfp >= cpu_base) && (prevfp < cpu_top)) !=
-				    ((fp >= cpu_base) && (fp < cpu_top))) {
-					switched_stacks = TRUE;
+				if (prevfp >= (target_cpu_datap->intstack_top - INTSTACK_SIZE) && prevfp < target_cpu_datap->intstack_top) {
+					switched_stacks = true;
+					break;
+				}
+#if defined(__arm__)
+				if (prevfp >= (target_cpu_datap->fiqstack_top - FIQSTACK_SIZE) && prevfp < target_cpu_datap->fiqstack_top) {
+					switched_stacks = true;
+					break;
+				}
+#elif defined(__arm64__)
+				if (prevfp >= (target_cpu_datap->excepstack_top - EXCEPSTACK_SIZE) && prevfp < target_cpu_datap->excepstack_top) {
+					switched_stacks = true;
 					break;
 				}
 #endif
 			}
+
+#if XNU_MONITOR
+			vm_offset_t cpu_base = (vm_offset_t)pmap_stacks_start;
+			vm_offset_t cpu_top = (vm_offset_t)pmap_stacks_end;
+
+			if (((prevfp >= cpu_base) && (prevfp < cpu_top)) !=
+			    ((fp >= cpu_base) && (fp < cpu_top))) {
+				switched_stacks = true;
+				break;
+			}
+#endif
 
 			if (!switched_stacks) {
 				/* Corrupt frame pointer? */
@@ -727,10 +662,10 @@ machine_trace_thread64(thread_t thread,
 		}
 
 		/* Assume there's a saved link register, and read it */
-		kern_virt_addr = machine_trace_thread_get_kva(fp + ARM64_LR_OFFSET, bt_vm_map, thread_trace_flags);
-
-		if (!kern_virt_addr) {
-			if (thread_trace_flags) {
+		kern_virt_addr = fp + ARM64_LR_OFFSET;
+		bool ok = machine_trace_thread_validate_kva(kern_virt_addr);
+		if (!ok) {
+			if (thread_trace_flags != NULL) {
 				*thread_trace_flags |= kThreadTruncatedBT;
 			}
 			break;
@@ -741,25 +676,22 @@ machine_trace_thread64(thread_t thread,
 		/* return addresses on stack signed by arm64e ABI */
 		prevlr = (uint64_t) ptrauth_strip((void *)prevlr, ptrauth_key_return_address);
 #endif
-		if (!user_p) {
-			prevlr = VM_KERNEL_UNSLIDE(prevlr);
-		}
+		prevlr = VM_KERNEL_UNSLIDE(prevlr);
 
 		prevfp = fp;
 		/* Next frame */
-		kern_virt_addr = machine_trace_thread_get_kva(fp, bt_vm_map, thread_trace_flags);
-
-		if (kern_virt_addr) {
-			fp = *(uint64_t *)kern_virt_addr;
-		} else {
-			fp = 0;
-			if (thread_trace_flags) {
+		kern_virt_addr = fp;
+		ok = machine_trace_thread_validate_kva(kern_virt_addr);
+		if (!ok) {
+			if (thread_trace_flags != NULL) {
 				*thread_trace_flags |= kThreadTruncatedBT;
 			}
+			fp = 0;
+			break;
 		}
+
+		fp = *(uint64_t *)kern_virt_addr;
 	}
-	/* Reset the target pmap */
-	machine_trace_thread_clear_validation_cache();
 	return (int)(((char *)tracebuf) - tracepos);
 #else
 #error Unknown architecture.

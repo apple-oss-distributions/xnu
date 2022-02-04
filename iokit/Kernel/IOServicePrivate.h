@@ -66,7 +66,18 @@ enum {
 	kIOServiceWaitDetachState   = 0x00040000,
 	kIOServiceConfigRunning     = 0x00020000,
 	kIOServiceFinalized         = 0x00010000,
+
+	kIOServiceRematchOnDetach   = 0x00008000,
+	kIOServiceUserUnhidden      = 0x00004000,
+//	kIOServiceX1                = 0x00004000,
+//	kIOServiceX2                = 0x00002000,
+//	kIOServiceX3                = 0x00001000,
+//	kIOServiceX4                = 0x00000800,
+//	kIOServiceX5                = 0x00000400,
 };
+
+extern const OSSymbol * gIOServiceNotificationUserKey;
+
 
 // notify state
 enum {
@@ -173,7 +184,7 @@ public:
 	IOService *         nub;
 	IOOptionBits        options;
 
-	static _IOServiceJob * startJob( IOService * nub, int type,
+	static LIBKERN_RETURNS_NOT_RETAINED _IOServiceJob * startJob( IOService * nub, int type,
 	    IOOptionBits options = 0 );
 	static void pingConfig( LIBKERN_CONSUMED class _IOServiceJob * job );
 };
@@ -232,17 +243,25 @@ public:
 	virtual OSObject * getNextObject() APPLE_KEXT_OVERRIDE;
 };
 
+
+class _IOServiceStateNotification : public IOService
+{
+	friend class IOService;
+
+	IOLock * fLock;
+	OSDictionary * fItems;
+
+	OSDeclareDefaultStructors(_IOServiceStateNotification);
+
+public:
+};
+
+
+
 extern const OSSymbol * gIOConsoleUsersKey;
 extern const OSSymbol * gIOConsoleSessionUIDKey;
 extern const OSSymbol * gIOConsoleSessionAuditIDKey;
 extern const OSSymbol * gIOConsoleSessionOnConsoleKey;
 extern const OSSymbol * gIOConsoleSessionSecureInputPIDKey;
-
-
-#define _interruptSourcesPrivate(service)   \
-    ((IOInterruptSourcePrivate *)(&(service)->_interruptSources[(service)->_numInterruptSources]))
-
-#define sizeofAllIOInterruptSource          \
-    (sizeof(IOInterruptSourcePrivate) + sizeof(IOInterruptSource))
 
 #endif /* ! _IOKIT_IOSERVICEPRIVATE_H */

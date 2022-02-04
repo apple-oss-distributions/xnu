@@ -9,7 +9,7 @@
 
 #ifndef ASSEMBLER
 
-#include <pexpert/arm/S3cUART.h>
+#include <pexpert/arm/apple_uart_regs.h>
 
 #include <pexpert/arm/dockchannel.h>
 

@@ -40,6 +40,8 @@
 extern void tcp_cache_set_cookie(struct tcpcb *tp, u_char *cookie, u_int8_t len);
 extern int tcp_cache_get_cookie(struct tcpcb *tp, u_char *cookie, u_int8_t *len);
 extern unsigned int tcp_cache_get_cookie_len(struct tcpcb *tp);
+extern uint8_t tcp_cache_get_mptcp_version(struct sockaddr* dst);
+extern void tcp_cache_update_mptcp_version(struct tcpcb *tp, boolean_t succeeded);
 
 extern void tcp_heuristic_tfo_loss(struct tcpcb *tp);
 extern void tcp_heuristic_tfo_rst(struct tcpcb *tp);

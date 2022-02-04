@@ -63,8 +63,11 @@
  *	@(#)types.h	8.3 (Berkeley) 1/5/94
  */
 
-#ifndef _MACHTYPES_H_
+#ifndef _I386_MACHTYPES_H_
+#define _I386_MACHTYPES_H_
 #define _MACHTYPES_H_
+
+#if defined (__i386__) || defined (__x86_64__)
 
 #ifndef __ASSEMBLER__
 #include <i386/_types.h>
@@ -146,4 +149,5 @@ typedef __int64_t               user32_off_t __attribute__((aligned(4)));
 typedef u_int64_t               syscall_arg_t;
 
 #endif /* __ASSEMBLER__ */
-#endif  /* _MACHTYPES_H_ */
+#endif /* defined (__i386__) || defined (__x86_64__) */
+#endif  /* _I386_MACHTYPES_H_ */

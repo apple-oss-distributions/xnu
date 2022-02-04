@@ -71,13 +71,24 @@ extern boolean_t vm_swap_files_pinned(void);
 extern mach_port_name_t ipc_port_copyout_send(
 	ipc_port_t      sright,
 	ipc_space_t     space);
-extern task_t port_name_to_task(
+extern mach_port_name_t ipc_port_copyout_send_pinned(
+	ipc_port_t      sright,
+	ipc_space_t     space);
+#endif /* _IPC_IPC_PORT_H_ */
+
+#ifndef _KERN_IPC_TT_H_
+
+#define port_name_to_task(name) port_name_to_task_kernel(name)
+
+extern task_t port_name_to_task_kernel(
+	mach_port_name_t name);
+extern task_t port_name_to_task_read(
 	mach_port_name_t name);
 extern task_t port_name_to_task_name(
 	mach_port_name_t name);
 extern void ipc_port_release_send(
 	ipc_port_t      port);
-#endif /* _IPC_IPC_PORT_H_ */
+#endif /* _KERN_IPC_TT_H_ */
 
 extern ipc_space_t  get_task_ipcspace(
 	task_t t);
@@ -88,7 +99,6 @@ extern int max_task_footprint_mb;       /* Per-task limit on physical memory con
 
 /* Some loose-ends VM stuff */
 
-extern vm_map_t         kalloc_map;
 extern vm_size_t        msg_ool_size_small;
 
 extern kern_return_t vm_tests(void);
@@ -96,6 +106,7 @@ extern void consider_machine_adjust(void);
 extern vm_map_offset_t get_map_min(vm_map_t);
 extern vm_map_offset_t get_map_max(vm_map_t);
 extern vm_map_size_t get_vmmap_size(vm_map_t);
+extern int get_task_page_size(task_t);
 #if CONFIG_COREDUMP
 extern int get_vmmap_entries(vm_map_t);
 #endif
@@ -149,6 +160,24 @@ extern kern_return_t vm_upl_unmap
 	upl_t upl
 );
 
+extern kern_return_t vm_upl_map_range
+(
+	vm_map_t target_task,
+	upl_t upl,
+	vm_offset_t offset,
+	vm_size_t size,
+	vm_prot_t prot,
+	vm_address_t *address
+);
+
+extern kern_return_t vm_upl_unmap_range
+(
+	vm_map_t target_task,
+	upl_t upl,
+	vm_offset_t offset,
+	vm_size_t size
+);
+
 extern kern_return_t vm_region_object_create
 (
 	vm_map_t target_task,
@@ -178,7 +207,8 @@ extern memory_object_t apple_protect_pager_setup(
 	vm_object_offset_t      crypto_backing_offset,
 	struct pager_crypt_info *crypt_info,
 	vm_object_offset_t      crypto_start,
-	vm_object_offset_t      crypto_end);
+	vm_object_offset_t      crypto_end,
+	boolean_t               cache_pager);
 #endif  /* CONFIG_CODE_DECRYPTION */
 
 struct vm_shared_region_slide_info;
@@ -516,14 +546,6 @@ extern void cs_validate_page(
 	int *validated_p,
 	int *tainted_p,
 	int *nx_p);
-#if PMAP_CS
-extern kern_return_t cs_associate_blob_with_mapping(
-	void *pmap,
-	vm_map_offset_t start,
-	vm_map_size_t size,
-	vm_object_offset_t offset,
-	void *blobs_p);
-#endif /* PMAP_CS */
 
 extern kern_return_t memory_entry_purgeable_control_internal(
 	ipc_port_t      entry_port,
@@ -579,6 +601,7 @@ extern kern_return_t mach_memory_entry_range_op(
 
 extern void mach_memory_entry_port_release(ipc_port_t port);
 extern void mach_destroy_memory_entry(ipc_port_t port);
+extern vm_named_entry_t mach_memory_entry_from_port(ipc_port_t port);
 extern kern_return_t mach_memory_entry_allocate(
 	struct vm_named_entry **user_entry_p,
 	ipc_port_t *user_handle_p);
@@ -598,6 +621,10 @@ extern unsigned int mach_vm_ctl_page_free_wanted(void);
 
 extern int no_paging_space_action(void);
 
+extern unsigned int vmtc_total;        /* total # of text page corruptions detected */
+
+extern kern_return_t revalidate_text_page(task_t, vm_map_offset_t);
+
 #define VM_TOGGLE_CLEAR         0
 #define VM_TOGGLE_SET           1
 #define VM_TOGGLE_GETVALUE      999
@@ -607,7 +634,6 @@ int vm_toggle_entry_reuse(int, int*);
 #define SWAP_READ               0x00000001      /* Read buffer. */
 #define SWAP_ASYNC              0x00000002      /* Start I/O, do not wait. */
 
-extern void vm_compressor_pager_init(void);
 extern kern_return_t compressor_memory_object_create(
 	memory_object_size_t,
 	memory_object_t *);
@@ -829,6 +855,7 @@ extern const char *debug4k_category_name[];
 #define DEBUG4K_VFS(...)
 
 #endif /* MACH_ASSERT */
+
 
 #endif  /* _VM_VM_PROTOS_H_ */
 

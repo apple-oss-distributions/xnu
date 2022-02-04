@@ -110,6 +110,8 @@ kperf_action_has_thread(unsigned int actionid)
 static void
 kperf_system_memory_log(void)
 {
+	extern unsigned int memorystatus_level;
+
 	BUF_DATA(PERF_MI_SYS_DATA, (uintptr_t)vm_page_free_count,
 	    (uintptr_t)vm_page_wire_count, (uintptr_t)vm_page_external_count,
 	    (uintptr_t)(vm_page_active_count + vm_page_inactive_count +
@@ -118,6 +120,14 @@ kperf_system_memory_log(void)
 	    (uintptr_t)vm_page_internal_count,
 	    (uintptr_t)vm_pageout_vminfo.vm_pageout_compressions,
 	    (uintptr_t)VM_PAGE_COMPRESSOR_COUNT);
+	BUF_DATA(PERF_MI_SYS_DATA_3,
+#if CONFIG_SECLUDED_MEMORY
+	    (uintptr_t)vm_page_secluded_count,
+#else // CONFIG_SECLUDED_MEMORY
+	    0,
+#endif // !CONFIG_SECLUDED_MEMORY
+	    (uintptr_t)vm_page_purgeable_count,
+	    memorystatus_level);
 }
 
 static void
@@ -127,9 +137,6 @@ kperf_sample_user_internal(struct kperf_usample *sbuf,
 {
 	if (sample_what & SAMPLER_USTACK) {
 		kperf_ucallstack_sample(&sbuf->ucallstack, context);
-	}
-	if (sample_what & SAMPLER_TH_DISPATCH) {
-		kperf_thread_dispatch_sample(&sbuf->th_dispatch, context);
 	}
 	if (sample_what & SAMPLER_TH_INFO) {
 		kperf_thread_info_sample(&sbuf->th_info, context);
@@ -146,7 +153,7 @@ kperf_sample_user_internal(struct kperf_usample *sbuf,
 		kperf_ucallstack_log(&sbuf->ucallstack);
 	}
 	if (sample_what & SAMPLER_TH_DISPATCH) {
-		kperf_thread_dispatch_log(&sbuf->th_dispatch);
+		kperf_thread_dispatch_log(&sbuf->usample_min->th_dispatch);
 	}
 	if (sample_what & SAMPLER_TH_INFO) {
 		kperf_thread_info_log(&sbuf->th_info);
@@ -157,17 +164,9 @@ kperf_sample_user_internal(struct kperf_usample *sbuf,
 	ml_set_interrupts_enabled(intren);
 }
 
-void
-kperf_sample_user(struct kperf_usample *sbuf, struct kperf_context *context,
-    unsigned int actionid, unsigned int sample_flags)
+static unsigned int
+kperf_prepare_sample_what(unsigned int sample_what, unsigned int sample_flags)
 {
-	if (actionid == 0 || actionid > actionc) {
-		return;
-	}
-
-	unsigned int sample_what = actionv[actionid - 1].sample;
-	unsigned int ucallstack_depth = actionv[actionid - 1].ucallstack_depth;
-
 	/* callstacks should be explicitly ignored */
 	if (sample_flags & SAMPLE_FLAG_EMPTY_CALLSTACK) {
 		sample_what &= ~(SAMPLER_KSTACK | SAMPLER_USTACK);
@@ -184,12 +183,25 @@ kperf_sample_user(struct kperf_usample *sbuf, struct kperf_context *context,
 		sample_what &= SAMPLER_TASK_MASK;
 	}
 
+	return sample_what;
+}
+
+void
+kperf_sample_user(struct kperf_usample *sbuf, struct kperf_context *context,
+    unsigned int actionid, unsigned int sample_flags)
+{
+	if (actionid == 0 || actionid > actionc) {
+		return;
+	}
+
+	unsigned int sample_what = kperf_prepare_sample_what(
+		actionv[actionid - 1].sample, sample_flags);
 	if (sample_what == 0) {
 		return;
 	}
 
-	sbuf->ucallstack.kpuc_nframes = ucallstack_depth ?:
-	    MAX_UCALLSTACK_FRAMES;
+	unsigned int ucallstack_depth = actionv[actionid - 1].ucallstack_depth;
+	sbuf->ucallstack.kpuc_nframes = ucallstack_depth ?: MAX_UCALLSTACK_FRAMES;
 
 	kperf_sample_user_internal(sbuf, context, actionid, sample_what);
 }
@@ -204,29 +216,11 @@ kperf_sample_internal(struct kperf_sample *sbuf,
 	int pended_th_dispatch = 0;
 	bool on_idle_thread = false;
 	uint32_t userdata = actionid;
-	bool task_only = false;
+	bool task_only = (sample_flags & SAMPLE_FLAG_TASK_ONLY) != 0;
 
+	sample_what = kperf_prepare_sample_what(sample_what, sample_flags);
 	if (sample_what == 0) {
 		return SAMPLE_CONTINUE;
-	}
-
-	/* callstacks should be explicitly ignored */
-	if (sample_flags & SAMPLE_FLAG_EMPTY_CALLSTACK) {
-		sample_what &= ~(SAMPLER_KSTACK | SAMPLER_USTACK);
-	}
-
-	if (sample_flags & SAMPLE_FLAG_ONLY_SYSTEM) {
-		sample_what &= SAMPLER_SYS_MEM;
-	}
-
-	assert((sample_flags & (SAMPLE_FLAG_THREAD_ONLY | SAMPLE_FLAG_TASK_ONLY))
-	    != (SAMPLE_FLAG_THREAD_ONLY | SAMPLE_FLAG_TASK_ONLY));
-	if (sample_flags & SAMPLE_FLAG_THREAD_ONLY) {
-		sample_what &= SAMPLER_THREAD_MASK;
-	}
-	if (sample_flags & SAMPLE_FLAG_TASK_ONLY) {
-		task_only = true;
-		sample_what &= SAMPLER_TASK_MASK;
 	}
 
 	if (!task_only) {
@@ -456,6 +450,34 @@ kperf_kdebug_handler(uint32_t debugid, uintptr_t *starting_fp)
 }
 
 /*
+ * Sample using a minimum of stack space during this phase.
+ */
+static void
+kperf_ast_sample_min_stack_phase(struct kperf_usample_min *sbuf_min,
+    struct kperf_context *context, unsigned int sample_what)
+{
+	if (sample_what & SAMPLER_TH_DISPATCH) {
+		kperf_thread_dispatch_sample(&sbuf_min->th_dispatch, context);
+	}
+}
+
+/*
+ * This function should not be inlined with its caller, which would pollute
+ * the stack usage of the minimum stack phase, above.
+ */
+__attribute__((noinline))
+static void
+kperf_ast_sample_max_stack_phase(struct kperf_usample_min *sbuf_min,
+    struct kperf_context *context, uint32_t actionid, unsigned int sample_what,
+    unsigned int nframes)
+{
+	struct kperf_usample sbuf = { .usample_min = sbuf_min };
+	sbuf.ucallstack.kpuc_nframes = nframes;
+
+	kperf_sample_user_internal(&sbuf, context, actionid, sample_what);
+}
+
+/*
  * This function allocates >2.3KB of the stack.  Prevent the compiler from
  * inlining this function into ast_taken and ensure the stack memory is only
  * allocated for the kperf AST.
@@ -467,8 +489,6 @@ kperf_thread_ast_handler(thread_t thread)
 	uint32_t ast = thread->kperf_ast;
 
 	BUF_INFO(PERF_AST_HNDLR | DBG_FUNC_START, thread, ast);
-
-	struct kperf_usample sbuf = {};
 
 	task_t task = get_threadtask(thread);
 
@@ -492,10 +512,12 @@ kperf_thread_ast_handler(thread_t thread)
 		sample_what |= SAMPLER_USTACK | SAMPLER_TH_INFO;
 	}
 
-	sbuf.ucallstack.kpuc_nframes =
-	    T_KPERF_GET_CALLSTACK_DEPTH(ast) ?: MAX_UCALLSTACK_FRAMES;
 	unsigned int actionid = T_KPERF_GET_ACTIONID(ast);
-	kperf_sample_user_internal(&sbuf, &ctx, actionid, sample_what);
+
+	struct kperf_usample_min sbuf_min = { 0 };
+	kperf_ast_sample_min_stack_phase(&sbuf_min, &ctx, sample_what);
+	kperf_ast_sample_max_stack_phase(&sbuf_min, &ctx, actionid, sample_what,
+	    T_KPERF_GET_CALLSTACK_DEPTH(ast) ?: MAX_UCALLSTACK_FRAMES);
 
 	BUF_INFO(PERF_AST_HNDLR | DBG_FUNC_END);
 }
@@ -693,7 +715,8 @@ kperf_action_set_count(unsigned count)
 	}
 
 	/* create a new array */
-	new_actionv = kalloc_tag(count * sizeof(*new_actionv), VM_KERN_MEMORY_DIAG);
+	new_actionv = kalloc_data_tag(count * sizeof(*new_actionv),
+	    Z_WAITOK, VM_KERN_MEMORY_DIAG);
 	if (new_actionv == NULL) {
 		return ENOMEM;
 	}
@@ -716,9 +739,7 @@ kperf_action_set_count(unsigned count)
 	actionv = new_actionv;
 	actionc = count;
 
-	if (old_actionv != NULL) {
-		kfree(old_actionv, old_count * sizeof(*actionv));
-	}
+	kfree_data(old_actionv, old_count * sizeof(*actionv));
 
 	return 0;
 }

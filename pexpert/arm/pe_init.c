@@ -12,10 +12,13 @@
 #include <pexpert/device_tree.h>
 #include <pexpert/pe_images.h>
 #include <kern/sched_prim.h>
+#include <kern/socd_client.h>
+#include <machine/atomic.h>
 #include <machine/machine_routines.h>
 #include <arm/caches_internal.h>
 #include <kern/debug.h>
 #include <libkern/section_keywords.h>
+#include <os/overflow.h>
 
 #if defined __arm__
 #include <pexpert/arm/board_config.h>
@@ -75,6 +78,10 @@ static unsigned int panic_text_len;
 
 /* Whether a console is standing by for panic logging */
 static boolean_t panic_console_available = FALSE;
+
+/* socd trace ram attributes */
+static SECURITY_READ_ONLY_LATE(vm_offset_t) socd_trace_ram_base = 0;
+static SECURITY_READ_ONLY_LATE(vm_size_t) socd_trace_ram_size = 0;
 
 extern uint32_t crc32(uint32_t crc, const void *buf, size_t size);
 
@@ -372,7 +379,7 @@ void
 PE_slide_devicetree(vm_offset_t slide)
 {
 	assert(PE_state.initialized);
-	PE_state.deviceTreeHead += slide;
+	PE_state.deviceTreeHead = (void *)((uintptr_t)PE_state.deviceTreeHead + slide);
 	SecureDTInit(PE_state.deviceTreeHead, PE_state.deviceTreeSize);
 }
 
@@ -394,7 +401,10 @@ PE_init_platform(boolean_t vm_initialized, void *args)
 		PE_state.video.v_width = boot_args_ptr->Video.v_width;
 		PE_state.video.v_height = boot_args_ptr->Video.v_height;
 		PE_state.video.v_depth = (boot_args_ptr->Video.v_depth >> kBootVideoDepthDepthShift) & kBootVideoDepthMask;
-		PE_state.video.v_rotate = (boot_args_ptr->Video.v_depth >> kBootVideoDepthRotateShift) & kBootVideoDepthMask;
+		PE_state.video.v_rotate = (
+			((boot_args_ptr->Video.v_depth >> kBootVideoDepthRotateShift) & kBootVideoDepthMask) +    // rotation
+			((boot_args_ptr->Video.v_depth >> kBootVideoDepthBootRotateShift)  & kBootVideoDepthMask) // add extra boot rotation
+			) % 4;
 		PE_state.video.v_scale = ((boot_args_ptr->Video.v_depth >> kBootVideoDepthScaleShift) & kBootVideoDepthMask) + 1;
 		PE_state.video.v_display = boot_args_ptr->Video.v_display;
 		strlcpy(PE_state.video.v_pixelFormat, "BBBBBBBBGGGGGGGGRRRRRRRR", sizeof(PE_state.video.v_pixelFormat));
@@ -545,7 +555,7 @@ int
 PE_stub_poll_input(__unused unsigned int options, char *c)
 {
 	*c = (char)uart_getc();
-	return 0;               /* 0 for success, 1 for unsupported */
+	return 0; /* 0 for success, 1 for unsupported */
 }
 
 /*
@@ -775,5 +785,50 @@ void
 PE_mark_hwaccess(uint64_t thread)
 {
 	last_hwaccess_thread = thread;
-	asm volatile ("dmb ish");
+	__builtin_arm_dmb(DMB_ISH);
+}
+
+__startup_func
+vm_size_t
+PE_init_socd_client(void)
+{
+	DTEntry entry;
+	uintptr_t const *reg_prop;
+	unsigned int size;
+
+	if (kSuccess != SecureDTLookupEntry(0, "socd-trace-ram", &entry)) {
+		return 0;
+	}
+
+	if (kSuccess != SecureDTGetProperty(entry, "reg", (void const **)&reg_prop, &size)) {
+		return 0;
+	}
+
+	socd_trace_ram_base = ml_io_map(reg_prop[0], (vm_size_t)reg_prop[1]);
+	socd_trace_ram_size = (vm_size_t)reg_prop[1];
+
+	return socd_trace_ram_size;
+}
+
+/*
+ * PE_write_socd_client_buffer solves two problems:
+ * 1. Prevents accidentally trusting a value read from socd client buffer. socd client buffer is considered untrusted.
+ * 2. Ensures only 4 byte store instructions are used. On some platforms, socd client buffer is backed up
+ *    by a SRAM that must be written to only 4 bytes at a time.
+ */
+void
+PE_write_socd_client_buffer(vm_offset_t offset, const void *buff, vm_size_t size)
+{
+	volatile uint32_t *dst = (volatile uint32_t *)(socd_trace_ram_base + offset);
+	vm_size_t len = size / sizeof(dst[0]);
+
+	assert(offset + size < socd_trace_ram_size);
+	/* Perform 4 byte aligned accesses */
+	if ((offset % 4 != 0) || (size % 4 != 0)) {
+		panic("unaligned acccess to socd trace ram");
+	}
+
+	for (vm_size_t i = 0; i < len; i++) {
+		dst[i] = ((const uint32_t *)buff)[i];
+	}
 }

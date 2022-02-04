@@ -867,11 +867,7 @@ act_thread_csave(void)
 	kern_return_t   kret;
 	unsigned int    val;
 
-	ic = (struct arm_act_context *) kalloc(sizeof(struct arm_act_context));
-
-	if (ic == (struct arm_act_context *) NULL) {
-		return (void *) 0;
-	}
+	ic = kalloc_type(struct arm_act_context, Z_WAITOK | Z_NOFAIL);
 
 	val = ARM_THREAD_STATE_COUNT;
 	kret = machine_thread_get_state(current_thread(),
@@ -879,7 +875,7 @@ act_thread_csave(void)
 	    (thread_state_t) &ic->ss,
 	    &val);
 	if (kret != KERN_SUCCESS) {
-		kfree(ic, sizeof(struct arm_act_context));
+		act_thread_cfree(ic);
 		return (void *) 0;
 	}
 #if __ARM_VFP__
@@ -889,7 +885,7 @@ act_thread_csave(void)
 	    (thread_state_t) &ic->vfps,
 	    &val);
 	if (kret != KERN_SUCCESS) {
-		kfree(ic, sizeof(struct arm_act_context));
+		act_thread_cfree(ic);
 		return (void *) 0;
 	}
 #endif
@@ -930,7 +926,7 @@ act_thread_catt(void *ctx)
 	}
 #endif
 out:
-	kfree(ic, sizeof(struct arm_act_context));
+	act_thread_cfree(ic);
 }
 
 /*
@@ -940,7 +936,7 @@ out:
 void
 act_thread_cfree(void *ctx)
 {
-	kfree(ctx, sizeof(struct arm_act_context));
+	kfree_type(struct arm_act_context, ctx);
 }
 
 kern_return_t

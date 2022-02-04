@@ -31,20 +31,20 @@
 #include "assym.s"
 
 #if XNU_MONITOR
-/* Exit path defines; for controlling PPL -> kernel transitions. */
+/*
+ * Exit path defines; for controlling PPL -> kernel transitions.
+ * These should fit within a 32-bit integer, as the PPL trampoline packs them into a 32-bit field.
+ */
 #define PPL_EXIT_DISPATCH   0 /* This is a clean exit after a PPL request. */
 #define PPL_EXIT_PANIC_CALL 1 /* The PPL has called panic. */
 #define PPL_EXIT_BAD_CALL   2 /* The PPL request failed. */
 #define PPL_EXIT_EXCEPTION  3 /* The PPL took an exception. */
 
-/* Guarded mode trap numbers: these are passed as the genter immediate. */
-#define GXF_ENTER_PPL 0
 
 #define KERNEL_MODE_ELR      ELR_GL11
 #define KERNEL_MODE_FAR      FAR_GL11
 #define KERNEL_MODE_ESR      ESR_GL11
 #define KERNEL_MODE_SPSR     SPSR_GL11
-#define KERNEL_MODE_ASPSR    ASPSR_GL11
 #define KERNEL_MODE_VBAR     VBAR_GL11
 #define KERNEL_MODE_TPIDR    TPIDR_GL11
 
@@ -52,7 +52,6 @@
 #define GUARDED_MODE_FAR     FAR_EL1
 #define GUARDED_MODE_ESR     ESR_EL1
 #define GUARDED_MODE_SPSR    SPSR_EL1
-#define GUARDED_MODE_ASPSR   ASPSR_EL1
 #define GUARDED_MODE_VBAR    VBAR_EL1
 #define GUARDED_MODE_TPIDR   TPIDR_EL1
 
@@ -135,8 +134,11 @@
  * On CPUs with PAC, the kernel "A" keys are used to create a thread signature.
  * These keys are deliberately kept loaded into the CPU for later kernel use.
  *
+ *   arg0 - KERNEL_MODE or HIBERNATE_MODE
  *   x0 - Address of the save area
  */
+#define KERNEL_MODE 0
+#define HIBERNATE_MODE 1
 
 .macro SPILL_REGISTERS	mode
 	stp		x2, x3, [x0, SS64_X2]                                   // Save remaining GPRs
@@ -181,28 +183,6 @@
 
 #if defined(HAS_APPLE_PAC)
 	.if \mode != HIBERNATE_MODE
-	/**
-	 * Restore kernel keys if:
-	 *
-	 * - Entering the kernel from EL0, and
-	 * - CPU lacks fast A-key switching (fast A-key switching is
-	 *   implemented by reprogramming KERNKey on context switch)
-	 */
-	.if \mode == KERNEL_MODE
-#if HAS_PAC_SLOW_A_KEY_SWITCHING
-	IF_PAC_FAST_A_KEY_SWITCHING	Lskip_restore_kernel_keys_\@, x21
-	and		x21, x23, #(PSR64_MODE_EL_MASK)
-	cmp		x21, #(PSR64_MODE_EL0)
-	bne		Lskip_restore_kernel_keys_\@
-
-	MOV64	x2, KERNEL_JOP_ID
-	mrs		x3, TPIDR_EL1
-	ldr		x3, [x3, ACT_CPUDATAP]
-	REPROGRAM_JOP_KEYS	Lskip_restore_kernel_keys_\@, x2, x3, x4
-	isb		sy
-Lskip_restore_kernel_keys_\@:
-#endif /* HAS_PAC_SLOW_A_KEY_SWITCHING */
-	.endif /* \mode == KERNEL_MODE */
 
 	/* Save x1 and LR to preserve across call */
 	mov		x21, x1
@@ -223,7 +203,11 @@ Lskip_restore_kernel_keys_\@:
 	mov		x3, x20
 	mov		x4, x16
 	mov		x5, x17
+
+	mrs		x19, SPSel
+	msr		SPSel, #1
 	bl		_ml_sign_thread_state
+	msr		SPSel, x19
 	mov		lr, x20
 	mov		x1, x21
 	.endif
@@ -257,45 +241,5 @@ Lskip_restore_kernel_keys_\@:
 	ldr		x1, [x1, ACT_CPUDATAP]
 	ldr		x1, [x1, CPU_ISTACKPTR]
 	mov		sp, x1			// Set the stack pointer to the interrupt stack
-.endmacro
-
-/*
- * REENABLE_DAIF
- *
- * Restores the DAIF bits to their original state (well, the AIF bits at least).
- *   arg0 - DAIF bits (read from the DAIF interface) to restore
- */
-.macro REENABLE_DAIF
-	/* AIF enable. */
-	tst		$0, #(DAIF_IRQF | DAIF_FIQF | DAIF_ASYNCF)
-	b.eq		3f
-
-	/* IF enable. */
-	tst		$0, #(DAIF_IRQF | DAIF_FIQF)
-	b.eq		2f
-
-	/* A enable. */
-	tst		$0, #(DAIF_ASYNCF)
-	b.eq		1f
-
-	/* Enable nothing. */
-	b		4f
-
-	/* A enable. */
-1:
-	msr		DAIFClr, #(DAIFSC_ASYNCF)
-	b		4f
-
-	/* IF enable. */
-2:
-	msr		DAIFClr, #(DAIFSC_IRQF | DAIFSC_FIQF)
-	b		4f
-
-	/* AIF enable. */
-3:
-	msr		DAIFClr, #(DAIFSC_IRQF | DAIFSC_FIQF | DAIFSC_ASYNCF)
-
-	/* Done! */
-4:
 .endmacro
 

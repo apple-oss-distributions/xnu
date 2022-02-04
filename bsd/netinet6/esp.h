@@ -65,7 +65,7 @@
 #ifndef _NETINET6_ESP_H_
 #define _NETINET6_ESP_H_
 #include <sys/appleapiopts.h>
-#include <net/multi_layer_pkt_log.h>
+#include <sys/types.h>
 
 struct esp {
 	u_int32_t       esp_spi;        /* ESP */

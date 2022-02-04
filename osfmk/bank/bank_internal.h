@@ -45,7 +45,7 @@
 #define BANK_DEFAULT_VALUE NULL
 #define BANK_DEFAULT_TASK_VALUE ((void *) 1)
 
-typedef mach_voucher_attr_value_handle_t bank_handle_t;
+typedef mach_voucher_attr_value_handle_t bank_handle_t __kernel_ptr_semantics;
 
 #define BANK_TASK        0
 #define BANK_ACCOUNT     1
@@ -71,7 +71,9 @@ struct bank_task {
 	queue_head_t              bt_accounts_to_charge;   /* List of accounts I did work and need to charge */
 	decl_lck_mtx_data(, bt_acc_to_pay_lock);           /* Lock to protect accounts to pay list */
 	decl_lck_mtx_data(, bt_acc_to_charge_lock);        /* Lock to protect accounts to charge list */
-	boolean_t                 bt_hasentitlement;       /* If the secure persona entitlement is set on the task */
+	uint32_t                  bt_hasentitlement:1,     /* If the secure persona entitlement is set on the task */
+	    bt_platform_binary:1,                          /* If the process is a platform binary */
+	    bt_adopt_any_entitled:1;                       /* If the adopt any persona entitlement is set on the task */
 #if CONFIG_THREAD_GROUPS
 	struct thread_group *         bt_thread_group;         /* Task's home thread group pointer */
 #endif
@@ -186,6 +188,10 @@ extern void bank_serviced_balance(bank_task_t bank_task, uint64_t *cpu_time, uin
 extern kern_return_t bank_get_bank_ledger_thread_group_and_persona(ipc_voucher_t voucher,
     ledger_t *bankledger, struct thread_group **banktg, uint32_t *persona_id);
 extern void bank_swap_thread_bank_ledger(thread_t thread, ledger_t ledger);
+#if CONFIG_PREADOPT_TG
+extern kern_return_t
+bank_get_preadopt_thread_group(ipc_voucher_t voucher, struct thread_group **banktg);
+#endif
 
 #endif /* MACH_KERNEL_PRIVATE */
 #endif /* _BANK_BANK_INTERNAL_H_ */

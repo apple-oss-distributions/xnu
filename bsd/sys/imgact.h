@@ -115,10 +115,14 @@ struct image_params {
 	struct vnode    *ip_scriptvp;           /* script */
 	unsigned int    ip_csflags;             /* code signing flags */
 	int             ip_mac_return;          /* return code from mac policy checks */
-	void            *ip_px_sa;
-	void            *ip_px_sfa;
-	void            *ip_px_spa;
-	void            *ip_px_smpx;            /* MAC-specific spawn attrs. */
+	void            *ip_px_sa;              /* posix_spawn attrs */
+	void            *ip_px_sfa;             /* posix_spawn file actions */
+	void            *ip_px_spa;             /* posix_spawn port actions */
+	struct ip_px_smpx_s {
+		void        *array;
+		void        *data;
+		uint64_t    datalen;
+	}               ip_px_smpx;             /* MAC-specific spawn attrs. */
 	void            *ip_px_persona;         /* persona args */
 	void            *ip_px_pcred_info;      /* posix cred args */
 	void            *ip_cs_error;           /* codesigning error reason */
@@ -143,13 +147,16 @@ struct image_params {
 #define IMGPF_SPAWN                             0x00000010      /* spawn (without setexec) */
 #define IMGPF_DISABLE_ASLR              0x00000020      /* disable ASLR */
 #define IMGPF_ALLOW_DATA_EXEC   0x00000040      /* forcibly disallow data execution */
+#if CONFIG_VFORK
 #define IMGPF_VFORK_EXEC                0x00000080      /* vfork followed by exec */
+#endif /* CONFIG_VFORK */
 #define IMGPF_EXEC                              0x00000100      /* exec */
 #define IMGPF_HIGH_BITS_ASLR    0x00000200      /* randomize high bits of ASLR slide */
 #define IMGPF_IS_64BIT_DATA             0x00000400      /* exec to a 64Bit register state */
 #define IMGPF_DRIVER             0x00000800      /* exec of a driver binary (no LC_MAIN) */
-#define IMGPF_RESLIDE           0x000001000     /* reslide the shared cache */
-#define IMGPF_PLUGIN_HOST_DISABLE_A_KEYS  0x000002000     /* process hosts plugins, disable ptr auth A keys */
+#define IMGPF_RESLIDE            0x00001000     /* reslide the shared cache */
+#define IMGPF_PLUGIN_HOST_DISABLE_A_KEYS  0x00002000     /* process hosts plugins, disable ptr auth A keys */
+#define IMGPF_ALT_ROSETTA       0x00004000     /* load alternative rosetta runtime */
 #define IMGPF_NOJOP             0x80000000
 
 

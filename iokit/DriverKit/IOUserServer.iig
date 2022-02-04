@@ -48,6 +48,7 @@ public:
 		const char      name[64],
 		uint64_t        tag,
 		uint64_t        options,
+		OSString      * bundleID,
 		IOUserServer ** server);
 
 	virtual bool
@@ -61,6 +62,9 @@ public:
 
 	virtual kern_return_t
 	LoadModule(const char path[1024]) LOCAL;
+
+	virtual kern_return_t
+	RegisterService() override;
 };
 
 #endif /* ! _IOKIT_UIOUSERSERVER_H */

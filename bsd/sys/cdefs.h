@@ -152,8 +152,16 @@
 #endif /* !NO_ANSI_KEYWORDS */
 #endif /* !(__STDC__ || __cplusplus) */
 
+/*
+ * __pure2 can be used for functions that are only a function of their scalar
+ * arguments (meaning they can't dereference pointers).
+ *
+ * __stateful_pure can be used for functions that have no side effects,
+ * but depend on the state of the memory.
+ */
 #define __dead2         __attribute__((__noreturn__))
 #define __pure2         __attribute__((__const__))
+#define __stateful_pure __attribute__((__pure__))
 
 /* __unused denotes variables and functions that may not be used, preventing
  * the compiler from warning about it if not used.
@@ -179,9 +187,9 @@
  * __exported_push/_exported_pop are pragmas used to delimit a range of
  *  symbols that should be exported even when symbols are hidden by default.
  */
-#define __exported                      __attribute__((__visibility__("default")))
-#define __exported_push         _Pragma("GCC visibility push(default)")
-#define __exported_pop          _Pragma("GCC visibility pop")
+#define __exported      __attribute__((__visibility__("default")))
+#define __exported_push _Pragma("GCC visibility push(default)")
+#define __exported_pop  _Pragma("GCC visibility pop")
 
 /* __deprecated causes the compiler to produce a warning when encountering
  * code using the deprecated functionality.
@@ -229,8 +237,7 @@
 #define __kpi_unavailable
 #endif /* !defined(KERNEL) || defined(KERNEL_PRIVATE) */
 
-#if defined(KERNEL)
-#if defined(XNU_KERNEL_PRIVATE)
+#if XNU_KERNEL_PRIVATE
 /* This macro is meant to be used for kpi deprecated to x86 3rd parties
  * but should be marked as unavailable for arm macOS devices.
  * XNU:                         nothing (API is still available)
@@ -239,18 +246,15 @@
  * 3rd party kexts macOS arm:   __unavailable
  */
 #define __kpi_deprecated_arm64_macos_unavailable
-#elif defined(KERNEL_PRIVATE)
-#define __kpi_deprecated_arm64_macos_unavailable __deprecated
-#else /* !defined(XNU_KERNEL_PRIVATE) */
-#if TARGET_OS_OSX && defined(__arm64__)
-#define __kpi_deprecated_arm64_macos_unavailable __unavailable
-#else /* !TARGET_OS_OSX || !defined(__arm64__) */
-#define __kpi_deprecated_arm64_macos_unavailable __deprecated
-#endif /* !TARGET_OS_OSX || !defined(__arm64__) */
-#endif /* !defined(XNU_KERNEL_PRIVATE) */
-#else /* !defined(KERNEL) */
+#elif !KERNEL || !PLATFORM_MacOSX
 #define __kpi_deprecated_arm64_macos_unavailable
-#endif /* !defined(KERNEL) */
+#elif KERNEL_PRIVATE
+#define __kpi_deprecated_arm64_macos_unavailable __deprecated
+#elif defined(__arm64__)
+#define __kpi_deprecated_arm64_macos_unavailable __unavailable
+#else
+#define __kpi_deprecated_arm64_macos_unavailable __deprecated
+#endif /* XNU_KERNEL_PRIVATE */
 
 /* Delete pseudo-keywords wherever they are not available or needed. */
 #ifndef __dead
@@ -768,7 +772,7 @@
 #define __DARWIN_EXTSN(sym)             __asm("_" __STRING(sym) __DARWIN_SUF_EXTSN)
 #define __DARWIN_EXTSN_C(sym)           __asm("_" __STRING(sym) __DARWIN_SUF_EXTSN __DARWIN_SUF_NON_CANCELABLE)
 #if XNU_KERNEL_PRIVATE
-#define __XNU_INTERNAL(sym)             __asm("_" __STRING(sym) "$XNU_INTERNAL")
+#define __XNU_INTERNAL(sym)             __asm("_" __STRING(sym) "$XNU_INTERNAL") __attribute__((used))
 #endif
 
 /*
@@ -962,6 +966,43 @@
 #define __XNU_PRIVATE_EXTERN __attribute__((visibility("hidden")))
 #endif
 
+#if XNU_KERNEL_PRIVATE
+/*
+ * Note: for now bound attributes are limited to the kernel.
+ *
+ * Any bound checks annotation will be stripped when installed to the KDK/SDK
+ * until their spellings have converged.
+ *
+ * Make sure to keep strip-bound-attributes.sed
+ * and bound-attributes-check.pl in sync.
+ */
+#if XNU_BOUND_CHECKS
+#define __bidi_indexable                    __attribute__((__bidi_indexable__))
+#define __indexable                         __attribute__((__indexable__))
+#define __single                            __attribute__((__single__))
+#define __unsafe_indexable                  __attribute__((__unsafe_indexable__))
+#define __counted_by(n)                     __attribute__((__counted_by__(n)))
+#define __sized_by(n)                       __attribute__((__sized_by__(n)))
+#define __ended_by(p)                       __attribute__((__ended_by__(p)))
+#define __unsafe_forge_bidi_indexable(p, s) __builtin_unsafe_forge_bidi_indexable(p, s)
+#define __unsafe_forge_single(p)            __builtin_unsafe_forge_single(p)
+#define __ASSUME_PTR_ABI_SINGLE_BEGIN       _Pragma("clang abi_ptr_attr set(single)")
+#define __ASSUME_PTR_ABI_SINGLE_END         _Pragma("clang abi_ptr_attr set(unsafe_indexable)")
+#else
+#define __bidi_indexable
+#define __indexable
+#define __single
+#define __unsafe_indexable
+#define __counted_by(n)
+#define __sized_by(n)
+#define __ended_by(p)
+#define __unsafe_forge_bidi_indexable(p, s) (p)
+#define __unsafe_forge_single(p)            (p)
+#define __ASSUME_PTR_ABI_SINGLE_BEGIN
+#define __ASSUME_PTR_ABI_SINGLE_END
+#endif
+#endif /* !XNU_KERNEL_PRIVATE */
+
 /*
  * Architecture validation for current SDK
  */
@@ -979,7 +1020,7 @@
  */
 #define __IGNORE_WCASTALIGN(x) _Pragma("clang diagnostic push")                     \
 	                       _Pragma("clang diagnostic ignored \"-Wcast-align\"") \
-	                       x;                                                   \
+	                       x                                                    \
 	                       _Pragma("clang diagnostic pop")
 #endif
 
@@ -994,17 +1035,10 @@
 #define __improbable(x) __builtin_expect(!!(x), 0)
 #endif /* !defined(__probable) && !defined(__improbable) */
 
-#if defined(__cplusplus)
-#define __container_of(ptr, type, field) __extension__({ \
-	        const __typeof__(((type *)nullptr)->field) *__ptr = (ptr); \
-	        (type *)((uintptr_t)__ptr - offsetof(type, field)); \
-	})
-#else
 #define __container_of(ptr, type, field) __extension__({ \
 	        const __typeof__(((type *)NULL)->field) *__ptr = (ptr); \
 	        (type *)((uintptr_t)__ptr - offsetof(type, field)); \
 	})
-#endif
 
 #endif /* KERNEL || PRIVATE */
 
@@ -1050,5 +1084,26 @@
 #define __options_closed_decl(_name, _type, ...) \
 	        typedef _type _name; enum __VA_ARGS__ __enum_closed __enum_options
 #endif
+
+#if defined(KERNEL) && __has_attribute(xnu_usage_semantics)
+/*
+ * These macros can be used to annotate type definitions or scalar structure
+ * fields to inform the compiler about which semantic they have with regards
+ * to the content of the underlying memory represented by such type or field.
+ *
+ * This information is used in the analysis of the types performed by the
+ * signature based type segregation implemented in kalloc.
+ */
+#define __kernel_ptr_semantics __attribute__((xnu_usage_semantics("pointer")))
+#define __kernel_data_semantics __attribute__((xnu_usage_semantics("data")))
+#define __kernel_dual_semantics __attribute__((xnu_usage_semantics("pointer", "data")))
+
+#else  /* defined(KERNEL) && __has_attribute(xnu_usage_semantics) */
+
+#define __kernel_ptr_semantics
+#define __kernel_data_semantics
+#define __kernel_dual_semantics
+
+#endif /* defined(KERNEL) && __has_attribute(xnu_usage_semantics) */
 
 #endif /* !_CDEFS_H_ */

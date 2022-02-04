@@ -1,0 +1,7 @@
+module Darwin.cdefs [system] {
+  header "sys/cdefs.h"
+  header "sys/_symbol_aliasing.h"
+  header "sys/_posix_availability.h"
+
+  export *
+}

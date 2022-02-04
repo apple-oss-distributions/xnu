@@ -143,8 +143,7 @@ static int dad_maxtry = 15;     /* max # of *tries* to transmit DAD packet */
 #define DAD_REMREF(_dp)                                                 \
 	dad_remref(_dp)
 
-extern lck_mtx_t *dad6_mutex;
-extern lck_mtx_t *nd6_mutex;
+static LCK_MTX_DECLARE_ATTR(dad6_mutex, &ip6_mutex_grp, &ip6_mutex_attr);
 
 static int nd6_llreach_base = 30;        /* seconds */
 
@@ -255,8 +254,10 @@ nd6_ns_input(
 	struct nd_neighbor_solicit *nd_ns = NULL;
 	struct in6_addr saddr6 = ip6->ip6_src;
 	struct in6_addr daddr6 = ip6->ip6_dst;
+	uint32_t saddr_ifscope = IN6_IS_SCOPE_EMBED(&saddr6) ? ip6_input_getsrcifscope(m) : IFSCOPE_NONE;
 	struct in6_addr taddr6 = {};
 	struct in6_addr myaddr6 = {};
+	uint32_t myaddr_ifscope = IFSCOPE_NONE;
 	char *lladdr = NULL;
 	struct ifaddr *ifa = NULL;
 	int lladdrlen = 0;
@@ -267,6 +268,7 @@ nd6_ns_input(
 	boolean_t advrouter = FALSE;
 	boolean_t is_dad_probe = FALSE;
 	int oflgclr = 0;
+	uint32_t taddr_ifscope;
 
 	/* Expect 32-bit aligned data pointer on strict-align platforms */
 	MBUF_STRICT_DATA_ALIGNMENT_CHECK_32(m);
@@ -277,7 +279,7 @@ nd6_ns_input(
 	m->m_pkthdr.pkt_flags |= PKTF_INET6_RESOLVE;
 
 	taddr6 = nd_ns->nd_ns_target;
-	if (in6_setscope(&taddr6, ifp, NULL) != 0) {
+	if (in6_setscope(&taddr6, ifp, &taddr_ifscope) != 0) {
 		goto bad;
 	}
 
@@ -316,6 +318,9 @@ nd6_ns_input(
 		src_sa6.sin6_family = AF_INET6;
 		src_sa6.sin6_len = sizeof(src_sa6);
 		src_sa6.sin6_addr = saddr6;
+		if (!in6_embedded_scope) {
+			src_sa6.sin6_scope_id = saddr_ifscope;
+		}
 		if (!nd6_is_addr_neighbor(&src_sa6, ifp, 0)) {
 			nd6log(info, "nd6_ns_input: "
 			    "NS packet from non-neighbor\n");
@@ -409,7 +414,7 @@ nd6_ns_input(
 		 * Is the target address part of the prefix that is being
 		 * proxied and installed on another interface?
 		 */
-		ifa = (struct ifaddr *)in6ifa_prproxyaddr(&taddr6);
+		ifa = (struct ifaddr *)in6ifa_prproxyaddr(&taddr6, taddr_ifscope);
 	}
 	if (ifa == NULL) {
 		/*
@@ -429,6 +434,7 @@ nd6_ns_input(
 	}
 	IFA_LOCK(ifa);
 	myaddr6 = *IFA_IN6(ifa);
+	myaddr_ifscope = IFA_SIN6_SCOPE(ifa);
 	anycast = ((struct in6_ifaddr *)ifa)->ia6_flags & IN6_IFF_ANYCAST;
 	dadprogress =
 	    ((struct in6_ifaddr *)ifa)->ia6_flags & IN6_IFF_DADPROGRESS;
@@ -446,7 +452,7 @@ nd6_ns_input(
 		goto bad;
 	}
 
-	if (IN6_ARE_ADDR_EQUAL(&myaddr6, &saddr6)) {
+	if (in6_are_addr_equal_scoped(&myaddr6, &saddr6, myaddr_ifscope, saddr_ifscope)) {
 		nd6log(info,
 		    "nd6_ns_input: duplicate IP6 address %s\n",
 		    ip6_sprintf(&saddr6));
@@ -645,6 +651,7 @@ nd6_ns_output(
 	ip6->ip6_hlim = IPV6_MAXHLIM;
 	if (daddr6) {
 		ip6->ip6_dst = *daddr6;
+		ip6_output_setdstifscope(m, ifp->if_index, NULL);
 	} else {
 		ip6->ip6_dst.s6_addr16[0] = IPV6_ADDR_INT16_MLL;
 		ip6->ip6_dst.s6_addr16[1] = 0;
@@ -652,6 +659,7 @@ nd6_ns_output(
 		ip6->ip6_dst.s6_addr32[2] = IPV6_ADDR_INT32_ONE;
 		ip6->ip6_dst.s6_addr32[3] = taddr6->s6_addr32[3];
 		ip6->ip6_dst.s6_addr8[12] = 0xff;
+		ip6_output_setdstifscope(m, ifp->if_index, NULL);
 		if (in6_setscope(&ip6->ip6_dst, ifp, NULL) != 0) {
 			goto bad;
 		}
@@ -765,6 +773,7 @@ nd6_ns_output(
 		ip6oa.ip6oa_flags &= ~IP6OAF_BOUND_SRCADDR;
 	}
 	ip6->ip6_src = *src;
+	ip6_output_setsrcifscope(m, ifp->if_index, ia);
 	nd_ns = (struct nd_neighbor_solicit *)(ip6 + 1);
 	nd_ns->nd_ns_type = ND_NEIGHBOR_SOLICIT;
 	nd_ns->nd_ns_code = 0;
@@ -1466,6 +1475,7 @@ nd6_na_output(
 		flags &= ~ND_NA_FLAG_SOLICITED;
 	} else {
 		ip6->ip6_dst = daddr6;
+		ip6_output_setdstifscope(m, ifp->if_index, NULL);
 	}
 
 	bzero(&dst_sa, sizeof(struct sockaddr_in6));
@@ -1492,6 +1502,7 @@ nd6_na_output(
 	 * from optimistic addresses.
 	 */
 	ia = in6ifa_ifpwithaddr(ifp, src);
+	ip6_output_setsrcifscope(m, ifp->if_index, ia);
 	if (ia != NULL) {
 		if (ia->ia6_flags & IN6_IFF_OPTIMISTIC) {
 			flags &= ~ND_NA_FLAG_OVERRIDE;
@@ -1655,7 +1666,7 @@ nd6_dad_find(struct ifaddr *ifa, struct nd_opt_nonce *nonce)
 {
 	struct dadq *dp;
 
-	lck_mtx_lock(dad6_mutex);
+	lck_mtx_lock(&dad6_mutex);
 	for (dp = dadq.tqh_first; dp; dp = dp->dad_list.tqe_next) {
 		DAD_LOCK_SPIN(dp);
 		if (dp->dad_ifa != ifa) {
@@ -1686,7 +1697,7 @@ nd6_dad_find(struct ifaddr *ifa, struct nd_opt_nonce *nonce)
 		DAD_UNLOCK(dp);
 		break;
 	}
-	lck_mtx_unlock(dad6_mutex);
+	lck_mtx_unlock(&dad6_mutex);
 	return dp;
 }
 
@@ -1750,7 +1761,7 @@ nd6_dad_start(
 	}
 
 	dp = zalloc_flags(dad_zone, Z_WAITOK | Z_ZERO);
-	lck_mtx_init(&dp->dad_lock, ifa_mtx_grp, ifa_mtx_attr);
+	lck_mtx_init(&dp->dad_lock, &ifa_mtx_grp, &ifa_mtx_attr);
 
 	/* Callee adds one reference for us */
 	dp = nd6_dad_attach(dp, ifa);
@@ -1797,7 +1808,7 @@ nd6_dad_start(
 static struct dadq *
 nd6_dad_attach(struct dadq *dp, struct ifaddr *ifa)
 {
-	lck_mtx_lock(dad6_mutex);
+	lck_mtx_lock(&dad6_mutex);
 	DAD_LOCK(dp);
 	dp->dad_ifa = ifa;
 	IFA_ADDREF(ifa);        /* for dad_ifa */
@@ -1812,7 +1823,7 @@ nd6_dad_attach(struct dadq *dp, struct ifaddr *ifa)
 	DAD_ADDREF_LOCKED(dp);  /* for dadq_head list */
 	TAILQ_INSERT_TAIL(&dadq, (struct dadq *)dp, dad_list);
 	DAD_UNLOCK(dp);
-	lck_mtx_unlock(dad6_mutex);
+	lck_mtx_unlock(&dad6_mutex);
 
 	return dp;
 }
@@ -1822,7 +1833,7 @@ nd6_dad_detach(struct dadq *dp, struct ifaddr *ifa)
 {
 	int detached;
 
-	lck_mtx_lock(dad6_mutex);
+	lck_mtx_lock(&dad6_mutex);
 	DAD_LOCK(dp);
 	if ((detached = dp->dad_attached)) {
 		VERIFY(dp->dad_ifa == ifa);
@@ -1832,7 +1843,7 @@ nd6_dad_detach(struct dadq *dp, struct ifaddr *ifa)
 		dp->dad_attached = 0;
 	}
 	DAD_UNLOCK(dp);
-	lck_mtx_unlock(dad6_mutex);
+	lck_mtx_unlock(&dad6_mutex);
 	if (detached) {
 		DAD_REMREF(dp);         /* drop dadq_head reference */
 	}
@@ -2365,7 +2376,7 @@ dad_addref(struct dadq *dp, int locked)
 	}
 
 	if (++dp->dad_refcount == 0) {
-		panic("%s: dad %p wraparound refcnt\n", __func__, dp);
+		panic("%s: dad %p wraparound refcnt", __func__, dp);
 		/* NOTREACHED */
 	}
 	if (!locked) {
@@ -2380,7 +2391,7 @@ dad_remref(struct dadq *dp)
 
 	DAD_LOCK_SPIN(dp);
 	if (dp->dad_refcount == 0) {
-		panic("%s: dad %p negative refcnt\n", __func__, dp);
+		panic("%s: dad %p negative refcnt", __func__, dp);
 	}
 	--dp->dad_refcount;
 	if (dp->dad_refcount > 0) {
@@ -2400,7 +2411,7 @@ dad_remref(struct dadq *dp)
 		dp->dad_ifa = NULL;
 	}
 
-	lck_mtx_destroy(&dp->dad_lock, ifa_mtx_grp);
+	lck_mtx_destroy(&dp->dad_lock, &ifa_mtx_grp);
 	zfree(dad_zone, dp);
 }
 
@@ -2506,11 +2517,15 @@ nd6_alt_node_present(struct ifnet *ifp, struct sockaddr_in6 *sin6,
 	struct rtentry *rt;
 	struct llinfo_nd6 *ln;
 	struct  if_llreach *lr = NULL;
-	const uint16_t temp_embedded_id = sin6->sin6_addr.s6_addr16[1];
+	const uint32_t temp_embedded_id = sin6->sin6_addr.s6_addr16[1];
+	const uint32_t temp_ifscope_id = sin6->sin6_scope_id;
 
-	if (IN6_IS_SCOPE_LINKLOCAL(&sin6->sin6_addr) &&
+	if (in6_embedded_scope && IN6_IS_SCOPE_LINKLOCAL(&sin6->sin6_addr) &&
 	    (temp_embedded_id == 0)) {
 		sin6->sin6_addr.s6_addr16[1] = htons(ifp->if_index);
+	}
+	if (!in6_embedded_scope && IN6_IS_SCOPE_LINKLOCAL(&sin6->sin6_addr) && (temp_ifscope_id == 0)) {
+		sin6->sin6_scope_id = ifp->if_index;
 	}
 
 	nd6_cache_lladdr(ifp, &sin6->sin6_addr, LLADDR(sdl), sdl->sdl_alen,
@@ -2523,8 +2538,11 @@ nd6_alt_node_present(struct ifnet *ifp, struct sockaddr_in6 *sin6,
 	    ifp->if_index);
 
 	/* Restore the address that was passed to us */
-	if (temp_embedded_id == 0) {
+	if (in6_embedded_scope && temp_embedded_id == 0) {
 		sin6->sin6_addr.s6_addr16[1] = 0;
+	}
+	if (!in6_embedded_scope && temp_ifscope_id == 0) {
+		sin6->sin6_scope_id = 0;
 	}
 
 	if (rt != NULL) {
@@ -2567,14 +2585,18 @@ void
 nd6_alt_node_absent(struct ifnet *ifp, struct sockaddr_in6 *sin6, struct sockaddr_dl *sdl)
 {
 	struct rtentry *rt;
-	const uint16_t temp_embedded_id = sin6->sin6_addr.s6_addr16[1];
+	const uint32_t temp_embedded_id = sin6->sin6_addr.s6_addr16[1];
+	const uint32_t temp_ifscope_id = sin6->sin6_scope_id;
 
 	nd6log(debug, "%s: host route to %s\n", __func__,
 	    ip6_sprintf(&sin6->sin6_addr));
 
-	if (IN6_IS_SCOPE_LINKLOCAL(&sin6->sin6_addr) &&
+	if (in6_embedded_scope && IN6_IS_SCOPE_LINKLOCAL(&sin6->sin6_addr) &&
 	    (temp_embedded_id == 0)) {
 		sin6->sin6_addr.s6_addr16[1] = htons(ifp->if_index);
+	}
+	if (!in6_embedded_scope && IN6_IS_SCOPE_LINKLOCAL(&sin6->sin6_addr) && (temp_ifscope_id == 0)) {
+		sin6->sin6_scope_id = ifp->if_index;
 	}
 
 	LCK_MTX_ASSERT(rnh_lock, LCK_MTX_ASSERT_NOTOWNED);
@@ -2584,8 +2606,11 @@ nd6_alt_node_absent(struct ifnet *ifp, struct sockaddr_in6 *sin6, struct sockadd
 	    ifp->if_index);
 
 	/* Restore the address that was passed to us */
-	if (temp_embedded_id == 0) {
+	if (in6_embedded_scope && temp_embedded_id == 0) {
 		sin6->sin6_addr.s6_addr16[1] = 0;
+	}
+	if (!in6_embedded_scope && temp_ifscope_id == 0) {
+		sin6->sin6_scope_id = 0;
 	}
 
 	if (rt != NULL) {

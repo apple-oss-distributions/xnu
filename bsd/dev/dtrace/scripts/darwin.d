@@ -26,9 +26,12 @@ inline int UT_VFORK = 0x02000000;  /* thread has vfork children */
 inline uthread_t uthread = (mach_kernel`uthread_t)(curthread->uthread); /* ` */
 #pragma D binding "1.0" uthread
 
-inline struct proc * curproc = 
-	(uthread && (uthread->uu_flag & UT_VFORK) && uthread->uu_proc) ? (struct proc *)uthread->uu_proc :
-	((struct proc *)(curthread->task->bsd_info)) != NULL ? ((struct proc *)(curthread->task->bsd_info)) : 
+// inline struct proc * curproc =
+// 	(uthread && (uthread->uu_flag & UT_VFORK) && uthread->uu_proc) ? (struct proc *)uthread->uu_proc :
+// 	((struct proc *)(curthread->task->bsd_info)) != NULL ? ((struct proc *)(curthread->task->bsd_info)) :
+// 	mach_kernel`kernproc;
+inline struct proc * curproc =
+	((struct proc *)(curthread->task->bsd_info)) != NULL ? ((struct proc *)(curthread->task->bsd_info)) :
 	mach_kernel`kernproc; /* ` */
 #pragma D binding "1.0" curproc
 
@@ -200,16 +203,16 @@ translator psinfo_t < struct proc * P > {
 	pr_nlwp = 	((struct task *)(P->task))->thread_count;
 	pr_pid = 	P->p_pid;
 	pr_ppid = 	P->p_ppid;
-	pr_pgid = 	P->p_pgrp->pg_id;
-	pr_sid = 	P->p_pgrp->pg_session->s_sid;
+	pr_pgid = 	P->p_pgrp.__hazard_ptr->pg_id;
+	pr_sid = 	P->p_pgrp.__hazard_ptr->pg_session->s_sid;
  	pr_uid = 	P->p_ucred->cr_posix.cr_ruid;
  	pr_euid = 	P->p_ucred->cr_posix.cr_uid;
  	pr_gid = 	P->p_ucred->cr_posix.cr_rgid;
  	pr_egid = 	P->p_ucred->cr_posix.cr_groups[0];
 	pr_addr = 	(uintptr_t)P;
 
-	pr_ttydev = (P->p_pgrp->pg_session->s_ttyvp == NULL) ? (dev_t)-1 :
-		P->p_pgrp->pg_session->s_ttyp->t_dev;
+	pr_ttydev = (P->p_pgrp.__hazard_ptr->pg_session->s_ttyvp == NULL) ? (dev_t)-1 :
+		P->p_pgrp.__hazard_ptr->pg_session->s_ttyp->t_dev;
 
 	/*
 	 * timestruct_t (SECONDS, NANOSECONDS) is not available directly nor can a further translation
@@ -336,15 +339,19 @@ inline lwpsinfo_t *curlwpsinfo = xlate <lwpsinfo_t *> (curthread);
 #pragma D attributes Stable/Stable/Common curlwpsinfo
 #pragma D binding "1.0" curlwpsinfo
 
-/* XXX Really want vn_getpath(curproc->p_fd->fd_cdir, , ) but that takes namecache_rw_lock XXX */
-inline string cwd = curproc->p_fd->fd_cdir->v_name == NULL ?
-	"<unknown>" : stringof(curproc->p_fd->fd_cdir->v_name);
+/* XXX Really want vn_getpath(curproc->p_fd.fd_cdir, , ) but that takes namecache_rw_lock XXX */
+inline string cwd = curproc->p_fd.fd_cdir->v_name == NULL ?
+	"<unknown>" : stringof(curproc->p_fd.fd_cdir->v_name);
 #pragma D attributes Stable/Stable/Common cwd
 #pragma D binding "1.0" cwd
 
-/* XXX Really want vn_getpath(curproc->p_fd->fd_rdir, , ) but that takes namecache_rw_lock XXX */
-inline string root = curproc->p_fd->fd_rdir == NULL ? "/" :
-	curproc->p_fd->fd_rdir->v_name == NULL ? "<unknown>" :
-	stringof(curproc->p_fd->fd_rdir->v_name);
+/* XXX Really want vn_getpath(curproc->p_fd.fd_rdir, , ) but that takes namecache_rw_lock XXX */
+inline string root = curproc->p_fd.fd_rdir == NULL ? "/" :
+	curproc->p_fd.fd_rdir->v_name == NULL ? "<unknown>" :
+	stringof(curproc->p_fd.fd_rdir->v_name);
 #pragma D attributes Stable/Stable/Common root
 #pragma D binding "1.0" root
+
+/* Used with livedump. */
+inline unsigned DT_HV = 0;
+#pragma D binding "1.19" DT_HV

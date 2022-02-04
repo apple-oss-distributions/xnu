@@ -517,7 +517,7 @@ ttcompat(struct tty *tp, u_long com, caddr_t data, int flag, struct proc *p)
 			return ENOTTY;
 		}
 
-		*(int *) data =  tp->t_session->s_leader->p_pid;
+		*(int *) data =  proc_getpid(tp->t_session->s_leader);
 		break;
 
 	default:

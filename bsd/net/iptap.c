@@ -81,10 +81,9 @@ static LIST_HEAD(iptap_list, iptap_softc) iptap_list = LIST_HEAD_INITIALIZER(ipt
 static void             iptap_lock_shared(void);
 static void             iptap_lock_exclusive(void);
 static void             iptap_lock_done(void);
-static void             iptap_alloc_lock(void);
 
-decl_lck_rw_data(static, iptap_lck_rw);
-static lck_grp_t                *iptap_grp;
+static LCK_GRP_DECLARE(iptap_grp, "IPTAP_IFNAME");
+static LCK_RW_DECLARE(iptap_lck_rw, &iptap_grp);
 
 errno_t iptap_if_output(ifnet_t, mbuf_t);
 errno_t iptap_demux(ifnet_t, mbuf_t, char *, protocol_family_t *);
@@ -143,30 +142,10 @@ iptap_init(void)
 {
 	errno_t error;
 
-	iptap_alloc_lock();
-
 	error = if_clone_attach(&iptap_cloner);
 	if (error != 0) {
-		panic("%s: if_clone_attach() failed, error %d\n", __func__, error);
+		panic("%s: if_clone_attach() failed, error %d", __func__, error);
 	}
-}
-
-static void
-iptap_alloc_lock(void)
-{
-	lck_grp_attr_t *grp_attr;
-	lck_attr_t *attr;
-
-	grp_attr = lck_grp_attr_alloc_init();
-	lck_grp_attr_setdefault(grp_attr);
-	iptap_grp = lck_grp_alloc_init(IPTAP_IFNAME, grp_attr);
-	lck_grp_attr_free(grp_attr);
-
-	attr = lck_attr_alloc_init();
-	lck_attr_setdefault(attr);
-
-	lck_rw_init(&iptap_lck_rw, iptap_grp, attr);
-	lck_attr_free(attr);
 }
 
 static void
@@ -594,19 +573,19 @@ iptap_bpf_tap(struct mbuf *m, u_int32_t proto, int outgoing)
 	struct iptap_softc *iptap;
 	void (*bpf_tap_func)(ifnet_t, u_int32_t, mbuf_t, void *, size_t ) =
 	    outgoing ? bpf_tap_out : bpf_tap_in;
-	uint16_t src_scope_id = 0;
-	uint16_t dst_scope_id = 0;
+	uint32_t src_scope_id = 0;
+	uint32_t dst_scope_id = 0;
 
 	if (proto == AF_INET6) {
 		struct ip6_hdr *ip6 = mtod(m, struct ip6_hdr *);
 		/*
 		 * Clear the embedded scope ID
 		 */
-		if (IN6_IS_SCOPE_EMBED(&ip6->ip6_src)) {
+		if (in6_embedded_scope && IN6_IS_SCOPE_EMBED(&ip6->ip6_src)) {
 			src_scope_id = ip6->ip6_src.s6_addr16[1];
 			ip6->ip6_src.s6_addr16[1] = 0;
 		}
-		if (IN6_IS_SCOPE_EMBED(&ip6->ip6_dst)) {
+		if (in6_embedded_scope && IN6_IS_SCOPE_EMBED(&ip6->ip6_dst)) {
 			dst_scope_id = ip6->ip6_dst.s6_addr16[1];
 			ip6->ip6_dst.s6_addr16[1] = 0;
 		}
@@ -663,11 +642,11 @@ iptap_bpf_tap(struct mbuf *m, u_int32_t proto, int outgoing)
 		/*
 		 * Restore the embedded scope ID
 		 */
-		if (IN6_IS_SCOPE_EMBED(&ip6->ip6_src)) {
-			ip6->ip6_src.s6_addr16[1] = src_scope_id;
+		if (in6_embedded_scope && IN6_IS_SCOPE_EMBED(&ip6->ip6_src)) {
+			ip6->ip6_src.s6_addr16[1] = (uint16_t)src_scope_id;
 		}
-		if (IN6_IS_SCOPE_EMBED(&ip6->ip6_dst)) {
-			ip6->ip6_dst.s6_addr16[1] = dst_scope_id;
+		if (in6_embedded_scope && IN6_IS_SCOPE_EMBED(&ip6->ip6_dst)) {
+			ip6->ip6_dst.s6_addr16[1] = (uint16_t)dst_scope_id;
 		}
 	}
 }

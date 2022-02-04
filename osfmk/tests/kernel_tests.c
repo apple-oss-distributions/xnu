@@ -80,11 +80,11 @@ kern_return_t pmap_coredump_test(void);
 #endif
 
 extern kern_return_t console_serial_test(void);
-extern kern_return_t console_serial_alloc_rel_tests(void);
 extern kern_return_t console_serial_parallel_log_tests(void);
 extern kern_return_t test_os_log(void);
 extern kern_return_t test_os_log_parallel(void);
 extern kern_return_t bitmap_post_test(void);
+extern kern_return_t counter_tests(void);
 
 #ifdef __arm64__
 extern kern_return_t arm64_munger_test(void);
@@ -121,7 +121,6 @@ struct xnupost_test kernel_post_tests[] = {XNUPOST_TEST_CONFIG_BASIC(zalloc_test
 #endif /* __arm64__ */
 	                                   XNUPOST_TEST_CONFIG_BASIC(kcdata_api_test),
 	                                   XNUPOST_TEST_CONFIG_BASIC(console_serial_test),
-	                                   XNUPOST_TEST_CONFIG_BASIC(console_serial_alloc_rel_tests),
 	                                   XNUPOST_TEST_CONFIG_BASIC(console_serial_parallel_log_tests),
 #if defined(__arm__) || defined(__arm64__)
 	                                   XNUPOST_TEST_CONFIG_BASIC(pmap_coredump_test),
@@ -138,7 +137,8 @@ struct xnupost_test kernel_post_tests[] = {XNUPOST_TEST_CONFIG_BASIC(zalloc_test
 #if __ARM_VFP__
 	                                   XNUPOST_TEST_CONFIG_BASIC(vfp_state_test),
 #endif
-	                                   XNUPOST_TEST_CONFIG_BASIC(vm_tests), };
+	                                   XNUPOST_TEST_CONFIG_BASIC(vm_tests),
+	                                   XNUPOST_TEST_CONFIG_BASIC(counter_tests)};
 
 uint32_t kernel_post_tests_count = sizeof(kernel_post_tests) / sizeof(xnupost_test_data_t);
 
@@ -235,6 +235,7 @@ xnupost_run_tests(xnupost_test_t test_list, uint32_t test_count)
 {
 	uint32_t i = 0;
 	int retval = KERN_SUCCESS;
+	int test_retval = KERN_FAILURE;
 
 	if ((kernel_post_args & POSTARGS_RUN_TESTS) == 0) {
 		printf("No POST boot-arg set.\n");
@@ -245,6 +246,7 @@ xnupost_run_tests(xnupost_test_t test_list, uint32_t test_count)
 	xnupost_test_t testp;
 	for (; i < test_count; i++) {
 		xnupost_reset_panic_widgets();
+		T_TESTRESULT = T_STATE_UNRESOLVED;
 		testp = &test_list[i];
 		T_BEGIN(testp->xt_name);
 		testp->xt_begin_time = mach_absolute_time();
@@ -268,7 +270,18 @@ xnupost_run_tests(xnupost_test_t test_list, uint32_t test_count)
 			continue;
 		}
 
-		testp->xt_func();
+		test_retval = testp->xt_func();
+		if (T_STATE_UNRESOLVED == T_TESTRESULT) {
+			/*
+			 * If test result is unresolved due to that no T_* test cases are called,
+			 * determine the test result based on the return value of the test function.
+			 */
+			if (KERN_SUCCESS == test_retval) {
+				T_PASS("Test passed because retval == KERN_SUCCESS");
+			} else {
+				T_FAIL("Test failed because retval == KERN_FAILURE");
+			}
+		}
 		T_END;
 		testp->xt_retval = T_TESTRESULT;
 		testp->xt_end_time = mach_absolute_time();
@@ -405,7 +418,7 @@ zalloc_test(void)
 	    ZC_DESTRUCTIBLE);
 	T_ASSERT_NOTNULL(test_zone, NULL);
 
-	T_ASSERT_EQ_INT(test_zone->countfree, 0, NULL);
+	T_ASSERT_EQ_INT(test_zone->z_elems_free, 0, NULL);
 	T_SETUPEND;
 
 	T_ASSERT_NOTNULL(test_ptr = zalloc(test_zone), NULL);
@@ -624,7 +637,7 @@ struct kcdata_subtype_descriptor test_disk_io_stats_def[] = {
 };
 
 kern_return_t
-kcdata_api_test()
+kcdata_api_test(void)
 {
 	kern_return_t retval = KERN_SUCCESS;
 
@@ -827,7 +840,7 @@ pmap_coredump_test(void)
 	T_ASSERT_GE_ULONG(lowGlo.lgStaticAddr, gPhysBase, NULL);
 	T_ASSERT_LE_ULONG(lowGlo.lgStaticAddr + lowGlo.lgStaticSize, first_avail, NULL);
 	T_ASSERT_EQ_ULONG(lowGlo.lgLayoutMajorVersion, 3, NULL);
-	T_ASSERT_EQ_ULONG(lowGlo.lgLayoutMinorVersion, 2, NULL);
+	T_ASSERT_GE_ULONG(lowGlo.lgLayoutMinorVersion, 2, NULL);
 	T_ASSERT_EQ_ULONG(lowGlo.lgLayoutMagic, LOWGLO_LAYOUT_MAGIC, NULL);
 
 	// check the constant values in lowGlo
@@ -857,7 +870,7 @@ pmap_coredump_test(void)
 	T_ASSERT_GT_INT(iter, 0, NULL);
 	return KERN_SUCCESS;
 }
-#endif
+#endif /* defined(__arm__) || defined(__arm64__) */
 
 struct ts_kern_prim_test_args {
 	int *end_barrier;
@@ -908,10 +921,6 @@ thread_lock_unlock_kernel_primitive(
 	struct ts_kern_prim_test_args *info = (struct ts_kern_prim_test_args*) args;
 	int pri;
 
-	thread_lock(thread);
-	pri = thread->sched_pri;
-	thread_unlock(thread);
-
 	wait_threads(info->wait_event_b, info->before_num);
 	wake_threads(info->notify_b);
 
@@ -923,9 +932,11 @@ thread_lock_unlock_kernel_primitive(
 	IOSleep(100);
 
 	if (info->priority_to_check) {
+		spl_t s = splsched();
 		thread_lock(thread);
 		pri = thread->sched_pri;
 		thread_unlock(thread);
+		splx(s);
 		T_ASSERT(pri == info->priority_to_check, "Priority thread: current sched %d sched wanted %d", pri, info->priority_to_check);
 	}
 
@@ -1137,6 +1148,8 @@ struct info_sleep_inheritor_test {
 	int value;
 	int handoff_failure;
 	thread_t thread_inheritor;
+	bool use_alloc_gate;
+	gate_t *alloc_gate;
 };
 
 static void
@@ -1231,13 +1244,17 @@ primitive_change_sleep_inheritor(struct info_sleep_inheritor_test *info)
 static kern_return_t
 primitive_gate_try_close(struct info_sleep_inheritor_test *info)
 {
+	gate_t *gate = &info->gate;
+	if (info->use_alloc_gate == true) {
+		gate = info->alloc_gate;
+	}
 	kern_return_t ret = KERN_SUCCESS;
 	switch (info->prim_type) {
 	case MTX_LOCK:
-		ret = lck_mtx_gate_try_close(&info->mtx_lock, &info->gate);
+		ret = lck_mtx_gate_try_close(&info->mtx_lock, gate);
 		break;
 	case RW_LOCK:
-		ret = lck_rw_gate_try_close(&info->rw_lock, &info->gate);
+		ret = lck_rw_gate_try_close(&info->rw_lock, gate);
 		break;
 	default:
 		panic("invalid type %d", info->prim_type);
@@ -1248,13 +1265,17 @@ primitive_gate_try_close(struct info_sleep_inheritor_test *info)
 static gate_wait_result_t
 primitive_gate_wait(struct info_sleep_inheritor_test *info)
 {
+	gate_t *gate = &info->gate;
+	if (info->use_alloc_gate == true) {
+		gate = info->alloc_gate;
+	}
 	gate_wait_result_t ret = GATE_OPENED;
 	switch (info->prim_type) {
 	case MTX_LOCK:
-		ret = lck_mtx_gate_wait(&info->mtx_lock, &info->gate, LCK_SLEEP_DEFAULT, THREAD_UNINT | THREAD_WAIT_NOREPORT_USER, TIMEOUT_WAIT_FOREVER);
+		ret = lck_mtx_gate_wait(&info->mtx_lock, gate, LCK_SLEEP_DEFAULT, THREAD_UNINT | THREAD_WAIT_NOREPORT_USER, TIMEOUT_WAIT_FOREVER);
 		break;
 	case RW_LOCK:
-		ret = lck_rw_gate_wait(&info->rw_lock, &info->gate, LCK_SLEEP_DEFAULT, THREAD_UNINT | THREAD_WAIT_NOREPORT_USER, TIMEOUT_WAIT_FOREVER);
+		ret = lck_rw_gate_wait(&info->rw_lock, gate, LCK_SLEEP_DEFAULT, THREAD_UNINT | THREAD_WAIT_NOREPORT_USER, TIMEOUT_WAIT_FOREVER);
 		break;
 	default:
 		panic("invalid type %d", info->prim_type);
@@ -1265,12 +1286,16 @@ primitive_gate_wait(struct info_sleep_inheritor_test *info)
 static void
 primitive_gate_open(struct info_sleep_inheritor_test *info)
 {
+	gate_t *gate = &info->gate;
+	if (info->use_alloc_gate == true) {
+		gate = info->alloc_gate;
+	}
 	switch (info->prim_type) {
 	case MTX_LOCK:
-		lck_mtx_gate_open(&info->mtx_lock, &info->gate);
+		lck_mtx_gate_open(&info->mtx_lock, gate);
 		break;
 	case RW_LOCK:
-		lck_rw_gate_open(&info->rw_lock, &info->gate);
+		lck_rw_gate_open(&info->rw_lock, gate);
 		break;
 	default:
 		panic("invalid type %d", info->prim_type);
@@ -1280,12 +1305,17 @@ primitive_gate_open(struct info_sleep_inheritor_test *info)
 static void
 primitive_gate_close(struct info_sleep_inheritor_test *info)
 {
+	gate_t *gate = &info->gate;
+	if (info->use_alloc_gate == true) {
+		gate = info->alloc_gate;
+	}
+
 	switch (info->prim_type) {
 	case MTX_LOCK:
-		lck_mtx_gate_close(&info->mtx_lock, &info->gate);
+		lck_mtx_gate_close(&info->mtx_lock, gate);
 		break;
 	case RW_LOCK:
-		lck_rw_gate_close(&info->rw_lock, &info->gate);
+		lck_rw_gate_close(&info->rw_lock, gate);
 		break;
 	default:
 		panic("invalid type %d", info->prim_type);
@@ -1295,12 +1325,17 @@ primitive_gate_close(struct info_sleep_inheritor_test *info)
 static void
 primitive_gate_steal(struct info_sleep_inheritor_test *info)
 {
+	gate_t *gate = &info->gate;
+	if (info->use_alloc_gate == true) {
+		gate = info->alloc_gate;
+	}
+
 	switch (info->prim_type) {
 	case MTX_LOCK:
-		lck_mtx_gate_steal(&info->mtx_lock, &info->gate);
+		lck_mtx_gate_steal(&info->mtx_lock, gate);
 		break;
 	case RW_LOCK:
-		lck_rw_gate_steal(&info->rw_lock, &info->gate);
+		lck_rw_gate_steal(&info->rw_lock, gate);
 		break;
 	default:
 		panic("invalid type %d", info->prim_type);
@@ -1310,13 +1345,18 @@ primitive_gate_steal(struct info_sleep_inheritor_test *info)
 static kern_return_t
 primitive_gate_handoff(struct info_sleep_inheritor_test *info, int flags)
 {
+	gate_t *gate = &info->gate;
+	if (info->use_alloc_gate == true) {
+		gate = info->alloc_gate;
+	}
+
 	kern_return_t ret = KERN_SUCCESS;
 	switch (info->prim_type) {
 	case MTX_LOCK:
-		ret = lck_mtx_gate_handoff(&info->mtx_lock, &info->gate, flags);
+		ret = lck_mtx_gate_handoff(&info->mtx_lock, gate, flags);
 		break;
 	case RW_LOCK:
-		ret = lck_rw_gate_handoff(&info->rw_lock, &info->gate, flags);
+		ret = lck_rw_gate_handoff(&info->rw_lock, gate, flags);
 		break;
 	default:
 		panic("invalid type %d", info->prim_type);
@@ -1327,12 +1367,17 @@ primitive_gate_handoff(struct info_sleep_inheritor_test *info, int flags)
 static void
 primitive_gate_assert(struct info_sleep_inheritor_test *info, int type)
 {
+	gate_t *gate = &info->gate;
+	if (info->use_alloc_gate == true) {
+		gate = info->alloc_gate;
+	}
+
 	switch (info->prim_type) {
 	case MTX_LOCK:
-		lck_mtx_gate_assert(&info->mtx_lock, &info->gate, type);
+		lck_mtx_gate_assert(&info->mtx_lock, gate, type);
 		break;
 	case RW_LOCK:
-		lck_rw_gate_assert(&info->rw_lock, &info->gate, type);
+		lck_rw_gate_assert(&info->rw_lock, gate, type);
 		break;
 	default:
 		panic("invalid type %d", info->prim_type);
@@ -1367,6 +1412,41 @@ primitive_gate_destroy(struct info_sleep_inheritor_test *info)
 	default:
 		panic("invalid type %d", info->prim_type);
 	}
+}
+
+static void
+primitive_gate_alloc(struct info_sleep_inheritor_test *info)
+{
+	gate_t *gate;
+	switch (info->prim_type) {
+	case MTX_LOCK:
+		gate = lck_mtx_gate_alloc_init(&info->mtx_lock);
+		break;
+	case RW_LOCK:
+		gate = lck_rw_gate_alloc_init(&info->rw_lock);
+		break;
+	default:
+		panic("invalid type %d", info->prim_type);
+	}
+	info->alloc_gate = gate;
+}
+
+static void
+primitive_gate_free(struct info_sleep_inheritor_test *info)
+{
+	T_ASSERT(info->alloc_gate != NULL, "gate not yet freed");
+
+	switch (info->prim_type) {
+	case MTX_LOCK:
+		lck_mtx_gate_free(&info->mtx_lock, info->alloc_gate);
+		break;
+	case RW_LOCK:
+		lck_rw_gate_free(&info->rw_lock, info->alloc_gate);
+		break;
+	default:
+		panic("invalid type %d", info->prim_type);
+	}
+	info->alloc_gate = NULL;
 }
 
 static void
@@ -1960,6 +2040,42 @@ thread_gate_aggressive(
 }
 
 static void
+thread_gate_free(
+	void *args,
+	__unused wait_result_t wr)
+{
+	struct info_sleep_inheritor_test *info = (struct info_sleep_inheritor_test*) args;
+	uint my_pri = current_thread()->sched_pri;
+
+	T_LOG("Started thread pri %d %p", my_pri, current_thread());
+
+	primitive_lock(info);
+
+	if (primitive_gate_try_close(info) == KERN_SUCCESS) {
+		primitive_gate_assert(info, GATE_ASSERT_HELD);
+		primitive_unlock(info);
+
+		wait_threads(&info->synch, info->synch_value - 1);
+		wait_for_waiters((struct synch_test_common *) info);
+
+		primitive_lock(info);
+		primitive_gate_open(info);
+		primitive_gate_free(info);
+	} else {
+		primitive_gate_assert(info, GATE_ASSERT_CLOSED);
+		wake_threads(&info->synch);
+		gate_wait_result_t ret = primitive_gate_wait(info);
+		T_ASSERT(ret == GATE_OPENED, "open gate");
+	}
+
+	primitive_unlock(info);
+
+	notify_waiter((struct synch_test_common *)info);
+
+	thread_terminate_self();
+}
+
+static void
 thread_gate_like_mutex(
 	void *args,
 	__unused wait_result_t wr)
@@ -2053,6 +2169,7 @@ static void
 test_gate_push(struct info_sleep_inheritor_test *info, int prim_type)
 {
 	info->prim_type = prim_type;
+	info->use_alloc_gate = false;
 
 	primitive_gate_init(info);
 	info->work_to_do = TRUE;
@@ -2069,6 +2186,7 @@ static void
 test_gate_handoff(struct info_sleep_inheritor_test *info, int prim_type)
 {
 	info->prim_type = prim_type;
+	info->use_alloc_gate = false;
 
 	primitive_gate_init(info);
 
@@ -2090,6 +2208,7 @@ static void
 test_gate_steal(struct info_sleep_inheritor_test *info, int prim_type)
 {
 	info->prim_type = prim_type;
+	info->use_alloc_gate = false;
 
 	primitive_gate_init(info);
 
@@ -2102,6 +2221,26 @@ test_gate_steal(struct info_sleep_inheritor_test *info, int prim_type)
 	wait_all_thread((struct synch_test_common *)info);
 
 	primitive_gate_destroy(info);
+}
+
+static void
+test_gate_alloc_free(struct info_sleep_inheritor_test *info, int prim_type)
+{
+	(void)info;
+	(void) prim_type;
+	info->prim_type = prim_type;
+	info->use_alloc_gate = true;
+
+	primitive_gate_alloc(info);
+
+	info->synch = 0;
+	info->synch_value = NUM_THREADS;
+
+	start_threads((thread_continue_t)thread_gate_free, (struct synch_test_common *)info, FALSE);
+	wait_all_thread((struct synch_test_common *)info);
+
+	T_ASSERT(info->alloc_gate == NULL, "gate free");
+	info->use_alloc_gate = false;
 }
 
 kern_return_t
@@ -2124,7 +2263,7 @@ ts_kernel_gate_test(void)
 	 * Testing the priority inherited by the keeper
 	 * lck_mtx_gate_try_close, lck_mtx_gate_open, lck_mtx_gate_wait
 	 */
-	T_LOG("Testing gate push, lck");
+	T_LOG("Testing gate push, mtx");
 	test_gate_push(&info, MTX_LOCK);
 
 	T_LOG("Testing gate push, rw");
@@ -2134,7 +2273,7 @@ ts_kernel_gate_test(void)
 	 * Testing the handoff
 	 * lck_mtx_gate_wait, lck_mtx_gate_handoff
 	 */
-	T_LOG("Testing gate handoff, lck");
+	T_LOG("Testing gate handoff, mtx");
 	test_gate_handoff(&info, MTX_LOCK);
 
 	T_LOG("Testing gate handoff, rw");
@@ -2144,11 +2283,21 @@ ts_kernel_gate_test(void)
 	 * Testing the steal
 	 * lck_mtx_gate_close, lck_mtx_gate_wait, lck_mtx_gate_steal, lck_mtx_gate_handoff
 	 */
-	T_LOG("Testing gate steal, lck");
+	T_LOG("Testing gate steal, mtx");
 	test_gate_steal(&info, MTX_LOCK);
 
 	T_LOG("Testing gate steal, rw");
 	test_gate_steal(&info, RW_LOCK);
+
+	/*
+	 * Testing the alloc/free
+	 * lck_mtx_gate_alloc_init, lck_mtx_gate_close, lck_mtx_gate_wait, lck_mtx_gate_free
+	 */
+	T_LOG("Testing gate alloc/free, mtx");
+	test_gate_alloc_free(&info, MTX_LOCK);
+
+	T_LOG("Testing gate alloc/free, rw");
+	test_gate_alloc_free(&info, RW_LOCK);
 
 	destroy_synch_test_common((struct synch_test_common *)&info);
 
@@ -2532,5 +2681,6 @@ kprintf_hhx_test(void)
 	    (unsigned char)'h', (unsigned char)'h', (unsigned char)'x',
 	    (unsigned char)'!',
 	    0xfeedfaceULL);
+	T_PASS("kprintf_hhx_test passed");
 	return KERN_SUCCESS;
 }

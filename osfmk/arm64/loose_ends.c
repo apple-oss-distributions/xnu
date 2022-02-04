@@ -50,7 +50,9 @@
 #include <arm/misc_protos.h>
 
 #include <sys/errno.h>
+
 #include <libkern/section_keywords.h>
+#include <libkern/OSDebug.h>
 
 #define INT_SIZE        (BYTE_SIZE * sizeof (int))
 
@@ -240,6 +242,9 @@ bzero_phys(addr64_t src, vm_size_t bytes)
 		case VM_WIMG_WCOMB:
 		case VM_WIMG_INNERWBACK:
 		case VM_WIMG_WTHRU:
+#if HAS_UCNORMAL_MEM
+		case VM_WIMG_RT:
+#endif
 			bzero(buf, count);
 			break;
 		default:
@@ -263,83 +268,124 @@ bzero_phys(addr64_t src, vm_size_t bytes)
  */
 
 
-static unsigned long long
+static uint64_t
 ml_phys_read_data(pmap_paddr_t paddr, int size)
 {
+	vm_address_t   addr;
+	ppnum_t        pn = atop_kernel(paddr);
+	ppnum_t        pn_end = atop_kernel(paddr + size - 1);
+	uint64_t       result = 0;
+	uint8_t        s1;
+	uint16_t       s2;
+	uint32_t       s4;
 	unsigned int   index;
-	unsigned int   wimg_bits;
-	ppnum_t        pn = (ppnum_t)(paddr >> PAGE_SHIFT);
-	ppnum_t        pn_end = (ppnum_t)((paddr + size - 1) >> PAGE_SHIFT);
-	unsigned long  long result = 0;
-	vm_offset_t    copywindow_vaddr = 0;
-	unsigned char  s1;
-	unsigned short s2;
-	unsigned int   s4;
+	bool           use_copy_window = true;
 
 	if (__improbable(pn_end != pn)) {
 		panic("%s: paddr 0x%llx spans a page boundary", __func__, (uint64_t)paddr);
 	}
 
+#ifdef ML_IO_TIMEOUTS_ENABLED
+	bool istate, timeread = false;
+	uint64_t sabs, eabs;
+
+	uint32_t const report_phy_read_delay = os_atomic_load(&report_phy_read_delay_to, relaxed);
+	uint32_t const trace_phy_read_delay = os_atomic_load(&trace_phy_read_delay_to, relaxed);
+
+	if (__improbable(report_phy_read_delay != 0)) {
+		istate = ml_set_interrupts_enabled(FALSE);
+		sabs = mach_absolute_time();
+		timeread = true;
+	}
+#ifdef ML_IO_SIMULATE_STRETCHED_ENABLED
+	if (__improbable(timeread && simulate_stretched_io)) {
+		sabs -= simulate_stretched_io;
+	}
+#endif /* ML_IO_SIMULATE_STRETCHED_ENABLED */
+#endif /* ML_IO_TIMEOUTS_ENABLED */
+
 #if defined(__ARM_COHERENT_IO__) || __ARM_PTE_PHYSMAP__
 	if (pmap_valid_address(paddr)) {
-		switch (size) {
-		case 1:
-			s1 = *(volatile unsigned char *)phystokv(paddr);
-			result = s1;
-			break;
-		case 2:
-			s2 = *(volatile unsigned short *)phystokv(paddr);
-			result = s2;
-			break;
-		case 4:
-			s4 = *(volatile unsigned int *)phystokv(paddr);
-			result = s4;
-			break;
-		case 8:
-			result = *(volatile unsigned long long *)phystokv(paddr);
-			break;
-		default:
-			panic("Invalid size %d for ml_phys_read_data\n", size);
-			break;
-		}
-		return result;
+		addr = phystokv(paddr);
+		use_copy_window = false;
 	}
-#endif
+#endif /* defined(__ARM_COHERENT_IO__) || __ARM_PTE_PHYSMAP__ */
 
-	mp_disable_preemption();
-	wimg_bits = pmap_cache_attributes(pn);
-	index = pmap_map_cpu_windows_copy(pn, VM_PROT_READ, wimg_bits);
-	copywindow_vaddr = pmap_cpu_windows_copy_addr(cpu_number(), index) | ((uint32_t)paddr & PAGE_MASK);
+	if (use_copy_window) {
+		mp_disable_preemption();
+		unsigned int wimg_bits = pmap_cache_attributes(pn);
+		index = pmap_map_cpu_windows_copy(pn, VM_PROT_READ, wimg_bits);
+		addr = pmap_cpu_windows_copy_addr(cpu_number(), index) | ((uint32_t)paddr & PAGE_MASK);
+	}
 
 	switch (size) {
 	case 1:
-		s1 = *(volatile unsigned char *)copywindow_vaddr;
+		s1 = *(volatile uint8_t *)addr;
 		result = s1;
 		break;
 	case 2:
-		s2 = *(volatile unsigned short *)copywindow_vaddr;
+		s2 = *(volatile uint16_t *)addr;
 		result = s2;
 		break;
 	case 4:
-		s4 = *(volatile unsigned int *)copywindow_vaddr;
+		s4 = *(volatile uint32_t *)addr;
 		result = s4;
 		break;
 	case 8:
-		result = *(volatile unsigned long long*)copywindow_vaddr;
+		result = *(volatile uint64_t *)addr;
 		break;
 	default:
-		panic("Invalid size %d for ml_phys_read_data\n", size);
+		panic("Invalid size %d for ml_phys_read_data", size);
 		break;
 	}
 
-	pmap_unmap_cpu_windows_copy(index);
-	mp_enable_preemption();
+	if (use_copy_window) {
+		pmap_unmap_cpu_windows_copy(index);
+		mp_enable_preemption();
+	}
+
+#ifdef ML_IO_TIMEOUTS_ENABLED
+	if (__improbable(timeread)) {
+		eabs = mach_absolute_time();
+
+#ifdef ML_IO_IOTRACE_ENABLED
+		iotrace(IOTRACE_PHYS_READ, 0, addr, size, result, sabs, eabs - sabs);
+#endif /* ML_IO_IOTRACE_ENABLED */
+
+		if (__improbable((eabs - sabs) > report_phy_read_delay)) {
+			ml_set_interrupts_enabled(istate);
+
+			if (phy_read_panic && (machine_timeout_suspended() == FALSE)) {
+				panic("Read from physical addr 0x%llx took %llu ns, "
+				    "result: 0x%llx (start: %llu, end: %llu), ceiling: %llu",
+				    (unsigned long long)addr, (eabs - sabs), result, sabs, eabs,
+				    (uint64_t)report_phy_read_delay);
+			}
+
+			if (report_phy_read_osbt) {
+				OSReportWithBacktrace("ml_phys_read_data took %llu us",
+				    (eabs - sabs) / NSEC_PER_USEC);
+			}
+#if CONFIG_DTRACE
+			DTRACE_PHYSLAT4(physread, uint64_t, (eabs - sabs),
+			    uint64_t, addr, uint32_t, size, uint64_t, result);
+#endif /* CONFIG_DTRACE */
+		} else if (__improbable(trace_phy_read_delay > 0 && (eabs - sabs) > trace_phy_read_delay)) {
+			KDBG(MACHDBG_CODE(DBG_MACH_IO, DBC_MACH_IO_PHYS_READ),
+			    (eabs - sabs), sabs, addr, result);
+
+			ml_set_interrupts_enabled(istate);
+		} else {
+			ml_set_interrupts_enabled(istate);
+		}
+	}
+#endif /*  ML_IO_TIMEOUTS_ENABLED */
 
 	return result;
 }
 
 unsigned int
-ml_phys_read( vm_offset_t paddr)
+ml_phys_read(vm_offset_t paddr)
 {
 	return (unsigned int)ml_phys_read_data((pmap_paddr_t)paddr, 4);
 }
@@ -405,68 +451,109 @@ ml_phys_read_double_64(addr64_t paddr64)
  */
 
 static void
-ml_phys_write_data(pmap_paddr_t paddr, unsigned long long data, int size)
+ml_phys_write_data(pmap_paddr_t paddr, uint64_t data, int size)
 {
-	unsigned int    index;
-	unsigned int    wimg_bits;
-	ppnum_t         pn = (ppnum_t)(paddr >> PAGE_SHIFT);
-	ppnum_t         pn_end = (ppnum_t)((paddr + size - 1) >> PAGE_SHIFT);
-	vm_offset_t     copywindow_vaddr = 0;
+	vm_address_t   addr;
+	ppnum_t        pn = atop_kernel(paddr);
+	ppnum_t        pn_end = atop_kernel(paddr + size - 1);
+	unsigned int   index;
+	bool           use_copy_window = true;
 
 	if (__improbable(pn_end != pn)) {
 		panic("%s: paddr 0x%llx spans a page boundary", __func__, (uint64_t)paddr);
 	}
 
+#ifdef ML_IO_TIMEOUTS_ENABLED
+	bool istate, timewrite = false;
+	uint64_t sabs, eabs;
+
+	uint32_t const report_phy_write_delay = os_atomic_load(&report_phy_write_delay_to, relaxed);
+	uint32_t const trace_phy_write_delay = os_atomic_load(&trace_phy_write_delay_to, relaxed);
+
+	if (__improbable(report_phy_write_delay != 0)) {
+		istate = ml_set_interrupts_enabled(FALSE);
+		sabs = mach_absolute_time();
+		timewrite = true;
+	}
+#ifdef ML_IO_SIMULATE_STRETCHED_ENABLED
+	if (__improbable(timewrite && simulate_stretched_io)) {
+		sabs -= simulate_stretched_io;
+	}
+#endif /* ML_IO_SIMULATE_STRETCHED_ENABLED */
+#endif /* ML_IO_TIMEOUTS_ENABLED */
+
 #if defined(__ARM_COHERENT_IO__) || __ARM_PTE_PHYSMAP__
 	if (pmap_valid_address(paddr)) {
-		switch (size) {
-		case 1:
-			*(volatile unsigned char *)phystokv(paddr) = (unsigned char)data;
-			return;
-		case 2:
-			*(volatile unsigned short *)phystokv(paddr) = (unsigned short)data;
-			return;
-		case 4:
-			*(volatile unsigned int *)phystokv(paddr) = (unsigned int)data;
-			return;
-		case 8:
-			*(volatile unsigned long long *)phystokv(paddr) = data;
-			return;
-		default:
-			panic("Invalid size %d for ml_phys_write_data\n", size);
-		}
+		addr = phystokv(paddr);
+		use_copy_window = false;
 	}
-#endif
+#endif /* defined(__ARM_COHERENT_IO__) || __ARM_PTE_PHYSMAP__ */
 
-	mp_disable_preemption();
-	wimg_bits = pmap_cache_attributes(pn);
-	index = pmap_map_cpu_windows_copy(pn, VM_PROT_READ | VM_PROT_WRITE, wimg_bits);
-	copywindow_vaddr = pmap_cpu_windows_copy_addr(cpu_number(), index) | ((uint32_t)paddr & PAGE_MASK);
+	if (use_copy_window) {
+		mp_disable_preemption();
+		unsigned int wimg_bits = pmap_cache_attributes(pn);
+		index = pmap_map_cpu_windows_copy(pn, VM_PROT_READ | VM_PROT_WRITE, wimg_bits);
+		addr = pmap_cpu_windows_copy_addr(cpu_number(), index) | ((uint32_t)paddr & PAGE_MASK);
+	}
 
 	switch (size) {
 	case 1:
-		*(volatile unsigned char *)(copywindow_vaddr) =
-		    (unsigned char)data;
+		*(volatile uint8_t *)addr = (uint8_t)data;
 		break;
 	case 2:
-		*(volatile unsigned short *)(copywindow_vaddr) =
-		    (unsigned short)data;
+		*(volatile uint16_t *)addr = (uint16_t)data;
 		break;
 	case 4:
-		*(volatile unsigned int *)(copywindow_vaddr) =
-		    (uint32_t)data;
+		*(volatile uint32_t *)addr = (uint32_t)data;
 		break;
 	case 8:
-		*(volatile unsigned long long *)(copywindow_vaddr) =
-		    (unsigned long long)data;
+		*(volatile uint64_t *)addr = data;
 		break;
 	default:
-		panic("Invalid size %d for ml_phys_write_data\n", size);
-		break;
+		panic("Invalid size %d for ml_phys_write_data", size);
 	}
 
-	pmap_unmap_cpu_windows_copy(index);
-	mp_enable_preemption();
+	if (use_copy_window) {
+		pmap_unmap_cpu_windows_copy(index);
+		mp_enable_preemption();
+	}
+
+#ifdef ML_IO_TIMEOUTS_ENABLED
+	if (__improbable(timewrite)) {
+		eabs = mach_absolute_time();
+
+#ifdef ML_IO_IOTRACE_ENABLED
+		iotrace(IOTRACE_PHYS_WRITE, 0, paddr, size, data, sabs, eabs - sabs);
+#endif /*  ML_IO_IOTRACE_ENABLED */
+
+		if (__improbable((eabs - sabs) > report_phy_write_delay)) {
+			ml_set_interrupts_enabled(istate);
+
+			if (phy_write_panic && (machine_timeout_suspended() == FALSE)) {
+				panic("Write from physical addr 0x%llx took %llu ns, "
+				    "data: 0x%llx (start: %llu, end: %llu), ceiling: %llu",
+				    (unsigned long long)paddr, (eabs - sabs), data, sabs, eabs,
+				    (uint64_t)report_phy_write_delay);
+			}
+
+			if (report_phy_write_osbt) {
+				OSReportWithBacktrace("ml_phys_write_data took %llu us",
+				    (eabs - sabs) / NSEC_PER_USEC);
+			}
+#if CONFIG_DTRACE
+			DTRACE_PHYSLAT4(physwrite, uint64_t, (eabs - sabs),
+			    uint64_t, paddr, uint32_t, size, uint64_t, data);
+#endif /* CONFIG_DTRACE */
+		} else if (__improbable(trace_phy_write_delay > 0 && (eabs - sabs) > trace_phy_write_delay)) {
+			KDBG(MACHDBG_CODE(DBG_MACH_IO, DBC_MACH_IO_PHYS_WRITE),
+			    (eabs - sabs), sabs, paddr, data);
+
+			ml_set_interrupts_enabled(istate);
+		} else {
+			ml_set_interrupts_enabled(istate);
+		}
+	}
+#endif /*  ML_IO_TIMEOUTS_ENABLED */
 }
 
 void
@@ -692,59 +779,6 @@ copypv(addr64_t source, addr64_t sink, unsigned int size, int which)
 
 	return res;
 }
-
-#if     MACH_ASSERT
-
-extern int copyinframe(vm_address_t fp, char *frame, boolean_t is64bit);
-
-/*
- * Machine-dependent routine to fill in an array with up to callstack_max
- * levels of return pc information.
- */
-void
-machine_callstack(
-	uintptr_t * buf,
-	vm_size_t callstack_max)
-{
-	/* Captures the USER call stack */
-	uint32_t i = 0;
-
-	struct arm_saved_state *state = find_user_regs(current_thread());
-
-	if (!state) {
-		while (i < callstack_max) {
-			buf[i++] = 0;
-		}
-	} else {
-		if (is_saved_state64(state)) {
-			uint64_t frame[2];
-			buf[i++] = (uintptr_t)get_saved_state_pc(state);
-			frame[0] = get_saved_state_fp(state);
-			while (i < callstack_max && frame[0] != 0) {
-				if (copyinframe(frame[0], (void*) frame, TRUE)) {
-					break;
-				}
-				buf[i++] = (uintptr_t)frame[1];
-			}
-		} else {
-			uint32_t frame[2];
-			buf[i++] = (uintptr_t)get_saved_state_pc(state);
-			frame[0] = (uint32_t)get_saved_state_fp(state);
-			while (i < callstack_max && frame[0] != 0) {
-				if (copyinframe(frame[0], (void*) frame, FALSE)) {
-					break;
-				}
-				buf[i++] = (uintptr_t)frame[1];
-			}
-		}
-
-		while (i < callstack_max) {
-			buf[i++] = 0;
-		}
-	}
-}
-
-#endif                          /* MACH_ASSERT */
 
 int
 clr_be_bit(void)

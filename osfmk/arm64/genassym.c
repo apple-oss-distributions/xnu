@@ -129,11 +129,12 @@ main(int     argc,
 	DECLARE("ACT_CONTEXT", offsetof(struct thread, machine.contextData));
 	DECLARE("TH_CTH_SELF", offsetof(struct thread, machine.cthread_self));
 	DECLARE("ACT_PREEMPT_CNT", offsetof(struct thread, machine.preemption_count));
+#if SCHED_PREEMPTION_DISABLE_DEBUG
+	DECLARE("ACT_PREEMPT_ADJ_MT", offsetof(struct thread, machine.preemption_disable_adj_mt));
+#endif
 	DECLARE("ACT_CPUDATAP", offsetof(struct thread, machine.CpuDatap));
 	DECLARE("ACT_DEBUGDATA", offsetof(struct thread, machine.DebugData));
 	DECLARE("TH_IOTIER_OVERRIDE", offsetof(struct thread, iotier_override));
-	DECLARE("TH_RWLOCK_CNT", offsetof(struct thread, rwlock_count));
-	DECLARE("TH_TMP_ALLOC_CNT", offsetof(struct thread, t_temp_alloc_count));
 	DECLARE("TH_TASK", offsetof(struct thread, task));
 
 #if defined(HAS_APPLE_PAC)
@@ -215,26 +216,20 @@ main(int     argc,
 
 	DECLARE("ARM_KERNEL_CONTEXT_SIZE", sizeof(arm_kernel_context_t));
 
-	DECLARE("SS64_KERNEL_X16", offsetof(arm_kernel_context_t, ss.x[0]));
-	DECLARE("SS64_KERNEL_X17", offsetof(arm_kernel_context_t, ss.x[1]));
-	DECLARE("SS64_KERNEL_X19", offsetof(arm_kernel_context_t, ss.x[2]));
-	DECLARE("SS64_KERNEL_X20", offsetof(arm_kernel_context_t, ss.x[3]));
-	DECLARE("SS64_KERNEL_X21", offsetof(arm_kernel_context_t, ss.x[4]));
-	DECLARE("SS64_KERNEL_X22", offsetof(arm_kernel_context_t, ss.x[5]));
-	DECLARE("SS64_KERNEL_X23", offsetof(arm_kernel_context_t, ss.x[6]));
-	DECLARE("SS64_KERNEL_X24", offsetof(arm_kernel_context_t, ss.x[7]));
-	DECLARE("SS64_KERNEL_X25", offsetof(arm_kernel_context_t, ss.x[8]));
-	DECLARE("SS64_KERNEL_X26", offsetof(arm_kernel_context_t, ss.x[9]));
-	DECLARE("SS64_KERNEL_X27", offsetof(arm_kernel_context_t, ss.x[10]));
-	DECLARE("SS64_KERNEL_X28", offsetof(arm_kernel_context_t, ss.x[11]));
+	DECLARE("SS64_KERNEL_X19", offsetof(arm_kernel_context_t, ss.x[0]));
+	DECLARE("SS64_KERNEL_X20", offsetof(arm_kernel_context_t, ss.x[1]));
+	DECLARE("SS64_KERNEL_X21", offsetof(arm_kernel_context_t, ss.x[2]));
+	DECLARE("SS64_KERNEL_X22", offsetof(arm_kernel_context_t, ss.x[3]));
+	DECLARE("SS64_KERNEL_X23", offsetof(arm_kernel_context_t, ss.x[4]));
+	DECLARE("SS64_KERNEL_X24", offsetof(arm_kernel_context_t, ss.x[5]));
+	DECLARE("SS64_KERNEL_X25", offsetof(arm_kernel_context_t, ss.x[6]));
+	DECLARE("SS64_KERNEL_X26", offsetof(arm_kernel_context_t, ss.x[7]));
+	DECLARE("SS64_KERNEL_X27", offsetof(arm_kernel_context_t, ss.x[8]));
+	DECLARE("SS64_KERNEL_X28", offsetof(arm_kernel_context_t, ss.x[9]));
 	DECLARE("SS64_KERNEL_FP", offsetof(arm_kernel_context_t, ss.fp));
 	DECLARE("SS64_KERNEL_LR", offsetof(arm_kernel_context_t, ss.lr));
 	DECLARE("SS64_KERNEL_SP", offsetof(arm_kernel_context_t, ss.sp));
 	DECLARE("SS64_KERNEL_PC", offsetof(arm_kernel_context_t, ss.pc));
-	DECLARE("SS64_KERNEL_CPSR", offsetof(arm_kernel_context_t, ss.cpsr));
-#if defined(HAS_APPLE_PAC)
-	DECLARE("SS64_KERNEL_JOPHASH", offsetof(arm_kernel_context_t, ss.jophash));
-#endif /* defined(HAS_APPLE_PAC) */
 
 	DECLARE("NS64_KERNEL_D8", offsetof(arm_kernel_context_t, ns.d[0]));
 	DECLARE("NS64_KERNEL_D9", offsetof(arm_kernel_context_t, ns.d[1]));
@@ -302,6 +297,7 @@ main(int     argc,
 	DECLARE("SR_RESTORE_TCR_EL1", offsetof(struct sysreg_restore, tcr_el1));
 
 #if XNU_MONITOR
+	DECLARE("PMAP_CPU_DATA_INFLIGHT_PMAP", offsetof(struct pmap_cpu_data, inflight_pmap));
 	DECLARE("PMAP_CPU_DATA_PPL_STATE", offsetof(struct pmap_cpu_data, ppl_state));
 	DECLARE("PMAP_CPU_DATA_ARRAY_ENTRY_SIZE", sizeof(struct pmap_cpu_data_array_entry));
 	DECLARE("PMAP_CPU_DATA_PPL_STACK", offsetof(struct pmap_cpu_data, ppl_stack));
@@ -322,13 +318,16 @@ main(int     argc,
 #endif /* defined(HAS_APPLE_PAC) */
 
 
+#if __ARM_ARCH_8_5__
+	DECLARE("CPU_SYNC_ON_CSWITCH", offsetof(cpu_data_t, sync_on_cswitch));
+#endif /* __ARM_ARCH_8_5__ */
 
 #if HIBERNATION
 	DECLARE("HIBHDR_STACKOFFSET", offsetof(IOHibernateImageHeader, restore1StackOffset));
 	DECLARE("HIBTRAMP_TTBR0", offsetof(pal_hib_tramp_result_t, ttbr0));
 	DECLARE("HIBTRAMP_TTBR1", offsetof(pal_hib_tramp_result_t, ttbr1));
 	DECLARE("HIBTRAMP_MEMSLIDE", offsetof(pal_hib_tramp_result_t, memSlide));
-	DECLARE("HIBTRAMP_KERNELSLIDE", offsetof(pal_hib_tramp_result_t, kernelSlide));
+	DECLARE("HIBGLOBALS_KERNELSLIDE", offsetof(pal_hib_globals_t, kernelSlide));
 #endif /* HIBERNATION */
 
 	return 0;

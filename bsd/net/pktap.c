@@ -117,10 +117,14 @@ do { \
 /*
  * pktap_lck_rw protects the global list of pktap interfaces
  */
-decl_lck_rw_data(static, pktap_lck_rw_data);
-static lck_rw_t *pktap_lck_rw = &pktap_lck_rw_data;
-static lck_grp_t *pktap_lck_grp = NULL;
-static lck_attr_t *pktap_lck_attr = NULL;
+static LCK_GRP_DECLARE(pktap_lck_grp, "pktap");
+#if PKTAP_DEBUG
+static LCK_ATTR_DECLARE(pktap_lck_attr, LCK_ATTR_DEBUG, 0);
+#else
+static LCK_ATTR_DECLARE(pktap_lck_attr, 0, 0);
+#endif
+static LCK_RW_DECLARE_ATTR(pktap_lck_rw, &pktap_lck_grp, &pktap_lck_attr);
+
 
 static LIST_HEAD(pktap_list, pktap_softc) pktap_list =
     LIST_HEAD_INITIALIZER(pktap_list);
@@ -191,7 +195,6 @@ __private_extern__ void
 pktap_init(void)
 {
 	int error = 0;
-	lck_grp_attr_t *lck_grp_attr = NULL;
 
 	_CASSERT_OFFFSETOF_FIELD(pktap_header, pktap_v2_hdr, pth_flags);
 
@@ -200,20 +203,11 @@ pktap_init(void)
 
 	pktap_inited = 1;
 
-	lck_grp_attr = lck_grp_attr_alloc_init();
-	pktap_lck_grp = lck_grp_alloc_init("pktap", lck_grp_attr);
-	pktap_lck_attr = lck_attr_alloc_init();
-#if PKTAP_DEBUG
-	lck_attr_setdebug(pktap_lck_attr);
-#endif /* PKTAP_DEBUG */
-	lck_rw_init(pktap_lck_rw, pktap_lck_grp, pktap_lck_attr);
-	lck_grp_attr_free(lck_grp_attr);
-
 	LIST_INIT(&pktap_list);
 
 	error = if_clone_attach(&pktap_cloner);
 	if (error != 0) {
-		panic("%s: if_clone_attach() failed, error %d\n",
+		panic("%s: if_clone_attach() failed, error %d",
 		    __func__, error);
 	}
 }
@@ -299,9 +293,9 @@ pktap_clone_create(struct if_clone *ifc, u_int32_t unit, __unused void *params)
 
 	/* Take a reference and add to the global list */
 	ifnet_reference(pktap->pktp_ifp);
-	lck_rw_lock_exclusive(pktap_lck_rw);
+	lck_rw_lock_exclusive(&pktap_lck_rw);
 	LIST_INSERT_HEAD(&pktap_list, pktap, pktp_link);
-	lck_rw_done(pktap_lck_rw);
+	lck_rw_done(&pktap_lck_rw);
 done:
 	if (error != 0 && pktap != NULL) {
 		if_clone_softc_deallocate(&pktap_cloner, pktap);
@@ -686,13 +680,13 @@ pktap_detach(ifnet_t ifp)
 
 	PKTAP_LOG(PKTP_LOG_FUNC, "%s\n", ifp->if_xname);
 
-	lck_rw_lock_exclusive(pktap_lck_rw);
+	lck_rw_lock_exclusive(&pktap_lck_rw);
 
 	pktap = ifp->if_softc;
 	ifp->if_softc = NULL;
 	LIST_REMOVE(pktap, pktp_link);
 
-	lck_rw_done(pktap_lck_rw);
+	lck_rw_done(&pktap_lck_rw);
 
 	/* Drop reference as it's no more on the global list */
 	ifnet_release(ifp);
@@ -1074,8 +1068,8 @@ pktap_fill_proc_info(struct pktap_header *hdr, protocol_family_t proto,
 				wildcard = 1;
 			}
 			if (pcbinfo != NULL) {
-				inp = in6_pcblookup_hash(pcbinfo, faddr, fport,
-				    laddr, lport, wildcard, outgoing ? NULL : ifp);
+				inp = in6_pcblookup_hash(pcbinfo, faddr, fport, ip6_input_getdstifscope(m),
+				    laddr, lport, ip6_input_getsrcifscope(m), wildcard, outgoing ? NULL : ifp);
 
 				if (inp == NULL && hdr->pth_iftype != IFT_LOOP) {
 					PKTAP_LOG(PKTP_LOG_NOPCB,
@@ -1125,7 +1119,7 @@ pktap_bpf_tap(struct ifnet *ifp, protocol_family_t proto, struct mbuf *m,
 		return;
 	}
 
-	lck_rw_lock_shared(pktap_lck_rw);
+	lck_rw_lock_shared(&pktap_lck_rw);
 
 	/*
 	 * No need to take the ifnet_lock as the struct ifnet field if_bpf is
@@ -1278,6 +1272,9 @@ pktap_bpf_tap(struct ifnet *ifp, protocol_family_t proto, struct mbuf *m,
 				if (m->m_pkthdr.pkt_flags & PKTF_TCP_REXMT) {
 					hdr->pth_flags |= PTH_FLAG_REXMIT;
 				}
+				if (m->m_pkthdr.pkt_flags & PKTF_WAKE_PKT) {
+					hdr->pth_flags |= PTH_FLAG_WAKE_PKT;
+				}
 
 				pktap_fill_proc_info(hdr, proto, m, pre, outgoing, ifp);
 
@@ -1300,7 +1297,7 @@ pktap_bpf_tap(struct ifnet *ifp, protocol_family_t proto, struct mbuf *m,
 		}
 	}
 done:
-	lck_rw_done(pktap_lck_rw);
+	lck_rw_done(&pktap_lck_rw);
 }
 
 __private_extern__ void

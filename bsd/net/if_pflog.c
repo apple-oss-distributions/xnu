@@ -195,13 +195,13 @@ pflog_clone_create(struct if_clone *ifc, u_int32_t unit, __unused void *params)
 	bpfattach(pflogif->sc_if, DLT_PFLOG, PFLOG_HDRLEN);
 #endif
 
-	lck_rw_lock_shared(pf_perim_lock);
-	lck_mtx_lock(pf_lock);
+	lck_rw_lock_shared(&pf_perim_lock);
+	lck_mtx_lock(&pf_lock);
 	LIST_INSERT_HEAD(&pflogif_list, pflogif, sc_list);
 	pflogifs[unit] = pflogif->sc_if;
 	pflogif->sc_flags &= ~IFPFLF_DETACHING;
-	lck_mtx_unlock(pf_lock);
-	lck_rw_done(pf_perim_lock);
+	lck_mtx_unlock(&pf_lock);
+	lck_rw_done(&pf_perim_lock);
 
 done:
 	return error;
@@ -213,8 +213,8 @@ pflog_remove(struct ifnet *ifp)
 	int error = 0;
 	struct pflog_softc *pflogif = NULL;
 
-	lck_rw_lock_shared(pf_perim_lock);
-	lck_mtx_lock(pf_lock);
+	lck_rw_lock_shared(&pf_perim_lock);
+	lck_mtx_lock(&pf_lock);
 	pflogif = ifp->if_softc;
 
 	if (pflogif == NULL ||
@@ -226,8 +226,8 @@ pflog_remove(struct ifnet *ifp)
 	pflogif->sc_flags |= IFPFLF_DETACHING;
 	LIST_REMOVE(pflogif, sc_list);
 done:
-	lck_mtx_unlock(pf_lock);
-	lck_rw_done(pf_perim_lock);
+	lck_mtx_unlock(&pf_lock);
+	lck_rw_done(&pf_perim_lock);
 	return error;
 }
 
@@ -317,7 +317,7 @@ pflog_packet(struct pfi_kif *kif, pbuf_t *pbuf, sa_family_t af, u_int8_t dir,
 	struct pfloghdr hdr;
 	struct mbuf *m;
 
-	LCK_MTX_ASSERT(pf_lock, LCK_MTX_ASSERT_OWNED);
+	LCK_MTX_ASSERT(&pf_lock, LCK_MTX_ASSERT_OWNED);
 
 	if (kif == NULL || !pbuf_is_valid(pbuf) || rm == NULL || pd == NULL) {
 		return -1;

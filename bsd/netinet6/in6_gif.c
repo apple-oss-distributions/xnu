@@ -175,6 +175,8 @@ in6_gif_output(
 	ip6->ip6_nxt    = proto;
 	ip6->ip6_hlim   = ip6_gif_hlim;
 	ip6->ip6_src    = sin6_src->sin6_addr;
+	ip6_output_setsrcifscope(m, sin6_src->sin6_scope_id, NULL);
+	ip6_output_setdstifscope(m, sin6_dst->sin6_scope_id, NULL);
 	/* bidirectional configured tunnel mode */
 	if (!IN6_IS_ADDR_UNSPECIFIED(&sin6_dst->sin6_addr)) {
 		ip6->ip6_dst = sin6_dst->sin6_addr;

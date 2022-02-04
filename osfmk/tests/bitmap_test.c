@@ -32,10 +32,12 @@
 #include <tests/xnupost.h>
 #include <kern/kalloc.h>
 #include <kern/bits.h>
+#include <pexpert/pexpert.h>
 
 extern void dump_bitmap_next(bitmap_t *map, uint nbits);
 extern void dump_bitmap_lsb(bitmap_t *map, uint nbits);
 extern void test_bitmap(void);
+extern void test_bits(void);
 extern kern_return_t bitmap_post_test(void);
 
 void
@@ -117,13 +119,98 @@ test_bitmap(void)
 		assert(bitmap_first(map, nbits) == -1);
 		assert(bitmap_lsb_first(map, nbits) == -1);
 
+		/* bitmap_not */
+		bitmap_not(map, map, nbits);
+		assert(bitmap_is_full(map, nbits));
+
+		bitmap_not(map, map, nbits);
+		assert(bitmap_first(map, nbits) == -1);
+		assert(bitmap_lsb_first(map, nbits) == -1);
+
+		/* bitmap_and */
+		bitmap_t *map0 = bitmap_alloc(nbits);
+		assert(bitmap_first(map0, nbits) == -1);
+
+		bitmap_t *map1 = bitmap_alloc(nbits);
+		bitmap_full(map1, nbits);
+		assert(bitmap_is_full(map1, nbits));
+
+		bitmap_and(map, map0, map1, nbits);
+		assert(bitmap_first(map, nbits) == -1);
+
+		bitmap_and(map, map1, map1, nbits);
+		assert(bitmap_is_full(map, nbits));
+
+		/* bitmap_or */
+		bitmap_or(map, map1, map0, nbits);
+		assert(bitmap_is_full(map, nbits));
+
+		bitmap_or(map, map0, map0, nbits);
+		assert(bitmap_first(map, nbits) == -1);
+
+		/* bitmap_and_not */
+		bitmap_and_not(map, map0, map1, nbits);
+		assert(bitmap_first(map, nbits) == -1);
+
+		bitmap_and_not(map, map1, map0, nbits);
+		assert(bitmap_is_full(map, nbits));
+
+		/* bitmap_equal */
+		for (uint i = 0; i < nbits; i++) {
+			bitmap_clear(map, i);
+			assert(!bitmap_equal(map, map1, nbits));
+			bitmap_set(map, i);
+			assert(bitmap_equal(map, map1, nbits));
+		}
+
+		/* bitmap_and_not_mask_first */
+		for (uint i = 0; i < nbits; i++) {
+			bitmap_clear(map, i);
+			expected_result = i;
+			int result = bitmap_and_not_mask_first(map1, map, nbits);
+			assert(result == expected_result);
+			bitmap_set(map, i);
+			result = bitmap_and_not_mask_first(map1, map, nbits);
+			assert(result == -1);
+		}
+
 		bitmap_free(map, nbits);
+		bitmap_free(map0, nbits);
+		bitmap_free(map1, nbits);
+	}
+}
+
+void
+test_bits(void)
+{
+	bitmap_t map = 0;
+
+	for (int i = 0; i < 64; i++) {
+		bool changed = bit_set_if_clear(map, i);
+		assert(changed);
+	}
+	assert(map == ~0);
+	for (int i = 0; i < 64; i++) {
+		bool changed = bit_set_if_clear(map, i);
+		assert(!changed);
+	}
+
+	for (int i = 0; i < 64; i++) {
+		bool changed = bit_clear_if_set(map, i);
+		assert(changed);
+	}
+	assert(map == 0);
+	for (int i = 0; i < 64; i++) {
+		bool changed = bit_clear_if_set(map, i);
+		assert(!changed);
 	}
 }
 
 kern_return_t
 bitmap_post_test(void)
 {
+	test_bits();
+
 	test_bitmap();
 
 	kern_return_t ret = KERN_SUCCESS;

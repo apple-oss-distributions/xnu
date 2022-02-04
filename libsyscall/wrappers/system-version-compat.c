@@ -21,13 +21,10 @@
  * @APPLE_LICENSE_HEADER_END@
  */
 
-#include <TargetConditionals.h>
+#include "system-version-compat-support.h"
 
-#if TARGET_OS_OSX && !defined(__i386__)
-/*
- * Support for shimming calls to open() to the SystemVersion plist on macOS for older
- * binaries. This code is only built into libsyscall_dynamic.
- */
+#if SYSTEM_VERSION_COMPAT_ENABLED
+
 
 #include <fcntl.h>
 #include <stdbool.h>
@@ -35,8 +32,6 @@
 #include <sys/errno.h>
 #include <sys/param.h>
 #include <unistd.h>
-
-#include "system-version-compat-support.h"
 
 #define PLAT_PREFIX_IOS "iOS"
 #define PLAT_PREFIX_MACOS ""
@@ -208,4 +203,4 @@ _system_version_compat_open_shim(int opened_fd, int openat_fd, const char *orig_
 	return new_fd;
 }
 
-#endif /* TARGET_OS_OSX && !defined(__i386__) */
+#endif /* SYSTEM_VERSION_COMPAT_ENABLED */

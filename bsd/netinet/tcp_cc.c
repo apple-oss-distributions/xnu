@@ -56,6 +56,16 @@ SYSCTL_INT(_net_inet_tcp, OID_AUTO, background_sockets,
     CTLFLAG_RD | CTLFLAG_LOCKED, &tcp_cc_ledbat.num_sockets,
     0, "Number of sockets using background transport");
 
+#if (DEVELOPMENT || DEBUG)
+SYSCTL_SKMEM_TCP_INT(OID_AUTO, use_ledbat,
+    CTLFLAG_RW | CTLFLAG_LOCKED, int, tcp_use_ledbat, 0,
+    "Use TCP LEDBAT for testing");
+#else
+SYSCTL_SKMEM_TCP_INT(OID_AUTO, use_ledbat,
+    CTLFLAG_RD | CTLFLAG_LOCKED, int, tcp_use_ledbat, 0,
+    "Use TCP LEDBAT for testing");
+#endif /* (DEVELOPMENT || DEBUG) */
+
 extern struct tcp_cc_algo tcp_cc_cubic;
 SYSCTL_INT(_net_inet_tcp, OID_AUTO, cubic_sockets,
     CTLFLAG_RD | CTLFLAG_LOCKED, &tcp_cc_cubic.num_sockets,
@@ -383,7 +393,8 @@ tcp_cc_delay_ack(struct tcpcb *tp, struct tcphdr *th)
 void
 tcp_cc_allocate_state(struct tcpcb *tp)
 {
-	if (tp->tcp_cc_index == TCP_CC_ALGO_CUBIC_INDEX &&
+	if ((tp->tcp_cc_index == TCP_CC_ALGO_CUBIC_INDEX ||
+	    tp->tcp_cc_index == TCP_CC_ALGO_BACKGROUND_INDEX) &&
 	    tp->t_ccstate == NULL) {
 		tp->t_ccstate = (struct tcp_ccstate *)zalloc(tcp_cc_zone);
 

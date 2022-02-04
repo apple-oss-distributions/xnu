@@ -295,6 +295,24 @@ trace_codename("wq_constrained_admission", function(buf)
 	end
 end)
 
+trace_codename("wq_cooperative_admission", function(buf)
+	local prefix = get_prefix(buf)
+	if (buf[4] == 1) then
+		printf("%s\tsuccess at qos %s\t wq_cooperative_threads_scheduled=%d >= wq_max_cooperative_threads\n",
+			prefix, parse_thread_qos(buf[2]), buf[1])
+	elseif (buf[4] == 2) then
+		printf("%s\tsuccess at qos %s\t due to empty bucket, wq_cooperative_threads_scheduled=%d\n",
+			prefix, parse_thread_qos(buf[2]), buf[1])
+	elseif (buf[4] == 3) then
+		success = "success"
+		if (buf[3] == 0) then
+			success = "fail"
+		end
+		printf("%s\t%s at qos %s\twq_cooperative_threads_scheduled_up_to_qos=%d\n",
+			prefix, success, parse_thread_qos(buf[2]), buf[1])
+	end
+end)
+
 trace_codename("wq_death_call", function(buf)
 	local prefix = get_prefix(buf)
 	if trace.debugid_is_start(buf.debugid) then

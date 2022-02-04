@@ -104,7 +104,6 @@ extern void ipc_hash_delete(
 /* Lookup (space, obj) in local hash table */
 extern boolean_t ipc_hash_table_lookup(
 	ipc_entry_t             table,
-	ipc_entry_num_t         size,
 	ipc_object_t            obj,
 	mach_port_name_t        *namep,
 	ipc_entry_t             *entryp);
@@ -112,7 +111,6 @@ extern boolean_t ipc_hash_table_lookup(
 /* Inserts an entry into the local reverse hash table */
 extern void ipc_hash_table_insert(
 	ipc_entry_t             table,
-	ipc_entry_num_t         size,
 	ipc_object_t            obj,
 	mach_port_index_t       index,
 	ipc_entry_t             entry);
@@ -120,7 +118,6 @@ extern void ipc_hash_table_insert(
 /* Delete an entry from the appropriate reverse hash table */
 extern void ipc_hash_table_delete(
 	ipc_entry_t             table,
-	ipc_entry_num_t         size,
 	ipc_object_t            obj,
 	mach_port_name_t        name,
 	ipc_entry_t             entry);

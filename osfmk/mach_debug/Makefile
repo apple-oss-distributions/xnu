@@ -14,7 +14,14 @@ DATAFILES = \
 	page_info.h mach_debug_types.h lockgroup_info.h \
 	${MIG_DEFS}
 
+MODULEMAPFILES = \
+	mach_debug.modulemap
+
 INSTALL_MI_LIST	= ${DATAFILES}
+
+INSTALL_MODULEMAP_MI_LIST = ${MODULEMAPFILES}
+
+INSTALL_SF_MI_LCL_LIST = ${DATAFILES}
 
 INSTALL_MI_DIR = mach_debug
 

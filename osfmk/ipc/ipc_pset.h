@@ -79,24 +79,21 @@ struct ipc_pset {
 	 * Initial sub-structure in common with all ipc_objects.
 	 */
 	struct ipc_object       ips_object;
-	struct ipc_mqueue       ips_messages;
+	struct waitq_set        ips_wqset;
+	struct klist            ips_klist;
 };
 
-#define ips_references          ips_object.io_references
+#define ips_object_to_pset(io)      __container_of(io, struct ipc_pset, ips_object)
+#define ips_to_object(pset)         (&(pset)->ips_object)
+#define ips_from_waitq(wq)          __container_of(wq, struct ipc_pset, ips_wqset.wqset_q)
 
-#define ips_object_to_pset(io)  __container_of(io, struct ipc_pset, ips_object)
-#define ips_to_object(pset)     (&(pset)->ips_object)
-#define ips_active(pset)        io_active(ips_to_object(pset))
-#define ips_lock(pset)          io_lock(ips_to_object(pset))
-#define ips_lock_try(pset)      io_lock_try(ips_to_object(pset))
-#define ips_lock_held_kdp(pset) io_lock_held_kdp(ips_to_object(pset))
-#define ips_unlock(pset)        io_unlock(ips_to_object(pset))
-#define ips_reference(pset)     io_reference(ips_to_object(pset))
-#define ips_release(pset)       io_release(ips_to_object(pset))
-
-/* get an ipc_pset pointer from an ipc_mqueue pointer */
-#define ips_from_mq(mq) \
-	        __container_of(mq, struct ipc_pset, ips_messages)
+#define ips_active(pset)            io_active(ips_to_object(pset))
+#define ips_mq_lock(pset)           io_lock(ips_to_object(pset))
+#define ips_mq_lock_try(pset)       io_lock_try(ips_to_object(pset))
+#define ips_mq_lock_held_kdp(pset)  io_lock_held_kdp(ips_to_object(pset))
+#define ips_mq_unlock(pset)         io_unlock(ips_to_object(pset))
+#define ips_reference(pset)         io_reference(ips_to_object(pset))
+#define ips_release(pset)           io_release(ips_to_object(pset))
 
 /* Allocate a port set */
 extern kern_return_t ipc_pset_alloc(
@@ -115,21 +112,22 @@ extern ipc_pset_t ipc_pset_alloc_special(
 	ipc_space_t             space);
 
 /* Add a port to a port set */
-extern kern_return_t ipc_pset_add(
+extern kern_return_t ipc_pset_add_unlock(
 	ipc_pset_t      pset,
 	ipc_port_t      port,
-	uint64_t        *reserved_link,
+	waitq_ref_t     *reserved_link,
 	uint64_t        *reserved_prepost);
 
-/* determine if port is a member of set */
-extern boolean_t ipc_pset_member(
+/* Remove a port from a port set */
+extern kern_return_t ipc_pset_remove_locked(
 	ipc_pset_t      pset,
 	ipc_port_t      port);
 
-/* Remove a port from a port set */
-extern kern_return_t ipc_pset_remove(
-	ipc_pset_t      pset,
-	ipc_port_t      port);
+/* Remove a port from all port sets and add it to given port set */
+extern kern_return_t ipc_pset_move_unlock(
+	ipc_pset_t        pset,
+	ipc_port_t        port,
+	uint64_t         *reserved_prepost);
 
 /* lazily initialize the wqset of a port set */
 extern kern_return_t ipc_pset_lazy_allocate(
@@ -137,7 +135,7 @@ extern kern_return_t ipc_pset_lazy_allocate(
 	mach_port_name_t psname);
 
 /* Remove a port from all its current port sets */
-extern kern_return_t ipc_pset_remove_from_all(
+extern void ipc_pset_remove_from_all_unlock(
 	ipc_port_t      port);
 
 /* Destroy a port_set */
@@ -147,20 +145,20 @@ extern void ipc_pset_destroy(
 
 #if MACH_KERNEL_PRIVATE
 extern struct turnstile *filt_ipc_kqueue_turnstile(
-	struct knote *kn);
-bool
-filt_machport_kqueue_has_turnstile(
-	struct knote *kn);
+	struct knote   *kn);
+
+extern bool filt_machport_kqueue_has_turnstile(
+	struct knote   *kn);
 
 extern void filt_machport_turnstile_prepare_lazily(
-	struct knote *kn,
+	struct knote   *kn,
 	mach_msg_type_name_t    msgt_name,
-	ipc_port_t port);
+	ipc_port_t      port);
 
 extern struct turnstile *filt_machport_stash_port(
-	struct knote *kn,
-	ipc_port_t port,
-	int *link);
+	struct knote   *kn,
+	ipc_port_t      port,
+	int            *link);
 #endif
 
 #endif  /* _IPC_IPC_PSET_H_ */

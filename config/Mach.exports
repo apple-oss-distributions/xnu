@@ -7,6 +7,7 @@ _clock_absolutetime_interval_to_deadline
 _clock_continuoustime_interval_to_deadline
 _clock_delay_until
 _clock_get_calendar_microtime
+_clock_get_calendar_absolute_and_microtime
 _clock_get_calendar_nanotime
 _clock_get_system_microtime
 _clock_get_system_nanotime
@@ -43,8 +44,8 @@ _semaphore_signal_all
 _semaphore_wait
 _semaphore_wait_deadline
 _semaphore_wait_noblock
-_task_deallocate
-_task_reference
+_task_deallocate:_task_deallocate_external
+_task_reference:_task_reference_external
 _thread_block
 _thread_block_parameter
 _thread_call_allocate

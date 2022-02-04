@@ -2,6 +2,7 @@
  * Copyright (c) 2000-2016 Apple Inc. All rights reserved.
  */
 
+#include <kern/bits.h>
 #include <kern/task.h>
 #include <kern/thread.h>
 #include <kern/assert.h>
@@ -16,6 +17,7 @@
 #include <pexpert/pexpert.h>
 
 #include <sys/kernel.h>
+#include <sys/kern_debug.h>
 #include <sys/vm.h>
 #include <sys/proc_internal.h>
 #include <sys/syscall.h>
@@ -74,6 +76,10 @@ __XNU_PRIVATE_EXTERN    int             syscalls_log[SYS_MAXSYSCALL];
 	                            ((code) == SYS_kdebug_trace64) || \
 	                            ((code) == SYS_kdebug_trace_string))
 
+#if CONFIG_DEBUG_SYSCALL_REJECTION
+extern int mach_trap_count;
+#endif
+
 /*
  * Function:	unix_syscall
  *
@@ -110,9 +116,11 @@ unix_syscall(
 		arm_trace_unix_syscall(code, state);
 	}
 
+#if CONFIG_VFORK
 	if ((uthread->uu_flag & UT_VFORK)) {
 		proc = current_proc();
 	}
+#endif /* CONFIG_VFORK */
 
 	syscode = (code < nsysent) ? code : SYS_invalid;
 	callp   = &sysent[syscode];
@@ -155,7 +163,7 @@ unix_syscall(
 #endif
 	pid = proc_pid(proc);
 
-#ifdef JOE_DEBUG
+#ifdef CONFIG_IOCOUNT_TRACE
 	uthread->uu_iocount = 0;
 	uthread->uu_vpindex = 0;
 #endif
@@ -163,13 +171,23 @@ unix_syscall(
 	    pid, proc->p_comm, thread_tid(current_thread()));
 
 #if CONFIG_MACF
-	if (__improbable(proc->syscall_filter_mask != NULL && !bitstr_test(proc->syscall_filter_mask, syscode))) {
+	if (__improbable(proc_syscall_filter_mask(proc) != NULL && !bitstr_test(proc_syscall_filter_mask(proc), syscode))) {
 		error = mac_proc_check_syscall_unix(proc, syscode);
 		if (error) {
 			goto skip_syscall;
 		}
 	}
 #endif /* CONFIG_MACF */
+
+#if CONFIG_DEBUG_SYSCALL_REJECTION
+	if (__improbable(uthread->syscall_rejection_mask != NULL &&
+	    debug_syscall_rejection_mode != 0) &&
+	    !bitmap_test(uthread->syscall_rejection_mask, mach_trap_count + syscode)) {
+		if (debug_syscall_rejection_handle(syscode)) {
+			goto skip_syscall;
+		}
+	}
+#endif /* CONFIG_DEBUG_SYSCALL_REJECTION */
 
 	AUDIT_SYSCALL_ENTER(code, proc, uthread);
 	error = (*(callp->sy_call))(proc, &uthread->uu_arg[0], &(uthread->uu_rval[0]));
@@ -183,9 +201,10 @@ skip_syscall:
 	    uthread->uu_rval[0], uthread->uu_rval[1],
 	    pid, get_bsdtask_info(current_task()) ? proc->p_comm : "unknown", thread_tid(current_thread()));
 
-#ifdef JOE_DEBUG
+#ifdef CONFIG_IOCOUNT_TRACE
 	if (uthread->uu_iocount) {
-		printf("system call returned with uu_iocount != 0");
+		printf("system call returned with uu_iocount(%d) != 0",
+		    uthread->uu_iocount);
 	}
 #endif
 #if CONFIG_DTRACE
@@ -217,12 +236,7 @@ skip_syscall:
 		    error, uthread->uu_rval[0], uthread->uu_rval[1], pid);
 	}
 
-#if PROC_REF_DEBUG
-	if (__improbable(uthread_get_proc_refcount(uthread) != 0)) {
-		panic("system call returned with uu_proc_refcount != 0");
-	}
-#endif
-
+	uthread_assert_zero_proc_refcount(uthread);
 #ifdef __arm__
 	thread_exception_return();
 #endif
@@ -282,7 +296,7 @@ unix_syscall_return(int error)
 	}
 	if (kdebug_enable && !code_is_kdebug_trace(code)) {
 		KDBG_RELEASE(BSDDBG_CODE(DBG_BSD_EXCP_SC, code) | DBG_FUNC_END,
-		    error, uthread->uu_rval[0], uthread->uu_rval[1], proc->p_pid);
+		    error, uthread->uu_rval[0], uthread->uu_rval[1], proc_getpid(proc));
 	}
 
 	thread_exception_return();

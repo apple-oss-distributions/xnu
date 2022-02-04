@@ -43,13 +43,12 @@
 
 #include <IOKit/IOReturn.h>
 #include <IOKit/IOTypes.h>
+#include <machine/machine_routines.h>
+#include <libkern/locks.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
-
-#include <libkern/locks.h>
-#include <machine/machine_routines.h>
 
 /*! @var IOLockGroup
  *   Global lock group used by all IOKit locks.  To simplify kext debugging and lock-heat analysis, consider using lck_* locks with a per-driver lock group, as defined in kern/locks.h.

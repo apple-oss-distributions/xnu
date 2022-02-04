@@ -28,10 +28,9 @@
 
 #include <kern/policy_internal.h>
 #include <mach/task_policy.h>
-
+#include <mach/task.h>
 #include <mach/mach_types.h>
 #include <mach/task_server.h>
-
 #include <kern/host.h>                  /* host_priv_self()        */
 #include <mach/host_priv.h>             /* host_get_special_port() */
 #include <mach/host_special_ports.h>    /* RESOURCE_NOTIFY_PORT    */
@@ -373,7 +372,7 @@ task_policy_set(
 			break;
 
 		case TASK_CONTROL_APPLICATION:
-			if (task != current_task() || task->sec_token.val[0] != 0) {
+			if (task != current_task() || !task_is_privileged(task)) {
 				result = KERN_INVALID_ARGUMENT;
 			} else {
 				proc_set_task_policy(task,
@@ -384,7 +383,7 @@ task_policy_set(
 
 		case TASK_GRAPHICS_SERVER:
 			/* TODO: Restrict this role to FCFS <rdar://problem/12552788> */
-			if (task != current_task() || task->sec_token.val[0] != 0) {
+			if (task != current_task() || !task_is_privileged(task)) {
 				result = KERN_INVALID_ARGUMENT;
 			} else {
 				proc_set_task_policy(task,
@@ -632,7 +631,7 @@ task_policy_get(
 		}
 
 		/* Only root can get this info */
-		if (current_task()->sec_token.val[0] != 0) {
+		if (!task_is_privileged(current_task())) {
 			return KERN_PROTECTION_FAILURE;
 		}
 
@@ -1359,7 +1358,7 @@ task_policy_update_complete_unlocked(task_t task, task_pend_token_t pend_token)
 {
 #ifdef MACH_BSD
 	if (pend_token->tpt_update_sockets) {
-		proc_apply_task_networkbg(task->bsd_info, THREAD_NULL);
+		proc_apply_task_networkbg(task_pid(task), THREAD_NULL);
 	}
 #endif /* MACH_BSD */
 
@@ -3006,14 +3005,7 @@ proc_lf_pidbind(task_t curtask, uint64_t tid, task_t target_task, int bind)
 		}
 		task_unlock(target_task);
 
-		twp = (task_watch_t *)kalloc(sizeof(task_watch_t));
-		if (twp == NULL) {
-			task_watch_unlock();
-			ret = ENOMEM;
-			goto out;
-		}
-
-		bzero(twp, sizeof(task_watch_t));
+		twp = kalloc_type(task_watch_t, Z_WAITOK | Z_ZERO | Z_NOFAIL);
 
 		task_watch_lock();
 
@@ -3021,7 +3013,7 @@ proc_lf_pidbind(task_t curtask, uint64_t tid, task_t target_task, int bind)
 			/* already bound to another task */
 			task_watch_unlock();
 
-			kfree(twp, sizeof(task_watch_t));
+			kfree_type(task_watch_t, twp);
 			ret = EBUSY;
 			goto out;
 		}
@@ -3060,7 +3052,7 @@ proc_lf_pidbind(task_t curtask, uint64_t tid, task_t target_task, int bind)
 			task_deallocate(task);                  /* drop task ref in twp */
 			set_thread_appbg(target_thread, 0, twp->tw_importance);
 			thread_deallocate(target_thread);       /* drop thread ref in twp */
-			kfree(twp, sizeof(task_watch_t));
+			kfree_type(task_watch_t, twp);
 		} else {
 			task_watch_unlock();
 			ret = 0;                /* return success if it not alredy bound */
@@ -3093,8 +3085,7 @@ retry:
 		return;
 	}
 
-	threadlist = kheap_alloc(KHEAP_TEMP,
-	    numwatchers * sizeof(thread_watchlist_t), Z_WAITOK | Z_ZERO);
+	threadlist = kalloc_type(thread_watchlist_t, numwatchers, Z_WAITOK | Z_ZERO);
 	if (threadlist == NULL) {
 		return;
 	}
@@ -3105,13 +3096,13 @@ retry:
 	if (task->watchapplying != 0) {
 		lck_mtx_sleep(&task_watch_mtx, LCK_SLEEP_DEFAULT, &task->watchapplying, THREAD_UNINT);
 		task_watch_unlock();
-		kheap_free(KHEAP_TEMP, threadlist, numwatchers * sizeof(thread_watchlist_t));
+		kfree_type(thread_watchlist_t, numwatchers, threadlist);
 		goto retry;
 	}
 
 	if (numwatchers != task->num_taskwatchers) {
 		task_watch_unlock();
-		kheap_free(KHEAP_TEMP, threadlist, numwatchers * sizeof(thread_watchlist_t));
+		kfree_type(thread_watchlist_t, numwatchers, threadlist);
 		goto retry;
 	}
 
@@ -3140,7 +3131,7 @@ retry:
 		set_thread_appbg(threadlist[j].thread, setbg, threadlist[j].importance);
 		thread_deallocate(threadlist[j].thread);
 	}
-	kheap_free(KHEAP_TEMP, threadlist, numwatchers * sizeof(thread_watchlist_t));
+	kfree_type(thread_watchlist_t, numwatchers, threadlist);
 
 
 	task_watch_lock();
@@ -3165,7 +3156,7 @@ thead_remove_taskwatch(thread_t thread)
 		thread_deallocate(twp->tw_thread);
 		task_deallocate(twp->tw_task);
 		importance = twp->tw_importance;
-		kfree(twp, sizeof(task_watch_t));
+		kfree_type(task_watch_t, twp);
 		/* remove the thread and networkbg */
 		set_thread_appbg(thread, 0, importance);
 	}
@@ -3177,10 +3168,9 @@ task_removewatchers(task_t task)
 	queue_head_t queue;
 	task_watch_t *twp;
 
-	queue_init(&queue);
-
 	task_watch_lock();
-	movqueue(&queue, &task->task_watchers);
+	queue_new_head(&task->task_watchers, &queue, task_watch_t *, tw_links);
+	queue_init(&task->task_watchers);
 
 	queue_iterate(&queue, twp, task_watch_t *, tw_links) {
 		/*
@@ -3193,12 +3183,13 @@ task_removewatchers(task_t task)
 	task->num_taskwatchers = 0;
 	task_watch_unlock();
 
-	while ((twp = qe_dequeue_head(&task->task_watchers, task_watch_t, tw_links)) != NULL) {
+	while (!queue_empty(&queue)) {
+		queue_remove_first(&queue, twp, task_watch_t *, tw_links);
 		/* remove thread and network bg */
 		set_thread_appbg(twp->tw_thread, 0, twp->tw_importance);
 		thread_deallocate(twp->tw_thread);
 		task_deallocate(twp->tw_task);
-		kfree(twp, sizeof(task_watch_t));
+		kfree_type(task_watch_t, twp);
 	}
 }
 #endif /* CONFIG_TASKWATCH */
@@ -3580,7 +3571,7 @@ task_add_importance_watchport(task_t task, mach_port_t port, int *boostp)
 	if (IP_VALID(port) != 0) {
 		ipc_importance_task_t new_imp_task = ipc_importance_for_task(task, FALSE);
 
-		ip_lock(port);
+		ip_mq_lock(port);
 
 		/*
 		 * The port must have been marked tempowner already.
@@ -3593,13 +3584,13 @@ task_add_importance_watchport(task_t task, mach_port_t port, int *boostp)
 			assert(port->ip_impdonation != 0);
 
 			boost = port->ip_impcount;
-			if (IIT_NULL != port->ip_imp_task) {
+			if (IIT_NULL != ip_get_imp_task(port)) {
 				/*
 				 * if this port is already bound to a task,
 				 * release the task reference and drop any
 				 * watchport-forwarded boosts
 				 */
-				release_imp_task = port->ip_imp_task;
+				release_imp_task = ip_get_imp_task(port);
 				port->ip_imp_task = IIT_NULL;
 			}
 
@@ -3609,7 +3600,7 @@ task_add_importance_watchport(task_t task, mach_port_t port, int *boostp)
 				new_imp_task = IIT_NULL;
 			}
 		}
-		ip_unlock(port);
+		ip_mq_unlock(port);
 
 		if (IIT_NULL != new_imp_task) {
 			ipc_importance_task_release(new_imp_task);
@@ -3897,6 +3888,68 @@ finish:
 #endif      /* MACH_BSD */
 }
 
+kern_return_t
+send_resource_violation_with_fatal_port(typeof(send_port_space_violation) sendfunc,
+    task_t violator,
+    int64_t current_size,
+    int64_t limit,
+    mach_port_t fatal_port,
+    resource_notify_flags_t flags)
+{
+#ifndef MACH_BSD
+	kr = KERN_NOT_SUPPORTED; goto finish;
+#else
+	kern_return_t   kr = KERN_SUCCESS;
+	proc_t          proc = NULL;
+	proc_name_t     procname = "<unknown>";
+	int             pid = -1;
+	clock_sec_t     secs;
+	clock_nsec_t    nsecs;
+	mach_timespec_t timestamp;
+	thread_t        curthread = current_thread();
+	ipc_port_t      dstport = MACH_PORT_NULL;
+
+	if (!violator) {
+		kr = KERN_INVALID_ARGUMENT; goto finish;
+	}
+
+	/* extract violator information; no need to acquire task lock */
+	assert(violator == current_task());
+	if (!(proc = get_bsdtask_info(violator))) {
+		kr = KERN_INVALID_ARGUMENT; goto finish;
+	}
+	(void)mig_strncpy(procname, proc_best_name(proc), sizeof(procname));
+	pid = task_pid(violator);
+
+	/* violation time ~ now */
+	clock_get_calendar_nanotime(&secs, &nsecs);
+	timestamp.tv_sec = (int32_t)secs;
+	timestamp.tv_nsec = (int32_t)nsecs;
+	/* 25567702 tracks widening mach_timespec_t */
+
+	/* send message */
+	kr = task_get_special_port(current_task(), TASK_RESOURCE_NOTIFY_PORT, &dstport);
+	if (dstport == MACH_PORT_NULL) {
+		kr = host_get_special_port(host_priv_self(), HOST_LOCAL_NODE,
+		    HOST_RESOURCE_NOTIFY_PORT, &dstport);
+		if (kr) {
+			goto finish;
+		}
+	}
+
+	thread_set_honor_qlimit(curthread);
+	kr = sendfunc(dstport,
+	    procname, pid, timestamp,
+	    current_size, limit, fatal_port,
+	    flags);
+	thread_clear_honor_qlimit(curthread);
+
+	ipc_port_release_send(dstport);
+
+#endif /* MACH_BSD */
+finish:
+	return kr;
+}
 
 /*
  * Resource violations trace four 64-bit integers.  For K32, two additional

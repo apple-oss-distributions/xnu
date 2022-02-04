@@ -35,6 +35,7 @@ coalition_create_syscall(user_addr_t cidp, uint32_t flags)
 	int type = COALITION_CREATE_FLAGS_GET_TYPE(flags);
 	int role = COALITION_CREATE_FLAGS_GET_ROLE(flags);
 	boolean_t privileged = !!(flags & COALITION_CREATE_FLAGS_PRIVILEGED);
+	boolean_t efficient = !!(flags & COALITION_CREATE_FLAGS_EFFICIENT);
 
 	if ((flags & (~COALITION_CREATE_FLAGS_MASK)) != 0) {
 		return EINVAL;
@@ -43,7 +44,7 @@ coalition_create_syscall(user_addr_t cidp, uint32_t flags)
 		return EINVAL;
 	}
 
-	kr = coalition_create_internal(type, role, privileged, &coal, &cid);
+	kr = coalition_create_internal(type, role, privileged, efficient, &coal, &cid);
 	if (kr != KERN_SUCCESS) {
 		/* for now, the only kr is KERN_RESOURCE_SHORTAGE */
 		error = ENOMEM;
@@ -277,14 +278,15 @@ coalition_info_efficiency(coalition_t coal, user_addr_t buffer, user_size_t bufs
 		return EINVAL;
 	}
 	if (flags & COALITION_FLAGS_EFFICIENT) {
-		coalition_set_efficient(coal);
+		// No longer supported; this flag must be set during create.
 #if CONFIG_THREAD_GROUPS
+		// TODO: remove when 69955352 lands
 		struct thread_group *tg = coalition_get_thread_group(coal);
 		thread_group_set_flags(tg, THREAD_GROUP_FLAGS_EFFICIENT);
 		thread_group_release(tg);
 #endif /* CONFIG_THREAD_GROUPS */
 	}
-	return error;
+	return error;  // TODO: change to ENOTSUP
 }
 
 static int
@@ -432,7 +434,7 @@ static int sysctl_coalition_get_ids SYSCTL_HANDLER_ARGS
 		return error;
 	}
 	if (!req->newptr) {
-		pid = req->p->p_pid;
+		pid = proc_getpid(req->p);
 	} else {
 		pid = (int)value;
 	}
@@ -468,7 +470,7 @@ static int sysctl_coalition_get_roles SYSCTL_HANDLER_ARGS
 		return error;
 	}
 	if (!req->newptr) {
-		pid = req->p->p_pid;
+		pid = proc_getpid(req->p);
 	} else {
 		pid = (int)value;
 	}
@@ -505,7 +507,7 @@ static int sysctl_coalition_get_page_count SYSCTL_HANDLER_ARGS
 		return error;
 	}
 	if (!req->newptr) {
-		pid = req->p->p_pid;
+		pid = proc_getpid(req->p);
 	} else {
 		pid = (int)value;
 	}
@@ -562,14 +564,14 @@ static int sysctl_coalition_get_pid_list SYSCTL_HANDLER_ARGS
 	if (!req->newptr) {
 		type = COALITION_TYPE_RESOURCE;
 		sort_order = COALITION_SORT_DEFAULT;
-		pid = req->p->p_pid;
+		pid = proc_getpid(req->p);
 	} else {
 		type = value[0];
 		sort_order = value[1];
 		if (has_pid) {
 			pid = value[2];
 		} else {
-			pid = req->p->p_pid;
+			pid = proc_getpid(req->p);
 		}
 	}
 

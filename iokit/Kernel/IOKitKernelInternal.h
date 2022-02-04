@@ -39,6 +39,7 @@ __BEGIN_DECLS
 #include <device/device_port.h>
 #include <IOKit/IODMACommand.h>
 #include <IOKit/IOKitServer.h>
+#include <kern/socd_client.h>
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
@@ -63,10 +64,17 @@ IOMemoryDescriptorMapAlloc(vm_map_t map, void * ref);
 
 
 mach_vm_address_t
-IOKernelAllocateWithPhysicalRestrict(mach_vm_size_t size, mach_vm_address_t maxPhys,
-    mach_vm_size_t alignment, bool contiguous);
+IOKernelAllocateWithPhysicalRestrict(
+	kalloc_heap_t       kheap,
+	mach_vm_size_t      size,
+	mach_vm_address_t   maxPhys,
+	mach_vm_size_t      alignment,
+	bool                contiguous);
 void
-IOKernelFreePhysical(mach_vm_address_t address, mach_vm_size_t size);
+IOKernelFreePhysical(
+	kalloc_heap_t       kheap,
+	mach_vm_address_t   address,
+	mach_vm_size_t      size);
 
 #if IOTRACKING
 IOReturn
@@ -160,6 +168,7 @@ struct IOMemoryDescriptorReserved {
 	vm_tag_t                      kernelTag;
 	vm_tag_t                      userTag;
 	task_t                        creator;
+	OSObject                    * contextObject;
 };
 
 struct iopa_t {
@@ -176,14 +185,15 @@ struct iopa_page_t {
 };
 typedef struct iopa_page_t iopa_page_t;
 
-typedef uintptr_t (*iopa_proc_t)(iopa_t * a);
+typedef uintptr_t (*iopa_proc_t)(kalloc_heap_t kheap, iopa_t * a);
 
 enum{
 	kIOPageAllocSignature  = 'iopa'
 };
 
 extern "C" void      iopa_init(iopa_t * a);
-extern "C" uintptr_t iopa_alloc(iopa_t * a, iopa_proc_t alloc, vm_size_t bytes, vm_size_t balign);
+extern "C" uintptr_t iopa_alloc(iopa_t * a, iopa_proc_t alloc, kalloc_heap_t kheap,
+    vm_size_t bytes, vm_size_t balign);
 extern "C" uintptr_t iopa_free(iopa_t * a, uintptr_t addr, vm_size_t bytes);
 extern "C" uint32_t  gIOPageAllocChunkBytes;
 
@@ -197,6 +207,9 @@ extern clock_sec_t gIOConsoleLockTime;
 extern bool gCPUsRunning;
 
 extern OSSet * gIORemoveOnReadProperties;
+
+extern uint32_t gHaltTimeMaxLog;
+extern uint32_t gHaltTimeMaxPanic;
 
 extern "C" void IOKitInitializeTime( void );
 extern void IOMachPortInitialize(void);
@@ -214,8 +227,6 @@ extern "C" void IOKitKernelLogBuffer(const char * title, const void * buffer, si
 extern const OSSymbol * gIOCreateEFIDevicePathSymbol;
 extern "C" void IOSetKeyStoreData(LIBKERN_CONSUMED IOMemoryDescriptor * data);
 extern "C" void IOSetAPFSKeyStoreData(LIBKERN_CONSUMED IOMemoryDescriptor* data);
-extern "C" void IOSetARVRootHashData(LIBKERN_CONSUMED IOMemoryDescriptor* arvData);
-extern "C" void IOSetARVManifestData(LIBKERN_CONSUMED IOMemoryDescriptor* arvData);
 #endif
 extern const  OSSymbol * gAKSGetKey;
 
@@ -227,5 +238,14 @@ IOReturn IOInstallServiceSleepPlatformActions(IOService * service);
 IOReturn IORemoveServicePlatformActions(IOService * service);
 void     IOCPUSleepKernel(void);
 void     IOPlatformActionsInitialize(void);
+
+class IOSystemStateNotification : public IOService
+{
+	OSDeclareDefaultStructors(IOSystemStateNotification);
+public:
+	static IOService * initialize(void);
+	virtual IOReturn setProperties( OSObject * properties) APPLE_KEXT_OVERRIDE;
+	virtual bool serializeProperties(OSSerialize * serialize) const APPLE_KEXT_OVERRIDE;
+};
 
 #endif /* ! _IOKIT_KERNELINTERNAL_H */

@@ -133,35 +133,17 @@ void (*record_startup_extensions_function)(void) = NULL;
 void
 InitIOKit(void *dtTop)
 {
-	int                         debugFlags = 0;
-
-	if (PE_parse_boot_argn( "io", &debugFlags, sizeof(debugFlags))) {
-		gIOKitDebug = debugFlags;
-	}
 	// Enable IOWaitQuiet panics on arm64 macOS except on KASAN.
 	// existing 3rd party KEXTs may hold the registry busy on x86 RELEASE kernels.
 	// Enabling this on other platforms is tracked in rdar://66364108
 #if XNU_TARGET_OS_OSX && defined(__arm64__) && !KASAN
-	else {
+	if (gIOKitDebug == DEBUG_INIT_VALUE) {
 		gIOKitDebug |= kIOWaitQuietPanics;
 	}
 #endif
 
-	if (PE_parse_boot_argn( "iotrace", &debugFlags, sizeof(debugFlags))) {
-		gIOKitTrace = debugFlags;
-	}
-
 	// Compat for boot-args
 	gIOKitTrace |= (gIOKitDebug & kIOTraceCompatBootArgs);
-
-	if (PE_parse_boot_argn( "pmtimeout", &debugFlags, sizeof(debugFlags))) {
-		gCanSleepTimeout = debugFlags;
-	}
-
-	if (PE_parse_boot_argn( "dk", &debugFlags, sizeof(debugFlags))) {
-		gIODKDebug = debugFlags;
-	}
-
 
 	//
 	// Have to start IOKit environment before we attempt to start
@@ -173,7 +155,6 @@ InitIOKit(void *dtTop)
 	IOLibInit();
 	OSlibkernInit();
 	IOMachPortInitialize();
-	devsw_init();
 
 	gIOProgressBackbufferKey  = OSSymbol::withCStringNoCopy(kIOProgressBackbufferKey);
 	gIORemoveOnReadProperties = OSSet::withObjects((const OSObject **) &gIOProgressBackbufferKey, 1);
@@ -208,6 +189,7 @@ ConfigureIOKit(void)
 void
 StartIOKitMatching(void)
 {
+	SOCD_TRACE_XNU(START_IOKIT);
 	assert(gRootNub != NULL);
 	bool ok = gRootNub->startIOServiceMatching();
 	if (__improbable(!ok)) {

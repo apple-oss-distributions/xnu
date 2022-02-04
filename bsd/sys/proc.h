@@ -87,6 +87,10 @@
 #include <mach/coalition.h>             /* COALITION_NUM_TYPES */
 #endif
 
+#ifndef KERNEL
+#include <Availability.h>
+#endif
+
 #if defined(XNU_KERNEL_PRIVATE) || !defined(KERNEL)
 
 struct session;
@@ -239,6 +243,7 @@ extern bool proc_is_alien(proc_t p);
 proc_t current_proc_EXTERNAL(void);
 
 extern int      msleep(void *chan, lck_mtx_t *mtx, int pri, const char *wmesg, struct timespec * ts );
+extern int      msleep0(void *chan, lck_mtx_t *mtx, int pri, const char *wmesg, int timo, int (*continuation)(int));
 extern void     wakeup(void *chan);
 extern void wakeup_one(caddr_t chan);
 
@@ -283,6 +288,8 @@ extern int proc_ppid(proc_t);
 extern int proc_original_ppid(proc_t);
 /* returns the start time of the given process */
 extern int proc_starttime(proc_t, struct timeval *);
+/* returns whether the given process is on simulated platform */
+extern boolean_t proc_is_simulated(const proc_t);
 /* returns the platform (macos, ios, watchos, tvos, ...) of the given process */
 extern uint32_t proc_platform(const proc_t);
 /* returns the minimum sdk version used by the current process */
@@ -404,11 +411,26 @@ extern void proc_set_responsible_pid(proc_t target_proc, pid_t responsible_pid);
 /* return 1 if process is forcing case-sensitive HFS+ access, 0 for default */
 extern int proc_is_forcing_hfs_case_sensitivity(proc_t);
 
+/* returns 1 if the process is parent of a vfork */
+extern int proc_lvfork(proc_t);
+
+/* increments process block output operations counter. returns original value if valid long pointer was passed */
+extern int proc_increment_ru_oublock(proc_t, long *);
+
+/* Check if process is aborted, but not killed by a signal or is not the exiting thread or is not attempting to dump core */
+extern int proc_isabortedsignal(proc_t);
+
 /* return true if the process is translated, false for default */
 extern boolean_t proc_is_translated(proc_t);
 
 /* true if the process ignores errors from content protection APIs */
 extern bool proc_ignores_content_protection(proc_t proc);
+
+/* true if the file system shouldn't update mtime for operations by the process */
+extern bool proc_skip_mtime_update(proc_t proc);
+
+/* return true if the process is flagged as allow-low-space */
+extern bool proc_allow_low_space_writes(proc_t p);
 
 /*!
  *  @function    proc_exitstatus
@@ -498,8 +520,10 @@ __BEGIN_DECLS
 
 int pid_suspend(int pid);
 int pid_resume(int pid);
-int task_inspect_for_pid(unsigned int target_tport, int pid, unsigned int *t);
-int task_read_for_pid(unsigned int target_tport, int pid, unsigned int *t);
+__API_AVAILABLE(macos(11.3), ios(14.5), tvos(14.5), watchos(7.3))
+int task_inspect_for_pid(unsigned int target_tport, int pid, unsigned int *t);  /* Returns task inspect port */
+__API_AVAILABLE(macos(11.3), ios(14.5), tvos(14.5), watchos(7.3))
+int task_read_for_pid(unsigned int target_tport, int pid, unsigned int *t);     /* Returns task read port */
 
 #if defined(__arm__) || defined(__arm64__)
 int pid_hibernate(int pid);

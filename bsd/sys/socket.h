@@ -82,6 +82,11 @@
 #include <uuid/uuid.h>
 #endif /* PRIVATE */
 
+#ifdef XNU_KERNEL_PRIVATE
+#include <kern/assert.h>
+#include <kern/kalloc.h>
+#endif /* XNU_KERNEL_PRIVATE */
+
 #ifndef KERNEL
 #include <Availability.h>
 #endif
@@ -349,7 +354,16 @@
 #define SO_MPKL_SEND_INFO          0x1122  /* (struct so_mpkl_send_info) */
 #define SO_STATISTICS_EVENT        0x1123  /* int64 argument, an event in statistics collection */
 #define SO_WANT_KEV_SOCKET_CLOSED  0x1124  /* want delivery of KEV_SOCKET_CLOSED (int) */
+#define SO_MARK_KNOWN_TRACKER      0x1125  /* Mark as a connection to a known tracker */
+#define SO_MARK_KNOWN_TRACKER_NON_APP_INITIATED 0x1126  /* Mark tracker connection to be non-app initiated */
+#define SO_MARK_WAKE_PKT           0x1127  /* Mark next packet as a wake packet, one shot (int) */
+#define SO_RECV_WAKE_PKT           0x1128  /* Receive wake packet indication as ancillary data (int) */
+#define SO_MARK_APPROVED_APP_DOMAIN 0x1129 /* Mark connection as being for an approved associated app domain */
+#define SO_FALLBACK_MODE           0x1130  /* Indicates the mode of fallback used */
 #endif /* PRIVATE */
+
+/* When adding new socket-options, you need to make sure MPTCP supports these as well! */
+
 /*
  * Network Service Type for option SO_NET_SERVICE_TYPE
  *

@@ -918,7 +918,7 @@ normalizeOptCaseFoldU32Char(int32_t u32char, bool case_sens,
 		} else {
 			/* treat like trieValue == 0 above */
 			u32NormFoldBuf[0] = u32char;
-			return adjustCase(case_sens, 1, u32NormFoldBuf);;
+			return adjustCase(case_sens, 1, u32NormFoldBuf);
 		}
 	}
 	if (trieValue == kHangulMask) {
@@ -941,7 +941,7 @@ normalizeOptCaseFoldU32Char(int32_t u32char, bool case_sens,
 		} else {
 			u32NormFoldBuf[0] = trieValue;
 		}
-		return adjustCase(case_sens, 1, u32NormFoldBuf);;
+		return adjustCase(case_sens, 1, u32NormFoldBuf);
 	}
 	const uint16_t* u16SeqPtr = NULL;
 	const int32_t*  u32SeqPtr = NULL;

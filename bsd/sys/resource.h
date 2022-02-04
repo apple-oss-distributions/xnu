@@ -395,7 +395,7 @@ typedef struct rusage_info_v5 rusage_info_current;
 #ifdef KERNEL
 
 struct rusage_superset {
-	struct rusage                   ru;
+	struct rusage           ru;
 	rusage_info_current     ri;
 };
 
@@ -547,6 +547,9 @@ struct proc_rlimit_control_wakeupmon {
 #define IOPOL_TYPE_VFS_STATFS_NO_DATA_VOLUME 4
 #define IOPOL_TYPE_VFS_TRIGGER_RESOLVE 5
 #define IOPOL_TYPE_VFS_IGNORE_CONTENT_PROTECTION 6
+#define IOPOL_TYPE_VFS_IGNORE_PERMISSIONS 7
+#define IOPOL_TYPE_VFS_SKIP_MTIME_UPDATE 8
+#define IOPOL_TYPE_VFS_ALLOW_LOW_SPACE_WRITES 9
 
 /* scope */
 #define IOPOL_SCOPE_PROCESS   0
@@ -585,6 +588,15 @@ struct proc_rlimit_control_wakeupmon {
 
 #define IOPOL_VFS_CONTENT_PROTECTION_DEFAULT 0
 #define IOPOL_VFS_CONTENT_PROTECTION_IGNORE  1
+
+#define IOPOL_VFS_IGNORE_PERMISSIONS_OFF 0
+#define IOPOL_VFS_IGNORE_PERMISSIONS_ON  1
+
+#define IOPOL_VFS_SKIP_MTIME_UPDATE_OFF 0
+#define IOPOL_VFS_SKIP_MTIME_UPDATE_ON 1
+
+#define IOPOL_VFS_ALLOW_LOW_SPACE_WRITES_OFF 0
+#define IOPOL_VFS_ALLOW_LOW_SPACE_WRITES_ON 1
 
 #ifdef PRIVATE
 /*

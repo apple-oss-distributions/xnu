@@ -757,11 +757,12 @@ def PmapBlockBaseMaskARM64(page_size, level):
     assert level >= 0 and level <= 3
     return ((1 << ARM64_VMADDR_BITS) - 1) & ~PmapBlockOffsetMaskARM64(page_size, level)
 
-def PmapDecodeTTEARM64(tte, level, stage2 = False):
+def PmapDecodeTTEARM64(tte, level, stage2 = False, is_iommu_tte = False):
     """ Display the bits of an ARM64 translation table or page table entry
         in human-readable form.
         tte: integer value of the TTE/PTE
         level: translation table level.  Valid values are 1, 2, or 3.
+        is_iommu_tte: True if the TTE is from an IOMMU's page table, False otherwise.
     """
     assert(type(level) == int)
     assert_64bit(tte)
@@ -785,7 +786,17 @@ def PmapDecodeTTEARM64(tte, level, stage2 = False):
         if stage2:
             print "S2 MemAttr = {:#x}.".format((tte >> 2) & 0xf)
         else:
-            print "AttrIdx    = {:#x}.".format((tte >> 2) & 0x7)
+            attr_index = (tte >> 2) & 0x7
+            attr_string = { 0: 'WRITEBACK', 1: 'WRITECOMB', 2: 'WRITETHRU',
+                3: 'CACHE DISABLE', 4: 'INNERWRITEBACK', 5: 'POSTED',
+                6: 'POSTED_REORDERED', 7: 'POSTED_COMBINED_REORDERED' }
+
+            # Only show the string version of the AttrIdx for CPU mappings since
+            # these values don't apply to IOMMU mappings.
+            if is_iommu_tte:
+                print "AttrIdx    = {:#x}.".format(attr_index)
+            else:
+                print "AttrIdx    = {:#x} ({:s}).".format(attr_index, attr_string[attr_index])
             print "NS         = {:#x}.".format((tte >> 5) & 0x1)
 
         if stage2:
@@ -845,6 +856,8 @@ def PmapWalkARM64(pmap_pt_attr, root_tte, vaddr, verbose_level = vHUMAN):
     # Walk the page tables
     paddr = -1
     max_level = unsigned(pmap_pt_attr.pta_max_level)
+    is_valid = True
+    is_leaf = False
 
     while (level <= max_level):
         if verbose_level >= vSCRIPT:
@@ -855,6 +868,8 @@ def PmapWalkARM64(pmap_pt_attr, root_tte, vaddr, verbose_level = vHUMAN):
         if tte & 0x1 == 0x0:
             if verbose_level >= vHUMAN:
                 print "L{} entry invalid: {:#x}\n".format(level, tte)
+
+            is_valid = False
             break
 
         # Handle leaf entry
@@ -867,6 +882,7 @@ def PmapWalkARM64(pmap_pt_attr, root_tte, vaddr, verbose_level = vHUMAN):
             if level != max_level:
                 print "phys: {:#x}".format(paddr)
 
+            is_leaf = True
             break
         else:
         # Handle page table entry
@@ -886,6 +902,7 @@ def PmapWalkARM64(pmap_pt_attr, root_tte, vaddr, verbose_level = vHUMAN):
         # We've parsed one level, so go to the next level
         assert(level <= 3)
         level = level + 1
+
 
     if verbose_level >= vHUMAN:
         if paddr:
@@ -973,82 +990,232 @@ def DecodeTTE(cmd_args=None):
         raise NotImplementedError("decode_tte does not support {0}".format(kern.arch))
 
 
-PVH_HIGH_FLAGS_ARM64 = (1 << 62) | (1 << 61) | (1 << 60) | (1 << 59)
+PVH_HIGH_FLAGS_ARM64 = (1 << 62) | (1 << 61) | (1 << 60) | (1 << 59) | (1 << 58)
 PVH_HIGH_FLAGS_ARM32 = (1 << 31)
 
-def PVWalkARM(pa):
-    """ Walk a physical-to-virtual reverse mapping list maintained by the arm pmap
-        pa: physical address (NOT page number).  Does not need to be page-aligned 
+def PVDumpPTE(pvep, ptep, verbose_level = vHUMAN):
+    """ Dump information about a single mapping retrieved by the pv_head_table.
+
+        pvep: Either a pointer to the PVE object if the PVH entry is PVH_TYPE_PVEP,
+              or None if type PVH_TYPE_PTEP.
+        ptep: For type PVH_TYPE_PTEP this should just be the raw PVH entry with
+              the high flags already set (the type bits don't need to be cleared).
+              For type PVH_TYPE_PVEP this will be the value retrieved from the
+              pve_ptep[] array.
     """
-    vm_first_phys = unsigned(kern.globals.vm_first_phys)
-    vm_last_phys = unsigned(kern.globals.vm_last_phys)
-    if pa < vm_first_phys or pa >= vm_last_phys:
-        raise ArgumentError("PA {:#x} is outside range of managed physical addresses: [{:#x}, {:#x})".format(pa, vm_first_phys, vm_last_phys))
-    page_size = kern.globals.page_size
-    pn = (pa - unsigned(kern.globals.vm_first_phys)) / page_size
-    pvh = unsigned(kern.globals.pv_head_table[pn])
-    pvh_type = pvh & 0x3
-    print "PVH raw value: ({:#x})".format(pvh)
     if kern.arch.startswith('arm64'):
         iommu_flag = 0x4
         iommu_table_flag = 1 << 63
-        pvh = pvh | PVH_HIGH_FLAGS_ARM64
     else:
         iommu_flag = 0
-        iommu_table_flag = 0 
+        iommu_table_flag = 0
+
+    # AltAcct status is only stored in the ptep for PVH_TYPE_PVEP entries.
+    if pvep is not None and (ptep & 0x1):
+        # Note: It's not possible for IOMMU mappings to be marked as alt acct so
+        # setting this string is mutually exclusive with setting the IOMMU strings.
+        pte_str = ' (alt acct)'
+    else:
+        pte_str = ''
+
+    if pvep is not None:
+        pve_str = 'PVEP {:#x}, '.format(pvep)
+    else:
+        pve_str = ''
+
+    # For PVH_TYPE_PTEP, this clears out the type bits. For PVH_TYPE_PVEP, this
+    # either does nothing or clears out the AltAcct bit.
+    ptep = ptep & ~0x3
+
+    # When printing with extra verbosity, print an extra newline that describes
+    # who owns the mapping.
+    extra_str = ''
+
+    if ptep & iommu_flag:
+        # The mapping is an IOMMU Mapping
+        ptep = ptep & ~iommu_flag
+
+        # Due to LLDB automatically setting all the high bits of pointers, when
+        # ptep is retrieved from the pve_ptep[] array, LLDB will automatically set
+        # the iommu_table_flag, which means this check only works for PVH entries
+        # of type PVH_TYPE_PTEP (since those PTEPs come directly from the PVH
+        # entry which has the right casting applied to avoid this issue).
+        #
+        # Why don't we just do the same casting for pve_ptep[] you ask? Well not
+        # for a lack of trying, that's for sure. If you can figure out how to
+        # cast that array correctly, then be my guest.
+        if ptep & iommu_table_flag:
+            pte_str = ' (IOMMU table), entry'
+
+            ptd = GetPtDesc(KVToPhysARM(ptep))
+            iommu = dereference(ptd.iommu)
+        else:
+            # Instead of dumping the PTE (since we don't have that), dump the
+            # descriptor object used by the IOMMU state (t8020dart/nvme_ppl/etc).
+            #
+            # This works because later on when the "ptep" is dereferenced as a
+            # PTE pointer (uint64_t pointer), the descriptor pointer will be
+            # dumped as that's the first 64-bit value in the IOMMU state object.
+            pte_str = ' (IOMMU state), descriptor'
+            ptep = ptep | iommu_table_flag
+            iommu = dereference(kern.GetValueFromAddress(ptep, 'ppl_iommu_state *'))
+
+        # For IOMMU mappings, dump who owns the mapping as the extra string.
+        extra_str = 'Mapped by {:s}'.format(dereference(iommu.desc).name)
+        if unsigned(iommu.name) is not 0:
+            extra_str += '/{:s}'.format(iommu.name)
+        extra_str += ' (iommu state: {:x})'.format(addressof(iommu))
+    else:
+        # The mapping is a CPU Mapping
+        pte_str += ', entry'
+        ptd = GetPtDesc(KVToPhysARM(ptep))
+        if ptd.pmap == kern.globals.kernel_pmap:
+            extra_str = "Mapped by kernel task (kernel_pmap: {:#x})".format(ptd.pmap)
+        elif verbose_level >= vDETAIL:
+            task = TaskForPmapHelper(ptd.pmap)
+            extra_str = "Mapped by user task (pmap: {:#x}, task: {:s})".format(ptd.pmap, "{:#x}".format(task) if task is not None else "<unknown>")
+    try:
+        print "{:s}PTEP {:#x}{:s}: {:#x}".format(pve_str, ptep, pte_str, dereference(kern.GetValueFromAddress(ptep, 'pt_entry_t *')))
+    except:
+        print "{:s}PTEP {:#x}{:s}: <unavailable>".format(pve_str, ptep, pte_str)
+
+    if verbose_level >= vDETAIL:
+        print "    |-- {:s}".format(extra_str)
+
+def PVWalkARM(pai, verbose_level = vHUMAN):
+    """ Walk a physical-to-virtual reverse mapping list maintained by the arm pmap.
+
+        pai: physical address index (PAI) corresponding to the pv_head_table
+             entry to walk.
+        verbose_level: Set to vSCRIPT or higher to print extra info around the
+                       the pv_head_table/pp_attr_table flags and to dump the
+                       pt_desc_t object if the type is a PTD.
+    """
+    # LLDB will automatically try to make pointer values dereferencable by
+    # setting the upper bits if they aren't set. We need to parse the flags
+    # stored in the upper bits later, so cast the pv_head_table to an array of
+    # integers to get around this "feature". We'll add the upper bits back
+    # manually before deref'ing anything.
+    pv_head_table = cast(kern.GetGlobalVariable('pv_head_table'), "uintptr_t*")
+    pvh_raw = unsigned(pv_head_table[pai])
+    pvh = pvh_raw
+    pvh_type = pvh & 0x3
+
+    print "PVH raw value: {:#x}".format(pvh_raw)
+    if kern.arch.startswith('arm64'):
+        pvh = pvh | PVH_HIGH_FLAGS_ARM64
+    else:
         pvh = pvh | PVH_HIGH_FLAGS_ARM32
+
     if pvh_type == 0:
         print "PVH type: NULL"
-        return
     elif pvh_type == 3:
         print "PVH type: page-table descriptor ({:#x})".format(pvh & ~0x3)
-        return
     elif pvh_type == 2:
-        ptep = pvh & ~0x3
-        pte_str = ''
         print "PVH type: single PTE"
-        if ptep & iommu_flag:
-            ptep = ptep & ~iommu_flag
-            if ptep & iommu_table_flag:
-                pte_str = ' (IOMMU table), entry'
-            else:
-                pte_str = ' (IOMMU state), descriptor'
-                ptep = ptep | iommu_table_flag
-        print "PTE {:#x}{:s}: {:#x}".format(ptep, pte_str, dereference(kern.GetValueFromAddress(ptep, 'pt_entry_t *')))
+        PVDumpPTE(None, pvh, verbose_level)
     elif pvh_type == 1:
         pvep = pvh & ~0x3
         print "PVH type: PTE list"
+        pve_ptep_idx = 0
         while pvep != 0:
             pve = kern.GetValueFromAddress(pvep, "pv_entry_t *")
-            if unsigned(pve.pve_next) & 0x1:
-                pve_str = ' (alt acct) '
-            else:
-                pve_str = ''
-            current_pvep = pvep
-            pvep = unsigned(pve.pve_next) & ~0x1
-            ptep = unsigned(pve.pve_ptep) & ~0x3
-            if ptep & iommu_flag:
-                ptep = ptep & ~iommu_flag
-                if ptep & iommu_table_flag:
-                    pve_str = ' (IOMMU table), entry'
-                else:
-                    pve_str = ' (IOMMU state), descriptor'
-                    ptep = ptep | iommu_table_flag
-            try:
-                print "PVE {:#x}, PTE {:#x}{:s}: {:#x}".format(current_pvep, ptep, pve_str, dereference(kern.GetValueFromAddress(ptep, 'pt_entry_t *')))
-            except:
-                print "PVE {:#x}, PTE {:#x}{:s}: <unavailable>".format(current_pvep, ptep, pve_str)
+
+            if pve.pve_ptep[pve_ptep_idx] != 0:
+                PVDumpPTE(pvep, pve.pve_ptep[pve_ptep_idx], verbose_level)
+
+            pve_ptep_idx += 1
+            if pve_ptep_idx == 2:
+                pve_ptep_idx = 0
+                pvep = unsigned(pve.pve_next)
+
+    if verbose_level >= vDETAIL:
+        if (pvh_type == 1) or (pvh_type == 2):
+            # Dump pv_head_table flags when there's a valid mapping.
+            pvh_flags = []
+
+            if pvh_raw & (1 << 62):
+                pvh_flags.append("CPU")
+            if pvh_raw & (1 << 60):
+                pvh_flags.append("EXEC")
+            if pvh_raw & (1 << 59):
+                pvh_flags.append("LOCKDOWN")
+            if pvh_raw & (1 << 58):
+                pvh_flags.append("HASHED")
+            if kern.arch.startswith('arm64') and pvh_raw & (1 << 61):
+                pvh_flags.append("LOCK")
+            elif kern.arch == 'arm' and pvh_raw & (1 << 31):
+                pvh_flags.append("LOCK")
+
+            print "PVH Flags: {}".format(pvh_flags)
+
+        # Always dump pp_attr_table flags (these can be updated even if there aren't mappings).
+        ppattr = unsigned(kern.globals.pp_attr_table[pai])
+        print "PPATTR raw value: {:#x}".format(ppattr)
+
+        ppattr_flags = ["WIMG ({:#x})".format(ppattr & 0x3F)]
+        if ppattr & 0x40:
+            ppattr_flags.append("REFERENCED")
+        if ppattr & 0x80:
+            ppattr_flags.append("MODIFIED")
+        if ppattr & 0x100:
+            ppattr_flags.append("INTERNAL")
+        if ppattr & 0x200:
+            ppattr_flags.append("REUSABLE")
+        if ppattr & 0x400:
+            ppattr_flags.append("ALTACCT")
+        if ppattr & 0x800:
+            ppattr_flags.append("NOENCRYPT")
+        if ppattr & 0x1000:
+            ppattr_flags.append("REFFAULT")
+        if ppattr & 0x2000:
+            ppattr_flags.append("MODFAULT")
+        if ppattr & 0x4000:
+            ppattr_flags.append("MONITOR")
+        if ppattr & 0x8000:
+            ppattr_flags.append("NO_MONITOR")
+
+        print "PPATTR Flags: {}".format(ppattr_flags)
+
+        if pvh_type == 3:
+            def RunLldbCmdHelper(command):
+                """Helper for dumping an LLDB command right before executing it
+                and printing the results.
+                command: The LLDB command (as a string) to run.
+
+                Example input: "p/x kernel_pmap".
+                """
+                print "\nExecuting: {:s}\n{:s}".format(command, lldb_run_command(command))
+            # Dump the page table descriptor object
+            ptd = kern.GetValueFromAddress(pvh & ~0x3, 'pt_desc_t *')
+            RunLldbCmdHelper("p/x *(pt_desc_t*)" + hex(ptd))
+
+            # Depending on the system, more than one ptd_info can be associated
+            # with a single PTD. Only dump the first PTD info and assume the
+            # user knows to dump the rest if they're on one of those systems.
+            RunLldbCmdHelper("p/x ((pt_desc_t*)" + hex(ptd) + ")->ptd_info[0]")
 
 @lldb_command('pv_walk')
 def PVWalk(cmd_args=None):
-    """ Show mappings for <physical_address> tracked in the PV list.
-        Syntax: (lldb) pv_walk <physical_address>
+    """ Show mappings for <physical_address | PAI> tracked in the PV list.
+        Syntax: (lldb) pv_walk <physical_address | PAI> [-vv]
+
+        Extra verbosity will pretty print the pv_head_table/pp_attr_table flags
+        as well as dump the page table descriptor (PTD) struct if the entry is a
+        PTD.
     """
     if cmd_args == None or len(cmd_args) < 1:
         raise ArgumentError("Too few arguments to pv_walk.")
     if not kern.arch.startswith('arm'):
         raise NotImplementedError("pv_walk does not support {0}".format(kern.arch))
-    PVWalkARM(kern.GetValueFromAddress(cmd_args[0], 'unsigned long'))
+
+    pa = kern.GetValueFromAddress(cmd_args[0], 'unsigned long')
+
+    # If the input is already a PAI, this function will return the input unchanged.
+    # This function also ensures that the physical address is kernel-managed.
+    pai = ConvertPhysAddrToPai(pa)
+
+    PVWalkARM(pai, config['verbosity'])
 
 @lldb_command('kvtophys')
 def KVToPhys(cmd_args=None):
@@ -1100,9 +1267,29 @@ def ShowPTEARM(pte, page_size, stage2 = False):
         pte: kernel virtual address of the PTE.  Should be L3 PTE.  May also work with L2 TTEs for certain devices.
     """
     ptd = GetPtDesc(KVToPhysARM(pte))
-    print "descriptor: {:#x}".format(ptd)
-    print "pmap: {:#x}".format(ptd.pmap)
     pt_index = (pte % kern.globals.page_size) / page_size
+    refcnt = ptd.ptd_info[pt_index].refcnt
+    wiredcnt = ptd.ptd_info[pt_index].wiredcnt
+    print "descriptor: {:#x} (refcnt: {:#x}, wiredcnt: {:#x})".format(ptd, refcnt, wiredcnt)
+
+    # PTDs used to describe IOMMU pages always have a refcnt of 0x8000/0x8001.
+    is_iommu_pte = (refcnt & 0x8000) == 0x8000
+
+    # The pmap/iommu field is a union, so only print the correct one.
+    if is_iommu_pte:
+        iommu_desc_name = '{:s}'.format(dereference(dereference(ptd.iommu).desc).name)
+        if unsigned(dereference(ptd.iommu).name) is not 0:
+            iommu_desc_name += '/{:s}'.format(dereference(ptd.iommu).name)
+
+        print "iommu state: {:#x} ({:s})".format(ptd.iommu, iommu_desc_name)
+    else:
+        if ptd.pmap == kern.globals.kernel_pmap:
+            pmap_str = "(kernel_pmap)"
+        else:
+            task = TaskForPmapHelper(ptd.pmap)
+            pmap_str = "(User Task: {:s})".format("{:#x}".format(task) if task is not None else "<unknown>")
+        print "pmap: {:#x} {:s}".format(ptd.pmap, pmap_str)
+
     pte_pgoff = pte % page_size
     if kern.arch.startswith('arm64'):
         pte_pgoff = pte_pgoff / 8
@@ -1116,12 +1303,13 @@ def ShowPTEARM(pte, page_size, stage2 = False):
     else:
         level = 3
         granule = page_size
-    print "maps {}: {:#x}".format("IPA" if stage2 else "VA", long(unsigned(ptd.ptd_info[pt_index].va)) + (pte_pgoff * granule))
+    print "maps {}: {:#x}".format("IPA" if stage2 else "VA", long(unsigned(ptd.va[pt_index])) + (pte_pgoff * granule))
     pteval = long(unsigned(dereference(kern.GetValueFromAddress(unsigned(pte), 'pt_entry_t *'))))
     print "value: {:#x}".format(pteval)
     if kern.arch.startswith('arm64'):
         print "level: {:d}".format(level)
-        PmapDecodeTTEARM64(pteval, level, stage2)
+        PmapDecodeTTEARM64(pteval, level, stage2, is_iommu_pte)
+
     elif kern.arch == 'arm':
         PmapDecodeTTEARM(pteval, 2, vSCRIPT)
 
@@ -1378,10 +1566,16 @@ def checkPVList(pmap, level, type, tte, paddr, va, granule):
     elif pvh_type == 1:
         pvep = pvh & ~0x3
         tte_match = False
+        pve_ptep_idx = 0
         while pvep != 0:
             pve = kern.GetValueFromAddress(pvep, "pv_entry_t *")
-            pvep = unsigned(pve.pve_next) & ~0x1
-            ptep = unsigned(pve.pve_ptep) & ~0x3
+            ptep = unsigned(pve.pve_ptep[pve_ptep_idx]) & ~0x3
+            pve_ptep_idx += 1
+            if pve_ptep_idx == 2:
+                pve_ptep_idx = 0
+                pvep = unsigned(pve.pve_next)
+            if ptep == 0:
+                continue
             if tte is not None and ptep == unsigned(tte):
                 tte_match = True
             try:
@@ -1447,3 +1641,84 @@ def PmapsForLedger(cmd_args=None):
         if pmap.ledger == ledger:
             print "pmap: {:#x}".format(pmap)
 
+
+def IsValidPai(pai):
+    """ Given an unsigned value, detect whether that value is a valid physical
+        address index (PAI). It does this by first computing the last possible
+        PAI and comparing the input to that.
+
+        All contemporary SoCs reserve the bottom part of the address space, so
+        there shouldn't be any valid physical addresses between zero and the
+        last PAI either.
+    """
+    page_size = unsigned(kern.globals.page_size)
+    vm_first_phys = unsigned(kern.globals.vm_first_phys)
+    vm_last_phys = unsigned(kern.globals.vm_last_phys)
+
+    last_pai = (vm_last_phys - vm_first_phys) / page_size
+    if (pai < 0) or (pai >= last_pai):
+        return False
+
+    return True
+
+def ConvertPaiToPhysAddr(pai):
+    """ Convert the given Physical Address Index (PAI) into a physical address.
+
+        If the input isn't a valid PAI (it's most likely already a physical
+        address), then just return back the input unchanged.
+    """
+    pa = pai
+
+    # If the value is a valid PAI, then convert it into a physical address.
+    if IsValidPai(pai):
+        pa = (pai * unsigned(kern.globals.page_size)) + unsigned(kern.globals.vm_first_phys)
+
+    return pa
+
+def ConvertPhysAddrToPai(pa):
+    """ Convert the given physical address into a Physical Address Index (PAI).
+
+        If the input is already a valid PAI, then just return back the input
+        unchanged.
+    """
+    vm_first_phys = unsigned(kern.globals.vm_first_phys)
+    vm_last_phys = unsigned(kern.globals.vm_last_phys)
+    pai = pa
+
+    if not IsValidPai(pa) and (pa < vm_first_phys or pa >= vm_last_phys):
+        raise ArgumentError("{:#x} is neither a valid PAI nor a kernel-managed address: [{:#x}, {:#x})".format(pa, vm_first_phys, vm_last_phys))
+    elif not IsValidPai(pa):
+        # If the value isn't already a valid PAI, then convert it into one.
+        pai = (pa - vm_first_phys) / unsigned(kern.globals.page_size)
+
+    return pai
+
+@lldb_command('pmappaindex')
+def PmapPaIndex(cmd_args=None):
+    """ Display both a physical address and physical address index (PAI) when
+        provided with only one of those values.
+
+        Syntax: (lldb) pmappaindex <physical address | PAI>
+
+        NOTE: This macro will throw an exception if the input isn't a valid PAI
+              and is also not a kernel-managed physical address.
+    """
+    if (cmd_args == None) or (len(cmd_args) < 1):
+        raise ArgumentError("Too few arguments to pmappaindex.")
+
+    if not kern.arch.startswith('arm'):
+        raise NotImplementedError("pmappaindex is only supported on ARM devices.")
+
+    value = kern.GetValueFromAddress(cmd_args[0], 'unsigned long')
+    pai = value
+    phys_addr = value
+
+    if IsValidPai(value):
+        # Input is a PAI, calculate the physical address.
+        phys_addr = ConvertPaiToPhysAddr(value)
+    else:
+        # Input is a physical address, calculate the PAI
+        pai = ConvertPhysAddrToPai(value)
+
+    print "Physical Address: {:#x}".format(phys_addr)
+    print "PAI: {:d}".format(pai)

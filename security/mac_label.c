@@ -47,9 +47,18 @@ mac_labelzone_alloc(int flags)
 
 	static_assert(MAC_NOWAIT == Z_NOWAIT);
 	l = zalloc_flags(zone_label, zflags);
-	if (l) {
-		l->l_flags = MAC_FLAG_INITIALIZED;
+	if (l == NULL) {
+		return NULL;
 	}
+
+	l->l_flags = MAC_FLAG_INITIALIZED;
+
+	/* l_ptr is protected with authenticates-null-values, so we have to manually update
+	 * each slot and can't rely on zalloc's bzero */
+	for (int i = 0; i < MAC_MAX_SLOTS; i++) {
+		l->l_perpolicy[i].l_ptr = NULL;
+	}
+
 	return l;
 }
 
@@ -57,11 +66,11 @@ void
 mac_labelzone_free(struct label *l)
 {
 	if (l == NULL) {
-		panic("Free of NULL MAC label\n");
+		panic("Free of NULL MAC label");
 	}
 
 	if ((l->l_flags & MAC_FLAG_INITIALIZED) == 0) {
-		panic("Free of uninitialized label\n");
+		panic("Free of uninitialized label");
 	}
 	bzero(l, sizeof(struct label));
 	zfree(zone_label, l);

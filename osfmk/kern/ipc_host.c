@@ -81,18 +81,27 @@
 #endif
 
 /*
- * Forward declarations
- */
-
-boolean_t
-ref_pset_port_locked(
-	ipc_port_t port, boolean_t matchn, processor_set_t *ppset);
-
-/*
  *	ipc_host_init: set up various things.
  */
 
 extern lck_grp_t                host_notify_lock_grp;
+
+IPC_KOBJECT_DEFINE(IKOT_HOST,
+    .iko_op_stable    = true,
+    .iko_op_permanent = true);
+IPC_KOBJECT_DEFINE(IKOT_HOST_PRIV,
+    .iko_op_stable    = true,
+    .iko_op_permanent = true);
+
+IPC_KOBJECT_DEFINE(IKOT_PROCESSOR,
+    .iko_op_stable    = true,
+    .iko_op_permanent = true);
+IPC_KOBJECT_DEFINE(IKOT_PSET,
+    .iko_op_stable    = true,
+    .iko_op_permanent = true);
+IPC_KOBJECT_DEFINE(IKOT_PSET_NAME,
+    .iko_op_stable    = true,
+    .iko_op_permanent = true);
 
 void
 ipc_host_init(void)
@@ -105,10 +114,6 @@ ipc_host_init(void)
 	/*
 	 *	Allocate and set up the two host ports.
 	 */
-	port = ipc_kobject_alloc_port((ipc_kobject_t) &realhost, IKOT_HOST_SECURITY,
-	    IPC_KOBJECT_ALLOC_MAKE_SEND);
-	kernel_set_special_port(&realhost, HOST_SECURITY_PORT, port);
-
 	port = ipc_kobject_alloc_port((ipc_kobject_t) &realhost, IKOT_HOST,
 	    IPC_KOBJECT_ALLOC_MAKE_SEND);
 	kernel_set_special_port(&realhost, HOST_PORT, port);
@@ -136,13 +141,11 @@ ipc_host_init(void)
 	 *	Set up ipc for default processor set.
 	 */
 	ipc_pset_init(&pset0);
-	ipc_pset_enable(&pset0);
 
 	/*
 	 *	And for master processor
 	 */
 	ipc_processor_init(master_processor);
-	ipc_processor_enable(master_processor);
 }
 
 /*
@@ -181,28 +184,8 @@ void
 ipc_processor_init(
 	processor_t     processor)
 {
-	ipc_port_t      port;
-
-	port = ipc_port_alloc_kernel();
-	if (port == IP_NULL) {
-		panic("ipc_processor_init");
-	}
-	processor->processor_self = port;
-}
-
-/*
- *	ipc_processor_enable:
- *
- *	Enable ipc control of processor by setting port object.
- */
-void
-ipc_processor_enable(
-	processor_t     processor)
-{
-	ipc_port_t      myport;
-
-	myport = processor->processor_self;
-	ipc_kobject_set(myport, (ipc_kobject_t) processor, IKOT_PROCESSOR);
+	processor->processor_self = ipc_kobject_alloc_port(processor,
+	    IKOT_PROCESSOR, IPC_KOBJECT_ALLOC_NONE);
 }
 
 /*
@@ -215,32 +198,10 @@ void
 ipc_pset_init(
 	processor_set_t         pset)
 {
-	ipc_port_t      port;
-
-	port = ipc_port_alloc_kernel();
-	if (port == IP_NULL) {
-		panic("ipc_pset_init");
-	}
-	pset->pset_self = port;
-
-	port = ipc_port_alloc_kernel();
-	if (port == IP_NULL) {
-		panic("ipc_pset_init");
-	}
-	pset->pset_name_self = port;
-}
-
-/*
- *	ipc_pset_enable:
- *
- *	Enable ipc access to a processor set.
- */
-void
-ipc_pset_enable(
-	processor_set_t         pset)
-{
-	ipc_kobject_set(pset->pset_self, (ipc_kobject_t) pset, IKOT_PSET);
-	ipc_kobject_set(pset->pset_name_self, (ipc_kobject_t) pset, IKOT_PSET_NAME);
+	pset->pset_self = ipc_kobject_alloc_port(pset,
+	    IKOT_PSET, IPC_KOBJECT_ALLOC_NONE);
+	pset->pset_name_self = ipc_kobject_alloc_port(pset,
+	    IKOT_PSET_NAME, IPC_KOBJECT_ALLOC_NONE);
 }
 
 /*
@@ -276,12 +237,15 @@ convert_port_to_host(
 	ipc_port_t      port)
 {
 	host_t host = HOST_NULL;
+	ipc_kobject_type_t type;
 
 	if (IP_VALID(port)) {
-		if (ip_kotype(port) == IKOT_HOST ||
-		    ip_kotype(port) == IKOT_HOST_PRIV) {
-			host = (host_t) ip_get_kobject(port);
-			require_ip_active(port);
+		type = ip_kotype(port);
+		if (type == IKOT_HOST || type == IKOT_HOST_PRIV) {
+			host = (host_t)ipc_kobject_get_stable(port, type);
+			if (host && host != &realhost) {
+				panic("unexpected host object: %p", host);
+			}
 		}
 	}
 	return host;
@@ -302,13 +266,16 @@ convert_port_to_host_priv(
 {
 	host_t host = HOST_NULL;
 
+	/* reject translation if itk_host is not host_priv */
+	if (port != current_task()->itk_host) {
+		return HOST_NULL;
+	}
+
 	if (IP_VALID(port)) {
-		ip_lock(port);
-		if (ip_active(port) &&
-		    (ip_kotype(port) == IKOT_HOST_PRIV)) {
-			host = (host_t) ip_get_kobject(port);
+		host = ipc_kobject_get_stable(port, IKOT_HOST_PRIV);
+		if (host && host != &realhost) {
+			panic("unexpected host object: %p", host);
 		}
-		ip_unlock(port);
 	}
 
 	return host;
@@ -331,12 +298,7 @@ convert_port_to_processor(
 	processor_t processor = PROCESSOR_NULL;
 
 	if (IP_VALID(port)) {
-		ip_lock(port);
-		if (ip_active(port) &&
-		    (ip_kotype(port) == IKOT_PROCESSOR)) {
-			processor = (processor_t) ip_get_kobject(port);
-		}
-		ip_unlock(port);
+		processor = ipc_kobject_get_stable(port, IKOT_PROCESSOR);
 	}
 
 	return processor;
@@ -346,7 +308,7 @@ convert_port_to_processor(
  *	Routine:	convert_port_to_pset
  *	Purpose:
  *		Convert from a port to a pset.
- *		Doesn't consume the port ref; produces a pset ref,
+ *		Doesn't consume the port ref
  *		which may be null.
  *	Conditions:
  *		Nothing locked.
@@ -356,15 +318,12 @@ processor_set_t
 convert_port_to_pset(
 	ipc_port_t      port)
 {
-	boolean_t r;
 	processor_set_t pset = PROCESSOR_SET_NULL;
 
-	r = FALSE;
-	while (!r && IP_VALID(port)) {
-		ip_lock(port);
-		r = ref_pset_port_locked(port, FALSE, &pset);
-		/* port unlocked */
+	if (IP_VALID(port)) {
+		pset = ipc_kobject_get_stable(port, IKOT_PSET);
 	}
+
 	return pset;
 }
 
@@ -372,7 +331,7 @@ convert_port_to_pset(
  *	Routine:	convert_port_to_pset_name
  *	Purpose:
  *		Convert from a port to a pset.
- *		Doesn't consume the port ref; produces a pset ref,
+ *		Doesn't consume the port ref
  *		which may be null.
  *	Conditions:
  *		Nothing locked.
@@ -382,34 +341,16 @@ processor_set_name_t
 convert_port_to_pset_name(
 	ipc_port_t      port)
 {
-	boolean_t r;
 	processor_set_t pset = PROCESSOR_SET_NULL;
+	ipc_kobject_type_t type;
 
-	r = FALSE;
-	while (!r && IP_VALID(port)) {
-		ip_lock(port);
-		r = ref_pset_port_locked(port, TRUE, &pset);
-		/* port unlocked */
+	if (IP_VALID(port)) {
+		type = ip_kotype(port);
+		if (type == IKOT_PSET || type == IKOT_PSET_NAME) {
+			pset = ipc_kobject_get_stable(port, type);
+		}
 	}
 	return pset;
-}
-
-boolean_t
-ref_pset_port_locked(ipc_port_t port, boolean_t matchn, processor_set_t *ppset)
-{
-	processor_set_t pset;
-
-	pset = PROCESSOR_SET_NULL;
-	if (ip_active(port) &&
-	    ((ip_kotype(port) == IKOT_PSET) ||
-	    (matchn && (ip_kotype(port) == IKOT_PSET_NAME)))) {
-		pset = (processor_set_t) ip_get_kobject(port);
-	}
-
-	*ppset = pset;
-	ip_unlock(port);
-
-	return TRUE;
 }
 
 /*
@@ -500,33 +441,6 @@ convert_pset_name_to_port(
 }
 
 /*
- *	Routine:	convert_port_to_host_security
- *	Purpose:
- *		Convert from a port to a host security.
- *		Doesn't consume the port ref; the port produced may be null.
- *	Conditions:
- *		Nothing locked.
- */
-
-host_t
-convert_port_to_host_security(
-	ipc_port_t port)
-{
-	host_t host = HOST_NULL;
-
-	if (IP_VALID(port)) {
-		ip_lock(port);
-		if (ip_active(port) &&
-		    (ip_kotype(port) == IKOT_HOST_SECURITY)) {
-			host = (host_t) ip_get_kobject(port);
-		}
-		ip_unlock(port);
-	}
-
-	return host;
-}
-
-/*
  *	Routine:	host_set_exception_ports [kernel call]
  *	Purpose:
  *			Sets the host exception port, flavor and
@@ -571,6 +485,7 @@ host_set_exception_ports(
 		case EXCEPTION_DEFAULT:
 		case EXCEPTION_STATE:
 		case EXCEPTION_STATE_IDENTITY:
+		case EXCEPTION_IDENTITY_PROTECTED:
 			break;
 		default:
 			return KERN_INVALID_ARGUMENT;
@@ -583,6 +498,11 @@ host_set_exception_ports(
 	 * osfmk/mach/ARCHITECTURE/thread_status.h
 	 */
 	if (new_flavor != 0 && !VALID_THREAD_STATE_FLAVOR(new_flavor)) {
+		return KERN_INVALID_ARGUMENT;
+	}
+
+	if ((new_behavior & ~MACH_EXCEPTION_MASK) == EXCEPTION_IDENTITY_PROTECTED
+	    && !(new_behavior & MACH_EXCEPTION_CODES)) {
 		return KERN_INVALID_ARGUMENT;
 	}
 
@@ -601,8 +521,6 @@ host_set_exception_ports(
 		}
 	}
 #endif
-
-	assert(host_priv == &realhost);
 
 	host_lock(host_priv);
 
@@ -696,8 +614,6 @@ host_get_exception_ports(
 		return KERN_INVALID_ARGUMENT;
 	}
 
-	assert(host_priv == &realhost);
-
 	host_lock(host_priv);
 
 	count = 0;
@@ -716,16 +632,13 @@ host_get_exception_ports(
 					break;
 				}
 			}/* for */
-			if (j == count) {
+			if (j == count && count < *CountCnt) {
 				masks[j] = (1 << i);
 				ports[j] =
 				    ipc_port_copy_send(host_priv->exc_actions[i].port);
 				behaviors[j] = host_priv->exc_actions[i].behavior;
 				flavors[j] = host_priv->exc_actions[i].flavor;
 				count++;
-				if (count > *CountCnt) {
-					break;
-				}
 			}
 		}
 	}/* for */
@@ -767,10 +680,11 @@ host_swap_exception_ports(
 	}
 
 	if (IP_VALID(new_port)) {
-		switch (new_behavior) {
+		switch (new_behavior & ~MACH_EXCEPTION_MASK) {
 		case EXCEPTION_DEFAULT:
 		case EXCEPTION_STATE:
 		case EXCEPTION_STATE_IDENTITY:
+		case EXCEPTION_IDENTITY_PROTECTED:
 			break;
 		default:
 			return KERN_INVALID_ARGUMENT;
@@ -778,6 +692,11 @@ host_swap_exception_ports(
 	}
 
 	if (new_flavor != 0 && !VALID_THREAD_STATE_FLAVOR(new_flavor)) {
+		return KERN_INVALID_ARGUMENT;
+	}
+
+	if ((new_behavior & ~MACH_EXCEPTION_MASK) == EXCEPTION_IDENTITY_PROTECTED
+	    && !(new_behavior & MACH_EXCEPTION_CODES)) {
 		return KERN_INVALID_ARGUMENT;
 	}
 

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2018 Apple Inc. All rights reserved.
+ * Copyright (c) 2011-2020 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -51,11 +51,10 @@ extern "C" {
 #include <libkern/libkern.h>
 
 /* flags for pktsched_setup */
-#define PKTSCHEDF_QALG_SFB      0x01    /* use SFB */
-#define PKTSCHEDF_QALG_ECN      0x02    /* enable ECN */
-#define PKTSCHEDF_QALG_FLOWCTL  0x04    /* enable flow control advisories */
-#define PKTSCHEDF_QALG_DELAYBASED       0x08    /* Delay based queueing */
-#define PKTSCHEDF_QALG_DRIVER_MANAGED   0x10    /* driver managed */
+#define PKTSCHEDF_QALG_ECN      0x01    /* enable ECN */
+#define PKTSCHEDF_QALG_FLOWCTL  0x02    /* enable flow control advisories */
+#define PKTSCHEDF_QALG_DELAYBASED       0x04    /* Delay based queueing */
+#define PKTSCHEDF_QALG_DRIVER_MANAGED   0x08    /* driver managed */
 
 typedef struct _pktsched_pkt_ {
 	classq_pkt_t            __pkt;

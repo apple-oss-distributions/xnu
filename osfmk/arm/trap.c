@@ -126,10 +126,6 @@ sleh_undef(struct arm_saved_state * regs, struct arm_vfpsaved_state * vfp_ss __u
 
 	getCpuDatap()->cpu_stat.undef_ex_cnt++;
 
-	/* Inherit the interrupt masks from previous */
-	if (!(regs->cpsr & PSR_INTMASK)) {
-		ml_set_interrupts_enabled(TRUE);
-	}
 
 #if CONFIG_DTRACE
 	if (tempDTraceTrapHook) {
@@ -140,7 +136,14 @@ sleh_undef(struct arm_saved_state * regs, struct arm_vfpsaved_state * vfp_ss __u
 			goto exit;
 		}
 	}
+#endif /* CONFIG_DTRACE */
 
+	/* Inherit the interrupt masks from previous */
+	if (!(regs->cpsr & PSR_INTMASK)) {
+		ml_set_interrupts_enabled(TRUE);
+	}
+
+#if CONFIG_DTRACE
 	/* Check to see if we've hit a userland probe */
 	if ((regs->cpsr & PSR_MODE_MASK) == PSR_USER_MODE) {
 		if (regs->cpsr & PSR_TF) {
@@ -172,7 +175,6 @@ sleh_undef(struct arm_saved_state * regs, struct arm_vfpsaved_state * vfp_ss __u
 		}
 	}
 #endif /* CONFIG_DTRACE */
-
 
 	if (regs->cpsr & PSR_TF) {
 		unsigned short instr = 0;

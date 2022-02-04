@@ -28,6 +28,7 @@
 
 #include <sys/errno.h>
 
+#include <kern/hvg_hypercall.h>
 #include <mach/mach_types.h>
 #include <mach/vm_attributes.h>
 #include <mach/vm_param.h>
@@ -431,7 +432,7 @@ kdp_map_debug_pagetable_window(void)
 	    &e);
 
 	if (kr != KERN_SUCCESS) {
-		panic("%s: vm_map_find_space failed with %d\n", __FUNCTION__, kr);
+		panic("%s: vm_map_find_space failed with %d", __FUNCTION__, kr);
 	}
 
 	vm_map_unlock(kernel_map);
@@ -465,6 +466,12 @@ kdp_jtag_coredump_init(void)
 void
 kdp_machine_init(void)
 {
+	/*
+	 * If the kernel is running on top of a hypervisor that supports AH#1, it will inform
+	 * the hypervisor of its debugging info.
+	 */
+	hvg_hcall_set_coredump_data();
+
 	if (debug_boot_arg == 0) {
 		return;
 	}

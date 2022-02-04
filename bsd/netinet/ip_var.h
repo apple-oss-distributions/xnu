@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2020 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -69,6 +69,9 @@
 #ifndef _NETINET_IP_VAR_H_
 #define _NETINET_IP_VAR_H_
 #include <sys/appleapiopts.h>
+
+#include <netinet/in.h>
+#include <sys/types.h>
 
 /*
  * Overlay for ip header used by other protocols (tcp, udp).
@@ -272,7 +275,7 @@ struct sockopt;
  * Extra information passed to ip_output when IP_OUTARGS is set.
  *
  * Upon returning an error to the caller, ip_output may indicate through
- * ipoa_retflags any additional information regarding the error.
+ * ipoa_flags any additional information regarding the error.
  */
 struct ip_out_args {
 	unsigned int    ipoa_boundif;   /* boundif interface index */
@@ -286,14 +289,15 @@ struct ip_out_args {
 #define IPOAF_AWDL_UNRESTRICTED 0x00000040      /* can send over
 	                                         *  AWDL_RESTRICTED */
 #define IPOAF_QOSMARKING_ALLOWED        0x00000080      /* policy allows Fastlane DSCP marking */
-#define IPOAF_NO_CONSTRAINED    0x00000100      /* skip IFXF_CONSTRAINED */
-#define IPOAF_REDO_QOSMARKING_POLICY    0x00000200      /* Re-evaluate QOS marking policy */
-	u_int32_t       ipoa_retflags;  /* IPOARF return flags (see below) */
-#define IPOARF_IFDENIED 0x00000001      /* denied access to interface */
+#define IPOAF_NO_CONSTRAINED    0x00000400      /* skip IFXF_CONSTRAINED */
+#define IPOAF_REDO_QOSMARKING_POLICY    0x00002000      /* Re-evaluate QOS marking policy */
+#define IPOAF_R_IFDENIED 0x00004000      /* denied access to interface */
 	int             ipoa_sotc;      /* traffic class for Fastlane DSCP mapping */
 	int             ipoa_netsvctype; /* network service type */
 	int32_t         qos_marking_gencount;
 };
+
+#define IPOAF_RET_MASK (IPOAF_R_IFDENIED)
 
 extern struct ipstat ipstat;
 extern int ip_use_randomid;
@@ -333,8 +337,8 @@ extern void ip_initid(void);
 extern u_int16_t ip_randomid(void);
 extern int ip_fragment(struct mbuf *, struct ifnet *, uint32_t, int);
 
-extern void ip_setsrcifaddr_info(struct mbuf *, uint32_t, struct in_ifaddr *);
-extern void ip_setdstifaddr_info(struct mbuf *, uint32_t, struct in_ifaddr *);
+extern void ip_setsrcifaddr_info(struct mbuf *, uint16_t, struct in_ifaddr *);
+extern void ip_setdstifaddr_info(struct mbuf *, uint16_t, struct in_ifaddr *);
 extern int ip_getsrcifaddr_info(struct mbuf *, uint32_t *, uint32_t *);
 extern int ip_getdstifaddr_info(struct mbuf *, uint32_t *, uint32_t *);
 

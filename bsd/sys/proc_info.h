@@ -145,6 +145,10 @@ struct proc_ipctableinfo {
 	uint32_t               table_free;
 };
 
+struct proc_threadschedinfo {
+	uint64_t               int_time_ns;         /* time spent in interrupt context */
+};
+
 #endif
 
 
@@ -180,6 +184,7 @@ struct proc_ipctableinfo {
 #define PROC_FLAG_SUPPRESSED         0x800000 /* Process is suppressed */
 #define PROC_FLAG_APPLICATION 0x1000000 /* Process is an application */
 #define PROC_FLAG_IOS_APPLICATION PROC_FLAG_APPLICATION /* Process is an application */
+#define PROC_FLAG_ROSETTA 0x2000000 /* Process is running translated under Rosetta */
 #endif
 
 
@@ -679,13 +684,15 @@ struct kqueue_dyninfo {
 };
 
 /* keep in sync with KQ_* in sys/eventvar.h */
-#define PROC_KQUEUE_SELECT      0x01
-#define PROC_KQUEUE_SLEEP       0x02
-#define PROC_KQUEUE_32          0x08
-#define PROC_KQUEUE_64          0x10
-#define PROC_KQUEUE_QOS         0x20
-
+#define PROC_KQUEUE_SELECT      0x0001
+#define PROC_KQUEUE_SLEEP       0x0002
+#define PROC_KQUEUE_32          0x0008
+#define PROC_KQUEUE_64          0x0010
+#define PROC_KQUEUE_QOS         0x0020
 #ifdef PRIVATE
+#define PROC_KQUEUE_WORKQ       0x0040
+#define PROC_KQUEUE_WORKLOOP    0x0080
+
 struct kevent_extinfo {
 	struct kevent_qos_s kqext_kev;
 	uint64_t kqext_sdata;
@@ -834,6 +841,9 @@ struct proc_fileportinfo {
 
 #define PROC_PIDIPCTABLEINFO 32
 #define PROC_PIDIPCTABLEINFO_SIZE (sizeof(struct proc_ipctableinfo))
+
+#define PROC_PIDTHREADSCHEDINFO 33
+#define PROC_PIDTHREADSCHEDINFO_SIZE (sizeof(struct proc_threadschedinfo))
 
 #endif /* PRIVATE */
 /* Flavors for proc_pidfdinfo */

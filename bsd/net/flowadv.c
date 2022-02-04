@@ -96,16 +96,16 @@
 #include <net/flowadv.h>
 
 /* Lock group and attribute for fadv_lock */
-static lck_grp_t        *fadv_lock_grp;
-static lck_grp_attr_t   *fadv_lock_grp_attr;
-decl_lck_mtx_data(static, fadv_lock);
+static LCK_GRP_DECLARE(fadv_lock_grp, "fadv_lock");
+static LCK_MTX_DECLARE(fadv_lock, &fadv_lock_grp);
 
 /* protected by fadv_lock */
-static STAILQ_HEAD(fadv_head, flowadv_fcentry) fadv_list;
+static STAILQ_HEAD(fadv_head, flowadv_fcentry) fadv_list =
+    STAILQ_HEAD_INITIALIZER(fadv_list);
 static thread_t fadv_thread = THREAD_NULL;
 static uint32_t fadv_active;
 
-static unsigned int fadv_size;                  /* size of flowadv_fcentry */
+static const unsigned int fadv_size = sizeof(struct flowadv_fcentry);
 static struct mcache *fadv_cache;               /* mcache for flowadv_fcentry */
 
 #define FADV_CACHE_NAME  "flowadv"              /* cache name */
@@ -116,14 +116,6 @@ static void flowadv_thread_func(void *, wait_result_t);
 void
 flowadv_init(void)
 {
-	STAILQ_INIT(&fadv_list);
-
-	/* Setup lock group and attribute for fadv_lock */
-	fadv_lock_grp_attr = lck_grp_attr_alloc_init();
-	fadv_lock_grp = lck_grp_alloc_init("fadv_lock", fadv_lock_grp_attr);
-	lck_mtx_init(&fadv_lock, fadv_lock_grp, NULL);
-
-	fadv_size = sizeof(struct flowadv_fcentry);
 	fadv_cache = mcache_create(FADV_CACHE_NAME, fadv_size,
 	    sizeof(uint64_t), 0, MCR_SLEEP);
 

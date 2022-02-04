@@ -137,7 +137,7 @@ alternate_debugger_init(void)
 			alt_va = 0;
 		} else {
 			if (alt_pages_size) {
-				alt_pages = (vm_offset_t) kalloc((vm_size_t) alt_pages_size);
+				alt_pages = (vm_offset_t)zalloc_permanent(alt_pages_size, ZALIGN_PTR);
 			}
 		}
 

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2003-2020 Apple Inc. All rights reserved.
+ * Copyright (c) 2003-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -122,6 +122,7 @@
 #include <net/init.h>
 #include <net/net_osdep.h>
 #include <net/net_perf.h>
+#include <net/if_ports_used.h>
 
 #include <netinet/in.h>
 #include <netinet/in_systm.h>
@@ -162,10 +163,8 @@ extern int ipsec_bypass;
 
 struct ip6protosw *ip6_protox[IPPROTO_MAX];
 
-static lck_grp_attr_t   *in6_ifaddr_rwlock_grp_attr;
-static lck_grp_t        *in6_ifaddr_rwlock_grp;
-static lck_attr_t       *in6_ifaddr_rwlock_attr;
-decl_lck_rw_data(, in6_ifaddr_rwlock);
+static LCK_GRP_DECLARE(in6_ifaddr_rwlock_grp, "in6_ifaddr_rwlock");
+LCK_RW_DECLARE(in6_ifaddr_rwlock, &in6_ifaddr_rwlock_grp);
 
 /* Protected by in6_ifaddr_rwlock */
 struct in6_ifaddrhead in6_ifaddrhead;
@@ -185,20 +184,11 @@ u_int32_t in6addr_hashp = 0;                  /* next largest prime */
 
 struct ip6stat ip6stat;
 
-decl_lck_mtx_data(, proxy6_lock);
-decl_lck_mtx_data(static, dad6_mutex_data);
-decl_lck_mtx_data(static, nd6_mutex_data);
-decl_lck_mtx_data(static, prefix6_mutex_data);
-lck_mtx_t               *dad6_mutex = &dad6_mutex_data;
-lck_mtx_t               *nd6_mutex = &nd6_mutex_data;
-lck_mtx_t               *prefix6_mutex = &prefix6_mutex_data;
-#ifdef ENABLE_ADDRSEL
-decl_lck_mtx_data(static, addrsel_mutex_data);
-lck_mtx_t               *addrsel_mutex = &addrsel_mutex_data;
-#endif
-static lck_attr_t       *ip6_mutex_attr;
-static lck_grp_t        *ip6_mutex_grp;
-static lck_grp_attr_t   *ip6_mutex_grp_attr;
+LCK_ATTR_DECLARE(ip6_mutex_attr, 0, 0);
+LCK_GRP_DECLARE(ip6_mutex_grp, "ip6");
+
+LCK_MTX_DECLARE_ATTR(proxy6_lock, &ip6_mutex_grp, &ip6_mutex_attr);
+LCK_MTX_DECLARE_ATTR(nd6_mutex_data, &ip6_mutex_grp, &ip6_mutex_attr);
 
 extern int loopattach_done;
 extern void addrsel_policy_init(void);
@@ -394,7 +384,7 @@ ip6_init(struct ip6protosw *pp, struct domain *dp)
 
 	pr = pffindproto_locked(PF_INET6, IPPROTO_RAW, SOCK_RAW);
 	if (pr == NULL) {
-		panic("%s: Unable to find [PF_INET6,IPPROTO_RAW,SOCK_RAW]\n",
+		panic("%s: Unable to find [PF_INET6,IPPROTO_RAW,SOCK_RAW]",
 		    __func__);
 		/* NOTREACHED */
 	}
@@ -418,29 +408,6 @@ ip6_init(struct ip6protosw *pp, struct domain *dp)
 			}
 		}
 	}
-
-	ip6_mutex_grp_attr  = lck_grp_attr_alloc_init();
-
-	ip6_mutex_grp = lck_grp_alloc_init("ip6", ip6_mutex_grp_attr);
-	ip6_mutex_attr = lck_attr_alloc_init();
-
-	lck_mtx_init(dad6_mutex, ip6_mutex_grp, ip6_mutex_attr);
-	lck_mtx_init(nd6_mutex, ip6_mutex_grp, ip6_mutex_attr);
-	lck_mtx_init(prefix6_mutex, ip6_mutex_grp, ip6_mutex_attr);
-	scope6_init(ip6_mutex_grp, ip6_mutex_attr);
-
-#ifdef ENABLE_ADDRSEL
-	lck_mtx_init(addrsel_mutex, ip6_mutex_grp, ip6_mutex_attr);
-#endif
-
-	lck_mtx_init(&proxy6_lock, ip6_mutex_grp, ip6_mutex_attr);
-
-	in6_ifaddr_rwlock_grp_attr = lck_grp_attr_alloc_init();
-	in6_ifaddr_rwlock_grp = lck_grp_alloc_init("in6_ifaddr_rwlock",
-	    in6_ifaddr_rwlock_grp_attr);
-	in6_ifaddr_rwlock_attr = lck_attr_alloc_init();
-	lck_rw_init(&in6_ifaddr_rwlock, in6_ifaddr_rwlock_grp,
-	    in6_ifaddr_rwlock_attr);
 
 	TAILQ_INIT(&in6_ifaddrhead);
 	in6_ifaddrhashtbl_init();
@@ -506,6 +473,7 @@ ip6_init(struct ip6protosw *pp, struct domain *dp)
 	ip6_desync_factor =
 	    (RandomULong() ^ tv.tv_usec) % MAX_TEMP_DESYNC_FACTOR;
 
+	PE_parse_boot_argn("in6_embedded_scope", &in6_embedded_scope, sizeof(in6_embedded_scope));
 	PE_parse_boot_argn("ip6_checkinterface", &i, sizeof(i));
 	switch (i) {
 	case IP6_CHECKINTERFACE_WEAK_ES:
@@ -534,7 +502,7 @@ ip6_init(struct ip6protosw *pp, struct domain *dp)
 	unguard = domain_unguard_deploy();
 	i = proto_register_input(PF_INET6, ip6_proto_input, NULL, 0);
 	if (i != 0) {
-		panic("%s: failed to register PF_INET6 protocol: %d\n",
+		panic("%s: failed to register PF_INET6 protocol: %d",
 		    __func__, i);
 		/* NOTREACHED */
 	}
@@ -633,19 +601,25 @@ ip6_input_check_interface(struct mbuf *m, struct ip6_hdr *ip6, struct ifnet *ini
 	struct in6_ifaddr *ia6 = NULL;
 	struct in6_addr tmp_dst = ip6->ip6_dst; /* copy to avoid unaligned access */
 	struct in6_ifaddr *best_ia6 = NULL;
+	uint32_t dst_ifscope = IFSCOPE_NONE;
 	ip6_check_if_result_t result = IP6_CHECK_IF_NONE;
 
 	*deliverifp = NULL;
 
+	if (m->m_pkthdr.pkt_flags & PKTF_IFAINFO) {
+		dst_ifscope = m->m_pkthdr.dst_ifindex;
+	} else {
+		dst_ifscope = inifp->if_index;
+	}
 	/*
 	 * Check for exact addresses in the hash bucket.
 	 */
 	lck_rw_lock_shared(&in6_ifaddr_rwlock);
 	TAILQ_FOREACH(ia6, IN6ADDR_HASH(&tmp_dst), ia6_hash) {
 		/*
-		 * TODO: should we accept loopbacl
+		 * TODO: should we accept loopback
 		 */
-		if (IN6_ARE_ADDR_EQUAL(&ia6->ia_addr.sin6_addr, &tmp_dst)) {
+		if (in6_are_addr_equal_scoped(&ia6->ia_addr.sin6_addr, &tmp_dst, ia6->ia_ifp->if_index, dst_ifscope)) {
 			if ((ia6->ia6_flags & (IN6_IFF_NOTREADY | IN6_IFF_CLAT46))) {
 				continue;
 			}
@@ -678,6 +652,7 @@ ip6_input_check_interface(struct mbuf *m, struct ip6_hdr *ip6, struct ifnet *ini
 			result = IP6_CHECK_IF_OURS;
 			*deliverifp = best_ia6->ia_ifp;
 			ip6_setdstifaddr_info(m, 0, best_ia6);
+			ip6_setsrcifaddr_info(m, best_ia6->ia_ifp->if_index, NULL);
 		}
 	}
 	lck_rw_done(&in6_ifaddr_rwlock);
@@ -692,7 +667,9 @@ ip6_input_check_interface(struct mbuf *m, struct ip6_hdr *ip6, struct ifnet *ini
 		dst6->sin6_len = sizeof(struct sockaddr_in6);
 		dst6->sin6_family = AF_INET6;
 		dst6->sin6_addr = ip6->ip6_dst;
-
+		if (!in6_embedded_scope && IN6_IS_SCOPE_EMBED(&ip6->ip6_dst)) {
+			dst6->sin6_scope_id = dst_ifscope;
+		}
 		rtalloc_scoped_ign((struct route *)rin6,
 		    RTF_PRCLONING, IFSCOPE_NONE);
 		if (rin6->ro_rt != NULL) {
@@ -744,6 +721,7 @@ ip6_input_check_interface(struct mbuf *m, struct ip6_hdr *ip6, struct ifnet *ini
 				 * record dst address information into mbuf.
 				 */
 				(void) ip6_setdstifaddr_info(m, 0, ia6);
+				(void) ip6_setsrcifaddr_info(m, ia6->ia_ifp->if_index, NULL);
 			}
 		}
 
@@ -758,6 +736,7 @@ ip6_input_check_interface(struct mbuf *m, struct ip6_hdr *ip6, struct ifnet *ini
 		} else {
 			result = IP6_CHECK_IF_FORWARD;
 			ip6_setdstifaddr_info(m, inifp->if_index, NULL);
+			ip6_setsrcifaddr_info(m, inifp->if_index, NULL);
 		}
 	}
 
@@ -856,7 +835,7 @@ ip6_input(struct mbuf *m)
 #endif /* DUMMYNET */
 
 	/*
-	 * No need to proccess packet twice if we've already seen it.
+	 * No need to process packet twice if we've already seen it.
 	 */
 	inject_ipfref = ipf_get_inject_filter(m);
 	if (inject_ipfref != NULL) {
@@ -866,6 +845,10 @@ ip6_input(struct mbuf *m)
 		goto injectit;
 	} else {
 		seen = 1;
+	}
+
+	if (__improbable(m->m_pkthdr.pkt_flags & PKTF_WAKE_PKT)) {
+		if_ports_used_match_mbuf(inifp, PF_INET6, m);
 	}
 
 	/*
@@ -1051,7 +1034,7 @@ check_with_pf:
 #endif /* !DUMMYNET */
 		if (error != 0 || m == NULL) {
 			if (m != NULL) {
-				panic("%s: unexpected packet %p\n",
+				panic("%s: unexpected packet %p",
 				    __func__, m);
 				/* NOTREACHED */
 			}
@@ -1077,7 +1060,7 @@ check_with_pf:
 		}
 	}
 
-	if (m->m_pkthdr.pkt_flags & PKTF_IFAINFO) {
+	if (m->m_pkthdr.pkt_flags & PKTF_IFAINFO && in6_embedded_scope) {
 		if (IN6_IS_SCOPE_LINKLOCAL(&ip6->ip6_src)) {
 			ip6->ip6_src.s6_addr16[1] =
 			    htons(m->m_pkthdr.src_ifindex);
@@ -1086,7 +1069,7 @@ check_with_pf:
 			ip6->ip6_dst.s6_addr16[1] =
 			    htons(m->m_pkthdr.dst_ifindex);
 		}
-	} else {
+	} else if (in6_embedded_scope) {
 		if (IN6_IS_SCOPE_LINKLOCAL(&ip6->ip6_src)) {
 			ip6->ip6_src.s6_addr16[1] = htons(inifp->if_index);
 		}
@@ -1130,9 +1113,11 @@ check_with_pf:
 			ia6 = in6_ifawithifp(deliverifp, &ip6->ip6_dst);
 			if (ia6 != NULL) {
 				(void) ip6_setdstifaddr_info(m, 0, ia6);
+				(void) ip6_setsrcifaddr_info(m, ia6->ia_ifp->if_index, NULL);
 				IFA_REMREF(&ia6->ia_ifa);
 			} else {
 				(void) ip6_setdstifaddr_info(m, inifp->if_index, NULL);
+				(void) ip6_setsrcifaddr_info(m, inifp->if_index, NULL);
 			}
 		}
 		goto hbhcheck;
@@ -1438,7 +1423,7 @@ void
 ip6_setsrcifaddr_info(struct mbuf *m, uint32_t src_idx, struct in6_ifaddr *ia6)
 {
 	VERIFY(m->m_flags & M_PKTHDR);
-
+	m->m_pkthdr.pkt_ext_flags &= ~PKTF_EXT_OUTPUT_SCOPE;
 	/*
 	 * If the source ifaddr is specified, pick up the information
 	 * from there; otherwise just grab the passed-in ifindex as the
@@ -1463,6 +1448,7 @@ void
 ip6_setdstifaddr_info(struct mbuf *m, uint32_t dst_idx, struct in6_ifaddr *ia6)
 {
 	VERIFY(m->m_flags & M_PKTHDR);
+	m->m_pkthdr.pkt_ext_flags &= ~PKTF_EXT_OUTPUT_SCOPE;
 
 	/*
 	 * If the destination ifaddr is specified, pick up the information
@@ -1522,6 +1508,34 @@ ip6_getdstifaddr_info(struct mbuf *m, uint32_t *dst_idx, uint32_t *ia6f)
 	}
 
 	return 0;
+}
+
+uint32_t
+ip6_input_getsrcifscope(struct mbuf *m)
+{
+	VERIFY(m->m_flags & M_PKTHDR);
+
+	if (m->m_pkthdr.rcvif != NULL) {
+		return m->m_pkthdr.rcvif->if_index;
+	}
+
+	uint32_t src_ifscope = IFSCOPE_NONE;
+	ip6_getsrcifaddr_info(m, &src_ifscope, NULL);
+	return src_ifscope;
+}
+
+uint32_t
+ip6_input_getdstifscope(struct mbuf *m)
+{
+	VERIFY(m->m_flags & M_PKTHDR);
+
+	if (m->m_pkthdr.rcvif != NULL) {
+		return m->m_pkthdr.rcvif->if_index;
+	}
+
+	uint32_t dst_ifscope = IFSCOPE_NONE;
+	ip6_getdstifaddr_info(m, &dst_ifscope, NULL);
+	return dst_ifscope;
 }
 
 /*
@@ -1793,6 +1807,17 @@ ip6_savecontrol_v4(struct inpcb *inp, struct mbuf *m, struct mbuf **mp,
 
 		mp = sbcreatecontrol_mbuf((caddr_t)&tc, sizeof(tc),
 		    SO_TRAFFIC_CLASS, SOL_SOCKET, mp);
+		if (*mp == NULL) {
+			return NULL;
+		}
+	}
+
+	if ((inp->inp_socket->so_flags & SOF_RECV_WAKE_PKT) &&
+	    (m->m_pkthdr.pkt_flags & PKTF_WAKE_PKT)) {
+		int flag = 1;
+
+		mp = sbcreatecontrol_mbuf((caddr_t)&flag, sizeof(flag),
+		    SO_RECV_WAKE_PKT, SOL_SOCKET, mp);
 		if (*mp == NULL) {
 			return NULL;
 		}
@@ -2080,13 +2105,16 @@ ip6_notify_pmtu(struct inpcb *in6p, struct sockaddr_in6 *dst, u_int32_t *mtu)
 	}
 
 	if (!IN6_IS_ADDR_UNSPECIFIED(&in6p->in6p_faddr) &&
-	    !IN6_ARE_ADDR_EQUAL(&in6p->in6p_faddr, &dst->sin6_addr)) {
+	    !in6_are_addr_equal_scoped(&in6p->in6p_faddr, &dst->sin6_addr, in6p->inp_fifscope, dst->sin6_scope_id)) {
 		return;
 	}
 
 	bzero(&mtuctl, sizeof(mtuctl));         /* zero-clear for safety */
 	mtuctl.ip6m_mtu = *mtu;
 	mtuctl.ip6m_addr = *dst;
+	if (!in6_embedded_scope) {
+		mtuctl.ip6m_addr.sin6_scope_id = dst->sin6_scope_id;
+	}
 	if (sa6_recoverscope(&mtuctl.ip6m_addr, TRUE)) {
 		return;
 	}

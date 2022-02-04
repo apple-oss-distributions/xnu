@@ -93,7 +93,6 @@
 #include <dev/random/randomdev.h>
 
 u_int32_t in6_maxmtu = 0;
-extern lck_mtx_t *nd6_mutex;
 
 #if IP6_AUTO_LINKLOCAL
 int ip6_auto_linklocal = IP6_AUTO_LINKLOCAL;
@@ -508,7 +507,7 @@ in6_ifattach_linklocal(struct ifnet *ifp, struct in6_aliasreq *ifra)
 	 * XXX: this change might affect some existing code base...
 	 */
 	bzero(&pr0, sizeof(pr0));
-	lck_mtx_init(&pr0.ndpr_lock, ifa_mtx_grp, ifa_mtx_attr);
+	lck_mtx_init(&pr0.ndpr_lock, &ifa_mtx_grp, &ifa_mtx_attr);
 	pr0.ndpr_ifp = ifp;
 	/* this should be 64 at this moment. */
 	pr0.ndpr_plen = (u_char)in6_mask2len(&ifra->ifra_prefixmask.sin6_addr, NULL);
@@ -538,7 +537,7 @@ in6_ifattach_linklocal(struct ifnet *ifp, struct in6_aliasreq *ifra)
 	if ((pr = nd6_prefix_lookup(&pr0, ND6_PREFIX_EXPIRY_UNSPEC)) == NULL) {
 		if ((error = nd6_prelist_add(&pr0, NULL, &pr, TRUE)) != 0) {
 			IFA_REMREF(&ia->ia_ifa);
-			lck_mtx_destroy(&pr0.ndpr_lock, ifa_mtx_grp);
+			lck_mtx_destroy(&pr0.ndpr_lock, &ifa_mtx_grp);
 			return error;
 		}
 	}
@@ -551,7 +550,7 @@ in6_ifattach_linklocal(struct ifnet *ifp, struct in6_aliasreq *ifra)
 		NDPR_REMREF(pr);
 	}
 
-	lck_mtx_destroy(&pr0.ndpr_lock, ifa_mtx_grp);
+	lck_mtx_destroy(&pr0.ndpr_lock, &ifa_mtx_grp);
 	return 0;
 }
 
@@ -620,7 +619,8 @@ in6_nigroup(
 	struct ifnet *ifp,
 	const char *name,
 	size_t namelen,
-	struct in6_addr *in6)
+	struct in6_addr *in6,
+	uint32_t *ifscopep)
 {
 	const char *p;
 	u_char *q;
@@ -662,7 +662,7 @@ in6_nigroup(
 	in6->s6_addr8[12] = 0xff;
 	/* copy first 3 bytes of prefix into address */
 	bcopy(digest, &in6->s6_addr8[13], 3);
-	if (in6_setscope(in6, ifp, NULL)) {
+	if (in6_setscope(in6, ifp, ifscopep)) {
 		return -1; /* XXX: should not fail */
 	}
 	return 0;
@@ -875,13 +875,18 @@ in6_ifattach_aliasreq(struct ifnet *ifp, struct ifnet *altifp,
 		if (ok && (in6->s6_addr16[0] != htons(0xfe80))) {
 			ok = FALSE;
 		}
+
 		if (ok) {
 			if (sin6->sin6_scope_id == 0 && in6->s6_addr16[1] == 0) {
-				in6->s6_addr16[1] = htons(ifp->if_index);
+				if (in6_embedded_scope) {
+					in6->s6_addr16[1] = htons(ifp->if_index);
+				} else {
+					sin6->sin6_scope_id = ifp->if_index;
+				}
 			} else if (sin6->sin6_scope_id != 0 &&
 			    sin6->sin6_scope_id != ifp->if_index) {
 				ok = FALSE;
-			} else if (in6->s6_addr16[1] != 0 &&
+			} else if (in6_embedded_scope && in6->s6_addr16[1] != 0 &&
 			    ntohs(in6->s6_addr16[1]) != ifp->if_index) {
 				ok = FALSE;
 			}
@@ -896,11 +901,19 @@ in6_ifattach_aliasreq(struct ifnet *ifp, struct ifnet *altifp,
 		ifra.ifra_addr.sin6_family = AF_INET6;
 		ifra.ifra_addr.sin6_len = sizeof(struct sockaddr_in6);
 		ifra.ifra_addr.sin6_addr.s6_addr16[0] = htons(0xfe80);
-		ifra.ifra_addr.sin6_addr.s6_addr16[1] = htons(ifp->if_index);
+		if (in6_embedded_scope) {
+			ifra.ifra_addr.sin6_addr.s6_addr16[1] = htons(ifp->if_index);
+		} else {
+			ifra.ifra_addr.sin6_addr.s6_addr16[1] = 0;
+			ifra.ifra_addr.sin6_scope_id = ifp->if_index;
+		}
 		ifra.ifra_addr.sin6_addr.s6_addr32[1] = 0;
 		if ((ifp->if_flags & IFF_LOOPBACK) != 0) {
 			ifra.ifra_addr.sin6_addr.s6_addr32[2] = 0;
 			ifra.ifra_addr.sin6_addr.s6_addr32[3] = htonl(1);
+			if (!in6_embedded_scope) {
+				ifra.ifra_addr.sin6_scope_id = ifp->if_index;
+			}
 		} else {
 			if (in6_select_iid_from_all_hw(ifp, altifp,
 			    &ifra.ifra_addr.sin6_addr) != 0) {
@@ -911,7 +924,7 @@ in6_ifattach_aliasreq(struct ifnet *ifp, struct ifnet *altifp,
 		}
 	}
 
-	if (in6_setscope(&ifra.ifra_addr.sin6_addr, ifp, NULL)) {
+	if (in6_setscope(&ifra.ifra_addr.sin6_addr, ifp, IN6_NULL_IF_EMBEDDED_SCOPE(&ifra.ifra_addr.sin6_scope_id))) {
 		return EADDRNOTAVAIL;
 	}
 
@@ -983,7 +996,11 @@ in6_ifattach_llcgareq(struct ifnet *ifp, struct in6_cgareq *llcgasr)
 	ifra.ifra_addr.sin6_family = AF_INET6;
 	ifra.ifra_addr.sin6_len = sizeof(struct sockaddr_in6);
 	ifra.ifra_addr.sin6_addr.s6_addr16[0] = htons(0xfe80);
-	ifra.ifra_addr.sin6_addr.s6_addr16[1] = htons(ifp->if_index);
+	if (in6_embedded_scope) {
+		ifra.ifra_addr.sin6_addr.s6_addr16[1] = htons(ifp->if_index);
+	} else {
+		ifra.ifra_addr.sin6_addr.s6_addr16[1] = 0;
+	}
 	ifra.ifra_addr.sin6_addr.s6_addr32[1] = 0;
 	ifra.ifra_flags = IN6_IFF_SECURED;
 
@@ -995,7 +1012,7 @@ in6_ifattach_llcgareq(struct ifnet *ifp, struct in6_cgareq *llcgasr)
 	}
 	in6_cga_node_unlock();
 
-	if (in6_setscope(&ifra.ifra_addr.sin6_addr, ifp, NULL)) {
+	if (in6_setscope(&ifra.ifra_addr.sin6_addr, ifp, IN6_NULL_IF_EMBEDDED_SCOPE(&ifra.ifra_addr.sin6_scope_id))) {
 		return EADDRNOTAVAIL;
 	}
 
@@ -1188,7 +1205,11 @@ in6_ifdetach(struct ifnet *ifp)
 	sin6.sin6_len = sizeof(struct sockaddr_in6);
 	sin6.sin6_family = AF_INET6;
 	sin6.sin6_addr = in6addr_linklocal_allnodes;
-	sin6.sin6_addr.s6_addr16[1] = htons(ifp->if_index);
+	if (in6_embedded_scope) {
+		sin6.sin6_addr.s6_addr16[1] = htons(ifp->if_index);
+	} else {
+		sin6.sin6_scope_id = ifp->if_index;
+	}
 	rt = rtalloc1((struct sockaddr *)&sin6, 0, 0);
 	if (rt != NULL) {
 		RT_LOCK(rt);

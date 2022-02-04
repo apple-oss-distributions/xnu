@@ -42,6 +42,8 @@
 #include <i386/cpu_threads.h>
 #include <i386/rtclock_protos.h>
 #include <i386/cpuid.h>
+#include <i386/lbr.h>
+#include <kern/debug.h>
 #if CONFIG_VMX
 #include <i386/vmx/vmx_cpu.h>
 #endif

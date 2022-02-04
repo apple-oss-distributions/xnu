@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2019 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -357,6 +357,13 @@
 #define SIOCGETROUTERMODE _IOWR('i', 209, struct ifreq)   /* get IPv4 router mode state */
 
 #define SIOCSIFNETWORKID _IOWR('i', 210, struct if_netidreq)   /* set Network Identifier for a given interface */
+
+#define SIOCSIFMARKWAKEPKT _IOWR('i', 211, struct ifreq) /* to mark the next input packet with wake flag */
+
+#define SIOCSIFESTTHROUGHPUT _IOWR('i', 212, struct ifreq) /* set ifru_estimated_throughput */
+#define SIOCSIFRADIODETAILS _IOWR('i', 213, struct ifreq) /* set ifru_radio_details */
+
+#define SIOCSIFLINKQUALITYMETRIC _IOWR('i', 214, struct ifreq) /* set LQM */
 #endif /* PRIVATE */
 
 #endif /* !_SYS_SOCKIO_H_ */

@@ -257,8 +257,8 @@ static u_int64_t        audit_pipe_drops;       /* Global record drop count. */
 static void
 audit_pipe_entry_free(struct audit_pipe_entry *ape)
 {
-	free(ape->ape_record, M_AUDIT_PIPE_ENTRY);
-	free(ape, M_AUDIT_PIPE_ENTRY);
+	kfree_data(ape->ape_record, ape->ape_record_len);
+	kfree_type(struct audit_pipe_entry, ape);
 }
 
 /*
@@ -314,7 +314,7 @@ audit_pipe_preselect_set(struct audit_pipe *ap, au_id_t auid, au_mask_t mask)
 	 * Pessimistically assume that the auid doesn't already have a mask
 	 * set, and allocate.  We will free it if it is unneeded.
 	 */
-	app_new = malloc(sizeof(*app_new), M_AUDIT_PIPE_PRESELECT, M_WAITOK);
+	app_new = kalloc_type(struct audit_pipe_preselect, Z_WAITOK | Z_NOFAIL);
 	AUDIT_PIPE_LOCK(ap);
 	app = audit_pipe_preselect_find(ap, auid);
 	if (app == NULL) {
@@ -325,9 +325,7 @@ audit_pipe_preselect_set(struct audit_pipe *ap, au_id_t auid, au_mask_t mask)
 	}
 	app->app_mask = mask;
 	AUDIT_PIPE_UNLOCK(ap);
-	if (app_new != NULL) {
-		free(app_new, M_AUDIT_PIPE_PRESELECT);
-	}
+	kfree_type(struct audit_pipe_preselect, app_new);
 }
 
 /*
@@ -348,9 +346,7 @@ audit_pipe_preselect_delete(struct audit_pipe *ap, au_id_t auid)
 		error = ENOENT;
 	}
 	AUDIT_PIPE_UNLOCK(ap);
-	if (app != NULL) {
-		free(app, M_AUDIT_PIPE_PRESELECT);
-	}
+	kfree_type(struct audit_pipe_preselect, app);
 	return error;
 }
 
@@ -366,7 +362,7 @@ audit_pipe_preselect_flush_locked(struct audit_pipe *ap)
 
 	while ((app = TAILQ_FIRST(&ap->ap_preselect_list)) != NULL) {
 		TAILQ_REMOVE(&ap->ap_preselect_list, app, app_list);
-		free(app, M_AUDIT_PIPE_PRESELECT);
+		kfree_type(struct audit_pipe_preselect, app);
 	}
 }
 
@@ -471,16 +467,16 @@ audit_pipe_append(struct audit_pipe *ap, void *record, u_int record_len)
 		return;
 	}
 
-	ape = malloc(sizeof(*ape), M_AUDIT_PIPE_ENTRY, M_NOWAIT | M_ZERO);
+	ape = kalloc_type(struct audit_pipe_entry, Z_NOWAIT | Z_ZERO);
 	if (ape == NULL) {
 		ap->ap_drops++;
 		audit_pipe_drops++;
 		return;
 	}
 
-	ape->ape_record = malloc(record_len, M_AUDIT_PIPE_ENTRY, M_NOWAIT);
+	ape->ape_record = kalloc_data(record_len, Z_NOWAIT);
 	if (ape->ape_record == NULL) {
-		free(ape, M_AUDIT_PIPE_ENTRY);
+		kfree_type(struct audit_pipe_entry, ape);
 		ap->ap_drops++;
 		audit_pipe_drops++;
 		return;
@@ -582,11 +578,7 @@ audit_pipe_alloc(void)
 
 	AUDIT_PIPE_LIST_WLOCK_ASSERT();
 
-	ap = malloc(sizeof(*ap), M_AUDIT_PIPE, M_WAITOK | M_ZERO);
-	if (ap == NULL) {
-		return NULL;
-	}
-
+	ap = kalloc_type(struct audit_pipe, Z_WAITOK | Z_ZERO | Z_NOFAIL);
 	ap->ap_qlimit = AUDIT_PIPE_QLIMIT_DEFAULT;
 	TAILQ_INIT(&ap->ap_queue);
 #ifndef  __APPLE__
@@ -663,7 +655,7 @@ audit_pipe_free(struct audit_pipe *ap)
 	knlist_destroy(&ap->ap_selinfo.si_note);
 #endif
 	TAILQ_REMOVE(&audit_pipe_list, ap, ap_list);
-	free(ap, M_AUDIT_PIPE);
+	kfree_type(struct audit_pipe, ap);
 	audit_pipe_count--;
 }
 
@@ -728,7 +720,7 @@ audit_pipe_open(dev_t dev, __unused int flags, __unused int devtype,
 	ap->ap_open = 1;
 	AUDIT_PIPE_LIST_WUNLOCK();
 #ifndef __APPLE__
-	fsetown(td->td_proc->p_pid, &ap->ap_sigio);
+	proc_getpid(fsetown(td->td_proc), &ap->ap_sigio);
 #endif
 	return 0;
 }

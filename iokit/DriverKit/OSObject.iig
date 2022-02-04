@@ -137,6 +137,8 @@ class IIG_SERIALIZABLE OSString;
 class IIG_SERIALIZABLE OSBoolean;
 class IIG_SERIALIZABLE OSDictionary;
 class IIG_SERIALIZABLE OSArray;
+class IIG_SERIALIZABLE OSSet;
+class IIG_SERIALIZABLE OSOrderedSet;
 
 class OSMetaClass;
 class IODispatchQueue;

@@ -293,11 +293,7 @@ IORegistryEntry::init( OSDictionary * dict )
 	}
 
 	if (!reserved) {
-		reserved = IONew(ExpansionData, 1);
-		if (!reserved) {
-			return false;
-		}
-		bzero(reserved, sizeof(ExpansionData));
+		reserved = IOMallocType(ExpansionData);
 		reserved->fLock = IORecursiveLockAlloc();
 		if (!reserved->fLock) {
 			return false;
@@ -360,11 +356,7 @@ IORegistryEntry::init( IORegistryEntry * old,
 	}
 
 	if (!reserved) {
-		reserved = IONew(ExpansionData, 1);
-		if (!reserved) {
-			return false;
-		}
-		bzero(reserved, sizeof(ExpansionData));
+		reserved = IOMallocType(ExpansionData);
 		reserved->fLock = IORecursiveLockAlloc();
 		if (!reserved->fLock) {
 			return false;
@@ -444,7 +436,7 @@ IORegistryEntry::free( void )
 		if (reserved->fLock) {
 			IORecursiveLockFree(reserved->fLock);
 		}
-		IODelete(reserved, ExpansionData, 1);
+		IOFreeType(reserved, ExpansionData);
 	}
 
 	super::free();
@@ -2386,7 +2378,7 @@ IORegistryIterator::enterEntry( const IORegistryPlane * enterPlane )
 	IORegCursor *       prev;
 
 	prev = where;
-	where = (IORegCursor *) IOMalloc( sizeof(IORegCursor));
+	where = IOMallocType(IORegCursor);
 	assert( where);
 
 	if (where) {
@@ -2419,7 +2411,7 @@ IORegistryIterator::exitEntry( void )
 	if (where != &start) {
 		gone = where;
 		where = gone->next;
-		IOFree( gone, sizeof(IORegCursor));
+		IOFreeType(gone, IORegCursor);
 		return true;
 	} else {
 		return false;

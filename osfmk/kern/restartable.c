@@ -71,12 +71,13 @@
 typedef int (*cmpfunc_t)(const void *a, const void *b);
 extern void qsort(void *a, size_t n, size_t es, cmpfunc_t cmp);
 
+#define RR_RANGES_MAX   64
 struct restartable_ranges {
 	queue_chain_t            rr_link;
 	os_refcnt_t              rr_ref;
 	uint32_t                 rr_count;
 	uint32_t                 rr_hash;
-	task_restartable_range_t rr_ranges[];
+	task_restartable_range_t rr_ranges[RR_RANGES_MAX];
 };
 
 #if DEBUG || DEVELOPMENT
@@ -139,6 +140,10 @@ _ranges_validate(task_t task, task_restartable_range_t *ranges, uint32_t count)
 	qsort(ranges, count, sizeof(task_restartable_range_t), _ranges_cmp);
 	uint64_t limit = task_has_64Bit_data(task) ? UINT64_MAX : UINT32_MAX;
 	uint64_t end, recovery;
+
+	if (count == 0) {
+		return KERN_INVALID_ARGUMENT;
+	}
 
 	for (size_t i = 0; i < count; i++) {
 		if (ranges[i].length > TASK_RESTARTABLE_OFFSET_MAX ||
@@ -223,7 +228,7 @@ _restartable_ranges_dispose(struct restartable_ranges *rr, bool hash_remove)
 		remqueue(&rr->rr_link);
 		rr_unlock();
 	}
-	kfree(rr, sizeof(*rr) + rr->rr_count * sizeof(task_restartable_range_t));
+	kfree_type(struct restartable_ranges, rr);
 }
 
 /**
@@ -272,14 +277,12 @@ _restartable_ranges_create(task_t task, task_restartable_range_t *ranges,
 	if (os_add_overflow(base_count, count, &total_count)) {
 		return KERN_INVALID_ARGUMENT;
 	}
-	if (total_count > 1024) {
+	if (total_count > RR_RANGES_MAX) {
 		return KERN_RESOURCE_SHORTAGE;
 	}
 
-	rr = kalloc(sizeof(*rr) + base_size + size);
-	if (rr == NULL) {
-		return KERN_RESOURCE_SHORTAGE;
-	}
+	rr = kalloc_type(struct restartable_ranges,
+	    (zalloc_flags_t) (Z_WAITOK | Z_ZERO | Z_NOFAIL));
 
 	queue_chain_init(rr->rr_link);
 	os_ref_init(&rr->rr_ref, NULL);
@@ -350,10 +353,7 @@ thread_reset_pcs_ast(thread_t thread)
 	 * and can't be mutated outside of this, no lock is required to read this.
 	 */
 	rr = task->restartable_ranges;
-	if (rr) {
-		/* pairs with the barrier in task_restartable_ranges_synchronize() */
-		os_atomic_thread_fence(acquire);
-
+	if (thread->active && rr) {
 		pc = _ranges_lookup(rr, machine_thread_pc(thread));
 
 		if (pc) {
@@ -423,27 +423,43 @@ kern_return_t
 task_restartable_ranges_synchronize(task_t task)
 {
 	thread_t thread;
+	bitmap_t map[BITMAP_LEN(MAX_CPUS)] = { };
+	unsigned long gen;
+	int cpu;
 
 	if (task != current_task()) {
 		return KERN_FAILURE;
 	}
 
-	/* pairs with the barrier in thread_reset_pcs_ast() */
-	os_atomic_thread_fence(release);
+	gen = ast_generation_get();
 
 	task_lock(task);
 
 	if (task->restartable_ranges) {
 		queue_iterate(&task->threads, thread, thread_t, task_threads) {
 			if (thread != current_thread()) {
-				thread_mtx_lock(thread);
-				act_set_ast_reset_pcs(thread);
-				thread_mtx_unlock(thread);
+				cpu = act_set_ast_reset_pcs(thread);
+				if (cpu != -1) {
+					bitmap_set(map, (uint32_t)cpu);
+				}
 			}
 		}
 	}
 
 	task_unlock(task);
+
+	/*
+	 * For any core that was running one of our threads,
+	 * make sure the AST has been acknowledged.
+	 *
+	 * threads that aren't on core can't fail to see the AST
+	 * we set, because act_set_ast_reset_pcs() takes
+	 * the thread_lock() and so does the scheduler.
+	 */
+	for (cpu = bitmap_first(map, MAX_CPUS); cpu >= 0;
+	    cpu = bitmap_next(map, cpu)) {
+		ast_generation_wait(gen, cpu);
+	}
 
 	return KERN_SUCCESS;
 }

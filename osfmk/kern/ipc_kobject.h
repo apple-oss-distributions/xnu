@@ -72,10 +72,13 @@
 #ifdef MACH_KERNEL_PRIVATE
 #include <ipc/ipc_kmsg.h>
 #include <ipc/ipc_port.h>
+#include <kern/startup.h>
 #endif /* MACH_KERNEL_PRIVATE */
 
 #ifndef _KERN_IPC_KOBJECT_H_
 #define _KERN_IPC_KOBJECT_H_
+
+__BEGIN_DECLS
 
 #ifdef KERNEL_PRIVATE
 /*
@@ -87,96 +90,153 @@
 #include <mach/machine/vm_types.h>
 #include <mach/mach_types.h>
 
-typedef natural_t       ipc_kobject_type_t;
+__enum_decl(ipc_kotype_t, natural_t, {
+	IKOT_NONE                     = 0,
+	IKOT_THREAD_CONTROL           = 1,
+	IKOT_TASK_CONTROL             = 2,
+	IKOT_HOST                     = 3,
+	IKOT_HOST_PRIV                = 4,
+	IKOT_PROCESSOR                = 5,
+	IKOT_PSET                     = 6,
+	IKOT_PSET_NAME                = 7,
+	IKOT_TIMER                    = 8,
+	IKOT_PORT_SUBST_ONCE          = 9,
+	// IKOT_MIG                   = 10,
+	IKOT_MEMORY_OBJECT            = 11,
+	// IKOT_XMM_PAGER             = 12,
+	// IKOT_XMM_KERNEL            = 13,
+	// IKOT_XMM_REPLY             = 14,
+	IKOT_UND_REPLY                = 15,
+	IKOT_HOST_NOTIFY              = 16,
+	// IKOT_HOST_SECURITY         = 17,
+	// IKOT_LEDGER                = 18,
+	IKOT_MASTER_DEVICE            = 19,
+	IKOT_TASK_NAME                = 20,
+	// IKOT_SUBSYSTEM             = 21,
+	// IKOT_IO_DONE_QUEUE         = 22,
+	IKOT_SEMAPHORE                = 23,
+	// IKOT_LOCK_SET              = 24,
+	IKOT_CLOCK                    = 25,
+	IKOT_CLOCK_CTRL               = 26,
+	IKOT_IOKIT_IDENT              = 27,
+	IKOT_NAMED_ENTRY              = 28,
+	IKOT_IOKIT_CONNECT            = 29,
+	IKOT_IOKIT_OBJECT             = 30,
+	// IKOT_UPL                   = 31,
+	IKOT_MEM_OBJ_CONTROL          = 32,
+#if CONFIG_AUDIT
+	IKOT_AU_SESSIONPORT           = 33,
+#endif
+	IKOT_FILEPORT                 = 34,
+	// IKOT_LABELH                = 35,
+	IKOT_TASK_RESUME              = 36,
+	IKOT_VOUCHER                  = 37,
+	IKOT_VOUCHER_ATTR_CONTROL     = 38,
+	IKOT_WORK_INTERVAL            = 39,
+	IKOT_UX_HANDLER               = 40,
+	IKOT_UEXT_OBJECT              = 41,
+	IKOT_ARCADE_REG               = 42,
+	IKOT_EVENTLINK                = 43,
+	IKOT_TASK_INSPECT             = 44,
+	IKOT_TASK_READ                = 45,
+	IKOT_THREAD_INSPECT           = 46,
+	IKOT_THREAD_READ              = 47,
+	IKOT_SUID_CRED                = 48,
+#if HYPERVISOR
+	IKOT_HYPERVISOR               = 49,
+#endif
+	IKOT_TASK_ID_TOKEN            = 50,
+#if CONFIG_PROC_RESOURCE_LIMITS
+	IKOT_TASK_FATAL               = 51,
+#endif
+	/* magic catch-all; should be the last entry */
+	IKOT_UNKNOWN,
+});
 
-#define IKOT_NONE                       0
-#define IKOT_THREAD_CONTROL             1
-#define IKOT_TASK_CONTROL               2
-#define IKOT_HOST                       3
-#define IKOT_HOST_PRIV                  4
-#define IKOT_PROCESSOR                  5
-#define IKOT_PSET                       6
-#define IKOT_PSET_NAME                  7
-#define IKOT_TIMER                      8
-#define IKOT_PAGING_REQUEST             9
-#define IKOT_MIG                        10
-#define IKOT_MEMORY_OBJECT              11
-#define IKOT_XMM_PAGER                  12
-#define IKOT_XMM_KERNEL                 13
-#define IKOT_XMM_REPLY                  14
-#define IKOT_UND_REPLY                  15
-#define IKOT_HOST_NOTIFY                16
-#define IKOT_HOST_SECURITY              17
-#define IKOT_LEDGER                     18
-#define IKOT_MASTER_DEVICE              19
-#define IKOT_TASK_NAME                  20
-#define IKOT_SUBSYSTEM                  21
-#define IKOT_IO_DONE_QUEUE              22
-#define IKOT_SEMAPHORE                  23
-#define IKOT_LOCK_SET                   24
-#define IKOT_CLOCK                      25
-#define IKOT_CLOCK_CTRL                 26
-#define IKOT_IOKIT_IDENT                27
-#define IKOT_NAMED_ENTRY                28
-#define IKOT_IOKIT_CONNECT              29
-#define IKOT_IOKIT_OBJECT               30
-#define IKOT_UPL                        31
-#define IKOT_MEM_OBJ_CONTROL            32
-#define IKOT_AU_SESSIONPORT             33
-#define IKOT_FILEPORT                   34
-#define IKOT_LABELH                     35
-#define IKOT_TASK_RESUME                36
-#define IKOT_VOUCHER                    37
-#define IKOT_VOUCHER_ATTR_CONTROL       38
-#define IKOT_WORK_INTERVAL              39
-#define IKOT_UX_HANDLER                 40
-#define IKOT_UEXT_OBJECT                41
-#define IKOT_ARCADE_REG                 42
-#define IKOT_EVENTLINK                  43
-#define IKOT_TASK_INSPECT               44
-#define IKOT_TASK_READ                  45
-#define IKOT_THREAD_INSPECT             46
-#define IKOT_THREAD_READ                47
-#define IKOT_SUID_CRED                  48
-#define IKOT_HYPERVISOR                 49
-
-/*
- * Add new entries here and adjust IKOT_UNKNOWN.
- * Please keep ipc/ipc_object.c:ikot_print_array up to date.
- */
-#define IKOT_UNKNOWN                    50      /* magic catchall       */
 #define IKOT_MAX_TYPE   (IKOT_UNKNOWN+1)        /* # of IKOT_ types	*/
+
+#ifdef __cplusplus
+/* preserve legacy ABI for c++ */
+typedef natural_t ipc_kobject_type_t;
+#else
+typedef ipc_kotype_t ipc_kobject_type_t;
+#endif
 
 /* set the bitstring index for kobject */
 extern kern_return_t ipc_kobject_set_kobjidx(
 	int                         msgid,
 	int                         index);
 
+#endif /* KERNEL_PRIVATE */
 #ifdef MACH_KERNEL_PRIVATE
+#pragma GCC visibility push(hidden)
+
+/*!
+ * @typedef ipc_kobject_ops_t
+ *
+ * @brief
+ * Describes the operations for a given kobject.
+ *
+ * @field iko_ko_type
+ * An @c IKOT_* value.
+ *
+ * @field iko_op_allow_upgrade
+ * Whether this kobject type is made (upgraded) rather than born.
+ *
+ * @field iko_op_stable
+ * The kobject/port association is stable:
+ * - ipc_kobject_dealloc_port() cannot be called
+ *   while there are outstanding send rights,
+ * - ipc_kobject_enable() is never called.
+ * - ipc_kobject_disable() is never called.
+ *
+ * @field iko_op_permanent
+ * The port is never destroyed.
+ * This doesn't necessarily imply iko_op_stable.
+ *
+ * @field iko_op_no_senders
+ * A callback to run when a NO_SENDERS notification fires.
+ *
+ * Kobjects that destroy their port on no senders only are guaranteed
+ * to be called with an active port only.
+ *
+ * However kobject ports that can be destroyed concurrently need
+ * to be prepared for no senders to fail to acquire the kobject port.
+ *
+ * @field iko_op_destroy
+ * A callback to run as part of destroying the kobject port.
+ *
+ * When this callback is set, @c ipc_kobject_dealloc_port()
+ * will not implicitly call @c ipc_kobject_disable().
+ *
+ * The callback runs after the port has been marked inactive,
+ * hence @c ipc_kobject_get_raw() needs to be used to get to the port.
+ */
+typedef const struct ipc_kobject_ops {
+	ipc_kobject_type_t iko_op_type;
+	unsigned long
+	    iko_op_allow_upgrade : 1,
+	    iko_op_stable        : 1,
+	    iko_op_permanent     : 1;
+	const char        *iko_op_name;
+	void (*iko_op_no_senders)(ipc_port_t port, mach_port_mscount_t mscount);
+	void (*iko_op_destroy)(ipc_port_t port);
+} *ipc_kobject_ops_t;
+
+#define IPC_KOBJECT_DEFINE(type, ...) \
+	__startup_data \
+	static struct ipc_kobject_ops ipc_kobject_ops_##type = { \
+	    .iko_op_type = type, \
+	    .iko_op_name = #type, \
+	    __VA_ARGS__ \
+	}; \
+	STARTUP_ARG(MACH_IPC, STARTUP_RANK_FIRST, ipc_kobject_register_startup, \
+	    &ipc_kobject_ops_##type)
 
 struct ipc_kobject_label {
 	ipc_label_t   ikol_label;       /* [private] mandatory access label */
-	ipc_kobject_t XNU_PTRAUTH_SIGNED_PTR("ipc_kobject_label.ikol_kobject") ikol_kobject;     /* actual kobject address */
+	ipc_port_t XNU_PTRAUTH_SIGNED_PTR("ipc_kobject_label.ikol_alt_port") ikol_alt_port;
 };
-
-/* initialization of kobject subsystem */
-extern void ipc_kobject_init(void);
-
-/* Dispatch a kernel server function */
-extern ipc_kmsg_t ipc_kobject_server(
-	ipc_kmsg_t                  request,
-	mach_msg_option_t           option);
-
-/* Make a port represent a kernel object of the given type */
-extern void ipc_kobject_set(
-	ipc_port_t                  port,
-	ipc_kobject_t               kobject,
-	ipc_kobject_type_t          type);
-
-extern void ipc_kobject_set_atomically(
-	ipc_port_t                  port,
-	ipc_kobject_t               kobject,
-	ipc_kobject_type_t          type);
 
 __options_decl(ipc_kobject_alloc_options_t, uint32_t, {
 	/* Just make the naked port */
@@ -187,10 +247,14 @@ __options_decl(ipc_kobject_alloc_options_t, uint32_t, {
 	IPC_KOBJECT_ALLOC_NSREQUEST = 0x00000002,
 	/* Make it no grant port */
 	IPC_KOBJECT_ALLOC_NO_GRANT  = 0x00000004,
-	/* Make all the send rights immovable */
+	/* Mark the port as immovable send right */
 	IPC_KOBJECT_ALLOC_IMMOVABLE_SEND = 0x00000008,
 	/* Add a label structure to the port */
-	IPC_KOBJECT_ALLOC_LABEL = 0x00000010,
+	IPC_KOBJECT_ALLOC_LABEL     = 0x00000010,
+	/* Mark the port as pinned (non dealloc-able) in an ipc space */
+	IPC_KOBJECT_ALLOC_PINNED    = 0x00000020,
+	/* Use ptrauth_discriminator in ipc_kobject_make_send_lazy_alloc_port */
+	IPC_KOBJECT_PTRAUTH_STORE   = 0x00000040,
 });
 
 /* Allocates a kobject port, never fails */
@@ -206,12 +270,15 @@ extern ipc_port_t ipc_kobject_alloc_labeled_port(
 	ipc_label_t                 label,
 	ipc_kobject_alloc_options_t options);
 
+extern ipc_port_t ipc_kobject_alloc_subst_once(
+	ipc_port_t                  target);
+
 /* Makes a send right, lazily allocating a kobject port, arming for no-senders, never fails */
 extern boolean_t ipc_kobject_make_send_lazy_alloc_port(
 	ipc_port_t                 *port_store,
 	ipc_kobject_t               kobject,
 	ipc_kobject_type_t          type,
-	boolean_t                   should_ptrauth,
+	ipc_kobject_alloc_options_t alloc_opts,
 	uint64_t                    ptrauth_discriminator) __result_use_check;
 
 /* Makes a send right, lazily allocating a kobject port, arming for no-senders, never fails */
@@ -221,24 +288,101 @@ extern boolean_t ipc_kobject_make_send_lazy_alloc_labeled_port(
 	ipc_kobject_type_t          type,
 	ipc_label_t                 label) __result_use_check;
 
-/* Get the kobject address associated with a port */
-static inline ipc_kobject_t
-ipc_kobject_get(ipc_port_t port)
-{
-	if (ip_is_kobject(port)) {
-		if (ip_is_kolabeled(port)) {
-			return port->ip_kolabel->ikol_kobject;
-		}
-		return port->ip_kobject;
-	}
-	return 0;
-}
+extern kern_return_t ipc_kobject_nsrequest(
+	ipc_port_t                  port,
+	mach_port_mscount_t         sync,
+	mach_port_mscount_t        *mscount) __result_use_check;
+
+/* Makes a send right, and arms no-senders */
+extern kern_return_t ipc_kobject_make_send_nsrequest(
+	ipc_port_t                  port) __result_use_check;
+
+extern ipc_kobject_t ipc_kobject_dealloc_port_and_unlock(
+	ipc_port_t                  port,
+	mach_port_mscount_t         mscount,
+	ipc_kobject_type_t          type);
+
+extern ipc_kobject_t ipc_kobject_dealloc_port(
+	ipc_port_t                  port,
+	mach_port_mscount_t         mscount,
+	ipc_kobject_type_t          type);
+
+extern void         ipc_kobject_enable(
+	ipc_port_t                  port,
+	ipc_kobject_t               kobject,
+	ipc_kobject_type_t          type);
+
+extern ipc_kobject_t ipc_kobject_get_raw(
+	ipc_port_t                  port,
+	ipc_kobject_type_t          type);
+
+extern ipc_kobject_t ipc_kobject_get_locked(
+	ipc_port_t                  port,
+	ipc_kobject_type_t          type);
+
+extern ipc_kobject_t ipc_kobject_get_stable(
+	ipc_port_t                  port,
+	ipc_kobject_type_t          type);
+
+extern ipc_kobject_t ipc_kobject_disable_locked(
+	ipc_port_t                  port,
+	ipc_kobject_type_t          type);
+
+extern ipc_kobject_t ipc_kobject_disable(
+	ipc_port_t                  port,
+	ipc_kobject_type_t          type);
+
+extern void         ipc_kobject_upgrade_locked(
+	ipc_port_t                  port,
+	ipc_kobject_t               kobject,
+	ipc_kobject_type_t          type);
+
+extern kern_return_t ipc_kobject_upgrade(
+	ipc_port_t                  port,
+	ipc_kobject_t               kobject,
+	ipc_kobject_type_t          type) __result_use_check;
+
+extern ipc_kobject_t ipc_kobject_downgrade_host_notify(
+	ipc_port_t                  port);
 
 /* Check if a kobject can be copied out to a given space */
-extern boolean_t ipc_kobject_label_check(
-	ipc_space_t space,
-	ipc_port_t port,
-	mach_msg_type_name_t msgt_name);
+extern bool     ipc_kobject_label_check(
+	ipc_space_t                 space,
+	ipc_port_t                  port,
+	mach_msg_type_name_t        msgt_name,
+	ipc_object_copyout_flags_t *flags,
+	ipc_port_t                 *subst_portp) __result_use_check;
+
+__result_use_check
+static inline bool
+ip_label_check(
+	ipc_space_t                 space,
+	ipc_port_t                  port,
+	mach_msg_type_name_t        msgt_name,
+	ipc_object_copyout_flags_t *flags,
+	ipc_port_t                 *subst_portp)
+{
+	if (!ip_is_kolabeled(port)) {
+		*subst_portp = IP_NULL;
+		return true;
+	}
+	return ipc_kobject_label_check(space, port, msgt_name, flags, subst_portp);
+}
+
+/* implementation details */
+
+__startup_func
+extern void ipc_kobject_register_startup(
+	ipc_kobject_ops_t           ops);
+
+/* initialization of kobject subsystem */
+extern void ipc_kobject_init(void);
+
+/* Dispatch a kernel server function */
+extern ipc_kmsg_t ipc_kobject_server(
+	ipc_port_t                  receiver,
+	ipc_kmsg_t                  request,
+	mach_msg_option_t           option);
 
 /* Release any kernel object resources associated with a port */
 extern void ipc_kobject_destroy(
@@ -246,11 +390,21 @@ extern void ipc_kobject_destroy(
 
 #define null_conversion(port)   (port)
 
-extern kern_return_t
-uext_server(ipc_kmsg_t request, ipc_kmsg_t * reply);
+extern void ipc_kobject_notify_no_senders(
+	ipc_port_t                  port,
+	mach_port_mscount_t         mscount);
 
+extern void ipc_kobject_notify_send_once_and_unlock(
+	ipc_port_t                  port);
+
+extern kern_return_t uext_server(
+	ipc_port_t                  receiver,
+	ipc_kmsg_t                  request,
+	ipc_kmsg_t                  *reply);
+
+#pragma GCC visibility pop
 #endif /* MACH_KERNEL_PRIVATE */
 
-#endif /* KERNEL_PRIVATE */
+__END_DECLS
 
 #endif /* _KERN_IPC_KOBJECT_H_ */

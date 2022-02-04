@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018-2019 Apple Inc. All rights reserved.
+ * Copyright (c) 2018-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -55,7 +55,7 @@ SYSCTL_INT(_net_inet_tcp_log, OID_AUTO, level_info,
  */
 #define TCP_LOG_ENABLE_DEFAULT \
     (TLEF_CONNECTION | TLEF_DST_LOCAL | TLEF_DST_GW | \
-    TLEF_DROP_NECP)
+    TLEF_DROP_NECP | TLEF_DROP_PCB)
 #else /* XNU_TARGET_OS_OSX */
 #define TCP_LOG_ENABLE_DEFAULT \
     (TLEF_CONNECTION | TLEF_DST_LOCAL | TLEF_DST_GW | \
@@ -219,6 +219,7 @@ tcp_log_inp_addresses(struct inpcb *inp, char *lbuf, socklen_t lbuflen, char *fb
 	}
 }
 
+__attribute__((noinline))
 void
 tcp_log_rtt_info(const char *func_name, int line_no, struct tcpcb *tp)
 {
@@ -243,14 +244,15 @@ tcp_log_rtt_info(const char *func_name, int line_no, struct tcpcb *tp)
 	os_log(OS_LOG_DEFAULT,
 	    "tcp_rtt_info (%s:%d) "
 	    TCP_LOG_COMMON_PCB_FMT
-	    "rttcur: %u ms srtt: %u ms rttvar: %u ms rttmin: %u ms rxtcur: %u rxtshift: %u",
+	    "base_rtt: %u ms rttcur: %u ms srtt: %u ms rttvar: %u ms rttmin: %u ms rxtcur: %u rxtshift: %u",
 	    func_name, line_no,
-	    TCP_LOG_COMMON_PCB_ARGS,
+	    TCP_LOG_COMMON_PCB_ARGS, get_base_rtt(tp),
 	    tp->t_rttcur, tp->t_srtt >> TCP_RTT_SHIFT,
 	    tp->t_rttvar >> TCP_RTTVAR_SHIFT,
 	    tp->t_rttmin, tp->t_rxtcur, tp->t_rxtshift);
 }
 
+__attribute__((noinline))
 void
 tcp_log_rt_rtt(const char *func_name, int line_no, struct tcpcb *tp,
     struct rtentry *rt)
@@ -287,6 +289,7 @@ tcp_log_rt_rtt(const char *func_name, int line_no, struct tcpcb *tp,
 	    rt->rt_rmx.rmx_rttvar / (RTM_RTTUNIT / TCP_RETRANSHZ));
 }
 
+__attribute__((noinline))
 void
 tcp_log_rtt_change(const char *func_name, int line_no, struct tcpcb *tp,
     int old_srtt, int old_rttvar)
@@ -330,6 +333,7 @@ tcp_log_rtt_change(const char *func_name, int line_no, struct tcpcb *tp,
 	}
 }
 
+__attribute__((noinline))
 void
 tcp_log_keepalive(const char *func_name, int line_no, struct tcpcb *tp,
     int32_t idle_time)
@@ -369,7 +373,9 @@ tcp_log_keepalive(const char *func_name, int line_no, struct tcpcb *tp,
 	    TCP_CONN_KEEPCNT(tp));
 }
 
+#define P_MS(ms, shift) ((ms) >> (shift)), (((ms) * 1000) >> (shift)) % 1000
 
+__attribute__((noinline))
 void
 tcp_log_connection(struct tcpcb *tp, const char *event, int error)
 {
@@ -405,6 +411,7 @@ tcp_log_connection(struct tcpcb *tp, const char *event, int error)
 	    TCP_LOG_COMMON_PCB_FMT \
 	    "rtt: %u.%u ms " \
 	    "rttvar: %u.%u ms " \
+	    "base_rtt: %u ms " \
 	    "error: %d " \
 	    "so_error: %d " \
 	    "svc/tc: %u"
@@ -412,8 +419,9 @@ tcp_log_connection(struct tcpcb *tp, const char *event, int error)
 #define TCP_LOG_CONNECT_ARGS \
 	    event, \
 	    TCP_LOG_COMMON_PCB_ARGS, \
-	    tp->t_srtt >> TCP_RTT_SHIFT, tp->t_srtt - ((tp->t_srtt >> TCP_RTT_SHIFT) << TCP_RTT_SHIFT), \
-	    tp->t_rttvar >> TCP_RTTVAR_SHIFT, tp->t_rttvar - ((tp->t_rttvar >> TCP_RTTVAR_SHIFT) << TCP_RTTVAR_SHIFT), \
+	    P_MS(tp->t_srtt, TCP_RTT_SHIFT), \
+	    P_MS(tp->t_rttvar, TCP_RTTVAR_SHIFT), \
+	    get_base_rtt(tp), \
 	    error, \
 	    so->so_error, \
 	    (so->so_flags1 & SOF1_TC_NET_SERV_TYPE) ? so->so_netsvctype : so->so_traffic_class
@@ -451,6 +459,7 @@ tcp_log_connection(struct tcpcb *tp, const char *event, int error)
 #undef TCP_LOG_CONNECT_ARGS
 }
 
+__attribute__((noinline))
 void
 tcp_log_listen(struct tcpcb *tp, int error)
 {
@@ -507,6 +516,7 @@ tcp_log_listen(struct tcpcb *tp, int error)
 #undef TCP_LOG_LISTEN_ARGS
 }
 
+__attribute__((noinline))
 void
 tcp_log_connection_summary(struct tcpcb *tp)
 {
@@ -567,8 +577,9 @@ tcp_log_connection_summary(struct tcpcb *tp)
 	    "syn rxmit: %u\n" \
 	    "bytes in/out: %llu/%llu " \
 	    "pkts in/out: %llu/%llu " \
-	    "rtt: %u.%u ms " \
-	    "rttvar: %u.%u ms " \
+	    "rtt: %u.%03u ms "  \
+	    "rttvar: %u.%03u ms " \
+	    "base rtt: %u ms " \
 	    "pkt rxmit: %u " \
 	    "ooo pkts: %u dup bytes in: %u ACKs delayed: %u delayed ACKs sent: %u " \
 	    "so_error: %d " \
@@ -581,8 +592,9 @@ tcp_log_connection_summary(struct tcpcb *tp)
 	    tp->t_stat.synrxtshift, \
 	    inp->inp_stat->rxbytes, inp->inp_stat->txbytes, \
 	    inp->inp_stat->rxpackets, inp->inp_stat->txpackets, \
-	    tp->t_srtt >> TCP_RTT_SHIFT, tp->t_srtt - ((tp->t_srtt >> TCP_RTT_SHIFT) << TCP_RTT_SHIFT), \
-	    tp->t_rttvar >> TCP_RTTVAR_SHIFT, tp->t_rttvar - ((tp->t_rttvar >> TCP_RTTVAR_SHIFT) << TCP_RTTVAR_SHIFT), \
+	    P_MS(tp->t_srtt, TCP_RTT_SHIFT), \
+	    P_MS(tp->t_rttvar, TCP_RTTVAR_SHIFT), \
+	    get_base_rtt(tp), \
 	    tp->t_stat.rxmitpkts, \
 	    tp->t_rcvoopack, tp->t_stat.rxduplicatebytes, tp->t_stat.acks_delayed, tp->t_stat.delayed_acks_sent, \
 	    so->so_error, \
@@ -599,6 +611,7 @@ tcp_log_connection_summary(struct tcpcb *tp)
 #undef TCP_LOG_CONNECTION_SUMMARY_ARGS
 }
 
+__attribute__((noinline))
 static bool
 tcp_log_pkt_addresses(void *hdr, struct tcphdr *th, bool outgoing,
     char *lbuf, socklen_t lbuflen, char *fbuf, socklen_t fbuflen)
@@ -656,6 +669,7 @@ tcp_log_pkt_addresses(void *hdr, struct tcphdr *th, bool outgoing,
 /*
  * Note: currently only used in the input path
  */
+__attribute__((noinline))
 void
 tcp_log_drop_pcb(void *hdr, struct tcphdr *th, struct tcpcb *tp, bool outgoing, const char *reason)
 {
@@ -666,6 +680,7 @@ tcp_log_drop_pcb(void *hdr, struct tcphdr *th, struct tcpcb *tp, bool outgoing, 
 	char faddr_buf[ADDRESS_STR_LEN];
 	in_port_t local_port;
 	in_port_t foreign_port;
+	const char *direction = "";
 
 	if (tp == NULL) {
 		return;
@@ -681,9 +696,11 @@ tcp_log_drop_pcb(void *hdr, struct tcphdr *th, struct tcpcb *tp, bool outgoing, 
 		if (outgoing) {
 			local_port = th->th_sport;
 			foreign_port = th->th_dport;
+			direction = "outgoing ";
 		} else {
 			local_port = th->th_dport;
 			foreign_port = th->th_sport;
+			direction = "incoming ";
 		}
 		(void) tcp_log_pkt_addresses(hdr, th, outgoing, laddr_buf, sizeof(laddr_buf), faddr_buf, sizeof(faddr_buf));
 	} else {
@@ -696,14 +713,14 @@ tcp_log_drop_pcb(void *hdr, struct tcphdr *th, struct tcpcb *tp, bool outgoing, 
 	    inp->inp_boundifp != NULL ? inp->inp_boundifp : NULL;
 
 #define TCP_LOG_DROP_PCB_FMT \
-	    "tcp drop %s " \
+	    "tcp drop %s" \
 	    TCP_LOG_COMMON_PCB_FMT \
 	    "t_state: %s " \
 	    "so_error: %d " \
 	    "reason: %s"
 
 #define TCP_LOG_DROP_PCB_ARGS \
-	    outgoing ? "outgoing" : "incoming", \
+	    direction, \
 	    TCP_LOG_COMMON_PCB_ARGS, \
 	    tcpstates[tp->t_state], \
 	    so->so_error, \
@@ -736,6 +753,7 @@ tcp_log_drop_pcb(void *hdr, struct tcphdr *th, struct tcpcb *tp, bool outgoing, 
 	thflags & TH_ACK ? "ACK " : "", \
 	TCP_LOG_COMMON_ARGS
 
+__attribute__((noinline))
 void
 tcp_log_th_flags(void *hdr, struct tcphdr *th, struct tcpcb *tp, bool outgoing, struct ifnet *ifp)
 {
@@ -821,6 +839,7 @@ tcp_log_th_flags(void *hdr, struct tcphdr *th, struct tcpcb *tp, bool outgoing, 
 	}
 }
 
+__attribute__((noinline))
 void
 tcp_log_drop_pkt(void *hdr, struct tcphdr *th, struct ifnet *ifp, const char *reason)
 {
@@ -878,6 +897,7 @@ tcp_log_drop_pkt(void *hdr, struct tcphdr *th, struct ifnet *ifp, const char *re
 #undef TCP_LOG_DROP_PKT_ARGS
 }
 
+__attribute__((noinline))
 void
 tcp_log_message(const char *func_name, int line_no, struct tcpcb *tp, const char *format, ...)
 {

@@ -380,7 +380,7 @@ x86_core_alloc(int cpu)
 		simple_unlock(&x86_topo_lock);
 		core = zalloc_permanent_type(x86_core_t);
 		if (core == NULL) {
-			panic("x86_core_alloc() alloc of x86_core_t failed!\n");
+			panic("x86_core_alloc() alloc of x86_core_t failed!");
 		}
 	}
 
@@ -526,7 +526,7 @@ x86_die_alloc(int cpu)
 		simple_unlock(&x86_topo_lock);
 		die = zalloc_permanent_type(x86_die_t);
 		if (die == NULL) {
-			panic("x86_die_alloc() alloc of x86_die_t failed!\n");
+			panic("x86_die_alloc() alloc of x86_die_t failed!");
 		}
 	}
 
@@ -567,7 +567,7 @@ x86_package_alloc(int cpu)
 		simple_unlock(&x86_topo_lock);
 		pkg = zalloc_permanent_type(x86_pkg_t);
 		if (pkg == NULL) {
-			panic("x86_package_alloc() alloc of x86_pkg_t failed!\n");
+			panic("x86_package_alloc() alloc of x86_pkg_t failed!");
 		}
 	}
 

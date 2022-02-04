@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2014 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -98,6 +98,15 @@
  *       @discussion IEEE 802.11 kernel event class.
  */
 #define KEV_IEEE80211_CLASS     6
+
+/*!
+ *       @defined KEV_NKE_CLASS
+ *       @discussion NKE kernel event class.
+ */
+#define KEV_NKE_CLASS           7
+
+#define KEV_NKE_ALF_SUBCLASS            1
+#define KEV_NKE_ALF_STATE_CHANGED       1
 
 /*
  * The following struct is KPI, but it was originally defined with a trailing
@@ -324,6 +333,7 @@ errno_t kev_msg_post(struct kev_msg *event_msg);
  * events.
  */
 int     kev_post_msg(struct kev_msg *event);
+int     kev_post_msg_nowait(struct kev_msg *event);
 
 LIST_HEAD(kern_event_head, kern_event_pcb);
 

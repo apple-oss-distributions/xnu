@@ -109,14 +109,18 @@
 56	AUE_REVOKE	ALL	{ int revoke(char *path); }
 57	AUE_SYMLINK	ALL	{ int symlink(char *path, char *link); }
 58	AUE_READLINK	ALL	{ int readlink(char *path, char *buf, int count); }
-59	AUE_EXECVE	ALL	{ int execve(char *fname, char **argp, char **envp); }
+59	AUE_EXECVE	ALL	{ int execve(char *fname, char **argp, char **envp) NO_SYSCALL_STUB; }
 60	AUE_UMASK	ALL	{ int umask(int newmask); }
 61	AUE_CHROOT	ALL	{ int chroot(user_addr_t path); }
 62	AUE_NULL	ALL	{ int nosys(void); }   { old fstat }
 63	AUE_NULL	ALL	{ int nosys(void); }   { used internally and reserved }
 64	AUE_NULL	ALL	{ int nosys(void); }   { old getpagesize }
 65	AUE_MSYNC	ALL	{ int msync(caddr_t addr, size_t len, int flags) NO_SYSCALL_STUB; }
-66	AUE_VFORK	ALL	{ int vfork(void); }
+#if CONFIG_VFORK
+66	AUE_VFORK	ALL	{ int vfork(void) NO_SYSCALL_STUB; }
+#else
+66	AUE_NULL	ALL	{ int nosys(void); }   { old vfork }
+#endif
 67	AUE_NULL	ALL	{ int nosys(void); }   { old vread }
 68	AUE_NULL	ALL	{ int nosys(void); }   { old vwrite }
 69	AUE_NULL	ALL	{ int nosys(void); }   { old sbrk }
@@ -856,10 +860,16 @@
 536	AUE_NULL	ALL	{ int shared_region_map_and_slide_2_np(uint32_t files_count, const struct shared_file_np *files, uint32_t mappings_count, const struct shared_file_mapping_slide_np *mappings) NO_SYSCALL_STUB; }
 537	AUE_NULL	ALL { int pivot_root(const char *new_rootfs_path_before, const char *old_rootfs_path_after); }
 538 AUE_TASKINSPECTFORPID	ALL { int task_inspect_for_pid(mach_port_name_t target_tport, int pid, mach_port_name_t *t); }
-539 AUE_TASKINSPECTFORPID	ALL { int task_read_for_pid(mach_port_name_t target_tport, int pid, mach_port_name_t *t); }
+539 AUE_TASKREADFORPID	ALL { int task_read_for_pid(mach_port_name_t target_tport, int pid, mach_port_name_t *t); }
 540	AUE_PREADV	ALL	{ user_ssize_t sys_preadv(int fd, struct iovec *iovp, int iovcnt, off_t offset); }
 541	AUE_PWRITEV	ALL	{ user_ssize_t sys_pwritev(int fd, struct iovec *iovp, int iovcnt, off_t offset); }
 542	AUE_PREADV	ALL	{ user_ssize_t sys_preadv_nocancel(int fd, struct iovec *iovp, int iovcnt, off_t offset) NO_SYSCALL_STUB; }
 543	AUE_PWRITEV	ALL	{ user_ssize_t sys_pwritev_nocancel(int fd, struct iovec *iovp, int iovcnt, off_t offset) NO_SYSCALL_STUB; }
 544     AUE_NULL        ALL     { int ulock_wait2(uint32_t operation, void *addr, uint64_t value, uint64_t timeout, uint64_t value2) NO_SYSCALL_STUB; }
 545	AUE_PROCINFO	ALL	{ int proc_info_extended_id(int32_t callnum, int32_t pid, uint32_t flavor, uint32_t flags, uint64_t ext_id, uint64_t arg, user_addr_t buffer, int32_t buffersize) NO_SYSCALL_STUB; }
+#if SOCKETS
+546     AUE_TRACKERACTION       ALL     { int tracker_action(int action, char *buffer, size_t buffer_size); }
+#else
+546	AUE_NULL	ALL	{ int nosys(void); }
+#endif /* SOCKETS */
+547 AUE_DEBUG_SYSCALL_REJECT	ALL { int debug_syscall_reject(uint64_t packed_selectors) NO_SYSCALL_STUB; }

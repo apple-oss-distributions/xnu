@@ -56,7 +56,7 @@
  *	because stack_alloc_try/thread_invoke operate at splsched.
  */
 
-decl_simple_lock_data(static, stack_lock_data);
+static SIMPLE_LOCK_DECLARE(stack_lock_data, 0);
 #define stack_lock()            simple_lock(&stack_lock_data, LCK_GRP_NULL)
 #define stack_unlock()          simple_unlock(&stack_lock_data)
 
@@ -74,12 +74,10 @@ static int                      stack_free_delta;
 
 static unsigned int             stack_new_count;                                                /* total new stack allocations */
 
-static vm_offset_t              stack_addr_mask;
-
-unsigned int                    kernel_stack_pages;
-vm_offset_t                     kernel_stack_size;
-vm_offset_t                     kernel_stack_mask;
-vm_offset_t                     kernel_stack_depth_max;
+static SECURITY_READ_ONLY_LATE(vm_offset_t)  stack_addr_mask;
+SECURITY_READ_ONLY_LATE(vm_offset_t)         kernel_stack_size;
+SECURITY_READ_ONLY_LATE(vm_offset_t)         kernel_stack_mask;
+vm_offset_t                                  kernel_stack_depth_max;
 
 struct stack_cache {
 	vm_offset_t     free;
@@ -113,32 +111,29 @@ roundup_pow2(vm_offset_t size)
 static vm_offset_t stack_alloc_internal(void);
 static void stack_free_stack(vm_offset_t);
 
-void
+static void
 stack_init(void)
 {
-	simple_lock_init(&stack_lock_data, 0);
+	uint32_t kernel_stack_pages = atop(KERNEL_STACK_SIZE);
 
-	kernel_stack_pages = KERNEL_STACK_SIZE / PAGE_SIZE;
 	kernel_stack_size = KERNEL_STACK_SIZE;
 	kernel_stack_mask = -KERNEL_STACK_SIZE;
-	kernel_stack_depth_max = 0;
 
 	if (PE_parse_boot_argn("kernel_stack_pages",
 	    &kernel_stack_pages,
 	    sizeof(kernel_stack_pages))) {
 		kernel_stack_size = kernel_stack_pages * PAGE_SIZE;
-		printf("stack_init: kernel_stack_pages=%d kernel_stack_size=%p\n",
-		    kernel_stack_pages, (void *) kernel_stack_size);
 	}
 
 	if (kernel_stack_size < round_page(kernel_stack_size)) {
-		panic("stack_init: stack size %p not a multiple of page size %d\n",
+		panic("stack_init: stack size %p not a multiple of page size %d",
 		    (void *) kernel_stack_size, PAGE_SIZE);
 	}
 
 	stack_addr_mask = roundup_pow2(kernel_stack_size) - 1;
 	kernel_stack_mask = ~stack_addr_mask;
 }
+STARTUP(TUNABLES, STARTUP_RANK_MIDDLE, stack_init);
 
 /*
  *	stack_alloc:
@@ -186,7 +181,7 @@ stack_alloc_internal(void)
 		    flags,
 		    VM_KERN_MEMORY_STACK);
 		if (kr != KERN_SUCCESS) {
-			panic("stack_alloc: kernel_memory_allocate(size:0x%llx, mask: 0x%llx, flags: 0x%x) failed with %d\n", (uint64_t)(kernel_stack_size + (2 * PAGE_SIZE)), (uint64_t)stack_addr_mask, flags, kr);
+			panic("stack_alloc: kernel_memory_allocate(size:0x%llx, mask: 0x%llx, flags: 0x%x) failed with %d", (uint64_t)(kernel_stack_size + (2 * PAGE_SIZE)), (uint64_t)stack_addr_mask, flags, kr);
 		}
 
 		/*
@@ -438,88 +433,25 @@ processor_set_stack_usage(
 #if !MACH_DEBUG
 	return KERN_NOT_SUPPORTED;
 #else
-	unsigned int total;
-	vm_size_t maxusage;
-	vm_offset_t maxstack;
-
-	thread_t *thread_list;
+	unsigned int total = 0;
 	thread_t thread;
-
-	unsigned int actual;    /* this many things */
-	unsigned int i;
-
-	vm_size_t size, size_needed;
-	void *addr;
 
 	if (pset == PROCESSOR_SET_NULL || pset != &pset0) {
 		return KERN_INVALID_ARGUMENT;
 	}
 
-	size = 0;
-	addr = NULL;
+	lck_mtx_lock(&tasks_threads_lock);
 
-	for (;;) {
-		lck_mtx_lock(&tasks_threads_lock);
-
-		actual = threads_count;
-
-		/* do we have the memory we need? */
-
-		size_needed = actual * sizeof(thread_t);
-		if (size_needed <= size) {
-			break;
-		}
-
-		lck_mtx_unlock(&tasks_threads_lock);
-
-		if (size != 0) {
-			kheap_free(KHEAP_TEMP, addr, size);
-		}
-
-		assert(size_needed > 0);
-		size = size_needed;
-
-		addr = kheap_alloc(KHEAP_TEMP, size, Z_WAITOK);
-		if (addr == 0) {
-			return KERN_RESOURCE_SHORTAGE;
-		}
+	queue_iterate(&threads, thread, thread_t, threads) {
+		total += (thread->kernel_stack != 0);
 	}
-
-	/* OK, have memory and list is locked */
-	thread_list = (thread_t *) addr;
-	for (i = 0, thread = (thread_t)(void *) queue_first(&threads);
-	    !queue_end(&threads, (queue_entry_t) thread);
-	    thread = (thread_t)(void *) queue_next(&thread->threads)) {
-		thread_reference_internal(thread);
-		thread_list[i++] = thread;
-	}
-	assert(i <= actual);
 
 	lck_mtx_unlock(&tasks_threads_lock);
 
-	/* calculate maxusage and free thread references */
-
-	total = 0;
-	maxusage = 0;
-	maxstack = 0;
-	while (i > 0) {
-		thread_t threadref = thread_list[--i];
-
-		if (threadref->kernel_stack != 0) {
-			total++;
-		}
-
-		thread_deallocate(threadref);
-	}
-
-	if (size != 0) {
-		kheap_free(KHEAP_TEMP, addr, size);
-	}
-
 	*totalp = total;
 	*residentp = *spacep = total * round_page(kernel_stack_size);
-	*maxusagep = maxusage;
-	*maxstackp = maxstack;
+	*maxusagep = 0;
+	*maxstackp = 0;
 	return KERN_SUCCESS;
 
 #endif  /* MACH_DEBUG */

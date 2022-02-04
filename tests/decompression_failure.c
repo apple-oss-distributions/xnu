@@ -7,6 +7,7 @@
 #include <unistd.h>
 #include <inttypes.h>
 #include <pthread.h>
+#include <TargetConditionals.h>
 #include "excserver.h"
 #include "exc_helpers.h"
 
@@ -15,15 +16,17 @@ extern int pid_hibernate(int pid);
 static vm_address_t page_size;
 
 T_GLOBAL_META(
+	T_META_RADAR_COMPONENT_NAME("xnu"),
+	T_META_RADAR_COMPONENT_VERSION("arm"),
+	T_META_OWNER("peter_newman"),
 	T_META_REQUIRES_SYSCTL_EQ("hw.optional.wkdm_popcount", 1)
 	);
 
-static void
-page_out(void)
-{
-	T_ASSERT_POSIX_SUCCESS(pid_hibernate(-2), NULL);
-	T_ASSERT_POSIX_SUCCESS(pid_hibernate(-2), NULL);
-}
+static vm_address_t *blocks;
+static uint64_t block_count;
+static const uint64_t block_length = 0x800000;
+
+static uint32_t vm_pagesize;
 
 static void
 dirty_page(const vm_address_t address)
@@ -46,37 +49,68 @@ try_to_corrupt_page(vm_address_t page_va)
 	return result == 0;
 }
 
-static vm_address_t
-create_corrupted_region(const vm_address_t buffer_length)
+static void
+create_corrupted_regions(void)
 {
-	void *const bufferp = malloc(buffer_length);
-	T_ASSERT_NOTNULL(bufferp, "allocated test buffer");
-	const vm_address_t buffer = (vm_address_t)bufferp;
+	uint64_t hw_memsize;
 
-	T_LOG("buffer address: %lx\n", (unsigned long)buffer);
+	size_t size = sizeof(unsigned int);
+	T_ASSERT_POSIX_SUCCESS(sysctlbyname("vm.pagesize", &vm_pagesize, &size,
+	    NULL, 0), "read vm.pagesize");
+	size = sizeof(uint64_t);
+	T_ASSERT_POSIX_SUCCESS(sysctlbyname("hw.memsize", &hw_memsize, &size,
+	    NULL, 0), "read hw.memsize");
 
-	for (size_t buffer_offset = 0; buffer_offset < buffer_length;
-	    buffer_offset += page_size) {
-		dirty_page(buffer + buffer_offset);
+#if TARGET_OS_OSX
+	const uint64_t max_memsize = 32ULL * 0x40000000ULL; // 32 GB
+#else
+	const uint64_t max_memsize = 8ULL * 0x100000ULL; // 8 MB
+#endif
+	const uint64_t effective_memsize = (hw_memsize > max_memsize) ?
+	    max_memsize : hw_memsize;
+
+	const uint64_t total_pages = effective_memsize / vm_pagesize;
+	const uint64_t pages_per_block = block_length / vm_pagesize;
+
+	// Map a as much memory as we have physical memory to back. Dirtying all
+	// of these pages will force a compressor sweep. The mapping is done using
+	// the smallest number of malloc() calls to allocate the necessary VAs.
+	block_count = total_pages / pages_per_block;
+
+	blocks = (vm_address_t *)malloc(sizeof(*blocks) * block_count);
+	for (uint64_t i = 0; i < block_count; i++) {
+		void *bufferp = malloc(block_length);
+		blocks[i] = (vm_address_t)bufferp;
 	}
 
-	page_out();
-
-	uint32_t corrupt = 0;
-	for (size_t buffer_offset = 0; buffer_offset < buffer_length;
-	    buffer_offset += page_size) {
-		if (try_to_corrupt_page(buffer + buffer_offset)) {
-			corrupt++;
+	for (uint32_t i = 0; i < block_count; i++) {
+		for (size_t buffer_offset = 0; buffer_offset < block_length;
+		    buffer_offset += vm_pagesize) {
+			dirty_page(blocks[i] + buffer_offset);
 		}
 	}
 
-	T_LOG("corrupted %u/%lu pages. accessing...\n", corrupt,
-	    (unsigned long)(buffer_length / page_size));
+#if !TARGET_OS_OSX
+	// We can't use a substantial amount of memory on embedded platforms, so
+	// freeze the current process instead to cause everything to be compressed.
+	T_ASSERT_POSIX_SUCCESS(pid_hibernate(-2), NULL);
+	T_ASSERT_POSIX_SUCCESS(pid_hibernate(-2), NULL);
+#endif
+
+	uint32_t corrupt = 0;
+	for (uint32_t i = 0; i < block_count; i++) {
+		for (size_t buffer_offset = 0; buffer_offset < block_length;
+		    buffer_offset += vm_pagesize) {
+			if (try_to_corrupt_page(blocks[i] + buffer_offset)) {
+				corrupt++;
+			}
+		}
+	}
+
+	T_LOG("corrupted %u/%llu pages. accessing...\n", corrupt, total_pages);
 	if (corrupt == 0) {
 		T_SKIP("no pages corrupted");
 	}
-
-	return buffer;
 }
 
 static bool
@@ -96,30 +130,26 @@ try_write(volatile uint32_t *word __unused)
 #endif
 }
 
-static void *
-run_test(vm_address_t buffer_start, vm_address_t buffer_length)
+static bool
+read_blocks(void)
 {
-	bool fault = false;
-	for (size_t buffer_offset = 0; buffer_offset < buffer_length;
-	    buffer_offset += page_size) {
-		// Access pages until the fault is detected.
-		if (!try_write((volatile uint32_t *)(buffer_start +
-		    buffer_offset))) {
-			T_LOG("test_thread breaking");
-			fault = true;
-			break;
+	for (uint32_t i = 0; i < block_count; i++) {
+		for (size_t buffer_offset = 0; buffer_offset < block_length;
+		    buffer_offset += vm_pagesize) {
+			// Access pages until the fault is detected.
+			if (!try_write((volatile uint32_t *)(blocks[i] + buffer_offset))) {
+				T_LOG("test_thread breaking");
+				return true;
+			}
 		}
 	}
-
-	if (!fault) {
-		T_SKIP("no faults");
-	}
-	T_LOG("test thread completing");
-	return NULL;
+	return false;
 }
 
 static size_t
 kern_memory_failure_handler(
+	__unused mach_port_t task,
+	__unused mach_port_t thread,
 	exception_type_t exception,
 	mach_exception_data_t code)
 {
@@ -132,29 +162,23 @@ kern_memory_failure_handler(
 	return 8;
 }
 
-static void
-run_test_expect_fault()
-{
-	mach_port_t exc_port = create_exception_port(EXC_MASK_BAD_ACCESS);
-	vm_address_t buffer_length = 10 * 1024ULL * 1024ULL;
-	vm_address_t buffer_start = create_corrupted_region(buffer_length);
-
-	run_exception_handler(exc_port, kern_memory_failure_handler);
-	run_test(buffer_start, buffer_length);
-	free((void *)buffer_start);
-}
-
-
-
 T_DECL(decompression_failure,
     "Confirm that exception is raised on decompression failure",
     // Disable software checks in development builds, as these would result in
     // panics.
-    T_META_BOOTARGS_SET("vm_compressor_validation=0"))
+    T_META_BOOTARGS_SET("vm_compressor_validation=0"),
+    T_META_ASROOT(true),
+    // This test intentionally corrupts pages backing heap memory, so it's
+    // not practical for it to release all the buffers properly.
+    T_META_CHECK_LEAKS(false))
 {
+	T_SETUPBEGIN;
+
+#if !TARGET_OS_OSX
 	if (pid_hibernate(-2) != 0) {
 		T_SKIP("compressor not active");
 	}
+#endif
 
 	int value;
 	size_t size = sizeof(value);
@@ -168,5 +192,13 @@ T_DECL(decompression_failure,
 	T_ASSERT_EQ_ULONG(size, sizeof(value), NULL);
 	page_size = (vm_address_t)value;
 
-	run_test_expect_fault();
+	mach_port_t exc_port = create_exception_port(EXC_MASK_BAD_ACCESS);
+	create_corrupted_regions();
+	T_SETUPEND;
+
+	run_exception_handler(exc_port, kern_memory_failure_handler);
+
+	if (!read_blocks()) {
+		T_SKIP("no faults");
+	}
 }

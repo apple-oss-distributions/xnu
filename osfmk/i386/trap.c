@@ -95,6 +95,7 @@
 #include <sys/kdebug.h>
 #include <kperf/kperf.h>
 #include <prng/random.h>
+#include <prng/entropy.h>
 
 #include <string.h>
 
@@ -110,6 +111,7 @@
 #include <libkern/OSDebug.h>
 #include <i386/cpu_threads.h>
 #include <machine/pal_routines.h>
+#include <i386/lbr.h>
 
 extern void throttle_lowpri_io(int);
 extern void kprint_state(x86_saved_state64_t *saved_state);
@@ -354,6 +356,7 @@ interrupt(x86_saved_state_t *state)
 	int             itype = DBG_INTR_TYPE_UNKNOWN;
 	int             handled;
 
+
 	x86_saved_state64_t     *state64 = saved_state64(state);
 	rip = state64->isf.rip;
 	rsp = state64->isf.rsp;
@@ -417,7 +420,7 @@ interrupt(x86_saved_state_t *state)
 	}
 
 	if (__improbable(get_preemption_level() != ipl)) {
-		panic("Preemption level altered by interrupt vector 0x%x: initial 0x%x, final: 0x%x\n", interrupt_num, ipl, get_preemption_level());
+		panic("Preemption level altered by interrupt vector 0x%x: initial 0x%x, final: 0x%x", interrupt_num, ipl, get_preemption_level());
 	}
 
 
@@ -474,7 +477,7 @@ interrupt(x86_saved_state_t *state)
 	}
 
 	if (cnum == master_cpu) {
-		ml_entropy_collect();
+		entropy_collect();
 	}
 
 #if KPERF
@@ -674,6 +677,10 @@ kernel_trap(
 		goto debugger_entry;
 
 	case T_DEBUG:
+		/*
+		 * Re-enable LBR tracing for core/panic files if necessary. i386_lbr_enable confirms LBR should be re-enabled.
+		 */
+		i386_lbr_enable();
 		if ((saved_state->isf.rflags & EFL_TF) == 0 && NO_WATCHPOINTS) {
 			/* We've somehow encountered a debug
 			 * register match that does not belong
@@ -935,7 +942,8 @@ user_trap(
 	 * trapped since the original cache line stores).  If the saved code is not valid,
 	 * we'll catch it below when we process the copyin() for unhandled faults.
 	 */
-	if (type == T_PAGE_FAULT || type == T_INVALID_OPCODE || type == T_GENERAL_PROTECTION) {
+	if (thread->machine.insn_copy_optout == false &&
+	    (type == T_PAGE_FAULT || type == T_INVALID_OPCODE || type == T_GENERAL_PROTECTION)) {
 #define CACHELINE_SIZE 64
 		THREAD_TO_PCB(thread)->insn_cacheline[CACHELINE_SIZE] = (uint8_t)(rip & (CACHELINE_SIZE - 1));
 		bcopy(&cpu_shadowp(current_cpu)->cpu_rtimes[0],
@@ -1191,7 +1199,7 @@ user_trap(
 			cs = saved_state32(saved_state)->cs;
 		}
 
-		if (last_branch_support_enabled) {
+		if (last_branch_enabled_modes == LBR_ENABLED_USERMODE) {
 			intrs = ml_set_interrupts_enabled(FALSE);
 			/*
 			 * This is a bit racy (it's possible for this thread to migrate to another CPU, then
@@ -1211,7 +1219,7 @@ user_trap(
 		 * And of course there's no need to copy the instruction stream if the boot-arg
 		 * was set to 0.
 		 */
-		if (insn_copyin_count > 0 &&
+		if (thread->machine.insn_copy_optout == false && insn_copyin_count > 0 &&
 		    (cs == USER64_CS || cs == USER_CS) && (type != T_PAGE_FAULT || vaddr != rip)) {
 #if DEVELOPMENT || DEBUG
 			copy_instruction_stream(thread, rip, type, inspect_cacheline);
@@ -1310,7 +1318,7 @@ copy_instruction_stream(thread_t thread, uint64_t rip, int __unused trap_code
 		enable_preemption();
 
 		if (pcb->insn_state == 0) {
-			pcb->insn_state = kalloc(sizeof(x86_instruction_state_t));
+			pcb->insn_state = kalloc_data(sizeof(x86_instruction_state_t), Z_WAITOK);
 		}
 
 		if (pcb->insn_state != 0) {
@@ -1362,8 +1370,6 @@ copy_instruction_stream(thread_t thread, uint64_t rip, int __unused trap_code
 						panic("Cacheline mismatch while processing unhandled exception.");
 					}
 				} else {
-					printf("thread %p code cacheline @ %p DOES match with copied-in code\n",
-					    thread, (void *)(rip & ~CACHELINE_MASK));
 					pcb->insn_state->out_of_synch = 0;
 				}
 			} else if (inspect_cacheline) {
@@ -1399,7 +1405,7 @@ copy_instruction_stream(thread_t thread, uint64_t rip, int __unused trap_code
 		pcb->insn_state_copyin_failure_errorcode = copyin_err;
 #if DEVELOPMENT || DEBUG
 		if (inspect_cacheline && pcb->insn_state == 0) {
-			pcb->insn_state = kalloc(sizeof(x86_instruction_state_t));
+			pcb->insn_state = kalloc_data(sizeof(x86_instruction_state_t), Z_WAITOK);
 		}
 		if (pcb->insn_state != 0) {
 			pcb->insn_state->insn_stream_valid_bytes = 0;

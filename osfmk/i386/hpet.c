@@ -330,7 +330,7 @@ ml_hpet_cfg(uint32_t cpu, uint32_t hpetVect)
 	boolean_t       enabled;
 
 	if (cpu > 1) {
-		panic("ml_hpet_cfg: invalid cpu = %d\n", cpu);
+		panic("ml_hpet_cfg: invalid cpu = %d", cpu);
 	}
 
 	lcpu = cpu_to_lcpu(cpu);

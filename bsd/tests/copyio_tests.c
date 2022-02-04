@@ -511,7 +511,7 @@ copyio_test(void)
 	 * not to the point of actually execing yet.
 	 */
 	proc_t proc = current_proc();
-	assert(proc->p_pid == 1);
+	assert(proc_getpid(proc) == 1);
 	data.user_map = get_task_map_reference(proc->task);
 
 	user_addr = data.user_addr;

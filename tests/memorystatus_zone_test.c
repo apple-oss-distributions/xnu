@@ -19,6 +19,8 @@
 
 T_GLOBAL_META(
 	T_META_NAMESPACE("xnu.vm"),
+	T_META_RADAR_COMPONENT_NAME("xnu"),
+	T_META_RADAR_COMPONENT_VERSION("VM"),
 	T_META_CHECK_LEAKS(false)
 	);
 
@@ -197,9 +199,19 @@ allocate_from_generic_zone(void)
 	uint64_t i = 0;
 	time_t start = time(NULL);
 	mach_port_t give_back[NUM_GIVE_BACK_PORTS];
+	int old_limit = 0;
 
 	printf("[%d] Allocating mach_ports\n", getpid());
-	for (i = 0;; i++) {
+
+	size_t size = sizeof(old_limit);
+	int kr = sysctlbyname("machdep.max_port_table_size", &old_limit, &size, NULL, 0);
+	T_QUIET; T_ASSERT_POSIX_SUCCESS(kr, "sysctl kern.max_port_table_size failed");
+	T_LOG("machdep.max_port_table_size = %d", old_limit);
+
+	/* Avoid hitting the resource limit exception */
+	uint64_t limit = (uint64_t)(old_limit * 7 / 8);
+
+	for (i = 0; i < limit; i++) {
 		mach_port_t port;
 
 		if ((mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &port)) != KERN_SUCCESS) {

@@ -54,6 +54,8 @@ _mach_continuous_time_base(void)
 #endif // 64-bit
 }
 
+#define CNTVCTSS_EL0 "S3_3_c14_c0_6"
+
 __attribute__((visibility("hidden")))
 kern_return_t
 _mach_continuous_hwclock(uint64_t *cont_time __unused)
@@ -63,6 +65,14 @@ _mach_continuous_hwclock(uint64_t *cont_time __unused)
 	uint8_t cont_hwclock = *((uint8_t*)_COMM_PAGE_CONT_HWCLOCK);
 	if (cont_hwclock) {
 		volatile uint64_t *base_ptr = (volatile uint64_t*)_COMM_PAGE_CONT_HW_TIMEBASE;
+
+		boolean_t has_cntvctss_el0 = *((uint8_t*)_COMM_PAGE_USER_TIMEBASE) == USER_TIMEBASE_NOSPEC;
+		if (has_cntvctss_el0) {
+			*cont_time = __builtin_arm_rsr64(CNTVCTSS_EL0) + *base_ptr;
+			return KERN_SUCCESS;
+		}
+
+
 		__builtin_arm_isb(ISB_SY);
 		*cont_time = __builtin_arm_rsr64("CNTVCT_EL0") + *base_ptr;
 		return KERN_SUCCESS;

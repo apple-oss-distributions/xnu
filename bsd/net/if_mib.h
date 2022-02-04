@@ -58,7 +58,9 @@
 
 #ifndef _NET_IF_MIB_H
 #define _NET_IF_MIB_H   1
+#include <net/if_var.h>
 #include <sys/appleapiopts.h>
+#include <sys/types.h>
 
 struct ifmibdata {
 	char                            ifmd_name[IFNAMSIZ]; /* name of interface */

@@ -42,7 +42,7 @@
 #include <pthread.h>
 #include <stdatomic.h>
 
-#include "vm/perf_helpers.h"
+#include "benchmark/helpers.h"
 
 #if (TARGET_OS_OSX || TARGET_OS_SIMULATOR)
 /*
@@ -90,6 +90,7 @@ typedef struct test_globals {
 	size_t tg_iterations_completed;
 	unsigned int tg_num_threads;
 	test_variant_t tg_variant;
+	bool pin_threads;
 	/*
 	 * An array of memory objects to fault in.
 	 * This is basically a workqueue of
@@ -110,21 +111,26 @@ typedef struct test_globals {
 	//_Atomic size_t tg_next_fault_buffer_index;
 } test_globals_t;
 
+typedef struct {
+	void *test_globals;
+	uint32_t cpu_id;
+} faulting_thread_args_t;
+
+static faulting_thread_args_t *faulting_thread_args;
+
 static const char* kSeparateObjectsArgument = "separate-objects";
 static const char* kShareObjectsArgument = "share-objects";
 
 /* Arguments parsed from the command line */
 typedef struct test_args {
 	uint32_t n_threads;
+	uint32_t first_cpu;
 	uint64_t duration_seconds;
 	test_variant_t variant;
+	bool pin_threads;
 	bool verbose;
 } test_args_t;
 
-/* Get a (wall-time) timestamp in nanoseconds */
-static uint64_t get_timestamp_ns(void);
-/* Get the number of cpus on this device. */
-static unsigned int get_ncpu(void);
 /*
  * Fault in the pages in the given buffer.
  */
@@ -197,7 +203,7 @@ main(int argc, char **argv)
 #else
 	static const size_t memory_per_core = 25 * (1UL << 20);
 #endif /* (TARGET_OS_OSX || TARGET_OS_SIMULATOR) */
-	const size_t kMemSize = memory_per_core * get_ncpu();
+	const size_t kMemSize = memory_per_core * (size_t) get_ncpu();
 	test_globals_t *globals = allocate_test_globals();
 	/* Total wall-time spent faulting in pages. */
 	uint64_t wall_time_elapsed_ns = 0;
@@ -231,9 +237,16 @@ main(int argc, char **argv)
 static void*
 faulting_thread(void* arg)
 {
-	test_globals_t* globals = arg;
+	test_globals_t* globals = ((faulting_thread_args_t *)arg)->test_globals;
 	uint64_t on_cpu_time_faulting = 0;
 	size_t current_iteration = 1;
+
+	if (globals->pin_threads) {
+		uint32_t cpu_id = ((faulting_thread_args_t *)arg)->cpu_id;
+		int err = sysctlbyname("kern.sched_thread_bind_cpu", NULL, 0, &cpu_id, sizeof(cpu_id));
+		assert(err == 0);
+	}
+
 	while (true) {
 		bool should_continue = worker_thread_iteration_setup(current_iteration, globals);
 		if (!should_continue) {
@@ -368,7 +381,7 @@ start_iteration(test_globals_t* globals, test_variant_t variant, bool verbose)
 	setup_memory(globals, variant);
 	benchmark_log(verbose, "Initialized data structures for iteration. Waking workers.\n");
 	/* Grab a timestamp, tick the current iteration, and wake up the worker threads */
-	start_time = get_timestamp_ns();
+	start_time = current_timestamp_ns();
 	globals->tg_current_iteration++;
 	ret = pthread_mutex_unlock(&globals->tg_lock);
 	assert(ret == 0);
@@ -387,7 +400,7 @@ finish_iteration(test_globals_t* globals, uint64_t start_time)
 	while (globals->tg_iterations_completed != globals->tg_current_iteration) {
 		ret = pthread_cond_wait(&globals->tg_cv, &globals->tg_lock);
 	}
-	end_time = get_timestamp_ns();
+	end_time = current_timestamp_ns();
 	ret = pthread_mutex_unlock(&globals->tg_lock);
 	unmap_fault_buffers(globals);
 	assert(ret == 0);
@@ -480,6 +493,7 @@ init_globals(test_globals_t *globals, const test_args_t *args)
 
 	globals->tg_num_threads = args->n_threads;
 	globals->tg_variant = args->variant;
+	globals->pin_threads = args->pin_threads;
 }
 
 static void
@@ -505,18 +519,23 @@ init_fault_buffer_arr(test_globals_t *globals, const test_args_t *args, size_t m
 }
 
 static pthread_t *
-spawn_worker_threads(test_globals_t *globals, unsigned int num_threads)
+spawn_worker_threads(test_globals_t *globals, unsigned int num_threads, unsigned int first_cpu)
 {
 	int ret;
 	pthread_attr_t pthread_attrs;
 	globals->tg_num_threads = num_threads;
 	pthread_t* threads = malloc(sizeof(pthread_t) * num_threads);
+	faulting_thread_args = malloc(sizeof(faulting_thread_args_t) * num_threads);
 	assert(threads);
 	ret = pthread_attr_init(&pthread_attrs);
 	assert(ret == 0);
 	// Spawn the background threads
 	for (unsigned int i = 0; i < num_threads; i++) {
-		ret = pthread_create(threads + i, &pthread_attrs, faulting_thread, globals);
+		if (globals->pin_threads) {
+			faulting_thread_args[i].cpu_id = (i + first_cpu) % get_ncpu();
+		}
+		faulting_thread_args[i].test_globals = globals;
+		ret = pthread_create(threads + i, &pthread_attrs, faulting_thread, &faulting_thread_args[i]);
 		assert(ret == 0);
 	}
 	ret = pthread_attr_destroy(&pthread_attrs);
@@ -530,7 +549,7 @@ setup_test(test_globals_t *globals, const test_args_t *args, size_t memory_size,
 	init_globals(globals, args);
 	init_fault_buffer_arr(globals, args, memory_size);
 	benchmark_log(verbose, "Initialized global data structures.\n");
-	pthread_t *workers = spawn_worker_threads(globals, args->n_threads);
+	pthread_t *workers = spawn_worker_threads(globals, args->n_threads, args->first_cpu);
 	benchmark_log(verbose, "Spawned workers.\n");
 	return workers;
 }
@@ -557,6 +576,7 @@ join_background_threads(test_globals_t *globals, pthread_t *threads)
 		total_cputime_spent_faulting += cputime_spent_faulting;
 	}
 	free(threads);
+	free(faulting_thread_args);
 	return total_cputime_spent_faulting;
 }
 
@@ -602,22 +622,6 @@ print_help(char** argv)
 	fprintf(stderr, "	%s		Share vm objects across faulting threads.\n", kShareObjectsArgument);
 }
 
-static uint64_t
-get_timestamp_ns()
-{
-	return clock_gettime_nsec_np(kWallTimeClock);
-}
-
-static unsigned int
-get_ncpu(void)
-{
-	int ncpu;
-	size_t sysctl_size = sizeof(ncpu);
-	int ret = sysctlbyname("hw.ncpu", &ncpu, &sysctl_size, NULL, 0);
-	assert(ret == 0);
-	return (unsigned int) ncpu;
-}
-
 static void
 parse_arguments(int argc, char** argv, test_args_t *args)
 {
@@ -657,6 +661,15 @@ parse_arguments(int argc, char** argv, test_args_t *args)
 		print_help(argv);
 		exit(1);
 	}
+	if (current_argument < argc) {
+		long first_cpu = strtol(argv[current_argument++], NULL, 10);
+		assert(first_cpu >= 0 && first_cpu < get_ncpu());
+		args->pin_threads = true;
+		args->first_cpu = (unsigned int) first_cpu;
+	} else {
+		args->pin_threads = false;
+	}
+
 	assert(num_cores > 0 && num_cores <= get_ncpu());
 	args->n_threads = (unsigned int) num_cores;
 	args->duration_seconds = (unsigned long) duration;

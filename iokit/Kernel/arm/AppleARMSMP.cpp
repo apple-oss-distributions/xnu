@@ -28,15 +28,16 @@
 
 extern "C" {
 #include <kern/debug.h>
+#include <pexpert/pexpert.h>
+};
+
 #include <kern/processor.h>
 #include <kern/thread.h>
 #include <kperf/kperf.h>
-#include <pexpert/pexpert.h>
 #include <machine/machine_routines.h>
-};
-
 #include <libkern/OSAtomic.h>
 #include <libkern/c++/OSCollection.h>
+#include <IOKit/IODeviceTreeSupport.h>
 #include <IOKit/IOLib.h>
 #include <IOKit/IOPlatformActions.h>
 #include <IOKit/IOPMGR.h>
@@ -81,35 +82,53 @@ idle_timer_wrapper(void */*refCon*/, uint64_t *new_timeout_ticks)
 	gPMGR->updateCPUIdle(new_timeout_ticks);
 }
 
+static OSDictionary *
+matching_dict_for_cpu_id(unsigned int cpu_id)
+{
+	// The cpu-id property in EDT doesn't necessarily match the dynamically
+	// assigned logical ID in XNU, so look up the cpu node by the physical
+	// (cluster/core) ID instead.
+	OSSymbolConstPtr cpuTypeSymbol = OSSymbol::withCString("cpu");
+	OSSymbolConstPtr cpuIdSymbol = OSSymbol::withCString("reg");
+	OSDataPtr cpuId = OSData::withBytes(&(topology_info->cpus[cpu_id].phys_id), sizeof(uint32_t));
+
+	OSDictionary *propMatch = OSDictionary::withCapacity(4);
+	propMatch->setObject(gIODTTypeKey, cpuTypeSymbol);
+	propMatch->setObject(cpuIdSymbol, cpuId);
+
+	OSDictionary *matching = IOService::serviceMatching("IOPlatformDevice");
+	matching->setObject(gIOPropertyMatchKey, propMatch);
+
+	propMatch->release();
+	cpuTypeSymbol->release();
+	cpuIdSymbol->release();
+	cpuId->release();
+
+	return matching;
+}
+
 static void
 register_aic_handlers(const ml_topology_cpu *cpu_info,
     ipi_handler_t ipi_handler,
     perfmon_interrupt_handler_func pmi_handler)
 {
-	const int n_irqs = 3;
-	int i;
-	IOInterruptVectorNumber irqlist[n_irqs] = {
-		cpu_info->self_ipi_irq,
-		cpu_info->other_ipi_irq,
-		cpu_info->pmi_irq };
+	OSDictionary *matching = matching_dict_for_cpu_id(cpu_info->cpu_id);
+	IOService *cpu = IOService::waitForMatchingService(matching, UINT64_MAX);
+	matching->release();
 
-	IOService *fakeCPU = new IOService();
-	if (!fakeCPU || !fakeCPU->init()) {
-		panic("Can't initialize fakeCPU");
+	OSArray *irqs = (OSArray *) cpu->getProperty(gIOInterruptSpecifiersKey);
+	if (!irqs) {
+		panic("Error finding interrupts for CPU %d", cpu_info->cpu_id);
 	}
 
-	IOInterruptSource source[n_irqs];
-	for (i = 0; i < n_irqs; i++) {
-		source[i].vectorData = OSData::withBytes(&irqlist[i], sizeof(irqlist[0]));
-	}
-	fakeCPU->_interruptSources = source;
+	unsigned int irqcount = irqs->getCount();
 
-	if (cpu_info->self_ipi_irq && cpu_info->other_ipi_irq) {
+	if (irqcount == 3) {
 		// Legacy configuration, for !HAS_IPI chips (pre-Skye).
-		if (gAIC->registerInterrupt(fakeCPU, 0, NULL, (IOInterruptHandler)ipi_handler, NULL) != kIOReturnSuccess ||
-		    gAIC->enableInterrupt(fakeCPU, 0) != kIOReturnSuccess ||
-		    gAIC->registerInterrupt(fakeCPU, 1, NULL, (IOInterruptHandler)ipi_handler, NULL) != kIOReturnSuccess ||
-		    gAIC->enableInterrupt(fakeCPU, 1) != kIOReturnSuccess) {
+		if (cpu->registerInterrupt(0, NULL, (IOInterruptAction)ipi_handler, NULL) != kIOReturnSuccess ||
+		    cpu->enableInterrupt(0) != kIOReturnSuccess ||
+		    cpu->registerInterrupt(2, NULL, (IOInterruptAction)ipi_handler, NULL) != kIOReturnSuccess ||
+		    cpu->enableInterrupt(2) != kIOReturnSuccess) {
 			panic("Error registering IPIs");
 		}
 #if !defined(HAS_IPI)
@@ -118,16 +137,13 @@ register_aic_handlers(const ml_topology_cpu *cpu_info,
 		aic_ipis = true;
 #endif
 	}
+
 	// Conditional, because on Skye and later, we use an FIQ instead of an external IRQ.
-	if (pmi_handler && cpu_info->pmi_irq) {
-		if (gAIC->registerInterrupt(fakeCPU, 2, NULL, (IOInterruptHandler)pmi_handler, NULL) != kIOReturnSuccess ||
-		    gAIC->enableInterrupt(fakeCPU, 2) != kIOReturnSuccess) {
+	if (pmi_handler && irqcount == 1) {
+		if (cpu->registerInterrupt(1, NULL, (IOInterruptAction)pmi_handler, NULL) != kIOReturnSuccess ||
+		    cpu->enableInterrupt(1) != kIOReturnSuccess) {
 			panic("Error registering PMI");
 		}
-	}
-
-	for (i = 0; i < n_irqs; i++) {
-		source[i].vectorData->release();
 	}
 }
 
@@ -152,13 +168,8 @@ cpu_boot_thread(void */*unused0*/, wait_result_t /*unused1*/)
 	matching->release();
 
 	const size_t array_size = (topology_info->max_cpu_id + 1) * sizeof(*machProcessors);
-	machProcessors = static_cast<processor_t *>(IOMalloc(array_size));
-	if (!machProcessors) {
-		panic("Can't allocate machProcessors array");
-	}
-	memset(machProcessors, 0, array_size);
+	machProcessors = static_cast<processor_t *>(zalloc_permanent(array_size, ZALIGN_PTR));
 
-	ml_cpu_init_state();
 	for (unsigned int cpu = 0; cpu < topology_info->num_cpus; cpu++) {
 		const ml_topology_cpu *cpu_info = &topology_info->cpus[cpu];
 		const unsigned int cpu_id = cpu_info->cpu_id;
@@ -192,6 +203,7 @@ cpu_boot_thread(void */*unused0*/, wait_result_t /*unused1*/)
 			panic("processor_start failed");
 		}
 	}
+	ml_cpu_init_completed();
 	IOService::publishResource(gIOAllCPUInitializedKey, kOSBooleanTrue);
 }
 
@@ -221,7 +233,8 @@ PE_cpu_start(cpu_id_t target,
 	unsigned int cpu_id = target_to_cpu_id(target);
 
 	if (cpu_id != boot_cpu) {
-		gPMGR->enableCPUCore(cpu_id);
+		extern unsigned int LowResetVectorBase;
+		gPMGR->enableCPUCore(cpu_id, ml_vtophys((vm_offset_t)&LowResetVectorBase));
 	}
 	return KERN_SUCCESS;
 }

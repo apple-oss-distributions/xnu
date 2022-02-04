@@ -243,9 +243,12 @@ kperf_backtrace_sample(struct kp_kcallstack *cs, struct kperf_context *context)
 
 	BUF_VERB(PERF_CS_BACKTRACE | DBG_FUNC_START, 1);
 
-	bool trunc = false;
-	cs->kpkc_nframes = backtrace_frame(cs->kpkc_word_frames,
-	    cs->kpkc_nframes - 1, context->starting_fp, &trunc);
+	backtrace_info_t btinfo = BTI_NONE;
+	struct backtrace_control ctl = {
+		.btc_frame_addr = (uintptr_t)context->starting_fp,
+	};
+	cs->kpkc_nframes = backtrace(cs->kpkc_word_frames, cs->kpkc_nframes - 1,
+	    &ctl, &btinfo);
 	if (cs->kpkc_nframes > 0) {
 		cs->kpkc_flags |= CALLSTACK_VALID;
 		/*
@@ -255,7 +258,7 @@ kperf_backtrace_sample(struct kp_kcallstack *cs, struct kperf_context *context)
 		cs->kpkc_word_frames[cs->kpkc_nframes + 1] = 0;
 		cs->kpkc_nframes += 1;
 	}
-	if (trunc) {
+	if ((btinfo & BTI_TRUNCATED)) {
 		cs->kpkc_flags |= CALLSTACK_TRUNCATED;
 	}
 
@@ -289,13 +292,14 @@ kperf_kcallstack_sample(struct kp_kcallstack *cs, struct kperf_context *context)
 	if (ml_at_interrupt_context()) {
 		assert(thread == current_thread());
 		cs->kpkc_flags |= CALLSTACK_KERNEL_WORDS;
-		bool trunc = false;
-		cs->kpkc_nframes = backtrace_interrupted(
-			cs->kpkc_word_frames, cs->kpkc_nframes - 1, &trunc);
+		backtrace_info_t btinfo = BTI_NONE;
+		struct backtrace_control ctl = { .btc_flags = BTF_KERN_INTERRUPTED, };
+		cs->kpkc_nframes = backtrace(cs->kpkc_word_frames, cs->kpkc_nframes - 1,
+		    &ctl, &btinfo);
 		if (cs->kpkc_nframes != 0) {
 			callstack_fixup_interrupted(cs);
 		}
-		if (trunc) {
+		if ((btinfo & BTI_TRUNCATED)) {
 			cs->kpkc_flags |= CALLSTACK_TRUNCATED;
 		}
 	} else {
@@ -335,31 +339,48 @@ kperf_ucallstack_sample(struct kp_ucallstack *cs, struct kperf_context *context)
 	BUF_INFO(PERF_CS_USAMPLE | DBG_FUNC_START,
 	    (uintptr_t)thread_tid(thread), cs->kpuc_nframes);
 
-	bool user64 = false;
-	bool trunc = false;
-	int error = 0;
+	struct backtrace_user_info btinfo = BTUINFO_INIT;
 	/*
 	 * Leave space for the fixup information.
 	 */
 	unsigned int maxnframes = cs->kpuc_nframes - 1;
-	unsigned int nframes = backtrace_thread_user(thread, cs->kpuc_frames,
-	    maxnframes, &error, &user64, &trunc, true);
+	struct backtrace_control ctl = { .btc_user_thread = thread, };
+	unsigned int nframes = backtrace_user(cs->kpuc_frames, maxnframes, &ctl,
+	    &btinfo);
 	cs->kpuc_nframes = MIN(maxnframes, nframes);
 
+	cs->kpuc_flags |= CALLSTACK_KERNEL_WORDS |
+	    ((btinfo.btui_info & BTI_TRUNCATED) ? CALLSTACK_TRUNCATED : 0) |
+	    ((btinfo.btui_info & BTI_64_BIT) ? CALLSTACK_64BIT : 0);
+
 	/*
-	 * Ignore EFAULT to get as much of the stack as possible.  It will be
-	 * marked as truncated, below.
+	 * Ignore EFAULT to get as much of the stack as possible.
 	 */
-	if (error == 0 || error == EFAULT) {
+	if (btinfo.btui_error == 0 || btinfo.btui_error == EFAULT) {
 		callstack_fixup_user(cs, thread);
 		cs->kpuc_flags |= CALLSTACK_VALID;
+
+		if (cs->kpuc_nframes < maxnframes &&
+		    btinfo.btui_async_frame_addr != 0) {
+			cs->kpuc_async_index = btinfo.btui_async_start_index;
+			ctl.btc_frame_addr = btinfo.btui_async_frame_addr;
+			ctl.btc_addr_offset = BTCTL_ASYNC_ADDR_OFFSET;
+			maxnframes -= cs->kpuc_nframes;
+			btinfo = BTUINFO_INIT;
+			unsigned int nasync_frames = backtrace_user(
+			    &cs->kpuc_frames[cs->kpuc_nframes], maxnframes, &ctl, &btinfo);
+			if (btinfo.btui_info & BTI_TRUNCATED) {
+				cs->kpuc_flags |= CALLSTACK_TRUNCATED;
+			}
+			if (btinfo.btui_error == 0 || btinfo.btui_error == EFAULT) {
+				cs->kpuc_flags |= CALLSTACK_HAS_ASYNC;
+				cs->kpuc_async_nframes = nasync_frames;
+			}
+		}
 	} else {
 		cs->kpuc_nframes = 0;
-		BUF_INFO(PERF_CS_ERROR, ERR_GETSTACK, error);
+		BUF_INFO(PERF_CS_ERROR, ERR_GETSTACK, btinfo.btui_error);
 	}
-
-	cs->kpuc_flags |= CALLSTACK_KERNEL_WORDS | (user64 ? CALLSTACK_64BIT : 0) |
-	    (trunc ? CALLSTACK_TRUNCATED : 0);
 
 	BUF_INFO(PERF_CS_USAMPLE | DBG_FUNC_END, (uintptr_t)thread_tid(thread),
 	    cs->kpuc_flags, cs->kpuc_nframes);
@@ -391,11 +412,11 @@ scrub_frame(uint64_t *bt, int n_frames, int frame)
 
 static void
 callstack_log(uint32_t hdrid, uint32_t dataid, void *vframes,
-    unsigned int nframes, unsigned int flags)
+    unsigned int nframes, unsigned int flags, unsigned int async_index,
+    unsigned int async_nframes)
 {
 	BUF_VERB(PERF_CS_LOG | DBG_FUNC_START, flags, nframes);
-
-	BUF_DATA(hdrid, flags, nframes);
+	BUF_DATA(hdrid, flags, nframes - async_nframes, async_index, async_nframes);
 
 	unsigned int nevts = nframes / 4;
 	unsigned int ovf = nframes % 4;
@@ -434,14 +455,15 @@ void
 kperf_kcallstack_log(struct kp_kcallstack *cs)
 {
 	callstack_log(PERF_CS_KHDR, PERF_CS_KDATA, cs->kpkc_frames,
-	    cs->kpkc_nframes, cs->kpkc_flags);
+	    cs->kpkc_nframes, cs->kpkc_flags, 0, 0);
 }
 
 void
 kperf_ucallstack_log(struct kp_ucallstack *cs)
 {
 	callstack_log(PERF_CS_UHDR, PERF_CS_UDATA, cs->kpuc_frames,
-	    cs->kpuc_nframes, cs->kpuc_flags);
+	    cs->kpuc_nframes + cs->kpuc_async_nframes, cs->kpuc_flags,
+	    cs->kpuc_async_index, cs->kpuc_async_nframes);
 }
 
 int

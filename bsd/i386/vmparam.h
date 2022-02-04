@@ -29,6 +29,8 @@
 #ifndef _BSD_I386_VMPARAM_H_
 #define _BSD_I386_VMPARAM_H_ 1
 
+#if defined (__i386__) || defined (__x86_64__)
+
 #include <sys/resource.h>
 
 #define USRSTACK        VM_USRSTACK32
@@ -56,5 +58,7 @@
 #ifndef MAXCSIZ
 #define MAXCSIZ         (RLIM_INFINITY)         /* max core size */
 #endif  /* MAXCSIZ */
+
+#endif /* defined (__i386__) || defined (__x86_64__) */
 
 #endif  /* _BSD_I386_VMPARAM_H_ */

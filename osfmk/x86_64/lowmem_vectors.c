@@ -64,19 +64,32 @@
  * system startup time
  */
 
-extern void     *version;
-extern void     *kmod;
-extern void     *kdp_trans_off;
-extern void     *kdp_read_io;
-extern void     *osversion;
-extern void     *flag_kdp_trigger_reboot;
-extern void     *manual_pkt;
-extern void     *kdp_jtag_coredump;
+extern void         *version;
+extern void         *kmod;
+extern void         *kdp_trans_off;
+extern void         *kdp_read_io;
+extern void         *osversion;
+extern void         *flag_kdp_trigger_reboot;
+extern void         *manual_pkt;
+extern void         *kdp_jtag_coredump;
+extern vm_offset_t  c_buffers;
+extern vm_size_t    c_buffers_size;
 
 lowglo lowGlo __attribute__ ((aligned(PAGE_SIZE))) = {
 	.lgVerCode              = { 'C', 'a', 't', 'f', 'i', 's', 'h', ' ' },
 
+	// Increment major version for changes that break the current usage of lowGlow
+	.lgLayoutMajorVersion   = 0,
+	// Increment minor version for changes that provide additional fields but do
+	// not break the current usage of lowGlow
+	.lgLayoutMinorVersion   = 1,
+
+	// Kernel version (not lowglo layout version)
 	.lgVersion              = (uint64_t) &version,
+
+	// Kernel compressor buffers
+	.lgCompressorBufferAddr = (uint64_t) &c_buffers,
+	.lgCompressorSizeAddr   = (uint64_t) &c_buffers_size,
 
 	.lgKmodptr              = (uint64_t) &kmod,
 

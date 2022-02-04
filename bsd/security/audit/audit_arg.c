@@ -51,7 +51,6 @@
 #include <sys/vnode_internal.h>
 #include <sys/user.h>
 #include <sys/syscall.h>
-#include <sys/malloc.h>
 #include <sys/un.h>
 #include <sys/sysent.h>
 #include <sys/sysproto.h>
@@ -212,7 +211,7 @@ audit_arg_suid(struct kaudit_record *ar, uid_t suid)
 }
 
 void
-audit_arg_groupset(struct kaudit_record *ar, gid_t *gidset, u_int gidset_size)
+audit_arg_groupset(struct kaudit_record *ar, const gid_t *gidset, u_int gidset_size)
 {
 	u_int i;
 
@@ -224,14 +223,14 @@ audit_arg_groupset(struct kaudit_record *ar, gid_t *gidset, u_int gidset_size)
 }
 
 void
-audit_arg_login(struct kaudit_record *ar, char *login)
+audit_arg_login(struct kaudit_record *ar, const char *login)
 {
 	strlcpy(ar->k_ar.ar_arg_login, login, MAXLOGNAME);
 	ARG_SET_VALID(ar, ARG_LOGIN);
 }
 
 void
-audit_arg_ctlname(struct kaudit_record *ar, int *name, int namelen)
+audit_arg_ctlname(struct kaudit_record *ar, const int *name, int namelen)
 {
 	bcopy(name, &ar->k_ar.ar_arg_ctlname, namelen * sizeof(int));
 	ar->k_ar.ar_arg_len = namelen;
@@ -302,7 +301,7 @@ audit_arg_process(struct kaudit_record *ar, proc_t p)
 	ar->k_ar.ar_arg_ruid = kauth_cred_getruid(my_cred);
 	ar->k_ar.ar_arg_rgid = kauth_cred_getrgid(my_cred);
 	kauth_cred_unref(&my_cred);
-	ar->k_ar.ar_arg_pid = p->p_pid;
+	ar->k_ar.ar_arg_pid = proc_getpid(p);
 	ARG_SET_VALID(ar, ARG_AUID | ARG_EUID | ARG_EGID | ARG_RUID |
 	    ARG_RGID | ARG_ASID | ARG_TERMID_ADDR | ARG_PID | ARG_PROCESS);
 }
@@ -385,7 +384,7 @@ audit_arg_auid(struct kaudit_record *ar, uid_t auid)
 }
 
 void
-audit_arg_auditinfo(struct kaudit_record *ar, struct auditinfo *au_info)
+audit_arg_auditinfo(struct kaudit_record *ar, const struct auditinfo *au_info)
 {
 	ar->k_ar.ar_arg_auid = au_info->ai_auid;
 	ar->k_ar.ar_arg_asid = au_info->ai_asid;
@@ -398,7 +397,7 @@ audit_arg_auditinfo(struct kaudit_record *ar, struct auditinfo *au_info)
 
 void
 audit_arg_auditinfo_addr(struct kaudit_record *ar,
-    struct auditinfo_addr *au_info)
+    const struct auditinfo_addr *au_info)
 {
 	ar->k_ar.ar_arg_auid = au_info->ai_auid;
 	ar->k_ar.ar_arg_asid = au_info->ai_asid;
@@ -414,7 +413,7 @@ audit_arg_auditinfo_addr(struct kaudit_record *ar,
 }
 
 void
-audit_arg_text(struct kaudit_record *ar, char *text)
+audit_arg_text(struct kaudit_record *ar, const char *text)
 {
 	KASSERT(text != NULL, ("audit_arg_text: text == NULL"));
 
@@ -425,8 +424,7 @@ audit_arg_text(struct kaudit_record *ar, char *text)
 	}
 
 	if (ar->k_ar.ar_arg_text == NULL) {
-		ar->k_ar.ar_arg_text = malloc(MAXPATHLEN, M_AUDITTEXT,
-		    M_WAITOK);
+		ar->k_ar.ar_arg_text = zalloc(ZV_NAMEI);
 	}
 
 	strlcpy(ar->k_ar.ar_arg_text, text, MAXPATHLEN);
@@ -434,7 +432,7 @@ audit_arg_text(struct kaudit_record *ar, char *text)
 }
 
 void
-audit_arg_opaque(struct kaudit_record *ar, void *data, size_t size)
+audit_arg_opaque(struct kaudit_record *ar, const void *data, size_t size)
 {
 	KASSERT(data != NULL, ("audit_arg_opaque: data == NULL"));
 	KASSERT(size <= UINT16_MAX, ("audit_arg_opaque: size > UINT16_MAX"));
@@ -444,8 +442,12 @@ audit_arg_opaque(struct kaudit_record *ar, void *data, size_t size)
 	}
 
 	if (ar->k_ar.ar_arg_opaque == NULL) {
-		ar->k_ar.ar_arg_opaque = malloc(size, M_AUDITDATA, M_WAITOK);
+		ar->k_ar.ar_arg_opaque = kalloc_data(size, Z_WAITOK);
 	} else {
+		return;
+	}
+
+	if (ar->k_ar.ar_arg_opaque == NULL) {
 		return;
 	}
 
@@ -455,7 +457,7 @@ audit_arg_opaque(struct kaudit_record *ar, void *data, size_t size)
 }
 
 void
-audit_arg_data(struct kaudit_record *ar, void *data, size_t size, size_t number)
+audit_arg_data(struct kaudit_record *ar, const void *data, size_t size, size_t number)
 {
 	size_t sz;
 
@@ -473,8 +475,12 @@ audit_arg_data(struct kaudit_record *ar, void *data, size_t size, size_t number)
 	sz = size * number;
 
 	if (ar->k_ar.ar_arg_data == NULL) {
-		ar->k_ar.ar_arg_data = malloc(sz, M_AUDITDATA, M_WAITOK);
+		ar->k_ar.ar_arg_data = kalloc_data(sz, Z_WAITOK);
 	} else {
+		return;
+	}
+
+	if (ar->k_ar.ar_arg_data == NULL) {
 		return;
 	}
 
@@ -498,7 +504,7 @@ audit_arg_data(struct kaudit_record *ar, void *data, size_t size, size_t number)
 		break;
 
 	default:
-		free(ar->k_ar.ar_arg_data, M_AUDITDATA);
+		kfree_data(ar->k_ar.ar_arg_data, sz);
 		ar->k_ar.ar_arg_data = NULL;
 		return;
 	}
@@ -523,7 +529,7 @@ audit_arg_svipc_cmd(struct kaudit_record *ar, int cmd)
 }
 
 void
-audit_arg_svipc_perm(struct kaudit_record *ar, struct ipc_perm *perm)
+audit_arg_svipc_perm(struct kaudit_record *ar, const struct ipc_perm *perm)
 {
 	bcopy(perm, &ar->k_ar.ar_arg_svipc_perm,
 	    sizeof(ar->k_ar.ar_arg_svipc_perm));
@@ -555,9 +561,9 @@ audit_arg_posix_ipc_perm(struct kaudit_record *ar, uid_t uid, gid_t gid,
 }
 
 void
-audit_arg_auditon(struct kaudit_record *ar, union auditon_udata *udata)
+audit_arg_auditon(struct kaudit_record *ar, const union auditon_udata *udata)
 {
-	bcopy((void *)udata, &ar->k_ar.ar_arg_auditon,
+	bcopy((const void *)udata, &ar->k_ar.ar_arg_auditon,
 	    sizeof(ar->k_ar.ar_arg_auditon));
 	ARG_SET_VALID(ar, ARG_AUDITON);
 }
@@ -645,7 +651,7 @@ audit_arg_file(struct kaudit_record *ar, __unused proc_t p,
  * XXXAUDIT: Possibly assert that the memory isn't already allocated?
  */
 void
-audit_arg_upath(struct kaudit_record *ar, struct vnode *cwd_vp, char *upath, u_int64_t flag)
+audit_arg_upath(struct kaudit_record *ar, struct vnode *cwd_vp, const char *upath, u_int64_t flag)
 {
 	char **pathp;
 
@@ -662,7 +668,7 @@ audit_arg_upath(struct kaudit_record *ar, struct vnode *cwd_vp, char *upath, u_i
 	}
 
 	if (*pathp == NULL) {
-		*pathp = malloc(MAXPATHLEN, M_AUDITPATH, M_WAITOK);
+		*pathp = zalloc(ZV_NAMEI);
 	} else {
 		return;
 	}
@@ -670,13 +676,13 @@ audit_arg_upath(struct kaudit_record *ar, struct vnode *cwd_vp, char *upath, u_i
 	if (audit_canon_path(cwd_vp, upath, *pathp) == 0) {
 		ARG_SET_VALID(ar, flag);
 	} else {
-		free(*pathp, M_AUDITPATH);
+		zfree(ZV_NAMEI, *pathp);
 		*pathp = NULL;
 	}
 }
 
 void
-audit_arg_kpath(struct kaudit_record *ar, char *kpath, u_int64_t flag)
+audit_arg_kpath(struct kaudit_record *ar, const char *kpath, u_int64_t flag)
 {
 	char **pathp;
 
@@ -693,7 +699,7 @@ audit_arg_kpath(struct kaudit_record *ar, char *kpath, u_int64_t flag)
 	}
 
 	if (*pathp == NULL) {
-		*pathp = malloc(MAXPATHLEN, M_AUDITPATH, M_WAITOK);
+		*pathp = zalloc(ZV_NAMEI);
 	} else {
 		return;
 	}
@@ -764,7 +770,7 @@ audit_arg_vnpath(struct kaudit_record *ar, struct vnode *vp, u_int64_t flags)
 	}
 
 	if (*pathp == NULL) {
-		*pathp = malloc(MAXPATHLEN, M_AUDITPATH, M_WAITOK);
+		*pathp = zalloc(ZV_NAMEI);
 	} else {
 		return;
 	}
@@ -782,7 +788,7 @@ audit_arg_vnpath(struct kaudit_record *ar, struct vnode *vp, u_int64_t flags)
 			ARG_SET_VALID(ar, ARG_KPATH2);
 		}
 	} else {
-		free(*pathp, M_AUDITPATH);
+		zfree(ZV_NAMEI, *pathp);
 		*pathp = NULL;
 	}
 
@@ -802,11 +808,12 @@ audit_arg_vnpath(struct kaudit_record *ar, struct vnode *vp, u_int64_t flags)
 
 #if CONFIG_MACF
 	if (*vnode_mac_labelp == NULL && (vp->v_lflag & VL_LABELED) == VL_LABELED) {
-		*vnode_mac_labelp = (char *)zalloc(audit_mac_label_zone);
-		if (*vnode_mac_labelp != NULL) {
-			mac.m_buflen = MAC_AUDIT_LABEL_LEN;
-			mac.m_string = *vnode_mac_labelp;
-			mac_vnode_label_externalize_audit(vp, &mac);
+		*vnode_mac_labelp = zalloc_flags(audit_mac_label_zone,
+		    Z_WAITOK | Z_NOFAIL);
+		mac.m_buflen = MAC_AUDIT_LABEL_LEN;
+		mac.m_string = *vnode_mac_labelp;
+		if (mac_vnode_label_externalize_audit(vp, &mac)) {
+			return;
 		}
 	}
 #endif
@@ -857,15 +864,20 @@ audit_arg_mach_port2(struct kaudit_record *ar, mach_port_name_t port)
  * Audit the argument strings passed to exec.
  */
 void
-audit_arg_argv(struct kaudit_record *ar, char *argv, int argc, size_t length)
+audit_arg_argv(struct kaudit_record *ar, const char *argv, int argc, size_t length)
 {
 	if (audit_argv == 0 || argc == 0) {
 		return;
 	}
 
 	if (ar->k_ar.ar_arg_argv == NULL) {
-		ar->k_ar.ar_arg_argv = malloc(length, M_AUDITTEXT, M_WAITOK);
+		ar->k_ar.ar_arg_argv = kalloc_data(length, Z_WAITOK);
 	}
+
+	if (ar->k_ar.ar_arg_argv == NULL) {
+		return;
+	}
+
 	bcopy(argv, ar->k_ar.ar_arg_argv, length);
 	ar->k_ar.ar_arg_argc = argc;
 	ARG_SET_VALID(ar, ARG_ARGV);
@@ -875,15 +887,20 @@ audit_arg_argv(struct kaudit_record *ar, char *argv, int argc, size_t length)
  * Audit the environment strings passed to exec.
  */
 void
-audit_arg_envv(struct kaudit_record *ar, char *envv, int envc, size_t length)
+audit_arg_envv(struct kaudit_record *ar, const char *envv, int envc, size_t length)
 {
 	if (audit_arge == 0 || envc == 0) {
 		return;
 	}
 
 	if (ar->k_ar.ar_arg_envv == NULL) {
-		ar->k_ar.ar_arg_envv = malloc(length, M_AUDITTEXT, M_WAITOK);
+		ar->k_ar.ar_arg_envv = kalloc_data(length, Z_WAITOK);
 	}
+
+	if (ar->k_ar.ar_arg_envv == NULL) {
+		return;
+	}
+
 	bcopy(envv, ar->k_ar.ar_arg_envv, length);
 	ar->k_ar.ar_arg_envc = envc;
 	ARG_SET_VALID(ar, ARG_ENVV);
@@ -921,17 +938,17 @@ audit_identity_info_destruct(struct au_identity_info *id_info)
 	}
 
 	if (id_info->signing_id != NULL) {
-		free(id_info->signing_id, M_AUDITTEXT);
+		kfree_data(id_info->signing_id, MAX_AU_IDENTITY_SIGNING_ID_LENGTH);
 		id_info->signing_id = NULL;
 	}
 
 	if (id_info->team_id != NULL) {
-		free(id_info->team_id, M_AUDITTEXT);
+		kfree_data(id_info->team_id, MAX_AU_IDENTITY_TEAM_ID_LENGTH);
 		id_info->team_id = NULL;
 	}
 
 	if (id_info->cdhash != NULL) {
-		free(id_info->cdhash, M_AUDITDATA);
+		kfree_data(id_info->cdhash, id_info->cdhash_len);
 		id_info->cdhash = NULL;
 	}
 }
@@ -959,37 +976,31 @@ audit_identity_info_construct(struct au_identity_info *id_info)
 	id_info->signer_type = signer_type;
 
 	if (id_info->signing_id == NULL && signing_id != NULL) {
-		id_info->signing_id = malloc( MAX_AU_IDENTITY_SIGNING_ID_LENGTH,
-		    M_AUDITTEXT, M_WAITOK);
-		if (id_info->signing_id != NULL) {
-			src_len = strlcpy(id_info->signing_id,
-			    signing_id, MAX_AU_IDENTITY_SIGNING_ID_LENGTH);
+		id_info->signing_id = kalloc_data(MAX_AU_IDENTITY_SIGNING_ID_LENGTH,
+		    Z_WAITOK | Z_NOFAIL);
+		src_len = strlcpy(id_info->signing_id,
+		    signing_id, MAX_AU_IDENTITY_SIGNING_ID_LENGTH);
 
-			if (src_len >= MAX_AU_IDENTITY_SIGNING_ID_LENGTH) {
-				id_info->signing_id_trunc = 1;
-			}
+		if (src_len >= MAX_AU_IDENTITY_SIGNING_ID_LENGTH) {
+			id_info->signing_id_trunc = 1;
 		}
 	}
 
 	if (id_info->team_id == NULL && team_id != NULL) {
-		id_info->team_id = malloc(MAX_AU_IDENTITY_TEAM_ID_LENGTH,
-		    M_AUDITTEXT, M_WAITOK);
-		if (id_info->team_id != NULL) {
-			src_len = strlcpy(id_info->team_id, team_id,
-			    MAX_AU_IDENTITY_TEAM_ID_LENGTH);
+		id_info->team_id = kalloc_data(MAX_AU_IDENTITY_TEAM_ID_LENGTH,
+		    Z_WAITOK | Z_NOFAIL);
+		src_len = strlcpy(id_info->team_id, team_id,
+		    MAX_AU_IDENTITY_TEAM_ID_LENGTH);
 
-			if (src_len >= MAX_AU_IDENTITY_TEAM_ID_LENGTH) {
-				id_info->team_id_trunc = 1;
-			}
+		if (src_len >= MAX_AU_IDENTITY_TEAM_ID_LENGTH) {
+			id_info->team_id_trunc = 1;
 		}
 	}
 
 	if (id_info->cdhash == NULL && cdhash != NULL) {
-		id_info->cdhash = malloc(CS_CDHASH_LEN, M_AUDITDATA, M_WAITOK);
-		if (id_info->cdhash != NULL) {
-			memcpy(id_info->cdhash, cdhash, CS_CDHASH_LEN);
-			id_info->cdhash_len = CS_CDHASH_LEN;
-		}
+		id_info->cdhash = kalloc_data(CS_CDHASH_LEN, Z_WAITOK | Z_NOFAIL);
+		memcpy(id_info->cdhash, cdhash, CS_CDHASH_LEN);
+		id_info->cdhash_len = CS_CDHASH_LEN;
 	}
 }
 

@@ -34,6 +34,8 @@ _OSMalloc_Tagalloc:_OSMalloc_Tagalloc_external
 _OSMalloc_Tagfree:_OSMalloc_Tagfree_external
 _OSMalloc_noblock:_OSMalloc_noblock_external
 _OSMalloc_nowait:_OSMalloc_nowait_external
+_OSObject_typed_operator_new
+_OSObject_typed_operator_delete
 _OSReportWithBacktrace
 _OSTestAndClear
 _OSTestAndSet
@@ -185,6 +187,7 @@ __ZN12OSOrderedSet10superClassE
 __ZN12OSOrderedSet11orderObjectEPK15OSMetaClassBase
 __ZN12OSOrderedSet12removeObjectEPK15OSMetaClassBase
 __ZN12OSOrderedSet12removeObjectERK11OSSharedPtrIK15OSMetaClassBaseE
+__ZN12OSOrderedSet12withCapacityEjU13block_pointerFiPK15OSMetaClassBaseS2_E
 __ZN12OSOrderedSet13setLastObjectEPK15OSMetaClassBase
 __ZN12OSOrderedSet13setLastObjectERK11OSSharedPtrIK15OSMetaClassBaseE
 __ZN12OSOrderedSet14copyCollectionEP12OSDictionary
@@ -408,6 +411,7 @@ __ZN8OSString10gMetaClassE
 __ZN8OSString10superClassE
 __ZN8OSString10withStringEPKS_
 __ZN8OSString11withCStringEPKc
+__ZN8OSString11withCStringEPKcm
 __ZN8OSString14initWithStringEPKS_
 __ZN8OSString15initWithCStringEPKc
 __ZN8OSString17withCStringNoCopyEPKc
@@ -681,6 +685,7 @@ __os_log_default
 __os_log_internal
 _adler32
 _atoi
+_amfi_interface_register
 _bcmp
 _bcopy
 _bcopy_phys
@@ -690,6 +695,8 @@ _copyin
 _copyinstr
 _copyout
 _copyoutstr
+_core_analytics_hub_register
+_coretrust_interface_register
 _crc32
 _debug_ivars_size
 _deflate
@@ -770,6 +777,7 @@ _lck_spin_try_lock_grp
 _lck_spin_unlock
 _memcmp
 _memcpy
+_memchr
 _memmove
 _memset
 _memset_s
@@ -778,6 +786,7 @@ _ml_get_interrupts_enabled
 _ml_set_interrupts_enabled
 _os_log_coprocessor
 _os_log_coprocessor_register
+_os_log_coprocessor_register_with_type
 _os_log_create
 _os_log_debug_enabled
 _os_log_info_enabled

@@ -119,6 +119,7 @@ struct  sigacts {
  * get signal action for process and signal; currently only for current process
  */
 #define SIGACTION(p, sig)       (p->p_sigacts->ps_sigact[(sig)])
+#define SIGTRAMP(p, sig)        (p->p_sigacts->ps_trampact[(sig)])
 
 /*
  *	Check for per-process and per thread signals.
@@ -199,8 +200,6 @@ int sigprop[NSIG] = {
 	                 sigmask(SIGFPE) | sigmask(SIGBUS)  | sigmask(SIGSEGV) | \
 	                 sigmask(SIGSYS))
 
-extern unsigned sigrestrict_arg;
-
 /*
  * Machine-independent functions:
  */
@@ -233,13 +232,13 @@ void    psignal_try_thread_with_reason(proc_t, thread_t, int, struct os_reason*)
 void    psignal_thread_with_reason(proc_t, thread_t, int, struct os_reason*);
 void    psignal_uthread(thread_t, int);
 void    pgsignal(struct pgrp *pgrp, int sig, int checkctty);
-void    tty_pgsignal(struct tty * tp, int sig, int checkctty);
+void    tty_pgsignal_locked(struct tty * tp, int sig, int checkctty);
 void    threadsignal(thread_t sig_actthread, int signum,
     mach_exception_code_t code, boolean_t set_exitreason);
 int     thread_issignal(proc_t p, thread_t th, sigset_t mask);
 void    psignal_vfork(struct proc *p, task_t new_task, thread_t thread,
     int signum);
-void psignal_vfork_with_reason(proc_t p, task_t new_task, thread_t thread,
+void    psignal_vfork_with_reason(proc_t p, task_t new_task, thread_t thread,
     int signum, struct os_reason *signal_reason);
 void    signal_setast(thread_t sig_actthread);
 void    pgsigio(pid_t pgid, int signalnum);

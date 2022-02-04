@@ -57,6 +57,8 @@
 #ifndef	_ARM_ASM_H_
 #define	_ARM_ASM_H_
 
+#if defined (__arm__) || defined (__arm64__)
+
 #include <arm/arch.h>
 
 #define FRAME	pushl %ebp; movl %esp, %ebp
@@ -316,5 +318,7 @@ SHIM_LABEL(__LINE__):
 SHIM_LABEL(__LINE__):
 
 #endif /* ASSEMBLER */
+
+#endif /* defined (__arm__) || defined (__arm64__) */
 
 #endif /* _ARM_ASM_H_ */

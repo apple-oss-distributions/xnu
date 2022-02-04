@@ -130,6 +130,9 @@ typedef uint32_t ast_t;
 #define AST_KEVENT              0x80000
 #define AST_REBALANCE           0x100000 /* thread context switched due to rebalancing */
 #define AST_UNQUIESCE           0x200000 /* catch unquiesced processor before returning to userspace */
+#define AST_PROC_RESOURCE       0x400000 /* port space and/or file descriptor table has reached its limits */
+#define AST_DEBUG_ASSERT        0x800000 /* check debug assertion */
+#define AST_TELEMETRY_MACF      0x1000000 /* telemetry sample requested by MAC framework */
 
 #define AST_NONE                0x00
 #define AST_ALL                 (~AST_NONE)
@@ -138,11 +141,11 @@ typedef uint32_t ast_t;
 #define AST_PREEMPTION  (AST_PREEMPT | AST_QUANTUM | AST_URGENT)
 
 #define AST_TELEMETRY_ALL (AST_TELEMETRY_USER | AST_TELEMETRY_KERNEL | \
-	        AST_TELEMETRY_PMI | AST_TELEMETRY_IO)
+	        AST_TELEMETRY_PMI | AST_TELEMETRY_IO | AST_TELEMETRY_MACF)
 
 /* Per-thread ASTs follow the thread at context-switch time. */
 #define AST_PER_THREAD  (AST_APC | AST_BSD | AST_MACF | AST_RESET_PCS | \
-	AST_ARCADE | AST_LEDGER | AST_GUARD | AST_TELEMETRY_ALL | AST_KEVENT)
+	AST_ARCADE | AST_LEDGER | AST_GUARD | AST_TELEMETRY_ALL | AST_KEVENT | AST_PROC_RESOURCE | AST_DEBUG_ASSERT)
 
 /* Handle AST_URGENT detected while in the kernel */
 extern void ast_taken_kernel(void);
@@ -174,6 +177,12 @@ extern void ast_context(thread_t thread);
 /* Propagate ASTs set on a thread to the current processor */
 extern void ast_propagate(thread_t thread);
 
+/* Prepare for an AST "ack" scheme */
+extern unsigned long ast_generation_get(void);
+
+/* Wait for an AST generation "ack" to pass */
+extern void ast_generation_wait(unsigned long gen, int cpu_num);
+
 /*
  *	Set an AST on a thread with thread_ast_set.
  *
@@ -184,11 +193,13 @@ extern void ast_propagate(thread_t thread);
  */
 #define thread_ast_set(act, reason)     ((void)os_atomic_or(&(act)->ast, (reason), relaxed))
 #define thread_ast_clear(act, reason)   ((void)os_atomic_andnot(&(act)->ast, (reason), relaxed))
+#define thread_ast_peek(act, reason)    (os_atomic_load(&(act)->ast, relaxed) & (reason))
 
 #ifdef MACH_BSD
 
 extern void act_set_astbsd(thread_t);
 extern void bsd_ast(thread_t);
+extern void proc_filedesc_ast(task_t task);
 
 #endif /* MACH_BSD */
 
@@ -197,9 +208,17 @@ extern void ast_dtrace_on(void);
 extern void dtrace_ast(void);
 #endif /* CONFIG_DTRACE */
 
+/* These are kept in sync with bsd/kern/ast.h */
+#define AST_KEVENT_RETURN_TO_KERNEL  0x0001
+#define AST_KEVENT_REDRIVE_THREADREQ 0x0002
+#define AST_KEVENT_WORKQ_QUANTUM_EXPIRED 0x0004
+
 extern void kevent_ast(thread_t thread, uint16_t bits);
 extern void act_set_astkevent(thread_t thread, uint16_t bits);
 extern uint16_t act_clear_astkevent(thread_t thread, uint16_t bits);
-extern void act_set_ast_reset_pcs(thread_t thread);
+extern int  act_set_ast_reset_pcs(thread_t thread);
+extern void task_filedesc_ast(task_t task, int current_size, int soft_limit, int hard_limit);
+extern void act_set_debug_assert(void);
 
+extern void thread_debug_return_to_user_ast(thread_t thread);
 #endif  /* _KERN_AST_H_ */

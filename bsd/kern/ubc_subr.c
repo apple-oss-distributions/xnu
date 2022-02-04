@@ -78,6 +78,7 @@
 #include <security/mac_framework.h>
 #include <stdbool.h>
 #include <stdatomic.h>
+#include <libkern/amfi/amfi.h>
 
 /* XXX These should be in a BSD accessible Mach header, but aren't. */
 extern kern_return_t memory_object_pages_resident(memory_object_control_t,
@@ -91,16 +92,6 @@ extern void             memory_object_mark_trusted(
 /* XXX Same for those. */
 
 extern void Debugger(const char *message);
-
-
-/* XXX no one uses this interface! */
-kern_return_t ubc_page_op_with_control(
-	memory_object_control_t  control,
-	off_t                    f_offset,
-	int                      ops,
-	ppnum_t                  *phys_entryp,
-	int                      *flagsp);
-
 
 #if DIAGNOSTIC
 #if defined(assert)
@@ -121,13 +112,16 @@ static boolean_t ubc_cs_supports_multilevel_hash(struct cs_blob *blob);
 static kern_return_t ubc_cs_convert_to_multilevel_hash(struct cs_blob *blob);
 
 ZONE_DECLARE(ubc_info_zone, "ubc_info zone", sizeof(struct ubc_info),
-    ZC_NOENCRYPT | ZC_ZFREE_CLEARMEM);
+    ZC_ZFREE_CLEARMEM);
 static uint32_t cs_blob_generation_count = 1;
 
 /*
  * CODESIGNING
  * Routines to navigate code signing data structures in the kernel...
  */
+
+ZONE_DECLARE(cs_blob_zone, "cs_blob zone", sizeof(struct cs_blob),
+    ZC_ZFREE_CLEARMEM);
 
 extern int cs_debug;
 
@@ -517,7 +511,8 @@ cs_validate_csblob(
 	const uint8_t *addr,
 	const size_t blob_size,
 	const CS_CodeDirectory **rcd,
-	const CS_GenericBlob **rentitlements)
+	const CS_GenericBlob **rentitlements,
+	const CS_GenericBlob **rder_entitlements)
 {
 	const CS_GenericBlob *blob;
 	int error;
@@ -525,6 +520,7 @@ cs_validate_csblob(
 
 	*rcd = NULL;
 	*rentitlements = NULL;
+	*rder_entitlements = NULL;
 
 	blob = (const CS_GenericBlob *)(const void *)addr;
 
@@ -616,6 +612,15 @@ cs_validate_csblob(
 					return EBADEXEC;
 				}
 				*rentitlements = subBlob;
+			} else if (type == CSSLOT_DER_ENTITLEMENTS) {
+				if (ntohl(subBlob->magic) != CSMAGIC_EMBEDDED_DER_ENTITLEMENTS) {
+					return EBADEXEC;
+				}
+				if (*rder_entitlements != NULL) {
+					printf("multiple der entitlements blobs\n");
+					return EBADEXEC;
+				}
+				*rder_entitlements = subBlob;
 			}
 		}
 
@@ -689,6 +694,10 @@ csblob_find_blob_bytes(const uint8_t *addr, size_t length, uint32_t type, uint32
 {
 	const CS_GenericBlob *blob = (const CS_GenericBlob *)(const void *)addr;
 
+	if ((addr + length) < addr) {
+		panic("CODE SIGNING: CS Blob length overflow for addr: %p", addr);
+	}
+
 	if (ntohl(blob->magic) == CSMAGIC_EMBEDDED_SIGNATURE) {
 		const CS_SuperBlob *sb = (const CS_SuperBlob *)blob;
 		size_t n, count = ntohl(sb->count);
@@ -705,11 +714,20 @@ csblob_find_blob_bytes(const uint8_t *addr, size_t length, uint32_t type, uint32
 			if (ntohl(blob->magic) != magic) {
 				continue;
 			}
+			if (((vm_address_t)blob + ntohl(blob->length)) < (vm_address_t)blob) {
+				panic("CODE SIGNING: CS Blob length overflow for blob at: %p", blob);
+			} else if (((vm_address_t)blob + ntohl(blob->length)) > (vm_address_t)(addr + length)) {
+				continue;
+			}
 			return blob;
 		}
-	} else if (type == CSSLOT_CODEDIRECTORY
-	    && ntohl(blob->magic) == CSMAGIC_CODEDIRECTORY
+	} else if (type == CSSLOT_CODEDIRECTORY && ntohl(blob->magic) == CSMAGIC_CODEDIRECTORY
 	    && magic == CSMAGIC_CODEDIRECTORY) {
+		if (((vm_address_t)blob + ntohl(blob->length)) < (vm_address_t)blob) {
+			panic("CODE SIGNING: CS Blob length overflow for code directory blob at: %p", blob);
+		} else if (((vm_address_t)blob + ntohl(blob->length)) > (vm_address_t)(addr + length)) {
+			return NULL;
+		}
 		return blob;
 	}
 	return NULL;
@@ -777,6 +795,11 @@ csblob_get_entitlements(struct cs_blob *csblob, void **out_start, size_t *out_le
 	}
 
 	csblob->csb_hashtype->cs_init(&context);
+	ptrauth_utils_auth_blob_generic(entitlements,
+	    ntohl(entitlements->length),
+	    OS_PTRAUTH_DISCRIMINATOR("cs_blob.csb_entitlements_blob_signature"),
+	    PTRAUTH_ADDR_DIVERSIFY,
+	    csblob->csb_entitlements_blob_signature);
 	csblob->csb_hashtype->cs_update(&context, entitlements, ntohl(entitlements->length));
 	csblob->csb_hashtype->cs_final(computed_hash, &context);
 
@@ -787,6 +810,72 @@ csblob_get_entitlements(struct cs_blob *csblob, void **out_start, size_t *out_le
 	*out_start = __DECONST(void *, entitlements);
 	*out_length = ntohl(entitlements->length);
 
+	return 0;
+}
+
+int
+csblob_get_der_entitlements(struct cs_blob *csblob, const CS_GenericBlob **out_start, size_t *out_length)
+{
+	uint8_t computed_hash[CS_HASH_MAX_SIZE];
+	const CS_GenericBlob *der_entitlements;
+	const CS_CodeDirectory *code_dir;
+	const uint8_t *embedded_hash;
+	union cs_hash_union context;
+
+	*out_start = NULL;
+	*out_length = 0;
+
+	if (csblob->csb_hashtype == NULL || csblob->csb_hashtype->cs_digest_size > sizeof(computed_hash)) {
+		return EBADEXEC;
+	}
+
+	code_dir = csblob->csb_cd;
+
+	if ((csblob->csb_flags & CS_VALID) == 0) {
+		der_entitlements = NULL;
+	} else {
+		der_entitlements = csblob->csb_der_entitlements_blob;
+	}
+	embedded_hash = find_special_slot(code_dir, csblob->csb_hashtype->cs_size, CSSLOT_DER_ENTITLEMENTS);
+
+	if (embedded_hash == NULL) {
+		if (der_entitlements) {
+			return EBADEXEC;
+		}
+		return 0;
+	} else if (der_entitlements == NULL) {
+		if (memcmp(embedded_hash, cshash_zero, csblob->csb_hashtype->cs_size) != 0) {
+			return EBADEXEC;
+		} else {
+			return 0;
+		}
+	}
+
+	csblob->csb_hashtype->cs_init(&context);
+	ptrauth_utils_auth_blob_generic(der_entitlements,
+	    ntohl(der_entitlements->length),
+	    OS_PTRAUTH_DISCRIMINATOR("cs_blob.csb_der_entitlements_blob_signature"),
+	    PTRAUTH_ADDR_DIVERSIFY,
+	    csblob->csb_der_entitlements_blob_signature);
+	csblob->csb_hashtype->cs_update(&context, der_entitlements, ntohl(der_entitlements->length));
+	csblob->csb_hashtype->cs_final(computed_hash, &context);
+
+	if (memcmp(computed_hash, embedded_hash, csblob->csb_hashtype->cs_size) != 0) {
+		return EBADEXEC;
+	}
+
+	*out_start = der_entitlements;
+	*out_length = ntohl(der_entitlements->length);
+
+	return 0;
+}
+
+/*
+ * Register a provisioning profile with a cs_blob.
+ */
+int
+csblob_register_profile(struct cs_blob __unused *csblob, void __unused *profile_addr, vm_size_t __unused profile_size)
+{
 	return 0;
 }
 
@@ -879,8 +968,7 @@ ubc_info_init_internal(vnode_t vp, int withfsize, off_t filesize)
 	 * attach one; otherwise, we will reuse the one that's there.
 	 */
 	if (uip == UBC_INFO_NULL) {
-		uip = (struct ubc_info *) zalloc(ubc_info_zone);
-		bzero((char *)uip, sizeof(struct ubc_info));
+		uip = zalloc_flags(ubc_info_zone, Z_WAITOK | Z_ZERO);
 
 		uip->ui_vnode = vp;
 		uip->ui_flags = UI_INITED;
@@ -992,93 +1080,6 @@ ubc_info_deallocate(struct ubc_info *uip)
 	ubc_info_free(uip);
 }
 
-errno_t
-mach_to_bsd_errno(kern_return_t mach_err)
-{
-	switch (mach_err) {
-	case KERN_SUCCESS:
-		return 0;
-
-	case KERN_INVALID_ADDRESS:
-	case KERN_INVALID_ARGUMENT:
-	case KERN_NOT_IN_SET:
-	case KERN_INVALID_NAME:
-	case KERN_INVALID_TASK:
-	case KERN_INVALID_RIGHT:
-	case KERN_INVALID_VALUE:
-	case KERN_INVALID_CAPABILITY:
-	case KERN_INVALID_HOST:
-	case KERN_MEMORY_PRESENT:
-	case KERN_INVALID_PROCESSOR_SET:
-	case KERN_INVALID_POLICY:
-	case KERN_ALREADY_WAITING:
-	case KERN_DEFAULT_SET:
-	case KERN_EXCEPTION_PROTECTED:
-	case KERN_INVALID_LEDGER:
-	case KERN_INVALID_MEMORY_CONTROL:
-	case KERN_INVALID_SECURITY:
-	case KERN_NOT_DEPRESSED:
-	case KERN_LOCK_OWNED:
-	case KERN_LOCK_OWNED_SELF:
-		return EINVAL;
-
-	case KERN_PROTECTION_FAILURE:
-	case KERN_NOT_RECEIVER:
-	case KERN_NO_ACCESS:
-	case KERN_POLICY_STATIC:
-		return EACCES;
-
-	case KERN_NO_SPACE:
-	case KERN_RESOURCE_SHORTAGE:
-	case KERN_UREFS_OVERFLOW:
-	case KERN_INVALID_OBJECT:
-		return ENOMEM;
-
-	case KERN_FAILURE:
-		return EIO;
-
-	case KERN_MEMORY_FAILURE:
-	case KERN_POLICY_LIMIT:
-	case KERN_CODESIGN_ERROR:
-		return EPERM;
-
-	case KERN_MEMORY_ERROR:
-		return EBUSY;
-
-	case KERN_ALREADY_IN_SET:
-	case KERN_NAME_EXISTS:
-	case KERN_RIGHT_EXISTS:
-		return EEXIST;
-
-	case KERN_ABORTED:
-		return EINTR;
-
-	case KERN_TERMINATED:
-	case KERN_LOCK_SET_DESTROYED:
-	case KERN_LOCK_UNSTABLE:
-	case KERN_SEMAPHORE_DESTROYED:
-		return ENOENT;
-
-	case KERN_RPC_SERVER_TERMINATED:
-		return ECONNRESET;
-
-	case KERN_NOT_SUPPORTED:
-		return ENOTSUP;
-
-	case KERN_NODE_DOWN:
-		return ENETDOWN;
-
-	case KERN_NOT_WAITING:
-		return ENOENT;
-
-	case KERN_OPERATION_TIMED_OUT:
-		return ETIMEDOUT;
-
-	default:
-		return EIO;
-	}
-}
-
 /*
  * ubc_setsize_ex
  *
@@ -1167,7 +1168,7 @@ ubc_setsize_ex(struct vnode *vp, off_t nsize, ubc_setsize_opts_t opts)
 		kret = ubc_create_upl_kernel(vp, lastpg, PAGE_SIZE, &upl, &pl, UPL_SET_LITE | UPL_WILL_MODIFY, VM_KERN_MEMORY_FILE);
 
 		if (kret != KERN_SUCCESS) {
-			panic("ubc_setsize: ubc_create_upl (error = %d)\n", kret);
+			panic("ubc_setsize: ubc_create_upl (error = %d)", kret);
 		}
 
 		if (upl_valid_page(pl, 0)) {
@@ -1927,7 +1928,7 @@ ubc_map(vnode_t vp, int flags)
 			 * Make sure we get a ref as we can't unwind from here
 			 */
 			if (vnode_ref_ext(vp, 0, VNODE_REF_FORCE)) {
-				panic("%s : VNODE_REF_FORCE failed\n", __FUNCTION__);
+				panic("%s : VNODE_REF_FORCE failed", __FUNCTION__);
 			}
 			/*
 			 * Vnodes that are on "unreliable" media (like disk
@@ -2168,7 +2169,7 @@ ubc_unmap(struct vnode *vp)
 			 * has really changed.
 			 */
 			if (want_fsevent && need_fsevent(FSE_CONTENT_MODIFIED, vp)) {
-				add_fsevent(FSE_CONTENT_MODIFIED, ctx,
+				add_fsevent(FSE_CONTENT_MODIFIED_NO_HLINK, ctx,
 				    FSE_ARG_VNODE, vp,
 				    FSE_ARG_DONE);
 			}
@@ -2553,6 +2554,22 @@ ubc_upl_map(
 	return vm_upl_map(kernel_map, upl, dst_addr);
 }
 
+/*
+ * ubc_upl_map_range:- similar to ubc_upl_map but the focus is on a range
+ * of the UPL. Takes an offset, size, and protection so that only a  part
+ * of the UPL can be mapped with the right protections.
+ */
+kern_return_t
+ubc_upl_map_range(
+	upl_t           upl,
+	vm_offset_t     offset_to_map,
+	vm_size_t       size_to_map,
+	vm_prot_t       prot_to_map,
+	vm_offset_t     *dst_addr)
+{
+	return vm_upl_map_range(kernel_map, upl, offset_to_map, size_to_map, prot_to_map, dst_addr);
+}
+
 
 /*
  * ubc_upl_unmap
@@ -2571,6 +2588,25 @@ ubc_upl_unmap(
 	upl_t   upl)
 {
 	return vm_upl_unmap(kernel_map, upl);
+}
+
+/*
+ * ubc_upl_unmap_range:- similar to ubc_upl_unmap but the focus is
+ * on part of the UPL that is mapped. The offset and size parameter
+ * specifies what part of the UPL needs to be unmapped.
+ *
+ * Note: Currrently offset & size are unused as we always initiate the unmap from the
+ * very beginning of the UPL's mapping and track the mapped size in the UPL. But we
+ * might want to allow unmapping a UPL in the middle, for example, and we can use the
+ * offset + size parameters for that purpose.
+ */
+kern_return_t
+ubc_upl_unmap_range(
+	upl_t   upl,
+	vm_offset_t     offset_to_unmap,
+	vm_size_t       size_to_unmap)
+{
+	return vm_upl_unmap_range(kernel_map, upl, offset_to_unmap, size_to_unmap);
 }
 
 
@@ -2938,14 +2974,30 @@ ubc_cs_blob_allocate(
 	vm_size_t       *blob_size_p)
 {
 	kern_return_t   kr = KERN_FAILURE;
+	vm_size_t               allocation_size = 0;
+
+	if (!blob_addr_p || !blob_size_p) {
+		return KERN_INVALID_ARGUMENT;
+	}
+	allocation_size = *blob_size_p;
 
 	{
-		*blob_addr_p = (vm_offset_t) kalloc_tag(*blob_size_p, VM_KERN_MEMORY_SECURITY);
+		*blob_addr_p = (vm_offset_t) kalloc_tag(allocation_size, VM_KERN_MEMORY_SECURITY);
 
 		if (*blob_addr_p == 0) {
 			kr = KERN_NO_SPACE;
 		} else {
 			kr = KERN_SUCCESS;
+		}
+	}
+
+	if (kr == KERN_SUCCESS) {
+		if (*blob_addr_p) {
+			memset((void*)*blob_addr_p, 0, allocation_size);
+			*blob_size_p = allocation_size;
+		} else {
+			printf("CODE SIGNING: cs_blob allocation returned success, but received a NULL pointer\n");
+			kr = KERN_NO_SPACE;
 		}
 	}
 
@@ -2957,11 +3009,6 @@ ubc_cs_blob_deallocate(
 	vm_offset_t     blob_addr,
 	vm_size_t       blob_size)
 {
-#if PMAP_CS
-	if (blob_size > pmap_cs_blob_limit) {
-		kmem_free(kernel_map, blob_addr, blob_size);
-	} else
-#endif
 	{
 		kfree(blob_addr, blob_size);
 	}
@@ -3048,111 +3095,431 @@ ubc_cs_supports_multilevel_hash(struct cs_blob *blob __unused)
 }
 
 /*
- * Given a cs_blob with an already chosen best code directory, this
- * function allocates memory and copies into it only the blobs that
- * will be needed by the kernel, namely the single chosen code
- * directory (and not any of its alternatives) and the entitlement
- * blob.
+ * Given a validated cs_blob, we reformat the structure to only include
+ * the blobs which are required by the kernel for our current platform.
+ * This saves significant memory with agile signatures.
  *
- * This saves significant memory with agile signatures, and additional
- * memory for 3rd Party Code because we also omit the CMS blob.
+ * To support rewriting the code directory, potentially through
+ * multilevel hashes, we provide a mechanism to allocate a code directory
+ * of a specified size and zero it out --> caller can fill it in.
  *
- * To support multilevel and other potential code directory rewriting,
- * the size of a new code directory can be specified. Since that code
- * directory will replace the existing code directory,
- * ubc_cs_reconstitute_code_signature does not copy the original code
- * directory when a size is given, and the caller must fill it in.
+ * We don't need to perform a lot of overflow checks as the assumption
+ * here is that the cs_blob has already been validated.
  */
 static int
-ubc_cs_reconstitute_code_signature(struct cs_blob const *blob, vm_size_t optional_new_cd_size,
-    vm_address_t *new_blob_addr_p, vm_size_t *new_blob_size_p,
-    CS_CodeDirectory **new_cd_p, CS_GenericBlob const **new_entitlements_p)
+ubc_cs_reconstitute_code_signature(
+	const struct cs_blob * const blob,
+	vm_address_t * const ret_mem_kaddr,
+	vm_size_t * const ret_mem_size,
+	vm_size_t code_directory_size,
+	CS_CodeDirectory ** const code_directory
+	)
 {
-	const CS_CodeDirectory  *old_cd, *cd;
-	CS_CodeDirectory        *new_cd;
-	const CS_GenericBlob *entitlements;
-	vm_offset_t     new_blob_addr;
-	vm_size_t       new_blob_size;
-	vm_size_t       new_cdsize;
-	kern_return_t   kr;
-	int                             error;
+	vm_address_t new_blob_addr = 0;
+	vm_size_t new_blob_size = 0;
+	vm_size_t new_code_directory_size = 0;
+	const CS_GenericBlob *best_code_directory = NULL;
+	const CS_GenericBlob *first_code_directory = NULL;
+	const CS_GenericBlob *der_entitlements_blob = NULL;
+	const CS_GenericBlob *entitlements_blob = NULL;
+	const CS_GenericBlob *cms_blob = NULL;
+	CS_SuperBlob *superblob = NULL;
+	uint32_t num_blobs = 0;
+	uint32_t blob_index = 0;
+	uint32_t blob_offset = 0;
+	kern_return_t ret;
+	int err;
 
-	old_cd = blob->csb_cd;
-
-	new_cdsize = optional_new_cd_size != 0 ? optional_new_cd_size : htonl(old_cd->length);
-
-	new_blob_size  = sizeof(CS_SuperBlob);
-	new_blob_size += sizeof(CS_BlobIndex);
-	new_blob_size += new_cdsize;
-
-	if (blob->csb_entitlements_blob) {
-		/* We need to add a slot for the entitlements */
-		new_blob_size += sizeof(CS_BlobIndex);
-		new_blob_size += ntohl(blob->csb_entitlements_blob->length);
+	if (!blob) {
+		if (cs_debug > 1) {
+			printf("CODE SIGNING: CS Blob passed in is NULL\n");
+		}
+		return EINVAL;
 	}
 
-	kr = ubc_cs_blob_allocate(&new_blob_addr, &new_blob_size);
-	if (kr != KERN_SUCCESS) {
-		if (cs_debug > 1) {
-			printf("CODE SIGNING: Failed to allocate memory for new Code Signing Blob: %d\n",
-			    kr);
+	best_code_directory = (const CS_GenericBlob*)blob->csb_cd;
+	if (!best_code_directory) {
+		/* This case can never happen, and it is a sign of bad things */
+		panic("CODE SIGNING: Validated CS Blob has no code directory");
+	}
+
+	new_code_directory_size = code_directory_size;
+	if (new_code_directory_size == 0) {
+		new_code_directory_size = ntohl(best_code_directory->length);
+	}
+
+	/*
+	 * A code signature can contain multiple code directories, each of which contains hashes
+	 * of pages based on a hashing algorithm. The kernel selects which hashing algorithm is
+	 * the strongest, and consequently, marks one of these code directories as the best
+	 * matched one. More often than not, the best matched one is _not_ the first one.
+	 *
+	 * However, the CMS blob which cryptographically verifies the code signature is only
+	 * signed against the first code directory. Therefore, if the CMS blob is present, we also
+	 * need the first code directory to be able to verify it. Given this, we organize the
+	 * new cs_blob as following order:
+	 *
+	 * 1. best code directory
+	 * 2. DER encoded entitlements blob (if present)
+	 * 3. entitlements blob (if present)
+	 * 4. cms blob (if present)
+	 * 5. first code directory (if not already the best match, and if cms blob is present)
+	 *
+	 * This order is chosen deliberately, as later on, we expect to get rid of the CMS blob
+	 * and the first code directory once their verification is complete.
+	 */
+
+	/* Storage for the super blob header */
+	new_blob_size += sizeof(CS_SuperBlob);
+
+	/* Guaranteed storage for the best code directory */
+	new_blob_size += sizeof(CS_BlobIndex);
+	new_blob_size += new_code_directory_size;
+	num_blobs += 1;
+
+	/* Conditional storage for the DER entitlements blob */
+	der_entitlements_blob = blob->csb_der_entitlements_blob;
+	if (der_entitlements_blob) {
+		ptrauth_utils_auth_blob_generic(der_entitlements_blob,
+		    ntohl(der_entitlements_blob->length),
+		    OS_PTRAUTH_DISCRIMINATOR("cs_blob.csb_der_entitlements_blob_signature"),
+		    PTRAUTH_ADDR_DIVERSIFY,
+		    blob->csb_der_entitlements_blob_signature);
+
+		new_blob_size += sizeof(CS_BlobIndex);
+		new_blob_size += ntohl(der_entitlements_blob->length);
+		num_blobs += 1;
+	}
+
+	/* Conditional storage for the entitlements blob */
+	entitlements_blob = blob->csb_entitlements_blob;
+	if (entitlements_blob) {
+		ptrauth_utils_auth_blob_generic(entitlements_blob,
+		    ntohl(entitlements_blob->length),
+		    OS_PTRAUTH_DISCRIMINATOR("cs_blob.csb_entitlements_blob_signature"),
+		    PTRAUTH_ADDR_DIVERSIFY,
+		    blob->csb_entitlements_blob_signature);
+
+		new_blob_size += sizeof(CS_BlobIndex);
+		new_blob_size += ntohl(entitlements_blob->length);
+		num_blobs += 1;
+	}
+
+	/* Conditional storage for the CMS blob */
+	cms_blob = csblob_find_blob_bytes((const uint8_t *)blob->csb_mem_kaddr, blob->csb_mem_size, CSSLOT_SIGNATURESLOT, CSMAGIC_BLOBWRAPPER);
+	if (cms_blob) {
+		new_blob_size += sizeof(CS_BlobIndex);
+		new_blob_size += ntohl(cms_blob->length);
+		num_blobs += 1;
+	}
+
+	/*
+	 * Conditional storage for the first code directory.
+	 * This is only needed if a CMS blob exists and the best code directory isn't already
+	 * the first one. It is an error if we find a CMS blob but do not find a first code directory.
+	 */
+	if (cms_blob) {
+		first_code_directory = csblob_find_blob_bytes((const uint8_t *)blob->csb_mem_kaddr, blob->csb_mem_size, CSSLOT_CODEDIRECTORY, CSMAGIC_CODEDIRECTORY);
+		if (first_code_directory == best_code_directory) {
+			/* We don't need the first code directory anymore, since the best one is already it */
+			first_code_directory = NULL;
+		} else if (first_code_directory) {
+			new_blob_size += sizeof(CS_BlobIndex);
+			new_blob_size += ntohl(first_code_directory->length);
+			num_blobs += 1;
+		} else {
+			printf("CODE SIGNING: Invalid CS Blob: found CMS blob but not a first code directory\n");
+			return EINVAL;
 		}
+	}
+
+	/*
+	 * The blob size could be rouded up to page size here, so we keep a copy
+	 * of the actual superblob length as well.
+	 */
+	vm_size_t new_blob_allocation_size = new_blob_size;
+	ret = ubc_cs_blob_allocate(&new_blob_addr, &new_blob_allocation_size);
+	if (ret != KERN_SUCCESS) {
+		printf("CODE SIGNING: Failed to allocate memory for new code signing blob: %d\n", ret);
 		return ENOMEM;
 	}
 
-	CS_SuperBlob            *new_superblob;
+	/*
+	 * Fill out the superblob header and then all the blobs in the order listed
+	 * above.
+	 */
+	superblob = (CS_SuperBlob*)new_blob_addr;
+	superblob->magic = htonl(CSMAGIC_EMBEDDED_SIGNATURE);
+	superblob->length = htonl((uint32_t)new_blob_size);
+	superblob->count = htonl(num_blobs);
 
-	new_superblob = (CS_SuperBlob *)new_blob_addr;
-	new_superblob->magic = htonl(CSMAGIC_EMBEDDED_SIGNATURE);
-	new_superblob->length = htonl((uint32_t)new_blob_size);
-	if (blob->csb_entitlements_blob) {
-		vm_size_t                       ent_offset, cd_offset;
+	blob_index = 0;
+	blob_offset = sizeof(CS_SuperBlob) + (num_blobs * sizeof(CS_BlobIndex));
 
-		cd_offset  = sizeof(CS_SuperBlob) + 2 * sizeof(CS_BlobIndex);
-		ent_offset = cd_offset +  new_cdsize;
-
-		new_superblob->count = htonl(2);
-		new_superblob->index[0].type = htonl(CSSLOT_CODEDIRECTORY);
-		new_superblob->index[0].offset = htonl((uint32_t)cd_offset);
-		new_superblob->index[1].type = htonl(CSSLOT_ENTITLEMENTS);
-		new_superblob->index[1].offset = htonl((uint32_t)ent_offset);
-
-		memcpy((void *)(new_blob_addr + ent_offset), blob->csb_entitlements_blob, ntohl(blob->csb_entitlements_blob->length));
-
-		new_cd = (CS_CodeDirectory *)(new_blob_addr + cd_offset);
+	/* Best code directory */
+	superblob->index[blob_index].offset = htonl(blob_offset);
+	if (first_code_directory) {
+		superblob->index[blob_index].type = htonl(CSSLOT_ALTERNATE_CODEDIRECTORIES);
 	} else {
-		// Blob is the code directory, directly.
-		new_cd = (CS_CodeDirectory *)new_blob_addr;
+		superblob->index[blob_index].type = htonl(CSSLOT_CODEDIRECTORY);
 	}
 
-	if (optional_new_cd_size == 0) {
-		// Copy code directory, and revalidate.
-		memcpy(new_cd, old_cd, new_cdsize);
+	if (code_directory_size > 0) {
+		/* We zero out the code directory, as we expect the caller to fill it in */
+		memset((void*)(new_blob_addr + blob_offset), 0, new_code_directory_size);
+	} else {
+		memcpy((void*)(new_blob_addr + blob_offset), best_code_directory, new_code_directory_size);
+	}
 
-		vm_size_t length = new_blob_size;
+	if (code_directory) {
+		*code_directory = (CS_CodeDirectory*)(new_blob_addr + blob_offset);
+	}
+	blob_offset += new_code_directory_size;
 
-		error = cs_validate_csblob((const uint8_t *)new_blob_addr, length, &cd, &entitlements);
+	/* DER entitlements blob */
+	if (der_entitlements_blob) {
+		blob_index += 1;
+		superblob->index[blob_index].offset = htonl(blob_offset);
+		superblob->index[blob_index].type = htonl(CSSLOT_DER_ENTITLEMENTS);
 
-		if (error) {
-			printf("CODE SIGNING: Failed to validate new Code Signing Blob: %d\n",
-			    error);
+		ptrauth_utils_auth_blob_generic(der_entitlements_blob,
+		    ntohl(der_entitlements_blob->length),
+		    OS_PTRAUTH_DISCRIMINATOR("cs_blob.csb_der_entitlements_blob_signature"),
+		    PTRAUTH_ADDR_DIVERSIFY,
+		    blob->csb_der_entitlements_blob_signature);
 
-			ubc_cs_blob_deallocate(new_blob_addr, new_blob_size);
-			return error;
+		memcpy((void*)(new_blob_addr + blob_offset), der_entitlements_blob, ntohl(der_entitlements_blob->length));
+		blob_offset += ntohl(der_entitlements_blob->length);
+	}
+
+	/* Entitlements blob */
+	if (entitlements_blob) {
+		blob_index += 1;
+		superblob->index[blob_index].offset = htonl(blob_offset);
+		superblob->index[blob_index].type = htonl(CSSLOT_ENTITLEMENTS);
+
+		ptrauth_utils_auth_blob_generic(entitlements_blob,
+		    ntohl(entitlements_blob->length),
+		    OS_PTRAUTH_DISCRIMINATOR("cs_blob.csb_entitlements_blob_signature"),
+		    PTRAUTH_ADDR_DIVERSIFY,
+		    blob->csb_entitlements_blob_signature);
+
+		memcpy((void*)(new_blob_addr + blob_offset), entitlements_blob, ntohl(entitlements_blob->length));
+		blob_offset += ntohl(entitlements_blob->length);
+	}
+
+	/* CMS blob */
+	if (cms_blob) {
+		blob_index += 1;
+		superblob->index[blob_index].offset = htonl(blob_offset);
+		superblob->index[blob_index].type = htonl(CSSLOT_SIGNATURESLOT);
+		memcpy((void*)(new_blob_addr + blob_offset), cms_blob, ntohl(cms_blob->length));
+		blob_offset += ntohl(cms_blob->length);
+	}
+
+	/* First code directory */
+	if (first_code_directory) {
+		blob_index += 1;
+		superblob->index[blob_index].offset = htonl(blob_offset);
+		superblob->index[blob_index].type = htonl(CSSLOT_CODEDIRECTORY);
+		memcpy((void*)(new_blob_addr + blob_offset), first_code_directory, ntohl(first_code_directory->length));
+		blob_offset += ntohl(first_code_directory->length);
+	}
+
+	/*
+	 * We only validate the blob in case we copied in the best code directory.
+	 * In case the code directory size we were passed in wasn't 0, we memset the best
+	 * code directory to 0 and expect the caller to fill it in. In the same spirit, we
+	 * expect the caller to validate the code signature after they fill in the code
+	 * directory.
+	 */
+	if (code_directory_size == 0) {
+		const CS_CodeDirectory *validated_code_directory = NULL;
+		const CS_GenericBlob *validated_entitlements_blob = NULL;
+		const CS_GenericBlob *validated_der_entitlements_blob = NULL;
+		ret = cs_validate_csblob((const uint8_t *)superblob, new_blob_size, &validated_code_directory, &validated_entitlements_blob, &validated_der_entitlements_blob);
+		if (ret) {
+			printf("CODE SIGNING: Validation of reconstituted blob failed: %d\n", ret);
+			err = EINVAL;
+			goto fail;
 		}
-		*new_entitlements_p = entitlements;
-	} else {
-		// Caller will fill out and validate code directory.
-		memset(new_cd, 0, new_cdsize);
-		*new_entitlements_p = NULL;
 	}
 
-	*new_blob_addr_p = new_blob_addr;
-	*new_blob_size_p = new_blob_size;
-	*new_cd_p = new_cd;
+	if (ret_mem_kaddr) {
+		*ret_mem_kaddr = new_blob_addr;
+	}
+	if (ret_mem_size) {
+		*ret_mem_size = new_blob_allocation_size;
+	}
+
+	return 0;
+
+fail:
+	ubc_cs_blob_deallocate(new_blob_addr, new_blob_allocation_size);
+	return err;
+}
+
+#if CONFIG_ENFORCE_SIGNED_CODE
+/*
+ * We use this function to clear out unnecessary bits from the code signature
+ * blob which are no longer needed. We free these bits and give them back to
+ * the kernel. This is needed since reconstitution includes extra data which is
+ * needed only for verification but has no point in keeping afterwards.
+ *
+ * This results in significant memory reduction, especially for 3rd party apps
+ * since we also get rid of the CMS blob.
+ */
+static int
+ubc_cs_clear_unneeded_code_signature(
+	struct cs_blob *blob
+	)
+{
+	CS_SuperBlob *superblob = NULL;
+	uint32_t num_blobs = 0;
+	vm_size_t last_needed_blob_offset = 0;
+	kern_return_t ret = KERN_FAILURE;
+	bool kmem_allocated = false;
+
+	/*
+	 * The only blobs we need to keep are the code directory and the entitlements
+	 * blob. These should have a certain ordering to them if we know that the
+	 * blob has been reconstituted in the past.
+	 *
+	 * Ordering:
+	 * 1. Code directory
+	 * 2. DER encoded entitlements (if present)
+	 *
+	 * We need to clear out the remaining page after these blobs end, and fix up
+	 * the superblob for the changes. Things gets a little more complicated for
+	 * blobs which may not have been kmem_allocated. For those, we simply just
+	 * allocate the new required space and copy into it.
+	 */
+
+	if (!blob) {
+		if (cs_debug > 1) {
+			printf("CODE SIGNING: CS Blob passed in is NULL\n");
+		}
+		return EINVAL;
+	}
+
+	if (!blob->csb_reconstituted) {
+		/*
+		 * Nothing for us to do, since we can't make any claims about how this
+		 * blob may have been ordered.
+		 */
+		return 0;
+	}
+
+
+	if (!blob->csb_cd) {
+		/* This case can never happen, and it is a sign of bad things */
+		panic("CODE SIGNING: Validated CS Blob has no code directory");
+	}
+	superblob = (CS_SuperBlob*)blob->csb_mem_kaddr;
+
+	num_blobs = 1;
+	last_needed_blob_offset = ntohl(superblob->index[0].offset) + ntohl(blob->csb_cd->length);
+
+	/* Check for DER entitlements */
+	if (blob->csb_der_entitlements_blob) {
+		ptrauth_utils_auth_blob_generic(blob->csb_der_entitlements_blob,
+		    ntohl(blob->csb_der_entitlements_blob->length),
+		    OS_PTRAUTH_DISCRIMINATOR("cs_blob.csb_der_entitlements_blob_signature"),
+		    PTRAUTH_ADDR_DIVERSIFY,
+		    blob->csb_der_entitlements_blob_signature);
+		num_blobs += 1;
+		last_needed_blob_offset += ntohl(blob->csb_der_entitlements_blob->length);
+	}
+
+	superblob->count = htonl(num_blobs);
+	superblob->length = htonl((uint32_t)last_needed_blob_offset);
+
+	/*
+	 * There is a chance that the code directory is marked within the superblob as an
+	 * alternate code directory. This happens when the first code directory isn't the
+	 * best one chosen by the kernel, so to be able to access both the first and the best,
+	 * we save the best one as an alternate one. Since we're getting rid of the first one
+	 * here, we mark the best one as the first one.
+	 */
+	superblob->index[0].type = htonl(CSSLOT_CODEDIRECTORY);
+
+	/*
+	 * If we are kmem_allocated, then we can free all the remaining pages which we no longer
+	 * need. However, this cannot be done if we didn't allocate page-wise, but byte-wise through
+	 * something like kalloc. In the latter case, we just allocate the required space again, and
+	 * copy over only the required portion of the superblob.
+	 */
+	if (kmem_allocated) {
+		vm_size_t last_needed_page_offset = round_page(last_needed_blob_offset);
+		assert(last_needed_page_offset <= blob->csb_mem_size);
+
+		vm_address_t unneeded_blob_addr = (vm_address_t)blob->csb_mem_kaddr + last_needed_page_offset;
+		vm_size_t unneeded_blob_size = blob->csb_mem_size - last_needed_page_offset;
+
+		/* These both need to be page aligned */
+		assert((unneeded_blob_addr & PAGE_MASK) == 0);
+		assert((unneeded_blob_size & PAGE_MASK) == 0);
+
+		/* Free the unneeded memory */
+		if (unneeded_blob_addr && unneeded_blob_size) {
+			kmem_free(kernel_map, unneeded_blob_addr, unneeded_blob_size);
+		}
+
+		/* Zero out the remaining bytes in the same page */
+		vm_size_t unneeded_bytes_in_page = last_needed_page_offset - last_needed_blob_offset;
+		memset((uint8_t*)superblob + last_needed_blob_offset, 0, unneeded_bytes_in_page);
+		blob->csb_mem_size = last_needed_page_offset;
+	} else {
+		vm_address_t new_superblob = 0;
+		vm_size_t new_superblob_size = last_needed_blob_offset;
+
+		ret = ubc_cs_blob_allocate(&new_superblob, &new_superblob_size);
+		if (ret != KERN_SUCCESS) {
+			printf("CODE SIGNING: Unable to allocate space when trying to clear unneeded code signature blobs: %d\n", ret);
+			return ENOMEM;
+		}
+
+		/*
+		 * As we weren't kmem_allocated before, we will not be kmem_allocated again. This should
+		 * mean the size we passed in is exactly the size we should get back for the allocation.
+		 */
+		assert(new_superblob_size == last_needed_blob_offset);
+
+		/* Copy in the updated superblob into the new memory */
+		memcpy((void*)new_superblob, superblob, new_superblob_size);
+
+		/* Free the old code signature and old memory */
+		ubc_cs_blob_deallocate((vm_offset_t)blob->csb_mem_kaddr, blob->csb_mem_size);
+
+		/* Setup the code signature blob again */
+		blob->csb_mem_kaddr = (void *)new_superblob;
+		blob->csb_mem_size = new_superblob_size;
+		blob->csb_cd = (const CS_CodeDirectory*)csblob_find_blob_bytes((uint8_t*)new_superblob, new_superblob_size, CSSLOT_CODEDIRECTORY, CSMAGIC_CODEDIRECTORY);
+
+		blob->csb_der_entitlements_blob = csblob_find_blob_bytes((uint8_t*)new_superblob, new_superblob_size, CSSLOT_DER_ENTITLEMENTS, CSMAGIC_EMBEDDED_DER_ENTITLEMENTS);
+		if (blob->csb_der_entitlements_blob != NULL) {
+			blob->csb_der_entitlements_blob_signature = ptrauth_utils_sign_blob_generic(blob->csb_der_entitlements_blob,
+			    ntohl(blob->csb_der_entitlements_blob->length),
+			    OS_PTRAUTH_DISCRIMINATOR("cs_blob.csb_der_entitlements_blob_signature"),
+			    PTRAUTH_ADDR_DIVERSIFY);
+		}
+	}
+
+	blob->csb_entitlements_blob = NULL;
+	blob->csb_entitlements_blob_signature = 0;
+
+	const CS_CodeDirectory *validated_code_directory = NULL;
+	const CS_GenericBlob *validated_entitlements_blob = NULL;
+	const CS_GenericBlob *validated_der_entitlements_blob = NULL;
+	ret = cs_validate_csblob((const uint8_t *)blob->csb_mem_kaddr, blob->csb_mem_size, &validated_code_directory, &validated_entitlements_blob, &validated_der_entitlements_blob);
+	if (ret) {
+		printf("CODE SIGNING: Validation of blob after clearing unneeded code signature blobs failed: %d\n", ret);
+		return EINVAL;
+	}
 
 	return 0;
 }
+#endif /* CONFIG_ENFORCE_SIGNED_CODE */
 
 static int
 ubc_cs_convert_to_multilevel_hash(struct cs_blob *blob)
@@ -3160,6 +3527,7 @@ ubc_cs_convert_to_multilevel_hash(struct cs_blob *blob)
 	const CS_CodeDirectory  *old_cd, *cd;
 	CS_CodeDirectory        *new_cd;
 	const CS_GenericBlob *entitlements;
+	const CS_GenericBlob *der_entitlements;
 	vm_offset_t     new_blob_addr;
 	vm_size_t       new_blob_size;
 	vm_size_t       new_cdsize;
@@ -3178,13 +3546,13 @@ ubc_cs_convert_to_multilevel_hash(struct cs_blob *blob)
 	new_cdsize  = ntohl(old_cd->hashOffset);
 	new_cdsize += (ntohl(old_cd->nCodeSlots) >> hashes_per_new_hash_shift) * old_cd->hashSize;
 
-	error = ubc_cs_reconstitute_code_signature(blob, new_cdsize,
-	    &new_blob_addr, &new_blob_size, &new_cd,
-	    &entitlements);
+	error = ubc_cs_reconstitute_code_signature(blob, &new_blob_addr, &new_blob_size, new_cdsize, &new_cd);
 	if (error != 0) {
 		printf("CODE SIGNING: Failed to reconsitute code signature: %d\n", error);
 		return error;
 	}
+	entitlements = csblob_find_blob_bytes((uint8_t*)new_blob_addr, new_blob_size, CSSLOT_ENTITLEMENTS, CSMAGIC_EMBEDDED_ENTITLEMENTS);
+	der_entitlements = csblob_find_blob_bytes((uint8_t*)new_blob_addr, new_blob_size, CSSLOT_DER_ENTITLEMENTS, CSMAGIC_EMBEDDED_DER_ENTITLEMENTS);
 
 	memcpy(new_cd, old_cd, ntohl(old_cd->hashOffset));
 
@@ -3237,7 +3605,7 @@ ubc_cs_convert_to_multilevel_hash(struct cs_blob *blob)
 		blob->csb_hashtype->cs_final(dst, &mdctx);
 	}
 
-	error = cs_validate_csblob((const uint8_t *)new_blob_addr, new_blob_size, &cd, &entitlements);
+	error = cs_validate_csblob((const uint8_t *)new_blob_addr, new_blob_size, &cd, &entitlements, &der_entitlements);
 	if (error != 0) {
 		printf("CODE SIGNING: Failed to validate new Code Signing Blob: %d\n",
 		    error);
@@ -3247,12 +3615,22 @@ ubc_cs_convert_to_multilevel_hash(struct cs_blob *blob)
 	}
 
 	/* New Code Directory is ready for use, swap it out in the blob structure */
-	ubc_cs_blob_deallocate(blob->csb_mem_kaddr, blob->csb_mem_size);
+	ubc_cs_blob_deallocate((vm_offset_t)blob->csb_mem_kaddr, blob->csb_mem_size);
 
 	blob->csb_mem_size = new_blob_size;
-	blob->csb_mem_kaddr = new_blob_addr;
+	blob->csb_mem_kaddr = (void *)new_blob_addr;
 	blob->csb_cd = cd;
-	blob->csb_entitlements_blob = entitlements;
+	blob->csb_entitlements_blob = NULL;
+	blob->csb_entitlements_blob_signature = 0;
+
+	blob->csb_der_entitlements_blob = der_entitlements; /* may be NULL, not yet validated */
+	if (blob->csb_der_entitlements_blob != NULL) {
+		blob->csb_der_entitlements_blob_signature = ptrauth_utils_sign_blob_generic(blob->csb_der_entitlements_blob,
+		    ntohl(blob->csb_der_entitlements_blob->length),
+		    OS_PTRAUTH_DISCRIMINATOR("cs_blob.csb_der_entitlements_blob_signature"),
+		    PTRAUTH_ADDR_DIVERSIFY);
+	}
+	blob->csb_reconstituted = true;
 
 	/* The blob has some cached attributes of the Code Directory, so update those */
 
@@ -3291,6 +3669,7 @@ cs_blob_create_validated(
 	int             error = EINVAL;
 	const CS_CodeDirectory *cd;
 	const CS_GenericBlob *entitlements;
+	const CS_GenericBlob *der_entitlements;
 	union cs_hash_union     mdctx;
 	size_t                  length;
 
@@ -3298,15 +3677,12 @@ cs_blob_create_validated(
 		*ret_blob = NULL;
 	}
 
-	blob = (struct cs_blob *) kalloc(sizeof(struct cs_blob));
-	if (blob == NULL) {
-		return ENOMEM;
-	}
+	blob = zalloc_flags(cs_blob_zone, Z_WAITOK | Z_NOFAIL);
 
 	/* fill in the new blob */
 	blob->csb_mem_size = size;
 	blob->csb_mem_offset = 0;
-	blob->csb_mem_kaddr = *addr;
+	blob->csb_mem_kaddr = (void *)*addr;
 	blob->csb_flags = 0;
 	blob->csb_signer_type = CS_SIGNER_TYPE_UNKNOWN;
 	blob->csb_platform_binary = 0;
@@ -3316,8 +3692,11 @@ cs_blob_create_validated(
 	blob->csb_supplement_teamid = NULL;
 #endif
 	blob->csb_entitlements_blob = NULL;
+	blob->csb_der_entitlements_blob = NULL;
 	blob->csb_entitlements = NULL;
 	blob->csb_reconstituted = false;
+	blob->profile_kaddr = 0;
+	blob->profile_allocation_size = 0;
 
 	/* Transfer ownership. Even on error, this function will deallocate */
 	*addr = 0;
@@ -3327,7 +3706,7 @@ cs_blob_create_validated(
 	 */
 	length = (size_t) size;
 	error = cs_validate_csblob((const uint8_t *)blob->csb_mem_kaddr,
-	    length, &cd, &entitlements);
+	    length, &cd, &entitlements, &der_entitlements);
 	if (error) {
 		if (cs_debug) {
 			printf("CODESIGNING: csblob invalid: %d\n", error);
@@ -3344,6 +3723,21 @@ cs_blob_create_validated(
 
 		blob->csb_cd = cd;
 		blob->csb_entitlements_blob = entitlements; /* may be NULL, not yet validated */
+		if (blob->csb_entitlements_blob != NULL) {
+			blob->csb_entitlements_blob_signature = ptrauth_utils_sign_blob_generic(blob->csb_entitlements_blob,
+			    ntohl(blob->csb_entitlements_blob->length),
+			    OS_PTRAUTH_DISCRIMINATOR("cs_blob.csb_entitlements_blob_signature"),
+			    PTRAUTH_ADDR_DIVERSIFY);
+		}
+
+		blob->csb_der_entitlements_blob = der_entitlements; /* may be NULL, not yet validated */
+		if (blob->csb_der_entitlements_blob != NULL) {
+			blob->csb_der_entitlements_blob_signature = ptrauth_utils_sign_blob_generic(blob->csb_der_entitlements_blob,
+			    ntohl(blob->csb_der_entitlements_blob->length),
+			    OS_PTRAUTH_DISCRIMINATOR("cs_blob.csb_der_entitlements_blob_signature"),
+			    PTRAUTH_ADDR_DIVERSIFY);
+		}
+
 		blob->csb_hashtype = cs_find_md(cd->hashType);
 		if (blob->csb_hashtype == NULL || blob->csb_hashtype->cs_digest_size > sizeof(hash)) {
 			panic("validated CodeDirectory but unsupported type");
@@ -3413,18 +3807,30 @@ out:
  */
 void
 cs_blob_free(
-	struct cs_blob * const blob)
+	struct cs_blob *blob)
 {
 	if (blob != NULL) {
-		if (blob->csb_mem_kaddr) {
-			ubc_cs_blob_deallocate(blob->csb_mem_kaddr, blob->csb_mem_size);
-			blob->csb_mem_kaddr = 0;
+		if (blob->profile_kaddr) {
+			kmem_free(kernel_map, blob->profile_kaddr, blob->profile_allocation_size);
 		}
+		blob->profile_kaddr = 0;
+		blob->profile_allocation_size = 0;
+
+		if (blob->csb_mem_kaddr) {
+			ubc_cs_blob_deallocate((vm_offset_t)blob->csb_mem_kaddr, blob->csb_mem_size);
+		}
+		blob->csb_mem_kaddr = NULL;
+		blob->csb_mem_size = 0;
+
 		if (blob->csb_entitlements != NULL) {
+			if (amfi) {
+				// TODO: PANIC if amfi isn't present
+				amfi->OSEntitlements_invalidate(blob->csb_entitlements);
+			}
 			osobject_release(blob->csb_entitlements);
 			blob->csb_entitlements = NULL;
 		}
-		(kfree)(blob, sizeof(*blob));
+		zfree(cs_blob_zone, blob);
 	}
 }
 #if CONFIG_SUPPLEMENTAL_SIGNATURES
@@ -3434,7 +3840,7 @@ cs_blob_supplement_free(struct cs_blob * const blob)
 	if (blob != NULL) {
 		if (blob->csb_supplement_teamid != NULL) {
 			vm_size_t teamid_size = strlen(blob->csb_supplement_teamid) + 1;
-			kfree(blob->csb_supplement_teamid, teamid_size);
+			kfree_data(blob->csb_supplement_teamid, teamid_size);
 			blob->csb_supplement_teamid = NULL;
 		}
 		cs_blob_free(blob);
@@ -3507,31 +3913,6 @@ ubc_cs_blob_add(
 	blob->csb_cpu_subtype = cpusubtype & ~CPU_SUBTYPE_MASK;
 	blob->csb_base_offset = base_offset;
 
-	/*
-	 * Let policy module check whether the blob's signature is accepted.
-	 */
-#if CONFIG_MACF
-	unsigned int cs_flags = blob->csb_flags;
-	unsigned int signer_type = blob->csb_signer_type;
-	error = mac_vnode_check_signature(vp, blob, imgp, &cs_flags, &signer_type, flags, platform);
-	blob->csb_flags = cs_flags;
-	blob->csb_signer_type = signer_type;
-
-	if (error) {
-		if (cs_debug) {
-			printf("check_signature[pid: %d], error = %d\n", current_proc()->p_pid, error);
-		}
-		goto out;
-	}
-	if ((flags & MAC_VNODE_CHECK_DYLD_SIM) && !(blob->csb_flags & CS_PLATFORM_BINARY)) {
-		if (cs_debug) {
-			printf("check_signature[pid: %d], is not apple signed\n", current_proc()->p_pid);
-		}
-		error = EPERM;
-		goto out;
-	}
-#endif
-
 #if CONFIG_ENFORCE_SIGNED_CODE
 	/*
 	 * Reconstitute code signature
@@ -3541,65 +3922,90 @@ ubc_cs_blob_add(
 		vm_size_t new_mem_size = 0;
 
 		CS_CodeDirectory *new_cd = NULL;
-		CS_GenericBlob const *new_entitlements = NULL;
+		const CS_GenericBlob *new_entitlements = NULL;
+		const CS_GenericBlob *new_der_entitlements = NULL;
 
-		error = ubc_cs_reconstitute_code_signature(blob, 0,
-		    &new_mem_kaddr, &new_mem_size,
-		    &new_cd, &new_entitlements);
-
+		error = ubc_cs_reconstitute_code_signature(blob, &new_mem_kaddr, &new_mem_size, 0, &new_cd);
 		if (error != 0) {
 			printf("failed code signature reconstitution: %d\n", error);
 			goto out;
 		}
+		new_entitlements = csblob_find_blob_bytes((uint8_t*)new_mem_kaddr, new_mem_size, CSSLOT_ENTITLEMENTS, CSMAGIC_EMBEDDED_ENTITLEMENTS);
+		new_der_entitlements = csblob_find_blob_bytes((uint8_t*)new_mem_kaddr, new_mem_size, CSSLOT_DER_ENTITLEMENTS, CSMAGIC_EMBEDDED_DER_ENTITLEMENTS);
 
-		ubc_cs_blob_deallocate(blob->csb_mem_kaddr, blob->csb_mem_size);
+		ubc_cs_blob_deallocate((vm_offset_t)blob->csb_mem_kaddr, blob->csb_mem_size);
 
-		blob->csb_mem_kaddr = new_mem_kaddr;
+		blob->csb_mem_kaddr = (void *)new_mem_kaddr;
 		blob->csb_mem_size = new_mem_size;
 		blob->csb_cd = new_cd;
 		blob->csb_entitlements_blob = new_entitlements;
-		blob->csb_reconstituted = true;
-	}
-#elif PMAP_CS
-	/*
-	 * When pmap_cs is enabled, there's an expectation that large blobs are
-	 * relocated to their own page.  Above, this happens under
-	 * ubc_cs_reconstitute_code_signature() but that discards parts of the
-	 * signatures that are necessary on some platforms (eg, requirements).
-	 * So in this case, just copy everything.
-	 */
-	if (pmap_cs && (blob->csb_mem_size > pmap_cs_blob_limit)) {
-		vm_offset_t cd_offset, ent_offset;
-		vm_size_t new_mem_size = round_page(blob->csb_mem_size);
-		vm_address_t new_mem_kaddr = 0;
-
-		kr = kmem_alloc_kobject(kernel_map, &new_mem_kaddr, new_mem_size, VM_KERN_MEMORY_SECURITY);
-		if (kr != KERN_SUCCESS) {
-			printf("failed to allocate %lu bytes to relocate blob: %d\n", new_mem_size, kr);
-			error = ENOMEM;
-			goto out;
-		}
-
-		cd_offset = (vm_address_t) blob->csb_cd - blob->csb_mem_kaddr;
-		ent_offset = (vm_address_t) blob->csb_entitlements_blob - blob->csb_mem_kaddr;
-
-		memcpy((void *) new_mem_kaddr, (const void *) blob->csb_mem_kaddr, blob->csb_mem_size);
-		ubc_cs_blob_deallocate(blob->csb_mem_kaddr, blob->csb_mem_size);
-		blob->csb_cd = (const CS_CodeDirectory *) (new_mem_kaddr + cd_offset);
-		/* Only update the entitlements blob pointer if it is non-NULL.  If it is NULL, then
-		 * the blob has no entitlements and ent_offset is garbage. */
 		if (blob->csb_entitlements_blob != NULL) {
-			blob->csb_entitlements_blob = (const CS_GenericBlob *) (new_mem_kaddr + ent_offset);
+			blob->csb_entitlements_blob_signature = ptrauth_utils_sign_blob_generic(blob->csb_entitlements_blob,
+			    ntohl(blob->csb_entitlements_blob->length),
+			    OS_PTRAUTH_DISCRIMINATOR("cs_blob.csb_entitlements_blob_signature"),
+			    PTRAUTH_ADDR_DIVERSIFY);
 		}
-		blob->csb_mem_kaddr = new_mem_kaddr;
-		blob->csb_mem_size = new_mem_size;
+
+		blob->csb_der_entitlements_blob = new_der_entitlements;
+		if (blob->csb_der_entitlements_blob != NULL) {
+			blob->csb_der_entitlements_blob_signature = ptrauth_utils_sign_blob_generic(blob->csb_der_entitlements_blob,
+			    ntohl(blob->csb_der_entitlements_blob->length),
+			    OS_PTRAUTH_DISCRIMINATOR("cs_blob.csb_der_entitlements_blob_signature"),
+			    PTRAUTH_ADDR_DIVERSIFY);
+		}
+		blob->csb_reconstituted = true;
 	}
 #endif
 
 
+#if CONFIG_MACF
+	/*
+	 * Let policy module check whether the blob's signature is accepted.
+	 */
+
+	unsigned int cs_flags = blob->csb_flags;
+	unsigned int signer_type = blob->csb_signer_type;
+	error = mac_vnode_check_signature(vp, blob, imgp, &cs_flags, &signer_type, flags, platform);
+	blob->csb_flags = cs_flags;
+	blob->csb_signer_type = signer_type;
+
+	if (error) {
+		if (cs_debug) {
+			printf("check_signature[pid: %d], error = %d\n", proc_getpid(current_proc()), error);
+		}
+		goto out;
+	}
+	if ((flags & MAC_VNODE_CHECK_DYLD_SIM) && !(blob->csb_flags & CS_PLATFORM_BINARY)) {
+		if (cs_debug) {
+			printf("check_signature[pid: %d], is not apple signed\n", proc_getpid(current_proc()));
+		}
+		error = EPERM;
+		goto out;
+	}
+#endif
+
+
+#if CONFIG_ENFORCE_SIGNED_CODE
+	/*
+	 * When this flag is turned on, we reconstitue the code signature to only
+	 * include the blobs which are needed. This may include the first code
+	 * directory and the CMS blob. However, now that verification of this blob
+	 * is complete, we don't need all these blobs. Hence, we clear them out.
+	 */
+
+	if (ubc_cs_clear_unneeded_code_signature(blob)) {
+		error = EPERM;
+		goto out;
+	}
+#endif /* CONFIG_ENFORCE_SIGNED_CODE */
+
+	blob->csb_entitlements_blob = NULL;
+	blob->csb_entitlements_blob_signature = 0;
+
+
 	if (blob->csb_flags & CS_PLATFORM_BINARY) {
 		if (cs_debug > 1) {
-			printf("check_signature[pid: %d]: platform binary\n", current_proc()->p_pid);
+			printf("check_signature[pid: %d]: platform binary\n", proc_getpid(current_proc()));
 		}
 		blob->csb_platform_binary = 1;
 		blob->csb_platform_path = !!(blob->csb_flags & CS_PLATFORM_PATH);
@@ -3609,9 +4015,9 @@ ubc_cs_blob_add(
 		blob->csb_teamid = csblob_parse_teamid(blob);
 		if (cs_debug > 1) {
 			if (blob->csb_teamid) {
-				printf("check_signature[pid: %d]: team-id is %s\n", current_proc()->p_pid, blob->csb_teamid);
+				printf("check_signature[pid: %d]: team-id is %s\n", proc_getpid(current_proc()), blob->csb_teamid);
 			} else {
-				printf("check_signature[pid: %d]: no team-id\n", current_proc()->p_pid);
+				printf("check_signature[pid: %d]: no team-id\n", proc_getpid(current_proc()));
 			}
 		}
 	}
@@ -3769,7 +4175,7 @@ ubc_cs_blob_add(
 		printf("CODE SIGNING: proc %d(%s) "
 		    "loaded %s signatures for file (%s) "
 		    "range 0x%llx:0x%llx flags 0x%x\n",
-		    p->p_pid, p->p_comm,
+		    proc_getpid(p), p->p_comm,
 		    blob->csb_cpu_type == -1 ? "detached" : "embedded",
 		    name,
 		    blob->csb_base_offset + blob->csb_start_offset,
@@ -3793,7 +4199,7 @@ ubc_cs_blob_add(
 out:
 	if (error) {
 		if (cs_debug) {
-			printf("check_signature[pid: %d]: error = %d\n", current_proc()->p_pid, error);
+			printf("check_signature[pid: %d]: error = %d\n", proc_getpid(current_proc()), error);
 		}
 
 		cs_blob_free(blob);
@@ -3866,7 +4272,7 @@ ubc_cs_blob_add_supplement(
 
 		printf("CODE SIGNING: proc %d(%s) supplemental signature for file (%s) "
 		    "is not a supplemental.\n",
-		    p->p_pid, p->p_comm, iname);
+		    proc_getpid(p), p->p_comm, iname);
 
 		error = EINVAL;
 
@@ -3898,7 +4304,7 @@ ubc_cs_blob_add_supplement(
 
 		printf("CODE SIGNING: proc %d(%s) supplemental signature for file (%s) "
 		    "does not match any attached cdhash.\n",
-		    p->p_pid, p->p_comm, iname);
+		    proc_getpid(p), p->p_comm, iname);
 
 		error = ESRCH;
 
@@ -3918,7 +4324,7 @@ ubc_cs_blob_add_supplement(
 
 	if (error) {
 		if (cs_debug) {
-			printf("check_supplemental_signature[pid: %d], error = %d\n", current_proc()->p_pid, error);
+			printf("check_supplemental_signature[pid: %d], error = %d\n", proc_getpid(current_proc()), error);
 		}
 		goto out;
 	}
@@ -3933,7 +4339,7 @@ ubc_cs_blob_add_supplement(
 		blob->csb_platform_path = orig_blob->csb_platform_path;
 	} else if (orig_blob->csb_teamid != NULL) {
 		vm_size_t teamid_size = strlen(orig_blob->csb_teamid) + 1;
-		blob->csb_supplement_teamid  = kalloc(teamid_size);
+		blob->csb_supplement_teamid = kalloc_data(teamid_size, Z_WAITOK);
 		if (blob->csb_supplement_teamid == NULL) {
 			error = ENOMEM;
 			goto out;
@@ -3998,7 +4404,7 @@ ubc_cs_blob_add_supplement(
 		printf("CODE SIGNING: proc %d(%s) "
 		    "loaded supplemental signature for file (%s) "
 		    "range 0x%llx:0x%llx\n",
-		    p->p_pid, p->p_comm,
+		    proc_getpid(p), p->p_comm,
 		    name,
 		    blob->csb_base_offset + blob->csb_start_offset,
 		    blob->csb_base_offset + blob->csb_end_offset);
@@ -4013,7 +4419,7 @@ ubc_cs_blob_add_supplement(
 out:
 	if (error) {
 		if (cs_debug) {
-			printf("ubc_cs_blob_add_supplement[pid: %d]: error = %d\n", current_proc()->p_pid, error);
+			printf("ubc_cs_blob_add_supplement[pid: %d]: error = %d\n", proc_getpid(current_proc()), error);
 		}
 
 		cs_blob_supplement_free(blob);
@@ -4161,7 +4567,7 @@ ubc_cs_free(
 		cs_blob_free(blob);
 	}
 #if CHECK_CS_VALIDATION_BITMAP
-	ubc_cs_validation_bitmap_deallocate( uip->ui_vnode );
+	ubc_cs_validation_bitmap_deallocate( uip );
 #endif
 	uip->cs_blobs = NULL;
 #if CONFIG_SUPPLEMENTAL_SIGNATURES
@@ -4208,13 +4614,14 @@ ubc_cs_blob_revalidate(
 	int error = 0;
 	const CS_CodeDirectory *cd = NULL;
 	const CS_GenericBlob *entitlements = NULL;
+	const CS_GenericBlob *der_entitlements = NULL;
 	size_t size;
 	assert(vp != NULL);
 	assert(blob != NULL);
 
 	size = blob->csb_mem_size;
 	error = cs_validate_csblob((const uint8_t *)blob->csb_mem_kaddr,
-	    size, &cd, &entitlements);
+	    size, &cd, &entitlements, &der_entitlements);
 	if (error) {
 		if (cs_debug) {
 			printf("CODESIGNING: csblob invalid: %d\n", error);
@@ -4257,7 +4664,7 @@ ubc_cs_blob_revalidate(
 #if CONFIG_MACF
 	error = mac_vnode_check_signature(vp, blob, imgp, &cs_flags, &signer_type, flags, platform);
 	if (cs_debug && error) {
-		printf("revalidate: check_signature[pid: %d], error = %d\n", current_proc()->p_pid, error);
+		printf("revalidate: check_signature[pid: %d], error = %d\n", proc_getpid(current_proc()), error);
 	}
 #else
 	(void)flags;
@@ -4418,7 +4825,7 @@ cs_validate_hash(
 		}
 
 		/* blob data has been released */
-		kaddr = blob->csb_mem_kaddr;
+		kaddr = (vm_offset_t)blob->csb_mem_kaddr;
 		if (kaddr == 0) {
 			continue;
 		}
@@ -4806,14 +5213,13 @@ ubc_cs_validation_bitmap_allocate(
 
 		if (uip->cs_valid_bitmap == NULL) {
 			bitmap_size = stob(uip->ui_size);
-			target_bitmap = (char*) kalloc((vm_size_t)bitmap_size );
+			target_bitmap = (char*) kalloc_data((vm_size_t)bitmap_size, Z_WAITOK | Z_ZERO);
 			if (target_bitmap == 0) {
 				kr = KERN_NO_SPACE;
 			} else {
 				kr = KERN_SUCCESS;
 			}
 			if (kr == KERN_SUCCESS) {
-				memset( target_bitmap, 0, (size_t)bitmap_size);
 				uip->cs_valid_bitmap = (void*)target_bitmap;
 				uip->cs_valid_bitmap_size = bitmap_size;
 			}
@@ -4867,20 +5273,11 @@ ubc_cs_check_validation_bitmap(
 
 void
 ubc_cs_validation_bitmap_deallocate(
-	vnode_t         vp)
+	struct ubc_info *uip)
 {
-	struct ubc_info *uip;
-	void            *target_bitmap;
-	vm_object_size_t        bitmap_size;
-
-	if (UBCINFOEXISTS(vp)) {
-		uip = vp->v_ubcinfo;
-
-		if ((target_bitmap = uip->cs_valid_bitmap) != NULL) {
-			bitmap_size = uip->cs_valid_bitmap_size;
-			kfree( target_bitmap, (vm_size_t) bitmap_size );
-			uip->cs_valid_bitmap = NULL;
-		}
+	if (uip->cs_valid_bitmap != NULL) {
+		kfree_data(uip->cs_valid_bitmap, (vm_size_t)uip->cs_valid_bitmap_size);
+		uip->cs_valid_bitmap = NULL;
 	}
 }
 #else
@@ -4900,72 +5297,9 @@ ubc_cs_check_validation_bitmap(
 }
 
 void
-ubc_cs_validation_bitmap_deallocate(__unused vnode_t vp)
+ubc_cs_validation_bitmap_deallocate(__unused struct ubc_info *uip)
 {
 	return;
 }
 #endif /* CHECK_CS_VALIDATION_BITMAP */
 
-#if PMAP_CS
-kern_return_t
-cs_associate_blob_with_mapping(
-	void                    *pmap,
-	vm_map_offset_t         start,
-	vm_map_size_t           size,
-	vm_object_offset_t      offset,
-	void                    *blobs_p)
-{
-	off_t                   blob_start_offset, blob_end_offset;
-	kern_return_t           kr;
-	struct cs_blob          *blobs, *blob;
-	vm_offset_t             kaddr;
-	struct pmap_cs_code_directory *cd_entry = NULL;
-
-	if (!pmap_cs) {
-		return KERN_NOT_SUPPORTED;
-	}
-
-	blobs = (struct cs_blob *)blobs_p;
-
-	for (blob = blobs;
-	    blob != NULL;
-	    blob = blob->csb_next) {
-		blob_start_offset = (blob->csb_base_offset +
-		    blob->csb_start_offset);
-		blob_end_offset = (blob->csb_base_offset +
-		    blob->csb_end_offset);
-		if ((off_t) offset < blob_start_offset ||
-		    (off_t) offset >= blob_end_offset ||
-		    (off_t) (offset + size) <= blob_start_offset ||
-		    (off_t) (offset + size) > blob_end_offset) {
-			continue;
-		}
-		kaddr = blob->csb_mem_kaddr;
-		if (kaddr == 0) {
-			/* blob data has been released */
-			continue;
-		}
-		cd_entry = blob->csb_pmap_cs_entry;
-		if (cd_entry == NULL) {
-			continue;
-		}
-
-		break;
-	}
-
-	if (cd_entry != NULL) {
-		kr = pmap_cs_associate(pmap,
-		    cd_entry,
-		    start,
-		    size,
-		    offset - blob_start_offset);
-	} else {
-		kr = KERN_CODESIGN_ERROR;
-	}
-#if 00
-	printf("FBDP %d[%s] pmap_cs_associate(%p,%p,0x%llx,0x%llx) -> kr=0x%x\n", proc_selfpid(), &(current_proc()->p_comm[0]), pmap, cd_entry, (uint64_t)start, (uint64_t)size, kr);
-	kr = KERN_SUCCESS;
-#endif
-	return kr;
-}
-#endif /* PMAP_CS */

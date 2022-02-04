@@ -102,7 +102,7 @@ static au_sentry_t audit_default_se = {
 struct auditinfo_addr * const audit_default_aia_p = &audit_default_se.se_auinfo;
 
 /* Copied from <ipc/ipc_object.h> */
-#define IPC_KMSG_FLAGS_ALLOW_IMMOVABLE_SEND 0x1
+#define IPC_OBJECT_COPYIN_FLAGS_ALLOW_IMMOVABLE_SEND 0x1
 kern_return_t ipc_object_copyin(ipc_space_t, mach_port_name_t,
     mach_msg_type_name_t, ipc_port_t *, mach_port_context_t, mach_msg_guard_flags_t *, uint32_t);
 void ipc_port_release_send(ipc_port_t);
@@ -437,7 +437,7 @@ audit_session_debug_callout(__unused proc_t p, __unused void *arg)
 static int
 audit_session_debug_filterfn(proc_t p, void *st)
 {
-	kauth_cred_t cred = p->p_ucred;
+	kauth_cred_t cred = kauth_cred_get();
 	auditinfo_addr_t *aia_p = cred->cr_audit.as_aia_p;
 	au_sentry_debug_t *sed_tab = (au_sentry_debug_t *) st;
 	au_sentry_debug_t  *sdtp;
@@ -526,8 +526,8 @@ audit_sysctl_session_debug(__unused struct sysctl_oid *oidp,
 	 * We hold the lock over the alloc since we don't want the table to
 	 * grow on us.   Therefore, use the non-blocking version of kalloc().
 	 */
-	sed_tab = (au_sentry_debug_t *)kheap_alloc(KHEAP_TEMP,
-	    entry_cnt * sizeof(au_sentry_debug_t), Z_NOWAIT | Z_ZERO);
+	sed_tab = kalloc_data(entry_cnt * sizeof(au_sentry_debug_t),
+	    Z_NOWAIT | Z_ZERO);
 	if (sed_tab == NULL) {
 		AUDIT_SENTRY_RUNLOCK();
 		return ENOMEM;
@@ -565,7 +565,7 @@ audit_sysctl_session_debug(__unused struct sysctl_oid *oidp,
 
 	req->oldlen = sz;
 	err = SYSCTL_OUT(req, sed_tab, sz);
-	kheap_free(KHEAP_TEMP, sed_tab, entry_cnt * sizeof(au_sentry_debug_t));
+	kfree_data(sed_tab, entry_cnt * sizeof(au_sentry_debug_t));
 
 	return err;
 }
@@ -710,7 +710,7 @@ audit_session_remove(au_sentry_t *se)
 
 			LIST_REMOVE(found_se, se_link);
 			AUDIT_SENTRY_WUNLOCK();
-			free(found_se, M_AU_SESSION);
+			kfree_type(au_sentry_t, found_se);
 
 			return;
 		}
@@ -867,7 +867,7 @@ audit_session_new(auditinfo_addr_t *new_aia_p, auditinfo_addr_t *old_aia_p)
 	/*
 	 * Alloc a new session entry now so we don't wait holding the lock.
 	 */
-	se = malloc(sizeof(au_sentry_t), M_AU_SESSION, M_WAITOK | M_ZERO);
+	se = kalloc_type(au_sentry_t, Z_WAITOK | Z_ZERO | Z_NOFAIL);
 
 	/*
 	 * Find an unique session ID, if desired.
@@ -899,7 +899,7 @@ audit_session_new(auditinfo_addr_t *new_aia_p, auditinfo_addr_t *old_aia_p)
 			updated = audit_update_sentry(found_se, new_aia_p);
 
 			AUDIT_SENTRY_WUNLOCK();
-			free(se, M_AU_SESSION);
+			kfree_type(au_sentry_t, se);
 
 			/* If a different session then add this process in. */
 			if (new_aia_p != old_aia_p) {
@@ -1027,7 +1027,7 @@ audit_session_unref(kauth_cred_t cred)
 void
 audit_session_procnew(proc_t p)
 {
-	kauth_cred_t cred = p->p_ucred;
+	kauth_cred_t cred = proc_ucred(p);
 	auditinfo_addr_t *aia_p;
 
 	KASSERT(IS_VALID_CRED(cred),
@@ -1045,7 +1045,7 @@ audit_session_procnew(proc_t p)
 void
 audit_session_procexit(proc_t p)
 {
-	kauth_cred_t cred = p->p_ucred;
+	kauth_cred_t cred = proc_ucred(p);
 	auditinfo_addr_t *aia_p;
 
 	KASSERT(IS_VALID_CRED(cred),
@@ -1069,8 +1069,8 @@ audit_session_init(void)
 
 	AUDIT_SENTRY_RWLOCK_INIT();
 
-	au_sentry_bucket = malloc( sizeof(struct au_sentry) *
-	    HASH_TABLE_SIZE, M_AU_SESSION, M_WAITOK | M_ZERO);
+	au_sentry_bucket = zalloc_permanent(sizeof(struct au_sentry) *
+	    HASH_TABLE_SIZE, ZALIGN_PTR);
 
 	for (i = 0; i < HASH_TABLE_SIZE; i++) {
 		LIST_INIT(&au_sentry_bucket[i]);
@@ -1078,8 +1078,8 @@ audit_session_init(void)
 
 	(void)audit_sdev_init();
 #if AU_HISTORY_LOGGING
-	au_history = malloc(sizeof(struct au_history) * au_history_size,
-	    M_AU_SESSION, M_WAITOK | M_ZERO);
+	au_history = zalloc_permanent(sizeof(struct au_history) * au_history_size,
+	    ZALIGN_PTR);
 #endif
 }
 
@@ -1195,7 +1195,7 @@ audit_session_setaia(proc_t p, auditinfo_addr_t *new_aia_p)
 			 * If p_ucred has changed then we should restart this
 			 * again with the new cred.
 			 */
-			if (p->p_ucred != my_cred) {
+			if (proc_ucred(p) != my_cred) {
 				proc_ucred_unlock(p);
 				audit_session_unref(my_new_cred);
 				kauth_cred_unref(&my_new_cred);
@@ -1203,9 +1203,9 @@ audit_session_setaia(proc_t p, auditinfo_addr_t *new_aia_p)
 				my_cred = kauth_cred_proc_ref(p);
 				continue;
 			}
-			p->p_ucred = my_new_cred;
+			proc_set_ucred(p, my_new_cred);
 			/* update cred on proc */
-			PROC_UPDATE_CREDS_ONPROC(p);
+			proc_update_creds_onproc(p);
 			proc_ucred_unlock(p);
 		}
 		/*
@@ -1423,8 +1423,8 @@ audit_session_join_internal(proc_t p, task_t task, ipc_port_t port, au_asid_t *n
 	}
 
 	proc_ucred_lock(p);
-	kauth_cred_ref(p->p_ucred);
-	my_cred = p->p_ucred;
+	kauth_cred_ref(proc_ucred(p));
+	my_cred = proc_ucred(p);
 	if (!IS_VALID_CRED(my_cred)) {
 		kauth_cred_unref(&my_cred);
 		proc_ucred_unlock(p);
@@ -1447,8 +1447,8 @@ audit_session_join_internal(proc_t p, task_t task, ipc_port_t port, au_asid_t *n
 		new_as.as_aia_p = new_aia_p;
 
 		my_new_cred = kauth_cred_setauditinfo(my_cred, &new_as);
-		p->p_ucred = my_new_cred;
-		PROC_UPDATE_CREDS_ONPROC(p);
+		proc_set_ucred(p, my_new_cred);
+		proc_update_creds_onproc(p);
 
 		/* Increment the proc count of new session */
 		audit_inc_procount(AU_SENTRY_PTR(new_aia_p));
@@ -1517,7 +1517,7 @@ audit_session_join(proc_t p, struct audit_session_join_args *uap,
 
 
 	if (ipc_object_copyin(get_task_ipcspace(p->task), send,
-	    MACH_MSG_TYPE_COPY_SEND, &port, 0, NULL, IPC_KMSG_FLAGS_ALLOW_IMMOVABLE_SEND) != KERN_SUCCESS) {
+	    MACH_MSG_TYPE_COPY_SEND, &port, 0, NULL, IPC_OBJECT_COPYIN_FLAGS_ALLOW_IMMOVABLE_SEND) != KERN_SUCCESS) {
 		*ret_asid = AU_DEFAUDITSID;
 		err = EINVAL;
 	} else {
@@ -1537,8 +1537,8 @@ audit_session_join(proc_t p, struct audit_session_join_args *uap,
 static void
 audit_sdev_entry_free(struct audit_sdev_entry *ase)
 {
-	free(ase->ase_record, M_AUDIT_SDEV_ENTRY);
-	free(ase, M_AUDIT_SDEV_ENTRY);
+	kfree_data(ase->ase_record, ase->ase_record_len);
+	kfree_type(struct audit_sdev_entry, ase);
 }
 
 /*
@@ -1559,16 +1559,16 @@ audit_sdev_append(struct audit_sdev *asdev, void *record, u_int record_len)
 		return;
 	}
 
-	ase = malloc(sizeof(*ase), M_AUDIT_SDEV_ENTRY, M_NOWAIT | M_ZERO);
+	ase = kalloc_type(struct audit_sdev_entry, Z_NOWAIT | Z_ZERO);
 	if (NULL == ase) {
 		asdev->asdev_drops++;
 		audit_sdev_drops++;
 		return;
 	}
 
-	ase->ase_record = malloc(record_len, M_AUDIT_SDEV_ENTRY, M_NOWAIT);
+	ase->ase_record = kalloc_data(record_len, Z_NOWAIT);
 	if (NULL == ase->ase_record) {
-		free(ase, M_AUDIT_SDEV_ENTRY);
+		kfree_type(struct audit_sdev_entry, ase);
 		asdev->asdev_drops++;
 		audit_sdev_drops++;
 		return;
@@ -1639,11 +1639,7 @@ audit_sdev_alloc(void)
 
 	AUDIT_SDEV_LIST_WLOCK_ASSERT();
 
-	asdev = malloc(sizeof(*asdev), M_AUDIT_SDEV, M_WAITOK | M_ZERO);
-	if (NULL == asdev) {
-		return NULL;
-	}
-
+	asdev = kalloc_type(struct audit_sdev, Z_ZERO | Z_WAITOK | Z_NOFAIL);
 	asdev->asdev_qlimit = AUDIT_SDEV_QLIMIT_DEFAULT;
 	TAILQ_INIT(&asdev->asdev_queue);
 	AUDIT_SDEV_LOCK_INIT(asdev);
@@ -1700,7 +1696,7 @@ audit_sdev_free(struct audit_sdev *asdev)
 	AUDIT_SDEV_LOCK_DESTROY(asdev);
 
 	TAILQ_REMOVE(&audit_sdev_list, asdev, asdev_list);
-	free(asdev, M_AUDIT_SDEV);
+	kfree_type(struct audit_sdev, asdev);
 	audit_sdev_count--;
 }
 

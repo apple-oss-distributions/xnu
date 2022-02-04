@@ -40,6 +40,10 @@
 #define __unused
 #endif
 
+#include <stddef.h>
+#include <sys/queue.h>
+#include <sys/types.h>
+
 /*
  * audit_internal.h contains private interfaces that are shared by user space
  * and the kernel for the purposes of assembling audit records.  Applications

@@ -28,15 +28,14 @@
 #ifndef _MACHDEP_INTERNAL_H_
 #define _MACHDEP_INTERNAL_H_
 
-/* We cache the current cthread pointer in the high bits of TPIDRRO_EL0 and
- * the current CPU number in the low bits. The cthread pointer must be aligned
+/* We cache the current cthread pointer in TPIDRRO_EL0 and
+ * the current CPU number in the low 12 bits of TPIDR_EL0.
+ *
+ * The cthread pointer must be aligned
  * sufficiently that the maximum CPU number will fit.
  *
  * NOTE: Keep this in sync with libsyscall/os/tsd.h, specifically _os_cpu_number()
  */
-
-#define MACHDEP_CTHREAD_ALIGNMENT       (1 << 3)
-#define MACHDEP_CPUNUM_MASK                     (MACHDEP_CTHREAD_ALIGNMENT - 1)
-#define MACHDEP_CTHREAD_MASK            (~MACHDEP_CPUNUM_MASK)
+#define MACHDEP_TPIDR_CPUNUM_MASK       (0x0000000000000fff)
 
 #endif /* _MACHDEP_INTERNAL_H_ */

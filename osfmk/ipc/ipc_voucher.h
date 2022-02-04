@@ -46,7 +46,7 @@ extern lck_grp_t        ipc_lck_grp;
 extern lck_attr_t       ipc_lck_attr;
 
 /* some shorthand for longer types */
-typedef mach_voucher_attr_value_handle_t        iv_value_handle_t;
+typedef mach_voucher_attr_value_handle_t        iv_value_handle_t __kernel_ptr_semantics;
 typedef mach_voucher_attr_value_reference_t     iv_value_refs_t;
 
 typedef natural_t               iv_index_t;
@@ -156,6 +156,7 @@ typedef ipc_voucher_attr_control_t iv_attr_control_t;
 extern ipc_voucher_attr_control_t  ivac_alloc(iv_index_t);
 extern void ipc_voucher_receive_postprocessing(ipc_kmsg_t kmsg, mach_msg_option_t option);
 extern void ipc_voucher_send_preprocessing(ipc_kmsg_t kmsg);
+extern ipc_voucher_t ipc_voucher_get_default_voucher(void);
 extern void mach_init_activity_id(void);
 extern kern_return_t ipc_get_pthpriority_from_kmsg_voucher(ipc_kmsg_t kmsg, ipc_pthread_priority_value_t *qos);
 #define ivac_lock_init(ivac) \
@@ -309,7 +310,7 @@ __BEGIN_DECLS
 
 /* DEBUG/TRACE Convert from a port to a voucher */
 extern uintptr_t unsafe_convert_port_to_voucher(
-	ipc_port_t              port);
+	ipc_port_t              port) __pure2;
 
 /* Convert from a port to a voucher */
 extern ipc_voucher_t convert_port_to_voucher(
@@ -327,10 +328,6 @@ extern void ipc_voucher_reference(
 extern void ipc_voucher_release(
 	ipc_voucher_t           voucher);
 
-/* deliver voucher notifications */
-extern void ipc_voucher_notify(
-	mach_msg_header_t       *msg);
-
 /* Convert from a voucher to a port */
 extern ipc_port_t convert_voucher_to_port(
 	ipc_voucher_t           voucher);
@@ -346,10 +343,6 @@ extern void ipc_voucher_attr_control_reference(
 /* drop the reference picked up above */
 extern void ipc_voucher_attr_control_release(
 	ipc_voucher_attr_control_t      control);
-
-/* deliver voucher control notifications */
-extern void ipc_voucher_attr_control_notify(
-	mach_msg_header_t       *msg);
 
 /* convert from a port to a voucher attribute control */
 extern ipc_voucher_attr_control_t convert_port_to_voucher_attr_control(

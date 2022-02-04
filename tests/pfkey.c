@@ -1101,7 +1101,7 @@ pfkey_process_message_test_60822136(uint8_t **mhp, int pfkey_socket)
 		T_QUIET; T_ASSERT_NOTNULL(policy_message, "spd add policy message is NULL");
 		policy_id = policy_message->sadb_x_policy_id;
 		T_LOG("Added policy id %u", policy_id);
-		send_pfkey_spd_get_message(pfkey_socket, policy_id);;
+		send_pfkey_spd_get_message(pfkey_socket, policy_id);
 		break;
 	}
 	case SADB_X_SPDGET:
@@ -1171,7 +1171,7 @@ pfkey_process_message_test_60822924(uint8_t **mhp, int pfkey_socket)
 		T_QUIET; T_ASSERT_NOTNULL(policy_message, "spd add policy message is NULL");
 		policy_id = policy_message->sadb_x_policy_id;
 		T_LOG("Added policy id %u", policy_id);
-		send_pfkey_spd_enable_message(pfkey_socket, policy_id);;
+		send_pfkey_spd_enable_message(pfkey_socket, policy_id);
 		break;
 	}
 	case SADB_X_SPDENABLE:
@@ -1241,7 +1241,7 @@ pfkey_process_message_test_60822956(uint8_t **mhp, int pfkey_socket)
 		T_QUIET; T_ASSERT_NOTNULL(policy_message, "spd add policy message is NULL");
 		policy_id = policy_message->sadb_x_policy_id;
 		T_LOG("Added policy id %u", policy_id);
-		send_pfkey_spd_disable_message(pfkey_socket, policy_id);;
+		send_pfkey_spd_disable_message(pfkey_socket, policy_id);
 		break;
 	}
 	case SADB_X_SPDDISABLE:

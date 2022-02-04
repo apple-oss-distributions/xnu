@@ -115,11 +115,15 @@ void os_reason_set_description_data(os_reason_t cur_reason, uint32_t type, void 
 #define OS_REASON_ENDPOINTSECURITY      27
 #define OS_REASON_PAC_EXCEPTION 28
 #define OS_REASON_BLUETOOTH_CHIP 29
+#define OS_REASON_PORT_SPACE    30
+#define OS_REASON_WEBKIT        31
+#define OS_REASON_BACKLIGHTSERVICES 32
+#define OS_REASON_MEDIA 33
 
 /*
  * Update whenever new OS_REASON namespaces are added.
  */
-#define OS_REASON_MAX_VALID_NAMESPACE OS_REASON_BLUETOOTH_CHIP
+#define OS_REASON_MAX_VALID_NAMESPACE OS_REASON_MEDIA
 
 #define OS_REASON_BUFFER_MAX_SIZE 5120
 
@@ -193,9 +197,9 @@ void abort_with_payload(uint32_t reason_namespace, uint64_t reason_code, void *p
  *                      args->reason_string - additional string formatted information about the request
  *                      args->reason_flags - options requested for how the process should be terminated (see OS_REASON_FLAG_* above)
  *
- * Outputs:             EINVAL if the PID requested is the same as that of the calling process, invalid or the namespace provided is invalid.
- *                      ESRCH if we couldn't find a live process with the requested PID
- *                      EPERM if the caller is not privileged enough to kill the process with the requested PID
+ * Outputs:             returns -1 and sets errno to EINVAL if the PID requested is the same as that of the calling process, invalid or the namespace provided is invalid.
+ *                      returns -1 and sets errno to ESRCH if we couldn't find a live process with the requested PID
+ *                      returns -1 and sets errno to EPERM if the caller is not privileged enough to kill the process with the requested PID
  *                      returns 0 otherwise
  */
 int terminate_with_reason(int pid, uint32_t reason_namespace, uint64_t reason_code, const char *reason_string, uint64_t reason_flags);
@@ -214,9 +218,9 @@ int terminate_with_reason(int pid, uint32_t reason_namespace, uint64_t reason_co
  *                      args->reason_string - additional string formatted information about the request
  *                      args->reason_flags - options requested for how the process should be terminated (see OS_REASON_FLAG_* above)
  *
- * Outputs:             EINVAL if the PID requested is the same as that of the calling process, is invalid or the namespace provided is invalid.
- *                      ESRCH if we couldn't find a live process with the requested PID
- *                      EPERM if the caller is not privileged enough to kill the process with the requested PID
+ * Outputs:             returns -1 and sets errno to EINVAL if the PID requested is the same as that of the calling process, is invalid or the namespace provided is invalid.
+ *                      returns -1 and sets errno to ESRCH if we couldn't find a live process with the requested PID
+ *                      returns -1 and sets errno to EPERM if the caller is not privileged enough to kill the process with the requested PID
  *                      returns 0 otherwise
  */
 int terminate_with_payload(int pid, uint32_t reason_namespace, uint64_t reason_code, void *payload, uint32_t payload_size,

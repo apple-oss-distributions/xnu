@@ -15,6 +15,7 @@
 #include <stdlib.h>
 #include <dlfcn.h>
 #include <os/assumes.h>
+#include <TargetConditionals.h>
 
 #else /* !KERNEL */
 #define TARGET_OS_WIN32 0

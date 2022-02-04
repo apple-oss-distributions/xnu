@@ -60,6 +60,8 @@
 #include <machine/monotonic.h>
 #endif /* MONOTONIC */
 
+#include <san/kcov_data.h>
+
 #include <machine/pal_routines.h>
 
 /*
@@ -160,19 +162,17 @@ typedef struct {
 #define DEFAULT_IOTRACE_ENTRIES_PER_CPU (64)
 #define IOTRACE_MAX_ENTRIES_PER_CPU (256)
 extern volatile int mmiotrace_enabled;
-extern int iotrace_generators;
-extern int iotrace_entries_per_cpu;
-extern int *iotrace_next;
-extern iotrace_entry_t **iotrace_ring;
+extern uint32_t iotrace_entries_per_cpu;
+PERCPU_DECL(uint32_t, iotrace_next);
+PERCPU_DECL(iotrace_entry_t * __unsafe_indexable, iotrace_ring);
 
 #define TRAPTRACE_INVALID_INDEX (~0U)
 #define DEFAULT_TRAPTRACE_ENTRIES_PER_CPU (16)
 #define TRAPTRACE_MAX_ENTRIES_PER_CPU (256)
 extern volatile int traptrace_enabled;
-extern int traptrace_generators;
-extern int traptrace_entries_per_cpu;
-extern int *traptrace_next;
-extern traptrace_entry_t **traptrace_ring;
+extern uint32_t traptrace_entries_per_cpu;
+PERCPU_DECL(uint32_t, traptrace_next);
+PERCPU_DECL(traptrace_entry_t * __unsafe_indexable, traptrace_ring);
 #endif /* DEVELOPMENT || DEBUG */
 
 /*
@@ -348,7 +348,6 @@ typedef struct cpu_data {
 	int                     cpu_plri;
 	plrecord_t              plrecords[MAX_PREEMPTION_RECORDS];
 #endif
-	void                    *cpu_console_buf;
 	struct x86_lcpu         lcpu;
 	int                     cpu_phys_number;        /* Physical CPU */
 	cpu_id_t                cpu_id;                 /* Platform Expert */
@@ -365,9 +364,13 @@ typedef struct cpu_data {
 #if DEBUG || DEVELOPMENT
 	uint64_t                tsc_sync_delta;
 #endif
+	uint32_t                cpu_soft_apic_lvt_timer;
+#if CONFIG_KCOV
+	kcov_cpu_data_t         cpu_kcov_data;
+#endif
 } cpu_data_t;
 
-extern cpu_data_t       *cpu_data_ptr[];
+extern cpu_data_t *__single cpu_data_ptr[MAX_CPUS];
 
 /*
  * __SEG_GS marks %gs-relative operations:
@@ -470,7 +473,8 @@ current_cpu_datap(void)
  */
 #if DEVELOPMENT || DEBUG
 static inline void
-rbtrace_bt(uint64_t *rets, int maxframes, cpu_data_t *cdata, uint64_t frameptr, bool use_cursp)
+rbtrace_bt(uint64_t *__counted_by(maxframes)rets, int maxframes,
+    cpu_data_t *cdata, uint64_t frameptr, bool use_cursp)
 {
 	extern uint32_t         low_intstack[];         /* bottom */
 	extern uint32_t         low_eintstack[];        /* top */
@@ -511,10 +515,10 @@ rbtrace_bt(uint64_t *rets, int maxframes, cpu_data_t *cdata, uint64_t frameptr, 
 				kstackt = cdata->cpu_int_stack_top;
 				kstackb = kstackt - INTSTACK_SIZE;
 				if (csp < kstackb || csp > kstackt) {
-					kstackt = (uintptr_t)low_eintstack;
+					kstackt = (uintptr_t)&low_eintstack;
 					kstackb = kstackt - INTSTACK_SIZE;
 					if (csp < kstackb || csp > kstackt) {
-						kstackb = (uintptr_t) mp_slave_stack;
+						kstackb = (uintptr_t)&mp_slave_stack;
 						kstackt = kstackb + PAGE_SIZE;
 					} else {
 						kstackb = 0;
@@ -525,7 +529,7 @@ rbtrace_bt(uint64_t *rets, int maxframes, cpu_data_t *cdata, uint64_t frameptr, 
 		}
 
 		if (__probable(kstackb && kstackt)) {
-			uint64_t *cfp = (uint64_t *) frameptr;
+			uint64_t *cfp = __unsafe_forge_single((uint64_t *)frameptr);
 			int rbbtf;
 
 			for (rbbtf = btidx; rbbtf < maxframes; rbbtf++) {
@@ -534,7 +538,7 @@ rbtrace_bt(uint64_t *rets, int maxframes, cpu_data_t *cdata, uint64_t frameptr, 
 					continue;
 				}
 				rets[rbbtf] = *(cfp + 1);
-				cfp = (uint64_t *) (*cfp);
+				cfp = __unsafe_forge_single((uint64_t *)(*cfp));
 			}
 		}
 	}
@@ -574,17 +578,18 @@ iotrace(iotrace_type_e type, uint64_t vaddr, uint64_t paddr, int size, uint64_t 
     uint64_t sabs, uint64_t duration)
 {
 	cpu_data_t *cdata;
-	int cpu_num, nextidx;
+	uint32_t nextidx;
 	iotrace_entry_t *cur_iotrace_ring;
+	uint32_t *nextidxp;
 
-	if (__improbable(mmiotrace_enabled == 0 || iotrace_generators == 0)) {
+	if (__improbable(mmiotrace_enabled == 0 || iotrace_entries_per_cpu == 0)) {
 		return;
 	}
 
 	cdata = current_cpu_datap();
-	cpu_num = cdata->cpu_number;
-	nextidx = iotrace_next[cpu_num];
-	cur_iotrace_ring = iotrace_ring[cpu_num];
+	nextidxp = PERCPU_GET(iotrace_next);
+	nextidx = *nextidxp;
+	cur_iotrace_ring = *PERCPU_GET(iotrace_ring);
 
 	cur_iotrace_ring[nextidx].iotype = type;
 	cur_iotrace_ring[nextidx].vaddr = vaddr;
@@ -594,7 +599,7 @@ iotrace(iotrace_type_e type, uint64_t vaddr, uint64_t paddr, int size, uint64_t 
 	cur_iotrace_ring[nextidx].start_time_abs = sabs;
 	cur_iotrace_ring[nextidx].duration = duration;
 
-	iotrace_next[cpu_num] = ((nextidx + 1) >= iotrace_entries_per_cpu) ? 0 : (nextidx + 1);
+	*nextidxp = ((nextidx + 1) >= iotrace_entries_per_cpu) ? 0 : (nextidx + 1);
 
 	rbtrace_bt(&cur_iotrace_ring[nextidx].backtrace[0],
 	    MAX_TRACE_BTFRAMES - 1, cdata, (uint64_t)__builtin_frame_address(0), true);
@@ -604,22 +609,22 @@ static inline uint32_t
 traptrace_start(int vecnum, uint64_t ipc, uint64_t sabs, uint64_t frameptr)
 {
 	cpu_data_t *cdata;
-	unsigned int cpu_num, nextidx;
-	traptrace_entry_t *cur_traptrace_ring;
+	uint32_t nextidx;
+	traptrace_entry_t *__unsafe_indexable cur_traptrace_ring;
+	uint32_t *nextidxp;
 
-	if (__improbable(traptrace_enabled == 0 || traptrace_generators == 0)) {
+	if (__improbable(traptrace_enabled == 0 || traptrace_entries_per_cpu == 0)) {
 		return TRAPTRACE_INVALID_INDEX;
 	}
 
 	assert(ml_get_interrupts_enabled() == FALSE);
 	cdata = current_cpu_datap();
-	cpu_num = (unsigned int)cdata->cpu_number;
-	nextidx = (unsigned int)traptrace_next[cpu_num];
+	nextidxp = PERCPU_GET(traptrace_next);
+	nextidx = *nextidxp;
 	/* prevent nested interrupts from clobbering this record */
-	traptrace_next[cpu_num] = (int)(((nextidx + 1) >= (unsigned int)traptrace_entries_per_cpu) ? 0 : (nextidx + 1));
+	*nextidxp = (((nextidx + 1) >= (unsigned int)traptrace_entries_per_cpu) ? 0 : (nextidx + 1));
 
-	cur_traptrace_ring = traptrace_ring[cpu_num];
-
+	cur_traptrace_ring = *PERCPU_GET(traptrace_ring);
 	cur_traptrace_ring[nextidx].vector = vecnum;
 	cur_traptrace_ring[nextidx].curthread = current_thread();
 	cur_traptrace_ring[nextidx].interrupted_pc = ipc;
@@ -633,16 +638,23 @@ traptrace_start(int vecnum, uint64_t ipc, uint64_t sabs, uint64_t frameptr)
 
 	assert(nextidx <= 0xFFFF);
 
-	return (uint32_t)((cpu_num << 16) | nextidx);
+	/*
+	 * encode the cpu number we're on because traptrace_end()
+	 * might be called from a different CPU.
+	 */
+	return ((uint32_t)cdata->cpu_number << 16) | nextidx;
 }
 
 static inline void
 traptrace_end(uint32_t index, uint64_t eabs)
 {
-	if (index != TRAPTRACE_INVALID_INDEX) {
-		traptrace_entry_t *ttentp = &traptrace_ring[index >> 16][index & 0xFFFF];
+	traptrace_entry_t *__unsafe_indexable ring;
 
-		ttentp->duration = eabs - ttentp->start_time_abs;
+	if (index != TRAPTRACE_INVALID_INDEX) {
+		ring = *PERCPU_GET_WITH_BASE(other_percpu_base(index >> 16),
+		    traptrace_ring);
+		index &= 0XFFFF;
+		ring[index].duration = eabs - ring[index].start_time_abs;
 	}
 }
 
@@ -738,6 +750,7 @@ _mp_enable_preemption_no_check(void)
 
 #ifdef XNU_KERNEL_PRIVATE
 #define disable_preemption() disable_preemption_internal()
+#define disable_preemption_without_measurements() disable_preemption_internal()
 #define enable_preemption() enable_preemption_internal()
 #define MACHINE_PREEMPTION_MACROS (1)
 #endif

@@ -185,6 +185,12 @@ ATTR_CMN_CHGTIME
 .El
 .Pp
 .
+.Pp
+If ATTR_CMN_MODTIME is set to a time before ATTR_CMN_CRTIME, the value of
+ATTR_CMN_CRTIME is set to the same value as ATTR_CMN_MODTIME.
+.El
+.Pp
+.
 You must be root (that is, your process's effective UID must be 0) in order to change the 
 .Dv ATTR_CMN_OWNERID
 attribute

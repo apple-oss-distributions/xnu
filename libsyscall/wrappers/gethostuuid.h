@@ -36,7 +36,7 @@
 #if defined(__IPHONE_OS_VERSION_MIN_REQUIRED) && (__IPHONE_OS_VERSION_MIN_REQUIRED < __IPHONE_7_0)
 int gethostuuid(uuid_t, const struct timespec *) __OSX_AVAILABLE_BUT_DEPRECATED_MSG(__MAC_NA, __MAC_NA, __IPHONE_2_0, __IPHONE_5_0, "gethostuuid() is no longer supported");
 #else
-int gethostuuid(uuid_t, const struct timespec *) __OSX_AVAILABLE_STARTING(__MAC_10_5, __IPHONE_NA);
+int gethostuuid(uuid_t, const struct timespec *) __API_AVAILABLE(macos(10.5)) __SPI_AVAILABLE(ios(2.0), tvos(9.0), watchos(1.0), bridgeos(2.0));
 #endif
 
 #endif /* __GETHOSTUUID_H */

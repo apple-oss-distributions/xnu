@@ -318,19 +318,18 @@ mach_node_register(mach_node_t  node)
 		goto out;
 	}
 
-	waitq_set_lazy_init_link(pp_set);
+	waitq_set_lazy_init_link(&pp_set->ips_wqset);
 	/* Add the bootstrap port to the proxy port set */
 	uint64_t wq_link_id = waitq_link_reserve(NULL);
 	uint64_t wq_reserved_prepost = waitq_prepost_reserve(NULL, 10,
 	    WAITQ_DONT_LOCK);
-	ips_lock(pp_set);
-	ip_lock(bs_port);
-	ipc_pset_add(pp_set,
+	ips_mq_lock(pp_set); // Revisit the lock when enabling flipc
+	ip_mq_lock(bs_port);
+	ipc_pset_add_unlock(pp_set,
 	    bs_port,
 	    &wq_link_id,
 	    &wq_reserved_prepost);
-	ip_unlock(bs_port);
-	ips_unlock(pp_set);
+	ips_mq_unlock(pp_set);
 
 	waitq_link_release(wq_link_id);
 	waitq_prepost_release_reserve(wq_reserved_prepost);
@@ -339,14 +338,13 @@ mach_node_register(mach_node_t  node)
 	wq_link_id = waitq_link_reserve(NULL);
 	wq_reserved_prepost = waitq_prepost_reserve(NULL, 10,
 	    WAITQ_DONT_LOCK);
-	ips_lock(pp_set);
-	ip_lock(ack_port);
-	ipc_pset_add(pp_set,
+	ips_mq_lock(pp_set); // Revisit the lock when enabling flipc
+	ip_mq_lock(ack_port);
+	ipc_pset_add_unlock(pp_set,
 	    ack_port,
 	    &wq_link_id,
 	    &wq_reserved_prepost);
-	ip_unlock(ack_port);
-	ips_unlock(pp_set);
+	ips_mq_unlock(pp_set);
 
 	waitq_link_release(wq_link_id);
 	waitq_prepost_release_reserve(wq_reserved_prepost);
@@ -380,7 +378,7 @@ mach_node_register(mach_node_t  node)
 out:
 	if (kr != KERN_SUCCESS) { // Dispose of whatever we allocated
 		if (pp_set) {
-			ips_lock(pp_set);
+			ips_mq_lock(pp_set);
 			ipc_pset_destroy(proxy_space, pp_set);
 		}
 
@@ -744,7 +742,7 @@ mnl_terminate(mnl_node_info_t   node,
 
 	// Wake any threads sleeping on the proxy port set
 	if (mnode->proxy_port_set != IPS_NULL) {
-		ips_lock(mnode->proxy_port_set);
+		ips_mq_lock(mnode->proxy_port_set);
 		ipc_pset_destroy(mnode->proxy_space, mnode->proxy_port_set);
 		mnode->proxy_port_set = IPS_NULL;
 	}

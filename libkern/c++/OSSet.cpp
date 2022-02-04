@@ -161,7 +161,7 @@ OSSharedPtr<OSSet>
 OSSet::withSet(const OSSet *set,
     unsigned int capacity)
 {
-	OSSharedPtr<OSSet> me = OSMakeShared<OSSet>();;
+	OSSharedPtr<OSSet> me = OSMakeShared<OSSet>();
 
 	if (me && !me->initWithSet(set, capacity)) {
 		return nullptr;

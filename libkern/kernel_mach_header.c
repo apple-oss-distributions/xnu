@@ -189,6 +189,34 @@ getsegdatafromheader(
 }
 
 /*
+ * This routine iterates through the sections in a particular segment
+ * and returns pointer to the requested section, if it is present.
+ * Otherwise it returns zero.
+ */
+kernel_section_t *
+getsectbynamefromseg(
+	kernel_segment_command_t *sgp,
+	const char *segname,
+	const char *sectname)
+{
+	unsigned long j;
+	kernel_section_t *sp = (kernel_section_t *)((uintptr_t)sgp +
+	    sizeof(kernel_segment_command_t));
+	for (j = 0; j < sgp->nsects; j++) {
+		if (strncmp(sp->sectname, sectname,
+		    sizeof(sp->sectname)) == 0 &&
+		    strncmp(sp->segname, segname,
+		    sizeof(sp->segname)) == 0) {
+			return sp;
+		}
+		sp = (kernel_section_t *)((uintptr_t)sp +
+		    sizeof(kernel_section_t));
+	}
+	return (kernel_section_t *)NULL;
+}
+
+
+/*
  * This routine returns the section structure for the named section in the
  * named segment for the mach_header pointer passed to it if it exist.
  * Otherwise it returns zero.
@@ -203,7 +231,7 @@ getsectbynamefromheader(
 {
 	kernel_segment_command_t *sgp;
 	kernel_section_t *sp;
-	unsigned long i, j;
+	unsigned long i;
 
 	sgp = (kernel_segment_command_t *)
 	    ((uintptr_t)mhp + sizeof(kernel_mach_header_t));
@@ -211,17 +239,9 @@ getsectbynamefromheader(
 		if (sgp->cmd == LC_SEGMENT_KERNEL) {
 			if (strncmp(sgp->segname, segname, sizeof(sgp->segname)) == 0 ||
 			    mhp->filetype == MH_OBJECT) {
-				sp = (kernel_section_t *)((uintptr_t)sgp +
-				    sizeof(kernel_segment_command_t));
-				for (j = 0; j < sgp->nsects; j++) {
-					if (strncmp(sp->sectname, sectname,
-					    sizeof(sp->sectname)) == 0 &&
-					    strncmp(sp->segname, segname,
-					    sizeof(sp->segname)) == 0) {
-						return sp;
-					}
-					sp = (kernel_section_t *)((uintptr_t)sp +
-					    sizeof(kernel_section_t));
+				sp = getsectbynamefromseg(sgp, segname, sectname);
+				if (sp) {
+					return sp;
 				}
 			}
 		}

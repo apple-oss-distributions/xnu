@@ -742,7 +742,7 @@ Entry(ks_64bit_return)
 	push	R64_CS(%r15)
 	push	R64_RIP(%r15)
 
-	cmpq	$(KERNEL64_CS), 8(%rsp)
+	cmpw	$(KERNEL64_CS), 8(%rsp)
 	jne	1f			/* Returning to user (%r15 will be restored after the segment checks) */
 	mov	R64_R15(%r15), %r15
 	jmp	L_64b_kernel_return	/* Returning to kernel */
@@ -794,11 +794,12 @@ L_chk_sysret:
 	 * |  Saved RAX   |  <-- rsp
 	 * +--------------+
 	 */
-	cmpl	$(SYSCALL_CS), 16(%rsp) /* test for exit via SYSRET */
+
+	cmpw	$(SYSCALL_CS), 16(%rsp) /* test for exit via SYSRET */
 	je      L_sysret
 
-	cmpl	$1, %eax
-	je	L_verw_island_2
+	testl	$(MTHR_SEGCHK), %eax
+	jnz	L_verw_island_2
 
 	pop	%rax		/* Matched to [A], above */
 
@@ -809,8 +810,8 @@ EXT(ret64_iret):
 
 
 L_sysret:
-	cmpl	$1, %eax
-	je	L_verw_island_3
+	testl	$(MTHR_SEGCHK), %eax
+	jnz	L_verw_island_3
 
 	pop	%rax		/* Matched to [A], above */
 	/*
@@ -829,7 +830,7 @@ L_sysret:
 L_verw_island_2:
 
 	pop	%rax		/* Matched to [A], above */
-	verw	40(%rsp)	/* verw operates on the %ss value already on the stack */
+	verw	32(%rsp)	/* verw operates on the %ss value already on the stack */
 	jmp	EXT(ret64_iret)
 
 
@@ -855,7 +856,7 @@ L_64b_segops_island:
 
 	/* Validate CS/DS/ES/FS/GS segment selectors with the Load Access Rights instruction prior to restoration */
 	/* Exempt "known good" statically configured selectors, e.g. USER64_CS and 0 */
-	cmpl	$(USER64_CS), R64_CS(%r15)
+	cmpw	$(USER64_CS), R64_CS(%r15)
 	jz 	11f
 	larw	R64_CS(%r15), %ax
 	jnz	L_64_reset_cs
@@ -866,25 +867,25 @@ L_64b_segops_island:
 L_64_reset_cs:
 	movl	$(USER64_CS), R64_CS(%r15)
 11:
-	cmpl	$0, R64_DS(%r15)
+	cmpw	$0, R64_DS(%r15)
 	jz 	22f
 	larw	R64_DS(%r15), %ax
 	jz	22f
 	movl	$0, R64_DS(%r15)
 22:
-	cmpl	$0, R64_ES(%r15)
+	cmpw	$0, R64_ES(%r15)
 	jz 	33f
 	larw	R64_ES(%r15), %ax
 	jz	33f
 	movl	$0, R64_ES(%r15)
 33:
-	cmpl	$0, R64_FS(%r15)
+	cmpw	$0, R64_FS(%r15)
 	jz 	44f
 	larw	R64_FS(%r15), %ax
 	jz	44f
 	movl	$0, R64_FS(%r15)
 44:
-	cmpl	$0, R64_GS(%r15)
+	cmpw	$0, R64_GS(%r15)
 	jz	55f
 	larw	R64_GS(%r15), %ax
 	jz	55f
@@ -981,7 +982,7 @@ Entry(ks_32bit_return)
 
 	/* Validate CS/DS/ES/FS/GS segment selectors with the Load Access Rights instruction prior to restoration */
 	/* Exempt "known good" statically configured selectors, e.g. USER_CS, USER_DS and 0 */
-	cmpl	$(USER_CS), R32_CS(%r15)
+	cmpw	$(USER_CS), R32_CS(%r15)
 	jz 	11f
 	larw	R32_CS(%r15), %ax
 	jnz	L_32_reset_cs
@@ -992,33 +993,33 @@ Entry(ks_32bit_return)
 L_32_reset_cs:
 	movl	$(USER_CS), R32_CS(%r15)
 11:
-	cmpl	$(USER_DS), R32_DS(%r15)
+	cmpw	$(USER_DS), R32_DS(%r15)
 	jz	22f
-	cmpl	$0, R32_DS(%r15)
+	cmpw	$0, R32_DS(%r15)
 	jz 	22f
 	larw	R32_DS(%r15), %ax
 	jz	22f
 	movl	$(USER_DS), R32_DS(%r15)
 22:
-	cmpl	$(USER_DS), R32_ES(%r15)
+	cmpw	$(USER_DS), R32_ES(%r15)
 	jz	33f
-	cmpl	$0, R32_ES(%r15)
+	cmpw	$0, R32_ES(%r15)
 	jz 	33f
 	larw	R32_ES(%r15), %ax
 	jz	33f
 	movl	$(USER_DS), R32_ES(%r15)
 33:
-	cmpl	$(USER_DS), R32_FS(%r15)
+	cmpw	$(USER_DS), R32_FS(%r15)
 	jz	44f
-	cmpl	$0, R32_FS(%r15)
+	cmpw	$0, R32_FS(%r15)
 	jz 	44f
 	larw	R32_FS(%r15), %ax
 	jz	44f
 	movl	$(USER_DS), R32_FS(%r15)
 44:
-	cmpl	$(USER_CTHREAD), R32_GS(%r15)
+	cmpw	$(USER_CTHREAD), R32_GS(%r15)
 	jz	55f
-	cmpl	$0, R32_GS(%r15)
+	cmpw	$0, R32_GS(%r15)
 	jz 	55f
 	larw	R32_GS(%r15), %ax
 	jz	55f
@@ -1105,12 +1106,11 @@ L_32bit_seg_restore_done:
 	 * +--------------+
 	 */
 
-	cmpl	$(SYSENTER_CS), 8(%rsp)
-					/* test for sysexit */
+	cmpw	$(SYSENTER_CS), 8(%rsp)		/* test for sysexit */
 	je      L_rtu_via_sysexit
 
-	cmpl	$1, %r14d
-	je	L_verw_island
+	testl	$(MTHR_SEGCHK), %r14d
+	jnz	L_verw_island
 
 L_after_verw:
 	xor	%r14, %r14
@@ -1135,7 +1135,7 @@ L_rtu_via_sysexit:
 	/*
 	 * %ss is now at 16(%rsp)
 	 */
-	cmpl	$1, %r14d
+	testl	$(MTHR_SEGCHK), %r14d
 	je	L_verw_island_1
 L_after_verw_1:
 	xor	%r14, %r14
@@ -1152,7 +1152,7 @@ L_after_verw_1:
 
 Entry(ks_dispatch)
 	popq	%rax
-	cmpl	$(KERNEL64_CS), ISF64_CS(%rsp)
+	cmpw	$(KERNEL64_CS), ISF64_CS(%rsp)
 	je	EXT(ks_dispatch_kernel)
 
 	mov 	%rax, %gs:CPU_UBER_TMP
@@ -1488,7 +1488,7 @@ ret_to_kernel:
 	CCALL1(panic_idt64, %r15)
 	hlt
 1:
-	cmpl	$(KERNEL64_CS), R64_CS(%r15)
+	cmpw	$(KERNEL64_CS), R64_CS(%r15)
 	je	2f
 	CCALL1(panic_idt64, %r15)
 	hlt
@@ -1540,13 +1540,6 @@ Entry(return_from_trap)
 	mov	%r15, %rdi			/* Set RDI to current thread */
 	CCALL(lck_rw_clear_promotions_x86)	/* Clear promotions if needed */
 1:	
-
-	cmpl	$0, TH_TMP_ALLOC_CNT(%r15)	/* Check if current thread has KHEAP_TEMP leaks */
-	jz	1f
-	xorq	%rbp, %rbp			/* clear framepointer */
-	mov	%r15, %rdi			/* Set RDI to current thread */
-	CCALL(kheap_temp_leak_panic)
-1:
 
 	movq	TH_PCB_ISS(%r15), %r15		/* PCB stack */
 	movl	%gs:CPU_PENDING_AST,%eax
@@ -1706,8 +1699,8 @@ LEXT(return_to_iret)			/* (label for kdb_kintr and hardclock) */
 	mov	%rax,%cr0		/* set cr0 */
 2:
 	/* Load interrupted code segment into %eax */
-	movl	R64_CS(%r15),%eax	/* assume 64-bit state */
-	cmpl	$(SS_32),SS_FLAVOR(%r15)/* 32-bit? */
+	movl	R64_CS(%r15), %eax	/* assume 64-bit state */
+	cmpl	$(SS_32), SS_FLAVOR(%r15) /* 32-bit? */
 #if DEBUG_IDT64
 	jne	5f
 	movl	R32_CS(%r15),%eax	/* 32-bit user mode */

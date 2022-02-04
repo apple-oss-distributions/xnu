@@ -31,6 +31,8 @@
 extern kern_return_t test_pmap_enter_disconnect(unsigned int);
 extern kern_return_t test_pmap_iommu_disconnect(void);
 extern kern_return_t test_pmap_extended(void);
+extern void test_pmap_call_overhead(unsigned int);
+extern uint64_t test_pmap_page_protect_overhead(unsigned int, unsigned int);
 
 static int
 sysctl_test_pmap_enter_disconnect(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused int arg2, struct sysctl_req *req)
@@ -79,3 +81,44 @@ sysctl_test_pmap_extended(__unused struct sysctl_oid *oidp, __unused void *arg1,
 SYSCTL_PROC(_kern, OID_AUTO, pmap_extended_test,
     CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED,
     0, 0, sysctl_test_pmap_extended, "I", "");
+
+static int
+sysctl_test_pmap_call_overhead(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused int arg2, struct sysctl_req *req)
+{
+	unsigned int num_loops;
+	int error, changed;
+	error = sysctl_io_number(req, 0, sizeof(num_loops), &num_loops, &changed);
+	if (error || !changed) {
+		return error;
+	}
+	test_pmap_call_overhead(num_loops);
+	return 0;
+}
+
+SYSCTL_PROC(_kern, OID_AUTO, pmap_call_overhead_test,
+    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED,
+    0, 0, sysctl_test_pmap_call_overhead, "I", "");
+
+static int
+sysctl_test_pmap_page_protect_overhead(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused int arg2, struct sysctl_req *req)
+{
+	struct {
+		unsigned int num_loops;
+		unsigned int num_aliases;
+	} ppo_in;
+
+	int error;
+	uint64_t duration;
+
+	error = SYSCTL_IN(req, &ppo_in, sizeof(ppo_in));
+	if (error) {
+		return error;
+	}
+
+	duration = test_pmap_page_protect_overhead(ppo_in.num_loops, ppo_in.num_aliases);
+	error = SYSCTL_OUT(req, &duration, sizeof(duration));
+	return error;
+}
+
+SYSCTL_PROC(_kern, OID_AUTO, pmap_page_protect_overhead_test,
+    CTLTYPE_OPAQUE | CTLFLAG_RW | CTLFLAG_LOCKED, 0, 0, sysctl_test_pmap_page_protect_overhead, "-", "");

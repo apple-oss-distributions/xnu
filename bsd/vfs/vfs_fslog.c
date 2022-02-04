@@ -40,7 +40,6 @@
 #include <sys/mount_internal.h>
 #include <sys/kasl.h>
 
-#include <sys/queue.h>
 #include <kern/zalloc.h>
 
 #include <uuid/uuid.h>
@@ -70,7 +69,7 @@ fslog_extmod_msgtracer(proc_t caller, proc_t target)
 		char t_name[2 * MAXCOMLEN + 2 /* () */ + sizeof(uuid_string_t)];
 
 		strlcpy(c_name, caller->p_comm, sizeof(c_name));
-		uuid_unparse_upper(caller->p_uuid, uuidstr);
+		uuid_unparse_upper(proc_executableuuid_addr(caller), uuidstr);
 		strlcat(c_name, "(", sizeof(c_name));
 		strlcat(c_name, uuidstr, sizeof(c_name));
 		strlcat(c_name, ")", sizeof(c_name));
@@ -79,7 +78,7 @@ fslog_extmod_msgtracer(proc_t caller, proc_t target)
 		}
 
 		strlcpy(t_name, target->p_comm, sizeof(t_name));
-		uuid_unparse_upper(target->p_uuid, uuidstr);
+		uuid_unparse_upper(proc_executableuuid_addr(target), uuidstr);
 		strlcat(t_name, "(", sizeof(t_name));
 		strlcat(t_name, uuidstr, sizeof(t_name));
 		strlcat(t_name, ")", sizeof(t_name));
@@ -104,176 +103,3 @@ fslog_extmod_msgtracer(proc_t caller, proc_t target)
 		    NULL);
 	}
 }
-
-#if defined(__x86_64__)
-
-/*
- * Log information about floating point exception handling
- */
-
-static lck_mtx_t fpxlock;
-
-void
-fpxlog_init(void)
-{
-	lck_grp_attr_t *lck_grp_attr = lck_grp_attr_alloc_init();
-	lck_grp_t *lck_grp = lck_grp_alloc_init("fpx", lck_grp_attr);
-	lck_mtx_init(&fpxlock, lck_grp, LCK_ATTR_NULL);
-}
-
-struct fpx_event {
-	uuid_t fe_uuid;
-	uint32_t fe_code;
-	uint32_t fe_xcpt;
-	TAILQ_ENTRY(fpx_event) fe_link;
-};
-
-static bool
-match_fpx_event(const struct fpx_event *fe,
-    const uuid_t uuid, const uint32_t code, const uint32_t xcpt)
-{
-	return code == fe->fe_code && xcpt == fe->fe_xcpt &&
-	       0 == memcmp(uuid, fe->fe_uuid, sizeof(uuid_t));
-}
-
-#if FPX_EVENT_DBG
-static __attribute__((noinline)) void
-print_fpx_event(const char *pfx, const struct fpx_event *fe)
-{
-	uuid_string_t uustr;
-	uuid_unparse_upper(fe->fe_uuid, uustr);
-	printf("%s: code 0x%x xcpt 0x%x uuid '%s'\n",
-	    pfx, fe->fe_code, fe->fe_xcpt, uustr);
-}
-#define DPRINTF_FPX_EVENT(pfx, fe)      print_fpx_event(pfx, fe)
-#else
-#define DPRINTF_FPX_EVENT(pfx, fe)      /* nothing */
-#endif
-
-#define MAX_DISTINCT_FPX_EVENTS 101     /* (approx one page of heap) */
-
-/*
- * Filter to detect "new" <uuid, code, xcpt> tuples.
- * Uses limited amount of state, managed LRU.
- * Optimized to ignore repeated invocation with the same tuple.
- *
- * Note that there are 6 exception types, two types of FP, and
- * many binaries, so don't make the list bound too small.
- * It's also a linear search, so don't make it too large either.
- * Next level filtering provided by syslogd, and summarization.
- */
-static bool
-novel_fpx_event(const uuid_t uuid, uint32_t code, uint32_t xcpt)
-{
-	static TAILQ_HEAD(fpx_event_head, fpx_event) fehead =
-	    TAILQ_HEAD_INITIALIZER(fehead);
-	struct fpx_event *fe;
-
-	lck_mtx_lock(&fpxlock);
-
-	fe = TAILQ_FIRST(&fehead);
-	if (NULL != fe &&
-	    match_fpx_event(fe, uuid, code, xcpt)) {
-		/* seen before and element already at head */
-		lck_mtx_unlock(&fpxlock);
-		DPRINTF_FPX_EVENT("seen, head", fe);
-		return false;
-	}
-
-	unsigned int count = 0;
-
-	TAILQ_FOREACH(fe, &fehead, fe_link) {
-		if (match_fpx_event(fe, uuid, code, xcpt)) {
-			/* seen before, now move element to head */
-			TAILQ_REMOVE(&fehead, fe, fe_link);
-			TAILQ_INSERT_HEAD(&fehead, fe, fe_link);
-			lck_mtx_unlock(&fpxlock);
-			DPRINTF_FPX_EVENT("seen, moved to head", fe);
-			return false;
-		}
-		count++;
-	}
-
-	/* not recorded here => novel */
-
-	if (count >= MAX_DISTINCT_FPX_EVENTS) {
-		/* reuse LRU element */
-		fe = TAILQ_LAST(&fehead, fpx_event_head);
-		TAILQ_REMOVE(&fehead, fe, fe_link);
-		DPRINTF_FPX_EVENT("reusing", fe);
-	} else {
-		/* add a new element to the list */
-		fe = zalloc_permanent_type(struct fpx_event);
-	}
-	memcpy(fe->fe_uuid, uuid, sizeof(uuid_t));
-	fe->fe_code = code;
-	fe->fe_xcpt = xcpt;
-	TAILQ_INSERT_HEAD(&fehead, fe, fe_link);
-	lck_mtx_unlock(&fpxlock);
-
-	DPRINTF_FPX_EVENT("novel", fe);
-
-	return true;
-}
-
-void
-fpxlog(
-	int code,       /* Mach exception code: e.g. 5 or 8 */
-	uint32_t stat,  /* Full FP status register bits */
-	uint32_t ctrl,  /* Full FP control register bits */
-	uint32_t xcpt)  /* Exception bits from FP status */
-{
-	proc_t p = current_proc();
-	if (PROC_NULL == p) {
-		return;
-	}
-
-	uuid_t uuid;
-	proc_getexecutableuuid(p, uuid, sizeof(uuid));
-
-	/*
-	 * Check to see if an exception with this <uuid, code, xcpt>
-	 * has been seen before.  If "novel" then log a message.
-	 */
-	if (!novel_fpx_event(uuid, code, xcpt)) {
-		return;
-	}
-
-	const size_t nmlen = 2 * MAXCOMLEN + 1;
-	char nm[nmlen] = {};
-	proc_selfname(nm, nmlen);
-	if (escape_str(nm, strlen(nm) + 1, nmlen)) {
-		snprintf(nm, nmlen, "(a.out)");
-	}
-
-	const size_t slen = 8 + 1 + 8 + 1;
-	char xcptstr[slen], csrstr[slen];
-
-	snprintf(xcptstr, slen, "%x.%x", code, xcpt);
-	if (ctrl == stat) {
-		snprintf(csrstr, slen, "%x", ctrl);
-	} else {
-		snprintf(csrstr, slen, "%x.%x", ctrl, stat);
-	}
-
-#if DEVELOPMENT || DEBUG
-	printf("%s[%d]: com.apple.kernel.fpx: %s, %s\n",
-	    nm, proc_pid(p), xcptstr, csrstr);
-#endif
-	kern_asl_msg(LOG_DEBUG, "messagetracer", 5,
-	    /* 0 */ "com.apple.message.domain", "com.apple.kernel.fpx",
-	    /* 1 */ "com.apple.message.signature", nm,
-	    /* 2 */ "com.apple.message.signature2", xcptstr,
-	    /* 3 */ "com.apple.message.value", csrstr,
-	    /* 4 */ "com.apple.message.summarize", "YES",
-	    NULL);
-}
-
-#else
-
-void
-fpxlog_init(void)
-{
-}
-
-#endif /* __x86_64__ */

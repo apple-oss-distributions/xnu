@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1998-2020 Apple Inc. All rights reserved.
+ * Copyright (c) 1998-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -39,6 +39,7 @@
 
 #include <IOKit/IOSubMemoryDescriptor.h>
 #include <IOKit/IOMultiMemoryDescriptor.h>
+#include <IOKit/IOBufferMemoryDescriptor.h>
 
 #include <IOKit/IOKitDebug.h>
 #include <IOKit/IOTimeStamp.h>
@@ -47,6 +48,7 @@
 
 #include "IOKitKernelInternal.h"
 
+#include <libkern/c++/OSAllocation.h>
 #include <libkern/c++/OSContainers.h>
 #include <libkern/c++/OSDictionary.h>
 #include <libkern/c++/OSArray.h>
@@ -80,6 +82,10 @@ __END_DECLS
 static IOMapper * gIOSystemMapper = NULL;
 
 ppnum_t           gIOLastPage;
+
+enum {
+	kIOMapGuardSizeLarge = 65536
+};
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
@@ -158,7 +164,34 @@ struct ioGMDData {
 	//ioPLBlock fBlocks[1];
 };
 
-#define getDataP(osd)   ((ioGMDData *) (osd)->getBytesNoCopy())
+#pragma GCC visibility push(hidden)
+
+class _IOMemoryDescriptorMixedData : public OSObject
+{
+	OSDeclareDefaultStructors(_IOMemoryDescriptorMixedData);
+
+public:
+	static OSPtr<_IOMemoryDescriptorMixedData> withCapacity(size_t capacity);
+	virtual bool initWithCapacity(size_t capacity);
+	virtual void free() APPLE_KEXT_OVERRIDE;
+
+	virtual bool appendBytes(const void * bytes, size_t length);
+	virtual void setLength(size_t length);
+
+	virtual const void * getBytes() const;
+	virtual size_t getLength() const;
+
+private:
+	void freeMemory();
+
+	void *  _data = nullptr;
+	size_t  _length = 0;
+	size_t  _capacity = 0;
+};
+
+#pragma GCC visibility pop
+
+#define getDataP(osd)   ((ioGMDData *) (osd)->getBytes())
 #define getIOPLList(d)  ((ioPLBlock *) (void *)&(d->fPageList[d->fPageCnt]))
 #define getNumIOPL(osd, d)      \
     ((UInt)(((osd)->getLength() - ((char *) getIOPLList(d) - (char *) d)) / sizeof(ioPLBlock)))
@@ -202,7 +235,7 @@ device_close(
 {
 	IOMemoryDescriptorReserved * ref = (IOMemoryDescriptorReserved *) device_handle;
 
-	IODelete( ref, IOMemoryDescriptorReserved, 1 );
+	IOFreeType( ref, IOMemoryDescriptorReserved );
 
 	return kIOReturnSuccess;
 }
@@ -490,8 +523,16 @@ IOGeneralMemoryDescriptor::memoryReferenceCreate(
 
 	offset = 0;
 	rangeIdx = 0;
+	remain = _length;
 	if (_task) {
 		getAddrLenForInd(nextAddr, nextLen, type, _ranges, rangeIdx);
+
+		// account for IOBMD setLength(), use its capacity as length
+		IOBufferMemoryDescriptor * bmd;
+		if ((bmd = OSDynamicCast(IOBufferMemoryDescriptor, this))) {
+			nextLen = bmd->getCapacity();
+			remain  = nextLen;
+		}
 	} else {
 		nextAddr = getPhysicalSegment(offset, &physLen, kIOMemoryMapperNone);
 		nextLen = physLen;
@@ -576,7 +617,6 @@ IOGeneralMemoryDescriptor::memoryReferenceCreate(
 		}
 		DEBUG4K_IOKIT("map %p _length 0x%llx prot 0x%x\n", map, (uint64_t)_length, prot);
 
-		remain = _length;
 		while (remain) {
 			srcAddr  = nextAddr;
 			srcLen   = nextLen;
@@ -761,16 +801,63 @@ IOGeneralMemoryDescriptor::memoryReferenceCreate(
 	return err;
 }
 
+static mach_vm_size_t
+IOMemoryDescriptorMapGuardSize(vm_map_t map, IOOptionBits options)
+{
+	switch (kIOMapGuardedMask & options) {
+	default:
+	case kIOMapGuardedSmall:
+		return vm_map_page_size(map);
+	case kIOMapGuardedLarge:
+		assert(0 == (kIOMapGuardSizeLarge & vm_map_page_mask(map)));
+		return kIOMapGuardSizeLarge;
+	}
+	;
+}
+
+static kern_return_t
+IOMemoryDescriptorMapDealloc(IOOptionBits options, vm_map_t map,
+    vm_map_offset_t addr, mach_vm_size_t size)
+{
+	kern_return_t   kr;
+	vm_map_offset_t actualAddr;
+	mach_vm_size_t  actualSize;
+
+	actualAddr = vm_map_trunc_page(addr, vm_map_page_mask(map));
+	actualSize = vm_map_round_page(addr + size, vm_map_page_mask(map)) - actualAddr;
+
+	if (kIOMapGuardedMask & options) {
+		mach_vm_size_t guardSize = IOMemoryDescriptorMapGuardSize(map, options);
+		actualAddr -= guardSize;
+		actualSize += 2 * guardSize;
+	}
+	kr = mach_vm_deallocate(map, actualAddr, actualSize);
+
+	return kr;
+}
+
 kern_return_t
 IOMemoryDescriptorMapAlloc(vm_map_t map, void * _ref)
 {
 	IOMemoryDescriptorMapAllocRef * ref = (typeof(ref))_ref;
 	IOReturn                        err;
 	vm_map_offset_t                 addr;
+	mach_vm_size_t                  size;
+	mach_vm_size_t                  guardSize;
 
 	addr = ref->mapped;
+	size = ref->size;
+	guardSize = 0;
 
-	err = vm_map_enter_mem_object(map, &addr, ref->size,
+	if (kIOMapGuardedMask & ref->options) {
+		if (!(kIOMapAnywhere & ref->options)) {
+			return kIOReturnBadArgument;
+		}
+		guardSize = IOMemoryDescriptorMapGuardSize(map, ref->options);
+		size += 2 * guardSize;
+	}
+
+	err = vm_map_enter_mem_object(map, &addr, size,
 #if __ARM_MIXED_PAGE_SIZE__
 	    // TODO4K this should not be necessary...
 	    (vm_map_offset_t)((ref->options & kIOMapAnywhere) ? max(PAGE_MASK, vm_map_page_mask(map)) : 0),
@@ -791,6 +878,15 @@ IOMemoryDescriptorMapAlloc(vm_map_t map, void * _ref)
 	if (KERN_SUCCESS == err) {
 		ref->mapped = (mach_vm_address_t) addr;
 		ref->map = map;
+		if (kIOMapGuardedMask & ref->options) {
+			vm_map_offset_t lastpage = vm_map_trunc_page(addr + size - guardSize, vm_map_page_mask(map));
+
+			err = vm_map_protect(map, addr, addr + guardSize, VM_PROT_NONE, false /*set_max*/);
+			assert(KERN_SUCCESS == err);
+			err = vm_map_protect(map, lastpage, lastpage + guardSize, VM_PROT_NONE, false /*set_max*/);
+			assert(KERN_SUCCESS == err);
+			ref->mapped += guardSize;
+		}
 	}
 
 	return err;
@@ -904,7 +1000,11 @@ IOGeneralMemoryDescriptor::memoryReferenceMap(
 	entry = &ref->entries[entryIdx];
 
 	// allocate VM
+#if __ARM_MIXED_PAGE_SIZE__
+	size = round_page_mask_64(size + pageOffset, vm_map_page_mask(map));
+#else
 	size = round_page_64(size + pageOffset);
+#endif
 	if (kIOMapOverwrite & options) {
 		if ((map == kernel_map) && (kIOMemoryBufferPageable & _flags)) {
 			map = IOPageableMapForAddress(addr);
@@ -1095,7 +1195,7 @@ IOGeneralMemoryDescriptor::memoryReferenceMap(
 	}
 
 	if ((KERN_SUCCESS != err) && didAlloc) {
-		(void) mach_vm_deallocate(map, trunc_page_64(addr), size);
+		(void) IOMemoryDescriptorMapDealloc(options, map, trunc_page_64(addr), size);
 		addr = 0;
 	}
 	*inaddr = addr;
@@ -1424,7 +1524,7 @@ IOGeneralMemoryDescriptor::memoryReferenceMapNew(
 	}
 
 	if ((KERN_SUCCESS != err) && didAlloc) {
-		(void) mach_vm_deallocate(map, trunc_page_64(addr), size);
+		(void) IOMemoryDescriptorMapDealloc(options, map, trunc_page_64(addr), size);
 		addr = 0;
 	}
 	*inaddr = addr;
@@ -2035,7 +2135,7 @@ IOGeneralMemoryDescriptor::initWithOptions(void *       buffers,
 		case kIODirectionNone:
 		case kIODirectionOutIn:
 		default:
-			panic("bad dir for upl 0x%x\n", (int) options);
+			panic("bad dir for upl 0x%x", (int) options);
 			break;
 		}
 		//       _wireCount++;	// UPLs start out life wired
@@ -2289,7 +2389,7 @@ IOGeneralMemoryDescriptor::free()
 			// (IOMemoryDescriptorReserved) so no reserved access after this point
 			device_pager_deallocate((memory_object_t) reserved->dp.devicePager );
 		} else {
-			IODelete(reserved, IOMemoryDescriptorReserved, 1);
+			IOFreeType(reserved, IOMemoryDescriptorReserved);
 		}
 		reserved = NULL;
 	}
@@ -2361,6 +2461,41 @@ uint64_t
 IOMemoryDescriptor::getFlags(void)
 {
 	return _flags;
+}
+
+OSObject *
+IOMemoryDescriptor::copyContext(void) const
+{
+	if (reserved) {
+		OSObject * context = reserved->contextObject;
+		if (context) {
+			context->retain();
+		}
+		return context;
+	} else {
+		return NULL;
+	}
+}
+
+void
+IOMemoryDescriptor::setContext(OSObject * obj)
+{
+	if (this->reserved == NULL && obj == NULL) {
+		// No existing object, and no object to set
+		return;
+	}
+
+	IOMemoryDescriptorReserved * reserved = getKernelReserved();
+	if (reserved) {
+		OSObject * oldObject = reserved->contextObject;
+		if (oldObject && OSCompareAndSwapPtr(oldObject, NULL, &reserved->contextObject)) {
+			oldObject->release();
+		}
+		if (obj != NULL) {
+			obj->retain();
+			reserved->contextObject = obj;
+		}
+	}
 }
 
 #ifndef __LP64__
@@ -2573,13 +2708,18 @@ IOMemoryDescriptor::cleanKernelReserved( IOMemoryDescriptorReserved * reserved )
 		task_deallocate(reserved->creator);
 		reserved->creator = NULL;
 	}
+
+	if (reserved->contextObject) {
+		reserved->contextObject->release();
+		reserved->contextObject = NULL;
+	}
 }
 
 IOMemoryDescriptorReserved *
 IOMemoryDescriptor::getKernelReserved( void )
 {
 	if (!reserved) {
-		reserved = IONewZero(IOMemoryDescriptorReserved, 1);
+		reserved = IOMallocType(IOMemoryDescriptorReserved);
 	}
 	return reserved;
 }
@@ -3445,7 +3585,7 @@ IOMemoryDescriptor::dmaCommandOperation(DMACommandOps op, void *vData, UInt data
 		addr64_t         addr, nextAddr;
 
 		if (data->fMapped) {
-			panic("fMapped %p %s %qx\n", this, getMetaClass()->getClassName(), (uint64_t) getLength());
+			panic("fMapped %p %s %qx", this, getMetaClass()->getClassName(), (uint64_t) getLength());
 		}
 		addr = md->getPhysicalSegment(offset, &length, kIOMemoryMapperNone);
 		offset += length;
@@ -3997,14 +4137,13 @@ IOGeneralMemoryDescriptor::wireVirtual(IODirection forDirection)
 		mapBase = 0;
 
 		// Note that appendBytes(NULL) zeros the data up to the desired length
-		//           and the length parameter is an unsigned int
 		size_t uplPageSize = dataP->fPageCnt * sizeof(upl_page_info_t);
 		if (uplPageSize > ((unsigned int)uplPageSize)) {
 			error = kIOReturnNoMemory;
 			traceInterval.setEndArg2(error);
 			return error;
 		}
-		if (!_memoryEntries->appendBytes(NULL, (unsigned int) uplPageSize)) {
+		if (!_memoryEntries->appendBytes(NULL, uplPageSize)) {
 			error = kIOReturnNoMemory;
 			traceInterval.setEndArg2(error);
 			return error;
@@ -4268,7 +4407,7 @@ abortExit:
 				upl_deallocate(ioplList[ioplIdx].fIOPL);
 			}
 		}
-		(void) _memoryEntries->initWithBytes(dataP, computeDataSize(0, 0)); // == setLength()
+		_memoryEntries->setLength(computeDataSize(0, 0));
 	}
 
 	if (error == KERN_FAILURE) {
@@ -4284,18 +4423,16 @@ bool
 IOGeneralMemoryDescriptor::initMemoryEntries(size_t size, IOMapper * mapper)
 {
 	ioGMDData * dataP;
-	unsigned    dataSize;
 
 	if (size > UINT_MAX) {
 		return false;
 	}
-	dataSize = (unsigned int) size;
 	if (!_memoryEntries) {
-		_memoryEntries = OSData::withCapacity(dataSize);
+		_memoryEntries = _IOMemoryDescriptorMixedData::withCapacity(size);
 		if (!_memoryEntries) {
 			return false;
 		}
-	} else if (!_memoryEntries->initWithCapacity(dataSize)) {
+	} else if (!_memoryEntries->initWithCapacity(size)) {
 		return false;
 	}
 
@@ -4649,7 +4786,7 @@ IOGeneralMemoryDescriptor::complete(IODirection forDirection)
 					upl_set_referenced(ioplList[0].fIOPL, false);
 				}
 
-				(void) _memoryEntries->initWithBytes(dataP, computeDataSize(0, 0)); // == setLength()
+				_memoryEntries->setLength(computeDataSize(0, 0));
 
 				dataP->fPreparationID = kIOPreparationIDUnprepared;
 				_flags &= ~kIOMemoryPreparedReadOnly;
@@ -4719,6 +4856,7 @@ IOGeneralMemoryDescriptor::doMap(
 	    && (mapping->fAddressMap == get_task_map(_task))
 	    && (options & kIOMapAnywhere)
 	    && (!(kIOMapUnique & options))
+	    && (!(kIOMapGuardedMask & options))
 	    && (1 == _rangesCount)
 	    && (0 == offset)
 	    && range0Addr
@@ -5116,7 +5254,7 @@ IOMemoryDescriptor::doUnmap(
 			    addressMap, address, length );
 		}
 #endif
-		err = mach_vm_deallocate( addressMap, address, length );
+		err = IOMemoryDescriptorMapDealloc(mapping->fOptions, addressMap, address, length );
 		if (vm_map_page_mask(addressMap) < PAGE_MASK) {
 			DEBUG4K_IOKIT("map %p address 0x%llx length 0x%llx err 0x%x\n", addressMap, address, length, err);
 		}
@@ -5307,12 +5445,6 @@ IOMemoryMap::free()
 		fMemory.reset();
 	}
 
-	if (fOwner && (fOwner != fMemory)) {
-		LOCK;
-		fOwner->removeMapping(this);
-		UNLOCK;
-	}
-
 	if (fSuperMap) {
 		fSuperMap.reset();
 	}
@@ -5398,6 +5530,9 @@ IOMemoryMap::copyCompatible(
 		return NULL;
 	}
 	if ((fOptions ^ _options) & kIOMapReadOnly) {
+		return NULL;
+	}
+	if ((fOptions ^ _options) & kIOMapGuardedMask) {
 		return NULL;
 	}
 	if ((kIOMapDefaultCache != (_options & kIOMapCacheMask))
@@ -5499,7 +5634,7 @@ IOMemoryDescriptor::free( void )
 
 	if (reserved) {
 		cleanKernelReserved(reserved);
-		IODelete(reserved, IOMemoryDescriptorReserved, 1);
+		IOFreeType(reserved, IOMemoryDescriptorReserved);
 		reserved = NULL;
 	}
 	super::free();
@@ -5845,15 +5980,12 @@ IOGeneralMemoryDescriptor::serialize(OSSerialize * s) const
 	OSSharedPtr<OSObject>           values[2] = {NULL};
 	OSSharedPtr<OSArray>            array;
 
-	vm_size_t vcopy_size;
-
 	struct SerData {
 		user_addr_t address;
 		user_size_t length;
-	} *vcopy = NULL;
+	};
 
-	unsigned int index, nRanges;
-	bool result = false;
+	unsigned int index;
 
 	IOOptionBits type = _flags & kIOMemoryTypeMask;
 
@@ -5866,15 +5998,9 @@ IOGeneralMemoryDescriptor::serialize(OSSerialize * s) const
 		return false;
 	}
 
-	nRanges = _rangesCount;
-	if (os_mul_overflow(sizeof(SerData), nRanges, &vcopy_size)) {
-		result = false;
-		goto bail;
-	}
-	vcopy = (SerData *) IOMalloc(vcopy_size);
-	if (vcopy == NULL) {
-		result = false;
-		goto bail;
+	OSDataAllocation<struct SerData> vcopy(_rangesCount, OSAllocateMemory);
+	if (!vcopy) {
+		return false;
 	}
 
 	keys[0] = OSSymbol::withCString("address");
@@ -5883,9 +6009,9 @@ IOGeneralMemoryDescriptor::serialize(OSSerialize * s) const
 	// Copy the volatile data so we don't have to allocate memory
 	// while the lock is held.
 	LOCK;
-	if (nRanges == _rangesCount) {
+	if (vcopy.size() == _rangesCount) {
 		Ranges vec = _ranges;
-		for (index = 0; index < nRanges; index++) {
+		for (index = 0; index < vcopy.size(); index++) {
 			mach_vm_address_t addr; mach_vm_size_t len;
 			getAddrLenForInd(addr, len, type, vec, index);
 			vcopy[index].address = addr;
@@ -5894,28 +6020,24 @@ IOGeneralMemoryDescriptor::serialize(OSSerialize * s) const
 	} else {
 		// The descriptor changed out from under us.  Give up.
 		UNLOCK;
-		result = false;
-		goto bail;
+		return false;
 	}
 	UNLOCK;
 
-	for (index = 0; index < nRanges; index++) {
+	for (index = 0; index < vcopy.size(); index++) {
 		user_addr_t addr = vcopy[index].address;
 		IOByteCount len = (IOByteCount) vcopy[index].length;
 		values[0] = OSNumber::withNumber(addr, sizeof(addr) * 8);
 		if (values[0] == NULL) {
-			result = false;
-			goto bail;
+			return false;
 		}
 		values[1] = OSNumber::withNumber(len, sizeof(len) * 8);
 		if (values[1] == NULL) {
-			result = false;
-			goto bail;
+			return false;
 		}
 		OSSharedPtr<OSDictionary> dict = OSDictionary::withObjects((const OSObject **)values, (const OSSymbol **)keys, 2);
 		if (dict == NULL) {
-			result = false;
-			goto bail;
+			return false;
 		}
 		array->setObject(dict.get());
 		dict.reset();
@@ -5923,14 +6045,7 @@ IOGeneralMemoryDescriptor::serialize(OSSerialize * s) const
 		values[1].reset();
 	}
 
-	result = array->serialize(s);
-
-bail:
-	if (vcopy) {
-		IOFree(vcopy, vcopy_size);
-	}
-
-	return result;
+	return array->serialize(s);
 }
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
@@ -5966,4 +6081,113 @@ IOPhysicalAddress
 IOMemoryDescriptor::getPhysicalAddress()
 {
 	return getPhysicalSegment( 0, NULL );
+}
+
+OSDefineMetaClassAndStructors(_IOMemoryDescriptorMixedData, OSObject)
+
+OSPtr<_IOMemoryDescriptorMixedData>
+_IOMemoryDescriptorMixedData::withCapacity(size_t capacity)
+{
+	OSSharedPtr<_IOMemoryDescriptorMixedData> me = OSMakeShared<_IOMemoryDescriptorMixedData>();
+	if (me && !me->initWithCapacity(capacity)) {
+		return nullptr;
+	}
+	return me;
+}
+
+bool
+_IOMemoryDescriptorMixedData::initWithCapacity(size_t capacity)
+{
+	if (_data && (!capacity || (_capacity < capacity))) {
+		freeMemory();
+	}
+
+	if (!OSObject::init()) {
+		return false;
+	}
+
+	if (!_data && capacity) {
+		_data = IOMalloc(capacity);
+		if (!_data) {
+			return false;
+		}
+		_capacity = capacity;
+	}
+
+	_length = 0;
+
+	return true;
+}
+
+void
+_IOMemoryDescriptorMixedData::free()
+{
+	freeMemory();
+	OSObject::free();
+}
+
+void
+_IOMemoryDescriptorMixedData::freeMemory()
+{
+	IOFree(_data, _capacity);
+	_data = nullptr;
+	_capacity = _length = 0;
+}
+
+bool
+_IOMemoryDescriptorMixedData::appendBytes(const void * bytes, size_t length)
+{
+	const auto oldLength = getLength();
+	size_t newLength;
+	if (os_add_overflow(oldLength, length, &newLength)) {
+		return false;
+	}
+
+	if (newLength > _capacity) {
+		void * const newData = IOMalloc(newLength);
+		if (_data) {
+			bcopy(_data, newData, oldLength);
+			IOFree(_data, _capacity);
+		}
+		_data = newData;
+		_capacity = newLength;
+	}
+
+	unsigned char * const dest = &(((unsigned char *)_data)[oldLength]);
+	if (bytes) {
+		bcopy(bytes, dest, length);
+	} else {
+		bzero(dest, length);
+	}
+
+	_length = newLength;
+
+	return true;
+}
+
+void
+_IOMemoryDescriptorMixedData::setLength(size_t length)
+{
+	if (!_data || (length > _capacity)) {
+		void * const newData = IOMallocZero(length);
+		if (_data) {
+			bcopy(_data, newData, _length);
+			IOFree(_data, _capacity);
+		}
+		_data = newData;
+		_capacity = length;
+	}
+	_length = length;
+}
+
+const void *
+_IOMemoryDescriptorMixedData::getBytes() const
+{
+	return _length ? _data : nullptr;
+}
+
+size_t
+_IOMemoryDescriptorMixedData::getLength() const
+{
+	return _data ? _length : 0;
 }

@@ -11,6 +11,7 @@ import time
 import xnudefines
 import memory
 import json
+from collections import defaultdict
 
 def GetProcName(proc):
     """ returns a string name of the process. Longer variant is preffered if provided.
@@ -26,17 +27,25 @@ def GetProcName(proc):
         return str(proc.p_comm)
 
 def GetProcNameForTask(task):
-    """ returns a string name of the process. if proc is not valid "unknown" is returned
+    """ returns a string name of the process. If proc is not valid the proc
+        name is looked up in the associated importance structure (if
+        available). If no name can be found, "unknown"  is returned.
         params:
             task: value object represeting a task in the kernel.
         returns:
             str : A string name of the process linked to the task
     """
-    if not task or not unsigned(task.bsd_info):
-        return "unknown"
-    p = Cast(task.bsd_info, 'proc *')
+    if task:
+        if unsigned(task.bsd_info):
+            p = Cast(task.bsd_info, 'proc *')
+            return GetProcName(p)
 
-    return GetProcName(p)
+        if (hasattr(task, 'task_imp_base') and
+           hasattr(task.task_imp_base, 'iit_procname') and
+           unsigned(task.task_imp_base) != 0):
+            return str(task.task_imp_base.iit_procname)
+
+    return "unknown"
 
 def GetProcPIDForTask(task):
     """ returns a int pid of the process. if the proc is not valid, val[5] from audit_token is returned.
@@ -187,6 +196,7 @@ def GetASTSummary(ast):
         K - AST_KPERF
         M - AST_MACF
         r - AST_RESET_PCS
+        a - AST_ARCADE
         G - AST_GUARD
         T - AST_TELEMETRY_USER
         T - AST_TELEMETRY_KERNEL
@@ -197,16 +207,17 @@ def GetASTSummary(ast):
         E - AST_KEVENT
         R - AST_REBALANCE
         N - AST_UNQUIESCE
+        p  - AST_PROC_RESOURCE
     """
     out_string = ""
     state = int(ast)
     thread_state_chars = {0x0:'', 0x1:'P', 0x2:'Q', 0x4:'U', 0x8:'H', 0x10:'Y', 0x20:'A',
-                          0x40:'L', 0x80:'B', 0x100:'K', 0x200:'M', 0x400: 'r',
+                          0x40:'L', 0x80:'B', 0x100:'K', 0x200:'M', 0x400: 'r', 0x800: 'a',
                           0x1000:'G', 0x2000:'T', 0x4000:'T', 0x8000:'T', 0x10000:'S',
-                          0x20000: 'D', 0x40000: 'I', 0x80000: 'E', 0x100000: 'R', 0x200000: 'N'}
+                          0x20000: 'D', 0x40000: 'I', 0x80000: 'E', 0x100000: 'R', 0x200000: 'N', 0x400000: 'p'}
     state_str = ''
     mask = 0x1
-    while mask <= 0x80000:
+    while mask <= 0x200000:
         state_str += thread_state_chars[int(state & mask)]
         mask = mask << 1
 
@@ -461,7 +472,7 @@ def GetResourceCoalitionSummary(coal, verbose=False):
         i = 0
         while i != ledgerp.l_template.lt_cnt:
             out_string += "\t\t"
-            out_string += GetLedgerEntrySummary(kern.globals.task_ledger_template, ledgerp.l_entries[i], i)
+            out_string += GetLedgerEntrySummary(kern.globals.task_ledger_template, ledgerp, i)
             i = i + 1
     out_string += "\t  bytesread {0: <d}\n\t  byteswritten {1: <d}\n\t  gpu_time {2: <d}".format(coal.r.bytesread, coal.r.byteswritten, coal.r.gpu_time)
     out_string += "\n\t  total_tasks {0: <d}\n\t  dead_tasks {1: <d}\n\t  active_tasks {2: <d}".format(coal.r.task_count, coal.r.dead_task_count, coal.r.task_count - coal.r.dead_task_count)
@@ -583,7 +594,7 @@ def GetThreadGroupSummary(tg):
         tg_flags += 'E'
     if (tg.tg_flags & 0x2):
         tg_flags += 'U'
-    out_string += format_string.format(tg, tg.tg_id, tg.tg_name, tg.tg_refcount, tg_flags, tg.tg_recommendation)
+    out_string += format_string.format(tg, tg.tg_id, tg.tg_name, tg.tg_refcount.ref_count, tg_flags, tg.tg_recommendation)
     return out_string
 
 @lldb_command('showallthreadgroups')
@@ -691,7 +702,7 @@ def GetProcSummary(proc):
     return out_string
 
 @lldb_type_summary(['tty_dev_t', 'tty_dev_t *'])
-@header("{0: <20s} {1: <10s} {2: <10s} {3: <15s} {4: <15s} {5: <15s} {6: <15s}".format("tty_dev","master", "slave", "open", "free", "name", "revoke"))
+@header("{0: <20s} {1: <10s} {2: <10s} {3: <15s} {4: <15s} {5: <15s} {6: <15s}".format("tty_dev","primary", "replica", "open", "free", "name", "revoke"))
 def GetTTYDevSummary(tty_dev):
     """ Summarizes the important fields in tty_dev_t structure.
         params: tty_dev: value - value object representing a tty_dev_t in kernel
@@ -703,7 +714,7 @@ def GetTTYDevSummary(tty_dev):
     free_fn = kern.Symbolicate(int(hex(tty_dev.free), 16))
     name_fn = kern.Symbolicate(int(hex(tty_dev.name), 16))
     revoke_fn = kern.Symbolicate(int(hex(tty_dev.revoke), 16))
-    out_string += format_string.format(tty_dev, tty_dev.master, tty_dev.slave, open_fn, free_fn, name_fn, revoke_fn)
+    out_string += format_string.format(tty_dev, tty_dev.primary, tty_dev.replica, open_fn, free_fn, name_fn, revoke_fn)
     return out_string
 
 # Macro: showtask
@@ -800,22 +811,20 @@ def ShowProcFiles(cmd_args=None):
         print ShowProcFiles.__doc__
         return
     proc = kern.GetValueFromAddress(cmd_args[0], 'proc_t')
-    proc_filedesc = proc.p_fd
-    proc_lastfile = unsigned(proc_filedesc.fd_lastfile)
+    proc_filedesc = addressof(proc.p_fd)
     proc_ofiles = proc_filedesc.fd_ofiles
     if unsigned(proc_ofiles) == 0:
         print 'No open files for proc {0: <s}'.format(cmd_args[0])
         return
     print "{0: <5s} {1: <18s} {2: <10s} {3: <8s} {4: <18s} {5: <64s}".format('FD', 'FILEGLOB', 'FG_FLAGS', 'FG_TYPE', 'FG_DATA','INFO')
     print "{0:-<5s} {0:-<18s} {0:-<10s} {0:-<8s} {0:-<18s} {0:-<64s}".format("")
-    count = 0
 
-    while count <= proc_lastfile:
-        if unsigned(proc_ofiles[count]) != 0:
+    for fd in xrange(0, unsigned(proc_filedesc.fd_afterlast)):
+        if unsigned(proc_ofiles[fd]) != 0:
             out_str = ''
-            proc_fd_flags = proc_ofiles[count].fp_flags
-            proc_fd_fglob = proc_ofiles[count].fp_glob
-            out_str += "{0: <5d} ".format(count)
+            proc_fd_flags = proc_ofiles[fd].fp_flags
+            proc_fd_fglob = proc_ofiles[fd].fp_glob
+            out_str += "{0: <5d} ".format(fd)
             out_str += "{0: <#18x} ".format(unsigned(proc_fd_fglob))
             out_str += "0x{0:0>8x} ".format(unsigned(proc_fd_flags))
             proc_fd_ftype = unsigned(proc_fd_fglob.fg_ops.fo_type)
@@ -829,7 +838,6 @@ def ShowProcFiles(cmd_args=None):
                 out_str += "{0: <64s}".format(fd_name)
             out_str += "\n"
             print out_str
-        count += 1
 
 #EndMacro: showprocfiles
 
@@ -1021,6 +1029,19 @@ def ShowAllTasks(cmd_args=None, cmd_options={}, O=None):
 
     ZombTasks()
 
+def TaskForPmapHelper(pmap):
+    """ Given a pmap pointer, return the task pointer which contains that
+        address space.
+
+        pmap: PMAP pointer whose task to find.
+    """
+    for tasklist in [kern.tasks, kern.terminated_tasks]:
+        for task in tasklist:
+            if kern.GetValueFromAddress(unsigned(task.map.pmap), 'pmap_t') == pmap:
+                return task
+
+    return None
+
 @lldb_command('taskforpmap')
 def TaskForPmap(cmd_args=None):
     """ Find the task whose pmap corresponds to <pmap>.
@@ -1030,13 +1051,15 @@ def TaskForPmap(cmd_args=None):
     if cmd_args == None or len(cmd_args) < 1:
         raise ArgumentError("Too few arguments to taskforpmap.")
     pmap = kern.GetValueFromAddress(cmd_args[0], 'pmap_t')
+    task = TaskForPmapHelper(pmap)
+
+    if task is None:
+        print "Couldn't find task for pmap {:#x}".format(pmap)
+        return
+
     print GetTaskSummary.header + " " + GetProcSummary.header
-    for tasklist in [kern.tasks, kern.terminated_tasks]:
-        for t in tasklist:
-            if kern.GetValueFromAddress(unsigned(t.map.pmap), 'pmap_t') == pmap:
-                pval = Cast(t.bsd_info, 'proc *')
-                out_str = GetTaskSummary(t) + " " + GetProcSummary(pval)
-                print out_str
+    pval = Cast(task.bsd_info, 'proc *')
+    print GetTaskSummary(task) + " " + GetProcSummary(pval)
 
 @lldb_command('showterminatedtasks') 
 def ShowTerminatedTasks(cmd_args=None):
@@ -1052,8 +1075,20 @@ def ShowTerminatedTasks(cmd_args=None):
     global kern
     print GetTaskSummary.header + " " + GetProcSummary.header
     for t in kern.terminated_tasks:
+
+        # If the task has been terminated it's likely that the process is
+        # gone too. If there is no proc it may still be possible to find
+        # the original proc name.
         pval = Cast(t.bsd_info, 'proc *')
-        print GetTaskSummary(t) +" "+ GetProcSummary(pval)
+        if pval:
+            psummary = GetProcSummary(pval)
+        else:
+            name = GetProcNameForTask(t);
+            pslen = GetProcSummary.header.find("command");
+            psummary = "{0: <{indent}} {1: <s}".format("", name, indent = pslen - 1)
+
+        print GetTaskSummary(t) + " " + psummary
+
     return True
 
 # Macro: showtaskstacks
@@ -1166,15 +1201,41 @@ def ShowProcRefs(cmd_args = None):
 def ShowAllThreads(cmd_args = None):
     """ Display info about all threads in the system
     """
+
+    # Terminated threads get prefixed with a 'T'
+    def ShowTaskTerminatedThreads(task):
+        tlist = tmap.get(unsigned(task), [])
+        for thval in tlist:
+            print "T\t" + GetThreadSummary(thval)
+
+    # Task -> [thread, ..] map of terminated threads
+    tmap = defaultdict(list)
+    for thr in kern.terminated_threads:
+        tmap[unsigned(thr.task)].append(thr)
+
     for t in kern.tasks:
         ShowTaskThreads([str(int(t))])
+        ShowTaskTerminatedThreads(t)
         print " \n"
-        
+
     for t in kern.terminated_tasks:
         print "Terminated: \n"
         ShowTaskThreads([str(int(t))])
+        ShowTaskTerminatedThreads(t)
         print " \n"
-        
+
+    return
+
+@lldb_command('showterminatedthreads')
+def ShowTerminatedThreads(cmd_args=None):
+    """ Display info about all terminated threads in the system
+    """
+
+    global kern
+    print GetThreadSummary.header
+    for t in kern.terminated_threads:
+        print GetThreadSummary(t)
+
     return
 
 @lldb_command('showtaskthreads', "F:")
@@ -1346,7 +1407,7 @@ def GetFullBackTrace(frame_addr, verbosity = vHUMAN, prefix = ""):
         if (not kern.arch.startswith('arm') and frame_ptr < mh_execute_addr) or (kern.arch.startswith('arm') and frame_ptr > mh_execute_addr):
             break
         pc_val = kern.GetValueFromAddress(frame_ptr + kern.ptrsize,'uintptr_t *')
-        pc_val = unsigned(dereference(pc_val))
+        pc_val = kern.StripKernelPAC(unsigned(dereference(pc_val)))
         out_string += prefix + GetSourceInformationForAddress(pc_val) + "\n"
         bt_count +=1
         previous_frame_ptr = frame_ptr
@@ -1522,13 +1583,23 @@ def GetProcessorSummary(processor):
             preemption_disable_str)
     return out_str   
 
-def GetLedgerEntry(ledger_template, ledger, i):
+ledger_limit_infinity = (uint64_t(0x1).value << 63) - 1
+
+def GetLedgerEntryIndex(template, name):
+    i = 0
+    while i != template.lt_cnt:
+        if str(template.lt_entries[i].et_key) == name:
+            return i
+        i = i + 1
+    return -1
+
+def GetLedgerEntryWithTemplate(ledger_template, ledgerp, i):
     """ Internal function to get internals of a ledger entry (*not* a ledger itself)
         params: ledger_template - value representing struct ledger_template_t for the task or thread
-                ledger - value representing struct ledger_entry *
+                ledgerp - value representing ledger pointer
+                i - index in ledger
         return: entry - entry dictionary
     """
-    ledger_limit_infinity = (uint64_t(0x1).value << 63) - 1
     lf_refill_scheduled = 0x0400
     lf_tracking_max = 0x4000
 
@@ -1537,25 +1608,41 @@ def GetLedgerEntry(ledger_template, ledger, i):
 
     entry = {}
 
-    entry["key"] = str(ledger_template.lt_entries[i].et_key)
-    entry["credit"] = unsigned(ledger.le_credit)
-    entry["debit"] = unsigned(ledger.le_debit)
+    et = ledger_template.lt_entries[i]
+    entry["key"] = str(et.et_key)
+    if et.et_size == sizeof("struct ledger_entry_small"):
+        les = ledgerp.l_entries[et.et_offset]
+        entry["credit"] = unsigned(les.les_credit)
+        entry["debit"] = 0
+        entry["flags"] = int(les.les_flags)
+        entry["limit"] = ledger_limit_infinity
+    elif et.et_size == sizeof("struct ledger_entry"):
+        le = Cast(addressof(ledgerp.l_entries[et.et_offset]), "struct ledger_entry *")
+        entry["credit"] = unsigned(le.le_credit)
+        entry["debit"] = unsigned(le.le_debit)
+        if (le.le_flags & lf_tracking_max):
+            if hasattr(le._le._le_max, "le_interval_max"):
+                entry["interval_max"] = unsigned(le._le._le_max.le_interval_max)
+            entry["lifetime_max"] = unsigned(le._le._le_max.le_lifetime_max)
+
+        entry["limit"] = unsigned(le.le_limit)
+
+        if (le.le_flags & lf_refill_scheduled):
+            entry["refill_period"] = unsigned (le._le.le_refill.le_refill_period)
+
+        if (unsigned(le.le_warn_percent) < 65535):
+            entry["warn_percent"] = unsigned (le.le_warn_percent * 100 / 65536)
+        entry["flags"] = int(le.le_flags)
+    else:
+        return None
+    
     entry["balance"] = entry["credit"] - entry["debit"]
-    if (ledger.le_flags & lf_tracking_max):
-        entry["interval_max"] = unsigned(ledger._le._le_max.le_interval_max)
-        entry["lifetime_max"] = unsigned(ledger._le._le_max.le_lifetime_max)
-
-    if (unsigned(ledger.le_limit) != ledger_limit_infinity):
-        entry["limit"] = unsigned(ledger.le_limit)
-
-    if (ledger.le_flags & lf_refill_scheduled):
-        entry["refill_period"] = unsigned (ledger._le.le_refill.le_refill_period)
-
-    if (unsigned(ledger.le_warn_percent) < 65535):
-        entry["warn_percent"] = unsigned (ledger.le_warn_percent * 100 / 65536)
-    entry["flags"] = int(ledger.le_flags)
-
     return entry
+
+def GetLedgerEntryWithName(ledger_template, ledger, name):
+    idx = GetLedgerEntryIndex(ledger_template, name)
+    assert(idx != -1)
+    return GetLedgerEntryWithTemplate(ledger_template, ledger, idx)
 
 def FormatLedgerEntrySummary(entry, i, show_footprint_interval_max=False):
     """ internal function to format a ledger entry into a string
@@ -1578,14 +1665,17 @@ def FormatLedgerEntrySummary(entry, i, show_footprint_interval_max=False):
         out_str += "             - "
 
     out_str += "{:12d} {:12d} ".format(entry["credit"], entry["debit"])
-    if entry.has_key("limit"):
+    if entry.has_key("limit") and entry['limit'] != unsigned(ledger_limit_infinity):
         out_str += "{:12d} ".format(unsigned(entry["limit"]))
     else:
         out_str += "           - "
 
     if entry.has_key("refill_period"):
         out_str += "{:15d} ".format(entry["refill_period"])
-        out_str += "{:9d} ".format((entry["limit"] * 100) / entry["refill_period"])
+        if entry["refill_period"] != 0:
+            out_str += "{:9d} ".format((entry["limit"] * 100) / entry["refill_period"])
+        else:
+            out_str += "XXXXX     - "
     else:
         out_str += "              - "
         out_str += "        - "
@@ -1609,10 +1699,10 @@ def FormatLedgerEntrySummary(entry, i, show_footprint_interval_max=False):
 def GetLedgerEntrySummary(ledger_template, ledger, i, show_footprint_interval_max=False):
     """ internal function to get internals of a ledger entry (*not* a ledger itself)
         params: ledger_template - value representing struct ledger_template_t for the task or thread
-                ledger - value representing struct ledger_entry *
+                ledger - value representing ledger pointer
         return: str - formatted output information of ledger entries
     """
-    entry = GetLedgerEntry(ledger_template, ledger, i)
+    entry = GetLedgerEntryWithTemplate(ledger_template, ledger, i)
     return FormatLedgerEntrySummary(entry, i)
 
 
@@ -1629,8 +1719,8 @@ def GetThreadLedgers(thread_val):
     if ledgerp:
         i = 0
         while i != ledgerp.l_template.lt_cnt:
-            thread["entries"].append(GetLedgerEntry(kern.globals.thread_ledger_template,
-                ledgerp.l_entries[i], i))
+            thread["entries"].append(GetLedgerEntryWithTemplate(kern.globals.thread_ledger_template,
+                ledgerp, i))
             i = i + 1
     return thread
 
@@ -1664,7 +1754,7 @@ def GetTaskLedgers(task_val):
 
     task["entries"] = []
     while i != task_ledgerp.l_template.lt_cnt:
-        task["entries"].append(GetLedgerEntry(kern.globals.task_ledger_template, task_ledgerp.l_entries[i], i))
+        task["entries"].append(GetLedgerEntryWithTemplate(kern.globals.task_ledger_template, task_ledgerp, i))
         i = i + 1
 
     # Now walk threads
@@ -2025,16 +2115,12 @@ def ShowProcFilesSummary(cmd_args=None):
     """
     print ShowProcFilesSummary.header
     for proc in kern.procs:
-        proc_filedesc = proc.p_fd
+        proc_filedesc = addressof(proc.p_fd)
         proc_ofiles = proc_filedesc.fd_ofiles
-        proc_lastfile = unsigned(proc_filedesc.fd_lastfile)
-        count = 0
         proc_file_count = 0
-        if proc_filedesc.fd_nfiles != 0:
-            while count <= proc_lastfile:
-                if unsigned(proc_ofiles[count]) != 0:
-                    proc_file_count += 1
-                count += 1
+        for fd in xrange(0, proc_filedesc.fd_first_allfree):
+            if unsigned(proc_ofiles[fd]) != 0:
+                proc_file_count += 1
         print "{0: <#020x} {1: <32s} {2: >10d}".format(proc, GetProcName(proc), proc_file_count)
 
 #EndMacro: showprocfilessummary
@@ -2202,4 +2288,3 @@ def Showstackafterthread(cmd_args = None):
                thread_flag = 1
         print '\n'
     return
-

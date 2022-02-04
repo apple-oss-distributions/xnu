@@ -42,6 +42,10 @@
 #define mptcp_hton64(x)  __DARWIN_OSSwapInt64(x)
 #define mptcp_ntoh64(x)  __DARWIN_OSSwapInt64(x)
 #endif
+#include <netinet/mptcp_var.h>
+
+/* Preferred MPTCP version to use when version discovery info is incomplete */
+extern int mptcp_preferred_version;
 
 /*
  * MPTCP Option Subtype Field values
@@ -56,7 +60,8 @@
 #define MPO_FASTCLOSE   0x7
 
 /* MPTCP Protocol version */
-#define MPTCP_STD_VERSION_0     0x0
+#define MPTCP_VERSION_0     0x0
+#define MPTCP_VERSION_1     0x1
 
 /*
  * MPTCP MP_CAPABLE TCP Option definitions
@@ -73,7 +78,7 @@ struct mptcp_mpcapable_opt_common {
 	uint8_t        mmco_subtype:4,
 	    mmco_version:4;
 #endif
-#define MPCAP_PROPOSAL_SBIT     0x01    /* SHA1 Algorithm */
+#define MPCAP_PROPOSAL_SBIT     0x01    /* SHA1 (v0) or SHA256 (v1) Algorithm */
 #define MPCAP_HBIT              0x01    /* alias of MPCAP_PROPOSAL_SBIT */
 #define MPCAP_GBIT              0x02    /* must be 0 */
 #define MPCAP_FBIT              0x04    /* must be 0 */
@@ -94,6 +99,12 @@ struct mptcp_mpcapable_opt_rsp1 {
 	struct mptcp_mpcapable_opt_common mmc_common;
 	mptcp_key_t mmc_localkey;
 	mptcp_key_t mmc_remotekey;
+} __attribute__((__packed__));
+
+struct mptcp_mpcapable_opt_rsp2 {
+	struct mptcp_mpcapable_opt_rsp1 mmc_rsp1;
+	uint16_t data_len;
+	uint16_t csum;
 } __attribute__((__packed__));
 
 /*
@@ -136,7 +147,7 @@ struct mptcp_mpjoin_opt_rsp2 {
 	    mmjo_reserved1:4;
 #endif
 	uint8_t        mmjo_reserved2;
-	uint8_t        mmjo_mac[SHA1_RESULTLEN]; /* This is 160 bits HMAC SHA-1 per RFC */
+	uint8_t        mmjo_mac[HMAC_TRUNCATED_ACK]; /* This is 160 bits HMAC per RFC */
 } __attribute__((__packed__));
 
 /* Remove Address Option */
@@ -299,11 +310,11 @@ struct mptcp_add_addr_opt {
 	uint8_t         maddr_kind;
 	uint8_t         maddr_len;
 #if BYTE_ORDER == LITTLE_ENDIAN
-	uint8_t         maddr_ipversion:4,
+	uint8_t         maddr_flags:4,
 	    maddr_subtype:4;
 #else /* BIG_ENDIAN */
 	uint8_t         maddr_subtype:4,
-	    maddr_ipversion:4;
+	    maddr_flags:4;
 #endif
 	uint8_t         maddr_addrid;
 	union {
@@ -318,9 +329,29 @@ struct mptcp_add_addr_opt {
 	} maddr_u;
 }__attribute__((__packed__));
 
-#define MPTCP_ADD_ADDR_OPT_LEN_V4       8
-#define MPTCP_ADD_ADDR_OPT_LEN_V6       20
+struct mptcp_add_addr_hmac_msg_v4 {
+	uint8_t         maddr_addrid;
+	struct in_addr maddr_addr;
+	uint16_t maddr_port;
+}__attribute__((__packed__));
 
+struct mptcp_add_addr_hmac_msg_v6 {
+	uint8_t         maddr_addrid;
+	struct in6_addr maddr_addr;
+	uint16_t maddr_port;
+}__attribute__((__packed__));
+
+
+#define MPTCP_V0_ADD_ADDR_IPV4          4
+#define MPTCP_V0_ADD_ADDR_IPV6          6
+#define MPTCP_V1_ADD_ADDR_ECHO          0x1
+
+#define MPTCP_V0_ADD_ADDR_OPT_LEN_V4       8
+#define MPTCP_V0_ADD_ADDR_OPT_LEN_V6       20
+#define MPTCP_V1_ADD_ADDR_OPT_LEN_V4       16
+#define MPTCP_V1_ADD_ADDR_OPT_LEN_V6       28
+#define MPTCP_V1_ADD_ADDR_ECHO_OPT_LEN_V4       8
+#define MPTCP_V1_ADD_ADDR_ECHO_OPT_LEN_V6       20
 /*
  * MPTCP MP_PRIO Option
  *

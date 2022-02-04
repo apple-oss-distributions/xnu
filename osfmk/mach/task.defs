@@ -72,6 +72,25 @@ subsystem
 #include <mach/mach_types.defs>
 #include <mach_debug/mach_debug_types.defs>
 
+#if !KERNEL && !LIBSYSCALL_INTERFACE
+#define PREFIX(NAME) _kernelrpc_ ## NAME
+#else
+#define PREFIX(NAME) NAME
+#endif
+
+/*
+ * Sandbox builds task.defs with KERNEL_SERVER defined when generating the map
+ * of MIG routine names to message IDs.
+ * The MIG routine names need to be kept stable so as to not break Sandbox
+ * profiles.
+ */
+#if	KERNEL_SERVER && !SANDBOX_COMPILER
+#define MIG_SERVER_SUFFIX(NAME) NAME ## _mig
+#else
+#define MIG_SERVER_SUFFIX(NAME) NAME
+#endif
+
+
 /*
  *	Create a new task with an empty set of IPC rights,
  *	and having an address space constructed from the
@@ -153,7 +172,7 @@ routine	task_set_info(
  *	count for that task is non-zero.
  */
 routine	task_suspend(
-		target_task	: task_t);
+		target_task	: task_read_t);
 
 
 /*
@@ -163,7 +182,7 @@ routine	task_suspend(
  *	that also have non-zero suspend counts may execute.
  */
 routine	task_resume(
-		target_task	: task_t);
+		target_task	: task_read_t);
 
 /*
  *	Returns the current value of the selected special port
@@ -185,7 +204,12 @@ task_get_special_port(
  *	Set one of the special ports associated with the
  *	target task.
  */
-routine task_set_special_port(
+routine
+#if	KERNEL_SERVER && !SANDBOX_COMPILER
+task_set_special_port_from_user(
+#else
+task_set_special_port(
+#endif
 		task		: task_t;
 		which_port	: int;
 		special_port	: mach_port_t);
@@ -266,25 +290,27 @@ routine	task_swap_exception_ports(
 		behavior	: exception_behavior_t;
 		new_flavor	: thread_state_flavor_t;
 	  out	masks		: exception_mask_array_t;
-	  out	old_handlerss	: exception_handler_array_t, SameCount;
+	  out	old_handlers	: exception_handler_array_t, SameCount;
 	  out	old_behaviors	: exception_behavior_array_t, SameCount;
 	  out	old_flavors	: exception_flavor_array_t, SameCount);
 
 /*
- * OBSOLETE interface.
+ * OBSOLETE interface, removed from kernel
  */
+#if KERNEL_SERVER
+skip;
+skip;
+#else
 routine lock_set_create(
 		task		: task_t;
 	out	new_lock_set	: lock_set_t;
 		n_ulocks	: int;
 		policy		: int);
 
-/*
- * OBSOLETE interface.
- */
 routine lock_set_destroy(
 		task		: task_t;
 		lock_set	: lock_set_t);
+#endif
 
 /*
  * Create and destroy semaphore synchronizers on a
@@ -454,11 +480,11 @@ routine task_set_phys_footprint_limit(
 		new_limit	: int;
 	out old_limit	: int);
 
-routine task_suspend2(
-		target_task : task_t;
+routine MIG_SERVER_SUFFIX(task_suspend2)(
+		target_task : task_read_t;
 	out suspend_token : task_suspension_token_t);
 
-routine task_resume2(
+routine MIG_SERVER_SUFFIX(task_resume2)(
 		suspend_token : task_suspension_token_t);
 
 routine task_purgable_info(
@@ -480,7 +506,7 @@ routine task_swap_mach_voucher(
 	inout	old_voucher	: ipc_voucher_t);
 
 routine task_generate_corpse(
-		task		:task_t;
+		task		:task_read_t;
 	out	corpse_task_port:mach_port_t);
 
 routine task_map_corpse_info(
@@ -540,5 +566,47 @@ routine task_create_suid_cred(
 		uid		: suid_cred_uid_t;
 	out	delegation	: suid_cred_t);
 
+#if KERNEL || (!KERNEL && !LIBSYSCALL_INTERFACE)
+routine PREFIX(mach_task_is_self)(
+		task     : task_name_t;
+	out is_self  : boolean_t);
+#else
+	/* Do not generate header, use the one in mach_init.h */
+	skip;
+#endif
+
+routine task_dyld_process_info_notify_register(
+		target_task : task_read_t;
+		notify   	: mach_port_make_send_t);
+
+routine task_create_identity_token(
+	    task     : task_t;
+	out	token    : task_id_token_t);
+
+routine task_identity_token_get_task_port(
+	    token    : task_id_token_t;
+		flavor   : task_flavor_t;
+	out task_port: mach_port_t);
+
+routine task_dyld_process_info_notify_deregister(
+		target_task : task_read_t;
+		notify   	: mach_port_name_t);
+
+routine task_get_exception_ports_info(
+		port : mach_port_t;
+		exception_mask	: exception_mask_t;
+	out	masks		: exception_mask_array_t;
+	out	old_handlers_info	: exception_handler_info_array_t, SameCount;
+	out	old_behaviors	: exception_behavior_array_t, SameCount;
+	out	old_flavors	: exception_flavor_array_t, SameCount);
+
+routine task_test_sync_upcall(
+	task	: task_t;
+	port	: mach_port_t);
+
+routine task_set_corpse_forking_behavior(
+		task	 : task_t;
+		behavior : task_corpse_forking_behavior_t);
+	
 /* vim: set ft=c : */
 

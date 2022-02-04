@@ -23,6 +23,9 @@
 #include <darwintest.h>
 #include <stdatomic.h>
 
+T_GLOBAL_META(T_META_RADAR_COMPONENT_NAME("xnu"),
+    T_META_RADAR_COMPONENT_VERSION("scheduler"));
+
 #define MAX_THREADS     32
 #define SPIN_SECS       6
 #define THR_SPINNER_PRI 63

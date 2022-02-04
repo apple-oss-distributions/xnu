@@ -84,7 +84,7 @@ IOSharedDataQueue::initWithCapacity(UInt32 size)
 		return false;
 	}
 
-	_reserved = (ExpansionData *)IOMalloc(sizeof(struct ExpansionData));
+	_reserved = IOMallocType(ExpansionData);
 	if (!_reserved) {
 		return false;
 	}
@@ -117,7 +117,7 @@ IOSharedDataQueue::initWithCapacity(UInt32 size)
 	appendix->version   = 0;
 
 	if (!notifyMsg) {
-		notifyMsg = IOMalloc(sizeof(mach_msg_header_t));
+		notifyMsg = IOMallocType(mach_msg_header_t);
 		if (!notifyMsg) {
 			return false;
 		}
@@ -136,13 +136,13 @@ IOSharedDataQueue::free()
 		IOFreeAligned(dataQueue, round_page(getQueueSize() + DATA_QUEUE_MEMORY_HEADER_SIZE + DATA_QUEUE_MEMORY_APPENDIX_SIZE));
 		dataQueue = NULL;
 		if (notifyMsg) {
-			IOFree(notifyMsg, sizeof(mach_msg_header_t));
+			IOFreeType(notifyMsg, mach_msg_header_t);
 			notifyMsg = NULL;
 		}
 	}
 
 	if (_reserved) {
-		IOFree(_reserved, sizeof(struct ExpansionData));
+		IOFreeType(_reserved, ExpansionData);
 		_reserved = NULL;
 	}
 

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2020 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -65,7 +65,7 @@
  * is included in support of clause 2.2 (b) of the Apple Public License,
  * Version 2.0.
  */
-
+#include <os/log.h>
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/kernel.h>
@@ -110,19 +110,19 @@ ZONE_DECLARE(unp_zone, "unpzone", sizeof(struct unpcb), ZC_NONE);
 static  unp_gen_t unp_gencnt;
 static  u_int unp_count;
 
-static  lck_attr_t             *unp_mtx_attr;
-static  lck_grp_t              *unp_mtx_grp;
-static  lck_grp_attr_t         *unp_mtx_grp_attr;
-static  lck_rw_t                unp_list_mtx;
+static  LCK_ATTR_DECLARE(unp_mtx_attr, 0, 0);
+static  LCK_GRP_DECLARE(unp_mtx_grp, "unp_list");
+static  LCK_RW_DECLARE_ATTR(unp_list_mtx, &unp_mtx_grp, &unp_mtx_attr);
 
-static  lck_mtx_t               unp_disconnect_lock;
-static  lck_mtx_t               unp_connect_lock;
-static  lck_mtx_t               uipc_lock;
+static  LCK_MTX_DECLARE_ATTR(unp_disconnect_lock, &unp_mtx_grp, &unp_mtx_attr);
+static  LCK_MTX_DECLARE_ATTR(unp_connect_lock, &unp_mtx_grp, &unp_mtx_attr);
+static  LCK_MTX_DECLARE_ATTR(uipc_lock, &unp_mtx_grp, &unp_mtx_attr);
+
 static  u_int                   disconnect_in_progress;
 
 static struct unp_head unp_shead, unp_dhead;
-static int      unp_defer, unp_gcing, unp_gcwait;
-static thread_t unp_gcthread = NULL;
+static int      unp_defer;
+static thread_call_t unp_gc_tcall;
 static LIST_HEAD(, fileglob) unp_msghead = LIST_HEAD_INITIALIZER(unp_msghead);
 
 
@@ -171,7 +171,7 @@ static int      unp_connect(struct socket *, struct sockaddr *, proc_t);
 static void     unp_disconnect(struct unpcb *);
 static void     unp_shutdown(struct unpcb *);
 static void     unp_drop(struct unpcb *, int);
-__private_extern__ void unp_gc(void);
+static void     unp_gc(thread_call_param_t arg0, thread_call_param_t arg1);
 static void     unp_scan(struct mbuf *, void (*)(struct fileglob *, void *arg), void *arg);
 static void     unp_mark(struct fileglob *, __unused void *);
 static void     unp_discard(struct fileglob *, void *);
@@ -179,6 +179,16 @@ static int      unp_internalize(struct mbuf *, proc_t);
 static int      unp_listen(struct unpcb *, proc_t);
 static void     unpcb_to_compat(struct unpcb *, struct unpcb_compat *);
 static void     unp_get_locks_in_order(struct socket *so, struct socket *conn_so);
+
+__startup_func
+static void
+unp_gc_setup(void)
+{
+	unp_gc_tcall = thread_call_allocate_with_options(unp_gc,
+	    NULL, THREAD_CALL_PRIORITY_KERNEL,
+	    THREAD_CALL_OPTIONS_ONCE);
+}
+STARTUP(THREAD_CALL, STARTUP_RANK_MIDDLE, unp_gc_setup);
 
 static void
 unp_get_locks_in_order(struct socket *so, struct socket *conn_so)
@@ -544,7 +554,9 @@ uipc_send(struct socket *so, int flags, struct mbuf *m, struct sockaddr *nam,
 			break;
 		}
 		if (unp->unp_conn == 0) {
-			panic("uipc_send connected but no connection?");
+			panic("uipc_send connected but no connection? "
+			    "socket state: %x socket flags: %x socket flags1: %x.",
+			    so->so_state, so->so_flags, so->so_flags1);
 		}
 
 		so2 = unp->unp_conn->unp_socket;
@@ -565,8 +577,9 @@ uipc_send(struct socket *so, int flags, struct mbuf *m, struct sockaddr *nam,
 
 			if (mbuf_copydata(m, 0, sizeof(hdr), &hdr) == 0 &&
 			    hdr.version == ntohl(MDNS_IPC_MSG_HDR_VERSION_1)) {
-				printf("%s[mDNSResponder] pid=%d (%s): op=0x%x\n",
-				    __func__, p->p_pid, p->p_comm, ntohl(hdr.op));
+				os_log(OS_LOG_DEFAULT,
+				    "%s[mDNSResponder] pid=%d (%s): op=0x%x",
+				    __func__, proc_getpid(p), p->p_comm, ntohl(hdr.op));
 			}
 		}
 
@@ -911,14 +924,9 @@ unp_attach(struct socket *so)
 			return error;
 		}
 	}
-	unp = (struct unpcb *)zalloc(unp_zone);
-	if (unp == NULL) {
-		return ENOBUFS;
-	}
-	bzero(unp, sizeof(*unp));
+	unp = zalloc_flags(unp_zone, Z_WAITOK | Z_ZERO | Z_NOFAIL);
 
-	lck_mtx_init(&unp->unp_mtx,
-	    unp_mtx_grp, unp_mtx_attr);
+	lck_mtx_init(&unp->unp_mtx, &unp_mtx_grp, &unp_mtx_attr);
 
 	lck_rw_lock_exclusive(&unp_list_mtx);
 	LIST_INIT(&unp->unp_refs);
@@ -1118,7 +1126,7 @@ unp_bind(
 
 	VATTR_INIT(&va);
 	VATTR_SET(&va, va_type, VSOCK);
-	VATTR_SET(&va, va_mode, (ACCESSPERMS & ~p->p_fd->fd_cmask));
+	VATTR_SET(&va, va_mode, (ACCESSPERMS & ~p->p_fd.fd_cmask));
 
 #if CONFIG_MACF
 	error = mac_vnode_check_create(ctx,
@@ -1743,8 +1751,8 @@ unp_pcblist SYSCTL_HANDLER_ARGS
 		return 0;
 	}
 
-	MALLOC(unp_list, struct unpcb **, n * sizeof(*unp_list),
-	    M_TEMP, M_WAITOK);
+	size_t unp_list_len = n;
+	unp_list = kalloc_type(struct unpcb *, unp_list_len, Z_WAITOK);
 	if (unp_list == 0) {
 		lck_rw_done(&unp_list_mtx);
 		return ENOMEM;
@@ -1801,7 +1809,7 @@ unp_pcblist SYSCTL_HANDLER_ARGS
 		xug.xug_count = unp_count;
 		error = SYSCTL_OUT(req, &xug, sizeof(xug));
 	}
-	FREE(unp_list, M_TEMP);
+	kfree_type(struct unpcb *, unp_list_len, unp_list);
 	lck_rw_done(&unp_list_mtx);
 	return error;
 }
@@ -1872,8 +1880,8 @@ unp_pcblist64 SYSCTL_HANDLER_ARGS
 		return 0;
 	}
 
-	MALLOC(unp_list, struct unpcb **, n * sizeof(*unp_list),
-	    M_TEMP, M_WAITOK);
+	size_t unp_list_len = n;
+	unp_list = kalloc_type(struct unpcb *, unp_list_len, Z_WAITOK);
 	if (unp_list == 0) {
 		lck_rw_done(&unp_list_mtx);
 		return ENOMEM;
@@ -1954,7 +1962,7 @@ unp_pcblist64 SYSCTL_HANDLER_ARGS
 		xug.xug_count = unp_count;
 		error = SYSCTL_OUT(req, &xug, sizeof(xug));
 	}
-	FREE(unp_list, M_TEMP);
+	kfree_type(struct unpcb *, unp_list_len, unp_list);
 	lck_rw_done(&unp_list_mtx);
 	return error;
 }
@@ -1992,20 +2000,6 @@ unp_drop(struct unpcb *unp, int errno)
 	unp_disconnect(unp);
 }
 
-/* always called under uipc_lock */
-static void
-unp_gc_wait(void)
-{
-	if (unp_gcthread == current_thread()) {
-		return;
-	}
-
-	while (unp_gcing != 0) {
-		unp_gcwait = 1;
-		msleep(&unp_gcing, &uipc_lock, 0, "unp_gc_wait", NULL);
-	}
-}
-
 /*
  * fg_insertuipc_mark
  *
@@ -2031,7 +2025,7 @@ fg_insertuipc_mark(struct fileglob * fg)
 		msleep(&fg->fg_lflags, &fg->fg_lock, 0, "fg_insertuipc", NULL);
 	}
 
-	os_ref_retain_locked_raw(&fg->fg_count, &f_refgrp);
+	os_ref_retain_raw(&fg->fg_count, &f_refgrp);
 	fg->fg_msgcount++;
 	if (fg->fg_msgcount == 1) {
 		fg->fg_lflags |= FG_INSMSGQ;
@@ -2053,14 +2047,13 @@ fg_insertuipc_mark(struct fileglob * fg)
  * Locks:	Takes and drops fg_lock & uipc_lock
  *		DO NOT call this function with proc_fdlock held as unp_gc()
  *		can potentially try to acquire proc_fdlock, which can result
- *		in a deadlock if this function is in unp_gc_wait().
+ *		in a deadlock.
  */
 static void
 fg_insertuipc(struct fileglob * fg)
 {
 	if (fg->fg_lflags & FG_INSMSGQ) {
-		lck_mtx_lock_spin(&uipc_lock);
-		unp_gc_wait();
+		lck_mtx_lock(&uipc_lock);
 		LIST_INSERT_HEAD(&unp_msghead, fg, f_msglist);
 		lck_mtx_unlock(&uipc_lock);
 		lck_mtx_lock(&fg->fg_lock);
@@ -2118,14 +2111,13 @@ fg_removeuipc_mark(struct fileglob * fg)
  * Locks:	Takes and drops fg_lock & uipc_lock
  *		DO NOT call this function with proc_fdlock held as unp_gc()
  *		can potentially try to acquire proc_fdlock, which can result
- *		in a deadlock if this function is in unp_gc_wait().
+ *		in a deadlock.
  */
 static void
 fg_removeuipc(struct fileglob * fg)
 {
 	if (fg->fg_lflags & FG_RMMSGQ) {
-		lck_mtx_lock_spin(&uipc_lock);
-		unp_gc_wait();
+		lck_mtx_lock(&uipc_lock);
 		LIST_REMOVE(fg, f_msglist);
 		lck_mtx_unlock(&uipc_lock);
 		lck_mtx_lock(&fg->fg_lock);
@@ -2146,91 +2138,91 @@ fg_removeuipc(struct fileglob * fg)
 int
 unp_externalize(struct mbuf *rights)
 {
-	proc_t p = current_proc();              /* XXX */
-	int i;
+	proc_t p = current_proc();
 	struct cmsghdr *cm = mtod(rights, struct cmsghdr *);
 	struct fileglob **rp = (struct fileglob **)(cm + 1);
-	int *fds = (int *)(cm + 1);
-	struct fileproc *fp;
-	struct fileproc **fileproc_l;
-	int newfds = (cm->cmsg_len - sizeof(*cm)) / sizeof(int);
-	int f, error = 0;
+	const int newfds = (cm->cmsg_len - sizeof(*cm)) / sizeof(int);
+	int *fds;
+	int error = 0;
 
-	MALLOC(fileproc_l, struct fileproc **,
-	    newfds * sizeof(struct fileproc *), M_TEMP, M_WAITOK);
-	if (fileproc_l == NULL) {
+	fds = kalloc_data(newfds * sizeof(int), Z_WAITOK);
+	if (fds == NULL) {
 		error = ENOMEM;
-		goto discard;
+		goto out;
 	}
 
+	/*
+	 * Step 1:
+	 *	Allocate all the fds, and if it doesn't fit,
+	 *	then fail and discard everything.
+	 */
 	proc_fdlock(p);
 
-	/*
-	 * if the new FD's will not fit, then we free them all
-	 */
-	if (!fdavail(p, newfds)) {
-		proc_fdunlock(p);
+	if (fdt_available_locked(p, newfds)) {
+		for (int i = 0; i < newfds; i++) {
+			error = fdalloc(p, 0, &fds[i]);
+			if (error) {
+				while (i-- > 0) {
+					fdrelse(p, fds[i]);
+				}
+				break;
+			}
+		}
+	} else {
 		error = EMSGSIZE;
-		goto discard;
 	}
-	/*
-	 * now change each pointer to an fd in the global table to
-	 * an integer that is the index to the local fd table entry
-	 * that we set up to point to the global one we are transferring.
-	 * XXX (1) this assumes a pointer and int are the same size,
-	 * XXX     or the mbuf can hold the expansion
-	 * XXX (2) allocation failures should be non-fatal
-	 */
-	for (i = 0; i < newfds; i++) {
-		if (fdalloc(p, 0, &f)) {
-			panic("unp_externalize:fdalloc");
-		}
-		fp = fileproc_alloc_init(NULL);
-		if (fp == NULL) {
-			panic("unp_externalize:fileproc_alloc_init");
-		}
-		fp->fp_glob = rp[i];
-		if (fg_removeuipc_mark(rp[i])) {
-			/*
-			 * Take an iocount on the fp for completing the
-			 * removal from the global msg queue
-			 */
-			os_ref_retain_locked(&fp->fp_iocount);
-			fileproc_l[i] = fp;
-		} else {
-			fileproc_l[i] = NULL;
-		}
-		procfdtbl_releasefd(p, f, fp);
-		fds[i] = f;
-	}
+
 	proc_fdunlock(p);
 
-	for (i = 0; i < newfds; i++) {
-		if (fileproc_l[i] != NULL) {
-			VERIFY(fileproc_l[i]->fp_glob != NULL &&
-			    (fileproc_l[i]->fp_glob->fg_lflags & FG_RMMSGQ));
-			VERIFY(fds[i] >= 0);
-			fg_removeuipc(fileproc_l[i]->fp_glob);
-
-			/* Drop the iocount */
-			fp_drop(p, fds[i], fileproc_l[i], 0);
-			fileproc_l[i] = NULL;
-		}
-		if (fds[i] != 0) {
-			(void) OSAddAtomic(-1, &unp_rights);
-		}
-	}
-
-discard:
-	if (fileproc_l != NULL) {
-		FREE(fileproc_l, M_TEMP);
-	}
 	if (error) {
-		for (i = 0; i < newfds; i++) {
-			unp_discard(*rp, p);
-			*rp++ = NULL;
-		}
+		goto out;
 	}
+
+	/*
+	 * Step 2:
+	 *	At this point we are commited, and can't fail anymore.
+	 *	Allocate all the fileprocs, and remove the files
+	 *	from the queue.
+	 *
+	 *	Until we call procfdtbl_releasefd(), fds are in flux
+	 *	and can't be closed.
+	 */
+	for (int i = 0; i < newfds; i++) {
+		struct fileproc *fp = NULL;
+
+		fp = fileproc_alloc_init();
+		fp->fp_glob = rp[i];
+		if (fg_removeuipc_mark(rp[i])) {
+			fg_removeuipc(rp[i]);
+		}
+
+		proc_fdlock(p);
+		procfdtbl_releasefd(p, fds[i], fp);
+		proc_fdunlock(p);
+	}
+
+	/*
+	 * Step 3:
+	 *	Return the fds into `cm`.
+	 *	Handle the fact ints and pointers do not have the same size.
+	 */
+	int *fds_out = (int *)(cm + 1);
+	memcpy(fds_out, fds, newfds * sizeof(int));
+	if (sizeof(struct fileglob *) != sizeof(int)) {
+		bzero(fds_out + newfds,
+		    newfds * (sizeof(struct fileglob *) - sizeof(int)));
+	}
+	OSAddAtomic(-newfds, &unp_rights);
+
+out:
+	if (error) {
+		for (int i = 0; i < newfds; i++) {
+			unp_discard(rp[i], p);
+		}
+		bzero(rp, newfds * sizeof(struct fileglob *));
+	}
+
+	kfree_data(fds, newfds * sizeof(int));
 	return error;
 }
 
@@ -2240,20 +2232,6 @@ unp_init(void)
 	_CASSERT(UIPC_MAX_CMSG_FD >= (MCLBYTES / sizeof(int)));
 	LIST_INIT(&unp_dhead);
 	LIST_INIT(&unp_shead);
-
-	/*
-	 * allocate lock group attribute and group for udp pcb mutexes
-	 */
-	unp_mtx_grp_attr = lck_grp_attr_alloc_init();
-
-	unp_mtx_grp = lck_grp_alloc_init("unp_list", unp_mtx_grp_attr);
-
-	unp_mtx_attr = lck_attr_alloc_init();
-
-	lck_mtx_init(&uipc_lock, unp_mtx_grp, unp_mtx_attr);
-	lck_rw_init(&unp_list_mtx, unp_mtx_grp, unp_mtx_attr);
-	lck_mtx_init(&unp_disconnect_lock, unp_mtx_grp, unp_mtx_attr);
-	lck_mtx_init(&unp_connect_lock, unp_mtx_grp, unp_mtx_attr);
 }
 
 #ifndef MIN
@@ -2295,7 +2273,7 @@ unp_internalize(struct mbuf *control, proc_t p)
 		} else if (!fg_sendable(tmpfp->fp_glob)) {
 			proc_fdunlock(p);
 			return EINVAL;
-		} else if (FP_ISGUARDED(tmpfp, GUARD_SOCKET_IPC)) {
+		} else if (fp_isguarded(tmpfp, GUARD_SOCKET_IPC)) {
 			error = fp_guard_exception(p,
 			    fds[i], tmpfp, kGUARD_EXC_SOCKET_IPC);
 			proc_fdunlock(p);
@@ -2327,35 +2305,28 @@ unp_internalize(struct mbuf *control, proc_t p)
 	return 0;
 }
 
-__private_extern__ void
-unp_gc(void)
+static void
+unp_gc(thread_call_param_t arg0, thread_call_param_t arg1)
 {
-	struct fileglob *fg, *nextfg;
+#pragma unused(arg0, arg1)
+	struct fileglob *fg;
 	struct socket *so;
 	static struct fileglob **extra_ref;
 	struct fileglob **fpp;
 	int nunref, i;
-	int need_gcwakeup = 0;
 
+restart:
 	lck_mtx_lock(&uipc_lock);
-	if (unp_gcing) {
-		lck_mtx_unlock(&uipc_lock);
-		return;
-	}
-	unp_gcing = 1;
 	unp_defer = 0;
-	unp_gcthread = current_thread();
-	lck_mtx_unlock(&uipc_lock);
 	/*
 	 * before going through all this, set all FDs to
 	 * be NOT defered and NOT externally accessible
 	 */
-	for (fg = unp_msghead.lh_first; fg != 0; fg = fg->f_msglist.le_next) {
+	LIST_FOREACH(fg, &unp_msghead, f_msglist) {
 		os_atomic_andnot(&fg->fg_flag, FMARK | FDEFER, relaxed);
 	}
 	do {
-		for (fg = unp_msghead.lh_first; fg != 0;
-		    fg = fg->f_msglist.le_next) {
+		LIST_FOREACH(fg, &unp_msghead, f_msglist) {
 			lck_mtx_lock(&fg->fg_lock);
 			/*
 			 * If the file is not open, skip it
@@ -2412,22 +2383,6 @@ unp_gc(void)
 				lck_mtx_unlock(&fg->fg_lock);
 				continue;
 			}
-#ifdef notdef
-			if (so->so_rcv.sb_flags & SB_LOCK) {
-				/*
-				 * This is problematical; it's not clear
-				 * we need to wait for the sockbuf to be
-				 * unlocked (on a uniprocessor, at least),
-				 * and it's also not clear what to do
-				 * if sbwait returns an error due to receipt
-				 * of a signal.  If sbwait does return
-				 * an error, we'll go into an infinite
-				 * loop.  Delete all of this for now.
-				 */
-				(void) sbwait(&so->so_rcv);
-				goto restart;
-			}
-#endif
 			/*
 			 * So, Ok, it's one of our sockets and it IS externally
 			 * accessible (or was defered). Now we look
@@ -2439,39 +2394,45 @@ unp_gc(void)
 			 * release the file lock.
 			 */
 			lck_mtx_unlock(&fg->fg_lock);
-
+			/*
+			 * It's safe to lock the socket after dropping fg_lock
+			 * because the socket isn't going away at this point.
+			 *
+			 * If we couldn't lock the socket or the socket buffer,
+			 * then it's because someone holding one of these
+			 * locks is stuck in unp_{internalize,externalize}().
+			 * Yield to that process and restart the garbage
+			 * collection.
+			 */
+			if (!socket_try_lock(so)) {
+				lck_mtx_unlock(&uipc_lock);
+				goto restart;
+			}
+			so->so_usecount++;
+			/*
+			 * Lock the receive socket buffer so that we can
+			 * iterate over its mbuf list.
+			 */
+			if (sblock(&so->so_rcv, SBL_NOINTR | SBL_IGNDEFUNCT)) {
+				socket_unlock(so, 1);
+				lck_mtx_unlock(&uipc_lock);
+				goto restart;
+			}
+			VERIFY(so->so_rcv.sb_flags & SB_LOCK);
+			socket_unlock(so, 0);
 			unp_scan(so->so_rcv.sb_mb, unp_mark, 0);
+			socket_lock(so, 0);
+			sbunlock(&so->so_rcv, TRUE);
+			/*
+			 * Unlock and release the reference acquired above.
+			 */
+			socket_unlock(so, 1);
 		}
 	} while (unp_defer);
 	/*
 	 * We grab an extra reference to each of the file table entries
 	 * that are not otherwise accessible and then free the rights
 	 * that are stored in messages on them.
-	 *
-	 * The bug in the orginal code is a little tricky, so I'll describe
-	 * what's wrong with it here.
-	 *
-	 * It is incorrect to simply unp_discard each entry for fg_msgcount
-	 * times -- consider the case of sockets A and B that contain
-	 * references to each other.  On a last close of some other socket,
-	 * we trigger a gc since the number of outstanding rights (unp_rights)
-	 * is non-zero.  If during the sweep phase the gc code un_discards,
-	 * we end up doing a (full) closef on the descriptor.  A closef on A
-	 * results in the following chain.  Closef calls soo_close, which
-	 * calls soclose.   Soclose calls first (through the switch
-	 * uipc_usrreq) unp_detach, which re-invokes unp_gc.  Unp_gc simply
-	 * returns because the previous instance had set unp_gcing, and
-	 * we return all the way back to soclose, which marks the socket
-	 * with SS_NOFDREF, and then calls sofree.  Sofree calls sorflush
-	 * to free up the rights that are queued in messages on the socket A,
-	 * i.e., the reference on B.  The sorflush calls via the dom_dispose
-	 * switch unp_dispose, which unp_scans with unp_discard.  This second
-	 * instance of unp_discard just calls closef on B.
-	 *
-	 * Well, a similar chain occurs on B, resulting in a sorflush on B,
-	 * which results in another closef on A.  Unfortunately, A is already
-	 * being closed, and the descriptor has already been marked with
-	 * SS_NOFDREF, and soclose panics at this point.
 	 *
 	 * Here, we first take an extra reference to each inaccessible
 	 * descriptor.  Then, we call sorflush ourself, since we know
@@ -2482,16 +2443,16 @@ unp_gc(void)
 	 *
 	 * 91/09/19, bsy@cs.cmu.edu
 	 */
-	MALLOC(extra_ref, struct fileglob **, nfiles * sizeof(struct fileglob *),
-	    M_TEMP, M_WAITOK);
+	size_t extra_ref_size = nfiles;
+	extra_ref = kalloc_type(struct fileglob *, extra_ref_size, Z_WAITOK);
 	if (extra_ref == NULL) {
-		goto bail;
+		lck_mtx_unlock(&uipc_lock);
+		return;
 	}
-	for (nunref = 0, fg = unp_msghead.lh_first, fpp = extra_ref; fg != 0;
-	    fg = nextfg) {
+	nunref = 0;
+	fpp = extra_ref;
+	LIST_FOREACH(fg, &unp_msghead, f_msglist) {
 		lck_mtx_lock(&fg->fg_lock);
-
-		nextfg = fg->f_msglist.le_next;
 		/*
 		 * If it's not open, skip it
 		 */
@@ -2516,6 +2477,8 @@ unp_gc(void)
 		}
 		lck_mtx_unlock(&fg->fg_lock);
 	}
+	lck_mtx_unlock(&uipc_lock);
+
 	/*
 	 * for each FD on our hit list, do the following two things
 	 */
@@ -2539,21 +2502,7 @@ unp_gc(void)
 		fg_drop(PROC_NULL, *fpp);
 	}
 
-	FREE(extra_ref, M_TEMP);
-bail:
-	lck_mtx_lock(&uipc_lock);
-	unp_gcing = 0;
-	unp_gcthread = NULL;
-
-	if (unp_gcwait != 0) {
-		unp_gcwait = 0;
-		need_gcwakeup = 1;
-	}
-	lck_mtx_unlock(&uipc_lock);
-
-	if (need_gcwakeup != 0) {
-		wakeup(&unp_gcing);
-	}
+	kfree_type(struct fileglob *, extra_ref_size, extra_ref);
 }
 
 void
@@ -2652,12 +2601,12 @@ unp_lock(struct socket *so, int refcount, void * lr)
 	if (so->so_pcb) {
 		lck_mtx_lock(&((struct unpcb *)so->so_pcb)->unp_mtx);
 	} else {
-		panic("unp_lock: so=%p NO PCB! lr=%p ref=0x%x\n",
+		panic("unp_lock: so=%p NO PCB! lr=%p ref=0x%x",
 		    so, lr_saved, so->so_usecount);
 	}
 
 	if (so->so_usecount < 0) {
-		panic("unp_lock: so=%p so_pcb=%p lr=%p ref=0x%x\n",
+		panic("unp_lock: so=%p so_pcb=%p lr=%p ref=0x%x",
 		    so, so->so_pcb, lr_saved, so->so_usecount);
 	}
 
@@ -2688,10 +2637,10 @@ unp_unlock(struct socket *so, int refcount, void * lr)
 	}
 
 	if (so->so_usecount < 0) {
-		panic("unp_unlock: so=%p usecount=%x\n", so, so->so_usecount);
+		panic("unp_unlock: so=%p usecount=%x", so, so->so_usecount);
 	}
 	if (so->so_pcb == NULL) {
-		panic("unp_unlock: so=%p NO PCB usecount=%x\n", so, so->so_usecount);
+		panic("unp_unlock: so=%p NO PCB usecount=%x", so, so->so_usecount);
 	} else {
 		mutex_held = &((struct unpcb *)so->so_pcb)->unp_mtx;
 	}
@@ -2702,16 +2651,15 @@ unp_unlock(struct socket *so, int refcount, void * lr)
 	if (so->so_usecount == 0 && (so->so_flags & SOF_PCBCLEARING)) {
 		sofreelastref(so, 1);
 
-		if (unp->unp_addr) {
-			FREE(unp->unp_addr, M_SONAME);
+		if (unp->unp_addr != NULL) {
+			free_sockaddr(unp->unp_addr);
 		}
 
 		lck_mtx_unlock(mutex_held);
 
-		lck_mtx_destroy(&unp->unp_mtx, unp_mtx_grp);
+		lck_mtx_destroy(&unp->unp_mtx, &unp_mtx_grp);
 		zfree(unp_zone, unp);
-
-		unp_gc();
+		thread_call_enter(unp_gc_tcall);
 	} else {
 		lck_mtx_unlock(mutex_held);
 	}
@@ -2727,11 +2675,11 @@ unp_getlock(struct socket *so, __unused int flags)
 
 	if (so->so_pcb) {
 		if (so->so_usecount < 0) {
-			panic("unp_getlock: so=%p usecount=%x\n", so, so->so_usecount);
+			panic("unp_getlock: so=%p usecount=%x", so, so->so_usecount);
 		}
 		return &unp->unp_mtx;
 	} else {
-		panic("unp_getlock: so=%p NULL so_pcb\n", so);
+		panic("unp_getlock: so=%p NULL so_pcb", so);
 		return so->so_proto->pr_domain->dom_mtx;
 	}
 }

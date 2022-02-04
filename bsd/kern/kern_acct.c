@@ -115,7 +115,6 @@
  */
 comp_t  encode_comp_t(uint32_t, uint32_t);
 void    acctwatch(void *);
-void    acct_init(void);
 
 /*
  * Accounting vnode pointer, and suspended accounting vnode pointer.  States
@@ -139,18 +138,11 @@ int     acctresume = 4;         /* resume when free space risen to > 4% */
 int     acctchkfreq = 15;       /* frequency (in seconds) to check space */
 
 
-static lck_grp_t       *acct_subsys_lck_grp;
-static lck_mtx_t       *acct_subsys_mutex;
+static LCK_GRP_DECLARE(acct_subsys_lck_grp, "acct");
+static LCK_MTX_DECLARE(acct_subsys_mutex, &acct_subsys_lck_grp);
 
-#define ACCT_SUBSYS_LOCK() lck_mtx_lock(acct_subsys_mutex)
-#define ACCT_SUBSYS_UNLOCK() lck_mtx_unlock(acct_subsys_mutex)
-
-void
-acct_init(void)
-{
-	acct_subsys_lck_grp = lck_grp_alloc_init("acct", NULL);
-	acct_subsys_mutex = lck_mtx_alloc_init(acct_subsys_lck_grp, NULL);
-}
+#define ACCT_SUBSYS_LOCK() lck_mtx_lock(&acct_subsys_mutex)
+#define ACCT_SUBSYS_UNLOCK() lck_mtx_unlock(&acct_subsys_mutex)
 
 
 /*
@@ -248,8 +240,7 @@ acct_process(proc_t p)
 	int error;
 	struct vnode *vp;
 	kauth_cred_t safecred;
-	struct session * sessp;
-	struct  tty *tp;
+	struct pgrp *pg;
 
 	/* If accounting isn't enabled, don't bother */
 	ACCT_SUBSYS_LOCK();
@@ -302,17 +293,10 @@ acct_process(proc_t p)
 
 	/* (7) The terminal from which the process was started */
 
-	sessp = proc_session(p);
-	if ((p->p_flag & P_CONTROLT) && (sessp != SESSION_NULL) && ((tp = SESSION_TP(sessp)) != TTY_NULL)) {
-		tty_lock(tp);
-		an_acct.ac_tty = tp->t_dev;
-		tty_unlock(tp);
-	} else {
-		an_acct.ac_tty = NODEV;
-	}
-
-	if (sessp != SESSION_NULL) {
-		session_rele(sessp);
+	an_acct.ac_tty = NODEV;
+	if ((p->p_flag & P_CONTROLT) && (pg = proc_pgrp(p, NULL))) {
+		an_acct.ac_tty = os_atomic_load(&pg->pg_session->s_ttydev, relaxed);
+		pgrp_rele(pg);
 	}
 
 	/* (8) The boolean flags that tell how the process terminated, etc. */

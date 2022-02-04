@@ -62,8 +62,10 @@
 #ifndef _ARM_HW_LOCK_TYPES_H_
 #define _ARM_HW_LOCK_TYPES_H_
 
+#include <stdint.h>
+
 struct hslock {
-	uintptr_t       lock_data;
+	uintptr_t       lock_data __kernel_data_semantics;
 };
 
 typedef struct hslock hw_lock_data_t, *hw_lock_t;

@@ -82,6 +82,7 @@ void kperf_thread_snapshot_log(struct kperf_thread_snapshot *);
 /* libdispatch information */
 struct kperf_thread_dispatch {
 	uint64_t kpthdi_dq_serialno;
+	char kpthdi_dq_label[64];
 };
 
 void kperf_thread_dispatch_sample(struct kperf_thread_dispatch *,

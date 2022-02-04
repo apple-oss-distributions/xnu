@@ -39,6 +39,8 @@
 #define rDOCKCHANNELS_AGENT_AP_ERR_INTR_CTRL    (*(volatile uint32_t *) (dock_agent_base + 0x08))
 #define rDOCKCHANNELS_AGENT_AP_ERR_INTR_STATUS  (*(volatile uint32_t *) (dock_agent_base + 0x0c))
 
+#define rDOCKCHANNELS_DEV_WR_WATERMARK(_ch)     (*(volatile uint32_t *) (dockchannel_uart_base + ((_ch) * DOCKCHANNEL_STRIDE) + 0x0000))
+#define rDOCKCHANNELS_DEV_RD_WATERMARK(_ch)     (*(volatile uint32_t *) (dockchannel_uart_base + ((_ch) * DOCKCHANNEL_STRIDE) + 0x0004))
 #define rDOCKCHANNELS_DEV_DRAIN_CFG(_ch)        (*(volatile uint32_t *) (dockchannel_uart_base + ((_ch) * DOCKCHANNEL_STRIDE) + 0x0008))
 
 #define rDOCKCHANNELS_DEV_WDATA1(_ch)           (*(volatile uint32_t *) (dockchannel_uart_base + ((_ch) * DOCKCHANNEL_STRIDE) + 0x4004))

@@ -81,7 +81,6 @@ extern struct   msgbuf *msgbufp;
 extern struct   msgbuf *aslbufp;
 extern void log_putc(char);
 extern void log_putc_locked(struct msgbuf *, char);
-extern int log_setsize(int size);
 extern int log_dmesg(user_addr_t, uint32_t, int32_t *);
 __END_DECLS
 #endif /* XNU_KERNEL_PRIVATE */

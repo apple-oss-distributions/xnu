@@ -95,9 +95,6 @@ static char normal_chars[] = {0, 0x80, 0xc0, 0xe0, 0xf0, 0xf8, 0xfc, 0xfe, -1};
 static char *rn_zeros, *rn_ones;
 
 
-extern lck_grp_t        *domain_proto_mtx_grp;
-extern lck_attr_t       *domain_proto_mtx_attr;
-
 #define rn_masktop (mask_rnhead->rnh_treetop)
 #undef Bcmp
 #define Bcmp(a, b, l) \
@@ -352,7 +349,7 @@ on1:
 		b--;
 	}
 keeplooking:
-	matched_off = cp - v;
+	matched_off = (int)(cp - v);
 	b += matched_off << 3;
 	rn_bit = -1 - b;
 	/*
@@ -420,7 +417,7 @@ static struct radix_node *
 rn_newpair(void *v, int b, struct radix_node nodes[2])
 {
 	struct radix_node *tt = nodes, *t = tt + 1;
-	t->rn_bit = b;
+	t->rn_bit = (short)b;
 	t->rn_bmask = 0x80 >> (b & 7);
 	t->rn_left = tt;
 	t->rn_offset = b >> 3;
@@ -467,7 +464,7 @@ rn_insert(void *v_arg, struct radix_node_head *head, int *dupentry,
 on1:
 		*dupentry = 0;
 		cmp_res = (cp[-1] ^ cp2[-1]) & 0xff;
-		for (b = (cp - v) << 3; cmp_res; b--) {
+		for (b = (int)(cp - v) << 3; cmp_res; b--) {
 			cmp_res >>= 1;
 		}
 	}
@@ -544,7 +541,7 @@ rn_addmask(void *n_arg, int search, int skip)
 	for (cp = addmask_key + mlen; (cp > addmask_key) && cp[-1] == 0;) {
 		cp--;
 	}
-	mlen = cp - addmask_key;
+	mlen = (int)(cp - addmask_key);
 	if (mlen <= skip) {
 		if (m0 >= last_zeroed) {
 			last_zeroed = mlen;
@@ -554,7 +551,7 @@ rn_addmask(void *n_arg, int search, int skip)
 	if (m0 < last_zeroed) {
 		Bzero(addmask_key + m0, last_zeroed - m0);
 	}
-	*addmask_key = last_zeroed = mlen;
+	*addmask_key = last_zeroed = (char)mlen;
 	x = rn_search(addmask_key, rn_masktop);
 	if (Bcmp(addmask_key, x->rn_key, mlen) != 0) {
 		x = NULL;
@@ -592,7 +589,7 @@ rn_addmask(void *n_arg, int search, int skip)
 		}
 	}
 	b += (cp - netmask) << 3;
-	x->rn_bit = -1 - b;
+	x->rn_bit = (short)(-1 - b);
 	if (isnormal) {
 		x->rn_flags |= RNF_NORMAL;
 	}
@@ -1223,6 +1220,9 @@ rn_inithead(void **head, int off)
 {
 	struct radix_node_head *rnh;
 	struct radix_node *t, *tt, *ttt;
+	if (off > INT8_MAX) {
+		return 0;
+	}
 	if (*head) {
 		return 1;
 	}
@@ -1238,7 +1238,7 @@ rn_inithead(void **head, int off)
 	t->rn_parent = t;
 	tt = t->rn_left;
 	tt->rn_flags = t->rn_flags = RNF_ROOT | RNF_ACTIVE;
-	tt->rn_bit = -1 - off;
+	tt->rn_bit = (short)(-1 - off);
 	*ttt = *tt;
 	ttt->rn_key = rn_ones;
 	rnh->rnh_addaddr = rn_addroute;

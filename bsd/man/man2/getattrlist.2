@@ -791,6 +791,13 @@ is to
 in
 .Xr statfs 2 .
 .
+.It ATTR_VOL_SPACEUSED
+An
+.Vt off_t
+containing the total space used on the volume in bytes.
+On space sharing volumes, this value may not be identical to the difference
+between the volume's size and its free space.
+.
 .It ATTR_VOL_MINALLOCATION
 An
 .Vt off_t

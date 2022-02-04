@@ -387,7 +387,8 @@ disable_timer_coalescing(void)
 }
 
 T_DECL(kqueue_timer_tests,
-    "Tests assorted kqueue operations for timer-related events")
+    "Tests assorted kqueue operations for timer-related events",
+    T_META_REQUIRES_SYSCTL_NE("kern.kasan.available", 1))
 {
 	/*
 	 * Since we're trying to test timers here, disable timer coalescing
@@ -445,5 +446,6 @@ T_DECL(kqueue_timer_tests,
 
 	test_updated_kevent(1000, 2000);
 	test_updated_kevent(2000, 1000);
+	T_MAYFAIL;
 	test_updated_kevent(1000, -1);
 }

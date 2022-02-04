@@ -47,6 +47,7 @@ class IOMemoryMap;
 class IOMapper;
 class IOService;
 class IODMACommand;
+class _IOMemoryDescriptorMixedData;
 
 /*
  * Direction of transfer, with respect to the described memory.
@@ -801,13 +802,27 @@ public:
 		mach_vm_size_t          length,
 		IOOptionBits            options );
 
-	virtual IOMemoryMap *      makeMapping(
+	virtual LIBKERN_RETURNS_NOT_RETAINED IOMemoryMap *      makeMapping(
 		IOMemoryDescriptor *    owner,
 		task_t                  intoTask,
 		IOVirtualAddress        atAddress,
 		IOOptionBits            options,
 		IOByteCount             offset,
 		IOByteCount             length );
+
+#if KERNEL_PRIVATE
+/*! @function copyContext
+ *   @abstract Accessor to the retrieve the context previously set for the memory descriptor.
+ *   @discussion This method returns the context for the memory descriptor. The context is not interpreted by IOMemoryDescriptor.
+ *   @result The context, returned with an additional retain to be released by the caller. */
+	OSObject * copyContext(void) const;
+
+/*! @function setContext
+ *   @abstract Set a context object for the memory descriptor. The context is not interpreted by IOMemoryDescriptor.
+ *   @discussion The context is retained, and will be released when the memory descriptor is freed or when a new context object is set.
+ */
+	void setContext(OSObject * context);
+#endif
 
 protected:
 	virtual void                addMapping(
@@ -840,6 +855,7 @@ class IOMemoryMap : public OSObject
 	OSDeclareDefaultStructorsWithDispatch(IOMemoryMap);
 #ifdef XNU_KERNEL_PRIVATE
 public:
+	IOOptionBits         fOptions;
 	OSPtr<IOMemoryDescriptor>  fMemory;
 	OSPtr<IOMemoryMap>         fSuperMap;
 	mach_vm_size_t       fOffset;
@@ -847,10 +863,7 @@ public:
 	mach_vm_size_t       fLength;
 	task_t               fAddressTask;
 	vm_map_t             fAddressMap;
-	IOOptionBits         fOptions;
 	upl_t                fRedirUPL;
-	ipc_port_t           fRedirEntry;
-	IOMemoryDescriptor * fOwner;
 	uint8_t              fUserClientUnmap;
 #if IOTRACKING
 	IOTrackingUser       fTracking;
@@ -1129,7 +1142,7 @@ private:
 #endif /* !__LP64__ */
 
 // Internal
-	OSPtr<OSData>   _memoryEntries;
+	OSPtr<_IOMemoryDescriptorMixedData> _memoryEntries;
 	unsigned int    _pages;
 	ppnum_t         _highestPage;
 	uint32_t        __iomd_reservedA;

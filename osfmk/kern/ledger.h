@@ -61,17 +61,11 @@ struct ledger_template_info {
 
 #ifdef MACH_KERNEL_PRIVATE
 /*
- * These definitions are only here to allow pmap.c to determine the expected
- * size of a ledger at build time.  Direct access to ledger fields or to
- * ledger entries is prohibited.
- */
-
-/*
  * The explicit alignment is to ensure that atomic operations don't panic
  * on ARM.
  */
 struct ledger_entry {
-	volatile uint32_t        le_flags;
+	volatile uint32_t le_flags;
 #define LEDGER_PERCENT_NONE  UINT16_MAX
 	uint16_t                 le_warn_percent;
 	ledger_amount_t          le_limit;
@@ -95,12 +89,22 @@ struct ledger_entry {
 	} _le;
 } __attribute__((aligned(8)));
 
+/*
+ * Many ledger entries just need to track an amount
+ * and have a few flags (panic on negative, active / inactive, etc...).
+ * Those entries use this struct to save memory.
+ */
+struct ledger_entry_small {
+	volatile uint32_t les_flags;
+	volatile ledger_amount_t les_credit __attribute__((aligned(8)));
+} __attribute__((aligned(8)));
+
 struct ledger {
-	uint64_t                l_id;
-	os_refcnt_t             l_refs;
-	int32_t                 l_size;
-	struct ledger_template *l_template;
-	struct ledger_entry     l_entries[0] __attribute__((aligned(8)));
+	uint64_t                  l_id;
+	os_refcnt_t               l_refs;
+	int32_t                   l_size;
+	struct ledger_template *  l_template;
+	struct ledger_entry_small l_entries[] __attribute__((aligned(8)));
 };
 #endif /* MACH_KERNEL_PRIVATE */
 
@@ -142,6 +146,9 @@ typedef void (*ledger_callback_t)(int warning, const void * param0, const void *
 extern ledger_template_t ledger_template_create(const char *name);
 extern ledger_template_t ledger_template_copy(ledger_template_t template, const char *name);
 extern void ledger_template_dereference(ledger_template_t template);
+/*
+ * DEPRECATED. Use ledger_entry_add_with_flags instead.
+ */
 extern int ledger_entry_add(ledger_template_t template, const char *key,
     const char *group, const char *units);
 extern kern_return_t ledger_set_callback(ledger_template_t template, int entry,
@@ -153,6 +160,33 @@ extern kern_return_t ledger_panic_on_negative(ledger_template_t template,
 extern kern_return_t ledger_track_credit_only(ledger_template_t template,
     int entry);
 extern int ledger_key_lookup(ledger_template_t template, const char *key);
+
+/*
+ * Supported ledger features.
+ * Passed in as a bitwise OR to ledger_entry_add_with_flags
+ */
+__options_decl(ledger_entry_flags, uint64_t, {
+	LEDGER_ENTRY_ALLOW_CALLBACK = 0x1,
+	LEDGER_ENTRY_ALLOW_MAXIMUM = 0x2,
+	LEDGER_ENTRY_ALLOW_PANIC_ON_NEGATIVE = 0x4,
+	LEDGER_ENTRY_ALLOW_DEBIT = 0x8,
+	LEDGER_ENTRY_ALLOW_LIMIT = 0x10,
+	LEDGER_ENTRY_ALLOW_ACTION = 0x20,
+	LEDGER_ENTRY_ALLOW_INACTIVE = 0x40,
+});
+
+/*
+ * Create a new ledger entry that only supports the feature set passed in via
+ * flags.
+ *
+ * This is the recommended way to create new ledger entries, as it allows
+ * the ledger code to allocate less memory for simpler entries.
+ * ledger_entry_add is kept for backwards compatibility.
+ *
+ * See below for the set of valid flags.
+ */
+extern int ledger_entry_add_with_flags(ledger_template_t template, const char *key,
+    const char *group, const char *units, ledger_entry_flags flags);
 
 /* value of entry type */
 #define LEDGER_CREATE_ACTIVE_ENTRIES    0

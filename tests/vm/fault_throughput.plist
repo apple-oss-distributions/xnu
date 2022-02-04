@@ -2,6 +2,13 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<key>RadarComponents</key>
+	<dict>
+		<key>Name</key>
+		<string>xnu</string>
+		<key>Version</key>
+		<string>VM</string>
+	</dict>
 	<key>Tests</key>
 	<array>
 		<dict>

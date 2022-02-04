@@ -353,7 +353,7 @@ kern_collectth_state(thread_t thread __unused, void *buffer, uint64_t size, void
 		state->lr   = saved_state->lr;
 		state->sp   = saved_state->sp;
 		state->pc   = saved_state->pc;
-		state->cpsr = saved_state->cpsr;
+		state->cpsr = PSR64_KERNEL_DEFAULT;
 	}
 
 #else /* __arm64__ */

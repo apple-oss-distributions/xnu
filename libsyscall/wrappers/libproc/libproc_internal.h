@@ -27,6 +27,7 @@
 
 #include <sys/cdefs.h>
 #include <libproc.h>
+#include <libproc_private.h>
 #include <mach/message.h>
 
 __BEGIN_DECLS
@@ -159,6 +160,9 @@ int proc_trace_log(pid_t pid, uint64_t uniqueid) __OSX_AVAILABLE_STARTING(__MAC_
 int proc_pidoriginatorinfo(int flavor, void *buffer, int buffersize) __OSX_AVAILABLE_STARTING(__MAC_10_10, __IPHONE_8_0);
 
 int proc_listcoalitions(int flavor, int coaltype, void *buffer, int buffersize) __OSX_AVAILABLE_STARTING(__MAC_10_11, __IPHONE_8_3);
+
+/* get scheduler stats for current thread */
+int proc_current_thread_schedinfo(void *buffer, size_t buffersize);
 
 #if !TARGET_OS_SIMULATOR
 

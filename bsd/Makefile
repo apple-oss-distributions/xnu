@@ -23,7 +23,6 @@ INSTINC_SUBDIRS = \
 	security \
 	pthread \
 	sys \
-	sys_private \
 	uuid \
 	vfs
 
@@ -56,7 +55,6 @@ EXPINC_SUBDIRS = \
 	security \
 	pthread \
 	sys \
-	sys_private \
 	uuid \
 	vfs \
 	vm

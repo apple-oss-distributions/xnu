@@ -168,7 +168,7 @@ enum {
 };
 
 #if PRIVATE
-typedef uintptr_t io_filter_policy_t;
+typedef uintptr_t io_filter_policy_t __kernel_ptr_semantics;
 enum io_filter_type_t {
 	io_filter_type_external_method       = 1,
 	io_filter_type_external_async_method = 2,
@@ -176,7 +176,7 @@ enum io_filter_type_t {
 };
 
 typedef IOReturn (*io_filter_resolver_t) (task_t task, IOUserClient * client, uint32_t type, io_filter_policy_t *filterp);
-typedef IOReturn (*io_filter_applier_t) (io_filter_policy_t filter, io_filter_type_t type, uint32_t selector);
+typedef IOReturn (*io_filter_applier_t) (IOUserClient * client, io_filter_policy_t filter, io_filter_type_t type, uint32_t selector);
 typedef void (*io_filter_release_t) (io_filter_policy_t filter);
 struct io_filter_callbacks {
 	const io_filter_resolver_t      io_filter_resolver;
@@ -349,7 +349,6 @@ public:
 
 	static OSPtr<OSDictionary>  copyClientEntitlements(task_t task);
 	static OSPtr<OSDictionary>  copyClientEntitlementsVnode(struct vnode *vnode, off_t offset);
-	static OSPtr<OSDictionary>  copyEntitlementsFromBlob(void *blob, size_t len);
 
 /*!
  *   @function releaseAsyncReference64
@@ -510,6 +509,38 @@ public:
 
 #ifdef XNU_KERNEL_PRIVATE
 extern "C" void IOMachPortDestroyUserReferences(OSObject * obj, natural_t type);
+
+class IOUserIterator : public OSIterator
+{
+	OSDeclareDefaultStructors(IOUserIterator);
+public:
+	OSObject    *       userIteratorObject;
+	IOLock      *       lock;
+
+	static IOUserIterator * withIterator(LIBKERN_CONSUMED OSIterator * iter);
+	virtual bool init( void ) APPLE_KEXT_OVERRIDE;
+	virtual void free() APPLE_KEXT_OVERRIDE;
+
+	virtual void reset() APPLE_KEXT_OVERRIDE;
+	virtual bool isValid() APPLE_KEXT_OVERRIDE;
+	virtual OSObject * getNextObject() APPLE_KEXT_OVERRIDE;
+	virtual OSObject * copyNextObject();
+};
+
+class IOUserNotification : public IOUserIterator
+{
+	OSDeclareDefaultStructors(IOUserNotification);
+
+public:
+
+	virtual void free() APPLE_KEXT_OVERRIDE;
+
+	virtual void setNotification( IONotifier * obj );
+
+	virtual void reset() APPLE_KEXT_OVERRIDE;
+	virtual bool isValid() APPLE_KEXT_OVERRIDE;
+};
+
 #endif /* XNU_KERNEL_PRIVATE */
 
 #endif /* ! _IOKIT_IOUSERCLIENT_H */

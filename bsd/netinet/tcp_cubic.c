@@ -60,8 +60,8 @@ static void tcp_cubic_pre_fr(struct tcpcb *tp);
 static void tcp_cubic_post_fr(struct tcpcb *tp, struct tcphdr *th);
 static void tcp_cubic_after_timeout(struct tcpcb *tp);
 static int tcp_cubic_delay_ack(struct tcpcb *tp, struct tcphdr *th);
-static void tcp_cubic_switch_cc(struct tcpcb *tp, u_int16_t old_index);
-static uint32_t tcp_cubic_update(struct tcpcb *tp, u_int32_t rtt);
+static void tcp_cubic_switch_cc(struct tcpcb *tp);
+static uint32_t tcp_cubic_update(struct tcpcb *tp, uint32_t rtt);
 static inline void tcp_cubic_clear_state(struct tcpcb *tp);
 
 
@@ -302,20 +302,6 @@ tcp_cubic_tcpwin(struct tcpcb *tp, struct tcphdr *th)
 		}
 	}
 	return tp->t_ccstate->cub_tcp_win;
-}
-
-static uint32_t
-tcp_round_to(uint32_t val, uint32_t round)
-{
-	if (tcp_cubic_minor_fixes) {
-		/*
-		 * Round up or down based on the middle. Meaning, if we round upon a
-		 * multiple of 10, 16 will round to 20 and 14 will round to 10.
-		 */
-		return ((val + (round / 2)) / round) * round;
-	} else {
-		return (val / round) * round;
-	}
 }
 
 /*
@@ -632,9 +618,8 @@ tcp_cubic_delay_ack(struct tcpcb *tp, struct tcphdr *th)
  * a new connection it will probe and learn the existing network conditions.
  */
 static void
-tcp_cubic_switch_cc(struct tcpcb *tp, uint16_t old_cc_index)
+tcp_cubic_switch_cc(struct tcpcb *tp)
 {
-#pragma unused(old_cc_index)
 	tcp_cubic_cwnd_init_or_reset(tp);
 
 	OSIncrementAtomic((volatile SInt32 *)&tcp_cc_cubic.num_sockets);

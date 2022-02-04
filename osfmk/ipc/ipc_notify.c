@@ -67,6 +67,7 @@
 #include <mach/message.h>
 #include <mach/mach_notify.h>
 #include <kern/misc_protos.h>
+#include <kern/ipc_kobject.h>
 #include <ipc/ipc_notify.h>
 #include <ipc/ipc_port.h>
 
@@ -128,6 +129,50 @@ ipc_notify_port_destroyed(
 }
 
 /*
+ *	Routine:	ipc_notify_no_senders_prepare
+ *	Purpose:
+ *		Prepare for consuming a no senders notification
+ *		when the port send right count just hit 0.
+ *	Conditions:
+ *		The port is locked.
+ *
+ *		For kobjects (ns_is_kobject), the `ns_notify` port has a reference.
+ *		For regular ports, the `ns_notify` has an outstanding send once right.
+ *	Returns:
+ *		A token that must be passed to ipc_notify_no_senders_emit.
+ */
+ipc_notify_nsenders_t
+ipc_notify_no_senders_prepare(
+	ipc_port_t              port)
+{
+	ipc_notify_nsenders_t req = { };
+
+	ip_mq_lock_held(port);
+
+	if (port->ip_kobject_nsrequest) {
+		assert(port->ip_nsrequest == IP_NULL);
+		port->ip_kobject_nsrequest = false;
+
+		if (ip_active(port)) {
+			req.ns_notify = port;
+			req.ns_mscount = port->ip_mscount;
+			req.ns_is_kobject = true;
+		} else {
+			/* silently consume the port-ref */
+			ip_release_live(port);
+		}
+	} else if (port->ip_nsrequest) {
+		req.ns_notify = port->ip_nsrequest;
+		req.ns_mscount = port->ip_mscount;
+		req.ns_is_kobject = false;
+
+		port->ip_nsrequest = IP_NULL;
+	}
+
+	return req;
+}
+
+/*
  *	Routine:	ipc_notify_no_senders
  *	Purpose:
  *		Send a no-senders notification.
@@ -139,26 +184,62 @@ ipc_notify_port_destroyed(
 void
 ipc_notify_no_senders(
 	ipc_port_t              port,
-	mach_port_mscount_t     mscount)
+	mach_port_mscount_t     mscount,
+	boolean_t               kobject)
 {
-	(void)mach_notify_no_senders(port, mscount);
-	/* send-once right consumed */
+	if (kobject) {
+		ipc_kobject_notify_no_senders(port, mscount);
+	} else {
+		(void)mach_notify_no_senders(port, mscount);
+		/* send-once right consumed */
+	}
 }
 
 /*
- *	Routine:	ipc_notify_send_once
+ *	Routine:	ipc_notify_no_senders_consume
  *	Purpose:
- *		Send a send-once notification.
+ *		Consume a no-senders notification.
  *	Conditions:
  *		Nothing locked.
  *		Consumes a ref/soright for port.
  */
 
 void
-ipc_notify_send_once(
+ipc_notify_no_senders_consume(
+	ipc_notify_nsenders_t   nsrequest)
+{
+	if (nsrequest.ns_notify) {
+		if (nsrequest.ns_is_kobject) {
+			ip_release(nsrequest.ns_notify);
+		} else {
+			ipc_port_release_sonce(nsrequest.ns_notify);
+		}
+	}
+}
+
+/*
+ *	Routine:	ipc_notify_send_once_and_unlock
+ *	Purpose:
+ *		Send a send-once notification.
+ *	Conditions:
+ *		Port is locked.
+ *		Consumes a ref/soright for port.
+ */
+
+void
+ipc_notify_send_once_and_unlock(
 	ipc_port_t      port)
 {
-	(void)mach_notify_send_once(port);
+	if (!ip_active(port)) {
+		ipc_port_release_sonce_and_unlock(port);
+	} else if (ip_in_space(port, ipc_space_kernel)) {
+		ipc_kobject_notify_send_once_and_unlock(port);
+	} else if (ip_full_kernel(port)) {
+		ipc_port_release_sonce_and_unlock(port);
+	} else {
+		ip_mq_unlock(port);
+		(void)mach_notify_send_once(port);
+	}
 	/* send-once right consumed */
 }
 

@@ -1,0 +1,6 @@
+module DarwinPrivate.net [system] {
+  module if_media {
+    header "net/if_media.h"
+    export *
+  }
+}

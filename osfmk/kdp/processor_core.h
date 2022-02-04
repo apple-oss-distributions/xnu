@@ -79,6 +79,18 @@ typedef kern_return_t (*core_save_summary_cb)(uint64_t core_segment_count, uint6
     uint64_t misc_bytes_count, void *context);
 
 /*
+ * The core_save_note_summary callback is provided with the call to the
+ * kcc_coredump_save_note_summary routine that was registered. The caller should
+ * provide the following
+ *
+ * core_note_count      -- the number of LC_NOTE segments that will be recorded
+ * core_note_byte_count -- overall length of all data to be included across all LC_NOTE segments
+ * context              -- Passed to kcc_coredump_save_note_summary routine
+ */
+typedef kern_return_t (*core_save_note_summary_cb)(uint64_t core_note_count, uint64_t core_note_byte_count,
+    void *context);
+
+/*
  * The core_save_segment_descriptions callback is provided with the call to the
  * kcc_coredump_save_segment_descriptions routine that was registered.
  *
@@ -111,6 +123,21 @@ typedef kern_return_t (*core_save_segment_descriptions_cb)(uint64_t seg_start, u
 typedef kern_return_t (*core_save_thread_state_cb)(void *thread_state, void *context);
 
 /*
+ * The core_save_note_descriptions_cb callback is provided with the call to the
+ * kcc_coredump_save_note_descriptions routine that was registered.
+ *
+ * It's expected that the caller should call this function for each LC_NOTE segment that
+ * they want to include in the corefile and provide the following for each:
+ *
+ * data_owner   -- owner name for this LC_NOTE
+ * length       -- length of the payload for this LC_NOTE
+ * context      -- Passed to kcc_coredump_save_note_descriptions routine
+ */
+typedef kern_return_t (*core_save_note_descriptions_cb)(const char *data_owner, uint64_t length, void *context);
+
+/*
+ * deprecated - please switch to core_save_sw_vers_detail_cb
+ *
  * The core_save_sw_vers callback is provided with the call to the
  * kcc_coredump_save_sw_vers routine that was registered.
  *
@@ -121,6 +148,19 @@ typedef kern_return_t (*core_save_thread_state_cb)(void *thread_state, void *con
  * context -- Passed to kcc_coredump_save_sw_vers routine
  */
 typedef kern_return_t (*core_save_sw_vers_cb)(void *sw_vers, uint64_t length, void *context);
+
+/*
+ * The core_save_sw_vers_detail_cb callback is provided with the call to the
+ * kcc_coredump_save_sw_vers_detail routine that was registered.
+ *
+ * The caller should call the callback with the following:
+ *
+ * address       -- base address of TEXT segment
+ * uuid          -- uuid of running binary
+ * log2_pagesize -- process page size in log base 2 (e.g. 4k pages are 12. 0 for unspecified)
+ * context       -- Passed to kcc_coredump_save_sw_vers_detail routine
+ */
+typedef kern_return_t (*core_save_sw_vers_detail_cb)(uint64_t address, uuid_t uuid, uint32_t log2_pagesize, void *context);
 
 /*
  * The core_save_segment_data callback is provided with the call to the
@@ -136,7 +176,21 @@ typedef kern_return_t (*core_save_sw_vers_cb)(void *sw_vers, uint64_t length, vo
 typedef kern_return_t (*core_save_segment_data_cb)(void *seg_data, uint64_t length, void *context);
 
 /*
- *  ---------------------- OPTIONAL -------------------------
+ * The core_save_note_data_cb callback is provided with the call to the
+ * kcc_coredump_save_note_data routine that was registered.
+ *
+ * It's expected that the caller should iterate all of the notes they want to include in
+ * the corefile and call the callback with the following for each:
+ *
+ * note_data    -- A pointer to the payload data for this LC_NOTE (mapped in the kernel's address space)
+ * length       -- length of the payload for this LC_NOTE
+ * context      -- Passed to kcc_coredump_save_note_data routine
+ */
+typedef kern_return_t (*core_save_note_data_cb)(void *note_data, uint64_t length, void *context);
+
+/*
+ * deprecated - please switch to core_save_note*
+ *
  * The core_save_misc_data callback is provided with the call to the
  * kcc_coredump_save_misc_data routine that was registered
  *
@@ -153,15 +207,21 @@ typedef struct {
 	kern_return_t (*kcc_coredump_get_summary)(void *refcon, core_save_summary_cb callback, void *context);
 	kern_return_t (*kcc_coredump_save_segment_descriptions)(void *refcon, core_save_segment_descriptions_cb callback, void *context);
 	kern_return_t (*kcc_coredump_save_thread_state)(void *refcon, void *buf, core_save_thread_state_cb callback, void *context);
-	kern_return_t (*kcc_coredump_save_sw_vers)(void *refcon, core_save_sw_vers_cb callback, void *context);
+	kern_return_t (*kcc_coredump_save_sw_vers)(void *refcon, core_save_sw_vers_cb callback, void *context) __deprecated_msg("please switch to kcc_coredump_save_sw_vers_detail");
 	kern_return_t (*kcc_coredump_save_segment_data)(void *refcon, core_save_segment_data_cb callback, void *context);
-	kern_return_t (*kcc_coredump_save_misc_data)(void *refcon, core_save_misc_data_cb callback, void *context); /* OPTIONAL */
+	kern_return_t (*kcc_coredump_save_misc_data)(void *refcon, core_save_misc_data_cb callback, void *context) __deprecated_msg("please switch to kcc_coredump_save_note_*");
 	/* End of version 1 */
+	kern_return_t (*kcc_coredump_save_note_summary)(void *refcon, core_save_note_summary_cb callback, void *context);
+	kern_return_t (*kcc_coredump_save_note_descriptions)(void *refcon, core_save_note_descriptions_cb callback, void *context);
+	kern_return_t (*kcc_coredump_save_note_data)(void *refcon, core_save_note_data_cb callback, void *context);
+	kern_return_t (*kcc_coredump_save_sw_vers_detail)(void *refcon, core_save_sw_vers_detail_cb callback, void *context);
+	/* End of version 2 */
 } kern_coredump_callback_config;
 
-#define KERN_COREDUMP_MAX_CORES MACH_CORE_FILEHEADER_MAXFILES
+#define KERN_COREDUMP_MAX_CORES 64
 #define KERN_COREDUMP_MIN_CONFIG_VERSION 1
-#define KERN_COREDUMP_CONFIG_VERSION 1
+#define KERN_COREDUMP_MIN_CONFIG_NOTES 2
+#define KERN_COREDUMP_CONFIG_VERSION 2
 #define KERN_COREDUMP_VERSIONSTRINGMAXSIZE 256
 
 /*
@@ -177,9 +237,6 @@ kern_return_t kern_register_coredump_helper(int kern_coredump_config_vers, const
 kern_return_t kern_register_xnu_coredump_helper(kern_coredump_callback_config *kc_callbacks);
 
 kern_return_t kern_do_coredump(void *core_outvars, boolean_t kernel_only, uint64_t first_file_offset, uint64_t *last_file_offset);
-
-#define KERN_COREDUMP_HEADERSIZE 4096
-static_assert((sizeof(struct mach_core_fileheader) <= KERN_COREDUMP_HEADERSIZE), "struct mach_core_fileheader larger than KERN_COREDUMP_HEADERSIZE (space that will be allocated for it in the corefile)");
 
 #define KERN_COREDUMP_MAXDEBUGLOGSIZE 16384
 #define KERN_COREDUMP_BEGIN_FILEBYTES_ALIGN 4096

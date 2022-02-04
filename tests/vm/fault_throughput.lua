@@ -40,6 +40,11 @@ local benchmark = benchrun.new {
             description = 'Which benchmark variant to run (sparate-objects or share-objects)',
             default = 'separate-objects'
         }
+        parser:option{
+            name = '--first-cpu',
+            description = 'Enable thread pinning starting from this CPU ID. "enable_skstb=1" boot-arg required',
+            default = -1
+        }
     end
 }
 
@@ -50,6 +55,8 @@ assert(benchmark.opt.variant == "separate-objects" or
 local ncpus, err = sysctl('hw.logicalcpu_max')
 assert(ncpus > 0, 'invalid number of logical cpus')
 local cpu_workers = tonumber(benchmark.opt.cpu_workers) or ncpus
+
+assert(tonumber(benchmark.opt.first_cpu) < ncpus, "invalid first CPU")
 
 local unit = perfdata.unit.custom('pages/sec')
 local tests = {}
@@ -84,6 +91,9 @@ end
 for _, test in ipairs(tests) do
     local args = {test.path, "-v", benchmark.opt.variant, benchmark.opt.duration, test.num_cores,
                      echo = true}
+    if benchmark.opt.first_cpu ~= -1 then
+        args[#args + 1] = benchmark.opt.first_cpu
+    end
     for out in benchmark:run(args) do
         local result = out:match("-----Results-----\n(.*)")
         benchmark:assert(result, "Unable to find result data in output")

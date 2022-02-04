@@ -1,2 +1,8 @@
-san/kasan-arm64.c       optional config_kasan
-san/kasan-test-arm64.s  optional config_kasan
+OPTIONS/CONFIG_UBSAN_MINIMAL   optional config_ubsan_minimal
+
+san/memory/kasan-arm64.c       optional config_kasan
+san/memory/kasan-test-arm64.s  optional config_kasan
+
+san/memory/kasan-classic.c     optional config_kasan
+
+san/memory/ubsan_minimal.c     optional config_ubsan_minimal

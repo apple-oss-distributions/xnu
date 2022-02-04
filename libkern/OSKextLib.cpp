@@ -417,7 +417,7 @@ kext_get_vm_map(kmod_info_t *info)
 void
 kext_weak_symbol_referenced(void)
 {
-	panic("A kext referenced an unresolved weak symbol\n");
+	panic("A kext referenced an unresolved weak symbol");
 }
 
 const void * const gOSKextUnresolved = (const void *)&kext_weak_symbol_referenced;

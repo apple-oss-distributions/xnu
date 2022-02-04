@@ -27,6 +27,8 @@
 #ifndef _MACH_I386_SDT_ISA_H
 #define _MACH_I386_SDT_ISA_H
 
+#if defined (__i386__) || defined (__x86_64__)
+
 /*
  * Only define when testing.  This makes the calls into actual calls to
  * test functions.
@@ -466,5 +468,7 @@
 	);
 
 #endif // __i386__
+
+#endif /* defined (__i386__) || defined (__x86_64__) */
 
 #endif  /* _MACH_I386_SDT_ISA_H */

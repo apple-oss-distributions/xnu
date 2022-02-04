@@ -11,8 +11,8 @@ fbt_arm.o_CFLAGS_ADD += $(CFLAGS_NOLTO_FLAG)
 # DO NOT ADD MORE HERE.
 #
 # -Wno-shorten-64-to-32
-kern_mman.o_CFLAGS_ADD += -Wno-shorten-64-to-32
-vm_compressor_backing_file.o_CFLAGS_ADD += -Wno-shorten-64-to-32
+kern_mman.o_CWARNFLAGS_ADD += -Wno-shorten-64-to-32
+vm_compressor_backing_file.o_CWARNFLAGS_ADD += -Wno-shorten-64-to-32
 ######################################################################
 #END    Machine dependent Makefile fragment for arm
 ######################################################################

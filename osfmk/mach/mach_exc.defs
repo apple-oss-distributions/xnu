@@ -130,4 +130,24 @@ routine		mach_exception_raise_state_identity(
 #endif
 			);
 
+#if MACH_EXC_SERVER_TASKIDTOKEN || ((KERNEL_USER || KERNEL_SERVER) && !SANDBOX_COMPILER)
+routine		mach_exception_raise_identity_protected(
+			exception_port	: mach_port_t;
+			thread_id	: uint64_t;
+			task_id_token_t	: mach_port_t;
+			exception	: exception_type_t;
+			code		: mach_exception_data_t
+#if MACH_EXC_SERVER_SECTOKEN
+ ;
+ ServerSecToken stoken	: security_token_t
+#endif
+#if MACH_EXC_SERVER_AUDITTOKEN
+ ;
+ ServerAuditToken atoken: audit_token_t
+#endif
+			);
+#else
+	skip;
+#endif /* MACH_EXC_SERVER_TASKIDTOKEN */
+
 /* vim: set ft=c : */

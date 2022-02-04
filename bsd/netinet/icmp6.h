@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2019 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2020 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -94,6 +94,7 @@
 #ifndef _NETINET_ICMP6_H_
 #define _NETINET_ICMP6_H_
 #ifndef DRIVERKIT
+#include <netinet/in.h>
 #include <sys/appleapiopts.h>
 #include <sys/types.h>
 #else
@@ -340,6 +341,7 @@ struct nd_opt_hdr {             /* Neighbor discovery option header */
 #define ND_OPT_RDNSS                    25      /* RFC 6106 */
 #define ND_OPT_DNSSL                    31      /* RFC 6106 */
 #define ND_OPT_CAPTIVE_PORTAL           37      /* RFC 7710 */
+#define ND_OPT_PREF64                   38      /* RFC 8781 */
 
 struct nd_opt_prefix_info {     /* prefix information */
 	u_int8_t        nd_opt_pi_type;
@@ -405,6 +407,26 @@ struct nd_opt_dnssl {   /* domain name search list */
 	u_int32_t           nd_opt_dnssl_lifetime;
 	u_int8_t            nd_opt_dnssl_domains[8];
 } __attribute__((__packed__));
+
+/*
+ * PREF64 (NAT64 prefix) RFC 8781
+ */
+struct nd_opt_pref64 {   /* NAT64 prefix */
+	u_int8_t            nd_opt_pref64_type;
+	u_int8_t            nd_opt_pref64_len;
+	u_int16_t           nd_opt_pref64_scaled_lifetime_plc;
+	u_int32_t           nd_opt_pref64_prefix[3];
+} __attribute__((__packed__));
+
+#define ND_OPT_PREF64_SCALED_LIFETIME_MASK      0xfff8
+#define ND_OPT_PREF64_PLC_MASK                  0x0007
+#define ND_OPT_PREF64_LIFETIME_MAX              65528
+#define ND_OPT_PREF64_PLC_32                    5
+#define ND_OPT_PREF64_PLC_40                    4
+#define ND_OPT_PREF64_PLC_48                    3
+#define ND_OPT_PREF64_PLC_56                    2
+#define ND_OPT_PREF64_PLC_64                    1
+#define ND_OPT_PREF64_PLC_96                    0
 
 /*
  * icmp6 namelookup
@@ -694,7 +716,8 @@ struct icmp6stat {
 #define ICMPV6CTL_ND6_MAXQLEN           24
 #define ICMPV6CTL_ND6_ACCEPT_6TO4       25
 #define ICMPV6CTL_ND6_OPTIMISTIC_DAD    26      /* RFC 4429 */
-#define ICMPV6CTL_MAXID                 27
+#define ICMPV6CTL_ERRPPSLIMIT_RANDOM_INCR 27
+#define ICMPV6CTL_MAXID                 28
 
 #ifdef BSD_KERNEL_PRIVATE
 #define ICMPV6CTL_NAMES { \
@@ -740,7 +763,6 @@ void    icmp6_error_flag(struct mbuf *, int, int, int, int);
 #define ICMP6_ERROR_RST_MRCVIF  0x1
 
 void    icmp6_error(struct mbuf *, int, int, int);
-void    icmp6_error2(struct mbuf *, int, int, int, struct ifnet *);
 int     icmp6_input(struct mbuf **, int *, int);
 void    icmp6_reflect(struct mbuf *, size_t);
 void    icmp6_prepare(struct mbuf *);

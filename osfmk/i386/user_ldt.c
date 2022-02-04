@@ -85,6 +85,9 @@ static int i386_set_ldt_impl(uint32_t *retval, uint64_t start_sel, uint64_t desc
 static int i386_get_ldt_impl(uint32_t *retval, uint64_t start_sel, uint64_t descs,
     uint64_t num_sels);
 
+#define USER_LDT_SIZE(descriptors) \
+	(sizeof(struct user_ldt) + (descriptors * sizeof(struct real_descriptor)))
+
 /*
  * Add the descriptors to the LDT, starting with
  * the descriptor for 'first_selector'.
@@ -185,7 +188,7 @@ i386_set_ldt_impl(
 
 		ldt_count = end_sel - begin_sel;
 		/* XXX allocation under task lock */
-		new_ldt = (user_ldt_t)kalloc(sizeof(struct user_ldt) + (ldt_count * sizeof(struct real_descriptor)));
+		new_ldt = (user_ldt_t)kalloc_data(USER_LDT_SIZE(ldt_count), Z_WAITOK);
 		if (new_ldt == NULL) {
 			task_unlock(task);
 			return ENOMEM;
@@ -357,7 +360,7 @@ void
 user_ldt_free(
 	user_ldt_t      user_ldt)
 {
-	kfree(user_ldt, sizeof(struct user_ldt) + (user_ldt->count * sizeof(struct real_descriptor)));
+	kfree_data(user_ldt, USER_LDT_SIZE(user_ldt->count));
 }
 
 user_ldt_t
@@ -365,8 +368,8 @@ user_ldt_copy(
 	user_ldt_t      user_ldt)
 {
 	if (user_ldt != NULL) {
-		size_t      size = sizeof(struct user_ldt) + (user_ldt->count * sizeof(struct real_descriptor));
-		user_ldt_t  new_ldt = (user_ldt_t)kalloc(size);
+		size_t      size = USER_LDT_SIZE(user_ldt->count);
+		user_ldt_t  new_ldt = (user_ldt_t)kalloc_data(size, Z_WAITOK);
 		if (new_ldt != NULL) {
 			bcopy(user_ldt, new_ldt, size);
 		}

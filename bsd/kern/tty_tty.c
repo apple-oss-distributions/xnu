@@ -90,6 +90,7 @@ cttyopen(dev_t dev, int flag, __unused int mode, proc_t p)
 	int error = 0;
 	int cttyflag, doclose = 0;
 	struct session *sessp;
+	struct pgrp *pg;
 
 	if (ttyvp == NULL) {
 		return ENXIO;
@@ -98,10 +99,8 @@ cttyopen(dev_t dev, int flag, __unused int mode, proc_t p)
 	context.vc_thread = current_thread();
 	context.vc_ucred = kauth_cred_proc_ref(p);
 
-	sessp = proc_session(p);
-	session_lock(sessp);
-	cttyflag = sessp->s_flags & S_CTTYREF;
-	session_unlock(sessp);
+	pg = proc_pgrp(p, &sessp);
+	cttyflag = os_ref_get_raw_mask(&sessp->s_refcount) & S_CTTYREF;
 
 	/*
 	 * A little hack--this device, used by many processes,
@@ -126,13 +125,9 @@ cttyopen(dev_t dev, int flag, __unused int mode, proc_t p)
 		 * and was able to set the flag, now perform a close, else
 		 * set the flag.
 		 */
-		session_lock(sessp);
-		if (cttyflag == (sessp->s_flags & S_CTTYREF)) {
-			sessp->s_flags |= S_CTTYREF;
-		} else {
+		if (os_atomic_or_orig(&sessp->s_refcount, S_CTTYREF, relaxed) & S_CTTYREF) {
 			doclose = 1;
 		}
-		session_unlock(sessp);
 
 		/*
 		 * We have to take a reference here to make sure a close
@@ -152,9 +147,9 @@ cttyopen(dev_t dev, int flag, __unused int mode, proc_t p)
 			error = vnode_ref(ttyvp);
 		}
 	}
-out:
-	session_rele(sessp);
 
+out:
+	pgrp_rele(pg);
 	vnode_put(ttyvp);
 	kauth_cred_unref(&context.vc_ucred);
 
@@ -206,7 +201,6 @@ cttyioctl(__unused dev_t dev, u_long cmd, caddr_t addr, int flag, proc_t p)
 {
 	vnode_t ttyvp = cttyvp(current_proc());
 	struct vfs_context context;
-	struct session *sessp;
 	int error = 0;
 
 	if (ttyvp == NULL) {
@@ -217,21 +211,16 @@ cttyioctl(__unused dev_t dev, u_long cmd, caddr_t addr, int flag, proc_t p)
 		goto out;
 	}
 	if (cmd == TIOCNOTTY) {
-		sessp = proc_session(p);
-		if (!SESS_LEADER(p, sessp)) {
-			OSBitAndAtomic(~((uint32_t)P_CONTROLT), &p->p_flag);
-			if (sessp != SESSION_NULL) {
-				session_rele(sessp);
-			}
+		struct pgrp *pg = proc_pgrp(p, NULL);
+
+		if (!SESS_LEADER(p, pg->pg_session)) {
+			os_atomic_andnot(&p->p_flag, P_CONTROLT, relaxed);
 			error = 0;
-			goto out;
 		} else {
-			if (sessp != SESSION_NULL) {
-				session_rele(sessp);
-			}
 			error = EINVAL;
-			goto out;
 		}
+		pgrp_rele(pg);
+		goto out;
 	}
 	context.vc_thread = current_thread();
 	context.vc_ucred = NOCRED;
@@ -264,18 +253,19 @@ cttyselect(__unused dev_t dev, int flag, void* wql, __unused proc_t p)
 static vnode_t
 cttyvp(proc_t p)
 {
+	struct pgrp *pg;
+	struct session *sessp;
 	vnode_t vp;
 	int vid;
-	struct session *sessp;
 
-	sessp = proc_session(p);
+	pg = proc_pgrp(p, &sessp);
 
 	session_lock(sessp);
 	vp = (p->p_flag & P_CONTROLT ? sessp->s_ttyvp : NULLVP);
 	vid = sessp->s_ttyvid;
 	session_unlock(sessp);
 
-	session_rele(sessp);
+	pgrp_rele(pg);
 
 	if (vp != NULLVP) {
 		/* cannot get an IO reference, return NULLVP */

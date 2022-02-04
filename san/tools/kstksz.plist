@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+	<array>
+		<dict>
+			<key>Name</key>
+			<string>Stack Size</string>
+			<key>Children</key>
+			<array>
+				<dict>
+					<key>Name</key>
+					<string>Threshold</string>
+					<key>Type</key>
+					<string>Interval</string>
+					<key>KTraceCodeBegin</key>
+					<string>0x01ad0000</string>
+					<key>KTraceCodeEnd</key>
+					<string>0x01ad0004</string>
+					<key>EventsMatchedBy</key>
+					<string>Thread</string>
+					<key>ArgNamesBegin</key>
+					<dict>
+						<key>Arg1</key>
+						<string>Stack Size</string>
+					</dict>
+					<key>ArgValueTypesBegin</key>
+					<dict>
+						<key>Arg1</key>
+						<string>UInt32</string>
+					</dict>
+					<key>ArgNamesEnd</key>
+					<dict>
+						<key>Arg1</key>
+						<string>Stack Size</string>
+					</dict>
+					<key>ArgValueTypesEnd</key>
+					<dict>
+						<key>Arg1</key>
+						<string>UInt32</string>
+					</dict>
+				</dict>
+			</array>
+		</dict>
+		<dict>
+			<key>Name</key>
+			<string>Stack Delta</string>
+			<key>Children</key>
+			<array>
+				<dict>
+					<key>Name</key>
+					<string>Delta</string>
+					<key>Type</key>
+					<string>Impulse</string>
+					<key>KTraceCode</key>
+					<string>0x01ad0008</string>
+					<key>EventsMatchedBy</key>
+					<string>Thread</string>
+					<key>ArgNames</key>
+					<dict>
+						<key>Arg1</key>
+						<string>Delta</string>
+					</dict>
+					<key>ArgValueTypes</key>
+					<dict>
+						<key>Arg1</key>
+						<string>UInt32</string>
+					</dict>
+				</dict>
+			</array>
+		</dict>
+	</array>
+</plist>

@@ -188,30 +188,35 @@ __BEGIN_DECLS
 #include <kern/kalloc.h>
 __END_DECLS
 
-#define malloc(size) malloc_impl(size)
+// Omit from static analysis.
+#ifndef __clang_analyzer__
+
+#define malloc(size)         malloc_impl(size)
+#define malloc_type(type)    kalloc_type(type, Z_WAITOK)
 static inline void *
 malloc_impl(size_t size)
 {
 	if (size == 0) {
 		return NULL;
 	}
-	return kheap_alloc_tag_bt(KHEAP_DEFAULT, size,
+	return kheap_alloc_tag_bt(KHEAP_DATA_BUFFERS, size,
 	           (zalloc_flags_t) (Z_WAITOK | Z_ZERO),
 	           VM_KERN_MEMORY_LIBKERN);
 }
 
-#define free(addr) free_impl(addr)
+#define free(addr)             free_impl(addr)
+#define free_type(type, addr)  kfree_type(type, addr)
 static inline void
 free_impl(void *addr)
 {
-	kheap_free_addr(KHEAP_DEFAULT, addr);
+	kheap_free_addr(KHEAP_DATA_BUFFERS, addr);
 }
 static inline void
 safe_free(void *addr, size_t size)
 {
 	if (addr) {
 		assert(size != 0);
-		kheap_free(KHEAP_DEFAULT, addr, size);
+		kheap_free(KHEAP_DATA_BUFFERS, addr, size);
 	}
 }
 
@@ -269,7 +274,7 @@ typedef int YYSTYPE;
 
 
 /* Line 216 of yacc.c.  */
-#line 224 "OSUnserialize.tab.c"
+#line 229 "OSUnserialize.tab.c"
 
 #ifdef short
 # undef short
@@ -557,11 +562,11 @@ static const yytype_int8 yyrhs[] =
 };
 
 /* YYRLINE[YYN] -- source line where rule number YYN was defined.  */
-static const yytype_uint8 yyrline[] =
+static const yytype_uint16 yyrline[] =
 {
-	0, 163, 163, 164, 165, 168, 169, 170, 171, 172,
-	173, 174, 175, 184, 192, 193, 196, 197, 200, 210,
-	211, 214, 215, 218, 223, 234, 242, 247, 252
+	0, 168, 168, 169, 170, 173, 174, 175, 176, 177,
+	178, 179, 180, 189, 197, 198, 201, 202, 205, 215,
+	216, 219, 220, 223, 228, 239, 247, 252, 257
 };
 #endif
 
@@ -778,7 +783,7 @@ while (YYID (0))
 #if YYDEBUG
 
 # ifndef YYFPRINTF
-#  include <stdio.h> /* INFRINGES ON USER NAME SPACE */
+#  include <stddef.h> /* INFRINGES ON USER NAME SPACE */
 #  define YYFPRINTF fprintf
 # endif
 
@@ -1500,57 +1505,57 @@ yyreduce:
 	YY_REDUCE_PRINT(yyn);
 	switch (yyn) {
 	case 2:
-#line 163 "OSUnserialize.y"
+#line 168 "OSUnserialize.y"
 		{ parsedObject = (OSObject *)NULL; YYACCEPT;;}
 		break;
 
 	case 3:
-#line 164 "OSUnserialize.y"
+#line 169 "OSUnserialize.y"
 		{ parsedObject = (OSObject *)(yyvsp[(1) - (1)]); YYACCEPT;;}
 		break;
 
 	case 4:
-#line 165 "OSUnserialize.y"
+#line 170 "OSUnserialize.y"
 		{ yyerror("syntax error"); YYERROR;;}
 		break;
 
 	case 5:
-#line 168 "OSUnserialize.y"
+#line 173 "OSUnserialize.y"
 		{ (yyval) = (object_t *)buildOSDictionary((yyvsp[(1) - (1)]));;}
 		break;
 
 	case 6:
-#line 169 "OSUnserialize.y"
+#line 174 "OSUnserialize.y"
 		{ (yyval) = (object_t *)buildOSArray((yyvsp[(1) - (1)]));;}
 		break;
 
 	case 7:
-#line 170 "OSUnserialize.y"
+#line 175 "OSUnserialize.y"
 		{ (yyval) = (object_t *)buildOSSet((yyvsp[(1) - (1)]));;}
 		break;
 
 	case 8:
-#line 171 "OSUnserialize.y"
+#line 176 "OSUnserialize.y"
 		{ (yyval) = (object_t *)buildOSString((yyvsp[(1) - (1)]));;}
 		break;
 
 	case 9:
-#line 172 "OSUnserialize.y"
+#line 177 "OSUnserialize.y"
 		{ (yyval) = (object_t *)buildOSData((yyvsp[(1) - (1)]));;}
 		break;
 
 	case 10:
-#line 173 "OSUnserialize.y"
+#line 178 "OSUnserialize.y"
 		{ (yyval) = (object_t *)buildOSOffset((yyvsp[(1) - (1)]));;}
 		break;
 
 	case 11:
-#line 174 "OSUnserialize.y"
+#line 179 "OSUnserialize.y"
 		{ (yyval) = (object_t *)buildOSBoolean((yyvsp[(1) - (1)]));;}
 		break;
 
 	case 12:
-#line 175 "OSUnserialize.y"
+#line 180 "OSUnserialize.y"
 		{ (yyval) = (object_t *)retrieveObject((yyvsp[(2) - (2)])->u.offset);
 		  if ((yyval)) {
 			  ((OSObject *)(yyval))->retain();
@@ -1563,7 +1568,7 @@ yyreduce:
 		break;
 
 	case 13:
-#line 184 "OSUnserialize.y"
+#line 189 "OSUnserialize.y"
 		{ (yyval) = (yyvsp[(1) - (3)]);
 		  rememberObject((yyvsp[(3) - (3)])->u.offset, (yyvsp[(1) - (3)]));
 		  freeObject((yyvsp[(3) - (3)]));
@@ -1571,22 +1576,22 @@ yyreduce:
 		break;
 
 	case 14:
-#line 192 "OSUnserialize.y"
+#line 197 "OSUnserialize.y"
 		{ (yyval) = NULL;;}
 		break;
 
 	case 15:
-#line 193 "OSUnserialize.y"
+#line 198 "OSUnserialize.y"
 		{ (yyval) = (yyvsp[(2) - (3)]);;}
 		break;
 
 	case 17:
-#line 197 "OSUnserialize.y"
+#line 202 "OSUnserialize.y"
 		{ (yyvsp[(2) - (2)])->next = (yyvsp[(1) - (2)]); (yyvsp[(1) - (2)])->prev = (yyvsp[(2) - (2)]); (yyval) = (yyvsp[(2) - (2)]);;}
 		break;
 
 	case 18:
-#line 200 "OSUnserialize.y"
+#line 205 "OSUnserialize.y"
 		{ (yyval) = newObject();
 		  (yyval)->next = NULL;
 		  (yyval)->prev = NULL;
@@ -1596,27 +1601,27 @@ yyreduce:
 		break;
 
 	case 19:
-#line 210 "OSUnserialize.y"
+#line 215 "OSUnserialize.y"
 		{ (yyval) = NULL;;}
 		break;
 
 	case 20:
-#line 211 "OSUnserialize.y"
+#line 216 "OSUnserialize.y"
 		{ (yyval) = (yyvsp[(2) - (3)]);;}
 		break;
 
 	case 21:
-#line 214 "OSUnserialize.y"
+#line 219 "OSUnserialize.y"
 		{ (yyval) = NULL;;}
 		break;
 
 	case 22:
-#line 215 "OSUnserialize.y"
+#line 220 "OSUnserialize.y"
 		{ (yyval) = (yyvsp[(2) - (3)]);;}
 		break;
 
 	case 23:
-#line 218 "OSUnserialize.y"
+#line 223 "OSUnserialize.y"
 		{ (yyval) = newObject();
 		  (yyval)->object = (yyvsp[(1) - (1)]);
 		  (yyval)->next = NULL;
@@ -1625,7 +1630,7 @@ yyreduce:
 		break;
 
 	case 24:
-#line 223 "OSUnserialize.y"
+#line 228 "OSUnserialize.y"
 		{ oo = newObject();
 		  oo->object = (yyvsp[(3) - (3)]);
 		  oo->next = (yyvsp[(1) - (3)]);
@@ -1636,7 +1641,7 @@ yyreduce:
 		break;
 
 	case 25:
-#line 234 "OSUnserialize.y"
+#line 239 "OSUnserialize.y"
 		{ (yyval) = (yyvsp[(1) - (3)]);
 		  (yyval)->size = (yyvsp[(3) - (3)])->u.offset;
 		  freeObject((yyvsp[(3) - (3)]));
@@ -1645,7 +1650,7 @@ yyreduce:
 
 
 /* Line 1267 of yacc.c.  */
-#line 1597 "OSUnserialize.tab.c"
+#line 1602 "OSUnserialize.tab.c"
 	default: break;
 	}
 	YY_SYMBOL_PRINT("-> $$ =", yyr1[yyn], &yyval, &yyloc);
@@ -1857,7 +1862,7 @@ yyreturn:
 }
 
 
-#line 255 "OSUnserialize.y"
+#line 260 "OSUnserialize.y"
 
 
 static int              lineNumber = 0;
@@ -2150,7 +2155,7 @@ newObject()
 #if DEBUG
 	debugUnserializeAllocCount++;
 #endif
-	return (object_t *)malloc(sizeof(object_t));
+	return malloc_type(object_t);
 }
 
 void
@@ -2159,7 +2164,7 @@ freeObject(object_t *o)
 #if DEBUG
 	debugUnserializeAllocCount--;
 #endif
-	safe_free(o, sizeof(object_t));
+	free_type(object_t, o);
 }
 
 static OSDictionary *tags;
@@ -2344,6 +2349,8 @@ OSUnserialize(const char *buffer, OSString **errorString)
 
 	return object;
 }
+
+#endif // not __clang_analyzer__
 
 
 //

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2010-2020 Apple Inc. All rights reserved.
+ * Copyright (c) 2010-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -188,15 +188,18 @@ struct in_multi_dbg {
 	TAILQ_ENTRY(in_multi_dbg) inm_trash_link;
 };
 
+static LCK_ATTR_DECLARE(in_multihead_lock_attr, 0, 0);
+static LCK_GRP_DECLARE(in_multihead_lock_grp, "in_multihead");
+
 /* List of trash in_multi entries protected by inm_trash_lock */
 static TAILQ_HEAD(, in_multi_dbg) inm_trash_head;
-static decl_lck_mtx_data(, inm_trash_lock);
-
+static LCK_MTX_DECLARE_ATTR(inm_trash_lock, &in_multihead_lock_grp,
+    &in_multihead_lock_attr);
 
 #if DEBUG
-static unsigned int inm_debug = 1;              /* debugging (enabled) */
+static TUNABLE(bool, inm_debug, "ifa_debug", true); /* debugging (enabled) */
 #else
-static unsigned int inm_debug;                  /* debugging (disabled) */
+static TUNABLE(bool, inm_debug, "ifa_debug", false); /* debugging (disabled) */
 #endif /* !DEBUG */
 #define INM_ZONE_NAME           "in_multi"      /* zone name */
 static struct zone *inm_zone;                   /* zone for in_multi */
@@ -206,12 +209,9 @@ static ZONE_DECLARE(ipms_zone, "ip_msource", sizeof(struct ip_msource),
 static ZONE_DECLARE(inms_zone, "in_msource", sizeof(struct in_msource),
     ZC_ZFREE_CLEARMEM);
 
-/* Lock group and attribute for in_multihead_lock lock */
-static lck_attr_t       *in_multihead_lock_attr;
-static lck_grp_t        *in_multihead_lock_grp;
-static lck_grp_attr_t   *in_multihead_lock_grp_attr;
+static LCK_RW_DECLARE_ATTR(in_multihead_lock, &in_multihead_lock_grp,
+    &in_multihead_lock_attr);
 
-static decl_lck_rw_data(, in_multihead_lock);
 struct in_multihead in_multihead;
 
 static struct in_multi *in_multi_alloc(zalloc_flags_t);
@@ -1743,7 +1743,9 @@ inp_get_source_filters(struct inpcb *inp, struct sockopt *sopt)
 	imo = inp->inp_moptions;
 	VERIFY(imo != NULL);
 
-	if (IS_64BIT_PROCESS(current_proc())) {
+	int is_64bit_proc = IS_64BIT_PROCESS(current_proc());
+
+	if (is_64bit_proc) {
 		error = sooptcopyin(sopt, &msfr64,
 		    sizeof(struct __msfilterreq64),
 		    sizeof(struct __msfilterreq64));
@@ -1815,7 +1817,7 @@ inp_get_source_filters(struct inpcb *inp, struct sockopt *sopt)
 	 * buffer really needs to be.
 	 */
 
-	if (IS_64BIT_PROCESS(current_proc())) {
+	if (is_64bit_proc) {
 		tmp_ptr = CAST_USER_ADDR_T(msfr64.msfr_srcs);
 	} else {
 		tmp_ptr = CAST_USER_ADDR_T(msfr32.msfr_srcs);
@@ -1823,8 +1825,8 @@ inp_get_source_filters(struct inpcb *inp, struct sockopt *sopt)
 
 	tss = NULL;
 	if (tmp_ptr != USER_ADDR_NULL && msfr.msfr_nsrcs > 0) {
-		tss = _MALLOC((size_t) msfr.msfr_nsrcs * sizeof(*tss),
-		    M_TEMP, M_WAITOK | M_ZERO);
+		tss = kalloc_data((size_t)msfr.msfr_nsrcs * sizeof(*tss),
+		    Z_WAITOK | Z_ZERO);
 		if (tss == NULL) {
 			IMO_UNLOCK(imo);
 			return ENOBUFS;
@@ -1860,14 +1862,14 @@ inp_get_source_filters(struct inpcb *inp, struct sockopt *sopt)
 
 	if (tss != NULL) {
 		error = copyout(tss, CAST_USER_ADDR_T(tmp_ptr), ncsrcs * sizeof(*tss));
-		FREE(tss, M_TEMP);
+		kfree_data(tss, (size_t)msfr.msfr_nsrcs * sizeof(*tss));
 		if (error) {
 			return error;
 		}
 	}
 
 	msfr.msfr_nsrcs = ncsrcs;
-	if (IS_64BIT_PROCESS(current_proc())) {
+	if (is_64bit_proc) {
 		msfr64.msfr_ifindex = msfr.msfr_ifindex;
 		msfr64.msfr_fmode   = msfr.msfr_fmode;
 		msfr64.msfr_nsrcs   = msfr.msfr_nsrcs;
@@ -2060,7 +2062,7 @@ inp_lookup_mcast_ifp(const struct inpcb *inp,
 			struct ifnet *mifp;
 
 			mifp = NULL;
-			lck_rw_lock_shared(in_ifaddr_rwlock);
+			lck_rw_lock_shared(&in_ifaddr_rwlock);
 			TAILQ_FOREACH(ia, &in_ifaddrhead, ia_link) {
 				IFA_LOCK_SPIN(&ia->ia_ifa);
 				mifp = ia->ia_ifp;
@@ -2071,7 +2073,7 @@ inp_lookup_mcast_ifp(const struct inpcb *inp,
 					break;
 				}
 			}
-			lck_rw_done(in_ifaddr_rwlock);
+			lck_rw_done(&in_ifaddr_rwlock);
 		}
 		ROUTE_RELEASE(&ro);
 	}
@@ -2793,7 +2795,9 @@ inp_set_source_filters(struct inpcb *inp, struct sockopt *sopt)
 
 	bzero(&itp, sizeof(itp));
 
-	if (IS_64BIT_PROCESS(current_proc())) {
+	int is_64bit_proc = IS_64BIT_PROCESS(current_proc());
+
+	if (is_64bit_proc) {
 		error = sooptcopyin(sopt, &msfr64,
 		    sizeof(struct __msfilterreq64),
 		    sizeof(struct __msfilterreq64));
@@ -2886,7 +2890,7 @@ inp_set_source_filters(struct inpcb *inp, struct sockopt *sopt)
 		struct sockaddr_storage *kss, *pkss;
 		int                      i;
 
-		if (IS_64BIT_PROCESS(current_proc())) {
+		if (is_64bit_proc) {
 			tmp_ptr = msfr64.msfr_srcs;
 		} else {
 			tmp_ptr = CAST_USER_ADDR_T(msfr32.msfr_srcs);
@@ -2894,8 +2898,7 @@ inp_set_source_filters(struct inpcb *inp, struct sockopt *sopt)
 
 		IGMP_PRINTF(("%s: loading %lu source list entries\n",
 		    __func__, (unsigned long)msfr.msfr_nsrcs));
-		kss = _MALLOC((size_t) msfr.msfr_nsrcs * sizeof(*kss),
-		    M_TEMP, M_WAITOK);
+		kss = kalloc_data((size_t)msfr.msfr_nsrcs * sizeof(*kss), Z_WAITOK);
 		if (kss == NULL) {
 			error = ENOMEM;
 			goto out_imo_locked;
@@ -2903,7 +2906,7 @@ inp_set_source_filters(struct inpcb *inp, struct sockopt *sopt)
 		error = copyin(CAST_USER_ADDR_T(tmp_ptr), kss,
 		    (size_t) msfr.msfr_nsrcs * sizeof(*kss));
 		if (error) {
-			FREE(kss, M_TEMP);
+			kfree_data(kss, (size_t)msfr.msfr_nsrcs * sizeof(*kss));
 			goto out_imo_locked;
 		}
 
@@ -2943,7 +2946,7 @@ inp_set_source_filters(struct inpcb *inp, struct sockopt *sopt)
 			}
 			lims->imsl_st[1] = imf->imf_st[1];
 		}
-		FREE(kss, M_TEMP);
+		kfree_data(kss, (size_t)msfr.msfr_nsrcs * sizeof(*kss));
 	}
 
 	if (error) {
@@ -3341,18 +3344,6 @@ ip_multicast_if(struct in_addr *a, unsigned int *ifindexp)
 void
 in_multi_init(void)
 {
-	PE_parse_boot_argn("ifa_debug", &inm_debug, sizeof(inm_debug));
-
-	/* Setup lock group and attribute for in_multihead */
-	in_multihead_lock_grp_attr = lck_grp_attr_alloc_init();
-	in_multihead_lock_grp = lck_grp_alloc_init("in_multihead",
-	    in_multihead_lock_grp_attr);
-	in_multihead_lock_attr = lck_attr_alloc_init();
-	lck_rw_init(&in_multihead_lock, in_multihead_lock_grp,
-	    in_multihead_lock_attr);
-
-	lck_mtx_init(&inm_trash_lock, in_multihead_lock_grp,
-	    in_multihead_lock_attr);
 	TAILQ_INIT(&inm_trash_head);
 
 	vm_size_t inm_size = (inm_debug == 0) ? sizeof(struct in_multi) :
@@ -3367,8 +3358,8 @@ in_multi_alloc(zalloc_flags_t how)
 
 	inm = zalloc_flags(inm_zone, how | Z_ZERO);
 	if (inm != NULL) {
-		lck_mtx_init(&inm->inm_lock, in_multihead_lock_grp,
-		    in_multihead_lock_attr);
+		lck_mtx_init(&inm->inm_lock, &in_multihead_lock_grp,
+		    &in_multihead_lock_attr);
 		inm->inm_debug |= IFD_ALLOC;
 		if (inm_debug != 0) {
 			inm->inm_debug |= IFD_DEBUG;
@@ -3413,7 +3404,7 @@ in_multi_free(struct in_multi *inm)
 	}
 	INM_UNLOCK(inm);
 
-	lck_mtx_destroy(&inm->inm_lock, in_multihead_lock_grp);
+	lck_mtx_destroy(&inm->inm_lock, &in_multihead_lock_grp);
 	zfree(inm_zone, inm);
 }
 

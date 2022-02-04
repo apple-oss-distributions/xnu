@@ -456,7 +456,7 @@ iflr_alloc(zalloc_flags_t how)
 	struct if_llreach *lr = zalloc_flags(iflr_zone, how | Z_ZERO);
 
 	if (lr) {
-		lck_mtx_init(&lr->lr_lock, ifnet_lock_group, ifnet_lock_attr);
+		lck_mtx_init(&lr->lr_lock, &ifnet_lock_group, &ifnet_lock_attr);
 		lr->lr_debug |= IFD_ALLOC;
 	}
 	return lr;
@@ -482,7 +482,7 @@ iflr_free(struct if_llreach *lr)
 	lr->lr_debug &= ~IFD_ALLOC;
 	IFLR_UNLOCK(lr);
 
-	lck_mtx_destroy(&lr->lr_lock, ifnet_lock_group);
+	lck_mtx_destroy(&lr->lr_lock, &ifnet_lock_group);
 	zfree(iflr_zone, lr);
 }
 

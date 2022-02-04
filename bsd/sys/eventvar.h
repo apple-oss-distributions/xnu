@@ -69,6 +69,7 @@ typedef int (*kevent_callback_t)(struct kevent_qos_s *, struct kevent_ctx_s *);
 #include <kern/locks.h>
 #include <mach/thread_policy.h>
 #include <pthread/workqueue_internal.h>
+#include <os/refcnt.h>
 
 /*
  * Lock ordering:
@@ -122,16 +123,15 @@ knote_lock_ctx_chk(struct knote_lock_ctx *knlc)
 	assert(knlc->knlc_state == KNOTE_LOCK_CTX_UNLOCKED);
 }
 #define KNOTE_LOCK_CTX(n) \
-	        struct knote_lock_ctx n __attribute__((cleanup(knote_lock_ctx_chk))); \
-	        n.knlc_state = KNOTE_LOCK_CTX_UNLOCKED
+	struct knote_lock_ctx n __attribute__((cleanup(knote_lock_ctx_chk))); \
+	n.knlc_state = KNOTE_LOCK_CTX_UNLOCKED
 #else
 #define KNOTE_LOCK_CTX(n) \
-	        struct knote_lock_ctx n
+	struct knote_lock_ctx n
 #endif
 
 
 __options_decl(kq_state_t, uint16_t, {
-	KQ_SEL            = 0x0001, /* select was recorded for kq */
 	KQ_SLEEP          = 0x0002, /* thread is waiting for events */
 	KQ_PROCWAIT       = 0x0004, /* thread waiting for processing */
 	KQ_KEV32          = 0x0008, /* kq is used with 32-bit events */
@@ -141,7 +141,6 @@ __options_decl(kq_state_t, uint16_t, {
 	KQ_WORKLOOP       = 0x0080, /* KQ is part of a workloop */
 	KQ_PROCESSING     = 0x0100, /* KQ is being processed */
 	KQ_DRAIN          = 0x0200, /* kq is draining */
-	KQ_WAKEUP         = 0x0400, /* kq awakened while processing */
 	KQ_DYNAMIC        = 0x0800, /* kqueue is dynamically managed */
 	KQ_R2K_ARMED      = 0x1000, /* ast notification armed */
 	KQ_HAS_TURNSTILE  = 0x2000, /* this kqueue has a turnstile */
@@ -155,19 +154,12 @@ __options_decl(kq_state_t, uint16_t, {
  *          derived from this definition.
  */
 struct kqueue {
-	struct {
-		struct waitq_set    kq_wqs;       /* private waitq set */
-		lck_spin_t          kq_lock;      /* kqueue lock */
-		kq_state_t          kq_state;     /* state of the kq */
-		union {
-			uint16_t    kq_waitq_hook;/* prepost hook (kqwl/kqwq) */
-			uint16_t    kq_level;     /* nesting level of the kq */
-		};
-		uint32_t            kq_count;     /* number of queued events */
-		struct proc        *kq_p;         /* process containing kqueue */
-		struct knote_locks  kq_knlocks;   /* list of knote locks held */
-	}; /* make sure struct padding is put before kq_queue */
-	struct kqtailq      kq_queue[0];      /* variable array of queues */
+	lck_spin_t          kq_lock;      /* kqueue lock */
+	kq_state_t          kq_state;     /* state of the kq */
+	uint16_t            kq_level;     /* nesting level of the kqfile */
+	uint32_t            kq_count;     /* number of queued events */
+	struct proc        *kq_p;         /* process containing kqueue */
+	struct knote_locks  kq_knlocks;   /* list of knote locks held */
 };
 
 /*
@@ -182,7 +174,6 @@ struct kqfile {
 	struct kqtailq      kqf_queue;      /* queue of woken up knotes */
 	struct kqtailq      kqf_suppressed; /* suppression queue */
 	struct selinfo      kqf_sel;        /* parent select/kqueue info */
-#define kqf_wqs      kqf_kqueue.kq_wqs
 #define kqf_lock     kqf_kqueue.kq_lock
 #define kqf_state    kqf_kqueue.kq_state
 #define kqf_level    kqf_kqueue.kq_level
@@ -206,7 +197,7 @@ struct kqfile {
 #endif
 
 #if !defined(KQWQ_NBUCKETS)
-#define KQWQ_NBUCKETS    (KQWQ_QOS_MANAGER + 1)
+#define KQWQ_NBUCKETS    (KQWQ_QOS_MANAGER)
 #endif
 
 /*
@@ -224,7 +215,6 @@ struct kqworkq {
 	workq_threadreq_s   kqwq_request[KQWQ_NBUCKETS];     /* per-QoS request states */
 };
 
-#define kqwq_wqs         kqwq_kqueue.kq_wqs
 #define kqwq_lock        kqwq_kqueue.kq_lock
 #define kqwq_state       kqwq_kqueue.kq_state
 #define kqwq_waitq_hook  kqwq_kqueue.kq_waitq_hook
@@ -241,20 +231,8 @@ struct kqworkq {
  * on the delta between the two QoS values.
  */
 
-/*
- * "Stay-active" knotes are held in a separate bucket that indicates
- * special handling required. They are kept separate because the
- * wakeups issued to them don't have context to tell us where to go
- * to find and process them. All processing of them happens at the
- * highest QoS. Unlike WorkQ kqueues, there is no special singular
- * "manager thread" for a process. We simply request a servicing
- * thread at the higest known QoS when these are woken (or override
- * an existing request to that).
- */
-#define KQWL_BUCKET_STAYACTIVE (THREAD_QOS_LAST)
-
 #if !defined(KQWL_NBUCKETS)
-#define KQWL_NBUCKETS    (KQWL_BUCKET_STAYACTIVE + 1)
+#define KQWL_NBUCKETS    (THREAD_QOS_LAST - 1)
 #endif
 
 /*
@@ -270,17 +248,144 @@ struct kqworkq {
  *
  *      NOTE:   "lane" support is TBD.
  */
+
+#if CONFIG_PREADOPT_TG_DEBUG
+__options_decl(kqwl_preadopt_tg_op_t, uint8_t, {
+	KQWL_PREADOPT_OP_SERVICER_BIND = 0x01,
+	KQWL_PREADOPT_OP_SERVICER_REBIND = 0x02,
+	KQWL_PREADOPT_OP_SERVICER_UNBIND = 0x3,
+	KQWL_PREADOPT_OP_INCOMING_IPC = 0x4,
+});
+#endif
+
+#if CONFIG_PREADOPT_TG
+/*
+ * We have this typedef to distinguish when there is a thread_qos_t embedded
+ * in the last 3 bits inside the pointer
+ */
+typedef struct thread_group *thread_group_qos_t;
+
+/* The possible states for kqwl_preadopt_tg:
+ *
+ * 1) Valid thread group with a QoS masked in the last 3 bits.
+ * 2) A known constant value (enumerated below). For these known constant
+ * values, no QoS is merged into them.
+ *
+ * @const KQWL_PREADOPTED_TG_NULL
+ *		NULL implies that the kqwl is capable of preadopting a thread group and it
+ *              hasn't got such a thread group to preadopt
+ * @const KQWL_PREADOPTED_TG_SENTINEL
+ *		SENTINEL is set when the kqwl is no longer capable of preadopting a thread
+ *              group because it has bound to a servicer - the reference of the thread group
+ *              is passed to the servicer
+ * @const KQWL_PREADOPTED_TG_PROCESSED
+ *		PROCESSED is set when the kqwl's servicer has processed and preadopted the
+ *              thread group of the first EVFILT_MACHPORT knote that it is going to deliver
+ *              to userspace.
+ * @const KQWL_PREADOPTED_TG_NEVER
+ *		NEVER is set when the kqwl is not capable of preadopting a thread
+ *		group because it is an app
+ */
+
+#define KQWL_PREADOPTED_TG_NULL ((struct thread_group *) 0)
+#define KQWL_PREADOPTED_TG_SENTINEL ((struct thread_group *) -1)
+#define KQWL_PREADOPTED_TG_PROCESSED ((struct thread_group *) -2)
+#define KQWL_PREADOPTED_TG_NEVER ((struct thread_group *) -3)
+
+#define KQWL_ENCODE_PREADOPTED_TG_QOS(tg, qos) \
+	        (struct thread_group *) ((uintptr_t) tg | (uintptr_t) qos);
+
+#define KQWL_PREADOPT_TG_MASK ~((uint64_t) THREAD_QOS_LAST)
+#define KQWL_GET_PREADOPTED_TG(tg) \
+	        (struct thread_group *)(((uintptr_t) tg) & KQWL_PREADOPT_TG_MASK)
+
+#define KQWL_PREADOPT_TG_QOS_MASK ((uint64_t) THREAD_QOS_LAST)
+#define KQWL_GET_PREADOPTED_TG_QOS(tg) \
+	        (thread_qos_t) (((uintptr_t) tg) & KQWL_PREADOPT_TG_QOS_MASK)
+
+#define KQWL_CAN_ADOPT_PREADOPT_TG(tg) \
+	        ((tg != KQWL_PREADOPTED_TG_SENTINEL) && \
+	        (tg != KQWL_PREADOPTED_TG_NEVER) && \
+	        (tg != KQWL_PREADOPTED_TG_PROCESSED))
+
+
+#define KQWL_HAS_VALID_PREADOPTED_TG(tg) \
+	        ((tg != KQWL_PREADOPTED_TG_NULL) && \
+	        (tg != KQWL_PREADOPTED_TG_SENTINEL) && \
+	        (tg != KQWL_PREADOPTED_TG_NEVER) && \
+	        (tg != KQWL_PREADOPTED_TG_PROCESSED) && \
+	        (KQWL_GET_PREADOPTED_TG(tg) != NULL))
+
+struct thread_group *
+kqr_preadopt_thread_group(workq_threadreq_t req);
+
+_Atomic(struct thread_group *) *
+kqr_preadopt_thread_group_addr(workq_threadreq_t req);
+
+#endif
+
+
 struct kqworkloop {
 	struct kqueue       kqwl_kqueue;                  /* queue of events */
 	struct kqtailq      kqwl_queue[KQWL_NBUCKETS];    /* array of queues */
 	struct kqtailq      kqwl_suppressed;              /* Per-QoS suppression queues */
 	workq_threadreq_s   kqwl_request;                 /* thread request state */
+#if CONFIG_PREADOPT_TG
+	_Atomic thread_group_qos_t      kqwl_preadopt_tg;
+#endif
+
 	lck_spin_t          kqwl_statelock;               /* state/debounce lock */
 	thread_t            kqwl_owner;                   /* current [sync] owner thread */
-	uint32_t            kqwl_retains;                 /* retain references */
-#define KQWL_STAYACTIVE_FIRED_BIT     (1 << 0)
-	uint8_t             kqwl_wakeup_indexes;          /* QoS/override levels that woke */
-	kq_index_t          kqwl_stayactive_qos;          /* max QoS of statyactive knotes */
+	os_ref_atomic_t     kqwl_retains;                 /* retain references */
+	thread_qos_t        kqwl_wakeup_qos;              /* QoS/override woke */
+
+#if CONFIG_PREADOPT_TG
+	/* The point of the kqwl_preadopt_tg_needs_redrive bit is to be able to
+	 * coordinate which thread is going to push information about modifications
+	 * to the kqwl_preadopt_thread group on the kqwl, to the workqueue
+	 * subsystem. This coordination is needed because the preadoption thread
+	 * group is set on the kqwl in the filter call without the kqlock.
+	 *
+	 * As such, if there is another thread holding the kqlock at this time and
+	 * observes the write to the preadoption thread group and the need for a
+	 * redrive request, that thread will take the responsibility of pushing that
+	 * information down to the workqueue subsystem, thereby ack-ing the request.
+	 *
+	 * Otherwise, the original thread which modified the kqwl, will do so when
+	 * it gets the kqlock.
+	 *
+	 * Note: Only a 1 single bit is required here but the 2 bytes here were
+	 * wasted in packing so I've created a new atomic field for it. Only the
+	 * bottom bit is being used, the remaining bits can be reused for other
+	 * purposes.
+	 */
+#define KQWL_PREADOPT_TG_NEEDS_REDRIVE (uint16_t) 0x1
+#define KQWL_PREADOPT_TG_CLEAR_REDRIVE (uint16_t) 0x0
+	_Atomic uint16_t                        kqwl_preadopt_tg_needs_redrive;
+#endif
+
+#if CONFIG_PREADOPT_TG_DEBUG
+	/* Keep track of history of events that happened to the kqworkloop wrt to tg preadoption */
+#define KQWL_PREADOPT_TG_HISTORY_COUNT 32
+#define KQWL_PREADOPT_TG_HISTORY_WRITE_ENTRY(kqwl, ...)  ({\
+	        struct kqworkloop *__kqwl = (kqwl); \
+	        unsigned int __index = os_atomic_inc_orig(&__kqwl->kqwl_preadopt_tg_history_index, relaxed); \
+	                struct kqwl_preadopt_tg _preadopt_tg = { mach_approximate_time(), __VA_ARGS__}; \
+	        __kqwl->kqwl_preadopt_tg_history[__index % KQWL_PREADOPT_TG_HISTORY_COUNT] = \
+	                        (struct kqwl_preadopt_tg) _preadopt_tg; \
+	})
+
+	struct kqwl_preadopt_tg {
+		uint64_t time;
+		kqwl_preadopt_tg_op_t op;
+		struct thread_group *old_preadopt_tg;
+		struct thread_group *new_preadopt_tg;
+	} kqwl_preadopt_tg_history[KQWL_PREADOPT_TG_HISTORY_COUNT];
+	unsigned int kqwl_preadopt_tg_history_index;
+#else
+#define KQWL_PREADOPT_TG_HISTORY_WRITE_ENTRY(kqwl, ...)
+#endif /* CONFIG_PREADOPT_TG_DEBUG */
+
 	struct turnstile   *kqwl_turnstile;               /* turnstile for sync IPC/waiters */
 	kqueue_id_t         kqwl_dynamicid;               /* dynamic identity */
 	uint64_t            kqwl_params;                  /* additional parameters */
@@ -320,8 +425,6 @@ typedef union {
 	struct kqworkloop   *kqwl;
 } __attribute__((transparent_union)) kqueue_t;
 
-
-#define kqwl_wqs         kqwl_kqueue.kq_wqs
 #define kqwl_lock        kqwl_kqueue.kq_lock
 #define kqwl_state       kqwl_kqueue.kq_state
 #define kqwl_waitq_hook  kqwl_kqueue.kq_waitq_hook
@@ -340,7 +443,8 @@ extern void kqueue_threadreq_bind(struct proc *p, workq_threadreq_t req,
 struct turnstile *kqueue_threadreq_get_turnstile(workq_threadreq_t kqr);
 
 // called with the wq lock held
-extern void kqueue_threadreq_bind_prepost(struct proc *p, workq_threadreq_t req,
+extern void
+kqueue_threadreq_bind_prepost(struct proc *p, workq_threadreq_t req,
     struct uthread *uth);
 
 // called with no lock held
@@ -363,6 +467,9 @@ extern int kevent_register(struct kqueue *, struct kevent_qos_s *,
 extern int kqueue_scan(struct kqueue *, int flags,
     struct kevent_ctx_s *, kevent_callback_t);
 extern int kqueue_stat(struct kqueue *, void *, int, proc_t);
+
+extern void kevent_set_workq_quantum_expiry_user_tsd(proc_t p, thread_t t,
+    uint64_t flags);
 
 #endif /* XNU_KERNEL_PRIVATE */
 

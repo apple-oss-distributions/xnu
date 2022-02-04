@@ -33,7 +33,7 @@
 .\"
 .\"     @(#)link.2	8.3 (Berkeley) 1/12/94
 .\"
-.Dd October 29, 2008
+.Dd June 3, 2021
 .Dt LINK 2
 .Os BSD 4
 .Sh NAME
@@ -248,6 +248,17 @@ The link named by
 and the file named by
 .Fa path1
 are on different file systems.
+.\" ==========
+.It Bq Er EDEADLK
+The file named by
+.Fa path1
+is a
+.Dq dataless
+file that must be materialized before being linked and the I/O policy of
+the current thread or process disallows file materialization
+.Po see
+.Xr getiopolicy_np 3
+.Pc .
 .El
 .Pp
 In addition to the errors returned by the

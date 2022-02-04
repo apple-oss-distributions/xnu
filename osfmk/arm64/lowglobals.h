@@ -81,6 +81,8 @@ typedef struct lowglo {
 	uint64_t      lgPhysMapEnd;            /* 0xffffff80000020E8 Last virtual address of the Physical Aperture (exclusive) */
 	uint64_t      lgPmapIoRangePtr;        /* 0xffffff80000020F0 Pointer to an array of pmap_io_range_t objects obtained from the device tree. */
 	uint64_t      lgNumPmapIoRanges;       /* 0xffffff80000020F8 Number of pmap_io_range regions in the array represented by lgPmapIoRangePtr. */
+	uint64_t      lgCompressorBufferAddr;  /* 0xFFFFFF8000002100 Pointer to compressor buffer */
+	uint64_t      lgCompressorSizeAddr;    /* 0xFFFFFF8000002108 Pointer to size of compressor buffer */
 } lowglo;
 #pragma pack()
 

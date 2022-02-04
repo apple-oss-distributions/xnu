@@ -1286,7 +1286,7 @@ class Tests: XCTestCase {
         }
 
         if (dict == nil) {
-            XCTFail(); return;
+            XCTFail(String(format:"Failed to decode %@", name)); return;
         }
 
         guard let plistdata = self.dataWithResource(name + ".plist.gz") ??
@@ -1307,15 +1307,16 @@ class Tests: XCTestCase {
         // check that we agree with python
 
         #if os(OSX)
-
-            let kcdatapy = Bundle(for: self.classForCoder).path(forResource: "kcdata.py", ofType: nil)
-
+        // default python based on #! is python3 in kcdata.py
+        let kcdatapy = Bundle(for: self.classForCoder).path(forResource: "kcdata.py", ofType: nil)
+        let pyargs = ["-p", Bundle(for:self.classForCoder).path(forResource: name, ofType: nil)!]
         let task = Process()
         task.launchPath = kcdatapy
-        task.arguments = ["-p",
-                          Bundle(for:self.classForCoder).path(forResource: name, ofType: nil)!]
+        task.arguments = pyargs
         let pipe = Pipe()
         task.standardOutput = pipe
+        let cli_invocation = task.arguments!.reduce(task.launchPath!) {$0 + " " + $1}
+        print(cli_invocation)
         task.launch()
 
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
@@ -1325,6 +1326,26 @@ class Tests: XCTestCase {
 
         XCTAssert(dict == dict3)
 
+        // check for python2 if present
+        let py2path = "/usr/bin/python2"
+        if FileManager.default.fileExists(atPath: py2path) {
+            let task = Process()
+            task.launchPath = py2path
+            task.arguments = [kcdatapy!] + pyargs
+            let pipe = Pipe()
+            task.standardOutput = pipe
+            let cli_invocation = task.arguments!.reduce(task.launchPath!) {$0 + " " + $1}
+            print(cli_invocation)
+            task.launch()
+
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+
+            guard let dict4 = try? PropertyListSerialization.propertyList(from:data, options:[], format: nil) as? NSDictionary
+            else { XCTFail(); return }
+
+            XCTAssert(dict == dict4)
+
+        }
         #endif
     }
 
@@ -1432,6 +1453,10 @@ class Tests: XCTestCase {
         self.testSampleStackshot("stackshot-with-waitinfo")
     }
 
+    func testStackshotWithAsyncInfo() {
+        self.testSampleStackshot("stackshot-with-asyncinfo")
+    }
+
     func testStackshotWithThreadPolicy() {
         self.testSampleStackshot("stackshot-sample-thread-policy")
     }
@@ -1446,6 +1471,10 @@ class Tests: XCTestCase {
 
     func testStackshotWithStacktop() {
         self.testSampleStackshot("stackshot-sample-stacktop")
+    }
+
+    func testStackshotWithAOT() {
+        self.testSampleStackshot("stackshot-sample-aot")
     }
 
     func testStackshotWithASID() {

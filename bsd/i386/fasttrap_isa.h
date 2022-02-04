@@ -23,8 +23,11 @@
  * Use is subject to license terms.
  */
 
-#ifndef _FASTTRAP_ISA_H
+#ifndef _I386_FASTTRAP_ISA_H
+#define _I386_FASTTRAP_ISA_H
 #define _FASTTRAP_ISA_H
+
+#if defined (__i386__) || defined (__x86_64__)
 
 #include <sys/types.h>
 #include <stdint.h>
@@ -110,4 +113,6 @@ typedef struct fasttrap_machtp {
 }
 #endif
 
-#endif  /* _FASTTRAP_ISA_H */
+#endif /* defined (__i386__) || defined (__x86_64__) */
+
+#endif  /* _I386_FASTTRAP_ISA_H */

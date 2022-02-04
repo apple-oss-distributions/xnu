@@ -27,7 +27,7 @@
  */
 
 #include <machine/asm.h>
-#include <arm64/hv/hv_regs.h>
+#include <arm64/machine_machdep.h>
 #include <arm64/machine_routines_asm.h>
 #include <arm64/proc_reg.h>
 #include <pexpert/arm64/board_config.h>
@@ -36,7 +36,6 @@
 #include <config_dtrace.h>
 #include "assym.s"
 #include <arm64/exception_asm.h>
-#include <arm64/pac_asm.h>
 #include "dwarf_unwind.h"
 
 #if __ARM_KERNEL_PROTECT__
@@ -59,182 +58,12 @@
 	/* Return to the PPL. */
 	mov		x15, #0
 	mov		w10, #PPL_STATE_EXCEPTION
-#if __APRR_SUPPORTED__
-	b		Ldisable_aif_and_enter_ppl
-#else
 #error "XPRR configuration error"
-#endif /* __APRR_SUPPORTED__ */
 1:
 .endmacro
 
-#if __APRR_SUPPORTED__
-/*
- * EL1_SP0_VECTOR_PPL_CHECK
- *
- * Check to see if the exception was taken by the kernel or the PPL.  Falls
- * through if kernel, hands off to the given label if PPL.  Expects to run on
- * SP1.
- *   arg0 - Label to go to if this was a PPL exception.
- */
-.macro EL1_SP0_VECTOR_PPL_CHECK
-	sub		sp, sp, ARM_CONTEXT_SIZE
-	stp		x0, x1, [sp, SS64_X0]
-	mrs		x0, APRR_EL1
-	MOV64		x1, APRR_EL1_DEFAULT
-	cmp		x0, x1
-	b.ne		$0
-	ldp		x0, x1, [sp, SS64_X0]
-	add		sp, sp, ARM_CONTEXT_SIZE
-.endmacro
-
-#define STAY_ON_SP1 0
-#define SWITCH_TO_SP0 1
-
-#define INVOKE_PREFLIGHT 0
-#define NO_INVOKE_PREFLIGHT 1
-
-/*
- * EL1_SP0_VECTOR_NOT_IN_KERNEL_MODE
- *
- * Verify whether an exception came from the PPL or from the kernel.  If it came
- * from the PPL, save off the PPL state and transition out of the PPL.
- *   arg0 - Label to go to if this was a kernel exception
- *   arg1 - Label to go to (after leaving the PPL) if this was a PPL exception
- *   arg2 - Indicates if this should switch back to SP0
- *   x0   - xPRR_EL1_BR1 read by EL1_SP0_VECTOR_PPL_CHECK
- */
-.macro EL1_SP0_VECTOR_NOT_IN_KERNEL_MODE
-	/* Spill some more registers. */
-	stp		x2, x3, [sp, SS64_X2]
-
-	/*
-	 * Check if the PPL is locked down; if not, we can treat this as a
-	 * kernel execption.
-	 */
-	adrp	x1, EXT(pmap_ppl_locked_down)@page
-	ldr		w1, [x1, #EXT(pmap_ppl_locked_down)@pageoff]
-	cbz		x1, 2f
-
-	/* Ensure that APRR_EL1 is actually in PPL mode. */
-	MOV64		x1, APRR_EL1_PPL
-	cmp		x0, x1
-	b.ne		.
-
-	/*
-	 * Check if the CPU is in the PPL; if not we can treat this as a
-	 * kernel exception.
-	 */
-	GET_PMAP_CPU_DATA	x3, x1, x2
-	ldr		w1, [x3, PMAP_CPU_DATA_PPL_STATE]
-	cmp		x1, #PPL_STATE_KERNEL
-	b.eq		2f
-
-	/* Ensure that the CPU is in the expected PPL state. */
-	cmp		x1, #PPL_STATE_DISPATCH
-	b.ne		.
-
-	/* Mark the CPU as dealing with an exception. */
-	mov		x1, #PPL_STATE_EXCEPTION
-	str		w1, [x3, PMAP_CPU_DATA_PPL_STATE]
-
-	/* Load the bounds of the PPL trampoline. */
-	adrp	x0, EXT(ppl_no_exception_start)@page
-	add		x0, x0, EXT(ppl_no_exception_start)@pageoff
-	adrp	x1, EXT(ppl_no_exception_end)@page
-	add		x1, x1, EXT(ppl_no_exception_end)@pageoff
-
-	/*
-	 * Ensure that the exception did not occur in the trampoline.  If it
-	 * did, we are either being attacked or our state machine is
-	 * horrifically broken.
-	 */
-	mrs		x2, ELR_EL1
-	cmp		x2, x0
-	b.lo		1f
-	cmp		x2, x1
-	b.hi		1f
-
-	/* We might be under attack; spin. */
-	b		.
-
-1:
-	/* Get the PPL save area. */
-	mov		x1, x3
-	ldr		x0, [x3, PMAP_CPU_DATA_SAVE_AREA]
-
-	/* Save our x0, x1 state. */
-	ldp		x2, x3, [sp, SS64_X0]
-	stp		x2, x3, [x0, SS64_X0]
-
-	/* Restore SP1 to its original state. */
-	mov		x3, sp
-	add		sp, sp, ARM_CONTEXT_SIZE
-
-	.if $2 == SWITCH_TO_SP0
-	/* Switch back to SP0. */
-	msr		SPSel, #0
-	mov		x2, sp
-	.else
-	/* Load the SP0 value. */
-	mrs		x2, SP_EL0
-	.endif
-
-	/* Save off the stack pointer. */
-	str		x2, [x0, SS64_SP]
-
-	INIT_SAVED_STATE_FLAVORS x0, w1, w2
-
-	/* Save the context that was interrupted. */ 
-	ldp		x2, x3, [x3, SS64_X2]
-	SPILL_REGISTERS PPL_MODE
-
-	/*
-	 * Stash the function we wish to be invoked to deal with the exception;
-	 * usually this is some preflight function for the fleh_* handler.
-	 */
-	adrp		x25, $1@page
-	add		x25, x25, $1@pageoff
-
-	/*
-	 * Indicate that this is a PPL exception, and that we should return to
-	 * the PPL.
-	 */
-	mov		x26, #1
-
-	/* Transition back to kernel mode. */
-	mov		x15, #PPL_EXIT_EXCEPTION
-	b		ppl_return_to_kernel_mode
-2:
-	/* Restore SP1 state. */
-	ldp		x2, x3, [sp, SS64_X2]
-	ldp		x0, x1, [sp, SS64_X0]
-	add		sp, sp, ARM_CONTEXT_SIZE
-
-	/* Go to the specified label (usually the original exception vector). */
-	b		$0
-.endmacro
-#endif /* __APRR_SUPPORTED__ */
 
 #endif /* XNU_MONITOR */
-
-#define	CBF_DISABLE	0
-#define	CBF_ENABLE	1
-
-.macro COMPARE_BRANCH_FUSION
-#if	defined(APPLE_ARM64_ARCH_FAMILY)
-	mrs             $1, ARM64_REG_HID1
-	.if $0 == CBF_DISABLE
-	orr		$1, $1, ARM64_REG_HID1_disCmpBrFusion
-	.else
-	mov		$2, ARM64_REG_HID1_disCmpBrFusion
-	bic		$1, $1, $2
-	.endif
-	msr             ARM64_REG_HID1, $1
-	.if $0 == CBF_DISABLE
-	isb             sy
-	.endif
-#endif
-.endmacro
 
 /*
  * MAP_KERNEL
@@ -475,14 +304,6 @@ Lel0_serror_vector_64:
 .endmacro
 
 el1_sp0_synchronous_vector_long:
-#if XNU_MONITOR && __APRR_SUPPORTED__
-	/*
-	 * We do not have enough space for new instructions in this vector, so
-	 * jump to outside code to check if this exception was taken in the PPL.
-	 */
-	b		el1_sp0_synchronous_vector_ppl_check
-Lel1_sp0_synchronous_vector_kernel:
-#endif
 	stp		x0, x1, [sp, #-16]!				// Save x0 and x1 to the exception stack
 	mrs		x1, ESR_EL1							// Get the exception syndrome
 	/* If the stack pointer is corrupt, it will manifest either as a data abort
@@ -499,10 +320,6 @@ Lkernel_stack_valid:
 	b		fleh_dispatch64
 
 el1_sp0_irq_vector_long:
-#if XNU_MONITOR && __APRR_SUPPORTED__
-	EL1_SP0_VECTOR_PPL_CHECK el1_sp0_irq_vector_not_in_kernel_mode
-Lel1_sp0_irq_vector_kernel:
-#endif
 	EL1_SP0_VECTOR
 	SWITCH_TO_INT_STACK
 	adrp	x1, EXT(fleh_irq)@page					// Load address for fleh
@@ -511,10 +328,6 @@ Lel1_sp0_irq_vector_kernel:
 
 el1_sp0_fiq_vector_long:
 	// ARM64_TODO write optimized decrementer
-#if XNU_MONITOR && __APRR_SUPPORTED__
-	EL1_SP0_VECTOR_PPL_CHECK el1_sp0_fiq_vector_not_in_kernel_mode
-Lel1_sp0_fiq_vector_kernel:
-#endif
 	EL1_SP0_VECTOR
 	SWITCH_TO_INT_STACK
 	adrp	x1, EXT(fleh_fiq)@page					// Load address for fleh
@@ -522,10 +335,6 @@ Lel1_sp0_fiq_vector_kernel:
 	b		fleh_dispatch64
 
 el1_sp0_serror_vector_long:
-#if XNU_MONITOR && __APRR_SUPPORTED__
-	EL1_SP0_VECTOR_PPL_CHECK el1_sp0_serror_vector_not_in_kernel_mode
-Lel1_sp0_serror_vector_kernel:
-#endif
 	EL1_SP0_VECTOR
 	adrp	x1, EXT(fleh_serror)@page				// Load address for fleh
 	add		x1, x1, EXT(fleh_serror)@pageoff
@@ -570,35 +379,12 @@ el1_sp1_serror_vector_long:
 	add		x1, x1, fleh_serror_sp1@pageoff
 	b		fleh_dispatch64
 
-#if defined(HAS_APPLE_PAC) && !(__APCFG_SUPPORTED__ || __APSTS_SUPPORTED__)
-/**
- * On these CPUs, SCTLR_CP15BEN_ENABLED is res0, and SCTLR_{ITD,SED}_DISABLED are res1.
- * The rest of the bits in SCTLR_EL1_DEFAULT | SCTLR_PACIB_ENABLED are set in common_start.
- */
-#define SCTLR_EL1_INITIAL	(SCTLR_EL1_DEFAULT | SCTLR_PACIB_ENABLED)
-#define SCTLR_EL1_EXPECTED	((SCTLR_EL1_INITIAL | SCTLR_SED_DISABLED | SCTLR_ITD_DISABLED) & ~SCTLR_CP15BEN_ENABLED)
-#endif
 
 .macro EL0_64_VECTOR
 	stp		x0, x1, [sp, #-16]!					// Save x0 and x1 to the exception stack
 #if __ARM_KERNEL_PROTECT__
 	mov		x18, #0 						// Zero x18 to avoid leaking data to user SS
 #endif
-#if defined(HAS_APPLE_PAC) && !(__APCFG_SUPPORTED__ || __APSTS_SUPPORTED__)
-	// enable JOP for kernel
-	mrs		x0, SCTLR_EL1
-	tbnz	x0, SCTLR_PACIA_ENABLED_SHIFT, 1f
-	//	if (!jop_running) {
-	MOV64 	x1, SCTLR_JOP_KEYS_ENABLED
-	orr		x0, x0, x1
-	msr		SCTLR_EL1, x0
-	isb		sy
-	MOV64	x1, SCTLR_EL1_EXPECTED | SCTLR_JOP_KEYS_ENABLED
-	cmp		x0, x1
-	bne		.
-	//	}
-1:
-#endif /* defined(HAS_APPLE_PAC) && !(__APCFG_SUPPORTED__ || __APSTS_SUPPORTED__) */
 	mrs		x0, TPIDR_EL1						// Load the thread register
 	mrs		x1, SP_EL0							// Load the user stack pointer
 	add		x0, x0, ACT_CONTEXT					// Calculate where we store the user context pointer
@@ -644,13 +430,6 @@ el0_serror_vector_64_long:
 	add		x1, x1, EXT(fleh_serror)@pageoff
 	b		fleh_dispatch64
 
-#if XNU_MONITOR && __APRR_SUPPORTED__
-el1_sp0_synchronous_vector_ppl_check:
-	EL1_SP0_VECTOR_PPL_CHECK el1_sp0_synchronous_vector_not_in_kernel_mode
-
-	/* Jump back to the primary exception vector if we fell through. */
-	b		Lel1_sp0_synchronous_vector_kernel
-#endif
 
 /*
  * check_exception_stack
@@ -768,6 +547,9 @@ fleh_dispatch64:
 
 	mov		x21, x0								// Copy arm_context_t pointer to x21
 	mov		x22, x1								// Copy handler routine to x22
+#if HAS_APPLE_PAC
+	pacia	x22, sp
+#endif
 
 #if XNU_MONITOR
 	/* Zero x26 to indicate that this should not return to the PPL. */
@@ -786,7 +568,11 @@ fleh_dispatch64:
 
 	/* Dispatch to FLEH */
 
+#if HAS_APPLE_PAC
+	braa	x22,sp
+#else
 	br		x22
+#endif
 
 
 	.text
@@ -842,7 +628,7 @@ UNWIND_EPILOGUE
 .macro BEGIN_INTERRUPT_HANDLER
 	mrs		x22, TPIDR_EL1
 	ldr		x23, [x22, ACT_CPUDATAP]			// Get current cpu
-	/* Update IRQ count */
+	/* Update IRQ count; CPU_STAT_IRQ.* is required to be accurate for the WFE idle sequence  */
 	ldr		w1, [x23, CPU_STAT_IRQ]
 	add		w1, w1, #1							// Increment count
 	str		w1, [x23, CPU_STAT_IRQ]				// Update  IRQ count
@@ -881,12 +667,16 @@ UNWIND_EPILOGUE
 	/* Switch back to kernel stack */
 	ldr		x0, [x22, TH_KSTACKPTR]
 	mov		sp, x0
+	/* Generate a CPU-local event to terminate a post-IRQ WFE */
+	sevl
 .endmacro
 
 	.text
 	.align 2
 	.global EXT(fleh_irq)
 LEXT(fleh_irq)
+UNWIND_PROLOGUE
+UNWIND_DIRECTIVES
 	BEGIN_INTERRUPT_HANDLER
 	PUSH_FRAME
 	bl		EXT(sleh_irq)
@@ -899,6 +689,7 @@ LEXT(fleh_irq)
 
 	mov		x28, #1			// Set a bit to check PFZ if there are ASTs
 	b		exception_return_dispatch
+UNWIND_EPILOGUE
 
 	.text
 	.align 2
@@ -910,6 +701,8 @@ LEXT(fleh_fiq_generic)
 	.align 2
 	.global EXT(fleh_fiq)
 LEXT(fleh_fiq)
+UNWIND_PROLOGUE
+UNWIND_DIRECTIVES
 	BEGIN_INTERRUPT_HANDLER
 	PUSH_FRAME
 	bl		EXT(sleh_fiq)
@@ -922,11 +715,14 @@ LEXT(fleh_fiq)
 
 	mov		x28, #1			// Set a bit to check PFZ if there are ASTs
 	b		exception_return_dispatch
+UNWIND_EPILOGUE
 
 	.text
 	.align 2
 	.global EXT(fleh_serror)
 LEXT(fleh_serror)
+UNWIND_PROLOGUE
+UNWIND_DIRECTIVES
 	mrs		x1, ESR_EL1							// Load exception syndrome
 	mrs		x2, FAR_EL1							// Load fault address
 
@@ -940,6 +736,7 @@ LEXT(fleh_serror)
 
 	mov		x28, xzr		// Don't need to check PFZ If there are ASTs
 	b		exception_return_dispatch
+UNWIND_EPILOGUE
 
 /*
  * Register state saved before we get here.
@@ -1052,14 +849,9 @@ check_user_asts:
 	str		w2, [x3, TH_IOTIER_OVERRIDE]			// Reset IO tier override to -1 before returning to user
 
 #if MACH_ASSERT
-	ldr		w0, [x3, TH_RWLOCK_CNT]
-	cbnz		w0, rwlock_count_notzero			// Detect unbalanced RW lock/unlock
-
 	ldr		w0, [x3, ACT_PREEMPT_CNT]
 	cbnz		w0, preempt_count_notzero			// Detect unbalanced enable/disable preemption
 #endif
-	ldr		w0, [x3, TH_TMP_ALLOC_CNT]
-	cbnz		w0, tmp_alloc_count_nozero			// Detect KHEAP_TEMP leaks
 
 	msr		DAIFSet, #DAIFSC_ALL				// Disable exceptions
 	ldr		x4, [x3, ACT_CPUDATAP]				// Get current CPU data pointer
@@ -1135,28 +927,15 @@ no_asts:
 	cmp		x0, x1
 	beq		L_skip_user_set_debug_state			// If active CPU debug state does not match thread debug state, apply thread state
 
-#if defined(APPLELIGHTNING)
-/* rdar://53177964 ([Cebu Errata SW WA][v8Debug] MDR NEX L3 clock turns OFF during restoreCheckpoint due to SWStep getting masked) */
-
-	ARM64_IS_PCORE x12                                  // if we're not a pCORE, also do nothing
-	cbz		x12, 1f
-
-#endif
-
-#if defined(APPLELIGHTNING)
-
-	mrs		x12, ARM64_REG_HID1                         // if any debug session ever existed, set forceNexL3ClkOn
-	orr		x12, x12, ARM64_REG_HID1_forceNexL3ClkOn
-	msr		ARM64_REG_HID1, x12
-1:
-
-#endif
 
 	PUSH_FRAME
 	bl		EXT(arm_debug_set)					// Establish thread debug state in live regs
 	POP_FRAME
 	mrs		x3, TPIDR_EL1						// Reload thread pointer
+	ldr		x4, [x3, ACT_CPUDATAP]				// Reload CPU data pointer
 L_skip_user_set_debug_state:
+	ldrsh	x0, [x4, CPU_NUMBER_GS]
+	msr		TPIDR_EL0, x0
 
 
 	b		exception_return_unint_tpidr_x3
@@ -1213,59 +992,6 @@ Lexception_return_restore_registers:
 	CMSR FPCR, x5, x4, 1
 1:
 
-#if defined(HAS_APPLE_PAC)
-	//	if (eret to userspace) {
-	and		x2, x2, #(PSR64_MODE_EL_MASK)
-	cmp		x2, #(PSR64_MODE_EL0)
-	bne		Ldone_reconfigure_jop
-	//		thread_t thread = current_thread();
-	//		bool disable_jop;
-	//		if (arm_user_jop_disabled()) {
-	//			/* if global user JOP disabled, always turn off JOP regardless of thread flag (kernel running with JOP on) */
-	//			disable_jop = true;
-	//		} else {
-	//			disable_jop = thread->machine.disable_user_jop;
-	//		}
-#if DEVELOPMENT || DEBUG
-	adrp	x4, EXT(const_boot_args)@page
-	add		x4, x4, EXT(const_boot_args)@pageoff
-	ldr		x4, [x4, BA_BOOT_FLAGS]
-	and		x1, x4, BA_BOOT_FLAGS_DISABLE_USER_JOP
-	cbnz	x1, Ldisable_jop
-#endif
-	mrs		x2, TPIDR_EL1
-	ldrb	w1, [x2, TH_DISABLE_USER_JOP]
-	cbz		w1, Lenable_jop
-	//		if (disable_jop) {
-	//			if (cpu does not have discrete JOP-at-EL1 bit) {
-	//				disable_sctlr_jop_keys();
-	//			}
-	//		} else {
-	//			if (cpu does not have fast A-key switching) {
-	//				reprogram_jop_keys(thread->machine.jop_pid);
-	//			}
-	//		}
-	//	}
-Ldisable_jop:
-#if !(__APCFG_SUPPORTED__ || __APSTS_SUPPORTED__)
-	MOV64	x1, SCTLR_JOP_KEYS_ENABLED
-	mrs		x4, SCTLR_EL1
-	bic		x4, x4, x1
-	msr		SCTLR_EL1, x4
-	MOV64	x1, SCTLR_EL1_EXPECTED
-	cmp		x4, x1
-	bne		.
-#endif /* !(__APCFG_SUPPORTED__ || __APSTS_SUPPORTED__) */
-	b		Ldone_reconfigure_jop
-Lenable_jop:
-#if HAS_PAC_SLOW_A_KEY_SWITCHING
-	IF_PAC_FAST_A_KEY_SWITCHING	Ldone_reconfigure_jop, x1
-	ldr		x1, [x2, TH_JOP_PID]
-	ldr		x2, [x2, ACT_CPUDATAP]
-	REPROGRAM_JOP_KEYS	Ldone_reconfigure_jop, x1, x2, x3
-#endif /* HAS_PAC_SLOW_A_KEY_SWITCHING */
-Ldone_reconfigure_jop:
-#endif /* defined(HAS_APPLE_PAC) */
 
 	/* Restore arm_neon_saved_state64 */
 	ldp		q0, q1, [x0, NS64_Q0]
@@ -1364,19 +1090,6 @@ L_underflow_str:
 #if MACH_ASSERT
 	.text
 	.align 2
-rwlock_count_notzero:
-	mrs		x0, TPIDR_EL1
-	str		x0, [sp, #-16]!						// We'll print thread pointer
-	ldr		w0, [x0, TH_RWLOCK_CNT]
-	str		w0, [sp, #8]
-	adr		x0, L_rwlock_count_notzero_str				// Format string
-	CALL_EXTERN panic							// Game over
-
-L_rwlock_count_notzero_str:
-	.asciz "RW lock count not 0 on thread %p (%u)"
-
-	.text
-	.align 2
 preempt_count_notzero:
 	mrs		x0, TPIDR_EL1
 	str		x0, [sp, #-16]!						// We'll print thread pointer
@@ -1388,12 +1101,6 @@ preempt_count_notzero:
 L_preempt_count_notzero_str:
 	.asciz "preemption count not 0 on thread %p (%u)"
 #endif /* MACH_ASSERT */
-
-	.text
-	.align 2
-tmp_alloc_count_nozero:
-	mrs		x0, TPIDR_EL1
-	CALL_EXTERN kheap_temp_leak_panic
 
 #if __ARM_KERNEL_PROTECT__
 	/*
@@ -1408,32 +1115,13 @@ LEXT(ExceptionVectorsEnd)
 #endif /* __ARM_KERNEL_PROTECT__ */
 
 #if XNU_MONITOR
-#if __APRR_SUPPORTED__
-	.text
-	.align 2
-el1_sp0_synchronous_vector_not_in_kernel_mode:
-	EL1_SP0_VECTOR_NOT_IN_KERNEL_MODE Lel1_sp0_synchronous_vector_kernel, fleh_synchronous_from_ppl, STAY_ON_SP1
-
-	.text
-	.align 2
-el1_sp0_fiq_vector_not_in_kernel_mode:
-	EL1_SP0_VECTOR_NOT_IN_KERNEL_MODE Lel1_sp0_fiq_vector_kernel, fleh_fiq_from_ppl, SWITCH_TO_SP0
-
-	.text
-	.align 2
-el1_sp0_irq_vector_not_in_kernel_mode:
-	EL1_SP0_VECTOR_NOT_IN_KERNEL_MODE Lel1_sp0_irq_vector_kernel, fleh_irq_from_ppl, SWITCH_TO_SP0
-
-	.text
-	.align 2
-el1_sp0_serror_vector_not_in_kernel_mode:
-	EL1_SP0_VECTOR_NOT_IN_KERNEL_MODE Lel1_sp0_serror_vector_kernel, fleh_serror_from_ppl, SWITCH_TO_SP0
-#endif /* __APRR_SUPPORTED__ */
 
 /*
  * Functions to preflight the fleh handlers when the PPL has taken an exception;
  * mostly concerned with setting up state for the normal fleh code.
  */
+	.text
+	.align 2
 fleh_synchronous_from_ppl:
 	/* Save x0. */
 	mov		x15, x0
@@ -1503,65 +1191,6 @@ fleh_serror_from_ppl:
 	b		EXT(fleh_serror)
 
 
-#if XNU_MONITOR && __APRR_SUPPORTED__
-/*
- * aprr_ppl_enter
- *
- * Invokes the PPL
- *   x15 - The index of the requested PPL function.
- */
-	.text
-	.align 2
-	.globl EXT(aprr_ppl_enter)
-LEXT(aprr_ppl_enter)
-	/* Push a frame. */
-	ARM64_STACK_PROLOG
-	stp		x20, x21, [sp, #-0x20]!
-	stp		x29, x30, [sp, #0x10]
-	add		x29, sp, #0x10
-
-	/* Increase the preemption count. */
-	mrs		x10, TPIDR_EL1
-	ldr		w12, [x10, ACT_PREEMPT_CNT]
-	add		w12, w12, #1
-	str		w12, [x10, ACT_PREEMPT_CNT]
-
-	/* Is the PPL currently locked down? */
-	adrp		x13, EXT(pmap_ppl_locked_down)@page
-	add		x13, x13, EXT(pmap_ppl_locked_down)@pageoff
-	ldr		w14, [x13]
-	cmp		w14, wzr
-
-	/* If not, just perform the call in the current context. */
-	b.eq		EXT(ppl_bootstrap_dispatch)
-
-	mov		w10, #PPL_STATE_KERNEL
-	b		Ldisable_aif_and_enter_ppl
-
-	/* We align this to land the next few instructions on their own page. */
-	.section __PPLTRAMP,__text,regular,pure_instructions
-	.align 14
-	.space (16*1024)-(4*8) // 8 insns
-
-	/*
-	 * This label is used by exception handlers that are trying to return
-	 * to the PPL.
-	 */
-Ldisable_aif_and_enter_ppl:
-	/* We must trampoline to the PPL context; disable AIF. */
-	mrs		x20, DAIF
-	msr		DAIFSet, #(DAIFSC_ASYNCF | DAIFSC_IRQF | DAIFSC_FIQF)
-
-	.globl EXT(ppl_no_exception_start)
-LEXT(ppl_no_exception_start)
-	/* Switch APRR_EL1 to PPL mode. */
-	MOV64	x14, APRR_EL1_PPL
-	msr		APRR_EL1, x14
-
-	/* This ISB should be the last instruction on a page. */
-	// TODO: can we static assert this?
-	isb
-#endif /* XNU_MONITOR && __APRR_SUPPORTED__ */
 
 
 	// x15: ppl call number
@@ -1570,18 +1199,8 @@ LEXT(ppl_no_exception_start)
 	.globl EXT(ppl_trampoline_start)
 LEXT(ppl_trampoline_start)
 
-#if __APRR_SUPPORTED__
-	/* Squash AIF AGAIN, because someone may have attacked us. */
-	msr		DAIFSet, #(DAIFSC_ASYNCF | DAIFSC_IRQF | DAIFSC_FIQF)
-#endif /* __APRR_SUPPORTED__ */
 
-#if __APRR_SUPPORTED__
-	/* Verify the state of APRR_EL1. */
-	MOV64	x14, APRR_EL1_PPL
-	mrs		x21, APRR_EL1
-#else /* __APRR_SUPPORTED__ */
 #error "XPRR configuration error"
-#endif /* __APRR_SUPPORTED__ */
 	cmp		x14, x21
 	b.ne	Lppl_fail_dispatch
 
@@ -1618,11 +1237,7 @@ LEXT(ppl_trampoline_start)
 	/* Find the save area, and return to the saved PPL context. */
 	ldr		x0, [x12, PMAP_CPU_DATA_SAVE_AREA]
 	mov		sp, x0
-#if __APRR_SUPPORTED__
-	b		Lexception_return_restore_registers
-#else
 	b		EXT(return_to_ppl)
-#endif /* __APRR_SUPPORTED__ */
 
 Lppl_mark_cpu_as_dispatching:
 	cmp		w10, #PPL_STATE_KERNEL
@@ -1669,6 +1284,7 @@ Lppl_fail_dispatch:
 	b		ppl_return_to_kernel_mode
 
 Lppl_dispatch_exit:
+
 	/* Indicate that we are cleanly exiting the PPL. */
 	mov		x15, #PPL_EXIT_DISPATCH
 
@@ -1677,6 +1293,10 @@ Lppl_dispatch_exit:
 
 	/* Move the saved DAIF bits. */
 	mov		x10, x20
+
+	/* Clear the in-flight pmap pointer */
+	add		x13, x12, PMAP_CPU_DATA_INFLIGHT_PMAP
+	stlr		xzr, [x13]
 
 	/* Clear the old stack pointer. */
 	str		xzr, [x12, PMAP_CPU_DATA_KERN_SAVED_SP]
@@ -1694,27 +1314,6 @@ Lppl_dispatch_exit:
 	/* Return to the kernel. */
 	b ppl_return_to_kernel_mode
 
-#if __APRR_SUPPORTED__
-	/* We align this to land the next few instructions on their own page. */
-	.align 14
-	.space (16*1024)-(4*5) // 5 insns
-
-ppl_return_to_kernel_mode:
-	/* Switch APRR_EL1 back to the kernel mode. */
-	// must be 5 instructions
-	MOV64	x14, APRR_EL1_DEFAULT
-	msr		APRR_EL1, x14
-
-	.globl EXT(ppl_trampoline_end)
-LEXT(ppl_trampoline_end)
-
-	/* This should be the first instruction on a page. */
-	isb
-
-	.globl EXT(ppl_no_exception_end)
-LEXT(ppl_no_exception_end)
-	b ppl_exit
-#endif /* __APRR_SUPPORTED__ */
 
 
 	.text
@@ -1726,12 +1325,17 @@ ppl_exit:
 	cmp		x15, #PPL_EXIT_EXCEPTION
 	b.eq	Ljump_to_fleh_handler
 
-	/* Restore the original AIF state. */
-	REENABLE_DAIF	x10
-
 	/* If this was a panic call from the PPL, reinvoke panic. */
 	cmp		x15, #PPL_EXIT_PANIC_CALL
 	b.eq	Ljump_to_panic_trap_to_debugger
+
+	/*
+	 * Stash off the original DAIF in the high bits of the exit code register.
+	 * We could keep this in a dedicated register, but that would require us to copy it to
+	 * an additional callee-save register below (e.g. x22), which in turn would require that
+	 * register to be saved/restored at PPL entry/exit.
+	 */
+	add		x15, x15, x10, lsl #32
 
 	/* Load the preemption count. */
 	mrs		x10, TPIDR_EL1
@@ -1744,24 +1348,57 @@ Lno_preempt_underflow:
 
 	/* Lower the preemption count. */
 	sub		w12, w12, #1
+
+#if SCHED_PREEMPTION_DISABLE_DEBUG
+	/* Collect preemption disable measurement if necessary. */
+
+	/* Only collect measurement if this reenabled preemption. */
+	cmp		w12, #0
+	b.ne	Lskip_collect_measurement
+
+	/* Only collect measurement if a start time was set. */
+	ldr		x14, [x10, ACT_PREEMPT_ADJ_MT]
+	cmp		x14, #0
+	b.eq	Lskip_collect_measurement
+
+	/* Stash our return value and return reason. */
+	mov		x20, x0
+	mov		x21, x15
+
+	/* Collect measurement. */
+	mov		x0, x10
+	bl		EXT(_collect_preemption_disable_measurement)
+
+	/* Restore the return value and the return reason. */
+	mov		x0, x20
+	mov		x15, x21
+	/* ... and w12, which was 0. */
+	mov		w12, #0
+
+	/* Restore the thread pointer into x10. */
+	mrs		x10, TPIDR_EL1
+
+Lskip_collect_measurement:
+#endif /* SCHED_PREEMPTION_DISABLE_DEBUG */
+
+	/* Save the lowered preemption count. */
 	str		w12, [x10, ACT_PREEMPT_CNT]
 
 	/* Skip ASTs if the peemption count is not zero. */
 	cbnz	x12, Lppl_skip_ast_taken
 
-	/* Skip the AST check if interrupts are disabled. */
-	mrs		x1, DAIF
-	tst	x1, #DAIF_IRQF
-	b.ne	Lppl_skip_ast_taken
-
-	/* Disable interrupts. */
-	msr		DAIFSet, #(DAIFSC_IRQF | DAIFSC_FIQF)
+	/*
+	 * Skip the AST check if interrupts were originally disabled.
+	 * The original DAIF state prior to PPL entry is stored in the upper
+	 * 32 bits of x15.
+	 */
+	tbnz		x15, #(DAIF_IRQF_SHIFT + 32), Lppl_skip_ast_taken
 
 	/* IF there is no urgent AST, skip the AST. */
 	ldr		x12, [x10, ACT_CPUDATAP]
 	ldr		x14, [x12, CPU_PENDING_AST]
 	tst		x14, AST_URGENT
-	b.eq	Lppl_defer_ast_taken
+	b.eq	Lppl_skip_ast_taken
 
 	/* Stash our return value and return reason. */
 	mov		x20, x0
@@ -1774,11 +1411,13 @@ Lno_preempt_underflow:
 	mov		x15, x21
 	mov		x0, x20
 
-Lppl_defer_ast_taken:
-	/* Reenable interrupts. */
-	msr		DAIFClr, #(DAIFSC_IRQF | DAIFSC_FIQF)
-
 Lppl_skip_ast_taken:
+
+	/* Extract caller DAIF from high-order bits of exit code */
+	ubfx	x10, x15, #32, #32
+	bfc		x15, #32, #32
+	msr		DAIF, x10
+
 	/* Pop the stack frame. */
 	ldp		x29, x30, [sp, #0x10]
 	ldp		x20, x21, [sp], #0x20
@@ -1815,7 +1454,7 @@ LEXT(ppl_dispatch)
 	stp		x12, x13, [sp, #-0x10]!
 
 	/* Restore the original AIF state. */
-	REENABLE_DAIF	x20
+	msr		DAIF, x20
 
 	/*
 	 * Note that if the method is NULL, we'll blow up with a prefetch abort,
@@ -1830,7 +1469,7 @@ LEXT(ppl_dispatch)
 #endif
 
 	/* Disable AIF. */
-	msr		DAIFSet, #(DAIFSC_ASYNCF | DAIFSC_IRQF | DAIFSC_FIQF)
+	msr		DAIFSet, #(DAIFSC_STANDARD_DISABLE)
 
 	/* Restore those important registers. */
 	ldp		x12, x13, [sp], #0x10
@@ -1858,6 +1497,12 @@ LEXT(ppl_bootstrap_dispatch)
 #else
 	blr		x10
 #endif
+	LOAD_PMAP_CPU_DATA	x9, x10, x11
+
+	/* Clear the in-flight pmap pointer */
+	add		x9, x9, PMAP_CPU_DATA_INFLIGHT_PMAP
+	stlr		xzr, [x9]
+
 	/* Stash off the return value */
 	mov		x20, x0
 	/* Drop the preemption count */
@@ -1889,7 +1534,7 @@ Lppl_fail_bootstrap_dispatch:
 	.globl EXT(ml_panic_trap_to_debugger)
 LEXT(ml_panic_trap_to_debugger)
 	mrs		x10, DAIF
-	msr		DAIFSet, #(DAIFSC_ASYNCF | DAIFSC_IRQF | DAIFSC_FIQF)
+	msr		DAIFSet, #(DAIFSC_STANDARD_DISABLE)
 
 	adrp		x12, EXT(pmap_ppl_locked_down)@page
 	ldr		w12, [x12, #EXT(pmap_ppl_locked_down)@pageoff]
@@ -1908,8 +1553,6 @@ LEXT(ml_panic_trap_to_debugger)
 	ldr		x12, [x11, PMAP_CPU_DATA_KERN_SAVED_SP]
 	mov		sp, x12
 
-	// we want interrupts to stay masked after exiting PPL when calling into panic to halt system
-	// x10 is used in ppl_return_to_kernel_mode restore desired DAIF state after GEXIT
 	mrs		x10, DAIF
 	mov		w13, #PPL_STATE_PANIC
 	str		w13, [x11, PMAP_CPU_DATA_PPL_STATE]
@@ -1917,7 +1560,7 @@ LEXT(ml_panic_trap_to_debugger)
 	/* Now we are ready to exit the PPL. */
 	b		ppl_return_to_kernel_mode
 Lnot_in_ppl_dispatch:
-	REENABLE_DAIF	x10
+	msr		DAIF, x10
 	ret
 
 	.data

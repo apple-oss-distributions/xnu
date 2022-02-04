@@ -16,7 +16,7 @@
 #include <time.h>
 
 T_GLOBAL_META(
-	T_META_NAMESPACE("xnu.vfs"),
+	T_META_NAMESPACE("xnu.fd"),
 	T_META_RUN_CONCURRENTLY(true));
 
 #define NREQUESTS 8

@@ -39,6 +39,7 @@
 #endif
 
 #include <libkern/tree.h>
+#include <mach/shared_region.h>
 
 struct _vm_map;
 struct vm_map_entry;
@@ -59,6 +60,16 @@ RB_HEAD( rb_head, vm_map_store );
 #include <vm/vm_map_store_ll.h>
 #include <vm/vm_map_store_rb.h>
 
+/*
+ * GuardMalloc support:-
+ * Some of these entries are created with MAP_FIXED.
+ * Some are created with a very high hint address.
+ * So we use aliases and address ranges to make sure
+ * that those special regions (nano, jit etc) don't
+ * result in our highest hint being set to near
+ * the end of the map and future alloctions getting
+ * KERN_NO_SPACE when running with guardmalloc.
+ */
 #define UPDATE_HIGHEST_ENTRY_END(map, highest_entry)                    \
 	MACRO_BEGIN                                                     \
 	struct _vm_map*	UHEE_map;                                       \
@@ -67,7 +78,17 @@ RB_HEAD( rb_head, vm_map_store );
 	assert(UHEE_map->disable_vmentry_reuse);                        \
 	assert(!UHEE_map->is_nested_map);                               \
 	UHEE_entry = (highest_entry);                                   \
-	if( UHEE_map->highest_entry_end < UHEE_entry->vme_end) {        \
+	int UHEE_alias = VME_ALIAS(UHEE_entry); \
+	if(UHEE_alias != VM_MEMORY_MALLOC_NANO && \
+	   UHEE_alias != VM_MEMORY_MALLOC_TINY && \
+	   UHEE_alias != VM_MEMORY_MALLOC_SMALL && \
+	   UHEE_alias != VM_MEMORY_MALLOC_MEDIUM && \
+	   UHEE_alias != VM_MEMORY_MALLOC_LARGE && \
+	   UHEE_alias != VM_MEMORY_MALLOC_HUGE && \
+	   UHEE_entry->used_for_jit == 0 && \
+	   (UHEE_entry->vme_start < SHARED_REGION_BASE || \
+	   UHEE_entry->vme_start >= (SHARED_REGION_BASE + SHARED_REGION_SIZE)) && \
+	   UHEE_map->highest_entry_end < UHEE_entry->vme_end) {        \
 	        UHEE_map->highest_entry_end = UHEE_entry->vme_end;      \
 	}                                                               \
 	MACRO_END

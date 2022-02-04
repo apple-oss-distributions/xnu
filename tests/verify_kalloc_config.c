@@ -6,6 +6,8 @@
 
 T_GLOBAL_META(
 	T_META_NAMESPACE("xnu.vm"),
+	T_META_RADAR_COMPONENT_NAME("xnu"),
+	T_META_RADAR_COMPONENT_VERSION("zalloc"),
 	T_META_CHECK_LEAKS(false),
 	T_META_RUN_CONCURRENTLY(true)
 	);
@@ -24,6 +26,8 @@ run_test(void)
 	mach_memory_info_t *wiredInfo = NULL;
 	unsigned int wiredInfoCnt = 0;
 	const char kalloc_str[] = "kalloc.";
+	const char type_str[] = "type";
+	size_t kt_name_len = strlen(kalloc_str) + strlen(type_str);
 
 	kr = mach_memory_info(mach_host_self(),
 	    &name, &nameCnt, &info, &infoCnt,
@@ -33,9 +37,19 @@ run_test(void)
 
 	/* Match the names of the kalloc zones against their element sizes. */
 	for (i = 0; i < nameCnt; i++) {
-		if (strncmp(name[i].mzn_name, kalloc_str, strlen(kalloc_str)) == 0) {
-			size = strtoul(&(name[i].mzn_name[strlen(kalloc_str)]), NULL, 10);
-			T_LOG("ZONE NAME: %-25s ELEMENT SIZE: %llu", name[i].mzn_name, size);
+		const char *z_name = &name[i].mzn_name;
+		if (strncmp(z_name, kalloc_str, strlen(kalloc_str)) == 0) {
+			const char *size_ptr = &z_name[strlen(kalloc_str)];
+			/*
+			 * Adjust size pointer for kalloc type zones
+			 */
+			if (strlen(z_name) > kt_name_len &&
+			    strncmp(&z_name[strlen(kalloc_str)], type_str,
+			    strlen(type_str)) == 0) {
+				size_ptr = strchr(&z_name[kt_name_len], '.') + 1;
+			}
+			size = strtoul(size_ptr, NULL, 10);
+			T_LOG("ZONE NAME: %-25s ELEMENT SIZE: %llu", z_name, size);
 			T_QUIET; T_ASSERT_EQ(size, info[i].mzi_elem_size, "kalloc zone name and element size don't match");
 		}
 	}

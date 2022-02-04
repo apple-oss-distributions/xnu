@@ -73,32 +73,8 @@
 
 #include <net/raw_cb.h>
 
-decl_lck_mtx_data(, raw_mtx_data);       /*### global raw cb mutex for now */
-lck_mtx_t       *raw_mtx = &raw_mtx_data;
-lck_attr_t      *raw_mtx_attr;
-lck_grp_t       *raw_mtx_grp;
-lck_grp_attr_t  *raw_mtx_grp_attr;
-/*
- * Initialize raw connection block q.
- */
-void
-raw_init(struct protosw *pp, struct domain *dp)
-{
-#pragma unused(pp, dp)
-	static int raw_initialized = 0;
-
-	/* This is called by key_init as well, so do it only once */
-	if (!raw_initialized) {
-		raw_initialized = 1;
-
-		raw_mtx_grp_attr = lck_grp_attr_alloc_init();
-		raw_mtx_grp = lck_grp_alloc_init("rawcb", raw_mtx_grp_attr);
-		raw_mtx_attr = lck_attr_alloc_init();
-
-		lck_mtx_init(raw_mtx, raw_mtx_grp, raw_mtx_attr);
-		LIST_INIT(&rawcb_list);
-	}
-}
+static LCK_GRP_DECLARE(raw_mtx_grp, "rawcb");
+LCK_MTX_DECLARE(raw_mtx, &raw_mtx_grp);   /*### global raw cb mutex for now */
 
 
 /*
@@ -124,7 +100,7 @@ raw_input(struct mbuf *m0, struct sockproto *proto, struct sockaddr *src,
 //####LD calls from the output (locked) path need to make sure the socket is not locked when
 //####LD we call in raw_input
 	last = NULL;
-	lck_mtx_lock(raw_mtx);
+	lck_mtx_lock(&raw_mtx);
 	LIST_FOREACH(rp, &rawcb_list, list) {
 		if (rp->rcb_proto.sp_family != proto->sp_family) {
 			continue;
@@ -175,7 +151,7 @@ raw_input(struct mbuf *m0, struct sockproto *proto, struct sockaddr *src,
 	} else {
 		m_freem(m);
 	}
-	lck_mtx_unlock(raw_mtx);
+	lck_mtx_unlock(&raw_mtx);
 }
 
 /*ARGSUSED*/

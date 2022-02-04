@@ -27,6 +27,7 @@
  */
 
 #include <kern/assert.h>
+#include <kern/kpc.h>
 #include <kern/monotonic.h>
 #include <kern/thread.h>
 #include <machine/atomic.h>
@@ -303,7 +304,7 @@ mt_mtc_update_fixed_counts(struct mt_cpu *mtc, uint64_t *counts,
 		return;
 	}
 
-	for (int i = 0; i < MT_CORE_NFIXED; i++) {
+	for (int i = 0; i < (int) kpc_fixed_count(); i++) {
 		uint64_t last_delta;
 		uint64_t count;
 
@@ -451,6 +452,24 @@ mt_cur_cpu_cycles(void)
 }
 
 void
+mt_cur_cpu_cycles_instrs_speculative(uint64_t *cycles, __unused uint64_t *instrs)
+{
+	uint64_t counts[MT_CORE_NFIXED];
+	struct mt_cpu *mtc = mt_cur_cpu();
+
+	assert(ml_get_interrupts_enabled() == FALSE);
+	assert(mtc != NULL);
+
+	mt_mtc_update_fixed_counts(mtc, counts, NULL);
+
+	*cycles = counts[MT_CORE_CYCLES];
+
+#ifdef MT_CORE_INSTRS
+	*instrs = counts[MT_CORE_INSTRS];
+#endif
+}
+
+void
 mt_update_task(task_t task, thread_t thread)
 {
 	task_lock_assert_owned(task);
@@ -494,6 +513,30 @@ mt_perfcontrol(uint64_t *instrs, uint64_t *cycles)
 #endif /* !defined(MT_CORE_INSTRS) */
 
 	*cycles = mtc->mtc_snaps[MT_CORE_CYCLES];
+}
+
+bool
+mt_acquire_counters(void)
+{
+	if (kpc_get_force_all_ctrs()) {
+		return false;
+	}
+	kpc_force_all_ctrs(current_task(), 1);
+	return true;
+}
+
+bool
+mt_owns_counters(void)
+{
+	return kpc_get_force_all_ctrs();
+}
+
+void
+mt_release_counters(void)
+{
+	if (kpc_get_force_all_ctrs()) {
+		kpc_force_all_ctrs(current_task(), 0);
+	}
 }
 
 void

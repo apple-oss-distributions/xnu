@@ -39,7 +39,6 @@
 
 #define NDRTI_ZONE_NAME "nd6_route_info"        /* zone name */
 
-extern lck_mtx_t *nd6_mutex;
 static struct nd_route_info *nd6_rti_lookup(struct nd_route_info *);
 
 static ZONE_DECLARE(ndrti_zone, "nd6_route_info",

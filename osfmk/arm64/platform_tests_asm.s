@@ -29,11 +29,3 @@
 #include <arm64/asm.h>
 #include <pexpert/arm64/board_config.h>
 
-#if HAS_TWO_STAGE_SPR_LOCK
-	.text
-	.align 2
-	.globl EXT(arm64_msr_lock_test)
-LEXT(arm64_msr_lock_test)
-	msr		ARM64_REG_HID8, x0
-	ret
-#endif

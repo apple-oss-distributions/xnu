@@ -7,6 +7,7 @@
 #include <cassert>
 #include <cstddef>
 #include <cstdlib>
+#include <cstring>
 
 namespace {
 struct assert_trapping_policy {
@@ -22,6 +23,14 @@ struct malloc_allocator {
 	allocate(size_t n)
 	{
 		return std::malloc(n);
+	}
+
+	static void*
+	allocate_zero(size_t n)
+	{
+		const auto result = malloc_allocator::allocate(n);
+		std::memset(result, 0, n);
+		return result;
 	}
 
 	static void
@@ -51,6 +60,14 @@ struct tracking_allocator {
 		did_allocate = true;
 		allocated_size = n;
 		return std::malloc(n);
+	}
+
+	static void*
+	allocate_zero(std::size_t n)
+	{
+		const auto result = tracking_allocator::allocate(n);
+		std::memset(result, 0, n);
+		return result;
 	}
 
 	static void

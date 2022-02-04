@@ -86,7 +86,7 @@ typedef union cpxunion {
 ZONE_DECLARE(cpx_zone, "cpx",
     sizeof(struct fcpx), ZC_ZFREE_CLEARMEM);
 ZONE_DECLARE(aes_ctz_zone, "AES ctx",
-    sizeof(aes_encrypt_ctx), ZC_ZFREE_CLEARMEM | ZC_NOENCRYPT);
+    sizeof(aes_encrypt_ctx), ZC_ZFREE_CLEARMEM);
 
 // Note: see struct fcpx defined in sys/cprotect.h
 

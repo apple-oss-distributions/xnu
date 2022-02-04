@@ -418,7 +418,6 @@ __NKE_API_DEPRECATED;
 extern void sock_close(socket_t so)
 __NKE_API_DEPRECATED;
 
-#ifdef KERNEL_PRIVATE
 /*
  *       @function sock_retain
  *       @discussion Prevents the socket from closing
@@ -429,7 +428,8 @@ __NKE_API_DEPRECATED;
  *               that socket. It is used in conjunction with
  *               sock_release(socket_t so).
  */
-extern void sock_retain(socket_t so);
+extern void sock_retain(socket_t so)
+__NKE_API_DEPRECATED;
 
 /*
  *       @function sock_release
@@ -439,8 +439,8 @@ extern void sock_retain(socket_t so);
  *               on a socket acquired with sock_retain. When the last retain
  *               count is reached, this will call sock_close to close the socket.
  */
-extern void sock_release(socket_t so);
-#endif /* KERNEL_PRIVATE */
+extern void sock_release(socket_t so)
+__NKE_API_DEPRECATED;
 
 /*!
  *       @function sock_setpriv

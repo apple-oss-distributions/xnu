@@ -74,7 +74,6 @@
 #include <mach/thread_act.h>
 #include <mach/task_special_ports.h>
 #include <mach/vm_param.h>
-#include <ipc/ipc_init.h>
 #include <kern/assert.h>
 #include <kern/mach_param.h>
 #include <kern/misc_protos.h>
@@ -118,6 +117,7 @@
 #include <machine/commpage.h>
 #include <machine/machine_routines.h>
 #include <libkern/version.h>
+#include <pexpert/device_tree.h>
 #include <sys/codesign.h>
 #include <sys/kdebug.h>
 #include <sys/random.h>
@@ -169,6 +169,10 @@ extern void vnguard_policy_init(void);
 #include <kern/hv_support.h>
 #endif
 
+#if CONFIG_UBSAN_MINIMAL
+#include <san/ubsan_minimal.h>
+#endif
+
 #include <san/kasan.h>
 
 #include <i386/pmCPU.h>
@@ -197,7 +201,6 @@ void scale_setup(void);
 extern void bsd_scale_setup(int);
 extern unsigned int semaphore_max;
 extern void stackshot_init(void);
-extern void ktrace_init(void);
 
 /*
  *	Running in virtual memory, on the interrupt stack.
@@ -215,9 +218,7 @@ SECURITY_READ_ONLY_LATE(startup_subsystem_id_t) startup_phase = STARTUP_SUB_NONE
 
 extern int serverperfmode;
 
-#if DEBUG || DEVELOPMENT
 TUNABLE(startup_debug_t, startup_debug, "startup_debug", 0);
-#endif
 
 /* size of kernel trace buffer, disabled by default */
 TUNABLE(unsigned int, new_nkdbufs, "trace", 0);
@@ -288,18 +289,67 @@ kernel_startup_bootstrap(void)
 	qsort(startup_entries, n, sizeof(struct startup_entry), startup_entry_cmp);
 
 	/*
-	 * Then initialize all tunables, and early locks
+	 * Then initialize all tunables, timeouts, and early locks
 	 */
 	kernel_startup_initialize_upto(STARTUP_SUB_LOCKS_EARLY);
 }
 
 __startup_func
-extern void
+void
 kernel_startup_tunable_init(const struct startup_tunable_spec *spec)
 {
-	if (PE_parse_boot_argn(spec->name, spec->var_addr, spec->var_len)) {
+	if (spec->var_is_str) {
+		PE_parse_boot_arg_str(spec->name, spec->var_addr, spec->var_len);
+	} else if (PE_parse_boot_argn(spec->name, spec->var_addr, spec->var_len)) {
 		if (spec->var_is_bool) {
 			/* make sure bool's are valued in {0, 1} */
+			*(bool *)spec->var_addr = *(uint8_t *)spec->var_addr;
+		}
+	}
+}
+
+__startup_func
+void
+kernel_startup_tunable_dt_init(const struct startup_tunable_dt_spec *spec)
+{
+	DTEntry base;
+
+	if (SecureDTLookupEntry(NULL, spec->dt_base, &base) != kSuccess) {
+		base = NULL;
+	}
+
+	bool found_in_chosen = false;
+
+	if (spec->dt_chosen_override) {
+		DTEntry chosen, chosen_base;
+
+		if (SecureDTLookupEntry(NULL, "chosen", &chosen) != kSuccess) {
+			chosen = NULL;
+		}
+
+		if (chosen != NULL && SecureDTLookupEntry(chosen, spec->dt_base, &chosen_base) == kSuccess) {
+			base = chosen_base;
+			found_in_chosen = true;
+		}
+	}
+
+	uint64_t const *data;
+	unsigned int data_size = spec->var_len;
+
+	if (base != NULL && SecureDTGetProperty(base, spec->dt_name, (const void **)&data, &data_size) == kSuccess) {
+		if (data_size != spec->var_len) {
+			panic("unexpected tunable size %u in DT entry %s/%s/%s",
+			    data_size, found_in_chosen ? "/chosen" : "", spec->dt_base, spec->dt_name);
+		}
+
+		/* No need to handle bools specially, they are 1 byte integers in the DT. */
+		memcpy(spec->var_addr, data, spec->var_len);
+	}
+
+	/* boot-arg overrides. */
+
+	if (PE_parse_boot_argn(spec->boot_arg_name, spec->var_addr, spec->var_len)) {
+		if (spec->var_is_bool) {
 			*(bool *)spec->var_addr = *(uint8_t *)spec->var_addr;
 		}
 	}
@@ -310,6 +360,7 @@ kernel_startup_log(startup_subsystem_id_t subsystem)
 {
 	static const char *names[] = {
 		[STARTUP_SUB_TUNABLES] = "tunables",
+		[STARTUP_SUB_TIMEOUTS] = "timeouts",
 		[STARTUP_SUB_LOCKS_EARLY] = "locks_early",
 		[STARTUP_SUB_KPRINTF] = "kprintf",
 
@@ -324,6 +375,8 @@ kernel_startup_log(startup_subsystem_id_t subsystem)
 		[STARTUP_SUB_CODESIGNING] = "codesigning",
 		[STARTUP_SUB_OSLOG] = "oslog",
 		[STARTUP_SUB_MACH_IPC] = "mach_ipc",
+		[STARTUP_SUB_THREAD_CALL] = "thread_call",
+		[STARTUP_SUB_SYSCTL] = "sysctl",
 		[STARTUP_SUB_EARLY_BOOT] = "early_boot",
 
 		/* LOCKDOWN is special and its value won't fit here. */
@@ -391,7 +444,17 @@ kernel_bootstrap(void)
 	machine_info.major_version = version_major;
 	machine_info.minor_version = version_minor;
 
+#if CONFIG_ATM
+	/* Initialize the Activity Trace Resource Manager. */
+	kernel_bootstrap_log("atm_init");
+	atm_init();
+#endif
 	kernel_startup_initialize_upto(STARTUP_SUB_OSLOG);
+
+#if CONFIG_UBSAN_MINIMAL
+	kernel_bootstrap_log("UBSan minimal runtime init");
+	ubsan_minimal_init();
+#endif
 
 #if KASAN
 	kernel_bootstrap_log("kasan_late_init");
@@ -479,11 +542,6 @@ kernel_bootstrap(void)
 	kernel_bootstrap_log("turnstiles_init");
 	turnstiles_init();
 
-#if CONFIG_ATM
-	/* Initialize the Activity Trace Resource Manager. */
-	kernel_bootstrap_log("atm_init");
-	atm_init();
-#endif
 	kernel_bootstrap_log("mach_init_activity_id");
 	mach_init_activity_id();
 
@@ -493,9 +551,6 @@ kernel_bootstrap(void)
 
 	kernel_bootstrap_log("ipc_pthread_priority_init");
 	ipc_pthread_priority_init();
-
-	/* initialize the corpse config based on boot-args */
-	corpses_init();
 
 	/* initialize host_statistics */
 	host_statistics_init();
@@ -517,11 +572,8 @@ kernel_bootstrap(void)
 	result = kernel_thread_create((thread_continue_t)kernel_bootstrap_thread, NULL, MAXPRI_KERNEL, &thread);
 
 	if (result != KERN_SUCCESS) {
-		panic("kernel_bootstrap: result = %08X\n", result);
+		panic("kernel_bootstrap: result = %08X", result);
 	}
-
-	/* The static init_thread is re-used as the bootstrap thread */
-	assert(thread == current_thread());
 
 	/* TODO: do a proper thread_start() (without the thread_setrun()) */
 	thread->state = TH_RUN;
@@ -540,6 +592,9 @@ SECURITY_READ_ONLY_LATE(vm_offset_t) buf_kernel_addrperm;
 SECURITY_READ_ONLY_LATE(vm_offset_t) vm_kernel_addrperm_ext;
 SECURITY_READ_ONLY_LATE(uint64_t) vm_kernel_addrhash_salt;
 SECURITY_READ_ONLY_LATE(uint64_t) vm_kernel_addrhash_salt_ext;
+
+extern void kdebug_lck_init(void);
+extern int create_buffers_triage(bool);
 
 /*
  * Now running in a thread.  Kick off other services,
@@ -571,21 +626,10 @@ kernel_bootstrap_thread(void)
 	kernel_bootstrap_thread_log("thread_daemon_init");
 	thread_daemon_init();
 
-	/* Create kernel map entry reserve */
-	vm_kernel_reserved_entry_init();
-
 	/*
 	 * Thread callout service.
 	 */
-	kernel_bootstrap_thread_log("thread_call_initialize");
-	thread_call_initialize();
-
-	/*
-	 * Work interval subsystem initialization.
-	 * Needs to be done once thread calls have been initialized.
-	 */
-	kernel_bootstrap_thread_log("work_interval_initialize");
-	work_interval_subsystem_init();
+	kernel_startup_initialize_upto(STARTUP_SUB_THREAD_CALL);
 
 	/*
 	 * Remain on current processor as
@@ -593,12 +637,6 @@ kernel_bootstrap_thread(void)
 	 */
 	kernel_bootstrap_thread_log("thread_bind");
 	thread_bind(processor);
-
-	/*
-	 * Initialize ipc thread call support.
-	 */
-	kernel_bootstrap_thread_log("ipc_thread_call_init");
-	ipc_thread_call_init();
 
 	/*
 	 * Kick off memory mapping adjustments.
@@ -642,26 +680,26 @@ kernel_bootstrap_thread(void)
 	bootprofile_init();
 #endif
 
-#if (defined(__i386__) || defined(__x86_64__)) && CONFIG_VMX
-	vmx_init();
-#endif
-
-	kernel_bootstrap_thread_log("ktrace_init");
-	ktrace_init();
-
 	char trace_typefilter[256] = {};
 	PE_parse_boot_arg_str("trace_typefilter", trace_typefilter,
 	    sizeof(trace_typefilter));
 #if KPERF
 	kperf_init();
 #endif /* KPERF */
+
+	/* Init the spinlocks contained in the kd_ctrl_page_XXX
+	 * structures because the kdebug system can try to use
+	 * it very early. Eg. tailspind->kdbg_disable_typefilter
+	 * even before create_buffers_trace() is called ie init-ing
+	 * there would be too late.
+	 */
+	kdebug_lck_init();
 	kdebug_init(new_nkdbufs, trace_typefilter,
 	    (trace_wrap ? KDOPT_WRAPPING : 0) | KDOPT_ATBOOT);
 
-#ifdef  MACH_BSD
-	kernel_bootstrap_log("bsd_early_init");
-	bsd_early_init();
-#endif
+	create_buffers_triage(TRUE /*early trace*/);
+
+	kernel_startup_initialize_upto(STARTUP_SUB_SYSCTL);
 
 #ifdef  IOKIT
 	kernel_bootstrap_log("PE_init_iokit");
@@ -708,6 +746,10 @@ kernel_bootstrap_thread(void)
 	sdt_early_init();
 #endif
 
+#ifndef BCM2837
+	kernel_bootstrap_log("trust_cache_init");
+	trust_cache_init();
+#endif
 
 	kernel_startup_initialize_upto(STARTUP_SUB_LOCKDOWN);
 
@@ -742,6 +784,15 @@ kernel_bootstrap_thread(void)
 	kernel_bootstrap_log("machine_lockdown");
 	machine_lockdown();
 
+#ifdef CONFIG_XNUPOST
+	kern_return_t result = kernel_list_tests();
+	result = kernel_do_post();
+	if (result != KERN_SUCCESS) {
+		panic("kernel_do_post: Tests failed with result = 0x%08x", result);
+	}
+	kernel_bootstrap_log("kernel_do_post - done");
+#endif /* CONFIG_XNUPOST */
+
 #ifdef  IOKIT
 	kernel_bootstrap_log("PE_lockdown_iokit");
 	PE_lockdown_iokit();
@@ -751,15 +802,6 @@ kernel_bootstrap_thread(void)
 	 * at the latest
 	 */
 	vm_set_restrictions(machine_info.max_cpus);
-
-#ifdef CONFIG_XNUPOST
-	kern_return_t result = kernel_list_tests();
-	result = kernel_do_post();
-	if (result != KERN_SUCCESS) {
-		panic("kernel_do_post: Tests failed with result = 0x%08x\n", result);
-	}
-	kernel_bootstrap_log("kernel_do_post - done");
-#endif /* CONFIG_XNUPOST */
 
 
 #if KPERF
@@ -914,6 +956,7 @@ load_context(
 	    ((thread->state & TH_IDLE) || (thread->bound_processor != PROCESSOR_NULL)) ? TH_BUCKET_SCHED_MAX : thread->th_sched_bucket);
 	processor->current_is_bound = thread->bound_processor != PROCESSOR_NULL;
 	processor->current_is_NO_SMT = false;
+	processor->current_is_eagerpreempt = false;
 #if CONFIG_THREAD_GROUPS
 	processor->current_thread_group = thread_group_get(thread);
 #endif
@@ -928,6 +971,11 @@ load_context(
 	timer_start(&processor->system_state, processor->last_dispatch);
 	processor->current_state = &processor->system_state;
 
+#if __AMP__
+	if (processor->processor_set->pset_cluster_type == PSET_AMP_P) {
+		timer_start(&thread->ptime, processor->last_dispatch);
+	}
+#endif
 
 	cpu_quiescent_counter_join(processor->last_dispatch);
 

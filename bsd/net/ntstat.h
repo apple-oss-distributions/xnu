@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2010-2017 Apple Inc. All rights reserved.
+ * Copyright (c) 2010-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -27,6 +27,7 @@
  */
 #ifndef __NTSTAT_H__
 #define __NTSTAT_H__
+#include <stdbool.h>
 #include <netinet/in.h>
 #include <net/if.h>
 #include <net/if_var.h>
@@ -349,7 +350,11 @@ enum{
 // Temporary properties of use for bringing up userland providers
 #define NSTAT_IFNET_ROUTE_VALUE_UNOBTAINABLE      0x2000
 #define NSTAT_IFNET_FLOWSWITCH_VALUE_UNOBTAINABLE 0x4000
+#define NSTAT_IFNET_IS_LLW               0x8000
 
+// Note that many usages of interface properties are constrained to be within a 16 bit field.
+// The following may be used if the properties are in a wider field, and is shorthand for WiFi and not AWDL or LLW..
+#define NSTAT_IFNET_IS_WIFI_INFRA        0x10000
 
 typedef enum {
 	NSTAT_PROVIDER_NONE           = 0
@@ -387,6 +392,22 @@ typedef struct nstat_tcp_add_param {
 		struct sockaddr_in6     v6;
 	} remote;
 } nstat_tcp_add_param;
+
+#define NSTAT_MAX_DOMAIN_NAME_LENGTH           256 /* As per RFC 2181 for full domain name */
+#define NSTAT_MAX_DOMAIN_OWNER_LENGTH          256
+#define NSTAT_MAX_DOMAIN_TRACKER_CONTEXT       256
+#define NSTAT_MAX_DOMAIN_ATTR_BUNDLE_ID        256
+
+typedef struct nstat_domain_info {
+	char            domain_name[NSTAT_MAX_DOMAIN_NAME_LENGTH];
+	char            domain_owner[NSTAT_MAX_DOMAIN_OWNER_LENGTH];
+	char            domain_tracker_ctxt[NSTAT_MAX_DOMAIN_TRACKER_CONTEXT];
+	char            domain_attributed_bundle_id[NSTAT_MAX_DOMAIN_ATTR_BUNDLE_ID];
+	bool            is_tracker;
+	bool            is_non_app_initiated;
+	bool            is_silent;
+	uint8_t         reserved[5];
+} nstat_domain_info __attribute__((aligned(sizeof(u_int64_t))));
 
 typedef struct nstat_tcp_descriptor {
 	u_int64_t       upid __attribute__((aligned(sizeof(u_int64_t))));
@@ -437,9 +458,9 @@ typedef struct nstat_tcp_descriptor {
 		// On armv7k, tcp_conn_status is 1 byte instead of 4
 		uint8_t                                 __pad_connstatus[4];
 	};
-	uint16_t        ifnet_properties        __attribute__((aligned(4)));
-
-	u_int8_t        reserved[6];
+	uint32_t        ifnet_properties        __attribute__((aligned(4)));
+	uint8_t         fallback_mode;
+	uint8_t         reserved[3];
 } nstat_tcp_descriptor;
 
 typedef struct nstat_tcp_add_param      nstat_udp_add_param;
@@ -476,9 +497,9 @@ typedef struct nstat_udp_descriptor {
 	uuid_t          euuid;
 	uuid_t          vuuid;
 	uuid_t          fuuid;
-	uint16_t        ifnet_properties;
-
-	u_int8_t        reserved[6];
+	uint32_t        ifnet_properties;
+	uint8_t         fallback_mode;
+	uint8_t         reserved[3];
 } nstat_udp_descriptor;
 
 /*
@@ -713,6 +734,7 @@ enum{
 	, NSTAT_MSG_TYPE_SRC_COUNTS          = 10004
 	, NSTAT_MSG_TYPE_SYSINFO_COUNTS      = 10005
 	, NSTAT_MSG_TYPE_SRC_UPDATE          = 10006
+	, NSTAT_MSG_TYPE_SRC_EXTENDED_UPDATE = 10007
 };
 
 enum{
@@ -741,10 +763,12 @@ enum{
 	, NSTAT_FILTER_ACCEPT_IS_NON_LOCAL    = 0x00001000
 	, NSTAT_FILTER_ACCEPT_ROUTE_VAL_ERR   = 0x00002000
 	, NSTAT_FILTER_ACCEPT_FLOWSWITCH_ERR  = 0x00004000
-	, NSTAT_FILTER_IFNET_FLAGS            = 0x0000FFFF
+	, NSTAT_FILTER_ACCEPT_WIFI_LLW        = 0x00008000
+	, NSTAT_FILTER_ACCEPT_WIFI_INFRA      = 0x00010000
+	, NSTAT_FILTER_IFNET_FLAGS            = 0x0001FFFF
 
-	, NSTAT_FILTER_UDP_INTERFACE_ATTACH   = 0x00010000
-	, NSTAT_FILTER_UDP_FLAGS              = 0x00010000
+	, NSTAT_FILTER_UDP_INTERFACE_ATTACH   = 0x00020000
+	, NSTAT_FILTER_UDP_FLAGS              = 0x00020000
 
 	, NSTAT_FILTER_TCP_INTERFACE_ATTACH   = 0x00040000
 	, NSTAT_FILTER_TCP_NO_EARLY_CLOSE     = 0x00080000
@@ -759,6 +783,7 @@ enum{
 	, NSTAT_FILTER_SPECIFIC_USER_BY_UUID  = 0x04000000
 	, NSTAT_FILTER_SPECIFIC_USER_BY_EUUID = 0x08000000
 	, NSTAT_FILTER_SPECIFIC_USER          = 0x0F000000
+	, NSTAT_FILTER_DOMAIN_INFO            = 0x10000000
 };
 
 enum{
@@ -913,6 +938,72 @@ typedef struct nstat_msg_src_update_convenient {
 	};
 } nstat_msg_src_update_convenient;
 
+
+/* Types of extended update information */
+enum{
+	NSTAT_EXTENDED_UPDATE_TYPE_UNKNOWN    = 0x00000000
+	, NSTAT_EXTENDED_UPDATE_TYPE_DOMAIN   = 0x00000001
+};
+
+typedef struct nstat_msg_src_extended_item_hdr {
+	u_int32_t       type;
+	u_int32_t       length;
+} nstat_msg_src_extended_item_hdr __attribute__((aligned(sizeof(u_int64_t))));;
+
+typedef struct nstat_msg_src_extended_item {
+	nstat_msg_src_extended_item_hdr         hdr;
+	u_int8_t                                data[];
+} nstat_msg_src_extended_item;
+
+typedef struct nstat_msg_src_extended_tcp_update {
+	nstat_msg_src_update_hdr                hdr;
+	nstat_tcp_descriptor                    tcp;
+	nstat_msg_src_extended_item_hdr         extension_hdr;
+	u_int8_t                                data[];
+} nstat_msg_src_extended_tcp_update;
+
+typedef struct nstat_msg_src_extended_udp_update {
+	nstat_msg_src_update_hdr                hdr;
+	nstat_udp_descriptor                    udp;
+	nstat_msg_src_extended_item_hdr         extension_hdr;
+	u_int8_t                                data[];
+} nstat_msg_src_extended_udp_update;
+
+typedef struct nstat_msg_src_extended_quic_update {
+	nstat_msg_src_update_hdr                hdr;
+	nstat_quic_descriptor                   quic;
+	nstat_msg_src_extended_item_hdr         extension_hdr;
+	u_int8_t                                data[];
+} nstat_msg_src_extended_quic_update;
+
+/* While the only type of extended update is for domain information, we can fully define the structure */
+typedef struct nstat_msg_src_tcp_update_domain_extension {
+	nstat_msg_src_update_hdr                hdr;
+	nstat_tcp_descriptor                    tcp;
+	nstat_msg_src_extended_item_hdr         extension_hdr;
+	nstat_domain_info                       domain_info;
+} nstat_msg_src_tcp_update_domain_extension;
+
+typedef struct nstat_msg_src_udp_update_domain_extension {
+	nstat_msg_src_update_hdr                hdr;
+	nstat_udp_descriptor                    udp;
+	nstat_msg_src_extended_item_hdr         extension_hdr;
+	nstat_domain_info                       domain_info;
+} nstat_msg_src_udp_update_domain_extension;
+
+typedef struct nstat_msg_src_quic_update_domain_extension {
+	nstat_msg_src_update_hdr                hdr;
+	nstat_quic_descriptor                   quic;
+	nstat_msg_src_extended_item_hdr         extension_hdr;
+	nstat_domain_info                       domain_info;
+} nstat_msg_src_quic_update_domain_extension;
+
+typedef struct nstat_msg_src_update_domain_extension_convenient {
+	nstat_msg_src_tcp_update_domain_extension       tcp;
+	nstat_msg_src_udp_update_domain_extension       udp;
+	nstat_msg_src_quic_update_domain_extension      quic;
+} nstat_msg_src_update_domain_extension_convenient;
+
 #undef NSTAT_SRC_UPDATE_FIELDS
 
 typedef struct nstat_msg_src_removed {
@@ -951,6 +1042,10 @@ struct nstat_stats {
 
 #ifdef XNU_KERNEL_PRIVATE
 #include <sys/mcache.h>
+
+#if (DEBUG || DEVELOPMENT)
+extern int nstat_test_privacy_transparency;
+#endif /* (DEBUG || DEVELOPMENT) */
 
 #pragma mark -- System Information Internal Support --
 
@@ -1138,6 +1233,7 @@ void nstat_ifnet_threshold_reached(unsigned int ifindex);
 
 void nstat_sysinfo_send_data(struct nstat_sysinfo_data *);
 
+int ntstat_tcp_progress_enable(struct sysctl_req *req);
 int ntstat_tcp_progress_indicators(struct sysctl_req *req);
 
 

@@ -88,7 +88,6 @@ SYSCTL_INT(_kern, OID_AUTO, nbuf, CTLFLAG_RD | CTLFLAG_LOCKED, &nbuf_headers, 0,
 SYSCTL_INT(_kern, OID_AUTO, maxnbuf, CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN, &max_nbuf_headers, 0, "");
 
 __private_extern__ int customnbuf = 0;
-int             ncl = 0;
 
 /* Indicates a server boot when set */
 TUNABLE(int, serverperfmode, "serverperfmode", 0);
@@ -241,7 +240,7 @@ bsd_bufferinit(void)
 	    &mb_map);
 
 	if (ret != KERN_SUCCESS) {
-		panic("Failed to allocate mb_map\n");
+		panic("Failed to allocate mb_map");
 	}
 #endif /* SOCKETS */
 
@@ -270,7 +269,7 @@ bsd_bufferinit(void)
 unsigned int
 bsd_mbuf_cluster_reserve(boolean_t *overridden)
 {
-	int mbuf_pool = 0;
+	int mbuf_pool = 0, ncl = 0;
 	static boolean_t was_overridden = FALSE;
 
 	/* If called more than once, return the previously calculated size */

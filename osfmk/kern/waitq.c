@@ -77,7 +77,7 @@
 #include <kern/turnstile.h>
 
 #include <os/hash.h>
-#include <libkern/OSAtomic.h>
+#include <libkern/section_keywords.h>
 #include <mach/sync_policy.h>
 #include <vm/vm_kern.h>
 
@@ -112,20 +112,6 @@
 #define wqerr(fmt, ...) \
 	printf("WQ[%s] ERROR: " fmt "\n", __func__, ## __VA_ARGS__)
 
-/*
- * file-static functions / data
- */
-static thread_t waitq_select_one_locked(struct waitq *waitq, event64_t event,
-    uint64_t *reserved_preposts,
-    int priority, spl_t *spl);
-
-static kern_return_t waitq_select_thread_locked(struct waitq *waitq,
-    event64_t event,
-    thread_t thread, spl_t *spl);
-
-ZONE_DECLARE(waitq_set_zone, "waitq sets",
-    sizeof(struct waitq_set), ZC_NOENCRYPT);
-
 /* waitq prepost cache */
 #define WQP_CACHE_MAX   50
 struct wqp_cache {
@@ -144,40 +130,64 @@ static __inline__ void waitq_grab_backtrace(uintptr_t bt[NWAITQ_BTFRAMES], int s
 
 LCK_GRP_DECLARE(waitq_lck_grp, "waitq");
 
-#if __arm64__
-
-#define waitq_lock_to(wq, to) \
-	(hw_lock_bit_to(&(wq)->waitq_interlock, LCK_ILOCK, to, &waitq_lck_grp))
-
-#define waitq_lock_unlock(wq) \
-	(hw_unlock_bit(&(wq)->waitq_interlock, LCK_ILOCK))
-
-#define waitq_lock_init(wq) \
-	(wq->waitq_interlock = 0)
-
-#else
-
-#define waitq_lock_to(wq, to) \
-	(hw_lock_to(&(wq)->waitq_interlock, to, &waitq_lck_grp))
-
-#define waitq_lock_unlock(wq) \
-	(hw_lock_unlock(&(wq)->waitq_interlock))
-
-#define waitq_lock_init(wq) \
-	(hw_lock_init(&(wq)->waitq_interlock))
-
-#endif  /* __arm64__ */
-
-/*
- * Prepost callback function for specially marked waitq sets
- * (prepost alternative)
- */
-extern void waitq_set__CALLING_PREPOST_HOOK__(waitq_set_prepost_hook_t *ctx);
-
 #define DEFAULT_MIN_FREE_TABLE_ELEM    100
 static uint32_t g_min_free_table_elem;
 static uint32_t g_min_free_cache;
 
+
+/* ----------------------------------------------------------------------
+ *
+ * waitq reference helpers
+ *
+ * ---------------------------------------------------------------------- */
+
+/* note: WAITQ_REF_NULL is considered a pointer */
+static inline bool
+wqr_is_ptr(waitq_ref_t ref)
+{
+	return (ref.wqr_value & 1) == 0;
+}
+
+__attribute__((overloadable))
+static inline waitq_ref_t
+wqr_make(const void *ptr)
+{
+	return (waitq_ref_t){ .wqr_value = (intptr_t)ptr };
+}
+
+__attribute__((overloadable))
+static inline waitq_ref_t
+wqr_make(uint64_t lid)
+{
+	return (waitq_ref_t){ .wqr_value = lid };
+}
+
+static inline bool
+wqr_is_equal(waitq_ref_t ref, uint64_t ltable_id)
+{
+	return ref.wqr_value == ltable_id;
+}
+
+static inline bool
+wqr_is_null(waitq_ref_t ref)
+{
+	return ref.wqr_value == 0;
+}
+
+static inline void *
+wqr_ptr_raw(waitq_ref_t ref)
+{
+	return (void *)(intptr_t)ref.wqr_value;
+}
+
+static inline void *
+wqr_ptr(waitq_ref_t ref)
+{
+	if (wqr_is_ptr(ref)) {
+		return wqr_ptr_raw(ref);
+	}
+	return NULL;
+}
 
 /* ----------------------------------------------------------------------
  *
@@ -187,8 +197,6 @@ static uint32_t g_min_free_cache;
 static struct link_table g_wqlinktable;
 
 enum wq_link_type {
-	WQL_ALL     = -1,
-	WQL_FREE    = LT_FREE,
 	WQL_WQS     = LT_ELEM,
 	WQL_LINK    = LT_LINK,
 };
@@ -198,16 +206,13 @@ struct waitq_link {
 
 	union {
 		/* wqt_type == WQL_WQS (LT_ELEM) */
-		struct {
-			struct waitq_set *wql_set;
-			/* uint64_t          sl_prepost_id; */
-		} wql_wqs;
+		struct waitq_set *wql_set;
 
 		/* wqt_type == WQL_LINK (LT_LINK) */
 		struct {
-			uint64_t          left_setid;
-			uint64_t          right_setid;
-		} wql_link;
+			waitq_ref_t   wql_next;
+			uint64_t      wql_node;
+		};
 	};
 #ifdef KEEP_WAITQ_LINK_STATS
 	thread_t  sl_alloc_th;
@@ -242,9 +247,12 @@ static_assert((sizeof(struct waitq_link) & (sizeof(struct waitq_link) - 1)) == 0
 	lt_bits_valid((link)->wqte.lt_bits)
 
 #define wql_setid wqte.lt_id
+#define wql_count wqte.lt_next_idx
 
 #define WQL_WQS_POISON         ((void *)(0xf00df00d))
 #define WQL_LINK_POISON        (0x0bad0badffffffffull)
+
+static KALLOC_TYPE_DEFINE(waitq_link_zone, struct waitq_link, KT_PRIV_ACCT);
 
 static void
 wql_poison(struct link_table *table, struct lt_elem *elem)
@@ -254,11 +262,11 @@ wql_poison(struct link_table *table, struct lt_elem *elem)
 
 	switch (wql_type(link)) {
 	case WQL_WQS:
-		link->wql_wqs.wql_set = WQL_WQS_POISON;
+		link->wql_set = WQL_WQS_POISON;
 		break;
 	case WQL_LINK:
-		link->wql_link.left_setid = WQL_LINK_POISON;
-		link->wql_link.right_setid = WQL_LINK_POISON;
+		link->wql_next.wqr_value = WQL_LINK_POISON;
+		link->wql_node = WQL_LINK_POISON;
 		break;
 	default:
 		break;
@@ -354,22 +362,6 @@ wql_init(void)
 	    sizeof(struct waitq_link), wql_poison);
 }
 
-static void
-wql_ensure_free_space(void)
-{
-	if (g_wqlinktable.nelem - g_wqlinktable.used_elem < g_min_free_table_elem) {
-		/*
-		 * we don't hold locks on these values, so check for underflow
-		 */
-		if (g_wqlinktable.used_elem <= g_wqlinktable.nelem) {
-			wqdbg_v("Forcing table growth: nelem=%d, used=%d, min_free=%d",
-			    g_wqlinktable.nelem, g_wqlinktable.used_elem,
-			    g_min_free_table_elem);
-			ltable_grow(&g_wqlinktable, g_min_free_table_elem);
-		}
-	}
-}
-
 static struct waitq_link *
 wql_alloc_link(int type)
 {
@@ -401,13 +393,22 @@ wql_invalidate(struct waitq_link *link)
 	wql_do_invalidate_stats(&link->wqte);
 }
 
+static bool
+wql_link_valid(uint64_t setid)
+{
+	return ltable_elem_valid(&g_wqlinktable, setid);
+}
+
 static struct waitq_link *
 wql_get_link(uint64_t setid)
 {
 	struct lt_elem *elem;
 
 	elem = ltable_get_elem(&g_wqlinktable, setid);
-	return (struct waitq_link *)elem;
+	if (!elem) {
+		return NULL;
+	}
+	return __container_of(elem, struct waitq_link, wqte);
 }
 
 static void
@@ -419,192 +420,89 @@ wql_put_link(struct waitq_link *link)
 	ltable_put_elem(&g_wqlinktable, (struct lt_elem *)link);
 }
 
-static struct waitq_link *
-wql_get_reserved(uint64_t setid, int type)
-{
-	struct lt_elem *elem;
-
-	elem = lt_elem_list_first(&g_wqlinktable, setid);
-	if (!elem) {
-		return NULL;
-	}
-	ltable_realloc_elem(&g_wqlinktable, elem, type);
-	return (struct waitq_link *)elem;
-}
-
-
-static inline int waitq_maybe_remove_link(struct waitq *waitq,
-    uint64_t setid,
-    struct waitq_link *parent,
-    struct waitq_link *left,
-    struct waitq_link *right);
-
-enum {
-	LINK_WALK_ONE_LEVEL = 0,
-	LINK_WALK_FULL_DAG  = 1,
-	LINK_WALK_FULL_DAG_UNLOCKED = 2,
-};
-
-typedef int (*wql_callback_func)(struct waitq *waitq, void *ctx,
-    struct waitq_link *link);
-
-/**
- * walk_waitq_links: walk all table elements (of type 'link_type') pointed to by 'setid'
+/*
+ * waitq links form a list hanging from the waitq `waitq_set_id` field.
  *
- * Conditions:
- *	waitq is locked (or NULL)
- *	'setid' is managed by 'waitq'
- *		this could be direct (waitq->waitq_set_id == setid)
- *		OR indirect (setid is the left/right ID in a LINK chain,
- *		             whose root is waitq->waitq_set_id)
+ * When the waitq is member of 0 or 1 set, it looks like this:
  *
- * Notes:
- *	This function uses recursion to walk the set of table elements
- *	pointed to by 'setid'. For each element encountered, 'cb' will be
- *	called. If non-zero, the return value of this callback function can
- *	early-out of the table walk.
+ *      ┌───────────────┐
+ *      │               │
+ *      │ waitq_set_id  ┼───> set or WAITQ_REF_NULL
+ *      │               │
+ *      └───────────────┘
  *
- *	For each link element encountered, the function takes a reference to
- *	it. The reference is dropped only after the callback and any recursion
- *	has completed.
+ * When the waitq is member of 2 or more sets, then it looks like this:
  *
- *	The assumed table/link/tree structure:
- *                   'setid'
- *                   /    \
- *                  /      \
- *              L(LINK)     R(LINK)
- *               /\             /\
- *              /  \           /  \
- *             /    \       Rl(*)  Rr(*)
- *         Ll(*)  Lr(*)      /\    /\
- *           /\     /\    ... ... ... ...
- *        ...  ... ... ...
- *                    \
- *                    WQS(wqset_q.waitq_setid == Sx)
- *                    [waitq set is a membet of setid, 'Sx')
+ *      ┌───────────────┐
+ *      │               │
+ *      │ waitq_set_id  │
+ *      │               │
+ *      └───────┼───────┘
+ *              │
+ *              v
+ *        ┌───────────┐   ┌───────────┐   ┌───────────┐
+ *        │ wql_count │   │           │   │           │
+ *        │ wql_next  ┼──>│ wql_next  ┼──>│ wql_next  ┼──────┐
+ *        │ wql_node  │   │ wql_node  │   │ wql_node  │      │
+ *        └─────┼─────┘   └─────┼─────┘   └─────┼─────┘      │
+ *              │               │               │            │
+ *              v               v               v            v
+ *             set             set             set          set
  *
- *                    'Sx'
- *                   /    \
- *                  /      \
- *              L(LINK)     R(LINK)
- *               /\             /\
- *             ... ...        ... ...
  *
- *	The basic algorithm is as follows:
- *	*) take a reference to the table object pointed to by 'setid'
- *	*) if appropriate, call 'cb' (potentially early-out on non-zero return)
- *	*) if the link object points to a waitq set, and the walk type
- *	   is 'FULL_DAG' (full directed-acyclic-graph), then try to lock
- *	   the associated waitq set object and recursively walk all sets to
- *	   which that set belongs. This is a DFS of the tree structure.
- *	*) recurse down the left side of the tree (following the
- *	   'left_setid' pointer in the link object
- *	*) recurse down the right side of the tree (following the
- *	   'right_setid' pointer in the link object
+ * when WQL_LINK elements are used that way, they are never made valid,
+ * and have their refcount to 1. No one should try to resolve those
+ * using ltable_get_elem().
  */
-static __attribute__((noinline))
-int
-walk_waitq_links(int walk_type, struct waitq *waitq,
-    uint64_t setid, int link_type,
-    void *ctx, wql_callback_func cb)
+#define waitq_foreach_link(it, ref) \
+	for (struct waitq_link *it = wqr_ptr(ref); it; it = wqr_ptr(it->wql_next))
+
+#define waitq_foreach_link_safe(it, ref) \
+	for (struct waitq_link *__tmp_##it = NULL, *it = wqr_ptr(ref); \
+	    (it ? (__tmp_##it = wqr_ptr(it->wql_next), 1) : 0); \
+	    it = __tmp_##it)
+
+static int
+__wql_found_set(uint64_t setid, int (^cb)(struct waitq_link *))
 {
-	struct waitq_link *link;
-	uint64_t nextid;
-	int wqltype;
+	struct waitq_link *link = wql_get_link(setid);
+	int ret = WQ_ITERATE_CONTINUE;
 
-	link = wql_get_link(setid);
-
-	/* invalid link */
-	if (!link) {
-		return WQ_ITERATE_CONTINUE;
+	if (link) {
+		ret = cb(link);
+		wql_put_link(link);
 	}
 
-	setid = nextid = 0;
-	wqltype = wql_type(link);
-	if (wqltype == WQL_LINK) {
-		setid  = link->wql_link.left_setid;
-		nextid = link->wql_link.right_setid;
-	}
-
-	/*
-	 * Make the callback only on specified link_type (or all links)
-	 * Note that after the callback, the link object may be
-	 * invalid. The only valid thing we can do is put our
-	 * reference to it (which may put it back on the free list)
-	 */
-	if (link_type == WQL_ALL || link_type == wqltype) {
-		/* allow the callback to early-out */
-		int ret = cb(waitq, ctx, link);
-		if (ret != WQ_ITERATE_CONTINUE) {
-			wql_put_link(link);
-			return ret;
-		}
-	}
-
-	if (wqltype == WQL_WQS &&
-	    (walk_type == LINK_WALK_FULL_DAG ||
-	    walk_type == LINK_WALK_FULL_DAG_UNLOCKED)) {
-		/*
-		 * Recurse down any sets to which this wait queue set was
-		 * added.  We do this just before we put our reference to
-		 * the link object (which may free it).
-		 */
-		struct waitq_set *wqset = link->wql_wqs.wql_set;
-		int ret = WQ_ITERATE_CONTINUE;
-		int should_unlock = 0;
-		uint64_t wqset_setid = 0;
-
-		if (waitq_set_is_valid(wqset) && walk_type == LINK_WALK_FULL_DAG) {
-			assert(!waitq_irq_safe(&wqset->wqset_q));
-			waitq_set_lock(wqset);
-			should_unlock = 1;
-		}
-
-		/*
-		 * verify the linked waitq set as it could have been
-		 * invalidated before we grabbed the lock!
-		 */
-		if (wqset->wqset_id != link->wql_setid.id) {
-			/* This is the bottom of the tree: just get out */
-			if (should_unlock) {
-				waitq_set_unlock(wqset);
-			}
-			wql_put_link(link);
-			return WQ_ITERATE_CONTINUE;
-		}
-
-		wqset_setid = wqset->wqset_q.waitq_set_id;
-
-		if (wqset_setid > 0) {
-			ret = walk_waitq_links(walk_type, &wqset->wqset_q,
-			    wqset_setid, link_type, ctx, cb);
-		}
-		if (should_unlock) {
-			waitq_set_unlock(wqset);
-		}
-		if (ret != WQ_ITERATE_CONTINUE) {
-			wql_put_link(link);
-			return ret;
-		}
-	}
-
-	wql_put_link(link);
-
-	/* recurse down left side of the tree */
-	if (setid) {
-		int ret = walk_waitq_links(walk_type, waitq, setid, link_type, ctx, cb);
-		if (ret != WQ_ITERATE_CONTINUE) {
-			return ret;
-		}
-	}
-
-	/* recurse down right side of the tree */
-	if (nextid) {
-		return walk_waitq_links(walk_type, waitq, nextid, link_type, ctx, cb);
-	}
-
-	return WQ_ITERATE_CONTINUE;
+	return ret;
 }
+
+static int
+wql_walk_sets(struct waitq *waitq, int (^cb)(struct waitq_link *))
+{
+	waitq_ref_t root_ref = waitq->waitq_set_id;
+	int ret = WQ_ITERATE_CONTINUE;
+
+	if (wqr_is_null(root_ref)) {
+		return ret;
+	}
+
+	if (!wqr_is_ptr(root_ref)) {
+		return __wql_found_set(root_ref.wqr_value, cb);
+	}
+
+	waitq_foreach_link(link, root_ref) {
+		ret = __wql_found_set(link->wql_node, cb);
+		if (ret != WQ_ITERATE_CONTINUE) {
+			return ret;
+		}
+		if (!wqr_is_ptr(link->wql_next)) {
+			return __wql_found_set(link->wql_next.wqr_value, cb);
+		}
+	}
+
+	__builtin_unreachable();
+}
+
 
 /* ----------------------------------------------------------------------
  *
@@ -757,12 +655,13 @@ wq_prepost_refill_cpu_cache(uint32_t nalloc)
 	/* check once more before putting these elements on the list */
 	if (cache->avail >= WQP_CACHE_MAX) {
 		lt_elem_list_release(&g_prepost_table, new_head, LT_RESERVED);
-		enable_preemption();
-		return;
+		goto out;
 	}
 
+	assert((cache->avail == 0) == (cache->head == 0));
+
 	cache->avail += nalloc;
-	if (cache->head == 0 || cache->head == LT_IDX_MAX) {
+	if (cache->head == 0) {
 		cache->head = new_head->lt_id.id;
 		goto out;
 	}
@@ -773,7 +672,6 @@ wq_prepost_refill_cpu_cache(uint32_t nalloc)
 
 out:
 	enable_preemption();
-	return;
 }
 
 static void
@@ -857,12 +755,12 @@ wq_prepost_alloc(int type, int nelem)
 		}
 		assert(nalloc == 0);
 		if (!next) {
-			cache->head = LT_IDX_MAX;
+			cache->head = 0;
 		} else {
 			cache->head = next->lt_id.id;
 		}
 		/* assert that we don't have mis-matched book keeping */
-		assert(!(cache->head == LT_IDX_MAX && cache->avail > 0));
+		assert((cache->avail == 0) == (cache->head == 0));
 		enable_preemption();
 		elem = first;
 		goto out;
@@ -940,7 +838,7 @@ wq_prepost_get_rnext(struct wq_prepost *head)
 static void
 wq_prepost_reset_rnext(struct wq_prepost *wqp)
 {
-	(void)lt_elem_list_break(&g_prepost_table, &wqp->wqte);
+	wqp->wqte.lt_next_idx = LT_IDX_MAX;
 }
 
 
@@ -957,16 +855,15 @@ wq_prepost_reset_rnext(struct wq_prepost *wqp)
  *	consumed as well (if the list contained only 2 objects)
  */
 static int
-wq_prepost_remove(struct waitq_set *wqset,
-    struct wq_prepost *wqp)
+wq_prepost_remove(struct waitq_set *wqset, struct wq_prepost *wqp)
 {
 	int more_posts = 1;
 	uint64_t next_id = wqp->wqp_post.wqp_next_id;
 	uint64_t wqp_id = wqp->wqp_prepostid.id;
 	struct wq_prepost *prev_wqp, *next_wqp;
 
+	assert(wqset->wqset_q.waitq_portset);
 	assert(wqp_type(wqp) == WQP_POST);
-	assert(wqset->wqset_q.waitq_prepost == 1);
 
 	if (next_id == wqp_id) {
 		/* the list is singular and becoming empty */
@@ -1059,7 +956,7 @@ wq_prepost_release_rlist(struct wq_prepost *wqp)
 	cache = PERCPU_GET(wqp_cache);
 	if (cache->avail < WQP_CACHE_MAX) {
 		struct lt_elem *tmp = NULL;
-		if (cache->head != LT_IDX_MAX) {
+		if (cache->head != 0) {
 			tmp = lt_elem_list_first(&g_prepost_table, cache->head);
 		}
 		nelem = lt_elem_list_link(&g_prepost_table, elem, tmp);
@@ -1079,10 +976,7 @@ wq_prepost_release_rlist(struct wq_prepost *wqp)
 #endif
 }
 
-typedef int (*wqp_callback_func)(struct waitq_set *wqset,
-    void *ctx,
-    struct wq_prepost *wqp,
-    struct waitq *waitq);
+typedef int (^wqp_callback_t)(struct wq_prepost *wqp, struct waitq *waitq);
 
 /**
  * iterate over a chain of preposts associated with a waitq set.
@@ -1096,15 +990,15 @@ typedef int (*wqp_callback_func)(struct waitq_set *wqset,
  *	want this extra processing, you can use wq_prepost_iterate().
  */
 static int
-wq_prepost_foreach_locked(struct waitq_set *wqset,
-    void *ctx, wqp_callback_func cb)
+wq_prepost_foreach_locked(struct waitq_set *wqset, wqp_callback_t cb)
 {
 	int ret = WQ_ITERATE_SUCCESS;
 	struct wq_prepost *wqp, *tmp_wqp;
 
 	assert(cb != NULL);
+	assert(wqset->wqset_q.waitq_portset);
 
-	if (!wqset || !waitq_set_maybe_preposted(wqset)) {
+	if (!wqset->wqset_prepost_id) {
 		return WQ_ITERATE_SUCCESS;
 	}
 
@@ -1122,7 +1016,7 @@ restart:
 	if (wqp_type(wqp) == WQP_WQ) {
 		uint64_t __assert_only wqp_id = wqp->wqp_prepostid.id;
 
-		ret = cb(wqset, ctx, wqp, wqp->wqp_wq.wqp_wq_ptr);
+		ret = cb(wqp, wqp->wqp_wq.wqp_wq_ptr);
 
 		switch (ret) {
 		case WQ_ITERATE_INVALIDATE_CONTINUE:
@@ -1188,7 +1082,7 @@ restart:
 		 * drop the lock on our waitq set. We need to re-validate
 		 * our state when this function returns.
 		 */
-		ret = cb(wqset, ctx, wqp, tmp_wqp->wqp_wq.wqp_wq_ptr);
+		ret = cb(wqp, tmp_wqp->wqp_wq.wqp_wq_ptr);
 		wq_prepost_put(tmp_wqp);
 
 		switch (ret) {
@@ -1275,8 +1169,7 @@ finish_prepost_foreach:
  *	you can use: wq_prepost_foreach_locked().
  */
 static int
-wq_prepost_iterate(uint64_t prepost_id,
-    void *ctx, wqp_callback_func cb)
+wq_prepost_iterate(uint64_t prepost_id, wqp_callback_t cb)
 {
 	int ret;
 	struct wq_prepost *wqp;
@@ -1291,11 +1184,7 @@ wq_prepost_iterate(uint64_t prepost_id,
 	}
 
 	if (wqp_type(wqp) == WQP_WQ) {
-		ret = WQ_ITERATE_SUCCESS;
-		if (cb) {
-			ret = cb(NULL, ctx, wqp, wqp->wqp_wq.wqp_wq_ptr);
-		}
-
+		ret = cb(wqp, wqp->wqp_wq.wqp_wq_ptr);
 		if (ret != WQ_ITERATE_DROPPED) {
 			wq_prepost_put(wqp);
 		}
@@ -1322,9 +1211,7 @@ wq_prepost_iterate(uint64_t prepost_id,
 			wq = tmp_wqp->wqp_wq.wqp_wq_ptr;
 		}
 
-		if (cb) {
-			ret = cb(NULL, ctx, wqp, wq);
-		}
+		ret = cb(wqp, wq);
 		if (tmp_wqp) {
 			wq_prepost_put(tmp_wqp);
 		}
@@ -1360,32 +1247,6 @@ wq_prepost_iterate(uint64_t prepost_id,
 }
 
 
-struct _is_posted_ctx {
-	struct waitq *posting_wq;
-	int did_prepost;
-};
-
-static int
-wq_is_preposted_on_set_cb(struct waitq_set *wqset, void *ctx,
-    struct wq_prepost *wqp, struct waitq *waitq)
-{
-	struct _is_posted_ctx *pctx = (struct _is_posted_ctx *)ctx;
-
-	(void)wqset;
-	(void)wqp;
-
-	/*
-	 * Don't early-out, run through the _entire_ list:
-	 * This ensures that we retain a minimum number of invalid elements.
-	 */
-	if (pctx->posting_wq == waitq) {
-		pctx->did_prepost = 1;
-	}
-
-	return WQ_ITERATE_CONTINUE;
-}
-
-
 /**
  * checks if 'waitq' has already preposted on 'wqset'
  *
@@ -1398,11 +1259,12 @@ wq_is_preposted_on_set_cb(struct waitq_set *wqset, void *ctx,
  *
  * Returns non-zero if 'waitq' has already preposted to 'wqset'
  */
-static int
+static bool
 wq_is_preposted_on_set(struct waitq *waitq, struct waitq_set *wqset)
 {
-	int ret;
-	struct _is_posted_ctx pctx;
+	__block bool did_prepost = false;
+
+	assert(wqset->wqset_q.waitq_portset);
 
 	/*
 	 * If the set's only prepost matches the waitq's prepost ID,
@@ -1410,15 +1272,19 @@ wq_is_preposted_on_set(struct waitq *waitq, struct waitq_set *wqset)
 	 */
 	if (waitq->waitq_prepost_id != 0 &&
 	    wqset->wqset_prepost_id == waitq->waitq_prepost_id) {
-		return 1;
+		return true;
 	}
 
 	/* use full prepost iteration: always trim the list */
-	pctx.posting_wq = waitq;
-	pctx.did_prepost = 0;
-	ret = wq_prepost_foreach_locked(wqset, (void *)&pctx,
-	    wq_is_preposted_on_set_cb);
-	return pctx.did_prepost;
+	wq_prepost_foreach_locked(wqset,
+	    ^(struct wq_prepost *wqp __unused, struct waitq *found_wq) {
+		if (found_wq == waitq) {
+		        did_prepost = true;
+		}
+		return WQ_ITERATE_CONTINUE;
+	});
+
+	return did_prepost;
 }
 
 static struct wq_prepost *
@@ -1471,6 +1337,11 @@ wq_prepost_do_post_locked(struct waitq_set *wqset,
 	struct wq_prepost *wqp_post, *wqp_head, *wqp_tail;
 
 	assert(waitq_held(waitq) && waitq_held(&wqset->wqset_q));
+
+	if (!wqset->wqset_q.waitq_portset) {
+		wqset->wqset_prepost_id = WQSET_PREPOSTED_ANON;
+		return;
+	}
 
 	/*
 	 * nothing to do if it's already preposted:
@@ -1615,8 +1486,6 @@ wq_prepost_do_post_locked(struct waitq_set *wqset,
 	    "new_prepost:0x%llx->0x%llx", wqset->wqset_id,
 	    wqset->wqset_prepost_id, wqp_head->wqp_prepostid.id,
 	    wqp_post->wqp_prepostid.id, wqp_post->wqp_post.wqp_next_id);
-
-	return;
 }
 
 
@@ -1670,13 +1539,13 @@ waitq_prepost_stats(struct wq_table_stats *stats)
  * ---------------------------------------------------------------------- */
 
 static struct waitq g_boot_waitq;
-static struct waitq *global_waitqs = &g_boot_waitq;
-static uint32_t g_num_waitqs = 1;
+static SECURITY_READ_ONLY_LATE(struct waitq *) global_waitqs = &g_boot_waitq;
+static SECURITY_READ_ONLY_LATE(uint32_t) g_num_waitqs = 1;
 
 /*
  * Zero out the used MSBs of the event.
  */
-#define _CAST_TO_EVENT_MASK(event)   ((uintptr_t)(event) & ((1ul << _EVENT_MASK_BITS) - 1ul))
+#define _CAST_TO_EVENT_MASK(event)   ((waitq_flags_t)(event) & ((1ul << _EVENT_MASK_BITS) - 1ul))
 
 static __inline__ uint32_t
 waitq_hash(char *key, size_t length)
@@ -1714,7 +1583,7 @@ waitq_grab_backtrace(uintptr_t bt[NWAITQ_BTFRAMES], int skip)
 		skip = 0;
 	}
 	memset(buf, 0, (NWAITQ_BTFRAMES + skip) * sizeof(uintptr_t));
-	backtrace(buf, g_nwaitq_btframes + skip, NULL);
+	backtrace(buf, g_nwaitq_btframes + skip, NULL, NULL);
 	memcpy(&bt[0], &buf[skip], NWAITQ_BTFRAMES * sizeof(uintptr_t));
 }
 #else /* no stats */
@@ -1753,12 +1622,17 @@ waitq_stats_count_wait(struct waitq *waitq)
 }
 
 static __inline__ void
-waitq_stats_count_wakeup(struct waitq *waitq)
+waitq_stats_count_wakeup(struct waitq *waitq, int n)
 {
 	struct wq_stats *wqs = waitq_global_stats(waitq);
 	if (wqs != NULL) {
-		wqs->wakeups++;
-		waitq_grab_backtrace(wqs->last_wakeup, 2);
+		if (n > 0) {
+			wqs->wakeups += n;
+			waitq_grab_backtrace(wqs->last_wakeup, 2);
+		} else {
+			wqs->failed_wakeups++;
+			waitq_grab_backtrace(wqs->last_failed_wakeup, 2);
+		}
 	}
 }
 
@@ -1772,45 +1646,31 @@ waitq_stats_count_clear_wakeup(struct waitq *waitq)
 		waitq_grab_backtrace(wqs->last_wakeup, 2);
 	}
 }
-
-static __inline__ void
-waitq_stats_count_fail(struct waitq *waitq)
-{
-	struct wq_stats *wqs = waitq_global_stats(waitq);
-	if (wqs != NULL) {
-		wqs->failed_wakeups++;
-		waitq_grab_backtrace(wqs->last_failed_wakeup, 2);
-	}
-}
 #else /* !CONFIG_WAITQ_STATS */
 #define waitq_stats_count_wait(q)         do { } while (0)
-#define waitq_stats_count_wakeup(q)       do { } while (0)
+#define waitq_stats_count_wakeup(q, n)    do { } while (0)
 #define waitq_stats_count_clear_wakeup(q) do { } while (0)
-#define waitq_stats_count_fail(q)         do { } while (0)
 #endif
 
-int
+bool
 waitq_is_valid(struct waitq *waitq)
 {
-	return (waitq != NULL) && waitq->waitq_isvalid;
+	return waitq_valid(waitq);
 }
 
-int
+bool
 waitq_set_is_valid(struct waitq_set *wqset)
 {
-	return (wqset != NULL) && wqset->wqset_q.waitq_isvalid && waitqs_is_set(wqset);
+	return waitq_valid(&wqset->wqset_q) && waitqs_is_set(wqset);
 }
 
-int
+bool
 waitq_is_global(struct waitq *waitq)
 {
-	if (waitq >= global_waitqs && waitq < global_waitqs + g_num_waitqs) {
-		return 1;
-	}
-	return 0;
+	return waitq >= global_waitqs && waitq < global_waitqs + g_num_waitqs;
 }
 
-int
+bool
 waitq_irq_safe(struct waitq *waitq)
 {
 	/* global wait queues have this bit set on initialization */
@@ -1864,36 +1724,69 @@ waitq_hash_size(void)
 static_assert(MAXPRI <= UINT8_MAX);
 
 static inline void
-waitq_thread_insert(struct waitq *wq,
-    thread_t thread, boolean_t fifo)
+waitq_thread_insert(struct waitq *safeq, thread_t thread,
+    struct waitq *wq, event64_t event)
 {
-	if (waitq_is_turnstile_queue(wq)) {
+	if (waitq_is_turnstile_queue(safeq)) {
 		turnstile_stats_update(0, TSU_TURNSTILE_BLOCK_COUNT, NULL);
-		turnstile_waitq_add_thread_priority_queue(wq, thread);
+		turnstile_waitq_add_thread_priority_queue(safeq, thread);
 	} else {
 		turnstile_stats_update(0, TSU_REGULAR_WAITQ_BLOCK_COUNT, NULL);
-		if (fifo) {
-			enqueue_tail(&wq->waitq_queue, &thread->wait_links);
+		/*
+		 * Realtime threads get priority for wait queue placements.
+		 * This allows wait_queue_wakeup_one to prefer a waiting
+		 * realtime thread, similar in principle to performing
+		 * a wait_queue_wakeup_all and allowing scheduler prioritization
+		 * to run the realtime thread, but without causing the
+		 * lock contention of that scenario.
+		 */
+		if (thread->sched_pri >= BASEPRI_REALTIME ||
+		    !safeq->waitq_fifo ||
+		    thread->options & TH_OPT_VMPRIV) {
+			enqueue_head(&safeq->waitq_queue, &thread->wait_links);
 		} else {
-			enqueue_head(&wq->waitq_queue, &thread->wait_links);
+			enqueue_tail(&safeq->waitq_queue, &thread->wait_links);
 		}
 	}
+
+	/* mark the event and real waitq, even if enqueued on a global safeq */
+	thread->wait_event = event;
+	thread->waitq = wq;
+}
+
+/**
+ * clear the thread-related waitq state
+ *
+ * Conditions:
+ *	'thread' is locked
+ */
+static inline void
+thread_clear_waitq_state(thread_t thread)
+{
+	thread->waitq = NULL;
+	thread->wait_event = NO_EVENT64;
+	thread->at_safe_point = FALSE;
 }
 
 static inline void
-waitq_thread_remove(struct waitq *wq,
-    thread_t thread)
+waitq_thread_remove(struct waitq *wq, thread_t thread)
 {
 	if (waitq_is_turnstile_queue(wq)) {
 		KERNEL_DEBUG_CONSTANT_IST(KDEBUG_TRACE,
-		    (TURNSTILE_CODE(TURNSTILE_HEAP_OPERATIONS, (THREAD_REMOVED_FROM_TURNSTILE_WAITQ))) | DBG_FUNC_NONE,
+		    (TURNSTILE_CODE(TURNSTILE_HEAP_OPERATIONS,
+		    (THREAD_REMOVED_FROM_TURNSTILE_WAITQ))) | DBG_FUNC_NONE,
 		    VM_KERNEL_UNSLIDE_OR_PERM(waitq_to_turnstile(wq)),
-		    thread_tid(thread),
-		    0, 0, 0);
-		priority_queue_remove(&wq->waitq_prio_queue, &thread->wait_prioq_links);
+		    thread_tid(thread), 0, 0, 0);
+		priority_queue_remove(&wq->waitq_prio_queue,
+		    &thread->wait_prioq_links);
 	} else {
-		remqueue(&(thread->wait_links));
+		remqueue(&thread->wait_links);
+		if (waitq_is_global(wq) && waitq_empty(wq)) {
+			wq->waitq_eventmask = 0;
+		}
 	}
+
+	thread_clear_waitq_state(thread);
 }
 
 void
@@ -1980,35 +1873,66 @@ waitq_bootstrap(void)
  */
 /* For x86, the hardware timeout is in TSC units. */
 #if defined(__i386__) || defined(__x86_64__)
-#define hwLockTimeOut LockTimeOutTSC
+#define waitq_timeout (2 * LockTimeOutTSC)
 #else
-#define hwLockTimeOut LockTimeOut
+#define waitq_timeout (2 * os_atomic_load(&LockTimeOut, relaxed))
 #endif
+
+static hw_lock_timeout_status_t
+waitq_timeout_handler(void *_lock, uint64_t timeout, uint64_t start, uint64_t now, uint64_t interrupt_time)
+{
+#pragma unused(interrupt_time)
+
+	lck_spinlock_to_info_t lsti;
+	hw_lck_ticket_t *lck = _lock;
+	hw_lck_ticket_t tmp;
+	struct waitq  *wq = __container_of(lck, struct waitq, waitq_interlock);
+
+	if (machine_timeout_suspended()) {
+		return HW_LOCK_TIMEOUT_CONTINUE;
+	}
+
+	lsti = lck_spinlock_timeout_hit(lck, 0);
+	tmp.tcurnext = os_atomic_load(&lck->tcurnext, relaxed);
+
+	panic("waitq(%p) lock timeout after %llu ticks; cpu=%d, "
+	    "cticket: 0x%x, nticket: 0x%x, waiting for 0x%x"
+#if INTERRUPT_MASKED_DEBUG
+	    "interrupt time: %llu, "
+#endif /* INTERRUPT_MASKED_DEBUG */
+	    "start time: %llu, now: %llu, timeout: %llu",
+	    wq, now - start, cpu_number(),
+	    tmp.cticket, tmp.nticket, lsti->extra,
+#if INTERRUPT_MASKED_DEBUG
+	    interrupt_time,
+#endif /* INTERRUPT_MASKED_DEBUG */
+	    start, now, timeout);
+}
 
 void
 waitq_lock(struct waitq *wq)
 {
-	if (__improbable(waitq_lock_to(wq,
-	    hwLockTimeOut * 2) == 0)) {
-		boolean_t wql_acquired = FALSE;
-
-		while (machine_timeout_suspended()) {
-			mp_enable_preemption();
-			wql_acquired = waitq_lock_to(wq,
-			    hwLockTimeOut * 2);
-			if (wql_acquired) {
-				break;
-			}
-		}
-		if (wql_acquired == FALSE) {
-			panic("waitq deadlock - waitq=%p, cpu=%d\n",
-			    wq, cpu_number());
-		}
-	}
+	(void)hw_lck_ticket_lock_to(&wq->waitq_interlock,
+	    waitq_timeout, waitq_timeout_handler, &waitq_lck_grp);
 #if defined(__x86_64__)
 	pltrace(FALSE);
 #endif
-	assert(waitq_held(wq));
+}
+
+bool
+waitq_lock_allow_invalid(struct waitq *wq)
+{
+	hw_lock_status_t rc;
+
+	rc = hw_lck_ticket_lock_allow_invalid(&wq->waitq_interlock,
+	    waitq_timeout, waitq_timeout_handler, &waitq_lck_grp);
+
+#if defined(__x86_64__)
+	if (rc == HW_LOCK_ACQUIRED) {
+		pltrace(FALSE);
+	}
+#endif
+	return rc == HW_LOCK_ACQUIRED;
 }
 
 void
@@ -2018,80 +1942,79 @@ waitq_unlock(struct waitq *wq)
 #if defined(__x86_64__)
 	pltrace(TRUE);
 #endif
-	waitq_lock_unlock(wq);
+	hw_lck_ticket_unlock(&wq->waitq_interlock);
 }
 
 
-/**
- * clear the thread-related waitq state
- *
- * Conditions:
- *	'thread' is locked
- */
-static inline void
-thread_clear_waitq_state(thread_t thread)
-{
-	thread->waitq = NULL;
-	thread->wait_event = NO_EVENT64;
-	thread->at_safe_point = FALSE;
-}
-
-
-typedef thread_t (*waitq_select_cb)(void *ctx, struct waitq *waitq,
-    int is_global, thread_t thread);
+typedef thread_t (^waitq_select_cb)(struct waitq *waitq, thread_t thread);
 
 struct waitq_select_args {
 	/* input parameters */
-	struct waitq    *posted_waitq;
-	struct waitq    *waitq;
 	event64_t        event;
 	waitq_select_cb  select_cb;
-	void            *select_ctx;
-	int             priority;
+	int              priority;
+	wait_result_t    result;
+	waitq_options_t  options;
 
 	uint64_t        *reserved_preposts;
 
 	/* output parameters */
-	queue_t       threadq;
-	int           max_threads;
-	int          *nthreads;
-	spl_t        *spl;
+	queue_head_t     threadq;
+	uint32_t         max_threads;
+	uint32_t         nthreads;
+	spl_t            spl;
 };
 
-static void do_waitq_select_n_locked(struct waitq_select_args *args);
+static void do_waitq_select_n_locked(struct waitq *, struct waitq_select_args *args);
+static void waitq_select_queue_flush(struct waitq *, struct waitq_select_args *args);
 
 /**
  * callback invoked once for every waitq set to which a waitq belongs
  *
  * Conditions:
- *	ctx->posted_waitq is locked
+ *	the posted waitq is locked.
  *	'link' points to a valid waitq set
  *
  * Notes:
  *	Takes the waitq set lock on the set pointed to by 'link'
- *	Calls do_waitq_select_n_locked() which could recurse back into
- *	this function if the waitq set is a member of other sets.
+ *	Calls do_waitq_select_n_locked().
  *	If no threads were selected, it preposts the input waitq
  *	onto the waitq set pointed to by 'link'.
  */
 static int
-waitq_select_walk_cb(struct waitq *waitq, void *ctx,
-    struct waitq_link *link)
+waitq_select_walk_cb(struct waitq_link *link, struct waitq *waitq,
+    struct waitq_select_args *args)
 {
+	struct waitq_set *wqset = link->wql_set;
 	int ret = WQ_ITERATE_CONTINUE;
-	struct waitq_select_args args = *((struct waitq_select_args *)ctx);
-	struct waitq_set *wqset;
 
-	(void)waitq;
-	assert(wql_type(link) == WQL_WQS);
-
-	wqset = link->wql_wqs.wql_set;
-	args.waitq = &wqset->wqset_q;
-
-	assert(!waitq_irq_safe(waitq));
 	assert(!waitq_irq_safe(&wqset->wqset_q));
 
-	waitq_set_lock(wqset);
+	if (queue_empty(&args->threadq)) {
+		waitq_set_lock(wqset);
+	} else if (!waitq_set_lock_try(wqset)) {
+		/*
+		 * We are holding several thread locks,
+		 * and failed to acquire this waitq set lock.
+		 *
+		 * It is possible that another core is holding that
+		 * (non IRQ-safe) waitq set lock, while an interrupt
+		 * is trying to grab the thread lock of ones of those threads.
+		 *
+		 * In order to avoid deadlocks, let's flush out the queue
+		 * of threads, and then we know we're safe.
+		 *
+		 * Note: this code will never run if `max_threads` is 1
+		 *       because we should not even reach this point.
+		 *
+		 *       It is critical because the `identify` variants
+		 *       will not want their queue flushed.
+		 */
+		assert(args->max_threads > 1);
+		waitq_select_queue_flush(waitq, args);
+		waitq_set_lock(wqset);
+	}
+
 	/*
 	 * verify that the link wasn't invalidated just before
 	 * we were able to take the lock.
@@ -2103,62 +2026,21 @@ waitq_select_walk_cb(struct waitq *waitq, void *ctx,
 	assert(waitqs_is_linked(wqset));
 
 	/*
-	 * Find any threads waiting on this wait queue set,
-	 * and recurse into any waitq set to which this set belongs.
+	 * Find any threads waiting on this wait queue set.
 	 */
-	do_waitq_select_n_locked(&args);
+	do_waitq_select_n_locked(&wqset->wqset_q, args);
 
-	if (*args.nthreads > 0 || (args.threadq && !queue_empty(args.threadq))) {
-		/* at least 1 thread was selected and returned: don't prepost */
-		if (args.max_threads > 0 && *args.nthreads >= args.max_threads) {
-			/* break out of the setid walk */
-			ret = WQ_ITERATE_FOUND;
+	if (args->nthreads == 0 && args->event == NO_EVENT64) {
+		/* No thread selected: prepost 'waitq' to 'wqset' */
+		wq_prepost_do_post_locked(wqset, waitq, args->reserved_preposts);
+
+		/* If this is a port-set, callout to the IPC subsystem */
+		if (wqset->wqset_q.waitq_portset) {
+			ipc_pset_prepost(wqset, waitq);
 		}
-	} else if (args.event == NO_EVENT64) {
-		/*
-		 * No thread selected: prepost 'waitq' to 'wqset'
-		 * if wqset can handle preposts and the event is set to 0.
-		 * We also make sure to not post waitq sets to other sets.
-		 *
-		 * If the set doesn't support preposts, but does support
-		 * prepost callout/hook interaction, invoke the predefined
-		 * callout function and pass the set's 'prepost_hook.' This
-		 * could potentially release another thread to handle events.
-		 */
-		if (waitq_set_can_prepost(wqset)) {
-			wq_prepost_do_post_locked(
-				wqset, waitq, args.reserved_preposts);
-		} else if (waitq_set_has_prepost_hook(wqset)) {
-			waitq_set_prepost_hook_t *hook = wqset->wqset_prepost_hook;
-
-			/*
-			 * When calling out to the prepost hook,
-			 * we drop the waitq lock, to allow for the kevent
-			 * subsytem to call into the waitq subsystem again,
-			 * without risking a deadlock.
-			 *
-			 * However, we need to guard against wqset going away,
-			 * so we increment the prepost hook use count
-			 * while the lock is dropped.
-			 *
-			 * This lets waitq_set_deinit() know to wait for the
-			 * prepost hook call to be done before it can proceed.
-			 *
-			 * Note: we need to keep preemption disabled the whole
-			 * time as waitq_set_deinit will spin on this.
-			 */
-
-			disable_preemption();
-			os_atomic_add(hook, (uint16_t)1, relaxed);
-			waitq_set_unlock(wqset);
-
-			waitq_set__CALLING_PREPOST_HOOK__(hook);
-
-			/* Note: after this decrement, the wqset may be deallocated */
-			os_atomic_add(hook, (uint16_t)-1, relaxed);
-			enable_preemption();
-			return ret;
-		}
+	} else if (args->nthreads >= args->max_threads) {
+		/* break out of the setid walk */
+		ret = WQ_ITERATE_FOUND;
 	}
 
 out_unlock:
@@ -2170,7 +2052,7 @@ out_unlock:
  * Routine to iterate over the waitq for non-priority ordered waitqs
  *
  * Conditions:
- *	args->waitq (and args->posted_waitq) is locked
+ *	args->waitq (and the posted waitq) is locked
  *
  * Notes:
  *	Uses the optional select callback function to refine the selection
@@ -2183,11 +2065,8 @@ out_unlock:
  */
 static thread_t
 waitq_queue_iterate_locked(struct waitq *safeq, struct waitq *waitq,
-    spl_t spl, struct waitq_select_args *args,
-    uint32_t *remaining_eventmask)
+    struct waitq_select_args *args, waitq_flags_t *remaining_eventmask)
 {
-	int max_threads = args->max_threads;
-	int *nthreads = args->nthreads;
 	thread_t thread = THREAD_NULL;
 	thread_t first_thread = THREAD_NULL;
 
@@ -2209,27 +2088,23 @@ waitq_queue_iterate_locked(struct waitq *safeq, struct waitq *waitq,
 
 			/* allow the caller to futher refine the selection */
 			if (args->select_cb) {
-				t = args->select_cb(args->select_ctx, waitq,
-				    waitq_is_global(waitq), thread);
+				t = args->select_cb(waitq, thread);
 			}
 			if (t != THREAD_NULL) {
-				*nthreads += 1;
-				if (args->threadq) {
-					/* if output queue, add locked thread to it */
-					if (*nthreads == 1) {
-						*(args->spl) = (safeq != waitq) ? spl : splsched();
-					}
-					thread_lock(t);
-					thread_clear_waitq_state(t);
-					re_queue_tail(args->threadq, &t->wait_links);
+				args->nthreads += 1;
+				if (args->nthreads == 1 && safeq == waitq) {
+					args->spl = splsched();
 				}
+				thread_lock(t);
+				thread_clear_waitq_state(t);
+				re_queue_tail(&args->threadq, &t->wait_links);
 				/* only enqueue up to 'max' threads */
-				if (*nthreads >= max_threads && max_threads > 0) {
+				if (args->nthreads >= args->max_threads) {
 					break;
 				}
 			}
 		}
-		/* thread wasn't selected so track it's event */
+		/* thread wasn't selected so track its event */
 		if (t == THREAD_NULL) {
 			*remaining_eventmask |= (thread->waitq != safeq) ?
 			    _CAST_TO_EVENT_MASK(thread->waitq) : _CAST_TO_EVENT_MASK(thread->wait_event);
@@ -2243,7 +2118,7 @@ waitq_queue_iterate_locked(struct waitq *safeq, struct waitq *waitq,
  * Routine to iterate and remove threads from priority ordered waitqs
  *
  * Conditions:
- *	args->waitq (and args->posted_waitq) is locked
+ *	args->waitq (and the posted waitq) is locked
  *
  * Notes:
  *	The priority ordered waitqs only support maximum priority element removal.
@@ -2264,45 +2139,27 @@ waitq_queue_iterate_locked(struct waitq *safeq, struct waitq *waitq,
  */
 static thread_t
 waitq_prioq_iterate_locked(struct waitq *safeq, struct waitq *waitq,
-    spl_t spl, struct waitq_select_args *args,
-    uint32_t *remaining_eventmask)
+    struct waitq_select_args *args, waitq_flags_t *remaining_eventmask)
 {
-	int max_threads = args->max_threads;
-	int *nthreads = args->nthreads;
 	thread_t first_thread = THREAD_NULL;
 	thread_t thread = THREAD_NULL;
 
 	/*
-	 * The waitq select routines need to handle two cases:
-	 * Case 1: Peek at maximum priority thread in the waitq (remove_op = 0)
-	 *         Get the maximum priority thread from the waitq without removing it.
-	 *         In that case args->threadq == NULL and max_threads == 1.
-	 * Case 2: Remove 'n' highest priority threads from waitq (remove_op = 1)
-	 *         Get max_threads (if available) while removing them from the waitq.
-	 *         In that case args->threadq != NULL and max_threads is one of {-1, 1}.
-	 *
 	 * The only possible values for remaining_eventmask for the priority queue
 	 * waitq are either 0 (for the remove all threads case) or the original
 	 * safeq->waitq_eventmask (for the lookup/remove one thread cases).
 	 */
 	*remaining_eventmask = safeq->waitq_eventmask;
-	boolean_t remove_op = !!(args->threadq);
 
-	while ((max_threads <= 0) || (*nthreads < max_threads)) {
+	while (args->nthreads < args->max_threads) {
 		if (priority_queue_empty(&(safeq->waitq_prio_queue))) {
 			*remaining_eventmask = 0;
 			break;
 		}
 
-		if (remove_op) {
-			thread = priority_queue_remove_max(&safeq->waitq_prio_queue,
-			    struct thread, wait_prioq_links);
-		} else {
-			/* For the peek operation, the only valid value for max_threads is 1 */
-			assert(max_threads == 1);
-			thread = priority_queue_max(&safeq->waitq_prio_queue,
-			    struct thread, wait_prioq_links);
-		}
+		thread = priority_queue_remove_max(&safeq->waitq_prio_queue,
+		    struct thread, wait_prioq_links);
+
 		/*
 		 * Ensure the wait event matches since priority ordered waitqs do not
 		 * support multiple events in the same waitq.
@@ -2315,21 +2172,8 @@ waitq_prioq_iterate_locked(struct waitq *safeq, struct waitq *waitq,
 			 * updates the select_ctx with information about the highest priority
 			 * thread which is eventually used by the caller.
 			 */
-			thread_t __assert_only ret_thread = args->select_cb(args->select_ctx, waitq,
-			    waitq_is_global(waitq), thread);
-			if (!remove_op) {
-				/* For the peek operation, the thread should not be selected for addition */
-				assert(ret_thread == THREAD_NULL);
-			} else {
-				/*
-				 * For the remove operation, the select routine should always return a valid
-				 * thread for priority waitqs. Since all threads in a prioq are equally
-				 * eligible, it should match the thread removed from the prioq. If this
-				 * invariant changes, the implementation would need to handle the
-				 * remaining_eventmask here correctly.
-				 */
-				assert(ret_thread == thread);
-			}
+			thread_t __assert_only ret_thread = args->select_cb(waitq, thread);
+			assert(ret_thread == thread);
 		}
 
 		if (first_thread == THREAD_NULL) {
@@ -2338,24 +2182,22 @@ waitq_prioq_iterate_locked(struct waitq *safeq, struct waitq *waitq,
 			 * turnstile_kernel_update_inheritor_on_wake_locked will lock
 			 * first_thread, so call it before locking it.
 			 */
-			if (args->priority == WAITQ_PROMOTE_ON_WAKE && first_thread != THREAD_NULL && waitq_is_turnstile_queue(safeq)) {
-				turnstile_kernel_update_inheritor_on_wake_locked(waitq_to_turnstile(safeq), (turnstile_inheritor_t)first_thread, TURNSTILE_INHERITOR_THREAD);
+			if (args->priority == WAITQ_PROMOTE_ON_WAKE &&
+			    first_thread != THREAD_NULL &&
+			    waitq_is_turnstile_queue(safeq)) {
+				turnstile_kernel_update_inheritor_on_wake_locked(waitq_to_turnstile(safeq),
+				    (turnstile_inheritor_t)first_thread, TURNSTILE_INHERITOR_THREAD);
 			}
 		}
 
-		/* For the peek operation, break out early */
-		if (!remove_op) {
-			break;
-		}
-
 		/* Add the thread to the result thread list */
-		*nthreads += 1;
-		if (*nthreads == 1) {
-			*(args->spl) = (safeq != waitq) ? spl : splsched();
+		args->nthreads += 1;
+		if (args->nthreads == 1 && safeq == waitq) {
+			args->spl = splsched();
 		}
 		thread_lock(thread);
 		thread_clear_waitq_state(thread);
-		enqueue_tail(args->threadq, &(thread->wait_links));
+		enqueue_tail(&args->threadq, &(thread->wait_links));
 	}
 
 	return first_thread;
@@ -2365,7 +2207,7 @@ waitq_prioq_iterate_locked(struct waitq *safeq, struct waitq *waitq,
  * generic thread selection from a waitq (and sets to which the waitq belongs)
  *
  * Conditions:
- *	args->waitq (and args->posted_waitq) is locked
+ *	'waitq' (and the posted waitq) is locked
  *
  * Notes:
  *	Uses the optional select callback function to refine the selection
@@ -2378,18 +2220,12 @@ waitq_prioq_iterate_locked(struct waitq *safeq, struct waitq *waitq,
  *	be used in a call to splx() if threads are returned to the caller.
  */
 static void
-do_waitq_select_n_locked(struct waitq_select_args *args)
+do_waitq_select_n_locked(struct waitq *waitq, struct waitq_select_args *args)
 {
-	struct waitq *waitq = args->waitq;
-	int max_threads = args->max_threads;
 	thread_t first_thread = THREAD_NULL;
 	struct waitq *safeq;
-	uint32_t remaining_eventmask = 0;
-	uint32_t eventmask;
-	int *nthreads = args->nthreads;
-	spl_t spl = 0;
-
-	assert(max_threads != 0);
+	waitq_flags_t remaining_eventmask = 0;
+	waitq_flags_t eventmask;
 
 	if (!waitq_irq_safe(waitq)) {
 		/* JMM - add flag to waitq to avoid global lookup if no waiters */
@@ -2404,8 +2240,8 @@ do_waitq_select_n_locked(struct waitq_select_args *args)
 			goto handle_waitq_set;
 		}
 
-		if (*nthreads == 0) {
-			spl = splsched();
+		if (args->nthreads == 0) {
+			args->spl = splsched();
 		}
 		waitq_lock(safeq);
 	} else {
@@ -2422,12 +2258,10 @@ do_waitq_select_n_locked(struct waitq_select_args *args)
 	    (safeq->waitq_eventmask & eventmask) == eventmask) {
 		if (waitq_is_turnstile_queue(safeq)) {
 			first_thread = waitq_prioq_iterate_locked(safeq, waitq,
-			    spl, args,
-			    &remaining_eventmask);
+			    args, &remaining_eventmask);
 		} else {
 			first_thread = waitq_queue_iterate_locked(safeq, waitq,
-			    spl, args,
-			    &remaining_eventmask);
+			    args, &remaining_eventmask);
 		}
 
 		/*
@@ -2442,7 +2276,7 @@ do_waitq_select_n_locked(struct waitq_select_args *args)
 		if (waitq_is_global(safeq)) {
 			if (waitq_empty(safeq)) {
 				safeq->waitq_eventmask = 0;
-			} else if (max_threads < 0 || *nthreads < max_threads) {
+			} else if (args->nthreads < args->max_threads) {
 				safeq->waitq_eventmask = remaining_eventmask;
 			}
 		}
@@ -2453,194 +2287,76 @@ do_waitq_select_n_locked(struct waitq_select_args *args)
 	 * We can guarantee that no one has manipulated this thread because
 	 * it's waiting on the given waitq, and we have that waitq locked.
 	 */
-	if (*nthreads == 0 && first_thread != THREAD_NULL && args->threadq) {
+	if (args->nthreads == 0 && first_thread != THREAD_NULL) {
 		/* we know this is the first (and only) thread */
-		++(*nthreads);
-		*(args->spl) = (safeq != waitq) ? spl : splsched();
+		args->nthreads += 1;
+		if (safeq == waitq) {
+			args->spl = splsched();
+		}
 
 		thread_lock(first_thread);
-		thread_clear_waitq_state(first_thread);
 		waitq_thread_remove(safeq, first_thread);
-		enqueue_tail(args->threadq, &(first_thread->wait_links));
-
-		/* update the eventmask on [now] empty global queues */
-		if (waitq_is_global(safeq) && waitq_empty(safeq)) {
-			safeq->waitq_eventmask = 0;
-		}
+		enqueue_tail(&args->threadq, &first_thread->wait_links);
 	}
 
 	/* unlock the safe queue if we locked one above */
 	if (safeq != waitq) {
 		waitq_unlock(safeq);
-		if (*nthreads == 0) {
-			splx(spl);
+		if (args->nthreads == 0) {
+			splx(args->spl);
+			args->spl = 0;
 		}
 	}
 
-	if (max_threads > 0 && *nthreads >= max_threads) {
+	if (args->nthreads >= args->max_threads) {
 		return;
 	}
 
 handle_waitq_set:
 	/*
-	 * wait queues that are not in any sets
-	 * are the bottom of the recursion
-	 */
-	if (!waitq->waitq_set_id) {
-		return;
-	}
-
-	/* check to see if the set ID for this wait queue is valid */
-	struct waitq_link *link = wql_get_link(waitq->waitq_set_id);
-	if (!link) {
-		/* the waitq set to which this waitq belonged, has been invalidated */
-		waitq->waitq_set_id = 0;
-		return;
-	}
-
-	wql_put_link(link);
-
-	/*
 	 * If this waitq is a member of any wait queue sets, we need to look
 	 * for waiting thread(s) in any of those sets, and prepost all sets that
 	 * don't have active waiters.
 	 *
-	 * Note that we do a local walk of this waitq's links - we manually
-	 * recurse down wait queue set's with non-zero wqset_q.waitq_set_id
+	 * We do not need to recurse into sets for non NO_EVENT64 events,
+	 * threads never wait on sets with a non 0 event.
 	 */
-	(void)walk_waitq_links(LINK_WALK_ONE_LEVEL, waitq, waitq->waitq_set_id,
-	    WQL_WQS, (void *)args, waitq_select_walk_cb);
-}
-
-/**
- * main entry point for thread selection from a waitq
- *
- * Conditions:
- *	waitq is locked
- *
- * Returns:
- *	The number of threads waiting on 'waitq' for 'event' which have
- *	been placed onto the input 'threadq'
- *
- * Notes:
- *	The 'select_cb' function is invoked for every thread found waiting on
- *	'waitq' for 'event'. The thread is _not_ locked upon callback
- *	invocation. This parameter may be NULL.
- *
- *	If one or more threads are returned in 'threadq' then the caller is
- *	responsible to call splx() using the returned 'spl' value. Each
- *	returned thread is locked.
- */
-static __inline__ int
-waitq_select_n_locked(struct waitq *waitq,
-    event64_t event,
-    waitq_select_cb select_cb,
-    void *select_ctx,
-    uint64_t *reserved_preposts,
-    queue_t threadq,
-    int max_threads, spl_t *spl,
-    int priority)
-{
-	int nthreads = 0;
-
-	struct waitq_select_args args = {
-		.posted_waitq = waitq,
-		.waitq = waitq,
-		.event = event,
-		.select_cb = select_cb,
-		.select_ctx = select_ctx,
-		.priority = priority,
-		.reserved_preposts = reserved_preposts,
-		.threadq = threadq,
-		.max_threads = max_threads,
-		.nthreads = &nthreads,
-		.spl = spl,
-	};
-
-	do_waitq_select_n_locked(&args);
-	return nthreads;
-}
-
-/**
- * select from a waitq a single thread waiting for a given event
- *
- * Conditions:
- *	'waitq' is locked
- *
- * Returns:
- *	A locked thread that's been removed from the waitq, but has not
- *	yet been put on a run queue. Caller is responsible to call splx
- *	with the '*spl' value.
- */
-static thread_t
-waitq_select_one_locked(struct waitq *waitq, event64_t event,
-    uint64_t *reserved_preposts,
-    int priority, spl_t *spl)
-{
-	int nthreads;
-	queue_head_t threadq;
-
-	queue_init(&threadq);
-
-	nthreads = waitq_select_n_locked(waitq, event, NULL, NULL,
-	    reserved_preposts, &threadq, 1, spl, priority);
-
-	/* if we selected a thread, return it (still locked) */
-	if (!queue_empty(&threadq)) {
-		thread_t t;
-		queue_entry_t qe = dequeue_head(&threadq);
-		t = qe_element(qe, struct thread, wait_links);
-		assert(queue_empty(&threadq)); /* there should be 1 entry */
-		/* t has been locked and removed from all queues */
-		return t;
+	if (args->event == NO_EVENT64) {
+		wql_walk_sets(waitq, ^(struct waitq_link *lnk){
+			return waitq_select_walk_cb(lnk, waitq, args);
+		});
 	}
-
-	return THREAD_NULL;
 }
 
-struct select_thread_ctx {
-	thread_t      thread;
-	event64_t     event;
-	spl_t        *spl;
-};
+static void
+waitq_select_args_prepare(struct waitq_select_args *args)
+{
+	queue_init(&args->threadq);
+}
 
 /**
  * link walk callback invoked once for each set to which a waitq belongs
  *
  * Conditions:
  *	initial waitq is locked
- *	ctx->thread is unlocked
+ *	thread is unlocked
  *
  * Notes:
  *	This may disable interrupts and early-out of the full DAG link walk by
- *	returning KERN_ALREADY_IN_SET. In this case, the returned thread has
+ *	returning WQ_ITERATE_FOUND. In this case, the returned thread has
  *	been removed from the waitq, it's waitq state has been reset, and the
  *	caller is responsible to call splx() with the returned interrupt state
  *	in ctx->spl.
  */
 static int
-waitq_select_thread_cb(struct waitq *waitq, void *ctx,
-    struct waitq_link *link)
+waitq_select_thread_cb(struct waitq_set *wqset, thread_t thread,
+    event64_t event, spl_t *spl)
 {
-	struct select_thread_ctx *stctx = (struct select_thread_ctx *)ctx;
-	struct waitq_set *wqset;
 	struct waitq *wqsetq;
 	struct waitq *safeq;
 	spl_t s;
 
-	(void)waitq;
-
-	thread_t thread = stctx->thread;
-	event64_t event = stctx->event;
-
-	if (wql_type(link) != WQL_WQS) {
-		return WQ_ITERATE_CONTINUE;
-	}
-
-	wqset = link->wql_wqs.wql_set;
 	wqsetq = &wqset->wqset_q;
-
-	assert(!waitq_irq_safe(waitq));
 	assert(!waitq_irq_safe(wqsetq));
 
 	waitq_set_lock(wqset);
@@ -2655,17 +2371,13 @@ waitq_select_thread_cb(struct waitq *waitq, void *ctx,
 
 	if ((thread->waitq == wqsetq) && (thread->wait_event == event)) {
 		waitq_thread_remove(wqsetq, thread);
-		if (waitq_empty(safeq)) {
-			safeq->waitq_eventmask = 0;
-		}
-		thread_clear_waitq_state(thread);
 		waitq_unlock(safeq);
 		waitq_set_unlock(wqset);
 		/*
 		 * thread still locked,
 		 * return non-zero to break out of WQS walk
 		 */
-		*(stctx->spl) = s;
+		*spl = s;
 		return WQ_ITERATE_FOUND;
 	}
 
@@ -2686,13 +2398,10 @@ waitq_select_thread_cb(struct waitq *waitq, void *ctx,
  *	'thread' is unlocked
  */
 static kern_return_t
-waitq_select_thread_locked(struct waitq *waitq,
-    event64_t event,
+waitq_select_thread_locked(struct waitq *waitq, event64_t event,
     thread_t thread, spl_t *spl)
 {
 	struct waitq *safeq;
-	struct waitq_link *link;
-	struct select_thread_ctx ctx;
 	kern_return_t kr;
 	spl_t s;
 
@@ -2719,10 +2428,6 @@ waitq_select_thread_locked(struct waitq *waitq,
 
 	if ((thread->waitq == waitq) && (thread->wait_event == event)) {
 		waitq_thread_remove(safeq, thread);
-		if (waitq_empty(safeq)) {
-			safeq->waitq_eventmask = 0;
-		}
-		thread_clear_waitq_state(thread);
 		*spl = s;
 		/* thread still locked */
 		return KERN_SUCCESS;
@@ -2737,15 +2442,11 @@ waitq_select_thread_locked(struct waitq *waitq,
 	splx(s);
 
 handle_waitq_set:
-	if (!waitq->waitq_set_id) {
-		return KERN_NOT_WAITING;
-	}
-
-	/* check to see if the set ID for this wait queue is valid */
-	link = wql_get_link(waitq->waitq_set_id);
-	if (!link) {
-		/* the waitq to which this set belonged, has been invalidated */
-		waitq->waitq_set_id = 0;
+	if (event != NO_EVENT64) {
+		/*
+		 * We do not need to recurse into sets for non NO_EVENT64
+		 * events, threads never wait on sets with a non 0 event.
+		 */
 		return KERN_NOT_WAITING;
 	}
 
@@ -2755,30 +2456,13 @@ handle_waitq_set:
 	 * all wait queue sets. If it's there, we'll remove it
 	 * because it's equivalent to waiting directly on the input waitq.
 	 */
-	ctx.thread = thread;
-	ctx.event = event;
-	ctx.spl = spl;
-	kr = walk_waitq_links(LINK_WALK_FULL_DAG, waitq, waitq->waitq_set_id,
-	    WQL_WQS, (void *)&ctx, waitq_select_thread_cb);
-
-	wql_put_link(link);
+	kr = wql_walk_sets(waitq, ^(struct waitq_link *lnk){
+		return waitq_select_thread_cb(lnk->wql_set,
+		thread, event, spl);
+	});
 
 	/* we found a thread, return success */
-	if (kr == WQ_ITERATE_FOUND) {
-		return KERN_SUCCESS;
-	}
-
-	return KERN_NOT_WAITING;
-}
-
-static int
-prepost_exists_cb(struct waitq_set __unused *wqset,
-    void __unused *ctx,
-    struct wq_prepost __unused *wqp,
-    struct waitq __unused *waitq)
-{
-	/* if we get here, then we know that there is a valid prepost object! */
-	return WQ_ITERATE_FOUND;
+	return kr == WQ_ITERATE_FOUND ? KERN_SUCCESS : KERN_NOT_WAITING;
 }
 
 /**
@@ -2797,7 +2481,6 @@ waitq_assert_wait64_locked(struct waitq *waitq,
     thread_t thread)
 {
 	wait_result_t wait_result;
-	int realtime = 0;
 	struct waitq *safeq;
 	uintptr_t eventmask;
 	spl_t s;
@@ -2815,27 +2498,39 @@ waitq_assert_wait64_locked(struct waitq *waitq,
 
 	if (waitq_is_set(waitq)) {
 		struct waitq_set *wqset = (struct waitq_set *)waitq;
+		bool found = false;
+
+		assert(wait_event == NO_EVENT64);
+
 		/*
 		 * early-out if the thread is waiting on a wait queue set
 		 * that has already been pre-posted.
 		 */
-		if (wait_event == NO_EVENT64 && waitq_set_maybe_preposted(wqset)) {
+		if (wqset->wqset_q.waitq_portset) {
 			int ret;
+
 			/*
 			 * Run through the list of potential preposts. Because
 			 * this is a hot path, we short-circuit the iteration
 			 * if we find just one prepost object.
 			 */
-			ret = wq_prepost_foreach_locked(wqset, NULL,
-			    prepost_exists_cb);
-			if (ret == WQ_ITERATE_FOUND) {
-				s = splsched();
-				thread_lock(thread);
-				thread->wait_result = THREAD_AWAKENED;
-				thread_unlock(thread);
-				splx(s);
-				return THREAD_AWAKENED;
-			}
+			ret = wq_prepost_foreach_locked(wqset,
+			    ^(struct wq_prepost *wqp, struct waitq *wq) {
+				(void)wqp; (void)wq;
+				return WQ_ITERATE_FOUND;
+			});
+			found = ret == WQ_ITERATE_FOUND;
+		} else if (wqset->wqset_prepost_id == WQSET_PREPOSTED_ANON) {
+			found = true;
+		}
+
+		if (found) {
+			s = splsched();
+			thread_lock(thread);
+			thread->wait_result = THREAD_AWAKENED;
+			thread_unlock(thread);
+			splx(s);
+			return THREAD_AWAKENED;
 		}
 	}
 
@@ -2862,18 +2557,6 @@ waitq_assert_wait64_locked(struct waitq *waitq,
 	thread_lock(thread);
 
 	/*
-	 * Realtime threads get priority for wait queue placements.
-	 * This allows wait_queue_wakeup_one to prefer a waiting
-	 * realtime thread, similar in principle to performing
-	 * a wait_queue_wakeup_all and allowing scheduler prioritization
-	 * to run the realtime thread, but without causing the
-	 * lock contention of that scenario.
-	 */
-	if (thread->sched_pri >= BASEPRI_REALTIME) {
-		realtime = 1;
-	}
-
-	/*
 	 * This is the extent to which we currently take scheduling attributes
 	 * into account.  If the thread is vm priviledged, we stick it at
 	 * the front of the queue.  Later, these queues will honor the policy
@@ -2882,16 +2565,7 @@ waitq_assert_wait64_locked(struct waitq *waitq,
 	wait_result = thread_mark_wait_locked(thread, interruptible);
 	/* thread->wait_result has been set */
 	if (wait_result == THREAD_WAITING) {
-		if (!safeq->waitq_fifo
-		    || (thread->options & TH_OPT_VMPRIV) || realtime) {
-			waitq_thread_insert(safeq, thread, false);
-		} else {
-			waitq_thread_insert(safeq, thread, true);
-		}
-
-		/* mark the event and real waitq, even if enqueued on a global safeq */
-		thread->wait_event = wait_event;
-		thread->waitq = waitq;
+		waitq_thread_insert(safeq, thread, waitq, wait_event);
 
 		if (deadline != 0) {
 			boolean_t act;
@@ -2939,11 +2613,19 @@ waitq_assert_wait64_locked(struct waitq *waitq,
  *	'thread' is locked
  *
  * Notes:
- *	This function is primarily used by clear_wait_internal in
- *	sched_prim.c from the thread timer wakeup path
- *	(i.e. the thread was waiting on 'waitq' with a timeout that expired)
+ *	This function is only used by clear_wait_internal in sched_prim.c
+ *	(which itself is called by the timer wakeup path and clear_wait()).
+ *
+ *	If true is returned, then the thread has been pulled successfuly.
+ *
+ *	If false is returned, then behavior depends on the
+ *	CONFIG_WAITQ_IRQSAFE_ALLOW_INVALID being enabled or not.
+ *	When CONFIG_WAITQ_IRQSAFE_ALLOW_INVALID is set,
+ *	then waitq_pull_thread_locked() failing is final,
+ *	else it just means the waitq lock couldn't be taken
+ *	and it needs to be retried.
  */
-int
+bool
 waitq_pull_thread_locked(struct waitq *waitq, thread_t thread)
 {
 	struct waitq *safeq;
@@ -2964,29 +2646,48 @@ waitq_pull_thread_locked(struct waitq *waitq, thread_t thread)
 
 	/* thread is already locked so have to try for the waitq lock */
 	if (!waitq_lock_try(safeq)) {
-		return 0;
+#if CONFIG_WAITQ_IRQSAFE_ALLOW_INVALID
+		/*
+		 * When CONFIG_WAITQ_IRQSAFE_ALLOW_INVALID is on,
+		 * all IRQ-safe wait queues are either either global,
+		 * or allocated from zones which support using
+		 * waitq_lock_allow_invalid().
+		 *
+		 * We hence can resolve the locking inversion safely.
+		 */
+		bool locked;
+
+		thread_unlock(thread);
+		locked = waitq_lock_allow_invalid(safeq);
+		thread_lock(thread);
+		if (waitq != thread->waitq) {
+			/*
+			 * the waitq this thread was waiting on either is invalid,
+			 * or changed, or both. Either way, we're done.
+			 */
+			if (locked) {
+				waitq_unlock(safeq);
+			}
+			return false;
+		}
+		if (__improbable(!locked)) {
+			panic("Thread %p is blocked on an invalid waitq %p",
+			    thread, waitq);
+		}
+#else
+		return false;
+#endif /* CONFIG_WAITQ_IRQSAFE_ALLOW_INVALID */
 	}
 
 	waitq_thread_remove(safeq, thread);
-	thread_clear_waitq_state(thread);
 	waitq_stats_count_clear_wakeup(waitq);
-
-	/* clear the global event mask if this was the last thread there! */
-	if (waitq_is_global(safeq) && waitq_empty(safeq)) {
-		safeq->waitq_eventmask = 0;
-		/* JMM - also mark no-waiters on waitq (if not the same as the safeq) */
-	}
-
 	waitq_unlock(safeq);
-
-	return 1;
+	return true;
 }
 
 
-static __inline__
-void
-maybe_adjust_thread_pri(thread_t   thread,
-    int        priority,
+static inline void
+maybe_adjust_thread_pri(thread_t thread, int priority,
     __kdebug_only struct waitq *waitq)
 {
 	/*
@@ -3011,6 +2712,21 @@ maybe_adjust_thread_pri(thread_t   thread,
 	}
 }
 
+static void
+waitq_select_queue_flush(struct waitq *waitq, struct waitq_select_args *args)
+{
+	thread_t thread = THREAD_NULL;
+	__assert_only kern_return_t kr;
+
+	qe_foreach_element_safe(thread, &args->threadq, wait_links) {
+		remqueue(&thread->wait_links);
+		maybe_adjust_thread_pri(thread, args->priority, waitq);
+		kr = thread_go(thread, args->result, args->options);
+		assert(kr == KERN_SUCCESS);
+		thread_unlock(thread);
+	}
+}
+
 /*
  * Clear a potential thread priority promotion from a waitq wakeup
  * with WAITQ_PROMOTE_PRIORITY.
@@ -3020,7 +2736,7 @@ maybe_adjust_thread_pri(thread_t   thread,
 void
 waitq_clear_promotion_locked(struct waitq *waitq, thread_t thread)
 {
-	spl_t s;
+	spl_t s = 0;
 
 	assert(waitq_held(waitq));
 	assert(thread != THREAD_NULL);
@@ -3066,45 +2782,33 @@ waitq_wakeup64_all_locked(struct waitq *waitq,
     int priority,
     waitq_lock_state_t lock_state)
 {
-	kern_return_t ret;
-	thread_t thread;
-	spl_t th_spl;
-	int nthreads;
-	queue_head_t wakeup_queue;
+	struct waitq_select_args args = {
+		.event = wake_event,
+		.priority = priority,
+		.reserved_preposts = reserved_preposts,
+		.max_threads = UINT32_MAX,
+		.result = result,
+		.options = WQ_OPTION_NONE,
+	};
 
 	assert(waitq_held(waitq));
-	queue_init(&wakeup_queue);
 
-	nthreads = waitq_select_n_locked(waitq, wake_event, NULL, NULL,
-	    reserved_preposts,
-	    &wakeup_queue, -1, &th_spl, priority);
+	waitq_select_args_prepare(&args);
+	do_waitq_select_n_locked(waitq, &args);
+	waitq_stats_count_wakeup(waitq, args.nthreads);
 
-	/* set each thread running */
-	ret = KERN_NOT_WAITING;
-
-#if CONFIG_WAITQ_STATS
-	qe_foreach_element(thread, &wakeup_queue, wait_links)
-	waitq_stats_count_wakeup(waitq);
-#endif
 	if (lock_state == WAITQ_UNLOCK) {
 		waitq_unlock(waitq);
 	}
 
-	qe_foreach_element_safe(thread, &wakeup_queue, wait_links) {
-		assert_thread_magic(thread);
-		remqueue(&thread->wait_links);
-		maybe_adjust_thread_pri(thread, priority, waitq);
-		ret = thread_go(thread, result, WQ_OPTION_NONE);
-		assert(ret == KERN_SUCCESS);
-		thread_unlock(thread);
-	}
-	if (nthreads > 0) {
-		splx(th_spl);
-	} else {
-		waitq_stats_count_fail(waitq);
+	waitq_select_queue_flush(waitq, &args);
+
+	if (args.nthreads > 0) {
+		splx(args.spl);
+		return KERN_SUCCESS;
 	}
 
-	return ret;
+	return KERN_NOT_WAITING;
 }
 
 /**
@@ -3125,32 +2829,30 @@ waitq_wakeup64_one_locked(struct waitq *waitq,
     waitq_lock_state_t lock_state,
     waitq_options_t option)
 {
-	thread_t thread;
-	spl_t th_spl;
+	struct waitq_select_args args = {
+		.event = wake_event,
+		.priority = priority,
+		.reserved_preposts = reserved_preposts,
+		.max_threads = 1,
+		.result = result,
+		.options = option,
+	};
 
 	assert(waitq_held(waitq));
 
-	thread = waitq_select_one_locked(waitq, wake_event,
-	    reserved_preposts,
-	    priority, &th_spl);
-
-	if (thread != THREAD_NULL) {
-		waitq_stats_count_wakeup(waitq);
-	} else {
-		waitq_stats_count_fail(waitq);
-	}
+	waitq_select_args_prepare(&args);
+	do_waitq_select_n_locked(waitq, &args);
+	waitq_stats_count_wakeup(waitq, args.nthreads);
 
 	if (lock_state == WAITQ_UNLOCK) {
 		waitq_unlock(waitq);
 	}
 
-	if (thread != THREAD_NULL) {
-		maybe_adjust_thread_pri(thread, priority, waitq);
-		kern_return_t ret = thread_go(thread, result, option);
-		assert(ret == KERN_SUCCESS);
-		thread_unlock(thread);
-		splx(th_spl);
-		return ret;
+	waitq_select_queue_flush(waitq, &args);
+
+	if (args.nthreads > 0) {
+		splx(args.spl);
+		return KERN_SUCCESS;
 	}
 
 	return KERN_NOT_WAITING;
@@ -3177,28 +2879,34 @@ waitq_wakeup64_identify_locked(struct waitq     *waitq,
     int              priority,
     waitq_lock_state_t lock_state)
 {
-	thread_t thread;
+	struct waitq_select_args args = {
+		.event = wake_event,
+		.priority = priority,
+		.reserved_preposts = reserved_preposts,
+		.max_threads = 1,
+	};
+	thread_t thread = THREAD_NULL;
 
 	assert(waitq_held(waitq));
 
-	thread = waitq_select_one_locked(waitq, wake_event,
-	    reserved_preposts,
-	    priority, spl);
-
-	if (thread != THREAD_NULL) {
-		waitq_stats_count_wakeup(waitq);
-	} else {
-		waitq_stats_count_fail(waitq);
-	}
+	waitq_select_args_prepare(&args);
+	do_waitq_select_n_locked(waitq, &args);
+	waitq_stats_count_wakeup(waitq, args.nthreads);
 
 	if (lock_state == WAITQ_UNLOCK) {
 		waitq_unlock(waitq);
 	}
 
-	if (thread != THREAD_NULL) {
+	if (args.nthreads > 0) {
 		kern_return_t __assert_only ret;
+
+		thread = qe_dequeue_head(&args.threadq, struct thread, wait_links);
+		assert(args.nthreads == 1 && queue_empty(&args.threadq));
+
+		maybe_adjust_thread_pri(thread, priority, waitq);
 		ret = thread_go(thread, result, WQ_OPTION_NONE);
 		assert(ret == KERN_SUCCESS);
+		*spl = args.spl;
 	}
 
 	return thread; /* locked if not NULL (caller responsible for spl) */
@@ -3236,12 +2944,7 @@ waitq_wakeup64_thread_locked(struct waitq *waitq,
 	 * dequeued and returned locked.
 	 */
 	ret = waitq_select_thread_locked(waitq, wake_event, thread, &th_spl);
-
-	if (ret == KERN_SUCCESS) {
-		waitq_stats_count_wakeup(waitq);
-	} else {
-		waitq_stats_count_fail(waitq);
-	}
+	waitq_stats_count_wakeup(waitq, ret == KERN_SUCCESS ? 1 : 0);
 
 	if (lock_state == WAITQ_UNLOCK) {
 		waitq_unlock(waitq);
@@ -3267,22 +2970,70 @@ waitq_wakeup64_thread_locked(struct waitq *waitq,
  *
  * ---------------------------------------------------------------------- */
 
+#if CONFIG_WAITQ_IRQSAFE_ALLOW_INVALID && MACH_ASSERT
+/*
+ * CONFIG_WAITQ_IRQSAFE_ALLOW_INVALID relies on waitq memory to always
+ * be one of:
+ * - a waitq
+ * - zeroed memory
+ * - unmapped memory
+ *
+ * This function allows to assert that this generally looks true.
+ */
+#include <kern/zalloc_internal.h>
+
+extern char __data_segment_start[] __SEGMENT_START_SYM("__DATA");
+extern char __data_segment_end[] __SEGMENT_END_SYM("__DATA");
+
+static inline bool
+waitq_is_in_kernel_data_or_adequate_zone(struct waitq *waitq)
+{
+	zone_id_t zid;
+
+	if (waitq_is_global(waitq)) {
+		return true;
+	}
+
+	zid = zone_id_for_native_element(waitq, sizeof(*waitq));
+	if (zid != ZONE_ID_INVALID) {
+		return zone_security_array[zid].z_va_sequester &&
+		       zone_array[zid].kasan_noquarantine;
+	}
+
+	const char *dataStart;
+	const char *dataEnd;
+
+#if PLATFORM_MACOS // 78481451
+	unsigned long sz;
+	dataStart = getsegdatafromheader(&_mh_execute_header, "__DATA", &sz);
+	dataEnd = dataStart + sz;
+#else
+	dataStart = __data_segment_start;
+	dataEnd = __data_segment_end;
+#endif
+
+	/* sfi, thread calls, ... */
+	return dataStart <= (char *)waitq && (char *)(waitq + 1) <= dataEnd;
+}
+#endif
+
 /**
  * initialize a waitq object
  */
-kern_return_t
+void
 waitq_init(struct waitq *waitq, int policy)
 {
 	assert(waitq != NULL);
+	assert((policy & SYNC_POLICY_FIXED_PRIORITY) == 0);
 
-	/* only FIFO and LIFO for now */
-	if ((policy & SYNC_POLICY_FIXED_PRIORITY) != 0) {
-		return KERN_INVALID_ARGUMENT;
+#if CONFIG_WAITQ_IRQSAFE_ALLOW_INVALID
+	if (policy & SYNC_POLICY_DISABLE_IRQ) {
+		assert(waitq_is_in_kernel_data_or_adequate_zone(waitq));
 	}
+#endif
 
 	waitq->waitq_fifo = ((policy & SYNC_POLICY_REVERSED) == 0);
 	waitq->waitq_irq = !!(policy & SYNC_POLICY_DISABLE_IRQ);
-	waitq->waitq_prepost = 0;
 	if (policy & SYNC_POLICY_TURNSTILE_PROXY) {
 		waitq->waitq_type = WQT_TSPROXY;
 	} else {
@@ -3291,10 +3042,9 @@ waitq_init(struct waitq *waitq, int policy)
 	waitq->waitq_turnstile = !!(policy & SYNC_POLICY_TURNSTILE);
 	waitq->waitq_eventmask = 0;
 
-	waitq->waitq_set_id = 0;
+	waitq->waitq_set_id = WAITQ_REF_NULL;
 	waitq->waitq_prepost_id = 0;
 
-	waitq_lock_init(waitq);
 	if (waitq_is_turnstile_queue(waitq)) {
 		/* For turnstile, initialize it as a priority queue */
 		priority_queue_init(&waitq->waitq_prio_queue);
@@ -3306,77 +3056,12 @@ waitq_init(struct waitq *waitq, int policy)
 		queue_init(&waitq->waitq_queue);
 	}
 
-	waitq->waitq_isvalid = 1;
-	return KERN_SUCCESS;
-}
-
-struct wq_unlink_ctx {
-	struct waitq *unlink_wq;
-	struct waitq_set *unlink_wqset;
-};
-
-static int waitq_unlink_prepost_cb(struct waitq_set __unused *wqset, void *ctx,
-    struct wq_prepost *wqp, struct waitq *waitq);
-
-/**
- * walk_waitq_links callback to invalidate 'link' parameter
- *
- * Conditions:
- *	Called from walk_waitq_links.
- *	Note that unlink other callbacks, this one make no assumptions about
- *	the 'waitq' parameter, specifically it does not have to be locked or
- *	even valid.
- */
-static int
-waitq_unlink_all_cb(struct waitq *waitq, void *ctx,
-    struct waitq_link *link)
-{
-	(void)waitq;
-	(void)ctx;
-	if (wql_type(link) == WQL_LINK && wql_is_valid(link)) {
-		wql_invalidate(link);
+	if (policy & SYNC_POLICY_INIT_LOCKED) {
+		hw_lck_ticket_init_locked(&waitq->waitq_interlock, &waitq_lck_grp);
+	} else {
+		hw_lck_ticket_init(&waitq->waitq_interlock, &waitq_lck_grp);
 	}
-
-	if (wql_type(link) == WQL_WQS) {
-		struct waitq_set *wqset;
-		struct wq_unlink_ctx ulctx;
-
-		/*
-		 * When destroying the waitq, take the time to clear out any
-		 * preposts it may have made. This could potentially save time
-		 * on the IPC send path which would otherwise have to iterate
-		 * over lots of dead port preposts.
-		 */
-		if (waitq->waitq_prepost_id == 0) {
-			goto out;
-		}
-
-		wqset = link->wql_wqs.wql_set;
-		assert(wqset != NULL);
-		assert(!waitq_irq_safe(&wqset->wqset_q));
-
-		waitq_set_lock(wqset);
-
-		if (!waitq_set_is_valid(wqset)) {
-			/* someone raced us to teardown */
-			goto out_unlock;
-		}
-		if (!waitq_set_maybe_preposted(wqset)) {
-			goto out_unlock;
-		}
-
-		ulctx.unlink_wq = waitq;
-		ulctx.unlink_wqset = wqset;
-		(void)wq_prepost_iterate(wqset->wqset_prepost_id, &ulctx,
-		    waitq_unlink_prepost_cb);
-out_unlock:
-		waitq_set_unlock(wqset);
-	}
-
-out:
-	return WQ_ITERATE_CONTINUE;
 }
-
 
 /**
  * cleanup any link/prepost table resources associated with a waitq
@@ -3384,175 +3069,103 @@ out:
 void
 waitq_deinit(struct waitq *waitq)
 {
-	spl_t s;
-
-	assert(waitq);
-	if (!waitq_is_valid(waitq)) {
-		return;
-	}
-
-	if (!waitq_is_queue(waitq) && !waitq_is_turnstile_proxy(waitq)) {
-		return;
-	}
-
-	if (waitq_irq_safe(waitq)) {
-		s = splsched();
-	}
-	waitq_lock(waitq);
+	assert(!waitq_is_set(waitq));
 
 	if (waitq_valid(waitq)) {
-		waitq->waitq_isvalid = 0;
-		if (!waitq_irq_safe(waitq)) {
+		/*
+		 * We must invalidate under the lock as many waitqs
+		 * use this invalidation state for their logic (see ports)
+		 * and changing it outside of a lock hold might mess
+		 * the state machine of the enclosing object.
+		 */
+		waitq_lock(waitq);
+		waitq_invalidate(waitq);
+		if (waitq_irq_safe(waitq)) {
+			waitq_unlock(waitq);
+		} else {
 			waitq_unlink_all_unlock(waitq);
-			/* waitq unlocked and set links deallocated */
-			goto out;
 		}
 	}
 
-	waitq_unlock(waitq);
-	if (waitq_irq_safe(waitq)) {
-		splx(s);
-	}
+	hw_lck_ticket_destroy(&waitq->waitq_interlock, true, &waitq_lck_grp);
 
-out:
+	/*
+	 * it is the responsibility of the waitq client to wake up all waiters
+	 */
 #if MACH_ASSERT
 	if (waitq_is_turnstile_queue(waitq)) {
 		assert(priority_queue_empty(&waitq->waitq_prio_queue));
 	} else if (waitq_is_turnstile_proxy(waitq)) {
 		assert(waitq->waitq_ts == TURNSTILE_NULL);
-	} else {
+	} else if (waitq_is_queue(waitq)) {
 		assert(queue_empty(&waitq->waitq_queue));
+	} else {
+		assert(waitq->waitq_type == WQT_INVALID);
 	}
-#else
-	(void)0;
 #endif // MACH_ASSERT
 }
 
+/**
+ * Invalidate a waitq.
+ *
+ * It is the responsibility of the caller to make sure that:
+ * - all waiters are woken up
+ * - linkages and preposts are cleared (non IRQ Safe waitqs).
+ */
 void
-waitq_invalidate_locked(struct waitq *waitq)
+waitq_invalidate(struct waitq *waitq)
 {
-	assert(waitq_held(waitq));
-	assert(waitq_is_valid(waitq));
-	waitq->waitq_isvalid = 0;
+	hw_lck_ticket_invalidate(&waitq->waitq_interlock);
 }
 
 /**
- * invalidate the given wq_prepost object
- *
- * Conditions:
- *	Called from wq_prepost_iterate (_not_ from wq_prepost_foreach_locked!)
+ * invalidate the given wq_prepost chain
  */
-static int
-wqset_clear_prepost_chain_cb(struct waitq_set __unused *wqset,
-    void __unused *ctx,
-    struct wq_prepost *wqp,
-    struct waitq __unused *waitq)
+static void
+wqset_clear_prepost_chain(uint64_t prepost_id)
 {
-	if (wqp_type(wqp) == WQP_POST) {
-		wq_prepost_invalidate(wqp);
-	}
-	return WQ_ITERATE_CONTINUE;
-}
-
-
-/**
- * allocate and initialize a waitq set object
- *
- * Conditions:
- *	may block
- *
- * Returns:
- *	allocated / initialized waitq_set object.
- *	the waits_set object returned does not have
- *	a waitq_link associated.
- *
- *	NULL on failure
- */
-struct waitq_set *
-waitq_set_alloc(int policy, waitq_set_prepost_hook_t *prepost_hook)
-{
-	struct waitq_set *wqset;
-
-	wqset = (struct waitq_set *)zalloc(waitq_set_zone);
-	if (!wqset) {
-		panic("Can't allocate a new waitq set from zone %p", waitq_set_zone);
+	if (prepost_id == WQSET_PREPOSTED_ANON) {
+		return;
 	}
 
-	kern_return_t ret;
-	ret = waitq_set_init(wqset, policy, NULL, prepost_hook);
-	if (ret != KERN_SUCCESS) {
-		zfree(waitq_set_zone, wqset);
-		wqset = NULL;
-	}
-
-	return wqset;
+	(void)wq_prepost_iterate(prepost_id,
+	    ^(struct wq_prepost *wqp, struct waitq __unused *waitq) {
+		if (wqp_type(wqp) == WQP_POST) {
+		        wq_prepost_invalidate(wqp);
+		}
+		return WQ_ITERATE_CONTINUE;
+	});
 }
 
 /**
  * initialize a waitq set object
- *
- * if no 'reserved_link' object is passed
- * the waitq_link will be lazily allocated
- * on demand through waitq_set_lazy_init_link.
  */
-kern_return_t
-waitq_set_init(struct waitq_set *wqset,
-    int policy, uint64_t *reserved_link,
-    waitq_set_prepost_hook_t *prepost_hook)
+void
+waitq_set_init(struct waitq_set *wqset, int policy)
 {
-	struct waitq_link *link;
-	kern_return_t ret;
-
 	memset(wqset, 0, sizeof(*wqset));
 
-	ret = waitq_init(&wqset->wqset_q, policy);
-	if (ret != KERN_SUCCESS) {
-		return ret;
-	}
-
+	waitq_init(&wqset->wqset_q, policy);
+	wqset->wqset_q.waitq_portset = (policy & SYNC_POLICY_PORT_SET) != 0;
 	wqset->wqset_q.waitq_type = WQT_SET;
-	if (policy & SYNC_POLICY_PREPOST) {
-		wqset->wqset_q.waitq_prepost = 1;
-		wqset->wqset_prepost_id = 0;
-		assert(prepost_hook == NULL);
-	} else {
-		wqset->wqset_q.waitq_prepost = 0;
-		wqset->wqset_prepost_hook = prepost_hook;
-	}
 
-	if (reserved_link && *reserved_link != 0) {
-		link = wql_get_reserved(*reserved_link, WQL_WQS);
+	/* Lazy allocate the link only when an actual id is needed.  */
+	wqset->wqset_id = WQSET_NOT_LINKED;
+}
 
-		if (!link) {
-			panic("Can't allocate link object for waitq set: %p", wqset);
-		}
-
-		/* always consume the caller's reference */
-		*reserved_link = 0;
-
-		link->wql_wqs.wql_set = wqset;
-		wql_mkvalid(link);
-
-		wqset->wqset_id = link->wql_setid.id;
-		wql_put_link(link);
-	} else {
-		/*
-		 * Lazy allocate the link only when an actual id is needed.
-		 */
-		wqset->wqset_id = WQSET_NOT_LINKED;
-	}
-
-	return KERN_SUCCESS;
+void
+waitq_set_reset_anon_prepost(struct waitq_set *wqset)
+{
+	assert(waitq_set_is_valid(wqset) && !wqset->wqset_q.waitq_portset);
+	wqset->wqset_prepost_id = 0;
 }
 
 #if DEVELOPMENT || DEBUG
-
 int
 sysctl_helper_waitq_set_nelem(void)
 {
 	return ltable_nelem(&g_wqlinktable);
 }
-
 #endif
 
 /**
@@ -3571,12 +3184,11 @@ waitq_set_lazy_init_link(struct waitq_set *wqset)
 	assert(get_preemption_level() == 0 && waitq_wait_possible(current_thread()));
 
 	waitq_set_lock(wqset);
-	if (!waitq_set_should_lazy_init_link(wqset)) {
+	if (wqset->wqset_id != WQSET_NOT_LINKED) {
 		waitq_set_unlock(wqset);
 		return;
 	}
 
-	assert(wqset->wqset_id == WQSET_NOT_LINKED);
 	waitq_set_unlock(wqset);
 
 	link = wql_alloc_link(WQL_WQS);
@@ -3584,36 +3196,98 @@ waitq_set_lazy_init_link(struct waitq_set *wqset)
 		panic("Can't allocate link object for waitq set: %p", wqset);
 	}
 
-	link->wql_wqs.wql_set = wqset;
+	link->wql_set = wqset;
 
 	waitq_set_lock(wqset);
-	if (waitq_set_should_lazy_init_link(wqset)) {
+	if (wqset->wqset_id == WQSET_NOT_LINKED) {
+		assert(waitq_set_is_valid(wqset));
 		wql_mkvalid(link);
 		wqset->wqset_id = link->wql_setid.id;
 	}
-
-	assert(wqset->wqset_id != 0);
-	assert(wqset->wqset_id != WQSET_NOT_LINKED);
-
 	waitq_set_unlock(wqset);
 
 	wql_put_link(link);
-
-	return;
 }
 
 /**
- * checks if a waitq set needs to be linked.
+ * clear out / release any resources associated with a waitq set
  *
+ * Conditions:
+ *	may block
+ *	waitqset is locked
+ * Note:
+ *	This will render the waitq set invalid, and it must
+ *	be re-initialized with waitq_set_init before it can be used again
  */
-boolean_t
-waitq_set_should_lazy_init_link(struct waitq_set *wqset)
+void
+waitq_set_deinit_and_unlock(struct waitq_set *wqset)
 {
-	if (waitqs_is_linked(wqset) || wqset->wqset_id == 0) {
-		return FALSE;
+	struct waitq_link *link = NULL;
+	uint64_t set_id, prepost_id;
+
+	assert(waitqs_is_set(wqset));
+
+	set_id = wqset->wqset_id;
+
+	if (waitqs_is_linked(wqset)) {
+		/* grab the set's link object */
+		link = wql_get_link(set_id);
+		if (link) {
+			wql_invalidate(link);
+		}
 	}
-	return TRUE;
+
+	/*
+	 * always clear the wqset_id, including WQSET_NOT_LINKED,
+	 * so that waitq_set_lazy_init_link() does nothing
+	 * once a set is invalidated (because of course,
+	 * port-sets do that).
+	 */
+	wqset->wqset_id = 0;
+
+	/*
+	 * This set may have a lot of preposts, or may have been a member of
+	 * many other sets. To minimize spinlock hold times, we clear out the
+	 * waitq set data structure under the lock-hold, but don't clear any
+	 * table objects. We keep handles to the prepost and set linkage
+	 * objects and free those outside the critical section.
+	 */
+	prepost_id = wqset->wqset_prepost_id;
+	if (prepost_id) {
+		assert(link != NULL);
+		wqset->wqset_prepost_id = 0;
+	}
+
+	wqset->wqset_q.waitq_fifo = 0;
+	waitq_invalidate(&wqset->wqset_q);
+
+	/* don't clear the 'waitq_irq' bit: it's used in locking! */
+	wqset->wqset_q.waitq_eventmask = 0;
+
+	waitq_set_unlock(wqset);
+
+	/* drop / unlink all the prepost table objects */
+	if (prepost_id) {
+		wqset_clear_prepost_chain(prepost_id);
+	}
+
+	if (link) {
+		/*
+		 * wql_walk_sets may race with us for access to the waitq set.
+		 * If wql_walk_sets has a reference to the set, then we should wait
+		 * until the link's refcount goes to 1 (our reference) before we exit
+		 * this function. That way we ensure that the waitq set memory will
+		 * remain valid even though it's been cleared out.
+		 */
+		while (wql_refcnt(link) > 1) {
+			delay(1);
+		}
+		wql_put_link(link);
+	}
+
+	hw_lck_ticket_destroy(&wqset->wqset_q.waitq_interlock, true, &waitq_lck_grp);
 }
+
 
 /**
  * clear out / release any resources associated with a waitq set
@@ -3627,9 +3301,6 @@ waitq_set_should_lazy_init_link(struct waitq_set *wqset)
 void
 waitq_set_deinit(struct waitq_set *wqset)
 {
-	struct waitq_link *link = NULL;
-	uint64_t set_id, prepost_id;
-
 	if (!waitqs_is_set(wqset)) {
 		panic("trying to de-initialize an invalid wqset @%p", wqset);
 	}
@@ -3638,146 +3309,8 @@ waitq_set_deinit(struct waitq_set *wqset)
 
 	waitq_set_lock(wqset);
 
-	if (waitq_set_has_prepost_hook(wqset)) {
-		waitq_set_prepost_hook_t *hook = wqset->wqset_prepost_hook;
-		/*
-		 * If the wqset_prepost_hook value is non 0,
-		 * then another core is currently posting to this waitq set
-		 * and we need for it to finish what it's doing.
-		 */
-		while (os_atomic_load(hook, relaxed) != 0) {
-			waitq_set_unlock(wqset);
-			delay(1);
-			waitq_set_lock(wqset);
-		}
-	}
-
-	set_id = wqset->wqset_id;
-
-	if (waitqs_is_linked(wqset) || set_id == 0) {
-		/* grab the set's link object */
-		link = wql_get_link(set_id);
-		if (link) {
-			wql_invalidate(link);
-		}
-		/* someone raced us to deinit */
-		if (!link || wqset->wqset_id != set_id || set_id != link->wql_setid.id) {
-			if (link) {
-				wql_put_link(link);
-			}
-			waitq_set_unlock(wqset);
-			return;
-		}
-
-		/* the link should be a valid link object at this point */
-		assert(link != NULL && wql_type(link) == WQL_WQS);
-
-		wqset->wqset_id = 0;
-	}
-
-	/*
-	 * This set may have a lot of preposts, or may have been a member of
-	 * many other sets. To minimize spinlock hold times, we clear out the
-	 * waitq set data structure under the lock-hold, but don't clear any
-	 * table objects. We keep handles to the prepost and set linkage
-	 * objects and free those outside the critical section.
-	 */
-	prepost_id = 0;
-	if (wqset->wqset_q.waitq_prepost && wqset->wqset_prepost_id) {
-		assert(link != NULL);
-		prepost_id = wqset->wqset_prepost_id;
-	}
-	/* else { TODO: notify kqueue subsystem? } */
-	wqset->wqset_prepost_id = 0;
-
-	wqset->wqset_q.waitq_fifo = 0;
-	wqset->wqset_q.waitq_prepost = 0;
-	wqset->wqset_q.waitq_isvalid = 0;
-
-	/* don't clear the 'waitq_irq' bit: it's used in locking! */
-	wqset->wqset_q.waitq_eventmask = 0;
-
-	waitq_unlink_all_unlock(&wqset->wqset_q);
-	/* wqset->wqset_q unlocked and set links deallocated */
-
-
-	if (link) {
-		/*
-		 * walk_waitq_links may race with us for access to the waitq set.
-		 * If walk_waitq_links has a reference to the set, then we should wait
-		 * until the link's refcount goes to 1 (our reference) before we exit
-		 * this function. That way we ensure that the waitq set memory will
-		 * remain valid even though it's been cleared out.
-		 */
-		while (wql_refcnt(link) > 1) {
-			delay(1);
-		}
-		wql_put_link(link);
-	}
-
-	/* drop / unlink all the prepost table objects */
-	/* JMM - can this happen before the delay? */
-	if (prepost_id) {
-		(void)wq_prepost_iterate(prepost_id, NULL,
-		    wqset_clear_prepost_chain_cb);
-	}
+	waitq_set_deinit_and_unlock(wqset);
 }
-
-/**
- * de-initialize and free an allocated waitq set object
- *
- * Conditions:
- *	may block
- */
-kern_return_t
-waitq_set_free(struct waitq_set *wqset)
-{
-	waitq_set_deinit(wqset);
-
-	memset(wqset, 0, sizeof(*wqset));
-	zfree(waitq_set_zone, wqset);
-
-	return KERN_SUCCESS;
-}
-
-#if DEVELOPMENT || DEBUG
-#if CONFIG_WAITQ_DEBUG
-/**
- * return the set ID of 'wqset'
- */
-uint64_t
-wqset_id(struct waitq_set *wqset)
-{
-	if (!wqset) {
-		return 0;
-	}
-
-	assert(waitqs_is_set(wqset));
-
-	if (!waitqs_is_linked(wqset)) {
-		waitq_set_lazy_init_link(wqset);
-	}
-
-	return wqset->wqset_id;
-}
-
-/**
- * returns a pointer to the waitq object embedded in 'wqset'
- */
-struct waitq *
-wqset_waitq(struct waitq_set *wqset)
-{
-	if (!wqset) {
-		return NULL;
-	}
-
-	assert(waitqs_is_set(wqset));
-
-	return &wqset->wqset_q;
-}
-#endif /* CONFIG_WAITQ_DEBUG */
-#endif /* DEVELOPMENT || DEBUG */
-
 
 /**
  * clear all preposts originating from 'waitq'
@@ -3807,7 +3340,6 @@ waitq_clear_prepost_locked(struct waitq *waitq)
 	wqp = wq_prepost_get(waitq->waitq_prepost_id);
 	waitq->waitq_prepost_id = 0;
 	if (wqp) {
-		uint64_t wqp_id = wqp->wqp_prepostid.id;
 		wqdbg_v("invalidate prepost 0x%llx (refcnt:%d)",
 		    wqp->wqp_prepostid.id, wqp_refcnt(wqp));
 		wq_prepost_invalidate(wqp);
@@ -3840,31 +3372,11 @@ waitq_clear_prepost_locked(struct waitq *waitq)
 
 			enable_preemption();
 		}
-		if (wqp_refcnt(wqp) > 0 && wqp->wqp_prepostid.id == wqp_id) {
-			wq_prepost_put(wqp);
-		}
+
+		wq_prepost_put(wqp);
 	}
 
 	return dropped_lock;
-}
-
-/**
- * clear all preposts originating from 'waitq'
- *
- * Conditions:
- *	'waitq' is not locked
- *	may disable and re-enable interrupts
- */
-void
-waitq_clear_prepost(struct waitq *waitq)
-{
-	assert(waitq_valid(waitq));
-	assert(!waitq_irq_safe(waitq));
-
-	waitq_lock(waitq);
-	/* it doesn't matter to us if the lock is dropped here */
-	(void)waitq_clear_prepost_locked(waitq);
-	waitq_unlock(waitq);
 }
 
 /**
@@ -3883,6 +3395,7 @@ waitq_get_prepost_id(struct waitq *waitq)
 		return 0;
 	}
 
+	assert(waitq_is_queue(waitq) || waitq_is_turnstile_proxy(waitq));
 	assert(!waitq_irq_safe(waitq));
 
 	waitq_lock(waitq);
@@ -3935,235 +3448,201 @@ out_unlock:
 }
 
 
-static int
-waitq_inset_cb(struct waitq *waitq, void *ctx, struct waitq_link *link)
-{
-	uint64_t setid = *(uint64_t *)ctx;
-	int wqltype = wql_type(link);
-	(void)waitq;
-	if (wqltype == WQL_WQS && link->wql_setid.id == setid) {
-		wqdbg_v("  waitq already in set 0x%llx", setid);
-		return WQ_ITERATE_FOUND;
-	} else if (wqltype == WQL_LINK) {
-		/*
-		 * break out early if we see a link that points to the setid
-		 * in question. This saves us a step in the
-		 * iteration/recursion
-		 */
-		wqdbg_v("  waitq already in set 0x%llx (WQL_LINK)", setid);
-		if (link->wql_link.left_setid == setid ||
-		    link->wql_link.right_setid == setid) {
-			return WQ_ITERATE_FOUND;
-		}
-	}
-
-	return WQ_ITERATE_CONTINUE;
-}
-
 /**
  * determine if 'waitq' is a member of 'wqset'
  *
  * Conditions:
- *	neither 'waitq' nor 'wqset' is not locked
+ *  'waitq' is locked
+ *	'wqset' is not locked
  *	may disable and re-enable interrupts while locking 'waitq'
  */
-boolean_t
-waitq_member(struct waitq *waitq, struct waitq_set *wqset)
+bool
+waitq_member_locked(struct waitq *waitq, struct waitq_set *wqset)
 {
-	kern_return_t kr = WQ_ITERATE_SUCCESS;
-	uint64_t setid;
+	waitq_ref_t root_ref = waitq->waitq_set_id;
+	uint64_t setid = wqset->wqset_id;
 
-	if (!waitq_valid(waitq)) {
+	if (!waitqs_is_linked(wqset) || wqr_is_null(root_ref)) {
+		return false;
+	}
+
+	if (!wqr_is_ptr(root_ref)) {
+		return wqr_is_equal(root_ref, setid);
+	}
+
+	waitq_foreach_link(link, root_ref) {
+		if (link->wql_node == setid) {
+			return true;
+		}
+		if (!wqr_is_ptr(link->wql_next)) {
+			return wqr_is_equal(link->wql_next, setid);
+		}
+	}
+
+	__builtin_unreachable();
+}
+
+__abortlike
+static void
+__waitq_link_arguments_panic(struct waitq *waitq, struct waitq_set *wqset)
+{
+	if (!waitq_valid(waitq) || waitq_irq_safe(waitq)) {
 		panic("Invalid waitq: %p", waitq);
 	}
-	assert(!waitq_irq_safe(waitq));
-
-	if (!waitqs_is_set(wqset)) {
-		return FALSE;
+	if (!waitq_is_queue(waitq) && !waitq_is_turnstile_proxy(waitq)) {
+		panic("Invalid waitq type: %p:%d", waitq, waitq->waitq_type);
 	}
-
-	waitq_lock(waitq);
-
-	if (!waitqs_is_linked(wqset)) {
-		goto out_unlock;
-	}
-
-	setid = wqset->wqset_id;
-
-	/* fast path: most waitqs are members of only 1 set */
-	if (waitq->waitq_set_id == setid) {
-		waitq_unlock(waitq);
-		return TRUE;
-	}
-
-	/* walk the link table and look for the Set ID of wqset */
-	kr = walk_waitq_links(LINK_WALK_ONE_LEVEL, waitq, waitq->waitq_set_id,
-	    WQL_ALL, (void *)&setid, waitq_inset_cb);
-
-out_unlock:
-	waitq_unlock(waitq);
-	return kr == WQ_ITERATE_FOUND;
+	panic("Invalid waitq-set: %p", wqset);
 }
 
-/**
- * Returns true is the given waitq is a member of at least 1 set
- */
-boolean_t
-waitq_in_set(struct waitq *waitq)
+static inline void
+__waitq_link_arguments_validate(struct waitq *waitq, struct waitq_set *wqset)
 {
-	struct waitq_link *link;
-	boolean_t inset = FALSE;
-
-	if (waitq_irq_safe(waitq)) {
-		return FALSE;
+	if (!waitq_valid(waitq) || waitq_irq_safe(waitq) ||
+	    (!waitq_is_queue(waitq) && !waitq_is_turnstile_proxy(waitq)) ||
+	    !waitqs_is_set(wqset)) {
+		__waitq_link_arguments_panic(waitq, wqset);
 	}
-
-	waitq_lock(waitq);
-
-	if (!waitq->waitq_set_id) {
-		goto out_unlock;
-	}
-
-	link = wql_get_link(waitq->waitq_set_id);
-	if (link) {
-		/* if we get here, the waitq is in _at_least_one_ set */
-		inset = TRUE;
-		wql_put_link(link);
-	} else {
-		/* we can just optimize this for next time */
-		waitq->waitq_set_id = 0;
-	}
-
-out_unlock:
-	waitq_unlock(waitq);
-	return inset;
 }
 
+__abortlike
+static void
+__waitq_invalid_panic(struct waitq *waitq)
+{
+	panic("Invalid waitq: %p", waitq);
+}
+
+
+static void
+__waitq_validate(struct waitq *waitq)
+{
+	if (!waitq_valid(waitq)) {
+		__waitq_invalid_panic(waitq);
+	}
+}
 
 /**
  * pre-allocate a waitq link structure from the link table
- *
- * Conditions:
- *	'waitq' is not locked
- *	may (rarely) block if link table needs to grow
  */
-uint64_t
-waitq_link_reserve(struct waitq *waitq)
+waitq_ref_t
+waitq_link_reserve(void)
 {
-	struct waitq_link *link;
-	uint64_t reserved_id = 0;
-
-	assert(get_preemption_level() == 0 && waitq_wait_possible(current_thread()));
-
-	/*
-	 * We've asserted that the caller can block, so we enforce a
-	 * minimum-free table element policy here.
-	 */
-	wql_ensure_free_space();
-
-	(void)waitq;
-	link = wql_alloc_link(LT_RESERVED);
-	if (!link) {
-		return 0;
-	}
-
-	reserved_id = link->wql_setid.id;
-
-	return reserved_id;
+	return wqr_make(zalloc_flags(waitq_link_zone, Z_WAITOK | Z_ZERO));
 }
 
 /**
  * release a pre-allocated waitq link structure
  */
 void
-waitq_link_release(uint64_t id)
+waitq_link_release(waitq_ref_t ref)
 {
-	struct waitq_link *link;
+	struct waitq_link *link = wqr_ptr_raw(ref);
 
-	if (id == 0) {
-		return;
-	}
-
-	link = wql_get_reserved(id, WQL_LINK);
-	if (!link) {
-		return;
-	}
-
-	/*
-	 * if we successfully got a link object, then we know
-	 * it's not been marked valid, and can be released with
-	 * a standard wql_put_link() which should free the element.
-	 */
-	wql_put_link(link);
+	if (link) {
+		zfree(waitq_link_zone, link);
 #if CONFIG_LTABLE_STATS
-	g_wqlinktable.nreserved_releases += 1;
+		g_wqlinktable.nreserved_releases += 1;
 #endif
+	}
 }
 
 /**
- * link 'waitq' to the set identified by 'setid' using the 'link' structure
+ * link 'waitq' to 'wqset' using the 'link' structure
  *
  * Conditions:
  *	'waitq' is locked
- *	caller should have a reference to the 'link' object
+ *	caller should have a reference to the 'link' object,
+ *	that this function consumes
  */
 static kern_return_t
-waitq_link_internal(struct waitq *waitq,
-    uint64_t setid, struct waitq_link *link)
+waitq_link_internal(struct waitq *waitq, struct waitq_set *wqset,
+    waitq_ref_t link_ref)
 {
-	struct waitq_link *qlink;
-	kern_return_t kr;
+	waitq_ref_t *refp;
+	uint64_t setid = wqset->wqset_id;
+	uint64_t *dead_ref = NULL;
 
 	assert(waitq_held(waitq));
-	assert(setid != 0);
-	assert(setid != WQSET_NOT_LINKED);
+	assert(waitqs_is_linked(wqset));
 
 	/*
 	 * If the waitq_set_id field is empty, then this waitq is not
 	 * a member of any other set. All we have to do is update the
 	 * field.
 	 */
-	if (!waitq->waitq_set_id) {
-		waitq->waitq_set_id = setid;
+	refp = &waitq->waitq_set_id;
+	if (wqr_is_null(*refp)) {
+		*refp = wqr_make(setid);
+		waitq_link_release(link_ref);
 		return KERN_SUCCESS;
 	}
-
-	qlink = wql_get_link(waitq->waitq_set_id);
-	if (!qlink) {
-		/*
-		 * The set to which this wait queue belonged has been
-		 * destroyed / invalidated. We can re-use the waitq field.
-		 */
-		waitq->waitq_set_id = setid;
-		return KERN_SUCCESS;
-	}
-	wql_put_link(qlink);
 
 	/*
 	 * Check to see if it's already a member of the set.
+	 * Similar to waitq_member_locked() but remember
+	 * the last invalid ref we met to try to reuse it.
 	 *
-	 * TODO: check for cycles!
+	 * This allows us not to have to do any expensive
+	 * ltable get/set operations, while still being able to "GC" links.
 	 */
-	kr = walk_waitq_links(LINK_WALK_ONE_LEVEL, waitq, waitq->waitq_set_id,
-	    WQL_ALL, (void *)&setid, waitq_inset_cb);
-	if (kr == WQ_ITERATE_FOUND) {
-		return KERN_ALREADY_IN_SET;
+	for (;;) {
+		if (wqr_is_ptr(*refp)) {
+			struct waitq_link *tmp = wqr_ptr_raw(*refp);
+
+			if (!wql_link_valid(tmp->wql_node)) {
+				dead_ref = &tmp->wql_node;
+			} else if (tmp->wql_node == setid) {
+				waitq_link_release(link_ref);
+				return KERN_ALREADY_IN_SET;
+			}
+
+			refp = &tmp->wql_next;
+		} else {
+			if (!wql_link_valid(refp->wqr_value)) {
+				dead_ref = &refp->wqr_value;
+			} else if (wqr_is_equal(*refp, setid)) {
+				waitq_link_release(link_ref);
+				return KERN_ALREADY_IN_SET;
+			}
+			break;
+		}
 	}
 
 	/*
-	 * This wait queue is a member of at least one set already,
-	 * and _not_ a member of the given set. Use our previously
-	 * allocated link object, and hook it up to the wait queue.
+	 * This wait queue is _not_ a member of the given set.
+	 *
+	 * If we found an empty "ref" during traversal, reuse it,
+	 * else use our previously allocated link object,
+	 * and hook it up to the wait queue.
+	 *
 	 * Note that it's possible that one or more of the wait queue sets to
 	 * which the wait queue belongs was invalidated before we allocated
 	 * this link object. That's OK because the next time we use that
 	 * object we'll just ignore it.
 	 */
-	link->wql_link.left_setid = setid;
-	link->wql_link.right_setid = waitq->waitq_set_id;
-	wql_mkvalid(link);
 
-	waitq->waitq_set_id = link->wql_setid.id;
+	if (dead_ref) {
+		*dead_ref = setid;
+		waitq_link_release(link_ref);
+		return KERN_SUCCESS;
+	}
+
+	waitq_ref_t root_ref = waitq->waitq_set_id;
+	struct waitq_link *link = wqr_ptr_raw(link_ref);
+
+	if (wqr_is_ptr(root_ref)) {
+		struct waitq_link *root = wqr_ptr_raw(root_ref);
+
+		link->wql_count = root->wql_count + 1;
+		root->wql_count = LT_IDX_MAX;
+	} else {
+		link->wql_count = 2;
+	}
+	link->wql_next = root_ref;
+	link->wql_node = setid;
+	link->wqte.lt_bits = WQL_LINK << LT_BITS_TYPE_SHIFT;
+
+	waitq->waitq_set_id = link_ref;
 
 	return KERN_SUCCESS;
 }
@@ -4189,25 +3668,13 @@ waitq_link_internal(struct waitq *waitq,
  */
 kern_return_t
 waitq_link(struct waitq *waitq, struct waitq_set *wqset,
-    waitq_lock_state_t lock_state, uint64_t *reserved_link)
+    waitq_lock_state_t lock_state, waitq_ref_t *reserved_link)
 {
 	kern_return_t kr;
-	struct waitq_link *link;
+	waitq_ref_t link;
 	int should_lock = (lock_state == WAITQ_SHOULD_LOCK);
 
-	if (!waitq_valid(waitq) || waitq_irq_safe(waitq)) {
-		panic("Invalid waitq: %p", waitq);
-	}
-
-	if (!waitqs_is_set(wqset)) {
-		return KERN_INVALID_ARGUMENT;
-	}
-
-	if (!reserved_link || *reserved_link == 0) {
-		if (!waitqs_is_linked(wqset)) {
-			waitq_set_lazy_init_link(wqset);
-		}
-	}
+	__waitq_link_arguments_validate(waitq, wqset);
 
 	wqdbg_v("Link waitq %p to wqset 0x%llx",
 	    (void *)VM_KERNEL_UNSLIDE_OR_PERM(waitq), wqset->wqset_id);
@@ -4221,289 +3688,150 @@ waitq_link(struct waitq *waitq, struct waitq_set *wqset,
 	 * reference to the link which, in turn, hold a reference to the
 	 * link table.
 	 */
-	if (reserved_link && *reserved_link != 0) {
-		link = wql_get_reserved(*reserved_link, WQL_LINK);
-		/* always consume the caller's reference */
-		*reserved_link = 0;
+	if (!reserved_link || wqr_is_null(*reserved_link)) {
+		if (!waitqs_is_linked(wqset)) {
+			waitq_set_lazy_init_link(wqset);
+		}
+
+		link = waitq_link_reserve();
 	} else {
-		link = wql_alloc_link(WQL_LINK);
-	}
-	if (!link) {
-		return KERN_NO_SPACE;
+		link = *reserved_link;
+		/* always consume the caller's reference */
+		*reserved_link = WAITQ_REF_NULL;
 	}
 
 	if (should_lock) {
 		waitq_lock(waitq);
 	}
 
-	kr = waitq_link_internal(waitq, wqset->wqset_id, link);
+	/* consumes link */
+	kr = waitq_link_internal(waitq, wqset, link);
 
 	if (should_lock) {
 		waitq_unlock(waitq);
 	}
 
-	wql_put_link(link);
-
 	return kr;
 }
 
 /**
- * helper: unlink 'waitq' from waitq set identified by 'setid'
- *         this function also prunes invalid objects from the tree
+ * unlink 'waitq' from all wqsets and then link to 'newset'
  *
  * Conditions:
- *	MUST be called from walk_waitq_links link table walk
- *	'waitq' is locked
- *
- * Notes:
- *	This is a helper function which compresses the link table by culling
- *	unused or unnecessary links. See comments below for different
- *	scenarios.
+ *	waitq locked on entry, unlocked on return
  */
-static inline int
-waitq_maybe_remove_link(struct waitq *waitq,
-    uint64_t setid,
-    struct waitq_link *parent,
-    struct waitq_link *left,
-    struct waitq_link *right)
+static void
+waitq_unlink_all_unlock_internal(struct waitq *waitq, waitq_ref_t newset)
 {
-	uint64_t *wq_setid = &waitq->waitq_set_id;
+	waitq_ref_t old_set_id;
 
-	/*
-	 * There are two scenarios:
-	 *
-	 * Scenario 1:
-	 * --------------------------------------------------------------------
-	 * waitq->waitq_set_id == parent
-	 *
-	 *         parent(LINK)
-	 *           /    \
-	 *          /      \
-	 *         /        \
-	 *  L(LINK/WQS_l)   R(LINK/WQS_r)
-	 *
-	 * In this scenario, we assert that the original waitq points to the
-	 * parent link we were passed in.  If WQS_l (or WQS_r) is the waitq
-	 * set we're looking for, we can set the corresponding parent
-	 * link id (left or right) to 0.  To compress the tree, we can reset the
-	 * waitq_set_id of the original waitq to point to the side of the
-	 * parent that is still valid. We then discard the parent link object.
-	 */
-	if (*wq_setid == parent->wql_setid.id) {
-		if (!left && !right) {
-			/* completely invalid children */
-			wql_invalidate(parent);
-			wqdbg_v("S1, L+R");
-			*wq_setid = 0;
-			return WQ_ITERATE_INVALID;
-		} else if (!left || left->wql_setid.id == setid) {
-			/*
-			 * left side matches we know it points either to the
-			 * WQS we're unlinking, or to an invalid object:
-			 * no need to invalidate it
-			 */
-			*wq_setid = right ? right->wql_setid.id : 0;
-			wql_invalidate(parent);
-			wqdbg_v("S1, L");
-			return left ? WQ_ITERATE_UNLINKED : WQ_ITERATE_INVALID;
-		} else if (!right || right->wql_setid.id == setid) {
-			/*
-			 * if right side matches we know it points either to the
-			 * WQS we're unlinking, or to an invalid object:
-			 * no need to invalidate it
-			 */
-			*wq_setid = left ? left->wql_setid.id : 0;
-			wql_invalidate(parent);
-			wqdbg_v("S1, R");
-			return right ? WQ_ITERATE_UNLINKED : WQ_ITERATE_INVALID;
+	assert(!waitq_irq_safe(waitq));
+
+	old_set_id = waitq->waitq_set_id;
+	waitq->waitq_set_id = newset;
+
+	if (wqr_is_null(old_set_id)) {
+		waitq_unlock(waitq);
+	} else {
+		/*
+		 * invalidate the prepost entry for this waitq.
+		 *
+		 * This may drop and re-acquire the waitq lock,
+		 * but that's OK because if it was added to another set
+		 * and preposted to that set in the time we drop the lock,
+		 * the state will remain consistent.
+		 */
+		(void)waitq_clear_prepost_locked(waitq);
+		waitq_unlock(waitq);
+
+		waitq_foreach_link_safe(link, old_set_id) {
+			waitq_link_release(wqr_make(link));
 		}
 	}
-
-	/*
-	 * the tree walk starts at the top-of-tree and moves down,
-	 * so these are safe asserts.
-	 */
-	assert(left || right); /* one of them has to be valid at this point */
-
-	/*
-	 * Scenario 2:
-	 * --------------------------------------------------------------------
-	 * waitq->waitq_set_id == ... (OR parent)
-	 *
-	 *                    ...
-	 *                     |
-	 *                   parent
-	 *                   /    \
-	 *                  /      \
-	 *              L(LINK)     R(LINK)
-	 *               /\             /\
-	 *              /  \           /  \
-	 *             /    \       Rl(*)  Rr(*)
-	 *         Ll(WQS)  Lr(WQS)
-	 *
-	 * In this scenario, a leaf node of either the left or right side
-	 * could be the wait queue set we're looking to unlink. We also handle
-	 * the case where one of these links is invalid.  If a leaf node is
-	 * invalid or it's the set we're looking for, we can safely remove the
-	 * middle link (left or right) and point the parent link directly to
-	 * the remaining leaf node.
-	 */
-	if (left && wql_type(left) == WQL_LINK) {
-		uint64_t Ll, Lr;
-		struct waitq_link *linkLl, *linkLr;
-		assert(left->wql_setid.id != setid);
-		Ll = left->wql_link.left_setid;
-		Lr = left->wql_link.right_setid;
-		linkLl = wql_get_link(Ll);
-		linkLr = wql_get_link(Lr);
-		if (!linkLl && !linkLr) {
-			/*
-			 * The left object points to two invalid objects!
-			 * We can invalidate the left w/o touching the parent.
-			 */
-			wql_invalidate(left);
-			wqdbg_v("S2, Ll+Lr");
-			return WQ_ITERATE_INVALID;
-		} else if (!linkLl || Ll == setid) {
-			/* Ll is invalid and/or the wait queue set we're looking for */
-			parent->wql_link.left_setid = Lr;
-			wql_invalidate(left);
-			wql_put_link(linkLl);
-			wql_put_link(linkLr);
-			wqdbg_v("S2, Ll");
-			return linkLl ? WQ_ITERATE_UNLINKED : WQ_ITERATE_INVALID;
-		} else if (!linkLr || Lr == setid) {
-			/* Lr is invalid and/or the wait queue set we're looking for */
-			parent->wql_link.left_setid = Ll;
-			wql_invalidate(left);
-			wql_put_link(linkLr);
-			wql_put_link(linkLl);
-			wqdbg_v("S2, Lr");
-			return linkLr ? WQ_ITERATE_UNLINKED : WQ_ITERATE_INVALID;
-		}
-		wql_put_link(linkLl);
-		wql_put_link(linkLr);
-	}
-
-	if (right && wql_type(right) == WQL_LINK) {
-		uint64_t Rl, Rr;
-		struct waitq_link *linkRl, *linkRr;
-		assert(right->wql_setid.id != setid);
-		Rl = right->wql_link.left_setid;
-		Rr = right->wql_link.right_setid;
-		linkRl = wql_get_link(Rl);
-		linkRr = wql_get_link(Rr);
-		if (!linkRl && !linkRr) {
-			/*
-			 * The right object points to two invalid objects!
-			 * We can invalidate the right w/o touching the parent.
-			 */
-			wql_invalidate(right);
-			wqdbg_v("S2, Rl+Rr");
-			return WQ_ITERATE_INVALID;
-		} else if (!linkRl || Rl == setid) {
-			/* Rl is invalid and/or the wait queue set we're looking for */
-			parent->wql_link.right_setid = Rr;
-			wql_invalidate(right);
-			wql_put_link(linkRl);
-			wql_put_link(linkRr);
-			wqdbg_v("S2, Rl");
-			return linkRl ? WQ_ITERATE_UNLINKED : WQ_ITERATE_INVALID;
-		} else if (!linkRr || Rr == setid) {
-			/* Rr is invalid and/or the wait queue set we're looking for */
-			parent->wql_link.right_setid = Rl;
-			wql_invalidate(right);
-			wql_put_link(linkRl);
-			wql_put_link(linkRr);
-			wqdbg_v("S2, Rr");
-			return linkRr ? WQ_ITERATE_UNLINKED : WQ_ITERATE_INVALID;
-		}
-		wql_put_link(linkRl);
-		wql_put_link(linkRr);
-	}
-
-	return WQ_ITERATE_CONTINUE;
 }
 
 /**
- * link table walk callback that unlinks 'waitq' from 'ctx->setid'
+ * unlink 'waitq' from all sets to which it belongs
  *
  * Conditions:
- *	called from walk_waitq_links
- *	'waitq' is locked
+ *	'waitq' is locked on entry
+ *	returns with waitq lock dropped
  *
  * Notes:
- *	uses waitq_maybe_remove_link() to compress the linktable and
- *	perform the actual unlinking
+ *	may (rarely) spin (see waitq_clear_prepost_locked)
  */
-static int
-waitq_unlink_cb(struct waitq *waitq, void *ctx,
-    struct waitq_link *link)
+void
+waitq_unlink_all_unlock(struct waitq *waitq)
 {
-	uint64_t setid = *((uint64_t *)ctx);
-	struct waitq_link *right, *left;
-	int ret = 0;
+	assert(!waitq_irq_safe(waitq));
 
-	if (wql_type(link) != WQL_LINK) {
-		return WQ_ITERATE_CONTINUE;
-	}
+	wqdbg_v("unlink waitq %p from all sets",
+	    (void *)VM_KERNEL_UNSLIDE_OR_PERM(waitq));
 
-	do {
-		left  = wql_get_link(link->wql_link.left_setid);
-		right = wql_get_link(link->wql_link.right_setid);
-
-		ret = waitq_maybe_remove_link(waitq, setid, link, left, right);
-
-		wql_put_link(left);
-		wql_put_link(right);
-
-		if (!wql_is_valid(link)) {
-			return WQ_ITERATE_INVALID;
-		}
-		/* A ret value of UNLINKED will break us out of table walk */
-	} while (ret == WQ_ITERATE_INVALID);
-
-	return ret;
+	waitq_unlink_all_unlock_internal(waitq, WAITQ_REF_NULL);
 }
 
-
 /**
- * undo/remove a prepost from 'ctx' (waitq) to 'wqset'
+ * unlink 'waitq' from all wqsets and then link to 'wqset'
  *
  * Conditions:
- *	Called from wq_prepost_foreach_locked OR wq_prepost_iterate
- *	'wqset' may be NULL
- *	(ctx)->unlink_wqset is locked
+ *	waitq locked on entry, unlocked on return
  */
-static int
-waitq_unlink_prepost_cb(struct waitq_set __unused *wqset, void *ctx,
-    struct wq_prepost *wqp, struct waitq *waitq)
+void
+waitq_unlink_all_relink_unlock(struct waitq *waitq, struct waitq_set *wqset)
 {
-	struct wq_unlink_ctx *ulctx = (struct wq_unlink_ctx *)ctx;
+	__waitq_link_arguments_validate(waitq, wqset);
 
-	if (waitq != ulctx->unlink_wq) {
-		return WQ_ITERATE_CONTINUE;
+	wqdbg_v("Link waitq %p to wqset 0x%llx",
+	    (void *)VM_KERNEL_UNSLIDE_OR_PERM(waitq), wqset->wqset_id);
+
+	waitq_unlink_all_unlock_internal(waitq, wqr_make(wqset->wqset_id));
+}
+
+/**
+ * clear out any prepost from waitq into wqset
+ *
+ * TODO: this could be more efficient than a linear search of
+ *       the waitq set's prepost list.
+ */
+static void
+waitq_unlink_prepost(struct waitq_set *wqset, struct waitq *unlink_wq)
+{
+	assert(!waitq_irq_safe(&wqset->wqset_q));
+
+	if (!wqset->wqset_q.waitq_portset) {
+		assert(wqset->wqset_prepost_id == 0 ||
+		    wqset->wqset_prepost_id == WQSET_PREPOSTED_ANON);
+		return;
 	}
 
-	if (wqp_type(wqp) == WQP_WQ &&
-	    wqp->wqp_prepostid.id == ulctx->unlink_wqset->wqset_prepost_id) {
-		/* this is the only prepost on this wait queue set */
-		wqdbg_v("unlink wqp (WQ) 0x%llx", wqp->wqp_prepostid.id);
-		ulctx->unlink_wqset->wqset_prepost_id = 0;
+	waitq_set_lock(wqset);
+
+	(void)wq_prepost_iterate(wqset->wqset_prepost_id,
+	    ^(struct wq_prepost *wqp, struct waitq *waitq) {
+		if (waitq != unlink_wq) {
+		        return WQ_ITERATE_CONTINUE;
+		}
+
+		if (wqp_type(wqp) == WQP_WQ) {
+		        /* this is the only prepost on this wait queue set */
+		        assert(wqp->wqp_prepostid.id == wqset->wqset_prepost_id);
+		        wqdbg_v("unlink wqp (WQ) 0x%llx", wqp->wqp_prepostid.id);
+		        wqset->wqset_prepost_id = 0;
+		} else {
+		        /*
+		         * The prepost object 'wqp' points to a waitq which
+		         * should no longer be preposted to 'wqset'.
+		         *
+		         * We can remove the prepost object from the list and
+		         * break out of the iteration.
+		         */
+		        wq_prepost_remove(wqset, wqp);
+		}
 		return WQ_ITERATE_BREAK;
-	}
+	});
 
-	assert(wqp_type(wqp) == WQP_POST);
-
-	/*
-	 * The prepost object 'wqp' points to a waitq which should no longer
-	 * be preposted to 'ulctx->unlink_wqset'. We can remove the prepost
-	 * object from the list and break out of the iteration. Using the
-	 * context object in this way allows this same callback function to be
-	 * used from both wq_prepost_foreach_locked and wq_prepost_iterate.
-	 */
-	wq_prepost_remove(ulctx->unlink_wqset, wqp);
-	return WQ_ITERATE_BREAK;
+	waitq_set_unlock(wqset);
 }
 
 /**
@@ -4515,25 +3843,18 @@ waitq_unlink_prepost_cb(struct waitq_set __unused *wqset, void *ctx,
  *	may (rarely) spin in prepost clear and drop/re-acquire 'waitq' lock
  *	(see waitq_clear_prepost_locked)
  */
-static kern_return_t
-waitq_unlink_locked(struct waitq *waitq,
-    struct waitq_set *wqset)
+kern_return_t
+waitq_unlink_locked(struct waitq *waitq, struct waitq_set *wqset)
 {
+	waitq_ref_t root_ref;
 	uint64_t setid;
-	kern_return_t kr;
 
-	assert(!waitq_irq_safe(waitq));
+	__waitq_link_arguments_validate(waitq, wqset);
 
-	if (waitq->waitq_set_id == 0) {
-		/*
-		 * TODO:
-		 * it doesn't belong to anyone, and it has a prepost object?
-		 * This is an artifact of not cleaning up after kqueues when
-		 * they prepost into select sets...
-		 */
-		if (waitq->waitq_prepost_id != 0) {
-			(void)waitq_clear_prepost_locked(waitq);
-		}
+	root_ref = waitq->waitq_set_id;
+
+	if (wqr_is_null(root_ref)) {
+		assert(waitq->waitq_prepost_id == 0);
 		return KERN_NOT_IN_SET;
 	}
 
@@ -4546,66 +3867,97 @@ waitq_unlink_locked(struct waitq *waitq,
 	}
 
 	setid = wqset->wqset_id;
-
-	if (waitq->waitq_set_id == setid) {
-		waitq->waitq_set_id = 0;
+	if (wqr_is_equal(root_ref, setid)) {
 		/*
 		 * This was the only set to which the waitq belonged: we can
 		 * safely release the waitq's prepost object. It doesn't
 		 * matter if this function drops and re-acquires the lock
 		 * because we're not manipulating waitq state any more.
 		 */
+		waitq->waitq_set_id = WAITQ_REF_NULL;
 		(void)waitq_clear_prepost_locked(waitq);
 		return KERN_SUCCESS;
 	}
 
-	/*
-	 * The waitq was a member of more that 1 set, so we need to
-	 * handle potentially compressing the link table, and
-	 * adjusting the waitq->waitq_set_id value.
-	 *
-	 * Note: we can't free the waitq's associated prepost object (if any)
-	 *       because it may be in use by the one or more _other_ sets to
-	 *       which this queue belongs.
-	 *
-	 * Note: This function only handles a single level of the queue linkage.
-	 *       Removing a waitq from a set to which it does not directly
-	 *       belong is undefined. For example, if a waitq belonged to set
-	 *       A, and set A belonged to set B. You can't remove the waitq
-	 *       from set B.
-	 */
-	kr = walk_waitq_links(LINK_WALK_ONE_LEVEL, waitq, waitq->waitq_set_id,
-	    WQL_LINK, (void *)&setid, waitq_unlink_cb);
-
-	if (kr == WQ_ITERATE_UNLINKED) {
-		struct wq_unlink_ctx ulctx;
-
-		kr = KERN_SUCCESS; /* found it and dis-associated it */
-
-		/* don't look for preposts if it's not prepost-enabled */
-		if (!wqset->wqset_q.waitq_prepost) {
-			goto out;
-		}
-
-		assert(!waitq_irq_safe(&wqset->wqset_q));
-
-		waitq_set_lock(wqset);
-		/*
-		 * clear out any prepost from waitq into wqset
-		 * TODO: this could be more efficient than a linear search of
-		 *       the waitq set's prepost list.
-		 */
-		ulctx.unlink_wq = waitq;
-		ulctx.unlink_wqset = wqset;
-		(void)wq_prepost_iterate(wqset->wqset_prepost_id, (void *)&ulctx,
-		    waitq_unlink_prepost_cb);
-		waitq_set_unlock(wqset);
-	} else {
-		kr = KERN_NOT_IN_SET; /* waitq is _not_ associated with wqset */
+	if (!wqr_is_ptr(root_ref)) {
+		return KERN_NOT_IN_SET;
 	}
 
-out:
-	return kr;
+	/*
+	 * This waitq is member than strictly more than one set.
+	 * Walk them all, in a fashion similar to SLIST_FOREACH_PREVPTR().
+	 */
+
+	waitq_ref_t *prev_next_p;
+	struct waitq_link *root, *link, *next;
+	uint32_t n;
+
+	prev_next_p = &waitq->waitq_set_id;
+	link = wqr_ptr_raw(root_ref);
+	n = link->wql_count;
+
+	for (;;) {
+		if (link->wql_node == setid) {
+			break;
+		}
+		if (wqr_is_equal(link->wql_next, setid)) {
+			break;
+		}
+		if (!wqr_is_ptr(link->wql_next)) {
+			return KERN_NOT_IN_SET;
+		}
+
+		next = wqr_ptr_raw(link->wql_next);
+		if (wql_link_valid(link->wql_node)) {
+			prev_next_p = &link->wql_next;
+		} else {
+			/*
+			 * Opportunistically cull the list from dead nodes.
+			 *
+			 * This is about making sure the list doesn't
+			 * grow unbounded, so we take shortcuts:
+			 *
+			 * - we use the racy wql_link_valid() rather than
+			 *   a get/put() pair which is more expensive,
+			 *
+			 * - we don't try removing the link if the dead setid
+			 *   is the tail one as it's slightly more complicated
+			 *   to unlink.
+			 */
+			assert(n >= 3);
+			root = wqr_ptr_raw(waitq->waitq_set_id);
+			root->wql_count = --n;
+
+			waitq_link_release(wqr_make(link));
+			*prev_next_p = wqr_make(next);
+		}
+		link = next;
+	}
+
+	/*
+	 * We found a link matching this waitq set
+	 *
+	 * 1. pop and free the element
+	 * 2. update the wql_count (if we will keep a list)
+	 * 3. cleanup the possible prepost of the waitq into the set
+	 */
+
+	if (link->wql_node == setid) {
+		*prev_next_p = link->wql_next;
+	} else {
+		*prev_next_p = wqr_make(link->wql_node);
+	}
+
+	assert(n >= 2);
+	if (n > 2) {
+		root = wqr_ptr_raw(waitq->waitq_set_id);
+		root->wql_count = n - 1;
+	}
+
+	waitq_link_release(wqr_make(link));
+
+	waitq_unlink_prepost(wqset, waitq);
+	return KERN_SUCCESS;
 }
 
 /**
@@ -4689,7 +4041,6 @@ waitq_unlink_by_prepost_id(uint64_t wqp_id, struct waitq_set *wqset)
 		waitq_unlock(wq);
 	}
 	enable_preemption();
-	return;
 }
 
 
@@ -4730,89 +4081,6 @@ waitq_lock_by_prepost_id(uint64_t wqp_id)
 	return wq;
 }
 
-
-/**
- * unlink 'waitq' from all sets to which it belongs
- *
- * Conditions:
- *	'waitq' is locked on entry
- *	returns with waitq lock dropped
- *
- * Notes:
- *	may (rarely) spin (see waitq_clear_prepost_locked)
- */
-kern_return_t
-waitq_unlink_all_unlock(struct waitq *waitq)
-{
-	uint64_t old_set_id = 0;
-	wqdbg_v("unlink waitq %p from all sets",
-	    (void *)VM_KERNEL_UNSLIDE_OR_PERM(waitq));
-	assert(!waitq_irq_safe(waitq));
-
-	/* it's not a member of any sets */
-	if (waitq->waitq_set_id == 0) {
-		waitq_unlock(waitq);
-		return KERN_SUCCESS;
-	}
-
-	old_set_id = waitq->waitq_set_id;
-	waitq->waitq_set_id = 0;
-
-	/*
-	 * invalidate the prepost entry for this waitq.
-	 * This may drop and re-acquire the waitq lock, but that's OK because
-	 * if it was added to another set and preposted to that set in the
-	 * time we drop the lock, the state will remain consistent.
-	 */
-	(void)waitq_clear_prepost_locked(waitq);
-
-	waitq_unlock(waitq);
-
-	if (old_set_id) {
-		/*
-		 * Walk the link table and invalidate each LINK object that
-		 * used to connect this waitq to one or more sets: this works
-		 * because WQL_LINK objects are private to each wait queue
-		 */
-		(void)walk_waitq_links(LINK_WALK_ONE_LEVEL, waitq, old_set_id,
-		    WQL_LINK, NULL, waitq_unlink_all_cb);
-	}
-
-	return KERN_SUCCESS;
-}
-
-/**
- * unlink 'waitq' from all sets to which it belongs
- *
- * Conditions:
- *	'waitq' is not locked
- *	may disable and re-enable interrupts
- *	may (rarely) spin
- *	(see waitq_unlink_all_locked, waitq_clear_prepost_locked)
- */
-kern_return_t
-waitq_unlink_all(struct waitq *waitq)
-{
-	kern_return_t kr = KERN_SUCCESS;
-
-	if (!waitq_valid(waitq)) {
-		panic("Invalid waitq: %p", waitq);
-	}
-
-	assert(!waitq_irq_safe(waitq));
-	waitq_lock(waitq);
-	if (!waitq_valid(waitq)) {
-		waitq_unlock(waitq);
-		return KERN_SUCCESS;
-	}
-
-	kr = waitq_unlink_all_unlock(waitq);
-	/* waitq unlocked and set links deallocated */
-
-	return kr;
-}
-
-
 /**
  * unlink all waitqs from 'wqset'
  *
@@ -4850,7 +4118,7 @@ waitq_set_unlink_all_unlock(struct waitq_set *wqset)
 
 		/* re-alloc the object to get a new generation ID */
 		wql_realloc_link(link, WQL_WQS);
-		link->wql_wqs.wql_set = wqset;
+		link->wql_set = wqset;
 
 		wqset->wqset_id = link->wql_setid.id;
 		wql_mkvalid(link);
@@ -4858,73 +4126,17 @@ waitq_set_unlink_all_unlock(struct waitq_set *wqset)
 	}
 
 	/* clear any preposts attached to this set */
-	prepost_id = 0;
-	if (wqset->wqset_q.waitq_prepost && wqset->wqset_prepost_id) {
-		prepost_id = wqset->wqset_prepost_id;
-	}
-	/* else { TODO: notify kqueue subsystem? } */
+	prepost_id = wqset->wqset_prepost_id;
 	wqset->wqset_prepost_id = 0;
 
-	/*
-	 * clear set linkage and prepost object associated with this set:
-	 * waitq sets may prepost to other sets if, for example, they are
-	 * associated with a kqueue which is in a select set.
-	 *
-	 * This releases all the set link objects
-	 * (links to other sets to which this set was previously added)
-	 */
-	waitq_unlink_all_unlock(&wqset->wqset_q);
-	/* wqset->wqset_q unlocked */
+	waitq_set_unlock(wqset);
 
 	/* drop / unlink all the prepost table objects */
 	if (prepost_id) {
-		(void)wq_prepost_iterate(prepost_id, NULL,
-		    wqset_clear_prepost_chain_cb);
+		wqset_clear_prepost_chain(prepost_id);
 	}
 
 	return KERN_SUCCESS;
-}
-
-/**
- * unlink all waitqs from 'wqset'
- *
- * Conditions:
- *	'wqset' is not locked
- *	may (rarely) spin/block (see waitq_clear_prepost_locked)
- */
-kern_return_t
-waitq_set_unlink_all(struct waitq_set *wqset)
-{
-	assert(waitqs_is_set(wqset));
-	assert(!waitq_irq_safe(&wqset->wqset_q));
-
-	waitq_set_lock(wqset);
-	return waitq_set_unlink_all_unlock(wqset);
-	/* wqset unlocked and set links and preposts deallocated */
-}
-
-static int
-waitq_prepost_reserve_cb(struct waitq *waitq, void *ctx,
-    struct waitq_link *link)
-{
-	uint32_t *num = (uint32_t *)ctx;
-	(void)waitq;
-
-	/*
-	 * In the worst case, we'll have to allocate 2 prepost objects
-	 * per waitq set (if the set was already preposted by another
-	 * waitq).
-	 */
-	if (wql_type(link) == WQL_WQS) {
-		/*
-		 * check to see if the associated waitq actually supports
-		 * preposting
-		 */
-		if (waitq_set_can_prepost(link->wql_wqs.wql_set)) {
-			*num += 2;
-		}
-	}
-	return WQ_ITERATE_CONTINUE;
 }
 
 static int
@@ -4995,7 +4207,8 @@ do_alloc:
 static int
 waitq_count_prepost_reservation(struct waitq *waitq, int extra, int keep_locked)
 {
-	int npreposts = 0;
+	waitq_ref_t root_ref;
+	int npreposts = extra;
 
 	/*
 	 * If the waitq is not currently part of a set, and we're not asked to
@@ -5003,48 +4216,28 @@ waitq_count_prepost_reservation(struct waitq *waitq, int extra, int keep_locked)
 	 * just-in-case it becomes part of a set while we unlock and reserve.
 	 * We may need up to 1 object for the waitq, and 2 for the set.
 	 */
-	if (waitq->waitq_set_id == 0) {
-		npreposts = 3;
+	root_ref = waitq->waitq_set_id;
+	if (wqr_is_null(root_ref)) {
+		if (!keep_locked) {
+			npreposts += 3;
+		}
 	} else {
 		/* this queue has never been preposted before */
 		if (waitq->waitq_prepost_id == 0) {
-			npreposts = 3;
+			npreposts += 3;
 		}
 
 		/*
-		 * Walk the set of table linkages associated with this waitq
-		 * and count the worst-case number of prepost objects that
-		 * may be needed during a wakeup_all. We can walk this without
-		 * locking each set along the way because the table-based IDs
-		 * disconnect us from the set pointers themselves, and the
-		 * table walking is careful to read the setid values only once.
-		 * Locking each set up the chain also doesn't guarantee that
-		 * their membership won't change between the time we unlock
-		 * that set and when we actually go to prepost, so our
-		 * situation is no worse than before and we've alleviated lock
-		 * contention on any sets to which this waitq belongs.
+		 * Count the worst-case number of prepost objects that
+		 * may be needed during a wakeup_all.
 		 */
-		(void)walk_waitq_links(LINK_WALK_FULL_DAG_UNLOCKED,
-		    waitq, waitq->waitq_set_id,
-		    WQL_WQS, (void *)&npreposts,
-		    waitq_prepost_reserve_cb);
-	}
+		if (wqr_is_ptr(root_ref)) {
+			struct waitq_link *link = wqr_ptr(root_ref);
 
-	if (extra > 0) {
-		npreposts += extra;
-	}
-
-	if (npreposts == 0 && !keep_locked) {
-		/*
-		 * If we get here, we were asked to reserve some prepost
-		 * objects for a waitq that's previously preposted, and is not
-		 * currently a member of any sets. We have also been
-		 * instructed to unlock the waitq when we're done. In this
-		 * case, we pre-allocated enough reserved objects to handle
-		 * the case where the waitq gets added to a single set when
-		 * the lock is released.
-		 */
-		npreposts = 3;
+			npreposts += 2 * link->wql_count;
+		} else {
+			npreposts += 2;
+		}
 	}
 
 	return npreposts;
@@ -5078,7 +4271,6 @@ waitq_prepost_reserve(struct waitq *waitq, int extra,
     waitq_lock_state_t lock_state)
 {
 	uint64_t reserved = 0;
-	uint64_t prev_setid = 0, prev_prepostid = 0;
 	struct wq_prepost *wqp = NULL;
 	int nalloc = 0, npreposts = 0;
 	int keep_locked = (lock_state == WAITQ_KEEP_LOCKED);
@@ -5106,81 +4298,25 @@ waitq_prepost_reserve(struct waitq *waitq, int extra,
 
 	waitq_lock(waitq);
 
-	/* remember the set ID that we started with */
-	prev_setid = waitq->waitq_set_id;
-	prev_prepostid = waitq->waitq_prepost_id;
-
-	/*
-	 * If the waitq is not part of a set, and we're asked to
-	 * keep the set locked, then we don't have to reserve
-	 * anything!
-	 */
-	if (prev_setid == 0 && keep_locked) {
-		goto out;
-	}
-
 	npreposts = waitq_count_prepost_reservation(waitq, extra, keep_locked);
+	if (npreposts) {
+		do {
+			/* this _may_ unlock and relock the waitq! */
+			nalloc = waitq_alloc_prepost_reservation(npreposts - nalloc,
+			    waitq, &unlocked, &wqp);
 
-	/* nothing for us to do! */
-	if (npreposts == 0) {
-		if (keep_locked) {
-			goto out;
-		}
-		goto out_unlock;
+			if (!unlocked) {
+				break;
+			}
+
+			npreposts = waitq_count_prepost_reservation(waitq, extra,
+			    keep_locked);
+		} while (npreposts > nalloc);
 	}
 
-try_alloc:
-	/* this _may_ unlock and relock the waitq! */
-	nalloc = waitq_alloc_prepost_reservation(npreposts, waitq,
-	    &unlocked, &wqp);
-
-	if (!unlocked) {
-		/* allocation held the waitq lock: we'd done! */
-		if (keep_locked) {
-			goto out;
-		}
-		goto out_unlock;
+	if (!keep_locked) {
+		waitq_unlock(waitq);
 	}
-
-	/*
-	 * Before we return, if the allocation had to unlock the waitq, we
-	 * must check one more time to see if we have enough. If not, we'll
-	 * try to allocate the difference. If the caller requests it, we'll
-	 * also leave the waitq locked so that the use of the pre-allocated
-	 * prepost objects can be guaranteed to be enough if a wakeup_all is
-	 * performed before unlocking the waitq.
-	 */
-
-	/*
-	 * If the waitq is no longer associated with a set, or if the waitq's
-	 * set/prepostid has not changed since we first walked its linkage,
-	 * we're done.
-	 */
-	if ((waitq->waitq_set_id == 0) ||
-	    (waitq->waitq_set_id == prev_setid &&
-	    waitq->waitq_prepost_id == prev_prepostid)) {
-		if (keep_locked) {
-			goto out;
-		}
-		goto out_unlock;
-	}
-
-	npreposts = waitq_count_prepost_reservation(waitq, extra, keep_locked);
-
-	if (npreposts > nalloc) {
-		prev_setid = waitq->waitq_set_id;
-		prev_prepostid = waitq->waitq_prepost_id;
-		npreposts = npreposts - nalloc; /* only allocate the diff */
-		goto try_alloc;
-	}
-
-	if (keep_locked) {
-		goto out;
-	}
-
-out_unlock:
-	waitq_unlock(waitq);
-out:
 	if (wqp) {
 		reserved = wqp->wqp_prepostid.id;
 	}
@@ -5210,84 +4346,11 @@ waitq_prepost_release_reserve(uint64_t id)
 }
 
 
-/**
- * clear all preposts from 'wqset'
- *
- * Conditions:
- *	'wqset' is not locked
- */
-void
-waitq_set_clear_preposts(struct waitq_set *wqset)
-{
-	uint64_t prepost_id;
-	spl_t spl;
-
-	assert(waitqs_is_set(wqset));
-
-	if (!wqset->wqset_q.waitq_prepost || !wqset->wqset_prepost_id) {
-		return;
-	}
-
-	wqdbg_v("Clearing all preposted queues on waitq_set: 0x%llx",
-	    wqset->wqset_id);
-
-	if (waitq_irq_safe(&wqset->wqset_q)) {
-		spl = splsched();
-	}
-	waitq_set_lock(wqset);
-	prepost_id = wqset->wqset_prepost_id;
-	wqset->wqset_prepost_id = 0;
-	waitq_set_unlock(wqset);
-	if (waitq_irq_safe(&wqset->wqset_q)) {
-		splx(spl);
-	}
-
-	/* drop / unlink all the prepost table objects */
-	if (prepost_id) {
-		(void)wq_prepost_iterate(prepost_id, NULL,
-		    wqset_clear_prepost_chain_cb);
-	}
-}
-
-
 /* ----------------------------------------------------------------------
  *
  * Iteration: waitq -> sets / waitq_set -> preposts
  *
  * ---------------------------------------------------------------------- */
-
-struct wq_it_ctx {
-	void *input;
-	void *ctx;
-	waitq_iterator_t it;
-};
-
-static int
-waitq_iterate_sets_cb(struct waitq *waitq, void *ctx,
-    struct waitq_link *link)
-{
-	struct wq_it_ctx *wctx = (struct wq_it_ctx *)(ctx);
-	struct waitq_set *wqset;
-	int ret;
-
-	(void)waitq;
-	assert(!waitq_irq_safe(waitq));
-	assert(wql_type(link) == WQL_WQS);
-
-	/*
-	 * the waitq is locked, so we can just take the set lock
-	 * and call the iterator function
-	 */
-	wqset = link->wql_wqs.wql_set;
-	assert(wqset != NULL);
-	assert(!waitq_irq_safe(&wqset->wqset_q));
-	waitq_set_lock(wqset);
-
-	ret = wctx->it(wctx->ctx, (struct waitq *)wctx->input, wqset);
-
-	waitq_set_unlock(wqset);
-	return ret;
-}
 
 /**
  * call external iterator function for each prepost object in wqset
@@ -5297,10 +4360,9 @@ waitq_iterate_sets_cb(struct waitq *waitq, void *ctx,
  *	(wqset locked, waitq _not_ locked)
  */
 static int
-wqset_iterate_prepost_cb(struct waitq_set *wqset, void *ctx,
-    struct wq_prepost *wqp, struct waitq *waitq)
+wqset_iterate_prepost_cb(struct waitq_set *wqset,
+    struct wq_prepost *wqp, struct waitq *waitq, int (^it)(struct waitq *))
 {
-	struct wq_it_ctx *wctx = (struct wq_it_ctx *)(ctx);
 	uint64_t wqp_id;
 	int ret;
 
@@ -5362,7 +4424,7 @@ call_iterator:
 	}
 
 	/* call the external callback */
-	ret = wctx->it(wctx->ctx, waitq, wqset);
+	ret = it(waitq);
 
 	if (ret == WQ_ITERATE_BREAK_KEEP_LOCKED) {
 		ret = WQ_ITERATE_BREAK;
@@ -5376,55 +4438,20 @@ out:
 }
 
 /**
- * iterator over all sets to which the given waitq has been linked
- *
- * Conditions:
- *      'waitq' is locked
- */
-int
-waitq_iterate_sets(struct waitq *waitq, void *ctx, waitq_iterator_t it)
-{
-	int ret;
-	struct wq_it_ctx wctx = {
-		.input = (void *)waitq,
-		.ctx = ctx,
-		.it = it,
-	};
-	if (!it || !waitq) {
-		return KERN_INVALID_ARGUMENT;
-	}
-
-	ret = walk_waitq_links(LINK_WALK_ONE_LEVEL, waitq, waitq->waitq_set_id,
-	    WQL_WQS, (void *)&wctx, waitq_iterate_sets_cb);
-	if (ret == WQ_ITERATE_CONTINUE) {
-		ret = WQ_ITERATE_SUCCESS;
-	}
-	return ret;
-}
-
-/**
  * iterator over all preposts in the given wqset
  *
  * Conditions:
  *      'wqset' is locked
  */
 int
-waitq_set_iterate_preposts(struct waitq_set *wqset,
-    void *ctx, waitq_iterator_t it)
+waitq_set_iterate_preposts(struct waitq_set *wqset, waitq_iterator_t it)
 {
-	struct wq_it_ctx wctx = {
-		.input = (void *)wqset,
-		.ctx = ctx,
-		.it = it,
-	};
-	if (!it || !wqset) {
-		return WQ_ITERATE_INVALID;
-	}
-
 	assert(waitq_held(&wqset->wqset_q));
 
-	return wq_prepost_foreach_locked(wqset, (void *)&wctx,
-	           wqset_iterate_prepost_cb);
+	return wq_prepost_foreach_locked(wqset,
+	           ^(struct wq_prepost *wqp, struct waitq *waitq){
+		return wqset_iterate_prepost_cb(wqset, wqp, waitq, it);
+	});
 }
 
 
@@ -5449,11 +4476,9 @@ waitq_assert_wait64(struct waitq *waitq,
 {
 	thread_t thread = current_thread();
 	wait_result_t ret;
-	spl_t s;
+	spl_t s = 0;
 
-	if (!waitq_valid(waitq)) {
-		panic("Invalid waitq: %p", waitq);
-	}
+	__waitq_validate(waitq);
 
 	if (waitq_irq_safe(waitq)) {
 		s = splsched();
@@ -5489,11 +4514,9 @@ waitq_assert_wait64_leeway(struct waitq *waitq,
 {
 	wait_result_t ret;
 	thread_t thread = current_thread();
-	spl_t s;
+	spl_t s = 0;
 
-	if (!waitq_valid(waitq)) {
-		panic("Invalid waitq: %p", waitq);
-	}
+	__waitq_validate(waitq);
 
 	if (waitq_irq_safe(waitq)) {
 		s = splsched();
@@ -5528,19 +4551,25 @@ waitq_wakeup64_one(struct waitq *waitq, event64_t wake_event,
 {
 	kern_return_t kr;
 	uint64_t reserved_preposts = 0;
-	spl_t spl;
+	spl_t spl = 0;
 
-	if (!waitq_valid(waitq)) {
-		panic("Invalid waitq: %p", waitq);
-	}
+	__waitq_validate(waitq);
 
-	if (!waitq_irq_safe(waitq)) {
-		/* reserve preposts in addition to locking the waitq */
-		reserved_preposts = waitq_prepost_reserve(waitq, 0, WAITQ_KEEP_LOCKED);
-	} else {
+	if (waitq_irq_safe(waitq)) {
 		spl = splsched();
 		waitq_lock(waitq);
+	} else if (wake_event != NO_EVENT64) {
+		waitq_lock(waitq);
+	} else {
+		/*
+		 * reserve preposts in addition to locking waitq
+		 * only non global wait queues for the NO_EVENT64
+		 * will prepost.
+		 */
+		reserved_preposts = waitq_prepost_reserve(waitq, 0,
+		    WAITQ_KEEP_LOCKED);
 	}
+
 
 	/* waitq is locked upon return */
 	kr = waitq_wakeup64_one_locked(waitq, wake_event, result,
@@ -5568,34 +4597,35 @@ waitq_wakeup64_one(struct waitq *waitq, event64_t wake_event,
  *	will _not_ block if waitq is global (or not a member of any set)
  */
 kern_return_t
-waitq_wakeup64_all(struct waitq *waitq,
-    event64_t wake_event,
-    wait_result_t result,
-    int priority)
+waitq_wakeup64_all(struct waitq *waitq, event64_t wake_event,
+    wait_result_t result, int priority)
 {
 	kern_return_t ret;
 	uint64_t reserved_preposts = 0;
-	spl_t s;
+	spl_t spl = 0;
 
-	if (!waitq_valid(waitq)) {
-		panic("Invalid waitq: %p", waitq);
-	}
+	__waitq_validate(waitq);
 
-	if (!waitq_irq_safe(waitq)) {
-		/* reserve preposts in addition to locking waitq */
+	if (waitq_irq_safe(waitq)) {
+		spl = splsched();
+		waitq_lock(waitq);
+	} else if (wake_event != NO_EVENT64) {
+		waitq_lock(waitq);
+	} else {
+		/*
+		 * reserve preposts in addition to locking waitq
+		 * only non global wait queues for the NO_EVENT64
+		 * will prepost.
+		 */
 		reserved_preposts = waitq_prepost_reserve(waitq, 0,
 		    WAITQ_KEEP_LOCKED);
-	} else {
-		s = splsched();
-		waitq_lock(waitq);
 	}
 
 	ret = waitq_wakeup64_all_locked(waitq, wake_event, result,
-	    &reserved_preposts, priority,
-	    WAITQ_UNLOCK);
+	    &reserved_preposts, priority, WAITQ_UNLOCK);
 
 	if (waitq_irq_safe(waitq)) {
-		splx(s);
+		splx(spl);
 	}
 
 	waitq_prepost_release_reserve(reserved_preposts);
@@ -5613,17 +4643,13 @@ waitq_wakeup64_all(struct waitq *waitq,
  *	May temporarily disable and re-enable interrupts
  */
 kern_return_t
-waitq_wakeup64_thread(struct waitq *waitq,
-    event64_t wake_event,
-    thread_t thread,
-    wait_result_t result)
+waitq_wakeup64_thread(struct waitq *waitq, event64_t wake_event,
+    thread_t thread, wait_result_t result)
 {
 	kern_return_t ret;
 	spl_t s, th_spl;
 
-	if (!waitq_valid(waitq)) {
-		panic("Invalid waitq: %p", waitq);
-	}
+	__waitq_validate(waitq);
 
 	if (waitq_irq_safe(waitq)) {
 		s = splsched();
@@ -5631,6 +4657,8 @@ waitq_wakeup64_thread(struct waitq *waitq,
 	waitq_lock(waitq);
 
 	ret = waitq_select_thread_locked(waitq, wake_event, thread, &th_spl);
+	waitq_stats_count_wakeup(waitq, ret == KERN_SUCCESS ? 1 : 0);
+
 	/* on success, returns 'thread' locked */
 
 	waitq_unlock(waitq);
@@ -5640,10 +4668,8 @@ waitq_wakeup64_thread(struct waitq *waitq,
 		assert(ret == KERN_SUCCESS);
 		thread_unlock(thread);
 		splx(th_spl);
-		waitq_stats_count_wakeup(waitq);
 	} else {
 		ret = KERN_NOT_WAITING;
-		waitq_stats_count_fail(waitq);
 	}
 
 	if (waitq_irq_safe(waitq)) {
@@ -5667,26 +4693,29 @@ waitq_wakeup64_thread(struct waitq *waitq,
  *	will _not_ block if waitq is global (or not a member of any set)
  */
 thread_t
-waitq_wakeup64_identify(struct waitq    *waitq,
-    event64_t       wake_event,
-    wait_result_t   result,
-    int             priority)
+waitq_wakeup64_identify(struct waitq *waitq, event64_t wake_event,
+    wait_result_t result, int priority)
 {
 	uint64_t reserved_preposts = 0;
 	spl_t thread_spl = 0;
 	thread_t thread;
-	spl_t spl;
+	spl_t spl = 0;
 
-	if (!waitq_valid(waitq)) {
-		panic("Invalid waitq: %p", waitq);
-	}
+	__waitq_validate(waitq);
 
-	if (!waitq_irq_safe(waitq)) {
-		/* reserve preposts in addition to locking waitq */
-		reserved_preposts = waitq_prepost_reserve(waitq, 0, WAITQ_KEEP_LOCKED);
-	} else {
+	if (waitq_irq_safe(waitq)) {
 		spl = splsched();
 		waitq_lock(waitq);
+	} else if (wake_event != NO_EVENT64) {
+		waitq_lock(waitq);
+	} else {
+		/*
+		 * reserve preposts in addition to locking waitq
+		 * only non global wait queues for the NO_EVENT64
+		 * will prepost.
+		 */
+		reserved_preposts = waitq_prepost_reserve(waitq, 0,
+		    WAITQ_KEEP_LOCKED);
 	}
 
 	thread = waitq_wakeup64_identify_locked(waitq, wake_event, result,
@@ -5710,3 +4739,201 @@ waitq_wakeup64_identify(struct waitq    *waitq,
 	/* returns +1 ref to running thread or THREAD_NULL */
 	return thread;
 }
+
+#pragma mark - tests
+#if DEBUG || DEVELOPMENT
+
+#include <ipc/ipc_pset.h>
+#include <sys/errno.h>
+
+#define MAX_GLOBAL_TEST_QUEUES 64
+static struct waitq wqt_waitq_array[MAX_GLOBAL_TEST_QUEUES];
+static bool wqt_running;
+static bool wqt_init;
+
+static bool
+wqt_start(const char *test, int64_t *out)
+{
+	if (os_atomic_xchg(&wqt_running, true, acquire)) {
+		*out = 0;
+		return false;
+	}
+
+	if (!wqt_init) {
+		wqt_init = true;
+		for (int i = 0; i < MAX_GLOBAL_TEST_QUEUES; i++) {
+			waitq_init(&wqt_waitq_array[i], SYNC_POLICY_FIFO);
+		}
+	}
+
+	printf("[WQ] starting %s\n", test);
+	return true;
+}
+
+static int
+wqt_end(const char *test, int64_t *out)
+{
+	os_atomic_store(&wqt_running, false, release);
+	printf("[WQ] done %s\n", test);
+	*out = 1;
+	return 0;
+}
+
+static struct waitq *
+wqt_wq(uint32_t index)
+{
+	return &wqt_waitq_array[index];
+}
+
+static uint32_t
+wqt_idx(struct waitq *waitq)
+{
+	assert(waitq >= wqt_waitq_array &&
+	    waitq < wqt_waitq_array + MAX_GLOBAL_TEST_QUEUES);
+	return (uint32_t)(waitq - wqt_waitq_array);
+}
+
+__attribute__((overloadable))
+static uint64_t
+wqt_bit(uint32_t index)
+{
+	return 1ull << index;
+}
+
+__attribute__((overloadable))
+static uint64_t
+wqt_bit(struct waitq *waitq)
+{
+	return wqt_bit(wqt_idx(waitq));
+}
+
+static struct waitq_set *
+wqt_wqset_create(void)
+{
+	struct waitq_set *wqset;
+
+	wqset = &ipc_pset_alloc_special(ipc_space_kernel)->ips_wqset;
+	if (!waitqs_is_linked(wqset)) {
+		waitq_set_lazy_init_link(wqset);
+	}
+	printf("[WQ]: created waitq set 0x%llx\n", wqset->wqset_id);
+	return wqset;
+}
+
+static void
+wqt_wqset_free(struct waitq_set *wqset)
+{
+	waitq_set_lock(wqset);
+	ipc_pset_destroy(ipc_space_kernel,
+	    __container_of(wqset, struct ipc_pset, ips_wqset));
+}
+
+static void
+wqt_link(uint32_t index, struct waitq_set *wqset, kern_return_t want)
+{
+	struct waitq *waitq = wqt_wq(index);
+	waitq_ref_t reserved_link;
+	kern_return_t kr;
+
+	printf("[WQ]: linking waitq [%d] to global wqset (0x%llx)\n",
+	    index, wqset->wqset_id);
+	reserved_link = waitq_link_reserve();
+	kr = waitq_link(waitq, wqset, WAITQ_SHOULD_LOCK, &reserved_link);
+	waitq_link_release(reserved_link);
+
+	printf("[WQ]:\tkr=%d\texpected=%d\n", kr, want);
+	assert(kr == want);
+}
+
+static void
+wqt_unlink(uint32_t index, struct waitq_set *wqset, kern_return_t want)
+{
+	struct waitq *waitq = wqt_wq(index);
+	kern_return_t kr;
+
+	printf("[WQ]: unlinking waitq [%d] from global wqset (0x%llx)\n",
+	    index, wqset->wqset_id);
+	kr = waitq_unlink(waitq, wqset);
+	printf("[WQ]: \tkr=%d\n", kr);
+	assert(kr == want);
+}
+
+static void
+wqt_wakeup_one(uint32_t index, event64_t event64, kern_return_t want)
+{
+	kern_return_t kr;
+
+	printf("[WQ]: Waking one thread on waitq [%d] event:0x%llx\n",
+	    index, event64);
+	kr = waitq_wakeup64_one(wqt_wq(index), event64,
+	    THREAD_AWAKENED, WAITQ_ALL_PRIORITIES);
+	printf("[WQ]: \tkr=%d\n", kr);
+	assert(kr == want);
+}
+
+static void
+wqt_clear_preposts(uint32_t idx)
+{
+	waitq_lock(wqt_wq(idx));
+	(void)waitq_clear_prepost_locked(wqt_wq(idx));
+	waitq_unlock(wqt_wq(idx));
+}
+
+static void
+wqt_expect_preposts(struct waitq_set *wqset, uint64_t preposts)
+{
+	/* make sure we find all preposts on wqset1 */
+	__block uint64_t found = 0;
+
+	waitq_set_lock(wqset);
+	waitq_set_iterate_preposts(wqset, ^(struct waitq *waitq) {
+		printf("[WQ]: found prepost %d\n", wqt_idx(waitq));
+		assertf((found & wqt_bit(waitq)) == 0,
+		"found waitq %d twice", wqt_idx(waitq));
+		found |= wqt_bit(waitq);
+		return WQ_ITERATE_CONTINUE;
+	});
+	waitq_set_unlock(wqset);
+
+	assertf(found == preposts, "preposts expected 0x%llx, but got 0x%llx",
+	    preposts, found);
+}
+
+static int
+waitq_basic_test(__unused int64_t in, int64_t *out)
+{
+	struct waitq_set *wqset;
+
+	if (!wqt_start(__func__, out)) {
+		return EBUSY;
+	}
+
+	wqset = wqt_wqset_create();
+	wqt_link(10, wqset, KERN_SUCCESS);
+	wqt_link(10, wqset, KERN_ALREADY_IN_SET);
+	wqt_link(11, wqset, KERN_SUCCESS);
+	wqt_link(11, wqset, KERN_ALREADY_IN_SET);
+	wqt_link(12, wqset, KERN_SUCCESS);
+	wqt_link(12, wqset, KERN_ALREADY_IN_SET);
+
+	wqt_wakeup_one(10, NO_EVENT64, KERN_NOT_WAITING);
+	wqt_wakeup_one(12, NO_EVENT64, KERN_NOT_WAITING);
+
+	wqt_expect_preposts(wqset, wqt_bit(10) | wqt_bit(12));
+	wqt_clear_preposts(10);
+
+	wqt_expect_preposts(wqset, wqt_bit(12));
+	wqt_clear_preposts(12);
+
+	wqt_expect_preposts(wqset, 0);
+
+	wqt_unlink(12, wqset, KERN_SUCCESS);
+	wqt_unlink(12, wqset, KERN_NOT_IN_SET);
+	wqt_unlink(11, wqset, KERN_SUCCESS);
+	wqt_unlink(10, wqset, KERN_SUCCESS);
+	wqt_wqset_free(wqset);
+
+	return wqt_end(__func__, out);
+}
+SYSCTL_TEST_REGISTER(waitq_basic, waitq_basic_test);
+#endif /* DEBUG || DEVELOPMENT */

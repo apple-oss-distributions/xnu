@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2004,2007-2008 Apple Inc. All rights reserved.
+ * Copyright (c) 2004-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -122,7 +122,7 @@ devtimer_release(devtimer_ref timer)
 {
 	if (os_ref_release(&timer->dt_retain_count) == 0) {
 		devtimer_invalidate(timer);
-		FREE(timer, M_DEVTIMER);
+		kfree_type(struct devtimer_s, timer);
 		_devtimer_printf("devtimer: timer released\n");
 	}
 }
@@ -164,10 +164,7 @@ devtimer_create(devtimer_process_func process_func, void * arg0)
 {
 	devtimer_ref        timer;
 
-	timer = _MALLOC(sizeof(*timer), M_DEVTIMER, M_WAITOK | M_ZERO);
-	if (timer == NULL) {
-		return timer;
-	}
+	timer = kalloc_type(struct devtimer_s, Z_WAITOK | Z_ZERO | Z_NOFAIL);
 	os_ref_init(&timer->dt_retain_count, NULL);
 	timer->dt_callout = thread_call_allocate(devtimer_process, timer);
 	if (timer->dt_callout == NULL) {

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2020 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -69,6 +69,9 @@
 #include <netinet/in_pcb.h>
 #include <netinet/tcp.h>
 #include <netinet/tcp_timer.h>
+#if !KERNEL
+#include <TargetConditionals.h>
+#endif
 
 #if defined(__LP64__)
 #define _TCPCB_PTR(x)                   u_int32_t
@@ -241,7 +244,30 @@ struct tcp_ccstate {
 #define cub_epoch_period __u__._cubic_state_.tc_epoch_period
 #define cub_avg_lastmax __u__._cubic_state_.tc_avg_lastmax
 #define cub_mean_dev __u__._cubic_state_.tc_mean_deviation
+		struct tcp_ledbat_state {
+			uint32_t num_slowdown_events;
+			uint32_t slowdown_ts;
+			uint32_t slowdown_begin;
+			uint32_t md_bytes_acked;
+		} _ledbat_state_;
+#define ledbat_slowdown_events __u__._ledbat_state_.num_slowdown_events
+#define ledbat_slowdown_ts __u__._ledbat_state_.slowdown_ts
+#define ledbat_slowdown_begin __u__._ledbat_state_.slowdown_begin
+#define ledbat_md_bytes_acked __u__._ledbat_state_.md_bytes_acked
 	} __u__;
+};
+
+struct tcp_rledbat_state {
+	uint32_t num_slowdown_events;  /* Number of slowdown events until reset */
+	uint32_t slowdown_ts;          /* Next slowdown timestamp */
+	uint32_t slowdown_begin;       /* Slowdown begin time */
+	uint32_t reduction_end;        /* Used to track rl_win reduction once per RTT */
+	uint32_t rcvd_bytes;           /* bytes received used for byte counting */
+	uint32_t md_rcvd_bytes;        /* bytes received during MD used for byte counting */
+	uint32_t win;                  /* receive Ledbat window size */
+	uint32_t ssthresh;             /* receive Ledbat ssthresh */
+	uint32_t drained_bytes;        /* bytes drained from the flight-size */
+	uint32_t win_ws;               /* receive Ledbat window after avoiding window shrinking */
 };
 
 /*
@@ -249,9 +275,9 @@ struct tcp_ccstate {
  * Organized for 16 byte cacheline efficiency.
  */
 struct tcpcb {
-	struct  tsegqe_head t_segq;
-	int     t_dupacks;              /* consecutive dup acks recd */
-	int     t_state;                /* state of this connection */
+	struct tsegqe_head t_segq;
+	uint32_t t_dupacks;             /* consecutive dup acks recd */
+	int      t_state;               /* state of this connection */
 	uint32_t t_timer[TCPT_NTIMERS]; /* tcp timers */
 	struct tcptimerentry tentry;    /* entry in timer list */
 
@@ -333,7 +359,7 @@ struct tcpcb {
 	int            t_rttvar;        /* variance in round-trip time */
 
 	uint64_t t_accsleep_ms;         /* accumulated sleep time since last boot */
-	uint16_t t_reassqlen;           /* length of reassembly queue */
+	uint32_t t_reassqlen;           /* length of reassembly queue */
 	uint16_t t_rxtshift;            /* log(2) of rexmt exp. backoff */
 	uint32_t t_rttmin;              /* minimum rtt allowed */
 	uint32_t t_rttbest;             /* best rtt we've seen */
@@ -501,11 +527,11 @@ struct tcpcb {
 #if TRAFFIC_MGT
 	/* Inter-arrival jitter related state */
 	uint32_t        iaj_rcv_ts;             /* tcp clock when the first packet was received */
-	uint16_t        iaj_size;               /* Size of packet for iaj measurement */
+	int             iaj_size;               /* Size of packet for iaj measurement */
 	uint8_t         iaj_small_pkt;          /* Count of packets smaller than iaj_size */
 	uint8_t         t_pipeack_ind;          /* index for next pipeack sample */
 	uint16_t        iaj_pktcnt;             /* packet count, to avoid throttling initially */
-	uint16_t        acc_iaj;                /* Accumulated iaj */
+	uint32_t        acc_iaj;                /* Accumulated iaj */
 	uint32_t        avg_iaj;                /* Mean */
 	uint32_t        std_dev_iaj;            /* Standard deviation */
 #endif /* TRAFFIC_MGT */
@@ -556,6 +582,7 @@ struct tcpcb {
 #define TMPF_SND_MPFAIL         0x00200000 /* Received mapping csum failure */
 #define TMPF_SND_JACK           0x00400000 /* Send a Join-ACK */
 #define TMPF_TFO_REQUEST        0x00800000 /* TFO Requested */
+#define TMPF_MPTCP_ECHO_ADDR    0x01000000 /* MPTCP echoes add_addr */
 
 #define TMPF_MPTCP_SIGNALS      (TMPF_SND_MPPRIO | TMPF_SND_REM_ADDR | TMPF_SND_MPFAIL | TMPF_SND_KEYS | TMPF_SND_JACK)
 
@@ -642,6 +669,21 @@ struct tcpcb {
 	uint32_t        t_comp_lastinc; /* Last time the gen-count was changed - should change every TCP_COMP_CHANGE_RATE ms */
 #define TCP_COMP_CHANGE_RATE    5 /* Intervals at which we change the gencnt. Means that worst-case we send one ACK every TCP_COMP_CHANGE_RATE ms */
 
+	uint32_t        t_ts_offset; /* Randomized timestamp offset to hide on-the-wire timestamp */
+
+#define NCURR_RTT_HIST 4                         /* Number of current RTT samples (k) */
+	uint32_t curr_rtt_hist[NCURR_RTT_HIST];  /* last k current RTT samples */
+	uint32_t curr_rtt_min;                   /* Minimum current RTT from last k samples */
+	uint32_t curr_rtt_index;                 /* Index for current RTT samples */
+
+	tcp_seq rcv_high;                   /* highest sequence number received */
+	uint32_t tsv_high;                  /* timestamp value of highest received sequence number */
+	struct tcp_rledbat_state t_rlstate; /* State used by rLedbat */
+
+	uint32_t rcv_srtt;                  /* receiver's SRTT, coarse when Timestamp not supported */
+	uint32_t rcv_rtt_est_ts;            /* start of measurement for estimating RTT when Timestamp not supported */
+	uint32_t rcv_rtt_est_seq;           /* expected sequence number for completion of 1RTT when Timestamp not supported */
+
 	uuid_t          t_fsw_uuid;
 	uuid_t          t_flow_uuid;
 };
@@ -682,7 +724,7 @@ struct tcpcb {
  * When the number of duplicate acks received is less than
  * the retransmit threshold, use Limited Transmit algorithm
  */
-extern int tcprexmtthresh;
+extern uint8_t tcprexmtthresh;
 #define ALLOW_LIMITED_TRANSMIT(_tp_)                                            \
 	((_tp_)->t_dupacks > 0 &&                                               \
 	(_tp_)->t_dupacks < (_tp_)->t_rexmtthresh &&                            \
@@ -745,6 +787,15 @@ extern int tcprexmtthresh;
 	(probe_if_index > 0 && tp->t_inpcb->inp_last_outifp != NULL &&  \
 	probe_if_index == tp->t_inpcb->inp_last_outifp->if_index)
 
+#define TCP_RLEDBAT_ENABLED(_tp) \
+    (tcp_rledbat == 1 && TSTMP_SUPPORTED(_tp))
+
+#define TCP_RECV_BG(_so) \
+    (tcp_recv_bg == 1 || IS_TCP_RECV_BG(_so))
+
+#define TCP_USE_RLEDBAT(_tp, _so) \
+    TCP_RLEDBAT_ENABLED(_tp) && TCP_RECV_BG(_so)
+
 /*
  * Structure to hold TCP options that are only used during segment
  * processing (in tcp_input), but not held in the tcpcb.
@@ -752,7 +803,7 @@ extern int tcprexmtthresh;
  * to tcp_dooptions.
  */
 struct tcpopt {
-	u_int32_t       to_flags;               /* which options are present */
+	uint32_t        to_flags;               /* which options are present */
 #define TOF_TS          0x0001          /* timestamp */
 #define TOF_MSS         0x0010
 #define TOF_SCALE       0x0020
@@ -762,11 +813,11 @@ struct tcpopt {
 #define TOF_MPTCP       0x0200  /* MPTCP options to be dropped */
 #define TOF_TFO         0x0400  /* TFO cookie option present */
 #define TOF_TFOREQ      0x0800  /* TFO cookie request present */
-	u_int32_t               to_tsval;
-	u_int32_t               to_tsecr;
-	u_int16_t       to_mss;
-	u_int8_t        to_requested_s_scale;
-	u_int8_t        to_nsacks;      /* number of SACK blocks */
+	uint32_t        to_tsval;
+	uint32_t        to_tsecr;
+	uint16_t        to_mss;
+	uint8_t         to_requested_s_scale;
+	uint8_t         to_nsacks;      /* number of SACK blocks */
 	u_char          *to_sacks;      /* pointer to the first SACK blocks */
 	u_char          *to_tfo;        /* pointer to the TFO cookie */
 };
@@ -1183,6 +1234,8 @@ struct  tcpstat {
 	u_int32_t       tcps_ka_offload_drops;  /* Keep alive drops for timeout reported by firmware */
 
 	u_int32_t       tcps_mptcp_triggered_cell;      /* Total number of times an MPTCP-connection triggered cell bringup */
+
+	u_int32_t       tcps_fin_timeout_drops;
 };
 
 
@@ -1227,7 +1280,7 @@ struct  xtcpcb {
 	u_quad_t        xt_alignment_hack;
 };
 
-#if XNU_TARGET_OS_OSX || !(TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR)
+#if XNU_TARGET_OS_OSX || KERNEL || !(TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR)
 
 struct  xtcpcb64 {
 	u_int32_t               xt_len;
@@ -1308,7 +1361,7 @@ struct  xtcpcb64 {
 	u_quad_t                xt_alignment_hack;
 };
 
-#endif /* XNU_TARGET_OS_OSX || !(TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR) */
+#endif /* XNU_TARGET_OS_OSX || KERNEL || !(TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR) */
 
 #ifdef PRIVATE
 
@@ -1434,6 +1487,14 @@ struct tcpprogressreq {
 	u_int64_t       xp_reserved2;           /* Expansion */
 };
 
+struct tcpprobereq {
+	u_int64_t       ifindex;                /* Optional interface index for TCP keep-alive probing */
+	u_int64_t       enable;                 /* Flag to enable or disable probing (1=on, 0=off)*/
+	u_int64_t       filter_flags;           /* Optional flags for filtering interfaces per ntstat.h (NSTAT_IFNET_IS_*) */
+	u_int32_t       reserved;               /* Expansion */
+	u_int32_t       reserved2;              /* Expansion */
+};
+
 #endif /* PRIVATE */
 
 #pragma pack()
@@ -1485,10 +1546,11 @@ extern int ss_fltsz_local;
 extern int target_qdelay;
 extern u_int32_t tcp_now;               /* for RFC 1323 timestamps */
 extern struct timeval tcp_uptime;
-extern lck_spin_t *tcp_uptime_lock;
+extern lck_spin_t tcp_uptime_lock;
 extern int tcp_delack_enabled;
 extern int maxseg_unacked;
 extern int tcp_use_newreno;
+extern int tcp_use_ledbat;
 extern struct zone *tcp_reass_zone;
 extern struct zone *tcp_rxt_seg_zone;
 extern int tcp_ecn_outbound;
@@ -1497,6 +1559,9 @@ extern uint32_t tcp_do_autorcvbuf;
 extern uint32_t tcp_autorcvbuf_max;
 extern int tcp_recv_bg;
 extern int tcp_do_ack_compression;
+extern int tcp_randomize_timestamps;
+extern int tcp_rledbat;
+extern int tcp_use_min_curr_rtt;
 /*
  * Dummy value used for when there is no flow and we want to ensure that compression
  * can happen.
@@ -1533,6 +1598,9 @@ void     tcp_getrt_rtt(struct tcpcb *tp, struct rtentry *rt);
 void     tcp_init(struct protosw *, struct domain *);
 void     tcp_input(struct mbuf *, int);
 void     tcp_mss(struct tcpcb *, int, unsigned int);
+uint32_t tcp_ceil(double a);
+uint32_t tcp_round_to(uint32_t val, uint32_t round);
+uint32_t tcp_round_up(uint32_t val, uint32_t base);
 int      tcp_mssopt(struct tcpcb *);
 void     tcp_drop_syn_sent(struct inpcb *, int);
 void     tcp_mtudisc(struct inpcb *, int);
@@ -1551,7 +1619,7 @@ void     tcp_run_timerlist(void *arg1, void *arg2);
 void     tcp_sched_timers(struct tcpcb *tp);
 
 struct tcptemp *tcp_maketemplate(struct tcpcb *);
-void     tcp_fillheaders(struct tcpcb *, void *, void *);
+void     tcp_fillheaders(struct mbuf *, struct tcpcb *, void *, void *);
 struct tcpcb *tcp_timers(struct tcpcb *, int);
 void     tcp_trace(int, int, struct tcpcb *, void *, struct tcphdr *, int);
 
@@ -1574,7 +1642,7 @@ void     tcp_set_tso(struct tcpcb *tp, struct ifnet *ifp);
 void     tcp_set_ecn(struct tcpcb *tp, struct ifnet *ifp);
 int      tcp_flight_size(struct tcpcb *tp);
 void     tcp_reset_stretch_ack(struct tcpcb *tp);
-extern void tcp_get_ports_used(u_int32_t, int, u_int32_t, bitstr_t *);
+extern void tcp_get_ports_used(ifnet_t ifp, int, u_int32_t, bitstr_t *);
 uint32_t tcp_count_opportunistic(unsigned int ifindex, u_int32_t flags);
 uint32_t tcp_find_anypcb_byaddr(struct ifaddr *ifa);
 void tcp_set_max_rwinscale(struct tcpcb *tp, struct socket *so);
@@ -1653,6 +1721,7 @@ extern void tcp_update_mss_locked(struct socket *, struct ifnet *);
 
 extern int get_tcp_inp_list(struct inpcb **, int, inp_gen_t);
 extern bool tcp_notify_ack_active(struct socket *so);
+extern void tcp_set_finwait_timeout(struct tcpcb *);
 
 #if MPTCP
 extern int mptcp_input_preproc(struct tcpcb *tp, struct mbuf *m,

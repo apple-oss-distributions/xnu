@@ -229,6 +229,8 @@ x2apic_init(void)
 		lo |= MSR_IA32_APIC_BASE_EXTENDED;
 		wrmsr(MSR_IA32_APIC_BASE, lo, hi);
 		kprintf("x2APIC mode enabled\n");
+		rdmsr(LAPIC_MSR(LVT_TIMER), lo, hi);
+		current_cpu_datap()->cpu_soft_apic_lvt_timer = lo;
 	}
 }
 
@@ -238,6 +240,10 @@ x2apic_read(lapic_register_t reg)
 	uint32_t        lo;
 	uint32_t        hi;
 
+	if (LVT_TIMER == reg) {
+		// avoid frequent APIC access VM-exit
+		return current_cpu_datap()->cpu_soft_apic_lvt_timer;
+	}
 	rdmsr(LAPIC_MSR(reg), lo, hi);
 	return lo;
 }
@@ -245,13 +251,16 @@ x2apic_read(lapic_register_t reg)
 static void
 x2apic_write(lapic_register_t reg, uint32_t value)
 {
+	if (LVT_TIMER == reg) {
+		current_cpu_datap()->cpu_soft_apic_lvt_timer = value;
+	}
 	wrmsr(LAPIC_MSR(reg), value, 0);
 }
 
 static uint64_t
 x2apic_read_icr(void)
 {
-	return rdmsr64(LAPIC_MSR(ICR));;
+	return rdmsr64(LAPIC_MSR(ICR));
 }
 
 static void
@@ -321,7 +330,7 @@ lapic_reinit(bool for_wake)
 	}
 
 	if ((!is_lapic_enabled && !is_local_x2apic)) {
-		panic("Unexpected local APIC state\n");
+		panic("Unexpected local APIC state");
 	}
 
 	/*
@@ -348,6 +357,12 @@ lapic_reinit(bool for_wake)
 		asm volatile ("cli; hlt;" ::: "memory");
 #endif
 	}
+
+	if (is_local_x2apic) {
+		/* ensure the soft copy is up-to-date */
+		rdmsr(LAPIC_MSR(LVT_TIMER), lo, hi);
+		current_cpu_datap()->cpu_soft_apic_lvt_timer = lo;
+	}
 }
 
 void
@@ -356,7 +371,7 @@ lapic_init_slave(void)
 	lapic_reinit(false);
 #if DEBUG || DEVELOPMENT
 	if (rdmsr64(MSR_IA32_APIC_BASE) & MSR_IA32_APIC_BASE_BSP) {
-		panic("Calling lapic_init_slave() on the boot processor\n");
+		panic("Calling lapic_init_slave() on the boot processor");
 	}
 #endif
 }
@@ -380,7 +395,7 @@ lapic_init(void)
 	    is_x2apic ? "extended" : "legacy",
 	    is_boot_processor ? "BSP" : "AP");
 	if (!is_boot_processor || !is_lapic_enabled) {
-		panic("Unexpected local APIC state\n");
+		panic("Unexpected local APIC state");
 	}
 
 	/*
@@ -416,7 +431,7 @@ lapic_init(void)
 
 	kprintf("ID: 0x%x LDR: 0x%x\n", LAPIC_READ(ID), LAPIC_READ(LDR));
 	if ((LAPIC_READ(VERSION) & LAPIC_VERSION_MASK) < 0x14) {
-		panic("Local APIC version 0x%x, 0x14 or more expected\n",
+		panic("Local APIC version 0x%x, 0x14 or more expected",
 		    (LAPIC_READ(VERSION) & LAPIC_VERSION_MASK));
 	}
 
@@ -728,7 +743,7 @@ lapic_set_timer(
 
 	mp_disable_preemption();
 	timer_vector = LAPIC_READ(LVT_TIMER);
-	timer_vector &= ~(LAPIC_LVT_MASKED | LAPIC_LVT_PERIODIC);;
+	timer_vector &= ~(LAPIC_LVT_MASKED | LAPIC_LVT_PERIODIC);
 	timer_vector |= interrupt_unmasked ? 0 : LAPIC_LVT_MASKED;
 	timer_vector |= (mode == periodic) ? LAPIC_LVT_PERIODIC : 0;
 	LAPIC_WRITE(LVT_TIMER, timer_vector);
@@ -871,7 +886,7 @@ lapic_set_intr_func(int vector, i386_intr_func_t func)
 		lapic_intr_func[vector] = func;
 		break;
 	default:
-		panic("lapic_set_intr_func(%d,%p) invalid vector\n",
+		panic("lapic_set_intr_func(%d,%p) invalid vector",
 		    vector, func);
 	}
 }
@@ -954,7 +969,7 @@ lapic_interrupt(int interrupt_num, x86_saved_state_t *state)
 
 		if ((debug_boot_arg && (lapic_dont_panic == FALSE)) ||
 		    cpu_number() != master_cpu) {
-			panic("Local APIC error, ESR: %d\n", esr);
+			panic("Local APIC error, ESR: %d", esr);
 		}
 
 		if (cpu_number() == master_cpu) {

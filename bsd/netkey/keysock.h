@@ -63,8 +63,9 @@ struct pfkeystat {
 #define KEY_SENDUP_REGISTERED   2
 
 #ifdef BSD_KERNEL_PRIVATE
+extern lck_mtx_t pfkey_stat_mutex;
 #define PFKEY_STAT_INCREMENT(x)  \
-	{lck_mtx_lock(pfkey_stat_mutex); (x)++; lck_mtx_unlock(pfkey_stat_mutex);}
+	{lck_mtx_lock(&pfkey_stat_mutex); (x)++; lck_mtx_unlock(&pfkey_stat_mutex);}
 
 struct keycb {
 	struct rawcb kp_raw;    /* rawcb */

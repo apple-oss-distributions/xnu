@@ -71,16 +71,26 @@ struct scope6_id {
 	u_int32_t s6id_list[SCOPE6_ID_MAX];
 };
 
-extern void scope6_init(lck_grp_t *, lck_attr_t *);
+extern int in6_embedded_scope;
+extern int in6_embedded_scope_debug;
+
+#define IN6_NULL_IF_EMBEDDED_SCOPE(_var) (in6_embedded_scope ? NULL : (_var))
+
 extern void scope6_ifattach(struct ifnet *);
 extern void scope6_setdefault(struct ifnet *);
 extern u_int32_t scope6_in6_addrscope(struct in6_addr *);
 extern u_int32_t scope6_addr2default(struct in6_addr *);
-extern int sa6_embedscope(struct sockaddr_in6 *, int);
+extern int sa6_embedscope(struct sockaddr_in6 *, int, uint32_t *);
 extern int sa6_recoverscope(struct sockaddr_in6 *, boolean_t);
 extern int in6_setscope(struct in6_addr *, struct ifnet *, u_int32_t *);
 extern int in6_clearscope(struct in6_addr *);
 extern void rtkey_to_sa6(struct rtentry *, struct sockaddr_in6 *);
 extern void rtgw_to_sa6(struct rtentry *, struct sockaddr_in6 *);
+extern bool in6_are_addr_equal_scoped(const struct in6_addr *, const struct in6_addr *,
+    uint32_t, uint32_t);
+extern bool in6_are_masked_addr_scope_equal(const struct in6_addr *, uint32_t, const struct in6_addr *, uint32_t, const struct in6_addr *);
+
+extern void in6_verify_ifscope(const struct in6_addr *, uint32_t);
+
 #endif /* BSD_KERNEL_PRIVATE */
 #endif /* _NETINET6_SCOPE6_VAR_H_ */

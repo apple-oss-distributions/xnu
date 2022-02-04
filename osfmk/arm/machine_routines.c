@@ -53,6 +53,7 @@
 #include <pexpert/device_tree.h>
 #include <arm/cpuid_internal.h>
 #include <arm/cpu_capabilities.h>
+#include <san/kcov.h>
 
 #include <IOKit/IOPlatformExpert.h>
 
@@ -70,6 +71,7 @@ static ml_topology_cluster_t topology_cluster = {
 static ml_topology_info_t topology_info = {
 	.version = CPU_TOPOLOGY_VERSION,
 	.num_clusters = 1,
+	.cluster_types = 0x1,
 	.max_cluster_id = 0,
 	.cpus = topology_cpu_array,
 	.clusters = &topology_cluster,
@@ -77,10 +79,15 @@ static ml_topology_info_t topology_info = {
 	.boot_cluster = &topology_cluster,
 };
 
-uint32_t LockTimeOut;
-uint32_t LockTimeOutUsec;
-uint64_t TLockTimeOut;
-uint64_t MutexSpin;
+_Atomic unsigned int cluster_type_num_active_cpus[MAX_CPU_TYPES];
+
+MACHINE_TIMEOUT32_WRITEABLE(LockTimeOut, "lock", 6e6 /* 0.25s */, MACHINE_TIMEOUT_UNIT_TIMEBASE, NULL);
+machine_timeout32_t LockTimeOutUsec; // computed in ml_init_lock_timeout
+
+MACHINE_TIMEOUT32_WRITEABLE(TLockTimeOut, "ticket-lock", 6e6 /* 0.25s */, MACHINE_TIMEOUT_UNIT_TIMEBASE, NULL);
+
+MACHINE_TIMEOUT32_WRITEABLE(MutexSpin, "mutex-spin", 240 /* 10us */, MACHINE_TIMEOUT_UNIT_TIMEBASE, NULL);
+
 extern uint32_t lockdown_done;
 uint64_t low_MutexSpin;
 int64_t  high_MutexSpin;
@@ -132,30 +139,42 @@ machine_processor_shutdown(
 void
 ml_init_lock_timeout(void)
 {
-	uint64_t        abstime;
-	uint64_t        mtxspin;
-	uint64_t        default_timeout_ns = NSEC_PER_SEC >> 2;
-	uint32_t        slto;
+	/*
+	 * This function is called after STARUP_SUB_TIMEOUTS
+	 * initialization, so using the "legacy" boot-args here overrides
+	 * the ml-timeout-...  configuration. (Given that these boot-args
+	 * here are usually explicitly specified, this makes sense by
+	 * overriding ml-timeout-..., which may come from the device tree.
+	 */
+
+	uint64_t lto_timeout_ns;
+	uint64_t lto_abstime;
+	uint32_t slto;
 
 	if (PE_parse_boot_argn("slto_us", &slto, sizeof(slto))) {
-		default_timeout_ns = slto * NSEC_PER_USEC;
+		lto_timeout_ns = slto * NSEC_PER_USEC;
+		nanoseconds_to_absolutetime(lto_timeout_ns, &lto_abstime);
+		os_atomic_store(&LockTimeOut, (uint32_t)lto_abstime, relaxed);
+	} else {
+		lto_abstime = os_atomic_load(&LockTimeOut, relaxed);
+		os_atomic_store(&TLockTimeOut, (uint32_t)lto_abstime, relaxed);
+		absolutetime_to_nanoseconds(lto_abstime, &lto_timeout_ns);
 	}
 
-	nanoseconds_to_absolutetime(default_timeout_ns, &abstime);
-	LockTimeOutUsec = (uint32_t)(default_timeout_ns / NSEC_PER_USEC);
-	LockTimeOut = (uint32_t)abstime;
-	TLockTimeOut = LockTimeOut;
+	os_atomic_store(&LockTimeOutUsec, (uint32_t)(lto_timeout_ns / NSEC_PER_USEC), relaxed);
 
+	uint64_t mtxspin;
+	uint64_t mtx_abstime;
 	if (PE_parse_boot_argn("mtxspin", &mtxspin, sizeof(mtxspin))) {
 		if (mtxspin > USEC_PER_SEC >> 4) {
 			mtxspin =  USEC_PER_SEC >> 4;
 		}
-		nanoseconds_to_absolutetime(mtxspin * NSEC_PER_USEC, &abstime);
+		nanoseconds_to_absolutetime(mtxspin * NSEC_PER_USEC, &mtx_abstime);
+		os_atomic_store(&MutexSpin, (uint32_t)mtx_abstime, relaxed);
 	} else {
-		nanoseconds_to_absolutetime(10 * NSEC_PER_USEC, &abstime);
+		mtx_abstime = os_atomic_load(&MutexSpin, relaxed);
 	}
-	MutexSpin = abstime;
-	low_MutexSpin = MutexSpin;
+	low_MutexSpin = os_atomic_load(&MutexSpin, relaxed);
 	/*
 	 * high_MutexSpin should be initialized as low_MutexSpin * real_ncpus, but
 	 * real_ncpus is not set at this time
@@ -167,12 +186,27 @@ ml_init_lock_timeout(void)
 }
 
 /*
+ * This is called when all of the ml_processor_info_t structures have been
+ * initialized and all the processors have been started through processor_start().
+ *
+ * Required by the scheduler subsystem.
+ */
+void
+ml_cpu_init_completed(void)
+{
+}
+
+/*
  * This is called from the machine-independent routine cpu_up()
  * to perform machine-dependent info updates.
  */
 void
 ml_cpu_up(void)
 {
+	ml_topology_cpu_t *cpu = &ml_get_topology_info()->cpus[ml_get_cpu_number_local()];
+
+	os_atomic_inc(&cluster_type_num_active_cpus[cpu->cluster_type], relaxed);
+
 	os_atomic_inc(&machine_info.physical_cpu, relaxed);
 	os_atomic_inc(&machine_info.logical_cpu, relaxed);
 }
@@ -185,6 +219,9 @@ void
 ml_cpu_down(void)
 {
 	cpu_data_t      *cpu_data_ptr;
+	ml_topology_cpu_t *cpu = &ml_get_topology_info()->cpus[ml_get_cpu_number_local()];
+
+	os_atomic_dec(&cluster_type_num_active_cpus[cpu->cluster_type], relaxed);
 
 	os_atomic_dec(&machine_info.physical_cpu, relaxed);
 	os_atomic_dec(&machine_info.logical_cpu, relaxed);
@@ -204,32 +241,6 @@ ml_cpu_down(void)
 	cpu_data_ptr->cpu_running = FALSE;
 
 	cpu_signal_handler_internal(TRUE);
-}
-
-/*
- *	Routine:        ml_cpu_get_info
- *	Function:
- */
-void
-ml_cpu_get_info(ml_cpu_info_t * ml_cpu_info)
-{
-	cache_info_t   *cpuid_cache_info;
-
-	cpuid_cache_info = cache_info();
-	ml_cpu_info->vector_unit = 0;
-	ml_cpu_info->cache_line_size = cpuid_cache_info->c_linesz;
-	ml_cpu_info->l1_icache_size = cpuid_cache_info->c_isize;
-	ml_cpu_info->l1_dcache_size = cpuid_cache_info->c_dsize;
-
-#if (__ARM_ARCH__ >= 7)
-	ml_cpu_info->l2_settings = 1;
-	ml_cpu_info->l2_cache_size = cpuid_cache_info->c_l2size;
-#else
-	ml_cpu_info->l2_settings = 0;
-	ml_cpu_info->l2_cache_size = 0xFFFFFFFF;
-#endif
-	ml_cpu_info->l3_settings = 0;
-	ml_cpu_info->l3_cache_size = 0xFFFFFFFF;
 }
 
 unsigned int
@@ -260,7 +271,7 @@ ml_get_max_offset(
 		pmap_max_offset_option = ARM_PMAP_MAX_OFFSET_DEVICE;
 		break;
 	default:
-		panic("ml_get_max_offset(): Illegal option 0x%x\n", option);
+		panic("ml_get_max_offset(): Illegal option 0x%x", option);
 		break;
 	}
 	return pmap_max_offset(is64, pmap_max_offset_option);
@@ -437,6 +448,7 @@ ml_parse_cpu_topology(void)
 
 		topology_info.num_cpus++;
 		topology_info.max_cpu_id = cpu_id;
+		topology_info.cluster_type_num_cpus[cpu->cluster_type]++;
 
 		cpu_id++;
 	}
@@ -471,7 +483,7 @@ ml_get_boot_cpu_number(void)
 }
 
 cluster_type_t
-ml_get_boot_cluster(void)
+ml_get_boot_cluster_type(void)
 {
 	return CLUSTER_TYPE_SMP;
 }
@@ -484,6 +496,21 @@ ml_get_cpu_number(uint32_t phys_id)
 	}
 
 	return (int)phys_id;
+}
+
+unsigned int
+ml_get_cpu_number_local(void)
+{
+	uint32_t mpidr_value = 0;
+	unsigned int cpu_id;
+
+	/* We identify the CPU based on the constant bits of MPIDR_EL1. */
+	asm volatile ("mrc p15, 0, %0, c0, c0, 5" : "=r" (mpidr_value));
+	cpu_id = mpidr_value & 0xFF;
+
+	assert(cpu_id <= (unsigned int)ml_get_max_cpu_number());
+
+	return cpu_id;
 }
 
 int
@@ -548,11 +575,6 @@ ml_processor_register(ml_processor_info_t *in_processor_info,
 	}
 
 	this_cpu_datap->cpu_id = in_processor_info->cpu_id;
-
-	this_cpu_datap->cpu_console_buf = console_cpu_alloc(is_boot_cpu);
-	if (this_cpu_datap->cpu_console_buf == (void *)(NULL)) {
-		goto processor_register_error;
-	}
 
 	if (!is_boot_cpu) {
 		if (cpu_data_register(this_cpu_datap) != KERN_SUCCESS) {
@@ -1028,6 +1050,22 @@ machine_choose_processor(__unused processor_set_t pset, processor_t processor)
 {
 	return processor;
 }
+
+#ifdef CONFIG_KCOV
+
+kcov_cpu_data_t *
+current_kcov_data(void)
+{
+	return &current_cpu_datap()->cpu_kcov_data;
+}
+
+kcov_cpu_data_t *
+cpu_kcov_data(int cpuid)
+{
+	return &cpu_datap(cpuid)->cpu_kcov_data;
+}
+
+#endif /* CONFIG_KCOV */
 
 boolean_t
 machine_timeout_suspended(void)

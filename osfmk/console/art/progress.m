@@ -40,7 +40,7 @@ lookup_color(uint8_t r, uint8_t g, uint8_t b)
     clut[clut_size].g = g;
     clut[clut_size].b = b;
   
-  return (uint8_t)clut_size++;;
+  return (uint8_t)clut_size++;
 }
 
 void print_buffer (uint8_t * buffer, size_t width, size_t height, size_t row)

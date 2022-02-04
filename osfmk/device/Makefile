@@ -15,14 +15,28 @@ DATAFILES = \
 	device_types.h device_port.h device_types.defs \
 	${MIG_DEFS}
 
+MODULEMAPFILES = \
+	device.modulemap
+
 PRIVATE_DATAFILES = \
 	device_types.h
+
+# device_types.h has some userspace IOKit types that are used by
+# IOTypes.h clients. The types are guarded by `IOKIT` because they
+# conflict with internal xnu types. However, once device_types.h
+# is part of the Darwin module, it gets processed before IOTypes.h
+# defines IOKIT. Later when IOTypes.h includes the header, it's
+# too late and the types don't get defined. Remove the IOKIT guard
+# in userspace to fix that problem and always define the IOKit types.
+KERNEL_ONLY_GUARDS_UNIFDEF = -DIOKIT
 
 MIGINCLUDES = \
 
 INSTALL_MI_LIST	= ${DATAFILES} ${_MIG_HDRS_} ${MIGINCLUDES}
 
-INSTALL_MI_LCL_LIST = ${PRIVATE_DATAFILES}
+INSTALL_MODULEMAP_MI_LIST = ${MODULEMAPFILES}
+
+INSTALL_SF_MI_LCL_LIST = ${DATAFILES} ${PRIVATE_DATAFILES} ${_MIG_HDRS_} ${MIGINCLUDES}
 
 INSTALL_MI_DIR = device
 

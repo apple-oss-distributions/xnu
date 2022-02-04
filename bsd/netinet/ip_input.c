@@ -107,6 +107,7 @@
 #if PF
 #include <net/pfvar.h>
 #endif /* PF */
+#include <net/if_ports_used.h>
 
 #include <netinet/in.h>
 #include <netinet/in_systm.h>
@@ -138,13 +139,6 @@
 
 #if IPSEC
 extern int ipsec_bypass;
-extern lck_mtx_t *sadb_mutex;
-
-lck_grp_t       *sadb_stat_mutex_grp;
-lck_grp_attr_t  *sadb_stat_mutex_grp_attr;
-lck_attr_t      *sadb_stat_mutex_attr;
-decl_lck_mtx_data(, sadb_stat_mutex_data);
-lck_mtx_t       *sadb_stat_mutex = &sadb_stat_mutex_data;
 #endif /* IPSEC */
 
 MBUFQ_HEAD(fq_head);
@@ -159,10 +153,9 @@ static void ipq_updateparams(void);
 static void ip_input_second_pass(struct mbuf *, struct ifnet *,
     int, int, struct ip_fw_in_args *);
 
-decl_lck_mtx_data(static, ipqlock);
-static lck_attr_t       *ipqlock_attr;
-static lck_grp_t        *ipqlock_grp;
-static lck_grp_attr_t   *ipqlock_grp_attr;
+static LCK_GRP_DECLARE(ipqlock_grp, "ipqlock");
+static LCK_MTX_DECLARE(ipqlock, &ipqlock_grp);
+
 
 /* Packet reassembly stuff */
 #define IPREASS_NHASH_LOG2      6
@@ -326,11 +319,8 @@ static int ipprintfs = 0;
 
 struct protosw *ip_protox[IPPROTO_MAX];
 
-static lck_grp_attr_t   *in_ifaddr_rwlock_grp_attr;
-static lck_grp_t        *in_ifaddr_rwlock_grp;
-static lck_attr_t       *in_ifaddr_rwlock_attr;
-decl_lck_rw_data(, in_ifaddr_rwlock_data);
-lck_rw_t                *in_ifaddr_rwlock = &in_ifaddr_rwlock_data;
+static LCK_GRP_DECLARE(in_ifaddr_rwlock_grp, "in_ifaddr_rwlock");
+LCK_RW_DECLARE(in_ifaddr_rwlock, &in_ifaddr_rwlock_grp);
 
 /* Protected by in_ifaddr_rwlock */
 struct in_ifaddrhead in_ifaddrhead;             /* first inet address */
@@ -506,13 +496,6 @@ ip_init(struct protosw *pp, struct domain *dp)
 
 	in_ifaddr_init();
 
-	in_ifaddr_rwlock_grp_attr = lck_grp_attr_alloc_init();
-	in_ifaddr_rwlock_grp = lck_grp_alloc_init("in_ifaddr_rwlock",
-	    in_ifaddr_rwlock_grp_attr);
-	in_ifaddr_rwlock_attr = lck_attr_alloc_init();
-	lck_rw_init(in_ifaddr_rwlock, in_ifaddr_rwlock_grp,
-	    in_ifaddr_rwlock_attr);
-
 	TAILQ_INIT(&in_ifaddrhead);
 	in_ifaddrhashtbl_init();
 
@@ -520,7 +503,7 @@ ip_init(struct protosw *pp, struct domain *dp)
 
 	pr = pffindproto_locked(PF_INET, IPPROTO_RAW, SOCK_RAW);
 	if (pr == NULL) {
-		panic("%s: Unable to find [PF_INET,IPPROTO_RAW,SOCK_RAW]\n",
+		panic("%s: Unable to find [PF_INET,IPPROTO_RAW,SOCK_RAW]",
 		    __func__);
 		/* NOTREACHED */
 	}
@@ -544,12 +527,6 @@ ip_init(struct protosw *pp, struct domain *dp)
 		}
 	}
 
-	/* IP fragment reassembly queue lock */
-	ipqlock_grp_attr  = lck_grp_attr_alloc_init();
-	ipqlock_grp = lck_grp_alloc_init("ipqlock", ipqlock_grp_attr);
-	ipqlock_attr = lck_attr_alloc_init();
-	lck_mtx_init(&ipqlock, ipqlock_grp, ipqlock_attr);
-
 	lck_mtx_lock(&ipqlock);
 	/* Initialize IP reassembly queue. */
 	for (i = 0; i < IPREASS_NHASH; i++) {
@@ -562,10 +539,8 @@ ip_init(struct protosw *pp, struct domain *dp)
 	lck_mtx_unlock(&ipqlock);
 
 	getmicrotime(&tv);
-	ip_id = RandomULong() ^ tv.tv_usec;
+	ip_id = (u_short)(RandomULong() ^ tv.tv_usec);
 	ip_initid();
-
-	ipf_init();
 
 	PE_parse_boot_argn("ip_checkinterface", &i, sizeof(i));
 	switch (i) {
@@ -578,15 +553,6 @@ ip_init(struct protosw *pp, struct domain *dp)
 		break;
 	}
 
-#if IPSEC
-	sadb_stat_mutex_grp_attr = lck_grp_attr_alloc_init();
-	sadb_stat_mutex_grp = lck_grp_alloc_init("sadb_stat",
-	    sadb_stat_mutex_grp_attr);
-	sadb_stat_mutex_attr = lck_attr_alloc_init();
-	lck_mtx_init(sadb_stat_mutex, sadb_stat_mutex_grp,
-	    sadb_stat_mutex_attr);
-
-#endif
 	arp_init();
 	net_init_add(ip_init_delayed);
 }
@@ -686,7 +652,7 @@ ip_proto_dispatch_in(struct mbuf *m, int hlen, u_int8_t proto,
 
 					changed_header = 1;
 					ip = mtod(m, struct ip *);
-					ip->ip_len = htons(ip->ip_len + hlen);
+					ip->ip_len = htons(ip->ip_len + (uint16_t)hlen);
 					ip->ip_off = htons(ip->ip_off);
 					ip->ip_sum = 0;
 					ip->ip_sum = ip_cksum_hdr_in(m, hlen);
@@ -714,7 +680,7 @@ ip_proto_dispatch_in(struct mbuf *m, int hlen, u_int8_t proto,
 	ip = mtod(m, struct ip *);
 
 	if (changed_header) {
-		ip->ip_len = ntohs(ip->ip_len) - hlen;
+		ip->ip_len = ntohs(ip->ip_len) - (u_short)hlen;
 		ip->ip_off = ntohs(ip->ip_off);
 	}
 
@@ -758,7 +724,7 @@ ip_chain_insert(struct mbuf *packet, pktchain_elm_t *tbl)
 	ip = mtod(packet, struct ip*);
 
 	/* reusing the hash function from inaddr_hashval */
-	pkttbl_idx = inaddr_hashval(ntohs(ip->ip_src.s_addr)) % PKTTBL_SZ;
+	pkttbl_idx = inaddr_hashval(ntohl(ip->ip_src.s_addr)) % PKTTBL_SZ;
 	if (tbl[pkttbl_idx].pkte_head == NULL) {
 		tbl[pkttbl_idx].pkte_head = packet;
 		tbl[pkttbl_idx].pkte_saddr.s_addr = ip->ip_src.s_addr;
@@ -876,7 +842,7 @@ ip_input_dispatch_chain(struct mbuf *m)
 }
 
 static void
-ip_input_setdst_chain(struct mbuf *m, uint32_t ifindex, struct in_ifaddr *ia)
+ip_input_setdst_chain(struct mbuf *m, uint16_t ifindex, struct in_ifaddr *ia)
 {
 	struct mbuf *tmp_mbuf = m;
 
@@ -1052,10 +1018,14 @@ ipfw_tags_done:
 		    struct ip *, ip, struct ifnet *, inifp,
 		    struct ip *, ip, struct ip6_hdr *, NULL);
 
-		ip->ip_len = ntohs(ip->ip_len) - hlen;
+		ip->ip_len = ntohs(ip->ip_len) - (u_short)hlen;
 		ip->ip_off = ntohs(ip->ip_off);
 		ip_proto_dispatch_in(m, hlen, ip->ip_p, inject_filter_ref);
 		return IPINPUT_DONE;
+	}
+
+	if (__improbable(m->m_pkthdr.pkt_flags & PKTF_WAKE_PKT)) {
+		if_ports_used_match_mbuf(inifp, PF_INET, m);
 	}
 
 	if (m->m_pkthdr.len < sizeof(struct ip)) {
@@ -1218,7 +1188,7 @@ check_with_pf:
 #endif /* DUMMYNET */
 		if (error != 0 || m == NULL) {
 			if (m != NULL) {
-				panic("%s: unexpected packet %p\n",
+				panic("%s: unexpected packet %p",
 				    __func__, m);
 				/* NOTREACHED */
 			}
@@ -1324,7 +1294,7 @@ ip_input_check_interface(struct mbuf **mp, struct ip *ip, struct ifnet *inifp)
 	/*
 	 * Check for a match in the hash bucket.
 	 */
-	lck_rw_lock_shared(in_ifaddr_rwlock);
+	lck_rw_lock_shared(&in_ifaddr_rwlock);
 	TAILQ_FOREACH(ia, INADDR_HASH(ip->ip_dst.s_addr), ia_hash) {
 		if (IA_SIN(ia)->sin_addr.s_addr == ip->ip_dst.s_addr) {
 			best_ia = ia;
@@ -1361,7 +1331,7 @@ ip_input_check_interface(struct mbuf **mp, struct ip *ip, struct ifnet *inifp)
 			ip_input_setdst_chain(m, 0, best_ia);
 		}
 	}
-	lck_rw_done(in_ifaddr_rwlock);
+	lck_rw_done(&in_ifaddr_rwlock);
 
 	if (result == IP_CHECK_IF_NONE && (inifp->if_flags & IFF_BROADCAST)) {
 		/*
@@ -1410,8 +1380,7 @@ ip_input_check_interface(struct mbuf **mp, struct ip *ip, struct ifnet *inifp)
 		}
 		ui = mtod(m, struct udpiphdr *);
 		if (ntohs(ui->ui_dport) == IPPORT_BOOTPC) {
-			ASSERT(m->m_nextpkt == NULL);
-			ip_setdstifaddr_info(m, inifp->if_index, NULL);
+			ip_input_setdst_chain(m, inifp->if_index, NULL);
 			result = IP_CHECK_IF_OURS;
 			match_ifp = inifp;
 		}
@@ -1815,10 +1784,14 @@ ipfw_tags_done:
 		    struct ip *, ip, struct ifnet *, inifp,
 		    struct ip *, ip, struct ip6_hdr *, NULL);
 
-		ip->ip_len = ntohs(ip->ip_len) - hlen;
+		ip->ip_len = ntohs(ip->ip_len) - (u_short)hlen;
 		ip->ip_off = ntohs(ip->ip_off);
 		ip_proto_dispatch_in(m, hlen, ip->ip_p, inject_filter_ref);
 		return;
+	}
+
+	if (__improbable(m->m_pkthdr.pkt_flags & PKTF_WAKE_PKT)) {
+		if_ports_used_match_mbuf(inifp, PF_INET, m);
 	}
 
 	OSAddAtomic(1, &ipstat.ips_total);
@@ -1963,7 +1936,7 @@ check_with_pf:
 #endif /* DUMMYNET */
 		if (error != 0 || m == NULL) {
 			if (m != NULL) {
-				panic("%s: unexpected packet %p\n",
+				panic("%s: unexpected packet %p",
 				    __func__, m);
 				/* NOTREACHED */
 			}
@@ -2559,7 +2532,7 @@ found:
 
 		ADDCARRY(csum);
 
-		m->m_pkthdr.csum_rx_val = csum;
+		m->m_pkthdr.csum_rx_val = (uint16_t)csum;
 		m->m_pkthdr.csum_rx_start = sizeof(struct ip);
 		m->m_pkthdr.csum_flags = fp->ipq_csum_flags;
 	} else if ((m->m_pkthdr.rcvif->if_flags & IFF_LOOPBACK) ||
@@ -2576,7 +2549,7 @@ found:
 	 * packet; dequeue and discard fragment reassembly header.
 	 * Make header visible.
 	 */
-	ip->ip_len = (IP_VHL_HL(ip->ip_vhl) << 2) + next;
+	ip->ip_len = (u_short)((IP_VHL_HL(ip->ip_vhl) << 2) + next);
 	ip->ip_src = fp->ipq_src;
 	ip->ip_dst = fp->ipq_dst;
 
@@ -2796,7 +2769,8 @@ ip_dooptions(struct mbuf *m, int pass, struct sockaddr_in *next_hop)
 	u_char *cp;
 	struct ip_timestamp *ipt;
 	struct in_ifaddr *ia;
-	int opt, optlen, cnt, off, code, type = ICMP_PARAMPROB, forward = 0;
+	int opt, optlen, cnt, off, type = ICMP_PARAMPROB, forward = 0;
+	uint8_t code = 0;
 	struct in_addr *sin, dst;
 	u_int32_t ntime;
 	struct sockaddr_in ipaddr = {
@@ -2822,13 +2796,13 @@ ip_dooptions(struct mbuf *m, int pass, struct sockaddr_in *next_hop)
 			optlen = 1;
 		} else {
 			if (cnt < IPOPT_OLEN + sizeof(*cp)) {
-				code = &cp[IPOPT_OLEN] - (u_char *)ip;
+				code = (uint8_t)(&cp[IPOPT_OLEN] - (u_char *)ip);
 				goto bad;
 			}
 			optlen = cp[IPOPT_OLEN];
 			if (optlen < IPOPT_OLEN + sizeof(*cp) ||
 			    optlen > cnt) {
-				code = &cp[IPOPT_OLEN] - (u_char *)ip;
+				code = (uint8_t)(&cp[IPOPT_OLEN] - (u_char *)ip);
 				goto bad;
 			}
 		}
@@ -2848,11 +2822,11 @@ ip_dooptions(struct mbuf *m, int pass, struct sockaddr_in *next_hop)
 		case IPOPT_LSRR:
 		case IPOPT_SSRR:
 			if (optlen < IPOPT_OFFSET + sizeof(*cp)) {
-				code = &cp[IPOPT_OLEN] - (u_char *)ip;
+				code = (uint8_t)(&cp[IPOPT_OLEN] - (u_char *)ip);
 				goto bad;
 			}
 			if ((off = cp[IPOPT_OFFSET]) < IPOPT_MINOFF) {
-				code = &cp[IPOPT_OFFSET] - (u_char *)ip;
+				code = (uint8_t)(&cp[IPOPT_OFFSET] - (u_char *)ip);
 				goto bad;
 			}
 			ipaddr.sin_addr = ip->ip_dst;
@@ -2952,11 +2926,11 @@ nosourcerouting:
 
 		case IPOPT_RR:
 			if (optlen < IPOPT_OFFSET + sizeof(*cp)) {
-				code = &cp[IPOPT_OFFSET] - (u_char *)ip;
+				code = (uint8_t)(&cp[IPOPT_OFFSET] - (u_char *)ip);
 				goto bad;
 			}
 			if ((off = cp[IPOPT_OFFSET]) < IPOPT_MINOFF) {
-				code = &cp[IPOPT_OFFSET] - (u_char *)ip;
+				code = (uint8_t)(&cp[IPOPT_OFFSET] - (u_char *)ip);
 				goto bad;
 			}
 			/*
@@ -2989,21 +2963,23 @@ nosourcerouting:
 			break;
 
 		case IPOPT_TS:
-			code = cp - (u_char *)ip;
+			code = (uint8_t)(cp - (u_char *)ip);
 			ipt = (struct ip_timestamp *)(void *)cp;
 			if (ipt->ipt_len < 4 || ipt->ipt_len > 40) {
-				code = (u_char *)&ipt->ipt_len - (u_char *)ip;
+				code = (uint8_t)((u_char *)&ipt->ipt_len -
+				    (u_char *)ip);
 				goto bad;
 			}
 			if (ipt->ipt_ptr < 5) {
-				code = (u_char *)&ipt->ipt_ptr - (u_char *)ip;
+				code = (uint8_t)((u_char *)&ipt->ipt_ptr -
+				    (u_char *)ip);
 				goto bad;
 			}
 			if (ipt->ipt_ptr >
 			    ipt->ipt_len - (int)sizeof(int32_t)) {
 				if (++ipt->ipt_oflw == 0) {
-					code = (u_char *)&ipt->ipt_ptr -
-					    (u_char *)ip;
+					code = (uint8_t)((u_char *)&ipt->ipt_ptr -
+					    (u_char *)ip);
 					goto bad;
 				}
 				break;
@@ -3016,8 +2992,8 @@ nosourcerouting:
 			case IPOPT_TS_TSANDADDR:
 				if (ipt->ipt_ptr - 1 + sizeof(n_time) +
 				    sizeof(struct in_addr) > ipt->ipt_len) {
-					code = (u_char *)&ipt->ipt_ptr -
-					    (u_char *)ip;
+					code = (uint8_t)((u_char *)&ipt->ipt_ptr -
+					    (u_char *)ip);
 					goto bad;
 				}
 				ipaddr.sin_addr = dst;
@@ -3038,8 +3014,8 @@ nosourcerouting:
 			case IPOPT_TS_PRESPEC:
 				if (ipt->ipt_ptr - 1 + sizeof(n_time) +
 				    sizeof(struct in_addr) > ipt->ipt_len) {
-					code = (u_char *)&ipt->ipt_ptr -
-					    (u_char *)ip;
+					code = (uint8_t)((u_char *)&ipt->ipt_ptr -
+					    (u_char *)ip);
 					goto bad;
 				}
 				(void) memcpy(&ipaddr.sin_addr, sin,
@@ -3055,8 +3031,8 @@ nosourcerouting:
 
 			default:
 				/* XXX can't take &ipt->ipt_flg */
-				code = (u_char *)&ipt->ipt_ptr -
-				    (u_char *)ip + 1;
+				code = (uint8_t)((u_char *)&ipt->ipt_ptr -
+				    (u_char *)ip + 1);
 				goto bad;
 			}
 			ntime = iptime();
@@ -3683,7 +3659,7 @@ ip_forward(struct mbuf *m, int srcrt, struct sockaddr_in *next_hop)
 			struct secasvar *sav;
 			struct route *ro;
 			struct ip *ipm;
-			int ipsechdr;
+			size_t ipsechdr;
 
 			/* count IPsec header size */
 			ipsechdr = ipsec_hdrsiz(sp);
@@ -3798,6 +3774,26 @@ ip_savecontrol(struct inpcb *inp, struct mbuf **mp, struct ip *ip,
 			goto no_mbufs;
 		}
 	}
+	if (inp->inp_socket->so_flags & SOF_RECV_TRAFFIC_CLASS) {
+		int tc = m_get_traffic_class(m);
+
+		mp = sbcreatecontrol_mbuf((caddr_t)&tc, sizeof(tc),
+		    SO_TRAFFIC_CLASS, SOL_SOCKET, mp);
+		if (*mp == NULL) {
+			goto no_mbufs;
+		}
+	}
+	if ((inp->inp_socket->so_flags & SOF_RECV_WAKE_PKT) &&
+	    (m->m_pkthdr.pkt_flags & PKTF_WAKE_PKT)) {
+		int flag = 1;
+
+		mp = sbcreatecontrol_mbuf((caddr_t)&flag, sizeof(flag),
+		    SO_RECV_WAKE_PKT, SOL_SOCKET, mp);
+		if (*mp == NULL) {
+			goto no_mbufs;
+		}
+	}
+
 	if (inp->inp_flags & INP_RECVDSTADDR
 #if CONTENT_FILTER
 	    /* Content Filter needs to see local address */
@@ -3888,15 +3884,6 @@ makedummy:
 			goto no_mbufs;
 		}
 	}
-	if (inp->inp_socket->so_flags & SOF_RECV_TRAFFIC_CLASS) {
-		int tc = m_get_traffic_class(m);
-
-		mp = sbcreatecontrol_mbuf((caddr_t)&tc, sizeof(tc),
-		    SO_TRAFFIC_CLASS, SOL_SOCKET, mp);
-		if (*mp == NULL) {
-			goto no_mbufs;
-		}
-	}
 	if (inp->inp_flags & INP_PKTINFO) {
 		struct in_pktinfo pi;
 
@@ -3965,7 +3952,7 @@ ip_getstat SYSCTL_HANDLER_ARGS
 }
 
 void
-ip_setsrcifaddr_info(struct mbuf *m, uint32_t src_idx, struct in_ifaddr *ia)
+ip_setsrcifaddr_info(struct mbuf *m, uint16_t src_idx, struct in_ifaddr *ia)
 {
 	VERIFY(m->m_flags & M_PKTHDR);
 
@@ -3986,7 +3973,7 @@ ip_setsrcifaddr_info(struct mbuf *m, uint32_t src_idx, struct in_ifaddr *ia)
 }
 
 void
-ip_setdstifaddr_info(struct mbuf *m, uint32_t dst_idx, struct in_ifaddr *ia)
+ip_setdstifaddr_info(struct mbuf *m, uint16_t dst_idx, struct in_ifaddr *ia)
 {
 	VERIFY(m->m_flags & M_PKTHDR);
 

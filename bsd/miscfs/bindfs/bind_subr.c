@@ -82,10 +82,8 @@
 #define BIND_NHASH(vp) (&bind_node_hashtbl[((((uintptr_t)vp) >> vnsz2log) + (uintptr_t)vnode_mount(vp)) & bind_hash_mask])
 
 static LIST_HEAD(bind_node_hashhead, bind_node) * bind_node_hashtbl;
-static lck_mtx_t bind_hashmtx;
-static lck_attr_t * bind_hashlck_attr;
-static lck_grp_t * bind_hashlck_grp;
-static lck_grp_attr_t * bind_hashlck_grp_attr;
+static LCK_GRP_DECLARE(bind_hashlck_grp, "com.apple.filesystems.bindfs");
+static LCK_MTX_DECLARE(bind_hashmtx, &bind_hashlck_grp);
 static u_long bind_hash_mask;
 
 /*  xnu doesn't have hashes built into vnodes. This mimics what freebsd does
@@ -93,28 +91,6 @@ static u_long bind_hash_mask;
 static int vnsz2log = 9;
 
 static int bind_hashins(struct mount *, struct bind_node *, struct vnode **);
-
-int
-bindfs_init_lck(lck_mtx_t * lck)
-{
-	int error = 1;
-	if (lck && bind_hashlck_grp && bind_hashlck_attr) {
-		lck_mtx_init(lck, bind_hashlck_grp, bind_hashlck_attr);
-		error = 0;
-	}
-	return error;
-}
-
-int
-bindfs_destroy_lck(lck_mtx_t * lck)
-{
-	int error = 1;
-	if (lck && bind_hashlck_grp) {
-		lck_mtx_destroy(lck, bind_hashlck_grp);
-		error = 0;
-	}
-	return error;
-}
 
 /*
  * Initialise cache headers
@@ -124,43 +100,15 @@ bindfs_init(__unused struct vfsconf * vfsp)
 {
 	BINDFSDEBUG("%s\n", __FUNCTION__);
 
-	/* assuming for now that this happens immediately and by default after fs
-	 * installation */
-	bind_hashlck_grp_attr = lck_grp_attr_alloc_init();
-	if (bind_hashlck_grp_attr == NULL) {
-		goto error;
-	}
-	bind_hashlck_grp = lck_grp_alloc_init("com.apple.filesystems.bindfs", bind_hashlck_grp_attr);
-	if (bind_hashlck_grp == NULL) {
-		goto error;
-	}
-	bind_hashlck_attr = lck_attr_alloc_init();
-	if (bind_hashlck_attr == NULL) {
-		goto error;
-	}
-
 	bind_node_hashtbl = hashinit(BIND_HASH_SIZE, M_TEMP, &bind_hash_mask);
 	if (bind_node_hashtbl == NULL) {
 		goto error;
 	}
-	lck_mtx_init(&bind_hashmtx, bind_hashlck_grp, bind_hashlck_attr);
 
 	BINDFSDEBUG("%s finished\n", __FUNCTION__);
 	return 0;
 error:
 	printf("BINDFS: failed to initialize globals\n");
-	if (bind_hashlck_grp_attr) {
-		lck_grp_attr_free(bind_hashlck_grp_attr);
-		bind_hashlck_grp_attr = NULL;
-	}
-	if (bind_hashlck_grp) {
-		lck_grp_free(bind_hashlck_grp);
-		bind_hashlck_grp = NULL;
-	}
-	if (bind_hashlck_attr) {
-		lck_attr_free(bind_hashlck_attr);
-		bind_hashlck_attr = NULL;
-	}
 	return KERN_FAILURE;
 }
 
@@ -169,20 +117,7 @@ bindfs_destroy(void)
 {
 	/* This gets called when the fs is uninstalled, there wasn't an exact
 	 * equivalent in vfsops */
-	lck_mtx_destroy(&bind_hashmtx, bind_hashlck_grp);
 	hashdestroy(bind_node_hashtbl, M_TEMP, bind_hash_mask);
-	if (bind_hashlck_grp_attr) {
-		lck_grp_attr_free(bind_hashlck_grp_attr);
-		bind_hashlck_grp_attr = NULL;
-	}
-	if (bind_hashlck_grp) {
-		lck_grp_free(bind_hashlck_grp);
-		bind_hashlck_grp = NULL;
-	}
-	if (bind_hashlck_attr) {
-		lck_attr_free(bind_hashlck_attr);
-		bind_hashlck_attr = NULL;
-	}
 	return 0;
 }
 
@@ -196,6 +131,7 @@ bind_hashget(struct mount * mp, struct vnode * lowervp, struct vnode ** vpp)
 	struct bind_node_hashhead * hd;
 	struct bind_node * a;
 	struct vnode * vp = NULL;
+	uint32_t vp_vid = 0;
 	int error = ENOENT;
 
 	/*
@@ -214,6 +150,8 @@ bind_hashget(struct mount * mp, struct vnode * lowervp, struct vnode ** vpp)
 				/*lowervp has reved */
 				error = EIO;
 				vp = NULL;
+			} else {
+				vp_vid = a->bind_myvid;
 			}
 			break;
 		}
@@ -221,7 +159,7 @@ bind_hashget(struct mount * mp, struct vnode * lowervp, struct vnode ** vpp)
 	lck_mtx_unlock(&bind_hashmtx);
 
 	if (vp != NULL) {
-		error = vnode_getwithvid(vp, a->bind_myvid);
+		error = vnode_getwithvid(vp, vp_vid);
 		if (error == 0) {
 			*vpp = vp;
 		}
@@ -243,6 +181,7 @@ bind_hashins(struct mount * mp, struct bind_node * xp, struct vnode ** vpp)
 	struct bind_node_hashhead * hd;
 	struct bind_node * oxp;
 	struct vnode * ovp = NULL;
+	uint32_t oxp_vid = 0;
 	int error = 0;
 
 	hd = BIND_NHASH(xp->bind_lowervp);
@@ -259,6 +198,8 @@ bind_hashins(struct mount * mp, struct bind_node * xp, struct vnode ** vpp)
 				 *  don't add it.*/
 				error = EIO;
 				ovp = NULL;
+			} else {
+				oxp_vid = oxp->bind_myvid;
 			}
 			goto end;
 		}
@@ -271,7 +212,7 @@ end:
 	lck_mtx_unlock(&bind_hashmtx);
 	if (ovp != NULL) {
 		/* if we found something in the hash map then grab an iocount */
-		error = vnode_getwithvid(ovp, oxp->bind_myvid);
+		error = vnode_getwithvid(ovp, oxp_vid);
 		if (error == 0) {
 			*vpp = ovp;
 		}
@@ -297,12 +238,10 @@ bind_nodecreate(struct vnode * lowervp)
 {
 	struct bind_node * xp;
 
-	MALLOC(xp, struct bind_node *, sizeof(struct bind_node), M_TEMP, M_WAITOK | M_ZERO);
-	if (xp != NULL) {
-		if (lowervp) {
-			xp->bind_lowervp  = lowervp;
-			xp->bind_lowervid = vnode_vid(lowervp);
-		}
+	xp = kalloc_type(struct bind_node, Z_WAITOK | Z_ZERO | Z_NOFAIL);
+	if (lowervp) {
+		xp->bind_lowervp  = lowervp;
+		xp->bind_lowervid = vnode_vid(lowervp);
 	}
 	return xp;
 }
@@ -344,7 +283,7 @@ bind_getnewvnode(
 		xp->bind_myvid = vnode_vid(*vpp);
 		vnode_settag(*vpp, VT_BINDFS);
 	} else {
-		FREE(xp, M_TEMP);
+		kfree_type(struct bind_node, xp);
 	}
 	return error;
 }

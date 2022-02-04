@@ -46,7 +46,7 @@ allocate_and_wire_memory(mach_vm_size_t size)
 		printf("mach_vm_allocate returned non-zero: %s\n", mach_error_string(err));
 		return err;
 	}
-	err = mach_vm_protect(task, addr, size, 0, VM_PROT_READ | VM_PROT_WRITE);;
+	err = mach_vm_protect(task, addr, size, 0, VM_PROT_READ | VM_PROT_WRITE);
 	if (err != KERN_SUCCESS) {
 		printf("mach_vm_protect returned non-zero: %s\n", mach_error_string(err));
 		return err;

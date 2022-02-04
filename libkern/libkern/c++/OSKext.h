@@ -143,6 +143,15 @@ struct OSKextGrabPgoStruct {
 
 struct OSKextAccount {
 	vm_allocation_site_t site;
+
+#if DEVELOPMENT || DEBUG
+	struct os_refgrp     task_refgrp;
+	/*
+	 * '5' for the "task_" prefix. task_refgrp_name can be entirely dropped
+	 * once we can directly flag the refgrp to be logged.
+	 */
+	char                 task_refgrp_name[5 + KMOD_MAX_NAME];
+#endif /* DEVELOPMENT || DEBUG */
 	uint32_t             loadTag;
 	OSKext             * kext;
 };
@@ -315,6 +324,7 @@ private:
 		unsigned int CPPInitialized:1;
 		unsigned int jettisonLinkeditSeg:1;
 		unsigned int resetSegmentsFromImmutableCopy:1;
+		unsigned int unloadUnsupported:1;
 	} flags;
 
 	uint32_t matchingRefCount;
@@ -601,9 +611,9 @@ private:
 		void                 *map_entry_list);
 	static void freeKCFileSetcontrol(void);
 	OSReturn resetKCFileSetSegments(void);
-	static void jettisonFileSetLinkeditSegment(kernel_mach_header_t *mh);
 #endif //(__x86_64__) || defined(__i386__)
 
+	static void jettisonFileSetLinkeditSegment(kernel_mach_header_t *mh);
 	static OSReturn validateKCFileSetUUID(
 		OSDictionary         *infoDict,
 		kc_kind_t            type);
@@ -686,6 +696,7 @@ private:
 	static void updateLoadedKextSummaries(void);
 	void updateLoadedKextSummary(OSKextLoadedKextSummary *summary);
 	void updateActiveAccount(OSKextActiveAccount *accountp);
+	static void removeDaemonExitRequests(void);
 
 #ifdef XNU_KERNEL_PRIVATE
 public:
@@ -755,13 +766,7 @@ public:
 		OSString        * kextIdentifier,
 		OSString        * serverName,
 		OSNumber        * serverTag,
-		class IOUserServerCheckInToken ** checkInToken);
-
-	static OSReturn requestDaemonLaunch(
-		OSString        * kextIdentifier,
-		OSString        * serverName,
-		OSNumber        * serverTag,
-		OSSharedPtr<class IOUserServerCheckInToken> &checkInToken);
+		class IOUserServerCheckInToken * checkInToken);
 
 	static OSReturn requestResource(
 		const char                    * kextIdentifier,
@@ -803,7 +808,7 @@ public:
 	OSPtr<OSData>                  copyMachoUUID(const kernel_mach_header_t * header);
 	virtual OSPtr<OSArray>         copyPersonalitiesArray(void);
 	static bool                copyUserExecutablePath(const OSSymbol * bundleID, char * pathResult, size_t pathSize);
-	virtual void               setDriverKitUUID(OSData *uuid);
+	virtual void               setDriverKitUUID(LIBKERN_CONSUMED OSData *uuid);
 /* This removes personalities naming the kext (by CFBundleIdentifier),
  * not all personalities defined by the kext (IOPersonalityPublisher or CFBundleIdentifier).
  */

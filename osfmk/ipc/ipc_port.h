@@ -93,116 +93,114 @@
 
 #include <security/_label.h>
 
-/*
- *  A receive right (port) can be in four states:
- *	1) dead (not active, ip_timestamp has death time)
- *	2) in a space (ip_receiver_name != 0, ip_receiver points
- *	to the space but doesn't hold a ref for it)
- *	3) in transit (ip_receiver_name == 0, ip_destination points
- *	to the destination port and holds a ref for it)
- *	4) in limbo (ip_receiver_name == 0, ip_destination == IP_NULL)
- *
- *  If the port is active, and ip_receiver points to some space,
- *  then ip_receiver_name != 0, and that space holds receive rights.
- *  If the port is not active, then ip_timestamp contains a timestamp
- *  taken when the port was destroyed.
- */
+#include <ptrauth.h>
 
 struct task_watchport_elem;
 
 typedef unsigned int ipc_port_timestamp_t;
 
 struct ipc_port {
+	struct ipc_object               ip_object;
+	union {
+		/*
+		 * The waitq_eventmask field is only used on the global queues.
+		 * We hence repurpose all those bits for our own use.
+		 *
+		 * Note: if too many bits are added, compilation will fail
+		 *       with errors about "negative bitfield sizes"
+		 */
+		WAITQ_FLAGS(ip_waitq
+		    , ip_fullwaiters:1            /* Whether there are senders blocked on a full queue */
+		    , ip_sprequests:1             /* send-possible requests outstanding */
+		    , ip_spimportant:1            /* ... at least one is importance donating */
+		    , ip_impdonation:1            /* port supports importance donation */
+		    , ip_tempowner:1              /* dont give donations to current receiver */
+		    , ip_guarded:1                /* port guarded (use context value as guard) */
+		    , ip_strict_guard:1           /* Strict guarding; Prevents user manipulation of context values directly */
+		    , ip_specialreply:1           /* port is a special reply port */
+		    , ip_sync_link_state:3        /* link the port to destination port/ Workloop */
+		    , ip_sync_bootstrap_checkin:1 /* port part of sync bootstrap checkin, push on thread doing the checkin */
+		    , ip_immovable_receive:1      /* the receive right cannot be moved out of a space, until it is destroyed */
+		    , ip_no_grant:1               /* Port wont accept complex messages containing (ool) port descriptors */
+		    , ip_immovable_send:1         /* No send(once) rights to this port can be moved out of a space, never unset */
+		    , ip_tg_block_tracking:1      /* Track blocking relationship between thread groups during sync IPC */
+		    , ip_pinned:1                 /* Can't deallocate the last send right from a space while the bit is set */
+		    , ip_service_port:1           /* port is a service port */
+		    , ip_kobject_nsrequest:1      /* kobject no-senders armed, naked port-ref only */
+#if DEVELOPMENT || DEBUG
+		    , ip_srp_lost_link:1          /* special reply port turnstile link chain broken */
+		    , ip_srp_msg_sent:1           /* special reply port msg sent */
+#endif
+		    );
+		struct waitq            ip_waitq;
+	};
+
+	struct ipc_mqueue               ip_messages;
+
 	/*
-	 * Initial sub-structure in common with ipc_pset
-	 * First element is an ipc_object second is a
-	 * message queue
+	 * IMPORTANT: Direct access of unionized fields are highly discouraged.
+	 * Use accessor functions below and see header doc for possible states.
 	 */
-	struct ipc_object ip_object;
-	struct ipc_mqueue ip_messages;
+	union {
+		struct ipc_space       *XNU_PTRAUTH_SIGNED_PTR("ipc_port.ip_receiver") ip_receiver;
+		struct ipc_port        *XNU_PTRAUTH_SIGNED_PTR("ipc_port.ip_destination") ip_destination;
+		ipc_port_timestamp_t    ip_timestamp;
+	};
+
+	/* update ipc_kobject_upgrade() if this union is changed */
+	union {
+		uintptr_t               ip_kobject; /* manually PAC-ed, see ipc_kobject_get_raw() */
+		ipc_importance_task_t   ip_imp_task; /* use accessor ip_get_imp_task() */
+		struct ipc_port        *ip_sync_inheritor_port;
+		struct knote           *ip_sync_inheritor_knote;
+		struct turnstile       *ip_sync_inheritor_ts;
+	};
+
+	struct ipc_port                *ip_nsrequest;
+	struct ipc_port                *ip_pdrequest;
+	struct ipc_port_request        *ip_requests;
+	union {
+		struct ipc_kmsg *XNU_PTRAUTH_SIGNED_PTR("ipc_port.premsg") ip_premsg;
+		struct turnstile       *ip_send_turnstile;
+	};
+	mach_vm_address_t               ip_context;
+
+	natural_t                       ip_impcount; /* number of importance donations in nested queue */
+
+	mach_port_mscount_t             ip_mscount;
+	mach_port_rights_t              ip_srights;
+	mach_port_rights_t              ip_sorights;
 
 	union {
-		struct ipc_space * receiver;
-		struct ipc_port * destination;
-		ipc_port_timestamp_t timestamp;
-	} data;
-
-	/* update host_request_notification if this union is changed */
-	union {
-		ipc_kobject_t XNU_PTRAUTH_SIGNED_PTR("ipc_port.kobject") kobject;
-		ipc_kobject_label_t XNU_PTRAUTH_SIGNED_PTR("ipc_port.kolabel") kolabel;
-		ipc_importance_task_t imp_task;
-		ipc_port_t sync_inheritor_port;
-		struct knote *sync_inheritor_knote;
-		struct turnstile *sync_inheritor_ts;
-	} kdata;
-
-	struct ipc_port *ip_nsrequest;
-	struct ipc_port *ip_pdrequest;
-	struct ipc_port_request *ip_requests;
-	union {
-		struct ipc_kmsg *premsg;
-		struct turnstile *send_turnstile;
-	} kdata2;
-
-	mach_vm_address_t ip_context;
-
-	natural_t ip_sprequests:1,      /* send-possible requests outstanding */
-	    ip_spimportant:1,           /* ... at least one is importance donating */
-	    ip_impdonation:1,           /* port supports importance donation */
-	    ip_tempowner:1,             /* dont give donations to current receiver */
-	    ip_guarded:1,               /* port guarded (use context value as guard) */
-	    ip_strict_guard:1,          /* Strict guarding; Prevents user manipulation of context values directly */
-	    ip_specialreply:1,          /* port is a special reply port */
-	    ip_sync_link_state:3,       /* link the port to destination port/ Workloop */
-	    ip_sync_bootstrap_checkin:1,/* port part of sync bootstrap checkin, push on thread doing the checkin */
-	    ip_immovable_receive:1,     /* the receive right cannot be moved out of a space, until it is destroyed */
-	    ip_no_grant:1,              /* Port wont accept complex messages containing (ool) port descriptors */
-	    ip_immovable_send:1,        /* No send(once) rights to this port can be moved out of a space */
-	    ip_tg_block_tracking:1,     /* Track blocking relationship between thread groups during sync IPC */
-	    ip_impcount:17;             /* number of importance donations in nested queue */
-
-	mach_port_mscount_t ip_mscount;
-	mach_port_rights_t ip_srights;
-	mach_port_rights_t ip_sorights;
+		ipc_kobject_label_t XNU_PTRAUTH_SIGNED_PTR("ipc_port.kolabel") ip_kolabel;
+		/* Union of service and connection ports' message filtering metadata */
+		void * XNU_PTRAUTH_SIGNED_PTR("ipc_port.ip_splabel") ip_splabel;
+	};
 
 #if     MACH_ASSERT
-#define IP_NSPARES              4
-#define IP_CALLSTACK_MAX        16
-/*	queue_chain_t	ip_port_links;*//* all allocated ports */
-	thread_t        ip_thread;      /* who made me?  thread context */
-	unsigned long   ip_timetrack;   /* give an idea of "when" created */
-	uintptr_t       ip_callstack[IP_CALLSTACK_MAX]; /* stack trace */
-	unsigned long   ip_spares[IP_NSPARES]; /* for debugging */
+#define IP_NSPARES                      4
+#define IP_CALLSTACK_MAX                16
+	thread_t                        ip_thread;      /* who made me?  thread context */
+	unsigned long                   ip_timetrack;   /* give an idea of "when" created */
+	uintptr_t                       ip_callstack[IP_CALLSTACK_MAX]; /* stack trace */
+	unsigned long                   ip_spares[IP_NSPARES]; /* for debugging */
 #endif  /* MACH_ASSERT */
-#if DEVELOPMENT || DEBUG
-	uint8_t         ip_srp_lost_link:1,     /* special reply port turnstile link chain broken */
-	    ip_srp_msg_sent:1;                  /* special reply port msg sent */
-#endif
 };
 
+#define ip_preposts             ip_waitq.waitq_prepost_id
 
-#define ip_references           ip_object.io_references
+static inline bool
+ip_in_pset(ipc_port_t port)
+{
+	return port->ip_waitq.waitq_set_id.wqr_value != 0;
+}
 
 #define ip_receiver_name        ip_messages.imq_receiver_name
-#define ip_in_pset              ip_messages.imq_in_pset
 #define ip_reply_context        ip_messages.imq_context
+#define ip_klist                ip_messages.imq_klist
 
-#define ip_receiver             data.receiver
-#define ip_destination          data.destination
-#define ip_timestamp            data.timestamp
-
-#define ip_kobject              kdata.kobject
-#define ip_kolabel              kdata.kolabel
-#define ip_imp_task             kdata.imp_task
-#define ip_sync_inheritor_port  kdata.sync_inheritor_port
-#define ip_sync_inheritor_knote kdata.sync_inheritor_knote
-#define ip_sync_inheritor_ts    kdata.sync_inheritor_ts
-
-#define ip_premsg               kdata2.premsg
-#define ip_send_turnstile       kdata2.send_turnstile
-
-#define port_send_turnstile(port)       (IP_PREALLOC(port) ? (port)->ip_premsg->ikm_turnstile : (port)->ip_send_turnstile)
+#define port_send_turnstile(port)                            \
+	(IP_PREALLOC(port) ? (port)->ip_premsg->ikm_turnstile : (port)->ip_send_turnstile)
 
 #define set_port_send_turnstile(port, value)                 \
 MACRO_BEGIN                                                  \
@@ -214,10 +212,9 @@ if (IP_PREALLOC(port)) {                                     \
 MACRO_END
 
 #define port_send_turnstile_address(port)                    \
-(IP_PREALLOC(port) ? &((port)->ip_premsg->ikm_turnstile) : &((port)->ip_send_turnstile))
+	(IP_PREALLOC(port) ? &((port)->ip_premsg->ikm_turnstile) : &((port)->ip_send_turnstile))
 
-#define port_rcv_turnstile_address(port) \
-	&(port)->ip_messages.imq_wait_queue.waitq_ts
+#define port_rcv_turnstile_address(port)   (&(port)->ip_waitq.waitq_ts)
 
 
 /*
@@ -258,39 +255,38 @@ MACRO_END
 #define PORT_SYNC_LINK_NO_LINKAGE       (0x4)
 #define PORT_SYNC_LINK_RCV_THREAD       (0x5)
 
-#define IP_NULL                 IPC_PORT_NULL
-#define IP_DEAD                 IPC_PORT_DEAD
-#define IP_VALID(port)          IPC_PORT_VALID(port)
+#define IP_NULL                         IPC_PORT_NULL
+#define IP_DEAD                         IPC_PORT_DEAD
+#define IP_VALID(port)                  IPC_PORT_VALID(port)
 
-#define ip_object_to_port(io)   __container_of(io, struct ipc_port, ip_object)
-#define ip_to_object(port)      (&(port)->ip_object)
-#define ip_active(port)         io_active(ip_to_object(port))
-#define ip_lock_init(port)      io_lock_init(ip_to_object(port))
-#define ip_lock_held(port)      io_lock_held(ip_to_object(port))
-#define ip_lock(port)           io_lock(ip_to_object(port))
-#define ip_lock_try(port)       io_lock_try(ip_to_object(port))
-#define ip_lock_held_kdp(port)  io_lock_held_kdp(ip_to_object(port))
-#define ip_unlock(port)         io_unlock(ip_to_object(port))
+#define ip_object_to_port(io)           __container_of(io, struct ipc_port, ip_object)
+#define ip_to_object(port)              (&(port)->ip_object)
+#define ip_active(port)                 io_active(ip_to_object(port))
+#define ip_mq_lock_held(port)           io_lock_held(ip_to_object(port))
+#define ip_mq_lock(port)                io_lock(ip_to_object(port))
+#define ip_mq_lock_try(port)            io_lock_try(ip_to_object(port))
+#define ip_mq_lock_held_kdp(port)       io_lock_held_kdp(ip_to_object(port))
+#define ip_mq_unlock(port)              io_unlock(ip_to_object(port))
 
-#define ip_reference(port)      io_reference(ip_to_object(port))
-#define ip_release(port)        io_release(ip_to_object(port))
+#define ip_reference(port)              io_reference(ip_to_object(port))
+#define ip_release(port)                io_release(ip_to_object(port))
+#define ip_release_safe(port)           io_release_safe(ip_to_object(port))
+#define ip_release_live(port)           io_release_live(ip_to_object(port))
 
-/* get an ipc_port pointer from an ipc_mqueue pointer */
-#define ip_from_mq(mq) \
-	        __container_of(mq, struct ipc_port, ip_messages)
+#define ip_from_waitq(wq)               __container_of(wq, struct ipc_port, ip_waitq)
+#define ip_from_mq(mq)                  __container_of(mq, struct ipc_port, ip_messages)
 
-#define ip_reference_mq(mq)     ip_reference(ip_from_mq(mq))
-#define ip_release_mq(mq)       ip_release(ip_from_mq(mq))
+#define ip_kotype(port)                 io_kotype(ip_to_object(port))
+#define ip_is_kobject(port)             io_is_kobject(ip_to_object(port))
+#define ip_is_control(port) \
+	(ip_is_kobject(port) && (ip_kotype(port) == IKOT_TASK_CONTROL || ip_kotype(port) == IKOT_THREAD_CONTROL))
+#define ip_is_kolabeled(port)           io_is_kolabeled(ip_to_object(port))
 
-#define ip_kotype(port)         io_kotype(ip_to_object(port))
-#define ip_is_kobject(port)     io_is_kobject(ip_to_object(port))
-#define ip_is_kolabeled(port)   io_is_kolabeled(ip_to_object(port))
-#define ip_get_kobject(port)    ipc_kobject_get(port)
-#define ip_label_check(space, port, msgt_name) \
-	(!ip_is_kolabeled(port) || ipc_kobject_label_check((space), (port), (msgt_name)))
+#define ip_full_kernel(port)            imq_full_kernel(&(port)->ip_messages)
+#define ip_full(port)                   imq_full(&(port)->ip_messages)
 
-#define ip_full_kernel(port)    imq_full_kernel(&(port)->ip_messages)
-#define ip_full(port)           imq_full(&(port)->ip_messages)
+#define ip_is_immovable_send(port)      ((port)->ip_immovable_send)
+#define ip_is_pinned(port)              ((port)->ip_pinned)
 
 /* Bits reserved in IO_BITS_PORT_INFO are defined here */
 
@@ -303,19 +299,12 @@ MACRO_END
  * therefore cannot be blocked waiting for memory themselves).
  */
 #define IP_BIT_PREALLOC         0x00008000      /* preallocated mesg */
-#define IP_PREALLOC(port)       ((port)->ip_object.io_bits & IP_BIT_PREALLOC)
+#define IP_PREALLOC(port)       (io_bits(ip_to_object(port)) & IP_BIT_PREALLOC)
 
 #define IP_SET_PREALLOC(port, kmsg)                                     \
 MACRO_BEGIN                                                             \
-	(port)->ip_object.io_bits |= IP_BIT_PREALLOC;                   \
+	io_bits_or(ip_to_object(port), IP_BIT_PREALLOC);                \
 	(port)->ip_premsg = (kmsg);                                     \
-MACRO_END
-
-#define IP_CLEAR_PREALLOC(port, kmsg)                                   \
-MACRO_BEGIN                                                             \
-	assert((port)->ip_premsg == kmsg);                              \
-	(port)->ip_object.io_bits &= ~IP_BIT_PREALLOC;                  \
-	(port)->ip_premsg = IKM_NULL;                                   \
 MACRO_END
 
 /*
@@ -323,7 +312,7 @@ MACRO_END
  * on a policy defined in the Sandbox.
  */
 #define IP_BIT_FILTER_MSG               0x00001000
-#define ip_enforce_msg_filtering(port)    (((port)->ip_object.io_bits & IP_BIT_FILTER_MSG) != 0)
+#define ip_enforce_msg_filtering(port)  ((io_bits(ip_to_object(port)) & IP_BIT_FILTER_MSG) != 0)
 
 /* JMM - address alignment/packing for LP64 */
 struct ipc_port_request {
@@ -367,10 +356,18 @@ extern lck_attr_t       ipc_lck_attr;
 extern lck_spin_t ipc_port_multiple_lock_data;
 
 #define ipc_port_multiple_lock()                                        \
-	        lck_spin_lock_grp(&ipc_port_multiple_lock_data, &ipc_lck_grp)
+	lck_spin_lock_grp(&ipc_port_multiple_lock_data, &ipc_lck_grp)
 
 #define ipc_port_multiple_unlock()                                      \
-	        lck_spin_unlock(&ipc_port_multiple_lock_data)
+	lck_spin_unlock(&ipc_port_multiple_lock_data)
+
+/*
+ *	Search for the end of the chain (a port not in transit),
+ *	acquiring locks along the way.
+ */
+extern boolean_t ipc_port_destination_chain_lock(
+	ipc_port_t port,
+	ipc_port_t *base);
 
 /*
  *	The port timestamp facility provides timestamps
@@ -392,39 +389,132 @@ extern ipc_port_timestamp_t ipc_port_timestamp(void);
 
 #define IP_TIMESTAMP_ORDER(one, two)    ((int) ((one) - (two)) < 0)
 
+extern void __abortlike __ipc_port_inactive_panic(ipc_port_t port);
+
 static inline void
 require_ip_active(ipc_port_t port)
 {
 	if (!ip_active(port)) {
-		panic("Using inactive port %p", port);
+		__ipc_port_inactive_panic(port);
 	}
 }
 
-static inline kern_return_t
-ipc_port_translate(
-	ipc_space_t                     space,
-	mach_port_name_t                name,
-	mach_port_right_t               right,
-	ipc_port_t                     *portp)
-{
-	ipc_object_t object;
-	kern_return_t kr;
+/*
+ *  A receive right (port) can be in ONE of the following four states:
+ *
+ *  1) INACTIVE: Dead
+ *  2) IN-SPACE: In a space
+ *  3) IN-TRANSIT: Enqueued in a message
+ *  4) IN-LIMBO
+ *
+ *  If the port is active and ip_receiver_name != MACH_PORT_NULL, we can safely
+ *  deference the union as ip_receiver, which points to the space that holds
+ *  receive right (but doesn't hold a ref for it).
+ *
+ *  If the port is active and ip_receiver_name == MACH_PORT_NULL, we can safely
+ *  deference the union as ip_destination. The port is either IN-LIMBO (ip_destination == IP_NULL)
+ *  or ip_destination points to the destination port and holds a ref for it.
+ *
+ *  If the port is not active, we can safely deference the union as ip_timestamp,
+ *  which contains a timestamp taken when the port was destroyed.
+ *
+ *  If the port is in a space, ip_receiver_name denotes the port name its receive
+ *  right occupies in the receiving space. The only exception, as an optimization trick,
+ *  is task's self port (itk_self), whose ip_receiver_name actually denotes the name
+ *  of mach_task_self() in owning task's space (a send right, with receive right in ipc_space_kernel).
+ */
 
-	kr = ipc_object_translate(space, name, right, &object);
-	*portp = (kr == KERN_SUCCESS) ? ip_object_to_port(object) : IP_NULL;
-	return kr;
+static inline bool
+ip_in_a_space(ipc_port_t port)
+{
+	/* IN-SPACE */
+	return ip_active(port) && port->ip_receiver_name != MACH_PORT_NULL;
 }
 
-#define ipc_port_translate_receive(space, name, portp)                  \
-	ipc_port_translate((space), (name), MACH_PORT_RIGHT_RECEIVE, portp)
+static inline bool
+ip_in_space(ipc_port_t port, ipc_space_t space)
+{
+	ip_mq_lock_held(port); /* port must be locked, otherwise PAC could fail */
+	return ip_in_a_space(port) && port->ip_receiver == space;
+}
 
-#define ipc_port_translate_send(space, name, portp)                     \
-	ipc_port_translate((space), (name), MACH_PORT_RIGHT_SEND, portp)
+/* use sparsely when port lock is not possible, just compare raw pointer */
+static inline bool
+ip_in_space_noauth(ipc_port_t port, void* space)
+{
+	void *raw_ptr = ptrauth_strip(*(void **)&port->ip_receiver, ptrauth_key_process_independent_data);
+	return raw_ptr == space;
+}
+
+static inline bool
+ip_in_transit(ipc_port_t port)
+{
+	/* IN-TRANSIT */
+	ip_mq_lock_held(port); /* port must be locked, otherwise PAC could fail */
+	return ip_active(port) && !ip_in_a_space(port) && port->ip_destination != IP_NULL;
+}
+
+static inline bool
+ip_in_limbo(ipc_port_t port)
+{
+	/* IN-LIMBO */
+	ip_mq_lock_held(port); /* port must be locked, otherwise PAC could fail */
+	return ip_active(port) && !ip_in_a_space(port) && port->ip_destination == IP_NULL;
+}
+
+static inline ipc_space_t
+ip_get_receiver(ipc_port_t port)
+{
+	ip_mq_lock_held(port); /* port must be locked, otherwise PAC could fail */
+	return ip_in_a_space(port) ? port->ip_receiver : NULL;
+}
+
+static inline void*
+ip_get_receiver_ptr_noauth(ipc_port_t port)
+{
+	void *raw_ptr = ptrauth_strip(*(void **)&port->ip_receiver, ptrauth_key_process_independent_data);
+	return raw_ptr;
+}
+
+static inline mach_port_name_t
+ip_get_receiver_name(ipc_port_t port)
+{
+	return ip_in_a_space(port) ? port->ip_receiver_name : MACH_PORT_NULL;
+}
+
+static inline ipc_port_t
+ip_get_destination(ipc_port_t port)
+{
+	ip_mq_lock_held(port); /* port must be locked, otherwise PAC could fail */
+	return ip_active(port) && !ip_in_a_space(port) ? port->ip_destination : IP_NULL;
+}
+
+static inline ipc_port_timestamp_t
+ip_get_death_time(ipc_port_t port)
+{
+	assert(!ip_active(port));
+	return port->ip_timestamp;
+}
+
+static inline ipc_importance_task_t
+ip_get_imp_task(ipc_port_t port)
+{
+	return (!ip_is_kobject(port) && !port->ip_specialreply && port->ip_tempowner) ? port->ip_imp_task : IIT_NULL;
+}
+
+extern kern_return_t ipc_port_translate_send(
+	ipc_space_t                     space,
+	mach_port_name_t                name,
+	ipc_port_t                     *portp);
+
+extern kern_return_t ipc_port_translate_receive(
+	ipc_space_t                     space,
+	mach_port_name_t                name,
+	ipc_port_t                     *portp);
 
 /* Allocate a notification request slot */
 #if IMPORTANCE_INHERITANCE
-extern kern_return_t
-ipc_port_request_alloc(
+extern kern_return_t ipc_port_request_alloc(
 	ipc_port_t                      port,
 	mach_port_name_t                name,
 	ipc_port_t                      soright,
@@ -433,8 +523,7 @@ ipc_port_request_alloc(
 	ipc_port_request_index_t        *indexp,
 	boolean_t                       *importantp);
 #else
-extern kern_return_t
-ipc_port_request_alloc(
+extern kern_return_t ipc_port_request_alloc(
 	ipc_port_t                      port,
 	mach_port_name_t                name,
 	ipc_port_t                      soright,
@@ -493,6 +582,7 @@ __options_decl(ipc_port_init_flags_t, uint32_t, {
 	IPC_PORT_INIT_SPECIAL_REPLY     = 0x00000004,
 	IPC_PORT_INIT_FILTER_MESSAGE    = 0x00000008,
 	IPC_PORT_INIT_TG_BLOCK_TRACKING = 0x00000010,
+	IPC_PORT_INIT_LOCKED            = 0x00000020,
 });
 
 /* Initialize a newly-allocated port */
@@ -515,6 +605,11 @@ extern kern_return_t ipc_port_alloc_name(
 	ipc_port_init_flags_t   flags,
 	mach_port_name_t        name,
 	ipc_port_t              *portp);
+
+/* Attach a label to the port */
+extern void ipc_port_set_label(
+	ipc_port_t              port,
+	ipc_label_t             label);
 
 /* Generate dead name notifications */
 extern void ipc_port_dnnotify(
@@ -670,11 +765,17 @@ extern mach_port_name_t ipc_port_copyout_send(
 	ipc_port_t      sright,
 	ipc_space_t     space);
 
+extern mach_port_name_t ipc_port_copyout_send_pinned(
+	ipc_port_t      sright,
+	ipc_space_t     space);
+
 extern void ipc_port_thread_group_blocked(
 	ipc_port_t      port);
 
 extern void ipc_port_thread_group_unblocked(void);
 
+extern void ipc_port_release_send_and_unlock(
+	ipc_port_t      port);
 #endif /* MACH_KERNEL_PRIVATE */
 
 #if KERNEL_PRIVATE
@@ -705,13 +806,20 @@ extern ipc_port_t ipc_port_make_sonce(
 extern void ipc_port_release_sonce(
 	ipc_port_t      port);
 
+/* Release a naked send-once right */
+extern void ipc_port_release_sonce_and_unlock(
+	ipc_port_t      port);
+
 /* Release a naked (in limbo or in transit) receive right */
 extern void ipc_port_release_receive(
 	ipc_port_t      port);
 
-/* finalize the destruction of a port before it gets freed */
+/* Finalize the destruction of a port before it gets freed */
 extern void ipc_port_finalize(
 	ipc_port_t      port);
+
+/* Get receiver task and its pid (if any) for port. */
+extern pid_t ipc_port_get_receiver_task(ipc_port_t port, uintptr_t *task);
 
 /* Allocate a port in a special space */
 extern ipc_port_t ipc_port_alloc_special(
@@ -719,15 +827,14 @@ extern ipc_port_t ipc_port_alloc_special(
 	ipc_port_init_flags_t   flags);
 
 /* Deallocate a port in a special space */
-extern void ipc_port_dealloc_special(
+extern void ipc_port_dealloc_special_and_unlock(
 	ipc_port_t      port,
 	ipc_space_t     space);
 
-#if     MACH_ASSERT
-/* Track low-level port deallocation */
-extern void ipc_port_track_dealloc(
-	ipc_port_t      port);
-#endif  /* MACH_ASSERT */
+/* Deallocate a port in a special space */
+extern void ipc_port_dealloc_special(
+	ipc_port_t      port,
+	ipc_space_t     space);
 
 extern void ipc_port_recv_update_inheritor(ipc_port_t port,
     struct turnstile *turnstile,
@@ -740,15 +847,10 @@ extern void ipc_port_send_update_inheritor(ipc_port_t port,
 extern int
 ipc_special_reply_get_pid_locked(ipc_port_t port);
 
-#define ipc_port_alloc_kernel()         \
-	        ipc_port_alloc_special(ipc_space_kernel, IPC_PORT_INIT_NONE)
-#define ipc_port_dealloc_kernel(port)   \
-	        ipc_port_dealloc_special((port), ipc_space_kernel)
-
 #define ipc_port_alloc_reply()          \
-	        ipc_port_alloc_special(ipc_space_reply, IPC_PORT_INIT_MESSAGE_QUEUE)
+	ipc_port_alloc_special(ipc_space_reply, IPC_PORT_INIT_MESSAGE_QUEUE | IPC_PORT_INIT_SPECIAL_REPLY)
 #define ipc_port_dealloc_reply(port)    \
-	        ipc_port_dealloc_special((port), ipc_space_reply)
+	ipc_port_dealloc_special((port), ipc_space_reply)
 
 #endif /* MACH_KERNEL_PRIVATE */
 

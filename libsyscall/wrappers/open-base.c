@@ -26,24 +26,19 @@
 #include <sys/param.h>
 #include <sys/types.h>
 #include <TargetConditionals.h>
+#include "system-version-compat-support.h"
 
 #if !defined(__i386__)
 
-#if TARGET_OS_OSX
+#if SYSTEM_VERSION_COMPAT_ENABLED
 #include <stdbool.h>
 
-/*
- * On macOS we have support for shimming calls to open the SystemVersion plist.
- * This support is enabled for specific (generally older) binaries from
- * libSystem_initializer()/__libkernel_init_late() by populating these function pointers
- * with the corresponding functions built into libsyscall_dynamic (see open-compat-shim.c).
- */
 extern bool (*system_version_compat_check_path_suffix)(const char *orig_path);
 extern int (*system_version_compat_open_shim)(int opened_fd, int openat_fd, const char *orig_path, int oflag, mode_t mode,
     int (*close_syscall)(int), int (*open_syscall)(const char *, int, mode_t),
     int (*openat_syscall)(int, const char *, int, mode_t),
     int (*fcntl_syscall)(int, int, long));
-#endif /* TARGET_OS_OSX */
+#endif /* SYSTEM_VERSION_COMPAT_ENABLED */
 
 #ifdef VARIANT_CANCELABLE
 int __open(const char *path, int oflag, mode_t mode);
@@ -52,13 +47,13 @@ int __openat(int fd, const char *path, int oflag, mode_t mode);
 #define OPEN_SYSCALL __open
 #define OPENAT_SYSCALL __openat
 
-#if TARGET_OS_OSX
+#if SYSTEM_VERSION_COMPAT_ENABLED
 int __fcntl(int fd, int cmd, long arg);
 int close(int fd);
 
 #define FCNTL_SYSCALL __fcntl
 #define CLOSE_SYSCALL close
-#endif /* TARGET_OS_OSX */
+#endif /* SYSTEM_VERSION_COMPAT_ENABLED */
 
 #else /* VARIANT_CANCELABLE */
 int __open_nocancel(const char *path, int oflag, mode_t mode);
@@ -67,13 +62,13 @@ int __openat_nocancel(int fd, const char *path, int oflag, mode_t mode);
 #define OPEN_SYSCALL __open_nocancel
 #define OPENAT_SYSCALL __openat_nocancel
 
-#if TARGET_OS_OSX
+#if SYSTEM_VERSION_COMPAT_ENABLED
 int __fcntl_nocancel(int fd, int cmd, long arg);
 int __close_nocancel(int fd);
 
 #define FCNTL_SYSCALL __fcntl_nocancel
 #define CLOSE_SYSCALL __close_nocancel
-#endif /* TARGET_OS_OSX */
+#endif /* SYSTEM_VERSION_COMPAT_ENABLED */
 #endif /* VARIANT_CANCELABLE */
 
 #ifdef VARIANT_CANCELABLE
@@ -96,9 +91,9 @@ open$NOCANCEL(const char *path, int oflag, ...)
 	}
 
 	opened_fd = OPEN_SYSCALL(path, oflag, mode);
-#if !TARGET_OS_OSX
+#if !SYSTEM_VERSION_COMPAT_ENABLED
 	return opened_fd;
-#else /* TARGET_OS_OSX */
+#else /* SYSTEM_VERSION_COMPAT_ENABLED */
 	if (opened_fd < 0) {
 		return opened_fd;
 	}
@@ -116,7 +111,7 @@ open$NOCANCEL(const char *path, int oflag, ...)
 	/* at this point we call into the version compat open shim and return values from there */
 	return system_version_compat_open_shim(opened_fd, -1, path, oflag, mode, CLOSE_SYSCALL, OPEN_SYSCALL,
 	           NULL, FCNTL_SYSCALL);
-#endif /* TARGET_OS_OSX */
+#endif /* !SYSTEM_VERSION_COMPAT_ENABLED */
 }
 
 #ifdef VARIANT_CANCELABLE
@@ -139,7 +134,7 @@ openat$NOCANCEL(int fd, const char *path, int oflag, ...)
 	}
 
 	opened_fd = OPENAT_SYSCALL(fd, path, oflag, mode);
-#if !TARGET_OS_OSX
+#if !SYSTEM_VERSION_COMPAT_ENABLED
 	return opened_fd;
 #else
 	if (opened_fd < 0) {
@@ -159,6 +154,6 @@ openat$NOCANCEL(int fd, const char *path, int oflag, ...)
 	/* at this point we call into the version compat open shim and return values from there */
 	return system_version_compat_open_shim(opened_fd, fd, path, oflag, mode, CLOSE_SYSCALL, NULL,
 	           OPENAT_SYSCALL, FCNTL_SYSCALL);
-#endif /* !TARGET_OS_OSX */
+#endif /* !SYSTEM_VERSION_COMPAT_ENABLED */
 }
 #endif /* !defined(__i386__) */

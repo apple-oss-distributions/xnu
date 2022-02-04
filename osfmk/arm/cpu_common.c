@@ -62,12 +62,14 @@ vm_address_t     percpu_base_cur;
 cpu_data_t       PERCPU_DATA(cpu_data);
 cpu_data_entry_t CpuDataEntries[MAX_CPUS];
 
-static lck_grp_t cpu_lck_grp;
-static lck_rw_t cpu_state_lock;
+static LCK_GRP_DECLARE(cpu_lck_grp, "cpu_lck_grp");
+static LCK_RW_DECLARE(cpu_state_lock, &cpu_lck_grp);
 
 unsigned int    real_ncpus = 1;
 boolean_t       idle_enable = FALSE;
 uint64_t        wake_abstime = 0x0ULL;
+
+extern uint64_t xcall_ack_timeout_abstime;
 
 #if defined(HAS_IPI)
 extern unsigned int gFastIPI;
@@ -217,7 +219,7 @@ cpu_handle_xcall(cpu_data_t *cpu_data_ptr)
 	/* Come back around if cpu_signal_internal is running on another CPU and has just
 	* added SIGPxcall to the pending mask, but hasn't yet assigned the call params.*/
 	if (cpu_data_ptr->cpu_xcall_p0 != NULL && cpu_data_ptr->cpu_xcall_p1 != NULL) {
-		xfunc = cpu_data_ptr->cpu_xcall_p0;
+		xfunc = ptrauth_auth_function(cpu_data_ptr->cpu_xcall_p0, ptrauth_key_function_pointer, cpu_data_ptr);
 		INTERRUPT_MASKED_DEBUG_START(xfunc, DBG_INTR_TYPE_IPI);
 		xparam = cpu_data_ptr->cpu_xcall_p1;
 		cpu_data_ptr->cpu_xcall_p0 = NULL;
@@ -228,7 +230,7 @@ cpu_handle_xcall(cpu_data_t *cpu_data_ptr)
 		INTERRUPT_MASKED_DEBUG_END();
 	}
 	if (cpu_data_ptr->cpu_imm_xcall_p0 != NULL && cpu_data_ptr->cpu_imm_xcall_p1 != NULL) {
-		xfunc = cpu_data_ptr->cpu_imm_xcall_p0;
+		xfunc = ptrauth_auth_function(cpu_data_ptr->cpu_imm_xcall_p0, ptrauth_key_function_pointer, cpu_data_ptr);
 		INTERRUPT_MASKED_DEBUG_START(xfunc, DBG_INTR_TYPE_IPI);
 		xparam = cpu_data_ptr->cpu_imm_xcall_p1;
 		cpu_data_ptr->cpu_imm_xcall_p0 = NULL;
@@ -276,11 +278,10 @@ cpu_broadcast_xcall_internal(unsigned int signal,
 		}
 
 		if ((target_cpu_datap == NULL) ||
-		    KERN_SUCCESS != cpu_signal(target_cpu_datap, signal, (void *)func, parm)) {
+		    KERN_SUCCESS != cpu_signal(target_cpu_datap, signal, ptrauth_nop_cast(void*, ptrauth_auth_and_resign(func, ptrauth_key_function_pointer, ptrauth_type_discriminator(broadcastFunc), ptrauth_key_function_pointer, target_cpu_datap)), parm)) {
 			failsig++;
 		}
 	}
-
 
 	if (self_xcall) {
 		func(parm);
@@ -387,7 +388,7 @@ cpu_xcall_internal(unsigned int signal, int cpu_number, broadcastFunc func, void
 		return KERN_INVALID_ARGUMENT;
 	}
 
-	return cpu_signal(target_cpu_datap, signal, (void*)func, param);
+	return cpu_signal(target_cpu_datap, signal, ptrauth_nop_cast(void*, ptrauth_auth_and_resign(func, ptrauth_key_function_pointer, ptrauth_type_discriminator(broadcastFunc), ptrauth_key_function_pointer, target_cpu_datap)), param);
 }
 
 kern_return_t
@@ -427,6 +428,11 @@ cpu_signal_internal(cpu_data_t *target_proc,
 	}
 
 	if ((signal == SIGPxcall) || (signal == SIGPxcallImm)) {
+		uint64_t start_mabs_time, max_mabs_time, current_mabs_time;
+		current_mabs_time = start_mabs_time = mach_absolute_time();
+		max_mabs_time = xcall_ack_timeout_abstime + current_mabs_time;
+		assert(max_mabs_time > current_mabs_time);
+
 		do {
 			current_signals = target_proc->cpu_signal;
 			if ((current_signals & SIGPdisabled) == SIGPdisabled) {
@@ -447,7 +453,20 @@ cpu_signal_internal(cpu_data_t *target_proc,
 			if (!swap_success && (current_proc->cpu_signal & signal)) {
 				cpu_handle_xcall(current_proc);
 			}
-		} while (!swap_success);
+		} while (!swap_success && ((current_mabs_time = mach_absolute_time()) < max_mabs_time));
+
+		/*
+		 * If we time out while waiting for the target CPU to respond, it's possible that no
+		 * other CPU is available to handle the watchdog interrupt that would eventually trigger
+		 * a panic. To prevent this from happening, we just panic here to flag this condition.
+		 */
+		if (__improbable(current_mabs_time >= max_mabs_time)) {
+			uint64_t end_time_ns, xcall_ack_timeout_ns;
+			absolutetime_to_nanoseconds(current_mabs_time - start_mabs_time, &end_time_ns);
+			absolutetime_to_nanoseconds(xcall_ack_timeout_abstime, &xcall_ack_timeout_ns);
+			panic("CPU%u has failed to respond to cross-call after %llu nanoseconds (timeout = %llu ns)",
+			    target_proc->cpu_number, end_time_ns, xcall_ack_timeout_ns);
+		}
 
 		if (signal == SIGPxcallImm) {
 			target_proc->cpu_imm_xcall_p0 = p0;
@@ -794,6 +813,12 @@ current_percpu_base(void)
 	return current_thread()->machine.pcpu_data_base;
 }
 
+vm_offset_t
+other_percpu_base(int cpu)
+{
+	return (vm_offset_t)cpu_datap(cpu) - __PERCPU_ADDR(cpu_data);
+}
+
 uint64_t
 ml_get_wake_timebase(void)
 {
@@ -815,6 +840,13 @@ ml_cpu_can_exit(__unused int cpu_id)
 	}
 #if HAS_CLUSTER && USE_APPLEARMSMP
 	/*
+	 * Until the feature is known to be stable, guard it with a boot-arg
+	 */
+	extern bool enable_processor_exit;
+	if (!enable_processor_exit) {
+		return false;
+	}
+	/*
 	 * Cyprus and newer chips can disable individual non-boot CPUs. The
 	 * implementation polls cpuX_IMPL_CPU_STS, which differs on older chips.
 	 */
@@ -823,13 +855,6 @@ ml_cpu_can_exit(__unused int cpu_id)
 	}
 #endif
 	return false;
-}
-
-void
-ml_cpu_init_state(void)
-{
-	lck_grp_init(&cpu_lck_grp, "cpu_lck_grp", LCK_GRP_ATTR_NULL);
-	lck_rw_init(&cpu_state_lock, &cpu_lck_grp, LCK_ATTR_NULL);
 }
 
 #ifdef USE_APPLEARMSMP

@@ -113,8 +113,8 @@ kern_ioctl_file_extents(struct kern_direct_file_io_ref_t * ref, u_long theIoctl,
 	int (*do_ioctl)(void * p1, void * p2, u_long theIoctl, caddr_t result);
 	void * p1;
 	void * p2;
-	uint64_t    fileblk;
-	size_t      filechunk;
+	uint64_t    fileblk = 0;
+	size_t      filechunk = 0;
 	dk_extent_t  extent;
 	dk_unmap_t   unmap;
 	_dk_cs_pin_t pin;
@@ -140,7 +140,7 @@ kern_ioctl_file_extents(struct kern_direct_file_io_ref_t * ref, u_long theIoctl,
 		(void) do_ioctl(p1, p2, _DKIOCCSPINEXTENT, (caddr_t)&pin);
 	} else if (_DKIOCCSUNPINEXTENT == theIoctl) {
 		/* Tell CS hibernation is done, so it can stop blocking overlapping writes */
-		pin.cp_flags = _DKIOCCSPINDISCARDBLACKLIST;
+		pin.cp_flags = _DKIOCCSPINDISCARDDENYLIST;
 		(void) do_ioctl(p1, p2, _DKIOCCSUNPINEXTENT, (caddr_t)&pin);
 	}
 
@@ -224,8 +224,8 @@ kern_open_file_for_direct_io(const char * name,
 	dk_apfs_wbc_range_t wbc_range;
 	int               error;
 	off_t             f_offset;
-	uint64_t          fileblk;
-	size_t            filechunk;
+	uint64_t          fileblk = 0;
+	size_t            filechunk = 0;
 	uint64_t          physoffset, minoffset;
 	dev_t             device;
 	dev_t             target = 0;
@@ -240,19 +240,17 @@ kern_open_file_for_direct_io(const char * name,
 	u_int32_t         ndflags;
 	off_t             mpFree;
 
+	wbc_range.count = 0;
+
 	int (*do_ioctl)(void * p1, void * p2, u_long theIoctl, caddr_t result);
 	void * p1 = NULL;
 	void * p2 = NULL;
 
 	error = EFAULT;
 
-	ref = (struct kern_direct_file_io_ref_t *) kalloc(sizeof(struct kern_direct_file_io_ref_t));
-	if (!ref) {
-		error = EFAULT;
-		goto out;
-	}
+	ref = kalloc_type(struct kern_direct_file_io_ref_t,
+	    Z_WAITOK | Z_ZERO | Z_NOFAIL);
 
-	bzero(ref, sizeof(*ref));
 	p = kernproc;
 	ref->ctx = vfs_context_kernel();
 
@@ -612,7 +610,7 @@ out:
 			ref->vp = NULLVP;
 		}
 		ref->ctx = NULL;
-		kfree(ref, sizeof(struct kern_direct_file_io_ref_t));
+		kfree_type(struct kern_direct_file_io_ref_t, ref);
 		ref = NULL;
 	}
 
@@ -714,5 +712,5 @@ kern_close_file_for_direct_io(struct kern_direct_file_io_ref_t * ref,
 
 	ref->ctx = NULL;
 
-	kfree(ref, sizeof(struct kern_direct_file_io_ref_t));
+	kfree_type(struct kern_direct_file_io_ref_t, ref);
 }

@@ -30,6 +30,8 @@
 #define __PTRAUTH_UTILS_H
 
 #include <ptrauth.h>
+#include <sys/cdefs.h>
+__BEGIN_DECLS
 
 /* ptrauth_utils flags */
 #define PTRAUTH_ADDR_DIVERSIFY  0x0001  /* Mix storage address in to signature */
@@ -56,16 +58,8 @@
  * Returns:		ptrauth_generic_signature_t		Signature of blob
  *
  */
-#if __has_feature(ptrauth_calls)
 ptrauth_generic_signature_t
-ptrauth_utils_sign_blob_generic(void * ptr, size_t len_bytes, uint64_t data, int flags);
-#else
-static inline ptrauth_generic_signature_t
-ptrauth_utils_sign_blob_generic(__unused void * ptr, __unused size_t len_bytes, __unused uint64_t data, __unused int flags)
-{
-	return 0;
-}
-#endif // __has_feature(ptrauth_calls)
+ptrauth_utils_sign_blob_generic(const void * ptr, size_t len_bytes, uint64_t data, int flags);
 
 
 /* ptrauth_utils_auth_blob_generic
@@ -87,16 +81,8 @@ ptrauth_utils_sign_blob_generic(__unused void * ptr, __unused size_t len_bytes, 
  *								else we panic as something's gone awry
  *
  */
-#if __has_feature(ptrauth_calls)
 void
-ptrauth_utils_auth_blob_generic(void * ptr, size_t len_bytes, uint64_t data, int flags, ptrauth_generic_signature_t signature);
-#else
-static inline void
-ptrauth_utils_auth_blob_generic(__unused void * ptr, __unused size_t len_bytes, __unused uint64_t data, __unused int flags, __unused ptrauth_generic_signature_t signature)
-{
-	return;
-}
-#endif // __has_feature(ptrauth_calls)
+ptrauth_utils_auth_blob_generic(const void * ptr, size_t len_bytes, uint64_t data, int flags, ptrauth_generic_signature_t signature);
 
-
+__END_DECLS
 #endif // __PTRAUTH_UTILS_H

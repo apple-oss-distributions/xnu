@@ -33,6 +33,7 @@
 
 #include <IOKit/IOKernelReportStructs.h>
 #include <IOKit/IOKernelReporters.h>
+#include <os/overflow.h>
 #include "IOReporterDefs.h"
 
 
@@ -120,7 +121,7 @@ IOHistogramReporter::initWith(IOService *reportingService,
 
 	PREFL_MEMOP_FAIL(_segmentCount, IOHistogramSegmentConfig);
 	configSize = (size_t)_segmentCount * sizeof(IOHistogramSegmentConfig);
-	_histogramSegmentsConfig = (IOHistogramSegmentConfig*)IOMalloc(configSize);
+	_histogramSegmentsConfig = (IOHistogramSegmentConfig*)IOMallocData(configSize);
 	if (!_histogramSegmentsConfig) {
 		goto finish;
 	}
@@ -155,20 +156,18 @@ IOHistogramReporter::initWith(IOService *reportingService,
 	// Allocate memory for the array of report elements
 	PREFL_MEMOP_FAIL(_nElements, IOReportElement);
 	elementsSize = (size_t)_nElements * sizeof(IOReportElement);
-	_elements = (IOReportElement *)IOMalloc(elementsSize);
+	_elements = (IOReportElement *)IOMallocZeroData(elementsSize);
 	if (!_elements) {
 		goto finish;
 	}
-	memset(_elements, 0, elementsSize);
 
 	// Allocate memory for the array of element watch count
 	PREFL_MEMOP_FAIL(_nElements, int);
 	eCountsSize = (size_t)_nChannels * sizeof(int);
-	_enableCounts = (int *)IOMalloc(eCountsSize);
+	_enableCounts = (int *)IOMallocZeroData(eCountsSize);
 	if (!_enableCounts) {
 		goto finish;
 	}
-	memset(_enableCounts, 0, eCountsSize);
 
 	lockReporter();
 	for (cnt2 = 0; cnt2 < _channelDimension; cnt2++) {
@@ -200,11 +199,10 @@ IOHistogramReporter::initWith(IOService *reportingService,
 	// Allocate memory for the bucket upper bounds
 	PREFL_MEMOP_FAIL(_nElements, uint64_t);
 	boundsSize = (size_t)_nElements * sizeof(uint64_t);
-	_bucketBounds = (int64_t*)IOMalloc(boundsSize);
+	_bucketBounds = (int64_t*)IOMallocZeroData(boundsSize);
 	if (!_bucketBounds) {
 		goto finish;
 	}
-	memset(_bucketBounds, 0, boundsSize);
 	_bucketCount = _nElements;
 
 	for (cnt = 0; cnt < _segmentCount; cnt++) {
@@ -260,11 +258,11 @@ IOHistogramReporter::free(void)
 {
 	if (_bucketBounds) {
 		PREFL_MEMOP_PANIC(_nElements, int64_t);
-		IOFree(_bucketBounds, (size_t)_nElements * sizeof(int64_t));
+		IOFreeData(_bucketBounds, (size_t)_nElements * sizeof(int64_t));
 	}
 	if (_histogramSegmentsConfig) {
 		PREFL_MEMOP_PANIC(_segmentCount, IOHistogramSegmentConfig);
-		IOFree(_histogramSegmentsConfig,
+		IOFreeData(_histogramSegmentsConfig,
 		    (size_t)_segmentCount * sizeof(IOHistogramSegmentConfig));
 	}
 
@@ -335,6 +333,7 @@ IOHistogramReporter::tallyValue(int64_t value)
 {
 	int result = -1;
 	int cnt = 0, element_index = 0;
+	int64_t sum = 0;
 	IOHistogramReportValues hist_values;
 
 	lockReporter();
@@ -364,7 +363,11 @@ IOHistogramReporter::tallyValue(int64_t value)
 	} else if (value > hist_values.bucket_max) {
 		hist_values.bucket_max = value;
 	}
-	hist_values.bucket_sum += value;
+	if (os_add_overflow(hist_values.bucket_sum, value, &sum)) {
+		hist_values.bucket_sum = INT64_MAX;
+	} else {
+		hist_values.bucket_sum = sum;
+	}
 	hist_values.bucket_hits++;
 
 	if (setElementValues(element_index, (IOReportElementValues *)&hist_values)
@@ -378,4 +381,52 @@ IOHistogramReporter::tallyValue(int64_t value)
 finish:
 	unlockReporter();
 	return result;
+}
+
+/* static */ OSPtr<IOReportLegendEntry>
+IOHistogramReporter::createLegend(uint64_t channelID,
+    const char *channelName,
+    int segmentCount,
+    IOHistogramSegmentConfig *config,
+    IOReportCategories categories,
+    IOReportUnit unit)
+{
+	OSSharedPtr<IOReportLegendEntry>        legendEntry;
+	OSSharedPtr<OSData>                     tmpConfigData;
+	OSDictionary                            *tmpDict;   // no refcount
+	int                                                                     cnt;
+
+	IOReportChannelType channelType = {
+		.categories = categories,
+		.report_format = kIOReportFormatHistogram,
+		.nelements = 0,
+		.element_idx = 0
+	};
+
+	for (cnt = 0; cnt < segmentCount; cnt++) {
+		channelType.nelements += config[cnt].segment_bucket_count;
+	}
+
+	legendEntry = IOReporter::legendWith(&channelID, &channelName, 1, channelType, unit);
+	if (!legendEntry) {
+		return nullptr;
+	}
+
+	PREFL_MEMOP_PANIC(segmentCount, IOHistogramSegmentConfig);
+	tmpConfigData = OSData::withBytes(config,
+	    (unsigned)segmentCount *
+	    sizeof(IOHistogramSegmentConfig));
+	if (!tmpConfigData) {
+		return nullptr;
+	}
+
+	tmpDict = OSDynamicCast(OSDictionary,
+	    legendEntry->getObject(kIOReportLegendInfoKey));
+	if (!tmpDict) {
+		return nullptr;
+	}
+
+	tmpDict->setObject(kIOReportLegendConfigKey, tmpConfigData.get());
+
+	return legendEntry;
 }

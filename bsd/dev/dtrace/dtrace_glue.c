@@ -226,9 +226,9 @@ done:
 /*
  * cpuvar
  */
-lck_mtx_t cpu_lock;
-lck_mtx_t cyc_lock;
-lck_mtx_t mod_lock;
+LCK_MTX_DECLARE_ATTR(cpu_lock, &dtrace_lck_grp, &dtrace_lck_attr);
+LCK_MTX_DECLARE_ATTR(cyc_lock, &dtrace_lck_grp, &dtrace_lck_attr);
+LCK_MTX_DECLARE_ATTR(mod_lock, &dtrace_lck_grp, &dtrace_lck_attr);
 
 dtrace_cpu_t *cpu_list;
 cpu_core_t *cpu_core; /* XXX TLB lockdown? */
@@ -415,7 +415,7 @@ timer_call_get_cyclic_arg(wrap_timer_call_t *wrapTC)
 cyclic_id_t
 cyclic_timer_add(cyc_handler_t *handler, cyc_time_t *when)
 {
-	wrap_timer_call_t *wrapTC = _MALLOC(sizeof(wrap_timer_call_t), M_TEMP, M_ZERO | M_WAITOK);
+	wrap_timer_call_t *wrapTC = kalloc_type(wrap_timer_call_t, Z_ZERO | Z_WAITOK);
 	if (NULL == wrapTC) {
 		return CYCLIC_NONE;
 	} else {
@@ -432,7 +432,7 @@ cyclic_timer_remove(cyclic_id_t cyclic)
 	wrap_timer_call_t *wrapTC = (wrap_timer_call_t *) cyclic;
 	dtrace_xcall(wrapTC->cpuid, (dtrace_xcall_t) timer_call_remove_cyclic, (void*) cyclic);
 
-	_FREE((void *)cyclic, M_TEMP);
+	kfree_type(wrap_timer_call_t, wrapTC);
 }
 
 static void
@@ -525,7 +525,7 @@ cyclic_add(cyc_handler_t *handler, cyc_time_t *when)
 {
 	uint64_t now;
 
-	wrap_thread_call_t *wrapTC = _MALLOC(sizeof(wrap_thread_call_t), M_TEMP, M_ZERO | M_WAITOK);
+	wrap_thread_call_t *wrapTC = kalloc_type(wrap_thread_call_t, Z_ZERO | Z_WAITOK);
 	if (NULL == wrapTC) {
 		return CYCLIC_NONE;
 	}
@@ -572,7 +572,7 @@ cyclic_remove(cyclic_id_t cyclic)
 	}
 
 	if (thread_call_free(wrapTC->TChdl)) {
-		_FREE(wrapTC, M_TEMP);
+		kfree_type(wrap_thread_call_t, wrapTC);
 	} else {
 		/* Gut this cyclic and move on ... */
 		wrapTC->hdlr.cyh_func = noop_cyh_func;
@@ -793,7 +793,7 @@ vmem_create(const char *name, void *base, size_t size, size_t quantum, void *ign
 {
 #pragma unused(name,quantum,ignore5,ignore6,source,qcache_max,vmflag)
 	blist_t bl;
-	struct blist_hdl *p = _MALLOC(sizeof(struct blist_hdl), M_TEMP, M_WAITOK);
+	struct blist_hdl *p = kalloc_type(struct blist_hdl, Z_WAITOK);
 
 	ASSERT(quantum == 1);
 	ASSERT(NULL == ignore5);
@@ -849,7 +849,7 @@ vmem_destroy(vmem_t *vmp)
 	struct blist_hdl *p = (struct blist_hdl *)vmp;
 
 	blist_destroy( p->blist );
-	_FREE( p, sizeof(struct blist_hdl));
+	kfree_type(struct blist_hdl, p);
 }
 
 /*
@@ -1118,7 +1118,7 @@ dtrace_buffer_copyout(const void *kaddr, user_addr_t uaddr, vm_size_t nbytes)
 
 		nbytes -= maxsize;
 		uaddr += maxsize;
-		kaddr += maxsize;
+		kaddr = (const void *)((uintptr_t)kaddr + maxsize);
 	}
 	if (nbytes > 0) {
 		if (copyout(kaddr, uaddr, nbytes) != 0) {

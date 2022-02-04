@@ -6,7 +6,10 @@
 #define HW_MEMSIZE_STR "hw.memsize"
 #define HW_MEMSIZE_THRESHOLD 600 * 1024 * 1024
 
-T_GLOBAL_META(T_META_NAMESPACE("xnu.vm"));
+T_GLOBAL_META(
+	T_META_NAMESPACE("xnu.vm"),
+	T_META_RADAR_COMPONENT_NAME("xnu"),
+	T_META_RADAR_COMPONENT_VERSION("VM"));
 
 /*
  * Embedded Device having physical memory greater than 600MB should have positive

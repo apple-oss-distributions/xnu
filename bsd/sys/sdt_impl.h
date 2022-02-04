@@ -62,6 +62,7 @@ extern uint64_t sdt_getarg(void *, dtrace_id_t, void *, int, int);
 
 void sdt_provide_module(void *, struct modctl *);
 void sdt_early_init(void);
+void sdt_load_machsect(struct modctl *ctl);
 void sdt_init(void);
 
 extern int          sdt_probetab_size;

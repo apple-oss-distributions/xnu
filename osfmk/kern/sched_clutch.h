@@ -62,7 +62,7 @@ __enum_decl(sched_clutch_tg_priority_t, uint8_t, {
 #define SCHED_CLUTCH_THREAD_ELIGIBLE(thread)    ((thread->bound_processor) == PROCESSOR_NULL)
 
 #if CONFIG_SCHED_EDGE
-#define SCHED_CLUTCH_THREAD_CLUSTER_BOUND(thread)       ((thread->sched_flags & (TH_SFLAG_ECORE_ONLY | TH_SFLAG_PCORE_ONLY)) != 0)
+#define SCHED_CLUTCH_THREAD_CLUSTER_BOUND(thread)       (thread->th_bound_cluster_id != THREAD_BOUND_CLUSTER_NONE)
 #define SCHED_CLUTCH_THREAD_CLUSTER_BOUND_SOFT(thread)  ((thread->sched_flags & TH_SFLAG_BOUND_SOFT) != 0)
 
 #else /* CONFIG_SCHED_EDGE */
@@ -146,6 +146,8 @@ struct sched_clutch_root {
 	uint16_t                        scr_thr_count;
 	/* (P) root level urgency; represents the urgency of the whole hierarchy for pre-emption purposes */
 	int16_t                         scr_urgency;
+	/* (P) runnable shared resource load enqueued in this cluster/root hierarchy */
+	uint16_t                        scr_shared_rsrc_load_runnable[CLUSTER_SHARED_RSRC_TYPE_COUNT];
 
 	uint32_t                        scr_cluster_id;
 	/* (I) processor set this hierarchy belongs to */
@@ -307,6 +309,8 @@ struct sched_clutch_bucket_group {
 	uint32_t _Atomic                scbg_pri_shift;
 	/* (A) preferred cluster ID for clutch bucket */
 	uint32_t _Atomic                scbg_preferred_cluster;
+	/* (A) cluster ID for AMP rebalancing */
+	uint32_t                        scbg_amp_rebalance_last_chosen;
 	/* (I) clutch to which this clutch bucket_group belongs */
 	struct sched_clutch             *scbg_clutch;
 #if !__LP64__
@@ -321,19 +325,8 @@ struct sched_clutch_bucket_group {
 	sched_clutch_counter_time_t     scbg_interactivity_data;
 	/* (A) CPU usage information for the clutch bucket group */
 	sched_clutch_bucket_cpu_data_t  scbg_cpu_data;
-
-	/*
-	 * Edge Scheduler Optimization
-	 *
-	 * Currently the array is statically sized based on MAX_PSETS.
-	 * If that definition does not exist (or has a large theoretical
-	 * max value), this could be a dynamic array based on ml_topology_info*
-	 * routines.
-	 *
-	 * <Edge Multi-cluster Support Needed>
-	 */
 	/* Storage for all clutch buckets for a thread group at scbg_bucket */
-	struct sched_clutch_bucket      scbg_clutch_buckets[MAX_PSETS];
+	struct sched_clutch_bucket      *scbg_clutch_buckets;
 };
 typedef struct sched_clutch_bucket_group *sched_clutch_bucket_group_t;
 
@@ -400,18 +393,7 @@ void sched_edge_matrix_set(sched_clutch_edge *edge_matrix, bool *edge_changes_bi
 void sched_edge_tg_preferred_cluster_change(struct thread_group *tg, uint32_t *tg_bucket_preferred_cluster, sched_perfcontrol_preferred_cluster_options_t options);
 
 uint16_t sched_edge_cluster_cumulative_count(sched_clutch_root_t root_clutch, sched_bucket_t bucket);
-
-#if DEVELOPMENT || DEBUG
-/*
- * Sysctl support for dynamically configuring edge properties.
- *
- * <Edge Multi-cluster Support Needed>
- */
-kern_return_t sched_edge_sysctl_configure_e_to_p(uint64_t);
-kern_return_t sched_edge_sysctl_configure_p_to_e(uint64_t);
-sched_clutch_edge sched_edge_e_to_p(void);
-sched_clutch_edge sched_edge_p_to_e(void);
-#endif /* DEVELOPMENT || DEBUG */
+uint16_t sched_edge_shared_rsrc_runnable_load(sched_clutch_root_t root_clutch, cluster_shared_rsrc_type_t load_type);
 
 #endif /* CONFIG_SCHED_EDGE */
 

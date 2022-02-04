@@ -1,0 +1,138 @@
+module Darwin.POSIX.netinet [system] {
+  module in {
+    header "netinet/in.h"
+    export *
+
+    #ifdef XNU_KERNEL_PRIVATE
+    // netinet6/in6.h is conceptually a part of netinet/in.h, and so
+    // belongs to this module, but needs to be excluded or else clang
+    // will attempt to compile in6.h independently. And that fails
+    // because in6.h can only be included from in.h, it cannot be used
+    // in any other context.
+    #endif
+    exclude header "netinet6/in6.h"
+  }
+
+  module tcp {
+    header "netinet/tcp.h"
+    export *
+  }
+}
+
+module Darwin.netinet [system] {
+  #ifdef XNU_KERNEL_PRIVATE
+  // The PLATFORM_MacOSX headers are in the public SDK for macOS,
+  // but mastered out of the public SDK for the other OSes.
+  #endif
+  #ifdef PLATFORM_MacOSX
+  module bootp {
+    header "netinet/bootp.h"
+    export *
+  }
+
+  #endif
+  module icmp6 {
+    header "netinet/icmp6.h"
+    export *
+  }
+
+  #ifdef PLATFORM_MacOSX
+  module icmp_var {
+    header "netinet/icmp_var.h"
+    export *
+  }
+
+  module if_ether {
+    header "netinet/if_ether.h"
+    export *
+  }
+
+  module igmp {
+    header "netinet/igmp.h"
+    export *
+  }
+
+  module igmp_var {
+    header "netinet/igmp_var.h"
+    export *
+  }
+
+  #endif
+  module in_pcb {
+    header "netinet/in_pcb.h"
+    export *
+  }
+
+  module in_systm {
+    header "netinet/in_systm.h"
+    export *
+  }
+
+  #ifdef PLATFORM_MacOSX
+  module in_var {
+    header "netinet/in_var.h"
+    export *
+  }
+
+  #endif
+  module ip {
+    header "netinet/ip.h"
+    export *
+  }
+
+  module ip6 {
+    header "netinet/ip6.h"
+    export *
+  }
+
+  module ip_icmp {
+    header "netinet/ip_icmp.h"
+    export *
+  }
+
+  #ifdef PLATFORM_MacOSX
+  module ip_var {
+    header "netinet/ip_var.h"
+    export *
+  }
+
+  module tcp_fsm {
+    header "netinet/tcp_fsm.h"
+    export *
+  }
+
+  module tcp_seq {
+    header "netinet/tcp_seq.h"
+    export *
+  }
+
+  #endif
+  module tcp_timer {
+    header "netinet/tcp_timer.h"
+    export *
+  }
+
+  module tcp_var {
+    header "netinet/tcp_var.h"
+    export *
+  }
+
+  #ifdef PLATFORM_MacOSX
+  module tcpip {
+    header "netinet/tcpip.h"
+    export *
+  }
+
+  #endif
+  module udp {
+    header "netinet/udp.h"
+    export *
+  }
+  #ifdef PLATFORM_MacOSX
+
+  module udp_var {
+    header "netinet/udp_var.h"
+    export *
+  }
+  #endif
+}

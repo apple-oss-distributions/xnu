@@ -230,6 +230,22 @@
 })
 
 /*!
+ * @function os_atomic_barrier_before_lock_acquire()
+ *
+ * @brief
+ * Appropriate barrier so that a lock acquire is fully ordered with
+ * any lock-release.
+ *
+ * @discussion
+ * Note: On all currently supported architecture,
+ *       this is a no-op given how locks are implemented.
+ *
+ *       If armv8 ever comes up with an ldapr-like kind of acquire semantics
+ *       for RMW, then this would have to change.
+ */
+#define os_atomic_barrier_before_lock_acquire()  ((void)0)
+
+/*!
  * @function os_atomic_init
  *
  * @brief

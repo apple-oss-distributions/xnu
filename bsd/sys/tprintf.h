@@ -69,7 +69,8 @@
 
 #ifdef __APPLE_API_UNSTABLE
 
-typedef struct session *tpr_t;
+struct proc;
+typedef struct pgrp *tpr_t;
 
 __BEGIN_DECLS
 tpr_t   tprintf_open(struct proc *);

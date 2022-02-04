@@ -120,7 +120,7 @@ __BEGIN_DECLS
 
 extern host_t                   host_self(void);
 extern host_priv_t              host_priv_self(void);
-extern host_security_t  host_security_self(void);
+
 __END_DECLS
 
 #endif  /* _KERN_HOST_H_ */

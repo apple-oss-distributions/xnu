@@ -20,6 +20,4 @@ bsd/dev/arm64/fasttrap_isa.c	optional config_dtrace
 bsd/dev/arm64/disassembler.c	optional config_dtrace
 bsd/dev/arm64/sdt_arm.c		optional config_dtrace
 
-bsd/dev/pgtrace/pgtrace_dev.c   optional config_pgtrace_nonkext
-
 bsd/kern/bsd_stubs.c		standard

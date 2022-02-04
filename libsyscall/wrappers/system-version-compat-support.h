@@ -28,10 +28,19 @@
 #ifndef __SYSTEM_VERSION_COMPAT_SUPPORT_H
 #define __SYSTEM_VERSION_COMPAT_SUPPORT_H
 
+#include <TargetConditionals.h>
+
+#if TARGET_OS_OSX && !defined(__i386__)
+#define SYSTEM_VERSION_COMPAT_ENABLED 1
+#endif
+
+
+#if SYSTEM_VERSION_COMPAT_ENABLED
 typedef enum system_version_compat_mode {
 	SYSTEM_VERSION_COMPAT_MODE_DISABLED = 0,
 	SYSTEM_VERSION_COMPAT_MODE_MACOSX = 1,
 	SYSTEM_VERSION_COMPAT_MODE_IOS = 2,
 } system_version_compat_mode_t;
+#endif /* SYSTEM_VERSION_COMPAT_ENABLED */
 
 #endif /* __SYSTEM_VERSION_COMPAT_SUPPORT_H */

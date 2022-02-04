@@ -90,7 +90,8 @@ Other makefile options
  * $ make MAKEJOBS=-j8    # this will use 8 processes during the build. The default is 2x the number of active CPUS.
  * $ make -j8             # the standard command-line option is also accepted
  * $ make -w              # trace recursive make invocations. Useful in combination with VERBOSE=YES
- * $ make BUILD_LTO=0      # build without LLVM Link Time Optimization
+ * $ make BUILD_LTO=0     # build without LLVM Link Time Optimization
+ * $ make BOUND_CHECKS=1  # enable -fbound-attributes for this build
  * $ make REMOTEBUILD=user@remotehost # perform build on remote host
  * $ make BUILD_JSON_COMPILATION_DATABASE=1 # Build Clang JSON Compilation Database
 
@@ -169,18 +170,6 @@ Set up your build environment and from the top directory, run:
     $ make cscope   # this will build cscope database
 
 
-Code Style
-==========
-
-Source files can be reformatted to comply with the xnu code style using the "restyle" make target invoked from the
-top-level project directory.
-
-   $ make restyle      # re-format all source files to be xnu code style conformant.
-
-Compliance can be checked using the "checkstyle" make target.
-
-   $ make checkstyle   # Check all relevant source files for xnu code style conformance.
-
 How to install a new header file from XNU
 =========================================
 
@@ -191,11 +180,12 @@ XNU installs header files at the following locations -
     a. $(DSTROOT)/System/Library/Frameworks/Kernel.framework/Headers
     b. $(DSTROOT)/System/Library/Frameworks/Kernel.framework/PrivateHeaders
     c. $(DSTROOT)/usr/include/
-    d. $(DSTROOT)/System/DriverKit/usr/include/
-    e. $(DSTROOT)/System/Library/Frameworks/System.framework/PrivateHeaders
+    d. $(DSTROOT)/usr/local/include/
+    e. $(DSTROOT)/System/DriverKit/usr/include/
+    f. $(DSTROOT)/System/Library/Frameworks/System.framework/PrivateHeaders
 
 `Kernel.framework` is used by kernel extensions.\
-The `System.framework` and `/usr/include` are used by user level applications. \
+The `System.framework`, `/usr/include` and `/usr/local/include` are used by user level applications. \
 `/System/DriverKit/usr/include` is used by userspace drivers. \
 The header files in framework's `PrivateHeaders` are only available for ** Apple Internal Development **.
 
@@ -210,6 +200,7 @@ from each file list are -
 
     a. `DATAFILES` : To make header file available in user level -
        `$(DSTROOT)/usr/include`
+       `$(DSTROOT)/System/Library/Frameworks/System.framework/PrivateHeaders`
 
     b. `DRIVERKIT_DATAFILES` : To make header file available to DriverKit userspace drivers -
        `$(DSTROOT)/System/DriverKit/usr/include`
@@ -218,6 +209,12 @@ from each file list are -
        user level -
        `$(DSTROOT)/System/Library/Frameworks/System.framework/PrivateHeaders`
 
+    d. `EMBEDDED_PRIVATE_DATAFILES` : To make header file available in user
+       level for macOS as `EXTRA_DATAFILES`, but Apple internal in user level
+       for embedded OSes as `EXTRA_PRIVATE_DATAFILES` -
+       `$(DSTROOT)/usr/include` (`EXTRA_DATAFILES`)
+       `$(DSTROOT)/usr/local/include` (`EXTRA_PRIVATE_DATAFILES`)
+
     d. `KERNELFILES` : To make header file available in kernel level -
        `$(DSTROOT)/System/Library/Frameworks/Kernel.framework/Headers`
        `$(DSTROOT)/System/Library/Frameworks/Kernel.framework/PrivateHeaders`
@@ -225,6 +222,13 @@ from each file list are -
     e. `PRIVATE_KERNELFILES` : To make header file available to Apple internal
        for kernel extensions -
        `$(DSTROOT)/System/Library/Frameworks/Kernel.framework/PrivateHeaders`
+
+    f. `MODULEMAPFILES` : To make module map file available in user level -
+       `$(DSTROOT)/usr/include`
+
+    g. `PRIVATE_MODULEMAPFILES` : To make module map file available to Apple
+       internal in user level -
+       `$(DSTROOT)/usr/local/include`
 
 The Makefile combines the file lists mentioned above into different
 install lists which are used by build system to install the header files. There
@@ -239,11 +243,13 @@ If the install list that you are interested does not exist, create it
 by adding the appropriate file lists.  The default install lists, its
 member file lists and their default location are described below -
 
-    a. `INSTALL_MI_LIST` : Installs header file to a location that is available to everyone in user level.
-        Locations -
+    a. `INSTALL_MI_LIST`, `INSTALL_MODULEMAP_MI_LIST` : Installs header and module map
+       files to a location that is available to everyone in user level.
+       Locations -
            $(DSTROOT)/usr/include
        Definition -
            INSTALL_MI_LIST = ${DATAFILES}
+           INSTALL_MODULEMAP_MI_LIST = ${MODULEMAPFILES}
 
     b. `INSTALL_DRIVERKIT_MI_LIST` : Installs header file to a location that is
         available to DriverKit userspace drivers.
@@ -252,39 +258,39 @@ member file lists and their default location are described below -
        Definition -
            INSTALL_DRIVERKIT_MI_LIST = ${DRIVERKIT_DATAFILES}
 
-    c.  `INSTALL_MI_LCL_LIST` : Installs header file to a location that is available
+    c.  `INSTALL_MI_LCL_LIST`, `INSTALL_MODULEMAP_MI_LCL_LIST` : Installs header and
+       module map files to a location that is available for Apple internal in user level.
+       Locations -
+           $(DSTROOT)/usr/local/include
+       Definition -
+           INSTALL_MI_LCL_LIST =
+           INSTALL_MODULEMAP_MI_LCL_LIST = ${PRIVATE_MODULEMAPFILES}
+
+    d.  `INSTALL_SF_MI_LCL_LIST` : Installs header file to a location that is available
        for Apple internal in user level.
        Locations -
            $(DSTROOT)/System/Library/Frameworks/System.framework/PrivateHeaders
        Definition -
-           INSTALL_MI_LCL_LIST = ${PRIVATE_DATAFILES}
+           INSTALL_SF_MI_LCL_LIST = ${DATAFILES} ${PRIVATE_DATAFILES}
 
-    d. `INSTALL_KF_MI_LIST` : Installs header file to location that is available
+    e. `INSTALL_KF_MI_LIST` : Installs header file to location that is available
        to everyone for kernel extensions.
        Locations -
             $(DSTROOT)/System/Library/Frameworks/Kernel.framework/Headers
        Definition -
             INSTALL_KF_MI_LIST = ${KERNELFILES}
 
-    e. `INSTALL_KF_MI_LCL_LIST` : Installs header file to location that is
+    f. `INSTALL_KF_MI_LCL_LIST` : Installs header file to location that is
        available for Apple internal for kernel extensions.
        Locations -
             $(DSTROOT)/System/Library/Frameworks/Kernel.framework/PrivateHeaders
        Definition -
             INSTALL_KF_MI_LCL_LIST = ${KERNELFILES} ${PRIVATE_KERNELFILES}
 
-    f. `EXPORT_MI_LIST` : Exports header file to all of xnu (bsd/, osfmk/, etc.)
+    g. `EXPORT_MI_LIST` : Exports header file to all of xnu (bsd/, osfmk/, etc.)
        for compilation only. Does not install anything into the SDK.
        Definition -
             EXPORT_MI_LIST = ${KERNELFILES} ${PRIVATE_KERNELFILES}
-
-    g. `INSTALL_MODULEMAP_INCDIR_MI_LIST` : Installs module map file to a
-       location that is available to everyone in user level, installing at the
-       root of INCDIR.
-       Locations -
-           $(DSTROOT)/usr/include
-       Definition -
-           INSTALL_MODULEMAP_INCDIR_MI_LIST = ${MODULEMAP_INCDIR_FILES}
 
 If you want to install the header file in a sub-directory of the paths
 described in (1), specify the directory name using two variables
@@ -292,6 +298,11 @@ described in (1), specify the directory name using two variables
 
     INSTALL_MI_DIR = dirname
     EXPORT_MI_DIR = dirname
+
+If you want to install the module map file in a sub-directory, specify the
+directory name using the variable `INSTALL_MODULEMAP_MI_DIR` as follows -
+
+    INSTALL_MODULEMAP_MI_DIR = dirname
 
 A single header file can exist at different locations using the steps
 mentioned above.  However it might not be desirable to make all the code
@@ -327,6 +338,31 @@ want to export a function only to kernel level but not user level.
     g. `DRIVERKIT`: If defined, enclosed code is visible exclusively in the
     DriverKit SDK headers used by userspace drivers.
 
+Module map file name convention
+===============================
+
+In the simple case, a subdirectory of `usr/include` or `usr/local/include`
+can be represented by a standalone module. Where this is the case, set
+`INSTALL_MODULEMAP_MI_DIR` to `INSTALL_MI_DIR` and install a `module.modulemap`
+file there. `module.modulemap` is used even for private modules in
+`usr/local/include`; `module.private.modulemap` is not used. Caveat: in order
+to stay in the simple case, the module name needs to be exactly the same as
+the directory name. If that's not possible, then the following method will
+need to be applied.
+
+`xnu` contributes to the modules defined in CoreOSModuleMaps by installing
+module map files that are sourced from `usr/include/module.modulemap` and
+`usr/local/include/module.modulemap`. The naming convention for the `xnu`
+module map files are as follows.
+
+    a. Ideally the module map file covers an entire directory. A module map
+       file covering `usr/include/a/b/c` would be named `a_b_c.modulemap`.
+       `usr/local/include/a/b/c` would be `a_b_c_private.modulemap`.
+    b. Some headers are special and require their own module. In that case,
+       the module map file would be named after the module it defines.
+       A module map file defining the module `One.Two.Three` would be named
+       `one_two_three.modulemap`.
+
 Conditional compilation
 =======================
 
@@ -352,77 +388,25 @@ does not define the platform macros from `TargetConditionals.h`
 (`TARGET_OS_OSX`, `TARGET_OS_IOS`, etc.).
 
 
-There is a deprecated `TARGET_OS_EMBEDDED` macro, but this should be avoided
-as it is in general too broad a definition for most functionality.
-Please refer to TargetConditionals.h for a full picture.
+Debugging xnu
+=============
 
-How to add a new syscall
-========================
+By default, the kernel reboots in the event of a panic.
+This behavior can be overriden by the `debug` boot-arg -- `debug=0x14e` will cause a panic to wait for a debugger to attach.
+To boot a kernel so it can be debugged by an attached machine, override the `kdp_match_name` boot-arg with the appropriate `ifconfig` interface.
+Ethernet, Thunderbolt, and serial debugging are supported, depending on the hardware.
 
+Use LLDB to debug the kernel:
 
+    ; xcrun -sdk macosx lldb <path-to-unstripped-kernel>
+    (lldb) gdb-remote [<host-ip>:]<port>
 
-
-Testing the kernel
-==================
-
-XNU kernel has multiple mechanisms for testing.
-
-  * Assertions - The DEVELOPMENT and DEBUG kernel configs are compiled with assertions enabled. This allows developers to easily
-    test invariants and conditions.
-
-  * XNU Power On Self Tests (`XNUPOST`): The XNUPOST config allows for building the kernel with basic set of test functions
-    that are run before first user space process is launched. Since XNU is hybrid between MACH and BSD, we have two locations where
-    tests can be added.
-
-        xnu/osfmk/tests/     # For testing mach based kernel structures and apis.
-        bsd/tests/           # For testing BSD interfaces.
-    Please follow the documentation at [osfmk/tests/README.md](osfmk/tests/README.md)
-
-  * User level tests: The `tools/tests/` directory holds all the tests that verify syscalls and other features of the xnu kernel.
-    The make target `xnu_tests` can be used to build all the tests supported.
-
-        $ make RC_ProjectName=xnu_tests SDKROOT=/path/to/SDK
-
-    These tests are individual programs that can be run from Terminal and report tests status by means of std posix exit codes (0 -> success) and/or stdout.
-    Please read detailed documentation in [tools/tests/unit_tests/README.md](tools/tests/unit_tests/README.md)
-
-
-Kernel data descriptors
-=======================
-
-XNU uses different data formats for passing data in its api. The most standard way is using syscall arguments. But for complex data
-it often relies of sending memory saved by C structs. This packaged data transport mechanism is fragile and leads to broken interfaces
-between user space programs and kernel apis. `libkdd` directory holds user space library that can parse custom data provided by the
-same version of kernel. The kernel chunked data format is described in detail at [libkdd/README.md](libkdd/README.md).
-
-
-Debugging the kernel
-====================
-
-The xnu kernel supports debugging with a remote kernel debugging protocol (kdp). Please refer documentation at [technical note] [TN2063]
-By default the kernel is setup to reboot on a panic. To debug a live kernel, the kdp server is setup to listen for UDP connections
-over ethernet. For machines without ethernet port, this behavior can be altered with use of kernel boot-args. Following are some
-common options.
-
-  * `debug=0x144` - setups debug variables to start kdp debugserver on panic
-  * `-v` - print kernel logs on screen. By default XNU only shows grey screen with boot art.
-  * `kdp_match_name=en1` - Override default port selection for kdp. Supported for ethernet, thunderbolt and serial debugging.
-
-To debug a panic'ed kernel, use llvm debugger (lldb) along with unstripped symbol rich kernel binary.
-
-    sh$ lldb kernel.development.unstripped
-
-And then you can connect to panic'ed machine with `kdp_remote [ip addr]` or `gdb_remote [hostip : port]` commands.
-
-Each kernel is packaged with kernel specific debug scripts as part of the build process. For security reasons these special commands
-and scripts do not get loaded automatically when lldb is connected to machine. Please add the following setting to your `~/.lldbinit`
-if you wish to always load these macros.
+The debug info for the kernel (dSYM) comes with a set of macros to support kernel debugging.
+To load these macros automatically when attaching to the kernel, add the following to `~/.lldbinit`:
 
     settings set target.load-script-from-symbol-file true
 
-The `tools/lldbmacros` directory contains the source for each of these commands. Please follow the [README.md](tools/lldbmacros/README.md)
-for detailed explanation of commands and their usage.
+`tools/lldbmacros` contains the source for these commands.
+See the README in that directory for their usage, or use the built-in LLDB help with:
 
-[TN2118]: https://developer.apple.com/library/mac/technotes/tn2004/tn2118.html#//apple_ref/doc/uid/DTS10003352 "Kernel Core Dumps"
-[TN2063]: https://developer.apple.com/library/mac/technotes/tn2063/_index.html "Understanding and Debugging Kernel Panics"
-[Kernel Programming Guide]: https://developer.apple.com/library/mac/documentation/Darwin/Conceptual/KernelProgramming/build/build.html#//apple_ref/doc/uid/TP30000905-CH221-BABDGEGF
+    (lldb) help showcurrentstacks

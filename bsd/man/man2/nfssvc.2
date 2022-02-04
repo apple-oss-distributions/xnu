@@ -85,7 +85,8 @@ and a NULL
 .Fa argstructp
 to enter the kernel as an
 .Xr nfsd 8
-daemon.  The
+daemon.
+The
 .Dv NFSSVC_NFSD
 action normally does not return until the NFS server is stopped.
 .Pp
@@ -130,12 +131,39 @@ struct nfs_export_args {
 .Ed
 .sp
 to pass exported file system information into the kernel.
+.Pp
+Additionally, the
+.Fn nfssvc
+is used by nfsstat(1) tool to receive statistic about the server from kernel.
+While used,
+.Fa argstructp
+points to
+.Fa struct iovec
+of size 2.
+The first
+.Fa iovec
+entry specifies the base address and length of an area in memory from which data should be written.
+The size of the available data will be returned in the location pointed by the second
+.Fa iovec
+entry.
+The following flags are supported :
+.Bl -tag -width 20n
+.It Cm NFSSVC_EXPORTSTATS
+Used to receive exported directory status.
+.It Cm NFSSVC_USERSTATS
+Used to receive exported directory active user status.
+.It Cm NFSSVC_USERCOUNT
+Used to receive current count of active NFS users.
+.It Cm NFSSVC_ZEROSTATS
+Used to zero NFS server statistics.
+.It Cm NFSSVC_SRVSTATS
+Used to receive NFS server statistics.
+.El
 .Sh RETURN VALUES
-Upon successful completion, a value of 0 is returned.  Otherwise, -1 is
-returned the global variable
+Upon successful completion, a value of 0 is returned.
+Otherwise, -1 is returned the global variable
 .Va errno
 is set to specify the error.
-.Pp
 .Sh ERRORS
 .Bl -tag -width Er
 .It Bq Er EPERM
@@ -155,6 +183,7 @@ An attempt was made to add a UDP socket via the
 action, but the UDP socket has already been added.
 .El
 .Sh SEE ALSO
+.Xr nfsstat 1 ,
 .Xr nfsd 8
 .Sh HISTORY
 The
@@ -165,7 +194,7 @@ The
 .Nm nfssvc
 system call is designed specifically for the
 .Tn NFS
-server daemons and as such is specific to their requirements.  Several
-fields of the argument structures are assumed to be valid, such that
+server daemons and as such is specific to their requirements.
+Several fields of the argument structures are assumed to be valid, such that
 .Nm nfssvc
 must be used with extreme care.

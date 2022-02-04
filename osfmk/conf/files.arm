@@ -6,7 +6,12 @@ osfmk/vm/vm_apple_protect.c	 standard
 
 osfmk/arm/hi_res_clock_map.c 	optional hi_res_clock
 
-osfmk/arm/pmap.c		standard
+osfmk/arm/pmap.c			standard
+osfmk/arm/pmap/pmap_cs.c		standard
+osfmk/arm/pmap/pmap_data.c		standard
+osfmk/arm/pmap/pmap_iommu.c		standard
+osfmk/arm/pmap/pmap_misc.c		standard
+osfmk/arm/pmap/pmap_ppl_interface.c	standard
 
 osfmk/arm/bsd_arm.c		optional mach_bsd
 osfmk/arm/machdep_call.c	optional mach_bsd
@@ -32,6 +37,7 @@ osfmk/arm/machine_cpuid.c	standard
 osfmk/arm/machine_routines.c		standard
 osfmk/arm/machine_routines_common.c	standard
 osfmk/arm/machine_routines_asm.s	standard
+osfmk/arm/machine_routines_apple.c	optional nos_arm_asm
 osfmk/arm/machine_task.c		standard
 osfmk/arm/pal_routines.c		standard
 osfmk/arm/mcount.s		optional profile
@@ -47,10 +53,12 @@ osfmk/arm/strnlen.s	standard
 osfmk/arm/strncmp.s	standard
 osfmk/arm/strncpy.c	standard
 osfmk/arm/strlcpy.c	standard
+osfmk/arm/trustcache.c		standard
 
 osfmk/arm/model_dep.c		standard
 osfmk/arm/pcb.c		standard
 osfmk/arm/rtclock.c		standard
+osfmk/arm/counter.c		standard
 osfmk/arm/status.c		standard
 osfmk/arm/status_shared.c	standard
 osfmk/arm/trap.c		standard

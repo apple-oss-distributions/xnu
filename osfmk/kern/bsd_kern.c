@@ -77,9 +77,12 @@ void task_bsdtask_kill(task_t);
 
 extern uint64_t get_dispatchqueue_serialno_offset_from_proc(void *p);
 extern uint64_t get_dispatchqueue_label_offset_from_proc(void *p);
-extern uint64_t proc_uniqueid(void *p);
+extern uint64_t proc_uniqueid_task(void *p, void *t);
 extern int proc_pidversion(void *p);
 extern int proc_getcdhash(void *p, char *cdhash);
+
+int mach_to_bsd_errno(kern_return_t mach_err);
+kern_return_t bsd_to_mach_failure(int bsd_err);
 
 #if MACH_BSD
 extern void psignal(void *, int);
@@ -324,7 +327,7 @@ get_task_map_reference(task_t t)
 		return VM_MAP_NULL;
 	}
 	m = t->map;
-	vm_map_reference_swap(m);
+	vm_map_reference(m);
 	task_unlock(t);
 	return m;
 }
@@ -404,28 +407,28 @@ get_task_pmap(task_t t)
 uint64_t
 get_task_resident_size(task_t task)
 {
-	vm_map_t map;
+	uint64_t val;
 
-	map = (task == kernel_task) ? kernel_map: task->map;
-	return (uint64_t)pmap_resident_count(map->pmap) * PAGE_SIZE_64;
+	ledger_get_balance(task->ledger, task_ledgers.phys_mem, (ledger_amount_t *) &val);
+	return val;
 }
 
 uint64_t
 get_task_compressed(task_t task)
 {
-	vm_map_t map;
+	uint64_t val;
 
-	map = (task == kernel_task) ? kernel_map: task->map;
-	return (uint64_t)pmap_compressed(map->pmap) * PAGE_SIZE_64;
+	ledger_get_balance(task->ledger, task_ledgers.internal_compressed, (ledger_amount_t *) &val);
+	return val;
 }
 
 uint64_t
 get_task_resident_max(task_t task)
 {
-	vm_map_t map;
+	uint64_t val;
 
-	map = (task == kernel_task) ? kernel_map: task->map;
-	return (uint64_t)pmap_resident_max(map->pmap) * PAGE_SIZE_64;
+	ledger_get_lifetime_max(task->ledger, task_ledgers.phys_mem, (ledger_amount_t *) &val);
+	return val;
 }
 
 /*
@@ -768,6 +771,12 @@ get_vmmap_size(
 {
 	return vm_map_adjusted_size(map);
 }
+int
+get_task_page_size(
+	task_t task)
+{
+	return vm_map_page_size(task->map);
+}
 
 #if CONFIG_COREDUMP
 
@@ -963,9 +972,7 @@ fill_taskprocinfo(task_t task, struct proc_taskinfo_internal * ptinfo)
 	map = (task == kernel_task)? kernel_map: task->map;
 
 	ptinfo->pti_virtual_size  = vm_map_adjusted_size(map);
-	ptinfo->pti_resident_size =
-	    (mach_vm_size_t)(pmap_resident_count(map->pmap))
-	    * PAGE_SIZE_64;
+	ledger_get_balance(task->ledger, task_ledgers.phys_mem, (ledger_amount_t *) &ptinfo->pti_resident_size);
 
 	ptinfo->pti_policy = ((task != kernel_task)?
 	    POLICY_TIMESHARE: POLICY_RR);
@@ -1016,14 +1023,14 @@ fill_taskprocinfo(task_t task, struct proc_taskinfo_internal * ptinfo)
 	ptinfo->pti_threads_system = tinfo.threads_system;
 	ptinfo->pti_threads_user = tinfo.threads_user;
 
-	ptinfo->pti_faults = task->faults;
-	ptinfo->pti_pageins = task->pageins;
-	ptinfo->pti_cow_faults = task->cow_faults;
-	ptinfo->pti_messages_sent = task->messages_sent;
-	ptinfo->pti_messages_received = task->messages_received;
-	ptinfo->pti_syscalls_mach = task->syscalls_mach + syscalls_mach;
-	ptinfo->pti_syscalls_unix = task->syscalls_unix + syscalls_unix;
-	ptinfo->pti_csw = task->c_switch + cswitch;
+	ptinfo->pti_faults = (int32_t) MIN(counter_load(&task->faults), INT32_MAX);
+	ptinfo->pti_pageins = (int32_t) MIN(counter_load(&task->pageins), INT32_MAX);
+	ptinfo->pti_cow_faults = (int32_t) MIN(counter_load(&task->cow_faults), INT32_MAX);
+	ptinfo->pti_messages_sent = (int32_t) MIN(counter_load(&task->messages_sent), INT32_MAX);
+	ptinfo->pti_messages_received = (int32_t) MIN(counter_load(&task->messages_received), INT32_MAX);
+	ptinfo->pti_syscalls_mach = (int32_t) MIN(task->syscalls_mach + syscalls_mach, INT32_MAX);
+	ptinfo->pti_syscalls_unix = (int32_t) MIN(task->syscalls_unix + syscalls_unix, INT32_MAX);
+	ptinfo->pti_csw = (int32_t) MIN(task->c_switch + cswitch, INT32_MAX);
 	ptinfo->pti_threadnum = task->thread_count;
 	ptinfo->pti_numrunning = numrunning;
 	ptinfo->pti_priority = task->priority;
@@ -1109,6 +1116,33 @@ out:
 }
 
 int
+fill_taskthreadschedinfo(task_t task, uint64_t thread_id, struct proc_threadschedinfo_internal *thread_sched_info)
+{
+	int err = 0;
+
+	thread_t thread = current_thread();
+
+	/*
+	 * Looking up threads is pretty expensive and not realtime-safe
+	 * right now, requiring locking the task and iterating over all
+	 * threads. As long as that is the case, we officially only
+	 * support getting this info for the current thread.
+	 */
+	if (task != current_task() || thread_id != thread->thread_id) {
+		return -1;
+	}
+
+#if INTERRUPT_MASKED_DEBUG
+	absolutetime_to_nanoseconds(thread->machine.int_time_mt, &thread_sched_info->int_time_ns);
+#else
+	(void)thread;
+	thread_sched_info->int_time_ns = 0;
+#endif
+
+	return err;
+}
+
+int
 get_numthreads(task_t task)
 {
 	return task->thread_count;
@@ -1140,7 +1174,7 @@ fill_task_rusage(task_t task, rusage_info_current *ri)
 	    (ledger_amount_t *)&ri->ri_resident_size);
 	ri->ri_wired_size = get_task_wired_mem(task);
 
-	ri->ri_pageins = task->pageins;
+	ri->ri_pageins = counter_load(&task->pageins);
 
 	task_unlock(task);
 	return 0;
@@ -1268,7 +1302,7 @@ uint64_t
 get_task_uniqueid(task_t task)
 {
 	if (task->bsd_info) {
-		return proc_uniqueid(task->bsd_info);
+		return proc_uniqueid_task(task->bsd_info, task);
 	} else {
 		return UINT64_MAX;
 	}
@@ -1306,7 +1340,7 @@ fill_taskipctableinfo(task_t task, uint32_t *table_size, uint32_t *table_free)
 		return -1;
 	}
 
-	*table_size = space->is_table_size;
+	*table_size = is_active_table(space)->ie_size;
 	*table_free = space->is_table_free;
 
 	is_read_unlock(space);
@@ -1324,4 +1358,132 @@ get_task_cdhash(task_t task, char cdhash[static CS_CDHASH_LEN])
 	task_unlock(task);
 
 	return result;
+}
+
+/* moved from ubc_subr.c */
+int
+mach_to_bsd_errno(kern_return_t mach_err)
+{
+	switch (mach_err) {
+	case KERN_SUCCESS:
+		return 0;
+
+	case KERN_INVALID_ADDRESS:
+	case KERN_INVALID_ARGUMENT:
+	case KERN_NOT_IN_SET:
+	case KERN_INVALID_NAME:
+	case KERN_INVALID_TASK:
+	case KERN_INVALID_RIGHT:
+	case KERN_INVALID_VALUE:
+	case KERN_INVALID_CAPABILITY:
+	case KERN_INVALID_HOST:
+	case KERN_MEMORY_PRESENT:
+	case KERN_INVALID_PROCESSOR_SET:
+	case KERN_INVALID_POLICY:
+	case KERN_ALREADY_WAITING:
+	case KERN_DEFAULT_SET:
+	case KERN_EXCEPTION_PROTECTED:
+	case KERN_INVALID_LEDGER:
+	case KERN_INVALID_MEMORY_CONTROL:
+	case KERN_INVALID_SECURITY:
+	case KERN_NOT_DEPRESSED:
+	case KERN_LOCK_OWNED:
+	case KERN_LOCK_OWNED_SELF:
+		return EINVAL;
+
+	case KERN_NOT_RECEIVER:
+	case KERN_NO_ACCESS:
+	case KERN_POLICY_STATIC:
+		return EACCES;
+
+	case KERN_NO_SPACE:
+	case KERN_RESOURCE_SHORTAGE:
+	case KERN_UREFS_OVERFLOW:
+	case KERN_INVALID_OBJECT:
+		return ENOMEM;
+
+	case KERN_MEMORY_FAILURE:
+	case KERN_MEMORY_ERROR:
+	case KERN_PROTECTION_FAILURE:
+		return EFAULT;
+
+	case KERN_POLICY_LIMIT:
+	case KERN_CODESIGN_ERROR:
+	case KERN_DENIED:
+		return EPERM;
+
+	case KERN_ALREADY_IN_SET:
+	case KERN_NAME_EXISTS:
+	case KERN_RIGHT_EXISTS:
+		return EEXIST;
+
+	case KERN_ABORTED:
+		return EINTR;
+
+	case KERN_TERMINATED:
+	case KERN_LOCK_SET_DESTROYED:
+	case KERN_LOCK_UNSTABLE:
+	case KERN_SEMAPHORE_DESTROYED:
+	case KERN_NOT_FOUND:
+	case KERN_NOT_WAITING:
+		return ENOENT;
+
+	case KERN_RPC_SERVER_TERMINATED:
+		return ECONNRESET;
+
+	case KERN_NOT_SUPPORTED:
+		return ENOTSUP;
+
+	case KERN_NODE_DOWN:
+		return ENETDOWN;
+
+	case KERN_OPERATION_TIMED_OUT:
+		return ETIMEDOUT;
+
+	default:
+		return EIO; /* 5 == KERN_FAILURE */
+	}
+}
+
+kern_return_t
+bsd_to_mach_failure(int bsd_err)
+{
+	switch (bsd_err) {
+	case EIO:
+	case EACCES:
+	case ENOMEM:
+	case EFAULT:
+		return KERN_MEMORY_ERROR;
+
+	case EINVAL:
+		return KERN_INVALID_ARGUMENT;
+
+	case ETIMEDOUT:
+	case EBUSY:
+		return KERN_OPERATION_TIMED_OUT;
+
+	case ECONNRESET:
+		return KERN_RPC_SERVER_TERMINATED;
+
+	case ENOTSUP:
+		return KERN_NOT_SUPPORTED;
+
+	case ENETDOWN:
+		return KERN_NODE_DOWN;
+
+	case ENOENT:
+		return KERN_NOT_FOUND;
+
+	case EINTR:
+		return KERN_ABORTED;
+
+	case EPERM:
+		return KERN_DENIED;
+
+	case EEXIST:
+		return KERN_ALREADY_IN_SET;
+
+	default:
+		return KERN_FAILURE;
+	}
 }

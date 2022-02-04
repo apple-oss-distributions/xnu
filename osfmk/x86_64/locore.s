@@ -68,6 +68,7 @@
 #include <assym.s>
 #include <mach/exception_types.h>
 #include <config_dtrace.h>
+#include <kern/ticket_lock.h>
 
 #define _ARCH_I386_ASM_HELP_H_          /* Prevent inclusion of user header */
 #include <mach/i386/syscall_sw.h>
@@ -402,6 +403,78 @@ L_copyout_atomic64_fail:
 	popq	%rbp			/* Restore registers */
 	retq				/* Return */
 
+
+/*
+ * int hw_lock_trylock_mask_allow_invalid(uint32_t *lock, uint32_t mask)
+ * rdi: lock address
+ * esi: mask to set
+ */
+Entry(hw_lock_trylock_mask_allow_invalid)
+	pushq	%rbp			/* Save registers */
+	movq	%rsp, %rbp
+
+	RECOVERY_SECTION
+	RECOVER(3f)			/* Set up recovery handler for next instruction*/
+	movl	(%rdi), %eax
+1:
+	testl	%eax, %eax		/* 0 value == invalid lock */
+	je	3f
+
+	testl	%esi, %eax		/* is `mask` set ? */
+	jne	2f			/* if yes, pause and return 0 */
+
+	mov	%eax, %ecx
+	orl	%esi, %ecx
+	RECOVERY_SECTION
+	RECOVER(3f)			/* Set up recovery handler for next instruction*/
+	lock cmpxchgl	%ecx, (%rdi)
+	jne 	1b			/* if the CAS failed, the new value is in %eax */
+
+	movl	$1, %eax
+	popq	%rbp			/* Restore registers */
+	retq				/* Return */
+
+2: /* contention */
+	pause
+	xorl	%eax, %eax
+	popq	%rbp			/* Restore registers */
+	retq				/* Return */
+3: /* invalid */
+	movl	$-1, %eax
+	popq	%rbp			/* Restore registers */
+	retq				/* Return */
+
+
+/*
+ * hw_lck_ticket_t
+ * hw_lck_ticket_reserve_orig_allow_invalid(hw_lck_ticket_t *lck)
+ *
+ * rdi: lock address
+ */
+Entry(hw_lck_ticket_reserve_orig_allow_invalid)
+	pushq	%rbp			/* Save registers */
+	movq	%rsp, %rbp
+
+	RECOVERY_SECTION
+	RECOVER(3f)			/* Set up recovery handler for next instruction*/
+	movl	(%rdi), %eax		/* Load lock value */
+1:
+	btl	$HW_LCK_TICKET_LOCK_VALID_BIT, %eax
+	jae	3f			/* is the lock valid ? */
+
+	leal	HW_LCK_TICKET_LOCK_INCREMENT(%rax), %edx
+	RECOVERY_SECTION
+	RECOVER(3f)			/* Set up recovery handler for next instruction*/
+	lock	cmpxchgl %edx, (%rdi)
+	jne	1b
+
+	popq	%rbp			/* Restore registers */
+	retq				/* Return */
+
+3: /* invalid */
+	xorl	%eax, %eax
+	popq	%rbp			/* Restore registers */
+	retq				/* Return */
 
 /*
  * Done with recovery table.

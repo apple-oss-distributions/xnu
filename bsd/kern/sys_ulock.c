@@ -159,8 +159,6 @@ typedef struct ull {
 	queue_chain_t   ull_hash_link;
 } ull_t;
 
-extern void ulock_initialize(void);
-
 #define ULL_MUST_EXIST  0x0001
 static void ull_put(ull_t *);
 
@@ -204,10 +202,10 @@ typedef struct ull_bucket {
 	lck_spin_t   ulb_lock;
 } ull_bucket_t;
 
-static int ull_hash_buckets;
-static ull_bucket_t *ull_bucket;
+static SECURITY_READ_ONLY_LATE(int) ull_hash_buckets;
+static SECURITY_READ_ONLY_LATE(ull_bucket_t *) ull_bucket;
 static uint32_t ull_nzalloc = 0;
-static ZONE_DECLARE(ull_zone, "ulocks", sizeof(ull_t), ZC_NOENCRYPT | ZC_CACHING);
+static ZONE_DECLARE(ull_zone, "ulocks", sizeof(ull_t), ZC_CACHING);
 
 #define ull_bucket_lock(i)       lck_spin_lock_grp(&ull_bucket[i].ulb_lock, &ull_lck_grp)
 #define ull_bucket_unlock(i)     lck_spin_unlock(&ull_bucket[i].ulb_lock)
@@ -224,7 +222,7 @@ ull_hash_index(const void *key, size_t length)
 
 #define ULL_INDEX(keyp) ull_hash_index(keyp, keyp->ulk_key_type == ULK_UADDR ? ULK_UADDR_LEN : ULK_XPROC_LEN)
 
-void
+static void
 ulock_initialize(void)
 {
 	assert(thread_max > 16);
@@ -245,6 +243,7 @@ ulock_initialize(void)
 		lck_spin_init(&ull_bucket[i].ulb_lock, &ull_lck_grp, NULL);
 	}
 }
+STARTUP(EARLY_BOOT, STARTUP_RANK_FIRST, ulock_initialize);
 
 #if DEVELOPMENT || DEBUG
 /* Count the number of hash entries for a given pid.
@@ -447,8 +446,8 @@ ulock_resolve_owner(uint32_t value, thread_t *owner)
 	mach_port_name_t owner_name = ulock_owner_value_to_port_name(value);
 
 	*owner = port_name_to_thread(owner_name,
-	    PORT_TO_THREAD_IN_CURRENT_TASK |
-	    PORT_TO_THREAD_NOT_CURRENT_THREAD);
+	    PORT_INTRANS_THREAD_IN_CURRENT_TASK |
+	    PORT_INTRANS_THREAD_NOT_CURRENT_THREAD);
 	if (*owner == THREAD_NULL) {
 		/*
 		 * Translation failed - even though the lock value is up to date,
@@ -545,7 +544,7 @@ ulock_wait2(struct proc *p, struct ulock_wait2_args *args, int32_t *retval)
 		key.ulk_offset = offset;
 	} else {
 		key.ulk_key_type = ULK_UADDR;
-		key.ulk_pid = p->p_pid;
+		key.ulk_pid = proc_getpid(p);
 		key.ulk_addr = args->addr;
 	}
 
@@ -626,7 +625,7 @@ ulock_wait2(struct proc *p, struct ulock_wait2_args *args, int32_t *retval)
 
 #if DEVELOPMENT || DEBUG
 	/* Occasionally simulate copyin finding the user address paged out */
-	if (((ull_simulate_copyin_fault == p->p_pid) || (ull_simulate_copyin_fault == 1)) && (copy_ret == 0)) {
+	if (((ull_simulate_copyin_fault == proc_getpid(p)) || (ull_simulate_copyin_fault == 1)) && (copy_ret == 0)) {
 		static _Atomic int fault_inject = 0;
 		if (os_atomic_inc_orig(&fault_inject, relaxed) % 73 == 0) {
 			copy_ret = EFAULT;
@@ -853,7 +852,7 @@ ulock_wake(struct proc *p, struct ulock_wake_args *args, __unused int32_t *retva
 
 #if DEVELOPMENT || DEBUG
 	if (opcode == UL_DEBUG_HASH_DUMP_PID) {
-		*retval = ull_hash_dump(p->p_pid);
+		*retval = ull_hash_dump(proc_getpid(p));
 		return ret;
 	} else if (opcode == UL_DEBUG_HASH_DUMP_ALL) {
 		*retval = ull_hash_dump(0);
@@ -922,15 +921,15 @@ ulock_wake(struct proc *p, struct ulock_wake_args *args, __unused int32_t *retva
 		key.ulk_offset = offset;
 	} else {
 		key.ulk_key_type = ULK_UADDR;
-		key.ulk_pid = p->p_pid;
+		key.ulk_pid = proc_getpid(p);
 		key.ulk_addr = args->addr;
 	}
 
 	if (flags & ULF_WAKE_THREAD) {
 		mach_port_name_t wake_thread_name = (mach_port_name_t)(args->wake_value);
 		wake_thread = port_name_to_thread(wake_thread_name,
-		    PORT_TO_THREAD_IN_CURRENT_TASK |
-		    PORT_TO_THREAD_NOT_CURRENT_THREAD);
+		    PORT_INTRANS_THREAD_IN_CURRENT_TASK |
+		    PORT_INTRANS_THREAD_NOT_CURRENT_THREAD);
 		if (wake_thread == THREAD_NULL) {
 			ret = ESRCH;
 			goto munge_retval;

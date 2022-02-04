@@ -45,7 +45,6 @@
 
 #define APPLE_ARM64_ARCH_FAMILY              1
 #define ARM_ARCH_TIMER
-#define ARM_BOARD_WFE_TIMEOUT_NS             1000
 
 #if defined(HAS_CTRR)
 #define KERNEL_INTEGRITY_CTRR                1
@@ -55,14 +54,17 @@
 #define KERNEL_INTEGRITY_WT                  1
 #endif
 
+#if defined(CPU_HAS_APPLE_PAC) && defined(__arm64e__)
+#define HAS_APPLE_PAC                        1 /* Has Apple ARMv8.3a pointer authentication */
+#endif
 
 #include <pexpert/arm64/apple_arm64_regs.h>
 #include <pexpert/arm64/AIC.h>
 
 #ifndef ASSEMBLER
-#include <pexpert/arm/S3cUART.h>
+#include <pexpert/arm/apple_uart_regs.h>
 
-#if !defined(APPLETYPHOON) && !defined(APPLETWISTER)
+#if !defined(APPLETYPHOON) && !defined(APPLETWISTER) && !defined(APPLEVIRTUALPLATFORM)
 #include <pexpert/arm/dockchannel.h>
 
 // AOP_CLOCK frequency * 30 ms

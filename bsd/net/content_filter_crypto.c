@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019 Apple Inc.
+ * Copyright (c) 2019-2021 Apple Inc.
  * All rights reserved.
  */
 
@@ -92,11 +92,8 @@ cfil_crypto_init_client(cfil_crypto_key client_key)
 	}
 
 	struct cfil_crypto_state *state;
-	MALLOC(state, struct cfil_crypto_state *, sizeof(struct cfil_crypto_state),
-	    M_TEMP, M_WAITOK | M_ZERO);
-	if (state == NULL) {
-		return NULL;
-	}
+	state = kalloc_type(struct cfil_crypto_state,
+	    Z_WAITOK | Z_ZERO | Z_NOFAIL);
 
 	memcpy(state->key, client_key, sizeof(cfil_crypto_key));
 	state->digest_info = ccsha256_di();
@@ -109,7 +106,7 @@ void
 cfil_crypto_cleanup_state(cfil_crypto_state_t state)
 {
 	if (state != NULL) {
-		FREE(state, M_TEMP);
+		kfree_type(struct cfil_crypto_state, state);
 	}
 }
 

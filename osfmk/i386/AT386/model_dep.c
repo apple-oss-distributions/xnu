@@ -106,6 +106,7 @@
 #include <i386/ucode.h>
 #include <i386/pmCPU.h>
 #include <i386/panic_hooks.h>
+#include <i386/lbr.h>
 
 #include <architecture/i386/pio.h> /* inb() */
 #include <pexpert/i386/boot.h>
@@ -162,7 +163,12 @@ extern char             osversion[];
 extern int              max_poll_quanta;
 extern unsigned int     panic_is_inited;
 
-extern int      proc_pid(struct proc *);
+/* #include <sys/proc.h> */
+#define MAXCOMLEN 16
+struct proc;
+extern int              proc_pid(struct proc *p);
+extern void             proc_name_kdp(task_t t, char * buf, int size);
+
 
 /* Definitions for frame pointers */
 #define FP_ALIGNMENT_MASK      ((uint32_t)(0x3))
@@ -208,6 +214,9 @@ size_t panic_stackshot_len = 0;
 
 boolean_t is_clock_configured = FALSE;
 
+static struct lbr_data lbrs[MAX_CPUS];
+static uint32_t lbr_stack_size;
+
 /*
  * Backtrace a single frame.
  */
@@ -215,22 +224,12 @@ void
 print_one_backtrace(pmap_t pmap, vm_offset_t topfp, const char *cur_marker,
     boolean_t is_64_bit)
 {
-	int                 i = 0;
-	addr64_t        lr;
-	addr64_t        fp;
-	addr64_t        fp_for_ppn;
-	ppnum_t         ppn;
-	boolean_t       dump_kernel_stack;
-
-	fp = topfp;
-	fp_for_ppn = 0;
-	ppn = (ppnum_t)NULL;
-
-	if (fp >= VM_MIN_KERNEL_ADDRESS) {
-		dump_kernel_stack = TRUE;
-	} else {
-		dump_kernel_stack = FALSE;
-	}
+	unsigned int    i = 0;
+	addr64_t        lr = 0;
+	addr64_t        fp = topfp;
+	addr64_t        fp_for_ppn = 0;
+	ppnum_t         ppn = (ppnum_t)NULL;
+	bool            dump_kernel_stack = (fp >= VM_MIN_KERNEL_ADDRESS);
 
 	do {
 		if ((fp == 0) || ((fp & FP_ALIGNMENT_MASK) != 0)) {
@@ -283,13 +282,25 @@ print_one_backtrace(pmap_t pmap, vm_offset_t topfp, const char *cur_marker,
 			}
 			break;
 		}
-
-		if (is_64_bit) {
-			paniclog_append_noflush("%s\t0x%016llx\n", cur_marker, lr);
-		} else {
-			paniclog_append_noflush("%s\t0x%08x\n", cur_marker, (uint32_t)lr);
+		/*
+		 * Counter 'i' may == FP_MAX_NUM_TO_EVALUATE when running one
+		 * extra round to check whether we have all frames in order to
+		 * indicate (in)complete backtrace below. This happens in a case
+		 * where total frame count and FP_MAX_NUM_TO_EVALUATE are equal.
+		 * Do not capture anything.
+		 */
+		if (i < FP_MAX_NUM_TO_EVALUATE && lr) {
+			if (is_64_bit) {
+				paniclog_append_noflush("%s\t0x%016llx\n", cur_marker, lr);
+			} else {
+				paniclog_append_noflush("%s\t0x%08x\n", cur_marker, (uint32_t)lr);
+			}
 		}
-	} while ((++i < FP_MAX_NUM_TO_EVALUATE) && (fp != topfp));
+	} while ((++i <= FP_MAX_NUM_TO_EVALUATE) && (fp != topfp));
+
+	if (i > FP_MAX_NUM_TO_EVALUATE && fp != 0) {
+		paniclog_append_noflush("Backtrace continues...\n");
+	}
 }
 void
 machine_startup(void)
@@ -457,7 +468,7 @@ efi_init(void)
 		}
 
 		if (args->Version != kBootArgsVersion2) {
-			panic("Incompatible boot args version %d revision %d\n", args->Version, args->Revision);
+			panic("Incompatible boot args version %d revision %d", args->Version, args->Revision);
 		}
 
 		DPRINTF("Boot args version %d revision %d mode %d\n", args->Version, args->Revision, args->efiMode);
@@ -550,7 +561,7 @@ hibernate_newruntime_map(void * map, vm_size_t map_size, uint32_t system_table_o
 		}
 
 		if (args->Version != kBootArgsVersion2) {
-			panic("Incompatible boot args version %d revision %d\n", args->Version, args->Revision);
+			panic("Incompatible boot args version %d revision %d", args->Version, args->Revision);
 		}
 
 		kprintf("Boot args version %d revision %d mode %d\n", args->Version, args->Revision, args->efiMode);
@@ -1210,10 +1221,7 @@ panic_display_system_configuration(boolean_t launchd_exit)
 			panic_display_hib_count();
 			panic_display_uptime();
 			panic_display_times();
-			panic_display_zprint();
-#if CONFIG_ZLEAKS
-			panic_display_ztrace();
-#endif /* CONFIG_ZLEAKS */
+			panic_display_zalloc();
 			kext_dump_panic_lists(&paniclog_append_noflush);
 		}
 	}
@@ -1243,6 +1251,123 @@ panic_print_kmod_symbol_name(vm_address_t search)
 	}
 }
 
+static void
+read_lbr_empty(void)
+{
+}
+
+void (*read_lbr)(void) = read_lbr_empty;
+
+static void
+capture_lbr_state(void)
+{
+	thread_t thr_act = current_thread();
+	int i;
+	last_branch_state_t thread_lbr_data;
+	struct lbr_data *lbr = &lbrs[cpu_number()];
+
+	if (lbr_stack_size > 0) {
+		i386_lbr_disable();
+
+		if (i386_filtered_lbr_state_to_mach_thread_state(thr_act, &thread_lbr_data, false) == 0) {
+			for (i = 0; i < thread_lbr_data.lbr_count; i++) {
+				lbr->from[i] = thread_lbr_data.lbrs[i].from_ip;
+				lbr->to[i] = thread_lbr_data.lbrs[i].to_ip;
+			}
+		}
+	}
+
+	i386_lbr_enable();
+}
+
+static void
+copy_lbr_data_for_core(void)
+{
+	unsigned int cpu;
+	struct {
+		uint32_t id;
+		uint8_t ncpus;
+		uint8_t lbr_count;
+	} metadata;
+
+	/* These two buffers are captured in the core file and placed in named segments */
+	if (phys_carveout && phys_carveout_metadata) {
+		// The minimum size of phys_carveout is 1MiB but just in case
+		if (phys_carveout_size >= sizeof(last_branch_state_t) * max_ncpus) {
+			for (cpu = 0; cpu < real_ncpus; cpu++) {
+				void *buf = (void *)(phys_carveout + lbr_stack_size * sizeof(uint64_t) * cpu);
+				memcpy(buf, lbrs[cpu].from, sizeof(uint64_t) * lbr_stack_size);
+				memcpy((uint64_t *)buf + lbr_stack_size * sizeof(uint64_t), lbrs[cpu].to,
+				    sizeof(uint64_t) * lbr_stack_size);
+			}
+			/* Write 'LBRS' identifier, the number of CPUs and the LBR stack size */
+			metadata.id = LBR_MAGIC; /* 'LBRS' */
+			metadata.ncpus = real_ncpus;
+			metadata.lbr_count = lbr_stack_size;
+			memcpy((void*)phys_carveout_metadata, (void*)&metadata, sizeof(metadata));
+		}
+	}
+}
+
+void
+lbr_for_kmode_init(uint32_t lbr_count)
+{
+	uint32_t size;
+	int i;
+
+	lbr_stack_size = lbr_count;
+
+	/* Cannot use real_ncpus here as only one CPU is registered yet*/
+
+	size = sizeof(uint64_t) * lbr_stack_size;
+	for (i = 0; i < max_ncpus; i++) {
+		lbrs[i].from = kalloc_data(size, Z_WAITOK | Z_ZERO);
+		lbrs[i].to = kalloc_data(size, Z_WAITOK | Z_ZERO);
+		if (!lbrs[i].from || !lbrs[i].to) {
+			kprintf("LBR: Kalloc failed for lbrs.from/to\n");
+			if (lbrs[i].from) {
+				kfree_data(lbrs[i].from, size);
+			}
+			if (lbrs[i].to) {
+				kfree_data(lbrs[i].to, size);
+			}
+			while (--i >= 0) {
+				kfree_data(lbrs[i].from, size);
+				kfree_data(lbrs[i].to, size);
+			}
+			goto err;
+		}
+	}
+
+	read_lbr = capture_lbr_state;
+
+	return;
+
+err:
+	last_branch_enabled_modes = LBR_ENABLED_NONE;
+	return;
+}
+
+static void
+write_lbr_to_panic_log(void)
+{
+	unsigned int cpu;
+	int i;
+
+	for (cpu = 0; cpu < real_ncpus; cpu++) {
+		paniclog_append_noflush("LBR Stack (CPU %d):\n", cpu);
+		for (i = 0; i < lbr_stack_size; i++) {
+			if (lbrs[cpu].from[i] == 0x0 && lbrs[cpu].to[i] == 0x0) {
+				continue;
+			}
+			paniclog_append_noflush("0x%llx : 0x%llx\n", lbrs[cpu].from[i], lbrs[cpu].to[i]);
+		}
+	}
+	if (debug_can_coredump_phys_carveout()) {
+		copy_lbr_data_for_core();
+	}
+}
+
 void
 panic_print_symbol_name(vm_address_t search)
 {
@@ -1259,6 +1384,14 @@ panic_print_symbol_name(vm_address_t search)
  * addresses, display the module name, load address and dependencies.
  */
 
+static hw_lock_timeout_status_t
+panic_btlock_handler_spin(void *_lock, uint64_t timeout, uint64_t start, uint64_t now, uint64_t interrupt_time)
+{
+#pragma unused(_lock, timeout, start, now, interrupt_time)
+	return HW_LOCK_TIMEOUT_RETURN;
+}
+
+
 #define DUMPFRAMES 32
 #define PBT_TIMEOUT_CYCLES (5 * 1000 * 1000 * 1000ULL)
 void
@@ -1273,6 +1406,7 @@ panic_i386_backtrace(void *_frame, int nframes, const char *msg, boolean_t regdu
 	boolean_t keepsyms = FALSE;
 	int cn = cpu_number();
 	boolean_t old_doprnt_hide_pointers = doprnt_hide_pointers;
+	thread_t cur_thread = current_thread();
 
 #if DEVELOPMENT || DEBUG
 	/* Turn off I/O tracing now that we're panicking */
@@ -1284,7 +1418,7 @@ panic_i386_backtrace(void *_frame, int nframes, const char *msg, boolean_t regdu
 		/* Spin on print backtrace lock, which serializes output
 		 * Continue anyway if a timeout occurs.
 		 */
-		hw_lock_to(&pbtlock, ~0U, LCK_GRP_NULL);
+		(void)hw_lock_to(&pbtlock, 0, panic_btlock_handler_spin, LCK_GRP_NULL);
 		pbtcpu = cn;
 	}
 
@@ -1319,12 +1453,33 @@ panic_i386_backtrace(void *_frame, int nframes, const char *msg, boolean_t regdu
 		PC = ss64p->isf.rip;
 	}
 
-	paniclog_append_noflush("Backtrace (CPU %d), "
+	// print current task info
+	if (PANIC_VALIDATE_PTR(cur_thread) &&
+	    PANIC_VALIDATE_PTR(cur_thread->task)) {
+		task_t task = cur_thread->task;
+
+		paniclog_append_noflush("Panicked task %p: %d threads: ",
+		    task, task->thread_count);
+
+		if (panic_validate_ptr(task->bsd_info, 1, "bsd_info")) {
+			char name[MAXCOMLEN + 1];
+			int  pid = proc_pid(task->bsd_info);
+			proc_name_kdp(task, name, sizeof(name));
+			paniclog_append_noflush("pid %d: %s", pid, name);
+		} else {
+			paniclog_append_noflush("unknown task");
+		}
+
+		paniclog_append_noflush("\n");
+	}
+
+	paniclog_append_noflush("Backtrace (CPU %d), panicked thread: %p, "
 #if PRINT_ARGS_FROM_STACK_FRAME
-	    "Frame : Return Address (4 potential args on stack)\n", cn);
+	    "Frame : Return Address (4 potential args on stack)\n",
 #else
-	    "Frame : Return Address\n", cn);
+	    "Frame : Return Address\n",
 #endif
+	    cn, cur_thread);
 
 	for (frame_index = 0; frame_index < nframes; frame_index++) {
 		vm_offset_t curframep = (vm_offset_t) frame;
@@ -1371,7 +1526,7 @@ panic_i386_backtrace(void *_frame, int nframes, const char *msg, boolean_t regdu
 		frame = frame->prev;
 	}
 
-	if (frame_index >= nframes) {
+	if (frame_index >= nframes && (vm_offset_t)frame != 0) {
 		paniclog_append_noflush("\tBacktrace continues...\n");
 	}
 
@@ -1391,6 +1546,10 @@ out:
 
 	if (PC != 0) {
 		kmod_panic_dump(&PC, 1);
+	}
+
+	if (last_branch_enabled_modes == LBR_ENABLED_KERNELMODE) {
+		write_lbr_to_panic_log();
 	}
 
 	panic_display_system_configuration(FALSE);
@@ -1585,7 +1744,7 @@ print_launchd_info(void)
 		/* Spin on print backtrace lock, which serializes output
 		 * Continue anyway if a timeout occurs.
 		 */
-		hw_lock_to(&pbtlock, ~0U, LCK_GRP_NULL);
+		(void)hw_lock_to(&pbtlock, 0, panic_btlock_handler_spin, LCK_GRP_NULL);
 		pbtcpu = cn;
 	}
 

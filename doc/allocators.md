@@ -40,23 +40,23 @@ recommendations.
    allocations that need to scale with the configuration of the machine and
    cannot be decided at compile time), and will be zeroed.
 
-2. If the memory you are allocating is temporary and will not escape the scope
-   of the syscall it's used for, use `kheap_alloc` and `kheap_free` with the
-   `KHEAP_TEMP` heap. Note that temporary paths should use `zalloc(ZV_NAMEI)`.
-
-3. If the memory you are allocating will not hold pointers, and even more so
+2. If the memory you are allocating will not hold pointers, and even more so
    when the content of that piece of memory can be directly influenced by
    user-space, then use `kheap_alloc` and `kheap_free` with the
    `KHEAP_DATA_BUFFERS` heap.
 
-4. In general we prefer zalloc or kalloc interfaces, and would like to abandon
+3. In general we prefer zalloc or kalloc interfaces, and would like to abandon
    any legacy MALLOC/FREE interfaces over time.
+
+4. If you are allocating memory that is seldomly or never modified, use
+   `zalloc_ro()`, keeping in mind that the zone being used must be in
+   the read-only submap.
 
 For all `kalloc` or `kheap_alloc` variants, these advices apply:
 
 - If your allocation size is of fixed size, of a sub-page size, and done with
   the `Z_WAITOK` semantics (allocation can block), consider adding `Z_NOFAIL`,
-- If you `bzero` the memory on allocation, prefer passing `Z_ZERO` which can be
+- If you `bzero` the memory on allocation, instead pass `Z_ZERO` which can be
   optimized away more often than not.
 
 ### Considerations for zones
@@ -83,7 +83,7 @@ Security wise, the following questions need answering:
 
 There are several allocation wrappers in XNU, present for various reasons
 ranging from additional accounting features (IOKit's `IONew`), conformance to
-langauge requirements (C++ various `new` operators) or organical historical
+language requirements (C++ various `new` operators) or organic historical
 reasons.
 
 `zalloc` and `kalloc` are considered the primitive allocation interfaces which
@@ -248,6 +248,11 @@ properties:
 - the VA Restricted map: it is used by the VM subsystem only, and allows for
   extremely tight packing of pointers used by the VM subsystem. This submap
   doesn't use sequestering.
+- the read-only map: it is used by the read-only allocator for security critical
+  data structures. The only way to modify these addresses is by writing through
+  the Physical Aperture (see doc/arm_pmap.md) using `zalloc_ro_mut()`. To create
+  a zone in this map, use flags `ZC_READONLY` and `ZC_ZFREE_CLEARMEM` with
+  `zone_create()`.
 - the general map: it is used by default by zones, and on embedded
   defaults to using full VA sequestering (see below).
 - the "bag of bytes" map: it is used for zones that provide various buffers
@@ -419,17 +424,6 @@ provides 3 builtin ones:
   Data" submap, and is meant for allocation of payloads that hold no pointer and
   tend to be under the control of user space (paths, pipe buffers, OSData
   backing stores, ...).
-
-In addition to that, the kernel provides an extra "magical" kalloc heap:
-`KHEAP_TEMP`, it is for all purposes an alias of `KHEAP_DEFAULT` but enforces
-extra semantics: allocations and deallocations out of this heap must be
-performed "in scope". It is meant for allocations that are made to support a
-syscall, and that will be freed before that syscall returns to user-space.
-
-The usage of `KHEAP_TEMP` will ensure that there is no outstanding allocation at
-various points (such as return-to-userspace) and will panic the system if this
-property is broken. The `kheap_temp_debug=1` boot-arg can be used on development
-kernels to debug such issues when the occur.
 
 As far as security policies are concerned, the default and kext heap are fully
 segregated per size-class. The data buffers heap is isolated in the user data

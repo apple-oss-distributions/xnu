@@ -104,6 +104,7 @@ static const char * sKernelComponentNames[] = {
 	"com.apple.kpi.dsep",
 	"com.apple.kpi.iokit",
 	"com.apple.kpi.kasan",
+	"com.apple.kpi.kcov",
 	"com.apple.kpi.libkern",
 	"com.apple.kpi.mach",
 	"com.apple.kpi.private",

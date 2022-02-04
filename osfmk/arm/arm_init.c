@@ -85,6 +85,10 @@
 #include <kern/monotonic.h>
 #endif /* MONOTONIC */
 
+#if KPERF
+#include <kperf/kptimer.h>
+#endif /* KPERF */
+
 #if HIBERNATION
 #include <IOKit/IOPlatformExpert.h>
 #endif /* HIBERNATION */
@@ -108,9 +112,7 @@ int             pc_trace_buf[PC_TRACE_BUF_SIZE] = {0};
 int             pc_trace_cnt = PC_TRACE_BUF_SIZE;
 int             debug_task;
 
-bool need_wa_rdar_55577508 = false;
 SECURITY_READ_ONLY_LATE(bool) static_kernelcache = false;
-
 
 #if HAS_BP_RET
 /* Enable both branch target retention (0x2) and branch direction retention (0x1) across sleep */
@@ -119,11 +121,33 @@ extern void set_bp_ret(void);
 #endif
 
 #if INTERRUPT_MASKED_DEBUG
-boolean_t interrupt_masked_debug = 1;
-/* the following are in mach timebase units */
-uint64_t interrupt_masked_timeout = 0xd0000;
-uint64_t stackshot_interrupt_masked_timeout = 0xf9999;
+TUNABLE_DT_WRITEABLE(sched_hygiene_mode_t, interrupt_masked_debug_mode,
+    "machine-timeouts", "interrupt-masked-debug-mode",
+    "interrupt-masked-debug-mode",
+    SCHED_HYGIENE_MODE_PANIC,
+    TUNABLE_DT_CHECK_CHOSEN);
+
+boolean_t interrupt_masked_debug_pmc = 1;
+MACHINE_TIMEOUT32_WRITEABLE(interrupt_masked_timeout, "interrupt-masked",
+    0xd0000, MACHINE_TIMEOUT_UNIT_TIMEBASE,  /* 35.499ms */
+    NULL);
+#if __arm64__
+#define SSHOT_INTERRUPT_MASKED_TIMEOUT 0xf9999 /* 64-bit: 42.599ms */
+#else
+#define SSHOT_INTERRUPT_MASKED_TIMEOUT 0x124f80 /* 32-bit: 50ms */
 #endif
+MACHINE_TIMEOUT32_WRITEABLE(stackshot_interrupt_masked_timeout, "sshot-interrupt-masked",
+    SSHOT_INTERRUPT_MASKED_TIMEOUT, MACHINE_TIMEOUT_UNIT_TIMEBASE,
+    NULL);
+#undef SSHOT_INTERRUPT_MASKED_TIMEOUT
+#endif
+
+/*
+ * A 6-second timeout will give the watchdog code a chance to run
+ * before a panic is triggered by the xcall routine.
+ */
+#define XCALL_ACK_TIMEOUT_NS ((uint64_t) 6000000000)
+uint64_t xcall_ack_timeout_abstime;
 
 boot_args const_boot_args __attribute__((section("__DATA, __const")));
 boot_args      *BootArgs __attribute__((section("__DATA, __const")));
@@ -147,6 +171,9 @@ SECURITY_READ_ONLY_LATE(boolean_t) diversify_user_jop = TRUE;
 SECURITY_READ_ONLY_LATE(uint64_t) gDramBase;
 SECURITY_READ_ONLY_LATE(uint64_t) gDramSize;
 
+SECURITY_READ_ONLY_LATE(bool) serial_console_enabled = false;
+SECURITY_READ_ONLY_LATE(bool) enable_processor_exit = false;
+
 /*
  * Forward definition
  */
@@ -154,6 +181,10 @@ void arm_init(boot_args * args);
 
 #if __arm64__
 unsigned int page_shift_user32; /* for page_size as seen by a 32-bit task */
+
+extern void configure_misc_apple_boot_args(void);
+extern void configure_misc_apple_regs(void);
+extern void configure_timer_apple_regs(void);
 #endif /* __arm64__ */
 
 
@@ -282,32 +313,19 @@ arm_auxkc_init(void *mh, void *base)
 #endif /* defined(HAS_APPLE_PAC) */
 }
 
-#if HAS_IC_INVAL_FILTERS
+/*
+ *	Routine:	arm_setup_pre_sign
+ *	Function:	Perform HW initialization that must happen ahead of the first PAC sign
+ *			operation.
+ */
 static void
-configure_misc_apple_regs(void)
+arm_setup_pre_sign(void)
 {
-	uint64_t actlr, __unused acfg, __unused ahcr;
-
-	actlr = get_aux_control();
-
-#if HAS_IC_INVAL_FILTERS
-	ahcr = __builtin_arm_rsr64(ARM64_REG_AHCR_EL2);
-	ahcr |= AHCR_IC_IVAU_EnRegime;
-	ahcr |= AHCR_IC_IVAU_EnVMID;
-	ahcr |= AHCR_IC_IALLU_EnRegime;
-	ahcr |= AHCR_IC_IALLU_EnVMID;
-	__builtin_arm_wsr64(ARM64_REG_AHCR_EL2, ahcr);
-#endif /* HAS_IC_INVAL_FILTERS */
-
-
-#if HAS_IC_INVAL_FILTERS
-	actlr |= ACTLR_EL1_IC_IVAU_EnASID;
-#endif /* HAS_IC_INVAL_FILTERS */
-
-	set_aux_control(actlr);
-
+#if __arm64__
+	/* DATA TBI, if enabled, affects the number of VA bits that contain the signature */
+	arm_set_kernel_tbi();
+#endif /* __arm64 */
 }
-#endif /* HAS_IC_INVAL_FILTERS */
 
 /*
  *		Routine:		arm_init
@@ -324,6 +342,8 @@ arm_init(
 	uint64_t        xmaxmem;
 	thread_t        thread;
 
+	arm_setup_pre_sign();
+
 	arm_slide_rebase_and_sign_image();
 
 	/* If kernel integrity is supported, use a constant copy of the boot args. */
@@ -333,33 +353,20 @@ arm_init(
 	cpu_data_init(&BootCpuData);
 #if defined(HAS_APPLE_PAC)
 	/* bootstrap cpu process dependent key for kernel has been loaded by start.s */
-	BootCpuData.rop_key = KERNEL_ROP_ID;
+	BootCpuData.rop_key = ml_default_rop_pid();
 	BootCpuData.jop_key = ml_default_jop_pid();
 #endif /* defined(HAS_APPLE_PAC) */
 
 	PE_init_platform(FALSE, args); /* Get platform expert set up */
 
 #if __arm64__
+	configure_timer_apple_regs();
 	wfe_timeout_configure();
-#if HAS_IC_INVAL_FILTERS
-	configure_misc_apple_regs();
-#endif /* HAS_IC_INVAL_FILTERS */
+	wfe_timeout_init();
 
-#if defined(HAS_APPLE_PAC)
-#if DEVELOPMENT || DEBUG
-	boolean_t user_jop = TRUE;
-	PE_parse_boot_argn("user_jop", &user_jop, sizeof(user_jop));
-	if (!user_jop) {
-		args->bootFlags |= kBootFlagsDisableUserJOP;
-	}
-#endif /* DEVELOPMENT || DEBUG */
-	boolean_t user_ts_jop = TRUE;
-	PE_parse_boot_argn("user_ts_jop", &user_ts_jop, sizeof(user_ts_jop));
-	if (!user_ts_jop) {
-		args->bootFlags |= kBootFlagsDisableUserThreadStateJOP;
-	}
-	PE_parse_boot_argn("diversify_user_jop", &diversify_user_jop, sizeof(diversify_user_jop));
-#endif /* defined(HAS_APPLE_PAC) */
+	configure_misc_apple_boot_args();
+	configure_misc_apple_regs();
+
 
 	{
 		/*
@@ -394,6 +401,7 @@ arm_init(
 
 	ml_parse_cpu_topology();
 
+
 	master_cpu = ml_get_boot_cpu_number();
 	assert(master_cpu >= 0 && master_cpu <= ml_get_max_cpu_number());
 
@@ -410,7 +418,6 @@ arm_init(
 	BootCpuData.fiqstack_top = (vm_offset_t) &fiqstack_top;
 	BootCpuData.fiqstackptr = BootCpuData.fiqstack_top;
 #endif
-	BootCpuData.cpu_console_buf = (void *)NULL;
 	CpuDataEntries[master_cpu].cpu_data_vaddr = &BootCpuData;
 	CpuDataEntries[master_cpu].cpu_data_paddr = (void *)((uintptr_t)(args->physBase)
 	    + ((uintptr_t)&BootCpuData
@@ -467,15 +474,23 @@ arm_init(
 
 #if INTERRUPT_MASKED_DEBUG
 	int wdt_boot_arg = 0;
-	/* Disable if WDT is disabled or no_interrupt_mask_debug in boot-args */
-	if (PE_parse_boot_argn("no_interrupt_masked_debug", &interrupt_masked_debug,
-	    sizeof(interrupt_masked_debug)) || (PE_parse_boot_argn("wdt", &wdt_boot_arg,
+	/* Disable if WDT is disabled */
+	if ((PE_parse_boot_argn("wdt", &wdt_boot_arg,
 	    sizeof(wdt_boot_arg)) && (wdt_boot_arg == -1)) || kern_feature_override(KF_INTERRUPT_MASKED_DEBUG_OVRD)) {
-		interrupt_masked_debug = 0;
+		interrupt_masked_debug_mode = SCHED_HYGIENE_MODE_OFF;
+	} else if (kern_feature_override(KF_INTERRUPT_MASKED_DEBUG_PMC_OVRD)) {
+		/*
+		 * The interrupt watchdog facility can, in adition to checking time, capture
+		 * metrics provided by the cycle and instruction counters available in some
+		 * systems. Check if we should enable this feature based on the validation
+		 * overrides.
+		 */
+		interrupt_masked_debug_pmc = 0;
 	}
 
-	PE_parse_boot_argn("interrupt_masked_debug_timeout", &interrupt_masked_timeout, sizeof(interrupt_masked_timeout));
 #endif
+
+	nanoseconds_to_absolutetime(XCALL_ACK_TIMEOUT_NS, &xcall_ack_timeout_abstime);
 
 #if HAS_BP_RET
 	PE_parse_boot_argn("bpret", &bp_ret, sizeof(bp_ret));
@@ -500,16 +515,8 @@ arm_init(
 
 	PE_consistent_debug_inherit();
 
-	/*
-	 * rdar://54622819 Insufficient HSP purge window can cause incorrect translation when ASID and TTBR base address is changed at same time)
-	 * (original info on HSP purge window issues can be found in rdar://55577508)
-	 * We need a flag to check for this, so calculate and set it here. We'll use it in machine_switch_amx_context().
-	 */
-#if __arm64__
-	need_wa_rdar_55577508 = cpuid_get_cpufamily() == CPUFAMILY_ARM_LIGHTNING_THUNDER;
-#endif
-
-	/* setup debugging output if one has been chosen */
+	/* Setup debugging output. */
+	const unsigned int serial_exists = serial_init();
 	kernel_startup_initialize_upto(STARTUP_SUB_KPRINTF);
 	kprintf("kprintf initialized\n");
 
@@ -517,6 +524,7 @@ arm_init(
 	if (PE_parse_boot_argn("serial", &serialmode, sizeof(serialmode))) {
 		/* Do we want a serial keyboard and/or console? */
 		kprintf("Serial mode specified: %08X\n", serialmode);
+		disable_iolog_serial_output = (serialmode & SERIALMODE_NO_IOLOG) != 0;
 		int force_sync = serialmode & SERIALMODE_SYNCDRAIN;
 		if (force_sync || PE_parse_boot_argn("drain_uart_sync", &force_sync, sizeof(force_sync))) {
 			if (force_sync) {
@@ -532,8 +540,10 @@ arm_init(
 		serialmode = 0;
 	}
 
-	if (serialmode & SERIALMODE_OUTPUT) {                 /* Start serial if requested */
-		(void)switch_to_serial_console(); /* Switch into serial mode */
+	/* Start serial if requested and a serial device was enumerated in serial_init(). */
+	if ((serialmode & SERIALMODE_OUTPUT) && serial_exists) {
+		serial_console_enabled = true;
+		(void)switch_to_serial_console(); /* Switch into serial mode from video console */
 		disableConsoleOutput = FALSE;     /* Allow printfs to happen */
 	}
 	PE_create_console();
@@ -558,10 +568,21 @@ arm_init(
 	PE_init_platform(TRUE, &BootCpuData);
 
 #if __arm64__
+	extern bool cpu_config_correct;
+	if (!cpu_config_correct) {
+		panic("The cpumask=N boot arg cannot be used together with cpus=N, and the boot CPU must be enabled");
+	}
+
 	ml_map_cpu_pio();
 #endif
 
 	cpu_timebase_init(TRUE);
+
+#if KPERF
+	/* kptimer_curcpu_up() must be called after cpu_timebase_init */
+	kptimer_curcpu_up();
+#endif /* KPERF */
+
 	PE_init_cpu();
 	fiq_context_init(TRUE);
 
@@ -623,14 +644,16 @@ arm_init_cpu(
 	__builtin_arm_wsr("pan", 1);
 #endif
 
-#if HAS_IC_INVAL_FILTERS
+#ifdef __arm64__
+	configure_timer_apple_regs();
 	configure_misc_apple_regs();
-#endif /* HAS_IC_INVAL_FILTERS */
+#endif
 
 	cpu_data_ptr->cpu_flags &= ~SleepState;
 #if     defined(ARMA7)
 	cpu_data_ptr->cpu_CLW_active = 1;
 #endif
+
 
 	machine_set_current_thread(cpu_data_ptr->cpu_active_thread);
 
@@ -649,7 +672,7 @@ arm_init_cpu(
 		// fix up its preemption count
 		unsigned int expected_preemption_count = (gEnforceQuiesceSafety ? 2 : 1);
 		if (cpu_data_ptr->cpu_active_thread->machine.preemption_count != expected_preemption_count) {
-			panic("unexpected preemption count %u on boot cpu thread (should be %u)\n",
+			panic("unexpected preemption count %u on boot cpu thread (should be %u)",
 			    cpu_data_ptr->cpu_active_thread->machine.preemption_count,
 			    expected_preemption_count);
 		}
@@ -682,6 +705,11 @@ arm_init_cpu(
 	 */
 	cpu_timebase_init(FALSE);
 
+#if KPERF
+	/* kptimer_curcpu_up() must be called after cpu_timebase_init */
+	kptimer_curcpu_up();
+#endif /* KPERF */
+
 	if (cpu_data_ptr == &BootCpuData) {
 #if __arm64__ && __ARM_GLOBAL_SLEEP_BIT__
 		/*
@@ -702,7 +730,7 @@ arm_init_cpu(
 
 #if DEVELOPMENT || DEBUG
 	PE_arm_debug_enable_trace();
-#endif
+#endif /* DEVELOPMENT || DEBUG */
 
 
 	kprintf("arm_cpu_init(): cpu %d online\n", cpu_data_ptr->cpu_number);
@@ -768,6 +796,13 @@ arm_init_idle_cpu(
 		cpu_defeatures_set((cpus_defeatures >> 4 * cpu_data_ptr->cpu_number) & 0xF);
 	}
 #endif
+
+	/*
+	 * Update the active debug object to reflect that debug registers have been reset.
+	 * This will force any thread with active debug state to resync the debug registers
+	 * if it returns to userspace on this CPU.
+	 */
+	cpu_data_ptr->cpu_user_debug = NULL;
 
 	fiq_context_init(FALSE);
 

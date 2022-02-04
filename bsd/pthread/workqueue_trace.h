@@ -33,6 +33,10 @@
 #define WQ_TRACE_WORKQUEUE_SUBCLASS 1
 // Workqueue request scheduling tracepoints
 #define WQ_TRACE_REQUESTS_SUBCLASS 2
+// Subclasses 3 - 6 in DBG_PTHREAD are used by libpthread
+
+// Workqueue quantum tracepoints
+#define WQ_TRACE_QUANTUM_SUBCLASS 7
 // Generic pthread tracepoints
 #define WQ_TRACE_BSDTHREAD_SUBCLASS 16
 
@@ -72,6 +76,8 @@
 	        KDBG_CODE(DBG_PTHREAD, WQ_TRACE_WORKQUEUE_SUBCLASS, 0x25)
 #define TRACE_wq_wqops_reqthreads \
 	        KDBG_CODE(DBG_PTHREAD, WQ_TRACE_WORKQUEUE_SUBCLASS, 0x26)
+#define TRACE_wq_cooperative_admission \
+	        KDBG_CODE(DBG_PTHREAD, WQ_TRACE_WORKQUEUE_SUBCLASS, 0x27)
 
 #define TRACE_wq_create \
 	        KDBG_CODE(DBG_PTHREAD, WQ_TRACE_REQUESTS_SUBCLASS, 0x01)
@@ -89,10 +95,19 @@
 #define TRACE_bsdthread_set_qos_self \
 	        KDBG_CODE(DBG_PTHREAD, WQ_TRACE_BSDTHREAD_SUBCLASS, 0x1)
 
-#define WQ_TRACE(x, a, b, c, d, e) \
-	        ({ KERNEL_DEBUG_CONSTANT(x, a, b, c, d, e); })
-#define WQ_TRACE_WQ(x, wq, b, c, d, e) \
-	        ({ KERNEL_DEBUG_CONSTANT(x, (wq)->wq_proc->p_pid, b, c, d, e); })
+#define TRACE_wq_quantum_arm \
+	        KDBG_CODE(DBG_PTHREAD, WQ_TRACE_QUANTUM_SUBCLASS, 0x01)
+#define TRACE_wq_quantum_expired \
+	        KDBG_CODE(DBG_PTHREAD, WQ_TRACE_QUANTUM_SUBCLASS, 0x02)
+#define TRACE_wq_quantum_disarm \
+	        KDBG_CODE(DBG_PTHREAD, WQ_TRACE_QUANTUM_SUBCLASS, 0x03)
+#define TRACE_wq_quantum_expiry_reevaluate \
+	        KDBG_CODE(DBG_PTHREAD, WQ_TRACE_QUANTUM_SUBCLASS, 0x04)
+
+#define WQ_TRACE(x, a, b, c, d) \
+	        ({ KERNEL_DEBUG_CONSTANT(x, a, b, c, d, 0); })
+#define WQ_TRACE_WQ(x, wq, b, c, d) \
+	        ({ KERNEL_DEBUG_CONSTANT(x, proc_getpid((wq)->wq_proc), b, c, d, 0); })
 
 #if (KDEBUG_LEVEL >= KDEBUG_LEVEL_STANDARD)
 #define __wq_trace_only

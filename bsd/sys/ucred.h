@@ -107,13 +107,16 @@ struct ucred {
 		uid_t   cr_ruid;        /* real user id */
 		uid_t   cr_svuid;       /* saved user id */
 		u_short cr_ngroups;     /* number of groups in advisory list */
+#if XNU_KERNEL_PRIVATE
+		u_short __cr_padding;
+#endif
 		gid_t   cr_groups[NGROUPS];/* advisory group list */
 		gid_t   cr_rgid;        /* real group id */
 		gid_t   cr_svgid;       /* saved group id */
 		uid_t   cr_gmuid;       /* UID for group membership purposes */
 		int     cr_flags;       /* flags on credential */
 	} cr_posix;
-	struct label    * OS_PTRAUTH_SIGNED_PTR("ucred.cr_label") cr_label;     /* MAC label */
+	struct label    * OS_PTRAUTH_SIGNED_PTR_AUTH_NULL("ucred.cr_label") cr_label;     /* MAC label */
 
 	/*
 	 * NOTE: If anything else (besides the flags)

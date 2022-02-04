@@ -51,8 +51,7 @@ doc_tombstone_get(void)
 	ut = get_bsdthread_info(current_thread());
 
 	if (ut->t_tombstone == NULL) {
-		ut->t_tombstone = kalloc_flags(sizeof(struct doc_tombstone),
-		    Z_WAITOK | Z_ZERO);
+		ut->t_tombstone = kalloc_type(struct doc_tombstone, Z_WAITOK | Z_ZERO);
 	}
 
 	return ut->t_tombstone;

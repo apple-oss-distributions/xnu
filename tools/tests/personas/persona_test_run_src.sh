@@ -452,11 +452,11 @@ echo "Running persona tests [$LINENO] ($TMPDIR)"
 ## Test Group 0: basic creation + spawn tests
 ##
 
-create_persona "test_default_persona" "guest" 9999
+create_persona "test_default_persona" "guest" 99999
 TEST_DEFAULT_PERSONA=$_ID
 
 # default group, specific ID
-create_persona "test0_1" "guest" 1001
+create_persona "test0_1" "guest" 10001
 P0ID=$_ID
 
 spawn_child $P0ID
@@ -470,7 +470,7 @@ spawn_child $P0ID -1 -1 1000,2000,3000
 destroy_persona $P0ID
 
 # specific ID, non-default group
-create_persona "test0_2" "guest" 1002 2000
+create_persona "test0_2" "guest" 10002 2000
 P0ID=$_ID
 spawn_child $P0ID
 spawn_child $P0ID 1100
@@ -483,7 +483,7 @@ spawn_child $P0ID -1 -1 1000,2000,3000
 destroy_persona $P0ID
 
 # non-default set of groups
-create_persona "test0_3" "guest" 1003 2000 2000,3000,4000
+create_persona "test0_3" "guest" 10003 2000 2000,3000,4000
 P0ID=$_ID
 spawn_child $P0ID
 spawn_child $P0ID 1100

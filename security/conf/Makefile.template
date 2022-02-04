@@ -45,6 +45,8 @@ COMP_SUBDIRS =
 
 %OBJS
 
+%LIBOBJS
+
 %CFILES
 
 %CXXFILES
@@ -59,16 +61,16 @@ COMP_SUBDIRS =
 # DO NOT ADD MORE HERE.
 #
 # -Wno-cast-align
-mac_base.o_CFLAGS_ADD += -Wno-cast-align
+mac_base.o_CWARNFLAGS_ADD += -Wno-cast-align
 # -Wno-shorten-64-to-32
-mac_audit.o_CFLAGS_ADD += -Wno-shorten-64-to-32
-mac_base.o_CFLAGS_ADD += -Wno-shorten-64-to-32
-mac_process.o_CFLAGS_ADD += -Wno-shorten-64-to-32
+mac_audit.o_CWARNFLAGS_ADD += -Wno-shorten-64-to-32
+mac_base.o_CWARNFLAGS_ADD += -Wno-shorten-64-to-32
+mac_process.o_CWARNFLAGS_ADD += -Wno-shorten-64-to-32
 # -Wno-sign-conversion
-mac_base.o_CFLAGS_ADD += -Wno-sign-conversion
-mac_mach.o_CFLAGS_ADD += -Wno-sign-conversion
-mac_vfs.o_CFLAGS_ADD += -Wno-sign-conversion
-mac_vfs_subr.o_CFLAGS_ADD += -Wno-sign-conversion
+mac_base.o_CWARNFLAGS_ADD += -Wno-sign-conversion
+mac_mach.o_CWARNFLAGS_ADD += -Wno-sign-conversion
+mac_vfs.o_CWARNFLAGS_ADD += -Wno-sign-conversion
+mac_vfs_subr.o_CWARNFLAGS_ADD += -Wno-sign-conversion
 
 # Rebuild if per-file overrides change
 ${OBJS}: $(firstword $(MAKEFILE_LIST))
@@ -90,7 +92,17 @@ $(COMPONENT).filelist: $(OBJS)
 		 $(ECHO) $(TARGET)/$(CURRENT_KERNEL_CONFIG)/$${obj}; \
 	done > $(COMPONENT).filelist
 
+$(COMPONENT).libfilelist: $(LIBOBJS)
+	@$(LOG_LDFILELIST) "lib$(COMPONENT)"
+	$(_v)for obj in ${LIBOBJS}; do	\
+		 $(ECHO) $(TARGET)/$(CURRENT_KERNEL_CONFIG)/$${obj}; \
+	done > $(COMPONENT).libfilelist
+
+ifeq ($(RC_ProjectName),xnu_libraries)
+do_all: $(COMPONENT).libfilelist
+else
 do_all: $(COMPONENT).filelist
+endif
 
 do_build_all:: do_all
 

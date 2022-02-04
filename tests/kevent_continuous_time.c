@@ -30,9 +30,12 @@ static uint64_t
 time_delta_ms(void)
 {
 	uint64_t abs_now = mach_absolute_time();
-	uint64_t cnt_now = mach_continuous_time();;
+	uint64_t cnt_now = mach_continuous_time();
 	return tick_to_ms(cnt_now) - tick_to_ms(abs_now);
 }
+
+T_GLOBAL_META(T_META_RADAR_COMPONENT_NAME("xnu"),
+    T_META_RADAR_COMPONENT_VERSION("kevent"));
 
 static int run_sleep_tests = 0;
 
@@ -110,7 +113,7 @@ T_DECL(kevent_continuous_time_periodic_tick, "kevent(EVFILT_TIMER with NOTE_MACH
 	T_ASSERT_EQ(0ll, kev.data, "No error returned");
 
 	uint64_t abs_then = mach_absolute_time();
-	uint64_t cnt_then = mach_continuous_time();;
+	uint64_t cnt_then = mach_continuous_time();
 
 	trigger_sleep(1);
 	int sleep_secs = wait_for_sleep();
@@ -120,7 +123,7 @@ T_DECL(kevent_continuous_time_periodic_tick, "kevent(EVFILT_TIMER with NOTE_MACH
 	T_ASSERT_EQ(kev.flags & EV_ERROR, 0, "event should not have EV_ERROR set: %s", kev.flags & EV_ERROR ? strerror((int)kev.data) : "no error");
 
 	uint64_t abs_now = mach_absolute_time();
-	uint64_t cnt_now = mach_continuous_time();;
+	uint64_t cnt_now = mach_continuous_time();
 	uint64_t ct_ms_progressed = tick_to_ms(cnt_now - cnt_then);
 	uint64_t ab_ms_progressed = tick_to_ms(abs_now - abs_then);
 

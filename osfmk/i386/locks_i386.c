@@ -87,30 +87,9 @@
 #include <kern/cpu_number.h>
 #include <os/hash.h>
 
-#if     CONFIG_DTRACE
-#define DTRACE_RW_SHARED        0x0     //reader
-#define DTRACE_RW_EXCL          0x1     //writer
-#define DTRACE_NO_FLAG          0x0     //not applicable
-#endif /* CONFIG_DTRACE */
-
-#define LCK_RW_LCK_EXCLUSIVE_CODE       0x100
-#define LCK_RW_LCK_EXCLUSIVE1_CODE      0x101
-#define LCK_RW_LCK_SHARED_CODE          0x102
-#define LCK_RW_LCK_SH_TO_EX_CODE        0x103
-#define LCK_RW_LCK_SH_TO_EX1_CODE       0x104
-#define LCK_RW_LCK_EX_TO_SH_CODE        0x105
-
-#define LCK_RW_LCK_EX_WRITER_SPIN_CODE  0x106
-#define LCK_RW_LCK_EX_WRITER_WAIT_CODE  0x107
-#define LCK_RW_LCK_EX_READER_SPIN_CODE  0x108
-#define LCK_RW_LCK_EX_READER_WAIT_CODE  0x109
-#define LCK_RW_LCK_SHARED_SPIN_CODE     0x110
-#define LCK_RW_LCK_SHARED_WAIT_CODE     0x111
-#define LCK_RW_LCK_SH_TO_EX_SPIN_CODE   0x112
-#define LCK_RW_LCK_SH_TO_EX_WAIT_CODE   0x113
-
-
 #define ANY_LOCK_DEBUG  (USLOCK_DEBUG || LOCK_DEBUG || MUTEX_DEBUG)
+
+uint64_t _Atomic lock_panic_timeout = 0xf000000;  /* 251e6 TSC ticks */
 
 /* Forwards */
 
@@ -125,6 +104,15 @@ decl_simple_lock_data(extern, panic_lock);
 #endif  /* USLOCK_DEBUG */
 
 extern unsigned int not_in_kdp;
+
+#if !LOCK_STATS
+#define usimple_lock_nopreempt(lck, grp) \
+	usimple_lock_nopreempt(lck)
+#define usimple_lock_try_nopreempt(lck, grp) \
+	usimple_lock_try_nopreempt(lck)
+#endif
+static void usimple_lock_nopreempt(usimple_lock_t, lck_grp_t *);
+static unsigned int usimple_lock_try_nopreempt(usimple_lock_t, lck_grp_t *);
 
 /*
  *	We often want to know the addresses of the callers
@@ -149,17 +137,11 @@ typedef void    *pc_t;
 #endif  /* lint */
 #endif  /* USLOCK_DEBUG */
 
-ZONE_VIEW_DEFINE(ZV_LCK_SPIN, "lck_spin",
-    KHEAP_ID_DEFAULT, sizeof(lck_spin_t));
+KALLOC_TYPE_DEFINE(KT_LCK_SPIN, lck_spin_t, KT_PRIV_ACCT);
 
-ZONE_VIEW_DEFINE(ZV_LCK_MTX, "lck_mtx",
-    KHEAP_ID_DEFAULT, sizeof(lck_mtx_t));
+KALLOC_TYPE_DEFINE(KT_LCK_MTX, lck_mtx_t, KT_PRIV_ACCT);
 
-ZONE_VIEW_DEFINE(ZV_LCK_MTX_EXT, "lck_mtx_ext",
-    KHEAP_ID_DEFAULT, sizeof(lck_mtx_ext_t));
-
-ZONE_VIEW_DEFINE(ZV_LCK_RW, "lck_rw",
-    KHEAP_ID_DEFAULT, sizeof(lck_rw_t));
+KALLOC_TYPE_DEFINE(KT_LCK_MTX_EXT, lck_mtx_ext_t, KT_PRIV_ACCT);
 
 /*
  * atomic exchange API is a low level abstraction of the operations
@@ -171,7 +153,7 @@ ZONE_VIEW_DEFINE(ZV_LCK_RW, "lck_rw",
  * atomic_exchange_complete() - conclude an exchange
  * atomic_exchange_abort() - cancel an exchange started with atomic_exchange_begin()
  */
-static uint32_t
+uint32_t
 atomic_exchange_begin32(uint32_t *target, uint32_t *previous, enum memory_order ord)
 {
 	uint32_t        val;
@@ -182,18 +164,18 @@ atomic_exchange_begin32(uint32_t *target, uint32_t *previous, enum memory_order 
 	return val;
 }
 
-static boolean_t
+boolean_t
 atomic_exchange_complete32(uint32_t *target, uint32_t previous, uint32_t newval, enum memory_order ord)
 {
 	return __c11_atomic_compare_exchange_strong((_Atomic uint32_t *)target, &previous, newval, ord, memory_order_relaxed);
 }
 
-static void
+void
 atomic_exchange_abort(void)
 {
 }
 
-static boolean_t
+boolean_t
 atomic_test_and_set32(uint32_t *target, uint32_t test_mask, uint32_t set_mask, enum memory_order ord, boolean_t wait)
 {
 	uint32_t        value, prev;
@@ -213,12 +195,6 @@ atomic_test_and_set32(uint32_t *target, uint32_t test_mask, uint32_t set_mask, e
 			return TRUE;
 		}
 	}
-}
-
-inline boolean_t
-hw_atomic_test_and_set32(uint32_t *target, uint32_t test_mask, uint32_t set_mask, enum memory_order ord, boolean_t wait)
-{
-	return atomic_test_and_set32(target, test_mask, set_mask, ord, wait);
 }
 
 /*
@@ -242,16 +218,6 @@ int             usld_lock_common_checks(usimple_lock_t, char *);
  * Forward definitions
  */
 
-static void lck_rw_lock_shared_gen(lck_rw_t *lck);
-static void lck_rw_lock_exclusive_gen(lck_rw_t *lck);
-static boolean_t lck_rw_lock_shared_to_exclusive_success(lck_rw_t *lck);
-static boolean_t lck_rw_lock_shared_to_exclusive_failure(lck_rw_t *lck, uint32_t prior_lock_state);
-static void lck_rw_lock_exclusive_to_shared_gen(lck_rw_t *lck, uint32_t prior_lock_state);
-static lck_rw_type_t lck_rw_done_gen(lck_rw_t *lck, uint32_t prior_lock_state);
-void lck_rw_clear_promotions_x86(thread_t thread);
-static boolean_t lck_rw_held_read_or_upgrade(lck_rw_t *lock);
-static boolean_t lck_rw_grab_want(lck_rw_t *lock);
-static boolean_t lck_rw_grab_shared(lck_rw_t *lock);
 static void lck_mtx_unlock_wakeup_tail(lck_mtx_t *mutex, uint32_t state, boolean_t indirect);
 static void lck_mtx_interlock_lock(lck_mtx_t *mutex, uint32_t *new_state);
 static void lck_mtx_interlock_lock_clear_flags(lck_mtx_t *mutex, uint32_t and_flags, uint32_t *new_state);
@@ -270,7 +236,7 @@ lck_spin_alloc_init(
 {
 	lck_spin_t *lck;
 
-	lck = zalloc(ZV_LCK_SPIN);
+	lck = zalloc(KT_LCK_SPIN);
 	lck_spin_init(lck, grp, attr);
 	return lck;
 }
@@ -284,7 +250,7 @@ lck_spin_free(
 	lck_grp_t       *grp)
 {
 	lck_spin_destroy(lck, grp);
-	zfree(ZV_LCK_SPIN, lck);
+	zfree(KT_LCK_SPIN, lck);
 }
 
 /*
@@ -341,6 +307,22 @@ lck_spin_lock(
 	usimple_lock((usimple_lock_t) lck, NULL);
 }
 
+void
+lck_spin_lock_nopreempt(
+	lck_spin_t      *lck)
+{
+	usimple_lock_nopreempt((usimple_lock_t) lck, NULL);
+}
+
+void
+lck_spin_lock_nopreempt_grp(
+	lck_spin_t      *lck,
+	lck_grp_t       *grp)
+{
+#pragma unused(grp)
+	usimple_lock_nopreempt((usimple_lock_t) lck, grp);
+}
+
 /*
  *      Routine:        lck_spin_unlock
  */
@@ -349,6 +331,13 @@ lck_spin_unlock(
 	lck_spin_t      *lck)
 {
 	usimple_unlock((usimple_lock_t) lck);
+}
+
+void
+lck_spin_unlock_nopreempt(
+	lck_spin_t      *lck)
+{
+	usimple_unlock_nopreempt((usimple_lock_t) lck);
 }
 
 boolean_t
@@ -375,6 +364,34 @@ lck_spin_try_lock(
 	lck_spin_t      *lck)
 {
 	boolean_t lrval = (boolean_t)usimple_lock_try((usimple_lock_t) lck, LCK_GRP_NULL);
+#if     DEVELOPMENT || DEBUG
+	if (lrval) {
+		pltrace(FALSE);
+	}
+#endif
+	return lrval;
+}
+
+int
+lck_spin_try_lock_nopreempt(
+	lck_spin_t      *lck)
+{
+	boolean_t lrval = (boolean_t)usimple_lock_try_nopreempt((usimple_lock_t) lck, LCK_GRP_NULL);
+#if     DEVELOPMENT || DEBUG
+	if (lrval) {
+		pltrace(FALSE);
+	}
+#endif
+	return lrval;
+}
+
+int
+lck_spin_try_lock_nopreempt_grp(
+	lck_spin_t      *lck,
+	lck_grp_t       *grp)
+{
+#pragma unused(grp)
+	boolean_t lrval = (boolean_t)usimple_lock_try_nopreempt((usimple_lock_t) lck, grp);
 #if     DEVELOPMENT || DEBUG
 	if (lrval) {
 		pltrace(FALSE);
@@ -439,34 +456,39 @@ usimple_lock_init(
 	usimple_lock_t  l,
 	__unused unsigned short tag)
 {
-#ifndef MACHINE_SIMPLE_LOCK
 	USLDBG(usld_lock_init(l, tag));
 	hw_lock_init(&l->interlock);
-#else
-	simple_lock_init((simple_lock_t)l, tag);
-#endif
 }
 
-volatile uint32_t spinlock_owner_cpu = ~0;
-volatile usimple_lock_t spinlock_timed_out;
-
-uint32_t
-spinlock_timeout_NMI(uintptr_t thread_addr)
+static hw_lock_timeout_status_t
+usimple_lock_acquire_timeout_panic(void *_lock, uint64_t timeout, uint64_t start, uint64_t now, uint64_t interrupt_time)
 {
-	uint32_t i;
+#pragma unused(interrupt_time)
 
-	for (i = 0; i < real_ncpus; i++) {
-		if ((cpu_data_ptr[i] != NULL) && ((uintptr_t)cpu_data_ptr[i]->cpu_active_thread == thread_addr)) {
-			spinlock_owner_cpu = i;
-			if ((uint32_t) cpu_number() != i) {
-				/* Cause NMI and panic on the owner's cpu */
-				NMIPI_panic(cpu_to_cpumask(i), SPINLOCK_TIMEOUT);
-			}
-			break;
-		}
+	usimple_lock_t l = _lock;
+	uintptr_t lowner;
+	lck_spinlock_to_info_t lsti;
+
+	if (machine_timeout_suspended()) {
+		return HW_LOCK_TIMEOUT_CONTINUE;
 	}
 
-	return spinlock_owner_cpu;
+	lowner = (uintptr_t)l->interlock.lock_data;
+	lsti = lck_spinlock_timeout_hit(l, lowner);
+
+	panic("Spinlock acquisition timed out: lock=%p, "
+	    "lock owner thread=0x%lx, current_thread: %p, "
+	    "lock owner active on CPU %d, current owner: 0x%lx, "
+#if INTERRUPT_MASKED_DEBUG
+	    "interrupt time: %llu, "
+#endif /* INTERRUPT_MASKED_DEBUG */
+	    "spin time: %llu, start time: %llu, now: %llu, timeout: %llu",
+	    l, lowner, current_thread(), lsti->owner_cpu,
+	    (uintptr_t)l->interlock.lock_data,
+#if INTERRUPT_MASKED_DEBUG
+	    interrupt_time,
+#endif /* INTERRUPT_MASKED_DEBUG */
+	    now - start, start, now, timeout);
 }
 
 /*
@@ -481,38 +503,48 @@ void
 	usimple_lock_t  l
 	LCK_GRP_ARG(lck_grp_t *grp))
 {
-#ifndef MACHINE_SIMPLE_LOCK
 	DECL_PC(pc);
 
 	OBTAIN_PC(pc);
 	USLDBG(usld_lock_pre(l, pc));
 
-	if (__improbable(hw_lock_to(&l->interlock, LockTimeOutTSC, grp) == 0)) {
-		boolean_t uslock_acquired = FALSE;
-		while (machine_timeout_suspended()) {
-			enable_preemption();
-			if ((uslock_acquired = hw_lock_to(&l->interlock, LockTimeOutTSC, grp))) {
-				break;
-			}
-		}
-
-		if (uslock_acquired == FALSE) {
-			uint32_t lock_cpu;
-			uintptr_t lowner = (uintptr_t)l->interlock.lock_data;
-			spinlock_timed_out = l;
-			lock_cpu = spinlock_timeout_NMI(lowner);
-			panic("Spinlock acquisition timed out: lock=%p, lock owner thread=0x%lx, current_thread: %p, lock owner active on CPU 0x%x, current owner: 0x%lx, time: %llu",
-			    l, lowner, current_thread(), lock_cpu, (uintptr_t)l->interlock.lock_data, mach_absolute_time());
-		}
-	}
+	(void)hw_lock_to(&l->interlock, LockTimeOutTSC,
+	    usimple_lock_acquire_timeout_panic, grp);
 #if DEVELOPMENT || DEBUG
 	pltrace(FALSE);
 #endif
 
 	USLDBG(usld_lock_post(l, pc));
-#else
-	simple_lock((simple_lock_t)l, grp);
+#if CONFIG_DTRACE
+	LOCKSTAT_RECORD(LS_LCK_SPIN_LOCK_ACQUIRE, l, 0, (uintptr_t)LCK_GRP_PROBEARG(grp));
 #endif
+}
+
+/*
+ *	Acquire a usimple_lock_nopreempt
+ *
+ *	Called and returns with preemption disabled.  Note
+ *	that the hw_lock routines are responsible for
+ *	maintaining preemption state.
+ */
+static void
+usimple_lock_nopreempt(
+	usimple_lock_t  l,
+	lck_grp_t *grp)
+{
+	DECL_PC(pc);
+
+	OBTAIN_PC(pc);
+	USLDBG(usld_lock_pre(l, pc));
+
+	(void)hw_lock_to_nopreempt(&l->interlock, LockTimeOutTSC,
+	    usimple_lock_acquire_timeout_panic, grp);
+
+#if DEVELOPMENT || DEBUG
+	pltrace(FALSE);
+#endif
+
+	USLDBG(usld_lock_post(l, pc));
 #if CONFIG_DTRACE
 	LOCKSTAT_RECORD(LS_LCK_SPIN_LOCK_ACQUIRE, l, 0, (uintptr_t)LCK_GRP_PROBEARG(grp));
 #endif
@@ -530,7 +562,6 @@ void
 usimple_unlock(
 	usimple_lock_t  l)
 {
-#ifndef MACHINE_SIMPLE_LOCK
 	DECL_PC(pc);
 
 	OBTAIN_PC(pc);
@@ -539,11 +570,28 @@ usimple_unlock(
 	pltrace(TRUE);
 #endif
 	hw_lock_unlock(&l->interlock);
-#else
-	simple_unlock_rwmb((simple_lock_t)l);
-#endif
 }
 
+/*
+ *	Release a usimple_unlock_nopreempt.
+ *
+ *	Called and returns with preemption enabled.  Note
+ *	that the hw_lock routines are responsible for
+ *	maintaining preemption state.
+ */
+void
+usimple_unlock_nopreempt(
+	usimple_lock_t  l)
+{
+	DECL_PC(pc);
+
+	OBTAIN_PC(pc);
+	USLDBG(usld_unlock(l, pc));
+#if DEVELOPMENT || DEBUG
+	pltrace(TRUE);
+#endif
+	hw_lock_unlock_nopreempt(&l->interlock);
+}
 
 /*
  *	Conditionally acquire a usimple_lock.
@@ -562,7 +610,6 @@ usimple_lock_try(
 	usimple_lock_t  l,
 	lck_grp_t *grp)
 {
-#ifndef MACHINE_SIMPLE_LOCK
 	unsigned int    success;
 	DECL_PC(pc);
 
@@ -575,9 +622,36 @@ usimple_lock_try(
 		USLDBG(usld_lock_try_post(l, pc));
 	}
 	return success;
-#else
-	return simple_lock_try((simple_lock_t)l, grp);
+}
+
+/*
+ *	Conditionally acquire a usimple_lock.
+ *
+ *	Called and returns with preemption disabled.  Note
+ *	that the hw_lock routines are responsible for
+ *	maintaining preemption state.
+ *
+ *	XXX No stats are gathered on a miss; I preserved this
+ *	behavior from the original assembly-language code, but
+ *	doesn't it make sense to log misses?  XXX
+ */
+static unsigned int
+usimple_lock_try_nopreempt(
+	usimple_lock_t  l,
+	lck_grp_t *grp)
+{
+	unsigned int    success;
+	DECL_PC(pc);
+
+	OBTAIN_PC(pc);
+	USLDBG(usld_lock_try_pre(l, pc));
+	if ((success = hw_lock_try_nopreempt(&l->interlock, grp))) {
+#if DEVELOPMENT || DEBUG
+		pltrace(FALSE);
 #endif
+		USLDBG(usld_lock_try_post(l, pc));
+	}
+	return success;
 }
 
 /*
@@ -889,1251 +963,6 @@ usld_lock_try_post(
 #endif  /* USLOCK_DEBUG */
 
 /*
- *      Routine:        lck_rw_alloc_init
- */
-lck_rw_t *
-lck_rw_alloc_init(
-	lck_grp_t       *grp,
-	lck_attr_t      *attr)
-{
-	lck_rw_t *lck;
-
-	lck = zalloc_flags(ZV_LCK_RW, Z_WAITOK | Z_ZERO);
-	lck_rw_init(lck, grp, attr);
-	return lck;
-}
-
-/*
- *      Routine:        lck_rw_free
- */
-void
-lck_rw_free(
-	lck_rw_t        *lck,
-	lck_grp_t       *grp)
-{
-	lck_rw_destroy(lck, grp);
-	zfree(ZV_LCK_RW, lck);
-}
-
-/*
- *      Routine:        lck_rw_init
- */
-void
-lck_rw_init(
-	lck_rw_t        *lck,
-	lck_grp_t       *grp,
-	lck_attr_t      *attr)
-{
-	lck_attr_t      *lck_attr = (attr != LCK_ATTR_NULL) ?
-	    attr : &LockDefaultLckAttr;
-
-	hw_lock_byte_init(&lck->lck_rw_interlock);
-	lck->lck_rw_want_write = FALSE;
-	lck->lck_rw_want_upgrade = FALSE;
-	lck->lck_rw_shared_count = 0;
-	lck->lck_rw_can_sleep = TRUE;
-	lck->lck_r_waiting = lck->lck_w_waiting = 0;
-	lck->lck_rw_tag = 0;
-	lck->lck_rw_priv_excl = ((lck_attr->lck_attr_val &
-	    LCK_ATTR_RW_SHARED_PRIORITY) == 0);
-
-	lck_grp_reference(grp);
-	lck_grp_lckcnt_incr(grp, LCK_TYPE_RW);
-}
-
-/*
- *      Routine:        lck_rw_destroy
- */
-void
-lck_rw_destroy(
-	lck_rw_t        *lck,
-	lck_grp_t       *grp)
-{
-	if (lck->lck_rw_tag == LCK_RW_TAG_DESTROYED) {
-		return;
-	}
-#if MACH_LDEBUG
-	lck_rw_assert(lck, LCK_RW_ASSERT_NOTHELD);
-#endif
-	lck->lck_rw_tag = LCK_RW_TAG_DESTROYED;
-	lck_grp_lckcnt_decr(grp, LCK_TYPE_RW);
-	lck_grp_deallocate(grp);
-	return;
-}
-
-/*
- *	Sleep locks.  These use the same data structure and algorithm
- *	as the spin locks, but the process sleeps while it is waiting
- *	for the lock.  These work on uniprocessor systems.
- */
-
-#define DECREMENTER_TIMEOUT 1000000
-
-/*
- * We disable interrupts while holding the RW interlock to prevent an
- * interrupt from exacerbating hold time.
- * Hence, local helper functions lck_interlock_lock()/lck_interlock_unlock().
- */
-static inline boolean_t
-lck_interlock_lock(lck_rw_t *lck)
-{
-	boolean_t       istate;
-
-	istate = ml_set_interrupts_enabled(FALSE);
-	hw_lock_byte_lock(&lck->lck_rw_interlock);
-	return istate;
-}
-
-static inline void
-lck_interlock_unlock(lck_rw_t *lck, boolean_t istate)
-{
-	hw_lock_byte_unlock(&lck->lck_rw_interlock);
-	ml_set_interrupts_enabled(istate);
-}
-
-/*
- * This inline is used when busy-waiting for an rw lock.
- * If interrupts were disabled when the lock primitive was called,
- * we poll the IPI handler for pending tlb flushes.
- * XXX This is a hack to avoid deadlocking on the pmap_system_lock.
- */
-static inline void
-lck_rw_lock_pause(boolean_t interrupts_enabled)
-{
-	if (!interrupts_enabled) {
-		handle_pending_TLB_flushes();
-	}
-	cpu_pause();
-}
-
-static inline boolean_t
-lck_rw_held_read_or_upgrade(lck_rw_t *lock)
-{
-	if (ordered_load(&lock->data) & (LCK_RW_SHARED_MASK | LCK_RW_INTERLOCK | LCK_RW_WANT_UPGRADE)) {
-		return TRUE;
-	}
-	return FALSE;
-}
-
-/*
- * compute the deadline to spin against when
- * waiting for a change of state on a lck_rw_t
- */
-static inline uint64_t
-lck_rw_deadline_for_spin(lck_rw_t *lck)
-{
-	if (lck->lck_rw_can_sleep) {
-		if (lck->lck_r_waiting || lck->lck_w_waiting || lck->lck_rw_shared_count > machine_info.max_cpus) {
-			/*
-			 * there are already threads waiting on this lock... this
-			 * implies that they have spun beyond their deadlines waiting for
-			 * the desired state to show up so we will not bother spinning at this time...
-			 *   or
-			 * the current number of threads sharing this lock exceeds our capacity to run them
-			 * concurrently and since all states we're going to spin for require the rw_shared_count
-			 * to be at 0, we'll not bother spinning since the latency for this to happen is
-			 * unpredictable...
-			 */
-			return mach_absolute_time();
-		}
-		return mach_absolute_time() + MutexSpin;
-	} else {
-		return mach_absolute_time() + (100000LL * 1000000000LL);
-	}
-}
-
-
-/*
- * Spin while interlock is held.
- */
-
-static inline void
-lck_rw_interlock_spin(lck_rw_t *lock)
-{
-	while (ordered_load(&lock->data) & LCK_RW_INTERLOCK) {
-		cpu_pause();
-	}
-}
-
-static boolean_t
-lck_rw_grab_want(lck_rw_t *lock)
-{
-	uint32_t        data, prev;
-
-	for (;;) {
-		data = atomic_exchange_begin32(&lock->data, &prev, memory_order_relaxed);
-		if ((data & LCK_RW_INTERLOCK) == 0) {
-			break;
-		}
-		atomic_exchange_abort();
-		lck_rw_interlock_spin(lock);
-	}
-	if (data & LCK_RW_WANT_WRITE) {
-		atomic_exchange_abort();
-		return FALSE;
-	}
-	data |= LCK_RW_WANT_WRITE;
-	return atomic_exchange_complete32(&lock->data, prev, data, memory_order_relaxed);
-}
-
-static boolean_t
-lck_rw_grab_shared(lck_rw_t *lock)
-{
-	uint32_t        data, prev;
-
-	for (;;) {
-		data = atomic_exchange_begin32(&lock->data, &prev, memory_order_acquire_smp);
-		if ((data & LCK_RW_INTERLOCK) == 0) {
-			break;
-		}
-		atomic_exchange_abort();
-		lck_rw_interlock_spin(lock);
-	}
-	if (data & (LCK_RW_WANT_WRITE | LCK_RW_WANT_UPGRADE)) {
-		if (((data & LCK_RW_SHARED_MASK) == 0) || (data & LCK_RW_PRIV_EXCL)) {
-			atomic_exchange_abort();
-			return FALSE;
-		}
-	}
-	data += LCK_RW_SHARED_READER;
-	return atomic_exchange_complete32(&lock->data, prev, data, memory_order_acquire_smp);
-}
-
-/*
- *      Routine:        lck_rw_lock_exclusive
- */
-static void
-lck_rw_lock_exclusive_gen(
-	lck_rw_t        *lck)
-{
-	__kdebug_only uintptr_t trace_lck = unslide_for_kdebug(lck);
-	uint64_t        deadline = 0;
-	int             slept = 0;
-	int             gotlock = 0;
-	int             lockheld = 0;
-	wait_result_t   res = 0;
-	boolean_t       istate = -1;
-
-#if     CONFIG_DTRACE
-	boolean_t dtrace_ls_initialized = FALSE;
-	boolean_t dtrace_rwl_excl_spin, dtrace_rwl_excl_block, dtrace_ls_enabled = FALSE;
-	uint64_t wait_interval = 0;
-	int readers_at_sleep = 0;
-#endif
-
-	/*
-	 *	Try to acquire the lck_rw_want_write bit.
-	 */
-	while (!lck_rw_grab_want(lck)) {
-#if     CONFIG_DTRACE
-		if (dtrace_ls_initialized == FALSE) {
-			dtrace_ls_initialized = TRUE;
-			dtrace_rwl_excl_spin = (lockstat_probemap[LS_LCK_RW_LOCK_EXCL_SPIN] != 0);
-			dtrace_rwl_excl_block = (lockstat_probemap[LS_LCK_RW_LOCK_EXCL_BLOCK] != 0);
-			dtrace_ls_enabled = dtrace_rwl_excl_spin || dtrace_rwl_excl_block;
-			if (dtrace_ls_enabled) {
-				/*
-				 * Either sleeping or spinning is happening,
-				 *  start a timing of our delay interval now.
-				 */
-				readers_at_sleep = lck->lck_rw_shared_count;
-				wait_interval = mach_absolute_time();
-			}
-		}
-#endif
-		if (istate == -1) {
-			istate = ml_get_interrupts_enabled();
-		}
-
-		deadline = lck_rw_deadline_for_spin(lck);
-
-		KERNEL_DEBUG(MACHDBG_CODE(DBG_MACH_LOCKS, LCK_RW_LCK_EX_WRITER_SPIN_CODE) | DBG_FUNC_START, trace_lck, 0, 0, 0, 0);
-
-		while (((gotlock = lck_rw_grab_want(lck)) == 0) && mach_absolute_time() < deadline) {
-			lck_rw_lock_pause(istate);
-		}
-
-		KERNEL_DEBUG(MACHDBG_CODE(DBG_MACH_LOCKS, LCK_RW_LCK_EX_WRITER_SPIN_CODE) | DBG_FUNC_END, trace_lck, 0, 0, gotlock, 0);
-
-		if (gotlock) {
-			break;
-		}
-		/*
-		 * if we get here, the deadline has expired w/o us
-		 * being able to grab the lock exclusively
-		 * check to see if we're allowed to do a thread_block
-		 */
-		if (lck->lck_rw_can_sleep) {
-			istate = lck_interlock_lock(lck);
-
-			if (lck->lck_rw_want_write) {
-				KERNEL_DEBUG(MACHDBG_CODE(DBG_MACH_LOCKS, LCK_RW_LCK_EX_WRITER_WAIT_CODE) | DBG_FUNC_START, trace_lck, 0, 0, 0, 0);
-
-				lck->lck_w_waiting = TRUE;
-
-				thread_set_pending_block_hint(current_thread(), kThreadWaitKernelRWLockWrite);
-				res = assert_wait(RW_LOCK_WRITER_EVENT(lck),
-				    THREAD_UNINT | THREAD_WAIT_NOREPORT_USER);
-				lck_interlock_unlock(lck, istate);
-
-				if (res == THREAD_WAITING) {
-					res = thread_block(THREAD_CONTINUE_NULL);
-					slept++;
-				}
-				KERNEL_DEBUG(MACHDBG_CODE(DBG_MACH_LOCKS, LCK_RW_LCK_EX_WRITER_WAIT_CODE) | DBG_FUNC_END, trace_lck, res, slept, 0, 0);
-			} else {
-				lck->lck_rw_want_write = TRUE;
-				lck_interlock_unlock(lck, istate);
-				break;
-			}
-		}
-	}
-	/*
-	 * Wait for readers (and upgrades) to finish...
-	 * the test for these conditions must be done simultaneously with
-	 * a check of the interlock not being held since
-	 * the rw_shared_count will drop to 0 first and then want_upgrade
-	 * will be set to 1 in the shared_to_exclusive scenario... those
-	 * adjustments are done behind the interlock and represent an
-	 * atomic change in state and must be considered as such
-	 * however, once we see the read count at 0, the want_upgrade not set
-	 * and the interlock not held, we are safe to proceed
-	 */
-	while (lck_rw_held_read_or_upgrade(lck)) {
-#if     CONFIG_DTRACE
-		/*
-		 * Either sleeping or spinning is happening, start
-		 * a timing of our delay interval now.  If we set it
-		 * to -1 we don't have accurate data so we cannot later
-		 * decide to record a dtrace spin or sleep event.
-		 */
-		if (dtrace_ls_initialized == FALSE) {
-			dtrace_ls_initialized = TRUE;
-			dtrace_rwl_excl_spin = (lockstat_probemap[LS_LCK_RW_LOCK_EXCL_SPIN] != 0);
-			dtrace_rwl_excl_block = (lockstat_probemap[LS_LCK_RW_LOCK_EXCL_BLOCK] != 0);
-			dtrace_ls_enabled = dtrace_rwl_excl_spin || dtrace_rwl_excl_block;
-			if (dtrace_ls_enabled) {
-				/*
-				 * Either sleeping or spinning is happening,
-				 *  start a timing of our delay interval now.
-				 */
-				readers_at_sleep = lck->lck_rw_shared_count;
-				wait_interval = mach_absolute_time();
-			}
-		}
-#endif
-		if (istate == -1) {
-			istate = ml_get_interrupts_enabled();
-		}
-
-		deadline = lck_rw_deadline_for_spin(lck);
-
-		KERNEL_DEBUG(MACHDBG_CODE(DBG_MACH_LOCKS, LCK_RW_LCK_EX_READER_SPIN_CODE) | DBG_FUNC_START, trace_lck, 0, 0, 0, 0);
-
-		while ((lockheld = lck_rw_held_read_or_upgrade(lck)) && mach_absolute_time() < deadline) {
-			lck_rw_lock_pause(istate);
-		}
-
-		KERNEL_DEBUG(MACHDBG_CODE(DBG_MACH_LOCKS, LCK_RW_LCK_EX_READER_SPIN_CODE) | DBG_FUNC_END, trace_lck, 0, 0, lockheld, 0);
-
-		if (!lockheld) {
-			break;
-		}
-		/*
-		 * if we get here, the deadline has expired w/o us
-		 * being able to grab the lock exclusively
-		 * check to see if we're allowed to do a thread_block
-		 */
-		if (lck->lck_rw_can_sleep) {
-			istate = lck_interlock_lock(lck);
-
-			if (lck->lck_rw_shared_count != 0 || lck->lck_rw_want_upgrade) {
-				KERNEL_DEBUG(MACHDBG_CODE(DBG_MACH_LOCKS, LCK_RW_LCK_EX_READER_WAIT_CODE) | DBG_FUNC_START, trace_lck, 0, 0, 0, 0);
-
-				lck->lck_w_waiting = TRUE;
-
-				thread_set_pending_block_hint(current_thread(), kThreadWaitKernelRWLockWrite);
-				res = assert_wait(RW_LOCK_WRITER_EVENT(lck),
-				    THREAD_UNINT | THREAD_WAIT_NOREPORT_USER);
-				lck_interlock_unlock(lck, istate);
-
-				if (res == THREAD_WAITING) {
-					res = thread_block(THREAD_CONTINUE_NULL);
-					slept++;
-				}
-				KERNEL_DEBUG(MACHDBG_CODE(DBG_MACH_LOCKS, LCK_RW_LCK_EX_READER_WAIT_CODE) | DBG_FUNC_END, trace_lck, res, slept, 0, 0);
-			} else {
-				lck_interlock_unlock(lck, istate);
-				/*
-				 * must own the lock now, since we checked for
-				 * readers or upgrade owner behind the interlock
-				 * no need for a call to 'lck_rw_held_read_or_upgrade'
-				 */
-				break;
-			}
-		}
-	}
-
-#if     CONFIG_DTRACE
-	/*
-	 * Decide what latencies we suffered that are Dtrace events.
-	 * If we have set wait_interval, then we either spun or slept.
-	 * At least we get out from under the interlock before we record
-	 * which is the best we can do here to minimize the impact
-	 * of the tracing.
-	 * If we have set wait_interval to -1, then dtrace was not enabled when we
-	 * started sleeping/spinning so we don't record this event.
-	 */
-	if (dtrace_ls_enabled == TRUE) {
-		if (slept == 0) {
-			LOCKSTAT_RECORD(LS_LCK_RW_LOCK_EXCL_SPIN, lck,
-			    mach_absolute_time() - wait_interval, 1);
-		} else {
-			/*
-			 * For the blocking case, we also record if when we blocked
-			 * it was held for read or write, and how many readers.
-			 * Notice that above we recorded this before we dropped
-			 * the interlock so the count is accurate.
-			 */
-			LOCKSTAT_RECORD(LS_LCK_RW_LOCK_EXCL_BLOCK, lck,
-			    mach_absolute_time() - wait_interval, 1,
-			    (readers_at_sleep == 0 ? 1 : 0), readers_at_sleep);
-		}
-	}
-	LOCKSTAT_RECORD(LS_LCK_RW_LOCK_EXCL_ACQUIRE, lck, 1);
-#endif
-}
-
-/*
- *      Routine:        lck_rw_done
- */
-
-lck_rw_type_t
-lck_rw_done(lck_rw_t *lock)
-{
-	uint32_t        data, prev;
-
-	for (;;) {
-		data = atomic_exchange_begin32(&lock->data, &prev, memory_order_release_smp);
-		if (data & LCK_RW_INTERLOCK) {          /* wait for interlock to clear */
-			atomic_exchange_abort();
-			lck_rw_interlock_spin(lock);
-			continue;
-		}
-		if (data & LCK_RW_SHARED_MASK) {
-			data -= LCK_RW_SHARED_READER;
-			if ((data & LCK_RW_SHARED_MASK) == 0) { /* if reader count has now gone to 0, check for waiters */
-				goto check_waiters;
-			}
-		} else {                                        /* if reader count == 0, must be exclusive lock */
-			if (data & LCK_RW_WANT_UPGRADE) {
-				data &= ~(LCK_RW_WANT_UPGRADE);
-			} else {
-				if (data & LCK_RW_WANT_WRITE) {
-					data &= ~(LCK_RW_WANT_EXCL);
-				} else {                                /* lock is not 'owned', panic */
-					panic("Releasing non-exclusive RW lock without a reader refcount!");
-				}
-			}
-check_waiters:
-			if (prev & LCK_RW_W_WAITING) {
-				data &= ~(LCK_RW_W_WAITING);
-				if ((prev & LCK_RW_PRIV_EXCL) == 0) {
-					data &= ~(LCK_RW_R_WAITING);
-				}
-			} else {
-				data &= ~(LCK_RW_R_WAITING);
-			}
-		}
-		if (atomic_exchange_complete32(&lock->data, prev, data, memory_order_release_smp)) {
-			break;
-		}
-		cpu_pause();
-	}
-	return lck_rw_done_gen(lock, prev);
-}
-
-/*
- *      Routine:        lck_rw_done_gen
- *
- *	called from lck_rw_done()
- *	prior_lock_state is the value in the 1st
- *      word of the lock at the time of a successful
- *	atomic compare and exchange with the new value...
- *      it represents the state of the lock before we
- *	decremented the rw_shared_count or cleared either
- *      rw_want_upgrade or rw_want_write and
- *	the lck_x_waiting bits...  since the wrapper
- *      routine has already changed the state atomically,
- *	we just need to decide if we should
- *	wake up anyone and what value to return... we do
- *	this by examining the state of the lock before
- *	we changed it
- */
-static lck_rw_type_t
-lck_rw_done_gen(
-	lck_rw_t        *lck,
-	uint32_t        prior_lock_state)
-{
-	lck_rw_t        *fake_lck;
-	lck_rw_type_t   lock_type;
-	thread_t        thread;
-	uint32_t        rwlock_count;
-
-	thread = current_thread();
-	rwlock_count = thread->rwlock_count--;
-	fake_lck = (lck_rw_t *)&prior_lock_state;
-
-	if (lck->lck_rw_can_sleep) {
-		/*
-		 * prior_lock state is a snapshot of the 1st word of the
-		 * lock in question... we'll fake up a pointer to it
-		 * and carefully not access anything beyond whats defined
-		 * in the first word of a lck_rw_t
-		 */
-
-		if (fake_lck->lck_rw_shared_count <= 1) {
-			if (fake_lck->lck_w_waiting) {
-				thread_wakeup(RW_LOCK_WRITER_EVENT(lck));
-			}
-
-			if (!(fake_lck->lck_rw_priv_excl && fake_lck->lck_w_waiting) && fake_lck->lck_r_waiting) {
-				thread_wakeup(RW_LOCK_READER_EVENT(lck));
-			}
-		}
-#if MACH_LDEBUG
-		if (rwlock_count == 0) {
-			panic("rw lock count underflow for thread %p", thread);
-		}
-#endif
-		/* Check if dropping the lock means that we need to unpromote */
-
-		if ((rwlock_count == 1 /* field now 0 */) && (thread->sched_flags & TH_SFLAG_RW_PROMOTED)) {
-			/* sched_flags checked without lock, but will be rechecked while clearing */
-			lck_rw_clear_promotion(thread, unslide_for_kdebug(lck));
-		}
-	}
-	if (fake_lck->lck_rw_shared_count) {
-		lock_type = LCK_RW_TYPE_SHARED;
-	} else {
-		lock_type = LCK_RW_TYPE_EXCLUSIVE;
-	}
-
-#if CONFIG_DTRACE
-	LOCKSTAT_RECORD(LS_LCK_RW_DONE_RELEASE, lck, lock_type == LCK_RW_TYPE_SHARED ? 0 : 1);
-#endif
-
-	return lock_type;
-}
-
-
-/*
- *	Routine:	lck_rw_unlock
- */
-void
-lck_rw_unlock(
-	lck_rw_t        *lck,
-	lck_rw_type_t   lck_rw_type)
-{
-	if (lck_rw_type == LCK_RW_TYPE_SHARED) {
-		lck_rw_unlock_shared(lck);
-	} else if (lck_rw_type == LCK_RW_TYPE_EXCLUSIVE) {
-		lck_rw_unlock_exclusive(lck);
-	} else {
-		panic("lck_rw_unlock(): Invalid RW lock type: %d\n", lck_rw_type);
-	}
-}
-
-
-/*
- *	Routine:	lck_rw_unlock_shared
- */
-void
-lck_rw_unlock_shared(
-	lck_rw_t        *lck)
-{
-	lck_rw_type_t   ret;
-
-	assertf(lck->lck_rw_shared_count > 0, "lck %p has shared_count=0x%x", lck, lck->lck_rw_shared_count);
-	ret = lck_rw_done(lck);
-
-	if (ret != LCK_RW_TYPE_SHARED) {
-		panic("lck_rw_unlock_shared(): lock %p held in mode: %d\n", lck, ret);
-	}
-}
-
-
-/*
- *	Routine:	lck_rw_unlock_exclusive
- */
-void
-lck_rw_unlock_exclusive(
-	lck_rw_t        *lck)
-{
-	lck_rw_type_t   ret;
-
-	ret = lck_rw_done(lck);
-
-	if (ret != LCK_RW_TYPE_EXCLUSIVE) {
-		panic("lck_rw_unlock_exclusive(): lock held in mode: %d\n", ret);
-	}
-}
-
-
-/*
- *	Routine:	lck_rw_lock
- */
-void
-lck_rw_lock(
-	lck_rw_t        *lck,
-	lck_rw_type_t   lck_rw_type)
-{
-	if (lck_rw_type == LCK_RW_TYPE_SHARED) {
-		lck_rw_lock_shared(lck);
-	} else if (lck_rw_type == LCK_RW_TYPE_EXCLUSIVE) {
-		lck_rw_lock_exclusive(lck);
-	} else {
-		panic("lck_rw_lock(): Invalid RW lock type: %x\n", lck_rw_type);
-	}
-}
-
-/*
- *	Routine:	lck_rw_lock_shared
- */
-void
-lck_rw_lock_shared(lck_rw_t *lock)
-{
-	uint32_t        data, prev;
-
-	current_thread()->rwlock_count++;
-	for (;;) {
-		data = atomic_exchange_begin32(&lock->data, &prev, memory_order_acquire_smp);
-		if (data & (LCK_RW_WANT_EXCL | LCK_RW_WANT_UPGRADE | LCK_RW_INTERLOCK)) {
-			atomic_exchange_abort();
-			if (lock->lck_rw_can_sleep) {
-				lck_rw_lock_shared_gen(lock);
-			} else {
-				cpu_pause();
-				continue;
-			}
-			break;
-		}
-		data += LCK_RW_SHARED_READER;
-		if (atomic_exchange_complete32(&lock->data, prev, data, memory_order_acquire_smp)) {
-			break;
-		}
-		cpu_pause();
-	}
-#if     CONFIG_DTRACE
-	LOCKSTAT_RECORD(LS_LCK_RW_LOCK_SHARED_ACQUIRE, lock, DTRACE_RW_SHARED);
-#endif  /* CONFIG_DTRACE */
-	return;
-}
-
-/*
- *	Routine:	lck_rw_lock_shared_gen
- *	Function:
- *		assembly fast path code has determined that this lock
- *		is held exclusively... this is where we spin/block
- *		until we can acquire the lock in the shared mode
- */
-static void
-lck_rw_lock_shared_gen(
-	lck_rw_t        *lck)
-{
-	__kdebug_only uintptr_t trace_lck = unslide_for_kdebug(lck);
-	uint64_t        deadline = 0;
-	int             gotlock = 0;
-	int             slept = 0;
-	wait_result_t   res = 0;
-	boolean_t       istate = -1;
-
-#if     CONFIG_DTRACE
-	uint64_t wait_interval = 0;
-	int readers_at_sleep = 0;
-	boolean_t dtrace_ls_initialized = FALSE;
-	boolean_t dtrace_rwl_shared_spin, dtrace_rwl_shared_block, dtrace_ls_enabled = FALSE;
-#endif
-
-	while (!lck_rw_grab_shared(lck)) {
-#if     CONFIG_DTRACE
-		if (dtrace_ls_initialized == FALSE) {
-			dtrace_ls_initialized = TRUE;
-			dtrace_rwl_shared_spin = (lockstat_probemap[LS_LCK_RW_LOCK_SHARED_SPIN] != 0);
-			dtrace_rwl_shared_block = (lockstat_probemap[LS_LCK_RW_LOCK_SHARED_BLOCK] != 0);
-			dtrace_ls_enabled = dtrace_rwl_shared_spin || dtrace_rwl_shared_block;
-			if (dtrace_ls_enabled) {
-				/*
-				 * Either sleeping or spinning is happening,
-				 *  start a timing of our delay interval now.
-				 */
-				readers_at_sleep = lck->lck_rw_shared_count;
-				wait_interval = mach_absolute_time();
-			}
-		}
-#endif
-		if (istate == -1) {
-			istate = ml_get_interrupts_enabled();
-		}
-
-		deadline = lck_rw_deadline_for_spin(lck);
-
-		KERNEL_DEBUG(MACHDBG_CODE(DBG_MACH_LOCKS, LCK_RW_LCK_SHARED_SPIN_CODE) | DBG_FUNC_START,
-		    trace_lck, lck->lck_rw_want_write, lck->lck_rw_want_upgrade, 0, 0);
-
-		while (((gotlock = lck_rw_grab_shared(lck)) == 0) && mach_absolute_time() < deadline) {
-			lck_rw_lock_pause(istate);
-		}
-
-		KERNEL_DEBUG(MACHDBG_CODE(DBG_MACH_LOCKS, LCK_RW_LCK_SHARED_SPIN_CODE) | DBG_FUNC_END,
-		    trace_lck, lck->lck_rw_want_write, lck->lck_rw_want_upgrade, gotlock, 0);
-
-		if (gotlock) {
-			break;
-		}
-		/*
-		 * if we get here, the deadline has expired w/o us
-		 * being able to grab the lock for read
-		 * check to see if we're allowed to do a thread_block
-		 */
-		if (lck->lck_rw_can_sleep) {
-			istate = lck_interlock_lock(lck);
-
-			if ((lck->lck_rw_want_write || lck->lck_rw_want_upgrade) &&
-			    ((lck->lck_rw_shared_count == 0) || lck->lck_rw_priv_excl)) {
-				KERNEL_DEBUG(MACHDBG_CODE(DBG_MACH_LOCKS, LCK_RW_LCK_SHARED_WAIT_CODE) | DBG_FUNC_START,
-				    trace_lck, lck->lck_rw_want_write, lck->lck_rw_want_upgrade, 0, 0);
-
-				lck->lck_r_waiting = TRUE;
-
-				thread_set_pending_block_hint(current_thread(), kThreadWaitKernelRWLockRead);
-				res = assert_wait(RW_LOCK_READER_EVENT(lck),
-				    THREAD_UNINT | THREAD_WAIT_NOREPORT_USER);
-				lck_interlock_unlock(lck, istate);
-
-				if (res == THREAD_WAITING) {
-					res = thread_block(THREAD_CONTINUE_NULL);
-					slept++;
-				}
-				KERNEL_DEBUG(MACHDBG_CODE(DBG_MACH_LOCKS, LCK_RW_LCK_SHARED_WAIT_CODE) | DBG_FUNC_END,
-				    trace_lck, res, slept, 0, 0);
-			} else {
-				lck->lck_rw_shared_count++;
-				lck_interlock_unlock(lck, istate);
-				break;
-			}
-		}
-	}
-
-#if     CONFIG_DTRACE
-	if (dtrace_ls_enabled == TRUE) {
-		if (slept == 0) {
-			LOCKSTAT_RECORD(LS_LCK_RW_LOCK_SHARED_SPIN, lck, mach_absolute_time() - wait_interval, 0);
-		} else {
-			LOCKSTAT_RECORD(LS_LCK_RW_LOCK_SHARED_BLOCK, lck,
-			    mach_absolute_time() - wait_interval, 0,
-			    (readers_at_sleep == 0 ? 1 : 0), readers_at_sleep);
-		}
-	}
-	LOCKSTAT_RECORD(LS_LCK_RW_LOCK_SHARED_ACQUIRE, lck, 0);
-#endif
-}
-
-#define LCK_RW_LOCK_EXCLUSIVE_TAS(lck) (atomic_test_and_set32(&(lck)->data, \
-	    (LCK_RW_SHARED_MASK | LCK_RW_WANT_EXCL | LCK_RW_WANT_UPGRADE | LCK_RW_INTERLOCK), \
-	    LCK_RW_WANT_EXCL, memory_order_acquire_smp, FALSE))
-
-/*
- *	Routine:	lck_rw_lock_exclusive_check_contended
- */
-
-bool
-lck_rw_lock_exclusive_check_contended(lck_rw_t *lock)
-{
-	bool contended = false;
-	current_thread()->rwlock_count++;
-	if (LCK_RW_LOCK_EXCLUSIVE_TAS(lock)) {
-#if     CONFIG_DTRACE
-		LOCKSTAT_RECORD(LS_LCK_RW_LOCK_EXCL_ACQUIRE, lock, DTRACE_RW_EXCL);
-#endif  /* CONFIG_DTRACE */
-	} else {
-		contended = true;
-		lck_rw_lock_exclusive_gen(lock);
-	}
-	return contended;
-}
-
-/*
- *	Routine:	lck_rw_lock_exclusive
- */
-
-void
-lck_rw_lock_exclusive(lck_rw_t *lock)
-{
-	current_thread()->rwlock_count++;
-	if (LCK_RW_LOCK_EXCLUSIVE_TAS(lock)) {
-#if     CONFIG_DTRACE
-		LOCKSTAT_RECORD(LS_LCK_RW_LOCK_EXCL_ACQUIRE, lock, DTRACE_RW_EXCL);
-#endif  /* CONFIG_DTRACE */
-	} else {
-		lck_rw_lock_exclusive_gen(lock);
-	}
-}
-
-
-/*
- *	Routine:	lck_rw_lock_shared_to_exclusive
- *
- *	False returned upon failure, in this case the shared lock is dropped.
- */
-
-boolean_t
-lck_rw_lock_shared_to_exclusive(lck_rw_t *lock)
-{
-	uint32_t        data, prev;
-
-	for (;;) {
-		data = atomic_exchange_begin32(&lock->data, &prev, memory_order_acquire_smp);
-		if (data & LCK_RW_INTERLOCK) {
-			atomic_exchange_abort();
-			lck_rw_interlock_spin(lock);
-			continue;
-		}
-		if (data & LCK_RW_WANT_UPGRADE) {
-			data -= LCK_RW_SHARED_READER;
-			if ((data & LCK_RW_SHARED_MASK) == 0) {         /* we were the last reader */
-				data &= ~(LCK_RW_W_WAITING);            /* so clear the wait indicator */
-			}
-			if (atomic_exchange_complete32(&lock->data, prev, data, memory_order_acquire_smp)) {
-				return lck_rw_lock_shared_to_exclusive_failure(lock, prev);
-			}
-		} else {
-			data |= LCK_RW_WANT_UPGRADE;            /* ask for WANT_UPGRADE */
-			data -= LCK_RW_SHARED_READER;           /* and shed our read count */
-			if (atomic_exchange_complete32(&lock->data, prev, data, memory_order_acquire_smp)) {
-				break;
-			}
-		}
-		cpu_pause();
-	}
-	/* we now own the WANT_UPGRADE */
-	if (data & LCK_RW_SHARED_MASK) {        /* check to see if all of the readers are drained */
-		lck_rw_lock_shared_to_exclusive_success(lock);  /* if not, we need to go wait */
-	}
-#if     CONFIG_DTRACE
-	LOCKSTAT_RECORD(LS_LCK_RW_LOCK_SHARED_TO_EXCL_UPGRADE, lock, 0);
-#endif
-	return TRUE;
-}
-
-
-/*
- *	Routine:	lck_rw_lock_shared_to_exclusive_failure
- *	Function:
- *		assembly fast path code has already dropped our read
- *		count and determined that someone else owns 'lck_rw_want_upgrade'
- *		if 'lck_rw_shared_count' == 0, its also already dropped 'lck_w_waiting'
- *		all we need to do here is determine if a wakeup is needed
- */
-static boolean_t
-lck_rw_lock_shared_to_exclusive_failure(
-	lck_rw_t        *lck,
-	uint32_t        prior_lock_state)
-{
-	lck_rw_t        *fake_lck;
-	thread_t        thread = current_thread();
-	uint32_t        rwlock_count;
-
-	/* Check if dropping the lock means that we need to unpromote */
-	rwlock_count = thread->rwlock_count--;
-#if MACH_LDEBUG
-	if (rwlock_count == 0) {
-		panic("rw lock count underflow for thread %p", thread);
-	}
-#endif
-	fake_lck = (lck_rw_t *)&prior_lock_state;
-
-	if (fake_lck->lck_w_waiting && fake_lck->lck_rw_shared_count == 1) {
-		/*
-		 *	Someone else has requested upgrade.
-		 *	Since we've released the read lock, wake
-		 *	him up if he's blocked waiting
-		 */
-		thread_wakeup(RW_LOCK_WRITER_EVENT(lck));
-	}
-
-	if ((rwlock_count == 1 /* field now 0 */) && (thread->sched_flags & TH_SFLAG_RW_PROMOTED)) {
-		/* sched_flags checked without lock, but will be rechecked while clearing */
-		lck_rw_clear_promotion(thread, unslide_for_kdebug(lck));
-	}
-
-	KERNEL_DEBUG(MACHDBG_CODE(DBG_MACH_LOCKS, LCK_RW_LCK_SH_TO_EX_CODE) | DBG_FUNC_NONE,
-	    VM_KERNEL_UNSLIDE_OR_PERM(lck), lck->lck_rw_shared_count, lck->lck_rw_want_upgrade, 0, 0);
-
-	return FALSE;
-}
-
-
-/*
- *	Routine:	lck_rw_lock_shared_to_exclusive_failure
- *	Function:
- *		assembly fast path code has already dropped our read
- *		count and successfully acquired 'lck_rw_want_upgrade'
- *		we just need to wait for the rest of the readers to drain
- *		and then we can return as the exclusive holder of this lock
- */
-static boolean_t
-lck_rw_lock_shared_to_exclusive_success(
-	lck_rw_t        *lck)
-{
-	__kdebug_only uintptr_t trace_lck = unslide_for_kdebug(lck);
-	uint64_t        deadline = 0;
-	int             slept = 0;
-	int             still_shared = 0;
-	wait_result_t   res;
-	boolean_t       istate = -1;
-
-#if     CONFIG_DTRACE
-	uint64_t wait_interval = 0;
-	int readers_at_sleep = 0;
-	boolean_t dtrace_ls_initialized = FALSE;
-	boolean_t dtrace_rwl_shared_to_excl_spin, dtrace_rwl_shared_to_excl_block, dtrace_ls_enabled = FALSE;
-#endif
-
-	while (lck->lck_rw_shared_count != 0) {
-#if     CONFIG_DTRACE
-		if (dtrace_ls_initialized == FALSE) {
-			dtrace_ls_initialized = TRUE;
-			dtrace_rwl_shared_to_excl_spin = (lockstat_probemap[LS_LCK_RW_LOCK_SHARED_TO_EXCL_SPIN] != 0);
-			dtrace_rwl_shared_to_excl_block = (lockstat_probemap[LS_LCK_RW_LOCK_SHARED_TO_EXCL_BLOCK] != 0);
-			dtrace_ls_enabled = dtrace_rwl_shared_to_excl_spin || dtrace_rwl_shared_to_excl_block;
-			if (dtrace_ls_enabled) {
-				/*
-				 * Either sleeping or spinning is happening,
-				 *  start a timing of our delay interval now.
-				 */
-				readers_at_sleep = lck->lck_rw_shared_count;
-				wait_interval = mach_absolute_time();
-			}
-		}
-#endif
-		if (istate == -1) {
-			istate = ml_get_interrupts_enabled();
-		}
-
-		deadline = lck_rw_deadline_for_spin(lck);
-
-		KERNEL_DEBUG(MACHDBG_CODE(DBG_MACH_LOCKS, LCK_RW_LCK_SH_TO_EX_SPIN_CODE) | DBG_FUNC_START,
-		    trace_lck, lck->lck_rw_shared_count, 0, 0, 0);
-
-		while ((still_shared = lck->lck_rw_shared_count) && mach_absolute_time() < deadline) {
-			lck_rw_lock_pause(istate);
-		}
-
-		KERNEL_DEBUG(MACHDBG_CODE(DBG_MACH_LOCKS, LCK_RW_LCK_SH_TO_EX_SPIN_CODE) | DBG_FUNC_END,
-		    trace_lck, lck->lck_rw_shared_count, 0, 0, 0);
-
-		if (!still_shared) {
-			break;
-		}
-		/*
-		 * if we get here, the deadline has expired w/o
-		 * the rw_shared_count having drained to 0
-		 * check to see if we're allowed to do a thread_block
-		 */
-		if (lck->lck_rw_can_sleep) {
-			istate = lck_interlock_lock(lck);
-
-			if (lck->lck_rw_shared_count != 0) {
-				KERNEL_DEBUG(MACHDBG_CODE(DBG_MACH_LOCKS, LCK_RW_LCK_SH_TO_EX_WAIT_CODE) | DBG_FUNC_START,
-				    trace_lck, lck->lck_rw_shared_count, 0, 0, 0);
-
-				lck->lck_w_waiting = TRUE;
-
-				thread_set_pending_block_hint(current_thread(), kThreadWaitKernelRWLockUpgrade);
-				res = assert_wait(RW_LOCK_WRITER_EVENT(lck),
-				    THREAD_UNINT | THREAD_WAIT_NOREPORT_USER);
-				lck_interlock_unlock(lck, istate);
-
-				if (res == THREAD_WAITING) {
-					res = thread_block(THREAD_CONTINUE_NULL);
-					slept++;
-				}
-				KERNEL_DEBUG(MACHDBG_CODE(DBG_MACH_LOCKS, LCK_RW_LCK_SH_TO_EX_WAIT_CODE) | DBG_FUNC_END,
-				    trace_lck, res, slept, 0, 0);
-			} else {
-				lck_interlock_unlock(lck, istate);
-				break;
-			}
-		}
-	}
-#if     CONFIG_DTRACE
-	/*
-	 * We infer whether we took the sleep/spin path above by checking readers_at_sleep.
-	 */
-	if (dtrace_ls_enabled == TRUE) {
-		if (slept == 0) {
-			LOCKSTAT_RECORD(LS_LCK_RW_LOCK_SHARED_TO_EXCL_SPIN, lck, mach_absolute_time() - wait_interval, 0);
-		} else {
-			LOCKSTAT_RECORD(LS_LCK_RW_LOCK_SHARED_TO_EXCL_BLOCK, lck,
-			    mach_absolute_time() - wait_interval, 1,
-			    (readers_at_sleep == 0 ? 1 : 0), readers_at_sleep);
-		}
-	}
-	LOCKSTAT_RECORD(LS_LCK_RW_LOCK_SHARED_TO_EXCL_UPGRADE, lck, 1);
-#endif
-	return TRUE;
-}
-
-/*
- *	Routine:	lck_rw_lock_exclusive_to_shared
- */
-
-void
-lck_rw_lock_exclusive_to_shared(lck_rw_t *lock)
-{
-	uint32_t        data, prev;
-
-	for (;;) {
-		data = atomic_exchange_begin32(&lock->data, &prev, memory_order_release_smp);
-		if (data & LCK_RW_INTERLOCK) {
-			atomic_exchange_abort();
-			lck_rw_interlock_spin(lock);    /* wait for interlock to clear */
-			continue;
-		}
-		data += LCK_RW_SHARED_READER;
-		if (data & LCK_RW_WANT_UPGRADE) {
-			data &= ~(LCK_RW_WANT_UPGRADE);
-		} else {
-			data &= ~(LCK_RW_WANT_EXCL);
-		}
-		if (!((prev & LCK_RW_W_WAITING) && (prev & LCK_RW_PRIV_EXCL))) {
-			data &= ~(LCK_RW_W_WAITING);
-		}
-		if (atomic_exchange_complete32(&lock->data, prev, data, memory_order_release_smp)) {
-			break;
-		}
-		cpu_pause();
-	}
-	return lck_rw_lock_exclusive_to_shared_gen(lock, prev);
-}
-
-
-/*
- *      Routine:        lck_rw_lock_exclusive_to_shared_gen
- *      Function:
- *		assembly fast path has already dropped
- *		our exclusive state and bumped lck_rw_shared_count
- *		all we need to do here is determine if anyone
- *		needs to be awakened.
- */
-static void
-lck_rw_lock_exclusive_to_shared_gen(
-	lck_rw_t        *lck,
-	uint32_t        prior_lock_state)
-{
-	__kdebug_only uintptr_t trace_lck = unslide_for_kdebug(lck);
-	lck_rw_t                *fake_lck;
-
-	fake_lck = (lck_rw_t *)&prior_lock_state;
-
-	KERNEL_DEBUG(MACHDBG_CODE(DBG_MACH_LOCKS, LCK_RW_LCK_EX_TO_SH_CODE) | DBG_FUNC_START,
-	    trace_lck, fake_lck->lck_rw_want_write, fake_lck->lck_rw_want_upgrade, 0, 0);
-
-	/*
-	 * don't wake up anyone waiting to take the lock exclusively
-	 * since we hold a read count... when the read count drops to 0,
-	 * the writers will be woken.
-	 *
-	 * wake up any waiting readers if we don't have any writers waiting,
-	 * or the lock is NOT marked as rw_priv_excl (writers have privilege)
-	 */
-	if (!(fake_lck->lck_rw_priv_excl && fake_lck->lck_w_waiting) && fake_lck->lck_r_waiting) {
-		thread_wakeup(RW_LOCK_READER_EVENT(lck));
-	}
-
-	KERNEL_DEBUG(MACHDBG_CODE(DBG_MACH_LOCKS, LCK_RW_LCK_EX_TO_SH_CODE) | DBG_FUNC_END,
-	    trace_lck, lck->lck_rw_want_write, lck->lck_rw_want_upgrade, lck->lck_rw_shared_count, 0);
-
-#if CONFIG_DTRACE
-	LOCKSTAT_RECORD(LS_LCK_RW_LOCK_EXCL_TO_SHARED_DOWNGRADE, lck, 0);
-#endif
-}
-
-
-/*
- *      Routine:        lck_rw_try_lock
- */
-boolean_t
-lck_rw_try_lock(
-	lck_rw_t        *lck,
-	lck_rw_type_t   lck_rw_type)
-{
-	if (lck_rw_type == LCK_RW_TYPE_SHARED) {
-		return lck_rw_try_lock_shared(lck);
-	} else if (lck_rw_type == LCK_RW_TYPE_EXCLUSIVE) {
-		return lck_rw_try_lock_exclusive(lck);
-	} else {
-		panic("lck_rw_try_lock(): Invalid rw lock type: %x\n", lck_rw_type);
-	}
-	return FALSE;
-}
-
-/*
- *	Routine:	lck_rw_try_lock_shared
- */
-
-boolean_t
-lck_rw_try_lock_shared(lck_rw_t *lock)
-{
-	uint32_t        data, prev;
-
-	for (;;) {
-		data = atomic_exchange_begin32(&lock->data, &prev, memory_order_acquire_smp);
-		if (data & LCK_RW_INTERLOCK) {
-			atomic_exchange_abort();
-			lck_rw_interlock_spin(lock);
-			continue;
-		}
-		if (data & (LCK_RW_WANT_EXCL | LCK_RW_WANT_UPGRADE)) {
-			atomic_exchange_abort();
-			return FALSE;                   /* lock is busy */
-		}
-		data += LCK_RW_SHARED_READER;           /* Increment reader refcount */
-		if (atomic_exchange_complete32(&lock->data, prev, data, memory_order_acquire_smp)) {
-			break;
-		}
-		cpu_pause();
-	}
-	current_thread()->rwlock_count++;
-	/* There is a 3 instr window where preemption may not notice rwlock_count after cmpxchg */
-#if     CONFIG_DTRACE
-	LOCKSTAT_RECORD(LS_LCK_RW_TRY_LOCK_SHARED_ACQUIRE, lock, DTRACE_RW_SHARED);
-#endif  /* CONFIG_DTRACE */
-	return TRUE;
-}
-
-
-/*
- *	Routine:	lck_rw_try_lock_exclusive
- */
-
-boolean_t
-lck_rw_try_lock_exclusive(lck_rw_t *lock)
-{
-	uint32_t        data, prev;
-
-	for (;;) {
-		data = atomic_exchange_begin32(&lock->data, &prev, memory_order_acquire_smp);
-		if (data & LCK_RW_INTERLOCK) {
-			atomic_exchange_abort();
-			lck_rw_interlock_spin(lock);
-			continue;
-		}
-		if (data & (LCK_RW_SHARED_MASK | LCK_RW_WANT_EXCL | LCK_RW_WANT_UPGRADE)) {
-			atomic_exchange_abort();
-			return FALSE;                           /* can't get it */
-		}
-		data |= LCK_RW_WANT_EXCL;
-		if (atomic_exchange_complete32(&lock->data, prev, data, memory_order_acquire_smp)) {
-			break;
-		}
-		cpu_pause();
-	}
-
-	current_thread()->rwlock_count++;
-#if     CONFIG_DTRACE
-	LOCKSTAT_RECORD(LS_LCK_RW_TRY_LOCK_EXCL_ACQUIRE, lock, DTRACE_RW_EXCL);
-#endif  /* CONFIG_DTRACE */
-	return TRUE;
-}
-
-
-void
-lck_rw_assert(
-	lck_rw_t        *lck,
-	unsigned int    type)
-{
-	switch (type) {
-	case LCK_RW_ASSERT_SHARED:
-		if (lck->lck_rw_shared_count != 0) {
-			return;
-		}
-		break;
-	case LCK_RW_ASSERT_EXCLUSIVE:
-		if ((lck->lck_rw_want_write ||
-		    lck->lck_rw_want_upgrade) &&
-		    lck->lck_rw_shared_count == 0) {
-			return;
-		}
-		break;
-	case LCK_RW_ASSERT_HELD:
-		if (lck->lck_rw_want_write ||
-		    lck->lck_rw_want_upgrade ||
-		    lck->lck_rw_shared_count != 0) {
-			return;
-		}
-		break;
-	case LCK_RW_ASSERT_NOTHELD:
-		if (!(lck->lck_rw_want_write ||
-		    lck->lck_rw_want_upgrade ||
-		    lck->lck_rw_shared_count != 0)) {
-			return;
-		}
-		break;
-	default:
-		break;
-	}
-
-	panic("rw lock (%p)%s held (mode=%u), first word %08x\n", lck, (type == LCK_RW_ASSERT_NOTHELD ? "" : " not"), type, *(uint32_t *)lck);
-}
-
-/* On return to userspace, this routine is called if the rwlock_count is somehow imbalanced */
-#if MACH_LDEBUG
-__dead2
-#endif
-void
-lck_rw_clear_promotions_x86(thread_t thread)
-{
-#if MACH_LDEBUG
-	/* It's fatal to leave a RW lock locked and return to userspace */
-	panic("%u rw lock(s) held on return to userspace for thread %p", thread->rwlock_count, thread);
-#else
-	/* Paper over the issue */
-	thread->rwlock_count = 0;
-	lck_rw_clear_promotion(thread, 0);
-#endif
-}
-
-boolean_t
-lck_rw_lock_yield_shared(lck_rw_t *lck, boolean_t force_yield)
-{
-	lck_rw_assert(lck, LCK_RW_ASSERT_SHARED);
-
-	if (lck->lck_rw_want_write || lck->lck_rw_want_upgrade || force_yield) {
-		lck_rw_unlock_shared(lck);
-		mutex_pause(2);
-		lck_rw_lock_shared(lck);
-		return TRUE;
-	}
-
-	return FALSE;
-}
-
-/*
- * Routine: kdp_lck_rw_lock_is_acquired_exclusive
- * NOT SAFE: To be used only by kernel debugger to avoid deadlock.
- */
-boolean_t
-kdp_lck_rw_lock_is_acquired_exclusive(lck_rw_t *lck)
-{
-	if (not_in_kdp) {
-		panic("panic: rw lock exclusive check done outside of kernel debugger");
-	}
-	return ((lck->lck_rw_want_upgrade || lck->lck_rw_want_write) && (lck->lck_rw_shared_count == 0)) ? TRUE : FALSE;
-}
-
-/*
  * Slow path routines for lck_mtx locking and unlocking functions.
  *
  * These functions were previously implemented in x86 assembly,
@@ -2185,7 +1014,7 @@ lck_mtx_alloc_init(
 {
 	lck_mtx_t *lck;
 
-	lck = zalloc(ZV_LCK_MTX);
+	lck = zalloc(KT_LCK_MTX);
 	lck_mtx_init(lck, grp, attr);
 	return lck;
 }
@@ -2199,7 +1028,7 @@ lck_mtx_free(
 	lck_grp_t       *grp)
 {
 	lck_mtx_destroy(lck, grp);
-	zfree(ZV_LCK_MTX, lck);
+	zfree(KT_LCK_MTX, lck);
 }
 
 /*
@@ -2247,7 +1076,7 @@ lck_mtx_init(
 	}
 
 	if ((lck_attr->lck_attr_val) & LCK_ATTR_DEBUG) {
-		lck_ext = zalloc(ZV_LCK_MTX_EXT);
+		lck_ext = zalloc(KT_LCK_MTX_EXT);
 		lck_mtx_ext_init(lck_ext, grp, lck_attr);
 		lck->lck_mtx_tag = LCK_MTX_TAG_INDIRECT;
 		lck->lck_mtx_ptr = lck_ext;
@@ -2334,7 +1163,7 @@ lck_mtx_destroy(
 	lck_mtx_lock_mark_destroyed(lck, indirect);
 
 	if (indirect) {
-		zfree(ZV_LCK_MTX_EXT, lck->lck_mtx_ptr);
+		zfree(KT_LCK_MTX_EXT, lck->lck_mtx_ptr);
 	}
 	lck_grp_lckcnt_decr(grp, LCK_TYPE_MTX);
 	lck_grp_deallocate(grp);
@@ -2529,7 +1358,6 @@ lck_mtx_lock_acquire_inline(
 	    trace_lck, 0, mutex->lck_mtx_waiters, 0, 0);
 
 	thread_t thread = (thread_t)mutex->lck_mtx_owner;       /* faster than current_thread() */
-	assert(thread->waiting_for_mutex == NULL);
 
 	if (mutex->lck_mtx_waiters > 0) {
 		if (ts == NULL) {
@@ -2751,7 +1579,7 @@ try_again:
 		 */
 		break;
 	default:
-		panic("lck_mtx_lock_spinwait_x86 returned %d for mutex %p\n", ret, lock);
+		panic("lck_mtx_lock_spinwait_x86 returned %d for mutex %p", ret, lock);
 	}
 
 	/*
@@ -3249,12 +2077,12 @@ lck_mtx_assert(
 
 	if (type == LCK_MTX_ASSERT_OWNED) {
 		if (owner != thread || !(state & (LCK_MTX_ILOCKED_MSK | LCK_MTX_MLOCKED_MSK))) {
-			panic("mutex (%p) not owned\n", lock);
+			panic("mutex (%p) not owned", lock);
 		}
 	} else {
 		assert(type == LCK_MTX_ASSERT_NOTOWNED);
 		if (owner == thread) {
-			panic("mutex (%p) owned\n", lock);
+			panic("mutex (%p) owned", lock);
 		}
 	}
 }
@@ -3566,8 +2394,6 @@ lck_mtx_lock_wait_x86(
 	    trace_lck, VM_KERNEL_UNSLIDE_OR_PERM(mutex->lck_mtx_owner),
 	    mutex->lck_mtx_waiters, 0, 0);
 
-	assert(self->waiting_for_mutex == NULL);
-	self->waiting_for_mutex = mutex;
 	mutex->lck_mtx_waiters++;
 
 	thread_t holder = (thread_t)mutex->lck_mtx_owner;
@@ -3593,8 +2419,6 @@ lck_mtx_lock_wait_x86(
 	turnstile_update_inheritor_complete(turnstile, TURNSTILE_INTERLOCK_NOT_HELD);
 
 	thread_block(THREAD_CONTINUE_NULL);
-
-	self->waiting_for_mutex = NULL;
 
 	KERNEL_DEBUG(MACHDBG_CODE(DBG_MACH_LOCKS, LCK_MTX_LCK_WAIT_CODE) | DBG_FUNC_END,
 	    trace_lck, VM_KERNEL_UNSLIDE_OR_PERM(mutex->lck_mtx_owner),
@@ -3643,24 +2467,4 @@ kdp_lck_mtx_find_owner(__unused struct waitq * waitq, event64_t event, thread_wa
 	waitinfo->context = VM_KERNEL_UNSLIDE_OR_PERM(mutex);
 	thread_t holder   = (thread_t)mutex->lck_mtx_owner;
 	waitinfo->owner   = thread_tid(holder);
-}
-
-void
-kdp_rwlck_find_owner(__unused struct waitq * waitq, event64_t event, thread_waitinfo_t * waitinfo)
-{
-	lck_rw_t *rwlck = NULL;
-	switch (waitinfo->wait_type) {
-	case kThreadWaitKernelRWLockRead:
-		rwlck = READ_EVENT_TO_RWLOCK(event);
-		break;
-	case kThreadWaitKernelRWLockWrite:
-	case kThreadWaitKernelRWLockUpgrade:
-		rwlck = WRITE_EVENT_TO_RWLOCK(event);
-		break;
-	default:
-		panic("%s was called with an invalid blocking type", __FUNCTION__);
-		break;
-	}
-	waitinfo->context = VM_KERNEL_UNSLIDE_OR_PERM(rwlck);
-	waitinfo->owner = 0;
 }

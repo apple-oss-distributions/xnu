@@ -48,7 +48,6 @@
 #include <sys/mount.h>
 #include <sys/sysproto.h>
 #include <mach/message.h>
-#include <mach/host_security.h>
 
 #include <kern/locks.h>
 
@@ -57,10 +56,10 @@
  * Authorization scopes.
  */
 
-lck_grp_t *kauth_lck_grp;
-static lck_mtx_t *kauth_scope_mtx;
-#define KAUTH_SCOPELOCK()       lck_mtx_lock(kauth_scope_mtx);
-#define KAUTH_SCOPEUNLOCK()     lck_mtx_unlock(kauth_scope_mtx);
+LCK_GRP_DECLARE(kauth_lck_grp, "kauth");
+static LCK_MTX_DECLARE(kauth_scope_mtx, &kauth_lck_grp);
+#define KAUTH_SCOPELOCK()       lck_mtx_lock(&kauth_scope_mtx);
+#define KAUTH_SCOPEUNLOCK()     lck_mtx_unlock(&kauth_scope_mtx);
 
 /*
  * We support listeners for scopes that have not been registered yet.
@@ -92,7 +91,8 @@ struct kauth_local_listener {
 };
 typedef struct kauth_local_listener *kauth_local_listener_t;
 
-static TAILQ_HEAD(, kauth_listener) kauth_dangling_listeners;
+static TAILQ_HEAD(, kauth_listener) kauth_dangling_listeners =
+    TAILQ_HEAD_INITIALIZER(kauth_dangling_listeners);
 
 /*
  * Scope listeners need to be reworked to be dynamic.
@@ -114,7 +114,7 @@ struct kauth_scope {
 /* values for kauth_scope.ks_flags */
 #define KS_F_HAS_LISTENERS              (1 << 0)
 
-static TAILQ_HEAD(, kauth_scope) kauth_scopes;
+static TAILQ_HEAD(, kauth_scope) kauth_scopes = TAILQ_HEAD_INITIALIZER(kauth_scopes);
 
 static int kauth_add_callback_to_scope(kauth_scope_t sp, kauth_listener_t klp);
 static void     kauth_scope_init(void);
@@ -142,35 +142,13 @@ extern void             release_pathbuff(char *path);
 void
 kauth_init(void)
 {
-	lck_grp_attr_t  *grp_attributes;
-
-	TAILQ_INIT(&kauth_scopes);
-	TAILQ_INIT(&kauth_dangling_listeners);
-
-	/* set up our lock group */
-	grp_attributes = lck_grp_attr_alloc_init();
-	kauth_lck_grp = lck_grp_alloc_init("kauth", grp_attributes);
-	lck_grp_attr_free(grp_attributes);
-
 	/* bring up kauth subsystem components */
-	kauth_cred_init();
-#if CONFIG_EXT_RESOLVER
-	kauth_identity_init();
-	kauth_groups_init();
-#endif
 	kauth_scope_init();
-#if CONFIG_EXT_RESOLVER
-	kauth_resolver_init();
-#endif
-	/* can't alloc locks after this */
-	lck_grp_free(kauth_lck_grp);
-	kauth_lck_grp = NULL;
 }
 
 static void
 kauth_scope_init(void)
 {
-	kauth_scope_mtx = lck_mtx_alloc_init(kauth_lck_grp, 0 /*LCK_ATTR_NULL*/);
 	kauth_scope_process = kauth_register_scope(KAUTH_SCOPE_PROCESS, kauth_authorize_process_callback, NULL);
 	kauth_scope_generic = kauth_register_scope(KAUTH_SCOPE_GENERIC, kauth_authorize_generic_callback, NULL);
 	kauth_scope_fileop = kauth_register_scope(KAUTH_SCOPE_FILEOP, NULL, NULL);
@@ -188,10 +166,7 @@ kauth_alloc_scope(const char *identifier, kauth_scope_callback_t callback, void 
 	/*
 	 * Allocate and populate the scope structure.
 	 */
-	MALLOC(sp, kauth_scope_t, sizeof(*sp), M_KAUTH, M_WAITOK | M_ZERO);
-	if (sp == NULL) {
-		return NULL;
-	}
+	sp = kalloc_type(struct kauth_scope, Z_WAITOK | Z_ZERO | Z_NOFAIL);
 	sp->ks_flags = 0;
 	sp->ks_identifier = identifier;
 	sp->ks_idata = idata;
@@ -207,10 +182,7 @@ kauth_alloc_listener(const char *identifier, kauth_scope_callback_t callback, vo
 	/*
 	 * Allocate and populate the listener structure.
 	 */
-	MALLOC(lsp, kauth_listener_t, sizeof(*lsp), M_KAUTH, M_WAITOK);
-	if (lsp == NULL) {
-		return NULL;
-	}
+	lsp = kalloc_type(struct kauth_listener, Z_WAITOK | Z_NOFAIL);
 	lsp->kl_identifier = identifier;
 	lsp->kl_idata = idata;
 	lsp->kl_callback = callback;
@@ -236,7 +208,7 @@ kauth_register_scope(const char *identifier, kauth_scope_callback_t callback, vo
 		if (strncmp(tsp->ks_identifier, identifier,
 		    strlen(tsp->ks_identifier) + 1) == 0) {
 			KAUTH_SCOPEUNLOCK();
-			FREE(sp, M_KAUTH);
+			kfree_type(struct kauth_scope, sp);
 			return NULL;
 		}
 	}
@@ -294,7 +266,7 @@ kauth_deregister_scope(kauth_scope_t scope)
 		}
 	}
 	KAUTH_SCOPEUNLOCK();
-	FREE(scope, M_KAUTH);
+	kfree_type(struct kauth_scope, scope);
 
 	return;
 }
@@ -323,7 +295,7 @@ kauth_listen_scope(const char *identifier, kauth_scope_callback_t callback, void
 			}
 			/* table already full */
 			KAUTH_SCOPEUNLOCK();
-			FREE(klp, M_KAUTH);
+			kfree_type(struct kauth_listener, klp);
 			return NULL;
 		}
 	}
@@ -367,7 +339,7 @@ kauth_unlisten_scope(kauth_listener_t listener)
 					sp->ks_flags &= ~KS_F_HAS_LISTENERS;
 				}
 				KAUTH_SCOPEUNLOCK();
-				FREE(listener, M_KAUTH);
+				kfree_type(struct kauth_listener, listener);
 				return;
 			}
 		}
@@ -378,7 +350,7 @@ kauth_unlisten_scope(kauth_listener_t listener)
 		if (klp == listener) {
 			TAILQ_REMOVE(&kauth_dangling_listeners, klp, kl_link);
 			KAUTH_SCOPEUNLOCK();
-			FREE(listener, M_KAUTH);
+			kfree_type(struct kauth_listener, listener);
 			return;
 		}
 	}
@@ -640,6 +612,16 @@ kauth_acl_evaluate(kauth_cred_t cred, kauth_acl_eval_t eval)
 	guid_t guid;
 	uint32_t rights;
 	int wkguid;
+
+	if (cred == NULL) {
+		KAUTH_DEBUG("    ACL - got NULL credential");
+		return EINVAL;
+	}
+
+	if (eval == NULL) {
+		KAUTH_DEBUG("    ACL - got NULL ACL evaluator");
+		return EINVAL;
+	}
 
 	/* always allowed to do nothing */
 	if (eval->ae_requested == 0) {
@@ -1084,7 +1066,7 @@ kauth_filesec_alloc(int count)
 		return NULL;
 	}
 
-	MALLOC(fsp, kauth_filesec_t, KAUTH_FILESEC_SIZE(count), M_KAUTH, M_WAITOK);
+	fsp = kalloc_data(KAUTH_FILESEC_SIZE(count), Z_WAITOK);
 	if (fsp != NULL) {
 		fsp->fsec_magic = KAUTH_FILESEC_MAGIC;
 		fsp->fsec_owner = kauth_null_guid;
@@ -1118,7 +1100,7 @@ kauth_filesec_free(kauth_filesec_t fsp)
 		panic("freeing KAUTH_FILESEC_WANTED");
 	}
 #endif
-	FREE(fsp, M_KAUTH);
+	kfree_data_addr(fsp);
 }
 
 /*
@@ -1206,7 +1188,7 @@ kauth_acl_alloc(int count)
 		return NULL;
 	}
 
-	MALLOC(aclp, kauth_acl_t, KAUTH_ACL_SIZE(count), M_KAUTH, M_WAITOK);
+	aclp = kheap_alloc(KM_KAUTH, KAUTH_ACL_SIZE(count), Z_WAITOK);
 	if (aclp != NULL) {
 		aclp->acl_entrycount = 0;
 		aclp->acl_flags = 0;
@@ -1217,7 +1199,11 @@ kauth_acl_alloc(int count)
 void
 kauth_acl_free(kauth_acl_t aclp)
 {
-	FREE(aclp, M_KAUTH);
+	/*
+	 * It's possible this may have have been allocated in a kext using
+	 * MALLOC. Using KHEAP_ANY will allow us to free it here.
+	 */
+	kheap_free_addr(KHEAP_ANY, aclp);
 }
 
 

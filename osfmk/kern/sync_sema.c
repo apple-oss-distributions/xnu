@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2020 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -47,7 +47,6 @@
 #include <kern/sync_sema.h>
 #include <kern/spl.h>
 #include <kern/ipc_kobject.h>
-#include <kern/ipc_sync.h>
 #include <kern/ipc_tt.h>
 #include <kern/thread.h>
 #include <kern/clock.h>
@@ -58,76 +57,34 @@
 #include <kern/zalloc.h>
 #include <kern/mach_param.h>
 
-#include <libkern/OSAtomic.h>
-
-static unsigned int semaphore_event;
+static const uint8_t semaphore_event;
 #define SEMAPHORE_EVENT CAST_EVENT64_T(&semaphore_event)
 
-ZONE_DECLARE(semaphore_zone, "semaphores", sizeof(struct semaphore), ZC_NONE);
+static SECURITY_READ_ONLY_LATE(zone_t) semaphore_zone;
+ZONE_INIT(&semaphore_zone, "semaphores", sizeof(struct semaphore),
+#if CONFIG_WAITQ_IRQSAFE_ALLOW_INVALID
+    ZC_NOGZALLOC | ZC_KASAN_NOQUARANTINE | ZC_SEQUESTER |
+#endif
+    ZC_ZFREE_CLEARMEM, ZONE_ID_SEMAPHORE, NULL);
 
 os_refgrp_decl(static, sema_refgrp, "semaphore", NULL);
 
 /* Forward declarations */
 
-
-kern_return_t
-semaphore_wait_trap_internal(
-	mach_port_name_t name,
-	void (*caller_cont)(kern_return_t));
-
-kern_return_t
-semaphore_wait_signal_trap_internal(
-	mach_port_name_t wait_name,
-	mach_port_name_t signal_name,
-	void (*caller_cont)(kern_return_t));
-
-kern_return_t
-semaphore_timedwait_trap_internal(
-	mach_port_name_t name,
-	unsigned int sec,
-	clock_res_t nsec,
-	void (*caller_cont)(kern_return_t));
-
-kern_return_t
-semaphore_timedwait_signal_trap_internal(
-	mach_port_name_t wait_name,
-	mach_port_name_t signal_name,
-	unsigned int sec,
-	clock_res_t nsec,
-	void (*caller_cont)(kern_return_t));
-
-kern_return_t
-semaphore_signal_internal_trap(mach_port_name_t sema_name);
-
-kern_return_t
-semaphore_signal_internal(
-	semaphore_t             semaphore,
-	thread_t                        thread,
-	int                             options);
-
-kern_return_t
-semaphore_convert_wait_result(
-	int                             wait_result);
-
-void
-semaphore_wait_continue(void *arg __unused, wait_result_t wr);
-
-static kern_return_t
-semaphore_wait_internal(
-	semaphore_t             wait_semaphore,
-	semaphore_t             signal_semaphore,
-	uint64_t                deadline,
-	int                             option,
-	void (*caller_cont)(kern_return_t));
+static inline bool
+semaphore_active(semaphore_t semaphore)
+{
+	return semaphore->owner != TASK_NULL;
+}
 
 static __inline__ uint64_t
 semaphore_deadline(
 	unsigned int            sec,
-	clock_res_t                     nsec)
+	clock_res_t             nsec)
 {
-	uint64_t        abstime;
+	uint64_t abstime;
 
-	nanoseconds_to_absolutetime((uint64_t)sec *     NSEC_PER_SEC + nsec, &abstime);
+	nanotime_to_absolutetime(sec, nsec, &abstime);
 	clock_absolutetime_interval_to_deadline(abstime, &abstime);
 
 	return abstime;
@@ -146,42 +103,39 @@ semaphore_create(
 	int                     policy,
 	int                     value)
 {
-	semaphore_t             s = SEMAPHORE_NULL;
-	kern_return_t           kret;
+	semaphore_t s = SEMAPHORE_NULL;
 
 	*new_semaphore = SEMAPHORE_NULL;
-	if (task == TASK_NULL || value < 0 || policy > SYNC_POLICY_MAX || policy < 0) {
+	if (task == TASK_NULL || value < 0 || (policy & ~SYNC_POLICY_USER_MASK)) {
 		return KERN_INVALID_ARGUMENT;
 	}
 
-	s = (semaphore_t) zalloc(semaphore_zone);
-
-	if (s == SEMAPHORE_NULL) {
-		return KERN_RESOURCE_SHORTAGE;
-	}
-
-	kret = waitq_init(&s->waitq, policy | SYNC_POLICY_DISABLE_IRQ); /* also inits lock */
-	if (kret != KERN_SUCCESS) {
-		zfree(semaphore_zone, s);
-		return kret;
-	}
-
-	/*
-	 * Initialize the semaphore values.
-	 */
-	s->port = IP_NULL;
-	os_ref_init(&s->ref_count, &sema_refgrp);
-	s->count = value;
-	s->active = TRUE;
-	s->owner = task;
+	s = zalloc_flags(semaphore_zone, Z_ZERO | Z_WAITOK | Z_NOFAIL);
 
 	/*
 	 *  Associate the new semaphore with the task by adding
 	 *  the new semaphore to the task's semaphore list.
 	 */
 	task_lock(task);
-	enqueue_head(&task->semaphore_list, (queue_entry_t) s);
+	/* Check for race with task_terminate */
+	if (!task->active) {
+		task_unlock(task);
+		zfree(semaphore_zone, s);
+		return KERN_INVALID_TASK;
+	}
+
+	waitq_init(&s->waitq, policy |
+	    SYNC_POLICY_DISABLE_IRQ | SYNC_POLICY_INIT_LOCKED);
+
+	/* init everything under both the task and semaphore locks */
+	os_ref_init_raw(&s->ref_count, &sema_refgrp);
+	s->count = value;
+	s->owner = task;
+	enqueue_head(&task->semaphore_list, &s->task_link);
 	task->semaphores_owned++;
+
+	semaphore_unlock(s);
+
 	task_unlock(task);
 
 	*new_semaphore = s;
@@ -197,33 +151,33 @@ semaphore_create(
  *
  *	Conditions:
  *			task is locked
- *			semaphore is locked
  *			semaphore is owned by the specified task
+ *			disabling interrupts (splsched) is the responsibility of the caller.
  *	Returns:
  *			with semaphore unlocked
  */
 static void
 semaphore_destroy_internal(
 	task_t                  task,
-	semaphore_t             semaphore)
+	semaphore_t             semaphore,
+	bool                    semaphore_locked)
 {
-	int                     old_count;
+	int old_count;
 
 	/* unlink semaphore from owning task */
 	assert(semaphore->owner == task);
-	remqueue((queue_entry_t) semaphore);
-	semaphore->owner = TASK_NULL;
+	remqueue(&semaphore->task_link);
 	task->semaphores_owned--;
 
 	/*
-	 *  Deactivate semaphore
+	 * deactivate semaphore under both locks
+	 * and then wake up all waiters.
 	 */
-	assert(semaphore->active);
-	semaphore->active = FALSE;
+	if (!semaphore_locked) {
+		semaphore_lock(semaphore);
+	}
 
-	/*
-	 *  Wakeup blocked threads
-	 */
+	semaphore->owner = TASK_NULL;
 	old_count = semaphore->count;
 	semaphore->count = 0;
 
@@ -235,8 +189,91 @@ semaphore_destroy_internal(
 		    WAITQ_UNLOCK);
 		/* waitq/semaphore is unlocked */
 	} else {
+		assert(queue_empty(&semaphore->waitq.waitq_queue));
 		semaphore_unlock(semaphore);
 	}
+}
+
+/*
+ *	Routine:	semaphore_free
+ *
+ *	Free a semaphore that hit a 0 refcount.
+ *
+ *	Conditions:
+ *			Nothing is locked.
+ */
+__attribute__((noinline))
+static void
+semaphore_free(
+	semaphore_t             semaphore)
+{
+	ipc_port_t port;
+	task_t task;
+
+	/*
+	 * Last ref, clean up the port [if any]
+	 * associated with the semaphore, destroy
+	 * it (if still active) and then free
+	 * the semaphore.
+	 */
+	port = semaphore->port;
+	if (IP_VALID(port)) {
+		assert(!port->ip_srights);
+		ipc_kobject_dealloc_port(port, 0, IKOT_SEMAPHORE);
+	}
+
+	/*
+	 * If the semaphore owned by the current task,
+	 * we know the current task can't go away,
+	 * so we can take locks in the right order.
+	 *
+	 * Else we try to take locks in the "wrong" order
+	 * but if we fail to, we take a task ref and do it "right".
+	 */
+	task = current_task();
+	if (semaphore->owner == task) {
+		task_lock(task);
+		if (semaphore->owner == task) {
+			spl_t s = splsched();
+			semaphore_destroy_internal(task, semaphore, false);
+			splx(s);
+		} else {
+			assert(semaphore->owner == TASK_NULL);
+		}
+		task_unlock(task);
+	} else {
+		spl_t s = splsched();
+
+		semaphore_lock(semaphore);
+
+		task = semaphore->owner;
+		if (task == TASK_NULL) {
+			semaphore_unlock(semaphore);
+			splx(s);
+		} else if (task_lock_try(task)) {
+			semaphore_destroy_internal(task, semaphore, true);
+			splx(s);
+			/* semaphore unlocked */
+			task_unlock(task);
+		} else {
+			task_reference(task);
+			semaphore_unlock(semaphore);
+			splx(s);
+
+			task_lock(task);
+			if (semaphore->owner == task) {
+				s = splsched();
+				semaphore_destroy_internal(task, semaphore, false);
+				splx(s);
+			}
+			task_unlock(task);
+
+			task_deallocate(task);
+		}
+	}
+
+	waitq_deinit(&semaphore->waitq);
+	zfree(semaphore_zone, semaphore);
 }
 
 /*
@@ -250,8 +287,6 @@ semaphore_destroy(
 	task_t                  task,
 	semaphore_t             semaphore)
 {
-	spl_t spl_level;
-
 	if (semaphore == SEMAPHORE_NULL) {
 		return KERN_INVALID_ARGUMENT;
 	}
@@ -261,23 +296,15 @@ semaphore_destroy(
 		return KERN_INVALID_ARGUMENT;
 	}
 
-	task_lock(task);
-	spl_level = splsched();
-	semaphore_lock(semaphore);
-
-	if (semaphore->owner != task) {
-		semaphore_unlock(semaphore);
-		semaphore_dereference(semaphore);
-		splx(spl_level);
+	if (semaphore->owner == task) {
+		task_lock(task);
+		if (semaphore->owner == task) {
+			spl_t spl_level = splsched();
+			semaphore_destroy_internal(task, semaphore, false);
+			splx(spl_level);
+		}
 		task_unlock(task);
-		return KERN_INVALID_ARGUMENT;
 	}
-
-	semaphore_destroy_internal(task, semaphore);
-	/* semaphore unlocked */
-
-	splx(spl_level);
-	task_unlock(task);
 
 	semaphore_dereference(semaphore);
 	return KERN_SUCCESS;
@@ -294,23 +321,19 @@ void
 semaphore_destroy_all(
 	task_t                  task)
 {
+	semaphore_t semaphore;
 	uint32_t count;
 	spl_t spl_level;
 
 	count = 0;
 	task_lock(task);
-	while (!queue_empty(&task->semaphore_list)) {
-		semaphore_t semaphore;
 
-		semaphore = (semaphore_t) queue_first(&task->semaphore_list);
-
+	qe_foreach_element_safe(semaphore, &task->semaphore_list, task_link) {
 		if (count == 0) {
 			spl_level = splsched();
 		}
-		semaphore_lock(semaphore);
 
-		semaphore_destroy_internal(task, semaphore);
-		/* semaphore unlocked */
+		semaphore_destroy_internal(task, semaphore, false);
 
 		/* throttle number of semaphores per interrupt disablement */
 		if (++count == SEMASPERSPL) {
@@ -332,11 +355,11 @@ semaphore_destroy_all(
  *	Assumptions:
  *		Semaphore is locked.
  */
-kern_return_t
+static kern_return_t
 semaphore_signal_internal(
 	semaphore_t             semaphore,
 	thread_t                thread,
-	int                             options)
+	int                     options)
 {
 	kern_return_t kr;
 	spl_t  spl_level;
@@ -344,7 +367,7 @@ semaphore_signal_internal(
 	spl_level = splsched();
 	semaphore_lock(semaphore);
 
-	if (!semaphore->active) {
+	if (!semaphore_active(semaphore)) {
 		semaphore_unlock(semaphore);
 		splx(spl_level);
 		return KERN_TERMINATED;
@@ -432,16 +455,12 @@ semaphore_signal_thread(
 	semaphore_t     semaphore,
 	thread_t        thread)
 {
-	kern_return_t           ret;
-
 	if (semaphore == SEMAPHORE_NULL) {
 		return KERN_INVALID_ARGUMENT;
 	}
 
-	ret = semaphore_signal_internal(semaphore,
-	    thread,
-	    SEMAPHORE_OPTION_NONE);
-	return ret;
+	return semaphore_signal_internal(semaphore, thread,
+	           SEMAPHORE_OPTION_NONE);
 }
 
 /*
@@ -455,9 +474,9 @@ semaphore_signal_thread_trap(
 {
 	mach_port_name_t sema_name = args->signal_name;
 	mach_port_name_t thread_name = args->thread_name;
-	semaphore_t     semaphore;
-	thread_t        thread;
-	kern_return_t   kr;
+	semaphore_t      semaphore;
+	thread_t         thread;
+	kern_return_t    kr;
 
 	/*
 	 * MACH_PORT_NULL is not an error. It means that we want to
@@ -465,7 +484,7 @@ semaphore_signal_thread_trap(
 	 * pre-post the semaphore.
 	 */
 	if (thread_name != MACH_PORT_NULL) {
-		thread = port_name_to_thread(thread_name, PORT_TO_THREAD_NONE);
+		thread = port_name_to_thread(thread_name, PORT_INTRANS_OPTIONS_NONE);
 		if (thread == THREAD_NULL) {
 			return KERN_INVALID_ARGUMENT;
 		}
@@ -535,7 +554,7 @@ semaphore_signal_trap(
 kern_return_t
 semaphore_signal_internal_trap(mach_port_name_t sema_name)
 {
-	semaphore_t     semaphore;
+	semaphore_t   semaphore;
 	kern_return_t kr;
 
 	kr = port_name_to_semaphore(sema_name, &semaphore);
@@ -609,7 +628,7 @@ semaphore_signal_all_trap(
  *	takes the wait result as an input and coverts that to an
  *	appropriate result.
  */
-kern_return_t
+static kern_return_t
 semaphore_convert_wait_result(int wait_result)
 {
 	switch (wait_result) {
@@ -626,7 +645,7 @@ semaphore_convert_wait_result(int wait_result)
 		return KERN_TERMINATED;
 
 	default:
-		panic("semaphore_block\n");
+		panic("semaphore_block");
 		return KERN_FAILURE;
 	}
 }
@@ -637,11 +656,11 @@ semaphore_convert_wait_result(int wait_result)
  *	Common continuation routine after waiting on a semphore.
  *	It returns directly to user space.
  */
-void
+static void
 semaphore_wait_continue(void *arg __unused, wait_result_t wr)
 {
 	thread_t self = current_thread();
-	void (*caller_cont)(kern_return_t) = self->sth_continuation;
+	semaphore_cont_t caller_cont = self->sth_continuation;
 
 	assert(self->sth_waitsemaphore != SEMAPHORE_NULL);
 	semaphore_dereference(self->sth_waitsemaphore);
@@ -650,7 +669,7 @@ semaphore_wait_continue(void *arg __unused, wait_result_t wr)
 	}
 
 	assert(self->handoff_thread == THREAD_NULL);
-	assert(caller_cont != (void (*)(kern_return_t))0);
+	assert(caller_cont != NULL);
 	(*caller_cont)(semaphore_convert_wait_result(wr));
 }
 
@@ -670,21 +689,21 @@ semaphore_wait_internal(
 	semaphore_t             wait_semaphore,
 	semaphore_t             signal_semaphore,
 	uint64_t                deadline,
-	int                             option,
-	void                    (*caller_cont)(kern_return_t))
+	int                     option,
+	semaphore_cont_t        caller_cont)
 {
-	int                                     wait_result;
-	spl_t                           spl_level;
-	kern_return_t           kr = KERN_ALREADY_WAITING;
+	int           wait_result;
+	spl_t         spl_level;
+	kern_return_t kr = KERN_ALREADY_WAITING;
+	thread_t      self = current_thread();
+	thread_t      handoff_thread = THREAD_NULL;
+	int           semaphore_signal_options = SEMAPHORE_SIGNAL_PREPOST;
+	thread_handoff_option_t handoff_option = THREAD_HANDOFF_NONE;
 
 	spl_level = splsched();
 	semaphore_lock(wait_semaphore);
-	thread_t self = current_thread();
-	thread_t handoff_thread = THREAD_NULL;
-	thread_handoff_option_t handoff_option = THREAD_HANDOFF_NONE;
-	int semaphore_signal_options = SEMAPHORE_SIGNAL_PREPOST;
 
-	if (!wait_semaphore->active) {
+	if (!semaphore_active(wait_semaphore)) {
 		kr = KERN_TERMINATED;
 	} else if (wait_semaphore->count > 0) {
 		wait_semaphore->count--;
@@ -763,6 +782,7 @@ semaphore_wait_internal(
 		self->handoff_thread = THREAD_NULL;
 		handoff_option = THREAD_HANDOFF_SETRUN_NEEDED;
 	}
+
 	/*
 	 * Now, we can block.  If the caller supplied a continuation
 	 * pointer of his own for after the block, block with the
@@ -800,10 +820,8 @@ semaphore_wait(
 		return KERN_INVALID_ARGUMENT;
 	}
 
-	return semaphore_wait_internal(semaphore,
-	           SEMAPHORE_NULL,
-	           0ULL, SEMAPHORE_OPTION_NONE,
-	           (void (*)(kern_return_t))0);
+	return semaphore_wait_internal(semaphore, SEMAPHORE_NULL,
+	           0ULL, SEMAPHORE_OPTION_NONE, SEMAPHORE_CONT_NULL);
 }
 
 kern_return_t
@@ -814,10 +832,8 @@ semaphore_wait_noblock(
 		return KERN_INVALID_ARGUMENT;
 	}
 
-	return semaphore_wait_internal(semaphore,
-	           SEMAPHORE_NULL,
-	           0ULL, SEMAPHORE_TIMEOUT_NOBLOCK,
-	           (void (*)(kern_return_t))0);
+	return semaphore_wait_internal(semaphore, SEMAPHORE_NULL,
+	           0ULL, SEMAPHORE_TIMEOUT_NOBLOCK, SEMAPHORE_CONT_NULL);
 }
 
 kern_return_t
@@ -829,10 +845,8 @@ semaphore_wait_deadline(
 		return KERN_INVALID_ARGUMENT;
 	}
 
-	return semaphore_wait_internal(semaphore,
-	           SEMAPHORE_NULL,
-	           deadline, SEMAPHORE_OPTION_NONE,
-	           (void (*)(kern_return_t))0);
+	return semaphore_wait_internal(semaphore, SEMAPHORE_NULL,
+	           deadline, SEMAPHORE_OPTION_NONE, SEMAPHORE_CONT_NULL);
 }
 
 /*
@@ -849,14 +863,12 @@ semaphore_wait_trap(
 	return semaphore_wait_trap_internal(args->wait_name, thread_syscall_return);
 }
 
-
-
 kern_return_t
 semaphore_wait_trap_internal(
 	mach_port_name_t name,
-	void (*caller_cont)(kern_return_t))
+	semaphore_cont_t caller_cont)
 {
-	semaphore_t     semaphore;
+	semaphore_t   semaphore;
 	kern_return_t kr;
 
 	kr = port_name_to_semaphore(name, &semaphore);
@@ -883,8 +895,8 @@ semaphore_timedwait(
 	semaphore_t             semaphore,
 	mach_timespec_t         wait_time)
 {
-	int                             option = SEMAPHORE_OPTION_NONE;
-	uint64_t                deadline = 0;
+	int      option = SEMAPHORE_OPTION_NONE;
+	uint64_t deadline = 0;
 
 	if (semaphore == SEMAPHORE_NULL) {
 		return KERN_INVALID_ARGUMENT;
@@ -900,10 +912,8 @@ semaphore_timedwait(
 		deadline = semaphore_deadline(wait_time.tv_sec, wait_time.tv_nsec);
 	}
 
-	return semaphore_wait_internal(semaphore,
-	           SEMAPHORE_NULL,
-	           deadline, option,
-	           (void (*)(kern_return_t))0);
+	return semaphore_wait_internal(semaphore, SEMAPHORE_NULL,
+	           deadline, option, SEMAPHORE_CONT_NULL);
 }
 
 /*
@@ -921,16 +931,17 @@ kern_return_t
 semaphore_timedwait_trap(
 	struct semaphore_timedwait_trap_args *args)
 {
-	return semaphore_timedwait_trap_internal(args->wait_name, args->sec, args->nsec, thread_syscall_return);
+	return semaphore_timedwait_trap_internal(args->wait_name,
+	           args->sec, args->nsec, thread_syscall_return);
 }
 
 
 kern_return_t
 semaphore_timedwait_trap_internal(
 	mach_port_name_t name,
-	unsigned int            sec,
-	clock_res_t             nsec,
-	void (*caller_cont)(kern_return_t))
+	unsigned int     sec,
+	clock_res_t      nsec,
+	semaphore_cont_t caller_cont)
 {
 	semaphore_t semaphore;
 	mach_timespec_t wait_time;
@@ -944,8 +955,8 @@ semaphore_timedwait_trap_internal(
 
 	kr = port_name_to_semaphore(name, &semaphore);
 	if (kr == KERN_SUCCESS) {
-		int                             option = SEMAPHORE_OPTION_NONE;
-		uint64_t                deadline = 0;
+		int      option = SEMAPHORE_OPTION_NONE;
+		uint64_t deadline = 0;
 
 		if (sec == 0 && nsec == 0) {
 			option = SEMAPHORE_TIMEOUT_NOBLOCK;
@@ -979,10 +990,8 @@ semaphore_wait_signal(
 		return KERN_INVALID_ARGUMENT;
 	}
 
-	return semaphore_wait_internal(wait_semaphore,
-	           signal_semaphore,
-	           0ULL, SEMAPHORE_OPTION_NONE,
-	           (void (*)(kern_return_t))0);
+	return semaphore_wait_internal(wait_semaphore, signal_semaphore,
+	           0ULL, SEMAPHORE_OPTION_NONE, SEMAPHORE_CONT_NULL);
 }
 
 /*
@@ -995,14 +1004,15 @@ kern_return_t
 semaphore_wait_signal_trap(
 	struct semaphore_wait_signal_trap_args *args)
 {
-	return semaphore_wait_signal_trap_internal(args->wait_name, args->signal_name, thread_syscall_return);
+	return semaphore_wait_signal_trap_internal(args->wait_name,
+	           args->signal_name, thread_syscall_return);
 }
 
 kern_return_t
 semaphore_wait_signal_trap_internal(
 	mach_port_name_t wait_name,
 	mach_port_name_t signal_name,
-	void (*caller_cont)(kern_return_t))
+	semaphore_cont_t caller_cont)
 {
 	semaphore_t wait_semaphore;
 	semaphore_t signal_semaphore;
@@ -1039,8 +1049,8 @@ semaphore_timedwait_signal(
 	semaphore_t             signal_semaphore,
 	mach_timespec_t         wait_time)
 {
-	int                             option = SEMAPHORE_OPTION_NONE;
-	uint64_t                deadline = 0;
+	int      option = SEMAPHORE_OPTION_NONE;
+	uint64_t deadline = 0;
 
 	if (wait_semaphore == SEMAPHORE_NULL) {
 		return KERN_INVALID_ARGUMENT;
@@ -1056,10 +1066,8 @@ semaphore_timedwait_signal(
 		deadline = semaphore_deadline(wait_time.tv_sec, wait_time.tv_nsec);
 	}
 
-	return semaphore_wait_internal(wait_semaphore,
-	           signal_semaphore,
-	           deadline, option,
-	           (void (*)(kern_return_t))0);
+	return semaphore_wait_internal(wait_semaphore, signal_semaphore,
+	           deadline, option, SEMAPHORE_CONT_NULL);
 }
 
 /*
@@ -1072,7 +1080,8 @@ kern_return_t
 semaphore_timedwait_signal_trap(
 	struct semaphore_timedwait_signal_trap_args *args)
 {
-	return semaphore_timedwait_signal_trap_internal(args->wait_name, args->signal_name, args->sec, args->nsec, thread_syscall_return);
+	return semaphore_timedwait_signal_trap_internal(args->wait_name,
+	           args->signal_name, args->sec, args->nsec, thread_syscall_return);
 }
 
 kern_return_t
@@ -1081,7 +1090,7 @@ semaphore_timedwait_signal_trap_internal(
 	mach_port_name_t signal_name,
 	unsigned int sec,
 	clock_res_t nsec,
-	void (*caller_cont)(kern_return_t))
+	semaphore_cont_t caller_cont)
 {
 	semaphore_t wait_semaphore;
 	semaphore_t signal_semaphore;
@@ -1098,8 +1107,8 @@ semaphore_timedwait_signal_trap_internal(
 	if (kr == KERN_SUCCESS) {
 		kr = port_name_to_semaphore(wait_name, &wait_semaphore);
 		if (kr == KERN_SUCCESS) {
-			int                             option = SEMAPHORE_OPTION_NONE;
-			uint64_t                deadline = 0;
+			int      option = SEMAPHORE_OPTION_NONE;
+			uint64_t deadline = 0;
 
 			if (sec == 0 && nsec == 0) {
 				option = SEMAPHORE_TIMEOUT_NOBLOCK;
@@ -1129,7 +1138,8 @@ void
 semaphore_reference(
 	semaphore_t             semaphore)
 {
-	os_ref_retain(&semaphore->ref_count);
+	zone_id_require(ZONE_ID_SEMAPHORE, sizeof(*semaphore), semaphore);
+	os_ref_retain_raw(&semaphore->ref_count, &sema_refgrp);
 }
 
 /*
@@ -1142,74 +1152,149 @@ void
 semaphore_dereference(
 	semaphore_t             semaphore)
 {
-	uint32_t collisions;
-	spl_t spl_level;
-
 	if (semaphore == NULL) {
 		return;
 	}
 
-	if (os_ref_release(&semaphore->ref_count) > 0) {
-		return;
+	if (os_ref_release_raw(&semaphore->ref_count, &sema_refgrp) == 0) {
+		return semaphore_free(semaphore);
 	}
-
-	/*
-	 * Last ref, clean up the port [if any]
-	 * associated with the semaphore, destroy
-	 * it (if still active) and then free
-	 * the semaphore.
-	 */
-	ipc_port_t port = semaphore->port;
-
-	if (IP_VALID(port)) {
-		assert(!port->ip_srights);
-		ipc_port_dealloc_kernel(port);
-	}
-
-	/*
-	 * Lock the semaphore to lock in the owner task reference.
-	 * Then continue to try to lock the task (inverse order).
-	 */
-	spl_level = splsched();
-	semaphore_lock(semaphore);
-	for (collisions = 0; semaphore->active; collisions++) {
-		task_t task = semaphore->owner;
-
-		assert(task != TASK_NULL);
-
-		if (task_lock_try(task)) {
-			semaphore_destroy_internal(task, semaphore);
-			/* semaphore unlocked */
-			splx(spl_level);
-			task_unlock(task);
-			goto out;
-		}
-
-		/* failed to get out-of-order locks */
-		semaphore_unlock(semaphore);
-		splx(spl_level);
-		mutex_pause(collisions);
-		spl_level = splsched();
-		semaphore_lock(semaphore);
-	}
-	semaphore_unlock(semaphore);
-	splx(spl_level);
-
-out:
-	zfree(semaphore_zone, semaphore);
 }
 
-#define WAITQ_TO_SEMA(wq) ((semaphore_t) ((uintptr_t)(wq) - offsetof(struct semaphore, waitq)))
 void
-kdp_sema_find_owner(struct waitq * waitq, __assert_only event64_t event, thread_waitinfo_t * waitinfo)
+kdp_sema_find_owner(struct waitq *waitq, __assert_only event64_t event, thread_waitinfo_t * waitinfo)
 {
-	semaphore_t sem = WAITQ_TO_SEMA(waitq);
+	semaphore_t sem = __container_of(waitq, struct semaphore, waitq);
 	assert(event == SEMAPHORE_EVENT);
 
-	zone_require(semaphore_zone, sem);
+	zone_id_require(ZONE_ID_SEMAPHORE, sizeof(*sem), sem);
 
 	waitinfo->context = VM_KERNEL_UNSLIDE_OR_PERM(sem->port);
 	if (sem->owner) {
 		waitinfo->owner = pid_from_task(sem->owner);
 	}
 }
+
+/*
+ *	Routine:	port_name_to_semaphore
+ *	Purpose:
+ *		Convert from a port name in the current space to a semaphore.
+ *		Produces a semaphore ref, which may be null.
+ *	Conditions:
+ *		Nothing locked.
+ */
+kern_return_t
+port_name_to_semaphore(
+	mach_port_name_t        name,
+	semaphore_t             *semaphorep)
+{
+	ipc_port_t port;
+	kern_return_t kr;
+
+	if (!MACH_PORT_VALID(name)) {
+		*semaphorep = SEMAPHORE_NULL;
+		return KERN_INVALID_NAME;
+	}
+
+	kr = ipc_port_translate_send(current_space(), name, &port);
+	if (kr != KERN_SUCCESS) {
+		*semaphorep = SEMAPHORE_NULL;
+		return kr;
+	}
+	/* have the port locked */
+
+	*semaphorep = convert_port_to_semaphore(port);
+	if (*semaphorep == SEMAPHORE_NULL) {
+		/* the port is valid, but doesn't denote a semaphore */
+		kr = KERN_INVALID_CAPABILITY;
+	} else {
+		kr = KERN_SUCCESS;
+	}
+	ip_mq_unlock(port);
+
+	return kr;
+}
+
+/*
+ *	Routine:	convert_port_to_semaphore
+ *	Purpose:
+ *		Convert from a port to a semaphore.
+ *		Doesn't consume the port [send-right] ref;
+ *		produces a semaphore ref, which may be null.
+ *	Conditions:
+ *		Caller has a send-right reference to port.
+ *		Port may or may not be locked.
+ */
+semaphore_t
+convert_port_to_semaphore(ipc_port_t port)
+{
+	semaphore_t semaphore = SEMAPHORE_NULL;
+
+	if (IP_VALID(port)) {
+		semaphore = ipc_kobject_get_stable(port, IKOT_SEMAPHORE);
+		if (semaphore != SEMAPHORE_NULL) {
+			semaphore_reference(semaphore);
+		}
+	}
+
+	return semaphore;
+}
+
+
+/*
+ *	Routine:	convert_semaphore_to_port
+ *	Purpose:
+ *		Convert a semaphore reference to a send right to a
+ *		semaphore port.
+ *
+ *		Consumes the semaphore reference.  If the semaphore
+ *		port currently has no send rights (or doesn't exist
+ *		yet), the reference is donated to the port to represent
+ *		all extant send rights collectively.
+ */
+ipc_port_t
+convert_semaphore_to_port(semaphore_t semaphore)
+{
+	if (semaphore == SEMAPHORE_NULL) {
+		return IP_NULL;
+	}
+
+	/*
+	 * make a send right and donate our reference for
+	 * semaphore_no_senders if this is the first send right
+	 */
+	if (!ipc_kobject_make_send_lazy_alloc_port(&semaphore->port,
+	    semaphore, IKOT_SEMAPHORE, IPC_KOBJECT_ALLOC_NONE, 0)) {
+		semaphore_dereference(semaphore);
+	}
+	return semaphore->port;
+}
+
+/*
+ * Routine:	semaphore_no_senders
+ * Purpose:
+ *	Called whenever the Mach port system detects no-senders
+ *	on the semaphore port.
+ *
+ *	When a send-right is first created, a no-senders
+ *	notification is armed (and a semaphore reference is donated).
+ *
+ *	A no-senders notification will be posted when no one else holds a
+ *	send-right (reference) to the semaphore's port. This notification function
+ *	will consume the semaphore reference donated to the extant collection of
+ *	send-rights.
+ */
+static void
+semaphore_no_senders(ipc_port_t port, __unused mach_port_mscount_t mscount)
+{
+	semaphore_t semaphore = ipc_kobject_get_stable(port, IKOT_SEMAPHORE);
+
+	assert(semaphore != SEMAPHORE_NULL);
+	assert(semaphore->port == port);
+
+	semaphore_dereference(semaphore);
+}
+
+IPC_KOBJECT_DEFINE(IKOT_SEMAPHORE,
+    .iko_op_stable     = true,
+    .iko_op_no_senders = semaphore_no_senders);

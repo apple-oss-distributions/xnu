@@ -68,6 +68,9 @@ struct proc_threadinfo_internal {
 	char                    pth_name[MAXTHREADNAMESIZE];            /* thread name, if any */
 };
 
+struct proc_threadschedinfo_internal {
+	uint64_t               int_time_ns;         /* time spent in interrupt context */
+};
 
 
 struct proc_regioninfo_internal {
@@ -116,6 +119,7 @@ extern int find_region_details(task_t task, vm_map_offset_t offset, uintptr_t *v
 void fill_taskprocinfo(task_t task, struct proc_taskinfo_internal * ptinfo);
 int fill_taskthreadinfo(task_t task, uint64_t thaddr, bool thuniqueid, struct proc_threadinfo_internal * ptinfo, void *, int *);
 int fill_taskthreadlist(task_t task, void * buffer, int thcount, bool thuniqueid);
+int fill_taskthreadschedinfo(task_t task, uint64_t thaddr, struct proc_threadschedinfo_internal *thread_sched_info);
 int get_numthreads(task_t);
 boolean_t bsd_hasthreadname(void *uth);
 void bsd_getthreadname(void *uth, char* buffer);

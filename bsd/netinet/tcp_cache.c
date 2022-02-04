@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015-2017 Apple Inc. All rights reserved.
+ * Copyright (c) 2015-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -32,6 +32,7 @@
 #include <net/route.h>
 #include <net/necp.h>
 #include <netinet/in_pcb.h>
+#include <netinet/mptcp.h>
 #include <netinet/mptcp_var.h>
 #include <netinet/tcp_cache.h>
 #include <netinet/tcp_seq.h>
@@ -100,15 +101,24 @@ struct tcp_cache_key {
 	in_4_6_addr tck_dst;
 };
 
+#define MPTCP_VERSION_SUPPORTED 1
+#define MPTCP_VERSION_UNSUPPORTED -1
+#define MPTCP_VERSION_SUPPORTED_UNKNOWN 0
 struct tcp_cache {
 	SLIST_ENTRY(tcp_cache) list;
 
 	uint32_t       tc_last_access;
+	uint32_t       tc_mptcp_version_discovery_refresh; /* Time until when we should do version discovery again */
 
 	struct tcp_cache_key tc_key;
 
 	uint8_t        tc_tfo_cookie[TFO_COOKIE_LEN_MAX];
 	uint8_t        tc_tfo_cookie_len;
+
+	int8_t         tc_mptcp_v0_support; /* -1 unsupported, 0 unknown, 1 supported */
+	int8_t         tc_mptcp_v1_support; /* -1 unsupported, 0 unknown, 1 supported */
+	uint8_t        tc_mptcp_v0_failed_count;
+	uint8_t        tc_mptcp_v1_failed_count;
 };
 
 struct tcp_cache_head {
@@ -137,19 +147,13 @@ size_t tcp_cache_size;
 
 static struct tcp_cache_head *tcp_cache;
 
-decl_lck_mtx_data(, tcp_cache_mtx);
-
-static lck_attr_t       *tcp_cache_mtx_attr;
-static lck_grp_t        *tcp_cache_mtx_grp;
-static lck_grp_attr_t   *tcp_cache_mtx_grp_attr;
+static LCK_ATTR_DECLARE(tcp_cache_mtx_attr, 0, 0);
+static LCK_GRP_DECLARE(tcp_cache_mtx_grp, "tcpcache");
 
 static struct tcp_heuristics_head *tcp_heuristics;
 
-decl_lck_mtx_data(, tcp_heuristics_mtx);
-
-static lck_attr_t       *tcp_heuristic_mtx_attr;
-static lck_grp_t        *tcp_heuristic_mtx_grp;
-static lck_grp_attr_t   *tcp_heuristic_mtx_grp_attr;
+static LCK_ATTR_DECLARE(tcp_heuristic_mtx_attr, 0, 0);
+static LCK_GRP_DECLARE(tcp_heuristic_mtx_grp, "tcpheuristic");
 
 static uint32_t tcp_backoff_maximum = 65536;
 
@@ -164,6 +168,7 @@ SYSCTL_UINT(_net_inet_tcp, OID_AUTO, ecn_timeout, CTLFLAG_RW | CTLFLAG_LOCKED,
 static int disable_tcp_heuristics = 0;
 SYSCTL_INT(_net_inet_tcp, OID_AUTO, disable_tcp_heuristics, CTLFLAG_RW | CTLFLAG_LOCKED,
     &disable_tcp_heuristics, 0, "Set to 1, to disable all TCP heuristics (TFO, ECN, MPTCP)");
+
 
 static uint32_t
 tcp_min_to_hz(uint32_t minutes)
@@ -187,6 +192,7 @@ tcp_min_to_hz(uint32_t minutes)
 #define ECN_MAX_SYN_LOSS        2
 #define MPTCP_MAX_SYN_LOSS      2
 #define MPTCP_SUCCESS_TRIGGER   10
+#define MPTCP_VERSION_MAX_FAIL  2
 #define ECN_MAX_DROPRST         1
 #define ECN_MAX_DROPRXMT        4
 #define ECN_MAX_SYNRST          4
@@ -362,8 +368,7 @@ tcp_getcache_with_lock(struct tcp_cache_key_src *tcks,
 			tpcache->tc_tfo_cookie_len = 0;
 		} else {
 			/* Create a new cache and add it to the list */
-			tpcache = _MALLOC(sizeof(struct tcp_cache), M_TEMP,
-			    M_NOWAIT | M_ZERO);
+			tpcache = kalloc_type(struct tcp_cache, Z_NOWAIT | Z_ZERO);
 			if (tpcache == NULL) {
 				os_log_error(OS_LOG_DEFAULT, "%s could not allocate cache", __func__);
 				goto out_null;
@@ -406,6 +411,22 @@ tcp_cache_key_src_create(struct tcpcb *tp, struct tcp_cache_key_src *tcks)
 		memcpy(&tcks->laddr.addr, &inp->inp_laddr, sizeof(struct in_addr));
 		memcpy(&tcks->faddr.addr, &inp->inp_faddr, sizeof(struct in_addr));
 		tcks->af = AF_INET;
+	}
+
+	return;
+}
+
+static void
+mptcp_version_cache_key_src_init(struct sockaddr *dst, struct tcp_cache_key_src *tcks)
+{
+	memset(tcks, 0, sizeof(*tcks));
+
+	if (dst->sa_family == AF_INET) {
+		memcpy(&tcks->faddr.addr, &SIN(dst)->sin_addr, sizeof(struct in_addr));
+		tcks->af = AF_INET;
+	} else {
+		memcpy(&tcks->faddr.addr6, &SIN6(dst)->sin6_addr, sizeof(struct in6_addr));
+		tcks->af = AF_INET6;
 	}
 
 	return;
@@ -516,6 +537,117 @@ tcp_cache_get_cookie_len(struct tcpcb *tp)
 	return tcp_cache_get_cookie_len_common(&tcks);
 }
 
+/*
+ * @return:
+ *         0	MPTCP_VERSION_0
+ *         1	MPTCP_VERSION_1
+ */
+uint8_t
+tcp_cache_get_mptcp_version(struct sockaddr *dst)
+{
+	struct tcp_cache_key_src tcks;
+	mptcp_version_cache_key_src_init(dst, &tcks);
+	uint8_t version = (uint8_t) mptcp_preferred_version;
+
+	struct tcp_cache_head *head;
+	struct tcp_cache *tpcache;
+
+	/* Call lookup/create function */
+	tpcache = tcp_getcache_with_lock(&tcks, 1, &head);
+	if (tpcache == NULL) {
+		return version;
+	}
+
+	if (tpcache->tc_mptcp_v1_support == MPTCP_VERSION_UNSUPPORTED &&
+	    tpcache->tc_mptcp_v0_support != MPTCP_VERSION_UNSUPPORTED) {
+		version =  MPTCP_VERSION_0;
+	}
+	if (tpcache->tc_mptcp_v0_support == MPTCP_VERSION_UNSUPPORTED &&
+	    tpcache->tc_mptcp_v1_support != MPTCP_VERSION_UNSUPPORTED) {
+		version =  MPTCP_VERSION_1;
+	}
+
+	tcp_cache_unlock(head);
+	return version;
+}
+
+void
+tcp_cache_update_mptcp_version(struct tcpcb *tp, boolean_t succeeded)
+{
+	struct mptcb *mp_tp = tptomptp(tp);
+	uint8_t version = mp_tp->mpt_version;
+	int8_t record = succeeded ? MPTCP_VERSION_SUPPORTED : MPTCP_VERSION_UNSUPPORTED;
+
+	struct tcp_cache_key_src tcks;
+
+	struct inpcb *inp = tp->t_inpcb;
+	if (inp->inp_vflag & INP_IPV6) {
+		struct sockaddr_in6 dst = {
+			.sin6_len = sizeof(struct sockaddr_in6),
+			.sin6_family = AF_INET6,
+			.sin6_addr = inp->in6p_faddr,
+		};
+		mptcp_version_cache_key_src_init((struct sockaddr *)&dst, &tcks);
+	} else {
+		struct sockaddr_in dst = {
+			.sin_len = sizeof(struct sockaddr_in),
+			.sin_family = AF_INET,
+			.sin_addr = inp->inp_faddr,
+		};
+		mptcp_version_cache_key_src_init((struct sockaddr *)&dst, &tcks);
+	}
+
+	struct tcp_cache_head *head;
+	struct tcp_cache *tpcache;
+	/* Call lookup/create function */
+	tpcache = tcp_getcache_with_lock(&tcks, 1, &head);
+	if (tpcache == NULL) {
+		return;
+	}
+
+	if (version == MPTCP_VERSION_0) {
+		if (tpcache->tc_mptcp_v0_support == MPTCP_VERSION_SUPPORTED_UNKNOWN) {
+			tpcache->tc_mptcp_v0_support = record;
+		} else {
+			if (succeeded) {
+				tpcache->tc_mptcp_v0_failed_count = 0;
+				tpcache->tc_mptcp_v0_support = MPTCP_VERSION_SUPPORTED;
+			} else {
+				tpcache->tc_mptcp_v0_failed_count += 1;
+				// flip the record, so the other version is attempted the next time
+				if (tpcache->tc_mptcp_v0_failed_count >= MPTCP_VERSION_MAX_FAIL) {
+					tpcache->tc_mptcp_v0_failed_count = 0;
+					tpcache->tc_mptcp_v1_failed_count = 0;
+					tpcache->tc_mptcp_v0_support = MPTCP_VERSION_UNSUPPORTED;
+					tpcache->tc_mptcp_v1_support = MPTCP_VERSION_SUPPORTED_UNKNOWN;
+				}
+			}
+		}
+	}
+
+	if (version == MPTCP_VERSION_1) {
+		if (tpcache->tc_mptcp_v1_support == MPTCP_VERSION_SUPPORTED_UNKNOWN) {
+			tpcache->tc_mptcp_v1_support = record;
+		} else {
+			if (succeeded) {
+				tpcache->tc_mptcp_v1_failed_count = 0;
+				tpcache->tc_mptcp_v1_support = MPTCP_VERSION_SUPPORTED;
+			} else {
+				tpcache->tc_mptcp_v1_failed_count += 1;
+				// flip the record, so the other version is attempted the next time
+				if (tpcache->tc_mptcp_v1_failed_count >= MPTCP_VERSION_MAX_FAIL) {
+					tpcache->tc_mptcp_v0_failed_count = 0;
+					tpcache->tc_mptcp_v1_failed_count = 0;
+					tpcache->tc_mptcp_v1_support = MPTCP_VERSION_UNSUPPORTED;
+					tpcache->tc_mptcp_v0_support = MPTCP_VERSION_SUPPORTED_UNKNOWN;
+				}
+			}
+		}
+	}
+
+	tcp_cache_unlock(head);
+}
+
 static uint16_t
 tcp_heuristics_hash(struct tcp_cache_key_src *tcks, struct tcp_heuristic_key *key)
 {
@@ -598,8 +730,7 @@ tcp_getheuristic_with_lock(struct tcp_cache_key_src *tcks,
 			    tpheur->th_val_end - tpheur->th_val_start);
 		} else {
 			/* Create a new heuristic and add it to the list */
-			tpheur = _MALLOC(sizeof(struct tcp_heuristic), M_TEMP,
-			    M_NOWAIT | M_ZERO);
+			tpheur = kalloc_type(struct tcp_heuristic, Z_NOWAIT | Z_ZERO);
 			if (tpheur == NULL) {
 				os_log_error(OS_LOG_DEFAULT, "%s could not allocate cache", __func__);
 				goto out_null;
@@ -1408,14 +1539,14 @@ sysctl_cleartfocache(void)
 		lck_mtx_lock(&head->tch_mtx);
 		SLIST_FOREACH_SAFE(tpcache, &head->tcp_caches, list, tmp) {
 			SLIST_REMOVE(&head->tcp_caches, tpcache, tcp_cache, list);
-			_FREE(tpcache, M_TEMP);
+			kfree_type(struct tcp_cache, tpcache);
 		}
 		lck_mtx_unlock(&head->tch_mtx);
 
 		lck_mtx_lock(&hhead->thh_mtx);
 		SLIST_FOREACH_SAFE(tpheur, &hhead->tcp_heuristics, list, htmp) {
 			SLIST_REMOVE(&hhead->tcp_heuristics, tpheur, tcp_heuristic, list);
-			_FREE(tpheur, M_TEMP);
+			kfree_type(struct tcp_heuristic, tpheur);
 		}
 		lck_mtx_unlock(&hhead->thh_mtx);
 	}
@@ -1485,27 +1616,19 @@ tcp_cache_init(void)
 		panic("Allocating tcp_cache failed at boot-time!");
 	}
 
-	tcp_cache_mtx_grp_attr = lck_grp_attr_alloc_init();
-	tcp_cache_mtx_grp = lck_grp_alloc_init("tcpcache", tcp_cache_mtx_grp_attr);
-	tcp_cache_mtx_attr = lck_attr_alloc_init();
-
 	tcp_heuristics = _MALLOC(sizeof(struct tcp_heuristics_head) * tcp_cache_size,
 	    M_TEMP, M_ZERO);
 	if (tcp_heuristics == NULL) {
 		panic("Allocating tcp_heuristic failed at boot-time!");
 	}
 
-	tcp_heuristic_mtx_grp_attr = lck_grp_attr_alloc_init();
-	tcp_heuristic_mtx_grp = lck_grp_alloc_init("tcpheuristic", tcp_heuristic_mtx_grp_attr);
-	tcp_heuristic_mtx_attr = lck_attr_alloc_init();
-
 	for (i = 0; i < tcp_cache_size; i++) {
-		lck_mtx_init(&tcp_cache[i].tch_mtx, tcp_cache_mtx_grp,
-		    tcp_cache_mtx_attr);
+		lck_mtx_init(&tcp_cache[i].tch_mtx, &tcp_cache_mtx_grp,
+		    &tcp_cache_mtx_attr);
 		SLIST_INIT(&tcp_cache[i].tcp_caches);
 
-		lck_mtx_init(&tcp_heuristics[i].thh_mtx, tcp_heuristic_mtx_grp,
-		    tcp_heuristic_mtx_attr);
+		lck_mtx_init(&tcp_heuristics[i].thh_mtx, &tcp_heuristic_mtx_grp,
+		    &tcp_heuristic_mtx_attr);
 		SLIST_INIT(&tcp_heuristics[i].tcp_heuristics);
 	}
 

@@ -26,6 +26,7 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 
+#include <arm64/machine_machdep.h>
 #include <arm64/proc_reg.h>
 #include <arm/machine_cpu.h>
 #include <arm/cpu_internal.h>
@@ -62,13 +63,12 @@
 #include <IOKit/IOPlatformExpert.h>
 #if HIBERNATION
 #include <IOKit/IOHibernatePrivate.h>
-#include <arm64/hibernate_ppl_hmac.h>
-#include <arm64/ppl/ppl_hib.h>
 #endif /* HIBERNATION */
 
 #if defined(KERNEL_INTEGRITY_KTRR) || defined(KERNEL_INTEGRITY_CTRR)
 #include <arm64/amcc_rorgn.h>
 #endif
+
 
 #include <libkern/section_keywords.h>
 
@@ -79,9 +79,6 @@
  * bits back to read/write.  However it will still catch xnu changes that
  * accidentally write to HID bits after they've been made read-only.
  */
-#if HAS_TWO_STAGE_SPR_LOCK && !(DEVELOPMENT || DEBUG)
-#define USE_TWO_STAGE_SPR_LOCK
-#endif
 
 #if KPC
 #include <kern/kpc.h>
@@ -94,12 +91,17 @@
 static uint8_t cluster_initialized = 0;
 #endif
 
-uint32_t LockTimeOut;
-uint32_t LockTimeOutUsec;
-uint64_t TLockTimeOut;
-uint64_t MutexSpin;
+MACHINE_TIMEOUT32_WRITEABLE(LockTimeOut, "lock", 6e6 /* 0.25s */, MACHINE_TIMEOUT_UNIT_TIMEBASE, NULL);
+machine_timeout32_t LockTimeOutUsec; // computed in ml_init_lock_timeout
+
+MACHINE_TIMEOUT_WRITEABLE(TLockTimeOut, "ticket-lock", 3e6 /* 0.125s */, MACHINE_TIMEOUT_UNIT_TIMEBASE, NULL);
+
+MACHINE_TIMEOUT32_WRITEABLE(MutexSpin, "mutex-spin", 240 /* 10us */, MACHINE_TIMEOUT_UNIT_TIMEBASE, NULL);
+
 uint64_t low_MutexSpin;
 int64_t high_MutexSpin;
+
+
 
 static uint64_t ml_wfe_hint_max_interval;
 #define MAX_WFE_HINT_INTERVAL_US (500ULL)
@@ -125,6 +127,8 @@ static TUNABLE_WRITEABLE(uint64_t, deferred_ipi_timer_ns, "fastipitimeout",
 
 thread_t Idle_context(void);
 
+SECURITY_READ_ONLY_LATE(bool) cpu_config_correct = true;
+
 SECURITY_READ_ONLY_LATE(static ml_topology_cpu_t) topology_cpu_array[MAX_CPUS];
 SECURITY_READ_ONLY_LATE(static ml_topology_cluster_t) topology_cluster_array[MAX_CPU_CLUSTERS];
 SECURITY_READ_ONLY_LATE(static ml_topology_info_t) topology_info = {
@@ -132,6 +136,9 @@ SECURITY_READ_ONLY_LATE(static ml_topology_info_t) topology_info = {
 	.cpus = topology_cpu_array,
 	.clusters = topology_cluster_array,
 };
+
+_Atomic unsigned int cluster_type_num_active_cpus[MAX_CPU_TYPES];
+
 /**
  * Represents the offset of each cluster within a hypothetical array of MAX_CPUS
  * entries of an arbitrary data type.  This is intended for use by specialized consumers
@@ -152,6 +159,11 @@ extern uint32_t lockdown_done;
  * (pre-mapped) in each user address space.
  */
 SECURITY_READ_ONLY_LATE(static struct vm_reserved_region) vm_reserved_regions[] = {
+	{
+		.vmrr_name = "GPU Carveout",
+		.vmrr_addr = MACH_VM_MIN_GPU_CARVEOUT_ADDRESS,
+		.vmrr_size = (vm_map_size_t)(MACH_VM_MAX_GPU_CARVEOUT_ADDRESS - MACH_VM_MIN_GPU_CARVEOUT_ADDRESS)
+	},
 	/*
 	 * Reserve the virtual memory space representing the commpage nesting region
 	 * to prevent user processes from allocating memory within it. The actual
@@ -181,15 +193,15 @@ ml_cpu_signal_type(unsigned int cpu_mpidr, uint32_t type)
 	MRS(local_mpidr, "MPIDR_EL1");
 	if (MPIDR_CLUSTER_ID(local_mpidr) == MPIDR_CLUSTER_ID(cpu_mpidr)) {
 		uint64_t x = type | MPIDR_CPU_ID(cpu_mpidr);
-		MSR(ARM64_REG_IPI_RR_LOCAL, x);
+		MSR("S3_5_C15_C0_0", x);
 	} else {
 		#define IPI_RR_TARGET_CLUSTER_SHIFT 16
 		uint64_t x = type | (MPIDR_CLUSTER_ID(cpu_mpidr) << IPI_RR_TARGET_CLUSTER_SHIFT) | MPIDR_CPU_ID(cpu_mpidr);
-		MSR(ARM64_REG_IPI_RR_GLOBAL, x);
+		MSR("S3_5_C15_C0_1", x);
 	}
 #else
 	uint64_t x = type | MPIDR_CPU_ID(cpu_mpidr);
-	MSR(ARM64_REG_IPI_RR, x);
+	MSR("S3_5_C15_C0_1", x);
 #endif
 }
 #endif
@@ -233,7 +245,7 @@ ml_cpu_signal_deferred_adjust_timer(uint64_t nanosecs)
 	/* update deferred_ipi_timer_ns with the new clamped value */
 	absolutetime_to_nanoseconds(abstime, &deferred_ipi_timer_ns);
 
-	MSR(ARM64_REG_IPI_CR, abstime);
+	MSR("S3_5_C15_C3_1", abstime);
 #else
 	(void)nanosecs;
 	panic("Platform does not support ACC Fast IPI");
@@ -276,14 +288,64 @@ ml_cpu_signal_retract(unsigned int cpu_mpidr __unused)
 #endif
 }
 
+extern uint32_t idle_proximate_io_wfe_unmasked;
+
+#define CPUPM_IDLE_WFE 0x5310300
+static bool
+wfe_process_recommendation(void)
+{
+	bool ipending = false;
+	if (__probable(idle_proximate_io_wfe_unmasked == 1)) {
+		/* Check for an active perf. controller generated
+		 * WFE recommendation for this cluster.
+		 */
+		cpu_data_t *cdp = getCpuDatap();
+		uint32_t cid = cdp->cpu_cluster_id;
+		uint64_t wfe_ttd = 0;
+		uint64_t wfe_deadline = 0;
+
+		if ((wfe_ttd = ml_cluster_wfe_timeout(cid)) != 0) {
+			wfe_deadline = mach_absolute_time() + wfe_ttd;
+		}
+
+		if (wfe_deadline != 0) {
+			/* Poll issuing event-bounded WFEs until an interrupt
+			 * arrives or the WFE recommendation expires
+			 */
+#if DEVELOPMENT || DEBUG
+			uint64_t wc = cdp->wfe_count;
+			KDBG(CPUPM_IDLE_WFE | DBG_FUNC_START, ipending, wc, wfe_ttd, cdp->cpu_stat.irq_ex_cnt_wake);
+#endif
+			/* Issue WFE until the recommendation expires,
+			 * with IRQs unmasked.
+			 */
+			ipending = wfe_to_deadline_or_interrupt(cid, wfe_deadline, cdp, true);
+#if DEVELOPMENT || DEBUG
+			KDBG(CPUPM_IDLE_WFE | DBG_FUNC_END, ipending, cdp->wfe_count - wc, wfe_deadline, cdp->cpu_stat.irq_ex_cnt_wake);
+#endif
+		}
+	}
+	return ipending;
+}
+
 void
 machine_idle(void)
 {
 	/* Interrupts are expected to be masked on entry or re-entry via
 	 * Idle_load_context()
 	 */
-	assert((__builtin_arm_rsr("DAIF") & DAIF_IRQF) == DAIF_IRQF);
-	Idle_context();
+	assert((__builtin_arm_rsr("DAIF") & (DAIF_IRQF | DAIF_FIQF)) == (DAIF_IRQF | DAIF_FIQF));
+	/* Check for, and act on, a WFE recommendation.
+	 * Bypasses context spill/fill for a minor perf. increment.
+	 * May unmask and restore IRQ+FIQ mask.
+	 */
+	if (wfe_process_recommendation() == false) {
+		/* If WFE recommendation absent, or WFE deadline
+		 * arrived with no interrupt pending/processed,
+		 * fall back to WFI.
+		 */
+		Idle_context();
+	}
 	__builtin_arm_wsr("DAIFClr", (DAIFSC_IRQF | DAIFSC_FIQF));
 }
 
@@ -377,6 +439,16 @@ user_cont_hwclock_allowed(void)
 #endif
 }
 
+/*
+ * user_timebase_type()
+ *
+ * Indicates type of EL0 virtual timebase read (CNTVCT_EL0).
+ *
+ * USER_TIMEBASE_NONE: EL0 has no access to timebase register
+ * USER_TIMEBASE_SPEC: EL0 has access to speculative timebase reads (CNTVCT_EL0)
+ * USER_TIMEBASE_NOSPEC: EL0 has access to non speculative timebase reads (CNTVCTSS_EL0)
+ *
+ */
 
 uint8_t
 user_timebase_type(void)
@@ -393,7 +465,9 @@ machine_startup(__unused boot_args * args)
 	}
 #endif /* defined(HAS_IPI) && (DEVELOPMENT || DEBUG)*/
 
+
 	machine_conf();
+
 
 	/*
 	 * Kick off the kernel bootstrap.
@@ -402,6 +476,21 @@ machine_startup(__unused boot_args * args)
 	/* NOTREACHED */
 }
 
+typedef void (*invalidate_fn_t)(void);
+
+static SECURITY_READ_ONLY_LATE(invalidate_fn_t) invalidate_hmac_function = NULL;
+
+void set_invalidate_hmac_function(invalidate_fn_t fn);
+
+void
+set_invalidate_hmac_function(invalidate_fn_t fn)
+{
+	if (NULL != invalidate_hmac_function) {
+		panic("Invalidate HMAC function already set");
+	}
+
+	invalidate_hmac_function = fn;
+}
 
 void
 machine_lockdown(void)
@@ -436,25 +525,13 @@ machine_lockdown(void)
 	rorgn_lockdown();
 #endif /* defined(KERNEL_INTEGRITY_KTRR) || defined(KERNEL_INTEGRITY_CTRR) */
 
-#if HIBERNATION
-	/* sign the kernel read-only region */
-	if (ppl_hmac_init() == KERN_SUCCESS) {
-		ppl_hmac_compute_rorgn_hmac();
-	}
-#endif /* HIBERNATION */
 
 #endif /* CONFIG_KERNEL_INTEGRITY */
 
-#if HIBERNATION
-	/* Avoid configuration security issues by panic'ing if hibernation is
-	 * supported but we don't know how to invalidate SIO HMAC keys, see
-	 * below. */
-	if (ppl_hib_hibernation_supported() &&
-	    NULL == invalidate_hmac_function) {
-		panic("Invalidate HMAC function wasn't set when needed");
-	}
-#endif  /* HIBERNATION */
 
+	if (NULL != invalidate_hmac_function) {
+		invalidate_hmac_function();
+	}
 
 	lockdown_done = 1;
 }
@@ -495,36 +572,49 @@ machine_processor_shutdown(
 void
 ml_init_lock_timeout(void)
 {
-	uint64_t        abstime;
-	uint64_t        mtxspin;
-	uint64_t        default_timeout_ns = NSEC_PER_SEC >> 2;
-	uint32_t        slto;
+	/*
+	 * This function is called after STARUP_SUB_TIMEOUTS
+	 * initialization, so using the "legacy" boot-args here overrides
+	 * the ml-timeout-...  configuration. (Given that these boot-args
+	 * here are usually explicitly specified, this makes sense by
+	 * overriding ml-timeout-..., which may come from the device tree.
+	 */
+
+	uint64_t lto_timeout_ns;
+	uint64_t lto_abstime;
+	uint32_t slto;
 
 	if (PE_parse_boot_argn("slto_us", &slto, sizeof(slto))) {
-		default_timeout_ns = slto * NSEC_PER_USEC;
+		lto_timeout_ns = slto * NSEC_PER_USEC;
+		nanoseconds_to_absolutetime(lto_timeout_ns, &lto_abstime);
+		os_atomic_store(&LockTimeOut, lto_abstime, relaxed);
+	} else {
+		lto_abstime = os_atomic_load(&LockTimeOut, relaxed);
+		absolutetime_to_nanoseconds(lto_abstime, &lto_timeout_ns);
 	}
 
-	nanoseconds_to_absolutetime(default_timeout_ns, &abstime);
-	LockTimeOutUsec = (uint32_t) (default_timeout_ns / NSEC_PER_USEC);
-	LockTimeOut = (uint32_t)abstime;
+	os_atomic_store(&LockTimeOutUsec, lto_timeout_ns / NSEC_PER_USEC, relaxed);
 
 	if (PE_parse_boot_argn("tlto_us", &slto, sizeof(slto))) {
-		nanoseconds_to_absolutetime(slto * NSEC_PER_USEC, &abstime);
-		TLockTimeOut = abstime;
-	} else {
-		TLockTimeOut = LockTimeOut >> 1;
-	}
+		nanoseconds_to_absolutetime(slto * NSEC_PER_USEC, &lto_abstime);
+		os_atomic_store(&TLockTimeOut, lto_abstime, relaxed);
+	} else if (lto_abstime != 0) {
+		os_atomic_store(&TLockTimeOut, lto_abstime >> 1, relaxed);
+	} // else take default from MACHINE_TIMEOUT.
 
+	uint64_t mtxspin;
+	uint64_t mtx_abstime;
 	if (PE_parse_boot_argn("mtxspin", &mtxspin, sizeof(mtxspin))) {
 		if (mtxspin > USEC_PER_SEC >> 4) {
 			mtxspin =  USEC_PER_SEC >> 4;
 		}
-		nanoseconds_to_absolutetime(mtxspin * NSEC_PER_USEC, &abstime);
+		nanoseconds_to_absolutetime(mtxspin * NSEC_PER_USEC, &mtx_abstime);
+		os_atomic_store(&MutexSpin, mtx_abstime, relaxed);
 	} else {
-		nanoseconds_to_absolutetime(10 * NSEC_PER_USEC, &abstime);
+		mtx_abstime = os_atomic_load(&MutexSpin, relaxed);
 	}
-	MutexSpin = abstime;
-	low_MutexSpin = MutexSpin;
+
+	low_MutexSpin = os_atomic_load(&MutexSpin, relaxed);
 	/*
 	 * high_MutexSpin should be initialized as low_MutexSpin * real_ncpus, but
 	 * real_ncpus is not set at this time
@@ -534,7 +624,23 @@ ml_init_lock_timeout(void)
 	 */
 	high_MutexSpin = low_MutexSpin;
 
-	nanoseconds_to_absolutetime(MAX_WFE_HINT_INTERVAL_US * NSEC_PER_USEC, &ml_wfe_hint_max_interval);
+	uint64_t maxwfeus = MAX_WFE_HINT_INTERVAL_US;
+	PE_parse_boot_argn("max_wfe_us", &maxwfeus, sizeof(maxwfeus));
+	nanoseconds_to_absolutetime(maxwfeus * NSEC_PER_USEC, &ml_wfe_hint_max_interval);
+}
+
+/*
+ * This is called when all of the ml_processor_info_t structures have been
+ * initialized and all the processors have been started through processor_start().
+ *
+ * Required by the scheduler subsystem.
+ */
+void
+ml_cpu_init_completed(void)
+{
+	if (SCHED(cpu_init_completed) != NULL) {
+		SCHED(cpu_init_completed)();
+	}
 }
 
 /*
@@ -544,6 +650,10 @@ ml_init_lock_timeout(void)
 void
 ml_cpu_up(void)
 {
+	ml_topology_cpu_t *cpu = &ml_get_topology_info()->cpus[ml_get_cpu_number_local()];
+
+	os_atomic_inc(&cluster_type_num_active_cpus[cpu->cluster_type], relaxed);
+
 	os_atomic_inc(&machine_info.physical_cpu, relaxed);
 	os_atomic_inc(&machine_info.logical_cpu, relaxed);
 }
@@ -556,6 +666,9 @@ void
 ml_cpu_down(void)
 {
 	cpu_data_t      *cpu_data_ptr;
+	ml_topology_cpu_t *cpu = &ml_get_topology_info()->cpus[ml_get_cpu_number_local()];
+
+	os_atomic_dec(&cluster_type_num_active_cpus[cpu->cluster_type], relaxed);
 
 	os_atomic_dec(&machine_info.physical_cpu, relaxed);
 	os_atomic_dec(&machine_info.logical_cpu, relaxed);
@@ -584,32 +697,6 @@ ml_cpu_down(void)
 	}
 
 	cpu_signal_handler_internal(TRUE);
-}
-
-/*
- *	Routine:        ml_cpu_get_info
- *	Function:
- */
-void
-ml_cpu_get_info(ml_cpu_info_t * ml_cpu_info)
-{
-	cache_info_t   *cpuid_cache_info;
-
-	cpuid_cache_info = cache_info();
-	ml_cpu_info->vector_unit = 0;
-	ml_cpu_info->cache_line_size = cpuid_cache_info->c_linesz;
-	ml_cpu_info->l1_icache_size = cpuid_cache_info->c_isize;
-	ml_cpu_info->l1_dcache_size = cpuid_cache_info->c_dsize;
-
-#if (__ARM_ARCH__ >= 7)
-	ml_cpu_info->l2_settings = 1;
-	ml_cpu_info->l2_cache_size = cpuid_cache_info->c_l2size;
-#else
-	ml_cpu_info->l2_settings = 0;
-	ml_cpu_info->l2_cache_size = 0xFFFFFFFF;
-#endif
-	ml_cpu_info->l3_settings = 0;
-	ml_cpu_info->l3_cache_size = 0xFFFFFFFF;
 }
 
 unsigned int
@@ -816,41 +903,25 @@ ml_read_chip_revision(unsigned int *rev __unused)
 #endif
 }
 
-static boolean_t
-ml_parse_interrupt_prop(const DTEntry entry, ml_topology_cpu_t *cpu)
-{
-	uint32_t const *prop;
-	unsigned int propSize;
-
-	if (SecureDTGetProperty(entry, "interrupts", (void const **)&prop, &propSize) != kSuccess) {
-		return FALSE;
-	}
-
-	if (propSize == sizeof(uint32_t) * 1) {
-		cpu->pmi_irq = prop[0];
-		return TRUE;
-	} else if (propSize == sizeof(uint32_t) * 3) {
-		cpu->self_ipi_irq = prop[0];
-		cpu->pmi_irq = prop[1];
-		cpu->other_ipi_irq = prop[2];
-		return TRUE;
-	} else {
-		return FALSE;
-	}
-}
-
 void
 ml_parse_cpu_topology(void)
 {
 	DTEntry entry, child __unused;
 	OpaqueDTEntryIterator iter;
-	uint32_t cpu_boot_arg;
+	uint32_t cpu_boot_arg = MAX_CPUS;
+	uint64_t cpumask_boot_arg = ULLONG_MAX;
 	int err;
 
 	int64_t cluster_phys_to_logical[MAX_CPU_CLUSTER_PHY_ID + 1];
 	int64_t cluster_max_cpu_phys_id[MAX_CPU_CLUSTER_PHY_ID + 1];
-	cpu_boot_arg = MAX_CPUS;
-	PE_parse_boot_argn("cpus", &cpu_boot_arg, sizeof(cpu_boot_arg));
+	const boolean_t cpus_boot_arg_present = PE_parse_boot_argn("cpus", &cpu_boot_arg, sizeof(cpu_boot_arg));
+	const boolean_t cpumask_boot_arg_present = PE_parse_boot_argn("cpumask", &cpumask_boot_arg, sizeof(cpumask_boot_arg));
+
+	// The cpus=N and cpumask=N boot args cannot be used simultaneously. Flag this
+	// so that we trigger a panic later in the boot process, once serial is enabled.
+	if (cpus_boot_arg_present && cpumask_boot_arg_present) {
+		cpu_config_correct = false;
+	}
 
 	err = SecureDTLookupEntry(NULL, "/cpus", &entry);
 	assert(err == kSuccess);
@@ -866,6 +937,19 @@ ml_parse_cpu_topology(void)
 
 	while (kSuccess == SecureDTIterateEntries(&iter, &child)) {
 		boolean_t is_boot_cpu = ml_is_boot_cpu(child);
+		boolean_t cpu_enabled = cpumask_boot_arg & 1;
+		cpumask_boot_arg >>= 1;
+
+		// Boot CPU disabled in cpumask. Flag this so that we trigger a panic
+		// later in the boot process, once serial is enabled.
+		if (is_boot_cpu && !cpu_enabled) {
+			cpu_config_correct = false;
+		}
+
+		// Ignore this CPU if it has been disabled by the cpumask= boot-arg.
+		if (!is_boot_cpu && !cpu_enabled) {
+			continue;
+		}
 
 		// If the number of CPUs is constrained by the cpus= boot-arg, and the boot CPU hasn't
 		// been added to the topology struct yet, and we only have one slot left, then skip
@@ -886,8 +970,8 @@ ml_parse_cpu_topology(void)
 		assert(cpu->cpu_id < MAX_CPUS);
 		topology_info.max_cpu_id = MAX(topology_info.max_cpu_id, cpu->cpu_id);
 
-		cpu->die_id = (int)ml_readprop(child, "die-id", 0);
-		topology_info.max_die_id = MAX(topology_info.max_die_id, cpu->die_id);
+		cpu->reserved = 0;
+		topology_info.reserved = 0;
 
 		cpu->phys_id = (uint32_t)ml_readprop(child, "reg", ML_READPROP_MANDATORY);
 
@@ -897,12 +981,19 @@ ml_parse_cpu_topology(void)
 		cpu->l3_cache_size = (uint32_t)ml_readprop(child, "l3-cache-size", 0);
 		cpu->l3_cache_id = (uint32_t)ml_readprop(child, "l3-cache-id", 0);
 
-		ml_parse_interrupt_prop(child, cpu);
 		ml_read_reg_range(child, "cpu-uttdbg-reg", &cpu->cpu_UTTDBG_pa, &cpu->cpu_UTTDBG_len);
 		ml_read_reg_range(child, "cpu-impl-reg", &cpu->cpu_IMPL_pa, &cpu->cpu_IMPL_len);
 		ml_read_reg_range(child, "coresight-reg", &cpu->coresight_pa, &cpu->coresight_len);
 		cpu->cluster_type = CLUSTER_TYPE_SMP;
 
+		int cluster_type = (int)ml_readprop(child, "cluster-type", 0);
+		if (cluster_type == 'E') {
+			cpu->cluster_type = CLUSTER_TYPE_E;
+		} else if (cluster_type == 'P') {
+			cpu->cluster_type = CLUSTER_TYPE_P;
+		}
+
+		topology_info.cluster_type_num_cpus[cpu->cluster_type]++;
 
 		/*
 		 * Since we want to keep a linear cluster ID space, we cannot just rely
@@ -912,7 +1003,7 @@ ml_parse_cpu_topology(void)
 #if HAS_CLUSTER
 		uint32_t phys_cluster_id = MPIDR_CLUSTER_ID(cpu->phys_id);
 #else
-		uint32_t phys_cluster_id = 0;
+		uint32_t phys_cluster_id = (cpu->cluster_type == CLUSTER_TYPE_P);
 #endif
 		assert(phys_cluster_id <= MAX_CPU_CLUSTER_PHY_ID);
 		cpu->cluster_id = ((cluster_phys_to_logical[phys_cluster_id] == -1) ?
@@ -926,6 +1017,7 @@ ml_parse_cpu_topology(void)
 
 			topology_info.num_clusters++;
 			topology_info.max_cluster_id = MAX(topology_info.max_cluster_id, cpu->cluster_id);
+			topology_info.cluster_types |= (1 << cpu->cluster_type);
 
 			cluster->cluster_id = cpu->cluster_id;
 			cluster->cluster_type = cpu->cluster_type;
@@ -986,14 +1078,17 @@ ml_parse_cpu_topology(void)
 	ml_read_chip_revision(&topology_info.chip_revision);
 
 	/*
-	 * Set TPIDRRO_EL0 to indicate the correct cpu number, as we may
+	 * Set TPIDR_EL0 to indicate the correct cpu number, as we may
 	 * not be booting from cpu 0.  Userspace will consume the current
 	 * CPU number through this register.  For non-boot cores, this is
 	 * done in start.s (start_cpu) using the cpu_number field of the
 	 * per-cpu data object.
 	 */
-	assert(__builtin_arm_rsr64("TPIDRRO_EL0") == 0);
-	__builtin_arm_wsr64("TPIDRRO_EL0", (uint64_t)topology_info.boot_cpu->cpu_id);
+	uint64_t cpuid = topology_info.boot_cpu->cpu_id;
+
+	__builtin_arm_wsr64("TPIDR_EL0", cpuid & MACHDEP_TPIDR_CPUNUM_MASK);
+	assert((cpuid & MACHDEP_TPIDR_CPUNUM_MASK) == cpuid);
+	__builtin_arm_wsr64("TPIDRRO_EL0", 0);
 }
 
 const ml_topology_info_t *
@@ -1048,7 +1143,7 @@ ml_get_boot_cpu_number(void)
 }
 
 cluster_type_t
-ml_get_boot_cluster(void)
+ml_get_boot_cluster_type(void)
 {
 	return topology_info.boot_cluster->cluster_type;
 }
@@ -1180,17 +1275,13 @@ ml_processor_register(ml_processor_info_t *in_processor_info,
 
 	this_cpu_datap->cpu_id = in_processor_info->cpu_id;
 
-	this_cpu_datap->cpu_console_buf = console_cpu_alloc(is_boot_cpu);
-	if (this_cpu_datap->cpu_console_buf == (void *)(NULL)) {
-		goto processor_register_error;
-	}
-
 	if (!is_boot_cpu) {
 		this_cpu_datap->cpu_number = (unsigned short)(in_processor_info->log_id);
 
 		if (cpu_data_register(this_cpu_datap) != KERN_SUCCESS) {
 			goto processor_register_error;
 		}
+		assert((this_cpu_datap->cpu_number & MACHDEP_TPIDR_CPUNUM_MASK) == this_cpu_datap->cpu_number);
 	}
 
 	this_cpu_datap->cpu_idle_notify = in_processor_info->processor_idle;
@@ -1218,10 +1309,18 @@ ml_processor_register(ml_processor_info_t *in_processor_info,
 #else /* HAS_CLUSTER */
 	this_cpu_datap->cluster_master = is_boot_cpu;
 #endif /* HAS_CLUSTER */
-
-	pset = pset_find(in_processor_info->cluster_id, processor_pset(master_processor));
-
-	assert(pset != NULL);
+	pset = pset_find(in_processor_info->cluster_id, NULL);
+	if (pset == NULL) {
+#if __AMP__
+		pset_cluster_type_t pset_cluster_type = this_cpu_datap->cpu_cluster_type == CLUSTER_TYPE_E ? PSET_AMP_E : PSET_AMP_P;
+		pset = pset_create(ml_get_boot_cluster_type() == this_cpu_datap->cpu_cluster_type ? &pset_node0 : &pset_node1, pset_cluster_type, this_cpu_datap->cpu_cluster_id, this_cpu_datap->cpu_cluster_id);
+		assert(pset != PROCESSOR_SET_NULL);
+#else /* __AMP__ */
+		pset_cluster_type_t pset_cluster_type = PSET_SMP;
+		pset = pset_create(&pset_node0, pset_cluster_type, this_cpu_datap->cpu_cluster_id, this_cpu_datap->cpu_cluster_id);
+		assert(pset != PROCESSOR_SET_NULL);
+#endif /* __AMP__ */
+	}
 	kprintf("%s>cpu_id %p cluster_id %d cpu_number %d is type %d\n", __FUNCTION__, in_processor_info->cpu_id, in_processor_info->cluster_id, this_cpu_datap->cpu_number, in_processor_info->cluster_type);
 
 	processor_t processor = PERCPU_GET_RELATIVE(processor, cpu_data, this_cpu_datap);
@@ -1548,12 +1647,25 @@ ml_static_protect(
 void
 ml_static_mfree(
 	vm_offset_t vaddr,
-	vm_size_t size)
+	vm_size_t   size)
 {
-	vm_offset_t     vaddr_cur;
-	ppnum_t         ppn;
-	uint32_t freed_pages = 0;
-	uint32_t freed_kernelcache_pages = 0;
+	vm_offset_t vaddr_cur;
+	ppnum_t     ppn;
+	uint32_t    freed_pages = 0;
+	uint32_t    bad_page_cnt = 0;
+	uint32_t    freed_kernelcache_pages = 0;
+
+#if defined(__arm64__) && (DEVELOPMENT || DEBUG)
+	/* For testing hitting a bad ram page */
+	static int count = 0;
+	static int bad_at_cnt = -1;
+	static bool first = true;
+
+	if (first) {
+		(void)PE_parse_boot_argn("bad_static_mfree", &bad_at_cnt, sizeof(bad_at_cnt));
+		first = false;
+	}
+#endif /* defined(__arm64__) && (DEVELOPMENT || DEBUG) */
 
 	/* It is acceptable (if bad) to fail to free. */
 	if (vaddr < VM_MIN_KERNEL_ADDRESS) {
@@ -1577,6 +1689,19 @@ ml_static_mfree(
 				panic("Failed ml_static_mfree on %p", (void *) vaddr_cur);
 			}
 
+#if defined(__arm64__)
+			bool is_bad = pmap_is_bad_ram(ppn);
+#if DEVELOPMENT || DEBUG
+			is_bad |= (count++ == bad_at_cnt);
+#endif /* DEVELOPMENT || DEBUG */
+
+			if (is_bad) {
+				++bad_page_cnt;
+				vm_page_create_retired(ppn);
+				continue;
+			}
+#endif /* defined(__arm64__) */
+
 			vm_page_create(ppn, (ppn + 1));
 			freed_pages++;
 			if (vaddr_cur >= segLOWEST && vaddr_cur < end_kern) {
@@ -1590,7 +1715,7 @@ ml_static_mfree(
 	vm_page_kernelcache_count -= freed_kernelcache_pages;
 	vm_page_unlock_queues();
 #if     DEBUG
-	kprintf("ml_static_mfree: Released 0x%x pages at VA %p, size:0x%llx, last ppn: 0x%x\n", freed_pages, (void *)vaddr, (uint64_t)size, ppn);
+	kprintf("ml_static_mfree: Released 0x%x pages at VA %p, size:0x%llx, last ppn: 0x%x, +%d bad\n", freed_pages, (void *)vaddr, (uint64_t)size, ppn, bad_page_cnt);
 #endif
 }
 
@@ -1764,6 +1889,22 @@ ml_stack_size(void)
 }
 #endif
 
+#ifdef CONFIG_KCOV
+
+kcov_cpu_data_t *
+current_kcov_data(void)
+{
+	return &current_cpu_datap()->cpu_kcov_data;
+}
+
+kcov_cpu_data_t *
+cpu_kcov_data(int cpuid)
+{
+	return &cpu_datap(cpuid)->cpu_kcov_data;
+}
+
+#endif /* CONFIG_KCOV */
+
 boolean_t
 machine_timeout_suspended(void)
 {
@@ -1794,6 +1935,7 @@ ml_set_decrementer(uint32_t dec_value)
 	}
 }
 
+
 uint64_t
 ml_get_hwclock()
 {
@@ -1811,21 +1953,43 @@ ml_get_hwclock()
 uint64_t
 ml_get_timebase()
 {
-	return ml_get_hwclock() + getCpuDatap()->cpu_base_timebase;
+	uint64_t clock, timebase;
+
+	//the retry is for the case where S2R catches us in the middle of this. see rdar://77019633
+	do {
+		timebase = getCpuDatap()->cpu_base_timebase;
+		os_compiler_barrier();
+		clock = ml_get_hwclock();
+		os_compiler_barrier();
+	} while (getCpuDatap()->cpu_base_timebase != timebase);
+
+	return clock + timebase;
 }
 
 /*
  * Get the speculative timebase without an ISB.
  */
-__attribute__((unused))
-static uint64_t
+uint64_t
 ml_get_speculative_timebase()
 {
-	uint64_t timebase;
+	uint64_t clock, timebase;
 
-	timebase = __builtin_arm_rsr64("CNTVCT_EL0");
+	//the retry is for the case where S2R catches us in the middle of this. see rdar://77019633&77697482
+	do {
+		timebase = getCpuDatap()->cpu_base_timebase;
+		os_compiler_barrier();
+		clock = __builtin_arm_rsr64("CNTVCT_EL0");
 
-	return timebase + getCpuDatap()->cpu_base_timebase;
+		os_compiler_barrier();
+	} while (getCpuDatap()->cpu_base_timebase != timebase);
+
+	return clock + timebase;
+}
+
+uint64_t
+ml_get_timebase_entropy(void)
+{
+	return ml_get_speculative_timebase();
 }
 
 uint32_t
@@ -1856,112 +2020,6 @@ ml_get_timer_pending()
 	return ((cntv_ctl & CNTV_CTL_EL0_ISTATUS) != 0) ? TRUE : FALSE;
 }
 
-static void
-cache_trap_error(thread_t thread, vm_map_address_t fault_addr)
-{
-	mach_exception_data_type_t exc_data[2];
-	arm_saved_state_t *regs = get_user_regs(thread);
-
-	set_saved_state_far(regs, fault_addr);
-
-	exc_data[0] = KERN_INVALID_ADDRESS;
-	exc_data[1] = fault_addr;
-
-	exception_triage(EXC_BAD_ACCESS, exc_data, 2);
-}
-
-static void
-cache_trap_recover()
-{
-	vm_map_address_t fault_addr;
-
-	__asm__ volatile ("mrs %0, FAR_EL1" : "=r"(fault_addr));
-
-	cache_trap_error(current_thread(), fault_addr);
-}
-
-static void
-set_cache_trap_recover(thread_t thread)
-{
-#if defined(HAS_APPLE_PAC)
-	thread->recover = (vm_address_t)ptrauth_auth_and_resign(&cache_trap_recover,
-	    ptrauth_key_function_pointer, 0,
-	    ptrauth_key_function_pointer, ptrauth_blend_discriminator(&thread->recover, PAC_DISCRIMINATOR_RECOVER));
-#else /* defined(HAS_APPLE_PAC) */
-	thread->recover = (vm_address_t)cache_trap_recover;
-#endif /* defined(HAS_APPLE_PAC) */
-}
-
-static void
-dcache_flush_trap(vm_map_address_t start, vm_map_size_t size)
-{
-	vm_map_address_t end = start + size;
-	thread_t thread = current_thread();
-	vm_offset_t old_recover = thread->recover;
-
-	/* Check bounds */
-	if (task_has_64Bit_addr(current_task())) {
-		if (end > MACH_VM_MAX_ADDRESS) {
-			cache_trap_error(thread, end & ((1 << ARM64_CLINE_SHIFT) - 1));
-		}
-	} else {
-		if (end > VM_MAX_ADDRESS) {
-			cache_trap_error(thread, end & ((1 << ARM64_CLINE_SHIFT) - 1));
-		}
-	}
-
-	if (start > end) {
-		cache_trap_error(thread, start & ((1 << ARM64_CLINE_SHIFT) - 1));
-	}
-
-	set_cache_trap_recover(thread);
-
-	/*
-	 * We're coherent on Apple ARM64 CPUs, so this could be a nop.  However,
-	 * if the region given us is bad, it would be good to catch it and
-	 * crash, ergo we still do the flush.
-	 */
-	FlushPoC_DcacheRegion(start, (uint32_t)size);
-
-	/* Restore recovery function */
-	thread->recover = old_recover;
-
-	/* Return (caller does exception return) */
-}
-
-static void
-icache_invalidate_trap(vm_map_address_t start, vm_map_size_t size)
-{
-	vm_map_address_t end = start + size;
-	thread_t thread = current_thread();
-	vm_offset_t old_recover = thread->recover;
-
-	/* Check bounds */
-	if (task_has_64Bit_addr(current_task())) {
-		if (end > MACH_VM_MAX_ADDRESS) {
-			cache_trap_error(thread, end & ((1 << ARM64_CLINE_SHIFT) - 1));
-		}
-	} else {
-		if (end > VM_MAX_ADDRESS) {
-			cache_trap_error(thread, end & ((1 << ARM64_CLINE_SHIFT) - 1));
-		}
-	}
-
-	if (start > end) {
-		cache_trap_error(thread, start & ((1 << ARM64_CLINE_SHIFT) - 1));
-	}
-
-	set_cache_trap_recover(thread);
-
-	/* Invalidate iCache to point of unification */
-	InvalidatePoU_IcacheRegion(start, (uint32_t)size);
-
-	/* Restore recovery function */
-	thread->recover = old_recover;
-
-	/* Return (caller does exception return) */
-}
-
 __attribute__((noreturn))
 void
 platform_syscall(arm_saved_state_t *state)
@@ -1971,17 +2029,13 @@ platform_syscall(arm_saved_state_t *state)
 #define platform_syscall_kprintf(x...) /* kprintf("platform_syscall: " x) */
 
 	code = (uint32_t)get_saved_state_reg(state, 3);
+
+	KDBG(MACHDBG_CODE(DBG_MACH_MACHDEP_EXCP_SC_ARM, code) | DBG_FUNC_START,
+	    get_saved_state_reg(state, 0),
+	    get_saved_state_reg(state, 1),
+	    get_saved_state_reg(state, 2));
+
 	switch (code) {
-	case 0:
-		/* I-Cache flush */
-		platform_syscall_kprintf("icache flush requested.\n");
-		icache_invalidate_trap(get_saved_state_reg(state, 0), get_saved_state_reg(state, 1));
-		break;
-	case 1:
-		/* D-Cache flush */
-		platform_syscall_kprintf("dcache flush requested.\n");
-		dcache_flush_trap(get_saved_state_reg(state, 0), get_saved_state_reg(state, 1));
-		break;
 	case 2:
 		/* set cthread */
 		platform_syscall_kprintf("set cthread self.\n");
@@ -1992,10 +2046,15 @@ platform_syscall(arm_saved_state_t *state)
 		platform_syscall_kprintf("get cthread self.\n");
 		set_saved_state_reg(state, 0, thread_get_cthread_self());
 		break;
+	case 0: /* I-Cache flush (removed) */
+	case 1: /* D-Cache flush (removed) */
 	default:
 		platform_syscall_kprintf("unknown: %d\n", code);
 		break;
 	}
+
+	KDBG(MACHDBG_CODE(DBG_MACH_MACHDEP_EXCP_SC_ARM, code) | DBG_FUNC_END,
+	    get_saved_state_reg(state, 0));
 
 	thread_exception_return();
 }
@@ -2053,6 +2112,22 @@ wfe_timeout_init(void)
 	_enable_timebase_event_stream(arm64_eventi);
 }
 
+/**
+ * Configures, but does not enable, the WFE event stream. The event stream
+ * generates an event at a set interval to act as a timeout for WFEs.
+ *
+ * This function sets the static global variable arm64_eventi to be the proper
+ * bit index for the CNTKCTL_EL1.EVENTI field to generate events at the correct
+ * period (1us unless specified by the "wfe_events_sec" boot-arg). arm64_eventi
+ * is used by wfe_timeout_init to actually poke the registers and enable the
+ * event stream.
+ *
+ * The CNTKCTL_EL1.EVENTI field contains the index of the bit of CNTVCT_EL0 that
+ * is the trigger for the system to generate an event. The trigger can occur on
+ * either the rising or falling edge of the bit depending on the value of
+ * CNTKCTL_EL1.EVNTDIR. This is arbitrary for our purposes, so we use the
+ * falling edge (1->0) transition to generate events.
+ */
 void
 wfe_timeout_configure(void)
 {
@@ -2067,34 +2142,39 @@ wfe_timeout_configure(void)
 			events_per_sec = USEC_PER_SEC;
 		}
 	} else {
-#if defined(ARM_BOARD_WFE_TIMEOUT_NS)
-		events_per_sec = NSEC_PER_SEC / ARM_BOARD_WFE_TIMEOUT_NS;
-#else /* !defined(ARM_BOARD_WFE_TIMEOUT_NS) */
-		/* Default to 1usec (or as close as we can get) */
 		events_per_sec = USEC_PER_SEC;
-#endif /* !defined(ARM_BOARD_WFE_TIMEOUT_NS) */
 	}
 	ticks_per_sec = gPEClockFrequencyInfo.timebase_frequency_hz;
 	ticks_per_event = ticks_per_sec / events_per_sec;
-	bit_index = flsll(ticks_per_event) - 1; /* Highest bit set */
 
-	/* Round up to power of two */
+	/* Bit index of next power of two greater than ticks_per_event */
+	bit_index = flsll(ticks_per_event) - 1;
+	/* Round up to next power of two if ticks_per_event is initially power of two */
 	if ((ticks_per_event & ((1 << bit_index) - 1)) != 0) {
 		bit_index++;
 	}
 
 	/*
-	 * The timer can only trigger on rising or falling edge,
-	 * not both; we don't care which we trigger on, but we
-	 * do need to adjust which bit we are interested in to
-	 * account for this.
+	 * The timer can only trigger on rising or falling edge, not both; we don't
+	 * care which we trigger on, but we do need to adjust which bit we are
+	 * interested in to account for this.
+	 *
+	 * In particular, we set CNTKCTL_EL1.EVENTDIR to trigger events on the
+	 * falling edge of the given bit. Therefore, we must decrement the bit index
+	 * by one as when the bit before the one we care about makes a 1 -> 0
+	 * transition, the bit we care about makes a 0 -> 1 transition.
+	 *
+	 * For example if we want an event generated every 8 ticks (if we calculated
+	 * a bit_index of 3), we would want the event to be generated whenever the
+	 * lower four bits of the counter transition from 0b0111 -> 0b1000. We can
+	 * see that the bit at index 2 makes a falling transition in this scenario,
+	 * so we would want EVENTI to be 2 instead of 3.
 	 */
 	if (bit_index != 0) {
 		bit_index--;
 	}
 
 	arm64_eventi = bit_index;
-	wfe_timeout_init();
 }
 
 boolean_t
@@ -2262,7 +2342,7 @@ ex_cb_invoke(
 	ex_cb_state_t state = {far};
 
 	if (cb_class >= EXCB_CLASS_MAX) {
-		panic("Invalid exception callback class 0x%x\n", cb_class);
+		panic("Invalid exception callback class 0x%x", cb_class);
 	}
 
 	if (pInfo->cb) {
@@ -2272,30 +2352,6 @@ ex_cb_invoke(
 }
 
 #if defined(HAS_APPLE_PAC)
-static inline bool
-cpu_supports_userkeyen()
-{
-#if   HAS_APCTL_EL1_USERKEYEN
-	return true;
-#else
-	return false;
-#endif
-}
-
-/**
- * Returns the default JOP key.  Depending on how the CPU diversifies userspace
- * JOP keys, this value may reflect either KERNKeyLo or APIAKeyLo.
- */
-uint64_t
-ml_default_jop_pid(void)
-{
-	if (cpu_supports_userkeyen()) {
-		return KERNEL_KERNKEY_ID;
-	} else {
-		return KERNEL_JOP_ID;
-	}
-}
-
 void
 ml_task_set_disable_user_jop(task_t task, uint8_t disable_user_jop)
 {
@@ -2370,15 +2426,25 @@ ml_thread_set_jop_pid(thread_t thread, task_t task)
 }
 #endif /* defined(HAS_APPLE_PAC) */
 
-
 #if defined(HAS_APPLE_PAC)
 #define _ml_auth_ptr_unchecked(_ptr, _suffix, _modifier) \
 	asm volatile ("aut" #_suffix " %[ptr], %[modifier]" : [ptr] "+r"(_ptr) : [modifier] "r"(_modifier));
 
-/*
- * ml_auth_ptr_unchecked: call this instead of ptrauth_auth_data
- * instrinsic when you don't want to trap on auth fail.
+/**
+ * Authenticates a signed pointer without trapping on failure.
  *
+ * @warning This function must be called with interrupts disabled.
+ *
+ * @warning Pointer authentication failure should normally be treated as a fatal
+ * error.  This function is intended for a handful of callers that cannot panic
+ * on failure, and that understand the risks in handling a poisoned return
+ * value.  Other code should generally use the trapping variant
+ * ptrauth_auth_data() instead.
+ *
+ * @param ptr the pointer to authenticate
+ * @param key which key to use for authentication
+ * @param modifier a modifier to mix into the key
+ * @return an authenticated version of ptr, possibly with poison bits set
  */
 void *
 ml_auth_ptr_unchecked(void *ptr, ptrauth_key key, uint64_t modifier)
@@ -2425,8 +2491,6 @@ ml_hibernate_active_pre(void)
 {
 #if HIBERNATION
 	if (kIOHibernateStateWakingFromHibernate == gIOHibernateState) {
-		/* validate rorgn hmac */
-		ppl_hmac_compute_rorgn_hmac();
 
 		hibernate_rebuild_vm_structs();
 	}
@@ -2490,6 +2554,13 @@ ml_update_cluster_wfe_recommendation(uint32_t wfe_cluster_id, uint64_t wfe_timeo
 	return 0; /* Success */
 }
 
+#if DEVELOPMENT || DEBUG
+int wfe_rec_max = 0;
+int wfe_rec_none = 0;
+uint64_t wfe_rec_override_mat = 0;
+uint64_t wfe_rec_clamp = 0;
+#endif
+
 uint64_t
 ml_cluster_wfe_timeout(uint32_t wfe_cluster_id)
 {
@@ -2497,5 +2568,26 @@ ml_cluster_wfe_timeout(uint32_t wfe_cluster_id)
 	 * of the recommendation; races are acceptable.
 	 */
 	uint64_t wfet = os_atomic_load(&arm64_cluster_wfe_recs[wfe_cluster_id], relaxed);
+#if DEVELOPMENT || DEBUG
+	if (wfe_rec_clamp) {
+		wfet = MIN(wfe_rec_clamp, wfet);
+	}
+
+	if (wfe_rec_max) {
+		for (int i = 0; i < MAX_CPU_CLUSTERS; i++) {
+			if (arm64_cluster_wfe_recs[i] > wfet) {
+				wfet = arm64_cluster_wfe_recs[i];
+			}
+		}
+	}
+
+	if (wfe_rec_none) {
+		wfet = 0;
+	}
+
+	if (wfe_rec_override_mat) {
+		wfet = wfe_rec_override_mat;
+	}
+#endif
 	return wfet;
 }

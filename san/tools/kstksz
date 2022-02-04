@@ -1,0 +1,256 @@
+#!/usr/local/bin/recon
+local CoreSymbolication = require 'CoreSymbolication'
+local argparse = require 'argparse'
+local kperf = require 'kperf'
+local ktrace = require 'ktrace'
+local strict = require 'strict'
+
+
+local ksancov = {}
+
+-- KCOV event
+
+ksancov.Event = {}
+ksancov.Event.__index = ksancov.Event
+
+function ksancov.Event.new()
+	local instance = {
+		pid = nil,
+		procname = nil,
+		tid = nil,
+		stack_size = nil,
+		pc = nil,
+		duration = nil,
+		ustack = nil,
+		kstack = nil,
+	}
+
+	return setmetatable(instance, ksancov.Event)
+end
+
+function ksancov.Event:print()
+	print(string.format("%s(%d)\t%d\t at %x has stack size %d.", self.procname, self.pid, self.tid,
+		self.pc, self.stack_size))
+end
+
+-- KSANCOV tracing session
+
+ksancov.Session = {}
+ksancov.Session.__index = ksancov.Session
+
+function ksancov.Session.new(ktrace_session, flags)
+	assert(ktrace_session)
+
+	local instance = {
+		ktrace_session = ktrace_session,
+		kperf_session = kperf.Session.new(ktrace_session),
+		events_by_tid = {},
+		event_handlers = {},
+	}
+
+	local self = setmetatable(instance, ksancov.Session)
+	self:_register_kperf_callbacks(flags.ustack, flags.kstack)
+	self:_register_ktrace_callbacks(flags.proc)
+	return self
+end
+
+function ksancov.Session:start()
+	return self.ktrace_session:start()
+end
+
+function ksancov.Session:_register_kperf_callbacks(ustack, kstack)
+	local samplers = {}
+	if kstack then
+		table.insert(samplers, 'kstack')
+	end
+
+	if ustack then
+		table.insert(samplers, 'ustack')
+	end
+
+	-- D0x01ad0000 KCOV_THRESHOLD_ABOVE
+	if #samplers == 0 then
+		return
+	end
+
+	self.kperf_session:add_kdebug_sampler({'D0x01ad0000'}, samplers)
+
+	-- Collect userspace stacks
+	if ustack then
+		self.kperf_session:add_callback_sample({'ustack'}, function (sample)
+			local event = self.events_by_tid[sample.threadid]
+			if event then
+				event.ustack = sample.ustack
+			end
+		end)
+	end
+
+	-- Collect kernel stacks
+	if kstack then
+		self.kperf_session:add_callback_sample({'kstack'}, function (sample)
+			local event = self.events_by_tid[sample.threadid]
+			if event then
+				event.kstack = sample.kstack
+			end
+		end)
+	end
+end
+
+function ksancov.Session:_register_ktrace_callbacks(proc)
+	self.ktrace_session:add_callback('KCOV_STKSZ_THRESHOLD_ABOVE', function (trace_point)
+		self:_handle_threshold_above(ktrace.copy_event(trace_point))
+	end)
+
+	self.ktrace_session:add_callback('KCOV_STKSZ_THRESHOLD_BELOW', function (trace_point)
+		self:_handle_threshold_below(ktrace.copy_event(trace_point))
+	end)
+
+	if proc then
+		self.ktrace_session:filter_proc(proc)
+	end
+end
+
+function ksancov.Session:_handle_threshold_above(trace_point)
+	local event = ksancov.Event.new()
+
+	event.tid = trace_point["threadid"]
+	event.pid = self.ktrace_session:pid_for_threadid(event.tid) or "0"
+	event.pc = trace_point[1]
+	event.stack_size = trace_point[2]
+	event.procname = self.ktrace_session:procname_for_threadid(event.tid)
+
+	self.events_by_tid[event.tid] = event
+end
+
+function ksancov.Session:_handle_threshold_below(trace_point)
+	local event = self.events_by_tid[trace_point["threadid"]]
+
+	-- It is possible that we redord BELOW event as first. Ignore it if we haven't seen
+	-- the ABOVE event first.
+	if event then
+		self.events_by_tid[event.tid] = nil
+
+		for i, handler in pairs(self.event_handlers) do
+			handler(event)
+		end
+	end
+end
+
+function ksancov.Session:add_event_handler(handler)
+	table.insert(self.event_handlers, handler)
+end
+
+-- Utility code
+
+local function parse_args()
+	local parser = argparse("ksancov", "Kernel stack size monitoring utility.")
+
+	parser:option {
+		name = "--codes-files",
+		description = "Import debugid-to-string mapping files",
+		args = "*",
+		count = "?",
+	}
+
+	parser:option {
+		name = "-f --file",
+		description = "artrace or ktrace file to read from",
+		args = 1,
+		count = "?",
+	}
+
+	parser:option {
+		name = "-p --proc",
+		description = "pid or process name to be recorded",
+		args = 1,
+		count = "?",
+	}
+
+	parser:flag  {
+		name = "-u --ustack",
+		description = "sample user space stacks",
+		count = "?",
+	}
+
+	parser:flag {
+		name = "-k --kstack",
+		description = "sample kernel space stacks",
+		count = "?",
+	}
+
+	return parser:parse(arg)
+end
+
+local flags = parse_args()
+local ktrace_session = ktrace.Session.new(flags.file)
+
+if flags.codes_files then
+	for _, file in pairs(flags.codes_files) do
+		ktrace_session:add_codes_file(file)
+	end
+end
+
+local ksancov_session = ksancov.Session.new(ktrace_session, flags)
+
+ksancov_session:add_event_handler(function (event)
+	event:print()
+
+	local function symbolicate(symbolicator, frame)
+		local symbol = symbolicator:symbolicate(frame)
+
+		if symbol then
+			print(("\t%s  (in %s)"):format(symbol.name or "???", symbol.owner_name or "???"))
+		else
+			print(("\t0x%x  (in ???)").format(frame))
+		end
+	end
+
+	-- Symbolicate stacks
+	if event.ustack then
+		print('ustack:')
+
+		if flags.file then
+			-- When reading from a file, we can't use CoreSymbolication to symbolicate the stack frames as the processes are
+			-- not actually running, so use our ktrace session instead.
+			for _, frame in ipairs(event.ustack or {}) do
+				print(("    %s"):format(ktrace_session:symbolicate_with_pid(event.pid, frame)))
+			end
+		else
+			local symbolicator = CoreSymbolication.Symbolicator.new(event.pid)
+			if symbolicator then
+				for _, frame in ipairs(event.ustack or {}) do
+					symbolicate(symbolicator, frame)
+				end
+			end
+		end
+	end
+
+	if event.kstack then
+		print('kstack:')
+
+		if flags.file then
+			-- When reading from a file, we can't use CoreSymbolication to symbolicate the stack frames as the processes are
+			-- not actually running, so use our ktrace session instead.
+			for _, frame in ipairs(event.kstack or {}) do
+				print(("    %s"):format(ktrace_session:symbolicate_with_pid(event.pid, frame)))
+			end
+		else
+			local symbolicator = CoreSymbolication.Symbolicator.new(0)
+			if symbolicator then
+				for _, frame in ipairs(event.kstack or {}) do
+					symbolicate(symbolicator, frame)
+				end
+			end
+		end
+	end
+end)
+
+io.stdout:write("Started recording ...\n")
+local ok, err = ksancov_session:start()
+if not ok then
+	io.stderr:write("Failed to start session: ", err, "\n")
+	os.exit(1)
+end
+
+io.stdout:write("DONE.\n")
+

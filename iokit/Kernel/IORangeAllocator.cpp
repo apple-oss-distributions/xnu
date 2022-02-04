@@ -54,12 +54,13 @@ struct IORangeAllocatorElement {
 	IORangeScalar       end;
 };
 
-IOLock *        gIORangeAllocatorLock;
+LCK_GRP_DECLARE(range_allocator_grp, "range_allocator_grp");
+LCK_MTX_DECLARE(gIORangeAllocatorLock, &range_allocator_grp);
 
 #define LOCK()          \
-	if( options & kLocking)	IOTakeLock( gIORangeAllocatorLock )
+	if( options & kLocking)	lck_mtx_lock( &gIORangeAllocatorLock )
 #define UNLOCK()        \
-	if( options & kLocking)	IOUnlock( gIORangeAllocatorLock )
+	if( options & kLocking)	lck_mtx_unlock( &gIORangeAllocatorLock )
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
@@ -85,10 +86,6 @@ IORangeAllocator::init( IORangeScalar endOfRange,
 	elements            = NULL;
 	defaultAlignmentMask = _defaultAlignment - 1;
 	options             = _options;
-
-	if ((!gIORangeAllocatorLock) && (options & kLocking)) {
-		gIORangeAllocatorLock = IOLockAlloc();
-	}
 
 	if (endOfRange) {
 		deallocate( 0, endOfRange + 1 );
@@ -120,7 +117,7 @@ void
 IORangeAllocator::free()
 {
 	if (elements) {
-		IODelete( elements, IORangeAllocatorElement, capacity );
+		IODeleteData( elements, IORangeAllocatorElement, capacity );
 	}
 
 	super::free();
@@ -157,7 +154,7 @@ IORangeAllocator::allocElement( UInt32 index )
 		if (os_add_overflow(capacity, capacityIncrement, &newCapacity)) {
 			return false;
 		}
-		newElements = IONew( IORangeAllocatorElement, newCapacity );
+		newElements = IONewData( IORangeAllocatorElement, newCapacity );
 		if (!newElements) {
 			return false;
 		}
@@ -170,7 +167,7 @@ IORangeAllocator::allocElement( UInt32 index )
 			    newElements + index + 1,
 			    (numElements - index) * sizeof(IORangeAllocatorElement));
 
-			IODelete( elements, IORangeAllocatorElement, capacity );
+			IODeleteData( elements, IORangeAllocatorElement, capacity );
 		}
 
 		elements = newElements;

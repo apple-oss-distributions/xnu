@@ -539,7 +539,7 @@ sbwait(struct sockbuf *sb)
 	int error = 0;
 
 	if (so == NULL) {
-		panic("%s: null so, sb=%p sb_flags=0x%x lr=%p\n",
+		panic("%s: null so, sb=%p sb_flags=0x%x lr=%p",
 		    __func__, sb, sb->sb_flags, lr_saved);
 		/* NOTREACHED */
 	} else if (so->so_usecount < 1) {
@@ -948,7 +948,7 @@ sbappendstream(struct sockbuf *sb, struct mbuf *m)
 	}
 
 	if (m->m_nextpkt != NULL || (sb->sb_mb != sb->sb_lastrecord)) {
-		panic("sbappendstream: nexpkt %p || mb %p != lastrecord %p\n",
+		panic("sbappendstream: nexpkt %p || mb %p != lastrecord %p",
 		    m->m_nextpkt, sb->sb_mb, sb->sb_lastrecord);
 		/* NOTREACHED */
 	}
@@ -1016,7 +1016,7 @@ sbcheck(struct sockbuf *sb)
 		}
 	}
 	if (len != sb->sb_cc || mbcnt != sb->sb_mbcnt) {
-		panic("cc %ld != %ld || mbcnt %ld != %ld\n", len, sb->sb_cc,
+		panic("cc %ld != %ld || mbcnt %ld != %ld", len, sb->sb_cc,
 		    mbcnt, sb->sb_mbcnt);
 	}
 }
@@ -1552,7 +1552,7 @@ sbappendmptcpstream_rcv(struct sockbuf *sb, struct mbuf *m)
 	VERIFY(so->so_flags & SOF_MP_SUBFLOW);
 
 	if (m->m_nextpkt != NULL || (sb->sb_mb != sb->sb_lastrecord)) {
-		panic("%s: nexpkt %p || mb %p != lastrecord %p\n", __func__,
+		panic("%s: nexpkt %p || mb %p != lastrecord %p", __func__,
 		    m->m_nextpkt, sb->sb_mb, sb->sb_lastrecord);
 		/* NOTREACHED */
 	}
@@ -1673,7 +1673,7 @@ sbflush(struct sockbuf *sb)
 
 	/* so_usecount may be 0 if we get here from sofreelastref() */
 	if (so == NULL) {
-		panic("%s: null so, sb=%p sb_flags=0x%x lr=%p\n",
+		panic("%s: null so, sb=%p sb_flags=0x%x lr=%p",
 		    __func__, sb, sb->sb_flags, lr_saved);
 		/* NOTREACHED */
 	} else if (so->so_usecount < 0) {
@@ -2357,7 +2357,7 @@ sblock(struct sockbuf *sb, uint32_t flags)
 
 	/* so_usecount may be 0 if we get here from sofreelastref() */
 	if (so == NULL) {
-		panic("%s: null so, sb=%p sb_flags=0x%x lr=%p\n",
+		panic("%s: null so, sb=%p sb_flags=0x%x lr=%p",
 		    __func__, sb, sb->sb_flags, lr_saved);
 		/* NOTREACHED */
 	} else if (so->so_usecount < 0) {
@@ -2376,7 +2376,7 @@ sblock(struct sockbuf *sb, uint32_t flags)
 		 * been cleared by sodefunct()
 		 */
 		if (!(so->so_flags & SOF_DEFUNCT) && !(sb->sb_flags & SB_LOCK)) {
-			panic("%s: SB_LOCK not held for %p\n",
+			panic("%s: SB_LOCK not held for %p",
 			    __func__, sb);
 		}
 
@@ -2458,7 +2458,7 @@ sbunlock(struct sockbuf *sb, boolean_t keeplocked)
 
 	/* so_usecount may be 0 if we get here from sofreelastref() */
 	if (so == NULL) {
-		panic("%s: null so, sb=%p sb_flags=0x%x lr=%p\n",
+		panic("%s: null so, sb=%p sb_flags=0x%x lr=%p",
 		    __func__, sb, sb->sb_flags, lr_saved);
 		/* NOTREACHED */
 	} else if (so->so_usecount < 0) {
@@ -2480,7 +2480,7 @@ sbunlock(struct sockbuf *sb, boolean_t keeplocked)
 		    !(sb->sb_flags & SB_LOCK) &&
 		    !(so->so_state & SS_DEFUNCT) &&
 		    !(so->so_flags1 & SOF1_DEFUNCTINPROG)) {
-			panic("%s: SB_LOCK not held for %p\n",
+			panic("%s: SB_LOCK not held for %p",
 			    __func__, sb);
 		}
 		/* Keep the sockbuf locked and proceed */
@@ -2635,19 +2635,31 @@ soevent_ifdenied(struct socket *so)
 }
 
 /*
- * Make a copy of a sockaddr in a malloced buffer of type M_SONAME.
+ * Make a copy of a sockaddr in a malloced buffer of type SONAME.
  */
 struct sockaddr *
 dup_sockaddr(struct sockaddr *sa, int canwait)
 {
 	struct sockaddr *sa2;
 
-	MALLOC(sa2, struct sockaddr *, sa->sa_len, M_SONAME,
-	    canwait ? M_WAITOK : M_NOWAIT);
-	if (sa2) {
+	sa2 = (struct sockaddr *)alloc_sockaddr(sa->sa_len, canwait ? Z_WAITOK : Z_NOWAIT);
+	if (sa2 != NULL) {
 		bcopy(sa, sa2, sa->sa_len);
 	}
 	return sa2;
+}
+
+void *
+alloc_sockaddr(size_t size, zalloc_flags_t flags)
+{
+	VERIFY((size) <= UINT8_MAX);
+
+	struct sockaddr *sa = kheap_alloc(KHEAP_SONAME, size, flags | Z_ZERO);
+	if (sa != NULL) {
+		sa->sa_len = (uint8_t)size;
+	}
+
+	return sa;
 }
 
 /*

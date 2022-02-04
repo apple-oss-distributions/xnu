@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2018 Apple Inc. All rights reserved.
+ * Copyright (c) 2011-2020 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -100,6 +100,10 @@ struct ifclassq;
 enum cqdq_op;
 enum cqrq;
 
+#if DEBUG || DEVELOPMENT
+extern uint32_t ifclassq_flow_control_adv;
+#endif /* DEBUG || DEVELOPMENT */
+
 typedef int (*ifclassq_enq_func)(struct ifclassq *, classq_pkt_t *,
     boolean_t *);
 typedef void  (*ifclassq_deq_func)(struct ifclassq *, classq_pkt_t *);
@@ -118,6 +122,7 @@ typedef int (*ifclassq_req_func)(struct ifclassq *, enum cqrq, void *);
 struct ifclassq {
 	decl_lck_mtx_data(, ifcq_lock);
 
+	os_refcnt_t     ifcq_refcnt;
 	struct ifnet    *ifcq_ifp;      /* back pointer to interface */
 	u_int32_t       ifcq_len;       /* packet count */
 	u_int32_t       ifcq_maxlen;
@@ -163,10 +168,12 @@ struct ifclassq {
 #define IFCQF_READY      0x01           /* ifclassq supports discipline */
 #define IFCQF_ENABLED    0x02           /* ifclassq is in use */
 #define IFCQF_TBR        0x04           /* Token Bucket Regulator is in use */
+#define IFCQF_DESTROYED  0x08           /* ifclassq torndown */
 
 #define IFCQ_IS_READY(_ifcq)            ((_ifcq)->ifcq_flags & IFCQF_READY)
 #define IFCQ_IS_ENABLED(_ifcq)          ((_ifcq)->ifcq_flags & IFCQF_ENABLED)
 #define IFCQ_TBR_IS_ENABLED(_ifcq)      ((_ifcq)->ifcq_flags & IFCQF_TBR)
+#define IFCQ_IS_DESTROYED(_ifcq)        ((_ifcq)->ifcq_flags & IFCQF_DESTROYED)
 
 /* classq enqueue return value */
 /* packet has to be dropped */
@@ -273,8 +280,8 @@ struct if_ifclassq_stats {
 
 #define IFCQ_PKT_DROP_LIMIT(_ifcq)      ((_ifcq)->ifcq_pkt_drop_limit)
 
-extern int ifclassq_setup(struct ifnet *, u_int32_t, boolean_t);
-extern void ifclassq_teardown(struct ifnet *);
+extern int ifclassq_setup(struct ifclassq *, struct ifnet *, uint32_t);
+extern void ifclassq_teardown(struct ifclassq *);
 extern int ifclassq_pktsched_setup(struct ifclassq *);
 extern void ifclassq_set_maxlen(struct ifclassq *, u_int32_t);
 extern u_int32_t ifclassq_get_maxlen(struct ifclassq *);
@@ -306,6 +313,9 @@ extern void ifclassq_calc_update_interval(u_int64_t *update_interval);
 extern void ifclassq_set_packet_metadata(struct ifclassq *ifq,
     struct ifnet *ifp, classq_pkt_t *p);
 extern void ifclassq_reap_caches(boolean_t);
+extern struct ifclassq *ifclassq_alloc(void);
+extern void ifclassq_retain(struct ifclassq *);
+extern void ifclassq_release(struct ifclassq **);
 
 #endif /* BSD_KERNEL_PRIVATE */
 #endif /* PRIVATE */

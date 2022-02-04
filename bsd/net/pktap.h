@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2017 Apple Inc. All rights reserved.
+ * Copyright (c) 2012-2020 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -221,6 +221,7 @@ struct pktap_buffer_v2_hdr_extra {
 #define PTH_FLAG_SOCKET         0x00020000 /* Packet on a Socket */
 #define PTH_FLAG_NEXUS_CHAN     0x00040000 /* Packet on a nexus channel */
 #define PTH_FLAG_V2_HDR         0x00080000 /* Version 2 of pktap */
+#define PTH_FLAG_WAKE_PKT       0x00100000 /* Packet caused system to ake from sleep */
 
 #ifdef BSD_KERNEL_PRIVATE
 

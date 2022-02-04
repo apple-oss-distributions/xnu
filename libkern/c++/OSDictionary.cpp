@@ -91,16 +91,16 @@ OSDictionary::initWithCapacity(unsigned int inCapacity)
 		return false;
 	}
 
-	unsigned int size = inCapacity * sizeof(dictEntry);
 //fOptions |= kSort;
 
-	dictionary = (dictEntry *) kalloc_container(size);
+	dictionary = kalloc_type_tag_bt(dictEntry, inCapacity, Z_WAITOK_ZERO,
+	    VM_KERN_MEMORY_LIBKERN);
 	if (!dictionary) {
 		return false;
 	}
 
 	os::uninitialized_value_construct(dictionary, dictionary + inCapacity);
-	OSCONTAINER_ACCUMSIZE(size);
+	OSCONTAINER_ACCUMSIZE(inCapacity * sizeof(dictEntry));
 
 	count = 0;
 	capacity = inCapacity;
@@ -282,7 +282,7 @@ OSDictionary::free()
 	(void) super::setOptions(0, kImmutable);
 	flushCollection();
 	if (dictionary) {
-		kfree(dictionary, capacity * sizeof(dictEntry));
+		kfree_type(dictEntry, capacity, dictionary);
 		OSCONTAINER_ACCUMSIZE( -(capacity * sizeof(dictEntry)));
 	}
 
@@ -319,7 +319,6 @@ OSDictionary::ensureCapacity(unsigned int newCapacity)
 {
 	dictEntry *newDict;
 	vm_size_t finalCapacity;
-	vm_size_t oldSize, newSize;
 
 	if (newCapacity <= capacity) {
 		return capacity;
@@ -334,27 +333,23 @@ OSDictionary::ensureCapacity(unsigned int newCapacity)
 		return capacity;
 	}
 
-	newSize = sizeof(dictEntry) * finalCapacity;
-
-	newDict = (dictEntry *) kallocp_container(&newSize);
+	newDict = kallocp_type_tag_bt(dictEntry, &finalCapacity, Z_WAITOK,
+	    VM_KERN_MEMORY_LIBKERN);
 	if (newDict) {
 		// use all of the actual allocation size
-		finalCapacity = (newSize / sizeof(dictEntry));
 		if (finalCapacity > UINT_MAX) {
 			// failure, too large
-			kfree(newDict, newSize);
+			kfree_type(dictEntry, finalCapacity, newDict);
 			return capacity;
 		}
-
-		oldSize = sizeof(dictEntry) * capacity;
 
 		os::uninitialized_move(dictionary, dictionary + capacity, newDict);
 		os::uninitialized_value_construct(newDict + capacity, newDict + finalCapacity);
 		os::destroy(dictionary, dictionary + capacity);
 
-		OSCONTAINER_ACCUMSIZE(((size_t)newSize) - ((size_t)oldSize));
-		kfree(dictionary, oldSize);
+		OSCONTAINER_ACCUMSIZE(sizeof(dictEntry) * (finalCapacity - capacity));
 
+		kfree_type(dictEntry, capacity, dictionary);
 		dictionary = newDict;
 		capacity = (unsigned int) finalCapacity;
 	}

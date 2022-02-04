@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2007-2019 Apple Inc. All rights reserved.
+ * Copyright (c) 2007-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -332,14 +332,6 @@ struct {                                                                \
 #define PFIOC_STRUCT_ADDR32(s)          (&s##_un->_u._s##_32)
 #define PFIOC_STRUCT_ADDR64(s)          (&s##_un->_u._s##_64)
 
-static lck_attr_t *pf_perim_lock_attr;
-static lck_grp_t *pf_perim_lock_grp;
-static lck_grp_attr_t *pf_perim_lock_grp_attr;
-
-static lck_attr_t *pf_lock_attr;
-static lck_grp_t *pf_lock_grp;
-static lck_grp_attr_t *pf_lock_grp_attr;
-
 struct thread *pf_purge_thread;
 
 extern void pfi_kifaddr_update(void *);
@@ -360,16 +352,10 @@ generate_token(struct proc *p)
 		return 0;
 	}
 
-	new_token = _MALLOC(sizeof(struct pfioc_kernel_token), M_TEMP,
-	    M_WAITOK | M_ZERO);
+	new_token = kalloc_type(struct pfioc_kernel_token,
+	    Z_WAITOK | Z_ZERO | Z_NOFAIL);
 
-	LCK_MTX_ASSERT(pf_lock, LCK_MTX_ASSERT_OWNED);
-
-	if (new_token == NULL) {
-		/* malloc failed! bail! */
-		os_log_error(OS_LOG_DEFAULT, "%s: unable to allocate pf token structure!", __func__);
-		return 0;
-	}
+	LCK_MTX_ASSERT(&pf_lock, LCK_MTX_ASSERT_OWNED);
 
 	token_value = VM_KERNEL_ADDRPERM((u_int64_t)(uintptr_t)new_token);
 
@@ -390,13 +376,13 @@ remove_token(struct pfioc_remove_token *tok)
 {
 	struct pfioc_kernel_token *entry, *tmp;
 
-	LCK_MTX_ASSERT(pf_lock, LCK_MTX_ASSERT_OWNED);
+	LCK_MTX_ASSERT(&pf_lock, LCK_MTX_ASSERT_OWNED);
 
 	SLIST_FOREACH_SAFE(entry, &token_list_head, next, tmp) {
 		if (tok->token_value == entry->token.token_value) {
 			SLIST_REMOVE(&token_list_head, entry,
 			    pfioc_kernel_token, next);
-			_FREE(entry, M_TEMP);
+			kfree_type(struct pfioc_kernel_token, entry);
 			nr_tokens--;
 			return 0;    /* success */
 		}
@@ -411,11 +397,11 @@ invalidate_all_tokens(void)
 {
 	struct pfioc_kernel_token *entry, *tmp;
 
-	LCK_MTX_ASSERT(pf_lock, LCK_MTX_ASSERT_OWNED);
+	LCK_MTX_ASSERT(&pf_lock, LCK_MTX_ASSERT_OWNED);
 
 	SLIST_FOREACH_SAFE(entry, &token_list_head, next, tmp) {
 		SLIST_REMOVE(&token_list_head, entry, pfioc_kernel_token, next);
-		_FREE(entry, M_TEMP);
+		kfree_type(struct pfioc_kernel_token, entry);
 	}
 
 	nr_tokens = 0;
@@ -426,17 +412,6 @@ pfinit(void)
 {
 	u_int32_t *t = pf_default_rule.timeout;
 	int maj;
-
-	pf_perim_lock_grp_attr = lck_grp_attr_alloc_init();
-	pf_perim_lock_grp = lck_grp_alloc_init("pf_perim",
-	    pf_perim_lock_grp_attr);
-	pf_perim_lock_attr = lck_attr_alloc_init();
-	lck_rw_init(pf_perim_lock, pf_perim_lock_grp, pf_perim_lock_attr);
-
-	pf_lock_grp_attr = lck_grp_attr_alloc_init();
-	pf_lock_grp = lck_grp_alloc_init("pf", pf_lock_grp_attr);
-	pf_lock_attr = lck_attr_alloc_init();
-	lck_mtx_init(pf_lock, pf_lock_grp, pf_lock_attr);
 
 	pool_init(&pf_rule_pl, sizeof(struct pf_rule), 0, 0, 0, "pfrulepl",
 	    NULL);
@@ -632,13 +607,13 @@ pfopen(dev_t dev, int flags, int fmt, struct proc *p)
 	}
 
 	if (minor(dev) == PFDEV_PFM) {
-		lck_mtx_lock(pf_lock);
+		lck_mtx_lock(&pf_lock);
 		if (pfdevcnt != 0) {
-			lck_mtx_unlock(pf_lock);
+			lck_mtx_unlock(&pf_lock);
 			return EBUSY;
 		}
 		pfdevcnt++;
-		lck_mtx_unlock(pf_lock);
+		lck_mtx_unlock(&pf_lock);
 	}
 	return 0;
 }
@@ -652,10 +627,10 @@ pfclose(dev_t dev, int flags, int fmt, struct proc *p)
 	}
 
 	if (minor(dev) == PFDEV_PFM) {
-		lck_mtx_lock(pf_lock);
+		lck_mtx_lock(&pf_lock);
 		VERIFY(pfdevcnt > 0);
 		pfdevcnt--;
-		lck_mtx_unlock(pf_lock);
+		lck_mtx_unlock(&pf_lock);
 	}
 	return 0;
 }
@@ -834,10 +809,7 @@ tagname2tag(struct pf_tags *head, char *tagname)
 
 skip_dynamic_tag_alloc:
 	/* allocate and fill new struct pf_tagname */
-	tag = _MALLOC(sizeof(*tag), M_TEMP, M_WAITOK | M_ZERO);
-	if (tag == NULL) {
-		return 0;
-	}
+	tag = kalloc_type(struct pf_tagname, Z_WAITOK | Z_ZERO | Z_NOFAIL);
 	strlcpy(tag->name, tagname, sizeof(tag->name));
 	tag->tag = new_tagid;
 	tag->ref++;
@@ -879,7 +851,7 @@ tag_unref(struct pf_tags *head, u_int16_t tag)
 		if (tag == p->tag) {
 			if (--p->ref == 0) {
 				TAILQ_REMOVE(head, p, entries);
-				_FREE(p, M_TEMP);
+				kfree_type(struct pf_tagname, p);
 			}
 			break;
 		}
@@ -1082,7 +1054,7 @@ pf_commit_rules(u_int32_t ticket, int rs_num, char *anchor)
 	int                      error;
 	u_int32_t                old_rcount;
 
-	LCK_MTX_ASSERT(pf_lock, LCK_MTX_ASSERT_OWNED);
+	LCK_MTX_ASSERT(&pf_lock, LCK_MTX_ASSERT_OWNED);
 
 	if (rs_num < 0 || rs_num >= PF_RULESET_MAX) {
 		return EINVAL;
@@ -1161,8 +1133,8 @@ pf_rule_copyin(struct pf_rule *src, struct pf_rule *dst, struct proc *p,
 	dst->overload_tblname[sizeof(dst->overload_tblname) - 1] = '\0';
 	dst->owner[sizeof(dst->owner) - 1] = '\0';
 
-	dst->cuid = kauth_cred_getuid(p->p_ucred);
-	dst->cpid = p->p_pid;
+	dst->cuid = kauth_cred_getuid(kauth_cred_get());
+	dst->cpid = proc_getpid(p);
 
 	dst->anchor = NULL;
 	dst->kif = NULL;
@@ -1368,7 +1340,7 @@ pf_setup_pfsync_matching(struct pf_ruleset *rs)
 static void
 pf_start(void)
 {
-	LCK_MTX_ASSERT(pf_lock, LCK_MTX_ASSERT_OWNED);
+	LCK_MTX_ASSERT(&pf_lock, LCK_MTX_ASSERT_OWNED);
 
 	VERIFY(pf_is_enabled == 0);
 
@@ -1386,7 +1358,7 @@ pf_start(void)
 static void
 pf_stop(void)
 {
-	LCK_MTX_ASSERT(pf_lock, LCK_MTX_ASSERT_OWNED);
+	LCK_MTX_ASSERT(&pf_lock, LCK_MTX_ASSERT_OWNED);
 
 	VERIFY(pf_is_enabled);
 
@@ -1541,12 +1513,12 @@ pfioctl(dev_t dev, u_long cmd, caddr_t addr, int flags, struct proc *p)
 	}
 
 	if (flags & FWRITE) {
-		lck_rw_lock_exclusive(pf_perim_lock);
+		lck_rw_lock_exclusive(&pf_perim_lock);
 	} else {
-		lck_rw_lock_shared(pf_perim_lock);
+		lck_rw_lock_shared(&pf_perim_lock);
 	}
 
-	lck_mtx_lock(pf_lock);
+	lck_mtx_lock(&pf_lock);
 
 	switch (cmd) {
 	case DIOCSTART:
@@ -1943,8 +1915,8 @@ pfioctl(dev_t dev, u_long cmd, caddr_t addr, int flags, struct proc *p)
 		break;
 	}
 
-	lck_mtx_unlock(pf_lock);
-	lck_rw_done(pf_perim_lock);
+	lck_mtx_unlock(&pf_lock);
+	lck_rw_done(&pf_perim_lock);
 
 	return error;
 }
@@ -2359,7 +2331,7 @@ pfioctl_ioc_tokens(u_long cmd, struct pfioc_tokens_32 *tok32,
 #else
 		token_buf = tok32->pgt_buf;
 #endif
-		tokens = _MALLOC(size, M_TEMP, M_WAITOK | M_ZERO);
+		tokens = (struct pfioc_token *)kalloc_data(size, Z_WAITOK | Z_ZERO);
 		if (tokens == NULL) {
 			error = ENOMEM;
 			break;
@@ -2393,7 +2365,7 @@ pfioctl_ioc_tokens(u_long cmd, struct pfioc_tokens_32 *tok32,
 			tok32->size = ocnt - cnt;
 		}
 
-		_FREE(tokens, M_TEMP);
+		kfree_data(tokens, size);
 		break;
 	}
 
@@ -2866,7 +2838,7 @@ pfioctl_ioc_rule(u_long cmd, int minordev, struct pfioc_rule *pr, struct proc *p
 #if DUMMYNET
 		if (rule->action == PF_DUMMYNET) {
 			struct dummynet_event dn_event;
-			uint32_t direction = DN_INOUT;;
+			uint32_t direction = DN_INOUT;
 			bzero(&dn_event, sizeof(dn_event));
 
 			dn_event.dn_event_code = DUMMYNET_RULE_CONFIG;
@@ -3180,7 +3152,6 @@ pfioctl_ioc_rule(u_long cmd, int minordev, struct pfioc_rule *pr, struct proc *p
 
 		pf_calc_skip_steps(ruleset->rules[rs_num].active.ptr);
 		pf_remove_if_empty_ruleset(ruleset);
-
 		break;
 	}
 
@@ -3570,11 +3541,8 @@ pfioctl_ioc_states(u_long cmd, struct pfioc_states_32 *ps32,
 			break;
 		}
 
-		pstore = _MALLOC(sizeof(*pstore), M_TEMP, M_WAITOK | M_ZERO);
-		if (pstore == NULL) {
-			error = ENOMEM;
-			break;
-		}
+		pstore = kalloc_type(struct pfsync_state,
+		    Z_WAITOK | Z_ZERO | Z_NOFAIL);
 #ifdef __LP64__
 		buf = (p64 ? ps64->ps_buf : ps32->ps_buf);
 #else
@@ -3592,7 +3560,7 @@ pfioctl_ioc_states(u_long cmd, struct pfioc_states_32 *ps32,
 				    state->state_key, state);
 				error = copyout(pstore, buf, sizeof(*pstore));
 				if (error) {
-					_FREE(pstore, M_TEMP);
+					kfree_type(struct pfsync_state, pstore);
 					goto fail;
 				}
 				buf += sizeof(*pstore);
@@ -3608,7 +3576,7 @@ pfioctl_ioc_states(u_long cmd, struct pfioc_states_32 *ps32,
 			ps32->ps_len = size;
 		}
 
-		_FREE(pstore, M_TEMP);
+		kfree_type(struct pfsync_state, pstore);
 		break;
 	}
 
@@ -4112,12 +4080,12 @@ pfioctl_ioc_trans(u_long cmd, struct pfioc_trans_32 *io32,
 			error = ENODEV;
 			goto fail;
 		}
-		ioe = _MALLOC(sizeof(*ioe), M_TEMP, M_WAITOK);
-		table = _MALLOC(sizeof(*table), M_TEMP, M_WAITOK);
+		ioe = kalloc_type(struct pfioc_trans_e, Z_WAITOK);
+		table = kalloc_type(struct pfr_table, Z_WAITOK);
 		for (i = 0; i < size; i++, buf += sizeof(*ioe)) {
 			if (copyin(buf, ioe, sizeof(*ioe))) {
-				_FREE(table, M_TEMP);
-				_FREE(ioe, M_TEMP);
+				kfree_type(struct pfr_table, table);
+				kfree_type(struct pfioc_trans_e, ioe);
 				error = EFAULT;
 				goto fail;
 			}
@@ -4131,29 +4099,29 @@ pfioctl_ioc_trans(u_long cmd, struct pfioc_trans_32 *io32,
 				    sizeof(table->pfrt_anchor));
 				if ((error = pfr_ina_begin(table,
 				    &ioe->ticket, NULL, 0))) {
-					_FREE(table, M_TEMP);
-					_FREE(ioe, M_TEMP);
+					kfree_type(struct pfr_table, table);
+					kfree_type(struct pfioc_trans_e, ioe);
 					goto fail;
 				}
 				break;
 			default:
 				if ((error = pf_begin_rules(&ioe->ticket,
 				    ioe->rs_num, ioe->anchor))) {
-					_FREE(table, M_TEMP);
-					_FREE(ioe, M_TEMP);
+					kfree_type(struct pfr_table, table);
+					kfree_type(struct pfioc_trans_e, ioe);
 					goto fail;
 				}
 				break;
 			}
 			if (copyout(ioe, buf, sizeof(*ioe))) {
-				_FREE(table, M_TEMP);
-				_FREE(ioe, M_TEMP);
+				kfree_type(struct pfr_table, table);
+				kfree_type(struct pfioc_trans_e, ioe);
 				error = EFAULT;
 				goto fail;
 			}
 		}
-		_FREE(table, M_TEMP);
-		_FREE(ioe, M_TEMP);
+		kfree_type(struct pfr_table, table);
+		kfree_type(struct pfioc_trans_e, ioe);
 		break;
 	}
 
@@ -4166,12 +4134,12 @@ pfioctl_ioc_trans(u_long cmd, struct pfioc_trans_32 *io32,
 			error = ENODEV;
 			goto fail;
 		}
-		ioe = _MALLOC(sizeof(*ioe), M_TEMP, M_WAITOK);
-		table = _MALLOC(sizeof(*table), M_TEMP, M_WAITOK);
+		ioe = kalloc_type(struct pfioc_trans_e, Z_WAITOK);
+		table = kalloc_type(struct pfr_table, Z_WAITOK);
 		for (i = 0; i < size; i++, buf += sizeof(*ioe)) {
 			if (copyin(buf, ioe, sizeof(*ioe))) {
-				_FREE(table, M_TEMP);
-				_FREE(ioe, M_TEMP);
+				kfree_type(struct pfr_table, table);
+				kfree_type(struct pfioc_trans_e, ioe);
 				error = EFAULT;
 				goto fail;
 			}
@@ -4185,23 +4153,23 @@ pfioctl_ioc_trans(u_long cmd, struct pfioc_trans_32 *io32,
 				    sizeof(table->pfrt_anchor));
 				if ((error = pfr_ina_rollback(table,
 				    ioe->ticket, NULL, 0))) {
-					_FREE(table, M_TEMP);
-					_FREE(ioe, M_TEMP);
+					kfree_type(struct pfr_table, table);
+					kfree_type(struct pfioc_trans_e, ioe);
 					goto fail; /* really bad */
 				}
 				break;
 			default:
 				if ((error = pf_rollback_rules(ioe->ticket,
 				    ioe->rs_num, ioe->anchor))) {
-					_FREE(table, M_TEMP);
-					_FREE(ioe, M_TEMP);
+					kfree_type(struct pfr_table, table);
+					kfree_type(struct pfioc_trans_e, ioe);
 					goto fail; /* really bad */
 				}
 				break;
 			}
 		}
-		_FREE(table, M_TEMP);
-		_FREE(ioe, M_TEMP);
+		kfree_type(struct pfr_table, table);
+		kfree_type(struct pfioc_trans_e, ioe);
 		break;
 	}
 
@@ -4216,13 +4184,13 @@ pfioctl_ioc_trans(u_long cmd, struct pfioc_trans_32 *io32,
 			error = ENODEV;
 			goto fail;
 		}
-		ioe = _MALLOC(sizeof(*ioe), M_TEMP, M_WAITOK);
-		table = _MALLOC(sizeof(*table), M_TEMP, M_WAITOK);
+		ioe = kalloc_type(struct pfioc_trans_e, Z_WAITOK);
+		table = kalloc_type(struct pfr_table, Z_WAITOK);
 		/* first makes sure everything will succeed */
 		for (i = 0; i < size; i++, buf += sizeof(*ioe)) {
 			if (copyin(buf, ioe, sizeof(*ioe))) {
-				_FREE(table, M_TEMP);
-				_FREE(ioe, M_TEMP);
+				kfree_type(struct pfr_table, table);
+				kfree_type(struct pfioc_trans_e, ioe);
 				error = EFAULT;
 				goto fail;
 			}
@@ -4234,8 +4202,8 @@ pfioctl_ioc_trans(u_long cmd, struct pfioc_trans_32 *io32,
 				rs = pf_find_ruleset(ioe->anchor);
 				if (rs == NULL || !rs->topen || ioe->ticket !=
 				    rs->tticket) {
-					_FREE(table, M_TEMP);
-					_FREE(ioe, M_TEMP);
+					kfree_type(struct pfr_table, table);
+					kfree_type(struct pfioc_trans_e, ioe);
 					error = EBUSY;
 					goto fail;
 				}
@@ -4243,8 +4211,8 @@ pfioctl_ioc_trans(u_long cmd, struct pfioc_trans_32 *io32,
 			default:
 				if (ioe->rs_num < 0 || ioe->rs_num >=
 				    PF_RULESET_MAX) {
-					_FREE(table, M_TEMP);
-					_FREE(ioe, M_TEMP);
+					kfree_type(struct pfr_table, table);
+					kfree_type(struct pfioc_trans_e, ioe);
 					error = EINVAL;
 					goto fail;
 				}
@@ -4253,8 +4221,8 @@ pfioctl_ioc_trans(u_long cmd, struct pfioc_trans_32 *io32,
 				    !rs->rules[ioe->rs_num].inactive.open ||
 				    rs->rules[ioe->rs_num].inactive.ticket !=
 				    ioe->ticket) {
-					_FREE(table, M_TEMP);
-					_FREE(ioe, M_TEMP);
+					kfree_type(struct pfr_table, table);
+					kfree_type(struct pfioc_trans_e, ioe);
 					error = EBUSY;
 					goto fail;
 				}
@@ -4265,8 +4233,8 @@ pfioctl_ioc_trans(u_long cmd, struct pfioc_trans_32 *io32,
 		/* now do the commit - no errors should happen here */
 		for (i = 0; i < size; i++, buf += sizeof(*ioe)) {
 			if (copyin(buf, ioe, sizeof(*ioe))) {
-				_FREE(table, M_TEMP);
-				_FREE(ioe, M_TEMP);
+				kfree_type(struct pfr_table, table);
+				kfree_type(struct pfioc_trans_e, ioe);
 				error = EFAULT;
 				goto fail;
 			}
@@ -4280,23 +4248,23 @@ pfioctl_ioc_trans(u_long cmd, struct pfioc_trans_32 *io32,
 				    sizeof(table->pfrt_anchor));
 				if ((error = pfr_ina_commit(table, ioe->ticket,
 				    NULL, NULL, 0))) {
-					_FREE(table, M_TEMP);
-					_FREE(ioe, M_TEMP);
+					kfree_type(struct pfr_table, table);
+					kfree_type(struct pfioc_trans_e, ioe);
 					goto fail; /* really bad */
 				}
 				break;
 			default:
 				if ((error = pf_commit_rules(ioe->ticket,
 				    ioe->rs_num, ioe->anchor))) {
-					_FREE(table, M_TEMP);
-					_FREE(ioe, M_TEMP);
+					kfree_type(struct pfr_table, table);
+					kfree_type(struct pfioc_trans_e, ioe);
 					goto fail; /* really bad */
 				}
 				break;
 			}
 		}
-		_FREE(table, M_TEMP);
-		_FREE(ioe, M_TEMP);
+		kfree_type(struct pfr_table, table);
+		kfree_type(struct pfioc_trans_e, ioe);
 		break;
 	}
 
@@ -4336,11 +4304,7 @@ pfioctl_ioc_src_nodes(u_long cmd, struct pfioc_src_nodes_32 *psn32,
 			break;
 		}
 
-		pstore = _MALLOC(sizeof(*pstore), M_TEMP, M_WAITOK);
-		if (pstore == NULL) {
-			error = ENOMEM;
-			break;
-		}
+		pstore = kalloc_type(struct pf_src_node, Z_WAITOK | Z_NOFAIL);
 #ifdef __LP64__
 		buf = (p64 ? psn64->psn_buf : psn32->psn_buf);
 #else
@@ -4381,7 +4345,7 @@ pfioctl_ioc_src_nodes(u_long cmd, struct pfioc_src_nodes_32 *psn32,
 
 			error = copyout(pstore, buf, sizeof(*pstore));
 			if (error) {
-				_FREE(pstore, M_TEMP);
+				kfree_type(struct pf_src_node, pstore);
 				goto fail;
 			}
 			buf += sizeof(*pstore);
@@ -4395,7 +4359,7 @@ pfioctl_ioc_src_nodes(u_long cmd, struct pfioc_src_nodes_32 *psn32,
 			psn32->psn_len = size;
 		}
 
-		_FREE(pstore, M_TEMP);
+		kfree_type(struct pf_src_node, pstore);
 		break;
 	}
 
@@ -4550,11 +4514,11 @@ pf_af_hook(struct ifnet *ifp, struct mbuf **mppn, struct mbuf **mp,
 	marks = net_thread_marks_push(NET_THREAD_HELD_PF);
 
 	if (marks != net_thread_marks_none) {
-		lck_rw_lock_shared(pf_perim_lock);
+		lck_rw_lock_shared(&pf_perim_lock);
 		if (!pf_is_enabled) {
 			goto done;
 		}
-		lck_mtx_lock(pf_lock);
+		lck_mtx_lock(&pf_lock);
 	}
 
 	if (mppn != NULL && *mppn != NULL) {
@@ -4612,12 +4576,12 @@ pf_af_hook(struct ifnet *ifp, struct mbuf **mppn, struct mbuf **mp,
 	}
 
 	if (marks != net_thread_marks_none) {
-		lck_mtx_unlock(pf_lock);
+		lck_mtx_unlock(&pf_lock);
 	}
 
 done:
 	if (marks != net_thread_marks_none) {
-		lck_rw_done(pf_perim_lock);
+		lck_rw_done(&pf_perim_lock);
 	}
 
 	net_thread_marks_pop(marks);
@@ -4626,7 +4590,7 @@ done:
 
 
 #if INET
-static int
+static __attribute__((noinline)) int
 pf_inet_hook(struct ifnet *ifp, struct mbuf **mp, int input,
     struct ip_fw_args *fwa)
 {
@@ -4680,7 +4644,7 @@ pf_inet_hook(struct ifnet *ifp, struct mbuf **mp, int input,
 }
 #endif /* INET */
 
-int
+int __attribute__((noinline))
 pf_inet6_hook(struct ifnet *ifp, struct mbuf **mp, int input,
     struct ip_fw_args *fwa)
 {
@@ -4726,13 +4690,13 @@ pf_ifaddr_hook(struct ifnet *ifp)
 	struct pfi_kif *kif = ifp->if_pf_kif;
 
 	if (kif != NULL) {
-		lck_rw_lock_shared(pf_perim_lock);
-		lck_mtx_lock(pf_lock);
+		lck_rw_lock_shared(&pf_perim_lock);
+		lck_mtx_lock(&pf_lock);
 
 		pfi_kifaddr_update(kif);
 
-		lck_mtx_unlock(pf_lock);
-		lck_rw_done(pf_perim_lock);
+		lck_mtx_unlock(&pf_lock);
+		lck_rw_done(&pf_perim_lock);
 	}
 	return 0;
 }
@@ -4743,15 +4707,15 @@ pf_ifaddr_hook(struct ifnet *ifp)
 void
 pf_ifnet_hook(struct ifnet *ifp, int attach)
 {
-	lck_rw_lock_shared(pf_perim_lock);
-	lck_mtx_lock(pf_lock);
+	lck_rw_lock_shared(&pf_perim_lock);
+	lck_mtx_lock(&pf_lock);
 	if (attach) {
 		pfi_attach_ifnet(ifp);
 	} else {
 		pfi_detach_ifnet(ifp);
 	}
-	lck_mtx_unlock(pf_lock);
-	lck_rw_done(pf_perim_lock);
+	lck_mtx_unlock(&pf_lock);
+	lck_rw_done(&pf_perim_lock);
 }
 
 static void

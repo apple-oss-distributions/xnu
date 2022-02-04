@@ -35,48 +35,25 @@
 
 #include <pexpert/arm64/board_config.h>
 #include <arm64/proc_reg.h>
+#if HAS_PARAVIRTUALIZED_PAC
+#include "smccc_asm.h"
+#endif
 #include "assym.s"
 
 #if defined(HAS_APPLE_PAC)
 
-#if   defined(HAS_APCTL_EL1_USERKEYEN)
-#define HAS_PAC_FAST_A_KEY_SWITCHING    1
-#define HAS_PAC_SLOW_A_KEY_SWITCHING    0
-
-.macro IF_PAC_FAST_A_KEY_SWITCHING      label, tmp
-.error "This macro should never need to be used on this CPU family."
-.endmacro
-
-/* We know at compile time that this CPU family definitely doesn't need slow A-key switching */
-.macro IF_PAC_SLOW_A_KEY_SWITCHING      label, tmp
-.endmacro
-
-#else /* !&& !defined(HAS_APCTL_EL1_USERKEYEN) */
-#define HAS_PAC_FAST_A_KEY_SWITCHING    0
-#define HAS_PAC_SLOW_A_KEY_SWITCHING    1
-
-/* We know at compile time that this CPU family definitely doesn't support fast A-key switching */
-.macro IF_PAC_FAST_A_KEY_SWITCHING      label, tmp
-.endmacro
-
-.macro IF_PAC_SLOW_A_KEY_SWITCHING      label, tmp
-.error "This macro should never need to be used on this CPU family."
-.endmacro
-
-#endif /**/
 
 /* BEGIN IGNORE CODESTYLE */
 
 /**
  * REPROGRAM_JOP_KEYS
  *
- * Reprograms the A-key registers if needed, and updates current_cpu_datap()->jop_key.
- *
- * On CPUs where fast A-key switching is implemented, this macro reprograms KERNKey_EL1.
- * On other CPUs, it reprograms AP{D,I}AKey_EL1.
+ * Loads a userspace process's JOP key (task->jop_pid) into the CPU, and
+ * updates current_cpu_datap()->jop_key accordingly.  This reprogramming process
+ * is skipped whenever the "new" JOP key has already been loaded into the CPU.
  *
  *   skip_label - branch to this label if new_jop_key is already loaded into CPU
- *   new_jop_key - new APIAKeyLo value
+ *   new_jop_key - process's jop_pid
  *   cpudatap - current cpu_data_t *
  *   tmp - scratch register
  */
@@ -89,37 +66,95 @@
 .endmacro
 
 /**
+ * REPROGRAM_ROP_KEYS
+ *
+ * Loads a userspace process's ROP key (task->rop_pid) into the CPU, and
+ * updates current_cpu_datap()->rop_key accordingly.  This reprogramming process
+ * is skipped whenever the "new" ROP key has already been loaded into the CPU.
+ *
+ *   skip_label - branch to this label if new_rop_key is already loaded into CPU
+ *   new_rop_key - process's rop_pid
+ *   cpudatap - current cpu_data_t *
+ *   tmp - scratch register
+ */
+.macro REPROGRAM_ROP_KEYS	skip_label, new_rop_key, cpudatap, tmp
+	ldr		\tmp, [\cpudatap, CPU_ROP_KEY]
+	cmp		\new_rop_key, \tmp
+	b.eq	\skip_label
+	SET_ROP_KEY_REGISTERS	\new_rop_key, \tmp
+	str		\new_rop_key, [\cpudatap, CPU_ROP_KEY]
+.endmacro
+
+/**
  * SET_JOP_KEY_REGISTERS
  *
- * Unconditionally reprograms the A-key registers.  The caller is responsible for
- * updating current_cpu_datap()->jop_key as needed.
+ * Unconditionally loads a userspace process's JOP key (task->jop_pid) into the
+ * CPU.  The caller is responsible for updating current_cpu_datap()->jop_key as
+ * needed.
  *
- *   new_jop_key - new APIAKeyLo value
+ *   new_jop_key - process's jop_pid
  *   tmp - scratch register
  */
 .macro SET_JOP_KEY_REGISTERS	new_jop_key, tmp
-#if HAS_PAC_FAST_A_KEY_SWITCHING
-	IF_PAC_SLOW_A_KEY_SWITCHING	Lslow_reprogram_jop_keys_\@, \tmp
-	msr		KERNKeyLo_EL1, \new_jop_key
-	add		\tmp, \new_jop_key, #1
-	msr		KERNKeyHi_EL1, \tmp
-#endif /* HAS_PAC_FAST_A_KEY_SWITCHING */
-#if HAS_PAC_FAST_A_KEY_SWITCHING && HAS_PAC_SLOW_A_KEY_SWITCHING
-	b		Lset_jop_key_registers_done_\@
-#endif /* HAS_PAC_FAST_A_KEY_SWITCHING && HAS_PAC_SLOW_A_KEY_SWITCHING */
+#if HAS_PARAVIRTUALIZED_PAC
+	SAVE_SMCCC_CLOBBERED_REGISTERS
+	/*
+	 * We're deliberately calling PAC_SET_EL0_DIVERSIFIER here, even though the
+	 * EL0 diversifier affects both A (JOP) and B (ROP) keys.  We don't want
+	 * SET_JOP_KEY_REGISTERS to have an impact on the EL1 A key state, since
+	 * these are the keys the kernel uses to sign pointers on the heap.
+	 *
+	 * Using new_jop_key as the EL0 diversifer has the same net effect of giving
+	 * userspace its own set of JOP keys, but doesn't affect EL1 A key state.
+	 */
+	MOV64	x0, VMAPPLE_PAC_SET_EL0_DIVERSIFIER
+	mov		x1, \new_jop_key
+	hvc		#0
+	LOAD_SMCCC_CLOBBERED_REGISTERS
+#endif /* HAS_PARAVIRTUALIZED_PAC */
+.endmacro
 
-#if HAS_PAC_SLOW_A_KEY_SWITCHING
-Lslow_reprogram_jop_keys_\@:
-	msr		APIAKeyLo_EL1, \new_jop_key
-	add		\tmp, \new_jop_key, #1
-	msr		APIAKeyHi_EL1, \tmp
-	add		\tmp, \tmp, #1
-	msr		APDAKeyLo_EL1, \tmp
-	add		\tmp, \tmp, #1
-	msr		APDAKeyHi_EL1, \tmp
-#endif /* HAS_PAC_SLOW_A_KEY_SWITCHING */
+/**
+ * SET_ROP_KEY_REGISTERS
+ *
+ * Unconditionally loads a userspace process's ROP key (task->rop_pid) into the
+ * CPU.  The caller is responsible for updating current_cpu_datap()->rop_key as
+ * needed.
+ *
+ *   new_rop_key - process's rop_pid
+ *   tmp - scratch register
+ */
+.macro SET_ROP_KEY_REGISTERS	new_rop_key, tmp
+#if HAS_PARAVIRTUALIZED_PAC
+	SAVE_SMCCC_CLOBBERED_REGISTERS
+	MOV64	x0, VMAPPLE_PAC_SET_B_KEYS
+	mov		x1, \new_rop_key
+	hvc		#0
+	LOAD_SMCCC_CLOBBERED_REGISTERS
+#endif /* HAS_PARAVIRTUALIZED_PAC */
+.endmacro
 
-Lset_jop_key_registers_done_\@:
+/**
+ * PAC_INIT_KEY_STATE
+ *
+ * Sets the initial PAC key state, but does not enable the keys.
+ *
+ *   tmp - scratch register
+ *   tmp2 - scratch register
+ */
+.macro PAC_INIT_KEY_STATE	tmp, tmp2
+#if HAS_PARAVIRTUALIZED_PAC
+#if HIBERNATION
+	#error PAC_INIT_KEY_STATE is not implemented for HAS_PARAVIRTUALIZED_PAC && HIBERNATION
+#endif
+	/*
+	 * This call clobbers x0-x3.  However we only initialize PAC at a point in
+	 * common_start where x0-x3 are safe to clobber, and where we don't yet have
+	 * a working stack to stash the existing values anyway.
+	 */
+	mov		x0, #VMAPPLE_PAC_SET_INITIAL_STATE
+	hvc		#0
+#endif /* HAS_PARAVIRTUALIZED_PAC */
 .endmacro
 
 /* END IGNORE CODESTYLE */

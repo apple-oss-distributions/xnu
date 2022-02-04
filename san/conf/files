@@ -1,14 +1,22 @@
-OPTIONS/CONFIG_KASAN            optional config_kasan
-OPTIONS/CONFIG_UBSAN            optional config_ubsan
-OPTIONS/CONFIG_KSANCOV          optional config_ksancov
+OPTIONS/CONFIG_KASAN                   optional config_kasan
+OPTIONS/CONFIG_UBSAN                   optional config_ubsan
+OPTIONS/CONFIG_KCOV                    optional config_kcov
+OPTIONS/CONFIG_KSANCOV                 optional config_ksancov
+OPTIONS/CONFIG_STKSZ                   optional config_stksz
 
-san/kasan.c                     optional config_kasan
-san/kasan-fakestack.c           optional config_kasan
-san/kasan-test.c                optional config_kasan
-san/kasan-memintrinsics.c       optional config_kasan
-san/kasan_dynamic_blacklist.c   optional config_kasan
+san/memory/kasan.c                     optional config_kasan
+san/memory/kasan-fakestack.c           optional config_kasan
+san/memory/kasan-test.c                optional config_kasan
+san/memory/kasan-memintrinsics.c       optional config_kasan
+san/memory/kasan_dynamic_blacklist.c   optional config_kasan
+san/memory/kasan-report.c              optional config_kasan
+san/memory/kasan-helper.c              optional config_kasan
 
-san/ubsan.c                     optional config_ubsan
-san/ubsan_log.c                 optional config_ubsan
+san/memory/ubsan.c                     optional config_ubsan
+san/memory/ubsan_log.c                 optional config_ubsan
 
-san/ksancov.c                   optional config_ksancov
+san/coverage/kcov_ksancov.c            optional config_ksancov
+
+san/coverage/kcov.c                    optional config_kcov
+
+san/coverage/kcov_stksz.c              optional config_stksz

@@ -11,7 +11,7 @@
 #include <sys/sysctl.h>
 #include <TargetConditionals.h>
 
-#include "ktrace_helpers.h"
+#include "ktrace/ktrace_helpers.h"
 
 enum telemetry_pmi {
 	TELEMETRY_PMI_NONE,
@@ -279,8 +279,4 @@ T_DECL(error_handling,
 	ret = __telemetry(TELEMETRY_CMD_PMI_SETUP, TELEMETRY_PMI_CYCLES,
 	    UINT64_MAX, 0, 0, 0);
 	T_EXPECT_EQ(ret, -1, "telemetry shouldn't allow PMI every UINT64_MAX cycles");
-
-	ret = __telemetry(TELEMETRY_CMD_PMI_SETUP, TELEMETRY_PMI_CYCLES,
-	    (1ULL << 55), 0, 0, 0);
-	T_EXPECT_EQ(ret, -1, "telemetry shouldn't allow PMI with extremely long periods");
 }

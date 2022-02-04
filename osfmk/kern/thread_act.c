@@ -53,6 +53,7 @@
 #include <mach/mach_types.h>
 #include <mach/kern_return.h>
 #include <mach/thread_act_server.h>
+#include <mach/thread_act.h>
 
 #include <kern/kern_types.h>
 #include <kern/ast.h>
@@ -70,7 +71,6 @@
 #include <kern/machine.h>
 #include <kern/spl.h>
 #include <kern/syscall_subr.h>
-#include <kern/sync_lock.h>
 #include <kern/processor.h>
 #include <kern/timer.h>
 #include <kern/affinity.h>
@@ -181,6 +181,9 @@ thread_terminate_internal(
 		thread_affinity_terminate(thread);
 	}
 
+	/* unconditionally unpin the thread in internal termination */
+	ipc_thread_port_unpin(thread->ith_self);
+
 	thread_mtx_unlock(thread);
 
 	if (thread != current_thread() && result == KERN_SUCCESS) {
@@ -190,9 +193,6 @@ thread_terminate_internal(
 	return result;
 }
 
-/*
- * Terminate a thread.
- */
 kern_return_t
 thread_terminate(
 	thread_t                thread)
@@ -222,6 +222,52 @@ thread_terminate(
 		/* NOTREACHED */
 	}
 
+	return result;
+}
+
+/*
+ * [MIG Call] Terminate a thread.
+ *
+ * Cannot be used on threads managed by pthread.
+ */
+kern_return_t
+thread_terminate_from_user(
+	thread_t                thread)
+{
+	if (thread == THREAD_NULL) {
+		return KERN_INVALID_ARGUMENT;
+	}
+
+	if (thread_get_tag(thread) & THREAD_TAG_PTHREAD) {
+		return KERN_DENIED;
+	}
+
+	return thread_terminate(thread);
+}
+
+/*
+ * Terminate a thread with pinned control port.
+ *
+ * Can only be used on threads managed by pthread. Exported in pthread_kern.
+ */
+kern_return_t
+thread_terminate_pinned(
+	thread_t                thread)
+{
+	if (thread == THREAD_NULL) {
+		return KERN_INVALID_ARGUMENT;
+	}
+
+	assert(thread->task != kernel_task);
+	assert(thread_get_tag(thread) & (THREAD_TAG_PTHREAD | THREAD_TAG_MAINTHREAD));
+
+	thread_mtx_lock(thread);
+	if (task_is_pinned(thread->task) && thread->active) {
+		assert(thread->ith_self->ip_pinned == 1);
+	}
+	thread_mtx_unlock(thread);
+
+	kern_return_t result = thread_terminate_internal(thread);
 	return result;
 }
 
@@ -1064,6 +1110,25 @@ thread_apc_ast(thread_t thread)
 }
 
 
+void
+thread_debug_return_to_user_ast(
+	thread_t thread)
+{
+#pragma unused(thread)
+#if MACH_ASSERT
+	if ((thread->sched_flags & TH_SFLAG_RW_PROMOTED) ||
+	    thread->rwlock_count > 0) {
+		panic("Returning to userspace with rw lock held, thread %p sched_flag %u rwlock_count %d", thread, thread->sched_flags, thread->rwlock_count);
+	}
+
+	if ((thread->sched_flags & TH_SFLAG_FLOOR_PROMOTED) ||
+	    thread->priority_floor_count > 0) {
+		panic("Returning to userspace with floor boost set, thread %p sched_flag %u priority_floor_count %d", thread, thread->sched_flags, thread->priority_floor_count);
+	}
+#endif /* MACH_ASSERT */
+}
+
+
 /* Prototype, see justification above */
 kern_return_t
 act_set_state(
@@ -1136,12 +1201,14 @@ act_get_state_to_user(
 	return thread_get_state_to_user(thread, flavor, state, count);
 }
 
-static void
+/* returns the CPU number this caused an AST check on, or -1 */
+static int
 act_set_ast(
 	thread_t thread,
-	ast_t ast)
+	ast_t    ast)
 {
 	spl_t s = splsched();
+	int caused_check_on_cpu = -1;
 
 	if (thread == current_thread()) {
 		thread_ast_set(thread, ast);
@@ -1156,11 +1223,14 @@ act_set_ast(
 		    processor->state == PROCESSOR_RUNNING &&
 		    processor->active_thread == thread) {
 			cause_ast_check(processor);
+			caused_check_on_cpu = processor->cpu_id;
 		}
 		thread_unlock(thread);
 	}
 
 	splx(s);
+
+	return caused_check_on_cpu;
 }
 
 /*
@@ -1178,6 +1248,20 @@ act_set_ast_async(thread_t  thread,
 	thread_ast_set(thread, ast);
 
 	if (thread == current_thread()) {
+		spl_t s = splsched();
+		ast_propagate(thread);
+		splx(s);
+	}
+}
+
+void
+act_set_debug_assert(void)
+{
+	thread_t thread = current_thread();
+	if (thread_ast_peek(thread, AST_DEBUG_ASSERT) != AST_DEBUG_ASSERT) {
+		thread_ast_set(thread, AST_DEBUG_ASSERT);
+	}
+	if (ast_peek(AST_DEBUG_ASSERT) != AST_DEBUG_ASSERT) {
 		spl_t s = splsched();
 		ast_propagate(thread);
 		splx(s);
@@ -1214,10 +1298,10 @@ act_clear_astkevent(thread_t thread, uint16_t bits)
 	return cur & bits;
 }
 
-void
+int
 act_set_ast_reset_pcs(thread_t thread)
 {
-	act_set_ast(thread, AST_RESET_PCS);
+	return act_set_ast(thread, AST_RESET_PCS);
 }
 
 void
@@ -1267,4 +1351,16 @@ void
 act_set_io_telemetry_ast(thread_t thread)
 {
 	act_set_ast(thread, AST_TELEMETRY_IO);
+}
+
+void
+act_set_macf_telemetry_ast(thread_t thread)
+{
+	act_set_ast(thread, AST_TELEMETRY_MACF);
+}
+
+void
+act_set_astproc_resource(thread_t thread)
+{
+	act_set_ast(thread, AST_PROC_RESOURCE);
 }

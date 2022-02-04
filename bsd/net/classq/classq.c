@@ -161,7 +161,7 @@ _addq_multi(class_queue_t *q, classq_pkt_t *pkt_head, classq_pkt_t *pkt_tail,
 void
 _getq(class_queue_t *q, classq_pkt_t *pkt)
 {
-	uint32_t pkt_len;
+	uint32_t pkt_len = 0;
 
 	switch (qptype(q)) {
 	case QP_MBUF: {
@@ -202,7 +202,7 @@ static void
 _getq_flow_or_scidx(class_queue_t *q, classq_pkt_t *pkt, u_int32_t val,
     boolean_t isflowid)
 {
-	uint32_t pkt_len;
+	uint32_t pkt_len = 0;
 
 	switch (qptype(q)) {
 	case QP_MBUF: {
