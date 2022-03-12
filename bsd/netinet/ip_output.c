@@ -553,7 +553,7 @@ loopit:
 			// Per RFC6864, value of ip_id is undefined for atomic ip packets
 			ip->ip_id = 0;
 		} else {
-			ip->ip_id = ip_randomid();
+			ip->ip_id = ip_randomid((uint64_t)m);
 		}
 		OSAddAtomic(1, &ipstat.ips_localout);
 	} else {

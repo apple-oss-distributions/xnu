@@ -234,12 +234,6 @@ iokit_release_port( ipc_port_t port )
 }
 
 EXTERN void
-iokit_make_port_send( ipc_port_t port )
-{
-	ipc_port_make_send( port );
-}
-
-EXTERN void
 iokit_release_port_send( ipc_port_t port )
 {
 	ipc_port_release_send( port );

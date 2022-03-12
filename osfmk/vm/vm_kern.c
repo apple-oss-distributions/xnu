@@ -399,7 +399,7 @@ kernel_memory_allocate_prot(
 		vmk_flags.vmkf_atomic_entry = TRUE;
 	}
 
-	if (flags & KMA_KHEAP) {
+	if (flags & KMA_LAST_FREE) {
 		vm_alloc_flags |= VM_MAP_FIND_LAST_FREE;
 	}
 
@@ -587,7 +587,8 @@ kernel_memory_populate_with_pages(
 	vm_size_t       size,
 	vm_page_t       page_list,
 	kma_flags_t     flags,
-	vm_tag_t        tag)
+	vm_tag_t        tag,
+	vm_prot_t       prot)
 {
 	vm_object_t     object;
 	kern_return_t   pe_result;
@@ -643,7 +644,7 @@ kernel_memory_populate_with_pages(
 		PMAP_ENTER_OPTIONS(kernel_pmap, addr + pg_offset,
 		    0, /* fault_phys_offset */
 		    mem,
-		    VM_PROT_READ | VM_PROT_WRITE, VM_PROT_NONE,
+		    prot, VM_PROT_NONE,
 		    ((flags & KMA_KSTACK) ? VM_MEM_STACK : 0), TRUE,
 		    PMAP_OPTIONS_NOWAIT, pe_result);
 
@@ -651,7 +652,7 @@ kernel_memory_populate_with_pages(
 			vm_object_unlock(object);
 
 			PMAP_ENTER(kernel_pmap, addr + pg_offset, mem,
-			    VM_PROT_READ | VM_PROT_WRITE, VM_PROT_NONE,
+			    prot, VM_PROT_NONE,
 			    ((flags & KMA_KSTACK) ? VM_MEM_STACK : 0), TRUE,
 			    pe_result);
 
@@ -774,7 +775,7 @@ kernel_memory_populate(
 		kr = vm_page_alloc_list(page_count, flags, &page_list);
 		if (kr == KERN_SUCCESS) {
 			kernel_memory_populate_with_pages(map, addr, size,
-			    page_list, flags, tag);
+			    page_list, flags, tag, VM_PROT_READ | VM_PROT_WRITE);
 		}
 	}
 

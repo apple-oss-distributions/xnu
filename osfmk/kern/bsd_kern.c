@@ -112,12 +112,7 @@ task_bsdtask_kill(task_t t)
 void *
 get_bsdthreadtask_info(thread_t th)
 {
-	void *bsd_info = NULL;
-
-	if (th->task) {
-		bsd_info = get_bsdtask_info(th->task);
-	}
-	return bsd_info;
+	return get_thread_ro(th)->tro_proc;
 }
 
 /*
@@ -129,13 +124,63 @@ set_bsdtask_info(task_t t, void * v)
 	t->bsd_info = v;
 }
 
-/*
- *
- */
-void *
+__abortlike
+static void
+__thread_ro_circularity_panic(thread_t th, thread_ro_t tro)
+{
+	panic("tro %p points back to %p instead of %p", tro, tro->tro_owner, th);
+}
+
+__attribute__((always_inline))
+thread_ro_t
+get_thread_ro_unchecked(thread_t th)
+{
+	return th->t_tro;
+}
+
+thread_ro_t
+get_thread_ro(thread_t th)
+{
+	thread_ro_t tro = th->t_tro;
+
+	zone_require_ro(ZONE_ID_THREAD_RO, sizeof(struct thread_ro), tro);
+	if (tro->tro_owner != th) {
+		__thread_ro_circularity_panic(th, tro);
+	}
+	return tro;
+}
+
+__attribute__((always_inline))
+thread_ro_t
+current_thread_ro_unchecked(void)
+{
+	return get_thread_ro_unchecked(current_thread());
+}
+
+thread_ro_t
+current_thread_ro(void)
+{
+	return get_thread_ro(current_thread());
+}
+
+void
+clear_thread_ro_proc(thread_t th)
+{
+	thread_ro_t tro = get_thread_ro(th);
+
+	zalloc_ro_clear_field(ZONE_ID_THREAD_RO, tro, tro_proc);
+}
+
+struct uthread *
 get_bsdthread_info(thread_t th)
 {
-	return th->uthread;
+	return (struct uthread *)((uintptr_t)th + sizeof(struct thread));
+}
+
+thread_t
+get_machthread(struct uthread *uth)
+{
+	return (struct thread *)((uintptr_t)uth - sizeof(struct thread));
 }
 
 /*
@@ -160,7 +205,8 @@ set_thread_pagein_error(thread_t th, int error)
 int
 thread_task_has_ldt(thread_t th)
 {
-	return th->task && th->task->i386_ldt != 0;
+	task_t task = get_threadtask(th);
+	return task && task->i386_ldt != 0;
 }
 #endif /* __x86_64__ */
 
@@ -368,7 +414,7 @@ swap_task_map(task_t task, thread_t thread, vm_map_t map)
 	vm_map_t old_map;
 	boolean_t doswitch = (thread == current_thread()) ? TRUE : FALSE;
 
-	if (task != thread->task) {
+	if (task != get_threadtask(thread)) {
 		panic("swap_task_map");
 	}
 
@@ -737,13 +783,22 @@ set_task_loadTag(task_t task, uint32_t loadTag)
 	return os_atomic_xchg(&task->loadTag, loadTag, relaxed);
 }
 
-/*
- *
- */
+
 task_t
 get_threadtask(thread_t th)
 {
-	return th->task;
+	return get_thread_ro(th)->tro_task;
+}
+
+task_t
+get_threadtask_early(thread_t th)
+{
+	if (__improbable(startup_phase < STARTUP_SUB_EARLY_BOOT)) {
+		if (th == THREAD_NULL || th->t_tro == NULL) {
+			return TASK_NULL;
+		}
+	}
+	return get_threadtask(th);
 }
 
 /*
@@ -1071,10 +1126,10 @@ fill_taskthreadinfo(task_t task, uint64_t thaddr, bool thuniqueid, struct proc_t
 			ptinfo->pth_priority = thact->base_pri;
 			ptinfo->pth_maxpriority = thact->max_priority;
 
-			if ((vpp != NULL) && (thact->uthread != NULL)) {
-				bsd_threadcdir(thact->uthread, vpp, vidp);
+			if (vpp != NULL) {
+				bsd_threadcdir(get_bsdthread_info(thact), vpp, vidp);
 			}
-			bsd_getthreadname(thact->uthread, ptinfo->pth_name);
+			bsd_getthreadname(get_bsdthread_info(thact), ptinfo->pth_name);
 			err = 0;
 			goto out;
 		}
@@ -1323,6 +1378,12 @@ struct label *
 get_task_crash_label(task_t task)
 {
 	return task->crash_label;
+}
+
+void
+set_task_crash_label(task_t task, struct label *label)
+{
+	task->crash_label = label;
 }
 #endif
 

@@ -398,7 +398,7 @@ void
 user_ldt_set(
 	thread_t thread)
 {
-	task_t          task = thread->task;
+	task_t          task = get_threadtask(thread);
 	user_ldt_t      user_ldt;
 
 	user_ldt = task->i386_ldt;

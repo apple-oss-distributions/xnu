@@ -394,10 +394,6 @@ static void ip_fwd_route_copyout(struct ifnet *, struct route *);
 static void ip_fwd_route_copyin(struct ifnet *, struct route *);
 static inline u_short ip_cksum(struct mbuf *, int);
 
-int ip_use_randomid = 1;
-SYSCTL_INT(_net_inet_ip, OID_AUTO, random_id, CTLFLAG_RW | CTLFLAG_LOCKED,
-    &ip_use_randomid, 0, "Randomize IP packets IDs");
-
 /*
  * On platforms which require strict alignment (currently for anything but
  * i386 or x86_64), check if the IP header pointer is 32-bit aligned; if not,
@@ -540,7 +536,6 @@ ip_init(struct protosw *pp, struct domain *dp)
 
 	getmicrotime(&tv);
 	ip_id = (u_short)(RandomULong() ^ tv.tv_usec);
-	ip_initid();
 
 	PE_parse_boot_argn("ip_checkinterface", &i, sizeof(i));
 	switch (i) {
@@ -1637,6 +1632,8 @@ ip_input_process_list(struct mbuf *packet_list)
 restart_list_process:
 	chain = 0;
 	for (packet = packet_list; packet; packet = packet_list) {
+		m_add_crumb(packet, PKT_CRUMB_IP_INPUT);
+
 		packet_list = mbuf_nextpkt(packet);
 		mbuf_setnextpkt(packet, NULL);
 
@@ -1723,6 +1720,8 @@ ip_input(struct mbuf *m)
 	MBUF_INPUT_CHECK(m, m->m_pkthdr.rcvif);
 	inifp = m->m_pkthdr.rcvif;
 	VERIFY(inifp != NULL);
+
+	m_add_crumb(m, PKT_CRUMB_IP_INPUT);
 
 	ipstat.ips_rxc_notlist++;
 
@@ -3794,12 +3793,7 @@ ip_savecontrol(struct inpcb *inp, struct mbuf **mp, struct ip *ip,
 		}
 	}
 
-	if (inp->inp_flags & INP_RECVDSTADDR
-#if CONTENT_FILTER
-	    /* Content Filter needs to see local address */
-	    || (inp->inp_socket->so_cfil_db != NULL)
-#endif
-	    ) {
+	if (inp->inp_flags & INP_RECVDSTADDR || SOFLOW_ENABLED(inp->inp_socket)) {
 		mp = sbcreatecontrol_mbuf((caddr_t)&ip->ip_dst,
 		    sizeof(struct in_addr), IP_RECVDSTADDR, IPPROTO_IP, mp);
 		if (*mp == NULL) {

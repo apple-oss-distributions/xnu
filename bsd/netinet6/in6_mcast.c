@@ -2292,20 +2292,9 @@ in6p_join_group(struct inpcb *inp, struct sockopt *sopt)
 	 */
 
 	if (is_new) {
-		/*
-		 * See inp_join_group() for why we need to unlock
-		 */
-		IM6O_ADDREF_LOCKED(imo);
-		IM6O_UNLOCK(imo);
-		socket_unlock(inp->inp_socket, 0);
-
 		VERIFY(inm == NULL);
 		error = in6_mc_join(ifp, &gsa->sin6_addr, imf, &inm, 0);
 		VERIFY(inm != NULL || error != 0);
-
-		socket_lock(inp->inp_socket, 0);
-		IM6O_REMREF(imo);
-		IM6O_LOCK(imo);
 
 		if (error) {
 			goto out_im6o_free;
@@ -2651,19 +2640,7 @@ out_im6f_rollback:
 		/* Remove the gap in the membership array. */
 		VERIFY(inm == imo->im6o_membership[idx]);
 		imo->im6o_membership[idx] = NULL;
-
-		/*
-		 * See inp_join_group() for why we need to unlock
-		 */
-		IM6O_ADDREF_LOCKED(imo);
-		IM6O_UNLOCK(imo);
-		socket_unlock(inp->inp_socket, 0);
-
 		IN6M_REMREF(inm);
-
-		socket_lock(inp->inp_socket, 0);
-		IM6O_REMREF(imo);
-		IM6O_LOCK(imo);
 
 		for (++idx; idx < imo->im6o_num_memberships; ++idx) {
 			imo->im6o_membership[idx - 1] = imo->im6o_membership[idx];

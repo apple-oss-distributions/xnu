@@ -2803,8 +2803,17 @@ ipc_right_copyin_two(
 		 *	Copy the right we got back.  If it is dead now,
 		 *	that's OK.  Neither right will be usable to send
 		 *	a message anyway.
+		 *
+		 *	Note that the port could be concurrently moved
+		 *	outside of the space as a descriptor, and then
+		 *	destroyed, which would not happen under the space lock.
+		 *
+		 *	It means we can't use ipc_port_copy_send() which
+		 *	may fail if the port died.
 		 */
-		(void)ipc_port_copy_send(ip_object_to_port(*objectp));
+		io_lock(*objectp);
+		ipc_port_copy_send_locked(ip_object_to_port(*objectp));
+		io_unlock(*objectp);
 	}
 
 	return KERN_SUCCESS;

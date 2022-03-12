@@ -1645,8 +1645,7 @@ host_default_memory_manager(
 		/*
 		 *	Retrieve the current value.
 		 */
-		returned_manager = current_manager;
-		memory_object_default_reference(returned_manager);
+		returned_manager = ipc_port_make_send(current_manager);
 	} else {
 		/*
 		 *	Only allow the kernel to change the value.
@@ -1676,8 +1675,7 @@ host_default_memory_manager(
 		 *	one.
 		 */
 		returned_manager = current_manager;
-		memory_manager_default = new_manager;
-		memory_object_default_reference(new_manager);
+		memory_manager_default = ipc_port_make_send(new_manager);
 
 		/*
 		 *	In case anyone's been waiting for a memory
@@ -1727,7 +1725,7 @@ memory_manager_default_reference(void)
 		assert(res == THREAD_AWAKENED);
 		current_manager = memory_manager_default;
 	}
-	memory_object_default_reference(current_manager);
+	current_manager = ipc_port_make_send(current_manager);
 	lck_mtx_unlock(&memory_manager_default_lock);
 
 	return current_manager;
@@ -2079,20 +2077,6 @@ memory_object_control_disable(
 {
 	assert(*control != VM_OBJECT_NULL);
 	*control = VM_OBJECT_NULL;
-}
-
-void
-memory_object_default_reference(
-	memory_object_default_t dmm)
-{
-	ipc_port_make_send(dmm);
-}
-
-void
-memory_object_default_deallocate(
-	memory_object_default_t dmm)
-{
-	ipc_port_release_send(dmm);
 }
 
 memory_object_t

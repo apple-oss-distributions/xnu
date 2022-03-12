@@ -1390,6 +1390,11 @@ IODTNVRAM::syncInternal(bool rateLimit)
 		return;
 	}
 
+	if (!SAFE_TO_LOCK()) {
+		DEBUG_INFO("cannot lock\n");
+		return;
+	}
+
 	// Rate limit requests to sync. Drivers that need this rate limiting will
 	// shadow the data and only write to flash when they get a sync call
 	if (rateLimit) {
@@ -1407,7 +1412,7 @@ IODTNVRAM::syncInternal(bool rateLimit)
 	ret = _nvramController->write(0, _nvramImage, _nvramSize);
 	DEBUG_INFO("nvramController->write() for gen=%u ret=%#08x\n", (unsigned int)_nvramGeneration, ret);
 
-	if (_diags && SAFE_TO_LOCK()) {
+	if (_diags) {
 		OSSharedPtr<OSNumber> generation = OSNumber::withNumber(_nvramGeneration, 32);
 		_diags->setProperty(kCurrentGenerationCountKey, generation.get());
 	}

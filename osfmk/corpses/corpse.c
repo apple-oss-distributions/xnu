@@ -604,6 +604,7 @@ task_generate_corpse_internal(
 	/* Create a task for corpse */
 	kr = task_create_internal(task,
 	    NULL,
+	    NULL,
 	    TRUE,
 	    is_64bit_addr,
 	    is_64bit_data,

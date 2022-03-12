@@ -5619,7 +5619,6 @@ IOService::start_watchdog_timer( void )
 
 	timeout = getPMRootDomain()->getWatchdogTimeout();
 	clock_interval_to_deadline(timeout, kSecondScale, &deadline);
-	fWatchdogDeadline = deadline;
 	start_watchdog_timer(deadline);
 	IOLockUnlock(fWatchdogLock);
 }
@@ -5628,6 +5627,7 @@ void
 IOService::start_watchdog_timer(uint64_t deadline)
 {
 	IOLockAssert(fWatchdogLock, kIOLockAssertOwned);
+	fWatchdogDeadline = deadline;
 
 	if (!thread_call_isactive(fWatchdogTimer)) {
 		thread_call_enter_delayed(fWatchdogTimer, deadline);
@@ -5740,7 +5740,14 @@ void
 IOService::watchdog_timer_expired( thread_call_param_t arg0, thread_call_param_t arg1 )
 {
 	IOService * me = (IOService *) arg0;
+	bool expired;
 
+	IOLockLock(me->fWatchdogLock);
+	expired = me->fWatchdogDeadline && (me->fWatchdogDeadline <= mach_absolute_time());
+	IOLockUnlock(me->fWatchdogLock);
+	if (!expired) {
+		return;
+	}
 
 	gIOPMWatchDogThread = current_thread();
 	getPMRootDomain()->sleepWakeDebugTrig(true);

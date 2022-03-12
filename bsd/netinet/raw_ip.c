@@ -241,10 +241,7 @@ rip_input(struct mbuf *m, int iphlen)
 			if (n && skipit == 0) {
 				int error = 0;
 				if ((last->inp_flags & INP_CONTROLOPTS) != 0 ||
-#if CONTENT_FILTER
-				    /* Content Filter needs to see local address */
-				    (last->inp_socket->so_cfil_db != NULL) ||
-#endif
+				    SOFLOW_ENABLED(last->inp_socket) ||
 				    (last->inp_socket->so_options & SO_TIMESTAMP) != 0 ||
 				    (last->inp_socket->so_options & SO_TIMESTAMP_MONOTONIC) != 0 ||
 				    (last->inp_socket->so_options & SO_TIMESTAMP_CONTINUOUS) != 0) {
@@ -261,7 +258,7 @@ rip_input(struct mbuf *m, int iphlen)
 				    /*
 				     * If socket is subject to Content Filter, delay stripping until reinject
 				     */
-				    && (last->inp_socket->so_cfil_db == NULL)
+				    && (!CFIL_DGRAM_FILTERED(last->inp_socket))
 #endif
 				    ) {
 					n->m_len -= iphlen;
@@ -298,10 +295,7 @@ rip_input(struct mbuf *m, int iphlen)
 	if (skipit == 0) {
 		if (last) {
 			if ((last->inp_flags & INP_CONTROLOPTS) != 0 ||
-#if CONTENT_FILTER
-			    /* Content Filter needs to see local address */
-			    (last->inp_socket->so_cfil_db != NULL) ||
-#endif
+			    SOFLOW_ENABLED(last->inp_socket) ||
 			    (last->inp_socket->so_options & SO_TIMESTAMP) != 0 ||
 			    (last->inp_socket->so_options & SO_TIMESTAMP_MONOTONIC) != 0 ||
 			    (last->inp_socket->so_options & SO_TIMESTAMP_CONTINUOUS) != 0) {
@@ -317,7 +311,7 @@ rip_input(struct mbuf *m, int iphlen)
 			    /*
 			     * If socket is subject to Content Filter, delay stripping until reinject
 			     */
-			    && (last->inp_socket->so_cfil_db == NULL)
+			    && (!CFIL_DGRAM_FILTERED(last->inp_socket))
 #endif
 			    ) {
 				m->m_len -= iphlen;
@@ -379,7 +373,7 @@ rip_output(
 	 * If socket is subject to Content Filter and no addr is passed in,
 	 * retrieve CFIL saved state from mbuf and use it if necessary.
 	 */
-	if (so->so_cfil_db && dst == INADDR_ANY) {
+	if (CFIL_DGRAM_FILTERED(so) && dst == INADDR_ANY) {
 		cfil_tag = cfil_dgram_get_socket_state(m, &cfil_so_state_change_cnt, &cfil_so_options, &cfil_faddr, &cfil_inp_flags);
 		if (cfil_tag) {
 			cfil_sin = SIN(cfil_faddr);
@@ -530,7 +524,7 @@ rip_output(
 			return EINVAL;
 		}
 		if (ip->ip_id == 0 && !(rfc6864 && IP_OFF_IS_ATOMIC(ntohs(ip->ip_off)))) {
-			ip->ip_id = ip_randomid();
+			ip->ip_id = ip_randomid((uint64_t)m);
 		}
 		/* XXX prevent ip_output from overwriting header fields */
 		flags |= IP_RAWOUTPUT;

@@ -466,8 +466,8 @@ i386_switch_lbrs(thread_t old, thread_t new)
 {
 	pcb_t   new_pcb;
 	int     i;
-	bool    save_old = (old != NULL && old->task != kernel_task);
-	bool    restore_new = (new->task != kernel_task);
+	bool    save_old = (old != NULL && get_threadtask(old) != kernel_task);
+	bool    restore_new = (get_threadtask(new) != kernel_task);
 
 	if (!save_old && !restore_new) {
 		return;
@@ -596,7 +596,7 @@ act_machine_switch_pcb(thread_t old, thread_t new)
 		 * and verify the memory shadow of the segment base
 		 * in the event it was altered in user space.
 		 */
-		if ((pcb->cthread_self != 0) || (new->task != kernel_task)) {
+		if ((pcb->cthread_self != 0) || (get_threadtask(new) != kernel_task)) {
 			if ((cdp->cpu_uber.cu_user_gs_base != pcb->cthread_self) ||
 			    (pcb->cthread_self != rdmsr64(MSR_IA32_KERNEL_GS_BASE))) {
 				cdp->cpu_uber.cu_user_gs_base = pcb->cthread_self;
@@ -642,7 +642,8 @@ act_machine_switch_pcb(thread_t old, thread_t new)
 	/*
 	 * Set the thread's LDT or LDT entry.
 	 */
-	if (__probable(new->task == TASK_NULL || new->task->i386_ldt == 0)) {
+	task_t task = get_threadtask_early(new);
+	if (__probable(task == TASK_NULL || task->i386_ldt == 0)) {
 		/*
 		 * Use system LDT.
 		 */
@@ -749,7 +750,7 @@ thread_set_wq_state64(thread_t thread, thread_state_t tstate)
 /*
  * Initialize the machine-dependent state for a new thread.
  */
-kern_return_t
+void
 machine_thread_create(
 	thread_t                thread,
 	task_t                  task,
@@ -828,8 +829,6 @@ machine_thread_create(
 	}
 
 	pcb->insn_copy_optout = (task->t_flags & TF_INSN_COPY_OPTOUT) ? true : false;
-
-	return KERN_SUCCESS;
 }
 
 /*
@@ -873,7 +872,7 @@ machine_thread_set_tsd_base(
 	thread_t                        thread,
 	mach_vm_offset_t        tsd_base)
 {
-	if (thread->task == kernel_task) {
+	if (get_threadtask(thread) == kernel_task) {
 		return KERN_INVALID_ARGUMENT;
 	}
 

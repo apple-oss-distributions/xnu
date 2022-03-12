@@ -76,7 +76,7 @@ _cons_cinput
 _cons_ops
 _conslog_putc
 _convert_port_entry_to_map
-_current_act
+_current_act:_current_thread
 _delay
 _delay_for_interval
 _des_ecb_encrypt

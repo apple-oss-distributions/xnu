@@ -2708,7 +2708,7 @@ ipc_port_make_send(
  *	Purpose:
  *		Make a naked send right from another naked send right.
  *	Conditions:
- *		port locked and active.
+ *		port locked.
  */
 void
 ipc_port_copy_send_locked(
@@ -3317,7 +3317,7 @@ ipc_port_init_debug(ipc_port_t port, void *fp)
 	}
 
 #ifdef MACH_BSD
-	task_t task = current_task();
+	task_t task = current_task_early();
 	if (task != TASK_NULL) {
 		struct proc* proc = (struct proc*) get_bsdtask_info(task);
 		if (proc) {

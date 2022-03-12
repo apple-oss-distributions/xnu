@@ -544,7 +544,7 @@ fpu_load_registers(void *fstate)
 	struct x86_fx_thread_state *ifps = fstate;
 	fp_save_layout_t layout = ifps->fp_save_layout;
 
-	assert(current_task() == NULL ||                                \
+	assert(startup_phase < STARTUP_SUB_EARLY_BOOT || \
 	    (thread_is_64bit_addr(current_thread()) ?                        \
 	    (layout == FXSAVE64 || layout == XSAVE64) :     \
 	    (layout == FXSAVE32 || layout == XSAVE32)));
@@ -1668,23 +1668,15 @@ ml_fpu_avx512_enabled(void)
 }
 
 static xstate_t
-task_xstate(task_t task)
-{
-	if (task == TASK_NULL) {
-		return fpu_default;
-	} else {
-		return task->xstate;
-	}
-}
-
-static xstate_t
 thread_xstate(thread_t thread)
 {
 	xstate_t xs = THREAD_TO_PCB(thread)->xstate;
-	if (xs == UNDEFINED) {
-		return task_xstate(thread->task);
-	} else {
+	if (xs != UNDEFINED) {
 		return xs;
+	} else if (startup_phase < STARTUP_SUB_EARLY_BOOT) {
+		return fpu_default;
+	} else {
+		return get_threadtask(thread)->xstate;
 	}
 }
 

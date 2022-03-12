@@ -582,7 +582,7 @@ fleh_swi_trap_ret:
 	bl		EXT(syscall_trace)
 #endif
 
-	bl		EXT(mach_kauth_cred_uthread_update)
+	bl		EXT(mach_kauth_cred_thread_update)
 	mrc		p15, 0, r9, c13, c0, 4				// Reload r9 from TPIDRPRW
 	/* unix syscall? */
 	rsbs	r5, r11, #0							// make the syscall positive (if negative)
@@ -687,8 +687,7 @@ fleh_swi_unix:
 	add		r1, r1, #1
 	str		r1, [r9, TH_UNIX_SYSCALLS]
 	mov		r1, r9								// current thread in arg1
-	ldr		r2, [r9, TH_UTHREAD]				// current uthread in arg2
-	ldr		r3, [r10, TASK_BSD_INFO]			// current proc in arg3
+	ldr		r2, [r10, TASK_BSD_INFO]			// current proc in arg2
 	bl		EXT(unix_syscall)
 	b		.
 

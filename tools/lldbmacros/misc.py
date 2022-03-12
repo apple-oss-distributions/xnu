@@ -133,8 +133,8 @@ def dumpTimerList(mpqueue):
 
                     tid = thread.thread_id
                     name = GetThreadName(thread)
-                    pid = GetProcPIDForTask(thread.task)
-                    procname = GetProcNameForTask(thread.task)
+                    pid = GetProcPIDForTask(thread.t_tro.tro_task)
+                    procname = GetProcNameForTask(thread.t_tro.tro_task)
 
                     extra_string += "thread: 0x{:x} {:s} task:{:s}[{:d}]".format(
                             tid, name, procname, pid)
@@ -261,7 +261,7 @@ def showTimerWakeupStats(cmd_args=None):
         proc = Cast(task.bsd_info, 'proc_t')
         print dereference(task)
         print '{:d}({:s}), terminated thread timer wakeups: {:d} {:d} 2ms: {:d} 5ms: {:d} UT: {:d} ST: {:d}'.format(
-            proc.p_pid,
+            GetProcPID(proc),
             GetProcName(proc),
 # Commented-out references below to be addressed by rdar://13009660.
             0, #task.task_interrupt_wakeups,

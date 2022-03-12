@@ -7,18 +7,18 @@ vminfo:::object_ownership_change
 		old_pid = -1;
 		old_name = "(nil)";
 	} else {
-		old_proc = (proc_t)old_owner->bsd_info;
-		old_pid = old_proc->p_pid;
-		old_name = old_proc->p_comm;
+		old_proc = xlate <psinfo_t *>((proc_t)old_owner->bsd_info);
+		old_pid = old_proc->pr_pid;
+		old_name = old_proc->pr_fname;
 	}
 	new_owner = (task_t)arg4;
 	if (new_owner == 0) {
 		new_pid = -1;
 		new_name = "(nil)";
 	} else {
-		new_proc = (proc_t)new_owner->bsd_info;
-		new_pid = new_proc->p_pid;
-		new_name = new_proc->p_comm;
+		new_proc = xlate <psinfo_t *>((proc_t)new_owner->bsd_info);
+		new_pid = new_proc->pr_pid;
+		new_name = new_proc->pr_fname;
 	}
 
 	printf("%d[%s] object 0x%p id 0x%x purgeable:%d owner:0x%p (%d[%s]) tag:%d nofootprint:%d -> owner:0x%p (%d[%s]) tag:%d nofootprint:%d",

@@ -212,6 +212,7 @@ uint64_t        c_generation_id_flush_barrier;
 #define         HIBERNATE_FLUSHING_SECS_TO_COMPLETE     120
 
 boolean_t       hibernate_no_swapspace = FALSE;
+boolean_t       hibernate_flush_timed_out = FALSE;
 clock_sec_t     hibernate_flushing_deadline = 0;
 
 
@@ -2241,6 +2242,26 @@ int             filecache_thrashing_induced_jetsam = 0;
 static boolean_t        vm_compressor_thrashing_detected = FALSE;
 #endif /* CONFIG_JETSAM */
 
+static bool
+compressor_swapout_conditions_met(void)
+{
+	bool should_swap = false;
+
+	if (COMPRESSOR_NEEDS_TO_SWAP()) {
+		should_swap = true;
+		vmcs_stats.compressor_swap_threshold_exceeded++;
+	}
+	if (VM_PAGE_Q_THROTTLED(&vm_pageout_queue_external) && vm_page_anonymous_count < (vm_page_inactive_count / 20)) {
+		should_swap = true;
+		vmcs_stats.external_q_throttled++;
+	}
+	if (vm_page_free_count < (vm_page_free_reserved - (COMPRESSOR_FREE_RESERVED_LIMIT * 2))) {
+		should_swap = true;
+		vmcs_stats.free_count_below_reserve++;
+	}
+	return should_swap;
+}
+
 static boolean_t
 compressor_needs_to_swap(void)
 {
@@ -2270,19 +2291,8 @@ compressor_needs_to_swap(void)
 		}
 	}
 	if (VM_CONFIG_SWAP_IS_ACTIVE) {
-		if (COMPRESSOR_NEEDS_TO_SWAP()) {
-			should_swap = TRUE;
-			vmcs_stats.compressor_swap_threshold_exceeded++;
-			goto check_if_low_space;
-		}
-		if (VM_PAGE_Q_THROTTLED(&vm_pageout_queue_external) && vm_page_anonymous_count < (vm_page_inactive_count / 20)) {
-			should_swap = TRUE;
-			vmcs_stats.external_q_throttled++;
-			goto check_if_low_space;
-		}
-		if (vm_page_free_count < (vm_page_free_reserved - (COMPRESSOR_FREE_RESERVED_LIMIT * 2))) {
-			should_swap = TRUE;
-			vmcs_stats.free_count_below_reserve++;
+		should_swap =  compressor_swapout_conditions_met();
+		if (should_swap) {
 			goto check_if_low_space;
 		}
 	}
@@ -2370,16 +2380,6 @@ check_if_low_space:
 		should_swap = vm_compressor_needs_to_major_compact();
 		if (should_swap) {
 			vmcs_stats.fragmentation_detected++;
-#if (XNU_TARGET_OS_OSX && __arm64__)
-			/*
-			 * SSD based systems don't need the fragmentation
-			 * swapout trigger because that was designed for
-			 * systems where the swapout latencies could be long
-			 * enough that the pressure, if allowed to build up,
-			 * would be tightly tied to the swapouts later on.
-			 */
-			should_swap = FALSE;
-#endif /* (XNU_TARGET_OS_OSX && __arm64__) */
 		}
 	}
 
@@ -2720,6 +2720,7 @@ vm_compressor_flush(void)
 
 	hibernate_flushing = TRUE;
 	hibernate_no_swapspace = FALSE;
+	hibernate_flush_timed_out = FALSE;
 	c_generation_id_flush_barrier = c_generation_id + 1000;
 
 	clock_get_system_nanotime(&now_sec, &now_nsec);
@@ -3076,6 +3077,7 @@ vm_compressor_compact_and_swap(boolean_t flush_all)
 			clock_get_system_nanotime(&sec, &nsec);
 
 			if (sec > hibernate_flushing_deadline) {
+				hibernate_flush_timed_out = TRUE;
 				HIBLOG("vm_compressor_flush - failed to finish before deadline\n");
 				break;
 			}
@@ -3293,22 +3295,32 @@ vm_compressor_compact_and_swap(boolean_t flush_all)
 
 		if (switch_state) {
 			if (VM_CONFIG_SWAP_IS_ACTIVE) {
-				/*
-				 * This mode of putting a generic c_seg on the swapout list is
-				 * only supported when we have general swapping enabled
-				 */
-				clock_sec_t lnow;
-				clock_nsec_t lnsec;
-				clock_get_system_nanotime(&lnow, &lnsec);
-				if (c_seg->c_agedin_ts && (lnow - c_seg->c_agedin_ts) < 30) {
-					vmcs_stats.unripe_under_30s++;
-				} else if (c_seg->c_agedin_ts && (lnow - c_seg->c_agedin_ts) < 60) {
-					vmcs_stats.unripe_under_60s++;
-				} else if (c_seg->c_agedin_ts && (lnow - c_seg->c_agedin_ts) < 300) {
-					vmcs_stats.unripe_under_300s++;
+				int new_state = C_ON_SWAPOUT_Q;
+
+#if (XNU_TARGET_OS_OSX && __arm64__)
+				if (flush_all == false && compressor_swapout_conditions_met() == false) {
+					new_state = C_ON_MAJORCOMPACT_Q;
+				}
+#endif /* (XNU_TARGET_OS_OSX && __arm64__) */
+
+				if (new_state == C_ON_SWAPOUT_Q) {
+					/*
+					 * This mode of putting a generic c_seg on the swapout list is
+					 * only supported when we have general swapping enabled
+					 */
+					clock_sec_t lnow;
+					clock_nsec_t lnsec;
+					clock_get_system_nanotime(&lnow, &lnsec);
+					if (c_seg->c_agedin_ts && (lnow - c_seg->c_agedin_ts) < 30) {
+						vmcs_stats.unripe_under_30s++;
+					} else if (c_seg->c_agedin_ts && (lnow - c_seg->c_agedin_ts) < 60) {
+						vmcs_stats.unripe_under_60s++;
+					} else if (c_seg->c_agedin_ts && (lnow - c_seg->c_agedin_ts) < 300) {
+						vmcs_stats.unripe_under_300s++;
+					}
 				}
 
-				c_seg_switch_state(c_seg, C_ON_SWAPOUT_Q, FALSE);
+				c_seg_switch_state(c_seg, new_state, FALSE);
 			} else {
 				if ((vm_swapout_ripe_segments == TRUE && c_overage_swapped_count < c_overage_swapped_limit)) {
 					assert(VM_CONFIG_SWAP_IS_PRESENT);
@@ -4860,6 +4872,21 @@ Retry:
 	lck_mtx_unlock_always(&c_seg->c_lock);
 	PAGE_REPLACEMENT_DISALLOWED(FALSE);
 }
+
+#if defined(__arm64__)
+extern clock_sec_t             vm_swapfile_last_failed_to_create_ts;
+__attribute__((noreturn))
+void
+vm_panic_hibernate_write_image_failed(int err)
+{
+	panic("hibernate_write_image encountered error 0x%x - %u, %u, %d, %d, %d, %d, %d, %d, %d, %d, %llu, %d, %d, %d\n",
+	    err,
+	    VM_PAGE_COMPRESSOR_COUNT, vm_page_wire_count,
+	    c_age_count, c_major_count, c_minor_count, c_swapout_count, c_swappedout_sparse_count,
+	    vm_num_swap_files, vm_num_pinned_swap_files, vm_swappin_enabled, vm_swap_put_failures,
+	    (vm_swapfile_last_failed_to_create_ts ? 1:0), hibernate_no_swapspace, hibernate_flush_timed_out);
+}
+#endif /*(__arm64__)*/
 
 #if CONFIG_FREEZE
 

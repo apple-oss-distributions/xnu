@@ -41,7 +41,7 @@ def GetTaskIPCSummary(task, show_busy = False):
     elif int(task.task_imp_base) != 0 and hasattr(task.task_imp_base, 'iit_procname'):
         proc_name += str(task.task_imp_base.iit_procname)
     is_table, table_size = GetSpaceTable(task.itk_space)
-    out_string += format_string.format(task, pval.p_pid, task.thread_count, table_size, proc_name)
+    out_string += format_string.format(task, GetProcPID(pval), task.thread_count, table_size, proc_name)
     if show_busy:
         nbusy, nmsgs = GetTaskBusyPortsSummary(task)
         out_string += busy_format.format(nbusy, nmsgs)
@@ -131,7 +131,7 @@ def GetPortDestProc(portp):
         if tsk.itk_space == spacep:
             if tsk.bsd_info:
                 destprocp = Cast(tsk.bsd_info, 'struct proc *')
-                return "{0:s}({1: <d})".format(GetProcName(destprocp), destprocp.p_pid)
+                return "{0:s}({1: <d})".format(GetProcName(destprocp), GetProcPID(destprocp))
             else:
                 return "unknown"
 
@@ -701,7 +701,7 @@ def GetPortUserStack(port, task):
         while count < 16 and ie_port_callstack[count]:
             out_str += ": <10x".format(ie_port_callstack[count])
             count = count + 1
-        if ie_port_spares != proc_val.p_pid:
+        if ie_port_spares != GetProcPID(proc_val):
             out_str += " ({:<10d})".format(ie_port_spares)
         out_str += '\n'
     return out_str
@@ -842,7 +842,7 @@ def GetTaskVoucherCount(t):
                     count += 1
     format_str = "{: <#020x} {: <6d} {: <12s} {: <8d}"
     pval = Cast(t.bsd_info, 'proc *')
-    return format_str.format(t, pval.p_pid, GetProcNameForTask(t), count)
+    return format_str.format(t, GetProcPID(pval), GetProcNameForTask(t), count)
 
 # Macro: countallvouchers
 @lldb_command('countallvouchers', fancy=True)
@@ -1285,8 +1285,8 @@ def IterateAllPorts(tasklist, func, ctx, include_psets, follow_busyports, should
             ## XXX: look at block reason to see if it's in mach_msg_receive - then look at saved state / message
 
             ## Thread port (send right)
-            if unsigned(thval.ith_settable_self) > 0:
-                thport = thval.ith_settable_self
+            if unsigned(thval.t_tro.tro_settable_self_port) > 0:
+                thport = thval.t_tro.tro_settable_self_port
                 func(t, space, ctx, thports_idx, 0, thport, 17) ## see: osfmk/mach/message.h
             ## Thread special reply port (send-once right)
             if unsigned(thval.ith_special_reply_port) > 0:
@@ -1299,10 +1299,10 @@ def IterateAllPorts(tasklist, func, ctx, include_psets, follow_busyports, should
                     vdisp = GetDispositionFromVoucherPort(vport)
                     func(t, space, ctx, thports_idx, 0, vport, vdisp)
             ## Thread exception ports
-            if unsigned(thval.exc_actions) > 0:
+            if unsigned(thval.t_tro.tro_exc_actions) > 0:
                 exidx = 0
                 while exidx < exmax: ## see: osfmk/mach/[arm|i386]/exception.h
-                    export = thval.exc_actions[exidx].port ## send right
+                    export = thval.t_tro.tro_exc_actions[exidx].port ## send right
                     if unsigned(export) > 0:
                         try:
                             func(t, space, ctx, excports_idx, 0, export, 17)

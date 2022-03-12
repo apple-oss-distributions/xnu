@@ -264,6 +264,25 @@ timer_call_setup(
 	simple_lock_init(&(call)->tc_lock, 0);
 }
 
+timer_call_t
+timer_call_alloc(
+	timer_call_func_t       func,
+	timer_call_param_t      param0)
+{
+	timer_call_t call;
+
+	call = kalloc_type(struct timer_call, Z_ZERO | Z_WAITOK | Z_NOFAIL);
+	timer_call_setup(call, func, param0);
+	return call;
+}
+
+void
+timer_call_free(
+	timer_call_t            call)
+{
+	kfree_type(struct timer_call, call);
+}
+
 static mpqueue_head_t*
 mpqueue_for_timer_call(timer_call_t entry)
 {
@@ -1691,7 +1710,7 @@ tcoal_qos_adjust(thread_t t, int32_t *tshift, uint64_t *tmax_abstime, boolean_t 
 {
 	uint32_t latency_qos;
 	boolean_t adjusted = FALSE;
-	task_t ctask = t->task;
+	task_t ctask = get_threadtask(t);
 
 	if (ctask) {
 		latency_qos = proc_get_effective_thread_policy(t, TASK_POLICY_LATENCY_QOS);

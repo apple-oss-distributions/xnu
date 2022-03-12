@@ -373,7 +373,7 @@ sysctl_handle_kern_threadname(  __unused struct sysctl_oid *oidp, __unused void 
     __unused int arg2, struct sysctl_req *req)
 {
 	int error;
-	struct uthread *ut = get_bsdthread_info(current_thread());
+	struct uthread *ut = current_uthread();
 	user_addr_t oldp = 0, newp = 0;
 	size_t *oldlenp = NULL;
 	size_t newlen = 0;
@@ -3032,7 +3032,7 @@ sysctl_rage_vnode
 	int new_value, old_value, changed;
 	int error;
 
-	ut = get_bsdthread_info(current_thread());
+	ut = current_uthread();
 
 	if (ut->uu_flag & UT_RAGE_VNODES) {
 		old_value = KERN_RAGE_THREAD;
@@ -3061,7 +3061,7 @@ sysctl_rage_vnode
 			ut->uu_flag |= UT_RAGE_VNODES;
 			break;
 		case KERN_UNRAGE_THREAD:
-			ut = get_bsdthread_info(current_thread());
+			ut = current_uthread();
 			ut->uu_flag &= ~UT_RAGE_VNODES;
 			break;
 		}
@@ -5258,202 +5258,6 @@ SYSCTL_QUAD(_kern, OID_AUTO, thread_block_count_on_turnstile,
 SYSCTL_QUAD(_kern, OID_AUTO, thread_block_count_on_reg_waitq,
     CTLFLAG_RD | CTLFLAG_ANYBODY | CTLFLAG_KERN | CTLFLAG_LOCKED,
     &thread_block_on_regular_waitq_count, "thread blocked on regular waitq count");
-
-static int
-sysctl_erase_all_test_mtx_stats SYSCTL_HANDLER_ARGS
-{
-#pragma unused(arg1, arg2)
-	int error, val = 0;
-	error = sysctl_handle_int(oidp, &val, 0, req);
-	if (error || val == 0) {
-		return error;
-	}
-
-	if (val == 1) {
-		lck_mtx_test_init();
-		erase_all_test_mtx_stats();
-	}
-
-	return 0;
-}
-
-static int
-sysctl_get_test_mtx_stats SYSCTL_HANDLER_ARGS
-{
-#pragma unused(oidp, arg1, arg2)
-	char* buffer;
-	int size, buffer_size, error;
-
-	buffer_size = 1000;
-	buffer = (char *)kalloc_data(buffer_size, Z_WAITOK);
-	if (!buffer) {
-		panic("Impossible to allocate memory for %s", __func__);
-	}
-
-	lck_mtx_test_init();
-
-	size = get_test_mtx_stats_string(buffer, buffer_size);
-
-	error = sysctl_io_string(req, buffer, size, 0, NULL);
-
-	kfree_data(buffer, buffer_size);
-
-	return error;
-}
-
-static int
-sysctl_test_mtx_uncontended SYSCTL_HANDLER_ARGS
-{
-#pragma unused(oidp, arg1, arg2)
-	char* buffer;
-	int buffer_size, offset, error, iter;
-	char input_val[40];
-
-	if (!req->newptr) {
-		return 0;
-	}
-
-	if (!req->oldptr) {
-		return EINVAL;
-	}
-
-	if (req->newlen >= sizeof(input_val)) {
-		return EINVAL;
-	}
-
-	error = SYSCTL_IN(req, input_val, req->newlen);
-	if (error) {
-		return error;
-	}
-	input_val[req->newlen] = '\0';
-
-	iter = 0;
-	error = sscanf(input_val, "%d", &iter);
-	if (error != 1) {
-		printf("%s invalid input\n", __func__);
-		return EINVAL;
-	}
-
-	if (iter <= 0) {
-		printf("%s requested %d iterations, not starting the test\n", __func__, iter);
-		return EINVAL;
-	}
-
-	lck_mtx_test_init();
-
-	buffer_size = 2000;
-	offset = 0;
-	buffer = (char *)kalloc_data(buffer_size, Z_WAITOK | Z_ZERO);
-	if (!buffer) {
-		panic("Impossible to allocate memory for %s", __func__);
-	}
-
-	printf("%s starting uncontended mutex test with %d iterations\n", __func__, iter);
-
-	offset = scnprintf(buffer, buffer_size, "STATS INNER LOOP");
-	offset += lck_mtx_test_mtx_uncontended(iter, &buffer[offset], buffer_size - offset);
-
-	offset += scnprintf(&buffer[offset], buffer_size - offset, "\nSTATS OUTER LOOP");
-	offset += lck_mtx_test_mtx_uncontended_loop_time(iter, &buffer[offset], buffer_size - offset);
-
-	error = SYSCTL_OUT(req, buffer, offset);
-
-	kfree_data(buffer, buffer_size);
-	return error;
-}
-
-static int
-sysctl_test_mtx_contended SYSCTL_HANDLER_ARGS
-{
-#pragma unused(oidp, arg1, arg2)
-	char* buffer;
-	int buffer_size, offset, error, iter;
-	char input_val[40];
-
-	if (!req->newptr) {
-		return 0;
-	}
-
-	if (!req->oldptr) {
-		return EINVAL;
-	}
-
-	if (req->newlen >= sizeof(input_val)) {
-		return EINVAL;
-	}
-
-	error = SYSCTL_IN(req, input_val, req->newlen);
-	if (error) {
-		return error;
-	}
-	input_val[req->newlen] = '\0';
-
-	iter = 0;
-	error = sscanf(input_val, "%d", &iter);
-	if (error != 1) {
-		printf("%s invalid input\n", __func__);
-		return EINVAL;
-	}
-
-	if (iter <= 0) {
-		printf("%s requested %d iterations, not starting the test\n", __func__, iter);
-		return EINVAL;
-	}
-
-	lck_mtx_test_init();
-
-	erase_all_test_mtx_stats();
-
-	buffer_size = 2000;
-	offset = 0;
-	buffer = (char *)kalloc_data(buffer_size, Z_WAITOK | Z_ZERO);
-	if (!buffer) {
-		panic("Impossible to allocate memory for %s", __func__);
-	}
-
-	printf("%s starting contended mutex test with %d iterations FULL_CONTENDED\n", __func__, iter);
-
-	offset = scnprintf(buffer, buffer_size, "STATS INNER LOOP");
-	offset += lck_mtx_test_mtx_contended(iter, &buffer[offset], buffer_size - offset, FULL_CONTENDED);
-
-	printf("%s starting contended mutex loop test with %d iterations FULL_CONTENDED\n", __func__, iter);
-
-	offset += scnprintf(&buffer[offset], buffer_size - offset, "\nSTATS OUTER LOOP");
-	offset += lck_mtx_test_mtx_contended_loop_time(iter, &buffer[offset], buffer_size - offset, FULL_CONTENDED);
-
-	printf("%s starting contended mutex test with %d iterations HALF_CONTENDED\n", __func__, iter);
-
-	offset += scnprintf(&buffer[offset], buffer_size - offset, "STATS INNER LOOP");
-	offset += lck_mtx_test_mtx_contended(iter, &buffer[offset], buffer_size - offset, HALF_CONTENDED);
-
-	printf("%s starting contended mutex loop test with %d iterations HALF_CONTENDED\n", __func__, iter);
-
-	offset += scnprintf(&buffer[offset], buffer_size - offset, "\nSTATS OUTER LOOP");
-	offset += lck_mtx_test_mtx_contended_loop_time(iter, &buffer[offset], buffer_size - offset, HALF_CONTENDED);
-
-	error = SYSCTL_OUT(req, buffer, offset);
-
-	printf("\n%s\n", buffer);
-	kfree_data(buffer, buffer_size);
-
-	return error;
-}
-
-SYSCTL_PROC(_kern, OID_AUTO, erase_all_test_mtx_stats,
-    CTLFLAG_WR | CTLFLAG_MASKED | CTLFLAG_ANYBODY | CTLFLAG_KERN | CTLFLAG_LOCKED,
-    0, 0, sysctl_erase_all_test_mtx_stats, "I", "erase test_mtx statistics");
-
-SYSCTL_PROC(_kern, OID_AUTO, get_test_mtx_stats,
-    CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_MASKED | CTLFLAG_KERN | CTLFLAG_LOCKED,
-    0, 0, sysctl_get_test_mtx_stats, "A", "get test_mtx statistics");
-
-SYSCTL_PROC(_kern, OID_AUTO, test_mtx_contended,
-    CTLTYPE_STRING | CTLFLAG_MASKED | CTLFLAG_RW | CTLFLAG_KERN | CTLFLAG_LOCKED,
-    0, 0, sysctl_test_mtx_contended, "A", "get statistics for contended mtx test");
-
-SYSCTL_PROC(_kern, OID_AUTO, test_mtx_uncontended,
-    CTLTYPE_STRING | CTLFLAG_MASKED | CTLFLAG_RW | CTLFLAG_KERN | CTLFLAG_LOCKED,
-    0, 0, sysctl_test_mtx_uncontended, "A", "get statistics for uncontended mtx test");
 
 #if defined(__x86_64__)
 extern uint64_t MutexSpin;

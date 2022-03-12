@@ -809,7 +809,7 @@ thread_unblock(
 	 *	Cancel pending wait timer.
 	 */
 	if (thread->wait_timer_is_set) {
-		if (timer_call_cancel(&thread->wait_timer)) {
+		if (timer_call_cancel(thread->wait_timer)) {
 			thread->wait_timer_active--;
 		}
 		thread->wait_timer_is_set = FALSE;
@@ -887,7 +887,7 @@ thread_unblock(
 	 */
 
 	if (__improbable(aticontext && !(thread_get_tag_internal(thread) & THREAD_TAG_CALLOUT))) {
-		DTRACE_SCHED2(iwakeup, struct thread *, thread, struct proc *, thread->task->bsd_info);
+		DTRACE_SCHED2(iwakeup, struct thread *, thread, struct proc *, current_proc());
 
 		uint64_t ttd = current_processor()->timer_call_ttd;
 
@@ -939,7 +939,7 @@ thread_unblock(
 	    (uintptr_t)thread_tid(thread), thread->sched_pri, thread->wait_result,
 	    sched_run_buckets[TH_BUCKET_RUN], 0);
 
-	DTRACE_SCHED2(wakeup, struct thread *, thread, struct proc *, thread->task->bsd_info);
+	DTRACE_SCHED2(wakeup, struct thread *, thread, struct proc *, current_proc());
 
 	return ready_for_runq;
 }
@@ -1069,7 +1069,7 @@ thread_mark_wait_locked(
 		}
 		if (thread->sched_call) {
 			wait_interrupt_t mask = THREAD_WAIT_NOREPORT_USER;
-			if (is_kerneltask(thread->task)) {
+			if (is_kerneltask(get_threadtask(thread))) {
 				mask = THREAD_WAIT_NOREPORT_KERNEL;
 			}
 			if ((interruptible_orig & mask) == 0) {
@@ -1823,7 +1823,7 @@ thread_vm_bind_group_add(void)
 {
 	thread_t self = current_thread();
 
-	thread_reference_internal(self);
+	thread_reference(self);
 	self->options |= TH_OPT_SCHED_VM_GROUP;
 
 	simple_lock(&sched_vm_group_list_lock, LCK_GRP_NULL);
@@ -2967,7 +2967,7 @@ thread_invoke(
 				    (uintptr_t)thread_tid(thread), (uintptr_t)thread->chosen_processor->cpu_id, 0, 0, 0);
 			}
 
-			DTRACE_SCHED2(off__cpu, struct thread *, thread, struct proc *, thread->task->bsd_info);
+			DTRACE_SCHED2(off__cpu, struct thread *, thread, struct proc *, current_proc());
 
 			SCHED_STATS_CSW(processor, self->reason, self->sched_pri, thread->sched_pri);
 
@@ -3116,7 +3116,7 @@ need_stack:
 		    (uintptr_t)thread_tid(thread), (uintptr_t)thread->chosen_processor->cpu_id, 0, 0, 0);
 	}
 
-	DTRACE_SCHED2(off__cpu, struct thread *, thread, struct proc *, thread->task->bsd_info);
+	DTRACE_SCHED2(off__cpu, struct thread *, thread, struct proc *, current_proc());
 
 	SCHED_STATS_CSW(processor, self->reason, self->sched_pri, thread->sched_pri);
 
@@ -3709,8 +3709,8 @@ thread_block_reason(
 	ast_off(AST_SCHEDULING);
 
 #if PROC_REF_DEBUG
-	if ((continuation != NULL) && (self->task != kernel_task)) {
-		uthread_assert_zero_proc_refcount(self->uthread);
+	if ((continuation != NULL) && (get_threadtask(self) != kernel_task)) {
+		uthread_assert_zero_proc_refcount(get_bsdthread_info(self));
 	}
 #endif
 
@@ -5375,9 +5375,7 @@ choose_starting_pset(pset_node_t node, thread_t thread, processor_t *processor_h
 		 * NRG this seems like the wrong thing to do.
 		 * See also task->pset_hint = pset in thread_setrun()
 		 */
-		task_t          task = thread->task;
-
-		pset = task->pset_hint;
+		pset = get_threadtask(thread)->pset_hint;
 		if (pset == PROCESSOR_SET_NULL) {
 			pset = current_processor()->processor_set;
 		}
@@ -5545,7 +5543,7 @@ thread_setrun(
 			pset = processor->processor_set;
 			pset_lock(pset);
 		}
-		task_t task = thread->task;
+		task_t task = get_threadtask(thread);
 		if (!(task->t_flags & TF_USE_PSET_HINT_CLUSTER_TYPE)) {
 			task->pset_hint = pset; /* NRG this is done without holding the task lock */
 		}
@@ -6137,10 +6135,11 @@ thread_urgency_t
 thread_get_urgency(thread_t thread, uint64_t *arg1, uint64_t *arg2)
 {
 	uint64_t urgency_param1 = 0, urgency_param2 = 0;
+	task_t task = get_threadtask_early(thread);
 
 	thread_urgency_t urgency;
 
-	if (thread == NULL || (thread->state & TH_IDLE)) {
+	if (thread == NULL || task == TASK_NULL || (thread->state & TH_IDLE)) {
 		urgency_param1 = 0;
 		urgency_param2 = 0;
 
@@ -6162,7 +6161,7 @@ thread_get_urgency(thread_t thread, uint64_t *arg1, uint64_t *arg2)
 		 * levels for optimal power/perf tradeoffs for a platform.
 		 */
 		boolean_t thread_lacks_qos = (proc_get_effective_thread_policy(thread, TASK_POLICY_QOS) == THREAD_QOS_UNSPECIFIED); //thread_has_qos_policy(thread);
-		boolean_t task_is_suppressed = (proc_get_effective_task_policy(thread->task, TASK_POLICY_SUP_ACTIVE) == 0x1);
+		boolean_t task_is_suppressed = (proc_get_effective_task_policy(task, TASK_POLICY_SUP_ACTIVE) == 0x1);
 
 		/*
 		 * Background urgency applied when thread priority is
@@ -6180,7 +6179,7 @@ thread_get_urgency(thread_t thread, uint64_t *arg1, uint64_t *arg2)
 	} else {
 		/* For otherwise unclassified threads, report throughput QoS parameters */
 		urgency_param1 = proc_get_effective_thread_policy(thread, TASK_POLICY_THROUGH_QOS);
-		urgency_param2 = proc_get_effective_task_policy(thread->task, TASK_POLICY_THROUGH_QOS);
+		urgency_param2 = proc_get_effective_task_policy(task, TASK_POLICY_THROUGH_QOS);
 		urgency = THREAD_URGENCY_NORMAL;
 	}
 
@@ -6215,7 +6214,7 @@ thread_get_perfcontrol_class(thread_t thread)
 	} else if (thread->base_pri <= BASEPRI_FOREGROUND) {
 		return PERFCONTROL_CLASS_UI;
 	} else {
-		if (thread->task == kernel_task) {
+		if (get_threadtask(thread) == kernel_task) {
 			/*
 			 * Classify Above UI kernel threads as PERFCONTROL_CLASS_KERNEL.
 			 * All other lower priority kernel threads should be treated
@@ -6362,11 +6361,11 @@ processor_idle(
 	 * thread_select will move the processor from dispatching to running,
 	 * or put it in idle if there's nothing to do.
 	 */
-	thread_t current_thread = current_thread();
+	thread_t cur_thread = current_thread();
 
-	thread_lock(current_thread);
-	thread_t new_thread = thread_select(current_thread, processor, &reason);
-	thread_unlock(current_thread);
+	thread_lock(cur_thread);
+	thread_t new_thread = thread_select(cur_thread, processor, &reason);
+	thread_unlock(cur_thread);
 
 	assert(processor->running_timers_active == false);
 
@@ -6730,7 +6729,7 @@ thread_update_add_thread(thread_t thread)
 	}
 
 	thread_update_array[thread_update_count++] = thread;
-	thread_reference_internal(thread);
+	thread_reference(thread);
 	return TRUE;
 }
 
@@ -7158,7 +7157,7 @@ sched_consider_recommended_cores(uint64_t ctime, thread_t cur_thread)
 	perfcontrol_failsafe_recommended_at_trigger = perfcontrol_requested_recommended_cores;
 
 	/* Capture some data about who screwed up (assuming that the thread on core is at fault) */
-	task_t task = cur_thread->task;
+	task_t task = get_threadtask(cur_thread);
 	perfcontrol_failsafe_pid = task_pid(task);
 	strlcpy(perfcontrol_failsafe_name, proc_name_address(task->bsd_info), sizeof(perfcontrol_failsafe_name));
 
@@ -7484,7 +7483,9 @@ int sched_allow_NO_SMT_threads = 1;
 bool
 thread_no_smt(thread_t thread)
 {
-	return sched_allow_NO_SMT_threads && (thread->bound_processor == PROCESSOR_NULL) && ((thread->sched_flags & TH_SFLAG_NO_SMT) || (thread->task->t_flags & TF_NO_SMT));
+	return sched_allow_NO_SMT_threads &&
+	       (thread->bound_processor == PROCESSOR_NULL) &&
+	       ((thread->sched_flags & TH_SFLAG_NO_SMT) || (get_threadtask(thread)->t_flags & TF_NO_SMT));
 }
 
 bool
@@ -8238,8 +8239,8 @@ extern char sysctl_get_task_cluster_type(void);
 char
 sysctl_get_task_cluster_type(void)
 {
-	thread_t thread = current_thread();
-	processor_set_t pset_hint = thread->task->pset_hint;
+	task_t task = current_task();
+	processor_set_t pset_hint = task->pset_hint;
 
 	if (!pset_hint) {
 		return '0';
@@ -8286,8 +8287,7 @@ extern void sysctl_task_set_cluster_type(char cluster_type);
 void
 sysctl_task_set_cluster_type(char cluster_type)
 {
-	thread_t thread = current_thread();
-	task_t task = thread->task;
+	task_t task = current_task();
 	processor_set_t pset_hint = PROCESSOR_SET_NULL;
 
 #if __AMP__

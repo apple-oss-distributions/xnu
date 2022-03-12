@@ -2185,7 +2185,7 @@ pmap_enter_pv(
 	vm_offset_t pvh_flags = pvh_get_flags(pvh);
 
 #if XNU_MONITOR
-	if (__improbable(pvh_flags & PVH_FLAG_LOCKDOWN)) {
+	if (__improbable(pvh_flags & PVH_FLAG_LOCKDOWN_MASK)) {
 		panic("%d is locked down (%#lx), cannot enter", pai, pvh_flags);
 	}
 #endif /* XNU_MONITOR */
@@ -2348,7 +2348,7 @@ pmap_remove_pv(
 	const vm_offset_t pvh_flags = pvh_get_flags(pvh);
 
 #if XNU_MONITOR
-	if (__improbable(pvh_flags & PVH_FLAG_LOCKDOWN)) {
+	if (__improbable(pvh_flags & PVH_FLAG_LOCKDOWN_MASK)) {
 		panic("%s: PVH entry at pai %d is locked down (%#lx), cannot remove",
 		    __func__, pai, pvh_flags);
 	}

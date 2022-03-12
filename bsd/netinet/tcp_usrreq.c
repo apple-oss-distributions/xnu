@@ -2865,19 +2865,19 @@ tcp_attach(struct socket *so, struct proc *p)
 	int error;
 	int isipv6 = SOCK_CHECK_DOM(so, PF_INET6) != 0;
 
-	error = in_pcballoc(so, &tcbinfo, p);
-	if (error) {
-		return error;
-	}
-
-	inp = sotoinpcb(so);
-
 	if (so->so_snd.sb_hiwat == 0 || so->so_rcv.sb_hiwat == 0) {
 		error = soreserve(so, tcp_sendspace, tcp_recvspace);
 		if (error) {
 			return error;
 		}
 	}
+
+	error = in_pcballoc(so, &tcbinfo, p);
+	if (error) {
+		return error;
+	}
+
+	inp = sotoinpcb(so);
 
 	if (so->so_snd.sb_preconn_hiwat == 0) {
 		soreserve_preconnect(so, 2048);

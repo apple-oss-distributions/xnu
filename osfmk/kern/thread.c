@@ -174,11 +174,7 @@
 LCK_GRP_DECLARE(thread_lck_grp, "thread");
 
 static SECURITY_READ_ONLY_LATE(zone_t) thread_zone;
-ZONE_INIT(&thread_zone, "threads", sizeof(struct thread),
-    ZC_ZFREE_CLEARMEM, ZONE_ID_THREAD, NULL);
-
-ZONE_DECLARE(thread_qos_override_zone, "thread qos override",
-    sizeof(struct thread_qos_override), ZC_ZFREE_CLEARMEM);
+SECURITY_READ_ONLY_LATE(zone_t) thread_ro_zone;
 
 static void thread_port_with_flavor_no_senders(ipc_port_t, mach_port_mscount_t);
 
@@ -220,6 +216,23 @@ static SECURITY_READ_ONLY_LATE(struct thread) thread_template = {
 #endif
 	/* timers are initialized in thread_bootstrap */
 };
+
+__startup_func
+static void
+thread_zone_startup(void)
+{
+	size_t size = sizeof(struct thread);
+
+#ifdef MACH_BSD
+	size += uthread_size;
+#endif
+	thread_zone = zone_create_ext("threads", size,
+	    ZC_ZFREE_CLEARMEM, ZONE_ID_THREAD, NULL);
+
+	thread_ro_zone = zone_create_ext("threads_ro", sizeof(struct thread_ro),
+	    ZC_READONLY, ZONE_ID_THREAD_RO, NULL);
+}
+STARTUP(ZALLOC, STARTUP_RANK_MIDDLE, thread_zone_startup);
 
 __startup_data
 static struct thread init_thread;
@@ -303,6 +316,55 @@ init_thread_from_template(thread_t thread)
 #pragma clang diagnostic pop
 }
 
+static void
+thread_ro_create(task_t parent_task, thread_t th, thread_ro_t tro_tpl)
+{
+#if __x86_64__ || __arm__
+	th->t_task = parent_task;
+#endif
+	tro_tpl->tro_owner = th;
+	tro_tpl->tro_task  = parent_task;
+	th->t_tro = zalloc_ro(ZONE_ID_THREAD_RO, Z_WAITOK | Z_ZERO | Z_NOFAIL);
+	zalloc_ro_update_elem(ZONE_ID_THREAD_RO, th->t_tro, tro_tpl);
+}
+
+static void
+thread_ro_destroy(thread_t th)
+{
+	thread_ro_t tro = get_thread_ro(th);
+#if MACH_BSD
+	struct ucred *cred = tro->tro_cred;
+#endif
+
+	zfree_ro(ZONE_ID_THREAD_RO, tro);
+#if MACH_BSD
+	if (cred) {
+		uthread_cred_free(cred);
+	}
+#endif
+}
+
+#if MACH_BSD
+extern void kauth_cred_set(struct ucred **, struct ucred *);
+
+void
+thread_ro_update_cred(thread_ro_t tro, struct ucred *ucred)
+{
+	struct ucred *my_cred = tro->tro_cred;
+	if (my_cred != ucred) {
+		kauth_cred_set(&my_cred, ucred);
+		zalloc_ro_update_field(ZONE_ID_THREAD_RO, tro, tro_cred, &my_cred);
+	}
+}
+
+void
+thread_ro_update_flags(thread_ro_t tro, thread_ro_flags_t add, thread_ro_flags_t clr)
+{
+	thread_ro_flags_t flags = (tro->tro_flags & ~clr) | add;
+	zalloc_ro_update_field(ZONE_ID_THREAD_RO, tro, tro_flags, &flags);
+}
+#endif
+
 thread_t
 thread_bootstrap(void)
 {
@@ -378,8 +440,9 @@ thread_terminate_continue(void)
 void
 thread_terminate_self(void)
 {
-	thread_t                thread = current_thread();
-	task_t                  task;
+	thread_t    thread = current_thread();
+	thread_ro_t tro    = get_thread_ro(thread);
+	task_t      task   = tro->tro_task;
 	int threadcnt;
 
 	pal_thread_terminate_self(thread);
@@ -418,21 +481,20 @@ thread_terminate_self(void)
 
 	bank_swap_thread_bank_ledger(thread, NULL);
 
-	if (kdebug_enable && bsd_hasthreadname(thread->uthread)) {
+	if (kdebug_enable && bsd_hasthreadname(get_bsdthread_info(thread))) {
 		char threadname[MAXTHREADNAMESIZE];
-		bsd_getthreadname(thread->uthread, threadname);
+		bsd_getthreadname(get_bsdthread_info(thread), threadname);
 		kernel_debug_string_simple(TRACE_STRING_THREADNAME_PREV, threadname);
 	}
 
-	task = thread->task;
-	uthread_cleanup(task, thread->uthread, task->bsd_info);
+	uthread_cleanup(get_bsdthread_info(thread), tro);
 
 	if (kdebug_enable && task->bsd_info && !task_is_exec_copy(task)) {
 		/* trace out pid before we sign off */
 		long dbg_arg1 = 0;
 		long dbg_arg2 = 0;
 
-		kdbg_trace_data(thread->task->bsd_info, &dbg_arg1, &dbg_arg2);
+		kdbg_trace_data(task->bsd_info, &dbg_arg1, &dbg_arg2);
 #if MONOTONIC
 		if (kdebug_debugid_enabled(DBG_MT_INSTRS_CYCLES_THR_EXIT)) {
 			uint64_t counts[MT_CORE_NFIXED];
@@ -482,7 +544,7 @@ thread_terminate_self(void)
 		if (kdebug_enable) {
 			/* since we're the last thread in this process, trace out the command name too */
 			long args[4] = {};
-			kdbg_trace_string(thread->task->bsd_info, &args[0], &args[1], &args[2], &args[3]);
+			kdbg_trace_string(task->bsd_info, &args[0], &args[1], &args[2], &args[3]);
 #if MONOTONIC
 			if (kdebug_debugid_enabled(DBG_MT_INSTRS_CYCLES_PROC_EXIT)) {
 				uint64_t counts[MT_CORE_NFIXED];
@@ -531,14 +593,12 @@ thread_terminate_self(void)
 		task_unlock(task);
 	}
 
-	uthread_cred_free(thread->uthread);
-
 	s = splsched();
 	thread_lock(thread);
 
 	/*
 	 * Ensure that the depress timer is no longer enqueued,
-	 * so the timer (stored in the thread) can be safely deallocated
+	 * so the timer can be safely deallocated
 	 *
 	 * TODO: build timer_call_cancel_wait
 	 */
@@ -570,7 +630,7 @@ thread_terminate_self(void)
 	if (thread->wait_timer_is_set) {
 		thread->wait_timer_is_set = FALSE;
 
-		if (timer_call_cancel(&thread->wait_timer)) {
+		if (timer_call_cancel(thread->wait_timer)) {
 			thread->wait_timer_active--;
 		}
 	}
@@ -636,7 +696,7 @@ thread_ref_release(thread_t thread)
 
 	assert_thread_magic(thread);
 
-	return os_ref_release(&thread->ref_count) == 0;
+	return os_ref_release_raw(&thread->ref_count, &thread_refgrp) == 0;
 }
 
 /* Drop a thread refcount safely without triggering a zfree */
@@ -665,7 +725,7 @@ thread_deallocate_complete(
 
 	assert_thread_magic(thread);
 
-	assert(os_ref_get_count(&thread->ref_count) == 0);
+	assert(os_ref_get_count_raw(&thread->ref_count) == 0);
 
 	if (!(thread->state & TH_TERMINATE2)) {
 		panic("thread_deallocate: thread not properly terminated");
@@ -681,15 +741,10 @@ thread_deallocate_complete(
 
 	proc_thread_qos_deallocate(thread);
 
-	task = thread->task;
+	task = get_threadtask(thread);
 
 #ifdef MACH_BSD
-	{
-		void *ut = thread->uthread;
-
-		thread->uthread = NULL;
-		uthread_zone_free(ut);
-	}
+	uthread_destroy(get_bsdthread_info(thread));
 #endif /* MACH_BSD */
 
 	if (thread->t_ledger) {
@@ -739,6 +794,10 @@ thread_deallocate_complete(
 	terminated_threads_count--;
 	lck_mtx_unlock(&tasks_threads_lock);
 
+	timer_call_free(thread->depress_timer);
+	timer_call_free(thread->wait_timer);
+
+	thread_ro_destroy(thread);
 	zfree(thread_zone, thread);
 }
 
@@ -861,7 +920,7 @@ thread_terminate_queue_invoke(mpsc_queue_chain_t e,
     __assert_only mpsc_daemon_queue_t dq)
 {
 	thread_t thread = mpsc_queue_element(e, struct thread, mpsc_links);
-	task_t task = thread->task;
+	task_t task = get_threadtask(thread);
 
 	assert(dq == &thread_terminate_queue);
 
@@ -1089,7 +1148,6 @@ thread_daemon_init(void)
 
 __options_decl(thread_create_internal_options_t, uint32_t, {
 	TH_OPTION_NONE          = 0x00,
-	TH_OPTION_NOCRED        = 0x01,
 	TH_OPTION_NOSUSP        = 0x02,
 	TH_OPTION_WORKQ         = 0x04,
 	TH_OPTION_IMMOVABLE     = 0x08,
@@ -1117,8 +1175,9 @@ thread_create_internal(
 	thread_create_internal_options_t        options,
 	thread_t                                *out_thread)
 {
-	thread_t                                new_thread;
+	thread_t                  new_thread;
 	ipc_thread_init_options_t init_options = IPC_THREAD_INIT_NONE;
+	struct thread_ro          tro_tpl = { };
 	bool first_thread = false;
 
 	/*
@@ -1138,6 +1197,9 @@ thread_create_internal(
 		 *
 		 * Also remember this thread in `vm_pageout_scan_thread`
 		 * as this is what the first thread ever becomes.
+		 *
+		 * Also pre-warm the depress timer since the VM pageout scan
+		 * daemon might need to use it.
 		 */
 		assert(vm_pageout_scan_thread == THREAD_NULL);
 		vm_pageout_scan_thread = new_thread;
@@ -1160,47 +1222,29 @@ thread_create_internal(
 		init_options |= IPC_THREAD_INIT_IMMOVABLE;
 	}
 
-	os_ref_init_count(&new_thread->ref_count, &thread_refgrp, 2);
+	os_ref_init_count_raw(&new_thread->ref_count, &thread_refgrp, 2);
+	machine_thread_create(new_thread, parent_task, first_thread);
 
 #ifdef MACH_BSD
-	new_thread->uthread = uthread_alloc(parent_task, new_thread, (options & TH_OPTION_NOCRED) != 0);
-	if (new_thread->uthread == NULL) {
-#if MACH_ASSERT
-		new_thread->thread_magic = 0;
-#endif /* MACH_ASSERT */
-
-		zfree(thread_zone, new_thread);
-		return KERN_RESOURCE_SHORTAGE;
+	uthread_init(parent_task, get_bsdthread_info(new_thread),
+	    &tro_tpl, (options & TH_OPTION_WORKQ) != 0);
+	if (!is_corpsetask(parent_task)) {
+		/*
+		 * uthread_init will set tro_cred (with a +1)
+		 * and tro_proc for live tasks.
+		 */
+		assert(tro_tpl.tro_cred && tro_tpl.tro_proc);
 	}
 #endif  /* MACH_BSD */
-
-	if (machine_thread_create(new_thread, parent_task, first_thread) != KERN_SUCCESS) {
-#ifdef MACH_BSD
-		void *ut = new_thread->uthread;
-
-		new_thread->uthread = NULL;
-		/* cred free may not be necessary */
-		uthread_cleanup(parent_task, ut, parent_task->bsd_info);
-		uthread_cred_free(ut);
-		uthread_zone_free(ut);
-#endif  /* MACH_BSD */
-
-#if MACH_ASSERT
-		new_thread->thread_magic = 0;
-#endif /* MACH_ASSERT */
-
-		zfree(thread_zone, new_thread);
-		return KERN_FAILURE;
-	}
-
-	new_thread->task = parent_task;
 
 	thread_lock_init(new_thread);
 	wake_lock_init(new_thread);
 
 	lck_mtx_init(&new_thread->mutex, &thread_lck_grp, LCK_ATTR_NULL);
 
-	ipc_thread_init(new_thread, init_options);
+	ipc_thread_init(parent_task, new_thread, &tro_tpl, init_options);
+
+	thread_ro_create(parent_task, new_thread, &tro_tpl);
 
 	new_thread->continuation = continuation;
 	new_thread->parameter = parameter;
@@ -1273,13 +1317,10 @@ thread_create_internal(
 
 #ifdef MACH_BSD
 		{
-			void *ut = new_thread->uthread;
+			struct uthread *ut = get_bsdthread_info(new_thread);
 
-			new_thread->uthread = NULL;
-			uthread_cleanup(parent_task, ut, parent_task->bsd_info);
-			/* cred free may not be necessary */
-			uthread_cred_free(ut);
-			uthread_zone_free(ut);
+			uthread_cleanup(ut, &tro_tpl);
+			uthread_destroy(ut);
 		}
 #endif  /* MACH_BSD */
 		ipc_thread_disable(new_thread);
@@ -1288,6 +1329,7 @@ thread_create_internal(
 		    sizeof(struct io_stat_info));
 		lck_mtx_destroy(&new_thread->mutex, &thread_lck_grp);
 		machine_thread_destroy(new_thread);
+		thread_ro_destroy(new_thread);
 		zfree(thread_zone, new_thread);
 		return KERN_FAILURE;
 	}
@@ -1300,7 +1342,7 @@ thread_create_internal(
 
 	task_reference_grp(parent_task, TASK_GRP_INTERNAL);
 
-	if (new_thread->task->rusage_cpu_flags & TASK_RUSECPU_FLAGS_PERTHR_LIMIT) {
+	if (parent_task->rusage_cpu_flags & TASK_RUSECPU_FLAGS_PERTHR_LIMIT) {
 		/*
 		 * This task has a per-thread CPU limit; make sure this new thread
 		 * gets its limit set too, before it gets out of the kernel.
@@ -1318,7 +1360,7 @@ thread_create_internal(
 	new_thread->t_deduct_bank_ledger_time = 0;
 	new_thread->t_deduct_bank_ledger_energy = 0;
 
-	new_thread->t_ledger = new_thread->task->ledger;
+	new_thread->t_ledger = parent_task->ledger;
 	if (new_thread->t_ledger) {
 		ledger_reference(new_thread->t_ledger);
 	}
@@ -1331,8 +1373,8 @@ thread_create_internal(
 	/* Cache the task's map */
 	new_thread->map = parent_task->map;
 
-	timer_call_setup(&new_thread->wait_timer, thread_timer_expire, new_thread);
-	timer_call_setup(&new_thread->depress_timer, thread_depress_expire, new_thread);
+	new_thread->depress_timer = timer_call_alloc(thread_depress_expire, new_thread);
+	new_thread->wait_timer = timer_call_alloc(thread_timer_expire, new_thread);
 
 #if KPC
 	kpc_thread_create(new_thread);
@@ -1707,7 +1749,7 @@ thread_create_workq_waiting(
 	 * which will result in pinned port guard exception. Instead, pin and make
 	 * it immovable atomically at copyout during workq_setup_and_run().
 	 */
-	int options = TH_OPTION_NOCRED | TH_OPTION_NOSUSP | TH_OPTION_WORKQ | TH_OPTION_IMMOVABLE;
+	int options = TH_OPTION_NOSUSP | TH_OPTION_WORKQ | TH_OPTION_IMMOVABLE;
 	return thread_create_waiting_internal(task, continuation, NULL,
 	           kThreadWaitParkedWorkQueue, options, new_thread);
 }
@@ -1730,7 +1772,7 @@ kernel_thread_create(
 	task_t                          task = kernel_task;
 
 	result = thread_create_internal(task, priority, continuation, parameter,
-	    TH_OPTION_NOCRED | TH_OPTION_NONE, &thread);
+	    TH_OPTION_NONE, &thread);
 	if (result != KERN_SUCCESS) {
 		return result;
 	}
@@ -2021,7 +2063,7 @@ thread_info_internal(
 		extended_info->pth_priority = thread->base_pri;
 		extended_info->pth_maxpriority = thread->max_priority;
 
-		bsd_getthreadname(thread->uthread, extended_info->pth_name);
+		bsd_getthreadname(get_bsdthread_info(thread), extended_info->pth_name);
 
 		thread_unlock(thread);
 		splx(s);
@@ -2319,7 +2361,7 @@ thread_guard_violation(thread_t thread,
 	 * that the guard_exc_* fields in the thread structure are set only by the
 	 * current thread and therefore, don't require a lock.
 	 */
-	if (thread->task == kernel_task) {
+	if (get_threadtask(thread) == kernel_task) {
 		return;
 	}
 
@@ -2622,40 +2664,41 @@ SENDING_NOTIFICATION__TASK_HAS_TOO_MANY_THREADS(task_t task, int thread_count)
 void
 thread_update_io_stats(thread_t thread, int size, int io_flags)
 {
+	task_t task = get_threadtask(thread);
 	int io_tier;
 
-	if (thread->thread_io_stats == NULL || thread->task->task_io_stats == NULL) {
+	if (thread->thread_io_stats == NULL || task->task_io_stats == NULL) {
 		return;
 	}
 
 	if (io_flags & DKIO_READ) {
 		UPDATE_IO_STATS(thread->thread_io_stats->disk_reads, size);
-		UPDATE_IO_STATS_ATOMIC(thread->task->task_io_stats->disk_reads, size);
+		UPDATE_IO_STATS_ATOMIC(task->task_io_stats->disk_reads, size);
 	}
 
 	if (io_flags & DKIO_META) {
 		UPDATE_IO_STATS(thread->thread_io_stats->metadata, size);
-		UPDATE_IO_STATS_ATOMIC(thread->task->task_io_stats->metadata, size);
+		UPDATE_IO_STATS_ATOMIC(task->task_io_stats->metadata, size);
 	}
 
 	if (io_flags & DKIO_PAGING) {
 		UPDATE_IO_STATS(thread->thread_io_stats->paging, size);
-		UPDATE_IO_STATS_ATOMIC(thread->task->task_io_stats->paging, size);
+		UPDATE_IO_STATS_ATOMIC(task->task_io_stats->paging, size);
 	}
 
 	io_tier = ((io_flags & DKIO_TIER_MASK) >> DKIO_TIER_SHIFT);
 	assert(io_tier < IO_NUM_PRIORITIES);
 
 	UPDATE_IO_STATS(thread->thread_io_stats->io_priority[io_tier], size);
-	UPDATE_IO_STATS_ATOMIC(thread->task->task_io_stats->io_priority[io_tier], size);
+	UPDATE_IO_STATS_ATOMIC(task->task_io_stats->io_priority[io_tier], size);
 
 	/* Update Total I/O Counts */
 	UPDATE_IO_STATS(thread->thread_io_stats->total_io, size);
-	UPDATE_IO_STATS_ATOMIC(thread->task->task_io_stats->total_io, size);
+	UPDATE_IO_STATS_ATOMIC(task->task_io_stats->total_io, size);
 
 	if (!(io_flags & DKIO_READ)) {
-		DTRACE_IO3(physical_writes, struct task *, thread->task, uint32_t, size, int, io_flags);
-		ledger_credit(thread->task->ledger, task_ledgers.physical_writes, size);
+		DTRACE_IO3(physical_writes, struct task *, task, uint32_t, size, int, io_flags);
+		ledger_credit(task->ledger, task_ledgers.physical_writes, size);
 	}
 }
 
@@ -2849,6 +2892,16 @@ thread_tid(
 	return thread != THREAD_NULL? thread->thread_id: 0;
 }
 
+uint64_t
+uthread_tid(
+	struct uthread *uth)
+{
+	if (uth) {
+		return thread_tid(get_machthread(uth));
+	}
+	return 0;
+}
+
 uint16_t
 thread_set_tag(thread_t th, uint16_t tag)
 {
@@ -2999,6 +3052,7 @@ thread_dispatchqaddr(
 {
 	uint64_t        dispatchqueue_addr;
 	uint64_t        thread_handle;
+	task_t          task;
 
 	if (thread == THREAD_NULL) {
 		return 0;
@@ -3009,10 +3063,11 @@ thread_dispatchqaddr(
 		return 0;
 	}
 
+	task = get_threadtask(thread);
 	if (thread->inspection == TRUE) {
-		dispatchqueue_addr = thread_handle + get_task_dispatchqueue_offset(thread->task);
-	} else if (thread->task->bsd_info) {
-		dispatchqueue_addr = thread_handle + get_dispatchqueue_offset_from_proc(thread->task->bsd_info);
+		dispatchqueue_addr = thread_handle + get_task_dispatchqueue_offset(task);
+	} else if (task->bsd_info) {
+		dispatchqueue_addr = thread_handle + get_dispatchqueue_offset_from_proc(task->bsd_info);
 	} else {
 		dispatchqueue_addr = 0;
 	}
@@ -3025,6 +3080,7 @@ uint64_t
 thread_wqquantum_addr(thread_t thread)
 {
 	uint64_t thread_handle;
+	task_t   task;
 
 	if (thread == THREAD_NULL) {
 		return 0;
@@ -3034,8 +3090,9 @@ thread_wqquantum_addr(thread_t thread)
 	if (thread_handle == 0) {
 		return 0;
 	}
+	task = get_threadtask(thread);
 
-	uint64_t wq_quantum_expiry_offset = get_wq_quantum_offset_from_proc(thread->task->bsd_info);
+	uint64_t wq_quantum_expiry_offset = get_wq_quantum_offset_from_proc(task->bsd_info);
 	if (wq_quantum_expiry_offset == 0) {
 		return 0;
 	}
@@ -3050,6 +3107,7 @@ thread_rettokern_addr(
 	uint64_t        rettokern_addr;
 	uint64_t        rettokern_offset;
 	uint64_t        thread_handle;
+	task_t          task;
 
 	if (thread == THREAD_NULL) {
 		return 0;
@@ -3059,9 +3117,10 @@ thread_rettokern_addr(
 	if (thread_handle == 0) {
 		return 0;
 	}
+	task = get_threadtask(thread);
 
-	if (thread->task->bsd_info) {
-		rettokern_offset = get_return_to_kernel_offset_from_proc(thread->task->bsd_info);
+	if (task->bsd_info) {
+		rettokern_offset = get_return_to_kernel_offset_from_proc(task->bsd_info);
 
 		/* Return 0 if return to kernel offset is not initialized. */
 		if (rettokern_offset == 0) {
@@ -3081,16 +3140,12 @@ thread_rettokern_addr(
  * within the osfmk component.
  */
 
-#undef thread_mtx_lock
-void thread_mtx_lock(thread_t thread);
 void
 thread_mtx_lock(thread_t thread)
 {
 	lck_mtx_lock(&thread->mutex);
 }
 
-#undef thread_mtx_unlock
-void thread_mtx_unlock(thread_t thread);
 void
 thread_mtx_unlock(thread_t thread)
 {
@@ -3102,7 +3157,8 @@ thread_reference(
 	thread_t        thread)
 {
 	if (thread != THREAD_NULL) {
-		thread_reference_internal(thread);
+		zone_id_require(ZONE_ID_THREAD, sizeof(struct thread), thread);
+		os_ref_retain_raw(&thread->ref_count, &thread_refgrp);
 	}
 }
 
@@ -3371,10 +3427,13 @@ task_supports_cooperative_workqueue(task_t task)
 bool
 thread_supports_cooperative_workqueue(thread_t thread)
 {
+	struct uthread *uth = get_bsdthread_info(thread);
+	task_t task = get_threadtask(thread);
+
 	assert(thread == current_thread());
 
-	return task_supports_cooperative_workqueue(thread->task) &&
-	       bsdthread_part_of_cooperative_workqueue(thread->uthread);
+	return task_supports_cooperative_workqueue(task) &&
+	       bsdthread_part_of_cooperative_workqueue(uth);
 }
 
 static inline bool
@@ -3500,8 +3559,8 @@ thread_evaluate_workqueue_quantum_expiry(thread_t thread)
 boolean_t
 thread_has_thread_name(thread_t th)
 {
-	if ((th) && (th->uthread)) {
-		return bsd_hasthreadname(th->uthread);
+	if (th) {
+		return bsd_hasthreadname(get_bsdthread_info(th));
 	}
 
 	/*
@@ -3514,8 +3573,8 @@ thread_has_thread_name(thread_t th)
 void
 thread_set_thread_name(thread_t th, const char* name)
 {
-	if ((th) && (th->uthread) && name) {
-		bsd_setthreadname(th->uthread, name);
+	if (th && name) {
+		bsd_setthreadname(get_bsdthread_info(th), name);
 	}
 }
 
@@ -3525,8 +3584,8 @@ thread_get_thread_name(thread_t th, char* name)
 	if (!name) {
 		return;
 	}
-	if ((th) && (th->uthread)) {
-		bsd_getthreadname(th->uthread, name);
+	if (th) {
+		bsd_getthreadname(get_bsdthread_info(th), name);
 	} else {
 		name[0] = '\0';
 	}
@@ -3623,6 +3682,7 @@ thread_port_with_flavor_no_senders(
 	ipc_port_t          port,
 	mach_port_mscount_t mscount __unused)
 {
+	thread_ro_t tro;
 	thread_t thread;
 	mach_thread_flavor_t flavor;
 	ipc_kobject_type_t kotype;
@@ -3636,7 +3696,7 @@ thread_port_with_flavor_no_senders(
 	assert((IKOT_THREAD_READ == kotype) || (IKOT_THREAD_INSPECT == kotype));
 	thread = ipc_kobject_get_locked(port, kotype);
 	if (thread != THREAD_NULL) {
-		thread_reference_internal(thread);
+		thread_reference(thread);
 	}
 	ip_mq_unlock(port);
 
@@ -3667,8 +3727,9 @@ thread_port_with_flavor_no_senders(
 	 * that vends out send rights to this port could resurrect it between
 	 * this notification being generated and actually being handled here.
 	 */
+	tro = get_thread_ro(thread);
 	if (!ip_active(port) ||
-	    thread->ith_thread_ports[flavor] != port ||
+	    tro->tro_ports[flavor] != port ||
 	    port->ip_srights > 0) {
 		ip_mq_unlock(port);
 		thread_mtx_unlock(thread);
@@ -3676,8 +3737,8 @@ thread_port_with_flavor_no_senders(
 		return;
 	}
 
-	assert(thread->ith_thread_ports[flavor] == port);
-	thread->ith_thread_ports[flavor] = IP_NULL;
+	assert(tro->tro_ports[flavor] == port);
+	zalloc_ro_clear_field(ZONE_ID_THREAD_RO, tro, tro_ports[flavor]);
 	thread_mtx_unlock(thread);
 
 	ipc_kobject_dealloc_port_and_unlock(port, 0, kotype);

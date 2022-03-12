@@ -76,14 +76,15 @@ dtrace_user_probe(x86_saved_state_t *regs)
 	lck_rw_t *rwp;
 	struct proc *p = current_proc();
 
-	uthread_t uthread = (uthread_t)get_bsdthread_info(current_thread());
+	thread_t thread = current_thread();
+	uthread_t uthread = current_uthread();
 	if (user_mode /*|| (rp->r_ps & PS_VM)*/) {
 		/*
 		 * DTrace accesses t_cred in probe context.  t_cred
 		 * must always be either NULL, or point to a valid,
 		 * allocated cred structure.
 		 */
-		kauth_cred_uthread_update(uthread, p);
+		kauth_cred_thread_update(thread, p);
 	}
 
 	if (trapno == T_DTRACE_RET) {

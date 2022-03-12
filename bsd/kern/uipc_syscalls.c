@@ -111,7 +111,6 @@
 
 #define f_flag fp_glob->fg_flag
 #define f_ops fp_glob->fg_ops
-#define f_data fp_glob->fg_data
 
 #define DBG_LAYER_IN_BEG        NETDBG_CODE(DBG_NETSOCK, 0)
 #define DBG_LAYER_IN_END        NETDBG_CODE(DBG_NETSOCK, 2)
@@ -269,7 +268,7 @@ socket_common(struct proc *p,
 	if (error) {
 		fp_free(p, fd, fp);
 	} else {
-		fp->f_data = (caddr_t)so;
+		fp_set_data(fp, so);
 
 		proc_fdlock(p);
 		procfdtbl_releasefd(p, fd, NULL);
@@ -438,7 +437,7 @@ accept_nocancel(struct proc *p, struct accept_nocancel_args *uap,
 	if (error) {
 		return error;
 	}
-	head = fp->f_data;
+	head = (struct socket *)fp_get_data(fp);
 
 #if CONFIG_MACF_SOCKET_SUBSET
 	if ((error = mac_socket_check_accept(kauth_cred_get(), head)) != 0) {
@@ -576,7 +575,7 @@ check_again:
 	*retval = newfd;
 	fp->f_flag = fflag;
 	fp->f_ops = &socketops;
-	fp->f_data = (caddr_t)so;
+	fp_set_data(fp, so);
 
 	socket_lock(head, 0);
 	if (dosocklock) {
@@ -1152,7 +1151,7 @@ socketpair(struct proc *p, struct socketpair_args *uap,
 	}
 	fp1->f_flag = FREAD | FWRITE;
 	fp1->f_ops = &socketops;
-	fp1->f_data = (caddr_t)so1;
+	fp_set_data(fp1, so1);
 	sv[0] = fd;
 
 	error = falloc(p, &fp2, &fd, vfs_context_current());
@@ -1161,7 +1160,7 @@ socketpair(struct proc *p, struct socketpair_args *uap,
 	}
 	fp2->f_flag = FREAD | FWRITE;
 	fp2->f_ops = &socketops;
-	fp2->f_data = (caddr_t)so2;
+	fp_set_data(fp2, so2);
 	sv[1] = fd;
 
 	error = soconnect2(so1, so2);
@@ -1834,17 +1833,14 @@ copyout_control(struct proc *p, struct mbuf *m, user_addr_t control,
 					goto out;
 				}
 			} else {
-#if CONTENT_FILTER
-				/* If socket is attached to Content Filter and socket did not request address, ignore it */
-				if ((so != NULL) && (so->so_cfil_db != NULL) &&
+				/* If socket has flow tracking and socket did not request address, ignore it */
+				if (SOFLOW_ENABLED(so) &&
 				    ((cp->cmsg_level == IPPROTO_IP && cp->cmsg_type == IP_RECVDSTADDR && inp != NULL &&
 				    !(inp->inp_flags & INP_RECVDSTADDR)) ||
 				    (cp->cmsg_level == IPPROTO_IPV6 && (cp->cmsg_type == IPV6_PKTINFO || cp->cmsg_type == IPV6_2292PKTINFO) && inp &&
 				    !(inp->inp_flags & IN6P_PKTINFO)))) {
 					tocopy = 0;
-				} else
-#endif
-				{
+				} else {
 					if (cp_size > buflen) {
 						panic("cp_size > buflen, something"
 						    "wrong with alignment!");
@@ -1942,7 +1938,7 @@ recvit(struct proc *p, int s, struct user_msghdr *mp, uio_t uiop,
 		KERNEL_DEBUG(DBG_FNC_RECVIT | DBG_FUNC_END, error, 0, 0, 0, 0);
 		return error;
 	}
-	so = fp->f_data;
+	so = (struct socket *)fp_get_data(fp);
 
 #if CONFIG_MACF_SOCKET_SUBSET
 	/*

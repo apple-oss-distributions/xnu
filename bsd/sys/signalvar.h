@@ -70,33 +70,6 @@
 
 #include <stdatomic.h>
 
-/*
- * Kernel signal definitions and data structures,
- * not exported to user programs.
- */
-
-/*
- * Process signal actions and state, needed only within the process
- * (not necessarily resident).
- */
-struct  sigacts {
-	user_addr_t     ps_sigact[NSIG];        /* disposition of signals */
-	user_addr_t     ps_trampact[NSIG];      /* disposition of signals */
-	sigset_t ps_catchmask[NSIG];    /* signals to be blocked */
-	sigset_t ps_sigonstack;         /* signals to take on sigstack */
-	sigset_t ps_sigintr;            /* signals that interrupt syscalls */
-	sigset_t ps_sigreset;           /* signals that reset when caught */
-	sigset_t ps_signodefer;         /* signals not masked while handled */
-	sigset_t ps_siginfo;            /* signals that want SA_SIGINFO args */
-	sigset_t ps_oldmask;            /* saved mask from before sigpause */
-	user_addr_t ps_sigreturn_token; /* random token used to validate sigreturn arguments */
-	_Atomic uint32_t ps_sigreturn_validation; /* sigreturn argument validation state */
-	int     ps_flags;               /* signal flags, below */
-	int     ps_sig;                 /* for core dump/debugger XXX */
-	int     ps_code;                /* for core dump/debugger XXX */
-	int     ps_addr;                /* for core dump/debugger XXX */
-};
-
 /* signal flags */
 #define SAS_OLDMASK     0x01            /* need to restore mask before pause */
 #define SAS_ALTSTACK    0x02            /* have alternate signal stack */
@@ -118,8 +91,8 @@ struct  sigacts {
 /*
  * get signal action for process and signal; currently only for current process
  */
-#define SIGACTION(p, sig)       (p->p_sigacts->ps_sigact[(sig)])
-#define SIGTRAMP(p, sig)        (p->p_sigacts->ps_trampact[(sig)])
+#define SIGACTION(p, sig)       ({ p->p_sigacts.ps_ro->ps_sigact[(sig)]; })
+#define SIGTRAMP(p, sig)        ({ p->p_sigacts.ps_ro->ps_trampact[(sig)]; })
 
 /*
  *	Check for per-process and per thread signals.

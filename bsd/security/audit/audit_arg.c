@@ -585,11 +585,11 @@ audit_arg_file(struct kaudit_record *ar, __unused proc_t p,
 	case DTYPE_VNODE:
 		/* case DTYPE_FIFO: */
 		audit_arg_vnpath_withref(ar,
-		    (struct vnode *)fp->fp_glob->fg_data, ARG_VNODE1);
+		    (struct vnode *)fp_get_data(fp), ARG_VNODE1);
 		break;
 
 	case DTYPE_SOCKET:
-		so = (struct socket *)fp->fp_glob->fg_data;
+		so = (struct socket *)fp_get_data(fp);
 		if (SOCK_CHECK_DOM(so, PF_INET)) {
 			if (so->so_pcb == NULL) {
 				break;
@@ -925,7 +925,7 @@ audit_sysclose(struct kaudit_record *ar, proc_t p, int fd)
 		return;
 	}
 
-	audit_arg_vnpath_withref(ar, (struct vnode *)fp->fp_glob->fg_data,
+	audit_arg_vnpath_withref(ar, (struct vnode *)fp_get_data(fp),
 	    ARG_VNODE1);
 	fp_drop(p, fd, fp, 0);
 }

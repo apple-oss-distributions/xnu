@@ -1930,6 +1930,8 @@ tcp_input(struct mbuf *m, int off0)
 	isipv6 = (mtod(m, struct ip *)->ip_v == 6) ? 1 : 0;
 	bzero((char *)&to, sizeof(to));
 
+	m_add_crumb(m, PKT_CRUMB_TCP_INPUT);
+
 	if (m->m_flags & M_PKTHDR) {
 		pf_tag = m_pftag(m)->pftag_tag;
 	}

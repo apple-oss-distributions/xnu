@@ -318,21 +318,38 @@ memorystatus_vm_map_fork_parent(int test_variant)
 		max_task_pmem = 0;
 	}
 
+	/* default limit is 1/4 of max task phys memory value */
+	active_limit_mb = max_task_pmem / 4;
+
+#if TARGET_OS_WATCH
+
+	/*
+	 * larger memory watches have a raised corpse size limit
+	 */
+	uint64_t hw_memsize = 0;
+	size = sizeof(hw_memsize);
+	T_ASSERT_POSIX_SUCCESS(sysctlbyname("hw.memsize", &hw_memsize, &size, NULL, 0), "read hw.memsize");
+	if (hw_memsize > 1024 * 1024 * 1024) {
+		active_limit_mb = MAX(active_limit_mb, 200);
+	}
+
+#endif /* TARGET_OS_WATCH */
+
 	if (test_variant == TEST_ALLOWED) {
 		/*
 		 * Tell the child to allocate less than 1/4 the system wide limit.
 		 */
-		if (max_task_pmem / 4 - LIMIT_DELTA_MB <= 0) {
+		if (active_limit_mb <= LIMIT_DELTA_MB) {
 			active_limit_mb = LIMIT_DELTA_MB;
 		} else {
-			active_limit_mb = max_task_pmem / 4 - LIMIT_DELTA_MB;
+			active_limit_mb -= LIMIT_DELTA_MB;
 		}
 		expected_pidwatch_val = MEMORYSTATUS_VM_MAP_FORK_ALLOWED;
 	} else { /* TEST_NOT_ALLOWED */
 		/*
 		 * Tell the child to allocate more than 1/4 the system wide limit.
 		 */
-		active_limit_mb = (max_task_pmem / 4) + LIMIT_DELTA_MB;
+		active_limit_mb += LIMIT_DELTA_MB;
 		if (max_task_pmem == 0) {
 			expected_pidwatch_val = MEMORYSTATUS_VM_MAP_FORK_ALLOWED;
 		} else {

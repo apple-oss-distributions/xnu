@@ -750,15 +750,15 @@ extern ipc_port_t ipc_port_make_send_locked(
 
 /* Make a naked send right from a receive right */
 extern ipc_port_t ipc_port_make_send(
-	ipc_port_t      port);
+	ipc_port_t      port) __result_use_check;
 
-/* Make a naked send right from another naked send right - port locked and active */
+/* Make a naked send right from another naked send right - port locked */
 extern void ipc_port_copy_send_locked(
 	ipc_port_t      port);
 
 /* Make a naked send right from another naked send right */
 extern ipc_port_t ipc_port_copy_send(
-	ipc_port_t      port);
+	ipc_port_t      port) __result_use_check;
 
 /* Copyout a naked send right */
 extern mach_port_name_t ipc_port_copyout_send(

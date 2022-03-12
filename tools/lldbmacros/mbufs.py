@@ -129,13 +129,13 @@ def MbufSlabs(cmd_args=None):
     x = 0
 
     if (kern.ptrsize == 8):
-        slabs_string_format = "{0:>4d}: 0x{1:16x} 0x{2:16x} 0x{3:16x} {4:4s} {5:20d} {6:3d} {7:3d} {8:3d} {9:3d} {10:>6s} "
-        out_string += "slot slab               next               obj                mca                tstamp     C  R  N   size flags\n"
-        out_string += "---- ------------------ ------------------ ------------------ ------------------ ---------- -- -- -- ------ -----\n"
+        slabs_string_format = "{0:>4d}: 0x{1:16x} 0x{2:16x} 0x{3:016x} 0x{4:016x} {5:10d} {6:3d} {7:3d} {8:3d} {9:5d} {10:>6s} "
+        out_string += "slot  slab               next               obj                mca                tstamp     C   R   N   size   flags\n"
+        out_string += "----- ------------------ ------------------ ------------------ ------------------ ---------- --- --- --- ------ -----\n"
     else:
-        slabs_string_format = "{0:>4d}: 0x{1:8x} 0x{2:8x} 0x{3:8x} {4:4s} {5:20d} {6:3d} {7:3d} {8:3d} {9:3d} {10:>6s} "
-        out_string += "slot slab       next       obj        mca        tstamp     C  R  N   size flags\n"
-        out_string += "---- ---------- ---------- ---------- ---------- ---------- -- -- -- ------ -----\n"
+        slabs_string_format = "{0:>4d}: 0x{1:8x} 0x{2:8x} 0x{3:08x} 0x{4:08x} {5:10d} {6:3d} {7:3d} {8:3d} {9:5d} {10:>6s} "
+        out_string += "slot  slab       next       obj        mca        tstamp     C   R   N   size   flags\n"
+        out_string += "----- ---------- ---------- ---------- ---------- ---------- --- --- --- ------ -----\n"
 
     mbutl = cast(kern.globals.mbutl, 'unsigned char *')
     nslabspmb = int((1 << MBSHIFT) >> unsigned(kern.globals.page_shift))
@@ -145,12 +145,12 @@ def MbufSlabs(cmd_args=None):
         obj = sl.sl_base
         ts = 0
 
-        if (kern.globals.mclaudit != 0):
+        if (kern.globals.mclaudit != 0 and obj != 0):
             mca = GetMbufMcaPtr(obj, sl.sl_class)
             trn = (mca.mca_next_trn + unsigned(kern.globals.mca_trn_max) - 1) % unsigned(kern.globals.mca_trn_max)
             ts = mca.mca_trns[trn].mca_tstamp
 
-        out_string += slabs_string_format.format((x + 1), sl, sl.sl_next, obj, hex(mca), int(ts), int(sl.sl_class), int(sl.sl_refcnt), int(sl.sl_chunks), int(sl.sl_len), hex(sl.sl_flags))
+        out_string += slabs_string_format.format((x + 1), sl, sl.sl_next, obj, mca, int(ts), int(sl.sl_class), int(sl.sl_refcnt), int(sl.sl_chunks), int(sl.sl_len), hex(sl.sl_flags))
 
         if (sl.sl_flags != 0):
             out_string += "<"
@@ -172,15 +172,17 @@ def MbufSlabs(cmd_args=None):
                 mca = 0
                 ts = 0
 
-                if (kern.globals.mclaudit != 0):
+                if (kern.globals.mclaudit != 0 ):
                     mca = GetMbufMcaPtr(obj, sl.sl_class)
                     trn = (mca.mca_next_trn + unsigned(kern.globals.mca_trn_max) - 1) % unsigned(kern.globals.mca_trn_max)
                     ts = mca.mca_trns[trn].mca_tstamp
 
                 if (kern.ptrsize == 8):
-                    out_string += "                                            " + hex(obj) + " " + hex(mca) + "                    " + str(unsigned(ts)) + "\n"
+                    chunk_string_format = "                                            0x{0:16x} 0x{1:16x} {2:10d}\n"
                 else:
-                    out_string += "                            " + hex(obj) + " " + hex(mca) + "           " + str(unsigned(ts)) + "\n"
+                    chunk_string_format = "                            0x{0:8x} {1:4s} {2:10d}\n"
+
+                out_string += chunk_string_format.format(int(obj), int(mca), int(ts))
 
                 z += 1
         x += 1
@@ -225,6 +227,7 @@ def GetMbufMcaPtr(m, cl):
     pgshift = int(kern.globals.page_shift)
     ix = int((m - Cast(kern.globals.mbutl, 'char *')) >> pgshift)
     page_addr = (Cast(kern.globals.mbutl, 'char *') + (ix << pgshift))
+
 
     if (int(cl) == 0):
         midx = int((m - page_addr) >> 8)
@@ -279,10 +282,12 @@ def GetMbufWalkAllSlabs(show_a, show_f, show_tr):
     while (x < unsigned(kern.globals.slabgrp)):
         slg = kern.globals.slabstbl[x]
         y = 0
-        stop = 0
-        while ((y < nslabspmb) and (stop == 0)):
+        while (y < nslabspmb):
             sl = addressof(slg.slg_slab[y])
             base = sl.sl_base
+            if (base == 0):
+                break
+
             mca = GetMbufMcaPtr(base, sl.sl_class)
             first = 1
 
@@ -322,8 +327,18 @@ def GetMbufWalkAllSlabs(show_a, show_f, show_tr):
                         out_string += "active        "
                     else:
                         out_string += "       freed "
+                    if (show_tr > 1) and (mca.mca_uflags & MB_SCVALID):
+                        m = Cast(mca.mca_addr, 'struct mbuf *')
+                        mbuf_string = GetMbufFlags(m)
+                        mbuf_string += " " + GetMbufPktCrumbs(m)
+                        if (mbuf_string != ""):
+                            if (kern.ptrsize == 8):
+                                out_string += "\n                              " + mbuf_string
+                            else:
+                                out_string += "\n                      " + mbuf_string
                     if (first == 1):
                         first = 0
+
                     out_string += "\n"
                     total = total + 1
 
@@ -345,8 +360,7 @@ def GetMbufWalkAllSlabs(show_a, show_f, show_tr):
                 mca = mca.mca_next
 
             y += 1
-            if (slg.slg_slab[int(y)].sl_base == 0):
-                stop = 1
+
         x += 1
 
     if (total and show_a and show_f):
@@ -355,6 +369,64 @@ def GetMbufWalkAllSlabs(show_a, show_f, show_tr):
         out_string += "freed/in_cache objects = " + str(int(total_f)) + "\n"
 
     return out_string
+
+def GetMbufFlagsAsString(mbuf_flags):
+    flags = (unsigned)(mbuf_flags & 0xff)
+    out_string = ""
+    i = 0
+    num = 1
+    while num <= flags:
+        if flags & num:
+            out_string += mbuf_flags_strings[i] + ","
+        i += 1
+        num = num << 1
+    return rstrip(out_string, ",")
+
+def GetMbufFlags(m):
+    out_string = ""
+    if (m != 0):
+        out_string += "m_flags: " + hex(m.m_hdr.mh_flags)
+        if (m.m_hdr.mh_flags != 0):
+             out_string += " " + GetMbufFlagsAsString(m.m_hdr.mh_flags)
+    return out_string
+
+# Macro: mbuf_show_m_flags
+@lldb_command('mbuf_show_m_flags')
+def MbufShowFlags(cmd_args=None):
+    """ Return a formatted string description of the mbuf flags
+    """
+    m = kern.GetValueFromAddress(cmd_args[0], 'mbuf_t *')
+    print GetMbufFlags(m)
+
+def GetMbufPktCrumbsAsString(mbuf_crumbs):
+    flags = (unsigned)(mbuf_crumbs & 0xffff)
+    out_string = ""
+    i = 0
+    num = 1
+    while num <= flags:
+        if flags & num:
+            out_string += mbuf_pkt_crumb_strings[i] + ","
+        i += 1
+        num = num << 1
+    return rstrip(out_string, ",")
+
+def GetMbufPktCrumbs(m):
+    out_string = ""
+    if (m != 0):
+        if (m.m_hdr.mh_flags & M_PKTHDR) != 0:
+            flags = m.M_dat.MH.MH_pkthdr.pkt_crumbs
+            out_string += "pkt_crumbs: " + hex(flags)
+            if (flags != 0):
+                out_string += " " + GetMbufPktCrumbsAsString(flags)
+    return out_string
+
+# Macro: mbuf_showpktcrumbs
+@lldb_command('mbuf_showpktcrumbs')
+def MbufShowPktCrumbs(cmd_args=None):
+    """ Print the packet crumbs of an mbuf object mca
+    """
+    m = kern.GetValueFromAddress(cmd_args[0], 'mbuf_t *')
+    print GetMbufPktCrumbs(m)
 
 def GetMbufMcaCtype(mca, vopt):
     cp = mca.mca_cache
@@ -453,9 +525,6 @@ def GetMbufMcaCtype(mca, vopt):
     out_string += "unknown: " + cp.mc_name
     return out_string
 
-kgm_pkmod = 0
-kgm_pkmodst = 0
-kgm_pkmoden = 0
 
 def GetPointerAsString(kgm_pc):
     if (kern.ptrsize == 8):
@@ -473,9 +542,11 @@ def GetPc(kgm_pc):
 @lldb_command('mbuf_showactive')
 def MbufShowActive(cmd_args=None):
     """ Print all active/in-use mbuf objects
+        Pass 1 to show the most transaction stack trace
+        Pass 2 to also display the mbuf flags and packet crumbs
     """
     if cmd_args:
-        print GetMbufWalkAllSlabs(1, 0, cmd_args[0])
+        print GetMbufWalkAllSlabs(1, 0, ArgumentStringToInt(cmd_args[0]))
     else:
         print GetMbufWalkAllSlabs(1, 0, 0)
 # EndMacro: mbuf_showactive
@@ -503,6 +574,13 @@ def MbufShowMca(cmd_args=None):
         out_string += "object type:\t"
         out_string += GetMbufMcaCtype(mca, 1)
         out_string += "\nControlling mcache :\t" + hex(mca.mca_cache) + " (" + str(cp.mc_name) + ")\n"
+        if (mca.mca_uflags & MB_INUSE):
+            out_string += " inuse"
+        if (mca.mca_uflags & MB_COMP_INUSE):
+            out_string += " comp_inuse"
+        if (mca.mca_uflags & MB_SCVALID):
+            out_string += " scvalid"
+        out_string += "\n"
         if (mca.mca_uflags & MB_SCVALID):
             mbutl = Cast(kern.globals.mbutl, 'unsigned char *')
             ix = (mca.mca_addr - mbutl) >> pgshift
@@ -593,7 +671,6 @@ def MbufCountChain(cmd_args=None):
 
     print "Total: " + str(pkt + nxt) + " (via m_next: " + str(nxt) + ")"
 # EndMacro: mbuf_countchain
-
 
 
 # Macro: mbuf_topleak
@@ -783,7 +860,7 @@ def McacheShowCache(cmd_args=None):
 
 # Macro: mbuf_wdlog
 @lldb_command('mbuf_wdlog')
-def McacheShowCache(cmd_args=None):
+def McacheShowWatchdogLog(cmd_args=None):
     """Display the watchdog log
     """
     lldb_run_command('settings set max-string-summary-length 4096')

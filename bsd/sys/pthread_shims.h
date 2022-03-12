@@ -160,9 +160,10 @@ typedef const struct pthread_callbacks_s {
 
 	thread_t (*task_findtid)(task_t t, uint64_t tid);
 	void (*thread_deallocate_safe)(thread_t);
+	/* reclaimable after rdar://81291169 */
 	bool (*proc_get_pthread_jit_allowlist)(struct proc *t);
 	void (*proc_set_dispatchqueue_offset)(struct proc *t, uint64_t offset);
-	void *__unused_was_proc_get_wqlockptr;
+	bool (*proc_get_pthread_jit_allowlist2)(struct proc *t, bool *late_out);
 	void *__unused_was_proc_get_wqinitingptr;
 	void *__unused_was_proc_get_wqptr;
 

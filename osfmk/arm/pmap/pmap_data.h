@@ -218,12 +218,11 @@ pai_to_pvh(unsigned int pai)
 #define PVH_FLAG_EXEC (1ULL << 60)
 
 /**
- * Marking a pv_head_table entry with this flag denotes that this page has been
- * locked down by the PPL. Locked down pages can't have new mappings created or
- * existing mappings removed, and all existing mappings will have been converted
- * to read-only. This essentially makes the page immutable.
+ * Marking a pv_head_table entry with this flag denotes that this page is a
+ * kernelcache text or data page that shouldn't have dynamically-created
+ * mappings.  See PVH_FLAG_LOCKDOWN_MASK for more details.
  */
-#define PVH_FLAG_LOCKDOWN (1ULL << 59)
+#define PVH_FLAG_LOCKDOWN_KC (1ULL << 59)
 
 /**
  * This flag is used to mark that a page has been hashed into the hibernation
@@ -236,13 +235,35 @@ pai_to_pvh(unsigned int pai)
 #define PVH_FLAG_HASHED (1ULL << 58)
 
 /**
+ * Marking a pv_head_table entry with this flag denotes that this page is a
+ * code signature page that shouldn't have dynamically-created mappings.
+ * See PVH_FLAG_LOCKDOWN_MASK for more details.
+ */
+#define PVH_FLAG_LOCKDOWN_CS (1ULL << 57)
+
+/**
+ * Marking a pv_head_table entry with this flag denotes that this page is a
+ * read-only allocator page that shouldn't have dynamically-created mappings.
+ * See PVH_FLAG_LOCKDOWN_MASK for more details.
+ */
+#define PVH_FLAG_LOCKDOWN_RO (1ULL << 56)
+
+/**
+ * Marking a pv_head_table entry with any bit in this mask denotes that this page
+ * has been locked down by the PPL.  Locked down pages can't have new mappings
+ * created or existing mappings removed, and all existing mappings will have been
+ * converted to read-only.  This essentially makes the page immutable.
+ */
+#define PVH_FLAG_LOCKDOWN_MASK (PVH_FLAG_LOCKDOWN_KC | PVH_FLAG_LOCKDOWN_CS | PVH_FLAG_LOCKDOWN_RO)
+
+/**
  * These bits need to be set to safely dereference a pv_head_table
  * entry/pointer.
  *
  * Any change to this #define should also update the copy located in the pmap.py
  * LLDB macros file.
  */
-#define PVH_HIGH_FLAGS (PVH_FLAG_CPU | PVH_FLAG_LOCK | PVH_FLAG_EXEC | PVH_FLAG_LOCKDOWN | PVH_FLAG_HASHED)
+#define PVH_HIGH_FLAGS (PVH_FLAG_CPU | PVH_FLAG_LOCK | PVH_FLAG_EXEC | PVH_FLAG_LOCKDOWN_MASK | PVH_FLAG_HASHED)
 
 #else /* defined(__arm64__) */
 

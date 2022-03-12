@@ -93,12 +93,7 @@ i386_send_NMI(int cpu)
 	if (NMIPIs_enabled == FALSE) {
 		i386_cpu_IPI(cpu);
 	} else {
-		/* Program the interrupt command register */
-		/* The vector is ignored in this case--the target CPU will enter on the
-		 * NMI vector.
-		 */
-		LAPIC_WRITE_ICR(cpu_to_lapic[cpu],
-		    LAPIC_VECTOR(INTERPROCESSOR) | LAPIC_ICR_DM_NMI);
+		lapic_send_nmi(cpu);
 	}
 	(void) ml_set_interrupts_enabled(state);
 }

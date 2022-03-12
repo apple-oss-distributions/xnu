@@ -373,7 +373,7 @@ ptsread(dev_t dev, struct uio *uio, int flag)
 	tp = pti->pt_tty;
 	tty_lock(tp);
 
-	ut = (struct uthread *)get_bsdthread_info(current_thread());
+	ut = current_uthread();
 	if (tp->t_oproc) {
 		error = (*linesw[tp->t_line].l_read)(tp, uio, flag);
 	}

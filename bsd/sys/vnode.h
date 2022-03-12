@@ -1523,7 +1523,7 @@ int vfs_context_rele(vfs_context_t ctx);
  *  @discussion Kexts should not use this function--it is preferred to use vfs_context_create(NULL) and vfs_context_rele(), which ensure proper reference counting of underlying structures.
  *  @return Context for current thread, or kernel context if thread context is unavailable.
  */
-vfs_context_t vfs_context_current(void);
+vfs_context_t vfs_context_current(void) __pure2;
 #ifdef KERNEL_PRIVATE
 int     vfs_context_bind(vfs_context_t);
 
@@ -2476,12 +2476,9 @@ int vnode_usecount(vnode_t vp);
 int vnode_iocount(vnode_t vp);
 void vnode_rele_ext(vnode_t, int, int);
 int is_package_name(const char *name, int len);
-int     vfs_context_issuser(vfs_context_t);
+int vfs_context_issuser(vfs_context_t);
 int vfs_context_iskernel(vfs_context_t);
-vfs_context_t vfs_context_kernel(void);         /* get from 1st kernel thread */
-#ifdef XNU_KERNEL_PRIVATE
-void vfs_set_context_kernel(vfs_context_t);     /* set from 1st kernel thread */
-#endif /* XNU_KERNEL_PRIVATE */
+vfs_context_t vfs_context_kernel(void) __pure2;         /* get from 1st kernel thread */
 vnode_t vfs_context_cwd(vfs_context_t);
 vnode_t vfs_context_get_cwd(vfs_context_t); /* get cwd with iocount */
 int vnode_isnoflush(vnode_t);

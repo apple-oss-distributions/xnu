@@ -6553,8 +6553,8 @@ vm_fault_wire_fast(
 
 	counter_inc(&vm_statistics_faults);
 
-	if (thread != THREAD_NULL && thread->task != TASK_NULL) {
-		counter_inc(&thread->task->faults);
+	if (thread != THREAD_NULL) {
+		counter_inc(&get_threadtask(thread)->faults);
 	}
 
 /*

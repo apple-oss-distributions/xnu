@@ -149,7 +149,8 @@ def GetWaitqSetidLinkSummary(link, verbose=False):
         try:
             pid = GetProcPIDForTask(link.sl_alloc_task)
         except:
-            pid = unsigned(link.sl_alloc_task.audit_token.val[5])
+            proc_ro = Cast(link.sl_alloc_task.bsd_info_ro, 'proc_ro *')
+            pid = unsigned(proc_ro.task_tokens.audit_token.val[5])
         pidnm = ""
         if pid < 0:
             pidnm = "DEAD:{:s}".format(GetProcNameForTask(link.sl_alloc_task))

@@ -119,7 +119,9 @@ void	mac_thread_userret(struct thread *);
 void	mac_thread_telemetry(struct thread *, int, void *, size_t);
 
 /* exception actions */
-struct label *mac_exc_create_label(void);
+struct label *mac_exc_create_label(struct exception_action *action);
+struct label *mac_exc_label(struct exception_action *action);
+void mac_exc_set_label(struct exception_action *action, struct label *label);
 void mac_exc_free_label(struct label *label);
 
 void mac_exc_associate_action_label(struct exception_action *action, struct label *label);

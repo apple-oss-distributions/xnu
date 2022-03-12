@@ -940,7 +940,7 @@ PMAP_SUPPORT_PROTOTYPES(
 
 PMAP_SUPPORT_PROTOTYPES(
 	void,
-	pmap_ro_zone_memcpy, (zone_t zone,
+	pmap_ro_zone_memcpy, (zone_id_t zid,
 	vm_offset_t va,
 	vm_offset_t offset,
 	const vm_offset_t new_data,
@@ -948,22 +948,10 @@ PMAP_SUPPORT_PROTOTYPES(
 
 PMAP_SUPPORT_PROTOTYPES(
 	void,
-	pmap_ro_zone_bzero, (zone_t zone,
+	pmap_ro_zone_bzero, (zone_id_t zid,
 	vm_offset_t va,
 	vm_offset_t offset,
 	vm_size_t size), PMAP_RO_ZONE_BZERO_INDEX);
-
-PMAP_SUPPORT_PROTOTYPES(
-	void,
-	pmap_phys_write_enable_pages, (zone_t zone,
-	vm_address_t va,
-	size_t size), PMAP_PHYS_WRITE_ENABLE_PAGES_INDEX);
-
-PMAP_SUPPORT_PROTOTYPES(
-	void,
-	pmap_phys_write_disable_pages, (zone_t zone,
-	vm_address_t va,
-	size_t size), PMAP_PHYS_WRITE_DISABLE_PAGES_INDEX);
 
 PMAP_SUPPORT_PROTOTYPES(
 	kern_return_t,
@@ -1214,8 +1202,6 @@ const void * __ptrauth_ppl_handler const ppl_handler_table[PMAP_COUNT] = {
 	[PMAP_MAP_CPU_WINDOWS_COPY_INDEX] = pmap_map_cpu_windows_copy_internal,
 	[PMAP_RO_ZONE_MEMCPY_INDEX] = pmap_ro_zone_memcpy_internal,
 	[PMAP_RO_ZONE_BZERO_INDEX] = pmap_ro_zone_bzero_internal,
-	[PMAP_PHYS_WRITE_ENABLE_PAGES_INDEX] = pmap_phys_write_enable_pages_internal,
-	[PMAP_PHYS_WRITE_DISABLE_PAGES_INDEX] = pmap_phys_write_disable_pages_internal,
 	[PMAP_MARK_PAGE_AS_PMAP_PAGE_INDEX] = pmap_mark_page_as_ppl_page_internal,
 	[PMAP_NEST_INDEX] = pmap_nest_internal,
 	[PMAP_PAGE_PROTECT_OPTIONS_INDEX] = pmap_page_protect_options_internal,
@@ -2252,10 +2238,10 @@ pmap_lockdown_kc(void)
 
 		vm_offset_t pvh_flags = pvh_get_flags(pv_h);
 
-		if (__improbable(pvh_flags & PVH_FLAG_LOCKDOWN)) {
+		if (__improbable(pvh_flags & PVH_FLAG_LOCKDOWN_MASK)) {
 			panic("pai %d already locked down", pai);
 		}
-		pvh_set_flags(pv_h, pvh_flags | PVH_FLAG_LOCKDOWN);
+		pvh_set_flags(pv_h, pvh_flags | PVH_FLAG_LOCKDOWN_KC);
 		cur_pa += ARM_PGBYTES;
 		cur_va += ARM_PGBYTES;
 	}
@@ -2265,7 +2251,7 @@ pmap_lockdown_kc(void)
 	pmap_paddr_t exclude_pages[] = {kvtophys_nofail((vm_offset_t)&ctrr_ro_test), kvtophys_nofail((vm_offset_t)&ctrr_nx_test)};
 	for (unsigned i = 0; i < (sizeof(exclude_pages) / sizeof(exclude_pages[0])); ++i) {
 		pv_entry_t **pv_h  = pai_to_pvh(pa_index(exclude_pages[i]));
-		pvh_set_flags(pv_h, pvh_get_flags(pv_h) & ~PVH_FLAG_LOCKDOWN);
+		pvh_set_flags(pv_h, pvh_get_flags(pv_h) & ~PVH_FLAG_LOCKDOWN_KC);
 	}
 #endif
 }
@@ -3986,7 +3972,7 @@ pmap_tte_deallocate(
  *
  *	Returns the number of PTE changed
  */
-static int
+MARK_AS_PMAP_TEXT static int
 pmap_remove_range(
 	pmap_t pmap,
 	vm_map_address_t va,
@@ -4043,7 +4029,7 @@ pmap_set_ptov_ap(unsigned int pai __unused, unsigned int ap __unused, boolean_t 
 
 #endif /* defined(PVH_FLAG_EXEC) */
 
-int
+MARK_AS_PMAP_TEXT int
 pmap_remove_range_options(
 	pmap_t pmap,
 	vm_map_address_t va,
@@ -4083,6 +4069,12 @@ pmap_remove_range_options(
 	num_alt_internal = 0;
 	num_alt_compressed = 0;
 
+#if XNU_MONITOR
+	bool ro_va = false;
+	if (__improbable((pmap == kernel_pmap) && (eva != NULL) && zone_spans_ro_va(va, *eva))) {
+		ro_va = true;
+	}
+#endif
 	for (cpte = bpte; cpte < epte;
 	    cpte += PAGE_RATIO, va += pmap_page_size) {
 		pt_entry_t      spte;
@@ -4198,11 +4190,17 @@ pmap_remove_range_options(
 		if (!managed) {
 			continue;
 		}
+
+#if XNU_MONITOR
+		if (__improbable(ro_va)) {
+			pmap_ppl_unlockdown_page_locked(pai, PVH_FLAG_LOCKDOWN_RO, true);
+		}
+#endif
+
 		/*
 		 * find and remove the mapping from the chain for this
 		 * physical address.
 		 */
-
 		bool is_altacct = pmap_remove_pv(pmap, cpte, pai, true);
 
 		if (is_altacct) {
@@ -4687,7 +4685,7 @@ pmap_page_protect_options_with_flush_range(
 	pvh_flags = pvh_get_flags(pv_h);
 
 #if XNU_MONITOR
-	if (__improbable(remove && (pvh_flags & PVH_FLAG_LOCKDOWN))) {
+	if (__improbable(remove && (pvh_flags & PVH_FLAG_LOCKDOWN_MASK))) {
 		panic("%d is locked down (%#llx), cannot remove", pai, (uint64_t)pvh_get_flags(pv_h));
 	}
 	if (__improbable(ppattr_pa_test_monitor(phys))) {
@@ -4740,7 +4738,7 @@ pmap_page_protect_options_with_flush_range(
 #ifdef PVH_FLAG_IOMMU
 		if (pvh_ptep_is_iommu(pte_p)) {
 #if XNU_MONITOR
-			if (__improbable(pvh_flags & PVH_FLAG_LOCKDOWN)) {
+			if (__improbable(pvh_flags & PVH_FLAG_LOCKDOWN_MASK)) {
 				panic("pmap_page_protect: ppnum 0x%x locked down, cannot be owned by iommu %p, pve_p=%p",
 				    ppnum, ptep_get_iommu(pte_p), pve_p);
 			}
@@ -5969,8 +5967,9 @@ pmap_enter_options_internal(
 	pt_entry_t      pte;
 	pt_entry_t      spte;
 	pt_entry_t      *pte_p;
-	boolean_t       refcnt_updated;
-	boolean_t       wiredcnt_updated;
+	bool            refcnt_updated;
+	bool            wiredcnt_updated;
+	bool            ro_va = false;
 	unsigned int    wimg_bits;
 	bool            committed = false, drop_refcnt = false, had_valid_mapping = false, skip_footprint_debit = false;
 	pmap_lock_mode_t lock_mode = PMAP_LOCK_SHARED;
@@ -6010,11 +6009,17 @@ pmap_enter_options_internal(
 #endif
 		panic("pmap_enter_options(): attempt to add executable mapping to kernel_pmap");
 	}
-
+	if (__improbable((pmap == kernel_pmap) && zone_spans_ro_va(v, v + pt_attr_page_size(pt_attr)))) {
+		if (__improbable(prot != VM_PROT_READ)) {
+			panic("%s: attempt to map RO zone VA 0x%llx with prot 0x%x",
+			    __func__, (unsigned long long)v, prot);
+		}
+		ro_va = true;
+	}
 	assert(pn != vm_page_fictitious_addr);
 
-	refcnt_updated = FALSE;
-	wiredcnt_updated = FALSE;
+	refcnt_updated = false;
+	wiredcnt_updated = false;
 
 	if ((prot & VM_PROT_EXECUTE) || TEST_PAGE_RATIO_4) {
 		/*
@@ -6073,11 +6078,11 @@ pmap_enter_options_internal(
 			 */
 			if (!wiredcnt_updated) {
 				OSAddAtomic16(1, (volatile int16_t*)wiredcnt);
-				wiredcnt_updated = TRUE;
+				wiredcnt_updated = true;
 			}
 			if (!refcnt_updated) {
 				OSAddAtomic16(1, (volatile int16_t*)refcnt);
-				refcnt_updated = TRUE;
+				refcnt_updated = true;
 				drop_refcnt = true;
 			}
 		}
@@ -6202,7 +6207,7 @@ pmap_enter_options_internal(
 				    pmap, v, (void*)pa, prot, fault_type, flags, wired, options);
 			}
 
-			if (__improbable(pvh_get_flags(pai_to_pvh(pai)) & PVH_FLAG_LOCKDOWN)) {
+			if (__improbable(pvh_get_flags(pai_to_pvh(pai)) & PVH_FLAG_LOCKDOWN_MASK)) {
 				panic("%s: page locked down, "
 				    "pmap=%p, v=0x%llx, pa=%p, prot=0x%x, fault_type=0x%x, flags=0x%x, wired=%u, options=0x%x",
 				    __FUNCTION__,
@@ -6391,6 +6396,10 @@ pmap_enter_options_internal(
 	}
 
 	pmap_unlock(pmap, lock_mode);
+
+	if (__improbable(ro_va && kr == KERN_SUCCESS)) {
+		pmap_phys_write_disable(v);
+	}
 
 	return kr;
 }
@@ -11228,17 +11237,19 @@ pmap_unpin_kernel_pages(vm_offset_t kva, size_t nbytes)
  * exception to this).
  *
  * @param kva Valid address to any mapping of the physical page to lockdown.
+ * @param lockdown_flag Bit within PVH_FLAG_LOCKDOWN_MASK specifying the lockdown reason
  * @param ppl_writable True if the PPL should still be able to write to the page
  *                     using the physical aperture mapping. False will make the
  *                     page read-only for both the kernel and PPL in the
  *                     physical aperture.
  */
 MARK_AS_PMAP_TEXT static void
-pmap_ppl_lockdown_page(vm_address_t kva, bool ppl_writable)
+pmap_ppl_lockdown_page(vm_address_t kva, uint64_t lockdown_flag, bool ppl_writable)
 {
 	const pmap_paddr_t pa = kvtophys_nofail(kva);
 	const unsigned int pai = pa_index(pa);
 
+	assert(lockdown_flag & PVH_FLAG_LOCKDOWN_MASK);
 	pvh_lock(pai);
 	pv_entry_t **pvh = pai_to_pvh(pai);
 	const vm_offset_t pvh_flags = pvh_get_flags(pvh);
@@ -11247,12 +11258,12 @@ pmap_ppl_lockdown_page(vm_address_t kva, bool ppl_writable)
 		panic("%s: %#lx (page %llx) belongs to PPL", __func__, kva, pa);
 	}
 
-	if (__improbable(pvh_flags & (PVH_FLAG_LOCKDOWN | PVH_FLAG_EXEC))) {
+	if (__improbable(pvh_flags & (PVH_FLAG_LOCKDOWN_MASK | PVH_FLAG_EXEC))) {
 		panic("%s: %#lx already locked down/executable (%#llx)",
 		    __func__, kva, (uint64_t)pvh_flags);
 	}
 
-	pvh_set_flags(pvh, pvh_flags | PVH_FLAG_LOCKDOWN);
+	pvh_set_flags(pvh, pvh_flags | lockdown_flag);
 
 	/* Update the physical aperture mapping to prevent kernel write access. */
 	const unsigned int new_xprr_perm =
@@ -11280,6 +11291,39 @@ pmap_ppl_lockdown_page(vm_address_t kva, bool ppl_writable)
 }
 
 /**
+ * Helper for releasing a page from being locked down to the PPL, making it writable to the
+ * kernel once again.
+ *
+ * @note This must be paired with a pmap_ppl_lockdown_page() call. Any attempts
+ *       to unlockdown a page that was never locked down, will panic.
+ *
+ * @param pai physical page index to release from lockdown.  PVH lock for this page must be held.
+ * @param lockdown_flag Bit within PVH_FLAG_LOCKDOWN_MASK specifying the lockdown reason
+ * @param ppl_writable This must match whatever `ppl_writable` parameter was
+ *                     passed to the paired pmap_ppl_lockdown_page() call. Any
+ *                     deviation will result in a panic.
+ */
+MARK_AS_PMAP_TEXT static void
+pmap_ppl_unlockdown_page_locked(unsigned int pai, uint64_t lockdown_flag, bool ppl_writable)
+{
+	pvh_assert_locked(pai);
+	pv_entry_t **pvh = pai_to_pvh(pai);
+	const vm_offset_t pvh_flags = pvh_get_flags(pvh);
+
+	if (__improbable(!(pvh_flags & lockdown_flag))) {
+		panic("%s: unlockdown attempt on not locked down pai %d, type=0x%llx, PVH flags=0x%llx",
+		    __func__, pai, (unsigned long long)lockdown_flag, (unsigned long long)pvh_flags);
+	}
+
+	pvh_set_flags(pvh, pvh_flags & ~lockdown_flag);
+
+	/* Restore the pre-lockdown physical aperture mapping permissions. */
+	const unsigned int old_xprr_perm =
+	    (ppl_writable) ? XPRR_PPL_RW_PERM : XPRR_KERN_RO_PERM;
+	pmap_set_xprr_perm(pai, old_xprr_perm, XPRR_KERN_RW_PERM);
+}
+
+/**
  * Release a page from being locked down to the PPL, making it writable to the
  * kernel once again.
  *
@@ -11287,32 +11331,20 @@ pmap_ppl_lockdown_page(vm_address_t kva, bool ppl_writable)
  *       to unlockdown a page that was never locked down, will panic.
  *
  * @param kva Valid address to any mapping of the physical page to unlockdown.
+ * @param lockdown_flag Bit within PVH_FLAG_LOCKDOWN_MASK specifying the lockdown reason
  * @param ppl_writable This must match whatever `ppl_writable` parameter was
  *                     passed to the paired pmap_ppl_lockdown_page() call. Any
  *                     deviation will result in a panic.
  */
 MARK_AS_PMAP_TEXT static void
-pmap_ppl_unlockdown_page(vm_address_t kva, bool ppl_writable)
+pmap_ppl_unlockdown_page(vm_address_t kva, uint64_t lockdown_flag, bool ppl_writable)
 {
-	pmap_paddr_t pa = kvtophys_nofail(kva);
+	const pmap_paddr_t pa = kvtophys_nofail(kva);
 	const unsigned int pai = pa_index(pa);
 
+	assert(lockdown_flag & PVH_FLAG_LOCKDOWN_MASK);
 	pvh_lock(pai);
-	pv_entry_t **pvh = pai_to_pvh(pai);
-	const vm_offset_t pvh_flags = pvh_get_flags(pvh);
-
-	if (__improbable(!(pvh_flags & PVH_FLAG_LOCKDOWN))) {
-		panic("%s: unlockdown attempt on not locked down virtual %#lx/pai %d",
-		    __func__, kva, pai);
-	}
-
-	pvh_set_flags(pvh, pvh_flags & ~PVH_FLAG_LOCKDOWN);
-
-	/* Restore the pre-lockdown physical aperture mapping permissions. */
-	const unsigned int old_xprr_perm =
-	    (ppl_writable) ? XPRR_PPL_RW_PERM : XPRR_KERN_RO_PERM;
-	pmap_set_xprr_perm(pai, old_xprr_perm, XPRR_KERN_RW_PERM);
-
+	pmap_ppl_unlockdown_page_locked(pai, lockdown_flag, ppl_writable);
 	pvh_unlock(pai);
 }
 
@@ -11331,6 +11363,26 @@ pmap_unpin_kernel_pages(vm_offset_t kva __unused, size_t nbytes __unused)
 #endif /* !XNU_MONITOR */
 
 
+MARK_AS_PMAP_TEXT static inline void
+pmap_cs_lockdown_pages(vm_address_t kva, vm_size_t size, bool ppl_writable)
+{
+#if XNU_MONITOR
+	pmap_ppl_lockdown_pages(kva, size, PVH_FLAG_LOCKDOWN_CS, ppl_writable);
+#else
+	pmap_ppl_lockdown_pages(kva, size, 0, ppl_writable);
+#endif
+}
+
+MARK_AS_PMAP_TEXT static inline void
+pmap_cs_unlockdown_pages(vm_address_t kva, vm_size_t size, bool ppl_writable)
+{
+#if XNU_MONITOR
+	pmap_ppl_unlockdown_pages(kva, size, PVH_FLAG_LOCKDOWN_CS, ppl_writable);
+#else
+	pmap_ppl_unlockdown_pages(kva, size, 0, ppl_writable);
+#endif
+}
+
 /**
  * Perform basic validation checks on the source, destination and
  * corresponding offset/sizes prior to writing to a read only allocation.
@@ -11338,7 +11390,7 @@ pmap_unpin_kernel_pages(vm_offset_t kva __unused, size_t nbytes __unused)
  * @note Should be called before writing to an allocation from the read
  * only allocator.
  *
- * @param zone The zone the allocation belongs to.
+ * @param zid The ID of the zone the allocation belongs to.
  * @param va VA of element being modified (destination).
  * @param offset Offset being written to, in the element.
  * @param new_data Pointer to new data (source).
@@ -11348,13 +11400,13 @@ pmap_unpin_kernel_pages(vm_offset_t kva __unused, size_t nbytes __unused)
 
 MARK_AS_PMAP_TEXT static void
 pmap_ro_zone_validate_element(
-	zone_t              zone,
+	zone_id_t           zid,
 	vm_offset_t         va,
 	vm_offset_t         offset,
 	const vm_offset_t   new_data,
 	vm_size_t           new_data_size)
 {
-	vm_size_t elem_size = zone_elem_size(zone);
+	vm_size_t elem_size = zone_elem_size_ro(zid);
 	vm_offset_t sum = 0, page = trunc_page(va);
 	if (__improbable(new_data_size > (elem_size - offset))) {
 		panic("%s: New data size %lu too large for elem size %lu at addr %p",
@@ -11379,7 +11431,7 @@ pmap_ro_zone_validate_element(
 	}
 
 	/* Check element is from correct zone */
-	zone_require_ro(zone_index(zone), elem_size, (void*)va);
+	zone_require_ro(zid, elem_size, (void*)va);
 }
 
 /**
@@ -11408,7 +11460,7 @@ pmap_ro_zone_lock_phy_page(
 	/* Ensure that the physical page is locked down */
 #if XNU_MONITOR
 	pv_entry_t **pvh = pai_to_pvh(pai);
-	if (!(pvh_get_flags(pvh) & PVH_FLAG_LOCKDOWN)) {
+	if (!(pvh_get_flags(pvh) & PVH_FLAG_LOCKDOWN_RO)) {
 		panic("%s: Physical page not locked down %llx", __func__, pa);
 	}
 #endif /* XNU_MONITOR */
@@ -11462,7 +11514,7 @@ kauth_cred_copy(const uintptr_t kv, const uintptr_t new_data);
  *
  * @note Designed to work only with the zone allocator's read-only submap.
  *
- * @param zone The zone to allocate from.
+ * @param zid The ID of the zone to allocate from.
  * @param va VA of element to be modified.
  * @param offset Offset from element.
  * @param new_data Pointer to new data.
@@ -11472,46 +11524,36 @@ kauth_cred_copy(const uintptr_t kv, const uintptr_t new_data);
 
 void
 pmap_ro_zone_memcpy(
-	zone_t              zone,
+	zone_id_t           zid,
 	vm_offset_t         va,
 	vm_offset_t         offset,
 	const vm_offset_t   new_data,
 	vm_size_t           new_data_size)
 {
 #if XNU_MONITOR
-	pmap_ro_zone_memcpy_ppl(zone, va, offset, new_data, new_data_size);
+	pmap_ro_zone_memcpy_ppl(zid, va, offset, new_data, new_data_size);
 #else /* XNU_MONITOR */
-	pmap_ro_zone_memcpy_internal(zone, va, offset, new_data, new_data_size);
+	pmap_ro_zone_memcpy_internal(zid, va, offset, new_data, new_data_size);
 #endif /* XNU_MONITOR */
 }
 
 MARK_AS_PMAP_TEXT void
 pmap_ro_zone_memcpy_internal(
-	zone_t                zone,
+	zone_id_t             zid,
 	vm_offset_t           va,
 	vm_offset_t           offset,
 	const vm_offset_t     new_data,
 	vm_size_t             new_data_size)
 {
 	const pmap_paddr_t pa = kvtophys_nofail(va + offset);
-	vm_size_t elem_size = zone_elem_size(zone);
 
 	if (!new_data || new_data_size == 0) {
 		return;
 	}
 
-	pmap_ro_zone_validate_element(zone, va, offset, new_data, new_data_size);
+	pmap_ro_zone_validate_element(zid, va, offset, new_data, new_data_size);
 	pmap_ro_zone_lock_phy_page(pa, va, new_data_size);
-	/*
-	 * Type-specific logic will be removed upon completion of
-	 * <rdar://problem/72635194> Compiler PAC support for memcpy
-	 */
-	if (new_data_size == elem_size &&
-	    zone_index(zone) == ZONE_ID_KAUTH_CRED) {
-		kauth_cred_copy(phystokv(pa), new_data);
-	} else {
-		memcpy((void*)phystokv(pa), (void*)new_data, new_data_size);
-	}
+	memcpy((void*)phystokv(pa), (void*)new_data, new_data_size);
 	pmap_ro_zone_unlock_phy_page(pa, va, new_data_size);
 }
 
@@ -11522,7 +11564,7 @@ pmap_ro_zone_memcpy_internal(
  * @note This is called by the zfree path of all allocations from read
  * only zones.
  *
- * @param zone The zone the allocation belongs to.
+ * @param zid The ID of the zone the allocation belongs to.
  * @param va VA of element to be zeroed.
  * @param offset Offset in the element.
  * @param size	Size of allocation.
@@ -11531,49 +11573,30 @@ pmap_ro_zone_memcpy_internal(
 
 void
 pmap_ro_zone_bzero(
-	zone_t          zone,
+	zone_id_t       zid,
 	vm_offset_t     va,
 	vm_offset_t     offset,
 	vm_size_t       size)
 {
 #if XNU_MONITOR
-	pmap_ro_zone_bzero_ppl(zone, va, offset, size);
+	pmap_ro_zone_bzero_ppl(zid, va, offset, size);
 #else /* XNU_MONITOR */
-	pmap_ro_zone_bzero_internal(zone, va, offset, size);
+	pmap_ro_zone_bzero_internal(zid, va, offset, size);
 #endif /* XNU_MONITOR */
 }
 
 MARK_AS_PMAP_TEXT void
 pmap_ro_zone_bzero_internal(
-	zone_t          zone,
+	zone_id_t       zid,
 	vm_offset_t     va,
 	vm_offset_t     offset,
 	vm_size_t       size)
 {
 	const pmap_paddr_t pa = kvtophys_nofail(va + offset);
-	pmap_ro_zone_validate_element(zone, va, offset, 0, size);
+	pmap_ro_zone_validate_element(zid, va, offset, 0, size);
 	pmap_ro_zone_lock_phy_page(pa, va, size);
 	bzero((void*)phystokv(pa), size);
 	pmap_ro_zone_unlock_phy_page(pa, va, size);
-}
-
-/**
- * Restores write access to the Physical Aperture.
- *
- * @note Designed to work only with the zone allocator's read-only submap.
- *
- * @param zone The zone the page is allocated from.
- * @param va VA of the page to restore write access to.
- *
- */
-
-MARK_AS_PMAP_TEXT static void
-pmap_phys_write_enable(zone_t zone, vm_address_t va)
-{
-	zone_require_ro_range_contains(zone_index(zone), (void*)va);
-#if XNU_MONITOR
-	pmap_ppl_unlockdown_page(va, true);
-#endif /* XNU_MONITOR */
 }
 
 /**
@@ -11582,96 +11605,18 @@ pmap_phys_write_enable(zone_t zone, vm_address_t va)
  * @note For non-PPL devices, it simply makes all virtual mappings RO.
  * @note Designed to work only with the zone allocator's read-only submap.
  *
- * @param zone The zone or the page is allocated from.
  * @param va VA of the page to restore write access to.
  *
  */
-
 MARK_AS_PMAP_TEXT static void
-pmap_phys_write_disable(zone_t zone, vm_address_t va)
+pmap_phys_write_disable(vm_address_t va)
 {
-	zone_require_ro_range_contains(zone_index(zone), (void*)va);
 #if XNU_MONITOR
-	pmap_ppl_lockdown_page(va, true);
+	pmap_ppl_lockdown_page(va, PVH_FLAG_LOCKDOWN_RO, true);
 #else /* XNU_MONITOR */
 	pmap_page_protect(atop_kernel(kvtophys(va)), VM_PROT_READ);
 #endif /* XNU_MONITOR */
 }
-
-/**
- * Restores write access to the Physical Aperture across multiple pages.
- *
- * @note Designed to work only with the zone allocator's read-only submap.
- *
- * @param zone The zone the page is allocated from.
- * @param va Starting VA of the pages to restore write access to.
- * @param size Size of VA to restore write access to.
- *
- */
-
-void
-pmap_phys_write_enable_pages(zone_t zone, vm_address_t va, size_t size)
-{
-#if XNU_MONITOR
-	pmap_phys_write_enable_pages_ppl(zone, va, size);
-#else /* XNU_MONITOR */
-	pmap_phys_write_enable_pages_internal(zone, va, size);
-#endif /* XNU_MONITOR */
-}
-
-MARK_AS_PMAP_TEXT void
-pmap_phys_write_enable_pages_internal(zone_t zone, vm_address_t va, size_t size)
-{
-	vm_object_offset_t sum = 0;
-	if (os_add_overflow(va, size, &sum)) {
-		panic("%s: Integer addition overflow %p + %d = %lx",
-		    __func__, (void*)va, (uint32_t)size, (uintptr_t)sum);
-	}
-
-	for (vm_object_offset_t pg_offset = 0;
-	    pg_offset < size;
-	    pg_offset += PAGE_SIZE_64) {
-		pmap_phys_write_enable(zone, va + pg_offset);
-	}
-}
-
-/**
- * Removes write access from the Physical Aperture across multiple pages.
- *
- * @note For non-PPL devices, it simply makes all virtual mappings RO.
- * @note Designed to work only with the zone allocator's read-only submap.
- *
- * @param zone The zone the page is allocated from.
- * @param va Starting va of the pages to remove write access from.
- * @param size Size of va to remove write access from.
- *
- */
-
-void
-pmap_phys_write_disable_pages(zone_t zone, vm_address_t va, size_t size)
-{
-#if XNU_MONITOR
-	pmap_phys_write_disable_pages_ppl(zone, va, size);
-#else /* XNU_MONITOR */
-	pmap_phys_write_disable_pages_internal(zone, va, size);
-#endif /* XNU_MONITOR */
-}
-
-MARK_AS_PMAP_TEXT void
-pmap_phys_write_disable_pages_internal(zone_t zone, vm_address_t va, size_t size)
-{
-	vm_object_offset_t sum = 0;
-	if (os_add_overflow(va, size, &sum)) {
-		panic("%s: Integer addition overflow %p + %d = %lx",
-		    __func__, (void*)va, (uint32_t)size, (uintptr_t)sum);
-	}
-	for (vm_object_offset_t pg_offset = 0;
-	    pg_offset < size;
-	    pg_offset += PAGE_SIZE_64) {
-		pmap_phys_write_disable(zone, va + pg_offset);
-	}
-}
-
 
 #define PMAP_RESIDENT_INVALID   ((mach_vm_size_t)-1)
 
@@ -12436,7 +12381,7 @@ pmap_cs_query_entitlements_internal(
 
 out:
 	if (cd_entry) {
-		pmap_simple_unlock(&cd_entry->lock);
+		lck_rw_unlock_shared(&cd_entry->rwlock);
 		cd_entry = NULL;
 	}
 	pmap_unlock(pmap, PMAP_LOCK_SHARED);

@@ -52,6 +52,7 @@
 #include <i386/cpu_threads.h>
 #include <i386/machine_routines.h>
 #include <i386/tsc.h>
+#include <i386/bit_routines.h>
 #if CONFIG_MCA
 #include <i386/machine_check.h>
 #endif
@@ -83,6 +84,7 @@ static unsigned lapic_master_error_count = 0;
 static unsigned lapic_error_count_threshold = 5;
 static boolean_t lapic_dont_panic = FALSE;
 int lapic_max_interrupt_cpunum = 0;
+long lapic_icr_pending_timeouts = 0;
 
 typedef enum {
 	APIC_MODE_UNKNOWN = 0,
@@ -1064,6 +1066,35 @@ lapic_send_ipi(int cpu, int vector)
 	LAPIC_WRITE_ICR(cpu_to_lapic[cpu], vector | LAPIC_ICR_DM_FIXED);
 
 	(void) ml_set_interrupts_enabled(state);
+}
+
+void
+lapic_send_nmi(int cpu)
+{
+	if (!is_x2apic) {
+		if (LAPIC_READ_ICR() & LAPIC_ICR_DS_PENDING) {
+			uint64_t now = mach_absolute_time();
+			/* Wait up to 10ms for the pending outgoing send (if any) to complete */
+			while ((LAPIC_READ_ICR() & LAPIC_ICR_DS_PENDING) &&
+			    (mach_absolute_time() - now) < (10 * NSEC_PER_MSEC)) {
+				cpu_pause();
+			}
+		}
+#if DEVELOPMENT || DEBUG
+		if (__improbable(LAPIC_READ_ICR() & LAPIC_ICR_DS_PENDING)) {
+			/* Since it's not safe to invoke printf here, kprintf and counting is the best we can do */
+			kprintf("WARNING: Wait for lapic ICR pending bit timed-out!\n");
+			atomic_incl((volatile long *)&lapic_icr_pending_timeouts, 1);
+		}
+#endif
+	}
+
+	/* Program the interrupt command register */
+	/* The vector is ignored in this case--the target CPU will enter on the
+	 * NMI vector.
+	 */
+	LAPIC_WRITE_ICR(cpu_to_lapic[cpu],
+	    LAPIC_VECTOR(INTERPROCESSOR) | LAPIC_ICR_DM_NMI);
 }
 
 /*

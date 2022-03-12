@@ -102,7 +102,7 @@ int
 mac_system_check_auditctl(struct ucred *cred, struct vnode *vp)
 {
 	int error;
-	struct label *vl = vp ? vp->v_label : NULL;
+	struct label *vl = vp ? mac_vnode_label(vp) : NULL;
 
 	MAC_CHECK(system_check_auditctl, cred, vp, vl);
 

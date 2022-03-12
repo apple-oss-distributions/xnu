@@ -740,6 +740,13 @@ out1:
 	}
 }
 
+__pure2
+static inline proc_t
+kdebug_current_proc_unsafe(void)
+{
+	return get_thread_ro_unchecked(current_thread())->tro_proc;
+}
+
 /*
  * Check if the given debug ID is allowed to be traced on the current process.
  *
@@ -763,7 +770,7 @@ kdebug_debugid_procfilt_allowed(uint32_t debugid)
 		return true;
 	}
 
-	struct proc *curproc = current_proc();
+	struct proc *curproc = kdebug_current_proc_unsafe();
 	/*
 	 * If the process is missing (early in boot), allow it.
 	 */
@@ -1326,14 +1333,14 @@ kdebug_current_proc_enabled(uint32_t debugid)
 	}
 
 	if (kd_ctrl_page_trace.kdebug_flags & KDBG_PIDCHECK) {
-		proc_t cur_proc = current_proc();
+		proc_t cur_proc = kdebug_current_proc_unsafe();
 
 		/* only the process with the kdebug bit set is allowed */
 		if (cur_proc && !(cur_proc->p_kdebug)) {
 			return false;
 		}
 	} else if (kd_ctrl_page_trace.kdebug_flags & KDBG_PIDEXCLUDE) {
-		proc_t cur_proc = current_proc();
+		proc_t cur_proc = kdebug_current_proc_unsafe();
 
 		/* every process except the one with the kdebug bit set is allowed */
 		if (cur_proc && cur_proc->p_kdebug) {
@@ -1711,8 +1718,7 @@ _resolve_iterator(proc_t proc, void *opaque)
 			break;
 		}
 		kd_threadmap *map = &resolver->krs_map[resolver->krs_count];
-		thread_t thread = uth->uu_thread;
-		map->thread = (uintptr_t)thread_tid(thread);
+		map->thread = (uintptr_t)uthread_tid(uth);
 		(void)strlcpy(map->command, proc_name, sizeof(map->command));
 		map->valid = pid;
 		resolver->krs_count++;
@@ -2817,7 +2823,7 @@ kdbg_control(int *name, u_int namelen, user_addr_t where, size_t *sizep)
 			break;
 		}
 
-		vp = fp->fp_glob->fg_data;
+		vp = fp_get_data(fp);
 		context.vc_thread = current_thread();
 		context.vc_ucred = fp->fp_glob->fg_cred;
 

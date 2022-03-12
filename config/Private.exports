@@ -292,6 +292,7 @@ _csblob_get_platform_binary
 _csblob_get_teamid
 _csblob_get_signer_type
 _csblob_get_size
+_csblob_get_storage_addr
 _csfg_get_cdhash
 _csfg_get_identity
 _csfg_get_path
@@ -1021,7 +1022,6 @@ _zalloc_noblock
 _zalloc_flags
 _zalloc_ro
 _zalloc_ro_mut
-_zalloc_ro_update_elem
 _zdestroy
 _zfree
 _zfree_ro

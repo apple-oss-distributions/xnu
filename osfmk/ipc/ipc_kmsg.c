@@ -1957,7 +1957,6 @@ ipc_kmsg_get_from_user(
 		}
 	}
 
-	msg_addr += sizeof(user_base.header);
 #if defined(__LP64__)
 	size += USER_HEADER_SIZE_DELTA;
 #endif
@@ -1996,10 +1995,20 @@ ipc_kmsg_get_from_user(
 	    kmsg->ikm_header->msgh_voucher_port,
 	    kmsg->ikm_header->msgh_id);
 
-	if (copyinmsg(msg_addr, (char *)(kmsg->ikm_header + 1),
-	    size - (mach_msg_size_t)sizeof(mach_msg_header_t))) {
-		ipc_kmsg_free(kmsg);
-		return MACH_SEND_INVALID_DATA;
+	if (size >= sizeof(mach_msg_base_t)) {
+		mach_msg_base_t *kbase = ((mach_msg_base_t *)kmsg->ikm_header);
+
+		kbase->body.msgh_descriptor_count =
+		    user_base.body.msgh_descriptor_count;
+	}
+
+	if (size > sizeof(mach_msg_base_t)) {
+		if (copyinmsg(msg_addr + sizeof(mach_msg_user_base_t),
+		    (char *)kmsg->ikm_header + sizeof(mach_msg_base_t),
+		    size - sizeof(mach_msg_base_t))) {
+			ipc_kmsg_free(kmsg);
+			return MACH_SEND_INVALID_DATA;
+		}
 	}
 
 	/* unreachable if !DEBUG */

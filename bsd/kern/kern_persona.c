@@ -90,7 +90,7 @@ static SECURITY_READ_ONLY_LATE(kauth_cred_t) g_default_persona_cred;
 #define lock_personas()    lck_mtx_lock(&all_personas_lock)
 #define unlock_personas()  lck_mtx_unlock(&all_personas_lock)
 
-extern void mach_kauth_cred_uthread_update(void);
+extern void mach_kauth_cred_thread_update(void);
 
 extern kern_return_t bank_get_bank_ledger_thread_group_and_persona(void *voucher,
     void *bankledger, void **banktg, uint32_t *persona_id);
@@ -100,7 +100,8 @@ ipc_voucher_release(void *voucher);
 static void
 personas_bootstrap(void)
 {
-	struct posix_cred pcred;
+	struct ucred cred;
+	posix_cred_t pcred;
 
 	persona_dbg("Initializing persona subsystem");
 	LIST_INIT(&all_personas);
@@ -112,22 +113,21 @@ personas_bootstrap(void)
 	 * setup the default credentials that a persona temporarily
 	 * inherits (to work around kauth APIs)
 	 */
-	bzero(&pcred, sizeof(pcred));
-	pcred.cr_uid = pcred.cr_ruid = pcred.cr_svuid = TEMP_PERSONA_ID;
-	pcred.cr_rgid = pcred.cr_svgid = TEMP_PERSONA_ID;
-	pcred.cr_groups[0] = TEMP_PERSONA_ID;
-	pcred.cr_ngroups = 1;
-	pcred.cr_flags = CRF_NOMEMBERD;
-	pcred.cr_gmuid = KAUTH_UID_NONE;
+	bzero(&cred, sizeof(cred));
+	pcred = &cred.cr_posix;
+	pcred->cr_uid = pcred->cr_ruid = pcred->cr_svuid = TEMP_PERSONA_ID;
+	pcred->cr_rgid = pcred->cr_svgid = TEMP_PERSONA_ID;
+	pcred->cr_groups[0] = TEMP_PERSONA_ID;
+	pcred->cr_ngroups = 1;
+	pcred->cr_flags = CRF_NOMEMBERD;
+	pcred->cr_gmuid = KAUTH_UID_NONE;
 
-	g_default_persona_cred = posix_cred_create(&pcred);
-	if (!g_default_persona_cred) {
-		panic("couldn't create default persona credentials!");
-	}
 #if CONFIG_AUDIT
 	/* posix_cred_create() sets this value to NULL */
-	g_default_persona_cred->cr_audit.as_aia_p = audit_default_aia_p;
+	cred.cr_audit.as_aia_p = audit_default_aia_p;
 #endif
+
+	g_default_persona_cred = kauth_cred_create(&cred);
 }
 STARTUP(EARLY_BOOT, STARTUP_RANK_MIDDLE, personas_bootstrap);
 
@@ -135,6 +135,8 @@ struct persona *
 persona_alloc(uid_t id, const char *login, persona_type_t type, char *path, int *error)
 {
 	struct persona *persona;
+	struct ucred persona_cred_model;
+	kauth_cred_t cred;
 	int err = 0;
 
 	if (!login) {
@@ -174,12 +176,10 @@ persona_alloc(uid_t id, const char *login, persona_type_t type, char *path, int 
 	 * We need to do this here because all kauth calls require
 	 * an existing cred structure.
 	 */
-	persona->pna_cred = kauth_cred_create(g_default_persona_cred);
-	if (!persona->pna_cred) {
-		pna_err("could not copy initial credentials!");
-		err = EIO;
-		goto out_error;
-	}
+	persona_cred_model = *g_default_persona_cred;
+	cred = kauth_cred_create(&persona_cred_model);
+
+	kauth_cred_set_and_unref(&persona->pna_cred, &cred);
 
 	persona->pna_type = type;
 	persona->pna_id = id;
@@ -277,10 +277,7 @@ try_again:
 	tmp_cred = kauth_cred_setuidgid(persona->pna_cred,
 	    persona->pna_id,
 	    persona->pna_id);
-	kauth_cred_unref(&persona->pna_cred);
-	if (tmp_cred != persona->pna_cred) {
-		persona->pna_cred = tmp_cred;
-	}
+	kauth_cred_set_and_unref(&persona->pna_cred, &tmp_cred);
 
 	if (!persona->pna_cred) {
 		err = EACCES;
@@ -290,14 +287,11 @@ try_again:
 	/* it should be a member of exactly 1 group (equal to its UID) */
 	new_group = (gid_t)persona->pna_id;
 
-	kauth_cred_ref(persona->pna_cred);
 	/* opt _out_ of memberd as a default */
+	kauth_cred_ref(persona->pna_cred);
 	tmp_cred = kauth_cred_setgroups(persona->pna_cred,
 	    &new_group, 1, KAUTH_UID_NONE);
-	kauth_cred_unref(&persona->pna_cred);
-	if (tmp_cred != persona->pna_cred) {
-		persona->pna_cred = tmp_cred;
-	}
+	kauth_cred_set_and_unref(&persona->pna_cred, &tmp_cred);
 
 	if (!persona->pna_cred) {
 		err = EACCES;
@@ -485,9 +479,7 @@ persona_put(struct persona *persona)
 	persona_dbg("Destroying persona %s", persona_desc(persona, 0));
 
 	/* release our credential reference */
-	if (persona->pna_cred) {
-		kauth_cred_unref(&persona->pna_cred);
-	}
+	kauth_cred_set(&persona->pna_cred, NOCRED);
 
 	/* remove it from the global list and decrement the count */
 	lock_personas();
@@ -811,10 +803,13 @@ proc_set_cred_internal(proc_t p, struct persona *persona,
     kauth_cred_t auth_override, int *rlim_error)
 {
 	struct persona *old_persona = NULL;
-	kauth_cred_t my_cred, my_new_cred;
-	uid_t old_uid, new_uid;
+	kauth_cred_t new_cred;
+	uid_t new_uid;
+	uid_t new_cred_uid;
 	size_t count;
 	rlim_t nproc = proc_limitgetcur(p, RLIMIT_NPROC);
+	bool changed;
+	__block uid_t old_uid;
 
 	/*
 	 * This operation must be done under the proc trans lock
@@ -839,84 +834,60 @@ proc_set_cred_internal(proc_t p, struct persona *persona,
 		    NULL, persona);
 	}
 
-	if (auth_override) {
-		my_new_cred = auth_override;
-	} else {
-		my_new_cred = persona->pna_cred;
-	}
-
-	if (!my_new_cred) {
-		panic("NULL credentials (persona:%p)", persona);
-	}
-
-	*rlim_error = 0;
-
-	kauth_cred_ref(my_new_cred);
-
-	new_uid = persona->pna_id;
-
 	/*
 	 * Check to see if we will hit a proc rlimit by moving the process
 	 * into the persona. If so, we'll bail early before actually moving
 	 * the process or changing its credentials.
 	 */
+	new_uid = persona->pna_id;
+
 	if (new_uid != 0 &&
 	    (rlim_t)chgproccnt(new_uid, 0) > nproc) {
 		pna_err("PID:%d hit proc rlimit in new persona(%d): %s",
 		    proc_getpid(p), new_uid, persona_desc(persona, 1));
+
 		*rlim_error = EACCES;
+
 		if (old_persona) {
 			(void)proc_reset_persona_internal(p, PROC_RESET_OLD_PERSONA,
 			    old_persona, persona);
 		}
-		kauth_cred_unref(&my_new_cred);
+
 		return NULL;
 	}
+
+	*rlim_error = 0;
+
+	/*
+	 * Select the appropriate credentials.
+	 */
+	new_cred = auth_override ?: persona->pna_cred;
+	if (!new_cred) {
+		panic("NULL credentials (persona:%p)", persona);
+	}
+
+	new_cred_uid = kauth_cred_getuid(new_cred);
 
 	/*
 	 * Set the new credentials on the proc
 	 */
-set_proc_cred:
-	my_cred = kauth_cred_proc_ref(p);
-	persona_dbg("proc_adopt PID:%d, %s -> %s",
-	    proc_getpid(p),
-	    persona_desc(old_persona, 1),
-	    persona_desc(persona, 1));
+	changed = proc_update_label(p, true, ^(kauth_cred_t cur_cred) {
+		old_uid = kauth_cred_getruid(cur_cred);
 
-	old_uid = kauth_cred_getruid(my_cred);
-
-	if (my_cred != my_new_cred) {
-		kauth_cred_t old_cred = my_cred;
-
-		proc_ucred_lock(p);
-		/*
-		 * We need to protect against a race where another thread
-		 * also changed the credential after we took our
-		 * reference.  If p_ucred has changed then we should
-		 * restart this again with the new cred.
-		 */
-		if (proc_ucred(p) != my_cred) {
-			proc_ucred_unlock(p);
-			kauth_cred_unref(&my_cred);
-			/* try again */
-			goto set_proc_cred;
+		if (new_cred != cur_cred) {
+		        kauth_cred_ref(new_cred);
+		        kauth_cred_unref(&cur_cred);
 		}
 
-		/* update the credential and take a ref for the proc */
-		kauth_cred_ref(my_new_cred);
-		proc_set_ucred(p, my_new_cred);
+		return new_cred;
+	});
 
-		/* update cred on proc (and current thread) */
-		mach_kauth_cred_uthread_update();
-		proc_update_creds_onproc(p);
-
-		/* drop the proc's old ref on the credential */
-		kauth_cred_unref(&old_cred);
-		proc_ucred_unlock(p);
+	if (changed) {
+		/*
+		 * Make sure current_thread()'s cred is updated now.
+		 */
+		mach_kauth_cred_thread_update();
 	}
-
-	/* drop this function's reference to the old cred */
-	kauth_cred_unref(&my_cred);
 
 	/*
 	 * Update the proc count.
@@ -938,7 +909,7 @@ set_proc_cred:
 		 */
 		count = chgproccnt(new_uid, 1);
 		persona_dbg("Increment Persona:%d (UID:%d) proc_count to: %lu",
-		    new_uid, kauth_cred_getuid(my_new_cred), count);
+		    new_uid, new_cred_uid, count);
 	}
 
 	OSBitOrAtomic(P_ADOPTPERSONA, &p->p_flag);
@@ -947,8 +918,6 @@ set_proc_cred:
 	p->p_persona = persona_get_locked(persona);
 	LIST_INSERT_HEAD(&persona->pna_members, p, p_persona_list);
 	proc_unlock(p);
-
-	kauth_cred_unref(&my_new_cred);
 
 	return old_persona;
 }
@@ -1099,6 +1068,8 @@ persona_set_cred(struct persona *persona, kauth_cred_t cred)
 {
 	int ret = 0;
 	kauth_cred_t my_cred;
+	struct ucred model_cred;
+
 	if (!persona || !cred) {
 		return EINVAL;
 	}
@@ -1114,7 +1085,8 @@ persona_set_cred(struct persona *persona, kauth_cred_t cred)
 	}
 
 	/* create a new cred from the passed-in cred */
-	my_cred = kauth_cred_create(cred);
+	model_cred = *cred;
+	my_cred = kauth_cred_create(&model_cred);
 
 	/* ensure that the UID matches the persona ID */
 	my_cred = kauth_cred_setresuid(my_cred, persona->pna_id,
@@ -1124,10 +1096,7 @@ persona_set_cred(struct persona *persona, kauth_cred_t cred)
 	/* TODO: clear the saved GID?! */
 
 	/* replace the persona's cred with the new one */
-	if (persona->pna_cred) {
-		kauth_cred_unref(&persona->pna_cred);
-	}
-	persona->pna_cred = my_cred;
+	kauth_cred_set_and_unref(&persona->pna_cred, &my_cred);
 
 out_unlock:
 	persona_unlock(persona);
@@ -1139,6 +1108,8 @@ persona_set_cred_from_proc(struct persona *persona, proc_t proc)
 {
 	int ret = 0;
 	kauth_cred_t parent_cred, my_cred;
+	struct ucred model_cred;
+
 	if (!persona || !proc) {
 		return EINVAL;
 	}
@@ -1158,7 +1129,9 @@ persona_set_cred_from_proc(struct persona *persona, proc_t proc)
 	/* TODO: clear the saved UID/GID! */
 
 	/* create a new cred from the proc's cred */
-	my_cred = kauth_cred_create(parent_cred);
+	model_cred = *parent_cred;
+	my_cred = kauth_cred_create(&model_cred);
+	kauth_cred_unref(&parent_cred);
 
 	/* ensure that the UID matches the persona ID */
 	my_cred = kauth_cred_setresuid(my_cred, persona->pna_id,
@@ -1166,12 +1139,7 @@ persona_set_cred_from_proc(struct persona *persona, proc_t proc)
 	    KAUTH_UID_NONE);
 
 	/* replace the persona's cred with the new one */
-	if (persona->pna_cred) {
-		kauth_cred_unref(&persona->pna_cred);
-	}
-	persona->pna_cred = my_cred;
-
-	kauth_cred_unref(&parent_cred);
+	kauth_cred_set_and_unref(&persona->pna_cred, &my_cred);
 
 out_unlock:
 	persona_unlock(persona);
@@ -1226,7 +1194,7 @@ int
 persona_set_gid(struct persona *persona, gid_t gid)
 {
 	int ret = 0;
-	kauth_cred_t my_cred, new_cred;
+	kauth_cred_t cred;
 
 	if (!persona || !persona->pna_cred) {
 		return EINVAL;
@@ -1242,13 +1210,10 @@ persona_set_gid(struct persona *persona, gid_t gid)
 		goto out_unlock;
 	}
 
-	my_cred = persona->pna_cred;
-	kauth_cred_ref(my_cred);
-	new_cred = kauth_cred_setresgid(my_cred, gid, gid, gid);
-	if (new_cred != my_cred) {
-		persona->pna_cred = new_cred;
-	}
-	kauth_cred_unref(&my_cred);
+	cred = persona->pna_cred;
+	kauth_cred_ref(cred);
+	cred = kauth_cred_setresgid(cred, gid, gid, gid);
+	kauth_cred_set_and_unref(&persona->pna_cred, &cred);
 
 out_unlock:
 	persona_unlock(persona);
@@ -1277,7 +1242,7 @@ int
 persona_set_groups(struct persona *persona, gid_t *groups, size_t ngroups, uid_t gmuid)
 {
 	int ret = 0;
-	kauth_cred_t my_cred, new_cred;
+	kauth_cred_t cred;
 
 	if (!persona || !persona->pna_cred) {
 		return EINVAL;
@@ -1296,13 +1261,10 @@ persona_set_groups(struct persona *persona, gid_t *groups, size_t ngroups, uid_t
 		goto out_unlock;
 	}
 
-	my_cred = persona->pna_cred;
-	kauth_cred_ref(my_cred);
-	new_cred = kauth_cred_setgroups(my_cred, groups, ngroups, gmuid);
-	if (new_cred != my_cred) {
-		persona->pna_cred = new_cred;
-	}
-	kauth_cred_unref(&my_cred);
+	cred = persona->pna_cred;
+	kauth_cred_ref(cred);
+	cred = kauth_cred_setgroups(cred, groups, ngroups, gmuid);
+	kauth_cred_set_and_unref(&persona->pna_cred, &cred);
 
 out_unlock:
 	persona_unlock(persona);

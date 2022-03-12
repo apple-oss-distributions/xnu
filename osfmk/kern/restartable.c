@@ -342,9 +342,8 @@ restartable_ranges_release(struct restartable_ranges *rr)
 }
 
 void
-thread_reset_pcs_ast(thread_t thread)
+thread_reset_pcs_ast(task_t task, thread_t thread)
 {
-	task_t task = thread->task;
 	struct restartable_ranges *rr;
 	mach_vm_address_t pc;
 

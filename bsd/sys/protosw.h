@@ -74,9 +74,10 @@
 
 /*
  * The arguments to the ctlinput routine are
- *      (*protosw[].pr_ctlinput)(cmd, sa, arg);
- * where cmd is one of the commands below, sa is a pointer to a sockaddr,
- * and arg is a `void *' argument used within a protocol family.
+ *      (*protosw[].pr_ctlinput)(cmd, sa, arg, ifnet);
+ * where `cmd' is one of the commands below, `sa' is a pointer to a sockaddr,
+ * `arg' is a `void *' argument used within a protocol family (typically
+ * that's a `struct ipctlparam *') and `ifp' is a pointer to the network interface.
  */
 #define PRC_IFDOWN              0       /* interface transition */
 #define PRC_ROUTEDEAD           1       /* select new route if possible ??? */
@@ -115,6 +116,26 @@
 #include <sys/socketvar.h>
 #include <sys/queue.h>
 #include <kern/locks.h>
+
+
+/*
+ * argument type for the 3rd arg of pr_ctlinput()
+ * should be consulted only with AF_INET family.
+ *
+ * IPv4 ICMP IPv4 [exthdrs] finalhdr payload
+ * ^    ^    ^              ^
+ * |    |    |              ipc_off
+ * |    |    ipc_icmp_ip
+ * |    ipc_icmp
+ * ipc_m
+ *
+ */
+struct ipctlparam {
+	struct ip   *ipc_icmp_ip;  /* ip header of target packet. Must be the first field */
+	struct mbuf *ipc_m;        /* start of mbuf chain */
+	struct icmp *ipc_icmp;     /* icmp header of target packet */
+	size_t       ipc_off;      /* offset of the target proto header */
+};
 
 /* Forward declare these structures referenced from prototypes below. */
 struct mbuf;

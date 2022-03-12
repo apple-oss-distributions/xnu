@@ -2149,10 +2149,7 @@ icmp6_rip6_input(struct mbuf **mp, int off)
 			struct  mbuf *n;
 			if ((n = m_copy(m, 0, (int)M_COPYALL)) != NULL) {
 				if ((last->in6p_flags & INP_CONTROLOPTS) != 0 ||
-#if CONTENT_FILTER
-				    /* Content Filter needs to see local address */
-				    (last->in6p_socket->so_cfil_db != NULL) ||
-#endif
+				    SOFLOW_ENABLED(last->in6p_socket) ||
 				    (last->in6p_socket->so_options & SO_TIMESTAMP) != 0 ||
 				    (last->in6p_socket->so_options & SO_TIMESTAMP_MONOTONIC) != 0 ||
 				    (last->in6p_socket->so_options & SO_TIMESTAMP_CONTINUOUS) != 0) {
@@ -2179,10 +2176,7 @@ icmp6_rip6_input(struct mbuf **mp, int off)
 	}
 	if (last) {
 		if ((last->in6p_flags & INP_CONTROLOPTS) != 0 ||
-#if CONTENT_FILTER
-		    /* Content Filter needs to see local address */
-		    (last->in6p_socket->so_cfil_db != NULL) ||
-#endif
+		    SOFLOW_ENABLED(last->in6p_socket) ||
 		    (last->in6p_socket->so_options & SO_TIMESTAMP) != 0 ||
 		    (last->in6p_socket->so_options & SO_TIMESTAMP_MONOTONIC) != 0 ||
 		    (last->in6p_socket->so_options & SO_TIMESTAMP_CONTINUOUS) != 0) {
@@ -3147,8 +3141,12 @@ icmp6_ctloutput(struct socket *so, struct sockopt *sopt)
 int
 icmp6_dgram_ctloutput(struct socket *so, struct sockopt *sopt)
 {
+	/*
+	 * For { SOCK_RAW, IPPROTO_ICMPV6 } the pr_ctloutput is
+	 * rip6_ctloutput() and not icmp6_ctloutput()
+	 */
 	if (kauth_cred_issuser(so->so_cred)) {
-		return icmp6_ctloutput(so, sopt);
+		return rip6_ctloutput(so, sopt);
 	}
 
 	if (sopt->sopt_level == IPPROTO_ICMPV6) {
@@ -3194,7 +3192,6 @@ icmp6_dgram_ctloutput(struct socket *so, struct sockopt *sopt)
 	case IPV6_2292RTHDR:
 	case IPV6_BOUND_IF:
 	case IPV6_NO_IFT_CELLULAR:
-
 		return ip6_ctloutput(so, sopt);
 
 	default:

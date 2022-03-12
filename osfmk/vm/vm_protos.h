@@ -642,6 +642,11 @@ extern boolean_t vm_compressor_low_on_space(void);
 extern boolean_t vm_compressor_out_of_space(void);
 extern int       vm_swap_low_on_space(void);
 void             do_fastwake_warmup_all(void);
+
+#if defined(__arm64__)
+extern void vm_panic_hibernate_write_image_failed(int err);
+#endif /* __arm64__ */
+
 #if CONFIG_JETSAM
 extern int proc_get_memstat_priority(struct proc*, boolean_t);
 #endif /* CONFIG_JETSAM */

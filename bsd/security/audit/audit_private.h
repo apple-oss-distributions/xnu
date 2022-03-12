@@ -324,7 +324,7 @@ struct audit_record {
  * Current thread macro.  get_bsdthread_info() returns a void ptr for some
  * reason.
  */
-#define curthread()     ((struct uthread *)get_bsdthread_info(current_thread()))
+#define curthread()     current_uthread()
 
 /*
  * In-kernel version of audit record; the basic record plus queue meta-data.

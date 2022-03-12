@@ -275,6 +275,7 @@ extern unsigned int get_maxmtu(struct rtentry *);
 #define NECP_PARSED_PARAMETERS_FIELD_TRANSPORT_PROTOCOL                 0x400000
 #define NECP_PARSED_PARAMETERS_FIELD_LOCAL_ADDR_PREFERENCE              0x800000
 #define NECP_PARSED_PARAMETERS_FIELD_ATTRIBUTED_BUNDLE_IDENTIFIER       0x1000000
+#define NECP_PARSED_PARAMETERS_FIELD_PARENT_UUID                        0x2000000
 
 
 #define NECP_MAX_INTERFACE_PARAMETERS 16
@@ -303,6 +304,7 @@ struct necp_client_parsed_parameters {
 	u_int16_t ethertype;
 	pid_t effective_pid;
 	uuid_t effective_uuid;
+	uuid_t parent_uuid;
 	u_int32_t traffic_class;
 };
 
@@ -463,7 +465,7 @@ struct necp_client {
 
 
 	size_t parameters_length;
-	u_int8_t parameters[0];
+	u_int8_t *parameters;
 };
 
 #define NECP_CLIENT_LOCK(_c) lck_mtx_lock(&_c->lock)
@@ -530,7 +532,7 @@ struct necp_client_update {
 	uuid_t client_id;
 
 	size_t update_length;
-	struct necp_client_observer_update update;
+	struct necp_client_observer_update *update;
 };
 
 
@@ -820,7 +822,7 @@ necpop_select(struct fileproc *fp, int which, void *wql, vfs_context_t ctx)
 	int events = 0;
 	proc_t procp;
 
-	fd_data = (struct necp_fd_data *)fp->fp_glob->fg_data;
+	fd_data = (struct necp_fd_data *)fp_get_data(fp);
 	if (fd_data == NULL) {
 		return 0;
 	}
@@ -919,7 +921,7 @@ necpop_kqfilter(struct fileproc *fp, struct knote *kn,
 		return 0;
 	}
 
-	fd_data = (struct necp_fd_data *)fp->fp_glob->fg_data;
+	fd_data = (struct necp_fd_data *)fp_get_data(fp);
 	if (fd_data == NULL) {
 		NECPLOG0(LOG_ERR, "No channel for kqfilter");
 		knote_set_error(kn, ENOENT);
@@ -1007,18 +1009,19 @@ necp_defunct_client_for_policy(struct necp_client *client,
 static void
 necp_client_free(struct necp_client *client)
 {
-	NECP_CLIENT_ASSERT_LOCKED(client);
-
-	NECP_CLIENT_UNLOCK(client);
+	NECP_CLIENT_ASSERT_UNLOCKED(client);
 
 	kfree_data(client->extra_interface_options,
 	    sizeof(struct necp_client_interface_option) * NECP_CLIENT_INTERFACE_OPTION_EXTRA_COUNT);
 	client->extra_interface_options = NULL;
 
+	kfree_data(client->parameters, client->parameters_length);
+	client->parameters = NULL;
+
 	lck_mtx_destroy(&client->route_lock, &necp_fd_mtx_grp);
 	lck_mtx_destroy(&client->lock, &necp_fd_mtx_grp);
 
-	FREE(client, M_NECP);
+	kfree_type(struct necp_client, client);
 }
 
 static void
@@ -1044,6 +1047,7 @@ necp_client_release_locked(struct necp_client *client)
 
 	os_ref_count_t count = os_ref_release_locked(&client->reference_count);
 	if (count == 0) {
+		NECP_CLIENT_UNLOCK(client);
 		necp_client_free(client);
 	}
 
@@ -1063,9 +1067,41 @@ necp_client_release(struct necp_client *client)
 	return last_ref;
 }
 
+static struct necp_client_update *
+necp_client_update_alloc(const void *data, size_t length)
+{
+	struct necp_client_update *client_update;
+	struct necp_client_observer_update *buffer;
+	size_t alloc_size;
+
+	if (os_add_overflow(length, sizeof(*buffer), &alloc_size)) {
+		return NULL;
+	}
+	buffer = kalloc_data(alloc_size, Z_WAITOK);
+	if (buffer == NULL) {
+		return NULL;
+	}
+
+	client_update = kalloc_type(struct necp_client_update,
+	    Z_WAITOK | Z_ZERO | Z_NOFAIL);
+	client_update->update_length = alloc_size;
+	client_update->update = buffer;
+	memcpy(buffer->tlv_buffer, data, length);
+	return client_update;
+}
+
+static void
+necp_client_update_free(struct necp_client_update *client_update)
+{
+	kfree_data(client_update->update, client_update->update_length);
+	kfree_type(struct necp_client_update, client_update);
+}
+
 static void
 necp_client_update_observer_add_internal(struct necp_fd_data *observer_fd, struct necp_client *client)
 {
+	struct necp_client_update *client_update;
+
 	NECP_FD_LOCK(observer_fd);
 
 	if (observer_fd->update_count >= necp_observer_message_limit) {
@@ -1073,13 +1109,10 @@ necp_client_update_observer_add_internal(struct necp_fd_data *observer_fd, struc
 		return;
 	}
 
-	struct necp_client_update *client_update = _MALLOC(sizeof(struct necp_client_update) + client->parameters_length,
-	    M_NECP, M_WAITOK | M_ZERO);
+	client_update = necp_client_update_alloc(client->parameters, client->parameters_length);
 	if (client_update != NULL) {
-		client_update->update_length = sizeof(struct necp_client_observer_update) + client->parameters_length;
 		uuid_copy(client_update->client_id, client->client_id);
-		client_update->update.update_type = NECP_CLIENT_UPDATE_TYPE_PARAMETERS;
-		memcpy(client_update->update.tlv_buffer, client->parameters, client->parameters_length);
+		client_update->update->update_type = NECP_CLIENT_UPDATE_TYPE_PARAMETERS;
 		TAILQ_INSERT_TAIL(&observer_fd->update_list, client_update, chain);
 		observer_fd->update_count++;
 
@@ -1099,13 +1132,10 @@ necp_client_update_observer_update_internal(struct necp_fd_data *observer_fd, st
 		return;
 	}
 
-	struct necp_client_update *client_update = _MALLOC(sizeof(struct necp_client_update) + client->result_length,
-	    M_NECP, M_WAITOK | M_ZERO);
+	struct necp_client_update *client_update = necp_client_update_alloc(client->result, client->result_length);
 	if (client_update != NULL) {
-		client_update->update_length = sizeof(struct necp_client_observer_update) + client->result_length;
 		uuid_copy(client_update->client_id, client->client_id);
-		client_update->update.update_type = NECP_CLIENT_UPDATE_TYPE_RESULT;
-		memcpy(client_update->update.tlv_buffer, client->result, client->result_length);
+		client_update->update->update_type = NECP_CLIENT_UPDATE_TYPE_RESULT;
 		TAILQ_INSERT_TAIL(&observer_fd->update_list, client_update, chain);
 		observer_fd->update_count++;
 
@@ -1125,12 +1155,10 @@ necp_client_update_observer_remove_internal(struct necp_fd_data *observer_fd, st
 		return;
 	}
 
-	struct necp_client_update *client_update = _MALLOC(sizeof(struct necp_client_update),
-	    M_NECP, M_WAITOK | M_ZERO);
+	struct necp_client_update *client_update = necp_client_update_alloc(NULL, 0);
 	if (client_update != NULL) {
-		client_update->update_length = sizeof(struct necp_client_observer_update);
 		uuid_copy(client_update->client_id, client->client_id);
-		client_update->update.update_type = NECP_CLIENT_UPDATE_TYPE_REMOVE;
+		client_update->update->update_type = NECP_CLIENT_UPDATE_TYPE_REMOVE;
 		TAILQ_INSERT_TAIL(&observer_fd->update_list, client_update, chain);
 		observer_fd->update_count++;
 
@@ -1237,7 +1265,7 @@ necp_destroy_client_flow_registration(struct necp_client *client,
 			uuid_clear(search_flow->u.nexus_agent);
 		}
 		if (search_flow->assigned_results != NULL) {
-			FREE(search_flow->assigned_results, M_NETAGENT);
+			kfree_data(search_flow->assigned_results, search_flow->assigned_results_length);
 			search_flow->assigned_results = NULL;
 		}
 		LIST_REMOVE(search_flow, flow_chain);
@@ -1348,8 +1376,8 @@ necpop_close(struct fileglob *fg, vfs_context_t ctx)
 	struct necp_fd_data *fd_data = NULL;
 	int error = 0;
 
-	fd_data = (struct necp_fd_data *)fg->fg_data;
-	fg->fg_data = NULL;
+	fd_data = (struct necp_fd_data *)fg_get_data(fg);
+	fg_set_data(fg, NULL);
 
 	if (fd_data != NULL) {
 		struct _necp_client_tree clients_to_close;
@@ -1398,7 +1426,7 @@ necpop_close(struct fileglob *fg, vfs_context_t ctx)
 		TAILQ_FOREACH_SAFE(client_update, &fd_data->update_list, chain, temp_update) {
 			// Flush pending updates
 			TAILQ_REMOVE(&fd_data->update_list, client_update, chain);
-			FREE(client_update, M_NECP);
+			necp_client_update_free(client_update);
 		}
 		fd_data->update_count = 0;
 
@@ -1446,7 +1474,7 @@ necp_find_fd_data(struct proc *p, int fd,
 	int error = fp_get_ftype(p, fd, DTYPE_NETPOLICY, ENODEV, &fp);
 
 	if (error == 0) {
-		*fd_data = (struct necp_fd_data *)fp->fp_glob->fg_data;
+		*fd_data = (struct necp_fd_data *)fp_get_data(fp);
 		*fpp = fp;
 
 		if ((*fd_data)->necp_fd_type != necp_fd_type_client) {
@@ -1795,7 +1823,7 @@ necp_client_update_flows(proc_t proc,
 				// Drop them as long as they aren't assigned data
 				if (!flow->nexus && !flow->assigned) {
 					if (flow->assigned_results != NULL) {
-						FREE(flow->assigned_results, M_NETAGENT);
+						kfree_data(flow->assigned_results, flow->assigned_results_length);
 						flow->assigned_results = NULL;
 						client_updated = TRUE;
 					}
@@ -2537,6 +2565,8 @@ necp_client_parse_parameters(struct necp_client *client, u_int8_t *parameters,
 				case NECP_CLIENT_PARAMETER_PARENT_ID: {
 					if (length == sizeof(parent_id)) {
 						uuid_copy(parent_id, value);
+						memcpy(&parsed_parameters->parent_uuid, value, sizeof(parsed_parameters->parent_uuid));
+						parsed_parameters->valid_fields |= NECP_PARSED_PARAMETERS_FIELD_PARENT_UUID;
 					}
 					break;
 				}
@@ -2677,6 +2707,7 @@ necp_client_create_flow_registration(struct necp_fd_data *fd_data, struct necp_c
 	NECP_FLOW_TREE_UNLOCK();
 
 	new_registration->client = client;
+
 
 	// Start out assuming there is nothing to read from the flow
 	new_registration->flow_result_read = true;
@@ -2990,7 +3021,7 @@ necp_client_unregister_socket_flow(uuid_t client_id, void *handle)
 				LIST_FOREACH_SAFE(search_flow, &flow_registration->flow_list, flow_chain, temp_flow) {
 					if (search_flow->socket && search_flow->u.socket_handle == handle) {
 						if (search_flow->assigned_results != NULL) {
-							FREE(search_flow->assigned_results, M_NETAGENT);
+							kfree_data(search_flow->assigned_results, search_flow->assigned_results_length);
 							search_flow->assigned_results = NULL;
 						}
 						client_updated = TRUE;
@@ -3105,7 +3136,7 @@ necp_client_assign_from_socket(pid_t pid, uuid_t client_id, struct inpcb *inp)
 					if (flow->socket && flow->u.socket_handle == inp) {
 						// Release prior results and route
 						if (flow->assigned_results != NULL) {
-							FREE(flow->assigned_results, M_NETAGENT);
+							kfree_data(flow->assigned_results, flow->assigned_results_length);
 							flow->assigned_results = NULL;
 						}
 
@@ -3319,7 +3350,7 @@ necp_assign_client_result_locked(struct proc *proc,
 		    uuid_compare(flow->u.nexus_agent, netagent_uuid) == 0) {
 			// Release prior results and route
 			if (flow->assigned_results != NULL) {
-				FREE(flow->assigned_results, M_NETAGENT);
+				kfree_data(flow->assigned_results, flow->assigned_results_length);
 				flow->assigned_results = NULL;
 			}
 
@@ -4356,7 +4387,7 @@ necp_set_client_as_background(proc_t proc,
 		return FALSE;
 	}
 
-	struct necp_fd_data *client_fd = (struct necp_fd_data *)fp->fp_glob->fg_data;
+	struct necp_fd_data *client_fd = (struct necp_fd_data *)fp_get_data(fp);
 	if (client_fd == NULL) {
 		NECPLOG0(LOG_ERR, "Could not find client structure for backgrounded client");
 		return FALSE;
@@ -5046,7 +5077,7 @@ necp_open(struct proc *p, struct necp_open_args *uap, int *retval)
 	fp->fp_flags |= FP_CLOEXEC | FP_CLOFORK;
 	fp->fp_glob->fg_flag = FREAD;
 	fp->fp_glob->fg_ops = &necp_fd_ops;
-	fp->fp_glob->fg_data = fd_data;
+	fp_set_data(fp, fd_data);
 
 	proc_fdlock(p);
 
@@ -5117,20 +5148,16 @@ necp_client_add(struct proc *p, struct necp_fd_data *fd_data, struct necp_client
 		return EINVAL;
 	}
 
-	if ((client = _MALLOC(sizeof(struct necp_client) + buffer_size, M_NECP,
-	    M_WAITOK | M_ZERO)) == NULL) {
-		error = ENOMEM;
-		goto done;
-	}
+	client = kalloc_type(struct necp_client, Z_WAITOK | Z_ZERO | Z_NOFAIL);
+	client->parameters = kalloc_data(buffer_size, Z_WAITOK | Z_NOFAIL);
+	lck_mtx_init(&client->lock, &necp_fd_mtx_grp, &necp_fd_mtx_attr);
+	lck_mtx_init(&client->route_lock, &necp_fd_mtx_grp, &necp_fd_mtx_attr);
 
 	error = copyin(uap->buffer, client->parameters, buffer_size);
 	if (error) {
 		NECPLOG(LOG_ERR, "necp_client_add parameters copyin error (%d)", error);
 		goto done;
 	}
-
-	lck_mtx_init(&client->lock, &necp_fd_mtx_grp, &necp_fd_mtx_attr);
-	lck_mtx_init(&client->route_lock, &necp_fd_mtx_grp, &necp_fd_mtx_attr);
 
 	os_ref_init(&client->reference_count, &necp_client_refgrp); // Hold our reference until close
 
@@ -5167,11 +5194,9 @@ necp_client_add(struct proc *p, struct necp_fd_data *fd_data, struct necp_client
 	NECP_CLIENT_UNLOCK(client);
 	NECP_FD_UNLOCK(fd_data);
 done:
-	if (error != 0) {
-		if (client != NULL) {
-			FREE(client, M_NECP);
-			client = NULL;
-		}
+	if (error != 0 && client != NULL) {
+		necp_client_free(client);
+		client = NULL;
 	}
 	*retval = error;
 
@@ -5919,7 +5944,7 @@ necp_client_copy_client_update(struct necp_fd_data *fd_data, struct necp_client_
 				NECPLOG(LOG_ERR, "Buffer size cannot hold update (%zu < %zu)", (size_t)uap->buffer_size, client_update->update_length);
 				error = EINVAL;
 			} else {
-				error = copyout(&client_update->update, uap->buffer, client_update->update_length);
+				error = copyout(client_update->update, uap->buffer, client_update->update_length);
 				if (error) {
 					NECPLOG(LOG_ERR, "Copy client update copyout error (%d)", error);
 				} else {
@@ -5928,7 +5953,7 @@ necp_client_copy_client_update(struct necp_fd_data *fd_data, struct necp_client_
 			}
 		}
 
-		FREE(client_update, M_NECP);
+		necp_client_update_free(client_update);
 		client_update = NULL;
 	} else {
 		error = ENOENT;
@@ -7570,7 +7595,7 @@ necp_create_nexus_assign_message(uuid_t nexus_instance, u_int32_t nexus_port, vo
 		return NULL;
 	}
 
-	MALLOC(buffer, u_int8_t *, valsize, M_NETAGENT, M_WAITOK | M_ZERO); // Use M_NETAGENT area, since it is expected upon free
+	buffer = kalloc_data(valsize, Z_WAITOK | Z_ZERO);
 	if (buffer == NULL) {
 		return NULL;
 	}

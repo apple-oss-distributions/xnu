@@ -135,7 +135,6 @@ ZONE_VIEW_DECLARE(ZV_NAMEI);
 #define M_NECP          118     /* General NECP policy data */
 #define M_FD_VN_DATA    122     /* Per fd vnode data */
 #define M_FD_DIRBUF     123     /* Directory entries' buffer */
-#define M_NETAGENT      124     /* Network Agents */
 #define M_EVENTHANDLER  125     /* Eventhandler */
 #define M_LLTABLE       126     /* Link layer table */
 #define M_NWKWQ         127     /* Network work queue */

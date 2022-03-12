@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1998-2020 Apple Inc. All rights reserved.
+ * Copyright (c) 1998-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -350,7 +350,7 @@ static ppnum_t mcl_pages;       /* Size of array (# physical pages) */
 static ppnum_t mcl_paddr_base;  /* Handle returned by IOMapper::iovmAlloc() */
 static mcache_t *ref_cache;     /* Cache of cluster reference & flags */
 static mcache_t *mcl_audit_con_cache; /* Audit contents cache */
-static unsigned int mbuf_debug; /* patchable mbuf mcache flags */
+unsigned int mbuf_debug; /* patchable mbuf mcache flags */
 static unsigned int mb_normalized; /* number of packets "normalized" */
 
 #define MB_GROWTH_AGGRESSIVE    1       /* Threshold: 1/2 of total */
@@ -925,6 +925,7 @@ static void mbuf_drain_locked(boolean_t);
 	(m)->m_pkthdr.csum_data = 0;                                    \
 	(m)->m_pkthdr.vlan_tag = 0;                                     \
 	(m)->m_pkthdr.comp_gencnt = 0;                                  \
+	(m)->m_pkthdr.pkt_crumbs = 0;                                     \
 	m_classifier_init(m, 0);                                        \
 	m_tag_init(m, 1);                                               \
 	m_scratch_init(m);                                              \
@@ -951,7 +952,7 @@ static void mbuf_drain_locked(boolean_t);
 	(m)->m_data = (m)->m_ext.ext_buf = (buf);                       \
 	(m)->m_flags |= M_EXT;                                          \
 	m_set_ext((m), (rfa), (free), (arg));                           \
-	(m)->m_ext.ext_size = (u_int)(size);                                   \
+	(m)->m_ext.ext_size = (u_int)(size);                            \
 	MEXT_MINREF(m) = (min);                                         \
 	MEXT_REF(m) = (ref);                                            \
 	MEXT_PREF(m) = (pref);                                          \
@@ -6807,7 +6808,7 @@ mbuf_watchdog_defunct_iterate(proc_t p, void *arg)
 		if (FILEGLOB_DTYPE(fg) != DTYPE_SOCKET) {
 			continue;
 		}
-		so = (struct socket *)fp->fp_glob->fg_data;
+		so = fg_get_data(fg);
 		/*
 		 * We calculate the space without the socket
 		 * lock because we don't want to be blocked
@@ -6865,7 +6866,7 @@ mbuf_watchdog_defunct(thread_call_param_t arg0, thread_call_param_t arg1)
 			if (FILEGLOB_DTYPE(fg) != DTYPE_SOCKET) {
 				continue;
 			}
-			so = (struct socket *)fp->fp_glob->fg_data;
+			so = (struct socket *)fp_get_data(fp);
 			socket_lock(so, 0);
 			if (sosetdefunct(args.top_app, so,
 			    SHUTDOWN_SOCKET_LEVEL_DISCONNECT_ALL,
@@ -8358,6 +8359,14 @@ m_scratch_get(struct mbuf *m, u_int8_t **p)
 
 	*p = (u_int8_t *)&pkt->pkt_mpriv;
 	return sizeof(pkt->pkt_mpriv);
+}
+
+void
+m_add_crumb(struct mbuf *m, uint16_t crumb)
+{
+	VERIFY(m->m_flags & M_PKTHDR);
+
+	m->m_pkthdr.pkt_crumbs |= crumb;
 }
 
 static void

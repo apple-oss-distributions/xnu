@@ -1353,43 +1353,43 @@ processor_set_things(
 	/* If we need it, get the thread list */
 	if (type == PSET_THING_THREAD) {
 		queue_iterate(&threads, thread, thread_t, threads) {
+			task = get_threadtask(thread);
 #if defined(SECURE_KERNEL)
-			if (thread->task == kernel_task) {
+			if (task == kernel_task) {
 				/* skip threads belonging to kernel_task */
 				continue;
 			}
 #endif
-			if (task_is_exec_copy_internal(thread->task)) {
+			if (task_is_exec_copy_internal(task)) {
 				/* skip threads belonging to tasks in the middle of exec */
 				continue;
 			}
 
-			thread_reference_internal(thread);
+			thread_reference(thread);
 			thread_list[actual_threads++] = thread;
 		}
 	}
 #if !CONFIG_MACF
-	else {
+	else
 #endif
-	/* get a list of the tasks */
-	queue_iterate(&tasks, task, task_t, tasks) {
+	{
+		/* get a list of the tasks */
+		queue_iterate(&tasks, task, task_t, tasks) {
 #if defined(SECURE_KERNEL)
-		if (task == kernel_task) {
-			/* skip kernel_task */
-			continue;
-		}
+			if (task == kernel_task) {
+				/* skip kernel_task */
+				continue;
+			}
 #endif
-		if (task_is_exec_copy_internal(task)) {
-			/* skip new tasks created in the middle of exec */
-			continue;
-		}
+			if (task_is_exec_copy_internal(task)) {
+				/* skip new tasks created in the middle of exec */
+				continue;
+			}
 
-		task_reference(task);
-		task_list[actual_tasks++] = task;
+			task_reference(task);
+			task_list[actual_tasks++] = task;
+		}
 	}
-#if !CONFIG_MACF
-}
-#endif
 
 	lck_mtx_unlock(&tasks_threads_lock);
 
@@ -1412,7 +1412,7 @@ processor_set_things(
 		for (i = used = 0; i < actual_threads; i++) {
 			boolean_t found_task = FALSE;
 
-			task = thread_list[i]->task;
+			task = get_threadtask(thread_list[i]);
 			for (j = 0; j < actual_tasks; j++) {
 				if (task_list[j] == task) {
 					found_task = TRUE;
@@ -1702,8 +1702,9 @@ recommended_pset_type(thread_t thread)
 #if DEVELOPMENT || DEBUG
 	extern bool system_ecore_only;
 	extern int enable_task_set_cluster_type;
-	if (enable_task_set_cluster_type && (thread->task->t_flags & TF_USE_PSET_HINT_CLUSTER_TYPE)) {
-		processor_set_t pset_hint = thread->task->pset_hint;
+	task_t task = get_threadtask(thread);
+	if (enable_task_set_cluster_type && (task->t_flags & TF_USE_PSET_HINT_CLUSTER_TYPE)) {
+		processor_set_t pset_hint = task->pset_hint;
 		if (pset_hint) {
 			return pset_hint->pset_cluster_type;
 		}
@@ -1733,7 +1734,7 @@ recommended_pset_type(thread_t thread)
 	switch (recommendation) {
 	case CLUSTER_TYPE_SMP:
 	default:
-		if (thread->task == kernel_task) {
+		if (get_threadtask(thread) == kernel_task) {
 			return PSET_AMP_E;
 		}
 		return PSET_AMP_P;

@@ -26,7 +26,8 @@ def IterateProcChannels(proc):
         if unsigned(proc_ofiles[fd]) != 0:
             proc_fd_fglob = proc_ofiles[fd].fp_glob
             if (unsigned(proc_fd_fglob.fg_ops.fo_type) == 10):
-                yield Cast(proc_fd_fglob.fg_data, 'kern_channel *')
+                proc_fd_fglob_fg_data = Cast(proc_fd_fglob.fg_data, 'void *')
+                yield Cast(proc_fd_fglob_fg_data, 'kern_channel *')
 
 def IterateKernChannelRings(kc, kind):
     """ Iterate through all rings on a given channel
@@ -519,7 +520,8 @@ def IterateProcNECP(proc):
         if unsigned(proc_ofiles[fd]) != 0:
             proc_fd_fglob = proc_ofiles[fd].fp_glob
             if (unsigned(proc_fd_fglob.fg_ops.fo_type) == 9):
-                yield Cast(proc_fd_fglob.fg_data, 'necp_fd_data *')
+                proc_fd_fglob_fg_data = Cast(proc_fd_fglob.fg_data, 'void *')
+                yield Cast(proc_fd_fglob_fg_data, 'necp_fd_data *')
 
 def GetNECPClientBitFields(necp):
     """ Return the bit fields in necp_client as string

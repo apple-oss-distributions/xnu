@@ -2361,13 +2361,28 @@ void
 tcp_ctlinput(int cmd, struct sockaddr *sa, void *vip, __unused struct ifnet *ifp)
 {
 	tcp_seq icmp_tcp_seq;
-	struct ip *ip = vip;
+	struct ipctlparam *ctl_param = vip;
+	struct ip *ip = NULL;
+	struct mbuf *m = NULL;
 	struct in_addr faddr;
 	struct inpcb *inp;
 	struct tcpcb *tp;
 	struct tcphdr *th;
 	struct icmp *icp;
+	size_t off;
 	void (*notify)(struct inpcb *, int) = tcp_notify;
+
+	if (ctl_param != NULL) {
+		ip = ctl_param->ipc_icmp_ip;
+		icp = ctl_param->ipc_icmp;
+		m = ctl_param->ipc_m;
+		off = ctl_param->ipc_off;
+	} else {
+		ip = NULL;
+		icp = NULL;
+		m = NULL;
+		off = 0;
+	}
 
 	faddr = ((struct sockaddr_in *)(void *)sa)->sin_addr;
 	if (sa->sa_family != AF_INET || faddr.s_addr == INADDR_ANY) {
@@ -2407,9 +2422,14 @@ tcp_ctlinput(int cmd, struct sockaddr *sa, void *vip, __unused struct ifnet *ifp
 		return;
 	}
 
-	icp = (struct icmp *)(void *)
-	    ((caddr_t)ip - offsetof(struct icmp, icmp_ip));
-	th = (struct tcphdr *)(void *)((caddr_t)ip + (IP_VHL_HL(ip->ip_vhl) << 2));
+	/* Check if we can safely get the sport, dport and the sequence number from the tcp header. */
+	if (m == NULL ||
+	    (m->m_len < off + (sizeof(unsigned short) + sizeof(unsigned short) + sizeof(tcp_seq)))) {
+		/* Insufficient length */
+		return;
+	}
+
+	th = (struct tcphdr*)(void*)(mtod(m, uint8_t*) + off);
 	icmp_tcp_seq = ntohl(th->th_seq);
 
 	inp = in_pcblookup_hash(&tcbinfo, faddr, th->th_dport,
@@ -3808,7 +3828,7 @@ tcp_make_keepalive_frame(struct tcpcb *tp, struct ifnet *ifp,
 
 		ip = (__typeof__(ip))(void *)data;
 
-		ip->ip_id = rfc6864 ? 0 : ip_randomid();
+		ip->ip_id = rfc6864 ? 0 : ip_randomid((uint64_t)m);
 		ip->ip_off = htons(IP_DF);
 		ip->ip_len = htons(sizeof(struct ip) + sizeof(struct tcphdr));
 		ip->ip_ttl = inp->inp_ip_ttl;

@@ -537,6 +537,7 @@ ml_get_first_cpu_id(unsigned int cluster_id)
 	return topology_info.clusters[cluster_id].first_cpu_id;
 }
 
+
 kern_return_t
 ml_processor_register(ml_processor_info_t *in_processor_info,
     processor_t * processor_out, ipi_handler_t *ipi_handler_out,
@@ -1217,19 +1218,6 @@ user_timebase_type(void)
 #endif
 }
 
-/*
- * The following are required for parts of the kernel
- * that cannot resolve these functions as inlines:
- */
-extern thread_t current_act(void) __attribute__((const));
-thread_t
-current_act(void)
-{
-	return current_thread_fast();
-}
-
-#undef current_thread
-extern thread_t current_thread(void) __attribute__((const));
 thread_t
 current_thread(void)
 {

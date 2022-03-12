@@ -1842,12 +1842,7 @@ ip6_savecontrol_v4(struct inpcb *inp, struct mbuf *m, struct mbuf **mp,
 		}
 
 		// Send IN6P_PKTINFO for v4-mapped address
-		if ((inp->inp_flags & IN6P_PKTINFO) != 0
-#if CONTENT_FILTER
-		    /* Content Filter needs to see local address */
-		    || (inp->inp_socket->so_cfil_db != NULL)
-#endif
-		    ) {
+		if ((inp->inp_flags & IN6P_PKTINFO) != 0 || SOFLOW_ENABLED(inp->inp_socket)) {
 			struct in6_pktinfo pi6 = {
 				.ipi6_addr = IN6ADDR_V4MAPPED_INIT,
 				.ipi6_ifindex = (m && m->m_pkthdr.rcvif) ? m->m_pkthdr.rcvif->if_index : 0,
@@ -1868,12 +1863,7 @@ ip6_savecontrol_v4(struct inpcb *inp, struct mbuf *m, struct mbuf **mp,
 	}
 
 	/* RFC 2292 sec. 5 */
-	if ((inp->inp_flags & IN6P_PKTINFO) != 0
-#if CONTENT_FILTER
-	    /* Content Filter needs to see local address */
-	    || (inp->inp_socket->so_cfil_db != NULL)
-#endif
-	    ) {
+	if ((inp->inp_flags & IN6P_PKTINFO) != 0 || SOFLOW_ENABLED(inp->inp_socket)) {
 		struct in6_pktinfo pi6;
 
 		bcopy(&ip6->ip6_dst, &pi6.ipi6_addr, sizeof(struct in6_addr));

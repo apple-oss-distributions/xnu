@@ -409,7 +409,7 @@ install-vm_test_code_signing_helper: vm_test_code_signing_helper
 
 vm_test_code_signing: OTHER_LDFLAGS += -ldarwintest_utils
 
-INCLUDED_TEST_SOURCE_DIRS += vm ipc
+INCLUDED_TEST_SOURCE_DIRS += vm ipc rm
 
 # Revert to legacy vm_test suite until <rdar://problem/56675212> gets solved
 EXCLUDED_SOURCES += vm/vm_allocation.c
@@ -502,6 +502,7 @@ endif
 tcp_bind_connect: CODE_SIGN_ENTITLEMENTS = network_entitlements.plist
 socket_bind_35243417: CODE_SIGN_ENTITLEMENTS = network_entitlements.plist
 socket_bind_35685803: CODE_SIGN_ENTITLEMENTS = network_entitlements.plist
+icmp_fragmetned_payload: CODE_SIGN_ENTITLEMENTS = network_entitlements.plist
 
 net_tuntests: CODE_SIGN_ENTITLEMENTS = network_entitlements.plist
 
@@ -844,7 +845,7 @@ endif
 
 # Same helper used in execperf, different build system.
 static_binary: ../tools/tests/execperf/exit-asm.S
-	$(CC) $(DT_CFLAGS) $(CFLAGS) $(filter-out -l%,$(DT_LDFLAGS) $(LDFLAGS) $(OTHER_LDFLAGS)) $< -o $(SYMROOT)/static_binary -static -nostartfiles -nodefaultlibs -Wl,-version_load_command -e _main
+	$(CC) $(DT_CFLAGS) $(CFLAGS) $(filter-out -l%,$(DT_LDFLAGS) $(LDFLAGS) $(OTHER_LDFLAGS)) $< -o $(SYMROOT)/static_binary -static -nostartfiles -nodefaultlibs -Wl,-version_load_command -Wl,-segalign,0x4000 -e _main
 	CODESIGN_ALLOCATE=$(CODESIGN_ALLOCATE) $(CODESIGN) --force --sign - --timestamp=none $(SYMROOT)/static_binary
 
 install-static_binary: static_binary
@@ -857,7 +858,6 @@ EXCLUDED_SOURCES += static_binary.c
 test_static_binary_csflags: static_binary
 test_static_binary_csflags: OTHER_LDFLAGS += -ldarwintest_utils
 
-INCLUDED_TEST_SOURCE_DIRS += lockf_uaf_poc
 
 trial_experiments: CODE_SIGN_ENTITLEMENTS = trial_experiments.entitlements
 trial_experiments: OTHER_CFLAGS += -DENTITLED=1 test_utils.c drop_priv.c

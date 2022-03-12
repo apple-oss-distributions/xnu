@@ -1988,6 +1988,7 @@ flow_divert_disable(struct flow_divert_pcb *fd_cb)
 	proc_t last_proc = NULL;
 	struct sockaddr *remote_endpoint = fd_cb->original_remote_endpoint;
 	bool do_connect = !(fd_cb->flags & FLOW_DIVERT_IMPLICIT_CONNECT);
+	bool unset_connecting = false;
 	struct inpcb *inp = NULL;
 
 	so = fd_cb->so;
@@ -1996,6 +1997,8 @@ flow_divert_disable(struct flow_divert_pcb *fd_cb)
 	}
 
 	FDLOG0(LOG_NOTICE, fd_cb, "Skipped all flow divert services, disabling flow divert");
+
+	unset_connecting = (SOCK_TYPE(so) == SOCK_STREAM || (fd_cb->flags & FLOW_DIVERT_HAS_TOKEN));
 
 	/* Restore the IP state */
 	inp = sotoinpcb(so);
@@ -2031,6 +2034,9 @@ flow_divert_disable(struct flow_divert_pcb *fd_cb)
 	last_proc = proc_find(so->last_pid);
 
 	if (do_connect) {
+		if (unset_connecting) {
+			so->so_state &= ~SS_ISCONNECTING; /* Get out of the connecting state to avoid confusing NECP */
+		}
 		/* Connect using the original protocol */
 		error = (*so->so_proto->pr_usrreqs->pru_connect)(so, remote_endpoint, (last_proc != NULL ? last_proc : current_proc()));
 		if (error) {
@@ -2540,18 +2546,16 @@ static mbuf_t
 flow_divert_create_control_mbuf(struct flow_divert_pcb *fd_cb)
 {
 	struct inpcb *inp = sotoinpcb(fd_cb->so);
-	bool is_cfil_enabled = false;
-#if CONTENT_FILTER
-	/* Content Filter needs to see the local address */
-	is_cfil_enabled = (inp->inp_socket && inp->inp_socket->so_cfil_db != NULL);
-#endif
+	bool need_recvdstaddr = false;
+	/* Socket flow tracking needs to see the local address */
+	need_recvdstaddr = SOFLOW_ENABLED(inp->inp_socket);
 	if ((inp->inp_vflag & INP_IPV4) &&
 	    fd_cb->local_endpoint.sa.sa_family == AF_INET &&
-	    ((inp->inp_flags & INP_RECVDSTADDR) || is_cfil_enabled)) {
+	    ((inp->inp_flags & INP_RECVDSTADDR) || need_recvdstaddr)) {
 		return sbcreatecontrol((caddr_t)&(fd_cb->local_endpoint.sin.sin_addr), sizeof(struct in_addr), IP_RECVDSTADDR, IPPROTO_IP);
 	} else if ((inp->inp_vflag & INP_IPV6) &&
 	    fd_cb->local_endpoint.sa.sa_family == AF_INET6 &&
-	    ((inp->inp_flags & IN6P_PKTINFO) || is_cfil_enabled)) {
+	    ((inp->inp_flags & IN6P_PKTINFO) || need_recvdstaddr)) {
 		struct in6_pktinfo pi6;
 		memset(&pi6, 0, sizeof(pi6));
 		pi6.ipi6_addr = fd_cb->local_endpoint.sin6.sin6_addr;
@@ -3642,7 +3646,7 @@ flow_divert_data_out(struct socket *so, int flags, mbuf_t data, struct sockaddr 
 	 * If the socket is subject to a UDP Content Filter and no remote address is passed in,
 	 * retrieve the CFIL saved remote address from the mbuf and use it.
 	 */
-	if (to == NULL && so->so_cfil_db) {
+	if (to == NULL && CFIL_DGRAM_FILTERED(so)) {
 		struct sockaddr *cfil_faddr = NULL;
 		cfil_tag = cfil_dgram_get_socket_state(data, NULL, NULL, &cfil_faddr, NULL);
 		if (cfil_tag) {

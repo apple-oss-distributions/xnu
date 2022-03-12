@@ -1266,7 +1266,7 @@ kill_all_frozen_processes(uint64_t max_band, bool suspended_only, os_reason_t je
 		}
 
 		if (state & (P_MEMSTAT_TERMINATED | P_MEMSTAT_LOCKED)) {
-			os_log_with_startup_serial(OS_LOG_DEFAULT, "memorystatus: Skipping kill of frozen process %s (%d) because it's already exiting.\n", p->p_name, p->p_pid);
+			os_log_with_startup_serial(OS_LOG_DEFAULT, "memorystatus: Skipping kill of frozen process %s (%d) because it's already exiting.\n", p->p_name, proc_getpid(p));
 			skips++;
 			continue;
 		}

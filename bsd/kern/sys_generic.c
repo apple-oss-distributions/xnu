@@ -195,7 +195,6 @@ select_waitq_init(void)
 #define f_type fp_glob->fg_ops->fo_type
 #define f_cred fp_glob->fg_cred
 #define f_ops fp_glob->fg_ops
-#define f_data fp_glob->fg_data
 
 /*
  * Validate if the file can be used for random access (pread, pwrite, etc).
@@ -214,7 +213,7 @@ valid_for_random_access(struct fileproc *fp)
 		return ESPIPE;
 	}
 
-	vnode_t vp = (struct vnode *)fp->fp_glob->fg_data;
+	vnode_t vp = (struct vnode *)fp_get_data(fp);
 	if (__improbable(vnode_isfifo(vp))) {
 		return ESPIPE;
 	}
@@ -380,7 +379,7 @@ dofileread(vfs_context_t ctx, struct fileproc *fp,
 		return EINVAL;
 	}
 
-	if (IS_64BIT_PROCESS(vfs_context_proc(ctx))) {
+	if (vfs_context_is64bit(ctx)) {
 		auio = uio_createwithbuffer(1, offset, UIO_USERSPACE64, UIO_READ,
 		    &uio_buf[0], sizeof(uio_buf));
 	} else {
@@ -589,7 +588,7 @@ pwrite_nocancel(struct proc *p, struct pwrite_nocancel_args *uap, user_ssize_t *
 		struct vfs_context context = *vfs_context_current();
 		context.vc_ucred = fp->fp_glob->fg_cred;
 
-		vp = (vnode_t)fp->fp_glob->fg_data;
+		vp = (vnode_t)fp_get_data(fp);
 		if (vnode_isfifo(vp)) {
 			error = ESPIPE;
 			goto errout;
@@ -636,7 +635,7 @@ dofilewrite(vfs_context_t ctx, struct fileproc *fp,
 		return EINVAL;
 	}
 
-	if (IS_64BIT_PROCESS(vfs_context_proc(ctx))) {
+	if (vfs_context_is64bit(ctx)) {
 		auio = uio_createwithbuffer(1, offset, UIO_USERSPACE64, UIO_WRITE,
 		    &uio_buf[0], sizeof(uio_buf));
 	} else {
@@ -1047,7 +1046,7 @@ ioctl(struct proc *p, struct ioctl_args *uap, __unused int32_t *retval)
 	case FIOSETOWN:
 		tmp = *(int *)datap;
 		if (fp->f_type == DTYPE_SOCKET) {
-			((struct socket *)fp->f_data)->so_pgid = tmp;
+			((struct socket *)fp_get_data(fp))->so_pgid = tmp;
 			break;
 		}
 		if (fp->f_type == DTYPE_PIPE) {
@@ -1070,7 +1069,7 @@ ioctl(struct proc *p, struct ioctl_args *uap, __unused int32_t *retval)
 
 	case FIOGETOWN:
 		if (fp->f_type == DTYPE_SOCKET) {
-			*(int *)datap = ((struct socket *)fp->f_data)->so_pgid;
+			*(int *)datap = ((struct socket *)fp_get_data(fp))->so_pgid;
 			break;
 		}
 		error = fo_ioctl(fp, TIOCGPGRP, datap, &context);
@@ -1281,7 +1280,7 @@ pselect_nocancel(struct proc *p, struct pselect_nocancel_args *uap, int32_t *ret
 		clock_absolutetime_interval_to_deadline(tstoabstime(&ts), &timeout);
 	}
 
-	ut = get_bsdthread_info(current_thread());
+	ut = current_uthread();
 
 	if (uap->mask != USER_ADDR_NULL) {
 		/* save current mask, then copyin and set new mask */
@@ -2247,7 +2246,7 @@ seldrop_locked(struct proc *p, u_int32_t *ibits, int nfd, int lim, int *need_wak
 	u_int32_t *iptr;
 	u_int nw;
 	int error = 0;
-	uthread_t uth = get_bsdthread_info(current_thread());
+	uthread_t uth = current_uthread();
 	struct _select_data *seldata;
 
 	*need_wakeup = 0;

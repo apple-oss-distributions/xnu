@@ -84,11 +84,7 @@
 void
 vnode_pager_throttle(void)
 {
-	struct uthread *ut;
-
-	ut = get_bsdthread_info(current_thread());
-
-	if (ut->uu_lowpri_window) {
+	if (current_uthread()->uu_lowpri_window) {
 		throttle_lowpri_io(1);
 	}
 }

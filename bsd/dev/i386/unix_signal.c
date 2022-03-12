@@ -180,7 +180,7 @@ sendsig(struct proc *p, user_addr_t ua_catcher, int sig, int mask, __unused uint
 	user_addr_t     ua_mctxp;
 	user_siginfo_t  sinfo64;
 
-	struct sigacts *ps = p->p_sigacts;
+	struct sigacts *ps = &p->p_sigacts;
 	int oonstack, flavor;
 	user_addr_t trampact;
 	int sigonstack;
@@ -736,7 +736,7 @@ sendsig(struct proc *p, user_addr_t ua_catcher, int sig, int mask, __unused uint
 bad:
 
 	proc_lock(p);
-	SIGACTION(p, SIGILL) = SIG_DFL;
+	proc_set_sigact(p, SIGILL, SIG_DFL);
 	sig = sigmask(SIGILL);
 	p->p_sigignore &= ~sig;
 	p->p_sigcatch &= ~sig;
@@ -773,7 +773,7 @@ sigreturn(struct proc *p, struct sigreturn_args *uap, __unused int *retval)
 
 	thread_t thread = current_thread();
 	struct uthread * ut;
-	struct sigacts *ps = p->p_sigacts;
+	struct sigacts *ps = &p->p_sigacts;
 	int     error;
 	int     onstack = 0;
 

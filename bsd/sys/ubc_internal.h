@@ -100,18 +100,24 @@ struct cs_hash;
 uint8_t cs_hash_type(struct cs_hash const *);
 
 struct cs_blob {
-	struct cs_blob  * XNU_PTRAUTH_SIGNED_PTR("cs_blob.csb_next") csb_next;
-	cpu_type_t      csb_cpu_type;
-	cpu_subtype_t   csb_cpu_subtype;
-	unsigned int    csb_flags;
+	struct cs_blob  *csb_next;
+	vnode_t         csb_vnode;
+	void            *csb_ro_addr;
+	__xnu_struct_group(cs_cpu_info, csb_cpu_info, {
+		cpu_type_t      csb_cpu_type;
+		cpu_subtype_t   csb_cpu_subtype;
+	});
+	__xnu_struct_group(cs_signer_info, csb_signer_info, {
+		unsigned int    csb_flags;
+		unsigned int    csb_signer_type;
+	});
 	off_t           csb_base_offset;        /* Offset of Mach-O binary in fat binary */
 	off_t           csb_start_offset;       /* Blob coverage area start, from csb_base_offset */
 	off_t           csb_end_offset;         /* Blob coverage area end, from csb_base_offset */
 	vm_size_t       csb_mem_size;
 	vm_offset_t     csb_mem_offset;
-	void            * XNU_PTRAUTH_SIGNED_PTR("cs_blob.csb_mem_kaddr") csb_mem_kaddr;
+	void            *csb_mem_kaddr;
 	unsigned char   csb_cdhash[CS_CDHASH_LEN];
-	ptrauth_generic_signature_t csb_cdhash_signature;
 	const struct cs_hash  *csb_hashtype;
 #if CONFIG_SUPPLEMENTAL_SIGNATURES
 	unsigned char   csb_linkage[CS_CDHASH_LEN];
@@ -119,23 +125,20 @@ struct cs_blob {
 #endif
 	int             csb_hash_pageshift;
 	int             csb_hash_firstlevel_pageshift;   /* First hash this many bytes, then hash the hashes together */
-	const CS_CodeDirectory * XNU_PTRAUTH_SIGNED_PTR("cs_blob.csb_cd") csb_cd;
-	const char      * XNU_PTRAUTH_SIGNED_PTR("cs_blob.csb_teamid") csb_teamid;
+	const CS_CodeDirectory *csb_cd;
+	const char      *csb_teamid;
 #if CONFIG_SUPPLEMENTAL_SIGNATURES
-	char            * XNU_PTRAUTH_SIGNED_PTR("cs_blob.csb_supplement_teamid") csb_supplement_teamid;
+	char            *csb_supplement_teamid;
 #endif
-	const CS_GenericBlob * XNU_PTRAUTH_SIGNED_PTR("cs_blob.csb_entitlements_blob") csb_entitlements_blob;    /* raw blob, subrange of csb_mem_kaddr */
-	ptrauth_generic_signature_t csb_entitlements_blob_signature;
-
-	const CS_GenericBlob * XNU_PTRAUTH_SIGNED_PTR("cs_blob.csb_der_entitlements_blob") csb_der_entitlements_blob;    /* raw blob, subrange of csb_mem_kaddr */
-	ptrauth_generic_signature_t csb_der_entitlements_blob_signature;
-
-	void *          XNU_PTRAUTH_SIGNED_PTR("cs_blob.csb_entitlements") csb_entitlements;       /* The entitlements as an OSEntitlements object */
-	unsigned int    csb_signer_type;
+	const CS_GenericBlob *csb_entitlements_blob;    /* raw blob, subrange of csb_mem_kaddr */
+	const CS_GenericBlob *csb_der_entitlements_blob;    /* raw blob, subrange of csb_mem_kaddr */
+	void *          csb_entitlements;       /* The entitlements as an OSEntitlements object */
 	unsigned int    csb_reconstituted;      /* signature has potentially been modified after validation */
-	/* The following two will be replaced by the csb_signer_type. */
-	unsigned int    csb_platform_binary:1;
-	unsigned int    csb_platform_path:1;
+	__xnu_struct_group(cs_blob_platform_flags, csb_platform_flags, {
+		/* The following two will be replaced by the csb_signer_type. */
+		unsigned int    csb_platform_binary:1;
+		unsigned int    csb_platform_path:1;
+	});
 
 
 	vm_address_t    profile_kaddr;
@@ -160,9 +163,9 @@ struct ubc_info {
 
 	struct timespec         cs_mtime;       /* modify time of file when
 	                                         *   first cs_blob was loaded */
-	struct  cs_blob         * XNU_PTRAUTH_SIGNED_PTR("ubc_info.cs_blobs") cs_blobs; /* for CODE SIGNING */
+	struct  cs_blob         * cs_blobs; /* for CODE SIGNING */
 #if CONFIG_SUPPLEMENTAL_SIGNATURES
-	struct  cs_blob         * XNU_PTRAUTH_SIGNED_PTR("ubc_info.cs_blob_supplement") cs_blob_supplement;/* supplemental blob (note that there can only be one supplement) */
+	struct  cs_blob         * cs_blob_supplement;/* supplemental blob (note that there can only be one supplement) */
 #endif
 #if CHECK_CS_VALIDATION_BITMAP
 	void                    * XNU_PTRAUTH_SIGNED_PTR("ubc_info.cs_valid_bitmap") cs_valid_bitmap;     /* right now: used only for signed files on the read-only root volume */
@@ -218,6 +221,7 @@ int     ubc_getcdhash(vnode_t, off_t, unsigned char *);
 
 /* code signing */
 struct cs_blob;
+void    cs_blob_require(struct cs_blob *, vnode_t);
 int     ubc_cs_blob_add(vnode_t, uint32_t, cpu_type_t, cpu_subtype_t, off_t, vm_address_t *, vm_size_t, struct image_params *, int, struct cs_blob **);
 #if CONFIG_SUPPLEMENTAL_SIGNATURES
 int     ubc_cs_blob_add_supplement(vnode_t, vnode_t, off_t, vm_address_t *, vm_size_t, struct cs_blob **);

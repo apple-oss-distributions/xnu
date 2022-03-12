@@ -67,7 +67,7 @@ def ShowX86UserStack(thread, user_lib_info = None):
     frameno = 0
     while True:
         frameno = frameno + 1
-        frame = GetUserDataAsString(thread.task, unsigned(cur_frame), user_abi_ret_offset*2)
+        frame = GetUserDataAsString(thread.t_tro.tro_task, unsigned(cur_frame), user_abi_ret_offset*2)
         cur_ip = _ExtractDataFromString(frame, user_abi_ret_offset, user_abi_type)
         cur_frame = _ExtractDataFromString(frame, 0, user_abi_type)
         if not cur_frame or cur_frame == 0x0000000800000008:
@@ -101,7 +101,7 @@ def ShowARMUserStack(thread, user_lib_info = None):
         frameformat = "{0:>2d} {3: <30s}  0x{2:0>8x}"
     framesize = 8
     frametype = "uint32_t"
-    _PrintARMUserStack(thread.task, cur_pc, cur_fp, framesize, frametype, frameformat, user_lib_info=user_lib_info)
+    _PrintARMUserStack(thread.t_tro.tro_task, cur_pc, cur_fp, framesize, frametype, frameformat, user_lib_info=user_lib_info)
 
 def ShowARM64UserStack(thread, user_lib_info = None):
     SAVED_STATE_FLAVOR_ARM=20
@@ -127,7 +127,7 @@ def ShowARM64UserStack(thread, user_lib_info = None):
     else:
         raise RuntimeError("Thread {0} has an invalid flavor {1}".format(unsigned(thread), flavor))
 
-    _PrintARMUserStack(thread.task, cur_pc, cur_fp, framesize, frametype, frameformat, user_lib_info=user_lib_info)
+    _PrintARMUserStack(thread.t_tro.tro_task, cur_pc, cur_fp, framesize, frametype, frameformat, user_lib_info=user_lib_info)
 
 
 @lldb_command('showthreaduserstack')
@@ -296,7 +296,7 @@ Synthetic crash log generated from Kernel userstacks
         osversion = "iOS"
     osversion += " ({:s})".format(kern.globals.osversion)
     if pval:
-        pid = pval.p_pid
+        pid = GetProcPID(pval)
         pname = GetProcName(pval)
         path = GetProcName(pval)
         ppid = pval.p_ppid
@@ -365,7 +365,7 @@ def ShowTaskUserStacksCmdHelper(cmd_args=None, cmd_options={}):
         pidval = ArgumentStringToInt(cmd_options["-P"])
         for t in kern.tasks:
             pval = Cast(t.bsd_info, 'proc *')
-            if pval and pval.p_pid == pidval:
+            if pval and GetProcPID(pval) == pidval:
                 task_list.append(t)
                 break
     elif cmd_args:

@@ -2570,7 +2570,7 @@ waitq_assert_wait64_locked(struct waitq *waitq,
 		if (deadline != 0) {
 			boolean_t act;
 
-			act = timer_call_enter_with_leeway(&thread->wait_timer,
+			act = timer_call_enter_with_leeway(thread->wait_timer,
 			    NULL,
 			    deadline, leeway,
 			    urgency, FALSE);

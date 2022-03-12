@@ -70,37 +70,26 @@
 
 #include <security/mac_internal.h>
 
-static struct label *
-mac_posixshm_label_alloc(void)
-{
-	struct label *label;
-
-	label = mac_labelzone_alloc(MAC_WAITOK);
-	if (label == NULL) {
-		return NULL;
-	}
-	MAC_PERFORM(posixshm_label_init, label);
-	return label;
-}
-
 void
 mac_posixshm_label_init(struct pshminfo *pshm)
 {
-	pshm->pshm_label = mac_posixshm_label_alloc();
-}
-
-static void
-mac_posixshm_label_free(struct label *label)
-{
-	MAC_PERFORM(posixshm_label_destroy, label);
-	mac_labelzone_free(label);
+	mac_labelzone_alloc_owned(&pshm->pshm_label, MAC_WAITOK, ^(struct label *label) {
+		MAC_PERFORM(posixshm_label_init, label);
+	});
 }
 
 void
 mac_posixshm_label_destroy(struct pshminfo *pshm)
 {
-	mac_posixshm_label_free(pshm->pshm_label);
-	pshm->pshm_label = NULL;
+	mac_labelzone_free_owned(&pshm->pshm_label, ^(struct label *label) {
+		MAC_PERFORM(posixshm_label_destroy, label);
+	});
+}
+
+struct label *
+mac_posixshm_label(struct pshminfo *pshm)
+{
+	return mac_label_verify(&pshm->pshm_label);
 }
 
 void
@@ -116,7 +105,7 @@ void
 mac_posixshm_label_associate(kauth_cred_t cred, struct pshminfo *pshm,
     const char *name)
 {
-	MAC_PERFORM(posixshm_label_associate, cred, pshm, pshm->pshm_label, name);
+	MAC_PERFORM(posixshm_label_associate, cred, pshm, mac_posixshm_label(pshm), name);
 }
 
 int
@@ -148,7 +137,7 @@ mac_posixshm_check_open(kauth_cred_t cred, struct pshminfo *shm, int fflags)
 	}
 #endif
 
-	MAC_CHECK(posixshm_check_open, cred, shm, shm->pshm_label, fflags);
+	MAC_CHECK(posixshm_check_open, cred, shm, mac_posixshm_label(shm), fflags);
 
 	return error;
 }
@@ -166,7 +155,7 @@ mac_posixshm_check_mmap(kauth_cred_t cred, struct pshminfo *shm,
 	}
 #endif
 
-	MAC_CHECK(posixshm_check_mmap, cred, shm, shm->pshm_label,
+	MAC_CHECK(posixshm_check_mmap, cred, shm, mac_posixshm_label(shm),
 	    prot, flags);
 
 	return error;
@@ -184,7 +173,7 @@ mac_posixshm_check_stat(kauth_cred_t cred, struct pshminfo *shm)
 	}
 #endif
 
-	MAC_CHECK(posixshm_check_stat, cred, shm, shm->pshm_label);
+	MAC_CHECK(posixshm_check_stat, cred, shm, mac_posixshm_label(shm));
 
 	return error;
 }
@@ -202,7 +191,7 @@ mac_posixshm_check_truncate(kauth_cred_t cred, struct pshminfo *shm,
 	}
 #endif
 
-	MAC_CHECK(posixshm_check_truncate, cred, shm, shm->pshm_label, size);
+	MAC_CHECK(posixshm_check_truncate, cred, shm, mac_posixshm_label(shm), size);
 
 	return error;
 }
@@ -220,7 +209,7 @@ mac_posixshm_check_unlink(kauth_cred_t cred, struct pshminfo *shm,
 	}
 #endif
 
-	MAC_CHECK(posixshm_check_unlink, cred, shm, shm->pshm_label, name);
+	MAC_CHECK(posixshm_check_unlink, cred, shm, mac_posixshm_label(shm), name);
 
 	return error;
 }

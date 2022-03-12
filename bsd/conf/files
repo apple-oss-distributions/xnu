@@ -512,6 +512,7 @@ bsd/kern/socket_info.c			optional sockets
 bsd/kern/subr_eventhandler.c		standard
 bsd/kern/sys_reason.c			standard
 bsd/kern/tracker.c			optional sockets
+bsd/kern/socket_flows.c                 optional sockets
 
 bsd/vm/vnode_pager.c			standard
 bsd/vm/vm_unix.c				standard
@@ -548,5 +549,6 @@ bsd/tests/bsd_tests.c 			optional config_xnupost
 bsd/tests/copyio_tests.c		optional config_xnupost
 bsd/tests/pmap_test_sysctl.c		optional config_xnupost
 bsd/tests/ptrauth_data_tests_sysctl.c		optional config_xnupost
+bsd/tests/readonly_proc_tests_sysctl.c      optional config_xnupost
 
 bsd/net/skywalk_stubs.c				standard

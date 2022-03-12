@@ -782,9 +782,6 @@ parse_machfile(
 	int                     error;
 	int                     resid = 0;
 	int                     spawn = (imgp->ip_flags & IMGPF_SPAWN);
-#if CONFIG_VFORK
-	int                     vfexec = (imgp->ip_flags & IMGPF_VFORK_EXEC);
-#endif /* CONFIG_VFORK */
 	size_t                  mach_header_sz = sizeof(struct mach_header);
 	boolean_t               abi64;
 	boolean_t               got_code_signatures = FALSE;
@@ -1367,13 +1364,6 @@ parse_machfile(
 					 */
 					if (!spawn) {
 						assert(load_failure_reason != OS_REASON_NULL);
-#if CONFIG_VFORK
-						if (vfexec) {
-							psignal_vfork_with_reason(p, get_threadtask(imgp->ip_new_thread),
-							    imgp->ip_new_thread, SIGKILL, load_failure_reason);
-							load_failure_reason = OS_REASON_NULL;
-						} else
-#endif /* CONFIG_VFORK */
 						{
 							psignal_with_reason(p, SIGKILL, load_failure_reason);
 							load_failure_reason = OS_REASON_NULL;
@@ -3172,8 +3162,11 @@ load_code_signature(
 			/* If we were revaliding a CS blob with any CPU arch we adjust it */
 			if (anyCPU) {
 				vnode_lock_spin(vp);
-				blob->csb_cpu_type = cputype;
-				blob->csb_cpu_subtype = cpusubtype;
+				struct cs_cpu_info cpu_info = {
+					.csb_cpu_type = cputype,
+					.csb_cpu_subtype = cpusubtype
+				};
+				zalloc_ro_update_field(ZONE_ID_CS_BLOB, blob, csb_cpu_info, &cpu_info);
 				vnode_unlock(vp);
 			}
 			ret = LOAD_SUCCESS;

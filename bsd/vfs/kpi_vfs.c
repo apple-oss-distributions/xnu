@@ -451,7 +451,7 @@ vfs_typenum(mount_t mp)
 void*
 vfs_mntlabel(mount_t mp)
 {
-	return (void*)mp->mnt_mntlabel;
+	return (void*)mac_mount_label(mp);
 }
 
 uint64_t
@@ -1265,12 +1265,14 @@ vfs_context_issignal(vfs_context_t ctx, sigset_t mask)
 int
 vfs_context_is64bit(vfs_context_t ctx)
 {
-	proc_t proc = vfs_context_proc(ctx);
+	uthread_t uth;
 
-	if (proc) {
-		return proc_is64bit(proc);
+	if (ctx != NULL && ctx->vc_thread != NULL) {
+		uth = get_bsdthread_info(ctx->vc_thread);
+	} else {
+		uth = current_uthread();
 	}
-	return 0;
+	return uthread_is64bit(uth);
 }
 
 boolean_t
@@ -1305,11 +1307,9 @@ vfs_context_can_resolve_triggers(vfs_context_t ctx)
  *		o	There is no Mach task associated with the Mach thread
  *		o	There is no proc_t associated with the Mach task
  *		o	The proc_t has no per process open file table
- *		o	The proc_t is post-vfork()
  *
  *		This causes this function to return a value matching as
- *		closely as possible the previous behaviour, while at the
- *		same time avoiding the task lending that results from vfork()
+ *		closely as possible the previous behaviour.
  */
 proc_t
 vfs_context_proc(vfs_context_t ctx)
@@ -1319,11 +1319,6 @@ vfs_context_proc(vfs_context_t ctx)
 	if (ctx != NULL && ctx->vc_thread != NULL) {
 		proc = (proc_t)get_bsdthreadtask_info(ctx->vc_thread);
 	}
-#if CONFIG_VFORK
-	if (proc != NULL && (proc->p_lflag & P_LVFORK)) {
-		proc = NULL;
-	}
-#endif /* CONFIG_VFORK */
 
 	return proc == NULL ? current_proc() : proc;
 }
@@ -1458,67 +1453,33 @@ vfs_context_create(vfs_context_t ctx)
 
 	newcontext = zalloc_flags(KT_VFS_CONTEXT, Z_WAITOK | Z_ZERO | Z_NOFAIL);
 
-	kauth_cred_t safecred;
-	if (ctx) {
-		newcontext->vc_thread = ctx->vc_thread;
-		safecred = ctx->vc_ucred;
-	} else {
-		newcontext->vc_thread = current_thread();
-		safecred = kauth_cred_get();
+	if (ctx == NULL) {
+		ctx = vfs_context_current();
 	}
-	if (IS_VALID_CRED(safecred)) {
-		kauth_cred_ref(safecred);
+	*newcontext = *ctx;
+	if (IS_VALID_CRED(ctx->vc_ucred)) {
+		kauth_cred_ref(ctx->vc_ucred);
 	}
-	newcontext->vc_ucred = safecred;
+
 	return newcontext;
-	return NULL;
 }
 
 
 vfs_context_t
 vfs_context_current(void)
 {
-	vfs_context_t ctx = NULL;
-	uthread_t ut = (uthread_t)get_bsdthread_info(current_thread());
+	static_assert(offsetof(struct thread_ro, tro_owner) ==
+	    offsetof(struct vfs_context, vc_thread));
+	static_assert(offsetof(struct thread_ro, tro_cred) ==
+	    offsetof(struct vfs_context, vc_ucred));
 
-	if (ut != NULL) {
-		if (ut->uu_context.vc_ucred != NULL) {
-			ctx = &ut->uu_context;
-		}
-	}
-
-	return ctx == NULL ? vfs_context_kernel() : ctx;
+	return (vfs_context_t)current_thread_ro();
 }
 
-
-/*
- * XXX Do not ask
- *
- * Dangerous hack - adopt the first kernel thread as the current thread, to
- * get to the vfs_context_t in the uthread associated with a kernel thread.
- * This is used by UDF to make the call into IOCDMediaBSDClient,
- * IOBDMediaBSDClient, and IODVDMediaBSDClient to determine whether the
- * ioctl() is being called from kernel or user space (and all this because
- * we do not pass threads into our ioctl()'s, instead of processes).
- *
- * This is also used by imageboot_setup(), called early from bsd_init() after
- * kernproc has been given a credential.
- *
- */
-static struct vfs_context kerncontext;
 vfs_context_t
 vfs_context_kernel(void)
 {
-	return &kerncontext;
-}
-
-/*
- * Called early in bsd_init() when kernproc sets its thread and cred context.
- */
-void
-vfs_set_context_kernel(vfs_context_t ctx)
-{
-	kerncontext = *ctx;
+	return &vfs_context0;
 }
 
 int
@@ -1552,7 +1513,7 @@ vfs_context_issuser(vfs_context_t ctx)
 int
 vfs_context_iskernel(vfs_context_t ctx)
 {
-	return ctx == &kerncontext;
+	return ctx == &vfs_context0;
 }
 
 /*
@@ -1585,7 +1546,7 @@ vfs_set_thread_fs_private(uint8_t tag, uint64_t fs_private)
 		return ENOTSUP;
 	}
 
-	ut = get_bsdthread_info(current_thread());
+	ut = current_uthread();
 	ut->t_fs_private = fs_private;
 
 	return 0;
@@ -1600,7 +1561,7 @@ vfs_get_thread_fs_private(uint8_t tag, uint64_t *fs_private)
 		return ENOTSUP;
 	}
 
-	ut = get_bsdthread_info(current_thread());
+	ut = current_uthread();
 	*fs_private = ut->t_fs_private;
 
 	return 0;

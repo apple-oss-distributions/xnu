@@ -166,12 +166,40 @@ enum{
 #define QUERY_CONTINUATION_SRC_COUNT 100
 #endif /* XNU_TARGET_OS_OSX */
 
+#ifndef ROUNDUP64
+#define ROUNDUP64(x) P2ROUNDUP((x), sizeof (u_int64_t))
+#endif
+
+#ifndef ADVANCE64
+#define ADVANCE64(p, n) (void*)((char *)(p) + ROUNDUP64(n))
+#endif
+
 typedef TAILQ_HEAD(, nstat_src)     tailq_head_nstat_src;
 typedef TAILQ_ENTRY(nstat_src)      tailq_entry_nstat_src;
+
+typedef TAILQ_HEAD(, nstat_tu_shadow)   tailq_head_tu_shadow;
+typedef TAILQ_ENTRY(nstat_tu_shadow)    tailq_entry_tu_shadow;
+
+typedef TAILQ_HEAD(, nstat_generic_shadow) tailq_head_generic_shadow;
+typedef TAILQ_ENTRY(nstat_generic_shadow)  tailq_entry_generic_shadow;
+
+typedef TAILQ_HEAD(, nstat_procdetails) tailq_head_procdetails;
+typedef TAILQ_ENTRY(nstat_procdetails)  tailq_entry_procdetails;
+
+struct nstat_procdetails {
+	tailq_entry_procdetails         pdet_link;
+	int                             pdet_pid;
+	u_int64_t                       pdet_upid;
+	char                            pdet_procname[64];
+	uuid_t                          pdet_uuid;
+	u_int32_t                       pdet_refcnt;
+	u_int32_t                       pdet_magic;
+};
 
 typedef struct nstat_provider_filter {
 	u_int64_t                       npf_flags;
 	u_int64_t                       npf_events;
+	u_int64_t                       npf_extensions;
 	pid_t                           npf_pid;
 	uuid_t                          npf_uuid;
 } nstat_provider_filter;
@@ -191,6 +219,8 @@ typedef struct nstat_control_state {
 	/* state maintained for partial query requests */
 	u_int64_t               ncs_context;
 	u_int64_t               ncs_seq;
+	/* For ease of debugging with lldb macros */
+	struct nstat_procdetails *ncs_procdetails;
 } nstat_control_state;
 
 typedef struct nstat_provider {
@@ -204,18 +234,9 @@ typedef struct nstat_provider {
 	void                    (*nstat_watcher_remove)(nstat_control_state *state);
 	errno_t                 (*nstat_copy_descriptor)(nstat_provider_cookie_t cookie, void *data, size_t len);
 	void                    (*nstat_release)(nstat_provider_cookie_t cookie, boolean_t locked);
-	bool                    (*nstat_reporting_allowed)(nstat_provider_cookie_t cookie, nstat_provider_filter *filter);
-	size_t                  (*nstat_domain_info)(nstat_provider_cookie_t cookie, nstat_domain_info *domain_info);
+	bool                    (*nstat_reporting_allowed)(nstat_provider_cookie_t cookie, nstat_provider_filter *filter, u_int64_t suppression_flags);
+	size_t                  (*nstat_copy_extension)(nstat_provider_cookie_t cookie, u_int32_t extension_id, void *buf, size_t len);
 } nstat_provider;
-
-typedef STAILQ_HEAD(, nstat_src)        stailq_head_nstat_src;
-typedef STAILQ_ENTRY(nstat_src)         stailq_entry_nstat_src;
-
-typedef TAILQ_HEAD(, nstat_tu_shadow)   tailq_head_tu_shadow;
-typedef TAILQ_ENTRY(nstat_tu_shadow)    tailq_entry_tu_shadow;
-
-typedef TAILQ_HEAD(, nstat_procdetails) tailq_head_procdetails;
-typedef TAILQ_ENTRY(nstat_procdetails)  tailq_entry_procdetails;
 
 typedef struct nstat_src {
 	tailq_entry_nstat_src   ns_control_link;        // All sources for the nstat_control_state, for iterating over.
@@ -224,16 +245,17 @@ typedef struct nstat_src {
 	nstat_provider          *provider;
 	nstat_provider_cookie_t cookie;
 	uint32_t                filter;
+	bool                    ns_reported;            // At least one update/counts/desc message has been sent
 	uint64_t                seq;
 } nstat_src;
 
 static errno_t      nstat_control_send_counts(nstat_control_state *, nstat_src *, unsigned long long, u_int16_t, int *);
 static int          nstat_control_send_description(nstat_control_state *state, nstat_src *src, u_int64_t context, u_int16_t hdr_flags);
 static int          nstat_control_send_update(nstat_control_state *state, nstat_src *src, u_int64_t context, u_int64_t event, u_int16_t hdr_flags, int *gone);
-static errno_t      nstat_control_send_removed(nstat_control_state *, nstat_src *);
+static errno_t      nstat_control_send_removed(nstat_control_state *state, nstat_src *src, u_int16_t hdr_flags);
 static errno_t      nstat_control_send_goodbye(nstat_control_state  *state, nstat_src *src);
 static void         nstat_control_cleanup_source(nstat_control_state *state, nstat_src *src, boolean_t);
-static bool         nstat_control_reporting_allowed(nstat_control_state *state, nstat_src *src);
+static bool         nstat_control_reporting_allowed(nstat_control_state *state, nstat_src *src, u_int64_t suppression_flags);
 static boolean_t    nstat_control_begin_query(nstat_control_state *state, const nstat_msg_hdr *hdrp);
 static u_int16_t    nstat_control_end_query(nstat_control_state *state, nstat_src *last_src, boolean_t partial);
 static void         nstat_ifnet_report_ecn_stats(void);
@@ -370,7 +392,7 @@ extend_ifnet_flags(
 	return extended_flags;
 }
 
-static u_int32_t
+u_int32_t
 nstat_ifnet_to_flags_extended(
 	struct ifnet *ifp)
 {
@@ -502,6 +524,84 @@ nstat_free_aligned(
 	struct align_header *hdr = (struct align_header*)(void *)((u_int8_t*)buffer - sizeof(*hdr));
 	char *offset_buffer = (char *)buffer - hdr->offset;
 	kfree_data(offset_buffer, hdr->length);
+}
+
+#pragma mark -- Utilities --
+
+#define NSTAT_PROCDETAILS_MAGIC     0xfeedc001
+#define NSTAT_PROCDETAILS_UNMAGIC   0xdeadc001
+
+static tailq_head_procdetails nstat_procdetails_head = TAILQ_HEAD_INITIALIZER(nstat_procdetails_head);
+
+static struct nstat_procdetails *
+nstat_retain_curprocdetails(void)
+{
+	struct nstat_procdetails *procdetails = NULL;
+	uint64_t upid = proc_uniqueid(current_proc());
+
+	lck_mtx_lock(&nstat_mtx);
+
+	TAILQ_FOREACH(procdetails, &nstat_procdetails_head, pdet_link) {
+		assert(procdetails->pdet_magic == NSTAT_PROCDETAILS_MAGIC);
+
+		if (procdetails->pdet_upid == upid) {
+			OSIncrementAtomic(&procdetails->pdet_refcnt);
+			break;
+		}
+	}
+	lck_mtx_unlock(&nstat_mtx);
+	if (!procdetails) {
+		// No need for paranoia on locking, it would be OK if there are duplicate structs on the list
+		procdetails = kalloc_type(struct nstat_procdetails,
+		    Z_WAITOK | Z_NOFAIL);
+		procdetails->pdet_pid = proc_selfpid();
+		procdetails->pdet_upid = upid;
+		proc_selfname(procdetails->pdet_procname, sizeof(procdetails->pdet_procname));
+		proc_getexecutableuuid(current_proc(), procdetails->pdet_uuid, sizeof(uuid_t));
+		procdetails->pdet_refcnt = 1;
+		procdetails->pdet_magic = NSTAT_PROCDETAILS_MAGIC;
+		lck_mtx_lock(&nstat_mtx);
+		TAILQ_INSERT_HEAD(&nstat_procdetails_head, procdetails, pdet_link);
+		lck_mtx_unlock(&nstat_mtx);
+	}
+
+	return procdetails;
+}
+
+static void
+nstat_release_procdetails(struct nstat_procdetails *procdetails)
+{
+	assert(procdetails->pdet_magic == NSTAT_PROCDETAILS_MAGIC);
+	// These are harvested later to amortize costs
+	OSDecrementAtomic(&procdetails->pdet_refcnt);
+}
+
+static void
+nstat_prune_procdetails(void)
+{
+	struct nstat_procdetails *procdetails;
+	struct nstat_procdetails *tmpdetails;
+	tailq_head_procdetails dead_list;
+
+	TAILQ_INIT(&dead_list);
+	lck_mtx_lock(&nstat_mtx);
+
+	TAILQ_FOREACH_SAFE(procdetails, &nstat_procdetails_head, pdet_link, tmpdetails)
+	{
+		assert(procdetails->pdet_magic == NSTAT_PROCDETAILS_MAGIC);
+		if (procdetails->pdet_refcnt == 0) {
+			// Pull it off the list
+			TAILQ_REMOVE(&nstat_procdetails_head, procdetails, pdet_link);
+			TAILQ_INSERT_TAIL(&dead_list, procdetails, pdet_link);
+		}
+	}
+	lck_mtx_unlock(&nstat_mtx);
+
+	while ((procdetails = TAILQ_FIRST(&dead_list))) {
+		TAILQ_REMOVE(&dead_list, procdetails, pdet_link);
+		procdetails->pdet_magic = NSTAT_PROCDETAILS_UNMAGIC;
+		kfree_type(struct nstat_procdetails, procdetails);
+	}
 }
 
 #pragma mark -- Route Provider --
@@ -771,7 +871,10 @@ nstat_route_copy_descriptor(
 }
 
 static bool
-nstat_route_reporting_allowed(nstat_provider_cookie_t cookie, nstat_provider_filter *filter)
+nstat_route_reporting_allowed(
+	nstat_provider_cookie_t cookie,
+	nstat_provider_filter *filter,
+	__unused u_int64_t suppression_flags)
 {
 	bool retval = true;
 
@@ -1119,10 +1222,9 @@ nstat_tucookie_release_locked(
 
 
 static size_t
-nstat_generic_domain_info(nstat_provider_cookie_t cookie, nstat_domain_info *domain_info)
+nstat_inp_domain_info(struct inpcb *inp, nstat_domain_info *domain_info, size_t len)
 {
-	struct nstat_tucookie *tucookie =  (struct nstat_tucookie *)cookie;
-	struct inpcb          *inp = tucookie->inp;
+	// Note, the caller has guaranteed that the buffer has been zeroed, there is no need to clear it again
 	struct socket         *so = inp->inp_socket;
 
 	if (so == NULL) {
@@ -1135,7 +1237,9 @@ nstat_generic_domain_info(nstat_provider_cookie_t cookie, nstat_domain_info *dom
 		return sizeof(nstat_domain_info);
 	}
 
-	bzero(domain_info, sizeof(*domain_info));
+	if (len < sizeof(nstat_domain_info)) {
+		return 0;
+	}
 
 	domain_info->is_tracker = !!(so->so_flags1 & SOF1_KNOWN_TRACKER);
 	domain_info->is_non_app_initiated = !!(so->so_flags1 & SOF1_TRACKER_NON_APP_INITIATED);
@@ -1172,6 +1276,7 @@ nstat_generic_domain_info(nstat_provider_cookie_t cookie, nstat_domain_info *dom
 	/* XXX tracking context is not provided through kernel for socket flows */
 	return sizeof(nstat_domain_info);
 }
+
 
 static nstat_provider   nstat_tcp_provider;
 
@@ -1750,19 +1855,33 @@ nstat_tcpudp_reporting_allowed(nstat_provider_cookie_t cookie, nstat_provider_fi
 }
 
 static bool
-nstat_tcp_reporting_allowed(nstat_provider_cookie_t cookie, nstat_provider_filter *filter)
+nstat_tcp_reporting_allowed(
+	nstat_provider_cookie_t cookie,
+	nstat_provider_filter *filter,
+	__unused u_int64_t suppression_flags)
 {
 	return nstat_tcpudp_reporting_allowed(cookie, filter, FALSE);
 }
 
 static size_t
-nstat_tcp_domain_info(nstat_provider_cookie_t cookie, nstat_domain_info *domain_info)
+nstat_tcp_extensions(nstat_provider_cookie_t cookie, u_int32_t extension_id, void *buf, size_t len)
 {
+	struct nstat_tucookie *tucookie =  (struct nstat_tucookie *)cookie;
+	struct inpcb          *inp = tucookie->inp;
+
 	if (nstat_tcp_gone(cookie)) {
 		return 0;
 	}
 
-	return nstat_generic_domain_info(cookie, domain_info);
+	switch (extension_id) {
+	case NSTAT_EXTENDED_UPDATE_TYPE_DOMAIN:
+		return nstat_inp_domain_info(inp, (nstat_domain_info *)buf, len);
+
+	case NSTAT_EXTENDED_UPDATE_TYPE_NECP_TLV:
+	default:
+		break;
+	}
+	return 0;
 }
 
 static void
@@ -1779,7 +1898,7 @@ nstat_init_tcp_provider(void)
 	nstat_tcp_provider.nstat_watcher_remove = nstat_tcp_remove_watcher;
 	nstat_tcp_provider.nstat_copy_descriptor = nstat_tcp_copy_descriptor;
 	nstat_tcp_provider.nstat_reporting_allowed = nstat_tcp_reporting_allowed;
-	nstat_tcp_provider.nstat_domain_info = nstat_tcp_domain_info;
+	nstat_tcp_provider.nstat_copy_extension = nstat_tcp_extensions;
 	nstat_tcp_provider.next = nstat_providers;
 	nstat_providers = &nstat_tcp_provider;
 }
@@ -2040,19 +2159,32 @@ nstat_udp_copy_descriptor(
 }
 
 static bool
-nstat_udp_reporting_allowed(nstat_provider_cookie_t cookie, nstat_provider_filter *filter)
+nstat_udp_reporting_allowed(
+	nstat_provider_cookie_t cookie,
+	nstat_provider_filter *filter,
+	__unused u_int64_t suppression_flags)
 {
 	return nstat_tcpudp_reporting_allowed(cookie, filter, TRUE);
 }
 
+
 static size_t
-nstat_udp_domain_info(nstat_provider_cookie_t cookie, nstat_domain_info *domain_info)
+nstat_udp_extensions(nstat_provider_cookie_t cookie, u_int32_t extension_id, void *buf, size_t len)
 {
+	struct nstat_tucookie *tucookie =  (struct nstat_tucookie *)cookie;
+	struct inpcb          *inp = tucookie->inp;
 	if (nstat_udp_gone(cookie)) {
 		return 0;
 	}
 
-	return nstat_generic_domain_info(cookie, domain_info);
+	switch (extension_id) {
+	case NSTAT_EXTENDED_UPDATE_TYPE_DOMAIN:
+		return nstat_inp_domain_info(inp, (nstat_domain_info *)buf, len);
+
+	default:
+		break;
+	}
+	return 0;
 }
 
 
@@ -2070,7 +2202,7 @@ nstat_init_udp_provider(void)
 	nstat_udp_provider.nstat_copy_descriptor = nstat_udp_copy_descriptor;
 	nstat_udp_provider.nstat_release = nstat_udp_release;
 	nstat_udp_provider.nstat_reporting_allowed = nstat_udp_reporting_allowed;
-	nstat_udp_provider.nstat_domain_info = nstat_udp_domain_info;
+	nstat_udp_provider.nstat_copy_extension = nstat_udp_extensions;
 	nstat_udp_provider.next = nstat_providers;
 	nstat_providers = &nstat_udp_provider;
 }
@@ -3733,7 +3865,7 @@ nstat_control_send_event(
 	errno_t result = 0;
 	int failed = 0;
 
-	if (nstat_control_reporting_allowed(state, src)) {
+	if (nstat_control_reporting_allowed(state, src, 0)) {
 		if ((state->ncs_flags & NSTAT_FLAG_SUPPORTS_UPDATES) != 0) {
 			result = nstat_control_send_update(state, src, 0, event, 0, NULL);
 			if (result != 0) {
@@ -3754,16 +3886,19 @@ nstat_control_send_event(
 static errno_t
 nstat_control_send_goodbye(
 	nstat_control_state     *state,
-	nstat_src                       *src)
+	nstat_src               *src)
 {
 	errno_t result = 0;
 	int failed = 0;
+	u_int16_t hdr_flags = NSTAT_MSG_HDR_FLAG_CLOSED_AFTER_FILTER;
 
-	if (nstat_control_reporting_allowed(state, src)) {
+	if (nstat_control_reporting_allowed(state, src, (src->ns_reported)? NSTAT_FILTER_SUPPRESS_BORING_CLOSE: 0)) {
+		hdr_flags = 0;
 		if ((state->ncs_flags & NSTAT_FLAG_SUPPORTS_UPDATES) != 0) {
 			result = nstat_control_send_update(state, src, 0, 0, NSTAT_MSG_HDR_FLAG_CLOSING, NULL);
 			if (result != 0) {
 				failed = 1;
+				hdr_flags = NSTAT_MSG_HDR_FLAG_CLOSED_AFTER_DROP;
 				if (nstat_debug != 0) {
 					printf("%s - nstat_control_send_update() %d\n", __func__, result);
 				}
@@ -3773,6 +3908,7 @@ nstat_control_send_goodbye(
 			result = nstat_control_send_counts(state, src, 0, NSTAT_MSG_HDR_FLAG_CLOSING, NULL);
 			if (result != 0) {
 				failed = 1;
+				hdr_flags = NSTAT_MSG_HDR_FLAG_CLOSED_AFTER_DROP;
 				if (nstat_debug != 0) {
 					printf("%s - nstat_control_send_counts() %d\n", __func__, result);
 				}
@@ -3782,6 +3918,7 @@ nstat_control_send_goodbye(
 			result = nstat_control_send_description(state, src, 0, NSTAT_MSG_HDR_FLAG_CLOSING);
 			if (result != 0) {
 				failed = 1;
+				hdr_flags = NSTAT_MSG_HDR_FLAG_CLOSED_AFTER_DROP;
 				if (nstat_debug != 0) {
 					printf("%s - nstat_control_send_description() %d\n", __func__, result);
 				}
@@ -3790,7 +3927,7 @@ nstat_control_send_goodbye(
 	}
 
 	// send the source removed notification
-	result = nstat_control_send_removed(state, src);
+	result = nstat_control_send_removed(state, src, hdr_flags);
 	if (result != 0 && nstat_debug) {
 		failed = 1;
 		if (nstat_debug != 0) {
@@ -3926,6 +4063,7 @@ nstat_idle_check(
 		nstat_control_cleanup_source(NULL, src, FALSE);
 	}
 
+	nstat_prune_procdetails();
 
 	return NULL;
 }
@@ -3956,7 +4094,7 @@ nstat_control_cleanup_source(
 	errno_t result;
 
 	if (state) {
-		result = nstat_control_send_removed(state, src);
+		result = nstat_control_send_removed(state, src, 0);
 		if (result != 0) {
 			nstat_stats.nstat_control_cleanup_source_failures++;
 			if (nstat_debug != 0) {
@@ -3974,14 +4112,15 @@ nstat_control_cleanup_source(
 static bool
 nstat_control_reporting_allowed(
 	nstat_control_state *state,
-	nstat_src *src)
+	nstat_src *src,
+	u_int64_t suppression_flags)
 {
 	if (src->provider->nstat_reporting_allowed == NULL) {
 		return TRUE;
 	}
 
 	return src->provider->nstat_reporting_allowed(src->cookie,
-	           &state->ncs_provider_filters[src->provider->nstat_provider_id]);
+	           &state->ncs_provider_filters[src->provider->nstat_provider_id], suppression_flags);
 }
 
 
@@ -4001,6 +4140,7 @@ nstat_control_connect(
 	state->ncs_kctl = kctl;
 	state->ncs_unit = sac->sc_unit;
 	state->ncs_flags = NSTAT_FLAG_REQCOUNTS;
+	state->ncs_procdetails = nstat_retain_curprocdetails();
 	*uinfo = state;
 
 	lck_mtx_lock(&nstat_mtx);
@@ -4071,6 +4211,7 @@ nstat_control_disconnect(
 	}
 
 	lck_mtx_destroy(&state->ncs_mtx, &nstat_lck_grp);
+	nstat_release_procdetails(state->ncs_procdetails);
 	kfree_type(struct nstat_control_state, state);
 
 	return 0;
@@ -4243,20 +4384,15 @@ nstat_control_append_description(
 	return nstat_accumulate_msg(state, &desc->hdr, size);
 }
 
-static boolean_t
-nstat_is_domain_info_allowed(
+static uint64_t
+nstat_extension_flags_for_source(
 	nstat_control_state *state,
 	nstat_src           *src)
 {
 	VERIFY(state != NULL & src != NULL);
 	nstat_provider_id_t provider_id = src->provider->nstat_provider_id;
 
-	if (state->ncs_provider_filters[provider_id].npf_flags &
-	    NSTAT_FILTER_DOMAIN_INFO) {
-		return TRUE;
-	}
-
-	return FALSE;
+	return state->ncs_provider_filters[provider_id].npf_extensions;
 }
 
 static int
@@ -4280,15 +4416,24 @@ nstat_control_send_update(
 	unsigned int    one = 1;
 	size_t          size = offsetof(nstat_msg_src_update, data) +
 	    src->provider->nstat_descriptor_length;
-	size_t          domain_info_size = 0;
+	size_t          total_extension_size = 0;
+	u_int32_t       num_extensions = 0;
+	u_int64_t       extension_mask = nstat_extension_flags_for_source(state, src);
 
-	if (nstat_is_domain_info_allowed(state, src) &&
-	    src->provider->nstat_domain_info != NULL) {
-		domain_info_size = src->provider->nstat_domain_info(src->cookie, NULL);
-		if (domain_info_size != 0) {
-			size += domain_info_size;
-			size += sizeof(nstat_msg_src_extended_item_hdr);
+	if ((extension_mask != 0) && (src->provider->nstat_copy_extension != NULL)) {
+		uint32_t extension_id = 0;
+		for (extension_id = NSTAT_EXTENDED_UPDATE_TYPE_MIN; extension_id <= NSTAT_EXTENDED_UPDATE_TYPE_MAX; extension_id++) {
+			if ((extension_mask & (1ull << extension_id)) != 0) {
+				size_t extension_size = src->provider->nstat_copy_extension(src->cookie, extension_id, NULL, 0);
+				if (extension_size == 0) {
+					extension_mask &= ~(1ull << extension_id);
+				} else {
+					num_extensions++;
+					total_extension_size += ROUNDUP64(extension_size);
+				}
+			}
 		}
+		size += total_extension_size + (sizeof(nstat_msg_src_extended_item_hdr) * num_extensions);
 	}
 	assert(size <= MAX_NSTAT_MSG_HDR_LENGTH);
 
@@ -4304,7 +4449,7 @@ nstat_control_send_update(
 	nstat_msg_src_update *desc = (nstat_msg_src_update*)mbuf_data(msg);
 	bzero(desc, size);
 	desc->hdr.context = context;
-	desc->hdr.type = (domain_info_size == 0) ? NSTAT_MSG_TYPE_SRC_UPDATE :
+	desc->hdr.type = (num_extensions == 0) ? NSTAT_MSG_TYPE_SRC_UPDATE :
 	    NSTAT_MSG_TYPE_SRC_EXTENDED_UPDATE;
 	desc->hdr.length = (u_int16_t)size;
 	desc->hdr.flags = hdr_flags;
@@ -4333,14 +4478,34 @@ nstat_control_send_update(
 		}
 	}
 
-
-	if (domain_info_size != 0) {
+	if (num_extensions > 0) {
 		nstat_msg_src_extended_item_hdr *p_extension_hdr = (nstat_msg_src_extended_item_hdr *)(void *)((char *)mbuf_data(msg) +
 		    sizeof(nstat_msg_src_update_hdr) + src->provider->nstat_descriptor_length);
-		nstat_domain_info *p_domain_info = (nstat_domain_info *)(void *)(p_extension_hdr + 1);;
+		uint32_t extension_id = 0;
 
-		p_extension_hdr->type = NSTAT_EXTENDED_UPDATE_TYPE_DOMAIN;
-		p_extension_hdr->length = src->provider->nstat_domain_info(src->cookie, p_domain_info);
+		bzero(p_extension_hdr, total_extension_size + (sizeof(nstat_msg_src_extended_item_hdr) * num_extensions));
+
+		for (extension_id = NSTAT_EXTENDED_UPDATE_TYPE_MIN; extension_id <= NSTAT_EXTENDED_UPDATE_TYPE_MAX; extension_id++) {
+			if ((extension_mask & (1ull << extension_id)) != 0) {
+				void *buf = (void *)(p_extension_hdr + 1);
+				size_t extension_size = src->provider->nstat_copy_extension(src->cookie, extension_id, buf, total_extension_size);
+				if ((extension_size == 0) || (extension_size > total_extension_size)) {
+					// Something has gone wrong. Instead of attempting to wind back the excess buffer space, mark it as unused
+					p_extension_hdr->type = NSTAT_EXTENDED_UPDATE_TYPE_UNKNOWN;
+					p_extension_hdr->length = total_extension_size + (sizeof(nstat_msg_src_extended_item_hdr) * (num_extensions - 1));
+					break;
+				} else {
+					// The extension may be of any size alignment, reported as such in the extension header,
+					// but we pad to ensure that whatever comes next is suitably aligned
+					p_extension_hdr->type = extension_id;
+					p_extension_hdr->length = extension_size;
+					extension_size = ROUNDUP64(extension_size);
+					total_extension_size -= extension_size;
+					p_extension_hdr = (nstat_msg_src_extended_item_hdr *)(void *)((char *)buf + extension_size);
+					num_extensions--;
+				}
+			}
+		}
 	}
 
 	if (src->provider->nstat_counts) {
@@ -4358,6 +4523,8 @@ nstat_control_send_update(
 	if (result != 0) {
 		nstat_stats.nstat_srcupatefailures += 1;
 		mbuf_freem(msg);
+	} else {
+		src->ns_reported = true;
 	}
 
 	return result;
@@ -4369,22 +4536,31 @@ nstat_control_append_update(
 	nstat_src           *src,
 	int                 *gone)
 {
-	size_t  size = offsetof(nstat_msg_src_update, data) + src->provider->nstat_descriptor_length;
-	size_t  domain_info_size = 0;
-
 	if ((src->provider->nstat_descriptor_length == 0 ||
 	    src->provider->nstat_copy_descriptor == NULL) &&
 	    src->provider->nstat_counts == NULL) {
 		return EOPNOTSUPP;
 	}
 
-	if (nstat_is_domain_info_allowed(state, src) &&
-	    src->provider->nstat_domain_info != NULL) {
-		domain_info_size = src->provider->nstat_domain_info(src->cookie, NULL);
-		if (domain_info_size != 0) {
-			size += domain_info_size;
-			size += sizeof(nstat_msg_src_extended_item_hdr);
+	size_t      size = offsetof(nstat_msg_src_update, data) + src->provider->nstat_descriptor_length;
+	size_t      total_extension_size = 0;
+	u_int32_t   num_extensions = 0;
+	u_int64_t   extension_mask = nstat_extension_flags_for_source(state, src);
+
+	if ((extension_mask != 0) && (src->provider->nstat_copy_extension != NULL)) {
+		uint32_t extension_id = 0;
+		for (extension_id = NSTAT_EXTENDED_UPDATE_TYPE_MIN; extension_id <= NSTAT_EXTENDED_UPDATE_TYPE_MAX; extension_id++) {
+			if ((extension_mask & (1ull << extension_id)) != 0) {
+				size_t extension_size = src->provider->nstat_copy_extension(src->cookie, extension_id, NULL, 0);
+				if (extension_size == 0) {
+					extension_mask &= ~(1ull << extension_id);
+				} else {
+					num_extensions++;
+					total_extension_size += ROUNDUP64(extension_size);
+				}
+			}
 		}
+		size += total_extension_size + (sizeof(nstat_msg_src_extended_item_hdr) * num_extensions);
 	}
 
 	/*
@@ -4404,7 +4580,7 @@ nstat_control_append_update(
 	bzero(buffer, size);
 
 	nstat_msg_src_update    *desc = (nstat_msg_src_update*)buffer;
-	desc->hdr.type = (domain_info_size == 0) ? NSTAT_MSG_TYPE_SRC_UPDATE :
+	desc->hdr.type = (num_extensions == 0) ? NSTAT_MSG_TYPE_SRC_UPDATE :
 	    NSTAT_MSG_TYPE_SRC_EXTENDED_UPDATE;
 	desc->hdr.length = (u_int16_t)size;
 	desc->srcref = src->srcref;
@@ -4426,13 +4602,31 @@ nstat_control_append_update(
 		}
 	}
 
-	if (domain_info_size != 0) {
+	if (num_extensions > 0) {
 		nstat_msg_src_extended_item_hdr *p_extension_hdr = (nstat_msg_src_extended_item_hdr *)(void *)((char *)buffer +
 		    sizeof(nstat_msg_src_update_hdr) + src->provider->nstat_descriptor_length);
-		nstat_domain_info *p_domain_info = (nstat_domain_info *)(void *)(p_extension_hdr + 1);
+		uint32_t extension_id = 0;
+		bzero(p_extension_hdr, total_extension_size + (sizeof(nstat_msg_src_extended_item_hdr) * num_extensions));
 
-		p_extension_hdr->type = NSTAT_EXTENDED_UPDATE_TYPE_DOMAIN;
-		p_extension_hdr->length = src->provider->nstat_domain_info(src->cookie, p_domain_info);
+		for (extension_id = NSTAT_EXTENDED_UPDATE_TYPE_MIN; extension_id <= NSTAT_EXTENDED_UPDATE_TYPE_MAX; extension_id++) {
+			if ((extension_mask & (1ull << extension_id)) != 0) {
+				void *buf = (void *)(p_extension_hdr + 1);
+				size_t extension_size = src->provider->nstat_copy_extension(src->cookie, extension_id, buf, total_extension_size);
+				if ((extension_size == 0) || (extension_size > total_extension_size)) {
+					// Something has gone wrong. Instead of attempting to wind back the excess buffer space, mark it as unused
+					p_extension_hdr->type = NSTAT_EXTENDED_UPDATE_TYPE_UNKNOWN;
+					p_extension_hdr->length = total_extension_size + (sizeof(nstat_msg_src_extended_item_hdr) * (num_extensions - 1));
+					break;
+				} else {
+					extension_size = ROUNDUP64(extension_size);
+					p_extension_hdr->type = extension_id;
+					p_extension_hdr->length = extension_size;
+					total_extension_size -= extension_size;
+					p_extension_hdr = (nstat_msg_src_extended_item_hdr *)(void *)((char *)buf + extension_size);
+					num_extensions--;
+				}
+			}
+		}
 	}
 
 	if (src->provider->nstat_counts) {
@@ -4451,13 +4645,18 @@ nstat_control_append_update(
 		}
 	}
 
-	return nstat_accumulate_msg(state, &desc->hdr, size);
+	result = nstat_accumulate_msg(state, &desc->hdr, size);
+	if (result == 0) {
+		src->ns_reported = true;
+	}
+	return result;
 }
 
 static errno_t
 nstat_control_send_removed(
 	nstat_control_state *state,
-	nstat_src           *src)
+	nstat_src           *src,
+	u_int16_t           hdr_flags)
 {
 	nstat_msg_src_removed removed;
 	errno_t result;
@@ -4466,6 +4665,7 @@ nstat_control_send_removed(
 	removed.hdr.type = NSTAT_MSG_TYPE_SRC_REMOVED;
 	removed.hdr.length = sizeof(removed);
 	removed.hdr.context = 0;
+	removed.hdr.flags = hdr_flags;
 	removed.srcref = src->srcref;
 	result = ctl_enqueuedata(state->ncs_kctl, state->ncs_unit, &removed,
 	    sizeof(removed), CTL_DATA_EOR | CTL_DATA_CRIT);
@@ -4539,9 +4739,14 @@ nstat_set_provider_filter(
 	}
 
 	state->ncs_watching |= (1 << provider_id);
-	state->ncs_provider_filters[provider_id].npf_flags  = req->filter;
 	state->ncs_provider_filters[provider_id].npf_events = req->events;
-	state->ncs_provider_filters[provider_id].npf_pid    = req->target_pid;
+	state->ncs_provider_filters[provider_id].npf_flags  = req->filter;
+
+	// The extensions should be populated by a more direct mechanism
+	// Using the top 32 bits of the filter flags reduces the namespace of both,
+	// but is a convenient workaround that avoids ntstat.h changes that would require rebuild of all clients
+	state->ncs_provider_filters[provider_id].npf_extensions = (req->filter >> NSTAT_FILTER_ALLOWED_EXTENSIONS_SHIFT) & NSTAT_EXTENDED_UPDATE_FLAG_MASK;
+	state->ncs_provider_filters[provider_id].npf_pid        = req->target_pid;
 	uuid_copy(state->ncs_provider_filters[provider_id].npf_uuid, req->target_uuid);
 	return 0;
 }
@@ -4612,15 +4817,15 @@ nstat_control_source_add(
 	mbuf_t                  msg = NULL;
 	nstat_src_ref_t         *srcrefp = NULL;
 
-	u_int64_t               provider_filter_flagss =
+	u_int64_t               provider_filter_flags =
 	    state->ncs_provider_filters[provider->nstat_provider_id].npf_flags;
 	boolean_t               tell_user =
-	    ((provider_filter_flagss & NSTAT_FILTER_SUPPRESS_SRC_ADDED) == 0);
+	    ((provider_filter_flags & NSTAT_FILTER_SUPPRESS_SRC_ADDED) == 0);
 	u_int32_t               src_filter =
-	    (provider_filter_flagss & NSTAT_FILTER_PROVIDER_NOZEROBYTES)
+	    (provider_filter_flags & NSTAT_FILTER_PROVIDER_NOZEROBYTES)
 	    ? NSTAT_FILTER_NOZEROBYTES : 0;
 
-	if (provider_filter_flagss & NSTAT_FILTER_TCP_NO_EARLY_CLOSE) {
+	if (provider_filter_flags & NSTAT_FILTER_TCP_NO_EARLY_CLOSE) {
 		src_filter |= NSTAT_FILTER_TCP_NO_EARLY_CLOSE;
 	}
 
@@ -4743,15 +4948,15 @@ nstat_control_handle_query_request(
 	// won't work with this code anyhow since we don't have proper locking in
 	// place yet.
 	tailq_head_nstat_src    dead_list;
-	errno_t                                 result = ENOENT;
+	errno_t                 result = ENOENT;
 	nstat_msg_query_src_req req;
 
 	if (mbuf_copydata(m, 0, sizeof(req), &req) != 0) {
 		return EINVAL;
 	}
 
-	const boolean_t all_srcs = (req.srcref == NSTAT_SRC_REF_ALL);
 	TAILQ_INIT(&dead_list);
+	const boolean_t  all_srcs = (req.srcref == NSTAT_SRC_REF_ALL);
 
 	lck_mtx_lock(&state->ncs_mtx);
 
@@ -4775,7 +4980,7 @@ nstat_control_handle_query_request(
 
 		// XXX ignore IFACE types?
 		if (all_srcs || src->srcref == req.srcref) {
-			if (nstat_control_reporting_allowed(state, src)
+			if (nstat_control_reporting_allowed(state, src, 0)
 			    && (!partial || !all_srcs || src->seq != state->ncs_seq)) {
 				if (all_srcs &&
 				    (req.hdr.flags & NSTAT_MSG_HDR_FLAG_SUPPORTS_AGGREGATE) != 0) {
@@ -4889,7 +5094,7 @@ nstat_control_handle_get_src_description(
 	TAILQ_FOREACH(src, &state->ncs_src_queue, ns_control_link)
 	{
 		if (all_srcs || src->srcref == req.srcref) {
-			if (nstat_control_reporting_allowed(state, src)
+			if (nstat_control_reporting_allowed(state, src, 0)
 			    && (!all_srcs || !partial || src->seq != state->ncs_seq)) {
 				if ((req.hdr.flags & NSTAT_MSG_HDR_FLAG_SUPPORTS_AGGREGATE) != 0 && all_srcs) {
 					result = nstat_control_append_description(state, src);
@@ -5052,7 +5257,7 @@ nstat_control_end_query(
 static errno_t
 nstat_control_handle_get_update(
 	nstat_control_state         *state,
-	mbuf_t                                      m)
+	mbuf_t                      m)
 {
 	nstat_msg_query_src_req req;
 
@@ -5069,6 +5274,7 @@ nstat_control_handle_get_update(
 	tailq_head_nstat_src dead_list;
 	u_int64_t src_count = 0;
 	boolean_t partial = FALSE;
+	const boolean_t all_srcs = (req.srcref == NSTAT_SRC_REF_ALL);
 	TAILQ_INIT(&dead_list);
 
 	/*
@@ -5077,34 +5283,33 @@ nstat_control_handle_get_update(
 	 */
 	partial = nstat_control_begin_query(state, &req.hdr);
 
-	TAILQ_FOREACH_SAFE(src, &state->ncs_src_queue, ns_control_link, tmpsrc)
-	{
-		int gone;
-
-		gone = 0;
-		if (nstat_control_reporting_allowed(state, src)) {
-			/* skip this source if it has the current state
-			 * sequence number as it's already been reported in
-			 * this query-all partial sequence. */
-			if (req.srcref == NSTAT_SRC_REF_ALL
-			    && (FALSE == partial || src->seq != state->ncs_seq)) {
-				result = nstat_control_append_update(state, src, &gone);
-				if (ENOMEM == result || ENOBUFS == result) {
-					/*
-					 * If the update message failed to
-					 * enqueue then give up.
-					 */
-					break;
+	TAILQ_FOREACH_SAFE(src, &state->ncs_src_queue, ns_control_link, tmpsrc) {
+		int gone = 0;
+		if (all_srcs) {
+			// Check to see if we should handle this source or if we're still skipping to find where to continue
+			if ((FALSE == partial || src->seq != state->ncs_seq)) {
+				u_int64_t suppression_flags = (src->ns_reported)? NSTAT_FILTER_SUPPRESS_BORING_POLL: 0;
+				if (nstat_control_reporting_allowed(state, src, suppression_flags)) {
+					result = nstat_control_append_update(state, src, &gone);
+					if (ENOMEM == result || ENOBUFS == result) {
+						/*
+						 * If the update message failed to
+						 * enqueue then give up.
+						 */
+						break;
+					}
+					if (partial) {
+						/*
+						 * We skip over hard errors and
+						 * filtered sources.
+						 */
+						src->seq = state->ncs_seq;
+						src_count++;
+					}
 				}
-				if (partial) {
-					/*
-					 * We skip over hard errors and
-					 * filtered sources.
-					 */
-					src->seq = state->ncs_seq;
-					src_count++;
-				}
-			} else if (src->srcref == req.srcref) {
+			}
+		} else if (src->srcref == req.srcref) {
+			if (nstat_control_reporting_allowed(state, src, 0)) {
 				result = nstat_control_send_update(state, src, req.hdr.context, 0, 0, &gone);
 			}
 		}
@@ -5115,7 +5320,7 @@ nstat_control_handle_get_update(
 			TAILQ_INSERT_TAIL(&dead_list, src, ns_control_link);
 		}
 
-		if (req.srcref != NSTAT_SRC_REF_ALL && req.srcref == src->srcref) {
+		if (!all_srcs && req.srcref == src->srcref) {
 			break;
 		}
 		if (src_count >= QUERY_CONTINUATION_SRC_COUNT) {
@@ -5137,7 +5342,7 @@ nstat_control_handle_get_update(
 	 * propagate to nstat_control_send. This way, the error is sent to
 	 * user-level.
 	 */
-	if (req.srcref == NSTAT_SRC_REF_ALL && ENOMEM != result && ENOBUFS != result) {
+	if (all_srcs && ENOMEM != result && ENOBUFS != result) {
 		nstat_enqueue_success(req.hdr.context, state, flags);
 		result = 0;
 	}

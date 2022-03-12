@@ -108,7 +108,7 @@ struct image_params {
 	/* Next two fields are for support of architecture translation... */
 	struct vfs_context      *ip_vfs_context;        /* VFS context */
 	struct nameidata *ip_ndp;               /* current nameidata */
-	thread_t        ip_new_thread;          /* thread for spawn/vfork */
+	thread_t        ip_new_thread;          /* thread for spawn */
 
 	struct label    *ip_execlabelp;         /* label of the executable */
 	struct label    *ip_scriptlabelp;       /* label of the script */
@@ -147,9 +147,6 @@ struct image_params {
 #define IMGPF_SPAWN                             0x00000010      /* spawn (without setexec) */
 #define IMGPF_DISABLE_ASLR              0x00000020      /* disable ASLR */
 #define IMGPF_ALLOW_DATA_EXEC   0x00000040      /* forcibly disallow data execution */
-#if CONFIG_VFORK
-#define IMGPF_VFORK_EXEC                0x00000080      /* vfork followed by exec */
-#endif /* CONFIG_VFORK */
 #define IMGPF_EXEC                              0x00000100      /* exec */
 #define IMGPF_HIGH_BITS_ASLR    0x00000200      /* randomize high bits of ASLR slide */
 #define IMGPF_IS_64BIT_DATA             0x00000400      /* exec to a 64Bit register state */

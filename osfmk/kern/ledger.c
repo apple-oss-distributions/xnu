@@ -1818,7 +1818,7 @@ ledger_ast(thread_t thread)
 	uint64_t        task_interval;
 
 	kern_return_t ret;
-	task_t task = thread->task;
+	task_t task = get_threadtask(thread);
 
 	lprintf(("Ledger AST for %p\n", thread));
 

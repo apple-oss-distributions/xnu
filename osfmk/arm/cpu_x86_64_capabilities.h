@@ -57,15 +57,6 @@
 #define x86_64_kHasADX                  0x0000000400000000ULL
 #define x86_64_kHasMPX                  0x0000001000000000ULL
 #define x86_64_kHasSGX                  0x0000002000000000ULL
-#if !defined(RC_HIDE_XNU_J137)
-#define x86_64_kHasAVX512F              0x0000004000000000ULL
-#define x86_64_kHasAVX512CD             0x0000008000000000ULL
-#define x86_64_kHasAVX512DQ             0x0000010000000000ULL
-#define x86_64_kHasAVX512BW             0x0000020000000000ULL
-#define x86_64_kHasAVX512IFMA   0x0000040000000000ULL
-#define x86_64_kHasAVX512VBMI   0x0000080000000000ULL
-#define x86_64_kHasAVX512VL             0x0000100000000000ULL
-#endif /* not RC_HIDE_XNU_J137 */
 
 #define x86_64_kIsTranslated    0x4000000000000000ULL   // isTranslated
 /* Cambria specific. The address space page shift. */

@@ -104,7 +104,7 @@ __options_decl(kma_flags_t, uint32_t, {
 	KMA_ATOMIC      = 0x00000800,
 	KMA_ZERO        = 0x00001000,
 	KMA_PAGEABLE    = 0x00002000,
-	KMA_KHEAP       = 0x00004000,  /* Pages belonging to zones backing one of kalloc_heap. */
+	KMA_LAST_FREE   = 0x00004000,
 });
 
 extern kern_return_t    kernel_memory_allocate(
@@ -195,7 +195,8 @@ extern void kernel_memory_populate_with_pages(
 	vm_size_t       size,
 	struct vm_page *page_list,
 	kma_flags_t     flags,
-	vm_tag_t        tag);
+	vm_tag_t        tag,
+	vm_prot_t       prot);
 
 extern kern_return_t kernel_memory_populate(
 	vm_map_t        map,

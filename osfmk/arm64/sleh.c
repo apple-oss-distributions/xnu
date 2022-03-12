@@ -178,17 +178,15 @@ static void handle_user_trapped_instruction32(arm_saved_state_t *, uint32_t esr)
 
 static void handle_simd_trap(arm_saved_state_t *, uint32_t esr) __dead2;
 
-extern void mach_kauth_cred_uthread_update(void);
+extern void mach_kauth_cred_thread_update(void);
 void   mach_syscall_trace_exit(unsigned int retval, unsigned int call_number);
 
-struct uthread;
 struct proc;
 
 typedef uint32_t arm64_instr_t;
 
 extern void
-unix_syscall(struct arm_saved_state * regs, thread_t thread_act,
-    struct uthread * uthread, struct proc * proc);
+unix_syscall(struct arm_saved_state * regs, thread_t thread_act, struct proc * proc);
 
 extern void
 mach_syscall(struct arm_saved_state*);
@@ -478,7 +476,9 @@ __attribute__((__always_inline__))
 static inline void
 task_vtimer_check(thread_t thread)
 {
-	if (__improbable((thread->task != NULL) && thread->task->vtimers)) {
+	task_t task = get_threadtask_early(thread);
+
+	if (__improbable(task != NULL && task->vtimers)) {
 		thread->ast |= AST_BSD;
 		thread->machine.CpuDatap->cpu_pending_ast |= AST_BSD;
 	}
@@ -1582,7 +1582,7 @@ handle_svc(arm_saved_state_t *state)
 		panic("Returned from platform_syscall()?");
 	}
 
-	mach_kauth_cred_uthread_update();
+	mach_kauth_cred_thread_update();
 
 	if (trap_no < 0) {
 		switch (trap_no) {
@@ -1604,7 +1604,7 @@ handle_svc(arm_saved_state_t *state)
 
 		assert(p);
 
-		unix_syscall(state, thread, (struct uthread*)thread->uthread, p);
+		unix_syscall(state, thread, p);
 	}
 }
 

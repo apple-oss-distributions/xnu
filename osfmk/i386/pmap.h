@@ -80,8 +80,9 @@
 #include <kern/simple_lock.h>
 
 #include <i386/mp.h>
+#include <i386/cpu_number.h>
 #include <i386/proc_reg.h>
-
+#include <os/atomic_private.h>
 #include <i386/pal_routines.h>
 
 /*
@@ -190,19 +191,6 @@ extern int pmap_asserts_traced;
 
 /* superpages */
 #define SUPERPAGE_NBASEPAGES 512
-
-/*
- * Atomic 64-bit store of a page table entry.
- */
-static inline void
-pmap_store_pte(pt_entry_t *entryp, pt_entry_t value)
-{
-	/*
-	 * In the 32-bit kernel a compare-and-exchange loop was
-	 * required to provide atomicity. For K64, life is easier:
-	 */
-	*entryp = value;
-}
 
 /* in 64 bit spaces, the number of each type of page in the page tables */
 #define NPML4PGS        (1ULL * (PAGE_SIZE/(sizeof (pml4_entry_t))))
@@ -469,6 +457,53 @@ extern uint32_t         pmap_kernel_text_ps;
 extern  uint64_t physmap_base, physmap_max;
 
 #define NPHYSMAP (MAX(((physmap_max - physmap_base) / GB), 4))
+
+extern pt_entry_t *PTE_corrupted_ptr;
+
+#if DEVELOPMENT || DEBUG
+extern int pmap_inject_pte_corruption;
+#endif
+
+static inline void
+pmap_corrupted_pte_detected(pt_entry_t *ptep, uint64_t clear_bits, uint64_t set_bits)
+{
+	if (__c11_atomic_compare_exchange_strong((_Atomic(pt_entry_t *)*) & PTE_corrupted_ptr, &PTE_corrupted_ptr, ptep,
+	    memory_order_acq_rel_smp, memory_order_relaxed)) {
+		force_immediate_debugger_NMI = TRUE;
+		NMIPI_panic(CPUMASK_REAL_OTHERS, PTE_CORRUPTION);
+		if (clear_bits == 0 && set_bits == 0) {
+			panic("PTE Corruption detected: ptep 0x%llx pte value 0x%llx", (unsigned long long)(uintptr_t)ptep, *(uint64_t *)ptep);
+		} else {
+			panic("PTE Corruption detected: ptep 0x%llx pte value 0x%llx clear 0x%llx set 0x%llx",
+			    (unsigned long long)(uintptr_t)ptep, *(uint64_t *)ptep, clear_bits, set_bits);
+		}
+	}
+}
+
+/*
+ * Atomic 64-bit store of a page table entry.
+ */
+static inline void
+pmap_store_pte(boolean_t is_ept, pt_entry_t *entryp, pt_entry_t value)
+{
+	/*
+	 * In the 32-bit kernel a compare-and-exchange loop was
+	 * required to provide atomicity. For K64, life is easier:
+	 */
+	*entryp = value;
+
+#if DEVELOPMENT || DEBUG
+	if (__improbable(pmap_inject_pte_corruption != 0 && is_ept == FALSE && (value & PTE_COMPRESSED))) {
+		pmap_inject_pte_corruption = 0;
+		/* Inject a corruption event */
+		value |= INTEL_PTE_NX;
+	}
+#endif
+
+	if (__improbable((is_ept == FALSE) && (value & PTE_COMPRESSED) && (value & INTEL_PTE_NX))) {
+		pmap_corrupted_pte_detected(entryp, 0, 0);
+	}
+}
 
 static inline boolean_t
 physmap_enclosed(addr64_t a)
@@ -746,11 +781,9 @@ extern void x86_64_protect_data_const(void);
 
 extern uint64_t pmap_commpage_size_min(pmap_t pmap);
 
-extern void pmap_ro_zone_memcpy(zone_t zone, vm_offset_t va, vm_offset_t offset,
+extern void pmap_ro_zone_memcpy(zone_id_t zid, vm_offset_t va, vm_offset_t offset,
     vm_offset_t new_data, vm_size_t new_data_size);
-extern void pmap_ro_zone_bzero(zone_t zone, vm_offset_t va, vm_offset_t offset, vm_size_t size);
-extern void pmap_phys_write_enable_pages(zone_t zone, vm_address_t va, size_t size);
-extern void pmap_phys_write_disable_pages(zone_t zone, vm_address_t va, size_t size);
+extern void pmap_ro_zone_bzero(zone_id_t zid, vm_offset_t va, vm_offset_t offset, vm_size_t size);
 
 /*
  *	Macros for speed.

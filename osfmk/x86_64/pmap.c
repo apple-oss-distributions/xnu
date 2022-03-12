@@ -364,13 +364,13 @@ pmap_cpu_init(void)
 
 static void
 pmap_ro_zone_validate_element(
-	zone_t              zone,
+	zone_id_t           zid,
 	vm_offset_t         va,
 	vm_offset_t         offset,
 	const vm_offset_t   new_data,
 	vm_size_t           new_data_size)
 {
-	vm_size_t elem_size = zone_elem_size(zone);
+	vm_size_t elem_size = zone_elem_size_ro(zid);
 	vm_offset_t sum = 0, page = trunc_page(va);
 	if (__improbable(new_data_size > (elem_size - offset))) {
 		panic("%s: New data size %lu too large for elem size %lu at addr %p",
@@ -395,12 +395,12 @@ pmap_ro_zone_validate_element(
 	}
 
 	/* Check element is from correct zone */
-	zone_require_ro(zone_index(zone), elem_size, (void*)va);
+	zone_require_ro(zid, elem_size, (void*)va);
 }
 
 void
 pmap_ro_zone_memcpy(
-	zone_t                zone,
+	zone_id_t             zid,
 	vm_offset_t           va,
 	vm_offset_t           offset,
 	const vm_offset_t     new_data,
@@ -412,59 +412,21 @@ pmap_ro_zone_memcpy(
 		return;
 	}
 
-	pmap_ro_zone_validate_element(zone, va, offset, new_data, new_data_size);
+	pmap_ro_zone_validate_element(zid, va, offset, new_data, new_data_size);
 	/* Write through Physical Aperture */
 	memcpy((void*)phystokv(pa), (void*)new_data, new_data_size);
 }
 
 void
 pmap_ro_zone_bzero(
-	zone_t            zone,
+	zone_id_t         zid,
 	vm_offset_t       va,
 	vm_offset_t       offset,
 	vm_size_t         size)
 {
 	const pmap_paddr_t pa = kvtophys(va + offset);
-	pmap_ro_zone_validate_element(zone, va, offset, 0, size);
+	pmap_ro_zone_validate_element(zid, va, offset, 0, size);
 	bzero((void*)phystokv(pa), size);
-}
-
-static void
-pmap_phys_write_disable(
-	zone_t zone,
-	vm_address_t va)
-{
-	zone_require_ro_range_contains(zone_index(zone), (void*)va);
-
-	/* Makes all virtual mappings RO */
-	pmap_page_protect(atop_kernel(kvtophys(va)), VM_PROT_READ);
-}
-
-void
-pmap_phys_write_enable_pages(
-	__unused zone_t zone,
-	__unused vm_address_t va,
-	__unused size_t size)
-{
-	return;
-}
-
-void
-pmap_phys_write_disable_pages(
-	zone_t zone,
-	vm_address_t va,
-	size_t size)
-{
-	vm_object_offset_t sum = 0;
-	if (os_add_overflow(va, size, &sum)) {
-		panic("%s: Integer addition overflow %lx + %d = %llx",
-		    __func__, va, (uint32_t)size, sum);
-	}
-	for (vm_object_offset_t pg_offset = 0;
-	    pg_offset < size;
-	    pg_offset += PAGE_SIZE_64) {
-		pmap_phys_write_disable(zone, va + pg_offset);
-	}
 }
 
 static uint32_t
@@ -1200,7 +1162,7 @@ pmap_lowmem_finalize(void)
 
 			ptep = pmap_pte(kernel_pmap, (vm_map_offset_t)myva);
 			if (ptep) {
-				pmap_store_pte(ptep, *ptep & ~INTEL_PTE_WRITE);
+				pmap_store_pte(FALSE, ptep, *ptep & ~INTEL_PTE_WRITE);
 			}
 		}
 	}
@@ -1246,7 +1208,7 @@ pmap_lowmem_finalize(void)
 			}
 			DBG("pmap_store_pte(%p,0x%llx)\n",
 			    (void *)pdep, pde);
-			pmap_store_pte(pdep, pde);
+			pmap_store_pte(FALSE, pdep, pde);
 
 			/*
 			 * Free the now-unused level-1 pte.
@@ -1267,7 +1229,7 @@ pmap_lowmem_finalize(void)
 		dpte = *dptep;
 		assert((dpte & INTEL_PTE_VALID));
 		dpte |= INTEL_PTE_NX;
-		pmap_store_pte(dptep, dpte);
+		pmap_store_pte(FALSE, dptep, dpte);
 		dataptes++;
 	}
 	assert(dataptes > 0);
@@ -1354,7 +1316,7 @@ pmap_lowmem_finalize(void)
 
 		/* make sure it is defined on page boundary */
 		assert(0 == ((vm_offset_t) &lowGlo & PAGE_MASK));
-		pmap_store_pte(pte, kvtophys((vm_offset_t)&lowGlo)
+		pmap_store_pte(FALSE, pte, kvtophys((vm_offset_t)&lowGlo)
 		    | INTEL_PTE_REF
 		    | INTEL_PTE_MOD
 		    | INTEL_PTE_WIRED
@@ -1924,28 +1886,28 @@ pmap_protect_options(
 
 				if (is_ept) {
 					if (!(prot & VM_PROT_READ)) {
-						pmap_update_pte(spte, PTE_READ(is_ept), 0);
+						pmap_update_pte(is_ept, spte, PTE_READ(is_ept), 0);
 					}
 				}
 				if (!(prot & VM_PROT_WRITE)) {
-					pmap_update_pte(spte, PTE_WRITE(is_ept), 0);
+					pmap_update_pte(is_ept, spte, PTE_WRITE(is_ept), 0);
 				}
 #if DEVELOPMENT || DEBUG
 				else if ((options & PMAP_OPTIONS_PROTECT_IMMEDIATE) &&
 				    map == kernel_pmap) {
-					pmap_update_pte(spte, 0, PTE_WRITE(is_ept));
+					pmap_update_pte(is_ept, spte, 0, PTE_WRITE(is_ept));
 				}
 #endif /* DEVELOPMENT || DEBUG */
 
 				if (set_NX) {
 					if (!is_ept) {
-						pmap_update_pte(spte, 0, INTEL_PTE_NX);
+						pmap_update_pte(FALSE, spte, 0, INTEL_PTE_NX);
 					} else {
-						pmap_update_pte(spte, INTEL_EPT_EX | INTEL_EPT_UEX, 0);
+						pmap_update_pte(TRUE, spte, INTEL_EPT_EX | INTEL_EPT_UEX, 0);
 					}
 				} else if (is_ept) {
 					/* This is the exception to the "Don't add permissions" statement, above */
-					pmap_update_pte(spte, 0, ((prot & VM_PROT_EXECUTE) ? INTEL_EPT_EX : 0) |
+					pmap_update_pte(TRUE, spte, 0, ((prot & VM_PROT_EXECUTE) ? INTEL_EPT_EX : 0) |
 					    ((prot & VM_PROT_UEXEC) ? INTEL_EPT_UEX : 0));
 				}
 				DTRACE_VM3(set_pte, pmap_t, map, void *, cur_vaddr, uint64_t, *spte);
@@ -2116,14 +2078,14 @@ pmap_expand_pml4(
 	 * bit at all levels of the EPT, so there is no risk of inducing EPT
 	 * violation faults.
 	 */
-	pmap_store_pte(pml4p, pa_to_pte(pa)
+	pmap_store_pte(is_ept, pml4p, pa_to_pte(pa)
 	    | PTE_READ(is_ept)
 	    | (is_ept ? (INTEL_EPT_EX | INTEL_EPT_UEX) : INTEL_PTE_USER)
 	    | PTE_WRITE(is_ept));
 	pml4_entry_t    *upml4p;
 
 	upml4p = pmap64_user_pml4(map, vaddr);
-	pmap_store_pte(upml4p, pa_to_pte(pa)
+	pmap_store_pte(is_ept, upml4p, pa_to_pte(pa)
 	    | PTE_READ(is_ept)
 	    | (is_ept ? (INTEL_EPT_EX | INTEL_EPT_UEX) : INTEL_PTE_USER)
 	    | PTE_WRITE(is_ept));
@@ -2215,7 +2177,7 @@ pmap_expand_pdpt(pmap_t map, vm_map_offset_t vaddr, unsigned int options)
 	 */
 	pdptp = pmap64_pdpt(map, vaddr); /* refetch under lock */
 
-	pmap_store_pte(pdptp, pa_to_pte(pa)
+	pmap_store_pte(is_ept, pdptp, pa_to_pte(pa)
 	    | PTE_READ(is_ept)
 	    | (is_ept ? (INTEL_EPT_EX | INTEL_EPT_UEX) : INTEL_PTE_USER)
 	    | PTE_WRITE(is_ept));
@@ -2340,7 +2302,7 @@ pmap_expand(
 	 */
 	pdp = pmap_pde(map, vaddr);
 
-	pmap_store_pte(pdp, pa_to_pte(pa)
+	pmap_store_pte(is_ept, pdp, pa_to_pte(pa)
 	    | PTE_READ(is_ept)
 	    | (is_ept ? (INTEL_EPT_EX | INTEL_EPT_UEX) : INTEL_PTE_USER)
 	    | PTE_WRITE(is_ept));
@@ -2402,14 +2364,14 @@ pmap_pre_expand_large_internal(
 
 		pte = pmap64_pml4(pmap, vaddr);
 
-		pmap_store_pte(pte, pa_to_pte(i386_ptob(pn)) |
+		pmap_store_pte(is_ept, pte, pa_to_pte(i386_ptob(pn)) |
 		    PTE_READ(is_ept) |
 		    (is_ept ? (INTEL_EPT_EX | INTEL_EPT_UEX) : INTEL_PTE_USER) |
 		    PTE_WRITE(is_ept));
 
 		pte = pmap64_user_pml4(pmap, vaddr);
 
-		pmap_store_pte(pte, pa_to_pte(i386_ptob(pn)) |
+		pmap_store_pte(is_ept, pte, pa_to_pte(i386_ptob(pn)) |
 		    PTE_READ(is_ept) |
 		    (is_ept ? (INTEL_EPT_EX | INTEL_EPT_UEX) : INTEL_PTE_USER) |
 		    PTE_WRITE(is_ept));
@@ -2424,7 +2386,7 @@ pmap_pre_expand_large_internal(
 
 		pte = pmap64_pdpt(pmap, vaddr);
 
-		pmap_store_pte(pte, pa_to_pte(i386_ptob(pn)) |
+		pmap_store_pte(is_ept, pte, pa_to_pte(i386_ptob(pn)) |
 		    PTE_READ(is_ept) |
 		    (is_ept ? (INTEL_EPT_EX | INTEL_EPT_UEX) : INTEL_PTE_USER) |
 		    PTE_WRITE(is_ept));
@@ -2487,7 +2449,7 @@ pmap_pre_expand(
 
 	pte = pmap_pde(pmap, vaddr);
 
-	pmap_store_pte(pte, pa_to_pte(i386_ptob(pn)) |
+	pmap_store_pte(is_ept, pte, pa_to_pte(i386_ptob(pn)) |
 	    PTE_READ(is_ept) |
 	    (is_ept ? (INTEL_EPT_EX | INTEL_EPT_UEX) : INTEL_PTE_USER) |
 	    PTE_WRITE(is_ept));

@@ -204,10 +204,6 @@ void  mac_policy_list_busy(void);
 int   mac_policy_list_conditional_busy(void);
 void  mac_policy_list_unbusy(void);
 
-void  mac_labelzone_init(void);
-
-void  mac_label_init(struct label *label);
-void  mac_label_destroy(struct label *label);
 #if KERNEL
 int   mac_check_structmac_consistent(struct user_mac *mac);
 #else

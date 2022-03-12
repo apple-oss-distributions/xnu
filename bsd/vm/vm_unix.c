@@ -1773,7 +1773,7 @@ networking_memstatus_callout(proc_t p, uint32_t status)
 #if NECP
 		case DTYPE_NETPOLICY:
 			necp_fd_memstatus(p, status,
-			    (struct necp_fd_data *)fp->fp_glob->fg_data);
+			    (struct necp_fd_data *)fp_get_data(fp));
 			break;
 #endif /* NECP */
 		default:
@@ -1801,7 +1801,7 @@ networking_defunct_callout(proc_t p, void *arg)
 
 		switch (FILEGLOB_DTYPE(fg)) {
 		case DTYPE_SOCKET: {
-			struct socket *so = (struct socket *)fg->fg_data;
+			struct socket *so = (struct socket *)fg_get_data(fg);
 			if (proc_getpid(p) == pid || so->last_pid == pid ||
 			    ((so->so_flags & SOF_DELEGATED) && so->e_pid == pid)) {
 				/* Call networking stack with socket and level */
@@ -1814,7 +1814,7 @@ networking_defunct_callout(proc_t p, void *arg)
 			/* first pass: defunct necp and get stats for ntstat */
 			if (proc_getpid(p) == pid) {
 				necp_fd_defunct(p,
-				    (struct necp_fd_data *)fg->fg_data);
+				    (struct necp_fd_data *)fg_get_data(fg));
 			}
 			break;
 #endif /* NECP */
@@ -2204,7 +2204,7 @@ shared_region_map_and_slide_setup(
 		}
 
 		/* get vnode from file structure */
-		error = vnode_getwithref((vnode_t) srfmp->fp->fp_glob->fg_data);
+		error = vnode_getwithref((vnode_t)fp_get_data(srfmp->fp));
 		if (error) {
 			SHARED_REGION_TRACE_ERROR(
 				("shared_region: %p [%d(%s)] map: "
@@ -2213,7 +2213,7 @@ shared_region_map_and_slide_setup(
 				proc_getpid(p), p->p_comm, srfmp->fd, error));
 			goto done;
 		}
-		srfmp->vp = (struct vnode *) srfmp->fp->fp_glob->fg_data;
+		srfmp->vp = (struct vnode *)fp_get_data(srfmp->fp);
 
 		/* make sure the vnode is a regular file */
 		if (srfmp->vp->v_type != VREG) {
@@ -3076,7 +3076,7 @@ void vm_pageout_io_throttle(void);
 void
 vm_pageout_io_throttle(void)
 {
-	struct uthread *uthread = get_bsdthread_info(current_thread());
+	struct uthread *uthread = current_uthread();
 
 	/*
 	 * thread is marked as a low priority I/O type

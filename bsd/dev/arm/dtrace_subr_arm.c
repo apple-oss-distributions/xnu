@@ -56,9 +56,10 @@ dtrace_user_probe(arm_saved_state_t *regs, unsigned int instr)
 	lck_rw_t *rwp;
 	struct proc *p = current_proc();
 
-	uthread_t uthread = (uthread_t)get_bsdthread_info(current_thread());
+	thread_t thread = current_thread();
+	uthread_t uthread = current_uthread();
 
-	kauth_cred_uthread_update(uthread, p);
+	kauth_cred_thread_update(thread, p);
 
 	if (((regs->cpsr & PSR_TF) && ((uint16_t) instr) == FASTTRAP_THUMB_RET_INSTR) ||
 	    ((uint32_t) instr == FASTTRAP_ARM_RET_INSTR)) {

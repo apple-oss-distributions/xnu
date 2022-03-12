@@ -459,15 +459,17 @@ icmp_input(struct mbuf *m, int hlen)
 		goto freeit;
 	}
 	i = hlen + min(icmplen, ICMP_ADVLENMIN);
-	if (m->m_len < i && (m = m_pullup(m, i)) == 0) {
+	if (m->m_len < i && (m = m_pullup(m, i)) == NULL) {
 		icmpstat.icps_tooshort++;
 		return;
 	}
+	/* Re-seat the pointers, since `m_pullup' might have moved `m'. `icp' is re-seated below. */
 	ip = mtod(m, struct ip *);
+
 	m->m_len -= hlen;
 	m->m_data += hlen;
 	icp = mtod(m, struct icmp *);
-	if (in_cksum(m, icmplen)) {
+	if (in_cksum(m, icmplen) != 0) {
 		icmpstat.icps_checksum++;
 		goto freeit;
 	}
@@ -572,6 +574,7 @@ deliver:
 			goto freeit;
 		}
 
+		/* Re-seat the pointers, since `m_pullup' might have moved `m'*/
 		ip = mtod(m, struct ip *);
 		icp = (struct icmp *)(void *)(mtod(m, uint8_t *) + hlen);
 
@@ -598,12 +601,18 @@ deliver:
 		ctlfunc = ip_protox[icp->icmp_ip.ip_p]->pr_ctlinput;
 
 		if (ctlfunc) {
+			struct ipctlparam ctl_param = {
+				.ipc_m = m,
+				.ipc_icmp = icp,
+				.ipc_icmp_ip = &icp->icmp_ip,
+				.ipc_off = hlen + offsetof(struct icmp, icmp_ip) + (IP_VHL_HL(icp->icmp_ip.ip_vhl) << 2)
+			};
 			LCK_MTX_ASSERT(inet_domain_mutex, LCK_MTX_ASSERT_OWNED);
 
 			lck_mtx_unlock(inet_domain_mutex);
 
 			(*ctlfunc)(code, (struct sockaddr *)&icmpsrc,
-			    (void *)&icp->icmp_ip, m->m_pkthdr.rcvif);
+			    (void *)&ctl_param, m->m_pkthdr.rcvif);
 
 			lck_mtx_lock(inet_domain_mutex);
 		}
@@ -1302,7 +1311,7 @@ icmp_dgram_send(struct socket *so, int flags, struct mbuf *m,
 	/*
 	 * If socket is subject to Content Filter, get inp_flags from saved state
 	 */
-	if (so->so_cfil_db && nam == NULL) {
+	if (CFIL_DGRAM_FILTERED(so) && nam == NULL) {
 		cfil_dgram_peek_socket_state(m, &inp_flags);
 	}
 #endif

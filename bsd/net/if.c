@@ -4999,9 +4999,11 @@ if_addmulti_common(struct ifnet *ifp, const struct sockaddr *sa,
 	 * We are certain we have added something, so call down to the
 	 * interface to let them know about it.  Do this only for newly-
 	 * added AF_LINK/AF_UNSPEC address in the if_multiaddrs set.
+	 * Note that the notification is deferred to avoid
+	 * locking reodering issues in certain paths.
 	 */
 	if (lladdr || ll_firstref) {
-		(void) ifnet_ioctl(ifp, 0, SIOCADDMULTI, NULL);
+		ifnet_ioctl_async(ifp, SIOCADDMULTI);
 	}
 
 	if (ifp->if_updatemcasts > 0) {
@@ -5139,8 +5141,10 @@ if_delmulti_common(struct ifmultiaddr *ifma, struct ifnet *ifp,
 		 * case of a link layer mcast group being left.  Do
 		 * this only for a AF_LINK/AF_UNSPEC address that has
 		 * been removed from the if_multiaddrs set.
+		 * Note that the notification is deferred to avoid
+		 * locking reodering issues in certain paths.
 		 */
-		ifnet_ioctl(ifp, 0, SIOCDELMULTI, NULL);
+		ifnet_ioctl_async(ifp, SIOCDELMULTI);
 	}
 
 	if (lastref) {

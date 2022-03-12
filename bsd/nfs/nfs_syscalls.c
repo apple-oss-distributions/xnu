@@ -346,7 +346,7 @@ nfsiod_start(void)
  * Grab an nfsiod struct to work on, do some work, then drop it
  */
 int
-nfsiod_continue(int error)
+nfsiod_continue(__unused int error)
 {
 	struct nfsiod *niod;
 	struct nfsmount *nmp;
@@ -432,7 +432,7 @@ worktodo:
 	/* queue ourselves back up - if there aren't too many threads running */
 	if (nfsiod_thread_count <= NFSIOD_MAX) {
 		TAILQ_INSERT_HEAD(&nfsiodfree, niod, niod_link);
-		error = msleep0(niod, &nfsiod_mutex, PWAIT | PDROP, "nfsiod", NFS_ASYNCTHREADMAXIDLE * hz, nfsiod_continue);
+		(void)msleep0(niod, &nfsiod_mutex, PWAIT | PDROP, "nfsiod", NFS_ASYNCTHREADMAXIDLE * hz, nfsiod_continue);
 		/* shouldn't return... so we have an error */
 		/* remove an old nfsiod struct and terminate */
 		lck_mtx_lock(&nfsiod_mutex);
@@ -789,7 +789,7 @@ fhopen(proc_t p __no_nfs_server_unused,
 
 	fp->fp_glob->fg_flag = fmode & FMASK;
 	fp->fp_glob->fg_ops = &vnops;
-	fp->fp_glob->fg_data = (caddr_t)vp;
+	fp_set_data(fp, vp);
 
 	// XXX do we really need to support this with fhopen()?
 	if (fmode & (O_EXLOCK | O_SHLOCK)) {
@@ -1542,7 +1542,7 @@ nfssvc_export(user_addr_t argp)
 	struct user_nfs_export_args unxa;
 	vfs_context_t ctx = vfs_context_current();
 
-	is_64bit = IS_64BIT_PROCESS(vfs_context_proc(ctx));
+	is_64bit = vfs_context_is64bit(ctx);
 
 	/* copy in pointers to path and export args */
 	if (is_64bit) {

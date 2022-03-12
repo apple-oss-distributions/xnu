@@ -138,9 +138,7 @@ proc_flag_explain_strings = ["!0x00000004 - process is 32 bit",  #only exception
                              "0x00400000 - is TBE state",
                              "0x00800000 - signal exceptions",
                              "0x01000000 - has thread cwd",
-                             "0x02000000 - has vfork() children",
                              "0x04000000 - not allowed to attach",
-                             "0x08000000 - vfork() in progress",
                              "0x10000000 - no shared libraries",
                              "0x20000000 - force quota for root",
                              "0x40000000 - no zombies when children exit",
@@ -168,7 +166,7 @@ CRASHLOG_PANIC_STRING_LEN = 32
 AURR_CRASHLOG_PANIC_VERSION = 2
 
 # File:EXTERNAL_HEADER/mach-o/loader.h
-# (struct proc *)->p_platform
+# (struct proc *)->p_proc_ro->p_platform_data.p_platform
 P_PLATFORM_MACOS = 1
 P_PLATFORM_IOS = 2
 P_PLATFORM_TVOS = 3

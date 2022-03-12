@@ -841,6 +841,12 @@ vsock_attach(struct socket *so, int proto, struct proc *p)
 {
 	#pragma unused(proto, p)
 
+	// Reserve send and receive buffers.
+	errno_t error = soreserve(so, vsock_sendspace, vsock_recvspace);
+	if (error) {
+		return error;
+	}
+
 	// Attach should only be run once per socket.
 	struct vsockpcb *pcb = sotovsockpcb(so);
 	if (pcb) {
@@ -851,12 +857,6 @@ vsock_attach(struct socket *so, int proto, struct proc *p)
 	struct vsock_transport *transport = os_atomic_load(&the_vsock_transport, relaxed);
 	if (transport == NULL) {
 		return ENODEV;
-	}
-
-	// Reserve send and receive buffers.
-	errno_t error = soreserve(so, vsock_sendspace, vsock_recvspace);
-	if (error) {
-		return error;
 	}
 
 	// Initialize the vsock protocol control block.
@@ -876,6 +876,8 @@ vsock_attach(struct socket *so, int proto, struct proc *p)
 	// Tell the transport that this socket has attached.
 	error = transport->attach_socket(transport->provider);
 	if (error) {
+		zfree(vsockpcb_zone, pcb);
+		so->so_pcb = NULL;
 		return error;
 	}
 

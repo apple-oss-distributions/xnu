@@ -2848,7 +2848,7 @@ vm_page_update_background_state(vm_page_t mem)
 		return;
 	}
 
-	task_t  my_task = current_task();
+	task_t  my_task = current_task_early();
 
 	if (my_task) {
 		if (task_get_darkwake_mode(my_task)) {
@@ -2885,7 +2885,7 @@ vm_page_assign_background_state(vm_page_t mem)
 		return;
 	}
 
-	task_t  my_task = current_task();
+	task_t  my_task = current_task_early();
 
 	if (my_task) {
 		if (task_get_darkwake_mode(my_task)) {
@@ -3577,7 +3577,7 @@ static inline void
 vm_page_grab_diags()
 {
 #if DEVELOPMENT || DEBUG
-	task_t task = current_task();
+	task_t task = current_task_early();
 	if (task == NULL) {
 		return;
 	}
@@ -6688,7 +6688,7 @@ vm_page_alloc_list(
 	int             page_grab_count = 0;
 	mach_vm_size_t  map_size = ptoa_64(page_count);
 #if DEVELOPMENT || DEBUG
-	task_t          task = current_task();
+	task_t          task = current_task_early();
 #endif /* DEVELOPMENT || DEBUG */
 
 	for (int i = 0; i < page_count; i++) {

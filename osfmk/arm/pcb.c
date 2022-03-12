@@ -153,7 +153,7 @@ machine_thread_on_core(thread_t thread)
  * Routine:	machine_thread_create
  *
  */
-kern_return_t
+void
 machine_thread_create(thread_t thread, task_t task, bool first_thread)
 {
 #define machine_thread_create_kprintf(x...)     /* kprintf("machine_thread_create: " x) */
@@ -179,8 +179,6 @@ machine_thread_create(thread_t thread, task_t task, bool first_thread)
 	(void)task;
 #endif
 	machine_thread_state_initialize(thread);
-
-	return KERN_SUCCESS;
 }
 
 /*
@@ -424,7 +422,7 @@ machine_thread_set_tsd_base(
 	thread_t                        thread,
 	mach_vm_offset_t        tsd_base)
 {
-	if (thread->task == kernel_task) {
+	if (get_threadtask(thread) == kernel_task) {
 		return KERN_INVALID_ARGUMENT;
 	}
 

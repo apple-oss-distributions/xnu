@@ -898,23 +898,6 @@ mac_error_select(int error1, int error2)
 	return error2;
 }
 
-void
-mac_label_init(struct label *label)
-{
-	bzero(label, sizeof(*label));
-	label->l_flags = MAC_FLAG_INITIALIZED;
-}
-
-void
-mac_label_destroy(struct label *label)
-{
-	KASSERT(label->l_flags & MAC_FLAG_INITIALIZED,
-	    ("destroying uninitialized label"));
-
-	bzero(label, sizeof(*label));
-	/* implicit: label->l_flags &= ~MAC_FLAG_INITIALIZED; */
-}
-
 int
 mac_check_structmac_consistent(struct user_mac *mac)
 {
@@ -1219,7 +1202,7 @@ __mac_get_pid(struct proc *p, struct __mac_get_pid_args *uap, int *ret __unused)
 	AUDIT_ARG(mac_string, elements);
 
 	buffer = kalloc_data(mac.m_buflen, Z_WAITOK | Z_ZERO);
-	error = mac_cred_label_externalize(tcred->cr_label, elements,
+	error = mac_cred_label_externalize(mac_cred_label(tcred), elements,
 	    buffer, mac.m_buflen, M_WAITOK);
 	if (error == 0) {
 		error = copyout(buffer, mac.m_string, strlen(buffer) + 1);
@@ -1271,7 +1254,7 @@ __mac_get_proc(proc_t p, struct __mac_get_proc_args *uap, int *ret __unused)
 	cr = kauth_cred_proc_ref(p);
 
 	buffer = kalloc_data(mac.m_buflen, Z_WAITOK | Z_ZERO);
-	error = mac_cred_label_externalize(cr->cr_label,
+	error = mac_cred_label_externalize(mac_cred_label(cr),
 	    elements, buffer, mac.m_buflen, M_WAITOK);
 	if (error == 0) {
 		error = copyout(buffer, mac.m_string, strlen(buffer) + 1);
@@ -1405,15 +1388,15 @@ __mac_get_fd(proc_t p, struct __mac_get_fd_args *uap, int *ret __unused)
 
 	switch (FILEGLOB_DTYPE(fp->fp_glob)) {
 	case DTYPE_VNODE:
-		intlabel = mac_vnode_label_alloc();
+		intlabel = mac_vnode_label_alloc(NULL);
 		if (intlabel == NULL) {
 			error = ENOMEM;
 			break;
 		}
-		vp = (struct vnode *)fp->fp_glob->fg_data;
+		vp = (struct vnode *)fp_get_data(fp);
 		error = vnode_getwithref(vp);
 		if (error == 0) {
-			mac_vnode_label_copy(vp->v_label, intlabel);
+			mac_vnode_label_copy(mac_vnode_label(vp), intlabel);
 			error = mac_vnode_label_externalize(intlabel,
 			    elements, buffer,
 			    mac.m_buflen, M_WAITOK);
@@ -1503,8 +1486,8 @@ mac_get_filelink(proc_t p, user_addr_t mac_p, user_addr_t path_p, int follow)
 
 	nameidone(&nd);
 
-	intlabel = mac_vnode_label_alloc();
-	mac_vnode_label_copy(vp->v_label, intlabel);
+	intlabel = mac_vnode_label_alloc(NULL);
+	mac_vnode_label_copy(mac_vnode_label(vp), intlabel);
 	error = mac_vnode_label_externalize(intlabel, elements, buffer,
 	    mac.m_buflen, M_WAITOK);
 	mac_vnode_label_free(intlabel);
@@ -1597,7 +1580,7 @@ __mac_set_fd(proc_t p, struct __mac_set_fd_args *uap, int *ret __unused)
 			break;
 		}
 
-		intlabel = mac_vnode_label_alloc();
+		intlabel = mac_vnode_label_alloc(NULL);
 
 		error = mac_vnode_label_internalize(intlabel, buffer);
 		if (error) {
@@ -1606,7 +1589,7 @@ __mac_set_fd(proc_t p, struct __mac_set_fd_args *uap, int *ret __unused)
 		}
 
 
-		vp = (struct vnode *)fp->fp_glob->fg_data;
+		vp = (struct vnode *)fp_get_data(fp);
 
 		error = vnode_getwithref(vp);
 		if (error == 0) {
@@ -1680,7 +1663,7 @@ mac_set_filelink(proc_t p, user_addr_t mac_p, user_addr_t path_p,
 	}
 	AUDIT_ARG(mac_string, buffer);
 
-	intlabel = mac_vnode_label_alloc();
+	intlabel = mac_vnode_label_alloc(NULL);
 	error = mac_vnode_label_internalize(intlabel, buffer);
 	kfree_data(buffer, mac.m_buflen);
 	if (error) {
@@ -1847,7 +1830,7 @@ mac_mount_label_get(struct mount *mp, user_addr_t mac_p)
 	}
 	AUDIT_ARG(mac_string, elements);
 
-	label = mp->mnt_mntlabel;
+	label = mac_mount_label(mp);
 	buffer = kalloc_data(mac.m_buflen, Z_WAITOK | Z_ZERO);
 	error = mac_mount_label_externalize(label, elements, buffer,
 	    mac.m_buflen);

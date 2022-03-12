@@ -111,22 +111,6 @@
 #include <kern/task.h>          /* for current_task() */
 #include <kern/assert.h>
 
-
-/*
- * Credential debugging; we can track entry into a function that might
- * change a credential, and we can track actual credential changes that
- * result.
- *
- * Note:	Does *NOT* currently include per-thread credential changes
- */
-#if DEBUG_CRED
-#define DEBUG_CRED_ENTER                printf
-#define DEBUG_CRED_CHANGE               printf
-#else   /* !DEBUG_CRED */
-#define DEBUG_CRED_ENTER(fmt, ...)      do {} while (0)
-#define DEBUG_CRED_CHANGE(fmt, ...)     do {} while (0)
-#endif  /* !DEBUG_CRED */
-
 #if DEVELOPMENT || DEBUG
 extern void task_importance_update_owner_info(task_t);
 #endif
@@ -337,21 +321,22 @@ geteuid(__unused proc_t p, __unused struct geteuid_args *uap, int32_t *retval)
 int
 gettid(__unused proc_t p, struct gettid_args *uap, int32_t *retval)
 {
-	struct uthread *uthread = get_bsdthread_info(current_thread());
+	thread_ro_t tro = current_thread_ro();
+	kauth_cred_t tro_cred = tro->tro_cred;
 	int     error;
 
 	/*
 	 * If this thread is not running with an override identity, we can't
 	 * return one to the caller, so return an error instead.
 	 */
-	if (!(uthread->uu_flag & UT_SETUID)) {
+	if (!(tro->tro_flags & TRO_SETUID)) {
 		return ESRCH;
 	}
 
-	if ((error = suword(uap->uidp, kauth_cred_getruid(uthread->uu_ucred)))) {
+	if ((error = suword(uap->uidp, kauth_cred_getruid(tro_cred)))) {
 		return error;
 	}
-	if ((error = suword(uap->gidp, kauth_cred_getrgid(uthread->uu_ucred)))) {
+	if ((error = suword(uap->gidp, kauth_cred_getrgid(tro_cred)))) {
 		return error;
 	}
 
@@ -501,9 +486,6 @@ setsid_internal(proc_t p)
 	struct pgrp * pg = PGRP_NULL;
 
 	if (p->p_pgrpid == proc_getpid(p) ||
-#if CONFIG_VFORK
-	    (p->p_lflag & P_LINVFORK) ||
-#endif /* CONFIG_VFORK */
 	    (pg = pgrp_find(proc_getpid(p)))) {
 		pgrp_rele(pg);
 		return EPERM;
@@ -526,9 +508,8 @@ setsid_internal(proc_t p)
  *		EPERM				Permission denied
  *
  * Notes:	If the calling process is not the process group leader; there
- *		is no existing process group with its ID, and we are not
- *		currently in vfork, then this function will create a new
- *		session, a new process group, and put the caller in the
+ *		is no existing process group with its ID, then this function will
+ *		create a new session, a new process group, and put the caller in the
  *		process group (as the sole member) and make it the session
  *		leader (as the sole process in the session).
  *
@@ -695,7 +676,6 @@ issetugid(proc_t p, __unused struct issetugid_args *uap, int32_t *retval)
 	return 0;
 }
 
-
 /*
  * setuid
  *
@@ -719,49 +699,44 @@ issetugid(proc_t p, __unused struct issetugid_args *uap, int32_t *retval)
 int
 setuid(proc_t p, struct setuid_args *uap, __unused int32_t *retval)
 {
-	uid_t uid;
-	uid_t svuid = KAUTH_UID_NONE;
-	uid_t ruid = KAUTH_UID_NONE;
-	uid_t gmuid = KAUTH_UID_NONE;
-	int error;
-	kauth_cred_t my_cred, my_new_cred;
-	posix_cred_t my_pcred;
+	__block int error = 0;
+	__block uid_t old_ruid;
+	__block uid_t ruid;
+	uid_t want_uid;
+	bool changed;
 
-	uid = uap->uid;
+	want_uid = uap->uid;
+	AUDIT_ARG(uid, want_uid);
 
-	/* get current credential and take a reference while we muck with it */
-	my_cred = kauth_cred_proc_ref(p);
-	my_pcred = posix_cred_get(my_cred);
+	changed = proc_update_label(p, true, ^(kauth_cred_t cur_cred) {
+		posix_cred_t cur_pcred = posix_cred_get(cur_cred);
+		uid_t svuid = KAUTH_UID_NONE;
+		uid_t gmuid = KAUTH_UID_NONE;
 
-	DEBUG_CRED_ENTER("setuid (%d/%d): %p %d\n", proc_getpid(p), (p->p_pptr ? proc_getpid(p->p_pptr) : 0), my_cred, uap->uid);
-	AUDIT_ARG(uid, uid);
+		ruid = KAUTH_UID_NONE;
+		old_ruid = cur_pcred->cr_ruid;
 
-	for (;;) {
 #if CONFIG_MACF
-		if ((error = mac_proc_check_setuid(p, my_cred, uid)) != 0) {
-			kauth_cred_unref(&my_cred);
-			return error;
+		if ((error = mac_proc_check_setuid(p, cur_cred, want_uid)) != 0) {
+		        return cur_cred;
 		}
 #endif
 
-		if (uid != my_pcred->cr_ruid &&         /* allow setuid(getuid()) */
-		    uid != my_pcred->cr_svuid &&        /* allow setuid(saved uid) */
-		    (error = suser(my_cred, &p->p_acflag))) {
-			kauth_cred_unref(&my_cred);
-			return error;
+		if (want_uid != cur_pcred->cr_ruid &&         /* allow setuid(getuid()) */
+		want_uid != cur_pcred->cr_svuid &&            /* allow setuid(saved uid) */
+		(error = suser(cur_cred, &p->p_acflag))) {
+		        return cur_cred;
 		}
 
 		/*
 		 * If we are privileged, then set the saved and real UID too;
 		 * otherwise, just set the effective UID
 		 */
-		if (suser(my_cred, &p->p_acflag) == 0) {
-			svuid = uid;
-			ruid = uid;
-		} else {
-			svuid = KAUTH_UID_NONE;
-			ruid = KAUTH_UID_NONE;
+		if (suser(cur_cred, &p->p_acflag) == 0) {
+		        svuid = want_uid;
+		        ruid = want_uid;
 		}
+
 		/*
 		 * Only set the gmuid if the current cred has not opt'ed out;
 		 * this normally only happens when calling setgroups() instead
@@ -771,78 +746,20 @@ setuid(proc_t p, struct setuid_args *uap, __unused int32_t *retval)
 		 * to something other than the default list for the user, as
 		 * in entering a group or leaving an exclusion group).
 		 */
-		if (!(my_pcred->cr_flags & CRF_NOMEMBERD)) {
-			gmuid = uid;
+		if (!(cur_pcred->cr_flags & CRF_NOMEMBERD)) {
+		        gmuid = want_uid;
 		}
 
-		/*
-		 * Set the credential with new info.  If there is no change,
-		 * we get back the same credential we passed in; if there is
-		 * a change, we drop the reference on the credential we
-		 * passed in.  The subsequent compare is safe, because it is
-		 * a pointer compare rather than a contents compare.
-		 */
-		my_new_cred = kauth_cred_setresuid(my_cred, ruid, uid, svuid, gmuid);
-		if (my_cred != my_new_cred) {
-			DEBUG_CRED_CHANGE("setuid CH(%d): %p/0x%08x -> %p/0x%08x\n", proc_getpid(p), my_cred, my_pcred->cr_flags, my_new_cred, posix_cred_get(my_new_cred)->cr_flags);
+		return kauth_cred_setresuid(cur_cred, ruid, want_uid, svuid, gmuid);
+	});
 
-			/*
-			 * If we're changing the ruid from A to B, we might race with another thread that's setting ruid from B to A.
-			 * The current locking mechanisms don't allow us to make the entire credential switch operation atomic,
-			 * thus we may be able to change the process credentials from ruid A to B, but get preempted before incrementing the proc
-			 * count of B. If a second thread sees the new process credentials and switches back to ruid A, that other thread
-			 * may be able to decrement the proc count of B before we can increment it. This results in a panic.
-			 * Incrementing the proc count of the target ruid, B, before setting the process credentials prevents this race.
-			 */
-			if (ruid != KAUTH_UID_NONE && !proc_has_persona(p)) {
-				(void)chgproccnt(ruid, 1);
-			}
-
-			proc_ucred_lock(p);
-			/*
-			 * We need to protect for a race where another thread
-			 * also changed the credential after we took our
-			 * reference.  If p_ucred has changed then we should
-			 * restart this again with the new cred.
-			 *
-			 * Note: the kauth_cred_setresuid has consumed a reference to my_cred, it p_ucred != my_cred, then my_cred must not be dereferenced!
-			 */
-			if (proc_ucred(p) != my_cred) {
-				proc_ucred_unlock(p);
-				/*
-				 * We didn't successfully switch to the new ruid, so decrement
-				 * the procs/uid count that we incremented above.
-				 */
-				if (ruid != KAUTH_UID_NONE && !proc_has_persona(p)) {
-					(void)chgproccnt(ruid, -1);
-				}
-				kauth_cred_unref(&my_new_cred);
-				my_cred = kauth_cred_proc_ref(p);
-				my_pcred = posix_cred_get(my_cred);
-				/* try again */
-				continue;
-			}
-			proc_set_ucred(p, my_new_cred);
-			/* update cred on proc */
-			proc_update_creds_onproc(p);
-
-			OSBitOrAtomic(P_SUGID, &p->p_flag);
-			proc_ucred_unlock(p);
-			/*
-			 * If we've updated the ruid, decrement the count of procs running
-			 * under the previous ruid
-			 */
-			if (ruid != KAUTH_UID_NONE && !proc_has_persona(p)) {
-				(void)chgproccnt(my_pcred->cr_ruid, -1);
-			}
-		}
-		break;
+	if (changed && ruid != KAUTH_UID_NONE && old_ruid != ruid &&
+	    !proc_has_persona(p)) {
+		(void)chgproccnt(ruid, 1);
+		(void)chgproccnt(old_ruid, -1);
 	}
-	/* Drop old proc reference or our extra reference */
-	kauth_cred_unref(&my_cred);
 
-	set_security_token(p);
-	return 0;
+	return error;
 }
 
 
@@ -867,73 +784,32 @@ setuid(proc_t p, struct setuid_args *uap, __unused int32_t *retval)
 int
 seteuid(proc_t p, struct seteuid_args *uap, __unused int32_t *retval)
 {
-	uid_t euid;
-	int error;
-	kauth_cred_t my_cred, my_new_cred;
-	posix_cred_t my_pcred;
+	__block int error = 0;
+	uid_t want_euid;
+	bool changed;
 
-	DEBUG_CRED_ENTER("seteuid: %d\n", uap->euid);
+	want_euid = uap->euid;
+	AUDIT_ARG(euid, want_euid);
 
-	euid = uap->euid;
-	AUDIT_ARG(euid, euid);
+	changed = proc_update_label(p, true, ^(kauth_cred_t cur_cred) {
+		posix_cred_t cur_pcred = posix_cred_get(cur_cred);
 
-	my_cred = kauth_cred_proc_ref(p);
-	my_pcred = posix_cred_get(my_cred);
-
-	for (;;) {
 #if CONFIG_MACF
-		if ((error = mac_proc_check_seteuid(p, my_cred, euid)) != 0) {
-			kauth_cred_unref(&my_cred);
-			return error;
+		if ((error = mac_proc_check_seteuid(p, cur_cred, want_euid)) != 0) {
+		        return cur_cred;
 		}
 #endif
 
-		if (euid != my_pcred->cr_ruid && euid != my_pcred->cr_svuid &&
-		    (error = suser(my_cred, &p->p_acflag))) {
-			kauth_cred_unref(&my_cred);
-			return error;
+		if (want_euid != cur_pcred->cr_ruid && want_euid != cur_pcred->cr_svuid &&
+		(error = suser(cur_cred, &p->p_acflag))) {
+		        return cur_cred;
 		}
 
-		/*
-		 * Set the credential with new info.  If there is no change,
-		 * we get back the same credential we passed in; if there is
-		 * a change, we drop the reference on the credential we
-		 * passed in.  The subsequent compare is safe, because it is
-		 * a pointer compare rather than a contents compare.
-		 */
-		my_new_cred = kauth_cred_setresuid(my_cred, KAUTH_UID_NONE, euid, KAUTH_UID_NONE, my_pcred->cr_gmuid);
+		return kauth_cred_setresuid(cur_cred, KAUTH_UID_NONE, want_euid,
+		KAUTH_UID_NONE, cur_pcred->cr_gmuid);
+	});
 
-		if (my_cred != my_new_cred) {
-			DEBUG_CRED_CHANGE("seteuid CH(%d): %p/0x%08x -> %p/0x%08x\n", proc_getpid(p), my_cred, my_pcred->cr_flags, my_new_cred, posix_cred_get(my_new_cred)->cr_flags);
-
-			proc_ucred_lock(p);
-			/*
-			 * We need to protect for a race where another thread
-			 * also changed the credential after we took our
-			 * reference.  If p_ucred has changed then we
-			 * should restart this again with the new cred.
-			 */
-			if (proc_ucred(p) != my_cred) {
-				proc_ucred_unlock(p);
-				kauth_cred_unref(&my_new_cred);
-				my_cred = kauth_cred_proc_ref(p);
-				my_pcred = posix_cred_get(my_cred);
-				/* try again */
-				continue;
-			}
-			proc_set_ucred(p, my_new_cred);
-			/* update cred on proc */
-			proc_update_creds_onproc(p);
-			OSBitOrAtomic(P_SUGID, &p->p_flag);
-			proc_ucred_unlock(p);
-		}
-		break;
-	}
-	/* drop old proc reference or our extra reference */
-	kauth_cred_unref(&my_cred);
-
-	set_security_token(p);
-	return 0;
+	return error;
 }
 
 
@@ -971,139 +847,77 @@ seteuid(proc_t p, struct seteuid_args *uap, __unused int32_t *retval)
 int
 setreuid(proc_t p, struct setreuid_args *uap, __unused int32_t *retval)
 {
-	uid_t ruid, euid;
-	int error;
-	kauth_cred_t my_cred, my_new_cred;
-	posix_cred_t my_pcred;
+	__block int error = 0;
+	__block uid_t old_ruid;
+	uid_t want_ruid, want_euid;
+	bool changed;
 
-	DEBUG_CRED_ENTER("setreuid %d %d\n", uap->ruid, uap->euid);
+	want_ruid = uap->ruid;
+	want_euid = uap->euid;
 
-	ruid = uap->ruid;
-	euid = uap->euid;
-	if (ruid == (uid_t)-1) {
-		ruid = KAUTH_UID_NONE;
+	if (want_ruid == (uid_t)-1) {
+		want_ruid = KAUTH_UID_NONE;
 	}
-	if (euid == (uid_t)-1) {
-		euid = KAUTH_UID_NONE;
+
+	if (want_euid == (uid_t)-1) {
+		want_euid = KAUTH_UID_NONE;
 	}
-	AUDIT_ARG(euid, euid);
-	AUDIT_ARG(ruid, ruid);
 
-	my_cred = kauth_cred_proc_ref(p);
-	my_pcred = posix_cred_get(my_cred);
+	AUDIT_ARG(euid, want_euid);
+	AUDIT_ARG(ruid, want_ruid);
 
-	for (;;) {
+	changed = proc_update_label(p, true, ^(kauth_cred_t cur_cred) {
+		posix_cred_t cur_pcred = posix_cred_get(cur_cred);
+		uid_t svuid = KAUTH_UID_NONE;
+
 #if CONFIG_MACF
-		if ((error = mac_proc_check_setreuid(p, my_cred, ruid, euid)) != 0) {
-			kauth_cred_unref(&my_cred);
-			return error;
+		if ((error = mac_proc_check_setreuid(p, cur_cred, want_ruid, want_euid)) != 0) {
+		        return cur_cred;
 		}
 #endif
 
-		if (((ruid != KAUTH_UID_NONE &&         /* allow no change of ruid */
-		    ruid != my_pcred->cr_ruid &&        /* allow ruid = ruid */
-		    ruid != my_pcred->cr_uid &&         /* allow ruid = euid */
-		    ruid != my_pcred->cr_svuid) ||      /* allow ruid = svuid */
-		    (euid != KAUTH_UID_NONE &&          /* allow no change of euid */
-		    euid != my_pcred->cr_uid &&         /* allow euid = euid */
-		    euid != my_pcred->cr_ruid &&        /* allow euid = ruid */
-		    euid != my_pcred->cr_svuid)) &&     /* allow euid = svuid */
-		    (error = suser(my_cred, &p->p_acflag))) { /* allow root user any */
-			kauth_cred_unref(&my_cred);
-			return error;
+		if (((want_ruid != KAUTH_UID_NONE &&         /* allow no change of ruid */
+		want_ruid != cur_pcred->cr_ruid &&            /* allow ruid = ruid */
+		want_ruid != cur_pcred->cr_uid &&             /* allow ruid = euid */
+		want_ruid != cur_pcred->cr_svuid) ||          /* allow ruid = svuid */
+		(want_euid != KAUTH_UID_NONE &&              /* allow no change of euid */
+		want_euid != cur_pcred->cr_uid &&             /* allow euid = euid */
+		want_euid != cur_pcred->cr_ruid &&            /* allow euid = ruid */
+		want_euid != cur_pcred->cr_svuid)) &&         /* allow euid = svuid */
+		(error = suser(cur_cred, &p->p_acflag))) {     /* allow root user any */
+		        return cur_cred;
 		}
 
-		uid_t new_euid;
-		uid_t svuid = KAUTH_UID_NONE;
+		uid_t new_euid = cur_pcred->cr_uid;
 
-		new_euid = my_pcred->cr_uid;
-		/*
-		 * Set the credential with new info.  If there is no change,
-		 * we get back the same credential we passed in; if there is
-		 * a change, we drop the reference on the credential we
-		 * passed in.  The subsequent compare is safe, because it is
-		 * a pointer compare rather than a contents compare.
-		 */
-		if (euid != KAUTH_UID_NONE && my_pcred->cr_uid != euid) {
-			/* changing the effective UID */
-			new_euid = euid;
-			OSBitOrAtomic(P_SUGID, &p->p_flag);
+		if (want_euid != KAUTH_UID_NONE && cur_pcred->cr_uid != want_euid) {
+		        new_euid = want_euid;
 		}
+
+		old_ruid = cur_pcred->cr_ruid;
+
 		/*
 		 * If the newly requested real uid or effective uid does
 		 * not match the saved uid, then set the saved uid to the
 		 * new effective uid.  We are protected from escalation
 		 * by the prechecking.
 		 */
-		if (my_pcred->cr_svuid != uap->ruid &&
-		    my_pcred->cr_svuid != uap->euid) {
-			svuid = new_euid;
-			OSBitOrAtomic(P_SUGID, &p->p_flag);
+		if (cur_pcred->cr_svuid != uap->ruid &&
+		cur_pcred->cr_svuid != uap->euid) {
+		        svuid = new_euid;
 		}
 
-		my_new_cred = kauth_cred_setresuid(my_cred, ruid, euid, svuid, my_pcred->cr_gmuid);
+		return kauth_cred_setresuid(cur_cred, want_ruid, want_euid,
+		svuid, cur_pcred->cr_gmuid);
+	});
 
-		if (my_cred != my_new_cred) {
-			DEBUG_CRED_CHANGE("setreuid CH(%d): %p/0x%08x -> %p/0x%08x\n", proc_getpid(p), my_cred, my_pcred->cr_flags, my_new_cred, posix_cred_get(my_new_cred)->cr_flags);
-
-			/*
-			 * If we're changing the ruid from A to B, we might race with another thread that's setting ruid from B to A.
-			 * The current locking mechanisms don't allow us to make the entire credential switch operation atomic,
-			 * thus we may be able to change the process credentials from ruid A to B, but get preempted before incrementing the proc
-			 * count of B. If a second thread sees the new process credentials and switches back to ruid A, that other thread
-			 * may be able to decrement the proc count of B before we can increment it. This results in a panic.
-			 * Incrementing the proc count of the target ruid, B, before setting the process credentials prevents this race.
-			 */
-			if (ruid != KAUTH_UID_NONE && !proc_has_persona(p)) {
-				(void)chgproccnt(ruid, 1);
-			}
-
-			proc_ucred_lock(p);
-			/*
-			 * We need to protect for a race where another thread
-			 * also changed the credential after we took our
-			 * reference.  If p_ucred has changed then we should
-			 * restart this again with the new cred.
-			 *
-			 * Note: the kauth_cred_setresuid has consumed a reference to my_cred, it p_ucred != my_cred, then my_cred must not be dereferenced!
-			 */
-			if (proc_ucred(p) != my_cred) {
-				proc_ucred_unlock(p);
-				if (ruid != KAUTH_UID_NONE && !proc_has_persona(p)) {
-					/*
-					 * We didn't successfully switch to the new ruid, so decrement
-					 * the procs/uid count that we incremented above.
-					 */
-					(void)chgproccnt(ruid, -1);
-				}
-				kauth_cred_unref(&my_new_cred);
-				my_cred = kauth_cred_proc_ref(p);
-				my_pcred = posix_cred_get(my_cred);
-				/* try again */
-				continue;
-			}
-
-			proc_set_ucred(p, my_new_cred);
-			/* update cred on proc */
-			proc_update_creds_onproc(p);
-			OSBitOrAtomic(P_SUGID, &p->p_flag);
-			proc_ucred_unlock(p);
-
-			if (ruid != KAUTH_UID_NONE && !proc_has_persona(p)) {
-				/*
-				 * We switched to a new ruid, so decrement the count of procs running
-				 * under the previous ruid
-				 */
-				(void)chgproccnt(my_pcred->cr_ruid, -1);
-			}
-		}
-		break;
+	if (changed && want_ruid != KAUTH_UID_NONE && want_ruid != old_ruid &&
+	    !proc_has_persona(p)) {
+		(void)chgproccnt(want_ruid, 1);
+		(void)chgproccnt(old_ruid, -1);
 	}
-	/* drop old proc reference or our extra reference */
-	kauth_cred_unref(&my_cred);
 
-	set_security_token(p);
-	return 0;
+	return error;
 }
 
 
@@ -1135,88 +949,43 @@ setreuid(proc_t p, struct setreuid_args *uap, __unused int32_t *retval)
 int
 setgid(proc_t p, struct setgid_args *uap, __unused int32_t *retval)
 {
-	gid_t gid;
-	gid_t rgid = KAUTH_GID_NONE;
-	gid_t svgid = KAUTH_GID_NONE;
-	int error;
-	kauth_cred_t my_cred, my_new_cred;
-	posix_cred_t my_pcred;
+	__block int error = 0;
+	gid_t want_gid;
+	bool changed;
 
-	DEBUG_CRED_ENTER("setgid(%d/%d): %d\n", proc_getpid(p), (p->p_pptr ? proc_getpid(p->p_pptr) : 0), uap->gid);
+	want_gid = uap->gid;
+	AUDIT_ARG(gid, want_gid);
 
-	gid = uap->gid;
-	AUDIT_ARG(gid, gid);
+	changed = proc_update_label(p, true, ^(kauth_cred_t cur_cred) {
+		posix_cred_t cur_pcred = posix_cred_get(cur_cred);
+		gid_t rgid = KAUTH_GID_NONE;
+		gid_t svgid = KAUTH_GID_NONE;
 
-	/* get current credential and take a reference while we muck with it */
-	my_cred = kauth_cred_proc_ref(p);
-	my_pcred = posix_cred_get(my_cred);
-
-	for (;;) {
 #if CONFIG_MACF
-		if ((error = mac_proc_check_setgid(p, my_cred, gid)) != 0) {
-			kauth_cred_unref(&my_cred);
-			return error;
+		if ((error = mac_proc_check_setgid(p, cur_cred, want_gid)) != 0) {
+		        return cur_cred;
 		}
 #endif
 
-		if (gid != my_pcred->cr_rgid &&         /* allow setgid(getgid()) */
-		    gid != my_pcred->cr_svgid &&        /* allow setgid(saved gid) */
-		    (error = suser(my_cred, &p->p_acflag))) {
-			kauth_cred_unref(&my_cred);
-			return error;
+		if (want_gid != cur_pcred->cr_rgid &&         /* allow setgid(getgid()) */
+		want_gid != cur_pcred->cr_svgid &&            /* allow setgid(saved gid) */
+		(error = suser(cur_cred, &p->p_acflag))) {
+		        return cur_cred;
 		}
 
 		/*
 		 * If we are privileged, then set the saved and real GID too;
 		 * otherwise, just set the effective GID
 		 */
-		if (suser(my_cred, &p->p_acflag) == 0) {
-			svgid = gid;
-			rgid = gid;
-		} else {
-			svgid = KAUTH_GID_NONE;
-			rgid = KAUTH_GID_NONE;
+		if (suser(cur_cred, &p->p_acflag) == 0) {
+		        svgid = want_gid;
+		        rgid = want_gid;
 		}
 
-		/*
-		 * Set the credential with new info.  If there is no change,
-		 * we get back the same credential we passed in; if there is
-		 * a change, we drop the reference on the credential we
-		 * passed in.  The subsequent compare is safe, because it is
-		 * a pointer compare rather than a contents compare.
-		 */
-		my_new_cred = kauth_cred_setresgid(my_cred, rgid, gid, svgid);
-		if (my_cred != my_new_cred) {
-			DEBUG_CRED_CHANGE("setgid(CH)%d: %p/0x%08x->%p/0x%08x\n", proc_getpid(p), my_cred, my_cred->cr_flags, my_new_cred, my_new_cred->cr_flags);
+		return kauth_cred_setresgid(cur_cred, rgid, want_gid, svgid);
+	});
 
-			proc_ucred_lock(p);
-			/*
-			 * We need to protect for a race where another thread
-			 * also changed the credential after we took our
-			 * reference.  If p_ucred has changed then we
-			 * should restart this again with the new cred.
-			 */
-			if (proc_ucred(p) != my_cred) {
-				proc_ucred_unlock(p);
-				kauth_cred_unref(&my_new_cred);
-				/* try again */
-				my_cred = kauth_cred_proc_ref(p);
-				my_pcred = posix_cred_get(my_cred);
-				continue;
-			}
-			proc_set_ucred(p, my_new_cred);
-			/* update cred on proc */
-			proc_update_creds_onproc(p);
-			OSBitOrAtomic(P_SUGID, &p->p_flag);
-			proc_ucred_unlock(p);
-		}
-		break;
-	}
-	/* Drop old proc reference or our extra reference */
-	kauth_cred_unref(&my_cred);
-
-	set_security_token(p);
-	return 0;
+	return error;
 }
 
 
@@ -1246,74 +1015,33 @@ setgid(proc_t p, struct setgid_args *uap, __unused int32_t *retval)
 int
 setegid(proc_t p, struct setegid_args *uap, __unused int32_t *retval)
 {
-	gid_t egid;
-	int error;
-	kauth_cred_t my_cred, my_new_cred;
-	posix_cred_t my_pcred;
+	__block int error = 0;
+	gid_t want_egid;
+	bool changed;
 
-	DEBUG_CRED_ENTER("setegid %d\n", uap->egid);
+	want_egid = uap->egid;
+	AUDIT_ARG(egid, want_egid);
 
-	egid = uap->egid;
-	AUDIT_ARG(egid, egid);
+	changed = proc_update_label(p, true, ^(kauth_cred_t cur_cred) {
+		posix_cred_t cur_pcred = posix_cred_get(cur_cred);
 
-	/* get current credential and take a reference while we muck with it */
-	my_cred = kauth_cred_proc_ref(p);
-	my_pcred = posix_cred_get(my_cred);
-
-	for (;;) {
 #if CONFIG_MACF
-		if ((error = mac_proc_check_setegid(p, my_cred, egid)) != 0) {
-			kauth_cred_unref(&my_cred);
-			return error;
+		if ((error = mac_proc_check_setegid(p, cur_cred, want_egid)) != 0) {
+		        return cur_cred;
 		}
 #endif
 
-		if (egid != my_pcred->cr_rgid &&
-		    egid != my_pcred->cr_svgid &&
-		    (error = suser(my_cred, &p->p_acflag))) {
-			kauth_cred_unref(&my_cred);
-			return error;
+		if (want_egid != cur_pcred->cr_rgid &&
+		want_egid != cur_pcred->cr_svgid &&
+		(error = suser(cur_cred, &p->p_acflag))) {
+		        return cur_cred;
 		}
-		/*
-		 * Set the credential with new info.  If there is no change,
-		 * we get back the same credential we passed in; if there is
-		 * a change, we drop the reference on the credential we
-		 * passed in.  The subsequent compare is safe, because it is
-		 * a pointer compare rather than a contents compare.
-		 */
-		my_new_cred = kauth_cred_setresgid(my_cred, KAUTH_GID_NONE, egid, KAUTH_GID_NONE);
-		if (my_cred != my_new_cred) {
-			DEBUG_CRED_CHANGE("setegid(CH)%d: %p/0x%08x->%p/0x%08x\n", proc_getpid(p), my_cred, my_pcred->cr_flags, my_new_cred, posix_cred_get(my_new_cred)->cr_flags);
 
-			proc_ucred_lock(p);
-			/*
-			 * We need to protect for a race where another thread
-			 * also changed the credential after we took our
-			 * reference.  If p_ucred has changed then we
-			 * should restart this again with the new cred.
-			 */
-			if (proc_ucred(p) != my_cred) {
-				proc_ucred_unlock(p);
-				kauth_cred_unref(&my_new_cred);
-				/* try again */
-				my_cred = kauth_cred_proc_ref(p);
-				my_pcred = posix_cred_get(my_cred);
-				continue;
-			}
-			proc_set_ucred(p, my_new_cred);
-			/* update cred on proc */
-			proc_update_creds_onproc(p);
-			OSBitOrAtomic(P_SUGID, &p->p_flag);
-			proc_ucred_unlock(p);
-		}
-		break;
-	}
+		return kauth_cred_setresgid(cur_cred, KAUTH_GID_NONE,
+		want_egid, KAUTH_GID_NONE);
+	});
 
-	/* Drop old proc reference or our extra reference */
-	kauth_cred_unref(&my_cred);
-
-	set_security_token(p);
-	return 0;
+	return error;
 }
 
 /*
@@ -1356,116 +1084,70 @@ setegid(proc_t p, struct setegid_args *uap, __unused int32_t *retval)
 int
 setregid(proc_t p, struct setregid_args *uap, __unused int32_t *retval)
 {
-	gid_t rgid, egid;
-	int error;
-	kauth_cred_t my_cred, my_new_cred;
-	posix_cred_t my_pcred;
+	__block int error = 0;
+	gid_t want_rgid;
+	gid_t want_egid;
+	bool changed;
 
-	DEBUG_CRED_ENTER("setregid %d %d\n", uap->rgid, uap->egid);
+	want_rgid = uap->rgid;
+	want_egid = uap->egid;
 
-	rgid = uap->rgid;
-	egid = uap->egid;
-
-	if (rgid == (uid_t)-1) {
-		rgid = KAUTH_GID_NONE;
+	if (want_rgid == (gid_t)-1) {
+		want_rgid = KAUTH_GID_NONE;
 	}
-	if (egid == (uid_t)-1) {
-		egid = KAUTH_GID_NONE;
+
+	if (want_egid == (gid_t)-1) {
+		want_egid = KAUTH_GID_NONE;
 	}
-	AUDIT_ARG(egid, egid);
-	AUDIT_ARG(rgid, rgid);
 
-	/* get current credential and take a reference while we muck with it */
-	my_cred = kauth_cred_proc_ref(p);
-	my_pcred = posix_cred_get(my_cred);
+	AUDIT_ARG(egid, want_egid);
+	AUDIT_ARG(rgid, want_rgid);
 
-	for (;;) {
+	changed = proc_update_label(p, true, ^(kauth_cred_t cur_cred) {
+		posix_cred_t cur_pcred = posix_cred_get(cur_cred);
+		uid_t svgid = KAUTH_UID_NONE;
+
 #if CONFIG_MACF
-		if ((error = mac_proc_check_setregid(p, my_cred, rgid, egid)) != 0) {
-			kauth_cred_unref(&my_cred);
-			return error;
+		if ((error = mac_proc_check_setregid(p, cur_cred, want_rgid,
+		want_egid)) != 0) {
+		        return cur_cred;
 		}
 #endif
 
-		if (((rgid != KAUTH_UID_NONE &&         /* allow no change of rgid */
-		    rgid != my_pcred->cr_rgid &&        /* allow rgid = rgid */
-		    rgid != my_pcred->cr_gid &&         /* allow rgid = egid */
-		    rgid != my_pcred->cr_svgid) ||      /* allow rgid = svgid */
-		    (egid != KAUTH_UID_NONE &&          /* allow no change of egid */
-		    egid != my_pcred->cr_groups[0] &&   /* allow no change of egid */
-		    egid != my_pcred->cr_gid &&         /* allow egid = egid */
-		    egid != my_pcred->cr_rgid &&        /* allow egid = rgid */
-		    egid != my_pcred->cr_svgid)) &&     /* allow egid = svgid */
-		    (error = suser(my_cred, &p->p_acflag))) { /* allow root user any */
-			kauth_cred_unref(&my_cred);
-			return error;
+		if (((want_rgid != KAUTH_UID_NONE &&         /* allow no change of rgid */
+		want_rgid != cur_pcred->cr_rgid &&            /* allow rgid = rgid */
+		want_rgid != cur_pcred->cr_gid &&             /* allow rgid = egid */
+		want_rgid != cur_pcred->cr_svgid) ||          /* allow rgid = svgid */
+		(want_egid != KAUTH_UID_NONE &&              /* allow no change of egid */
+		want_egid != cur_pcred->cr_groups[0] &&       /* allow no change of egid */
+		want_egid != cur_pcred->cr_gid &&             /* allow egid = egid */
+		want_egid != cur_pcred->cr_rgid &&            /* allow egid = rgid */
+		want_egid != cur_pcred->cr_svgid)) &&         /* allow egid = svgid */
+		(error = suser(cur_cred, &p->p_acflag))) {     /* allow root user any */
+		        return cur_cred;
 		}
 
-		uid_t new_egid = my_pcred->cr_gid;
-		uid_t new_rgid = my_pcred->cr_rgid;
-		uid_t svgid = KAUTH_UID_NONE;
-
-
-		/*
-		 * Set the credential with new info.  If there is no change,
-		 * we get back the same credential we passed in; if there is
-		 * a change, we drop the reference on the credential we
-		 * passed in.  The subsequent compare is safe, because it is
-		 * a pointer compare rather than a contents compare.
-		 */
-		if (egid != KAUTH_UID_NONE && my_pcred->cr_gid != egid) {
-			/* changing the effective GID */
-			new_egid = egid;
-			OSBitOrAtomic(P_SUGID, &p->p_flag);
+		uid_t new_egid = cur_pcred->cr_gid;
+		if (want_egid != KAUTH_UID_NONE && cur_pcred->cr_gid != want_egid) {
+		        /* changing the effective GID */
+		        new_egid = want_egid;
 		}
-		if (rgid != KAUTH_UID_NONE && my_pcred->cr_rgid != rgid) {
-			/* changing the real GID */
-			new_rgid = rgid;
-			OSBitOrAtomic(P_SUGID, &p->p_flag);
-		}
+
 		/*
 		 * If the newly requested real gid or effective gid does
 		 * not match the saved gid, then set the saved gid to the
 		 * new effective gid.  We are protected from escalation
 		 * by the prechecking.
 		 */
-		if (my_pcred->cr_svgid != uap->rgid &&
-		    my_pcred->cr_svgid != uap->egid) {
-			svgid = new_egid;
-			OSBitOrAtomic(P_SUGID, &p->p_flag);
+		if (cur_pcred->cr_svgid != want_rgid &&
+		cur_pcred->cr_svgid != want_egid) {
+		        svgid = new_egid;
 		}
 
-		my_new_cred = kauth_cred_setresgid(my_cred, rgid, egid, svgid);
-		if (my_cred != my_new_cred) {
-			DEBUG_CRED_CHANGE("setregid(CH)%d: %p/0x%08x->%p/0x%08x\n", proc_getpid(p), my_cred, my_pcred->cr_flags, my_new_cred, posix_cred_get(my_new_cred)->cr_flags);
+		return kauth_cred_setresgid(cur_cred, want_rgid, want_egid, svgid);
+	});
 
-			proc_ucred_lock(p);
-			/* need to protect for a race where another thread
-			 * also changed the credential after we took our
-			 * reference.  If p_ucred has changed then we
-			 * should restart this again with the new cred.
-			 */
-			if (proc_ucred(p) != my_cred) {
-				proc_ucred_unlock(p);
-				kauth_cred_unref(&my_new_cred);
-				/* try again */
-				my_cred = kauth_cred_proc_ref(p);
-				my_pcred = posix_cred_get(my_cred);
-				continue;
-			}
-			proc_set_ucred(p, my_new_cred);
-			/* update cred on proc */
-			proc_update_creds_onproc(p);
-			OSBitOrAtomic(P_SUGID, &p->p_flag); /* XXX redundant? */
-			proc_ucred_unlock(p);
-		}
-		break;
-	}
-	/* Drop old proc reference or our extra reference */
-	kauth_cred_unref(&my_cred);
-
-	set_security_token(p);
-	return 0;
+	return error;
 }
 
 
@@ -1480,8 +1162,8 @@ setregid(proc_t p, struct setregid_args *uap, __unused int32_t *retval)
 int
 settid(proc_t p, struct settid_args *uap, __unused int32_t *retval)
 {
-	kauth_cred_t uc;
-	struct uthread *uthread = get_bsdthread_info(current_thread());
+	kauth_cred_t cred;
+	struct thread_ro *tro = current_thread_ro();
 	uid_t uid;
 	gid_t gid;
 #if CONFIG_MACF
@@ -1505,20 +1187,18 @@ settid(proc_t p, struct settid_args *uap, __unused int32_t *retval)
 
 	if (uid == KAUTH_UID_NONE) {
 		/* must already be assuming another identity in order to revert back */
-		if ((uthread->uu_flag & UT_SETUID) == 0) {
+		if ((tro->tro_flags & TRO_SETUID) == 0) {
 			return EPERM;
 		}
 
 		/* revert to delayed binding of process credential */
-		uc = kauth_cred_proc_ref(p);
-		kauth_cred_unref(&uthread->uu_ucred);
-		uthread->uu_ucred = uc;
-		uthread->uu_flag &= ~UT_SETUID;
+		cred = kauth_cred_proc_ref(p);
+		thread_ro_update_cred(tro, cred);
+		thread_ro_update_flags(tro, TRO_NONE, TRO_SETUID);
+		kauth_cred_unref(&cred);
 	} else {
-		kauth_cred_t my_cred, my_new_cred;
-
 		/* cannot already be assuming another identity */
-		if ((uthread->uu_flag & UT_SETUID) != 0) {
+		if ((tro->tro_flags & TRO_SETUID) != 0) {
 			return EPERM;
 		}
 
@@ -1529,17 +1209,14 @@ settid(proc_t p, struct settid_args *uap, __unused int32_t *retval)
 		 * current credential while we muck with it, so we can do
 		 * the post-compare for changes by pointer.
 		 */
-		kauth_cred_ref(uthread->uu_ucred);
-		my_cred = uthread->uu_ucred;
-		my_new_cred = kauth_cred_setuidgid(my_cred, uid, gid);
-		if (my_cred != my_new_cred) {
-			uthread->uu_ucred = my_new_cred;
-		}
-		uthread->uu_flag |= UT_SETUID;
-
-		/* Drop old uthread reference or our extra reference */
-		kauth_cred_unref(&my_cred);
+		cred = tro->tro_cred;
+		kauth_cred_ref(cred);
+		cred = kauth_cred_setuidgid(cred, uid, gid);
+		thread_ro_update_cred(tro, cred);
+		thread_ro_update_flags(tro, TRO_SETUID, TRO_NONE);
+		kauth_cred_unref(&cred);
 	}
+
 	/*
 	 * XXX should potentially set per thread security token (there is
 	 * XXX none).
@@ -1564,8 +1241,8 @@ int
 settid_with_pid(proc_t p, struct settid_with_pid_args *uap, __unused int32_t *retval)
 {
 	proc_t target_proc;
-	struct uthread *uthread = get_bsdthread_info(current_thread());
-	kauth_cred_t my_cred, my_target_cred, my_new_cred;
+	thread_ro_t tro = current_thread_ro();
+	kauth_cred_t cred, my_target_cred;
 	posix_cred_t my_target_pcred;
 	uid_t uid;
 	gid_t gid;
@@ -1607,7 +1284,7 @@ settid_with_pid(proc_t p, struct settid_with_pid_args *uap, __unused int32_t *re
 #endif
 
 		/* can't do this if we have already assumed an identity */
-		if (proc_suser(p) != 0 || (uthread->uu_flag & UT_SETUID) != 0) {
+		if (proc_suser(p) != 0 || (tro->tro_flags & TRO_SETUID) != 0) {
 			return EPERM;
 		}
 
@@ -1623,17 +1300,12 @@ settid_with_pid(proc_t p, struct settid_with_pid_args *uap, __unused int32_t *re
 		 * credential following our assumption of a per-thread one,
 		 * since the credential cache will maintain a unique instance.
 		 */
-		kauth_cred_ref(uthread->uu_ucred);
-		my_cred = uthread->uu_ucred;
-		my_new_cred = kauth_cred_setuidgid(my_cred, uid, gid);
-		if (my_cred != my_new_cred) {
-			uthread->uu_ucred = my_new_cred;
-		}
-
-		uthread->uu_flag |= UT_SETUID;
-
-		/* Drop old uthread reference or our extra reference */
-		kauth_cred_unref(&my_cred);
+		cred = tro->tro_cred;
+		kauth_cred_ref(cred);
+		cred = kauth_cred_setuidgid(cred, uid, gid);
+		thread_ro_update_cred(tro, cred);
+		thread_ro_update_flags(tro, TRO_SETUID, TRO_NONE);
+		kauth_cred_unref(&cred);
 
 		return 0;
 	}
@@ -1641,22 +1313,22 @@ settid_with_pid(proc_t p, struct settid_with_pid_args *uap, __unused int32_t *re
 	/*
 	 * Otherwise, we are reverting back to normal mode of operation where
 	 * delayed binding of the process credential sets the credential in
-	 * the thread (uu_ucred)
+	 * the thread_ro (tro_cred)
 	 */
 
 	if ((error = mac_proc_check_settid(p, KAUTH_UID_NONE, KAUTH_GID_NONE)) != 0) {
 		return error;
 	}
 
-	if (proc_suser(p) != 0 || (uthread->uu_flag & UT_SETUID) == 0) {
+	if (proc_suser(p) != 0 || (tro->tro_flags & TRO_SETUID) == 0) {
 		return EPERM;
 	}
 
 	/* revert to delayed binding of process credential */
-	my_new_cred = kauth_cred_proc_ref(p);
-	kauth_cred_unref(&uthread->uu_ucred);
-	uthread->uu_ucred = my_new_cred;
-	uthread->uu_flag &= ~UT_SETUID;
+	cred = kauth_cred_proc_ref(p);
+	thread_ro_update_cred(tro, cred);
+	thread_ro_update_flags(tro, TRO_NONE, TRO_SETUID);
+	kauth_cred_unref(&cred);
 
 	return 0;
 }
@@ -1703,9 +1375,6 @@ setgroups1(proc_t p, u_int ngrp, user_addr_t gidset, uid_t gmuid, __unused int32
 	gid_t   newgroups[NGROUPS] = { 0 };
 	int     error;
 
-	DEBUG_CRED_ENTER("setgroups1 (%d/%d): %d 0x%016x %d\n", proc_getpid(p),
-	    (p->p_pptr ? proc_getpid(p->p_pptr) : 0), ngrp, gidset, gmuid);
-
 	if (ngrp > NGROUPS) {
 		return EINVAL;
 	}
@@ -1723,13 +1392,15 @@ setgroups1(proc_t p, u_int ngrp, user_addr_t gidset, uid_t gmuid, __unused int32
 int
 setgroups_internal(proc_t p, u_int ngrp, gid_t *newgroups, uid_t gmuid)
 {
-	struct uthread *uthread = get_bsdthread_info(current_thread());
-	kauth_cred_t my_cred, my_new_cred;
+	thread_ro_t tro = current_thread_ro();
+	kauth_cred_t cred;
 	int     error;
 
-	my_cred = kauth_cred_proc_ref(p);
-	if ((error = suser(my_cred, &p->p_acflag))) {
-		kauth_cred_unref(&my_cred);
+	cred = kauth_cred_proc_ref(p);
+	error = suser(cred, &p->p_acflag);
+	kauth_cred_unref(&cred);
+
+	if (error) {
 		return error;
 	}
 
@@ -1738,12 +1409,7 @@ setgroups_internal(proc_t p, u_int ngrp, gid_t *newgroups, uid_t gmuid)
 		newgroups[0] = 0;
 	}
 
-	if ((uthread->uu_flag & UT_SETUID) != 0) {
-#if DEBUG_CRED
-		int my_cred_flags = uthread->uu_ucred->cr_flags;
-#endif  /* DEBUG_CRED */
-		kauth_cred_unref(&my_cred);
-
+	if ((tro->tro_flags & TRO_SETUID) != 0) {
 		/*
 		 * If this thread is under an assumed identity, set the
 		 * supplementary grouplist on the thread credential instead
@@ -1753,60 +1419,17 @@ setgroups_internal(proc_t p, u_int ngrp, gid_t *newgroups, uid_t gmuid)
 		 * already held on it.  Because this is per-thread, we don't
 		 * need the referencing/locking/retry required for per-process.
 		 */
-		my_cred = uthread->uu_ucred;
-		uthread->uu_ucred = kauth_cred_setgroups(my_cred, &newgroups[0], ngrp, gmuid);
-#if DEBUG_CRED
-		if (my_cred != uthread->uu_ucred) {
-			DEBUG_CRED_CHANGE("setgroups1(CH)%d: %p/0x%08x->%p/0x%08x\n", proc_getpid(p), my_cred, my_cred_flags, uthread->uu_ucred, uthread->uu_ucred->cr_flags);
-		}
-#endif  /* DEBUG_CRED */
+		cred = tro->tro_cred;
+		kauth_cred_ref(cred);
+		cred = kauth_cred_setgroups(cred, &newgroups[0], ngrp, gmuid);
+		thread_ro_update_cred(tro, cred);
+		kauth_cred_unref(&cred);
 	} else {
-		/*
-		 * get current credential and take a reference while we muck
-		 * with it
-		 */
-		for (;;) {
-			/*
-			 * Set the credential with new info.  If there is no
-			 * change, we get back the same credential we passed
-			 * in; if there is a change, we drop the reference on
-			 * the credential we passed in.  The subsequent
-			 * compare is safe, because it is a pointer compare
-			 * rather than a contents compare.
-			 */
-			my_new_cred = kauth_cred_setgroups(my_cred, &newgroups[0], ngrp, gmuid);
-			if (my_cred != my_new_cred) {
-				DEBUG_CRED_CHANGE("setgroups1(CH)%d: %p/0x%08x->%p/0x%08x\n", proc_getpid(p), my_cred, my_cred->cr_flags, my_new_cred, my_new_cred->cr_flags);
+		proc_update_label(p, true, ^(kauth_cred_t cur_cred) {
+			return kauth_cred_setgroups(cur_cred, &newgroups[0], ngrp, gmuid);
+		});
 
-				proc_ucred_lock(p);
-				/*
-				 * We need to protect for a race where another
-				 * thread also changed the credential after we
-				 * took our reference.  If p_ucred has
-				 * changed then we should restart this again
-				 * with the new cred.
-				 */
-				if (proc_ucred(p) != my_cred) {
-					proc_ucred_unlock(p);
-					kauth_cred_unref(&my_new_cred);
-					my_cred = kauth_cred_proc_ref(p);
-					/* try again */
-					continue;
-				}
-				proc_set_ucred(p, my_new_cred);
-				/* update cred on proc */
-				proc_update_creds_onproc(p);
-				OSBitOrAtomic(P_SUGID, &p->p_flag);
-				proc_ucred_unlock(p);
-			}
-			break;
-		}
-		/* Drop old proc reference or our extra reference */
-		AUDIT_ARG(groupset, posix_cred_get(my_cred)->cr_groups, ngrp);
-		kauth_cred_unref(&my_cred);
-
-
-		set_security_token(p);
+		AUDIT_ARG(groupset, &newgroups[0], ngrp);
 	}
 
 	return 0;
@@ -1845,8 +1468,6 @@ setgroups_internal(proc_t p, u_int ngrp, gid_t *newgroups, uid_t gmuid)
 int
 initgroups(proc_t p, struct initgroups_args *uap, __unused int32_t *retval)
 {
-	DEBUG_CRED_ENTER("initgroups\n");
-
 	return setgroups1(p, uap->gidsetsize, uap->gidset, uap->gmuid, retval);
 }
 
@@ -1879,8 +1500,6 @@ initgroups(proc_t p, struct initgroups_args *uap, __unused int32_t *retval)
 int
 setgroups(proc_t p, struct setgroups_args *uap, __unused int32_t *retval)
 {
-	DEBUG_CRED_ENTER("setgroups\n");
-
 	return setgroups1(p, uap->gidsetsize, uap->gidset, KAUTH_UID_NONE, retval);
 }
 
@@ -1947,11 +1566,6 @@ groupmember(gid_t gid, kauth_cred_t cred)
 int
 suser(kauth_cred_t cred, u_short *acflag)
 {
-#if DIAGNOSTIC
-	if (!IS_VALID_CRED(cred)) {
-		panic("suser");
-	}
-#endif
 	if (kauth_cred_getuid(cred) == 0) {
 		if (acflag) {
 			*acflag |= ASU;
@@ -2117,19 +1731,6 @@ set_security_token_task_internal(proc_t p, void *t)
 	host_priv_t host_priv;
 	task_t task = t;
 
-#if CONFIG_VFORK
-	/*
-	 * Don't allow a vfork child to override the parent's token settings
-	 * (since they share a task).  Instead, the child will just have to
-	 * suffer along using the parent's token until the exec().  It's all
-	 * undefined behavior anyway, right?
-	 */
-	if (task == current_task()) {
-		if (current_uthread()->uu_flag & UT_VFORK) {
-			return 1;
-		}
-	}
-#endif /* CONFIG_VFORK */
 
 	my_cred = kauth_cred_proc_ref(p);
 

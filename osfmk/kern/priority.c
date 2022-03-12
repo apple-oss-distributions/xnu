@@ -220,7 +220,7 @@ thread_quantum_expire(
 	 */
 
 	ast_t check_reason = AST_QUANTUM;
-	if (thread->task == kernel_task) {
+	if (get_threadtask(thread) == kernel_task) {
 		check_reason |= AST_URGENT;
 	}
 
@@ -578,7 +578,7 @@ sched_compute_timeshare_priority(thread_t thread)
 	int priority = thread->base_pri - decay_amount;
 
 	if (priority < MAXPRI_THROTTLE) {
-		if (thread->task->max_priority > MAXPRI_THROTTLE) {
+		if (get_threadtask(thread)->max_priority > MAXPRI_THROTTLE) {
 			priority = MAXPRI_THROTTLE;
 		} else if (priority < MINPRI_USER) {
 			priority = MINPRI_USER;

@@ -87,7 +87,6 @@
 
 #define f_flag fp_glob->fg_flag
 #define f_ops fp_glob->fg_ops
-#define f_data fp_glob->fg_data
 
 /*
  * Used to construct the list of memory objects
@@ -483,7 +482,7 @@ shm_open(proc_t p, struct shm_open_args *uap, int32_t *retval)
 	fp->f_flag = fmode & FMASK;
 	fp->f_ops = &pshmops;
 	new_pnode->pinfo = pinfo;
-	fp->f_data = (caddr_t)new_pnode;
+	fp_set_data(fp, new_pnode);
 
 	proc_fdlock(p);
 	procfdtbl_releasefd(p, indx, NULL);
@@ -568,7 +567,7 @@ pshm_truncate(
 #endif
 
 	PSHM_SUBSYS_LOCK();
-	if (((pnode = (pshmnode_t *)fp->f_data)) == NULL) {
+	if (((pnode = (pshmnode_t *)fp_get_data(fp))) == NULL) {
 		PSHM_SUBSYS_UNLOCK();
 		return EINVAL;
 	}
@@ -776,7 +775,7 @@ pshm_mmap(
 	user_map = current_map();
 
 	PSHM_SUBSYS_LOCK();
-	pnode = (pshmnode_t *)fp->f_data;
+	pnode = (pshmnode_t *)fp_get_data(fp);
 	if (pnode == NULL) {
 		PSHM_SUBSYS_UNLOCK();
 		return EINVAL;
@@ -1077,10 +1076,10 @@ pshm_closefile(struct fileglob *fg, __unused vfs_context_t ctx)
 
 	PSHM_SUBSYS_LOCK();
 
-	pnode = (pshmnode_t *)fg->fg_data;
+	pnode = (pshmnode_t *)fg_get_data(fg);
 	if (pnode != NULL) {
 		error = 0;
-		fg->fg_data = NULL; /* set fg_data to NULL to avoid racing close()es */
+		fg_set_data(fg, NULL); /* set fg_data to NULL to avoid racing close()es */
 		if (pnode->pinfo != NULL) {
 			pshm_deref(pnode->pinfo);
 			pnode->pinfo = NULL;
@@ -1128,13 +1127,13 @@ pshm_label_associate(struct fileproc *fp, struct vnode *vp, vfs_context_t ctx)
 	pshm_info_t *pshm;
 
 	PSHM_SUBSYS_LOCK();
-	pnode = (pshmnode_t *)fp->f_data;
+	pnode = (pshmnode_t *)fp_get_data(fp);
 	if (pnode != NULL) {
 		pshm = pnode->pinfo;
 		if (pshm != NULL) {
 			mac_posixshm_vnode_label_associate(
-				vfs_context_ucred(ctx), &pshm->pshm_hdr, pshm->pshm_label,
-				vp, vp->v_label);
+				vfs_context_ucred(ctx), &pshm->pshm_hdr,
+				mac_posixshm_label(&pshm->pshm_hdr), vp, mac_vnode_label(vp));
 		}
 	}
 	PSHM_SUBSYS_UNLOCK();

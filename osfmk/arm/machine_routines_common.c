@@ -514,7 +514,7 @@ machine_thread_going_on_core(thread_t   new_thread,
 	on_core.qos_class = (uint16_t)proc_get_effective_thread_policy(new_thread, TASK_POLICY_QOS);
 	on_core.urgency = (uint16_t)urgency;
 	on_core.is_32_bit = thread_is_64bit_data(new_thread) ? FALSE : TRUE;
-	on_core.is_kernel_thread = new_thread->task == kernel_task;
+	on_core.is_kernel_thread = get_threadtask(new_thread) == kernel_task;
 #if CONFIG_THREAD_GROUPS
 	struct thread_group *tg = thread_group_get(new_thread);
 	on_core.thread_group_id = thread_group_get_id(tg);

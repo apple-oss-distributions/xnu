@@ -292,7 +292,7 @@ sendsig(
 
 	user_siginfo_t sinfo;
 	user_addr_t     sp = 0, trampact;
-	struct sigacts *ps = p->p_sigacts;
+	struct sigacts *ps = &p->p_sigacts;
 	int             oonstack, infostyle;
 	thread_t        th_act;
 	struct uthread *ut;
@@ -632,7 +632,7 @@ sendsig(
 bad:
 	proc_lock(p);
 bad2:
-	SIGACTION(p, SIGILL) = SIG_DFL;
+	proc_set_sigact(p, SIGILL, SIG_DFL);
 	sig = sigmask(SIGILL);
 	p->p_sigignore &= ~sig;
 	p->p_sigcatch &= ~sig;
@@ -775,7 +775,7 @@ sigreturn(
 #endif
 	} mctx;
 
-	struct sigacts *ps = p->p_sigacts;
+	struct sigacts *ps = &p->p_sigacts;
 	int             error, sigmask = 0, onstack = 0;
 	thread_t        th_act;
 	struct uthread *ut;

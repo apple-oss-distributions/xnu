@@ -1383,10 +1383,11 @@ copy_instruction_stream(thread_t thread, uint64_t rip, int __unused trap_code
 
 #if defined(MACH_BSD) && (DEVELOPMENT || DEBUG)
 			if (panic_on_trap_procname[0] != 0) {
+				task_t task = get_threadtask(thread);
 				char procnamebuf[65] = {0};
 
-				if (thread->task->bsd_info != NULL) {
-					procname = proc_name_address(thread->task->bsd_info);
+				if (task->bsd_info != NULL) {
+					procname = proc_name_address(task->bsd_info);
 					strlcpy(procnamebuf, procname, sizeof(procnamebuf));
 
 					if (strcasecmp(panic_on_trap_procname, procnamebuf) == 0 &&
@@ -1550,9 +1551,12 @@ void
 thread_exception_return(void)
 {
 	thread_t thread = current_thread();
+	task_t   task   = current_task();
+
 	ml_set_interrupts_enabled(FALSE);
-	if (thread_is_64bit_addr(thread) != task_has_64Bit_addr(thread->task)) {
-		panic("Task/thread bitness mismatch %p %p, task: %d, thread: %d", thread, thread->task, thread_is_64bit_addr(thread), task_has_64Bit_addr(thread->task));
+	if (thread_is_64bit_addr(thread) != task_has_64Bit_addr(task)) {
+		panic("Task/thread bitness mismatch %p %p, task: %d, thread: %d",
+		    thread, task, thread_is_64bit_addr(thread), task_has_64Bit_addr(task));
 	}
 
 	if (thread_is_64bit_addr(thread)) {

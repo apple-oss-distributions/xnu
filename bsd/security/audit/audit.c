@@ -958,7 +958,7 @@ audit_proc_coredump(proc_t proc, const char *path, int errcode)
 			ARG_SET_VALID(ar, ARG_UPATH1);
 		}
 	}
-	ar->k_ar.ar_arg_signum = proc->p_sigacts->ps_sig;
+	ar->k_ar.ar_arg_signum = proc->p_sigacts.ps_sig;
 	ARG_SET_VALID(ar, ARG_SIGNUM);
 	if (errcode != 0) {
 		ret = 1;

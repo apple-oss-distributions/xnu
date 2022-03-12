@@ -610,10 +610,8 @@ extern vm_offset_t pmap_cpu_windows_copy_addr(int cpu_num, unsigned int index);
 extern unsigned int pmap_map_cpu_windows_copy(ppnum_t pn, vm_prot_t prot, unsigned int wimg_bits);
 extern void pmap_unmap_cpu_windows_copy(unsigned int index);
 
-extern void pmap_ro_zone_memcpy(zone_t zone, vm_offset_t va, vm_offset_t offset, vm_offset_t new_data, vm_size_t new_data_size);
-extern void pmap_ro_zone_bzero(zone_t zone, vm_offset_t va, vm_offset_t offset, vm_size_t size);
-extern void pmap_phys_write_enable_pages(zone_t zone, vm_address_t va, size_t size);
-extern void pmap_phys_write_disable_pages(zone_t zone, vm_address_t va, size_t size);
+extern void pmap_ro_zone_memcpy(zone_id_t zid, vm_offset_t va, vm_offset_t offset, vm_offset_t new_data, vm_size_t new_data_size);
+extern void pmap_ro_zone_bzero(zone_id_t zid, vm_offset_t va, vm_offset_t offset, vm_size_t size);
 
 #if XNU_MONITOR
 /* exposed for use by the HMAC SHA driver */
@@ -712,8 +710,6 @@ boolean_t pmap_enforces_execute_only(pmap_t pmap);
 #define PMAP_NOP_INDEX 75
 
 #define PMAP_RO_ZONE_MEMCPY_INDEX 76
-#define PMAP_PHYS_WRITE_DISABLE_PAGES_INDEX 77
-#define PMAP_PHYS_WRITE_ENABLE_PAGES_INDEX 78
 
 #if DEVELOPMENT || DEBUG
 #define PMAP_TEST_TEXT_CORRUPTION_INDEX 79

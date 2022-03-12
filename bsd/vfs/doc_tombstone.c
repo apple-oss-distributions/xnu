@@ -48,7 +48,7 @@ struct doc_tombstone *
 doc_tombstone_get(void)
 {
 	struct  uthread *ut;
-	ut = get_bsdthread_info(current_thread());
+	ut = current_uthread();
 
 	if (ut->t_tombstone == NULL) {
 		ut->t_tombstone = kalloc_type(struct doc_tombstone, Z_WAITOK | Z_ZERO);

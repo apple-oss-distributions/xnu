@@ -118,68 +118,108 @@
 #define VFS_KERNEL_DEBUG_END1(dcode, darg)      do {} while (0)
 #endif
 
-static struct label *
-mac_devfsdirent_label_alloc(void)
-{
-	struct label *label;
-
-	label = mac_labelzone_alloc(MAC_WAITOK);
-	if (label == NULL) {
-		return NULL;
-	}
-	VFS_KERNEL_DEBUG_START0(0);
-	MAC_PERFORM(devfs_label_init, label);
-	VFS_KERNEL_DEBUG_END0(0);
-	return label;
-}
-
 void
 mac_devfs_label_init(struct devnode *de)
 {
-	de->dn_label = mac_devfsdirent_label_alloc();
+	mac_labelzone_alloc_owned(&de->dn_label, MAC_WAITOK, ^(struct label *label) {
+		VFS_KERNEL_DEBUG_START0(0);
+		MAC_PERFORM(devfs_label_init, label);
+		VFS_KERNEL_DEBUG_END0(0);
+	});
 }
 
-static struct label *
-mac_mount_label_alloc(void)
+struct label *
+mac_devfs_label(struct devnode *de)
 {
-	struct label *label;
+	return mac_label_verify(&de->dn_label);
+}
 
-	label = mac_labelzone_alloc(MAC_WAITOK);
-	if (label == NULL) {
-		return NULL;
-	}
-	VFS_KERNEL_DEBUG_START0(1);
-	MAC_PERFORM(mount_label_init, label);
-	VFS_KERNEL_DEBUG_END0(1);
-	return label;
+void
+mac_devfs_label_destroy(struct devnode *de)
+{
+	mac_labelzone_free_owned(&de->dn_label, ^(struct label *label) {
+		VFS_KERNEL_DEBUG_START1(3, label);
+		MAC_PERFORM(devfs_label_destroy, label);
+		VFS_KERNEL_DEBUG_END1(3, label);
+	});
 }
 
 void
 mac_mount_label_init(struct mount *mp)
 {
-	mp->mnt_mntlabel = mac_mount_label_alloc();
+	mac_labelzone_alloc_owned(&mp->mnt_mntlabel, MAC_WAITOK, ^(struct label *label) {
+		VFS_KERNEL_DEBUG_START0(1);
+		MAC_PERFORM(mount_label_init, label);
+		VFS_KERNEL_DEBUG_END0(1);
+	});
 }
 
 struct label *
-mac_vnode_label_alloc(void)
+mac_mount_label(struct mount *mp)
 {
-	struct label *label;
+	return mac_label_verify(&mp->mnt_mntlabel);
+}
 
-	label = mac_labelzone_alloc(MAC_WAITOK);
-	if (label == NULL) {
-		return NULL;
-	}
-	VFS_KERNEL_DEBUG_START0(2);
-	MAC_PERFORM(vnode_label_init, label);
-	VFS_KERNEL_DEBUG_END0(2);
-	OSIncrementAtomic(&mac_vnode_label_count);
-	return label;
+void
+mac_mount_label_destroy(struct mount *mp)
+{
+	mac_labelzone_free_owned(&mp->mnt_mntlabel, ^(struct label *label) {
+		VFS_KERNEL_DEBUG_START1(4, label);
+		MAC_PERFORM(mount_label_destroy, label);
+		VFS_KERNEL_DEBUG_END1(4, label);
+	});
+}
+
+struct label *
+mac_vnode_label_alloc(vnode_t vp)
+{
+	return mac_labelzone_alloc_for_owner(vp ? &vp->v_label : NULL, MAC_WAITOK, ^(struct label *label) {
+		VFS_KERNEL_DEBUG_START0(2);
+		MAC_PERFORM(vnode_label_init, label);
+		VFS_KERNEL_DEBUG_END0(2);
+		OSIncrementAtomic(&mac_vnode_label_count);
+	});
 }
 
 void
 mac_vnode_label_init(vnode_t vp)
 {
-	vp->v_label = mac_vnode_label_alloc();
+	struct label *label;
+
+	label = mac_vnode_label_alloc(vp);
+	vp->v_label = label;
+}
+
+struct label *
+mac_vnode_label(vnode_t vp)
+{
+	return mac_label_verify(&vp->v_label);
+}
+
+static void
+mac_vnode_label_cleanup(struct label *label)
+{
+	VFS_KERNEL_DEBUG_START1(5, label);
+	MAC_PERFORM(vnode_label_destroy, label);
+	VFS_KERNEL_DEBUG_END1(5, label);
+	OSDecrementAtomic(&mac_vnode_label_count);
+}
+
+void
+mac_vnode_label_free(struct label *label)
+{
+	if (label != NULL) {
+		mac_vnode_label_cleanup(label);
+		mac_labelzone_free(label);
+	}
+}
+
+void
+mac_vnode_label_destroy(struct vnode *vp)
+{
+	mac_labelzone_free_owned(&vp->v_label, ^(struct label *label) {
+		mac_vnode_label_cleanup(label);
+	});
 }
 
 int
@@ -189,7 +229,7 @@ mac_vnode_label_init_needed(vnode_t vp)
 	(void)vp;
 	return false;
 #else
-	return mac_label_vnodes != 0 && vp->v_label == NULL;
+	return mac_label_vnodes != 0 && mac_vnode_label(vp) == NULL;
 #endif
 }
 
@@ -197,9 +237,9 @@ struct label *
 mac_vnode_label_allocate(vnode_t vp)
 {
 	if (mac_vnode_label_init_needed(vp)) {
-		vp->v_label = mac_vnode_label_alloc();
+		mac_vnode_label_init(vp);
 	}
-	return vp->v_label;
+	return mac_vnode_label(vp);
 }
 
 /*
@@ -210,71 +250,15 @@ mac_vnode_label_allocate(vnode_t vp)
 void
 mac_vnode_label_recycle(vnode_t vp)
 {
-	MAC_PERFORM(vnode_label_recycle, vp->v_label);
+	struct label *v_label = mac_vnode_label(vp);
+
+	MAC_PERFORM(vnode_label_recycle, v_label);
 #if CONFIG_MACF_LAZY_VNODE_LABELS
-	if (vp->v_label) {
+	if (v_label) {
 		mac_vnode_label_destroy(vp);
-		vp->v_label = NULL;
 		vp->v_lflag &= ~VL_LABELED;
 	}
 #endif
-}
-
-static void
-mac_devfs_label_free(struct label *label)
-{
-	VFS_KERNEL_DEBUG_START1(3, label);
-	MAC_PERFORM(devfs_label_destroy, label);
-	VFS_KERNEL_DEBUG_END1(3, label);
-	mac_labelzone_free(label);
-}
-
-void
-mac_devfs_label_destroy(struct devnode *de)
-{
-	if (de->dn_label != NULL) {
-		mac_devfs_label_free(de->dn_label);
-		de->dn_label = NULL;
-	}
-}
-
-static void
-mac_mount_label_free(struct label *label)
-{
-	VFS_KERNEL_DEBUG_START1(4, label);
-	MAC_PERFORM(mount_label_destroy, label);
-	VFS_KERNEL_DEBUG_END1(4, label);
-	mac_labelzone_free(label);
-}
-
-void
-mac_mount_label_destroy(struct mount *mp)
-{
-	if (mp->mnt_mntlabel != NULL) {
-		mac_mount_label_free(mp->mnt_mntlabel);
-		mp->mnt_mntlabel = NULL;
-	}
-}
-
-void
-mac_vnode_label_free(struct label *label)
-{
-	if (label != NULL) {
-		VFS_KERNEL_DEBUG_START1(5, label);
-		MAC_PERFORM(vnode_label_destroy, label);
-		VFS_KERNEL_DEBUG_END1(5, label);
-		mac_labelzone_free(label);
-		OSDecrementAtomic(&mac_vnode_label_count);
-	}
-}
-
-void
-mac_vnode_label_destroy(struct vnode *vp)
-{
-	if (vp->v_label != NULL) {
-		mac_vnode_label_free(vp->v_label);
-		vp->v_label = NULL;
-	}
 }
 
 void
@@ -295,7 +279,7 @@ mac_vnode_label_externalize_audit(struct vnode *vp, struct mac *mac)
 	int error;
 
 	/* It is assumed that any necessary vnode locking is done on entry */
-	error = MAC_EXTERNALIZE_AUDIT(vnode, vp->v_label,
+	error = MAC_EXTERNALIZE_AUDIT(vnode, mac_vnode_label(vp),
 	    mac->m_string, mac->m_buflen);
 
 	return error;
@@ -370,8 +354,8 @@ mac_devfs_label_update(struct mount *mp, struct devnode *de,
 #endif
 
 	VFS_KERNEL_DEBUG_START1(8, vp);
-	MAC_PERFORM(devfs_label_update, mp, de, de->dn_label, vp,
-	    vp->v_label);
+	MAC_PERFORM(devfs_label_update, mp, de, mac_devfs_label(de), vp,
+	    mac_vnode_label(vp));
 	VFS_KERNEL_DEBUG_END1(8, vp);
 }
 
@@ -420,9 +404,9 @@ mac_vnode_label_associate_devfs(struct mount *mp, struct devnode *de,
 
 	VFS_KERNEL_DEBUG_START1(9, vp);
 	MAC_PERFORM(vnode_label_associate_devfs,
-	    mp, mp ? mp->mnt_mntlabel : NULL,
-	    de, de->dn_label,
-	    vp, vp->v_label);
+	    mp, mp ? mac_mount_label(mp) : NULL,
+	    de, mac_devfs_label(de),
+	    vp, mac_vnode_label(vp));
 	VFS_KERNEL_DEBUG_END1(9, vp);
 }
 
@@ -432,8 +416,8 @@ mac_vnode_label_associate_extattr(struct mount *mp, struct vnode *vp)
 	int error;
 
 	VFS_KERNEL_DEBUG_START1(10, vp);
-	MAC_CHECK(vnode_label_associate_extattr, mp, mp->mnt_mntlabel, vp,
-	    vp->v_label);
+	MAC_CHECK(vnode_label_associate_extattr, mp, mac_mount_label(mp), vp,
+	    mac_vnode_label(vp));
 	VFS_KERNEL_DEBUG_END1(10, vp);
 
 	return error;
@@ -454,7 +438,7 @@ mac_vnode_label_associate_singlelabel(struct mount *mp, struct vnode *vp)
 
 	VFS_KERNEL_DEBUG_START1(11, vp);
 	MAC_PERFORM(vnode_label_associate_singlelabel, mp,
-	    mp ? mp->mnt_mntlabel : NULL, vp, vp->v_label);
+	    mp ? mac_mount_label(mp) : NULL, vp, mac_vnode_label(vp));
 	VFS_KERNEL_DEBUG_END1(11, vp);
 }
 
@@ -476,8 +460,8 @@ mac_vnode_notify_create(vfs_context_t ctx, struct mount *mp,
 		return 0;
 	}
 	VFS_KERNEL_DEBUG_START1(12, vp);
-	MAC_CHECK(vnode_notify_create, cred, mp, mp->mnt_mntlabel,
-	    dvp, dvp->v_label, vp, vp->v_label, cnp);
+	MAC_CHECK(vnode_notify_create, cred, mp, mac_mount_label(mp),
+	    dvp, mac_vnode_label(dvp), vp, mac_vnode_label(vp), cnp);
 	VFS_KERNEL_DEBUG_END1(12, vp);
 
 	return error;
@@ -506,18 +490,18 @@ mac_vnode_notify_rename(vfs_context_t ctx, struct vnode *fvp,
 		/* BEGIN IGNORE CODESTYLE */
 		if (swap) {
 			if (mpc->mpc_ops->mpo_vnode_notify_swap != NULL) {
-				mpc->mpc_ops->mpo_vnode_notify_swap(cred, fvp, fvp->v_label,
-					tvp, tvp->v_label);
+				mpc->mpc_ops->mpo_vnode_notify_swap(cred, fvp, mac_vnode_label(fvp),
+					tvp, mac_vnode_label(tvp));
 			} else if (mpc->mpc_ops->mpo_vnode_notify_rename != NULL) {
 				/* Call notify_rename twice, one for each member of the swap. */
-				mpc->mpc_ops->mpo_vnode_notify_rename(cred, fvp, fvp->v_label,
-					tdvp, tdvp->v_label, tcnp);
-				mpc->mpc_ops->mpo_vnode_notify_rename(cred, tvp, tvp->v_label,
-					fdvp, fdvp->v_label, fcnp);
+				mpc->mpc_ops->mpo_vnode_notify_rename(cred, fvp, mac_vnode_label(fvp),
+					tdvp, mac_vnode_label(tdvp), tcnp);
+				mpc->mpc_ops->mpo_vnode_notify_rename(cred, tvp, mac_vnode_label(tvp),
+					fdvp, mac_vnode_label(fdvp), fcnp);
 			}
 		} else if (mpc->mpc_ops->mpo_vnode_notify_rename != NULL) {
-			mpc->mpc_ops->mpo_vnode_notify_rename(cred, fvp, fvp->v_label,
-		        tdvp, tdvp->v_label, tcnp);
+			mpc->mpc_ops->mpo_vnode_notify_rename(cred, fvp, mac_vnode_label(fvp),
+		        tdvp, mac_vnode_label(tdvp), tcnp);
 		}
 		/* END IGNORE CODESTYLE */
 	});
@@ -540,7 +524,7 @@ mac_vnode_notify_open(vfs_context_t ctx, struct vnode *vp, int acc_flags)
 		return;
 	}
 	VFS_KERNEL_DEBUG_START1(14, vp);
-	MAC_PERFORM(vnode_notify_open, cred, vp, vp->v_label, acc_flags);
+	MAC_PERFORM(vnode_notify_open, cred, vp, mac_vnode_label(vp), acc_flags);
 	VFS_KERNEL_DEBUG_END1(14, vp);
 }
 
@@ -561,7 +545,7 @@ mac_vnode_notify_link(vfs_context_t ctx, struct vnode *vp,
 		return;
 	}
 	VFS_KERNEL_DEBUG_START1(15, vp);
-	MAC_PERFORM(vnode_notify_link, cred, dvp, dvp->v_label, vp, vp->v_label, cnp);
+	MAC_PERFORM(vnode_notify_link, cred, dvp, mac_vnode_label(dvp), vp, mac_vnode_label(vp), cnp);
 	VFS_KERNEL_DEBUG_END1(15, vp);
 }
 
@@ -581,7 +565,7 @@ mac_vnode_notify_deleteextattr(vfs_context_t ctx, struct vnode *vp, const char *
 		return;
 	}
 	VFS_KERNEL_DEBUG_START1(16, vp);
-	MAC_PERFORM(vnode_notify_deleteextattr, cred, vp, vp->v_label, name);
+	MAC_PERFORM(vnode_notify_deleteextattr, cred, vp, mac_vnode_label(vp), name);
 	VFS_KERNEL_DEBUG_END1(16, vp);
 }
 
@@ -601,7 +585,7 @@ mac_vnode_notify_setacl(vfs_context_t ctx, struct vnode *vp, struct kauth_acl *a
 		return;
 	}
 	VFS_KERNEL_DEBUG_START1(17, vp);
-	MAC_PERFORM(vnode_notify_setacl, cred, vp, vp->v_label, acl);
+	MAC_PERFORM(vnode_notify_setacl, cred, vp, mac_vnode_label(vp), acl);
 	VFS_KERNEL_DEBUG_END1(17, vp);
 }
 
@@ -621,7 +605,7 @@ mac_vnode_notify_setattrlist(vfs_context_t ctx, struct vnode *vp, struct attrlis
 		return;
 	}
 	VFS_KERNEL_DEBUG_START1(18, vp);
-	MAC_PERFORM(vnode_notify_setattrlist, cred, vp, vp->v_label, alist);
+	MAC_PERFORM(vnode_notify_setattrlist, cred, vp, mac_vnode_label(vp), alist);
 	VFS_KERNEL_DEBUG_END1(18, vp);
 }
 
@@ -641,7 +625,7 @@ mac_vnode_notify_setextattr(vfs_context_t ctx, struct vnode *vp, const char *nam
 		return;
 	}
 	VFS_KERNEL_DEBUG_START1(19, vp);
-	MAC_PERFORM(vnode_notify_setextattr, cred, vp, vp->v_label, name, uio);
+	MAC_PERFORM(vnode_notify_setextattr, cred, vp, mac_vnode_label(vp), name, uio);
 	VFS_KERNEL_DEBUG_END1(19, vp);
 }
 
@@ -661,7 +645,7 @@ mac_vnode_notify_setflags(vfs_context_t ctx, struct vnode *vp, u_long flags)
 		return;
 	}
 	VFS_KERNEL_DEBUG_START1(20, vp);
-	MAC_PERFORM(vnode_notify_setflags, cred, vp, vp->v_label, flags);
+	MAC_PERFORM(vnode_notify_setflags, cred, vp, mac_vnode_label(vp), flags);
 	VFS_KERNEL_DEBUG_END1(20, vp);
 }
 
@@ -681,7 +665,7 @@ mac_vnode_notify_setmode(vfs_context_t ctx, struct vnode *vp, mode_t mode)
 		return;
 	}
 	VFS_KERNEL_DEBUG_START1(21, vp);
-	MAC_PERFORM(vnode_notify_setmode, cred, vp, vp->v_label, mode);
+	MAC_PERFORM(vnode_notify_setmode, cred, vp, mac_vnode_label(vp), mode);
 	VFS_KERNEL_DEBUG_END1(21, vp);
 }
 
@@ -701,7 +685,7 @@ mac_vnode_notify_setowner(vfs_context_t ctx, struct vnode *vp, uid_t uid, gid_t 
 		return;
 	}
 	VFS_KERNEL_DEBUG_START1(22, vp);
-	MAC_PERFORM(vnode_notify_setowner, cred, vp, vp->v_label, uid, gid);
+	MAC_PERFORM(vnode_notify_setowner, cred, vp, mac_vnode_label(vp), uid, gid);
 	VFS_KERNEL_DEBUG_END1(22, vp);
 }
 
@@ -721,7 +705,7 @@ mac_vnode_notify_setutimes(vfs_context_t ctx, struct vnode *vp, struct timespec 
 		return;
 	}
 	VFS_KERNEL_DEBUG_START1(23, vp);
-	MAC_PERFORM(vnode_notify_setutimes, cred, vp, vp->v_label, atime, mtime);
+	MAC_PERFORM(vnode_notify_setutimes, cred, vp, mac_vnode_label(vp), atime, mtime);
 	VFS_KERNEL_DEBUG_END1(23, vp);
 }
 
@@ -741,7 +725,7 @@ mac_vnode_notify_truncate(vfs_context_t ctx, kauth_cred_t file_cred, struct vnod
 		return;
 	}
 	VFS_KERNEL_DEBUG_START1(24, vp);
-	MAC_PERFORM(vnode_notify_truncate, cred, file_cred, vp, vp->v_label);
+	MAC_PERFORM(vnode_notify_truncate, cred, file_cred, vp, mac_vnode_label(vp));
 	VFS_KERNEL_DEBUG_END1(24, vp);
 }
 
@@ -767,8 +751,8 @@ mac_vnode_label_update_extattr(struct mount *mp, struct vnode *vp,
 	}
 
 	VFS_KERNEL_DEBUG_START1(25, vp);
-	MAC_PERFORM(vnode_label_update_extattr, mp, mp->mnt_mntlabel, vp,
-	    vp->v_label, name);
+	MAC_PERFORM(vnode_label_update_extattr, mp, mac_mount_label(mp), vp,
+	    mac_vnode_label(vp), name);
 	VFS_KERNEL_DEBUG_END1(25, vp);
 	if (error == 0) {
 		return;
@@ -802,7 +786,7 @@ mac_vnode_label_store(vfs_context_t ctx, struct vnode *vp,
 		return 0;
 	}
 	VFS_KERNEL_DEBUG_START1(26, vp);
-	MAC_CHECK(vnode_label_store, cred, vp, vp->v_label, intlabel);
+	MAC_CHECK(vnode_label_store, cred, vp, mac_vnode_label(vp), intlabel);
 	VFS_KERNEL_DEBUG_END1(26, vp);
 
 	return error;
@@ -856,7 +840,7 @@ mac_cred_label_update_execve(vfs_context_t ctx, kauth_cred_t new, struct vnode *
 			void *spawnattr = exec_spawnattr_getmacpolicyinfo(macextensions, mpc->mpc_name, &spawnattrlen);
 
 			error = mac_error_select(hook(cred, new, vfs_context_proc(ctx), vp, offset, scriptvp,
-			    vp->v_label, scriptvnodelabel, execl, csflags, spawnattr, spawnattrlen, disjoint),
+			    mac_vnode_label(vp), scriptvnodelabel, execl, csflags, spawnattr, spawnattrlen, disjoint),
 			    error);
 		}
 		if (mac_policy_list_conditional_busy() != 0) {
@@ -875,7 +859,7 @@ mac_cred_label_update_execve(vfs_context_t ctx, kauth_cred_t new, struct vnode *
 				void *spawnattr = exec_spawnattr_getmacpolicyinfo(macextensions, mpc->mpc_name, &spawnattrlen);
 
 				error = mac_error_select(hook(cred, new, vfs_context_proc(ctx), vp, offset, scriptvp,
-				    vp->v_label, scriptvnodelabel, execl, csflags, spawnattr, spawnattrlen, disjoint),
+				    mac_vnode_label(vp), scriptvnodelabel, execl, csflags, spawnattr, spawnattrlen, disjoint),
 				    error);
 			}
 			mac_policy_list_unbusy();
@@ -926,7 +910,7 @@ mac_cred_check_label_update_execve(vfs_context_t ctx, struct vnode *vp, off_t of
 			size_t spawnattrlen = 0;
 			void *spawnattr = exec_spawnattr_getmacpolicyinfo(macextensions, mpc->mpc_name, &spawnattrlen);
 
-			result = result || hook(cred, vp, offset, scriptvp, vp->v_label, scriptvnodelabel, execlabel, p, spawnattr, spawnattrlen);
+			result = result || hook(cred, vp, offset, scriptvp, mac_vnode_label(vp), scriptvnodelabel, execlabel, p, spawnattr, spawnattrlen);
 		}
 		if (mac_policy_list_conditional_busy() != 0) {
 			for (; i <= mac_policy_list.maxindex; i++) {
@@ -943,7 +927,7 @@ mac_cred_check_label_update_execve(vfs_context_t ctx, struct vnode *vp, off_t of
 				size_t spawnattrlen = 0;
 				void *spawnattr = exec_spawnattr_getmacpolicyinfo(macextensions, mpc->mpc_name, &spawnattrlen);
 
-				result = result || hook(cred, vp, offset, scriptvp, vp->v_label, scriptvnodelabel, execlabel, p, spawnattr, spawnattrlen);
+				result = result || hook(cred, vp, offset, scriptvp, mac_vnode_label(vp), scriptvnodelabel, execlabel, p, spawnattr, spawnattrlen);
 			}
 			mac_policy_list_unbusy();
 		}
@@ -974,7 +958,7 @@ mac_vnode_check_access(vfs_context_t ctx, struct vnode *vp,
 	/* Convert {R,W,X}_OK values to V{READ,WRITE,EXEC} for entry points */
 	mask = ACCESS_MODE_TO_VNODE_MASK(acc_mode);
 	VFS_KERNEL_DEBUG_START1(29, vp);
-	MAC_CHECK(vnode_check_access, cred, vp, vp->v_label, mask);
+	MAC_CHECK(vnode_check_access, cred, vp, mac_vnode_label(vp), mask);
 	VFS_KERNEL_DEBUG_END1(29, vp);
 	return error;
 }
@@ -996,7 +980,7 @@ mac_vnode_check_chdir(vfs_context_t ctx, struct vnode *dvp)
 		return 0;
 	}
 	VFS_KERNEL_DEBUG_START1(30, dvp);
-	MAC_CHECK(vnode_check_chdir, cred, dvp, dvp->v_label);
+	MAC_CHECK(vnode_check_chdir, cred, dvp, mac_vnode_label(dvp));
 	VFS_KERNEL_DEBUG_END1(30, dvp);
 	return error;
 }
@@ -1019,7 +1003,7 @@ mac_vnode_check_chroot(vfs_context_t ctx, struct vnode *dvp,
 		return 0;
 	}
 	VFS_KERNEL_DEBUG_START1(31, dvp);
-	MAC_CHECK(vnode_check_chroot, cred, dvp, dvp->v_label, cnp);
+	MAC_CHECK(vnode_check_chroot, cred, dvp, mac_vnode_label(dvp), cnp);
 	VFS_KERNEL_DEBUG_END1(31, dvp);
 	return error;
 }
@@ -1042,8 +1026,8 @@ mac_vnode_check_clone(vfs_context_t ctx, struct vnode *dvp,
 		return 0;
 	}
 	VFS_KERNEL_DEBUG_START1(32, dvp);
-	MAC_CHECK(vnode_check_clone, cred, dvp, dvp->v_label, vp,
-	    vp->v_label, cnp);
+	MAC_CHECK(vnode_check_clone, cred, dvp, mac_vnode_label(dvp), vp,
+	    mac_vnode_label(vp), cnp);
 	VFS_KERNEL_DEBUG_END1(32, dvp);
 	return error;
 }
@@ -1065,7 +1049,7 @@ mac_vnode_check_create(vfs_context_t ctx, struct vnode *dvp,
 		return 0;
 	}
 	VFS_KERNEL_DEBUG_START1(33, dvp);
-	MAC_CHECK(vnode_check_create, cred, dvp, dvp->v_label, cnp, vap);
+	MAC_CHECK(vnode_check_create, cred, dvp, mac_vnode_label(dvp), cnp, vap);
 	VFS_KERNEL_DEBUG_END1(33, dvp);
 	return error;
 }
@@ -1088,8 +1072,8 @@ mac_vnode_check_unlink(vfs_context_t ctx, struct vnode *dvp, struct vnode *vp,
 		return 0;
 	}
 	VFS_KERNEL_DEBUG_START1(34, dvp);
-	MAC_CHECK(vnode_check_unlink, cred, dvp, dvp->v_label, vp,
-	    vp->v_label, cnp);
+	MAC_CHECK(vnode_check_unlink, cred, dvp, mac_vnode_label(dvp), vp,
+	    mac_vnode_label(vp), cnp);
 	VFS_KERNEL_DEBUG_END1(34, dvp);
 	return error;
 }
@@ -1112,7 +1096,7 @@ mac_vnode_check_deleteacl(vfs_context_t ctx, struct vnode *vp,
 		return 0;
 	}
 	VFS_KERNEL_DEBUG_START1(35, dvp);
-	MAC_CHECK(vnode_check_deleteacl, cred, vp, vp->v_label, type);
+	MAC_CHECK(vnode_check_deleteacl, cred, vp, mac_vnode_label(vp), type);
 	VFS_KERNEL_DEBUG_END1(35, dvp);
 	return error;
 }
@@ -1136,7 +1120,7 @@ mac_vnode_check_deleteextattr(vfs_context_t ctx, struct vnode *vp,
 		return 0;
 	}
 	VFS_KERNEL_DEBUG_START1(36, vp);
-	MAC_CHECK(vnode_check_deleteextattr, cred, vp, vp->v_label, name);
+	MAC_CHECK(vnode_check_deleteextattr, cred, vp, mac_vnode_label(vp), name);
 	VFS_KERNEL_DEBUG_END1(36, vp);
 	return error;
 }
@@ -1158,8 +1142,8 @@ mac_vnode_check_exchangedata(vfs_context_t ctx,
 		return 0;
 	}
 	VFS_KERNEL_DEBUG_START1(37, v1);
-	MAC_CHECK(vnode_check_exchangedata, cred, v1, v1->v_label,
-	    v2, v2->v_label);
+	MAC_CHECK(vnode_check_exchangedata, cred, v1, mac_vnode_label(v1),
+	    v2, mac_vnode_label(v2));
 	VFS_KERNEL_DEBUG_END1(37, v1);
 
 	return error;
@@ -1183,7 +1167,7 @@ mac_vnode_check_getacl(vfs_context_t ctx, struct vnode *vp, acl_type_t type)
 		return 0;
 	}
 	VFS_KERNEL_DEBUG_START1(38, vp);
-	MAC_CHECK(vnode_check_getacl, cred, vp, vp->v_label, type);
+	MAC_CHECK(vnode_check_getacl, cred, vp, mac_vnode_label(vp), type);
 	VFS_KERNEL_DEBUG_END1(38, vp);
 	return error;
 }
@@ -1207,7 +1191,7 @@ mac_vnode_check_getattr(vfs_context_t ctx, struct ucred *file_cred,
 		return 0;
 	}
 	VFS_KERNEL_DEBUG_START1(39, vp);
-	MAC_CHECK(vnode_check_getattr, cred, file_cred, vp, vp->v_label, va);
+	MAC_CHECK(vnode_check_getattr, cred, file_cred, vp, mac_vnode_label(vp), va);
 	VFS_KERNEL_DEBUG_END1(39, vp);
 	return error;
 }
@@ -1230,7 +1214,7 @@ mac_vnode_check_getattrlist(vfs_context_t ctx, struct vnode *vp,
 		return 0;
 	}
 	VFS_KERNEL_DEBUG_START1(40, vp);
-	MAC_CHECK(vnode_check_getattrlist, cred, vp, vp->v_label, alist, options);
+	MAC_CHECK(vnode_check_getattrlist, cred, vp, mac_vnode_label(vp), alist, options);
 	VFS_KERNEL_DEBUG_END1(40, vp);
 
 	/* Falsify results instead of returning error? */
@@ -1279,7 +1263,7 @@ mac_vnode_check_exec(vfs_context_t ctx, struct vnode *vp,
 
 			error = mac_error_select(
 				hook(cred,
-				vp, imgp->ip_scriptvp, vp->v_label, imgp->ip_scriptlabelp,
+				vp, imgp->ip_scriptvp, mac_vnode_label(vp), imgp->ip_scriptlabelp,
 				imgp->ip_execlabelp, &imgp->ip_ndp->ni_cnd, &imgp->ip_csflags,
 				spawnattr, spawnattrlen), error);
 		}
@@ -1300,7 +1284,7 @@ mac_vnode_check_exec(vfs_context_t ctx, struct vnode *vp,
 
 				error = mac_error_select(
 					hook(cred,
-					vp, imgp->ip_scriptvp, vp->v_label, imgp->ip_scriptlabelp,
+					vp, imgp->ip_scriptvp, mac_vnode_label(vp), imgp->ip_scriptlabelp,
 					imgp->ip_execlabelp, &imgp->ip_ndp->ni_cnd, &imgp->ip_csflags,
 					spawnattr, spawnattrlen), error);
 			}
@@ -1329,7 +1313,7 @@ mac_vnode_check_fsgetpath(vfs_context_t ctx, struct vnode *vp)
 		return 0;
 	}
 	VFS_KERNEL_DEBUG_START1(42, vp);
-	MAC_CHECK(vnode_check_fsgetpath, cred, vp, vp->v_label);
+	MAC_CHECK(vnode_check_fsgetpath, cred, vp, mac_vnode_label(vp));
 	VFS_KERNEL_DEBUG_END1(42, vp);
 	return error;
 }
@@ -1357,7 +1341,7 @@ mac_vnode_check_signature(struct vnode *vp, struct cs_blob *cs_blob,
 #endif
 
 	VFS_KERNEL_DEBUG_START1(43, vp);
-	MAC_CHECK(vnode_check_signature, vp, vp->v_label, cpu_type, cs_blob,
+	MAC_CHECK(vnode_check_signature, vp, mac_vnode_label(vp), cpu_type, cs_blob,
 	    cs_flags, signer_type, flags, platform, &fatal_failure_desc, &fatal_failure_desc_len);
 	VFS_KERNEL_DEBUG_END1(43, vp);
 
@@ -1458,7 +1442,7 @@ mac_vnode_check_supplemental_signature(struct vnode *vp,
 	}
 #endif
 	VFS_KERNEL_DEBUG_START1(93, vp);
-	MAC_CHECK(vnode_check_supplemental_signature, vp, vp->v_label, cs_blob, linked_vp, linked_cs_blob,
+	MAC_CHECK(vnode_check_supplemental_signature, vp, mac_vnode_label(vp), cs_blob, linked_vp, linked_cs_blob,
 	    signer_type);
 	VFS_KERNEL_DEBUG_END1(93, vp);
 
@@ -1483,7 +1467,7 @@ mac_vnode_check_getacl(vfs_context_t ctx, struct vnode *vp, acl_type_t type)
 		return 0;
 	}
 	VFS_KERNEL_DEBUG_START1(44, vp);
-	MAC_CHECK(vnode_check_getacl, cred, vp, vp->v_label, type);
+	MAC_CHECK(vnode_check_getacl, cred, vp, mac_vnode_label(vp), type);
 	VFS_KERNEL_DEBUG_END1(44, vp);
 	return error;
 }
@@ -1507,7 +1491,7 @@ mac_vnode_check_getextattr(vfs_context_t ctx, struct vnode *vp,
 		return 0;
 	}
 	VFS_KERNEL_DEBUG_START1(45, vp);
-	MAC_CHECK(vnode_check_getextattr, cred, vp, vp->v_label,
+	MAC_CHECK(vnode_check_getextattr, cred, vp, mac_vnode_label(vp),
 	    name, uio);
 	VFS_KERNEL_DEBUG_END1(45, vp);
 	return error;
@@ -1530,7 +1514,7 @@ mac_vnode_check_ioctl(vfs_context_t ctx, struct vnode *vp, u_long cmd)
 		return 0;
 	}
 	VFS_KERNEL_DEBUG_START1(46, vp);
-	MAC_CHECK(vnode_check_ioctl, cred, vp, vp->v_label, cmd);
+	MAC_CHECK(vnode_check_ioctl, cred, vp, mac_vnode_label(vp), cmd);
 	VFS_KERNEL_DEBUG_END1(46, vp);
 	return error;
 }
@@ -1554,7 +1538,7 @@ mac_vnode_check_kqfilter(vfs_context_t ctx, kauth_cred_t file_cred,
 	}
 	VFS_KERNEL_DEBUG_START1(47, vp);
 	MAC_CHECK(vnode_check_kqfilter, cred, file_cred, kn, vp,
-	    vp->v_label);
+	    mac_vnode_label(vp));
 	VFS_KERNEL_DEBUG_END1(47, vp);
 
 	return error;
@@ -1578,8 +1562,8 @@ mac_vnode_check_link(vfs_context_t ctx, struct vnode *dvp,
 		return 0;
 	}
 	VFS_KERNEL_DEBUG_START1(48, vp);
-	MAC_CHECK(vnode_check_link, cred, dvp, dvp->v_label, vp,
-	    vp->v_label, cnp);
+	MAC_CHECK(vnode_check_link, cred, dvp, mac_vnode_label(dvp), vp,
+	    mac_vnode_label(vp), cnp);
 	VFS_KERNEL_DEBUG_END1(48, vp);
 	return error;
 }
@@ -1601,7 +1585,7 @@ mac_vnode_check_listextattr(vfs_context_t ctx, struct vnode *vp)
 		return 0;
 	}
 	VFS_KERNEL_DEBUG_START1(49, vp);
-	MAC_CHECK(vnode_check_listextattr, cred, vp, vp->v_label);
+	MAC_CHECK(vnode_check_listextattr, cred, vp, mac_vnode_label(vp));
 	VFS_KERNEL_DEBUG_END1(49, vp);
 	return error;
 }
@@ -1624,7 +1608,7 @@ mac_vnode_check_lookup_preflight(vfs_context_t ctx, struct vnode *dvp,
 		return 0;
 	}
 	VFS_KERNEL_DEBUG_START1(50, dvp);
-	MAC_CHECK(vnode_check_lookup_preflight, cred, dvp, dvp->v_label, path, pathlen);
+	MAC_CHECK(vnode_check_lookup_preflight, cred, dvp, mac_vnode_label(dvp), path, pathlen);
 	VFS_KERNEL_DEBUG_END1(50, dvp);
 	return error;
 }
@@ -1647,7 +1631,7 @@ mac_vnode_check_lookup(vfs_context_t ctx, struct vnode *dvp,
 		return 0;
 	}
 	VFS_KERNEL_DEBUG_START1(51, dvp);
-	MAC_CHECK(vnode_check_lookup, cred, dvp, dvp->v_label, cnp);
+	MAC_CHECK(vnode_check_lookup, cred, dvp, mac_vnode_label(dvp), cnp);
 	VFS_KERNEL_DEBUG_END1(51, dvp);
 	return error;
 }
@@ -1669,7 +1653,7 @@ mac_vnode_check_open(vfs_context_t ctx, struct vnode *vp, int acc_mode)
 		return 0;
 	}
 	VFS_KERNEL_DEBUG_START1(52, vp);
-	MAC_CHECK(vnode_check_open, cred, vp, vp->v_label, acc_mode);
+	MAC_CHECK(vnode_check_open, cred, vp, mac_vnode_label(vp), acc_mode);
 	VFS_KERNEL_DEBUG_END1(52, vp);
 	return error;
 }
@@ -1693,7 +1677,7 @@ mac_vnode_check_read(vfs_context_t ctx, struct ucred *file_cred,
 	}
 	VFS_KERNEL_DEBUG_START1(53, vp);
 	MAC_CHECK(vnode_check_read, cred, file_cred, vp,
-	    vp->v_label);
+	    mac_vnode_label(vp));
 	VFS_KERNEL_DEBUG_END1(53, vp);
 
 	return error;
@@ -1716,7 +1700,7 @@ mac_vnode_check_readdir(vfs_context_t ctx, struct vnode *dvp)
 		return 0;
 	}
 	VFS_KERNEL_DEBUG_START1(54, dvp);
-	MAC_CHECK(vnode_check_readdir, cred, dvp, dvp->v_label);
+	MAC_CHECK(vnode_check_readdir, cred, dvp, mac_vnode_label(dvp));
 	VFS_KERNEL_DEBUG_END1(54, dvp);
 	return error;
 }
@@ -1738,7 +1722,7 @@ mac_vnode_check_readlink(vfs_context_t ctx, struct vnode *vp)
 		return 0;
 	}
 	VFS_KERNEL_DEBUG_START1(55, vp);
-	MAC_CHECK(vnode_check_readlink, cred, vp, vp->v_label);
+	MAC_CHECK(vnode_check_readlink, cred, vp, mac_vnode_label(vp));
 	VFS_KERNEL_DEBUG_END1(55, vp);
 	return error;
 }
@@ -1761,7 +1745,7 @@ mac_vnode_check_label_update(vfs_context_t ctx, struct vnode *vp,
 		return 0;
 	}
 	VFS_KERNEL_DEBUG_START1(56, vp);
-	MAC_CHECK(vnode_check_label_update, cred, vp, vp->v_label, newlabel);
+	MAC_CHECK(vnode_check_label_update, cred, vp, mac_vnode_label(vp), newlabel);
 	VFS_KERNEL_DEBUG_END1(56, vp);
 
 	return error;
@@ -1787,23 +1771,23 @@ mac_vnode_check_rename(vfs_context_t ctx, struct vnode *dvp,
 	}
 
 	VFS_KERNEL_DEBUG_START1(57, vp);
-	MAC_CHECK(vnode_check_rename_from, cred, dvp, dvp->v_label, vp,
-	    vp->v_label, cnp);
+	MAC_CHECK(vnode_check_rename_from, cred, dvp, mac_vnode_label(dvp), vp,
+	    mac_vnode_label(vp), cnp);
 	if (error) {
 		VFS_KERNEL_DEBUG_END1(57, vp);
 		return error;
 	}
 
-	MAC_CHECK(vnode_check_rename_to, cred, tdvp, tdvp->v_label, tvp,
-	    tvp != NULL ? tvp->v_label : NULL, dvp == tdvp, tcnp);
+	MAC_CHECK(vnode_check_rename_to, cred, tdvp, mac_vnode_label(tdvp), tvp,
+	    tvp != NULL ? mac_vnode_label(tvp) : NULL, dvp == tdvp, tcnp);
 	if (error) {
 		VFS_KERNEL_DEBUG_END1(57, vp);
 		return error;
 	}
 
-	MAC_CHECK(vnode_check_rename, cred, dvp, dvp->v_label, vp,
-	    vp->v_label, cnp, tdvp, tdvp->v_label, tvp,
-	    tvp != NULL ? tvp->v_label : NULL, tcnp);
+	MAC_CHECK(vnode_check_rename, cred, dvp, mac_vnode_label(dvp), vp,
+	    mac_vnode_label(vp), cnp, tdvp, mac_vnode_label(tdvp), tvp,
+	    tvp != NULL ? mac_vnode_label(tvp) : NULL, tcnp);
 	VFS_KERNEL_DEBUG_END1(57, vp);
 	return error;
 }
@@ -1825,7 +1809,7 @@ mac_vnode_check_revoke(vfs_context_t ctx, struct vnode *vp)
 		return 0;
 	}
 	VFS_KERNEL_DEBUG_START1(58, vp);
-	MAC_CHECK(vnode_check_revoke, cred, vp, vp->v_label);
+	MAC_CHECK(vnode_check_revoke, cred, vp, mac_vnode_label(vp));
 	VFS_KERNEL_DEBUG_END1(58, vp);
 	return error;
 }
@@ -1848,7 +1832,7 @@ mac_vnode_check_searchfs(vfs_context_t ctx, struct vnode *vp, struct attrlist *r
 		return 0;
 	}
 	VFS_KERNEL_DEBUG_START1(59, vp);
-	MAC_CHECK(vnode_check_searchfs, cred, vp, vp->v_label, returnattrs, searchattrs);
+	MAC_CHECK(vnode_check_searchfs, cred, vp, mac_vnode_label(vp), returnattrs, searchattrs);
 	VFS_KERNEL_DEBUG_END1(59, vp);
 	return error;
 }
@@ -1870,7 +1854,7 @@ mac_vnode_check_select(vfs_context_t ctx, struct vnode *vp, int which)
 		return 0;
 	}
 	VFS_KERNEL_DEBUG_START1(60, vp);
-	MAC_CHECK(vnode_check_select, cred, vp, vp->v_label, which);
+	MAC_CHECK(vnode_check_select, cred, vp, mac_vnode_label(vp), which);
 	VFS_KERNEL_DEBUG_END1(60, vp);
 	return error;
 }
@@ -1893,7 +1877,7 @@ mac_vnode_check_setacl(vfs_context_t ctx, struct vnode *vp,
 		return 0;
 	}
 	VFS_KERNEL_DEBUG_START1(61, vp);
-	MAC_CHECK(vnode_check_setacl, cred, vp, vp->v_label, acl);
+	MAC_CHECK(vnode_check_setacl, cred, vp, mac_vnode_label(vp), acl);
 	VFS_KERNEL_DEBUG_END1(61, vp);
 	return error;
 }
@@ -1916,7 +1900,7 @@ mac_vnode_check_setattrlist(vfs_context_t ctx, struct vnode *vp,
 		return 0;
 	}
 	VFS_KERNEL_DEBUG_START1(62, vp);
-	MAC_CHECK(vnode_check_setattrlist, cred, vp, vp->v_label, alist);
+	MAC_CHECK(vnode_check_setattrlist, cred, vp, mac_vnode_label(vp), alist);
 	VFS_KERNEL_DEBUG_END1(62, vp);
 	return error;
 }
@@ -1939,7 +1923,7 @@ mac_vnode_check_setextattr(vfs_context_t ctx, struct vnode *vp,
 		return 0;
 	}
 	VFS_KERNEL_DEBUG_START1(63, vp);
-	MAC_CHECK(vnode_check_setextattr, cred, vp, vp->v_label,
+	MAC_CHECK(vnode_check_setextattr, cred, vp, mac_vnode_label(vp),
 	    name, uio);
 	VFS_KERNEL_DEBUG_END1(63, vp);
 	return error;
@@ -1962,7 +1946,7 @@ mac_vnode_check_setflags(vfs_context_t ctx, struct vnode *vp, u_long flags)
 		return 0;
 	}
 	VFS_KERNEL_DEBUG_START1(64, vp);
-	MAC_CHECK(vnode_check_setflags, cred, vp, vp->v_label, flags);
+	MAC_CHECK(vnode_check_setflags, cred, vp, mac_vnode_label(vp), flags);
 	VFS_KERNEL_DEBUG_END1(64, vp);
 	return error;
 }
@@ -1984,7 +1968,7 @@ mac_vnode_check_setmode(vfs_context_t ctx, struct vnode *vp, mode_t mode)
 		return 0;
 	}
 	VFS_KERNEL_DEBUG_START1(65, vp);
-	MAC_CHECK(vnode_check_setmode, cred, vp, vp->v_label, mode);
+	MAC_CHECK(vnode_check_setmode, cred, vp, mac_vnode_label(vp), mode);
 	VFS_KERNEL_DEBUG_END1(65, vp);
 	return error;
 }
@@ -2007,7 +1991,7 @@ mac_vnode_check_setowner(vfs_context_t ctx, struct vnode *vp, uid_t uid,
 		return 0;
 	}
 	VFS_KERNEL_DEBUG_START1(66, vp);
-	MAC_CHECK(vnode_check_setowner, cred, vp, vp->v_label, uid, gid);
+	MAC_CHECK(vnode_check_setowner, cred, vp, mac_vnode_label(vp), uid, gid);
 	VFS_KERNEL_DEBUG_END1(66, vp);
 	return error;
 }
@@ -2030,7 +2014,7 @@ mac_vnode_check_setutimes(vfs_context_t ctx, struct vnode *vp,
 		return 0;
 	}
 	VFS_KERNEL_DEBUG_START1(67, vp);
-	MAC_CHECK(vnode_check_setutimes, cred, vp, vp->v_label, atime,
+	MAC_CHECK(vnode_check_setutimes, cred, vp, mac_vnode_label(vp), atime,
 	    mtime);
 	VFS_KERNEL_DEBUG_END1(67, vp);
 	return error;
@@ -2055,7 +2039,7 @@ mac_vnode_check_stat(vfs_context_t ctx, struct ucred *file_cred,
 	}
 	VFS_KERNEL_DEBUG_START1(68, vp);
 	MAC_CHECK(vnode_check_stat, cred, file_cred, vp,
-	    vp->v_label);
+	    mac_vnode_label(vp));
 	VFS_KERNEL_DEBUG_END1(68, vp);
 	return error;
 }
@@ -2078,7 +2062,7 @@ mac_vnode_check_trigger_resolve(vfs_context_t ctx, struct vnode *dvp,
 		return 0;
 	}
 	VFS_KERNEL_DEBUG_START1(69, dvp);
-	MAC_CHECK(vnode_check_trigger_resolve, cred, dvp, dvp->v_label, cnp);
+	MAC_CHECK(vnode_check_trigger_resolve, cred, dvp, mac_vnode_label(dvp), cnp);
 	VFS_KERNEL_DEBUG_END1(69, dvp);
 	return error;
 }
@@ -2102,7 +2086,7 @@ mac_vnode_check_truncate(vfs_context_t ctx, struct ucred *file_cred,
 	}
 	VFS_KERNEL_DEBUG_START1(70, vp);
 	MAC_CHECK(vnode_check_truncate, cred, file_cred, vp,
-	    vp->v_label);
+	    mac_vnode_label(vp));
 	VFS_KERNEL_DEBUG_END1(70, vp);
 
 	return error;
@@ -2126,7 +2110,7 @@ mac_vnode_check_write(vfs_context_t ctx, struct ucred *file_cred,
 		return 0;
 	}
 	VFS_KERNEL_DEBUG_START1(71, vp);
-	MAC_CHECK(vnode_check_write, cred, file_cred, vp, vp->v_label);
+	MAC_CHECK(vnode_check_write, cred, file_cred, vp, mac_vnode_label(vp));
 	VFS_KERNEL_DEBUG_END1(71, vp);
 
 	return error;
@@ -2150,7 +2134,7 @@ mac_vnode_check_uipc_bind(vfs_context_t ctx, struct vnode *dvp,
 		return 0;
 	}
 	VFS_KERNEL_DEBUG_START1(72, dvp);
-	MAC_CHECK(vnode_check_uipc_bind, cred, dvp, dvp->v_label, cnp, vap);
+	MAC_CHECK(vnode_check_uipc_bind, cred, dvp, mac_vnode_label(dvp), cnp, vap);
 	VFS_KERNEL_DEBUG_END1(72, dvp);
 	return error;
 }
@@ -2172,7 +2156,7 @@ mac_vnode_check_uipc_connect(vfs_context_t ctx, struct vnode *vp, struct socket 
 		return 0;
 	}
 	VFS_KERNEL_DEBUG_START1(73, vp);
-	MAC_CHECK(vnode_check_uipc_connect, cred, vp, vp->v_label, (socket_t) so);
+	MAC_CHECK(vnode_check_uipc_connect, cred, vp, mac_vnode_label(vp), (socket_t) so);
 	VFS_KERNEL_DEBUG_END1(73, vp);
 	return error;
 }
@@ -2183,20 +2167,23 @@ mac_vnode_label_update(vfs_context_t ctx, struct vnode *vp, struct label *newlab
 	kauth_cred_t cred = vfs_context_ucred(ctx);
 	struct label *tmpl = NULL;
 
-	if (vp->v_label == NULL) {
-		tmpl = mac_vnode_label_alloc();
+	if (mac_vnode_label(vp) == NULL) {
+		tmpl = mac_vnode_label_alloc(vp);
 	}
 
 	vnode_lock(vp);
 
-	/* recheck after lock */
-	if (vp->v_label == NULL) {
+	/*
+	 * Recheck under lock.  We allocate labels for vnodes lazily, so
+	 * somebody else might have already got here first.
+	 */
+	if (mac_vnode_label(vp) == NULL) {
 		vp->v_label = tmpl;
 		tmpl = NULL;
 	}
 
 	VFS_KERNEL_DEBUG_START1(74, vp);
-	MAC_PERFORM(vnode_label_update, cred, vp, vp->v_label, newlabel);
+	MAC_PERFORM(vnode_label_update, cred, vp, mac_vnode_label(vp), newlabel);
 	VFS_KERNEL_DEBUG_END1(74, vp);
 	vnode_unlock(vp);
 
@@ -2218,7 +2205,7 @@ mac_vnode_find_sigs(struct proc *p, struct vnode *vp, off_t offset)
 #endif
 
 	VFS_KERNEL_DEBUG_START1(75, vp);
-	MAC_CHECK(vnode_find_sigs, p, vp, offset, vp->v_label);
+	MAC_CHECK(vnode_find_sigs, p, vp, offset, mac_vnode_label(vp));
 	VFS_KERNEL_DEBUG_END1(75, vp);
 
 	return error;
@@ -2271,7 +2258,7 @@ mac_mount_label_associate(vfs_context_t ctx, struct mount *mp)
 	}
 
 	VFS_KERNEL_DEBUG_START1(76, mp);
-	MAC_PERFORM(mount_label_associate, cred, mp, mp->mnt_mntlabel);
+	MAC_PERFORM(mount_label_associate, cred, mp, mac_mount_label(mp));
 	VFS_KERNEL_DEBUG_END1(76, mp);
 #if DEBUG
 	printf("MAC Framework enabling %s support: %s -> %s (%s)\n",
@@ -2300,7 +2287,7 @@ mac_mount_check_mount(vfs_context_t ctx, struct vnode *vp,
 		return 0;
 	}
 	VFS_KERNEL_DEBUG_START1(77, vp);
-	MAC_CHECK(mount_check_mount, cred, vp, vp->v_label, cnp, vfc_name);
+	MAC_CHECK(mount_check_mount, cred, vp, mac_vnode_label(vp), cnp, vfc_name);
 	VFS_KERNEL_DEBUG_END1(77, vp);
 
 	return error;
@@ -2438,7 +2425,7 @@ mac_mount_check_remount(vfs_context_t ctx, struct mount *mp)
 		return 0;
 	}
 	VFS_KERNEL_DEBUG_START1(82, mp);
-	MAC_CHECK(mount_check_remount, cred, mp, mp->mnt_mntlabel);
+	MAC_CHECK(mount_check_remount, cred, mp, mac_mount_label(mp));
 	VFS_KERNEL_DEBUG_END1(82, mp);
 
 	return error;
@@ -2461,7 +2448,7 @@ mac_mount_check_umount(vfs_context_t ctx, struct mount *mp)
 		return 0;
 	}
 	VFS_KERNEL_DEBUG_START1(83, mp);
-	MAC_CHECK(mount_check_umount, cred, mp, mp->mnt_mntlabel);
+	MAC_CHECK(mount_check_umount, cred, mp, mac_mount_label(mp));
 	VFS_KERNEL_DEBUG_END1(83, mp);
 
 	return error;
@@ -2485,7 +2472,7 @@ mac_mount_check_getattr(vfs_context_t ctx, struct mount *mp,
 		return 0;
 	}
 	VFS_KERNEL_DEBUG_START1(84, mp);
-	MAC_CHECK(mount_check_getattr, cred, mp, mp->mnt_mntlabel, vfa);
+	MAC_CHECK(mount_check_getattr, cred, mp, mac_mount_label(mp), vfa);
 	VFS_KERNEL_DEBUG_END1(84, mp);
 	return error;
 }
@@ -2508,7 +2495,7 @@ mac_mount_check_setattr(vfs_context_t ctx, struct mount *mp,
 		return 0;
 	}
 	VFS_KERNEL_DEBUG_START1(85, mp);
-	MAC_CHECK(mount_check_setattr, cred, mp, mp->mnt_mntlabel, vfa);
+	MAC_CHECK(mount_check_setattr, cred, mp, mac_mount_label(mp), vfa);
 	VFS_KERNEL_DEBUG_END1(85, mp);
 	return error;
 }
@@ -2530,7 +2517,7 @@ mac_mount_check_stat(vfs_context_t ctx, struct mount *mount)
 		return 0;
 	}
 	VFS_KERNEL_DEBUG_START1(86, mount);
-	MAC_CHECK(mount_check_stat, cred, mount, mount->mnt_mntlabel);
+	MAC_CHECK(mount_check_stat, cred, mount, mac_mount_label(mount));
 	VFS_KERNEL_DEBUG_END1(86, mount);
 
 	return error;
@@ -2553,7 +2540,7 @@ mac_mount_check_label_update(vfs_context_t ctx, struct mount *mount)
 		return 0;
 	}
 	VFS_KERNEL_DEBUG_START1(87, mount);
-	MAC_CHECK(mount_check_label_update, cred, mount, mount->mnt_mntlabel);
+	MAC_CHECK(mount_check_label_update, cred, mount, mac_mount_label(mount));
 	VFS_KERNEL_DEBUG_END1(87, mount);
 
 	return error;
@@ -2576,7 +2563,7 @@ mac_mount_check_fsctl(vfs_context_t ctx, struct mount *mp, u_long cmd)
 		return 0;
 	}
 	VFS_KERNEL_DEBUG_START1(88, mp);
-	MAC_CHECK(mount_check_fsctl, cred, mp, mp->mnt_mntlabel, cmd);
+	MAC_CHECK(mount_check_fsctl, cred, mp, mac_mount_label(mp), cmd);
 	VFS_KERNEL_DEBUG_END1(88, mp);
 
 	return error;
@@ -2594,7 +2581,7 @@ mac_devfs_label_associate_device(dev_t dev, struct devnode *de,
 #endif
 
 	VFS_KERNEL_DEBUG_START1(89, de);
-	MAC_PERFORM(devfs_label_associate_device, dev, de, de->dn_label,
+	MAC_PERFORM(devfs_label_associate_device, dev, de, mac_devfs_label(de),
 	    fullpath);
 	VFS_KERNEL_DEBUG_END1(89, de);
 }
@@ -2612,7 +2599,7 @@ mac_devfs_label_associate_directory(const char *dirname, int dirnamelen,
 
 	VFS_KERNEL_DEBUG_START1(90, de);
 	MAC_PERFORM(devfs_label_associate_directory, dirname, dirnamelen, de,
-	    de->dn_label, fullpath);
+	    mac_devfs_label(de), fullpath);
 	VFS_KERNEL_DEBUG_END1(90, de);
 }
 
@@ -2693,7 +2680,7 @@ mac_vnode_label_associate_fdesc(struct mount *mp, struct fdescnode *fnp,
 	 */
 	if (fnp->fd_fd == -1) {
 		MAC_PERFORM(vnode_label_associate_file, vfs_context_ucred(ctx),
-		    mp, mp->mnt_mntlabel, NULL, NULL, vp, vp->v_label);
+		    mp, mac_mount_label(mp), NULL, NULL, vp, mac_vnode_label(vp));
 		VFS_KERNEL_DEBUG_END1(91, vp);
 		return 0;
 	}
@@ -2712,25 +2699,25 @@ mac_vnode_label_associate_fdesc(struct mount *mp, struct fdescnode *fnp,
 
 	switch (FILEGLOB_DTYPE(fp->fp_glob)) {
 	case DTYPE_VNODE:
-		fvp = (struct vnode *)fp->fp_glob->fg_data;
+		fvp = (struct vnode *)fp_get_data(fp);
 		if ((error = vnode_getwithref(fvp))) {
 			goto out;
 		}
-		if (fvp->v_label != NULL) {
-			if (mac_label_vnodes != 0 && vp->v_label == NULL) {
+		if (mac_vnode_label(fvp) != NULL) {
+			if (mac_label_vnodes != 0 && mac_vnode_label(vp) == NULL) {
 				mac_vnode_label_init(vp); /* init dst label */
 			}
-			MAC_PERFORM(vnode_label_copy, fvp->v_label, vp->v_label);
+			MAC_PERFORM(vnode_label_copy, mac_vnode_label(fvp), mac_vnode_label(vp));
 		}
 		(void)vnode_put(fvp);
 		break;
 #if CONFIG_MACF_SOCKET_SUBSET
 	case DTYPE_SOCKET:
-		so = (struct socket *)fp->fp_glob->fg_data;
+		so = (struct socket *)fp_get_data(fp);
 		socket_lock(so, 1);
 		MAC_PERFORM(vnode_label_associate_socket,
-		    vfs_context_ucred(ctx), (socket_t)so, so->so_label,
-		    vp, vp->v_label);
+		    vfs_context_ucred(ctx), (socket_t)so, NULL,
+		    vp, mac_vnode_label(vp));
 		socket_unlock(so, 1);
 		break;
 #endif
@@ -2741,7 +2728,7 @@ mac_vnode_label_associate_fdesc(struct mount *mp, struct fdescnode *fnp,
 		psem_label_associate(fp, vp, ctx);
 		break;
 	case DTYPE_PIPE:
-		cpipe = (struct pipe *)fp->fp_glob->fg_data;
+		cpipe = (struct pipe *)fp_get_data(fp);
 		/* kern/sys_pipe.c:pipe_select() suggests this test. */
 		if (cpipe == (struct pipe *)-1) {
 			error = EINVAL;
@@ -2749,7 +2736,7 @@ mac_vnode_label_associate_fdesc(struct mount *mp, struct fdescnode *fnp,
 		}
 		PIPE_LOCK(cpipe);
 		MAC_PERFORM(vnode_label_associate_pipe, vfs_context_ucred(ctx),
-		    cpipe, cpipe->pipe_label, vp, vp->v_label);
+		    cpipe, mac_pipe_label(cpipe), vp, mac_vnode_label(vp));
 		PIPE_UNLOCK(cpipe);
 		break;
 	case DTYPE_KQUEUE:
@@ -2758,8 +2745,8 @@ mac_vnode_label_associate_fdesc(struct mount *mp, struct fdescnode *fnp,
 	case DTYPE_NETPOLICY:
 	default:
 		MAC_PERFORM(vnode_label_associate_file, vfs_context_ucred(ctx),
-		    mp, mp->mnt_mntlabel, fp->fp_glob, fp->fp_glob->fg_label,
-		    vp, vp->v_label);
+		    mp, mac_mount_label(mp), fp->fp_glob, NULL,
+		    vp, mac_vnode_label(vp));
 		break;
 	}
 out:
@@ -2774,7 +2761,7 @@ mac_vnode_label_get(struct vnode *vp, int slot, intptr_t sentinel)
 	struct label *l;
 
 	KASSERT(vp != NULL, ("mac_vnode_label_get: NULL vnode"));
-	l = vp->v_label;
+	l = mac_vnode_label(vp);
 	if (l != NULL) {
 		return mac_label_get(l, slot);
 	} else {
@@ -2787,10 +2774,10 @@ mac_vnode_label_set(struct vnode *vp, int slot, intptr_t v)
 {
 	struct label *l;
 	KASSERT(vp != NULL, ("mac_vnode_label_set: NULL vnode"));
-	l = vp->v_label;
+	l = mac_vnode_label(vp);
 	if (l == NULL) {
 		mac_vnode_label_init(vp);
-		l = vp->v_label;
+		l = mac_vnode_label(vp);
 	}
 	mac_label_set(l, slot, v);
 }
@@ -2868,8 +2855,8 @@ mac_vnode_check_copyfile(vfs_context_t ctx, struct vnode *dvp,
 		return 0;
 	}
 	VFS_KERNEL_DEBUG_START1(97, dvp);
-	MAC_CHECK(vnode_check_copyfile, cred, dvp, dvp->v_label,
-	    tvp, tvp ? tvp->v_label : NULL, fvp, fvp->v_label, cnp, mode, flags);
+	MAC_CHECK(vnode_check_copyfile, cred, dvp, mac_vnode_label(dvp),
+	    tvp, tvp ? mac_vnode_label(tvp) : NULL, fvp, mac_vnode_label(fvp), cnp, mode, flags);
 	VFS_KERNEL_DEBUG_END1(97, dvp);
 	return error;
 }

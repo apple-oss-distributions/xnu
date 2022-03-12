@@ -291,7 +291,7 @@ kperf_thread_dispatch_sample(struct kperf_thread_dispatch *thdi,
 	BUF_INFO(PERF_TI_DISPSAMPLE | DBG_FUNC_START,
 	    (uintptr_t)thread_tid(thread));
 
-	task_t task = thread->task;
+	task_t task = get_threadtask(thread);
 	size_t user_addr_size = task_has_64Bit_addr(task) ? 8 : 4;
 	thdi->kpthdi_dq_serialno = 0;
 	thdi->kpthdi_dq_label[0] = '\0';
@@ -302,7 +302,7 @@ kperf_thread_dispatch_sample(struct kperf_thread_dispatch *thdi,
 	 * information about the dispatch queue.  Use task-level offsets to
 	 * find the serial number and label of the dispatch queue.
 	 */
-	assert(thread->task != kernel_task);
+	assert(task != kernel_task);
 	uint64_t user_dq_key_addr = thread_dispatchqaddr(thread);
 	if (user_dq_key_addr == 0) {
 		error = ENOENT;

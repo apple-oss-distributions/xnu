@@ -2755,7 +2755,7 @@ proc_pidfdinfo(int pid, int flavor, int fd, user_addr_t buffer, uint32_t buffers
 		if ((error = fp_get_ftype(p, fd, DTYPE_VNODE, EBADF, &fp)) != 0) {
 			goto out1;
 		}
-		error = pid_vnodeinfo(fp->fp_glob->fg_data, fp, p, buffer, buffersize, retval);
+		error = pid_vnodeinfo((vnode_t)fp_get_data(fp), fp, p, buffer, buffersize, retval);
 	}
 	break;
 
@@ -2763,7 +2763,7 @@ proc_pidfdinfo(int pid, int flavor, int fd, user_addr_t buffer, uint32_t buffers
 		if ((error = fp_get_ftype(p, fd, DTYPE_VNODE, EBADF, &fp)) != 0) {
 			goto out1;
 		}
-		error = pid_vnodeinfopath(fp->fp_glob->fg_data, fp, p, buffer, buffersize, retval);
+		error = pid_vnodeinfopath((vnode_t)fp_get_data(fp), fp, p, buffer, buffersize, retval);
 	}
 	break;
 
@@ -2771,7 +2771,7 @@ proc_pidfdinfo(int pid, int flavor, int fd, user_addr_t buffer, uint32_t buffers
 		if ((error = fp_get_ftype(p, fd, DTYPE_SOCKET, ENOTSOCK, &fp)) != 0) {
 			goto out1;
 		}
-		error = pid_socketinfo(fp->fp_glob->fg_data, fp, p, buffer, buffersize, retval);
+		error = pid_socketinfo((socket_t)fp_get_data(fp), fp, p, buffer, buffersize, retval);
 	}
 	break;
 
@@ -2779,7 +2779,7 @@ proc_pidfdinfo(int pid, int flavor, int fd, user_addr_t buffer, uint32_t buffers
 		if ((error = fp_get_ftype(p, fd, DTYPE_PSXSEM, EBADF, &fp)) != 0) {
 			goto out1;
 		}
-		error = pid_pseminfo(fp->fp_glob->fg_data, fp, p, buffer, buffersize, retval);
+		error = pid_pseminfo((struct psemnode *)fp_get_data(fp), fp, p, buffer, buffersize, retval);
 	}
 	break;
 
@@ -2787,7 +2787,7 @@ proc_pidfdinfo(int pid, int flavor, int fd, user_addr_t buffer, uint32_t buffers
 		if ((error = fp_get_ftype(p, fd, DTYPE_PSXSHM, EBADF, &fp)) != 0) {
 			goto out1;
 		}
-		error = pid_pshminfo(fp->fp_glob->fg_data, fp, p, buffer, buffersize, retval);
+		error = pid_pshminfo((struct pshmnode *)fp_get_data(fp), fp, p, buffer, buffersize, retval);
 	}
 	break;
 
@@ -2795,7 +2795,7 @@ proc_pidfdinfo(int pid, int flavor, int fd, user_addr_t buffer, uint32_t buffers
 		if ((error = fp_get_ftype(p, fd, DTYPE_PIPE, EBADF, &fp)) != 0) {
 			goto out1;
 		}
-		error = pid_pipeinfo(fp->fp_glob->fg_data, fp, p, buffer, buffersize, retval);
+		error = pid_pipeinfo((struct pipe *)fp_get_data(fp), fp, p, buffer, buffersize, retval);
 	}
 	break;
 
@@ -2811,7 +2811,7 @@ proc_pidfdinfo(int pid, int flavor, int fd, user_addr_t buffer, uint32_t buffers
 		} else if ((error = fp_get_ftype(p, fd, DTYPE_KQUEUE, EBADF, &fp)) != 0) {
 			goto out1;
 		} else {
-			kqu.kq = fp->fp_glob->fg_data;
+			kqu.kq = (struct kqueue *)fp_get_data(fp);
 		}
 
 		error = pid_kqueueinfo(kqu.kq, fp, p, buffer, buffersize, retval);
@@ -2830,7 +2830,7 @@ proc_pidfdinfo(int pid, int flavor, int fd, user_addr_t buffer, uint32_t buffers
 		} else if ((error = fp_get_ftype(p, fd, DTYPE_KQUEUE, EBADF, &fp)) != 0) {
 			goto out1;
 		} else {
-			kqu.kq = fp->fp_glob->fg_data;
+			kqu.kq = (struct kqueue *)fp_get_data(fp);
 		}
 		error = pid_kqueue_extinfo(p, kqu.kq, buffer, buffersize, retval);
 	}
@@ -2924,7 +2924,7 @@ proc_fileport_info(__unused mach_port_name_t name,
 			error = ENOTSUP;
 			break;
 		}
-		vp = (struct vnode *)fg->fg_data;
+		vp = (struct vnode *)fg_get_data(fg);
 		error = pid_vnodeinfopath(vp, fp, PROC_NULL,
 		    fia->fia_buffer, fia->fia_buffersize, fia->fia_retval);
 	}       break;
@@ -2936,7 +2936,7 @@ proc_fileport_info(__unused mach_port_name_t name,
 			error = EOPNOTSUPP;
 			break;
 		}
-		so = (socket_t)fg->fg_data;
+		so = (socket_t)fg_get_data(fg);
 		error = pid_socketinfo(so, fp, PROC_NULL,
 		    fia->fia_buffer, fia->fia_buffersize, fia->fia_retval);
 	}       break;
@@ -2948,7 +2948,7 @@ proc_fileport_info(__unused mach_port_name_t name,
 			error = EBADF;          /* ick - mirror fp_getfpshm */
 			break;
 		}
-		pshm = (struct pshmnode *)fg->fg_data;
+		pshm = (struct pshmnode *)fg_get_data(fg);
 		error = pid_pshminfo(pshm, fp, PROC_NULL,
 		    fia->fia_buffer, fia->fia_buffersize, fia->fia_retval);
 	}       break;
@@ -2960,7 +2960,7 @@ proc_fileport_info(__unused mach_port_name_t name,
 			error = EBADF;          /* ick - mirror fp_getfpipe */
 			break;
 		}
-		cpipe = (struct pipe *)fg->fg_data;
+		cpipe = (struct pipe *)fg_get_data(fg);
 		error = pid_pipeinfo(cpipe, fp, PROC_NULL,
 		    fia->fia_buffer, fia->fia_buffersize, fia->fia_retval);
 	}       break;

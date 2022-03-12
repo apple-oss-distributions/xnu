@@ -2384,7 +2384,7 @@ ipsec4_encapsulate(struct mbuf *m, struct secasvar *sav)
 	if (rfc6864 && IP_OFF_IS_ATOMIC(ntohs(ip->ip_off))) {
 		ip->ip_id = 0;
 	} else {
-		ip->ip_id = ip_randomid();
+		ip->ip_id = ip_randomid((uint64_t)m);
 	}
 	bcopy(&((struct sockaddr_in *)&sav->sah->saidx.src)->sin_addr,
 	    &ip->ip_src, sizeof(ip->ip_src));
@@ -5094,7 +5094,7 @@ ipsec_fill_offload_frame(ifnet_t ifp,
 	if (rfc6864 && IP_OFF_IS_ATOMIC(htons(ip->ip_off))) {
 		ip->ip_id = 0;
 	} else {
-		ip->ip_id = ip_randomid();
+		ip->ip_id = ip_randomid((uint64_t)data);
 	}
 	ip->ip_ttl = (u_char)ip_defttl;
 	ip->ip_p = IPPROTO_UDP;

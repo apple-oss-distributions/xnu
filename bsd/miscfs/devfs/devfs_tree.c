@@ -553,7 +553,7 @@ dev_add_node(int entrytype, devnode_type_t * typeinfo, devnode_t * proto,
 		proto->dn_prevsiblingp = &(dnp->dn_nextsibling);
 #if CONFIG_MACF
 		mac_devfs_label_init(dnp);
-		mac_devfs_label_copy(proto->dn_label, dnp->dn_label);
+		mac_devfs_label_copy(mac_devfs_label(proto), mac_devfs_label(dnp));
 #endif
 	} else {
 		struct timeval tv;

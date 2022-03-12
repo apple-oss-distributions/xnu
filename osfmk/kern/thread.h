@@ -86,6 +86,7 @@
 
 #include <mach/kern_return.h>
 #include <mach/mach_types.h>
+#include <mach/mach_param.h>
 #include <mach/message.h>
 #include <mach/boolean.h>
 #include <mach/vm_param.h>
@@ -97,19 +98,7 @@
 #include <vm/vm_kern.h>
 #include <sys/cdefs.h>
 
-#ifdef XNU_KERNEL_PRIVATE
-/* Thread tags; for easy identification. */
-__options_closed_decl(thread_tag_t, uint16_t, {
-	THREAD_TAG_MAINTHREAD   = 0x01,
-	THREAD_TAG_CALLOUT      = 0x02,
-	THREAD_TAG_IOWORKLOOP   = 0x04,
-	THREAD_TAG_PTHREAD      = 0x10,
-	THREAD_TAG_WORKQUEUE    = 0x20,
-});
-#endif /* XNU_KERNEL_PRIVATE */
-
-#ifdef  MACH_KERNEL_PRIVATE
-
+#ifdef MACH_KERNEL_PRIVATE
 #include <mach_assert.h>
 #include <mach_ldebug.h>
 
@@ -148,20 +137,73 @@ __options_closed_decl(thread_tag_t, uint16_t, {
 #include <machine/cpu_data.h>
 #include <machine/thread.h>
 
+#if MONOTONIC
+#include <stdatomic.h>
+#include <machine/monotonic.h>
+#endif /* MONOTONIC */
+#endif  /* MACH_KERNEL_PRIVATE */
 #ifdef XNU_KERNEL_PRIVATE
 /* priority queue static asserts fail for __ARM64_ARCH_8_32__ kext builds */
 #include <kern/priority_queue.h>
 #endif /* XNU_KERNEL_PRIVATE */
 
-#if MONOTONIC
-#include <stdatomic.h>
-#include <machine/monotonic.h>
-#endif /* MONOTONIC */
+__BEGIN_DECLS
 
+#ifdef XNU_KERNEL_PRIVATE
 #if CONFIG_TASKWATCH
 /* Taskwatch related. TODO: find this a better home */
 typedef struct task_watcher task_watch_t;
 #endif /* CONFIG_TASKWATCH */
+
+/* Thread tags; for easy identification. */
+__options_closed_decl(thread_tag_t, uint16_t, {
+	THREAD_TAG_MAINTHREAD   = 0x01,
+	THREAD_TAG_CALLOUT      = 0x02,
+	THREAD_TAG_IOWORKLOOP   = 0x04,
+	THREAD_TAG_PTHREAD      = 0x10,
+	THREAD_TAG_WORKQUEUE    = 0x20,
+});
+
+__options_closed_decl(thread_ro_flags_t, uint16_t, {
+	TRO_NONE                = 0x0000,
+	TRO_SETUID              = 0x0001,
+});
+
+typedef struct thread_ro *thread_ro_t;
+
+/*!
+ * @struct thread_ro
+ *
+ * @brief
+ * A structure allocated in a read only zone that safely
+ * represents the linkages of a thread to its cred, proc, task, ...
+ *
+ * @discussion
+ * The lifetime of a @c thread_ro structure is 1:1 with that
+ * of a @c thread_t or a @c uthread_t and holding a thread reference
+ * always allows to dereference this structure safely.
+ */
+struct thread_ro {
+	struct thread              *tro_owner;
+#if MACH_BSD
+	struct ucred               *tro_cred;
+	struct proc                *tro_proc;
+	struct proc_ro             *tro_proc_ro;
+#endif
+	struct task                *tro_task;
+	thread_ro_flags_t           tro_flags;
+
+	struct ipc_port            *tro_self_port;
+	struct ipc_port            *tro_settable_self_port;             /* send right */
+	struct ipc_port            *tro_ports[THREAD_SELF_PORT_COUNT];  /* no right */
+
+	struct exception_action    *tro_exc_actions;
+};
+
+#endif /* XNU_KERNEL_PRIVATE */
+#ifdef MACH_KERNEL_PRIVATE
+
+extern zone_t thread_ro_zone;
 
 __options_decl(thread_work_interval_flags_t, uint32_t, {
 	TH_WORK_INTERVAL_FLAGS_NONE           = 0x0,
@@ -247,6 +289,9 @@ struct thread {
 	bool                    wake_active;    /* wake event on stop */
 	bool                    at_safe_point;  /* thread_abort_safely allowed */
 	uint8_t                 sched_saved_run_weight;
+#if DEVELOPMENT || DEBUG
+	bool                    pmap_footprint_suspended;
+#endif /* DEVELOPMENT || DEBUG */
 	ast_t                   reason;         /* why we blocked */
 	uint32_t                quantum_remaining;
 	wait_result_t           wait_result;    /* outcome of wait -
@@ -346,7 +391,7 @@ struct thread {
 	int16_t                 suspend_count;          /* Kernel holds on this thread  */
 
 	int                     iotier_override;        /* atomic operations to set, cleared on ret to user */
-	os_refcnt_t             ref_count;              /* number of references to me */
+	os_ref_atomic_t         ref_count;              /* number of references to me */
 
 	uint32_t                rwlock_count;           /* Number of lck_rw_t locks held by thread */
 #ifdef DEBUG_RW
@@ -357,7 +402,7 @@ struct thread {
 
 	/* Priority depression expiration */
 	integer_t               depress_timer_active;
-	timer_call_data_t       depress_timer;
+	timer_call_t            depress_timer;
 
 	/* real-time parameters */
 	struct {                                        /* see mach/thread_policy.h */
@@ -553,15 +598,15 @@ struct thread {
 	queue_chain_t           task_threads;
 
 	/* Task membership */
-	struct task             *task;
+#if __x86_64__ || __arm__
+	struct task            *t_task;
+#endif
+	struct thread_ro       *t_tro;
 	vm_map_t                map;
 	thread_t                handoff_thread;
-#if DEVELOPMENT || DEBUG
-	bool      pmap_footprint_suspended;
-#endif /* DEVELOPMENT || DEBUG */
 
 	/* Timed wait expiration */
-	timer_call_data_t       wait_timer;
+	timer_call_t            wait_timer;
 	uint16_t                wait_timer_active;
 	bool                    wait_timer_is_set;
 
@@ -579,19 +624,7 @@ struct thread {
 
 	decl_lck_mtx_data(, mutex);
 
-	/*
-	 * Different flavors of thread port.
-	 * These flavors THREAD_FLAVOR_* are defined in mach_types.h
-	 */
-	struct ipc_port         *ith_thread_ports[THREAD_SELF_PORT_COUNT];        /* does not hold right */
-	struct ipc_port         *ith_settable_self;        /* a send right */
-	struct ipc_port         *ith_self;                 /* immovable/pinned thread port */
 	struct ipc_port         *ith_special_reply_port;   /* ref to special reply port */
-	struct exception_action *exc_actions;
-
-#ifdef  MACH_BSD
-	void                    *uthread;
-#endif
 
 #if CONFIG_DTRACE
 	uint16_t                t_dtrace_flags;         /* DTrace thread states */
@@ -702,9 +735,7 @@ struct thread {
 	mach_port_name_t        ith_voucher_name;
 	ipc_voucher_t           ith_voucher;
 
-
 #if CONFIG_THREAD_GROUPS
-
 #if CONFIG_PREADOPT_TG
 	/* The preadopt thread group is set on the thread
 	 *
@@ -780,7 +811,7 @@ struct thread {
 #define THREAD_BOUND_CLUSTER_NONE       (UINT32_MAX)
 	uint32_t                 th_bound_cluster_id;
 
-#if     SCHED_TRACE_THREAD_WAKEUPS
+#if SCHED_TRACE_THREAD_WAKEUPS
 	uintptr_t               thread_wakeup_bt[64];
 #endif
 	turnstile_update_flags_t inheritor_flags; /* inheritor flags for inheritor field */
@@ -843,13 +874,6 @@ extern void                     thread_machine_init_template(void);
 extern void                     thread_init(void);
 
 extern void                     thread_daemon_init(void);
-
-static inline void
-thread_reference_internal(thread_t thread)
-{
-	zone_id_require(ZONE_ID_THREAD, sizeof(struct thread), thread);
-	os_ref_retain(&thread->ref_count);
-}
 
 extern void                     thread_reference(
 	thread_t                thread);
@@ -973,7 +997,7 @@ extern thread_t                 machine_switch_context(
 extern void                             machine_load_context(
 	thread_t                thread) __attribute__((noreturn));
 
-extern kern_return_t    machine_thread_state_initialize(
+extern void             machine_thread_state_initialize(
 	thread_t                                thread);
 
 extern kern_return_t    machine_thread_set_state(
@@ -1020,7 +1044,7 @@ extern void             machine_thread_init(void);
 extern void             machine_thread_template_init(thread_t thr_template);
 
 
-extern kern_return_t    machine_thread_create(
+extern void             machine_thread_create(
 	thread_t                thread,
 	task_t                  task,
 	bool                    first_thread);
@@ -1047,9 +1071,7 @@ extern kern_return_t    machine_thread_set_tsd_base(
 	thread_t                                thread,
 	mach_vm_offset_t                tsd_base);
 
-#define thread_mtx_lock(thread)                 lck_mtx_lock(&(thread)->mutex)
 #define thread_mtx_try(thread)                  lck_mtx_try_lock(&(thread)->mutex)
-#define thread_mtx_unlock(thread)               lck_mtx_unlock(&(thread)->mutex)
 #define thread_mtx_held(thread)                 lck_mtx_assert(&(thread)->mutex, LCK_MTX_ASSERT_OWNED)
 
 extern void thread_apc_ast(thread_t thread);
@@ -1070,23 +1092,9 @@ extern void thread_set_options(uint32_t thopt);
 struct thread_group *thread_get_current_voucher_thread_group(thread_t thread);
 #endif /* CONFIG_THREAD_GROUPS */
 
-#else   /* MACH_KERNEL_PRIVATE */
-
-__BEGIN_DECLS
-
-extern void thread_mtx_lock(thread_t thread);
-
-extern void thread_mtx_unlock(thread_t thread);
-
-extern thread_t         current_thread(void) __attribute__((const));
-
-extern void                     thread_reference(
-	thread_t        thread);
-
-extern void                     thread_deallocate(
-	thread_t        thread);
-
+#endif  /* MACH_KERNEL_PRIVATE */
 #if BSD_KERNEL_PRIVATE
+
 /* Duplicated from osfmk/kern/ipc_tt.h */
 __options_decl(port_intrans_options_t, uint32_t, {
 	PORT_INTRANS_OPTIONS_NONE              = 0x0000,
@@ -1100,35 +1108,9 @@ __options_decl(port_intrans_options_t, uint32_t, {
 extern thread_t port_name_to_thread(
 	mach_port_name_t            port_name,
 	port_intrans_options_t    options);
+
 #endif /* BSD_KERNEL_PRIVATE */
-
-__END_DECLS
-
-#endif  /* MACH_KERNEL_PRIVATE */
-
-#ifdef  KERNEL_PRIVATE
-
-__BEGIN_DECLS
-
-extern uint64_t                 thread_dispatchqaddr(
-	thread_t thread);
-
-__END_DECLS
-
-#endif  /* KERNEL_PRIVATE */
-
-#ifdef KERNEL
-__BEGIN_DECLS
-
-extern uint64_t                 thread_tid(thread_t thread);
-
-__END_DECLS
-
-#endif  /* KERNEL */
-
-__BEGIN_DECLS
-
-#ifdef  XNU_KERNEL_PRIVATE
+#ifdef XNU_KERNEL_PRIVATE
 
 extern void                     thread_require(
 	thread_t        thread);
@@ -1142,11 +1124,11 @@ extern uint64_t                 thread_rettokern_addr(
 extern uint64_t                 thread_wqquantum_addr(
 	thread_t thread);
 
-extern integer_t        thread_kern_get_pri(thread_t thr) __attribute__((const));
+extern integer_t        thread_kern_get_pri(thread_t thr) __pure2;
 
 extern void             thread_kern_set_pri(thread_t thr, integer_t pri);
 
-extern integer_t        thread_kern_get_kernel_maxpri(void) __attribute__((const));
+extern integer_t        thread_kern_get_kernel_maxpri(void) __pure2;
 
 uint16_t        thread_set_tag(thread_t thread, uint16_t tag);
 uint16_t        thread_get_tag(thread_t thread);
@@ -1234,7 +1216,9 @@ extern kern_return_t    thread_create_workq_waiting(
 extern  void    thread_yield_internal(
 	mach_msg_timeout_t      interval);
 
-extern void             thread_yield_to_preemption(void);
+extern void thread_yield_to_preemption(void);
+
+extern void thread_depress_timer_setup(thread_t self);
 
 /*
  * Thread-private CPU limits: apply a private CPU limit to this thread only. Available actions are:
@@ -1333,7 +1317,9 @@ extern void             thread_sched_call(
 extern boolean_t        thread_is_static_param(
 	thread_t                thread);
 
-extern task_t   get_threadtask(thread_t);
+extern task_t   get_threadtask(thread_t) __pure2;
+
+extern task_t   get_threadtask_early(thread_t) __pure2;
 
 /*
  * Thread is running within a 64-bit address space.
@@ -1350,20 +1336,38 @@ extern task_t   get_threadtask(thread_t);
 #if defined(__x86_64__)
 extern int              thread_task_has_ldt(thread_t);
 #endif
-extern void             *get_bsdthread_info(thread_t);
-extern void             set_bsdthread_info(thread_t, void *);
 extern void             set_thread_pagein_error(thread_t, int);
-extern void             *uthread_alloc(task_t, thread_t, int);
-extern event_t  workq_thread_init_and_wq_lock(task_t, thread_t); // bsd/pthread/
-extern void             uthread_cleanup_name(void *uthread);
-extern void             uthread_cleanup(task_t, void *, void *);
-extern void             uthread_zone_free(void *);
-extern void             uthread_cred_free(void *);
-extern void             uthread_reset_proc_refcount(void *);
+extern event_t          workq_thread_init_and_wq_lock(task_t, thread_t); // bsd/pthread/
+
+struct proc;
+struct uthread;
+extern const size_t     uthread_size;
+extern thread_ro_t      get_thread_ro_unchecked(thread_t) __pure2;
+extern thread_ro_t      get_thread_ro(thread_t) __pure2;
+extern thread_ro_t      current_thread_ro_unchecked(void) __pure2;
+extern thread_ro_t      current_thread_ro(void) __pure2;
+extern void             clear_thread_ro_proc(thread_t);
+extern struct uthread  *get_bsdthread_info(thread_t) __pure2;
+extern thread_t         get_machthread(struct uthread *) __pure2;
+extern uint64_t         uthread_tid(struct uthread *) __pure2;
+extern void             uthread_init(task_t, struct uthread *, thread_ro_t, int);
+extern void             uthread_cleanup_name(struct uthread *uthread);
+extern void             uthread_cleanup(struct uthread *, thread_ro_t);
+extern void             uthread_cred_ref(struct ucred *);
+extern void             uthread_cred_free(struct ucred *);
+extern void             uthread_destroy(struct uthread *);
+extern void             uthread_reset_proc_refcount(struct uthread *);
+extern void             thread_ro_update_cred(thread_ro_t, struct ucred *);
+extern void             thread_ro_update_flags(thread_ro_t, thread_ro_flags_t add, thread_ro_flags_t clr);
+extern bool             uthread_is64bit(struct uthread *uth) __pure2;
 #if PROC_REF_DEBUG
-extern void             uthread_assert_zero_proc_refcount(void *);
+extern void             uthread_init_proc_refcount(struct uthread *);
+extern void             uthread_destroy_proc_refcount(struct uthread *);
+extern void             uthread_assert_zero_proc_refcount(struct uthread *);
 #else
-#define uthread_assert_zero_proc_refcount(uth) ((void)(uth))
+#define                 uthread_init_proc_refcount(uth)        ((void)(uth))
+#define                 uthread_destroy_proc_refcount(uth)     ((void)(uth))
+#define                 uthread_assert_zero_proc_refcount(uth) ((void)(uth))
 #endif
 #if CONFIG_DEBUG_SYSCALL_REJECTION
 extern uint64_t         *uthread_get_syscall_rejection_mask(void *);
@@ -1477,8 +1481,8 @@ extern void curtask_set_insn_copy_optout(void);
 #endif /* defined(__x86_64__) */
 
 #endif  /* XNU_KERNEL_PRIVATE */
-
 #ifdef KERNEL_PRIVATE
+
 typedef struct thread_pri_floor {
 	thread_t thread;
 } thread_pri_floor_t;
@@ -1509,51 +1513,14 @@ extern thread_pri_floor_t thread_priority_floor_start(void);
 extern void thread_priority_floor_end(thread_pri_floor_t *token);
 
 extern void thread_set_no_smt(bool set);
-#endif /* KERNEL_PRIVATE */
 
-/*! @function thread_has_thread_name
- *   @abstract Checks if a thread has a name.
- *   @discussion This function takes one input, a thread, and returns a boolean value indicating if that thread already has a name associated with it.
- *   @param th The thread to inspect.
- *   @result TRUE if the thread has a name, FALSE otherwise.
- */
-extern boolean_t thread_has_thread_name(thread_t th);
+extern void thread_mtx_lock(thread_t thread);
 
-/*! @function thread_set_thread_name
- *   @abstract Set a thread's name.
- *   @discussion This function takes two input parameters: a thread to name, and the name to apply to the thread.  The name will be copied over to the thread in order to better identify the thread.  If the name is longer than MAXTHREADNAMESIZE - 1, it will be truncated.
- *   @param th The thread to be named.
- *   @param name The name to apply to the thread.
- */
-extern void thread_set_thread_name(thread_t th, const char* name);
+extern void thread_mtx_unlock(thread_t thread);
 
-#ifdef XNU_KERNEL_PRIVATE
-extern void
-thread_get_thread_name(thread_t th, char* name);
+extern uint64_t thread_dispatchqaddr(
+	thread_t thread);
 
-extern bool thread_supports_cooperative_workqueue(thread_t thread);
-extern void thread_arm_workqueue_quantum(thread_t thread);
-extern void thread_disarm_workqueue_quantum(thread_t thread);
-
-extern void thread_evaluate_workqueue_quantum_expiry(thread_t thread);
-extern bool thread_has_expired_workqueue_quantum(thread_t thread, bool should_trace);
-#endif /* XNU_KERNEL_PRIVATE */
-
-/*! @function kernel_thread_start
- *   @abstract Create a kernel thread.
- *   @discussion This function takes three input parameters, namely reference to the function that the thread should execute, caller specified data and a reference which is used to return the newly created kernel thread. The function returns KERN_SUCCESS on success or an appropriate kernel code type indicating the error. It may be noted that the caller is responsible for explicitly releasing the reference to the created thread when no longer needed. This should be done by calling thread_deallocate(new_thread).
- *   @param continuation A C-function pointer where the thread will begin execution.
- *   @param parameter Caller specified data to be passed to the new thread.
- *   @param new_thread Reference to the new thread is returned in this parameter.
- *   @result Returns KERN_SUCCESS on success or an appropriate kernel code type.
- */
-
-extern kern_return_t    kernel_thread_start(
-	thread_continue_t       continuation,
-	void                            *parameter,
-	thread_t                        *new_thread);
-
-#ifdef KERNEL_PRIVATE
 bool thread_is_eager_preempt(thread_t thread);
 void thread_set_eager_preempt(thread_t thread);
 void thread_clear_eager_preempt(thread_t thread);
@@ -1573,8 +1540,72 @@ extern void thread_self_region_page_shift_set(int pgshift);
 extern kern_return_t thread_create_immovable(task_t task, thread_t *new_thread);
 extern kern_return_t thread_terminate_pinned(thread_t thread);
 
-
 #endif /* KERNEL_PRIVATE */
+#ifdef XNU_KERNEL_PRIVATE
+
+extern void
+thread_get_thread_name(thread_t th, char* name);
+
+extern bool thread_supports_cooperative_workqueue(thread_t thread);
+extern void thread_arm_workqueue_quantum(thread_t thread);
+extern void thread_disarm_workqueue_quantum(thread_t thread);
+
+extern void thread_evaluate_workqueue_quantum_expiry(thread_t thread);
+extern bool thread_has_expired_workqueue_quantum(thread_t thread, bool should_trace);
+
+#endif /* XNU_KERNEL_PRIVATE */
+
+/*! @function thread_has_thread_name
+ *   @abstract Checks if a thread has a name.
+ *   @discussion This function takes one input, a thread, and returns
+ *       a boolean value indicating if that thread already has a name associated
+ *       with it.
+ *   @param th The thread to inspect.
+ *   @result TRUE if the thread has a name, FALSE otherwise.
+ */
+extern boolean_t thread_has_thread_name(thread_t th);
+
+/*! @function thread_set_thread_name
+ *   @abstract Set a thread's name.
+ *   @discussion This function takes two input parameters: a thread to name,
+ *       and the name to apply to the thread.  The name will be copied over to
+ *       the thread in order to better identify the thread.  If the name is
+ *       longer than MAXTHREADNAMESIZE - 1, it will be truncated.
+ *   @param th The thread to be named.
+ *   @param name The name to apply to the thread.
+ */
+extern void thread_set_thread_name(thread_t th, const char* name);
+
+extern thread_t current_thread(void) __pure2;
+
+extern uint64_t thread_tid(thread_t thread) __pure2;
+
+extern void thread_reference(
+	thread_t        thread);
+
+extern void thread_deallocate(
+	thread_t        thread);
+
+/*! @function kernel_thread_start
+ *   @abstract Create a kernel thread.
+ *   @discussion This function takes three input parameters, namely reference
+ *       to the function that the thread should execute, caller specified data
+ *       and a reference which is used to return the newly created kernel
+ *       thread. The function returns KERN_SUCCESS on success or an appropriate
+ *       kernel code type indicating the error. It may be noted that the caller
+ *       is responsible for explicitly releasing the reference to the created
+ *       thread when no longer needed. This should be done by calling
+ *       thread_deallocate(new_thread).
+ *   @param continuation A C-function pointer where the thread will begin execution.
+ *   @param parameter Caller specified data to be passed to the new thread.
+ *   @param new_thread Reference to the new thread is returned in this parameter.
+ *   @result Returns KERN_SUCCESS on success or an appropriate kernel code type.
+ */
+
+extern kern_return_t    kernel_thread_start(
+	thread_continue_t       continuation,
+	void                    *parameter,
+	thread_t                *new_thread);
 
 __END_DECLS
 

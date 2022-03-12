@@ -115,7 +115,7 @@ class UserProcess(target.Process):
 
         super(UserProcess, self).__init__(self.cputype, self.cpusubtype, ptrsize)
         dbg_message = "process:%s is64bit:%d ptrsize:%d cputype:0x%x cpusubtype:0x%x" % (hex(self.proc), int(dataregisters64bit), ptrsize, self.cputype, self.cpusubtype)
-        self.proc_platform = int(self.proc.p_platform)
+        self.proc_platform = int(GetProcPlatform(self.proc))
         if self.proc_platform == xnudefines.P_PLATFORM_MACOS:
             self.hinfo['ostype'] = 'macosx'
         elif self.proc_platform == xnudefines.P_PLATFORM_WATCHOS:

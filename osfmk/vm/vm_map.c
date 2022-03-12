@@ -7703,7 +7703,7 @@ virt_memory_guard_ast(
 	mach_exception_data_type_t code,
 	mach_exception_data_type_t subcode)
 {
-	task_t task = thread->task;
+	task_t task = get_threadtask(thread);
 	assert(task != kernel_task);
 	assert(task == current_task());
 	kern_return_t sync_exception_result;

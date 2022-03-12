@@ -62,6 +62,8 @@ enum{
 	, NSTAT_EVENT_SRC_RESERVED_1             = 0x00001000
 	, NSTAT_EVENT_SRC_RESERVED_2             = 0x00002000
 #endif /* (DEBUG || DEVELOPMENT) */
+	, NSTAT_EVENT_SRC_FLOW_UUID_ASSIGNED     = 0x00004000
+	, NSTAT_EVENT_SRC_FLOW_UUID_CHANGED      = 0x00008000
 };
 
 typedef struct nstat_counts {
@@ -339,7 +341,7 @@ enum{
 #define NSTAT_IFNET_IS_WIRED             0x0010
 #define NSTAT_IFNET_IS_AWDL              0x0020
 #define NSTAT_IFNET_IS_EXPENSIVE         0x0040
-#define NSTAT_IFNET_IS_VPN               0x0080
+#define NSTAT_IFNET_IS_VPN               0x0080 /* Reserved, currently unused */
 #define NSTAT_IFNET_VIA_CELLFALLBACK     0x0100
 #define NSTAT_IFNET_IS_COMPANIONLINK     0x0200
 #define NSTAT_IFNET_IS_CONSTRAINED       0x0400
@@ -356,6 +358,10 @@ enum{
 // The following may be used if the properties are in a wider field, and is shorthand for WiFi and not AWDL or LLW..
 #define NSTAT_IFNET_IS_WIFI_INFRA        0x10000
 
+// Not interface properties, but used for filtering in similar fashion
+#define NSTAT_NECP_CONN_HAS_NET_ACCESS     0x01000000
+
+
 typedef enum {
 	NSTAT_PROVIDER_NONE           = 0
 	, NSTAT_PROVIDER_ROUTE        = 1
@@ -366,8 +372,10 @@ typedef enum {
 	, NSTAT_PROVIDER_IFNET        = 6
 	, NSTAT_PROVIDER_SYSINFO      = 7
 	, NSTAT_PROVIDER_QUIC_USERLAND = 8
+	, NSTAT_PROVIDER_CONN_USERLAND = 9
+	, NSTAT_PROVIDER_UDP_SUBFLOW   = 10
 } nstat_provider_type_t;
-#define NSTAT_PROVIDER_LAST NSTAT_PROVIDER_QUIC_USERLAND
+#define NSTAT_PROVIDER_LAST NSTAT_PROVIDER_UDP_SUBFLOW
 #define NSTAT_PROVIDER_COUNT (NSTAT_PROVIDER_LAST+1)
 
 typedef struct nstat_route_add_param {
@@ -403,10 +411,14 @@ typedef struct nstat_domain_info {
 	char            domain_owner[NSTAT_MAX_DOMAIN_OWNER_LENGTH];
 	char            domain_tracker_ctxt[NSTAT_MAX_DOMAIN_TRACKER_CONTEXT];
 	char            domain_attributed_bundle_id[NSTAT_MAX_DOMAIN_ATTR_BUNDLE_ID];
+	union{
+		struct sockaddr_in      v4;
+		struct sockaddr_in6     v6;
+	} remote;
 	bool            is_tracker;
 	bool            is_non_app_initiated;
 	bool            is_silent;
-	uint8_t         reserved[5];
+	uint8_t         reserved[1];
 } nstat_domain_info __attribute__((aligned(sizeof(u_int64_t))));
 
 typedef struct nstat_tcp_descriptor {
@@ -510,6 +522,24 @@ typedef struct nstat_udp_descriptor {
  */
 typedef struct nstat_tcp_add_param      nstat_quic_add_param;
 typedef struct nstat_tcp_descriptor     nstat_quic_descriptor;
+
+typedef struct nstat_connection_descriptor {
+	u_int64_t       start_timestamp __attribute__((aligned(sizeof(u_int64_t))));
+	u_int64_t       timestamp;
+	u_int64_t       upid;
+	u_int64_t       eupid;
+
+	u_int32_t       pid;
+	u_int32_t       epid;
+	u_int32_t       ifnet_properties;
+	char            pname[64];
+	uuid_t          uuid;   /* UUID of the app */
+	uuid_t          euuid;  /* Effective UUID */
+	uuid_t          cuuid;  /* Connection UUID */
+	uuid_t          puuid;  /* Parent UUID */
+	uuid_t          fuuid;  /* Flow UUID */
+	uint8_t         reserved[4];
+} nstat_connection_descriptor;
 
 typedef struct nstat_route_descriptor {
 	u_int64_t       id __attribute__((aligned(sizeof(u_int64_t))));
@@ -747,49 +777,87 @@ enum{
 	NSTAT_FILTER_NOZEROBYTES             = 0x00000001
 };
 
-/* Provider-level filters */
+
+/* Types of extended update information, used in setting initial filters as well as to identify returned extensions */
+/* A contiguous range currently limited 1..31 due to being passed as the top 32 bits of filter */
 enum{
-	NSTAT_FILTER_ACCEPT_UNKNOWN           = 0x00000001
-	, NSTAT_FILTER_ACCEPT_LOOPBACK        = 0x00000002
-	, NSTAT_FILTER_ACCEPT_CELLULAR        = 0x00000004
-	, NSTAT_FILTER_ACCEPT_WIFI            = 0x00000008
-	, NSTAT_FILTER_ACCEPT_WIRED           = 0x00000010
-	, NSTAT_FILTER_ACCEPT_AWDL            = 0x00000020
-	, NSTAT_FILTER_ACCEPT_EXPENSIVE       = 0x00000040
-	, NSTAT_FILTER_ACCEPT_CELLFALLBACK    = 0x00000100
-	, NSTAT_FILTER_ACCEPT_COMPANIONLINK   = 0x00000200
-	, NSTAT_FILTER_ACCEPT_IS_CONSTRAINED  = 0x00000400
-	, NSTAT_FILTER_ACCEPT_IS_LOCAL        = 0x00000800
-	, NSTAT_FILTER_ACCEPT_IS_NON_LOCAL    = 0x00001000
-	, NSTAT_FILTER_ACCEPT_ROUTE_VAL_ERR   = 0x00002000
-	, NSTAT_FILTER_ACCEPT_FLOWSWITCH_ERR  = 0x00004000
-	, NSTAT_FILTER_ACCEPT_WIFI_LLW        = 0x00008000
-	, NSTAT_FILTER_ACCEPT_WIFI_INFRA      = 0x00010000
-	, NSTAT_FILTER_IFNET_FLAGS            = 0x0001FFFF
-
-	, NSTAT_FILTER_UDP_INTERFACE_ATTACH   = 0x00020000
-	, NSTAT_FILTER_UDP_FLAGS              = 0x00020000
-
-	, NSTAT_FILTER_TCP_INTERFACE_ATTACH   = 0x00040000
-	, NSTAT_FILTER_TCP_NO_EARLY_CLOSE     = 0x00080000
-	, NSTAT_FILTER_TCP_FLAGS              = 0x000C0000
-
-	, NSTAT_FILTER_SUPPRESS_SRC_ADDED     = 0x00100000
-	, NSTAT_FILTER_REQUIRE_SRC_ADDED      = 0x00200000
-	, NSTAT_FILTER_PROVIDER_NOZEROBYTES   = 0x00400000
-
-	, NSTAT_FILTER_SPECIFIC_USER_BY_PID   = 0x01000000
-	, NSTAT_FILTER_SPECIFIC_USER_BY_EPID  = 0x02000000
-	, NSTAT_FILTER_SPECIFIC_USER_BY_UUID  = 0x04000000
-	, NSTAT_FILTER_SPECIFIC_USER_BY_EUUID = 0x08000000
-	, NSTAT_FILTER_SPECIFIC_USER          = 0x0F000000
-	, NSTAT_FILTER_DOMAIN_INFO            = 0x10000000
+	NSTAT_EXTENDED_UPDATE_TYPE_UNKNOWN              = 0
+	, NSTAT_EXTENDED_UPDATE_TYPE_DOMAIN             = 1
+	, NSTAT_EXTENDED_UPDATE_TYPE_NECP_TLV           = 2
+	, NSTAT_EXTENDED_UPDATE_TYPE_ORIGINAL_NECP_TLV  = 3
+	, NSTAT_EXTENDED_UPDATE_TYPE_ORIGINAL_DOMAIN    = 4
 };
+
+#define NSTAT_EXTENDED_UPDATE_TYPE_MIN  NSTAT_EXTENDED_UPDATE_TYPE_DOMAIN
+#define NSTAT_EXTENDED_UPDATE_TYPE_MAX  NSTAT_EXTENDED_UPDATE_TYPE_ORIGINAL_DOMAIN
+
+
+#define NSTAT_EXTENDED_UPDATE_FLAG_MASK    0x00ffffffull    /* Maximum of 24 extension types allowed due to restrictions on specifying via filter flags */
+
+#define NSTAT_FILTER_ALLOWED_EXTENSIONS_SHIFT   40  /* With extensions expediently passed as the top 24 bits of filters supplied by client, this shift is for extraction */
+
+/* Provider-level filters */
+#define NSTAT_FILTER_ACCEPT_UNKNOWN          0x0000000000000001ull
+#define NSTAT_FILTER_ACCEPT_LOOPBACK         0x0000000000000002ull
+#define NSTAT_FILTER_ACCEPT_CELLULAR         0x0000000000000004ull
+#define NSTAT_FILTER_ACCEPT_WIFI             0x0000000000000008ull
+#define NSTAT_FILTER_ACCEPT_WIRED            0x0000000000000010ull
+#define NSTAT_FILTER_ACCEPT_AWDL             0x0000000000000020ull
+#define NSTAT_FILTER_ACCEPT_EXPENSIVE        0x0000000000000040ull
+#define NSTAT_FILTER_ACCEPT_CELLFALLBACK     0x0000000000000100ull
+#define NSTAT_FILTER_ACCEPT_COMPANIONLINK    0x0000000000000200ull
+#define NSTAT_FILTER_ACCEPT_IS_CONSTRAINED   0x0000000000000400ull
+#define NSTAT_FILTER_ACCEPT_IS_LOCAL         0x0000000000000800ull
+#define NSTAT_FILTER_ACCEPT_IS_NON_LOCAL     0x0000000000001000ull
+#define NSTAT_FILTER_ACCEPT_ROUTE_VAL_ERR    0x0000000000002000ull
+#define NSTAT_FILTER_ACCEPT_FLOWSWITCH_ERR   0x0000000000004000ull
+#define NSTAT_FILTER_ACCEPT_WIFI_LLW         0x0000000000008000ull
+#define NSTAT_FILTER_ACCEPT_WIFI_INFRA       0x0000000000010000ull
+#define NSTAT_FILTER_IFNET_FLAGS             0x000000000001FFFFull
+
+#define NSTAT_FILTER_UDP_INTERFACE_ATTACH    0x0000000000020000ull
+#define NSTAT_FILTER_UDP_FLAGS               0x0000000000020000ull
+
+#define NSTAT_FILTER_TCP_INTERFACE_ATTACH    0x0000000000040000ull
+#define NSTAT_FILTER_TCP_NO_EARLY_CLOSE      0x0000000000080000ull
+#define NSTAT_FILTER_TCP_FLAGS               0x00000000000C0000ull
+
+#define NSTAT_FILTER_SUPPRESS_SRC_ADDED      0x0000000000100000ull
+#define NSTAT_FILTER_REQUIRE_SRC_ADDED       0x0000000000200000ull
+#define NSTAT_FILTER_PROVIDER_NOZEROBYTES    0x0000000000400000ull
+
+#define NSTAT_FILTER_CONN_HAS_NET_ACCESS     0x0000000001000000ull
+#define NSTAT_FILTER_CONN_FLAGS              0x0000000001000000ull
+
+/* In this context, boring == no change from previous report */
+#define NSTAT_FILTER_SUPPRESS_BORING_CLOSE   0x0000000010000000ull  /* No final update, only NSTAT_MSG_TYPE_SRC_REMOVED */
+#define NSTAT_FILTER_SUPPRESS_BORING_POLL    0x0000000020000000ull  /* Only for poll-all, not poll specific source */
+#define NSTAT_FILTER_SUPPRESS_BORING_FLAGS   (NSTAT_FILTER_SUPPRESS_BORING_CLOSE|NSTAT_FILTER_SUPPRESS_BORING_POLL)
+
+#define NSTAT_FILTER_SPECIFIC_USER_BY_PID    0x0000000100000000ull
+#define NSTAT_FILTER_SPECIFIC_USER_BY_EPID   0x0000000200000000ull
+#define NSTAT_FILTER_SPECIFIC_USER_BY_UUID   0x0000000400000000ull
+#define NSTAT_FILTER_SPECIFIC_USER_BY_EUUID  0x0000000800000000ull
+#define NSTAT_FILTER_SPECIFIC_USER           0x0000000F00000000ull
+
+#define NSTAT_FILTER_INITIAL_PROPERTIES      0x0000001000000000ull  /* For providers that give "properties" on open, apply the filter to the properties */
+                                                                    /* and permanently discard unless the filter allows through */
+#define NSTAT_FILTER_FLAGS_RESERVED          0x000000E000000000ul
+
+#define NSTAT_FILTER_IFNET_AND_CONN_FLAGS    (NSTAT_FILTER_IFNET_FLAGS|NSTAT_FILTER_CONN_FLAGS)
+
+#define NSTAT_EXTENSION_FILTER_DOMAIN_INFO              (1ull << (NSTAT_EXTENDED_UPDATE_TYPE_DOMAIN + NSTAT_FILTER_ALLOWED_EXTENSIONS_SHIFT))
+#define NSTAT_EXTENSION_FILTER_NECP_TLV                 (1ull << (NSTAT_EXTENDED_UPDATE_TYPE_NECP_TLV + NSTAT_FILTER_ALLOWED_EXTENSIONS_SHIFT))
+#define NSTAT_EXTENSION_FILTER_ORIGINAL_NECP_TLV        (1ull << (NSTAT_EXTENDED_UPDATE_TYPE_ORIGINAL_NECP_TLV + NSTAT_FILTER_ALLOWED_EXTENSIONS_SHIFT))
+#define NSTAT_EXTENSION_FILTER_ORIGINAL_DOMAIN_INFO     (1ull << (NSTAT_EXTENDED_UPDATE_TYPE_ORIGINAL_DOMAIN + NSTAT_FILTER_ALLOWED_EXTENSIONS_SHIFT))
+#define NSTAT_EXTENSION_FILTER_MASK                     (NSTAT_EXTENDED_UPDATE_FLAG_MASK << NSTAT_FILTER_ALLOWED_EXTENSIONS_SHIFT)
 
 enum{
 	NSTAT_MSG_HDR_FLAG_SUPPORTS_AGGREGATE   = 1 << 0,
 	NSTAT_MSG_HDR_FLAG_CONTINUATION         = 1 << 1,
 	NSTAT_MSG_HDR_FLAG_CLOSING              = 1 << 2,
+	NSTAT_MSG_HDR_FLAG_CLOSED_AFTER_DROP    = 1 << 3,
+	NSTAT_MSG_HDR_FLAG_CLOSED_AFTER_FILTER  = 1 << 4,
 };
 
 typedef struct nstat_msg_hdr {
@@ -926,6 +994,27 @@ typedef struct nstat_msg_src_update_hdr {
 	NSTAT_SRC_UPDATE_FIELDS;
 } nstat_msg_src_update_hdr;
 
+typedef struct nstat_msg_src_update_tcp {
+	NSTAT_SRC_UPDATE_FIELDS;
+	nstat_tcp_descriptor            tcp_desc;
+} nstat_msg_src_update_tcp;
+
+typedef struct nstat_msg_src_update_udp {
+	NSTAT_SRC_UPDATE_FIELDS;
+	nstat_udp_descriptor            udp_desc;
+} nstat_msg_src_update_udp;
+
+typedef struct nstat_msg_src_update_quic {
+	NSTAT_SRC_UPDATE_FIELDS;
+	nstat_quic_descriptor           quic_desc;
+} nstat_msg_src_update_quic;
+
+typedef struct nstat_msg_src_update_conn {
+	NSTAT_SRC_UPDATE_FIELDS;
+	nstat_connection_descriptor     conn_desc;
+} nstat_msg_src_update_conn;
+
+
 typedef struct nstat_msg_src_update_convenient {
 	nstat_msg_src_update_hdr                hdr;
 	union {
@@ -935,15 +1024,9 @@ typedef struct nstat_msg_src_update_convenient {
 		nstat_ifnet_descriptor          ifnet;
 		nstat_sysinfo_descriptor        sysinfo;
 		nstat_quic_descriptor           quic;
+		nstat_connection_descriptor     conn;
 	};
 } nstat_msg_src_update_convenient;
-
-
-/* Types of extended update information */
-enum{
-	NSTAT_EXTENDED_UPDATE_TYPE_UNKNOWN    = 0x00000000
-	, NSTAT_EXTENDED_UPDATE_TYPE_DOMAIN   = 0x00000001
-};
 
 typedef struct nstat_msg_src_extended_item_hdr {
 	u_int32_t       type;
@@ -975,6 +1058,13 @@ typedef struct nstat_msg_src_extended_quic_update {
 	nstat_msg_src_extended_item_hdr         extension_hdr;
 	u_int8_t                                data[];
 } nstat_msg_src_extended_quic_update;
+
+typedef struct nstat_msg_src_extended_conn_update {
+	nstat_msg_src_update_hdr                hdr;
+	nstat_connection_descriptor             conn;
+	nstat_msg_src_extended_item_hdr         extension_hdr;
+	u_int8_t                                data[];
+} nstat_msg_src_extended_conn_update;
 
 /* While the only type of extended update is for domain information, we can fully define the structure */
 typedef struct nstat_msg_src_tcp_update_domain_extension {
@@ -1238,7 +1328,48 @@ int ntstat_tcp_progress_indicators(struct sysctl_req *req);
 
 
 // Utilities for userland stats reporting
+
+// Original form for backwards compatibility, should be replaced in due course
 u_int16_t nstat_ifnet_to_flags(struct ifnet *ifp);
+
+// Preferred form returns a 32 bit quantity, for easier handling of NSTAT_IFNET_IS_WIFI_INFRA and future expansion
+u_int32_t nstat_ifnet_to_flags_extended(struct ifnet *ifp);
+
+
+// Generic external provider reporting
+
+// Each side passes opaque references.
+typedef void *nstat_provider_context;   /* This is quoted to the external provider */
+typedef void *nstat_context;            /* This is quoted by the external provider when calling nstat */
+
+// After nstat_provider_stats_open() has been called (and potentially while the open is still executing), netstats can request a refresh of its data
+// The various return pointer parameters may be null if the item is not required
+// The return code is true for success
+typedef bool (nstat_provider_request_vals_fn)(nstat_provider_context ctx,
+    u_int32_t *ifflagsp,    /* Flags for being on cell/wifi etc, used for filtering */
+    nstat_counts *countsp,  /* Counts to be filled in */
+    void *metadatap);       /* A descriptor for the particular provider */
+
+// Netstats can also request "extension" items, specified by the allowed_extensions flag
+// The return value is the amount of space currently required for the extension
+typedef size_t (nstat_provider_request_extensions_fn)(nstat_provider_context ctx,
+    int requested_extension,    /* The extension to be returned */
+    void *buf,                  /* If not NULL, the address for the extension to be returned in */
+    size_t buf_size);           /* The size of the buffer space, typically matching the return from a previous call with null buffer pointer */
+
+// Things get started with a call to netstats to say that there’s a new item to become a netstats source
+nstat_context nstat_provider_stats_open(nstat_provider_context ctx,
+    int provider_id,
+    u_int64_t properties,                   /* The bottom 32 bits can be used as per the interface / connection flags ifflagsp */
+    nstat_provider_request_vals_fn req_fn,
+    nstat_provider_request_extensions_fn req_extensions_fn);
+
+// Note that when the source is closed, netstats will make one last call on the request functions to retrieve final values
+void nstat_provider_stats_close(nstat_context nstat_ctx);
+
+// Events that cause a significant change may be reported via a flags word
+void nstat_provider_stats_event(nstat_context nstat_ctx, uint64_t event);
+
 
 // locked_add_64 uses atomic operations on 32bit so the 64bit
 // value can be properly read. The values are only ever incremented

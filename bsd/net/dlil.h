@@ -260,7 +260,7 @@ extern errno_t dlil_send_arp_internal(ifnet_t, u_int16_t,
  * manipulating the uthread:uu_network_marks field.  As an example...
  *
  *   static const u_int32_t bits = NET_THREAD_CKREQ_LLADDR;
- *   struct uthread *uth = get_bsdthread_info(current_thread());
+ *   struct uthread *uth = current_uthread();
  *
  *   net_thread_marks_t marks = net_thread_marks_push(bits);
  *   VERIFY((uth->uu_network_marks & NET_THREAD_CKREQ_LLADDR) != 0);
@@ -459,6 +459,8 @@ ifp_inc_traffic_class_out(struct ifnet *ifp, struct mbuf *m)
 		ifp->if_tc.ifi_opvbytes += (u_int64_t)m->m_pkthdr.len;
 	}
 }
+
+extern void ifnet_ioctl_async(struct ifnet *, u_long);
 #endif /* BSD_KERNEL_PRIVATE */
 #endif /* KERNEL_PRIVATE */
 #endif /* KERNEL */

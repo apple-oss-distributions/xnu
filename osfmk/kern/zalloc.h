@@ -348,6 +348,9 @@ extern void     zone_require_ro_range_contains(
  * @const Z_NOZZC
  * Used internally to mark allocations that will skip zero validation.
  *
+ * @const Z_PCPU
+ * Used internally for the percpu paths.
+ *
  * @const Z_VM_TAG_MASK
  * Represents bits in which a vm_tag_t for the allocation can be passed.
  * (used by kalloc for the zone tagging debugging feature).
@@ -360,6 +363,10 @@ __options_decl(zalloc_flags_t, uint32_t, {
 	Z_NOPAGEWAIT    = 0x0002,
 	Z_ZERO          = 0x0004,
 
+#if XNU_KERNEL_PRIVATE
+	Z_PCPU          = 0x2000,
+	Z_NOZZC         = 0x4000,
+#endif /* XNU_KERNEL_PRIVATE */
 	Z_NOFAIL        = 0x8000,
 
 	/* convenient c++ spellings */
@@ -367,8 +374,6 @@ __options_decl(zalloc_flags_t, uint32_t, {
 	Z_WAITOK_ZERO          = Z_WAITOK | Z_ZERO,
 	Z_WAITOK_ZERO_NOFAIL   = Z_WAITOK | Z_ZERO | Z_NOFAIL, /* convenient spelling for c++ */
 #if XNU_KERNEL_PRIVATE
-	Z_NOZZC         = 0x4000,
-
 	/** used by kalloc to propagate vm tags for -zt */
 	Z_VM_TAG_MASK   = 0xffff0000,
 
@@ -452,10 +457,10 @@ extern void    *zalloc_ro(
  * sign the value appropriately beforehand if they wish to do this.
  *
  * @param zone_id       the zone id to allocate from
- * @param elem	        element to be modified
+ * @param elem          element to be modified
  * @param offset        offset from element
- * @param new_data	    pointer to new data
- * @param new_data_size	size of modification
+ * @param new_data      pointer to new data
+ * @param new_data_size size of modification
  *
  */
 extern void    zalloc_ro_mut(
@@ -469,18 +474,66 @@ extern void    zalloc_ro_mut(
  * @function zalloc_ro_update_elem
  *
  * @abstract
- * Calls zalloc_ro_mut.
- * Assumes entire element is getting modified.
+ * Update the value of an entire element allocated in the read only allocator.
  *
  * @param zone_id       the zone id to allocate from
- * @param elem	        element to be modified
- * @param new_data	    pointer to new data
+ * @param elem          element to be modified
+ * @param new_data      pointer to new data
  *
  */
-extern void zalloc_ro_update_elem(
+#define zalloc_ro_update_elem(zone_id, elem, new_data)  ({ \
+	const typeof(*(elem)) *__new_data = (new_data);                        \
+	zalloc_ro_mut(zone_id, elem, 0, __new_data, sizeof(*__new_data));      \
+})
+
+/*!
+ * @function zalloc_ro_update_field
+ *
+ * @abstract
+ * Update a single field of an element allocated in the read only allocator.
+ *
+ * @param zone_id       the zone id to allocate from
+ * @param elem          element to be modified
+ * @param field         the element field to be modified
+ * @param new_data      pointer to new data
+ *
+ */
+#define zalloc_ro_update_field(zone_id, elem, field, value)  ({ \
+	const typeof((elem)->field) *__value = (value);                        \
+	zalloc_ro_mut(zone_id, elem, offsetof(typeof(*(elem)), field),         \
+	    __value, sizeof((elem)->field));                                   \
+})
+
+/*!
+ * @function zalloc_ro_clear
+ *
+ * @abstract
+ * Zeroes an element from a specified read-only zone.
+ *
+ * @param zone_id       the zone id to allocate from
+ * @param elem          element to be modified
+ * @param offset        offset from element
+ * @param size          size of modification
+ */
+extern void    zalloc_ro_clear(
 	zone_id_t       zone_id,
 	void           *elem,
-	const void     *new_data);
+	vm_offset_t     offset,
+	vm_size_t       size);
+
+/*!
+ * @function zalloc_ro_clear_field
+ *
+ * @abstract
+ * Zeroes the specified field of an element from a specified read-only zone.
+ *
+ * @param zone_id       the zone id to allocate from
+ * @param elem          element to be modified
+ * @param field         offset from element
+ */
+#define zalloc_ro_clear_field(zone_id, elem, field) \
+	zalloc_ro_clear(zone_id, elem, offsetof(typeof(*(elem)), field), \
+	    sizeof((elem)->field))
 
 /*!
  * @function zfree_ro()
@@ -857,10 +910,15 @@ __enum_decl(zone_reserved_id_t, zone_id_t, {
 	ZONE_ID_PERMANENT,
 	ZONE_ID_PERCPU_PERMANENT,
 
-	ZONE_ID_TEST_RO,
+	ZONE_ID_THREAD_RO,
+	ZONE_ID_MAC_LABEL,
+	ZONE_ID_PROC_RO,
+	ZONE_ID_PROC_SIGACTS_RO,
+	ZONE_ID_KAUTH_CRED,
+	ZONE_ID_CS_BLOB,
 
-	ZONE_ID__FIRST_RO = ZONE_ID_TEST_RO,
-	ZONE_ID__LAST_RO = ZONE_ID_TEST_RO,
+	ZONE_ID__FIRST_RO = ZONE_ID_THREAD_RO,
+	ZONE_ID__LAST_RO = ZONE_ID_CS_BLOB,
 
 	ZONE_ID_PMAP,
 	ZONE_ID_VM_MAP,
@@ -874,9 +932,9 @@ __enum_decl(zone_reserved_id_t, zone_id_t, {
 	ZONE_ID_TASK,
 	ZONE_ID_PROC,
 	ZONE_ID_THREAD,
-	ZONE_ID_KAUTH_CRED,
 	ZONE_ID_TURNSTILE,
 	ZONE_ID_SEMAPHORE,
+	ZONE_ID_FILEPROC,
 
 	ZONE_ID__FIRST_DYNAMIC,
 });
@@ -1019,35 +1077,6 @@ extern void     zone_id_require_allow_foreign(
 	zone_id_t               zone_id,
 	vm_size_t               elem_size,
 	void                   *addr);
-
-/*
- * Zone submap indices
- *
- * Z_SUBMAP_IDX_VM
- * this map has the special property that its allocations
- * can be done without ever locking the submap, and doesn't use
- * VM entries in the map (which limits certain VM map operations on it).
- *
- * On ILP32 a single zone lives here (the vm_map_entry_reserved_zone).
- *
- * On LP64 it is also used to restrict VM allocations on LP64 lower
- * in the kernel VA space, for pointer packing purposes.
- *
- * Z_SUBMAP_IDX_GENERAL
- * used for unrestricted allocations
- *
- * Z_SUBMAP_IDX_BAG_OF_BYTES
- * used to sequester bags of bytes from all other allocations and allow VA reuse
- * within the map
- *
- * Z_SUBMAP_IDX_READ_ONLY
- * used for the read-only allocator
- */
-#define Z_SUBMAP_IDX_VM             0
-#define Z_SUBMAP_IDX_READ_ONLY      1
-#define Z_SUBMAP_IDX_GENERAL        2
-#define Z_SUBMAP_IDX_BAG_OF_BYTES   3
-#define Z_SUBMAP_IDX_COUNT          4
 
 /* Make zone as non expandable, to be called from the zone_create_ext() setup hook */
 extern void     zone_set_noexpand(

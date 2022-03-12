@@ -438,7 +438,9 @@ ipc_kobject_server_internal(
 	 * to perform the kernel function
 	 */
 	if (ptr) {
-		task_t curtask = current_task();
+		thread_ro_t tro = current_thread_ro();
+		task_t curtask = tro->tro_task;
+		struct proc *curproc = tro->tro_proc;
 		task_t task = TASK_NULL;
 		uint32_t exec_token;
 
@@ -460,7 +462,7 @@ ipc_kobject_server_internal(
 		    !bitstr_test(filter_mask, idx) &&
 		    mac_task_kobj_msg_evaluate != NULL) {
 			/* Not in filter mask, evaluate policy. */
-			kern_return_t kr = mac_task_kobj_msg_evaluate(get_bsdtask_info(curtask),
+			kern_return_t kr = mac_task_kobj_msg_evaluate(curproc,
 			    request_msgh_id, idx);
 			if (kr != KERN_SUCCESS) {
 				((mig_reply_error_t *) reply->ikm_header)->RetCode = kr;
@@ -1648,7 +1650,7 @@ ipc_kobject_label_substitute_thread(
 	ipc_port_t subst = IP_NULL;
 	thread_t thread = ipc_kobject_get_raw(port, IKOT_THREAD_CONTROL);
 
-	if (thread != THREAD_NULL && space->is_task == thread->task) {
+	if (thread != THREAD_NULL && space->is_task == get_threadtask(thread)) {
 		if ((subst = kolabel->ikol_alt_port) != IP_NULL) {
 			return subst;
 		}

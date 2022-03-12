@@ -176,7 +176,7 @@ extern uint64_t         proc_did_throttle(void *p);
 extern int              proc_exiting(void *p);
 extern int              proc_in_teardown(void *p);
 static uint64_t         proc_did_throttle_from_task(task_t task);
-extern void             proc_name_kdp(task_t task, char * buf, int size);
+extern void             proc_name_kdp(struct proc *p, char * buf, int size);
 extern int              proc_threadname_kdp(void * uth, char * buf, size_t size);
 extern void             proc_starttime_kdp(void * p, uint64_t * tv_sec, uint64_t * tv_usec, uint64_t * abstime);
 extern void             proc_archinfo_kdp(void* p, cpu_type_t* cputype, cpu_subtype_t* cpusubtype);
@@ -1437,7 +1437,7 @@ kcdata_record_transitioning_task_snapshot(kcdata_descriptor_t kcd, task_t task, 
 
 	/* Add the BSD process identifiers */
 	if (task_pid != -1 && task->bsd_info != NULL) {
-		proc_name_kdp(task, cur_tsnap->tts_p_comm, sizeof(cur_tsnap->tts_p_comm));
+		proc_name_kdp(task->bsd_info, cur_tsnap->tts_p_comm, sizeof(cur_tsnap->tts_p_comm));
 	} else {
 		cur_tsnap->tts_p_comm[0] = '\0';
 	}
@@ -1514,7 +1514,7 @@ kcdata_record_task_snapshot(kcdata_descriptor_t kcd, task_t task, uint64_t trace
 
 	/* Add the BSD process identifiers */
 	if (task_pid != -1 && task->bsd_info != NULL) {
-		proc_name_kdp(task, cur_tsnap->ts_p_comm, sizeof(cur_tsnap->ts_p_comm));
+		proc_name_kdp(task->bsd_info, cur_tsnap->ts_p_comm, sizeof(cur_tsnap->ts_p_comm));
 	} else {
 		cur_tsnap->ts_p_comm[0] = '\0';
 #if IMPORTANCE_INHERITANCE && (DEVELOPMENT || DEBUG)
@@ -1917,7 +1917,7 @@ kcdata_record_thread_snapshot(
 
 	/* if there is thread name then add to buffer */
 	cur_thread_name[0] = '\0';
-	proc_threadname_kdp(thread->uthread, cur_thread_name, STACKSHOT_MAX_THREAD_NAME_SIZE);
+	proc_threadname_kdp(get_bsdthread_info(thread), cur_thread_name, STACKSHOT_MAX_THREAD_NAME_SIZE);
 	if (strnlen(cur_thread_name, STACKSHOT_MAX_THREAD_NAME_SIZE) > 0) {
 		kcd_exit_on_error(kcdata_get_memory_addr(kcd, STACKSHOT_KCTYPE_THREAD_NAME, sizeof(cur_thread_name), &out_addr));
 		stackshot_memcpy((void *)out_addr, (void *)cur_thread_name, sizeof(cur_thread_name));
@@ -1945,7 +1945,7 @@ kcdata_record_thread_snapshot(
 #endif /* STACKSHOT_COLLECTS_LATENCY_INFO */
 
 	/* Trace user stack, if any */
-	if (!active_kthreads_only_p && task->active && thread->task->map != kernel_map) {
+	if (!active_kthreads_only_p && task->active && task->map != kernel_map) {
 		uint32_t user_ths_ss_flags = 0;
 
 		/*
@@ -1962,7 +1962,7 @@ kcdata_record_thread_snapshot(
 			goto error_exit;
 		}
 		struct _stackshot_backtrace_context ctx = {
-			.sbc_map = thread->task->map,
+			.sbc_map = task->map,
 			.sbc_allow_faulting = stack_enable_faulting,
 			.sbc_prev_page = -1,
 			.sbc_prev_kva = -1,

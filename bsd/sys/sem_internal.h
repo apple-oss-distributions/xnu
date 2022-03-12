@@ -195,7 +195,7 @@ struct semid_kernel {
 #define SEM_ALLOC       01000   /* semaphore is allocated */
 #define SEM_DEST        02000   /* semaphore will be destroyed on last detach */
 
-#define SEMMNI_INC      8       /* increment value for semaphore identifiers */
+#define SEMMNI_INC      32      /* increment value for semaphore identifiers */
 #define SEMMNS_INC      64      /* increment value for semaphores */
 #define SEMMNU_INC      32      /* increment value for undo structures */
 
@@ -216,13 +216,6 @@ struct semid_kernel {
  * #define SEMUSZ	SEM_ALIGN(offsetof(struct sem_undo, un_ent[SEMUME]))
  */
 #define SEMUSZ          sizeof(struct sem_undo)
-
-extern struct semid_kernel      *sema;          /* semaphore id pool */
-extern struct sem               *sem_pool;      /* semaphore pool */
-/* This is now a struct sem_undo with the new memory allocation
- * extern int	*semu;		// undo structure pool
- */
-extern struct sem_undo  *semu;          /* undo structure pool */
 
 /*
  * Macro to find a particular sem_undo vector

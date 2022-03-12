@@ -134,7 +134,7 @@ struct filedesc {
 	int                 fd_nfiles_hard_limit;   /* (L) fd_nfiles hard limit to terminate */
 #endif /* CONFIG_PROC_RESOURCE_LIMITS */
 
-	struct  fileproc  **fd_ofiles;      /* (L) file structures for open files */
+	struct fileproc   **XNU_PTRAUTH_SIGNED_PTR("filedesc.fd_ofiles") fd_ofiles; /* (L) file structures for open files */
 	char               *fd_ofileflags;  /* (L) per-process open file flags */
 
 	int                 fd_knlistsize;  /* (L) size of knlist */

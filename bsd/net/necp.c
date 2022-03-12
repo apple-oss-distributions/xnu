@@ -366,7 +366,9 @@ static size_t necp_kernel_socket_policies_non_app_count;
 static LIST_HEAD(_necpkernelsocketconnectpolicies, necp_kernel_socket_policy) necp_kernel_socket_policies;
 #define NECP_KERNEL_SOCKET_POLICIES_MAP_NUM_APP_ID_BUCKETS 5
 #define NECP_SOCKET_MAP_APP_ID_TO_BUCKET(appid) (appid ? (appid%(NECP_KERNEL_SOCKET_POLICIES_MAP_NUM_APP_ID_BUCKETS - 1) + 1) : 0)
+static size_t necp_kernel_socket_policies_map_counts[NECP_KERNEL_SOCKET_POLICIES_MAP_NUM_APP_ID_BUCKETS];
 static struct necp_kernel_socket_policy **necp_kernel_socket_policies_map[NECP_KERNEL_SOCKET_POLICIES_MAP_NUM_APP_ID_BUCKETS];
+static size_t necp_kernel_socket_policies_app_layer_map_count;
 static struct necp_kernel_socket_policy **necp_kernel_socket_policies_app_layer_map;
 /*
  * A note on policy 'maps': these are used for boosting efficiency when matching policies. For each dimension of the map,
@@ -382,6 +384,7 @@ static size_t necp_kernel_ip_output_policies_non_id_count;
 static LIST_HEAD(_necpkernelipoutputpolicies, necp_kernel_ip_output_policy) necp_kernel_ip_output_policies;
 #define NECP_KERNEL_IP_OUTPUT_POLICIES_MAP_NUM_ID_BUCKETS 5
 #define NECP_IP_OUTPUT_MAP_ID_TO_BUCKET(id) (id ? (id%(NECP_KERNEL_IP_OUTPUT_POLICIES_MAP_NUM_ID_BUCKETS - 1) + 1) : 0)
+static size_t necp_kernel_ip_output_policies_map_counts[NECP_KERNEL_SOCKET_POLICIES_MAP_NUM_APP_ID_BUCKETS];
 static struct necp_kernel_ip_output_policy **necp_kernel_ip_output_policies_map[NECP_KERNEL_IP_OUTPUT_POLICIES_MAP_NUM_ID_BUCKETS];
 static struct necp_kernel_socket_policy pass_policy =
 {
@@ -805,7 +808,7 @@ necp_session_open(struct proc *p, struct necp_session_open_args *uap, int *retva
 	fp->fp_flags |= FP_CLOEXEC | FP_CLOFORK;
 	fp->fp_glob->fg_flag = 0;
 	fp->fp_glob->fg_ops = &necp_session_fd_ops;
-	fp->fp_glob->fg_data = session;
+	fp_set_data(fp, session);
 
 	proc_fdlock(p);
 	procfdtbl_releasefd(p, fd, NULL);
@@ -828,8 +831,8 @@ static int
 necp_session_op_close(struct fileglob *fg, vfs_context_t ctx)
 {
 #pragma unused(ctx)
-	struct necp_session *session = (struct necp_session *)fg->fg_data;
-	fg->fg_data = NULL;
+	struct necp_session *session = (struct necp_session *)fg_get_data(fg);
+	fg_set_data(fg, NULL);
 
 	if (session != NULL) {
 		necp_policy_mark_all_for_deletion(session);
@@ -850,7 +853,7 @@ necp_session_find_from_fd(struct proc *p, int fd,
 
 	if (error == 0) {
 		*fpp = fp;
-		*session = (struct necp_session *)fp->fp_glob->fg_data;
+		*session = (struct necp_session *)fp_get_data(fp);
 		if ((*session)->necp_fd_type != necp_fd_type_session) {
 			// Not a client fd, ignore
 			fp_drop(p, fd, fp, 0);
@@ -2674,7 +2677,7 @@ necp_handle_policy_dump_all(user_addr_t out_buffer, size_t out_buffer_length)
 
 	policy_count = necp_kernel_application_policies_count;
 
-	MALLOC(tlv_buffer_pointers, u_int8_t * *, sizeof(u_int8_t *) * policy_count, M_NECP, M_NOWAIT | M_ZERO);
+	tlv_buffer_pointers = kalloc_type(u_int8_t *, policy_count, M_WAITOK | Z_ZERO);
 	if (tlv_buffer_pointers == NULL) {
 		NECPLOG(LOG_DEBUG, "Failed to allocate tlv_buffer_pointers (%lu bytes)", sizeof(u_int8_t *) * policy_count);
 		UNLOCK_AND_REPORT_ERROR(&necp_kernel_policy_lock, NECP_ERROR_INTERNAL);
@@ -3074,7 +3077,7 @@ done:
 				tlv_buffer_pointers[i] = NULL;
 			}
 		}
-		FREE(tlv_buffer_pointers, M_NECP);
+		kfree_type(u_int8_t *, policy_count, tlv_buffer_pointers);
 	}
 
 	if (tlv_buffer_lengths != NULL) {
@@ -4775,9 +4778,7 @@ static bool
 necp_kernel_socket_policies_reprocess(void)
 {
 	int app_i;
-	int bucket_allocation_counts[NECP_KERNEL_SOCKET_POLICIES_MAP_NUM_APP_ID_BUCKETS];
 	int bucket_current_free_index[NECP_KERNEL_SOCKET_POLICIES_MAP_NUM_APP_ID_BUCKETS];
-	int app_layer_allocation_count = 0;
 	int app_layer_current_free_index = 0;
 	struct necp_kernel_socket_policy *kernel_policy = NULL;
 
@@ -4793,24 +4794,29 @@ necp_kernel_socket_policies_reprocess(void)
 	// Reset all maps to NULL
 	for (app_i = 0; app_i < NECP_KERNEL_SOCKET_POLICIES_MAP_NUM_APP_ID_BUCKETS; app_i++) {
 		if (necp_kernel_socket_policies_map[app_i] != NULL) {
-			FREE(necp_kernel_socket_policies_map[app_i], M_NECP);
+			kfree_type(struct necp_kernel_socket_policy *,
+			    necp_kernel_socket_policies_map_counts[app_i] + 1,
+			    necp_kernel_socket_policies_map[app_i]);
 			necp_kernel_socket_policies_map[app_i] = NULL;
 		}
 
 		// Init counts
-		bucket_allocation_counts[app_i] = 0;
+		necp_kernel_socket_policies_map_counts[app_i] = 0;
 	}
 	if (necp_kernel_socket_policies_app_layer_map != NULL) {
-		FREE(necp_kernel_socket_policies_app_layer_map, M_NECP);
-		necp_kernel_socket_policies_app_layer_map = NULL;
+		kfree_type(struct necp_kernel_socket_policy *,
+		    necp_kernel_socket_policies_app_layer_map_count + 1,
+		    necp_kernel_socket_policies_app_layer_map);
 	}
+	necp_kernel_socket_policies_app_layer_map = NULL;
+	necp_kernel_socket_policies_app_layer_map_count = 0;
 
 	// Create masks and counts
 	LIST_FOREACH(kernel_policy, &necp_kernel_socket_policies, chain) {
 		// App layer mask/count
 		necp_kernel_application_policies_condition_mask |= kernel_policy->condition_mask;
 		necp_kernel_application_policies_count++;
-		app_layer_allocation_count++;
+		necp_kernel_socket_policies_app_layer_map_count++;
 
 		if ((kernel_policy->condition_mask & NECP_KERNEL_CONDITION_AGENT_TYPE)) {
 			// Agent type conditions only apply to app layer
@@ -4825,32 +4831,30 @@ necp_kernel_socket_policies_reprocess(void)
 		    kernel_policy->condition_negated_mask & NECP_KERNEL_CONDITION_APP_ID) {
 			necp_kernel_socket_policies_non_app_count++;
 			for (app_i = 0; app_i < NECP_KERNEL_SOCKET_POLICIES_MAP_NUM_APP_ID_BUCKETS; app_i++) {
-				bucket_allocation_counts[app_i]++;
+				necp_kernel_socket_policies_map_counts[app_i]++;
 			}
 		} else {
-			bucket_allocation_counts[NECP_SOCKET_MAP_APP_ID_TO_BUCKET(kernel_policy->cond_app_id)]++;
+			necp_kernel_socket_policies_map_counts[NECP_SOCKET_MAP_APP_ID_TO_BUCKET(kernel_policy->cond_app_id)]++;
 		}
 	}
 
 	// Allocate maps
 	for (app_i = 0; app_i < NECP_KERNEL_SOCKET_POLICIES_MAP_NUM_APP_ID_BUCKETS; app_i++) {
-		if (bucket_allocation_counts[app_i] > 0) {
+		if (necp_kernel_socket_policies_map_counts[app_i] > 0) {
 			// Allocate a NULL-terminated array of policy pointers for each bucket
-			MALLOC(necp_kernel_socket_policies_map[app_i], struct necp_kernel_socket_policy **, sizeof(struct necp_kernel_socket_policy *) * (bucket_allocation_counts[app_i] + 1), M_NECP, M_WAITOK);
+			necp_kernel_socket_policies_map[app_i] = kalloc_type(struct necp_kernel_socket_policy *,
+			    necp_kernel_socket_policies_map_counts[app_i] + 1, Z_WAITOK | Z_ZERO);
 			if (necp_kernel_socket_policies_map[app_i] == NULL) {
 				goto fail;
 			}
-
-			// Initialize the first entry to NULL
-			(necp_kernel_socket_policies_map[app_i])[0] = NULL;
 		}
 		bucket_current_free_index[app_i] = 0;
 	}
-	MALLOC(necp_kernel_socket_policies_app_layer_map, struct necp_kernel_socket_policy **, sizeof(struct necp_kernel_socket_policy *) * (app_layer_allocation_count + 1), M_NECP, M_WAITOK);
+	necp_kernel_socket_policies_app_layer_map = kalloc_type(struct necp_kernel_socket_policy *,
+	    necp_kernel_socket_policies_app_layer_map_count + 1, Z_WAITOK | Z_ZERO);
 	if (necp_kernel_socket_policies_app_layer_map == NULL) {
 		goto fail;
 	}
-	necp_kernel_socket_policies_app_layer_map[0] = NULL;
 
 	// Fill out maps
 	LIST_FOREACH(kernel_policy, &necp_kernel_socket_policies, chain) {
@@ -4898,14 +4902,20 @@ fail:
 	necp_kernel_socket_policies_non_app_count = 0;
 	for (app_i = 0; app_i < NECP_KERNEL_SOCKET_POLICIES_MAP_NUM_APP_ID_BUCKETS; app_i++) {
 		if (necp_kernel_socket_policies_map[app_i] != NULL) {
-			FREE(necp_kernel_socket_policies_map[app_i], M_NECP);
+			kfree_type(struct necp_kernel_socket_policy *,
+			    necp_kernel_socket_policies_map_counts[app_i] + 1,
+			    necp_kernel_socket_policies_map[app_i]);
 			necp_kernel_socket_policies_map[app_i] = NULL;
 		}
+		necp_kernel_socket_policies_map_counts[app_i] = 0;
 	}
 	if (necp_kernel_socket_policies_app_layer_map != NULL) {
-		FREE(necp_kernel_socket_policies_app_layer_map, M_NECP);
+		kfree_type(struct necp_kernel_socket_policy *,
+		    necp_kernel_socket_policies_app_layer_map_count + 1,
+		    necp_kernel_socket_policies_app_layer_map);
 		necp_kernel_socket_policies_app_layer_map = NULL;
 	}
+	necp_kernel_socket_policies_app_layer_map_count = 0;
 	return FALSE;
 }
 
@@ -6059,7 +6069,6 @@ static bool
 necp_kernel_ip_output_policies_reprocess(void)
 {
 	int i;
-	int bucket_allocation_counts[NECP_KERNEL_IP_OUTPUT_POLICIES_MAP_NUM_ID_BUCKETS];
 	int bucket_current_free_index[NECP_KERNEL_IP_OUTPUT_POLICIES_MAP_NUM_ID_BUCKETS];
 	struct necp_kernel_ip_output_policy *kernel_policy = NULL;
 
@@ -6072,12 +6081,14 @@ necp_kernel_ip_output_policies_reprocess(void)
 
 	for (i = 0; i < NECP_KERNEL_IP_OUTPUT_POLICIES_MAP_NUM_ID_BUCKETS; i++) {
 		if (necp_kernel_ip_output_policies_map[i] != NULL) {
-			FREE(necp_kernel_ip_output_policies_map[i], M_NECP);
+			kfree_type(struct necp_kernel_ip_output_policy *,
+			    necp_kernel_ip_output_policies_map_counts[i] + 1,
+			    necp_kernel_ip_output_policies_map[i]);
 			necp_kernel_ip_output_policies_map[i] = NULL;
 		}
 
 		// Init counts
-		bucket_allocation_counts[i] = 0;
+		necp_kernel_ip_output_policies_map_counts[i] = 0;
 	}
 
 	LIST_FOREACH(kernel_policy, &necp_kernel_ip_output_policies, chain) {
@@ -6093,26 +6104,24 @@ necp_kernel_ip_output_policies_reprocess(void)
 		    (kernel_policy->condition_mask & NECP_KERNEL_CONDITION_LOCAL_NETWORKS) ||
 		    kernel_policy->result == NECP_KERNEL_POLICY_RESULT_SKIP) {
 			for (i = 0; i < NECP_KERNEL_IP_OUTPUT_POLICIES_MAP_NUM_ID_BUCKETS; i++) {
-				bucket_allocation_counts[i]++;
+				necp_kernel_ip_output_policies_map_counts[i]++;
 			}
 		}
 		if (!(kernel_policy->condition_mask & NECP_KERNEL_CONDITION_POLICY_ID)) {
 			necp_kernel_ip_output_policies_non_id_count++;
 		} else {
-			bucket_allocation_counts[NECP_IP_OUTPUT_MAP_ID_TO_BUCKET(kernel_policy->cond_policy_id)]++;
+			necp_kernel_ip_output_policies_map_counts[NECP_IP_OUTPUT_MAP_ID_TO_BUCKET(kernel_policy->cond_policy_id)]++;
 		}
 	}
 
 	for (i = 0; i < NECP_KERNEL_IP_OUTPUT_POLICIES_MAP_NUM_ID_BUCKETS; i++) {
-		if (bucket_allocation_counts[i] > 0) {
+		if (necp_kernel_ip_output_policies_map_counts[i] > 0) {
 			// Allocate a NULL-terminated array of policy pointers for each bucket
-			MALLOC(necp_kernel_ip_output_policies_map[i], struct necp_kernel_ip_output_policy **, sizeof(struct necp_kernel_ip_output_policy *) * (bucket_allocation_counts[i] + 1), M_NECP, M_WAITOK);
+			necp_kernel_ip_output_policies_map[i] = kalloc_type(struct necp_kernel_ip_output_policy *,
+			    necp_kernel_ip_output_policies_map_counts[i] + 1, Z_WAITOK | Z_ZERO);
 			if (necp_kernel_ip_output_policies_map[i] == NULL) {
 				goto fail;
 			}
-
-			// Initialize the first entry to NULL
-			(necp_kernel_ip_output_policies_map[i])[0] = NULL;
 		}
 		bucket_current_free_index[i] = 0;
 	}
@@ -6148,7 +6157,9 @@ fail:
 	necp_kernel_ip_output_policies_non_id_count = 0;
 	for (i = 0; i < NECP_KERNEL_IP_OUTPUT_POLICIES_MAP_NUM_ID_BUCKETS; i++) {
 		if (necp_kernel_ip_output_policies_map[i] != NULL) {
-			FREE(necp_kernel_ip_output_policies_map[i], M_NECP);
+			kfree_type(struct necp_kernel_ip_output_policy *,
+			    necp_kernel_ip_output_policies_map_counts[i] + 1,
+			    necp_kernel_ip_output_policies_map[i]);
 			necp_kernel_ip_output_policies_map[i] = NULL;
 		}
 	}
@@ -6473,7 +6484,12 @@ necp_application_fillout_info_locked(uuid_t application_uuid, uuid_t real_applic
 	}
 
 	if (necp_kernel_application_policies_condition_mask & NECP_KERNEL_CONDITION_ENTITLEMENT && proc != NULL) {
-		info->cred_result = priv_check_cred(kauth_cred_get(), PRIV_NET_PRIVILEGED_NECP_MATCH, 0);
+		kauth_cred_t proc_cred = kauth_cred_proc_ref(proc ? proc : current_proc());
+		info->cred_result = EPERM;
+		if (proc_cred != NULL) {
+			info->cred_result = priv_check_cred(proc_cred, PRIV_NET_PRIVILEGED_NECP_MATCH, 0);
+			kauth_cred_unref(&proc_cred);
+		}
 
 		if (info->cred_result != 0) {
 			// Process does not have entitlement, check the parent process
@@ -8838,9 +8854,7 @@ necp_socket_find_policy_match(struct inpcb *inp, struct sockaddr *override_local
 		if (necp_socket_is_connected(inp) &&
 		    (matched_policy->result == NECP_KERNEL_POLICY_RESULT_DROP ||
 		    (matched_policy->result == NECP_KERNEL_POLICY_RESULT_IP_TUNNEL && !necp_socket_uses_interface(inp, matched_policy->result_parameter.tunnel_interface_index)))) {
-			if (necp_debug || NECP_DATA_TRACE_POLICY_ON(debug)) {
-				NECPLOG(LOG_DEBUG, "Marking socket in state %d as defunct", so->so_state);
-			}
+			NECPLOG(LOG_ERR, "Marking socket in state %d as defunct", so->so_state);
 			sosetdefunct(current_proc(), so, SHUTDOWN_SOCKET_LEVEL_NECP | SHUTDOWN_SOCKET_LEVEL_DISCONNECT_ALL, TRUE);
 		} else if (necp_socket_is_connected(inp) &&
 		    matched_policy->result == NECP_KERNEL_POLICY_RESULT_IP_TUNNEL &&

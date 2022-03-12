@@ -1009,7 +1009,7 @@ ttioctl_locked(struct tty *tp, u_long cmd, caddr_t data, int flag, proc_t p)
 
 	TTY_LOCK_OWNED(tp);     /* debug assert */
 
-	ut = (struct uthread *)get_bsdthread_info(current_thread());
+	ut = current_uthread();
 	/* If the ioctl involves modification, signal if in the background. */
 	switch (cmd) {
 	case TIOCIXON:
@@ -2001,7 +2001,7 @@ ttread(struct tty *tp, struct uio *uio, int flag)
 
 	TTY_LOCK_OWNED(tp);     /* debug assert */
 
-	ut = (struct uthread *)get_bsdthread_info(current_thread());
+	ut = current_uthread();
 
 loop:
 	lflag = tp->t_lflag;
@@ -2320,7 +2320,7 @@ ttycheckoutq(struct tty *tp, int wait)
 
 	TTY_LOCK_OWNED(tp);     /* debug assert */
 
-	ut = (struct uthread *)get_bsdthread_info(current_thread());
+	ut = current_uthread();
 
 	hiwat = tp->t_hiwat;
 	oldsig = wait ? ut->uu_siglist : 0;
@@ -2362,7 +2362,7 @@ ttwrite(struct tty *tp, struct uio *uio, int flag)
 
 	TTY_LOCK_OWNED(tp);     /* debug assert */
 
-	ut = (struct uthread *)get_bsdthread_info(current_thread());
+	ut = current_uthread();
 	hiwat = tp->t_hiwat;
 	count = uio_resid(uio);
 	error = 0;
@@ -2874,7 +2874,6 @@ void
 ttyinfo_locked(struct tty *tp)
 {
 	int             load;
-	thread_t        thread;
 	uthread_t       uthread;
 	proc_t          p;
 	proc_t          pick;
@@ -2946,8 +2945,7 @@ ttyinfo_locked(struct tty *tp)
 
 	if (TAILQ_EMPTY(&pick->p_uthlist) ||
 	    (uthread = TAILQ_FIRST(&pick->p_uthlist)) == NULL ||
-	    (thread = vfs_context_thread(&uthread->uu_context)) == NULL ||
-	    (thread_info_internal(thread, THREAD_BASIC_INFO, (thread_info_t)&basic_info, &mmtn) != KERN_SUCCESS)) {
+	    (thread_info_internal(get_machthread(uthread), THREAD_BASIC_INFO, (thread_info_t)&basic_info, &mmtn) != KERN_SUCCESS)) {
 		ttyprintf(tp, "foreground process without thread\n");
 		tp->t_rocount = 0;
 		proc_rele(pick);
@@ -3373,7 +3371,7 @@ filt_ttyattach(struct knote *kn, __unused struct kevent_qos_s *kev)
 {
 	uthread_t uth = current_uthread();
 	vfs_context_t ctx = vfs_context_current();
-	vnode_t vp = kn->kn_fp->fp_glob->fg_data;
+	vnode_t vp = (vnode_t)fp_get_data(kn->kn_fp);
 	struct waitq_set *old_wqs;
 	int selres;
 

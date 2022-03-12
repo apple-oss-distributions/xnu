@@ -1766,6 +1766,9 @@ in_pcbdetach(struct inpcb *inp)
 		}
 		ROUTE_RELEASE(&inp->inp_route);
 		imo = inp->inp_moptions;
+		if (imo != NULL) {
+			IMO_REMREF(imo);
+		}
 		inp->inp_moptions = NULL;
 		sofreelastref(so, 0);
 		inp->inp_state = INPCB_STATE_DEAD;
@@ -1802,15 +1805,6 @@ in_pcbdetach(struct inpcb *inp)
 		so->so_flags |= SOF_PCBCLEARING;
 
 		inpcb_gc_sched(inp->inp_pcbinfo, INPCB_TIMER_FAST);
-
-		/*
-		 * See inp_join_group() for why we need to unlock
-		 */
-		if (imo != NULL) {
-			socket_unlock(so, 0);
-			IMO_REMREF(imo);
-			socket_lock(so, 0);
-		}
 	}
 }
 

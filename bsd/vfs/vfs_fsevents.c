@@ -1783,7 +1783,7 @@ static int
 fseventsf_read(struct fileproc *fp, struct uio *uio,
     __unused int flags, __unused vfs_context_t ctx)
 {
-	fsevent_handle *fseh = (struct fsevent_handle *)fp->fp_glob->fg_data;
+	fsevent_handle *fseh = (struct fsevent_handle *)fp_get_data(fp);
 	int error;
 
 	error = fmod_watch(fseh->watcher, uio);
@@ -1809,7 +1809,7 @@ typedef struct fsevent_dev_filter_args64 {
 static int
 fseventsf_ioctl(struct fileproc *fp, u_long cmd, caddr_t data, vfs_context_t ctx)
 {
-	fsevent_handle *fseh = (struct fsevent_handle *)fp->fp_glob->fg_data;
+	fsevent_handle *fseh = (struct fsevent_handle *)fp_get_data(fp);
 	int ret = 0;
 	fsevent_dev_filter_args64 *devfilt_args, _devfilt_args;
 
@@ -1940,7 +1940,7 @@ handle_dev_filter:
 static int
 fseventsf_select(struct fileproc *fp, int which, __unused void *wql, vfs_context_t ctx)
 {
-	fsevent_handle *fseh = (struct fsevent_handle *)fp->fp_glob->fg_data;
+	fsevent_handle *fseh = (struct fsevent_handle *)fp_get_data(fp);
 	int ready = 0;
 
 	if ((which != FREAD) || (fseh->watcher->flags & WATCHER_CLOSING)) {
@@ -1972,7 +1972,7 @@ fseventsf_stat(__unused struct fileproc *fp, __unused struct stat *sb, __unused 
 static int
 fseventsf_close(struct fileglob *fg, __unused vfs_context_t ctx)
 {
-	fsevent_handle *fseh = (struct fsevent_handle *)fg->fg_data;
+	fsevent_handle *fseh = (struct fsevent_handle *)fg_get_data(fg);
 	fs_event_watcher *watcher;
 
 	OSBitOrAtomic(FSEH_CLOSING, &fseh->flags);
@@ -1981,7 +1981,7 @@ fseventsf_close(struct fileglob *fg, __unused vfs_context_t ctx)
 	}
 
 	watcher = fseh->watcher;
-	fg->fg_data = NULL;
+	fg_set_data(fg, NULL);
 	fseh->watcher = NULL;
 
 	remove_watcher(watcher);
@@ -2116,7 +2116,7 @@ static int
 fseventsf_kqfilter(struct fileproc *fp, struct knote *kn,
     __unused struct kevent_qos_s *kev)
 {
-	fsevent_handle *fseh = (struct fsevent_handle *)fp->fp_glob->fg_data;
+	fsevent_handle *fseh = (struct fsevent_handle *)fp_get_data(fp);
 	int res;
 
 	kn->kn_hook = (void*)fseh;
@@ -2139,7 +2139,7 @@ static int
 fseventsf_drain(struct fileproc *fp, __unused vfs_context_t ctx)
 {
 	int counter = 0;
-	fsevent_handle *fseh = (struct fsevent_handle *)fp->fp_glob->fg_data;
+	fsevent_handle *fseh = (struct fsevent_handle *)fp_get_data(fp);
 
 	// if there are people still waiting, sleep for 10ms to
 	// let them clean up and get out of there.  however we
@@ -2472,7 +2472,8 @@ handle_clone:
 		proc_fdlock(p);
 		f->fp_glob->fg_flag = FREAD | FWRITE;
 		f->fp_glob->fg_ops = &fsevents_fops;
-		f->fp_glob->fg_data = (caddr_t) fseh;
+		fp_set_data(f, fseh);
+
 		/*
 		 * We can safely hold the proc_fdlock across this copyout()
 		 * because of the vslock() call above.  The vslock() call

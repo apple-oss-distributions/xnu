@@ -92,7 +92,6 @@ options		SYSV_SEM	# SVID semaphores		# <sysv_sem>
 options		SYSV_MSG	# SVID messages			# <sysv_msg>
 options		SYSV_SHM	# SVID shared mem		# <sysv_shm>
 options		PSYNCH		# pthread synch			# <psynch>
-options		CONFIG_VFORK	# vfork support			# <vfork>
 options		FLOW_DIVERT								# <flow_divert>
 options		NECP									# <necp>
 options		CONTENT_FILTER	#						# <content_filter>

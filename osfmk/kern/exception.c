@@ -114,12 +114,6 @@ kern_return_t exception_deliver(
 	struct exception_action *excp,
 	lck_mtx_t                       *mutex);
 
-static kern_return_t
-check_exc_receiver_dependency(
-	exception_type_t exception,
-	struct exception_action *excp,
-	lck_mtx_t *mutex);
-
 #ifdef MACH_BSD
 kern_return_t bsd_exception(
 	exception_type_t        exception,
@@ -259,7 +253,7 @@ exception_deliver(
 		small_code[1] = CAST_DOWN_EXPLICIT(exception_data_type_t, code[1]);
 	}
 
-	task = thread->task;
+	task = get_threadtask(thread);
 
 #if CONFIG_MACF
 	/* Now is a reasonably good time to check if the exception action is
@@ -457,7 +451,7 @@ out_release_right:
  * Returns:
  *      KERN_SUCCESS if its ok to send exception message.
  */
-kern_return_t
+static kern_return_t
 check_exc_receiver_dependency(
 	exception_type_t exception,
 	struct exception_action *excp,
@@ -501,10 +495,11 @@ exception_triage_thread(
 	thread_t                thread)
 {
 	task_t                  task;
+	thread_ro_t             tro;
 	host_priv_t             host_priv;
 	lck_mtx_t               *mutex;
+	struct exception_action *actions;
 	kern_return_t   kr = KERN_FAILURE;
-
 
 	assert(exception != EXC_RPC_ALERT);
 
@@ -523,9 +518,11 @@ exception_triage_thread(
 	/*
 	 * Try to raise the exception at the activation level.
 	 */
-	mutex = &thread->mutex;
-	if (KERN_SUCCESS == check_exc_receiver_dependency(exception, thread->exc_actions, mutex)) {
-		kr = exception_deliver(thread, exception, code, codeCnt, thread->exc_actions, mutex);
+	mutex   = &thread->mutex;
+	tro     = get_thread_ro(thread);
+	actions = tro->tro_exc_actions;
+	if (KERN_SUCCESS == check_exc_receiver_dependency(exception, actions, mutex)) {
+		kr = exception_deliver(thread, exception, code, codeCnt, actions, mutex);
 		if (kr == KERN_SUCCESS || kr == MACH_RCV_PORT_DIED) {
 			goto out;
 		}
@@ -534,10 +531,11 @@ exception_triage_thread(
 	/*
 	 * Maybe the task level will handle it.
 	 */
-	task = thread->task;
-	mutex = &task->itk_lock_data;
-	if (KERN_SUCCESS == check_exc_receiver_dependency(exception, task->exc_actions, mutex)) {
-		kr = exception_deliver(thread, exception, code, codeCnt, task->exc_actions, mutex);
+	task    = tro->tro_task;
+	mutex   = &task->itk_lock_data;
+	actions = task->exc_actions;
+	if (KERN_SUCCESS == check_exc_receiver_dependency(exception, actions, mutex)) {
+		kr = exception_deliver(thread, exception, code, codeCnt, actions, mutex);
 		if (kr == KERN_SUCCESS || kr == MACH_RCV_PORT_DIED) {
 			goto out;
 		}
@@ -547,10 +545,10 @@ exception_triage_thread(
 	 * How about at the host level?
 	 */
 	host_priv = host_priv_self();
-	mutex = &host_priv->lock;
-
-	if (KERN_SUCCESS == check_exc_receiver_dependency(exception, host_priv->exc_actions, mutex)) {
-		kr = exception_deliver(thread, exception, code, codeCnt, host_priv->exc_actions, mutex);
+	mutex     = &host_priv->lock;
+	actions   = host_priv->exc_actions;
+	if (KERN_SUCCESS == check_exc_receiver_dependency(exception, actions, mutex)) {
+		kr = exception_deliver(thread, exception, code, codeCnt, actions, mutex);
 		if (kr == KERN_SUCCESS || kr == MACH_RCV_PORT_DIED) {
 			goto out;
 		}
@@ -578,7 +576,7 @@ pac_exception_triage(
 	mach_exception_data_t   code)
 {
 	boolean_t traced_flag = FALSE;
-	task_t task = current_thread()->task;
+	task_t task = current_task();
 	void *proc = task->bsd_info;
 	char *proc_name = (char *) "unknown";
 	int pid = 0;
@@ -636,17 +634,22 @@ exception_triage(
 	mach_msg_type_number_t  codeCnt)
 {
 	thread_t thread = current_thread();
-	if (VM_MAP_PAGE_SIZE(thread->task->map) < PAGE_SIZE) {
-		DEBUG4K_EXC("thread %p task %p map %p exception %d codes 0x%llx 0x%llx \n", thread, thread->task, thread->task->map, exception, code[0], code[1]);
+	task_t   task   = current_task();
+
+	if (VM_MAP_PAGE_SIZE(task->map) < PAGE_SIZE) {
+		DEBUG4K_EXC("thread %p task %p map %p exception %d codes 0x%llx 0x%llx\n",
+		    thread, task, task->map, exception, code[0], code[1]);
 		if (debug4k_panic_on_exception) {
-			panic("DEBUG4K %s:%d thread %p task %p map %p exception %d codes 0x%llx 0x%llx", __FUNCTION__, __LINE__, thread, thread->task, thread->task->map, exception, code[0], code[1]);
+			panic("DEBUG4K thread %p task %p map %p exception %d codes 0x%llx 0x%llx",
+			    thread, task, task->map, exception, code[0], code[1]);
 		}
 	}
 
 #if (DEVELOPMENT || DEBUG)
 #ifdef MACH_BSD
-	if (proc_pid(thread->task->bsd_info) <= exception_log_max_pid) {
-		printf("exception_log_max_pid: pid %d (%s): sending exception %d (0x%llx 0x%llx)\n", proc_pid(thread->task->bsd_info), proc_name_address(thread->task->bsd_info), exception, code[0], code[1]);
+	if (proc_pid(task->bsd_info) <= exception_log_max_pid) {
+		printf("exception_log_max_pid: pid %d (%s): sending exception %d (0x%llx 0x%llx)\n",
+		    proc_pid(task->bsd_info), proc_name_address(task->bsd_info), exception, code[0], code[1]);
 	}
 #endif /* MACH_BSD */
 #endif /* DEVELOPMENT || DEBUG */
@@ -732,7 +735,7 @@ sys_perf_notify(thread_t thread, int pid)
 	/* Make sure we're not catching our own exception */
 	if (!IP_VALID(xport) ||
 	    !ip_active(xport) ||
-	    ip_in_space_noauth(xport, thread->task->itk_space)) {
+	    ip_in_space_noauth(xport, get_threadtask(thread)->itk_space)) {
 		lck_mtx_unlock(&hostp->lock);
 		return KERN_FAILURE;
 	}

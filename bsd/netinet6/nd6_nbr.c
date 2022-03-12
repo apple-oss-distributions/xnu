@@ -160,6 +160,10 @@ SYSCTL_INT(_net_inet6_ip6, OID_AUTO, dad_enhanced, CTLFLAG_RW | CTLFLAG_LOCKED,
     &dad_enhanced, 0,
     "Enable Enhanced DAD, which adds a random nonce to NS messages for DAD.");
 
+static int  ip6_p2p_debug = 0;
+SYSCTL_INT(_net_inet6_ip6, OID_AUTO, ip6_p2p_debug, CTLFLAG_RW | CTLFLAG_LOCKED,
+    &ip6_p2p_debug, 0,
+    "Enable more instrumentation for IPv6 P2P use-case");
 /*
  * Obtain a link-layer source cache entry for the sender.
  *
@@ -2572,6 +2576,10 @@ nd6_alt_node_present(struct ifnet *ifp, struct sockaddr_in6 *sin6,
 	if (rt == NULL) {
 		log(LOG_ERR, "%s: failed to add/update host route to %s.\n",
 		    __func__, ip6_sprintf(&sin6->sin6_addr));
+		if (ip6_p2p_debug) {
+			panic("%s: failed to add/update host route to %s.\n",
+			    __func__, ip6_sprintf(&sin6->sin6_addr));
+		}
 		return EHOSTUNREACH;
 	} else {
 		nd6log(debug, "%s: host route to %s [lr=0x%llx]\n",

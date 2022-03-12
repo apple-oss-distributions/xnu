@@ -538,7 +538,7 @@ machine_processor_shutdown(
  * This is where registers that are not normally specified by the mach-o
  * file on an execve would be nullified, perhaps to avoid a covert channel.
  */
-kern_return_t
+void
 machine_thread_state_initialize(
 	thread_t thread)
 {
@@ -559,8 +559,6 @@ machine_thread_state_initialize(
 		zfree(ids_zone, thread->machine.ids);
 		thread->machine.ids = NULL;
 	}
-
-	return KERN_SUCCESS;
 }
 
 uint32_t
@@ -1145,7 +1143,7 @@ machine_thread_set_state(
 		}
 
 		/* If this process does not have a custom LDT, return failure */
-		if (thr_act->task->i386_ldt == 0) {
+		if (get_threadtask(thr_act)->i386_ldt == 0) {
 			return KERN_INVALID_ARGUMENT;
 		}
 
@@ -1168,7 +1166,7 @@ machine_thread_set_state(
 			return set_thread_state64(thr_act, &state->uts.ts64, FALSE);
 		} else if (state->tsh.flavor == x86_THREAD_FULL_STATE64 &&
 		    state->tsh.count == x86_THREAD_FULL_STATE64_COUNT &&
-		    thread_is_64bit_addr(thr_act) && thr_act->task->i386_ldt != 0) {
+		    thread_is_64bit_addr(thr_act) && get_threadtask(thr_act)->i386_ldt != 0) {
 			return set_thread_state64(thr_act, &state->uts.ts64, TRUE);
 		} else if (state->tsh.flavor == x86_THREAD_STATE32 &&
 		    state->tsh.count == x86_THREAD_STATE32_COUNT &&
@@ -1578,7 +1576,7 @@ machine_thread_get_state(
 		}
 
 		/* If this process does not have a custom LDT, return failure */
-		if (thr_act->task->i386_ldt == 0) {
+		if (get_threadtask(thr_act)->i386_ldt == 0) {
 			return KERN_INVALID_ARGUMENT;
 		}
 
@@ -1998,6 +1996,8 @@ machine_thread_get_kern_state(
 void
 machine_thread_switch_addrmode(thread_t thread)
 {
+	task_t task = get_threadtask(thread);
+
 	/*
 	 * We don't want to be preempted until we're done
 	 * - particularly if we're switching the current thread
@@ -2008,10 +2008,10 @@ machine_thread_switch_addrmode(thread_t thread)
 	 * Reset the state saveareas. As we're resetting, we anticipate no
 	 * memory allocations in this path.
 	 */
-	machine_thread_create(thread, thread->task, false);
+	machine_thread_create(thread, task, false);
 
 	/* Adjust FPU state */
-	fpu_switch_addrmode(thread, task_has_64Bit_addr(thread->task));
+	fpu_switch_addrmode(thread, task_has_64Bit_addr(task));
 
 	/* If we're switching ourselves, reset the pcb addresses etc. */
 	if (thread == current_thread()) {

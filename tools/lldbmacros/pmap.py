@@ -990,7 +990,7 @@ def DecodeTTE(cmd_args=None):
         raise NotImplementedError("decode_tte does not support {0}".format(kern.arch))
 
 
-PVH_HIGH_FLAGS_ARM64 = (1 << 62) | (1 << 61) | (1 << 60) | (1 << 59) | (1 << 58)
+PVH_HIGH_FLAGS_ARM64 = (1 << 62) | (1 << 61) | (1 << 60) | (1 << 59) | (1 << 58) | (1 << 57) | (1 << 56)
 PVH_HIGH_FLAGS_ARM32 = (1 << 31)
 
 def PVDumpPTE(pvep, ptep, verbose_level = vHUMAN):
@@ -1139,9 +1139,13 @@ def PVWalkARM(pai, verbose_level = vHUMAN):
             if pvh_raw & (1 << 60):
                 pvh_flags.append("EXEC")
             if pvh_raw & (1 << 59):
-                pvh_flags.append("LOCKDOWN")
+                pvh_flags.append("LOCKDOWN_KC")
             if pvh_raw & (1 << 58):
                 pvh_flags.append("HASHED")
+            if pvh_raw & (1 << 57):
+                pvh_flags.append("LOCKDOWN_CS")
+            if pvh_raw & (1 << 56):
+                pvh_flags.append("LOCKDOWN_RO")
             if kern.arch.startswith('arm64') and pvh_raw & (1 << 61):
                 pvh_flags.append("LOCK")
             elif kern.arch == 'arm' and pvh_raw & (1 << 31):

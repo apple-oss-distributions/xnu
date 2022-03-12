@@ -1818,11 +1818,6 @@ nfs_gss_clnt_log_error(struct nfsreq *req, struct nfs_gss_clnt_ctx *cp, uint32_t
 
 	if (req->r_thread) {
 		proc = (proc_t)get_bsdthreadtask_info(req->r_thread);
-#if CONFIG_VFORK
-		if (proc != NULL && (proc->p_lflag & P_LVFORK)) {
-			proc = NULL;
-		}
-#endif /* CONFIG_VFORK */
 		if (proc) {
 			pid = proc_pid(proc);
 			proc_name(pid, namebuf, sizeof(namebuf));

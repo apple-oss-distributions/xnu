@@ -277,8 +277,6 @@ struct socket {
 
 	u_int32_t       so_ifdenied_notifies; /* # of notifications generated */
 
-	struct label    *so_label;      /* MAC label for socket */
-	struct label    *so_peerlabel;  /* cached MAC label for socket peer */
 	thread_t        so_background_thread;   /* thread that marked
 	                                         *  this socket background */
 	struct data_stats so_tc_stats[SO_TC_STATS_MAX];
@@ -288,9 +286,9 @@ struct socket {
 
 #if CONTENT_FILTER
 	struct cfil_info    *so_cfil;
-	struct cfil_db      *so_cfil_db;
 	u_int32_t           so_state_change_cnt; /* incr for each connect, disconnect */
 #endif
+	struct soflow_db    *so_flow_db;
 
 	u_int32_t       so_eventmask;           /* event mask */
 
@@ -962,6 +960,29 @@ typedef struct tracker_metadata_short {
 } tracker_metadata_short_t;
 
 extern int tracker_lookup(uuid_t app_uuid, struct sockaddr *, tracker_metadata_t *metadata);
+
+/*
+ * Socket flow management
+ */
+
+#define IS_INET(so) (so != NULL && so->so_proto != NULL && so->so_proto->pr_domain != NULL && (so->so_proto->pr_domain->dom_family == AF_INET || so->so_proto->pr_domain->dom_family == AF_INET6))
+#define IS_TCP(so) (so != NULL && so->so_proto != NULL && so->so_proto->pr_type == SOCK_STREAM && so->so_proto->pr_protocol == IPPROTO_TCP)
+#define IS_UDP(so) (so != NULL && so->so_proto != NULL && so->so_proto->pr_type == SOCK_DGRAM && so->so_proto->pr_protocol == IPPROTO_UDP)
+
+// For iOS, keep track of flows for UDP sockets only.
+// For OSX, keep track of flows for all datagram sockets.
+#if !XNU_TARGET_OS_OSX
+#define NEED_DGRAM_FLOW_TRACKING(so) (IS_INET(so) && IS_UDP(so))
+#else
+#define NEED_DGRAM_FLOW_TRACKING(so) (IS_INET(so) && !IS_TCP(so))
+#endif
+
+// Check if socket flow tracking is present for socket
+#define SOFLOW_ENABLED(so) (so != NULL && (so->so_flow_db != NULL))
+
+extern struct soflow_hash_entry *soflow_get_flow(struct socket *, struct sockaddr *, struct sockaddr *, struct mbuf *, size_t, bool, u_short);
+extern void soflow_free_flow(struct soflow_hash_entry *);
+extern void soflow_detach(struct socket *);
 
 /* Service class flags used for setting service class on a packet */
 #define PKT_SCF_IPV6            0x00000001      /* IPv6 packet */

@@ -1085,6 +1085,28 @@
 	        typedef _type _name; enum __VA_ARGS__ __enum_closed __enum_options
 #endif
 
+#if XNU_KERNEL_PRIVATE
+/*
+ * __xnu_struct_group() can be used to declare a set of fields to be grouped
+ * together logically in order to perform safer memory operations
+ * (assignment, zeroing, ...) on them.
+ */
+#ifdef __cplusplus
+#define __xnu_struct_group(group_type, group_name, ...) \
+	struct group_type __VA_ARGS__; \
+	union { \
+	    struct __VA_ARGS__; \
+	    struct group_type group_name; \
+	}
+#else
+#define __xnu_struct_group(group_type, group_name, ...) \
+	union { \
+	    struct __VA_ARGS__; \
+	    struct group_type __VA_ARGS__ group_name; \
+	}
+#endif
+#endif /* XNU_KERNEL_PRIVATE */
+
 #if defined(KERNEL) && __has_attribute(xnu_usage_semantics)
 /*
  * These macros can be used to annotate type definitions or scalar structure

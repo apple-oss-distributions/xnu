@@ -5832,9 +5832,9 @@ struct mac_policy_ops {
 	mpo_file_check_mmap_t                   *mpo_file_check_mmap;
 	mpo_file_check_receive_t                *mpo_file_check_receive;
 	mpo_file_check_set_t                    *mpo_file_check_set;
-	mpo_file_label_init_t                   *mpo_file_label_init;
-	mpo_file_label_destroy_t                *mpo_file_label_destroy;
-	mpo_file_label_associate_t              *mpo_file_label_associate;
+	mpo_file_label_init_t                   *mpo_file_label_init;       /* deprecated not called anymore */
+	mpo_file_label_destroy_t                *mpo_file_label_destroy;    /* deprecated not called anymore */
+	mpo_file_label_associate_t              *mpo_file_label_associate;  /* deprecated not called anymore */
 	mpo_file_notify_close_t                 *mpo_file_notify_close;
 
 	mpo_reserved_hook_t                     *mpo_reserved06;
@@ -6424,10 +6424,20 @@ int     mac_file_removexattr(struct fileglob *fg, const char *name);
  * intptr_t to a policy-specific data type.
  */
 #ifdef KERNEL_PRIVATE
+struct label *  mac_label_verify(struct label **labelp);
 intptr_t        mac_label_get(struct label *l, int slot);
+/*
+ * Sets a label slot to the given pointer value, `v`.  `v` cannot be `~0ULL`.
+ */
 void            mac_label_set(struct label *l, int slot, intptr_t v);
 struct label *  mac_labelzone_alloc(int flags);
+struct label *  mac_labelzone_alloc_for_owner(struct label **labelp, int flags,
+    void (^extra_setup)(struct label *));
+struct label *  mac_labelzone_alloc_owned(struct label **labelp, int flags,
+    void (^extra_setup)(struct label *));
 void            mac_labelzone_free(struct label *l);
+void            mac_labelzone_free_owned(struct label **labelp,
+    void (^extra_deinit)(struct label *));
 intptr_t        mac_vnode_label_get(struct vnode *vp, int slot, intptr_t sentinel);
 void            mac_vnode_label_set(struct vnode *vp, int slot, intptr_t v);
 #endif

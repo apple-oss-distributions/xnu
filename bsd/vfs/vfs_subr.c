@@ -2268,7 +2268,7 @@ vnode_ref_ext(vnode_t vp, int fmode, int flags)
 	if (vp->v_flag & VRAGE) {
 		struct  uthread *ut;
 
-		ut = get_bsdthread_info(current_thread());
+		ut = current_uthread();
 
 		if (!(current_proc()->p_lflag & P_LRAGE_VNODES) &&
 		    !(ut->uu_flag & UT_RAGE_VNODES)) {
@@ -2627,7 +2627,7 @@ vnode_rele_internal(vnode_t vp, int fmode, int dont_reenter, int locked)
 	    ((vp->v_lflag & (VL_MARKTERM | VL_TERMINATE | VL_DEAD)) == VL_MARKTERM)) {
 		struct  uthread *ut;
 
-		ut = get_bsdthread_info(current_thread());
+		ut = current_uthread();
 
 		if (ut->uu_defer_reclaims) {
 			vp->v_defer_reclaimlist = ut->uu_vreclaims;
@@ -5387,7 +5387,7 @@ steal_this_vp:
 	 */
 	assert((vp->v_lflag & VL_LABELWAIT) != VL_LABELWAIT);
 	assert((vp->v_lflag & VL_LABEL) != VL_LABEL);
-	if (vp->v_lflag & VL_LABELED || vp->v_label != NULL) {
+	if (vp->v_lflag & VL_LABELED || mac_vnode_label(vp) != NULL) {
 		vnode_lock_convert(vp);
 		mac_vnode_label_recycle(vp);
 	} else if (mac_vnode_label_init_needed(vp)) {
@@ -5658,6 +5658,16 @@ out:
 		vnode_unlock(vp);
 	}
 	return retval;
+}
+
+kauth_cred_t
+vnode_cred(vnode_t vp)
+{
+	if (vp->v_cred) {
+		return kauth_cred_require(vp->v_cred);
+	}
+
+	return NULL;
 }
 
 
@@ -6271,7 +6281,7 @@ vnode_create_internal(uint32_t flavor, uint32_t size, void *data, vnode_t *vpp,
 		 */
 		vp->v_flag |= VNCACHEABLE;
 	}
-	ut = get_bsdthread_info(current_thread());
+	ut = current_uthread();
 
 	if ((current_proc()->p_lflag & P_LRAGE_VNODES) ||
 	    (ut->uu_flag & (UT_RAGE_VNODES | UT_KERN_RAGE_VNODES))) {
@@ -10325,7 +10335,7 @@ rmdir_remove_orphaned_appleDouble(vnode_t vp, vfs_context_t ctx, int * restart_f
 	 * Prevent dataless fault materialization while we have
 	 * a suspended vnode.
 	 */
-	uthread_t ut = get_bsdthread_info(current_thread());
+	uthread_t ut = current_uthread();
 	bool saved_nodatalessfaults =
 	    (ut->uu_flag & UT_NSPACE_NODATALESSFAULTS) ? true : false;
 	ut->uu_flag |= UT_NSPACE_NODATALESSFAULTS;
@@ -10711,7 +10721,7 @@ record_iocount_trace_uthread(vnode_t vp, int count)
 {
 	struct uthread *ut;
 
-	ut = get_bsdthread_info(current_thread());
+	ut = current_uthread();
 	ut->uu_iocount += count;
 
 	if (count == 1) {

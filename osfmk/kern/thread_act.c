@@ -182,7 +182,7 @@ thread_terminate_internal(
 	}
 
 	/* unconditionally unpin the thread in internal termination */
-	ipc_thread_port_unpin(thread->ith_self);
+	ipc_thread_port_unpin(get_thread_ro(thread)->tro_self_port);
 
 	thread_mtx_unlock(thread);
 
@@ -197,12 +197,16 @@ kern_return_t
 thread_terminate(
 	thread_t                thread)
 {
+	task_t task;
+
 	if (thread == THREAD_NULL) {
 		return KERN_INVALID_ARGUMENT;
 	}
 
+	task = get_threadtask(thread);
+
 	/* Kernel threads can't be terminated without their own cooperation */
-	if (thread->task == kernel_task && thread != current_thread()) {
+	if (task == kernel_task && thread != current_thread()) {
 		return KERN_FAILURE;
 	}
 
@@ -213,7 +217,7 @@ thread_terminate(
 	 * Kernel threads don't pass through the return-to-user AST checking code,
 	 * but all threads must finish their own termination in thread_apc_ast.
 	 */
-	if (thread->task == kernel_task) {
+	if (task == kernel_task) {
 		assert(thread->active == FALSE);
 		thread_ast_clear(thread, AST_APC);
 		thread_apc_ast(thread);
@@ -254,16 +258,21 @@ kern_return_t
 thread_terminate_pinned(
 	thread_t                thread)
 {
+	task_t task;
+
 	if (thread == THREAD_NULL) {
 		return KERN_INVALID_ARGUMENT;
 	}
 
-	assert(thread->task != kernel_task);
+	task = get_threadtask(thread);
+
+
+	assert(task != kernel_task);
 	assert(thread_get_tag(thread) & (THREAD_TAG_PTHREAD | THREAD_TAG_MAINTHREAD));
 
 	thread_mtx_lock(thread);
-	if (task_is_pinned(thread->task) && thread->active) {
-		assert(thread->ith_self->ip_pinned == 1);
+	if (task_is_pinned(task) && thread->active) {
+		assert(get_thread_ro(thread)->tro_self_port->ip_pinned == 1);
 	}
 	thread_mtx_unlock(thread);
 
@@ -321,7 +330,7 @@ thread_suspend(thread_t thread)
 {
 	kern_return_t result = KERN_SUCCESS;
 
-	if (thread == THREAD_NULL || thread->task == kernel_task) {
+	if (thread == THREAD_NULL || get_threadtask(thread) == kernel_task) {
 		return KERN_INVALID_ARGUMENT;
 	}
 
@@ -349,7 +358,7 @@ thread_resume(thread_t thread)
 {
 	kern_return_t result = KERN_SUCCESS;
 
-	if (thread == THREAD_NULL || thread->task == kernel_task) {
+	if (thread == THREAD_NULL || get_threadtask(thread) == kernel_task) {
 		return KERN_INVALID_ARGUMENT;
 	}
 
@@ -778,7 +787,7 @@ thread_state_initialize(
 
 			if (thread_stop(thread, TRUE)) {
 				thread_mtx_lock(thread);
-				result = machine_thread_state_initialize( thread );
+				machine_thread_state_initialize( thread );
 				thread_unstop(thread);
 			} else {
 				thread_mtx_lock(thread);
@@ -787,7 +796,7 @@ thread_state_initialize(
 
 			thread_release(thread);
 		} else {
-			result = machine_thread_state_initialize( thread );
+			machine_thread_state_initialize( thread );
 		}
 	} else {
 		result = KERN_TERMINATED;

@@ -244,13 +244,7 @@ cpu_core_t *cpu_core; /* XXX TLB lockdown? */
 cred_t *
 dtrace_CRED(void)
 {
-	struct uthread *uthread = get_bsdthread_info(current_thread());
-
-	if (uthread == NULL) {
-		return NULL;
-	} else {
-		return uthread->uu_ucred; /* May return NOCRED which is defined to be 0 */
-	}
+	return current_thread_ro_unchecked()->tro_cred;
 }
 
 int

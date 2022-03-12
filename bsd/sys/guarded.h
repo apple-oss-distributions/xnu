@@ -166,10 +166,14 @@ enum guard_vn_exception_codes {
 #define kVNG_POLICY_SIGKILL     (1u << 4)
 #define kVNG_POLICY_UPRINTMSG   (1u << 5)
 
-#if defined(KERNEL)
+#if BSD_KERNEL_PRIVATE
+struct fileglob;
 extern int vnguard_exceptions_active(void);
 extern void vnguard_policy_init(void);
-#endif /* KERNEL */
+#if CONFIG_MACF && CONFIG_VNGUARD
+extern void vng_file_label_destroy(struct fileglob *fg);
+#endif /* CONFIG_MACF && CONFIG_VNGUARD */
+#endif /* BSD_KERNEL_PRIVATE */
 
 #endif /* (!_POSIX_C_SOURCE || _DARWIN_C_SOURCE) */
 

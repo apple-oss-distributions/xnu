@@ -486,6 +486,7 @@ nat464_translate_icmp_ip(pbuf_t *pbuf, uint16_t off, uint16_t *tot_len, uint16_t
 	struct ip6_hdr *ip6 = NULL;
 	void *hdr = NULL;
 	int hlen = 0, olen = 0;
+	uint64_t ipid_salt = (uint64_t)pbuf_get_packet_buffer_address(pbuf);
 
 	if (af == naf || (af != AF_INET && af != AF_INET6) ||
 	    (naf != AF_INET && naf != AF_INET6)) {
@@ -511,7 +512,7 @@ nat464_translate_icmp_ip(pbuf_t *pbuf, uint16_t off, uint16_t *tot_len, uint16_t
 		ip4->ip_v = IPVERSION;
 		ip4->ip_hl = sizeof(*ip4) >> 2;
 		ip4->ip_len = htons((uint16_t)(sizeof(*ip4) + tot_len2 - olen));
-		ip4->ip_id = rfc6864 ? 0 : htons(ip_randomid());
+		ip4->ip_id = rfc6864 ? 0 : htons(ip_randomid(ipid_salt));
 		ip4->ip_off = htons(IP_DF);
 		ip4->ip_ttl = ttl2;
 		if (proto2 == IPPROTO_ICMPV6) {

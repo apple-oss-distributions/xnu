@@ -154,7 +154,6 @@
 
 #define f_flag fp_glob->fg_flag
 #define f_ops fp_glob->fg_ops
-#define f_data fp_glob->fg_data
 
 struct pipepair {
 	lck_mtx_t     pp_mtx;
@@ -411,8 +410,8 @@ pipe(proc_t p, __unused struct pipe_args *uap, int32_t *retval)
 		goto freepipes;
 	}
 	rf->f_flag = FREAD;
-	rf->f_data = (caddr_t)rpipe;
 	rf->f_ops = &pipeops;
+	fp_set_data(rf, rpipe);
 
 	error = falloc(p, &wf, &retval[1], vfs_context_current());
 	if (error) {
@@ -420,8 +419,8 @@ pipe(proc_t p, __unused struct pipe_args *uap, int32_t *retval)
 		goto freepipes;
 	}
 	wf->f_flag = FWRITE;
-	wf->f_data = (caddr_t)wpipe;
 	wf->f_ops = &pipeops;
+	fp_set_data(wf, wpipe);
 
 	rpipe->pipe_peer = wpipe;
 	wpipe->pipe_peer = rpipe;
@@ -437,7 +436,7 @@ pipe(proc_t p, __unused struct pipe_args *uap, int32_t *retval)
 	 */
 	mac_pipe_label_init(rpipe);
 	mac_pipe_label_associate(kauth_cred_get(), rpipe);
-	wpipe->pipe_label = rpipe->pipe_label;
+	mac_pipe_set_label(wpipe, mac_pipe_label(rpipe));
 #endif
 	proc_fdlock_spin(p);
 	procfdtbl_releasefd(p, retval[0], NULL);
@@ -750,7 +749,7 @@ static int
 pipe_read(struct fileproc *fp, struct uio *uio, __unused int flags,
     __unused vfs_context_t ctx)
 {
-	struct pipe *rpipe = (struct pipe *)fp->f_data;
+	struct pipe *rpipe = (struct pipe *)fp_get_data(fp);
 	int error;
 	int nread = 0;
 	u_int size;
@@ -923,7 +922,7 @@ pipe_write(struct fileproc *fp, struct uio *uio, __unused int flags,
 	}
 	int space;
 
-	rpipe = (struct pipe *)fp->f_data;
+	rpipe = (struct pipe *)fp_get_data(fp);
 
 	PIPE_LOCK(rpipe);
 	wpipe = rpipe->pipe_peer;
@@ -1188,7 +1187,7 @@ static int
 pipe_ioctl(struct fileproc *fp, u_long cmd, caddr_t data,
     __unused vfs_context_t ctx)
 {
-	struct pipe *mpipe = (struct pipe *)fp->f_data;
+	struct pipe *mpipe = (struct pipe *)fp_get_data(fp);
 #if CONFIG_MACF
 	int error;
 #endif
@@ -1243,7 +1242,7 @@ pipe_ioctl(struct fileproc *fp, u_long cmd, caddr_t data,
 static int
 pipe_select(struct fileproc *fp, int which, void *wql, vfs_context_t ctx)
 {
-	struct pipe *rpipe = (struct pipe *)fp->f_data;
+	struct pipe *rpipe = (struct pipe *)fp_get_data(fp);
 	struct pipe *wpipe;
 	int    retnum = 0;
 
@@ -1309,8 +1308,8 @@ pipe_close(struct fileglob *fg, __unused vfs_context_t ctx)
 	struct pipe *cpipe;
 
 	proc_fdlock_spin(vfs_context_proc(ctx));
-	cpipe = (struct pipe *)fg->fg_data;
-	fg->fg_data = NULL;
+	cpipe = (struct pipe *)fg_get_data(fg);
+	fg_set_data(fg, NULL);
 	proc_fdunlock(vfs_context_proc(ctx));
 	if (cpipe) {
 		pipeclose(cpipe);
@@ -1360,7 +1359,7 @@ pipeclose(struct pipe *cpipe)
 	/*
 	 * Free the shared pipe label only after the two ends are disconnected.
 	 */
-	if (cpipe->pipe_label != NULL && cpipe->pipe_peer == NULL) {
+	if (mac_pipe_label(cpipe) != NULL && cpipe->pipe_peer == NULL) {
 		mac_pipe_label_destroy(cpipe);
 	}
 #endif
@@ -1588,7 +1587,7 @@ static int
 pipe_kqfilter(struct fileproc *fp, struct knote *kn,
     __unused struct kevent_qos_s *kev)
 {
-	struct pipe *cpipe = (struct pipe *)fp->f_data;
+	struct pipe *cpipe = (struct pipe *)fp_get_data(fp);
 	struct pipe *rpipe = &PIPE_PAIR(cpipe)->pp_rpipe;
 	int res;
 
@@ -1657,7 +1656,7 @@ pipe_kqfilter(struct fileproc *fp, struct knote *kn,
 static void
 filt_pipedetach(struct knote *kn)
 {
-	struct pipe *cpipe = (struct pipe *)kn->kn_fp->f_data;
+	struct pipe *cpipe = (struct pipe *)fp_get_data(kn->kn_fp);
 	struct pipe *rpipe = &PIPE_PAIR(cpipe)->pp_rpipe;
 
 	PIPE_LOCK(cpipe);
@@ -1756,7 +1755,7 @@ static int
 pipe_drain(struct fileproc *fp, __unused vfs_context_t ctx)
 {
 	/* Note: fdlock already held */
-	struct pipe *ppipe, *cpipe = (struct pipe *)(fp->fp_glob->fg_data);
+	struct pipe *ppipe, *cpipe = fp_get_data(fp);
 	boolean_t drain_pipe = FALSE;
 
 	/* Check if the pipe is going away */

@@ -305,6 +305,8 @@ udp_input(struct mbuf *m, int iphlen)
 	/* Expect 32-bit aligned data pointer on strict-align platforms */
 	MBUF_STRICT_DATA_ALIGNMENT_CHECK_32(m);
 
+	m_add_crumb(m, PKT_CRUMB_UDP_INPUT);
+
 	/*
 	 * Strip IP options, if any; should skip this,
 	 * make available to user, and use on returned packets,
@@ -712,10 +714,7 @@ udp_input(struct mbuf *m, int iphlen)
 	udp_in.sin_port = uh->uh_sport;
 	udp_in.sin_addr = ip->ip_src;
 	if ((inp->inp_flags & INP_CONTROLOPTS) != 0 ||
-#if CONTENT_FILTER
-	    /* Content Filter needs to see local address */
-	    (inp->inp_socket->so_cfil_db != NULL) ||
-#endif
+	    SOFLOW_ENABLED(inp->inp_socket) ||
 	    (inp->inp_socket->so_options & SO_TIMESTAMP) != 0 ||
 	    (inp->inp_socket->so_options & SO_TIMESTAMP_MONOTONIC) != 0 ||
 	    (inp->inp_socket->so_options & SO_TIMESTAMP_CONTINUOUS) != 0) {
@@ -804,10 +803,7 @@ udp_append(struct inpcb *last, struct ip *ip, struct mbuf *n, int off,
 	int ret = 0;
 
 	if ((last->inp_flags & INP_CONTROLOPTS) != 0 ||
-#if CONTENT_FILTER
-	    /* Content Filter needs to see local address */
-	    (last->inp_socket->so_cfil_db != NULL) ||
-#endif
+	    SOFLOW_ENABLED(last->inp_socket) ||
 	    (last->inp_socket->so_options & SO_TIMESTAMP) != 0 ||
 	    (last->inp_socket->so_options & SO_TIMESTAMP_MONOTONIC) != 0 ||
 	    (last->inp_socket->so_options & SO_TIMESTAMP_CONTINUOUS) != 0) {
@@ -877,10 +873,26 @@ udp_notify(struct inpcb *inp, int errno)
 void
 udp_ctlinput(int cmd, struct sockaddr *sa, void *vip, __unused struct ifnet * ifp)
 {
-	struct ip *ip = vip;
+	struct ipctlparam *ctl_param = vip;
+	struct ip *ip = NULL;
+	struct mbuf *m = NULL;
 	void (*notify)(struct inpcb *, int) = udp_notify;
 	struct in_addr faddr;
 	struct inpcb *inp = NULL;
+	struct icmp *icp = NULL;
+	size_t off;
+
+	if (ctl_param != NULL) {
+		ip = ctl_param->ipc_icmp_ip;
+		icp = ctl_param->ipc_icmp;
+		m = ctl_param->ipc_m;
+		off = ctl_param->ipc_off;
+	} else {
+		ip = NULL;
+		icp = NULL;
+		m = NULL;
+		off = 0;
+	}
 
 	faddr = ((struct sockaddr_in *)(void *)sa)->sin_addr;
 	if (sa->sa_family != AF_INET || faddr.s_addr == INADDR_ANY) {
@@ -897,12 +909,17 @@ udp_ctlinput(int cmd, struct sockaddr *sa, void *vip, __unused struct ifnet * if
 	}
 	if (ip) {
 		struct udphdr uh;
-		struct icmp *icp = NULL;
 
-		bcopy(((caddr_t)ip + (ip->ip_hl << 2)), &uh, sizeof(uh));
+		/* Check if we can safely get the ports from the UDP header */
+		if (m == NULL ||
+		    (m->m_len < off + sizeof(uh))) {
+			/* Insufficient length */
+			return;
+		}
+
+		bcopy(m->m_data + off, &uh, sizeof(uh));
 		inp = in_pcblookup_hash(&udbinfo, faddr, uh.uh_dport,
 		    ip->ip_src, uh.uh_sport, 0, NULL);
-		icp = (struct icmp *)(void *)((caddr_t)ip - offsetof(struct icmp, icmp_ip));
 
 		if (inp != NULL && inp->inp_socket != NULL) {
 			udp_lock(inp->inp_socket, 1, 0);
@@ -935,7 +952,12 @@ udp_ctloutput(struct socket *so, struct sockopt *sopt)
 	/* Allow <SOL_SOCKET,SO_FLUSH> at this level */
 	if (sopt->sopt_level != IPPROTO_UDP &&
 	    !(sopt->sopt_level == SOL_SOCKET && sopt->sopt_name == SO_FLUSH)) {
-		return ip_ctloutput(so, sopt);
+		if (SOCK_CHECK_DOM(so, PF_INET6)) {
+			error = ip6_ctloutput(so, sopt);
+		} else {
+			error = ip_ctloutput(so, sopt);
+		}
+		return error;
 	}
 
 	inp = sotoinpcb(so);
@@ -1471,7 +1493,7 @@ udp_output(struct inpcb *inp, struct mbuf *m, struct sockaddr *addr,
 	 * If socket is subject to UDP Content Filter and no addr is passed in,
 	 * retrieve CFIL saved state from mbuf and use it if necessary.
 	 */
-	if (so->so_cfil_db && !addr) {
+	if (CFIL_DGRAM_FILTERED(so) && !addr) {
 		cfil_tag = cfil_dgram_get_socket_state(m, &cfil_so_state_change_cnt, &cfil_so_options, &cfil_faddr, NULL);
 		if (cfil_tag) {
 			sin = (struct sockaddr_in *)(void *)cfil_faddr;
@@ -1908,6 +1930,7 @@ udp_output(struct inpcb *inp, struct mbuf *m, struct sockaddr *addr,
 	}
 #endif /* (DEBUG || DEVELOPMENT) */
 
+	m_add_crumb(m, PKT_CRUMB_UDP_OUTPUT);
 
 	if (ipoa.ipoa_boundif != IFSCOPE_NONE) {
 		ipoa.ipoa_flags |= IPOAF_BOUND_IF;
@@ -2118,16 +2141,16 @@ udp_attach(struct socket *so, int proto, struct proc *p)
 	struct inpcb *inp;
 	int error;
 
+	error = soreserve(so, udp_sendspace, udp_recvspace);
+	if (error != 0) {
+		return error;
+	}
 	inp = sotoinpcb(so);
 	if (inp != NULL) {
 		panic("%s so=%p inp=%p", __func__, so, inp);
 		/* NOTREACHED */
 	}
 	error = in_pcballoc(so, &udbinfo, p);
-	if (error != 0) {
-		return error;
-	}
-	error = soreserve(so, udp_sendspace, udp_recvspace);
 	if (error != 0) {
 		return error;
 	}

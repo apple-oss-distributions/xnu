@@ -860,7 +860,7 @@ pmap_compressed_pte_corruption_repair(uint64_t pte, uint64_t *pte_addr, uint64_t
 	    action, pmap, vaddr, ptep, (ppnum_t)~0UL, 0, 0, sizeof(adj_pteps) / sizeof(adj_pteps[0]),
 	    adj_pteps) != PMAP_ACTION_ASSERT) {
 		/* Correct the flipped bit(s) and continue */
-		pmap_store_pte(ptep, pte & INTEL_PTE_COMPRESSED_MASK);
+		pmap_store_pte(is_ept_pmap(pmap), ptep, pte & INTEL_PTE_COMPRESSED_MASK);
 		pmap->corrected_compressed_ptes_count++;
 		return TRUE; /* Returning TRUE to indicate this is a now a valid compressed PTE (we hope) */
 	}
@@ -1116,7 +1116,7 @@ pmap_cmpx_pte(pt_entry_t *entryp, pt_entry_t old, pt_entry_t new)
 extern uint32_t pmap_update_clear_pte_count;
 
 static inline void
-pmap_update_pte(pt_entry_t *mptep, uint64_t pclear_bits, uint64_t pset_bits)
+pmap_update_pte(boolean_t is_ept, pt_entry_t *mptep, uint64_t pclear_bits, uint64_t pset_bits)
 {
 	pt_entry_t npte, opte;
 	do {
@@ -1129,7 +1129,19 @@ pmap_update_pte(pt_entry_t *mptep, uint64_t pclear_bits, uint64_t pset_bits)
 		}
 		npte = opte & ~(pclear_bits);
 		npte |= pset_bits;
+#if DEVELOPMENT || DEBUG
+		if (__improbable(pmap_inject_pte_corruption != 0 && is_ept == FALSE && (npte & PTE_COMPRESSED))) {
+			pmap_inject_pte_corruption = 0;
+			/* Inject a corruption event */
+			npte |= INTEL_PTE_NX;
+		}
+#endif
 	}       while (!pmap_cmpx_pte(mptep, opte, npte));
+
+
+	if (__improbable((is_ept == FALSE) && (npte & PTE_COMPRESSED) && (npte & INTEL_PTE_NX))) {
+		pmap_corrupted_pte_detected(mptep, pclear_bits, pset_bits);
+	}
 }
 
 /*

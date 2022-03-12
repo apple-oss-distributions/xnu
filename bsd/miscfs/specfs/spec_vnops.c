@@ -1519,7 +1519,8 @@ rethrottle_thread(uthread_t ut)
 			wakeup(&ut->uu_on_throttlelist);
 
 			rethrottle_wakeups++;
-			KERNEL_DEBUG_CONSTANT((FSDBG_CODE(DBG_FSRW, 102)), thread_tid(ut->uu_thread), ut->uu_on_throttlelist, my_new_level, 0, 0);
+			KERNEL_DEBUG_CONSTANT((FSDBG_CODE(DBG_FSRW, 102)),
+			    uthread_tid(ut), ut->uu_on_throttlelist, my_new_level, 0, 0);
 		}
 	}
 	lck_spin_unlock(&ut->uu_rethrottle_lock);
@@ -1721,7 +1722,7 @@ int
 throttle_get_io_policy(uthread_t *ut)
 {
 	if (ut != NULL) {
-		*ut = get_bsdthread_info(current_thread());
+		*ut = current_uthread();
 	}
 
 	return proc_get_effective_thread_policy(current_thread(), TASK_POLICY_IO);
@@ -1731,7 +1732,7 @@ int
 throttle_get_passive_io_policy(uthread_t *ut)
 {
 	if (ut != NULL) {
-		*ut = get_bsdthread_info(current_thread());
+		*ut = current_uthread();
 	}
 
 	return proc_get_effective_thread_policy(current_thread(), TASK_POLICY_PASSIVE_IO);
@@ -1866,7 +1867,7 @@ throttle_io_will_be_throttled(__unused int lowpri_window_msecs, mount_t mp)
 	}
 
 	if (info->throttle_is_fusion_with_priority) {
-		uthread_t ut = get_bsdthread_info(current_thread());
+		uthread_t ut = current_uthread();
 		if (ut->uu_lowpri_window == 0) {
 			return THROTTLE_DISENGAGED;
 		}
@@ -1918,7 +1919,7 @@ throttle_lowpri_io(int sleep_amount)
 	boolean_t insert_tail = TRUE;
 	boolean_t s;
 
-	ut = get_bsdthread_info(current_thread());
+	ut = current_uthread();
 
 	if (ut->uu_lowpri_window == 0) {
 		return 0;
@@ -1992,7 +1993,8 @@ throttle_lowpri_io(int sleep_amount)
 			ml_set_interrupts_enabled(s);
 			lck_mtx_yield(&info->throttle_lock);
 
-			KERNEL_DEBUG_CONSTANT((FSDBG_CODE(DBG_FSRW, 103)), thread_tid(ut->uu_thread), ut->uu_on_throttlelist, 0, 0, 0);
+			KERNEL_DEBUG_CONSTANT((FSDBG_CODE(DBG_FSRW, 103)),
+			    uthread_tid(ut), ut->uu_on_throttlelist, 0, 0, 0);
 
 			ut->uu_was_rethrottled = false;
 			continue;
@@ -2073,7 +2075,7 @@ throttle_lowpri_io_will_be_throttled(int sleep_amount)
 		return FALSE;
 	}
 
-	uthread_t ut = get_bsdthread_info(current_thread());
+	uthread_t ut = current_uthread();
 	if (ut->uu_lowpri_window == 0) {
 		return FALSE;
 	}
@@ -2138,7 +2140,7 @@ throttle_info_reset_window(uthread_t ut)
 	struct _throttle_io_info_t *info;
 
 	if (ut == NULL) {
-		ut = get_bsdthread_info(current_thread());
+		ut = current_uthread();
 	}
 
 	if ((info = ut->uu_throttle_info)) {
@@ -2237,7 +2239,7 @@ throttle_info_update_internal(struct _throttle_io_info_t *info, uthread_t ut, in
 	}
 
 	if (ut == NULL) {
-		ut = get_bsdthread_info(current_thread());
+		ut = current_uthread();
 	}
 
 	if (bap && inflight && !ut->uu_throttle_bc) {
@@ -2293,7 +2295,7 @@ throttle_info_update_by_mount(mount_t mp)
 	uthread_t ut;
 	boolean_t isssd = FALSE;
 
-	ut = get_bsdthread_info(current_thread());
+	ut = current_uthread();
 
 	if (mp != NULL) {
 		if (disk_conditioner_mount_is_ssd(mp)) {
@@ -2429,8 +2431,7 @@ throttle_info_io_will_be_throttled(void * throttle_info, int policy)
 int
 throttle_lowpri_window(void)
 {
-	struct uthread *ut = get_bsdthread_info(current_thread());
-	return ut->uu_lowpri_window;
+	return current_uthread()->uu_lowpri_window;
 }
 
 
@@ -2923,7 +2924,7 @@ filt_spec_common(struct knote *kn, struct kevent_qos_s *kev, bool attach)
 {
 	uthread_t uth = current_uthread();
 	vfs_context_t ctx = vfs_context_current();
-	vnode_t vp = kn->kn_fp->fp_glob->fg_data;
+	vnode_t vp = (vnode_t)fp_get_data(kn->kn_fp);
 	__block bool selrecorded = false;
 	struct waitq_set *old_wqs;
 	int64_t data = 0;
@@ -2999,7 +3000,7 @@ out:
 static int
 filt_specattach(struct knote *kn, __unused struct kevent_qos_s *kev)
 {
-	vnode_t vp = kn->kn_fp->fp_glob->fg_data; /* Already have iocount, and vnode is alive */
+	vnode_t vp = (vnode_t)fp_get_data(kn->kn_fp); /* Already have iocount, and vnode is alive */
 	dev_t dev;
 
 	assert(vnode_ischr(vp));

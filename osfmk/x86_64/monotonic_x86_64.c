@@ -143,7 +143,12 @@ mt_core_set_snap(unsigned int ctr, uint64_t count)
 #define FIXED_CTR_CTRL_INIT_SINGLE (0x8)
 #define FIXED_CTR_CTRL_ENABLE_SINGLE (0x3)
 
+#if DEBUG
+void mt_fixed_counter_set_ctrl_mask(uint8_t ctrlbits);
+void
+#else
 inline void
+#endif
 mt_fixed_counter_set_ctrl_mask(uint8_t ctrlbits)
 {
 	uint64_t mask = 0;

@@ -290,6 +290,7 @@ int ml_get_max_cluster_number(void);
 
 unsigned int ml_get_first_cpu_id(unsigned int cluster_id);
 
+
 #ifdef __arm64__
 int ml_get_cluster_number_local(void);
 #endif /* __arm64__ */

@@ -40,7 +40,8 @@ def IterateProcKqfiles(proc):
             proc_fd_fglob = proc_ofiles[fd].fp_glob
             proc_fd_ftype = unsigned(proc_fd_fglob.fg_ops.fo_type)
             if proc_fd_ftype == xnudefines.DTYPE_KQUEUE:
-                yield kern.GetValueFromAddress(int(proc_fd_fglob.fg_data), 'struct kqfile *')
+                proc_fd_fglob_fg_data = Cast(proc_fd_fglob.fg_data, 'void *')
+                yield Cast(proc_fd_fglob_fg_data, 'struct kqfile *')
 
 def IterateProcKqworkloops(proc):
     """ Iterate through all kqworkloops in the given process

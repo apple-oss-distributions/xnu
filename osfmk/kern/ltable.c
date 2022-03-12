@@ -501,8 +501,8 @@ try_again:
 		return elem;
 	}
 
-	if (!ltable_has_space(table_size, used_elem, nelem)) {
-		if (get_preemption_level() != 0) {
+	if (get_preemption_level() != 0) {
+		if (!ltable_has_space(table_size, used_elem, nelem)) {
 #if CONFIG_LTABLE_STATS
 			table->nspins += 1;
 #endif
@@ -517,8 +517,17 @@ try_again:
 			delay(1);
 			goto try_again;
 		}
-		ltable_grow(table, nelem);
-		goto try_again;
+	} else {
+		/*
+		 * If we're close to be out of elements, just grow the table,
+		 * do not wait to have just one element left because it's
+		 * likely that person will be under preemption disabled
+		 * and not allowed to grow the table.
+		 */
+		if (!ltable_has_space(table_size, used_elem, nelem + MAX_CPUS)) {
+			ltable_grow(table, nelem + MAX_CPUS);
+			goto try_again;
+		}
 	}
 
 	/* read this value only once before the CAS */

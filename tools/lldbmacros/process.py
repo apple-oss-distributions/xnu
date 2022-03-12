@@ -13,6 +13,24 @@ import memory
 import json
 from collections import defaultdict
 
+def GetProcPID(proc):
+    """ returns the PID of a process.
+        params:
+            proc: value object representing a proc in the kernel.
+        returns:
+            int: the pid of the process.
+    """
+    return unsigned(proc.p_pid)
+
+def GetProcPlatform(proc):
+    """ returns the platform identifier of a process.
+        params:
+            proc: value object representing a proc in the kernel.
+        returns:
+            int: the platform identifier of the process.
+    """
+    return int(proc.p_proc_ro.p_platform_data.p_platform)
+
 def GetProcName(proc):
     """ returns a string name of the process. Longer variant is preffered if provided.
         params:
@@ -56,10 +74,12 @@ def GetProcPIDForTask(task):
     """
     if task and unsigned(task.bsd_info):
         p = Cast(task.bsd_info, 'proc *')
-        return unsigned(p.p_pid)
+        return unsigned(GetProcPID(p))
 
     if task :
-        return unsigned(task.audit_token.val[5])
+        proc_ro = Cast(link.sl_alloc_task.bsd_info_ro, 'proc_ro *')
+        pid = unsigned(proc_ro.task_tokens.audit_token.val[5])
+        return pid
 
     return -1
 
@@ -71,11 +91,11 @@ def GetProcInfo(proc):
             str : A string describing various information for process.
     """
     out_string = ""
-    out_string += ("Process {p: <#020x}\n\tname {0: <32s}\n\tpid:{p.p_pid: <6d} " +
+    out_string += ("Process {p: <#020x}\n\tname {0: <32s}\n\tpid:{1: <6d} " +
                    "task:{p.task: <#020x} p_stat:{p.p_stat: <6d} parent pid: {p.p_ppid: <6d}\n"
-                   ).format(GetProcName(proc), p=proc)
+                   ).format(GetProcName(proc), GetProcPID(proc), p=proc)
     #print the Creds
-    ucred = proc.p_ucred
+    ucred = proc.p_proc_ro.p_ucred
     if ucred:
         out_string += "Cred: euid {:d} ruid {:d} svuid {:d}\n".format(ucred.cr_posix.cr_uid,
                                                                       ucred.cr_posix.cr_ruid,
@@ -109,7 +129,7 @@ def GetProcNameForPid(pid):
             str     : Name of the process corresponding to the pid, "Unknown" if not found
     """
     for p in kern.procs:
-        if int(p.p_pid) == int(pid):
+        if int(GetProcPID(p)) == int(pid):
             return GetProcName(p)
     return "Unknown"
 
@@ -126,7 +146,7 @@ def GetProcForPid(search_pid):
     else:
         headp = kern.globals.allproc
         for proc in IterateListEntry(headp, 'struct proc *', 'p_list'):
-            if proc.p_pid == search_pid:
+            if GetProcPID(proc) == search_pid:
                 return proc
         return None
 
@@ -272,16 +292,25 @@ def GetTaskSummary(task, showcorpse=False):
         out_string += " " + GetKCDataSummary(task.corpse_info)
     return out_string
 
+def GetMachThread(thread):
+    """ Converts the passed in value interpreted as a thread_t into a uthread_t
+    """
+    return addressof(Cast(thread, 'struct thread *')[-1])
+
+def GetBSDThread(thread):
+    """ Converts the passed in value interpreted as a uthread_t into a thread_t
+    """
+    return Cast(addressof(Cast(thread, 'struct thread *')[1]), 'struct uthread *')
+
 def GetThreadName(thread):
     """ Get the name of a thread, if possible.  Returns the empty string
         otherwise.
     """
-    if int(thread.uthread) != 0:
-        uthread = Cast(thread.uthread, 'uthread *')
-        if int(uthread.pth_name) != 0 :
-            th_name_strval = Cast(uthread.pth_name, 'char *')
-            if len(str(th_name_strval)) > 0 :
-                return str(th_name_strval)
+    uthread = GetBSDThread(thread)
+    if int(uthread.pth_name) != 0 :
+        th_name_strval = Cast(uthread.pth_name, 'char *')
+        if len(str(th_name_strval)) > 0 :
+            return str(th_name_strval)
 
     return ''
 
@@ -335,26 +364,25 @@ def GetThreadSummary(thread):
     
     io_policy_str = ""
     thread_name = GetThreadName(thread)
-    if int(thread.uthread) != 0:
-        uthread = Cast(thread.uthread, 'uthread *')
+    uthread = GetBSDThread(thread)
 
-        #check for io_policy flags 
-        if int(uthread.uu_flag) & 0x400:
-            io_policy_str+='RAGE '
-        
-        #now flags for task_policy
-        
-        io_policy_str = ""
-        
-        if int(thread.effective_policy.thep_darwinbg) != 0:
-            io_policy_str += "B"
-        if int(thread.effective_policy.thep_io_tier) != 0:
-            io_policy_str += "T"
-        if int(thread.effective_policy.thep_io_passive) != 0:
-            io_policy_str += "P"
-        if int(thread.effective_policy.thep_terminated) != 0:
-            io_policy_str += "D"
-                
+    # check for io_policy flags
+    if int(uthread.uu_flag) & 0x400:
+        io_policy_str+='RAGE '
+
+    #now flags for task_policy
+
+    io_policy_str = ""
+
+    if int(thread.effective_policy.thep_darwinbg) != 0:
+        io_policy_str += "B"
+    if int(thread.effective_policy.thep_io_tier) != 0:
+        io_policy_str += "T"
+    if int(thread.effective_policy.thep_io_passive) != 0:
+        io_policy_str += "P"
+    if int(thread.effective_policy.thep_terminated) != 0:
+        io_policy_str += "D"
+
     state = int(thread.state)
     thread_state_chars = {0x0:'', 0x1:'W', 0x2:'S', 0x4:'R', 0x8:'U', 0x10:'H', 0x20:'A', 0x40:'P', 0x80:'I'}
     state_str = ''
@@ -380,11 +408,10 @@ def GetThreadSummary(thread):
         wait_event_str_sym = kern.Symbolicate(int(hex(thread.wait_event), 16))
         if len(wait_event_str_sym) > 0:
             wait_event_str = wait_event_str.strip() + " <" + wait_event_str_sym + ">"
-        if int(thread.uthread) != 0 :
-            uthread = Cast(thread.uthread, 'uthread *')
-            if int(uthread.uu_wmesg) != 0:
-                wait_message = str(Cast(uthread.uu_wmesg, 'char *'))
-            
+        uthread = GetBSDThread(thread)
+        if int(uthread.uu_wmesg) != 0:
+            wait_message = str(Cast(uthread.uu_wmesg, 'char *'))
+
     out_string += format_string.format(thread_ptr_str, thread_id, processor, base_priority, sched_priority, sched_mode, io_policy_str, state_str, ast_str, wait_queue_str, wait_event_str, wait_message, thread_name)
     return out_string
 
@@ -649,7 +676,7 @@ def GetProcSummary(proc):
     if not proc:
         out_string += "Process " + hex(proc) + " is not valid."
         return out_string 
-    pid = int(proc.p_pid)
+    pid = int(GetProcPID(proc))
     proc_addr = int(hex(proc), 16)
     proc_rage_str = ""
     if int(proc.p_lflag) & 0x400000 :
@@ -756,7 +783,7 @@ def ShowPid(cmd_args=None):
     pidval = ArgumentStringToInt(cmd_args[0])
     for t in kern.tasks:
         pval = Cast(t.bsd_info, 'proc *')
-        if pval and pval.p_pid == pidval:
+        if pval and GetProcPID(pval) == pidval:
             print GetTaskSummary.header + " " + GetProcSummary.header
             print GetTaskSummary(t) + " " + GetProcSummary(pval)
             break
@@ -824,6 +851,7 @@ def ShowProcFiles(cmd_args=None):
             out_str = ''
             proc_fd_flags = proc_ofiles[fd].fp_flags
             proc_fd_fglob = proc_ofiles[fd].fp_glob
+            proc_fd_fglob_fg_data = Cast(proc_fd_fglob.fg_data, 'void *')
             out_str += "{0: <5d} ".format(fd)
             out_str += "{0: <#18x} ".format(unsigned(proc_fd_fglob))
             out_str += "0x{0:0>8x} ".format(unsigned(proc_fd_flags))
@@ -832,9 +860,9 @@ def ShowProcFiles(cmd_args=None):
                 out_str += "{0: <8s} ".format(xnudefines.filetype_strings[proc_fd_ftype])
             else:
                 out_str += "?: {0: <5d} ".format(proc_fd_ftype)
-            out_str += "{0: <#18x} ".format(unsigned(proc_fd_fglob.fg_data))
+            out_str += "{0: <#18x} ".format(unsigned(proc_fd_fglob_fg_data))
             if proc_fd_ftype == 1:
-                fd_name = Cast(proc_fd_fglob.fg_data, 'struct vnode *').v_name
+                fd_name = Cast(proc_fd_fglob_fg_data, 'struct vnode *').v_name
                 out_str += "{0: <64s}".format(fd_name)
             out_str += "\n"
             print out_str
@@ -1153,15 +1181,16 @@ def ShowTaskStacksCmdHelper(cmd_args=None, cmd_options={}):
 
 def CheckTaskProcRefs(task, proc):
     for thread in IterateQueue(task.threads, 'thread *', 'task_threads'):
-        if int(thread.uthread) == 0:
-            continue
-        uthread = Cast(thread.uthread, 'uthread *')
+        uthread = GetBSDThread(thread)
         refcount = int(uthread.uu_proc_refcount)
-        uu_ref_index = int(uthread.uu_pindex)
+        uu_ref_info = uthread.uu_proc_ref_info
+        if int(uu_ref_info) == 0:
+            continue
+        uu_ref_index = int(uu_ref_info.upri_pindex)
         if refcount == 0:
             continue
         for ref in range(0, uu_ref_index):
-            if unsigned(uthread.uu_proc_ps[ref]) == unsigned(proc):
+            if unsigned(uu_ref_info.upri_proc_ps[ref]) == unsigned(proc):
                 print GetTaskSummary.header + " " + GetProcSummary.header
                 pval = Cast(task.bsd_info, 'proc *')
                 print GetTaskSummary(task) + " " + GetProcSummary(pval)
@@ -1169,7 +1198,7 @@ def CheckTaskProcRefs(task, proc):
                 print "\t" + GetThreadSummary(thread) + "\n"
 
                 for frame in range (0, 10):
-                    trace_addr = unsigned(uthread.uu_proc_pcs[ref][frame])
+                    trace_addr = unsigned(uu_ref_info.upri_proc_pcs[ref][frame])
                     symbol_arr = kern.SymbolicateFromAddress(unsigned(trace_addr))
                     if symbol_arr:
                         symbol_str = str(symbol_arr[0].addr)
@@ -1211,7 +1240,7 @@ def ShowAllThreads(cmd_args = None):
     # Task -> [thread, ..] map of terminated threads
     tmap = defaultdict(list)
     for thr in kern.terminated_threads:
-        tmap[unsigned(thr.task)].append(thr)
+        tmap[unsigned(thr.t_tro.tro_task)].append(thr)
 
     for t in kern.tasks:
         ShowTaskThreads([str(int(t))])
@@ -1361,7 +1390,7 @@ def ShowCurrentStacks(cmd_args=None):
         print "\n" + GetProcessorSummary(current_processor)
         active_thread = current_processor.active_thread
         if unsigned(active_thread) != 0 :
-            task_val = active_thread.task
+            task_val = active_thread.t_tro.tro_task
             proc_val = Cast(task_val.bsd_info, 'proc *')
             print GetTaskSummary.header + " " + GetProcSummary.header
             print GetTaskSummary(task_val) + " " + GetProcSummary(proc_val)
@@ -1382,7 +1411,7 @@ def ShowCurrentThreads(cmd_args=None):
         print GetProcessorSummary(current_processor)
         active_thread = current_processor.active_thread
         if unsigned(active_thread) != 0 :
-            task_val = active_thread.task
+            task_val = active_thread.t_tro.tro_task
             proc_val = Cast(task_val.bsd_info, 'proc *')
             print GetTaskSummary.header + " " + GetProcSummary.header
             print GetTaskSummary(task_val) + " " + GetProcSummary(proc_val)
@@ -1439,7 +1468,7 @@ def FullBackTraceAll(cmd_args=[]):
         print "\n" + GetProcessorSummary(processor)
         active_thread = processor.active_thread
         if unsigned(active_thread) != 0 :
-            task_val = active_thread.task
+            task_val = active_thread.t_tro.tro_task
             proc_val = Cast(task_val.bsd_info, 'proc *')
             print GetTaskSummary.header + " " + GetProcSummary.header
             print GetTaskSummary(task_val) + " " + GetProcSummary(proc_val)
@@ -1495,7 +1524,7 @@ def ShowProcTree(cmd_args=None):
     out_string += hdr_format.format('='*3, '='*7, '='*7)
     proc = GetProcForPid(search_pid)
     out_string += "{0: <6d} {1: <32s} [ {2: #019x} ]\n".format(proc.p_ppid, GetProcName(proc.p_pptr), unsigned(proc.p_pptr))
-    out_string += "|--{0: <6d} {1: <32s} [ {2: #019x} ]\n".format(proc.p_pid, GetProcName(proc), unsigned(proc))
+    out_string += "|--{0: <6d} {1: <32s} [ {2: #019x} ]\n".format(GetProcPID(proc), GetProcName(proc), unsigned(proc))
     print out_string
     ShowProcTreeRecurse(proc, "|  ")
     
@@ -1512,7 +1541,7 @@ def ShowProcTreeRecurse(proc, prefix=""):
         head_ptr = proc.p_children.lh_first
         
         for p in IterateListEntry(proc.p_children, 'struct proc *', 'p_sibling'):
-            print prefix + "|--{0: <6d} {1: <32s} [ {2: #019x} ]\n".format(p.p_pid, GetProcName(p), unsigned(p))
+            print prefix + "|--{0: <6d} {1: <32s} [ {2: #019x} ]\n".format(GetProcPID(p), GetProcName(p), unsigned(p))
             ShowProcTreeRecurse(p, prefix + "|  ")
 
 @lldb_command('showthreadfortid')
@@ -1750,7 +1779,7 @@ def GetTaskLedgers(task_val):
     pval = Cast(task_val.bsd_info, 'proc *')
     if pval:
         task["name"] = GetProcName(pval)
-        task["pid"] = int(pval.p_pid)
+        task["pid"] = int(GetProcPID(pval))
 
     task["entries"] = []
     while i != task_ledgerp.l_template.lt_cnt:

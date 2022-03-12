@@ -427,7 +427,7 @@ sigaction(proc_t p, struct sigaction_args *uap, __unused int32_t *retval)
 	struct __kern_sigaction __vec;
 
 	struct kern_sigaction *sa = &vec;
-	struct sigacts *ps = p->p_sigacts;
+	struct sigacts *ps = &p->p_sigacts;
 
 	int signum;
 	int bit, error = 0;
@@ -531,20 +531,6 @@ clear_procsiglist(proc_t p, int bit, boolean_t in_signalstart)
 		proc_signalstart(p, 1);
 	}
 
-#if CONFIG_VFORK
-	if ((p->p_lflag & P_LINVFORK) && p->p_vforkact) {
-		thread_t thact = p->p_vforkact;
-		uth = (struct uthread *)get_bsdthread_info(thact);
-		if (uth) {
-			uth->uu_siglist &= ~bit;
-		}
-		if (!in_signalstart) {
-			proc_signalend(p, 1);
-		}
-		proc_unlock(p);
-		return 0;
-	}
-#endif /* CONFIG_VFORK */
 
 	TAILQ_FOREACH(uth, &p->p_uthlist, uu_list) {
 		uth->uu_siglist &= ~bit;
@@ -567,19 +553,6 @@ unblock_procsigmask(proc_t p, int bit)
 	proc_lock(p);
 	proc_signalstart(p, 1);
 
-#if CONFIG_VFORK
-	if ((p->p_lflag & P_LINVFORK) && p->p_vforkact) {
-		thread_t thact = p->p_vforkact;
-		uth = (struct uthread *)get_bsdthread_info(thact);
-		if (uth) {
-			uth->uu_sigmask &= ~bit;
-		}
-		p->p_sigmask &= ~bit;
-		proc_signalend(p, 1);
-		proc_unlock(p);
-		return 0;
-	}
-#endif /* CONFIG_VFORK */
 
 	TAILQ_FOREACH(uth, &p->p_uthlist, uu_list) {
 		uth->uu_sigmask &= ~bit;
@@ -599,19 +572,6 @@ block_procsigmask(proc_t p, int bit)
 	proc_lock(p);
 	proc_signalstart(p, 1);
 
-#if CONFIG_VFORK
-	if ((p->p_lflag & P_LINVFORK) && p->p_vforkact) {
-		thread_t thact = p->p_vforkact;
-		uth = (struct uthread *)get_bsdthread_info(thact);
-		if (uth) {
-			uth->uu_sigmask |= bit;
-		}
-		p->p_sigmask |=  bit;
-		proc_signalend(p, 1);
-		proc_unlock(p);
-		return 0;
-	}
-#endif /* CONFIG_VFORK */
 
 	TAILQ_FOREACH(uth, &p->p_uthlist, uu_list) {
 		uth->uu_sigmask |= bit;
@@ -631,19 +591,6 @@ set_procsigmask(proc_t p, int bit)
 	proc_lock(p);
 	proc_signalstart(p, 1);
 
-#if CONFIG_VFORK
-	if ((p->p_lflag & P_LINVFORK) && p->p_vforkact) {
-		thread_t thact = p->p_vforkact;
-		uth = (struct uthread *)get_bsdthread_info(thact);
-		if (uth) {
-			uth->uu_sigmask = bit;
-		}
-		p->p_sigmask =  bit;
-		proc_signalend(p, 1);
-		proc_unlock(p);
-		return 0;
-	}
-#endif /* CONFIG_VFORK */
 
 	TAILQ_FOREACH(uth, &p->p_uthlist, uu_list) {
 		uth->uu_sigmask = bit;
@@ -669,7 +616,7 @@ set_procsigmask(proc_t p, int bit)
 int
 setsigvec(proc_t p, __unused thread_t thread, int signum, struct __kern_sigaction *sa, boolean_t in_sigstart)
 {
-	struct sigacts *ps = p->p_sigacts;
+	struct sigacts *ps = &p->p_sigacts;
 	int bit;
 
 	assert(signum < NSIG);
@@ -768,7 +715,7 @@ siginit(proc_t p)
 void
 execsigs(proc_t p, thread_t thread)
 {
-	struct sigacts *ps = p->p_sigacts;
+	struct sigacts *ps = &p->p_sigacts;
 	int nc, mask;
 	struct uthread *ut;
 
@@ -836,7 +783,7 @@ sigprocmask(proc_t p, struct sigprocmask_args *uap, __unused int32_t *retval)
 	user_addr_t omask = uap->omask;
 	struct uthread *ut;
 
-	ut = (struct uthread *)get_bsdthread_info(current_thread());
+	ut = current_uthread();
 	oldmask  = ut->uu_sigmask;
 
 	if (uap->mask == USER_ADDR_NULL) {
@@ -881,7 +828,7 @@ sigpending(__unused proc_t p, struct sigpending_args *uap, __unused int32_t *ret
 	struct uthread *ut;
 	sigset_t pendlist;
 
-	ut = (struct uthread *)get_bsdthread_info(current_thread());
+	ut = current_uthread();
 	pendlist = ut->uu_siglist;
 
 	if (uap->osv) {
@@ -899,7 +846,7 @@ sigpending(__unused proc_t p, struct sigpending_args *uap, __unused int32_t *ret
 static int
 sigcontinue(__unused int error)
 {
-//	struct uthread *ut = get_bsdthread_info(current_thread());
+//	struct uthread *ut = current_uthread();
 	unix_syscall_return(EINTR);
 }
 
@@ -915,7 +862,7 @@ sigsuspend_nocancel(proc_t p, struct sigsuspend_nocancel_args *uap, __unused int
 {
 	struct uthread *ut;
 
-	ut = (struct uthread *)get_bsdthread_info(current_thread());
+	ut = current_uthread();
 
 	/*
 	 * When returning from sigpause, we want
@@ -940,7 +887,7 @@ __disable_threadsignal(__unused proc_t p,
 {
 	struct uthread *uth;
 
-	uth = (struct uthread *)get_bsdthread_info(current_thread());
+	uth = current_uthread();
 
 	/* No longer valid to have any signal delivered */
 	uth->uu_flag |= (UT_NO_SIGMASK | UT_CANCELDISABLE);
@@ -988,8 +935,7 @@ __pthread_markcancel(__unused proc_t p,
 
 	uth = (struct uthread *)get_bsdthread_info(target_act);
 
-	/* if the thread is in vfork do not cancel */
-	if ((uth->uu_flag & UT_ALREADY_CANCELED_MASK) == 0) {
+	if ((uth->uu_flag & (UT_CANCEL | UT_CANCELED)) == 0) {
 		uth->uu_flag |= (UT_CANCEL | UT_NO_SIGMASK);
 		if (((uth->uu_flag & UT_NOTCANCELPT) == 0)
 		    && ((uth->uu_flag & UT_CANCELDISABLE) == 0)) {
@@ -1026,7 +972,6 @@ __pthread_canceled(__unused proc_t p,
 		return 0;
 	case 0:
 	default:
-		/* if the thread is in vfork do not cancel */
 		if ((uth->uu_flag & (UT_CANCELDISABLE | UT_CANCEL | UT_CANCELED)) == UT_CANCEL) {
 			uth->uu_flag &= ~UT_CANCEL;
 			uth->uu_flag |= (UT_CANCELED | UT_NO_SIGMASK);
@@ -1291,7 +1236,7 @@ __pthread_sigmask(__unused proc_t p, struct __pthread_sigmask_args *uap,
 	struct uthread *ut;
 	sigset_t  oldset;
 
-	ut = (struct uthread *)get_bsdthread_info(current_thread());
+	ut = current_uthread();
 	oldset = ut->uu_sigmask;
 
 	if (set == USER_ADDR_NULL) {
@@ -1354,7 +1299,7 @@ __sigwait_nocancel(proc_t p, struct __sigwait_nocancel_args *uap, __unused int32
 	sigset_t sigw = 0;
 	int signum;
 
-	ut = (struct uthread *)get_bsdthread_info(current_thread());
+	ut = current_uthread();
 
 	if (uap->set == USER_ADDR_NULL) {
 		return EINVAL;
@@ -1372,12 +1317,6 @@ __sigwait_nocancel(proc_t p, struct __sigwait_nocancel_args *uap, __unused int32
 	}
 
 	proc_lock(p);
-#if CONFIG_VFORK
-	if ((p->p_lflag & P_LINVFORK) && p->p_vforkact) {
-		proc_unlock(p);
-		return EINVAL;
-	}
-#endif /* CONFIG_VFORK */
 
 	proc_signalstart(p, 1);
 	TAILQ_FOREACH(uth, &p->p_uthlist, uu_list) {
@@ -1454,7 +1393,7 @@ sigaltstack(__unused proc_t p, struct sigaltstack_args *uap, __unused int32_t *r
 	struct uthread *uth;
 	int onstack;
 
-	uth = (struct uthread *)get_bsdthread_info(current_thread());
+	uth = current_uthread();
 
 	pstk = &uth->uu_sigstk;
 	if ((uth->uu_flag & UT_ALTSTACK) == 0) {
@@ -1850,8 +1789,11 @@ killpg1(proc_t curproc, int signum, int pgid, int all, int posix)
 		}
 
 		pgrp_iterate(pgrp, killpg1_callback, &karg, ^bool (proc_t p) {
+			if (p == kernproc || p == initproc) {
+			        return false;
+			}
 			/* XXX shouldn't this allow signalling zombies? */
-			return proc_getpid(p) > 1 && !(p->p_flag & P_SYSTEM) && p->p_stat != SZOMB;
+			return !(p->p_flag & P_SYSTEM) && p->p_stat != SZOMB;
 		});
 		pgrp_rele(pgrp);
 	}
@@ -1940,11 +1882,6 @@ threadsignal(thread_t sig_actthread, int signum, mach_exception_code_t code, boo
 	p = (proc_t)(get_bsdtask_info(sig_task));
 
 	uth = get_bsdthread_info(sig_actthread);
-#if CONFIG_VFORK
-	if (uth->uu_flag & UT_VFORK) {
-		p = uth->uu_proc;
-	}
-#endif /* CONFIG_VFORK */
 
 	proc_lock(p);
 	if (!(p->p_lflag & P_LTRACED) && (p->p_sigignore & mask)) {
@@ -2072,27 +2009,12 @@ get_signalthread(proc_t p, int signum, thread_t * thr)
 
 	*thr = THREAD_NULL;
 
-#if CONFIG_VFORK
-	if ((p->p_lflag & P_LINVFORK) && p->p_vforkact) {
-		task_t sig_task = p->task;
-		thread_t sig_thread = p->p_vforkact;
-		kern_return_t kret;
-
-		kret = check_actforsig(sig_task, sig_thread, 1);
-		if (kret == KERN_SUCCESS) {
-			*thr = sig_thread;
-			return KERN_SUCCESS;
-		} else {
-			return KERN_FAILURE;
-		}
-	}
-#endif /* CONFIG_VFORK */
 
 again:
 	TAILQ_FOREACH(uth, &p->p_uthlist, uu_list) {
 		if (((uth->uu_flag & UT_NO_SIGMASK) == 0) &&
 		    (((uth->uu_sigmask & mask) == 0) || (uth->uu_sigwait & mask))) {
-			thread_t th = uth->uu_context.vc_thread;
+			thread_t th = get_machthread(uth);
 			if (skip_wqthreads && (thread_get_tag(th) & THREAD_TAG_WORKQUEUE)) {
 				/* Workqueue threads may be parked in the kernel unable to
 				 * deliver signals for an extended period of time, so skip them
@@ -2391,7 +2313,6 @@ psignal_internal(proc_t p, task_t task, thread_t thread, int flavor, int signum,
 	 * Defer further processing for signals which are held,
 	 * except that stopped processes must be continued by SIGCONT.
 	 */
-	/* vfork will not go thru as action is SIG_DFL */
 	if ((action == KERN_SIG_HOLD) && ((prop & SA_CONT) == 0 || sig_proc->p_stat != SSTOP)) {
 		goto sigout_locked;
 	}
@@ -3185,7 +3106,7 @@ void
 postsig_locked(int signum)
 {
 	proc_t p = current_proc();
-	struct sigacts *ps = p->p_sigacts;
+	struct sigacts *ps = &p->p_sigacts;
 	user_addr_t catcher;
 	uint32_t code;
 	int mask, returnmask;
@@ -3213,7 +3134,7 @@ postsig_locked(int signum)
 
 	proc_signalstart(p, 1);
 
-	ut = (struct uthread *)get_bsdthread_info(current_thread());
+	ut = current_uthread();
 	mask = sigmask(signum);
 	ut->uu_siglist &= ~mask;
 	catcher = SIGACTION(p, signum);
@@ -3233,7 +3154,7 @@ postsig_locked(int signum)
 
 		p->p_acflag |= AXSIG;
 		if (sigprop[signum] & SA_CORE) {
-			p->p_sigacts->ps_sig = signum;
+			p->p_sigacts.ps_sig = signum;
 			proc_signalend(p, 1);
 			proc_unlock(p);
 #if CONFIG_COREDUMP
@@ -3605,16 +3526,6 @@ proc_pendingsignals(proc_t p, sigset_t mask)
 		goto out;
 	}
 
-#if CONFIG_VFORK
-	if ((p->p_lflag & P_LINVFORK) && p->p_vforkact) {
-		thread_t th = p->p_vforkact;
-		uth = (struct uthread *)get_bsdthread_info(th);
-		if (uth) {
-			bits = (((uth->uu_siglist & ~uth->uu_sigmask) & ~p->p_sigignore) & mask);
-		}
-		goto out;
-	}
-#endif /* CONFIG_VFORK */
 
 	bits = 0;
 	TAILQ_FOREACH(uth, &p->p_uthlist, uu_list) {

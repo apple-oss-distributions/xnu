@@ -227,6 +227,7 @@ XNU_ONLY_EXPORTS = \
 	pipe.h \
 	proc_internal.h \
 	proc_require.h \
+	proc_ro.h \
 	pthread_internal.h \
 	resourcevar.h \
 	semaphore.h \

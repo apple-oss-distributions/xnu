@@ -303,7 +303,7 @@ def SchedClutchBucketDetails(clutch_bucket):
         print GetThreadSummary.header + "{:s}".format("Process Name")
         print "=" * 240
         for thread in thread_list:
-            proc = Cast(thread.task.bsd_info, 'proc *')
+            proc = thread.t_tro.tro_proc
             print GetThreadSummary(thread) + "{:s}".format(GetProcName(proc))
 
 @lldb_command('showschedclutchbucket')
@@ -369,8 +369,8 @@ def GetSchedMostRecentDispatch(show_processor_details=False):
     while unsigned(current_processor) > 0:
         active_thread = current_processor.active_thread
         if unsigned(active_thread) != 0 :
-            task_val = active_thread.task
-            proc_val = Cast(task_val.bsd_info, 'proc *')
+            task_val = active_thread.t_tro.tro_task
+            proc_val = active_thread.t_tro.tro_proc
             proc_name = "<unknown>" if unsigned(proc_val) == 0 else GetProcName(proc_val)
 
         last_dispatch = unsigned(current_processor.last_dispatch)
@@ -406,13 +406,12 @@ def ShowThreadSchedHistory(thread, most_recent_dispatch):
 
     thread_name = ""
 
-    if unsigned(thread.uthread) != 0:
-        uthread = Cast(thread.uthread, 'uthread *')
-        # Doing the straightforward thing blows up weirdly, so use some indirections to get back on track
-        if unsigned(uthread.pth_name) != 0 :
-            thread_name = str(kern.GetValueFromAddress(unsigned(uthread.pth_name), 'char*'))
+    uthread = GetBSDThread(thread)
+    # Doing the straightforward thing blows up weirdly, so use some indirections to get back on track
+    if unsigned(uthread.pth_name) != 0 :
+        thread_name = str(kern.GetValueFromAddress(unsigned(uthread.pth_name), 'char*'))
 
-    task = thread.task
+    task = thread.t_tro.tro_task
     task_name = "unknown"
     if task and unsigned(task.bsd_info):
         p = Cast(task.bsd_info, 'proc *')
@@ -1100,7 +1099,7 @@ def ShowThreadCall(prefix, call, recent_timestamp, is_pending=False):
                 kqueue = GetKnoteKqueue(knote)
                 proc = kqueue.kq_p
                 proc_name = GetProcName(proc)
-                proc_pid = proc.p_pid
+                proc_pid = GetProcPID(proc)
 
                 extra_string += "kq: {:#018x} {:s}[{:d}]".format(kqueue, proc_name, proc_pid)
 
@@ -1114,7 +1113,7 @@ def ShowThreadCall(prefix, call, recent_timestamp, is_pending=False):
                 workq = Cast(call.tc_param0, 'struct workqueue *')
                 proc = workq.wq_proc
                 proc_name = GetProcName(proc)
-                proc_pid = proc.p_pid
+                proc_pid = GetProcPID(proc)
 
                 extra_string += "{:s}[{:d}]".format(proc_name, proc_pid)
 
@@ -1122,7 +1121,7 @@ def ShowThreadCall(prefix, call, recent_timestamp, is_pending=False):
                 "realitexpire" in func_name):
                 proc = Cast(call.tc_param0, 'struct proc *')
                 proc_name = GetProcName(proc)
-                proc_pid = proc.p_pid
+                proc_pid = GetProcPID(proc)
 
                 extra_string += "{:s}[{:d}]".format(proc_name, proc_pid)
 

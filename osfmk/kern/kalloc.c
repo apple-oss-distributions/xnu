@@ -471,8 +471,7 @@ kalloc_zones_init(struct kalloc_heap *kheap)
 	/*
 	 * Set large maps and fallback maps for each zone
 	 */
-	if ((zsecurity_options & ZSECURITY_OPTIONS_KERNEL_DATA_MAP) &&
-	    kheap == KHEAP_DATA_BUFFERS) {
+	if (ZSECURITY_ENABLED(KERNEL_DATA_MAP) && kheap == KHEAP_DATA_BUFFERS) {
 		kheap->kh_large_map = kalloc_large_data_map;
 		kheap->kh_fallback_map = kernel_data_map;
 		kheap->kh_tag = VM_KERN_MEMORY_KALLOC_DATA;
@@ -603,7 +602,7 @@ kalloc_init_maps(vm_address_t min_address)
 
 	min_address = MAX(min_address, range.max_address);
 
-	if (zsecurity_options & ZSECURITY_OPTIONS_KERNEL_DATA_MAP) {
+	if (ZSECURITY_ENABLED(KERNEL_DATA_MAP)) {
 		vm_map_size_t largest_free_size;
 
 		vm_map_sizes(kernel_map, NULL, NULL, &largest_free_size);
@@ -669,19 +668,19 @@ kalloc_init(void)
 	kalloc_max_prerounded = KHEAP_DEFAULT->kh_zones->kalloc_max;
 	assert(kalloc_max_prerounded > KALLOC_SAFE_ALLOC_SIZE);
 
+#if ZSECURITY_CONFIG(SUBMAP_USER_DATA)
 	/* Initialize kalloc data buffers heap */
-	if (ZSECURITY_OPTIONS_SUBMAP_USER_DATA & zsecurity_options) {
-		kalloc_zones_init(KHEAP_DATA_BUFFERS);
-	} else {
-		*KHEAP_DATA_BUFFERS = *KHEAP_DEFAULT;
-	}
+	kalloc_zones_init(KHEAP_DATA_BUFFERS);
+#else
+	*KHEAP_DATA_BUFFERS = *KHEAP_DEFAULT;
+#endif
 
+#if ZSECURITY_CONFIG(SEQUESTER_KEXT_KALLOC)
 	/* Initialize kalloc kext heap */
-	if (ZSECURITY_OPTIONS_SEQUESTER_KEXT_KALLOC & zsecurity_options) {
-		kalloc_zones_init(KHEAP_KEXT);
-	} else {
-		*KHEAP_KEXT = *KHEAP_DEFAULT;
-	}
+	kalloc_zones_init(KHEAP_KEXT);
+#else
+	*KHEAP_KEXT = *KHEAP_DEFAULT;
+#endif
 }
 STARTUP(ZALLOC, STARTUP_RANK_THIRD, kalloc_init);
 
@@ -1685,7 +1684,7 @@ kalloc_ext(
 	zalloc_flags_t        flags,
 	vm_allocation_site_t  *site)
 {
-	vm_size_t size;
+	vm_size_t size, esize;
 	void *addr;
 	zone_t z;
 
@@ -1705,14 +1704,15 @@ kalloc_ext(
 		return kalloc_large(kheap, req_size, size, flags, site);
 	}
 
+	esize = zone_elem_size(z);
 #ifdef KALLOC_DEBUG
-	if (size > zone_elem_size(z)) {
+	if (size > esize) {
 		panic("%s: z %p (%s%s) but requested size %lu", __func__, z,
 		    kalloc_heap_names[kheap->kh_zones->heap_id], z->z_name,
 		    (unsigned long)size);
 	}
 #endif
-	assert(size <= zone_elem_size(z));
+	assert(size <= esize);
 
 #if VM_TAG_SIZECLASSES
 	if (__improbable(z->z_uses_tags)) {
@@ -1727,13 +1727,13 @@ kalloc_ext(
 		flags |= Z_VM_TAG(tag);
 	}
 #endif
-	addr = zalloc_ext(z, kheap->kh_stats ?: z->z_stats, flags);
+	addr = zalloc_ext(z, kheap->kh_stats ?: z->z_stats, flags, esize);
 
 #if KASAN_KALLOC
-	addr = (void *)kasan_alloc((vm_offset_t)addr, zone_elem_size(z),
+	addr = (void *)kasan_alloc((vm_offset_t)addr, esize,
 	    req_size, KASAN_GUARD_SIZE);
 #else
-	req_size = zone_elem_size(z);
+	req_size = esize;
 #endif
 
 	DTRACE_VM3(kalloc, vm_size_t, size, vm_size_t, req_size, void*, addr);
@@ -1761,6 +1761,8 @@ kalloc_data_external(
 	           VM_KERN_MEMORY_KALLOC_DATA);
 }
 
+#if ZSECURITY_CONFIG(SUBMAP_USER_DATA)
+
 __abortlike
 static void
 kalloc_data_require_panic(void *addr, vm_size_t size)
@@ -1783,30 +1785,6 @@ kalloc_data_require_panic(void *addr, vm_size_t size)
 	} else {
 		panic("kalloc_data_require failed: address %p not in zone native map",
 		    addr);
-	}
-}
-
-void
-kalloc_data_require(void *addr, vm_size_t size)
-{
-	if (zsecurity_options & ZSECURITY_OPTIONS_SUBMAP_USER_DATA) {
-		zone_id_t zid = zone_id_for_native_element(addr, size);
-
-		if (zid != ZONE_ID_INVALID) {
-			zone_t z = &zone_array[zid];
-			zone_security_flags_t zsflags = zone_security_array[zid];
-			if (zsflags.z_kheap_id == KHEAP_ID_DATA_BUFFERS &&
-			    size <= zone_elem_size(z)) {
-				return;
-			}
-		} else if (!(zsecurity_options & ZSECURITY_OPTIONS_KERNEL_DATA_MAP)) {
-			return;
-		} else if (zone_range_contains(&kalloc_data_or_kernel_data_range,
-		    (vm_address_t)addr, size)) {
-			return;
-		}
-
-		kalloc_data_require_panic(addr, size);
 	}
 }
 
@@ -1839,39 +1817,69 @@ kalloc_non_data_require_panic(void *addr, vm_size_t size)
 	}
 }
 
+#endif /* ZSECURITY_CONFIG(SUBMAP_USER_DATA) */
+
+void
+kalloc_data_require(void *addr, vm_size_t size)
+{
+#if ZSECURITY_CONFIG(SUBMAP_USER_DATA)
+	zone_id_t zid = zone_id_for_native_element(addr, size);
+
+	if (zid != ZONE_ID_INVALID) {
+		zone_t z = &zone_array[zid];
+		zone_security_flags_t zsflags = zone_security_array[zid];
+		if (zsflags.z_kheap_id == KHEAP_ID_DATA_BUFFERS &&
+		    size <= zone_elem_size(z)) {
+			return;
+		}
+	} else if (!ZSECURITY_ENABLED(KERNEL_DATA_MAP)) {
+		return;
+	} else if (zone_range_contains(&kalloc_data_or_kernel_data_range,
+	    (vm_address_t)addr, size)) {
+		return;
+	}
+
+	kalloc_data_require_panic(addr, size);
+#else
+#pragma unused(addr, size)
+#endif
+}
+
 void
 kalloc_non_data_require(void *addr, vm_size_t size)
 {
-	if (zsecurity_options & ZSECURITY_OPTIONS_SUBMAP_USER_DATA) {
-		zone_id_t zid = zone_id_for_native_element(addr, size);
+#if ZSECURITY_CONFIG(SUBMAP_USER_DATA)
+	zone_id_t zid = zone_id_for_native_element(addr, size);
 
-		if (zid != ZONE_ID_INVALID) {
-			zone_t z = &zone_array[zid];
-			zone_security_flags_t zsflags = zone_security_array[zid];
-			switch (zsflags.z_kheap_id) {
-			case KHEAP_ID_NONE:
-				if (!zsflags.z_kalloc_type) {
-					break;
-				}
-				OS_FALLTHROUGH;
-			case KHEAP_ID_DEFAULT:
-			case KHEAP_ID_KEXT:
-				if (size < zone_elem_size(z)) {
-					return;
-				}
-				break;
-			default:
+	if (zid != ZONE_ID_INVALID) {
+		zone_t z = &zone_array[zid];
+		zone_security_flags_t zsflags = zone_security_array[zid];
+		switch (zsflags.z_kheap_id) {
+		case KHEAP_ID_NONE:
+			if (!zsflags.z_kalloc_type) {
 				break;
 			}
-		} else if (!(zsecurity_options & ZSECURITY_OPTIONS_KERNEL_DATA_MAP)) {
-			return;
-		} else if (!zone_range_contains(&kalloc_data_or_kernel_data_range,
-		    (vm_address_t)addr, size)) {
-			return;
+			OS_FALLTHROUGH;
+		case KHEAP_ID_DEFAULT:
+		case KHEAP_ID_KEXT:
+			if (size < zone_elem_size(z)) {
+				return;
+			}
+			break;
+		default:
+			break;
 		}
-
-		kalloc_non_data_require_panic(addr, size);
+	} else if (!ZSECURITY_ENABLED(KERNEL_DATA_MAP)) {
+		return;
+	} else if (!zone_range_contains(&kalloc_data_or_kernel_data_range,
+	    (vm_address_t)addr, size)) {
+		return;
 	}
+
+	kalloc_non_data_require_panic(addr, size);
+#else
+#pragma unused(addr, size)
+#endif
 }
 
 void *
@@ -2124,7 +2132,8 @@ kfree_ext(kalloc_heap_t kheap, void *data, vm_size_t size)
 #if !KASAN_KALLOC
 	DTRACE_VM3(kfree, vm_size_t, size, vm_size_t, zsize, void*, data);
 #endif
-	zfree_ext(z, zs ?: z->z_stats, data);
+	bzero(data, zsize);
+	zfree_ext(z, zs ?: z->z_stats, data, zsize);
 }
 
 void
@@ -2594,8 +2603,11 @@ kern_os_realloc_external(void *addr, size_t nsize)
 void
 kern_os_zfree(zone_t zone, void *addr, vm_size_t size)
 {
-	if (zsecurity_options & ZSECURITY_OPTIONS_STRICT_IOKIT_FREE
-	    || zone_owns(zone, addr)) {
+#if ZSECURITY_CONFIG(STRICT_IOKIT_FREE)
+#pragma unused(size)
+	zfree(zone, addr);
+#else
+	if (zone_owns(zone, addr)) {
 		zfree(zone, addr);
 	} else {
 		/*
@@ -2606,24 +2618,25 @@ kern_os_zfree(zone_t zone, void *addr, vm_size_t size)
 		    zone->z_name);
 		kheap_free(KHEAP_KEXT, addr, size);
 	}
+#endif
 }
 
 void
 kern_os_kfree(void *addr, vm_size_t size)
 {
-	if (zsecurity_options & ZSECURITY_OPTIONS_STRICT_IOKIT_FREE) {
-		kheap_free(KHEAP_DEFAULT, addr, size);
-	} else {
-		/*
-		 * Third party kexts may not know about newly added operator
-		 * default new/delete. If they call new for any iokit object
-		 * it will end up coming from the KEXT heap. If these objects
-		 * are freed by calling release() or free(), the internal
-		 * version of operator delete is called and the kernel ends
-		 * up freeing the object to the DEFAULT heap.
-		 */
-		kheap_free(KHEAP_ANY, addr, size);
-	}
+#if ZSECURITY_CONFIG(STRICT_IOKIT_FREE)
+	kheap_free(KHEAP_DEFAULT, addr, size);
+#else
+	/*
+	 * Third party kexts may not know about newly added operator
+	 * default new/delete. If they call new for any iokit object
+	 * it will end up coming from the KEXT heap. If these objects
+	 * are freed by calling release() or free(), the internal
+	 * version of operator delete is called and the kernel ends
+	 * up freeing the object to the DEFAULT heap.
+	 */
+	kheap_free(KHEAP_ANY, addr, size);
+#endif
 }
 
 bool
@@ -2646,25 +2659,27 @@ IOMallocType_from_vm(uint32_t kt_idx, uint32_t kt_size)
 void
 kern_os_typed_free(kalloc_type_view_t ktv, void *addr, vm_size_t esize)
 {
-	if ((zsecurity_options & ZSECURITY_OPTIONS_STRICT_IOKIT_FREE) == 0) {
-		/*
-		 * For third party kexts that have been compiled with sdk pre macOS 11,
-		 * an allocation of an OSObject that is defined in xnu or first pary
-		 * kexts, by directly calling new will lead to using the kext heap
-		 * as it will call OSObject_operator_new_external. If this object
-		 * is freed by xnu, it panics as xnu uses the typed free which
-		 * requires the object to have been allocated in a kalloc.type zone.
-		 * To workaround this issue, detect if the allocation being freed is
-		 * from the kext heap and allow freeing to it.
-		 */
-		zone_id_t zid = zone_id_for_native_element(addr, esize);
-		if (__probable(zid < MAX_ZONES)) {
-			zone_security_flags_t zsflags = zone_security_array[zid];
-			if (zsflags.z_kheap_id == KHEAP_ID_KEXT) {
-				return kheap_free(KHEAP_KEXT, addr, esize);
-			}
+#if ZSECURITY_CONFIG(STRICT_IOKIT_FREE)
+#pragma unused(esize)
+#else
+	/*
+	 * For third party kexts that have been compiled with sdk pre macOS 11,
+	 * an allocation of an OSObject that is defined in xnu or first pary
+	 * kexts, by directly calling new will lead to using the kext heap
+	 * as it will call OSObject_operator_new_external. If this object
+	 * is freed by xnu, it panics as xnu uses the typed free which
+	 * requires the object to have been allocated in a kalloc.type zone.
+	 * To workaround this issue, detect if the allocation being freed is
+	 * from the kext heap and allow freeing to it.
+	 */
+	zone_id_t zid = zone_id_for_native_element(addr, esize);
+	if (__probable(zid < MAX_ZONES)) {
+		zone_security_flags_t zsflags = zone_security_array[zid];
+		if (zsflags.z_kheap_id == KHEAP_ID_KEXT) {
+			return kheap_free(KHEAP_KEXT, addr, esize);
 		}
 	}
+#endif
 	kfree_type_impl_external(ktv, addr);
 }
 

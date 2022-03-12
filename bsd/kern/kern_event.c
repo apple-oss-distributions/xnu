@@ -942,13 +942,12 @@ SECURITY_READ_ONLY_EARLY(static struct filterops) file_filtops = {
 
 #define f_flag fp_glob->fg_flag
 #define f_ops fp_glob->fg_ops
-#define f_data fp_glob->fg_data
 #define f_lflags fp_glob->fg_lflags
 
 static void
 filt_kqdetach(struct knote *kn)
 {
-	struct kqfile *kqf = (struct kqfile *)kn->kn_fp->f_data;
+	struct kqfile *kqf = (struct kqfile *)fp_get_data(kn->kn_fp);
 	struct kqueue *kq = &kqf->kqf_kqueue;
 
 	kqlock(kq);
@@ -959,7 +958,7 @@ filt_kqdetach(struct knote *kn)
 static int
 filt_kqueue(struct knote *kn, __unused long hint)
 {
-	struct kqueue *kq = (struct kqueue *)kn->kn_fp->f_data;
+	struct kqueue *kq = (struct kqueue *)fp_get_data(kn->kn_fp);
 
 	return kq->kq_count > 0;
 }
@@ -968,7 +967,7 @@ static int
 filt_kqtouch(struct knote *kn, struct kevent_qos_s *kev)
 {
 #pragma unused(kev)
-	struct kqueue *kq = (struct kqueue *)kn->kn_fp->f_data;
+	struct kqueue *kq = (struct kqueue *)fp_get_data(kn->kn_fp);
 	int res;
 
 	kqlock(kq);
@@ -981,7 +980,7 @@ filt_kqtouch(struct knote *kn, struct kevent_qos_s *kev)
 static int
 filt_kqprocess(struct knote *kn, struct kevent_qos_s *kev)
 {
-	struct kqueue *kq = (struct kqueue *)kn->kn_fp->f_data;
+	struct kqueue *kq = (struct kqueue *)fp_get_data(kn->kn_fp);
 	int res = 0;
 
 	kqlock(kq);
@@ -2489,7 +2488,7 @@ filt_wlpost_register_wait(struct uthread *uth, struct knote *kn,
 		filt_wlupdate_inheritor(kqwl, ts, TURNSTILE_DELAYED_UPDATE);
 	}
 
-	thread_set_pending_block_hint(uth->uu_thread, kThreadWaitWorkloopSyncWait);
+	thread_set_pending_block_hint(get_machthread(uth), kThreadWaitWorkloopSyncWait);
 	waitq_assert_wait64(&ts->ts_waitq, knote_filt_wev64(kn),
 	    THREAD_ABORTSAFE, TIMEOUT_WAIT_FOREVER);
 
@@ -2971,7 +2970,7 @@ kqueue_internal(struct proc *p, fp_initfn_t fp_init, void *initarg, int32_t *ret
 	fp->fp_flags |= FP_CLOEXEC | FP_CLOFORK;
 	fp->f_flag = FREAD | FWRITE;
 	fp->f_ops = &kqueueops;
-	fp->f_data = kq;
+	fp_set_data(fp, kq);
 	fp->f_lflags |= FG_CONFINED;
 
 	proc_fdlock(p);
@@ -4671,7 +4670,7 @@ kqueue_workloop_ctl(proc_t p, struct kqueue_workloop_ctl_args *uap, int *retval)
 static int
 kqueue_select(struct fileproc *fp, int which, void *wql, __unused vfs_context_t ctx)
 {
-	struct kqfile *kq = (struct kqfile *)fp->f_data;
+	struct kqfile *kq = (struct kqfile *)fp_get_data(fp);
 	int retnum = 0;
 
 	assert((kq->kqf_state & (KQ_WORKLOOP | KQ_WORKQ)) == 0);
@@ -4695,14 +4694,14 @@ kqueue_select(struct fileproc *fp, int which, void *wql, __unused vfs_context_t 
 static int
 kqueue_close(struct fileglob *fg, __unused vfs_context_t ctx)
 {
-	struct kqfile *kqf = (struct kqfile *)fg->fg_data;
+	struct kqfile *kqf = fg_get_data(fg);
 
 	assert((kqf->kqf_state & (KQ_WORKLOOP | KQ_WORKQ)) == 0);
 	kqlock(kqf);
 	selthreadclear(&kqf->kqf_sel);
 	kqunlock(kqf);
 	kqueue_dealloc(&kqf->kqf_kqueue);
-	fg->fg_data = NULL;
+	fg_set_data(fg, NULL);
 	return 0;
 }
 
@@ -4722,7 +4721,7 @@ static int
 kqueue_kqfilter(struct fileproc *fp, struct knote *kn,
     __unused struct kevent_qos_s *kev)
 {
-	struct kqfile *kqf = (struct kqfile *)fp->f_data;
+	struct kqfile *kqf = (struct kqfile *)fp_get_data(fp);
 	struct kqueue *kq = &kqf->kqf_kqueue;
 	struct kqueue *parentkq = knote_get_kq(kn);
 
@@ -4822,7 +4821,7 @@ kqfile_wakeup(struct kqfile *kqf, long hint, wait_result_t wr)
 static int
 kqueue_drain(struct fileproc *fp, __unused vfs_context_t ctx)
 {
-	struct kqfile *kqf = (struct kqfile *)fp->fp_glob->fg_data;
+	struct kqfile *kqf = (struct kqfile *)fp_get_data(fp);
 
 	assert((kqf->kqf_state & (KQ_WORKLOOP | KQ_WORKQ)) == 0);
 
@@ -4990,7 +4989,7 @@ kqueue_threadreq_bind_prepost(struct proc *p __unused, workq_threadreq_t kqr,
     struct uthread *ut)
 {
 	ut->uu_kqr_bound = kqr;
-	kqr->tr_thread = ut->uu_thread;
+	kqr->tr_thread = get_machthread(ut);
 	kqr->tr_state = WORKQ_TR_STATE_BINDING;
 }
 
@@ -6639,7 +6638,7 @@ kevent_get_kqfile(struct proc *p, int fd, int flags,
 	if (__improbable(error)) {
 		return error;
 	}
-	kq = (struct kqueue *)(*fpp)->f_data;
+	kq = (struct kqueue *)fp_get_data((*fpp));
 
 	uint16_t kq_state = os_atomic_load(&kq->kq_state, relaxed);
 	if (__improbable((kq_state & (KQ_KEV32 | KQ_KEV64 | KQ_KEV_QOS)) == 0)) {
@@ -8908,18 +8907,6 @@ kevent_ast(thread_t thread, uint16_t bits)
 {
 	proc_t p = current_proc();
 
-#if CONFIG_VFORK
-	/* Don't do any AST processing if the thread is in a vfork() */
-	struct uthread *uth = current_uthread();
-	if (uth->uu_flag & UT_VFORK) {
-		if (bits & AST_KEVENT_REDRIVE_THREADREQ) {
-			panic("Should not be in kevent() and in vfork() at the same time");
-		}
-
-		/* We're okay with dropping the other kevent_ast bits on the floor */
-		return;
-	}
-#endif /* CONFIG_VFORK */
 
 	if (bits & AST_KEVENT_REDRIVE_THREADREQ) {
 		workq_kern_threadreq_redrive(p, WORKQ_THREADREQ_CAN_CREATE_THREADS);
@@ -8952,7 +8939,7 @@ kevent_sysctl SYSCTL_HANDLER_ARGS
 		return EINVAL;
 	}
 
-	struct uthread *ut = get_bsdthread_info(current_thread());
+	struct uthread *ut = current_uthread();
 	if (!ut) {
 		return EFAULT;
 	}

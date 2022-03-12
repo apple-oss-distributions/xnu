@@ -125,7 +125,7 @@ def GetZoneCachedElements(zone):
                 cached.add(decode_element(cache.zc_free_elems[i].ze_value))
             for mag in IterateTAILQ_HEAD(cache.zc_depot, 'zm_link', 's'):
                 for i in xrange(0, mag.zm_cur):
-                    cached.add(decode_element(mag.zm_elems[i]))
+                    cached.add(decode_element(mag.zm_elems[i].ze_value))
 
     return cached
 
@@ -253,7 +253,7 @@ def GetMemoryStatusNode(proc_val):
     phys_footprint_lifetime_max = task_phys_footprint_ledger_entry['lifetime_max'] / page_size
 
     format_string = '{0: >8d} {1: >12d} {2: >12d} {3: #011x} {4: >10d} {5: #011x} {6: >12d} {7: >10d} {8: >13d}'
-    out_str += format_string.format(proc_val.p_pid, proc_val.p_memstat_effectivepriority,
+    out_str += format_string.format(GetProcPID(proc_val), proc_val.p_memstat_effectivepriority,
         proc_val.p_memstat_requestedpriority, proc_val.p_memstat_state, proc_val.p_memstat_relaunch_flags, 
         proc_val.p_memstat_userdata, phys_mem_footprint, iokit_footprint, phys_footprint)
     if phys_footprint != phys_footprint_spike:
@@ -1690,7 +1690,7 @@ def ShowSelectMem(cmd_args=None, cmd_options={}):
         print "{:18s} {:10s} {:s}".format('Task', 'Thread ID', 'Select Mem (bytes)')
     for t in kern.tasks:
         for th in IterateQueue(t.threads, 'thread *', 'task_threads'):
-            uth = Cast(th.uthread, 'uthread *');
+            uth = GetBSDThread(th)
             wqs = 0
             if hasattr(uth, 'uu_allocsize'): # old style
                 thmem = uth.uu_allocsize
@@ -1796,7 +1796,7 @@ def ShowAllVMStats(cmd_args=None):
     hdr_format = "{:>6s} {:>10s} {:>10s} {:>10s} {:>10s} {:>10s} {:>10s} {:>10s} {:>10s} {:>10s} {:>10s} {:>10s} {:>10s} {:<20s} {:1s}"
     print hdr_format.format('#ents', 'wired', 'vsize', 'rsize', 'NEW RSIZE', 'max rsize', 'internal', 'external', 'reusable', 'compressed', 'compressed', 'compressed', 'pid', 'command', '')
     print hdr_format.format('', '(pages)', '(pages)', '(pages)', '(pages)', '(pages)', '(pages)', '(pages)', '(pages)', '(current)', '(peak)', '(lifetime)', '', '', '')
-    entry_format = "{m.hdr.nentries: >6d} {s.wired_count: >10d} {vsize: >10d} {s.resident_count: >10d} {s.new_resident_count: >10d} {s.resident_max: >10d} {s.internal: >10d} {s.external: >10d} {s.reusable: >10d} {s.compressed: >10d} {s.compressed_peak: >10d} {s.compressed_lifetime: >10d} {p.p_pid: >10d} {0: <32s} {s.error}"
+    entry_format = "{m.hdr.nentries: >6d} {s.wired_count: >10d} {vsize: >10d} {s.resident_count: >10d} {s.new_resident_count: >10d} {s.resident_max: >10d} {s.internal: >10d} {s.external: >10d} {s.reusable: >10d} {s.compressed: >10d} {s.compressed_peak: >10d} {s.compressed_lifetime: >10d} {1: >10d} {0: <32s} {s.error}"
 
     ledger_template = kern.globals.task_ledger_template
     entry_indices = {}
@@ -1847,7 +1847,7 @@ def ShowAllVMStats(cmd_args=None):
         if vmstats.new_resident_count +vmstats.reusable != vmstats.resident_count:
             vmstats.error += '*'
 
-        print entry_format.format(GetProcName(proc), p=proc, m=vmmap, vsize=(unsigned(vmmap.size) / page_size), t=task, s=vmstats)
+        print entry_format.format(GetProcName(proc), GetProcPID(proc), p=proc, m=vmmap, vsize=(unsigned(vmmap.size) / page_size), t=task, s=vmstats)
 
 
 def ShowTaskVMEntries(task, show_pager_info, show_all_shadows):
@@ -2576,7 +2576,7 @@ def GetVnodeLock(lockf):
     # POSIX file vs advisory range locks
     if lockf_flags & 0x40:
         lockf_proc = Cast(lockf.lf_id, 'proc *')
-        vnode_lock_output += ("PID {: <18d}").format(lockf_proc.p_pid)
+        vnode_lock_output += ("PID {: <18d}").format(GetProcPID(lockf_proc))
     else:
         vnode_lock_output += ("ID {: <#019x}").format(int(lockf.lf_id))
 
@@ -2659,7 +2659,7 @@ def ShowProcLocks(cmd_args=None):
             fglob = fd_ofiles[fd].fp_glob
             fo_type = fglob.fg_ops.fo_type
             if fo_type == 1:
-                fg_data = fglob.fg_data
+                fg_data = Cast(fglob.fg_data, 'void *')
                 fg_vnode = Cast(fg_data, 'vnode *')
                 name = fg_vnode.v_name
                 lockf_itr = fg_vnode.v_lockf
@@ -2836,13 +2836,14 @@ def ShowProcVnodes(cmd_args=None):
         fproc = kern.GetValueFromAddress(int(fpp), 'fileproc *')
         if int(fproc) != 0:
             fglob = dereference(fproc).fp_glob
+            fglob_fg_data = Cast(fglob.fg_data, 'void *')
             flags = ""
             if (int(fglob) != 0) and (int(fglob.fg_ops.fo_type) == 1):
                 if (fpp.fp_flags & GetEnumValue('fileproc_flags_t', 'FP_CLOEXEC')):    flags += 'E'
                 if (fpp.fp_flags & GetEnumValue('fileproc_flags_t', 'FP_CLOFORK')):    flags += 'F'
                 if (fdptr.fd_ofileflags[count] & 4):    flags += 'R'
                 if (fdptr.fd_ofileflags[count] & 8):    flags += 'C'
-                print '{0: <5d} {1: <7s} {2: <#020x} '.format(count, flags, fglob) + GetVnodeSummary(Cast(fglob.fg_data, 'vnode *'))
+                print '{0: <5d} {1: <7s} {2: <#020x} '.format(count, flags, fglob) + GetVnodeSummary(Cast(fglob_fg_data, 'vnode *'))
         count += 1
         fpptr = kern.GetValueFromAddress(int(fpptr) + kern.ptrsize,'uint64_t *')
 
@@ -4057,7 +4058,7 @@ def ShowTaskLoadInfo(cmd_args=None, cmd_options={}):
     t = kern.GetValueFromAddress(cmd_args[0], 'struct task *')
     print_format = "0x{0:x} - 0x{1:x} {2: <50s} (??? - ???) <{3: <36s}> {4: <50s}"
     p = Cast(t.bsd_info, 'struct proc *')
-    uuid = p.p_uuid
+    uuid = ProcGetUUID(p)
     uuid_out_string = "{a[0]:02X}{a[1]:02X}{a[2]:02X}{a[3]:02X}-{a[4]:02X}{a[5]:02X}-{a[6]:02X}{a[7]:02X}-{a[8]:02X}{a[9]:02X}-{a[10]:02X}{a[11]:02X}{a[12]:02X}{a[13]:02X}{a[14]:02X}{a[15]:02X}".format(a=uuid)
     filepath = GetVnodePath(p.p_textvp)
     libname = filepath.split('/')[-1]

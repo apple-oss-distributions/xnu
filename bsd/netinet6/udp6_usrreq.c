@@ -205,10 +205,7 @@ udp6_append(struct inpcb *last, struct ip6_hdr *ip6,
 	boolean_t wired = (!wifi && IFNET_IS_WIRED(ifp));
 
 	if ((last->in6p_flags & INP_CONTROLOPTS) != 0 ||
-#if CONTENT_FILTER
-	    /* Content Filter needs to see local address */
-	    (last->in6p_socket->so_cfil_db != NULL) ||
-#endif
+	    SOFLOW_ENABLED(last->in6p_socket) ||
 	    (last->in6p_socket->so_options & SO_TIMESTAMP) != 0 ||
 	    (last->in6p_socket->so_options & SO_TIMESTAMP_MONOTONIC) != 0 ||
 	    (last->in6p_socket->so_options & SO_TIMESTAMP_CONTINUOUS) != 0) {
@@ -612,10 +609,7 @@ udp6_input(struct mbuf **mp, int *offp, int proto)
 	init_sin6(&udp_in6, m); /* general init */
 	udp_in6.sin6_port = uh->uh_sport;
 	if ((in6p->in6p_flags & INP_CONTROLOPTS) != 0 ||
-#if CONTENT_FILTER
-	    /* Content Filter needs to see local address */
-	    (in6p->in6p_socket->so_cfil_db != NULL) ||
-#endif
+	    SOFLOW_ENABLED(in6p->in6p_socket) ||
 	    (in6p->in6p_socket->so_options & SO_TIMESTAMP) != 0 ||
 	    (in6p->in6p_socket->so_options & SO_TIMESTAMP_MONOTONIC) != 0 ||
 	    (in6p->in6p_socket->so_options & SO_TIMESTAMP_CONTINUOUS) != 0) {
@@ -760,6 +754,13 @@ udp6_attach(struct socket *so, int proto, struct proc *p)
 	struct inpcb *inp;
 	int error;
 
+	if (so->so_snd.sb_hiwat == 0 || so->so_rcv.sb_hiwat == 0) {
+		error = soreserve(so, udp_sendspace, udp_recvspace);
+		if (error) {
+			return error;
+		}
+	}
+
 	inp = sotoinpcb(so);
 	if (inp != NULL) {
 		return EINVAL;
@@ -770,12 +771,6 @@ udp6_attach(struct socket *so, int proto, struct proc *p)
 		return error;
 	}
 
-	if (so->so_snd.sb_hiwat == 0 || so->so_rcv.sb_hiwat == 0) {
-		error = soreserve(so, udp_sendspace, udp_recvspace);
-		if (error) {
-			return error;
-		}
-	}
 	inp = (struct inpcb *)so->so_pcb;
 	inp->inp_vflag |= INP_IPV6;
 	if (ip6_mapped_addr_on) {
@@ -1037,7 +1032,7 @@ udp6_send(struct socket *so, int flags, struct mbuf *m, struct sockaddr *addr,
 
 #if CONTENT_FILTER
 	//If socket is subject to UDP Content Filter and unconnected, get addr from tag.
-	if (so->so_cfil_db && !addr && IN6_IS_ADDR_UNSPECIFIED(&inp->in6p_faddr)) {
+	if (CFIL_DGRAM_FILTERED(so) && !addr && IN6_IS_ADDR_UNSPECIFIED(&inp->in6p_faddr)) {
 		cfil_tag = cfil_dgram_get_socket_state(m, NULL, NULL, &cfil_faddr, NULL);
 		if (cfil_tag) {
 			addr = (struct sockaddr *)cfil_faddr;

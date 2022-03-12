@@ -3040,8 +3040,6 @@ ip6_ctloutput(struct socket *so, struct sockopt *sopt)
 			}
 			break;
 		}
-	} else if (level == IPPROTO_UDP) {
-		error = udp_ctloutput(so, sopt);
 	} else {
 		error = EINVAL;
 	}

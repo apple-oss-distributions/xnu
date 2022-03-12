@@ -375,7 +375,7 @@ kppet_threads_prepare(task_t task)
 	thread_t thread;
 	kppet.g_nthreads = 0;
 	queue_iterate(&(task->threads), thread, thread_t, task_threads) {
-		thread_reference_internal(thread);
+		thread_reference(thread);
 		kppet.g_threads[kppet.g_nthreads++] = thread;
 	}
 

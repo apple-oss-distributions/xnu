@@ -956,6 +956,7 @@ ndrv_do_remove_multicast(struct ndrv_cb *np, struct sockopt *sopt)
 	int                                 result;
 
 	if (sopt->sopt_val == 0 || sopt->sopt_valsize < 2 ||
+	    sopt->sopt_valsize > SOCK_MAXADDRLEN ||
 	    sopt->sopt_level != SOL_NDRVPROTO) {
 		return EINVAL;
 	}
@@ -1013,7 +1014,7 @@ ndrv_do_remove_multicast(struct ndrv_cb *np, struct sockopt *sopt)
 		// Free the memory
 		FREE(ndrv_entry, M_IFADDR);
 	}
-	kfree_data(multi_addr, multi_addr->sa_len);
+	kfree_data(multi_addr, sopt->sopt_valsize);
 
 	return result;
 }

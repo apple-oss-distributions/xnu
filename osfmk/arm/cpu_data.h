@@ -48,8 +48,6 @@
 
 __ASSUME_PTR_ABI_SINGLE_BEGIN
 
-#define current_thread()        current_thread_fast()
-
 static inline __attribute__((const)) thread_t
 current_thread_fast(void)
 {

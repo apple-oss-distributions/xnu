@@ -4501,7 +4501,8 @@ IOServicePH::serverSlept(void)
 
 	lock();
 	ret = (kIOMessageSystemWillSleep == sSystemPower)
-	    || (kIOMessageSystemPagingOff == sSystemPower);
+	    || (kIOMessageSystemWillPowerOff == sSystemPower)
+	    || (kIOMessageSystemWillRestart == sSystemPower);
 	unlock();
 
 	return ret;

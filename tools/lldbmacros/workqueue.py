@@ -1,4 +1,5 @@
 from xnu import *
+from process import GetBSDThread, GetMachThread
 from scheduler import GetRecentTimestamp
 import xnudefines
 
@@ -42,7 +43,7 @@ def GetWorkqueueSummary(proc, wq):
 @header("{:<20s} {:<20s} {:>10s}  {:9s} {:<20s} {:<10s} {:<30s}".format(
     'thread', 'uthread', 'thport', 'kind', 'kqueue', 'idle (ms)', 'uu_workq_flags'))
 def GetWQThreadSummary(th, uth):
-    p = Cast(th.task.bsd_info, 'proc *')
+    p = th.t_tro.tro_proc
     wq = p.p_wqptr
 
     uu_workq_flags = []
@@ -134,7 +135,7 @@ def ShowWQThread(cmd_args=None, cmd_options={}, O=None):
         raise ArgumentError('not a workqueue thread')
 
     with O.table(GetWQThreadSummary.header):
-        print GetWQThreadSummary(th, Cast(th.uthread, 'struct uthread *'))
+        print GetWQThreadSummary(th, GetBSDThread(th))
 
 
 @lldb_command('showprocworkqueue', fancy=True)
@@ -177,11 +178,11 @@ def ShowProcWorkqueue(cmd_args=None, cmd_options={}, O=None):
         with O.table(GetWQThreadSummary.header, indent=True):
             print ""
             for uth in IterateTAILQ_HEAD(wq.wq_thrunlist, "uu_workq_entry"):
-                print GetWQThreadSummary(Cast(uth.uu_thread, 'struct thread *'), uth)
+                print GetWQThreadSummary(GetMachThread(uth), uth)
             for uth in IterateTAILQ_HEAD(wq.wq_thidlelist, "uu_workq_entry"):
-                print GetWQThreadSummary(Cast(uth.uu_thread, 'struct thread *'), uth)
+                print GetWQThreadSummary(GetMachThread(uth), uth)
             for uth in IterateTAILQ_HEAD(wq.wq_thnewlist, "uu_workq_entry"):
-                print GetWQThreadSummary(Cast(uth.uu_thread, 'struct thread *'), uth)
+                print GetWQThreadSummary(GetMachThread(uth), uth)
 
 @lldb_command('showallworkqueues', fancy=True)
 def ShowAllWorkqueues(cmd_args=None, cmd_options={}, O=None):

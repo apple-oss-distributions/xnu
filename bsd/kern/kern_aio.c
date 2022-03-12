@@ -1538,7 +1538,7 @@ aio_work_thread(void *arg __unused, wait_result_t wr __unused)
 		 */
 		currentmap = get_task_map((current_proc())->task);
 		if (currentmap != entryp->aio_map) {
-			uthreadp = (struct uthread *) get_bsdthread_info(current_thread());
+			uthreadp = (struct uthread *) current_uthread();
 			oldaiotask = uthreadp->uu_aio_task;
 			/*
 			 * workq entries at this stage cause _aio_exec() and _aio_exit() to
@@ -2096,7 +2096,7 @@ do_aio_fsync(aio_workq_entry *entryp)
 		entryp->returnval = -1;
 		return error;
 	}
-	vp = fp->fp_glob->fg_data;
+	vp = fp_get_data(fp);
 
 	if ((error = vnode_getwithref(vp)) == 0) {
 		struct vfs_context context = {
@@ -2192,7 +2192,7 @@ _aio_create_worker_threads(int num)
 task_t
 get_aiotask(void)
 {
-	return ((struct uthread *)get_bsdthread_info(current_thread()))->uu_aio_task;
+	return current_uthread()->uu_aio_task;
 }
 
 

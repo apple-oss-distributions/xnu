@@ -87,8 +87,8 @@ vnode_label(struct mount *mp, struct vnode *dvp, struct vnode *vp,
 		/* Could sleep on disk I/O, drop lock. */
 		vnode_unlock(vp);
 
-		if (vp->v_label == NULL) {
-			vp->v_label = mac_vnode_label_alloc();
+		if (mac_vnode_label(vp) == NULL) {
+			mac_vnode_label_init(vp);
 		}
 
 		if (flags & VNODE_LABEL_CREATE) {

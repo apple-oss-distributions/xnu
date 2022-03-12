@@ -112,8 +112,8 @@ extern void                             kdp_callouts(kdp_event_t event);
 /* #include <sys/proc.h> */
 #define MAXCOMLEN 16
 struct proc;
-extern int                              proc_pid(struct proc *p);
-extern void                     proc_name_kdp(task_t, char *, int);
+extern int        proc_pid(struct proc *p);
+extern void       proc_name_kdp(struct proc *, char *, int);
 
 /*
  * Make sure there's enough space to include the relevant bits in the format required
@@ -372,6 +372,7 @@ do_print_all_backtraces(const char *message, uint64_t panic_options)
 	thread_t        cur_thread = current_thread();
 	uintptr_t       cur_fp;
 	task_t          task;
+	struct proc    *proc;
 	int             print_vnodes = 0;
 	const char *nohilite_thread_marker = "\t";
 
@@ -544,10 +545,10 @@ do_print_all_backtraces(const char *message, uint64_t panic_options)
 		paniclog_append_noflush("Thread task pri cpu_usage\n");
 
 		for (int i = 0; i < TOP_RUNNABLE_LIMIT; i++) {
-			if (top_runnable[i] && PANIC_VALIDATE_PTR(top_runnable[i]->task) &&
-			    panic_validate_ptr(top_runnable[i]->task->bsd_info, 1, "bsd_info")) {
-				char            name[MAXCOMLEN + 1];
-				proc_name_kdp(top_runnable[i]->task, name, sizeof(name));
+			if (top_runnable[i] &&
+			    panic_get_thread_proc_task(top_runnable[i], &task, &proc) && proc) {
+				char name[MAXCOMLEN + 1];
+				proc_name_kdp(proc, name, sizeof(name));
 				paniclog_append_noflush("%p %s %d %d\n",
 				    top_runnable[i], name, top_runnable[i]->sched_pri, top_runnable[i]->cpu_usage);
 			}
@@ -556,10 +557,7 @@ do_print_all_backtraces(const char *message, uint64_t panic_options)
 	}
 
 	// print current task info
-	if (PANIC_VALIDATE_PTR(cur_thread) &&
-	    PANIC_VALIDATE_PTR(cur_thread->task)) {
-		task = cur_thread->task;
-
+	if (panic_get_thread_proc_task(cur_thread, &task, &proc)) {
 		if (PANIC_VALIDATE_PTR(task->map) &&
 		    PANIC_VALIDATE_PTR(task->map->pmap)) {
 			ledger_amount_t resident = 0;
@@ -574,11 +572,10 @@ do_print_all_backtraces(const char *message, uint64_t panic_options)
 			    task, task->thread_count);
 		}
 
-		if (panic_validate_ptr(task->bsd_info, 1, "bsd_info")) {
+		if (proc) {
 			char            name[MAXCOMLEN + 1];
-			int             pid = proc_pid(task->bsd_info);
-			proc_name_kdp(task, name, sizeof(name));
-			paniclog_append_noflush("pid %d: %s", pid, name);
+			proc_name_kdp(proc, name, sizeof(name));
+			paniclog_append_noflush("pid %d: %s", proc_pid(proc), name);
 		} else {
 			paniclog_append_noflush("unknown task");
 		}

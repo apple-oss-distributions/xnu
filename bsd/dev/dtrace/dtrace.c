@@ -3699,7 +3699,7 @@ dtrace_dif_variable(dtrace_mstate_t *mstate, dtrace_state_t *state, uint64_t v,
 		}
 
 	case DIF_VAR_ERRNO: {
-		uthread_t uthread = (uthread_t)get_bsdthread_info(current_thread());
+		uthread_t uthread = current_uthread();
 		if (!dtrace_priv_proc(state))
 			return (0);
 
@@ -6704,7 +6704,7 @@ dtrace_action_raise(uint64_t sig)
 	 * invocations of the raise() action.
 	 */
 
-	uthread_t uthread = (uthread_t)get_bsdthread_info(current_thread());
+	uthread_t uthread = current_uthread();
 
 	if (uthread && uthread->t_dtrace_sig == 0) {
 		uthread->t_dtrace_sig = sig;
@@ -6718,7 +6718,7 @@ dtrace_action_stop(void)
 	if (dtrace_destructive_disallow)
 		return;
 
-        uthread_t uthread = (uthread_t)get_bsdthread_info(current_thread());
+        uthread_t uthread = current_uthread();
 	if (uthread) {
 		/*
 		 * The currently running process will be set to task_suspend
@@ -6745,7 +6745,7 @@ dtrace_action_pidresume(uint64_t pid)
 		DTRACE_CPUFLAG_SET(CPU_DTRACE_ILLOP);		
 		return;
 	}
-        uthread_t uthread = (uthread_t)get_bsdthread_info(current_thread());
+        uthread_t uthread = current_uthread();
 
 	/*
 	 * When the currently running process leaves the kernel, it attempts to

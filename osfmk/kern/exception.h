@@ -47,7 +47,7 @@ struct exception_action {
 	thread_state_flavor_t   flavor;         /* state flavor to send */
 	exception_behavior_t    behavior;       /* exception type to raise */
 	boolean_t               privileged;     /* survives ipc_task_reset */
-	struct label            * XNU_PTRAUTH_SIGNED_PTR("exception_action.label") label; /* MAC label associated with action */
+	struct label            *label;         /* MAC label associated with action */
 };
 
 /* Initialize global state needed for exceptions. */

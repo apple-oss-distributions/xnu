@@ -910,7 +910,7 @@ machine_thread_get_kern_state(thread_t                 thread,
 void
 machine_thread_switch_addrmode(thread_t thread)
 {
-	if (task_has_64Bit_data(thread->task)) {
+	if (task_has_64Bit_data(get_threadtask(thread))) {
 		thread->machine.upcb->ash.flavor = ARM_SAVED_STATE64;
 		thread->machine.upcb->ash.count = ARM_SAVED_STATE64_COUNT;
 		thread->machine.uNeon->nsh.flavor = ARM_NEON_SAVED_STATE64;
@@ -1320,7 +1320,7 @@ machine_thread_reset_pc(thread_t thread, mach_vm_address_t pc)
  * Routine: machine_thread_state_initialize
  *
  */
-kern_return_t
+void
 machine_thread_state_initialize(thread_t thread)
 {
 	arm_context_t *context = thread->machine.contextData;
@@ -1340,6 +1340,7 @@ machine_thread_state_initialize(thread_t thread)
 		} else {
 			context->ns.ns_32.fpcr = FPCR_DEFAULT_32;
 		}
+		context->ss.ss_64.cpsr = PSR64_USER64_DEFAULT;
 	}
 
 	thread->machine.DebugData = NULL;
@@ -1351,25 +1352,22 @@ machine_thread_state_initialize(thread_t thread)
 		asm volatile (
                         "mov	x0, %[iss]"             "\n"
                         "mov	x1, #0"                 "\n"
-                        "mov	x2, #0"                 "\n"
+                        "mov	w2, %w[usr]"            "\n"
                         "mov	x3, #0"                 "\n"
                         "mov	x4, #0"                 "\n"
                         "mov	x5, #0"                 "\n"
-
                         "mov	x6, lr"                 "\n"
                         "msr	SPSel, #1"              "\n"
-                        "bl	_ml_sign_thread_state"  "\n"
+                        "bl     _ml_sign_thread_state"  "\n"
                         "msr	SPSel, #0"              "\n"
                         "mov	lr, x6"                 "\n"
                         :
-                        : [iss] "r"(thread->machine.upcb)
+                        : [iss] "r"(thread->machine.upcb), [usr] "r"(thread->machine.upcb->ss_64.cpsr)
                         : "x0", "x1", "x2", "x3", "x4", "x5", "x6"
                 );
 		ml_pac_safe_interrupts_restore(intr);
 	}
 #endif /* defined(HAS_APPLE_PAC) */
-
-	return KERN_SUCCESS;
 }
 
 /*

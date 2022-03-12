@@ -5508,6 +5508,7 @@ IOUserUserClient::externalMethod(uint32_t selector, IOExternalMethodArguments * 
 	uint64_t   structureOutputSize;
 	OSAction                  * action;
 	IOUserUserClientActionRef * ref;
+	mach_port_t wake_port = MACH_PORT_NULL;
 
 	kr             = kIOReturnUnsupported;
 	structureInput = NULL;
@@ -5520,7 +5521,7 @@ IOUserUserClient::externalMethod(uint32_t selector, IOExternalMethodArguments * 
 
 	if (MACH_PORT_NULL != args->asyncWakePort) {
 		// this retain is for the OSAction to release
-		iokit_make_port_send(args->asyncWakePort);
+		wake_port = ipc_port_make_send(args->asyncWakePort);
 		kr = CreateActionKernelCompletion(sizeof(IOUserUserClientActionRef), &action);
 		assert(KERN_SUCCESS == kr);
 		ref = (typeof(ref))action->GetReference();
@@ -5558,9 +5559,9 @@ IOUserUserClient::externalMethod(uint32_t selector, IOExternalMethodArguments * 
 		// mig will destroy any async port
 		return kr;
 	}
-	if (MACH_PORT_NULL != args->asyncWakePort) {
+	if (MACH_PORT_NULL != wake_port) {
 		// this release is for the mig created send right
-		iokit_release_port_send(args->asyncWakePort);
+		iokit_release_port_send(wake_port);
 	}
 
 	if (structureOutput) {

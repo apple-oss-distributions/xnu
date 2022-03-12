@@ -280,7 +280,7 @@ struct persona {
 	char         pna_login[MAXLOGNAME + 1];
 	char         *pna_path;
 
-	kauth_cred_t pna_cred;
+	kauth_cred_t XNU_PTRAUTH_SIGNED_PTR("persona.pna_cred") pna_cred;
 	uid_t        pna_pgid;
 
 	int          pna_cred_locked; /* set upon first adoption */

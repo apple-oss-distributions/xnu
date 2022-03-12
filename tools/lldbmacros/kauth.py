@@ -25,7 +25,7 @@ def PrintKauthCache(cmd_args=None):
     print "Number of items in each bucket ... \n"
     for i in range(0, table_entries):
         numinbucket = 0
-        for kauth_cred in IterateListEntry(anchor[i], 'kauth_cred_t', "cr_link"):
+        for kauth_cred in IterateListEntry(anchor[i], 'struct ucred_rw *', "crw_link"):
             numinbucket += 1
             #print str(kauth_cred.cr_posix)
             #print str(kauth_cred.cr_ref)

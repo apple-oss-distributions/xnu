@@ -392,14 +392,14 @@ fdesc_attr(int fd, struct vnode_attr *vap, vfs_context_t a_context)
 	}
 	switch (FILEGLOB_DTYPE(fp->fp_glob)) {
 	case DTYPE_VNODE:
-		if ((error = vnode_getwithref((struct vnode *) fp->fp_glob->fg_data)) != 0) {
+		if ((error = vnode_getwithref((struct vnode *)fp_get_data(fp))) != 0) {
 			break;
 		}
-		if ((error = vnode_authorize((struct vnode *)fp->fp_glob->fg_data,
+		if ((error = vnode_authorize((struct vnode *)fp_get_data(fp),
 		    NULL,
 		    KAUTH_VNODE_READ_ATTRIBUTES | KAUTH_VNODE_READ_SECURITY,
 		    a_context)) == 0) {
-			error = vnode_getattr((struct vnode *)fp->fp_glob->fg_data, vap, a_context);
+			error = vnode_getattr((struct vnode *)fp_get_data(fp), vap, a_context);
 		}
 		if (error == 0 && vap->va_type == VDIR) {
 			/*
@@ -410,17 +410,17 @@ fdesc_attr(int fd, struct vnode_attr *vap, vfs_context_t a_context)
 			 */
 			vap->va_mode &= ~((VEXEC) | (VEXEC >> 3) | (VEXEC >> 6));
 		}
-		(void)vnode_put((struct vnode *) fp->fp_glob->fg_data);
+		(void)vnode_put((struct vnode *)fp_get_data(fp));
 		break;
 
 	case DTYPE_SOCKET:
 	case DTYPE_PIPE:
 #if SOCKETS
 		if (FILEGLOB_DTYPE(fp->fp_glob) == DTYPE_SOCKET) {
-			error = soo_stat((struct socket *)fp->fp_glob->fg_data, (void *)&stb, 0);
+			error = soo_stat((struct socket *)fp_get_data(fp), (void *)&stb, 0);
 		} else
 #endif /* SOCKETS */
-		error = pipe_stat((struct pipe *)fp->fp_glob->fg_data, (void *)&stb, 0);
+		error = pipe_stat((struct pipe *)fp_get_data(fp), (void *)&stb, 0);
 
 		if (error == 0) {
 			if (FILEGLOB_DTYPE(fp->fp_glob) == DTYPE_SOCKET) {
@@ -518,11 +518,11 @@ fdesc_setattr(struct vnop_setattr_args *ap)
 	switch (FILEGLOB_DTYPE(fp->fp_glob)) {
 	case DTYPE_VNODE:
 	{
-		if ((error = vnode_getwithref((struct vnode *) fp->fp_glob->fg_data)) != 0) {
+		if ((error = vnode_getwithref((struct vnode *)fp_get_data(fp))) != 0) {
 			break;
 		}
-		error = vnode_setattr((struct vnode *) fp->fp_glob->fg_data, ap->a_vap, ap->a_context);
-		(void)vnode_put((struct vnode *) fp->fp_glob->fg_data);
+		error = vnode_setattr((struct vnode *)fp_get_data(fp), ap->a_vap, ap->a_context);
+		(void)vnode_put((struct vnode *)fp_get_data(fp));
 		break;
 	}
 

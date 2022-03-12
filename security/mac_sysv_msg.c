@@ -74,68 +74,58 @@
 
 #include <security/mac_internal.h>
 
-static struct label *
-mac_sysv_msgmsg_label_alloc(void)
-{
-	struct label *label;
-
-	label = mac_labelzone_alloc(MAC_WAITOK);
-	if (label == NULL) {
-		return NULL;
-	}
-	MAC_PERFORM(sysvmsg_label_init, label);
-	return label;
-}
-
 void
 mac_sysvmsg_label_init(struct msg *msgptr)
 {
-	msgptr->label = mac_sysv_msgmsg_label_alloc();
+	mac_labelzone_alloc_owned(&msgptr->label, MAC_WAITOK, ^(struct label *label) {
+		MAC_PERFORM(sysvmsg_label_init, label);
+	});
 }
 
-static struct label *
-mac_sysv_msgqueue_label_alloc(void)
+struct label *
+mac_sysvmsg_label(struct msg *msgptr)
 {
-	struct label *label;
-
-	label = mac_labelzone_alloc(MAC_WAITOK);
-	if (label == NULL) {
-		return NULL;
-	}
-	MAC_PERFORM(sysvmsq_label_init, label);
-	return label;
+	return mac_label_verify(&msgptr->label);
 }
 
 void
 mac_sysvmsq_label_init(struct msqid_kernel *msqptr)
 {
-	msqptr->label = mac_sysv_msgqueue_label_alloc();
+	mac_labelzone_alloc_owned(&msqptr->label, MAC_WAITOK, ^(struct label *label) {
+		MAC_PERFORM(sysvmsq_label_init, label);
+	});
+}
+
+struct label *
+mac_sysvmsq_label(struct msqid_kernel *msqptr)
+{
+	return mac_label_verify(&msqptr->label);
 }
 
 void
 mac_sysvmsg_label_associate(kauth_cred_t cred, struct msqid_kernel *msqptr,
     struct msg *msgptr)
 {
-	MAC_PERFORM(sysvmsg_label_associate, cred, msqptr, msqptr->label,
-	    msgptr, msgptr->label);
+	MAC_PERFORM(sysvmsg_label_associate, cred, msqptr, mac_sysvmsq_label(msqptr),
+	    msgptr, mac_sysvmsg_label(msgptr));
 }
 
 void
 mac_sysvmsq_label_associate(kauth_cred_t cred, struct msqid_kernel *msqptr)
 {
-	MAC_PERFORM(sysvmsq_label_associate, cred, msqptr, msqptr->label);
+	MAC_PERFORM(sysvmsq_label_associate, cred, msqptr, mac_sysvmsq_label(msqptr));
 }
 
 void
 mac_sysvmsg_label_recycle(struct msg *msgptr)
 {
-	MAC_PERFORM(sysvmsg_label_recycle, msgptr->label);
+	MAC_PERFORM(sysvmsg_label_recycle, mac_sysvmsg_label(msgptr));
 }
 
 void
 mac_sysvmsq_label_recycle(struct msqid_kernel *msqptr)
 {
-	MAC_PERFORM(sysvmsq_label_recycle, msqptr->label);
+	MAC_PERFORM(sysvmsq_label_recycle, mac_sysvmsq_label(msqptr));
 }
 
 int
@@ -151,8 +141,8 @@ mac_sysvmsq_check_enqueue(kauth_cred_t cred, struct msg *msgptr,
 	}
 #endif
 
-	MAC_CHECK(sysvmsq_check_enqueue, cred, msgptr, msgptr->label, msqptr,
-	    msqptr->label);
+	MAC_CHECK(sysvmsq_check_enqueue, cred, msgptr, mac_sysvmsg_label(msgptr), msqptr,
+	    mac_sysvmsq_label(msqptr));
 
 	return error;
 }
@@ -169,7 +159,7 @@ mac_sysvmsq_check_msgrcv(kauth_cred_t cred, struct msg *msgptr)
 	}
 #endif
 
-	MAC_CHECK(sysvmsq_check_msgrcv, cred, msgptr, msgptr->label);
+	MAC_CHECK(sysvmsq_check_msgrcv, cred, msgptr, mac_sysvmsg_label(msgptr));
 
 	return error;
 }
@@ -186,7 +176,7 @@ mac_sysvmsq_check_msgrmid(kauth_cred_t cred, struct msg *msgptr)
 	}
 #endif
 
-	MAC_CHECK(sysvmsq_check_msgrmid, cred, msgptr, msgptr->label);
+	MAC_CHECK(sysvmsq_check_msgrmid, cred, msgptr, mac_sysvmsg_label(msgptr));
 
 	return error;
 }
@@ -203,7 +193,7 @@ mac_sysvmsq_check_msqget(kauth_cred_t cred, struct msqid_kernel *msqptr)
 	}
 #endif
 
-	MAC_CHECK(sysvmsq_check_msqget, cred, msqptr, msqptr->label);
+	MAC_CHECK(sysvmsq_check_msqget, cred, msqptr, mac_sysvmsq_label(msqptr));
 
 	return error;
 }
@@ -220,7 +210,7 @@ mac_sysvmsq_check_msqsnd(kauth_cred_t cred, struct msqid_kernel *msqptr)
 	}
 #endif
 
-	MAC_CHECK(sysvmsq_check_msqsnd, cred, msqptr, msqptr->label);
+	MAC_CHECK(sysvmsq_check_msqsnd, cred, msqptr, mac_sysvmsq_label(msqptr));
 
 	return error;
 }
@@ -237,7 +227,7 @@ mac_sysvmsq_check_msqrcv(kauth_cred_t cred, struct msqid_kernel *msqptr)
 	}
 #endif
 
-	MAC_CHECK(sysvmsq_check_msqrcv, cred, msqptr, msqptr->label);
+	MAC_CHECK(sysvmsq_check_msqrcv, cred, msqptr, mac_sysvmsq_label(msqptr));
 
 	return error;
 }
@@ -255,7 +245,7 @@ mac_sysvmsq_check_msqctl(kauth_cred_t cred, struct msqid_kernel *msqptr,
 	}
 #endif
 
-	MAC_CHECK(sysvmsq_check_msqctl, cred, msqptr, msqptr->label, cmd);
+	MAC_CHECK(sysvmsq_check_msqctl, cred, msqptr, mac_sysvmsq_label(msqptr), cmd);
 
 	return error;
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2018 Apple Inc. All rights reserved.
+ * Copyright (c) 2016-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -80,13 +80,18 @@ typedef struct flowq {
 
 #define fq_empty(_q)    MBUFQ_EMPTY(&(_q)->fq_mbufq)
 
-#define fq_enqueue(_q, _h, _t, _c) \
-    MBUFQ_ENQUEUE_MULTI(&(_q)->fq_mbufq, (_h).cp_mbuf, (_t).cp_mbuf)
+#define fq_enqueue(_q, _h, _t, _c) do {                                 \
+	MBUFQ_ENQUEUE_MULTI(&(_q)->fq_mbufq, (_h).cp_mbuf,              \
+	    (_t).cp_mbuf);                                              \
+	MBUFQ_ADD_CRUMB_MULTI(&(_q)->fq_mbufq, (_h).cp_mbuf,            \
+	    (_t).cp_mbuf, PKT_CRUMB_FQ_ENQUEUE);                        \
+} while (0)
 
 #define fq_dequeue(_q, _p) do {                                         \
 	MBUFQ_DEQUEUE(&(_q)->fq_mbufq, (_p)->cp_mbuf);                  \
 	if (__probable((_p)->cp_mbuf != NULL)) {                        \
 	        CLASSQ_PKT_INIT_MBUF((_p), (_p)->cp_mbuf);              \
+	        m_add_crumb((_p)->cp_mbuf, PKT_CRUMB_FQ_DEQUEUE);       \
 	}                                                               \
 } while (0)
 

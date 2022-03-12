@@ -1177,7 +1177,7 @@ after_sack_rexmit:
 #endif
 	if (len > tp->t_maxseg) {
 		if ((tp->t_flags & TF_TSO) && tcp_do_tso && hwcksum_tx &&
-		    ip_use_randomid && kipf_count == 0 &&
+		    kipf_count == 0 &&
 		    tp->rcv_numsacks == 0 && sack_rxmit == 0 &&
 		    sack_bytes_rxmt == 0 &&
 		    inp->inp_options == NULL &&
@@ -2183,6 +2183,7 @@ send:
 		m->m_len = hdrlen;
 	}
 	m->m_pkthdr.rcvif = 0;
+	m_add_crumb(m, PKT_CRUMB_TCP_OUTPUT);
 
 	/* Any flag other than pure-ACK: Do not compress! */
 	if (flags & ~(TH_ACK)) {

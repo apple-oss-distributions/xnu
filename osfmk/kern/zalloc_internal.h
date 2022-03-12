@@ -291,47 +291,102 @@ struct zone {
  * modified after lockdown.
  */
 typedef struct zone_security_flags {
-	uint8_t
+	uint16_t
 	/*
 	 * Security sensitive configuration bits
 	 */
-	    z_allows_foreign   :1,  /* allow non-zalloc space  */
+	    z_submap_idx       :8,  /* a Z_SUBMAP_IDX_* value */
+	    z_submap_from_end  :1,  /* allocate from the left or the right ? */
 	    z_kheap_id         :2,  /* zone_kheap_id_t when part of a kalloc heap */
+	    z_allows_foreign   :1,  /* allow non-zalloc space  */
 	    z_noencrypt        :1,  /* do not encrypt pages when hibernating */
-	    z_submap_idx       :2,  /* a Z_SUBMAP_IDX_* value */
 	    z_va_sequester     :1,  /* page sequester: no VA reuse with other zones */
 	    z_kalloc_type      :1;  /* zones that does types based seggregation */
 } zone_security_flags_t;
 
+
+/*
+ * Zsecurity config to enable sequestering VA of zones
+ */
+#if KASAN_ZALLOC || !defined(__LP64__)
+#   define ZSECURITY_CONFIG_SEQUESTER                   OFF
+#else
+#   define ZSECURITY_CONFIG_SEQUESTER                   ON
+#endif
+
+/*
+ * Zsecurity config to enable creating separate kalloc zones for
+ * bags of bytes
+ */
+#if KASAN_ZALLOC || !defined(__LP64__)
+#   define ZSECURITY_CONFIG_SUBMAP_USER_DATA            OFF
+#else
+#   define ZSECURITY_CONFIG_SUBMAP_USER_DATA            ON
+#endif
+
+/*
+ * Leave kext heap on macOS for kalloc/kalloc_type callsites that aren't
+ * in the BootKC.
+ */
+#if KASAN_ZALLOC || !defined(__LP64__)
+#   define ZSECURITY_CONFIG_SEQUESTER_KEXT_KALLOC       OFF
+#elif PLATFORM_MacOSX
+#   define ZSECURITY_CONFIG_SEQUESTER_KEXT_KALLOC       ON
+#else
+#   define ZSECURITY_CONFIG_SEQUESTER_KEXT_KALLOC       OFF
+#endif
+
+/*
+ * Zsecurity config to enable strict free of iokit objects to zone
+ * or heap they were allocated from.
+ *
+ * Turn ZSECURITY_OPTIONS_STRICT_IOKIT_FREE off on x86 so as not
+ * not break third party kexts that haven't yet been recompiled
+ * to use the new iokit macros.
+ */
+#if PLATFORM_MacOSX && __x86_64__
+#   define ZSECURITY_CONFIG_STRICT_IOKIT_FREE           OFF
+#else
+#   define ZSECURITY_CONFIG_STRICT_IOKIT_FREE           ON
+#endif
+
+/*
+ * Zsecurity config to enable the read-only allocator
+ */
+#if KASAN_ZALLOC || !defined(__LP64__)
+#   define ZSECURITY_CONFIG_READ_ONLY                   OFF
+#else
+#   define ZSECURITY_CONFIG_READ_ONLY                   ON
+#endif
+
+/*
+ * Zsecurity config to enable making heap feng-shui
+ * less reliable.
+ */
+#if KASAN_ZALLOC || !defined(__LP64__)
+#   define ZSECURITY_CONFIG_SAD_FENG_SHUI               OFF
+#   define ZSECURITY_CONFIG_GENERAL_SUBMAPS             1
+#else
+#   define ZSECURITY_CONFIG_SAD_FENG_SHUI               ON
+#   define ZSECURITY_CONFIG_GENERAL_SUBMAPS             4
+#endif
+
+/*
+ * Zsecurity options that can be toggled, as opposed to configs
+ */
 __options_decl(zone_security_options_t, uint64_t, {
-	/*
-	 * Zsecurity option to enable sequestering VA of zones
-	 */
-	ZSECURITY_OPTIONS_SEQUESTER             = 0x00000001,
-	/*
-	 * Zsecurity option to enable creating separate kalloc zones for
-	 * bags of bytes
-	 */
-	ZSECURITY_OPTIONS_SUBMAP_USER_DATA      = 0x00000002,
-	/*
-	 * Zsecurity option to enable sequestering of kalloc zones used by
-	 * kexts (KHEAP_KEXT heap)
-	 */
-	ZSECURITY_OPTIONS_SEQUESTER_KEXT_KALLOC = 0x00000004,
-	/*
-	 * Zsecurity option to enable strict free of iokit objects to zone
-	 * or heap they were allocated from.
-	 */
-	ZSECURITY_OPTIONS_STRICT_IOKIT_FREE     = 0x00000008,
-	/*
-	 * Zsecurity option to enable the read-only allocator
-	 */
-	ZSECURITY_OPTIONS_READ_ONLY             = 0x00000010,
 	/*
 	 * Zsecurity option to enable the kernel and kalloc data maps.
 	 */
 	ZSECURITY_OPTIONS_KERNEL_DATA_MAP       = 0x00000020,
 });
+
+#define ZSECURITY_NOT_A_COMPILE_TIME_CONFIG__OFF() 0
+#define ZSECURITY_NOT_A_COMPILE_TIME_CONFIG__ON()  1
+#define ZSECURITY_CONFIG2(v)     ZSECURITY_NOT_A_COMPILE_TIME_CONFIG__##v()
+#define ZSECURITY_CONFIG1(v)     ZSECURITY_CONFIG2(v)
+#define ZSECURITY_CONFIG(opt)    ZSECURITY_CONFIG1(ZSECURITY_CONFIG_##opt)
+#define ZSECURITY_ENABLED(opt)   (zsecurity_options & ZSECURITY_OPTIONS_##opt)
 
 __options_decl(kalloc_type_options_t, uint64_t, {
 	/*
@@ -349,6 +404,43 @@ __options_decl(kalloc_type_options_t, uint64_t, {
 	 * budget distribution and signatures.
 	 */
 	KT_OPTIONS_DEBUG                        = 0x00000004,
+});
+
+/*
+ * Zone submap indices
+ *
+ * Z_SUBMAP_IDX_VM
+ * this map has the special property that its allocations
+ * can be done without ever locking the submap, and doesn't use
+ * VM entries in the map (which limits certain VM map operations on it).
+ *
+ * On ILP32 a single zone lives here (the vm_map_entry_reserved_zone).
+ *
+ * On LP64 it is also used to restrict VM allocations on LP64 lower
+ * in the kernel VA space, for pointer packing purposes.
+ *
+ * Z_SUBMAP_IDX_GENERAL_{0,1,2,3}
+ * used for unrestricted allocations
+ *
+ * Z_SUBMAP_IDX_DATA
+ * used to sequester bags of bytes from all other allocations and allow VA reuse
+ * within the map
+ *
+ * Z_SUBMAP_IDX_READ_ONLY
+ * used for the read-only allocator
+ */
+__enum_decl(zone_submap_idx_t, uint32_t, {
+	Z_SUBMAP_IDX_VM,
+	Z_SUBMAP_IDX_READ_ONLY,
+	Z_SUBMAP_IDX_GENERAL_0,
+#if ZSECURITY_CONFIG(SAD_FENG_SHUI)
+	Z_SUBMAP_IDX_GENERAL_1,
+	Z_SUBMAP_IDX_GENERAL_2,
+	Z_SUBMAP_IDX_GENERAL_3,
+#endif /* ZSECURITY_CONFIG(SAD_FENG_SHUI) */
+	Z_SUBMAP_IDX_DATA,
+
+	Z_SUBMAP_IDX_COUNT,
 });
 
 #define KALLOC_MINALIGN     (1 << KALLOC_LOG2_MINALIGN)
@@ -416,13 +508,27 @@ zone_is_ro(zone_t zone)
 
 __pure2
 static inline vm_offset_t
+zone_elem_size_ro(zone_id_t zid)
+{
+	return zone_ro_elem_size[zid];
+}
+
+__pure2
+static inline vm_offset_t
 zone_elem_size(zone_t zone)
+{
+	return zone->z_elem_size;
+}
+
+__pure2
+static inline vm_offset_t
+zone_elem_size_safe(zone_t zone)
 {
 	if (zone_is_ro(zone)) {
 		zone_id_t zid = zone_index(zone);
-		return zone_ro_elem_size[zid];
+		return zone_elem_size_ro(zid);
 	}
-	return zone->z_elem_size;
+	return zone_elem_size(zone);
 }
 
 __pure2
@@ -626,12 +732,14 @@ zalloc_flags_get_tag(zalloc_flags_t flags)
 extern void    *zalloc_ext(
 	zone_t          zone,
 	zone_stats_t    zstats,
-	zalloc_flags_t  flags);
+	zalloc_flags_t  flags,
+	vm_size_t       elem_size);
 
 extern void     zfree_ext(
 	zone_t          zone,
 	zone_stats_t    zstats,
-	void           *addr);
+	void           *addr,
+	vm_size_t       elem_size);
 
 extern zone_id_t zone_id_for_native_element(
 	void           *addr,

@@ -768,8 +768,6 @@ fasttrap_tracepoint_enable(proc_t *p, fasttrap_probe_t *probe, uint_t index)
 
 	ASSERT(probe->ftp_tps[index].fit_tp->ftt_pid == pid);
 
-	//ASSERT(!(p->p_flag & SVFORK));
-
 	/*
 	 * Before we make any modifications, make sure we've imposed a barrier
 	 * on the generation in which this probe was last modified.
@@ -1234,7 +1232,6 @@ fasttrap_pid_enable(void *arg, dtrace_id_t id, void *parg)
 		dtrace_ptss_enable(p);
 	}
 
-	// ASSERT(!(p->p_flag & SVFORK));
 	proc_unlock(p);
 
 	/*
@@ -1304,9 +1301,7 @@ fasttrap_pid_disable(void *arg, dtrace_id_t id, void *parg)
 	 * provider lock as a point of mutual exclusion to prevent other
 	 * DTrace consumers from disabling this probe.
 	 */
-	if ((p = sprlock(probe->ftp_pid)) != PROC_NULL) {
-		// ASSERT(!(p->p_flag & SVFORK));
-	}
+	p = sprlock(probe->ftp_pid);
 
 	lck_mtx_lock(&provider->ftp_mtx);
 
@@ -1627,16 +1622,10 @@ fasttrap_provider_lookup(proc_t *p, fasttrap_provider_type_t provider_type, cons
 	lck_mtx_unlock(&bucket->ftb_mtx);
 
 	/*
-	 * Make sure the process isn't a child created as the result
-	 * of a vfork(2), and isn't a zombie (but may be in fork).
+	 * Make sure the process isn't a child
+	 * isn't a zombie (but may be in fork).
 	 */
 	proc_lock(p);
-#if CONFIG_VFORK
-	if (p->p_lflag & P_LINVFORK) {
-		proc_unlock(p);
-		return (NULL);
-	}
-#endif /* CONFIG_VFORK */
 	if (p->p_lflag & P_LEXIT) {
 		proc_unlock(p);
 		return (NULL);

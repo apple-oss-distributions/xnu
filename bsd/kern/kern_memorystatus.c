@@ -4745,6 +4745,10 @@ set_vm_map_fork_pidwatch(task_t task, uint64_t x)
  *	then the vm_map_fork is allowed.  This calculation
  *	is based on the assumption that a process can
  *	munch memory up to the system-wide task limit.
+ *
+ *      For watchOS, which has a low task limit, we use a
+ *      different value. Current task limit has been reduced
+ *      to 300MB and it's been decided the limit should be 200MB.
  */
 boolean_t
 memorystatus_allowed_vm_map_fork(task_t task)
@@ -4771,6 +4775,15 @@ memorystatus_allowed_vm_map_fork(task_t task)
 	 * Maximum is 1/4 of the system-wide task limit by default.
 	 */
 	max_allowed_bytes = ((uint64_t)max_task_footprint_mb * 1024 * 1024) >> 2;
+
+#if XNU_TARGET_OS_WATCH
+	/*
+	 * For watches with > 1G, raise the limit to 200MB.
+	 */
+	if (sane_size > 1 * 1024 * 1024 * 1024) {
+		max_allowed_bytes = MAX(max_allowed_bytes, 200 * 1024 * 1024);
+	}
+#endif /* XNU_TARGET_OS_WATCH */
 
 #if DEBUG || DEVELOPMENT
 	if (corpse_threshold_system_limit) {

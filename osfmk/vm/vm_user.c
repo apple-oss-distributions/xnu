@@ -3133,7 +3133,7 @@ mach_make_memory_entry_internal(
 				/* release our new "copy" */
 				vm_map_copy_discard(copy);
 				/* get extra send right on handle */
-				ipc_port_copy_send(parent_handle);
+				parent_handle = ipc_port_copy_send(parent_handle);
 
 				*size = CAST_DOWN(vm_size_t,
 				    (parent_entry->size -

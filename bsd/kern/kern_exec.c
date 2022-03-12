@@ -254,7 +254,6 @@ SYSCTL_INT(_vm, OID_AUTO, vm_shared_region_reslide_aslr,
  */
 int vm_enable_driverkit_shared_region = 0;
 
-/* support for child creation in exec after vfork */
 thread_t fork_create_child(task_t parent_task,
     coalition_t *parent_coalition,
     proc_t child_proc,
@@ -262,9 +261,6 @@ thread_t fork_create_child(task_t parent_task,
     int is_64bit_addr,
     int is_64bit_data,
     int in_exec);
-#if CONFIG_VFORK
-void vfork_exit(proc_t p, int rv);
-#endif /* CONFIG_VFORK */
 extern void proc_apply_task_networkbg_internal(proc_t, thread_t);
 extern void task_set_did_exec_flag(task_t task);
 extern void task_clear_exec_copy_flag(task_t task);
@@ -696,7 +692,7 @@ exec_shell_imgact(struct image_params *imgp)
 
 		fp->fp_glob->fg_flag = FREAD;
 		fp->fp_glob->fg_ops = &vnops;
-		fp->fp_glob->fg_data = (caddr_t)imgp->ip_vp;
+		fp_set_data(fp, imgp->ip_vp);
 
 		proc_fdlock(p);
 		procfdtbl_releasefd(p, fd, NULL);
@@ -853,8 +849,10 @@ activate_exec_state(task_t task, proc_t p, thread_t thread, load_result_t *resul
 	task_set_64bit(task, result->is_64bit_addr, result->is_64bit_data);
 	if (result->is_64bit_addr) {
 		OSBitOrAtomic(P_LP64, &p->p_flag);
+		get_bsdthread_info(thread)->uu_flag |= UT_LP64;
 	} else {
 		OSBitAndAtomic(~((uint32_t)P_LP64), &p->p_flag);
+		get_bsdthread_info(thread)->uu_flag &= ~UT_LP64;
 	}
 	task_set_mach_header_address(task, result->mach_header);
 
@@ -1005,8 +1003,6 @@ binary_match(cpu_type_t mask, cpu_type_t req_cpu,
  * Note:	A return value other than -1 indicates subsequent image
  *		activators should not be given the opportunity to attempt
  *		to activate the image.
- *
- * TODO:	More gracefully handle failures after vfork
  */
 static int
 exec_mach_imgact(struct image_params *imgp)
@@ -1024,11 +1020,7 @@ exec_mach_imgact(struct image_params *imgp)
 	load_result_t           load_result = {};
 	struct _posix_spawnattr *psa = NULL;
 	int                     spawn = (imgp->ip_flags & IMGPF_SPAWN);
-#if CONFIG_VFORK
-	int                     vfexec = (imgp->ip_flags & IMGPF_VFORK_EXEC);
-#else
 	const int               vfexec = 0;
-#endif /* CONFIG_VFORK */
 	int                     exec = (imgp->ip_flags & IMGPF_EXEC);
 	os_reason_t             exec_failure_reason = OS_REASON_NULL;
 	boolean_t               reslide = FALSE;
@@ -1146,29 +1138,6 @@ grade:
 	AUDIT_ARG(envv, imgp->ip_endargv, imgp->ip_envc,
 	    imgp->ip_endenvv - imgp->ip_endargv);
 
-#if CONFIG_VFORK
-	/*
-	 * We are being called to activate an image subsequent to a vfork()
-	 * operation; in this case, we know that our task, thread, and
-	 * uthread are actually those of our parent, and our proc, which we
-	 * obtained indirectly from the image_params vfs_context_t, is the
-	 * new child process.
-	 */
-	if (vfexec) {
-		imgp->ip_new_thread = fork_create_child(task,
-		    NULL,
-		    p,
-		    FALSE,
-		    (imgp->ip_flags & IMGPF_IS_64BIT_ADDR),
-		    (imgp->ip_flags & IMGPF_IS_64BIT_DATA),
-		    FALSE);
-		/* task and thread ref returned, will be released in __mac_execve */
-		if (imgp->ip_new_thread == NULL) {
-			error = ENOMEM;
-			goto bad;
-		}
-	}
-#endif /* CONFIG_VFORK */
 
 
 	/* reset local idea of thread, uthread, task */
@@ -1716,8 +1685,7 @@ grade:
 	}
 
 	/*
-	 * mark as execed, wakeup the process that vforked (if any) and tell
-	 * it that it now has its own resources back
+	 * mark as execed
 	 */
 	OSBitOrAtomic(P_EXEC, &p->p_flag);
 	proc_resetregister(p);
@@ -1728,28 +1696,12 @@ grade:
 		wakeup((caddr_t)p->p_pptr);
 	}
 
-#if CONFIG_VFORK
-	/*
-	 * Pay for our earlier safety; deliver the delayed signals from
-	 * the incomplete vfexec process now that it's complete.
-	 */
-	if (vfexec && (p->p_lflag & P_LTRACED)) {
-		psignal_vfork(p, new_task, thread, SIGTRAP);
-	}
-#endif /* CONFIG_VFORK */
 
 	goto done;
 
 badtoolate:
 	/* Don't allow child process to execute any instructions */
 	if (!spawn) {
-#if CONFIG_VFORK
-		if (vfexec) {
-			assert(exec_failure_reason != OS_REASON_NULL);
-			psignal_vfork_with_reason(p, new_task, thread, SIGKILL, exec_failure_reason);
-			exec_failure_reason = OS_REASON_NULL;
-		} else
-#endif /* CONFIG_VFORK */
 		{
 			assert(exec_failure_reason != OS_REASON_NULL);
 			psignal_with_reason(p, SIGKILL, exec_failure_reason);
@@ -1936,13 +1888,14 @@ encapsulated_binary:
 			 */
 			if (imgp->ip_scriptlabelp) {
 				mac_vnode_label_free(imgp->ip_scriptlabelp);
+				imgp->ip_scriptlabelp = NULL;
 			}
-			imgp->ip_scriptlabelp = mac_vnode_label_alloc();
+			imgp->ip_scriptlabelp = mac_vnode_label_alloc(NULL);
 			if (imgp->ip_scriptlabelp == NULL) {
 				error = ENOMEM;
 				break;
 			}
-			mac_vnode_label_copy(imgp->ip_vp->v_label,
+			mac_vnode_label_copy(mac_vnode_label(imgp->ip_vp),
 			    imgp->ip_scriptlabelp);
 
 			/*
@@ -2376,7 +2329,7 @@ exec_handle_file_actions(struct image_params *imgp, short psa_flags)
 	_posix_spawn_file_actions_t px_sfap = imgp->ip_px_sfa;
 	int ival[2];            /* dummy retval for system calls) */
 #if CONFIG_AUDIT
-	struct uthread *uthread = get_bsdthread_info(current_thread());
+	struct uthread *uthread = current_uthread();
 #endif
 
 	for (action = 0; action < px_sfap->psfa_act_count; action++) {
@@ -3053,48 +3006,6 @@ proc_apply_jit_and_jumbo_va_policies(proc_t p, task_t task)
 }
 #endif /* CONFIG_MACF */
 
-/*
- * Apply a modification on the proc's kauth cred until it converges.
- *
- * `update` consumes its argument to return a new kauth cred.
- */
-static void
-apply_kauth_cred_update(proc_t p,
-    kauth_cred_t (^update)(kauth_cred_t orig_cred))
-{
-	kauth_cred_t my_cred, my_new_cred;
-
-	my_cred = kauth_cred_proc_ref(p);
-	for (;;) {
-		my_new_cred = update(my_cred);
-		if (my_cred == my_new_cred) {
-			kauth_cred_unref(&my_new_cred);
-			break;
-		}
-
-		/* try update cred on proc */
-		proc_ucred_lock(p);
-
-		if (proc_ucred(p) == my_cred) {
-			/* base pointer didn't change, donate our ref */
-			proc_set_ucred(p, my_new_cred);
-			proc_update_creds_onproc(p);
-			proc_ucred_unlock(p);
-
-			/* drop p->p_ucred reference */
-			kauth_cred_unref(&my_cred);
-			break;
-		}
-
-		/* base pointer changed, retry */
-		my_cred = proc_ucred(p);
-		kauth_cred_ref(my_cred);
-		proc_ucred_unlock(p);
-
-		kauth_cred_unref(&my_new_cred);
-	}
-}
-
 static int
 spawn_posix_cred_adopt(proc_t p,
     struct _posix_spawn_posix_cred_info *px_pcred_info)
@@ -3165,7 +3076,7 @@ spawn_posix_cred_adopt(proc_t p,
 int
 posix_spawn(proc_t ap, struct posix_spawn_args *uap, int32_t *retval)
 {
-	proc_t p = ap;          /* quiet bogus GCC vfork() warning */
+	proc_t p = ap;
 	user_addr_t pid = uap->pid;
 	int ival[2];            /* dummy retval for setpgid() */
 	char *subsystem_root_path = NULL;
@@ -3423,19 +3334,13 @@ posix_spawn(proc_t ap, struct posix_spawn_args *uap, int32_t *retval)
 	}
 
 	/* set uthread to parent */
-	uthread = get_bsdthread_info(current_thread());
+	uthread = current_uthread();
 
 	/*
 	 * <rdar://6640530>; this does not result in a behaviour change
 	 * relative to Leopard, so there should not be any existing code
 	 * which depends on it.
 	 */
-#if CONFIG_VFORK
-	if (uthread->uu_flag & UT_VFORK) {
-		error = EINVAL;
-		goto bad;
-	}
-#endif /* CONFIG_VFORK */
 
 	if (imgp->ip_px_sa != NULL) {
 		struct _posix_spawnattr *psa = (struct _posix_spawnattr *) imgp->ip_px_sa;
@@ -3663,9 +3568,7 @@ do_fork1:
 
 	/*
 	 * Post fdt_fork(), pre exec_handle_sugid() - this is where we want
-	 * to handle the file_actions.  Since vfork() also ends up setting
-	 * us into the parent process group, and saved off the signal flags,
-	 * this is also where we want to handle the spawn flags.
+	 * to handle the file_actions.
 	 */
 
 	/* Has spawn file actions? */
@@ -3717,10 +3620,11 @@ do_fork1:
 	if (imgp->ip_px_sa != NULL) {
 		/*
 		 * Reset UID/GID to parent's RUID/RGID; This works only
-		 * because the operation occurs *after* the vfork() and
-		 * before the call to exec_handle_sugid() by the image
-		 * activator called from exec_activate_image().  POSIX
-		 * requires that any setuid/setgid bits on the process
+		 * because the operation occurs before the call
+		 * to exec_handle_sugid() by the image activator called
+		 * from exec_activate_image().
+		 *
+		 * POSIX requires that any setuid/setgid bits on the process
 		 * image will take precedence over the spawn attributes
 		 * (re)setting them.
 		 *
@@ -3729,7 +3633,7 @@ do_fork1:
 		 * a garbage credential.
 		 */
 		if (px_sa.psa_flags & POSIX_SPAWN_RESETIDS) {
-			apply_kauth_cred_update(p, ^kauth_cred_t (kauth_cred_t my_cred){
+			proc_update_label(p, false, ^kauth_cred_t (kauth_cred_t my_cred){
 				return kauth_cred_setuidgid(my_cred,
 				kauth_cred_getruid(my_cred),
 				kauth_cred_getrgid(my_cred));
@@ -4267,9 +4171,11 @@ bad:
 
 		if (imgp->ip_execlabelp) {
 			mac_cred_label_free(imgp->ip_execlabelp);
+			imgp->ip_execlabelp = NULL;
 		}
 		if (imgp->ip_scriptlabelp) {
 			mac_vnode_label_free(imgp->ip_scriptlabelp);
+			imgp->ip_scriptlabelp = NULL;
 		}
 		if (imgp->ip_cs_error != OS_REASON_NULL) {
 			os_reason_free(imgp->ip_cs_error);
@@ -4345,12 +4251,16 @@ bad:
 	 */
 	if (task_did_exec(old_task)) {
 		set_bsdtask_info(old_task, NULL);
+		clear_thread_ro_proc(get_machthread(uthread));
 	}
 
 	/* clear bsd_info from new task and terminate it if exec failed  */
 	if (new_task != NULL && task_is_exec_copy(new_task)) {
 		set_bsdtask_info(new_task, NULL);
 		task_terminate_internal(new_task);
+		if (imgp && imgp->ip_new_thread) {
+			clear_thread_ro_proc(imgp->ip_new_thread);
+		}
 	}
 
 	/* Return to both the parent and the child? */
@@ -4491,13 +4401,14 @@ proc_exec_switch_task(proc_t p, task_t old_task, task_t new_task, thread_t new_t
 		error = proc_transstart(p, 1, 0);
 		if (error == 0) {
 			uthread_t new_uthread = get_bsdthread_info(new_thread);
-			uthread_t old_uthread = get_bsdthread_info(current_thread());
+			uthread_t old_uthread = current_uthread();
 
 			/*
 			 * bsd_info of old_task will get cleared in execve and posix_spawn
 			 * after firing exec-success/error dtrace probe.
 			 */
 			proc_set_task(p, new_task);
+			proc_switch_ro(p, task_get_ro(new_task));
 
 			/* Clear dispatchqueue and workloop ast offset */
 			p->p_dispatchqueue_offset = 0;
@@ -4512,9 +4423,6 @@ proc_exec_switch_task(proc_t p, task_t old_task, task_t new_task, thread_t new_t
 			new_uthread->uu_sigwait = old_uthread->uu_sigwait;
 			new_uthread->uu_sigmask = old_uthread->uu_sigmask;
 			new_uthread->uu_oldmask = old_uthread->uu_oldmask;
-#if CONFIG_VFORK
-			new_uthread->uu_vforkmask = old_uthread->uu_vforkmask;
-#endif /* CONFIG_VFORK */
 			new_uthread->uu_exit_reason = old_uthread->uu_exit_reason;
 #if CONFIG_DTRACE
 			new_uthread->t_dtrace_sig = old_uthread->t_dtrace_sig;
@@ -4536,8 +4444,9 @@ proc_exec_switch_task(proc_t p, task_t old_task, task_t new_task, thread_t new_t
 			old_uthread->uu_siglist = 0;
 
 			/* Add the new uthread to proc uthlist and remove the old one */
-			TAILQ_INSERT_TAIL(&p->p_uthlist, new_uthread, uu_list);
 			TAILQ_REMOVE(&p->p_uthlist, old_uthread, uu_list);
+			assert(TAILQ_EMPTY(&p->p_uthlist));
+			TAILQ_INSERT_TAIL(&p->p_uthlist, new_uthread, uu_list);
 
 			task_set_did_exec_flag(old_task);
 			task_clear_exec_copy_flag(new_task);
@@ -4647,16 +4556,12 @@ __mac_execve(proc_t p, struct __mac_execve_args *uap, int32_t *retval __unused)
 	int error;
 	int is_64 = IS_64BIT_PROCESS(p);
 	struct vfs_context context;
-	struct uthread  *uthread;
+	struct uthread  *uthread = NULL;
 	task_t old_task = current_task();
 	task_t new_task = NULL;
 	boolean_t should_release_proc_ref = FALSE;
 	boolean_t exec_done = FALSE;
-#if CONFIG_VFORK
-	bool in_vfexec = false;
-#else
 	const bool in_vfexec = false;
-#endif /* CONFIG_VFORK */
 	void *inherit = NULL;
 	struct {
 		struct image_params imgp;
@@ -4702,13 +4607,7 @@ __mac_execve(proc_t p, struct __mac_execve_args *uap, int32_t *retval __unused)
 		}
 	}
 #endif
-	uthread = get_bsdthread_info(current_thread());
-#if CONFIG_VFORK
-	if (uthread->uu_flag & UT_VFORK) {
-		imgp->ip_flags |= IMGPF_VFORK_EXEC;
-		in_vfexec = true;
-	} else
-#endif /* CONFIG_VFORK */
+	uthread = current_uthread();
 	{
 		imgp->ip_flags |= IMGPF_EXEC;
 
@@ -4811,9 +4710,11 @@ __mac_execve(proc_t p, struct __mac_execve_args *uap, int32_t *retval __unused)
 #if CONFIG_MACF
 	if (imgp->ip_execlabelp) {
 		mac_cred_label_free(imgp->ip_execlabelp);
+		imgp->ip_execlabelp = NULL;
 	}
 	if (imgp->ip_scriptlabelp) {
 		mac_vnode_label_free(imgp->ip_scriptlabelp);
+		imgp->ip_scriptlabelp = NULL;
 	}
 #endif
 	if (imgp->ip_cs_error != OS_REASON_NULL) {
@@ -4899,12 +4800,6 @@ __mac_execve(proc_t p, struct __mac_execve_args *uap, int32_t *retval __unused)
 			}
 		}
 #endif
-
-#if CONFIG_VFORK
-		if (in_vfexec) {
-			vfork_return(p, retval, proc_getpid(p));
-		}
-#endif /* CONFIG_VFORK */
 	} else {
 		DTRACE_PROC1(exec__failure, int, error);
 	}
@@ -4916,11 +4811,15 @@ exit_with_error:
 	 */
 	if (task_did_exec(old_task)) {
 		set_bsdtask_info(old_task, NULL);
+		clear_thread_ro_proc(get_machthread(uthread));
 	}
 
 	/* clear bsd_info from new task and terminate it if exec failed  */
 	if (new_task != NULL && task_is_exec_copy(new_task)) {
 		set_bsdtask_info(new_task, NULL);
+		if (imgp && imgp->ip_new_thread) {
+			clear_thread_ro_proc(imgp->ip_new_thread);
+		}
 		task_terminate_internal(new_task);
 	}
 
@@ -6146,7 +6045,7 @@ handle_mac_transition:
 
 			ret = suid_cred_verify(imgp->ip_sc_port, vp, &uid);
 			if (ret == 0) {
-				apply_kauth_cred_update(p, ^kauth_cred_t (kauth_cred_t my_cred) {
+				proc_update_label(p, false, ^kauth_cred_t (kauth_cred_t my_cred) {
 					return kauth_cred_setresuid(my_cred,
 					KAUTH_UID_NONE,
 					uid,
@@ -6159,7 +6058,7 @@ handle_mac_transition:
 		}
 
 		if (imgp->ip_origvattr->va_mode & VSUID) {
-			apply_kauth_cred_update(p, ^kauth_cred_t (kauth_cred_t my_cred) {
+			proc_update_label(p, false, ^kauth_cred_t (kauth_cred_t my_cred) {
 				return kauth_cred_setresuid(my_cred,
 				KAUTH_UID_NONE,
 				imgp->ip_origvattr->va_uid,
@@ -6169,7 +6068,7 @@ handle_mac_transition:
 		}
 
 		if (imgp->ip_origvattr->va_mode & VSGID) {
-			apply_kauth_cred_update(p, ^kauth_cred_t (kauth_cred_t my_cred) {
+			proc_update_label(p, false, ^kauth_cred_t (kauth_cred_t my_cred) {
 				return kauth_cred_setresgid(my_cred,
 				KAUTH_GID_NONE,
 				imgp->ip_origvattr->va_gid,
@@ -6309,7 +6208,7 @@ handle_mac_transition:
 
 				fg->fg_flag = flag;
 				fg->fg_ops = &vnops;
-				fg->fg_data = ndp->ni_vp;
+				fp_set_data(fp, ndp->ni_vp);
 
 				vnode_put(ndp->ni_vp);
 
@@ -6347,7 +6246,7 @@ handle_mac_transition:
 	 * proc's ucred lock. This prevents others from accessing
 	 * a garbage credential.
 	 */
-	apply_kauth_cred_update(p, ^kauth_cred_t (kauth_cred_t my_cred) {
+	proc_update_label(p, false, ^kauth_cred_t (kauth_cred_t my_cred) {
 		return kauth_cred_setsvuidgid(my_cred,
 		kauth_cred_getuid(my_cred),
 		kauth_cred_getgid(my_cred));
@@ -6999,11 +6898,7 @@ check_for_signature(proc_t p, struct image_params *imgp)
 	struct cs_blob *csb;
 	boolean_t require_success = FALSE;
 	int spawn = (imgp->ip_flags & IMGPF_SPAWN);
-#if CONFIG_VFORK
-	int vfexec = (imgp->ip_flags & IMGPF_VFORK_EXEC);
-#else
 	const int vfexec = 0;
-#endif /* CONFIG_VFORK */
 	os_reason_t signature_failure_reason = OS_REASON_NULL;
 
 	/*

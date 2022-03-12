@@ -32,6 +32,7 @@
 #include <vm/vm_map.h>
 #include <vm/vm_kern.h>
 #include <kern/ledger.h>
+#include <kern/zalloc_internal.h>
 #include <i386/pmap_internal.h>
 
 void            pmap_remove_range(
@@ -55,6 +56,11 @@ void            pmap_reusable_range(
 	boolean_t       reusable);
 
 uint32_t pmap_update_clear_pte_count;
+pt_entry_t *PTE_corrupted_ptr;
+
+#if DEVELOPMENT || DEBUG
+int pmap_inject_pte_corruption;
+#endif
 
 /*
  * The Intel platform can nest at the PDE level, so NBPDE (i.e. 2MB) at a time,
@@ -180,7 +186,7 @@ pmap_nest(pmap_t grand, pmap_t subord, addr64_t va_start, uint64_t size)
 			if (pde == 0) {
 				panic("pmap_nest: no PDPT, grand  %p vaddr 0x%llx", grand, vaddr);
 			}
-			pmap_store_pte(pde, tpde);
+			pmap_store_pte(FALSE, pde, tpde);
 			vaddr += NBPDPT;
 			i += (uint32_t) NPDEPG;
 		} else {
@@ -201,7 +207,7 @@ pmap_nest(pmap_t grand, pmap_t subord, addr64_t va_start, uint64_t size)
 				panic("pmap_nest: no pde, grand  %p vaddr 0x%llx", grand, vaddr);
 			}
 			vaddr += NBPDE;
-			pmap_store_pte(pde, tpde);
+			pmap_store_pte(FALSE, pde, tpde);
 			i++;
 		}
 	}
@@ -257,7 +263,7 @@ pmap_unnest(pmap_t grand, addr64_t vaddr, uint64_t size)
 			npdpt = pdptnum(grand, vaddr);
 			pde = pmap64_pdpt(grand, vaddr);
 			if (pde && (*pde & INTEL_PDPTE_NESTED)) {
-				pmap_store_pte(pde, (pd_entry_t)0);
+				pmap_store_pte(FALSE, pde, (pd_entry_t)0);
 				i += (uint32_t) NPDEPG;
 				vaddr += NBPDPT;
 				continue;
@@ -267,7 +273,7 @@ pmap_unnest(pmap_t grand, addr64_t vaddr, uint64_t size)
 		if (pde == 0) {
 			panic("pmap_unnest: no pde, grand %p vaddr 0x%llx", grand, vaddr);
 		}
-		pmap_store_pte(pde, (pd_entry_t)0);
+		pmap_store_pte(FALSE, pde, (pd_entry_t)0);
 		i++;
 		vaddr += NBPDE;
 	}
@@ -525,9 +531,9 @@ pmap_update_cache_attributes_locked(ppnum_t pn, unsigned attributes)
 
 			nexth = (pv_hashed_entry_t)queue_next(&pvh_e->qlink);
 			if (!is_ept) {
-				pmap_update_pte(ptep, PHYS_CACHEABILITY_MASK, attributes);
+				pmap_update_pte(is_ept, ptep, PHYS_CACHEABILITY_MASK, attributes);
 			} else {
-				pmap_update_pte(ptep, INTEL_EPT_CACHE_MASK, ept_attributes);
+				pmap_update_pte(is_ept, ptep, INTEL_EPT_CACHE_MASK, ept_attributes);
 			}
 			PMAP_UPDATE_TLBS(pmap, vaddr, vaddr + PAGE_SIZE);
 			pvh_e = nexth;
@@ -741,7 +747,7 @@ Retry:
 		 */
 		delpage_pde_index = pdeidx(pmap, vaddr);
 		delpage_pm_obj = pmap->pm_obj;
-		pmap_store_pte(pte, 0);
+		pmap_store_pte(is_ept, pte, 0);
 	}
 
 	PTE_LOCK_LOCK(pte);
@@ -937,14 +943,14 @@ dont_update_pte:
 		 */
 
 		/* invalidate the PTE */
-		pmap_update_pte(pte, PTE_VALID_MASK(is_ept), 0);
+		pmap_update_pte(is_ept, pte, PTE_VALID_MASK(is_ept), 0);
 		/* propagate invalidate everywhere */
 		PMAP_UPDATE_TLBS(pmap, vaddr, vaddr + PAGE_SIZE);
 		/* remember reference and change */
 		old_pte = *pte;
 		oattr = (char) (old_pte & (PTE_MOD(is_ept) | PTE_REF(is_ept)));
 		/* completely invalidate the PTE */
-		pmap_store_pte(pte, PTE_LOCK(is_ept));
+		pmap_store_pte(is_ept, pte, PTE_LOCK(is_ept));
 
 		if (IS_MANAGED_PAGE(pai)) {
 			/*
@@ -1221,7 +1227,7 @@ dont_update_pte:
 		}
 	}
 	template |= PTE_LOCK(is_ept);
-	pmap_store_pte(pte, template);
+	pmap_store_pte(is_ept, pte, template);
 	DTRACE_VM3(set_pte, uint64_t, vaddr, uint64_t, 0, uint64_t, template);
 
 	/*
@@ -1268,6 +1274,10 @@ done2:
 
 	kr = KERN_SUCCESS;
 done1:
+	if (__improbable((kr == KERN_SUCCESS) && (pmap == kernel_pmap) &&
+	    zone_spans_ro_va(vaddr, vaddr + PAGE_SIZE))) {
+		pmap_page_protect((ppnum_t)atop_kernel(kvtophys(vaddr)), VM_PROT_READ);
+	}
 	PMAP_TRACE(PMAP_CODE(PMAP__ENTER) | DBG_FUNC_END, kr);
 	return kr;
 }
@@ -1347,7 +1357,7 @@ pmap_remove_range_options(
 				}
 				/* clear marker(s) */
 				/* XXX probably does not need to be atomic! */
-				pmap_update_pte(cpte, INTEL_PTE_COMPRESSED_MASK, 0);
+				pmap_update_pte(is_ept, cpte, INTEL_PTE_COMPRESSED_MASK, 0);
 			}
 			continue;
 		}
@@ -1364,7 +1374,7 @@ pmap_remove_range_options(
 			 *	Outside range of managed physical memory.
 			 *	Just remove the mappings.
 			 */
-			pmap_store_pte(cpte, 0);
+			pmap_store_pte(is_ept, cpte, 0);
 			continue;
 		}
 
@@ -1373,7 +1383,7 @@ pmap_remove_range_options(
 		}
 
 		/* invalidate the PTE */
-		pmap_update_pte(cpte, PTE_VALID_MASK(is_ept), 0);
+		pmap_update_pte(is_ept, cpte, PTE_VALID_MASK(is_ept), 0);
 	}
 
 	if (num_found == 0) {
@@ -1405,7 +1415,7 @@ check_pte_for_compressed_marker:
 					/* ... but it used to be "ALTACCT" */
 					ledgers_alt_compressed++;
 				}
-				pmap_store_pte(cpte, 0);
+				pmap_store_pte(is_ept, cpte, 0);
 			}
 			continue;
 		}
@@ -1461,7 +1471,7 @@ check_pte_for_compressed_marker:
 		}
 
 		/* completely invalidate the PTE */
-		pmap_store_pte(cpte, 0);
+		pmap_store_pte(is_ept, cpte, 0);
 
 		UNLOCK_PVH(pai);
 
@@ -1782,7 +1792,7 @@ pmap_page_protect_options(
 			}
 
 			if (options & PMAP_OPTIONS_NOREFMOD) {
-				pmap_store_pte(pte, new_pte_value);
+				pmap_store_pte(is_ept, pte, new_pte_value);
 
 				if (options & PMAP_OPTIONS_NOFLUSH) {
 					PMAP_UPDATE_TLBS_DELAYED(pmap, vaddr, vaddr + PAGE_SIZE, (pmap_flush_context *)arg);
@@ -1793,7 +1803,7 @@ pmap_page_protect_options(
 				/*
 				 * Remove the mapping, collecting dirty bits.
 				 */
-				pmap_update_pte(pte, PTE_VALID_MASK(is_ept), 0);
+				pmap_update_pte(is_ept, pte, PTE_VALID_MASK(is_ept), 0);
 
 				PMAP_UPDATE_TLBS(pmap, vaddr, vaddr + PAGE_SIZE);
 				if (!is_ept) {
@@ -1824,7 +1834,7 @@ pmap_page_protect_options(
 						}
 					}
 				}
-				pmap_store_pte(pte, new_pte_value);
+				pmap_store_pte(is_ept, pte, new_pte_value);
 			}
 
 #if TESTING
@@ -1924,7 +1934,7 @@ pmap_page_protect_options(
 				pmap_phys_attributes[pai] |=
 				    ept_refmod_to_physmap((*pte & (INTEL_EPT_REF | INTEL_EPT_MOD))) & (PHYS_MODIFIED | PHYS_REFERENCED);
 			}
-			pmap_update_pte(pte, PTE_WRITE(is_ept), 0);
+			pmap_update_pte(is_ept, pte, PTE_WRITE(is_ept), 0);
 
 			if (options & PMAP_OPTIONS_NOFLUSH) {
 				PMAP_UPDATE_TLBS_DELAYED(pmap, vaddr, vaddr + PAGE_SIZE, (pmap_flush_context *)arg);
@@ -2073,7 +2083,7 @@ phys_attribute_clear(
 			 * Clear modify and/or reference bits.
 			 */
 			if (pte_bits) {
-				pmap_update_pte(pte, pte_bits, 0);
+				pmap_update_pte(is_ept, pte, pte_bits, 0);
 
 				/* Ensure all processors using this translation
 				 * invalidate this TLB entry. The invalidation
@@ -2291,13 +2301,13 @@ pmap_change_wiring(
 		 * wiring down mapping
 		 */
 		pmap_ledger_credit(map, task_ledgers.wired_mem, PAGE_SIZE);
-		pmap_update_pte(pte, 0, PTE_WIRED);
+		pmap_update_pte(is_ept_pmap(map), pte, 0, PTE_WIRED);
 	} else if (!wired && iswired(*pte)) {
 		/*
 		 * unwiring mapping
 		 */
 		pmap_ledger_debit(map, task_ledgers.wired_mem, PAGE_SIZE);
-		pmap_update_pte(pte, PTE_WIRED, 0);
+		pmap_update_pte(is_ept_pmap(map), pte, PTE_WIRED, 0);
 	}
 
 	PMAP_UNLOCK_SHARED(map);
@@ -2352,7 +2362,7 @@ pmap_map_bd(
 		if (pte_to_pa(*ptep)) {
 			doflush = TRUE;
 		}
-		pmap_store_pte(ptep, template);
+		pmap_store_pte(FALSE, ptep, template);
 		pte_increment_pa(template);
 		virt += PAGE_SIZE;
 		caddr += PAGE_SIZE;
@@ -2407,7 +2417,7 @@ pmap_alias(
 		sptep = pmap_pte(kernel_pmap, start_addr);
 		assert(sptep != PT_ENTRY_NULL && (pte_to_pa(*sptep) != 0));
 		template = pa_to_pte(pte_to_pa(*sptep)) | prot_template;
-		pmap_store_pte(aptep, template);
+		pmap_store_pte(FALSE, aptep, template);
 
 		ava += PAGE_SIZE;
 		start_addr += PAGE_SIZE;

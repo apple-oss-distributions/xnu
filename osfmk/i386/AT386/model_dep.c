@@ -95,7 +95,7 @@
 #include <i386/thread.h>
 #include <i386/trap.h>
 #include <i386/machine_routines.h>
-#include <i386/mp.h>            /* mp_rendezvous_break_lock */
+#include <i386/mp.h>
 #include <i386/cpuid.h>
 #include <i386/fpu.h>
 #include <i386/machine_cpu.h>
@@ -167,7 +167,7 @@ extern unsigned int     panic_is_inited;
 #define MAXCOMLEN 16
 struct proc;
 extern int              proc_pid(struct proc *p);
-extern void             proc_name_kdp(task_t t, char * buf, int size);
+extern void             proc_name_kdp(struct proc *p, char * buf, int size);
 
 
 /* Definitions for frame pointers */
@@ -894,6 +894,26 @@ SavePanicInfo(
 		panic_info->mph_panic_flags |= MACOS_PANIC_HEADER_FLAG_COPROC_INITIATED_PANIC;
 	}
 
+#if MACH_KDP
+	/*
+	 * If this panic is due to a PTE corruption event, use the kdp cross-cpu calling machinery to ask
+	 * each CPU to dump their backtraces before proceeding.  This mechanism was preferred to adding new
+	 * synchronization operations in NMIInterruptHandler and the normal panic flow; this mechanism allows
+	 * each CPU to add their backtraces after all other primary panic output is complete while not adding
+	 * additional complexity to the common panic path.
+	 */
+	if (NMI_panic_reason == PTE_CORRUPTION) {
+		for (uint64_t cpu = 0; cpu < real_ncpus; cpu++) {
+			if (cpu == cpu_number() || !cpu_is_running(cpu)) {
+				continue;
+			}
+			(void) kdp_x86_xcpu_invoke(cpu, NMI_pte_corruption_callback, NULL, NULL, NSEC_PER_SEC /* 1 second timeout */);
+		}
+	}
+#else
+#error NMI PTE Corruption panic flow requires KDP
+#endif
+
 	if (PE_get_offset_into_panic_region(debug_buf_ptr) < panic_info->mph_panic_log_offset) {
 		kdb_printf("Invalid panic log offset found (not properly initialized?): debug_buf_ptr : 0x%p, panic_info: 0x%p mph_panic_log_offset: 0x%x\n",
 		    debug_buf_ptr, panic_info, panic_info->mph_panic_log_offset);
@@ -1407,6 +1427,8 @@ panic_i386_backtrace(void *_frame, int nframes, const char *msg, boolean_t regdu
 	int cn = cpu_number();
 	boolean_t old_doprnt_hide_pointers = doprnt_hide_pointers;
 	thread_t cur_thread = current_thread();
+	task_t task;
+	struct proc *proc;
 
 #if DEVELOPMENT || DEBUG
 	/* Turn off I/O tracing now that we're panicking */
@@ -1418,7 +1440,7 @@ panic_i386_backtrace(void *_frame, int nframes, const char *msg, boolean_t regdu
 		/* Spin on print backtrace lock, which serializes output
 		 * Continue anyway if a timeout occurs.
 		 */
-		(void)hw_lock_to(&pbtlock, 0, panic_btlock_handler_spin, LCK_GRP_NULL);
+		(void)hw_lock_to(&pbtlock, LockTimeOutTSC * 4, panic_btlock_handler_spin, LCK_GRP_NULL);
 		pbtcpu = cn;
 	}
 
@@ -1454,18 +1476,13 @@ panic_i386_backtrace(void *_frame, int nframes, const char *msg, boolean_t regdu
 	}
 
 	// print current task info
-	if (PANIC_VALIDATE_PTR(cur_thread) &&
-	    PANIC_VALIDATE_PTR(cur_thread->task)) {
-		task_t task = cur_thread->task;
-
+	if (panic_get_thread_proc_task(cur_thread, &task, &proc)) {
 		paniclog_append_noflush("Panicked task %p: %d threads: ",
 		    task, task->thread_count);
-
-		if (panic_validate_ptr(task->bsd_info, 1, "bsd_info")) {
+		if (proc) {
 			char name[MAXCOMLEN + 1];
-			int  pid = proc_pid(task->bsd_info);
-			proc_name_kdp(task, name, sizeof(name));
-			paniclog_append_noflush("pid %d: %s", pid, name);
+			proc_name_kdp(proc, name, sizeof(name));
+			paniclog_append_noflush("pid %d: %s", proc_pid(proc), name);
 		} else {
 			paniclog_append_noflush("unknown task");
 		}
@@ -1744,7 +1761,7 @@ print_launchd_info(void)
 		/* Spin on print backtrace lock, which serializes output
 		 * Continue anyway if a timeout occurs.
 		 */
-		(void)hw_lock_to(&pbtlock, 0, panic_btlock_handler_spin, LCK_GRP_NULL);
+		(void)hw_lock_to(&pbtlock, LockTimeOutTSC * 4, panic_btlock_handler_spin, LCK_GRP_NULL);
 		pbtcpu = cn;
 	}
 

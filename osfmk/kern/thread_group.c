@@ -624,7 +624,7 @@ thread_group_get(thread_t t)
 struct thread_group *
 thread_group_get_home_group(thread_t t)
 {
-	return task_coalition_get_thread_group(t->task);
+	return task_coalition_get_thread_group(get_threadtask(t));
 }
 
 /*

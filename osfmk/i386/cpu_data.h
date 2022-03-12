@@ -423,7 +423,6 @@ get_active_thread(void)
 
 #define current_thread_fast()           get_active_thread()
 #define current_thread_volatile()       get_active_thread_volatile()
-#define current_thread()                current_thread_fast()
 
 #define cpu_mode_is64bit()              TRUE
 
@@ -626,7 +625,7 @@ traptrace_start(int vecnum, uint64_t ipc, uint64_t sabs, uint64_t frameptr)
 
 	cur_traptrace_ring = *PERCPU_GET(traptrace_ring);
 	cur_traptrace_ring[nextidx].vector = vecnum;
-	cur_traptrace_ring[nextidx].curthread = current_thread();
+	cur_traptrace_ring[nextidx].curthread = current_thread_fast();
 	cur_traptrace_ring[nextidx].interrupted_pc = ipc;
 	cur_traptrace_ring[nextidx].curpl = cdata->cpu_preemption_level;
 	cur_traptrace_ring[nextidx].curil = cdata->cpu_interrupt_level;

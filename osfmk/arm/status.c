@@ -513,7 +513,7 @@ machine_thread_reset_pc(thread_t thread, mach_vm_address_t pc)
  * Routine:	machine_thread_state_initialize
  *
  */
-kern_return_t
+void
 machine_thread_state_initialize(
 	thread_t thread)
 {
@@ -528,8 +528,6 @@ machine_thread_state_initialize(
 #endif
 
 	thread->machine.DebugData = NULL;
-
-	return KERN_SUCCESS;
 }
 
 #if __ARM_VFP__

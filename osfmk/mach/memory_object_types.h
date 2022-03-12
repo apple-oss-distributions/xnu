@@ -333,9 +333,6 @@ extern boolean_t memory_object_backing_object(
 	vm_object_t *backing_object,
 	vm_object_offset_t *backing_offset);
 
-extern void memory_object_default_reference(memory_object_default_t);
-extern void memory_object_default_deallocate(memory_object_default_t);
-
 extern void memory_object_control_reference(memory_object_control_t control);
 extern void memory_object_control_deallocate(memory_object_control_t control);
 extern int  memory_object_control_uiomove(memory_object_control_t, memory_object_offset_t, void *, int, int, int, int);

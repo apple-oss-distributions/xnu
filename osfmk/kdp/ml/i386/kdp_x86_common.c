@@ -175,7 +175,7 @@ kdp_machine_phys_read(kdp_readphysmem64_req_t *rq, caddr_t dst,
 
 	if ((lcpu != KDP_CURRENT_LCPU) && (lcpu != cpu_number())) {
 		return (mach_vm_size_t)
-		       kdp_x86_xcpu_invoke(lcpu, (kdp_x86_xcpu_func_t)kdp_machine_phys_read, rq, dst);
+		       kdp_x86_xcpu_invoke(lcpu, (kdp_x86_xcpu_func_t)kdp_machine_phys_read, rq, dst, 0);
 	}
 
 #ifdef KDP_VM_READ_DEBUG
@@ -285,7 +285,7 @@ kdp_machine_phys_write(kdp_writephysmem64_req_t *rq, caddr_t src,
 
 	if ((lcpu != KDP_CURRENT_LCPU) && (lcpu != cpu_number())) {
 		return (mach_vm_size_t)
-		       kdp_x86_xcpu_invoke(lcpu, (kdp_x86_xcpu_func_t)kdp_machine_phys_write, rq, src);
+		       kdp_x86_xcpu_invoke(lcpu, (kdp_x86_xcpu_func_t)kdp_machine_phys_write, rq, src, 0);
 	}
 
 #ifdef KDP_VM_WRITE_DEBUG
@@ -334,7 +334,7 @@ kdp_machine_ioport_read(kdp_readioport_req_t *rq, caddr_t data, uint16_t lcpu)
 	uint16_t size = rq->nbytes;
 
 	if ((lcpu != KDP_CURRENT_LCPU) && (lcpu != cpu_number())) {
-		return (int) kdp_x86_xcpu_invoke(lcpu, (kdp_x86_xcpu_func_t)kdp_machine_ioport_read, rq, data);
+		return (int) kdp_x86_xcpu_invoke(lcpu, (kdp_x86_xcpu_func_t)kdp_machine_ioport_read, rq, data, 0);
 	}
 
 	switch (size) {
@@ -361,7 +361,7 @@ kdp_machine_ioport_write(kdp_writeioport_req_t *rq, caddr_t data, uint16_t lcpu)
 	uint16_t size = rq->nbytes;
 
 	if ((lcpu != KDP_CURRENT_LCPU) && (lcpu != cpu_number())) {
-		return (int) kdp_x86_xcpu_invoke(lcpu, (kdp_x86_xcpu_func_t)kdp_machine_ioport_write, rq, data);
+		return (int) kdp_x86_xcpu_invoke(lcpu, (kdp_x86_xcpu_func_t)kdp_machine_ioport_write, rq, data, 0);
 	}
 
 	switch (size) {
@@ -388,7 +388,7 @@ kdp_machine_msr64_read(kdp_readmsr64_req_t *rq, caddr_t data, uint16_t lcpu)
 	uint32_t msr    = rq->address;
 
 	if ((lcpu != KDP_CURRENT_LCPU) && (lcpu != cpu_number())) {
-		return (int) kdp_x86_xcpu_invoke(lcpu, (kdp_x86_xcpu_func_t)kdp_machine_msr64_read, rq, data);
+		return (int) kdp_x86_xcpu_invoke(lcpu, (kdp_x86_xcpu_func_t)kdp_machine_msr64_read, rq, data, 0);
 	}
 
 	*value = rdmsr64(msr);
@@ -402,7 +402,7 @@ kdp_machine_msr64_write(kdp_writemsr64_req_t *rq, caddr_t data, uint16_t lcpu)
 	uint32_t msr    = rq->address;
 
 	if ((lcpu != KDP_CURRENT_LCPU) && (lcpu != cpu_number())) {
-		return (int) kdp_x86_xcpu_invoke(lcpu, (kdp_x86_xcpu_func_t)kdp_machine_msr64_write, rq, data);
+		return (int) kdp_x86_xcpu_invoke(lcpu, (kdp_x86_xcpu_func_t)kdp_machine_msr64_write, rq, data, 0);
 	}
 
 	wrmsr64(msr, *value);

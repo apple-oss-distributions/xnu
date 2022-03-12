@@ -52,6 +52,7 @@
 #include <net/if_arp.h>
 #include <net/iptap.h>
 #include <net/pktap.h>
+#include <net/nwk_wq.h>
 #include <sys/kern_event.h>
 #include <sys/kdebug.h>
 #include <sys/mcache.h>
@@ -4677,6 +4678,8 @@ dlil_input_packet_list_common(struct ifnet *ifp_param, struct mbuf *m,
 		struct if_proto *ifproto = NULL;
 		uint32_t pktf_mask;     /* pkt flags to preserve */
 
+		m_add_crumb(m, PKT_CRUMB_DLIL_INPUT);
+
 		if (ifp_param == NULL) {
 			ifp = m->m_pkthdr.rcvif;
 		}
@@ -5299,6 +5302,8 @@ preout_again:
 	m = packetlist;
 	packetlist = packetlist->m_nextpkt;
 	m->m_nextpkt = NULL;
+
+	m_add_crumb(m, PKT_CRUMB_DLIL_OUTPUT);
 
 	/*
 	 * Perform address family translation for the first
@@ -6034,6 +6039,69 @@ done:
 	return error;
 }
 
+/* The following is used to enqueue work items for ifnet ioctl events */
+static void ifnet_ioctl_event_callback(void *);
+
+struct ifnet_ioctl_event {
+	struct ifnet *ifp;
+	u_long ioctl_code;
+};
+
+struct ifnet_ioctl_event_nwk_wq_entry {
+	struct nwk_wq_entry nwk_wqe;
+	struct ifnet_ioctl_event ifnet_ioctl_ev_arg;
+};
+
+void
+ifnet_ioctl_async(struct ifnet *ifp, u_long ioctl_code)
+{
+	struct ifnet_ioctl_event_nwk_wq_entry *p_ifnet_ioctl_ev = NULL;
+
+	/*
+	 * Get an io ref count if the interface is attached.
+	 * At this point it most likely is. We are taking a reference for
+	 * deferred processing.
+	 */
+	if (!ifnet_is_attached(ifp, 1)) {
+		os_log(OS_LOG_DEFAULT, "%s:%d %s Failed for ioctl %lu as interface "
+		    "is not attached",
+		    __func__, __LINE__, if_name(ifp), ioctl_code);
+		return;
+	}
+
+	MALLOC(p_ifnet_ioctl_ev, struct ifnet_ioctl_event_nwk_wq_entry *,
+	    sizeof(struct ifnet_ioctl_event_nwk_wq_entry),
+	    M_NWKWQ, M_WAITOK | M_ZERO);
+
+	p_ifnet_ioctl_ev->ifnet_ioctl_ev_arg.ifp = ifp;
+	p_ifnet_ioctl_ev->ifnet_ioctl_ev_arg.ioctl_code = ioctl_code;
+
+	p_ifnet_ioctl_ev->nwk_wqe.func = ifnet_ioctl_event_callback;
+	p_ifnet_ioctl_ev->nwk_wqe.is_arg_managed = TRUE;
+	p_ifnet_ioctl_ev->nwk_wqe.arg = &p_ifnet_ioctl_ev->ifnet_ioctl_ev_arg;
+	nwk_wq_enqueue((struct nwk_wq_entry*)p_ifnet_ioctl_ev);
+}
+
+static void
+ifnet_ioctl_event_callback(void *arg)
+{
+	struct ifnet_ioctl_event *p_ifnet_ioctl_ev = (struct ifnet_ioctl_event *)arg;
+	struct ifnet *ifp = p_ifnet_ioctl_ev->ifp;
+	u_long ioctl_code = p_ifnet_ioctl_ev->ioctl_code;
+	int ret = 0;
+
+	if ((ret = ifnet_ioctl(ifp, 0, ioctl_code, NULL)) != 0) {
+		os_log(OS_LOG_DEFAULT, "%s:%d %s ifnet_ioctl returned %d for ioctl %lu",
+		    __func__, __LINE__, if_name(ifp), ret, ioctl_code);
+	} else if (dlil_verbose) {
+		os_log(OS_LOG_DEFAULT, "%s:%d %s ifnet_ioctl returned successfully "
+		    "for ioctl %lu",
+		    __func__, __LINE__, if_name(ifp), ioctl_code);
+	}
+	ifnet_decr_iorefcnt(ifp);
+	return;
+}
+
 errno_t
 ifnet_ioctl(ifnet_t ifp, protocol_family_t proto_fam, u_long ioctl_code,
     void *ioctl_arg)
@@ -6266,7 +6334,7 @@ net_thread_marks_push(u_int32_t push)
 	u_int32_t pop = 0;
 
 	if (push != 0) {
-		struct uthread *uth = get_bsdthread_info(current_thread());
+		struct uthread *uth = current_uthread();
 
 		pop = push & ~uth->uu_network_marks;
 		if (pop != 0) {
@@ -6284,7 +6352,7 @@ net_thread_unmarks_push(u_int32_t unpush)
 	u_int32_t unpop = 0;
 
 	if (unpush != 0) {
-		struct uthread *uth = get_bsdthread_info(current_thread());
+		struct uthread *uth = current_uthread();
 
 		unpop = unpush & uth->uu_network_marks;
 		if (unpop != 0) {
@@ -6303,7 +6371,7 @@ net_thread_marks_pop(net_thread_marks_t popx)
 
 	if (pop != 0) {
 		static const ptrdiff_t ones = (ptrdiff_t)(u_int32_t)~0U;
-		struct uthread *uth = get_bsdthread_info(current_thread());
+		struct uthread *uth = current_uthread();
 
 		VERIFY((pop & ones) == pop);
 		VERIFY((ptrdiff_t)(uth->uu_network_marks & pop) == pop);
@@ -6319,7 +6387,7 @@ net_thread_unmarks_pop(net_thread_marks_t unpopx)
 
 	if (unpop != 0) {
 		static const ptrdiff_t ones = (ptrdiff_t)(u_int32_t)~0U;
-		struct uthread *uth = get_bsdthread_info(current_thread());
+		struct uthread *uth = current_uthread();
 
 		VERIFY((unpop & ones) == unpop);
 		VERIFY((ptrdiff_t)(uth->uu_network_marks & unpop) == 0);
@@ -6331,7 +6399,7 @@ __private_extern__ u_int32_t
 net_thread_is_marked(u_int32_t check)
 {
 	if (check != 0) {
-		struct uthread *uth = get_bsdthread_info(current_thread());
+		struct uthread *uth = current_uthread();
 		return uth->uu_network_marks & check;
 	} else {
 		return 0;
@@ -6342,7 +6410,7 @@ __private_extern__ u_int32_t
 net_thread_is_unmarked(u_int32_t check)
 {
 	if (check != 0) {
-		struct uthread *uth = get_bsdthread_info(current_thread());
+		struct uthread *uth = current_uthread();
 		return ~uth->uu_network_marks & check;
 	} else {
 		return 0;
@@ -6822,6 +6890,19 @@ ioref_done:
 	return retval;
 }
 
+static void
+dlil_handle_proto_attach(ifnet_t ifp, protocol_family_t protocol)
+{
+	/*
+	 * A protocol has been attached, mark the interface up.
+	 * This used to be done by configd.KernelEventMonitor, but that
+	 * is inherently prone to races (rdar://problem/30810208).
+	 */
+	(void) ifnet_set_flags(ifp, IFF_UP, IFF_UP);
+	(void) ifnet_ioctl(ifp, 0, SIOCSIFFLAGS, NULL);
+	dlil_post_sifflags_msg(ifp);
+}
+
 errno_t
 ifnet_attach_protocol(ifnet_t ifp, protocol_family_t protocol,
     const struct ifnet_attach_proto_param *proto_details)
@@ -6877,14 +6958,7 @@ end:
 	}
 	ifnet_head_done();
 	if (retval == 0) {
-		/*
-		 * A protocol has been attached, mark the interface up.
-		 * This used to be done by configd.KernelEventMonitor, but that
-		 * is inherently prone to races (rdar://problem/30810208).
-		 */
-		(void) ifnet_set_flags(ifp, IFF_UP, IFF_UP);
-		(void) ifnet_ioctl(ifp, 0, SIOCSIFFLAGS, NULL);
-		dlil_post_sifflags_msg(ifp);
+		dlil_handle_proto_attach(ifp, protocol);
 	} else if (ifproto != NULL) {
 		zfree(dlif_proto_zone, ifproto);
 	}
@@ -6946,14 +7020,7 @@ end:
 	}
 	ifnet_head_done();
 	if (retval == 0) {
-		/*
-		 * A protocol has been attached, mark the interface up.
-		 * This used to be done by configd.KernelEventMonitor, but that
-		 * is inherently prone to races (rdar://problem/30810208).
-		 */
-		(void) ifnet_set_flags(ifp, IFF_UP, IFF_UP);
-		(void) ifnet_ioctl(ifp, 0, SIOCSIFFLAGS, NULL);
-		dlil_post_sifflags_msg(ifp);
+		dlil_handle_proto_attach(ifp, protocol);
 	} else if (ifproto != NULL) {
 		zfree(dlif_proto_zone, ifproto);
 	}

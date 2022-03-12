@@ -1337,7 +1337,7 @@ chudxnu_thread_get_callstack64_internal(
 	boolean_t               kern_only)
 {
 	kern_return_t kr = KERN_FAILURE;
-	task_t task = thread->task;
+	task_t task = get_threadtask(thread);
 	uint64_t currPC = 0ULL;
 	boolean_t supervisor = FALSE;
 	mach_msg_type_number_t bufferIndex = 0;

@@ -683,7 +683,7 @@ pmSafeMode(x86_lcpu_t *lcpu, uint32_t flags)
 
 		/*
 		 * Clear the halted flag for the specified CPU, that will
-		 * get it out of it's spin loop.
+		 * get it out of its spin loop.
 		 */
 		if (flags & PM_SAFE_FL_RESUME) {
 			lcpu->state = LCPU_RUN;
@@ -747,22 +747,8 @@ machine_choose_processor(processor_set_t pset,
 static int
 pmThreadGetUrgency(uint64_t *rt_period, uint64_t *rt_deadline)
 {
-	thread_urgency_t urgency;
-	uint64_t        arg1, arg2;
-
-	urgency = thread_get_urgency(THREAD_NULL, &arg1, &arg2);
-
-	if (urgency == THREAD_URGENCY_REAL_TIME) {
-		if (rt_period != NULL) {
-			*rt_period = arg1;
-		}
-
-		if (rt_deadline != NULL) {
-			*rt_deadline = arg2;
-		}
-	}
-
-	return (int)urgency;
+#pragma unused(rt_period, rt_deadline)
+	return THREAD_URGENCY_NONE;
 }
 
 #if     DEBUG

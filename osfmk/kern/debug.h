@@ -543,6 +543,10 @@ enum {
 #endif
 #define panic_plain(ex, ...)  (panic)(ex, ## __VA_ARGS__)
 
+struct task;
+struct thread;
+struct proc;
+
 __abortlike __printflike(4, 5)
 void panic_with_options(unsigned int reason, void *ctx,
     uint64_t debugger_options_mask, const char *str, ...);
@@ -550,6 +554,8 @@ void Debugger(const char * message);
 void populate_model_name(char *);
 
 boolean_t panic_validate_ptr(void *ptr, vm_size_t size, const char *what);
+
+boolean_t panic_get_thread_proc_task(struct thread *thread, struct task **task, struct proc **proc);
 
 #define PANIC_VALIDATE_PTR(expr) \
 	panic_validate_ptr(expr, sizeof(*(expr)), #expr)

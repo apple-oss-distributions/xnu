@@ -2274,7 +2274,8 @@ hibernate_write_image(void)
 	} else {
 		// on ARM, once ApplePMGR decides we're hibernating, we can't turn back
 		// see: <rdar://problem/63848862> Tonga ApplePMGR diff quiesce path support
-		panic("hibernate_write_image encountered error 0x%x", err);
+		vm_panic_hibernate_write_image_failed(err);
+		return err; //not coming here post panic
 	}
 #else
 	if (kIOReturnSuccess == err) {

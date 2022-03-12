@@ -2424,7 +2424,7 @@ mach_port_guard_exception(
 	boolean_t fatal = FALSE;
 
 	if (reason <= MAX_OPTIONAL_kGUARD_EXC_CODE &&
-	    (t->task->task_exc_guard & TASK_EXC_GUARD_MP_FATAL)) {
+	    (get_threadtask(t)->task_exc_guard & TASK_EXC_GUARD_MP_FATAL)) {
 		fatal = TRUE;
 	} else if (reason <= MAX_FATAL_kGUARD_EXC_CODE) {
 		fatal = TRUE;
@@ -2500,8 +2500,9 @@ mach_port_guard_ast(thread_t t,
     mach_exception_data_type_t code, mach_exception_data_type_t subcode)
 {
 	unsigned int reason = EXC_GUARD_DECODE_GUARD_FLAVOR(code);
-	task_t task = t->task;
+	task_t task = get_threadtask(t);
 	unsigned int behavior = task->task_exc_guard;
+
 	assert(task == current_task());
 	assert(task != kernel_task);
 

@@ -182,8 +182,8 @@ qos_main_thread_active(void)
 static int
 proc_usynch_get_requested_thread_qos(struct uthread *uth)
 {
-	thread_t        thread = uth ? uth->uu_thread : current_thread();
-	int                     requested_qos;
+	thread_t thread = uth ? get_machthread(uth) : current_thread();
+	int      requested_qos;
 
 	requested_qos = proc_get_thread_policy(thread, TASK_POLICY_ATTRIBUTE, TASK_POLICY_QOS);
 
@@ -205,7 +205,7 @@ proc_usynch_thread_qos_add_override_for_resource(task_t task, struct uthread *ut
     uint64_t tid, int override_qos, boolean_t first_override_for_resource,
     user_addr_t resource, int resource_type)
 {
-	thread_t thread = uth ? uth->uu_thread : THREAD_NULL;
+	thread_t thread = uth ? get_machthread(uth) : THREAD_NULL;
 
 	return proc_thread_qos_add_override(task, thread, tid, override_qos,
 	           first_override_for_resource, resource, resource_type) == 0;
@@ -215,7 +215,7 @@ static boolean_t
 proc_usynch_thread_qos_remove_override_for_resource(task_t task,
     struct uthread *uth, uint64_t tid, user_addr_t resource, int resource_type)
 {
-	thread_t thread = uth ? uth->uu_thread : THREAD_NULL;
+	thread_t thread = uth ? get_machthread(uth) : THREAD_NULL;
 
 	return proc_thread_qos_remove_override(task, thread, tid, resource,
 	           resource_type) == 0;
@@ -289,26 +289,25 @@ static kern_return_t
 psynch_wait_wakeup(uintptr_t kwq, struct ksyn_waitq_element *kwe,
     struct turnstile **tstore)
 {
-	struct uthread *uth;
+	struct thread *th;
 	struct turnstile *ts;
 	kern_return_t kr;
 
-	uth = __container_of(kwe, struct uthread, uu_save.uus_kwe);
-	assert(uth);
+	th = get_machthread(__container_of(kwe, struct uthread, uu_save.uus_kwe));
 
 	if (tstore) {
 		ts = turnstile_prepare(kwq, tstore, TURNSTILE_NULL,
 		    TURNSTILE_PTHREAD_MUTEX);
-		turnstile_update_inheritor(ts, uth->uu_thread,
+		turnstile_update_inheritor(ts, th,
 		    (TURNSTILE_IMMEDIATE_UPDATE | TURNSTILE_INHERITOR_THREAD));
 
-		kr = waitq_wakeup64_thread(&ts->ts_waitq, (event64_t)kwq,
-		    uth->uu_thread, THREAD_AWAKENED);
+		kr = waitq_wakeup64_thread(&ts->ts_waitq, (event64_t)kwq, th,
+		    THREAD_AWAKENED);
 
 		turnstile_update_inheritor_complete(ts, TURNSTILE_INTERLOCK_HELD);
 		turnstile_complete(kwq, tstore, NULL, TURNSTILE_PTHREAD_MUTEX);
 	} else {
-		kr = thread_wakeup_thread((event_t)kwq, uth->uu_thread);
+		kr = thread_wakeup_thread((event_t)kwq, th);
 	}
 
 	return kr;
@@ -491,6 +490,13 @@ thread_will_park_or_terminate(__unused thread_t thread)
 {
 }
 
+static bool
+old_proc_get_pthread_jit_allowlist(struct proc *t)
+{
+	bool unused_late = false;
+	return proc_get_pthread_jit_allowlist(t, &unused_late);
+}
+
 /*
  * The callbacks structure (defined in pthread_shims.h) contains a collection
  * of kernel functions that were not deemed sensible to expose as a KPI to all
@@ -514,7 +520,8 @@ static const struct pthread_callbacks_s pthread_callbacks = {
 	.proc_set_pthhash = proc_set_pthhash,
 	.proc_get_register = proc_get_register,
 	.proc_set_register = proc_set_register,
-	.proc_get_pthread_jit_allowlist = proc_get_pthread_jit_allowlist,
+	.proc_get_pthread_jit_allowlist = old_proc_get_pthread_jit_allowlist,
+	.proc_get_pthread_jit_allowlist2 = proc_get_pthread_jit_allowlist,
 
 	/* kernel IPI interfaces */
 	.ipc_port_copyout_send = ipc_port_copyout_send,
@@ -534,7 +541,7 @@ static const struct pthread_callbacks_s pthread_callbacks = {
 	.thread_bootstrap_return = pthread_bootstrap_return,
 	.unix_syscall_return = unix_syscall_return,
 
-	.get_bsdthread_info = (void*)get_bsdthread_info,
+	.get_bsdthread_info = get_bsdthread_info,
 	.thread_policy_set_internal = thread_policy_set_internal,
 	.thread_policy_get = thread_policy_get,
 

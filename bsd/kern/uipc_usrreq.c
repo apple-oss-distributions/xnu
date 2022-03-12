@@ -1615,7 +1615,8 @@ try_again:
 		VERIFY(so->so_usecount > 0);
 		so->so_usecount--;
 
-		/* Set the socket state correctly but do a wakeup later when
+		/*
+		 * Set the socket state correctly but do a wakeup later when
 		 * we release all locks except the socket lock, this will avoid
 		 * a deadlock.
 		 */
@@ -1623,7 +1624,7 @@ try_again:
 		unp->unp_socket->so_state |= (SS_CANTRCVMORE | SS_CANTSENDMORE | SS_ISDISCONNECTED);
 
 		unp2->unp_socket->so_state &= ~(SS_ISCONNECTING | SS_ISCONNECTED | SS_ISDISCONNECTING);
-		unp->unp_socket->so_state |= (SS_CANTRCVMORE | SS_CANTSENDMORE | SS_ISDISCONNECTED);
+		unp2->unp_socket->so_state |= (SS_CANTRCVMORE | SS_CANTSENDMORE | SS_ISDISCONNECTED);
 
 		if (unp2->unp_flags & UNP_TRACE_MDNS) {
 			unp2->unp_flags &= ~UNP_TRACE_MDNS;
@@ -2374,7 +2375,7 @@ restart:
 			 * Now check if it is possibly one of OUR sockets.
 			 */
 			if (FILEGLOB_DTYPE(fg) != DTYPE_SOCKET ||
-			    (so = (struct socket *)fg->fg_data) == 0) {
+			    (so = (struct socket *)fg_get_data(fg)) == 0) {
 				lck_mtx_unlock(&fg->fg_lock);
 				continue;
 			}
@@ -2487,15 +2488,14 @@ restart:
 
 		tfg = *fpp;
 
-		if (FILEGLOB_DTYPE(tfg) == DTYPE_SOCKET &&
-		    tfg->fg_data != NULL) {
-			so = (struct socket *)(tfg->fg_data);
+		if (FILEGLOB_DTYPE(tfg) == DTYPE_SOCKET) {
+			so = (struct socket *)fg_get_data(tfg);
 
-			socket_lock(so, 0);
-
-			sorflush(so);
-
-			socket_unlock(so, 0);
+			if (so) {
+				socket_lock(so, 0);
+				sorflush(so);
+				socket_unlock(so, 0);
+			}
 		}
 	}
 	for (i = nunref, fpp = extra_ref; --i >= 0; ++fpp) {

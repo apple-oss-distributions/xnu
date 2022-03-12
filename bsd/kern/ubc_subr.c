@@ -73,7 +73,6 @@
 #include <libkern/crypto/sha1.h>
 #include <libkern/crypto/sha2.h>
 #include <libkern/libkern.h>
-#include <libkern/ptrauth_utils.h>
 
 #include <security/mac_framework.h>
 #include <stdbool.h>
@@ -120,8 +119,9 @@ static uint32_t cs_blob_generation_count = 1;
  * Routines to navigate code signing data structures in the kernel...
  */
 
-ZONE_DECLARE(cs_blob_zone, "cs_blob zone", sizeof(struct cs_blob),
-    ZC_ZFREE_CLEARMEM);
+static SECURITY_READ_ONLY_LATE(zone_t) cs_blob_zone;
+ZONE_INIT(&cs_blob_zone, "cs_blob zone", sizeof(struct cs_blob),
+    ZC_READONLY | ZC_ZFREE_CLEARMEM, ZONE_ID_CS_BLOB, NULL);
 
 extern int cs_debug;
 
@@ -795,11 +795,6 @@ csblob_get_entitlements(struct cs_blob *csblob, void **out_start, size_t *out_le
 	}
 
 	csblob->csb_hashtype->cs_init(&context);
-	ptrauth_utils_auth_blob_generic(entitlements,
-	    ntohl(entitlements->length),
-	    OS_PTRAUTH_DISCRIMINATOR("cs_blob.csb_entitlements_blob_signature"),
-	    PTRAUTH_ADDR_DIVERSIFY,
-	    csblob->csb_entitlements_blob_signature);
 	csblob->csb_hashtype->cs_update(&context, entitlements, ntohl(entitlements->length));
 	csblob->csb_hashtype->cs_final(computed_hash, &context);
 
@@ -852,11 +847,6 @@ csblob_get_der_entitlements(struct cs_blob *csblob, const CS_GenericBlob **out_s
 	}
 
 	csblob->csb_hashtype->cs_init(&context);
-	ptrauth_utils_auth_blob_generic(der_entitlements,
-	    ntohl(der_entitlements->length),
-	    OS_PTRAUTH_DISCRIMINATOR("cs_blob.csb_der_entitlements_blob_signature"),
-	    PTRAUTH_ADDR_DIVERSIFY,
-	    csblob->csb_der_entitlements_blob_signature);
 	csblob->csb_hashtype->cs_update(&context, der_entitlements, ntohl(der_entitlements->length));
 	csblob->csb_hashtype->cs_final(computed_hash, &context);
 
@@ -1372,25 +1362,25 @@ int
 ubc_setthreadcred(struct vnode *vp, proc_t p, thread_t thread)
 {
 	struct ubc_info *uip;
-	kauth_cred_t credp;
-	struct uthread  *uthread = get_bsdthread_info(thread);
+	thread_ro_t tro = get_thread_ro(thread);
 
 	if (!UBCINFOEXISTS(vp)) {
 		return 1;
 	}
 
+	assert(thread == current_thread());
+
 	vnode_lock(vp);
 
 	uip = vp->v_ubcinfo;
-	credp = uip->ui_ucred;
 
-	if (!IS_VALID_CRED(credp)) {
+	if (!IS_VALID_CRED(uip->ui_ucred)) {
 		/* use per-thread cred, if assumed identity, else proc cred */
-		if (uthread == NULL || (uthread->uu_flag & UT_SETUID) == 0) {
-			uip->ui_ucred = kauth_cred_proc_ref(p);
-		} else {
-			uip->ui_ucred = uthread->uu_ucred;
+		if (tro->tro_flags & TRO_SETUID) {
+			uip->ui_ucred = tro->tro_cred;
 			kauth_cred_ref(uip->ui_ucred);
+		} else {
+			uip->ui_ucred = kauth_cred_proc_ref(p);
 		}
 	}
 	vnode_unlock(vp);
@@ -3180,12 +3170,6 @@ ubc_cs_reconstitute_code_signature(
 	/* Conditional storage for the DER entitlements blob */
 	der_entitlements_blob = blob->csb_der_entitlements_blob;
 	if (der_entitlements_blob) {
-		ptrauth_utils_auth_blob_generic(der_entitlements_blob,
-		    ntohl(der_entitlements_blob->length),
-		    OS_PTRAUTH_DISCRIMINATOR("cs_blob.csb_der_entitlements_blob_signature"),
-		    PTRAUTH_ADDR_DIVERSIFY,
-		    blob->csb_der_entitlements_blob_signature);
-
 		new_blob_size += sizeof(CS_BlobIndex);
 		new_blob_size += ntohl(der_entitlements_blob->length);
 		num_blobs += 1;
@@ -3194,12 +3178,6 @@ ubc_cs_reconstitute_code_signature(
 	/* Conditional storage for the entitlements blob */
 	entitlements_blob = blob->csb_entitlements_blob;
 	if (entitlements_blob) {
-		ptrauth_utils_auth_blob_generic(entitlements_blob,
-		    ntohl(entitlements_blob->length),
-		    OS_PTRAUTH_DISCRIMINATOR("cs_blob.csb_entitlements_blob_signature"),
-		    PTRAUTH_ADDR_DIVERSIFY,
-		    blob->csb_entitlements_blob_signature);
-
 		new_blob_size += sizeof(CS_BlobIndex);
 		new_blob_size += ntohl(entitlements_blob->length);
 		num_blobs += 1;
@@ -3282,12 +3260,6 @@ ubc_cs_reconstitute_code_signature(
 		superblob->index[blob_index].offset = htonl(blob_offset);
 		superblob->index[blob_index].type = htonl(CSSLOT_DER_ENTITLEMENTS);
 
-		ptrauth_utils_auth_blob_generic(der_entitlements_blob,
-		    ntohl(der_entitlements_blob->length),
-		    OS_PTRAUTH_DISCRIMINATOR("cs_blob.csb_der_entitlements_blob_signature"),
-		    PTRAUTH_ADDR_DIVERSIFY,
-		    blob->csb_der_entitlements_blob_signature);
-
 		memcpy((void*)(new_blob_addr + blob_offset), der_entitlements_blob, ntohl(der_entitlements_blob->length));
 		blob_offset += ntohl(der_entitlements_blob->length);
 	}
@@ -3297,12 +3269,6 @@ ubc_cs_reconstitute_code_signature(
 		blob_index += 1;
 		superblob->index[blob_index].offset = htonl(blob_offset);
 		superblob->index[blob_index].type = htonl(CSSLOT_ENTITLEMENTS);
-
-		ptrauth_utils_auth_blob_generic(entitlements_blob,
-		    ntohl(entitlements_blob->length),
-		    OS_PTRAUTH_DISCRIMINATOR("cs_blob.csb_entitlements_blob_signature"),
-		    PTRAUTH_ADDR_DIVERSIFY,
-		    blob->csb_entitlements_blob_signature);
 
 		memcpy((void*)(new_blob_addr + blob_offset), entitlements_blob, ntohl(entitlements_blob->length));
 		blob_offset += ntohl(entitlements_blob->length);
@@ -3422,11 +3388,6 @@ ubc_cs_clear_unneeded_code_signature(
 
 	/* Check for DER entitlements */
 	if (blob->csb_der_entitlements_blob) {
-		ptrauth_utils_auth_blob_generic(blob->csb_der_entitlements_blob,
-		    ntohl(blob->csb_der_entitlements_blob->length),
-		    OS_PTRAUTH_DISCRIMINATOR("cs_blob.csb_der_entitlements_blob_signature"),
-		    PTRAUTH_ADDR_DIVERSIFY,
-		    blob->csb_der_entitlements_blob_signature);
 		num_blobs += 1;
 		last_needed_blob_offset += ntohl(blob->csb_der_entitlements_blob->length);
 	}
@@ -3497,16 +3458,9 @@ ubc_cs_clear_unneeded_code_signature(
 		blob->csb_cd = (const CS_CodeDirectory*)csblob_find_blob_bytes((uint8_t*)new_superblob, new_superblob_size, CSSLOT_CODEDIRECTORY, CSMAGIC_CODEDIRECTORY);
 
 		blob->csb_der_entitlements_blob = csblob_find_blob_bytes((uint8_t*)new_superblob, new_superblob_size, CSSLOT_DER_ENTITLEMENTS, CSMAGIC_EMBEDDED_DER_ENTITLEMENTS);
-		if (blob->csb_der_entitlements_blob != NULL) {
-			blob->csb_der_entitlements_blob_signature = ptrauth_utils_sign_blob_generic(blob->csb_der_entitlements_blob,
-			    ntohl(blob->csb_der_entitlements_blob->length),
-			    OS_PTRAUTH_DISCRIMINATOR("cs_blob.csb_der_entitlements_blob_signature"),
-			    PTRAUTH_ADDR_DIVERSIFY);
-		}
 	}
 
 	blob->csb_entitlements_blob = NULL;
-	blob->csb_entitlements_blob_signature = 0;
 
 	const CS_CodeDirectory *validated_code_directory = NULL;
 	const CS_GenericBlob *validated_entitlements_blob = NULL;
@@ -3621,15 +3575,8 @@ ubc_cs_convert_to_multilevel_hash(struct cs_blob *blob)
 	blob->csb_mem_kaddr = (void *)new_blob_addr;
 	blob->csb_cd = cd;
 	blob->csb_entitlements_blob = NULL;
-	blob->csb_entitlements_blob_signature = 0;
 
 	blob->csb_der_entitlements_blob = der_entitlements; /* may be NULL, not yet validated */
-	if (blob->csb_der_entitlements_blob != NULL) {
-		blob->csb_der_entitlements_blob_signature = ptrauth_utils_sign_blob_generic(blob->csb_der_entitlements_blob,
-		    ntohl(blob->csb_der_entitlements_blob->length),
-		    OS_PTRAUTH_DISCRIMINATOR("cs_blob.csb_der_entitlements_blob_signature"),
-		    PTRAUTH_ADDR_DIVERSIFY);
-	}
 	blob->csb_reconstituted = true;
 
 	/* The blob has some cached attributes of the Code Directory, so update those */
@@ -3649,35 +3596,73 @@ ubc_cs_convert_to_multilevel_hash(struct cs_blob *blob)
 	return 0;
 }
 
-/*
- * Validate the code signature blob, create a struct cs_blob wrapper
- * and return it together with a pointer to the chosen code directory
- * and entitlements blob.
- *
- * Note that this takes ownership of the memory as addr, mainly because
- * this function can actually replace the passed in blob with another
- * one, e.g. when performing multilevel hashing optimization.
- */
-int
-cs_blob_create_validated(
-	vm_address_t * const            addr,
-	vm_size_t                       size,
-	struct cs_blob ** const         ret_blob,
-	CS_CodeDirectory const ** const     ret_cd)
+static void
+cs_blob_cleanup(struct cs_blob *blob)
 {
-	struct cs_blob          *blob;
-	int             error = EINVAL;
-	const CS_CodeDirectory *cd;
-	const CS_GenericBlob *entitlements;
-	const CS_GenericBlob *der_entitlements;
-	union cs_hash_union     mdctx;
-	size_t                  length;
-
-	if (ret_blob) {
-		*ret_blob = NULL;
+	if (blob->profile_kaddr) {
+		kmem_free(kernel_map, blob->profile_kaddr, blob->profile_allocation_size);
 	}
+	blob->profile_kaddr = 0;
+	blob->profile_allocation_size = 0;
 
-	blob = zalloc_flags(cs_blob_zone, Z_WAITOK | Z_NOFAIL);
+	if (blob->csb_mem_kaddr) {
+		ubc_cs_blob_deallocate((vm_offset_t)blob->csb_mem_kaddr, blob->csb_mem_size);
+	}
+	blob->csb_mem_kaddr = NULL;
+	blob->csb_mem_size = 0;
+
+	if (blob->csb_entitlements != NULL) {
+		if (amfi) {
+			// TODO: PANIC if amfi isn't present
+			amfi->OSEntitlements_invalidate(blob->csb_entitlements);
+		}
+		osobject_release(blob->csb_entitlements);
+		blob->csb_entitlements = NULL;
+	}
+}
+
+static void
+cs_blob_ro_free(struct cs_blob *blob)
+{
+	struct cs_blob tmp;
+
+	if (blob != NULL) {
+		/*
+		 * cs_blob_cleanup clears fields, so we need to pass it a
+		 * mutable copy.
+		 */
+		tmp = *blob;
+		cs_blob_cleanup(&tmp);
+
+		zfree_ro(ZONE_ID_CS_BLOB, blob);
+	}
+}
+
+/*
+ * Free a cs_blob previously created by cs_blob_create_validated.
+ */
+void
+cs_blob_free(
+	struct cs_blob *blob)
+{
+	cs_blob_ro_free(blob);
+}
+
+static int
+cs_blob_init_validated(
+	vm_address_t * const addr,
+	vm_size_t size,
+	struct cs_blob *blob,
+	CS_CodeDirectory const ** const ret_cd)
+{
+	int error = EINVAL;
+	const CS_CodeDirectory *cd = NULL;
+	const CS_GenericBlob *entitlements = NULL;
+	const CS_GenericBlob *der_entitlements = NULL;
+	union cs_hash_union mdctx;
+	size_t length;
+
+	bzero(blob, sizeof(*blob));
 
 	/* fill in the new blob */
 	blob->csb_mem_size = size;
@@ -3723,21 +3708,7 @@ cs_blob_create_validated(
 
 		blob->csb_cd = cd;
 		blob->csb_entitlements_blob = entitlements; /* may be NULL, not yet validated */
-		if (blob->csb_entitlements_blob != NULL) {
-			blob->csb_entitlements_blob_signature = ptrauth_utils_sign_blob_generic(blob->csb_entitlements_blob,
-			    ntohl(blob->csb_entitlements_blob->length),
-			    OS_PTRAUTH_DISCRIMINATOR("cs_blob.csb_entitlements_blob_signature"),
-			    PTRAUTH_ADDR_DIVERSIFY);
-		}
-
 		blob->csb_der_entitlements_blob = der_entitlements; /* may be NULL, not yet validated */
-		if (blob->csb_der_entitlements_blob != NULL) {
-			blob->csb_der_entitlements_blob_signature = ptrauth_utils_sign_blob_generic(blob->csb_der_entitlements_blob,
-			    ntohl(blob->csb_der_entitlements_blob->length),
-			    OS_PTRAUTH_DISCRIMINATOR("cs_blob.csb_der_entitlements_blob_signature"),
-			    PTRAUTH_ADDR_DIVERSIFY);
-		}
-
 		blob->csb_hashtype = cs_find_md(cd->hashType);
 		if (blob->csb_hashtype == NULL || blob->csb_hashtype->cs_digest_size > sizeof(hash)) {
 			panic("validated CodeDirectory but unsupported type");
@@ -3764,10 +3735,6 @@ cs_blob_create_validated(
 		blob->csb_hashtype->cs_final(hash, &mdctx);
 
 		memcpy(blob->csb_cdhash, hash, CS_CDHASH_LEN);
-		blob->csb_cdhash_signature = ptrauth_utils_sign_blob_generic(blob->csb_cdhash,
-		    sizeof(blob->csb_cdhash),
-		    OS_PTRAUTH_DISCRIMINATOR("cs_blob.csb_cd_signature"),
-		    PTRAUTH_ADDR_DIVERSIFY);
 
 #if CONFIG_SUPPLEMENTAL_SIGNATURES
 		blob->csb_linkage_hashtype = NULL;
@@ -3787,14 +3754,11 @@ cs_blob_create_validated(
 
 out:
 	if (error != 0) {
-		cs_blob_free(blob);
+		cs_blob_cleanup(blob);
 		blob = NULL;
 		cd = NULL;
 	}
 
-	if (ret_blob != NULL) {
-		*ret_blob = blob;
-	}
 	if (ret_cd != NULL) {
 		*ret_cd = cd;
 	}
@@ -3803,47 +3767,55 @@ out:
 }
 
 /*
- * Free a cs_blob previously created by cs_blob_create_validated.
+ * Validate the code signature blob, create a struct cs_blob wrapper
+ * and return it together with a pointer to the chosen code directory
+ * and entitlements blob.
+ *
+ * Note that this takes ownership of the memory as addr, mainly because
+ * this function can actually replace the passed in blob with another
+ * one, e.g. when performing multilevel hashing optimization.
  */
-void
-cs_blob_free(
-	struct cs_blob *blob)
+int
+cs_blob_create_validated(
+	vm_address_t * const            addr,
+	vm_size_t                       size,
+	struct cs_blob ** const         ret_blob,
+	CS_CodeDirectory const ** const     ret_cd)
 {
-	if (blob != NULL) {
-		if (blob->profile_kaddr) {
-			kmem_free(kernel_map, blob->profile_kaddr, blob->profile_allocation_size);
-		}
-		blob->profile_kaddr = 0;
-		blob->profile_allocation_size = 0;
+	struct cs_blob blob = {};
+	struct cs_blob *ro_blob;
+	int error;
 
-		if (blob->csb_mem_kaddr) {
-			ubc_cs_blob_deallocate((vm_offset_t)blob->csb_mem_kaddr, blob->csb_mem_size);
-		}
-		blob->csb_mem_kaddr = NULL;
-		blob->csb_mem_size = 0;
-
-		if (blob->csb_entitlements != NULL) {
-			if (amfi) {
-				// TODO: PANIC if amfi isn't present
-				amfi->OSEntitlements_invalidate(blob->csb_entitlements);
-			}
-			osobject_release(blob->csb_entitlements);
-			blob->csb_entitlements = NULL;
-		}
-		zfree(cs_blob_zone, blob);
+	if (ret_blob) {
+		*ret_blob = NULL;
 	}
+
+	if ((error = cs_blob_init_validated(addr, size, &blob, ret_cd)) != 0) {
+		return error;
+	}
+
+	if (ret_blob != NULL) {
+		ro_blob = zalloc_ro(ZONE_ID_CS_BLOB, Z_WAITOK | Z_NOFAIL);
+		zalloc_ro_update_elem(ZONE_ID_CS_BLOB, ro_blob, &blob);
+		*ret_blob = ro_blob;
+	}
+
+	return error;
 }
+
 #if CONFIG_SUPPLEMENTAL_SIGNATURES
 static void
 cs_blob_supplement_free(struct cs_blob * const blob)
 {
+	void *teamid;
+
 	if (blob != NULL) {
 		if (blob->csb_supplement_teamid != NULL) {
+			teamid = blob->csb_supplement_teamid;
 			vm_size_t teamid_size = strlen(blob->csb_supplement_teamid) + 1;
-			kfree_data(blob->csb_supplement_teamid, teamid_size);
-			blob->csb_supplement_teamid = NULL;
+			kfree_data(teamid, teamid_size);
 		}
-		cs_blob_free(blob);
+		cs_blob_ro_free(blob);
 	}
 }
 #endif
@@ -3874,6 +3846,30 @@ ubc_cs_blob_adjust_statistics(struct cs_blob const *blob)
 	}
 }
 
+static void
+cs_blob_set_cpu_type(struct cs_blob *blob, cpu_type_t cputype)
+{
+	zalloc_ro_update_field(ZONE_ID_CS_BLOB, blob, csb_cpu_type, &cputype);
+}
+
+__abortlike
+static void
+panic_cs_blob_backref_mismatch(struct cs_blob *blob, struct vnode *vp)
+{
+	panic("cs_blob vnode backref mismatch: blob=%p, vp=%p, "
+	    "blob->csb_vnode=%p", blob, vp, blob->csb_vnode);
+}
+
+void
+cs_blob_require(struct cs_blob *blob, vnode_t vp)
+{
+	zone_require_ro(ZONE_ID_CS_BLOB, sizeof(struct cs_blob), blob);
+
+	if (vp != NULL && __improbable(blob->csb_vnode != vp)) {
+		panic_cs_blob_backref_mismatch(blob, vp);
+	}
+}
+
 int
 ubc_cs_blob_add(
 	struct vnode    *vp,
@@ -3889,7 +3885,9 @@ ubc_cs_blob_add(
 {
 	kern_return_t           kr;
 	struct ubc_info         *uip;
-	struct cs_blob          *blob = NULL, *oblob = NULL;
+	struct cs_blob          tmp_blob;
+	struct cs_blob          *blob_ro = NULL;
+	struct cs_blob          *oblob;
 	int                     error;
 	CS_CodeDirectory const *cd;
 	off_t                   blob_start_offset, blob_end_offset;
@@ -3902,16 +3900,16 @@ ubc_cs_blob_add(
 
 	/* Create the struct cs_blob wrapper that will be attached to the vnode.
 	 * Validates the passed in blob in the process. */
-	error = cs_blob_create_validated(addr, size, &blob, &cd);
+	error = cs_blob_init_validated(addr, size, &tmp_blob, &cd);
 
 	if (error != 0) {
 		printf("malform code signature blob: %d\n", error);
 		return error;
 	}
 
-	blob->csb_cpu_type = cputype;
-	blob->csb_cpu_subtype = cpusubtype & ~CPU_SUBTYPE_MASK;
-	blob->csb_base_offset = base_offset;
+	tmp_blob.csb_cpu_type = cputype;
+	tmp_blob.csb_cpu_subtype = cpusubtype & ~CPU_SUBTYPE_MASK;
+	tmp_blob.csb_base_offset = base_offset;
 
 #if CONFIG_ENFORCE_SIGNED_CODE
 	/*
@@ -3925,7 +3923,7 @@ ubc_cs_blob_add(
 		const CS_GenericBlob *new_entitlements = NULL;
 		const CS_GenericBlob *new_der_entitlements = NULL;
 
-		error = ubc_cs_reconstitute_code_signature(blob, &new_mem_kaddr, &new_mem_size, 0, &new_cd);
+		error = ubc_cs_reconstitute_code_signature(&tmp_blob, &new_mem_kaddr, &new_mem_size, 0, &new_cd);
 		if (error != 0) {
 			printf("failed code signature reconstitution: %d\n", error);
 			goto out;
@@ -3933,41 +3931,36 @@ ubc_cs_blob_add(
 		new_entitlements = csblob_find_blob_bytes((uint8_t*)new_mem_kaddr, new_mem_size, CSSLOT_ENTITLEMENTS, CSMAGIC_EMBEDDED_ENTITLEMENTS);
 		new_der_entitlements = csblob_find_blob_bytes((uint8_t*)new_mem_kaddr, new_mem_size, CSSLOT_DER_ENTITLEMENTS, CSMAGIC_EMBEDDED_DER_ENTITLEMENTS);
 
-		ubc_cs_blob_deallocate((vm_offset_t)blob->csb_mem_kaddr, blob->csb_mem_size);
+		ubc_cs_blob_deallocate((vm_offset_t)tmp_blob.csb_mem_kaddr, tmp_blob.csb_mem_size);
 
-		blob->csb_mem_kaddr = (void *)new_mem_kaddr;
-		blob->csb_mem_size = new_mem_size;
-		blob->csb_cd = new_cd;
-		blob->csb_entitlements_blob = new_entitlements;
-		if (blob->csb_entitlements_blob != NULL) {
-			blob->csb_entitlements_blob_signature = ptrauth_utils_sign_blob_generic(blob->csb_entitlements_blob,
-			    ntohl(blob->csb_entitlements_blob->length),
-			    OS_PTRAUTH_DISCRIMINATOR("cs_blob.csb_entitlements_blob_signature"),
-			    PTRAUTH_ADDR_DIVERSIFY);
-		}
-
-		blob->csb_der_entitlements_blob = new_der_entitlements;
-		if (blob->csb_der_entitlements_blob != NULL) {
-			blob->csb_der_entitlements_blob_signature = ptrauth_utils_sign_blob_generic(blob->csb_der_entitlements_blob,
-			    ntohl(blob->csb_der_entitlements_blob->length),
-			    OS_PTRAUTH_DISCRIMINATOR("cs_blob.csb_der_entitlements_blob_signature"),
-			    PTRAUTH_ADDR_DIVERSIFY);
-		}
-		blob->csb_reconstituted = true;
+		tmp_blob.csb_mem_kaddr = (void *)new_mem_kaddr;
+		tmp_blob.csb_mem_size = new_mem_size;
+		tmp_blob.csb_cd = new_cd;
+		tmp_blob.csb_entitlements_blob = new_entitlements;
+		tmp_blob.csb_der_entitlements_blob = new_der_entitlements;
+		tmp_blob.csb_reconstituted = true;
 	}
 #endif
 
+
+	blob_ro = zalloc_ro(ZONE_ID_CS_BLOB, Z_WAITOK | Z_NOFAIL);
+	tmp_blob.csb_ro_addr = blob_ro;
+	tmp_blob.csb_vnode = vp;
+
+	/* AMFI needs to see the current blob state at the RO address. */
+	zalloc_ro_update_elem(ZONE_ID_CS_BLOB, blob_ro, &tmp_blob);
 
 #if CONFIG_MACF
 	/*
 	 * Let policy module check whether the blob's signature is accepted.
 	 */
 
-	unsigned int cs_flags = blob->csb_flags;
-	unsigned int signer_type = blob->csb_signer_type;
-	error = mac_vnode_check_signature(vp, blob, imgp, &cs_flags, &signer_type, flags, platform);
-	blob->csb_flags = cs_flags;
-	blob->csb_signer_type = signer_type;
+	unsigned int cs_flags = tmp_blob.csb_flags;
+	unsigned int signer_type = tmp_blob.csb_signer_type;
+	error = mac_vnode_check_signature(vp, &tmp_blob, imgp, &cs_flags, &signer_type, flags, platform);
+
+	tmp_blob.csb_flags = cs_flags;
+	tmp_blob.csb_signer_type = signer_type;
 
 	if (error) {
 		if (cs_debug) {
@@ -3975,7 +3968,7 @@ ubc_cs_blob_add(
 		}
 		goto out;
 	}
-	if ((flags & MAC_VNODE_CHECK_DYLD_SIM) && !(blob->csb_flags & CS_PLATFORM_BINARY)) {
+	if ((flags & MAC_VNODE_CHECK_DYLD_SIM) && !(tmp_blob.csb_flags & CS_PLATFORM_BINARY)) {
 		if (cs_debug) {
 			printf("check_signature[pid: %d], is not apple signed\n", proc_getpid(current_proc()));
 		}
@@ -3993,29 +3986,28 @@ ubc_cs_blob_add(
 	 * is complete, we don't need all these blobs. Hence, we clear them out.
 	 */
 
-	if (ubc_cs_clear_unneeded_code_signature(blob)) {
+	if (ubc_cs_clear_unneeded_code_signature(&tmp_blob)) {
 		error = EPERM;
 		goto out;
 	}
 #endif /* CONFIG_ENFORCE_SIGNED_CODE */
 
-	blob->csb_entitlements_blob = NULL;
-	blob->csb_entitlements_blob_signature = 0;
+	tmp_blob.csb_entitlements_blob = NULL;
 
 
-	if (blob->csb_flags & CS_PLATFORM_BINARY) {
+	if (tmp_blob.csb_flags & CS_PLATFORM_BINARY) {
 		if (cs_debug > 1) {
 			printf("check_signature[pid: %d]: platform binary\n", proc_getpid(current_proc()));
 		}
-		blob->csb_platform_binary = 1;
-		blob->csb_platform_path = !!(blob->csb_flags & CS_PLATFORM_PATH);
+		tmp_blob.csb_platform_binary = 1;
+		tmp_blob.csb_platform_path = !!(tmp_blob.csb_flags & CS_PLATFORM_PATH);
 	} else {
-		blob->csb_platform_binary = 0;
-		blob->csb_platform_path = 0;
-		blob->csb_teamid = csblob_parse_teamid(blob);
+		tmp_blob.csb_platform_binary = 0;
+		tmp_blob.csb_platform_path = 0;
+		tmp_blob.csb_teamid = csblob_parse_teamid(&tmp_blob);
 		if (cs_debug > 1) {
-			if (blob->csb_teamid) {
-				printf("check_signature[pid: %d]: team-id is %s\n", proc_getpid(current_proc()), blob->csb_teamid);
+			if (tmp_blob.csb_teamid) {
+				printf("check_signature[pid: %d]: team-id is %s\n", proc_getpid(current_proc()), tmp_blob.csb_teamid);
 			} else {
 				printf("check_signature[pid: %d]: no team-id\n", proc_getpid(current_proc()));
 			}
@@ -4025,8 +4017,8 @@ ubc_cs_blob_add(
 	/*
 	 * Validate the blob's coverage
 	 */
-	blob_start_offset = blob->csb_base_offset + blob->csb_start_offset;
-	blob_end_offset = blob->csb_base_offset + blob->csb_end_offset;
+	blob_start_offset = tmp_blob.csb_base_offset + tmp_blob.csb_start_offset;
+	blob_end_offset = tmp_blob.csb_base_offset + tmp_blob.csb_end_offset;
 
 	if (blob_start_offset >= blob_end_offset ||
 	    blob_start_offset < 0 ||
@@ -4036,13 +4028,13 @@ ubc_cs_blob_add(
 		goto out;
 	}
 
-	if (ubc_cs_supports_multilevel_hash(blob)) {
-		error = ubc_cs_convert_to_multilevel_hash(blob);
+	if (ubc_cs_supports_multilevel_hash(&tmp_blob)) {
+		error = ubc_cs_convert_to_multilevel_hash(&tmp_blob);
 		if (error != 0) {
 			printf("failed multilevel hash conversion: %d\n", error);
 			goto out;
 		}
-		blob->csb_reconstituted = true;
+		tmp_blob.csb_reconstituted = true;
 	}
 
 	vnode_lock(vp);
@@ -4054,25 +4046,25 @@ ubc_cs_blob_add(
 	uip = vp->v_ubcinfo;
 
 	/* check if this new blob overlaps with an existing blob */
-	for (oblob = uip->cs_blobs;
+	for (oblob = ubc_get_cs_blobs(vp);
 	    oblob != NULL;
 	    oblob = oblob->csb_next) {
 		off_t oblob_start_offset, oblob_end_offset;
 
-		if (blob->csb_signer_type != oblob->csb_signer_type) {  // signer type needs to be the same for slices
+		if (tmp_blob.csb_signer_type != oblob->csb_signer_type) {  // signer type needs to be the same for slices
 			vnode_unlock(vp);
 			error = EALREADY;
 			goto out;
-		} else if (blob->csb_platform_binary) {  //platform binary needs to be the same for app slices
+		} else if (tmp_blob.csb_platform_binary) {  //platform binary needs to be the same for app slices
 			if (!oblob->csb_platform_binary) {
 				vnode_unlock(vp);
 				error = EALREADY;
 				goto out;
 			}
-		} else if (blob->csb_teamid) {  //teamid binary needs to be the same for app slices
+		} else if (tmp_blob.csb_teamid) {  //teamid binary needs to be the same for app slices
 			if (oblob->csb_platform_binary ||
 			    oblob->csb_teamid == NULL ||
-			    strcmp(oblob->csb_teamid, blob->csb_teamid) != 0) {
+			    strcmp(oblob->csb_teamid, tmp_blob.csb_teamid) != 0) {
 				vnode_unlock(vp);
 				error = EALREADY;
 				goto out;
@@ -4097,12 +4089,12 @@ ubc_cs_blob_add(
 			/* conflict ! */
 			if (blob_start_offset == oblob_start_offset &&
 			    blob_end_offset == oblob_end_offset &&
-			    blob->csb_mem_size == oblob->csb_mem_size &&
-			    blob->csb_flags == oblob->csb_flags &&
-			    (blob->csb_cpu_type == CPU_TYPE_ANY ||
+			    tmp_blob.csb_mem_size == oblob->csb_mem_size &&
+			    tmp_blob.csb_flags == oblob->csb_flags &&
+			    (tmp_blob.csb_cpu_type == CPU_TYPE_ANY ||
 			    oblob->csb_cpu_type == CPU_TYPE_ANY ||
-			    blob->csb_cpu_type == oblob->csb_cpu_type) &&
-			    !bcmp(blob->csb_cdhash,
+			    tmp_blob.csb_cpu_type == oblob->csb_cpu_type) &&
+			    !bcmp(tmp_blob.csb_cdhash,
 			    oblob->csb_cdhash,
 			    CS_CDHASH_LEN)) {
 				/*
@@ -4117,7 +4109,7 @@ ubc_cs_blob_add(
 					 * Update it with whatever the caller
 					 * provided this time.
 					 */
-					oblob->csb_cpu_type = cputype;
+					cs_blob_set_cpu_type(oblob, cputype);
 				}
 
 				/* The signature is still accepted, so update the
@@ -4163,10 +4155,12 @@ ubc_cs_blob_add(
 	 * the top of the list was and that list will remain valid
 	 * while we validate a page, even after we release the vnode's lock.
 	 */
-	blob->csb_next = uip->cs_blobs;
-	uip->cs_blobs = blob;
+	tmp_blob.csb_next = uip->cs_blobs;
+	uip->cs_blobs = blob_ro;
 
-	ubc_cs_blob_adjust_statistics(blob);
+	ubc_cs_blob_adjust_statistics(&tmp_blob);
+
+	zalloc_ro_update_elem(ZONE_ID_CS_BLOB, blob_ro, &tmp_blob);
 
 	if (cs_debug > 1) {
 		proc_t p;
@@ -4176,11 +4170,11 @@ ubc_cs_blob_add(
 		    "loaded %s signatures for file (%s) "
 		    "range 0x%llx:0x%llx flags 0x%x\n",
 		    proc_getpid(p), p->p_comm,
-		    blob->csb_cpu_type == -1 ? "detached" : "embedded",
+		    blob_ro->csb_cpu_type == -1 ? "detached" : "embedded",
 		    name,
-		    blob->csb_base_offset + blob->csb_start_offset,
-		    blob->csb_base_offset + blob->csb_end_offset,
-		    blob->csb_flags);
+		    blob_ro->csb_base_offset + blob_ro->csb_start_offset,
+		    blob_ro->csb_base_offset + blob_ro->csb_end_offset,
+		    blob_ro->csb_flags);
 		vnode_putname_printable(name);
 	}
 
@@ -4191,7 +4185,7 @@ ubc_cs_blob_add(
 	}
 
 	if (ret_blob) {
-		*ret_blob = blob;
+		*ret_blob = blob_ro;
 	}
 
 	error = 0;      /* success ! */
@@ -4202,7 +4196,10 @@ out:
 			printf("check_signature[pid: %d]: error = %d\n", proc_getpid(current_proc()), error);
 		}
 
-		cs_blob_free(blob);
+		cs_blob_cleanup(&tmp_blob);
+		if (blob_ro) {
+			zfree_ro(ZONE_ID_CS_BLOB, blob_ro);
+		}
 	}
 
 	if (error == EAGAIN) {
@@ -4230,7 +4227,9 @@ ubc_cs_blob_add_supplement(
 	kern_return_t           kr;
 	struct ubc_info         *uip, *orig_uip;
 	int                     error;
-	struct cs_blob          *blob, *orig_blob;
+	struct cs_blob          tmp_blob;
+	struct cs_blob          *orig_blob;
+	struct cs_blob          *blob_ro = NULL;
 	CS_CodeDirectory const *cd;
 	off_t                   blob_start_offset, blob_end_offset;
 
@@ -4240,17 +4239,17 @@ ubc_cs_blob_add_supplement(
 
 	/* Create the struct cs_blob wrapper that will be attached to the vnode.
 	 * Validates the passed in blob in the process. */
-	error = cs_blob_create_validated(addr, size, &blob, &cd);
+	error = cs_blob_init_validated(addr, size, &tmp_blob, &cd);
 
 	if (error != 0) {
 		printf("malformed code signature supplement blob: %d\n", error);
 		return error;
 	}
 
-	blob->csb_cpu_type = -1;
-	blob->csb_base_offset = base_offset;
+	tmp_blob.csb_cpu_type = -1;
+	tmp_blob.csb_base_offset = base_offset;
 
-	blob->csb_reconstituted = false;
+	tmp_blob.csb_reconstituted = false;
 
 	vnode_lock(orig_vp);
 	if (!UBCINFOEXISTS(orig_vp)) {
@@ -4265,7 +4264,7 @@ ubc_cs_blob_add_supplement(
 	 * the target image.
 	 */
 
-	if (blob->csb_linkage_hashtype == NULL) {
+	if (tmp_blob.csb_linkage_hashtype == NULL) {
 		proc_t p;
 		const char *iname = vnode_getname_printable(vp);
 		p = current_proc();
@@ -4281,15 +4280,10 @@ ubc_cs_blob_add_supplement(
 		goto out;
 	}
 
-	for (orig_blob = orig_uip->cs_blobs; orig_blob != NULL;
+	for (orig_blob = ubc_get_cs_blobs(orig_vp); orig_blob != NULL;
 	    orig_blob = orig_blob->csb_next) {
-		ptrauth_utils_auth_blob_generic(orig_blob->csb_cdhash,
-		    sizeof(orig_blob->csb_cdhash),
-		    OS_PTRAUTH_DISCRIMINATOR("cs_blob.csb_cd_signature"),
-		    PTRAUTH_ADDR_DIVERSIFY,
-		    orig_blob->csb_cdhash_signature);
-		if (orig_blob->csb_hashtype == blob->csb_linkage_hashtype &&
-		    memcmp(orig_blob->csb_cdhash, blob->csb_linkage, CS_CDHASH_LEN) == 0) {
+		if (orig_blob->csb_hashtype == tmp_blob.csb_linkage_hashtype &&
+		    memcmp(orig_blob->csb_cdhash, tmp_blob.csb_linkage, CS_CDHASH_LEN) == 0) {
 			// Found match!
 			break;
 		}
@@ -4315,12 +4309,19 @@ ubc_cs_blob_add_supplement(
 
 	vnode_unlock(orig_vp);
 
+	blob_ro = zalloc_ro(ZONE_ID_CS_BLOB, Z_WAITOK | Z_NOFAIL);
+	tmp_blob.csb_ro_addr = blob_ro;
+	tmp_blob.csb_vnode = vp;
+
+	/* AMFI needs to see the current blob state at the RO address. */
+	zalloc_ro_update_elem(ZONE_ID_CS_BLOB, blob_ro, &tmp_blob);
+
 	// validate the signature against policy!
 #if CONFIG_MACF
-	unsigned int signer_type = blob->csb_signer_type;
-	error = mac_vnode_check_supplemental_signature(vp, blob, orig_vp, orig_blob, &signer_type);
-	blob->csb_signer_type = signer_type;
+	unsigned int signer_type = tmp_blob.csb_signer_type;
+	error = mac_vnode_check_supplemental_signature(vp, &tmp_blob, orig_vp, orig_blob, &signer_type);
 
+	tmp_blob.csb_signer_type = signer_type;
 
 	if (error) {
 		if (cs_debug) {
@@ -4332,25 +4333,25 @@ ubc_cs_blob_add_supplement(
 
 	// We allowed the supplemental signature blob so
 	// copy the platform bit or team-id from the linked signature and whether or not the original is developer code
-	blob->csb_platform_binary = 0;
-	blob->csb_platform_path = 0;
+	tmp_blob.csb_platform_binary = 0;
+	tmp_blob.csb_platform_path = 0;
 	if (orig_blob->csb_platform_binary == 1) {
-		blob->csb_platform_binary = orig_blob->csb_platform_binary;
-		blob->csb_platform_path = orig_blob->csb_platform_path;
+		tmp_blob.csb_platform_binary = orig_blob->csb_platform_binary;
+		tmp_blob.csb_platform_path = orig_blob->csb_platform_path;
 	} else if (orig_blob->csb_teamid != NULL) {
 		vm_size_t teamid_size = strlen(orig_blob->csb_teamid) + 1;
-		blob->csb_supplement_teamid = kalloc_data(teamid_size, Z_WAITOK);
-		if (blob->csb_supplement_teamid == NULL) {
+		tmp_blob.csb_supplement_teamid = kalloc_data(teamid_size, Z_WAITOK);
+		if (tmp_blob.csb_supplement_teamid == NULL) {
 			error = ENOMEM;
 			goto out;
 		}
-		strlcpy(blob->csb_supplement_teamid, orig_blob->csb_teamid, teamid_size);
+		strlcpy(tmp_blob.csb_supplement_teamid, orig_blob->csb_teamid, teamid_size);
 	}
-	blob->csb_flags = (orig_blob->csb_flags & CS_DEV_CODE);
+	tmp_blob.csb_flags = (orig_blob->csb_flags & CS_DEV_CODE);
 
 	// Validate the blob's coverage
-	blob_start_offset = blob->csb_base_offset + blob->csb_start_offset;
-	blob_end_offset = blob->csb_base_offset + blob->csb_end_offset;
+	blob_start_offset = tmp_blob.csb_base_offset + tmp_blob.csb_start_offset;
+	blob_end_offset = tmp_blob.csb_base_offset + tmp_blob.csb_end_offset;
 
 	if (blob_start_offset >= blob_end_offset || blob_start_offset < 0 || blob_end_offset <= 0) {
 		/* reject empty or backwards blob */
@@ -4368,8 +4369,8 @@ ubc_cs_blob_add_supplement(
 
 	struct cs_blob *existing = uip->cs_blob_supplement;
 	if (existing != NULL) {
-		if (blob->csb_hashtype == existing->csb_hashtype &&
-		    memcmp(blob->csb_cdhash, existing->csb_cdhash, CS_CDHASH_LEN) == 0) {
+		if (tmp_blob.csb_hashtype == existing->csb_hashtype &&
+		    memcmp(tmp_blob.csb_cdhash, existing->csb_cdhash, CS_CDHASH_LEN) == 0) {
 			error = EAGAIN; // non-fatal
 		} else {
 			error = EALREADY; // fatal
@@ -4380,8 +4381,8 @@ ubc_cs_blob_add_supplement(
 	}
 
 	/* Unlike regular cs_blobs, we only ever support one supplement. */
-	blob->csb_next = NULL;
-	uip->cs_blob_supplement = blob;
+	tmp_blob.csb_next = NULL;
+	uip->cs_blob_supplement = blob_ro;
 
 	/* mark this vnode's VM object as having "signed pages" */
 	kr = memory_object_signed(uip->ui_control, TRUE);
@@ -4391,11 +4392,13 @@ ubc_cs_blob_add_supplement(
 		goto out;
 	}
 
+	zalloc_ro_update_elem(ZONE_ID_CS_BLOB, blob_ro, &tmp_blob);
+
 	vnode_unlock(vp);
 
 	/* We still adjust statistics even for supplemental blobs, as they
 	 * consume memory just the same. */
-	ubc_cs_blob_adjust_statistics(blob);
+	ubc_cs_blob_adjust_statistics(&tmp_blob);
 
 	if (cs_debug > 1) {
 		proc_t p;
@@ -4406,13 +4409,13 @@ ubc_cs_blob_add_supplement(
 		    "range 0x%llx:0x%llx\n",
 		    proc_getpid(p), p->p_comm,
 		    name,
-		    blob->csb_base_offset + blob->csb_start_offset,
-		    blob->csb_base_offset + blob->csb_end_offset);
+		    blob_ro->csb_base_offset + blob_ro->csb_start_offset,
+		    blob_ro->csb_base_offset + blob_ro->csb_end_offset);
 		vnode_putname_printable(name);
 	}
 
 	if (ret_blob) {
-		*ret_blob = blob;
+		*ret_blob = blob_ro;
 	}
 
 	error = 0; // Success!
@@ -4422,7 +4425,10 @@ out:
 			printf("ubc_cs_blob_add_supplement[pid: %d]: error = %d\n", proc_getpid(current_proc()), error);
 		}
 
-		cs_blob_supplement_free(blob);
+		cs_blob_cleanup(&tmp_blob);
+		if (blob_ro) {
+			zfree_ro(ZONE_ID_CS_BLOB, blob_ro);
+		}
 	}
 
 	if (error == EAGAIN) {
@@ -4518,7 +4524,6 @@ ubc_cs_blob_get(
 	cpu_subtype_t   cpusubtype,
 	off_t           offset)
 {
-	struct ubc_info *uip;
 	struct cs_blob  *blob;
 	off_t offset_in_blob;
 
@@ -4529,8 +4534,7 @@ ubc_cs_blob_get(
 		goto out;
 	}
 
-	uip = vp->v_ubcinfo;
-	for (blob = uip->cs_blobs;
+	for (blob = ubc_get_cs_blobs(vp);
 	    blob != NULL;
 	    blob = blob->csb_next) {
 		if (cputype != -1 && blob->csb_cpu_type == cputype && (cpusubtype == -1 || blob->csb_cpu_subtype == (cpusubtype & ~CPU_SUBTYPE_MASK))) {
@@ -4564,7 +4568,7 @@ ubc_cs_free(
 		next_blob = blob->csb_next;
 		os_atomic_add(&cs_blob_count, -1, relaxed);
 		os_atomic_add(&cs_blob_size, -blob->csb_mem_size, relaxed);
-		cs_blob_free(blob);
+		cs_blob_ro_free(blob);
 	}
 #if CHECK_CS_VALIDATION_BITMAP
 	ubc_cs_validation_bitmap_deallocate( uip );
@@ -4673,8 +4677,11 @@ ubc_cs_blob_revalidate(
 
 	/* update generation number if success */
 	vnode_lock_spin(vp);
-	blob->csb_flags = cs_flags;
-	blob->csb_signer_type = signer_type;
+	struct cs_signer_info signer_info = {
+		.csb_flags = cs_flags,
+		.csb_signer_type = signer_type
+	};
+	zalloc_ro_update_field(ZONE_ID_CS_BLOB, blob, csb_signer_info, &signer_info);
 	if (UBCINFOEXISTS(vp)) {
 		if (error == 0) {
 			vp->v_ubcinfo->cs_add_gen = cs_blob_generation_count;
@@ -4726,6 +4733,9 @@ ubc_get_cs_blobs(
 
 	uip = vp->v_ubcinfo;
 	blobs = uip->cs_blobs;
+	if (blobs != NULL) {
+		cs_blob_require(blobs, vp);
+	}
 
 out:
 	return blobs;
@@ -4760,6 +4770,9 @@ ubc_get_cs_supplement(
 
 	uip = vp->v_ubcinfo;
 	blob = uip->cs_blob_supplement;
+	if (blob != NULL) {
+		cs_blob_require(blob, vp);
+	}
 
 out:
 	return blob;
@@ -5125,11 +5138,6 @@ ubc_cs_getcdhash(
 		ret = EBADEXEC; /* XXX any better error ? */
 	} else {
 		/* get the SHA1 hash of that blob */
-		ptrauth_utils_auth_blob_generic(blob->csb_cdhash,
-		    sizeof(blob->csb_cdhash),
-		    OS_PTRAUTH_DISCRIMINATOR("cs_blob.csb_cd_signature"),
-		    PTRAUTH_ADDR_DIVERSIFY,
-		    blob->csb_cdhash_signature);
 		bcopy(blob->csb_cdhash, cdhash, sizeof(blob->csb_cdhash));
 		ret = 0;
 	}

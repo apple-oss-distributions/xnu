@@ -42,8 +42,7 @@ extern void dtrace_systrace_syscall_return(unsigned short, int, int *);
 #endif  /* CONFIG_DTRACE */
 
 extern void
-unix_syscall(struct arm_saved_state * regs, thread_t thread_act,
-    struct uthread * uthread, struct proc * proc);
+unix_syscall(struct arm_saved_state * regs, thread_t thread_act, struct proc * proc);
 
 static int      arm_get_syscall_args(uthread_t, struct arm_saved_state *, const struct sysent *);
 static int      arm_get_u32_syscall_args(uthread_t, arm_saved_state32_t *, const struct sysent *);
@@ -93,14 +92,14 @@ __attribute__((noreturn))
 void
 unix_syscall(
 	struct arm_saved_state * state,
-	__unused thread_t thread_act,
-	struct uthread * uthread,
+	thread_t thread_act,
 	struct proc * proc)
 {
 	const struct sysent  *callp;
 	int             error;
 	unsigned short  code, syscode;
-	pid_t                   pid;
+	pid_t           pid;
+	struct uthread *uthread = get_bsdthread_info(thread_act);
 
 #if defined(__arm__)
 	assert(is_saved_state32(state));
@@ -116,11 +115,6 @@ unix_syscall(
 		arm_trace_unix_syscall(code, state);
 	}
 
-#if CONFIG_VFORK
-	if ((uthread->uu_flag & UT_VFORK)) {
-		proc = current_proc();
-	}
-#endif /* CONFIG_VFORK */
 
 	syscode = (code < nsysent) ? code : SYS_invalid;
 	callp   = &sysent[syscode];
@@ -525,9 +519,8 @@ arm_get_u64_syscall_args(uthread_t uthread, arm_saved_state64_t *regs, const str
 	 * thread_t.
 	 */
 	mungerp = callp->sy_arg_munge32;
-	assert(uthread->uu_thread);
 
-	if (indirect_offset && !ml_thread_is64bit(uthread->uu_thread)) {
+	if (indirect_offset && !ml_thread_is64bit(get_machthread(uthread))) {
 		(*mungerp)(&uthread->uu_arg[0]);
 	}
 #endif

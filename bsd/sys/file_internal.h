@@ -121,7 +121,7 @@ struct fileproc {
 	_Atomic fileproc_vflags_t fp_vflags;
 	fileproc_flags_t fp_flags;
 	uint16_t         fp_guard_attrs;
-	struct fileglob *fp_glob;
+	struct fileglob *XNU_PTRAUTH_SIGNED_PTR("fileproc.fp_glob") fp_glob;
 	union {
 		struct waitq_set      *fp_wset;   /* fp_guard_attrs == 0 */
 		struct fileproc_guard *fp_guard;  /* fp_guard_attrs != 0 */
@@ -179,14 +179,14 @@ struct fileglob {
 	os_ref_atomic_t      fg_count;      /* reference count */
 	uint32_t             fg_msgcount;   /* references from message queue */
 	int32_t              fg_lflags;     /* file global flags */
-	kauth_cred_t         fg_cred;       /* credentials associated with descriptor */
-	const struct fileops *fg_ops;
+	kauth_cred_t         XNU_PTRAUTH_SIGNED_PTR("fileglob.fg_cred") fg_cred;        /* credentials associated with descriptor */
+	const struct fileops *XNU_PTRAUTH_SIGNED_PTR("fileglob.fg_ops") fg_ops;
 	off_t                fg_offset;
-	void                *fg_data;       /* vnode or socket or SHM or semaphore */
-	struct fd_vn_data   *fg_vn_data;    /* Per fd vnode data, used for directories */
+	uintptr_t            fg_data;       /* vnode or socket or SHM or semaphore */
+	struct fd_vn_data   *XNU_PTRAUTH_SIGNED_PTR("fileglob.fg_vn_data") fg_vn_data;  /* Per fd vnode data, used for directories */
 	lck_mtx_t            fg_lock;
-#if CONFIG_MACF
-	struct label        *fg_label;      /* JMM - use the one in the cred? */
+#if CONFIG_MACF && CONFIG_VNGUARD
+	struct vng_owner    *fg_vgo;        /* Used by the vnode guard MAC hook */
 #endif
 };
 
@@ -262,7 +262,117 @@ fg_drop(proc_t p, struct fileglob *fg);
 bool
 fg_sendable(struct fileglob *fg);
 
+/*!
+ * @function fg_get_data_volatile
+ *
+ * @brief
+ * Returns the fileglob opaque data pointer.
+ *
+ * @discussion
+ * Unlike @c fg_get_data() this variant will
+ * not be hoisted by the compiler.
+ *
+ * @param fg
+ * The file whose data is being requested.
+ */
+void *
+fg_get_data_volatile(struct fileglob *fg);
+
+/*!
+ * @function fg_get_data
+ *
+ * @brief
+ * Returns the fileglob opaque data pointer.
+ *
+ * @discussion
+ * Unlike @c fg_get_data_volatile() this variant
+ * will be hoisted by the compiler if it is called
+ * repeatedly.
+ *
+ * @param fg
+ * The file whose data is being requested.
+ */
+__pure2
+static inline void *
+fg_get_data(struct fileglob *fg)
+{
+	return fg_get_data_volatile(fg);
+}
+
+/*!
+ * @function fg_set_data
+ *
+ * @brief
+ * Sets the fileglob opaque data pointer.
+ *
+ * @param fg
+ * The file whose data is being set.
+ *
+ * @param fg_data
+ * Opaque file data value
+ */
+void
+fg_set_data(struct fileglob *fg, void *fg_data);
+
 #pragma mark file descriptor entries (struct fileproc)
+
+/*!
+ * @function fg_get_data
+ *
+ * @brief
+ * Returns the fileproc fileglob opaque data pointer.
+ *
+ * @discussion
+ * Unlike @c fp_get_data_volatile() this variant
+ * will be hoisted by the compiler if it is called
+ * repeatedly.
+ *
+ * @param fp
+ * The fileproc whose data is being requested.
+ */
+__pure2
+static inline void *
+fp_get_data(struct fileproc *fp)
+{
+	return fg_get_data(fp->fp_glob);
+}
+
+/*!
+ * @function fp_get_data
+ *
+ * @brief
+ * Returns the fileproc fileglob opaque data pointer.
+ *
+ * @discussion
+ * Unlike @c fp_get_data() this variant will
+ * not be hoisted by the compiler.
+ *
+ * @param fp
+ * The fileproc whose data is being requested.
+ */
+static inline void *
+fp_get_data_volatile(struct fileproc *fp)
+{
+	return fg_get_data_volatile(fp->fp_glob);
+}
+
+/*!
+ * @function fp_set_data
+ *
+ * @brief
+ * Sets the fileproc opaque data pointer.
+ *
+ * @param fp
+ * The fileproc whose data is being set.
+ *
+ * @param fg_data
+ * Opaque file data value
+ */
+static inline void
+fp_set_data(struct fileproc *fp, void *fg_data)
+{
+	fg_set_data(fp->fp_glob, fg_data);
+}
 
 /*!
  * @function fp_get_ftype

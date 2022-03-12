@@ -611,9 +611,9 @@ inpcb_get_if_ports_used(ifnet_t ifp, int protocol, uint32_t flags,
 			}
 		}
 
-		if (if_ports_used_add_inpcb(ifp->if_index, inp)) {
-			bitstr_set(bitfield, ntohs(inp->inp_lport));
-		}
+		bitstr_set(bitfield, ntohs(inp->inp_lport));
+
+		(void) if_ports_used_add_inpcb(ifp->if_index, inp);
 	}
 	lck_rw_done(&pcbinfo->ipi_lock);
 }
@@ -765,7 +765,7 @@ shutdown_sockets_on_interface_proc_callout(proc_t p, void *arg)
 			continue;
 		}
 
-		so = (struct socket *)fp->fp_glob->fg_data;
+		so = (struct socket *)fp_get_data(fp);
 		if (SOCK_DOM(so) != PF_INET && SOCK_DOM(so) != PF_INET6) {
 			continue;
 		}

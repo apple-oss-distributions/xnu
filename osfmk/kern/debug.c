@@ -893,6 +893,35 @@ panic_validate_ptr(void *ptr, vm_size_t size, const char *what)
 	return true;
 }
 
+boolean_t
+panic_get_thread_proc_task(struct thread *thread, struct task **task, struct proc **proc)
+{
+	if (!PANIC_VALIDATE_PTR(thread)) {
+		return false;
+	}
+
+	if (!PANIC_VALIDATE_PTR(thread->t_tro)) {
+		return false;
+	}
+
+	if (!PANIC_VALIDATE_PTR(thread->t_tro->tro_task)) {
+		return false;
+	}
+
+	if (task) {
+		*task = thread->t_tro->tro_task;
+	}
+
+	if (!panic_validate_ptr(thread->t_tro->tro_proc,
+	    sizeof(struct proc *), "bsd_info")) {
+		*proc = NULL;
+	} else {
+		*proc = thread->t_tro->tro_proc;
+	}
+
+	return true;
+}
+
 #if defined (__x86_64__)
 /*
  * panic_with_thread_context() is used on x86 platforms to specify a different thread that should be backtraced in the paniclog.
@@ -909,7 +938,7 @@ panic_with_thread_context(unsigned int reason, void *ctx, uint64_t debugger_opti
 	__assert_only os_ref_count_t th_ref_count;
 
 	assert_thread_magic(thread);
-	th_ref_count = os_ref_get_count(&thread->ref_count);
+	th_ref_count = os_ref_get_count_raw(&thread->ref_count);
 	assertf(th_ref_count > 0, "panic_with_thread_context called with invalid thread %p with refcount %u", thread, th_ref_count);
 
 	/* Take a reference on the thread so it doesn't disappear by the time we try to backtrace it */
@@ -1542,19 +1571,11 @@ __private_extern__ void
 panic_display_process_name(void)
 {
 	proc_name_t proc_name = {};
-	task_t ctask = 0;
-	void *cbsd_info = 0;
+	struct proc *cbsd_info = NULL;
+	task_t ctask = NULL;
 	vm_size_t size;
 
-	size = ml_nofault_copy((vm_offset_t)&current_thread()->task,
-	    (vm_offset_t)&ctask, sizeof(task_t));
-	if (size != sizeof(task_t)) {
-		goto out;
-	}
-
-	size = ml_nofault_copy((vm_offset_t)&ctask->bsd_info,
-	    (vm_offset_t)&cbsd_info, sizeof(cbsd_info));
-	if (size != sizeof(cbsd_info)) {
+	if (!panic_get_thread_proc_task(current_thread(), &ctask, &cbsd_info)) {
 		goto out;
 	}
 

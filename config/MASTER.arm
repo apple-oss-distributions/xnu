@@ -23,7 +23,7 @@
 #  BSD_BASE =       [ mach_bsd config_workqueue psynch config_proc_uuid_policy config_imageboot config_imageboot_img4 ]
 #  BSD_RELEASE =    [ BSD_BASE no_printf_str no_kprintf_str secure_kernel ]
 #  BSD_DEV =        [ BSD_BASE config_imgsrc_access config_coredump pgo config_vnguard ]
-#  BSD_DEBUG =      [ BSD_BASE config_imgsrc_access config_coredump pgo config_vnguard vfork ]
+#  BSD_DEBUG =      [ BSD_BASE config_imgsrc_access config_coredump pgo config_vnguard ]
 #  FILESYS_BASE =   [ devfs fifo fs_compression config_mnt_rootsnap config_protect config_fse routefs namedstreams bindfs]
 #  FILESYS_RELEASE= [ FILESYS_BASE ]
 #  FILESYS_DEV =    [ FILESYS_BASE config_union_mounts fdesc ]

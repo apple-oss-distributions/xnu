@@ -737,7 +737,7 @@ sfi_get_class_offtime(sfi_class_id_t class_id, uint64_t *offtime_usecs)
 sfi_class_id_t
 sfi_thread_classify(thread_t thread)
 {
-	task_t task = thread->task;
+	task_t task = get_threadtask(thread);
 	boolean_t is_kernel_thread = (task == kernel_task);
 	sched_mode_t thmode = thread->sched_mode;
 	boolean_t focal = FALSE;
@@ -795,7 +795,7 @@ sfi_thread_classify(thread_t thread)
 	case TASK_DEFAULT_APPLICATION:
 	case TASK_UNSPECIFIED:
 		/* Focal if the task is in a coalition with a FG/focal app */
-		if (task_coalition_focal_count(thread->task) > 0) {
+		if (task_coalition_focal_count(task) > 0) {
 			focal = TRUE;
 		}
 		break;
@@ -948,7 +948,8 @@ _sfi_wait_cleanup(void)
 		int64_t sfi_wait_time = made_runnable - self->wait_sfi_begin_time;
 		assert(sfi_wait_time >= 0);
 
-		ledger_credit(self->task->ledger, task_ledgers.sfi_wait_times[current_sfi_wait_class],
+		ledger_credit(get_threadtask(self)->ledger,
+		    task_ledgers.sfi_wait_times[current_sfi_wait_class],
 		    sfi_wait_time);
 
 		self->wait_sfi_begin_time = 0;
@@ -1165,7 +1166,7 @@ sfi_reevaluate(thread_t thread __unused)
 sfi_class_id_t
 sfi_thread_classify(thread_t thread)
 {
-	task_t task = thread->task;
+	task_t task = get_threadtask(thread);
 	boolean_t is_kernel_thread = (task == kernel_task);
 
 	if (is_kernel_thread) {

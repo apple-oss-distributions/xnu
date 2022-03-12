@@ -187,7 +187,7 @@ dtrace_systrace_syscall(struct proc *pp, void *uap, int *rv)
 	systrace_args(code, ip, uargs);
 
 	if ((id = sy->stsy_entry) != DTRACE_IDNONE) {
-		uthread_t uthread = (uthread_t)get_bsdthread_info(current_thread());
+		uthread_t uthread = current_uthread();
 		if (uthread) {
 			uthread->t_dtrace_syscall_args = uargs;
 		}
@@ -221,7 +221,7 @@ dtrace_systrace_syscall(struct proc *pp, void *uap, int *rv)
 
 	if ((id = sy->stsy_return) != DTRACE_IDNONE) {
 		uint64_t munged_rv0, munged_rv1;
-		uthread_t uthread = (uthread_t)get_bsdthread_info(current_thread());
+		uthread_t uthread = current_uthread();
 
 		if (uthread) {
 			uthread->t_dtrace_errno = rval; /* Establish t_dtrace_errno now in case this enabling refers to it. */
@@ -305,7 +305,7 @@ dtrace_systrace_syscall_return(unsigned short code, int rval, int *rv)
 
 	if ((id = sy->stsy_return) != DTRACE_IDNONE) {
 		uint64_t munged_rv0, munged_rv1;
-		uthread_t uthread = (uthread_t)get_bsdthread_info(current_thread());
+		uthread_t uthread = current_uthread();
 
 		if (uthread) {
 			uthread->t_dtrace_errno = rval; /* Establish t_dtrace_errno now in case this enabling refers to it. */
@@ -712,7 +712,7 @@ dtrace_machtrace_syscall(struct mach_call_args *args)
 	sy = &machtrace_sysent[code];
 
 	if ((id = sy->stsy_entry) != DTRACE_IDNONE) {
-		uthread_t uthread = (uthread_t)get_bsdthread_info(current_thread());
+		uthread_t uthread = current_uthread();
 
 		if (uthread) {
 			uthread->t_dtrace_syscall_args = (void *)ip;
@@ -997,7 +997,7 @@ systrace_getargval(void *arg, dtrace_id_t id, void *parg, int argno, int aframes
 	uint64_t val = 0;
 	uint64_t *uargs = NULL;
 
-	uthread_t uthread = (uthread_t)get_bsdthread_info(current_thread());
+	uthread_t uthread = current_uthread();
 
 	if (uthread) {
 		uargs = uthread->t_dtrace_syscall_args;
@@ -1021,7 +1021,7 @@ systrace_getargdesc(void *arg, dtrace_id_t id, void *parg,
 {
 #pragma unused(arg, id)
 	int sysnum = SYSTRACE_SYSNUM(parg);
-	uthread_t uthread = (uthread_t)get_bsdthread_info(current_thread());
+	uthread_t uthread = current_uthread();
 	uint64_t *uargs = NULL;
 
 	if (!uthread) {
@@ -1051,7 +1051,7 @@ machtrace_getarg(void *arg, dtrace_id_t id, void *parg, int argno, int aframes)
 	uint64_t val = 0;
 	syscall_arg_t *stack = (syscall_arg_t *)NULL;
 
-	uthread_t uthread = (uthread_t)get_bsdthread_info(current_thread());
+	uthread_t uthread = current_uthread();
 
 	if (uthread) {
 		stack = (syscall_arg_t *)uthread->t_dtrace_syscall_args;

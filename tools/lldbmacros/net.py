@@ -11,6 +11,7 @@ import tempfile
 import xnudefines
 from netdefines import *
 from routedefines import *
+from mbufdefines import *
 
 def GetDlilIfFlagsAsString(dlil_if_flags):
     """ Return a formatted string description of the dlil interface flags
@@ -630,17 +631,18 @@ def GetProcSockets(proc, total_snd_cc, total_rcv_cc):
             for fd in xrange(0, unsigned(proc_filedesc.fd_afterlast)):
                 if (unsigned(proc_ofiles[fd]) != 0 and proc_ofiles[fd].fp_glob != 0):
                         fg = proc_ofiles[fd].fp_glob
+                        fg_data = Cast(fg.fg_data, 'void *')
                         if (int(fg.fg_ops.fo_type) == 2):
                             if (proc_filedesc.fd_ofileflags[fd] & 4):
                                 out_string += "U: "
                             else:
                                 out_string += " "
                             out_string += "fd = " + str(fd) + " "
-                            if (fg.fg_data != 0):
-                                out_string += GetSocket(unsigned(fg.fg_data))
+                            if (fg_data != 0):
+                                out_string += GetSocket(fg_data)
                                 out_string += "\n"
 
-                                so = kern.GetValueFromAddress(unsigned(fg.fg_data), 'socket *')
+                                so = Cast(fg_data, 'socket *')
                                 snd_cc += int(so.so_snd.sb_cc)
                                 total_snd_cc[0] += int(so.so_snd.sb_cc)
                                 rcv_cc += int(so.so_rcv.sb_cc)

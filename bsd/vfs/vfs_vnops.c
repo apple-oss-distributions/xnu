@@ -1038,7 +1038,7 @@ vn_read(struct fileproc *fp, struct uio *uio, int flags, vfs_context_t ctx)
 	} else {
 		offset_locked = false;
 	}
-	vp = (struct vnode *)fp->fp_glob->fg_data;
+	vp = (struct vnode *)fp_get_data(fp);
 	if ((error = vnode_getwithref(vp))) {
 		if (offset_locked) {
 			vn_offset_unlock(fp->fp_glob);
@@ -1178,7 +1178,7 @@ vn_write(struct fileproc *fp, struct uio *uio, int flags, vfs_context_t ctx)
 		offset_locked = false;
 	}
 
-	vp = (struct vnode *)fp->fp_glob->fg_data;
+	vp = (struct vnode *)fp_get_data(fp);
 	if ((error = vnode_getwithref(vp))) {
 		if (offset_locked) {
 			vn_offset_unlock(fp->fp_glob);
@@ -1609,7 +1609,7 @@ vn_stat(struct vnode *vp, void *sb, kauth_filesec_t *xsec, int isstat64, int nee
 static int
 vn_ioctl(struct fileproc *fp, u_long com, caddr_t data, vfs_context_t ctx)
 {
-	struct vnode *vp = ((struct vnode *)fp->fp_glob->fg_data);
+	struct vnode *vp = (struct vnode *)fp_get_data(fp);
 	off_t file_size;
 	int error;
 	struct vnode *ttyvp;
@@ -1715,7 +1715,7 @@ static int
 vn_select(struct fileproc *fp, int which, void *wql, __unused vfs_context_t ctx)
 {
 	int error;
-	struct vnode * vp = (struct vnode *)fp->fp_glob->fg_data;
+	struct vnode * vp = (struct vnode *)fp_get_data(fp);
 	struct vfs_context context;
 
 	if ((error = vnode_getwithref(vp)) == 0) {
@@ -1744,7 +1744,7 @@ vn_select(struct fileproc *fp, int which, void *wql, __unused vfs_context_t ctx)
 static int
 vn_closefile(struct fileglob *fg, vfs_context_t ctx)
 {
-	struct vnode *vp = fg->fg_data;
+	struct vnode *vp = fg_get_data(fg);
 	int error;
 
 	if ((error = vnode_getwithref(vp)) == 0) {
@@ -1864,7 +1864,7 @@ vn_kqfilter(struct fileproc *fp, struct knote *kn, struct kevent_qos_s *kev)
 	int error = 0;
 	int result = 0;
 
-	vp = (struct vnode *)fp->fp_glob->fg_data;
+	vp = (struct vnode *)fp_get_data(fp);
 
 	/*
 	 * Don't attach a knote to a dead vnode.

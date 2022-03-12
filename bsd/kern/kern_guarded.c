@@ -121,27 +121,47 @@ guarded_fileproc_unguard(struct fileproc *fp)
 }
 
 static int
-fp_lookup_guarded(proc_t p, int fd, guardid_t guard,
-    struct fileproc **fpp, int locked)
+fp_lookup_guarded_locked(proc_t p, int fd, guardid_t guard,
+    struct fileproc **fpp)
 {
-	struct fileproc *fp;
 	int error;
+	struct fileproc *fp;
 
-	if ((error = fp_lookup(p, fd, &fp, locked)) != 0) {
+	if ((error = fp_lookup(p, fd, &fp, 1)) != 0) {
 		return error;
 	}
+
 	if (fp->fp_guard_attrs == 0) {
-		(void) fp_drop(p, fd, fp, locked);
+		(void) fp_drop(p, fd, fp, 1);
 		return EINVAL;
 	}
 
 	if (guard != fp->fp_guard->fpg_guard) {
-		(void) fp_drop(p, fd, fp, locked);
+		(void) fp_drop(p, fd, fp, 1);
 		return EPERM; /* *not* a mismatch exception */
 	}
 
 	*fpp = fp;
 	return 0;
+}
+
+static int
+fp_lookup_guarded(proc_t p, int fd, guardid_t guard,
+    struct fileproc **fpp, int locked)
+{
+	int error;
+
+	if (!locked) {
+		proc_fdlock_spin(p);
+	}
+
+	error = fp_lookup_guarded_locked(p, fd, guard, fpp);
+
+	if (!locked) {
+		proc_fdunlock(p);
+	}
+
+	return error;
 }
 
 /*
@@ -719,7 +739,7 @@ guarded_pwrite_np(struct proc *p, struct guarded_pwrite_np_args *uap, user_ssize
 			error = ESPIPE;
 			goto errout;
 		}
-		vp = (vnode_t)fp->fp_glob->fg_data;
+		vp = (vnode_t)fp_get_data(fp);
 		if (vnode_isfifo(vp)) {
 			error = ESPIPE;
 			goto errout;
@@ -879,7 +899,6 @@ struct vng_info { /* lives on the vnode label */
 
 struct vng_owner { /* lives on the fileglob label */
 	proc_t vgo_p;
-	struct fileglob *vgo_fg;
 	struct vng_info *vgo_vgi;
 	TAILQ_ENTRY(vng_owner) vgo_link;
 };
@@ -895,11 +914,10 @@ new_vgi(unsigned attrs, guardid_t guard)
 }
 
 static struct vng_owner *
-new_vgo(proc_t p, struct fileglob *fg)
+new_vgo(proc_t p)
 {
 	struct vng_owner *vgo = kalloc_type(struct vng_owner, Z_WAITOK | Z_ZERO);
 	vgo->vgo_p = p;
-	vgo->vgo_fg = fg;
 	return vgo;
 }
 
@@ -993,7 +1011,7 @@ vnguard_sysc_getguardattr(proc_t p, struct vnguard_getattr *vga)
 			error = EBADF;
 			break;
 		}
-		struct vnode *vp = fg->fg_data;
+		struct vnode *vp = fg_get_data(fg);
 		if (!vnode_isreg(vp) || NULL == vp->v_mount) {
 			error = EBADF;
 			break;
@@ -1007,8 +1025,8 @@ vnguard_sysc_getguardattr(proc_t p, struct vnguard_getattr *vga)
 
 		lck_rw_lock_shared(&llock);
 
-		if (NULL != vp->v_label) {
-			const struct vng_info *vgi = vng_lbl_get(vp->v_label);
+		if (NULL != mac_vnode_label(vp)) {
+			const struct vng_info *vgi = vng_lbl_get(mac_vnode_label(vp));
 			if (NULL != vgi) {
 				if (vgi->vgi_guard != vga->vga_guard) {
 					error = EPERM;
@@ -1064,7 +1082,7 @@ vnguard_sysc_setguard(proc_t p, const struct vnguard_set *vns)
 			error = EBADF;
 			break;
 		}
-		struct vnode *vp = fg->fg_data;
+		struct vnode *vp = fg_get_data(fg);
 		if (!vnode_isreg(vp) || NULL == vp->v_mount) {
 			error = EBADF;
 			break;
@@ -1079,7 +1097,7 @@ vnguard_sysc_setguard(proc_t p, const struct vnguard_set *vns)
 		mac_vnode_label_update(ctx, vp, NULL);
 
 		struct vng_info *nvgi = new_vgi(vns->vns_attrs, vns->vns_guard);
-		struct vng_owner *nvgo = new_vgo(p, fg);
+		struct vng_owner *nvgo = new_vgo(p);
 
 		lck_rw_lock_exclusive(&llock);
 
@@ -1088,8 +1106,8 @@ vnguard_sysc_setguard(proc_t p, const struct vnguard_set *vns)
 			 * A vnode guard is associated with one or more
 			 * fileglobs in one or more processes.
 			 */
-			struct vng_info *vgi = vng_lbl_get(vp->v_label);
-			struct vng_owner *vgo = vng_lbl_get(fg->fg_label);
+			struct vng_info *vgi = vng_lbl_get(mac_vnode_label(vp));
+			struct vng_owner *vgo = fg->fg_vgo;
 
 			if (NULL == vgi) {
 				/* vnode unguarded, add the first guard */
@@ -1102,8 +1120,8 @@ vnguard_sysc_setguard(proc_t p, const struct vnguard_set *vns)
 				if (0 == error) {
 					/* add the guard */
 					vgi_add_vgo(nvgi, nvgo);
-					vng_lbl_set(vp->v_label, nvgi);
-					vng_lbl_set(fg->fg_label, nvgo);
+					vng_lbl_set(mac_vnode_label(vp), nvgi);
+					fg->fg_vgo = nvgo;
 				} else {
 					free_vgo(nvgo);
 					free_vgi(nvgi);
@@ -1131,7 +1149,7 @@ vnguard_sysc_setguard(proc_t p, const struct vnguard_set *vns)
 				}
 				/* record shared ownership */
 				vgi_add_vgo(vgi, nvgo);
-				vng_lbl_set(fg->fg_label, nvgo);
+				fg->fg_vgo = nvgo;
 			}
 		} while (0);
 
@@ -1187,25 +1205,25 @@ vng_policy_syscall(proc_t p, int cmd, user_addr_t arg)
  * Take the exclusive lock: no other thread can add or remove
  * a vng_info to any vnode in the system.
  */
-static void
-vng_file_label_destroy(struct label *label)
+void
+vng_file_label_destroy(struct fileglob *fg)
 {
-	lck_rw_lock_exclusive(&llock);
-	struct vng_owner *lvgo = vng_lbl_get(label);
+	struct vng_owner *lvgo = fg->fg_vgo;
+	struct vng_info *vgi = NULL;
+
 	if (lvgo) {
-		vng_lbl_set(label, 0);
-		struct vng_info *vgi = lvgo->vgo_vgi;
+		lck_rw_lock_exclusive(&llock);
+		fg->fg_vgo = NULL;
+		vgi = lvgo->vgo_vgi;
 		assert(vgi);
 		if (vgi_remove_vgo(vgi, lvgo)) {
 			/* that was the last reference */
 			vgi->vgi_attrs = 0;
-			struct fileglob *fg = lvgo->vgo_fg;
-			assert(fg);
 			if (DTYPE_VNODE == FILEGLOB_DTYPE(fg)) {
-				struct vnode *vp = fg->fg_data;
+				struct vnode *vp = fg_get_data(fg);
 				int error = vnode_getwithref(vp);
 				if (0 == error) {
-					vng_lbl_set(vp->v_label, 0);
+					vng_lbl_set(mac_vnode_label(vp), 0);
 					lck_rw_unlock_exclusive(&llock);
 					/* may trigger VNOP_INACTIVE */
 					vnode_rele_ext(vp, O_EVTONLY, 0);
@@ -1216,9 +1234,9 @@ vng_file_label_destroy(struct label *label)
 				}
 			}
 		}
+		lck_rw_unlock_exclusive(&llock);
 		free_vgo(lvgo);
 	}
-	lck_rw_unlock_exclusive(&llock);
 }
 
 static os_reason_t
@@ -1562,8 +1580,6 @@ vng_vnode_check_open(kauth_cred_t cred,
  */
 
 SECURITY_READ_ONLY_EARLY(static struct mac_policy_ops) vng_policy_ops = {
-	.mpo_file_label_destroy = vng_file_label_destroy,
-
 	.mpo_vnode_check_link = vng_vnode_check_link,
 	.mpo_vnode_check_unlink = vng_vnode_check_unlink,
 	.mpo_vnode_check_rename = vng_vnode_check_rename,

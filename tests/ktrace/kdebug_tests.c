@@ -19,6 +19,7 @@
 #include <sys/kdebug_signpost.h>
 #include <sys/sysctl.h>
 #include <stdint.h>
+#include <TargetConditionals.h>
 
 #include "ktrace_helpers.h"
 #include "test_utils.h"
@@ -1201,11 +1202,19 @@ set_nevents(unsigned int nevents)
 
 T_DECL(set_buffer_size, "ensure large buffer sizes can be set")
 {
-	start_controlling_ktrace();
-
+	T_SETUPBEGIN;
 	uint64_t memsize = 0;
 	T_QUIET; T_ASSERT_POSIX_SUCCESS(sysctlbyname("hw.memsize", &memsize,
-	    &(size_t){ sizeof(memsize) }, NULL, 0), "get memory size");
+	    &(size_t){ sizeof(memsize) }, NULL, 0), "sysctl hw.memsize");
+	T_SETUPEND;
+
+#if TARGET_OS_IPHONE
+	if (memsize >= (8ULL << 30)) {
+		T_SKIP("skipping on iOS device with memory >= 8GB, rdar://79403304");
+	}
+#endif // TARGET_OS_IPHONE
+
+	start_controlling_ktrace();
 
 	/*
 	 * Try to allocate up to one-eighth of available memory towards

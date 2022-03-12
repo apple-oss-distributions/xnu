@@ -307,7 +307,7 @@ dtrace_ptss_exec_exit(struct proc* p)
 }
 
 /*
- * This function is not thread safe. It is not used for vfork.
+ * This function is not thread safe.
  *
  * The child proc ptss fields are initialized to NULL at fork time.
  * Pages allocated in the parent are copied as part of the vm_map copy, though.

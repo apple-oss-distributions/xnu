@@ -149,6 +149,7 @@
 #include <vm/vm_purgeable_internal.h>
 #include <vm/vm_compressor_pager.h>
 
+#include <sys/proc_ro.h>
 #include <sys/resource.h>
 #include <sys/signalvar.h> /* for coredump */
 #include <sys/bsdtask_info.h>
@@ -573,7 +574,13 @@ out:
 	task_unlock(task);
 }
 
-boolean_t
+bool
+task_get_64bit_addr(task_t task)
+{
+	return task_has_64Bit_addr(task);
+}
+
+bool
 task_get_64bit_data(task_t task)
 {
 	return task_has_64Bit_data(task);
@@ -949,9 +956,9 @@ task_init(void)
 	 * Create the kernel task as the first task.
 	 */
 #ifdef __LP64__
-	if (task_create_internal(TASK_NULL, NULL, FALSE, TRUE, TRUE, TF_NONE, TPF_NONE, TWF_NONE, &kernel_task) != KERN_SUCCESS)
+	if (task_create_internal(TASK_NULL, NULL, NULL, FALSE, TRUE, TRUE, TF_NONE, TPF_NONE, TWF_NONE, &kernel_task) != KERN_SUCCESS)
 #else
-	if (task_create_internal(TASK_NULL, NULL, FALSE, FALSE, FALSE, TF_NONE, TPF_NONE, TWF_NONE, &kernel_task) != KERN_SUCCESS)
+	if (task_create_internal(TASK_NULL, NULL, NULL, FALSE, FALSE, FALSE, TF_NONE, TPF_NONE, TWF_NONE, &kernel_task) != KERN_SUCCESS)
 #endif
 	{ panic("task_init");}
 
@@ -1293,6 +1300,7 @@ init_task_ledgers(void)
 kern_return_t
 task_create_internal(
 	task_t             parent_task,            /* Null-able */
+	proc_ro_t          proc_ro,
 	coalition_t        *parent_coalitions __unused,
 	boolean_t          inherit_memory,
 	boolean_t          is_64bit __unused,
@@ -1302,9 +1310,10 @@ task_create_internal(
 	uint8_t            t_returnwaitflags,
 	task_t             *child_task)            /* OUT */
 {
-	task_t             new_task;
-	vm_shared_region_t shared_region;
-	ledger_t           ledger = NULL;
+	task_t                  new_task;
+	vm_shared_region_t      shared_region;
+	ledger_t                ledger = NULL;
+	struct task_ro_data     task_ro_data = {};
 
 	*child_task = NULL;
 	new_task = zalloc_flags(task_zone, Z_WAITOK | Z_NOFAIL);
@@ -1405,10 +1414,10 @@ task_create_internal(
 	task_set_uniqueid(new_task);
 
 #if CONFIG_MACF
-	new_task->crash_label = NULL;
+	set_task_crash_label(new_task, NULL);
 
-	new_task->mach_trap_filter_mask = NULL;
-	new_task->mach_kobj_filter_mask = NULL;
+	task_ro_data.task_filters.mach_trap_filter_mask = NULL;
+	task_ro_data.task_filters.mach_kobj_filter_mask = NULL;
 #endif
 
 #if CONFIG_MEMORYSTATUS
@@ -1480,11 +1489,18 @@ task_create_internal(
 	new_task->task_shared_region_slide = -1;
 
 	if (parent_task != NULL) {
-		new_task->sec_token = *task_get_sec_token(parent_task);
-		new_task->audit_token = *task_get_audit_token(parent_task);
+		task_ro_data.task_tokens.sec_token = *task_get_sec_token(parent_task);
+		task_ro_data.task_tokens.audit_token = *task_get_audit_token(parent_task);
 	} else {
-		new_task->sec_token = KERNEL_SECURITY_TOKEN;
-		new_task->audit_token = KERNEL_AUDIT_TOKEN;
+		task_ro_data.task_tokens.sec_token = KERNEL_SECURITY_TOKEN;
+		task_ro_data.task_tokens.audit_token = KERNEL_AUDIT_TOKEN;
+	}
+
+	/* must set before task_importance_init_from_parent: */
+	if (proc_ro != NULL) {
+		new_task->bsd_info_ro = proc_ro_ref_task(proc_ro, new_task, &task_ro_data);
+	} else {
+		new_task->bsd_info_ro = proc_ro_alloc(NULL, NULL, new_task, &task_ro_data);
 	}
 
 	task_importance_init_from_parent(new_task, parent_task);
@@ -1976,9 +1992,9 @@ task_deallocate_internal(
 #endif
 
 #if CONFIG_MACF
-	if (task->crash_label) {
-		mac_exc_free_label(task->crash_label);
-		task->crash_label = NULL;
+	if (get_task_crash_label(task)) {
+		mac_exc_free_label(get_task_crash_label(task));
+		set_task_crash_label(task, NULL);
 	}
 #endif
 
@@ -1991,6 +2007,14 @@ task_deallocate_internal(
 	}
 
 	task_ref_count_fini(task);
+
+	task->bsd_info_ro = proc_ro_release_task((proc_ro_t)task->bsd_info_ro);
+
+	if (task->bsd_info_ro != NULL) {
+		proc_ro_free(task->bsd_info_ro);
+		task->bsd_info_ro = NULL;
+	}
+
 	zfree(task_zone, task);
 }
 
@@ -2102,7 +2126,7 @@ task_collect_crash_info(
 	}
 
 #if CONFIG_MACF
-	free_label = label = mac_exc_create_label();
+	free_label = label = mac_exc_create_label(NULL);
 #endif
 
 	task_lock(task);
@@ -2111,8 +2135,8 @@ task_collect_crash_info(
 	if (task->corpse_info == NULL && (is_corpse_fork || task->bsd_info != NULL)) {
 #if CONFIG_MACF
 		/* Set the crash label, used by the exception delivery mac hook */
-		free_label = task->crash_label;         // Most likely NULL.
-		task->crash_label = label;
+		free_label = get_task_crash_label(task);         // Most likely NULL.
+		set_task_crash_label(task, label);
 		mac_exc_update_task_crash_label(task, crash_label);
 #endif
 		task_unlock(task);
@@ -2246,7 +2270,7 @@ task_terminate(
 
 #if MACH_ASSERT
 extern int proc_pid(struct proc *);
-extern void proc_name_kdp(task_t t, char *buf, int size);
+extern void proc_name_kdp(struct proc *p, char *buf, int size);
 #endif /* MACH_ASSERT */
 
 #define VM_MAP_PARTIAL_REAP 0x54  /* 0x150 */
@@ -2664,7 +2688,8 @@ task_duplicate_map_and_threads(
 		}
 
 		/* Copy thread name */
-		bsd_copythreadname(new_thread->uthread, thread_array[i]->uthread);
+		bsd_copythreadname(get_bsdthread_info(new_thread),
+		    get_bsdthread_info(thread_array[i]));
 		new_thread->thread_tag = thread_array[i]->thread_tag;
 		thread_copy_resource_info(new_thread, thread_array[i]);
 	}
@@ -2720,7 +2745,7 @@ task_terminate_internal(
 	assert(task != kernel_task);
 
 	self = current_thread();
-	self_task = self->task;
+	self_task = current_task();
 
 	/*
 	 *	Get the task locked and make sure that we are not racing
@@ -2888,7 +2913,7 @@ task_terminate_internal(
 	char procname[17];
 	if (task->bsd_info && !task_is_exec_copy(task)) {
 		pid = proc_pid(task->bsd_info);
-		proc_name_kdp(task, procname, sizeof(procname));
+		proc_name_kdp(task->bsd_info, procname, sizeof(procname));
 	} else {
 		pid = 0;
 		strlcpy(procname, "<unknown>", sizeof(procname));
@@ -3008,7 +3033,7 @@ task_start_halt_locked(task_t task, boolean_t should_mark_corpse)
 
 	self = current_thread();
 
-	if (task != self->task && !task_is_a_corpse_fork(task)) {
+	if (task != get_threadtask(self) && !task_is_a_corpse_fork(task)) {
 		return KERN_INVALID_ARGUMENT;
 	}
 
@@ -3389,7 +3414,7 @@ task_threads_internal(
 	i = 0;
 	queue_iterate(&task->threads, thread, thread_t, task_threads) {
 		assert(i < actual);
-		thread_reference_internal(thread);
+		thread_reference(thread);
 		thread_list[i++] = thread;
 	}
 
@@ -7097,32 +7122,40 @@ task_get_phys_footprint_limit(
 security_token_t *
 task_get_sec_token(task_t task)
 {
-	return &task->sec_token;
+	return &task_get_ro(task)->task_tokens.sec_token;
 }
 
 void
 task_set_sec_token(task_t task, security_token_t *token)
 {
-	memcpy(&task->sec_token, token, sizeof(security_token_t));
+	zalloc_ro_update_field(ZONE_ID_PROC_RO, task_get_ro(task),
+	    task_tokens.sec_token, token);
 }
 
 audit_token_t *
 task_get_audit_token(task_t task)
 {
-	return &task->audit_token;
+	return &task_get_ro(task)->task_tokens.audit_token;
 }
 
 void
 task_set_audit_token(task_t task, audit_token_t *token)
 {
-	memcpy(&task->audit_token, token, sizeof(audit_token_t));
+	zalloc_ro_update_field(ZONE_ID_PROC_RO, task_get_ro(task),
+	    task_tokens.audit_token, token);
 }
 
 void
 task_set_tokens(task_t task, security_token_t *sec_token, audit_token_t *audit_token)
 {
-	memcpy(&task->sec_token, sec_token, sizeof(security_token_t));
-	memcpy(&task->audit_token, audit_token, sizeof(audit_token_t));
+	struct task_token_ro_data tokens;
+
+	tokens = task_get_ro(task)->task_tokens;
+	tokens.sec_token = *sec_token;
+	tokens.audit_token = *audit_token;
+
+	zalloc_ro_update_field(ZONE_ID_PROC_RO, task_get_ro(task), task_tokens,
+	    &tokens);
 }
 
 boolean_t
@@ -7135,32 +7168,40 @@ task_is_privileged(task_t task)
 uint8_t *
 task_get_mach_trap_filter_mask(task_t task)
 {
-	return task->mach_trap_filter_mask;
+	return task_get_ro(task)->task_filters.mach_trap_filter_mask;
 }
 
 void
 task_set_mach_trap_filter_mask(task_t task, uint8_t *mask)
 {
-	task->mach_trap_filter_mask = mask;
+	zalloc_ro_update_field(ZONE_ID_PROC_RO, task_get_ro(task),
+	    task_filters.mach_trap_filter_mask, &mask);
 }
 
 uint8_t *
 task_get_mach_kobj_filter_mask(task_t task)
 {
-	return task->mach_kobj_filter_mask;
+	return task_get_ro(task)->task_filters.mach_kobj_filter_mask;
 }
 
 void
 task_set_mach_kobj_filter_mask(task_t task, uint8_t *mask)
 {
-	task->mach_kobj_filter_mask = mask;
+	zalloc_ro_update_field(ZONE_ID_PROC_RO, task_get_ro(task),
+	    task_filters.mach_kobj_filter_mask, &mask);
 }
 
 void
 task_copy_filter_masks(task_t new_task, task_t old_task)
 {
-	new_task->mach_trap_filter_mask = task_get_mach_trap_filter_mask(old_task);
-	new_task->mach_kobj_filter_mask = task_get_mach_kobj_filter_mask(old_task);
+	struct task_filter_ro_data filters;
+
+	filters = task_get_ro(new_task)->task_filters;
+	filters.mach_trap_filter_mask = task_get_mach_trap_filter_mask(old_task);
+	filters.mach_kobj_filter_mask = task_get_mach_kobj_filter_mask(old_task);
+
+	zalloc_ro_update_field(ZONE_ID_PROC_RO, task_get_ro(new_task),
+	    task_filters, &filters);
 }
 #endif /* CONFIG_MACF */
 
@@ -7239,12 +7280,21 @@ is_corpsefork(task_t t)
 	return task_is_a_corpse_fork(t);
 }
 
-#undef current_task
-task_t current_task(void);
+task_t
+current_task_early(void)
+{
+	if (__improbable(startup_phase < STARTUP_SUB_EARLY_BOOT)) {
+		if (current_thread()->t_tro == NULL) {
+			return TASK_NULL;
+		}
+	}
+	return get_threadtask(current_thread());
+}
+
 task_t
 current_task(void)
 {
-	return current_task_fast();
+	return get_threadtask(current_thread());
 }
 
 /* defined in bsd/kern/kern_prot.c */
@@ -7341,7 +7391,7 @@ task_findtid(task_t task, uint64_t tid)
 
 	/* Short-circuit the lookup if we're looking up ourselves */
 	if (tid == self->thread_id || tid == TID_NULL) {
-		assert(self->task == task);
+		assert(get_threadtask(self) == task);
 
 		thread_reference(self);
 
@@ -9056,4 +9106,25 @@ task_get_corpse_vmobject_list(task_t task, vmobject_list_output_t* list, size_t*
 
 	*list = task->corpse_vmobject_list;
 	*list_size = (size_t)task->corpse_vmobject_list_size;
+}
+
+__abortlike
+static void
+panic_proc_ro_task_backref_mismatch(task_t t, proc_ro_t ro)
+{
+	panic("proc_ro->task backref mismatch: t=%p, ro=%p, "
+	    "proc_ro_task(ro)=%p", t, ro, proc_ro_task(ro));
+}
+
+proc_ro_t
+task_get_ro(task_t t)
+{
+	proc_ro_t ro = (proc_ro_t)t->bsd_info_ro;
+
+	zone_require_ro(ZONE_ID_PROC_RO, sizeof(struct proc_ro), ro);
+	if (__improbable(proc_ro_task(ro) != t)) {
+		panic_proc_ro_task_backref_mismatch(t, ro);
+	}
+
+	return ro;
 }

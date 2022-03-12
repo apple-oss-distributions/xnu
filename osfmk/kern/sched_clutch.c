@@ -127,6 +127,8 @@ static boolean_t sched_thread_sched_pri_promoted(thread_t);
 /* System based routines */
 static bool sched_edge_pset_available(processor_set_t);
 static uint32_t sched_edge_thread_bound_cluster_id(thread_t);
+static int sched_edge_iterate_clusters_ordered(processor_set_t, uint64_t, int);
+
 /* Global indicating the maximum number of clusters on the current platform */
 static int sched_edge_max_clusters = 0;
 #endif /* CONFIG_SCHED_EDGE */
@@ -3554,6 +3556,8 @@ sched_edge_pset_init(processor_set_t pset)
 	/* Set the edge weight and properties for the pset itself */
 	bitmap_clear(pset->foreign_psets, pset_cluster_id);
 	bitmap_clear(pset->native_psets, pset_cluster_id);
+	bitmap_clear(pset->local_psets, pset_cluster_id);
+	bitmap_clear(pset->remote_psets, pset_cluster_id);
 	pset->sched_edges[pset_cluster_id].sce_edge_packed = (sched_clutch_edge){.sce_migration_weight = 0, .sce_migration_allowed = 0, .sce_steal_allowed = 0}.sce_edge_packed;
 	sched_clutch_root_init(&pset->pset_clutch_root, pset);
 	bitmap_set(sched_edge_available_pset_bitmask, pset_cluster_id);
@@ -3929,7 +3933,8 @@ static boolean_t
 sched_edge_foreign_running_thread_available(processor_set_t pset)
 {
 	bitmap_t *foreign_pset_bitmap = pset->foreign_psets;
-	for (int cluster = bitmap_first(foreign_pset_bitmap, sched_edge_max_clusters); cluster >= 0; cluster = bitmap_next(foreign_pset_bitmap, cluster)) {
+	int cluster = -1;
+	while ((cluster = sched_edge_iterate_clusters_ordered(pset, foreign_pset_bitmap[0], cluster)) != -1) {
 		/* Skip the pset if its not schedulable */
 		processor_set_t target_pset = pset_array[cluster];
 		if (sched_edge_pset_available(target_pset) == false) {
@@ -3978,7 +3983,8 @@ sched_edge_steal_thread(processor_set_t pset, uint64_t candidate_pset_bitmap)
 	 * greater than the edge weight. Maybe it should have a more advanced version
 	 * which looks for the maximum delta etc.
 	 */
-	for (int cluster_id = bit_first(candidate_pset_bitmap); cluster_id >= 0; cluster_id = bit_next(candidate_pset_bitmap, cluster_id)) {
+	int cluster_id = -1;
+	while ((cluster_id = sched_edge_iterate_clusters_ordered(pset, candidate_pset_bitmap, cluster_id)) != -1) {
 		processor_set_t steal_from_pset = pset_array[cluster_id];
 		if (steal_from_pset == NULL) {
 			continue;
@@ -4227,6 +4233,40 @@ sched_edge_migration_check(uint32_t cluster_id, processor_set_t preferred_pset,
 	return false;
 }
 
+
+static int
+sched_edge_iterate_clusters_ordered(processor_set_t starting_pset, uint64_t candidate_map, int previous_cluster)
+{
+	int cluster_id = -1;
+
+	uint64_t local_candidate_map = starting_pset->local_psets[0] & candidate_map;
+	uint64_t remote_candidate_map = starting_pset->remote_psets[0] & candidate_map;
+
+	if (previous_cluster == -1) {
+		/* previous_cluster == -1 indicates the initial condition */
+		cluster_id = bit_first(local_candidate_map);
+		if (cluster_id != -1) {
+			return cluster_id;
+		}
+		return bit_first(remote_candidate_map);
+	} else {
+		/*
+		 * After the initial condition, the routine attempts to return a
+		 * cluster in the previous_cluster's locality. If none is available,
+		 * it looks at remote clusters.
+		 */
+		if (bit_test(local_candidate_map, previous_cluster)) {
+			cluster_id = bit_next(local_candidate_map, previous_cluster);
+			if (cluster_id != -1) {
+				return cluster_id;
+			} else {
+				return bit_first(remote_candidate_map);
+			}
+		}
+		return bit_next(remote_candidate_map, previous_cluster);
+	}
+}
+
 /*
  * sched_edge_migrate_edges_evaluate()
  *
@@ -4247,7 +4287,8 @@ sched_edge_migrate_edges_evaluate(processor_set_t preferred_pset, uint32_t prefe
 	bitmap_t *foreign_pset_bitmap = preferred_pset->foreign_psets;
 	bitmap_t *native_pset_bitmap = preferred_pset->native_psets;
 	/* Always start the search with the native clusters */
-	for (int cluster_id = bitmap_first(native_pset_bitmap, sched_edge_max_clusters); cluster_id >= 0; cluster_id = bitmap_next(native_pset_bitmap, cluster_id)) {
+	int cluster_id = -1;
+	while ((cluster_id = sched_edge_iterate_clusters_ordered(preferred_pset, native_pset_bitmap[0], cluster_id)) != -1) {
 		search_complete = sched_edge_migration_check(cluster_id, preferred_pset, preferred_cluster_load, thread, &selected_pset, &max_edge_delta);
 		if (search_complete) {
 			break;
@@ -4287,7 +4328,8 @@ sched_edge_migrate_edges_evaluate(processor_set_t preferred_pset, uint32_t prefe
 	}
 
 	/* Now look at the non-native clusters */
-	for (int cluster_id = bitmap_first(foreign_pset_bitmap, sched_edge_max_clusters); cluster_id >= 0; cluster_id = bitmap_next(foreign_pset_bitmap, cluster_id)) {
+	cluster_id = -1;
+	while ((cluster_id = sched_edge_iterate_clusters_ordered(preferred_pset, foreign_pset_bitmap[0], cluster_id)) != -1) {
 		search_complete = sched_edge_migration_check(cluster_id, preferred_pset, preferred_cluster_load, thread, &selected_pset, &max_edge_delta);
 		if (search_complete) {
 			break;
@@ -4423,8 +4465,9 @@ sched_edge_migrate_candidate(processor_set_t preferred_pset, thread_t thread, pr
 	uint64_t candidate_cluster_bitmap = mask(sched_edge_max_clusters);
 #if DEVELOPMENT || DEBUG
 	extern int enable_task_set_cluster_type;
-	if (enable_task_set_cluster_type && (thread->task->t_flags & TF_USE_PSET_HINT_CLUSTER_TYPE)) {
-		processor_set_t pset_hint = thread->task->pset_hint;
+	task_t task = get_threadtask(thread);
+	if (enable_task_set_cluster_type && (task->t_flags & TF_USE_PSET_HINT_CLUSTER_TYPE)) {
+		processor_set_t pset_hint = task->pset_hint;
 		if (pset_hint && selected_pset->pset_cluster_type != pset_hint->pset_cluster_type) {
 			selected_pset = pset_hint;
 			goto migrate_candidate_available_check;
@@ -4833,6 +4876,14 @@ sched_edge_cpu_init_completed(void)
 				bitmap_set(src_pset->foreign_psets, dst_cluster_id);
 				bitmap_clear(src_pset->native_psets, dst_cluster_id);
 				sched_edge_config_set(src_cluster_id, dst_cluster_id, (sched_clutch_edge){.sce_migration_weight = 0, .sce_migration_allowed = 0, .sce_steal_allowed = 0});
+			}
+			bool clusters_local = true;
+			if (clusters_local) {
+				bitmap_set(src_pset->local_psets, dst_cluster_id);
+				bitmap_clear(src_pset->remote_psets, dst_cluster_id);
+			} else {
+				bitmap_set(src_pset->remote_psets, dst_cluster_id);
+				bitmap_clear(src_pset->local_psets, dst_cluster_id);
 			}
 		}
 

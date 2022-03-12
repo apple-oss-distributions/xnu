@@ -192,11 +192,10 @@ static int munge_statfs(struct mount *mp, struct vfsstatfs *sfsp,
 static int fsync_common(proc_t p, struct fsync_args *uap, int flags);
 static int mount_common(const char *fstypename, vnode_t pvp, vnode_t vp,
     struct componentname *cnp, user_addr_t fsmountargs,
-    int flags, uint32_t internal_flags, char *labelstr, boolean_t kernelmount,
-    vfs_context_t ctx);
+    int flags, uint32_t internal_flags, char *labelstr, vfs_context_t ctx);
 void vfs_notify_mount(vnode_t pdvp);
 
-int prepare_coveredvp(vnode_t vp, vfs_context_t ctx, struct componentname *cnp, const char *fsname, boolean_t skip_auth);
+int prepare_coveredvp(vnode_t vp, vfs_context_t ctx, struct componentname *cnp, const char *fsname, uint32_t internal_flags);
 
 struct fd_vn_data * fg_vn_data_alloc(void);
 
@@ -293,6 +292,8 @@ kernel_mount(const char *fstype, vnode_t pvp, vnode_t vp, const char *path,
 	NDINIT(&nd, LOOKUP, OP_MOUNT, FOLLOW | AUDITVNPATH1 | WANTPARENT,
 	    UIO_SYSSPACE, CAST_USER_ADDR_T(path), ctx);
 
+	kern_flags &= KERNEL_MOUNT_SANITIZE_MASK;
+
 	/*
 	 * Get the vnode to be covered if it's not supplied
 	 */
@@ -315,8 +316,9 @@ kernel_mount(const char *fstype, vnode_t pvp, vnode_t vp, const char *path,
 		did_namei = FALSE;
 	}
 
+	kern_flags |= KERNEL_MOUNT_KMOUNT;
 	error = mount_common(fstype, pvp, vp, &nd.ni_cnd, CAST_USER_ADDR_T(data),
-	    syscall_flags, kern_flags, NULL, TRUE, ctx);
+	    syscall_flags, kern_flags, NULL, ctx);
 
 	if (did_namei) {
 		vnode_put(vp);
@@ -457,7 +459,7 @@ fmount(__unused proc_t p, struct fmount_args *uap, __unused int32_t *retval)
 		return error;
 	}
 
-	error = mount_common(fstypename, pvp, vp, &cn, uap->data, flags, 0, labelstr, FALSE, ctx);
+	error = mount_common(fstypename, pvp, vp, &cn, uap->data, flags, KERNEL_MOUNT_FMOUNT, labelstr, ctx);
 
 	zfree(ZV_NAMEI, cn.cn_pnbuf);
 	vnode_put(pvp);
@@ -632,7 +634,7 @@ __mac_mount(struct proc *p, register struct __mac_mount_args *uap, __unused int3
 	}
 
 	error = mount_common(fstypename, pvp, vp, &nd.ni_cnd, uap->data, flags, 0,
-	    labelstr, FALSE, ctx);
+	    labelstr, ctx);
 
 out:
 
@@ -670,7 +672,7 @@ out:
 static int
 mount_common(const char *fstypename, vnode_t pvp, vnode_t vp,
     struct componentname *cnp, user_addr_t fsmountargs, int flags, uint32_t internal_flags,
-    char *labelstr, boolean_t kernelmount, vfs_context_t ctx)
+    char *labelstr, vfs_context_t ctx)
 {
 #if !CONFIG_MACF
 #pragma unused(labelstr)
@@ -693,6 +695,7 @@ mount_common(const char *fstypename, vnode_t pvp, vnode_t vp,
 	boolean_t did_rele = FALSE;
 	boolean_t have_usecount = FALSE;
 	boolean_t did_set_lmount = FALSE;
+	boolean_t kernelmount = !!(internal_flags & KERNEL_MOUNT_KMOUNT);
 
 #if CONFIG_ROSV_STARTUP || CONFIG_MOUNT_VM || CONFIG_BASESYSTEMROOT
 	/* Check for mutually-exclusive flag bits */
@@ -843,7 +846,7 @@ mount_common(const char *fstypename, vnode_t pvp, vnode_t vp,
 		goto out1;
 	}
 
-	error = prepare_coveredvp(vp, ctx, cnp, fstypename, ((internal_flags & KERNEL_MOUNT_NOAUTH) != 0));
+	error = prepare_coveredvp(vp, ctx, cnp, fstypename, internal_flags);
 	if (error != 0) {
 		goto out1;
 	}
@@ -1540,13 +1543,16 @@ out1:
  * and set VMOUNT
  */
 int
-prepare_coveredvp(vnode_t vp, vfs_context_t ctx, struct componentname *cnp, const char *fsname, boolean_t skip_auth)
+prepare_coveredvp(vnode_t vp, vfs_context_t ctx, struct componentname *cnp, const char *fsname, uint32_t internal_flags)
 {
 #if !CONFIG_MACF
 #pragma unused(cnp,fsname)
 #endif
 	struct vnode_attr va;
 	int error;
+	boolean_t skip_auth = !!(internal_flags & KERNEL_MOUNT_NOAUTH);
+	boolean_t is_fmount = !!(internal_flags & KERNEL_MOUNT_FMOUNT);
+	boolean_t is_busy;
 
 	if (!skip_auth) {
 		/*
@@ -1576,22 +1582,27 @@ prepare_coveredvp(vnode_t vp, vfs_context_t ctx, struct componentname *cnp, cons
 		goto out;
 	}
 
-	if (ISSET(vp->v_flag, VMOUNT) && (vp->v_mountedhere != NULL)) {
+	vnode_lock_spin(vp);
+	is_busy = is_fmount ?
+	    (ISSET(vp->v_flag, VMOUNT) || (vp->v_mountedhere != NULL)) :
+	    (ISSET(vp->v_flag, VMOUNT) && (vp->v_mountedhere != NULL));
+	if (is_busy) {
+		vnode_unlock(vp);
 		error = EBUSY;
 		goto out;
 	}
+	SET(vp->v_flag, VMOUNT);
+	vnode_unlock(vp);
 
 #if CONFIG_MACF
 	error = mac_mount_check_mount(ctx, vp,
 	    cnp, fsname);
 	if (error != 0) {
-		goto out;
+		vnode_lock_spin(vp);
+		CLR(vp->v_flag, VMOUNT);
+		vnode_unlock(vp);
 	}
 #endif
-
-	vnode_lock_spin(vp);
-	SET(vp->v_flag, VMOUNT);
-	vnode_unlock(vp);
 
 out:
 	return error;
@@ -1940,7 +1951,7 @@ relocate_imageboot_source(vnode_t pvp, vnode_t vp,
 	IMGSRC_DEBUG("Preparing coveredvp.\n");
 
 	/* Mark covered vnode as mount in progress, authorize placing mount on top */
-	error = prepare_coveredvp(vp, ctx, cnp, fsname, FALSE);
+	error = prepare_coveredvp(vp, ctx, cnp, fsname, 0);
 	if (error != 0) {
 		IMGSRC_DEBUG("Preparing coveredvp failed with %d.\n", error);
 		goto out1;
@@ -4210,7 +4221,7 @@ open1(vfs_context_t ctx, struct nameidata *ndp, int uflags,
 
 	fp->fp_glob->fg_flag = flags & (FMASK | O_EVTONLY | FENCRYPTED | FUNENCRYPTED);
 	fp->fp_glob->fg_ops = &vnops;
-	fp->fp_glob->fg_data = (caddr_t)vp;
+	fp_set_data(fp, vp);
 
 	if (flags & (O_EXLOCK | O_SHLOCK)) {
 		struct flock lf = {
@@ -6434,7 +6445,7 @@ fstatat_internal(vfs_context_t ctx, user_addr_t path, user_addr_t ub,
 		source.sb64.st_lspare = 0;
 		source.sb64.st_qspare[0] = 0LL;
 		source.sb64.st_qspare[1] = 0LL;
-		if (IS_64BIT_PROCESS(vfs_context_proc(ctx))) {
+		if (vfs_context_is64bit(ctx)) {
 			munge_user64_stat64(&source.sb64, &dest.user64_sb64);
 			my_size = sizeof(dest.user64_sb64);
 			sbp = (caddr_t)&dest.user64_sb64;
@@ -6453,7 +6464,7 @@ fstatat_internal(vfs_context_t ctx, user_addr_t path, user_addr_t ub,
 		source.sb.st_lspare = 0;
 		source.sb.st_qspare[0] = 0LL;
 		source.sb.st_qspare[1] = 0LL;
-		if (IS_64BIT_PROCESS(vfs_context_proc(ctx))) {
+		if (vfs_context_is64bit(ctx)) {
 			munge_user64_stat(&source.sb, &dest.user64_sb);
 			my_size = sizeof(dest.user64_sb);
 			sbp = (caddr_t)&dest.user64_sb;
@@ -7652,7 +7663,7 @@ ftruncate(proc_t p, struct ftruncate_args *uap, int32_t *retval)
 		goto out;
 	}
 
-	vp = (vnode_t)fp->fp_glob->fg_data;
+	vp = (vnode_t)fp_get_data(fp);
 
 	if ((fp->fp_glob->fg_flag & FWRITE) == 0) {
 		AUDIT_ARG(vnpath_withref, vp, ARG_VNODE1);
@@ -9621,7 +9632,7 @@ get_from_fd:
 	}
 
 	vn_offset_lock(fp->fp_glob);
-	if (fp->fp_glob->fg_data != vp) {
+	if (((vnode_t)fp_get_data(fp)) != vp) {
 		vn_offset_unlock(fp->fp_glob);
 		file_drop(fd);
 		goto get_from_fd;
@@ -9689,7 +9700,7 @@ unionread:
 
 		if (lookup_traverse_union(vp, &uvp, &context) == 0) {
 			if (vnode_ref(uvp) == 0) {
-				fp->fp_glob->fg_data = (caddr_t)uvp;
+				fp_set_data(fp, uvp);
 				fp->fp_glob->fg_offset = 0;
 				vnode_rele(vp);
 				vnode_put(vp);
@@ -10007,7 +10018,7 @@ unionread:
 			struct vnode *tvp = vp;
 			if (lookup_traverse_union(tvp, &vp, ctx) == 0) {
 				vnode_ref_ext(vp, fp->fp_glob->fg_flag & O_EVTONLY, 0);
-				fp->fp_glob->fg_data = (caddr_t) vp;
+				fp_set_data(fp, vp);
 				fp->fp_glob->fg_offset = 0; // reset index for new dir
 				count = savecount;
 				vnode_rele_internal(tvp, fp->fp_glob->fg_flag & O_EVTONLY, 0, 0);
@@ -10884,7 +10895,7 @@ nspace_materialization_set_proc_state(struct proc *p, int is_prevented)
 static int
 nspace_materialization_get_thread_state(int *is_prevented)
 {
-	uthread_t ut = get_bsdthread_info(current_thread());
+	uthread_t ut = current_uthread();
 
 	*is_prevented = (ut->uu_flag & UT_NSPACE_NODATALESSFAULTS) ? 1 : 0;
 	return 0;
@@ -10893,7 +10904,7 @@ nspace_materialization_get_thread_state(int *is_prevented)
 static int
 nspace_materialization_set_thread_state(int is_prevented)
 {
-	uthread_t ut = get_bsdthread_info(current_thread());
+	uthread_t ut = current_uthread();
 
 	if (is_prevented) {
 		ut->uu_flag |= UT_NSPACE_NODATALESSFAULTS;
@@ -13579,7 +13590,7 @@ snapshot_mount(int dirfd, user_addr_t name, user_addr_t directory,
 	smnt_data.sm_cnp = &snapndp->ni_cnd;
 	error = mount_common(mp->mnt_vfsstat.f_fstypename, pvp, vp,
 	    &dirndp->ni_cnd, CAST_USER_ADDR_T(&smnt_data), flags & MNT_DONTBROWSE,
-	    KERNEL_MOUNT_SNAPSHOT, NULL, FALSE, ctx);
+	    KERNEL_MOUNT_SNAPSHOT, NULL, ctx);
 
 out2:
 	vnode_put(vp);

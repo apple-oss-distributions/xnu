@@ -161,7 +161,7 @@ main(
 	DECLARE("TASK_VTIMERS", offsetof(struct task, vtimers));
 
 	/* These fields are being added on demand */
-	DECLARE("TH_TASK", offsetof(struct thread, task));
+	DECLARE("TH_TASK", offsetof(struct thread, t_task));
 	DECLARE("TH_AST", offsetof(struct thread, ast));
 	DECLARE("TH_MAP", offsetof(struct thread, map));
 	DECLARE("TH_SPF", offsetof(struct thread, machine.specFlags));
