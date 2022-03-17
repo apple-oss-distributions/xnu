@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2020 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -150,6 +150,9 @@ extern int esp_udp_encap_port;
 #include <net/content_filter.h>
 #endif /* CONTENT_FILTER */
 
+#if SKYWALK
+#include <skywalk/core/skywalk_var.h>
+#endif /* SKYWALK */
 
 /*
  * UDP protocol inplementation.
@@ -699,6 +702,10 @@ udp6_ctlinput(int cmd, struct sockaddr *sa, void *d, __unused struct ifnet *ifp)
 	}
 
 	if (ip6 != NULL) {
+#if SKYWALK
+		union sockaddr_in_4_6 sock_laddr;
+		struct protoctl_ev_val prctl_ev_val;
+#endif /* SKYWALK */
 		/*
 		 * XXX: We assume that when IPV6 is non NULL,
 		 * M and OFF are valid.
@@ -723,6 +730,22 @@ udp6_ctlinput(int cmd, struct sockaddr *sa, void *d, __unused struct ifnet *ifp)
 		(void) in6_pcbnotify(&udbinfo, sa, uh.uh_dport,
 		    (struct sockaddr*)ip6cp->ip6c_src, uh.uh_sport,
 		    cmd, cmdarg, notify);
+#if SKYWALK
+		bzero(&prctl_ev_val, sizeof(prctl_ev_val));
+		bzero(&sock_laddr, sizeof(sock_laddr));
+
+		if (cmd == PRC_MSGSIZE && icmp6 != NULL) {
+			prctl_ev_val.val = ntohl(icmp6->icmp6_mtu);
+		}
+		sock_laddr.sin6.sin6_family = AF_INET6;
+		sock_laddr.sin6.sin6_len = sizeof(sock_laddr.sin6);
+		sock_laddr.sin6.sin6_addr = ip6->ip6_src;
+
+		protoctl_event_enqueue_nwk_wq_entry(ifp,
+		    (struct sockaddr *)&sock_laddr, sa,
+		    uh.uh_sport, uh.uh_dport, IPPROTO_UDP,
+		    cmd, &prctl_ev_val);
+#endif /* SKYWALK */
 	}
 	/*
 	 * XXX The else condition here was broken for a long time.
@@ -994,6 +1017,11 @@ udp6_disconnect(struct socket *so)
 	inp->in6p_laddr = in6addr_any;
 	inp->inp_lifscope = IFSCOPE_NONE;
 	inp->in6p_last_outifp = NULL;
+#if SKYWALK
+	if (NETNS_TOKEN_VALID(&inp->inp_netns_token)) {
+		netns_set_ifnet(&inp->inp_netns_token, NULL);
+	}
+#endif /* SKYWALK */
 
 	so->so_state &= ~SS_ISCONNECTED;                /* XXX */
 	return 0;
@@ -1104,7 +1132,13 @@ do_flow_divert:
 	}
 #endif /* defined(NECP) && defined(FLOW_DIVERT) */
 
+#if SKYWALK
+	sk_protect_t protect = sk_async_transmit_protect();
+#endif /* SKYWALK */
 	error = udp6_output(inp, m, addr, control, p);
+#if SKYWALK
+	sk_async_transmit_unprotect(protect);
+#endif /* SKYWALK */
 
 #if CONTENT_FILTER
 	if (cfil_tag) {

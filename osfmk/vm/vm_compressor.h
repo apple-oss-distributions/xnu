@@ -231,6 +231,7 @@ struct c_segment {
 	thread_t        c_busy_for_thread;
 	uint32_t        c_agedin_ts;
 	uint32_t        c_swappedin_ts;
+	bool            c_swappedin;
 
 	int             c_slot_var_array_len;
 	struct  c_slot  *c_slot_var_array;

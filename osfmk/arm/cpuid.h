@@ -155,6 +155,7 @@ typedef union {
 /* H12 e-Core (ARMv8 architecture) */
 #define CPU_PART_THUNDER            0x13
 
+
 /* H13J e-Core */
 #define CPU_PART_ICESTORM_JADE_CHOP    0x24
 #define CPU_PART_ICESTORM_JADE_DIE     0x28

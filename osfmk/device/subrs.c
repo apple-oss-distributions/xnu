@@ -406,7 +406,7 @@ size_t
 strnlen(const char *s, size_t max)
 {
 	const char *es = s + max, *p = s;
-	while (*p && p != es) {
+	while (p != es && *p) {
 		p++;
 	}
 

@@ -1552,7 +1552,11 @@ in6_pcbsetport(struct in6_addr *laddr, struct inpcb *inp, struct proc *p,
 	bool found, randomport;
 	struct inpcbinfo *pcbinfo = inp->inp_pcbinfo;
 	kauth_cred_t cred;
+#if SKYWALK
+	bool laddr_unspecified = IN6_IS_ADDR_UNSPECIFIED(laddr);
+#else
 #pragma unused(laddr)
+#endif
 	if (!locked) { /* Make sure we don't run into a deadlock: 4052373 */
 		if (!lck_rw_try_lock_exclusive(&pcbinfo->ipi_lock)) {
 			socket_unlock(inp->inp_socket, 0);
@@ -1642,6 +1646,12 @@ in6_pcbsetport(struct in6_addr *laddr, struct inpcb *inp, struct proc *p,
 			inp->in6p_laddr = in6addr_any;
 			inp->in6p_last_outifp = NULL;
 			inp->inp_lifscope = IFSCOPE_NONE;
+#if SKYWALK
+			if (NETNS_TOKEN_VALID(&inp->inp_netns_token)) {
+				netns_set_ifnet(&inp->inp_netns_token,
+				    NULL);
+			}
+#endif /* SKYWALK */
 			if (!locked) {
 				lck_rw_done(&pcbinfo->ipi_lock);
 			}
@@ -1670,6 +1680,34 @@ in6_pcbsetport(struct in6_addr *laddr, struct inpcb *inp, struct proc *p,
 
 		found = (in6_pcblookup_local(pcbinfo, &inp->in6p_laddr,
 		    lport, inp->inp_lifscope, wild) == NULL);
+#if SKYWALK
+		if (found &&
+		    (SOCK_PROTO(so) == IPPROTO_TCP ||
+		    SOCK_PROTO(so) == IPPROTO_UDP) &&
+		    !(inp->inp_flags2 & INP2_EXTERNAL_PORT)) {
+			if (laddr_unspecified &&
+			    (inp->inp_flags & IN6P_IPV6_V6ONLY) == 0) {
+				struct in_addr ip_zero = { .s_addr = 0 };
+
+				netns_release(&inp->inp_wildcard_netns_token);
+				if (netns_reserve_in(
+					    &inp->inp_wildcard_netns_token,
+					    ip_zero,
+					    (uint8_t)SOCK_PROTO(so), lport,
+					    NETNS_BSD, NULL) != 0) {
+					/* port in use in IPv4 namespace */
+					found = false;
+				}
+			}
+			if (found &&
+			    netns_reserve_in6(&inp->inp_netns_token,
+			    inp->in6p_laddr, (uint8_t)SOCK_PROTO(so), lport,
+			    NETNS_BSD, NULL) != 0) {
+				netns_release(&inp->inp_wildcard_netns_token);
+				found = false;
+			}
+		}
+#endif /* SKYWALK */
 	} while (!found);
 
 	inp->inp_lport = lport;
@@ -1679,6 +1717,9 @@ in6_pcbsetport(struct in6_addr *laddr, struct inpcb *inp, struct proc *p,
 		inp->in6p_laddr = in6addr_any;
 		inp->in6p_last_outifp = NULL;
 		inp->inp_lifscope = IFSCOPE_NONE;
+#if SKYWALK
+		netns_release(&inp->inp_netns_token);
+#endif /* SKYWALK */
 		inp->inp_lport = 0;
 		inp->inp_flags &= ~INP_ANONPORT;
 		if (!locked) {

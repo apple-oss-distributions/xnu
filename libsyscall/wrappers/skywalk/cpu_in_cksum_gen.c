@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017 Apple Inc. All rights reserved.
+ * Copyright (c) 2017-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -26,3 +26,4 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 
+#include "../../../bsd/netinet/cpu_in_cksum_gen.c"

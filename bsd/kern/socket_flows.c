@@ -432,6 +432,14 @@ soflow_db_remove_entry(struct soflow_db *db, struct soflow_hash_entry *hash_entr
 		return;
 	}
 
+#if defined(NSTAT_EXTENSION_FILTER_DOMAIN_INFO)
+	if (hash_entry->soflow_nstat_context != NULL) {
+		SOFLOW_LOG(LOG_INFO, db->soflow_db_so, hash_entry->soflow_debug, "<Close nstat> - context %lX", (unsigned long)hash_entry->soflow_nstat_context);
+		nstat_provider_stats_close(hash_entry->soflow_nstat_context);
+		hash_entry->soflow_nstat_context = NULL;
+		SOFLOW_ENTRY_FREE(hash_entry);
+	}
+#endif
 
 	db->soflow_db_count--;
 	if (db->soflow_db_only_entry == hash_entry) {
@@ -901,6 +909,224 @@ soflow_entry_update_local(struct soflow_db *db, struct soflow_hash_entry *entry,
 	return;
 }
 
+#if defined(NSTAT_EXTENSION_FILTER_DOMAIN_INFO)
+static u_int32_t
+ifnet_to_flags(struct ifnet *ifp, struct socket *so)
+{
+	u_int32_t flags = 0;
+
+	if (ifp != NULL) {
+		flags = nstat_ifnet_to_flags(ifp);
+		if ((flags & NSTAT_IFNET_IS_WIFI) && ((flags & (NSTAT_IFNET_IS_AWDL | NSTAT_IFNET_IS_LLW)) == 0)) {
+			flags |= NSTAT_IFNET_IS_WIFI_INFRA;
+		}
+	} else {
+		flags = NSTAT_IFNET_IS_UNKNOWN_TYPE;
+	}
+
+	if (so != NULL && (so->so_flags1 & SOF1_CELLFALLBACK)) {
+		flags |= NSTAT_IFNET_VIA_CELLFALLBACK;
+	}
+	return flags;
+}
+
+static bool
+soflow_nstat_provider_request_vals(nstat_provider_context ctx,
+    u_int32_t *ifflagsp,
+    nstat_counts *countsp,
+    void *metadatap)
+{
+	struct soflow_hash_entry *hash_entry = (struct soflow_hash_entry *) ctx;
+	struct socket *so = (hash_entry && hash_entry->soflow_db) ? hash_entry->soflow_db->soflow_db_so : NULL;
+	struct inpcb *inp = so ? sotoinpcb(so) : NULL;
+	char local[MAX_IPv6_STR_LEN + 6] = { 0 };
+	char remote[MAX_IPv6_STR_LEN + 6] = { 0 };
+	const void *addr = NULL;
+
+	if (hash_entry == NULL || so == NULL || inp == NULL) {
+		return false;
+	}
+
+	if (ifflagsp) {
+		if (hash_entry->soflow_outifindex) {
+			struct ifnet *ifp = ifindex2ifnet[hash_entry->soflow_outifindex];
+			*ifflagsp = ifnet_to_flags(ifp, so);
+		}
+		if ((countsp == NULL) && (metadatap == NULL)) {
+			SOFLOW_LOG(LOG_DEBUG, so, hash_entry->soflow_debug, "ifflagsp set to 0x%X", *ifflagsp);
+			goto done;
+		}
+	}
+
+	if (countsp) {
+		bzero(countsp, sizeof(*countsp));
+		countsp->nstat_rxpackets = hash_entry->soflow_rxpackets;
+		countsp->nstat_rxbytes = hash_entry->soflow_rxbytes;
+		countsp->nstat_txpackets = hash_entry->soflow_txpackets;
+		countsp->nstat_txbytes = hash_entry->soflow_txbytes;
+
+		SOFLOW_LOG(LOG_DEBUG, so, hash_entry->soflow_debug,
+		    "Collected NSTAT counts: rxpackets %llu rxbytes %llu txpackets %llu txbytes %llu",
+		    countsp->nstat_rxpackets, countsp->nstat_rxbytes, countsp->nstat_txpackets, countsp->nstat_txbytes);
+	}
+
+	if (metadatap) {
+		nstat_udp_descriptor *desc = (nstat_udp_descriptor *)metadatap;
+		bzero(desc, sizeof(*desc));
+
+		if (so->so_flags & SOF_DELEGATED) {
+			desc->eupid = so->e_upid;
+			desc->epid = so->e_pid;
+			uuid_copy(desc->euuid, so->e_uuid);
+		} else {
+			desc->eupid = so->last_upid;
+			desc->epid = so->last_pid;
+			uuid_copy(desc->euuid, so->last_uuid);
+		}
+
+		uuid_copy(desc->vuuid, so->so_vuuid);
+		uuid_copy(desc->fuuid, hash_entry->soflow_uuid);
+
+		if (hash_entry->soflow_family == AF_INET6) {
+			in6_ip6_to_sockaddr(&hash_entry->soflow_laddr.addr6, hash_entry->soflow_lport, hash_entry->soflow_laddr6_ifscope,
+			    &desc->local.v6, sizeof(desc->local.v6));
+			in6_ip6_to_sockaddr(&hash_entry->soflow_faddr.addr6, hash_entry->soflow_fport, hash_entry->soflow_faddr6_ifscope,
+			    &desc->remote.v6, sizeof(desc->remote.v6));
+		} else if (hash_entry->soflow_family == AF_INET) {
+			desc->local.v4.sin_family = AF_INET;
+			desc->local.v4.sin_len = sizeof(struct sockaddr_in);
+			desc->local.v4.sin_port = hash_entry->soflow_lport;
+			desc->local.v4.sin_addr = hash_entry->soflow_laddr.addr46.ia46_addr4;
+
+			desc->remote.v4.sin_family = AF_INET;
+			desc->remote.v4.sin_len = sizeof(struct sockaddr_in);
+			desc->remote.v4.sin_port = hash_entry->soflow_fport;
+			desc->remote.v4.sin_addr = hash_entry->soflow_faddr.addr46.ia46_addr4;
+		}
+
+		desc->ifindex = hash_entry->soflow_outifindex;
+		if (hash_entry->soflow_outifindex) {
+			struct ifnet *ifp = ifindex2ifnet[hash_entry->soflow_outifindex];
+			desc->ifnet_properties = (uint16_t)ifnet_to_flags(ifp, so);
+		}
+
+		desc->rcvbufsize = so->so_rcv.sb_hiwat;
+		desc->rcvbufused = so->so_rcv.sb_cc;
+		desc->traffic_class = so->so_traffic_class;
+		inp_get_activity_bitmap(inp, &desc->activity_bitmap);
+
+		if (hash_entry->soflow_debug) {
+			switch (hash_entry->soflow_family) {
+			case AF_INET6:
+				addr = &desc->local.v6;
+				inet_ntop(AF_INET6, addr, local, sizeof(local));
+				addr = &desc->remote.v6;
+				inet_ntop(AF_INET6, addr, remote, sizeof(local));
+				break;
+			case AF_INET:
+				addr = &desc->local.v4.sin_addr;
+				inet_ntop(AF_INET, addr, local, sizeof(local));
+				addr = &desc->remote.v4.sin_addr;
+				inet_ntop(AF_INET, addr, remote, sizeof(local));
+				break;
+			default:
+				break;
+			}
+
+			uint8_t *ptr = (uint8_t *)&desc->euuid;
+
+			SOFLOW_LOG(LOG_DEBUG, so, hash_entry->soflow_debug,
+			    "Collected NSTAT metadata: eupid %llu epid %d euuid %x%x%x%x-%x%x%x%x-%x%x%x%x-%x%x%x%x "
+			    "outifp %d properties 0x%X lport %d fport %d laddr %s faddr %s "
+			    "rcvbufsize %u rcvbufused %u traffic_class %u",
+			    desc->eupid, desc->epid,
+			    ptr[0], ptr[1], ptr[2], ptr[3], ptr[4], ptr[5], ptr[6], ptr[7],
+			    ptr[8], ptr[9], ptr[10], ptr[11], ptr[12], ptr[13], ptr[14], ptr[15],
+			    desc->ifindex, desc->ifnet_properties,
+			    ntohs(desc->local.v4.sin_port), ntohs(desc->remote.v4.sin_port), local, remote,
+			    desc->rcvbufsize, desc->rcvbufused, desc->traffic_class);
+		}
+	}
+done:
+	return true;
+}
+
+static size_t
+soflow_nstat_provider_request_extensions(nstat_provider_context ctx,
+    int requested_extension,
+    void *buf,
+    size_t buf_size)
+{
+	struct soflow_hash_entry *hash_entry = (struct soflow_hash_entry *) ctx;
+	struct socket *so = (hash_entry && hash_entry->soflow_db) ? hash_entry->soflow_db->soflow_db_so : NULL;
+	struct inpcb *inp = so ? sotoinpcb(so) : NULL;
+	struct nstat_domain_info *domain_info = NULL;
+	size_t size = 0;
+
+	if (hash_entry == NULL || so == NULL || inp == NULL) {
+		return 0;
+	}
+
+	if (buf == NULL) {
+		switch (requested_extension) {
+		case NSTAT_EXTENDED_UPDATE_TYPE_DOMAIN:
+			return sizeof(nstat_domain_info);
+		default:
+			return 0;
+		}
+	}
+
+	if (buf_size < sizeof(nstat_domain_info)) {
+		return 0;
+	}
+
+	switch (requested_extension) {
+	case NSTAT_EXTENDED_UPDATE_TYPE_DOMAIN:
+
+		domain_info = (struct nstat_domain_info *)buf;
+
+		domain_info->is_tracker = !!(so->so_flags1 & SOF1_KNOWN_TRACKER);
+		domain_info->is_non_app_initiated = !!(so->so_flags1 & SOF1_TRACKER_NON_APP_INITIATED);
+
+		if (domain_info->is_tracker && inp->inp_necp_attributes.inp_tracker_domain != NULL) {
+			strlcpy(domain_info->domain_name, inp->inp_necp_attributes.inp_tracker_domain,
+			    sizeof(domain_info->domain_name));
+		} else if (inp->inp_necp_attributes.inp_domain != NULL) {
+			strlcpy(domain_info->domain_name, inp->inp_necp_attributes.inp_domain,
+			    sizeof(domain_info->domain_name));
+		}
+
+		if (inp->inp_necp_attributes.inp_domain_owner != NULL) {
+			strlcpy(domain_info->domain_owner, inp->inp_necp_attributes.inp_domain_owner,
+			    sizeof(domain_info->domain_owner));
+		}
+
+		if (inp->inp_necp_attributes.inp_domain_context != NULL) {
+			strlcpy(domain_info->domain_tracker_ctxt, inp->inp_necp_attributes.inp_domain_context,
+			    sizeof(domain_info->domain_tracker_ctxt));
+		}
+
+		if (hash_entry->soflow_debug) {
+			SOFLOW_LOG(LOG_DEBUG, so, hash_entry->soflow_debug, "Collected NSTAT domain_info:pid %d domain <%s> owner <%s> "
+			    "ctxt <%s> bundle id <%s> is_tracker %d is_non_app_initiated %d is_silent %d",
+			    so->so_flags & SOF_DELEGATED ? so->e_pid : so->last_pid,
+			    domain_info->domain_name,
+			    domain_info->domain_owner,
+			    domain_info->domain_tracker_ctxt,
+			    domain_info->domain_attributed_bundle_id,
+			    domain_info->is_tracker,
+			    domain_info->is_non_app_initiated,
+			    domain_info->is_silent);
+		}
+		size = sizeof(nstat_domain_info);
+
+	default:
+		break;
+	}
+
+	return size;
+}
+#endif
 
 static void
 soflow_update_flow_stats(struct soflow_hash_entry *hash_entry, size_t data_size, bool outgoing)
@@ -1000,6 +1226,19 @@ soflow_get_flow(struct socket *so, struct sockaddr *local, struct sockaddr *remo
 
 	// Only report flow to NSTAT if unconnected UDP
 	if (!soflow_nstat_disable && SOFLOW_IS_UDP(so) && !(so->so_state & (SS_ISCONNECTED | SS_ISCONNECTING))) {
+#if defined(NSTAT_EXTENSION_FILTER_DOMAIN_INFO)
+		// Take refcount of entry before handing it to nstat. Abort if fail.
+		if (os_ref_retain_try(&hash_entry->soflow_ref_count) == false) {
+			soflow_db_remove_entry(so->so_flow_db, hash_entry);
+			return NULL;
+		}
+		uuid_generate_random(hash_entry->soflow_uuid);
+		hash_entry->soflow_nstat_context = nstat_provider_stats_open((nstat_provider_context) hash_entry,
+		    NSTAT_PROVIDER_UDP_SUBFLOW, 0,
+		    soflow_nstat_provider_request_vals,
+		    soflow_nstat_provider_request_extensions);
+		SOFLOW_LOG(LOG_INFO, so, hash_entry->soflow_debug, "<Open nstat> - context %lX", (unsigned long)hash_entry->soflow_nstat_context);
+#endif
 	}
 
 	SOFLOW_LOCK_EXCLUSIVE;

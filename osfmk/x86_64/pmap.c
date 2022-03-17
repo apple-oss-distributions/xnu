@@ -1880,36 +1880,44 @@ pmap_protect_options(
 			}
 
 			for (; spte < epte; spte++) {
+				uint64_t clear_bits, set_bits;
+
 				if (!(*spte & PTE_VALID_MASK(is_ept))) {
 					continue;
 				}
 
+				clear_bits = 0;
+				set_bits = 0;
+
 				if (is_ept) {
 					if (!(prot & VM_PROT_READ)) {
-						pmap_update_pte(is_ept, spte, PTE_READ(is_ept), 0);
+						clear_bits |= PTE_READ(is_ept);
 					}
 				}
 				if (!(prot & VM_PROT_WRITE)) {
-					pmap_update_pte(is_ept, spte, PTE_WRITE(is_ept), 0);
+					clear_bits |= PTE_WRITE(is_ept);
 				}
 #if DEVELOPMENT || DEBUG
 				else if ((options & PMAP_OPTIONS_PROTECT_IMMEDIATE) &&
 				    map == kernel_pmap) {
-					pmap_update_pte(is_ept, spte, 0, PTE_WRITE(is_ept));
+					set_bits |= PTE_WRITE(is_ept);
 				}
 #endif /* DEVELOPMENT || DEBUG */
 
 				if (set_NX) {
 					if (!is_ept) {
-						pmap_update_pte(FALSE, spte, 0, INTEL_PTE_NX);
+						set_bits |= INTEL_PTE_NX;
 					} else {
-						pmap_update_pte(TRUE, spte, INTEL_EPT_EX | INTEL_EPT_UEX, 0);
+						clear_bits |= INTEL_EPT_EX | INTEL_EPT_UEX;
 					}
 				} else if (is_ept) {
 					/* This is the exception to the "Don't add permissions" statement, above */
-					pmap_update_pte(TRUE, spte, 0, ((prot & VM_PROT_EXECUTE) ? INTEL_EPT_EX : 0) |
-					    ((prot & VM_PROT_UEXEC) ? INTEL_EPT_UEX : 0));
+					set_bits |= ((prot & VM_PROT_EXECUTE) ? INTEL_EPT_EX : 0) |
+					    ((prot & VM_PROT_UEXEC) ? INTEL_EPT_UEX : 0);
 				}
+
+				pmap_update_pte(is_ept, spte, clear_bits, set_bits, false);
+
 				DTRACE_VM3(set_pte, pmap_t, map, void *, cur_vaddr, uint64_t, *spte);
 				cur_vaddr += vaddr_incr;
 

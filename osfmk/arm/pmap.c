@@ -5230,7 +5230,6 @@ pmap_protect_options_internal(
 	unsigned int options,
 	__unused void *args)
 {
-	const pt_attr_t *const pt_attr = pmap_get_pt_attr(pmap);
 	tt_entry_t      *tte_p;
 	pt_entry_t      *bpte_p, *epte_p;
 	pt_entry_t      *pte_p;
@@ -5240,6 +5239,11 @@ pmap_protect_options_internal(
 #endif
 	boolean_t        should_have_removed = FALSE;
 	bool             need_strong_sync = false;
+
+	/* Validate the pmap input before accessing its data. */
+	validate_pmap_mutable(pmap);
+
+	const pt_attr_t *const pt_attr = pmap_get_pt_attr(pmap);
 
 	if (__improbable((end < start) || (end > ((start + pt_attr_twig_size(pt_attr)) & ~pt_attr_twig_offmask(pt_attr))))) {
 		panic("%s: invalid address range %p, %p", __func__, (void*)start, (void*)end);
@@ -5293,7 +5297,6 @@ pmap_protect_options_internal(
 	vm_map_address_t va = start;
 	unsigned int npages = 0;
 
-	validate_pmap_mutable(pmap);
 	pmap_lock(pmap, PMAP_LOCK_EXCLUSIVE);
 
 	tte_p = pmap_tte(pmap, start);
@@ -10765,6 +10768,9 @@ pmap_insert_sharedpage_internal(
 	int options = 0;
 	pmap_t sharedpage_pmap = sharedpage_pmap_default;
 
+	/* Validate the pmap input before accessing its data. */
+	validate_pmap_mutable(pmap);
+
 	const pt_attr_t * const pt_attr = pmap_get_pt_attr(pmap);
 	const unsigned int sharedpage_level = pt_attr_commpage_level(pt_attr);
 
@@ -10785,7 +10791,6 @@ pmap_insert_sharedpage_internal(
 	}
 #endif /* __ARM_MIXED_PAGE_SIZE__ */
 
-	validate_pmap_mutable(pmap);
 #if XNU_MONITOR
 	options |= PMAP_OPTIONS_NOWAIT;
 #endif /* XNU_MONITOR */

@@ -421,26 +421,27 @@ task_restartable_ranges_register(
 kern_return_t
 task_restartable_ranges_synchronize(task_t task)
 {
+	ast_gen_t gens[MAX_CPUS] = {0};
+	thread_pri_floor_t token;
 	thread_t thread;
-	bitmap_t map[BITMAP_LEN(MAX_CPUS)] = { };
-	unsigned long gen;
-	int cpu;
 
 	if (task != current_task()) {
 		return KERN_FAILURE;
 	}
 
-	gen = ast_generation_get();
+	/*
+	 * When initiating a GC, artificially raise the priority for the
+	 * duration of sending ASTs, we want to be preemptible, but this
+	 * sequence has to terminate in a timely fashion.
+	 */
+	token = thread_priority_floor_start();
 
 	task_lock(task);
 
 	if (task->restartable_ranges) {
 		queue_iterate(&task->threads, thread, thread_t, task_threads) {
 			if (thread != current_thread()) {
-				cpu = act_set_ast_reset_pcs(thread);
-				if (cpu != -1) {
-					bitmap_set(map, (uint32_t)cpu);
-				}
+				act_set_ast_reset_pcs(thread, gens);
 			}
 		}
 	}
@@ -455,10 +456,9 @@ task_restartable_ranges_synchronize(task_t task)
 	 * we set, because act_set_ast_reset_pcs() takes
 	 * the thread_lock() and so does the scheduler.
 	 */
-	for (cpu = bitmap_first(map, MAX_CPUS); cpu >= 0;
-	    cpu = bitmap_next(map, cpu)) {
-		ast_generation_wait(gen, cpu);
-	}
+	ast_generation_wait(gens);
+
+	thread_priority_floor_end(&token);
 
 	return KERN_SUCCESS;
 }

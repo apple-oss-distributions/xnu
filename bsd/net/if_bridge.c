@@ -170,6 +170,9 @@
 #include <netinet/bootp.h>
 #include <netinet/dhcp.h>
 
+#if SKYWALK
+#include <skywalk/nexus/netif/nx_netif.h>
+#endif /* SKYWALK */
 
 #include <os/log.h>
 
@@ -400,6 +403,10 @@ bif_has_checksum_offload(struct bridge_iflist * bif)
 #define BIFF_HF_HWSRC           0x20    /* host filter source MAC is set */
 #define BIFF_HF_IPSRC           0x40    /* host filter source IP is set */
 #define BIFF_INPUT_BROADCAST    0x80    /* send broadcast packets in */
+#if SKYWALK
+#define BIFF_FLOWSWITCH_ATTACHED 0x1000   /* we attached the flowswitch */
+#define BIFF_NETAGENT_REMOVED    0x2000   /* we removed the netagent */
+#endif /* SKYWALK */
 
 /*
  * mac_nat_entry
@@ -2390,6 +2397,18 @@ bridge_delete_member(struct bridge_softc *sc, struct bridge_iflist *bif,
 
 	BRIDGE_UNLOCK(sc);
 
+#if SKYWALK
+	if (!gone) {
+		if ((bif->bif_flags & BIFF_NETAGENT_REMOVED) != 0) {
+			ifnet_add_netagent(ifs);
+			bif->bif_flags &= ~BIFF_NETAGENT_REMOVED;
+		}
+		if ((bif->bif_flags & BIFF_FLOWSWITCH_ATTACHED) != 0) {
+			ifnet_detach_flowswitch_nexus(ifs);
+			bif->bif_flags &= ~BIFF_FLOWSWITCH_ATTACHED;
+		}
+	}
+#endif /* SKYWALK */
 
 	if (lladdr_changed &&
 	    (error = ifnet_set_lladdr(bifp, eaddr, ETHER_ADDR_LEN)) != 0) {
@@ -2605,6 +2624,18 @@ bridge_ioctl_add(struct bridge_softc *sc, void *arg)
 	 */
 	BRIDGE_UNLOCK(sc);
 
+#if SKYWALK
+	/* ensure that the flowswitch is present for native interface */
+	if (SKYWALK_NATIVE(ifs)) {
+		if (ifnet_attach_flowswitch_nexus(ifs)) {
+			bif->bif_flags |= BIFF_FLOWSWITCH_ATTACHED;
+		}
+	}
+	/* remove the netagent on the flowswitch (rdar://75050182) */
+	if (ifnet_remove_netagent(ifs)) {
+		bif->bif_flags |= BIFF_NETAGENT_REMOVED;
+	}
+#endif /* SKYWALK */
 
 	/*
 	 * install an interface filter

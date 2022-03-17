@@ -335,12 +335,12 @@ type thread_policy_t		= array[*:16] of integer_t;
 		 * task_basic_info_64_2_t
 		 * mach_task_basic_info_t (12 ints)
 		 * task_power_info_t (18 ints)
-		 * task_vm_info_t (87 ints)
+		 * task_vm_info_t (89 ints)
 		 * If other task_info flavors are added, this
 		 * definition may need to be changed. (See
 		 * mach/task_info.h and mach/policy.h) */
 type task_flavor_t		= int;
-type task_info_t		= array[*:87] of integer_t;
+type task_info_t		= array[*:89] of integer_t;
 
 type task_purgable_info_t	= struct[68] of integer_t;
 

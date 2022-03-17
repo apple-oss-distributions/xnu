@@ -1563,6 +1563,9 @@ enum {
 	KERNEL_TAG_TYPE_INET6                   = 9,
 	KERNEL_TAG_TYPE_IPSEC                   = 10,
 	KERNEL_TAG_TYPE_DRVAUX                  = 11,
+#if SKYWALK
+	KERNEL_TAG_TYPE_PKT_FLOWADV             = 12,
+#endif /* SKYWALK */
 	KERNEL_TAG_TYPE_CFIL_UDP                = 13,
 	KERNEL_TAG_TYPE_PF_REASS                = 14,
 };

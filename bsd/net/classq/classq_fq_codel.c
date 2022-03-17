@@ -97,6 +97,12 @@ fq_alloc(classq_pkt_type_t ptype)
 	if (ptype == QP_MBUF) {
 		MBUFQ_INIT(&fq->fq_mbufq);
 	}
+#if SKYWALK
+	else {
+		VERIFY(ptype == QP_PACKET);
+		KPKTQ_INIT(&fq->fq_kpktq);
+	}
+#endif /* SKYWALK */
 	CLASSQ_PKT_INIT(&fq->fq_dq_head);
 	CLASSQ_PKT_INIT(&fq->fq_dq_tail);
 	fq->fq_in_dqlist = false;
@@ -160,6 +166,12 @@ fq_head_drop(fq_if_t *fqs, fq_t *fq)
 	case QP_MBUF:
 		*pkt_flags &= ~PKTF_PRIV_GUARDED;
 		break;
+#if SKYWALK
+	case QP_PACKET:
+		/* sanity check */
+		ASSERT((*pkt_flags & ~PKT_F_COMMON_MASK) == 0);
+		break;
+#endif /* SKYWALK */
 	default:
 		VERIFY(0);
 		/* NOTREACHED */
@@ -215,6 +227,25 @@ fq_compressor(fq_if_t *fqs, fq_t *fq, fq_if_classq_t *fq_cl,
 		IFCQ_CONVERT_LOCK(fqs->fqs_ifq);
 		m_freem(m);
 	}
+#if SKYWALK
+	else {
+		struct __kern_packet *kpkt = KPKTQ_LAST(&fq->fq_kpktq);
+
+		if (comp_gencnt != kpkt->pkt_comp_gencnt) {
+			return 0;
+		}
+
+		/* If we got until here, we should merge/replace the segment */
+		KPKTQ_REMOVE(&fq->fq_kpktq, kpkt);
+		old_pktlen = kpkt->pkt_length;
+		old_timestamp = kpkt->pkt_timestamp;
+
+		IFCQ_CONVERT_LOCK(fqs->fqs_ifq);
+		pp_free_packet(*(struct kern_pbufpool **)(uintptr_t)&
+		    (((struct __kern_quantum *)kpkt)->qum_pp),
+		    (uint64_t)kpkt);
+	}
+#endif /* SKYWALK */
 
 	fq->fq_bytes -= old_pktlen;
 	fq_cl->fcl_stat.fcl_byte_cnt -= old_pktlen;
@@ -253,6 +284,12 @@ fq_addq(fq_if_t *fqs, pktsched_pkt_t *pkt, fq_if_classq_t *fq_cl)
 		VERIFY(!(*pkt_flags & PKTF_PRIV_GUARDED));
 		*pkt_flags |= PKTF_PRIV_GUARDED;
 		break;
+#if SKYWALK
+	case QP_PACKET:
+		/* sanity check */
+		ASSERT((*pkt_flags & ~PKT_F_COMMON_MASK) == 0);
+		break;
+#endif /* SKYWALK */
 	default:
 		VERIFY(0);
 		/* NOTREACHED */
@@ -587,6 +624,12 @@ fq_getq_flow(fq_if_t *fqs, fq_t *fq, pktsched_pkt_t *pkt)
 	case QP_MBUF:
 		*pkt_flags &= ~PKTF_PRIV_GUARDED;
 		break;
+#if SKYWALK
+	case QP_PACKET:
+		/* sanity check */
+		ASSERT((*pkt_flags & ~PKT_F_COMMON_MASK) == 0);
+		break;
+#endif /* SKYWALK */
 	default:
 		VERIFY(0);
 		/* NOTREACHED */

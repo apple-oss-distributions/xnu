@@ -3069,7 +3069,7 @@ find_pfxlist_reachable_router(struct nd_prefix *pr)
 		 * on cellular (for that matter any interface that is point
 		 * to point really), we treat the router as reachable.
 		 */
-		if (ifp->if_type == IFT_CELLULAR) {
+		if (ifp != NULL && ifp->if_type == IFT_CELLULAR) {
 			break;
 		}
 		if (pfxrtr->router->stateflags & NDDRF_MAPPED) {

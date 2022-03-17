@@ -34,6 +34,9 @@
 #include <sys/time.h>
 #include <net/flowadv.h>
 #include <net/classq/if_classq.h>
+#if SKYWALK
+#include <skywalk/os_skywalk_private.h>
+#endif /* SKYWALK */
 
 #ifdef __cplusplus
 extern "C" {
@@ -51,6 +54,9 @@ extern "C" {
 typedef struct flowq {
 	union {
 		MBUFQ_HEAD(mbufq_head) __mbufq; /* mbuf packet queue */
+#if SKYWALK
+		KPKTQ_HEAD(kpktq_head) __kpktq; /* skywalk packet queue */
+#endif /* SKYWALK */
 	} __fq_pktq_u;
 #define FQF_FLOWCTL_CAPABLE 0x01 /* Use flow control instead of drop */
 #define FQF_DELAY_HIGH  0x02    /* Min delay is greater than target */
@@ -77,16 +83,76 @@ typedef struct flowq {
 } fq_t;
 
 #define fq_mbufq        __fq_pktq_u.__mbufq
+#if SKYWALK
+#define fq_kpktq        __fq_pktq_u.__kpktq
+#endif /* SKYWALK */
 
+#if SKYWALK
+#define fq_empty(_q)    (((_q)->fq_ptype == QP_MBUF) ?  \
+    MBUFQ_EMPTY(&(_q)->fq_mbufq) :                      \
+    KPKTQ_EMPTY(&(_q)->fq_kpktq))
+#else /* !SKYWALK */
 #define fq_empty(_q)    MBUFQ_EMPTY(&(_q)->fq_mbufq)
+#endif /* !SKYWALK */
 
+#if SKYWALK
+#define fq_enqueue(_q, _h, _t, _c) do {                                 \
+	switch ((_q)->fq_ptype) {                                       \
+	case QP_MBUF:                                                   \
+	        ASSERT((_h).cp_ptype == QP_MBUF);                       \
+	        ASSERT((_t).cp_ptype == QP_MBUF);                       \
+	        MBUFQ_ENQUEUE_MULTI(&(_q)->fq_mbufq, (_h).cp_mbuf,      \
+	            (_t).cp_mbuf);                                      \
+	        MBUFQ_ADD_CRUMB_MULTI(&(_q)->fq_mbufq, (_h).cp_mbuf,    \
+	            (_t).cp_mbuf, PKT_CRUMB_FQ_ENQUEUE);                \
+	        break;                                                  \
+	case QP_PACKET:                                                 \
+	        ASSERT((_h).cp_ptype == QP_PACKET);                     \
+	        ASSERT((_t).cp_ptype == QP_PACKET);                     \
+	        KPKTQ_ENQUEUE_MULTI(&(_q)->fq_kpktq, (_h).cp_kpkt,      \
+	            (_t).cp_kpkt, (_c));                                \
+	        break;                                                  \
+	default:                                                        \
+	        VERIFY(0);                                              \
+	        __builtin_unreachable();                                \
+	        break;                                                  \
+	}                                                               \
+} while (0)
+#else /* !SKYWALK */
 #define fq_enqueue(_q, _h, _t, _c) do {                                 \
 	MBUFQ_ENQUEUE_MULTI(&(_q)->fq_mbufq, (_h).cp_mbuf,              \
 	    (_t).cp_mbuf);                                              \
 	MBUFQ_ADD_CRUMB_MULTI(&(_q)->fq_mbufq, (_h).cp_mbuf,            \
 	    (_t).cp_mbuf, PKT_CRUMB_FQ_ENQUEUE);                        \
 } while (0)
+#endif /* !SKYWALK */
 
+#if SKYWALK
+#define fq_dequeue(_q, _p) do {                                         \
+	switch ((_q)->fq_ptype) {                                       \
+	case QP_MBUF: {                                                 \
+	        MBUFQ_DEQUEUE(&(_q)->fq_mbufq, (_p)->cp_mbuf);          \
+	        if (__probable((_p)->cp_mbuf != NULL)) {                \
+	                CLASSQ_PKT_INIT_MBUF((_p), (_p)->cp_mbuf);      \
+	                m_add_crumb((_p)->cp_mbuf,                      \
+	                    PKT_CRUMB_FQ_DEQUEUE);                      \
+	        }                                                       \
+	        break;                                                  \
+	}                                                               \
+	case QP_PACKET: {                                               \
+	        KPKTQ_DEQUEUE(&(_q)->fq_kpktq, (_p)->cp_kpkt);          \
+	        if (__probable((_p)->cp_kpkt != NULL)) {                \
+	                CLASSQ_PKT_INIT_PACKET((_p), (_p)->cp_kpkt);    \
+	        }                                                       \
+	        break;                                                  \
+	}                                                               \
+	default:                                                        \
+	        VERIFY(0);                                              \
+	        __builtin_unreachable();                                \
+	        break;                                                  \
+	}                                                               \
+} while (0)
+#else /* !SKYWALK */
 #define fq_dequeue(_q, _p) do {                                         \
 	MBUFQ_DEQUEUE(&(_q)->fq_mbufq, (_p)->cp_mbuf);                  \
 	if (__probable((_p)->cp_mbuf != NULL)) {                        \
@@ -94,6 +160,7 @@ typedef struct flowq {
 	        m_add_crumb((_p)->cp_mbuf, PKT_CRUMB_FQ_DEQUEUE);       \
 	}                                                               \
 } while (0)
+#endif /* !SKYWALK */
 
 struct fq_codel_sched_data;
 struct fq_if_classq;

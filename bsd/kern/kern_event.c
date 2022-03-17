@@ -113,6 +113,11 @@
 
 #include "net/net_str_id.h"
 
+#if defined(SKYWALK) && defined(XNU_TARGET_OS_OSX)
+#include <skywalk/lib/net_filter_event.h>
+
+extern bool net_check_compatible_alf(void);
+#endif /* SKYWALK && XNU_TARGET_OS_OSX */
 
 #include <mach/task.h>
 #include <libkern/section_keywords.h>
@@ -276,6 +281,11 @@ extern const struct filterops soexcept_filtops;
 extern const struct filterops spec_filtops;
 extern const struct filterops bpfread_filtops;
 extern const struct filterops necp_fd_rfiltops;
+#if SKYWALK
+extern const struct filterops skywalk_channel_rfiltops;
+extern const struct filterops skywalk_channel_wfiltops;
+extern const struct filterops skywalk_channel_efiltops;
+#endif /* SKYWALK */
 extern const struct filterops fsevent_filtops;
 extern const struct filterops vnode_filtops;
 extern const struct filterops tty_filtops;
@@ -325,6 +335,11 @@ static const struct filterops * const sysfilt_ops[EVFILTID_MAX] = {
 	[~EVFILT_MEMORYSTATUS]          = &bad_filtops,
 #endif
 	[~EVFILT_EXCEPT]                = &file_filtops,
+#if SKYWALK
+	[~EVFILT_NW_CHANNEL]            = &file_filtops,
+#else /* !SKYWALK */
+	[~EVFILT_NW_CHANNEL]            = &bad_filtops,
+#endif /* !SKYWALK */
 	[~EVFILT_WORKLOOP]              = &workloop_filtops,
 
 	/* Private filters */
@@ -340,6 +355,15 @@ static const struct filterops * const sysfilt_ops[EVFILTID_MAX] = {
 	[EVFILTID_SPEC]                 = &spec_filtops,
 	[EVFILTID_BPFREAD]              = &bpfread_filtops,
 	[EVFILTID_NECP_FD]              = &necp_fd_rfiltops,
+#if SKYWALK
+	[EVFILTID_SKYWALK_CHANNEL_W]    = &skywalk_channel_wfiltops,
+	[EVFILTID_SKYWALK_CHANNEL_R]    = &skywalk_channel_rfiltops,
+	[EVFILTID_SKYWALK_CHANNEL_E]    = &skywalk_channel_efiltops,
+#else /* !SKYWALK */
+	[EVFILTID_SKYWALK_CHANNEL_W]    = &bad_filtops,
+	[EVFILTID_SKYWALK_CHANNEL_R]    = &bad_filtops,
+	[EVFILTID_SKYWALK_CHANNEL_E]    = &bad_filtops,
+#endif /* !SKYWALK */
 	[EVFILTID_FSEVENT]              = &fsevent_filtops,
 	[EVFILTID_VN]                   = &vnode_filtops,
 	[EVFILTID_TTY]                  = &tty_filtops,
@@ -8159,6 +8183,21 @@ kev_post_msg_internal(struct kev_msg *event_msg, int wait)
 	u_int32_t total_size;
 	int i;
 
+#if defined(SKYWALK) && defined(XNU_TARGET_OS_OSX)
+	/*
+	 * Special hook for ALF state updates
+	 */
+	if (event_msg->vendor_code == KEV_VENDOR_APPLE &&
+	    event_msg->kev_class == KEV_NKE_CLASS &&
+	    event_msg->kev_subclass == KEV_NKE_ALF_SUBCLASS &&
+	    event_msg->event_code == KEV_NKE_ALF_STATE_CHANGED) {
+#if (DEBUG || DEVELOPMENT)
+		os_log_info(OS_LOG_DEFAULT, "KEV_NKE_ALF_STATE_CHANGED posted");
+#endif /* DEBUG || DEVELOPMENT */
+		net_filter_event_mark(NET_FILTER_EVENT_ALF,
+		    net_check_compatible_alf());
+	}
+#endif /* SKYWALK && XNU_TARGET_OS_OSX */
 
 	/* Verify the message is small enough to fit in one mbuf w/o cluster */
 	total_size = KEV_MSG_HEADER_SIZE;

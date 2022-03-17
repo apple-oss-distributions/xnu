@@ -675,11 +675,22 @@ static mbuf_table_t mbuf_table[] = {
 
 #define NELEM(a)        (sizeof (a) / sizeof ((a)[0]))
 
+#if SKYWALK
+#define MC_THRESHOLD_SCALE_DOWN_FACTOR  2
+static unsigned int mc_threshold_scale_down_factor =
+    MC_THRESHOLD_SCALE_DOWN_FACTOR;
+#endif /* SKYWALK */
 
 static uint32_t
 m_avgtotal(mbuf_class_t c)
 {
+#if SKYWALK
+	return if_is_fsw_transport_netagent_enabled() ?
+	       (mbuf_table[c].mtbl_avgtotal / mc_threshold_scale_down_factor) :
+	       mbuf_table[c].mtbl_avgtotal;
+#else /* !SKYWALK */
 	return mbuf_table[c].mtbl_avgtotal;
+#endif /* SKYWALK */
 }
 
 static void *mb_waitchan = &mbuf_table; /* wait channel for all caches */
@@ -8905,6 +8916,12 @@ mtracelarge_register(size_t size)
 
 SYSCTL_DECL(_kern_ipc);
 #if DEBUG || DEVELOPMENT
+#if SKYWALK
+SYSCTL_UINT(_kern_ipc, OID_AUTO, mc_threshold_scale_factor,
+    CTLFLAG_RW | CTLFLAG_LOCKED, &mc_threshold_scale_down_factor,
+    MC_THRESHOLD_SCALE_DOWN_FACTOR,
+    "scale down factor for mbuf cache thresholds");
+#endif /* SKYWALK */
 #endif
 SYSCTL_PROC(_kern_ipc, KIPC_MBSTAT, mbstat,
     CTLTYPE_STRUCT | CTLFLAG_RD | CTLFLAG_LOCKED,

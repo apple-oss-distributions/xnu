@@ -3157,6 +3157,11 @@ tcp_ip_output(struct socket *so, struct tcpcb *tp, struct mbuf *pkt,
 			so->so_snd.sb_flags &= ~SB_SNDBYTE_CNT;
 		}
 		inp->inp_last_outifp = outif;
+#if SKYWALK
+		if (NETNS_TOKEN_VALID(&inp->inp_netns_token)) {
+			netns_set_ifnet(&inp->inp_netns_token, inp->inp_last_outifp);
+		}
+#endif /* SKYWALK */
 	}
 
 	if (error != 0 && ifdenied &&

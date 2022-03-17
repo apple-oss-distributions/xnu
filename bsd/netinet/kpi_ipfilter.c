@@ -41,6 +41,9 @@
 #include <net/route.h>
 #include <net/kpi_protocol.h>
 #include <net/net_api_stats.h>
+#if defined(SKYWALK) && defined(XNU_TARGET_OS_OSX)
+#include <skywalk/lib//net_filter_event.h>
+#endif /* SKYWALK && XNU_TARGET_OS_OSX */
 
 #include <netinet/in_systm.h>
 #include <netinet/in.h>
@@ -54,6 +57,9 @@
 
 #include <stdbool.h>
 
+#if SKYWALK
+#include <skywalk/core/skywalk_var.h>
+#endif /* SKYWALK */
 
 /*
  * kipf_lock and kipf_ref protect the linkage of the list of IP filters
@@ -82,6 +88,9 @@ extern errno_t ipf_addv6(const struct ipf_filter *filter,
 static errno_t ipf_add(const struct ipf_filter *filter,
     ipfilter_t *filter_ref, struct ipfilter_list *head, bool is_internal);
 
+#if defined(SKYWALK) && defined(XNU_TARGET_OS_OSX)
+static bool net_check_compatible_ipf(void);
+#endif /* SKYWALK && XNU_TARGET_OS_OSX */
 
 __private_extern__ void
 ipf_ref(void)
@@ -129,6 +138,10 @@ ipf_unref(void)
 			}
 		}
 	}
+#if defined(SKYWALK) && defined(XNU_TARGET_OS_OSX)
+	net_filter_event_mark(NET_FILTER_EVENT_IP,
+	    net_check_compatible_ipf());
+#endif /* SKYWALK && XNU_TARGET_OS_OSX */
 	lck_mtx_unlock(&kipf_lock);
 }
 
@@ -159,6 +172,10 @@ ipf_add(
 		OSIncrementAtomic64(&net_api_stats.nas_ipf_add_os_count);
 		INC_ATOMIC_INT64_LIM(net_api_stats.nas_ipf_add_os_total);
 	}
+#if defined(SKYWALK) && defined(XNU_TARGET_OS_OSX)
+	net_filter_event_mark(NET_FILTER_EVENT_IP,
+	    net_check_compatible_ipf());
+#endif /* SKYWALK && XNU_TARGET_OS_OSX */
 
 	lck_mtx_unlock(&kipf_lock);
 
@@ -276,6 +293,10 @@ ipf_remove(
 			return 0;
 		}
 	}
+#if defined(SKYWALK) && defined(XNU_TARGET_OS_OSX)
+	net_filter_event_mark(NET_FILTER_EVENT_IP,
+	    net_check_compatible_ipf());
+#endif /* SKYWALK && XNU_TARGET_OS_OSX */
 
 	lck_mtx_unlock(&kipf_lock);
 
@@ -568,6 +589,9 @@ ipf_inject_output(
 	u_int8_t        vers;
 	errno_t         error = 0;
 
+#if SKYWALK
+	sk_protect_t protect = sk_async_transmit_protect();
+#endif /* SKYWALK */
 
 	/* Make one byte of the header contiguous in the mbuf */
 	if (m->m_len < 1) {
@@ -592,6 +616,9 @@ ipf_inject_output(
 	}
 
 done:
+#if SKYWALK
+	sk_async_transmit_unprotect(protect);
+#endif /* SKYWALK */
 
 	return error;
 }
@@ -611,3 +638,13 @@ ipf_get_inject_filter(struct mbuf *m)
 	return filter_ref;
 }
 
+#if defined(SKYWALK) && defined(XNU_TARGET_OS_OSX)
+bool
+net_check_compatible_ipf(void)
+{
+	if (net_api_stats.nas_ipf_add_count > net_api_stats.nas_ipf_add_os_count) {
+		return false;
+	}
+	return true;
+}
+#endif /* SKYWALK && XNU_TARGET_OS_OSX */

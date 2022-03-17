@@ -1527,6 +1527,9 @@ addrloop:
 			ia6->ia6_flags |= IN6_IFF_DEPRECATED;
 
 			if ((oldflags & IN6_IFF_DEPRECATED) == 0) {
+#if SKYWALK
+				SK_NXS_MS_IF_ADDR_GENCNT_INC(ia6->ia_ifp);
+#endif /* SKYWALK */
 				/*
 				 * Only enqueue the Deprecated event when the address just
 				 * becomes deprecated.
@@ -1577,6 +1580,11 @@ addrloop:
 			 * preferred.
 			 */
 			ia6->ia6_flags &= ~IN6_IFF_DEPRECATED;
+#if SKYWALK
+			if ((oldflags & IN6_IFF_DEPRECATED) != 0) {
+				SK_NXS_MS_IF_ADDR_GENCNT_INC(ia6->ia_ifp);
+			}
+#endif /* SKYWALK */
 			IFA_UNLOCK(&ia6->ia_ifa);
 		}
 		LCK_RW_ASSERT(&in6_ifaddr_rwlock, LCK_RW_ASSERT_EXCLUSIVE);

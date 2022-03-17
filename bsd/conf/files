@@ -75,6 +75,15 @@ OPTIONS/pflog				optional pflog pf
 OPTIONS/zlib				optional zlib
 OPTIONS/sixlowpan			optional sixlowpan
 
+#
+# Skywalk options
+#
+OPTIONS/skywalk				optional skywalk
+OPTIONS/config_nexus_user_pipe		optional config_nexus_user_pipe
+OPTIONS/config_nexus_kernel_pipe	optional config_nexus_kernel_pipe
+OPTIONS/config_nexus_monitor		optional config_nexus_monitor
+OPTIONS/config_nexus_flowswitch		optional config_nexus_flowswitch
+OPTIONS/config_nexus_netif		optional config_nexus_netif
 
 #
 # Filesystem options
@@ -552,3 +561,73 @@ bsd/tests/ptrauth_data_tests_sysctl.c		optional config_xnupost
 bsd/tests/readonly_proc_tests_sysctl.c      optional config_xnupost
 
 bsd/net/skywalk_stubs.c				standard
+bsd/skywalk/namespace/netns.c			optional skywalk
+bsd/skywalk/namespace/protons.c			optional skywalk
+bsd/skywalk/core/skywalk.c			optional skywalk
+bsd/skywalk/core/skywalk_proc_info.c		optional skywalk
+bsd/skywalk/core/skywalk_sysctl.c		optional skywalk
+bsd/skywalk/channel/channel.c			optional skywalk
+bsd/skywalk/channel/channel_kern.c		optional skywalk
+bsd/skywalk/channel/channel_ring.c		optional skywalk
+bsd/skywalk/channel/kern_channel_event.c	optional skywalk
+bsd/skywalk/channel/channel_syscalls.c		optional skywalk
+bsd/skywalk/lib/cuckoo_hashtable.c		optional skywalk
+bsd/skywalk/lib/cuckoo_hashtable_test.c		optional skywalk
+bsd/skywalk/lib/net_filter_event.c		optional skywalk
+bsd/skywalk/mem/skmem.c				optional skywalk
+bsd/skywalk/mem/skmem_arena.c			optional skywalk
+bsd/skywalk/mem/skmem_cache.c			optional skywalk
+bsd/skywalk/mem/skmem_region.c			optional skywalk
+bsd/skywalk/mem/skmem_test.c			optional skywalk
+bsd/skywalk/nexus/nexus.c			optional skywalk
+bsd/skywalk/nexus/nexus_adapter.c		optional skywalk
+bsd/skywalk/nexus/nexus_kern.c			optional skywalk
+bsd/skywalk/nexus/nexus_mbq.c			optional skywalk
+bsd/skywalk/nexus/nexus_pktq.c			optional skywalk
+bsd/skywalk/nexus/nexus_syscalls.c		optional skywalk
+bsd/skywalk/nexus/flowswitch/nx_flowswitch.c	optional config_nexus_flowswitch
+bsd/skywalk/nexus/flowswitch/fsw.c		optional config_nexus_flowswitch
+bsd/skywalk/nexus/flowswitch/fsw_vp.c		optional config_nexus_flowswitch
+bsd/skywalk/nexus/flowswitch/fsw_dp.c			optional config_nexus_flowswitch
+bsd/skywalk/nexus/flowswitch/fsw_ip.c			optional config_nexus_flowswitch
+bsd/skywalk/nexus/flowswitch/fsw_ip_frag.c		optional config_nexus_flowswitch
+bsd/skywalk/nexus/flowswitch/fsw_cellular.c		optional config_nexus_flowswitch
+bsd/skywalk/nexus/flowswitch/fsw_ethernet.c		optional config_nexus_flowswitch
+bsd/skywalk/nexus/flowswitch/fsw_flow.c		optional config_nexus_flowswitch
+bsd/skywalk/nexus/flowswitch/fsw_netagent.c		optional config_nexus_flowswitch
+bsd/skywalk/nexus/flowswitch/fsw_classq.c		optional config_nexus_flowswitch
+bsd/skywalk/nexus/flowswitch/fsw_qos.c		optional config_nexus_flowswitch
+bsd/skywalk/nexus/flowswitch/flow/flow.c		optional config_nexus_flowswitch
+bsd/skywalk/nexus/flowswitch/flow/flow_classifier.c	optional config_nexus_flowswitch
+bsd/skywalk/nexus/flowswitch/flow/flow_entry.c	optional config_nexus_flowswitch
+bsd/skywalk/nexus/flowswitch/flow/flow_manager.c	optional config_nexus_flowswitch
+bsd/skywalk/nexus/flowswitch/flow/flow_namespace.c	optional config_nexus_flowswitch
+bsd/skywalk/nexus/flowswitch/flow/flow_owner.c	optional config_nexus_flowswitch
+bsd/skywalk/nexus/flowswitch/flow/flow_route.c	optional config_nexus_flowswitch
+bsd/skywalk/nexus/flowswitch/flow/flow_stats.c	optional config_nexus_flowswitch
+bsd/skywalk/nexus/flowswitch/flow/flow_track.c	optional config_nexus_flowswitch
+bsd/skywalk/nexus/flowswitch/flow/flow_agg.c	optional config_nexus_flowswitch
+bsd/skywalk/nexus/monitor/nx_monitor.c		optional config_nexus_monitor
+bsd/skywalk/nexus/netif/nx_netif.c		optional config_nexus_netif
+bsd/skywalk/nexus/netif/nx_netif_compat.c	optional config_nexus_netif
+bsd/skywalk/nexus/netif/nx_netif_host.c		optional config_nexus_netif
+bsd/skywalk/nexus/netif/nx_netif_mit.c		optional config_nexus_netif
+bsd/skywalk/nexus/netif/nx_netif_netagent.c	optional config_nexus_netif
+bsd/skywalk/nexus/netif/nx_netif_filter.c	optional config_nexus_netif
+bsd/skywalk/nexus/netif/nx_netif_filter_compat.c	optional config_nexus_netif
+bsd/skywalk/nexus/netif/nx_netif_filter_native.c	optional config_nexus_netif
+bsd/skywalk/nexus/netif/nx_netif_filter_vp.c	optional config_nexus_netif
+bsd/skywalk/nexus/netif/nx_netif_flow.c		optional config_nexus_netif
+bsd/skywalk/nexus/netif/nx_netif_vp.c		optional config_nexus_netif
+bsd/skywalk/nexus/netif/nx_netif_util.c		optional config_nexus_netif
+bsd/skywalk/nexus/netif/nx_netif_poll.c		optional config_nexus_netif
+bsd/skywalk/nexus/netif/nx_netif_gso.c		optional config_nexus_netif
+bsd/skywalk/nexus/netif/nx_netif_llink.c	optional config_nexus_netif
+bsd/skywalk/nexus/upipe/nx_user_pipe.c		optional config_nexus_user_pipe
+bsd/skywalk/nexus/kpipe/nx_kernel_pipe.c	optional config_nexus_kernel_pipe
+bsd/skywalk/nexus/kpipe/nx_kpipe_loopback.c	optional config_nexus_kernel_pipe
+bsd/skywalk/packet/packet_copy.c		optional skywalk
+bsd/skywalk/packet/packet_kern.c		optional skywalk
+bsd/skywalk/packet/pbufpool.c			optional skywalk
+bsd/skywalk/packet/pbufpool_kern.c		optional skywalk
+bsd/dev/cpu_copy_in_cksum_gen.c			optional skywalk

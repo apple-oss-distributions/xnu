@@ -20,7 +20,8 @@ INSTINC_SUBDIRS = \
 	power \
 	pwr_mgt \
 	rtc \
-	system_management
+	system_management \
+	skywalk
 
 
 EXPINC_SUBDIRS = ${INSTINC_SUBDIRS}

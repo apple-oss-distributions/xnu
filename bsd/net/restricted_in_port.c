@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2020 Apple Inc. All rights reserved.
+ * Copyright (c) 2019-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -36,6 +36,9 @@
 #include <net/restricted_in_port.h>
 #include <netinet/in.h>
 #include <os/log.h>
+#if SKYWALK
+#include <skywalk/namespace/netns.h>
+#endif /* SKYWALK */
 
 /*
  * Entitlement required for using the port of the test entry
@@ -364,6 +367,13 @@ restricted_in_port_init(void)
 {
 	unsigned int i;
 
+#if SKYWALK
+	_CASSERT(PORT_FLAGS_LISTENER == NETNS_LISTENER);
+	_CASSERT(PORT_FLAGS_SKYWALK == NETNS_SKYWALK);
+	_CASSERT(PORT_FLAGS_BSD == NETNS_BSD);
+	_CASSERT(PORT_FLAGS_PF == NETNS_PF);
+	_CASSERT(PORT_FLAGS_MAX == NETNS_OWNER_MAX);
+#endif /* SKYWALK */
 
 	restricted_port_bitmap = bitmap_alloc(UINT16_MAX);
 
@@ -390,6 +400,10 @@ port_flag_str(uint32_t port_flags)
 	switch (port_flags) {
 	case PORT_FLAGS_LISTENER:
 		return "listener";
+#if SKYWALK
+	case PORT_FLAGS_SKYWALK:
+		return "skywalk";
+#endif /* SKYWALK */
 	case PORT_FLAGS_BSD:
 		return "bsd";
 	case PORT_FLAGS_PF:

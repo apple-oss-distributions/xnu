@@ -96,7 +96,12 @@ options		FLOW_DIVERT								# <flow_divert>
 options		NECP									# <necp>
 options		CONTENT_FILTER	#						# <content_filter>
 options 	PACKET_MANGLER	#						# <packet_mangler>
-options 	SIXLOWPAN	#		# <sixlowpan>
+options		SKYWALK		#		# <skywalk>
+options		CONFIG_NEXUS_USER_PIPE	#	# <config_nexus_user_pipe>
+options		CONFIG_NEXUS_KERNEL_PIPE #	# <config_nexus_kernel_pipe>
+options		CONFIG_NEXUS_MONITOR	#	# <config_nexus_monitor>
+options		CONFIG_NEXUS_FLOWSWITCH	#	# <config_nexus_flowswitch>
+options		CONFIG_NEXUS_NETIF	#	# <config_nexus_netif>
 # secure_kernel - secure kernel from user programs
 options     SECURE_KERNEL       # <secure_kernel>
 

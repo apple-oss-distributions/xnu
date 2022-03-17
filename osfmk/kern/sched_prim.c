@@ -125,12 +125,27 @@
 #include <kern/host.h>
 #include <stdatomic.h>
 
-static volatile unsigned long ast_gen;
-static volatile unsigned long PERCPU_DATA(ast_ack);
+struct ast_gen_pair {
+	os_atomic(ast_gen_t) ast_gen;
+	os_atomic(ast_gen_t) ast_ack;
+};
+
+static struct ast_gen_pair PERCPU_DATA(ast_gen_pair);
 struct sched_statistics PERCPU_DATA(sched_stats);
 bool sched_stats_active;
 
 #define AST_GEN_CMP(a, op, b) ((long)((a) - (b)) op 0)
+
+__startup_func
+static void
+ast_gen_init(void)
+{
+	percpu_foreach(pair, ast_gen_pair) {
+		os_atomic_init(&pair->ast_gen, 1);
+		os_atomic_init(&pair->ast_ack, 1);
+	}
+}
+STARTUP(PERCPU, STARTUP_RANK_MIDDLE, ast_gen_init);
 
 static uint64_t
 deadline_add(uint64_t d, uint64_t e)
@@ -5708,16 +5723,11 @@ csw_check_locked(
 	return AST_NONE;
 }
 
-/*
- * Handle preemption IPI or IPI in response to setting an AST flag
- * Triggered by cause_ast_check
- * Called at splsched
- */
-void
-ast_check(processor_t processor)
+static void
+ast_ack_if_needed(processor_t processor)
 {
-	volatile unsigned long *ast_ack = PERCPU_GET_RELATIVE(ast_ack, processor, processor);
-	unsigned long gen;
+	struct ast_gen_pair *pair = PERCPU_GET_RELATIVE(ast_gen_pair, processor, processor);
+	ast_gen_t gen;
 
 	/*
 	 * Make sure that if we observe a new generation, we ack it.
@@ -5731,15 +5741,26 @@ ast_check(processor_t processor)
 	 * which is that `processor` has been in ast_check()
 	 * _after_ ast_generation_get() was called.
 	 */
-	gen = os_atomic_load(&ast_gen, relaxed);
-	if (gen != os_atomic_load(ast_ack, relaxed)) {
+
+	gen = os_atomic_load(&pair->ast_gen, relaxed);
+	if (gen != os_atomic_load(&pair->ast_ack, relaxed)) {
 		/* pairs with the fence in ast_generation_get() */
 		os_atomic_thread_fence(acq_rel);
-		os_atomic_store(ast_ack, gen, relaxed);
+		os_atomic_store(&pair->ast_ack, gen, relaxed);
 	}
+}
 
+/*
+ * Handle preemption IPI or IPI in response to setting an AST flag
+ * Triggered by cause_ast_check
+ * Called at splsched
+ */
+void
+ast_check(processor_t processor)
+{
 	if (processor->state != PROCESSOR_RUNNING &&
 	    processor->state != PROCESSOR_SHUTDOWN) {
+		ast_ack_if_needed(processor);
 		return;
 	}
 
@@ -5749,6 +5770,7 @@ ast_check(processor_t processor)
 
 	thread_lock(thread);
 
+	ast_ack_if_needed(processor);
 	/*
 	 * Propagate thread ast to processor.
 	 * (handles IPI in response to setting AST flag)
@@ -5793,28 +5815,32 @@ ast_check(processor_t processor)
 	}
 }
 
-unsigned long
-ast_generation_get(void)
+void
+ast_generation_get(processor_t processor, ast_gen_t gens[])
 {
-	return os_atomic_inc(&ast_gen, release);
+	struct ast_gen_pair *pair = PERCPU_GET_RELATIVE(ast_gen_pair, processor, processor);
+
+	gens[processor->cpu_id] = os_atomic_add(&pair->ast_gen, 2, release);
 }
 
 void
-ast_generation_wait(unsigned long gen, int cpu_num)
+ast_generation_wait(ast_gen_t gens[MAX_CPUS])
 {
-	volatile unsigned long *ast_ack;
-	unsigned long gen_ack;
+	percpu_foreach(cpup, processor) {
+		struct ast_gen_pair *pair;
+		ast_gen_t gen_ack;
+		uint32_t cpu = cpup->cpu_id;
 
-	ast_ack = PERCPU_GET_WITH_BASE(other_percpu_base(cpu_num), ast_ack);
-
-	for (;;) {
-		gen_ack = os_atomic_load(ast_ack, relaxed);
-		if (__probable(AST_GEN_CMP(gen_ack, >=, gen))) {
-			return;
+		if (gens[cpu] == 0) {
+			continue;
 		}
-		disable_preemption();
-		hw_wait_while_equals((void **)(uintptr_t)ast_ack, (void *)gen_ack);
-		enable_preemption();
+		pair    = PERCPU_GET_RELATIVE(ast_gen_pair, processor, cpup);
+		gen_ack = os_atomic_load(&pair->ast_ack, relaxed);
+		while (__improbable(AST_GEN_CMP(gen_ack, <, gens[cpu]))) {
+			disable_preemption();
+			gen_ack = (unsigned long)hw_wait_while_equals((void **)(uintptr_t)&pair->ast_ack, (void *)gen_ack);
+			enable_preemption();
+		}
 	}
 }
 

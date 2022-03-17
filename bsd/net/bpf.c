@@ -2856,6 +2856,92 @@ bpf_tap_callback(struct ifnet *ifp, struct mbuf *m)
 	return 0;
 }
 
+#if SKYWALK
+#include <skywalk/os_skywalk_private.h>
+
+static void
+bpf_pktcopy(kern_packet_t pkt, void *dst_arg, size_t len)
+{
+	kern_buflet_t   buflet = NULL;
+	size_t count;
+	u_char *dst;
+
+	dst = dst_arg;
+	while (len > 0) {
+		uint8_t         *addr;
+
+		u_int32_t       buflet_length;
+
+		buflet = kern_packet_get_next_buflet(pkt, buflet);
+		VERIFY(buflet != NULL);
+		addr = kern_buflet_get_data_address(buflet);
+		VERIFY(addr != NULL);
+		addr += kern_buflet_get_data_offset(buflet);
+		buflet_length = kern_buflet_get_data_length(buflet);
+		count = MIN(buflet_length, len);
+		bcopy((void *)addr, (void *)dst, count);
+		dst += count;
+		len -= count;
+	}
+}
+
+static inline void
+bpf_tap_packet(
+	ifnet_t         ifp,
+	u_int32_t       dlt,
+	kern_packet_t   pkt,
+	void*           hdr,
+	size_t          hlen,
+	int             outbound)
+{
+	struct bpf_packet       bpf_pkt;
+	struct mbuf *           m;
+
+	if (ifp->if_bpf == NULL) {
+		/* quickly check without taking lock */
+		return;
+	}
+	m = kern_packet_get_mbuf(pkt);
+	if (m != NULL) {
+		bpf_pkt.bpfp_type = BPF_PACKET_TYPE_MBUF;
+		bpf_pkt.bpfp_mbuf = m;
+		bpf_pkt.bpfp_total_length = m_length(m);
+	} else {
+		bpf_pkt.bpfp_type = BPF_PACKET_TYPE_PKT;
+		bpf_pkt.bpfp_pkt = pkt;
+		bpf_pkt.bpfp_total_length = kern_packet_get_data_length(pkt);
+	}
+	bpf_pkt.bpfp_header = hdr;
+	bpf_pkt.bpfp_header_length = hlen;
+	if (hlen != 0) {
+		bpf_pkt.bpfp_total_length += hlen;
+	}
+	bpf_tap_imp(ifp, dlt, &bpf_pkt, outbound);
+}
+
+void
+bpf_tap_packet_out(
+	ifnet_t         ifp,
+	u_int32_t       dlt,
+	kern_packet_t   pkt,
+	void*           hdr,
+	size_t          hlen)
+{
+	bpf_tap_packet(ifp, dlt, pkt, hdr, hlen, 1);
+}
+
+void
+bpf_tap_packet_in(
+	ifnet_t         ifp,
+	u_int32_t       dlt,
+	kern_packet_t   pkt,
+	void*           hdr,
+	size_t          hlen)
+{
+	bpf_tap_packet(ifp, dlt, pkt, hdr, hlen, 0);
+}
+
+#endif /* SKYWALK */
 
 static errno_t
 bpf_copydata(struct bpf_packet *pkt, size_t off, size_t len, void* out_data)
@@ -2863,6 +2949,10 @@ bpf_copydata(struct bpf_packet *pkt, size_t off, size_t len, void* out_data)
 	errno_t err = 0;
 	if (pkt->bpfp_type == BPF_PACKET_TYPE_MBUF) {
 		err = mbuf_copydata(pkt->bpfp_mbuf, off, len, out_data);
+#if SKYWALK
+	} else if (pkt->bpfp_type == BPF_PACKET_TYPE_PKT) {
+		err = kern_packet_copy_bytes(pkt->bpfp_pkt, off, len, out_data);
+#endif /* SKYWALK */
 	} else {
 		err = EINVAL;
 	}
@@ -2889,6 +2979,11 @@ copy_bpf_packet(struct bpf_packet * pkt, void * dst, size_t len)
 	case BPF_PACKET_TYPE_MBUF:
 		bpf_mcopy(pkt->bpfp_mbuf, dst, len);
 		break;
+#if SKYWALK
+	case BPF_PACKET_TYPE_PKT:
+		bpf_pktcopy(pkt->bpfp_pkt, dst, len);
+		break;
+#endif /* SKYWALK */
 	default:
 		break;
 	}
@@ -3417,6 +3512,28 @@ catchpacket(struct bpf_d *d, struct bpf_packet * pkt,
 					ehp->bh_pktflags |= BPF_PKTFLAGS_WAKE_PKT;
 				}
 			}
+#if SKYWALK
+		} else {
+			kern_packet_t kern_pkt = pkt->bpfp_pkt;
+
+			if (outbound) {
+				/*
+				 * Note: pp_init() asserts that kern_packet_svc_class_t is equivalent
+				 * to mbuf_svc_class_t
+				 */
+				ehp->bh_svc = so_svc2tc((mbuf_svc_class_t)kern_packet_get_service_class(kern_pkt));
+				if (kern_packet_get_transport_retransmit(kern_pkt)) {
+					ehp->bh_pktflags |= BPF_PKTFLAGS_TCP_REXMT;
+				}
+				if (kern_packet_get_transport_last_packet(kern_pkt)) {
+					ehp->bh_pktflags |= BPF_PKTFLAGS_LAST_PKT;
+				}
+			} else {
+				if (kern_packet_get_wake_flag(kern_pkt)) {
+					ehp->bh_pktflags |= BPF_PKTFLAGS_WAKE_PKT;
+				}
+			}
+#endif /* SKYWALK */
 		}
 	} else {
 		hp = (struct bpf_hdr *)(void *)(d->bd_sbuf + curlen);

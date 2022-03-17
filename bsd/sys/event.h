@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2003-2019 Apple Inc. All rights reserved.
+ * Copyright (c) 2003-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -94,6 +94,7 @@
 #endif /* PRIVATE */
 #define EVFILT_EXCEPT           (-15)   /* Exception events */
 #ifdef PRIVATE
+#define EVFILT_NW_CHANNEL       (-16)   /* Skywalk channel events */
 #define EVFILT_WORKLOOP         (-17)   /* Workloop events */
 #endif /* PRIVATE */
 
@@ -253,6 +254,9 @@ typedef uint64_t kqueue_id_t;
 #define EVFILTID_SPEC              (EVFILT_SYSCOUNT + 9)
 #define EVFILTID_BPFREAD           (EVFILT_SYSCOUNT + 10)
 #define EVFILTID_NECP_FD           (EVFILT_SYSCOUNT + 11)
+#define EVFILTID_SKYWALK_CHANNEL_W (EVFILT_SYSCOUNT + 12)
+#define EVFILTID_SKYWALK_CHANNEL_R (EVFILT_SYSCOUNT + 13)
+#define EVFILTID_SKYWALK_CHANNEL_E (EVFILT_SYSCOUNT + 14)
 #define EVFILTID_FSEVENT           (EVFILT_SYSCOUNT + 15)
 #define EVFILTID_VN                (EVFILT_SYSCOUNT + 16)
 #define EVFILTID_TTY               (EVFILT_SYSCOUNT + 17)
@@ -668,6 +672,15 @@ typedef enum vm_pressure_level {
 
 
 #ifdef PRIVATE
+/*
+ * data/hint fflags for EVFILT_NW_CHANNEL, shared with userspace.
+ */
+#define NOTE_FLOW_ADV_UPDATE    0x00000001 /* flow advisory update */
+#define NOTE_CHANNEL_EVENT      0x00000002 /* generic channel event */
+#define NOTE_IF_ADV_UPD         0x00000004 /* Interface advisory update */
+
+#define EVFILT_NW_CHANNEL_ALL_MASK    \
+    (NOTE_FLOW_ADV_UPDATE | NOTE_CHANNEL_EVENT | NOTE_IF_ADV_UPD)
 #endif /* PRIVATE */
 
 #ifndef KERNEL

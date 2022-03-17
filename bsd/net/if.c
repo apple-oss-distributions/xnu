@@ -127,6 +127,9 @@
 #include <netinet6/nd6.h>
 #endif /* INET */
 
+#if SKYWALK
+#include <skywalk/nexus/netif/nx_netif.h>
+#endif /* SKYWALK */
 
 #include <os/log.h>
 
@@ -356,6 +359,9 @@ if_attach_ifa_common(struct ifnet *ifp, struct ifaddr *ifa, int link)
 		(*ifa->ifa_attached)(ifa);
 	}
 
+#if SKYWALK
+	SK_NXS_MS_IF_ADDR_GENCNT_INC(ifp);
+#endif /* SKYWALK */
 }
 
 __private_extern__ void
@@ -418,6 +424,9 @@ if_detach_ifa_common(struct ifnet *ifp, struct ifaddr *ifa, int link)
 		(*ifa->ifa_detached)(ifa);
 	}
 
+#if SKYWALK
+	SK_NXS_MS_IF_ADDR_GENCNT_INC(ifp);
+#endif /* SKYWALK */
 }
 
 #define INITIAL_IF_INDEXLIM     8
@@ -1857,6 +1866,26 @@ ifioctl_linkparams(struct ifnet *ifp, u_long cmd, caddr_t data, struct proc *p)
 			break;
 		}
 
+#if SKYWALK
+		error = kern_nexus_set_netif_input_tbr_rate(ifp,
+		    iflpr->iflpr_input_tbr_rate);
+		if (error != 0) {
+			break;
+		}
+
+		/*
+		 * Input netem is done at flowswitch, which is the entry point
+		 * of all traffic, when skywalk is enabled.
+		 */
+		error = kern_nexus_set_if_netem_params(
+			kern_nexus_shared_controller(),
+			ifp->if_nx_flowswitch.if_fsw_instance,
+			&iflpr->iflpr_input_netem,
+			sizeof(iflpr->iflpr_input_netem));
+		if (error != 0) {
+			break;
+		}
+#endif /* SKYWALK */
 
 		char netem_name[32];
 		(void) snprintf(netem_name, sizeof(netem_name),
@@ -1920,6 +1949,12 @@ ifioctl_linkparams(struct ifnet *ifp, u_long cmd, caddr_t data, struct proc *p)
 		bcopy(&ifp->if_input_lt, &iflpr->iflpr_input_lt,
 		    sizeof(iflpr->iflpr_input_lt));
 
+#if SKYWALK
+		if (ifp->if_input_netem != NULL) {
+			netem_get_params(ifp->if_input_netem,
+			    &iflpr->iflpr_input_netem);
+		}
+#endif /* SKYWALK */
 		if (ifp->if_output_netem != NULL) {
 			netem_get_params(ifp->if_output_netem,
 			    &iflpr->iflpr_output_netem);
@@ -2576,6 +2611,33 @@ ifioctl_clat46addr(struct ifnet *ifp, u_long cmd, caddr_t data)
 	return error;
 }
 
+#if SKYWALK
+static __attribute__((noinline)) int
+ifioctl_nexus(struct ifnet *ifp, u_long cmd, caddr_t data)
+{
+	int error = 0;
+	struct if_nexusreq *ifnr = (struct if_nexusreq *)(void *)data;
+
+	switch (cmd) {
+	case SIOCGIFNEXUS:              /* struct if_nexusreq */
+		if (ifnr->ifnr_flags != 0) {
+			error = EINVAL;
+			break;
+		}
+		error = kern_nexus_get_netif_instance(ifp, ifnr->ifnr_netif);
+		if (error != 0) {
+			break;
+		}
+		kern_nexus_get_flowswitch_instance(ifp, ifnr->ifnr_flowswitch);
+		break;
+	default:
+		VERIFY(0);
+		/* NOTREACHED */
+	}
+
+	return error;
+}
+#endif /* SKYWALK */
 
 static int
 ifioctl_get_protolist(struct ifnet *ifp, u_int32_t * ret_count,
@@ -2731,6 +2793,9 @@ ifioctl_restrict_intcoproc(unsigned long cmd, const char *ifname,
 	case SIOCGNBRINFO_IN6:
 	case SIOCGIFALIFETIME_IN6:
 	case SIOCGIFNETMASK_IN6:
+#if SKYWALK
+	case SIOCGIFNEXUS:
+#endif /* SKYWALK */
 	case SIOCGIFPROTOLIST32:
 	case SIOCGIFPROTOLIST64:
 	case SIOCGIFXFLAGS:
@@ -3112,6 +3177,13 @@ ifioctl(struct socket *so, u_long cmd, caddr_t data, struct proc *p)
 		    ifname, IFNAMSIZ);
 		ifp = ifunit_ref(ifname);
 		break;
+#if SKYWALK
+	case SIOCGIFNEXUS:                      /* struct if_nexusreq */
+		bcopy(((struct if_nexusreq *)(void *)data)->ifnr_name,
+		    ifname, IFNAMSIZ);
+		ifp = ifunit_ref(ifname);
+		break;
+#endif /* SKYWALK */
 	case SIOCGIFPROTOLIST32:                /* struct if_protolistreq32 */
 	case SIOCGIFPROTOLIST64:                /* struct if_protolistreq64 */
 		bcopy(((struct if_protolistreq *)(void *)data)->ifpl_name,
@@ -3214,6 +3286,11 @@ ifioctl(struct socket *so, u_long cmd, caddr_t data, struct proc *p)
 	case SIOCGIFCLAT46ADDR:                 /* struct if_clat46req */
 		error = ifioctl_clat46addr(ifp, cmd, data);
 		break;
+#if SKYWALK
+	case SIOCGIFNEXUS:
+		error = ifioctl_nexus(ifp, cmd, data);
+		break;
+#endif /* SKYWALK */
 
 	case SIOCGIFPROTOLIST32:                /* struct if_protolistreq32 */
 	case SIOCGIFPROTOLIST64:                /* struct if_protolistreq64 */
@@ -5518,7 +5595,21 @@ void
 if_copy_netif_stats(struct ifnet *ifp, struct if_netif_stats *if_ns)
 {
 	bzero(if_ns, sizeof(*if_ns));
+#if SKYWALK
+	if (!(ifp->if_capabilities & IFCAP_SKYWALK) ||
+	    !ifnet_is_attached(ifp, 1)) {
+		return;
+	}
+
+	if (ifp->if_na != NULL) {
+		nx_netif_copy_stats(ifp->if_na, if_ns);
+	}
+
+	/* Release the IO refcnt */
+	ifnet_decr_iorefcnt(ifp);
+#else /* SKYWALK */
 #pragma unused(ifp)
+#endif /* SKYWALK */
 }
 
 struct ifaddr *
@@ -5850,6 +5941,9 @@ ifioctl_cassert(void)
 	case SIOCSIFNAT64PREFIX:
 
 	case SIOCGIFCLAT46ADDR:
+#if SKYWALK
+	case SIOCGIFNEXUS:
+#endif /* SKYWALK */
 
 	case SIOCGIFPROTOLIST32:
 	case SIOCGIFPROTOLIST64:
@@ -5876,6 +5970,15 @@ ifioctl_cassert(void)
 	}
 }
 
+#if SKYWALK
+/*
+ * XXX: This API is only used by BSD stack and for now will always return 0.
+ * For Skywalk native drivers, preamble space need not be allocated in mbuf
+ * as the preamble will be reserved in the translated skywalk packet
+ * which is transmitted to the driver.
+ * For Skywalk compat drivers currently headroom is always set to zero.
+ */
+#endif /* SKYWALK */
 uint32_t
 ifnet_mbuf_packetpreamblelen(struct ifnet *ifp)
 {

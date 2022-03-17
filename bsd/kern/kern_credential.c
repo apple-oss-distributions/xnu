@@ -3823,6 +3823,8 @@ kauth_cred_free(kauth_cred_t cred, bool remove)
 		panic("%s: freeing credential with active long-term ref", __func__);
 	}
 
+	lck_mtx_destroy(&rw->crw_lock, &ucred_rw_lock_group);
+
 #if CONFIG_MACF
 	mac_cred_label_destroy(&mut_copy);
 #endif

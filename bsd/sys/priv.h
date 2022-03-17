@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2010-2017 Apple Inc. All rights reserved.
+ * Copyright (c) 2010-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -135,6 +135,16 @@
 #define PRIV_NETINET_RESERVEDPORT       11000   /* Bind low port number. */
 #define PRIV_NETINET_TCP_KA_OFFLOAD     11001   /* Can set TCP keep alive offload option */
 
+/*
+ * Skywalk privileges.
+ */
+#define PRIV_SKYWALK_REGISTER_USER_PIPE         12000   /* Register a user pipe nexus */
+#define PRIV_SKYWALK_REGISTER_KERNEL_PIPE       12001   /* Register a kernel pipe nexus */
+#define PRIV_SKYWALK_REGISTER_NET_IF            12002   /* Register a net_if nexus */
+#define PRIV_SKYWALK_REGISTER_FLOW_SWITCH       12003   /* Register a flow switch nexus */
+#define PRIV_SKYWALK_LOW_LATENCY_CHANNEL        12004   /* open a low latency channel */
+#define PRIV_SKYWALK_OBSERVE_ALL                        12010   /* Observe stats and data on channels */
+#define PRIV_SKYWALK_OBSERVE_STATS                      12011   /* Observe stats only on channels */
 
 /*
  * VFS privileges

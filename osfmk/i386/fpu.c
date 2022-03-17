@@ -450,7 +450,7 @@ init_fpu(void)
 	if (cpuid_features() & CPUID_FEATURE_XSAVE) {
 		cpuid_xsave_leaf_t *xs0p = &cpuid_info()->cpuid_xsave_leaf[0];
 		if (is_avx512_enabled &&
-		    (xs0p->extended_state[eax] & XFEM_ZMM) == XFEM_ZMM) {
+		    (xs0p->extended_state[eax] & XFEM_ZMM_OPMASK) == XFEM_ZMM_OPMASK) {
 			assert(xs0p->extended_state[eax] & XFEM_SSE);
 			assert(xs0p->extended_state[eax] & XFEM_YMM);
 			fpu_capability = AVX512;
@@ -898,8 +898,13 @@ Retry:
 			case x86_AVX512_STATE32:
 				__nochk_bcopy(&xs.s32->fpu_k0, iavx->x_Opmask, 8 * sizeof(_STRUCT_OPMASK_REG));
 				__nochk_bcopy(&xs.s32->fpu_zmmh0, iavx->x_ZMM_Hi256, 8 * sizeof(_STRUCT_YMM_REG));
+
+				if (fpu_allzeroes((uint64_t *)(void *)iavx->x_Opmask, 8 * sizeof(_STRUCT_OPMASK_REG)) == TRUE) {
+					iavx->_xh.xstate_bv &= ~XFEM_OPMASK;
+				}
+
 				if (fpu_allzeroes((uint64_t *)(void *)iavx->x_ZMM_Hi256, 8 * sizeof(_STRUCT_YMM_REG)) == TRUE) {
-					iavx->_xh.xstate_bv &= ~XFEM_ZMM;
+					iavx->_xh.xstate_bv &= ~(XFEM_ZMM_HI256 | XFEM_HI16_ZMM);
 				}
 				__nochk_bcopy(&xs.s32->fpu_ymmh0, iavx->x_YMM_Hi128, 8 * sizeof(_STRUCT_XMM_REG));
 				if (fpu_allzeroes((uint64_t *)(void *)iavx->x_YMM_Hi128, 8 * sizeof(_STRUCT_XMM_REG)) == TRUE) {
@@ -919,13 +924,17 @@ Retry:
 				__nochk_bcopy(&xs.s64->fpu_zmm16, iavx->x_Hi16_ZMM, 16 * sizeof(_STRUCT_ZMM_REG));
 				__nochk_bcopy(&xs.s64->fpu_zmmh0, iavx->x_ZMM_Hi256, 16 * sizeof(_STRUCT_YMM_REG));
 				/*
-				 * Note that it is valid to have XFEM_ZMM set but XFEM_YMM cleared.  In that case,
+				 * Note that it is valid to have XFEM_ZMM_OPMASK set but XFEM_YMM cleared.  In that case,
 				 * the upper bits of the YMMs would be cleared and would result in a clean-upper
 				 * state, allowing SSE instruction to avoid false dependencies.
 				 */
+				if (fpu_allzeroes((uint64_t *)(void *)iavx->x_Opmask, 8 * sizeof(_STRUCT_OPMASK_REG)) == TRUE) {
+					iavx->_xh.xstate_bv &= ~XFEM_OPMASK;
+				}
+
 				if (fpu_allzeroes((uint64_t *)(void *)iavx->x_Hi16_ZMM, 16 * sizeof(_STRUCT_ZMM_REG)) == TRUE &&
 				    fpu_allzeroes((uint64_t *)(void *)iavx->x_ZMM_Hi256, 16 * sizeof(_STRUCT_YMM_REG)) == TRUE) {
-					iavx->_xh.xstate_bv &= ~XFEM_ZMM;
+					iavx->_xh.xstate_bv &= ~(XFEM_ZMM_HI256 | XFEM_HI16_ZMM);
 				}
 
 				__nochk_bcopy(&xs.s64->fpu_ymmh0, iavx->x_YMM_Hi128, 16 * sizeof(_STRUCT_XMM_REG));
@@ -1353,6 +1362,8 @@ fpexterrflt(void)
 	 * Save the FPU state and turn off the FPU.
 	 */
 	fp_save(thr_act);
+	/* Set TS to ensure we catch attempts to use the FPU before returning from trap handling */
+	set_ts();
 
 	(void)ml_set_interrupts_enabled(intr);
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2016 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -141,6 +141,8 @@ typedef enum {
 	DTYPE_FSEVENTS,         /* fsevents */
 	DTYPE_ATALK,            /* (obsolete) */
 	DTYPE_NETPOLICY,        /* networking policy */
+	DTYPE_CHANNEL,          /* Skywalk Channel */
+	DTYPE_NEXUS             /* Skywalk Nexus */
 } file_type_t;
 
 /* defines for fg_lflags */

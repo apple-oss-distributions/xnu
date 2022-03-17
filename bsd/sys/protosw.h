@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2019 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -341,6 +341,25 @@ struct protosw {
 #endif /* BSD_KERNEL_PRIVATE */
 
 #ifdef BSD_KERNEL_PRIVATE
+#if SKYWALK
+struct protoctl_ev_val {
+	uint32_t val;
+	uint32_t tcp_seq_number;
+};
+
+extern void
+protoctl_event_enqueue_nwk_wq_entry(struct ifnet *ifp, struct sockaddr *p_laddr,
+    struct sockaddr *p_raddr, uint16_t lport, uint16_t rport, uint8_t protocol,
+    uint32_t protoctl_event_code, struct protoctl_ev_val *p_protoctl_ev_val);
+
+struct protoctl_ev_val;
+/* Proto event declarations */
+extern struct eventhandler_lists_ctxt protoctl_evhdlr_ctxt;
+typedef void (*protoctl_event_fn)(struct eventhandler_entry_arg, struct ifnet *,
+    struct sockaddr *, struct sockaddr*, uint16_t, uint16_t, uint8_t, uint32_t,
+    struct protoctl_ev_val *);
+EVENTHANDLER_DECLARE(protoctl_event, protoctl_event_fn);
+#endif /* SKYWALK */
 #ifdef PRCREQUESTS
 char    *prcrequests[] = {
 	"IFDOWN", "ROUTEDEAD", "IFUP", "DEC-BIT-QUENCH2",

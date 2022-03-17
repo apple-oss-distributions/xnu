@@ -282,6 +282,10 @@ get_pcblist_n(short proto, struct sysctl_req *req, struct inpcbinfo *pcbinfo)
 	    ROUNDUP64(sizeof(struct xsocket_n)) +
 	    2 * ROUNDUP64(sizeof(struct xsockbuf_n)) +
 	    ROUNDUP64(sizeof(struct xsockstat_n));
+#if SKYWALK
+	int nuserland;
+	void *userlandsnapshot = NULL;
+#endif /* SKYWALK */
 
 	if (proto == IPPROTO_TCP) {
 		item_size += ROUNDUP64(sizeof(struct xtcpcb_n));
@@ -289,6 +293,9 @@ get_pcblist_n(short proto, struct sysctl_req *req, struct inpcbinfo *pcbinfo)
 
 	if (req->oldptr == USER_ADDR_NULL) {
 		n = pcbinfo->ipi_count;
+#if SKYWALK
+		n += ntstat_userland_count(proto);
+#endif /* SKYWALK */
 		req->oldidx = 2 * (sizeof(xig)) + (n + n / 8 + 1) * item_size;
 		return 0;
 	}
@@ -297,6 +304,19 @@ get_pcblist_n(short proto, struct sysctl_req *req, struct inpcbinfo *pcbinfo)
 		return EPERM;
 	}
 
+#if SKYWALK
+	/*
+	 * Get a snapshot of the state of the user level flows so we know
+	 * the exact number of results to give back to the user.
+	 * This could take a while and use other locks, so do this prior
+	 * to taking any locks of our own.
+	 */
+	error = nstat_userland_get_snapshot(proto, &userlandsnapshot, &nuserland);
+
+	if (error) {
+		return error;
+	}
+#endif /* SKYWALK */
 
 	/*
 	 * The process of preparing the PCB list is too time-consuming and
@@ -312,6 +332,9 @@ get_pcblist_n(short proto, struct sysctl_req *req, struct inpcbinfo *pcbinfo)
 	bzero(&xig, sizeof(xig));
 	xig.xig_len = sizeof(xig);
 	xig.xig_count = n;
+#if SKYWALK
+	xig.xig_count += nuserland;
+#endif /* SKYWALK */
 	xig.xig_gen = gencnt;
 	xig.xig_sogen = so_gencnt;
 	error = SYSCTL_OUT(req, &xig, sizeof(xig));
@@ -400,6 +423,11 @@ get_pcblist_n(short proto, struct sysctl_req *req, struct inpcbinfo *pcbinfo)
 			}
 		}
 	}
+#if SKYWALK
+	if (!error && nuserland > 0) {
+		error = nstat_userland_list_snapshot(proto, req, userlandsnapshot, nuserland);
+	}
+#endif /* SKYWALK */
 
 	if (!error) {
 		/*
@@ -414,11 +442,17 @@ get_pcblist_n(short proto, struct sysctl_req *req, struct inpcbinfo *pcbinfo)
 		xig.xig_gen = pcbinfo->ipi_gencnt;
 		xig.xig_sogen = so_gencnt;
 		xig.xig_count = pcbinfo->ipi_count;
+#if SKYWALK
+		xig.xig_count +=  nuserland;
+#endif /* SKYWALK */
 		error = SYSCTL_OUT(req, &xig, sizeof(xig));
 	}
 done:
 	lck_rw_done(&pcbinfo->ipi_lock);
 
+#if SKYWALK
+	nstat_userland_release_snapshot(userlandsnapshot, nuserland);
+#endif /* SKYWALK */
 	if (inp_list != NULL) {
 		FREE(inp_list, M_TEMP);
 	}

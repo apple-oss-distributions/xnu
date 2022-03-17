@@ -48,6 +48,9 @@
 
 #include <libkern/libkern.h>
 
+#if SKYWALK
+#include <skywalk/os_skywalk_private.h>
+#endif /* SKYWALK */
 
 static errno_t ifclassq_dequeue_common(struct ifclassq *, mbuf_svc_class_t,
     u_int32_t, u_int32_t, classq_pkt_t *, classq_pkt_t *, u_int32_t *,
@@ -185,6 +188,10 @@ ifclassq_pktsched_setup(struct ifclassq *ifq)
 
 	IFCQ_LOCK_ASSERT_HELD(ifq);
 	VERIFY(ifp->if_eflags & IFEF_TXSTART);
+#if SKYWALK
+	ptype = ((ifp->if_eflags & IFEF_SKYWALK_NATIVE) != 0) ? QP_PACKET :
+	    QP_MBUF;
+#endif /* SKYWALK */
 
 	err = pktsched_setup(ifq, PKTSCHEDT_FQ_CODEL, ifq->ifcq_sflags, ptype);
 
@@ -234,6 +241,15 @@ ifclassq_get_len(struct ifclassq *ifq, mbuf_svc_class_t sc, u_int32_t *packets,
 	}
 	IFCQ_UNLOCK(ifq);
 
+#if SKYWALK
+	struct ifnet *ifp = ifq->ifcq_ifp;
+
+	if (__improbable(ifp->if_na_ops != NULL &&
+	    ifp->if_na_ops->ni_get_len != NULL)) {
+		err = ifp->if_na_ops->ni_get_len(ifp->if_na, sc, packets,
+		    bytes, err);
+	}
+#endif /* SKYWALK */
 
 	return err;
 }
@@ -255,6 +271,14 @@ ifclassq_set_packet_metadata(struct ifclassq *ifq, struct ifnet *ifp,
 		break;
 	}
 
+#if SKYWALK
+	case QP_PACKET:
+		/*
+		 * Support for equivalent of mbuf_get_unsent_data_bytes()
+		 * is not needed in the Skywalk architecture.
+		 */
+		break;
+#endif /* SKYWALK */
 
 	default:
 		VERIFY(0);
@@ -371,6 +395,16 @@ dequeue_loop:
 			}
 			break;
 
+#if SKYWALK
+		case QP_PACKET:
+			head->cp_kpkt->pkt_nextpkt = NULL;
+			l += head->cp_kpkt->pkt_length;
+			ifclassq_set_packet_metadata(ifq, ifp, head);
+			if (last.cp_kpkt != NULL) {
+				last.cp_kpkt->pkt_nextpkt = head->cp_kpkt;
+			}
+			break;
+#endif /* SKYWALK */
 
 		default:
 			VERIFY(0);
@@ -403,6 +437,25 @@ ifclassq_dequeue_common(struct ifclassq *ifq, mbuf_svc_class_t sc,
     u_int32_t pkt_limit, u_int32_t byte_limit, classq_pkt_t *head,
     classq_pkt_t *tail, u_int32_t *cnt, u_int32_t *len, boolean_t drvmgt)
 {
+#if SKYWALK
+	struct ifnet *ifp = ifq->ifcq_ifp;
+
+	if (__improbable(ifp->if_na_ops != NULL &&
+	    ifp->if_na_ops->ni_dequeue != NULL)) {
+		/*
+		 * TODO:
+		 * We should be changing the pkt/byte limit to the
+		 * available space in the next filter. But this is not
+		 * useful until we can flow control the whole chain of
+		 * filters.
+		 */
+		errno_t err = ifclassq_dequeue_common_default(ifq, sc,
+		    pkt_limit, byte_limit, head, tail, cnt, len, drvmgt);
+
+		return ifp->if_na_ops->ni_dequeue(ifp->if_na, sc, pkt_limit,
+		           byte_limit, head, tail, cnt, len, drvmgt, err);
+	}
+#endif /* SKYWALK */
 	return ifclassq_dequeue_common_default(ifq, sc,
 	           pkt_limit, byte_limit, head, tail, cnt, len, drvmgt);
 }
@@ -581,6 +634,12 @@ ifclassq_tbr_dequeue_common(struct ifclassq *ifq, mbuf_svc_class_t sc,
 			tbr->tbr_token -= TBR_SCALE(m_pktlen(pkt->cp_mbuf));
 			break;
 
+#if SKYWALK
+		case QP_PACKET:
+			tbr->tbr_token -=
+			    TBR_SCALE(pkt->cp_kpkt->pkt_length);
+			break;
+#endif /* SKYWALK */
 
 		default:
 			VERIFY(0);

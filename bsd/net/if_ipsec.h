@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2019 Apple Inc. All rights reserved.
+ * Copyright (c) 2012-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -40,6 +40,9 @@ errno_t ipsec_register_control(void);
 
 /* Helpers */
 int ipsec_interface_isvalid(ifnet_t interface);
+#if SKYWALK
+boolean_t ipsec_interface_needs_netagent(ifnet_t interface);
+#endif /* SKYWALK */
 
 errno_t ipsec_inject_inbound_packet(ifnet_t     interface, mbuf_t packet);
 

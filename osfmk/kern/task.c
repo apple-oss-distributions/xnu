@@ -312,7 +312,7 @@ SECURITY_READ_ONLY_LATE(struct _task_ledger_indices) task_ledgers __attribute__(
 #if CONFIG_MEMORYSTATUS
  .memorystatus_dirty_time = -1,
 #endif /* CONFIG_MEMORYSTATUS */
-};
+ .swapins = -1, };
 
 /* System sleep state */
 boolean_t tasks_suspend_state;
@@ -1172,6 +1172,9 @@ init_task_ledgers(void)
 	task_ledgers.memorystatus_dirty_time = ledger_entry_add(t, "memorystatus_dirty_time", "physmem", "ns");
 #endif /* CONFIG_MEMORYSTATUS */
 
+	task_ledgers.swapins = ledger_entry_add_with_flags(t, "swapins", "physmem", "bytes",
+	    LEDGER_ENTRY_ALLOW_PANIC_ON_NEGATIVE);
+
 	if ((task_ledgers.cpu_time < 0) ||
 	    (task_ledgers.tkm_private < 0) ||
 	    (task_ledgers.tkm_shared < 0) ||
@@ -1226,7 +1229,8 @@ init_task_ledgers(void)
 	    (task_ledgers.memorystatus_dirty_time < 0) ||
 #endif /* CONFIG_MEMORYSTATUS */
 	    (task_ledgers.energy_billed_to_me < 0) ||
-	    (task_ledgers.energy_billed_to_others < 0)
+	    (task_ledgers.energy_billed_to_others < 0) ||
+	    (task_ledgers.swapins < 0)
 	    ) {
 		panic("couldn't create entries for task ledger template");
 	}
@@ -5617,6 +5621,11 @@ task_info(
 			}
 			vm_info->decompressions = (int32_t) MIN(total, INT32_MAX);
 			*task_info_count = TASK_VM_INFO_REV5_COUNT;
+		}
+		if (original_task_info_count >= TASK_VM_INFO_REV6_COUNT) {
+			ledger_get_balance(task->ledger, task_ledgers.swapins,
+			    &vm_info->ledger_swapins);
+			*task_info_count = TASK_VM_INFO_REV6_COUNT;
 		}
 
 		break;

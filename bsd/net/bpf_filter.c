@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2017 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -215,6 +215,136 @@ bad:
 	return 0;
 }
 
+#if SKYWALK
+
+#include <skywalk/os_skywalk_private.h>
+
+static void *
+buflet_get_address(kern_buflet_t buflet)
+{
+	uint8_t *addr;
+
+	addr = kern_buflet_get_data_address(buflet);
+	if (addr == NULL) {
+		return NULL;
+	}
+	return addr + kern_buflet_get_data_offset(buflet);
+}
+
+static u_char *
+p_hdr_offset(kern_packet_t p, void * hdr, size_t hdrlen, bpf_u_int32 * k_p,
+    size_t * len_p, kern_buflet_t * buflet_p)
+{
+	u_char          *cp = NULL;
+	bpf_u_int32     k = *k_p;
+	size_t          len;
+	kern_buflet_t   buflet = NULL;
+
+	if (k >= hdrlen) {
+		k -= hdrlen;
+		for (;;) {
+			buflet = kern_packet_get_next_buflet(p, buflet);
+			if (buflet == NULL) {
+				break;
+			}
+			len = kern_buflet_get_data_length(buflet);
+			if (k < len) {
+				break;
+			}
+			k -= len;
+		}
+		if (buflet == NULL) {
+			return NULL;
+		}
+		cp = (u_char *)buflet_get_address(buflet) + k;
+		/* update the offset */
+		*k_p = k;
+	} else {
+		len = hdrlen;
+		cp = (u_char *)hdr + k;
+	}
+	*len_p = len;
+	*buflet_p = buflet;
+	return cp;
+}
+
+static u_int32_t
+p_xword(kern_packet_t p, void * hdr, size_t hdrlen, bpf_u_int32 k, int *err)
+{
+	kern_buflet_t   buflet = NULL;
+	u_char          *cp;
+	size_t          len = 0;
+	u_char          *np;
+
+	cp = p_hdr_offset(p, hdr, hdrlen, &k, &len, &buflet);
+	if (cp == NULL) {
+		goto bad;
+	}
+	if ((len - k) >= 4) {
+		*err = 0;
+		return EXTRACT_LONG(cp);
+	}
+	buflet = kern_packet_get_next_buflet(p, buflet);
+	if (buflet == NULL ||
+	    (kern_buflet_get_data_length(buflet) + len - k) < 4) {
+		goto bad;
+	}
+	*err = 0;
+	np = (u_char *)buflet_get_address(buflet);
+	return get_word_from_buffers(cp, np, len - k);
+
+bad:
+	*err = 1;
+	return 0;
+}
+
+static uint16_t
+p_xhalf(kern_packet_t p, void * hdr, size_t hdrlen, bpf_u_int32 k, int *err)
+{
+	kern_buflet_t   buflet = NULL;
+	u_char          *cp;
+	size_t          len = 0;
+	u_char          *np;
+
+	cp = p_hdr_offset(p, hdr, hdrlen, &k, &len, &buflet);
+	if (cp == NULL) {
+		goto bad;
+	}
+	if ((len - k) >= 2) {
+		*err = 0;
+		return EXTRACT_SHORT(cp);
+	}
+	buflet = kern_packet_get_next_buflet(p, buflet);
+	if (buflet == NULL || kern_buflet_get_data_length(buflet) == 0) {
+		goto bad;
+	}
+	np = (u_char *)buflet_get_address(buflet);
+	*err = 0;
+	return (uint16_t)((cp[0] << 8) | np[0]);
+bad:
+	*err = 1;
+	return 0;
+}
+
+static u_int8_t
+p_xbyte(kern_packet_t p, void * hdr, size_t hdrlen, bpf_u_int32 k, int *err)
+{
+	kern_buflet_t   buflet = NULL;
+	u_char          *cp;
+	size_t          len = 0;
+
+	cp = p_hdr_offset(p, hdr, hdrlen, &k, &len, &buflet);
+	if (cp == NULL) {
+		goto bad;
+	}
+	*err = 0;
+	return *cp;
+bad:
+	*err = 1;
+	return 0;
+}
+
+#endif /* SKYWALK */
 
 static u_int32_t
 bp_xword(struct bpf_packet *bp, bpf_u_int32 k, int *err)
@@ -225,6 +355,10 @@ bp_xword(struct bpf_packet *bp, bpf_u_int32 k, int *err)
 	switch (bp->bpfp_type) {
 	case BPF_PACKET_TYPE_MBUF:
 		return m_xword(bp->bpfp_mbuf, hdr, hdrlen, k, err);
+#if SKYWALK
+	case BPF_PACKET_TYPE_PKT:
+		return p_xword(bp->bpfp_pkt, hdr, hdrlen, k, err);
+#endif /* SKYWALK */
 	default:
 		break;
 	}
@@ -241,6 +375,10 @@ bp_xhalf(struct bpf_packet *bp, bpf_u_int32 k, int *err)
 	switch (bp->bpfp_type) {
 	case BPF_PACKET_TYPE_MBUF:
 		return m_xhalf(bp->bpfp_mbuf, hdr, hdrlen, k, err);
+#if SKYWALK
+	case BPF_PACKET_TYPE_PKT:
+		return p_xhalf(bp->bpfp_pkt, hdr, hdrlen, k, err);
+#endif /* SKYWALK */
 	default:
 		break;
 	}
@@ -257,6 +395,10 @@ bp_xbyte(struct bpf_packet *bp, bpf_u_int32 k, int *err)
 	switch (bp->bpfp_type) {
 	case BPF_PACKET_TYPE_MBUF:
 		return m_xbyte(bp->bpfp_mbuf, hdr, hdrlen, k, err);
+#if SKYWALK
+	case BPF_PACKET_TYPE_PKT:
+		return p_xbyte(bp->bpfp_pkt, hdr, hdrlen, k, err);
+#endif /* SKYWALK */
 	default:
 		break;
 	}

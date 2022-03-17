@@ -89,6 +89,9 @@
 #include <net/if_types.h>
 #include <net/net_api_stats.h>
 #include <net/route.h>
+#if defined(SKYWALK) && defined(XNU_TARGET_OS_OSX)
+#include <skywalk/lib/net_filter_event.h>
+#endif
 
 #include <netinet/in.h>
 #include <netinet/in_var.h>
@@ -1352,6 +1355,10 @@ pf_start(void)
 		pf_status.stateid = pf_status.stateid << 32;
 	}
 	wakeup(pf_purge_thread_fn);
+#if defined(SKYWALK) && defined(XNU_TARGET_OS_OSX)
+	net_filter_event_mark(NET_FILTER_EVENT_PF,
+	    pf_check_compatible_rules());
+#endif // SKYWALK && defined(XNU_TARGET_OS_OSX)
 	DPFPRINTF(PF_DEBUG_MISC, ("pf: started\n"));
 }
 
@@ -1366,6 +1373,10 @@ pf_stop(void)
 	pf_is_enabled = 0;
 	pf_status.since = pf_calendar_time_second();
 	wakeup(pf_purge_thread_fn);
+#if defined(SKYWALK) && defined(XNU_TARGET_OS_OSX)
+	net_filter_event_mark(NET_FILTER_EVENT_PF,
+	    pf_check_compatible_rules());
+#endif // SKYWALK && defined(XNU_TARGET_OS_OSX)
 	DPFPRINTF(PF_DEBUG_MISC, ("pf: stopped\n"));
 }
 
@@ -3152,6 +3163,10 @@ pfioctl_ioc_rule(u_long cmd, int minordev, struct pfioc_rule *pr, struct proc *p
 
 		pf_calc_skip_steps(ruleset->rules[rs_num].active.ptr);
 		pf_remove_if_empty_ruleset(ruleset);
+#if defined(SKYWALK) && defined(XNU_TARGET_OS_OSX)
+		net_filter_event_mark(NET_FILTER_EVENT_PF,
+		    pf_check_compatible_rules());
+#endif // SKYWALK && defined(XNU_TARGET_OS_OSX)
 		break;
 	}
 
@@ -3275,6 +3290,10 @@ pfioctl_ioc_rule(u_long cmd, int minordev, struct pfioc_rule *pr, struct proc *p
 				INC_ATOMIC_INT64_LIM(net_api_stats.nas_pf_addrule_os);
 			}
 		}
+#if defined(SKYWALK) && defined(XNU_TARGET_OS_OSX)
+		net_filter_event_mark(NET_FILTER_EVENT_PF,
+		    pf_check_compatible_rules());
+#endif // SKYWALK && defined(XNU_TARGET_OS_OSX)
 		break;
 	}
 
@@ -3303,6 +3322,10 @@ pfioctl_ioc_rule(u_long cmd, int minordev, struct pfioc_rule *pr, struct proc *p
 		if (pr->rule.action == PF_NAT64) {
 			atomic_add_16(&pf_nat64_configured, -1);
 		}
+#if defined(SKYWALK) && defined(XNU_TARGET_OS_OSX)
+		net_filter_event_mark(NET_FILTER_EVENT_PF,
+		    pf_check_compatible_rules());
+#endif // SKYWALK && defined(XNU_TARGET_OS_OSX)
 		break;
 	}
 
@@ -4265,6 +4288,10 @@ pfioctl_ioc_trans(u_long cmd, struct pfioc_trans_32 *io32,
 		}
 		kfree_type(struct pfr_table, table);
 		kfree_type(struct pfioc_trans_e, ioe);
+#if defined(SKYWALK) && defined(XNU_TARGET_OS_OSX)
+		net_filter_event_mark(NET_FILTER_EVENT_PF,
+		    pf_check_compatible_rules());
+#endif // SKYWALK && defined(XNU_TARGET_OS_OSX)
 		break;
 	}
 

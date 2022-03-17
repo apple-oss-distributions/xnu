@@ -56,7 +56,14 @@
 #include <kern/zalloc.h>
 #include <os/log.h>
 
+#if SKYWALK
+#include <skywalk/os_skywalk_private.h>
+#include <skywalk/nexus/flowswitch/nx_flowswitch.h>
+#include <skywalk/nexus/netif/nx_netif.h>
+#define IPSEC_NEXUS 1
+#else // SKYWALK
 #define IPSEC_NEXUS 0
+#endif // SKYWALK
 
 extern int net_qos_policy_restricted;
 extern int net_qos_policy_restrict_avapps;
@@ -237,6 +244,8 @@ struct ipsec_pcb {
 #define IPSEC_FLAGS_KPIPE_ALLOCATED 1
 
 /* data movement refcounting functions */
+static boolean_t ipsec_data_move_begin(struct ipsec_pcb *pcb);
+static void ipsec_data_move_end(struct ipsec_pcb *pcb);
 static void ipsec_wait_data_move_drain(struct ipsec_pcb *pcb);
 
 /* Data path states */
@@ -4258,6 +4267,34 @@ ipsec_set_ip6oa_for_interface(ifnet_t interface, struct ip6_out_args *ip6oa)
 	}
 }
 
+static boolean_t
+ipsec_data_move_begin(struct ipsec_pcb *pcb)
+{
+	boolean_t ret = 0;
+
+	lck_mtx_lock_spin(&pcb->ipsec_pcb_data_move_lock);
+	if ((ret = IPSEC_IS_DATA_PATH_READY(pcb))) {
+		pcb->ipsec_pcb_data_move++;
+	}
+	lck_mtx_unlock(&pcb->ipsec_pcb_data_move_lock);
+
+	return ret;
+}
+
+static void
+ipsec_data_move_end(struct ipsec_pcb *pcb)
+{
+	lck_mtx_lock_spin(&pcb->ipsec_pcb_data_move_lock);
+	VERIFY(pcb->ipsec_pcb_data_move > 0);
+	/*
+	 * if there's no more thread moving data, wakeup any
+	 * drainers that's blocked waiting for this.
+	 */
+	if (--pcb->ipsec_pcb_data_move == 0 && pcb->ipsec_pcb_drainers > 0) {
+		wakeup(&(pcb->ipsec_pcb_data_move));
+	}
+	lck_mtx_unlock(&pcb->ipsec_pcb_data_move_lock);
+}
 
 static void
 ipsec_data_move_drain(struct ipsec_pcb *pcb)

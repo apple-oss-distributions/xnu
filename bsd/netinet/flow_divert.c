@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2017, 2020, 2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2012-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -169,7 +169,7 @@ struct sockaddr *
 flow_divert_get_buffered_target_address(mbuf_t buffer);
 
 static void
-flow_divert_disconnect_socket(struct socket *so);
+flow_divert_disconnect_socket(struct socket *so, bool is_connected);
 
 static inline uint8_t
 flow_divert_syslog_type_to_oslog_type(int syslog_type)
@@ -1139,7 +1139,7 @@ flow_divert_send_packet(struct flow_divert_pcb *fd_cb, mbuf_t packet, Boolean en
 	if (fd_cb->group == NULL) {
 		FDLOG0(LOG_INFO, fd_cb, "no provider, cannot send packet");
 		flow_divert_update_closed_state(fd_cb, SHUT_RDWR, TRUE);
-		flow_divert_disconnect_socket(fd_cb->so);
+		flow_divert_disconnect_socket(fd_cb->so, !(fd_cb->flags & FLOW_DIVERT_IMPLICIT_CONNECT));
 		if (SOCK_TYPE(fd_cb->so) == SOCK_STREAM) {
 			error = ECONNABORTED;
 		} else {
@@ -1503,7 +1503,7 @@ flow_divert_send_close_if_needed(struct flow_divert_pcb *fd_cb)
 	}
 
 	if (flow_divert_tunnel_how_closed(fd_cb) == SHUT_RDWR) {
-		flow_divert_disconnect_socket(fd_cb->so);
+		flow_divert_disconnect_socket(fd_cb->so, !(fd_cb->flags & FLOW_DIVERT_IMPLICIT_CONNECT));
 	}
 }
 
@@ -2175,7 +2175,7 @@ done:
 
 	if (error && so != NULL) {
 		so->so_error = (uint16_t)error;
-		flow_divert_disconnect_socket(so);
+		flow_divert_disconnect_socket(so, do_connect);
 	}
 }
 
@@ -2248,6 +2248,11 @@ flow_divert_scope(struct flow_divert_pcb *fd_cb, int out_if_index, bool derive_n
 			inp->inp_last_outifp = new_ifp;
 		}
 
+#if SKYWALK
+		if (NETNS_TOKEN_VALID(&inp->inp_netns_token)) {
+			netns_set_ifnet(&inp->inp_netns_token, new_ifp);
+		}
+#endif /* SKYWALK */
 	}
 }
 
@@ -2458,7 +2463,7 @@ set_socket_state:
 				flow_divert_update_closed_state(fd_cb, SHUT_RDWR, TRUE);
 				so->so_error = (uint16_t)connect_error;
 			}
-			flow_divert_disconnect_socket(so);
+			flow_divert_disconnect_socket(so, !(fd_cb->flags & FLOW_DIVERT_IMPLICIT_CONNECT));
 		} else {
 #if NECP
 			/* Update NECP client with connected five-tuple */
@@ -2514,6 +2519,7 @@ flow_divert_handle_close(struct flow_divert_pcb *fd_cb, mbuf_t packet, int offse
 
 	FDLOCK(fd_cb);
 	if (fd_cb->so != NULL) {
+		bool is_connected = (SOCK_TYPE(fd_cb->so) == SOCK_STREAM || !(fd_cb->flags & FLOW_DIVERT_IMPLICIT_CONNECT));
 		socket_lock(fd_cb->so, 0);
 
 		if (!(fd_cb->so->so_flags & SOF_FLOW_DIVERT)) {
@@ -2526,15 +2532,13 @@ flow_divert_handle_close(struct flow_divert_pcb *fd_cb, mbuf_t packet, int offse
 		flow_divert_update_closed_state(fd_cb, how, TRUE);
 
 		/* Only do this for stream flows because "shutdown by peer" doesn't make sense for datagram flows */
-		if (SOCK_TYPE(fd_cb->so) == SOCK_STREAM) {
-			how = flow_divert_tunnel_how_closed(fd_cb);
-			if (how == SHUT_RDWR) {
-				flow_divert_disconnect_socket(fd_cb->so);
-			} else if (how == SHUT_RD) {
-				socantrcvmore(fd_cb->so);
-			} else if (how == SHUT_WR) {
-				socantsendmore(fd_cb->so);
-			}
+		how = flow_divert_tunnel_how_closed(fd_cb);
+		if (how == SHUT_RDWR) {
+			flow_divert_disconnect_socket(fd_cb->so, is_connected);
+		} else if (how == SHUT_RD && is_connected) {
+			socantrcvmore(fd_cb->so);
+		} else if (how == SHUT_WR && is_connected) {
+			socantsendmore(fd_cb->so);
 		}
 done:
 		socket_unlock(fd_cb->so, 0);
@@ -3097,7 +3101,7 @@ flow_divert_close_all(struct flow_divert_group *group)
 			flow_divert_pcb_remove(fd_cb);
 			flow_divert_update_closed_state(fd_cb, SHUT_RDWR, TRUE);
 			fd_cb->so->so_error = ECONNABORTED;
-			flow_divert_disconnect_socket(fd_cb->so);
+			flow_divert_disconnect_socket(fd_cb->so, !(fd_cb->flags & FLOW_DIVERT_IMPLICIT_CONNECT));
 			socket_unlock(fd_cb->so, 0);
 		}
 		FDUNLOCK(fd_cb);
@@ -3305,10 +3309,32 @@ flow_divert_dup_addr(sa_family_t family, struct sockaddr *addr,
 }
 
 static void
-flow_divert_disconnect_socket(struct socket *so)
+flow_divert_disconnect_socket(struct socket *so, bool is_connected)
 {
-	if (SOCK_TYPE(so) == SOCK_STREAM) {
+	if (SOCK_TYPE(so) == SOCK_STREAM || is_connected) {
 		soisdisconnected(so);
+	}
+	if (SOCK_TYPE(so) == SOCK_DGRAM) {
+		struct inpcb *inp = sotoinpcb(so);
+		if (inp != NULL && !(so->so_flags & SOF_PCBCLEARING)) {
+			/*
+			 * Let NetworkStatistics know this PCB is going away
+			 * before we detach it.
+			 */
+			if (nstat_collect && (SOCK_PROTO(so) == IPPROTO_TCP || SOCK_PROTO(so) == IPPROTO_UDP)) {
+				nstat_pcb_detach(inp);
+			}
+
+			if (SOCK_DOM(so) == PF_INET6) {
+				ROUTE_RELEASE(&inp->in6p_route);
+			} else {
+				ROUTE_RELEASE(&inp->inp_route);
+			}
+			inp->inp_state = INPCB_STATE_DEAD;
+			/* makes sure we're not called twice from so_close */
+			so->so_flags |= SOF_PCBCLEARING;
+			inpcb_gc_sched(inp->inp_pcbinfo, INPCB_TIMER_FAST);
+		}
 	}
 }
 

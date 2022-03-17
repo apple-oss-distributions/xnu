@@ -955,3 +955,66 @@ tcp_log_message(const char *func_name, int line_no, struct tcpcb *tp, const char
 #undef TCP_LOG_MESSAGE_ARGS
 }
 
+#if SKYWALK
+__attribute__((noinline))
+void
+tcp_log_fsw_flow(const char *func_name, int line_no, struct tcpcb *tp, const char *format, ...)
+{
+	struct inpcb *inp;
+	struct socket *so;
+	struct ifnet *ifp;
+	char laddr_buf[ADDRESS_STR_LEN];
+	char faddr_buf[ADDRESS_STR_LEN];
+	in_port_t local_port;
+	in_port_t foreign_port;
+	uuid_string_t flow_uuid_str;
+	char message[256];
+
+	if (tp == NULL || tp->t_inpcb == NULL || tp->t_inpcb->inp_socket == NULL) {
+		return;
+	}
+
+	/* Do not log too much */
+	if (tcp_log_is_rate_limited()) {
+		return;
+	}
+	inp = tp->t_inpcb;
+	so = inp->inp_socket;
+
+	local_port = inp->inp_lport;
+	foreign_port = inp->inp_fport;
+
+	ifp = inp->inp_last_outifp != NULL ? inp->inp_last_outifp :
+	    inp->inp_boundifp != NULL ? inp->inp_boundifp : NULL;
+
+	tcp_log_inp_addresses(inp, laddr_buf, sizeof(laddr_buf), faddr_buf, sizeof(faddr_buf));
+
+	uuid_unparse_upper(tp->t_flow_uuid, flow_uuid_str);
+
+	va_list ap;
+	va_start(ap, format);
+	vsnprintf(message, sizeof(message), format, ap);
+	va_end(ap);
+
+#define TCP_LOG_FSW_FLOW_MESSAGE_FMT \
+	"tcp (%s:%d) " \
+	TCP_LOG_COMMON_PCB_FMT \
+	"flow %s %s"
+
+#define TCP_LOG_FSW_FLOW_MESSAGE_ARGS \
+	func_name, line_no, \
+	TCP_LOG_COMMON_PCB_ARGS, \
+	flow_uuid_str, \
+	message
+
+	if (tcp_log_level_info == 0) {
+		os_log(OS_LOG_DEFAULT, TCP_LOG_FSW_FLOW_MESSAGE_FMT,
+		    TCP_LOG_FSW_FLOW_MESSAGE_ARGS);
+	} else {
+		os_log_info(OS_LOG_DEFAULT, TCP_LOG_FSW_FLOW_MESSAGE_FMT,
+		    TCP_LOG_FSW_FLOW_MESSAGE_ARGS);
+	}
+#undef TCP_LOG_FSW_FLOW_MESSAGE_FMT
+#undef TCP_LOG_FSW_FLOW_MESSAGE_ARGS
+}
+#endif /* SKYWALK */

@@ -2633,6 +2633,9 @@ findpcb:
 				} else {
 					inp->inp_laddr.s_addr = INADDR_ANY;
 				}
+#if SKYWALK
+				netns_release(&inp->inp_netns_token);
+#endif /* SKYWALK */
 				inp->inp_lport = 0;
 				socket_lock(oso, 0);    /* release ref on parent */
 				socket_unlock(oso, 1);

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2020 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -1361,6 +1361,10 @@ struct ifnet;
 struct mbuf;
 
 #define BPF_PACKET_TYPE_MBUF    0
+#if SKYWALK
+#define BPF_PACKET_TYPE_PKT     1
+#include <skywalk/os_skywalk.h>
+#endif /* SKYWALK */
 
 struct bpf_packet {
 	int     bpfp_type;
@@ -1369,6 +1373,10 @@ struct bpf_packet {
 	union {
 		struct mbuf     *bpfpu_mbuf;
 		void *          bpfpu_ptr;
+#if SKYWALK
+		kern_packet_t   bpfpu_pkt;
+#define bpfp_pkt        bpfp_u.bpfpu_pkt
+#endif /* SKYWALK */
 	} bpfp_u;
 #define bpfp_mbuf       bpfp_u.bpfpu_mbuf
 #define bpfp_ptr        bpfp_u.bpfpu_ptr
@@ -1504,6 +1512,36 @@ extern void bpf_tap_in(ifnet_t interface, u_int32_t dlt, mbuf_t packet,
 extern void bpf_tap_out(ifnet_t interface, u_int32_t dlt, mbuf_t packet,
     void *header, size_t header_len);
 
+#if SKYWALK
+/*!
+ *       @function bpf_tap_packet_in
+ *       @discussion Call this function when your interface receives a
+ *               packet. This function will check if any bpf devices need a
+ *               a copy of the packet.
+ *       @param interface The interface the packet was received on.
+ *       @param dlt The data link type of the packet.
+ *       @param packet The packet received.
+ *       @param header An optional pointer to a header that will be prepended.
+ *       @param header_len If the header was specified, the length of the header.
+ */
+extern void bpf_tap_packet_in(ifnet_t interface, u_int32_t dlt,
+    kern_packet_t packet, void *header, size_t header_len);
+
+/*!
+ *       @function bpf_tap_packet_out
+ *       @discussion Call this function when your interface transmits a
+ *               packet. This function will check if any bpf devices need a
+ *               a copy of the packet.
+ *       @param interface The interface the packet was or will be transmitted on.
+ *       @param dlt The data link type of the packet.
+ *       @param packet The packet received.
+ *       @param header An optional pointer to a header that will be prepended.
+ *       @param header_len If the header was specified, the length of the header.
+ */
+extern void bpf_tap_packet_out(ifnet_t interface, u_int32_t dlt,
+    kern_packet_t packet, void *header, size_t header_len);
+
+#endif /* SKYWALK */
 #endif /* KERNEL */
 
 #endif /* _NET_BPF_H_ */

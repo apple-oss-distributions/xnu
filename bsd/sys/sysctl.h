@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2019 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -652,6 +652,9 @@ SYSCTL_DECL(_kern_bridge);
 SYSCTL_DECL(_hw_features);
 #endif
 
+#if defined(BSD_KERNEL_PRIVATE) && SKYWALK
+#include <skywalk/os_sysctls_private.h>
+#endif  /* defined(BSD_KERNEL_PRIVATE) && SKYWALK */
 
 #ifndef SYSCTL_SKMEM_UPDATE_FIELD
 

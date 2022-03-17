@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2020 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -85,6 +85,9 @@
 #if NECP
 #include <net/necp.h>
 #endif /* NECP */
+#if SKYWALK
+#include <skywalk/os_channel.h>
+#endif /* SKYWALK */
 
 #include <security/audit/audit.h>
 #include <security/mac.h>
@@ -1776,6 +1779,12 @@ networking_memstatus_callout(proc_t p, uint32_t status)
 			    (struct necp_fd_data *)fp_get_data(fp));
 			break;
 #endif /* NECP */
+#if SKYWALK
+		case DTYPE_CHANNEL:
+			kern_channel_memstatus(p, status,
+			    (struct kern_channel *)fp_get_data(fp));
+			break;
+#endif /* SKYWALK */
 		default:
 			break;
 		}
@@ -1785,6 +1794,15 @@ networking_memstatus_callout(proc_t p, uint32_t status)
 	return 1;
 }
 
+#if SKYWALK
+/*
+ * Since we make multiple passes across the fileproc array, record the
+ * first MAX_CHANNELS channel handles found.  MAX_CHANNELS should be
+ * large enough to accomodate most, if not all cases.  If we find more,
+ * we'll go to the slow path during second pass.
+ */
+#define MAX_CHANNELS    8       /* should be more than enough */
+#endif /* SKYWALK */
 
 static int
 networking_defunct_callout(proc_t p, void *arg)
@@ -1793,6 +1811,13 @@ networking_defunct_callout(proc_t p, void *arg)
 	int pid = args->pid;
 	int level = args->level;
 	struct fileproc *fp;
+#if SKYWALK
+	int i;
+	int channel_count = 0;
+	struct kern_channel *channel_array[MAX_CHANNELS];
+
+	bzero(&channel_array, sizeof(channel_array));
+#endif /* SKYWALK */
 
 	proc_fdlock(p);
 
@@ -1818,11 +1843,47 @@ networking_defunct_callout(proc_t p, void *arg)
 			}
 			break;
 #endif /* NECP */
+#if SKYWALK
+		case DTYPE_CHANNEL:
+			/* first pass: get channels and total count */
+			if (proc_getpid(p) == pid) {
+				if (channel_count < MAX_CHANNELS) {
+					channel_array[channel_count] =
+					    (struct kern_channel *)fg_get_data(fg);
+				}
+				++channel_count;
+			}
+			break;
+#endif /* SKYWALK */
 		default:
 			break;
 		}
 	}
 
+#if SKYWALK
+	/*
+	 * Second pass: defunct channels/flows (after NECP).  Handle
+	 * the common case of up to MAX_CHANNELS count with fast path,
+	 * and traverse the fileproc array again only if we exceed it.
+	 */
+	if (channel_count != 0 && channel_count <= MAX_CHANNELS) {
+		ASSERT(proc_getpid(p) == pid);
+		for (i = 0; i < channel_count; i++) {
+			ASSERT(channel_array[i] != NULL);
+			kern_channel_defunct(p, channel_array[i]);
+		}
+	} else if (channel_count != 0) {
+		ASSERT(proc_getpid(p) == pid);
+		fdt_foreach(fp, p) {
+			struct fileglob *fg = fp->fp_glob;
+
+			if (FILEGLOB_DTYPE(fg) == DTYPE_CHANNEL) {
+				kern_channel_defunct(p,
+				    (struct kern_channel *)fg_get_data(fg));
+			}
+		}
+	}
+#endif /* SKYWALK */
 	proc_fdunlock(p);
 
 	return PROC_RETURNED;

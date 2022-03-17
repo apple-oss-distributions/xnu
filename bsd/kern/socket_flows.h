@@ -69,6 +69,10 @@ struct soflow_hash_entry {
 	uint64_t                            soflow_feat_ctxt_id;
 	void                                *soflow_feat_ctxt;
 
+#if defined(NSTAT_EXTENSION_FILTER_DOMAIN_INFO)
+	uuid_t                              soflow_uuid;
+	nstat_context                       soflow_nstat_context;
+#endif
 };
 
 /*

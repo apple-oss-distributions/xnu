@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2003-2020 Apple Inc. All rights reserved.
+ * Copyright (c) 2003-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -298,6 +298,53 @@ in6_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct proc *p)
 			}
 		}
 
+#if SKYWALK
+		if (inp->inp_flags2 & INP2_EXTERNAL_PORT) {
+			// Extract the external flow info
+			struct ns_flow_info nfi = {};
+			int netns_error = necp_client_get_netns_flow_info(inp->necp_client_uuid,
+			    &nfi);
+			if (netns_error != 0) {
+				lck_rw_done(&pcbinfo->ipi_lock);
+				socket_lock(so, 0);
+				return netns_error;
+			}
+
+			// Extract the reserved port
+			u_int16_t reserved_lport = 0;
+			if (nfi.nfi_laddr.sa.sa_family == AF_INET) {
+				reserved_lport = nfi.nfi_laddr.sin.sin_port;
+			} else if (nfi.nfi_laddr.sa.sa_family == AF_INET6) {
+				reserved_lport = nfi.nfi_laddr.sin6.sin6_port;
+			} else {
+				lck_rw_done(&pcbinfo->ipi_lock);
+				socket_lock(so, 0);
+				return EINVAL;
+			}
+
+			// Validate or use the reserved port
+			if (lport == 0) {
+				lport = reserved_lport;
+			} else if (lport != reserved_lport) {
+				lck_rw_done(&pcbinfo->ipi_lock);
+				socket_lock(so, 0);
+				return EINVAL;
+			}
+		}
+
+		/* Do not allow reserving a UDP port if remaining UDP port count is below 4096 */
+		if (SOCK_PROTO(so) == IPPROTO_UDP && !allow_udp_port_exhaustion) {
+			uint32_t current_reservations = 0;
+			current_reservations = netns_lookup_reservations_count_in6(inp->in6p_laddr, IPPROTO_UDP);
+			if (USHRT_MAX - UDP_RANDOM_PORT_RESERVE < current_reservations) {
+				log(LOG_ERR, "UDP port not available, less than 4096 UDP ports left");
+				lck_rw_done(&pcbinfo->ipi_lock);
+				socket_lock(so, 0);
+				return EADDRNOTAVAIL;
+			}
+		}
+
+#endif /* SKYWALK */
 
 		if (lport != 0) {
 			struct inpcb *t;
@@ -368,6 +415,23 @@ in6_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct proc *p)
 						return EADDRINUSE;
 					}
 
+#if SKYWALK
+					VERIFY(!NETNS_TOKEN_VALID(
+						    &inp->inp_wildcard_netns_token));
+					if ((SOCK_PROTO(so) == IPPROTO_TCP ||
+					    SOCK_PROTO(so) == IPPROTO_UDP) &&
+					    !(inp->inp_flags2 & INP2_EXTERNAL_PORT)) {
+						if (netns_reserve_in(&inp->
+						    inp_wildcard_netns_token,
+						    sin.sin_addr,
+						    (uint8_t)SOCK_PROTO(so), lport,
+						    NETNS_BSD, NULL) != 0) {
+							lck_rw_done(&pcbinfo->ipi_lock);
+							socket_lock(so, 0);
+							return EADDRINUSE;
+						}
+					}
+#endif /* SKYWALK */
 				}
 			}
 			t = in6_pcblookup_local_and_cleanup(pcbinfo,
@@ -377,6 +441,9 @@ in6_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct proc *p)
 			    (!(t->inp_flags2 & INP2_EXTERNAL_PORT) ||
 			    !(inp->inp_flags2 & INP2_EXTERNAL_PORT) ||
 			    uuid_compare(t->necp_client_uuid, inp->necp_client_uuid) != 0)) {
+#if SKYWALK
+				netns_release(&inp->inp_wildcard_netns_token);
+#endif /* SKYWALK */
 				lck_rw_done(&pcbinfo->ipi_lock);
 				socket_lock(so, 0);
 				return EADDRINUSE;
@@ -395,11 +462,45 @@ in6_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct proc *p)
 				    (!(t->inp_flags2 & INP2_EXTERNAL_PORT) ||
 				    !(inp->inp_flags2 & INP2_EXTERNAL_PORT) ||
 				    uuid_compare(t->necp_client_uuid, inp->necp_client_uuid) != 0)) {
+#if SKYWALK
+					netns_release(&inp->inp_wildcard_netns_token);
+#endif /* SKYWALK */
+					lck_rw_done(&pcbinfo->ipi_lock);
+					socket_lock(so, 0);
+					return EADDRINUSE;
+				}
+#if SKYWALK
+				if ((SOCK_PROTO(so) == IPPROTO_TCP ||
+				    SOCK_PROTO(so) == IPPROTO_UDP) &&
+				    !(inp->inp_flags2 & INP2_EXTERNAL_PORT) &&
+				    (!NETNS_TOKEN_VALID(
+					    &inp->inp_wildcard_netns_token))) {
+					if (netns_reserve_in(&inp->
+					    inp_wildcard_netns_token,
+					    sin.sin_addr,
+					    (uint8_t)SOCK_PROTO(so), lport,
+					    NETNS_BSD, NULL) != 0) {
+						lck_rw_done(&pcbinfo->ipi_lock);
+						socket_lock(so, 0);
+						return EADDRINUSE;
+					}
+				}
+#endif /* SKYWALK */
+			}
+#if SKYWALK
+			if ((SOCK_PROTO(so) == IPPROTO_TCP ||
+			    SOCK_PROTO(so) == IPPROTO_UDP) &&
+			    !(inp->inp_flags2 & INP2_EXTERNAL_PORT)) {
+				if (netns_reserve_in6(&inp->inp_netns_token,
+				    sin6.sin6_addr, (uint8_t)SOCK_PROTO(so), lport,
+				    NETNS_BSD, NULL) != 0) {
+					netns_release(&inp->inp_wildcard_netns_token);
 					lck_rw_done(&pcbinfo->ipi_lock);
 					socket_lock(so, 0);
 					return EADDRINUSE;
 				}
 			}
+#endif /* SKYWALK */
 		}
 	}
 
@@ -410,12 +511,20 @@ in6_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct proc *p)
 	 * Checking if world has changed since.
 	 */
 	if (inp->inp_state == INPCB_STATE_DEAD) {
+#if SKYWALK
+		netns_release(&inp->inp_netns_token);
+		netns_release(&inp->inp_wildcard_netns_token);
+#endif /* SKYWALK */
 		lck_rw_done(&pcbinfo->ipi_lock);
 		return ECONNABORTED;
 	}
 
 	/* check if the socket got bound when the lock was released */
 	if (inp->inp_lport || !IN6_IS_ADDR_UNSPECIFIED(&inp->in6p_laddr)) {
+#if SKYWALK
+		netns_release(&inp->inp_netns_token);
+		netns_release(&inp->inp_wildcard_netns_token);
+#endif /* SKYWALK */
 		lck_rw_done(&pcbinfo->ipi_lock);
 		return EINVAL;
 	}
@@ -425,12 +534,22 @@ in6_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct proc *p)
 		inp->in6p_last_outifp = outif;
 		inp->inp_lifscope = lifscope;
 		in6_verify_ifscope(&inp->in6p_laddr, lifscope);
+#if SKYWALK
+		if (NETNS_TOKEN_VALID(&inp->inp_netns_token)) {
+			netns_set_ifnet(&inp->inp_netns_token,
+			    inp->in6p_last_outifp);
+		}
+#endif /* SKYWALK */
 	}
 
 	if (lport == 0) {
 		int e;
 		if ((e = in6_pcbsetport(&inp->in6p_laddr, inp, p, 1)) != 0) {
 			/* Undo any address bind from above. */
+#if SKYWALK
+			netns_release(&inp->inp_netns_token);
+			netns_release(&inp->inp_wildcard_netns_token);
+#endif /* SKYWALK */
 			inp->in6p_laddr = in6addr_any;
 			inp->in6p_last_outifp = NULL;
 			inp->inp_lifscope = IFSCOPE_NONE;
@@ -440,6 +559,10 @@ in6_pcbbind(struct inpcb *inp, struct sockaddr *nam, struct proc *p)
 	} else {
 		inp->inp_lport = lport;
 		if (in_pcbinshash(inp, 1) != 0) {
+#if SKYWALK
+			netns_release(&inp->inp_netns_token);
+			netns_release(&inp->inp_wildcard_netns_token);
+#endif /* SKYWALK */
 			inp->in6p_laddr = in6addr_any;
 			inp->inp_lifscope = IFSCOPE_NONE;
 			inp->inp_lport = 0;
@@ -634,6 +757,12 @@ in6_pcbconnect(struct inpcb *inp, struct sockaddr *nam, struct proc *p)
 			inp->inp_lifscope = lifscope;
 		}
 		in6_verify_ifscope(&inp->in6p_laddr, inp->inp_lifscope);
+#if SKYWALK
+		if (NETNS_TOKEN_VALID(&inp->inp_netns_token)) {
+			netns_set_ifnet(&inp->inp_netns_token,
+			    inp->in6p_last_outifp);
+		}
+#endif /* SKYWALK */
 		inp->in6p_flags |= INP_IN6ADDR_ANY;
 	}
 	if (!lck_rw_try_lock_exclusive(&inp->inp_pcbinfo->ipi_lock)) {

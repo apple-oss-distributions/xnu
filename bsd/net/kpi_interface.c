@@ -79,6 +79,10 @@
 #include <security/mac_framework.h>
 #endif
 
+#if SKYWALK
+#include <skywalk/os_skywalk_private.h>
+#include <skywalk/nexus/netif/nx_netif.h>
+#endif /* SKYWALK */
 
 #undef ifnet_allocate
 errno_t ifnet_allocate(const struct ifnet_init_params *init,
@@ -200,6 +204,9 @@ errno_t
 ifnet_allocate_extended(const struct ifnet_init_eparams *einit0,
     ifnet_t *interface)
 {
+#if SKYWALK
+	ifnet_start_func ostart = NULL;
+#endif /* SKYWALK */
 	struct ifnet_init_eparams einit;
 	struct ifnet *ifp = NULL;
 	char if_xname[IFXNAMSIZ] = {0};
@@ -218,8 +225,27 @@ ifnet_allocate_extended(const struct ifnet_init_eparams *einit0,
 		return EINVAL;
 	}
 
+#if SKYWALK
+	/* headroom must be a multiple of 8 bytes */
+	if ((einit.tx_headroom & 0x7) != 0) {
+		return EINVAL;
+	}
+	/*
+	 * Currently Interface advisory reporting is supported only for
+	 * skywalk interface.
+	 */
+	if (((einit.flags & IFNET_INIT_IF_ADV) != 0) &&
+	    ((einit.flags & IFNET_INIT_SKYWALK_NATIVE) == 0)) {
+		return EINVAL;
+	}
+#endif /* SKYWALK */
 
 	if (einit.flags & IFNET_INIT_LEGACY) {
+#if SKYWALK
+		if (einit.flags & IFNET_INIT_SKYWALK_NATIVE) {
+			return EINVAL;
+		}
+#endif /* SKYWALK */
 		if (einit.output == NULL ||
 		    (einit.flags & IFNET_INIT_INPUT_POLL)) {
 			return EINVAL;
@@ -231,6 +257,23 @@ ifnet_allocate_extended(const struct ifnet_init_eparams *einit0,
 		einit.input_poll = NULL;
 		einit.input_ctl = NULL;
 	} else {
+#if SKYWALK
+		/*
+		 * For native Skywalk drivers, steer all start requests
+		 * to ifp_if_start() until the netif device adapter is
+		 * fully activated, at which point we will point it to
+		 * nx_netif_doorbell().
+		 */
+		if (einit.flags & IFNET_INIT_SKYWALK_NATIVE) {
+			if (einit.start != NULL) {
+				return EINVAL;
+			}
+			/* override output start callback */
+			ostart = einit.start = ifp_if_start;
+		} else {
+			ostart = einit.start;
+		}
+#endif /* SKYWALK */
 		if (einit.start == NULL) {
 			return EINVAL;
 		}
@@ -422,8 +465,59 @@ ifnet_allocate_extended(const struct ifnet_init_eparams *einit0,
 		    einit.broadcast_len);
 
 		if_clear_xflags(ifp, -1);
+#if SKYWALK
+		ifp->if_tx_headroom = 0;
+		ifp->if_tx_trailer = 0;
+		ifp->if_rx_mit_ival = 0;
+		ifp->if_save_start = ostart;
+		if (einit.flags & IFNET_INIT_SKYWALK_NATIVE) {
+			VERIFY(ifp->if_eflags & IFEF_TXSTART);
+			VERIFY(!(einit.flags & IFNET_INIT_LEGACY));
+			if_set_eflags(ifp, IFEF_SKYWALK_NATIVE);
+			ifp->if_tx_headroom = einit.tx_headroom;
+			ifp->if_tx_trailer = einit.tx_trailer;
+			ifp->if_rx_mit_ival = einit.rx_mit_ival;
+			/*
+			 * For native Skywalk drivers, make sure packets
+			 * emitted by the BSD stack get dropped until the
+			 * interface is in service.  When the netif host
+			 * adapter is fully activated, we'll point it to
+			 * nx_netif_output().
+			 */
+			ifp->if_output = ifp_if_output;
+			/*
+			 * Override driver-supplied parameters
+			 * and force IFEF_ENQUEUE_MULTI?
+			 */
+			if (sk_netif_native_txmodel ==
+			    NETIF_NATIVE_TXMODEL_ENQUEUE_MULTI) {
+				einit.start_delay_qlen = sk_tx_delay_qlen;
+				einit.start_delay_timeout = sk_tx_delay_timeout;
+			}
+			/* netif comes with native interfaces */
+			VERIFY((ifp->if_xflags & IFXF_LEGACY) == 0);
+		} else if (!ifnet_needs_compat(ifp)) {
+			/*
+			 * If we're told not to plumb in netif compat
+			 * for this interface, set IFXF_NX_NOAUTO to
+			 * prevent DLIL from auto-attaching the nexus.
+			 */
+			einit.flags |= IFNET_INIT_NX_NOAUTO;
+			/* legacy (non-netif) interface */
+			if_set_xflags(ifp, IFXF_LEGACY);
+		}
+
+		ifp->if_save_output = ifp->if_output;
+		if ((einit.flags & IFNET_INIT_NX_NOAUTO) != 0) {
+			if_set_xflags(ifp, IFXF_NX_NOAUTO);
+		}
+		if ((einit.flags & IFNET_INIT_IF_ADV) != 0) {
+			if_set_eflags(ifp, IFEF_ADV_REPORT);
+		}
+#else /* !SKYWALK */
 		/* legacy interface */
 		if_set_xflags(ifp, IFXF_LEGACY);
+#endif /* !SKYWALK */
 
 		if ((ifp->if_snd = ifclassq_alloc()) == NULL) {
 			panic_plain("%s: ifp=%p couldn't allocate class queues",
@@ -949,6 +1043,12 @@ ifnet_set_offload(ifnet_t interface, ifnet_offload_t offload)
 	ifnet_lock_exclusive(interface);
 	interface->if_hwassist = (offload & offload_mask);
 
+#if SKYWALK
+	/* preserve skywalk capability */
+	if ((interface->if_capabilities & IFCAP_SKYWALK) != 0) {
+		ifcaps |= IFCAP_SKYWALK;
+	}
+#endif /* SKYWALK */
 	/*
 	 * Hardware capable of partial checksum offload is
 	 * flexible enough to handle any transports utilizing
@@ -1629,6 +1729,13 @@ ifnet_set_poll_params(struct ifnet *ifp, struct ifnet_poll_params *p)
 		return ENXIO;
 	}
 
+#if SKYWALK
+	if (SKYWALK_CAPABLE(ifp)) {
+		err = netif_rxpoll_set_params(ifp, p, FALSE);
+		ifnet_decr_iorefcnt(ifp);
+		return err;
+	}
+#endif /* SKYWALK */
 	err = dlil_rxpoll_set_params(ifp, p, FALSE);
 
 	/* Release the io ref count */
@@ -2852,6 +2959,11 @@ ifnet_get_local_ports_extended(ifnet_t ifp, protocol_family_t protocol,
 
 	if_ports_used_update_wakeuuid(ifp);
 
+#if SKYWALK
+	if (netns_is_enabled()) {
+		netns_get_local_ports(ifp, protocol, flags, bitfield);
+	}
+#endif /* SKYWALK */
 
 	ifindex = (ifp != NULL) ? ifp->if_index : 0;
 
@@ -3446,7 +3558,30 @@ errno_t
 ifnet_interface_advisory_report(ifnet_t ifp,
     const struct ifnet_interface_advisory *advisory)
 {
+#if SKYWALK
+	if (__improbable(ifp == NULL || advisory == NULL ||
+	    advisory->version != IF_INTERFACE_ADVISORY_VERSION_CURRENT)) {
+		return EINVAL;
+	}
+	if (__improbable((advisory->direction !=
+	    IF_INTERFACE_ADVISORY_DIRECTION_TX) &&
+	    (advisory->direction != IF_INTERFACE_ADVISORY_DIRECTION_RX))) {
+		return EINVAL;
+	}
+	if (__improbable(!IF_FULLY_ATTACHED(ifp))) {
+		return ENXIO;
+	}
+	if (__improbable(((ifp->if_eflags & IFEF_ADV_REPORT) == 0) ||
+	    ((ifp->if_capabilities & IFCAP_SKYWALK) == 0))) {
+		return ENOTSUP;
+	}
+	if (__improbable(NA(ifp) == NULL)) {
+		return ENXIO;
+	}
+	return nx_netif_interface_advisory_report(&NA(ifp)->nifna_up, advisory);
+#else /* SKYWALK */
 #pragma unused(ifp)
 #pragma unused(advisory)
 	return ENOTSUP;
+#endif /* SKYWALK */
 }

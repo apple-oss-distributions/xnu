@@ -317,7 +317,7 @@ grow_sema_array(void)
 
 	newArr = krealloc(semas,
 	    sizeof(struct semid_kernel *) * (old_size / SEMMNI_INC),
-	    sizeof(struct semid_kernel *) * (old_size / SEMMNI_INC) + 1,
+	    sizeof(struct semid_kernel *) * ((old_size / SEMMNI_INC) + 1),
 	    Z_WAITOK | Z_ZERO);
 	if (newArr == NULL) {
 		return 0;

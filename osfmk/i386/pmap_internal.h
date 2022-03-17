@@ -1113,10 +1113,14 @@ pmap_cmpx_pte(pt_entry_t *entryp, pt_entry_t old, pt_entry_t new)
 	           memory_order_acq_rel_smp, memory_order_relaxed);
 }
 
+
+#if DEVELOPMENT || DEBUG
 extern uint32_t pmap_update_clear_pte_count;
+extern uint32_t pmap_update_invalid_pte_count;
+#endif
 
 static inline void
-pmap_update_pte(boolean_t is_ept, pt_entry_t *mptep, uint64_t pclear_bits, uint64_t pset_bits)
+pmap_update_pte(boolean_t is_ept, pt_entry_t *mptep, uint64_t pclear_bits, uint64_t pset_bits, bool oldpte_invalid_ok)
 {
 	pt_entry_t npte, opte;
 	do {
@@ -1125,7 +1129,12 @@ pmap_update_pte(boolean_t is_ept, pt_entry_t *mptep, uint64_t pclear_bits, uint6
 #if DEVELOPMENT || DEBUG
 			pmap_update_clear_pte_count++;
 #endif
-			break;
+			return;
+		} else if (__improbable(!oldpte_invalid_ok && (opte & PTE_VALID_MASK(is_ept)) == 0)) {
+#if DEVELOPMENT || DEBUG
+			pmap_update_invalid_pte_count++;
+#endif
+			return;
 		}
 		npte = opte & ~(pclear_bits);
 		npte |= pset_bits;
@@ -1137,7 +1146,6 @@ pmap_update_pte(boolean_t is_ept, pt_entry_t *mptep, uint64_t pclear_bits, uint6
 		}
 #endif
 	}       while (!pmap_cmpx_pte(mptep, opte, npte));
-
 
 	if (__improbable((is_ept == FALSE) && (npte & PTE_COMPRESSED) && (npte & INTEL_PTE_NX))) {
 		pmap_corrupted_pte_detected(mptep, pclear_bits, pset_bits);

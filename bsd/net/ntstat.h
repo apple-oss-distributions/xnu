@@ -1326,6 +1326,69 @@ void nstat_sysinfo_send_data(struct nstat_sysinfo_data *);
 int ntstat_tcp_progress_enable(struct sysctl_req *req);
 int ntstat_tcp_progress_indicators(struct sysctl_req *req);
 
+#if SKYWALK
+
+// Userland stats reporting
+
+// Each side, NetworkStatistics and the kernel provider for userland,
+// pass opaque references.
+typedef void *userland_stats_provider_context;
+typedef void *nstat_userland_context;
+
+typedef struct nstat_progress_digest {
+	u_int64_t       rxbytes;
+	u_int64_t       txbytes;
+	u_int32_t       rxduplicatebytes;
+	u_int32_t       rxoutoforderbytes;
+	u_int32_t       txretransmit;
+	u_int32_t       ifindex;
+	u_int32_t       state;
+	u_int32_t       txunacked;
+	u_int32_t       txwindow;
+	union {
+		struct tcp_conn_status connstatus;
+		// On armv7k, tcp_conn_status is 1 byte instead of 4
+		uint8_t                                 __pad_connstatus[4];
+	};
+} nstat_progress_digest;
+
+// When things have been set up, Netstats can request a refresh of its data.
+typedef bool (userland_stats_request_vals_fn)(userland_stats_provider_context *ctx,
+    u_int16_t *ifflagsp,
+    nstat_progress_digest *digestp,
+    nstat_counts *countsp,
+    void *metadatap);
+
+// Netstats can also request "extension" items, specified by the allowed_extensions flag
+// The return value is the amount of space currently required for the extension
+typedef size_t (userland_stats_request_extension_fn)(userland_stats_provider_context *ctx,
+    int requested_extension,    /* The extension to be returned */
+    void *buf,                  /* If not NULL, the address for the extension to be returned in */
+    size_t buf_size);           /* The size of the buffer space, typically matching the return from a previous call with null buffer pointer */
+
+// Things get started with a call to netstats to say that there’s a new connection:
+nstat_userland_context ntstat_userland_stats_open(userland_stats_provider_context *ctx,
+    int provider_id,
+    u_int64_t properties,
+    userland_stats_request_vals_fn req_fn,
+    userland_stats_request_extension_fn req_extension_fn);
+
+void ntstat_userland_stats_close(nstat_userland_context nstat_ctx);
+
+
+void ntstat_userland_stats_event(nstat_userland_context nstat_ctx, uint64_t event);
+
+void nstats_userland_stats_defunct_for_process(int pid);
+
+// Servicing a sysctl for information of TCP or UDP flows
+int ntstat_userland_count(short proto);
+int nstat_userland_get_snapshot(short proto, void **snapshotp, int *countp);
+int nstat_userland_list_snapshot(short proto, struct sysctl_req *req, void *userlandsnapshot, int nuserland);
+void nstat_userland_release_snapshot(void *snapshot, int nuserland);
+#if NTSTAT_SUPPORTS_STANDALONE_SYSCTL
+int ntstat_userland_list_n(short proto, struct sysctl_req *req);
+#endif
+#endif /* SKYWALK */
 
 // Utilities for userland stats reporting
 

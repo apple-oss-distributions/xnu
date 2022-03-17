@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2020 Apple Inc. All rights reserved.
+ * Copyright (c) 2012-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -1351,6 +1351,168 @@ pktap_output(struct ifnet *ifp, protocol_family_t proto, struct mbuf *m,
 	pktap_bpf_tap(ifp, proto, m, pre, post, 1);
 }
 
+#if SKYWALK
+
+typedef void (*tap_packet_func)(ifnet_t interface, u_int32_t dlt,
+    kern_packet_t packet, void *header, size_t header_len);
+
+static void
+pktap_bpf_tap_packet(struct ifnet *ifp, protocol_family_t proto, uint32_t dlt,
+    pid_t pid, const char * pname, pid_t epid, const char * epname,
+    kern_packet_t pkt, const void * header, size_t header_length,
+    uint8_t ipproto, uint32_t flowid, uint32_t flags, tap_packet_func tap_func)
+{
+	struct {
+		struct pktap_header     pkth;
+		union {
+			uint8_t         llhdr[16];
+			uint32_t        proto;
+		} extra;
+	} hdr_buffer;
+	struct pktap_header     *hdr;
+	size_t                  hdr_size;
+	struct pktap_softc      *pktap;
+	uint32_t                pre_length = 0;
+
+	/*
+	 * Skip the coprocessor interface
+	 */
+	if (!intcoproc_unrestricted && IFNET_IS_INTCOPROC(ifp)) {
+		return;
+	}
+
+	if (proto != AF_INET && proto != AF_INET6) {
+		PKTAP_LOG(PKTP_LOG_ERROR,
+		    "unsupported protocol %d\n",
+		    proto);
+		return;
+	}
+
+	/* assume that we'll be tapping using PKTAP */
+	hdr = &hdr_buffer.pkth;
+	bzero(&hdr_buffer, sizeof(hdr_buffer));
+	hdr->pth_length = sizeof(struct pktap_header);
+	hdr->pth_type_next = PTH_TYPE_PACKET;
+	hdr->pth_dlt = dlt;
+	hdr->pth_pid = pid;
+	if (pid != epid) {
+		hdr->pth_epid = epid;
+	} else {
+		hdr->pth_epid = -1;
+	}
+	if (pname != NULL) {
+		strlcpy(hdr->pth_comm, pname, sizeof(hdr->pth_comm));
+	}
+	if (epname != NULL) {
+		strlcpy(hdr->pth_ecomm, epname, sizeof(hdr->pth_ecomm));
+	}
+	strlcpy(hdr->pth_ifname, ifp->if_xname, sizeof(hdr->pth_ifname));
+	hdr->pth_flags |= flags;
+	hdr->pth_ipproto = ipproto;
+	hdr->pth_flowid = flowid;
+	/*
+	 * Do the same as pktap_fill_proc_info() to defer looking up inpcb.
+	 * We do it for both inbound and outbound packets unlike the mbuf case.
+	 */
+	if ((flags & PTH_FLAG_SOCKET) != 0 && ipproto != 0 && flowid != 0) {
+		hdr->pth_flags |= PTH_FLAG_DELAY_PKTAP;
+	}
+	if (kern_packet_get_wake_flag(pkt)) {
+		hdr->pth_flags |= PTH_FLAG_WAKE_PKT;
+	}
+	hdr->pth_protocol_family = proto;
+	hdr->pth_svc = so_svc2tc((mbuf_svc_class_t)
+	    kern_packet_get_service_class(pkt));
+	hdr->pth_iftype = ifp->if_type;
+	hdr->pth_ifunit = ifp->if_unit;
+	hdr_size = sizeof(struct pktap_header);
+	if (header != NULL && header_length != 0) {
+		if (header_length > sizeof(hdr_buffer.extra.llhdr)) {
+			PKTAP_LOG(PKTP_LOG_ERROR,
+			    "%s: header %d > %d\n",
+			    if_name(ifp), (int)header_length,
+			    (int)sizeof(hdr_buffer.extra.llhdr));
+			return;
+		}
+		bcopy(header, hdr_buffer.extra.llhdr, header_length);
+		hdr_size += header_length;
+		pre_length = (uint32_t)header_length;
+	} else if (dlt == DLT_RAW) {
+		/*
+		 * Use the same DLT as has been used for the mbuf path
+		 */
+		hdr->pth_dlt = DLT_NULL;
+		hdr_buffer.extra.proto = proto;
+		hdr_size = sizeof(struct pktap_header) + sizeof(u_int32_t);
+		pre_length = sizeof(hdr_buffer.extra.proto);
+	} else if (dlt == DLT_EN10MB) {
+		pre_length = ETHER_HDR_LEN;
+	}
+	hdr->pth_frame_pre_length = pre_length;
+
+	lck_rw_lock_shared(&pktap_lck_rw);
+	/*
+	 * No need to take the ifnet_lock as the struct ifnet field if_bpf is
+	 * protected by the BPF subsystem
+	 */
+	LIST_FOREACH(pktap, &pktap_list, pktp_link) {
+		int filter_result;
+
+		filter_result = pktap_filter_evaluate(pktap, ifp);
+		if (filter_result == PKTAP_FILTER_SKIP) {
+			continue;
+		}
+
+		if (dlt == DLT_RAW && pktap->pktp_dlt_raw_count > 0) {
+			(*tap_func)(pktap->pktp_ifp, DLT_RAW, pkt, NULL, 0);
+		}
+		if (pktap->pktp_dlt_pkttap_count > 0) {
+			(*tap_func)(pktap->pktp_ifp, DLT_PKTAP,
+			    pkt, hdr, hdr_size);
+		}
+	}
+	lck_rw_done(&pktap_lck_rw);
+}
+
+void
+pktap_input_packet(struct ifnet *ifp, protocol_family_t proto, uint32_t dlt,
+    pid_t pid, const char * pname, pid_t epid, const char * epname,
+    kern_packet_t pkt, const void * header, size_t header_length,
+    uint8_t ipproto, uint32_t flowid, uint32_t flags)
+{
+	/* Fast path */
+	if (pktap_total_tap_count == 0) {
+		return;
+	}
+
+	PKTAP_LOG(PKTP_LOG_INPUT, "IN %s proto %u pid %d epid %d\n",
+	    ifp->if_xname, proto, pid, epid);
+	pktap_bpf_tap_packet(ifp, proto, dlt, pid, pname, epid, epname, pkt,
+	    header, header_length, ipproto, flowid,
+	    PTH_FLAG_DIR_IN | (flags & ~(PTH_FLAG_DIR_IN | PTH_FLAG_DIR_OUT)),
+	    bpf_tap_packet_in);
+}
+
+void
+pktap_output_packet(struct ifnet *ifp, protocol_family_t proto, uint32_t dlt,
+    pid_t pid, const char * pname, pid_t epid, const char * epname,
+    kern_packet_t pkt, const void * header, size_t header_length,
+    uint8_t ipproto, uint32_t flowid, uint32_t flags)
+{
+	/* Fast path */
+	if (pktap_total_tap_count == 0) {
+		return;
+	}
+
+	PKTAP_LOG(PKTP_LOG_OUTPUT, "OUT %s proto %u pid %d epid %d\n",
+	    ifp->if_xname, proto, pid, epid);
+	pktap_bpf_tap_packet(ifp, proto, dlt, pid, pname, epid, epname, pkt,
+	    header, header_length, ipproto, flowid,
+	    PTH_FLAG_DIR_OUT | (flags & ~(PTH_FLAG_DIR_IN | PTH_FLAG_DIR_OUT)),
+	    bpf_tap_packet_out);
+}
+
+#endif /* SKYWALK */
 
 void
 convert_to_pktap_header_to_v2(struct bpf_packet *bpf_pkt, bool truncate)

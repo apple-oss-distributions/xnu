@@ -68,7 +68,7 @@
 
 #define FP_XMASK     ((uint32_t) (XFEM_X87 | XFEM_SSE))
 #define AVX_XMASK    ((uint32_t) (XFEM_X87 | XFEM_SSE | XFEM_YMM))
-#define AVX512_XMASK ((uint32_t) (XFEM_X87 | XFEM_SSE | XFEM_YMM | XFEM_ZMM))
+#define AVX512_XMASK ((uint32_t) (XFEM_X87 | XFEM_SSE | XFEM_YMM | XFEM_ZMM_OPMASK))
 
 typedef enum {
 	FXSAVE32 = 1,

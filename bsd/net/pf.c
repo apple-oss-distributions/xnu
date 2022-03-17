@@ -236,6 +236,9 @@ static struct pf_rule   *pf_get_translation_aux(struct pf_pdesc *,
     struct pf_src_node **, struct pf_addr *,
     union pf_state_xport *, struct pf_addr *,
     union pf_state_xport *, union pf_state_xport *
+#if SKYWALK
+    , netns_token *
+#endif
     );
 static void              pf_attach_state(struct pf_state_key *,
     struct pf_state *, int);
@@ -277,6 +280,9 @@ static int               pf_get_sport(struct pf_pdesc *, struct pfi_kif *,
     union pf_state_xport *, struct pf_addr *,
     union pf_state_xport *, struct pf_addr *,
     union pf_state_xport *, struct pf_src_node **
+#if SKYWALK
+    , netns_token *
+#endif
     );
 static void              pf_route(pbuf_t **, struct pf_rule *, int,
     struct ifnet *, struct pf_state *,
@@ -337,6 +343,13 @@ struct pf_pool_limit pf_pool_limits[PF_LIMIT_MAX] = {
 	{ .pp = &pfr_kentry_pl, .limit = PFR_KENTRY_HIWAT },
 };
 
+#if defined(SKYWALK) && defined(XNU_TARGET_OS_OSX)
+const char *compatible_anchors[] = {
+	"com.apple.internet-sharing",
+	"com.apple/250.ApplicationFirewall",
+	"com.apple/200.AirDrop"
+};
+#endif // SKYWALK && defined(XNU_TARGET_OS_OSX)
 
 void *
 pf_lazy_makewritable(struct pf_pdesc *pd, pbuf_t *pbuf, int len)
@@ -1716,6 +1729,9 @@ pf_free_state(struct pf_state *cur)
 	if (cur->tag) {
 		pf_tag_unref(cur->tag);
 	}
+#if SKYWALK
+	netns_release(&cur->nstoken);
+#endif
 	pool_put(&pf_state_pl, cur);
 	pf_status.fcounters[FCNT_STATE_REMOVALS]++;
 	VERIFY(pf_status.states > 0);
@@ -3409,6 +3425,9 @@ pf_get_sport(struct pf_pdesc *pd, struct pfi_kif *kif, struct pf_rule *r,
     struct pf_addr *saddr, union pf_state_xport *sxport, struct pf_addr *daddr,
     union pf_state_xport *dxport, struct pf_addr *naddr,
     union pf_state_xport *nxport, struct pf_src_node **sn
+#if SKYWALK
+    , netns_token *pnstoken
+#endif
     )
 {
 #pragma unused(kif)
@@ -3468,6 +3487,13 @@ pf_get_sport(struct pf_pdesc *pd, struct pfi_kif *kif, struct pf_rule *r,
 					continue;
 				}
 
+#if SKYWALK
+				if (netns_reserve(pnstoken, naddr->addr32,
+				    NETNS_AF_SIZE(af), proto, sxport->port,
+				    NETNS_PF, NULL) != 0) {
+					return 1;
+				}
+#endif
 				nxport->port = sk->gwy.xport.port;
 				return 0;
 			}
@@ -3496,6 +3522,13 @@ pf_get_sport(struct pf_pdesc *pd, struct pfi_kif *kif, struct pf_rule *r,
 			if (!(PF_AEQ(&sk->lan.addr, saddr, af))) {
 				continue;
 			}
+#if SKYWALK
+			if (netns_reserve(pnstoken, naddr->addr32,
+			    NETNS_AF_SIZE(af), proto, sxport->port,
+			    NETNS_PF, NULL) != 0) {
+				return 1;
+			}
+#endif
 			nxport->port = sk->gwy.xport.port;
 			return 0;
 		}
@@ -3531,18 +3564,33 @@ pf_get_sport(struct pf_pdesc *pd, struct pfi_kif *kif, struct pf_rule *r,
 				memset(&key.gwy.xport, 0,
 				    sizeof(key.gwy.xport));
 			}
+#if SKYWALK
+			/* Nothing to do: netns handles TCP/UDP only */
+#endif
 			if (pf_find_state_all(&key, PF_IN, NULL) == NULL) {
 				return 0;
 			}
 		} else if (low == 0 && high == 0) {
 			key.gwy.xport = *nxport;
 			if (pf_find_state_all(&key, PF_IN, NULL) == NULL
+#if SKYWALK
+			    && ((proto != IPPROTO_TCP && proto != IPPROTO_UDP)
+			    || netns_reserve(pnstoken, naddr->addr32,
+			    NETNS_AF_SIZE(af), proto, nxport->port,
+			    NETNS_PF, NULL) == 0)
+#endif
 			    ) {
 				return 0;
 			}
 		} else if (low == high) {
 			key.gwy.xport.port = htons(low);
 			if (pf_find_state_all(&key, PF_IN, NULL) == NULL
+#if SKYWALK
+			    && ((proto != IPPROTO_TCP && proto != IPPROTO_UDP)
+			    || netns_reserve(pnstoken, naddr->addr32,
+			    NETNS_AF_SIZE(af), proto, htons(low),
+			    NETNS_PF, NULL) == 0)
+#endif
 			    ) {
 				nxport->port = htons(low);
 				return 0;
@@ -3560,6 +3608,12 @@ pf_get_sport(struct pf_pdesc *pd, struct pfi_kif *kif, struct pf_rule *r,
 			for (tmp = cut; tmp <= high; ++(tmp)) {
 				key.gwy.xport.port = htons(tmp);
 				if (pf_find_state_all(&key, PF_IN, NULL) == NULL
+#if SKYWALK
+				    && ((proto != IPPROTO_TCP && proto != IPPROTO_UDP)
+				    || netns_reserve(pnstoken, naddr->addr32,
+				    NETNS_AF_SIZE(af), proto, htons(tmp),
+				    NETNS_PF, NULL) == 0)
+#endif
 				    ) {
 					nxport->port = htons(tmp);
 					return 0;
@@ -3568,6 +3622,12 @@ pf_get_sport(struct pf_pdesc *pd, struct pfi_kif *kif, struct pf_rule *r,
 			for (tmp = cut - 1; tmp >= low; --(tmp)) {
 				key.gwy.xport.port = htons(tmp);
 				if (pf_find_state_all(&key, PF_IN, NULL) == NULL
+#if SKYWALK
+				    && ((proto != IPPROTO_TCP && proto != IPPROTO_UDP)
+				    || netns_reserve(pnstoken, naddr->addr32,
+				    NETNS_AF_SIZE(af), proto, htons(tmp),
+				    NETNS_PF, NULL) == 0)
+#endif
 				    ) {
 					nxport->port = htons(tmp);
 					return 0;
@@ -3720,6 +3780,9 @@ pf_get_translation_aux(struct pf_pdesc *pd, pbuf_t *pbuf, int off,
     int direction, struct pfi_kif *kif, struct pf_src_node **sn,
     struct pf_addr *saddr, union pf_state_xport *sxport, struct pf_addr *daddr,
     union pf_state_xport *dxport, union pf_state_xport *nsxport
+#if SKYWALK
+    , netns_token *pnstoken
+#endif
     )
 {
 	struct pf_rule  *r = NULL;
@@ -3773,6 +3836,9 @@ pf_get_translation_aux(struct pf_pdesc *pd, pbuf_t *pbuf, int off,
 
 			if (pf_get_sport(pd, kif, r, saddr, sxport, daddr,
 			    dxport, nsaddr, nsxport, sn
+#if SKYWALK
+			    , pnstoken
+#endif
 			    )) {
 				DPFPRINTF(PF_DEBUG_MISC,
 				    ("pf: NAT proxy port allocation "
@@ -4762,6 +4828,9 @@ pf_test_rule(struct pf_rule **rm, struct pf_state **sm, int direction,
 	int                      state_icmp = 0;
 	u_int16_t                mss = tcp_mssdflt;
 	u_int8_t                 icmptype = 0, icmpcode = 0;
+#if SKYWALK
+	netns_token              nstoken = NULL;
+#endif
 
 	struct pf_grev1_hdr     *grev1 = pd->hdr.grev1;
 	union pf_state_xport bxport, bdxport, nxport, sxport, dxport;
@@ -4846,6 +4915,9 @@ pf_test_rule(struct pf_rule **rm, struct pf_state **sm, int direction,
 	/* check packet for BINAT/NAT/RDR */
 	if ((nr = pf_get_translation_aux(pd, pbuf, off, direction, kif, &nsn,
 	    saddr, &sxport, daddr, &dxport, &nxport
+#if SKYWALK
+	    , &nstoken
+#endif
 	    )) != NULL) {
 		int ua;
 		u_int16_t dport;
@@ -5066,6 +5138,9 @@ pf_test_rule(struct pf_rule **rm, struct pf_state **sm, int direction,
 		pd->nat_rule = nr;
 		pd->af = pd->naf;
 	} else {
+#if SKYWALK
+		VERIFY(!NETNS_TOKEN_VALID(&nstoken));
+#endif
 	}
 
 	if (nr && nr->tag > 0) {
@@ -5191,6 +5266,9 @@ pf_test_rule(struct pf_rule **rm, struct pf_state **sm, int direction,
 
 			if (pf_lazy_makewritable(pd, pbuf, rewrite) == NULL) {
 				REASON_SET(&reason, PFRES_MEMORY);
+#if SKYWALK
+				netns_release(&nstoken);
+#endif
 				return PF_DROP;
 			}
 
@@ -5397,6 +5475,9 @@ pf_test_rule(struct pf_rule **rm, struct pf_state **sm, int direction,
 	}
 
 	if (r->action == PF_DROP) {
+#if SKYWALK
+		netns_release(&nstoken);
+#endif
 		return PF_DROP;
 	}
 
@@ -5546,6 +5627,9 @@ pf_test_rule(struct pf_rule **rm, struct pf_state **sm, int direction,
 
 	if (pf_tag_packet(pbuf, pd->pf_mtag, tag, rtableid, pd)) {
 		REASON_SET(&reason, PFRES_MEMORY);
+#if SKYWALK
+		netns_release(&nstoken);
+#endif
 		return PF_DROP;
 	}
 
@@ -5583,6 +5667,16 @@ pf_test_rule(struct pf_rule **rm, struct pf_state **sm, int direction,
 			 * different internal address.  Only one 'blocking'
 			 * partial state is allowed for each external address.
 			 */
+#if SKYWALK
+			/*
+			 * XXXSCW:
+			 *
+			 * It's not clear how this impacts netns. The original
+			 * state will hold the port reservation token but what
+			 * happens to other "Cone NAT" states when the first is
+			 * torn down?
+			 */
+#endif
 			memset(&sk0, 0, sizeof(sk0));
 			sk0.af_gwy = pd->af;
 			sk0.proto = IPPROTO_ESP;
@@ -5643,6 +5737,9 @@ cleanup:
 				}
 				pool_put(&pf_state_key_pl, sk);
 			}
+#if SKYWALK
+			netns_release(&nstoken);
+#endif
 			return PF_DROP;
 		}
 		bzero(s, sizeof(*s));
@@ -5741,6 +5838,9 @@ cleanup:
 				REASON_SET(&reason, PFRES_MEMORY);
 				pf_src_tree_remove_state(s);
 				STATE_DEC_COUNTERS(s);
+#if SKYWALK
+				netns_release(&nstoken);
+#endif
 				pool_put(&pf_state_pl, s);
 				return PF_DROP;
 			}
@@ -5751,6 +5851,9 @@ cleanup:
 				DPFPRINTF(PF_DEBUG_URGENT,
 				    ("pf_normalize_tcp_stateful failed on "
 				    "first pkt"));
+#if SKYWALK
+				netns_release(&nstoken);
+#endif
 				pf_normalize_tcp_cleanup(s);
 				pf_src_tree_remove_state(s);
 				STATE_DEC_COUNTERS(s);
@@ -5839,9 +5942,16 @@ cleanup:
 			REASON_SET(&reason, PFRES_STATEINS);
 			pf_src_tree_remove_state(s);
 			STATE_DEC_COUNTERS(s);
+#if SKYWALK
+			netns_release(&nstoken);
+#endif
 			pool_put(&pf_state_pl, s);
 			return PF_DROP;
 		} else {
+#if SKYWALK
+			s->nstoken = nstoken;
+			nstoken = NULL;
+#endif
 			*sm = s;
 		}
 		if (tag > 0) {
@@ -5907,6 +6017,11 @@ cleanup:
 			}
 		}
 	}
+#if SKYWALK
+	else {
+		netns_release(&nstoken);
+	}
+#endif
 
 	/* copy back packet headers if we performed NAT operations */
 	if (rewrite) {
@@ -10830,3 +10945,58 @@ hook_runloop(struct hook_desc_head *head, int flags)
 	}
 }
 
+#if defined(SKYWALK) && defined(XNU_TARGET_OS_OSX)
+static bool
+pf_check_compatible_anchor(const char *anchor_path)
+{
+	// Whitelist reserved anchor
+	if (strncmp(anchor_path, PF_RESERVED_ANCHOR, MAXPATHLEN) == 0) {
+		return true;
+	}
+
+	// Whitelist com.apple anchor
+	if (strncmp(anchor_path, "com.apple", MAXPATHLEN) == 0) {
+		return true;
+	}
+
+	for (int i = 0; i < sizeof(compatible_anchors) / sizeof(compatible_anchors[0]); i++) {
+		const char *ptr = strnstr(anchor_path, compatible_anchors[i], MAXPATHLEN);
+		if (ptr != NULL && ptr == anchor_path) {
+			return true;
+		}
+	}
+
+	return false;
+}
+
+bool
+pf_check_compatible_rules(void)
+{
+	struct pf_anchor *anchor = NULL;
+	struct pf_rule *rule = NULL;
+
+	// Check whitelisted anchors
+	RB_FOREACH(anchor, pf_anchor_global, &pf_anchors) {
+		if (!pf_check_compatible_anchor(anchor->path)) {
+			if (pf_status.debug >= PF_DEBUG_MISC) {
+				printf("pf anchor %s not compatible\n", anchor->path);
+			}
+			return false;
+		}
+	}
+
+	// Check rules in main ruleset
+	for (int i = PF_RULESET_SCRUB; i < PF_RULESET_MAX; i++) {
+		TAILQ_FOREACH(rule, pf_main_ruleset.rules[i].active.ptr, entries) {
+			if (rule->anchor == NULL) {
+				if (pf_status.debug >= PF_DEBUG_MISC) {
+					printf("main ruleset contains rules\n");
+				}
+				return false;
+			}
+		}
+	}
+
+	return true;
+}
+#endif // SKYWALK && defined(XNU_TARGET_OS_OSX)

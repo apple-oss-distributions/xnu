@@ -3194,6 +3194,7 @@ check_and_swap_attrhdr(attr_header_t *ah, attr_info_t *ainfop)
 	int count;
 	int i;
 	uint32_t total_header_size;
+	uint32_t total_data_size;
 
 	if (ah == NULL) {
 		return EINVAL;
@@ -3238,6 +3239,7 @@ check_and_swap_attrhdr(attr_header_t *ah, attr_info_t *ainfop)
 	ae = (attr_entry_t *)(&ah[1]);
 
 	total_header_size = sizeof(attr_header_t);
+	total_data_size = 0;
 	for (i = 0; i < count; i++) {
 		/* Make sure the fixed-size part of this attr_entry_t fits. */
 		if ((u_int8_t *) &ae[1] > buf_end) {
@@ -3266,12 +3268,19 @@ check_and_swap_attrhdr(attr_header_t *ah, attr_info_t *ainfop)
 		}
 
 		/* Make sure entry points to data section and not header */
-		if (ae->offset < ah->data_start) {
+		if (ae->offset < ah->data_start || end > ah->data_start + ah->data_length) {
 			return EINVAL;
 		}
 
 		/* We verified namelen is ok above, so add this entry's size to a total */
-		total_header_size += ATTR_ENTRY_LENGTH(ae->namelen);
+		if (os_add_overflow(total_header_size, ATTR_ENTRY_LENGTH(ae->namelen), &total_header_size)) {
+			return EINVAL;
+		}
+
+		/* We verified that entry's length is within data section, so add it to running size total */
+		if (os_add_overflow(total_data_size, ae->length, &total_data_size)) {
+			return EINVAL;
+		}
 
 		ae = ATTR_NEXT(ae);
 	}
@@ -3279,6 +3288,11 @@ check_and_swap_attrhdr(attr_header_t *ah, attr_info_t *ainfop)
 
 	/* make sure data_start is actually after all the xattr key entries */
 	if (ah->data_start < total_header_size) {
+		return EINVAL;
+	}
+
+	/* make sure all entries' data  length add to header's idea of data length */
+	if (total_data_size != ah->data_length) {
 		return EINVAL;
 	}
 

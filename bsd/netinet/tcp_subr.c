@@ -987,6 +987,12 @@ tcp_respond(struct tcpcb *tp, void *ipgen, struct tcphdr *th, struct mbuf *m,
 		    (outif = ro6->ro_rt->rt_ifp) !=
 		    tp->t_inpcb->in6p_last_outifp) {
 			tp->t_inpcb->in6p_last_outifp = outif;
+#if SKYWALK
+			if (NETNS_TOKEN_VALID(&tp->t_inpcb->inp_netns_token)) {
+				netns_set_ifnet(&tp->t_inpcb->inp_netns_token,
+				    tp->t_inpcb->in6p_last_outifp);
+			}
+#endif /* SKYWALK */
 		}
 
 		if (ro6 == &sro6) {
@@ -1048,6 +1054,11 @@ tcp_respond(struct tcpcb *tp, void *ipgen, struct tcphdr *th, struct mbuf *m,
 		    (outif = sro.ro_rt->rt_ifp) !=
 		    tp->t_inpcb->inp_last_outifp) {
 			tp->t_inpcb->inp_last_outifp = outif;
+#if SKYWALK
+			if (NETNS_TOKEN_VALID(&tp->t_inpcb->inp_netns_token)) {
+				netns_set_ifnet(&tp->t_inpcb->inp_netns_token, outif);
+			}
+#endif /* SKYWALK */
 		}
 		if (ro != &sro) {
 			/* Synchronize cached PCB route */
@@ -2254,6 +2265,11 @@ tcp_count_opportunistic(unsigned int ifindex, u_int32_t flags)
 __private_extern__ uint32_t
 tcp_find_anypcb_byaddr(struct ifaddr *ifa)
 {
+#if SKYWALK
+	if (netns_is_enabled()) {
+		return netns_find_anyres_byaddr(ifa, IPPROTO_TCP);
+	} else
+#endif /* SKYWALK */
 	return inpcb_find_anypcb_byaddr(ifa, &tcbinfo);
 }
 
@@ -2370,6 +2386,10 @@ tcp_ctlinput(int cmd, struct sockaddr *sa, void *vip, __unused struct ifnet *ifp
 	struct tcphdr *th;
 	struct icmp *icp;
 	size_t off;
+#if SKYWALK
+	union sockaddr_in_4_6 sock_laddr;
+	struct protoctl_ev_val prctl_ev_val;
+#endif /* SKYWALK */
 	void (*notify)(struct inpcb *, int) = tcp_notify;
 
 	if (ctl_param != NULL) {
@@ -2416,9 +2436,17 @@ tcp_ctlinput(int cmd, struct sockaddr *sa, void *vip, __unused struct ifnet *ifp
 		return;
 	}
 
+#if SKYWALK
+	bzero(&prctl_ev_val, sizeof(prctl_ev_val));
+	bzero(&sock_laddr, sizeof(sock_laddr));
+#endif /* SKYWALK */
 
 	if (ip == NULL) {
 		in_pcbnotifyall(&tcbinfo, faddr, inetctlerrmap[cmd], notify);
+#if SKYWALK
+		protoctl_event_enqueue_nwk_wq_entry(ifp, NULL,
+		    sa, 0, 0, IPPROTO_TCP, cmd, NULL);
+#endif /* SKYWALK */
 		return;
 	}
 
@@ -2437,6 +2465,21 @@ tcp_ctlinput(int cmd, struct sockaddr *sa, void *vip, __unused struct ifnet *ifp
 
 	if (inp == NULL ||
 	    inp->inp_socket == NULL) {
+#if SKYWALK
+		if (cmd == PRC_MSGSIZE) {
+			prctl_ev_val.val = ntohs(icp->icmp_nextmtu);
+		}
+		prctl_ev_val.tcp_seq_number = icmp_tcp_seq;
+
+		sock_laddr.sin.sin_family = AF_INET;
+		sock_laddr.sin.sin_len = sizeof(sock_laddr.sin);
+		sock_laddr.sin.sin_addr = ip->ip_src;
+
+		protoctl_event_enqueue_nwk_wq_entry(ifp,
+		    (struct sockaddr *)&sock_laddr, sa,
+		    th->th_sport, th->th_dport, IPPROTO_TCP,
+		    cmd, &prctl_ev_val);
+#endif /* SKYWALK */
 		return;
 	}
 
@@ -2484,6 +2527,10 @@ tcp6_ctlinput(int cmd, struct sockaddr *sa, void *d, __unused struct ifnet *ifp)
 		uint16_t th_sport;
 		uint16_t th_dport;
 	} t_ports;
+#if SKYWALK
+	union sockaddr_in_4_6 sock_laddr;
+	struct protoctl_ev_val prctl_ev_val;
+#endif /* SKYWALK */
 
 	if (sa->sa_family != AF_INET6 ||
 	    sa->sa_len != sizeof(struct sockaddr_in6)) {
@@ -2534,10 +2581,18 @@ tcp6_ctlinput(int cmd, struct sockaddr *sa, void *d, __unused struct ifnet *ifp)
 		return;
 	}
 
+#if SKYWALK
+	bzero(&prctl_ev_val, sizeof(prctl_ev_val));
+	bzero(&sock_laddr, sizeof(sock_laddr));
+#endif /* SKYWALK */
 
 	if (ip6 == NULL) {
 		in6_pcbnotify(&tcbinfo, sa, 0, (struct sockaddr *)(size_t)sa6_src,
 		    0, cmd, NULL, notify);
+#if SKYWALK
+		protoctl_event_enqueue_nwk_wq_entry(ifp, NULL, sa,
+		    0, 0, IPPROTO_TCP, cmd, NULL);
+#endif /* SKYWALK */
 		return;
 	}
 
@@ -2573,6 +2628,21 @@ tcp6_ctlinput(int cmd, struct sockaddr *sa, void *d, __unused struct ifnet *ifp)
 
 	if (inp == NULL ||
 	    inp->inp_socket == NULL) {
+#if SKYWALK
+		if (cmd == PRC_MSGSIZE) {
+			prctl_ev_val.val = mtu;
+		}
+		prctl_ev_val.tcp_seq_number = icmp_tcp_seq;
+
+		sock_laddr.sin6.sin6_family = AF_INET6;
+		sock_laddr.sin6.sin6_len = sizeof(sock_laddr.sin6);
+		sock_laddr.sin6.sin6_addr = ip6->ip6_src;
+
+		protoctl_event_enqueue_nwk_wq_entry(ifp,
+		    (struct sockaddr *)&sock_laddr, sa,
+		    t_ports.th_sport, t_ports.th_dport, IPPROTO_TCP,
+		    cmd, &prctl_ev_val);
+#endif /* SKYWALK */
 		return;
 	}
 
@@ -2925,6 +2995,12 @@ tcp_rtlookup(struct inpcb *inp, unsigned int input_ifscope)
 		tcp_set_ecn(tp, rt->rt_ifp);
 		if (inp->inp_last_outifp == NULL) {
 			inp->inp_last_outifp = rt->rt_ifp;
+#if SKYWALK
+			if (NETNS_TOKEN_VALID(&inp->inp_netns_token)) {
+				netns_set_ifnet(&inp->inp_netns_token,
+				    inp->inp_last_outifp);
+			}
+#endif /* SKYWALK */
 		}
 	}
 
@@ -3027,6 +3103,12 @@ tcp_rtlookup6(struct inpcb *inp, unsigned int input_ifscope)
 		tcp_set_ecn(tp, rt->rt_ifp);
 		if (inp->inp_last_outifp == NULL) {
 			inp->inp_last_outifp = rt->rt_ifp;
+#if SKYWALK
+			if (NETNS_TOKEN_VALID(&inp->inp_netns_token)) {
+				netns_set_ifnet(&inp->inp_netns_token,
+				    inp->inp_last_outifp);
+			}
+#endif /* SKYWALK */
 		}
 
 		/* Note if the peer is local */
@@ -4463,3 +4545,111 @@ tcp_update_stats_per_flow(struct ifnet_stats_per_flow *ifs,
 	ifnet_lock_done(ifp);
 }
 
+#if SKYWALK
+
+#include <skywalk/core/skywalk_var.h>
+
+void
+tcp_add_fsw_flow(struct tcpcb *tp, struct ifnet *ifp)
+{
+	struct inpcb *inp = tp->t_inpcb;
+	struct socket *so = inp->inp_socket;
+	uuid_t fsw_uuid;
+	struct nx_flow_req nfr;
+	int err;
+
+	if (sk_fsw_rx_agg_tcp == 0) {
+		return;
+	}
+
+	if (ifp == NULL || kern_nexus_get_flowswitch_instance(ifp, fsw_uuid)) {
+		TCP_LOG_FSW_FLOW(tp, "skip ifp no fsw");
+		return;
+	}
+
+	memset(&nfr, 0, sizeof(nfr));
+
+	if (inp->inp_vflag & INP_IPV4) {
+		ASSERT(!(inp->inp_laddr.s_addr == INADDR_ANY ||
+		    inp->inp_faddr.s_addr == INADDR_ANY ||
+		    IN_MULTICAST(ntohl(inp->inp_laddr.s_addr)) ||
+		    IN_MULTICAST(ntohl(inp->inp_faddr.s_addr))));
+		nfr.nfr_saddr.sin.sin_len = sizeof(struct sockaddr_in);
+		nfr.nfr_saddr.sin.sin_family = AF_INET;
+		nfr.nfr_saddr.sin.sin_port = inp->inp_lport;
+		memcpy(&nfr.nfr_saddr.sin.sin_addr, &inp->inp_laddr,
+		    sizeof(struct in_addr));
+		nfr.nfr_daddr.sin.sin_len = sizeof(struct sockaddr_in);
+		nfr.nfr_daddr.sin.sin_family = AF_INET;
+		nfr.nfr_daddr.sin.sin_port = inp->inp_fport;
+		memcpy(&nfr.nfr_daddr.sin.sin_addr, &inp->inp_faddr,
+		    sizeof(struct in_addr));
+	} else {
+		ASSERT(!(IN6_IS_ADDR_UNSPECIFIED(&inp->in6p_laddr) ||
+		    IN6_IS_ADDR_UNSPECIFIED(&inp->in6p_faddr) ||
+		    IN6_IS_ADDR_MULTICAST(&inp->in6p_laddr) ||
+		    IN6_IS_ADDR_MULTICAST(&inp->in6p_faddr)));
+		nfr.nfr_saddr.sin6.sin6_len = sizeof(struct sockaddr_in6);
+		nfr.nfr_saddr.sin6.sin6_family = AF_INET6;
+		nfr.nfr_saddr.sin6.sin6_port = inp->inp_lport;
+		memcpy(&nfr.nfr_saddr.sin6.sin6_addr, &inp->in6p_laddr,
+		    sizeof(struct in6_addr));
+		nfr.nfr_daddr.sin6.sin6_len = sizeof(struct sockaddr_in6);
+		nfr.nfr_daddr.sin.sin_family = AF_INET6;
+		nfr.nfr_daddr.sin6.sin6_port = inp->inp_fport;
+		memcpy(&nfr.nfr_daddr.sin6.sin6_addr, &inp->in6p_faddr,
+		    sizeof(struct in6_addr));
+		/* clear embedded scope ID */
+		if (IN6_IS_SCOPE_EMBED(&nfr.nfr_saddr.sin6.sin6_addr)) {
+			nfr.nfr_saddr.sin6.sin6_addr.s6_addr16[1] = 0;
+		}
+		if (IN6_IS_SCOPE_EMBED(&nfr.nfr_daddr.sin6.sin6_addr)) {
+			nfr.nfr_daddr.sin6.sin6_addr.s6_addr16[1] = 0;
+		}
+	}
+
+	nfr.nfr_nx_port = 1;
+	nfr.nfr_ip_protocol = IPPROTO_TCP;
+	nfr.nfr_transport_protocol = IPPROTO_TCP;
+	nfr.nfr_flags = NXFLOWREQF_ASIS;
+	nfr.nfr_epid = (so != NULL ? so->last_pid : 0);
+	if (NETNS_TOKEN_VALID(&inp->inp_netns_token)) {
+		nfr.nfr_port_reservation = inp->inp_netns_token;
+		nfr.nfr_flags |= NXFLOWREQF_EXT_PORT_RSV;
+	}
+	nfr.nfr_inp_flowhash = inp->inp_flowhash;
+
+	uuid_generate_random(nfr.nfr_flow_uuid);
+	err = kern_nexus_flow_add(kern_nexus_shared_controller(), fsw_uuid,
+	    &nfr, sizeof(nfr));
+
+	if (err == 0) {
+		uuid_copy(tp->t_fsw_uuid, fsw_uuid);
+		uuid_copy(tp->t_flow_uuid, nfr.nfr_flow_uuid);
+	}
+
+	TCP_LOG_FSW_FLOW(tp, "add err %d\n", err);
+}
+
+void
+tcp_del_fsw_flow(struct tcpcb *tp)
+{
+	if (uuid_is_null(tp->t_fsw_uuid) || uuid_is_null(tp->t_flow_uuid)) {
+		return;
+	}
+
+	struct nx_flow_req nfr;
+	uuid_copy(nfr.nfr_flow_uuid, tp->t_flow_uuid);
+
+	/* It's possible for this call to fail if the nexus has detached */
+	int err = kern_nexus_flow_del(kern_nexus_shared_controller(),
+	    tp->t_fsw_uuid, &nfr, sizeof(nfr));
+	VERIFY(err == 0 || err == ENOENT || err == ENXIO);
+
+	uuid_clear(tp->t_fsw_uuid);
+	uuid_clear(tp->t_flow_uuid);
+
+	TCP_LOG_FSW_FLOW(tp, "del err %d\n", err);
+}
+
+#endif /* SKYWALK */

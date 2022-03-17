@@ -545,7 +545,7 @@ cpu_data_startup_init(void)
 	int flags = KMA_GUARD_FIRST | KMA_GUARD_LAST | KMA_PERMANENT |
 	    KMA_ZERO | KMA_KOBJECT;
 	uint32_t cpus = max_cpus_from_firmware;
-	vm_size_t size = percpu_section_size() * cpus;
+	vm_size_t size = percpu_section_size() * (cpus - 1);
 	kern_return_t kr;
 
 	percpu_base.size = percpu_section_size();

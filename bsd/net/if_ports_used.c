@@ -55,6 +55,11 @@
 #include <netinet/tcp_fsm.h>
 #include <netinet/udp.h>
 
+#if SKYWALK
+#include <skywalk/os_skywalk_private.h>
+#include <skywalk/nexus/flowswitch/flow/flow_var.h>
+#include <skywalk/namespace/netns.h>
+#endif /* SKYWALK */
 
 #include <stdbool.h>
 
@@ -784,6 +789,107 @@ if_ports_used_add_inpcb(const uint32_t ifindex, const struct inpcb *inp)
 	return net_port_info_add_entry(&npi);
 }
 
+#if SKYWALK
+__private_extern__ bool
+if_ports_used_add_flow_entry(const struct flow_entry *fe, const uint32_t ifindex,
+    const struct ns_flow_info *nfi, uint32_t ns_flags)
+{
+	struct net_port_info npi = {};
+
+	/* This is unlikely to happen but better be safe than sorry */
+	if (ifindex > UINT16_MAX) {
+		os_log(OS_LOG_DEFAULT, "%s: ifindex %u too big", __func__, ifindex);
+		return false;
+	}
+	npi.npi_if_index = (uint16_t)ifindex;
+	if (IF_INDEX_IN_RANGE(ifindex)) {
+		struct ifnet *ifp = ifindex2ifnet[ifindex];
+		if (ifp != NULL && IFNET_IS_COMPANION_LINK(ifp)) {
+			npi.npi_flags |= NPIF_COMPLINK;
+		}
+	}
+
+	npi.npi_flags |= NPIF_CHANNEL;
+
+	npi.npi_timestamp.tv_sec = (int32_t)wakeuiid_last_check.tv_sec;
+	npi.npi_timestamp.tv_usec = wakeuiid_last_check.tv_usec;
+
+	if (ns_flags & NETNS_NOWAKEFROMSLEEP) {
+		npi.npi_flags |= NPIF_NOWAKE;
+	}
+	if ((ns_flags & NETNS_OWNER_MASK) == NETNS_LISTENER) {
+		npi.npi_flags |= NPIF_LISTEN;
+	}
+
+	uuid_copy(npi.npi_flow_uuid, nfi->nfi_flow_uuid);
+
+	if (nfi->nfi_protocol == IPPROTO_TCP) {
+		npi.npi_flags |= NPIF_TCP;
+	} else if (nfi->nfi_protocol == IPPROTO_UDP) {
+		npi.npi_flags |= NPIF_UDP;
+	} else {
+		os_log(OS_LOG_DEFAULT, "%s: unexpected protocol %u for nfi %p",
+		    __func__, nfi->nfi_protocol, nfi);
+		return false;
+	}
+
+	if (nfi->nfi_laddr.sa.sa_family == AF_INET) {
+		npi.npi_flags |= NPIF_IPV4;
+
+		npi.npi_local_port = nfi->nfi_laddr.sin.sin_port;
+		npi.npi_foreign_port = nfi->nfi_faddr.sin.sin_port;
+
+		npi.npi_local_addr_in = nfi->nfi_laddr.sin.sin_addr;
+		npi.npi_foreign_addr_in = nfi->nfi_faddr.sin.sin_addr;
+	} else {
+		npi.npi_flags |= NPIF_IPV6;
+
+		npi.npi_local_port = nfi->nfi_laddr.sin6.sin6_port;
+		npi.npi_foreign_port = nfi->nfi_faddr.sin6.sin6_port;
+
+		memcpy(&npi.npi_local_addr_in6,
+		    &nfi->nfi_laddr.sin6.sin6_addr, sizeof(struct in6_addr));
+		memcpy(&npi.npi_foreign_addr_in6,
+		    &nfi->nfi_faddr.sin6.sin6_addr, sizeof(struct in6_addr));
+
+		/* Clear the embedded scope ID */
+		if (IN6_IS_ADDR_LINKLOCAL(&npi.npi_local_addr_in6)) {
+			npi.npi_local_addr_in6.s6_addr16[1] = 0;
+		}
+		if (IN6_IS_ADDR_LINKLOCAL(&npi.npi_foreign_addr_in6)) {
+			npi.npi_foreign_addr_in6.s6_addr16[1] = 0;
+		}
+	}
+
+	npi.npi_owner_pid = nfi->nfi_owner_pid;
+	strlcpy(npi.npi_owner_pname, nfi->nfi_owner_name,
+	    sizeof(npi.npi_owner_pname));
+
+	/*
+	 * Get the proc UUID from the pid as the the proc UUID is not present
+	 * in the flow_entry
+	 */
+	proc_t proc = proc_find(npi.npi_owner_pid);
+	if (proc != PROC_NULL) {
+		proc_getexecutableuuid(proc, npi.npi_owner_uuid, sizeof(npi.npi_owner_uuid));
+		proc_rele(proc);
+	}
+	if (nfi->nfi_effective_pid != -1) {
+		npi.npi_effective_pid = nfi->nfi_effective_pid;
+		strlcpy(npi.npi_effective_pname, nfi->nfi_effective_name,
+		    sizeof(npi.npi_effective_pname));
+		uuid_copy(npi.npi_effective_uuid, fe->fe_eproc_uuid);
+	} else {
+		npi.npi_effective_pid = npi.npi_owner_pid;
+		strlcpy(npi.npi_effective_pname, npi.npi_owner_pname,
+		    sizeof(npi.npi_effective_pname));
+		uuid_copy(npi.npi_effective_uuid, npi.npi_owner_uuid);
+	}
+
+	return net_port_info_add_entry(&npi);
+}
+
+#endif /* SKYWALK */
 
 static void
 net_port_info_log_npi(const char *s, const struct net_port_info *npi)
@@ -1359,3 +1465,223 @@ failed:
 	if_notify_unattributed_wake_mbuf(ifp, m, &npi);
 }
 
+#if SKYWALK
+
+static void
+if_notify_unattributed_wake_pkt(struct ifnet *ifp, struct __kern_packet *pkt,
+    struct net_port_info *npi)
+{
+	struct kev_msg ev_msg = {};
+
+	LCK_MTX_ASSERT(&net_port_entry_head_lock, LCK_MTX_ASSERT_NOTOWNED);
+
+	lck_mtx_lock(&net_port_entry_head_lock);
+	if (has_notified_unattributed_wake) {
+		lck_mtx_unlock(&net_port_entry_head_lock);
+		if_ports_used_stats.ifpu_dup_unattributed_wake_event += 1;
+
+		if (__improbable(net_wake_pkt_debug > 0)) {
+			net_port_info_log_npi("already notified unattributed wake packet", npi);
+		}
+		return;
+	}
+	has_notified_unattributed_wake = true;
+	lck_mtx_unlock(&net_port_entry_head_lock);
+
+	if_ports_used_stats.ifpu_unattributed_wake_event += 1;
+
+	if (ifp == NULL) {
+		os_log(OS_LOG_DEFAULT, "%s: receive interface is NULL",
+		    __func__);
+		if_ports_used_stats.ifpu_unattributed_null_recvif += 1;
+	}
+
+	ev_msg.vendor_code = KEV_VENDOR_APPLE;
+	ev_msg.kev_class = KEV_NETWORK_CLASS;
+	ev_msg.kev_subclass = KEV_POWER_SUBCLASS;
+	ev_msg.event_code  = KEV_POWER_UNATTRIBUTED_WAKE;
+
+	struct net_port_info_una_wake_event event_data = {};
+	uuid_copy(event_data.una_wake_uuid, current_wakeuuid);
+	event_data.una_wake_pkt_if_index = ifp != NULL ? ifp->if_index : 0;
+	event_data.una_wake_pkt_flags = npi->npi_flags;
+
+	uint16_t offset = kern_packet_get_network_header_offset(SK_PKT2PH(pkt));
+	event_data.una_wake_ptk_len =
+	    pkt->pkt_length - offset > NPI_MAX_UNA_WAKE_PKT_LEN ?
+	    NPI_MAX_UNA_WAKE_PKT_LEN : (u_int16_t) pkt->pkt_length - offset;
+
+	kern_packet_copy_bytes(SK_PKT2PH(pkt), offset, event_data.una_wake_ptk_len,
+	    event_data.una_wake_pkt);
+
+	event_data.una_wake_pkt_local_port = npi->npi_local_port;
+	event_data.una_wake_pkt_foreign_port = npi->npi_foreign_port;
+	event_data.una_wake_pkt_local_addr_ = npi->npi_local_addr_;
+	event_data.una_wake_pkt_foreign_addr_ = npi->npi_foreign_addr_;
+	if (ifp != NULL) {
+		strlcpy(event_data.una_wake_pkt_ifname, ifp->if_xname,
+		    sizeof(event_data.una_wake_pkt_ifname));
+	}
+
+	ev_msg.dv[0].data_ptr = &event_data;
+	ev_msg.dv[0].data_length = sizeof(event_data);
+
+	int result = kev_post_msg(&ev_msg);
+	if (result != 0) {
+		uuid_string_t wake_uuid_str;
+
+		uuid_unparse(event_data.una_wake_uuid, wake_uuid_str);
+		os_log_error(OS_LOG_DEFAULT,
+		    "%s: kev_post_msg() failed with error %d for wake uuid %s",
+		    __func__, result, wake_uuid_str);
+
+		if_ports_used_stats.ifpu_unattributed_wake_event_error += 1;
+	}
+}
+
+void
+if_ports_used_match_pkt(struct ifnet *ifp, struct __kern_packet *pkt)
+{
+	struct net_port_info npi = {};
+	bool found = false;
+
+	if ((pkt->pkt_pflags & PKT_F_WAKE_PKT) == 0) {
+		if_ports_used_stats.ifpu_match_wake_pkt_no_flag += 1;
+		os_log_error(OS_LOG_DEFAULT, "%s: called PKT_F_WAKE_PKT not set from %s",
+		    __func__, ifp != NULL ? ifp->if_xname : "");
+		return;
+	}
+	if (ifp == NULL) {
+		goto failed;
+	}
+
+	if_ports_used_stats.ifpu_ch_match_wake_pkt += 1;
+
+	npi.npi_if_index = ifp->if_index;
+	if (IFNET_IS_COMPANION_LINK(ifp)) {
+		npi.npi_flags |= NPIF_COMPLINK;
+	}
+	npi.npi_flags |= NPIF_CHANNEL; /* For logging */
+	switch (pkt->pkt_flow_ip_ver) {
+	case IPVERSION:
+		if_ports_used_stats.ifpu_ipv4_wake_pkt += 1;
+
+		npi.npi_flags |= NPIF_IPV4;
+		npi.npi_local_addr_in = pkt->pkt_flow_ipv4_dst;
+		npi.npi_foreign_addr_in = pkt->pkt_flow_ipv4_src;
+		break;
+	case IPV6_VERSION:
+		if_ports_used_stats.ifpu_ipv6_wake_pkt += 1;
+
+		npi.npi_flags |= NPIF_IPV6;
+		memcpy(&npi.npi_local_addr_in6, &pkt->pkt_flow_ipv6_dst,
+		    sizeof(struct in6_addr));
+		memcpy(&npi.npi_foreign_addr_in6, &pkt->pkt_flow_ipv6_src,
+		    sizeof(struct in6_addr));
+		break;
+	default:
+		if_ports_used_stats.ifpu_bad_family_wake_pkt += 1;
+
+		os_log(OS_LOG_DEFAULT, "%s: unexpected protocol family %u from %s",
+		    __func__, pkt->pkt_flow_ip_ver, ifp->if_xname);
+		goto failed;
+	}
+
+	/*
+	 * Check if this is a fragment that is not the first fragment
+	 */
+	if (pkt->pkt_flow_ip_is_frag && !pkt->pkt_flow_ip_is_first_frag) {
+		os_log(OS_LOG_DEFAULT, "%s: unexpected wake fragment from %s",
+		    __func__, ifp->if_xname);
+		npi.npi_flags |= NPIF_FRAG;
+		if_ports_used_stats.ifpu_frag_wake_pkt += 1;
+	}
+
+	switch (pkt->pkt_flow_ip_proto) {
+	case IPPROTO_TCP: {
+		if_ports_used_stats.ifpu_tcp_wake_pkt += 1;
+		npi.npi_flags |= NPIF_TCP;
+
+		/*
+		 * Cannot attribute a fragment that is not the first fragment as it
+		 * not have the TCP header
+		 */
+		if (npi.npi_flags & NPIF_FRAG) {
+			goto failed;
+		}
+		struct tcphdr *tcp = (struct tcphdr *)pkt->pkt_flow_tcp_hdr;
+		if (tcp == NULL) {
+			os_log(OS_LOG_DEFAULT, "%s: pkt with unassigned TCP header from %s",
+			    __func__, ifp->if_xname);
+			if_ports_used_stats.ifpu_incomplete_tcp_hdr_pkt += 1;
+			goto failed;
+		}
+		npi.npi_local_port = tcp->th_dport;
+		npi.npi_foreign_port = tcp->th_sport;
+		break;
+	}
+	case IPPROTO_UDP: {
+		if_ports_used_stats.ifpu_udp_wake_pkt += 1;
+		npi.npi_flags |= NPIF_UDP;
+
+		/*
+		 * Cannot attribute a fragment that is not the first fragment as it
+		 * not have the UDP header
+		 */
+		if (npi.npi_flags & NPIF_FRAG) {
+			goto failed;
+		}
+		struct udphdr *uh = (struct udphdr *)pkt->pkt_flow_udp_hdr;
+		if (uh == NULL) {
+			os_log(OS_LOG_DEFAULT, "%s: pkt with unassigned UDP header from %s",
+			    __func__, ifp->if_xname);
+			if_ports_used_stats.ifpu_incomplete_udp_hdr_pkt += 1;
+			goto failed;
+		}
+		npi.npi_local_port = uh->uh_dport;
+		npi.npi_foreign_port = uh->uh_sport;
+
+		/*
+		 * Defer matching of UDP NAT traversal to ip_input
+		 * (assumes IKE uses sockets)
+		 */
+		if (ntohs(npi.npi_local_port) == PORT_ISAKMP_NATT ||
+		    ntohs(npi.npi_foreign_port) == PORT_ISAKMP_NATT) {
+			if_ports_used_stats.ifpu_deferred_isakmp_natt_wake_pkt += 1;
+			if (net_wake_pkt_debug > 0) {
+				net_port_info_log_npi("defer ISAKMP_NATT matching", &npi);
+			}
+			return;
+		}
+		break;
+	}
+	case IPPROTO_ESP: {
+		/*
+		 * Let the ESP layer handle the wake packet
+		 */
+		if_ports_used_stats.ifpu_esp_wake_pkt += 1;
+		npi.npi_flags |= NPIF_ESP;
+		if (net_wake_pkt_debug > 0) {
+			net_port_info_log_npi("defer ESP matching", &npi);
+		}
+		return;
+	}
+	default:
+		if_ports_used_stats.ifpu_bad_proto_wake_pkt += 1;
+
+		os_log(OS_LOG_DEFAULT, "%s: unexpected IP protocol %u from %s",
+		    __func__, pkt->pkt_flow_ip_proto, ifp->if_xname);
+		goto failed;
+	}
+
+	found = net_port_info_find_match(&npi);
+	if (found) {
+		if_notify_wake_packet(ifp, &npi);
+	} else {
+		if_notify_unattributed_wake_pkt(ifp, pkt, &npi);
+	}
+	return;
+failed:
+	if_notify_unattributed_wake_pkt(ifp, pkt, &npi);
+}
+#endif /* SKYWALK */

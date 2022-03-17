@@ -56,6 +56,9 @@
 #include <netinet6/esp.h>
 #include <net/flowhash.h>
 #include <net/if_var.h>
+#if defined(SKYWALK) && defined(XNU_TARGET_OS_OSX)
+#include <skywalk/lib/net_filter_event.h>
+#endif /* defined(SKYWALK) && defined(XNU_TARGET_OS_OSX) */
 #include <sys/kauth.h>
 #include <sys/sysctl.h>
 #include <sys/sysproto.h>
@@ -6484,12 +6487,7 @@ necp_application_fillout_info_locked(uuid_t application_uuid, uuid_t real_applic
 	}
 
 	if (necp_kernel_application_policies_condition_mask & NECP_KERNEL_CONDITION_ENTITLEMENT && proc != NULL) {
-		kauth_cred_t proc_cred = kauth_cred_proc_ref(proc ? proc : current_proc());
-		info->cred_result = EPERM;
-		if (proc_cred != NULL) {
-			info->cred_result = priv_check_cred(proc_cred, PRIV_NET_PRIVILEGED_NECP_MATCH, 0);
-			kauth_cred_unref(&proc_cred);
-		}
+		info->cred_result = priv_check_cred(kauth_cred_get(), PRIV_NET_PRIVILEGED_NECP_MATCH, 0);
 
 		if (info->cred_result != 0) {
 			// Process does not have entitlement, check the parent process
@@ -7218,6 +7216,22 @@ necp_application_find_policy_match_internal(proc_t proc,
 	}
 
 	if (flags != NULL) {
+#if defined(SKYWALK) && defined(XNU_TARGET_OS_OSX)
+		enum net_filter_event_subsystems filters = net_filter_event_get_state();
+
+		if (filters & (NET_FILTER_EVENT_SOCKET | NET_FILTER_EVENT_INTERFACE | NET_FILTER_EVENT_IP)) {
+			*flags |= NECP_CLIENT_RESULT_FLAG_KEXT_FILTER_PRESENT;
+		}
+		if (filters & NET_FILTER_EVENT_PF) {
+			*flags |= NECP_CLIENT_RESULT_FLAG_PF_RULES_PRESENT;
+		}
+		if (filters & NET_FILTER_EVENT_ALF) {
+			*flags |= NECP_CLIENT_RESULT_FLAG_ALF_PRESENT;
+		}
+		if (filters & NET_FILTER_EVENT_PARENTAL_CONTROLS) {
+			*flags |= NECP_CLIENT_RESULT_FLAG_PARENTAL_CONTROLS_PRESENT;
+		}
+#endif /* defined(SKYWALK) && defined(XNU_TARGET_OS_OSX) */
 		if ((client_flags & NECP_CLIENT_PARAMETER_FLAG_LISTENER) == 0) {
 			// Check for local/direct
 			bool is_local = FALSE;

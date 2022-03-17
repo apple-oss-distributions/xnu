@@ -184,7 +184,9 @@
 #define XFEM_OPMASK     XCR0_OPMASK
 #define XFEM_ZMM_HI256  XCR0_ZMM_HI256
 #define XFEM_HI16_ZMM   XCR0_HI16_ZMM
-#define XFEM_ZMM        (XFEM_ZMM_HI256 | XFEM_HI16_ZMM | XFEM_OPMASK)
+#define XFEM_ZMM_OPMASK (XFEM_ZMM_HI256 | XFEM_HI16_ZMM | XFEM_OPMASK)
+/* Legacy name for Hypervisor.  Remove once it has updated. rdar://85833887&85613709 */
+#define XFEM_ZMM        XFEM_ZMM_OPMASK
 #define XCR0 (0)
 
 #define PMAP_PCID_PRESERVE (1ULL << 63)

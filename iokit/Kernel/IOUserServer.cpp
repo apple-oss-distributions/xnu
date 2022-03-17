@@ -5591,80 +5591,50 @@ _IOUserServerCheckInCancellationHandler *
 IOUserServerCheckInToken::setCancellationHandler(IOUserServerCheckInCancellationHandler handler,
     void* handlerArgs)
 {
-	bool runHandler = false;
 	_IOUserServerCheckInCancellationHandler * handlerObj = _IOUserServerCheckInCancellationHandler::withHandler(handler, handlerArgs);
 	if (!handlerObj) {
 		goto finish;
 	}
 
-	IOLockLock(fLock);
+	IORecursiveLockLock(gDriverKitLaunchLock);
+
+	assert(fState != kIOUserServerCheckInComplete);
 
 	if (fState == kIOUserServerCheckInCanceled) {
 		// Send cancel notification if we set the handler after this was canceled
-		runHandler = true;
+		handlerObj->call(this);
 	} else if (fState == kIOUserServerCheckInPending) {
 		fHandlers->setObject(handlerObj);
 	}
 
-	IOLockUnlock(fLock);
+	IORecursiveLockUnlock(gDriverKitLaunchLock);
 
 finish:
-
-	if (runHandler && handlerObj != NULL) {
-		handlerObj->call(this);
-	}
 	return handlerObj;
 }
 
 void
 IOUserServerCheckInToken::removeCancellationHandler(_IOUserServerCheckInCancellationHandler * handler)
 {
-	IOLockLock(fLock);
+	IORecursiveLockLock(gDriverKitLaunchLock);
 
-	if (fState == kIOUserServerCheckInPending) {
-		fHandlers->removeObject(handler);
-	}
+	fHandlers->removeObject(handler);
 
-	IOLockUnlock(fLock);
-}
-
-bool
-IOUserServerCheckInToken::setState(IOUserServerCheckInToken::State newState)
-{
-	assert(newState == kIOUserServerCheckInCanceled || newState == kIOUserServerCheckInComplete);
-
-	bool stateChanged = false;
-	IOLockLock(fLock);
-
-	if (fState == kIOUserServerCheckInPending && fState != newState) {
-		stateChanged = true;
-	}
-
-	if (stateChanged) {
-		fState = newState;
-	}
-
-	IOLockUnlock(fLock);
-
-	if (stateChanged) {
-		IORecursiveLockLock(gDriverKitLaunchLock);
-		if (gDriverKitLaunches != NULL) {
-			// Remove pending launch from list, if we have not shut down yet.
-			gDriverKitLaunches->removeObject(this);
-		}
-		IORecursiveLockUnlock(gDriverKitLaunchLock);
-	}
-
-	return stateChanged;
+	IORecursiveLockUnlock(gDriverKitLaunchLock);
 }
 
 void
 IOUserServerCheckInToken::cancel()
 {
-	bool changed = setState(kIOUserServerCheckInCanceled);
+	IORecursiveLockLock(gDriverKitLaunchLock);
 
-	if (changed) {
-		// Once canceled, new handlers cannot be added, so we don't need to use a lock here
+	if (fState == kIOUserServerCheckInPending) {
+		fState = kIOUserServerCheckInCanceled;
+		if (gDriverKitLaunches != NULL) {
+			// Remove pending launch from list, if we have not shut down yet.
+			gDriverKitLaunches->removeObject(this);
+		}
+
 		fHandlers->iterateObjects(^bool (OSObject * obj){
 			_IOUserServerCheckInCancellationHandler * handlerObj = OSDynamicCast(_IOUserServerCheckInCancellationHandler, obj);
 			if (handlerObj) {
@@ -5674,16 +5644,27 @@ IOUserServerCheckInToken::cancel()
 		});
 		fHandlers->flushCollection();
 	}
+
+	IORecursiveLockUnlock(gDriverKitLaunchLock);
 }
 
 void
 IOUserServerCheckInToken::complete()
 {
-	bool changed = setState(kIOUserServerCheckInComplete);
-	if (changed) {
+	IORecursiveLockLock(gDriverKitLaunchLock);
+
+	if (fState == kIOUserServerCheckInPending && --fPendingCount == 0) {
+		fState = kIOUserServerCheckInComplete;
+		if (gDriverKitLaunches != NULL) {
+			// Remove pending launch from list, if we have not shut down yet.
+			gDriverKitLaunches->removeObject(this);
+		}
+
 		// No need to hold on to the cancellation handlers
 		fHandlers->flushCollection();
 	}
+
+	IORecursiveLockUnlock(gDriverKitLaunchLock);
 }
 
 bool
@@ -5710,12 +5691,8 @@ IOUserServerCheckInToken::init(const OSSymbol * serverName, OSNumber * serverTag
 		return false;
 	}
 
-	fLock = IOLockAlloc();
-	if (!fLock) {
-		return false;
-	}
-
 	fState = kIOUserServerCheckInPending;
+	fPendingCount = 1;
 
 	return true;
 }
@@ -5726,9 +5703,6 @@ IOUserServerCheckInToken::free()
 	OSSafeReleaseNULL(fServerName);
 	OSSafeReleaseNULL(fServerTag);
 	OSSafeReleaseNULL(fHandlers);
-	if (fLock != NULL) {
-		IOLockFree(fLock);
-	}
 
 	OSObject::free();
 }
@@ -5826,6 +5800,29 @@ finish:
 	return me;
 }
 
+/*
+ * IOUserServerCheckInTokens are used to track dext launches. They have three possible states:
+ *
+ * - Pending: A dext launch is pending
+ * - Canceled: Dext launch failed
+ * - Complete: Dext launch is complete
+ *
+ * A token can be shared among multiple IOServices that are waiting for dexts if the IOUserServerName
+ * is the same. This allows dexts to be reused and host multiple services. All pending tokens are stored
+ * in gDriverKitLaunches and we check here before creating a new token when launching a dext.
+ *
+ * A token starts in the pending state with a pending count of 1. When we reuse a token, we increase the
+ * pending count of the token.
+ *
+ * The token is sent to userspace as a mach port through kernelmanagerd/driverkitd to the dext. The dext then
+ * uses that token to check in to the kernel. If any part of the dext launch failed (dext crashed, kmd crashed, etc.)
+ * we get a no-senders notification for the token in the kernel and the token goes into the Canceled state.
+ *
+ * Once the dext checks in to the kernel, we decrement the pending count for the token. When the pending count reaches
+ * 0, the token goes into the Complete state. So if the token is in the Complete state, there are no kernel matching threads
+ * waiting on the dext to check in.
+ */
+
 IOUserServerCheckInToken *
 IOUserServerCheckInToken::findExistingToken(const OSSymbol * serverName)
 {
@@ -5842,6 +5839,8 @@ IOUserServerCheckInToken::findExistingToken(const OSSymbol * serverName)
 		        // Check if server name matches
 		        const OSSymbol * tokenServerName = token->fServerName;
 		        if (tokenServerName->isEqualTo(serverName)) {
+		                assert(token->fState == kIOUserServerCheckInPending);
+		                token->fPendingCount++;
 		                result = token;
 		                result->retain();
 			}
@@ -5862,7 +5861,7 @@ IOUserServerCheckInToken::cancelAll()
 	IORecursiveLockLock(gDriverKitLaunchLock);
 	tokensToCancel = gDriverKitLaunches;
 	gDriverKitLaunches = NULL;
-	IORecursiveLockUnlock(gDriverKitLaunchLock);
+
 
 	tokensToCancel->iterateObjects(^(OSObject *obj) {
 		IOUserServerCheckInToken * token = OSDynamicCast(IOUserServerCheckInToken, obj);
@@ -5871,6 +5870,8 @@ IOUserServerCheckInToken::cancelAll()
 		}
 		return false;
 	});
+
+	IORecursiveLockUnlock(gDriverKitLaunchLock);
 
 	OSSafeReleaseNULL(tokensToCancel);
 }

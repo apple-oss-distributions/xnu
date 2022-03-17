@@ -348,6 +348,7 @@ struct c_sv_hash_entry c_segment_sv_hash_table[C_SV_HASH_SIZE]  __attribute__ ((
 static boolean_t compressor_needs_to_swap(void);
 static void vm_compressor_swap_trigger_thread(void);
 static void vm_compressor_do_delayed_compactions(boolean_t);
+static void vm_compressor_process_major_segments(void);
 static void vm_compressor_compact_and_swap(boolean_t);
 static void vm_compressor_age_swapped_in_segments(boolean_t);
 
@@ -2052,6 +2053,11 @@ c_seg_major_compact(
 		assert(c_seg_src->c_slots_used);
 		c_seg_src->c_slots_used--;
 
+		if (!c_seg_src->c_swappedin) {
+			/* Pessimistically lose swappedin status when non-swappedin pages are added. */
+			c_seg_dst->c_swappedin = false;
+		}
+
 		if (c_seg_dst->c_nextoffset >= c_seg_off_limit || c_seg_dst->c_nextslot >= C_SLOT_MAX_INDEX) {
 			/* dest segment is now full */
 			keep_compacting = FALSE;
@@ -2696,6 +2702,7 @@ vm_compressor_flush(void)
 	clock_sec_t     now_sec;
 	clock_nsec_t    now_nsec;
 	uint64_t        nsec;
+	c_segment_t     c_seg, c_seg_next;
 
 	HIBLOG("vm_compressor_flush - starting\n");
 
@@ -2728,6 +2735,23 @@ vm_compressor_flush(void)
 
 	vm_swap_put_failures_at_start = vm_swap_put_failures;
 
+	/*
+	 * We are about to hibernate and so we want all segments flushed to disk.
+	 * Segments that are on the major compaction queue won't be considered in
+	 * the vm_compressor_compact_and_swap() pass. So we need to bring them to
+	 * the ageQ for consideration.
+	 */
+	if (!queue_empty(&c_major_list_head)) {
+		c_seg = (c_segment_t)queue_first(&c_major_list_head);
+
+		while (!queue_end(&c_major_list_head, (queue_entry_t)c_seg)) {
+			c_seg_next = (c_segment_t) queue_next(&c_seg->c_age_list);
+			lck_mtx_lock_spin_always(&c_seg->c_lock);
+			c_seg_switch_state(c_seg, C_ON_AGE_Q, FALSE);
+			lck_mtx_unlock_always(&c_seg->c_lock);
+			c_seg = c_seg_next;
+		}
+	}
 	vm_compressor_compact_and_swap(TRUE);
 
 	while (!queue_empty(&c_swapout_list_head)) {
@@ -3023,6 +3047,8 @@ vm_compressor_compact_and_swap(boolean_t flush_all)
 
 		fastwake_warmup = FALSE;
 	}
+
+	vm_compressor_process_major_segments();
 
 	/*
 	 * it's possible for the c_age_list_head to be empty if we
@@ -3684,6 +3710,23 @@ c_current_seg_filled(c_segment_t c_seg, c_segment_t *current_chead)
 }
 
 
+static void
+vm_compressor_process_major_segments(void)
+{
+	c_segment_t c_seg = NULL, c_seg_next = NULL;
+	if (!queue_empty(&c_major_list_head)) {
+		c_seg = (c_segment_t)queue_first(&c_major_list_head);
+
+		while (!queue_end(&c_major_list_head, (queue_entry_t)c_seg)) {
+			c_seg_next = (c_segment_t) queue_next(&c_seg->c_age_list);
+			lck_mtx_lock_spin_always(&c_seg->c_lock);
+			c_seg_switch_state(c_seg, C_ON_AGE_Q, FALSE);
+			lck_mtx_unlock_always(&c_seg->c_lock);
+			c_seg = c_seg_next;
+		}
+	}
+}
+
 /*
  * returns with c_seg locked
  */
@@ -3724,6 +3767,7 @@ c_seg_swapin_requeue(c_segment_t c_seg, boolean_t has_data, boolean_t minor_comp
 		c_seg_switch_state(c_seg, C_ON_BAD_Q, FALSE);
 	}
 	c_seg->c_swappedin_ts = (uint32_t)sec;
+	c_seg->c_swappedin = true;
 
 	lck_mtx_unlock_always(c_list_lock);
 }
@@ -4507,6 +4551,12 @@ bypass_busy_check:
 
 	assert(c_seg->c_slots_used);
 	c_seg->c_slots_used--;
+	if (dst && c_seg->c_swappedin) {
+		task_t task = current_task();
+		if (task) {
+			ledger_credit(task->ledger, task_ledgers.swapins, PAGE_SIZE);
+		}
+	}
 
 	PACK_C_SIZE(cs, 0);
 
@@ -5099,6 +5149,11 @@ Relookup_src:
 
 	assert(c_seg_src->c_slots_used);
 	c_seg_src->c_slots_used--;
+
+	if (!c_seg_src->c_swappedin) {
+		/* Pessimistically lose swappedin status when non-swappedin pages are added. */
+		c_seg_dst->c_swappedin = false;
+	}
 
 	if (c_indx < c_seg_src->c_firstemptyslot) {
 		c_seg_src->c_firstemptyslot = c_indx;

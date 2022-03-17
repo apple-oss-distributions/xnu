@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2007-2019 Apple Inc. All rights reserved.
+ * Copyright (c) 2007-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -73,6 +73,9 @@
 
 #include <libkern/libkern.h>
 
+#if SKYWALK
+#include <skywalk/os_skywalk_private.h>
+#endif /* SKYWALK */
 
 u_int32_t classq_verbose = 0;   /* more noise if greater than 1 */
 
@@ -89,6 +92,11 @@ _qinit(class_queue_t *q, int type, int lim, classq_pkt_type_t ptype)
 		MBUFQ_INIT(&qmbufq(q));
 		break;
 
+#if SKYWALK
+	case QP_PACKET:
+		KPKTQ_INIT(&qkpktq(q));
+		break;
+#endif /* SKYWALK */
 
 	default:
 		VERIFY(0);
@@ -119,6 +127,14 @@ _addq(class_queue_t *q, classq_pkt_t *pkt)
 		break;
 	}
 
+#if SKYWALK
+	case QP_PACKET: {
+		struct __kern_packet *kp = pkt->cp_kpkt;
+		KPKTQ_ENQUEUE(&qkpktq(q), kp);
+		size = kp->pkt_length;
+		break;
+	}
+#endif /* SKYWALK */
 
 	default:
 		VERIFY(0);
@@ -146,6 +162,14 @@ _addq_multi(class_queue_t *q, classq_pkt_t *pkt_head, classq_pkt_t *pkt_tail,
 		break;
 	}
 
+#if SKYWALK
+	case QP_PACKET: {
+		struct __kern_packet *kp_head = pkt_head->cp_kpkt;
+		struct __kern_packet *kp_tail = pkt_tail->cp_kpkt;
+		KPKTQ_ENQUEUE_MULTI(&qkpktq(q), kp_head, kp_tail, cnt);
+		break;
+	}
+#endif /* SKYWALK */
 
 	default:
 		VERIFY(0);
@@ -173,6 +197,16 @@ _getq(class_queue_t *q, classq_pkt_t *pkt)
 		break;
 	}
 
+#if SKYWALK
+	case QP_PACKET: {
+		KPKTQ_DEQUEUE(&qkpktq(q), pkt->cp_kpkt);
+		if (__probable(pkt->cp_kpkt != NULL)) {
+			CLASSQ_PKT_INIT_PACKET(pkt, pkt->cp_kpkt);
+			pkt_len = pkt->cp_kpkt->pkt_length;
+		}
+		break;
+	}
+#endif /* SKYWALK */
 
 	default:
 		VERIFY(0);
@@ -227,6 +261,27 @@ _getq_flow_or_scidx(class_queue_t *q, classq_pkt_t *pkt, u_int32_t val,
 		break;
 	}
 
+#if SKYWALK
+	case QP_PACKET: {
+		struct __kern_packet *kp, *kp_tmp;
+
+		KPKTQ_FOREACH_SAFE(kp, &qkpktq(q), kp_tmp) {
+			if ((isflowid && (val == 0 ||
+			    (kp->pkt_flow_token == val))) || (!isflowid &&
+			    MBUF_SCIDX(kp->pkt_svc_class) < val)) {
+				/* remove it from the class queue */
+				KPKTQ_REMOVE(&qkpktq(q), kp);
+				KPKTQ_NEXT(kp) = NULL;
+				break;
+			}
+		}
+		if (__probable(kp != NULL)) {
+			CLASSQ_PKT_INIT_PACKET(pkt, kp);
+			pkt_len = kp->pkt_length;
+		}
+		break;
+	}
+#endif /* SKYWALK */
 
 	default:
 		VERIFY(0);
@@ -281,6 +336,21 @@ _getq_all(class_queue_t *q, classq_pkt_t *first, classq_pkt_t *last,
 		MBUFQ_INIT(&qmbufq(q));
 		break;
 
+#if SKYWALK
+	case QP_PACKET:
+		first->cp_kpkt = KPKTQ_FIRST(&qkpktq(q));
+		if (__probable(first->cp_kpkt != NULL)) {
+			CLASSQ_PKT_INIT_PACKET(first, first->cp_kpkt);
+		}
+		if (last != NULL) {
+			last->cp_kpkt = KPKTQ_LAST(&qkpktq(q));
+			if (__probable(last->cp_kpkt != NULL)) {
+				CLASSQ_PKT_INIT_PACKET(last, last->cp_kpkt);
+			}
+		}
+		KPKTQ_INIT(&qkpktq(q));
+		break;
+#endif /* SKYWALK */
 
 	default:
 		VERIFY(0);
@@ -351,6 +421,9 @@ _getq_tail(class_queue_t *q, classq_pkt_t *pkt)
 		}
 		break;
 
+#if SKYWALK
+	case QP_PACKET: /* XXX: Add support for Kernel packet when needed */
+#endif /* SKYWALK */
 	default:
 		VERIFY(0);
 		/* NOTREACHED */
@@ -431,6 +504,9 @@ _getq_random(class_queue_t *q, classq_pkt_t *pkt)
 		}
 		break;
 
+#if SKYWALK
+	case QP_PACKET: /* XXX: Add support for Kernel packet when needed */
+#endif /* SKYWALK */
 	default:
 		VERIFY(0);
 		/* NOTREACHED */
@@ -490,6 +566,9 @@ _removeq(class_queue_t *q, classq_pkt_t *pkt)
 		_removeq_mbuf(q, pkt->cp_mbuf);
 		break;
 
+#if SKYWALK
+	case QP_PACKET: /* XXX: Add support for Kernel packet when needed */
+#endif /* SKYWALK */
 	default:
 		VERIFY(0);
 		/* NOTREACHED */
@@ -553,6 +632,56 @@ _flushq_flow_mbuf(class_queue_t *q, u_int32_t flow, u_int32_t *cnt,
 	}
 }
 
+#if SKYWALK
+static inline void
+_flushq_flow_kpkt(class_queue_t *q, u_int32_t flow, u_int32_t *cnt,
+    u_int32_t *len)
+{
+	KPKTQ_HEAD(pq_freeq) freeq;
+	struct __kern_packet *p, *p_tmp;
+	u_int32_t c = 0, l = 0;
+
+	KPKTQ_INIT(&freeq);
+
+	KPKTQ_FOREACH_SAFE(p, &qkpktq(q), p_tmp) {
+		if (flow == 0 || p->pkt_flow_token == flow) {
+			/* remove it from the class queue */
+			KPKTQ_REMOVE(&qkpktq(q), p);
+			KPKTQ_NEXT(p) = NULL;
+
+			/* and add it to the free queue */
+			KPKTQ_ENQUEUE(&freeq, p);
+
+			l += p->pkt_length;
+			c++;
+		}
+	}
+	VERIFY(c == 0 || !KPKTQ_EMPTY(&freeq));
+
+	if (c > 0) {
+		VERIFY(qlen(q) >= c);
+		qlen(q) -= c;
+
+		/* qsize is an approximation, so adjust if necessary */
+		if (((int)qsize(q) - l) > 0) {
+			qsize(q) -= l;
+		} else if (qsize(q) != 0) {
+			qsize(q) = 0;
+		}
+	}
+
+	if (!KPKTQ_EMPTY(&freeq)) {
+		pp_free_packet_chain(KPKTQ_FIRST(&freeq), NULL);
+	}
+
+	if (cnt != NULL) {
+		*cnt = c;
+	}
+	if (len != NULL) {
+		*len = l;
+	}
+}
+#endif /* SKYWALK */
 
 void
 _flushq_flow(class_queue_t *q, u_int32_t flow, u_int32_t *cnt, u_int32_t *len)
@@ -562,6 +691,12 @@ _flushq_flow(class_queue_t *q, u_int32_t flow, u_int32_t *cnt, u_int32_t *len)
 		_flushq_flow_mbuf(q, flow, cnt, len);
 		break;
 
+#if SKYWALK
+	case QP_PACKET:
+		_flushq_flow_kpkt(q, flow, cnt, len);
+		break;
+
+#endif /* SKYWALK */
 	default:
 		VERIFY(0);
 		/* NOTREACHED */

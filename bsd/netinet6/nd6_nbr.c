@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2020 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -1985,6 +1985,9 @@ nd6_dad_timer(struct ifaddr *ifa)
 			    if_name(ia->ia_ifp));
 			nd6_dad_duplicated(ifa);
 			/* (*dp) will be freed in nd6_dad_duplicated() */
+#if SKYWALK
+			SK_NXS_MS_IF_ADDR_GENCNT_INC(ia->ia_ifp);
+#endif /* SKYWALK */
 		} else if (dad_enhanced != 0 &&
 		    dp->dad_ns_lcount > 0 &&
 		    dp->dad_ns_lcount > dp->dad_loopbackprobe) {
@@ -2054,6 +2057,9 @@ nd6_dad_timer(struct ifaddr *ifa)
 			in6_post_msg(ia->ia_ifp, KEV_INET6_NEW_USER_ADDR, ia,
 			    dp->dad_lladdr);
 			nd6_dad_detach(dp, ifa);
+#if SKYWALK
+			SK_NXS_MS_IF_ADDR_GENCNT_INC(ia->ia_ifp);
+#endif /* SKYWALK */
 		}
 	}
 

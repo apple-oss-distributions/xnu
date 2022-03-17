@@ -1301,6 +1301,8 @@ vm_swapout_finish(c_segment_t c_seg, uint64_t f_offset, uint32_t size, kern_retu
 
 		counter_add(&vm_statistics_swapouts, size >> PAGE_SHIFT);
 
+		c_seg->c_swappedin = false;
+
 		if (c_seg->c_bytes_used) {
 			OSAddAtomic64(-c_seg->c_bytes_used, &compressor_bytes_used);
 		}
@@ -2152,6 +2154,8 @@ ReTry_for_cseg:
 		counter_add(&vm_statistics_swapouts, c_size >> PAGE_SHIFT);
 
 		lck_mtx_lock_spin_always(&c_seg->c_lock);
+
+		c_seg->c_swappedin = false;
 
 		assert(C_SEG_IS_ONDISK(c_seg));
 		/*

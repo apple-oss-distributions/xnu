@@ -1083,6 +1083,7 @@ struct _task_ledger_indices {
 #if CONFIG_PHYS_WRITE_ACCT
 	int fs_metadata_writes;
 #endif /* CONFIG_PHYS_WRITE_ACCT */
+	int swapins;
 };
 
 /*
@@ -1101,9 +1102,9 @@ struct _task_ledger_indices {
  * Otherwise, PPL systems will panic at boot.
  */
 #if DEVELOPMENT || DEBUG
-#define TASK_LEDGER_NUM_SMALL_INDICES 32
+#define TASK_LEDGER_NUM_SMALL_INDICES 33
 #else
-#define TASK_LEDGER_NUM_SMALL_INDICES 28
+#define TASK_LEDGER_NUM_SMALL_INDICES 29
 #endif /* DEVELOPMENT || DEBUG */
 extern struct _task_ledger_indices task_ledgers;
 

@@ -56,7 +56,14 @@
 #include <kern/zalloc.h>
 #include <os/log.h>
 
+#if SKYWALK && CONFIG_NEXUS_KERNEL_PIPE
+#include <skywalk/os_skywalk_private.h>
+#include <skywalk/nexus/flowswitch/nx_flowswitch.h>
+#include <skywalk/nexus/netif/nx_netif.h>
+#define UTUN_NEXUS 1
+#else // SKYWALK && CONFIG_NEXUS_KERNEL_PIPE
 #define UTUN_NEXUS 0
+#endif // SKYWALK && CONFIG_NEXUS_KERNEL_PIPE
 
 #if UTUN_NEXUS
 static nexus_controller_t utun_ncd;
@@ -2747,6 +2754,21 @@ utun_framer(ifnet_t interface,
 	// place protocol number at the beginning of the mbuf
 	*(protocol_family_t *)mbuf_data(*packet) = *(protocol_family_t *)(uintptr_t)(size_t)frame_type;
 
+#if NECP
+	// Add process uuid if applicable
+	if (pcb->utun_flags & UTUN_FLAGS_ENABLE_PROC_UUID) {
+		if (m_pktlen(*packet) >= (int32_t)UTUN_HEADER_SIZE(pcb)) {
+			u_int8_t *header = (u_int8_t *)mbuf_data(*packet);
+			int uuid_err = necp_get_app_uuid_from_packet(*packet, (void *)(header + sizeof(u_int32_t)));
+			if (uuid_err != 0) {
+				os_log_error(OS_LOG_DEFAULT, "Received app uuid error %d for %s%d\n", uuid_err, ifnet_name(pcb->utun_ifp), ifnet_unit(pcb->utun_ifp));
+			}
+		} else {
+			os_log_error(OS_LOG_DEFAULT, "Cannot set proc uuid for %s%d, size %d < %zu\n", ifnet_name(pcb->utun_ifp), ifnet_unit(pcb->utun_ifp),
+			    m_pktlen(*packet), UTUN_HEADER_SIZE(pcb));
+		}
+	}
+#endif // NECP
 
 	return 0;
 }

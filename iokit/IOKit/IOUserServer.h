@@ -307,7 +307,6 @@ public:
 
 private:
 	static IOUserServerCheckInToken * findExistingToken(const OSSymbol * serverName);
-	bool setState(IOUserServerCheckInToken::State state);
 	bool init(const OSSymbol * userServerName, OSNumber * serverTag);
 
 	friend class IOUserServer;
@@ -316,10 +315,10 @@ private:
 
 private:
 	IOUserServerCheckInToken::State          fState;
+	size_t                                   fPendingCount;
 	const OSSymbol                         * fServerName;
 	OSNumber                               * fServerTag;
 	OSSet                                  * fHandlers;
-	IOLock                                 * fLock;
 };
 
 extern "C" kern_return_t

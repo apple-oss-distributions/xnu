@@ -1210,14 +1210,13 @@ act_get_state_to_user(
 	return thread_get_state_to_user(thread, flavor, state, count);
 }
 
-/* returns the CPU number this caused an AST check on, or -1 */
-static int
+static void
 act_set_ast(
-	thread_t thread,
-	ast_t    ast)
+	thread_t   thread,
+	ast_t      ast,
+	ast_gen_t *gens)
 {
 	spl_t s = splsched();
-	int caused_check_on_cpu = -1;
 
 	if (thread == current_thread()) {
 		thread_ast_set(thread, ast);
@@ -1231,15 +1230,15 @@ act_set_ast(
 		if (processor != PROCESSOR_NULL &&
 		    processor->state == PROCESSOR_RUNNING &&
 		    processor->active_thread == thread) {
+			if (gens) {
+				ast_generation_get(processor, gens);
+			}
 			cause_ast_check(processor);
-			caused_check_on_cpu = processor->cpu_id;
 		}
 		thread_unlock(thread);
 	}
 
 	splx(s);
-
-	return caused_check_on_cpu;
 }
 
 /*
@@ -1278,10 +1277,9 @@ act_set_debug_assert(void)
 }
 
 void
-act_set_astbsd(
-	thread_t        thread)
+act_set_astbsd(thread_t thread)
 {
-	act_set_ast( thread, AST_BSD );
+	act_set_ast(thread, AST_BSD, NULL);
 }
 
 void
@@ -1307,15 +1305,14 @@ act_clear_astkevent(thread_t thread, uint16_t bits)
 	return cur & bits;
 }
 
-int
-act_set_ast_reset_pcs(thread_t thread)
+void
+act_set_ast_reset_pcs(thread_t thread, ast_gen_t gens[])
 {
-	return act_set_ast(thread, AST_RESET_PCS);
+	act_set_ast(thread, AST_RESET_PCS, gens);
 }
 
 void
-act_set_kperf(
-	thread_t        thread)
+act_set_kperf(thread_t thread)
 {
 	/* safety check */
 	if (thread != current_thread()) {
@@ -1324,7 +1321,7 @@ act_set_kperf(
 		}
 	}
 
-	act_set_ast( thread, AST_KPERF );
+	act_set_ast(thread, AST_KPERF, NULL);
 }
 
 #if CONFIG_MACF
@@ -1332,14 +1329,14 @@ void
 act_set_astmacf(
 	thread_t        thread)
 {
-	act_set_ast( thread, AST_MACF);
+	act_set_ast( thread, AST_MACF, NULL);
 }
 #endif
 
 void
 act_set_astledger(thread_t thread)
 {
-	act_set_ast(thread, AST_LEDGER);
+	act_set_ast(thread, AST_LEDGER, NULL);
 }
 
 /*
@@ -1359,17 +1356,17 @@ act_set_astledger_async(thread_t thread)
 void
 act_set_io_telemetry_ast(thread_t thread)
 {
-	act_set_ast(thread, AST_TELEMETRY_IO);
+	act_set_ast(thread, AST_TELEMETRY_IO, NULL);
 }
 
 void
 act_set_macf_telemetry_ast(thread_t thread)
 {
-	act_set_ast(thread, AST_TELEMETRY_MACF);
+	act_set_ast(thread, AST_TELEMETRY_MACF, NULL);
 }
 
 void
 act_set_astproc_resource(thread_t thread)
 {
-	act_set_ast(thread, AST_PROC_RESOURCE);
+	act_set_ast(thread, AST_PROC_RESOURCE, NULL);
 }

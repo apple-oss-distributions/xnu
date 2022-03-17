@@ -4439,6 +4439,49 @@ zone_fill_initially(zone_t zone, vm_size_t nelems)
 	zcram(zone, addr, pages, ZONE_ADDR_NATIVE);
 }
 
+#if ZSECURITY_CONFIG(SAD_FENG_SHUI)
+__attribute__((noinline))
+static void
+zone_scramble_va_and_unlock(
+	zone_t                      z,
+	struct zone_page_metadata  *meta,
+	uint32_t                    runs,
+	uint32_t                    pages,
+	uint32_t                    chunk_pages)
+{
+	struct zone_page_metadata *arr[ZONE_CHUNK_ALLOC_SIZE / 4096];
+
+	/*
+	 * Fisher–Yates shuffle, for an array with indices [0, n)
+	 *
+	 * for i from n−1 downto 1 do
+	 *     j ← random integer such that 0 ≤ j ≤ i
+	 *     exchange a[j] and a[i]
+	 *
+	 * The point here is that early allocations aren't at a fixed
+	 * distance from each other.
+	 */
+	for (uint32_t i = 0, j = 0; i < runs; i++, j += chunk_pages) {
+		arr[i] = meta + j;
+	}
+
+	for (uint32_t i = runs - 1; i > 0; i--) {
+		uint32_t j = zalloc_random_uniform(0, i + 1);
+
+		meta   = arr[j];
+		arr[j] = arr[i];
+		arr[i] = meta;
+	}
+
+	zone_lock(z);
+
+	for (uint32_t i = 0; i < runs; i++) {
+		zone_meta_queue_push(z, &z->z_pageq_va, arr[i]);
+	}
+	z->z_va_cur += z->z_percpu ? runs : pages;
+}
+#endif
+
 static void
 zone_allocate_va_locked(zone_t z, zalloc_flags_t flags)
 {
@@ -4494,38 +4537,7 @@ zone_allocate_va_locked(zone_t z, zalloc_flags_t flags)
 
 #if ZSECURITY_CONFIG(SAD_FENG_SHUI)
 	if (__improbable(zone_caching_disabled < 0)) {
-		struct zone_page_metadata *arr[ZONE_CHUNK_ALLOC_SIZE / 4096];
-
-		/*
-		 * Fisher–Yates shuffle, for an array with indices [0, n)
-		 *
-		 * for i from n−1 downto 1 do
-		 *     j ← random integer such that 0 ≤ j ≤ i
-		 *     exchange a[j] and a[i]
-		 *
-		 * The point here is that early allocations aren't at a fixed
-		 * distance from each other.
-		 */
-		for (uint32_t i = 0, pg = 0; i < runs; pg += chunk_pages, i++) {
-			arr[i] = meta + pg;
-		}
-
-		for (uint32_t i = runs - 1; i > 0; i--) {
-			uint32_t j = zalloc_random_uniform(0, i + 1);
-
-			meta   = arr[j];
-			arr[j] = arr[i];
-			arr[i] = meta;
-		}
-
-		zone_lock(z);
-
-		for (uint32_t i = 0, pg = 0; i < runs; pg += chunk_pages, i++) {
-			zone_meta_queue_push(z, &z->z_pageq_va, arr[i]);
-		}
-		z->z_va_cur += z->z_percpu ? runs : pages;
-
-		return;
+		return zone_scramble_va_and_unlock(z, meta, runs, pages, chunk_pages);
 	}
 #endif /* ZSECURITY_CONFIG(SAD_FENG_SHUI) */
 

@@ -5129,6 +5129,9 @@ sosetoptlock(struct socket *so, struct sockopt *sopt, int dolock)
 			} else {
 				so->so_options &= ~sopt->sopt_name;
 			}
+#if SKYWALK
+			inp_update_netns_flags(so);
+#endif /* SKYWALK */
 			break;
 
 		case SO_SNDBUF:
@@ -7853,6 +7856,9 @@ so_set_recv_anyif(struct socket *so, int optval)
 		} else {
 			sotoinpcb(so)->inp_flags &= ~INP_RECV_ANYIF;
 		}
+#if SKYWALK
+		inp_update_netns_flags(so);
+#endif /* SKYWALK */
 	}
 
 

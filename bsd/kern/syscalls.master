@@ -811,6 +811,20 @@
 501	AUE_NULL	ALL	{ int enosys(void); }
 502	AUE_NULL	ALL	{ int enosys(void); }
 #endif /* NECP */
+#if SKYWALK
+503	AUE_NEXUS	ALL	{ int __nexus_open(struct nxctl_init *init, uint32_t init_len); }
+504	AUE_NEXUS	ALL	{ int __nexus_register(int ctl, struct nxprov_reg *reg, uint32_t reg_len, uuid_t *prov_uuid, uint32_t prov_uuid_len); }
+505	AUE_NEXUS	ALL	{ int __nexus_deregister(int ctl, uuid_t prov_uuid, uint32_t prov_uuid_len); }
+506	AUE_NEXUS	ALL	{ int __nexus_create(int ctl, uuid_t prov_uuid, uint32_t prov_uuid_len, uuid_t *nx_uuid, uint32_t nx_uuid_len); }
+507	AUE_NEXUS	ALL	{ int __nexus_destroy(int ctl, uuid_t nx_uuid, uint32_t nx_uuid_len); }
+508	AUE_NEXUS	ALL	{ int __nexus_get_opt(int ctl, uint32_t opt, void *aoptval, uint32_t *aoptlen); }
+509	AUE_NEXUS	ALL	{ int __nexus_set_opt(int ctl, uint32_t opt, const void *aoptval, uint32_t optlen); }
+510	AUE_CHANNEL	ALL	{ int __channel_open(struct ch_init *init, uint32_t init_len); }
+511	AUE_CHANNEL	ALL	{ int __channel_get_info(int c, struct ch_info *cinfo, uint32_t cinfolen); }
+512	AUE_CHANNEL	ALL	{ int __channel_sync(int c, int mode, int flags); }
+513	AUE_CHANNEL	ALL	{ int __channel_get_opt(int c, uint32_t opt, void *aoptval, uint32_t *aoptlen); }
+514	AUE_CHANNEL	ALL	{ int __channel_set_opt(int c, uint32_t opt, const void *aoptval, uint32_t optlen); }
+#else
 503	AUE_NULL	ALL	{ int enosys(void); }
 504	AUE_NULL	ALL	{ int enosys(void); }
 505	AUE_NULL	ALL	{ int enosys(void); }
@@ -823,6 +837,7 @@
 512	AUE_NULL	ALL	{ int enosys(void); }
 513	AUE_NULL	ALL	{ int enosys(void); }
 514	AUE_NULL	ALL	{ int enosys(void); }
+#endif /* !SKYWALK */
 515	AUE_NULL	ALL	{ int ulock_wait(uint32_t operation, void *addr, uint64_t value, uint32_t timeout) NO_SYSCALL_STUB; }
 516	AUE_NULL	ALL	{ int ulock_wake(uint32_t operation, void *addr, uint64_t wake_value) NO_SYSCALL_STUB; }
 517	AUE_FCLONEFILEAT	ALL     { int fclonefileat(int src_fd, int dst_dirfd, user_addr_t dst, uint32_t flags); }

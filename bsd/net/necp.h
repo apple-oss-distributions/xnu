@@ -914,6 +914,9 @@ struct necp_drop_dest_policy {
 #include <net/network_agent.h>
 #include <net/ethernet.h>
 #include <os/log.h>
+#if SKYWALK
+#include <skywalk/namespace/netns.h>
+#endif /* SKYWALK */
 
 
 SYSCTL_DECL(_net_necp);
@@ -1301,6 +1304,9 @@ extern int necp_client_register_socket_flow(pid_t pid, uuid_t client_id, struct 
 
 extern int necp_client_register_socket_listener(pid_t pid, uuid_t client_id, struct inpcb *inp);
 
+#if SKYWALK
+extern int necp_client_get_netns_flow_info(uuid_t client_id, struct ns_flow_info *flow_info);
+#endif /* SKYWALK */
 
 extern int necp_client_assert_bb_radio_manager(uuid_t client_id, bool assert);
 
@@ -1332,7 +1338,11 @@ struct necp_client_nexus_parameters {
 	pid_t pid;
 	pid_t epid;
 	uuid_t euuid;
+#if SKYWALK
+	netns_token port_reservation;
+#else /* !SKYWALK */
 	void *reserved;
+#endif /* !SKYWALK */
 	union necp_sockaddr_union local_addr;
 	union necp_sockaddr_union remote_addr;
 	u_int8_t ip_protocol;
@@ -1378,6 +1388,14 @@ typedef void (*necp_client_flow_cb)(void *handle, int action, uint32_t interface
 
 extern void necp_client_reap_caches(boolean_t purge);
 
+#if SKYWALK
+struct skmem_arena_mmap_info;
+
+extern pid_t necp_client_get_proc_pid_from_arena_info(struct skmem_arena_mmap_info *arena_info);
+
+extern void necp_client_early_close(uuid_t client_id); // Cause a single client to close stats, etc
+
+#endif /* SKYWALK */
 
 #endif /* BSD_KERNEL_PRIVATE */
 

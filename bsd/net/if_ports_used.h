@@ -200,6 +200,13 @@ void if_ports_used_update_wakeuuid(struct ifnet *);
 struct inpcb;
 bool if_ports_used_add_inpcb(const uint32_t ifindex, const struct inpcb *inp);
 
+#if SKYWALK
+struct ns_flow_info;
+struct flow_entry;
+bool if_ports_used_add_flow_entry(const struct flow_entry *fe, const uint32_t ifindex,
+    const struct ns_flow_info *nfi, uint32_t ns_flags);
+void if_ports_used_match_pkt(struct ifnet *ifp, struct __kern_packet *pkt);
+#endif /* SKYWALK */
 
 void if_ports_used_match_mbuf(struct ifnet *ifp, protocol_family_t proto_family,
     struct mbuf *m);

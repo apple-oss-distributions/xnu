@@ -120,6 +120,9 @@ extern int esp_udp_encap_port;
 #include <net/content_filter.h>
 #endif /* CONTENT_FILTER */
 
+#if SKYWALK
+#include <skywalk/core/skywalk_var.h>
+#endif /* SKYWALK */
 
 #define DBG_LAYER_IN_BEG        NETDBG_CODE(DBG_NETUDP, 0)
 #define DBG_LAYER_IN_END        NETDBG_CODE(DBG_NETUDP, 2)
@@ -938,6 +941,27 @@ udp_ctlinput(int cmd, struct sockaddr *sa, void *vip, __unused struct ifnet * if
 			}
 			udp_unlock(inp->inp_socket, 1, 0);
 		}
+#if SKYWALK
+		else {
+			union sockaddr_in_4_6 sock_laddr;
+			struct protoctl_ev_val prctl_ev_val;
+			bzero(&prctl_ev_val, sizeof(prctl_ev_val));
+			bzero(&sock_laddr, sizeof(sock_laddr));
+
+			if (cmd == PRC_MSGSIZE) {
+				prctl_ev_val.val = ntohs(icp->icmp_nextmtu);
+			}
+
+			sock_laddr.sin.sin_family = AF_INET;
+			sock_laddr.sin.sin_len = sizeof(sock_laddr.sin);
+			sock_laddr.sin.sin_addr = ip->ip_src;
+
+			protoctl_event_enqueue_nwk_wq_entry(ifp,
+			    (struct sockaddr *)&sock_laddr, sa,
+			    uh.uh_sport, uh.uh_dport, IPPROTO_UDP,
+			    cmd, &prctl_ev_val);
+		}
+#endif /* SKYWALK */
 	} else {
 		in_pcbnotifyall(&udbinfo, faddr, inetctlerrmap[cmd], notify);
 	}
@@ -1362,6 +1386,11 @@ udp_count_opportunistic(unsigned int ifindex, u_int32_t flags)
 __private_extern__ uint32_t
 udp_find_anypcb_byaddr(struct ifaddr *ifa)
 {
+#if SKYWALK
+	if (netns_is_enabled()) {
+		return netns_find_anyres_byaddr(ifa, IPPROTO_UDP);
+	} else
+#endif /* SKYWALK */
 	return inpcb_find_anypcb_byaddr(ifa, &udbinfo);
 }
 
@@ -1621,6 +1650,11 @@ udp_output(struct inpcb *inp, struct mbuf *m, struct sockaddr *addr,
 				/* new src will be set later */
 				inp->inp_laddr.s_addr = INADDR_ANY;
 				inp->inp_last_outifp = NULL;
+#if SKYWALK
+				if (NETNS_TOKEN_VALID(&inp->inp_netns_token)) {
+					netns_set_ifnet(&inp->inp_netns_token, NULL);
+				}
+#endif /* SKYWALK */
 			}
 		}
 		if (ia != NULL) {
@@ -1902,6 +1936,12 @@ udp_output(struct inpcb *inp, struct mbuf *m, struct sockaddr *addr,
 		    mopts->imo_multicast_ifp != NULL) {
 			/* no reference needed */
 			inp->inp_last_outifp = mopts->imo_multicast_ifp;
+#if SKYWALK
+			if (NETNS_TOKEN_VALID(&inp->inp_netns_token)) {
+				netns_set_ifnet(&inp->inp_netns_token,
+				    inp->inp_last_outifp);
+			}
+#endif /* SKYWALK */
 		}
 		IMO_UNLOCK(mopts);
 	}
@@ -1994,6 +2034,12 @@ abort:
 		inp->inp_laddr = origladdr;     /* XXX rehash? */
 		/* no reference needed */
 		inp->inp_last_outifp = origoutifp;
+#if SKYWALK
+		if (NETNS_TOKEN_VALID(&inp->inp_netns_token)) {
+			netns_set_ifnet(&inp->inp_netns_token,
+			    inp->inp_last_outifp);
+		}
+#endif /* SKYWALK */
 	} else if (inp->inp_route.ro_rt != NULL) {
 		struct rtentry *rt = inp->inp_route.ro_rt;
 		struct ifnet *outifp;
@@ -2024,6 +2070,12 @@ abort:
 		if (rt != NULL &&
 		    (outifp = rt->rt_ifp) != inp->inp_last_outifp) {
 			inp->inp_last_outifp = outifp; /* no reference needed */
+#if SKYWALK
+			if (NETNS_TOKEN_VALID(&inp->inp_netns_token)) {
+				netns_set_ifnet(&inp->inp_netns_token,
+				    inp->inp_last_outifp);
+			}
+#endif /* SKYWALK */
 
 			so->so_pktheadroom = (uint16_t)P2ROUNDUP(
 				sizeof(struct udphdr) +
@@ -2393,6 +2445,11 @@ udp_disconnect(struct socket *so)
 	inp->inp_laddr.s_addr = INADDR_ANY;
 	so->so_state &= ~SS_ISCONNECTED;                /* XXX */
 	inp->inp_last_outifp = NULL;
+#if SKYWALK
+	if (NETNS_TOKEN_VALID(&inp->inp_netns_token)) {
+		netns_set_ifnet(&inp->inp_netns_token, NULL);
+	}
+#endif /* SKYWALK */
 
 	return 0;
 }
@@ -2439,7 +2496,13 @@ udp_send(struct socket *so, int flags, struct mbuf *m,
 #endif /* FLOW_DIVERT */
 #endif /* NECP */
 
+#if SKYWALK
+	sk_protect_t protect = sk_async_transmit_protect();
+#endif /* SKYWALK */
 	error = udp_output(inp, m, addr, control, p);
+#if SKYWALK
+	sk_async_transmit_unprotect(protect);
+#endif /* SKYWALK */
 
 	return error;
 }

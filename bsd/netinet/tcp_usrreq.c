@@ -115,6 +115,10 @@
 #include <netinet/flow_divert.h>
 #endif /* FLOW_DIVERT */
 
+#if SKYWALK
+#include <libkern/sysctl.h>
+#include <skywalk/os_stats_private.h>
+#endif /* SKYWALK */
 
 errno_t tcp_fill_info_for_info_tuple(struct info_tuple *, struct tcp_info *);
 
@@ -1455,6 +1459,17 @@ skip_oinp:
 		error = EINVAL;
 		goto done;
 	}
+#if SKYWALK
+	if (!NETNS_TOKEN_VALID(&inp->inp_netns_token)) {
+		error = netns_reserve_in(&inp->inp_netns_token,
+		    inp->inp_laddr.s_addr != INADDR_ANY ?
+		    inp->inp_laddr : laddr,
+		    IPPROTO_TCP, inp->inp_lport, NETNS_BSD, NULL);
+		if (error) {
+			goto done;
+		}
+	}
+#endif /* SKYWALK */
 	if (!lck_rw_try_lock_exclusive(&inp->inp_pcbinfo->ipi_lock)) {
 		/*lock inversion issue, mostly with udp multicast packets */
 		socket_unlock(inp->inp_socket, 0);
@@ -1465,6 +1480,11 @@ skip_oinp:
 		inp->inp_laddr = laddr;
 		/* no reference needed */
 		inp->inp_last_outifp = outif;
+#if SKYWALK
+		if (NETNS_TOKEN_VALID(&inp->inp_netns_token)) {
+			netns_set_ifnet(&inp->inp_netns_token, inp->inp_last_outifp);
+		}
+#endif /* SKYWALK */
 
 		inp->inp_flags |= INP_INADDR_ANY;
 	}
@@ -1559,6 +1579,17 @@ tcp6_connect(struct tcpcb *tp, struct sockaddr *nam, struct proc *p)
 			goto done;
 		}
 	}
+#if SKYWALK
+	if (!NETNS_TOKEN_VALID(&inp->inp_netns_token)) {
+		error = netns_reserve_in6(&inp->inp_netns_token,
+		    IN6_IS_ADDR_UNSPECIFIED(&inp->in6p_laddr) ?
+		    addr6 : inp->in6p_laddr,
+		    IPPROTO_TCP, inp->inp_lport, NETNS_BSD, NULL);
+		if (error) {
+			goto done;
+		}
+	}
+#endif /* SKYWALK */
 	if (!lck_rw_try_lock_exclusive(&inp->inp_pcbinfo->ipi_lock)) {
 		/*lock inversion issue, mostly with udp multicast packets */
 		socket_unlock(inp->inp_socket, 0);
@@ -1570,6 +1601,11 @@ tcp6_connect(struct tcpcb *tp, struct sockaddr *nam, struct proc *p)
 		inp->in6p_last_outifp = outif;  /* no reference needed */
 		inp->inp_lifscope = lifscope;
 		in6_verify_ifscope(&inp->in6p_laddr, inp->inp_lifscope);
+#if SKYWALK
+		if (NETNS_TOKEN_VALID(&inp->inp_netns_token)) {
+			netns_set_ifnet(&inp->inp_netns_token, inp->in6p_last_outifp);
+		}
+#endif /* SKYWALK */
 		inp->in6p_flags |= INP_IN6ADDR_ANY;
 	}
 	inp->in6p_faddr = sin6->sin6_addr;
@@ -1845,6 +1881,40 @@ tcp_fill_info_for_info_tuple(struct info_tuple *itpl, struct tcp_info *ti)
 
 		return 0;
 	}
+#if SKYWALK
+	else {
+		/* if no pcb found, check for flowswitch for uTCP flow */
+		int error;
+		struct nexus_mib_filter nmf = {
+			.nmf_type = NXMIB_FLOW,
+			.nmf_bitmap = NXMIB_FILTER_INFO_TUPLE,
+			.nmf_info_tuple = *itpl,
+		};
+		struct sk_stats_flow sf;
+		size_t len = sizeof(sf);
+		error = kernel_sysctlbyname(SK_STATS_FLOW, &sf, &len, &nmf, sizeof(nmf));
+		if (error != 0) {
+			printf("kernel_sysctlbyname err %d\n", error);
+			return error;
+		}
+		if (len != sizeof(sf)) {
+			printf("kernel_sysctlbyname invalid len %zu\n", len);
+			return ENOENT;
+		}
+
+		/*
+		 * This is what flow tracker can offer right now, which is good
+		 * for mDNS TCP keep alive offload.
+		 */
+		ti->tcpi_snd_nxt = sf.sf_lseq;
+		ti->tcpi_rcv_nxt = sf.sf_rseq;
+		ti->tcpi_rcv_space = (uint32_t)(sf.sf_lmax_win << sf.sf_lwscale);
+		ti->tcpi_rcv_wscale = sf.sf_lwscale;
+		ti->tcpi_last_outif = (int32_t)sf.sf_if_index;
+
+		return 0;
+	}
+#endif /* SKYWALK */
 
 	return ENOENT;
 }
