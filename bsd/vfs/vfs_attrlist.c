@@ -794,7 +794,7 @@ vfs_setup_vattr_from_attrlist(struct attrlist *alp, struct vnode_attr *vap,
 	// the caller passes us no options, we assume the caller wants the new fork
 	// attr behavior, hence the hardcoded 1
 	return getattrlist_setupvattr_all(alp, vap, obj_vtype,
-	           attrs_fixed_sizep, IS_64BIT_PROCESS(vfs_context_proc(ctx)), 1);
+	           attrs_fixed_sizep, vfs_context_is64bit(ctx), 1);
 }
 
 
@@ -1280,7 +1280,7 @@ getvolattrlist(vfs_context_t ctx, vnode_t vp, struct attrlist *alp,
 	}
 	/* note that this returns the encoding for the volume name, not the node name */
 	if (alp->commonattr & ATTR_CMN_SCRIPT) {
-		ATTR_PACK4(ab, va.va_encoding);
+		OS_ANALYZER_SUPPRESS("80178956") ATTR_PACK4(ab, va.va_encoding);
 		ab.actual.commonattr |= ATTR_CMN_SCRIPT;
 	}
 	if (alp->commonattr & ATTR_CMN_CRTIME) {
@@ -1325,19 +1325,19 @@ getvolattrlist(vfs_context_t ctx, vnode_t vp, struct attrlist *alp,
 		}
 	}
 	if (alp->commonattr & ATTR_CMN_OWNERID) {
-		ATTR_PACK4(ab, va.va_uid);
+		OS_ANALYZER_SUPPRESS("80178956") ATTR_PACK4(ab, va.va_uid);
 		ab.actual.commonattr |= ATTR_CMN_OWNERID;
 	}
 	if (alp->commonattr & ATTR_CMN_GRPID) {
-		ATTR_PACK4(ab, va.va_gid);
+		OS_ANALYZER_SUPPRESS("80178956") ATTR_PACK4(ab, va.va_gid);
 		ab.actual.commonattr |= ATTR_CMN_GRPID;
 	}
 	if (alp->commonattr & ATTR_CMN_ACCESSMASK) {
-		ATTR_PACK_CAST(&ab, uint32_t, va.va_mode);
+		OS_ANALYZER_SUPPRESS("80178956") ATTR_PACK_CAST(&ab, uint32_t, va.va_mode);
 		ab.actual.commonattr |= ATTR_CMN_ACCESSMASK;
 	}
 	if (alp->commonattr & ATTR_CMN_FLAGS) {
-		ATTR_PACK4(ab, va.va_flags);
+		OS_ANALYZER_SUPPRESS("80178956") ATTR_PACK4(ab, va.va_flags);
 		ab.actual.commonattr |= ATTR_CMN_FLAGS;
 	}
 	if (alp->commonattr & ATTR_CMN_USERACCESS) {    /* XXX this is expensive and also duplicate work */
@@ -2749,6 +2749,7 @@ vfs_attr_pack_internal(mount_t mp, vnode_t vp, uio_t auio, struct attrlist *alp,
 	    /* For firmlink targets we have to overide what the FS returned for parentid */
 	    ||
 	    (!is_realdev && vp && (vp->v_flag & VFMLINKTARGET) && vp->v_fmlink &&
+	    (vp->v_fmlink->v_type == VDIR) &&
 	    (alp->commonattr & (ATTR_CMN_PAROBJID | ATTR_CMN_PARENTID)))
 #endif
 	    )) {
@@ -3309,7 +3310,7 @@ fgetattrlist(proc_t p, struct fgetattrlist_args *uap, __unused int32_t *retval)
 	if ((error = fp_get_ftype(p, uap->fd, DTYPE_VNODE, EINVAL, &fp)) != 0) {
 		return error;
 	}
-	vp = (struct vnode *)fp->fp_glob->fg_data;
+	vp = (struct vnode *)fp_get_data(fp);
 
 	if ((error = vnode_getwithref(vp)) != 0) {
 		goto out;
@@ -3352,13 +3353,16 @@ getattrlistat_internal(vfs_context_t ctx, user_addr_t path,
 	/*
 	 * Look up the file.
 	 */
-	if (!(options & FSOPT_NOFOLLOW)) {
+	if (!(options & (FSOPT_NOFOLLOW | FSOPT_NOFOLLOW_ANY))) {
 		nameiflags |= FOLLOW;
 	}
 
 	nameiflags |= AUDITVNPATH1;
 	NDINIT(&nd, LOOKUP, OP_GETATTR, nameiflags, pathsegflg,
 	    path, ctx);
+	if (options & FSOPT_NOFOLLOW_ANY) {
+		nd.ni_flag |= NAMEI_NOFOLLOW_ANY;
+	}
 
 	error = nameiat(&nd, fd);
 
@@ -4031,7 +4035,7 @@ getattrlistbulk(proc_t p, struct getattrlistbulk_args *uap, int32_t *retval)
 	fvdata = NULL;
 	eofflag = 0;
 	ctx = vfs_context_current();
-	ut = get_bsdthread_info(current_thread());
+	ut = current_uthread();
 	segflg = IS_64BIT_PROCESS(p) ? UIO_USERSPACE64 : UIO_USERSPACE32;
 
 	if ((fp->fp_glob->fg_flag & FREAD) == 0) {
@@ -4682,10 +4686,13 @@ setattrlist(proc_t p, struct setattrlist_args *uap, __unused int32_t *retval)
 	 * Look up the file.
 	 */
 	nameiflags = AUDITVNPATH1;
-	if ((uap->options & FSOPT_NOFOLLOW) == 0) {
+	if ((uap->options & (FSOPT_NOFOLLOW | FSOPT_NOFOLLOW_ANY)) == 0) {
 		nameiflags |= FOLLOW;
 	}
 	NDINIT(&nd, LOOKUP, OP_SETATTR, nameiflags, UIO_USERSPACE, uap->path, ctx);
+	if (uap->options & FSOPT_NOFOLLOW_ANY) {
+		nd.ni_flag |= NAMEI_NOFOLLOW_ANY;
+	}
 	if ((error = namei(&nd)) != 0) {
 		goto out;
 	}
@@ -4717,10 +4724,13 @@ setattrlistat(proc_t p, struct setattrlistat_args *uap, __unused int32_t *retval
 	 * Look up the file.
 	 */
 	nameiflags = AUDITVNPATH1;
-	if (!(uap->options & FSOPT_NOFOLLOW)) {
+	if (!(uap->options & (FSOPT_NOFOLLOW | FSOPT_NOFOLLOW_ANY))) {
 		nameiflags |= FOLLOW;
 	}
 	NDINIT(&nd, LOOKUP, OP_SETATTR, nameiflags, UIO_USERSPACE, uap->path, ctx);
+	if (uap->options & FSOPT_NOFOLLOW_ANY) {
+		nd.ni_flag |= NAMEI_NOFOLLOW_ANY;
+	}
 	if ((error = nameiat(&nd, uap->fd)) != 0) {
 		goto out;
 	}

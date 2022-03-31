@@ -53,8 +53,8 @@
 #endif
 #include <machine/machine_routines.h>
 
-static ZONE_DECLARE(thread_call_zone, "thread_call",
-    sizeof(thread_call_data_t), ZC_ZFREE_CLEARMEM);
+static ZONE_DEFINE_TYPE(thread_call_zone, "thread_call",
+    thread_call_data_t, ZC_ZFREE_CLEARMEM);
 
 typedef enum {
 	TCF_ABSOLUTE    = 0,
@@ -458,10 +458,10 @@ thread_call_group_setup(thread_call_group_t group)
 
 	timer_call_setup(&group->dealloc_timer, thread_call_dealloc_timer, group);
 
-	waitq_init(&group->waiters_waitq, SYNC_POLICY_DISABLE_IRQ);
+	waitq_init(&group->waiters_waitq, WQT_QUEUE, SYNC_POLICY_FIFO);
 
 	/* Reverse the wait order so we re-use the most recently parked thread from the pool */
-	waitq_init(&group->idle_waitq, SYNC_POLICY_REVERSED | SYNC_POLICY_DISABLE_IRQ);
+	waitq_init(&group->idle_waitq, WQT_QUEUE, SYNC_POLICY_REVERSED);
 }
 
 /*
@@ -512,7 +512,7 @@ static void
 thread_call_initialize(void)
 {
 	nanotime_to_absolutetime(0, THREAD_CALL_DEALLOC_INTERVAL_NS, &thread_call_dealloc_interval_abs);
-	waitq_init(&daemon_waitq, SYNC_POLICY_DISABLE_IRQ | SYNC_POLICY_FIFO);
+	waitq_init(&daemon_waitq, WQT_QUEUE, SYNC_POLICY_FIFO);
 
 	for (uint32_t i = 0; i < THREAD_CALL_INDEX_MAX; i++) {
 		thread_call_group_setup(&thread_call_groups[i]);

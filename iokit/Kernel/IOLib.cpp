@@ -113,7 +113,9 @@ void *_giDebugLogDataInternal   = NULL;
 void *_giDebugReserved1         = NULL;
 void *_giDebugReserved2         = NULL;
 
+#if defined(__x86_64__)
 iopa_t gIOBMDPageAllocator;
+#endif /* defined(__x86_64__) */
 
 /*
  * Static variables for this module.
@@ -145,9 +147,11 @@ static struct {
 	lck_mtx_t * lock;
 } gIOKitPageableSpace;
 
+#if defined(__x86_64__)
 static iopa_t gIOPageablePageAllocator;
 
 uint32_t  gIOPageAllocChunkBytes;
+#endif /* defined(__x86_64__) */
 
 #if IOTRACKING
 IOTrackingQueue * gIOMallocTracking;
@@ -189,7 +193,7 @@ IOLibInit(void)
 	ret = kmem_suballoc(kernel_map,
 	    &gIOKitPageableSpace.maps[0].address,
 	    kIOPageableMapSize,
-	    TRUE,
+	    VM_MAP_CREATE_PAGEABLE,
 	    VM_FLAGS_ANYWHERE,
 	    VM_MAP_KERNEL_FLAGS_NONE,
 	    VM_KERN_MEMORY_IOKIT,
@@ -206,10 +210,13 @@ IOLibInit(void)
 	gIOMallocContiguousEntriesLock      = lck_mtx_alloc_init(IOLockGroup, LCK_ATTR_NULL);
 	queue_init( &gIOMallocContiguousEntries );
 
+#if defined(__x86_64__)
 	gIOPageAllocChunkBytes = PAGE_SIZE / 64;
+
 	assert(sizeof(iopa_page_t) <= gIOPageAllocChunkBytes);
 	iopa_init(&gIOBMDPageAllocator);
 	iopa_init(&gIOPageablePageAllocator);
+#endif /* defined(__x86_64__) */
 
 
 	libInitialized = true;
@@ -318,7 +325,8 @@ IOMalloc_internal(struct kalloc_heap *kheap, vm_size_t size)
 		return NULL;                                          // overflow
 	}
 #endif
-	address = kheap_alloc_tag_bt(kheap, allocSize, Z_WAITOK, VM_KERN_MEMORY_IOKIT);
+	address = kheap_alloc(kheap, allocSize,
+	    Z_VM_TAG_BT(Z_WAITOK, VM_KERN_MEMORY_IOKIT));
 
 	if (address) {
 #if IOTRACKING
@@ -362,7 +370,8 @@ IOFree_internal(struct kalloc_heap *kheap, void * inAddress, vm_size_t size)
 
 			hdr = (typeof(hdr))address;
 			if (size != hdr->tracking.size) {
-				OSReportWithBacktrace("bad IOFree size 0x%lx should be 0x%lx", size, hdr->tracking.size);
+				OSReportWithBacktrace("bad IOFree size 0x%zx should be 0x%zx",
+				    (size_t)size, (size_t)hdr->tracking.size);
 				size = hdr->tracking.size;
 			}
 			IOTrackingRemove(gIOMallocTracking, &hdr->tracking.tracking, size);
@@ -475,8 +484,8 @@ IOMallocAligned_internal(struct kalloc_heap *kheap, vm_size_t size,
 				allocationAddress = 0;
 			}
 		} else {
-			allocationAddress = (vm_address_t) kheap_alloc_tag_bt(kheap,
-			    adjustedSize, Z_WAITOK, VM_KERN_MEMORY_IOKIT);
+			allocationAddress = (vm_address_t) kheap_alloc(kheap,
+			    adjustedSize, Z_VM_TAG_BT(Z_WAITOK, VM_KERN_MEMORY_IOKIT));
 		}
 
 		if (allocationAddress) {
@@ -560,7 +569,8 @@ IOFreeAligned_internal(kalloc_heap_t kheap, void * address, vm_size_t size)
 #if IOTRACKING
 		if (TRACK_ALLOC) {
 			if (size != hdr->tracking.size) {
-				OSReportWithBacktrace("bad IOFreeAligned size 0x%lx should be 0x%lx", size, hdr->tracking.size);
+				OSReportWithBacktrace("bad IOFreeAligned size 0x%zx should be 0x%zx",
+				    (size_t)size, (size_t)hdr->tracking.size);
 				size = hdr->tracking.size;
 			}
 			IOTrackingRemove(gIOMallocTracking, &hdr->tracking.tracking, size);
@@ -703,8 +713,8 @@ IOKernelAllocateWithPhysicalRestrict(
 		if (adjustedSize < size) {
 			return 0;
 		}
-		allocationAddress = (mach_vm_address_t) kheap_alloc_tag_bt(kheap,
-		    adjustedSize, Z_WAITOK, VM_KERN_MEMORY_IOKIT);
+		allocationAddress = (mach_vm_address_t) kheap_alloc(kheap,
+		    adjustedSize, Z_VM_TAG_BT(Z_WAITOK, VM_KERN_MEMORY_IOKIT));
 
 		if (allocationAddress) {
 			address = (allocationAddress + alignMask + sizeofIOLibPageMallocHeader)
@@ -892,7 +902,7 @@ IOIteratePageableMaps(vm_size_t size,
 		kr = kmem_suballoc(kernel_map,
 		    &min,
 		    segSize,
-		    TRUE,
+		    VM_MAP_CREATE_PAGEABLE,
 		    VM_FLAGS_ANYWHERE,
 		    VM_MAP_KERNEL_FLAGS_NONE,
 		    VM_KERN_MEMORY_IOKIT,
@@ -985,11 +995,13 @@ IOFreePageablePages(void * address, vm_size_t size)
 	}
 }
 
+#if defined(__x86_64__)
 static uintptr_t
 IOMallocOnePageablePage(kalloc_heap_t kheap __unused, iopa_t * a)
 {
 	return (uintptr_t) IOMallocPageablePages(page_size, page_size, VM_KERN_MEMORY_IOKIT);
 }
+#endif /* defined(__x86_64__) */
 
 static void *
 IOMallocPageableInternal(vm_size_t size, vm_size_t alignment, bool zeroed)
@@ -999,6 +1011,7 @@ IOMallocPageableInternal(vm_size_t size, vm_size_t alignment, bool zeroed)
 	if (((uint32_t) alignment) != alignment) {
 		return NULL;
 	}
+#if defined(__x86_64__)
 	if (size >= (page_size - 4 * gIOPageAllocChunkBytes) ||
 	    alignment > page_size) {
 		addr = IOMallocPageablePages(size, alignment, IOMemoryTag(kernel_map));
@@ -1006,10 +1019,18 @@ IOMallocPageableInternal(vm_size_t size, vm_size_t alignment, bool zeroed)
 	} else {
 		addr = ((void *) iopa_alloc(&gIOPageablePageAllocator,
 		    &IOMallocOnePageablePage, KHEAP_ANY, size, (uint32_t) alignment));
-		if (zeroed) {
+		if (addr && zeroed) {
 			bzero(addr, size);
 		}
 	}
+#else /* !defined(__x86_64__) */
+	vm_size_t allocSize = size;
+	if (allocSize == 0) {
+		allocSize = 1;
+	}
+	addr = IOMallocPageablePages(allocSize, alignment, IOMemoryTag(kernel_map));
+	/* already zeroed */
+#endif /* defined(__x86_64__) */
 
 	if (addr) {
 #if IOALLOCDEBUG
@@ -1041,6 +1062,7 @@ IOFreePageable(void * address, vm_size_t size)
 #endif
 	IOStatisticsAlloc(kIOStatisticsFreePageable, size);
 
+#if defined(__x86_64__)
 	if (size < (page_size - 4 * gIOPageAllocChunkBytes)) {
 		address = (void *) iopa_free(&gIOPageablePageAllocator, (uintptr_t) address, size);
 		size = page_size;
@@ -1048,6 +1070,14 @@ IOFreePageable(void * address, vm_size_t size)
 	if (address) {
 		IOFreePageablePages(address, size);
 	}
+#else /* !defined(__x86_64__) */
+	if (size == 0) {
+		size = 1;
+	}
+	if (address) {
+		IOFreePageablePages(address, size);
+	}
+#endif /* defined(__x86_64__) */
 }
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
@@ -1074,8 +1104,6 @@ IOFreeData(void * address, vm_size_t size)
 void *
 IOMallocTypeImpl(kalloc_type_view_t kt_view)
 {
-	uint32_t kt_size = kalloc_type_get_size(kt_view->kt_size);
-	uint32_t kt_idx = kalloc_type_get_idx(kt_view->kt_size);
 #if IOTRACKING
 	/*
 	 * When leak detection is on default to using IOMalloc as kalloc
@@ -1083,15 +1111,16 @@ IOMallocTypeImpl(kalloc_type_view_t kt_view)
 	 * the header.
 	 */
 	if (TRACK_ALLOC) {
+		uint32_t kt_size = kalloc_type_get_size(kt_view->kt_size);
 		void *mem = IOMallocZero_internal(KHEAP_DEFAULT, kt_size);
-		if (!IOMallocType_from_vm(kt_idx, kt_size)) {
+		if (!IOMallocType_from_vm(kt_view)) {
 			assert(mem);
 		}
 		return mem;
 	}
 #endif
 	zalloc_flags_t kt_flags = (zalloc_flags_t) (Z_WAITOK | Z_ZERO);
-	if (!IOMallocType_from_vm(kt_idx, kt_size)) {
+	if (!IOMallocType_from_vm(kt_view)) {
 		kt_flags = (zalloc_flags_t) (kt_flags | Z_NOFAIL);
 	}
 	/*
@@ -1119,7 +1148,42 @@ IOFreeTypeImpl(kalloc_type_view_t kt_view, void * address)
 	return kfree_type_impl_external(kt_view, address);
 }
 
+void *
+IOMallocTypeVarImpl(kalloc_type_var_view_t kt_view, vm_size_t size)
+{
+#if IOTRACKING
+	/*
+	 * When leak detection is on default to using IOMalloc as kalloc
+	 * type infrastructure isn't aware of needing additional space for
+	 * the header.
+	 */
+	if (TRACK_ALLOC) {
+		return IOMallocZero_internal(KHEAP_DEFAULT, size);
+	}
+#endif
+	zalloc_flags_t kt_flags = (zalloc_flags_t) (Z_WAITOK | Z_ZERO);
+
+	kt_flags = Z_VM_TAG_BT(kt_flags, VM_KERN_MEMORY_KALLOC_TYPE);
+	return kalloc_type_var_impl(kt_view, size, kt_flags, NULL);
+}
+
+void
+IOFreeTypeVarImpl(kalloc_type_var_view_t kt_view, void * address,
+    vm_size_t size)
+{
+#if IOTRACKING
+	if (TRACK_ALLOC) {
+		return IOFree_internal(KHEAP_DEFAULT, address, size);
+	}
+#endif
+
+	return kfree_type_var_impl(kt_view, address, size);
+}
+
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+
+#if defined(__x86_64__)
+
 
 extern "C" void
 iopa_init(iopa_t * a)
@@ -1274,6 +1338,8 @@ iopa_free(iopa_t * a, uintptr_t addr, vm_size_t bytes)
 	return (uintptr_t) pa;
 }
 
+#endif /* defined(__x86_64__) */
+
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
 IOReturn
@@ -1407,7 +1473,10 @@ _IOLogv(const char *format, va_list ap, void *caller)
 
 	va_copy(ap2, ap);
 
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wformat-nonliteral"
 	os_log_with_args(OS_LOG_DEFAULT, OS_LOG_TYPE_DEFAULT, format, ap, caller);
+#pragma clang diagnostic pop
 
 	if (!disable_iolog_serial_output) {
 		__doprnt(format, ap2, console_printbuf_putc, &info_data, 16, TRUE);

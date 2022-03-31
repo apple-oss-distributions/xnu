@@ -320,34 +320,26 @@ mach_node_register(mach_node_t  node)
 
 	waitq_set_lazy_init_link(&pp_set->ips_wqset);
 	/* Add the bootstrap port to the proxy port set */
-	uint64_t wq_link_id = waitq_link_reserve(NULL);
-	uint64_t wq_reserved_prepost = waitq_prepost_reserve(NULL, 10,
-	    WAITQ_DONT_LOCK);
-	ips_mq_lock(pp_set); // Revisit the lock when enabling flipc
+	waitq_link_t link = waitq_link_alloc(WQT_PORT_SET);
 	ip_mq_lock(bs_port);
-	ipc_pset_add_unlock(pp_set,
-	    bs_port,
-	    &wq_link_id,
-	    &wq_reserved_prepost);
+	ips_mq_lock(pp_set); // Revisit the lock when enabling flipc
+	ipc_mqueue_add_locked(bs_port, pp_set, &link);
 	ips_mq_unlock(pp_set);
-
-	waitq_link_release(wq_link_id);
-	waitq_prepost_release_reserve(wq_reserved_prepost);
+	ip_mq_unlock(bs_port);
 
 	/* Add the control port to the proxy port set */
-	wq_link_id = waitq_link_reserve(NULL);
-	wq_reserved_prepost = waitq_prepost_reserve(NULL, 10,
-	    WAITQ_DONT_LOCK);
-	ips_mq_lock(pp_set); // Revisit the lock when enabling flipc
+	if (link.wqlh == NULL) {
+		link = waitq_link_alloc(WQT_PORT_SET);
+	}
 	ip_mq_lock(ack_port);
-	ipc_pset_add_unlock(pp_set,
-	    ack_port,
-	    &wq_link_id,
-	    &wq_reserved_prepost);
+	ips_mq_lock(pp_set); // Revisit the lock when enabling flipc
+	ipc_mqueue_add_locked(ack_port, pp_set, &link);
 	ips_mq_unlock(pp_set);
+	ips_mq_unlock(ack_port);
 
-	waitq_link_release(wq_link_id);
-	waitq_prepost_release_reserve(wq_reserved_prepost);
+	if (link.wqlh) {
+		waitq_link_free(WQT_PORT_SET, link);
+	}
 
 	// Setup mach_node struct
 	node->published         = 0;

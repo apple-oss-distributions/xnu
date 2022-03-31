@@ -82,7 +82,7 @@ mac_system_check_acct(kauth_cred_t cred, struct vnode *vp)
 #endif
 
 	MAC_CHECK(system_check_acct, cred, vp,
-	    vp != NULL ? vp->v_label : NULL);
+	    vp != NULL ? mac_vnode_label(vp) : NULL);
 
 	return error;
 }
@@ -185,7 +185,7 @@ mac_system_check_swapon(kauth_cred_t cred, struct vnode *vp)
 	}
 #endif
 
-	MAC_CHECK(system_check_swapon, cred, vp, vp->v_label);
+	MAC_CHECK(system_check_swapon, cred, vp, mac_vnode_label(vp));
 	return error;
 }
 
@@ -201,7 +201,7 @@ mac_system_check_swapoff(kauth_cred_t cred, struct vnode *vp)
 	}
 #endif
 
-	MAC_CHECK(system_check_swapoff, cred, vp, vp->v_label);
+	MAC_CHECK(system_check_swapoff, cred, vp, mac_vnode_label(vp));
 	return error;
 }
 

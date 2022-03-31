@@ -110,8 +110,9 @@ extern kern_return_t task_importance(task_t task, integer_t importance);
 #define TASK_POLICY_QOS_PROMOTE         IMP_TASK_POLICY_QOS_PROMOTE
 #define TASK_POLICY_QOS_KEVENT_OVERRIDE IMP_TASK_POLICY_QOS_KEVENT_OVERRIDE
 #define TASK_POLICY_QOS_SERVICER_OVERRIDE IMP_TASK_POLICY_QOS_SERVICER_OVERRIDE
+#define TASK_POLICY_IOTIER_KEVENT_OVERRIDE IMP_TASK_POLICY_IOTIER_KEVENT_OVERRIDE
 
-#define TASK_POLICY_MAX                 0x3F
+#define TASK_POLICY_MAX                 0x40
 
 /* The main entrance to task policy is this function */
 extern void proc_set_task_policy(task_t task, int category, int flavor, int value);
@@ -261,6 +262,7 @@ extern void thread_clear_exec_promotion(thread_t thread);
 extern void thread_add_servicer_override(thread_t thread, uint32_t qos_override);
 extern void thread_update_servicer_override(thread_t thread, uint32_t qos_override);
 extern void thread_drop_servicer_override(thread_t thread);
+extern void thread_update_servicer_iotier_override(thread_t thread, uint8_t iotier_override);
 
 /* for generic kevent override management */
 extern void thread_add_kevent_override(thread_t thread, uint32_t qos_override);
@@ -271,6 +273,8 @@ extern void thread_drop_kevent_override(thread_t thread);
 extern thread_qos_t thread_get_requested_qos(thread_t thread, int *relpri);
 
 extern boolean_t task_is_app(task_t task);
+
+extern const struct thread_requested_policy default_thread_requested_policy;
 /*
  ******************************
  * Mach-internal functionality

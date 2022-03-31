@@ -38,6 +38,7 @@ extern "C" {
 #include <libkern/OSDebug.h>
 #include <libkern/c++/OSCPPDebug.h>
 #include <kern/backtrace.h>
+#include <kern/btlog.h>
 
 #include <IOKit/IOKitDebug.h>
 #include <IOKit/IOLib.h>
@@ -94,7 +95,6 @@ IOPrintPlane( const IORegistryPlane * plane )
 	IORegistryEntry *           next;
 	IORegistryIterator *        iter;
 	OSOrderedSet *              all;
-	char                        format[] = "%xxxs";
 	IOService *                 service;
 
 	iter = IORegistryIterator::iterateOver( plane );
@@ -109,9 +109,7 @@ IOPrintPlane( const IORegistryPlane * plane )
 
 	iter->reset();
 	while ((next = iter->getNextObjectRecursive())) {
-		snprintf(format + 1, sizeof(format) - 1, "%ds", 2 * next->getDepth( plane ));
-		DEBG( format, "");
-		DEBG( "\033[33m%s", next->getName( plane ));
+		DEBG( "%*s\033[33m%s", 2 * next->getDepth( plane ), "", next->getName( plane ));
 		if ((next->getLocation( plane ))) {
 			DEBG("@%s", next->getLocation( plane ));
 		}
@@ -123,6 +121,8 @@ IOPrintPlane( const IORegistryPlane * plane )
 //      IOSleep(250);
 	}
 	iter->release();
+
+#undef IOPrintPlaneFormat
 }
 
 void
@@ -283,6 +283,8 @@ struct IOTrackingCallSiteWithUser {
 	struct IOTrackingCallSite     site;
 	struct IOTrackingCallSiteUser user;
 };
+
+static void IOTrackingFreeCallSite(uint32_t type, IOTrackingCallSite ** site);
 
 struct IOTrackingLeaksRef {
 	uintptr_t * instances;
@@ -681,11 +683,7 @@ IOTrackingRemove(IOTrackingQueue * queue, IOTracking * mem, size_t size)
 			remque(&mem->site->link);
 			assert(queue->siteCount);
 			queue->siteCount--;
-			if (kIOTrackingQueueTypeUser & queue->type) {
-				kfree_type(IOTrackingCallSiteWithUser, mem->site);
-			} else {
-				kfree_type(IOTrackingCallSite, mem->site);
-			}
+			IOTrackingFreeCallSite(queue->type, &mem->site);
 		}
 		mem->site = NULL;
 	}
@@ -752,6 +750,19 @@ IOTrackingFree(IOTrackingQueue * queue, uintptr_t address, size_t size)
 	IOTRecursiveLockUnlock(&queue->lock);
 }
 
+static void
+IOTrackingFreeCallSite(uint32_t type, IOTrackingCallSite ** site)
+{
+	void ** ptr;
+
+	ptr = reinterpret_cast<void **>(site);
+	if (kIOTrackingQueueTypeUser & type) {
+		kfree_type(IOTrackingCallSiteWithUser, *ptr);
+	} else {
+		kfree_type(IOTrackingCallSite, *ptr);
+	}
+}
+
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
 void
@@ -796,15 +807,11 @@ IOTrackingReset(IOTrackingQueue * queue)
 					if (addresses) {
 						trackingAddress = (typeof(trackingAddress))tracking;
 						if (kTrackingAddressFlagAllocated & IOTrackingAddressFlags(trackingAddress)) {
-							kfree_type(IOTrackingAddress, tracking);
+							kfree_type(IOTrackingAddress, trackingAddress);
 						}
 					}
 				}
-				if (kIOTrackingQueueTypeUser & queue->type) {
-					kfree_type(IOTrackingCallSiteWithUser, site);
-				} else {
-					kfree_type(IOTrackingCallSite, site);
-				}
+				IOTrackingFreeCallSite(queue->type, &site);
 			}
 		}
 	}
@@ -1028,30 +1035,6 @@ zone_leaks_scan(uintptr_t * instances, uint32_t count, uint32_t zoneSize, uint32
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
-static void
-ZoneSiteProc(void * refCon, uint32_t siteCount, uint32_t zoneSize,
-    uintptr_t * btrace, uint32_t btCount)
-{
-	IOTrackingCallSiteInfo siteInfo;
-	OSData               * leakData;
-	uint32_t               idx;
-
-	leakData = (typeof(leakData))refCon;
-
-	bzero(&siteInfo, sizeof(siteInfo));
-	siteInfo.count   = siteCount;
-	siteInfo.size[0] = zoneSize * siteCount;
-
-	for (idx = 0; (idx < btCount) && (idx < kIOTrackingCallSiteBTs); idx++) {
-		siteInfo.bt[0][idx] = VM_KERNEL_UNSLIDE(btrace[idx]);
-	}
-
-	leakData->appendBytes(&siteInfo, sizeof(siteInfo));
-}
-
-
-/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
-
 static OSData *
 IOTrackingLeaks(LIBKERN_CONSUMED OSData * data)
 {
@@ -1254,7 +1237,7 @@ IOTrackingDebug(uint32_t selector, uint32_t options, uint64_t value,
 						if (addresses) {
 							instFlags |= kInstanceFlagAddress;
 						}
-						data->appendBytes(&instFlags, sizeof(instFlags));
+						data->appendValue(instFlags);
 					}
 				}
 			}
@@ -1448,7 +1431,16 @@ IOTrackingDebug(uint32_t selector, uint32_t options, uint64_t value,
 			if (next >= (names + namesLen)) {
 				break;
 			}
-			kr = zone_leaks(scan, sLen, &ZoneSiteProc, data);
+			kr = zone_leaks(scan, sLen, ^(uint32_t count, uint32_t eSize, btref_t ref) {
+				IOTrackingCallSiteInfo siteInfo = {
+				        .count   = count,
+				        .size[0] = eSize * count,
+				};
+
+				btref_decode_unslide(ref, siteInfo.bt[0]);
+
+				data->appendBytes(&siteInfo, sizeof(siteInfo));
+			});
 			if (KERN_SUCCESS == kr) {
 				ret = kIOReturnSuccess;
 			} else if (KERN_INVALID_NAME != kr) {

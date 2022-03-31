@@ -95,7 +95,7 @@ extern uintptr_t start_cpu;
 extern void exc_vectors_table;
 #endif /* __ARM_KERNEL_PROTECT__ */
 
-extern void __attribute__((noreturn)) arm64_prepare_for_sleep(boolean_t deep_sleep);
+extern void __attribute__((noreturn)) arm64_prepare_for_sleep(boolean_t deep_sleep, unsigned int cpu, uint64_t entry_pa);
 extern void arm64_force_wfi_clock_gate(void);
 #if defined(APPLETYPHOON)
 // <rdar://problem/15827409>
@@ -344,7 +344,7 @@ cpu_sleep(void)
 		cpu_data_ptr->cpu_reset_handler = (uintptr_t)0;
 		__builtin_arm_dsb(DSB_ISH);
 		CleanPoU_Dcache();
-		arm64_prepare_for_sleep(deep_sleep);
+		arm64_prepare_for_sleep(deep_sleep, cpu_data_ptr->cpu_number, ml_vtophys((vm_offset_t)&LowResetVectorBase));
 	}
 #else
 	PE_cpu_machine_quiesce(cpu_data_ptr->cpu_id);
@@ -788,8 +788,12 @@ cpu_data_free(cpu_data_t *cpu_data_ptr)
 		CpuDataEntries[cpu_number].cpu_data_paddr = 0;
 		__builtin_arm_dmb(DMB_ISH); // Ensure prior stores to cpu array are visible
 	}
-	(kfree)((void *)(cpu_data_ptr->intstack_top - INTSTACK_SIZE), INTSTACK_SIZE);
-	(kfree)((void *)(cpu_data_ptr->excepstack_top - EXCEPSTACK_SIZE), EXCEPSTACK_SIZE);
+	kmem_free(kernel_map,
+	    cpu_data_ptr->intstack_top - INTSTACK_SIZE - PAGE_SIZE,
+	    INTSTACK_SIZE + 2 * PAGE_SIZE);
+	kmem_free(kernel_map,
+	    cpu_data_ptr->excepstack_top - EXCEPSTACK_SIZE - PAGE_SIZE,
+	    EXCEPSTACK_SIZE + 2 * PAGE_SIZE);
 }
 
 void
@@ -1094,7 +1098,7 @@ ml_arm_sleep(void)
 		mt_sleep();
 #endif /* MONOTONIC */
 		/* ARM64-specific preparation */
-		arm64_prepare_for_sleep(true);
+		arm64_prepare_for_sleep(true, cpu_data_ptr->cpu_number, ml_vtophys((vm_offset_t)&LowResetVectorBase));
 	} else {
 #if __ARM_GLOBAL_SLEEP_BIT__
 		/*
@@ -1124,7 +1128,7 @@ ml_arm_sleep(void)
 		}
 
 		/* ARM64-specific preparation */
-		arm64_prepare_for_sleep(true);
+		arm64_prepare_for_sleep(true, cpu_data_ptr->cpu_number, ml_vtophys((vm_offset_t)&LowResetVectorBase));
 	}
 }
 

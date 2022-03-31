@@ -33,6 +33,7 @@ typedef enum {
 	TEST_SADB_EXT_MIGRATE_ADDRESS_IPv4 = 9,
 	TEST_SADB_EXT_MIGRATE_ADDRESS_IPv6 = 10,
 	TEST_SADB_EXT_MIGRATE_BAD_ADDRESS = 11,
+	TEST_TCP_INPUT_IPSEC_COPY_POLICY = 12,
 } test_identifier;
 
 static test_identifier test_id = TEST_INVALID;
@@ -1638,6 +1639,81 @@ pfkey_process_message_test_60687183_2(uint8_t **mhp, int pfkey_socket)
 	return;
 }
 
+static int
+setup_tcp_server(uint16_t port)
+{
+	struct sockaddr_in server_addr = {};
+	int server_fd = -1;
+
+	T_QUIET; T_ASSERT_POSIX_SUCCESS(server_fd = socket(AF_INET, SOCK_STREAM, 0),
+	    "tcp server socket creation failed");
+
+	server_addr.sin_family = AF_INET;
+	server_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+	server_addr.sin_port = htons(port);
+
+	T_QUIET; T_ASSERT_POSIX_SUCCESS(bind(server_fd, (struct sockaddr *)&server_addr,
+	    sizeof(server_addr)), "tcp server bind failed");
+
+	T_QUIET; T_ASSERT_POSIX_SUCCESS(listen(server_fd, 2), "tcp server listen failed");
+	return server_fd;
+}
+
+static int
+setup_loopback_tcp_client(uint16_t server_port)
+{
+	struct sockaddr_in conn_addr = {};
+	int client_fd = -1;
+
+	T_QUIET; T_ASSERT_POSIX_SUCCESS(client_fd = socket(AF_INET, SOCK_STREAM, 0),
+	    "tcp client socket creation failed");
+	T_QUIET; T_ASSERT_POSIX_SUCCESS(inet_pton(AF_INET, "127.0.0.1", &conn_addr.sin_addr),
+	    "loopback address inet_pton failed");
+
+	conn_addr.sin_family = AF_INET;
+	conn_addr.sin_port = htons(server_port);
+
+	T_QUIET; T_ASSERT_POSIX_SUCCESS(connect(client_fd, (struct sockaddr *)&conn_addr, sizeof(conn_addr)),
+	    "tcp loopback client connect failed");
+	return client_fd;
+}
+
+static void
+setup_socket_policy(int socket_fd)
+{
+	uint8_t buf[
+		sizeof(struct sadb_x_policy) +
+		sizeof(struct sadb_x_ipsecrequest) +
+		sizeof(struct sockaddr_in) +
+		sizeof(struct sockaddr_in)
+	];
+
+	struct sadb_x_policy *xpl = (struct sadb_x_policy *)buf;
+	struct sadb_x_ipsecrequest *xisr = (struct sadb_x_ipsecrequest *)(xpl + 1);
+	struct sockaddr *sa;
+
+
+	bzero(buf, sizeof(buf));
+	/* xpl: */
+	xpl->sadb_x_policy_len = sizeof(buf) >> 3;
+	xpl->sadb_x_policy_dir = IPSEC_DIR_INBOUND;
+	xpl->sadb_x_policy_type = IPSEC_POLICY_IPSEC;
+	/* xisr: */
+	xisr->sadb_x_ipsecrequest_len = sizeof(buf) - sizeof(*xpl);
+	xisr->sadb_x_ipsecrequest_proto = IPPROTO_ESP;
+	xisr->sadb_x_ipsecrequest_mode = IPSEC_MODE_TRANSPORT;
+	xisr->sadb_x_ipsecrequest_level = IPSEC_LEVEL_DEFAULT;
+	/* src sockaddr: */
+	sa = (struct sockaddr *)(xisr + 1);
+	sa->sa_len = sizeof(struct sockaddr_in);
+	/* dst sockaddr: */
+	sa = (struct sockaddr *)((void *)(xisr + 1) + sa->sa_len);
+	sa->sa_len = sizeof(struct sockaddr_in);
+
+	T_QUIET; T_ASSERT_POSIX_SUCCESS(setsockopt(socket_fd, IPPROTO_IP, IP_IPSEC_POLICY,
+	    buf, sizeof(buf)), "tcp server listen failed");
+}
+
 T_DECL(sadb_x_get_60822136, "security policy reference count overflow")
 {
 	test_id = TEST_SADB_X_GET_OVERFLOW_60822136;
@@ -1775,4 +1851,19 @@ T_DECL(sadb_key_migrate_bad_address, "security association migrate bad address")
 	send_pkey_add_sa(pfkey_socket, 0x12345678, TEST_SRC_ADDRESS_IPv6, TEST_DST_ADDRESS_IPv6, AF_INET6);
 
 	dispatch_main();
+}
+
+T_DECL(tcp_input_ipsec_copy_policy, "listener policy copied to child")
+{
+	test_id = TEST_TCP_INPUT_IPSEC_COPY_POLICY;
+
+	int server_fd = setup_tcp_server(4000);
+	setup_socket_policy(server_fd);
+	int client_fd = setup_loopback_tcp_client(4000);
+
+	sleep(3);
+	close(client_fd);
+	close(server_fd);
+
+	T_PASS("listener policy copied to child");
 }

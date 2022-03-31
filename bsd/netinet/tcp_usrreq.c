@@ -115,6 +115,10 @@
 #include <netinet/flow_divert.h>
 #endif /* FLOW_DIVERT */
 
+#if SKYWALK
+#include <libkern/sysctl.h>
+#include <skywalk/os_stats_private.h>
+#endif /* SKYWALK */
 
 errno_t tcp_fill_info_for_info_tuple(struct info_tuple *, struct tcp_info *);
 
@@ -1066,7 +1070,7 @@ tcp_usr_send(struct socket *so, int flags, struct mbuf *m,
 	struct inpcb *inp = sotoinpcb(so);
 	struct tcpcb *tp;
 	uint32_t mpkl_len = 0; /* length of mbuf chain */
-	uint32_t mpkl_seq; /* sequence number where new data is added */
+	uint32_t mpkl_seq = 0; /* sequence number where new data is added */
 	struct so_mpkl_send_info mpkl_send_info = {};
 
 	int isipv6;
@@ -1455,6 +1459,17 @@ skip_oinp:
 		error = EINVAL;
 		goto done;
 	}
+#if SKYWALK
+	if (!NETNS_TOKEN_VALID(&inp->inp_netns_token)) {
+		error = netns_reserve_in(&inp->inp_netns_token,
+		    inp->inp_laddr.s_addr != INADDR_ANY ?
+		    inp->inp_laddr : laddr,
+		    IPPROTO_TCP, inp->inp_lport, NETNS_BSD, NULL);
+		if (error) {
+			goto done;
+		}
+	}
+#endif /* SKYWALK */
 	if (!lck_rw_try_lock_exclusive(&inp->inp_pcbinfo->ipi_lock)) {
 		/*lock inversion issue, mostly with udp multicast packets */
 		socket_unlock(inp->inp_socket, 0);
@@ -1465,6 +1480,11 @@ skip_oinp:
 		inp->inp_laddr = laddr;
 		/* no reference needed */
 		inp->inp_last_outifp = outif;
+#if SKYWALK
+		if (NETNS_TOKEN_VALID(&inp->inp_netns_token)) {
+			netns_set_ifnet(&inp->inp_netns_token, inp->inp_last_outifp);
+		}
+#endif /* SKYWALK */
 
 		inp->inp_flags |= INP_INADDR_ANY;
 	}
@@ -1559,6 +1579,17 @@ tcp6_connect(struct tcpcb *tp, struct sockaddr *nam, struct proc *p)
 			goto done;
 		}
 	}
+#if SKYWALK
+	if (!NETNS_TOKEN_VALID(&inp->inp_netns_token)) {
+		error = netns_reserve_in6(&inp->inp_netns_token,
+		    IN6_IS_ADDR_UNSPECIFIED(&inp->in6p_laddr) ?
+		    addr6 : inp->in6p_laddr,
+		    IPPROTO_TCP, inp->inp_lport, NETNS_BSD, NULL);
+		if (error) {
+			goto done;
+		}
+	}
+#endif /* SKYWALK */
 	if (!lck_rw_try_lock_exclusive(&inp->inp_pcbinfo->ipi_lock)) {
 		/*lock inversion issue, mostly with udp multicast packets */
 		socket_unlock(inp->inp_socket, 0);
@@ -1570,6 +1601,11 @@ tcp6_connect(struct tcpcb *tp, struct sockaddr *nam, struct proc *p)
 		inp->in6p_last_outifp = outif;  /* no reference needed */
 		inp->inp_lifscope = lifscope;
 		in6_verify_ifscope(&inp->in6p_laddr, inp->inp_lifscope);
+#if SKYWALK
+		if (NETNS_TOKEN_VALID(&inp->inp_netns_token)) {
+			netns_set_ifnet(&inp->inp_netns_token, inp->in6p_last_outifp);
+		}
+#endif /* SKYWALK */
 		inp->in6p_flags |= INP_IN6ADDR_ANY;
 	}
 	inp->in6p_faddr = sin6->sin6_addr;
@@ -1627,79 +1663,76 @@ tcp_fill_info(struct tcpcb *tp, struct tcp_info *ti)
 	bzero(ti, sizeof(*ti));
 
 	ti->tcpi_state = (uint8_t)tp->t_state;
-	ti->tcpi_flowhash = inp->inp_flowhash;
+	ti->tcpi_flowhash = inp != NULL ? inp->inp_flowhash: 0;
+
+	if (TSTMP_SUPPORTED(tp)) {
+		ti->tcpi_options |= TCPI_OPT_TIMESTAMPS;
+	}
+	if (SACK_ENABLED(tp)) {
+		ti->tcpi_options |= TCPI_OPT_SACK;
+	}
+	if (TCP_WINDOW_SCALE_ENABLED(tp)) {
+		ti->tcpi_options |= TCPI_OPT_WSCALE;
+		ti->tcpi_snd_wscale = tp->snd_scale;
+		ti->tcpi_rcv_wscale = tp->rcv_scale;
+	}
+	if (TCP_ECN_ENABLED(tp)) {
+		ti->tcpi_options |= TCPI_OPT_ECN;
+	}
+
+	/* Are we in retranmission episode */
+	if (IN_FASTRECOVERY(tp) || tp->t_rxtshift > 0) {
+		ti->tcpi_flags |= TCPI_FLAG_LOSSRECOVERY;
+	}
+
+	if (tp->t_flags & TF_STREAMING_ON) {
+		ti->tcpi_flags |= TCPI_FLAG_STREAMING_ON;
+	}
+
+	ti->tcpi_rto = tp->t_timer[TCPT_REXMT] ? tp->t_rxtcur : 0;
+	ti->tcpi_snd_mss = tp->t_maxseg;
+	ti->tcpi_rcv_mss = tp->t_maxseg;
+
+	ti->tcpi_rttcur = tp->t_rttcur;
+	ti->tcpi_srtt = tp->t_srtt >> TCP_RTT_SHIFT;
+	ti->tcpi_rcv_srtt = tp->rcv_srtt >> TCP_RTT_SHIFT;
+	ti->tcpi_rttvar = tp->t_rttvar >> TCP_RTTVAR_SHIFT;
+	ti->tcpi_rttbest = tp->t_rttbest >> TCP_RTT_SHIFT;
+
+	ti->tcpi_snd_ssthresh = tp->snd_ssthresh;
+	ti->tcpi_snd_cwnd = tp->snd_cwnd;
+	if (inp != NULL && inp->inp_socket != NULL) {
+		ti->tcpi_snd_sbbytes = inp->inp_socket->so_snd.sb_cc;
+	}
+
+	ti->tcpi_rcv_space = tp->rcv_adv > tp->rcv_nxt ?
+	    tp->rcv_adv - tp->rcv_nxt : 0;
+
+	ti->tcpi_snd_wnd = tp->snd_wnd;
+	ti->tcpi_snd_nxt = tp->snd_nxt;
+	ti->tcpi_rcv_nxt = tp->rcv_nxt;
+
+	/* convert bytes/msec to bits/sec */
+	if ((tp->t_flagsext & TF_MEASURESNDBW) != 0 &&
+	    tp->t_bwmeas != NULL) {
+		ti->tcpi_snd_bw = (tp->t_bwmeas->bw_sndbw * 8000);
+	}
+
+	ti->tcpi_txpackets = inp != NULL ? inp->inp_stat->txpackets : 0;
+	ti->tcpi_txbytes = inp != NULL ? inp->inp_stat->txbytes : 0;
+	ti->tcpi_txretransmitbytes = tp->t_stat.txretransmitbytes;
+	ti->tcpi_txretransmitpackets = tp->t_stat.rxmitpkts;
+	ti->tcpi_txunacked = tp->snd_max - tp->snd_una;
+
+	ti->tcpi_rxpackets = inp != NULL ? inp->inp_stat->rxpackets : 0;
+	ti->tcpi_rxbytes = inp != NULL ? inp->inp_stat->rxbytes : 0;
+	ti->tcpi_rxduplicatebytes = tp->t_stat.rxduplicatebytes;
+	ti->tcpi_rxoutoforderbytes = tp->t_stat.rxoutoforderbytes;
 
 	if (tp->t_state > TCPS_LISTEN) {
-		if (TSTMP_SUPPORTED(tp)) {
-			ti->tcpi_options |= TCPI_OPT_TIMESTAMPS;
-		}
-		if (SACK_ENABLED(tp)) {
-			ti->tcpi_options |= TCPI_OPT_SACK;
-		}
-		if (TCP_WINDOW_SCALE_ENABLED(tp)) {
-			ti->tcpi_options |= TCPI_OPT_WSCALE;
-			ti->tcpi_snd_wscale = tp->snd_scale;
-			ti->tcpi_rcv_wscale = tp->rcv_scale;
-		}
-		if (TCP_ECN_ENABLED(tp)) {
-			ti->tcpi_options |= TCPI_OPT_ECN;
-		}
-
-		/* Are we in retranmission episode */
-		if (IN_FASTRECOVERY(tp) || tp->t_rxtshift > 0) {
-			ti->tcpi_flags |= TCPI_FLAG_LOSSRECOVERY;
-		}
-
-		if (tp->t_flags & TF_STREAMING_ON) {
-			ti->tcpi_flags |= TCPI_FLAG_STREAMING_ON;
-		}
-
-		ti->tcpi_rto = tp->t_timer[TCPT_REXMT] ? tp->t_rxtcur : 0;
-		ti->tcpi_snd_mss = tp->t_maxseg;
-		ti->tcpi_rcv_mss = tp->t_maxseg;
-
-		ti->tcpi_rttcur = tp->t_rttcur;
-		ti->tcpi_srtt = tp->t_srtt >> TCP_RTT_SHIFT;
-		ti->tcpi_rcv_srtt = tp->rcv_srtt >> TCP_RTT_SHIFT;
-		ti->tcpi_rttvar = tp->t_rttvar >> TCP_RTTVAR_SHIFT;
-		ti->tcpi_rttbest = tp->t_rttbest >> TCP_RTT_SHIFT;
-
-		ti->tcpi_snd_ssthresh = tp->snd_ssthresh;
-		ti->tcpi_snd_cwnd = tp->snd_cwnd;
-		ti->tcpi_snd_sbbytes = inp->inp_socket->so_snd.sb_cc;
-
-		ti->tcpi_rcv_space = tp->rcv_adv > tp->rcv_nxt ?
-		    tp->rcv_adv - tp->rcv_nxt : 0;
-
-		ti->tcpi_snd_wnd = tp->snd_wnd;
-		ti->tcpi_snd_nxt = tp->snd_nxt;
-		ti->tcpi_rcv_nxt = tp->rcv_nxt;
-
-		/* convert bytes/msec to bits/sec */
-		if ((tp->t_flagsext & TF_MEASURESNDBW) != 0 &&
-		    tp->t_bwmeas != NULL) {
-			ti->tcpi_snd_bw = (tp->t_bwmeas->bw_sndbw * 8000);
-		}
-
-		ti->tcpi_last_outif = (tp->t_inpcb->inp_last_outifp == NULL) ? 0 :
-		    tp->t_inpcb->inp_last_outifp->if_index;
-
-		//atomic_get_64(ti->tcpi_txbytes, &inp->inp_stat->txbytes);
-		ti->tcpi_txpackets = inp->inp_stat->txpackets;
-		ti->tcpi_txbytes = inp->inp_stat->txbytes;
-		ti->tcpi_txretransmitbytes = tp->t_stat.txretransmitbytes;
-		ti->tcpi_txretransmitpackets = tp->t_stat.rxmitpkts;
-		ti->tcpi_txunacked = tp->snd_max - tp->snd_una;
-
-		//atomic_get_64(ti->tcpi_rxbytes, &inp->inp_stat->rxbytes);
-		ti->tcpi_rxpackets = inp->inp_stat->rxpackets;
-		ti->tcpi_rxbytes = inp->inp_stat->rxbytes;
-		ti->tcpi_rxduplicatebytes = tp->t_stat.rxduplicatebytes;
-		ti->tcpi_rxoutoforderbytes = tp->t_stat.rxoutoforderbytes;
-
-		if (tp->t_state > TCPS_LISTEN) {
-			ti->tcpi_synrexmits = (uint8_t)tp->t_stat.rxmitsyns;
-		}
+		ti->tcpi_synrexmits = (uint8_t)tp->t_stat.rxmitsyns;
+	}
+	if (inp != NULL) {
 		ti->tcpi_cell_rxpackets = inp->inp_cstat->rxpackets;
 		ti->tcpi_cell_rxbytes = inp->inp_cstat->rxbytes;
 		ti->tcpi_cell_txpackets = inp->inp_cstat->txpackets;
@@ -1714,68 +1747,70 @@ tcp_fill_info(struct tcpcb *tp, struct tcp_info *ti)
 		ti->tcpi_wired_rxbytes = inp->inp_Wstat->rxbytes;
 		ti->tcpi_wired_txpackets = inp->inp_Wstat->txpackets;
 		ti->tcpi_wired_txbytes = inp->inp_Wstat->txbytes;
-		tcp_get_connectivity_status(tp, &ti->tcpi_connstatus);
-
-		ti->tcpi_tfo_syn_data_rcv = !!(tp->t_tfo_stats & TFO_S_SYNDATA_RCV);
-		ti->tcpi_tfo_cookie_req_rcv = !!(tp->t_tfo_stats & TFO_S_COOKIEREQ_RECV);
-		ti->tcpi_tfo_cookie_sent = !!(tp->t_tfo_stats & TFO_S_COOKIE_SENT);
-		ti->tcpi_tfo_cookie_invalid = !!(tp->t_tfo_stats & TFO_S_COOKIE_INVALID);
-
-		ti->tcpi_tfo_cookie_req = !!(tp->t_tfo_stats & TFO_S_COOKIE_REQ);
-		ti->tcpi_tfo_cookie_rcv = !!(tp->t_tfo_stats & TFO_S_COOKIE_RCV);
-		ti->tcpi_tfo_syn_data_sent = !!(tp->t_tfo_stats & TFO_S_SYN_DATA_SENT);
-		ti->tcpi_tfo_syn_data_acked = !!(tp->t_tfo_stats & TFO_S_SYN_DATA_ACKED);
-		ti->tcpi_tfo_syn_loss = !!(tp->t_tfo_stats & TFO_S_SYN_LOSS);
-		ti->tcpi_tfo_cookie_wrong = !!(tp->t_tfo_stats & TFO_S_COOKIE_WRONG);
-		ti->tcpi_tfo_no_cookie_rcv = !!(tp->t_tfo_stats & TFO_S_NO_COOKIE_RCV);
-		ti->tcpi_tfo_heuristics_disable = !!(tp->t_tfo_stats & TFO_S_HEURISTICS_DISABLE);
-		ti->tcpi_tfo_send_blackhole = !!(tp->t_tfo_stats & TFO_S_SEND_BLACKHOLE);
-		ti->tcpi_tfo_recv_blackhole = !!(tp->t_tfo_stats & TFO_S_RECV_BLACKHOLE);
-		ti->tcpi_tfo_onebyte_proxy = !!(tp->t_tfo_stats & TFO_S_ONE_BYTE_PROXY);
-
-		ti->tcpi_ecn_client_setup = !!(tp->ecn_flags & TE_SETUPSENT);
-		ti->tcpi_ecn_server_setup = !!(tp->ecn_flags & TE_SETUPRECEIVED);
-		ti->tcpi_ecn_success = (tp->ecn_flags & TE_ECN_ON) == TE_ECN_ON ? 1 : 0;
-		ti->tcpi_ecn_lost_syn = !!(tp->ecn_flags & TE_LOST_SYN);
-		ti->tcpi_ecn_lost_synack = !!(tp->ecn_flags & TE_LOST_SYNACK);
-
-		ti->tcpi_local_peer = !!(tp->t_flags & TF_LOCAL);
-
-		if (tp->t_inpcb->inp_last_outifp != NULL) {
-			if (IFNET_IS_CELLULAR(tp->t_inpcb->inp_last_outifp)) {
-				ti->tcpi_if_cell = 1;
-			}
-			if (IFNET_IS_WIFI(tp->t_inpcb->inp_last_outifp)) {
-				ti->tcpi_if_wifi = 1;
-			}
-			if (IFNET_IS_WIRED(tp->t_inpcb->inp_last_outifp)) {
-				ti->tcpi_if_wired = 1;
-			}
-			if (IFNET_IS_WIFI_INFRA(tp->t_inpcb->inp_last_outifp)) {
-				ti->tcpi_if_wifi_infra = 1;
-			}
-			if (tp->t_inpcb->inp_last_outifp->if_eflags & IFEF_AWDL) {
-				ti->tcpi_if_wifi_awdl = 1;
-			}
-		}
-		if (tp->tcp_cc_index == TCP_CC_ALGO_BACKGROUND_INDEX) {
-			ti->tcpi_snd_background = 1;
-		}
-		if (tcp_recv_bg == 1 ||
-		    IS_TCP_RECV_BG(tp->t_inpcb->inp_socket)) {
-			ti->tcpi_rcv_background = 1;
-		}
-
-		ti->tcpi_ecn_recv_ce = tp->t_ecn_recv_ce;
-		ti->tcpi_ecn_recv_cwr = tp->t_ecn_recv_cwr;
-
-		ti->tcpi_rcvoopack = tp->t_rcvoopack;
-		ti->tcpi_pawsdrop = tp->t_pawsdrop;
-		ti->tcpi_sack_recovery_episode = tp->t_sack_recovery_episode;
-		ti->tcpi_reordered_pkts = tp->t_reordered_pkts;
-		ti->tcpi_dsack_sent = tp->t_dsack_sent;
-		ti->tcpi_dsack_recvd = tp->t_dsack_recvd;
 	}
+	tcp_get_connectivity_status(tp, &ti->tcpi_connstatus);
+
+	ti->tcpi_tfo_syn_data_rcv = !!(tp->t_tfo_stats & TFO_S_SYNDATA_RCV);
+	ti->tcpi_tfo_cookie_req_rcv = !!(tp->t_tfo_stats & TFO_S_COOKIEREQ_RECV);
+	ti->tcpi_tfo_cookie_sent = !!(tp->t_tfo_stats & TFO_S_COOKIE_SENT);
+	ti->tcpi_tfo_cookie_invalid = !!(tp->t_tfo_stats & TFO_S_COOKIE_INVALID);
+
+	ti->tcpi_tfo_cookie_req = !!(tp->t_tfo_stats & TFO_S_COOKIE_REQ);
+	ti->tcpi_tfo_cookie_rcv = !!(tp->t_tfo_stats & TFO_S_COOKIE_RCV);
+	ti->tcpi_tfo_syn_data_sent = !!(tp->t_tfo_stats & TFO_S_SYN_DATA_SENT);
+	ti->tcpi_tfo_syn_data_acked = !!(tp->t_tfo_stats & TFO_S_SYN_DATA_ACKED);
+	ti->tcpi_tfo_syn_loss = !!(tp->t_tfo_stats & TFO_S_SYN_LOSS);
+	ti->tcpi_tfo_cookie_wrong = !!(tp->t_tfo_stats & TFO_S_COOKIE_WRONG);
+	ti->tcpi_tfo_no_cookie_rcv = !!(tp->t_tfo_stats & TFO_S_NO_COOKIE_RCV);
+	ti->tcpi_tfo_heuristics_disable = !!(tp->t_tfo_stats & TFO_S_HEURISTICS_DISABLE);
+	ti->tcpi_tfo_send_blackhole = !!(tp->t_tfo_stats & TFO_S_SEND_BLACKHOLE);
+	ti->tcpi_tfo_recv_blackhole = !!(tp->t_tfo_stats & TFO_S_RECV_BLACKHOLE);
+	ti->tcpi_tfo_onebyte_proxy = !!(tp->t_tfo_stats & TFO_S_ONE_BYTE_PROXY);
+
+	ti->tcpi_ecn_client_setup = !!(tp->ecn_flags & TE_SETUPSENT);
+	ti->tcpi_ecn_server_setup = !!(tp->ecn_flags & TE_SETUPRECEIVED);
+	ti->tcpi_ecn_success = (tp->ecn_flags & TE_ECN_ON) == TE_ECN_ON ? 1 : 0;
+	ti->tcpi_ecn_lost_syn = !!(tp->ecn_flags & TE_LOST_SYN);
+	ti->tcpi_ecn_lost_synack = !!(tp->ecn_flags & TE_LOST_SYNACK);
+
+	ti->tcpi_local_peer = !!(tp->t_flags & TF_LOCAL);
+
+	if (inp != NULL && inp->inp_last_outifp != NULL) {
+		ti->tcpi_last_outif = inp->inp_last_outifp->if_index;
+
+		if (IFNET_IS_CELLULAR(inp->inp_last_outifp)) {
+			ti->tcpi_if_cell = 1;
+		}
+		if (IFNET_IS_WIFI(inp->inp_last_outifp)) {
+			ti->tcpi_if_wifi = 1;
+		}
+		if (IFNET_IS_WIRED(inp->inp_last_outifp)) {
+			ti->tcpi_if_wired = 1;
+		}
+		if (IFNET_IS_WIFI_INFRA(inp->inp_last_outifp)) {
+			ti->tcpi_if_wifi_infra = 1;
+		}
+		if (inp->inp_last_outifp->if_eflags & IFEF_AWDL) {
+			ti->tcpi_if_wifi_awdl = 1;
+		}
+	}
+	if (tp->tcp_cc_index == TCP_CC_ALGO_BACKGROUND_INDEX) {
+		ti->tcpi_snd_background = 1;
+	}
+	if (tcp_recv_bg == 1 || (inp != NULL && inp->inp_socket != NULL &&
+	    IS_TCP_RECV_BG(inp->inp_socket))) {
+		ti->tcpi_rcv_background = 1;
+	}
+
+	ti->tcpi_ecn_recv_ce = tp->t_ecn_recv_ce;
+	ti->tcpi_ecn_recv_cwr = tp->t_ecn_recv_cwr;
+
+	ti->tcpi_rcvoopack = tp->t_rcvoopack;
+	ti->tcpi_pawsdrop = tp->t_pawsdrop;
+	ti->tcpi_sack_recovery_episode = tp->t_sack_recovery_episode;
+	ti->tcpi_reordered_pkts = tp->t_reordered_pkts;
+	ti->tcpi_dsack_sent = tp->t_dsack_sent;
+	ti->tcpi_dsack_recvd = tp->t_dsack_recvd;
 }
 
 __private_extern__ errno_t
@@ -1845,6 +1880,40 @@ tcp_fill_info_for_info_tuple(struct info_tuple *itpl, struct tcp_info *ti)
 
 		return 0;
 	}
+#if SKYWALK
+	else {
+		/* if no pcb found, check for flowswitch for uTCP flow */
+		int error;
+		struct nexus_mib_filter nmf = {
+			.nmf_type = NXMIB_FLOW,
+			.nmf_bitmap = NXMIB_FILTER_INFO_TUPLE,
+			.nmf_info_tuple = *itpl,
+		};
+		struct sk_stats_flow sf;
+		size_t len = sizeof(sf);
+		error = kernel_sysctlbyname(SK_STATS_FLOW, &sf, &len, &nmf, sizeof(nmf));
+		if (error != 0) {
+			printf("kernel_sysctlbyname err %d\n", error);
+			return error;
+		}
+		if (len != sizeof(sf)) {
+			printf("kernel_sysctlbyname invalid len %zu\n", len);
+			return ENOENT;
+		}
+
+		/*
+		 * This is what flow tracker can offer right now, which is good
+		 * for mDNS TCP keep alive offload.
+		 */
+		ti->tcpi_snd_nxt = sf.sf_lseq;
+		ti->tcpi_rcv_nxt = sf.sf_rseq;
+		ti->tcpi_rcv_space = (uint32_t)(sf.sf_lmax_win << sf.sf_lwscale);
+		ti->tcpi_rcv_wscale = sf.sf_lwscale;
+		ti->tcpi_last_outif = (int32_t)sf.sf_if_index;
+
+		return 0;
+	}
+#endif /* SKYWALK */
 
 	return ENOENT;
 }
@@ -1856,63 +1925,62 @@ tcp_connection_fill_info(struct tcpcb *tp, struct tcp_connection_info *tci)
 
 	bzero(tci, sizeof(*tci));
 	tci->tcpi_state = (uint8_t)tp->t_state;
-	if (tp->t_state > TCPS_LISTEN) {
-		if (TSTMP_SUPPORTED(tp)) {
-			tci->tcpi_options |= TCPCI_OPT_TIMESTAMPS;
-		}
-		if (SACK_ENABLED(tp)) {
-			tci->tcpi_options |= TCPCI_OPT_SACK;
-		}
-		if (TCP_WINDOW_SCALE_ENABLED(tp)) {
-			tci->tcpi_options |= TCPCI_OPT_WSCALE;
-			tci->tcpi_snd_wscale = tp->snd_scale;
-			tci->tcpi_rcv_wscale = tp->rcv_scale;
-		}
-		if (TCP_ECN_ENABLED(tp)) {
-			tci->tcpi_options |= TCPCI_OPT_ECN;
-		}
-		if (IN_FASTRECOVERY(tp) || tp->t_rxtshift > 0) {
-			tci->tcpi_flags |= TCPCI_FLAG_LOSSRECOVERY;
-		}
-		if (tp->t_flagsext & TF_PKTS_REORDERED) {
-			tci->tcpi_flags |= TCPCI_FLAG_REORDERING_DETECTED;
-		}
-		tci->tcpi_rto = (tp->t_timer[TCPT_REXMT] > 0) ?
-		    tp->t_rxtcur : 0;
-		tci->tcpi_maxseg = tp->t_maxseg;
-		tci->tcpi_snd_ssthresh = tp->snd_ssthresh;
-		tci->tcpi_snd_cwnd = tp->snd_cwnd;
-		tci->tcpi_snd_wnd = tp->snd_wnd;
-		tci->tcpi_snd_sbbytes = inp->inp_socket->so_snd.sb_cc;
-		tci->tcpi_rcv_wnd = tp->rcv_adv > tp->rcv_nxt ?
-		    tp->rcv_adv - tp->rcv_nxt : 0;
-		tci->tcpi_rttcur = tp->t_rttcur;
-		tci->tcpi_srtt = (tp->t_srtt >> TCP_RTT_SHIFT);
-		tci->tcpi_rttvar = (tp->t_rttvar >> TCP_RTTVAR_SHIFT);
-		tci->tcpi_txpackets = inp->inp_stat->txpackets;
-		tci->tcpi_txbytes = inp->inp_stat->txbytes;
-		tci->tcpi_txretransmitbytes = tp->t_stat.txretransmitbytes;
-		tci->tcpi_txretransmitpackets = tp->t_stat.rxmitpkts;
-		tci->tcpi_rxpackets = inp->inp_stat->rxpackets;
-		tci->tcpi_rxbytes = inp->inp_stat->rxbytes;
-		tci->tcpi_rxoutoforderbytes = tp->t_stat.rxoutoforderbytes;
 
-		tci->tcpi_tfo_syn_data_rcv = !!(tp->t_tfo_stats & TFO_S_SYNDATA_RCV);
-		tci->tcpi_tfo_cookie_req_rcv = !!(tp->t_tfo_stats & TFO_S_COOKIEREQ_RECV);
-		tci->tcpi_tfo_cookie_sent = !!(tp->t_tfo_stats & TFO_S_COOKIE_SENT);
-		tci->tcpi_tfo_cookie_invalid = !!(tp->t_tfo_stats & TFO_S_COOKIE_INVALID);
-		tci->tcpi_tfo_cookie_req = !!(tp->t_tfo_stats & TFO_S_COOKIE_REQ);
-		tci->tcpi_tfo_cookie_rcv = !!(tp->t_tfo_stats & TFO_S_COOKIE_RCV);
-		tci->tcpi_tfo_syn_data_sent = !!(tp->t_tfo_stats & TFO_S_SYN_DATA_SENT);
-		tci->tcpi_tfo_syn_data_acked = !!(tp->t_tfo_stats & TFO_S_SYN_DATA_ACKED);
-		tci->tcpi_tfo_syn_loss = !!(tp->t_tfo_stats & TFO_S_SYN_LOSS);
-		tci->tcpi_tfo_cookie_wrong = !!(tp->t_tfo_stats & TFO_S_COOKIE_WRONG);
-		tci->tcpi_tfo_no_cookie_rcv = !!(tp->t_tfo_stats & TFO_S_NO_COOKIE_RCV);
-		tci->tcpi_tfo_heuristics_disable = !!(tp->t_tfo_stats & TFO_S_HEURISTICS_DISABLE);
-		tci->tcpi_tfo_send_blackhole = !!(tp->t_tfo_stats & TFO_S_SEND_BLACKHOLE);
-		tci->tcpi_tfo_recv_blackhole = !!(tp->t_tfo_stats & TFO_S_RECV_BLACKHOLE);
-		tci->tcpi_tfo_onebyte_proxy = !!(tp->t_tfo_stats & TFO_S_ONE_BYTE_PROXY);
+	if (TSTMP_SUPPORTED(tp)) {
+		tci->tcpi_options |= TCPCI_OPT_TIMESTAMPS;
 	}
+	if (SACK_ENABLED(tp)) {
+		tci->tcpi_options |= TCPCI_OPT_SACK;
+	}
+	if (TCP_WINDOW_SCALE_ENABLED(tp)) {
+		tci->tcpi_options |= TCPCI_OPT_WSCALE;
+		tci->tcpi_snd_wscale = tp->snd_scale;
+		tci->tcpi_rcv_wscale = tp->rcv_scale;
+	}
+	if (TCP_ECN_ENABLED(tp)) {
+		tci->tcpi_options |= TCPCI_OPT_ECN;
+	}
+	if (IN_FASTRECOVERY(tp) || tp->t_rxtshift > 0) {
+		tci->tcpi_flags |= TCPCI_FLAG_LOSSRECOVERY;
+	}
+	if (tp->t_flagsext & TF_PKTS_REORDERED) {
+		tci->tcpi_flags |= TCPCI_FLAG_REORDERING_DETECTED;
+	}
+	tci->tcpi_rto = tp->t_timer[TCPT_REXMT] > 0 ? tp->t_rxtcur : 0;
+	tci->tcpi_maxseg = tp->t_maxseg;
+	tci->tcpi_snd_ssthresh = tp->snd_ssthresh;
+	tci->tcpi_snd_cwnd = tp->snd_cwnd;
+	tci->tcpi_snd_wnd = tp->snd_wnd;
+	if (inp != NULL && inp->inp_socket != NULL) {
+		tci->tcpi_snd_sbbytes = inp->inp_socket->so_snd.sb_cc;
+	}
+	tci->tcpi_rcv_wnd = tp->rcv_adv > tp->rcv_nxt ? tp->rcv_adv - tp->rcv_nxt : 0;
+	tci->tcpi_rttcur = tp->t_rttcur;
+	tci->tcpi_srtt = (tp->t_srtt >> TCP_RTT_SHIFT);
+	tci->tcpi_rttvar = (tp->t_rttvar >> TCP_RTTVAR_SHIFT);
+	tci->tcpi_txpackets = inp != NULL ? inp->inp_stat->txpackets : 0;
+	tci->tcpi_txbytes = inp != NULL ? inp->inp_stat->txbytes : 0;
+	tci->tcpi_txretransmitbytes = tp->t_stat.txretransmitbytes;
+	tci->tcpi_txretransmitpackets = tp->t_stat.rxmitpkts;
+	tci->tcpi_rxpackets = inp != NULL ? inp->inp_stat->rxpackets : 0;
+	tci->tcpi_rxbytes = inp != NULL ? inp->inp_stat->rxbytes : 0;
+	tci->tcpi_rxoutoforderbytes = tp->t_stat.rxoutoforderbytes;
+
+	tci->tcpi_tfo_syn_data_rcv = !!(tp->t_tfo_stats & TFO_S_SYNDATA_RCV);
+	tci->tcpi_tfo_cookie_req_rcv = !!(tp->t_tfo_stats & TFO_S_COOKIEREQ_RECV);
+	tci->tcpi_tfo_cookie_sent = !!(tp->t_tfo_stats & TFO_S_COOKIE_SENT);
+	tci->tcpi_tfo_cookie_invalid = !!(tp->t_tfo_stats & TFO_S_COOKIE_INVALID);
+	tci->tcpi_tfo_cookie_req = !!(tp->t_tfo_stats & TFO_S_COOKIE_REQ);
+	tci->tcpi_tfo_cookie_rcv = !!(tp->t_tfo_stats & TFO_S_COOKIE_RCV);
+	tci->tcpi_tfo_syn_data_sent = !!(tp->t_tfo_stats & TFO_S_SYN_DATA_SENT);
+	tci->tcpi_tfo_syn_data_acked = !!(tp->t_tfo_stats & TFO_S_SYN_DATA_ACKED);
+	tci->tcpi_tfo_syn_loss = !!(tp->t_tfo_stats & TFO_S_SYN_LOSS);
+	tci->tcpi_tfo_cookie_wrong = !!(tp->t_tfo_stats & TFO_S_COOKIE_WRONG);
+	tci->tcpi_tfo_no_cookie_rcv = !!(tp->t_tfo_stats & TFO_S_NO_COOKIE_RCV);
+	tci->tcpi_tfo_heuristics_disable = !!(tp->t_tfo_stats & TFO_S_HEURISTICS_DISABLE);
+	tci->tcpi_tfo_send_blackhole = !!(tp->t_tfo_stats & TFO_S_SEND_BLACKHOLE);
+	tci->tcpi_tfo_recv_blackhole = !!(tp->t_tfo_stats & TFO_S_RECV_BLACKHOLE);
+	tci->tcpi_tfo_onebyte_proxy = !!(tp->t_tfo_stats & TFO_S_ONE_BYTE_PROXY);
 }
 
 
@@ -2865,19 +2933,19 @@ tcp_attach(struct socket *so, struct proc *p)
 	int error;
 	int isipv6 = SOCK_CHECK_DOM(so, PF_INET6) != 0;
 
-	error = in_pcballoc(so, &tcbinfo, p);
-	if (error) {
-		return error;
-	}
-
-	inp = sotoinpcb(so);
-
 	if (so->so_snd.sb_hiwat == 0 || so->so_rcv.sb_hiwat == 0) {
 		error = soreserve(so, tcp_sendspace, tcp_recvspace);
 		if (error) {
 			return error;
 		}
 	}
+
+	error = in_pcballoc(so, &tcbinfo, p);
+	if (error) {
+		return error;
+	}
+
+	inp = sotoinpcb(so);
 
 	if (so->so_snd.sb_preconn_hiwat == 0) {
 		soreserve_preconnect(so, 2048);

@@ -1010,54 +1010,26 @@ vn_offset_unlock(struct fileglob *fg)
 	}
 }
 
-/*
- * File table vnode read routine.
- */
 static int
-vn_read(struct fileproc *fp, struct uio *uio, int flags, vfs_context_t ctx)
+vn_read_common(vnode_t vp, struct uio *uio, int fflag, vfs_context_t ctx)
 {
-	struct vnode *vp;
 	int error;
 	int ioflag;
 	off_t read_offset;
 	user_ssize_t  read_len;
 	user_ssize_t  adjusted_read_len;
 	user_ssize_t  clippedsize;
-	bool offset_locked;
 
+	/* Caller has already validated read_len. */
 	read_len = uio_resid(uio);
-	if (read_len < 0 || read_len > INT_MAX) {
-		return EINVAL;
-	}
+	assert(read_len >= 0 && read_len <= INT_MAX);
+
 	adjusted_read_len = read_len;
 	clippedsize = 0;
-
-	if ((flags & FOF_OFFSET) == 0) {
-		vn_offset_lock(fp->fp_glob);
-		offset_locked = true;
-	} else {
-		offset_locked = false;
-	}
-	vp = (struct vnode *)fp->fp_glob->fg_data;
-	if ((error = vnode_getwithref(vp))) {
-		if (offset_locked) {
-			vn_offset_unlock(fp->fp_glob);
-		}
-		return error;
-	}
-
-	if (offset_locked && (vnode_vtype(vp) != VREG || vnode_isswap(vp))) {
-		vn_offset_unlock(fp->fp_glob);
-		offset_locked = false;
-	}
 
 #if CONFIG_MACF
 	error = mac_vnode_check_read(ctx, vfs_context_ucred(ctx), vp);
 	if (error) {
-		(void)vnode_put(vp);
-		if (offset_locked) {
-			vn_offset_unlock(fp->fp_glob);
-		}
 		return error;
 	}
 #endif
@@ -1065,35 +1037,30 @@ vn_read(struct fileproc *fp, struct uio *uio, int flags, vfs_context_t ctx)
 	/* This signals to VNOP handlers that this read came from a file table read */
 	ioflag = IO_SYSCALL_DISPATCH;
 
-	if (fp->fp_glob->fg_flag & FNONBLOCK) {
+	if (fflag & FNONBLOCK) {
 		ioflag |= IO_NDELAY;
 	}
-	if ((fp->fp_glob->fg_flag & FNOCACHE) || vnode_isnocache(vp)) {
+	if ((fflag & FNOCACHE) || vnode_isnocache(vp)) {
 		ioflag |= IO_NOCACHE;
 	}
-	if (fp->fp_glob->fg_flag & FENCRYPTED) {
+	if (fflag & FENCRYPTED) {
 		ioflag |= IO_ENCRYPTED;
 	}
-	if (fp->fp_glob->fg_flag & FUNENCRYPTED) {
+	if (fflag & FUNENCRYPTED) {
 		ioflag |= IO_SKIP_ENCRYPTION;
 	}
-	if (fp->fp_glob->fg_flag & O_EVTONLY) {
+	if (fflag & O_EVTONLY) {
 		ioflag |= IO_EVTONLY;
 	}
-	if (fp->fp_glob->fg_flag & FNORDAHEAD) {
+	if (fflag & FNORDAHEAD) {
 		ioflag |= IO_RAOFF;
 	}
 
-	if ((flags & FOF_OFFSET) == 0) {
-		read_offset = fp->fp_glob->fg_offset;
-		uio_setoffset(uio, read_offset);
-	} else {
-		read_offset = uio_offset(uio);
-		/* POSIX allows negative offsets for character devices. */
-		if ((read_offset < 0) && (vnode_vtype(vp) != VCHR)) {
-			error = EINVAL;
-			goto error_out;
-		}
+	read_offset = uio_offset(uio);
+	/* POSIX allows negative offsets for character devices. */
+	if ((read_offset < 0) && (vnode_vtype(vp) != VCHR)) {
+		error = EINVAL;
+		goto error_out;
 	}
 
 	if (read_offset == INT64_MAX) {
@@ -1132,20 +1099,63 @@ vn_read(struct fileproc *fp, struct uio *uio, int flags, vfs_context_t ctx)
 		uio_setresid(uio, (uio_resid(uio) + clippedsize));
 	}
 
+error_out:
+	return error;
+}
+
+/*
+ * File table vnode read routine.
+ */
+static int
+vn_read(struct fileproc *fp, struct uio *uio, int flags, vfs_context_t ctx)
+{
+	vnode_t vp;
+	user_ssize_t read_len;
+	int error;
+	bool offset_locked;
+
+	read_len = uio_resid(uio);
+	if (read_len < 0 || read_len > INT_MAX) {
+		return EINVAL;
+	}
+
+	if ((flags & FOF_OFFSET) == 0) {
+		vn_offset_lock(fp->fp_glob);
+		offset_locked = true;
+	} else {
+		offset_locked = false;
+	}
+	vp = (struct vnode *)fp_get_data(fp);
+	if ((error = vnode_getwithref(vp))) {
+		if (offset_locked) {
+			vn_offset_unlock(fp->fp_glob);
+		}
+		return error;
+	}
+
+	if (offset_locked && (vnode_vtype(vp) != VREG || vnode_isswap(vp))) {
+		vn_offset_unlock(fp->fp_glob);
+		offset_locked = false;
+	}
+
+	if ((flags & FOF_OFFSET) == 0) {
+		uio_setoffset(uio, fp->fp_glob->fg_offset);
+	}
+
+	error = vn_read_common(vp, uio, fp->fp_glob->fg_flag, ctx);
+
 	if ((flags & FOF_OFFSET) == 0) {
 		fp->fp_glob->fg_offset += read_len - uio_resid(uio);
 	}
 
-error_out:
 	if (offset_locked) {
 		vn_offset_unlock(fp->fp_glob);
 		offset_locked = false;
 	}
 
-	(void)vnode_put(vp);
+	vnode_put(vp);
 	return error;
 }
-
 
 /*
  * File table vnode write routine.
@@ -1178,7 +1188,7 @@ vn_write(struct fileproc *fp, struct uio *uio, int flags, vfs_context_t ctx)
 		offset_locked = false;
 	}
 
-	vp = (struct vnode *)fp->fp_glob->fg_data;
+	vp = (struct vnode *)fp_get_data(fp);
 	if ((error = vnode_getwithref(vp))) {
 		if (offset_locked) {
 			vn_offset_unlock(fp->fp_glob);
@@ -1609,7 +1619,7 @@ vn_stat(struct vnode *vp, void *sb, kauth_filesec_t *xsec, int isstat64, int nee
 static int
 vn_ioctl(struct fileproc *fp, u_long com, caddr_t data, vfs_context_t ctx)
 {
-	struct vnode *vp = ((struct vnode *)fp->fp_glob->fg_data);
+	struct vnode *vp = (struct vnode *)fp_get_data(fp);
 	off_t file_size;
 	int error;
 	struct vnode *ttyvp;
@@ -1715,7 +1725,7 @@ static int
 vn_select(struct fileproc *fp, int which, void *wql, __unused vfs_context_t ctx)
 {
 	int error;
-	struct vnode * vp = (struct vnode *)fp->fp_glob->fg_data;
+	struct vnode * vp = (struct vnode *)fp_get_data(fp);
 	struct vfs_context context;
 
 	if ((error = vnode_getwithref(vp)) == 0) {
@@ -1744,7 +1754,7 @@ vn_select(struct fileproc *fp, int which, void *wql, __unused vfs_context_t ctx)
 static int
 vn_closefile(struct fileglob *fg, vfs_context_t ctx)
 {
-	struct vnode *vp = fg->fg_data;
+	struct vnode *vp = fg_get_data(fg);
 	int error;
 
 	if ((error = vnode_getwithref(vp)) == 0) {
@@ -1864,7 +1874,7 @@ vn_kqfilter(struct fileproc *fp, struct knote *kn, struct kevent_qos_s *kev)
 	int error = 0;
 	int result = 0;
 
-	vp = (struct vnode *)fp->fp_glob->fg_data;
+	vp = (struct vnode *)fp_get_data(fp);
 
 	/*
 	 * Don't attach a knote to a dead vnode.
@@ -2135,4 +2145,120 @@ filt_vnprocess(struct knote *kn, struct kevent_qos_s *kev)
 	vnode_unlock(vp);
 
 	return activate;
+}
+
+struct vniodesc {
+	vnode_t         vnio_vnode;     /* associated vnode */
+	int             vnio_fflags;    /* cached fileglob flags */
+};
+
+errno_t
+vnio_openfd(int fd, vniodesc_t *vniop)
+{
+	proc_t p = current_proc();
+	struct fileproc *fp = NULL;
+	vniodesc_t vnio;
+	vnode_t vp;
+	int error;
+	bool need_drop = false;
+
+	vnio = kalloc_type(struct vniodesc, Z_WAITOK);
+
+	error = fp_getfvp(p, fd, &fp, &vp);
+	if (error) {
+		goto out;
+	}
+	need_drop = true;
+
+	if ((fp->fp_glob->fg_flag & (FREAD | FWRITE)) == 0) {
+		error = EBADF;
+		goto out;
+	}
+
+	if (vnode_isswap(vp)) {
+		error = EPERM;
+		goto out;
+	}
+
+	if (vp->v_type != VREG) {
+		error = EFTYPE;
+		goto out;
+	}
+
+	error = vnode_getwithref(vp);
+	if (error) {
+		goto out;
+	}
+
+	vnio->vnio_vnode = vp;
+	vnio->vnio_fflags = fp->fp_glob->fg_flag;
+
+	(void)fp_drop(p, fd, fp, 0);
+	need_drop = false;
+
+	error = vnode_ref_ext(vp, vnio->vnio_fflags, 0);
+	if (error == 0) {
+		*vniop = vnio;
+		vnio = NULL;
+	}
+
+	vnode_put(vp);
+
+out:
+	if (need_drop) {
+		fp_drop(p, fd, fp, 0);
+	}
+	if (vnio != NULL) {
+		kfree_type(struct vniodesc, vnio);
+	}
+	return error;
+}
+
+errno_t
+vnio_close(vniodesc_t vnio)
+{
+	int error;
+
+	/*
+	 * The vniodesc is always destroyed, because the close
+	 * always "succeeds".  We just return whatever error
+	 * might have been encountered while doing so.
+	 */
+
+	error = vnode_getwithref(vnio->vnio_vnode);
+	if (error == 0) {
+		error = vnode_close(vnio->vnio_vnode, vnio->vnio_fflags, NULL);
+	}
+
+	kfree_type(struct vniodesc, vnio);
+
+	return error;
+}
+
+errno_t
+vnio_read(vniodesc_t vnio, uio_t uio)
+{
+	vnode_t vp = vnio->vnio_vnode;
+	user_ssize_t read_len;
+	int error;
+
+	read_len = uio_resid(uio);
+	if (read_len < 0 || read_len > INT_MAX) {
+		return EINVAL;
+	}
+
+	error = vnode_getwithref(vp);
+	if (error == 0) {
+		error = vn_read_common(vp, uio, vnio->vnio_fflags,
+		    vfs_context_current());
+		vnode_put(vp);
+	}
+
+	return error;
+}
+
+vnode_t
+vnio_vnode(vniodesc_t vnio)
+{
+	return vnio->vnio_vnode;
 }

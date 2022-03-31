@@ -37,4 +37,7 @@ subsystem
 routine mach_test_sync_upcall(
 		port	: mach_port_t);
 
+simpleroutine mach_test_async_upcall(
+		port	: mach_port_t);
+
 /* vim: set ft=c : */

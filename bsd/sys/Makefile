@@ -108,6 +108,7 @@ PRIVATE_DATAFILES = $(sort \
 	process_policy.h \
 	reason.h \
 	resource.h \
+	resource_private.h \
 	sfi.h \
 	shm_internal.h \
 	snapshot.h \
@@ -150,7 +151,7 @@ KERNELFILES = \
 	kauth.h kdebug.h kdebug_private.h kdebug_kernel.h md5.h kern_control.h \
 	imgact.h malloc.h namei.h mman.h mbuf.h mount.h netport.h param.h paths.h \
 	perfmon_private.h proc.h  queue.h random.h resource.h \
-	sbuf.h posix_sem.h posix_shm.h sem.h shm.h \
+	sbuf.h posix_sem.h posix_shm.h resource_private.h sem.h shm.h \
 	select.h signal.h socket.h socketvar.h sockio.h stat.h stdio.h \
 	sysctl.h syslimits.h syslog.h systm.h sys_domain.h  time.h \
 	types.h ubc.h ucontext.h ucred.h uio.h un.h unistd.h unpcb.h \
@@ -227,6 +228,7 @@ XNU_ONLY_EXPORTS = \
 	pipe.h \
 	proc_internal.h \
 	proc_require.h \
+	proc_ro.h \
 	pthread_internal.h \
 	resourcevar.h \
 	semaphore.h \
@@ -259,7 +261,8 @@ EXPORT_MI_DIR = sys
 # /usr/local/include
 INSTALL_MI_LCL_LIST = $(sort \
 	codesign.h content_protection.h decmpfs.h fsevents.h kdebug_private.h \
-	kern_memorystatus.h perfmon_private.h reason.h stackshot.h work_interval.h \
+	kern_memorystatus.h perfmon_private.h reason.h resource_private.h \
+	stackshot.h work_interval.h \
 	${EXTRA_PRIVATE_DATAFILES})
 
 # /System/Library/Frameworks/System.framework/PrivateHeaders

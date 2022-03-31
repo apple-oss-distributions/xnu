@@ -409,8 +409,9 @@ IOInterruptEventSource::checkForWork()
 		}
 
 		if (reserved->statistics) {
-			if (IA_GET_STATISTIC_ENABLED(kInterruptAccountingSecondLevelCountIndex)) {
-				IA_ADD_VALUE(&reserved->statistics->interruptStatistics[kInterruptAccountingSecondLevelCountIndex], 1);
+			if (IA_GET_STATISTIC_ENABLED(kInterruptAccountingSecondLevelSystemTimeIndex)) {
+				endSystemTime = mach_absolute_time();
+				IA_ADD_VALUE(&reserved->statistics->interruptStatistics[kInterruptAccountingSecondLevelSystemTimeIndex], endSystemTime - startSystemTime);
 			}
 
 			if (IA_GET_STATISTIC_ENABLED(kInterruptAccountingSecondLevelCPUTimeIndex)) {
@@ -418,9 +419,8 @@ IOInterruptEventSource::checkForWork()
 				IA_ADD_VALUE(&reserved->statistics->interruptStatistics[kInterruptAccountingSecondLevelCPUTimeIndex], endCPUTime - startCPUTime);
 			}
 
-			if (IA_GET_STATISTIC_ENABLED(kInterruptAccountingSecondLevelSystemTimeIndex)) {
-				endSystemTime = mach_absolute_time();
-				IA_ADD_VALUE(&reserved->statistics->interruptStatistics[kInterruptAccountingSecondLevelSystemTimeIndex], endSystemTime - startSystemTime);
+			if (IA_GET_STATISTIC_ENABLED(kInterruptAccountingSecondLevelCountIndex)) {
+				IA_ADD_VALUE(&reserved->statistics->interruptStatistics[kInterruptAccountingSecondLevelCountIndex], 1);
 			}
 		}
 

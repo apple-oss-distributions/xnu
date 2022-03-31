@@ -176,6 +176,7 @@ void plctrace_disable(void);
 kern_return_t ml_interrupt_prewarm(uint64_t deadline);
 
 /* Machine layer routine for intercepting panics */
+__printflike(1, 0)
 void ml_panic_trap_to_debugger(const char *panic_format_str,
     va_list *panic_args,
     unsigned int reason,

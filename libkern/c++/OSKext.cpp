@@ -138,11 +138,12 @@ static OSObject * _OSKextGetRequestArgument(
 	OSDictionary * requestDict,
 	const char   * argName);
 static bool _OSKextSetRequestArgument(
-	OSDictionary * requestDict,
-	const char   * argName,
-	OSObject     * value);
-static void * _OSKextExtractPointer(OSData * wrapper);
-static OSKextRequestResourceCallback _OSKextExtractCallbackPointer(OSData * wrapper);
+	OSDictionary    * requestDict,
+	const char      * argName,
+	OSMetaClassBase * value);
+template <typename T>
+static T * _OSKextExtractPointer(OSValueObject<T *> * wrapper);
+static OSKextRequestResourceCallback _OSKextExtractCallbackPointer(OSValueObject<OSKextRequestResourceCallback> * wrapper);
 static OSReturn _OSDictionarySetCStringValue(
 	OSDictionary * dict,
 	const char   * key,
@@ -3318,7 +3319,7 @@ OSKext::createMkext2FileEntry(
 
 	entryRef.mkext = (mkext_basic_header *)mkextBuffer;
 	entryRef.fileinfo = mkextBuffer + entryOffset;
-	if (!result->appendBytes(&entryRef, sizeof(entryRef))) {
+	if (!result->appendValue(entryRef)) {
 		result.reset();
 		goto finish;
 	}
@@ -3369,8 +3370,8 @@ z_alloc(void * notused __unused, u_int num_items, u_int size)
 	}
 	uint32_t allocSize = (uint32_t)allocSize64;
 
-	zmem = (z_mem *)kheap_alloc_tag(KHEAP_DATA_BUFFERS, allocSize,
-	    Z_WAITOK, VM_KERN_MEMORY_OSKEXT);
+	zmem = (z_mem *)kalloc_data_tag(allocSize, Z_WAITOK,
+	    VM_KERN_MEMORY_OSKEXT);
 	if (!zmem) {
 		goto finish;
 	}
@@ -3385,8 +3386,7 @@ z_free(void * notused __unused, void * ptr)
 {
 	uint32_t * skipper = (uint32_t *)ptr - 1;
 	z_mem    * zmem = (z_mem *)skipper;
-	kheap_free(KHEAP_DATA_BUFFERS, zmem, zmem->alloc_size);
-	return;
+	kfree_data(zmem, zmem->alloc_size);
 }
 };
 
@@ -4848,7 +4848,7 @@ OSKext::copyMachoUUID(const kernel_mach_header_t * header)
 	for (i = 0; i < header->ncmds; i++) {
 		if (load_cmd->cmd == LC_UUID) {
 			uuid_cmd = (struct uuid_command *)load_cmd;
-			result = OSData::withBytes(uuid_cmd->uuid, sizeof(uuid_cmd->uuid));
+			result = OSData::withValue(uuid_cmd->uuid);
 			goto finish;
 		}
 		load_cmd = (struct load_command *)((caddr_t)load_cmd + load_cmd->cmdsize);
@@ -5956,8 +5956,7 @@ strdup(const char * string)
 	}
 
 	size = 1 + strlen(string);
-	result = (char *)kheap_alloc_tag(KHEAP_DATA_BUFFERS, size,
-	    Z_WAITOK, VM_KERN_MEMORY_OSKEXT);
+	result = (char *)kalloc_data_tag(size, Z_WAITOK, VM_KERN_MEMORY_OSKEXT);
 	if (!result) {
 		goto finish;
 	}
@@ -6631,11 +6630,11 @@ finish:
 
 		if (kxlddeps[i].kext_name) {
 			size = 1 + strlen(kxlddeps[i].kext_name);
-			kheap_free(KHEAP_DATA_BUFFERS, kxlddeps[i].kext_name, size);
+			kfree_data(kxlddeps[i].kext_name, size);
 		}
 		if (kxlddeps[i].interface_name) {
 			size = 1 + strlen(kxlddeps[i].interface_name);
-			kheap_free(KHEAP_DATA_BUFFERS, kxlddeps[i].interface_name, size);
+			kfree_data(kxlddeps[i].interface_name, size);
 		}
 	}
 	if (kxlddeps) {
@@ -8247,15 +8246,17 @@ _OSKextConsiderUnloads(
 		do {
 			OSDictionary * callbackRecord = OSDynamicCast(OSDictionary,
 			    sRequestCallbackRecords->getObject(i));
-			OSBoolean * stale = OSDynamicCast(OSBoolean,
-			    callbackRecord->getObject(kKextRequestStaleKey));
+			if (callbackRecord) {
+				OSBoolean * stale = OSDynamicCast(OSBoolean,
+				    callbackRecord->getObject(kKextRequestStaleKey));
 
-			if (stale == kOSBooleanTrue) {
-				OSKext::invokeRequestCallback(callbackRecord,
-				    kOSKextReturnTimeout);
-			} else {
-				callbackRecord->setObject(kKextRequestStaleKey,
-				    kOSBooleanTrue);
+				if (stale == kOSBooleanTrue) {
+					OSKext::invokeRequestCallback(callbackRecord,
+					    kOSKextReturnTimeout);
+				} else {
+					callbackRecord->setObject(kKextRequestStaleKey,
+					    kOSBooleanTrue);
+				}
 			}
 		} while (i--);
 	}
@@ -11006,7 +11007,7 @@ OSKext::copyInfo(OSArray * infoKeys)
 				header->sections[ASAN_CSTRING_SECT_IDX].sect_size   = (uint32_t) asan_cstring_size;
 
 
-				logData = OSData::withBytes(header, (u_int) (sizeof(osLogDataHeaderRef)));
+				logData = OSData::withValue(*header);
 				if (!logData) {
 					goto finish;
 				}
@@ -11070,7 +11071,7 @@ OSKext::copyInfo(OSArray * infoKeys)
 				header->sections[ASAN_CSTRING_SECT_IDX].sect_offset = 0;
 				header->sections[ASAN_CSTRING_SECT_IDX].sect_size   = (uint32_t) 0;
 
-				logData = OSData::withBytes(header, (u_int) (sizeof(osLogDataHeaderRef)));
+				logData = OSData::withValue(*header);
 				if (!logData) {
 					goto finish;
 				}
@@ -11558,9 +11559,9 @@ OSKext::requestResource(
 	OSSharedPtr<OSString>           resourceName;
 
 	OSSharedPtr<OSDictionary>       callbackRecord;
-	OSSharedPtr<OSData>             callbackWrapper;
+	OSSharedPtr<OSValueObject<OSKextRequestResourceCallback> > callbackWrapper;
 
-	OSSharedPtr<OSData>             contextWrapper;
+	OSSharedPtr<OSValueObject<void *> > contextWrapper;
 
 	IORecursiveLockLock(sKextLock);
 
@@ -11648,9 +11649,9 @@ OSKext::requestResource(
 		goto finish;
 	}
 	// we validate callback address at call time
-	callbackWrapper = OSData::withBytes((void *)&callback, sizeof(void *));
+	callbackWrapper = OSValueObjectWithValue(callback);
 	if (context) {
-		contextWrapper = OSData::withBytes((void *)&context, sizeof(void *));
+		contextWrapper = OSValueObjectWithValue(context);
 	}
 	if (!callbackWrapper || !_OSKextSetRequestArgument(callbackRecord.get(),
 	    kKextRequestArgumentCallbackKey, callbackWrapper.get())) {
@@ -12887,7 +12888,7 @@ vm_map_kcfileset_segment(
 	vm_object_offset_t fileoffset,
 	vm_prot_t          max_prot)
 {
-	vm_map_kernel_flags_t vmk_flags;
+	vm_map_kernel_flags_t vmk_flags = VM_MAP_KERNEL_FLAGS_NONE;
 	vmk_flags.vmkf_no_copy_on_read = 1;
 	vmk_flags.vmkf_cs_enforcement = 0;
 	vmk_flags.vmkf_cs_enforcement_override = 1;
@@ -13045,9 +13046,9 @@ OSKext::dispatchResource(OSDictionary * requestDict)
 	OSData                        * dataObj         = NULL;        // do not release
 	uint32_t                        dataLength      = 0;
 	const void                    * dataPtr         = NULL;        // do not free
-	OSData                        * callbackWrapper = NULL;        // do not release
+	OSValueObject<OSKextRequestResourceCallback> * callbackWrapper = nullptr; // do not release
 	OSKextRequestResourceCallback   callback        = NULL;
-	OSData                        * contextWrapper  = NULL;        // do not release
+	OSValueObject<void *>         * contextWrapper  = nullptr;     // do not release
 	void                          * context         = NULL;        // do not free
 	OSSharedPtr<OSKext>             callbackKext;
 
@@ -13073,14 +13074,14 @@ OSKext::dispatchResource(OSDictionary * requestDict)
 	/*****
 	 * Get the context pointer of the callback record (if there is one).
 	 */
-	contextWrapper = OSDynamicCast(OSData, _OSKextGetRequestArgument(callbackRecord.get(),
-	    kKextRequestArgumentContextKey));
+	contextWrapper = OSDynamicCast(OSValueObject<void *>, _OSKextGetRequestArgument(
+		    callbackRecord.get(), kKextRequestArgumentContextKey));
 	context = _OSKextExtractPointer(contextWrapper);
 	if (contextWrapper && !context) {
 		goto finish;
 	}
 
-	callbackWrapper = OSDynamicCast(OSData,
+	callbackWrapper = OSDynamicCast(OSValueObject<OSKextRequestResourceCallback>,
 	    _OSKextGetRequestArgument(callbackRecord.get(),
 	    kKextRequestArgumentCallbackKey));
 	callback = _OSKextExtractCallbackPointer(callbackWrapper);
@@ -13245,7 +13246,7 @@ OSKext::cancelRequest(
 {
 	OSReturn       result         = kOSKextReturnNoMemory;
 	OSSharedPtr<OSDictionary> callbackRecord;
-	OSData       * contextWrapper = NULL;        // do not release
+	OSValueObject<void *> * contextWrapper = nullptr; // do not release
 
 	IORecursiveLockLock(sKextLock);
 	result = OSKext::dequeueCallbackForRequestTag(requestTag,
@@ -13253,7 +13254,7 @@ OSKext::cancelRequest(
 	IORecursiveLockUnlock(sKextLock);
 
 	if (result == kOSReturnSuccess && contextOut) {
-		contextWrapper = OSDynamicCast(OSData,
+		contextWrapper = OSDynamicCast(OSValueObject<void *>,
 		    _OSKextGetRequestArgument(callbackRecord.get(),
 		    kKextRequestArgumentContextKey));
 		*contextOut = _OSKextExtractPointer(contextWrapper);
@@ -13285,7 +13286,7 @@ OSKext::invokeOrCancelRequestCallbacks(
 		if (!request) {
 			continue;
 		}
-		OSData * callbackWrapper = OSDynamicCast(OSData,
+		auto * callbackWrapper = OSDynamicCast(OSValueObject<OSKextRequestResourceCallback>,
 		    _OSKextGetRequestArgument(request,
 		    kKextRequestArgumentCallbackKey));
 
@@ -13335,7 +13336,7 @@ OSKext::countRequestCallbacks(void)
 		if (!request) {
 			continue;
 		}
-		OSData * callbackWrapper = OSDynamicCast(OSData,
+		auto * callbackWrapper = OSDynamicCast(OSValueObject<OSKextRequestResourceCallback>,
 		    _OSKextGetRequestArgument(request,
 		    kKextRequestArgumentCallbackKey));
 
@@ -13413,9 +13414,9 @@ _OSKextGetRequestArgument(
 *********************************************************************/
 static bool
 _OSKextSetRequestArgument(
-	OSDictionary * requestDict,
-	const char   * argName,
-	OSObject     * value)
+	OSDictionary    * requestDict,
+	const char      * argName,
+	OSMetaClassBase * value)
 {
 	OSDictionary * args = OSDynamicCast(OSDictionary,
 	    requestDict->getObject(kKextRequestArgumentsKey));
@@ -13437,36 +13438,25 @@ finish:
 
 /*********************************************************************
 *********************************************************************/
-static void *
-_OSKextExtractPointer(OSData * wrapper)
+template <typename T>
+static T *
+_OSKextExtractPointer(OSValueObject<T *> * wrapper)
 {
-	void       * result = NULL;
-	const void * resultPtr = NULL;
-
 	if (!wrapper) {
-		goto finish;
+		return nullptr;
 	}
-	resultPtr = wrapper->getBytesNoCopy();
-	result = *(void **)resultPtr;
-finish:
-	return result;
+	return wrapper->getRef();
 }
 
 /*********************************************************************
 *********************************************************************/
 static OSKextRequestResourceCallback
-_OSKextExtractCallbackPointer(OSData * wrapper)
+_OSKextExtractCallbackPointer(OSValueObject<OSKextRequestResourceCallback> * wrapper)
 {
-	OSKextRequestResourceCallback       result = NULL;
-	const void * resultPtr = NULL;
-
 	if (!wrapper) {
-		goto finish;
+		return nullptr;
 	}
-	resultPtr = wrapper->getBytesNoCopy();
-	result = *(OSKextRequestResourceCallback *)resultPtr;
-finish:
-	return result;
+	return wrapper->getRef();
 }
 
 
@@ -13721,19 +13711,21 @@ OSKext::copyPersonalitiesArray(void)
 		OSDictionary * personality = OSDynamicCast(OSDictionary,
 		    personalities->getObject(personalityName));
 
-		/******
-		 * If the personality doesn't have a CFBundleIdentifier, or if it
-		 * differs from the kext's, insert the kext's ID so we can find it.
-		 * The publisher ID is used to remove personalities from bundles
-		 * correctly.
-		 */
-		personalityBundleIdentifier = OSDynamicCast(OSString,
-		    personality->getObject(kCFBundleIdentifierKey));
+		if (personality) {
+			/******
+			 * If the personality doesn't have a CFBundleIdentifier, or if it
+			 * differs from the kext's, insert the kext's ID so we can find it.
+			 * The publisher ID is used to remove personalities from bundles
+			 * correctly.
+			 */
+			personalityBundleIdentifier = OSDynamicCast(OSString,
+			    personality->getObject(kCFBundleIdentifierKey));
 
-		if (!personalityBundleIdentifier) {
-			personality->setObject(kCFBundleIdentifierKey, bundleID.get());
-		} else if (!personalityBundleIdentifier->isEqualTo(bundleID.get())) {
-			personality->setObject(kIOPersonalityPublisherKey, bundleID.get());
+			if (!personalityBundleIdentifier) {
+				personality->setObject(kCFBundleIdentifierKey, bundleID.get());
+			} else if (!personalityBundleIdentifier->isEqualTo(bundleID.get())) {
+				personality->setObject(kIOPersonalityPublisherKey, bundleID.get());
+			}
 		}
 
 		result->setObject(personality);
@@ -14947,8 +14939,7 @@ OSKext::saveLoadedKextPanicList(void)
 	}
 
 	if (loaded_kext_paniclist) {
-		kheap_free(KHEAP_DATA_BUFFERS, loaded_kext_paniclist,
-		    loaded_kext_paniclist_size);
+		kfree_data(loaded_kext_paniclist, loaded_kext_paniclist_size);
 	}
 	loaded_kext_paniclist = newlist;
 	newlist = NULL;

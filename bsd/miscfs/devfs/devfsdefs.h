@@ -205,9 +205,6 @@ struct devfsmount {
 //#define HIDDEN_MOUNTPOINT	1
 
 /* misc */
-#define M_DEVFSNAME     M_DEVFS
-#define M_DEVFSNODE     M_DEVFS
-#define M_DEVFSMNT      M_DEVFS
 
 #define VTODN(vp)       ((devnode_t *)(vp)->v_data)
 

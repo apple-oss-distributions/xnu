@@ -30,10 +30,12 @@ LLDBMACROS_USERDEBUG_FILES:= \
 
 LLDBMACROS_PYTHON_FILES = $(LLDBMACROS_USERDEBUG_FILES) \
 	core/standard.py \
+	core/compat.py \
 	core/cvalue.py \
 	core/__init__.py \
 	core/configuration.py \
 	core/caching.py \
+	core/io.py \
 	core/lazytarget.py \
 	core/kernelcore.py \
 	core/operating_system.py \
@@ -81,7 +83,8 @@ LLDBMACROS_PYTHON_FILES = $(LLDBMACROS_USERDEBUG_FILES) \
 	sysreg.py \
 	counter.py \
 	btlog.py \
-	refgrp.py
+	refgrp.py \
+	kext.py
 
 ifneq ($(PLATFORM),MacOSX)
 	LLDBMACROS_PYTHON_FILES+= \

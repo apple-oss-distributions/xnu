@@ -90,6 +90,7 @@ osfmk/kdp/output_stages/out_net.c	optional mach_kdp
 osfmk/kdp/output_stages/out_progress_notify.c	optional mach_kdp
 osfmk/kdp/output_stages/out_shmem.c	optional mach_kdp
 osfmk/kdp/output_stages/out_zlib.c	optional mach_kdp
+osfmk/kdp/output_stages/out_memory_backing_aware_buffer.c optional mach_kdp
 osfmk/kdp/processor_core.c		optional mach_kdp
 osfmk/kdp/kdp_serial.c			optional config_serial_kdp
 osfmk/ipc/ipc_entry.c			standard
@@ -145,8 +146,8 @@ osfmk/kern/kalloc.c			standard
 osfmk/kern/ktrace_background_notify.c	standard
 osfmk/kern/ledger.c			standard
 osfmk/kern/locks.c			standard
+osfmk/kern/lock_group.c			standard
 osfmk/kern/lock_ticket.c		standard
-osfmk/kern/ltable.c			standard
 osfmk/kern/mach_node.c			standard
 osfmk/kern/machine.c			standard
 osfmk/kern/mk_sp.c			standard
@@ -171,6 +172,7 @@ osfmk/kern/sched_traditional.c	optional config_sched_traditional
 osfmk/kern/sched_grrr.c	optional config_sched_grrr_core
 osfmk/kern/sched_multiq.c	optional config_sched_multiq
 osfmk/kern/sfi.c			standard
+osfmk/kern/smr.c		standard
 osfmk/kern/stack.c			standard
 osfmk/kern/startup.c			standard
 osfmk/kern/sync_sema.c		standard
@@ -203,7 +205,6 @@ osfmk/kern/hibernate.c		optional hibernation
 osfmk/kern/remote_time.c        standard
 osfmk/kern/memset_s.c		standard
 osfmk/kern/copyout_shim.c	optional copyout_shim
-osfmk/kern/suid_cred.c		standard
 osfmk/kern/task_ident.c     standard
 osfmk/kern/socd_client.c   	standard
 
@@ -246,7 +247,7 @@ osfmk/tests/vfp_state_test.c		optional config_xnupost
 osfmk/bank/bank.c			standard
 osfmk/atm/atm.c			optional config_atm
 ./atm/atm_notification_user.c		optional config_atm
-osfmk/voucher/ipc_pthread_priority.c		standard
+osfmk/voucher/ipc_pthread_priority.c	optional config_voucher_deprecated
 ./mach/coalition_notification_user.c	optional config_coalitions
 ./mach/sysdiagnose_notification_user.c	optional config_sysdiagnose
 ./mach/sysdiagnose_notification_user.c	optional config_sysdiagnose

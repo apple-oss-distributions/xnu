@@ -597,7 +597,16 @@ T_DECL(kperf_timer_not_oversampling,
 			uint64_t fire_period_ns = cur_ns - last_fire_ns;
 			uint64_t fire_period_adj_ns = fire_period_ns +
 			    last_fire_latency_ns + timer_latency_ns;
-			bool too_short = fire_period_adj_ns < FIRE_PERIOD_THRESHOLD_NS;
+			// Within 5% is still a valid period -- adjust this for running in
+			// potentially-noisy automation.
+			uint64_t fire_period_pct_adj_ns = fire_period_adj_ns +
+			    FIRE_PERIOD_THRESHOLD_NS / 20;
+			if (fire_period_adj_ns < FIRE_PERIOD_THRESHOLD_NS &&
+			    fire_period_pct_adj_ns >= FIRE_PERIOD_THRESHOLD_NS) {
+				T_LOG("ignoring period of %llu within 5%% of expected %llu",
+				    fire_period_adj_ns, fire_period_pct_adj_ns);
+			}
+			bool too_short = fire_period_pct_adj_ns < FIRE_PERIOD_THRESHOLD_NS;
 			if (too_short) {
 				T_LOG("%llu: period of timer fire %llu is %llu + %llu + %llu = "
 						"%llu < %llu",

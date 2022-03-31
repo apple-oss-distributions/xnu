@@ -509,7 +509,8 @@ nfs4_write_rpc_async(
 	nfsm_assert(error, (numops == 0), EPROTO);
 	nfsmout_if(error);
 
-	error = nfs_request_async(np, NULL, &nmreq, NFSPROC4_COMPOUND, thd, cred, &si, 0, cb, reqp);
+	error = nfs_request_async(np, NULL, &nmreq, NFSPROC4_COMPOUND,
+	    thd, cred, &si, R_NOUMOUNTINTR, cb, reqp);
 nfsmout:
 	nfsm_chain_cleanup(&nmreq);
 	return error;
@@ -646,7 +647,8 @@ restart:
 	nfsm_assert(error, (numops == 0), EPROTO);
 	nfsmout_if(error);
 
-	error = nfs_request2(dnp, NULL, &nmreq, NFSPROC4_COMPOUND, thd, cred, &si, 0, &nmrep, &xid, &status);
+	error = nfs_request2(dnp, NULL, &nmreq, NFSPROC4_COMPOUND,
+	    thd, cred, &si, R_NOUMOUNTINTR, &nmrep, &xid, &status);
 
 	if ((lockerror = nfs_node_lock(dnp))) {
 		error = lockerror;
@@ -738,7 +740,8 @@ nfs4_rename_rpc(
 	nfsm_assert(error, (numops == 0), EPROTO);
 	nfsmout_if(error);
 
-	error = nfs_request(fdnp, NULL, &nmreq, NFSPROC4_COMPOUND, ctx, &si, &nmrep, &xid, &status);
+	error = nfs_request2(fdnp, NULL, &nmreq, NFSPROC4_COMPOUND,
+	    vfs_context_thread(ctx), vfs_context_ucred(ctx), &si, R_NOUMOUNTINTR, &nmrep, &xid, &status);
 
 	if ((lockerror = nfs_node_lock2(fdnp, tdnp))) {
 		error = lockerror;
@@ -1388,7 +1391,7 @@ nfs4_commit_rpc(
 	nfsm_assert(error, (numops == 0), EPROTO);
 	nfsmout_if(error);
 	error = nfs_request2(np, NULL, &nmreq, NFSPROC4_COMPOUND,
-	    current_thread(), cred, &si, 0, &nmrep, &xid, &status);
+	    current_thread(), cred, &si, R_NOUMOUNTINTR, &nmrep, &xid, &status);
 
 	if ((lockerror = nfs_node_lock(np))) {
 		error = lockerror;
@@ -1717,7 +1720,8 @@ tryagain:
 	nfsm_chain_build_done(error, &nmreq);
 	nfsm_assert(error, (numops == 0), EPROTO);
 	nfsmout_if(error);
-	error = nfs_request(np, NULL, &nmreq, NFSPROC4_COMPOUND, ctx, &si, &nmrep, &xid, &status);
+	error = nfs_request2(np, NULL, &nmreq, NFSPROC4_COMPOUND,
+	    vfs_context_thread(ctx), vfs_context_ucred(ctx), &si, R_NOUMOUNTINTR, &nmrep, &xid, &status);
 
 	if ((lockerror = nfs_node_lock(np))) {
 		error = lockerror;
@@ -3723,7 +3727,8 @@ nfs4_setlock_rpc(
 	nfsm_assert(error, (numops == 0), EPROTO);
 	nfsmout_if(error);
 
-	error = nfs_request2(np, NULL, &nmreq, NFSPROC4_COMPOUND, thd, cred, &si, flags | R_NOINTR, &nmrep, &xid, &status);
+	error = nfs_request2(np, NULL, &nmreq, NFSPROC4_COMPOUND,
+	    thd, cred, &si, flags | R_NOINTR | R_NOUMOUNTINTR, &nmrep, &xid, &status);
 
 	if ((lockerror = nfs_node_lock(np))) {
 		error = lockerror;
@@ -3816,7 +3821,8 @@ nfs4_unlock_rpc(
 	nfsm_assert(error, (numops == 0), EPROTO);
 	nfsmout_if(error);
 
-	error = nfs_request2(np, NULL, &nmreq, NFSPROC4_COMPOUND, thd, cred, &si, flags | R_NOINTR, &nmrep, &xid, &status);
+	error = nfs_request2(np, NULL, &nmreq, NFSPROC4_COMPOUND,
+	    thd, cred, &si, flags | R_NOINTR | R_NOUMOUNTINTR, &nmrep, &xid, &status);
 
 	if ((lockerror = nfs_node_lock(np))) {
 		error = lockerror;
@@ -5217,8 +5223,8 @@ nfs4_open_rpc_internal(
 	struct nfsmount *nmp;
 	struct nfs_open_owner *noop = nofp->nof_owner;
 	struct nfs_vattr *nvattr;
-	int error = 0, open_error = EIO, lockerror = ENOENT, busyerror = ENOENT, status;
-	int nfsvers, namedattrs, numops, exclusive = 0, gotuid, gotgid;
+	int error = 0, open_error = EIO, lockerror = ENOENT, busyerror = ENOENT, status, ciflag = 0;
+	int nfsvers, namedattrs, numops, exclusive = 0, gotuid, gotgid, flags = R_NOINTR;
 	u_int64_t xid, savedxid = 0;
 	nfsnode_t dnp = VTONFS(dvp);
 	nfsnode_t np, newnp = NULL;
@@ -5306,12 +5312,15 @@ again:
 	nfsm_chain_add_openowner(error, &nmreq, nmp, noop);
 	nfsm_chain_add_32(error, &nmreq, create);
 	if (create) {
+		flags |= R_NOUMOUNTINTR;
 		if (exclusive) {
 			nfsm_chain_add_32(error, &nmreq, NFS_CREATE_EXCLUSIVE);
 			error = nfsm_chaim_add_exclusive_create_verifier(error, &nmreq, nmp);
+			ciflag = NFS_CREATE_EXCLUSIVE;
 		} else {
 			nfsm_chain_add_32(error, &nmreq, NFS_CREATE_UNCHECKED);
 			nfsm_chain_add_fattr4(error, &nmreq, vap, nmp);
+			ciflag = NFS_CREATE_UNCHECKED;
 		}
 	}
 	nfsm_chain_add_32(error, &nmreq, NFS_CLAIM_NULL);
@@ -5337,7 +5346,8 @@ again:
 		nfs_dulookup_init(dul, dnp, cnp->cn_nameptr, cnp->cn_namelen, ctx);
 	}
 
-	error = nfs_request_async(dnp, NULL, &nmreq, NFSPROC4_COMPOUND, thd, cred, &si, R_NOINTR, NULL, &req);
+	error = nfs_request_async(dnp, NULL, &nmreq, NFSPROC4_COMPOUND,
+	    thd, cred, &si, flags, NULL, &req);
 	if (!error) {
 		if (create && !namedattrs) {
 			nfs_dulookup_start(dul, dnp, ctx);
@@ -5361,7 +5371,7 @@ again:
 	nfsm_chain_op_check(error, &nmrep, NFS_OP_OPEN);
 	nfs_owner_seqid_increment(noop, NULL, error);
 	nfsm_chain_get_stateid(error, &nmrep, sid);
-	nfsm_chain_check_change_info(error, &nmrep, dnp);
+	nfsm_chain_check_change_info_open(error, &nmrep, dnp, ciflag);
 	nfsm_chain_get_32(error, &nmrep, rflags);
 	bmlen = NFS_ATTR_BITMAP_LEN;
 	nfsm_chain_get_bitmap(error, &nmrep, bitmap, bmlen);
@@ -5614,8 +5624,6 @@ nfs4_claim_delegated_open_rpc(
 	if (nfs_mount_gone(nmp)) {
 		return ENXIO;
 	}
-	fh = zalloc(nfs_fhandle_zone);
-	nvattr = zalloc_flags(KT_NFS_VATTR, Z_WAITOK);
 	nfsvers = nmp->nm_vers;
 
 	nfs_node_lock_force(np);
@@ -5672,6 +5680,9 @@ nfs4_claim_delegated_open_rpc(
 	if ((error = nfs_open_owner_set_busy(noop, NULL))) {
 		goto out;
 	}
+
+	fh = zalloc(nfs_fhandle_zone);
+	nvattr = zalloc_flags(KT_NFS_VATTR, Z_WAITOK);
 	NVATTR_INIT(nvattr);
 	delegation = NFS_OPEN_DELEGATE_NONE;
 	dstateid = np->n_dstateid;
@@ -5722,7 +5733,7 @@ nfs4_claim_delegated_open_rpc(
 	nfsm_chain_op_check(error, &nmrep, NFS_OP_OPEN);
 	nfs_owner_seqid_increment(noop, NULL, error);
 	nfsm_chain_get_stateid(error, &nmrep, &nofp->nof_stateid);
-	nfsm_chain_check_change_info(error, &nmrep, np);
+	nfsm_chain_check_change_info_open(error, &nmrep, VTONFS(dvp), 0);
 	nfsm_chain_get_32(error, &nmrep, rflags);
 	bmlen = NFS_ATTR_BITMAP_LEN;
 	nfsm_chain_get_bitmap(error, &nmrep, bitmap, bmlen);
@@ -5951,7 +5962,7 @@ nfs4_open_reclaim_rpc(
 	nfsm_chain_op_check(error, &nmrep, NFS_OP_OPEN);
 	nfs_owner_seqid_increment(noop, NULL, error);
 	nfsm_chain_get_stateid(error, &nmrep, &nofp->nof_stateid);
-	nfsm_chain_check_change_info(error, &nmrep, np);
+	nfsm_chain_check_change_info_open(error, &nmrep, np, 0);
 	nfsm_chain_get_32(error, &nmrep, rflags);
 	bmlen = NFS_ATTR_BITMAP_LEN;
 	nfsm_chain_get_bitmap(error, &nmrep, bitmap, bmlen);
@@ -7187,7 +7198,7 @@ nfs4_create_rpc(
 	nfsmout_if(error);
 
 	error = nfs_request_async(dnp, NULL, &nmreq, NFSPROC4_COMPOUND,
-	    vfs_context_thread(ctx), vfs_context_ucred(ctx), &si, 0, NULL, &req);
+	    vfs_context_thread(ctx), vfs_context_ucred(ctx), &si, R_NOUMOUNTINTR, NULL, &req);
 	if (!error) {
 		if (!namedattrs) {
 			nfs_dulookup_start(dul, dnp, ctx);
@@ -7458,7 +7469,8 @@ nfs4_vnop_link(
 	nfsm_chain_build_done(error, &nmreq);
 	nfsm_assert(error, (numops == 0), EPROTO);
 	nfsmout_if(error);
-	error = nfs_request(tdnp, NULL, &nmreq, NFSPROC4_COMPOUND, ctx, &si, &nmrep, &xid, &status);
+	error = nfs_request2(tdnp, NULL, &nmreq, NFSPROC4_COMPOUND,
+	    vfs_context_thread(ctx), vfs_context_ucred(ctx), &si, R_NOUMOUNTINTR, &nmrep, &xid, &status);
 
 	if ((lockerror = nfs_node_lock2(tdnp, np))) {
 		error = lockerror;
@@ -8160,7 +8172,7 @@ restart:
 		nfsm_chain_op_check(error, &nmrep, NFS_OP_OPEN);
 		nfs_owner_seqid_increment(noop, NULL, error);
 		nfsm_chain_get_stateid(error, &nmrep, &newnofp->nof_stateid);
-		nfsm_chain_check_change_info(error, &nmrep, adnp);
+		nfsm_chain_check_change_info_open(error, &nmrep, adnp, create ? NFS_CREATE_UNCHECKED : 0);
 		nfsm_chain_get_32(error, &nmrep, rflags);
 		bmlen = NFS_ATTR_BITMAP_LEN;
 		nfsm_chain_get_bitmap(error, &nmrep, bitmap, bmlen);

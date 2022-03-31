@@ -198,7 +198,7 @@ static unsigned int nddr_debug;                 /* debug flags */
 static struct zone *nddr_zone;                  /* zone for nd_defrouter */
 #define NDDR_ZONE_NAME  "nd6_defrouter"         /* zone name */
 
-static ZONE_DECLARE(ndprtr_zone, "nd6_pfxrouter",
+static ZONE_DEFINE(ndprtr_zone, "nd6_pfxrouter",
     sizeof(struct nd_pfxrouter), ZC_NONE);
 
 #define TWOHOUR         (120*60)
@@ -315,7 +315,7 @@ nd6_rs_input(
 		goto bad;
 	}
 
-	nd6_cache_lladdr(ifp, &saddr6, lladdr, lladdrlen, ND_ROUTER_SOLICIT, 0);
+	nd6_cache_lladdr(ifp, &saddr6, lladdr, lladdrlen, ND_ROUTER_SOLICIT, 0, NULL);
 
 freeit:
 	m_freem(m);
@@ -834,7 +834,7 @@ skip:
 	}
 
 	nd6_cache_lladdr(ifp, &saddr6, lladdr, (int)lladdrlen,
-	    ND_ROUTER_ADVERT, 0);
+	    ND_ROUTER_ADVERT, 0, NULL);
 
 	/* Post message */
 	nd6_post_msg(KEV_ND6_RA, nd_prefix_list_head, nd_prefix_list_length,
@@ -3069,7 +3069,7 @@ find_pfxlist_reachable_router(struct nd_prefix *pr)
 		 * on cellular (for that matter any interface that is point
 		 * to point really), we treat the router as reachable.
 		 */
-		if (ifp->if_type == IFT_CELLULAR) {
+		if (ifp != NULL && ifp->if_type == IFT_CELLULAR) {
 			break;
 		}
 		if (pfxrtr->router->stateflags & NDDRF_MAPPED) {

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2013 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -71,10 +71,17 @@
 #ifndef _SYS_MALLOC_H_
 #define _SYS_MALLOC_H_
 
+#include <sys/cdefs.h>
 #include <sys/appleapiopts.h>
 
-
 #ifdef KERNEL
+#ifdef XNU_KERNEL_PRIVATE
+#include <mach/vm_types.h>
+#include <kern/kalloc.h>
+#endif
+
+__BEGIN_DECLS
+
 /*
  * flags to malloc
  */
@@ -85,15 +92,9 @@
 
 #ifdef XNU_KERNEL_PRIVATE
 
-#include <mach/vm_types.h>
-#include <kern/kalloc.h>
-
-ZONE_VIEW_DECLARE(ZV_NAMEI);
-
 /*
  * Types of memory to be allocated (not all are used by us)
  */
-#define M_DEVBUF        2       /* device driver memory */
 #define M_PCB           4       /* protocol control block */
 #define M_RTABLE        5       /* routing tables */
 #define M_IFADDR        9       /* interface address */
@@ -112,76 +113,30 @@ ZONE_VIEW_DECLARE(ZV_NAMEI);
 #define M_NFSSVC        50      /* NFS server structure */
 #define M_NFSD          52      /* NFS server daemon structure */
 #define M_IPMOPTS       53      /* internet multicast options */
-#define M_IFMADDR       55      /* link-level multicast address */
 #define M_NFSBIO        58      /* NFS client I/O buffers */
 #define M_NFSBIGFH      61      /* NFS version 3 file handle */
 #define M_TTYS          65      /* allocated tty structures */
 #define M_OFILETABL     73      /* Open file descriptor table */
 #define M_TEMP          80      /* misc temporary data buffers */
 #define M_SECA          81      /* security associations, key management */
-#define M_DEVFS         82
 #define M_UDFNODE       84      /* UDF inodes */
 #define M_UDFMNT        85      /* UDF mount structures */
 #define M_KQUEUE        94      /* kqueue system */
 #define M_KAUTH         100     /* kauth subsystem */
-#define M_DUMMYNET      101     /* dummynet */
-#define M_MACTEMP       104     /* MAC framework */
 #define M_SBUF          105     /* string buffers */
 #define M_SELECT        107     /* per-thread select memory */
-#define M_INMFILTER     110     /* IPv4 multicast PCB-layer source filter */
-#define M_IN6MFILTER    112     /* IPv6 multicast PCB-layer source filter */
 #define M_IP6MOPTS      113     /* IPv6 multicast options */
 #define M_IP6CGA        117
 #define M_NECP          118     /* General NECP policy data */
 #define M_FD_VN_DATA    122     /* Per fd vnode data */
 #define M_FD_DIRBUF     123     /* Directory entries' buffer */
-#define M_NETAGENT      124     /* Network Agents */
 #define M_EVENTHANDLER  125     /* Eventhandler */
 #define M_LLTABLE       126     /* Link layer table */
-#define M_NWKWQ         127     /* Network work queue */
 #define M_CFIL          128     /* Content Filter */
 #define M_TRACKER       129     /* Tracker socket management */
 
-#define M_LAST          130     /* Must be last type + 1 */
+ZONE_VIEW_DECLARE(ZV_NAMEI);
 
-#define MALLOC(space, cast, size, type, flags)                      \
-	({ VM_ALLOC_SITE_STATIC(0, 0);                              \
-	(space) = (cast)__MALLOC(size, type, flags, &site); })
-
-#define REALLOC(space, cast, addr, size, type, flags)               \
-	({ VM_ALLOC_SITE_STATIC(0, 0);                              \
-	(space) = (cast)__REALLOC(addr, size, type, flags, &site); })
-
-#define _MALLOC(size, type, flags)                                  \
-	({ VM_ALLOC_SITE_STATIC(0, 0);                              \
-	__MALLOC(size, type, flags, &site); })
-
-#define _REALLOC(addr, size, type, flags)                           \
-	({ VM_ALLOC_SITE_STATIC(0, 0);                              \
-	__REALLOC(addr, size, type, flags, &site); })
-
-#define _FREE(addr, type)                                           \
-	(kheap_free_addr)(KHEAP_DEFAULT, addr)
-
-#define FREE(addr, type)                                            \
-	kheap_free_addr(KHEAP_DEFAULT, addr)
-
-#pragma GCC visibility push(hidden)
-
-extern void     *__MALLOC(
-	size_t                size,
-	int                   type,
-	int                   flags,
-	vm_allocation_site_t *site)  __attribute__((alloc_size(1)));
-
-extern void     *__REALLOC(
-	void                 *addr,
-	size_t                size,
-	int                   type,
-	int                   flags,
-	vm_allocation_site_t *site)  __attribute__((alloc_size(2)));
-
-#pragma GCC visibility pop
 #else /* XNU_KERNEL_PRIVATE */
 
 #define M_PCB           4       /* protocol control block (smb) */
@@ -193,6 +148,8 @@ extern void     *__REALLOC(
 #define M_UDFNODE       84      /* UDF inodes (udf)*/
 #define M_UDFMNT        85      /* UDF mount structures (udf)*/
 #define M_KAUTH         100     /* kauth subsystem (smb) */
+
+#if PLATFORM_MacOSX
 
 #define MALLOC(space, cast, size, type, flags) \
 	(space) = (cast)_MALLOC(size, type, flags)
@@ -206,27 +163,41 @@ extern void     *__REALLOC(
 #define FREE_ZONE(addr, size, type) \
 	_FREE_ZONE((void *)addr, size, type)
 
+#if defined(KERNEL_PRIVATE)
+__deprecated_msg("Please use IOMallocType()/kalloc_type() instead")
+#endif
 extern void     *_MALLOC(
 	size_t          size,
 	int             type,
 	int             flags);
 
+#if defined(KERNEL_PRIVATE)
+__deprecated_msg("Please use IOFreeType()/kfree_type() instead")
+#endif
 extern void     _FREE(
 	void            *addr,
 	int             type);
 
+#if defined(KERNEL_PRIVATE)
+__deprecated_msg("Please use IOMallocType()/kalloc_type() instead")
+#endif
 extern void     *_MALLOC_ZONE(
 	size_t          size,
 	int             type,
 	int             flags);
 
+#if defined(KERNEL_PRIVATE)
+__deprecated_msg("Please use IOFreeType()/kfree_type() instead")
+#endif
 extern void     _FREE_ZONE(
 	void            *elem,
 	size_t          size,
 	int             type);
 
+#endif /* PLATFORM_MacOSX */
 #endif /* !XNU_KERNEL_PRIVATE */
 
-#endif  /* KERNEL */
+__END_DECLS
 
+#endif  /* KERNEL */
 #endif  /* _SYS_MALLOC_H_ */

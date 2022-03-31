@@ -23,21 +23,17 @@
 inline int UT_VFORK = 0x02000000;  /* thread has vfork children */
 #pragma D binding "1.0" UT_VFORK
 
-inline uthread_t uthread = (mach_kernel`uthread_t)(curthread->uthread); /* ` */
+inline uthread_t uthread = (mach_kernel`uthread_t)(&curthread[1]); /* ` */
 #pragma D binding "1.0" uthread
 
-// inline struct proc * curproc =
-// 	(uthread && (uthread->uu_flag & UT_VFORK) && uthread->uu_proc) ? (struct proc *)uthread->uu_proc :
-// 	((struct proc *)(curthread->task->bsd_info)) != NULL ? ((struct proc *)(curthread->task->bsd_info)) :
-// 	mach_kernel`kernproc;
 inline struct proc * curproc =
-	((struct proc *)(curthread->task->bsd_info)) != NULL ? ((struct proc *)(curthread->task->bsd_info)) :
+	((struct proc *)(curthread->t_tro->tro_proc)) != NULL ? ((struct proc *)(curthread->t_tro->tro_proc)) :
 	mach_kernel`kernproc; /* ` */
 #pragma D binding "1.0" curproc
 
 /*
  * curthread->thread_tag will have this set if the thread is the main thread
- */   
+ */
 inline uint32_t THREAD_TAG_MAINTHREAD = 0x1;
 inline uint32_t THREAD_TAG_CALLOUT = 0x2;
 inline uint32_t THREAD_TAG_IOWORKLOOP = 0x4;
@@ -205,10 +201,10 @@ translator psinfo_t < struct proc * P > {
 	pr_ppid = 	P->p_ppid;
 	pr_pgid = 	P->p_pgrp.__hazard_ptr->pg_id;
 	pr_sid = 	P->p_pgrp.__hazard_ptr->pg_session->s_sid;
- 	pr_uid = 	P->p_ucred->cr_posix.cr_ruid;
- 	pr_euid = 	P->p_ucred->cr_posix.cr_uid;
- 	pr_gid = 	P->p_ucred->cr_posix.cr_rgid;
- 	pr_egid = 	P->p_ucred->cr_posix.cr_groups[0];
+ 	pr_uid = 	P->p_proc_ro->p_ucred->cr_posix.cr_ruid;
+ 	pr_euid = 	P->p_proc_ro->p_ucred->cr_posix.cr_uid;
+ 	pr_gid = 	P->p_proc_ro->p_ucred->cr_posix.cr_rgid;
+ 	pr_egid = 	P->p_proc_ro->p_ucred->cr_posix.cr_groups[0];
 	pr_addr = 	(uintptr_t)P;
 
 	pr_ttydev = (P->p_pgrp.__hazard_ptr->pg_session->s_ttyvp == NULL) ? (dev_t)-1 :
@@ -249,30 +245,30 @@ translator psinfo_t < struct proc * P > {
  */
 #pragma D binding "1.0" translator
 translator psinfo_t < thread_t T > {
-	pr_nlwp = xlate <psinfo_t> ((struct proc *)(T->task->bsd_info)).pr_nlwp;
-	pr_pid = xlate <psinfo_t> ((struct proc *)(T->task->bsd_info)).pr_pid;
-	pr_ppid = xlate <psinfo_t> ((struct proc *)(T->task->bsd_info)).pr_ppid;
-	pr_pgid = xlate <psinfo_t> ((struct proc *)(T->task->bsd_info)).pr_pgid;
-	pr_sid = xlate <psinfo_t> ((struct proc *)(T->task->bsd_info)).pr_sid;
-	pr_uid = xlate <psinfo_t> ((struct proc *)(T->task->bsd_info)).pr_uid;
-	pr_euid = xlate <psinfo_t> ((struct proc *)(T->task->bsd_info)).pr_euid;
-	pr_gid = xlate <psinfo_t> ((struct proc *)(T->task->bsd_info)).pr_gid;
-	pr_egid = xlate <psinfo_t> ((struct proc *)(T->task->bsd_info)).pr_egid;
-	pr_addr = xlate <psinfo_t> ((struct proc *)(T->task->bsd_info)).pr_addr;
-	pr_ttydev = xlate <psinfo_t> ((struct proc *)(T->task->bsd_info)).pr_ttydev;
-	pr_start = xlate <psinfo_t> ((struct proc *)(T->task->bsd_info)).pr_start; 
-	pr_fname = xlate <psinfo_t> ((struct proc *)(T->task->bsd_info)).pr_fname;
-	pr_psargs = xlate <psinfo_t> ((struct proc *)(T->task->bsd_info)).pr_psargs; /* XXX omits command line arguments XXX */
-	pr_argc = xlate <psinfo_t> ((struct proc *)(T->task->bsd_info)).pr_argc;
-	pr_argv = xlate <psinfo_t> ((struct proc *)(T->task->bsd_info)).pr_argv;
-	pr_envp = xlate <psinfo_t> ((struct proc *)(T->task->bsd_info)).pr_envp;
-	pr_dmodel = xlate <psinfo_t> ((struct proc *)(T->task->bsd_info)).pr_dmodel;
-	pr_taskid = xlate <psinfo_t> ((struct proc *)(T->task->bsd_info)).pr_taskid;
-	pr_projid = xlate <psinfo_t> ((struct proc *)(T->task->bsd_info)).pr_projid;
-	pr_poolid = xlate <psinfo_t> ((struct proc *)(T->task->bsd_info)).pr_poolid;
-	pr_zoneid = xlate <psinfo_t> ((struct proc *)(T->task->bsd_info)).pr_zoneid;
+	pr_nlwp = xlate <psinfo_t> (T->t_tro->tro_proc).pr_nlwp;
+	pr_pid = xlate <psinfo_t> (T->t_tro->tro_proc).pr_pid;
+	pr_ppid = xlate <psinfo_t> (T->t_tro->tro_proc).pr_ppid;
+	pr_pgid = xlate <psinfo_t> (T->t_tro->tro_proc).pr_pgid;
+	pr_sid = xlate <psinfo_t> (T->t_tro->tro_proc).pr_sid;
+	pr_uid = xlate <psinfo_t> (T->t_tro->tro_proc).pr_uid;
+	pr_euid = xlate <psinfo_t> (T->t_tro->tro_proc).pr_euid;
+	pr_gid = xlate <psinfo_t> (T->t_tro->tro_proc).pr_gid;
+	pr_egid = xlate <psinfo_t> (T->t_tro->tro_proc).pr_egid;
+	pr_addr = xlate <psinfo_t> (T->t_tro->tro_proc).pr_addr;
+	pr_ttydev = xlate <psinfo_t> (T->t_tro->tro_proc).pr_ttydev;
+	pr_start = xlate <psinfo_t> (T->t_tro->tro_proc).pr_start;
+	pr_fname = xlate <psinfo_t> (T->t_tro->tro_proc).pr_fname;
+	pr_psargs = xlate <psinfo_t> (T->t_tro->tro_proc).pr_psargs; /* XXX omits command line arguments XXX */
+	pr_argc = xlate <psinfo_t> (T->t_tro->tro_proc).pr_argc;
+	pr_argv = xlate <psinfo_t> (T->t_tro->tro_proc).pr_argv;
+	pr_envp = xlate <psinfo_t> (T->t_tro->tro_proc).pr_envp;
+	pr_dmodel = xlate <psinfo_t> (T->t_tro->tro_proc).pr_dmodel;
+	pr_taskid = xlate <psinfo_t> (T->t_tro->tro_proc).pr_taskid;
+	pr_projid = xlate <psinfo_t> (T->t_tro->tro_proc).pr_projid;
+	pr_poolid = xlate <psinfo_t> (T->t_tro->tro_proc).pr_poolid;
+	pr_zoneid = xlate <psinfo_t> (T->t_tro->tro_proc).pr_zoneid;
 
-	pr_start_tv = xlate <psinfo_t> ((struct proc *)(T->task->bsd_info)).pr_start_tv; 
+	pr_start_tv = xlate <psinfo_t> (T->t_tro->tro_proc).pr_start_tv;
 };
 
 /*
@@ -309,7 +305,7 @@ translator lwpsinfo_t < thread_t T > {
 	pr_flag = 0; /* lwp flags (DEPRECATED; do not use) */
 	pr_lwpid = (id_t)T->thread_id;
 	pr_addr = (uintptr_t)T;
-	pr_wchan = (uintptr_t)(((uthread_t)(T->uthread))->uu_wchan);
+	pr_wchan = (uintptr_t)(((uthread_t)&T[1])->uu_wchan);
 
 	pr_stype = SOBJ_NONE; /* XXX Undefined synch object (or none) XXX */
 	pr_state = curproc->p_stat;
@@ -319,7 +315,7 @@ translator lwpsinfo_t < thread_t T > {
 			(curproc->p_stat == SSTOP) ? 'T' :
 			(curproc->p_stat == SZOMB) ? 'Z' : '?';
 
-	pr_syscall = ((uthread_t)(T->uthread))->uu_code;
+	pr_syscall = ((uthread_t)&T[1])->uu_code;
 	pr_pri = T->sched_pri;
 
 	pr_clname = (T->sched_mode & 0x0001) ? "RT" :

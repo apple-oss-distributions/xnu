@@ -210,10 +210,7 @@ rip6_input(
 #endif /* NECP */
 			if (n) {
 				if ((last->in6p_flags & INP_CONTROLOPTS) != 0 ||
-#if CONTENT_FILTER
-				    /* Content Filter needs to see local address */
-				    (last->in6p_socket->so_cfil_db != NULL) ||
-#endif
+				    SOFLOW_ENABLED(last->in6p_socket) ||
 				    (last->in6p_socket->so_options & SO_TIMESTAMP) != 0 ||
 				    (last->in6p_socket->so_options & SO_TIMESTAMP_MONOTONIC) != 0 ||
 				    (last->in6p_socket->so_options & SO_TIMESTAMP_CONTINUOUS) != 0) {
@@ -251,10 +248,7 @@ rip6_input(
 #endif /* NECP */
 	if (last) {
 		if ((last->in6p_flags & INP_CONTROLOPTS) != 0 ||
-#if CONTENT_FILTER
-		    /* Content Filter needs to see local address */
-		    (last->in6p_socket->so_cfil_db != NULL) ||
-#endif
+		    SOFLOW_ENABLED(last->in6p_socket) ||
 		    (last->in6p_socket->so_options & SO_TIMESTAMP) != 0 ||
 		    (last->in6p_socket->so_options & SO_TIMESTAMP_MONOTONIC) != 0 ||
 		    (last->in6p_socket->so_options & SO_TIMESTAMP_CONTINUOUS) != 0) {
@@ -395,7 +389,7 @@ rip6_output(
 	 * If socket is subject to Content Filter and no addr is passed in,
 	 * retrieve CFIL saved state from mbuf and use it if necessary.
 	 */
-	if (so->so_cfil_db && !dstsock) {
+	if (CFIL_DGRAM_FILTERED(so) && !dstsock) {
 		cfil_tag = cfil_dgram_get_socket_state(m, &cfil_so_state_change_cnt, &cfil_so_options, &cfil_faddr, NULL);
 		if (cfil_tag) {
 			cfil_sin6 = SIN6(cfil_faddr);

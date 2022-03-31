@@ -67,8 +67,6 @@
 #ifndef _RADIX_H_
 #include <sys/param.h>
 #include <sys/systm.h>
-#include <sys/malloc.h>
-#define M_DONTWAIT M_NOWAIT
 #include <sys/domain.h>
 #include <sys/syslog.h>
 #include <net/radix.h>
@@ -80,20 +78,20 @@
 static int      rn_walktree_from(struct radix_node_head *h, void *a,
     void *m, walktree_f_t *f, void *w);
 static int rn_walktree(struct radix_node_head *, walktree_f_t *, void *);
-static struct radix_node
-*rn_insert(void *, struct radix_node_head *, int *,
-    struct radix_node[2]),
-*rn_newpair(void *, int, struct radix_node[2]),
-*rn_search(void *, struct radix_node *),
-*rn_search_m(void *, struct radix_node *, void *);
+static struct radix_node *rn_insert(void *, struct radix_node_head *, int *, struct radix_node[2]);
+static struct radix_node *rn_newpair(void *, int, struct radix_node[2]);
+static struct radix_node *rn_search(void *, struct radix_node *);
+static struct radix_node *rn_search_m(void *, struct radix_node *, void *);
 
-static int      max_keylen;
+static int max_keylen;
 static struct radix_mask *rn_mkfreelist;
 static struct radix_node_head *mask_rnhead;
 static char *addmask_key;
 static char normal_chars[] = {0, 0x80, 0xc0, 0xe0, 0xf0, 0xf8, 0xfc, 0xfe, -1};
 static char *rn_zeros, *rn_ones;
 
+static zone_t radix_node_zone;
+KALLOC_TYPE_DEFINE(radix_node_head_zone, struct radix_node_head, KT_DEFAULT);
 
 #define rn_masktop (mask_rnhead->rnh_treetop)
 #undef Bcmp
@@ -559,17 +557,13 @@ rn_addmask(void *n_arg, int search, int skip)
 	if (x || search) {
 		return x;
 	}
-	R_Malloc(x, struct radix_node *, max_keylen + 2 * sizeof(*x));
-	if ((saved_x = x) == 0) {
-		return NULL;
-	}
-	Bzero(x, max_keylen + 2 * sizeof(*x));
+	x = saved_x = zalloc_flags(radix_node_zone, Z_WAITOK_ZERO_NOFAIL);
 	netmask = cp = (caddr_t)(x + 2);
 	Bcopy(addmask_key, cp, mlen);
 	x = rn_insert(cp, mask_rnhead, &maskduplicated, x);
 	if (maskduplicated) {
 		log(LOG_ERR, "rn_addmask: mask impossibly already in tree");
-		R_Free(saved_x);
+		zfree(radix_node_zone, saved_x);
 		return x;
 	}
 	mask_rnhead->rnh_cnt++;
@@ -621,11 +615,6 @@ rn_new_radix_mask(struct radix_node *tt, struct radix_mask *next)
 	struct radix_mask *m;
 
 	MKGet(m);
-	if (m == 0) {
-		log(LOG_ERR, "Mask for route not entered\n");
-		return NULL;
-	}
-	Bzero(m, sizeof *m);
 	m->rm_bit = tt->rn_bit;
 	m->rm_flags = tt->rn_flags;
 	if (tt->rn_flags & RNF_NORMAL) {
@@ -872,6 +861,9 @@ rn_delete(void *v_arg, void *netmask_arg, struct radix_node_head *head)
 	for (mp = &x->rn_mklist; (m = *mp); mp = &m->rm_mklist) {
 		if (m == saved_m) {
 			*mp = m->rm_mklist;
+			if (tt->rn_mklist == m) {
+				tt->rn_mklist = *mp;
+			}
 			MKFree(m);
 			break;
 		}
@@ -1226,11 +1218,8 @@ rn_inithead(void **head, int off)
 	if (*head) {
 		return 1;
 	}
-	R_Malloc(rnh, struct radix_node_head *, sizeof(*rnh));
-	if (rnh == 0) {
-		return 0;
-	}
-	Bzero(rnh, sizeof(*rnh));
+
+	rnh = zalloc_flags(radix_node_head_zone, Z_WAITOK_ZERO_NOFAIL);
 	*head = rnh;
 	t = rn_newpair(rn_zeros, off, rnh->rnh_nodes);
 	ttt = rnh->rnh_nodes + 2;
@@ -1271,11 +1260,7 @@ rn_init(void)
 		    "rn_init: radix functions require max_keylen be set\n");
 		return;
 	}
-	R_Malloc(rn_zeros, char *, 3 * max_keylen);
-	if (rn_zeros == NULL) {
-		panic("rn_init");
-	}
-	Bzero(rn_zeros, 3 * max_keylen);
+	rn_zeros = zalloc_permanent(3 * max_keylen, ZALIGN_NONE);
 	rn_ones = cp = rn_zeros + max_keylen;
 	addmask_key = cplim = rn_ones + max_keylen;
 	while (cp < cplim) {
@@ -1284,4 +1269,8 @@ rn_init(void)
 	if (rn_inithead((void **)&mask_rnhead, 0) == 0) {
 		panic("rn_init 2");
 	}
+
+	radix_node_zone = zone_create("radix_node",
+	    sizeof(struct radix_node) * 2 + max_keylen,
+	    ZC_PGZ_USE_GUARDS | ZC_ZFREE_CLEARMEM);
 }

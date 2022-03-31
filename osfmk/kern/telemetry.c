@@ -317,7 +317,7 @@ telemetry_task_ctl_locked(task_t task, uint32_t reasons, int enable_disable)
 static bool
 telemetry_is_active(thread_t thread)
 {
-	task_t task = thread->task;
+	task_t task = get_threadtask(thread);
 
 	if (task == kernel_task) {
 		/* Kernel threads never return to an AST boundary, and are ineligible */
@@ -328,7 +328,7 @@ telemetry_is_active(thread_t thread)
 		return true;
 	}
 
-	if ((telemetry_active_tasks > 0) && ((thread->task->t_flags & TF_TELEMETRY) != 0)) {
+	if ((telemetry_active_tasks > 0) && ((task->t_flags & TF_TELEMETRY) != 0)) {
 		return true;
 	}
 
@@ -552,7 +552,7 @@ telemetry_take_sample(thread_t thread, enum micro_snapshot_flags flags)
 	}
 
 	/* Ensure task is ready for taking a sample. */
-	task = thread->task;
+	task = get_threadtask(thread);
 	if (!telemetry_task_ready_for_sample(task)) {
 		return;
 	}
@@ -617,7 +617,7 @@ telemetry_macf_take_sample(thread_t thread, enum micro_snapshot_flags flags)
 	telemetry_instrumentation_begin(telbuf, flags);
 
 	/* Ensure task is ready for taking a sample. */
-	task = thread->task;
+	task = get_threadtask(thread);
 	if (!telemetry_task_ready_for_sample(task)) {
 		rv = EBUSY;
 		goto out;
@@ -756,7 +756,7 @@ telemetry_process_sample(const struct telemetry_target *target,
 		return EINVAL;
 	}
 
-	task = thread->task;
+	task = get_threadtask(thread);
 	p = get_bsdtask_info(task);
 	bool user64_va = task_has_64Bit_addr(task);
 
@@ -1295,7 +1295,7 @@ int
 telemetry_macf_mark_curthread(void)
 {
 	thread_t thread = current_thread();
-	task_t   task   = thread->task;
+	task_t   task   = get_threadtask(thread);
 	int      rv     = 0;
 
 	if (task == kernel_task) {

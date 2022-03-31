@@ -2221,7 +2221,7 @@ static int
 sysctl_test_ca_event SYSCTL_HANDLER_ARGS
 {
 #pragma unused(arg1, arg2)
-	int error, val;
+	int error, val = 0;
 	/*
 	 * Only send on write
 	 */

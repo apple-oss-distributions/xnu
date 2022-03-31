@@ -102,7 +102,7 @@
 #define DODEBUG(A)
 #endif
 
-ZONE_DECLARE(mount_zone, "mount", sizeof(struct mount), ZC_ZFREE_CLEARMEM);
+ZONE_DEFINE_TYPE(mount_zone, "mount", struct mount, ZC_ZFREE_CLEARMEM);
 
 __private_extern__ void vntblinit(void);
 

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2022 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -241,10 +241,7 @@ rip_input(struct mbuf *m, int iphlen)
 			if (n && skipit == 0) {
 				int error = 0;
 				if ((last->inp_flags & INP_CONTROLOPTS) != 0 ||
-#if CONTENT_FILTER
-				    /* Content Filter needs to see local address */
-				    (last->inp_socket->so_cfil_db != NULL) ||
-#endif
+				    SOFLOW_ENABLED(last->inp_socket) ||
 				    (last->inp_socket->so_options & SO_TIMESTAMP) != 0 ||
 				    (last->inp_socket->so_options & SO_TIMESTAMP_MONOTONIC) != 0 ||
 				    (last->inp_socket->so_options & SO_TIMESTAMP_CONTINUOUS) != 0) {
@@ -261,7 +258,7 @@ rip_input(struct mbuf *m, int iphlen)
 				    /*
 				     * If socket is subject to Content Filter, delay stripping until reinject
 				     */
-				    && (last->inp_socket->so_cfil_db == NULL)
+				    && (!CFIL_DGRAM_FILTERED(last->inp_socket))
 #endif
 				    ) {
 					n->m_len -= iphlen;
@@ -298,10 +295,7 @@ rip_input(struct mbuf *m, int iphlen)
 	if (skipit == 0) {
 		if (last) {
 			if ((last->inp_flags & INP_CONTROLOPTS) != 0 ||
-#if CONTENT_FILTER
-			    /* Content Filter needs to see local address */
-			    (last->inp_socket->so_cfil_db != NULL) ||
-#endif
+			    SOFLOW_ENABLED(last->inp_socket) ||
 			    (last->inp_socket->so_options & SO_TIMESTAMP) != 0 ||
 			    (last->inp_socket->so_options & SO_TIMESTAMP_MONOTONIC) != 0 ||
 			    (last->inp_socket->so_options & SO_TIMESTAMP_CONTINUOUS) != 0) {
@@ -317,7 +311,7 @@ rip_input(struct mbuf *m, int iphlen)
 			    /*
 			     * If socket is subject to Content Filter, delay stripping until reinject
 			     */
-			    && (last->inp_socket->so_cfil_db == NULL)
+			    && (!CFIL_DGRAM_FILTERED(last->inp_socket))
 #endif
 			    ) {
 				m->m_len -= iphlen;
@@ -379,7 +373,7 @@ rip_output(
 	 * If socket is subject to Content Filter and no addr is passed in,
 	 * retrieve CFIL saved state from mbuf and use it if necessary.
 	 */
-	if (so->so_cfil_db && dst == INADDR_ANY) {
+	if (CFIL_DGRAM_FILTERED(so) && dst == INADDR_ANY) {
 		cfil_tag = cfil_dgram_get_socket_state(m, &cfil_so_state_change_cnt, &cfil_so_options, &cfil_faddr, &cfil_inp_flags);
 		if (cfil_tag) {
 			cfil_sin = SIN(cfil_faddr);
@@ -520,17 +514,19 @@ rip_output(
 			return EMSGSIZE;
 		}
 		ip = mtod(m, struct ip *);
-		/* don't allow both user specified and setsockopt options,
-		 *  and don't allow packet length sizes that will crash */
-		if (((IP_VHL_HL(ip->ip_vhl) != (sizeof(*ip) >> 2))
-		    && inp->inp_options)
-		    || (ip->ip_len > m->m_pkthdr.len)
-		    || (ip->ip_len < (IP_VHL_HL(ip->ip_vhl) << 2))) {
+		/*
+		 * don't allow both user specified and setsockopt options,
+		 * and don't allow packet length sizes that will crash
+		 */
+		if (m->m_pkthdr.len < sizeof(struct ip) ||
+		    ((IP_VHL_HL(ip->ip_vhl) != (sizeof(*ip) >> 2)) && inp->inp_options) ||
+		    (ip->ip_len > m->m_pkthdr.len) ||
+		    (ip->ip_len < (IP_VHL_HL(ip->ip_vhl) << 2))) {
 			m_freem(m);
 			return EINVAL;
 		}
 		if (ip->ip_id == 0 && !(rfc6864 && IP_OFF_IS_ATOMIC(ntohs(ip->ip_off)))) {
-			ip->ip_id = ip_randomid();
+			ip->ip_id = ip_randomid((uint64_t)m);
 		}
 		/* XXX prevent ip_output from overwriting header fields */
 		flags |= IP_RAWOUTPUT;
@@ -1165,7 +1161,7 @@ static int
 rip_pcblist SYSCTL_HANDLER_ARGS
 {
 #pragma unused(oidp, arg1, arg2)
-	int error, i, n;
+	int error, i, n, sz;
 	struct inpcb *inp, **inp_list;
 	inp_gen_t gencnt;
 	struct xinpgen xig;
@@ -1192,7 +1188,7 @@ rip_pcblist SYSCTL_HANDLER_ARGS
 	 * OK, now we're committed to doing something.
 	 */
 	gencnt = ripcbinfo.ipi_gencnt;
-	n = ripcbinfo.ipi_count;
+	sz = n = ripcbinfo.ipi_count;
 
 	bzero(&xig, sizeof(xig));
 	xig.xig_len = sizeof xig;
@@ -1212,8 +1208,8 @@ rip_pcblist SYSCTL_HANDLER_ARGS
 		return 0;
 	}
 
-	inp_list = _MALLOC(n * sizeof *inp_list, M_TEMP, M_WAITOK);
-	if (inp_list == 0) {
+	inp_list = kalloc_type(struct inpcb *, n, Z_WAITOK);
+	if (inp_list == NULL) {
 		lck_rw_done(&ripcbinfo.ipi_lock);
 		return ENOMEM;
 	}
@@ -1257,8 +1253,9 @@ rip_pcblist SYSCTL_HANDLER_ARGS
 		xig.xig_count = ripcbinfo.ipi_count;
 		error = SYSCTL_OUT(req, &xig, sizeof xig);
 	}
-	FREE(inp_list, M_TEMP);
+
 	lck_rw_done(&ripcbinfo.ipi_lock);
+	kfree_type(struct inpcb *, sz, inp_list);
 	return error;
 }
 
@@ -1272,7 +1269,7 @@ static int
 rip_pcblist64 SYSCTL_HANDLER_ARGS
 {
 #pragma unused(oidp, arg1, arg2)
-	int error, i, n;
+	int error, i, n, sz;
 	struct inpcb *inp, **inp_list;
 	inp_gen_t gencnt;
 	struct xinpgen xig;
@@ -1299,7 +1296,7 @@ rip_pcblist64 SYSCTL_HANDLER_ARGS
 	 * OK, now we're committed to doing something.
 	 */
 	gencnt = ripcbinfo.ipi_gencnt;
-	n = ripcbinfo.ipi_count;
+	sz = n = ripcbinfo.ipi_count;
 
 	bzero(&xig, sizeof(xig));
 	xig.xig_len = sizeof xig;
@@ -1319,8 +1316,8 @@ rip_pcblist64 SYSCTL_HANDLER_ARGS
 		return 0;
 	}
 
-	inp_list = _MALLOC(n * sizeof *inp_list, M_TEMP, M_WAITOK);
-	if (inp_list == 0) {
+	inp_list = kalloc_type(struct inpcb *, n, Z_WAITOK);
+	if (inp_list == NULL) {
 		lck_rw_done(&ripcbinfo.ipi_lock);
 		return ENOMEM;
 	}
@@ -1363,8 +1360,9 @@ rip_pcblist64 SYSCTL_HANDLER_ARGS
 		xig.xig_count = ripcbinfo.ipi_count;
 		error = SYSCTL_OUT(req, &xig, sizeof xig);
 	}
-	FREE(inp_list, M_TEMP);
+
 	lck_rw_done(&ripcbinfo.ipi_lock);
+	kfree_type(struct inpcb *, sz, inp_list);
 	return error;
 }
 

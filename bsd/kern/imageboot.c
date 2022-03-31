@@ -552,7 +552,7 @@ errorout:
 }
 
 static int
-imageboot_read_file_internal(const char *path, const off_t offset, const bool pageable, void **bufp, size_t *bufszp)
+imageboot_read_file_internal(const char *path, const off_t offset, const bool pageable, void **bufp, size_t *bufszp, off_t *fsizep)
 {
 	int err = 0;
 	struct nameidata ndp = {};
@@ -589,6 +589,10 @@ imageboot_read_file_internal(const char *path, const off_t offset, const bool pa
 		AUTHPRNT("negative file offset");
 		err = EINVAL;
 		goto out;
+	}
+
+	if (fsizep) {
+		*fsizep = fsize;
 	}
 
 	if ((err = VNOP_OPEN(vp, FREAD, ctx)) != 0) {
@@ -705,19 +709,19 @@ out:
 int
 imageboot_read_file_pageable(const char *path, void **bufp, size_t *bufszp)
 {
-	return imageboot_read_file_internal(path, 0, true, bufp, bufszp);
+	return imageboot_read_file_internal(path, 0, true, bufp, bufszp, NULL);
 }
 
 int
 imageboot_read_file_from_offset(const char *path, const off_t offset, void **bufp, size_t *bufszp)
 {
-	return imageboot_read_file_internal(path, offset, false, bufp, bufszp);
+	return imageboot_read_file_internal(path, offset, false, bufp, bufszp, NULL);
 }
 
 int
-imageboot_read_file(const char *path, void **bufp, size_t *bufszp)
+imageboot_read_file(const char *path, void **bufp, size_t *bufszp, off_t *fsizep)
 {
-	return imageboot_read_file_internal(path, 0, false, bufp, bufszp);
+	return imageboot_read_file_internal(path, 0, false, bufp, bufszp, fsizep);
 }
 
 #if CONFIG_IMAGEBOOT_IMG4 || CONFIG_IMAGEBOOT_CHUNKLIST
@@ -814,7 +818,7 @@ authenticate_root_with_img4(const char *rootpath)
 		return ENOMEM;
 	}
 
-	rv = imageboot_read_file(ticket_path, (void **)&tck.i4b_bytes, &tck.i4b_len);
+	rv = imageboot_read_file(ticket_path, (void **)&tck.i4b_bytes, &tck.i4b_len, NULL);
 	if (rv) {
 		AUTHPRNT("Cannot get a ticket from %s - %d\n", ticket_path, rv);
 		goto out_with_ticket_path;

@@ -35,6 +35,7 @@
 #include <sys/stat.h> /* dev_t */
 #include <miscfs/devfs/devfs.h> /* must come after sys/stat.h */
 #include <sys/conf.h> /* must come after sys/stat.h */
+#include <sys/resource_private.h>
 #include <sys/sysctl.h>
 #include <sys/sysproto.h>
 #include <sys/systm.h>
@@ -111,10 +112,9 @@ mt_dev_init(void)
 		assert(mt_devices[i].mtd_ncounters > 0);
 
 		dev_t dev = makedev(mt_dev_major, i);
-		char name[128];
-		snprintf(name, sizeof(name), MT_NODE "/%s", mt_devices[i].mtd_name);
 		void *node = devfs_make_node(dev, DEVFS_CHAR, UID_ROOT,
-		    GID_WINDOWSERVER, 0666, name);
+		    GID_WINDOWSERVER, 0666, MT_NODE "/%s",
+		    mt_devices[i].mtd_name);
 		if (!node) {
 			panic("monotonic: devfs_make_node failed for '%s'",
 			    mt_devices[i].mtd_name);
@@ -311,19 +311,19 @@ int
 thread_selfcounts(__unused struct proc *p,
     struct thread_selfcounts_args *uap, __unused int *ret_out)
 {
-	switch (uap->type) {
-	case 1: {
-		uint64_t counts[2] = { 0 };
+	switch (uap->kind) {
+	case THSC_CPI: {
+		struct thsc_cpi counts = { 0 };
 		uint64_t thread_counts[MT_CORE_NFIXED] = { 0 };
 
 		mt_cur_thread_fixed_counts(thread_counts);
 
 #ifdef MT_CORE_INSTRS
-		counts[0] = thread_counts[MT_CORE_INSTRS];
+		counts.tcpi_instructions = thread_counts[MT_CORE_INSTRS];
 #endif /* defined(MT_CORE_INSTRS) */
-		counts[1] = thread_counts[MT_CORE_CYCLES];
+		counts.tcpi_cycles = thread_counts[MT_CORE_CYCLES];
 
-		return copyout(counts, uap->buf, MIN(sizeof(counts), uap->nbytes));
+		return copyout(&counts, uap->buf, MIN(sizeof(counts), uap->nbytes));
 	}
 	default:
 		return EINVAL;

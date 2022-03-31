@@ -104,5 +104,5 @@ uint16_t        pbuf_inet_cksum(const pbuf_t *, uint32_t, uint32_t, uint32_t);
 uint16_t        pbuf_inet6_cksum(const pbuf_t *, uint32_t, uint32_t, uint32_t);
 
 mbuf_svc_class_t pbuf_get_service_class(const pbuf_t *);
-
+void *          pbuf_get_packet_buffer_address(const pbuf_t *);
 #endif /* __PBUF_H__ */

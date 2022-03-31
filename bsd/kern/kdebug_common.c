@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2020 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2021 Apple Inc. All rights reserved.
  *
  * @Apple_LICENSE_HEADER_START@
  *
@@ -34,21 +34,20 @@ kdebug_lck_init(void)
 	lck_spin_init(&kd_ctrl_page_triage.kds_spin_lock, &kdebug_lck_grp, LCK_ATTR_NULL);
 }
 
-inline int
-_storage_lock(struct kd_ctrl_page_t *kd_ctrl_page)
+int
+kdebug_storage_lock(struct kd_ctrl_page_t *kd_ctrl_page)
 {
 	int intrs_en = ml_set_interrupts_enabled(false);
 	lck_spin_lock_grp(&kd_ctrl_page->kds_spin_lock, &kdebug_lck_grp);
 	return intrs_en;
 }
 
-inline void
-_storage_unlock(struct kd_ctrl_page_t *kd_ctrl_page, int intrs_en)
+void
+kdebug_storage_unlock(struct kd_ctrl_page_t *kd_ctrl_page, int intrs_en)
 {
 	lck_spin_unlock(&kd_ctrl_page->kds_spin_lock);
 	ml_set_interrupts_enabled(intrs_en);
 }
-
 
 extern int kernel_debug_trace_write_to_file(user_addr_t *buffer, size_t *number, size_t *count, size_t tempbuf_number, vnode_t vp, vfs_context_t ctx, uint32_t file_version);
 
@@ -96,7 +95,6 @@ kdebug_timestamp(void)
 		return mach_absolute_time();
 	}
 }
-
 
 int
 create_buffers(struct kd_ctrl_page_t *kd_ctrl_page, struct kd_data_page_t *kd_data_page, vm_tag_t tag)
@@ -255,7 +253,7 @@ allocate_storage_unit(struct kd_ctrl_page_t *kd_ctrl_page, struct kd_data_page_t
 	bool retval = true;
 	struct kd_storage_buffers *kd_bufs;
 
-	int intrs_en = _storage_lock(kd_ctrl_page);
+	int intrs_en = kdebug_storage_lock(kd_ctrl_page);
 
 	kdbp = &kd_data_page->kdbip[cpu];
 	kd_bufs = kd_data_page->kd_bufs;
@@ -371,7 +369,7 @@ allocate_storage_unit(struct kd_ctrl_page_t *kd_ctrl_page, struct kd_data_page_t
 	}
 	kdbp->kd_list_tail = kdsp;
 out:
-	_storage_unlock(kd_ctrl_page, intrs_en);
+	kdebug_storage_unlock(kd_ctrl_page, intrs_en);
 
 	return retval;
 }
@@ -387,7 +385,7 @@ release_storage_unit(struct kd_ctrl_page_t *kd_ctrl_page, struct kd_data_page_t 
 
 	kdsp.raw = kdsp_raw;
 
-	int intrs_en = _storage_lock(kd_ctrl_page);
+	int intrs_en = kdebug_storage_lock(kd_ctrl_page);
 
 	if (kdsp.raw == kdbp->kd_list_head.raw) {
 		/*
@@ -409,7 +407,7 @@ release_storage_unit(struct kd_ctrl_page_t *kd_ctrl_page, struct kd_data_page_t 
 		kd_ctrl_page->kds_inuse_count--;
 	}
 
-	_storage_unlock(kd_ctrl_page, intrs_en);
+	kdebug_storage_unlock(kd_ctrl_page, intrs_en);
 }
 
 
@@ -420,7 +418,7 @@ bool
 disable_wrap(struct kd_ctrl_page_t *kd_ctrl_page, uint32_t *old_slowcheck, uint32_t *old_flags)
 {
 	bool wrapped;
-	int intrs_en = _storage_lock(kd_ctrl_page);
+	int intrs_en = kdebug_storage_lock(kd_ctrl_page);
 
 	*old_slowcheck = kd_ctrl_page->kdebug_slowcheck;
 	*old_flags = kd_ctrl_page->kdebug_flags;
@@ -429,7 +427,7 @@ disable_wrap(struct kd_ctrl_page_t *kd_ctrl_page, uint32_t *old_slowcheck, uint3
 	kd_ctrl_page->kdebug_flags &= ~KDBG_WRAPPED;
 	kd_ctrl_page->kdebug_flags |= KDBG_NOWRAP;
 
-	_storage_unlock(kd_ctrl_page, intrs_en);
+	kdebug_storage_unlock(kd_ctrl_page, intrs_en);
 
 	return wrapped;
 }
@@ -437,14 +435,14 @@ disable_wrap(struct kd_ctrl_page_t *kd_ctrl_page, uint32_t *old_slowcheck, uint3
 void
 enable_wrap(struct kd_ctrl_page_t *kd_ctrl_page, uint32_t old_slowcheck)
 {
-	int intrs_en = _storage_lock(kd_ctrl_page);
+	int intrs_en = kdebug_storage_lock(kd_ctrl_page);
 
 	kd_ctrl_page->kdebug_flags &= ~KDBG_NOWRAP;
 
 	if (!(old_slowcheck & SLOW_NOLOG)) {
 		kd_ctrl_page->kdebug_slowcheck &= ~SLOW_NOLOG;
 	}
-	_storage_unlock(kd_ctrl_page, intrs_en);
+	kdebug_storage_unlock(kd_ctrl_page, intrs_en);
 }
 
 __attribute__((always_inline))
@@ -588,7 +586,9 @@ kernel_debug_read(struct kd_ctrl_page_t *kd_ctrl_page, struct kd_data_page_t *kd
 	uint32_t old_kdebug_flags;
 	uint32_t old_kdebug_slowcheck;
 	bool out_of_events = false;
-	bool wrapped = false, set_preempt = true;
+	bool wrapped = false;
+	bool set_preempt = true;
+	bool should_disable = false;
 
 	struct kd_bufinfo *kdbip = kd_data_page->kdbip;
 	struct kd_storage_buffers *kd_bufs = kd_data_page->kd_bufs;
@@ -861,6 +861,18 @@ skip_record_checks:
 
 			/* Copy earliest event into merged events scratch buffer. */
 			*tempbuf = kdsp_actual->kds_records[kdsp_actual->kds_readlast++];
+			kd_buf *earliest_event = tempbuf;
+			if (kd_ctrl_page_trace.kdebug_flags & KDBG_MATCH_DISABLE) {
+				kd_event_matcher *match = &kd_ctrl_page_trace.disable_event_match;
+				kd_event_matcher *mask = &kd_ctrl_page_trace.disable_event_mask;
+				if ((earliest_event->debugid & mask->kem_debugid) == match->kem_debugid &&
+				    (earliest_event->arg1 & mask->kem_args[0]) == match->kem_args[0] &&
+				    (earliest_event->arg2 & mask->kem_args[1]) == match->kem_args[1] &&
+				    (earliest_event->arg3 & mask->kem_args[2]) == match->kem_args[2] &&
+				    (earliest_event->arg4 & mask->kem_args[3]) == match->kem_args[3]) {
+					should_disable = true;
+				}
+			}
 
 			if (kd_ctrl_page->mode == KDEBUG_MODE_TRACE) {
 				if (kdsp_actual->kds_readlast == kd_ctrl_page->kdebug_events_per_storage_unit) {
@@ -938,7 +950,7 @@ check_error:
 			count   -= tempbuf_number;
 			*number += tempbuf_number;
 		}
-		if (out_of_events == true) {
+		if (out_of_events) {
 			/*
 			 * all trace buffers are empty
 			 */
@@ -955,6 +967,10 @@ check_error:
 
 	if (set_preempt) {
 		thread_clear_eager_preempt(current_thread());
+	}
+
+	if (should_disable) {
+		kernel_debug_disable();
 	}
 
 	return error;

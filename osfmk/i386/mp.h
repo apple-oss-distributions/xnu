@@ -147,7 +147,7 @@ typedef long (*kdp_x86_xcpu_func_t) (void *arg0, void *arg1, uint16_t lcpu);
 
 extern  long kdp_x86_xcpu_invoke(const uint16_t lcpu,
     kdp_x86_xcpu_func_t func,
-    void *arg0, void *arg1);
+    void *arg0, void *arg1, uint64_t timeout);
 typedef enum    {KDP_XCPU_NONE = 0xffff, KDP_CURRENT_LCPU = 0xfffe} kdp_cpu_t;
 #endif
 
@@ -161,9 +161,10 @@ cpu_to_cpumask(cpu_t cpu)
 {
 	return (cpu < MAX_CPUS) ? (1ULL << cpu) : 0;
 }
-#define CPUMASK_ALL     0xffffffffffffffffULL
-#define CPUMASK_SELF    cpu_to_cpumask(cpu_number())
-#define CPUMASK_OTHERS  (CPUMASK_ALL & ~CPUMASK_SELF)
+#define CPUMASK_ALL             0xffffffffffffffffULL
+#define CPUMASK_SELF            cpu_to_cpumask((cpu_t)cpu_number())
+#define CPUMASK_OTHERS          (CPUMASK_ALL & ~CPUMASK_SELF)
+#define CPUMASK_REAL_OTHERS     (((1ULL << real_ncpus) - 1) & ~CPUMASK_SELF)
 
 /* Initialation routing called at processor registration */
 extern void mp_cpus_call_cpu_init(int cpu);
@@ -198,9 +199,14 @@ typedef enum {
 	SPINLOCK_TIMEOUT,
 	TLB_FLUSH_TIMEOUT,
 	CROSSCALL_TIMEOUT,
-	INTERRUPT_WATCHDOG
+	INTERRUPT_WATCHDOG,
+	PTE_CORRUPTION
 } NMI_reason_t;
+
+extern NMI_reason_t NMI_panic_reason;
+
 extern void NMIPI_panic(cpumask_t cpus, NMI_reason_t reason);
+extern long NMI_pte_corruption_callback(void *arg0, void *arg1, uint16_t lcpu);
 
 /* Interrupt a set of cpus, forcing an exit out of non-root mode */
 extern void mp_cpus_kick(cpumask_t cpus);

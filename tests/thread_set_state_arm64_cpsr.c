@@ -40,6 +40,7 @@ T_GLOBAL_META(
 	);
 
 #define PSR64_USER_MASK (0xFU << 28)
+#define PSR64_OPT_BITS  (0x01 << 12) // user-writeable bits that may or may not be set, depending on hardware/device/OS/moon phase
 
 #if __arm64__
 __attribute__((noreturn))
@@ -56,7 +57,7 @@ phase2()
 	err = thread_get_state(mach_thread_self(), ARM_THREAD_STATE64, (thread_state_t)&ts, &count);
 	T_QUIET; T_ASSERT_EQ(err, KERN_SUCCESS, "Got own thread state after corrupting CPSR");
 
-	T_QUIET; T_ASSERT_EQ(ts.__cpsr & ~PSR64_USER_MASK, 0, "No privileged fields in CPSR are set");
+	T_QUIET; T_ASSERT_EQ(ts.__cpsr & ~(PSR64_USER_MASK | PSR64_OPT_BITS), 0, "No privileged fields in CPSR are set");
 
 	exit(0);
 }

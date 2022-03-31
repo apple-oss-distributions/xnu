@@ -127,6 +127,14 @@ If
 .Fa path
 names a symbolic link, ownership of the symbolic link is changed.
 .El
+.Bl -tag -width indent
+.It Dv AT_SYMLINK_NOFOLLOW_ANY
+If
+.Fa path
+names a symbolic link, ownership of the symbolic link is changed.
+If any any other symbolic link is encountered it is not followed
+and an error is returned instead.
+.El
 .Pp
 If
 .Fn fchownat
@@ -169,6 +177,10 @@ points outside the process's allocated address space.
 .It Bq Er ELOOP
 Too many symbolic links are encountered in translating the pathname.
 This is taken to be indicative of a looping symbolic link.
+.\" ==========
+.It Bq Er ELOOP
+If AT_SYMLINK_NOFOLLOW_ANY is passed a symbolic link was encountered
+in translating the pathname.
 .\" ==========
 .It Bq Er ENAMETOOLONG
 A component of a pathname exceeded 255 characters,

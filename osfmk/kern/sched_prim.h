@@ -580,7 +580,7 @@ thread_t thread_prepare_for_handoff(thread_t thread, thread_handoff_option_t opt
 /* Attempt to context switch to a specific runnable thread */
 extern wait_result_t thread_handoff_deallocate(thread_t thread, thread_handoff_option_t option);
 
-__attribute__((nonnull(1, 2)))
+__attribute__((nonnull(2)))
 extern void thread_handoff_parameter(thread_t thread,
     thread_continue_t continuation, void *parameter, thread_handoff_option_t) __dead2;
 

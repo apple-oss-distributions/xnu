@@ -1,4 +1,9 @@
-from __future__ import print_function
+from __future__ import absolute_import, division, print_function
+
+from builtins import map
+from builtins import range
+from builtins import object
+
 from xnu import *
 from utils import *
 from core.lazytarget import *
@@ -58,7 +63,7 @@ def GetKdebugClassName(class_num):
     return (KdebugClassNames[class_num] + ' ({})'.format(class_num) if class_num in KdebugClassNames else 'unknown ({})'.format(class_num))
 
 @lldb_type_summary(['typefilter_t'])
-@header('{0: <20s}'.format("class") + ' '.join(map('{:02x}'.format, xrange(0, 255, 8))))
+@header('{0: <20s}'.format("class") + ' '.join(map('{:02x}'.format, list(range(0, 255, 8)))))
 def GetKdebugTypefilter(typefilter):
     """ Summarizes the provided typefilter.
     """
@@ -70,15 +75,15 @@ def GetKdebugTypefilter(typefilter):
     cur_typefilter = cast(typefilter, 'uint64_t *')
     subclasses_fmts = ' '.join(['{:02x}'] * 8)
 
-    elements_per_class = subclasses_per_class / subclasses_per_element
+    elements_per_class = subclasses_per_class // subclasses_per_element
 
     out_str = ''
-    for i in xrange(0, classes):
+    for i in range(0, classes):
         print_class = False
         subclasses = [0] * elements_per_class
 
         # check subclass ranges for set bits, remember those subclasses
-        for j in xrange(0, elements_per_class):
+        for j in range(0, elements_per_class):
             element = unsigned(cur_typefilter[i * elements_per_class + j])
             if element != 0:
                 print_class = True
@@ -132,7 +137,7 @@ def GetKdebugStatus():
     kdebug_flags = kern.globals.kd_ctrl_page_trace.kdebug_flags
     out += 'kdebug flags: {}\n'.format(xnudefines.GetStateString(xnudefines.kdebug_flags_strings, kdebug_flags))
     events = kern.globals.kd_data_page_trace.nkdbufs
-    buf_mb = events * (64 if kern.arch == 'x86_64' or kern.arch.startswith('arm64') else 32) / 1000000
+    buf_mb = events * (64 if kern.arch == 'x86_64' or kern.arch.startswith('arm64') else 32) // 1000000
     out += 'events allocated: {:<d} ({:<d} MB)\n'.format(events, buf_mb)
     out += 'enabled: {}\n'.format('yes' if kern.globals.kdebug_enable != 0 else 'no')
     if kdebug_flags & xnudefines.KDBG_TYPEFILTER_CHECK:
@@ -185,7 +190,7 @@ def GetKperfActionSummary(action):
 def GetKperfKdebugFilterDescription():
     kdebug_filter = kern.globals.kperf_kdebug_filter
     desc = ''
-    for i in xrange(kdebug_filter.n_debugids):
+    for i in range(kdebug_filter.n_debugids):
         filt_index = 1 if i >= 16 else 0
         filt_type = (kdebug_filter.types[filt_index] >> ((i % 16) * 4)) & 0xf
         debugid = kdebug_filter.debugids[i]
@@ -254,7 +259,7 @@ def GetKperfStatus():
 
     out += 'actions:\n'
     out += '{:<5s} '.format('id') + GetKperfActionSummary.header + '\n'
-    for i in xrange(0, actions):
+    for i in range(0, actions):
         out += '{:<5d} '.format(i) + GetKperfActionSummary(actions_arr[i])
 
     timers = kern.globals.kptimer.g_ntimers
@@ -262,7 +267,7 @@ def GetKperfStatus():
 
     out += 'timers:\n'
     out += '{:<5s} '.format('id') + GetKperfTimerSummary.header + '\n'
-    for i in xrange(0, timers):
+    for i in range(0, timers):
         out += '{:<5d} '.format(i) + GetKperfTimerSummary(timers_arr[i])
 
     return out
@@ -310,7 +315,7 @@ def GetKtraceConfig():
     action_samplers = []
     action_user_datas = []
     action_pid_filters = []
-    for i in xrange(action_count):
+    for i in range(action_count):
         action = actions[i]
         action_samplers.append(unsigned(action.sample))
         action_user_datas.append(unsigned(action.userdata))
@@ -321,7 +326,7 @@ def GetKtraceConfig():
     timer_actions = []
     timer_periods_ns = []
 
-    for i in xrange(timer_count):
+    for i in range(timer_count):
         timer = timers[i]
         timer_actions.append(unsigned(timer.kt_actionid))
         timer_periods_ns.append(
@@ -410,6 +415,9 @@ class KDEvent(object):
     def __gt__(self, other):
         return self.timestamp > other.timestamp
 
+    def __hash__(self):
+        return hash(self.timestamp)
+
 
 class KDCPU(object):
     """
@@ -486,6 +494,7 @@ class KDCPU(object):
         return KDEvent(timestamp, keventp, self.k64)
 
     # Python 2 compatibility
+    # pragma pylint: disable=next-method-defined
     def next(self):
         return self.__next__()
 

@@ -100,6 +100,13 @@ If
 .Fa path
 names a symbolic link, then the mode of the symbolic link is changed.
 .El
+.Bl -tag -width indent
+.It Dv AT_SYMLINK_NOFOLLOW_ANY
+If
+.Fa path
+names a symbolic link, then the mode of the symbolic link is changed and if
+if the path has any other symbolic links, an error is returned.
+.El
 .Pp
 If
 .Fn fchmodat
@@ -191,6 +198,10 @@ An I/O error occurred while reading from or writing to the file system.
 .It Bq Er ELOOP
 Too many symbolic links were encountered in translating the pathname.
 This is taken to be indicative of a looping symbolic link.
+.\" ==========
+.It Bq Er ELOOP
+If AT_SYMLINK_NOFOLLOW_ANY was passed and a symbolic link was encountered
+in translating the pathname.
 .\" ==========
 .It Bq Er ENAMETOOLONG
 A component of a pathname exceeded 

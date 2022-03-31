@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2020 Apple Inc. All rights reserved.
+ * Copyright (c) 2012-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -33,6 +33,9 @@
 #include <sys/types.h>
 #include <sys/queue.h>
 
+#if SKYWALK
+#include <skywalk/os_skywalk.h>
+#endif /* SKYWALK */
 
 #define FADV_SUCCESS            0       /* success */
 #define FADV_FLOW_CONTROLLED    1       /* regular flow control */
@@ -47,6 +50,11 @@ struct flowadv_fcentry {
 	STAILQ_ENTRY(flowadv_fcentry) fce_link;
 	u_int32_t       fce_flowsrc_type;       /* FLOWSRC values */
 	u_int32_t       fce_flowid;
+#if SKYWALK
+	flowadv_token_t fce_flowsrc_token;
+	flowadv_idx_t   fce_flowsrc_fidx;
+	struct ifnet    *fce_ifp;
+#endif /* SKYWALK */
 };
 
 STAILQ_HEAD(flowadv_fclist, flowadv_fcentry);

@@ -288,8 +288,9 @@ mtrr_init(void)
 	/* allocate storage for variable ranges (can block?) */
 	if (mtrr_state.var_count) {
 		mtrr_state.var_range = (mtrr_var_range_t *)
-		    zalloc_permanent(sizeof(mtrr_var_range_t) *
-		    mtrr_state.var_count, ZALIGN(mtrr_var_range_t));
+		    zalloc_permanent_tag(sizeof(mtrr_var_range_t) *
+		    mtrr_state.var_count, ZALIGN(mtrr_var_range_t),
+		    VM_KERN_MEMORY_CPU);
 		if (mtrr_state.var_range == NULL) {
 			mtrr_state.var_count = 0;
 		}

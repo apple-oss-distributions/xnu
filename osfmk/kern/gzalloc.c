@@ -151,12 +151,10 @@ gzalloc_zone_init(zone_t z)
 		gztrackzone = z;
 	}
 
-	if (!z->gzalloc_exempt) {
-		z->gzalloc_tracked = (z == gztrackzone) ||
-		    ((zone_elem_size(z) >= gzalloc_min) && (zone_elem_size(z) <= gzalloc_max));
-	}
+	z->z_gzalloc_tracked = (z == gztrackzone) ||
+	    ((zone_elem_size(z) >= gzalloc_min) && (zone_elem_size(z) <= gzalloc_max));
 
-	if (gzfc_size && z->gzalloc_tracked) {
+	if (gzfc_size && z->z_gzalloc_tracked) {
 		vm_size_t gzfcsz = round_page(sizeof(*z->gz.gzfc) * gzfc_size);
 		kern_return_t kr;
 
@@ -196,7 +194,7 @@ gzalloc_empty_free_cache(zone_t zone)
 	vm_offset_t gzfcsz = round_page(sizeof(*zone->gz.gzfc) * gzfc_size);
 	vm_offset_t gzfc_copy;
 
-	assert(zone->gzalloc_tracked); // the caller is responsible for checking
+	assert(zone->z_gzalloc_tracked); // the caller is responsible for checking
 
 	kr = kmem_alloc(kernel_map, &gzfc_copy, gzfcsz, VM_KERN_MEMORY_OSFMK);
 	if (kr != KERN_SUCCESS) {
@@ -326,9 +324,10 @@ gzalloc_init(vm_size_t max_zonemap_size)
 
 		vmk_flags = VM_MAP_KERNEL_FLAGS_NONE;
 		vmk_flags.vmkf_permanent = TRUE;
-		retval = kmem_suballoc(kernel_map, &gzalloc_map_min, (max_zonemap_size * gzalloc_zonemap_scale),
-		    FALSE, VM_FLAGS_ANYWHERE, vmk_flags, VM_KERN_MEMORY_ZONE,
-		    &gzalloc_map);
+		retval = kmem_suballoc(kernel_map, &gzalloc_map_min,
+		    (max_zonemap_size * gzalloc_zonemap_scale),
+		    VM_MAP_CREATE_DEFAULT, VM_FLAGS_ANYWHERE, vmk_flags,
+		    VM_KERN_MEMORY_ZONE, &gzalloc_map);
 
 		if (retval != KERN_SUCCESS) {
 			panic("zone_init: kmem_suballoc(gzalloc_map, 0x%lx, %u) failed",
@@ -343,7 +342,7 @@ gzalloc_alloc(zone_t zone, zone_stats_t zstats, zalloc_flags_t flags)
 {
 	vm_offset_t addr = 0;
 
-	assert(zone->gzalloc_tracked); // the caller is responsible for checking
+	assert(zone->z_gzalloc_tracked); // the caller is responsible for checking
 
 	if (get_preemption_level() != 0) {
 		if (flags & Z_NOWAIT) {
@@ -436,7 +435,7 @@ gzalloc_free(zone_t zone, zone_stats_t zstats, void *addr)
 {
 	kern_return_t kr;
 
-	assert(zone->gzalloc_tracked); // the caller is responsible for checking
+	assert(zone->z_gzalloc_tracked); // the caller is responsible for checking
 
 	gzhdr_t *gzh;
 	vm_offset_t rounded_size = round_page(zone_elem_size(zone) + GZHEADER_SIZE);
@@ -630,7 +629,7 @@ gzalloc_element_size(void *gzaddr, zone_t *z, vm_size_t *gzsz)
 		}
 
 		*gzsz = zone_elem_size(gzh->gzone);
-		if (__improbable(!gzh->gzone->gzalloc_tracked)) {
+		if (__improbable(!gzh->gzone->z_gzalloc_tracked)) {
 			panic("GZALLOC: zone mismatch (%p)", gzh->gzone);
 		}
 

@@ -127,6 +127,7 @@ thread_affinity_get(thread_t thread)
 kern_return_t
 thread_affinity_set(thread_t thread, uint32_t tag)
 {
+	task_t                  task = get_threadtask(thread);
 	affinity_set_t          aset;
 	affinity_set_t          empty_aset = NULL;
 	affinity_space_t        aspc;
@@ -134,22 +135,22 @@ thread_affinity_set(thread_t thread, uint32_t tag)
 
 	DBG("thread_affinity_set(%p,%u)\n", thread, tag);
 
-	task_lock(thread->task);
-	aspc = thread->task->affinity_space;
+	task_lock(task);
+	aspc = task->affinity_space;
 	if (aspc == NULL) {
-		task_unlock(thread->task);
+		task_unlock(task);
 		new_aspc = affinity_space_alloc();
 		if (new_aspc == NULL) {
 			return KERN_RESOURCE_SHORTAGE;
 		}
-		task_lock(thread->task);
-		if (thread->task->affinity_space == NULL) {
-			thread->task->affinity_space = new_aspc;
+		task_lock(task);
+		if (task->affinity_space == NULL) {
+			task->affinity_space = new_aspc;
 			new_aspc = NULL;
 		}
-		aspc = thread->task->affinity_space;
+		aspc = task->affinity_space;
 	}
-	task_unlock(thread->task);
+	task_unlock(task);
 	if (new_aspc) {
 		affinity_space_free(new_aspc);
 	}
@@ -331,8 +332,8 @@ thread_affinity_dup(thread_t parent, thread_t child)
 	}
 
 	aspc = aset->aset_space;
-	assert(aspc == parent->task->affinity_space);
-	assert(aspc == child->task->affinity_space);
+	assert(aspc == get_threadtask(parent)->affinity_space);
+	assert(aspc == get_threadtask(child)->affinity_space);
 
 	lck_mtx_lock(&aspc->aspc_lock);
 	affinity_set_add(aset, child);

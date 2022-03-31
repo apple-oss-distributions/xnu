@@ -318,19 +318,19 @@ SLIST_HEAD(turnstile_list, turnstile);
 
 struct turnstile {
 	struct waitq                  ts_waitq;              /* waitq embedded in turnstile */
-	turnstile_inheritor_t         ts_inheritor;          /* thread/turnstile inheriting the priority (IL, WL) */
+#define ts_inheritor  ts_waitq.waitq_inheritor               /* thread/turnstile inheriting the priority (IL, WL) */
 	union {
 		struct turnstile_list ts_free_turnstiles;    /* turnstile free list (IL) */
 		SLIST_ENTRY(turnstile) ts_free_elm;          /* turnstile free list element (IL) */
 	};
-	struct priority_queue_sched_max ts_inheritor_queue;    /* Queue of turnstile with us as an inheritor (WL) */
+	struct priority_queue_sched_max ts_inheritor_queue;  /* Queue of turnstile with us as an inheritor (WL) */
 	union {
 		struct priority_queue_entry_sched ts_inheritor_links;    /* Inheritor queue links */
 		struct mpsc_queue_chain   ts_deallocate_link;    /* thread deallocate link */
 	};
 	SLIST_ENTRY(turnstile)        ts_htable_link;        /* linkage for turnstile in global hash table */
 	uintptr_t                     ts_proprietor;         /* hash key lookup turnstile (IL) */
-	os_refcnt_t                   ts_refcount;           /* reference count for turnstiles */
+	os_ref_atomic_t               ts_refcount;           /* reference count for turnstiles */
 	_Atomic uint32_t              ts_type_gencount;      /* gen count used for priority chaining (IL), type of turnstile (IL) */
 	uint32_t                      ts_port_ref;           /* number of explicit refs from ports on send turnstile */
 	turnstile_update_flags_t      ts_inheritor_flags;    /* flags for turnstile inheritor (IL, WL) */

@@ -58,17 +58,7 @@ options		HW_AST		# Hardware ast support		# <hw_ast>
 options 	HW_FOOTPRINT	# Cache footprint support	# <hw_foot>
 
 options 	MACH		# Standard Mach features	# <mach>
-options		MACH_COMPAT	# Vendor syscall compatibility  # <mach>
-options		MACH_FASTLINK	# Fast symbolic links
-options		MACH_HOST	# Mach host (resource alloc.)	# <host>
-options		MACH_IPC_COMPAT	# Enable old IPC interface	# <ipc_compat>
-options		MACH_IPC_TEST	# Testing code/printfs		# <ipc_test>
 options		MACH_FLIPC	# Fast-Local IPC		# <mach_flipc>
-options 	MACH_NP		# Mach IPC support		# <np>
-options		MACH_NBC	# No buffer cache		# <nbc>
-options		MACH_NET	# Fast network access		# <mach_net>
-options		MACH_XP		# external pager support	# <xp>
-options		NO_DIRECT_RPC	# for untyped mig servers	#
 options		LOOP		# loopback support		# <loop>
 options		VLAN		#				# <vlan>
 options		SIXLOWPAN	# 6LoWPAN support		# <sixlowpan>
@@ -92,12 +82,18 @@ options		SYSV_SEM	# SVID semaphores		# <sysv_sem>
 options		SYSV_MSG	# SVID messages			# <sysv_msg>
 options		SYSV_SHM	# SVID shared mem		# <sysv_shm>
 options		PSYNCH		# pthread synch			# <psynch>
-options		CONFIG_VFORK	# vfork support			# <vfork>
 options		FLOW_DIVERT								# <flow_divert>
 options		NECP									# <necp>
 options		CONTENT_FILTER	#						# <content_filter>
 options 	PACKET_MANGLER	#						# <packet_mangler>
-options 	SIXLOWPAN	#		# <sixlowpan>
+options 	REMOTE_VIF	#						# <remote_vif>
+options		SKYWALK		#		# <skywalk>
+options		CONFIG_NEXUS_USER_PIPE	#	# <config_nexus_user_pipe>
+options		CONFIG_NEXUS_KERNEL_PIPE #	# <config_nexus_kernel_pipe>
+options		CONFIG_NEXUS_MONITOR	#	# <config_nexus_monitor>
+options		CONFIG_NEXUS_FLOWSWITCH	#	# <config_nexus_flowswitch>
+options		CONFIG_NEXUS_NETIF	#	# <config_nexus_netif>
+
 # secure_kernel - secure kernel from user programs
 options     SECURE_KERNEL       # <secure_kernel>
 
@@ -314,7 +310,7 @@ options   CONFIG_IPC_TABLE_ENTRIES_STEPS=256 	# 300714 entries	# <medium,large,x
 #
 # maximum copyout size for IPC debugging tools
 #
-options CONFIG_IPC_KERNEL_MAP_SIZE=16	# 16M	# <bsmall,small,xsmall>
+options CONFIG_IPC_KERNEL_MAP_SIZE=32	# 32M	# <bsmall,small,xsmall>
 options CONFIG_IPC_KERNEL_MAP_SIZE=64	# 64M	# <medium,large,xlarge>
 
 #
@@ -385,18 +381,9 @@ options		CONFIG_MEMORYSTATUS		# <memorystatus>
 options		CONFIG_JETSAM			# <jetsam>
 
 #
-# enable new link table implementation stats/debugging
-# (adds mesaureable overhead)
-#
-options		CONFIG_LTABLE_STATS			# <config_ltable_stats>
-options		CONFIG_LTABLE_DEBUG			# <config_ltable_debug>
-
-#
 # enable new wait queue implementation stats / debugging
 #
 options		CONFIG_WAITQ_STATS			# <config_waitq_stats>
-options		CONFIG_WAITQ_DEBUG			# <config_waitq_debug>
-options		CONFIG_WAITQ_IRQSAFE_ALLOW_INVALID	# <config_waitq_irqsafe_allow_invalid>
 
 #
 # enable freezing of suspended processes - used on embedded
@@ -609,13 +596,8 @@ options		MACH_DEBUG	# IPC debugging interface	# <mdebug>
 options		MACH_IPC_DEBUG	# Enable IPC debugging calls	# <ipc_debug>
 options		MACH_LOCKFREE_SPACE	# Enable lockfree IPC space # <ipc_lockfree_space>
 options		MACH_VM_DEBUG	#				# <debug>
-#
-# MACH_MP_DEBUG control the possible dead locks that may occur by controlling
-#	that IPL level has been raised down to SPL0 after some calls to
-#	hardclock device driver.
-#
-options		MACH_MP_DEBUG	#				# <debug>
 options		CONFIG_ZLEAKS	# Live zone leak debugging	# <zleaks>
+options		CONFIG_VOUCHER_DEPRECATED # Enable deprecated voucher managers # <config_voucher_deprecated>
 
 #
 # CONFIG_TASK_ZONE_INFO allows per-task zone information to be extracted
@@ -670,25 +652,6 @@ options		DEVELOPMENT	# dev kernel	    	    # <development>
 options		DEBUG		# general debugging code    # <debug>
 options		CONFIG_NONFATAL_ASSERTS	# non fatal asserts	# <softasserts>
 
-##########################################################
-#
-# This defines configuration options that are normally used only during
-# kernel code development and performance characterization. They add run-time
-# statistics gathering, which will slow down the system,
-#
-##########################################################
-#
-# MACH_IPC_STATS controls the collection of statistics in the MACH IPC
-#	subsystem.
-#
-#options	MACH_IPC_STATS
-#
-# MACH_CLUSTER_STATS controls the collection of various statistics concerning
-#	the effectiveness and behavior of the clustered pageout and pagein
-#	code.
-#
-#options	MACH_CLUSTER_STATS
-
 options		MACH_BSD	# BSD subsystem on top of Mach	# <mach_bsd>
 options         IOKIT		#				# <iokit>
 
@@ -734,6 +697,7 @@ options 	CONFIG_SCHED_AUTO_JOIN		# <config_sched_auto_join>
 options		CONFIG_SCHED_IDLE_IN_PLACE	# <config_sched_idle_in_place>
 options		CONFIG_SCHED_SFI		# <config_sched_sfi>
 options		CONFIG_GZALLOC			# <config_gzalloc>
+options		CONFIG_PROB_GZALLOC		# <pgzalloc>
 options		CONFIG_SCHED_DEFERRED_AST	# <config_sched_deferred_ast>
 
 options		CONFIG_PREADOPT_TG			# <config_preadopt_tg>
@@ -826,6 +790,9 @@ options		CONFIG_STKSZ		# <config_stksz>
 
 # dark boot support
 options		CONFIG_DARKBOOT		# <config_darkboot>
+
+# support for tracking service port labels for stackshots/debugging
+options		CONFIG_SERVICE_PORT_INFO # <config_service_port_info>
 
 # support for processes delaying idle sleep for pending IO
 options		CONFIG_DELAY_IDLE_SLEEP # <config_delay_idle_sleep>

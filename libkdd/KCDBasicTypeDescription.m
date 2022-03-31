@@ -136,10 +136,7 @@ KCDBasicTypeDescription () {
 		retval[_name] = [self objectForType:_subtype_desc.kcs_elem_type withData:&data[_subtype_desc.kcs_elem_offset]];
 	} else if (_subtype_desc.kcs_elem_type == KC_ST_CHAR) {
 		char *s = (char *)&data[_subtype_desc.kcs_elem_offset];
-		if (!(strnlen(s, length) < length)) {
-			return nil;
-		}
-		retval[_name] = [NSString stringWithFormat:@"%s", s];
+		retval[_name] = [NSString stringWithFormat:@"%.*s", (int)elem_count, s];
 	} else {
 		NSMutableArray * objArray = [NSMutableArray arrayWithCapacity:elem_count];
 		for (unsigned int i = 0; i < elem_count; i++) {

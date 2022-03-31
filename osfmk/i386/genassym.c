@@ -121,14 +121,6 @@ main(
 
 	/* Simple Lock structure */
 	DECLARE("SLOCK_ILK", offsetof(usimple_lock_data_t, interlock));
-#if     MACH_LDEBUG
-	DECLARE("SLOCK_TYPE", offsetof(usimple_lock_data_t, lock_type));
-	DECLARE("SLOCK_PC", offsetof(usimple_lock_data_t, debug.lock_pc));
-	DECLARE("SLOCK_THREAD", offsetof(usimple_lock_data_t, debug.lock_thread));
-	DECLARE("SLOCK_DURATIONH", offsetof(usimple_lock_data_t, debug.duration[0]));
-	DECLARE("SLOCK_DURATIONL", offsetof(usimple_lock_data_t, debug.duration[1]));
-	DECLARE("USLOCK_TAG", USLOCK_TAG);
-#endif  /* MACH_LDEBUG */
 
 	/* Mutex structure */
 	DECLARE("MUTEX_OWNER", offsetof(lck_mtx_t, lck_mtx_owner));
@@ -140,9 +132,6 @@ main(
 	/* x86 only */
 	DECLARE("MUTEX_DESTROYED", LCK_MTX_TAG_DESTROYED);
 
-	/* Per-mutex statistic element */
-	DECLARE("MTX_ACQ_TSC", offsetof(lck_mtx_ext_t, lck_mtx_stat));
-
 	/* Reader writer lock types */
 	DECLARE("RW_SHARED", LCK_RW_TYPE_SHARED);
 	DECLARE("RW_EXCL", LCK_RW_TYPE_EXCLUSIVE);
@@ -150,7 +139,6 @@ main(
 	DECLARE("TH_RECOVER", offsetof(struct thread, recover));
 	DECLARE("TH_CONTINUATION", offsetof(struct thread, continuation));
 	DECLARE("TH_KERNEL_STACK", offsetof(struct thread, kernel_stack));
-	DECLARE("TH_MUTEX_COUNT", offsetof(struct thread, mutex_count));
 	DECLARE("TH_IOTIER_OVERRIDE", offsetof(struct thread, iotier_override));
 
 	DECLARE("TH_SYSCALLS_MACH", offsetof(struct thread, syscalls_mach));
@@ -161,7 +149,7 @@ main(
 	DECLARE("TASK_VTIMERS", offsetof(struct task, vtimers));
 
 	/* These fields are being added on demand */
-	DECLARE("TH_TASK", offsetof(struct thread, task));
+	DECLARE("TH_TASK", offsetof(struct thread, t_task));
 	DECLARE("TH_AST", offsetof(struct thread, ast));
 	DECLARE("TH_MAP", offsetof(struct thread, map));
 	DECLARE("TH_SPF", offsetof(struct thread, machine.specFlags));

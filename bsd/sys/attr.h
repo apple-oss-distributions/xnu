@@ -68,6 +68,7 @@
 #endif
 #define FSOPT_UTIMES_NULL        0x00000400
 #endif /* PRIVATE */
+#define FSOPT_NOFOLLOW_ANY       0x00000800
 
 /* we currently aren't anywhere near this amount for a valid
  * fssearchblock.sizeofsearchparams1 or fssearchblock.sizeofsearchparams2

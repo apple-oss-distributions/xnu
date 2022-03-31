@@ -98,7 +98,7 @@ typedef struct alarm    alarm_data_t;
 /* local data declarations */
 decl_simple_lock_data(static, alarm_lock);       /* alarm synchronization */
 /* zone for user alarms */
-static ZONE_DECLARE(alarm_zone, "alarms", sizeof(struct alarm), ZC_NONE);
+static KALLOC_TYPE_DEFINE(alarm_zone, struct alarm, KT_DEFAULT);
 static struct   alarm           *alrmfree;              /* alarm free list pointer */
 static struct   alarm           *alrmdone;              /* alarm done list pointer */
 static struct   alarm           *alrmlist;

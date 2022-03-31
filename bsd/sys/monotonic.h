@@ -33,15 +33,6 @@
 #include <stdint.h>
 #include <sys/cdefs.h>
 
-__BEGIN_DECLS
-
-struct mt_cpu_inscyc {
-	uint64_t mtci_instructions;
-	uint64_t mtci_cycles;
-};
-
-__END_DECLS
-
 #if !MACH_KERNEL_PRIVATE
 
 #include <sys/ioccom.h>

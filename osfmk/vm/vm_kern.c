@@ -151,7 +151,7 @@ kmem_alloc_contig(
 		object = vm_object_allocate(map_size);
 	}
 
-	kr = vm_map_find_space(map, &map_addr, map_size, map_mask, 0,
+	kr = vm_map_find_space(map, &map_addr, map_size, map_mask,
 	    VM_MAP_KERNEL_FLAGS_NONE, tag, &entry);
 	if (KERN_SUCCESS != kr) {
 		vm_object_deallocate(object);
@@ -237,7 +237,6 @@ kmem_alloc_contig(
  * addrp	: pointer to start address of new memory
  * size		: size of memory requested
  * flags	: options
- *		  KMA_HERE		*addrp is base address, else "anywhere"
  *		  KMA_NOPAGEWAIT	don't wait for pages if unavailable
  *		  KMA_KOBJECT		use kernel_object
  *		  KMA_LOMEM		support for 32 bit devices in a 64 bit world
@@ -255,21 +254,6 @@ kernel_memory_allocate(
 	kma_flags_t     flags,
 	vm_tag_t        tag)
 {
-	return kernel_memory_allocate_prot(map, addrp, size, mask, flags, tag,
-	           VM_PROT_DEFAULT, VM_PROT_ALL);
-}
-
-kern_return_t
-kernel_memory_allocate_prot(
-	vm_map_t        map,
-	vm_offset_t     *addrp,
-	vm_size_t       size,
-	vm_offset_t     mask,
-	kma_flags_t     flags,
-	vm_tag_t        tag,
-	vm_prot_t               protection,
-	vm_prot_t               max_protection)
-{
 	vm_object_t             object;
 	vm_object_offset_t      offset;
 	vm_object_offset_t      pg_offset;
@@ -279,29 +263,33 @@ kernel_memory_allocate_prot(
 	vm_map_size_t           map_size, fill_size;
 	kern_return_t           kr, pe_result;
 	vm_page_t               mem;
-	vm_page_t               guard_page_list = NULL;
-	vm_page_t               wired_page_list = NULL;
-	int                     guard_page_count = 0;
+	vm_page_t               guard_left = VM_PAGE_NULL;
+	vm_page_t               guard_right = VM_PAGE_NULL;
+	vm_page_t               wired_page_list = VM_PAGE_NULL;
 	int                     wired_page_count = 0;
-	int                     vm_alloc_flags;
 	vm_map_kernel_flags_t   vmk_flags;
-	vm_prot_t               kma_prot;
 
-	if (startup_phase < STARTUP_SUB_KMEM) {
+	if (kernel_map == VM_MAP_NULL) {
 		panic("kernel_memory_allocate: VM is not ready");
 	}
+	if (map->pmap != kernel_pmap) {
+		panic("kernel_memory_allocate: %p is not a kernel map", map);
+	}
 
-	map_size = vm_map_round_page(size,
-	    VM_MAP_PAGE_MASK(map));
+#if DEBUG || DEVELOPMENT
+	VM_DEBUG_CONSTANT_EVENT(vm_kern_request, VM_KERN_REQUEST, DBG_FUNC_START,
+	    size, 0, 0, 0);
+#endif
+
+	map_size = vm_map_round_page(size, VM_MAP_PAGE_MASK(map));
 	map_mask = (vm_map_offset_t) mask;
 
-	vm_alloc_flags = 0; //VM_MAKE_TAG(tag);
 	vmk_flags = VM_MAP_KERNEL_FLAGS_NONE;
 
 	/* Check for zero allocation size (either directly or via overflow) */
-	if (map_size == 0) {
-		*addrp = 0;
-		return KERN_INVALID_ARGUMENT;
+	if (__improbable(map_size == 0)) {
+		kr = KERN_INVALID_ARGUMENT;
+		goto out;
 	}
 
 	/*
@@ -313,21 +301,25 @@ kernel_memory_allocate_prot(
 	 */
 	if (!(flags & (KMA_VAONLY | KMA_PAGEABLE)) &&
 	    map_size > MAX(1ULL << 31, sane_size / 64)) {
-		return KERN_RESOURCE_SHORTAGE;
+		kr = KERN_RESOURCE_SHORTAGE;
+		goto out;
 	}
 
 	/*
 	 * Guard pages:
 	 *
-	 * Guard pages are implemented as ficticious pages.  By placing guard pages
-	 * on either end of a stack, they can help detect cases where a thread walks
-	 * off either end of its stack.  They are allocated and set up here and attempts
+	 * Guard pages are implemented as fictitious pages.
+	 *
+	 * By placing guard pages on either end of a stack,
+	 * they can help detect cases where a thread walks
+	 * off either end of its stack.
+	 *
+	 * They are allocated and set up here and attempts
 	 * to access those pages are trapped in vm_fault_page().
 	 *
 	 * The map_size we were passed may include extra space for
-	 * guard pages.  If those were requested, then back it out of fill_size
-	 * since vm_map_find_space() takes just the actual size not including
-	 * guard pages.  Similarly, fill_start indicates where the actual pages
+	 * guard pages. fill_size represents the actual size to populate.
+	 * Similarly, fill_start indicates where the actual pages
 	 * will begin in the range.
 	 */
 
@@ -337,41 +329,37 @@ kernel_memory_allocate_prot(
 	if (flags & KMA_GUARD_FIRST) {
 		vmk_flags.vmkf_guard_before = TRUE;
 		fill_start += PAGE_SIZE_64;
-		fill_size -= PAGE_SIZE_64;
-		if (map_size < fill_start + fill_size) {
+		if (os_sub_overflow(fill_size, PAGE_SIZE_64, &fill_size)) {
 			/* no space for a guard page */
-			*addrp = 0;
-			return KERN_INVALID_ARGUMENT;
+			kr = KERN_INVALID_ARGUMENT;
+			goto out;
 		}
-		guard_page_count++;
+		if (!map->never_faults) {
+			guard_left = vm_page_grab_guard((flags & KMA_NOPAGEWAIT) == 0);
+			if (guard_left == VM_PAGE_NULL) {
+				kr = KERN_RESOURCE_SHORTAGE;
+				goto out;
+			}
+		}
 	}
 	if (flags & KMA_GUARD_LAST) {
 		vmk_flags.vmkf_guard_after = TRUE;
-		fill_size -= PAGE_SIZE_64;
-		if (map_size <= fill_start + fill_size) {
+		if (os_sub_overflow(fill_size, PAGE_SIZE_64, &fill_size)) {
 			/* no space for a guard page */
-			*addrp = 0;
-			return KERN_INVALID_ARGUMENT;
-		}
-		guard_page_count++;
-	}
-	wired_page_count = (int) (fill_size / PAGE_SIZE_64);
-	assert(wired_page_count * PAGE_SIZE_64 == fill_size);
-
-#if DEBUG || DEVELOPMENT
-	VM_DEBUG_CONSTANT_EVENT(vm_kern_request, VM_KERN_REQUEST, DBG_FUNC_START,
-	    size, 0, 0, 0);
-#endif
-
-	for (int i = 0; i < guard_page_count; i++) {
-		mem = vm_page_grab_guard((flags & KMA_NOPAGEWAIT) == 0);
-		if (mem == VM_PAGE_NULL) {
-			kr = KERN_RESOURCE_SHORTAGE;
+			kr = KERN_INVALID_ARGUMENT;
 			goto out;
 		}
-		mem->vmp_snext = guard_page_list;
-		guard_page_list = mem;
+		if (!map->never_faults) {
+			guard_right = vm_page_grab_guard((flags & KMA_NOPAGEWAIT) == 0);
+			if (guard_right == VM_PAGE_NULL) {
+				kr = KERN_RESOURCE_SHORTAGE;
+				goto out;
+			}
+		}
 	}
+
+	wired_page_count = (int)atop(fill_size);
+	assert(ptoa_64(wired_page_count) == fill_size);
 
 	if (!(flags & (KMA_VAONLY | KMA_PAGEABLE))) {
 		kr = vm_page_alloc_list(wired_page_count, flags,
@@ -399,21 +387,17 @@ kernel_memory_allocate_prot(
 		vmk_flags.vmkf_atomic_entry = TRUE;
 	}
 
-	if (flags & KMA_KHEAP) {
-		vm_alloc_flags |= VM_MAP_FIND_LAST_FREE;
+	if (flags & KMA_LAST_FREE) {
+		vmk_flags.vmkf_last_free = true;
 	}
 
 	kr = vm_map_find_space(map, &map_addr,
-	    fill_size, map_mask,
-	    vm_alloc_flags, vmk_flags, tag, &entry);
+	    fill_size, map_mask, vmk_flags, tag, &entry);
 
 	if (KERN_SUCCESS != kr) {
 		vm_object_deallocate(object);
 		goto out;
 	}
-
-	entry->protection = protection;
-	entry->max_protection = max_protection;
 
 	if (object == kernel_object || object == compressor_object) {
 		offset = map_addr;
@@ -438,24 +422,13 @@ kernel_memory_allocate_prot(
 	vm_object_lock(object);
 	vm_map_unlock(map);
 
-	pg_offset = 0;
-
-	if (fill_start) {
-		if (guard_page_list == NULL) {
-			panic("kernel_memory_allocate: guard_page_list == NULL");
-		}
-
-		mem = guard_page_list;
-		guard_page_list = mem->vmp_snext;
-		mem->vmp_snext = NULL;
-
-		vm_page_insert(mem, object, offset + pg_offset);
-
-		mem->vmp_busy = FALSE;
-		pg_offset += PAGE_SIZE_64;
+	if (guard_left) {
+		vm_page_insert(guard_left, object, offset);
+		guard_left->vmp_busy = FALSE;
+		guard_left = VM_PAGE_NULL;
+	} else {
+		assert(fill_start == 0 || map->never_faults);
 	}
-
-	kma_prot = VM_PROT_READ | VM_PROT_WRITE;
 
 #if KASAN
 	if (!(flags & KMA_VAONLY)) {
@@ -493,16 +466,17 @@ kernel_memory_allocate_prot(
 			mem->vmp_wpmapped = TRUE;
 
 			PMAP_ENTER_OPTIONS(kernel_pmap, map_addr + pg_offset,
-			    0, /* fault_phys_offset */
-			    mem,
-			    kma_prot, VM_PROT_NONE, ((flags & KMA_KSTACK) ? VM_MEM_STACK : 0), TRUE,
+			    /* fault_phys_offset */ 0, mem,
+			    VM_PROT_DEFAULT, VM_PROT_NONE,
+			    ((flags & KMA_KSTACK) ? VM_MEM_STACK : 0), TRUE,
 			    PMAP_OPTIONS_NOWAIT, pe_result);
 
 			if (pe_result == KERN_RESOURCE_SHORTAGE) {
 				vm_object_unlock(object);
 
 				PMAP_ENTER(kernel_pmap, map_addr + pg_offset, mem,
-				    kma_prot, VM_PROT_NONE, ((flags & KMA_KSTACK) ? VM_MEM_STACK : 0), TRUE,
+				    VM_PROT_DEFAULT, VM_PROT_NONE,
+				    ((flags & KMA_KSTACK) ? VM_MEM_STACK : 0), TRUE,
 				    pe_result);
 
 				vm_object_lock(object);
@@ -520,21 +494,13 @@ kernel_memory_allocate_prot(
 			vm_tag_update_size(tag, fill_size);
 		}
 	}
-	if ((fill_start + fill_size) < map_size) {
-		if (guard_page_list == NULL) {
-			panic("kernel_memory_allocate: guard_page_list == NULL");
-		}
 
-		mem = guard_page_list;
-		guard_page_list = mem->vmp_snext;
-		mem->vmp_snext = NULL;
-
-		vm_page_insert(mem, object, offset + pg_offset);
-
-		mem->vmp_busy = FALSE;
-	}
-	if (guard_page_list || wired_page_list) {
-		panic("kernel_memory_allocate: non empty list");
+	if (guard_right) {
+		vm_page_insert(guard_right, object, offset + pg_offset);
+		guard_right->vmp_busy = FALSE;
+		guard_right = VM_PAGE_NULL;
+	} else {
+		assert(fill_start + fill_size == map_size || map->never_faults);
 	}
 
 	if (!(flags & (KMA_VAONLY | KMA_PAGEABLE))) {
@@ -558,20 +524,23 @@ kernel_memory_allocate_prot(
 	VM_DEBUG_CONSTANT_EVENT(vm_kern_request, VM_KERN_REQUEST, DBG_FUNC_END,
 	    wired_page_count, 0, 0, 0);
 #endif
-	/*
-	 *	Return the memory, not zeroed.
-	 */
+
 	*addrp = CAST_DOWN(vm_offset_t, map_addr);
 	return KERN_SUCCESS;
 
 out:
-	if (guard_page_list) {
-		vm_page_free_list(guard_page_list, FALSE);
+	if (guard_left) {
+		guard_left->vmp_snext = wired_page_list;
+		wired_page_list = guard_left;
 	}
-
+	if (guard_right) {
+		guard_right->vmp_snext = wired_page_list;
+		wired_page_list = guard_right;
+	}
 	if (wired_page_list) {
 		vm_page_free_list(wired_page_list, FALSE);
 	}
+	*addrp = 0;
 
 #if DEBUG || DEVELOPMENT
 	VM_DEBUG_CONSTANT_EVENT(vm_kern_request, VM_KERN_REQUEST, DBG_FUNC_END,
@@ -587,7 +556,8 @@ kernel_memory_populate_with_pages(
 	vm_size_t       size,
 	vm_page_t       page_list,
 	kma_flags_t     flags,
-	vm_tag_t        tag)
+	vm_tag_t        tag,
+	vm_prot_t       prot)
 {
 	vm_object_t     object;
 	kern_return_t   pe_result;
@@ -643,7 +613,7 @@ kernel_memory_populate_with_pages(
 		PMAP_ENTER_OPTIONS(kernel_pmap, addr + pg_offset,
 		    0, /* fault_phys_offset */
 		    mem,
-		    VM_PROT_READ | VM_PROT_WRITE, VM_PROT_NONE,
+		    prot, VM_PROT_NONE,
 		    ((flags & KMA_KSTACK) ? VM_MEM_STACK : 0), TRUE,
 		    PMAP_OPTIONS_NOWAIT, pe_result);
 
@@ -651,7 +621,7 @@ kernel_memory_populate_with_pages(
 			vm_object_unlock(object);
 
 			PMAP_ENTER(kernel_pmap, addr + pg_offset, mem,
-			    VM_PROT_READ | VM_PROT_WRITE, VM_PROT_NONE,
+			    prot, VM_PROT_NONE,
 			    ((flags & KMA_KSTACK) ? VM_MEM_STACK : 0), TRUE,
 			    pe_result);
 
@@ -774,7 +744,7 @@ kernel_memory_populate(
 		kr = vm_page_alloc_list(page_count, flags, &page_list);
 		if (kr == KERN_SUCCESS) {
 			kernel_memory_populate_with_pages(map, addr, size,
-			    page_list, flags, tag);
+			    page_list, flags, tag, VM_PROT_READ | VM_PROT_WRITE);
 		}
 	}
 
@@ -868,48 +838,6 @@ kernel_memory_depopulate(
 }
 
 /*
- *	kmem_alloc:
- *
- *	Allocate wired-down memory in the kernel's address map
- *	or a submap.  The memory is not zero-filled.
- */
-
-kern_return_t
-kmem_alloc_external(
-	vm_map_t        map,
-	vm_offset_t     *addrp,
-	vm_size_t       size)
-{
-	return kmem_alloc(map, addrp, size, vm_tag_bt());
-}
-
-
-kern_return_t
-kmem_alloc(
-	vm_map_t        map,
-	vm_offset_t     *addrp,
-	vm_size_t       size,
-	vm_tag_t        tag)
-{
-	return kmem_alloc_flags(map, addrp, size, tag, 0);
-}
-
-kern_return_t
-kmem_alloc_flags(
-	vm_map_t        map,
-	vm_offset_t     *addrp,
-	vm_size_t       size,
-	vm_tag_t        tag,
-	kma_flags_t     flags)
-{
-	kern_return_t kr = kernel_memory_allocate(map, addrp, size, 0, flags, tag);
-	if (kr == KERN_SUCCESS) {
-		TRACE_MACHLEAKS(KMEM_ALLOC_CODE, KMEM_ALLOC_CODE_2, size, *addrp);
-	}
-	return kr;
-}
-
-/*
  *	kmem_realloc:
  *
  *	Reallocate wired-down memory in the kernel's address map
@@ -995,10 +923,7 @@ kmem_realloc(
 	 */
 
 	kr = vm_map_find_space(map, &newmapaddr, newmapsize,
-	    (vm_map_offset_t) 0, 0,
-	    vmk_flags,
-	    tag,
-	    &newentry);
+	    (vm_map_offset_t)0, vmk_flags, tag, &newentry);
 	if (kr != KERN_SUCCESS) {
 		vm_object_lock(object);
 		for (offset = oldmapsize;
@@ -1048,6 +973,23 @@ kmem_realloc(
 }
 
 /*
+ *	kmem_alloc:
+ *
+ *	Allocate wired-down memory in the kernel's address map
+ *	or a submap.  The memory is not zero-filled.
+ */
+
+kern_return_t
+kmem_alloc_external(
+	vm_map_t        map,
+	vm_offset_t     *addrp,
+	vm_size_t       size)
+{
+	return kmem_alloc(map, addrp, size, vm_tag_bt());
+}
+
+
+/*
  *	kmem_alloc_kobject:
  *
  *	Allocate wired-down memory in the kernel's address map
@@ -1067,36 +1009,6 @@ kmem_alloc_kobject_external(
 	return kmem_alloc_kobject(map, addrp, size, vm_tag_bt());
 }
 
-kern_return_t
-kmem_alloc_kobject(
-	vm_map_t        map,
-	vm_offset_t     *addrp,
-	vm_size_t       size,
-	vm_tag_t        tag)
-{
-	return kernel_memory_allocate(map, addrp, size, 0, KMA_KOBJECT, tag);
-}
-
-/*
- *	kmem_alloc_aligned:
- *
- *	Like kmem_alloc_kobject, except that the memory is aligned.
- *	The size should be a power-of-2.
- */
-
-kern_return_t
-kmem_alloc_aligned(
-	vm_map_t        map,
-	vm_offset_t     *addrp,
-	vm_size_t       size,
-	vm_tag_t        tag)
-{
-	if ((size & (size - 1)) != 0) {
-		panic("kmem_alloc_aligned: size not aligned");
-	}
-	return kernel_memory_allocate(map, addrp, size, size - 1, KMA_KOBJECT, tag);
-}
-
 /*
  *	kmem_alloc_pageable:
  *
@@ -1110,49 +1022,6 @@ kmem_alloc_pageable_external(
 	vm_size_t       size)
 {
 	return kmem_alloc_pageable(map, addrp, size, vm_tag_bt());
-}
-
-kern_return_t
-kmem_alloc_pageable(
-	vm_map_t        map,
-	vm_offset_t     *addrp,
-	vm_size_t       size,
-	vm_tag_t        tag)
-{
-	vm_map_offset_t map_addr;
-	vm_map_size_t   map_size;
-	kern_return_t kr;
-
-#ifndef normal
-	map_addr = (vm_map_min(map)) + PAGE_SIZE;
-#else
-	map_addr = vm_map_min(map);
-#endif
-	map_size = vm_map_round_page(size,
-	    VM_MAP_PAGE_MASK(map));
-	if (map_size < size) {
-		/* overflow */
-		*addrp = 0;
-		return KERN_INVALID_ARGUMENT;
-	}
-
-	kr = vm_map_enter(map, &map_addr, map_size,
-	    (vm_map_offset_t) 0,
-	    VM_FLAGS_ANYWHERE,
-	    VM_MAP_KERNEL_FLAGS_NONE,
-	    tag,
-	    VM_OBJECT_NULL, (vm_object_offset_t) 0, FALSE,
-	    VM_PROT_DEFAULT, VM_PROT_ALL, VM_INHERIT_DEFAULT);
-
-	if (kr != KERN_SUCCESS) {
-		return kr;
-	}
-
-#if KASAN
-	kasan_notify_address(map_addr, map_size);
-#endif
-	*addrp = CAST_DOWN(vm_offset_t, map_addr);
-	return KERN_SUCCESS;
 }
 
 /*
@@ -1172,8 +1041,6 @@ kmem_free(
 	kern_return_t kr;
 
 	assert(addr >= VM_MIN_KERNEL_AND_KEXT_ADDRESS);
-
-	TRACE_MACHLEAKS(KMEM_FREE_CODE, KMEM_FREE_CODE_2, size, addr);
 
 	if (size == 0) {
 #if MACH_ASSERT
@@ -1249,7 +1116,7 @@ kmem_suballoc(
 	vm_map_t        parent,
 	vm_offset_t     *addr,
 	vm_size_t       size,
-	boolean_t       pageable,
+	vm_map_create_options_t vmc_options,
 	int             flags,
 	vm_map_kernel_flags_t vmk_flags,
 	vm_tag_t    tag,
@@ -1260,8 +1127,7 @@ kmem_suballoc(
 	vm_map_size_t   map_size;
 	kern_return_t   kr;
 
-	map_size = vm_map_round_page(size,
-	    VM_MAP_PAGE_MASK(parent));
+	map_size = vm_map_round_page(size, VM_MAP_PAGE_MASK(parent));
 	if (map_size < size) {
 		/* overflow */
 		*addr = 0;
@@ -1290,10 +1156,8 @@ kmem_suballoc(
 	}
 
 	pmap_reference(vm_map_pmap(parent));
-	map = vm_map_create(vm_map_pmap(parent), map_addr, map_addr + map_size, pageable);
-	if (map == VM_MAP_NULL) {
-		panic("kmem_suballoc: vm_map_create failed");   /* "can't happen" */
-	}
+	map = vm_map_create_options(vm_map_pmap(parent), map_addr,
+	    map_addr + map_size, vmc_options);
 	/* inherit the parent map's page size */
 	vm_map_set_page_shift(map, VM_MAP_PAGE_SHIFT(parent));
 
@@ -1407,8 +1271,10 @@ kmem_init(
 	    VM_MAP_PAGE_MASK(kernel_map));
 
 #if     defined(__arm__) || defined(__arm64__)
-	kernel_map = vm_map_create(pmap_kernel(), VM_MIN_KERNEL_AND_KEXT_ADDRESS,
-	    VM_MAX_KERNEL_ADDRESS, FALSE);
+	kernel_map = vm_map_create_options(pmap_kernel(),
+	    VM_MIN_KERNEL_AND_KEXT_ADDRESS,
+	    VM_MAX_KERNEL_ADDRESS,
+	    VM_MAP_CREATE_DEFAULT);
 	/*
 	 *	Reserve virtual memory allocated up to this time.
 	 */
@@ -1442,8 +1308,9 @@ kmem_init(
 		}
 	}
 #else
-	kernel_map = vm_map_create(pmap_kernel(), VM_MIN_KERNEL_AND_KEXT_ADDRESS,
-	    map_end, FALSE);
+	kernel_map = vm_map_create_options(pmap_kernel(),
+	    VM_MIN_KERNEL_AND_KEXT_ADDRESS, map_end,
+	    VM_MAP_CREATE_DEFAULT);
 	/*
 	 *	Reserve virtual memory allocated up to this time.
 	 */

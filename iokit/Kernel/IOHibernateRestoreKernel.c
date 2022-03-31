@@ -598,7 +598,7 @@ hibernate_kernel_entrypoint(uint32_t p1,
 	uint32_t handoffPages;
 	uint32_t handoffPageCount;
 	uint8_t * wkdmScratch;
-	hibernate_scratch_t conflictList;
+	hibernate_scratch_t conflictList = {};
 	pal_hib_ctx_t palHibCtx;
 
 	uint64_t timeStart;

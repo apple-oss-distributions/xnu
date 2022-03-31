@@ -161,6 +161,7 @@ work_interval_ctl(__unused proc_t p, struct work_interval_ctl_args *uap,
 			return error;
 		}
 
+
 		struct kern_work_interval_args kwi_args = {
 			.work_interval_id   = uap->work_interval_id,
 			.start              = notification.start,

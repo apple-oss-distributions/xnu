@@ -31,14 +31,14 @@ malloc(size_t size)
 	if (size == 0) {
 		return NULL;
 	}
-	return kheap_alloc_tag_bt(KHEAP_DEFAULT, size,
-	           (zalloc_flags_t) (Z_WAITOK | Z_ZERO), VM_KERN_MEMORY_LIBKERN);
+	return kheap_alloc(KHEAP_DEFAULT, size,
+	           Z_VM_TAG_BT(Z_WAITOK_ZERO, VM_KERN_MEMORY_LIBKERN));
 }
 
 static inline void
-free(void *addr)
+free(void *addr, size_t size)
 {
-	kheap_free_addr(KHEAP_DEFAULT, addr);
+	kheap_free(KHEAP_DEFAULT, addr, size);
 }
 
 #endif /* KERNEL */
@@ -382,7 +382,7 @@ _Block_byref_release(const void *arg)
 				struct Block_byref_2 *byref2 = (struct Block_byref_2 *)(byref + 1);
 				(*byref2->byref_destroy)(byref);
 			}
-			free(byref);
+			free(byref, byref->size);
 		}
 	}
 }
@@ -418,7 +418,7 @@ _Block_release(const void *arg)
 	if (latching_decr_int_should_deallocate(&aBlock->flags)) {
 		_Block_call_dispose_helper(aBlock);
 		_Block_destructInstance(aBlock);
-		free(aBlock);
+		free(aBlock, Block_size(aBlock));
 	}
 }
 

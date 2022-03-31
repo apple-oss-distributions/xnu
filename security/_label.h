@@ -78,14 +78,9 @@
 #endif
 #endif
 
-#define MAC_FLAG_INITIALIZED    0x0000001       /* Is initialized for use. */
-
 struct label {
-	int     l_flags;
-	union {
-		void    * XNU_PTRAUTH_SIGNED_PTR_AUTH_NULL("label.l_ptr") l_ptr;
-		long     l_long;
-	}       l_perpolicy[MAC_MAX_SLOTS];
+	struct label **l_owner;
+	void *l_perpolicy[MAC_MAX_SLOTS];
 };
 
 #endif /* !_SECURITY_LABEL_H_ */

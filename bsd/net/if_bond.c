@@ -99,8 +99,6 @@ typedef struct bondport_s bondport, * bondport_ref;
 #define BOND_ZONE_MAX_ELEM      MIN(IFNETS_MAX, BOND_MAXUNIT)
 #define BONDNAME                "bond"
 
-#define M_BOND                  M_DEVBUF
-
 #define EA_FORMAT       "%x:%x:%x:%x:%x:%x"
 #define EA_CH(e, i)     ((u_char)((u_char *)(e))[(i)])
 #define EA_LIST(ea)     EA_CH(ea,0),EA_CH(ea,1),EA_CH(ea,2),EA_CH(ea,3),EA_CH(ea,4),EA_CH(ea,5)
@@ -194,6 +192,7 @@ struct ifbond_s {
 	struct ifmultiaddr *        ifb_ifma_slow_proto;
 	bondport_ref *              ifb_distributing_array;
 	int                         ifb_distributing_count;
+	int                         ifb_distributing_max;
 	int                         ifb_last_link_event;
 	int                         ifb_mode;/* LACP, STATIC */
 };
@@ -725,9 +724,8 @@ ifbond_release(ifbond_ref ifb)
 		    ifb->ifb_ifma_slow_proto->ifma_addr);
 		IFMA_REMREF(ifb->ifb_ifma_slow_proto);
 	}
-	if (ifb->ifb_distributing_array != NULL) {
-		FREE(ifb->ifb_distributing_array, M_BOND);
-	}
+	kfree_type(bondport_ref, ifb->ifb_distributing_max,
+	    ifb->ifb_distributing_array);
 	if_clone_softc_deallocate(&bond_cloner, ifb);
 }
 
@@ -2064,6 +2062,8 @@ bond_add_interface(struct ifnet * ifp, struct ifnet * port_ifp)
 	bondport_ref *              new_array = NULL;
 	bondport_ref *              old_array = NULL;
 	bondport_ref                p;
+	int                         old_max = 0;
+	int                         new_max = 0;
 
 	if (IFNET_IS_INTCOPROC(port_ifp)) {
 		return EINVAL;
@@ -2173,8 +2173,8 @@ bond_add_interface(struct ifnet * ifp, struct ifnet * port_ifp)
 	uint32_bit_set(&control_flags, PORT_CONTROL_FLAGS_IN_LIST);
 
 	/* allocate a larger distributing array */
-	new_array = (bondport_ref *)
-	    _MALLOC(sizeof(*new_array) * ifb->ifb_port_count, M_BOND, M_WAITOK);
+	new_max = ifb->ifb_port_count;
+	new_array = kalloc_type(bondport_ref, new_max, Z_WAITOK);
 	if (new_array == NULL) {
 		error = ENOMEM;
 		goto failed;
@@ -2282,7 +2282,9 @@ bond_add_interface(struct ifnet * ifp, struct ifnet * port_ifp)
 		    sizeof(*new_array) * ifb->ifb_distributing_count);
 	}
 	old_array = ifb->ifb_distributing_array;
+	old_max = ifb->ifb_distributing_max;
 	ifb->ifb_distributing_array = new_array;
+	ifb->ifb_distributing_max = new_max;
 
 	if (ifb->ifb_mode == IF_BOND_MODE_LACP) {
 		bondport_start(p);
@@ -2313,9 +2315,7 @@ bond_add_interface(struct ifnet * ifp, struct ifnet * port_ifp)
 	if (event_code != 0) {
 		interface_link_event(ifp, event_code);
 	}
-	if (old_array != NULL) {
-		FREE(old_array, M_BOND);
-	}
+	kfree_type(bondport_ref, old_max, old_array);
 	return 0;
 
 failed:
@@ -2326,9 +2326,7 @@ failed:
 		ifnet_set_lladdr_and_type(ifp, NULL, 0, IFT_IEEE8023ADLAG);
 	}
 
-	if (new_array != NULL) {
-		FREE(new_array, M_BOND);
-	}
+	kfree_type(bondport_ref, new_max, new_array);
 	if (uint32_bit_is_set(control_flags,
 	    PORT_CONTROL_FLAGS_LLADDR_SET)) {
 		int     error1;

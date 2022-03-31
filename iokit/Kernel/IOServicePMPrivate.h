@@ -562,7 +562,6 @@ struct IOPMInterestContext {
 	IOPMPowerStateIndex     stateNumber;
 	IOPMPowerFlags          stateFlags;
 	IOPMPowerChangeFlags    changeFlags;
-	const char *            errorLog;
 	IOPMMessageFilter       messageFilter;
 };
 

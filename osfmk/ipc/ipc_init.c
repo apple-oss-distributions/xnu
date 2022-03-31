@@ -86,7 +86,6 @@
 #include <kern/ipc_mig.h>
 #include <kern/host_notify.h>
 #include <kern/misc_protos.h>
-#include <kern/suid_cred.h>
 #include <kern/sync_sema.h>
 #include <kern/ux_handler.h>
 #include <vm/vm_map.h>
@@ -108,13 +107,14 @@
 
 #include <mach/machine/ndr_def.h>   /* NDR_record */
 
-#define IPC_KERNEL_MAP_SIZE      (CONFIG_IPC_KERNEL_MAP_SIZE * 1024 * 1024)
 SECURITY_READ_ONLY_LATE(vm_map_t) ipc_kernel_map;
 
 /* values to limit physical copy out-of-line memory descriptors */
 SECURITY_READ_ONLY_LATE(vm_map_t) ipc_kernel_copy_map;
 #define IPC_KERNEL_COPY_MAP_SIZE (8 * 1024 * 1024)
 const vm_size_t ipc_kmsg_max_vm_space = ((IPC_KERNEL_COPY_MAP_SIZE * 7) / 8);
+
+#define IPC_KERNEL_MAP_SIZE      (CONFIG_IPC_KERNEL_MAP_SIZE << 20)
 
 /*
  * values to limit inline message body handling
@@ -124,7 +124,7 @@ const vm_size_t ipc_kmsg_max_vm_space = ((IPC_KERNEL_COPY_MAP_SIZE * 7) / 8);
 const vm_size_t ipc_kmsg_max_body_space = ((IPC_KMSG_MAX_SPACE * 3) / 4 - MAX_TRAILER_SIZE);
 
 #if XNU_TARGET_OS_OSX
-#define IPC_CONTROL_PORT_OPTIONS_DEFAULT (ICP_OPTIONS_NONE)
+#define IPC_CONTROL_PORT_OPTIONS_DEFAULT (ICP_OPTIONS_IMMOVABLE_1P_HARD | ICP_OPTIONS_PINNED_1P_HARD)
 #else
 #define IPC_CONTROL_PORT_OPTIONS_DEFAULT (ICP_OPTIONS_IMMOVABLE_ALL_HARD | \
 	ICP_OPTIONS_PINNED_1P_HARD | \
@@ -189,7 +189,7 @@ ipc_init(void)
 	}
 
 	kr = kmem_suballoc(kernel_map, &min, IPC_KERNEL_MAP_SIZE,
-	    TRUE,
+	    VM_MAP_CREATE_PAGEABLE,
 	    (VM_FLAGS_ANYWHERE),
 	    VM_MAP_KERNEL_FLAGS_NONE,
 	    VM_KERN_MEMORY_IPC,
@@ -200,7 +200,7 @@ ipc_init(void)
 	}
 
 	kr = kmem_suballoc(kernel_map, &min, IPC_KERNEL_COPY_MAP_SIZE,
-	    TRUE,
+	    VM_MAP_CREATE_PAGEABLE,
 	    (VM_FLAGS_ANYWHERE),
 	    VM_MAP_KERNEL_FLAGS_NONE,
 	    VM_KERN_MEMORY_IPC,

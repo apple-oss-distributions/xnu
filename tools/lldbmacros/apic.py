@@ -1,3 +1,7 @@
+from __future__ import absolute_import, print_function
+
+from builtins import range
+
 from xnu import *
 from misc import DoReadMsr64, DoWriteMsr64
 
@@ -152,8 +156,8 @@ def GetApicFields(reg_val):
 def DoLapicDump():
     """ Prints all LAPIC registers
     """
-    print "LAPIC operating mode: {:s}".format(
-        "x2APIC" if IsX2ApicEnabled() else "xAPIC")
+    print("LAPIC operating mode: {:s}".format(
+        "x2APIC" if IsX2ApicEnabled() else "xAPIC"))
     # LAPIC register offset, register name, field formatting function
     lapic_dump_table = [
         (0x020, "ID", None),
@@ -202,10 +206,10 @@ def DoLapicDump():
     for reg in lapic_dump_table:
         reg_val = DoLapicRead32(reg[0], xnudefines.lcpu_self)
         if reg[2] == None:
-            print "LAPIC[{:#05x}] {:21s}: {:#010x}".format(reg[0], reg[1], reg_val)
+            print("LAPIC[{:#05x}] {:21s}: {:#010x}".format(reg[0], reg[1], reg_val))
         else:
-            print "LAPIC[{:#05x}] {:21s}: {:#010x} {:s}".format(reg[0], reg[1],
-                reg_val, reg[2](reg_val))
+            print("LAPIC[{:#05x}] {:21s}: {:#010x} {:s}".format(reg[0], reg[1],
+                reg_val, reg[2](reg_val)))
 
 ######################################
 # IOAPIC Helper functions
@@ -235,25 +239,25 @@ def DoIoApicDump():
     """
     # Show IOAPIC ID register
     ioapic_id = DoIoApicRead(0)
-    print "IOAPIC[0x00] {:9s}: {:#010x}".format("ID", ioapic_id)
+    print("IOAPIC[0x00] {:9s}: {:#010x}".format("ID", ioapic_id))
     # Show IOAPIC Version register
     ioapic_ver = DoIoApicRead(1)
     maxredir = ((ioapic_ver >> 16) & 0xff) + 1
-    print "IOAPIC[0x01] {:9s}: {:#010x}".format("VERSION", ioapic_ver) +\
+    print("IOAPIC[0x01] {:9s}: {:#010x}".format("VERSION", ioapic_ver) +\
         "       [MAXREDIR={:02d} PRQ={:d} VERSION={:#04x}]".format(
             maxredir,
             ioapic_ver >> 15 & 0x1,
-            ioapic_ver & 0xff)
+            ioapic_ver & 0xff))
     # Show IOAPIC redirect regsiters
     for redir in range(maxredir):
         redir_val_lo = DoIoApicRead(0x10 + redir * 2)
         redir_val_hi = DoIoApicRead(0x10 + (redir * 2) + 1)
-        print "IOAPIC[{:#04x}] IOREDIR{:02d}: {:#08x}{:08x} {:s}".format(
+        print("IOAPIC[{:#04x}] IOREDIR{:02d}: {:#08x}{:08x} {:s}".format(
             0x10 + (redir * 2),
             redir, 
             redir_val_hi,
             redir_val_lo,
-            GetApicFields(redir_val_lo))
+            GetApicFields(redir_val_lo)))
 
 ######################################
 # LLDB commands
@@ -265,10 +269,10 @@ def LapicRead32(cmd_args=None):
         Syntax: lapic_read32 <offset> [lcpu]
     """
     if cmd_args == None or len(cmd_args) < 1:
-        print LapicRead32.__doc__
+        print(LapicRead32.__doc__)
         return
     if not IsArchX86_64():
-        print "lapic_read32 not supported on this architecture."
+        print("lapic_read32 not supported on this architecture.")
         return
     
     lcpu = xnudefines.lcpu_self
@@ -277,7 +281,7 @@ def LapicRead32(cmd_args=None):
 
     offset = ArgumentStringToInt(cmd_args[0])
     read_val = DoLapicRead32(offset, lcpu)
-    print "LAPIC[{:#05x}]: {:#010x}".format(offset, read_val)
+    print("LAPIC[{:#05x}]: {:#010x}".format(offset, read_val))
 
 @lldb_command('lapic_write32')
 def LapicWrite32(cmd_args=None):
@@ -287,10 +291,10 @@ def LapicWrite32(cmd_args=None):
         Syntax: lapic_write32 <offset> <val> [lcpu]
     """
     if cmd_args == None or len(cmd_args) < 2:
-        print LapicWrite32.__doc__
+        print(LapicWrite32.__doc__)
         return
     if not IsArchX86_64():
-        print "lapic_write32 not supported on this architecture."
+        print("lapic_write32 not supported on this architecture.")
         return
     offset = ArgumentStringToInt(cmd_args[0])
     write_val = ArgumentStringToInt(cmd_args[1])
@@ -298,14 +302,14 @@ def LapicWrite32(cmd_args=None):
     if len(cmd_args) > 2:
         lcpu = ArgumentStringToInt(cmd_args[2])
     if not DoLapicWrite32(offset, write_val, lcpu):
-        print "lapic_write32 FAILED"
+        print("lapic_write32 FAILED")
 
 @lldb_command('lapic_dump')
 def LapicDump(cmd_args=None):
     """ Prints all LAPIC entries
     """
     if not IsArchX86_64():
-        print "lapic_dump not supported on this architecture."
+        print("lapic_dump not supported on this architecture.")
         return
     DoLapicDump()
 
@@ -315,15 +319,15 @@ def IoApicRead32(cmd_args=None):
         Syntax: ioapic_read32 <offset>
     """
     if cmd_args == None or len(cmd_args) < 1:
-        print IoApicRead32.__doc__
+        print(IoApicRead32.__doc__)
         return
     if not IsArchX86_64():
-        print "ioapic_read32 not supported on this architecture."
+        print("ioapic_read32 not supported on this architecture.")
         return
 
     offset = ArgumentStringToInt(cmd_args[0])
     read_val = DoIoApicRead(offset)
-    print "IOAPIC[{:#04x}]: {:#010x}".format(offset, read_val)
+    print("IOAPIC[{:#04x}]: {:#010x}".format(offset, read_val))
 
 @lldb_command('ioapic_write32')
 def IoApicWrite32(cmd_args=None):
@@ -331,16 +335,16 @@ def IoApicWrite32(cmd_args=None):
         Syntax: ioapic_write32 <offset> <val>
     """
     if cmd_args == None or len(cmd_args) < 2:
-        print IoApicWrite32.__doc__
+        print(IoApicWrite32.__doc__)
         return
     if not IsArchX86_64():
-        print "ioapic_write32 not supported on this architecture."
+        print("ioapic_write32 not supported on this architecture.")
         return
 
     offset = ArgumentStringToInt(cmd_args[0])
     write_val = ArgumentStringToInt(cmd_args[1])
     if not DoIoApicWrite(offset, write_val):
-        print "ioapic_write32 FAILED"
+        print("ioapic_write32 FAILED")
     return
 
 @lldb_command('ioapic_dump')
@@ -348,7 +352,7 @@ def IoApicDump(cmd_args=None):
     """ Prints all IOAPIC entries
     """
     if not IsArchX86_64():
-        print "ioapic_dump not supported on this architecture."
+        print("ioapic_dump not supported on this architecture.")
         return
     DoIoApicDump()
 

@@ -107,14 +107,6 @@ type mach_vm_address_t = uint64_t;
 type mach_vm_offset_t = uint64_t;
 type mach_vm_size_t = uint64_t;
 
-#if	MACH_IPC_COMPAT
-/*
- * For the old IPC interface
- */
-#define	MSG_TYPE_PORT_NAME	natural_t
-
-#endif	/* MACH_IPC_COMPAT */
-
 /*
  * These are types used internal to Mach to implement the
  * legacy 32-bit VM APIs published by the kernel.

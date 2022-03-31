@@ -469,7 +469,7 @@ mmap(proc_t p, struct mmap_args *uap, user_addr_t *retval)
 			error = EINVAL;
 			goto bad;
 		}
-		vp = (struct vnode *)fp->fp_glob->fg_data;
+		vp = (struct vnode *)fp_get_data(fp);
 		error = vnode_getwithref(vp);
 		if (error != 0) {
 			goto bad;

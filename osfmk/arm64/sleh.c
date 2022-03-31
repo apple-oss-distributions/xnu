@@ -136,6 +136,9 @@ static void handle_mach_absolute_time_trap(arm_saved_state_t *);
 static void handle_mach_continuous_time_trap(arm_saved_state_t *);
 
 static void handle_msr_trap(arm_saved_state_t *state, uint32_t esr);
+#ifdef __ARM_ARCH_8_6__
+static void handle_pac_fail(arm_saved_state_t *state, uint32_t esr) __dead2;
+#endif
 
 extern kern_return_t arm_fast_fault(pmap_t, vm_map_address_t, vm_prot_t, bool, bool);
 
@@ -178,17 +181,15 @@ static void handle_user_trapped_instruction32(arm_saved_state_t *, uint32_t esr)
 
 static void handle_simd_trap(arm_saved_state_t *, uint32_t esr) __dead2;
 
-extern void mach_kauth_cred_uthread_update(void);
+extern void mach_kauth_cred_thread_update(void);
 void   mach_syscall_trace_exit(unsigned int retval, unsigned int call_number);
 
-struct uthread;
 struct proc;
 
 typedef uint32_t arm64_instr_t;
 
 extern void
-unix_syscall(struct arm_saved_state * regs, thread_t thread_act,
-    struct uthread * uthread, struct proc * proc);
+unix_syscall(struct arm_saved_state * regs, thread_t thread_act, struct proc * proc);
 
 extern void
 mach_syscall(struct arm_saved_state*);
@@ -403,10 +404,16 @@ panic_with_thread_kernel_state(const char *msg, arm_saved_state_t *ss)
 
 	os_atomic_cmpxchg(&original_faulting_state, NULL, state, seq_cst);
 
+	// rdar://80659177
+	// Read SoCD tracepoints up to twice — once the first time we call panic and
+	// another time if we encounter a nested panic after that.
 	static int twice = 2;
 	if (twice > 0) {
 		twice--;
-		SOCD_TRACE_XNU(PANIC_ASYNC, ADDR(state->pc), VALUE(state->esr), PACK_2X32(VALUE(state->cpsr), VALUE(ss_valid)), VALUE(state->far));
+		SOCD_TRACE_XNU(KERNEL_STATE_PANIC, ADDR(state->pc),
+		    PACK_LSB(VALUE(state->lr), VALUE(ss_valid)),
+		    PACK_2X32(VALUE(state->esr), VALUE(state->cpsr)),
+		    VALUE(state->far));
 	}
 
 	panic_plain("%s at pc 0x%016llx, lr 0x%016llx (saved state: %p%s)\n"
@@ -478,7 +485,9 @@ __attribute__((__always_inline__))
 static inline void
 task_vtimer_check(thread_t thread)
 {
-	if (__improbable((thread->task != NULL) && thread->task->vtimers)) {
+	task_t task = get_threadtask_early(thread);
+
+	if (__improbable(task != NULL && task->vtimers)) {
 		thread->ast |= AST_BSD;
 		thread->machine.CpuDatap->cpu_pending_ast |= AST_BSD;
 	}
@@ -606,6 +615,12 @@ sleh_synchronous(arm_context_t *context, uint32_t esr, vm_offset_t far)
 		handle_msr_trap(state, esr);
 		break;
 
+#ifdef __ARM_ARCH_8_6__
+	case ESR_EC_PAC_FAIL:
+		handle_pac_fail(state, esr);
+		__builtin_unreachable();
+
+#endif /* __ARM_ARCH_8_6__ */
 
 	case ESR_EC_IABORT_EL0:
 		handle_abort(state, esr, far, recover, inspect_instruction_abort, handle_user_abort, expected_fault_handler);
@@ -907,18 +922,19 @@ handle_kernel_breakpoint(arm_saved_state_t *state, uint32_t esr)
 
 #if __has_feature(ptrauth_calls)
 	if (brk_comment_is_ptrauth(comment)) {
-		const char *msg_fmt = "Break 0x%04X instruction exception from kernel. Ptrauth failure with %s key resulted in 0x%016llx";
-		char msg[strlen(msg_fmt)
+#define MSG_FMT "Break 0x%04X instruction exception from kernel. Ptrauth failure with %s key resulted in 0x%016llx"
+		char msg[strlen(MSG_FMT)
 		- strlen("0x%04X") + strlen("0xFFFF")
 		- strlen("%s") + strlen("IA")
 		- strlen("0x%016llx") + strlen("0xFFFFFFFFFFFFFFFF")
 		+ 1];
 		ptrauth_key key = (ptrauth_key)(comment - ptrauth_brk_comment_base);
 		const char *key_str = ptrauth_key_to_string(key);
-		snprintf(msg, sizeof(msg), msg_fmt, comment, key_str, saved_state64(state)->x[16]);
+		snprintf(msg, sizeof(msg), MSG_FMT, comment, key_str, saved_state64(state)->x[16]);
 
 		panic_with_thread_kernel_state(msg, state);
 		__builtin_unreachable();
+#undef MSG_FMT
 	}
 #endif /* __has_feature(ptrauth_calls) */
 
@@ -938,9 +954,10 @@ handle_kernel_breakpoint(arm_saved_state_t *state, uint32_t esr)
 	}
 #endif /* CONFIG_UBSAN_MINIMAL */
 
-	const char *msg_fmt = "Break 0x%04X instruction exception from kernel. Panic (by design)";
-	char msg[strlen(msg_fmt) - strlen("0x%04X") + strlen("0xFFFF") + 1];
-	snprintf(msg, sizeof(msg), msg_fmt, comment);
+#define MSG_FMT "Break 0x%04X instruction exception from kernel. Panic (by design)"
+	char msg[strlen(MSG_FMT) - strlen("0x%04X") + strlen("0xFFFF") + 1];
+	snprintf(msg, sizeof(msg), MSG_FMT, comment);
+#undef MSG_FMT
 
 	panic_with_thread_kernel_state(msg, state);
 	__builtin_unreachable();
@@ -1018,11 +1035,19 @@ inspect_data_abort(uint32_t iss, fault_status_t *fault_code, vm_prot_t *fault_ty
 }
 
 #if __has_feature(ptrauth_calls)
+#ifdef __ARM_ARCH_8_6__
+static inline uint64_t
+fault_addr_bitmask(unsigned int bit_from, unsigned int bit_to)
+{
+	return ((1ULL << (bit_to - bit_from + 1)) - 1) << bit_from;
+}
+#else
 static inline bool
 fault_addr_bit(vm_offset_t fault_addr, unsigned int bit)
 {
 	return (bool)((fault_addr >> bit) & 1);
 }
+#endif /* __ARM_ARCH_8_6__ */
 
 /**
  * Determines whether a fault address taken at EL0 contains a PAC error code
@@ -1033,6 +1058,17 @@ user_fault_addr_matches_pac_error_code(vm_offset_t fault_addr, bool data_key)
 {
 	bool instruction_tbi = !(get_tcr() & TCR_TBID0_TBI_DATA_ONLY);
 	bool tbi = data_key || __improbable(instruction_tbi);
+#ifdef __ARM_ARCH_8_6__
+	/*
+	 * EnhancedPAC2 CPUs don't encode error codes at fixed positions, so
+	 * treat all non-canonical address bits like potential poison bits.
+	 */
+	uint64_t mask = fault_addr_bitmask(T0SZ_BOOT, 54);
+	if (!tbi) {
+		mask |= fault_addr_bitmask(56, 63);
+	}
+	return (fault_addr & mask) != 0;
+#else /* !__ARM_ARCH_8_6__ */
 	unsigned int poison_shift;
 	if (tbi) {
 		poison_shift = 53;
@@ -1044,6 +1080,7 @@ user_fault_addr_matches_pac_error_code(vm_offset_t fault_addr, bool data_key)
 	bool poison_bit_1 = fault_addr_bit(fault_addr, poison_shift);
 	bool poison_bit_2 = fault_addr_bit(fault_addr, poison_shift + 1);
 	return poison_bit_1 != poison_bit_2;
+#endif /* __ARM_ARCH_8_6__ */
 }
 #endif /* __has_feature(ptrauth_calls) */
 
@@ -1231,6 +1268,7 @@ set_saved_state_pc_to_recovery_handler(arm_saved_state_t *iss, vm_offset_t recov
 	    "mov	x1, %[recover]		\n"
 	    "mov	x6, %[disc]		\n"
 	    "autia	x1, x6			\n"
+#if !__ARM_ARCH_8_6__
 	    // if (recover != (vm_offset_t)ptrauth_strip((void *)recover, ptrauth_key_function_pointer)) {
 	    "mov	x6, x1			\n"
 	    "xpaci	x6			\n"
@@ -1241,6 +1279,7 @@ set_saved_state_pc_to_recovery_handler(arm_saved_state_t *iss, vm_offset_t recov
 	    "bl		_panic			\n"
 	    // }
 	    "1:					\n"
+#endif /* !__ARM_ARCH_8_6__ */
 	    "str	x1, [x0, %[SS64_PC]]	\n",
 	    [recover]     "r"(recover),
 	    [disc]        "r"(disc),
@@ -1582,7 +1621,7 @@ handle_svc(arm_saved_state_t *state)
 		panic("Returned from platform_syscall()?");
 	}
 
-	mach_kauth_cred_uthread_update();
+	mach_kauth_cred_thread_update();
 
 	if (trap_no < 0) {
 		switch (trap_no) {
@@ -1604,7 +1643,7 @@ handle_svc(arm_saved_state_t *state)
 
 		assert(p);
 
-		unix_syscall(state, thread, (struct uthread*)thread->uthread, p);
+		unix_syscall(state, thread, p);
 	}
 }
 
@@ -1647,6 +1686,87 @@ handle_msr_trap(arm_saved_state_t *state, uint32_t esr)
 	__builtin_unreachable();
 }
 
+#ifdef __ARM_ARCH_8_6__
+static void
+autxx_instruction_extract_reg(uint32_t instr, char reg[4])
+{
+	unsigned int rd = ARM64_INSTR_AUTxx_RD_GET(instr);
+	switch (rd) {
+	case 29:
+		strncpy(reg, "fp", 4);
+		return;
+
+	case 30:
+		strncpy(reg, "lr", 4);
+		return;
+
+	case 31:
+		strncpy(reg, "xzr", 4);
+		return;
+
+	default:
+		snprintf(reg, 4, "x%u", rd);
+		return;
+	}
+}
+
+static const char *
+autix_system_instruction_extract_reg(uint32_t instr)
+{
+	unsigned int crm_op2 = ARM64_INSTR_AUTIx_SYSTEM_CRM_OP2_GET(instr);
+	if (crm_op2 == ARM64_INSTR_AUTIx_SYSTEM_CRM_OP2_AUTIA1716 ||
+	    crm_op2 == ARM64_INSTR_AUTIx_SYSTEM_CRM_OP2_AUTIB1716) {
+		return "x17";
+	} else {
+		return "lr";
+	}
+}
+
+static void
+handle_pac_fail(arm_saved_state_t *state, uint32_t esr)
+{
+	exception_type_t           exception = EXC_BAD_ACCESS | EXC_PTRAUTH_BIT;
+	mach_exception_data_type_t codes[2]  = {EXC_ARM_PAC_FAIL};
+	mach_msg_type_number_t     numcodes  = 2;
+	uint32_t                   instr     = 0;
+
+	if (!is_saved_state64(state)) {
+		panic("PAC failure (ESR 0x%x) from 32-bit state", esr);
+	}
+
+	COPYIN(get_saved_state_pc(state), (char *)&instr, sizeof(instr));
+
+	if (PSR64_IS_KERNEL(get_saved_state_cpsr(state))) {
+#define GENERIC_PAC_FAILURE_MSG_FMT "PAC failure from kernel with %s key"
+#define AUTXX_MSG_FMT GENERIC_PAC_FAILURE_MSG_FMT " while authing %s"
+#define GENERIC_MSG_FMT GENERIC_PAC_FAILURE_MSG_FMT
+
+		char msg[strlen(AUTXX_MSG_FMT)
+		- strlen("%s") + strlen("IA")
+		- strlen("%s") + strlen("xzr")
+		+ 1];
+		ptrauth_key key = (ptrauth_key)(esr & 0x3);
+		const char *key_str = ptrauth_key_to_string(key);
+
+		if (ARM64_INSTR_IS_AUTxx(instr)) {
+			char reg[4];
+			autxx_instruction_extract_reg(instr, reg);
+			snprintf(msg, sizeof(msg), AUTXX_MSG_FMT, key_str, reg);
+		} else if (ARM64_INSTR_IS_AUTIx_SYSTEM(instr)) {
+			const char *reg = autix_system_instruction_extract_reg(instr);
+			snprintf(msg, sizeof(msg), AUTXX_MSG_FMT, key_str, reg);
+		} else {
+			snprintf(msg, sizeof(msg), GENERIC_MSG_FMT, key_str);
+		}
+		panic_with_thread_kernel_state(msg, state);
+	}
+
+	codes[1] = instr;
+
+	exception_triage(exception, codes, numcodes);
+	__builtin_unreachable();
+}
+#endif /* __ARM_ARCH_8_6__ */
 
 static void
 handle_user_trapped_instruction32(arm_saved_state_t *state, uint32_t esr)

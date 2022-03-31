@@ -731,7 +731,7 @@ IOHibernateSystemSleep(void)
 			}
 #endif /* DEBUG || DEVELOPMENT */
 
-			data = OSData::withBytes(&rtcVars, sizeof(rtcVars));
+			data = OSData::withValue(rtcVars);
 			if (data) {
 				if (gIOHibernateRTCVariablesKey) {
 					IOService::getPMRootDomain()->setProperty(gIOHibernateRTCVariablesKey, data);
@@ -766,7 +766,7 @@ IOHibernateSystemSleep(void)
 						}
 						gIOHibernateBoot0082Data = OSData::withCapacity(sizeof(loadOptionHeader) + loadOptionHeader.FilePathLength);
 						if (gIOHibernateBoot0082Data) {
-							gIOHibernateBoot0082Data->appendBytes(&loadOptionHeader, sizeof(loadOptionHeader));
+							gIOHibernateBoot0082Data->appendValue(loadOptionHeader);
 							if (fileData) {
 								gIOHibernateBoot0082Data->appendBytes(data->getBytesNoCopy(), data->getLength() - 4);
 								gIOHibernateBoot0082Data->appendBytes(fileData);
@@ -778,7 +778,7 @@ IOHibernateSystemSleep(void)
 				}
 				if (!gIOHibernateBootNextData) {
 					uint16_t bits = 0x0082;
-					gIOHibernateBootNextData = OSData::withBytes(&bits, sizeof(bits));
+					gIOHibernateBootNextData = OSData::withValue(bits);
 				}
 
 #if DEBUG || DEVELOPMENT
@@ -1445,15 +1445,17 @@ uint32_t
 IOHibernateWasScreenLocked(void)
 {
 	uint32_t ret = 0;
-	if ((kIOHibernateStateWakingFromHibernate == gIOHibernateState) && gIOChosenEntry) {
-		OSData *
-		    data = OSDynamicCast(OSData, gIOChosenEntry->getProperty(kIOScreenLockStateKey));
-		if (data) {
-			ret = ((uint32_t *)data->getBytesNoCopy())[0];
-			gIOChosenEntry->setProperty(kIOBooterScreenLockStateKey, data);
+	if (gIOChosenEntry) {
+		if (kIOHibernateStateWakingFromHibernate == gIOHibernateState) {
+			OSData *
+			    data = OSDynamicCast(OSData, gIOChosenEntry->getProperty(kIOScreenLockStateKey));
+			if (data) {
+				ret = ((uint32_t *)data->getBytesNoCopy())[0];
+				gIOChosenEntry->setProperty(kIOBooterScreenLockStateKey, data);
+			}
+		} else {
+			gIOChosenEntry->removeProperty(kIOBooterScreenLockStateKey);
 		}
-	} else {
-		gIOChosenEntry->removeProperty(kIOBooterScreenLockStateKey);
 	}
 
 	return ret;
@@ -1550,7 +1552,7 @@ IOHibernateSystemInit(IOPMrootDomain * rootDomain)
 	gIOHibernateRTCVariablesKey = OSSymbol::withCStringNoCopy(kIOHibernateRTCVariablesKey);
 #endif /* defined(__i386__) || defined(__x86_64__) */
 
-	OSData * data = OSData::withBytesNoCopy(&gIOHibernateState, sizeof(gIOHibernateState));
+	OSData * data = OSData::withValueNoCopy(gIOHibernateState);
 	if (data) {
 		rootDomain->setProperty(kIOHibernateStateKey, data);
 		data->release();
@@ -2274,7 +2276,8 @@ hibernate_write_image(void)
 	} else {
 		// on ARM, once ApplePMGR decides we're hibernating, we can't turn back
 		// see: <rdar://problem/63848862> Tonga ApplePMGR diff quiesce path support
-		panic("hibernate_write_image encountered error 0x%x", err);
+		vm_panic_hibernate_write_image_failed(err);
+		return err; //not coming here post panic
 	}
 #else
 	if (kIOReturnSuccess == err) {
@@ -2732,14 +2735,14 @@ IOHibernateSystemRestart(void)
 		return;
 	}
 	element = len;
-	noteProp->appendBytes(&element, sizeof(element));
+	noteProp->appendValue(element);
 	element = crc32(0, smcBytes, len);
-	noteProp->appendBytes(&element, sizeof(element));
+	noteProp->appendValue(element);
 
 	bcopy(smcBytes, noteStore, len);
 	element = (addr64_t) &noteStore[0];
 	element = (element & page_mask) | ptoa_64(pmap_find_phys(kernel_pmap, element));
-	noteProp->appendBytes(&element, sizeof(element));
+	noteProp->appendValue(element);
 
 	if (!gIOOptionsEntry) {
 		regEntry = IORegistryEntry::fromPath("/options", gIODTPlane);

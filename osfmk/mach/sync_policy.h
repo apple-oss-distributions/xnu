@@ -54,11 +54,7 @@ typedef int sync_policy_t;
 #define SYNC_POLICY_USER_MASK \
 	(SYNC_POLICY_FIFO | SYNC_POLICY_LIFO | SYNC_POLICY_PREPOST)
 
-#define SYNC_POLICY_DISABLE_IRQ         0x08
-#define SYNC_POLICY_TURNSTILE           0x10
-#define SYNC_POLICY_TURNSTILE_PROXY     0x20
-#define SYNC_POLICY_INIT_LOCKED         0x40
-#define SYNC_POLICY_PORT_SET            0x80
+#define SYNC_POLICY_INIT_LOCKED         0x08
 
 #endif  /* XNU_KERNEL_PRIVATE */
 

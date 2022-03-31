@@ -80,6 +80,7 @@ OSDefineMetaClassAndStructorsWithZone(IOBufferMemoryDescriptor,
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
+#if defined(__x86_64__)
 static uintptr_t
 IOBMDPageProc(kalloc_heap_t kheap, iopa_t * a)
 {
@@ -95,6 +96,7 @@ IOBMDPageProc(kalloc_heap_t kheap, iopa_t * a)
 
 	return (uintptr_t) vmaddr;
 }
+#endif /* defined(__x86_64__) */
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
@@ -345,6 +347,7 @@ IOBufferMemoryDescriptor::initWithPhysicalMask(
 #endif
 			IOStatisticsAlloc(kIOStatisticsMallocAligned, capacity);
 			_buffer = (void *)(address + page_size);
+#if defined(__x86_64__)
 		} else if (mappedOrShared
 		    && (capacity + alignment) <= (page_size - gIOPageAllocChunkBytes)) {
 			_internalFlags |= kInternalFlagPageAllocated;
@@ -356,6 +359,7 @@ IOBufferMemoryDescriptor::initWithPhysicalMask(
 				OSAddAtomicLong(capacity, &debug_iomalloc_size);
 #endif
 			}
+#endif /* defined(__x86_64__) */
 		} else if (alignment > 1) {
 			_buffer = IOMallocAligned_internal(kheap, capacity, alignment);
 		} else {
@@ -398,7 +402,7 @@ IOBufferMemoryDescriptor::initWithPhysicalMask(
 		}
 	}
 
-	_ranges.v64->address = (mach_vm_address_t) _buffer;
+	_ranges.v64->address = (mach_vm_address_t) pgz_decode(_buffer, _capacity);
 	_ranges.v64->length  = _capacity;
 
 	if (!super::initWithOptions(_ranges.v64, 1, 0,
@@ -715,6 +719,7 @@ IOBufferMemoryDescriptor::free()
 		if (kInternalFlagPhysical & internalFlags) {
 			IOKernelFreePhysical(kheap, (mach_vm_address_t) buffer, size);
 		} else if (kInternalFlagPageAllocated & internalFlags) {
+#if defined(__x86_64__)
 			uintptr_t page;
 			page = iopa_free(&gIOBMDPageAllocator, (uintptr_t) buffer, size);
 			if (page) {
@@ -724,6 +729,10 @@ IOBufferMemoryDescriptor::free()
 			OSAddAtomicLong(-size, &debug_iomalloc_size);
 #endif
 			IOStatisticsAlloc(kIOStatisticsFreeAligned, size);
+#else /* !defined(__x86_64__) */
+			/* should be unreachable */
+			panic("Attempting to free IOBMD with page allocated flag");
+#endif /* defined(__x86_64__) */
 		} else if (kInternalFlagGuardPages & internalFlags) {
 			vm_offset_t allocation = (vm_offset_t)buffer - page_size;
 			kmem_free(kheap->kh_fallback_map, allocation, size + page_size * 2);

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2004-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2004-2022 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -79,6 +79,10 @@
 #include <security/mac_framework.h>
 #endif
 
+#if SKYWALK
+#include <skywalk/os_skywalk_private.h>
+#include <skywalk/nexus/netif/nx_netif.h>
+#endif /* SKYWALK */
 
 #undef ifnet_allocate
 errno_t ifnet_allocate(const struct ifnet_init_params *init,
@@ -200,6 +204,9 @@ errno_t
 ifnet_allocate_extended(const struct ifnet_init_eparams *einit0,
     ifnet_t *interface)
 {
+#if SKYWALK
+	ifnet_start_func ostart = NULL;
+#endif /* SKYWALK */
 	struct ifnet_init_eparams einit;
 	struct ifnet *ifp = NULL;
 	char if_xname[IFXNAMSIZ] = {0};
@@ -218,8 +225,27 @@ ifnet_allocate_extended(const struct ifnet_init_eparams *einit0,
 		return EINVAL;
 	}
 
+#if SKYWALK
+	/* headroom must be a multiple of 8 bytes */
+	if ((einit.tx_headroom & 0x7) != 0) {
+		return EINVAL;
+	}
+	/*
+	 * Currently Interface advisory reporting is supported only for
+	 * skywalk interface.
+	 */
+	if (((einit.flags & IFNET_INIT_IF_ADV) != 0) &&
+	    ((einit.flags & IFNET_INIT_SKYWALK_NATIVE) == 0)) {
+		return EINVAL;
+	}
+#endif /* SKYWALK */
 
 	if (einit.flags & IFNET_INIT_LEGACY) {
+#if SKYWALK
+		if (einit.flags & IFNET_INIT_SKYWALK_NATIVE) {
+			return EINVAL;
+		}
+#endif /* SKYWALK */
 		if (einit.output == NULL ||
 		    (einit.flags & IFNET_INIT_INPUT_POLL)) {
 			return EINVAL;
@@ -231,6 +257,23 @@ ifnet_allocate_extended(const struct ifnet_init_eparams *einit0,
 		einit.input_poll = NULL;
 		einit.input_ctl = NULL;
 	} else {
+#if SKYWALK
+		/*
+		 * For native Skywalk drivers, steer all start requests
+		 * to ifp_if_start() until the netif device adapter is
+		 * fully activated, at which point we will point it to
+		 * nx_netif_doorbell().
+		 */
+		if (einit.flags & IFNET_INIT_SKYWALK_NATIVE) {
+			if (einit.start != NULL) {
+				return EINVAL;
+			}
+			/* override output start callback */
+			ostart = einit.start = ifp_if_start;
+		} else {
+			ostart = einit.start;
+		}
+#endif /* SKYWALK */
 		if (einit.start == NULL) {
 			return EINVAL;
 		}
@@ -422,8 +465,59 @@ ifnet_allocate_extended(const struct ifnet_init_eparams *einit0,
 		    einit.broadcast_len);
 
 		if_clear_xflags(ifp, -1);
+#if SKYWALK
+		ifp->if_tx_headroom = 0;
+		ifp->if_tx_trailer = 0;
+		ifp->if_rx_mit_ival = 0;
+		ifp->if_save_start = ostart;
+		if (einit.flags & IFNET_INIT_SKYWALK_NATIVE) {
+			VERIFY(ifp->if_eflags & IFEF_TXSTART);
+			VERIFY(!(einit.flags & IFNET_INIT_LEGACY));
+			if_set_eflags(ifp, IFEF_SKYWALK_NATIVE);
+			ifp->if_tx_headroom = einit.tx_headroom;
+			ifp->if_tx_trailer = einit.tx_trailer;
+			ifp->if_rx_mit_ival = einit.rx_mit_ival;
+			/*
+			 * For native Skywalk drivers, make sure packets
+			 * emitted by the BSD stack get dropped until the
+			 * interface is in service.  When the netif host
+			 * adapter is fully activated, we'll point it to
+			 * nx_netif_output().
+			 */
+			ifp->if_output = ifp_if_output;
+			/*
+			 * Override driver-supplied parameters
+			 * and force IFEF_ENQUEUE_MULTI?
+			 */
+			if (sk_netif_native_txmodel ==
+			    NETIF_NATIVE_TXMODEL_ENQUEUE_MULTI) {
+				einit.start_delay_qlen = sk_tx_delay_qlen;
+				einit.start_delay_timeout = sk_tx_delay_timeout;
+			}
+			/* netif comes with native interfaces */
+			VERIFY((ifp->if_xflags & IFXF_LEGACY) == 0);
+		} else if (!ifnet_needs_compat(ifp)) {
+			/*
+			 * If we're told not to plumb in netif compat
+			 * for this interface, set IFXF_NX_NOAUTO to
+			 * prevent DLIL from auto-attaching the nexus.
+			 */
+			einit.flags |= IFNET_INIT_NX_NOAUTO;
+			/* legacy (non-netif) interface */
+			if_set_xflags(ifp, IFXF_LEGACY);
+		}
+
+		ifp->if_save_output = ifp->if_output;
+		if ((einit.flags & IFNET_INIT_NX_NOAUTO) != 0) {
+			if_set_xflags(ifp, IFXF_NX_NOAUTO);
+		}
+		if ((einit.flags & IFNET_INIT_IF_ADV) != 0) {
+			if_set_eflags(ifp, IFEF_ADV_REPORT);
+		}
+#else /* !SKYWALK */
 		/* legacy interface */
 		if_set_xflags(ifp, IFXF_LEGACY);
+#endif /* !SKYWALK */
 
 		if ((ifp->if_snd = ifclassq_alloc()) == NULL) {
 			panic_plain("%s: ifp=%p couldn't allocate class queues",
@@ -949,6 +1043,12 @@ ifnet_set_offload(ifnet_t interface, ifnet_offload_t offload)
 	ifnet_lock_exclusive(interface);
 	interface->if_hwassist = (offload & offload_mask);
 
+#if SKYWALK
+	/* preserve skywalk capability */
+	if ((interface->if_capabilities & IFCAP_SKYWALK) != 0) {
+		ifcaps |= IFCAP_SKYWALK;
+	}
+#endif /* SKYWALK */
 	/*
 	 * Hardware capable of partial checksum offload is
 	 * flexible enough to handle any transports utilizing
@@ -1629,6 +1729,13 @@ ifnet_set_poll_params(struct ifnet *ifp, struct ifnet_poll_params *p)
 		return ENXIO;
 	}
 
+#if SKYWALK
+	if (SKYWALK_CAPABLE(ifp)) {
+		err = netif_rxpoll_set_params(ifp, p, FALSE);
+		ifnet_decr_iorefcnt(ifp);
+		return err;
+	}
+#endif /* SKYWALK */
 	err = dlil_rxpoll_set_params(ifp, p, FALSE);
 
 	/* Release the io ref count */
@@ -1982,13 +2089,12 @@ one:
 		err = ENXIO;
 		goto done;
 	}
-	MALLOC(*addresses, ifaddr_t *, sizeof(ifaddr_t) * (count + 1),
-	    M_TEMP, how);
+
+	*addresses = kalloc_type(ifaddr_t, count + 1, how | Z_ZERO);
 	if (*addresses == NULL) {
 		err = ENOMEM;
 		goto done;
 	}
-	bzero(*addresses, sizeof(ifaddr_t) * (count + 1));
 
 done:
 	SLIST_FOREACH_SAFE(ifal, &ifal_head, ifal_le, ifal_tmp) {
@@ -2015,7 +2121,7 @@ done:
 	VERIFY(err == 0 || *addresses == NULL);
 	if ((err == 0) && (count) && ((*addresses)[0] == NULL)) {
 		VERIFY(return_inuse_addrs == 1);
-		FREE(*addresses, M_TEMP);
+		kfree_type(ifaddr_t, count + 1, *addresses);
 		err = ENXIO;
 	}
 	return err;
@@ -2034,7 +2140,7 @@ ifnet_free_address_list(ifaddr_t *addresses)
 		IFA_REMREF(addresses[i]);
 	}
 
-	FREE(addresses, M_TEMP);
+	kfree_type(ifaddr_t, i + 1, addresses);
 }
 
 void *
@@ -2211,7 +2317,7 @@ ifnet_set_lladdr_internal(ifnet_t interface, const void *lladdr,
 		intf_event_enqueue_nwk_wq_entry(interface, NULL,
 		    INTF_EVENT_CODE_LLADDR_UPDATE);
 		dlil_post_msg(interface, KEV_DL_SUBCLASS,
-		    KEV_DL_LINK_ADDRESS_CHANGED, NULL, 0);
+		    KEV_DL_LINK_ADDRESS_CHANGED, NULL, 0, FALSE);
 	}
 
 	return error;
@@ -2298,8 +2404,7 @@ ifnet_get_multicast_list(ifnet_t ifp, ifmultiaddr_t **addresses)
 		cmax++;
 	}
 
-	MALLOC(*addresses, ifmultiaddr_t *, sizeof(ifmultiaddr_t) * (cmax + 1),
-	    M_TEMP, M_WAITOK);
+	*addresses = kalloc_type(ifmultiaddr_t, cmax + 1, Z_WAITOK);
 	if (*addresses == NULL) {
 		ifnet_lock_done(ifp);
 		return ENOMEM;
@@ -2332,7 +2437,7 @@ ifnet_free_multicast_list(ifmultiaddr_t *addresses)
 		ifmaddr_release(addresses[i]);
 	}
 
-	FREE(addresses, M_TEMP);
+	kfree_type(ifmultiaddr_t, i + 1, addresses);
 }
 
 errno_t
@@ -2435,13 +2540,11 @@ ifnet_list_get_common(ifnet_family_t family, boolean_t get_all, ifnet_t **list,
 		goto done;
 	}
 
-	MALLOC(*list, ifnet_t *, sizeof(ifnet_t) * (cnt + 1),
-	    M_TEMP, M_NOWAIT);
+	*list = kalloc_type(ifnet_t, cnt + 1, Z_WAITOK | Z_ZERO);
 	if (*list == NULL) {
 		err = ENOMEM;
 		goto done;
 	}
-	bzero(*list, sizeof(ifnet_t) * (cnt + 1));
 	*count = cnt;
 
 done:
@@ -2471,7 +2574,7 @@ ifnet_list_free(ifnet_t *interfaces)
 		ifnet_release(interfaces[i]);
 	}
 
-	FREE(interfaces, M_TEMP);
+	kfree_type(ifnet_t, i + 1, interfaces);
 }
 
 /*************************************************************************/
@@ -2765,17 +2868,9 @@ ifnet_clone_attach(struct ifnet_clone_params *cloner_params,
 		goto fail;
 	}
 
-	/* Make room for name string */
-	ifc = _MALLOC(sizeof(struct if_clone) + IFNAMSIZ + 1, M_CLONE,
-	    M_WAITOK | M_ZERO);
-	if (ifc == NULL) {
-		printf("%s: _MALLOC failed\n", __func__);
-		error = ENOBUFS;
-		goto fail;
-	}
-	strlcpy((char *)(ifc + 1), cloner_params->ifc_name, IFNAMSIZ + 1);
-	ifc->ifc_name = (char *)(ifc + 1);
-	ifc->ifc_namelen = namelen;
+	ifc = kalloc_type(struct if_clone, Z_WAITOK | Z_ZERO | Z_NOFAIL);
+	strlcpy(ifc->ifc_name, cloner_params->ifc_name, IFNAMSIZ + 1);
+	ifc->ifc_namelen = (uint8_t)namelen;
 	ifc->ifc_maxunit = IF_MAXUNIT;
 	ifc->ifc_create = cloner_params->ifc_create;
 	ifc->ifc_destroy = cloner_params->ifc_destroy;
@@ -2790,7 +2885,7 @@ ifnet_clone_attach(struct ifnet_clone_params *cloner_params,
 	return 0;
 fail:
 	if (ifc != NULL) {
-		FREE(ifc, M_CLONE);
+		kfree_type(struct if_clone, ifc);
 	}
 	return error;
 }
@@ -2801,7 +2896,7 @@ ifnet_clone_detach(if_clone_t ifcloner)
 	errno_t error = 0;
 	struct if_clone *ifc = ifcloner;
 
-	if (ifc == NULL || ifc->ifc_name == NULL) {
+	if (ifc == NULL) {
 		return EINVAL;
 	}
 
@@ -2813,7 +2908,7 @@ ifnet_clone_detach(if_clone_t ifcloner)
 
 	if_clone_detach(ifc);
 
-	FREE(ifc, M_CLONE);
+	kfree_type(struct if_clone, ifc);
 
 fail:
 	return error;
@@ -2852,6 +2947,11 @@ ifnet_get_local_ports_extended(ifnet_t ifp, protocol_family_t protocol,
 
 	if_ports_used_update_wakeuuid(ifp);
 
+#if SKYWALK
+	if (netns_is_enabled()) {
+		netns_get_local_ports(ifp, protocol, flags, bitfield);
+	}
+#endif /* SKYWALK */
 
 	ifindex = (ifp != NULL) ? ifp->if_index : 0;
 
@@ -2944,7 +3044,7 @@ ifnet_notice_primary_elected(ifnet_t ifp)
 		return EINVAL;
 	}
 
-	dlil_post_msg(ifp, KEV_DL_SUBCLASS, KEV_DL_PRIMARY_ELECTED, NULL, 0);
+	dlil_post_msg(ifp, KEV_DL_SUBCLASS, KEV_DL_PRIMARY_ELECTED, NULL, 0, FALSE);
 	return 0;
 }
 
@@ -3045,7 +3145,7 @@ ifnet_set_delegate(ifnet_t ifp, ifnet_t delegated_ifp)
 	}
 
 	/* Generate a kernel event */
-	dlil_post_msg(ifp, KEV_DL_SUBCLASS, KEV_DL_IFDELEGATE_CHANGED, NULL, 0);
+	dlil_post_msg(ifp, KEV_DL_SUBCLASS, KEV_DL_IFDELEGATE_CHANGED, NULL, 0, FALSE);
 
 done:
 	/* Release the io ref count */
@@ -3446,7 +3546,30 @@ errno_t
 ifnet_interface_advisory_report(ifnet_t ifp,
     const struct ifnet_interface_advisory *advisory)
 {
+#if SKYWALK
+	if (__improbable(ifp == NULL || advisory == NULL ||
+	    advisory->version != IF_INTERFACE_ADVISORY_VERSION_CURRENT)) {
+		return EINVAL;
+	}
+	if (__improbable((advisory->direction !=
+	    IF_INTERFACE_ADVISORY_DIRECTION_TX) &&
+	    (advisory->direction != IF_INTERFACE_ADVISORY_DIRECTION_RX))) {
+		return EINVAL;
+	}
+	if (__improbable(!IF_FULLY_ATTACHED(ifp))) {
+		return ENXIO;
+	}
+	if (__improbable(((ifp->if_eflags & IFEF_ADV_REPORT) == 0) ||
+	    ((ifp->if_capabilities & IFCAP_SKYWALK) == 0))) {
+		return ENOTSUP;
+	}
+	if (__improbable(NA(ifp) == NULL)) {
+		return ENXIO;
+	}
+	return nx_netif_interface_advisory_report(&NA(ifp)->nifna_up, advisory);
+#else /* SKYWALK */
 #pragma unused(ifp)
 #pragma unused(advisory)
 	return ENOTSUP;
+#endif /* SKYWALK */
 }

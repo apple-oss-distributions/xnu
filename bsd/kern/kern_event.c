@@ -113,6 +113,11 @@
 
 #include "net/net_str_id.h"
 
+#if defined(SKYWALK) && defined(XNU_TARGET_OS_OSX)
+#include <skywalk/lib/net_filter_event.h>
+
+extern bool net_check_compatible_alf(void);
+#endif /* SKYWALK && XNU_TARGET_OS_OSX */
 
 #include <mach/task.h>
 #include <libkern/section_keywords.h>
@@ -167,6 +172,7 @@ static void kqueue_threadreq_initiate(struct kqueue *kq, workq_threadreq_t, kq_i
 static void kqworkq_unbind(proc_t p, workq_threadreq_t);
 static thread_qos_t kqworkq_unbind_locked(struct kqworkq *kqwq, workq_threadreq_t, thread_t thread);
 static workq_threadreq_t kqworkq_get_request(struct kqworkq *kqwq, kq_index_t qos_index);
+static void kqueue_update_iotier_override(kqueue_t kqu);
 
 static void kqworkloop_unbind(struct kqworkloop *kwql);
 
@@ -233,13 +239,13 @@ static void knote_drop(kqueue_t kqu, struct knote *kn, struct knote_lock_ctx *kn
 static void knote_adjust_qos(struct kqueue *kq, struct knote *kn, int result);
 static void knote_reset_priority(kqueue_t kqu, struct knote *kn, pthread_priority_t pp);
 
-static ZONE_DECLARE(knote_zone, "knote zone",
+static ZONE_DEFINE(knote_zone, "knote zone",
     sizeof(struct knote), ZC_CACHING | ZC_ZFREE_CLEARMEM);
-static ZONE_DECLARE(kqfile_zone, "kqueue file zone",
+static ZONE_DEFINE(kqfile_zone, "kqueue file zone",
     sizeof(struct kqfile), ZC_ZFREE_CLEARMEM | ZC_NOTBITAG);
-static ZONE_DECLARE(kqworkq_zone, "kqueue workq zone",
+static ZONE_DEFINE(kqworkq_zone, "kqueue workq zone",
     sizeof(struct kqworkq), ZC_ZFREE_CLEARMEM | ZC_NOTBITAG);
-static ZONE_DECLARE(kqworkloop_zone, "kqueue workloop zone",
+static ZONE_DEFINE(kqworkloop_zone, "kqueue workloop zone",
     sizeof(struct kqworkloop), ZC_CACHING | ZC_ZFREE_CLEARMEM | ZC_NOTBITAG);
 
 #define KN_HASH(val, mask)      (((val) ^ (val >> 8)) & (mask))
@@ -276,6 +282,11 @@ extern const struct filterops soexcept_filtops;
 extern const struct filterops spec_filtops;
 extern const struct filterops bpfread_filtops;
 extern const struct filterops necp_fd_rfiltops;
+#if SKYWALK
+extern const struct filterops skywalk_channel_rfiltops;
+extern const struct filterops skywalk_channel_wfiltops;
+extern const struct filterops skywalk_channel_efiltops;
+#endif /* SKYWALK */
 extern const struct filterops fsevent_filtops;
 extern const struct filterops vnode_filtops;
 extern const struct filterops tty_filtops;
@@ -325,6 +336,11 @@ static const struct filterops * const sysfilt_ops[EVFILTID_MAX] = {
 	[~EVFILT_MEMORYSTATUS]          = &bad_filtops,
 #endif
 	[~EVFILT_EXCEPT]                = &file_filtops,
+#if SKYWALK
+	[~EVFILT_NW_CHANNEL]            = &file_filtops,
+#else /* !SKYWALK */
+	[~EVFILT_NW_CHANNEL]            = &bad_filtops,
+#endif /* !SKYWALK */
 	[~EVFILT_WORKLOOP]              = &workloop_filtops,
 
 	/* Private filters */
@@ -340,6 +356,15 @@ static const struct filterops * const sysfilt_ops[EVFILTID_MAX] = {
 	[EVFILTID_SPEC]                 = &spec_filtops,
 	[EVFILTID_BPFREAD]              = &bpfread_filtops,
 	[EVFILTID_NECP_FD]              = &necp_fd_rfiltops,
+#if SKYWALK
+	[EVFILTID_SKYWALK_CHANNEL_W]    = &skywalk_channel_wfiltops,
+	[EVFILTID_SKYWALK_CHANNEL_R]    = &skywalk_channel_rfiltops,
+	[EVFILTID_SKYWALK_CHANNEL_E]    = &skywalk_channel_efiltops,
+#else /* !SKYWALK */
+	[EVFILTID_SKYWALK_CHANNEL_W]    = &bad_filtops,
+	[EVFILTID_SKYWALK_CHANNEL_R]    = &bad_filtops,
+	[EVFILTID_SKYWALK_CHANNEL_E]    = &bad_filtops,
+#endif /* !SKYWALK */
 	[EVFILTID_FSEVENT]              = &fsevent_filtops,
 	[EVFILTID_VN]                   = &vnode_filtops,
 	[EVFILTID_TTY]                  = &tty_filtops,
@@ -787,6 +812,10 @@ knote_post(struct knote *kn, long hint)
 
 	dropping = (kn->kn_status & KN_DROPPING);
 
+	if (!dropping && (result & FILTER_ADJUST_EVENT_IOTIER_BIT)) {
+		kqueue_update_iotier_override(kq);
+	}
+
 	if (!dropping && (result & FILTER_ACTIVE)) {
 		knote_activate(kq, kn, result);
 	}
@@ -942,13 +971,12 @@ SECURITY_READ_ONLY_EARLY(static struct filterops) file_filtops = {
 
 #define f_flag fp_glob->fg_flag
 #define f_ops fp_glob->fg_ops
-#define f_data fp_glob->fg_data
 #define f_lflags fp_glob->fg_lflags
 
 static void
 filt_kqdetach(struct knote *kn)
 {
-	struct kqfile *kqf = (struct kqfile *)kn->kn_fp->f_data;
+	struct kqfile *kqf = (struct kqfile *)fp_get_data(kn->kn_fp);
 	struct kqueue *kq = &kqf->kqf_kqueue;
 
 	kqlock(kq);
@@ -959,7 +987,7 @@ filt_kqdetach(struct knote *kn)
 static int
 filt_kqueue(struct knote *kn, __unused long hint)
 {
-	struct kqueue *kq = (struct kqueue *)kn->kn_fp->f_data;
+	struct kqueue *kq = (struct kqueue *)fp_get_data(kn->kn_fp);
 
 	return kq->kq_count > 0;
 }
@@ -968,7 +996,7 @@ static int
 filt_kqtouch(struct knote *kn, struct kevent_qos_s *kev)
 {
 #pragma unused(kev)
-	struct kqueue *kq = (struct kqueue *)kn->kn_fp->f_data;
+	struct kqueue *kq = (struct kqueue *)fp_get_data(kn->kn_fp);
 	int res;
 
 	kqlock(kq);
@@ -981,7 +1009,7 @@ filt_kqtouch(struct knote *kn, struct kevent_qos_s *kev)
 static int
 filt_kqprocess(struct knote *kn, struct kevent_qos_s *kev)
 {
-	struct kqueue *kq = (struct kqueue *)kn->kn_fp->f_data;
+	struct kqueue *kq = (struct kqueue *)fp_get_data(kn->kn_fp);
 	int res = 0;
 
 	kqlock(kq);
@@ -2489,7 +2517,7 @@ filt_wlpost_register_wait(struct uthread *uth, struct knote *kn,
 		filt_wlupdate_inheritor(kqwl, ts, TURNSTILE_DELAYED_UPDATE);
 	}
 
-	thread_set_pending_block_hint(uth->uu_thread, kThreadWaitWorkloopSyncWait);
+	thread_set_pending_block_hint(get_machthread(uth), kThreadWaitWorkloopSyncWait);
 	waitq_assert_wait64(&ts->ts_waitq, knote_filt_wev64(kn),
 	    THREAD_ABORTSAFE, TIMEOUT_WAIT_FOREVER);
 
@@ -2971,7 +2999,7 @@ kqueue_internal(struct proc *p, fp_initfn_t fp_init, void *initarg, int32_t *ret
 	fp->fp_flags |= FP_CLOEXEC | FP_CLOFORK;
 	fp->f_flag = FREAD | FWRITE;
 	fp->f_ops = &kqueueops;
-	fp->f_data = kq;
+	fp_set_data(fp, kq);
 	fp->f_lflags |= FG_CONFINED;
 
 	proc_fdlock(p);
@@ -3155,6 +3183,37 @@ kqworkloop_hash_init(struct filedesc *fdp)
 	}
 }
 
+/*
+ * kqueue iotier override is only supported for kqueue that has
+ * only one port as a mach port source. Updating the iotier
+ * override on the mach port source will update the override
+ * on kqueue as well. Since kqueue with iotier override will
+ * only have one port attached, there is no logic for saturation
+ * like qos override, the iotier override of mach port source
+ * would be reflected in kevent iotier override.
+ */
+void
+kqueue_set_iotier_override(kqueue_t kqu, uint8_t iotier_override)
+{
+	if (!(kqu.kq->kq_state & KQ_WORKLOOP)) {
+		return;
+	}
+
+	struct kqworkloop *kqwl = kqu.kqwl;
+	os_atomic_store(&kqwl->kqwl_iotier_override, iotier_override, relaxed);
+}
+
+uint8_t
+kqueue_get_iotier_override(kqueue_t kqu)
+{
+	if (!(kqu.kq->kq_state & KQ_WORKLOOP)) {
+		return THROTTLE_LEVEL_END;
+	}
+
+	struct kqworkloop *kqwl = kqu.kqwl;
+	return os_atomic_load(&kqwl->kqwl_iotier_override, relaxed);
+}
+
 #if CONFIG_PREADOPT_TG
 /*
  * This function is called with a borrowed reference on the thread group without
@@ -3333,6 +3392,7 @@ kqworkloop_init(struct kqworkloop *kqwl, proc_t p,
 	}
 	kqwl->kqwl_request.tr_state = WORKQ_TR_STATE_IDLE;
 	kqwl->kqwl_request.tr_flags = tr_flags;
+	os_atomic_store(&kqwl->kqwl_iotier_override, (uint8_t)THROTTLE_LEVEL_END, relaxed);
 #if CONFIG_PREADOPT_TG
 	if (task_is_app(current_task())) {
 		/* Apps will never adopt a thread group that is not their own. This is a
@@ -4143,6 +4203,11 @@ knote_process(struct knote *kn, kevent_ctx_t kectx,
 	if (result & FILTER_ADJUST_EVENT_QOS_BIT) {
 		knote_adjust_qos(kq, kn, result);
 	}
+
+	if (result & FILTER_ADJUST_EVENT_IOTIER_BIT) {
+		kqueue_update_iotier_override(kq);
+	}
+
 	kev.qos = _pthread_priority_combine(kn->kn_qos, kn->kn_qos_override);
 
 	if (kev.flags & EV_ONESHOT) {
@@ -4671,7 +4736,7 @@ kqueue_workloop_ctl(proc_t p, struct kqueue_workloop_ctl_args *uap, int *retval)
 static int
 kqueue_select(struct fileproc *fp, int which, void *wql, __unused vfs_context_t ctx)
 {
-	struct kqfile *kq = (struct kqfile *)fp->f_data;
+	struct kqfile *kq = (struct kqfile *)fp_get_data(fp);
 	int retnum = 0;
 
 	assert((kq->kqf_state & (KQ_WORKLOOP | KQ_WORKQ)) == 0);
@@ -4695,14 +4760,14 @@ kqueue_select(struct fileproc *fp, int which, void *wql, __unused vfs_context_t 
 static int
 kqueue_close(struct fileglob *fg, __unused vfs_context_t ctx)
 {
-	struct kqfile *kqf = (struct kqfile *)fg->fg_data;
+	struct kqfile *kqf = fg_get_data(fg);
 
 	assert((kqf->kqf_state & (KQ_WORKLOOP | KQ_WORKQ)) == 0);
 	kqlock(kqf);
 	selthreadclear(&kqf->kqf_sel);
 	kqunlock(kqf);
 	kqueue_dealloc(&kqf->kqf_kqueue);
-	fg->fg_data = NULL;
+	fg_set_data(fg, NULL);
 	return 0;
 }
 
@@ -4722,7 +4787,7 @@ static int
 kqueue_kqfilter(struct fileproc *fp, struct knote *kn,
     __unused struct kevent_qos_s *kev)
 {
-	struct kqfile *kqf = (struct kqfile *)fp->f_data;
+	struct kqfile *kqf = (struct kqfile *)fp_get_data(fp);
 	struct kqueue *kq = &kqf->kqf_kqueue;
 	struct kqueue *parentkq = knote_get_kq(kn);
 
@@ -4822,7 +4887,7 @@ kqfile_wakeup(struct kqfile *kqf, long hint, wait_result_t wr)
 static int
 kqueue_drain(struct fileproc *fp, __unused vfs_context_t ctx)
 {
-	struct kqfile *kqf = (struct kqfile *)fp->fp_glob->fg_data;
+	struct kqfile *kqf = (struct kqfile *)fp_get_data(fp);
 
 	assert((kqf->kqf_state & (KQ_WORKLOOP | KQ_WORKQ)) == 0);
 
@@ -4990,7 +5055,7 @@ kqueue_threadreq_bind_prepost(struct proc *p __unused, workq_threadreq_t kqr,
     struct uthread *ut)
 {
 	ut->uu_kqr_bound = kqr;
-	kqr->tr_thread = ut->uu_thread;
+	kqr->tr_thread = get_machthread(ut);
 	kqr->tr_state = WORKQ_TR_STATE_BINDING;
 }
 
@@ -5151,6 +5216,7 @@ kqueue_threadreq_bind(struct proc *p, workq_threadreq_t kqr, thread_t thread,
 			os_atomic_store(&kqu.kqwl->kqwl_preadopt_tg_needs_redrive, KQWL_PREADOPT_TG_CLEAR_REDRIVE, relaxed);
 		}
 #endif
+		kqueue_update_iotier_override(kqu);
 	} else {
 		assert(kqr->tr_kq_override_index == 0);
 
@@ -5431,6 +5497,20 @@ recompute:
 }
 
 static void
+kqworkloop_update_iotier_override(struct kqworkloop *kqwl)
+{
+	workq_threadreq_t kqr = &kqwl->kqwl_request;
+	thread_t servicer = kqr_thread(kqr);
+	uint8_t iotier = os_atomic_load(&kqwl->kqwl_iotier_override, relaxed);
+
+	kqlock_held(kqwl);
+
+	if (servicer) {
+		thread_update_servicer_iotier_override(servicer, iotier);
+	}
+}
+
+static void
 kqworkloop_wakeup(struct kqworkloop *kqwl, kq_index_t qos)
 {
 	if (qos <= kqwl->kqwl_wakeup_qos) {
@@ -5607,6 +5687,14 @@ kqworkq_update_override(struct kqworkq *kqwq, struct knote *kn,
 }
 
 static void
+kqueue_update_iotier_override(kqueue_t kqu)
+{
+	if (kqu.kq->kq_state & KQ_WORKLOOP) {
+		kqworkloop_update_iotier_override(kqu.kqwl);
+	}
+}
+
+static void
 kqueue_update_override(kqueue_t kqu, struct knote *kn, thread_qos_t qos)
 {
 	if (kqu.kq->kq_state & KQ_WORKLOOP) {
@@ -5662,6 +5750,7 @@ kqworkloop_unbind_locked(struct kqworkloop *kqwl, thread_t thread,
 		thread_set_preadopt_thread_group(thread, NULL);
 	}
 #endif
+	thread_update_servicer_iotier_override(thread, THROTTLE_LEVEL_END);
 
 	kqr->tr_thread = THREAD_NULL;
 	kqr->tr_state = WORKQ_TR_STATE_IDLE;
@@ -6260,6 +6349,10 @@ kq_remove_knote(struct kqueue *kq, struct knote *kn, struct proc *p,
 	SLIST_REMOVE(list, kn, knote, kn_link);
 
 	kqlock(kq);
+
+	/* Update the servicer iotier override */
+	kqueue_update_iotier_override(kq);
+
 	kq_state = kq->kq_state;
 	if (knlc) {
 		knote_unlock_cancel(kq, kn, knlc);
@@ -6501,6 +6594,10 @@ knote_apply_touch(kqueue_t kqu, struct knote *kn, struct kevent_qos_s *kev,
 		}
 	}
 
+	if (result & FILTER_ADJUST_EVENT_IOTIER_BIT) {
+		kqueue_update_iotier_override(kqu);
+	}
+
 	if ((result & FILTER_UPDATE_REQ_QOS) && kev->qos && kev->qos != kn->kn_qos) {
 		// may dequeue the knote
 		knote_reset_priority(kqu, kn, kev->qos);
@@ -6639,7 +6736,7 @@ kevent_get_kqfile(struct proc *p, int fd, int flags,
 	if (__improbable(error)) {
 		return error;
 	}
-	kq = (struct kqueue *)(*fpp)->f_data;
+	kq = (struct kqueue *)fp_get_data((*fpp));
 
 	uint16_t kq_state = os_atomic_load(&kq->kq_state, relaxed);
 	if (__improbable((kq_state & (KQ_KEV32 | KQ_KEV64 | KQ_KEV_QOS)) == 0)) {
@@ -8043,7 +8140,7 @@ struct kern_event_head kern_event_head;
 
 static u_int32_t static_event_id = 0;
 
-static ZONE_DECLARE(ev_pcb_zone, "kerneventpcb",
+static ZONE_DEFINE(ev_pcb_zone, "kerneventpcb",
     sizeof(struct kern_event_pcb), ZC_ZFREE_CLEARMEM);
 
 /*
@@ -8160,6 +8257,21 @@ kev_post_msg_internal(struct kev_msg *event_msg, int wait)
 	u_int32_t total_size;
 	int i;
 
+#if defined(SKYWALK) && defined(XNU_TARGET_OS_OSX)
+	/*
+	 * Special hook for ALF state updates
+	 */
+	if (event_msg->vendor_code == KEV_VENDOR_APPLE &&
+	    event_msg->kev_class == KEV_NKE_CLASS &&
+	    event_msg->kev_subclass == KEV_NKE_ALF_SUBCLASS &&
+	    event_msg->event_code == KEV_NKE_ALF_STATE_CHANGED) {
+#if (DEBUG || DEVELOPMENT)
+		os_log_info(OS_LOG_DEFAULT, "KEV_NKE_ALF_STATE_CHANGED posted");
+#endif /* DEBUG || DEVELOPMENT */
+		net_filter_event_mark(NET_FILTER_EVENT_ALF,
+		    net_check_compatible_alf());
+	}
+#endif /* SKYWALK && XNU_TARGET_OS_OSX */
 
 	/* Verify the message is small enough to fit in one mbuf w/o cluster */
 	total_size = KEV_MSG_HEADER_SIZE;
@@ -8908,18 +9020,6 @@ kevent_ast(thread_t thread, uint16_t bits)
 {
 	proc_t p = current_proc();
 
-#if CONFIG_VFORK
-	/* Don't do any AST processing if the thread is in a vfork() */
-	struct uthread *uth = current_uthread();
-	if (uth->uu_flag & UT_VFORK) {
-		if (bits & AST_KEVENT_REDRIVE_THREADREQ) {
-			panic("Should not be in kevent() and in vfork() at the same time");
-		}
-
-		/* We're okay with dropping the other kevent_ast bits on the floor */
-		return;
-	}
-#endif /* CONFIG_VFORK */
 
 	if (bits & AST_KEVENT_REDRIVE_THREADREQ) {
 		workq_kern_threadreq_redrive(p, WORKQ_THREADREQ_CAN_CREATE_THREADS);
@@ -8952,7 +9052,7 @@ kevent_sysctl SYSCTL_HANDLER_ARGS
 		return EINVAL;
 	}
 
-	struct uthread *ut = get_bsdthread_info(current_thread());
+	struct uthread *ut = current_uthread();
 	if (!ut) {
 		return EFAULT;
 	}

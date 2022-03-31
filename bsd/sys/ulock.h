@@ -51,6 +51,9 @@ ulock_owner_value_to_port_name(uint32_t uval)
 	 */
 	return ipc_entry_name_mask((mach_port_name_t)uval);
 }
+
+extern int ulock_wake(struct task *task, uint32_t operation, user_addr_t addr, uint64_t wake_value);
+
 #else
 static __inline mach_port_name_t
 ulock_owner_value_to_port_name(uint32_t uval)

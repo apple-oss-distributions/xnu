@@ -1117,7 +1117,7 @@ clock_initialize_calendar(void)
 
 #if ENABLE_LEGACY_CLOCK_CODE
 	if (has_monotonic_clock) {
-		monotonic_sec = monotonic_usec_total / (clock_sec_t)USEC_PER_SEC;
+		OS_ANALYZER_SUPPRESS("82347749") monotonic_sec = monotonic_usec_total / (clock_sec_t)USEC_PER_SEC;
 		monotonic_usec = monotonic_usec_total % (clock_usec_t)USEC_PER_SEC;
 
 		// monotonic clock - sys
@@ -1298,7 +1298,7 @@ clock_wakeup_calendar_legacy(void)
 #if DEVELOPMENT || DEBUG
 	os_log(OS_LOG_DEFAULT, "time at wake %lu s %d u from %s clock, abs %llu\n", (unsigned long)wake_sec, wake_usec, (has_monotonic_clock)?"monotonic":"UTC", wake_abs);
 	if (has_monotonic_clock) {
-		os_log(OS_LOG_DEFAULT, "UTC time %lu s %d u\n", (unsigned long)var_s, var_us);
+		OS_ANALYZER_SUPPRESS("82347749") os_log(OS_LOG_DEFAULT, "UTC time %lu s %d u\n", (unsigned long)var_s, var_us);
 	}
 #endif /* DEVELOPMENT || DEBUG */
 

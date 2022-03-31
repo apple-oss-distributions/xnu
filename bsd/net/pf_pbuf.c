@@ -424,3 +424,15 @@ pbuf_get_service_class(const pbuf_t *pbuf)
 
 	return MBUF_SC_BE;
 }
+
+void *
+pbuf_get_packet_buffer_address(const pbuf_t *pbuf)
+{
+	VERIFY(pbuf != NULL);
+
+	if (pbuf->pb_type == PBUF_TYPE_MBUF) {
+		return pbuf->pb_mbuf;
+	} else {
+		return pbuf->pb_memory.pm_buffer;
+	}
+}

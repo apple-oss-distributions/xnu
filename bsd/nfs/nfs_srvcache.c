@@ -96,12 +96,12 @@ int nfsrv_reqcache_size = NFSRVCACHESIZ;
 
 #define NFSRCHASH(xid) \
 	(&nfsrv_reqcache_hashtbl[((xid) + ((xid) >> 24)) & nfsrv_reqcache_hash])
-LIST_HEAD(nfsrv_reqcache_hash, nfsrvcache) * nfsrv_reqcache_hashtbl;
-TAILQ_HEAD(nfsrv_reqcache_lru, nfsrvcache) nfsrv_reqcache_lruhead;
-u_long nfsrv_reqcache_hash;
+static LIST_HEAD(nfsrv_reqcache_hash, nfsrvcache) * nfsrv_reqcache_hashtbl;
+static TAILQ_HEAD(nfsrv_reqcache_lru, nfsrvcache) nfsrv_reqcache_lruhead;
+static u_long nfsrv_reqcache_hash;
 
 static LCK_GRP_DECLARE(nfsrv_reqcache_lck_grp, "nfsrv_reqcache");
-LCK_MTX_DECLARE(nfsrv_reqcache_mutex, &nfsrv_reqcache_lck_grp);
+static LCK_MTX_DECLARE(nfsrv_reqcache_mutex, &nfsrv_reqcache_lck_grp);
 
 /*
  * Static array that defines which nfs rpc's are nonidempotent
@@ -300,12 +300,9 @@ loop:
 	OSAddAtomic64(1, &nfsrvstats.srvcache_misses);
 	if (nfsrv_reqcache_count < nfsrv_reqcache_size) {
 		/* try to allocate a new entry */
-		MALLOC(rp, struct nfsrvcache *, sizeof *rp, M_NFSD, M_WAITOK);
-		if (rp) {
-			bzero((char *)rp, sizeof *rp);
-			nfsrv_reqcache_count++;
-			rp->rc_flag = RC_LOCKED;
-		}
+		rp = kalloc_type(struct nfsrvcache, Z_WAITOK | Z_ZERO | Z_NOFAIL);
+		rp->rc_flag = RC_LOCKED;
+		nfsrv_reqcache_count++;
 	} else {
 		rp = NULL;
 	}
@@ -446,14 +443,13 @@ nfsrv_cleancache(void)
 	struct nfsrvcache *rp, *nextrp;
 
 	lck_mtx_lock(&nfsrv_reqcache_mutex);
-	for (rp = nfsrv_reqcache_lruhead.tqh_first; rp != 0; rp = nextrp) {
-		nextrp = rp->rc_lru.tqe_next;
-		LIST_REMOVE(rp, rc_hash);
-		TAILQ_REMOVE(&nfsrv_reqcache_lruhead, rp, rc_lru);
-		_FREE(rp, M_NFSD);
+	TAILQ_FOREACH_SAFE(rp, &nfsrv_reqcache_lruhead, rc_lru, nextrp) {
+		kfree_type(struct nfsrvcache, rp);
 	}
+	hashdestroy(nfsrv_reqcache_hashtbl, M_NFSD, nfsrv_reqcache_hash);
+	nfsrv_reqcache_hash = 0;
 	nfsrv_reqcache_count = 0;
-	FREE(nfsrv_reqcache_hashtbl, M_TEMP);
+	TAILQ_INIT(&nfsrv_reqcache_lruhead);
 	lck_mtx_unlock(&nfsrv_reqcache_mutex);
 }
 

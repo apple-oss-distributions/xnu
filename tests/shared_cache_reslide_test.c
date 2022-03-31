@@ -36,7 +36,11 @@
 #define OS_REASON_FLAG_SHAREDREGION_FAULT       0x400
 #endif
 
-T_GLOBAL_META(T_META_RUN_CONCURRENTLY(true));
+T_GLOBAL_META(
+	T_META_RADAR_COMPONENT_NAME("xnu"),
+	T_META_RADAR_COMPONENT_VERSION("VM"),
+	T_META_OWNER("eperla"),
+	T_META_RUN_CONCURRENTLY(true));
 
 #if (__arm64e__) && (TARGET_OS_IOS || TARGET_OS_OSX)
 static void *
@@ -186,7 +190,7 @@ T_DECL(reslide_sharedcache, "crash induced reslide of the shared cache",
 	void *confirm_address;
 	char *ptr;
 	int  on = 1;
-	size_t size;
+	size_t size = sizeof(saved_status);
 
 	/* Force resliding on */
 	T_ASSERT_POSIX_SUCCESS(sysctlbyname("vm.vm_shared_region_reslide_aslr", &saved_status, &size, &on, sizeof(on)), "force enable reslide");

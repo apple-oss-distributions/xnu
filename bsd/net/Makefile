@@ -9,6 +9,12 @@ include $(MakeInc_def)
 INSTINC_SUBDIRS = \
 	altq classq pktsched
 
+# Additional private file for macOS
+ifeq ($(PLATFORM),MacOSX)
+MACOS_PRIVATE_DATAFILES = \
+	remote_vif.h
+endif
+
 # Files that are public on macOS, but private on embedded
 EMBEDDED_PRIVATE_DATAFILES = \
 	if_media.h
@@ -89,6 +95,7 @@ PRIVATE_DATAFILES = $(sort \
 	sixxlowpan.h \
 	frame802154.h \
 	nat464_utils.h \
+	$(MACOS_PRIVATE_DATAFILES) \
 	$(EXTRA_PRIVATE_DATAFILES))
 
 ifneq ($(EXTRA_PRIVATE_DATAFILES),)

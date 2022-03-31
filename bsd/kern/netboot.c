@@ -663,7 +663,7 @@ netboot_mountroot(void)
 		printf("netboot: can't retrieve IP parameters\n");
 		goto failed;
 	}
-	printf("netboot: IP address " IP_FORMAT, IP_LIST(&iaddr));
+	OS_ANALYZER_SUPPRESS("12641116") printf("netboot: IP address " IP_FORMAT, IP_LIST(&iaddr));
 	if (netmask.s_addr) {
 		printf(" netmask " IP_FORMAT, IP_LIST(&netmask));
 	}

@@ -361,7 +361,6 @@ swapfile_pager_data_request(
 	    &kernel_mapping,
 	    PAGE_SIZE_64,
 	    0,
-	    0,
 	    VM_MAP_KERNEL_FLAGS_NONE,
 	    VM_KERN_MEMORY_NONE,
 	    &map_entry);

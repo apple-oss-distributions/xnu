@@ -161,6 +161,7 @@ extern boolean_t compressor_store_stop_compaction;
 extern lck_mtx_t vm_swap_data_lock;
 extern int vm_swapfile_create_thread_running;
 extern int vm_swapfile_gc_thread_running;
+extern uint32_t cl_sparse_push_error;
 
 int
 reboot_kernel(int howto, char *message)
@@ -244,6 +245,10 @@ reboot_kernel(int howto, char *message)
 		}
 
 		IOSystemShutdownNotification(howto, kIOSystemShutdownNotificationStageRootUnmount);
+
+		if (cl_sparse_push_error) {
+			panic("system_shutdown cluster_push_err failed with ENOSPC %d times\n", cl_sparse_push_error);
+		}
 
 		/*
 		 * Unmount filesystems
@@ -359,6 +364,7 @@ sd_closelog(vfs_context_t ctx)
 	return error;
 }
 
+__printflike(2, 3)
 static void
 sd_log(vfs_context_t ctx, const char *fmt, ...)
 {

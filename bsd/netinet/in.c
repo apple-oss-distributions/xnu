@@ -204,10 +204,6 @@ static struct zone *inifa_zone;                 /* zone for in_ifaddr */
 
 #define INIFA_ZONE_NAME         "in_ifaddr"     /* zone name */
 
-static const unsigned int in_extra_size = sizeof(struct in_ifextra);
-static const unsigned int in_extra_bufsize = in_extra_size +
-    sizeof(void *) + sizeof(uint64_t);
-
 /*
  * Return 1 if the address is
  * - loopback
@@ -342,51 +338,32 @@ static int in_interfaces;       /* number of external internet interfaces */
 static int
 in_domifattach(struct ifnet *ifp)
 {
-	int error;
+	int error = 0;
 
 	VERIFY(ifp != NULL);
 
 	if ((error = proto_plumb(PF_INET, ifp)) && error != EEXIST) {
 		log(LOG_ERR, "%s: proto_plumb returned %d if=%s\n",
 		    __func__, error, if_name(ifp));
-	} else if (error == 0 && ifp->if_inetdata == NULL) {
-		void **pbuf, *base;
-		struct in_ifextra *ext;
-		int errorx;
-
-		if ((ext = (struct in_ifextra *)_MALLOC(in_extra_bufsize,
-		    M_IFADDR, M_WAITOK | M_ZERO)) == NULL) {
-			error = ENOMEM;
-			errorx = proto_unplumb(PF_INET, ifp);
-			if (errorx != 0) {
-				log(LOG_ERR,
-				    "%s: proto_unplumb returned %d if=%s%d\n",
-				    __func__, errorx, ifp->if_name,
-				    ifp->if_unit);
-			}
-			goto done;
-		}
-
-		/* Align on 64-bit boundary */
-		base = (void *)P2ROUNDUP((intptr_t)ext + sizeof(uint64_t),
-		    sizeof(uint64_t));
-		VERIFY(((intptr_t)base + in_extra_size) <=
-		    ((intptr_t)ext + in_extra_bufsize));
-		pbuf = (void **)((intptr_t)base - sizeof(void *));
-		*pbuf = ext;
-		ifp->if_inetdata = base;
-		IN_IFEXTRA(ifp)->ii_llt = in_lltattach(ifp);
-		VERIFY(IS_P2ALIGNED(ifp->if_inetdata, sizeof(uint64_t)));
+		return error;
 	}
-done:
-	if (error == 0 && ifp->if_inetdata != NULL) {
+
+	if (ifp->if_inetdata == NULL) {
+		ifp->if_inetdata = zalloc_permanent_type(struct in_ifextra);
+		IN_IFEXTRA(ifp)->ii_llt = in_lltattach(ifp);
+		error = 0;
+	} else if (error != EEXIST) {
 		/*
 		 * Since the structure is never freed, we need to
 		 * zero out its contents to avoid reusing stale data.
 		 * A little redundant with allocation above, but it
 		 * keeps the code simpler for all cases.
 		 */
-		bzero(ifp->if_inetdata, in_extra_size);
+		IN_IFEXTRA(ifp)->netsig_len = 0;
+		bzero(IN_IFEXTRA(ifp)->netsig, sizeof(IN_IFEXTRA(ifp)->netsig));
+		if (LLTABLE(ifp)) {
+			lltable_purge(LLTABLE(ifp));
+		}
 	}
 	return error;
 }
@@ -2382,7 +2359,8 @@ in_lltable_destroy_lle_unlocked(struct llentry *lle)
 {
 	LLE_LOCK_DESTROY(lle);
 	LLE_REQ_DESTROY(lle);
-	kfree_type(struct in_llentry, lle);
+	struct in_llentry *in_lle = (struct in_llentry *)lle;
+	kfree_type(struct in_llentry, in_lle);
 }
 
 /*

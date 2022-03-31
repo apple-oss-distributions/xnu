@@ -74,8 +74,6 @@
 #include <netinet6/in6_var.h>
 #include <netinet6/nd6.h>
 
-MALLOC_DEFINE(M_LLTABLE, "lltable", "link level address tables");
-
 static SLIST_HEAD(, lltable) lltables = SLIST_HEAD_INITIALIZER(lltables);
 
 static LCK_GRP_DECLARE(lltable_rwlock_grp, "lltable_rwlock");
@@ -250,12 +248,14 @@ htable_prefix_free(struct lltable *llt, const struct sockaddr *addr,
 	lltable_free_entry(llt, lle);
 }
 
+#if 0
 static void
 htable_free_tbl(struct lltable *llt)
 {
-	FREE(llt->lle_head, M_LLTABLE);
+	kfree_type(struct llentries, llt->llt_hsize, llt->lle_head);
 	kfree_type(struct lltable, llt);
 }
+#endif
 
 static void
 llentries_unlink(struct lltable *llt, struct llentries *head)
@@ -551,7 +551,29 @@ lltable_free(struct lltable *llt)
 	}
 
 	/* XXX We recycle network interfaces so we only purge */
-	/* llt->llt_free_tbl(llt); */
+	/* htable_freee_tbl(llt); */
+}
+
+/* Purge all entries from a given table */
+void
+lltable_purge(struct lltable *llt)
+{
+	struct llentry *lle = NULL;
+	struct llentry *next = NULL;
+	struct llentries dchain = {};
+
+	KASSERT(llt != NULL, ("%s: llt is NULL", __func__));
+
+	LIST_INIT(&dchain);
+	IF_AFDATA_WLOCK(llt->llt_ifp, llt->llt_af);
+	/* Push all lles to @dchain */
+	lltable_foreach_lle(llt, lltable_free_cb, &dchain);
+	llentries_unlink(llt, &dchain);
+	IF_AFDATA_WUNLOCK(llt->llt_ifp, llt->llt_af);
+
+	LIST_FOREACH_SAFE(lle, &dchain, lle_chain, next) {
+		llentry_free(lle);
+	}
 }
 
 #if 0
@@ -638,14 +660,13 @@ struct lltable *
 lltable_allocate_htbl(uint32_t hsize)
 {
 	struct lltable *llt;
-	int i;
 
 	llt = kalloc_type(struct lltable, Z_WAITOK | Z_ZERO);
 	llt->llt_hsize = hsize;
-	MALLOC(llt->lle_head, struct llentries *, sizeof(struct llentries) * hsize,
-	    M_LLTABLE, M_WAITOK | M_ZERO);
+	llt->lle_head = kalloc_type(struct llentries, hsize,
+	    Z_WAITOK | Z_ZERO | Z_NOFAIL);
 
-	for (i = 0; i < llt->llt_hsize; i++) {
+	for (int i = 0; i < llt->llt_hsize; i++) {
 		LIST_INIT(&llt->lle_head[i]);
 	}
 
@@ -654,7 +675,6 @@ lltable_allocate_htbl(uint32_t hsize)
 	llt->llt_unlink_entry = htable_unlink_entry;
 	llt->llt_prefix_free = htable_prefix_free;
 	llt->llt_foreach_entry = htable_foreach_lle;
-	llt->llt_free_tbl = htable_free_tbl;
 
 	return llt;
 }

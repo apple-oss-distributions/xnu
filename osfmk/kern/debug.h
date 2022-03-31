@@ -543,6 +543,10 @@ enum {
 #endif
 #define panic_plain(ex, ...)  (panic)(ex, ## __VA_ARGS__)
 
+struct task;
+struct thread;
+struct proc;
+
 __abortlike __printflike(4, 5)
 void panic_with_options(unsigned int reason, void *ctx,
     uint64_t debugger_options_mask, const char *str, ...);
@@ -550,6 +554,8 @@ void Debugger(const char * message);
 void populate_model_name(char *);
 
 boolean_t panic_validate_ptr(void *ptr, vm_size_t size, const char *what);
+
+boolean_t panic_get_thread_proc_task(struct thread *thread, struct task **task, struct proc **proc);
 
 #define PANIC_VALIDATE_PTR(expr) \
 	panic_validate_ptr(expr, sizeof(*(expr)), #expr)
@@ -727,6 +733,7 @@ void    panic_print_symbol_name(vm_address_t search);
 #if CONFIG_ECC_LOGGING
 void    panic_display_ecc_errors(void);
 #endif /* CONFIG_ECC_LOGGING */
+void panic_display_compressor_stats(void);
 
 /*
  * @var not_in_kdp
@@ -747,11 +754,15 @@ typedef enum {
 	DBOP_BREAKPOINT,
 } debugger_op;
 
+__printflike(3, 0)
 kern_return_t DebuggerTrapWithState(debugger_op db_op, const char *db_message, const char *db_panic_str, va_list *db_panic_args,
     uint64_t db_panic_options, void *db_panic_data_ptr, boolean_t db_proceed_on_sync_failure, unsigned long db_panic_caller);
 void handle_debugger_trap(unsigned int exception, unsigned int code, unsigned int subcode, void *state);
 
 void DebuggerWithContext(unsigned int reason, void *ctx, const char *message, uint64_t debugger_options_mask, unsigned long debugger_caller);
+
+const char *sysctl_debug_get_preoslog(size_t *size);
+void sysctl_debug_free_preoslog(void);
 
 #if DEBUG || DEVELOPMENT
 /* leak pointer scan definitions */
@@ -765,16 +776,13 @@ enum{
 #define INSTANCE_GET(x) ((x) & ~kInstanceFlags)
 #define INSTANCE_PUT(x) ((x) ^ ~kInstanceFlags)
 
-typedef void (*leak_site_proc)(void * refCon, uint32_t siteCount, uint32_t zoneSize,
-    uintptr_t * backtrace, uint32_t btCount);
+typedef void (^leak_site_proc)(uint32_t siteCount, uint32_t elem_size, uint32_t btref);
 
 extern kern_return_t
-zone_leaks(const char * zoneName, uint32_t nameLen, leak_site_proc proc, void * refCon);
+zone_leaks(const char * zoneName, uint32_t nameLen, leak_site_proc proc);
 
 extern void
 zone_leaks_scan(uintptr_t * instances, uint32_t count, uint32_t zoneSize, uint32_t * found);
-
-const char *sysctl_debug_get_preoslog(size_t *size);
 
 #endif  /* DEBUG || DEVELOPMENT */
 

@@ -125,12 +125,27 @@
 #include <kern/host.h>
 #include <stdatomic.h>
 
-static volatile unsigned long ast_gen;
-static volatile unsigned long PERCPU_DATA(ast_ack);
+struct ast_gen_pair {
+	os_atomic(ast_gen_t) ast_gen;
+	os_atomic(ast_gen_t) ast_ack;
+};
+
+static struct ast_gen_pair PERCPU_DATA(ast_gen_pair);
 struct sched_statistics PERCPU_DATA(sched_stats);
 bool sched_stats_active;
 
 #define AST_GEN_CMP(a, op, b) ((long)((a) - (b)) op 0)
+
+__startup_func
+static void
+ast_gen_init(void)
+{
+	percpu_foreach(pair, ast_gen_pair) {
+		os_atomic_init(&pair->ast_gen, 1);
+		os_atomic_init(&pair->ast_ack, 1);
+	}
+}
+STARTUP(PERCPU, STARTUP_RANK_MIDDLE, ast_gen_init);
 
 static uint64_t
 deadline_add(uint64_t d, uint64_t e)
@@ -809,7 +824,7 @@ thread_unblock(
 	 *	Cancel pending wait timer.
 	 */
 	if (thread->wait_timer_is_set) {
-		if (timer_call_cancel(&thread->wait_timer)) {
+		if (timer_call_cancel(thread->wait_timer)) {
 			thread->wait_timer_active--;
 		}
 		thread->wait_timer_is_set = FALSE;
@@ -887,7 +902,7 @@ thread_unblock(
 	 */
 
 	if (__improbable(aticontext && !(thread_get_tag_internal(thread) & THREAD_TAG_CALLOUT))) {
-		DTRACE_SCHED2(iwakeup, struct thread *, thread, struct proc *, thread->task->bsd_info);
+		DTRACE_SCHED2(iwakeup, struct thread *, thread, struct proc *, current_proc());
 
 		uint64_t ttd = current_processor()->timer_call_ttd;
 
@@ -939,7 +954,7 @@ thread_unblock(
 	    (uintptr_t)thread_tid(thread), thread->sched_pri, thread->wait_result,
 	    sched_run_buckets[TH_BUCKET_RUN], 0);
 
-	DTRACE_SCHED2(wakeup, struct thread *, thread, struct proc *, thread->task->bsd_info);
+	DTRACE_SCHED2(wakeup, struct thread *, thread, struct proc *, current_proc());
 
 	return ready_for_runq;
 }
@@ -993,7 +1008,7 @@ thread_go(
 
 	assert(thread->at_safe_point == FALSE);
 	assert(thread->wait_event == NO_EVENT64);
-	assert(thread->waitq == NULL);
+	assert(waitq_wait_possible(thread));
 
 	assert(!(thread->state & (TH_TERMINATE | TH_TERMINATE2)));
 	assert(thread->state & TH_WAIT);
@@ -1069,7 +1084,7 @@ thread_mark_wait_locked(
 		}
 		if (thread->sched_call) {
 			wait_interrupt_t mask = THREAD_WAIT_NOREPORT_USER;
-			if (is_kerneltask(thread->task)) {
+			if (is_kerneltask(get_threadtask(thread))) {
 				mask = THREAD_WAIT_NOREPORT_KERNEL;
 			}
 			if ((interruptible_orig & mask) == 0) {
@@ -1565,35 +1580,13 @@ clear_wait_internal(
 	thread_t        thread,
 	wait_result_t   wresult)
 {
-	struct waitq *waitq = thread->waitq;
-#if !CONFIG_WAITQ_IRQSAFE_ALLOW_INVALID
-	uint32_t timeout = os_atomic_load(&LockTimeOutUsec, relaxed);
-	uint32_t i = timeout;
-
-again:
-#endif /* !CONFIG_WAITQ_IRQSAFE_ALLOW_INVALID */
+	waitq_t waitq = thread->waitq;
 
 	if (wresult == THREAD_INTERRUPTED && (thread->state & TH_UNINT)) {
 		return KERN_FAILURE;
 	}
 
-	if (waitq != NULL && !waitq_pull_thread_locked(waitq, thread)) {
-#if !CONFIG_WAITQ_IRQSAFE_ALLOW_INVALID
-		thread_unlock(thread);
-		delay(1);
-		if (timeout > 0 && i > 0 && !machine_timeout_suspended()) {
-			i--;
-		}
-		thread_lock(thread);
-
-		if (waitq == thread->waitq) {
-			if (timeout != 0 && i == 0) {
-				panic("%s: deadlock: thread=%p, wq=%p, cpu=%d",
-				    __func__, thread, waitq, cpu_number());
-			}
-			goto again;
-		}
-#endif /* !CONFIG_WAITQ_IRQSAFE_ALLOW_INVALID */
+	if (!waitq_is_null(waitq) && !waitq_pull_thread_locked(waitq, thread)) {
 		return KERN_NOT_WAITING;
 	}
 
@@ -1823,7 +1816,7 @@ thread_vm_bind_group_add(void)
 {
 	thread_t self = current_thread();
 
-	thread_reference_internal(self);
+	thread_reference(self);
 	self->options |= TH_OPT_SCHED_VM_GROUP;
 
 	simple_lock(&sched_vm_group_list_lock, LCK_GRP_NULL);
@@ -2215,7 +2208,8 @@ pset_commit_processor_to_new_thread(processor_set_t pset, processor_t processor,
 }
 
 static processor_t choose_processor_for_realtime_thread(processor_set_t pset, processor_t skip_processor, bool consider_secondaries, bool skip_spills);
-static processor_t choose_furthest_deadline_processor_for_realtime_thread(processor_set_t pset, int max_pri, uint64_t minimum_deadline, processor_t skip_processor, bool skip_spills);
+static processor_t choose_furthest_deadline_processor_for_realtime_thread(processor_set_t pset, int max_pri, uint64_t minimum_deadline,
+    processor_t skip_processor, bool skip_spills, bool include_ast_urgent_pending_cpus);
 static processor_t choose_next_processor_for_realtime_thread(processor_set_t pset, int max_pri, uint64_t minimum_deadline, processor_t skip_processor, bool consider_secondaries);
 #if defined(__x86_64__)
 static bool all_available_primaries_are_running_realtime_threads(processor_set_t pset, bool include_backups);
@@ -2787,6 +2781,8 @@ idle:
 
 			sched_update_pset_load_average(pset, 0);
 
+			clear_pending_AST_bits(pset, processor, 6);
+
 			KDBG(MACHDBG_CODE(DBG_MACH_SCHED, MACH_SCHED_THREAD_SELECT) | DBG_FUNC_END,
 			    (uintptr_t)thread_tid(thread), pset->pending_AST_URGENT_cpu_mask, delay_count, 6);
 			pset_unlock(pset);
@@ -2803,7 +2799,7 @@ idle:
 		}
 		pset_update_rt_stealable_state(pset);
 
-		clear_pending_AST_bits(pset, processor, 6);
+		clear_pending_AST_bits(pset, processor, 7);
 
 		/* Invoked with pset locked, returns with pset unlocked */
 		SCHED(processor_balance)(processor, pset);
@@ -2967,7 +2963,7 @@ thread_invoke(
 				    (uintptr_t)thread_tid(thread), (uintptr_t)thread->chosen_processor->cpu_id, 0, 0, 0);
 			}
 
-			DTRACE_SCHED2(off__cpu, struct thread *, thread, struct proc *, thread->task->bsd_info);
+			DTRACE_SCHED2(off__cpu, struct thread *, thread, struct proc *, current_proc());
 
 			SCHED_STATS_CSW(processor, self->reason, self->sched_pri, thread->sched_pri);
 
@@ -3116,7 +3112,7 @@ need_stack:
 		    (uintptr_t)thread_tid(thread), (uintptr_t)thread->chosen_processor->cpu_id, 0, 0, 0);
 	}
 
-	DTRACE_SCHED2(off__cpu, struct thread *, thread, struct proc *, thread->task->bsd_info);
+	DTRACE_SCHED2(off__cpu, struct thread *, thread, struct proc *, current_proc());
 
 	SCHED_STATS_CSW(processor, self->reason, self->sched_pri, thread->sched_pri);
 
@@ -3709,8 +3705,8 @@ thread_block_reason(
 	ast_off(AST_SCHEDULING);
 
 #if PROC_REF_DEBUG
-	if ((continuation != NULL) && (self->task != kernel_task)) {
-		uthread_assert_zero_proc_refcount(self->uthread);
+	if ((continuation != NULL) && (get_threadtask(self) != kernel_task)) {
+		uthread_assert_zero_proc_refcount(get_bsdthread_info(self));
 	}
 #endif
 
@@ -4619,10 +4615,6 @@ sched_ipi_action(processor_t dst, thread_t thread, sched_ipi_event_t event)
 		return SCHED_IPI_NONE;
 	}
 
-	if (bit_test(pset->pending_AST_URGENT_cpu_mask, dst->cpu_id)) {
-		return SCHED_IPI_NONE;
-	}
-
 	bool dst_idle = (dst->state == PROCESSOR_IDLE);
 	if (dst_idle) {
 		pset_update_processor_state(pset, dst, PROCESSOR_DISPATCHING);
@@ -4954,9 +4946,11 @@ choose_processor(
 				 * realtime threads to preempt non-realtime threads
 				 * to regain their previous executing processor.
 				 */
-				if ((thread->sched_pri >= BASEPRI_RTQUEUES) &&
-				    processor_is_fast_track_candidate_for_realtime_thread(pset, processor)) {
-					return processor;
+				if (thread->sched_pri >= BASEPRI_RTQUEUES) {
+					if (processor_is_fast_track_candidate_for_realtime_thread(pset, processor)) {
+						return processor;
+					}
+					processor = PROCESSOR_NULL;
 				}
 
 				/* Otherwise, use hint as part of search below */
@@ -4997,14 +4991,10 @@ choose_processor(
 	if (processor != PROCESSOR_NULL) {
 		/* All other states should be enumerated above. */
 		assert(processor->state == PROCESSOR_RUNNING || processor->state == PROCESSOR_DISPATCHING);
+		assert(thread->sched_pri < BASEPRI_RTQUEUES);
 
 		lowest_priority = processor->current_pri;
 		lp_processor = processor;
-
-		if (processor->current_pri >= BASEPRI_RTQUEUES) {
-			furthest_deadline = processor->deadline;
-			fd_processor = processor;
-		}
 
 		lowest_count = SCHED(processor_runq_count)(processor);
 		lc_processor = processor;
@@ -5012,7 +5002,11 @@ choose_processor(
 
 	if (thread->sched_pri >= BASEPRI_RTQUEUES) {
 		pset_node_t node = pset->node;
-		int consider_secondaries = (!pset->is_SMT) || (bit_count(node->pset_map) == 1) || (node->pset_non_rt_primary_map == 0);
+		bool include_ast_urgent_pending_cpus = false;
+		cpumap_t ast_urgent_pending;
+try_again:
+		ast_urgent_pending = 0;
+		int consider_secondaries = (!pset->is_SMT) || (bit_count(node->pset_map) == 1) || (node->pset_non_rt_primary_map == 0) || include_ast_urgent_pending_cpus;
 		for (; consider_secondaries < 2; consider_secondaries++) {
 			pset = change_locked_pset(pset, starting_pset);
 			do {
@@ -5027,7 +5021,7 @@ choose_processor(
 				}
 
 				if (consider_secondaries) {
-					processor = choose_furthest_deadline_processor_for_realtime_thread(pset, thread->sched_pri, thread->realtime.deadline, PROCESSOR_NULL, false);
+					processor = choose_furthest_deadline_processor_for_realtime_thread(pset, thread->sched_pri, thread->realtime.deadline, PROCESSOR_NULL, false, include_ast_urgent_pending_cpus);
 					if (processor && (processor->deadline > furthest_deadline)) {
 						fd_processor = processor;
 						furthest_deadline = processor->deadline;
@@ -5041,6 +5035,8 @@ choose_processor(
 							return fd_processor;
 						}
 					}
+
+					ast_urgent_pending |= pset->pending_AST_URGENT_cpu_mask;
 
 					if (rt_runq_count(pset) < lowest_count) {
 						int cpuid = bit_first(available_map);
@@ -5067,6 +5063,12 @@ no_available_cpus:
 			} else if (lc_processor) {
 				pset_assert_locked(lc_processor->processor_set);
 				return lc_processor;
+			}
+		} else {
+			if ((fd_processor == PROCESSOR_NULL) && ast_urgent_pending && !include_ast_urgent_pending_cpus) {
+				/* See the comment in choose_furthest_deadline_processor_for_realtime_thread() */
+				include_ast_urgent_pending_cpus = true;
+				goto try_again;
 			}
 		}
 
@@ -5375,9 +5377,7 @@ choose_starting_pset(pset_node_t node, thread_t thread, processor_t *processor_h
 		 * NRG this seems like the wrong thing to do.
 		 * See also task->pset_hint = pset in thread_setrun()
 		 */
-		task_t          task = thread->task;
-
-		pset = task->pset_hint;
+		pset = get_threadtask(thread)->pset_hint;
 		if (pset == PROCESSOR_SET_NULL) {
 			pset = current_processor()->processor_set;
 		}
@@ -5545,7 +5545,7 @@ thread_setrun(
 			pset = processor->processor_set;
 			pset_lock(pset);
 		}
-		task_t task = thread->task;
+		task_t task = get_threadtask(thread);
 		if (!(task->t_flags & TF_USE_PSET_HINT_CLUSTER_TYPE)) {
 			task->pset_hint = pset; /* NRG this is done without holding the task lock */
 		}
@@ -5659,6 +5659,8 @@ csw_check_locked(
 	if (rt_runq_count(pset) > 0) {
 		if ((rt_runq_priority(pset) > processor->current_pri) || !processor->first_timeslice) {
 			return check_reason | AST_PREEMPT | AST_URGENT;
+		} else if (deadline_add(rt_runq_earliest_deadline(pset), rt_deadline_epsilon) < processor->deadline) {
+			return check_reason | AST_PREEMPT | AST_URGENT;
 		} else {
 			return check_reason | AST_PREEMPT;
 		}
@@ -5710,16 +5712,11 @@ csw_check_locked(
 	return AST_NONE;
 }
 
-/*
- * Handle preemption IPI or IPI in response to setting an AST flag
- * Triggered by cause_ast_check
- * Called at splsched
- */
-void
-ast_check(processor_t processor)
+static void
+ast_ack_if_needed(processor_t processor)
 {
-	volatile unsigned long *ast_ack = PERCPU_GET_RELATIVE(ast_ack, processor, processor);
-	unsigned long gen;
+	struct ast_gen_pair *pair = PERCPU_GET_RELATIVE(ast_gen_pair, processor, processor);
+	ast_gen_t gen;
 
 	/*
 	 * Make sure that if we observe a new generation, we ack it.
@@ -5733,15 +5730,26 @@ ast_check(processor_t processor)
 	 * which is that `processor` has been in ast_check()
 	 * _after_ ast_generation_get() was called.
 	 */
-	gen = os_atomic_load(&ast_gen, relaxed);
-	if (gen != os_atomic_load(ast_ack, relaxed)) {
+
+	gen = os_atomic_load(&pair->ast_gen, relaxed);
+	if (gen != os_atomic_load(&pair->ast_ack, relaxed)) {
 		/* pairs with the fence in ast_generation_get() */
 		os_atomic_thread_fence(acq_rel);
-		os_atomic_store(ast_ack, gen, relaxed);
+		os_atomic_store(&pair->ast_ack, gen, relaxed);
 	}
+}
 
+/*
+ * Handle preemption IPI or IPI in response to setting an AST flag
+ * Triggered by cause_ast_check
+ * Called at splsched
+ */
+void
+ast_check(processor_t processor)
+{
 	if (processor->state != PROCESSOR_RUNNING &&
 	    processor->state != PROCESSOR_SHUTDOWN) {
+		ast_ack_if_needed(processor);
 		return;
 	}
 
@@ -5751,6 +5759,7 @@ ast_check(processor_t processor)
 
 	thread_lock(thread);
 
+	ast_ack_if_needed(processor);
 	/*
 	 * Propagate thread ast to processor.
 	 * (handles IPI in response to setting AST flag)
@@ -5795,28 +5804,32 @@ ast_check(processor_t processor)
 	}
 }
 
-unsigned long
-ast_generation_get(void)
+void
+ast_generation_get(processor_t processor, ast_gen_t gens[])
 {
-	return os_atomic_inc(&ast_gen, release);
+	struct ast_gen_pair *pair = PERCPU_GET_RELATIVE(ast_gen_pair, processor, processor);
+
+	gens[processor->cpu_id] = os_atomic_add(&pair->ast_gen, 2, release);
 }
 
 void
-ast_generation_wait(unsigned long gen, int cpu_num)
+ast_generation_wait(ast_gen_t gens[MAX_CPUS])
 {
-	volatile unsigned long *ast_ack;
-	unsigned long gen_ack;
+	percpu_foreach(cpup, processor) {
+		struct ast_gen_pair *pair;
+		ast_gen_t gen_ack;
+		uint32_t cpu = cpup->cpu_id;
 
-	ast_ack = PERCPU_GET_WITH_BASE(other_percpu_base(cpu_num), ast_ack);
-
-	for (;;) {
-		gen_ack = os_atomic_load(ast_ack, relaxed);
-		if (__probable(AST_GEN_CMP(gen_ack, >=, gen))) {
-			return;
+		if (gens[cpu] == 0) {
+			continue;
 		}
-		disable_preemption();
-		hw_wait_while_equals((void **)(uintptr_t)ast_ack, (void *)gen_ack);
-		enable_preemption();
+		pair    = PERCPU_GET_RELATIVE(ast_gen_pair, processor, cpup);
+		gen_ack = os_atomic_load(&pair->ast_ack, relaxed);
+		while (__improbable(AST_GEN_CMP(gen_ack, <, gens[cpu]))) {
+			disable_preemption();
+			gen_ack = hw_wait_while_equals_long(&pair->ast_ack, gen_ack);
+			enable_preemption();
+		}
 	}
 }
 
@@ -6137,10 +6150,11 @@ thread_urgency_t
 thread_get_urgency(thread_t thread, uint64_t *arg1, uint64_t *arg2)
 {
 	uint64_t urgency_param1 = 0, urgency_param2 = 0;
+	task_t task = get_threadtask_early(thread);
 
 	thread_urgency_t urgency;
 
-	if (thread == NULL || (thread->state & TH_IDLE)) {
+	if (thread == NULL || task == TASK_NULL || (thread->state & TH_IDLE)) {
 		urgency_param1 = 0;
 		urgency_param2 = 0;
 
@@ -6162,7 +6176,7 @@ thread_get_urgency(thread_t thread, uint64_t *arg1, uint64_t *arg2)
 		 * levels for optimal power/perf tradeoffs for a platform.
 		 */
 		boolean_t thread_lacks_qos = (proc_get_effective_thread_policy(thread, TASK_POLICY_QOS) == THREAD_QOS_UNSPECIFIED); //thread_has_qos_policy(thread);
-		boolean_t task_is_suppressed = (proc_get_effective_task_policy(thread->task, TASK_POLICY_SUP_ACTIVE) == 0x1);
+		boolean_t task_is_suppressed = (proc_get_effective_task_policy(task, TASK_POLICY_SUP_ACTIVE) == 0x1);
 
 		/*
 		 * Background urgency applied when thread priority is
@@ -6180,7 +6194,7 @@ thread_get_urgency(thread_t thread, uint64_t *arg1, uint64_t *arg2)
 	} else {
 		/* For otherwise unclassified threads, report throughput QoS parameters */
 		urgency_param1 = proc_get_effective_thread_policy(thread, TASK_POLICY_THROUGH_QOS);
-		urgency_param2 = proc_get_effective_task_policy(thread->task, TASK_POLICY_THROUGH_QOS);
+		urgency_param2 = proc_get_effective_task_policy(task, TASK_POLICY_THROUGH_QOS);
 		urgency = THREAD_URGENCY_NORMAL;
 	}
 
@@ -6201,6 +6215,7 @@ thread_get_perfcontrol_class(thread_t thread)
 	if (thread->state & TH_IDLE) {
 		return PERFCONTROL_CLASS_IDLE;
 	}
+
 	if (thread->sched_mode == TH_MODE_REALTIME) {
 		return PERFCONTROL_CLASS_REALTIME;
 	}
@@ -6215,7 +6230,7 @@ thread_get_perfcontrol_class(thread_t thread)
 	} else if (thread->base_pri <= BASEPRI_FOREGROUND) {
 		return PERFCONTROL_CLASS_UI;
 	} else {
-		if (thread->task == kernel_task) {
+		if (get_threadtask(thread) == kernel_task) {
 			/*
 			 * Classify Above UI kernel threads as PERFCONTROL_CLASS_KERNEL.
 			 * All other lower priority kernel threads should be treated
@@ -6362,11 +6377,11 @@ processor_idle(
 	 * thread_select will move the processor from dispatching to running,
 	 * or put it in idle if there's nothing to do.
 	 */
-	thread_t current_thread = current_thread();
+	thread_t cur_thread = current_thread();
 
-	thread_lock(current_thread);
-	thread_t new_thread = thread_select(current_thread, processor, &reason);
-	thread_unlock(current_thread);
+	thread_lock(cur_thread);
+	thread_t new_thread = thread_select(cur_thread, processor, &reason);
+	thread_unlock(cur_thread);
 
 	assert(processor->running_timers_active == false);
 
@@ -6730,7 +6745,7 @@ thread_update_add_thread(thread_t thread)
 	}
 
 	thread_update_array[thread_update_count++] = thread;
-	thread_reference_internal(thread);
+	thread_reference(thread);
 	return TRUE;
 }
 
@@ -7158,7 +7173,7 @@ sched_consider_recommended_cores(uint64_t ctime, thread_t cur_thread)
 	perfcontrol_failsafe_recommended_at_trigger = perfcontrol_requested_recommended_cores;
 
 	/* Capture some data about who screwed up (assuming that the thread on core is at fault) */
-	task_t task = cur_thread->task;
+	task_t task = get_threadtask(cur_thread);
 	perfcontrol_failsafe_pid = task_pid(task);
 	strlcpy(perfcontrol_failsafe_name, proc_name_address(task->bsd_info), sizeof(perfcontrol_failsafe_name));
 
@@ -7484,7 +7499,9 @@ int sched_allow_NO_SMT_threads = 1;
 bool
 thread_no_smt(thread_t thread)
 {
-	return sched_allow_NO_SMT_threads && (thread->bound_processor == PROCESSOR_NULL) && ((thread->sched_flags & TH_SFLAG_NO_SMT) || (thread->task->t_flags & TF_NO_SMT));
+	return sched_allow_NO_SMT_threads &&
+	       (thread->bound_processor == PROCESSOR_NULL) &&
+	       ((thread->sched_flags & TH_SFLAG_NO_SMT) || (get_threadtask(thread)->t_flags & TF_NO_SMT));
 }
 
 bool
@@ -7845,13 +7862,17 @@ skip_secondaries:
 	return PROCESSOR_NULL;
 }
 
-/* pset is locked */
+/*
+ * Choose the processor with (1) the lowest priority less than max_pri and (2) the furthest deadline for that priority.
+ * If all available processors are at max_pri, choose the furthest deadline that is greater than minimum_deadline.
+ *
+ * pset is locked.
+ */
 static processor_t
-choose_furthest_deadline_processor_for_realtime_thread(processor_set_t pset, int max_pri, uint64_t minimum_deadline, processor_t skip_processor, bool skip_spills)
+choose_furthest_deadline_processor_for_realtime_thread(processor_set_t pset, int max_pri, uint64_t minimum_deadline, processor_t skip_processor, bool skip_spills, bool include_ast_urgent_pending_cpus)
 {
 	uint64_t  furthest_deadline = deadline_add(minimum_deadline, rt_deadline_epsilon);
 	processor_t fd_processor = PROCESSOR_NULL;
-	processor_t lopri_processor = PROCESSOR_NULL;
 	int lowest_priority = max_pri;
 
 	cpumap_t cpu_map = pset_available_cpumap(pset) & ~pset->pending_AST_URGENT_cpu_mask;
@@ -7865,13 +7886,14 @@ choose_furthest_deadline_processor_for_realtime_thread(processor_set_t pset, int
 	for (int cpuid = bit_first(cpu_map); cpuid >= 0; cpuid = bit_next(cpu_map, cpuid)) {
 		processor_t processor = processor_array[cpuid];
 
-		if (processor->current_pri > max_pri) {
+		if (processor->current_pri > lowest_priority) {
 			continue;
 		}
 
 		if (processor->current_pri < lowest_priority) {
 			lowest_priority = processor->current_pri;
-			lopri_processor = processor;
+			furthest_deadline = processor->deadline;
+			fd_processor = processor;
 			continue;
 		}
 
@@ -7881,17 +7903,48 @@ choose_furthest_deadline_processor_for_realtime_thread(processor_set_t pset, int
 		}
 	}
 
-	if (lopri_processor) {
-		if (sched_rt_runq_strict_priority) {
-			return lopri_processor;
-		}
+	if (fd_processor) {
+		return fd_processor;
+	}
 
-		if (lopri_processor->deadline > furthest_deadline) {
-			/* NRG maybe also consider the computations if possible */
-			return lopri_processor;
-		}
+	/*
+	 * There is a race condition possible when there are multiple processor sets.
+	 * choose_processor() takes pset lock A, sees the pending_AST_URGENT_cpu_mask set for a processor in that set and finds no suitable candiate CPU,
+	 * so it drops pset lock A and tries to take pset lock B.  Meanwhile the pending_AST_URGENT_cpu_mask CPU is looking for a thread to run and holds
+	 * pset lock B. It doesn't find any threads (because the candidate thread isn't yet on any run queue), so drops lock B, takes lock A again to clear
+	 * the pending_AST_URGENT_cpu_mask bit, and keeps running the current (far deadline) thread. choose_processor() now has lock B and can only find
+	 * the lowest count processor in set B so enqueues it on set B's run queue but doesn't IPI anyone. (The lowest count includes all threads,
+	 * near and far deadlines, so will prefer a low count of earlier deadlines to a high count of far deadlines, which is suboptimal for EDF scheduling.
+	 * To make a better choice we would need to know how many threads with earlier deadlines than the candidate thread exist on each pset's run queue.
+	 * But even if we chose the better run queue, we still wouldn't send an IPI in this case.)
+	 *
+	 * The migitation is to also look for suitable CPUs that have their pending_AST_URGENT_cpu_mask bit set where there are no earlier deadline threads
+	 * on the run queue of that pset.
+	 */
+	if (include_ast_urgent_pending_cpus && (rt_runq_earliest_deadline(pset) > furthest_deadline)) {
+		cpu_map = pset_available_cpumap(pset) & pset->pending_AST_URGENT_cpu_mask;
+		assert(skip_processor == PROCESSOR_NULL);
+		assert(skip_spills == false);
 
-		return PROCESSOR_NULL;
+		for (int cpuid = bit_first(cpu_map); cpuid >= 0; cpuid = bit_next(cpu_map, cpuid)) {
+			processor_t processor = processor_array[cpuid];
+
+			if (processor->current_pri > lowest_priority) {
+				continue;
+			}
+
+			if (processor->current_pri < lowest_priority) {
+				lowest_priority = processor->current_pri;
+				furthest_deadline = processor->deadline;
+				fd_processor = processor;
+				continue;
+			}
+
+			if (processor->deadline > furthest_deadline) {
+				furthest_deadline = processor->deadline;
+				fd_processor = processor;
+			}
+		}
 	}
 
 	return fd_processor;
@@ -7902,13 +7955,14 @@ static processor_t
 choose_next_processor_for_realtime_thread(processor_set_t pset, int max_pri, uint64_t minimum_deadline, processor_t skip_processor, bool consider_secondaries)
 {
 	bool skip_spills = true;
+	bool include_ast_urgent_pending_cpus = false;
 
 	processor_t next_processor = choose_processor_for_realtime_thread(pset, skip_processor, consider_secondaries, skip_spills);
 	if (next_processor != PROCESSOR_NULL) {
 		return next_processor;
 	}
 
-	next_processor = choose_furthest_deadline_processor_for_realtime_thread(pset, max_pri, minimum_deadline, skip_processor, skip_spills);
+	next_processor = choose_furthest_deadline_processor_for_realtime_thread(pset, max_pri, minimum_deadline, skip_processor, skip_spills, include_ast_urgent_pending_cpus);
 	return next_processor;
 }
 
@@ -8238,8 +8292,8 @@ extern char sysctl_get_task_cluster_type(void);
 char
 sysctl_get_task_cluster_type(void)
 {
-	thread_t thread = current_thread();
-	processor_set_t pset_hint = thread->task->pset_hint;
+	task_t task = current_task();
+	processor_set_t pset_hint = task->pset_hint;
 
 	if (!pset_hint) {
 		return '0';
@@ -8286,8 +8340,7 @@ extern void sysctl_task_set_cluster_type(char cluster_type);
 void
 sysctl_task_set_cluster_type(char cluster_type)
 {
-	thread_t thread = current_thread();
-	task_t task = thread->task;
+	task_t task = current_task();
 	processor_set_t pset_hint = PROCESSOR_SET_NULL;
 
 #if __AMP__

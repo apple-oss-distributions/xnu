@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2008-2022 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -56,7 +56,14 @@
 #include <kern/zalloc.h>
 #include <os/log.h>
 
+#if SKYWALK && CONFIG_NEXUS_KERNEL_PIPE
+#include <skywalk/os_skywalk_private.h>
+#include <skywalk/nexus/flowswitch/nx_flowswitch.h>
+#include <skywalk/nexus/netif/nx_netif.h>
+#define UTUN_NEXUS 1
+#else // SKYWALK && CONFIG_NEXUS_KERNEL_PIPE
 #define UTUN_NEXUS 0
+#endif // SKYWALK && CONFIG_NEXUS_KERNEL_PIPE
 
 #if UTUN_NEXUS
 static nexus_controller_t utun_ncd;
@@ -271,7 +278,7 @@ static LCK_MTX_DECLARE_ATTR(utun_lock, &utun_lck_grp, &utun_lck_attr);
 
 TAILQ_HEAD(utun_list, utun_pcb) utun_head;
 
-static ZONE_DECLARE(utun_pcb_zone, "net.if_utun",
+static ZONE_DEFINE(utun_pcb_zone, "net.if_utun",
     sizeof(struct utun_pcb), ZC_ZFREE_CLEARMEM);
 
 #if UTUN_NEXUS
@@ -1946,8 +1953,12 @@ utun_ctl_disconnect(__unused kern_ctl_ref kctlref,
 			 */
 			if_down(ifp);
 
-			/* Increment refcnt, but detach interface */
-			ifnet_incr_iorefcnt(ifp);
+			/*
+			 * Suspend data movement and wait for IO threads to exit.
+			 * We can't rely on the logic in dlil_quiesce_and_detach_nexuses() to
+			 * do this because utun nexuses are attached/detached separately.
+			 */
+			ifnet_datamov_suspend_and_drain(ifp);
 			if ((result = ifnet_detach(ifp)) != 0) {
 				panic("utun_ctl_disconnect - ifnet_detach failed: %d", result);
 			}
@@ -1974,8 +1985,8 @@ utun_ctl_disconnect(__unused kern_ctl_ref kctlref,
 			}
 			utun_nexus_detach(pcb);
 
-			/* Decrement refcnt to finish detaching and freeing */
-			ifnet_decr_iorefcnt(ifp);
+			/* Decrement refcnt added by ifnet_datamov_suspend_and_drain(). */
+			ifnet_datamov_resume(ifp);
 		} else
 #endif // UTUN_NEXUS
 		{
@@ -2747,6 +2758,21 @@ utun_framer(ifnet_t interface,
 	// place protocol number at the beginning of the mbuf
 	*(protocol_family_t *)mbuf_data(*packet) = *(protocol_family_t *)(uintptr_t)(size_t)frame_type;
 
+#if NECP
+	// Add process uuid if applicable
+	if (pcb->utun_flags & UTUN_FLAGS_ENABLE_PROC_UUID) {
+		if (m_pktlen(*packet) >= (int32_t)UTUN_HEADER_SIZE(pcb)) {
+			u_int8_t *header = (u_int8_t *)mbuf_data(*packet);
+			int uuid_err = necp_get_app_uuid_from_packet(*packet, (void *)(header + sizeof(u_int32_t)));
+			if (uuid_err != 0) {
+				os_log_error(OS_LOG_DEFAULT, "Received app uuid error %d for %s%d\n", uuid_err, ifnet_name(pcb->utun_ifp), ifnet_unit(pcb->utun_ifp));
+			}
+		} else {
+			os_log_error(OS_LOG_DEFAULT, "Cannot set proc uuid for %s%d, size %d < %zu\n", ifnet_name(pcb->utun_ifp), ifnet_unit(pcb->utun_ifp),
+			    m_pktlen(*packet), UTUN_HEADER_SIZE(pcb));
+		}
+	}
+#endif // NECP
 
 	return 0;
 }

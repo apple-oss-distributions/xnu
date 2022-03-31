@@ -2,13 +2,19 @@
 """ Please make sure you read the README COMPLETELY BEFORE reading anything below.
     It is very critical that you read coding guidelines in Section E in README file.
 """
+from __future__ import absolute_import, division
 
-from cvalue import *
-from lazytarget import *
-from configuration import *
+from builtins import range
+from builtins import object
+
+from .cvalue import value
+from .compat import valueint as int
+from .lazytarget import LazyTarget
 from utils import *
-import caching
+from . import caching
+
 import lldb
+import six
 
 def IterateTAILQ_HEAD(headval, element_name, list_prefix=''):
     """ iterate over a TAILQ_HEAD in kernel. refer to bsd/sys/queue.h
@@ -64,7 +70,7 @@ def IterateListEntry(element, element_type, field_name, list_prefix=''):
                 print GetProcInfo(pp)
     """
     elt = element.__getattr__(list_prefix + 'lh_first')
-    if type(element_type) == str:
+    if isinstance(element_type, six.string_types):
         element_type = gettype(element_type)
     while unsigned(elt) != 0:
         yield elt
@@ -90,7 +96,7 @@ def IterateLinkageChain(queue_head, element_type, field_name, field_ofst=0):
                 print GetCoalitionInfo(coal)
     """
     global kern
-    if type(element_type) == str:
+    if isinstance(element_type, six.string_types):
         element_type = gettype(element_type)
 
     if unsigned(queue_head) == 0:
@@ -152,7 +158,7 @@ def IterateQueue(queue_head, element_ptr_type, element_field_name, backwards=Fal
             for page_meta in IterateQueue(kern.globals.first_zone.pages.all_free, 'struct zone_page_metadata *', 'pages'):
                 print page_meta
     """
-    if type(element_ptr_type) == str :
+    if isinstance(element_ptr_type, six.string_types):
         element_ptr_type = gettype(element_ptr_type)
 
     queue_head = queue_head.GetSBValue()
@@ -197,7 +203,7 @@ def IterateRBTreeEntry(element, element_type, field_name):
             value  : an object thats of type (element_type) head->sle_next. Always a pointer object
     """
     elt = element.__getattr__('rbh_root')
-    if type(element_type) == str:
+    if isinstance(element_type, six.string_types):
         element_type = gettype(element_type)
 
     # Walk to find min
@@ -329,7 +335,10 @@ class KernelTarget(object):
             def __getattr__(self, name):
                 v = self._xnu_kernobj_12obscure12.GetGlobalVariable(name)
                 if not v.GetSBValue().IsValid():
-                    raise ValueError('No such global variable by name: %s '%str(name))
+                    # Python 2 swallows all exceptions in hasattr(). That makes it work
+                    # even when global variable is not found. Python 3 has fixed the behavior
+                    # and we can raise only AttributeError here to keep original behavior.
+                    raise AttributeError('No such global variable by name: %s '%str(name))
                 return v
         self.globals = _GlobalVariableFind(self)
         LazyTarget.Initialize(debugger)
@@ -360,7 +369,7 @@ class KernelTarget(object):
             ret_str +=syms[0].GetName()
         return ret_str
 
-    def SymbolicateFromAddress(self, addr):
+    def SymbolicateFromAddress(self, addr, fullSymbol=False):
         """ symbolicates any given address based on modules loaded in the target.
             params:
                 addr - int : typically hex value like 0xffffff80002c0df0
@@ -387,7 +396,10 @@ class KernelTarget(object):
         if not syms:
             return ret_array
         for s in syms:
-            ret_array.append(s.get_symbol_context().symbol)
+            if fullSymbol:
+                ret_array.append(s)
+            else:
+                ret_array.append(s.get_symbol_context().symbol)
         return ret_array
 
     def IsDebuggerConnected(self):
@@ -417,7 +429,8 @@ class KernelTarget(object):
             return unsigned(self.globals.cpu_data_ptr[cpu].cpu_pcpu_base)
         elif self.arch.startswith('arm'):
             data_entries = self.GetGlobalVariable('CpuDataEntries')
-            return unsigned(data_entries[cpu]) - unsigned(data_entries[0])
+            BootCpuData = addressof(self.GetGlobalVariable('percpu_slot_cpu_data'))
+            return unsigned(data_entries[cpu].cpu_data_vaddr) - unsigned(BootCpuData)
 
     def PERCPU_GET(self, name, cpu):
         """ Get the value object representation for a kernel percpu global variable
@@ -517,8 +530,8 @@ class KernelTarget(object):
     def PhysToKVARM64(self, addr):
         ptov_table = self.GetGlobalVariable('ptov_table')
         for i in range(0, self.GetGlobalVariable('ptov_index')):
-            if (addr >= long(unsigned(ptov_table[i].pa))) and (addr < (long(unsigned(ptov_table[i].pa)) + long(unsigned(ptov_table[i].len)))):
-                return (addr - long(unsigned(ptov_table[i].pa)) + long(unsigned(ptov_table[i].va)))
+            if (addr >= int(unsigned(ptov_table[i].pa))) and (addr < (int(unsigned(ptov_table[i].pa)) + int(unsigned(ptov_table[i].len)))):
+                return (addr - int(unsigned(ptov_table[i].pa)) + int(unsigned(ptov_table[i].va)))
         return (addr - unsigned(self.GetGlobalVariable("gPhysBase")) + unsigned(self.GetGlobalVariable("gVirtBase")))
 
     def PhysToKernelVirt(self, addr):
@@ -549,7 +562,7 @@ class KernelTarget(object):
                 usec_divisor = unsigned(rtc.rtc_usec_divisor)
             usec_divisor = int(usec_divisor)
             caching.SaveStaticCacheData('kern.rtc_usec_divisor', usec_divisor)
-        nsecs = (abstime * 1000)/usec_divisor
+        nsecs = (abstime * 1000) // usec_divisor
         return nsecs
 
     def __getattribute__(self, name):

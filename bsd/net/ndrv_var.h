@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2021 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -35,16 +35,17 @@
 #define _NET_NDRV_VAR_H
 #ifdef PRIVATE
 
+#if BSD_KERNEL_PRIVATE
 /*
  * structure for storing a linked list of multicast addresses
  * registered by this socket. May be variable in length.
  */
-
 struct ndrv_multiaddr {
-	struct ndrv_multiaddr*      next;
-	ifmultiaddr_t                       ifma;
-	struct sockaddr                     addr;
+	struct ndrv_multiaddr      *next;
+	ifmultiaddr_t               ifma;
+	struct sockaddr            *addr;
 };
+#endif
 
 /*
  * The cb is plugged into the socket (so_pcb), and the ifnet structure

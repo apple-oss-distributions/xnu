@@ -386,7 +386,8 @@ coredump(proc_t core_proc, uint32_t reserve_mb, int coredump_flags)
 		goto out;
 	}
 
-	if (kmem_alloc_flags(kernel_map, &header, (vm_size_t)header_size, VM_KERN_MEMORY_DIAG, KMA_ZERO) != KERN_SUCCESS) {
+	if (kernel_memory_allocate(kernel_map, &header, (vm_size_t)header_size,
+	    0, KMA_ZERO, VM_KERN_MEMORY_DIAG) != KERN_SUCCESS) {
 		error = ENOMEM;
 		goto out;
 	}
@@ -490,7 +491,7 @@ coredump(proc_t core_proc, uint32_t reserve_mb, int coredump_flags)
 			    UIO_USERSPACE64 : UIO_USERSPACE32;
 
 			error = vn_rdwr_64(UIO_WRITE, vp, vmoffset, fsize,
-			    foffset, sflg, IO_NOCACHE | IO_NODELOCKED | IO_UNIT,
+			    foffset, sflg, IO_NODELOCKED | IO_UNIT,
 			    cred, &resid, core_proc);
 
 			if (error) {
@@ -576,7 +577,7 @@ coredump(proc_t core_proc, uint32_t reserve_mb, int coredump_flags)
 	 *	file.  OK to use a 32 bit write for this.
 	 */
 	error = vn_rdwr(UIO_WRITE, vp, (caddr_t)header, (int)MIN(header_size, INT_MAX), (off_t)0,
-	    UIO_SYSSPACE, IO_NOCACHE | IO_NODELOCKED | IO_UNIT, cred, (int *) 0, core_proc);
+	    UIO_SYSSPACE, IO_NODELOCKED | IO_UNIT, cred, (int *) 0, core_proc);
 	kmem_free(kernel_map, header, header_size);
 
 	if ((coredump_flags & COREDUMP_FULLFSYNC) && error == 0) {

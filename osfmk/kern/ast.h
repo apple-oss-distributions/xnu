@@ -78,6 +78,8 @@
  */
 typedef uint32_t ast_t;
 
+typedef unsigned long ast_gen_t;
+
 /*
  * When returning from interrupt/trap context to kernel mode,
  * if AST_URGENT is set, then ast_taken_kernel is called, for
@@ -178,10 +180,10 @@ extern void ast_context(thread_t thread);
 extern void ast_propagate(thread_t thread);
 
 /* Prepare for an AST "ack" scheme */
-extern unsigned long ast_generation_get(void);
+extern void ast_generation_get(processor_t processor, ast_gen_t gens[] /* MAX_CPUS */);
 
 /* Wait for an AST generation "ack" to pass */
-extern void ast_generation_wait(unsigned long gen, int cpu_num);
+extern void ast_generation_wait(ast_gen_t gens[] /* MAX_CPUS */ );
 
 /*
  *	Set an AST on a thread with thread_ast_set.
@@ -216,7 +218,7 @@ extern void dtrace_ast(void);
 extern void kevent_ast(thread_t thread, uint16_t bits);
 extern void act_set_astkevent(thread_t thread, uint16_t bits);
 extern uint16_t act_clear_astkevent(thread_t thread, uint16_t bits);
-extern int  act_set_ast_reset_pcs(thread_t thread);
+extern void act_set_ast_reset_pcs(thread_t thread, ast_gen_t array[] /* MAX_CPUS */ );
 extern void task_filedesc_ast(task_t task, int current_size, int soft_limit, int hard_limit);
 extern void act_set_debug_assert(void);
 

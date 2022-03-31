@@ -150,10 +150,10 @@ extern struct waitq select_conflict_queue;
 #define f_cred fp_glob->fg_cred
 #define f_ops fp_glob->fg_ops
 #define f_offset fp_glob->fg_offset
-#define f_data fp_glob->fg_data
 
-ZONE_DECLARE(fg_zone, "fileglob", sizeof(struct fileglob), ZC_ZFREE_CLEARMEM);
-ZONE_DECLARE(fp_zone, "fileproc", sizeof(struct fileproc), ZC_ZFREE_CLEARMEM);
+ZONE_DEFINE_TYPE(fg_zone, "fileglob", struct fileglob, ZC_ZFREE_CLEARMEM);
+ZONE_DEFINE_ID(ZONE_ID_FILEPROC, "fileproc", struct fileproc, ZC_ZFREE_CLEARMEM);
+
 /*
  * If you need accounting for KM_OFILETABL consider using
  * KALLOC_HEAP_DEFINE to define a view.
@@ -191,13 +191,15 @@ fg_free(struct fileglob *fg)
 		fg->fg_vn_data = NULL;
 	}
 
-	if (IS_VALID_CRED(fg->fg_cred)) {
-		kauth_cred_unref(&fg->fg_cred);
+	kauth_cred_t cred = fg->fg_cred;
+	if (IS_VALID_CRED(cred)) {
+		kauth_cred_unref(&cred);
+		fg->fg_cred = NOCRED;
 	}
 	lck_mtx_destroy(&fg->fg_lock, &file_lck_grp);
 
-#if CONFIG_MACF
-	mac_file_label_destroy(fg);
+#if CONFIG_MACF && CONFIG_VNGUARD
+	vng_file_label_destroy(fg);
 #endif
 	zfree(fg_zone, fg);
 }
@@ -254,7 +256,7 @@ fg_drop(proc_t p, struct fileglob *fg)
 			.l_type = F_UNLCK,
 		};
 
-		vp = (struct vnode *)fg->fg_data;
+		vp = (struct vnode *)fg_get_data(fg);
 		if ((error = vnode_getwithref(vp)) == 0) {
 			(void)VNOP_ADVLOCK(vp, (caddr_t)p, F_UNLCK, &lf, F_POSIX, &context, NULL);
 			(void)vnode_put(vp);
@@ -274,6 +276,50 @@ fg_drop(proc_t p, struct fileglob *fg)
 	return error;
 }
 
+inline
+void
+fg_set_data(
+	struct fileglob *fg,
+	void *fg_data)
+{
+	uintptr_t *store = &fg->fg_data;
+
+#if __has_feature(ptrauth_calls)
+	int type = FILEGLOB_DTYPE(fg);
+
+	if (fg_data) {
+		type ^= OS_PTRAUTH_DISCRIMINATOR("fileglob.fg_data");
+		fg_data = ptrauth_sign_unauthenticated(fg_data,
+		    ptrauth_key_process_independent_data,
+		    ptrauth_blend_discriminator(store, type));
+	}
+#endif // __has_feature(ptrauth_calls)
+
+	*store = (uintptr_t)fg_data;
+}
+
+inline
+void *
+fg_get_data_volatile(struct fileglob *fg)
+{
+	uintptr_t *store = &fg->fg_data;
+	void *fg_data = (void *)*store;
+
+#if __has_feature(ptrauth_calls)
+	int type = FILEGLOB_DTYPE(fg);
+
+	if (fg_data) {
+		type ^= OS_PTRAUTH_DISCRIMINATOR("fileglob.fg_data");
+		fg_data = ptrauth_auth_data(fg_data,
+		    ptrauth_key_process_independent_data,
+		    ptrauth_blend_discriminator(store, type));
+	}
+#endif // __has_feature(ptrauth_calls)
+
+	return fg_data;
+}
+
+
 bool
 fg_sendable(struct fileglob *fg)
 {
@@ -289,7 +335,6 @@ fg_sendable(struct fileglob *fg)
 		return false;
 	}
 }
-
 
 #pragma mark file descriptor table (static helpers)
 
@@ -962,7 +1007,7 @@ fileproc_alloc_init(void)
 {
 	struct fileproc *fp;
 
-	fp = zalloc_flags(fp_zone, Z_WAITOK | Z_ZERO | Z_NOFAIL);
+	fp = zalloc_id(ZONE_ID_FILEPROC, Z_WAITOK | Z_ZERO | Z_NOFAIL);
 	os_ref_init(&fp->fp_iocount, &f_refgrp);
 	return fp;
 }
@@ -982,7 +1027,7 @@ fileproc_free(struct fileproc *fp)
 		guarded_fileproc_unguard(fp);
 	}
 	assert(fp->fp_wset == NULL);
-	zfree(fp_zone, fp);
+	zfree_id(ZONE_ID_FILEPROC, fp);
 }
 
 
@@ -1144,7 +1189,6 @@ fileproc_get_vflags(struct fileproc *fp)
 	return os_atomic_load(&fp->fp_vflags, relaxed);
 }
 
-
 /*
  * falloc_withinit
  *
@@ -1235,17 +1279,10 @@ falloc_withinit(proc_t p, struct fileproc **resultfp, int *resultfd,
 	os_ref_init_raw(&fg->fg_count, &f_refgrp);
 	fg->fg_ops = &uninitops;
 	fp->fp_glob = fg;
-#if CONFIG_MACF
-	mac_file_label_init(fg);
-#endif
 
 	kauth_cred_ref(ctx->vc_ucred);
 
 	fp->f_cred = ctx->vc_ucred;
-
-#if CONFIG_MACF
-	mac_file_label_associate(fp->f_cred, fg);
-#endif
 
 	os_atomic_inc(&nfiles, relaxed);
 
@@ -1307,6 +1344,8 @@ fp_get_noref_locked(proc_t p, int fd)
 	    (fdp->fd_ofileflags[fd] & UF_RESERVED)) {
 		return NULL;
 	}
+
+	zone_id_require(ZONE_ID_FILEPROC, sizeof(*fp), fp);
 	return fp;
 }
 
@@ -1325,6 +1364,7 @@ fp_get_noref_locked_with_iocount(proc_t p, int fd)
 		    __func__, fd, fp);
 	}
 
+	zone_id_require(ZONE_ID_FILEPROC, sizeof(*fp), fp);
 	return fp;
 }
 
@@ -1370,6 +1410,8 @@ fp_lookup(proc_t p, int fd, struct fileproc **resultfp, int locked)
 		}
 		return EBADF;
 	}
+
+	zone_id_require(ZONE_ID_FILEPROC, sizeof(*fp), fp);
 	os_ref_retain_locked(&fp->fp_iocount);
 
 	if (resultfp) {
@@ -1402,6 +1444,7 @@ fp_get_ftype(proc_t p, int fd, file_type_t ftype, int err, struct fileproc **fpp
 		return err;
 	}
 
+	zone_id_require(ZONE_ID_FILEPROC, sizeof(*fp), fp);
 	os_ref_retain_locked(&fp->fp_iocount);
 	proc_fdunlock(p);
 
@@ -1524,17 +1567,17 @@ fileproc_drain(proc_t p, struct fileproc * fp)
 
 		fo_drain(fp, &context);
 		if ((fp->fp_flags & FP_INSELECT) == FP_INSELECT) {
-			struct waitq_set *wqset;
+			struct select_set *selset;
 
 			if (fp->fp_guard_attrs) {
-				wqset = fp->fp_guard->fpg_wset;
+				selset = fp->fp_guard->fpg_wset;
 			} else {
-				wqset = fp->fp_wset;
+				selset = fp->fp_wset;
 			}
-			if (waitq_wakeup64_all((struct waitq *)wqset, NO_EVENT64,
+			if (waitq_wakeup64_all(selset, NO_EVENT64,
 			    THREAD_INTERRUPTED, WAITQ_ALL_PRIORITIES) == KERN_INVALID_ARGUMENT) {
 				panic("bad wait queue for waitq_wakeup64_all %p (%sfp:%p)",
-				    wqset, fp->fp_guard_attrs ? "guarded " : "", fp);
+				    selset, fp->fp_guard_attrs ? "guarded " : "", fp);
 			}
 		}
 		if ((fp->fp_flags & FP_SELCONFLICT) == FP_SELCONFLICT) {
@@ -1601,29 +1644,39 @@ fp_close_and_unlock(proc_t p, int fd, struct fileproc *fp, int flags)
 	}
 	p->p_fd.fd_ofileflags[fd] |= (UF_RESERVED | UF_CLOSING);
 
-	if ((fp->fp_flags & FP_AIOISSUED) || kauth_authorize_fileop_has_listeners()) {
+	if ((fp->fp_flags & FP_AIOISSUED) ||
+#if CONFIG_MACF
+	    (FILEGLOB_DTYPE(fg) == DTYPE_VNODE)
+#else
+	    kauth_authorize_fileop_has_listeners()
+#endif
+	    ) {
 		proc_fdunlock(p);
 
-		if ((FILEGLOB_DTYPE(fg) == DTYPE_VNODE) && kauth_authorize_fileop_has_listeners()) {
+		if (FILEGLOB_DTYPE(fg) == DTYPE_VNODE) {
 			/*
 			 * call out to allow 3rd party notification of close.
 			 * Ignore result of kauth_authorize_fileop call.
 			 */
-			if (vnode_getwithref((vnode_t)fg->fg_data) == 0) {
+#if CONFIG_MACF
+			cred = kauth_cred_proc_ref(p);
+			mac_file_notify_close(cred, fp->fp_glob);
+			kauth_cred_unref(&cred);
+#endif
+
+			if (kauth_authorize_fileop_has_listeners() &&
+			    vnode_getwithref((vnode_t)fg_get_data(fg)) == 0) {
 				u_int   fileop_flags = 0;
 				if (fg->fg_flag & FWASWRITTEN) {
 					fileop_flags |= KAUTH_FILEOP_CLOSE_MODIFIED;
 				}
 				kauth_authorize_fileop(fg->fg_cred, KAUTH_FILEOP_CLOSE,
-				    (uintptr_t)fg->fg_data, (uintptr_t)fileop_flags);
-#if CONFIG_MACF
-				cred = kauth_cred_proc_ref(p);
-				mac_file_notify_close(cred, fp->fp_glob);
-				kauth_cred_unref(&cred);
-#endif
-				vnode_put((vnode_t)fg->fg_data);
+				    (uintptr_t)fg_get_data(fg), (uintptr_t)fileop_flags);
+
+				vnode_put((vnode_t)fg_get_data(fg));
 			}
 		}
+
 		if (fp->fp_flags & FP_AIOISSUED) {
 			/*
 			 * cancel all async IO requests that can be cancelled.
@@ -1651,7 +1704,7 @@ fp_close_and_unlock(proc_t p, int fd, struct fileproc *fp, int flags)
 
 	if (ENTR_SHOULDTRACE && FILEGLOB_DTYPE(fg) == DTYPE_SOCKET) {
 		KERNEL_ENERGYTRACE(kEnTrActKernSocket, DBG_FUNC_END,
-		    fd, 0, (int64_t)VM_KERNEL_ADDRPERM(fg->fg_data));
+		    fd, 0, (int64_t)VM_KERNEL_ADDRPERM(fg_get_data(fg)));
 	}
 
 	fileproc_free(fp);
@@ -1788,7 +1841,7 @@ vnode_t
 fg_get_vnode(struct fileglob *fg)
 {
 	if (FILEGLOB_DTYPE(fg) == DTYPE_VNODE) {
-		return (vnode_t)fg->fg_data;
+		return (vnode_t)fg_get_data(fg);
 	} else {
 		return NULL;
 	}
@@ -1834,7 +1887,7 @@ fp_getfvp(proc_t p, int fd, struct fileproc **resultfp, struct vnode **resultvp)
 			*resultfp = fp;
 		}
 		if (resultvp) {
-			*resultvp = (struct vnode *)fp->f_data;
+			*resultvp = (struct vnode *)fp_get_data(fp);
 		}
 	}
 
@@ -1881,7 +1934,7 @@ fp_get_pipe_id(proc_t p, int fd, uint64_t *result_pipe_id)
 	fg = fp->fp_glob;
 
 	if (FILEGLOB_DTYPE(fg) == DTYPE_PIPE) {
-		*result_pipe_id = pipe_id((struct pipe*)fg->fg_data);
+		*result_pipe_id = pipe_id((struct pipe*)fg_get_data(fg));
 	} else {
 		error = ENOTSUP;
 	}
@@ -1979,10 +2032,10 @@ file_vnode_withvid(int fd, struct vnode **vpp, uint32_t *vidp)
 	error = fp_get_ftype(current_proc(), fd, DTYPE_VNODE, EINVAL, &fp);
 	if (error == 0) {
 		if (vpp) {
-			*vpp = fp->f_data;
+			*vpp = (struct vnode *)fp_get_data(fp);
 		}
 		if (vidp) {
-			*vidp = vnode_vid(fp->f_data);
+			*vidp = vnode_vid((struct vnode *)fp_get_data(fp));
 		}
 	}
 	return error;
@@ -2031,7 +2084,7 @@ file_socket(int fd, struct socket **sp)
 	error = fp_get_ftype(current_proc(), fd, DTYPE_SOCKET, ENOTSOCK, &fp);
 	if (error == 0) {
 		if (sp) {
-			*sp = (struct socket *)fp->f_data;
+			*sp = (struct socket *)fp_get_data(fp);
 		}
 	}
 	return error;
@@ -2358,7 +2411,7 @@ sys_dup(proc_t p, struct dup_args *uap, int32_t *retval)
 
 	if (ENTR_SHOULDTRACE && FILEGLOB_DTYPE(fp->fp_glob) == DTYPE_SOCKET) {
 		KERNEL_ENERGYTRACE(kEnTrActKernSocket, DBG_FUNC_START,
-		    new, 0, (int64_t)VM_KERNEL_ADDRPERM(fp->f_data));
+		    new, 0, (int64_t)VM_KERNEL_ADDRPERM(fp_get_data(fp)));
 	}
 
 	return error;
@@ -2826,7 +2879,7 @@ sys_fcntl_nocancel(proc_t p, struct fcntl_nocancel_args *uap, int32_t *retval)
 
 	case F_GETOWN:
 		if (fp->f_type == DTYPE_SOCKET) {
-			*retval = ((struct socket *)fp->f_data)->so_pgid;
+			*retval = ((struct socket *)fp_get_data(fp))->so_pgid;
 			error = 0;
 			goto out;
 		}
@@ -2838,7 +2891,7 @@ sys_fcntl_nocancel(proc_t p, struct fcntl_nocancel_args *uap, int32_t *retval)
 		tmp = CAST_DOWN_EXPLICIT(pid_t, uap->arg); /* arg is an int, so we won't lose bits */
 		AUDIT_ARG(value32, tmp);
 		if (fp->f_type == DTYPE_SOCKET) {
-			((struct socket *)fp->f_data)->so_pgid = tmp;
+			((struct socket *)fp_get_data(fp))->so_pgid = tmp;
 			error = 0;
 			goto out;
 		}
@@ -2865,7 +2918,7 @@ sys_fcntl_nocancel(proc_t p, struct fcntl_nocancel_args *uap, int32_t *retval)
 		tmp = CAST_DOWN_EXPLICIT(int, uap->arg);
 		if (fp->f_type == DTYPE_SOCKET) {
 #if SOCKETS
-			error = sock_setsockopt((struct socket *)fp->f_data,
+			error = sock_setsockopt((struct socket *)fp_get_data(fp),
 			    SOL_SOCKET, SO_NOSIGPIPE, &tmp, sizeof(tmp));
 #else
 			error = EINVAL;
@@ -2888,7 +2941,7 @@ sys_fcntl_nocancel(proc_t p, struct fcntl_nocancel_args *uap, int32_t *retval)
 		if (fp->f_type == DTYPE_SOCKET) {
 #if SOCKETS
 			int retsize = sizeof(*retval);
-			error = sock_getsockopt((struct socket *)fp->f_data,
+			error = sock_getsockopt((struct socket *)fp_get_data(fp),
 			    SOL_SOCKET, SO_NOSIGPIPE, retval, &retsize);
 #else
 			error = EINVAL;
@@ -2950,7 +3003,7 @@ sys_fcntl_nocancel(proc_t p, struct fcntl_nocancel_args *uap, int32_t *retval)
 			error = EBADF;
 			goto out;
 		}
-		vp = (struct vnode *)fp->f_data;
+		vp = (struct vnode *)fp_get_data(fp);
 
 		fflag = fp->f_flag;
 		offset = fp->f_offset;
@@ -3083,7 +3136,7 @@ sys_fcntl_nocancel(proc_t p, struct fcntl_nocancel_args *uap, int32_t *retval)
 			error = EBADF;
 			goto out;
 		}
-		vp = (struct vnode *)fp->f_data;
+		vp = (struct vnode *)fp_get_data(fp);
 
 		offset = fp->f_offset;
 		proc_fdunlock(p);
@@ -3168,7 +3221,7 @@ sys_fcntl_nocancel(proc_t p, struct fcntl_nocancel_args *uap, int32_t *retval)
 			goto out;
 		}
 
-		vp = (struct vnode *)fp->f_data;
+		vp = (struct vnode *)fp_get_data(fp);
 		proc_fdunlock(p);
 
 		/* make sure that we have write permission */
@@ -3255,7 +3308,7 @@ sys_fcntl_nocancel(proc_t p, struct fcntl_nocancel_args *uap, int32_t *retval)
 			goto out;
 		}
 
-		vp = (struct vnode *)fp->f_data;
+		vp = (struct vnode *)fp_get_data(fp);
 		proc_fdunlock(p);
 
 		/* need write permissions */
@@ -3297,7 +3350,7 @@ sys_fcntl_nocancel(proc_t p, struct fcntl_nocancel_args *uap, int32_t *retval)
 			goto out;
 		}
 
-		vp = (struct vnode *)fp->f_data;
+		vp = (struct vnode *)fp_get_data(fp);
 		proc_fdunlock(p);
 
 		/* need write permissions */
@@ -3328,7 +3381,7 @@ sys_fcntl_nocancel(proc_t p, struct fcntl_nocancel_args *uap, int32_t *retval)
 			goto out;
 		}
 
-		vp = (struct vnode *)fp->f_data;
+		vp = (struct vnode *)fp_get_data(fp);
 		proc_fdunlock(p);
 
 		if ((error = copyin(argp, (caddr_t)&args, sizeof(args)))) {
@@ -3380,7 +3433,7 @@ sys_fcntl_nocancel(proc_t p, struct fcntl_nocancel_args *uap, int32_t *retval)
 			error = EBADF;
 			goto out;
 		}
-		vp = (struct vnode *)fp->f_data;
+		vp = (struct vnode *)fp_get_data(fp);
 		proc_fdunlock(p);
 
 		error = copyin(argp, (caddr_t)&offset, sizeof(off_t));
@@ -3483,7 +3536,7 @@ sys_fcntl_nocancel(proc_t p, struct fcntl_nocancel_args *uap, int32_t *retval)
 			error = EBADF;
 			goto out;
 		}
-		vp = (struct vnode *)fp->f_data;
+		vp = (struct vnode *)fp_get_data(fp);
 		proc_fdunlock(p);
 
 		if ((error = vnode_getwithref(vp)) == 0) {
@@ -3504,7 +3557,7 @@ sys_fcntl_nocancel(proc_t p, struct fcntl_nocancel_args *uap, int32_t *retval)
 			error = EBADF;
 			goto out;
 		}
-		vp = (struct vnode *)fp->f_data;
+		vp = (struct vnode *)fp_get_data(fp);
 		proc_fdunlock(p);
 
 		if ((error = vnode_getwithref(vp)) == 0) {
@@ -3527,7 +3580,7 @@ sys_fcntl_nocancel(proc_t p, struct fcntl_nocancel_args *uap, int32_t *retval)
 			error = EBADF;
 			goto out;
 		}
-		vp = (struct vnode *)fp->f_data;
+		vp = (struct vnode *)fp_get_data(fp);
 		proc_fdunlock(p);
 
 		if ((error = copyin(argp, (caddr_t)&ra_struct, sizeof(ra_struct)))) {
@@ -3551,7 +3604,7 @@ sys_fcntl_nocancel(proc_t p, struct fcntl_nocancel_args *uap, int32_t *retval)
 			error = EBADF;
 			goto out;
 		}
-		vp = (struct vnode *)fp->f_data;
+		vp = (struct vnode *)fp_get_data(fp);
 		proc_fdunlock(p);
 
 		if ((error = vnode_getwithref(vp)) == 0) {
@@ -3583,7 +3636,7 @@ sys_fcntl_nocancel(proc_t p, struct fcntl_nocancel_args *uap, int32_t *retval)
 			error = EBADF;
 			goto out;
 		}
-		vp = (struct vnode *)fp->f_data;
+		vp = (struct vnode *)fp_get_data(fp);
 		proc_fdunlock(p);
 		if ((error = vnode_getwithref(vp))) {
 			goto outdrop;
@@ -3647,7 +3700,7 @@ sys_fcntl_nocancel(proc_t p, struct fcntl_nocancel_args *uap, int32_t *retval)
 			error = EBADF;
 			goto out;
 		}
-		vp = (struct vnode *)fp->f_data;
+		vp = (struct vnode *)fp_get_data(fp);
 		proc_fdunlock(p);
 
 		pathlen = MAXPATHLEN;
@@ -3677,7 +3730,7 @@ sys_fcntl_nocancel(proc_t p, struct fcntl_nocancel_args *uap, int32_t *retval)
 			error = EBADF;
 			goto out;
 		}
-		vp = (struct vnode *)fp->f_data;
+		vp = (struct vnode *)fp_get_data(fp);
 		proc_fdunlock(p);
 
 		pathlen = MAXPATHLEN;
@@ -3704,7 +3757,7 @@ sys_fcntl_nocancel(proc_t p, struct fcntl_nocancel_args *uap, int32_t *retval)
 			error = EBADF;
 			goto out;
 		}
-		vp = (struct vnode *)fp->f_data;
+		vp = (struct vnode *)fp_get_data(fp);
 		proc_fdunlock(p);
 
 		if ((error = vnode_getwithref(vp)) == 0) {
@@ -3724,7 +3777,7 @@ sys_fcntl_nocancel(proc_t p, struct fcntl_nocancel_args *uap, int32_t *retval)
 			error = EBADF;
 			goto out;
 		}
-		vp = (struct vnode *)fp->f_data;
+		vp = (struct vnode *)fp_get_data(fp);
 
 		return sys_fcntl__OPENFROM(p, fd, cmd, uap->arg, fp, vp, retval);
 	}
@@ -3741,7 +3794,7 @@ sys_fcntl_nocancel(proc_t p, struct fcntl_nocancel_args *uap, int32_t *retval)
 			error = EBADF;
 			goto out;
 		}
-		vp = (struct vnode *)fp->f_data;
+		vp = (struct vnode *)fp_get_data(fp);
 		proc_fdunlock(p);
 
 		if (vnode_getwithref(vp)) {
@@ -3800,7 +3853,7 @@ sys_fcntl_nocancel(proc_t p, struct fcntl_nocancel_args *uap, int32_t *retval)
 			error = EBADF;
 			goto out;
 		}
-		vp = (struct vnode *)fp->f_data;
+		vp = (struct vnode *)fp_get_data(fp);
 		proc_fdunlock(p);
 
 		if (cmd == F_ADDFILESIGS_FOR_DYLD_SIM) {
@@ -4027,9 +4080,9 @@ sys_fcntl_nocancel(proc_t p, struct fcntl_nocancel_args *uap, int32_t *retval)
 			goto out;
 		}
 
-		ivp = (struct vnode *)orig_fp->f_data;
+		ivp = (struct vnode *)fp_get_data(orig_fp);
 
-		vp = (struct vnode *)fp->f_data;
+		vp = (struct vnode *)fp_get_data(fp);
 
 		proc_fdunlock(p);
 
@@ -4143,7 +4196,7 @@ dropboth:
 			error = EBADF;
 			goto out;
 		}
-		vp = (struct vnode *)fp->f_data;
+		vp = (struct vnode *)fp_get_data(fp);
 		proc_fdunlock(p);
 
 		error = vnode_getwithref(vp);
@@ -4188,7 +4241,7 @@ dropboth:
 			error = EBADF;
 			goto out;
 		}
-		vp = (struct vnode *)fp->f_data;
+		vp = (struct vnode *)fp_get_data(fp);
 
 		proc_fdunlock(p);
 
@@ -4222,7 +4275,7 @@ dropboth:
 			error = EBADF;
 			goto out;
 		}
-		vp = (struct vnode *)fp->f_data;
+		vp = (struct vnode *)fp_get_data(fp);
 
 		proc_fdunlock(p);
 
@@ -4256,7 +4309,7 @@ dropboth:
 			goto out;
 		}
 
-		vp = (struct vnode *)fp->f_data;
+		vp = (struct vnode *)fp_get_data(fp);
 		proc_fdunlock(p);
 
 		if (vnode_getwithref(vp)) {
@@ -4292,7 +4345,7 @@ dropboth:
 			goto out;
 		}
 
-		vp = (struct vnode*) fp->f_data;
+		vp = (struct vnode*)fp_get_data(fp);
 		proc_fdunlock(p);
 
 		if (vnode_getwithref(vp)) {
@@ -4312,7 +4365,7 @@ dropboth:
 			goto out;
 		}
 
-		vp = (struct vnode*) fp->f_data;
+		vp = (struct vnode*)fp_get_data(fp);
 		proc_fdunlock(p);
 
 		if (vnode_getwithref(vp)) {
@@ -4354,7 +4407,7 @@ dropboth:
 		 * For now, special case HFS+ and APFS only, since this
 		 * is SPI.
 		 */
-		src_vp = (struct vnode *)fp->f_data;
+		src_vp = (struct vnode *)fp_get_data(fp);
 		if (src_vp->v_tag != VT_HFS && src_vp->v_tag != VT_APFS) {
 			error = ENOTSUP;
 			goto out;
@@ -4373,7 +4426,7 @@ dropboth:
 			error = EBADF;
 			goto out;
 		}
-		dst_vp = (struct vnode *)fp2->f_data;
+		dst_vp = (struct vnode *)fp_get_data(fp2);
 		if (dst_vp->v_tag != VT_HFS && dst_vp->v_tag != VT_APFS) {
 			fp_drop(p, fd2, fp2, 1);
 			error = ENOTSUP;
@@ -4479,7 +4532,7 @@ dropboth:
 			goto out;
 		}
 
-		vp = (struct vnode*) fp->f_data;
+		vp = (struct vnode*)fp_get_data(fp);
 		proc_fdunlock(p);
 
 		/* get the vnode */
@@ -4534,7 +4587,7 @@ dropboth:
 			error = EBADF;
 			goto out;
 		}
-		vp = (struct vnode *)fp->f_data;
+		vp = (struct vnode *)fp_get_data(fp);
 		proc_fdunlock(p);
 
 		error = vnode_getwithref(vp);
@@ -4594,7 +4647,7 @@ dropboth:
 			error = EBADF;
 			goto out;
 		}
-		vp = (struct vnode *)fp->f_data;
+		vp = (struct vnode *)fp_get_data(fp);
 		proc_fdunlock(p);
 
 		error = vnode_getwithref(vp);
@@ -4628,7 +4681,7 @@ dropboth:
 			goto out;
 		}
 
-		vp = (struct vnode *)fp->f_data;
+		vp = (struct vnode *)fp_get_data(fp);
 
 		if (vp->v_tag != VT_HFS) {
 			error = EINVAL;
@@ -4673,7 +4726,7 @@ dropboth:
 			error = EBADF;
 			goto out;
 		}
-		vp = (struct vnode *)fp->f_data;
+		vp = (struct vnode *)fp_get_data(fp);
 		proc_fdunlock(p);
 
 		pathlen = MAXPATHLEN;
@@ -4749,7 +4802,7 @@ dropboth:
 			error = EBADF;
 			goto out;
 		}
-		vp = (struct vnode *)fp->f_data;
+		vp = (struct vnode *)fp_get_data(fp);
 		proc_fdunlock(p);
 
 		vnode_recycle(vp);
@@ -4790,7 +4843,7 @@ dropboth:
 			error = EBADF;
 			goto out;
 		}
-		vp = (struct vnode *)fp->f_data;
+		vp = (struct vnode *)fp_get_data(fp);
 		proc_fdunlock(p);
 
 		if ((error = vnode_getwithref(vp)) == 0) {
@@ -5006,7 +5059,7 @@ fstat(proc_t p, int fd, user_addr_t ub, user_addr_t xsecurity,
 		return error;
 	}
 	type = fp->f_type;
-	data = fp->f_data;
+	data = (caddr_t)fp_get_data(fp);
 	fsec = KAUTH_FILESEC_NONE;
 
 	sbptr = (void *)&source;
@@ -5061,7 +5114,7 @@ fstat(proc_t p, int fd, user_addr_t ub, user_addr_t xsecurity,
 			source.sb64.st_qspare[0] = 0LL;
 			source.sb64.st_qspare[1] = 0LL;
 
-			if (IS_64BIT_PROCESS(current_proc())) {
+			if (IS_64BIT_PROCESS(p)) {
 				munge_user64_stat64(&source.sb64, &dest.user64_sb64);
 				my_size = sizeof(dest.user64_sb64);
 				sbp = (caddr_t)&dest.user64_sb64;
@@ -5074,7 +5127,7 @@ fstat(proc_t p, int fd, user_addr_t ub, user_addr_t xsecurity,
 			source.sb.st_lspare = 0;
 			source.sb.st_qspare[0] = 0LL;
 			source.sb.st_qspare[1] = 0LL;
-			if (IS_64BIT_PROCESS(current_proc())) {
+			if (IS_64BIT_PROCESS(p)) {
 				munge_user64_stat(&source.sb, &dest.user64_sb);
 				my_size = sizeof(dest.user64_sb);
 				sbp = (caddr_t)&dest.user64_sb;
@@ -5233,7 +5286,6 @@ sys_fpathconf(proc_t p, struct fpathconf_args *uap, int32_t *retval)
 	struct vnode *vp;
 	int error = 0;
 	file_type_t type;
-	caddr_t data;
 
 
 	AUDIT_ARG(fd, uap->fd);
@@ -5241,7 +5293,6 @@ sys_fpathconf(proc_t p, struct fpathconf_args *uap, int32_t *retval)
 		return error;
 	}
 	type = fp->f_type;
-	data = fp->f_data;
 
 	switch (type) {
 	case DTYPE_SOCKET:
@@ -5263,7 +5314,7 @@ sys_fpathconf(proc_t p, struct fpathconf_args *uap, int32_t *retval)
 		goto out;
 
 	case DTYPE_VNODE:
-		vp = (struct vnode *)data;
+		vp = (struct vnode *)fp_get_data(fp);
 
 		if ((error = vnode_getwithref(vp)) == 0) {
 			AUDIT_ARG(vnpath, vp, ARG_VNODE1);

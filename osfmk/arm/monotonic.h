@@ -28,10 +28,14 @@
 #ifndef ARM_MONOTONIC_H
 #define ARM_MONOTONIC_H
 
+#include <stdbool.h>
+
 #define MT_NDEVS 0
 
 #define MT_CORE_NFIXED 1
 #define MT_CORE_CYCLES 0
 #define MT_CORE_MAXVAL UINT32_MAX
+
+extern const bool mt_core_supported;
 
 #endif /* !defined(ARM_MONOTONIC_H) */

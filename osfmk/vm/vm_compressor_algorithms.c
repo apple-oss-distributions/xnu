@@ -242,9 +242,12 @@ WKdmD(WK_word* src_buf, WK_word* dest_buf, WK_word* scratch, unsigned int bytes,
 #endif
 	WKdm_hv(src_buf);
 #if defined(__arm64__)
+#ifndef __ARM_16K_PG__
 	if (PAGE_SIZE == 4096) {
 		WKdm_decompress_4k(src_buf, dest_buf, scratch, bytes);
-	} else {
+	} else
+#endif /* !____ARM_16K_PG__ */
+	{
 		__unused uint64_t wdsstart;
 
 		VM_COMPRESSOR_STAT_DBG(wdsstart = mach_absolute_time());
@@ -269,9 +272,12 @@ WKdmC(WK_word* src_buf, WK_word* dest_buf, WK_word* scratch,
 	(void)incomp_copy;
 	int wkcval;
 #if defined(__arm64__)
+#ifndef __ARM_16K_PG__
 	if (PAGE_SIZE == 4096) {
 		wkcval = WKdm_compress_4k(src_buf, dest_buf, scratch, limit);
-	} else {
+	} else
+#endif /* !____ARM_16K_PG__ */
+	{
 		__unused uint64_t wcswstart;
 
 		VM_COMPRESSOR_STAT_DBG(wcswstart = mach_absolute_time());

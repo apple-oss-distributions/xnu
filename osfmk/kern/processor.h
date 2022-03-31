@@ -272,6 +272,8 @@ struct processor_set {
 
 	bitmap_t                foreign_psets[BITMAP_LEN(MAX_PSETS)];
 	bitmap_t                native_psets[BITMAP_LEN(MAX_PSETS)];
+	bitmap_t                local_psets[BITMAP_LEN(MAX_PSETS)];
+	bitmap_t                remote_psets[BITMAP_LEN(MAX_PSETS)];
 	sched_clutch_edge       sched_edges[MAX_PSETS];
 	pset_execution_time_t   pset_execution_time[TH_BUCKET_SCHED_MAX];
 	uint64_t                pset_cluster_shared_rsrc_load[CLUSTER_SHARED_RSRC_TYPE_COUNT];

@@ -490,7 +490,7 @@ IOGeneralMemoryDescriptor::memoryReferenceCreate(
 	kern_return_t        err;
 	IOMemoryReference *  ref;
 	IOMemoryEntry *      entries;
-	IOMemoryEntry *      cloneEntries;
+	IOMemoryEntry *      cloneEntries = NULL;
 	vm_map_t             map;
 	ipc_port_t           entry, cloneEntry;
 	vm_prot_t            prot;
@@ -2236,6 +2236,13 @@ IOGeneralMemoryDescriptor::initWithOptions(void *       buffers,
 				break;
 			}
 		}
+#if CONFIG_PROB_GZALLOC
+		if (task == kernel_task) {
+			for (UInt32 i = 0; i < count; i++) {
+				_ranges.v[i].address = pgz_decode(_ranges.v[i].address, _ranges.v[i].length);
+			}
+		}
+#endif /* CONFIG_PROB_GZALLOC */
 		_rangesCount = count;
 
 		// Find starting address within the vector of ranges
@@ -4100,7 +4107,8 @@ IOGeneralMemoryDescriptor::wireVirtual(IODirection forDirection)
 
 	if (_wireCount) {
 		if ((kIOMemoryPreparedReadOnly & _flags) && !(UPL_COPYOUT_FROM & uplFlags)) {
-			OSReportWithBacktrace("IOMemoryDescriptor 0x%lx prepared read only", VM_KERNEL_ADDRPERM(this));
+			OSReportWithBacktrace("IOMemoryDescriptor 0x%zx prepared read only",
+			    (size_t)VM_KERNEL_ADDRPERM(this));
 			error = kIOReturnNotWritable;
 		}
 	} else {
@@ -5175,7 +5183,8 @@ IOMemoryDescriptor::populateDevicePager(
 #if DEBUG || DEVELOPMENT
 		if ((kIOMemoryTypeUPL != type)
 		    && pmap_has_managed_page((ppnum_t) atop_64(physAddr), (ppnum_t) atop_64(physAddr + segLen - 1))) {
-			OSReportWithBacktrace("IOMemoryDescriptor physical with managed page 0x%qx:0x%qx", physAddr, segLen);
+			OSReportWithBacktrace("IOMemoryDescriptor physical with managed page 0x%qx:0x%qx",
+			    physAddr, (uint64_t)segLen);
 		}
 #endif /* DEBUG || DEVELOPMENT */
 
@@ -5912,6 +5921,18 @@ IOMemoryDescriptor::removeMapping(
 	if (_mappings) {
 		_mappings->removeObject( mapping);
 	}
+}
+
+void
+IOMemoryDescriptor::setMapperOptions( uint16_t options)
+{
+	_iomapperOptions = options;
+}
+
+uint16_t
+IOMemoryDescriptor::getMapperOptions( void )
+{
+	return _iomapperOptions;
 }
 
 #ifndef __LP64__

@@ -8,6 +8,8 @@ bsd/dev/arm64/sysctl.c          standard
 bsd/dev/arm/unix_signal.c	standard
 
 bsd/dev/arm64/cpu_in_cksum.s	standard
+bsd/dev/arm64/cpu_copy_in_cksum.s optional skywalk
+bsd/dev/arm64/cpu_memcmp_mask.s optional skywalk
 
 #if defined(KERNEL_INTEGRITY_CTRR)
 bsd/tests/ctrr_test_sysctl.c		optional config_xnupost

@@ -549,7 +549,7 @@ IOService::initialize( void )
 	gIOConsoleSessionScreenLockedTimeKey = OSSymbol::withCStringNoCopy(kIOConsoleSessionScreenLockedTimeKey);
 	gIOConsoleSessionScreenIsLockedKey   = OSSymbol::withCStringNoCopy(kIOConsoleSessionScreenIsLockedKey);
 
-	gIOConsoleUsersSeedValue           = OSData::withBytesNoCopy(&gIOConsoleUsersSeed, sizeof(gIOConsoleUsersSeed));
+	gIOConsoleUsersSeedValue           = OSData::withValueNoCopy(gIOConsoleUsersSeed);
 
 	gIOServiceDEXTEntitlementsKey           = OSSymbol::withCStringNoCopy( kIOServiceDEXTEntitlementsKey );
 	gIODriverKitEntitlementKey             = OSSymbol::withCStringNoCopy( kIODriverKitEntitlementKey );
@@ -1558,6 +1558,7 @@ IOService::setPlatform( IOPlatformExpert * platform)
 		ios->setProperty(gIOModuleIdentifierKey->getCStringNoCopy(), "com.apple.kpi.iokit");
 		ios->setProperty(gIOMatchedAtBootKey, kOSBooleanTrue);
 		ios->setProperty(gIOPrimaryDriverTerminateOptionsKey, kOSBooleanTrue);
+		ios->release();
 	}
 #endif
 
@@ -4061,6 +4062,7 @@ IOService::probeCandidates( OSOrderedSet * matches )
 	// start the best (until success) of each category
 
 	iter = OSCollectionIterator::withCollection( startDict );
+	assert(startDict || !iter);
 	if (iter) {
 		while ((category = (const OSSymbol *) iter->getNextObject())) {
 			startList = (OSOrderedSet *) startDict->getObject( category );
@@ -4501,7 +4503,8 @@ IOServicePH::serverSlept(void)
 
 	lock();
 	ret = (kIOMessageSystemWillSleep == sSystemPower)
-	    || (kIOMessageSystemPagingOff == sSystemPower);
+	    || (kIOMessageSystemWillPowerOff == sSystemPower)
+	    || (kIOMessageSystemWillRestart == sSystemPower);
 	unlock();
 
 	return ret;
@@ -4729,14 +4732,15 @@ IOService::startCandidate( IOService * service )
 	AbsoluteTime startTime;
 	AbsoluteTime endTime;
 	UInt64       nano;
+	bool recordTime = (kIOLogStart & gIOKitDebug) != 0;
 
-	if (kIOLogStart & gIOKitDebug) {
+	if (recordTime) {
 		clock_get_uptime(&startTime);
 	}
 
 	ok = service->start(this);
 
-	if (kIOLogStart & gIOKitDebug) {
+	if (recordTime) {
 		clock_get_uptime(&endTime);
 
 		if (CMP_ABSOLUTETIME(&endTime, &startTime) > 0) {
@@ -4839,9 +4843,7 @@ IOService::addNeededResource( const char * key )
 	set = OSDynamicCast( OSSet, resourcesProp );
 	if (!set) {
 		set = OSSet::withCapacity( 1 );
-		if (set) {
-			set->setObject( resourcesProp );
-		}
+		set->setObject( resourcesProp );
 	} else {
 		set->retain();
 	}
@@ -5253,7 +5255,7 @@ IOService::_adjustBusy( SInt32 delta )
 			count = next->__state[1] & kIOServiceBusyStateMask;
 			wasQuiet = (0 == count);
 			if (((delta < 0) && wasQuiet) || ((delta > 0) && (kIOServiceBusyMax == count))) {
-				OSReportWithBacktrace("%s: bad busy count (%d,%d)\n", next->getName(), count, delta);
+				OSReportWithBacktrace("%s: bad busy count (%d,%d)\n", next->getName(), (uint32_t)count, (int)delta);
 			} else {
 				count += delta;
 			}

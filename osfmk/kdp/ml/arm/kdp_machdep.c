@@ -254,6 +254,8 @@ __attribute__((noreturn))
 void
 kdp_panic(const char * fmt, ...)
 {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wformat-nonliteral"
 	char kdp_fmt[256];
 	va_list args;
 
@@ -265,6 +267,7 @@ kdp_panic(const char * fmt, ...)
 	while (1) {
 	}
 	;
+#pragma clang diagnostic pop
 }
 
 int

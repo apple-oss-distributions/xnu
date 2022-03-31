@@ -76,29 +76,10 @@ struct proc *
 current_proc(void)
 {
 	/* Never returns a NULL */
-	struct proc * p;
-#if CONFIG_VFORK
-	thread_t thread = current_thread();
-	struct uthread * ut;
-
-	ut = (struct uthread *)get_bsdthread_info(thread);
-	if (ut && (ut->uu_flag & UT_VFORK) && ut->uu_proc) {
-		p = ut->uu_proc;
-		if ((p->p_lflag & P_LINVFORK) == 0) {
-			panic("returning child proc not under vfork");
-		}
-		if (p->p_vforkact != (void *)thread) {
-			panic("returning child proc which is not cur_act");
-		}
-		return p;
-	}
-#endif /* CONFIG_VFORK */
-
-	p = (struct proc *)get_bsdtask_info(current_task());
-	if (p == NULL) {
+	proc_t p = current_thread_ro()->tro_proc;
+	if (__improbable(p == PROC_NULL)) {
 		return kernproc;
 	}
-
 	return p;
 }
 

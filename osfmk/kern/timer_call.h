@@ -149,6 +149,13 @@ extern boolean_t        timer_call_enter_with_leeway(
 extern boolean_t        timer_call_cancel(
 	timer_call_t    call);
 
+extern timer_call_t     timer_call_alloc(
+	timer_call_func_t       func,
+	timer_call_param_t      param0);
+
+extern void             timer_call_free(
+	timer_call_t            call);
+
 extern void             timer_call_setup(
 	timer_call_t            call,
 	timer_call_func_t       func,

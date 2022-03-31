@@ -39,15 +39,8 @@ run_test(void)
 	for (i = 0; i < nameCnt; i++) {
 		const char *z_name = &name[i].mzn_name;
 		if (strncmp(z_name, kalloc_str, strlen(kalloc_str)) == 0) {
-			const char *size_ptr = &z_name[strlen(kalloc_str)];
-			/*
-			 * Adjust size pointer for kalloc type zones
-			 */
-			if (strlen(z_name) > kt_name_len &&
-			    strncmp(&z_name[strlen(kalloc_str)], type_str,
-			    strlen(type_str)) == 0) {
-				size_ptr = strchr(&z_name[kt_name_len], '.') + 1;
-			}
+			const char *size_ptr = strrchr(z_name, '.') + 1;
+			T_QUIET; T_ASSERT_NOTNULL(size_ptr, "couldn't find size in name");
 			size = strtoul(size_ptr, NULL, 10);
 			T_LOG("ZONE NAME: %-25s ELEMENT SIZE: %llu", z_name, size);
 			T_QUIET; T_ASSERT_EQ(size, info[i].mzi_elem_size, "kalloc zone name and element size don't match");

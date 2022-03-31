@@ -860,26 +860,6 @@ extern gate_wait_result_t lck_mtx_gate_wait(lck_mtx_t *lock, gate_t *gate, lck_s
  */
 extern void lck_mtx_gate_assert(lck_mtx_t *lock, gate_t *gate, gate_assert_flags_t flags);
 
-
-#endif //KERNEL_PRIVATE
-
-#if DEVELOPMENT || DEBUG
-#define FULL_CONTENDED 0
-#define HALF_CONTENDED 1
-#define MAX_CONDENDED  2
-
-extern void             erase_all_test_mtx_stats(void);
-extern int              get_test_mtx_stats_string(char* buffer, int buffer_size);
-extern void             lck_mtx_test_init(void);
-extern void             lck_mtx_test_lock(void);
-extern void             lck_mtx_test_unlock(void);
-extern int              lck_mtx_test_mtx_uncontended(int iter, char* buffer, int buffer_size);
-extern int              lck_mtx_test_mtx_contended(int iter, char* buffer, int buffer_size, int type);
-extern int              lck_mtx_test_mtx_uncontended_loop_time(int iter, char* buffer, int buffer_size);
-extern int              lck_mtx_test_mtx_contended_loop_time(int iter, char* buffer, int buffer_size, int type);
-#endif
-#ifdef  KERNEL_PRIVATE
-
 extern boolean_t        lck_mtx_try_lock(
 	lck_mtx_t               *lck);
 

@@ -56,6 +56,25 @@
 
 d_ioctl_t       random_ioctl;
 
+static int
+random_stop(__unused struct tty *tp, __unused int rw)
+{
+	return 0;
+}
+
+static int
+random_reset(__unused int uban)
+{
+	return 0;
+}
+
+static int
+random_select(__unused dev_t dev, __unused int which, __unused void *wql,
+    __unused struct proc *p)
+{
+	return ENODEV;
+}
+
 static const struct cdevsw random_cdevsw =
 {
 	.d_open = random_open,
@@ -63,9 +82,9 @@ static const struct cdevsw random_cdevsw =
 	.d_read = random_read,
 	.d_write = random_write,
 	.d_ioctl = random_ioctl,
-	.d_stop = (stop_fcn_t *)nulldev,
-	.d_reset = (reset_fcn_t *)nulldev,
-	.d_select = eno_select,
+	.d_stop = random_stop,
+	.d_reset = random_reset,
+	.d_select = random_select,
 	.d_mmap = eno_mmap,
 	.d_strategy = eno_strat,
 	.d_reserved_1 = eno_getc,
@@ -88,14 +107,14 @@ random_init(void)
 	}
 
 	devfs_make_node(makedev(ret, RANDOM_MINOR), DEVFS_CHAR,
-	    UID_ROOT, GID_WHEEL, 0666, "random", 0);
+	    UID_ROOT, GID_WHEEL, 0666, "random");
 
 	/*
 	 * also make urandom
 	 * (which is exactly the same thing in our context)
 	 */
 	devfs_make_node(makedev(ret, URANDOM_MINOR), DEVFS_CHAR,
-	    UID_ROOT, GID_WHEEL, 0666, "urandom", 0);
+	    UID_ROOT, GID_WHEEL, 0666, "urandom");
 }
 
 int

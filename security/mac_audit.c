@@ -75,8 +75,8 @@
 
 #if CONFIG_AUDIT
 
-ZONE_DECLARE(mac_audit_data_zone, "mac_audit_data_zone",
-    MAC_AUDIT_DATA_LIMIT, ZC_NONE);
+ZONE_DEFINE(mac_audit_data_zone, "mac_audit_data_zone",
+    MAC_AUDIT_DATA_LIMIT, ZC_PGZ_USE_GUARDS);
 
 int
 mac_system_check_audit(struct ucred *cred, void *record, int length)
@@ -102,7 +102,7 @@ int
 mac_system_check_auditctl(struct ucred *cred, struct vnode *vp)
 {
 	int error;
-	struct label *vl = vp ? vp->v_label : NULL;
+	struct label *vl = vp ? mac_vnode_label(vp) : NULL;
 
 	MAC_CHECK(system_check_auditctl, cred, vp, vl);
 

@@ -1,3 +1,11 @@
+from __future__ import absolute_import, division, print_function
+
+from builtins import chr
+from builtins import zip
+from builtins import hex
+from builtins import range
+from builtins import object
+
 from xnu import *
 from utils import *
 from kdp import *
@@ -191,18 +199,18 @@ def ShowAllClasses(cmd_args=None):
     while idx < count:
         meta = CastIOKitClass(kern.globals.sAllClassesDict.dictionary[idx].value, 'OSMetaClass *')
         idx += 1
-        print GetMetaClass(meta)
+        print(GetMetaClass(meta))
 
 @lldb_command('showobject')
 def ShowObject(cmd_args=None):
     """ Show info about an OSObject - its vtable ptr and retain count, & more info for simple container classes.
     """
     if not cmd_args:
-        print "Please specify the address of the OSObject whose info you want to view. Type help showobject for help"
+        print("Please specify the address of the OSObject whose info you want to view. Type help showobject for help")
         return
     
     obj = kern.GetValueFromAddress(cmd_args[0], 'OSObject *')
-    print GetObjectSummary(obj)
+    print(GetObjectSummary(obj))
 
 #Macro: dumpobject
 @lldb_command('dumpobject')
@@ -211,22 +219,22 @@ def DumpObject(cmd_args=None):
         Usage: dumpobject <address of object to be dumped> [class/struct type of object]
     """
     if not cmd_args:
-        print "No arguments passed"
-        print DumpObject.__doc__
+        print("No arguments passed")
+        print(DumpObject.__doc__)
         return False
 
     if len(cmd_args) == 1:
         try:
             object_info = lldb_run_command("showobject {:s}".format(cmd_args[0]))
         except:
-            print "Error!! showobject failed due to invalid value"
-            print DumpObject.__doc__
+            print("Error!! showobject failed due to invalid value")
+            print(DumpObject.__doc__)
             return False
 
         srch = re.search(r'<vtable for ([A-Za-z].*)>', object_info)
         if not srch:
-            print "Error!! Couldn't find object in registry, input type manually as 2nd argument"
-            print DumpObject.__doc__
+            print("Error!! Couldn't find object in registry, input type manually as 2nd argument")
+            print(DumpObject.__doc__)
             return False
 
         object_type = srch.group(1)
@@ -235,11 +243,11 @@ def DumpObject(cmd_args=None):
         if type_lookup.find(cmd_args[1])!= -1:
             object_type = cmd_args[1]
         else:
-            print "Error!! Input type {:s} isn't available in image lookup".format(cmd_args[1])
+            print("Error!! Input type {:s} isn't available in image lookup".format(cmd_args[1]))
             return False
 
-    print "******** Object Dump for value \'{:s}\' with type \"{:s}\" ********".format(cmd_args[0], object_type)
-    print lldb_run_command("p/x *({:s}*){:s}".format(object_type, cmd_args[0]))
+    print("******** Object Dump for value \'{:s}\' with type \"{:s}\" ********".format(cmd_args[0], object_type))
+    print(lldb_run_command("p/x *({:s}*){:s}".format(object_type, cmd_args[0])))
 
 #EndMacro: dumpobject
 
@@ -251,11 +259,11 @@ def SetRegistryPlane(cmd_args=None):
         syntax: (lldb) setregistryplane gIODTPlane  - will set the registry plane to gIODTPlane
     """
     if not cmd_args:
-        print "Please specify the name of the plane you want to use with the IOKit registry macros."
-        print SetRegistryPlane.__doc__
+        print("Please specify the name of the plane you want to use with the IOKit registry macros.")
+        print(SetRegistryPlane.__doc__)
     
     if cmd_args[0] == "0":
-        print GetObjectSummary(kern.globals.gIORegistryPlanes)
+        print(GetObjectSummary(kern.globals.gIORegistryPlanes))
     else:
         global plane
         plane = kern.GetValueFromAddress(cmd_args[0], 'IORegistryPlane *')
@@ -268,8 +276,8 @@ def ShowRegistryEntry(cmd_args=None):
         syntax: (lldb) showregistryentry gIOPMRootDomain
     """
     if not cmd_args:
-        print "Please specify the address of the registry entry whose info you want to view."
-        print ShowRegistryEntry.__doc__
+        print("Please specify the address of the registry entry whose info you want to view.")
+        print(ShowRegistryEntry.__doc__)
         return
     
     entry = kern.GetValueFromAddress(cmd_args[0], 'IORegistryEntry *')
@@ -299,8 +307,8 @@ def FindRegistryEntry(cmd_args=None):
         syntax: (lldb) findregistryentries AppleACPICPU - will find the first registry entry that matches AppleACPICPU
     """
     if not cmd_args:
-        print "Please specify the name of the registry entry you want to find"
-        print FindRegistryEntry.__doc__
+        print("Please specify the name of the registry entry you want to find")
+        print(FindRegistryEntry.__doc__)
         return
     
     FindRegistryEntryRecurse(kern.globals.gRegistryRoot, cmd_args[0], True)
@@ -313,8 +321,8 @@ def FindRegistryEntries(cmd_args=None):
         syntax: (lldb) findregistryentries AppleACPICPU - will find all registry entries that match AppleACPICPU
     """
     if not cmd_args:
-        print "Please specify the name of the registry entry/entries you want to find"
-        print FindRegistryEntries.__doc__
+        print("Please specify the name of the registry entry/entries you want to find")
+        print(FindRegistryEntries.__doc__)
         return
     
     FindRegistryEntryRecurse(kern.globals.gRegistryRoot, cmd_args[0], False)
@@ -328,13 +336,13 @@ def FindRegistryProp(cmd_args=None):
         syntax: (lldb) findregistryprop gIOPMRootDomain "Supported Features"
     """
     if not cmd_args or len(cmd_args) < 2:
-        print "Please specify the address of a IORegistry entry and the property you're looking for"
-        print FindRegistryProp.__doc__
+        print("Please specify the address of a IORegistry entry and the property you're looking for")
+        print(FindRegistryProp.__doc__)
         return
     
     entry = kern.GetValueFromAddress(cmd_args[0], 'IOService *')
     propertyTable = entry.fPropertyTable
-    print GetObjectSummary(LookupKeyInPropTable(propertyTable, cmd_args[1]))
+    print(GetObjectSummary(LookupKeyInPropTable(propertyTable, cmd_args[1])))
 
 @lldb_command('readioport8')
 def ReadIOPort8(cmd_args=None):
@@ -344,8 +352,8 @@ def ReadIOPort8(cmd_args=None):
         Syntax: (lldb) readioport8 <port> [lcpu (kernel's numbering convention)]
     """
     if not cmd_args:
-        print "Please specify a port to read out of"
-        print ReadIOPort8.__doc__
+        print("Please specify a port to read out of")
+        print(ReadIOPort8.__doc__)
         return
     
     portAddr = ArgumentStringToInt(cmd_args[0])
@@ -364,8 +372,8 @@ def ReadIOPort16(cmd_args=None):
         Syntax: (lldb) readioport16 <port> [lcpu (kernel's numbering convention)]
     """
     if not cmd_args:
-        print "Please specify a port to read out of"
-        print ReadIOPort16.__doc__
+        print("Please specify a port to read out of")
+        print(ReadIOPort16.__doc__)
         return
     
     portAddr = ArgumentStringToInt(cmd_args[0])
@@ -384,8 +392,8 @@ def ReadIOPort32(cmd_args=None):
         Syntax: (lldb) readioport32 <port> [lcpu (kernel's numbering convention)]
     """
     if not cmd_args:
-        print "Please specify a port to read out of"
-        print ReadIOPort32.__doc__
+        print("Please specify a port to read out of")
+        print(ReadIOPort32.__doc__)
         return
     
     portAddr = ArgumentStringToInt(cmd_args[0])
@@ -404,8 +412,8 @@ def WriteIOPort8(cmd_args=None):
         Syntax: (lldb) writeioport8 <port> <value> [lcpu (kernel's numbering convention)]
     """
     if not cmd_args or len(cmd_args) < 2:
-        print "Please specify a port to write to, followed by the value you want to write"
-        print WriteIOPort8.__doc__
+        print("Please specify a port to write to, followed by the value you want to write")
+        print(WriteIOPort8.__doc__)
         return
     
     portAddr = ArgumentStringToInt(cmd_args[0])
@@ -426,8 +434,8 @@ def WriteIOPort16(cmd_args=None):
         Syntax: (lldb) writeioport16 <port> <value> [lcpu (kernel's numbering convention)]
     """
     if not cmd_args or len(cmd_args) < 2:
-        print "Please specify a port to write to, followed by the value you want to write"
-        print WriteIOPort16.__doc__
+        print("Please specify a port to write to, followed by the value you want to write")
+        print(WriteIOPort16.__doc__)
         return
     
     portAddr = ArgumentStringToInt(cmd_args[0])
@@ -448,8 +456,8 @@ def WriteIOPort32(cmd_args=None):
         Syntax: (lldb) writeioport32 <port> <value> [lcpu (kernel's numbering convention)]
     """
     if not cmd_args or len(cmd_args) < 2:
-        print "Please specify a port to write to, followed by the value you want to write"
-        print WriteIOPort32.__doc__
+        print("Please specify a port to write to, followed by the value you want to write")
+        print(WriteIOPort32.__doc__)
         return
     
     portAddr = ArgumentStringToInt(cmd_args[0])
@@ -468,8 +476,8 @@ def ShowIOServicePM(cmd_args=None):
         Syntax: (lldb) showioservicepm <IOServicePM pointer>
     """
     if not cmd_args:
-        print "Please enter the pointer to the IOServicePM object you'd like to introspect"
-        print ShowIOServicePM.__doc__
+        print("Please enter the pointer to the IOServicePM object you'd like to introspect")
+        print(ShowIOServicePM.__doc__)
         return
     
     iopmpriv = kern.GetValueFromAddress(cmd_args[0], 'IOServicePM *')
@@ -528,7 +536,7 @@ def ShowIOServicePM(cmd_args=None):
             unsigned(iopmpriv.DesiredPowerState),
             unsigned(iopmpriv.PreviousRequestPowerFlags))
     
-    print out_string
+    print(out_string)
 
 @lldb_type_summary(['IOPMWorkQueue *'])
 @header("")
@@ -557,9 +565,9 @@ def GetIOPMWorkQueueSummary(wq):
 def ShowIOPMQueues(cmd_args=None):
     """ Show IOKit power management queues and IOPMRequest objects.
     """
-    print "IOPMWorkQueue 0x{:<16x} ({:<d} IOServicePM)\n".format(
-        kern.globals.gIOPMWorkQueue, kern.globals.gIOPMWorkQueue.fQueueLength)
-    print GetIOPMWorkQueueSummary(kern.globals.gIOPMWorkQueue)
+    print("IOPMWorkQueue 0x{:<16x} ({:<d} IOServicePM)\n".format(
+        kern.globals.gIOPMWorkQueue, kern.globals.gIOPMWorkQueue.fQueueLength))
+    print(GetIOPMWorkQueueSummary(kern.globals.gIOPMWorkQueue))
 
 @lldb_type_summary(['IOService *'])
 @header("")
@@ -593,12 +601,12 @@ def ShowIOPMInterest(cmd_args=None):
         syntax: (lldb) showiopminterest <IOService>
     """
     if not cmd_args:
-        print "Please specify the address of the IOService"
-        print ShowIOPMInterest.__doc__
+        print("Please specify the address of the IOService")
+        print(ShowIOPMInterest.__doc__)
         return
 
     obj = kern.GetValueFromAddress(cmd_args[0], 'IOService *')
-    print GetIOPMInterest(obj)
+    print(GetIOPMInterest(obj))
 
 @lldb_command("showinterruptvectors")
 def ShowInterruptVectorInfo(cmd_args=None):
@@ -645,7 +653,7 @@ def ShowInterruptVectorInfo(cmd_args=None):
         for (vector_data, vector_cont) in zip(vectorDataList, vectorContList):
             # vector_cont is the name of the interrupt controller. Find the matching controller from
             # the list of controllers obtained earlier
-            matching_ics = filter(lambda ic: ic.name == vector_cont, interrupt_controllers)
+            matching_ics = [ic for ic in interrupt_controllers if ic.name == vector_cont]
 
             if len(matching_ics) > 0:
                 should_print = True
@@ -722,10 +730,10 @@ def ShowRegistryEntryRecurse(entry, prefix, printProps):
     propertyTable = entry.fPropertyTable
     
     # Print entry details
-    print "{0:s}{1:s}".format(prefix, GetRegistryEntrySummary(entry))
+    print("{0:s}{1:s}".format(prefix, GetRegistryEntrySummary(entry)))
     # Printing large property tables make it look like lldb is 'stuck'
     if printProps:
-        print GetRegDictionary(propertyTable, prefix + "  | ")
+        print(GetRegDictionary(propertyTable, prefix + "  | "))
     
     # Recurse
     if plane is None:
@@ -764,13 +772,13 @@ def FindRegistryEntryRecurse(entry, search_name, stopAfterFirst):
     
     if name is not None:
         if str(CastIOKitClass(name, 'OSString *').string) == search_name:
-            print GetRegistryEntrySummary(entry)
+            print(GetRegistryEntrySummary(entry))
             if stopAfterFirst is True:
                 return True
     elif CastIOKitClass(entry, 'IOService *').pwrMgt and CastIOKitClass(entry, 'IOService *').pwrMgt.Name:
         name = CastIOKitClass(entry, 'IOService *').pwrMgt.Name
         if str(name) == search_name:
-            print GetRegistryEntrySummary(entry)
+            print(GetRegistryEntrySummary(entry))
             if stopAfterFirst is True:
                 return True
     
@@ -1049,7 +1057,7 @@ def GetMetaClasses():
 
     # At this point, each metaclass is independent of each other. We don't have superclass links set up yet.
 
-    for (address, metaclass) in metaclasses_by_address.items():
+    for (address, metaclass) in list(metaclasses_by_address.items()):
         # Get the address of the superclass using the superClassLink in IOMetaClass
         superclass_address = int(metaclass.data().superClassLink)
 
@@ -1065,7 +1073,7 @@ def GetMetaClasses():
     
     # This method returns a dictionary mapping each class name to the associated metaclass object
     metaclasses_by_name = {}
-    for (_, metaclass) in metaclasses_by_address.items():
+    for (_, metaclass) in list(metaclasses_by_address.items()):
         metaclasses_by_name[str(metaclass.className())] = metaclass
 
     # Save the result in the cache
@@ -1448,7 +1456,7 @@ def ReadIOPortInt(addr, numbytes, lcpu):
     result = 0xBAD10AD
     
     if "kdp" != GetConnectionProtocol():
-        print "Target is not connected over kdp. Nothing to do here."
+        print("Target is not connected over kdp. Nothing to do here.")
         return
     
     # Set up the manual KDP packet
@@ -1456,12 +1464,12 @@ def ReadIOPortInt(addr, numbytes, lcpu):
     len_address = unsigned(addressof(kern.globals.manual_pkt.len))
     data_address = unsigned(addressof(kern.globals.manual_pkt.data))
     if not WriteInt32ToMemoryAddress(0, input_address):
-        print "0x{0: <4x}: 0x{1: <1x}".format(addr, result)
+        print("0x{0: <4x}: 0x{1: <1x}".format(addr, result))
         return
     
     kdp_pkt_size = GetType('kdp_readioport_req_t').GetByteSize()
     if not WriteInt32ToMemoryAddress(kdp_pkt_size, len_address):
-        print "0x{0: <4x}: 0x{1: <1x}".format(addr, result)
+        print("0x{0: <4x}: 0x{1: <1x}".format(addr, result))
         return
     
     kgm_pkt = kern.GetValueFromAddress(data_address, 'kdp_readioport_req_t *')
@@ -1485,13 +1493,13 @@ def ReadIOPortInt(addr, numbytes, lcpu):
             elif numbytes == 4:
                 result = dereference(Cast(addressof(result_pkt.data), 'uint32_t *'))
 
-    print "{0: <#6x}: {1:#0{2}x}".format(addr, result, (numbytes*2)+2)
+    print("{0: <#6x}: {1:#0{2}x}".format(addr, result, (numbytes*2)+2))
 
 def WriteIOPortInt(addr, numbytes, value, lcpu):
     """ Writes 'value' into ioport specified by 'addr'. Prints errors if it encounters any
     """
     if "kdp" != GetConnectionProtocol():
-        print "Target is not connected over kdp. Nothing to do here."
+        print("Target is not connected over kdp. Nothing to do here.")
         return
     
     # Set up the manual KDP packet
@@ -1499,12 +1507,12 @@ def WriteIOPortInt(addr, numbytes, value, lcpu):
     len_address = unsigned(addressof(kern.globals.manual_pkt.len))
     data_address = unsigned(addressof(kern.globals.manual_pkt.data))
     if not WriteInt32ToMemoryAddress(0, input_address):
-        print "error writing {0: #x} to port {1: <#6x}: failed to write 0 to input_address".format(value, addr)
+        print("error writing {0: #x} to port {1: <#6x}: failed to write 0 to input_address".format(value, addr))
         return
     
     kdp_pkt_size = GetType('kdp_writeioport_req_t').GetByteSize()
     if not WriteInt32ToMemoryAddress(kdp_pkt_size, len_address):
-        print "error writing {0: #x} to port {1: <#6x}: failed to write kdp_pkt_size".format(value, addr)
+        print("error writing {0: #x} to port {1: <#6x}: failed to write kdp_pkt_size".format(value, addr))
         return
     
     kgm_pkt = kern.GetValueFromAddress(data_address, 'kdp_writeioport_req_t *')
@@ -1518,27 +1526,27 @@ def WriteIOPortInt(addr, numbytes, value, lcpu):
         ):
         if numbytes == 1:
             if not WriteInt8ToMemoryAddress(value, int(addressof(kgm_pkt.data))):
-                print "error writing {0: #x} to port {1: <#6x}: failed to write 8 bit data".format(value, addr)
+                print("error writing {0: #x} to port {1: <#6x}: failed to write 8 bit data".format(value, addr))
                 return
         elif numbytes == 2:
             if not WriteInt16ToMemoryAddress(value, int(addressof(kgm_pkt.data))):
-                print "error writing {0: #x} to port {1: <#6x}: failed to write 16 bit data".format(value, addr)
+                print("error writing {0: #x} to port {1: <#6x}: failed to write 16 bit data".format(value, addr))
                 return
         elif numbytes == 4:
             if not WriteInt32ToMemoryAddress(value, int(addressof(kgm_pkt.data))):
-                print "error writing {0: #x} to port {1: <#6x}: failed to write 32 bit data".format(value, addr)
+                print("error writing {0: #x} to port {1: <#6x}: failed to write 32 bit data".format(value, addr))
                 return
         if not WriteInt32ToMemoryAddress(1, input_address):
-            print "error writing {0: #x} to port {1: <#6x}: failed to write to input_address".format(value, addr)
+            print("error writing {0: #x} to port {1: <#6x}: failed to write to input_address".format(value, addr))
             return
 
         result_pkt = Cast(addressof(kern.globals.manual_pkt.data), 'kdp_writeioport_reply_t *')
         
         # Done with the write
         if(result_pkt.error == 0):
-            print "Writing {0: #x} to port {1: <#6x} was successful".format(value, addr)
+            print("Writing {0: #x} to port {1: <#6x} was successful".format(value, addr))
     else:
-        print "error writing {0: #x} to port {1: <#6x}".format(value, addr)
+        print("error writing {0: #x} to port {1: <#6x}".format(value, addr))
 
 @lldb_command('showinterruptcounts')
 def showinterruptcounts(cmd_args=None):
@@ -1550,7 +1558,7 @@ def showinterruptcounts(cmd_args=None):
     header_format = "{0: <20s} {1: >5s} {2: >20s}"
     content_format = "{0: <20s} {1: >5d} {2: >20d}"
 
-    print header_format.format("Name", "Index", "Count")
+    print(header_format.format("Name", "Index", "Count"))
     
     for i in kern.interrupt_stats:
         owner = CastIOKitClass(i.owner, 'IOInterruptEventSource *')
@@ -1579,7 +1587,7 @@ def showinterruptcounts(cmd_args=None):
         interrupt_index = i.interruptIndex
         first_level_count = i.interruptStatistics[0]
 
-        print content_format.format(nub_name, interrupt_index, first_level_count)
+        print(content_format.format(nub_name, interrupt_index, first_level_count))
     
     return True
 
@@ -1600,7 +1608,7 @@ def showinterruptstats(cmd_args=None):
     header_format = "{0: <20s} {1: >5s} {2: >20s} {3: >20s} {4: >20s} {5: >20s} {6: >20s} {7: >20s} {8: >20s} {9: >20s}"
     content_format = "{0: <20s} {1: >5d} {2: >20d} {3: >20d} {4: >20d} {5: >20d} {6: >20d} {7: >20d} {8: >20d} {9: >#20x}"
 
-    print header_format.format("Name", "Index", "Interrupt Count", "Interrupt Time", "Avg Interrupt Time", "Workloop Count", "Workloop CPU Time", "Workloop Time", "Avg Workloop Time", "Owner")
+    print(header_format.format("Name", "Index", "Interrupt Count", "Interrupt Time", "Avg Interrupt Time", "Workloop Count", "Workloop CPU Time", "Workloop Time", "Avg Workloop Time", "Owner"))
     
     for i in kern.interrupt_stats:
         owner = CastIOKitClass(i.owner, 'IOInterruptEventSource *')
@@ -1635,14 +1643,14 @@ def showinterruptstats(cmd_args=None):
 
         avg_first_level_time = 0
         if first_level_count != 0:
-            avg_first_level_time = first_level_time / first_level_count
+            avg_first_level_time = first_level_time // first_level_count
 
         avg_second_level_time = 0
         if second_level_count != 0:
-            avg_second_level_time = second_level_system_time / second_level_count
+            avg_second_level_time = second_level_system_time // second_level_count
 
-        print content_format.format(nub_name, interrupt_index, first_level_count, first_level_time, avg_first_level_time,
-            second_level_count, second_level_cpu_time, second_level_system_time, avg_second_level_time, owner)
+        print(content_format.format(nub_name, interrupt_index, first_level_count, first_level_time, avg_first_level_time,
+            second_level_count, second_level_cpu_time, second_level_system_time, avg_second_level_time, owner))
     
     return True
 
@@ -1667,7 +1675,7 @@ def GetPreoslogHeader():
     """
     edt_plane = GetRegistryPlane("IODeviceTree")
     if edt_plane is None:
-        print "Couldn't obtain a pointer to IODeviceTree"
+        print("Couldn't obtain a pointer to IODeviceTree")
         return None
 
     # Registry API functions operate on "plane" global variable
@@ -1676,23 +1684,23 @@ def GetPreoslogHeader():
     plane = edt_plane
     chosen = FindRegistryObjectRecurse(kern.globals.gRegistryRoot, "chosen")
     if chosen is None:
-        print "Couldn't obtain /chosen IORegistryEntry"
+        print("Couldn't obtain /chosen IORegistryEntry")
         return None
 
     memory_map = FindRegistryObjectRecurse(chosen, "memory-map")
     if memory_map is None:
-        print "Couldn't obtain memory-map from /chosen"
+        print("Couldn't obtain memory-map from /chosen")
         return None
 
     plane = prev_plane
 
     mm_preoslog = LookupKeyInOSDict(memory_map.fPropertyTable, "preoslog", CompareStringToOSSymbol)
     if mm_preoslog is None:
-        print "Couldn't find preoslog entry in memory-map"
+        print("Couldn't find preoslog entry in memory-map")
         return None
 
     if mm_preoslog.length != 16:
-        print "preoslog entry in memory-map is malformed, expected len is 16, given len is {}".format(preoslog.length)
+        print("preoslog entry in memory-map is malformed, expected len is 16, given len is {:d}".format(mm_preoslog.length))
         return None
 
     data = cast(mm_preoslog.data, "dtptr_t *")
@@ -1721,16 +1729,16 @@ def GetPreoslogHeader():
     preoslog_header.size = unsigned(preoslog_header_ptr[1])
     preoslog_header.offset = unsigned(preoslog_header_ptr[2])
 
-    for i in xrange(len(preoslog_header.valid_magic)):
+    for i in range(len(preoslog_header.valid_magic)):
         c = chr(unsigned(preoslog_header.magic[i]))
         if c != preoslog_header.valid_magic[i]:
             string = "Error: magic doesn't match, expected {:.4s}, given {:.4s}"
-            print string.format(preoslog_header.valid_magic, preoslog_header.magic)
+            print(string.format(preoslog_header.valid_magic, preoslog_header.magic))
             return None
 
     if preoslog_header.size != preoslog_size:
         string = "Error: size mismatch preoslog_header.size ({}) != preoslog_size ({})"
-        print string.format(preoslog_header.size, preoslog_size)
+        print(string.format(preoslog_header.size, preoslog_size))
         return None
 
     preoslog_data_ptr = kern.GetValueFromAddress(preoslog_vaddr + 14, "char *")
@@ -1743,7 +1751,7 @@ def showpreoslog(cmd_args=None):
 
     preoslog = GetPreoslogHeader()
     if preoslog is None:
-        print "Error: couldn't obtain preoslog header"
+        print("Error: couldn't obtain preoslog header")
         return False
 
     header = "".join([
@@ -1755,13 +1763,13 @@ def showpreoslog(cmd_args=None):
         "----preoslog log start------"
         ])
 
-    print header.format(preoslog.size, preoslog.offset, preoslog.wrapped, preoslog.source)
+    print(header.format(preoslog.size, preoslog.offset, preoslog.wrapped, preoslog.source))
 
     err = lldb.SBError()
     if preoslog.wrapped > 0:
-        print preoslog.data.GetString(err, preoslog.offset + 1)
-    print preoslog.data.GetString(err, 0)
-    print "-----preoslog log end-------"
+        print(six.ensure_str(preoslog.data.GetString(err, preoslog.offset + 1)))
+    print(six.ensure_str(preoslog.data.GetString(err, 0)))
+    print("-----preoslog log end-------")
     return True
 
 @lldb_command('showeventsources')
@@ -1770,8 +1778,8 @@ def ShowEventSources(cmd_args=None):
         syntax: (lldb) showeventsources <IOWorkLoop *>
     """
     if not cmd_args:
-        print "Please specify the address of the IOWorkLoop"
-        print ShowEventSources.__doc__
+        print("Please specify the address of the IOWorkLoop")
+        print(ShowEventSources.__doc__)
         return
 
     obj = kern.GetValueFromAddress(cmd_args[0], 'IOWorkLoop *')

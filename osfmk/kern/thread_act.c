@@ -154,6 +154,10 @@ thread_start_in_assert_wait(
 /*
  * Internal routine to terminate a thread.
  * Sometimes called with task already locked.
+ *
+ * If thread is on core, cause AST check immediately;
+ * Otherwise, let the thread continue running in kernel
+ * until it hits AST.
  */
 kern_return_t
 thread_terminate_internal(
@@ -182,7 +186,7 @@ thread_terminate_internal(
 	}
 
 	/* unconditionally unpin the thread in internal termination */
-	ipc_thread_port_unpin(thread->ith_self);
+	ipc_thread_port_unpin(get_thread_ro(thread)->tro_self_port);
 
 	thread_mtx_unlock(thread);
 
@@ -197,12 +201,16 @@ kern_return_t
 thread_terminate(
 	thread_t                thread)
 {
+	task_t task;
+
 	if (thread == THREAD_NULL) {
 		return KERN_INVALID_ARGUMENT;
 	}
 
+	task = get_threadtask(thread);
+
 	/* Kernel threads can't be terminated without their own cooperation */
-	if (thread->task == kernel_task && thread != current_thread()) {
+	if (task == kernel_task && thread != current_thread()) {
 		return KERN_FAILURE;
 	}
 
@@ -213,7 +221,7 @@ thread_terminate(
 	 * Kernel threads don't pass through the return-to-user AST checking code,
 	 * but all threads must finish their own termination in thread_apc_ast.
 	 */
-	if (thread->task == kernel_task) {
+	if (task == kernel_task) {
 		assert(thread->active == FALSE);
 		thread_ast_clear(thread, AST_APC);
 		thread_apc_ast(thread);
@@ -254,16 +262,21 @@ kern_return_t
 thread_terminate_pinned(
 	thread_t                thread)
 {
+	task_t task;
+
 	if (thread == THREAD_NULL) {
 		return KERN_INVALID_ARGUMENT;
 	}
 
-	assert(thread->task != kernel_task);
+	task = get_threadtask(thread);
+
+
+	assert(task != kernel_task);
 	assert(thread_get_tag(thread) & (THREAD_TAG_PTHREAD | THREAD_TAG_MAINTHREAD));
 
 	thread_mtx_lock(thread);
-	if (task_is_pinned(thread->task) && thread->active) {
-		assert(thread->ith_self->ip_pinned == 1);
+	if (task_is_pinned(task) && thread->active) {
+		assert(get_thread_ro(thread)->tro_self_port->ip_pinned == 1);
 	}
 	thread_mtx_unlock(thread);
 
@@ -321,7 +334,7 @@ thread_suspend(thread_t thread)
 {
 	kern_return_t result = KERN_SUCCESS;
 
-	if (thread == THREAD_NULL || thread->task == kernel_task) {
+	if (thread == THREAD_NULL || get_threadtask(thread) == kernel_task) {
 		return KERN_INVALID_ARGUMENT;
 	}
 
@@ -349,7 +362,7 @@ thread_resume(thread_t thread)
 {
 	kern_return_t result = KERN_SUCCESS;
 
-	if (thread == THREAD_NULL || thread->task == kernel_task) {
+	if (thread == THREAD_NULL || get_threadtask(thread) == kernel_task) {
 		return KERN_INVALID_ARGUMENT;
 	}
 
@@ -523,9 +536,10 @@ thread_get_state_internal(
 	int                                             flavor,
 	thread_state_t                  state,                  /* pointer to OUT array */
 	mach_msg_type_number_t  *state_count,   /*IN/OUT*/
-	boolean_t                               to_user)
+	thread_set_status_flags_t  flags)
 {
 	kern_return_t           result = KERN_SUCCESS;
+	boolean_t               to_user = !!(flags & TSSF_TRANSLATE_TO_USER);
 
 	if (thread == THREAD_NULL) {
 		return KERN_INVALID_ARGUMENT;
@@ -563,7 +577,7 @@ thread_get_state_internal(
 
 	if (to_user && result == KERN_SUCCESS) {
 		result = machine_thread_state_convert_to_user(thread, flavor, state,
-		    state_count);
+		    state_count, flags);
 	}
 
 	thread_mtx_unlock(thread);
@@ -587,7 +601,7 @@ thread_get_state(
 	thread_state_t                  state,                  /* pointer to OUT array */
 	mach_msg_type_number_t  *state_count)   /*IN/OUT*/
 {
-	return thread_get_state_internal(thread, flavor, state, state_count, FALSE);
+	return thread_get_state_internal(thread, flavor, state, state_count, TSSF_FLAGS_NONE);
 }
 
 kern_return_t
@@ -597,7 +611,7 @@ thread_get_state_to_user(
 	thread_state_t                  state,                  /* pointer to OUT array */
 	mach_msg_type_number_t  *state_count)   /*IN/OUT*/
 {
-	return thread_get_state_internal(thread, flavor, state, state_count, TRUE);
+	return thread_get_state_internal(thread, flavor, state, state_count, TSSF_TRANSLATE_TO_USER);
 }
 
 /*
@@ -606,13 +620,16 @@ thread_get_state_to_user(
  */
 static inline kern_return_t
 thread_set_state_internal(
-	thread_t                thread,
-	int                                             flavor,
+	thread_t                        thread,
+	int                             flavor,
 	thread_state_t                  state,
-	mach_msg_type_number_t  state_count,
-	boolean_t                               from_user)
+	mach_msg_type_number_t          state_count,
+	thread_state_t                  old_state,
+	mach_msg_type_number_t          old_state_count,
+	thread_set_status_flags_t       flags)
 {
 	kern_return_t           result = KERN_SUCCESS;
+	boolean_t               from_user = !!(flags & TSSF_TRANSLATE_TO_USER);
 
 	if (thread == THREAD_NULL) {
 		return KERN_INVALID_ARGUMENT;
@@ -623,7 +640,7 @@ thread_set_state_internal(
 	if (thread->active) {
 		if (from_user) {
 			result = machine_thread_state_convert_from_user(thread, flavor,
-			    state, state_count);
+			    state, state_count, old_state, old_state_count, flags);
 			if (result != KERN_SUCCESS) {
 				goto out;
 			}
@@ -677,7 +694,7 @@ thread_set_state(
 	thread_state_t                  state,
 	mach_msg_type_number_t  state_count)
 {
-	return thread_set_state_internal(thread, flavor, state, state_count, FALSE);
+	return thread_set_state_internal(thread, flavor, state, state_count, NULL, 0, TSSF_FLAGS_NONE);
 }
 
 kern_return_t
@@ -687,7 +704,7 @@ thread_set_state_from_user(
 	thread_state_t                  state,
 	mach_msg_type_number_t  state_count)
 {
-	return thread_set_state_internal(thread, flavor, state, state_count, TRUE);
+	return thread_set_state_internal(thread, flavor, state, state_count, NULL, 0, TSSF_TRANSLATE_TO_USER);
 }
 
 kern_return_t
@@ -728,7 +745,7 @@ thread_convert_thread_state(
 
 	/* Authenticate and convert thread state to kernel representation */
 	kr = machine_thread_state_convert_from_user(from_thread, flavor,
-	    in_state, state_count);
+	    in_state, state_count, NULL, 0, TSSF_FLAGS_NONE);
 
 	/* Return early if one of the thread was jop disabled while other wasn't */
 	if (kr != KERN_SUCCESS) {
@@ -737,7 +754,7 @@ thread_convert_thread_state(
 
 	/* Convert thread state to target thread user representation */
 	kr = machine_thread_state_convert_to_user(to_thread, flavor,
-	    in_state, &state_count);
+	    in_state, &state_count, TSSF_PRESERVE_FLAGS);
 
 	if (kr == KERN_SUCCESS) {
 		if (state_count <= *out_state_count) {
@@ -778,7 +795,7 @@ thread_state_initialize(
 
 			if (thread_stop(thread, TRUE)) {
 				thread_mtx_lock(thread);
-				result = machine_thread_state_initialize( thread );
+				machine_thread_state_initialize( thread );
 				thread_unstop(thread);
 			} else {
 				thread_mtx_lock(thread);
@@ -787,7 +804,7 @@ thread_state_initialize(
 
 			thread_release(thread);
 		} else {
-			result = machine_thread_state_initialize( thread );
+			machine_thread_state_initialize( thread );
 		}
 	} else {
 		result = KERN_TERMINATED;
@@ -910,9 +927,13 @@ thread_setstatus_from_user(
 	thread_t                thread,
 	int                                             flavor,
 	thread_state_t                  tstate,
-	mach_msg_type_number_t  count)
+	mach_msg_type_number_t  count,
+	thread_state_t                  old_tstate,
+	mach_msg_type_number_t  old_count,
+	thread_set_status_flags_t flags)
 {
-	return thread_set_state_from_user(thread, flavor, tstate, count);
+	return thread_set_state_internal(thread, flavor, tstate, count, old_tstate,
+	           old_count, flags | TSSF_TRANSLATE_TO_USER);
 }
 
 /*
@@ -1201,14 +1222,13 @@ act_get_state_to_user(
 	return thread_get_state_to_user(thread, flavor, state, count);
 }
 
-/* returns the CPU number this caused an AST check on, or -1 */
-static int
+static void
 act_set_ast(
-	thread_t thread,
-	ast_t    ast)
+	thread_t   thread,
+	ast_t      ast,
+	ast_gen_t *gens)
 {
 	spl_t s = splsched();
-	int caused_check_on_cpu = -1;
 
 	if (thread == current_thread()) {
 		thread_ast_set(thread, ast);
@@ -1222,15 +1242,15 @@ act_set_ast(
 		if (processor != PROCESSOR_NULL &&
 		    processor->state == PROCESSOR_RUNNING &&
 		    processor->active_thread == thread) {
+			if (gens) {
+				ast_generation_get(processor, gens);
+			}
 			cause_ast_check(processor);
-			caused_check_on_cpu = processor->cpu_id;
 		}
 		thread_unlock(thread);
 	}
 
 	splx(s);
-
-	return caused_check_on_cpu;
 }
 
 /*
@@ -1269,10 +1289,9 @@ act_set_debug_assert(void)
 }
 
 void
-act_set_astbsd(
-	thread_t        thread)
+act_set_astbsd(thread_t thread)
 {
-	act_set_ast( thread, AST_BSD );
+	act_set_ast(thread, AST_BSD, NULL);
 }
 
 void
@@ -1298,15 +1317,14 @@ act_clear_astkevent(thread_t thread, uint16_t bits)
 	return cur & bits;
 }
 
-int
-act_set_ast_reset_pcs(thread_t thread)
+void
+act_set_ast_reset_pcs(thread_t thread, ast_gen_t gens[])
 {
-	return act_set_ast(thread, AST_RESET_PCS);
+	act_set_ast(thread, AST_RESET_PCS, gens);
 }
 
 void
-act_set_kperf(
-	thread_t        thread)
+act_set_kperf(thread_t thread)
 {
 	/* safety check */
 	if (thread != current_thread()) {
@@ -1315,7 +1333,7 @@ act_set_kperf(
 		}
 	}
 
-	act_set_ast( thread, AST_KPERF );
+	act_set_ast(thread, AST_KPERF, NULL);
 }
 
 #if CONFIG_MACF
@@ -1323,14 +1341,14 @@ void
 act_set_astmacf(
 	thread_t        thread)
 {
-	act_set_ast( thread, AST_MACF);
+	act_set_ast( thread, AST_MACF, NULL);
 }
 #endif
 
 void
 act_set_astledger(thread_t thread)
 {
-	act_set_ast(thread, AST_LEDGER);
+	act_set_ast(thread, AST_LEDGER, NULL);
 }
 
 /*
@@ -1350,17 +1368,17 @@ act_set_astledger_async(thread_t thread)
 void
 act_set_io_telemetry_ast(thread_t thread)
 {
-	act_set_ast(thread, AST_TELEMETRY_IO);
+	act_set_ast(thread, AST_TELEMETRY_IO, NULL);
 }
 
 void
 act_set_macf_telemetry_ast(thread_t thread)
 {
-	act_set_ast(thread, AST_TELEMETRY_MACF);
+	act_set_ast(thread, AST_TELEMETRY_MACF, NULL);
 }
 
 void
 act_set_astproc_resource(thread_t thread)
 {
-	act_set_ast(thread, AST_PROC_RESOURCE);
+	act_set_ast(thread, AST_PROC_RESOURCE, NULL);
 }

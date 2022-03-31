@@ -1,3 +1,7 @@
+from __future__ import absolute_import, print_function
+
+from builtins import range
+
 from xnu import *
 from scheduler import GetRecentTimestamp
 import xnudefines
@@ -14,16 +18,16 @@ ulock_types = {
     'ull_t', 'kind', 'addr/obj', 'pid/offs', 'owner', 'turnstile', 'waiters'))
 def GetUlockSummary(ull):
     code = int(ull.ull_opcode)
-    if ulock_types.has_key(code):
+    if code in ulock_types:
         ull_type = ulock_types[code]
     else:
         ull_type = "{:#x}".format(code)
 
     s = "{ull: <#20x} {ull_type: <20s}".format(ull=ull, ull_type=ull_type)
     ulk=ull.ull_key
-    if int(ulk.ulk_key_type) is 1:
+    if int(ulk.ulk_key_type) == 1:
         s += " {ulk.ulk_addr: <#20x} {ulk.ulk_pid: <10d}".format(ulk=ulk)
-    elif int(ulk.ulk_key_type) is 2:
+    elif int(ulk.ulk_key_type) == 2:
         s += " {ulk.ulk_object: <#20x} {ulk.ulk_offset: <10d}".format(ulk=ulk)
     else:
         s += " {:<20s} {:<10s}".format("", "")
@@ -40,6 +44,6 @@ def ShowAllUlocks(cmd_args=None, cmd_options={}, O=None):
     with O.table(GetUlockSummary.header):
         count = kern.globals.ull_hash_buckets;
         buckets = kern.globals.ull_bucket
-        for i in xrange(0, count):
+        for i in range(0, count):
             for ull in IterateLinkageChain(addressof(buckets[i].ulb_head), 'ull_t *', 'ull_hash_link'):
-                print GetUlockSummary(ull)
+                print(GetUlockSummary(ull))

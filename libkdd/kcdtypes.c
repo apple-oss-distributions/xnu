@@ -298,6 +298,10 @@ kcdata_get_typedescription(unsigned type_id, uint8_t * buffer, uint32_t buffer_s
 		setup_type_definition(retval, type_id, 0, "thread_snapshots");
 		break;
 
+	case STACKSHOT_KCCONTAINER_PORTLABEL:
+		setup_type_definition(retval, type_id, 0, "portlabels");
+		break;
+
 	case STACKSHOT_KCTYPE_TASK_SNAPSHOT: {
 		i = 0;
 		_SUBTYPE(KC_ST_UINT64, struct task_snapshot_v2, ts_unique_pid);
@@ -628,19 +632,22 @@ kcdata_get_typedescription(unsigned type_id, uint8_t * buffer, uint32_t buffer_s
 
 	case STACKSHOT_KCTYPE_THREAD_WAITINFO: {
 		i = 0;
-		_SUBTYPE(KC_ST_UINT64, struct stackshot_thread_waitinfo, owner);
-		_SUBTYPE(KC_ST_UINT64, struct stackshot_thread_waitinfo, waiter);
-		_SUBTYPE(KC_ST_UINT64, struct stackshot_thread_waitinfo, context);
-		_SUBTYPE(KC_ST_UINT8, struct stackshot_thread_waitinfo, wait_type);
+		_SUBTYPE(KC_ST_UINT64, struct stackshot_thread_waitinfo_v2, owner);
+		_SUBTYPE(KC_ST_UINT64, struct stackshot_thread_waitinfo_v2, waiter);
+		_SUBTYPE(KC_ST_UINT64, struct stackshot_thread_waitinfo_v2, context);
+		_SUBTYPE(KC_ST_UINT8, struct stackshot_thread_waitinfo_v2, wait_type);
+		_SUBTYPE(KC_ST_INT16, struct stackshot_thread_waitinfo_v2, portlabel_id);
+		_SUBTYPE(KC_ST_UINT32, struct stackshot_thread_waitinfo_v2, wait_flags);
 		setup_type_definition(retval, type_id, i, "thread_waitinfo");
 		break;
 	}
 
 	case STACKSHOT_KCTYPE_THREAD_GROUP_SNAPSHOT: {
 		i = 0;
-		_SUBTYPE(KC_ST_UINT64, struct thread_group_snapshot_v2, tgs_id);
-		_SUBTYPE_ARRAY(KC_ST_CHAR, struct thread_group_snapshot_v2, tgs_name, 16);
-		_SUBTYPE(KC_ST_UINT64, struct thread_group_snapshot_v2, tgs_flags);
+		_SUBTYPE(KC_ST_UINT64, struct thread_group_snapshot_v3, tgs_id);
+		_SUBTYPE_ARRAY(KC_ST_CHAR, struct thread_group_snapshot_v3, tgs_name, 16);
+		_SUBTYPE(KC_ST_UINT64, struct thread_group_snapshot_v3, tgs_flags);
+		_SUBTYPE_ARRAY(KC_ST_CHAR, struct thread_group_snapshot_v3, tgs_name_cont, 16);
 		setup_type_definition(retval, type_id, i, "thread_group_snapshot");
 		break;
 	}
@@ -914,14 +921,33 @@ kcdata_get_typedescription(unsigned type_id, uint8_t * buffer, uint32_t buffer_s
 
 	case STACKSHOT_KCTYPE_THREAD_TURNSTILEINFO: {
 		i = 0;
-		_SUBTYPE(KC_ST_UINT64, struct stackshot_thread_turnstileinfo, waiter);
-		_SUBTYPE(KC_ST_UINT64, struct stackshot_thread_turnstileinfo, turnstile_context);
-		_SUBTYPE(KC_ST_UINT8, struct stackshot_thread_turnstileinfo, turnstile_priority);
-		_SUBTYPE(KC_ST_UINT8, struct stackshot_thread_turnstileinfo, number_of_hops);
-		_SUBTYPE(KC_ST_UINT64, struct stackshot_thread_turnstileinfo, turnstile_flags);
+		_SUBTYPE(KC_ST_UINT64, struct stackshot_thread_turnstileinfo_v2, waiter);
+		_SUBTYPE(KC_ST_UINT64, struct stackshot_thread_turnstileinfo_v2, turnstile_context);
+		_SUBTYPE(KC_ST_UINT8, struct stackshot_thread_turnstileinfo_v2, turnstile_priority);
+		_SUBTYPE(KC_ST_UINT8, struct stackshot_thread_turnstileinfo_v2, number_of_hops);
+		_SUBTYPE(KC_ST_UINT64, struct stackshot_thread_turnstileinfo_v2, turnstile_flags);
+		_SUBTYPE(KC_ST_INT16, struct stackshot_thread_turnstileinfo_v2, portlabel_id);
 		setup_type_definition(retval, type_id, i, "thread_turnstileinfo");
 		break;
 	}
+
+	case STACKSHOT_KCTYPE_PORTLABEL: {
+		i = 0;
+		_SUBTYPE(KC_ST_INT16, struct portlabel_info, portlabel_id);
+		_SUBTYPE(KC_ST_UINT16, struct portlabel_info, portlabel_flags);
+		_SUBTYPE(KC_ST_INT8, struct portlabel_info, portlabel_domain);
+		subtypes[0].kcs_flags |= KCS_SUBTYPE_FLAGS_MERGE;
+		subtypes[1].kcs_flags |= KCS_SUBTYPE_FLAGS_MERGE;
+		subtypes[2].kcs_flags |= KCS_SUBTYPE_FLAGS_MERGE;
+		setup_type_definition(retval, type_id, i, "portlabel_info");
+		break;
+	}
+
+	case STACKSHOT_KCTYPE_PORTLABEL_NAME:
+		i = 0;
+		_STRINGTYPE("portlabel_name");
+		setup_type_definition(retval, type_id, i, "portlabel_name");
+		break;
 
 	case STACKSHOT_KCTYPE_TASK_CPU_ARCHITECTURE: {
 		i = 0;

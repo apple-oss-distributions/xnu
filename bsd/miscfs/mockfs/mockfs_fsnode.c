@@ -85,13 +85,7 @@ mockfs_fsnode_create(mount_t mp, uint8_t type, mockfs_fsnode_t * fsnpp)
 		goto done;
 	}
 
-	MALLOC(*fsnpp, typeof(*fsnpp), sizeof(**fsnpp), M_TEMP, M_WAITOK | M_ZERO);
-
-	if (!*fsnpp) {
-		rvalue = ENOMEM;
-		goto done;
-	}
-
+	*fsnpp = kalloc_type(mockfs_fsnode_t, Z_WAITOK | Z_ZERO | Z_NOFAIL);
 	(*fsnpp)->size = new_size;
 	(*fsnpp)->type = type;
 	(*fsnpp)->mnt = mp;
@@ -160,7 +154,7 @@ mockfs_fsnode_destroy(mockfs_fsnode_t fsnp)
 		}
 	}
 
-	FREE(fsnp, M_TEMP);
+	kfree_type(mockfs_fsnode_t, fsnp);
 done:
 	return rvalue;
 }

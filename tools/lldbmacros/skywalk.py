@@ -2,6 +2,10 @@
 """ Please make sure you read the README COMPLETELY BEFORE reading anything below.
     It is very critical that you read coding guidelines in Section E in README file.
 """
+from __future__ import absolute_import, print_function
+
+from builtins import hex
+from builtins import range
 
 from xnu import *
 from utils import *
@@ -22,11 +26,12 @@ def IterateProcChannels(proc):
     proc_filedesc = addressof(proc.p_fd)
     proc_ofiles = proc_filedesc.fd_ofiles
 
-    for fd in xrange(0, unsigned(proc_filedesc.fd_afterlast)):
+    for fd in range(0, unsigned(proc_filedesc.fd_afterlast)):
         if unsigned(proc_ofiles[fd]) != 0:
             proc_fd_fglob = proc_ofiles[fd].fp_glob
             if (unsigned(proc_fd_fglob.fg_ops.fo_type) == 10):
-                yield Cast(proc_fd_fglob.fg_data, 'kern_channel *')
+                proc_fd_fglob_fg_data = Cast(proc_fd_fglob.fg_data, 'void *')
+                yield Cast(proc_fd_fglob_fg_data, 'kern_channel *')
 
 def IterateKernChannelRings(kc, kind):
     """ Iterate through all rings on a given channel
@@ -48,7 +53,7 @@ def IterateKernChannelRings(kc, kind):
 
     # note that ch_last is actually one greater than the last
     # as per the comment in ch_connect
-    for i in xrange(kc.ch_first[kind], kc.ch_last[kind]):
+    for i in range(kc.ch_first[kind], kc.ch_last[kind]):
         yield addressof(rings[i])
 
 # Note this is broken if you have type summaries enabled
@@ -104,9 +109,9 @@ def ShowProcChannels(cmd_args=None):
 
     proc = kern.GetValueFromAddress(cmd_args[0], 'proc_t')
 
-    print GetKernChannelSummary.header
+    print(GetKernChannelSummary.header)
     for kc in IterateProcChannels(proc):
-        print GetKernChannelSummary(kc)
+        print(GetKernChannelSummary(kc))
 
 @lldb_command('showchannelrings')
 def ShowChannelRings(cmd_args=None):
@@ -120,25 +125,25 @@ def ShowChannelRings(cmd_args=None):
 
     kc = kern.GetValueFromAddress(cmd_args[0], 'kern_channel *')
 
-    print "RX rings:"
-    print GetKernChannelRingSummary.header
+    print("RX rings:")
+    print(GetKernChannelRingSummary.header)
     for ring in IterateKernChannelRings(kc, 0) :
-        print GetKernChannelRingSummary(ring)
+        print(GetKernChannelRingSummary(ring))
 
-    print "TX rings:"
-    print GetKernChannelRingSummary.header
+    print("TX rings:")
+    print(GetKernChannelRingSummary.header)
     for ring in IterateKernChannelRings(kc, 1) :
-        print GetKernChannelRingSummary(ring)
+        print(GetKernChannelRingSummary(ring))
 
-    print "ALLOC rings:"
-    print GetKernChannelRingSummary.header
+    print("ALLOC rings:")
+    print(GetKernChannelRingSummary.header)
     for ring in IterateKernChannelRings(kc, 2) :
-        print GetKernChannelRingSummary(ring)
+        print(GetKernChannelRingSummary(ring))
 
-    print "FREE rings:"
-    print GetKernChannelRingSummary.header
+    print("FREE rings:")
+    print(GetKernChannelRingSummary.header)
     for ring in IterateKernChannelRings(kc, 3) :
-        print GetKernChannelRingSummary(ring)
+        print(GetKernChannelRingSummary(ring))
 
 def SkmemCacheModeAsString(mode) :
     out_string = ""
@@ -162,14 +167,14 @@ def ShowSkmemCache(cmd_args=None) :
     """
 
     format_string = "{:<4s}  {:<18s} {:<4s} {:<4s} {:<4s} {:<4s} {:<4s} {:<4s} {:<4s} {:<4s} {:<4s} {:<s}"
-    print format_string.format("", "ADDR", "BUFI", "BUFM", "RESC", "SLCR", "SLDE", "SLAL", "SLFR", "DECO", "MODE", "NAME")
+    print(format_string.format("", "ADDR", "BUFI", "BUFM", "RESC", "SLCR", "SLDE", "SLAL", "SLFR", "DECO", "MODE", "NAME"))
 
     i = 1
     skmhead = kern.globals.skmem_cache_head
 
     for skm in IterateTAILQ_HEAD(skmhead, "skm_link") :
         format_string = "{:>4d}: 0x{:<08x} {:<4d} {:<4d} {:<4d} {:<4d} {:<4d} {:<4d} {:<4d} {:<4d} {:<4s} \"{:<s}\""
-        print format_string.format(i, skm, skm.skm_sl_bufinuse, skm.skm_sl_bufmax, skm.skm_sl_rescale, skm.skm_sl_create, skm.skm_sl_destroy, skm.skm_sl_alloc, skm.skm_sl_free, skm.skm_depot_contention, SkmemCacheModeAsString(skm.skm_mode), str(skm.skm_name))
+        print(format_string.format(i, skm, skm.skm_sl_bufinuse, skm.skm_sl_bufmax, skm.skm_sl_rescale, skm.skm_sl_create, skm.skm_sl_destroy, skm.skm_sl_alloc, skm.skm_sl_free, skm.skm_depot_contention, SkmemCacheModeAsString(skm.skm_mode), str(skm.skm_name)))
         i += 1
 
 @lldb_command('showskmemslab')
@@ -178,50 +183,50 @@ def ShowBufCtl(cmd_args=None) :
     """
 
     if (cmd_args == None or len(cmd_args) == 0) :
-        print "Missing argument 0 (skmem_cache address)."
+        print("Missing argument 0 (skmem_cache address).")
         return
 
     skm = kern.GetValueFromAddress(cmd_args[0], 'skmem_cache *')
 
     for slab in IterateTAILQ_HEAD(skm.skm_sl_partial_list, "sl_link") :
         format_string = "{:<18s} {:<4s} {:18s} {:18s}"
-        print format_string.format("slab", "ref", "base", "basem")
+        print(format_string.format("slab", "ref", "base", "basem"))
         format_string = "0x{:<08x} {:<4d} 0x{:<08x} 0x{:08x}"
-        print format_string.format(slab, slab.sl_refcnt, slab.sl_base, slab.sl_basem)
-        print "\t========================= free ========================="
+        print(format_string.format(slab, slab.sl_refcnt, slab.sl_base, slab.sl_basem))
+        print("\t========================= free =========================")
         format_string = "\t{:<18s} {:18s} {:18s}"
-        print format_string.format("bufctl", "buf_addr", "buf_addrm")
+        print(format_string.format("bufctl", "buf_addr", "buf_addrm"))
         for bc in IterateListEntry(slab.sl_head, 'struct skmem_bufctl *',
           'bc_link', list_prefix='s') :
             format_string = "\t0x{:<08x} 0x{:<08x} 0x{:<08x}"
-            print format_string.format(bc, bc.bc_addr, bc.bc_addrm)
+            print(format_string.format(bc, bc.bc_addr, bc.bc_addrm))
 
     for slab in IterateTAILQ_HEAD(skm.skm_sl_empty_list, "sl_link") :
         format_string = "{:<18s}  {:<4s} {:18s} {:18s}"
-        print format_string.format("slab", "ref", "base", "basem")
+        print(format_string.format("slab", "ref", "base", "basem"))
         format_string = "0x{:<08x} {:<4d} 0x{:<08x} 0x{:08x}"
-        print format_string.format(slab, slab.sl_refcnt, slab.sl_base, slab.sl_basem)
-        print "\t========================= free ========================="
+        print(format_string.format(slab, slab.sl_refcnt, slab.sl_base, slab.sl_basem))
+        print("\t========================= free =========================")
         format_string = "\t{:<18s} {:18s} {:18s}"
-        print format_string.format("bufctl", "buf_addr", "buf_addrm")
+        print(format_string.format("bufctl", "buf_addr", "buf_addrm"))
         for bc in IterateListEntry(slab.sl_head, 'struct skmem_bufctl *',
           'bc_link', list_prefix='s') :
             format_string = "\t0x{:<08x} 0x{:<08x} 0x{:<08x}"
-            print format_string.format(bc, bc.bc_addr, bc.bc_addrm)
+            print(format_string.format(bc, bc.bc_addr, bc.bc_addrm))
 
-    print " "
+    print(" ")
     for i in range(0, skm.skm_hash_mask + 1) :
         format_string = "{:<18s}  {:<4s}"
-        print format_string.format("bucket", "idx")
+        print(format_string.format("bucket", "idx"))
         format_string = "0x{:<08x} {:<4d}"
-        print format_string.format(addressof(skm.skm_hash_table[i]), i)
-        print "\t====================== allocated ======================="
+        print(format_string.format(addressof(skm.skm_hash_table[i]), i))
+        print("\t====================== allocated =======================")
         format_string = "\t{:<18s} {:18s} {:18s}"
-        print format_string.format("bufctl", "buf_addr", "buf_addrm")
+        print(format_string.format("bufctl", "buf_addr", "buf_addrm"))
         for bc in IterateListEntry(skm.skm_hash_table[i].bcb_head,
           'struct skmem_bufctl *', 'bc_link', list_prefix='s') :
             format_string = "\t0x{:<08x} 0x{:<08x} 0x{:<08x}"
-            print format_string.format(bc, bc.bc_addr, bc.bc_addrm)
+            print(format_string.format(bc, bc.bc_addr, bc.bc_addrm))
 
 def SkmemArenaTypeAsString(type) :
     out_string = ""
@@ -250,7 +255,7 @@ def ShowSkmemArena(cmd_args=None) :
 
     for ar in IterateTAILQ_HEAD(arhead, "ar_link") :
         format_string = "{:>4d}: 0x{:<08x} {:<6s} {:>5d} KB \"{:<s}\""
-        print format_string.format(i, ar, SkmemArenaTypeAsString(ar.ar_type), ar.ar_mapsize >> 10, str(ar.ar_name))
+        print(format_string.format(i, ar, SkmemArenaTypeAsString(ar.ar_type), ar.ar_mapsize >> 10, str(ar.ar_name)))
         i += 1
 
 @lldb_command('showskmemregions')
@@ -263,7 +268,7 @@ def ShowSkmemRegions(cmd_args=None) :
 
     for skr in IterateTAILQ_HEAD(skrhead, "skr_link") :
         format_string = "{:>4d}: 0x{:<08x} \"{:<s}\""
-        print format_string.format(i, skr, str(skr.skr_name))
+        print(format_string.format(i, skr, str(skr.skr_name)))
         i += 1
 
 @lldb_command('showskmemregion')
@@ -272,32 +277,32 @@ def ShowSkmemRegion(cmd_args=None) :
     """
 
     if (cmd_args == None or len(cmd_args) == 0) :
-        print "Missing argument 0 (skmem_region address)."
+        print("Missing argument 0 (skmem_region address).")
         return
 
     skr = kern.GetValueFromAddress(cmd_args[0], 'skmem_region *')
 
-    print "\t========================= free ========================="
+    print("\t========================= free =========================")
     for sg in IterateTAILQ_HEAD(skr.skr_seg_free, "sg_link") :
         format_string = "{:<18s} {:<4s} {:18s} {:18s}"
-        print format_string.format("segment", "idx", "start", "end")
+        print(format_string.format("segment", "idx", "start", "end"))
         format_string = "0x{:<08x} {:<4d} 0x{:<08x} 0x{:08x}"
-        print format_string.format(sg, sg.sg_index, sg.sg_start, sg.sg_end)
+        print(format_string.format(sg, sg.sg_index, sg.sg_start, sg.sg_end))
         format_string = "\t{:<18s} {:18s} {:18s}"
-        print format_string.format("bufctl", "buf_addr", "buf_addrm")
+        print(format_string.format("bufctl", "buf_addr", "buf_addrm"))
 
-    print " "
+    print(" ")
     for i in range(0, skr.skr_hash_mask + 1) :
         format_string = "{:<18s}  {:<4s}"
-        print format_string.format("bucket", "idx")
+        print(format_string.format("bucket", "idx"))
         format_string = "0x{:<08x} {:<4d}"
-        print format_string.format(addressof(skr.skr_hash_table[i]), i)
-        print "\t====================== allocated ======================="
+        print(format_string.format(addressof(skr.skr_hash_table[i]), i))
+        print("\t====================== allocated =======================")
         format_string = "\t{:<18s} {:4s} {:18s} {:18s}"
-        print format_string.format("segment", "idx", "start", "end")
+        print(format_string.format("segment", "idx", "start", "end"))
         for sg in IterateTAILQ_HEAD(skr.skr_hash_table[i].sgb_head, "sg_link") :
             format_string = "\t0x{:<08x} {:<4d} 0x{:<08x} 0x{:<08x}"
-            print format_string.format(sg, sg.sg_index, sg.sg_start, sg.sg_end)
+            print(format_string.format(sg, sg.sg_index, sg.sg_start, sg.sg_end))
 
 @lldb_command('showchannelupphash')
 def ShowChannelUppHash(cmd_args=None) :
@@ -305,7 +310,7 @@ def ShowChannelUppHash(cmd_args=None) :
     """
 
     if (cmd_args == None or len(cmd_args) == 0) :
-        print "Missing argument 0 (skmem_cache address)."
+        print("Missing argument 0 (skmem_cache address).")
         return
 
     ch = kern.GetValueFromAddress(cmd_args[0], 'kern_channel *')
@@ -314,11 +319,11 @@ def ShowChannelUppHash(cmd_args=None) :
     for i in range(KERN_CHANNEL_UPP_HTBL_SIZE) :
         bkt = addressof(ch.ch_upp_hash_table[i])
         format_string = "{:>4d} 0x{:<08x}"
-        print format_string.format(i, bkt)
+        print(format_string.format(i, bkt))
         for kqum in IterateListEntry(bkt.upp_head, 'struct __kern_quantum *',
                                       'qum_upp_link', list_prefix='s') :
             format_string = "0x{:<08x}"
-            print format_string.format(kqum)
+            print(format_string.format(kqum))
 
 @lldb_type_summary(['struct ns *'])
 @header('{:<20s} {:<5s} {:<48s} {:<4s}'.format('ns', 'proto', 'addr', 'nreservations'))
@@ -370,22 +375,22 @@ def GetStructNsSummary(ns):
 def ShowNetNS(cmd_args=None):
     """ Show the netns table
     """
-    print"\nnetns_namespaces:"
-    print GetStructNsSummary.header
+    print("\nnetns_namespaces:")
+    print(GetStructNsSummary.header)
 
     namespaces = kern.globals.netns_namespaces
     for ns in IterateRBTreeEntry(namespaces, 'struct ns *', 'ns_link'):
-        print GetStructNsSummary(ns)
+        print(GetStructNsSummary(ns))
 
-    print "\nwild: (these should be duplicated above)"
-    print GetStructNsSummary.header
+    print("\nwild: (these should be duplicated above)")
+    print(GetStructNsSummary.header)
     for i in range(0,4):
-        print GetStructNsSummary(kern.globals.netns_global_wild[i])
+        print(GetStructNsSummary(kern.globals.netns_global_wild[i]))
 
-    print "\nnon wild:"
-    print GetStructNsSummary.header
+    print("\nnon wild:")
+    print(GetStructNsSummary.header)
     for i in range(0,4):
-        print GetStructNsSummary(kern.globals.netns_global_non_wild[i])
+        print(GetStructNsSummary(kern.globals.netns_global_non_wild[i]))
 
 
 NETNS_LISTENER = 0x00
@@ -446,9 +451,9 @@ def ShowAllNetNSTokens(cmd_args=None):
     """
 
     tokenhead = kern.globals.netns_all_tokens
-    print GetNsTokenSummary.header
+    print(GetNsTokenSummary.header)
     for nt in IterateListEntry(tokenhead, 'struct ns_token *', 'nt_all_link', list_prefix='s'):
-        print GetNsTokenSummary(nt)
+        print(GetNsTokenSummary(nt))
 
 @lldb_command("shownetnstokens")
 def ShowNetNSTokens(cmd_args=None):
@@ -457,20 +462,20 @@ def ShowNetNSTokens(cmd_args=None):
     """
 
     if (cmd_args == None or len(cmd_args) == 0):
-        print "No ifp argument provided, showing unbound tokens"
+        print("No ifp argument provided, showing unbound tokens")
         tokenhead = kern.globals.netns_unbound_tokens
     elif len(cmd_args) > 0:
         ifp = kern.GetValueFromAddress(cmd_args[0], 'ifnet *')
-        print "Showing tokens for ifp %r" % ifp
+        print("Showing tokens for ifp %r" % ifp)
         tokenhead = ifp.if_netns_tokens
     else:
-        print "Missing ifp argument 0 in shownetnstokens"
-        print cmd_args
+        print("Missing ifp argument 0 in shownetnstokens")
+        print(cmd_args)
         return
 
-    print GetNsTokenSummary.header
+    print(GetNsTokenSummary.header)
     for nt in IterateListEntry(tokenhead, 'struct ns_token *', 'nt_ifp_link', list_prefix='s'):
-        print GetNsTokenSummary(nt)
+        print(GetNsTokenSummary(nt))
 
 def IterateSTAILQ_HEAD(headval, element_name):
     iter_val = headval.stqh_first
@@ -484,23 +489,23 @@ def ShowNexusChannels(cmd_args=None):
     """ show nexus channels
     """
     if (cmd_args == None or len(cmd_args) == 0):
-        print "Missing argument 0 (kern_nexus address)."
+        print("Missing argument 0 (kern_nexus address).")
         return
 
     nx = kern.GetValueFromAddress(cmd_args[0], 'kern_nexus *')
     i = 1
 
     format_string = "{:>4s}  {:<18s} {:>4s} {:<7s} {:<7s} {:<18s} {:<18s} {:<18s} {:>8s} {:6s} {:<18s} {:>4s} {:s}"
-    print format_string.format("", "addr", "refs", "txrings", "rxrings", "arena", "ioskmap", "mapaddr", "mapsize", "maprdr", "na", "fd", "process")
+    print(format_string.format("", "addr", "refs", "txrings", "rxrings", "arena", "ioskmap", "mapaddr", "mapsize", "maprdr", "na", "fd", "process"))
 
     for ch in IterateSTAILQ_HEAD(nx.nx_ch_head, "ch_link"):
         format_string = "{:>4d}: 0x{:<08x} {:>4d} [{:2d},{:2d}] [{:2d},{:2d}] 0x{:<08x} 0x{:<08x} 0x{:<16x} {:>8d} {:>6d} 0x{:<08x} {:>4d} {:s}({:d})"
-        print format_string.format(i, ch, ch.ch_refcnt, ch.ch_first[0], ch.ch_last[0], ch.ch_first[1], ch.ch_last[1], ch.ch_mmap.ami_arena, ch.ch_mmap.ami_mapref, ch.ch_mmap.ami_mapaddr, ch.ch_mmap.ami_mapsize, ch.ch_mmap.ami_redirect, ch.ch_na, ch.ch_fd, ch.ch_name, ch.ch_pid)
+        print(format_string.format(i, ch, ch.ch_refcnt, ch.ch_first[0], ch.ch_last[0], ch.ch_first[1], ch.ch_last[1], ch.ch_mmap.ami_arena, ch.ch_mmap.ami_mapref, ch.ch_mmap.ami_mapaddr, ch.ch_mmap.ami_mapsize, ch.ch_mmap.ami_redirect, ch.ch_na, ch.ch_fd, ch.ch_name, ch.ch_pid))
         i += 1
 
     for ch in IterateSTAILQ_HEAD(nx.nx_ch_nonxref_head, "ch_link"):
         format_string = "{:>4d}: 0x{:<08x} {:>4d} [{:2d},{:2d}] [{:2d},{:2d}] 0x{:<08x} 0x{:<08x} 0x{:<16x} {:>8d} {:>6d} 0x{:<08x} {:>4d} {:s}({:d})"
-        print format_string.format(i, ch, ch.ch_refcnt, ch.ch_first[0], ch.ch_last[0], ch.ch_first[1], ch.ch_last[1], ch.ch_mmap.ami_arena, ch.ch_mmap.ami_mapref, ch.ch_mmap.ami_mapaddr, ch.ch_mmap.ami_mapsize, ch.ch_mmap.ami_redirect, ch.ch_na, ch.ch_fd, ch.ch_name, ch.ch_pid)
+        print(format_string.format(i, ch, ch.ch_refcnt, ch.ch_first[0], ch.ch_last[0], ch.ch_first[1], ch.ch_last[1], ch.ch_mmap.ami_arena, ch.ch_mmap.ami_mapref, ch.ch_mmap.ami_mapaddr, ch.ch_mmap.ami_mapsize, ch.ch_mmap.ami_redirect, ch.ch_na, ch.ch_fd, ch.ch_name, ch.ch_pid))
         i += 1
 
 def IterateProcNECP(proc):
@@ -515,11 +520,12 @@ def IterateProcNECP(proc):
     proc_filedesc = addressof(proc.p_fd)
     proc_ofiles = proc_filedesc.fd_ofiles
 
-    for fd in xrange(0, unsigned(proc_filedesc.fd_afterlast)):
+    for fd in range(0, unsigned(proc_filedesc.fd_afterlast)):
         if unsigned(proc_ofiles[fd]) != 0:
             proc_fd_fglob = proc_ofiles[fd].fp_glob
             if (unsigned(proc_fd_fglob.fg_ops.fo_type) == 9):
-                yield Cast(proc_fd_fglob.fg_data, 'necp_fd_data *')
+                proc_fd_fglob_fg_data = Cast(proc_fd_fglob.fg_data, 'void *')
+                yield Cast(proc_fd_fglob_fg_data, 'necp_fd_data *')
 
 def GetNECPClientBitFields(necp):
     """ Return the bit fields in necp_client as string
@@ -622,9 +628,9 @@ def ShowProcNECP(cmd_args=None):
 
     proc = kern.GetValueFromAddress(cmd_args[0], 'proc_t')
 
-    print GetNECPSummary.header
+    print(GetNECPSummary.header)
     for kc in IterateProcNECP(proc):
-        print GetNECPSummary(kc)
+        print(GetNECPSummary(kc))
 
 def NexusTypePtr(nx):
     if nx.nx_prov.nxprov_params.nxp_type == GetEnumValue("nexus_type_t::NEXUS_TYPE_FLOW_SWITCH"):
@@ -665,7 +671,7 @@ def ShowNexuses(cmd_args=None):
         nexus_summaries.append(GetStructNexusSummary(nx))
     nexus_summaries.sort()
     for nx_str in nexus_summaries:
-        print "{0:s}".format(nx_str)
+        print("{0:s}".format(nx_str))
 
 def GetSockAddr4(in_addr):
     return inet_ntoa(struct.pack("I", unsigned(in_addr.s_addr)))
@@ -733,11 +739,11 @@ def ShowFlowswitches(cmd_args=None):
         fsw = GetNexusAsFlowswitch(nx)
         if ifname not in str(fsw.fsw_ifp.if_xname):
             continue
-        print "{}".format(FlowswitchStr(fsw))
+        print("{}".format(FlowswitchStr(fsw)))
         flows = GetFlowswitchFlowEntries(fsw)
         flows.sort(key=GetFlowEntryPid)
         for fe in flows:
-            print "    {}".format(FlowEntryStr(fe))
+            print("    {}".format(FlowEntryStr(fe)))
 
 def CuckooHashtableForeachSlot(cht, slotHandler):
     for i in range(0, cht._n_buckets):
@@ -770,9 +776,9 @@ def ShowCuckooHashtable(cmd_args=None):
 
     cht = kern.GetValueFromAddress(cmd_args[0], 'struct cuckoo_hashtable *')
 
-    print "(struct cuckoo_hashtable *){:18s} capacity {:d} entries {:d}".format(hex(cht), cht._capacity, cht._n_entries)
+    print("(struct cuckoo_hashtable *){:18s} capacity {:d} entries {:d}".format(hex(cht), cht._capacity, cht._n_entries))
     def CuckooHashtablePrintNode(node, hashValue):
-        print "  node {} hash 0x{:08x}".format(hex(node), int(hashValue))
+        print("  node {} hash 0x{:08x}".format(hex(node), int(hashValue)))
 
     CuckooHashtableForeach(cht, CuckooHashtablePrintNode)
 
@@ -783,6 +789,6 @@ def ShowProtoNS(cmd_args=None):
 
     protons_tokens = kern.globals.protons_tokens
     for pt in IterateRBTreeEntry(protons_tokens, 'struct protons_token *', 'pt_link'):
-        print "(struct protons_token *){} protocol {:3} pid {:5} epid {:5} ref {:2} flags {}".format(
+        print("(struct protons_token *){} protocol {:3} pid {:5} epid {:5} ref {:2} flags {}".format(
                 hex(pt), int(pt.pt_protocol), int(pt.pt_pid), int(pt.pt_epid),
-                int(pt.pt_refcnt.ref_count), hex(pt.pt_flags))
+                int(pt.pt_refcnt.ref_count), hex(pt.pt_flags)))

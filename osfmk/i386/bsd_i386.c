@@ -68,7 +68,7 @@
 #include <../bsd/sys/sysent.h>
 
 #ifdef MACH_BSD
-extern void     mach_kauth_cred_uthread_update(void);
+extern void mach_kauth_cred_thread_update(void);
 extern void throttle_lowpri_io(int);
 #endif
 
@@ -560,7 +560,7 @@ mach_call_munger(x86_saved_state_t *state)
 	}
 
 #ifdef MACH_BSD
-	mach_kauth_cred_uthread_update();
+	mach_kauth_cred_thread_update();
 #endif
 
 	KERNEL_DEBUG_CONSTANT_IST(KDEBUG_TRACE,
@@ -569,27 +569,28 @@ mach_call_munger(x86_saved_state_t *state)
 
 #if CONFIG_MACF
 	/* Check mach trap filter mask, if exists. */
-	task_t task = current_task();
+	thread_ro_t tro = current_thread_ro();
+	task_t task = tro->tro_task;
+	struct proc *proc = tro->tro_proc;
 	uint8_t *filter_mask = task_get_mach_trap_filter_mask(task);
 
 	if (__improbable(filter_mask != NULL &&
-	    !bitstr_test(filter_mask, call_number))) {
+	    !bitstr_test(filter_mask, call_number) &&
+	    mac_task_mach_trap_evaluate != NULL)) {
 		/* Not in filter mask, evaluate policy. */
-		if (mac_task_mach_trap_evaluate != NULL) {
-			retval = mac_task_mach_trap_evaluate(get_bsdtask_info(task),
-			    call_number);
-			if (retval != KERN_SUCCESS) {
-				DEBUG_KPRINT_SYSCALL_MACH(
-					"mach_call_munger: MACF retval=0x%x\n", retval);
-				i386_exception(EXC_SYSCALL, call_number, 1);
-				/* NOTREACHED */
+		retval = mac_task_mach_trap_evaluate(proc, call_number);
+		if (retval != KERN_SUCCESS) {
+			if (mach_trap_table[call_number].mach_trap_returns_port) {
+				retval = MACH_PORT_NULL;
 			}
+			goto skip_machcall;
 		}
 	}
 #endif /* CONFIG_MACF */
 
 	retval = mach_call(&args);
 
+skip_machcall:
 	DEBUG_KPRINT_SYSCALL_MACH("mach_call_munger: retval=0x%x\n", retval);
 
 	KERNEL_DEBUG_CONSTANT_IST(KDEBUG_TRACE,
@@ -621,6 +622,7 @@ mach_call_munger64(x86_saved_state_t *state)
 	int call_number;
 	int argc;
 	mach_call_t mach_call;
+	kern_return_t retval;
 	struct mach_call_args args = {
 		.arg1 = 0,
 		.arg2 = 0,
@@ -681,35 +683,39 @@ mach_call_munger64(x86_saved_state_t *state)
 	}
 
 #ifdef MACH_BSD
-	mach_kauth_cred_uthread_update();
+	mach_kauth_cred_thread_update();
 #endif
 
 #if CONFIG_MACF
 	/* Check syscall filter mask, if exists. */
-	task_t task = current_task();
+	thread_ro_t tro = current_thread_ro();
+	task_t task = tro->tro_task;
+	struct proc *proc = tro->tro_proc;
 	uint8_t *filter_mask = task_get_mach_trap_filter_mask(task);
 
 	if (__improbable(filter_mask != NULL &&
-	    !bitstr_test(filter_mask, call_number))) {
-		/* Not in filter mask, evaluate policy. */
-		if (mac_task_mach_trap_evaluate != NULL) {
-			if (mac_task_mach_trap_evaluate(get_bsdtask_info(task),
-			    call_number) != KERN_SUCCESS) {
-				i386_exception(EXC_SYSCALL, regs->rax, 1);
-				/* NOTREACHED */
+	    !bitstr_test(filter_mask, call_number)) &&
+	    mac_task_mach_trap_evaluate != NULL) {
+		retval = mac_task_mach_trap_evaluate(proc, call_number);
+		if (retval != KERN_SUCCESS) {
+			if (mach_trap_table[call_number].mach_trap_returns_port) {
+				retval = MACH_PORT_NULL;
 			}
+			goto skip_machcall;
 		}
 	}
 #endif /* CONFIG_MACF */
 
-	regs->rax = (uint64_t)mach_call((void *)&args);
+	retval = mach_call((void *)&args);
 
-	DEBUG_KPRINT_SYSCALL_MACH( "mach_call_munger64: retval=0x%llx\n", regs->rax);
+skip_machcall:
+	DEBUG_KPRINT_SYSCALL_MACH("mach_call_munger64: retval=0x%llx\n", retval);
 
 	KERNEL_DEBUG_CONSTANT_IST(KDEBUG_TRACE,
 	    MACHDBG_CODE(DBG_MACH_EXCP_SC, (call_number)) | DBG_FUNC_END,
-	    regs->rax, 0, 0, 0, 0);
+	    retval, 0, 0, 0, 0);
 
+	regs->rax = (uint64_t)retval;
 #if DEBUG || DEVELOPMENT
 	kern_allocation_name_t
 	prior __assert_only = thread_get_kernel_state(current_thread())->allocation_name;

@@ -38,6 +38,7 @@ libkern/c++/OSSymbol.cpp				optional libkerncpp
 libkern/c++/OSUnserialize.cpp				optional libkerncpp
 libkern/c++/OSUnserializeXML.cpp			optional libkerncpp
 libkern/c++/OSSerializeBinary.cpp			optional libkerncpp
+libkern/c++/OSValueObject.cpp				optional libkerncpp
 
 libkern/c++/priority_queue.cpp				standard
 

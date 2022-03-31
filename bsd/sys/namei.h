@@ -207,7 +207,7 @@ struct nameidata {
 	(ndp)->ni_op = pop; \
 	(ndp)->ni_cnd.cn_flags = flags; \
 	if ((segflg) == UIO_USERSPACE) { \
-	        (ndp)->ni_segflg = ((IS_64BIT_PROCESS(vfs_context_proc(ctx))) ? UIO_USERSPACE64 : UIO_USERSPACE32); \
+	        (ndp)->ni_segflg = (vfs_context_is64bit(ctx) ? UIO_USERSPACE64 : UIO_USERSPACE32); \
 	} \
 	else { \
 	        (ndp)->ni_segflg = segflg; \
@@ -222,7 +222,7 @@ struct nameidata {
 	(ndp)->ni_cnd.cn_nameiop = op; \
 	(ndp)->ni_cnd.cn_flags = flags; \
 	if ((segflg) == UIO_USERSPACE) { \
-	        (ndp)->ni_segflg = ((IS_64BIT_PROCESS(vfs_context_proc(ctx))) ? UIO_USERSPACE64 : UIO_USERSPACE32); \
+	        (ndp)->ni_segflg = (vfs_context_is64bit(ctx) ? UIO_USERSPACE64 : UIO_USERSPACE32); \
 	} \
 	else { \
 	        (ndp)->ni_segflg = segflg; \

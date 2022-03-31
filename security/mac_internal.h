@@ -89,6 +89,7 @@
 #include <sys/socket.h>
 #include <sys/socketvar.h>
 #include <sys/vnode.h>
+#include <mach/sdt.h>
 
 /*
  * MAC Framework sysctl namespace.
@@ -122,10 +123,10 @@ typedef struct mac_policy_list mac_policy_list_t;
  */
 struct mac_label_listener {
 	mac_policy_handle_t             mll_handle;
-	LIST_ENTRY(mac_label_listener)  mll_list;
+	SLIST_ENTRY(mac_label_listener) mll_list;
 };
 
-LIST_HEAD(mac_label_listeners_t, mac_label_listener);
+SLIST_HEAD(mac_label_listeners_t, mac_label_listener);
 
 /*
  * Type of list used to manage label namespace names.
@@ -133,10 +134,10 @@ LIST_HEAD(mac_label_listeners_t, mac_label_listener);
 struct mac_label_element {
 	char                            mle_name[MAC_MAX_LABEL_ELEMENT_NAME];
 	struct mac_label_listeners_t    mle_listeners;
-	LIST_ENTRY(mac_label_element)   mle_list;
+	SLIST_ENTRY(mac_label_element)  mle_list;
 };
 
-LIST_HEAD(mac_label_element_list_t, mac_label_element);
+SLIST_HEAD(mac_label_element_list_t, mac_label_element);
 
 /*
  * MAC Framework global variables.
@@ -204,10 +205,6 @@ void  mac_policy_list_busy(void);
 int   mac_policy_list_conditional_busy(void);
 void  mac_policy_list_unbusy(void);
 
-void  mac_labelzone_init(void);
-
-void  mac_label_init(struct label *label);
-void  mac_label_destroy(struct label *label);
 #if KERNEL
 int   mac_check_structmac_consistent(struct user_mac *mac);
 #else
@@ -219,6 +216,12 @@ int mac_vnode_label_externalize(struct label *, char *e, char *out, size_t olen,
 
 int mac_cred_label_internalize(struct label *label, char *string);
 int mac_vnode_label_internalize(struct label *label, char *string);
+
+typedef int (^mac_getter_t)(char *, char *, size_t);
+typedef int (^mac_setter_t)(char *, size_t);
+
+int mac_do_get(struct proc *p, user_addr_t mac_p, mac_getter_t getter);
+int mac_do_set(struct proc *p, user_addr_t mac_p, mac_setter_t setter);
 
 #define MAC_POLICY_ITERATE(...) do {                                \
     struct mac_policy_conf *mpc;                                    \
@@ -243,6 +246,12 @@ int mac_vnode_label_internalize(struct label *label, char *string);
     }                                                               \
 } while (0)
 
+enum mac_iterate_types {
+	MAC_ITERATE_CHECK = 0,  // error starts at 0, callbacks can change it
+	MAC_ITERATE_GRANT = 1,  // error starts as EPERM, callbacks can clear it
+	MAC_ITERATE_PERFORM = 2, // no result
+};
+
 /*
  * MAC_CHECK performs the designated check by walking the policy
  * module list and checking with each as to how it feels about the
@@ -252,10 +261,12 @@ int mac_vnode_label_internalize(struct label *label, char *string);
 #define MAC_CHECK(check, args...) do {                              \
     error = 0;                                                      \
     MAC_POLICY_ITERATE({                                            \
-	    if (mpc->mpc_ops->mpo_ ## check != NULL)                    \
-	            error = mac_error_select(                           \
-	                    mpc->mpc_ops->mpo_ ## check (args),         \
-	                    error);                                     \
+	    if (mpc->mpc_ops->mpo_ ## check != NULL) {              \
+	            DTRACE_MACF3(mac__call__ ## check, void *, mpc, int, error, int, MAC_ITERATE_CHECK); \
+	            int __step_err = mpc->mpc_ops->mpo_ ## check (args); \
+	            DTRACE_MACF2(mac__rslt__ ## check, void *, mpc, int, __step_err); \
+	            error = mac_error_select(__step_err, error);         \
+	    }                                                           \
     });                                                             \
 } while (0)
 
@@ -269,10 +280,13 @@ int mac_vnode_label_internalize(struct label *label, char *string);
 #define MAC_GRANT(check, args...) do {                              \
     error = EPERM;                                                  \
     MAC_POLICY_ITERATE({                                            \
-	    if (mpc->mpc_ops->mpo_ ## check != NULL) {                  \
-	            if (mpc->mpc_ops->mpo_ ## check (args) == 0) {      \
-	                    error = 0;                                  \
-	            }                                                   \
+	if (mpc->mpc_ops->mpo_ ## check != NULL) {                  \
+	        DTRACE_MACF3(mac__call__ ## check, void *, mpc, int, error, int, MAC_ITERATE_GRANT); \
+	        int __step_res = mpc->mpc_ops->mpo_ ## check (args); \
+	        if (__step_res == 0) {                              \
+	                error = 0;                                  \
+	        }                                                   \
+	        DTRACE_MACF2(mac__rslt__ ## check, void *, mpc, int, __step_res); \
 	    }                                                           \
     });                                                             \
 } while (0)
@@ -286,17 +300,25 @@ int mac_vnode_label_internalize(struct label *label, char *string);
 #define MAC_EXTERNALIZE_AUDIT(obj, label, outbuf, outbuflen)        \
     mac_externalize(offsetof(struct mac_policy_ops, mpo_ ## obj ## _label_externalize_audit), label, "*", outbuf, outbuflen)
 
+#define MAC_PERFORM_CALL(operation, mpc) DTRACE_MACF3(mac__call__ ## operation, void *, mpc, int, 0, int, MAC_ITERATE_PERFORM)
+#define MAC_PERFORM_RSLT(operation, mpc) DTRACE_MACF2(mac__rslt__ ## operation, void *, mpc, int, 0)
+
 /*
  * MAC_PERFORM performs the designated operation by walking the policy
  * module list and invoking that operation for each policy.
  */
-#define MAC_PERFORM(operation, args...) do {                        \
-    MAC_POLICY_ITERATE({                                            \
-	    if (mpc->mpc_ops->mpo_ ## operation != NULL)                \
-	            mpc->mpc_ops->mpo_ ## operation (args);             \
-    });                                                             \
+#define MAC_PERFORM(operation, args...) do {           \
+    MAC_POLICY_ITERATE({                                    \
+	if (mpc->mpc_ops->mpo_ ## operation != NULL) {      \
+	        MAC_PERFORM_CALL(operation, mpc);           \
+	        mpc->mpc_ops->mpo_ ## operation (args);     \
+	        MAC_PERFORM_RSLT(operation, mpc);           \
+	}                                                   \
+    });                                                     \
 } while (0)
 
+
+#
 struct __mac_get_pid_args;
 struct __mac_get_proc_args;
 struct __mac_set_proc_args;

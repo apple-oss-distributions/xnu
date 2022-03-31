@@ -31,7 +31,8 @@
 
 #define PTHPRIORITY_ATTR_DEFAULT_VALUE (0)
 
+#if CONFIG_VOUCHER_DEPRECATED
 extern void ipc_pthread_priority_init(void);
-
+#endif /* CONFIG_VOUCHER_DEPRECATED */
 
 #endif /* _VOUCHER_IPC_PTHREAD_PRIORITY_INTERNAL_H_ */

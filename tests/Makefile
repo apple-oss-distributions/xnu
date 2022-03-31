@@ -29,7 +29,7 @@ OTHER_CFLAGS += -Wno-padded -Wno-used-but-marked-unused -Wno-covered-switch-defa
 OTHER_CFLAGS += -Wno-gnu-empty-initializer -Wno-unused-macros -Wno-undef -Wno-fixed-enum-extension
 OTHER_CFLAGS += -Wno-gnu-auto-type -Wno-switch-enum -Wno-variadic-macros
 OTHER_CFLAGS += --std=gnu11 -isystem $(SDKROOT)/System/Library/Frameworks/System.framework/PrivateHeaders
-OTHER_CFLAGS += -UT_NAMESPACE_PREFIX -DT_NAMESPACE_PREFIX=xnu
+OTHER_CFLAGS += -UT_NAMESPACE_PREFIX -DT_NAMESPACE_PREFIX=xnu -DT_LEAKS_DISABLE=1
 OTHER_CFLAGS += -F $(SDKROOT)/System/Library/PrivateFrameworks
 
 OTHER_CFLAGS += -Wl,-sectcreate,__INFO_FILTER,__disable,/dev/null
@@ -234,7 +234,7 @@ else
 EXCLUDED_SOURCES += stackshot_translated_child.c
 endif
 
-telemetry: OTHER_LDFLAGS = -framework ktrace -framework kperf -framework CoreFoundation
+microstackshot_tests: OTHER_LDFLAGS = -ldarwintest_utils -framework ktrace -framework kperf -framework CoreFoundation
 
 memorystatus_zone_test: OTHER_CFLAGS += -isystem $(SDKROOT)/System/Library/Frameworks/System.framework/PrivateHeaders
 memorystatus_zone_test: OTHER_LDFLAGS += -framework ktrace
@@ -252,6 +252,24 @@ text_corruption_helper:
 install-text_corruption_helper: text_corruption_helper
 	mkdir -p $(INSTALLDIR)
 	cp $(SYMROOT)/text_corruption_helper $(INSTALLDIR)/
+
+codesigntests: CODE_SIGN_ENTITLEMENTS=codesigntests-entitlements.plist
+codesigntests: OTHER_CFLAGS += -DTESTNAME=codesigntests
+# Adding a custom target and build/install rules since CODE_SIGN_ENTITLEMENTS
+# does not take in arguments, and we need to sign this test using a sha256T
+# digest
+
+OTHER_TEST_TARGETS += codesigntests_sha256t
+codesigntests_sha256t: OTHER_CFLAGS += -DTESTNAME=codesigntests_sha256t
+
+codesigntests_sha256t: codesigntests.c
+	$(CC) $(DT_CFLAGS) $(OTHER_CFLAGS) $(DT_LDFLAGS) $(LDFLAGS) $(CFLAGS) codesigntests.c -o $(SYMROOT)/$@;
+	env CODESIGN_ALLOCATE=$(CODESIGN_ALLOCATE) $(CODESIGN) --digest=sha256T -s - --entitlements codesigntests-entitlements.plist $(SYMROOT)/$@; 
+install-codesigntests_sha256t: codesigntests_sha256t
+	mkdir -p $(INSTALLDIR)
+	cp $(SYMROOT)/codesigntests_sha256t $(INSTALLDIR)/
+
+
 
 kevent_qos: OTHER_CFLAGS += -Wno-unused-macros
 kevent_qos: OTHER_CFLAGS += -I $(OBJROOT)/
@@ -329,7 +347,8 @@ osptr_17: osptr_compat.cpp
 	$(CXX) $(DT_CXXFLAGS) $(OTHER_CXXFLAGS) $(CXXFLAGS) $(DT_LDFLAGS) $(OTHER_LDFLAGS) $(LDFLAGS) $< -o $(SYMROOT)/$@
 
 priority_queue: OTHER_CXXFLAGS += -std=c++17
-zalloc_buddy: OTHER_CFLAGS += -Wno-format-pedantic
+vm/zalloc: OTHER_LDFLAGS += -ldarwintest_utils
+vm/zalloc_buddy: OTHER_CFLAGS += -Wno-format-pedantic
 
 os_refcnt: OTHER_CFLAGS += -I$(SRCROOT)/../libkern/ -Wno-gcc-compat -Wno-undef -O3 -flto
 
@@ -409,40 +428,44 @@ install-vm_test_code_signing_helper: vm_test_code_signing_helper
 
 vm_test_code_signing: OTHER_LDFLAGS += -ldarwintest_utils
 
-INCLUDED_TEST_SOURCE_DIRS += vm ipc
+INCLUDED_TEST_SOURCE_DIRS += vm ipc rm workq
 
 # Revert to legacy vm_test suite until <rdar://problem/56675212> gets solved
 EXCLUDED_SOURCES += vm/vm_allocation.c
+
+EXCLUDED_SOURCES += jumbo_va_spaces_common.c
 
 ifeq ($(IOS_TEST_COMPAT),YES)
 OTHER_TEST_TARGETS += jumbo_va_spaces_28530648_unentitled jumbo_va_spaces_52551256 vm_phys_footprint_legacy vm/entitlement_increased_memory_limit vm/entitlement_increased_memory_limit_unentitled
 jumbo_va_spaces_28530648: CODE_SIGN_ENTITLEMENTS = jumbo_va_spaces_28530648.entitlements
 jumbo_va_spaces_28530648: OTHER_CFLAGS += -DENTITLED=1 -DTESTNAME=jumbo_va_spaces_28530648
+jumbo_va_spaces_28530648: jumbo_va_spaces_common.c
 jumbo_va_spaces_28530648: OTHER_LDFLAGS += -ldarwintest_utils
 jumbo_va_spaces_28530648: OTHER_LDFLAGS += -sectcreate __TEXT __info_plist jumbo_va_spaces_28530648-identifier.plist
 
 jumbo_va_spaces_52551256: CODE_SIGN_ENTITLEMENTS = jumbo_va_spaces_52551256.entitlements
 jumbo_va_spaces_52551256: OTHER_CFLAGS += -DENTITLED=1 -DTESTNAME=jumbo_va_spaces_52551256
 jumbo_va_spaces_52551256: OTHER_LDFLAGS += -ldarwintest_utils
-jumbo_va_spaces_52551256: jumbo_va_spaces_28530648.c
-	$(CC) $(DT_CFLAGS) $(OTHER_CFLAGS) $(CFLAGS) $(DT_LDFLAGS) $(OTHER_LDFLAGS) $(LDFLAGS) $< -o $(SYMROOT)/$@
+jumbo_va_spaces_52551256: jumbo_va_spaces_28530648.c jumbo_va_spaces_common.c
+	$(CC) $(DT_CFLAGS) $(OTHER_CFLAGS) $(CFLAGS) $(DT_LDFLAGS) $(OTHER_LDFLAGS) $(LDFLAGS) $^ -o $(SYMROOT)/$@
 	env CODESIGN_ALLOCATE=$(CODESIGN_ALLOCATE) $(CODESIGN) --force --sign - --timestamp=none --entitlements $(CODE_SIGN_ENTITLEMENTS) $(SYMROOT)/$@;
 
 jumbo_va_spaces_28530648_unentitled: OTHER_LDFLAGS += -ldarwintest_utils
 jumbo_va_spaces_28530648_unentitled: OTHER_CFLAGS += -DTESTNAME=jumbo_va_spaces_28530648_unentitled
-jumbo_va_spaces_28530648_unentitled: jumbo_va_spaces_28530648.c
-	$(CC) $(DT_CFLAGS) $(OTHER_CFLAGS) $(CFLAGS) $(DT_LDFLAGS) $(OTHER_LDFLAGS) $(LDFLAGS) $< -o $(SYMROOT)/$@
+
+jumbo_va_spaces_28530648_unentitled: jumbo_va_spaces_28530648.c jumbo_va_spaces_common.c
+	$(CC) $(DT_CFLAGS) $(OTHER_CFLAGS) $(CFLAGS) $(DT_LDFLAGS) $(OTHER_LDFLAGS) $(LDFLAGS) $^ -o $(SYMROOT)/$@
 
 vm/entitlement_increased_memory_limit: CODE_SIGN_ENTITLEMENTS = vm/entitlement_increased_memory_limit.entitlements
-vm/entitlement_increased_memory_limit: OTHER_CFLAGS += -DENTITLED=1
+vm/entitlement_increased_memory_limit: OTHER_CFLAGS += -DENTITLED=1 jumbo_va_spaces_common.c
 vm/entitlement_increased_memory_limit: OTHER_LDFLAGS += -ldarwintest_utils memorystatus_assertion_helpers.c
 vm/entitlement_increased_memory_limit: vm/entitlement_increased_memory_limit.c
-	$(CC) $(DT_CFLAGS) $(OTHER_CFLAGS) $(CFLAGS) $(DT_LDFLAGS) $(OTHER_LDFLAGS) $(LDFLAGS) $< -o $(SYMROOT)/$@
+	$(CC) $(DT_CFLAGS) $(OTHER_CFLAGS) $(CFLAGS) $(DT_LDFLAGS) $(OTHER_LDFLAGS) $(LDFLAGS) $^ -o $(SYMROOT)/$@
 	env CODESIGN_ALLOCATE=$(CODESIGN_ALLOCATE) $(CODESIGN) --force --sign - --timestamp=none --entitlements $(CODE_SIGN_ENTITLEMENTS) $(SYMROOT)/$@;
 
 vm/entitlement_increased_memory_limit_unentitled: OTHER_LDFLAGS += -ldarwintest_utils memorystatus_assertion_helpers.c
-vm/entitlement_increased_memory_limit_unentitled: vm/entitlement_increased_memory_limit.c
-	$(CC) $(DT_CFLAGS) $(OTHER_CFLAGS) $(CFLAGS) $(DT_LDFLAGS) $(OTHER_LDFLAGS) $(LDFLAGS) $< -o $(SYMROOT)/$@
+vm/entitlement_increased_memory_limit_unentitled: vm/entitlement_increased_memory_limit.c jumbo_va_spaces_common.c
+	$(CC) $(DT_CFLAGS) $(OTHER_CFLAGS) $(CFLAGS) $(DT_LDFLAGS) $(OTHER_LDFLAGS) $(LDFLAGS) $^ -o $(SYMROOT)/$@
 
 vm_phys_footprint_legacy: OTHER_LDFLAGS += -framework CoreFoundation -framework IOSurface
 vm_phys_footprint_legacy: OTHER_CFLAGS += -DLEGACY_FOOTPRINT_ENTITLED=1
@@ -502,6 +525,7 @@ endif
 tcp_bind_connect: CODE_SIGN_ENTITLEMENTS = network_entitlements.plist
 socket_bind_35243417: CODE_SIGN_ENTITLEMENTS = network_entitlements.plist
 socket_bind_35685803: CODE_SIGN_ENTITLEMENTS = network_entitlements.plist
+icmp_fragmetned_payload: CODE_SIGN_ENTITLEMENTS = network_entitlements.plist
 
 net_tuntests: CODE_SIGN_ENTITLEMENTS = network_entitlements.plist
 
@@ -602,6 +626,9 @@ ptrauth_failure: CODESIGN = $(CODESIGN_HARDENED_RUNTIME)
 
 decompression_failure: excserver exc_helpers.c
 decompression_failure: OTHER_CFLAGS += $(OBJROOT)/excserver.c -I $(OBJROOT)
+
+ipc/kernel_signed_pac_thread_state: excserver
+ipc/kernel_signed_pac_thread_state: OTHER_CFLAGS += $(OBJROOT)/excserver.c -I $(OBJROOT)
 
 ifeq ($(findstring arm64,$(ARCH_CONFIGS)),)
 EXCLUDED_SOURCES += arm_cpu_capabilities.c
@@ -788,13 +815,6 @@ install-perf_madvise_benchrun: perf_madvise_benchrun
 CUSTOM_TARGETS += perf_madvise perf_madvise_benchrun
 EXCLUDED_SOURCES += vm/perf_madvise.c
 
-task_create_suid_cred: CODE_SIGN_ENTITLEMENTS = ./task_create_suid_cred_entitlement.plist
-
-OTHER_TEST_TARGETS += task_create_suid_cred_unentitled
-task_create_suid_cred_unentitled: OTHER_CFLAGS += -DUNENTITLED
-task_create_suid_cred_unentitled: task_create_suid_cred.c
-	$(CC) $(DT_CFLAGS) $(OTHER_CFLAGS) $(CFLAGS) $(DT_LDFLAGS) $(OTHER_LDFLAGS) $(LDFLAGS) $< -o $(SYMROOT)/$@
-
 ioconnectasyncmethod_57641955: OTHER_LDFLAGS += -framework IOKit
 
 ifeq ($(PLATFORM),BridgeOS)
@@ -844,7 +864,7 @@ endif
 
 # Same helper used in execperf, different build system.
 static_binary: ../tools/tests/execperf/exit-asm.S
-	$(CC) $(DT_CFLAGS) $(CFLAGS) $(filter-out -l%,$(DT_LDFLAGS) $(LDFLAGS) $(OTHER_LDFLAGS)) $< -o $(SYMROOT)/static_binary -static -nostartfiles -nodefaultlibs -Wl,-version_load_command -e _main
+	$(CC) $(DT_CFLAGS) $(CFLAGS) $(filter-out -l%,$(DT_LDFLAGS) $(LDFLAGS) $(OTHER_LDFLAGS)) $< -o $(SYMROOT)/static_binary -static -nostartfiles -nodefaultlibs -Wl,-version_load_command -Wl,-segalign,0x4000 -e _main
 	CODESIGN_ALLOCATE=$(CODESIGN_ALLOCATE) $(CODESIGN) --force --sign - --timestamp=none $(SYMROOT)/static_binary
 
 install-static_binary: static_binary
@@ -857,13 +877,12 @@ EXCLUDED_SOURCES += static_binary.c
 test_static_binary_csflags: static_binary
 test_static_binary_csflags: OTHER_LDFLAGS += -ldarwintest_utils
 
-INCLUDED_TEST_SOURCE_DIRS += lockf_uaf_poc
 
 trial_experiments: CODE_SIGN_ENTITLEMENTS = trial_experiments.entitlements
-trial_experiments: OTHER_CFLAGS += -DENTITLED=1 test_utils.c drop_priv.c
+trial_experiments: OTHER_CFLAGS += -DENTITLED=1
 trial_experiments: OTHER_LDFLAGS += -ldarwintest_utils
-trial_experiments: trial_experiments.c
-	$(CC) $(DT_CFLAGS) $(OTHER_CFLAGS) $(CFLAGS) $(DT_LDFLAGS) $(OTHER_LDFLAGS) $(LDFLAGS) $< -o $(SYMROOT)/$@
+trial_experiments: trial_experiments.c drop_priv.c test_utils.c
+	$(CC) $(DT_CFLAGS) $(OTHER_CFLAGS) $(CFLAGS) $(DT_LDFLAGS) $(OTHER_LDFLAGS) $(LDFLAGS) $^ -o $(SYMROOT)/$@
 	env CODESIGN_ALLOCATE=$(CODESIGN_ALLOCATE) $(CODESIGN) --force --sign - --timestamp=none --entitlements $(CODE_SIGN_ENTITLEMENTS) $(SYMROOT)/$@;
 
 trial_experiments_unentitled: OTHER_CFLAGS += drop_priv.c test_utils.c

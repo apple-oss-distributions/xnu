@@ -75,7 +75,8 @@ machine_thread_state_convert_to_user(
 	__unused thread_t thread,
 	__unused thread_flavor_t flavor,
 	__unused thread_state_t tstate,
-	__unused mach_msg_type_number_t *count)
+	__unused mach_msg_type_number_t *count,
+	__unused thread_set_status_flags_t tssf_flags)
 {
 	// No conversion to userspace representation on this platform
 	return KERN_SUCCESS;
@@ -86,7 +87,10 @@ machine_thread_state_convert_from_user(
 	__unused thread_t thread,
 	__unused thread_flavor_t flavor,
 	__unused thread_state_t tstate,
-	__unused mach_msg_type_number_t count)
+	__unused mach_msg_type_number_t count,
+	__unused thread_state_t old_tstate,
+	__unused mach_msg_type_number_t old_count,
+	__unused thread_set_status_flags_t tssf_flags)
 {
 	// No conversion from userspace representation on this platform
 	return KERN_SUCCESS;
@@ -513,7 +517,7 @@ machine_thread_reset_pc(thread_t thread, mach_vm_address_t pc)
  * Routine:	machine_thread_state_initialize
  *
  */
-kern_return_t
+void
 machine_thread_state_initialize(
 	thread_t thread)
 {
@@ -528,8 +532,6 @@ machine_thread_state_initialize(
 #endif
 
 	thread->machine.DebugData = NULL;
-
-	return KERN_SUCCESS;
 }
 
 #if __ARM_VFP__

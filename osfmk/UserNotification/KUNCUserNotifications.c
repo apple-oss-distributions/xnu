@@ -72,7 +72,7 @@ IPC_KOBJECT_DEFINE(IKOT_UND_REPLY,
 #define UNDReply_lock(reply)            lck_mtx_lock(&reply->lock)
 #define UNDReply_unlock(reply)          lck_mtx_unlock(&reply->lock)
 
-extern lck_grp_t LockCompatGroup;
+LCK_GRP_DECLARE(UNDLckGrp, "UND");
 
 static UNDServerRef
 UNDServer_reference(void)
@@ -188,7 +188,7 @@ KUNCGetNotificationID(void)
 	reply = kalloc_type(struct UNDReply, Z_WAITOK | Z_ZERO | Z_NOFAIL);
 	reply->self_port = ipc_kobject_alloc_port((ipc_kobject_t)reply,
 	    IKOT_UND_REPLY, IPC_KOBJECT_ALLOC_NSREQUEST);
-	lck_mtx_init(&reply->lock, &LockCompatGroup, LCK_ATTR_NULL);
+	lck_mtx_init(&reply->lock, &UNDLckGrp, LCK_ATTR_NULL);
 	reply->userLandNotificationKey = -1;
 	reply->inprogress = FALSE;
 
@@ -201,7 +201,7 @@ UNDReply_no_senders(ipc_port_t port, mach_port_mscount_t mscount)
 	UNDReplyRef reply;
 
 	reply = ipc_kobject_dealloc_port(port, mscount, IKOT_UND_REPLY);
-	lck_mtx_destroy(&reply->lock, &LockCompatGroup);
+	lck_mtx_destroy(&reply->lock, &UNDLckGrp);
 	kfree_type(struct UNDReply, reply);
 }
 

@@ -817,12 +817,39 @@ LEXT(arm_debug_set_cp14)
 #if defined(APPLE_ARM64_ARCH_FAMILY)
 /*
  * Note: still have to ISB before executing wfi!
+ *
+ * x0 = boolean deep_sleep
+ * x1 = unsigned int cpu
+ * x2 = uint64_t entry_pa
  */
 	.text
 	.align 2
 	.globl EXT(arm64_prepare_for_sleep)
 LEXT(arm64_prepare_for_sleep)
 	PUSH_FRAME
+
+#if APPLEVIRTUALPLATFORM
+
+#define PSCI_FN_ID_CPU_OFF			0x84000002
+#define PSCI_FN_ID_SYSTEM_SUSPEND	0xC400000E
+
+	/*
+	 * Power off non-boot CPUs individually. Then for the boot CPU (0),
+	 * power off the whole system.  This assumes the deep_sleep=true case.
+	 */
+	cbnz	x1, 1f
+
+	MOV64	x0, PSCI_FN_ID_SYSTEM_SUSPEND
+	mov		x1, x2
+	hvc		0
+	b		.
+
+1:
+	MOV64	x0, PSCI_FN_ID_CPU_OFF
+	hvc		0
+	b		.
+
+#endif /* VMAPPLE */
 
 
 #if HAS_CLUSTER

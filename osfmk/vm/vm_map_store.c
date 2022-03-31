@@ -144,8 +144,9 @@ _vm_map_store_entry_link( struct vm_map_header * mapHdr, vm_map_entry_t after_wh
 		entry->vme_start_original = entry->vme_start;
 		entry->vme_end_original = entry->vme_end;
 	}
-	backtrace(&entry->vme_insertion_bt[0],
-	    (sizeof(entry->vme_insertion_bt) / sizeof(uintptr_t)), NULL, NULL);
+	btref_put(entry->vme_insertion_bt);
+	entry->vme_insertion_bt = btref_get(__builtin_frame_address(0),
+	    BTREF_GET_NOWAIT);
 #endif
 }
 

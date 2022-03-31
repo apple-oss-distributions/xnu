@@ -186,11 +186,8 @@ io_bits_andnot(ipc_object_t io, ipc_object_bits_t bits)
 
 extern zone_t __single ipc_object_zones[IOT_NUMBER];
 
-static inline ipc_object_t
-io_alloc(unsigned int otype, zalloc_flags_t flags)
-{
-	return zalloc_flags(ipc_object_zones[otype], flags);
-}
+#define io_alloc(otype, flags) \
+	zalloc_flags(ipc_object_zones[otype], flags)
 
 /*
  * Here we depend on all ipc_objects being an ipc_wait_queue

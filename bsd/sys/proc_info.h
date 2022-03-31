@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2005-2020 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2005-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -728,6 +728,8 @@ typedef uint64_t proc_info_udata_t;
 #define PROX_FDTYPE_PIPE        6
 #define PROX_FDTYPE_FSEVENTS    7
 #define PROX_FDTYPE_NETPOLICY   9
+#define PROX_FDTYPE_CHANNEL     10
+#define PROX_FDTYPE_NEXUS       11
 
 struct proc_fdinfo {
 	int32_t                 proc_fd;
@@ -739,6 +741,39 @@ struct proc_fileportinfo {
 	uint32_t                proc_fdtype;
 };
 
+/*
+ * Channel
+ */
+
+/* type */
+#define PROC_CHANNEL_TYPE_USER_PIPE             0
+#define PROC_CHANNEL_TYPE_KERNEL_PIPE           1
+#define PROC_CHANNEL_TYPE_NET_IF                2
+#define PROC_CHANNEL_TYPE_FLOW_SWITCH           3
+
+/* flags */
+#define PROC_CHANNEL_FLAGS_MONITOR_TX           0x1
+#define PROC_CHANNEL_FLAGS_MONITOR_RX           0x2
+#define PROC_CHANNEL_FLAGS_MONITOR_NO_COPY      0x4
+#define PROC_CHANNEL_FLAGS_EXCLUSIVE            0x10
+#define PROC_CHANNEL_FLAGS_USER_PACKET_POOL     0x20
+#define PROC_CHANNEL_FLAGS_DEFUNCT_OK           0x40
+#define PROC_CHANNEL_FLAGS_LOW_LATENCY          0x80
+#define PROC_CHANNEL_FLAGS_MONITOR                                      \
+	(PROC_CHANNEL_FLAGS_MONITOR_TX | PROC_CHANNEL_FLAGS_MONITOR_RX)
+
+struct proc_channel_info {
+	uuid_t                  chi_instance;
+	uint32_t                chi_port;
+	uint32_t                chi_type;
+	uint32_t                chi_flags;
+	uint32_t                rfu_1;/* reserved */
+};
+
+struct channel_fdinfo {
+	struct proc_fileinfo    pfi;
+	struct proc_channel_info channelinfo;
+};
 
 /* Flavors for proc_pidinfo() */
 #define PROC_PIDLISTFDS                 1
@@ -879,6 +914,8 @@ struct proc_fileportinfo {
 #define PROC_PIDDYNKQUEUES_MAX  (1024 * 128)
 #endif /* PRIVATE */
 
+#define PROC_PIDFDCHANNELINFO           10
+#define PROC_PIDFDCHANNELINFO_SIZE      (sizeof(struct channel_fdinfo))
 
 /* Flavors for proc_pidfileportinfo */
 
@@ -1018,6 +1055,9 @@ extern int pid_kqueue_listdynamickqueues(proc_t p, user_addr_t ubuf,
     uint32_t bufsize, int32_t *retval);
 extern int pid_dynamickqueue_extinfo(proc_t p, kqueue_id_t kq_id,
     user_addr_t ubuf, uint32_t bufsize, int32_t *retval);
+struct kern_channel;
+extern int fill_channelinfo(struct kern_channel * chan,
+    struct proc_channel_info *chan_info);
 extern int fill_procworkqueue(proc_t, struct proc_workqueueinfo *);
 extern boolean_t workqueue_get_pwq_exceeded(void *v, boolean_t *exceeded_total,
     boolean_t *exceeded_constrained);

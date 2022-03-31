@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2004-2020 Apple Inc. All rights reserved.
+ * Copyright (c) 2004-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -725,6 +725,8 @@ struct ifnet_init_params {
 #define IFNET_INIT_INPUT_POLL   0x2     /* opportunistic input polling model */
 #define IFNET_INIT_NX_NOAUTO    0x4     /* do not auto config nexus */
 #define IFNET_INIT_ALLOC_KPI    0x8     /* allocated via the ifnet_alloc() KPI */
+#define IFNET_INIT_IF_ADV    0x40000000    /* Supports Interface advisory reporting */
+#define IFNET_INIT_SKYWALK_NATIVE     0x80000000 /* native Skywalk driver */
 
 /*
  *       @typedef ifnet_pre_enqueue_func

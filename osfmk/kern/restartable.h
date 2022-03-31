@@ -139,7 +139,7 @@ extern void restartable_ranges_release(struct restartable_ranges *ranges);
  * @brief
  * Perform the work at the AST boundary to reset thread PCS.
  */
-extern void thread_reset_pcs_ast(struct thread *thread);
+extern void thread_reset_pcs_ast(task_t task, struct thread *thread);
 
 #endif // KERNEL_PRIVATE
 

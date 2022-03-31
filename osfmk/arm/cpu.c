@@ -313,8 +313,12 @@ cpu_data_free(cpu_data_t *cpu_data_ptr)
 		CpuDataEntries[cpu_number].cpu_data_paddr = 0;
 		__builtin_arm_dmb(DMB_ISH); // Ensure prior stores to cpu array are visible
 	}
-	(kfree)((void *)(cpu_data_ptr->intstack_top - INTSTACK_SIZE), INTSTACK_SIZE);
-	(kfree)((void *)(cpu_data_ptr->fiqstack_top - FIQSTACK_SIZE), FIQSTACK_SIZE);
+	kmem_free(kernel_map,
+	    cpu_data_ptr->intstack_top - INTSTACK_SIZE - PAGE_SIZE,
+	    INTSTACK_SIZE + 2 * PAGE_SIZE);
+	kmem_free(kernel_map,
+	    cpu_data_ptr->fiqstack_top - FIQSTACK_SIZE - PAGE_SIZE,
+	    FIQSTACK_SIZE + 2 * PAGE_SIZE);
 }
 
 void

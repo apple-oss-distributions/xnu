@@ -442,7 +442,7 @@ typedef struct thread_time_constraint_with_priority_policy    \
  * When they do, we will update THREAD_POLICY_INTERNAL_STRUCT_VERSION.
  */
 
-#define THREAD_POLICY_INTERNAL_STRUCT_VERSION 6
+#define THREAD_POLICY_INTERNAL_STRUCT_VERSION 7
 
 struct thread_requested_policy {
 	uint64_t        thrp_int_darwinbg       :1,     /* marked as darwinbg via setpriority */
@@ -463,8 +463,9 @@ struct thread_requested_policy {
 	    thrp_terminated         :1,                 /* heading for termination */
 	    thrp_qos_workq_override :3,                 /* thread qos class override (workq) */
 	    thrp_qos_wlsvc_override :3,                 /* workloop servicer qos class override */
+	    thrp_iotier_kevent_override :2,             /* thread iotier from kevent override */
 
-	    thrp_reserved           :26;
+	    thrp_reserved           :24;
 };
 
 struct thread_effective_policy {

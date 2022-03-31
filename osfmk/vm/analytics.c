@@ -135,6 +135,7 @@ static void
 vm_analytics_init()
 {
 	vm_analytics_thread_call = thread_call_allocate_with_options(vm_analytics_tick, NULL, THREAD_CALL_PRIORITY_KERNEL, THREAD_CALL_OPTIONS_ONCE);
+	schedule_analytics_thread_call();
 }
 
 STARTUP(THREAD_CALL, STARTUP_RANK_MIDDLE, vm_analytics_init);

@@ -132,8 +132,6 @@ vm_mem_bootstrap(void)
 	vm_mem_bootstrap_log("kmem_init");
 	kmem_init(start, end);
 
-	kernel_startup_initialize_upto(STARTUP_SUB_KMEM);
-
 	/*
 	 * Eat a random amount of kernel_map to fuzz subsequent heap, zone and
 	 * stack addresses. (With a 4K page and 9 bits of randomness, this
@@ -153,7 +151,7 @@ vm_mem_bootstrap(void)
 	vm_mem_bootstrap_log("pmap_init");
 	pmap_init();
 
-	kernel_startup_initialize_upto(STARTUP_SUB_KMEM_ALLOC);
+	kernel_startup_initialize_upto(STARTUP_SUB_KMEM);
 
 	vm_mem_bootstrap_log("vm_fault_init");
 	vm_fault_init();

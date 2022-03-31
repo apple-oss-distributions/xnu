@@ -126,7 +126,9 @@ struct ipc_port {
 		    , ip_tg_block_tracking:1      /* Track blocking relationship between thread groups during sync IPC */
 		    , ip_pinned:1                 /* Can't deallocate the last send right from a space while the bit is set */
 		    , ip_service_port:1           /* port is a service port */
-		    , ip_kobject_nsrequest:1      /* kobject no-senders armed, naked port-ref only */
+		    , ip_has_watchport:1          /* port has an exec watchport */
+		    , ip_kernel_iotier_override:2 /* kernel iotier override */
+		    , ip_kernel_qos_override:3    /* kernel qos override */
 #if DEVELOPMENT || DEBUG
 		    , ip_srp_lost_link:1          /* special reply port turnstile link chain broken */
 		    , ip_srp_msg_sent:1           /* special reply port msg sent */
@@ -156,8 +158,19 @@ struct ipc_port {
 		struct turnstile       *ip_sync_inheritor_ts;
 	};
 
+	/*
+	 * ip_specialreply:  ip_pid
+	 * ip_has_watchport: ip_twe
+	 * else:             ip_pdrequest
+	 */
+	union {
+		int                     ip_pid;
+		struct task_watchport_elem *XNU_PTRAUTH_SIGNED_PTR("ipc_port.ip_twe") ip_twe;
+		struct ipc_port *XNU_PTRAUTH_SIGNED_PTR("ipc_port.ip_pdrequest") ip_pdrequest;
+	};
+
+#define IP_KOBJECT_NSREQUEST_ARMED      ((struct ipc_port *)1)
 	struct ipc_port                *ip_nsrequest;
-	struct ipc_port                *ip_pdrequest;
 	struct ipc_port_request        *ip_requests;
 	union {
 		struct ipc_kmsg *XNU_PTRAUTH_SIGNED_PTR("ipc_port.premsg") ip_premsg;
@@ -166,7 +179,6 @@ struct ipc_port {
 	mach_vm_address_t               ip_context;
 
 	natural_t                       ip_impcount; /* number of importance donations in nested queue */
-
 	mach_port_mscount_t             ip_mscount;
 	mach_port_rights_t              ip_srights;
 	mach_port_rights_t              ip_sorights;
@@ -177,22 +189,17 @@ struct ipc_port {
 		void * XNU_PTRAUTH_SIGNED_PTR("ipc_port.ip_splabel") ip_splabel;
 	};
 
-#if     MACH_ASSERT
-#define IP_NSPARES                      4
-#define IP_CALLSTACK_MAX                16
-	thread_t                        ip_thread;      /* who made me?  thread context */
+#if MACH_ASSERT
 	unsigned long                   ip_timetrack;   /* give an idea of "when" created */
-	uintptr_t                       ip_callstack[IP_CALLSTACK_MAX]; /* stack trace */
-	unsigned long                   ip_spares[IP_NSPARES]; /* for debugging */
+	uint32_t                        ip_made_bt;     /* stack trace (btref_t) */
+	uint32_t                        ip_made_pid;    /* for debugging */
 #endif  /* MACH_ASSERT */
 };
-
-#define ip_preposts             ip_waitq.waitq_prepost_id
 
 static inline bool
 ip_in_pset(ipc_port_t port)
 {
-	return port->ip_waitq.waitq_set_id.wqr_value != 0;
+	return !circle_queue_empty(&port->ip_waitq.waitq_links);
 }
 
 #define ip_receiver_name        ip_messages.imq_receiver_name
@@ -557,12 +564,6 @@ extern boolean_t ipc_port_request_sparm(
 	mach_msg_option_t         option,
 	mach_msg_priority_t       priority);
 
-/* Make a port-deleted request */
-extern void ipc_port_pdrequest(
-	ipc_port_t      port,
-	ipc_port_t      notify,
-	ipc_port_t      *previousp);
-
 /* Make a no-senders request */
 extern void ipc_port_nsrequest(
 	ipc_port_t              port,
@@ -573,7 +574,8 @@ extern void ipc_port_nsrequest(
 /* Prepare a receive right for transmission/destruction */
 extern boolean_t ipc_port_clear_receiver(
 	ipc_port_t              port,
-	boolean_t               should_destroy);
+	boolean_t               should_destroy,
+	waitq_link_list_t      *free_l);
 
 __options_decl(ipc_port_init_flags_t, uint32_t, {
 	IPC_PORT_INIT_NONE              = 0x00000000,
@@ -691,6 +693,10 @@ void
 ipc_port_clear_sync_rcv_thread_boost_locked(
 	ipc_port_t port);
 
+bool
+ipc_port_has_prdrequest(
+	ipc_port_t port);
+
 kern_return_t
 ipc_port_add_watchport_elem_locked(
 	ipc_port_t                 port,
@@ -750,15 +756,15 @@ extern ipc_port_t ipc_port_make_send_locked(
 
 /* Make a naked send right from a receive right */
 extern ipc_port_t ipc_port_make_send(
-	ipc_port_t      port);
+	ipc_port_t      port) __result_use_check;
 
-/* Make a naked send right from another naked send right - port locked and active */
+/* Make a naked send right from another naked send right - port locked */
 extern void ipc_port_copy_send_locked(
 	ipc_port_t      port);
 
 /* Make a naked send right from another naked send right */
 extern ipc_port_t ipc_port_copy_send(
-	ipc_port_t      port);
+	ipc_port_t      port) __result_use_check;
 
 /* Copyout a naked send right */
 extern mach_port_name_t ipc_port_copyout_send(
@@ -790,6 +796,24 @@ extern void ipc_port_reference(
 extern void ipc_port_release(
 	ipc_port_t port);
 
+struct thread_attr_for_ipc_propagation {
+	union {
+		struct {
+			uint64_t tafip_iotier:2,
+			    tafip_qos:3;
+		};
+		uint64_t tafip_value;
+	};
+	uint64_t tafip_reserved;
+};
+
+extern kern_return_t
+ipc_port_propagate_thread_attr(
+	ipc_port_t port,
+	struct thread_attr_for_ipc_propagation attr);
+
+extern kern_return_t
+ipc_port_reset_thread_attr(ipc_port_t port);
 #endif /* KERNEL_PRIVATE */
 
 #ifdef MACH_KERNEL_PRIVATE

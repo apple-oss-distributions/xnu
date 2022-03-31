@@ -63,8 +63,8 @@ struct task_id_token {
 	os_refcnt_t       tidt_refs;
 };
 
-static ZONE_DECLARE(task_id_token_zone, "task_id_token",
-    sizeof(struct task_id_token), ZC_ZFREE_CLEARMEM);
+static ZONE_DEFINE_TYPE(task_id_token_zone, "task_id_token",
+    struct task_id_token, ZC_ZFREE_CLEARMEM);
 
 void task_id_token_set_port(task_id_token_t token, ipc_port_t port);
 
@@ -93,21 +93,23 @@ tidt_release(task_id_token_t token)
 	/* last ref */
 	port = token->port;
 
+	if (IP_VALID(port)) {
 #if CONFIG_PROC_RESOURCE_LIMITS
-	/*
-	 * Ports of type IKOT_TASK_FATAL use task_ident objects to avoid holding a task reference
-	 * and are created to send resource limit notifications
-	 */
-	int kotype = ip_kotype(port);
-	if (kotype == IKOT_TASK_ID_TOKEN || kotype == IKOT_TASK_FATAL) {
-		ipc_kobject_dealloc_port(port, 0, kotype);
-	} else {
-		panic("%s: unexpected kotype of port %p: got %d",
-		    __func__, port, kotype);
-	}
+		/*
+		 * Ports of type IKOT_TASK_FATAL use task_ident objects to avoid holding a task reference
+		 * and are created to send resource limit notifications
+		 */
+		int kotype = ip_kotype(port);
+		if (kotype == IKOT_TASK_ID_TOKEN || kotype == IKOT_TASK_FATAL) {
+			ipc_kobject_dealloc_port(port, 0, kotype);
+		} else {
+			panic("%s: unexpected kotype of port %p: got %d",
+			    __func__, port, kotype);
+		}
 #else /* CONFIG_PROC_RESOURCE_LIMITS */
-	ipc_kobject_dealloc_port(port, 0, IKOT_TASK_ID_TOKEN);
+		ipc_kobject_dealloc_port(port, 0, IKOT_TASK_ID_TOKEN);
 #endif /* CONFIG_PROC_RESOURCE_LIMITS */
+	}
 
 	zfree(task_id_token_zone, token);
 }

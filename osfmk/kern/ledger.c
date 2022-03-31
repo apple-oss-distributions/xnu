@@ -593,7 +593,8 @@ ledger_template_complete(ledger_template_t template)
 	size_t ledger_size;
 	ledger_size = sizeof(struct ledger) + template->lt_next_offset;
 	assert(ledger_size > sizeof(struct ledger));
-	template->lt_zone = zone_create(template->lt_name, ledger_size, ZC_NONE);
+	template->lt_zone = zone_create(template->lt_name, ledger_size,
+	    ZC_PGZ_USE_GUARDS);
 	template->lt_initialized = true;
 }
 
@@ -964,9 +965,9 @@ ledger_entry_check_new_balance(thread_t thread, ledger_t ledger,
 	if (size == sizeof(struct ledger_entry_small)) {
 		if ((les->les_flags & LF_PANIC_ON_NEGATIVE) && les->les_credit < 0) {
 			panic("ledger_entry_check_new_balance(%p,%d): negative ledger %p credit:%lld debit:0 balance:%lld",
-			    ledger, entry, le,
-			    le->le_credit,
-			    le->le_credit);
+			    ledger, entry, les,
+			    les->les_credit,
+			    les->les_credit);
 		}
 	} else if (size == sizeof(struct ledger_entry)) {
 		le = (struct ledger_entry *)les;
@@ -1818,7 +1819,7 @@ ledger_ast(thread_t thread)
 	uint64_t        task_interval;
 
 	kern_return_t ret;
-	task_t task = thread->task;
+	task_t task = get_threadtask(thread);
 
 	lprintf(("Ledger AST for %p\n", thread));
 

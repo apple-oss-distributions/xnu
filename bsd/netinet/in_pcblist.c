@@ -273,7 +273,7 @@ __private_extern__ int
 get_pcblist_n(short proto, struct sysctl_req *req, struct inpcbinfo *pcbinfo)
 {
 	int error = 0;
-	int i, n;
+	int i, n, sz;
 	struct inpcb *inp, **inp_list = NULL;
 	inp_gen_t gencnt;
 	struct xinpgen xig;
@@ -282,6 +282,10 @@ get_pcblist_n(short proto, struct sysctl_req *req, struct inpcbinfo *pcbinfo)
 	    ROUNDUP64(sizeof(struct xsocket_n)) +
 	    2 * ROUNDUP64(sizeof(struct xsockbuf_n)) +
 	    ROUNDUP64(sizeof(struct xsockstat_n));
+#if SKYWALK
+	int nuserland;
+	void *userlandsnapshot = NULL;
+#endif /* SKYWALK */
 
 	if (proto == IPPROTO_TCP) {
 		item_size += ROUNDUP64(sizeof(struct xtcpcb_n));
@@ -289,6 +293,9 @@ get_pcblist_n(short proto, struct sysctl_req *req, struct inpcbinfo *pcbinfo)
 
 	if (req->oldptr == USER_ADDR_NULL) {
 		n = pcbinfo->ipi_count;
+#if SKYWALK
+		n += ntstat_userland_count(proto);
+#endif /* SKYWALK */
 		req->oldidx = 2 * (sizeof(xig)) + (n + n / 8 + 1) * item_size;
 		return 0;
 	}
@@ -297,6 +304,19 @@ get_pcblist_n(short proto, struct sysctl_req *req, struct inpcbinfo *pcbinfo)
 		return EPERM;
 	}
 
+#if SKYWALK
+	/*
+	 * Get a snapshot of the state of the user level flows so we know
+	 * the exact number of results to give back to the user.
+	 * This could take a while and use other locks, so do this prior
+	 * to taking any locks of our own.
+	 */
+	error = nstat_userland_get_snapshot(proto, &userlandsnapshot, &nuserland);
+
+	if (error) {
+		return error;
+	}
+#endif /* SKYWALK */
 
 	/*
 	 * The process of preparing the PCB list is too time-consuming and
@@ -307,11 +327,14 @@ get_pcblist_n(short proto, struct sysctl_req *req, struct inpcbinfo *pcbinfo)
 	 * OK, now we're committed to doing something.
 	 */
 	gencnt = pcbinfo->ipi_gencnt;
-	n = pcbinfo->ipi_count;
+	n = sz = pcbinfo->ipi_count;
 
 	bzero(&xig, sizeof(xig));
 	xig.xig_len = sizeof(xig);
 	xig.xig_count = n;
+#if SKYWALK
+	xig.xig_count += nuserland;
+#endif /* SKYWALK */
 	xig.xig_gen = gencnt;
 	xig.xig_sogen = so_gencnt;
 	error = SYSCTL_OUT(req, &xig, sizeof(xig));
@@ -331,7 +354,7 @@ get_pcblist_n(short proto, struct sysctl_req *req, struct inpcbinfo *pcbinfo)
 		goto done;
 	}
 
-	inp_list = _MALLOC(n * sizeof(*inp_list), M_TEMP, M_WAITOK);
+	inp_list = kalloc_type(struct inpcb *, n, Z_WAITOK);
 	if (inp_list == NULL) {
 		error = ENOMEM;
 		goto done;
@@ -400,6 +423,11 @@ get_pcblist_n(short proto, struct sysctl_req *req, struct inpcbinfo *pcbinfo)
 			}
 		}
 	}
+#if SKYWALK
+	if (!error && nuserland > 0) {
+		error = nstat_userland_list_snapshot(proto, req, userlandsnapshot, nuserland);
+	}
+#endif /* SKYWALK */
 
 	if (!error) {
 		/*
@@ -414,14 +442,19 @@ get_pcblist_n(short proto, struct sysctl_req *req, struct inpcbinfo *pcbinfo)
 		xig.xig_gen = pcbinfo->ipi_gencnt;
 		xig.xig_sogen = so_gencnt;
 		xig.xig_count = pcbinfo->ipi_count;
+#if SKYWALK
+		xig.xig_count +=  nuserland;
+#endif /* SKYWALK */
 		error = SYSCTL_OUT(req, &xig, sizeof(xig));
 	}
 done:
 	lck_rw_done(&pcbinfo->ipi_lock);
 
-	if (inp_list != NULL) {
-		FREE(inp_list, M_TEMP);
-	}
+#if SKYWALK
+	nstat_userland_release_snapshot(userlandsnapshot, nuserland);
+#endif /* SKYWALK */
+
+	kfree_type(struct inpcb *, sz, inp_list);
 	if (buf != NULL) {
 		kfree_data(buf, item_size);
 	}
@@ -611,9 +644,9 @@ inpcb_get_if_ports_used(ifnet_t ifp, int protocol, uint32_t flags,
 			}
 		}
 
-		if (if_ports_used_add_inpcb(ifp->if_index, inp)) {
-			bitstr_set(bitfield, ntohs(inp->inp_lport));
-		}
+		bitstr_set(bitfield, ntohs(inp->inp_lport));
+
+		(void) if_ports_used_add_inpcb(ifp->if_index, inp);
 	}
 	lck_rw_done(&pcbinfo->ipi_lock);
 }
@@ -765,7 +798,7 @@ shutdown_sockets_on_interface_proc_callout(proc_t p, void *arg)
 			continue;
 		}
 
-		so = (struct socket *)fp->fp_glob->fg_data;
+		so = (struct socket *)fp_get_data(fp);
 		if (SOCK_DOM(so) != PF_INET && SOCK_DOM(so) != PF_INET6) {
 			continue;
 		}

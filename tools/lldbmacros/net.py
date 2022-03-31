@@ -2,6 +2,11 @@
 """ Please make sure you read the README COMPLETELY BEFORE reading anything below.
     It is very critical that you read coding guidelines in Section E in README file.
 """
+from __future__ import absolute_import, print_function
+
+from builtins import hex
+from builtins import range
+
 from xnu import *
 from utils import *
 from string import *
@@ -11,6 +16,7 @@ import tempfile
 import xnudefines
 from netdefines import *
 from routedefines import *
+from mbufdefines import *
 
 def GetDlilIfFlagsAsString(dlil_if_flags):
     """ Return a formatted string description of the dlil interface flags
@@ -24,7 +30,7 @@ def GetDlilIfFlagsAsString(dlil_if_flags):
             out_string += dlil_if_flags_strings[i] + ","
         i += 1
         num = num << 1
-    return rstrip(out_string, ",")
+    return out_string.rstrip(",")
 
 def GetIfFlagsAsString(if_flags):
     """ Return a formatted string description of the interface flags
@@ -38,7 +44,7 @@ def GetIfFlagsAsString(if_flags):
             out_string += if_flags_strings[i] + ","
         i += 1
         num = num << 1
-    return rstrip(out_string, ",")
+    return out_string.rstrip(",")
 
 
 def ShowIfConfiguration(ifnet):
@@ -56,7 +62,7 @@ def ShowIfConfiguration(ifnet):
             out_string += "\n\t" + str(iface.if_snd.ifcq_len)
         if dlifnet.dl_if_inpstorage.dlth_pkts.qlen :
             out_string += "\n\t" + str(dlifnet.dl_if_inpstorage.dlth_pkts.qlen)
-    print out_string
+    print(out_string)
 
 def GetIfConfiguration(ifname):
     """ Return ifnet structure corresponding to the ifname passed in
@@ -87,7 +93,7 @@ def NetGetAlwaysOnPktap(cmd_args=None):
         break
 
     if not ifnet:
-        print "Could not find a pktap interface"
+        print("Could not find a pktap interface")
         return
 
     bpf_d = ifnet.if_bpf.bif_dlist
@@ -100,16 +106,16 @@ def NetGetAlwaysOnPktap(cmd_args=None):
         addr = bpf_d.bd_hbuf[0]._sbval19k84obscure747.AddressOf().GetValueAsUnsigned()
         buf = LazyTarget.GetProcess().ReadMemory(addr, unsigned(bpf_d.bd_hlen), err)
         if err.fail:
-            print "Error, getting sbuf"
+            print("Error, getting sbuf")
         f.write(buf)
 
     addr = bpf_d.bd_sbuf[0]._sbval19k84obscure747.AddressOf().GetValueAsUnsigned()
     buf = LazyTarget.GetProcess().ReadMemory(addr, unsigned(bpf_d.bd_slen), err)
     if err.fail:
-        print "Error, getting sbuf"
+        print("Error, getting sbuf")
     f.write(buf)
 
-    print f.name
+    print(f.name)
     f.close()
 # EndMacro: net_get_always_on_pktap
 
@@ -127,7 +133,7 @@ def ShowIfconfig(cmd_args=None) :
     for ifnet in IterateTAILQ_HEAD(ifnets, "if_link"):
         ShowIfConfiguration(ifnet)
         if (showall == 1):
-            print GetIfaddrs(ifnet)
+            print(GetIfaddrs(ifnet))
 # EndMacro: ifconfig
 
 #Macro: ifconfig_dlil
@@ -138,7 +144,7 @@ def ShowIfconfigDlil(cmd_args=None) :
     dlil_ifnets = kern.globals.dlil_ifnet_head
     for dlil_ifnet in IterateTAILQ_HEAD(dlil_ifnets, "dl_if_link"):
         ShowIfConfiguration(dlil_ifnet)
-        print GetIfaddrs(Cast(dlil_ifnet, 'ifnet *'))
+        print(GetIfaddrs(Cast(dlil_ifnet, 'ifnet *')))
 # EndMacro: ifconfig_dlil
 
 def GetAddressAsStringColonHex(addr, count):
@@ -147,9 +153,9 @@ def GetAddressAsStringColonHex(addr, count):
     addr_format_string = "{0:02x}"
     while (i < count):
         if (i == 0):
-            out_string += addr_format_string.format(addr[i])[-2:]
+            out_string += addr_format_string.format(unsigned(addr[i]))[-2:]
         else:
-            out_string += ":" + addr_format_string.format(addr[i])[-2:]
+            out_string += ":" + addr_format_string.format(unsigned(addr[i]))[-2:]
         i += 1
     return out_string
 
@@ -245,15 +251,15 @@ def ShowIfaddrs(cmd_args=None):
     if cmd_args != None and len(cmd_args) > 0 :
         ifp = kern.GetValueFromAddress(cmd_args[0], 'ifnet *')
         if not ifp:
-            print "Unknown value passed as argument."
+            print("Unknown value passed as argument.")
             return
         i = 1
         for ifaddr in IterateTAILQ_HEAD(ifp.if_addrhead, "ifa_link"):
             format_string = "\t{0: <d}: 0x{1: <x} {2: <s} [{3: <d}]"
-            print format_string.format(i, ifaddr, GetSocketAddrAsString(ifaddr.ifa_addr), ifaddr.ifa_refcnt)
+            print(format_string.format(i, ifaddr, GetSocketAddrAsString(ifaddr.ifa_addr), ifaddr.ifa_refcnt))
             i += 1
     else :
-        print "Missing argument 0 in user function."
+        print("Missing argument 0 in user function.")
 # EndMacro: showifaddrs
 
 def GetIfaddrs(ifp):
@@ -280,7 +286,7 @@ def GetCapabilitiesAsString(flags):
             out_string += if_capenable_strings[i] + ","
         i += 1
         num = num << 1
-    return rstrip(out_string, ",")
+    return out_string.rstrip(",")
 
 def GetIfEflagsAsString(if_eflags):
     """ Return a formatted string description of the interface extra flags
@@ -294,7 +300,7 @@ def GetIfEflagsAsString(if_eflags):
             out_string += if_eflags_strings[i] + ","
         i += 1
         num = num << 1
-    return rstrip(out_string, ",")
+    return out_string.rstrip(",")
 
 def GetIfXflagsAsString(if_xflags):
     """ Return a formatted string description of the interface extended flags
@@ -308,7 +314,7 @@ def GetIfXflagsAsString(if_xflags):
             out_string += if_xflags_strings[i] + ","
         i += 1
         num = num << 1
-    return rstrip(out_string, ",")
+    return out_string.rstrip(",")
 
 def ShowDlilIfnetConfiguration(dlil_ifnet, show_all) :
     """ Formatted display of dlil_ifnet structures
@@ -342,7 +348,7 @@ def ShowDlilIfnetConfiguration(dlil_ifnet, show_all) :
     if show_all :
         out_string += GetIfaddrs(iface)
         out_string += "\n"
-    print out_string
+    print(out_string)
 
 # Macro: showifnets
 @lldb_command('showifnets')
@@ -366,7 +372,7 @@ def ShowIfMultiAddrs(cmd_args=None) :
     if cmd_args != None and len(cmd_args) > 0 :
         ifp = kern.GetValueFromAddress(cmd_args[0], 'ifnet *')
         if not ifp:
-            print "Unknown value passed as argument."
+            print("Unknown value passed as argument.")
             return
         ifmulti = cast(ifp.if_multiaddrs.lh_first, 'ifmultiaddr *')
         i = 0
@@ -388,9 +394,9 @@ def ShowIfMultiAddrs(cmd_args=None) :
             out_string += "[" + str(int(ifmulti.ifma_refcount)) + "]\n"
             ifmulti = cast(ifmulti.ifma_link.le_next, 'ifmultiaddr *')
             i += 1
-        print out_string
+        print(out_string)
     else :
-        print "Missing argument 0 in user function."
+        print("Missing argument 0 in user function.")
 # EndMacro: showifmultiaddrs
 
 # Macro: showinmultiaddrs
@@ -411,7 +417,7 @@ def ShowInMultiAddrs(cmd_args=None) :
         out_string += ifma_format_string.format(ifp, ifp.if_xname, inmulti.inm_ifma) + "\n"
         inmulti = cast(inmulti.inm_link.le_next, 'in_multi *')
         i += 1
-    print out_string
+    print(out_string)
 # EndMacro: showinmultiaddrs
 
 # Macro: showin6multiaddrs
@@ -432,7 +438,7 @@ def ShowIn6MultiAddrs(cmd_args=None) :
         out_string += ifma_format_string.format(ifp, ifp.if_xname, in6multi.in6m_ifma) + "\n"
         in6multi = cast(in6multi.in6m_entry.le_next, 'in6_multi *')
         i += 1
-    print out_string
+    print(out_string)
 # EndMacro: showin6multiaddrs
 
 def GetTcpState(tcpcb):
@@ -560,8 +566,8 @@ def GetSocket(socket) :
     so = kern.GetValueFromAddress(unsigned(socket), 'socket *')
     if (so):
         out_string = ""
-        sock_format_string = "so: 0x{0:<x}"
-        out_string += sock_format_string.format(so)
+        sock_format_string = "so: 0x{0:<x} options 0x{1:<x} state 0x{2:<x}"
+        out_string += sock_format_string.format(so, so.so_options, so.so_state)
         domain = so.so_proto.pr_domain
         domain_name_format_string = " {0:<s} "
         out_string += domain_name_format_string.format(domain.dom_name)
@@ -573,7 +579,7 @@ def GetSocket(socket) :
             out_string += GetIPv6SocketAsString(so)
         if (domain.dom_family == 40):
             out_string += GetVsockSocketAsString(so)
-        out_string += " s=" + str(int(so.so_snd.sb_cc)) + " r=" + str(int(so.so_rcv.sb_cc)) + " usecnt=" + str(int(so.so_usecount)) + "] "
+        out_string += " s=" + str(int(so.so_snd.sb_cc)) + " r=" + str(int(so.so_rcv.sb_cc)) + " usecnt=" + str(int(so.so_usecount))
     else:
         out_string += "(null)"
     return out_string
@@ -586,13 +592,13 @@ def ShowSocket(cmd_args=None) :
     """ Show the contents of a socket
     """
     if (cmd_args == None or len(cmd_args) == 0):
-            print "Missing argument 0 in user function."
+            print("Missing argument 0 in user function.")
             return
     so = kern.GetValueFromAddress(cmd_args[0], 'socket *')
     if (len(str(cmd_args[0])) > 0):
         out_string = ""
-        sock_format_string = "so: 0x{0:<x}"
-        out_string += sock_format_string.format(so)
+        sock_format_string = "so: 0x{0:<x} options 0x{1:<x} state 0x{2:<x}"
+        out_string += sock_format_string.format(so, so.so_options, so.so_state)
         domain = so.so_proto.pr_domain
         domain_name_format_string = " {0:<s} "
         out_string += domain_name_format_string.format(domain.dom_name)
@@ -604,13 +610,13 @@ def ShowSocket(cmd_args=None) :
             out_string += GetIPv6SocketAsString(so)
         if (domain.dom_family == 40):
             out_string += GetVsockSocketAsString(so)
-        print out_string
+        print(out_string)
     else:
-        print "Unknown value passed as argument."
+        print("Unknown value passed as argument.")
         return
 # EndMacro: showsocket
 
-def GetProcSockets(proc, total_snd_cc, total_rcv_cc):
+def GetProcSockets(proc, total_snd_cc, total_rcv_cc, total_sock_fd):
     """ Given a proc_t pointer, display information about its sockets
     """
     out_string = ""
@@ -627,20 +633,21 @@ def GetProcSockets(proc, total_snd_cc, total_rcv_cc):
         proc_ofiles = proc_filedesc.fd_ofiles
         """ high-water mark of fd_ofiles """
         if proc_filedesc.fd_nfiles != 0:
-            for fd in xrange(0, unsigned(proc_filedesc.fd_afterlast)):
+            for fd in range(0, unsigned(proc_filedesc.fd_afterlast)):
                 if (unsigned(proc_ofiles[fd]) != 0 and proc_ofiles[fd].fp_glob != 0):
                         fg = proc_ofiles[fd].fp_glob
+                        fg_data = Cast(fg.fg_data, 'void *')
                         if (int(fg.fg_ops.fo_type) == 2):
                             if (proc_filedesc.fd_ofileflags[fd] & 4):
                                 out_string += "U: "
                             else:
                                 out_string += " "
                             out_string += "fd = " + str(fd) + " "
-                            if (fg.fg_data != 0):
-                                out_string += GetSocket(unsigned(fg.fg_data))
+                            if (fg_data != 0):
+                                out_string += GetSocket(fg_data)
                                 out_string += "\n"
 
-                                so = kern.GetValueFromAddress(unsigned(fg.fg_data), 'socket *')
+                                so = Cast(fg_data, 'socket *')
                                 snd_cc += int(so.so_snd.sb_cc)
                                 total_snd_cc[0] += int(so.so_snd.sb_cc)
                                 rcv_cc += int(so.so_rcv.sb_cc)
@@ -649,6 +656,7 @@ def GetProcSockets(proc, total_snd_cc, total_rcv_cc):
                             else:
                                 out_string += ""
         out_string += "total sockets " + str(int(sock_fd_seen)) + " snd_cc " + str(int(snd_cc)) + " rcv_cc " + str(int(rcv_cc)) + "\n"
+        total_sock_fd[0] = sock_fd_seen
     return out_string
 
 
@@ -659,18 +667,19 @@ def ShowProcSockets(cmd_args=None):
     """
     total_snd_cc = [0]
     total_rcv_cc = [0]
+    sock_fd_seen = [0]
     out_string = ""
     if cmd_args != None and len(cmd_args) > 0 :
         proc = kern.GetValueFromAddress(cmd_args[0], 'proc *')
 
         if not proc:
-            print "Unknown value passed as argument."
+            print("Unknown value passed as argument.")
             return
         else:
-            print GetProcInfo(proc)
-            print GetProcSockets(proc, total_snd_cc, total_rcv_cc)
+            print(GetProcInfo(proc))
+            print(GetProcSockets(proc, total_snd_cc, total_rcv_cc, sock_fd_seen))
     else:
-        print "Missing argument 0 in user function."
+        print("Missing argument 0 in user function.")
 # EndMacro: showprocsockets
 
 # Macro: showallprocsockets
@@ -681,9 +690,13 @@ def ShowAllProcSockets(cmd_args=None):
     total_snd_cc = [0]
     total_rcv_cc = [0]
     for proc in kern.procs:
-        print "================================================================================"
-        print GetProcInfo(proc)
-        print GetProcSockets(proc, total_snd_cc, total_rcv_cc)
+        sock_fd_seen = [0]
+        out_str = ""
+        out_str += GetProcSockets(proc, total_snd_cc, total_rcv_cc, sock_fd_seen)
+        if sock_fd_seen[0] != 0:
+            print("================================================================================")
+            print(GetProcInfo(proc))
+            print(out_str)
     print ("total_snd_cc: " + str(int(total_snd_cc[0])) + " total_rcv_cc: " + str(int(total_rcv_cc[0])) + "\n")
 # EndMacro: showallprocsockets
 
@@ -837,34 +850,34 @@ def GetRtInetAsString():
     rt_tables = kern.globals.rt_tables[2]
     if (kern.ptrsize == 8):
         rt_table_header_format_string = "{0:<18s} {1: <16s} {2:<20s} {3:<16s} {4:<8s} {5:<8s} {6:<8s}"
-        print rt_table_header_format_string.format("rtentry", " dst", "gw", "parent", "Refs", "Use", "flags/if")
-        print rt_table_header_format_string.format("-" * 18, "-" * 16, "-" * 16, "-" * 16, "-" * 8, "-" * 8, "-" * 8)
-        print GetRtTableAsString(rt_tables)
+        print(rt_table_header_format_string.format("rtentry", " dst", "gw", "parent", "Refs", "Use", "flags/if"))
+        print(rt_table_header_format_string.format("-" * 18, "-" * 16, "-" * 16, "-" * 16, "-" * 8, "-" * 8, "-" * 8))
+        print(GetRtTableAsString(rt_tables))
     else:
         rt_table_header_format_string = "{0:<8s} {1:<16s} {2:<18s} {3:<8s} {4:<8s} {5:<8s} {6:<8s}"
-        print rt_table_header_format_string.format("rtentry", "dst", "gw", "parent", "Refs", "Use", "flags/if")
-        print rt_table_header_format_string.format("-" * 8, "-" * 16, "-" * 16, "-" * 8, "-" * 8, "-" * 8, "-" * 8)
-        print GetRtTableAsString(rt_tables)
+        print(rt_table_header_format_string.format("rtentry", "dst", "gw", "parent", "Refs", "Use", "flags/if"))
+        print(rt_table_header_format_string.format("-" * 8, "-" * 16, "-" * 16, "-" * 8, "-" * 8, "-" * 8, "-" * 8))
+        print(GetRtTableAsString(rt_tables))
 
 def GetRtInet6AsString():
     rt_tables = kern.globals.rt_tables[30]
     if (kern.ptrsize == 8):
         rt_table_header_format_string = "{0:<18s} {1: <16s} {2:<20s} {3:<16s} {4:<8s} {5:<8s} {6:<8s}"
-        print rt_table_header_format_string.format("rtentry", " dst", "gw", "parent", "Refs", "Use", "flags/if")
-        print rt_table_header_format_string.format("-" * 18, "-" * 16, "-" * 16, "-" * 16, "-" * 8, "-" * 8, "-" * 8)
-        print GetRtTableAsString(rt_tables)
+        print(rt_table_header_format_string.format("rtentry", " dst", "gw", "parent", "Refs", "Use", "flags/if"))
+        print(rt_table_header_format_string.format("-" * 18, "-" * 16, "-" * 16, "-" * 16, "-" * 8, "-" * 8, "-" * 8))
+        print(GetRtTableAsString(rt_tables))
     else:
         rt_table_header_format_string = "{0:<8s} {1:<16s} {2:<18s} {3:<8s} {4:<8s} {5:<8s} {6:<8s}"
-        print rt_table_header_format_string.format("rtentry", "dst", "gw", "parent", "Refs", "Use", "flags/if")
-        print rt_table_header_format_string.format("-" * 8, "-" * 16, "-" * 18, "-" * 8, "-" * 8, "-" * 8, "-" * 8)
-        print GetRtTableAsString(rt_tables)
+        print(rt_table_header_format_string.format("rtentry", "dst", "gw", "parent", "Refs", "Use", "flags/if"))
+        print(rt_table_header_format_string.format("-" * 8, "-" * 16, "-" * 18, "-" * 8, "-" * 8, "-" * 8, "-" * 8))
+        print(GetRtTableAsString(rt_tables))
 
 # Macro: show_rt_inet
 @lldb_command('show_rt_inet')
 def ShowRtInet(cmd_args=None):
     """ Display the IPv4 routing table
     """
-    print GetRtInetAsString()
+    print(GetRtInetAsString())
 # EndMacro: show_rt_inet
 
 # Macro: show_rt_inet6
@@ -872,7 +885,7 @@ def ShowRtInet(cmd_args=None):
 def ShowRtInet6(cmd_args=None):
     """ Display the IPv6 routing table
     """
-    print GetRtInet6AsString()
+    print(GetRtInet6AsString())
 # EndMacro: show_rt_inet6
 
 # Macro: rtentry_showdbg
@@ -881,7 +894,7 @@ def ShowRtEntryDebug(cmd_args=None):
     """ Print the debug information of a route entry
     """
     if (cmd_args == None or len(cmd_args) == 0):
-            print "Missing argument 0 in user function."
+            print("Missing argument 0 in user function.")
             return
     out_string = ""
     cnt = 0
@@ -970,7 +983,7 @@ def ShowRtEntryDebug(cmd_args=None):
             ix += 1
         cnt += 1
 
-    print out_string
+    print(out_string)
 # EndMacro: rtentry_showdbg
 
 # Macro: inifa_showdbg
@@ -979,7 +992,7 @@ def InIfaShowDebug(cmd_args=None):
     """ Print the debug information of an IPv4 interface address
     """
     if (cmd_args == None or len(cmd_args) == 0):
-            print "Missing argument 0 in user function."
+            print("Missing argument 0 in user function.")
             return
     out_string = ""
     cnt = 0
@@ -1036,7 +1049,7 @@ def InIfaShowDebug(cmd_args=None):
                 out_string += "\n"
             ix += 1
         cnt += 1
-    print out_string
+    print(out_string)
 # EndMacro: inifa_showdbg
 
 # Macro: in6ifa_showdbg
@@ -1045,14 +1058,14 @@ def In6IfaShowDebug(cmd_args=None):
     """ Print the debug information of an IPv6 interface address
     """
     if (cmd_args == None or len(cmd_args) == 0):
-            print "Missing argument 0 in user function."
+            print("Missing argument 0 in user function.")
             return
     out_string = ""
     cnt = 0
     in6ifa = kern.GetValueFromAddress(cmd_args[0], 'in6_ifaddr_dbg *')
     in6_ifaddr_summary_format_string = "{0:s} {1:d}"
-    print in6_ifaddr_summary_format_string.format("Total holds : ", in6ifa.in6ifa_refhold_cnt)
-    print in6_ifaddr_summary_format_string.format("Total releases : ", in6ifa.in6ifa_refrele_cnt)
+    print(in6_ifaddr_summary_format_string.format("Total holds : ", in6ifa.in6ifa_refhold_cnt))
+    print(in6_ifaddr_summary_format_string.format("Total releases : ", in6ifa.in6ifa_refrele_cnt))
 
     ix = 0
     while (ix < CTRACE_STACK_SIZE):
@@ -1102,7 +1115,7 @@ def In6IfaShowDebug(cmd_args=None):
                 out_string += "\n"
             ix += 1
         cnt += 1
-    print out_string
+    print(out_string)
 # EndMacro: in6ifa_showdbg
 
 # Macro: inm_showdbg
@@ -1111,7 +1124,7 @@ def InmShowDebug(cmd_args=None):
     """ Print the debug information of an IPv4 multicast address
     """
     if (cmd_args == None or len(cmd_args) == 0):
-            print "Missing argument 0 in user function."
+            print("Missing argument 0 in user function.")
             return
     out_string = ""
     cnt = 0
@@ -1145,7 +1158,7 @@ def InmShowDebug(cmd_args=None):
                 out_string += "\n"
             ix += 1
         cnt += 1
-    print out_string
+    print(out_string)
 # EndMacro: inm_showdbg
 
 # Macro: ifma_showdbg
@@ -1154,7 +1167,7 @@ def IfmaShowDebug(cmd_args=None):
     """ Print the debug information of a link multicast address
     """
     if (cmd_args == None or len(cmd_args) == 0):
-            print "Missing argument 0 in user function."
+            print("Missing argument 0 in user function.")
             return
     out_string = ""
     cnt = 0
@@ -1188,7 +1201,7 @@ def IfmaShowDebug(cmd_args=None):
                 out_string += "\n"
             ix += 1
         cnt += 1
-    print out_string
+    print(out_string)
 # EndMacro: ifma_showdbg
 
 # Macro: ifpref_showdbg
@@ -1197,7 +1210,7 @@ def IfpRefShowDebug(cmd_args=None):
     """ Print the debug information of an interface ref count
     """
     if (cmd_args == None or len(cmd_args) == 0):
-            print "Missing argument 0 in user function."
+            print("Missing argument 0 in user function.")
             return
     out_string = ""
     cnt = 0
@@ -1231,7 +1244,7 @@ def IfpRefShowDebug(cmd_args=None):
                 out_string += "\n"
             ix += 1
         cnt += 1
-    print out_string
+    print(out_string)
 # EndMacro: ifpref_showdbg
 
 # Macro: ndpr_showdbg
@@ -1240,7 +1253,7 @@ def ndprShowDebug(cmd_args=None):
     """ Print the debug information of a nd_prefix structure
     """
     if (cmd_args == None or len(cmd_args) == 0):
-            print "Missing argument 0 in user function."
+            print("Missing argument 0 in user function.")
             return
     out_string = ""
     cnt = 0
@@ -1274,7 +1287,7 @@ def ndprShowDebug(cmd_args=None):
                 out_string += "\n"
             ix += 1
         cnt += 1
-    print out_string
+    print(out_string)
 # EndMacro: ndpr_showdbg
 
 # Macro: nddr_showdbg
@@ -1283,7 +1296,7 @@ def nddrShowDebug(cmd_args=None):
     """ Print the debug information of a nd_defrouter structure
     """
     if (cmd_args == None or len(cmd_args) == 0):
-            print "Missing argument 0 in user function."
+            print("Missing argument 0 in user function.")
             return
     out_string = ""
     cnt = 0
@@ -1317,7 +1330,7 @@ def nddrShowDebug(cmd_args=None):
                 out_string += "\n"
             ix += 1
         cnt += 1
-    print out_string
+    print(out_string)
 # EndMacro: nddr_showdbg
 
 # Macro: imo_showdbg
@@ -1326,7 +1339,7 @@ def IpmOptions(cmd_args=None):
     """ Print the debug information of a ip_moptions structure
     """
     if (cmd_args == None or len(cmd_args) == 0):
-            print "Missing argument 0 in user function."
+            print("Missing argument 0 in user function.")
             return
     out_string = ""
     cnt = 0
@@ -1360,7 +1373,7 @@ def IpmOptions(cmd_args=None):
                 out_string += "\n"
             ix += 1
         cnt += 1
-    print out_string
+    print(out_string)
 # EndMacro: imo_showdbg
 
 # Macro: im6o_showdbg
@@ -1369,7 +1382,7 @@ def IpmOptions(cmd_args=None):
     """ Print the debug information of a ip6_moptions structure
     """
     if (cmd_args == None or len(cmd_args) == 0):
-            print "Missing argument 0 in user function."
+            print("Missing argument 0 in user function.")
             return
     out_string = ""
     cnt = 0
@@ -1403,7 +1416,7 @@ def IpmOptions(cmd_args=None):
                 out_string += "\n"
             ix += 1
         cnt += 1
-    print out_string
+    print(out_string)
 # EndMacro: im6o_showdbg
 
 # Macro: rtentry_trash
@@ -1419,16 +1432,16 @@ def RtEntryTrash(cmd_args=None):
     while (int(rtd) != 0):
         if (cnt == 0):
             if (kern.ptrsize == 8):
-                print "                rtentry ref   hold   rele             dst    gw             parent flags/if\n"
-                print "      ----------------- --- ------ ------ --------------- ----- ------------------ -----------\n"
+                print("                rtentry ref   hold   rele             dst    gw             parent flags/if\n")
+                print("      ----------------- --- ------ ------ --------------- ----- ------------------ -----------\n")
             else:
-                print "        rtentry ref   hold   rele             dst    gw     parent flags/if\n"
-                print "      --------- --- ------ ------ --------------- ----- ---------- -----------\n"
+                print("        rtentry ref   hold   rele             dst    gw     parent flags/if\n")
+                print("      --------- --- ------ ------ --------------- ----- ---------- -----------\n")
         out_string += rt_trash_format_string.format(cnt, rtd, rtd.rtd_refhold_cnt - rtd.rtd_refrele_cnt, rtd.rtd_refhold_cnt, rtd.rtd_refrele_cnt) + "   "
         out_string += GetRtEntryPrDetailsAsString(rtd) + "\n"
         rtd = rtd.rtd_trash_link.tqe_next
         cnt += 1
-    print out_string
+    print(out_string)
 # EndMacro: rtentry_trash
 
 # Macro: show_rtentry
@@ -1439,7 +1452,7 @@ def ShRtEntry(cmd_args=None):
     out_string = ""
     rt = kern.GetValueFromAddress(cmd_args[0], 'rtentry *')
     out_string += GetRtEntryPrDetailsAsString(rt) + "\n"
-    print out_string
+    print(out_string)
 # EndMacro: show_rtentry
 
 # Macro: inifa_trash
@@ -1455,16 +1468,16 @@ def InIfaTrash(cmd_args=None):
     while (int(ifa) != 0):
         if (cnt == 0):
             if (kern.ptrsize == 8):
-                print "                  in_ifa  ref   hold   rele"
-                print "      ------------------  ---  ------  ----"
+                print("                  in_ifa  ref   hold   rele")
+                print("      ------------------  ---  ------  ----")
             else:
-                print "          in_ifa  ref   hold   rele"
-                print "      ----------  ---  ----- ------"
+                print("          in_ifa  ref   hold   rele")
+                print("      ----------  ---  ----- ------")
         out_string += inifa_trash_format_string.format(cnt + 1, ifa, ifa.inifa_refhold_cnt - ifa.inifa_refrele_cnt, ifa.inifa_refhold_cnt, ifa.inifa_refrele_cnt) + "   "
         out_string += GetSocketAddrAsStringInet(ifa.inifa.ia_ifa.ifa_addr) + "\n"
         ifa = ifa.inifa_trash_link.tqe_next
         cnt += 1
-    print out_string
+    print(out_string)
 # EndMacro: inifa_trash
 
 # Macro: in6ifa_trash
@@ -1480,16 +1493,16 @@ def In6IfaTrash(cmd_args=None):
     while (int(ifa) != 0):
         if (cnt == 0):
             if (kern.ptrsize == 8):
-                print "                 in6_ifa  ref   hold   rele"
-                print "      ------------------  --- ------ ------"
+                print("                 in6_ifa  ref   hold   rele")
+                print("      ------------------  --- ------ ------")
             else:
-                print "         in6_ifa  ref   hold   rele"
-                print "      ----------  --- ------ ------"
+                print("         in6_ifa  ref   hold   rele")
+                print("      ----------  --- ------ ------")
         out_string += in6ifa_trash_format_string.format(cnt + 1, ifa, ifa.in6ifa_refhold_cnt - ifa.in6ifa_refrele_cnt, ifa.in6ifa_refhold_cnt, ifa.in6ifa_refrele_cnt) + "   "
         out_string += GetSocketAddrAsStringInet6(ifa.in6ifa.ia_ifa.ifa_addr) + "\n"
         ifa = ifa.in6ifa_trash_link.tqe_next
         cnt += 1
-    print out_string
+    print(out_string)
 # EndMacro: in6ifa_trash
 
 # Macro: inm_trash
@@ -1505,16 +1518,16 @@ def InmTrash(cmd_args=None):
     while (int(inm) != 0):
         if (cnt == 0):
             if (kern.ptrsize == 8):
-                print "                     inm  ref   hold   rele"
-                print "      ------------------  --- ------ ------"
+                print("                     inm  ref   hold   rele")
+                print("      ------------------  --- ------ ------")
             else:
-                print "             inm  ref   hold   rele"
-                print "      ----------  --- ------ ------"
+                print("             inm  ref   hold   rele")
+                print("      ----------  --- ------ ------")
         out_string += inm_trash_format_string.format(cnt + 1, inm, inm.inm_refhold_cnt - inm.inm_refrele_cnt, inm.inm_refhold_cnt, inm.inm_refrele_cnt) + "   "
         out_string += GetInAddrAsString(addressof(inm.inm.inm_addr)) + "\n"
         inm = inm.inm_trash_link.tqe_next
         cnt += 1
-    print out_string
+    print(out_string)
 # EndMacro: inm_trash
 
 # Macro: in6m_trash
@@ -1530,16 +1543,16 @@ def In6mTrash(cmd_args=None):
     while (int(in6m) != 0):
         if (cnt == 0):
             if (kern.ptrsize == 8):
-                print "                    in6m  ref   hold   rele"
-                print "      ------------------  --- ------ ------"
+                print("                    in6m  ref   hold   rele")
+                print("      ------------------  --- ------ ------")
             else:
-                print "            in6m  ref   hold   rele"
-                print "      ----------  --- ------ ------"
+                print("            in6m  ref   hold   rele")
+                print("      ----------  --- ------ ------")
         out_string += in6m_trash_format_string.format(cnt + 1, in6m, in6m.in6m_refhold_cnt - in6m.in6m_refrele_cnt, in6m.in6m_refhold_cnt, in6m.in6m_refrele_cnt) + "   "
         out_string += GetIn6AddrAsString(addressof(in6m.in6m.in6m_addr)) + "\n"
         in6m = in6m.in6m_trash_link.tqe_next
         cnt += 1
-    print out_string
+    print(out_string)
 # EndMacro: in6m_trash
 
 # Macro: ifma_trash
@@ -1555,17 +1568,17 @@ def IfmaTrash(cmd_args=None):
     while (int(ifma) != 0):
         if (cnt == 0):
             if (kern.ptrsize == 8):
-                print "                    ifma  ref   hold   rele"
-                print "      ------------------  --- ------ ------"
+                print("                    ifma  ref   hold   rele")
+                print("      ------------------  --- ------ ------")
             else:
-                print "            ifma  ref   hold   rele"
-                print "      ----------  --- ------ ------"
+                print("            ifma  ref   hold   rele")
+                print("      ----------  --- ------ ------")
         out_string += ifma_trash_format_string.format(cnt + 1, ifma, ifma.ifma_refhold_cnt - ifma.ifma_refrele_cnt, ifma.ifma_refhold_cnt, ifma.ifma_refrele_cnt) + "   "
         out_string += GetSocketAddrAsString(ifma.ifma.ifma_addr) + "\n"
         out_string += " @ " + ifma.ifma.ifma_ifp.if_xname
         ifma = ifma.ifma_trash_link.tqe_next
         cnt += 1
-    print out_string
+    print(out_string)
 # EndMacro: ifma_trash
 
 def GetInPcb(pcb, proto):
@@ -1779,7 +1792,7 @@ def GetMptcpInfo():
             total_mbuf_bytes += snd_buf[x] + rcv_buf[x]
 
     out_string += "total mbuf bytes used by MPTCP: "+ str(total_mbuf_bytes) + "\n"
-    print out_string
+    print(out_string)
 
     #pcb = 
 
@@ -1913,7 +1926,7 @@ def ShowMbufListUsageSummary(cmd_args=None):
             out_string += "Total buf bytes of type " + Mbuf_Type.reverse_mapping[x] + " : " + str(int(buf_byte_cnt[x])) + "\n"
     out_string += "Total mbuf count " + str(int(mbuf_cnt[0])) + "\n"
     out_string += "Total mbuf cluster count " + str(int(mbuf_cluster_cnt[0])) + "\n"
-    print out_string
+    print(out_string)
 
 # Macro: show_kern_event_pcbinfo
 def GetKernEventPcbInfo(kev_pcb_head):
@@ -1937,7 +1950,7 @@ def GetKernEventPcbInfo(kev_pcb_head):
 def ShowKernEventPcbInfo(cmd_args=None):
     """ Display the list of Kernel Event protocol control block information
     """
-    print GetKernEventPcbInfo(addressof(kern.globals.kern_event_head))
+    print(GetKernEventPcbInfo(addressof(kern.globals.kern_event_head)))
 # EndMacro:  show_kern_event_pcbinfo
 
 # Macro: show_kern_control_pcbinfo
@@ -1973,7 +1986,40 @@ def GetKernControlPcbInfo(ctl_head):
 def ShowKernControlPcbInfo(cmd_args=None):
     """ Display the list of Kernel Control protocol control block information
     """
-    print GetKernControlPcbInfo(addressof(kern.globals.ctl_head))
+    print(GetKernControlPcbInfo(addressof(kern.globals.ctl_head)))
+# EndMacro:  show_kern_control_pcbinfo
+
+# Macro: show_unix_domain_pcbinfo
+def GetUnixDomainPCBAsString(unp, type) :
+    out_string = ""
+    pcb = Cast(unp, 'unpcb *')
+    out_string += "unpcb: " + hex(pcb)  + " " + str(type)
+    out_string += " unp_socket: " + hex(pcb.unp_socket)
+    out_string += " unp_vnode: " + hex(pcb.unp_vnode)
+    out_string += " unp_conn: " + hex(pcb.unp_conn)
+    out_string += " unp_addr: " + GetSocketAddrAsStringUnix(pcb.unp_addr)
+    out_string += " unp_gencnt: " + str(int(pcb.unp_gencnt))
+    out_string += " unp_flags: " + hex(pcb.unp_flags)
+    if pcb.unp_socket != 0:
+        so = Cast(pcb.unp_socket, 'socket *')
+        out_string += " s=" + str(int(so.so_snd.sb_cc)) + " r=" + str(int(so.so_rcv.sb_cc)) + " usecnt=" + str(int(so.so_usecount))
+    return out_string
+
+def GetUnixDomainPcbInfo(unp_head, type):
+    out_string = ""
+    unp = Cast(unp_head.lh_first, 'unpcb *')
+    while unsigned(unp) != 0:
+        out_string += GetUnixDomainPCBAsString(unp, type)
+        out_string += "\n"
+        unp = unp.unp_link.le_next
+    return out_string
+
+@lldb_command('show_unix_domain_pcbinfo')
+def ShowUnixDomainPcbInfo(cmd_args=None):
+    """ Display the list of unix domain pcb
+    """
+    print(GetUnixDomainPcbInfo(addressof(kern.globals.unp_dhead), "dgram"))
+    print(GetUnixDomainPcbInfo(addressof(kern.globals.unp_shead), "stream"))
 # EndMacro:  show_kern_control_pcbinfo
 
 # Macro: show_tcp_pcbinfo
@@ -1981,7 +2027,7 @@ def ShowKernControlPcbInfo(cmd_args=None):
 def ShowTcpPcbInfo(cmd_args=None):
     """ Display the list of TCP protocol control block information
     """
-    print GetPcbInfo(addressof(kern.globals.tcbinfo), IPPROTO_TCP)
+    print(GetPcbInfo(addressof(kern.globals.tcbinfo), IPPROTO_TCP))
 # EndMacro:  show_tcp_pcbinfo
 
 # Macro: show_udp_pcbinfo
@@ -1989,7 +2035,7 @@ def ShowTcpPcbInfo(cmd_args=None):
 def ShowUdpPcbInfo(cmd_args=None):
     """ Display the list of UDP protocol control block information
     """
-    print GetPcbInfo(addressof(kern.globals.udbinfo), IPPROTO_UDP)
+    print(GetPcbInfo(addressof(kern.globals.udbinfo), IPPROTO_UDP))
 # EndMacro:  show_udp_pcbinfo
 
 # Macro: show_rip_pcbinfo
@@ -1997,7 +2043,7 @@ def ShowUdpPcbInfo(cmd_args=None):
 def ShowRipPcbInfo(cmd_args=None):
     """ Display the list of Raw IP protocol control block information
     """
-    print GetPcbInfo(addressof(kern.globals.ripcbinfo), IPPROTO_RAW)
+    print(GetPcbInfo(addressof(kern.globals.ripcbinfo), IPPROTO_RAW))
 # EndMacro:  show_rip_pcbinfo
 
 # Macro: show_mptcp_pcbinfo
@@ -2125,7 +2171,7 @@ def ShowDomains(cmd_args=None):
             pr = pr.pr_entry.tqe_next
         dp = dp.dom_entry.tqe_next
 
-        print out_string
+        print(out_string)
 # EndMacro: show_domains
 
 # Macro: tcp_count_rxt_segments
@@ -2143,8 +2189,8 @@ def TCPCountRxtSegments(cmd_args=None):
         cnt += 1
         rxseg = rxseg.rx_link.sle_next
         if (cnt % 1000 == 0):
-            print " running count: {:d}".format(cnt)
-    print " total count: {:d}".format(cnt)
+            print(" running count: {:d}".format(cnt))
+    print(" total count: {:d}".format(cnt))
 # EndMacro: tcp_count_rxt_segments
 
 # Macro: tcp_walk_rxt_segments
@@ -2162,8 +2208,8 @@ def TCPWalkRxtSegments(cmd_args=None):
         cnt += 1
         rxseg = rxseg.rx_link.sle_next
         if (cnt % 1000 == 0):
-            print " running count: {:d}".format(cnt)
-    print " total count: {:d}".format(cnt)
+            print(" running count: {:d}".format(cnt))
+    print(" total count: {:d}".format(cnt))
     rxseg = cast(tp.t_rxt_segments.slh_first, 'tcp_rxt_seg *')
     cnt = 0
     while rxseg != 0:
@@ -2172,6 +2218,6 @@ def TCPWalkRxtSegments(cmd_args=None):
         span = rxseg.rx_end - rxseg.rx_start
         rxseg_format = "{0:4d} 0x{1:x} rx_start 0x{2:x} rx_end 0x{3:x} rx_count {4:4d} rx_flags 0x{5:x} span {6:d}"
         out_string += rxseg_format.format(cnt, rxseg, rxseg.rx_start, rxseg.rx_end, rxseg.rx_count, rxseg.rx_flags, abs(span))
-        print out_string
+        print(out_string)
         rxseg = rxseg.rx_link.sle_next
 # EndMacro: tcp_walk_rxt_segments

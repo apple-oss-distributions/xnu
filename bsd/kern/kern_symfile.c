@@ -243,6 +243,7 @@ kern_open_file_for_direct_io(const char * name,
 	wbc_range.count = 0;
 
 	int (*do_ioctl)(void * p1, void * p2, u_long theIoctl, caddr_t result);
+	do_ioctl = NULL;
 	void * p1 = NULL;
 	void * p2 = NULL;
 
@@ -593,7 +594,9 @@ out:
 
 	if (error && locked) {
 		p1 = &device;
-		(void) do_ioctl(p1, p2, DKIOCUNLOCKPHYSICALEXTENTS, NULL);
+		if (do_ioctl) {
+			(void) do_ioctl(p1, p2, DKIOCUNLOCKPHYSICALEXTENTS, NULL);
+		}
 	}
 
 	if (error && ref) {
@@ -604,7 +607,9 @@ out:
 				(void) VNOP_IOCTL(ref->vp, FSCTL_THAW_EXTENTS, NULL, 0, ref->ctx);
 			}
 			if (ref->wbcranged) {
-				(void) do_ioctl(p1, p2, DKIOCAPFSRELEASEWBCRANGE, (caddr_t) NULL);
+				if (do_ioctl) {
+					(void) do_ioctl(p1, p2, DKIOCAPFSRELEASEWBCRANGE, (caddr_t) NULL);
+				}
 			}
 			vnode_close(ref->vp, FWRITE, ref->ctx);
 			ref->vp = NULLVP;

@@ -79,6 +79,9 @@ struct necp_packet_header {
 #define NECP_SESSION_ACTION_REGISTER_SERVICE            9       // In: uuid_t					Out: None
 #define NECP_SESSION_ACTION_UNREGISTER_SERVICE          10      // In: uuid_t					Out: None
 #define NECP_SESSION_ACTION_POLICY_DUMP_ALL                     11      // In: None						Out: uint32_t bytes length, then Policy TLVs
+#define NECP_SESSION_ACTION_ADD_DOMAIN_FILTER           12      // In: struct net_bloom_filter  Out: uint32_t, ID
+#define NECP_SESSION_ACTION_REMOVE_DOMAIN_FILTER        13      // In: uint32_t, ID             Out: None
+#define NECP_SESSION_ACTION_REMOVE_ALL_DOMAIN_FILTERS   14      // In: None                     Out: None
 
 /*
  * Control message flags
@@ -162,6 +165,7 @@ struct necp_packet_header {
 #define NECP_POLICY_CONDITION_TRACKER_DOMAIN            35      // String, tracker domain
 #define NECP_POLICY_CONDITION_ATTRIBUTED_BUNDLE_IDENTIFIER 36   // String, app to which traffic is attributed to
 #define NECP_POLICY_CONDITION_SCHEME_PORT               37      // u_int16_t, the port associated with the scheme for a connection
+#define NECP_POLICY_CONDITION_DOMAIN_FILTER             38      // struct net_bloom_filter
 
 /*
  * Policy Packet tags
@@ -914,6 +918,9 @@ struct necp_drop_dest_policy {
 #include <net/network_agent.h>
 #include <net/ethernet.h>
 #include <os/log.h>
+#if SKYWALK
+#include <skywalk/namespace/netns.h>
+#endif /* SKYWALK */
 
 
 SYSCTL_DECL(_net_necp);
@@ -1112,6 +1119,7 @@ struct necp_kernel_socket_policy {
 	u_int32_t                                       cond_account_id;                                // Locally assigned ID value stored
 	char                                            *cond_domain;                                   // String
 	u_int8_t                                        cond_domain_dot_count;                  // Number of dots in cond_domain
+	u_int32_t                                       cond_domain_filter;
 	pid_t                                           cond_pid;
 	uid_t                                           cond_uid;
 	ifnet_t                                         cond_bound_interface;                   // Matches specific binding only
@@ -1301,6 +1309,9 @@ extern int necp_client_register_socket_flow(pid_t pid, uuid_t client_id, struct 
 
 extern int necp_client_register_socket_listener(pid_t pid, uuid_t client_id, struct inpcb *inp);
 
+#if SKYWALK
+extern int necp_client_get_netns_flow_info(uuid_t client_id, struct ns_flow_info *flow_info);
+#endif /* SKYWALK */
 
 extern int necp_client_assert_bb_radio_manager(uuid_t client_id, bool assert);
 
@@ -1332,7 +1343,11 @@ struct necp_client_nexus_parameters {
 	pid_t pid;
 	pid_t epid;
 	uuid_t euuid;
+#if SKYWALK
+	netns_token port_reservation;
+#else /* !SKYWALK */
 	void *reserved;
+#endif /* !SKYWALK */
 	union necp_sockaddr_union local_addr;
 	union necp_sockaddr_union remote_addr;
 	u_int8_t ip_protocol;
@@ -1378,11 +1393,21 @@ typedef void (*necp_client_flow_cb)(void *handle, int action, uint32_t interface
 
 extern void necp_client_reap_caches(boolean_t purge);
 
+#if SKYWALK
+struct skmem_arena_mmap_info;
+
+extern pid_t necp_client_get_proc_pid_from_arena_info(struct skmem_arena_mmap_info *arena_info);
+
+extern void necp_client_early_close(uuid_t client_id); // Cause a single client to close stats, etc
+
+#endif /* SKYWALK */
 
 #endif /* BSD_KERNEL_PRIVATE */
 
 #ifdef KERNEL
 #ifdef KERNEL_PRIVATE
+struct nstat_domain_info;
+extern void necp_copy_inp_domain_info(struct inpcb *, struct socket *, struct nstat_domain_info *);
 extern bool net_domain_contains_hostname(char *hostname_string, char *domain_string);
 #endif /* KERNEL_PRIVATE */
 #endif /* KERNEL */

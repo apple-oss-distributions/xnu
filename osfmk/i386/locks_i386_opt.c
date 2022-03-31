@@ -362,7 +362,7 @@ lck_mtx_try_lock_spin_always(
 #endif
 
 #if     CONFIG_DTRACE
-	LOCKSTAT_RECORD(LS_LCK_MTX_TRY_SPIN_LOCK_ACQUIRE, lock, 0);
+	LOCKSTAT_RECORD(LS_LCK_MTX_TRY_LOCK_SPIN_ACQUIRE, lock, 0);
 #endif
 
 	/* return with the interlock held and preemption disabled */

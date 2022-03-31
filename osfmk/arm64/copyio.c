@@ -177,15 +177,21 @@ copy_validate(const user_addr_t user_addr, uintptr_t kernel_addr,
 	if ((flags & COPYIO_VALIDATE_USER_ONLY) == 0) {
 		if (__probable(!zalloc_disable_copyio_check)) {
 			zone_t src_zone = NULL;
-			vm_size_t kernel_buf_size = zone_element_size((void *)kernel_addr, &src_zone);
+			vm_offset_t oob_offs, size;
+
+			size = zone_element_size((void *)kernel_addr,
+			    &src_zone, false, &oob_offs);
+			size -= oob_offs;
+
 			/*
 			 * Size of elements in the permanent zone is not saved as a part of the
 			 * zone's info
 			 */
 			if (__improbable(src_zone && !src_zone->z_permanent &&
-			    kernel_buf_size < nbytes)) {
-				panic("copyio_preflight: kernel buffer 0x%lx has size %lu < nbytes %lu",
-				    kernel_addr, kernel_buf_size, nbytes);
+			    size < nbytes)) {
+				panic("copyio_preflight: kernel buffer %p "
+				    "has size %lu < nbytes %lu",
+				    (void *)kernel_addr, size, nbytes);
 			}
 		}
 

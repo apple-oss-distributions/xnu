@@ -41,7 +41,7 @@
 
 static struct nd_route_info *nd6_rti_lookup(struct nd_route_info *);
 
-static ZONE_DECLARE(ndrti_zone, "nd6_route_info",
+static ZONE_DEFINE(ndrti_zone, "nd6_route_info",
     sizeof(struct nd_route_info), ZC_ZFREE_CLEARMEM);
 
 static boolean_t nd6_rti_list_busy = FALSE;             /* protected by nd6_mutex */

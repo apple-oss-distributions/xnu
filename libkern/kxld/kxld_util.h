@@ -151,9 +151,6 @@ __attribute__((malloc, visibility("hidden")));
 void * kxld_page_alloc_untracked(size_t size)
 __attribute__((malloc, visibility("hidden")));
 
-void * kxld_alloc_pageable(size_t size)
-__attribute__((malloc, visibility("hidden")));
-
 /*******************************************************************************
 * Deallocators
 *******************************************************************************/

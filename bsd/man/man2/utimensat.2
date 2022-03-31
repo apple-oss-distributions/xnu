@@ -135,6 +135,16 @@ names a symbolic link, the symbolic link's times are changed.
 By default,
 .Fn utimensat
 changes the times of the file referenced by the symbolic link.
+.Bl -tag -width indent
+.It Dv AT_SYMLINK_NOFOLLOW_ANY
+If
+.Fa path
+names a symbolic link, the symbolic link's times are changed.
+In addition, if any symbolic link is enountered during pathname
+resolution, an error is returned.
+By default,
+.Fn utimensat
+changes the times of the file referenced by the symbolic link.
 .El
 .Sh RETURN VALUES
 .Rv -std

@@ -237,7 +237,7 @@ ml_copy_phys(addr64_t src64, addr64_t dst64, vm_size_t bytes)
 		/* Establish a cache-inhibited physical window; some platforms
 		 * may not cover arbitrary ranges with MTRRs
 		 */
-		pmap_store_pte(debugger_ptep, debug_pa | INTEL_PTE_NCACHE | INTEL_PTE_RW | INTEL_PTE_REF | INTEL_PTE_MOD | INTEL_PTE_VALID);
+		pmap_store_pte(FALSE, debugger_ptep, debug_pa | INTEL_PTE_NCACHE | INTEL_PTE_RW | INTEL_PTE_REF | INTEL_PTE_MOD | INTEL_PTE_VALID);
 		pmap_tlbi_range(0, ~0ULL, true, 0);
 #if     DEBUG
 		kprintf("Remapping debugger physical window at %p to 0x%llx\n", (void *)debugger_window_kva, debug_pa);

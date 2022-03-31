@@ -1,3 +1,7 @@
+from __future__ import absolute_import, print_function
+
+from builtins import object
+
 import getopt
 import os
 import sys
@@ -176,7 +180,7 @@ class CommandOutput(object):
         return s.format(*args, **kwargs)
 
     def error(self, s, *args, **kwargs):
-        print self.format("{cmd.cmd_name}: {VT.Red}"+s+"{VT.Default}", cmd=self, *args, **kwargs)
+        print(self.format("{cmd.cmd_name}: {VT.Red}"+s+"{VT.Default}", cmd=self, *args, **kwargs))
 
     def write(self, s):
         """ Handler for all commands output. By default just print to stdout """
@@ -222,7 +226,7 @@ class CommandOutput(object):
         try:
             opts,args = getopt.gnu_getopt(args,'hvo:s:p:c:'+ cmdoptions,[])
             self.target_cmd_args = args
-        except getopt.GetoptError,err:
+        except getopt.GetoptError as err:
             raise ArgumentError(str(err))
         #continue with processing
         for o,a in opts :
@@ -233,13 +237,13 @@ class CommandOutput(object):
             if o == "-o" and len(a) > 0:
                 self.fname=os.path.normpath(os.path.expanduser(a.strip()))
                 self.fhandle=open(self.fname,"w")
-                print "saving results in file ",str(a)
+                print("saving results in file ",str(a))
                 self.fhandle.write("(lldb)%s %s \n" % (self.cmd_name, " ".join(cmdargs)))
                 self.isatty = os.isatty(self.fhandle.fileno())
             elif o == "-s" and len(a) > 0:
                 self.reg = re.compile(a.strip(),re.MULTILINE|re.DOTALL)
                 self.FILTER=True
-                print "showing results for regex:",a.strip()
+                print("showing results for regex:",a.strip())
             elif o == "-p" and len(a) > 0:
                 self.pluginRequired = True
                 self.pluginName = a.strip()

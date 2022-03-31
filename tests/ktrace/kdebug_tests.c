@@ -1,4 +1,4 @@
-// Copyright (c) 2020 Apple Inc.  All rights reserved.
+// Copyright (c) 2020-2021 Apple Inc.  All rights reserved.
 
 #include <darwintest.h>
 #include <darwintest_utils.h>
@@ -17,8 +17,10 @@
 #include <stdlib.h>
 #include <sys/kdebug.h>
 #include <sys/kdebug_signpost.h>
+#include <sys/resource_private.h>
 #include <sys/sysctl.h>
 #include <stdint.h>
+#include <TargetConditionals.h>
 
 #include "ktrace_helpers.h"
 #include "test_utils.h"
@@ -39,8 +41,7 @@ T_DECL(kdebug_trace_syscall, "test that kdebug_trace(2) emits correct events")
 
 	ktrace_session_t s = ktrace_session_create();
 	T_QUIET; T_WITH_ERRNO; T_ASSERT_NOTNULL(s, "created session");
-
-	ktrace_events_class(s, DBG_MACH, ^(__unused struct trace_point *tp){});
+	ktrace_set_collection_interval(s, 200);
 
 	__block int events_seen = 0;
 	ktrace_events_single(s, TRACE_DEBUGID, ^void (struct trace_point *tp) {
@@ -72,6 +73,84 @@ T_DECL(kdebug_trace_syscall, "test that kdebug_trace(2) emits correct events")
 	T_ASSERT_POSIX_ZERO(ktrace_start(s, dispatch_get_main_queue()), NULL);
 	T_ASSERT_POSIX_SUCCESS(kdebug_trace(TRACE_DEBUGID, 0xfeedfacefeedface, 2,
 			3, 4), NULL);
+	ktrace_end(s, 0);
+
+	dispatch_main();
+}
+
+#if __LP64__
+#define IS_64BIT true
+#else // __LP64__
+#define IS_64BIT false
+#endif // !__LP64__
+
+#define STRING_SIZE (1024)
+
+T_DECL(kdebug_trace_string_syscall,
+    "test that kdebug_trace_string(2) emits correct events",
+    T_META_ENABLED(IS_64BIT))
+{
+	start_controlling_ktrace();
+
+	ktrace_session_t s = ktrace_session_create();
+	T_QUIET; T_WITH_ERRNO; T_ASSERT_NOTNULL(s, "created session");
+	ktrace_set_collection_interval(s, 200);
+	ktrace_filter_pid(s, getpid());
+
+	char *traced_string = calloc(1, STRING_SIZE);
+	T_QUIET; T_WITH_ERRNO;
+	T_ASSERT_NOTNULL(traced_string, "allocated memory for string");
+	for (size_t i = 0; i < sizeof(traced_string); i++) {
+		traced_string[i] = 'a' + (i % 26);
+	}
+	traced_string[sizeof(traced_string) - 1] = '\0';
+	size_t traced_len = strlen(traced_string);
+	T_QUIET; T_ASSERT_EQ(traced_len, sizeof(traced_string) - 1,
+			"traced string should be filled");
+
+	ktrace_events_single(s, TRACE_DEBUGID,
+			^void (struct trace_point * __unused tp) {
+		// Do nothing -- just ensure the event is filtered in.
+	});
+
+	__block unsigned int string_cpu = 0;
+	__block bool tracing_string = false;
+	char *observed_string = calloc(1, PATH_MAX);
+	T_QUIET; T_WITH_ERRNO;
+	T_ASSERT_NOTNULL(observed_string, "allocated memory for observed string");
+	__block size_t string_offset = 0;
+	ktrace_events_single(s, TRACE_STRING_GLOBAL, ^(struct trace_point *tp){
+		if (tp->debugid & DBG_FUNC_START && tp->arg1 == TRACE_DEBUGID) {
+			tracing_string = true;
+			string_cpu = tp->cpuid;
+			memcpy(observed_string + string_offset, &tp->arg3,
+					sizeof(uint64_t) * 2);
+			string_offset += sizeof(uint64_t) * 2;
+		} else if (tracing_string && string_cpu == tp->cpuid) {
+			memcpy(observed_string + string_offset, &tp->arg1,
+					sizeof(uint64_t) * 4);
+			string_offset += sizeof(uint64_t) * 4;
+			if (tp->debugid & DBG_FUNC_END) {
+				ktrace_end(s, 1);
+			}
+		}
+	});
+
+	ktrace_set_completion_handler(s, ^{
+		T_EXPECT_TRUE(tracing_string, "found string in trace");
+		size_t observed_len = strlen(observed_string);
+		T_EXPECT_EQ(traced_len, observed_len, "string lengths should be equal");
+		if (traced_len == observed_len) {
+			T_EXPECT_EQ_STR(traced_string, observed_string,
+					"observed correct string");
+		}
+		ktrace_session_destroy(s);
+		T_END;
+	});
+
+	T_ASSERT_POSIX_ZERO(ktrace_start(s, dispatch_get_main_queue()), NULL);
+	uint64_t str_id = kdebug_trace_string(TRACE_DEBUGID, 0, traced_string);
+	T_WITH_ERRNO; T_ASSERT_NE(str_id, (uint64_t)0, "kdebug_trace_string(2)");
 	ktrace_end(s, 0);
 
 	dispatch_main();
@@ -300,6 +379,92 @@ T_DECL(wrapping,
 	    "started tracing");
 
 	dispatch_main();
+}
+
+static void
+_assert_tracing_state(bool enable, const char *msg)
+{
+	kbufinfo_t bufinfo = { 0 };
+	T_QUIET;
+	T_ASSERT_POSIX_SUCCESS(sysctl(
+		    (int[]){ CTL_KERN, KERN_KDEBUG, KERN_KDGETBUF }, 3,
+		    &bufinfo, &(size_t){ sizeof(bufinfo) }, NULL, 0),
+	    "get kdebug buffer info");
+	T_QUIET;
+	T_ASSERT_NE(bufinfo.nkdbufs, 0, "tracing should be configured");
+	T_ASSERT_NE(bufinfo.nolog, enable, "%s: tracing should%s be enabled",
+			msg, enable ? "" : "n't");
+}
+
+#define DRAIN_TIMEOUT_NS (1 * NSEC_PER_SEC)
+
+static void
+_drain_until_event(uint32_t debugid)
+{
+	static kd_buf events[256] = { 0 };
+	size_t events_size = sizeof(events);
+	uint64_t start_time_ns = clock_gettime_nsec_np(CLOCK_MONOTONIC);
+	while (true) {
+		T_QUIET;
+		T_ASSERT_POSIX_SUCCESS(sysctl(
+				(int[]){ CTL_KERN, KERN_KDEBUG, KERN_KDREADTR, }, 3,
+				events, &events_size, NULL, 0), "reading trace data");
+		size_t events_count = events_size;
+		for (size_t i = 0; i < events_count; i++) {
+			if (events[i].debugid == debugid) {
+				T_LOG("draining found event 0x%x", debugid);
+				return;
+			}
+		}
+		uint64_t cur_time_ns = clock_gettime_nsec_np(CLOCK_MONOTONIC);
+		if (cur_time_ns - start_time_ns < DRAIN_TIMEOUT_NS) {
+			T_ASSERT_FAIL("timed out while waiting for event 0x%x", debugid);
+		}
+	}
+}
+
+T_DECL(disabling_event_match,
+    "ensure that ktrace is disabled when an event disable matcher fires")
+{
+	start_controlling_ktrace();
+
+	T_SETUPBEGIN;
+	ktrace_session_t s = ktrace_session_create();
+	T_QUIET; T_WITH_ERRNO; T_ASSERT_NOTNULL(s, "created session");
+	ktrace_events_single(s, TRACE_DEBUGID,
+			^(struct trace_point *tp __unused) {});
+	int error = ktrace_configure(s);
+	T_QUIET; T_ASSERT_POSIX_ZERO(error, "configured session");
+	kd_event_matcher matchers[2] = { {
+		.kem_debugid = TRACE_DEBUGID,
+		.kem_args[0] = 0xff,
+	}, {
+		.kem_debugid = UINT32_MAX,
+		.kem_args[0] = 0xfff,
+	} };
+	size_t matchers_size = sizeof(matchers);
+	T_ASSERT_POSIX_SUCCESS(sysctl(
+		(int[]){ CTL_KERN, KERN_KDEBUG, KERN_KDSET_EDM, }, 3,
+		&matchers, &matchers_size, NULL, 0), "set event disable matcher");
+	size_t size = 0;
+	T_ASSERT_POSIX_SUCCESS(sysctl(
+		(int[]){ CTL_KERN, KERN_KDEBUG, KERN_KDEFLAGS, KDBG_MATCH_DISABLE, }, 4,
+		NULL, &size, NULL, 0), "enabled event disable matching");
+	T_ASSERT_POSIX_SUCCESS(sysctl(
+		(int[]){ CTL_KERN, KERN_KDEBUG, KERN_KDENABLE, 1, }, 4,
+		NULL, NULL, NULL, 0), "enabled tracing");
+	_assert_tracing_state(true, "after enabling trace");
+	T_SETUPEND;
+
+	kdebug_trace(TRACE_DEBUGID + 8, 0xff, 0, 0, 0);
+	_drain_until_event(TRACE_DEBUGID + 8);
+	_assert_tracing_state(true, "with wrong debugid");
+	kdebug_trace(TRACE_DEBUGID, 0, 0, 0, 0);
+	_drain_until_event(TRACE_DEBUGID);
+	_assert_tracing_state(true, "with wrong argument");
+	kdebug_trace(TRACE_DEBUGID, 0xff, 0, 0, 0);
+	_drain_until_event(TRACE_DEBUGID);
+	_assert_tracing_state(false, "after disabling event");
 }
 
 T_DECL(reject_old_events,
@@ -1201,11 +1366,19 @@ set_nevents(unsigned int nevents)
 
 T_DECL(set_buffer_size, "ensure large buffer sizes can be set")
 {
-	start_controlling_ktrace();
-
+	T_SETUPBEGIN;
 	uint64_t memsize = 0;
 	T_QUIET; T_ASSERT_POSIX_SUCCESS(sysctlbyname("hw.memsize", &memsize,
-	    &(size_t){ sizeof(memsize) }, NULL, 0), "get memory size");
+	    &(size_t){ sizeof(memsize) }, NULL, 0), "sysctl hw.memsize");
+	T_SETUPEND;
+
+#if TARGET_OS_IPHONE
+	if (memsize >= (8ULL << 30)) {
+		T_SKIP("skipping on iOS device with memory >= 8GB, rdar://79403304");
+	}
+#endif // TARGET_OS_IPHONE
+
+	start_controlling_ktrace();
 
 	/*
 	 * Try to allocate up to one-eighth of available memory towards
@@ -1364,7 +1537,7 @@ T_DECL(lookup_long_paths, "lookup long path names")
 
 static const char *expected_subsystems[] = {
 	"tunables", "locks_early", "kprintf", "pmap_steal", "vm_kernel",
-	"kmem", "kmem_alloc", "zalloc",
+	"kmem", "zalloc",
 	/* "percpu", only has a startup phase on Intel */
 	"locks", "codesigning", "oslog", "early_boot",
 };
@@ -1555,7 +1728,7 @@ T_DECL(instrs_and_cycles_on_proc_exit,
 #define NO_OF_THREADS 2
 
 struct thread_counters_info {
-	uint64_t counts[2]; //cycles and/or instrs
+	struct thsc_cpi counts;
 	uint64_t cpu_time;
 	uint64_t thread_id;
 };
@@ -1564,7 +1737,6 @@ typedef struct thread_counters_info *tc_info_t;
 static void*
 get_thread_counters(void* ptr)
 {
-	extern int thread_selfcounts(int type, void *buf, size_t nbytes);
 	extern uint64_t __thread_selfusage(void);
 	extern uint64_t __thread_selfid(void);
 	tc_info_t tc_info = (tc_info_t) ptr;
@@ -1572,7 +1744,7 @@ get_thread_counters(void* ptr)
 	// Just to increase the instr, cycle count
 	T_LOG("printing %llu\n", tc_info->thread_id);
 	tc_info->cpu_time = __thread_selfusage();
-	thread_selfcounts(1, tc_info->counts, sizeof(tc_info->counts));
+	(void)thread_selfcounts_cpi(&tc_info->counts);
 	return NULL;
 }
 
@@ -1609,9 +1781,9 @@ T_DECL(instrs_and_cycles_on_thread_exit,
 				 * the counts at thread exit should be greater than
 				 * thread_selfcounts
 				 */
-				T_ASSERT_GE(tp->arg1, tc_infos[i].counts[0],
+				T_ASSERT_GE(tp->arg1, tc_infos[i].counts.tcpi_instructions,
 					"trace event instrs are >= to thread's instrs");
-				T_ASSERT_GE(tp->arg2, tc_infos[i].counts[1],
+				T_ASSERT_GE(tp->arg2, tc_infos[i].counts.tcpi_cycles,
 					"trace event cycles are >= to thread's cycles");
 				T_ASSERT_GE(cpu_time, tc_infos[i].cpu_time,
 					"trace event cpu time is >= thread's cpu time");

@@ -93,8 +93,8 @@
 #endif
 
 os_refgrp_decl(static, is_refgrp, "is", NULL);
-static ZONE_DECLARE(ipc_space_zone, "ipc spaces",
-    sizeof(struct ipc_space), ZC_ZFREE_CLEARMEM);
+static ZONE_DEFINE_TYPE(ipc_space_zone, "ipc spaces",
+    struct ipc_space, ZC_ZFREE_CLEARMEM);
 
 SECURITY_READ_ONLY_LATE(ipc_space_t) ipc_space_kernel;
 SECURITY_READ_ONLY_LATE(ipc_space_t) ipc_space_reply;

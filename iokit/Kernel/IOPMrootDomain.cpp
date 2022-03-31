@@ -755,6 +755,23 @@ private:
 };
 
 /*
+ * this should be treated as POD, as it's byte-copied around
+ * and we cannot rely on d'tor firing at the right time
+ */
+struct PMAssertStruct {
+	IOPMDriverAssertionID       id;
+	IOPMDriverAssertionType     assertionBits;
+	uint64_t                    createdTime;
+	uint64_t                    modifiedTime;
+	const OSSymbol              *ownerString;
+	IOService                   *ownerService;
+	uint64_t                    registryEntryID;
+	IOPMDriverAssertionLevel    level;
+	uint64_t                    assertCPUStartTime;
+	uint64_t                    assertCPUDuration;
+};
+
+/*
  * PMAssertionsTracker
  * Tracks kernel and user space PM assertions
  */
@@ -773,7 +790,7 @@ public:
 	IOPMDriverAssertionType     getActivatedAssertions(void);
 	IOPMDriverAssertionLevel    getAssertionLevel(IOPMDriverAssertionType);
 
-	IOReturn                    handleCreateAssertion(OSData *);
+	IOReturn                    handleCreateAssertion(OSValueObject<PMAssertStruct> *);
 	IOReturn                    handleReleaseAssertion(IOPMDriverAssertionID);
 	IOReturn                    handleSetAssertionLevel(IOPMDriverAssertionID, IOPMDriverAssertionLevel);
 	IOReturn                    handleSetUserAssertionLevels(void * arg0);
@@ -781,23 +798,6 @@ public:
 	void                        reportCPUBitAccounting(void);
 
 private:
-	/*
-	 * this should be treated as POD, as it's byte-copied around
-	 * and we cannot rely on d'tor firing at the right time
-	 */
-	typedef struct {
-		IOPMDriverAssertionID       id;
-		IOPMDriverAssertionType     assertionBits;
-		uint64_t                    createdTime;
-		uint64_t                    modifiedTime;
-		const OSSymbol              *ownerString;
-		IOService                   *ownerService;
-		uint64_t                    registryEntryID;
-		IOPMDriverAssertionLevel    level;
-		uint64_t                    assertCPUStartTime;
-		uint64_t                    assertCPUDuration;
-	} PMAssertStruct;
-
 	uint32_t                    tabulateProducerCount;
 	uint32_t                    tabulateConsumerCount;
 
@@ -1579,6 +1579,11 @@ IOPMrootDomain::start( IOService * nub )
 	PE_parse_boot_argn("haltmspanic", &gHaltTimeMaxPanic, sizeof(gHaltTimeMaxPanic));
 	PE_parse_boot_argn("haltmslog", &gHaltTimeMaxLog, sizeof(gHaltTimeMaxLog));
 
+	// read noidle setting from Device Tree
+	if (PE_get_default("no-idle", &gNoIdleFlag, sizeof(gNoIdleFlag))) {
+		DLOG("Setting gNoIdleFlag to %u from device tree\n", gNoIdleFlag);
+	}
+
 	queue_init(&aggressivesQueue);
 	aggressivesThreadCall = thread_call_allocate(handleAggressivesFunction, this);
 	aggressivesData = OSData::withCapacity(
@@ -2306,7 +2311,7 @@ IOPMrootDomain::handleAggressivesRequests( void )
 						DLOG("disk spindown accelerated\n");
 					}
 
-					aggressivesData->appendBytes(&newRecord, sizeof(newRecord));
+					aggressivesData->appendValue(newRecord);
 
 					// OSData may have switched to another (larger) buffer.
 					count = aggressivesData->getLength() / sizeof(AggressivesRecord);
@@ -5481,7 +5486,7 @@ IOPMrootDomain::evaluateSystemSleepPolicyFinal( void )
 			resetTimers = false;
 		}
 
-		paramsData = OSData::withBytes(&params, sizeof(params));
+		paramsData = OSData::withValue(params);
 		if (paramsData) {
 			setProperty(kIOPMSystemSleepParametersKey, paramsData.get());
 		}
@@ -5681,6 +5686,7 @@ IOPMrootDomain::handlePlatformHaltRestart( UInt32 pe_type )
 {
 	AbsoluteTime                startTime, elapsedTime;
 	uint32_t                    deltaTime;
+	bool                        nvramSync = false;
 
 	memset(&gHaltRestartCtx, 0, sizeof(gHaltRestartCtx));
 	gHaltRestartCtx.RootDomain = this;
@@ -5692,12 +5698,14 @@ IOPMrootDomain::handlePlatformHaltRestart( UInt32 pe_type )
 		gHaltRestartCtx.PowerState  = OFF_STATE;
 		gHaltRestartCtx.MessageType = kIOMessageSystemWillPowerOff;
 		gHaltRestartCtx.LogString   = "PowerOff";
+		nvramSync = true;
 		break;
 
 	case kPERestartCPU:
 		gHaltRestartCtx.PowerState  = RESTART_STATE;
 		gHaltRestartCtx.MessageType = kIOMessageSystemWillRestart;
 		gHaltRestartCtx.LogString   = "Restart";
+		nvramSync = true;
 		break;
 
 	case kPEPagingOff:
@@ -5712,6 +5720,10 @@ IOPMrootDomain::handlePlatformHaltRestart( UInt32 pe_type )
 
 	default:
 		return;
+	}
+
+	if (nvramSync) {
+		PESyncNVRAM();
 	}
 
 	gHaltRestartCtx.phase = kNotifyPriorityClients;
@@ -7111,7 +7123,7 @@ IOPMrootDomain::setMaintenanceWakeCalendar(
 		return kIOReturnBadArgument;
 	}
 
-	data = OSData::withBytes((void *) calendar, sizeof(*calendar));
+	data = OSData::withValue(*calendar);
 	if (!data) {
 		return kIOReturnNoMemory;
 	}
@@ -7852,10 +7864,6 @@ IOPMrootDomain::dispatchPowerEvent(
 		if (systemBooting) {
 			systemBooting = false;
 
-			// read noidle setting from Device Tree
-			if (PE_get_default("no-idle", &gNoIdleFlag, sizeof(gNoIdleFlag))) {
-				DLOG("Setting gNoIdleFlag to %u from device tree\n", gNoIdleFlag);
-			}
 			if (PE_get_default("sleep-disabled", &gSleepDisabledFlag, sizeof(gSleepDisabledFlag))) {
 				DLOG("Setting gSleepDisabledFlag to %u from device tree\n", gSleepDisabledFlag);
 			}
@@ -7943,7 +7951,7 @@ IOPMrootDomain::dispatchPowerEvent(
 	case kPowerEventAssertionCreate:
 		DMSG("power event %u args %p 0x%llx\n", event, OBFUSCATE(arg0), arg1);
 		if (pmAssertions) {
-			pmAssertions->handleCreateAssertion((OSData *)arg0);
+			pmAssertions->handleCreateAssertion((OSValueObject<PMAssertStruct> *)arg0);
 		}
 		break;
 
@@ -9058,7 +9066,7 @@ IOPMrootDomain::pmStatsRecordEvent(
 			delta = gPMStats.hibRead.stop - gPMStats.hibRead.start;
 			IOLog("PMStats: Hibernate read took %qd ms\n", delta / NSEC_PER_MSEC);
 
-			publishPMStats = OSData::withBytes(&gPMStats, sizeof(gPMStats));
+			publishPMStats = OSData::withValue(gPMStats);
 			setProperty(kIOPMSleepStatisticsKey, publishPMStats.get());
 			bzero(&gPMStats, sizeof(gPMStats));
 		}
@@ -10682,7 +10690,7 @@ IOPMrootDomain::claimSystemWakeEvent(
 	deviceName   = device->copyName(gIOServicePlane);
 	deviceRegId  = OSNumber::withNumber(device->getRegistryEntryID(), 64);
 	claimTime    = OSNumber::withNumber(timestamp, 64);
-	flagsData    = OSData::withBytes(&flags, sizeof(flags));
+	flagsData    = OSData::withValue(flags);
 	reasonString = OSString::withCString(reason);
 	dict = OSDictionary::withCapacity(5 + (details ? 1 : 0));
 	if (!dict || !deviceName || !deviceRegId || !claimTime || !flagsData || !reasonString) {
@@ -10981,8 +10989,8 @@ PMAssertionsTracker::tabulate(void)
 {
 	int i;
 	int count;
-	PMAssertStruct      *_a = NULL;
-	OSData              *_d = NULL;
+	const PMAssertStruct *_a = nullptr;
+	OSValueObject<PMAssertStruct> *_d = nullptr;
 
 	IOPMDriverAssertionType oldKernel = assertionsKernel;
 	IOPMDriverAssertionType oldCombined = assertionsCombined;
@@ -10998,9 +11006,9 @@ PMAssertionsTracker::tabulate(void)
 
 	if ((count = assertionsArray->getCount())) {
 		for (i = 0; i < count; i++) {
-			_d = OSDynamicCast(OSData, assertionsArray->getObject(i));
+			_d = OSDynamicCast(OSValueObject<PMAssertStruct>, assertionsArray->getObject(i));
 			if (_d) {
-				_a = (PMAssertStruct *)_d->getBytesNoCopy();
+				_a = _d->getBytesNoCopy();
 				if (_a && (kIOPMDriverAssertionLevelOn == _a->level)) {
 					assertionsKernel |= _a->assertionBits;
 				}
@@ -11043,8 +11051,8 @@ PMAssertionsTracker::updateCPUBitAccounting( PMAssertStruct *assertStruct )
 void
 PMAssertionsTracker::reportCPUBitAccounting( void )
 {
-	PMAssertStruct *_a;
-	OSData         *_d;
+	const PMAssertStruct *_a = nullptr;
+	OSValueObject<PMAssertStruct> *_d = nullptr;
 	int            i, count;
 	AbsoluteTime   now;
 	uint64_t       nsec;
@@ -11056,9 +11064,9 @@ PMAssertionsTracker::reportCPUBitAccounting( void )
 		now = mach_absolute_time();
 		if ((count = assertionsArray->getCount())) {
 			for (i = 0; i < count; i++) {
-				_d = OSDynamicCast(OSData, assertionsArray->getObject(i));
+				_d = OSDynamicCast(OSValueObject<PMAssertStruct>, assertionsArray->getObject(i));
 				if (_d) {
-					_a = (PMAssertStruct *)_d->getBytesNoCopy();
+					_a = _d->getBytesNoCopy();
 					if ((_a->assertionBits & kIOPMDriverAssertionCPUBit) &&
 					    (_a->level == kIOPMDriverAssertionLevelOn) &&
 					    (_a->assertCPUStartTime != 0)) {
@@ -11113,11 +11121,11 @@ PMAssertionsTracker::publishProperties( void )
 	}
 }
 
-PMAssertionsTracker::PMAssertStruct *
+PMAssertStruct *
 PMAssertionsTracker::detailsForID(IOPMDriverAssertionID _id, int *index)
 {
 	PMAssertStruct      *_a = NULL;
-	OSData              *_d = NULL;
+	OSValueObject<PMAssertStruct> *_d = nullptr;
 	int                 found = -1;
 	int                 count = 0;
 	int                 i = 0;
@@ -11125,9 +11133,9 @@ PMAssertionsTracker::detailsForID(IOPMDriverAssertionID _id, int *index)
 	if (assertionsArray
 	    && (count = assertionsArray->getCount())) {
 		for (i = 0; i < count; i++) {
-			_d = OSDynamicCast(OSData, assertionsArray->getObject(i));
+			_d = OSDynamicCast(OSValueObject<PMAssertStruct>, assertionsArray->getObject(i));
 			if (_d) {
-				_a = (PMAssertStruct *)_d->getBytesNoCopy();
+				_a = _d->getMutableBytesNoCopy();
 				if (_a && (_id == _a->id)) {
 					found = i;
 					break;
@@ -11150,15 +11158,15 @@ PMAssertionsTracker::detailsForID(IOPMDriverAssertionID _id, int *index)
  * Perform assertion work on the PM workloop. Do not call directly.
  */
 IOReturn
-PMAssertionsTracker::handleCreateAssertion(OSData *newAssertion)
+PMAssertionsTracker::handleCreateAssertion(OSValueObject<PMAssertStruct> *newAssertion)
 {
-	PMAssertStruct *assertStruct;
+	PMAssertStruct *assertStruct = nullptr;
 
 	ASSERT_GATED();
 
 	if (newAssertion) {
 		IOLockLock(assertionsArrayLock);
-		assertStruct = (PMAssertStruct *) newAssertion->getBytesNoCopy();
+		assertStruct = newAssertion->getMutableBytesNoCopy();
 		if ((assertStruct->assertionBits & kIOPMDriverAssertionCPUBit) &&
 		    (assertStruct->level == kIOPMDriverAssertionLevelOn)) {
 			assertStruct->assertCPUStartTime = mach_absolute_time();
@@ -11184,7 +11192,7 @@ PMAssertionsTracker::createAssertion(
 	const char *whoItIs,
 	IOPMDriverAssertionID *outID)
 {
-	OSSharedPtr<OSData>         dataStore;
+	OSSharedPtr<OSValueObject<PMAssertStruct> > dataStore;
 	PMAssertStruct  track;
 
 	// Warning: trillions and trillions of created assertions may overflow the unique ID.
@@ -11202,7 +11210,7 @@ PMAssertionsTracker::createAssertion(
 	track.assertCPUStartTime = 0;
 	track.assertCPUDuration = 0;
 
-	dataStore = OSData::withBytes(&track, sizeof(PMAssertStruct));
+	dataStore = OSValueObjectWithValue(track);
 	if (!dataStore) {
 		if (track.ownerString) {
 			track.ownerString->release();
@@ -11368,12 +11376,12 @@ PMAssertionsTracker::copyAssertionsArray(void)
 	}
 
 	for (i = 0; i < count; i++) {
-		PMAssertStruct  *_a = NULL;
-		OSData          *_d = NULL;
+		const PMAssertStruct *_a = nullptr;
+		OSValueObject<PMAssertStruct> *_d = nullptr;
 		OSSharedPtr<OSDictionary>    details;
 
-		_d = OSDynamicCast(OSData, assertionsArray->getObject(i));
-		if (_d && (_a = (PMAssertStruct *)_d->getBytesNoCopy())) {
+		_d = OSDynamicCast(OSValueObject<PMAssertStruct>, assertionsArray->getObject(i));
+		if (_d && (_a = _d->getBytesNoCopy())) {
 			OSSharedPtr<OSNumber>        _n;
 
 			details = OSDictionary::withCapacity(7);

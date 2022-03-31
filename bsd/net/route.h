@@ -237,6 +237,9 @@ struct rtentry {
 	struct eventhandler_lists_ctxt rt_evhdlr_ctxt;
 };
 
+#define rt_key_free(r) \
+	(kheap_free_addr)(KHEAP_DATA_BUFFERS, rt_key(r))
+
 enum {
 	ROUTE_STATUS_UPDATE = 1,
 	ROUTE_ENTRY_REFRESH,
@@ -327,6 +330,11 @@ extern int route_op_entitlement_check(struct socket *, kauth_cred_t, int, boolea
 
 #define IS_DIRECT_HOSTROUTE(rt) \
 	(((rt)->rt_flags & (RTF_HOST | RTF_GATEWAY)) == RTF_HOST)
+
+#define IS_DYNAMIC_DIRECT_HOSTROUTE(rt) \
+	(((rt)->rt_flags & (RTF_CLONING | RTF_PRCLONING | RTF_HOST | RTF_LLINFO |\
+	    RTF_WASCLONED | RTF_GATEWAY)) ==\
+	 (RTF_HOST | RTF_LLINFO | RTF_WASCLONED))
 /*
  * Routing statistics.
  */

@@ -333,8 +333,7 @@ extern int ip_savecontrol(struct inpcb *, struct mbuf **, struct ip *,
     struct mbuf *);
 extern struct mbuf *ip_srcroute(void);
 extern void  ip_stripoptions(struct mbuf *);
-extern void ip_initid(void);
-extern u_int16_t ip_randomid(void);
+extern u_int16_t ip_randomid(uint64_t);
 extern int ip_fragment(struct mbuf *, struct ifnet *, uint32_t, int);
 
 extern void ip_setsrcifaddr_info(struct mbuf *, uint16_t, struct in_ifaddr *);

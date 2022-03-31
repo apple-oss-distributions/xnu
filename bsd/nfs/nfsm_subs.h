@@ -822,21 +822,41 @@ int nfsm_chain_trim_data(struct nfsm_chain *, int, int *);
 	        nfsm_assert((E), (__val == NFS_OK), __val); \
 	} while (0)
 
-#define nfsm_chain_check_change_info(E, NMC, DNP) \
+#define nfsm_chain_read_change_info(E, NMC, ATOMIC, BEFORE, AFTER) \
 	do { \
-	        uint64_t __ci_before = 0, __ci_after = 0; \
-	        uint32_t __ci_atomic = 0; \
-	        nfsm_chain_get_32((E), (NMC), __ci_atomic); \
-	        nfsm_chain_get_64((E), (NMC), __ci_before); \
-	        nfsm_chain_get_64((E), (NMC), __ci_after); \
-	        if ((E) || !(DNP)) break; \
-	        if (__ci_atomic && (__ci_before == (DNP)->n_ncchange)) { \
-	                (DNP)->n_ncchange = __ci_after; \
+	        nfsm_chain_get_32((E), (NMC), (ATOMIC)); \
+	        nfsm_chain_get_64((E), (NMC), (BEFORE)); \
+	        nfsm_chain_get_64((E), (NMC), (AFTER)); \
+} while (0)
+
+#define nfsm_chain_check_change_info_impl(ATOMIC, BEFORE, AFTER, DNP) \
+	do { \
+	        if ((ATOMIC) && ((BEFORE) == (DNP)->n_ncchange)) { \
+	                (DNP)->n_ncchange = (AFTER); \
 	        } else { \
 	                cache_purge(NFSTOV(DNP)); \
 	                (DNP)->n_ncgen++; \
 	        } \
+} while (0)
+
+#define nfsm_chain_check_change_info(E, NMC, DNP) \
+	do { \
+	        uint64_t __ci_before = 0, __ci_after = 0; \
+	        uint32_t __ci_atomic = 0; \
+	        nfsm_chain_read_change_info((E), (NMC), __ci_atomic, __ci_before, __ci_after); \
+	        if ((E) || !(DNP)) break; \
+	        nfsm_chain_check_change_info_impl(__ci_atomic, __ci_before, __ci_after, DNP); \
 	} while (0)
+
+#define nfsm_chain_check_change_info_open(E, NMC, DNP, CFLAGS) \
+	do { \
+	        uint64_t __ci_before = 0, __ci_after = 0; \
+	        uint32_t __ci_atomic = 0; \
+	        nfsm_chain_read_change_info((E), (NMC), __ci_atomic, __ci_before, __ci_after); \
+	        if ((E) || !(DNP) || !(CFLAGS)) break; \
+	        if ((CFLAGS) == NFS_CREATE_EXCLUSIVE || __ci_before != __ci_after || (DNP)->n_ncchange != __ci_after) \
+	                nfsm_chain_check_change_info_impl(__ci_atomic, __ci_before, __ci_after, DNP); \
+	        } while (0)
 
 #endif /* __APPLE_API_PRIVATE */
 #endif /* _NFS_NFSM_SUBS_H_ */

@@ -302,8 +302,7 @@ void     audit_arg_mac_string(struct kaudit_record *ar, char *string);
 
 extern au_event_t sys_au_event[];
 
-#define AUDIT_RECORD() \
-	((struct uthread*)get_bsdthread_info(current_thread()))->uu_ar
+#define AUDIT_RECORD()          (current_uthread()->uu_ar)
 
 #ifndef AUDIT_USE_BUILTIN_EXPECT
 #define AUDIT_USE_BUILTIN_EXPECT
@@ -379,8 +378,7 @@ extern au_event_t sys_au_event[];
 
 #define AUDIT_MACH_SYSCALL_EXIT(retval)         do {                    \
 	if (AUDIT_SYSCALLS()) {                                         \
-	        struct uthread *__uthread =                             \
-	                get_bsdthread_info(current_thread());           \
+	        struct uthread *__uthread = current_uthread();          \
 	        if (AUDIT_AUDITING(__uthread->uu_ar))                   \
 	                audit_mach_syscall_exit(retval, __uthread);     \
 	}                                                               \

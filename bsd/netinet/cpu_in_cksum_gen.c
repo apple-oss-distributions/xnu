@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2017 Apple Inc. All rights reserved.
+ * Copyright (c) 2012-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -75,6 +75,8 @@
 #include <unistd.h>
 #include <strings.h>
 #include <mach/boolean.h>
+#include <skywalk/os_skywalk_private.h>
+#define CKSUM_ERR(fmt, args...) fprintf_stderr(fmt, ## args)
 #endif /* !KERNEL */
 
 /* compile time assert */

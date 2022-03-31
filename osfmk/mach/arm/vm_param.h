@@ -38,6 +38,10 @@
 
 #if defined (__arm__) || defined (__arm64__)
 
+#if defined(XNU_KERNEL_PRIVATE) && defined(__arm64__)
+#include <arm64/proc_reg.h>
+#endif
+
 #if defined(KERNEL_PRIVATE) && __ARM_16K_PG__
 #include <arm64/proc_reg.h>
 #endif
@@ -111,47 +115,7 @@ extern int PAGE_SHIFT_CONST;
 #define VM32_MIN_ADDRESS        ((vm32_offset_t) 0)
 #define VM32_MAX_ADDRESS        ((vm32_offset_t) (VM_MAX_ADDRESS & 0xFFFFFFFF))
 
-/*
- * kalloc() parameters:
- *
- * Historically kalloc's underlying zones were power-of-2 sizes, with a
- * KALLOC_MINSIZE of 16 bytes.  Thus the allocator ensured that
- * (sizeof == alignof) >= 16 for all kalloc allocations.
- *
- * Today kalloc may use zones with intermediate (small) sizes, constrained by
- * KALLOC_MINSIZE and a minimum alignment, expressed by KALLOC_LOG2_MINALIGN.
- *
- * Note that most dynamically allocated data structures contain more than
- * one int/long/pointer member, so KALLOC_MINSIZE should probably start at 8.
- */
-
-#if defined (__arm__)
-
-#define KALLOC_MINSIZE          8       /* minimum allocation size */
-#define KALLOC_LOG2_MINALIGN    3       /* log2 minimum alignment */
-
-#elif defined(__arm64__)
-
-#define KALLOC_MINSIZE          16      /* minimum allocation size */
-#define KALLOC_LOG2_MINALIGN    4       /* log2 minimum alignment */
-
-#else
-#error Unsupported arch
-#endif
-
-#if defined (__arm__)
-/* existing zone map size limit moved from osfmk/vm/vm_init.c */
-#define ZONE_MAP_MAX (1024 * 1024 * 1536) /* 1.5GB for 32bit systems */
-#elif defined(__arm64__)
-/*
- * Limits the physical pages in the zone map
- */
-#define ZONE_MAP_MAX (31ULL << 30) /* 31GB for 64bit systems */
-#else
-#error Unsupported arch
-#endif
-
-#endif
+#endif /* MACH_KERNEL_PRIVATE */
 
 #if defined (__arm__)
 
@@ -192,18 +156,42 @@ extern int PAGE_SHIFT_CONST;
 
 #ifdef  KERNEL
 
+/*
+ * kalloc() parameters:
+ *
+ * Historically kalloc's underlying zones were power-of-2 sizes, with a
+ * KALLOC_MINSIZE of 16 bytes.  Thus the allocator ensured that
+ * (sizeof == alignof) >= 16 for all kalloc allocations.
+ *
+ * Today kalloc may use zones with intermediate (small) sizes, constrained by
+ * KALLOC_MINSIZE and a minimum alignment, expressed by KALLOC_LOG2_MINALIGN.
+ *
+ * Note that most dynamically allocated data structures contain more than
+ * one int/long/pointer member, so KALLOC_MINSIZE should probably start at 8.
+ */
+
 #if defined (__arm__)
 #define VM_KERNEL_POINTER_SIGNIFICANT_BITS  31
 #define VM_MIN_KERNEL_ADDRESS   ((vm_address_t) 0x80000000)
 #define VM_MAX_KERNEL_ADDRESS   ((vm_address_t) 0xFFFEFFFF)
 #define VM_HIGH_KERNEL_WINDOW   ((vm_address_t) 0xFFFE0000)
+
+#if XNU_KERNEL_PRIVATE
+#define KALLOC_MINSIZE          8       /* minimum allocation size */
+#define KALLOC_LOG2_MINALIGN    3       /* log2 minimum alignment */
+
+#define ZONE_MAP_MAX            (1024 * 1024 * 1536) /* 1.5GB for 32bit systems */
+#endif
 #elif defined (__arm64__)
 /*
  * The minimum and maximum kernel address; some configurations may
  * constrain the address space further.
  */
-#define TiB(x) ((0ULL + (x)) << 40)
-#define GiB(x) ((0ULL + (x)) << 30)
+#define TiB(x)                  ((0ULL + (x)) << 40)
+#define GiB(x)                  ((0ULL + (x)) << 30)
+
+#define KALLOC_MINSIZE          16      /* minimum allocation size */
+#define KALLOC_LOG2_MINALIGN    4       /* log2 minimum alignment */
 
 #if XNU_KERNEL_PRIVATE
 #if defined(ARM_LARGE_MEMORY)
@@ -227,6 +215,9 @@ extern int PAGE_SHIFT_CONST;
 
 // 1.25TB for static_memory_region, 512GB for kernel heap, 256GB for KASAN
 #define VM_MAX_KERNEL_ADDRESS   ((vm_address_t) (VM_MIN_KERNEL_ADDRESS + GiB(64) + GiB(512) - 1))
+
+#define ZONE_MAP_MAX            GiB(32)
+#define ZONE_MAP_VA_SIZE_LP64   GiB(128)
 #else // ARM_LARGE_MEMORY
 /*
  * +-----------------------+--------+--------+------------------------+
@@ -245,10 +236,14 @@ extern int PAGE_SHIFT_CONST;
 #define VM_KERNEL_POINTER_SIGNIFICANT_BITS  37
 #define VM_MIN_KERNEL_ADDRESS   ((vm_address_t) 0xffffffe000000000ULL)
 #define VM_MAX_KERNEL_ADDRESS   ((vm_address_t) 0xfffffffbffffffffULL)
+
+#define ZONE_MAP_MAX            GiB(8)
+#define ZONE_MAP_VA_SIZE_LP64   GiB(24)
 #endif // ARM_LARGE_MEMORY
 
 #else // !XNU_KERNEL_PRIVATE
 // Inform kexts about largest possible kernel address space
+#define VM_KERNEL_POINTER_SIGNIFICANT_BITS  41
 #define VM_MIN_KERNEL_ADDRESS   ((vm_address_t) (0ULL - TiB(2)))
 #define VM_MAX_KERNEL_ADDRESS   ((vm_address_t) 0xfffffffbffffffffULL)
 #endif // XNU_KERNEL_PRIVATE

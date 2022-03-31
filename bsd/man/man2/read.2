@@ -145,6 +145,15 @@ return the number of bytes actually read and placed in the buffer.
 The system guarantees to read the number of bytes requested if
 the descriptor references a normal file that has that many bytes left
 before the end-of-file, but in no other case.
+.Pp
+.Fn read
+and
+.Fn pread
+will fail if the parameter
+.Fa nbyte
+exceeds
+.Dv INT_MAX ,
+and they do not attempt a partial read.
 .Sh RETURN VALUES
 If successful, the
 number of bytes actually read is returned.
@@ -275,6 +284,20 @@ A read is attempted on an unconnected socket.
 .It Bq Er ETIMEDOUT
 A transmission timeout occurs
 during a read attempt on a socket.
+.El
+.Pp
+The
+.Fn read
+and
+.Fn pread
+call may also return the following error:
+.Bl -tag -width Er
+.\" ===========
+.It Bq Er EINVAL
+The value provided for
+.Fa nbyte
+exceeds
+.Dv INT_MAX .
 .El
 .Pp
 The

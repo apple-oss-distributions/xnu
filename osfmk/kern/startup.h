@@ -64,8 +64,7 @@ __enum_decl(startup_subsystem_id_t, uint32_t, {
 
 	STARTUP_SUB_PMAP_STEAL,       /**< to perform various pmap carveouts   */
 	STARTUP_SUB_VM_KERNEL,        /**< once the kernel VM is ready         */
-	STARTUP_SUB_KMEM,             /**< once kmem is ready                  */
-	STARTUP_SUB_KMEM_ALLOC,       /**< once kmem_alloc is ready            */
+	STARTUP_SUB_KMEM,             /**< once kmem_alloc is ready            */
 	STARTUP_SUB_ZALLOC,           /**< initialize zalloc and kalloc        */
 	STARTUP_SUB_PERCPU,           /**< initialize the percpu subsystem     */
 	STARTUP_SUB_LOCKS,            /**< various subsystem locks             */
@@ -124,8 +123,7 @@ extern startup_debug_t startup_debug;
  * else did for this subsystem.
  */
 __enum_decl(startup_rank_t, uint32_t, {
-#define STARTUP_RANK_NTH(n) \
-	(enum startup_rank)(n)
+#define STARTUP_RANK_NTH(n)           ((startup_rank_t)(n - 1))
 	STARTUP_RANK_FIRST          = 0,
 	STARTUP_RANK_SECOND         = 1,
 	STARTUP_RANK_THIRD          = 2,
@@ -134,7 +132,7 @@ __enum_decl(startup_rank_t, uint32_t, {
 	STARTUP_RANK_MIDDLE         = 0x7fffffff,
 
 #define STARTUP_RANK_LATE_NTH(n) \
-	(enum startup_rank)(STARTUP_RANK_MIDDLE + 1 + (n))
+	((startup_rank_t)(STARTUP_RANK_MIDDLE + 1 + (n)))
 
 	STARTUP_RANK_LAST           = 0xffffffff,
 });

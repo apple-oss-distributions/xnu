@@ -1,3 +1,5 @@
+from __future__ import absolute_import, print_function
+
 from memory import IterateZPerCPU
 from xnu import *
 
@@ -20,5 +22,5 @@ def ShowSimpleCounter(cmd_args=None):
     """
     if not cmd_args:
         raise ArgumentError("Please specify the address of the counter you want to read.")
-        return
-    print GetSimpleCounter(kern.GetValueFromAddress(cmd_args[0], "scalable_counter_t"))
+
+    print(GetSimpleCounter(kern.GetValueFromAddress(cmd_args[0], "scalable_counter_t")))

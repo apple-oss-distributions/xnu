@@ -108,38 +108,22 @@ mac_cred_label_free(struct label *label)
 	mac_labelzone_free(label);
 }
 
+struct label *
+mac_cred_label(struct ucred *cred)
+{
+	return cred->cr_label;
+}
+
 bool
 mac_cred_label_is_equal(const struct label *a, const struct label *b)
 {
-	if (a->l_flags != b->l_flags) {
-		return false;
-	}
-	for (int slot = 0; slot < MAC_MAX_SLOTS; slot++) {
-		const void *pa = a->l_perpolicy[slot].l_ptr;
-		const void *pb = b->l_perpolicy[slot].l_ptr;
-
-		if (pa != pb) {
-			return false;
-		}
-	}
-	return true;
+	return memcmp(a->l_perpolicy, b->l_perpolicy, sizeof(a->l_perpolicy)) == 0;
 }
 
 uint32_t
 mac_cred_label_hash_update(const struct label *a, uint32_t hash)
 {
-	hash = os_hash_jenkins_update(&a->l_flags,
-	    sizeof(a->l_flags), hash);
-#if __has_feature(ptrauth_calls)
-	for (int slot = 0; slot < MAC_MAX_SLOTS; slot++) {
-		const void *ptr = a->l_perpolicy[slot].l_ptr;
-		hash = os_hash_jenkins_update(&ptr, sizeof(ptr), hash);
-	}
-#else
-	hash = os_hash_jenkins_update(&a->l_perpolicy,
-	    sizeof(a->l_perpolicy), hash);
-#endif
-	return hash;
+	return os_hash_jenkins_update(a->l_perpolicy, sizeof(a->l_perpolicy), hash);
 }
 
 int
@@ -150,7 +134,7 @@ mac_cred_label_externalize_audit(struct proc *p, struct mac *mac)
 
 	cr = kauth_cred_proc_ref(p);
 
-	error = MAC_EXTERNALIZE_AUDIT(cred, cr->cr_label,
+	error = MAC_EXTERNALIZE_AUDIT(cred, mac_cred_label(cr),
 	    mac->m_string, mac->m_buflen);
 
 	kauth_cred_unref(&cr);
@@ -160,8 +144,9 @@ mac_cred_label_externalize_audit(struct proc *p, struct mac *mac)
 void
 mac_cred_label_destroy(kauth_cred_t cred)
 {
-	mac_cred_label_free(cred->cr_label);
+	struct label *label = mac_cred_label(cred);
 	cred->cr_label = NULL;
+	mac_cred_label_free(label);
 }
 
 int
@@ -231,53 +216,24 @@ mac_cred_label_associate(struct ucred *parent_cred, struct ucred *child_cred)
 int
 mac_execve_enter(user_addr_t mac_p, struct image_params *imgp)
 {
-	struct user_mac mac;
-	struct label *execlabel;
-	char *buffer;
-	int error;
-	size_t ulen;
-
 	if (mac_p == USER_ADDR_NULL) {
 		return 0;
 	}
 
-	if (IS_64BIT_PROCESS(current_proc())) {
-		struct user64_mac mac64;
-		error = copyin(mac_p, &mac64, sizeof(mac64));
-		mac.m_buflen = mac64.m_buflen;
-		mac.m_string = mac64.m_string;
-	} else {
-		struct user32_mac mac32;
-		error = copyin(mac_p, &mac32, sizeof(mac32));
-		mac.m_buflen = mac32.m_buflen;
-		mac.m_string = mac32.m_string;
-	}
-	if (error) {
+	return mac_do_set(current_proc(), mac_p,
+	           ^(char *input, __unused size_t len) {
+		struct label *execlabel;
+		int error;
+
+		execlabel = mac_cred_label_alloc();
+		if ((error = mac_cred_label_internalize(execlabel, input))) {
+		        mac_cred_label_free(execlabel);
+		        execlabel = NULL;
+		}
+
+		imgp->ip_execlabelp = execlabel;
 		return error;
-	}
-
-	error = mac_check_structmac_consistent(&mac);
-	if (error) {
-		return error;
-	}
-
-	execlabel = mac_cred_label_alloc();
-	buffer = kalloc_data(mac.m_buflen, Z_WAITOK);
-	error = copyinstr(CAST_USER_ADDR_T(mac.m_string), buffer, mac.m_buflen, &ulen);
-	if (error) {
-		goto out;
-	}
-	AUDIT_ARG(mac_string, buffer);
-
-	error = mac_cred_label_internalize(execlabel, buffer);
-out:
-	if (error) {
-		mac_cred_label_free(execlabel);
-		execlabel = NULL;
-	}
-	imgp->ip_execlabelp = execlabel;
-	kfree_data(buffer, mac.m_buflen);
-	return error;
+	});
 }
 
 /*

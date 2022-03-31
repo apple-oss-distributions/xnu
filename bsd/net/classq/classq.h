@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2007-2018 Apple Inc. All rights reserved.
+ * Copyright (c) 2007-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -78,6 +78,9 @@ extern "C" {
 typedef enum classq_pkt_type {
 	QP_INVALID = 0,
 	QP_MBUF,        /* mbuf packet */
+#if SKYWALK
+	QP_PACKET,      /* skywalk packet */
+#endif /* SKYWALK */
 } classq_pkt_type_t;
 
 /*
@@ -86,6 +89,9 @@ typedef enum classq_pkt_type {
 typedef struct classq_pkt {
 	union {
 		struct mbuf             *cp_mbuf;       /* mbuf packet */
+#if SKYWALK
+		struct __kern_packet    *cp_kpkt;       /* skywalk packet */
+#endif /* SKYWALK */
 	};
 	classq_pkt_type_t       cp_ptype;
 } classq_pkt_t;
@@ -103,6 +109,12 @@ typedef struct classq_pkt {
 	(_p)->cp_mbuf = (_m);                   \
 } while (0)
 
+#if SKYWALK
+#define CLASSQ_PKT_INIT_PACKET(_p, _k)  do {    \
+	(_p)->cp_ptype = QP_PACKET;             \
+	(_p)->cp_kpkt = (_k);                   \
+} while (0)
+#endif /* SKYWALK */
 
 /*
  * Packet Queue types
@@ -138,6 +150,9 @@ struct pktcntr {
 #include <sys/mcache.h>
 #include <sys/mbuf.h>
 #include <sys/sysctl.h>
+#if SKYWALK
+#include <skywalk/packet/packet_queue.h>
+#endif /* SKYWALK */
 
 /*
  * Packet Queue structures and macros to manipulate them.
@@ -145,6 +160,9 @@ struct pktcntr {
 typedef struct _class_queue_ {
 	union {
 		MBUFQ_HEAD(mq_head) __mbufq; /* mbuf packet queue */
+#if SKYWALK
+		KPKTQ_HEAD(kq_head) __kpktq; /* skywalk packet queue */
+#endif /* SKYWALK */
 	} __pktq_u;
 	u_int32_t       qlen;   /* Queue length (in number of packets) */
 	u_int32_t       qlim;   /* Queue limit (in number of packets*) */
@@ -155,6 +173,9 @@ typedef struct _class_queue_ {
 } class_queue_t;
 
 #define qmbufq(q)       (q)->__pktq_u.__mbufq   /* Get mbuf packet queue */
+#if SKYWALK
+#define qkpktq(q)       (q)->__pktq_u.__kpktq   /* Get kernel packet queue */
+#endif /* SKYWALK */
 #define qptype(q)       (q)->qptype             /* Get queue packet type */
 #define qtype(q)        (q)->qtype              /* Get queue type */
 #define qstate(q)       (q)->qstate             /* Get queue state */
@@ -162,7 +183,13 @@ typedef struct _class_queue_ {
 #define qlen(q)         (q)->qlen               /* Current queue length. */
 #define qsize(q)        (q)->qsize              /* Approx. bytes in queue */
 
+#if SKYWALK
+#define qhead(q)        ((qptype(q) == QP_MBUF) ?               \
+	                    (void *)MBUFQ_FIRST(&qmbufq(q)) :   \
+	                    (void *)KPKTQ_FIRST(&qkpktq(q)))
+#else /* !SKYWALK */
 #define qhead(q)        MBUFQ_FIRST(&qmbufq(q))
+#endif /* !SKYWALK */
 
 #define qempty(q)       (qlen(q) == 0)  /* Is the queue empty?? */
 #define q_is_red(q)     (qtype(q) == Q_RED)     /* Is the queue a RED queue */

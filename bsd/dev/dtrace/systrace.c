@@ -187,7 +187,7 @@ dtrace_systrace_syscall(struct proc *pp, void *uap, int *rv)
 	systrace_args(code, ip, uargs);
 
 	if ((id = sy->stsy_entry) != DTRACE_IDNONE) {
-		uthread_t uthread = (uthread_t)get_bsdthread_info(current_thread());
+		uthread_t uthread = current_uthread();
 		if (uthread) {
 			uthread->t_dtrace_syscall_args = uargs;
 		}
@@ -221,7 +221,7 @@ dtrace_systrace_syscall(struct proc *pp, void *uap, int *rv)
 
 	if ((id = sy->stsy_return) != DTRACE_IDNONE) {
 		uint64_t munged_rv0, munged_rv1;
-		uthread_t uthread = (uthread_t)get_bsdthread_info(current_thread());
+		uthread_t uthread = current_uthread();
 
 		if (uthread) {
 			uthread->t_dtrace_errno = rval; /* Establish t_dtrace_errno now in case this enabling refers to it. */
@@ -305,7 +305,7 @@ dtrace_systrace_syscall_return(unsigned short code, int rval, int *rv)
 
 	if ((id = sy->stsy_return) != DTRACE_IDNONE) {
 		uint64_t munged_rv0, munged_rv1;
-		uthread_t uthread = (uthread_t)get_bsdthread_info(current_thread());
+		uthread_t uthread = current_uthread();
 
 		if (uthread) {
 			uthread->t_dtrace_errno = rval; /* Establish t_dtrace_errno now in case this enabling refers to it. */
@@ -603,24 +603,33 @@ systrace_detach(dev_info_t *devi, ddi_detach_cmd_t cmd)
 typedef kern_return_t (*mach_call_t)(void *);
 
 /* APPLE NOTE: From #include <kern/syscall_sw.h> which may be changed for 64 bit! */
-typedef void    mach_munge_t(void *);
+#if CONFIG_REQUIRES_U32_MUNGING
+typedef void mach_munge_t(void *);
+#elif __arm__ && (__BIGGEST_ALIGNMENT__ > 4)
+typedef int mach_munge_t(const void *, void *);
+#endif
 
 typedef struct {
-	int                     mach_trap_arg_count;
-	kern_return_t           (*mach_trap_function)(void *);
-#if defined(__arm64__) || defined(__x86_64__)
-	mach_munge_t            *mach_trap_arg_munge32; /* system call arguments for 32-bit */
+	unsigned char           mach_trap_arg_count; /* Number of trap arguments (Arch independant) */
+	unsigned char           mach_trap_u32_words; /* number of 32-bit words to copyin for U32 */
+	unsigned char           mach_trap_returns_port;
+	unsigned char           __mach_trap_padding;
+	kern_return_t         (*mach_trap_function)(void *);
+#if CONFIG_REQUIRES_U32_MUNGING || (__arm__ && (__BIGGEST_ALIGNMENT__ > 4))
+	mach_munge_t           *mach_trap_arg_munge32; /* system call argument munger routine for 32-bit */
 #endif
-	int                     mach_trap_u32_words;
-#if     MACH_ASSERT
-	const char*             mach_trap_name;
+#if MACH_ASSERT
+	const char             *mach_trap_name;
 #endif /* MACH_ASSERT */
 } mach_trap_t;
 
-extern const mach_trap_t mach_trap_table[]; /* syscall_sw.h now declares this as const */
-extern const int         mach_trap_count;
 
-extern const char *const mach_syscall_name_table[];
+#define MACH_TRAP_TABLE_COUNT   128
+
+extern const mach_trap_t        mach_trap_table[MACH_TRAP_TABLE_COUNT];
+extern const int                mach_trap_count;
+extern const char * const       mach_syscall_name_table[MACH_TRAP_TABLE_COUNT];
+
 
 /* XXX From osfmk/i386/bsd_i386.c */
 struct mach_call_args {
@@ -712,7 +721,7 @@ dtrace_machtrace_syscall(struct mach_call_args *args)
 	sy = &machtrace_sysent[code];
 
 	if ((id = sy->stsy_entry) != DTRACE_IDNONE) {
-		uthread_t uthread = (uthread_t)get_bsdthread_info(current_thread());
+		uthread_t uthread = current_uthread();
 
 		if (uthread) {
 			uthread->t_dtrace_syscall_args = (void *)ip;
@@ -997,7 +1006,7 @@ systrace_getargval(void *arg, dtrace_id_t id, void *parg, int argno, int aframes
 	uint64_t val = 0;
 	uint64_t *uargs = NULL;
 
-	uthread_t uthread = (uthread_t)get_bsdthread_info(current_thread());
+	uthread_t uthread = current_uthread();
 
 	if (uthread) {
 		uargs = uthread->t_dtrace_syscall_args;
@@ -1021,7 +1030,7 @@ systrace_getargdesc(void *arg, dtrace_id_t id, void *parg,
 {
 #pragma unused(arg, id)
 	int sysnum = SYSTRACE_SYSNUM(parg);
-	uthread_t uthread = (uthread_t)get_bsdthread_info(current_thread());
+	uthread_t uthread = current_uthread();
 	uint64_t *uargs = NULL;
 
 	if (!uthread) {
@@ -1051,7 +1060,7 @@ machtrace_getarg(void *arg, dtrace_id_t id, void *parg, int argno, int aframes)
 	uint64_t val = 0;
 	syscall_arg_t *stack = (syscall_arg_t *)NULL;
 
-	uthread_t uthread = (uthread_t)get_bsdthread_info(current_thread());
+	uthread_t uthread = current_uthread();
 
 	if (uthread) {
 		stack = (syscall_arg_t *)uthread->t_dtrace_syscall_args;

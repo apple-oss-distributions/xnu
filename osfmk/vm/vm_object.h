@@ -94,10 +94,8 @@
 #include <libkern/OSDebug.h>
 #include <kern/btlog.h>
 extern void vm_object_tracking_init(void);
-extern boolean_t vm_object_tracking_inited;
-extern btlog_t *vm_object_tracking_btlog;
+extern btlog_t vm_object_tracking_btlog;
 #define VM_OBJECT_TRACKING_NUM_RECORDS  50000
-#define VM_OBJECT_TRACKING_BTDEPTH 7
 #define VM_OBJECT_TRACKING_OP_CREATED   1
 #define VM_OBJECT_TRACKING_OP_MODIFIED  2
 #define VM_OBJECT_TRACKING_OP_TRUESHARE 3
@@ -725,7 +723,7 @@ __private_extern__ void         vm_object_collapse(
 	boolean_t               can_bypass);
 
 __private_extern__ boolean_t    vm_object_copy_quickly(
-	vm_object_t             *_object,
+	vm_object_t             object,
 	vm_object_offset_t      src_offset,
 	vm_object_size_t        size,
 	boolean_t               *_src_needs_copy,

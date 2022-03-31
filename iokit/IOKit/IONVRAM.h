@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 1998-2006 Apple Computer, Inc. All rights reserved.
- * Copyright (c) 2007-2012 Apple Inc. All rights reserved.
+ * Copyright (c) 2007-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -74,28 +74,31 @@ enum {
 class IODTNVRAMVariables;
 class IODTNVRAMDiags;
 
+class IODTNVRAMFormatHandler
+{
+public:
+	virtual
+	~IODTNVRAMFormatHandler();
+	virtual IOReturn setVariable(const uuid_t *varGuid, const char *variableName, OSObject *object) = 0;
+	virtual bool setController(IONVRAMController *_nvramController) = 0;
+	virtual bool sync(void) = 0;
+	virtual uint32_t getGeneration(void) const = 0;
+	virtual uint32_t getVersion(void) const = 0;
+	virtual uint32_t getSystemUsed(void) const = 0;
+	virtual uint32_t getCommonUsed(void) const = 0;
+};
+
 class IODTNVRAM : public IOService
 {
 	OSDeclareDefaultStructors(IODTNVRAM);
 
 private:
 	friend class IODTNVRAMVariables;
-
-	IONVRAMController      *_nvramController;
-	OSPtr<const OSSymbol>  _registryPropertiesKey;
-
-	UInt8                  *_nvramImage;
-	UInt32                 _nvramSize;
-	int                    _nvramVersion;
-	UInt32                 _nvramGeneration;
-
-	UInt32                 _commonPartitionOffset;
-	UInt32                 _commonPartitionSize;
-
-	UInt32                 _systemPartitionOffset;
-	UInt32                 _systemPartitionSize;
+	friend class IONVRAMCHRPHandler;
+	friend class IONVRAMV3Handler;
 
 	IODTNVRAMDiags         *_diags;
+	IODTNVRAMFormatHandler *_format;
 
 	IORWLock               *_variableLock;
 	IOLock                 *_controllerLock;
@@ -106,21 +109,12 @@ private:
 	OSPtr<OSDictionary>    _commonDict;
 	OSPtr<OSDictionary>    _systemDict;
 
-	OSPtr<OSDictionary>    _nvramPartitionOffsets;
-	OSPtr<OSDictionary>    _nvramPartitionLengths;
-
-	bool                   _systemPanicked;
 	SInt32                 _lastDeviceSync;
 	bool                   _freshInterval;
-	bool                   _isProxied;
 
-	void initNVRAMImage(void);
-	IOReturn initVariables(void);
-	void initProxyData(void);
+	void initImageFormat(void);
 
-	UInt32 getNVRAMSize(void);
-
-	IOReturn serializeVariables(void);
+	uint32_t getNVRAMSize(void);
 
 	NVRAMPartitionType getDictionaryType(const OSDictionary *dict) const;
 	IOReturn chooseDictionary(IONVRAMOperation operation, const uuid_t *varGuid,
@@ -134,28 +128,6 @@ private:
 	IOReturn removePropertyWithGUIDAndName(const uuid_t *guid, const char *name);
 	IOReturn setPropertyWithGUIDAndName(const uuid_t *guid, const char *name, OSObject *anObject);
 
-	bool convertPropToObject(const UInt8 *propName, UInt32 propNameLength,
-	    const UInt8 *propData, UInt32 propDataLength,
-	    LIBKERN_RETURNS_RETAINED const OSSymbol **propSymbol,
-	    LIBKERN_RETURNS_RETAINED OSObject **propObject);
-	bool convertPropToObject(const UInt8 *propName, UInt32 propNameLength,
-	    const UInt8 *propData, UInt32 propDataLength,
-	    OSSharedPtr<const OSSymbol>& propSymbol,
-	    OSSharedPtr<OSObject>& propObject);
-	bool convertObjectToProp(UInt8 *buffer, UInt32 *length,
-	    const OSSymbol *propSymbol, OSObject *propObject);
-	bool convertObjectToProp(UInt8 *buffer, UInt32 *length,
-	    const char *propSymbol, OSObject *propObject);
-
-	OSPtr<OSData> unescapeBytesToData(const UInt8 *bytes, UInt32 length);
-	OSPtr<OSData> escapeDataToData(OSData * value);
-
-	IOReturn readNVRAMPropertyType1(IORegistryEntry *entry,
-	    const OSSymbol **name,
-	    OSData **value);
-	IOReturn writeNVRAMPropertyType1(IORegistryEntry *entry,
-	    const OSSymbol *name,
-	    OSData *value);
 	void syncInternal(bool rateLimit);
 	bool safeToSync(void);
 
@@ -163,7 +135,7 @@ public:
 	virtual bool init(IORegistryEntry *old, const IORegistryPlane *plane) APPLE_KEXT_OVERRIDE;
 	virtual bool start(IOService * provider) APPLE_KEXT_OVERRIDE;
 
-	virtual void registerNVRAMController(IONVRAMController *nvram);
+	virtual void registerNVRAMController(IONVRAMController *controller);
 
 	virtual void sync(void);
 
@@ -176,9 +148,9 @@ public:
 	virtual void removeProperty(const OSSymbol *aKey) APPLE_KEXT_OVERRIDE;
 	virtual IOReturn setProperties(OSObject *properties) APPLE_KEXT_OVERRIDE;
 
-	virtual IOReturn readXPRAM(IOByteCount offset, UInt8 *buffer,
+	virtual IOReturn readXPRAM(IOByteCount offset, uint8_t *buffer,
 	    IOByteCount length);
-	virtual IOReturn writeXPRAM(IOByteCount offset, UInt8 *buffer,
+	virtual IOReturn writeXPRAM(IOByteCount offset, uint8_t *buffer,
 	    IOByteCount length);
 
 	virtual IOReturn readNVRAMProperty(IORegistryEntry *entry,
@@ -191,14 +163,14 @@ public:
 	virtual OSDictionary *getNVRAMPartitions(void);
 
 	virtual IOReturn readNVRAMPartition(const OSSymbol *partitionID,
-	    IOByteCount offset, UInt8 *buffer,
+	    IOByteCount offset, uint8_t *buffer,
 	    IOByteCount length);
 
 	virtual IOReturn writeNVRAMPartition(const OSSymbol *partitionID,
-	    IOByteCount offset, UInt8 *buffer,
+	    IOByteCount offset, uint8_t *buffer,
 	    IOByteCount length);
 
-	virtual IOByteCount savePanicInfo(UInt8 *buffer, IOByteCount length);
+	virtual IOByteCount savePanicInfo(uint8_t *buffer, IOByteCount length);
 };
 
 #endif /* __cplusplus */

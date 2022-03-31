@@ -1169,6 +1169,7 @@ pfr_walktree(struct radix_node *rn, void *arg)
 
 	LCK_MTX_ASSERT(&pf_lock, LCK_MTX_ASSERT_OWNED);
 
+	VERIFY(ke != NULL);
 	switch (w->pfrw_op) {
 	case PFRW_MARK:
 		ke->pfrke_mark = 0;
@@ -2176,10 +2177,10 @@ pfr_destroy_ktable(struct pfr_ktable *kt, int flushaddr)
 		pfr_destroy_kentries(&addrq);
 	}
 	if (kt->pfrkt_ip4 != NULL) {
-		_FREE((caddr_t)kt->pfrkt_ip4, M_RTABLE);
+		zfree(radix_node_head_zone, kt->pfrkt_ip4);
 	}
 	if (kt->pfrkt_ip6 != NULL) {
-		_FREE((caddr_t)kt->pfrkt_ip6, M_RTABLE);
+		zfree(radix_node_head_zone, kt->pfrkt_ip6);
 	}
 	if (kt->pfrkt_shadow != NULL) {
 		pfr_destroy_ktable(kt->pfrkt_shadow, flushaddr);

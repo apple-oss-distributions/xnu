@@ -4,10 +4,6 @@ _VNOP_IOCTL
 _VNOP_READ
 _VNOP_STRATEGY
 _VNOP_WRITE
-__FREE:__FREE_external
-__FREE_ZONE:__FREE_ZONE_external
-__MALLOC:__MALLOC_external
-__MALLOC_ZONE:__MALLOC_external
 _advisory_read
 _advisory_read_ext
 _bcd2bin_data

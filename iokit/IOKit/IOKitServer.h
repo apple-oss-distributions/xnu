@@ -155,8 +155,8 @@ extern kern_return_t iokit_destroy_object_port( ipc_port_t port,
 extern mach_port_name_t iokit_make_send_right( task_t task,
     io_object_t obj, ipc_kobject_type_t type );
 
-extern mach_port_t ipc_port_make_send(mach_port_t);
-extern mach_port_t ipc_port_copy_send(mach_port_t);
+extern mach_port_t ipc_port_make_send(mach_port_t) __result_use_check;
+extern mach_port_t ipc_port_copy_send(mach_port_t) __result_use_check;
 extern void ipc_port_release_send(ipc_port_t port);
 
 extern io_object_t iokit_lookup_io_object(ipc_port_t port, ipc_kobject_type_t type);
@@ -170,7 +170,6 @@ extern io_object_t iokit_lookup_uext_ref_current_task(mach_port_name_t name);
 
 extern void iokit_retain_port( ipc_port_t port );
 extern void iokit_release_port( ipc_port_t port );
-extern void iokit_make_port_send( ipc_port_t port );
 extern void iokit_release_port_send( ipc_port_t port );
 
 extern void iokit_lock_port(ipc_port_t port);

@@ -158,8 +158,8 @@ struct vnode *
 vnode_pager_lookup_vnode(               /* forward */
 	memory_object_t);
 
-ZONE_DECLARE(vnode_pager_zone, "vnode pager structures",
-    sizeof(struct vnode_pager), ZC_NOENCRYPT);
+ZONE_DEFINE_TYPE(vnode_pager_zone, "vnode pager structures",
+    struct vnode_pager, ZC_NOENCRYPT);
 
 #define VNODE_PAGER_NULL        ((vnode_pager_t) 0)
 
@@ -995,7 +995,7 @@ fill_procregioninfo(task_t task, uint64_t arg, struct proc_regioninfo_internal *
 
 	start = address;
 
-	if (!vm_map_lookup_entry(map, start, &tmp_entry)) {
+	if (!vm_map_lookup_entry_allow_pgz(map, start, &tmp_entry)) {
 		if ((entry = tmp_entry->vme_next) == vm_map_to_entry(map)) {
 			if (do_region_footprint &&
 			    address == tmp_entry->vme_end) {
@@ -1148,7 +1148,7 @@ fill_procregioninfo_onlymappedvnodes(task_t task, uint64_t arg, struct proc_regi
 
 	vm_map_lock_read(map);
 
-	if (!vm_map_lookup_entry(map, address, &tmp_entry)) {
+	if (!vm_map_lookup_entry_allow_pgz(map, address, &tmp_entry)) {
 		if ((entry = tmp_entry->vme_next) == vm_map_to_entry(map)) {
 			vm_map_unlock_read(map);
 			vm_map_deallocate(map);
@@ -1226,7 +1226,7 @@ find_region_details(task_t task, vm_map_offset_t offset,
 	task_unlock(task);
 
 	vm_map_lock_read(map);
-	if (!vm_map_lookup_entry(map, offset, &tmp_entry)) {
+	if (!vm_map_lookup_entry_allow_pgz(map, offset, &tmp_entry)) {
 		if ((entry = tmp_entry->vme_next) == vm_map_to_entry(map)) {
 			rc = 0;
 			goto ret;

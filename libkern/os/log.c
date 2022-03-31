@@ -89,13 +89,16 @@ uint64_t startup_serial_num_procs = 300;
 
 bool os_log_disabled(void);
 
+__osloglike(3, 0)
 static void
 _os_log_with_args_internal(os_log_t oslog __unused, os_log_type_t type __unused,
     const char *format, va_list args, void *addr, void *dso, bool driverKit, bool addcr);
 
+__osloglike(1, 0)
 static void
 _os_log_to_msgbuf_internal(const char *format, va_list args, bool safe, bool logging, bool addcr);
 
+__osloglike(2, 0)
 static void
 _os_log_to_log_internal(os_log_type_t type, const char *format, va_list args, void *addr, void *dso, bool driverKit);
 
@@ -364,9 +367,12 @@ _os_log_to_msgbuf_internal(const char *format, va_list args, bool safe, bool log
 		printf_log_locked(FALSE, "[%5lu.%06u]: ", (unsigned long)secs, microsecs);
 	}
 
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wformat-nonliteral"
 	va_copy(args_copy, args);
 	newlogline = vprintf_log_locked(format, args_copy, addcr);
 	va_end(args_copy);
+#pragma clang diagnostic pop
 
 	bsd_log_unlock();
 	logwakeup(msgbufp);

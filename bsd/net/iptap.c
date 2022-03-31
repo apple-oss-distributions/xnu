@@ -176,11 +176,6 @@ iptap_clone_create(struct if_clone *ifc, u_int32_t unit, void *params)
 	struct ifnet_init_eparams if_init;
 
 	iptap = if_clone_softc_allocate(&iptap_cloner);
-	if (iptap == NULL) {
-		printf("%s: _MALLOC failed\n", __func__);
-		error = ENOMEM;
-		goto done;
-	}
 	iptap->iptap_unit = unit;
 
 	/*

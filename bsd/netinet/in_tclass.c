@@ -513,7 +513,7 @@ set_pid_tclass(struct so_tcdbg *so_tcdbg)
 				continue;
 			}
 
-			so = (struct socket *)fp->fp_glob->fg_data;
+			so = (struct socket *)fp_get_data(fp);
 			if (SOCK_DOM(so) != PF_INET && SOCK_DOM(so) != PF_INET6) {
 				continue;
 			}
@@ -600,7 +600,7 @@ flush_pid_tclass(struct so_tcdbg *so_tcdbg)
 			continue;
 		}
 
-		so = (struct socket *)fp->fp_glob->fg_data;
+		so = (struct socket *)fp_get_data(fp);
 		error = sock_setsockopt(so, SOL_SOCKET, SO_FLUSH, &tclass,
 		    sizeof(tclass));
 		if (error != 0) {

@@ -71,6 +71,8 @@
 #include <mach_debug/zone_info.h>
 #include <kern/kern_types.h>
 #include <sys/cdefs.h>
+#include <os/alloc_util.h>
+#include <os/atomic.h>
 
 #ifdef XNU_KERNEL_PRIVATE
 #include <kern/startup.h>
@@ -82,7 +84,18 @@
 #define __zalloc_deprecated(msg)
 #endif
 
-__BEGIN_DECLS
+/*
+ * Enable this macro to force type safe zalloc/zalloc_ro/...
+ */
+#ifndef ZALLOC_TYPE_SAFE
+#if __has_ptrcheck
+#define ZALLOC_TYPE_SAFE 1
+#else
+#define ZALLOC_TYPE_SAFE 0
+#endif
+#endif /* !ZALLOC_TYPE_SAFE */
+
+__BEGIN_DECLS __ASSUME_PTR_ABI_SINGLE_BEGIN
 
 /*!
  * @macro __zpercpu
@@ -91,7 +104,7 @@ __BEGIN_DECLS
  * Annotation that helps denoting a per-cpu pointer that requires usage of
  * @c zpercpu_*() for access.
  */
-#define __zpercpu
+#define __zpercpu __unsafe_indexable
 
 /*!
  * @typedef zone_id_t
@@ -153,6 +166,9 @@ __options_decl(zone_create_flags_t, uint64_t, {
 	ZC_DESTRUCTIBLE         = 0x80000000,
 
 #ifdef XNU_KERNEL_PRIVATE
+	/** Use guard pages in PGZ mode */
+	ZC_PGZ_USE_GUARDS       = 0x0100000000000000,
+
 	/** Zone doesn't support TBI tagging */
 	ZC_NOTBITAG             = 0x0200000000000000,
 
@@ -178,8 +194,7 @@ __options_decl(zone_create_flags_t, uint64_t, {
 
 	/** Disable kasan redzones for this zone */
 	ZC_KASAN_NOREDZONE      = 0x8000000000000000,
-
-#endif
+#endif /* XNU_KERNEL_PRIVATE */
 });
 
 /*!
@@ -212,6 +227,28 @@ typedef union zone_or_view zone_or_view_t __attribute__((transparent_union));
 #endif
 
 /*!
+ * @enum zone_create_ro_id_t
+ *
+ * @abstract
+ * Zone creation IDs for external read only zones
+ *
+ * @discussion
+ * Kexts that desire to use the RO allocator should:
+ * 1. Add a zone creation id below
+ * 2. Add a corresponding ID to @c zone_reserved_id_t
+ * 3. Use @c zone_create_ro with ID from #1 to create a RO zone.
+ * 4. Save the zone ID returned from #3 in a SECURITY_READ_ONLY_LATE variable.
+ * 5. Use the saved ID for zalloc_ro/zfree_ro, etc.
+ */
+__enum_decl(zone_create_ro_id_t, zone_id_t, {
+	ZC_RO_ID_SANDBOX,
+	ZC_RO_ID_PROFILE,
+	ZC_RO_ID_PROTOBOX,
+	ZC_RO_ID_SB_FILTER,
+	ZC_RO_ID__LAST = ZC_RO_ID_SB_FILTER,
+});
+
+/*!
  * @function zone_create
  *
  * @abstract
@@ -227,9 +264,32 @@ typedef union zone_or_view zone_or_view_t __attribute__((transparent_union));
  * @returns             the created zone, this call never fails.
  */
 extern zone_t   zone_create(
-	const char             *name,
+	const char             *name __unsafe_indexable,
 	vm_size_t               size,
 	zone_create_flags_t     flags);
+
+/*!
+ * @function zone_create_ro
+ *
+ * @abstract
+ * Creates a read only zone with the specified parameters from kexts
+ *
+ * @discussion
+ * See notes under @c zone_create_ro_id_t wrt creation and use of RO zones in
+ * kexts. Do not use this API to create read only zones in xnu.
+ *
+ * @param name          the name for the new zone.
+ * @param size          the size of the elements returned by this zone.
+ * @param flags         a set of @c zone_create_flags_t flags.
+ * @param zc_ro_id      an ID declared in @c zone_create_ro_id_t
+ *
+ * @returns             the zone ID of the created zone, this call never fails.
+ */
+extern zone_id_t   zone_create_ro(
+	const char             *name __unsafe_indexable,
+	vm_size_t               size,
+	zone_create_flags_t     flags,
+	zone_create_ro_id_t     zc_ro_id);
 
 /*!
  * @function zdestroy
@@ -265,7 +325,7 @@ extern void     zdestroy(
  */
 extern void     zone_require(
 	zone_t          zone,
-	void           *addr);
+	void           *addr __unsafe_indexable);
 
 /*!
  * @function zone_require_ro
@@ -290,7 +350,7 @@ extern void     zone_require(
 extern void     zone_require_ro(
 	zone_id_t       zone_id,
 	vm_size_t       elem_size,
-	void           *addr);
+	void           *addr __unsafe_indexable);
 
 /*!
  * @function zone_require_ro_range_contains
@@ -305,7 +365,7 @@ extern void     zone_require_ro(
  */
 extern void     zone_require_ro_range_contains(
 	zone_id_t       zone_id,
-	void           *addr);
+	void           *addr __unsafe_indexable);
 
 /*!
  * @enum zalloc_flags_t
@@ -343,10 +403,24 @@ extern void     zone_require_ro_range_contains(
  * This flag is incompatible with @c Z_NOWAIT or @c Z_NOPAGEWAIT. It also can't
  * be used on exhaustible zones.
  *
+ * @const Z_REALLOCF
+ * For the realloc family of functions,
+ * free the incoming memory on failure cases.
+ *
  #if XNU_KERNEL_PRIVATE
+ * @const Z_PGZ
+ * Used by zalloc internally to denote an allocation that we will try
+ * to guard with PGZ.
+ *
+ * @const Z_VM_TAG_BT_BIT
+ * Used to blame allocation accounting on the first kext
+ * found in the backtrace of the allocation.
  *
  * @const Z_NOZZC
  * Used internally to mark allocations that will skip zero validation.
+ *
+ * @const Z_PCPU
+ * Used internally for the percpu paths.
  *
  * @const Z_VM_TAG_MASK
  * Represents bits in which a vm_tag_t for the allocation can be passed.
@@ -359,21 +433,29 @@ __options_decl(zalloc_flags_t, uint32_t, {
 	Z_NOWAIT        = 0x0001,
 	Z_NOPAGEWAIT    = 0x0002,
 	Z_ZERO          = 0x0004,
+	Z_REALLOCF      = 0x0008,
 
+#if XNU_KERNEL_PRIVATE
+	Z_PGZ           = 0x0800,
+	Z_VM_TAG_BT_BIT = 0x1000,
+	Z_PCPU          = 0x2000,
+	Z_NOZZC         = 0x4000,
+#endif /* XNU_KERNEL_PRIVATE */
 	Z_NOFAIL        = 0x8000,
 
 	/* convenient c++ spellings */
 	Z_NOWAIT_ZERO          = Z_NOWAIT | Z_ZERO,
 	Z_WAITOK_ZERO          = Z_WAITOK | Z_ZERO,
 	Z_WAITOK_ZERO_NOFAIL   = Z_WAITOK | Z_ZERO | Z_NOFAIL, /* convenient spelling for c++ */
-#if XNU_KERNEL_PRIVATE
-	Z_NOZZC         = 0x4000,
 
+	Z_KPI_MASK             = Z_WAITOK | Z_NOWAIT | Z_NOPAGEWAIT | Z_ZERO,
+#if XNU_KERNEL_PRIVATE
 	/** used by kalloc to propagate vm tags for -zt */
 	Z_VM_TAG_MASK   = 0xffff0000,
 
 #define Z_VM_TAG_SHIFT        16
-#define Z_VM_TAG(tag)         ((zalloc_flags_t)(tag) << Z_VM_TAG_SHIFT)
+#define Z_VM_TAG(fl, tag)     ((zalloc_flags_t)((fl) | ((tag) << Z_VM_TAG_SHIFT)))
+#define Z_VM_TAG_BT(fl, tag)  ((zalloc_flags_t)(Z_VM_TAG(fl, tag) | Z_VM_TAG_BT_BIT))
 #endif
 });
 
@@ -390,7 +472,8 @@ __options_decl(zalloc_flags_t, uint32_t, {
  *
  * @returns             NULL or the allocated element
  */
-extern void    *zalloc(
+__attribute__((malloc))
+extern void *__unsafe_indexable zalloc(
 	zone_or_view_t  zone_or_view);
 
 /*!
@@ -407,7 +490,8 @@ extern void    *zalloc(
  *
  * @returns             NULL or the allocated element
  */
-extern void    *zalloc_noblock(
+__attribute__((malloc))
+extern void *__unsafe_indexable zalloc_noblock(
 	zone_or_view_t  zone_or_view);
 
 /*!
@@ -421,8 +505,25 @@ extern void    *zalloc_noblock(
  *
  * @returns             NULL or the allocated element
  */
-extern void    *zalloc_flags(
+__attribute__((malloc))
+extern void *__unsafe_indexable zalloc_flags(
 	zone_or_view_t  zone_or_view,
+	zalloc_flags_t  flags);
+
+/*!
+ * @macro zalloc_id
+ *
+ * @abstract
+ * Allocates an element from a specified zone ID, with flags.
+ *
+ * @param zid           The proper @c ZONE_ID_* constant.
+ * @param flags         a collection of @c zalloc_flags_t.
+ *
+ * @returns             NULL or the allocated element
+ */
+__attribute__((malloc))
+extern void *__unsafe_indexable zalloc_id(
+	zone_id_t       zid,
 	zalloc_flags_t  flags);
 
 /*!
@@ -436,7 +537,8 @@ extern void    *zalloc_flags(
  *
  * @returns             NULL or the allocated element
  */
-extern void    *zalloc_ro(
+__attribute__((malloc))
+extern void *__unsafe_indexable zalloc_ro(
 	zone_id_t       zone_id,
 	zalloc_flags_t  flags);
 
@@ -452,35 +554,205 @@ extern void    *zalloc_ro(
  * sign the value appropriately beforehand if they wish to do this.
  *
  * @param zone_id       the zone id to allocate from
- * @param elem	        element to be modified
+ * @param elem          element to be modified
  * @param offset        offset from element
- * @param new_data	    pointer to new data
- * @param new_data_size	size of modification
+ * @param new_data      pointer to new data
+ * @param new_data_size size of modification
  *
  */
-extern void    zalloc_ro_mut(
+extern void zalloc_ro_mut(
 	zone_id_t       zone_id,
-	void           *elem,
+	void           *elem __unsafe_indexable,
 	vm_offset_t     offset,
-	const void     *new_data,
+	const void     *new_data __sized_by(new_data_size),
 	vm_size_t       new_data_size);
 
 /*!
  * @function zalloc_ro_update_elem
  *
  * @abstract
- * Calls zalloc_ro_mut.
- * Assumes entire element is getting modified.
+ * Update the value of an entire element allocated in the read only allocator.
  *
  * @param zone_id       the zone id to allocate from
- * @param elem	        element to be modified
- * @param new_data	    pointer to new data
+ * @param elem          element to be modified
+ * @param new_data      pointer to new data
  *
  */
-extern void zalloc_ro_update_elem(
+#define zalloc_ro_update_elem(zone_id, elem, new_data)  ({ \
+	const typeof(*(elem)) *__new_data = (new_data);                        \
+	zalloc_ro_mut(zone_id, elem, 0, __new_data, sizeof(*__new_data));      \
+})
+
+/*!
+ * @function zalloc_ro_update_field
+ *
+ * @abstract
+ * Update a single field of an element allocated in the read only allocator.
+ *
+ * @param zone_id       the zone id to allocate from
+ * @param elem          element to be modified
+ * @param field         the element field to be modified
+ * @param new_data      pointer to new data
+ *
+ */
+#define zalloc_ro_update_field(zone_id, elem, field, value)  ({ \
+	const typeof((elem)->field) *__value = (value);                        \
+	zalloc_ro_mut(zone_id, elem, offsetof(typeof(*(elem)), field),         \
+	    __value, sizeof((elem)->field));                                   \
+})
+
+#if __LP64__
+#define ZRO_ATOMIC_LONG(op) ZRO_ATOMIC_##op##_64
+#else
+#define ZRO_ATOMIC_LONG(op) ZRO_ATOMIC_##op##_32
+#endif
+
+/*!
+ * @enum zro_atomic_op_t
+ *
+ * @brief
+ * Flags that can be used with @c zalloc_ro_*_atomic to specify the desired
+ * atomic operations.
+ *
+ * @discussion
+ * This enum provides all flavors of atomic operations supported in sizes 8,
+ * 16, 32, 64 bits.
+ *
+ * @const ZRO_ATOMIC_OR_*
+ * To perform an @s os_atomic_or
+ *
+ * @const ZRO_ATOMIC_XOR_*
+ * To perform an @s os_atomic_xor
+ *
+ * @const ZRO_ATOMIC_AND_*
+ * To perform an @s os_atomic_and
+ *
+ * @const ZRO_ATOMIC_ADD_*
+ * To perform an @s os_atomic_add
+ *
+ * @const ZRO_ATOMIC_XCHG_*
+ * To perform an @s os_atomic_xchg
+ *
+ */
+__enum_decl(zro_atomic_op_t, uint32_t, {
+	ZRO_ATOMIC_OR_8      = 0x00000010 | 1,
+	ZRO_ATOMIC_OR_16     = 0x00000010 | 2,
+	ZRO_ATOMIC_OR_32     = 0x00000010 | 4,
+	ZRO_ATOMIC_OR_64     = 0x00000010 | 8,
+
+	ZRO_ATOMIC_XOR_8     = 0x00000020 | 1,
+	ZRO_ATOMIC_XOR_16    = 0x00000020 | 2,
+	ZRO_ATOMIC_XOR_32    = 0x00000020 | 4,
+	ZRO_ATOMIC_XOR_64    = 0x00000020 | 8,
+
+	ZRO_ATOMIC_AND_8     = 0x00000030 | 1,
+	ZRO_ATOMIC_AND_16    = 0x00000030 | 2,
+	ZRO_ATOMIC_AND_32    = 0x00000030 | 4,
+	ZRO_ATOMIC_AND_64    = 0x00000030 | 8,
+
+	ZRO_ATOMIC_ADD_8     = 0x00000040 | 1,
+	ZRO_ATOMIC_ADD_16    = 0x00000040 | 2,
+	ZRO_ATOMIC_ADD_32    = 0x00000040 | 4,
+	ZRO_ATOMIC_ADD_64    = 0x00000040 | 8,
+
+	ZRO_ATOMIC_XCHG_8    = 0x00000050 | 1,
+	ZRO_ATOMIC_XCHG_16   = 0x00000050 | 2,
+	ZRO_ATOMIC_XCHG_32   = 0x00000050 | 4,
+	ZRO_ATOMIC_XCHG_64   = 0x00000050 | 8,
+
+	/* cconvenient spellings */
+	ZRO_ATOMIC_OR_LONG   = ZRO_ATOMIC_LONG(OR),
+	ZRO_ATOMIC_XOR_LONG  = ZRO_ATOMIC_LONG(XOR),
+	ZRO_ATOMIC_AND_LONG  = ZRO_ATOMIC_LONG(AND),
+	ZRO_ATOMIC_ADD_LONG  = ZRO_ATOMIC_LONG(ADD),
+	ZRO_ATOMIC_XCHG_LONG = ZRO_ATOMIC_LONG(XCHG),
+});
+
+/*!
+ * @function zalloc_ro_mut_atomic
+ *
+ * @abstract
+ * Atomically update an offset in an element allocated in the read only
+ * allocator. Do not use directly. Use via @c zalloc_ro_update_field_atomic.
+ *
+ * @param zone_id       the zone id to allocate from
+ * @param elem          element to be modified
+ * @param offset        offset in the element to be modified
+ * @param op            atomic operation to perform (see @c zro_atomic_op_t)
+ * @param value         value for the atomic operation
+ *
+ */
+extern uint64_t zalloc_ro_mut_atomic(
 	zone_id_t       zone_id,
-	void           *elem,
-	const void     *new_data);
+	void           *elem __unsafe_indexable,
+	vm_offset_t     offset,
+	zro_atomic_op_t op,
+	uint64_t        value);
+
+/*!
+ * @macro zalloc_ro_update_field_atomic
+ *
+ * @abstract
+ * Atomically update a single field of an element allocated in the read only
+ * allocator.
+ *
+ * @param zone_id       the zone id to allocate from
+ * @param elem          element to be modified
+ * @param field         the element field to be modified
+ * @param op            atomic operation to perform (see @c zro_atomic_op_t)
+ * @param value         value for the atomic operation
+ *
+ */
+#define zalloc_ro_update_field_atomic(zone_id, elem, field, op, value)  ({ \
+	const typeof((elem)->field) __value = (value);                         \
+	static_assert(sizeof(__value) == (op & 0xf));                          \
+	(os_atomic_basetypeof(&(elem)->field))zalloc_ro_mut_atomic(zone_id,    \
+	    elem, offsetof(typeof(*(elem)), field), op, (uint64_t)__value);    \
+})
+
+/*!
+ * @function zalloc_ro_clear
+ *
+ * @abstract
+ * Zeroes an element from a specified read-only zone.
+ *
+ * @param zone_id       the zone id to allocate from
+ * @param elem          element to be modified
+ * @param offset        offset from element
+ * @param size          size of modification
+ */
+extern void    zalloc_ro_clear(
+	zone_id_t       zone_id,
+	void           *elem __unsafe_indexable,
+	vm_offset_t     offset,
+	vm_size_t       size);
+
+/*!
+ * @function zalloc_ro_clear_field
+ *
+ * @abstract
+ * Zeroes the specified field of an element from a specified read-only zone.
+ *
+ * @param zone_id       the zone id to allocate from
+ * @param elem          element to be modified
+ * @param field         offset from element
+ */
+#define zalloc_ro_clear_field(zone_id, elem, field) \
+	zalloc_ro_clear(zone_id, elem, offsetof(typeof(*(elem)), field), \
+	    sizeof((elem)->field))
+
+/*!
+ * @function zfree_id()
+ *
+ * @abstract
+ * Frees an element previously allocated with @c zalloc_id().
+ *
+ * @param zone_id       the zone id to free the element to.
+ * @param addr          the address to free
+ */
+extern void     zfree_id(
+	zone_id_t       zone_id,
+	void           *addr __unsafe_indexable);
 
 /*!
  * @function zfree_ro()
@@ -493,7 +765,7 @@ extern void zalloc_ro_update_elem(
  */
 extern void     zfree_ro(
 	zone_id_t       zone_id,
-	void           *addr);
+	void           *addr __unsafe_indexable);
 
 /*!
  * @function zfree
@@ -510,7 +782,7 @@ extern void     zfree_ro(
  */
 extern void     zfree(
 	zone_or_view_t  zone_or_view,
-	void            *elem);
+	void            *elem __unsafe_indexable);
 
 /*
  * This macro sets "elem" to NULL on free.
@@ -520,12 +792,17 @@ extern void     zfree(
  */
 #define zfree(zone, elem) ({ \
 	__auto_type __zfree_zone = (zone); \
-	(zfree)(__zfree_zone, (void *)__zalloc_ptr_load_and_erase(elem)); \
+	(zfree)(__zfree_zone, (void *)os_ptr_load_and_erase(elem)); \
+})
+
+#define zfree_id(zid, elem) ({ \
+	zone_id_t __zfree_zid = (zid); \
+	(zfree_id)(__zfree_zid, (void *)os_ptr_load_and_erase(elem)); \
 })
 
 #define zfree_ro(zid, elem) ({ \
-	__auto_type __zfree_zid = (zid); \
-	(zfree_ro)(__zfree_zid, (void *)__zalloc_ptr_load_and_erase(elem)); \
+	zone_id_t __zfree_zid = (zid); \
+	(zfree_ro)(__zfree_zid, (void *)os_ptr_load_and_erase(elem)); \
 })
 
 /* deprecated KPIS */
@@ -535,7 +812,7 @@ extern zone_t   zinit(
 	vm_size_t       size,           /* the size of an element */
 	vm_size_t       maxmem,         /* maximum memory to use */
 	vm_size_t       alloc,          /* allocation size */
-	const char      *name);         /* a name for the zone */
+	const char      *name __unsafe_indexable);
 
 
 #pragma mark: zone views
@@ -569,7 +846,7 @@ typedef struct zone_view *zone_view_t;
 struct zone_view {
 	zone_t          zv_zone;
 	zone_stats_t    zv_stats;
-	const char     *zv_name;
+	const char     *zv_name __unsafe_indexable;
 	zone_view_t     zv_next;
 };
 
@@ -592,6 +869,9 @@ struct zone_view {
  * @const KHEAP_ID_DATA_BUFFERS
  * Indicates zones part of the KHEAP_DATA_BUFFERS heap.
  *
+ * @const KHEAP_ID_KT_VAR
+ * Indicates zones part of the KHEAP_KT_VAR heap.
+ *
  * @const KHEAP_ID_KEXT
  * Indicates zones part of the KHEAP_KEXT heap.
  */
@@ -599,6 +879,7 @@ __enum_decl(zone_kheap_id_t, uint32_t, {
 	KHEAP_ID_NONE,
 	KHEAP_ID_DEFAULT,
 	KHEAP_ID_DATA_BUFFERS,
+	KHEAP_ID_KT_VAR,
 	KHEAP_ID_KEXT,
 
 #define KHEAP_ID_COUNT (KHEAP_ID_KEXT + 1)
@@ -668,6 +949,29 @@ __enum_decl(zone_kheap_id_t, uint32_t, {
 
 
 /*!
+ * @function zalloc_permanent_tag()
+ *
+ * @abstract
+ * Allocates a permanent element from the permanent zone
+ *
+ * @discussion
+ * Memory returned by this function is always 0-initialized.
+ * Note that the size of this allocation can not be determined
+ * by zone_element_size so it should not be used for copyio.
+ *
+ * @param size          the element size (must be smaller than PAGE_SIZE)
+ * @param align_mask    the required alignment for this allocation
+ * @param tag           the tag to use for allocations larger than a page.
+ *
+ * @returns             the allocated element
+ */
+__attribute__((malloc))
+extern void *__unsafe_indexable zalloc_permanent_tag(
+	vm_size_t       size,
+	vm_offset_t     align_mask,
+	vm_tag_t        tag);
+
+/*!
  * @function zalloc_permanent()
  *
  * @abstract
@@ -683,9 +987,8 @@ __enum_decl(zone_kheap_id_t, uint32_t, {
  *
  * @returns             the allocated element
  */
-extern void    *zalloc_permanent(
-	vm_size_t       size,
-	vm_offset_t     align_mask);
+#define zalloc_permanent(size, align) \
+	zalloc_permanent_tag(size, align, VM_KERN_MEMORY_KALLOC)
 
 /*!
  * @function zalloc_permanent_type()
@@ -701,7 +1004,8 @@ extern void    *zalloc_permanent(
  * @returns             the allocated element
  */
 #define zalloc_permanent_type(type_t) \
-	((type_t *)zalloc_permanent(sizeof(type_t), ZALIGN(type_t)))
+	__unsafe_forge_single(type_t *, \
+	    zalloc_permanent(sizeof(type_t), ZALIGN(type_t)))
 
 /*!
  * @function zalloc_first_proc_made()
@@ -781,7 +1085,7 @@ zalloc_first_proc_made(void);
  *
  * @returns             NULL or the allocated element
  */
-extern void    *zalloc_percpu(
+extern void *__zpercpu zalloc_percpu(
 	zone_or_view_t  zone_or_view,
 	zalloc_flags_t  flags);
 
@@ -796,7 +1100,7 @@ extern void    *zalloc_percpu(
  */
 extern void     zfree_percpu(
 	zone_or_view_t  zone_or_view,
-	void           *addr);
+	void *__zpercpu addr);
 
 /*!
  * @function zalloc_percpu_permanent()
@@ -812,7 +1116,7 @@ extern void     zfree_percpu(
  *
  * @returns             the allocated element
  */
-extern void    *zalloc_percpu_permanent(
+extern void *__zpercpu zalloc_percpu_permanent(
 	vm_size_t       size,
 	vm_offset_t     align_mask);
 
@@ -831,7 +1135,7 @@ extern void    *zalloc_percpu_permanent(
  * @returns             the allocated element
  */
 #define zalloc_percpu_permanent_type(type_t) \
-	((type_t *)zalloc_percpu_permanent(sizeof(type_t), ZALIGN(type_t)))
+	((type_t *__zpercpu)zalloc_percpu_permanent(sizeof(type_t), ZALIGN(type_t)))
 
 
 #pragma mark XNU only: zone creation (extended)
@@ -848,6 +1152,11 @@ extern void    *zalloc_percpu_permanent(
  * @c ZONE_ID__ZERO reserves zone index 0 so that it can't be used, as 0 is too
  * easy a value to produce (by malice or accident).
  *
+ * @c ZONE_ID__FIRST_RO_EXT is the first external read only zone ID that corresponds
+ * to the first @c zone_create_ro_id_t. There is a 1:1 mapping between zone IDs
+ * belonging to [ZONE_ID__FIRST_RO_EXT - ZONE_ID__LAST_RO_EXT] and zone creations IDs
+ * listed in @c zone_create_ro_id_t.
+ *
  * @c ZONE_ID__FIRST_DYNAMIC is the first dynamic zone ID that can be used by
  * @c zone_create().
  */
@@ -857,10 +1166,22 @@ __enum_decl(zone_reserved_id_t, zone_id_t, {
 	ZONE_ID_PERMANENT,
 	ZONE_ID_PERCPU_PERMANENT,
 
-	ZONE_ID_TEST_RO,
+	ZONE_ID_THREAD_RO,
+	ZONE_ID_MAC_LABEL,
+	ZONE_ID_PROC_RO,
+	ZONE_ID_PROC_SIGACTS_RO,
+	ZONE_ID_KAUTH_CRED,
+	ZONE_ID_CS_BLOB,
 
-	ZONE_ID__FIRST_RO = ZONE_ID_TEST_RO,
-	ZONE_ID__LAST_RO = ZONE_ID_TEST_RO,
+	ZONE_ID_SANDBOX_RO,
+	ZONE_ID_PROFILE_RO,
+	ZONE_ID_PROTOBOX,
+	ZONE_ID_SB_FILTER,
+
+	ZONE_ID__FIRST_RO = ZONE_ID_THREAD_RO,
+	ZONE_ID__FIRST_RO_EXT = ZONE_ID_SANDBOX_RO,
+	ZONE_ID__LAST_RO_EXT = ZONE_ID_SB_FILTER,
+	ZONE_ID__LAST_RO = ZONE_ID__LAST_RO_EXT,
 
 	ZONE_ID_PMAP,
 	ZONE_ID_VM_MAP,
@@ -874,9 +1195,10 @@ __enum_decl(zone_reserved_id_t, zone_id_t, {
 	ZONE_ID_TASK,
 	ZONE_ID_PROC,
 	ZONE_ID_THREAD,
-	ZONE_ID_KAUTH_CRED,
 	ZONE_ID_TURNSTILE,
 	ZONE_ID_SEMAPHORE,
+	ZONE_ID_SELECT_SET,
+	ZONE_ID_FILEPROC,
 
 	ZONE_ID__FIRST_DYNAMIC,
 });
@@ -900,7 +1222,7 @@ __enum_decl(zone_reserved_id_t, zone_id_t, {
  * @param zone          the specified zone
  * @returns             the name of the specified zone.
  */
-const char     *zone_name(
+const char *__unsafe_indexable zone_name(
 	zone_t                  zone);
 
 /**!
@@ -909,7 +1231,7 @@ const char     *zone_name(
  * @param zone          the specified zone
  * @returns             the name of the heap this zone is part of, or "".
  */
-const char     *zone_heap_name(
+const char *__unsafe_indexable zone_heap_name(
 	zone_t                  zone);
 
 /*!
@@ -935,7 +1257,7 @@ const char     *zone_heap_name(
  * @returns             the created zone, this call never fails.
  */
 extern zone_t   zone_create_ext(
-	const char             *name,
+	const char             *name __unsafe_indexable,
 	vm_size_t               size,
 	zone_create_flags_t     flags,
 	zone_id_t               desired_zid,
@@ -945,15 +1267,43 @@ extern zone_t   zone_create_ext(
  * @macro ZONE_DECLARE
  *
  * @abstract
+ * Declares a zone variable and its associated type.
+ *
+ * @param var           the name of the variable to declare.
+ * @param type_t        the type of elements in the zone.
+ */
+#define ZONE_DECLARE(var, type_t) \
+	extern zone_t var; \
+	__ZONE_DECLARE_TYPE(var, type_t)
+
+/*!
+ * @macro ZONE_DECLARE_ID
+ *
+ * @abstract
+ * Declares the type associated with a zone ID.
+ *
+ * @param id            the name of zone ID to associate a type with.
+ * @param type_t        the type of elements in the zone.
+ */
+#define ZONE_DECLARE_ID(id, type_t) \
+	__ZONE_DECLARE_TYPE(id, type_t)
+
+/*!
+ * @macro ZONE_DEFINE
+ *
+ * @abstract
  * Declares a zone variable to automatically initialize with the specified
  * parameters.
+ *
+ * @discussion
+ * Using ZONE_DEFINE_TYPE is preferred, but not always possible.
  *
  * @param var           the name of the variable to declare.
  * @param name          the name for the zone
  * @param size          the size of the elements returned by this zone.
  * @param flags         a set of @c zone_create_flags_t flags.
  */
-#define ZONE_DECLARE(var, name, size, flags) \
+#define ZONE_DEFINE(var, name, size, flags) \
 	SECURITY_READ_ONLY_LATE(zone_t) var; \
 	static_assert(((flags) & ZC_DESTRUCTIBLE) == 0); \
 	static __startup_data struct zone_create_startup_spec \
@@ -961,6 +1311,38 @@ extern zone_t   zone_create_ext(
 	    ZONE_ID_ANY, NULL }; \
 	STARTUP_ARG(ZALLOC, STARTUP_RANK_MIDDLE, zone_create_startup, \
 	    &__startup_zone_spec_ ## var)
+
+/*!
+ * @macro ZONE_DEFINE_TYPE
+ *
+ * @abstract
+ * Defines a zone variable to automatically initialize with the specified
+ * parameters, associated with a particular type.
+ *
+ * @param var           the name of the variable to declare.
+ * @param name          the name for the zone
+ * @param type_t        the type of elements in the zone.
+ * @param flags         a set of @c zone_create_flags_t flags.
+ */
+#define ZONE_DEFINE_TYPE(var, name, type_t, flags) \
+	ZONE_DEFINE(var, name, sizeof(type_t), flags); \
+	__ZONE_DECLARE_TYPE(var, type_t)
+
+/*!
+ * @macro ZONE_DEFINE_ID
+ *
+ * @abstract
+ * Initializes a given zone automatically during startup with the specified
+ * parameters.
+ *
+ * @param zid           a @c zone_reserved_id_t value.
+ * @param name          the name for the zone
+ * @param type_t        the type of elements in the zone.
+ * @param flags         a set of @c zone_create_flags_t flags.
+ */
+#define ZONE_DEFINE_ID(zid, name, type_t, flags) \
+	ZONE_DECLARE_ID(zid, type_t); \
+	ZONE_INIT(NULL, name, sizeof(type_t), flags, zid, NULL)
 
 /*!
  * @macro ZONE_INIT
@@ -1003,7 +1385,7 @@ extern zone_t   zone_create_ext(
 extern void     zone_id_require(
 	zone_id_t               zone_id,
 	vm_size_t               elem_size,
-	void                   *addr);
+	void                   *addr __unsafe_indexable);
 
 /*!
  * @function zone_id_require_allow_foreign
@@ -1018,36 +1400,7 @@ extern void     zone_id_require(
 extern void     zone_id_require_allow_foreign(
 	zone_id_t               zone_id,
 	vm_size_t               elem_size,
-	void                   *addr);
-
-/*
- * Zone submap indices
- *
- * Z_SUBMAP_IDX_VM
- * this map has the special property that its allocations
- * can be done without ever locking the submap, and doesn't use
- * VM entries in the map (which limits certain VM map operations on it).
- *
- * On ILP32 a single zone lives here (the vm_map_entry_reserved_zone).
- *
- * On LP64 it is also used to restrict VM allocations on LP64 lower
- * in the kernel VA space, for pointer packing purposes.
- *
- * Z_SUBMAP_IDX_GENERAL
- * used for unrestricted allocations
- *
- * Z_SUBMAP_IDX_BAG_OF_BYTES
- * used to sequester bags of bytes from all other allocations and allow VA reuse
- * within the map
- *
- * Z_SUBMAP_IDX_READ_ONLY
- * used for the read-only allocator
- */
-#define Z_SUBMAP_IDX_VM             0
-#define Z_SUBMAP_IDX_READ_ONLY      1
-#define Z_SUBMAP_IDX_GENERAL        2
-#define Z_SUBMAP_IDX_BAG_OF_BYTES   3
-#define Z_SUBMAP_IDX_COUNT          4
+	void                   *addr __unsafe_indexable);
 
 /* Make zone as non expandable, to be called from the zone_create_ext() setup hook */
 extern void     zone_set_noexpand(
@@ -1077,11 +1430,76 @@ extern void     zone_fill_initially(
 	zone_t          zone,
 	vm_size_t       nelems);
 
+#pragma mark XNU only: PGZ support
+
+/*!
+ * @function pgz_owned()
+ *
+ * @brief
+ * Returns whether an address is PGZ owned.
+ *
+ * @param addr          The address to translate.
+ * @returns             Whether it is PGZ owned
+ */
+#if CONFIG_PROB_GZALLOC
+extern bool pgz_owned(mach_vm_address_t addr) __pure2;
+#else
+#define pgz_owned(addr) false
+#endif
+
+/*!
+ * @function pgz_decode()
+ *
+ * @brief
+ * Translates a PGZ protected virtual address to its unprotected
+ * backing store.
+ *
+ * @discussion
+ * This is exposed so that the VM can lookup the vm_page_t for PGZ protected
+ * elements since the PGZ protected virtual addresses are maintained by PGZ
+ * at the pmap level without the VM involvment.
+ *
+ * "allow_invalid" schemes relying on sequestering also need this
+ * to perform the locking attempts on the unprotected address.
+ *
+ * @param addr          The address to translate.
+ * @param size          The object size.
+ * @returns             The unprotected address or @c addr.
+ */
+#if CONFIG_PROB_GZALLOC
+#define pgz_decode(addr, size) \
+	((typeof(addr))__pgz_decode((mach_vm_address_t)(addr), size))
+#else
+#define pgz_decode(addr, size)  (addr)
+#endif
+
+/*!
+ * @function pgz_decode_allow_invalid()
+ *
+ * @brief
+ * Translates a PGZ protected virtual address to its unprotected
+ * backing store, but doesn't assert it is still allocated/valid.
+ *
+ * @discussion
+ * "allow_invalid" schemes relying on sequestering also need this
+ * to perform the locking attempts on the unprotected address.
+ *
+ * @param addr          The address to translate.
+ * @param want_zid      The expected zone ID for the element.
+ * @returns             The unprotected address or @c addr.
+ */
+#if CONFIG_PROB_GZALLOC
+#define pgz_decode_allow_invalid(addr, want_zid) \
+	((typeof(addr))__pgz_decode_allow_invalid((vm_offset_t)(addr), want_zid))
+#else
+#define pgz_decode_allow_invalid(addr, zid)  (addr)
+#endif
+
 #pragma mark XNU only: misc & implementation details
 
 struct zone_create_startup_spec {
 	zone_t                 *z_var;
-	const char             *z_name;
+	const char             *z_name __unsafe_indexable;
 	vm_size_t               z_size;
 	zone_create_flags_t     z_flags;
 	zone_id_t               z_zid;
@@ -1091,6 +1509,10 @@ struct zone_create_startup_spec {
 extern void     zone_create_startup(
 	struct zone_create_startup_spec *spec);
 
+#define __ZONE_DECLARE_TYPE(var, type_t) \
+	__attribute__((visibility("hidden"))) \
+	extern type_t *__zalloc__##var##__type_name
+
 #define __ZONE_INIT1(ns, var, name, size, flags, zid, setup) \
 	static __startup_data struct zone_create_startup_spec \
 	__startup_zone_spec_ ## ns = { var, name, size, flags, zid, setup }; \
@@ -1099,6 +1521,17 @@ extern void     zone_create_startup(
 
 #define __ZONE_INIT(ns, var, name, size, flags, zid, setup) \
 	__ZONE_INIT1(ns, var, name, size, flags, zid, setup) \
+
+#define __zalloc_cast(namespace, expr) \
+	__unsafe_forge_single(typeof(__zalloc__##namespace##__type_name), expr)
+
+#define zalloc_id(zid, flags)   __zalloc_cast(zid, (zalloc_id)(zid, flags))
+#define zalloc_ro(zid, flags)   __zalloc_cast(zid, (zalloc_ro)(zid, flags))
+#if ZALLOC_TYPE_SAFE
+#define zalloc(zov)             __zalloc_cast(zov, (zalloc)(zov))
+#define zalloc_noblock(zov)     __zalloc_cast(zov, (zalloc_noblock)(zov))
+#define zalloc_flags(zov, fl)   __zalloc_cast(zov, (zalloc_flags)(zov, fl))
+#endif
 
 struct zone_view_startup_spec {
 	zone_view_t         zv_view;
@@ -1114,6 +1547,23 @@ extern void zone_view_startup_init(
 
 extern void zone_userspace_reboot_checks(void);
 
+#if VM_TAG_SIZECLASSES
+extern zalloc_flags_t __zone_flags_mix_tag(
+	zone_t                  zone,
+	zalloc_flags_t          flags,
+	vm_allocation_site_t   *site) __pure2;
+#else
+static inline zalloc_flags_t
+__zone_flags_mix_tag(
+	zone_t                  zone,
+	zalloc_flags_t          flags,
+	vm_allocation_site_t   *site)
+{
+#pragma unused(zone, site)
+	return flags;
+}
+#endif
+
 #if DEBUG || DEVELOPMENT
 #  if __LP64__
 #    define ZPCPU_MANGLE_BIT    (1ul << 63)
@@ -1127,7 +1577,7 @@ extern void zone_userspace_reboot_checks(void);
 #define __zpcpu_mangle(ptr)     (__zpcpu_addr(ptr) & ~ZPCPU_MANGLE_BIT)
 #define __zpcpu_demangle(ptr)   (__zpcpu_addr(ptr) | ZPCPU_MANGLE_BIT)
 #define __zpcpu_addr(e)         ((vm_address_t)(e))
-#define __zpcpu_cast(ptr, e)    ((typeof(ptr))(e))
+#define __zpcpu_cast(ptr, e)    __unsafe_forge_single(typeof(ptr), e)
 #define __zpcpu_next(ptr)       __zpcpu_cast(ptr, __zpcpu_addr(ptr) + PAGE_SIZE)
 
 /**
@@ -1152,39 +1602,44 @@ extern void zone_userspace_reboot_checks(void);
 
 extern unsigned zpercpu_count(void) __pure2;
 
+#if CONFIG_PROB_GZALLOC
 
-/* These functions used for leak detection both in zalloc.c and mbuf.c */
-extern uintptr_t hash_mix(uintptr_t);
-extern uint32_t hashbacktrace(uintptr_t *, uint32_t, uint32_t);
-extern uint32_t hashaddr(uintptr_t, uint32_t);
+extern vm_offset_t __pgz_decode(
+	mach_vm_address_t       addr,
+	mach_vm_size_t          size);
 
+extern vm_offset_t __pgz_decode_allow_invalid(
+	vm_offset_t             offs,
+	zone_id_t               zid);
+
+#endif
 #if CONFIG_ZLEAKS
-/* support for the kern.zleak.* sysctls */
+extern uint32_t                 zleak_active;
+extern vm_size_t                zleak_max_zonemap_size;
+extern vm_size_t                zleak_global_tracking_threshold;
+extern vm_size_t                zleak_per_zone_tracking_threshold;
 
-extern kern_return_t zleak_activate(void);
-extern vm_size_t zleak_max_zonemap_size;
-extern vm_size_t zleak_global_tracking_threshold;
-extern vm_size_t zleak_per_zone_tracking_threshold;
-
-extern int get_zleak_state(void);
-
+extern kern_return_t zleak_update_threshold(
+	vm_size_t              *arg,
+	uint64_t                value);
 #endif /* CONFIG_ZLEAKS */
+
+extern uint32_t                 zone_map_jetsam_limit;
+
+extern kern_return_t zone_map_jetsam_set_limit(uint32_t value);
 
 extern zone_t percpu_u64_zone;
 
 #pragma GCC visibility pop
 #endif /* XNU_KERNEL_PRIVATE */
 
-#define __zalloc_ptr_load_and_erase(elem) ({            \
-	_Static_assert(sizeof(elem) == sizeof(void *),  \
-	    "elem isn't pointer sized");                \
-	__auto_type __eptr = &(elem);                   \
-	__auto_type __elem = *__eptr;                   \
-	*__eptr = (__typeof__(__elem))NULL;             \
-	__elem;                                         \
-})
+/*
+ * This macro is currently used by AppleImage4 (rdar://83924635)
+ */
+#define __zalloc_ptr_load_and_erase(elem) \
+	os_ptr_load_and_erase(elem)
 
-__END_DECLS
+__ASSUME_PTR_ABI_SINGLE_END __END_DECLS
 
 #endif  /* _KERN_ZALLOC_H_ */
 

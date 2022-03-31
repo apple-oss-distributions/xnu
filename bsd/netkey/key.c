@@ -350,34 +350,6 @@ ipseclog((LOG_DEBUG, "%s: direction mismatched (TREE=%d SP=%d), " \
 }                                                               \
 } while (0)
 
-#if 1
-#define KMALLOC_WAIT(p, t, n)                                                     \
-((p) = (t) _MALLOC((n), M_SECA, M_WAITOK))
-#define KMALLOC_NOWAIT(p, t, n)                                              \
-((p) = (t) _MALLOC((n), M_SECA, M_NOWAIT))
-#define KFREE(p)                                                             \
-_FREE((caddr_t)(p), M_SECA);
-#else
-#define KMALLOC_WAIT(p, t, n) \
-do { \
-((p) = (t)_MALLOC((u_int32_t)(n), M_SECA, M_WAITOK));             \
-printf("%s %d: %p <- KMALLOC_WAIT(%s, %d)\n",                             \
-__FILE__, __LINE__, (p), #t, n);                             \
-} while (0)
-#define KMALLOC_NOWAIT(p, t, n) \
-do { \
-((p) = (t)_MALLOC((u_int32_t)(n), M_SECA, M_NOWAIT));             \
-printf("%s %d: %p <- KMALLOC_NOWAIT(%s, %d)\n",                             \
-__FILE__, __LINE__, (p), #t, n);                             \
-} while (0)
-
-#define KFREE(p)                                                             \
-do {                                                                 \
-printf("%s %d: %p -> KFREE()\n", __FILE__, __LINE__, (p));   \
-_FREE((caddr_t)(p), M_SECA);                                  \
-} while (0)
-#endif
-
 /*
  * set parameters into secpolicyindex buffer.
  * Must allocate secpolicyindex buffer passed to this function.
@@ -1256,10 +1228,10 @@ key_allocsa_extended(u_int family,
 {
 	struct secasvar *sav, *match;
 	u_int stateidx, state, tmpidx, matchidx;
-	struct sockaddr_in sin;
-	struct sockaddr_in6 sin6;
+	union sockaddr_in_4_6 dst_address = {};
 	const u_int *saorder_state_valid;
 	int arraysize;
+	bool dst_ll_address = false;
 
 	LCK_MTX_ASSERT(sadb_mutex, LCK_MTX_ASSERT_NOTOWNED);
 
@@ -1279,6 +1251,36 @@ key_allocsa_extended(u_int family,
 		saorder_state_valid = saorder_state_valid_prefer_new;
 		arraysize = _ARRAYLEN(saorder_state_valid_prefer_new);
 	}
+
+	/* check dst address */
+	switch (family) {
+	case AF_INET:
+		dst_address.sin.sin_family = AF_INET;
+		dst_address.sin.sin_len = sizeof(dst_address.sin);
+		memcpy(&dst_address.sin.sin_addr, dst, sizeof(dst_address.sin.sin_addr));
+		break;
+	case AF_INET6:
+		dst_address.sin6.sin6_family = AF_INET6;
+		dst_address.sin6.sin6_len = sizeof(dst_address.sin6);
+		memcpy(&dst_address.sin6.sin6_addr, dst, sizeof(dst_address.sin6.sin6_addr));
+		if (IN6_IS_SCOPE_LINKLOCAL(&dst_address.sin6.sin6_addr)) {
+			dst_ll_address = true;
+			/* kame fake scopeid */
+			dst_address.sin6.sin6_scope_id = dst_ifscope;
+			if (in6_embedded_scope) {
+				in6_verify_ifscope(&dst_address.sin6.sin6_addr, dst_address.sin6.sin6_scope_id);
+				dst_address.sin6.sin6_scope_id =
+				    ntohs(dst_address.sin6.sin6_addr.s6_addr16[1]);
+				dst_address.sin6.sin6_addr.s6_addr16[1] = 0;
+			}
+		}
+		break;
+	default:
+		ipseclog((LOG_DEBUG, "key_allocsa: "
+		    "unknown address family=%d.\n", family));
+		return NULL;
+	}
+
 
 	/*
 	 * searching SAD.
@@ -1320,44 +1322,21 @@ key_allocsa_extended(u_int family,
 			continue;
 		}
 
-		/* check dst address */
-		switch (family) {
-		case AF_INET:
-			bzero(&sin, sizeof(sin));
-			sin.sin_family = AF_INET;
-			sin.sin_len = sizeof(sin);
-			bcopy(dst, &sin.sin_addr,
-			    sizeof(sin.sin_addr));
-			if (key_sockaddrcmp((struct sockaddr*)&sin,
-			    (struct sockaddr *)&sav->sah->saidx.dst, 0) != 0) {
+		struct sockaddr_in6 tmp_sah_dst = {};
+		struct sockaddr *sah_dst = (struct sockaddr *)&sav->sah->saidx.dst;
+		if (dst_ll_address) {
+			if (!IN6_IS_SCOPE_LINKLOCAL(&(__DECONST(struct sockaddr_in6 *, sah_dst))->sin6_addr)) {
 				continue;
+			} else {
+				tmp_sah_dst.sin6_family = AF_INET6;
+				tmp_sah_dst.sin6_len = sizeof(tmp_sah_dst);
+				memcpy(&tmp_sah_dst.sin6_addr, &(__DECONST(struct sockaddr_in6 *, sah_dst))->sin6_addr, sizeof(tmp_sah_dst.sin6_addr));
+				tmp_sah_dst.sin6_scope_id = sav->sah->outgoing_if;
+				sah_dst = (struct sockaddr *)&tmp_sah_dst;
 			}
+		}
 
-			break;
-		case AF_INET6:
-			bzero(&sin6, sizeof(sin6));
-			sin6.sin6_family = AF_INET6;
-			sin6.sin6_len = sizeof(sin6);
-			bcopy(dst, &sin6.sin6_addr,
-			    sizeof(sin6.sin6_addr));
-			if (IN6_IS_SCOPE_LINKLOCAL(&sin6.sin6_addr)) {
-				/* kame fake scopeid */
-				sin6.sin6_scope_id = dst_ifscope;
-				if (in6_embedded_scope) {
-					in6_verify_ifscope(&sin6.sin6_addr, sin6.sin6_scope_id);
-					sin6.sin6_scope_id =
-					    ntohs(sin6.sin6_addr.s6_addr16[1]);
-					sin6.sin6_addr.s6_addr16[1] = 0;
-				}
-			}
-			if (key_sockaddrcmp((struct sockaddr*)&sin6,
-			    (struct sockaddr *)&sav->sah->saidx.dst, 0) != 0) {
-				continue;
-			}
-			break;
-		default:
-			ipseclog((LOG_DEBUG, "key_allocsa: "
-			    "unknown address family=%d.\n", family));
+		if (key_sockaddrcmp(&dst_address.sa, sah_dst, 0) != 0) {
 			continue;
 		}
 
@@ -1776,7 +1755,7 @@ key_delsp(
 
 		while (isr != NULL) {
 			nextisr = isr->next;
-			KFREE(isr);
+			kfree_type(struct ipsecrequest, isr);
 			isr = nextisr;
 		}
 	}
@@ -1966,18 +1945,8 @@ key_msg2sp(
 			}
 
 			/* allocate request buffer */
-			KMALLOC_WAIT(*p_isr, struct ipsecrequest *, sizeof(**p_isr));
-			if ((*p_isr) == NULL) {
-				ipseclog((LOG_DEBUG,
-				    "key_msg2sp: No more memory.\n"));
-				key_freesp(newsp, KEY_SADB_UNLOCKED);
-				*error = ENOBUFS;
-				return NULL;
-			}
-			bzero(*p_isr, sizeof(**p_isr));
-
-			/* set values */
-			(*p_isr)->next = NULL;
+			*p_isr = kalloc_type(struct ipsecrequest,
+			    Z_WAITOK_ZERO_NOFAIL);
 
 			switch (xisr->sadb_x_ipsecrequest_proto) {
 			case IPPROTO_ESP:
@@ -3369,7 +3338,6 @@ key_spddump(
 {
 	struct secpolicy *sp, **spbuf = NULL, **sp_ptr;
 	u_int32_t cnt = 0, bufcount = 0;
-	size_t total_req_size = 0;
 	u_int dir;
 	struct mbuf *n;
 	int error = 0;
@@ -3389,11 +3357,7 @@ key_spddump(
 		bufcount = ipsec_policy_count;
 	}
 
-	if (os_mul_overflow(bufcount, sizeof(struct secpolicy *), &total_req_size)) {
-		panic("key_spddump spbuf requested memory overflow %u", bufcount);
-	}
-
-	KMALLOC_WAIT(spbuf, struct secpolicy**, total_req_size);
+	spbuf = kalloc_type(struct secpolicy *, bufcount, Z_WAITOK);
 	if (spbuf == NULL) {
 		ipseclog((LOG_DEBUG, "key_spddump: No more memory.\n"));
 		error = ENOMEM;
@@ -3437,9 +3401,7 @@ key_spddump(
 	lck_mtx_unlock(sadb_mutex);
 
 end:
-	if (spbuf) {
-		KFREE(spbuf);
-	}
+	kfree_type(struct secpolicy *, bufcount, spbuf);
 	if (error) {
 		return key_senderror(so, m, error);
 	}
@@ -3893,9 +3855,7 @@ key_delsah(
 		LIST_REMOVE(sah, chain);
 	}
 
-	KFREE(sah);
-
-	return;
+	kfree_type(struct secashead, sah);
 }
 
 /*
@@ -3928,18 +3888,12 @@ key_newsav(
 		panic("key_newsa: NULL pointer is passed.");
 	}
 
-	KMALLOC_NOWAIT(newsav, struct secasvar *, sizeof(struct secasvar));
+	newsav = kalloc_type(struct secasvar, Z_NOWAIT_ZERO);
 	if (newsav == NULL) {
 		lck_mtx_unlock(sadb_mutex);
-		KMALLOC_WAIT(newsav, struct secasvar *, sizeof(struct secasvar));
+		newsav = kalloc_type(struct secasvar, Z_WAITOK_ZERO_NOFAIL);
 		lck_mtx_lock(sadb_mutex);
-		if (newsav == NULL) {
-			ipseclog((LOG_DEBUG, "key_newsa: No more memory.\n"));
-			*errp = ENOBUFS;
-			return NULL;
-		}
 	}
-	bzero((caddr_t)newsav, sizeof(struct secasvar));
 
 	switch (mhp->msg->sadb_msg_type) {
 	case SADB_GETSPI:
@@ -4013,13 +3967,7 @@ key_newsav(
 				*errp = EINVAL;
 				return NULL;
 			}
-			newsav->lft_h = (struct sadb_lifetime *)key_newbuf(lft0, sizeof(*lft0));
-			if (newsav->lft_h == NULL) {
-				ipseclog((LOG_DEBUG, "key_newsa: No more memory.\n"));
-				key_delsav(newsav);
-				*errp = ENOBUFS;
-				return NULL;
-			}
+			newsav->lft_h = key_newbuf(lft0, sizeof(*lft0));
 		}
 	}
 
@@ -4077,12 +4025,12 @@ key_reset_sav(struct secasvar *sav)
 
 	if (sav->key_auth != NULL) {
 		bzero(_KEYBUF(sav->key_auth), _KEYLEN(sav->key_auth));
-		KFREE(sav->key_auth);
+		kfree_data(sav->key_auth, PFKEY_UNUNIT64(sav->key_auth->sadb_key_len));
 		sav->key_auth = NULL;
 	}
 	if (sav->key_enc != NULL) {
 		bzero(_KEYBUF(sav->key_enc), _KEYLEN(sav->key_enc));
-		KFREE(sav->key_enc);
+		kfree_data(sav->key_enc, PFKEY_UNUNIT64(sav->key_enc->sadb_key_len));
 		sav->key_enc = NULL;
 	}
 	if (sav->sched) {
@@ -4103,19 +4051,17 @@ key_reset_sav(struct secasvar *sav)
 		sav->lft_c = NULL;
 	}
 	if (sav->lft_h != NULL) {
-		KFREE(sav->lft_h);
+		kfree_data(sav->lft_h, sizeof(*sav->lft_h));
 		sav->lft_h = NULL;
 	}
 	if (sav->lft_s != NULL) {
-		KFREE(sav->lft_s);
+		kfree_data(sav->lft_s, sizeof(*sav->lft_h));
 		sav->lft_s = NULL;
 	}
 	if (sav->iv != NULL) {
 		kfree_data(sav->iv, sav->ivlen);
 		sav->iv = NULL;
 	}
-
-	return;
 }
 
 /*
@@ -4147,9 +4093,7 @@ key_delsav(
 
 	key_reset_sav(sav);
 
-	KFREE(sav);
-
-	return;
+	kfree_type(struct secasvar, sav);
 }
 
 /*
@@ -4412,8 +4356,12 @@ key_setsaval(
 		key0 = (const struct sadb_key *)mhp->ext[SADB_EXT_KEY_AUTH];
 		len = mhp->extlen[SADB_EXT_KEY_AUTH];
 
+		const size_t max_length = PFKEY_ALIGN8(sizeof(*key0)) +
+		    PFKEY_ALIGN8(IPSEC_KEY_AUTH_MAX_BYTES);
+		assert(max_length < KALLOC_SAFE_ALLOC_SIZE);
+
 		error = 0;
-		if (len < sizeof(*key0)) {
+		if ((len < sizeof(*key0)) || (len > max_length)) {
 			ipseclog((LOG_DEBUG, "key_setsaval: invalid auth key ext len. len = %d\n", len));
 			error = EINVAL;
 			goto fail;
@@ -4436,11 +4384,6 @@ key_setsaval(
 		}
 
 		sav->key_auth = (struct sadb_key *)key_newbuf(key0, len);
-		if (sav->key_auth == NULL) {
-			ipseclog((LOG_DEBUG, "key_setsaval: No more memory.\n"));
-			error = ENOBUFS;
-			goto fail;
-		}
 	}
 
 	/* Encryption key */
@@ -4451,8 +4394,12 @@ key_setsaval(
 		key0 = (const struct sadb_key *)mhp->ext[SADB_EXT_KEY_ENCRYPT];
 		len = mhp->extlen[SADB_EXT_KEY_ENCRYPT];
 
+		const size_t max_length = PFKEY_ALIGN8(sizeof(*key0)) +
+		    PFKEY_ALIGN8(IPSEC_KEY_ENCRYPT_MAX_BYTES);
+		assert(max_length < KALLOC_SAFE_ALLOC_SIZE);
+
 		error = 0;
-		if (len < sizeof(*key0)) {
+		if ((len < sizeof(*key0)) || (len > max_length)) {
 			ipseclog((LOG_DEBUG, "key_setsaval: invalid encryption key ext len. len = %d\n", len));
 			error = EINVAL;
 			goto fail;
@@ -4466,11 +4413,6 @@ key_setsaval(
 				break;
 			}
 			sav->key_enc = (struct sadb_key *)key_newbuf(key0, len);
-			if (sav->key_enc == NULL) {
-				ipseclog((LOG_DEBUG, "key_setsaval: No more memory.\n"));
-				error = ENOBUFS;
-				goto fail;
-			}
 			break;
 		case SADB_SATYPE_AH:
 		default:
@@ -4555,13 +4497,7 @@ key_setsaval(
 				error = EINVAL;
 				goto fail;
 			}
-			sav->lft_h = (struct sadb_lifetime *)key_newbuf(lft0,
-			    sizeof(*lft0));
-			if (sav->lft_h == NULL) {
-				ipseclog((LOG_DEBUG, "key_setsaval: No more memory.\n"));
-				error = ENOBUFS;
-				goto fail;
-			}
+			sav->lft_h = (struct sadb_lifetime *)key_newbuf(lft0, sizeof(*lft0));
 			/* to be initialize ? */
 		}
 
@@ -4573,13 +4509,7 @@ key_setsaval(
 				error = EINVAL;
 				goto fail;
 			}
-			sav->lft_s = (struct sadb_lifetime *)key_newbuf(lft0,
-			    sizeof(*lft0));
-			if (sav->lft_s == NULL) {
-				ipseclog((LOG_DEBUG, "key_setsaval: No more memory.\n"));
-				error = ENOBUFS;
-				goto fail;
-			}
+			sav->lft_s = (struct sadb_lifetime *)key_newbuf(lft0, sizeof(*lft0));
 			/* to be initialize ? */
 		}
 	}
@@ -5270,15 +5200,11 @@ key_newbuf(
 	caddr_t new;
 
 	LCK_MTX_ASSERT(sadb_mutex, LCK_MTX_ASSERT_OWNED);
-	KMALLOC_NOWAIT(new, caddr_t, len);
+	new = kalloc_data(len, Z_NOWAIT);
 	if (new == NULL) {
 		lck_mtx_unlock(sadb_mutex);
-		KMALLOC_WAIT(new, caddr_t, len);
+		new = kalloc_data(len, Z_WAITOK | Z_NOFAIL);
 		lck_mtx_lock(sadb_mutex);
-		if (new == NULL) {
-			ipseclog((LOG_DEBUG, "key_newbuf: No more memory.\n"));
-			return NULL;
-		}
 	}
 	bcopy(src, new, len);
 
@@ -5869,7 +5795,6 @@ key_timehandler(void)
 	struct secpolicy **spbuf = NULL, **spptr = NULL;
 	struct secasvar **savexbuf = NULL, **savexptr = NULL;
 	struct secasvar **savkabuf = NULL, **savkaptr = NULL;
-	size_t total_req_size = 0;
 	u_int32_t spbufcount = 0, savbufcount = 0, spcount = 0, savexcount = 0, savkacount = 0, cnt;
 	int stop_handler = 1;  /* stop the timehandler */
 
@@ -5883,10 +5808,7 @@ key_timehandler(void)
 			spbufcount = ipsec_policy_count;
 		}
 
-		if (os_mul_overflow(spbufcount, sizeof(struct secpolicy *), &total_req_size)) {
-			panic("key_timehandler spbuf requested memory overflow %u", spbufcount);
-		}
-		KMALLOC_WAIT(spbuf, struct secpolicy **, total_req_size);
+		spbuf = kalloc_type(struct secpolicy *, spbufcount, Z_WAITOK);
 		if (spbuf) {
 			spptr = spbuf;
 		}
@@ -5896,14 +5818,11 @@ key_timehandler(void)
 			ipseclog((LOG_DEBUG, "key_timehandler: savbufcount overflow, ipsec sa count %u.\n", ipsec_sav_count));
 			savbufcount = ipsec_sav_count;
 		}
-		if (os_mul_overflow(savbufcount, sizeof(struct secasvar *), &total_req_size)) {
-			panic("key_timehandler savexbuf requested memory overflow %u", savbufcount);
-		}
-		KMALLOC_WAIT(savexbuf, struct secasvar **, total_req_size);
+		savexbuf = kalloc_type(struct secasvar *, savbufcount, Z_WAITOK);
 		if (savexbuf) {
 			savexptr = savexbuf;
 		}
-		KMALLOC_WAIT(savkabuf, struct secasvar **, total_req_size);
+		savkabuf = kalloc_type(struct secasvar *, savbufcount, Z_WAITOK);
 		if (savkabuf) {
 			savkaptr = savkabuf;
 		}
@@ -6201,7 +6120,7 @@ key_timehandler(void)
 			if (tv.tv_sec - acq->created > key_blockacq_lifetime
 			    && __LIST_CHAINED(acq)) {
 				LIST_REMOVE(acq, chain);
-				KFREE(acq);
+				kfree_type(struct secacq, acq);
 			}
 		}
 	}
@@ -6220,7 +6139,8 @@ key_timehandler(void)
 			if (tv.tv_sec - acq->created > key_blockacq_lifetime
 			    && __LIST_CHAINED(acq)) {
 				LIST_REMOVE(acq, chain);
-				KFREE(acq);
+				struct secacq *secacq_p = (struct secacq *)acq;
+				kfree_type(struct secacq, secacq_p);
 			}
 		}
 	}
@@ -6273,19 +6193,19 @@ key_timehandler(void)
 		while (spcount--) {
 			key_freesp(*spptr++, KEY_SADB_LOCKED);
 		}
-		KFREE(spbuf);
+		kfree_type(struct secpolicy *, spbufcount, spbuf);
 	}
 	if (savkabuf) {
 		while (savkacount--) {
 			key_freesav(*savkaptr++, KEY_SADB_LOCKED);
 		}
-		KFREE(savkabuf);
+		kfree_type(struct secasvar *, savbufcount, savkabuf);
 	}
 	if (savexbuf) {
 		while (savexcount--) {
 			key_freesav(*savexptr++, KEY_SADB_LOCKED);
 		}
-		KFREE(savexbuf);
+		kfree_type(struct secasvar *, savbufcount, savexbuf);
 	}
 
 	if (stop_handler) {
@@ -8208,24 +8128,18 @@ key_newacq(
 	struct timeval tv;
 
 	/* get new entry */
-	KMALLOC_NOWAIT(newacq, struct secacq *, sizeof(struct secacq));
+	newacq = kalloc_type(struct secacq, Z_NOWAIT_ZERO);
 	if (newacq == NULL) {
 		lck_mtx_unlock(sadb_mutex);
-		KMALLOC_WAIT(newacq, struct secacq *, sizeof(struct secacq));
+		newacq = kalloc_type(struct secacq, Z_WAITOK_ZERO_NOFAIL);
 		lck_mtx_lock(sadb_mutex);
-		if (newacq == NULL) {
-			ipseclog((LOG_DEBUG, "key_newacq: No more memory.\n"));
-			return NULL;
-		}
 	}
-	bzero(newacq, sizeof(*newacq));
 
 	/* copy secindex */
 	bcopy(saidx, &newacq->saidx, sizeof(newacq->saidx));
 	newacq->seq = (acq_seq == ~0 ? 1 : ++acq_seq);
 	microtime(&tv);
 	newacq->created = tv.tv_sec;
-	newacq->count = 0;
 
 	return newacq;
 }
@@ -8273,23 +8187,17 @@ key_newspacq(
 	struct timeval tv;
 
 	/* get new entry */
-	KMALLOC_NOWAIT(acq, struct secspacq *, sizeof(struct secspacq));
+	acq = kalloc_type(struct secspacq, Z_NOWAIT_ZERO);
 	if (acq == NULL) {
 		lck_mtx_unlock(sadb_mutex);
-		KMALLOC_WAIT(acq, struct secspacq *, sizeof(struct secspacq));
+		acq = kalloc_type(struct secspacq, Z_WAITOK_ZERO_NOFAIL);
 		lck_mtx_lock(sadb_mutex);
-		if (acq == NULL) {
-			ipseclog((LOG_DEBUG, "key_newspacq: No more memory.\n"));
-			return NULL;
-		}
 	}
-	bzero(acq, sizeof(*acq));
 
 	/* copy secindex */
 	bcopy(spidx, &acq->spidx, sizeof(acq->spidx));
 	microtime(&tv);
 	acq->created = tv.tv_sec;
-	acq->count = 0;
 
 	return acq;
 }
@@ -8490,12 +8398,7 @@ key_register(
 	}
 
 	/* create regnode */
-	KMALLOC_WAIT(newreg, struct secreg *, sizeof(*newreg));
-	if (newreg == NULL) {
-		ipseclog((LOG_DEBUG, "key_register: No more memory.\n"));
-		return key_senderror(so, m, ENOBUFS);
-	}
-	bzero((caddr_t)newreg, sizeof(*newreg));
+	newreg = kalloc_type(struct secreg, Z_WAITOK_ZERO_NOFAIL);
 
 	lck_mtx_lock(sadb_mutex);
 	/* check whether existing or not */
@@ -8503,7 +8406,7 @@ key_register(
 		if (reg->so == so) {
 			lck_mtx_unlock(sadb_mutex);
 			ipseclog((LOG_DEBUG, "key_register: socket exists already.\n"));
-			KFREE(newreg);
+			kfree_type(struct secreg, newreg);
 			return key_senderror(so, m, EEXIST);
 		}
 	}
@@ -8702,7 +8605,7 @@ key_freereg(
 			if (reg->so == so
 			    && __LIST_CHAINED(reg)) {
 				LIST_REMOVE(reg, chain);
-				KFREE(reg);
+				kfree_type(struct secreg, reg);
 				break;
 			}
 		}
@@ -8957,7 +8860,6 @@ key_dump(
 	struct secashead *sah;
 	struct secasvar *sav;
 	struct sav_dump_elem *savbuf = NULL, *elem_ptr;
-	size_t total_req_size = 0;
 	u_int32_t bufcount = 0, cnt = 0, cnt2 = 0;
 	u_int16_t proto;
 	u_int stateidx;
@@ -8989,11 +8891,7 @@ key_dump(
 		bufcount = ipsec_sav_count;
 	}
 
-	if (os_mul_overflow(bufcount, sizeof(struct sav_dump_elem), &total_req_size)) {
-		panic("key_dump savbuf requested memory overflow %u", bufcount);
-	}
-
-	KMALLOC_WAIT(savbuf, struct sav_dump_elem*, total_req_size);
+	savbuf = kalloc_type(struct sav_dump_elem, bufcount, Z_WAITOK);
 	if (savbuf == NULL) {
 		ipseclog((LOG_DEBUG, "key_dump: No more memory.\n"));
 		error = ENOMEM;
@@ -9066,7 +8964,7 @@ end:
 			}
 			lck_mtx_unlock(sadb_mutex);
 		}
-		KFREE(savbuf);
+		kfree_type(struct sav_dump_elem, bufcount, savbuf);
 	}
 
 	if (error) {

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016 Apple Inc. All rights reserved.
+ * Copyright (c) 2016-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -211,12 +211,7 @@ struct lltable {
 	llt_link_entry_t        *llt_link_entry;
 	llt_unlink_entry_t      *llt_unlink_entry;
 	llt_fill_sa_entry_t     *llt_fill_sa_entry;
-	llt_free_tbl_t          *llt_free_tbl;
 };
-
-#ifdef MALLOC_DECLARE
-MALLOC_DECLARE(M_LLTABLE);
-#endif
 
 /*
  * LLentry flags
@@ -242,6 +237,7 @@ MALLOC_DECLARE(M_LLTABLE);
     (((((((key >> 8) ^ key) >> 8) ^ key) >> 8) ^ key) & mask)
 
 struct lltable *lltable_allocate_htbl(uint32_t hsize);
+void lltable_purge(struct lltable *);
 void lltable_free(struct lltable *);
 void lltable_link(struct lltable *llt);
 void lltable_prefix_free(int, struct sockaddr *,

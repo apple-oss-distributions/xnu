@@ -109,7 +109,11 @@ extern char     *strchr(const char *s, int c) __stateful_pure;
 #ifdef XNU_KERNEL_PRIVATE
 extern char     *strrchr(const char *s, int c) __stateful_pure;
 #endif
+#if PLATFORM_MacOSX
+#ifndef KERNEL_PRIVATE
 extern char     *STRDUP(const char *, int);
+#endif
+#endif /* PLATFORM_MacOSX */
 extern int      strprefix(const char *s1, const char *s2) __stateful_pure;
 
 extern int      bcmp(const void *s1 __sized_by(n), const void *s2 __sized_by(n), size_t n) __stateful_pure;

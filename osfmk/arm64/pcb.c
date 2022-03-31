@@ -66,8 +66,8 @@
 extern int debug_task;
 
 /* zone for debug_state area */
-ZONE_DECLARE(ads_zone, "arm debug state", sizeof(arm_debug_state_t), ZC_NONE);
-ZONE_DECLARE(user_ss_zone, "user save state", sizeof(arm_context_t), ZC_NONE);
+ZONE_DEFINE_TYPE(ads_zone, "arm debug state", arm_debug_state_t, ZC_NONE);
+ZONE_DEFINE_TYPE(user_ss_zone, "user save state", arm_context_t, ZC_NONE);
 
 /*
  * Routine: consider_machine_collect
@@ -201,12 +201,9 @@ machine_thread_on_core(thread_t thread)
  * Routine: machine_thread_create
  *
  */
-kern_return_t
+void
 machine_thread_create(thread_t thread, task_t task, bool first_thread)
 {
-	arm_context_t *thread_user_ss = NULL;
-	kern_return_t result = KERN_SUCCESS;
-
 #define machine_thread_create_kprintf(x...) \
 	/* kprintf("machine_thread_create: " x) */
 
@@ -257,20 +254,7 @@ machine_thread_create(thread_t thread, task_t task, bool first_thread)
 
 
 	bzero(&thread->machine.perfctrl_state, sizeof(thread->machine.perfctrl_state));
-	result = machine_thread_state_initialize(thread);
-
-	if (result != KERN_SUCCESS) {
-		thread_user_ss = thread->machine.contextData;
-
-		if (thread_user_ss) {
-			thread->machine.upcb = NULL;
-			thread->machine.uNeon = NULL;
-			thread->machine.contextData = NULL;
-			zfree(user_ss_zone, thread_user_ss);
-		}
-	}
-
-	return result;
+	machine_thread_state_initialize(thread);
 }
 
 /*
@@ -984,7 +968,7 @@ kern_return_t
 machine_thread_set_tsd_base(thread_t         thread,
     mach_vm_offset_t tsd_base)
 {
-	if (thread->task == kernel_task) {
+	if (get_threadtask(thread) == kernel_task) {
 		return KERN_INVALID_ARGUMENT;
 	}
 

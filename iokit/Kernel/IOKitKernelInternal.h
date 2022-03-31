@@ -171,6 +171,7 @@ struct IOMemoryDescriptorReserved {
 	OSObject                    * contextObject;
 };
 
+#if defined(__x86_64__)
 struct iopa_t {
 	IOLock       * lock;
 	queue_head_t   list;
@@ -198,6 +199,8 @@ extern "C" uintptr_t iopa_free(iopa_t * a, uintptr_t addr, vm_size_t bytes);
 extern "C" uint32_t  gIOPageAllocChunkBytes;
 
 extern "C" iopa_t    gIOBMDPageAllocator;
+#endif /* defined(__x86_64__) */
+
 
 extern "C" struct timeval gIOLastSleepTime;
 extern "C" struct timeval gIOLastWakeTime;

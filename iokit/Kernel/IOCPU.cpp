@@ -288,11 +288,9 @@ IOCPUSleepKernel(void)
 	 */
 
 	rootDomain->start_watchdog_timer();
-	rootDomain->tracePoint( kIOPMTracePointWakePlatformActions );
 
 	console_resume();
 
-	IOPlatformActionsPostResume();
 	rootDomain->tracePoint( kIOPMTracePointWakeCPUs );
 
 	// Wake the other CPUs.
@@ -314,6 +312,9 @@ IOCPUSleepKernel(void)
 #if defined(__arm64__)
 	sched_restore_recommended_cores_after_sleep();
 #endif
+
+	rootDomain->tracePoint( kIOPMTracePointWakePlatformActions );
+	IOPlatformActionsPostResume();
 
 	thread_kern_set_pri(self, old_pri);
 	printf("IOCPUSleepKernel exit\n");
@@ -611,7 +612,7 @@ IOCPUInterruptController::setCPUInterruptProperties(IOService *service)
 	specifier = OSArray::withCapacity(numSources);
 	for (cnt = 0; cnt < numSources; cnt++) {
 		tmpLong = cnt;
-		OSSharedPtr<OSData> tmpData = OSData::withBytes(&tmpLong, sizeof(tmpLong));
+		OSSharedPtr<OSData> tmpData = OSData::withValue(tmpLong);
 		specifier->setObject(tmpData.get());
 	}
 

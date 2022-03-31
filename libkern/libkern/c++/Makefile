@@ -42,11 +42,17 @@ DATAFILES = \
           bounded_ptr_fwd.h \
           safe_allocation.h
 
+PRIVATE_KERNELFILES = \
+          OSValueObject.h
+
 INSTALL_MI_LIST	=
 
 INSTALL_MI_DIR = libkern/c++
 
-EXPORT_MI_LIST	= ${DATAFILES}
+INSTALL_KF_MI_LIST = ${DATAFILES}
+INSTALL_KF_MI_LCL_LIST = ${DATAFILES} ${PRIVATE_KERNELFILES}
+
+EXPORT_MI_LIST	= ${DATAFILES} ${PRIVATE_KERNELFILES}
 
 EXPORT_MI_DIR = libkern/c++
 

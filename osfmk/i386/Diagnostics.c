@@ -321,8 +321,8 @@ diagCall64(x86_saved_state_t * state)
 	{
 		(void) ml_set_interrupts_enabled(TRUE);
 		if (diagflag) {
-			unsigned *ptr = (unsigned *)kalloc(1024);
-			kfree(ptr, 1024);
+			unsigned *ptr = (unsigned *)kalloc_data(1024, Z_WAITOK);
+			kfree_data(ptr, 1024);
 			*ptr = 0x42;
 		}
 		(void) ml_set_interrupts_enabled(FALSE);

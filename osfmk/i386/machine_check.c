@@ -183,7 +183,8 @@ mca_cpu_alloc(cpu_data_t        *cdp)
 	 */
 	mca_state_size = sizeof(mca_state_t) +
 	    sizeof(mca_mci_bank_t) * mca_error_bank_count;
-	cdp->cpu_mca_state = zalloc_permanent(mca_state_size, ZALIGN_PTR);
+	cdp->cpu_mca_state = zalloc_permanent_tag(mca_state_size, ZALIGN_PTR,
+	    VM_KERN_MEMORY_CPU);
 	if (cdp->cpu_mca_state == NULL) {
 		printf("mca_cpu_alloc() failed for cpu %d\n", cdp->cpu_number);
 		return;

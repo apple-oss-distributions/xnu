@@ -15,6 +15,8 @@
         4.  Create a function that can be called either through the zonetriage macro ZoneTriage() or using its own macro. 
             This function should handle all lldb commands you want to run for this type of zone panic.
 """
+from __future__ import absolute_import, print_function
+
 from xnu import *
 import sys, shlex
 from utils import *
@@ -44,7 +46,7 @@ def ZoneTriage(cmd_args=None):
     elif re.match(zone_map_exhausted, panic_string) is not None:
         ZoneTriageMemoryLeak()
     else:
-        print "zonetriage does not currently support this panic string."
+        print("zonetriage does not currently support this panic string.")
 
 @lldb_command('zonetriage_freedelement')
 def ZoneTriageFreedElement(cmd_args=None):
@@ -58,7 +60,7 @@ def ZoneTriageFreedElement(cmd_args=None):
             return
     CheckZoneBootArgs()
     ## Run showzonesbeinglogged. 
-    print "(lldb) zstack_showzonesbeinglogged\n%s\n" % lldb_run_command("zstack_showzonesbeinglogged")
+    print("(lldb) zstack_showzonesbeinglogged\n%s\n" % lldb_run_command("zstack_showzonesbeinglogged"))
     ## Capture zone and element from panic string.
     values = re.search(zone_element_modified, panic_string)
     if values is None or 'zone' not in values.group() or 'element' not in values.group():
@@ -67,10 +69,10 @@ def ZoneTriageFreedElement(cmd_args=None):
     zone = values.group('zone')
     btlog = FindZoneBTLog(zone)
     if btlog is not None:
-        print "(lldb) zstack_findelem " + btlog + " " + element
+        print("(lldb) zstack_findelem " + btlog + " " + element)
         findelem_output = lldb_run_command("zstack_findelem " + btlog + " " + element)
         findelem_output = re.sub('Scanning is ongoing. [0-9]* items scanned since last check.\n', '', findelem_output)
-        print findelem_output
+        print(findelem_output)
 
 @lldb_command('zonetriage_memoryleak')
 def ZoneTriageMemoryLeak(cmd_args=None):
@@ -79,14 +81,14 @@ def ZoneTriageMemoryLeak(cmd_args=None):
     global kern
     CheckZoneBootArgs()
     ## Run showzonesbeinglogged. 
-    print "(lldb) zstack_showzonesbeinglogged\n%s\n" % lldb_run_command("zstack_showzonesbeinglogged")
+    print("(lldb) zstack_showzonesbeinglogged\n%s\n" % lldb_run_command("zstack_showzonesbeinglogged"))
     for zval in kern.zones:
         if zval.zlog_btlog:
-            print '%s:' % zval.z_name
-            print "(lldb) zstack_findtop -N 5 0x%lx" % zval.zlog_btlog
-            print lldb_run_command("zstack_findtop -N 5 0x%lx" % zval.zlog_btlog)
-            print "(lldb) zstack_findleak 0x%lx" % zval.zlog_btlog
-            print lldb_run_command("zstack_findleak 0x%lx" % zval.zlog_btlog)
+            print('%s:' % zval.z_name)
+            print("(lldb) zstack_findtop -N 5 0x%lx" % zval.zlog_btlog)
+            print(lldb_run_command("zstack_findtop -N 5 0x%lx" % zval.zlog_btlog))
+            print("(lldb) zstack_findleak 0x%lx" % zval.zlog_btlog)
+            print(lldb_run_command("zstack_findleak 0x%lx" % zval.zlog_btlog))
 
 def CheckZoneBootArgs(cmd_args=None):
     """ Check boot args to see if zone is being logged, if not, suggest new boot args
@@ -109,8 +111,8 @@ def CheckZoneBootArgs(cmd_args=None):
     bootargs = lldb_run_command("showbootargs")
     correct_boot_args = re.search('zlog([1-9]|10)?=' + re.sub(' ', '.', zone), bootargs)
     if correct_boot_args is None:
-        print "Current boot-args:\n" + bootargs
-        print "You may need to include: -zc -zp zlog([1-9]|10)?=" + re.sub(' ', '.', zone)
+        print("Current boot-args:\n" + bootargs)
+        print("You may need to include: -zc -zp zlog([1-9]|10)?=" + re.sub(' ', '.', zone))
 
 def FindZoneBTLog(zone):
     """ Returns the btlog address in the format 0x%lx for the zone name passed as a parameter

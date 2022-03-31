@@ -2003,6 +2003,7 @@
 0x263c0028	imp_thread_qos_promote
 0x263d0028	imp_thread_qos_ipc_override
 0x263e0028	imp_thread_qos_servicer_override
+0x263f0028	imp_thread_iotier_kevent_override
 0x27000000	PERF_PCEVENT
 0x27001000	PERF_CPU_IDLE
 0x27001100	PERF_CPU_IDLE_TIMER

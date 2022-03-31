@@ -292,16 +292,16 @@
  *
  * The common alignment for LP64 is for longs and pointers i.e. 8 bytes.
  */
-
-
 #define KALLOC_MINSIZE          16      /* minimum allocation size */
 #define KALLOC_LOG2_MINALIGN    4       /* log2 minimum alignment */
+
+#define ZONE_MAP_MAX            (32ULL << 30)
+#define ZONE_MAP_VA_SIZE_LP64   (128ULL << 30)
 
 #define LINEAR_KERNEL_ADDRESS   ((vm_offset_t) 0x00000000)
 
 #define VM_MIN_KERNEL_LOADED_ADDRESS    ((vm_offset_t) 0xFFFFFF8000000000UL)
 #define VM_MAX_KERNEL_LOADED_ADDRESS    ((vm_offset_t) 0xFFFFFF801FFFFFFFUL)
-
 
 /*
  *	Conversion between 80386 pages and VM pages
@@ -310,7 +310,6 @@
 #define trunc_i386_to_vm(p)     (atop(trunc_page(i386_ptob(p))))
 #define round_i386_to_vm(p)     (atop(round_page(i386_ptob(p))))
 #define vm_to_i386(p)           (i386_btop(ptoa(p)))
-
 
 #define PMAP_SET_CACHE_ATTR(mem, object, cache_attr, batch_pmap_op)     \
 	MACRO_BEGIN                                                     \
@@ -328,11 +327,6 @@
 
 #define IS_USERADDR64_CANONICAL(addr)                   \
 	((addr) < (VM_MAX_USER_PAGE_ADDRESS))
-
-/*
- * This now limits the physical pages in the zone map
- */
-#define ZONE_MAP_MAX (64ULL << 30) /* 64GB */
 
 #endif  /* MACH_KERNEL_PRIVATE */
 

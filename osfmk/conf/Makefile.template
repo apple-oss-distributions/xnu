@@ -78,6 +78,8 @@ vm_tests.o_CFLAGS_ADD += -O0 -g
 #
 # DO NOT ADD MORE HERE.
 #
+# -Wno-format-nonliteral
+ktest_emit.o_CWARNFLAGS_ADD += -Wno-format-nonliteral
 # -Wno-atomic-implicit-seq-cst
 mp.o_CWARNFLAGS_ADD += -Wno-atomic-implicit-seq-cst
 pmCPU.o_CWARNFLAGS_ADD += -Wno-atomic-implicit-seq-cst
@@ -261,7 +263,6 @@ locks_i386.o_CWARNFLAGS_ADD += -Wno-sign-conversion
 locks_i386_opt.o_CWARNFLAGS_ADD += -Wno-sign-conversion
 loose_ends.o_CWARNFLAGS_ADD += -Wno-sign-conversion
 lowmem_vectors.o_CWARNFLAGS_ADD += -Wno-sign-conversion
-ltable.o_CWARNFLAGS_ADD += -Wno-sign-conversion
 lz4.o_CWARNFLAGS_ADD += -Wno-sign-conversion
 mach_debug.o_CWARNFLAGS_ADD += -Wno-sign-conversion
 mach_kernelrpc.o_CWARNFLAGS_ADD += -Wno-sign-conversion

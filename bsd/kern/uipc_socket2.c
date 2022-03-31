@@ -873,6 +873,7 @@ static int
 sbappend_common(struct sockbuf *sb, struct mbuf *m, boolean_t nodrop)
 {
 	struct socket *so = sb->sb_so;
+	struct soflow_hash_entry *dgram_flow_entry = NULL;
 
 	if (m == NULL || (sb->sb_flags & SB_DROP)) {
 		if (m != NULL && !nodrop) {
@@ -889,13 +890,18 @@ sbappend_common(struct sockbuf *sb, struct mbuf *m, boolean_t nodrop)
 
 	if (SOCK_DOM(sb->sb_so) == PF_INET || SOCK_DOM(sb->sb_so) == PF_INET6) {
 		ASSERT(nodrop == FALSE);
+
+		if (NEED_DGRAM_FLOW_TRACKING(so)) {
+			dgram_flow_entry = soflow_get_flow(so, NULL, NULL, NULL, m_length(m), false, m->m_pkthdr.rcvif ? m->m_pkthdr.rcvif->if_index : 0);
+		}
+
 		if (sb->sb_flags & SB_RECV && !(m && m->m_flags & M_SKIPCFIL)) {
 			int error = sflt_data_in(so, NULL, &m, NULL, 0);
 			SBLASTRECORDCHK(sb, "sbappend 2");
 
 #if CONTENT_FILTER
 			if (error == 0) {
-				error = cfil_sock_data_in(so, NULL, m, NULL, 0);
+				error = cfil_sock_data_in(so, NULL, m, NULL, 0, dgram_flow_entry);
 			}
 #endif /* CONTENT_FILTER */
 
@@ -903,10 +909,17 @@ sbappend_common(struct sockbuf *sb, struct mbuf *m, boolean_t nodrop)
 				if (error != EJUSTRETURN) {
 					m_freem(m);
 				}
+				if (dgram_flow_entry != NULL) {
+					soflow_free_flow(dgram_flow_entry);
+				}
 				return 0;
 			}
 		} else if (m) {
 			m->m_flags &= ~M_SKIPCFIL;
+		}
+
+		if (dgram_flow_entry != NULL) {
+			soflow_free_flow(dgram_flow_entry);
 		}
 	}
 
@@ -938,6 +951,7 @@ sbappend_nodrop(struct sockbuf *sb, struct mbuf *m)
 int
 sbappendstream(struct sockbuf *sb, struct mbuf *m)
 {
+	struct soflow_hash_entry *dgram_flow_entry = NULL;
 	struct socket *so = sb->sb_so;
 
 	if (m == NULL || (sb->sb_flags & SB_DROP)) {
@@ -956,13 +970,17 @@ sbappendstream(struct sockbuf *sb, struct mbuf *m)
 	SBLASTMBUFCHK(sb, __func__);
 
 	if (SOCK_DOM(sb->sb_so) == PF_INET || SOCK_DOM(sb->sb_so) == PF_INET6) {
+		if (NEED_DGRAM_FLOW_TRACKING(so)) {
+			dgram_flow_entry = soflow_get_flow(so, NULL, NULL, NULL, m_length(m), false, m->m_pkthdr.rcvif ? m->m_pkthdr.rcvif->if_index : 0);
+		}
+
 		if (sb->sb_flags & SB_RECV && !(m && m->m_flags & M_SKIPCFIL)) {
 			int error = sflt_data_in(so, NULL, &m, NULL, 0);
 			SBLASTRECORDCHK(sb, "sbappendstream 1");
 
 #if CONTENT_FILTER
 			if (error == 0) {
-				error = cfil_sock_data_in(so, NULL, m, NULL, 0);
+				error = cfil_sock_data_in(so, NULL, m, NULL, 0, dgram_flow_entry);
 			}
 #endif /* CONTENT_FILTER */
 
@@ -970,10 +988,17 @@ sbappendstream(struct sockbuf *sb, struct mbuf *m)
 				if (error != EJUSTRETURN) {
 					m_freem(m);
 				}
+				if (dgram_flow_entry != NULL) {
+					soflow_free_flow(dgram_flow_entry);
+				}
 				return 0;
 			}
 		} else if (m) {
 			m->m_flags &= ~M_SKIPCFIL;
+		}
+
+		if (dgram_flow_entry != NULL) {
+			soflow_free_flow(dgram_flow_entry);
 		}
 	}
 
@@ -1083,6 +1108,8 @@ sblastmbufchk(struct sockbuf *sb, const char *where)
 static int
 sbappendrecord_common(struct sockbuf *sb, struct mbuf *m0, boolean_t nodrop)
 {
+	struct soflow_hash_entry *dgram_flow_entry = NULL;
+	struct socket *so = sb->sb_so;
 	struct mbuf *m;
 	int space = 0;
 
@@ -1106,13 +1133,18 @@ sbappendrecord_common(struct sockbuf *sb, struct mbuf *m0, boolean_t nodrop)
 
 	if (SOCK_DOM(sb->sb_so) == PF_INET || SOCK_DOM(sb->sb_so) == PF_INET6) {
 		ASSERT(nodrop == FALSE);
+
+		if (NEED_DGRAM_FLOW_TRACKING(so)) {
+			dgram_flow_entry = soflow_get_flow(so, NULL, NULL, NULL, m_length(m0), false, m0->m_pkthdr.rcvif ? m0->m_pkthdr.rcvif->if_index : 0);
+		}
+
 		if (sb->sb_flags & SB_RECV && !(m0 && m0->m_flags & M_SKIPCFIL)) {
 			int error = sflt_data_in(sb->sb_so, NULL, &m0, NULL,
 			    sock_data_filt_flag_record);
 
 #if CONTENT_FILTER
 			if (error == 0) {
-				error = cfil_sock_data_in(sb->sb_so, NULL, m0, NULL, 0);
+				error = cfil_sock_data_in(sb->sb_so, NULL, m0, NULL, 0, dgram_flow_entry);
 			}
 #endif /* CONTENT_FILTER */
 
@@ -1121,10 +1153,17 @@ sbappendrecord_common(struct sockbuf *sb, struct mbuf *m0, boolean_t nodrop)
 				if (error != EJUSTRETURN) {
 					m_freem(m0);
 				}
+				if (dgram_flow_entry != NULL) {
+					soflow_free_flow(dgram_flow_entry);
+				}
 				return 0;
 			}
 		} else if (m0) {
 			m0->m_flags &= ~M_SKIPCFIL;
+		}
+
+		if (dgram_flow_entry != NULL) {
+			soflow_free_flow(dgram_flow_entry);
 		}
 	}
 
@@ -1283,6 +1322,8 @@ sbappendaddr(struct sockbuf *sb, struct sockaddr *asa, struct mbuf *m0,
 	int result = 0;
 	boolean_t sb_unix = (sb->sb_flags & SB_UNIX);
 	struct mbuf *mbuf_chain = NULL;
+	struct soflow_hash_entry *dgram_flow_entry = NULL;
+	struct socket *so = sb->sb_so;
 
 	if (error_out) {
 		*error_out = 0;
@@ -1307,6 +1348,11 @@ sbappendaddr(struct sockbuf *sb, struct sockaddr *asa, struct mbuf *m0,
 
 	if (SOCK_DOM(sb->sb_so) == PF_INET || SOCK_DOM(sb->sb_so) == PF_INET6) {
 		/* Call socket data in filters */
+
+		if (NEED_DGRAM_FLOW_TRACKING(so)) {
+			dgram_flow_entry = soflow_get_flow(so, NULL, asa, control, m_length(m0), false, m0->m_pkthdr.rcvif ? m0->m_pkthdr.rcvif->if_index : 0);
+		}
+
 		if (sb->sb_flags & SB_RECV && !(m0 && m0->m_flags & M_SKIPCFIL)) {
 			int error;
 			error = sflt_data_in(sb->sb_so, asa, &m0, &control, 0);
@@ -1315,7 +1361,7 @@ sbappendaddr(struct sockbuf *sb, struct sockaddr *asa, struct mbuf *m0,
 #if CONTENT_FILTER
 			if (error == 0) {
 				error = cfil_sock_data_in(sb->sb_so, asa, m0, control,
-				    0);
+				    0, dgram_flow_entry);
 			}
 #endif /* CONTENT_FILTER */
 
@@ -1331,10 +1377,17 @@ sbappendaddr(struct sockbuf *sb, struct sockaddr *asa, struct mbuf *m0,
 						*error_out = error;
 					}
 				}
+				if (dgram_flow_entry != NULL) {
+					soflow_free_flow(dgram_flow_entry);
+				}
 				return 0;
 			}
 		} else if (m0) {
 			m0->m_flags &= ~M_SKIPCFIL;
+		}
+
+		if (dgram_flow_entry != NULL) {
+			soflow_free_flow(dgram_flow_entry);
 		}
 	}
 
@@ -1429,6 +1482,8 @@ int
 sbappendcontrol(struct sockbuf *sb, struct mbuf *m0, struct mbuf *control,
     int *error_out)
 {
+	struct soflow_hash_entry *dgram_flow_entry = NULL;
+	struct socket *so = sb->sb_so;
 	int result = 0;
 	boolean_t sb_unix = (sb->sb_flags & SB_UNIX);
 
@@ -1450,6 +1505,10 @@ sbappendcontrol(struct sockbuf *sb, struct mbuf *m0, struct mbuf *control,
 	}
 
 	if (SOCK_DOM(sb->sb_so) == PF_INET || SOCK_DOM(sb->sb_so) == PF_INET6) {
+		if (NEED_DGRAM_FLOW_TRACKING(so)) {
+			dgram_flow_entry = soflow_get_flow(so, NULL, NULL, control, m_length(m0), false, m0->m_pkthdr.rcvif ? m0->m_pkthdr.rcvif->if_index : 0);
+		}
+
 		if (sb->sb_flags & SB_RECV && !(m0 && m0->m_flags & M_SKIPCFIL)) {
 			int error;
 
@@ -1459,7 +1518,7 @@ sbappendcontrol(struct sockbuf *sb, struct mbuf *m0, struct mbuf *control,
 #if CONTENT_FILTER
 			if (error == 0) {
 				error = cfil_sock_data_in(sb->sb_so, NULL, m0, control,
-				    0);
+				    0, dgram_flow_entry);
 			}
 #endif /* CONTENT_FILTER */
 
@@ -1475,10 +1534,17 @@ sbappendcontrol(struct sockbuf *sb, struct mbuf *m0, struct mbuf *control,
 						*error_out = error;
 					}
 				}
+				if (dgram_flow_entry != NULL) {
+					soflow_free_flow(dgram_flow_entry);
+				}
 				return 0;
 			}
 		} else if (m0) {
 			m0->m_flags &= ~M_SKIPCFIL;
+		}
+
+		if (dgram_flow_entry != NULL) {
+			soflow_free_flow(dgram_flow_entry);
 		}
 	}
 

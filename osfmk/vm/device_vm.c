@@ -112,8 +112,7 @@ device_pager_get_refcount(device_pager_t device_object)
 
 LCK_GRP_DECLARE(device_pager_lck_grp, "device_pager");
 
-ZONE_DECLARE(device_pager_zone, "device node pager structures",
-    sizeof(struct device_pager), ZC_NONE);
+KALLOC_TYPE_DEFINE(device_pager_zone, struct device_pager, KT_DEFAULT);
 
 #define device_pager_lock_init(pager) \
 	lck_mtx_init(&(pager)->lock, &device_pager_lck_grp, LCK_ATTR_NULL)

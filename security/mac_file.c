@@ -47,46 +47,6 @@
 
 #include <security/mac_internal.h>
 
-
-static struct label *
-mac_file_label_alloc(void)
-{
-	struct label *label;
-
-	label = mac_labelzone_alloc(MAC_WAITOK);
-	if (label == NULL) {
-		return NULL;
-	}
-	MAC_PERFORM(file_label_init, label);
-	return label;
-}
-
-void
-mac_file_label_init(struct fileglob *fg)
-{
-	fg->fg_label = mac_file_label_alloc();
-}
-
-static void
-mac_file_label_free(struct label *label)
-{
-	MAC_PERFORM(file_label_destroy, label);
-	mac_labelzone_free(label);
-}
-
-void
-mac_file_label_associate(struct ucred *cred, struct fileglob *fg)
-{
-	MAC_PERFORM(file_label_associate, cred, fg, fg->fg_label);
-}
-
-void
-mac_file_label_destroy(struct fileglob *fg)
-{
-	mac_file_label_free(fg->fg_label);
-	fg->fg_label = NULL;
-}
-
 int
 mac_file_check_create(struct ucred *cred)
 {
@@ -101,7 +61,7 @@ mac_file_check_dup(struct ucred *cred, struct fileglob *fg, int newfd)
 {
 	int error;
 
-	MAC_CHECK(file_check_dup, cred, fg, fg->fg_label, newfd);
+	MAC_CHECK(file_check_dup, cred, fg, NULL, newfd);
 	return error;
 }
 
@@ -111,7 +71,7 @@ mac_file_check_fcntl(struct ucred *cred, struct fileglob *fg, int cmd,
 {
 	int error;
 
-	MAC_CHECK(file_check_fcntl, cred, fg, fg->fg_label, cmd, arg);
+	MAC_CHECK(file_check_fcntl, cred, fg, NULL, cmd, arg);
 	return error;
 }
 
@@ -120,7 +80,7 @@ mac_file_check_ioctl(struct ucred *cred, struct fileglob *fg, u_long cmd)
 {
 	int error;
 
-	MAC_CHECK(file_check_ioctl, cred, fg, fg->fg_label, cmd);
+	MAC_CHECK(file_check_ioctl, cred, fg, NULL, cmd);
 	return error;
 }
 
@@ -129,7 +89,7 @@ mac_file_check_inherit(struct ucred *cred, struct fileglob *fg)
 {
 	int error;
 
-	MAC_CHECK(file_check_inherit, cred, fg, fg->fg_label);
+	MAC_CHECK(file_check_inherit, cred, fg, NULL);
 	return error;
 }
 
@@ -138,7 +98,7 @@ mac_file_check_receive(struct ucred *cred, struct fileglob *fg)
 {
 	int error;
 
-	MAC_CHECK(file_check_receive, cred, fg, fg->fg_label);
+	MAC_CHECK(file_check_receive, cred, fg, NULL);
 	return error;
 }
 
@@ -147,7 +107,7 @@ mac_file_check_get_offset(struct ucred *cred, struct fileglob *fg)
 {
 	int error;
 
-	MAC_CHECK(file_check_get_offset, cred, fg, fg->fg_label);
+	MAC_CHECK(file_check_get_offset, cred, fg, NULL);
 	return error;
 }
 
@@ -156,7 +116,7 @@ mac_file_check_change_offset(struct ucred *cred, struct fileglob *fg)
 {
 	int error;
 
-	MAC_CHECK(file_check_change_offset, cred, fg, fg->fg_label);
+	MAC_CHECK(file_check_change_offset, cred, fg, NULL);
 	return error;
 }
 
@@ -186,7 +146,7 @@ mac_file_check_lock(struct ucred *cred, struct fileglob *fg, int op,
 {
 	int error;
 
-	MAC_CHECK(file_check_lock, cred, fg, fg->fg_label, op, fl);
+	MAC_CHECK(file_check_lock, cred, fg, NULL, op, fl);
 	return error;
 }
 
@@ -218,7 +178,7 @@ mac_file_check_mmap(struct ucred *cred, struct fileglob *fg, int prot,
 	int maxp;
 
 	maxp = *maxprot;
-	MAC_CHECK(file_check_mmap, cred, fg, fg->fg_label, prot, flags, offset, &maxp);
+	MAC_CHECK(file_check_mmap, cred, fg, NULL, prot, flags, offset, &maxp);
 	if ((maxp | *maxprot) != *maxprot) {
 		panic("file_check_mmap increased max protections");
 	}
@@ -232,8 +192,7 @@ mac_file_check_mmap_downgrade(struct ucred *cred, struct fileglob *fg,
 {
 	int result = *prot;
 
-	MAC_PERFORM(file_check_mmap_downgrade, cred, fg, fg->fg_label,
-	    &result);
+	MAC_PERFORM(file_check_mmap_downgrade, cred, fg, NULL, &result);
 
 	*prot = result;
 }
@@ -241,7 +200,7 @@ mac_file_check_mmap_downgrade(struct ucred *cred, struct fileglob *fg,
 void
 mac_file_notify_close(struct ucred *cred, struct fileglob *fg)
 {
-	MAC_PERFORM(file_notify_close, cred, fg, fg->fg_label, ((fg->fg_flag & FWASWRITTEN) ? 1 : 0));
+	MAC_PERFORM(file_notify_close, cred, fg, NULL, ((fg->fg_flag & FWASWRITTEN) ? 1 : 0));
 }
 
 
@@ -258,7 +217,7 @@ mac_file_setxattr(struct fileglob *fg, const char *name, char *buf, size_t len)
 		return EFTYPE;
 	}
 
-	vp = (struct vnode *)fg->fg_data;
+	vp = (struct vnode *)fg_get_data(fg);
 	return mac_vnop_setxattr(vp, name, buf, len);
 }
 
@@ -272,7 +231,7 @@ mac_file_getxattr(struct fileglob *fg, const char *name, char *buf, size_t len,
 		return EFTYPE;
 	}
 
-	vp = (struct vnode *)fg->fg_data;
+	vp = (struct vnode *)fg_get_data(fg);
 	return mac_vnop_getxattr(vp, name, buf, len, attrlen);
 }
 
@@ -285,6 +244,6 @@ mac_file_removexattr(struct fileglob *fg, const char *name)
 		return EFTYPE;
 	}
 
-	vp = (struct vnode *)fg->fg_data;
+	vp = (struct vnode *)fg_get_data(fg);
 	return mac_vnop_removexattr(vp, name);
 }

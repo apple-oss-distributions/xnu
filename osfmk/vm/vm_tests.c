@@ -34,13 +34,16 @@
 
 #include <kern/ledger.h>
 
+#include <device/device_port.h>
 #include <vm/memory_object.h>
 #include <vm/vm_fault.h>
 #include <vm/vm_map.h>
 #include <vm/vm_object.h>
+#include <vm/vm_pageout.h>
 #include <vm/vm_protos.h>
 
 #include <mach/mach_vm.h>
+
 extern ledger_template_t        task_ledger_template;
 
 extern kern_return_t
@@ -261,14 +264,14 @@ vm_test_wire_and_extract(void)
 	    LEDGER_CREATE_ACTIVE_ENTRIES);
 	pmap_t user_pmap = pmap_create_options(ledger, 0, PMAP_CREATE_64BIT);
 	assert(user_pmap);
-	user_map = vm_map_create(user_pmap,
+	user_map = vm_map_create_options(user_pmap,
 	    0x100000000ULL,
 	    0x200000000ULL,
-	    TRUE);
-	wire_map = vm_map_create(NULL,
+	    VM_MAP_CREATE_PAGEABLE);
+	wire_map = vm_map_create_options(NULL,
 	    0x100000000ULL,
 	    0x200000000ULL,
-	    TRUE);
+	    VM_MAP_CREATE_PAGEABLE);
 	user_addr = 0;
 	user_size = 0x10000;
 	kr = mach_vm_allocate(user_map,
@@ -517,10 +520,10 @@ vm_test_4k(void)
 	printf("\n\n\nVM_TEST_4K:%d creating 4K map...\n", __LINE__);
 	test_pmap = pmap_create_options(NULL, 0, PMAP_CREATE_64BIT | PMAP_CREATE_FORCE_4K_PAGES);
 	assert(test_pmap != NULL);
-	test_map = vm_map_create(test_pmap,
+	test_map = vm_map_create_options(test_pmap,
 	    MACH_VM_MIN_ADDRESS,
 	    MACH_VM_MAX_ADDRESS,
-	    TRUE);
+	    VM_MAP_CREATE_PAGEABLE);
 	assert(test_map != VM_MAP_NULL);
 	vm_map_set_page_shift(test_map, FOURK_PAGE_SHIFT);
 	printf("VM_TEST_4K:%d map %p pmap %p page_size 0x%x\n", __LINE__, test_map, test_pmap, VM_MAP_PAGE_SIZE(test_map));
@@ -844,11 +847,13 @@ vm_test_map_copy_adjust_to_target(void)
 	vm_prot_t curprot, maxprot;
 
 	/* create a 4k map */
-	map4k = vm_map_create(PMAP_NULL, 0, (uint32_t)-1, TRUE);
+	map4k = vm_map_create_options(PMAP_NULL, 0, (uint32_t)-1,
+	    VM_MAP_CREATE_PAGEABLE);
 	vm_map_set_page_shift(map4k, 12);
 
 	/* create a 16k map */
-	map16k = vm_map_create(PMAP_NULL, 0, (uint32_t)-1, TRUE);
+	map16k = vm_map_create_options(PMAP_NULL, 0, (uint32_t)-1,
+	    VM_MAP_CREATE_PAGEABLE);
 	vm_map_set_page_shift(map16k, 14);
 
 	/* create 4 VM objects */
@@ -921,11 +926,11 @@ vm_test_map_copy_adjust_to_target(void)
 	vm_test_map_copy_adjust_to_target_one(copy16k, map4k);
 
 	/* assert 1 ref on 4k map */
-	assert(os_ref_get_count(&map4k->map_refcnt) == 1);
+	assert(os_ref_get_count_raw(&map4k->map_refcnt) == 1);
 	/* release 4k map */
 	vm_map_deallocate(map4k);
 	/* assert 1 ref on 16k map */
-	assert(os_ref_get_count(&map16k->map_refcnt) == 1);
+	assert(os_ref_get_count_raw(&map16k->map_refcnt) == 1);
 	/* release 16k map */
 	vm_map_deallocate(map16k);
 	/* deallocate copy maps */
@@ -969,10 +974,10 @@ vm_test_watch3_overmap(void)
 	user_pmap = pmap_create_options(ledger, 0, 0);
 	assert(user_pmap);
 	ledger_dereference(ledger);
-	user_map = vm_map_create(user_pmap,
+	user_map = vm_map_create_options(user_pmap,
 	    0x1000000ULL,
 	    0x2000000ULL,
-	    TRUE);
+	    VM_MAP_CREATE_PAGEABLE);
 	assert(user_map);
 	vm_map_set_page_shift(user_map, SIXTEENK_PAGE_SHIFT);
 	object = vm_object_allocate(FOURK_PAGE_SIZE);
@@ -1017,6 +1022,163 @@ vm_test_watch3_overmap(void)
 #endif /* __arm__ && !__arm64__ */
 }
 
+#if __arm64__ && !KASAN
+void vm_test_per_mapping_internal_accounting(void);
+void
+vm_test_per_mapping_internal_accounting(void)
+{
+	ledger_t ledger;
+	pmap_t user_pmap;
+	vm_map_t user_map;
+	kern_return_t kr;
+	ledger_amount_t balance;
+	mach_vm_address_t user_addr, user_remap;
+	vm_map_offset_t device_addr;
+	mach_vm_size_t user_size;
+	vm_prot_t cur_prot, max_prot;
+	upl_size_t upl_size;
+	upl_t upl;
+	unsigned int upl_count;
+	upl_control_flags_t upl_flags;
+	upl_page_info_t *pl;
+	ppnum_t ppnum;
+	vm_object_t device_object;
+	vm_map_offset_t map_start, map_end;
+	int pmap_flags;
+
+	pmap_flags = 0;
+	if (sizeof(vm_map_offset_t) == 4) {
+		map_start = 0x100000000ULL;
+		map_end = 0x200000000ULL;
+		pmap_flags |= PMAP_CREATE_64BIT;
+	} else {
+		map_start = 0x10000000;
+		map_end = 0x20000000;
+	}
+	/* create a user address space */
+	ledger = ledger_instantiate(task_ledger_template,
+	    LEDGER_CREATE_ACTIVE_ENTRIES);
+	assert(ledger);
+	user_pmap = pmap_create_options(ledger, 0, pmap_flags);
+	assert(user_pmap);
+	user_map = vm_map_create(user_pmap,
+	    map_start,
+	    map_end,
+	    TRUE);
+	assert(user_map);
+	/* check ledger */
+	kr = ledger_get_balance(ledger, task_ledgers.internal, &balance);
+	assertf(kr == KERN_SUCCESS, "kr=0x%x", kr);
+	assertf(balance == 0, "balance=0x%llx", balance);
+	/* allocate 1 page in that address space */
+	user_addr = 0;
+	user_size = PAGE_SIZE;
+	kr = mach_vm_allocate(user_map,
+	    &user_addr,
+	    user_size,
+	    VM_FLAGS_ANYWHERE);
+	assertf(kr == KERN_SUCCESS, "kr=0x%x", kr);
+	/* check ledger */
+	kr = ledger_get_balance(ledger, task_ledgers.internal, &balance);
+	assertf(kr == KERN_SUCCESS, "kr=0x%x", kr);
+	assertf(balance == 0, "balance=0x%llx", balance);
+	/* remap the original mapping */
+	user_remap = 0;
+	kr = mach_vm_remap(user_map,
+	    &user_remap,
+	    PAGE_SIZE,
+	    0,
+	    VM_FLAGS_ANYWHERE,
+	    user_map,
+	    user_addr,
+	    FALSE,                /* copy */
+	    &cur_prot,
+	    &max_prot,
+	    VM_INHERIT_DEFAULT);
+	assertf(kr == KERN_SUCCESS, "kr=0x%x", kr);
+	/* check ledger */
+	kr = ledger_get_balance(ledger, task_ledgers.internal, &balance);
+	assertf(kr == KERN_SUCCESS, "kr=0x%x", kr);
+	assertf(balance == 0, "balance=0x%llx", balance);
+	/* create a UPL from the original mapping */
+	upl_size = PAGE_SIZE;
+	upl = NULL;
+	upl_count = 0;
+	upl_flags = UPL_FILE_IO | UPL_NO_SYNC | UPL_SET_INTERNAL | UPL_SET_LITE | UPL_SET_IO_WIRE;
+	kr = vm_map_create_upl(user_map,
+	    (vm_map_offset_t)user_addr,
+	    &upl_size,
+	    &upl,
+	    NULL,
+	    &upl_count,
+	    &upl_flags,
+	    VM_KERN_MEMORY_DIAG);
+	assertf(kr == KERN_SUCCESS, "kr=0x%x", kr);
+	pl = UPL_GET_INTERNAL_PAGE_LIST(upl);
+	assert(upl_page_present(pl, 0));
+	ppnum = upl_phys_page(pl, 0);
+	/* check ledger */
+	kr = ledger_get_balance(ledger, task_ledgers.internal, &balance);
+	assertf(kr == KERN_SUCCESS, "kr=0x%x", kr);
+	assertf(balance == 0, "balance=0x%llx", balance);
+	device_object = vm_object_allocate(PAGE_SIZE);
+	assert(device_object);
+	device_object->private = TRUE;
+	device_object->phys_contiguous = TRUE;
+	kr = vm_object_populate_with_private(device_object, 0,
+	    ppnum, PAGE_SIZE);
+	assertf(kr == KERN_SUCCESS, "kr=0x%x", kr);
+
+	/* check ledger */
+	kr = ledger_get_balance(ledger, task_ledgers.internal, &balance);
+	assertf(kr == KERN_SUCCESS, "kr=0x%x", kr);
+	assertf(balance == 0, "balance=0x%llx", balance);
+	/* deallocate the original mapping */
+	kr = mach_vm_deallocate(user_map, user_addr, PAGE_SIZE);
+	assertf(kr == KERN_SUCCESS, "kr=0x%x", kr);
+	/* map the device_object in the kernel */
+	device_addr = 0;
+	vm_object_reference(device_object);
+	kr = vm_map_enter(kernel_map,
+	    &device_addr,
+	    PAGE_SIZE,
+	    0,
+	    VM_FLAGS_ANYWHERE,
+	    VM_MAP_KERNEL_FLAGS_NONE,
+	    0,
+	    device_object,
+	    0,
+	    FALSE,               /* copy */
+	    VM_PROT_DEFAULT,
+	    VM_PROT_DEFAULT,
+	    VM_INHERIT_NONE);
+	assertf(kr == KERN_SUCCESS, "kr=0x%x", kr);
+	/* access the device pager mapping */
+	*(char *)device_addr = 'x';
+	printf("%s:%d 0x%llx: 0x%x\n", __FUNCTION__, __LINE__, (uint64_t)device_addr, *(uint32_t *)device_addr);
+	/* check ledger */
+	kr = ledger_get_balance(ledger, task_ledgers.internal, &balance);
+	assertf(kr == KERN_SUCCESS, "kr=0x%x", kr);
+	assertf(balance == 0, "balance=0x%llx", balance);
+	/* fault in the remap addr */
+	kr = vm_fault(user_map, (vm_map_offset_t)user_remap, VM_PROT_READ,
+	    FALSE, 0, TRUE, NULL, 0);
+	assertf(kr == KERN_SUCCESS, "kr=0x%x", kr);
+	/* check ledger */
+	kr = ledger_get_balance(ledger, task_ledgers.internal, &balance);
+	assertf(kr == KERN_SUCCESS, "kr=0x%x", kr);
+	assertf(balance == PAGE_SIZE, "balance=0x%llx", balance);
+	/* deallocate remapping */
+	kr = mach_vm_deallocate(user_map, user_remap, PAGE_SIZE);
+	assertf(kr == KERN_SUCCESS, "kr=0x%x", kr);
+	/* check ledger */
+	kr = ledger_get_balance(ledger, task_ledgers.internal, &balance);
+	assertf(kr == KERN_SUCCESS, "kr=0x%x", kr);
+	assertf(balance == 0, "balance=0x%llx", balance);
+	/* TODO: cleanup... */
+	printf("%s:%d PASS\n", __FUNCTION__, __LINE__);
+}
+#endif /* __arm64__ && !KASAN */
 
 boolean_t vm_tests_in_progress = FALSE;
 
@@ -1037,6 +1199,9 @@ vm_tests(void)
 	vm_test_4k();
 #endif /* PMAP_CREATE_FORCE_4K_PAGES && MACH_ASSERT */
 	vm_test_watch3_overmap();
+#if __arm64__ && !KASAN
+	vm_test_per_mapping_internal_accounting();
+#endif /* __arm64__ && !KASAN */
 
 	vm_tests_in_progress = FALSE;
 

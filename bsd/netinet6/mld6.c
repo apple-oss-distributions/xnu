@@ -253,7 +253,7 @@ static unsigned int mld_mli_list_genid;
 	VERIFY(SLIST_EMPTY(_head));                                     \
 }
 
-static ZONE_DECLARE(mli_zone, "mld_ifinfo",
+static ZONE_DEFINE(mli_zone, "mld_ifinfo",
     sizeof(struct mld_ifinfo), ZC_ZFREE_CLEARMEM);
 
 SYSCTL_DECL(_net_inet6);        /* Note: Not in any common header. */

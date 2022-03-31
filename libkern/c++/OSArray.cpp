@@ -64,8 +64,7 @@ OSArray::initWithCapacity(unsigned int inCapacity)
 		return false;
 	}
 
-	array = kalloc_type_tag_bt(ArrayPtrType, inCapacity, Z_WAITOK_ZERO,
-	    VM_KERN_MEMORY_LIBKERN);
+	array = kallocp_type_container(ArrayPtrType, &inCapacity, Z_WAITOK_ZERO);
 	if (!array) {
 		return false;
 	}
@@ -208,7 +207,7 @@ unsigned int
 OSArray::ensureCapacity(unsigned int newCapacity)
 {
 	ArraySharedPtrType *newArray;
-	vm_size_t    finalCapacity;
+	unsigned int        finalCapacity;
 
 	if (newCapacity <= capacity) {
 		return capacity;
@@ -223,16 +222,8 @@ OSArray::ensureCapacity(unsigned int newCapacity)
 		return capacity;
 	}
 
-	newArray = kallocp_type_tag_bt(ArrayPtrType, &finalCapacity,
-	    Z_WAITOK, VM_KERN_MEMORY_LIBKERN);
+	newArray = kallocp_type_container(ArrayPtrType, &finalCapacity, Z_WAITOK);
 	if (newArray) {
-		// use all of the actual allocation size
-		if (finalCapacity > UINT_MAX) {
-			// failure, too large
-			kfree_type(ArrayPtrType, finalCapacity, newArray);
-			return capacity;
-		}
-
 		OSCONTAINER_ACCUMSIZE(sizeof(*array) * (finalCapacity - capacity));
 
 		os::uninitialized_move(array, array + capacity, newArray);
@@ -240,7 +231,7 @@ OSArray::ensureCapacity(unsigned int newCapacity)
 		os::destroy(array, array + capacity);
 		kfree_type(ArrayPtrType, capacity, array);
 		array = newArray;
-		capacity = (unsigned int) finalCapacity;
+		capacity = finalCapacity;
 	}
 
 	return capacity;

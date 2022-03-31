@@ -38,19 +38,87 @@
 
 #define BACKTRACE_USER (0)
 #define BACKTRACE_USER_RESUME (1)
+static int backtrace_user_sysctl SYSCTL_HANDLER_ARGS;
 
-static int backtrace_sysctl SYSCTL_HANDLER_ARGS;
+#define BACKTRACE_KERN_TEST_PACK_UNPACK (0)
+#define BACKTRACE_KERN_TEST_PACKED (1)
+static int backtrace_kernel_sysctl SYSCTL_HANDLER_ARGS;
 
 SYSCTL_NODE(_kern, OID_AUTO, backtrace, CTLFLAG_RW | CTLFLAG_LOCKED, 0,
     "backtrace");
 
 SYSCTL_PROC(_kern_backtrace, OID_AUTO, user,
     CTLFLAG_RW | CTLFLAG_LOCKED, (void *)BACKTRACE_USER,
-    sizeof(uint64_t), backtrace_sysctl, "O",
+    sizeof(uint64_t), backtrace_user_sysctl, "O",
+    "take user backtrace of current thread");
+
+SYSCTL_PROC(_kern_backtrace, OID_AUTO, kernel_tests,
+    CTLFLAG_RW | CTLFLAG_LOCKED, (void *)BACKTRACE_USER,
+    sizeof(uint64_t), backtrace_kernel_sysctl, "O",
     "take user backtrace of current thread");
 
 static int
-backtrace_sysctl SYSCTL_HANDLER_ARGS
+backtrace_kernel_sysctl SYSCTL_HANDLER_ARGS
+{
+	unsigned int scenario = (unsigned int)req->newlen;
+	uintptr_t *bt = NULL;
+	uint8_t *packed_bt = NULL;
+	uintptr_t *unpacked_bt = NULL;
+	unsigned int bt_len = 0;
+	size_t bt_size = 0;
+	errno_t error = 0;
+
+	bt_len = 24;
+	bt_size = sizeof(bt[0]) * bt_len;
+	bt = kalloc_data(bt_size, Z_WAITOK | Z_ZERO);
+	packed_bt = kalloc_data(bt_size, Z_WAITOK | Z_ZERO);
+	unpacked_bt = kalloc_data(bt_size, Z_WAITOK | Z_ZERO);
+	if (!bt || !packed_bt || !unpacked_bt) {
+		error = ENOBUFS;
+		goto out;
+	}
+	backtrace_info_t info = BTI_NONE;
+	unsigned int len = backtrace(bt, bt_len, NULL, &info);
+	backtrace_info_t packed_info = BTI_NONE;
+	size_t packed_size = 0;
+	if (scenario == BACKTRACE_KERN_TEST_PACK_UNPACK) {
+		packed_size = backtrace_pack(BTP_KERN_OFFSET_32, packed_bt, bt_size,
+		    bt, len);
+	} else {
+		packed_size = backtrace_packed(BTP_KERN_OFFSET_32, packed_bt, bt_size,
+		    NULL, &packed_info);
+	}
+	unsigned int unpacked_len = backtrace_unpack(BTP_KERN_OFFSET_32,
+	    unpacked_bt, bt_len, packed_bt, packed_size);
+	if (unpacked_len != len) {
+		printf("backtrace_tests: length %u != %u unpacked\n", len,
+		    unpacked_len);
+		error = ERANGE;
+		goto out;
+	}
+	for (unsigned int i = 0; i < len; i++) {
+		if (unpacked_bt[i] != bt[i]) {
+			printf("backtrace_tests: bad address %u: 0x%lx != 0x%lx unpacked",
+			    i, bt[i], unpacked_bt[i]);
+			error = EINVAL;
+		}
+	}
+
+out:
+	if (bt) {
+		kfree_data(bt, bt_size);
+	}
+	if (packed_bt) {
+		kfree_data(packed_bt, bt_size);
+	}
+	if (unpacked_bt) {
+		kfree_data(unpacked_bt, bt_size);
+	}
+	return error;
+}
+
+static int
+backtrace_user_sysctl SYSCTL_HANDLER_ARGS
 {
 #pragma unused(oidp, arg1, arg2)
 	unsigned int scenario = (unsigned int)req->newlen;

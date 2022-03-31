@@ -101,6 +101,9 @@ sdt_provider_t sdt_providers[] = {
 	{ "sysevent", "__sysevent____", &stab_attr, 0 },
 	{ "sdt", "__sdt____", &sdt_attr, 0 },
 	{ "boost", "__boost____", &stab_attr, 0},
+#if SKYWALK
+	{ "skywalk", "__skywalk____", &stab_attr, 0},
+#endif // SKYWALK
 	{ "route", "__route____", &stab_attr, 0 },
 #if KASAN
 	{ "kasan", "__kasan____", &stab_attr, 0 },

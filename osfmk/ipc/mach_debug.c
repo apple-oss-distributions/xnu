@@ -188,15 +188,14 @@ mach_port_space_info(
 	__unused ipc_info_tree_name_array_t     *treep,
 	__unused mach_msg_type_number_t         *treeCntp)
 {
+	const uint32_t BATCH_SIZE = 4 << 10;
 	ipc_info_name_t *table_info;
-	vm_offset_t table_addr;
+	vm_offset_t table_addr = 0;
 	vm_size_t table_size, table_size_needed;
 	ipc_entry_t table;
 	ipc_entry_num_t tsize;
-	mach_port_index_t index;
 	kern_return_t kr;
 	vm_map_copy_t copy;
-
 
 	if (space == IS_NULL) {
 		return KERN_INVALID_TASK;
@@ -212,8 +211,10 @@ mach_port_space_info(
 
 	table_size = 0;
 
+	is_read_lock(space);
+
+allocate_loop:
 	for (;;) {
-		is_read_lock(space);
 		if (!is_active(space)) {
 			is_read_unlock(space);
 			if (table_size != 0) {
@@ -230,33 +231,29 @@ mach_port_space_info(
 		    vm_map_round_page(tsize * sizeof(ipc_info_name_t),
 		    VM_MAP_PAGE_MASK(ipc_kernel_map));
 
-		if (table_size_needed == table_size) {
+		if (table_size_needed <= table_size) {
 			break;
 		}
 
 		is_read_unlock(space);
 
-		if (table_size != table_size_needed) {
-			if (table_size != 0) {
-				kmem_free(ipc_kernel_map, table_addr, table_size);
-			}
-			kr = kmem_alloc(ipc_kernel_map, &table_addr, table_size_needed, VM_KERN_MEMORY_IPC);
-			if (kr != KERN_SUCCESS) {
-				return KERN_RESOURCE_SHORTAGE;
-			}
-			table_size = table_size_needed;
+		if (table_size != 0) {
+			kmem_free(ipc_kernel_map, table_addr, table_size);
 		}
+		kr = kmem_alloc(ipc_kernel_map, &table_addr, table_size_needed,
+		    VM_KERN_MEMORY_IPC);
+		if (kr != KERN_SUCCESS) {
+			return KERN_RESOURCE_SHORTAGE;
+		}
+		table_size = table_size_needed;
+
+		is_read_lock(space);
 	}
 	/* space is read-locked and active; we have enough wired memory */
 
-	/* get the overall space info */
-	infop->iis_genno_mask = MACH_PORT_NGEN(MACH_PORT_DEAD);
-	infop->iis_table_size = tsize;
-	infop->iis_table_next = space->is_table_next->its_size;
-
 	/* walk the table for this space */
 	table_info = (ipc_info_name_array_t)table_addr;
-	for (index = 0; index < tsize; index++) {
+	for (mach_port_index_t index = 0; index < tsize; index++) {
 		ipc_info_name_t *iin = &table_info[index];
 		ipc_entry_t entry = &table[index];
 		ipc_entry_bits_t bits;
@@ -283,30 +280,53 @@ mach_port_space_info(
 		iin->iin_object = (dbg_ok) ? (natural_t)VM_KERNEL_ADDRPERM((uintptr_t)entry->ie_object) : 0;
 		iin->iin_next = entry->ie_next;
 		iin->iin_hash = entry->ie_index;
+
+		if (index + 1 < tsize && (index + 1) % BATCH_SIZE == 0) {
+			/*
+			 * Give the system some breathing room,
+			 * and check if anything changed,
+			 * if yes start over.
+			 */
+			is_read_unlock(space);
+			is_read_lock(space);
+			if (!is_active(space)) {
+				goto allocate_loop;
+			}
+			table = is_active_table(space);
+			if (tsize < table->ie_size) {
+				goto allocate_loop;
+			}
+			tsize = table->ie_size;
+		}
 	}
+
+	/* get the overall space info */
+	infop->iis_genno_mask = MACH_PORT_NGEN(MACH_PORT_DEAD);
+	infop->iis_table_size = tsize;
+	infop->iis_table_next = space->is_table_next->its_size;
 
 	is_read_unlock(space);
 
 	/* prepare the table out-of-line data for return */
 	if (table_size > 0) {
-		vm_size_t used_table_size;
+		vm_map_size_t used = tsize * sizeof(ipc_info_name_t);
+		vm_map_size_t keep = vm_map_round_page(used,
+		    VM_MAP_PAGE_MASK(ipc_kernel_map));
 
-		used_table_size = infop->iis_table_size * sizeof(ipc_info_name_t);
-		if (table_size > used_table_size) {
-			bzero((char *)&table_info[infop->iis_table_size],
-			    table_size - used_table_size);
+		if (used < table_size) {
+			kmem_free(ipc_kernel_map, table_addr + keep,
+			    table_size - keep);
+			table_size = keep;
+		}
+		if (table_size > used) {
+			bzero(&table_info[infop->iis_table_size],
+			    table_size - used);
 		}
 
-		kr = vm_map_unwire(
-			ipc_kernel_map,
-			vm_map_trunc_page(table_addr,
-			VM_MAP_PAGE_MASK(ipc_kernel_map)),
-			vm_map_round_page(table_addr + table_size,
-			VM_MAP_PAGE_MASK(ipc_kernel_map)),
-			FALSE);
+		kr = vm_map_unwire(ipc_kernel_map, table_addr,
+		    table_addr + table_size, FALSE);
 		assert(kr == KERN_SUCCESS);
-		kr = vm_map_copyin(ipc_kernel_map, (vm_map_address_t)table_addr,
-		    (vm_map_size_t)used_table_size, TRUE, &copy);
+		kr = vm_map_copyin(ipc_kernel_map, table_addr, used, TRUE, &copy);
 		assert(kr == KERN_SUCCESS);
 		*tablep = (ipc_info_name_t *)copy;
 		*tableCntp = infop->iis_table_size;

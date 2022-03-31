@@ -4,6 +4,7 @@
 #include <unistd.h>
 #include <stdio.h>
 #include <assert.h>
+#include <mach/task.h>
 
 /*
  * DO NOT run this test file by itself.
@@ -17,7 +18,7 @@
  *
  * The type of exception raised (if any) is checked on control_port_options side.
  */
-#define MAX_TEST_NUM 16
+#define MAX_TEST_NUM 17
 
 static int
 attempt_send_immovable_port(mach_port_name_t port, mach_msg_type_name_t disp)
@@ -173,7 +174,7 @@ immovable_test_move_send_as_remote_port(void)
 }
 
 static void
-immovable_test_move_send_task_self()
+immovable_test_move_send_task_self(void)
 {
 	kern_return_t kr;
 	printf("[Crasher]: Move send mach_task_self_\n");
@@ -183,7 +184,7 @@ immovable_test_move_send_task_self()
 }
 
 static void
-immovable_test_copy_send_task_self()
+immovable_test_copy_send_task_self(void)
 {
 	kern_return_t kr;
 	printf("[Crasher]: Copy send mach_task_self_\n");
@@ -193,7 +194,7 @@ immovable_test_copy_send_task_self()
 }
 
 static void
-immovable_test_move_send_thread_self()
+immovable_test_move_send_thread_self(void)
 {
 	kern_return_t kr;
 	printf("[Crasher]: Move send main thread's self port\n");
@@ -203,7 +204,7 @@ immovable_test_move_send_thread_self()
 }
 
 static void
-immovable_test_copy_send_thread_self()
+immovable_test_copy_send_thread_self(void)
 {
 	kern_return_t kr;
 	mach_port_t port;
@@ -216,7 +217,7 @@ immovable_test_copy_send_thread_self()
 }
 
 static void
-immovable_test_copy_send_task_read()
+immovable_test_copy_send_task_read(void)
 {
 	kern_return_t kr;
 	mach_port_t port;
@@ -230,7 +231,7 @@ immovable_test_copy_send_task_read()
 }
 
 static void
-immovable_test_copy_send_task_inspect()
+immovable_test_copy_send_task_inspect(void)
 {
 	kern_return_t kr;
 	mach_port_t port;
@@ -242,7 +243,7 @@ immovable_test_copy_send_task_inspect()
 }
 
 static void
-immovable_test_move_send_thread_inspect()
+immovable_test_move_send_thread_inspect(void)
 {
 	kern_return_t kr;
 	mach_port_t port;
@@ -258,7 +259,26 @@ immovable_test_move_send_thread_inspect()
 }
 
 static void
-immovable_test_copy_send_thread_read()
+immovable_test_move_send_raw_thread(void)
+{
+	kern_return_t kr;
+	mach_port_t port;
+
+	kr = thread_create(mach_task_self(), &port);
+	assert(kr == 0);
+	kr = mach_port_deallocate(mach_task_self(), port); /* not pinned, should not crash */
+
+	kr = thread_create(mach_task_self(), &port);
+	assert(kr == 0);
+	kr = attempt_send_immovable_port(port, MACH_MSG_TYPE_MOVE_SEND); /* immovable, should crash here */
+	printf("[Crasher immovable_test_move_send_raw_thread] attempt_send_immovable_port returned %s \n.", mach_error_string(kr));
+
+	kr = thread_terminate(port);
+	assert(kr == 0);
+}
+
+static void
+immovable_test_copy_send_thread_read(void)
 {
 	kern_return_t kr;
 	mach_port_t port;
@@ -295,6 +315,7 @@ main(int argc, char *argv[])
 		immovable_test_move_send_thread_inspect,
 		immovable_test_copy_send_thread_read,
 		immovable_test_move_send_as_remote_port,
+		immovable_test_move_send_raw_thread
 	};
 	printf("[Crasher]: My Pid: %d\n", getpid());
 

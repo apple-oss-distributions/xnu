@@ -187,8 +187,9 @@ IOTimerEventSource::timeoutAndRelease(void * self, void * c)
 			wl->openGate();
 		}
 	}
-
-	me->reserved->workLoop->release();
+	if (me->reserved->workLoop) {
+		me->reserved->workLoop->release();
+	}
 	me->release();
 }
 

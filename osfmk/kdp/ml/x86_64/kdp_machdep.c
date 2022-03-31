@@ -275,6 +275,8 @@ kdp_panic(
 	...
 	)
 {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wformat-nonliteral"
 	char kdp_fmt[256];
 	va_list args;
 
@@ -284,6 +286,7 @@ kdp_panic(
 	va_end(args);
 
 	__asm__ volatile ("hlt");
+#pragma clang diagnostic pop
 }
 
 int

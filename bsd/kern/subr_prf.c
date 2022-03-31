@@ -258,9 +258,12 @@ tprintf(tpr_t tpr, const char *fmt, ...)
 		putchar_args_destroy(&pca);
 	}
 
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wformat-nonliteral"
 	va_start(ap, fmt);
 	os_log_with_args(OS_LOG_DEFAULT, OS_LOG_TYPE_DEFAULT, fmt, ap, __builtin_return_address(0));
 	va_end(ap);
+#pragma clang diagnostic pop
 }
 
 /*

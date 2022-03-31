@@ -89,6 +89,8 @@ char *
 qos_to_str(qos_class_t qos)
 {
 	switch (qos) {
+	case QOS_CLASS_MAINTENANCE:
+		return "MT";
 	case QOS_CLASS_BACKGROUND:
 		return "BG";
 	case QOS_CLASS_UTILITY:
@@ -146,16 +148,18 @@ bool test_should_end = false;
 qos_class_t
 get_rand_qos_class(void)
 {
-	switch (rand() % 5) {
+	switch (rand() % 6) {
 	case 0:
-		return QOS_CLASS_BACKGROUND;
+		return QOS_CLASS_MAINTENANCE;
 	case 1:
-		return QOS_CLASS_UTILITY;
+		return QOS_CLASS_BACKGROUND;
 	case 2:
-		return QOS_CLASS_DEFAULT;
+		return QOS_CLASS_UTILITY;
 	case 3:
-		return QOS_CLASS_USER_INITIATED;
+		return QOS_CLASS_DEFAULT;
 	case 4:
+		return QOS_CLASS_USER_INITIATED;
+	case 5:
 		return QOS_CLASS_USER_INTERACTIVE;
 	}
 }

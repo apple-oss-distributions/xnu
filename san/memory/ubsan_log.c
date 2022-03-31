@@ -91,7 +91,7 @@ again:
 		if (e != i) {
 		        // we need to wait for another enqueuer
 		        os_atomic_rmw_loop_give_up({
-				hw_wait_while_equals((void **)&ubsan_log_head, (void *)e);
+				hw_wait_while_equals_long(&ubsan_log_head, e);
 				goto again;
 			});
 		}

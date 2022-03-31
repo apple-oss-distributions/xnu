@@ -85,7 +85,6 @@
 
 #define f_flag fp_glob->fg_flag
 #define f_ops fp_glob->fg_ops
-#define f_data fp_glob->fg_data
 
 #define PSEMNAMLEN      31      /* maximum name segment length we bother with */
 
@@ -604,7 +603,7 @@ sem_open(proc_t p, struct sem_open_args *uap, user_addr_t *retval)
 	proc_fdlock(p);
 	fp->f_flag = fmode & FMASK;
 	fp->f_ops = &psemops;
-	fp->f_data = (caddr_t)new_pnode;
+	fp_set_data(fp, new_pnode);
 	procfdtbl_releasefd(p, indx, NULL);
 	fp_drop(p, indx, fp, 1);
 	proc_fdunlock(p);
@@ -820,7 +819,7 @@ sem_wait_nocancel(proc_t p, struct sem_wait_nocancel_args *uap, __unused int32_t
 	if (error) {
 		return error;
 	}
-	pnode = (struct psemnode *)fp->f_data;
+	pnode = (struct psemnode *)fp_get_data(fp);
 
 	PSEM_SUBSYS_LOCK();
 	if ((pinfo = pnode->pinfo) == PSEMINFO_NULL) {
@@ -879,7 +878,7 @@ sem_trywait(proc_t p, struct sem_trywait_args *uap, __unused int32_t *retval)
 	if (error) {
 		return error;
 	}
-	pnode = (struct psemnode *)fp->f_data;
+	pnode = (struct psemnode *)fp_get_data(fp);
 
 	PSEM_SUBSYS_LOCK();
 	if ((pinfo = pnode->pinfo) == PSEMINFO_NULL) {
@@ -942,7 +941,7 @@ sem_post(proc_t p, struct sem_post_args *uap, __unused int32_t *retval)
 	if (error) {
 		return error;
 	}
-	pnode = (struct psemnode *)fp->f_data;
+	pnode = (struct psemnode *)fp_get_data(fp);
 
 	PSEM_SUBSYS_LOCK();
 	if ((pinfo = pnode->pinfo) == PSEMINFO_NULL) {
@@ -1029,7 +1028,7 @@ psem_closefile(struct fileglob *fg, __unused vfs_context_t ctx)
 	 * Not locked as psem_close is called only from here and is locked
 	 * properly
 	 */
-	return psem_close((struct psemnode *)fg->fg_data);
+	return psem_close((struct psemnode *)fg_get_data(fg));
 }
 
 static int
@@ -1096,13 +1095,14 @@ psem_label_associate(struct fileproc *fp, struct vnode *vp, vfs_context_t ctx)
 	struct pseminfo *psem;
 
 	PSEM_SUBSYS_LOCK();
-	pnode = (struct psemnode *)fp->fp_glob->fg_data;
+	pnode = (struct psemnode *)fp_get_data(fp);
 	if (pnode != NULL) {
 		psem = pnode->pinfo;
 		if (psem != NULL) {
 			mac_posixsem_vnode_label_associate(
-				vfs_context_ucred(ctx), psem, psem->psem_label,
-				vp, vp->v_label);
+				vfs_context_ucred(ctx), psem,
+				mac_posixsem_label(psem),
+				vp, mac_vnode_label(vp));
 		}
 	}
 	PSEM_SUBSYS_UNLOCK();

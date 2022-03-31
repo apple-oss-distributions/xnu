@@ -114,6 +114,17 @@ static uint32_t                         uio_t_count = 0;
 	  (segflg) == UIO_PHYS_USERSPACE64 || \
 	  (segflg) == UIO_PHYS_USERSPACE32 )
 
+#if __has_feature(ptrauth_calls)
+__attribute__((always_inline))
+static u_int64_t
+blend_iov_components(const struct kern_iovec *kiovp)
+{
+	return ptrauth_blend_discriminator(
+		(void *)((u_int64_t)&kiovp->iov_base ^ kiovp->iov_len),
+		ptrauth_string_discriminator("kiovp"));
+}
+#endif
+
 __attribute__((always_inline))
 static u_int64_t
 kiovp_get_base(const struct kern_iovec *kiovp)
@@ -124,8 +135,7 @@ kiovp_get_base(const struct kern_iovec *kiovp)
 	} else {
 		return (u_int64_t)ptrauth_auth_data((void *)kiovp->iov_base,
 		           ptrauth_key_process_independent_data,
-		           ptrauth_blend_discriminator(&kiovp->iov_base,
-		           kiovp->iov_len));
+		           blend_iov_components(kiovp));
 	}
 #else
 	return kiovp->iov_base;
@@ -142,8 +152,7 @@ kiovp_set_base(struct kern_iovec *kiovp, u_int64_t addr)
 	} else {
 		kiovp->iov_base = (u_int64_t)ptrauth_sign_unauthenticated(
 			(void *)addr, ptrauth_key_process_independent_data,
-			ptrauth_blend_discriminator(&kiovp->iov_base,
-			kiovp->iov_len));
+			blend_iov_components(kiovp));
 	}
 #else
 	kiovp->iov_base = addr;
@@ -418,8 +427,7 @@ hashinit(int elements, int type __unused, u_long *hashmask)
 	}
 
 	hashsize = 1UL << (fls(elements) - 1);
-	hashtbl = kheap_alloc(KHEAP_DEFAULT, hashsize * sizeof(*hashtbl),
-	    Z_WAITOK | Z_ZERO);
+	hashtbl = kalloc_type(struct generic_hash_head, hashsize, Z_WAITOK | Z_ZERO);
 	if (hashtbl != NULL) {
 		*hashmask = hashsize - 1;
 	}
@@ -429,9 +437,8 @@ hashinit(int elements, int type __unused, u_long *hashmask)
 void
 hashdestroy(void *hash, int type __unused, u_long hashmask)
 {
-	struct generic_hash_head *hashtbl = hash;
 	assert(powerof2(hashmask + 1));
-	kheap_free(KHEAP_DEFAULT, hashtbl, (hashmask + 1) * sizeof(*hashtbl));
+	kfree_type(struct generic_hash_head, hashmask + 1, hash);
 }
 
 /*

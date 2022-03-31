@@ -92,8 +92,6 @@ extern struct rtstat rtstat;
 extern struct domain routedomain_s;
 static struct domain *routedomain = NULL;
 
-MALLOC_DEFINE(M_RTABLE, "routetbl", "routing tables");
-
 static struct sockaddr route_dst = { .sa_len = 2, .sa_family = PF_ROUTE, .sa_data = { 0, } };
 static struct sockaddr route_src = { .sa_len = 2, .sa_family = PF_ROUTE, .sa_data = { 0, } };
 static struct sockaddr sa_zero   = { .sa_len = sizeof(sa_zero), .sa_family = AF_INET, .sa_data = { 0, } };
@@ -184,17 +182,13 @@ rts_attach(struct socket *so, int proto, struct proc *p)
 
 	VERIFY(so->so_pcb == NULL);
 
-	MALLOC(rp, struct rawcb *, sizeof(*rp), M_PCB, M_WAITOK | M_ZERO);
-	if (rp == NULL) {
-		return ENOBUFS;
-	}
-
+	rp = kalloc_type(struct rawcb, Z_WAITOK_ZERO_NOFAIL);
 	so->so_pcb = (caddr_t)rp;
 	/* don't use raw_usrreqs.pru_attach, it checks for SS_PRIV */
 	error = raw_attach(so, proto);
 	rp = sotorawcb(so);
 	if (error) {
-		FREE(rp, M_PCB);
+		kfree_type(struct rawcb, rp);
 		so->so_pcb = NULL;
 		so->so_flags |= SOF_PCBCLEARING;
 		return error;
@@ -308,6 +302,7 @@ static int
 route_output(struct mbuf *m, struct socket *so)
 {
 	struct rt_msghdr *rtm = NULL;
+	size_t rtm_len = 0;
 	struct rtentry *rt = NULL;
 	struct rtentry *saved_nrt = NULL;
 	struct radix_node_head *rnh;
@@ -340,11 +335,12 @@ route_output(struct mbuf *m, struct socket *so)
 		info.rti_info[RTAX_DST] = NULL;
 		senderr(EINVAL);
 	}
-	R_Malloc(rtm, struct rt_msghdr *, len);
+	rtm = kalloc_data(len, Z_WAITOK);
 	if (rtm == NULL) {
 		info.rti_info[RTAX_DST] = NULL;
 		senderr(ENOBUFS);
 	}
+	rtm_len = (size_t)len;
 	m_copydata(m, 0, len, (caddr_t)rtm);
 	if (rtm->rtm_version != RTM_VERSION) {
 		info.rti_info[RTAX_DST] = NULL;
@@ -623,7 +619,7 @@ report:
 				IFA_UNLOCK(ifa2);
 			}
 			struct rt_msghdr *out_rtm;
-			R_Malloc(out_rtm, struct rt_msghdr *, len);
+			out_rtm = kalloc_data(len, Z_WAITOK);
 			if (out_rtm == NULL) {
 				RT_UNLOCK(rt);
 				if (ifa2 != NULL) {
@@ -640,8 +636,9 @@ report:
 			if (ifa2 != NULL) {
 				IFA_UNLOCK(ifa2);
 			}
-			R_Free(rtm);
+			kfree_data(rtm, rtm_len);
 			rtm = out_rtm;
+			rtm_len = len;
 			rtm->rtm_flags = rt->rt_flags;
 			rt_getmetrics(rt, &rtm->rtm_rmx);
 			rtm->rtm_addrs = info.rti_addrs;
@@ -744,9 +741,7 @@ flush:
 	 */
 	if (!(so->so_options & SO_USELOOPBACK)) {
 		if (route_cb.any_count <= 1) {
-			if (rtm != NULL) {
-				R_Free(rtm);
-			}
+			kfree_data(rtm, rtm_len);
 			m_freem(m);
 			return error;
 		}
@@ -761,7 +756,7 @@ flush:
 		} else if (m->m_pkthdr.len > rtm->rtm_msglen) {
 			m_adj(m, rtm->rtm_msglen - m->m_pkthdr.len);
 		}
-		R_Free(rtm);
+		kfree_data(rtm, rtm_len);
 	}
 	if (sendonlytoself && m != NULL) {
 		error = 0;
@@ -1741,7 +1736,7 @@ done:
  * all locks to allocate a temporary buffer that gets filled
  * in the second pass.
  *
- * Note that we are verifying the assumption that _MALLOC returns a buffer
+ * Note that we are verifying the assumption that kalloc() returns a buffer
  * that is at least 32 bits aligned and that the messages and addresses are
  * 32 bits aligned.
  */

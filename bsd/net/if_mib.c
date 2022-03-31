@@ -185,17 +185,8 @@ make_ifmibdata(struct ifnet *ifp, int *name, struct sysctl_req *req)
 	case IFDATA_SUPPLEMENTAL: {
 		struct ifmibdata_supplemental *ifmd_supp;
 
-		if ((ifmd_supp = kalloc_type(struct ifmibdata_supplemental,
-		    Z_WAITOK | Z_ZERO)) == NULL) {
-			error = ENOMEM;
-#if DEVELOPMENT || DEBUG
-			os_log(OS_LOG_DEFAULT, "%s: IFDATA_SUPPLEMENTAL _MALLOC(%lu) failed with ENOMEM",
-			    __func__, sizeof(*ifmd_supp));
-#endif /* DEVELOPMENT || DEBUG */
-			kfree_type(struct ifmibdata_supplemental, ifmd_supp);
-			break;
-		}
-
+		ifmd_supp = kalloc_type(struct ifmibdata_supplemental,
+		    Z_WAITOK | Z_ZERO | Z_NOFAIL);
 		if_copy_traffic_class(ifp, &ifmd_supp->ifmd_traffic_class);
 		if_copy_data_extended(ifp, &ifmd_supp->ifmd_data_extended);
 		if_copy_packet_stats(ifp, &ifmd_supp->ifmd_packet_stats);

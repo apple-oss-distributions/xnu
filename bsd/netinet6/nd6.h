@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2020 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2022 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -72,6 +72,7 @@
 #include <sys/tree.h>
 #include <sys/eventhandler.h>
 #include <netinet6/nd6_var.h>
+#include <sys/sdt.h>
 
 struct  llinfo_nd6 {
 	/*
@@ -118,18 +119,27 @@ struct  llinfo_nd6 {
 #ifdef BSD_KERNEL_PRIVATE
 
 #define ND6_CACHE_STATE_TRANSITION(ln, nstate) do {\
+	DTRACE_IP2(nd6_state_transition, struct llinfo_nd6 *, (ln), int, (nstate));\
 	if (nd6_debug >= 1) {\
-	        struct rtentry *ln_rt = ln != NULL ? (ln)->ln_rt : NULL; \
+	        struct rtentry *ln_rt = (ln) != NULL ? (ln)->ln_rt : NULL; \
 	        nd6log(info,\
 	            "[%s:%d]: NDP cache entry changed from %s -> %s for address %s.\n",\
 	            __func__,\
 	            __LINE__,\
 	            ndcache_state2str((ln)->ln_state),\
-	            ndcache_state2str(nstate),\
+	            ndcache_state2str((nstate)),\
 	            ln_rt != NULL ? ip6_sprintf(&SIN6(rt_key(ln_rt))->sin6_addr) : "N/A");\
 	}\
-	if (ln != NULL)\
-	        (ln)->ln_state = nstate;\
+	if ((ln) != NULL) {\
+	        if ((ln)->ln_rt != NULL && (ln)->ln_rt->rt_ifp != NULL &&\
+	            ((ln)->ln_rt->rt_ifp->if_eflags & IFEF_IPV6_ND6ALT) &&\
+	            ((ln)->ln_state == ND6_LLINFO_REACHABLE)) {\
+	                VERIFY((nstate) != ND6_LLINFO_STALE &&\
+	                    (nstate) != ND6_LLINFO_DELAY &&\
+	                    (nstate) != ND6_LLINFO_PROBE);\
+	        }\
+	        (ln)->ln_state = (nstate);\
+	}\
 } while(0)
 
 #define ND6_IS_LLINFO_PROBREACH(n) ((n)->ln_state > ND6_LLINFO_INCOMPLETE)
@@ -639,6 +649,7 @@ struct nd_prefix {
 	LIST_HEAD(pr_rtrhead, nd_pfxrouter) ndpr_advrtrs;
 	u_char          ndpr_plen;
 	int             ndpr_addrcnt;   /* reference counter from addresses */
+	int             ndpr_manual_addrcnt; /* reference counter non-autoconf addresses */
 	u_int32_t       ndpr_allmulti_cnt;      /* total all-multi reqs */
 	u_int32_t       ndpr_prproxy_sols_cnt;  /* total # of proxied NS */
 	struct prproxy_sols_tree ndpr_prproxy_sols; /* tree of proxied NS */
@@ -902,7 +913,7 @@ extern int nd6_resolve(struct ifnet *, struct rtentry *,
 extern void nd6_rtrequest(int, struct rtentry *, struct sockaddr *);
 extern int nd6_ioctl(u_long, caddr_t, struct ifnet *);
 extern void nd6_cache_lladdr(struct ifnet *, struct in6_addr *,
-    char *, int, int, int);
+    char *, int, int, int, int *);
 extern int nd6_output_list(struct ifnet *, struct ifnet *, struct mbuf *,
     struct sockaddr_in6 *, struct rtentry *, struct flowadv *);
 extern int nd6_output(struct ifnet *, struct ifnet *, struct mbuf *,
@@ -936,7 +947,7 @@ extern void nd6_alt_node_addr_decompose(struct ifnet *, struct sockaddr *,
     struct sockaddr_dl *, struct sockaddr_in6 *);
 extern int nd6_alt_node_present(struct ifnet *, struct sockaddr_in6 *,
     struct sockaddr_dl *, int32_t, int, int);
-extern void nd6_alt_node_absent(struct ifnet *, struct sockaddr_in6 *, struct sockaddr_dl *);
+extern int nd6_alt_node_absent(struct ifnet *, struct sockaddr_in6 *, struct sockaddr_dl *);
 
 /* nd6_rtr.c */
 extern struct in6_ifaddr *in6_pfx_newpersistaddr(struct nd_prefix *, int,

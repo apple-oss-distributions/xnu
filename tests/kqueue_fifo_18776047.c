@@ -13,7 +13,7 @@
 
 #include <TargetConditionals.h>
 
-T_GLOBAL_META(T_META_RUN_CONCURRENTLY(true));
+T_GLOBAL_META(T_META_RUN_CONCURRENTLY(false));  // rdar://79464597
 
 #define TMP_FILE_PATH "/tmp/test_kqueue_fifo_18776047"
 

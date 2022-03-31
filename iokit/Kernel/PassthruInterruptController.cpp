@@ -67,7 +67,7 @@ PassthruInterruptController::setCPUInterruptProperties(IOService *service)
 
 	long         zero = 0;
 	OSArray *specifier = OSArray::withCapacity(1);
-	OSData *tmpData = OSData::withBytes(&zero, sizeof(zero));
+	OSData *tmpData = OSData::withValue(zero);
 	specifier->setObject(tmpData);
 	tmpData->release();
 	service->setProperty(gIOInterruptSpecifiersKey, specifier);

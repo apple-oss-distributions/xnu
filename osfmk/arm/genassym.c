@@ -123,13 +123,12 @@ main(
 	DECLARE("TH_CONTINUATION", offsetof(struct thread, continuation));
 	DECLARE("TH_KERNEL_STACK", offsetof(struct thread, kernel_stack));
 	DECLARE("TH_KSTACKPTR", offsetof(struct thread, machine.kstackptr));
-	DECLARE("TH_UTHREAD", offsetof(struct thread, uthread));
 
 	DECLARE("TASK_MACH_EXC_PORT",
 	    offsetof(struct task, exc_actions[EXC_MACH_SYSCALL].port));
 
 	/* These fields are being added on demand */
-	DECLARE("ACT_TASK", offsetof(struct thread, task));
+	DECLARE("ACT_TASK", offsetof(struct thread, t_task));
 	DECLARE("ACT_PCBDATA", offsetof(struct thread, machine.PcbData));
 #if __ARM_VFP__
 	DECLARE("ACT_UVFP", offsetof(struct thread, machine.PcbData.VFPdata));

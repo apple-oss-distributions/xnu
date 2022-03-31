@@ -1,0 +1,71 @@
+.\" Copyright (c) 2021, Apple Inc.  All rights reserved.
+.
+.Dd June 30, 2021
+.Dt BACKTRACE_PACK 9
+.Os Darwin
+.
+.Sh NAME
+.Nm backtrace_pack ,
+.Nm backtrace_unpack
+.Nd convert a backtrace to and from compact formats
+.
+.Sh SYNOPSIS
+.In kern/backtrace.h
+.Ft size_t
+.Fo backtrace_pack
+.Fa "backtrace_pack_t packing"
+.Fa "uint8_t *dst"
+.Fa "size_t dst_size"
+.Fa "uintptr_t *src"
+.Fa "unsigned int src_len"
+.Fc
+.
+.Ft unsigned int
+.Fo backtrace_unpack
+.Fa "backtrace_pack_t packing"
+.Fa "uintptr_t *dst"
+.Fa "unsigned int dst_len"
+.Fa "uint8_t *src"
+.Fa "size_t src_size"
+.Fc
+.
+.Sh DESCRIPTION
+The
+.Nm backtrace_pack
+and
+.Nm backtrace_unpack
+functions convert to and from a compact representation of a backtrace.
+.Sh RETURN VALUES
+The
+.Fn backtrace_pack
+function returns the number of bytes written to the destination buffer.
+The
+.Fn backtrace_unpack
+function returns the number of addresses written to the destination buffer.
+.Sh FORMATS
+.Bl -tag -width indent
+.It Sy BTP_NONE
+Just copy the addresses unpacked to the destination buffer.
+.It Sy BTP_KERN_OFFSET_32
+Subtract the kernel base address from each address so they fit in 4 bytes.
+.El
+.
+.Sh EXAMPLE
+.Bd -literal
+uintptr_t bt[8] = { 0 };
+enum backtrace_info bti = BTI_NONE;
+unsigned int len = backtrace(bt, sizeof(bt) / sizeof(bt[0]), NULL, &bti);
+uint8_t bt_packed[1024] = { 0 };
+size_t packed_size = backtrace_pack(BTP_KERN_OFFSET_32, bt_packed,
+		sizeof(bt_packed), bt, len);
+uintptr_t bt_unpacked[8] = { 0 };
+unsigned int unpacked_len = backtrace_unpack(BTP_KERN_OFFSET_32, bt_unpacked,
+		sizeof(bt_unpacked) / sizeof(bt_unpacked[0]), bt_packed, packed_size);
+assert(len == unpacked_len);
+for (unsigned int i = 0; i < len; i++) {
+	assert(bt[i] == unpacked_bt[i]);
+}
+.Ed
+.
+.Sh SEE ALSO
+.Xr backtrace 9

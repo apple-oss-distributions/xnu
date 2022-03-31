@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2022 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -106,6 +106,8 @@
 
 #include <netinet/ip6.h>       /* for ip6_input, ip6_output prototypes */
 #include <netinet6/ip6_var.h>
+
+#include <stdbool.h>
 
 /*
  * We keep a private variable for the simulation time, but we could
@@ -553,14 +555,11 @@ heap_init(struct dn_heap *h, int new_size)
 		return 0;
 	}
 	new_size = (new_size + HEAP_INCREMENT) & ~HEAP_INCREMENT;
-	p = _MALLOC(new_size * sizeof(*p), M_DUMMYNET, M_DONTWAIT );
+	p = krealloc_type(struct dn_heap_entry, h->size, new_size,
+	    h->p, Z_NOWAIT | Z_ZERO);
 	if (p == NULL) {
 		printf("dummynet: heap_init, resize %d failed\n", new_size );
 		return 1; /* error */
-	}
-	if (h->size > 0) {
-		bcopy(h->p, p, h->size * sizeof(*p));
-		FREE(h->p, M_DUMMYNET);
 	}
 	h->p = p;
 	h->size = new_size;
@@ -687,9 +686,7 @@ heapify(struct dn_heap *h)
 static void
 heap_free(struct dn_heap *h)
 {
-	if (h->size > 0) {
-		FREE(h->p, M_DUMMYNET);
-	}
+	kfree_type(struct dn_heap_entry, h->size, h->p);
 	bzero(h, sizeof(*h));
 }
 
@@ -1825,9 +1822,7 @@ purge_flow_set(struct dn_flow_set *fs, int all)
 		if (fs->w_q_lookup) {
 			kfree_data(fs->w_q_lookup, fs->lookup_depth * sizeof(int));
 		}
-		if (fs->rq) {
-			FREE(fs->rq, M_DUMMYNET);
-		}
+		kfree_type(struct dn_flow_queue *, fs->rq_size + 1, fs->rq);
 		/* if this fs is not part of a pipe, free it */
 		if (fs->pipe && fs != &(fs->pipe->fs)) {
 			kfree_type(struct dn_flow_set, fs);
@@ -1924,7 +1919,6 @@ config_red(struct dn_flow_set *p, struct dn_flow_set * x)
 	}
 	if (red_lookup_depth == 0) {
 		printf("\ndummynet: net.inet.ip.dummynet.red_lookup_depth must be > 0\n");
-		kfree_type(struct dn_flow_set, x);
 		return EINVAL;
 	}
 	x->lookup_depth = red_lookup_depth;
@@ -1932,7 +1926,6 @@ config_red(struct dn_flow_set *p, struct dn_flow_set * x)
 	    Z_NOWAIT);
 	if (x->w_q_lookup == NULL) {
 		printf("dummynet: sorry, cannot allocate red lookup table\n");
-		kfree_type(struct dn_flow_set, x);
 		return ENOSPC;
 	}
 
@@ -1972,8 +1965,8 @@ alloc_hash(struct dn_flow_set *x, struct dn_flow_set *pfs)
 	} else {            /* one is enough for null mask */
 		x->rq_size = 1;
 	}
-	x->rq = _MALLOC((1 + x->rq_size) * sizeof(struct dn_flow_queue *),
-	    M_DUMMYNET, M_DONTWAIT | M_ZERO);
+	x->rq = kalloc_type(struct dn_flow_queue *, x->rq_size + 1,
+	    Z_NOWAIT | Z_ZERO);
 	if (x->rq == NULL) {
 		printf("dummynet: sorry, cannot allocate queue\n");
 		return ENOSPC;
@@ -1982,7 +1975,7 @@ alloc_hash(struct dn_flow_set *x, struct dn_flow_set *pfs)
 	return 0;
 }
 
-static void
+static int
 set_fs_parms(struct dn_flow_set *x, struct dn_flow_set *src)
 {
 	x->flags_fs = src->flags_fs;
@@ -2003,8 +1996,9 @@ set_fs_parms(struct dn_flow_set *x, struct dn_flow_set *src)
 	}
 	/* configuring RED */
 	if (x->flags_fs & DN_IS_RED) {
-		config_red(src, x); /* XXX should check errors */
+		return config_red(src, x); /* XXX should check errors */
 	}
+	return 0;
 }
 
 /*
@@ -2016,6 +2010,7 @@ config_pipe(struct dn_pipe *p)
 	int i, r;
 	struct dn_flow_set *pfs = &(p->fs);
 	struct dn_flow_queue *q;
+	bool is_new = false;
 
 	/*
 	 * The config program passes parameters as follows:
@@ -2040,6 +2035,7 @@ config_pipe(struct dn_pipe *p)
 		b = locate_pipe(p->pipe_nr);
 
 		if (b == NULL || b->pipe_nr != p->pipe_nr) { /* new pipe */
+			is_new = true;
 			x = kalloc_type(struct dn_pipe, Z_NOWAIT | Z_ZERO);
 			if (x == NULL) {
 				lck_mtx_unlock(&dn_mutex);
@@ -2067,14 +2063,22 @@ config_pipe(struct dn_pipe *p)
 		bcopy(p->if_name, x->if_name, sizeof(p->if_name));
 		x->ifp = NULL; /* reset interface ptr */
 		x->delay = p->delay;
-		set_fs_parms(&(x->fs), pfs);
-
+		r = set_fs_parms(&(x->fs), pfs);
+		if (r != 0) {
+			lck_mtx_unlock(&dn_mutex);
+			if (is_new) { /* a new pipe */
+				kfree_type(struct dn_pipe, x);
+			}
+			return r;
+		}
 
 		if (x->fs.rq == NULL) { /* a new pipe */
 			r = alloc_hash(&(x->fs), pfs);
 			if (r) {
 				lck_mtx_unlock(&dn_mutex);
-				kfree_type(struct dn_pipe, x);
+				if (is_new) {
+					kfree_type(struct dn_pipe, x);
+				}
 				return r;
 			}
 			SLIST_INSERT_HEAD(&pipehash[HASH(x->pipe_nr)],
@@ -2097,6 +2101,7 @@ config_pipe(struct dn_pipe *p)
 		b = locate_flowset(pfs->fs_nr);
 
 		if (b == NULL || b->fs_nr != pfs->fs_nr) { /* new  */
+			is_new = true;
 			if (pfs->parent_nr == 0) { /* need link to a pipe */
 				lck_mtx_unlock(&dn_mutex);
 				return EINVAL;
@@ -2123,7 +2128,15 @@ config_pipe(struct dn_pipe *p)
 			}
 			x = b;
 		}
-		set_fs_parms(x, pfs);
+		r = set_fs_parms(x, pfs);
+		if (r != 0) {
+			lck_mtx_unlock(&dn_mutex);
+			printf("dummynet: no memory for new flow_set\n");
+			if (is_new) {
+				kfree_type(struct dn_flow_set, x);
+			}
+			return r;
+		}
 
 		if (x->rq == NULL) { /* a new flow_set */
 			r = alloc_hash(x, pfs);
@@ -2574,28 +2587,25 @@ struct dn_event_nwk_wq_entry {
 };
 
 static void
-dummynet_event_callback(void *arg)
+dummynet_event_callback(struct nwk_wq_entry *nwk_item)
 {
-	struct dummynet_event *p_dn_ev = (struct dummynet_event *)arg;
+	struct dn_event_nwk_wq_entry *p_ev;
 
-	EVENTHANDLER_INVOKE(&dummynet_evhdlr_ctxt, dummynet_event, p_dn_ev);
-	return;
+	p_ev = __container_of(nwk_item, struct dn_event_nwk_wq_entry, nwk_wqe);
+
+	EVENTHANDLER_INVOKE(&dummynet_evhdlr_ctxt, dummynet_event, &p_ev->dn_ev_arg);
+
+	kfree_type(struct dn_event_nwk_wq_entry, p_ev);
 }
 
 void
 dummynet_event_enqueue_nwk_wq_entry(struct dummynet_event *p_dn_event)
 {
-	struct dn_event_nwk_wq_entry *p_dn_ev = NULL;
+	struct dn_event_nwk_wq_entry *p_ev = NULL;
 
-	MALLOC(p_dn_ev, struct dn_event_nwk_wq_entry *,
-	    sizeof(struct dn_event_nwk_wq_entry),
-	    M_NWKWQ, M_WAITOK | M_ZERO);
-
-	p_dn_ev->nwk_wqe.func = dummynet_event_callback;
-	p_dn_ev->nwk_wqe.is_arg_managed = TRUE;
-	p_dn_ev->nwk_wqe.arg = &p_dn_ev->dn_ev_arg;
-
-	bcopy(p_dn_event, &(p_dn_ev->dn_ev_arg),
-	    sizeof(struct dummynet_event));
-	nwk_wq_enqueue((struct nwk_wq_entry*)p_dn_ev);
+	p_ev = kalloc_type(struct dn_event_nwk_wq_entry,
+	    Z_WAITOK | Z_ZERO | Z_NOFAIL);
+	p_ev->nwk_wqe.func = dummynet_event_callback;
+	p_ev->dn_ev_arg = *p_dn_event;
+	nwk_wq_enqueue(&p_ev->nwk_wqe);
 }

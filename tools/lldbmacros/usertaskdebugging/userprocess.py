@@ -1,5 +1,10 @@
+from __future__ import absolute_import, division
+
+from builtins import hex
+
+from builtins import object
 import logging
-import target
+from . import target
 import struct
 
 from xnu import *
@@ -115,7 +120,7 @@ class UserProcess(target.Process):
 
         super(UserProcess, self).__init__(self.cputype, self.cpusubtype, ptrsize)
         dbg_message = "process:%s is64bit:%d ptrsize:%d cputype:0x%x cpusubtype:0x%x" % (hex(self.proc), int(dataregisters64bit), ptrsize, self.cputype, self.cpusubtype)
-        self.proc_platform = int(self.proc.p_platform)
+        self.proc_platform = int(GetProcPlatform(self.proc))
         if self.proc_platform == xnudefines.P_PLATFORM_MACOS:
             self.hinfo['ostype'] = 'macosx'
         elif self.proc_platform == xnudefines.P_PLATFORM_WATCHOS:
@@ -148,7 +153,7 @@ class UserProcess(target.Process):
             logging.warning("regnum %d is not defined for thread_id 0x%x" % (reg_num, th_id))
             return ''
         value = self.threads[th_id].getRegisterData(reg_num)
-        return self.encodeRegisterData(value, bytesize=self.registerset[reg_num]['bitsize']/8)
+        return self.encodeRegisterData(value, bytesize=(self.registerset[reg_num]['bitsize'] // 8))
 
     def getRegisterCombinedDataForThread(self, th_id):
         if th_id not in self.threads:
@@ -161,7 +166,7 @@ class UserProcess(target.Process):
             name = rinfo['name']
             format = "%02x:%s;"
             value = cur_thread.getRegisterValueByName(name)
-            value_endian_correct_str = self.encodeRegisterData(value, bytesize=(rinfo['bitsize']/8))
+            value_endian_correct_str = self.encodeRegisterData(value, bytesize=(rinfo['bitsize'] // 8))
             retval += format % (pos, value_endian_correct_str)
             pos += 1
         return retval
@@ -181,7 +186,7 @@ class UserProcess(target.Process):
 
         rinfo = self.registerset[regnum]
         retval = ''
-        for i in rinfo.keys():
+        for i in list(rinfo.keys()):
             i_val = str(rinfo[i])
             if i == 'set':
                 i_val = 'General Purpose Registers'
@@ -204,7 +209,7 @@ class UserProcess(target.Process):
         pinfo['real-gid'] = "%x" % (unsigned(self.proc.p_rgid))
         if str(kern.arch).find('arm') >= 0:
             pinfo['ostype'] = 'ios'
-        for i in pinfo.keys():
+        for i in list(pinfo.keys()):
             i_val = str(pinfo[i])
             retval += '%s:%s;' % (str(i), i_val)
         return retval

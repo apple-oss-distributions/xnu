@@ -194,7 +194,8 @@ mcache_init(void)
 		__builtin_unreachable();
 	}
 
-	mcache_zone = zone_create("mcache", MCACHE_ALLOC_SIZE, ZC_DESTRUCTIBLE);
+	mcache_zone = zone_create("mcache", MCACHE_ALLOC_SIZE,
+	    ZC_PGZ_USE_GUARDS | ZC_DESTRUCTIBLE);
 
 	LIST_INIT(&mcache_head);
 
@@ -347,7 +348,8 @@ mcache_create_common(const char *name, size_t bufsize, size_t align,
 		VERIFY(align != 0 && (align % MCACHE_ALIGN) == 0);
 		chunksize += sizeof(uint64_t) + align;
 		chunksize = P2ROUNDUP(chunksize, align);
-		cp->mc_slab_zone = zone_create(cp->mc_name, chunksize, ZC_DESTRUCTIBLE);
+		cp->mc_slab_zone = zone_create(cp->mc_name, chunksize,
+		    ZC_PGZ_USE_GUARDS | ZC_DESTRUCTIBLE);
 	}
 	cp->mc_chunksize = chunksize;
 

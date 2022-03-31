@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2003-2020 Apple Inc. All rights reserved.
+ * Copyright (c) 2003-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -49,6 +49,9 @@
 #include <libkern/OSAtomic.h>
 #include <stdbool.h>
 
+#if SKYWALK
+#include <skywalk/core/skywalk_var.h>
+#endif /* SKYWALK */
 
 static errno_t sock_send_internal(socket_t, const struct msghdr *,
     mbuf_t, int, size_t *);
@@ -281,9 +284,15 @@ sock_connect(socket_t sock, const struct sockaddr *to, int flags)
 		goto out;
 	}
 
+#if SKYWALK
+	sk_protect_t protect = sk_async_transmit_protect();
+#endif /* SKYWALK */
 
 	error = soconnectlock(sock, sa, 0);
 
+#if SKYWALK
+	sk_async_transmit_unprotect(protect);
+#endif /* SKYWALK */
 
 	if (!error) {
 		if ((sock->so_state & SS_ISCONNECTING) &&
@@ -845,10 +854,10 @@ sock_send_internal(socket_t sock, const struct msghdr *msg, mbuf_t data,
 	if (data == NULL && msg != NULL) {
 		struct iovec *tempp = msg->msg_iov;
 
-		MALLOC(uio_bufp, char *, UIO_SIZEOF(msg->msg_iovlen), M_TEMP, M_WAITOK);
+		uio_bufp = kalloc_data(UIO_SIZEOF(msg->msg_iovlen), Z_WAITOK);
 		if (uio_bufp == NULL) {
 #if (DEBUG || DEVELOPMENT)
-			printf("sock_send_internal: so %p MALLOC(%lu) failed, ENOMEM\n",
+			printf("sock_send_internal: so %p kalloc_data(%lu) failed, ENOMEM\n",
 			    sock, UIO_SIZEOF(msg->msg_iovlen));
 #endif /* (DEBUG || DEVELOPMENT) */
 			error = ENOMEM;
@@ -911,11 +920,17 @@ sock_send_internal(socket_t sock, const struct msghdr *msg, mbuf_t data,
 		control->m_len = msg->msg_controllen;
 	}
 
+#if SKYWALK
+	sk_protect_t protect = sk_async_transmit_protect();
+#endif /* SKYWALK */
 
 	error = sock->so_proto->pr_usrreqs->pru_sosend(sock, msg != NULL ?
 	    (struct sockaddr *)msg->msg_name : NULL, auio, data,
 	    control, flags);
 
+#if SKYWALK
+	sk_async_transmit_unprotect(protect);
+#endif /* SKYWALK */
 
 	/*
 	 * Residual data is possible in the case of IO vectors but not
@@ -937,7 +952,7 @@ sock_send_internal(socket_t sock, const struct msghdr *msg, mbuf_t data,
 		}
 	}
 	if (uio_bufp != NULL) {
-		FREE(uio_bufp, M_TEMP);
+		kfree_data(uio_bufp, UIO_SIZEOF(msg->msg_iovlen));
 	}
 
 	return error;
@@ -958,7 +973,7 @@ errorout:
 		*sentlen = 0;
 	}
 	if (uio_bufp != NULL) {
-		FREE(uio_bufp, M_TEMP);
+		kfree_data(uio_bufp, UIO_SIZEOF(msg->msg_iovlen));
 	}
 	return error;
 }

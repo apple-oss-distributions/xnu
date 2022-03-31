@@ -233,28 +233,6 @@ kxld_page_alloc(size_t size)
 
 /*******************************************************************************
 *******************************************************************************/
-void *
-kxld_alloc_pageable(size_t size)
-{
-	size = round_page(size);
-
-#if KERNEL
-	kern_return_t rval = 0;
-	vm_offset_t ptr = 0;
-
-	rval = kmem_alloc_pageable(kernel_map, &ptr, size, VM_KERN_MEMORY_OSKEXT);
-	if (rval) {
-		ptr = 0;
-	}
-
-	return (void *) ptr;
-#else
-	return kxld_page_alloc_untracked(size);
-#endif
-}
-
-/*******************************************************************************
-*******************************************************************************/
 void
 kxld_free(void *ptr, size_t size __unused)
 {
@@ -264,7 +242,7 @@ kxld_free(void *ptr, size_t size __unused)
 #endif
 
 #if KERNEL
-	kfree(ptr, size);
+	kheap_free(KHEAP_DEFAULT, ptr, size);
 #else
 	free(ptr);
 #endif
@@ -276,7 +254,7 @@ void
 kxld_page_free_untracked(void *ptr, size_t size __unused)
 {
 #if KERNEL
-	kfree(ptr, round_page(size));
+	kheap_free(KHEAP_DEFAULT, ptr, round_page(size));
 #else /* !KERNEL */
 	free(ptr);
 #endif /* KERNEL */

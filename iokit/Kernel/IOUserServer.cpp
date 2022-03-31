@@ -1585,9 +1585,11 @@ IOInterruptDispatchSource::CheckForWork_Impl(
 		}
 		willWait = (synchronous && (waitResult == THREAD_WAITING));
 		if (willWait && (kIOInterruptTypeLevel & ivars->interruptType) && ivars->enable) {
+			IOSimpleLockUnlockEnableInterrupt(ivars->lock, is);
 			ivars->provider->enableInterrupt(ivars->intIndex);
+		} else {
+			IOSimpleLockUnlockEnableInterrupt(ivars->lock, is);
 		}
-		IOSimpleLockUnlockEnableInterrupt(ivars->lock, is);
 		if (willWait) {
 			waitResult = thread_block(THREAD_CONTINUE_NULL);
 			if (THREAD_INTERRUPTED == waitResult) {
@@ -2028,9 +2030,11 @@ IOUserServer::waitInterruptTrap(void * p1, void * p2, void * p3, void * p4, void
 			}
 			willWait = (waitResult == THREAD_WAITING);
 			if (willWait && (kIOInterruptTypeLevel & ivars->interruptType) && ivars->enable) {
+				IOSimpleLockUnlockEnableInterrupt(ivars->lock, is);
 				ivars->provider->enableInterrupt(ivars->intIndex);
+			} else {
+				IOSimpleLockUnlockEnableInterrupt(ivars->lock, is);
 			}
-			IOSimpleLockUnlockEnableInterrupt(ivars->lock, is);
 			if (willWait) {
 				waitResult = thread_block(THREAD_CONTINUE_NULL);
 				if (THREAD_INTERRUPTED == waitResult) {
@@ -2389,7 +2393,7 @@ IOUserServer::setDriverKitUUID(OSKext *kext)
 	}
 
 	uuid_unparse(p_uuid, uuid_string);
-	new_uuid = OSData::withBytes(p_uuid, sizeof(p_uuid));
+	new_uuid = OSData::withValue(p_uuid);
 	kext->setDriverKitUUID(new_uuid);
 }
 
@@ -3687,7 +3691,7 @@ IOUserServer::copyInObjects(IORPCMessageMach * mach, IORPCMessage * message,
 
 	while (idx--) {
 		object = (OSObject *) message->objects[idx];
-		object->release();
+		OSSafeReleaseNULL(object);
 		message->objects[idx] = 0;
 	}
 
@@ -3793,21 +3797,34 @@ IOUserClient * IOUserServer::withTask(task_t owningTask)
 		inst = NULL;
 		return inst;
 	}
-	inst->PMinit();
+	OS_ANALYZER_SUPPRESS("82033761") inst->PMinit();
 
 	inst->fOwningTask = current_task();
 	inst->fEntitlements = IOUserClient::copyClientEntitlements(inst->fOwningTask);
 
 	if (!(kIODKDisableEntitlementChecking & gIODKDebug)) {
-		if (!IOCurrentTaskHasEntitlement(gIODriverKitEntitlementKey->getCStringNoCopy())) {
-			proc_t p;
-			pid_t  pid;
+		proc_t p;
+		pid_t  pid;
+		const char * name;
+		p = (proc_t)get_bsdtask_info(inst->fOwningTask);
+		if (p) {
+			name = proc_best_name(p);
+			pid = proc_pid(p);
+		} else {
+			name = "unknown";
+			pid = 0;
+		}
 
-			p = (proc_t)get_bsdtask_info(inst->fOwningTask);
-			if (p) {
-				pid = proc_pid(p);
-				IOLog(kIODriverKitEntitlementKey " entitlement check failed for %s[%d]\n", proc_best_name(p), pid);
-			}
+		if (inst->fEntitlements == NULL) {
+#if DEVELOPMENT || DEBUG
+			panic("entitlements are missing for %s[%d]\n", name, pid);
+#else
+			DKLOG("entitlements are missing for %s[%d]\n", name, pid);
+#endif /* DEVELOPMENT || DEBUG */
+		}
+
+		if (!IOCurrentTaskHasEntitlement(gIODriverKitEntitlementKey->getCStringNoCopy())) {
+			IOLog(kIODriverKitEntitlementKey " entitlement check failed for %s[%d]\n", name, pid);
 			inst->release();
 			inst = NULL;
 			return inst;
@@ -4225,7 +4242,7 @@ IOUserServer::serviceNewUserClient(IOService * service, task_t owningTask, void 
 	}
 	userUC = OSDynamicCast(IOUserUserClient, uc);
 	if (!userUC) {
-		uc->terminate();
+		uc->terminate(kIOServiceTerminateNeedWillTerminate);
 		OSSafeReleaseNULL(uc);
 		OSSafeReleaseNULL(entitlements);
 		return kIOReturnUnsupported;
@@ -4266,7 +4283,7 @@ IOUserServer::serviceNewUserClient(IOService * service, task_t owningTask, void 
 
 		if (!ok) {
 			DKLOG(DKS ":UC entitlements check failed\n", DKN(userUC));
-			uc->terminate();
+			uc->terminate(kIOServiceTerminateNeedWillTerminate);
 			OSSafeReleaseNULL(uc);
 			OSSafeReleaseNULL(entitlements);
 			return kIOReturnNotPermitted;
@@ -5310,6 +5327,9 @@ IOUserUserClient::eventlinkConfigurationTrap(void * p1, void * p2, void * p3, vo
 
 	IOLockLock(fLock);
 	eventLink = OSDynamicCast(IOEventLink, fEventLinks->getObject(eventlinkNameStr));
+	if (eventLink) {
+		eventLink->retain();
+	}
 	IOLockUnlock(fLock);
 
 	if (eventLink == NULL) {
@@ -5343,6 +5363,7 @@ finish:
 	}
 
 	OSSafeReleaseNULL(eventlinkNameStr);
+	OSSafeReleaseNULL(eventLink);
 
 	return ret;
 }
@@ -5379,6 +5400,9 @@ IOUserUserClient::workgroupConfigurationTrap(void * p1, void * p2, void * p3, vo
 
 	IOLockLock(fLock);
 	workgroup = OSDynamicCast(IOWorkGroup, fWorkGroups->getObject(workgroupNameStr));
+	if (workgroup) {
+		workgroup->retain();
+	}
 	IOLockUnlock(fLock);
 
 	if (workgroup == NULL) {
@@ -5413,6 +5437,7 @@ finish:
 	}
 
 	OSSafeReleaseNULL(workgroupNameStr);
+	OSSafeReleaseNULL(workgroup);
 
 	return ret;
 }
@@ -5508,6 +5533,7 @@ IOUserUserClient::externalMethod(uint32_t selector, IOExternalMethodArguments * 
 	uint64_t   structureOutputSize;
 	OSAction                  * action;
 	IOUserUserClientActionRef * ref;
+	mach_port_t wake_port = MACH_PORT_NULL;
 
 	kr             = kIOReturnUnsupported;
 	structureInput = NULL;
@@ -5520,7 +5546,7 @@ IOUserUserClient::externalMethod(uint32_t selector, IOExternalMethodArguments * 
 
 	if (MACH_PORT_NULL != args->asyncWakePort) {
 		// this retain is for the OSAction to release
-		iokit_make_port_send(args->asyncWakePort);
+		wake_port = ipc_port_make_send(args->asyncWakePort);
 		kr = CreateActionKernelCompletion(sizeof(IOUserUserClientActionRef), &action);
 		assert(KERN_SUCCESS == kr);
 		ref = (typeof(ref))action->GetReference();
@@ -5558,9 +5584,9 @@ IOUserUserClient::externalMethod(uint32_t selector, IOExternalMethodArguments * 
 		// mig will destroy any async port
 		return kr;
 	}
-	if (MACH_PORT_NULL != args->asyncWakePort) {
+	if (MACH_PORT_NULL != wake_port) {
 		// this release is for the mig created send right
-		iokit_release_port_send(args->asyncWakePort);
+		iokit_release_port_send(wake_port);
 	}
 
 	if (structureOutput) {
@@ -5590,80 +5616,50 @@ _IOUserServerCheckInCancellationHandler *
 IOUserServerCheckInToken::setCancellationHandler(IOUserServerCheckInCancellationHandler handler,
     void* handlerArgs)
 {
-	bool runHandler = false;
 	_IOUserServerCheckInCancellationHandler * handlerObj = _IOUserServerCheckInCancellationHandler::withHandler(handler, handlerArgs);
 	if (!handlerObj) {
 		goto finish;
 	}
 
-	IOLockLock(fLock);
+	IORecursiveLockLock(gDriverKitLaunchLock);
+
+	assert(fState != kIOUserServerCheckInComplete);
 
 	if (fState == kIOUserServerCheckInCanceled) {
 		// Send cancel notification if we set the handler after this was canceled
-		runHandler = true;
+		handlerObj->call(this);
 	} else if (fState == kIOUserServerCheckInPending) {
 		fHandlers->setObject(handlerObj);
 	}
 
-	IOLockUnlock(fLock);
+	IORecursiveLockUnlock(gDriverKitLaunchLock);
 
 finish:
-
-	if (runHandler && handlerObj != NULL) {
-		handlerObj->call(this);
-	}
 	return handlerObj;
 }
 
 void
 IOUserServerCheckInToken::removeCancellationHandler(_IOUserServerCheckInCancellationHandler * handler)
 {
-	IOLockLock(fLock);
+	IORecursiveLockLock(gDriverKitLaunchLock);
 
-	if (fState == kIOUserServerCheckInPending) {
-		fHandlers->removeObject(handler);
-	}
+	fHandlers->removeObject(handler);
 
-	IOLockUnlock(fLock);
-}
-
-bool
-IOUserServerCheckInToken::setState(IOUserServerCheckInToken::State newState)
-{
-	assert(newState == kIOUserServerCheckInCanceled || newState == kIOUserServerCheckInComplete);
-
-	bool stateChanged = false;
-	IOLockLock(fLock);
-
-	if (fState == kIOUserServerCheckInPending && fState != newState) {
-		stateChanged = true;
-	}
-
-	if (stateChanged) {
-		fState = newState;
-	}
-
-	IOLockUnlock(fLock);
-
-	if (stateChanged) {
-		IORecursiveLockLock(gDriverKitLaunchLock);
-		if (gDriverKitLaunches != NULL) {
-			// Remove pending launch from list, if we have not shut down yet.
-			gDriverKitLaunches->removeObject(this);
-		}
-		IORecursiveLockUnlock(gDriverKitLaunchLock);
-	}
-
-	return stateChanged;
+	IORecursiveLockUnlock(gDriverKitLaunchLock);
 }
 
 void
 IOUserServerCheckInToken::cancel()
 {
-	bool changed = setState(kIOUserServerCheckInCanceled);
+	IORecursiveLockLock(gDriverKitLaunchLock);
 
-	if (changed) {
-		// Once canceled, new handlers cannot be added, so we don't need to use a lock here
+	if (fState == kIOUserServerCheckInPending) {
+		fState = kIOUserServerCheckInCanceled;
+		if (gDriverKitLaunches != NULL) {
+			// Remove pending launch from list, if we have not shut down yet.
+			gDriverKitLaunches->removeObject(this);
+		}
+
 		fHandlers->iterateObjects(^bool (OSObject * obj){
 			_IOUserServerCheckInCancellationHandler * handlerObj = OSDynamicCast(_IOUserServerCheckInCancellationHandler, obj);
 			if (handlerObj) {
@@ -5673,16 +5669,27 @@ IOUserServerCheckInToken::cancel()
 		});
 		fHandlers->flushCollection();
 	}
+
+	IORecursiveLockUnlock(gDriverKitLaunchLock);
 }
 
 void
 IOUserServerCheckInToken::complete()
 {
-	bool changed = setState(kIOUserServerCheckInComplete);
-	if (changed) {
+	IORecursiveLockLock(gDriverKitLaunchLock);
+
+	if (fState == kIOUserServerCheckInPending && --fPendingCount == 0) {
+		fState = kIOUserServerCheckInComplete;
+		if (gDriverKitLaunches != NULL) {
+			// Remove pending launch from list, if we have not shut down yet.
+			gDriverKitLaunches->removeObject(this);
+		}
+
 		// No need to hold on to the cancellation handlers
 		fHandlers->flushCollection();
 	}
+
+	IORecursiveLockUnlock(gDriverKitLaunchLock);
 }
 
 bool
@@ -5709,12 +5716,8 @@ IOUserServerCheckInToken::init(const OSSymbol * serverName, OSNumber * serverTag
 		return false;
 	}
 
-	fLock = IOLockAlloc();
-	if (!fLock) {
-		return false;
-	}
-
 	fState = kIOUserServerCheckInPending;
+	fPendingCount = 1;
 
 	return true;
 }
@@ -5725,9 +5728,6 @@ IOUserServerCheckInToken::free()
 	OSSafeReleaseNULL(fServerName);
 	OSSafeReleaseNULL(fServerTag);
 	OSSafeReleaseNULL(fHandlers);
-	if (fLock != NULL) {
-		IOLockFree(fLock);
-	}
 
 	OSObject::free();
 }
@@ -5825,6 +5825,29 @@ finish:
 	return me;
 }
 
+/*
+ * IOUserServerCheckInTokens are used to track dext launches. They have three possible states:
+ *
+ * - Pending: A dext launch is pending
+ * - Canceled: Dext launch failed
+ * - Complete: Dext launch is complete
+ *
+ * A token can be shared among multiple IOServices that are waiting for dexts if the IOUserServerName
+ * is the same. This allows dexts to be reused and host multiple services. All pending tokens are stored
+ * in gDriverKitLaunches and we check here before creating a new token when launching a dext.
+ *
+ * A token starts in the pending state with a pending count of 1. When we reuse a token, we increase the
+ * pending count of the token.
+ *
+ * The token is sent to userspace as a mach port through kernelmanagerd/driverkitd to the dext. The dext then
+ * uses that token to check in to the kernel. If any part of the dext launch failed (dext crashed, kmd crashed, etc.)
+ * we get a no-senders notification for the token in the kernel and the token goes into the Canceled state.
+ *
+ * Once the dext checks in to the kernel, we decrement the pending count for the token. When the pending count reaches
+ * 0, the token goes into the Complete state. So if the token is in the Complete state, there are no kernel matching threads
+ * waiting on the dext to check in.
+ */
+
 IOUserServerCheckInToken *
 IOUserServerCheckInToken::findExistingToken(const OSSymbol * serverName)
 {
@@ -5841,6 +5864,8 @@ IOUserServerCheckInToken::findExistingToken(const OSSymbol * serverName)
 		        // Check if server name matches
 		        const OSSymbol * tokenServerName = token->fServerName;
 		        if (tokenServerName->isEqualTo(serverName)) {
+		                assert(token->fState == kIOUserServerCheckInPending);
+		                token->fPendingCount++;
 		                result = token;
 		                result->retain();
 			}
@@ -5861,7 +5886,7 @@ IOUserServerCheckInToken::cancelAll()
 	IORecursiveLockLock(gDriverKitLaunchLock);
 	tokensToCancel = gDriverKitLaunches;
 	gDriverKitLaunches = NULL;
-	IORecursiveLockUnlock(gDriverKitLaunchLock);
+
 
 	tokensToCancel->iterateObjects(^(OSObject *obj) {
 		IOUserServerCheckInToken * token = OSDynamicCast(IOUserServerCheckInToken, obj);
@@ -5870,6 +5895,8 @@ IOUserServerCheckInToken::cancelAll()
 		}
 		return false;
 	});
+
+	IORecursiveLockUnlock(gDriverKitLaunchLock);
 
 	OSSafeReleaseNULL(tokensToCancel);
 }

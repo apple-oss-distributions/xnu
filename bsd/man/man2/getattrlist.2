@@ -227,6 +227,16 @@ will not follow a symlink if it occurs as
 the last component of
 .Fa path .
 .
+.It FSOPT_NOFOLLOW_ANY
+If this bit is set,
+.Fn getattrlist
+will not follow a symlink if it occurs as
+the last component of
+.Fa path .
+In addition an error is returned if a symlink
+is encountered before the last component of
+.Fa path .
+.
 .It FSOPT_REPORT_FULLSIZE
 The size of the attributes reported (in the first
 .Vt u_int32_t
@@ -1809,6 +1819,11 @@ Search permission is denied for a component of the path prefix for
 .It Bq Er ELOOP
 Too many symbolic links were encountered in translating the pathname
 for
+.Fn getattrlist .
+.
+.It Bq Er ELOOP
+FSOPT_NOFOLLOW_ANY was passed and a symbolic link was encountered in
+translating the pathname for
 .Fn getattrlist .
 .
 .It Bq Er EFAULT

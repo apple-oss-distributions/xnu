@@ -287,6 +287,12 @@ extern kern_return_t    vm_pageout_wait(uint64_t deadline);
 extern unsigned int     vm_pageout_scan_event_counter;
 extern unsigned int     vm_page_anonymous_count;
 extern thread_t         vm_pageout_scan_thread;
+extern thread_t         vm_pageout_gc_thread;
+
+#define VM_PAGEOUT_GC_INIT      ((void *)0)
+#define VM_PAGEOUT_GC_COLLECT   ((void *)1)
+#define VM_PAGEOUT_GC_EVENT     ((event_t)&vm_pageout_garbage_collect)
+extern void vm_pageout_garbage_collect(void *, wait_result_t);
 
 
 /*

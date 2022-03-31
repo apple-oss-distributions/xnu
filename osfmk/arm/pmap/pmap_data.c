@@ -871,6 +871,7 @@ ppr_remove_pt_page(pt_desc_t *ptdp)
 		 */
 		const vm_offset_t va_end = va + (size_t)pt_attr_leaf_table_size(pt_attr);
 		pmap_tte_deallocate(pmap, va, va_end, need_strong_sync, ttep, pt_attr_twig_level(pt_attr));
+		pmap_lock(pmap, PMAP_LOCK_EXCLUSIVE); /* pmap_tte_deallocate() dropped the lock */
 	}
 
 	/**
@@ -964,7 +965,10 @@ pmap_page_reclaim(void)
 MARK_AS_PMAP_TEXT static void
 pmap_give_free_ppl_page(pmap_paddr_t pa)
 {
-	assert((pa & PAGE_MASK) == 0);
+	if ((pa & PAGE_MASK) != 0) {
+		panic("%s: Unaligned address passed in, pa=0x%llx",
+		    __func__, pa);
+	}
 
 	page_free_entry_t *page_entry = (page_free_entry_t *)phystokv(pa);
 	pmap_simple_lock(&pmap_ppl_free_page_lock);
@@ -1879,15 +1883,25 @@ pv_alloc(
 
 	/**
 	 * We got here because both the per-CPU and the global lists are empty. If
-	 * this allocation is for the kernel, we try to get an entry from the kernel
-	 * list next.
+	 * this allocation is for the kernel pmap or an IOMMU kernel driver, we try
+	 * to get an entry from the kernel list next.
 	 */
 	if ((pmap == NULL) || (kernel_pmap == pmap)) {
 		pv_list_kern_alloc(pvepp);
 		if (PV_ENTRY_NULL != *pvepp) {
 			return PV_ALLOC_SUCCESS;
 		}
-		alloc_flags = PMAP_PAGES_ALLOCATE_NOWAIT | PMAP_PAGE_RECLAIM_NOWAIT;
+		/**
+		 * If the pmap is NULL, this is an allocation outside the normal pmap path,
+		 * most likely an IOMMU allocation.  We therefore don't know what other locks
+		 * this path may hold or timing constraints it may have, so we should avoid
+		 * a potentially expensive call to pmap_page_reclaim() on this path.
+		 */
+		if (pmap == NULL) {
+			alloc_flags = PMAP_PAGES_ALLOCATE_NOWAIT;
+		} else {
+			alloc_flags = PMAP_PAGES_ALLOCATE_NOWAIT | PMAP_PAGE_RECLAIM_NOWAIT;
+		}
 	}
 
 	/**
@@ -2101,6 +2115,16 @@ pepv_convert_ptep_to_pvep(
 	pve_init(pvep);
 	pve_set_ptep(pvep, 0, pvh_ptep(pvh));
 
+	assert(!pve_get_internal(pvep, 0));
+	assert(!pve_get_altacct(pvep, 0));
+	if (ppattr_is_internal(pai)) {
+		/**
+		 * Transfer "internal" status from pp_attr to this pve. See the comment
+		 * above PP_ATTR_INTERNAL for more information on this.
+		 */
+		ppattr_clear_internal(pai);
+		pve_set_internal(pvep, 0);
+	}
 	if (ppattr_is_altacct(pai)) {
 		/**
 		 * Transfer "altacct" status from pp_attr to this pve. See the comment
@@ -2185,7 +2209,7 @@ pmap_enter_pv(
 	vm_offset_t pvh_flags = pvh_get_flags(pvh);
 
 #if XNU_MONITOR
-	if (__improbable(pvh_flags & PVH_FLAG_LOCKDOWN)) {
+	if (__improbable(pvh_flags & PVH_FLAG_LOCKDOWN_MASK)) {
 		panic("%d is locked down (%#lx), cannot enter", pai, pvh_flags);
 	}
 #endif /* XNU_MONITOR */
@@ -2215,11 +2239,6 @@ pmap_enter_pv(
 	 * page. These will persist until all mappings to the page are removed.
 	 */
 	if (first_cpu_mapping) {
-		if (options & PMAP_OPTIONS_INTERNAL) {
-			ppattr_set_internal(pai);
-		} else {
-			ppattr_clear_internal(pai);
-		}
 		if ((options & PMAP_OPTIONS_INTERNAL) &&
 		    (options & PMAP_OPTIONS_REUSABLE)) {
 			ppattr_set_reusable(pai);
@@ -2331,24 +2350,28 @@ pmap_enter_pv(
  *                        updating the physical aperture mapping of the page.
  *                        This parameter specifies whether the TLB invalidate
  *                        should be synchronized or not if that update occurs.
- * @return The altacct bit of the PTE that was removed.
+ * @param is_internal_p The internal bit of the PTE that was removed.
+ * @param is_altacct_p The altacct bit of the PTE that was removed.
  */
-bool
+void
 pmap_remove_pv(
 	pmap_t pmap,
 	pt_entry_t *ptep,
 	int pai,
-	bool flush_tlb_async __unused)
+	bool flush_tlb_async __unused,
+	bool *is_internal_p,
+	bool *is_altacct_p)
 {
 	ASSERT_NOT_HIBERNATING();
 	pvh_assert_locked(pai);
 
+	bool is_internal = false;
 	bool is_altacct = false;
 	pv_entry_t **pvh = pai_to_pvh(pai);
 	const vm_offset_t pvh_flags = pvh_get_flags(pvh);
 
 #if XNU_MONITOR
-	if (__improbable(pvh_flags & PVH_FLAG_LOCKDOWN)) {
+	if (__improbable(pvh_flags & PVH_FLAG_LOCKDOWN_MASK)) {
 		panic("%s: PVH entry at pai %d is locked down (%#lx), cannot remove",
 		    __func__, pai, pvh_flags);
 	}
@@ -2365,6 +2388,7 @@ pmap_remove_pv(
 		}
 
 		pvh_update_head(pvh, PV_ENTRY_NULL, PVH_TYPE_NULL);
+		is_internal = ppattr_is_internal(pai);
 		is_altacct = ppattr_is_altacct(pai);
 	} else if (pvh_test_type(pvh, PVH_TYPE_PVEP)) {
 		pv_entry_t **pvepp = pvh;
@@ -2381,6 +2405,7 @@ pmap_remove_pv(
 			panic("%s: ptep=%p (pai=0x%x) not in pvh=%p", __func__, ptep, pai, pvh);
 		}
 
+		is_internal = pve_get_internal(pvep, pve_pte_idx);
 		is_altacct = pve_get_altacct(pvep, pve_pte_idx);
 		pve_set_ptep(pvep, pve_pte_idx, PT_ENTRY_NULL);
 
@@ -2428,6 +2453,9 @@ pmap_remove_pv(
 			int head_pve_pte_empty_idx;
 			if ((head_pve_pte_empty_idx = pve_find_ptep_index(head_pvep, PT_ENTRY_NULL)) != -1) {
 				pve_set_ptep(head_pvep, head_pve_pte_empty_idx, pve_get_ptep(pvep, other_pte_idx));
+				if (pve_get_internal(pvep, other_pte_idx)) {
+					pve_set_internal(head_pvep, head_pve_pte_empty_idx);
+				}
 				if (pve_get_altacct(pvep, other_pte_idx)) {
 					pve_set_altacct(head_pvep, head_pve_pte_empty_idx);
 				}
@@ -2448,6 +2476,9 @@ pmap_remove_pv(
 			 */
 			pve_remove(pvh, pvepp, pvep);
 			pvh_update_head(pvh, pve_get_ptep(pvep, other_pte_idx), PVH_TYPE_PTEP);
+			if (pve_get_internal(pvep, other_pte_idx)) {
+				ppattr_set_internal(pai);
+			}
 			if (pve_get_altacct(pvep, other_pte_idx)) {
 				ppattr_set_altacct(pai);
 			}
@@ -2479,7 +2510,8 @@ pmap_remove_pv(
 	}
 #endif /* PVH_FLAG_EXEC */
 
-	return is_altacct;
+	*is_internal_p = is_internal;
+	*is_altacct_p = is_altacct;
 }
 
 /**

@@ -230,7 +230,6 @@ static dtrace_toxrange_t *dtrace_toxrange;	/* toxic range array */
 static int		dtrace_toxranges;	/* number of toxic ranges */
 static int		dtrace_toxranges_max;	/* size of toxic range array */
 static dtrace_anon_t	dtrace_anon;		/* anonymous enabling */
-static kmem_cache_t	*dtrace_state_cache;	/* cache for dynamic state */
 static uint64_t		dtrace_vtime_references; /* number of vtimestamp refs */
 static kthread_t	*dtrace_panicked;	/* panicking thread */
 static dtrace_ecb_t	*dtrace_ecb_create_cache; /* cached created ECB */
@@ -257,8 +256,11 @@ static uint8_t      dtrace_kerneluuid[16];	/* the 128-bit uuid */
  * 20k elements allocated, the space saved is substantial.
  */
 
-static ZONE_DECLARE(dtrace_probe_t_zone, "dtrace.dtrace_probe_t",
-    sizeof(dtrace_probe_t), ZC_NONE);
+static ZONE_DEFINE_TYPE(dtrace_probe_t_zone, "dtrace.dtrace_probe_t",
+    dtrace_probe_t, ZC_PGZ_USE_GUARDS);
+
+static ZONE_DEFINE(dtrace_state_pcpu_zone, "dtrace.dtrace_dstate_percpu_t",
+    sizeof(dtrace_dstate_percpu_t), ZC_PERCPU);
 
 static int dtrace_module_unloaded(struct kmod_info *kmod);
 
@@ -465,13 +467,19 @@ static LCK_MTX_DECLARE_ATTR(dtrace_errlock, &dtrace_lck_grp, &dtrace_lck_attr);
 #define	DTRACE_V4MAPPED_OFFSET		(sizeof (uint32_t) * 3)
 
 /*
- * The key for a thread-local variable consists of the lower 61 bits of the
- * current_thread(), plus the 3 bits of the highest active interrupt above LOCK_LEVEL.
- * We add DIF_VARIABLE_MAX to t_did to assure that the thread key is never
- * equal to a variable identifier.  This is necessary (but not sufficient) to
- * assure that global associative arrays never collide with thread-local
- * variables.  To guarantee that they cannot collide, we must also define the
- * order for keying dynamic variables.  That order is:
+ * The key for a thread-local variable needs to be unique to a single
+ * thread over the lifetime of the system, and not overlap with any variable
+ * IDs. So we take thread's thread_id, a unique 64-bit number that is never
+ * reused after the thread exits, and add DIF_VARIABLE_MAX to it, which
+ * guarantees that it won’t overlap any variable IDs. We also want to treat
+ * running in interrupt context as independent of thread-context. So if
+ * interrupts are active, we set the 63rd bit, otherwise it’s cleared.
+ *
+ * This is necessary (but not sufficient) to assure that global associative
+ * arrays never collide with thread-local variables. To guarantee that they
+ * cannot collide, we must also define the order for keying dynamic variables.
+ *
+ * That order is:
  *
  *   [ key0 ] ... [ keyn ] [ variable-key ] [ tls-key ]
  *
@@ -479,33 +487,13 @@ static LCK_MTX_DECLARE_ATTR(dtrace_errlock, &dtrace_lck_grp, &dtrace_lck_attr);
  * no way for a global variable key signature to match a thread-local key
  * signature.
  */
-#if defined (__x86_64__)
-/* FIXME: two function calls!! */
-#define	DTRACE_TLS_THRKEY(where) { \
+#if defined (__x86_64__) || defined(__arm__) || defined(__arm64__)
+#define	DTRACE_TLS_THRKEY(where) {                                           \
 	uint_t intr = ml_at_interrupt_context(); /* Note: just one measly bit */ \
-	uint64_t thr = (uintptr_t)current_thread(); \
-	ASSERT(intr < (1 << 3)); \
-	(where) = ((thr + DIF_VARIABLE_MAX) & \
-	    (((uint64_t)1 << 61) - 1)) | ((uint64_t)intr << 61); \
-}
-#elif defined(__arm__)
-/* FIXME: three function calls!!! */
-#define	DTRACE_TLS_THRKEY(where) { \
-	uint_t intr = ml_at_interrupt_context(); /* Note: just one measly bit */ \
-	uint64_t thr = (uintptr_t)current_thread(); \
-	uint_t pid = (uint_t)dtrace_proc_selfpid(); \
-	ASSERT(intr < (1 << 3)); \
-	(where) = (((thr << 32 | pid) + DIF_VARIABLE_MAX) & \
-	    (((uint64_t)1 << 61) - 1)) | ((uint64_t)intr << 61); \
-}
-#elif defined (__arm64__)
-/* FIXME: two function calls!! */
-#define	DTRACE_TLS_THRKEY(where) { \
-	uint_t intr = ml_at_interrupt_context(); /* Note: just one measly bit */ \
-	uint64_t thr = (uintptr_t)current_thread(); \
-	ASSERT(intr < (1 << 3)); \
-	(where) = ((thr + DIF_VARIABLE_MAX) & \
-	    (((uint64_t)1 << 61) - 1)) | ((uint64_t)intr << 61); \
+	uint64_t thr = thread_tid(current_thread());                             \
+	ASSERT(intr < 2);                                                        \
+	(where) = ((thr + DIF_VARIABLE_MAX) & (~((uint64_t)1 << 63))) |          \
+		((uint64_t)intr << 63);                                              \
 }
 #else
 #error Unknown architecture
@@ -1799,12 +1787,9 @@ static void
 dtrace_dynvar_clean(dtrace_dstate_t *dstate)
 {
 	dtrace_dynvar_t *dirty;
-	dtrace_dstate_percpu_t *dcpu;
-	int i, work = 0;
+	int work = 0;
 
-	for (i = 0; i < (int)NCPU; i++) {
-		dcpu = &dstate->dtds_percpu[i];
-
+	zpercpu_foreach(dcpu, dstate->dtds_percpu) {
 		ASSERT(dcpu->dtdsc_rinsing == NULL);
 
 		/*
@@ -1852,9 +1837,7 @@ dtrace_dynvar_clean(dtrace_dstate_t *dstate)
 
 	dtrace_sync();
 
-	for (i = 0; i < (int)NCPU; i++) {
-		dcpu = &dstate->dtds_percpu[i];
-
+	zpercpu_foreach(dcpu, dstate->dtds_percpu) {
 		if (dcpu->dtdsc_rinsing == NULL)
 			continue;
 
@@ -1896,7 +1879,7 @@ dtrace_dynvar(dtrace_dstate_t *dstate, uint_t nkeys,
 	dtrace_dynhash_t *hash = dstate->dtds_hash;
 	dtrace_dynvar_t *free, *new_free, *next, *dvar, *start, *prev = NULL;
 	processorid_t me = CPU->cpu_id, cpu = me;
-	dtrace_dstate_percpu_t *dcpu = &dstate->dtds_percpu[me];
+	dtrace_dstate_percpu_t *dcpu = zpercpu_get_cpu(dstate->dtds_percpu, me);
 	size_t bucket, ksize;
 	size_t chunksize = dstate->dtds_chunksize;
 	uintptr_t kdata, lock, nstate;
@@ -2211,7 +2194,7 @@ retry:
 					if (dcpu->dtdsc_rinsing != NULL)
 						nstate = DTRACE_DSTATE_RINSING;
 
-					dcpu = &dstate->dtds_percpu[cpu];
+					dcpu = zpercpu_get_cpu(dstate->dtds_percpu, cpu);
 
 					if (cpu != me)
 						goto retry;
@@ -3699,7 +3682,7 @@ dtrace_dif_variable(dtrace_mstate_t *mstate, dtrace_state_t *state, uint64_t v,
 		}
 
 	case DIF_VAR_ERRNO: {
-		uthread_t uthread = (uthread_t)get_bsdthread_info(current_thread());
+		uthread_t uthread = current_uthread();
 		if (!dtrace_priv_proc(state))
 			return (0);
 
@@ -6704,7 +6687,7 @@ dtrace_action_raise(uint64_t sig)
 	 * invocations of the raise() action.
 	 */
 
-	uthread_t uthread = (uthread_t)get_bsdthread_info(current_thread());
+	uthread_t uthread = current_uthread();
 
 	if (uthread && uthread->t_dtrace_sig == 0) {
 		uthread->t_dtrace_sig = sig;
@@ -6718,7 +6701,7 @@ dtrace_action_stop(void)
 	if (dtrace_destructive_disallow)
 		return;
 
-        uthread_t uthread = (uthread_t)get_bsdthread_info(current_thread());
+        uthread_t uthread = current_uthread();
 	if (uthread) {
 		/*
 		 * The currently running process will be set to task_suspend
@@ -6745,7 +6728,7 @@ dtrace_action_pidresume(uint64_t pid)
 		DTRACE_CPUFLAG_SET(CPU_DTRACE_ILLOP);		
 		return;
 	}
-        uthread_t uthread = (uthread_t)get_bsdthread_info(current_thread());
+        uthread_t uthread = current_uthread();
 
 	/*
 	 * When the currently running process leaves the kernel, it attempts to
@@ -13811,6 +13794,12 @@ dtrace_dof_slurp(dof_hdr_t *dof, dtrace_vstate_t *vstate, cred_t *cr,
 			return (-1);
 		}
 
+		if (sec->dofs_flags & DOF_SECF_LOAD) {
+			len = dof->dofh_loadsz;
+		} else {
+			len = dof->dofh_filesz;
+		}
+
 		if (sec->dofs_offset > len || sec->dofs_size > len ||
 		    sec->dofs_offset + sec->dofs_size > len) {
 			dtrace_dof_error(dof, "corrupt section header");
@@ -13929,7 +13918,6 @@ dtrace_dstate_init(dtrace_dstate_t *dstate, size_t size)
 	void *base;
 	uintptr_t limit;
 	dtrace_dynvar_t *dvar, *next, *start;
-	size_t i;
 
 	LCK_MTX_ASSERT(&dtrace_lock, LCK_MTX_ASSERT_OWNED);
 	ASSERT(dstate->dtds_base == NULL && dstate->dtds_percpu == NULL);
@@ -13949,8 +13937,7 @@ dtrace_dstate_init(dtrace_dstate_t *dstate, size_t size)
 
 	dstate->dtds_size = size;
 	dstate->dtds_base = base;
-	dstate->dtds_percpu = kmem_cache_alloc(dtrace_state_cache, KM_SLEEP);
-	bzero(dstate->dtds_percpu, (int)NCPU * sizeof (dtrace_dstate_percpu_t));
+	dstate->dtds_percpu = zalloc_percpu(dtrace_state_pcpu_zone, Z_WAITOK | Z_ZERO);
 
 	hashsize = size / (dstate->dtds_chunksize + sizeof (dtrace_dynhash_t));
 
@@ -13967,7 +13954,7 @@ dtrace_dstate_init(dtrace_dstate_t *dstate, size_t size)
 	 * lookups to know that they have iterated over an entire, valid hash
 	 * chain.
 	 */
-	for (i = 0; i < hashsize; i++)
+	for (size_t i = 0; i < hashsize; i++)
 		dstate->dtds_hash[i].dtdh_chain = &dtrace_dynhash_sink;
 
 	if (dtrace_dynhash_sink.dtdv_hashval != DTRACE_DYNHASH_SINK)
@@ -13987,8 +13974,10 @@ dtrace_dstate_init(dtrace_dstate_t *dstate, size_t size)
 	maxper = (limit - (uintptr_t)start) / (int)NCPU;
 	maxper = (maxper / dstate->dtds_chunksize) * dstate->dtds_chunksize;
 
-	for (i = 0; i < NCPU; i++) {
-		dstate->dtds_percpu[i].dtdsc_free = dvar = start;
+	zpercpu_foreach_cpu(i) {
+		dtrace_dstate_percpu_t *dcpu = zpercpu_get_cpu(dstate->dtds_percpu, i);
+
+		dcpu->dtdsc_free = dvar = start;
 
 		/*
 		 * If we don't even have enough chunks to make it once through
@@ -14036,7 +14025,7 @@ dtrace_dstate_fini(dtrace_dstate_t *dstate)
 		return;
 
 	kmem_free(dstate->dtds_base, dstate->dtds_size);
-	kmem_cache_free(dtrace_state_cache, dstate->dtds_percpu);
+	zfree_percpu(dtrace_state_pcpu_zone, dstate->dtds_percpu);
 }
 
 static void
@@ -17295,10 +17284,6 @@ dtrace_attach(dev_info_t *devi)
 	dtrace_arena = vmem_create("dtrace", (void *)1, INT32_MAX, 1,
 	    NULL, NULL, NULL, 0, VM_SLEEP | VMC_IDENTIFIER);
 
-	dtrace_state_cache = kmem_cache_create("dtrace_state_cache",
-	    sizeof (dtrace_dstate_percpu_t) * (int)NCPU, DTRACE_STATE_ALIGN,
-	    NULL, NULL, NULL, NULL, NULL, 0);
-
 	LCK_MTX_ASSERT(&cpu_lock, LCK_MTX_ASSERT_OWNED);
 
 	dtrace_nprobes = dtrace_nprobes_default;
@@ -18505,7 +18490,7 @@ dtrace_ioctl(dev_t dev, u_long cmd, user_addr_t arg, int md, cred_t *cr, int *rv
 	case DTRACEIOC_STATUS: {
 		dtrace_status_t stat;
 		dtrace_dstate_t *dstate;
-		int i, j;
+		int j;
 		uint64_t nerrs;
 
 		/*
@@ -18532,8 +18517,8 @@ dtrace_ioctl(dev_t dev, u_long cmd, user_addr_t arg, int md, cred_t *cr, int *rv
 		nerrs = state->dts_errors;
 		dstate = &state->dts_vstate.dtvs_dynvars;
 
-		for (i = 0; i < (int)NCPU; i++) {
-			dtrace_dstate_percpu_t *dcpu = &dstate->dtds_percpu[i];
+		zpercpu_foreach_cpu(i) {
+			dtrace_dstate_percpu_t *dcpu = zpercpu_get_cpu(dstate->dtds_percpu, i);
 
 			stat.dtst_dyndrops += dcpu->dtdsc_drops;
 			stat.dtst_dyndrops_dirty += dcpu->dtdsc_dirty_drops;
@@ -19159,14 +19144,14 @@ helper_init( void )
 	if (0 >= helper_majdevno)
 	{
 		helper_majdevno = cdevsw_add(HELPER_MAJOR, &helper_cdevsw);
-		
+
 		if (helper_majdevno < 0) {
 			printf("helper_init: failed to allocate a major number!\n");
 			return;
 		}
-		
-		if (NULL == devfs_make_node( makedev(helper_majdevno, 0), DEVFS_CHAR, UID_ROOT, GID_WHEEL, 0666, 
-					DTRACEMNR_HELPER, 0 )) {
+
+		if (NULL == devfs_make_node( makedev(helper_majdevno, 0), DEVFS_CHAR, UID_ROOT, GID_WHEEL, 0666,
+					DTRACEMNR_HELPER )) {
 			printf("dtrace_init: failed to devfs_make_node for helper!\n");
 			return;
 		}
@@ -19305,8 +19290,8 @@ dtrace_init( void )
 			return;
 		}
 
-		if (NULL == devfs_make_node_clone( makedev(gMajDevNo, 0), DEVFS_CHAR, UID_ROOT, GID_WHEEL, 0666, 
-					dtrace_clone_func, DTRACEMNR_DTRACE, 0 )) {
+		if (NULL == devfs_make_node_clone( makedev(gMajDevNo, 0), DEVFS_CHAR, UID_ROOT, GID_WHEEL, 0666,
+					dtrace_clone_func, DTRACEMNR_DTRACE )) {
 			printf("dtrace_init: failed to devfs_make_node_clone for dtrace!\n");
 			gDTraceInited = 0;
 			return;

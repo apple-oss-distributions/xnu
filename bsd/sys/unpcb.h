@@ -125,21 +125,21 @@ LIST_HEAD(unp_head, unpcb);
 #define sotounpcb(so)   ((struct unpcb *)((so)->so_pcb))
 
 struct  unpcb {
-	LIST_ENTRY(unpcb) unp_link;     /* glue on list of all PCBs */
-	struct socket   *unp_socket;    /* pointer back to socket */
-	struct vnode    *unp_vnode;     /* if associated with file */
+	LIST_ENTRY(unpcb)       unp_link;       /* glue on list of all PCBs */
+	struct socket           *unp_socket;    /* pointer back to socket */
+	struct vnode            *unp_vnode;     /* if associated with file */
 	ino_t                   unp_ino;        /* fake inode number */
-	struct unpcb    *unp_conn;      /* control block of connected socket */
-	struct unp_head unp_refs;       /* referencing socket linked list */
-	LIST_ENTRY(unpcb) unp_reflink;  /* link in unp_refs list */
-	struct sockaddr_un *unp_addr;   /* bound address of socket */
-	int             unp_cc;         /* copy of rcv.sb_cc */
-	int             unp_mbcnt;      /* copy of rcv.sb_mbcnt */
-	unp_gen_t       unp_gencnt;     /* generation count of this instance */
-	int             unp_flags;      /* flags */
-	struct xucred   unp_peercred;   /* peer credentials, if applicable */
-	decl_lck_mtx_data(, unp_mtx);   /* per unpcb lock */
-	int             rw_thrcount;    /* disconnect should wait for this count to become zero */
+	struct unpcb            *unp_conn;      /* control block of connected socket */
+	struct unp_head         unp_refs;       /* referencing socket linked list */
+	LIST_ENTRY(unpcb)       unp_reflink;    /* link in unp_refs list */
+	struct sockaddr_un      *unp_addr;      /* bound address of socket */
+	unp_gen_t               unp_gencnt;     /* generation count of this instance */
+	int                     unp_cc;         /* copy of rcv.sb_cc */
+	int                     unp_mbcnt;      /* copy of rcv.sb_mbcnt */
+	uint32_t                unp_flags;      /* flags */
+	uint32_t                rw_thrcount;    /* disconnect should wait for this count to become zero */
+	struct xucred           unp_peercred;   /* peer credentials, if applicable */
+	decl_lck_mtx_data(, unp_mtx);           /* per unpcb lock */
 };
 #endif /* KERNEL */
 
@@ -156,10 +156,11 @@ struct  unpcb {
  * (there may not even be a peer).  This is set in unp_listen() when
  * it fills in unp_peercred for later consumption by unp_connect().
  */
-#define UNP_HAVEPC                      0x0001
-#define UNP_HAVEPCCACHED                0x0002
-#define UNP_DONTDISCONNECT              0x0004
-#define UNP_TRACE_MDNS                  0x1000
+#define UNP_HAVEPC                      0x00000001
+#define UNP_HAVEPCCACHED                0x00000002
+#define UNP_DONTDISCONNECT              0x00000004
+#define UNP_NOPEERACCEPT                0x00000010
+#define UNP_TRACE_MDNS                  0x00001000
 
 #ifdef KERNEL
 struct  unpcb_compat {

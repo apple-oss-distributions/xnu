@@ -1469,6 +1469,10 @@ class Tests: XCTestCase {
         self.testSampleStackshot("stackshot-sample-instrs-cycles")
     }
 
+    func testStackshotWithPortlabels() {
+        self.testSampleStackshot("stackshot-sample-portlabels")
+    }
+
     func testStackshotWithStacktop() {
         self.testSampleStackshot("stackshot-sample-stacktop")
     }

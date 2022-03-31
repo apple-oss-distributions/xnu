@@ -283,6 +283,7 @@ public:
 
 	/*
 	 * Set handler to be invoked when launch is cancelled. Returns an wrapper object for the handler to be released by the caller.
+	 * The handler always runs under the lock for this IOUserServerCheckInToken.
 	 * The returned object can be used with removeCancellationHandler().
 	 */
 	_IOUserServerCheckInCancellationHandler * setCancellationHandler(IOUserServerCheckInCancellationHandler handler, void *handlerArgs);
@@ -307,7 +308,6 @@ public:
 
 private:
 	static IOUserServerCheckInToken * findExistingToken(const OSSymbol * serverName);
-	bool setState(IOUserServerCheckInToken::State state);
 	bool init(const OSSymbol * userServerName, OSNumber * serverTag);
 
 	friend class IOUserServer;
@@ -316,10 +316,10 @@ private:
 
 private:
 	IOUserServerCheckInToken::State          fState;
+	size_t                                   fPendingCount;
 	const OSSymbol                         * fServerName;
 	OSNumber                               * fServerTag;
 	OSSet                                  * fHandlers;
-	IOLock                                 * fLock;
 };
 
 extern "C" kern_return_t

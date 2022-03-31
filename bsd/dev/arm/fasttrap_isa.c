@@ -352,7 +352,7 @@ fasttrap_sigsegv(proc_t *p, uthread_t t, user_addr_t addr, arm_saved_state_t *re
 	proc_unlock(p);
 
 	/* raise signal */
-	signal_setast(t->uu_context.vc_thread);
+	signal_setast(get_machthread(t));
 #endif
 }
 
@@ -403,7 +403,7 @@ fasttrap_pid_probe(arm_saved_state_t *regs)
 
 	user_addr_t pc = regs->pc;
 
-	uthread_t uthread = (uthread_t) get_bsdthread_info(current_thread());
+	uthread_t uthread = current_uthread();
 
 	/*
 	 * It's possible that a user (in a veritable orgy of bad planning)
@@ -426,20 +426,6 @@ fasttrap_pid_probe(arm_saved_state_t *regs)
 	uthread->t_dtrace_scrpc = 0;
 	uthread->t_dtrace_astpc = 0;
 
-#if CONFIG_VFORK
-	/*
-	 * Treat a child created by a call to vfork(2) as if it were its
-	 * parent. We know that there's only one thread of control in such a
-	 * process: this one.
-	 */
-	if (p->p_lflag & P_LINVFORK) {
-		proc_list_lock();
-		while (p->p_lflag & P_LINVFORK) {
-			p = p->p_pptr;
-		}
-		proc_list_unlock();
-	}
-#endif /* CONFIG_VFORK */
 
 	pid = proc_getpid(p);
 	pid_mtx = &cpu_core[CPU->cpu_id].cpuc_pid_lock;
@@ -1140,7 +1126,7 @@ int
 fasttrap_return_probe(arm_saved_state_t *regs)
 {
 	proc_t *p = current_proc();
-	uthread_t uthread = (uthread_t)get_bsdthread_info(current_thread());
+	uthread_t uthread = current_uthread();
 	user_addr_t pc = uthread->t_dtrace_pc;
 	user_addr_t npc = uthread->t_dtrace_npc;
 
@@ -1149,20 +1135,6 @@ fasttrap_return_probe(arm_saved_state_t *regs)
 	uthread->t_dtrace_scrpc = 0;
 	uthread->t_dtrace_astpc = 0;
 
-#if CONFIG_VFORK
-	/*
-	 * Treat a child created by a call to vfork(2) as if it were its
-	 * parent. We know that there's only one thread of control in such a
-	 * process: this one.
-	 */
-	if (p->p_lflag & P_LINVFORK) {
-		proc_list_lock();
-		while (p->p_lflag & P_LINVFORK) {
-			p = p->p_pptr;
-		}
-		proc_list_unlock();
-	}
-#endif /* CONFIG_VFORK */
 
 	/*
 	 * We set rp->r_pc to the address of the traced instruction so

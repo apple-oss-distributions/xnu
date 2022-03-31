@@ -106,7 +106,7 @@
  */
 #define UIPC_MAX_CMSG_FD        512
 
-ZONE_DECLARE(unp_zone, "unpzone", sizeof(struct unpcb), ZC_NONE);
+ZONE_DEFINE_TYPE(unp_zone, "unpzone", struct unpcb, ZC_NONE);
 static  unp_gen_t unp_gencnt;
 static  u_int unp_count;
 
@@ -240,10 +240,12 @@ uipc_accept(struct socket *so, struct sockaddr **nam)
 	 * if it was bound and we are still connected
 	 * (our peer may have closed already!).
 	 */
-	if (unp->unp_conn && unp->unp_conn->unp_addr) {
+	if (unp->unp_conn != NULL && unp->unp_conn->unp_addr != NULL) {
 		*nam = dup_sockaddr((struct sockaddr *)
 		    unp->unp_conn->unp_addr, 1);
 	} else {
+		os_log(OS_LOG_DEFAULT, "%s: peer disconnected unp_gencnt %llu",
+		    __func__, unp->unp_gencnt);
 		*nam = dup_sockaddr((struct sockaddr *)&sun_noname, 1);
 	}
 	return 0;
@@ -358,15 +360,24 @@ static int
 uipc_peeraddr(struct socket *so, struct sockaddr **nam)
 {
 	struct unpcb *unp = sotounpcb(so);
+	struct socket *so2;
 
 	if (unp == NULL) {
 		return EINVAL;
 	}
+	so2 = unp->unp_conn != NULL ? unp->unp_conn->unp_socket : NULL;
+	if (so2 != NULL) {
+		unp_get_locks_in_order(so, so2);
+	}
+
 	if (unp->unp_conn != NULL && unp->unp_conn->unp_addr != NULL) {
 		*nam = dup_sockaddr((struct sockaddr *)
 		    unp->unp_conn->unp_addr, 1);
 	} else {
 		*nam = dup_sockaddr((struct sockaddr *)&sun_noname, 1);
+	}
+	if (so2 != NULL) {
+		socket_unlock(so2, 1);
 	}
 	return 0;
 }
@@ -1615,7 +1626,8 @@ try_again:
 		VERIFY(so->so_usecount > 0);
 		so->so_usecount--;
 
-		/* Set the socket state correctly but do a wakeup later when
+		/*
+		 * Set the socket state correctly but do a wakeup later when
 		 * we release all locks except the socket lock, this will avoid
 		 * a deadlock.
 		 */
@@ -1623,7 +1635,7 @@ try_again:
 		unp->unp_socket->so_state |= (SS_CANTRCVMORE | SS_CANTSENDMORE | SS_ISDISCONNECTED);
 
 		unp2->unp_socket->so_state &= ~(SS_ISCONNECTING | SS_ISCONNECTED | SS_ISDISCONNECTING);
-		unp->unp_socket->so_state |= (SS_CANTRCVMORE | SS_CANTSENDMORE | SS_ISDISCONNECTED);
+		unp2->unp_socket->so_state |= (SS_CANTRCVMORE | SS_CANTSENDMORE | SS_ISDISCONNECTED);
 
 		if (unp2->unp_flags & UNP_TRACE_MDNS) {
 			unp2->unp_flags &= ~UNP_TRACE_MDNS;
@@ -2374,7 +2386,7 @@ restart:
 			 * Now check if it is possibly one of OUR sockets.
 			 */
 			if (FILEGLOB_DTYPE(fg) != DTYPE_SOCKET ||
-			    (so = (struct socket *)fg->fg_data) == 0) {
+			    (so = (struct socket *)fg_get_data(fg)) == 0) {
 				lck_mtx_unlock(&fg->fg_lock);
 				continue;
 			}
@@ -2487,15 +2499,14 @@ restart:
 
 		tfg = *fpp;
 
-		if (FILEGLOB_DTYPE(tfg) == DTYPE_SOCKET &&
-		    tfg->fg_data != NULL) {
-			so = (struct socket *)(tfg->fg_data);
+		if (FILEGLOB_DTYPE(tfg) == DTYPE_SOCKET) {
+			so = (struct socket *)fg_get_data(tfg);
 
-			socket_lock(so, 0);
-
-			sorflush(so);
-
-			socket_unlock(so, 0);
+			if (so) {
+				socket_lock(so, 0);
+				sorflush(so);
+				socket_unlock(so, 0);
+			}
 		}
 	}
 	for (i = nunref, fpp = extra_ref; --i >= 0; ++fpp) {

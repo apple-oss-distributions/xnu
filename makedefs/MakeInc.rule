@@ -73,20 +73,11 @@ $(1): $(3)/.UNIFDEF_FLAGS
 $(3)/.UNIFDEF_FLAGS: ALWAYS | $(3)_MKDIR
 	$$(_v)$$(REPLACECONTENTS) $$@ $$(UNIFDEF) $(4)
 
-# rebuild if strippers change
-$(1): $(STRIP_BOUND_ATTRIBUTES)
-$(1): $(BOUND_ATTRIBUTES_CHECK)
-
 $(1): $(dir $(firstword $(1)))% : $(if $(2),%,$$(SOURCE)/%) | $(3)_MKDIR
 	@$$(LOG_INSTALLHDR) "$$*"
 	$$(_v)$$(UNIFDEF) $(4) $$< > ./$(3)/$$*.unifdef.$$$$$$$$;		\
 	if [ $$$$? -eq 2 ]; then						\
 		$(ERR) Parse failure for $$<;					\
-		exit 1;								\
-	fi;									\
-	$$(STRIP_BOUND_ATTRIBUTES) -i '' ./$(3)/$$*.unifdef.$$$$$$$$ || exit 1;	\
-	if ! $(BOUND_ATTRIBUTES_CHECK) ./$(3)/$$*.unifdef.$$$$$$$$; then	\
-		$(ERR) bound attribute stripping failure for $$<;		\
 		exit 1;								\
 	fi;									\
 	$$(DECOMMENT) ./$(3)/$$*.unifdef.$$$$$$$$ r >				\

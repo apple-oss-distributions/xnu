@@ -1,3 +1,7 @@
+from __future__ import absolute_import
+
+from builtins import object
+
 import logging
 
 
@@ -31,7 +35,7 @@ class Message(object):
         try:
             data_begin = bytedata.index('$')
             data_end = bytedata.index('#')
-        except ValueError, e:
+        except ValueError as e:
             logging.error('Invalid bytedata considered as message %s' % bytedata)
             return None
                 

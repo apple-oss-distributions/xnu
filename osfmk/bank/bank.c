@@ -50,10 +50,10 @@
 #define PERSONA_ID_NONE ((uint32_t)-1)
 #endif
 
-static ZONE_DECLARE(bank_task_zone, "bank_task",
-    sizeof(struct bank_task), ZC_NONE);
-static ZONE_DECLARE(bank_account_zone, "bank_account",
-    sizeof(struct bank_account), ZC_NONE);
+static ZONE_DEFINE_TYPE(bank_task_zone, "bank_task",
+    struct bank_task, ZC_NONE);
+static ZONE_DEFINE_TYPE(bank_account_zone, "bank_account",
+    struct bank_account, ZC_NONE);
 
 #define MAX_BANK_TASK     (CONFIG_TASK_MAX)
 #define MAX_BANK_ACCOUNT  (CONFIG_TASK_MAX + CONFIG_THREAD_MAX)

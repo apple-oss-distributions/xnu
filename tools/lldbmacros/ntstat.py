@@ -1,7 +1,9 @@
 """ Please make sure you read the README COMPLETELY BEFORE reading anything below.
     It is very critical that you read coding guidelines in Section E in README file.
 """
+from __future__ import absolute_import, print_function
 
+from builtins import hex
 from xnu import *
 from utils import *
 from string import *
@@ -37,7 +39,7 @@ def ShowNstatTUShadow(inshadow):
                 format_string = " INVALID proc magic {0: <s}"
                 out_string += format_string.format(hex(procmagic))
 
-    print out_string
+    print(out_string)
 
 def GetNstatProcdetailsBrief(procdetails):
     """ Display a brief summary for an nstat_procdetails struct
@@ -71,7 +73,7 @@ def ShowNstatProcdetails(procdetails):
         out_string += format_string.format(hex(procdetails), hex(procdetails.pdet_link.tqe_next), hex(procdetails.pdet_link.tqe_prev))
         out_string += GetNstatProcdetailsBrief(procdetails)
 
-    print out_string
+    print(out_string)
 
 def GetNstatTUShadowBrief(shadow):
     """ Display a summary for an nstat_tu_shadow struct
@@ -131,7 +133,7 @@ def ShowNstatSrc(insrc):
         if (prov.nstat_provider_id == 3):
             out_string += GetNstatTUShadowBrief(src.cookie);
 
-    print out_string
+    print(out_string)
 
 def ShowNstatCtrl(inctrl):
     """ Display an nstat_control_state struct
@@ -144,7 +146,7 @@ def ShowNstatCtrl(inctrl):
         format_string = "nstat_control_state {0: <s}: next={1: <s} src head={2: <s} tail={3: <s}"
         out_string += format_string.format(hex(ctrl), hex(ctrl.ncs_next), hex(ctrl.ncs_src_queue.tqh_first), hex(ctrl.ncs_src_queue.tqh_last))
 
-    print out_string
+    print(out_string)
 
     for src in IterateTAILQ_HEAD(ctrl.ncs_src_queue, 'ns_control_link'):
         ShowNstatSrc(src)
@@ -155,19 +157,19 @@ def ShowNstatCtrl(inctrl):
 def ShowAllNtstat(cmd_args=None) :
     """ Show the contents of various ntstat (network statistics) data structures
     """
-    print "nstat_controls list:\n"
+    print("nstat_controls list:\n")
     ctrl = kern.globals.nstat_controls
     ctrl = cast(ctrl, 'nstat_control_state *')
     while ctrl != 0:
         ShowNstatCtrl(ctrl)
         ctrl = cast(ctrl.ncs_next, 'nstat_control_state *')
 
-    print "\nnstat_userprot_shad list:\n"
+    print("\nnstat_userprot_shad list:\n")
     shadows = kern.globals.nstat_userprot_shad_head
     for shad in IterateTAILQ_HEAD(shadows, 'shad_link'):
         ShowNstatTUShadow(shad)
 
-    print "\nnstat_procdetails list:\n"
+    print("\nnstat_procdetails list:\n")
     procdetails_head = kern.globals.nstat_procdetails_head
     for procdetails in IterateTAILQ_HEAD(procdetails_head, 'pdet_link'):
         ShowNstatProcdetails(procdetails)

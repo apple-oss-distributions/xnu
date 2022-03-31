@@ -292,6 +292,7 @@ _csblob_get_platform_binary
 _csblob_get_teamid
 _csblob_get_signer_type
 _csblob_get_size
+_csblob_get_storage_addr
 _csfg_get_cdhash
 _csfg_get_identity
 _csfg_get_path
@@ -393,11 +394,14 @@ _iokit_make_ident_port
 _iokit_remove_reference
 _ip_gre_output
 _ip_gre_register_input
+_ipc_port_propagate_thread_attr
 _ipc_port_release_send
+_ipc_port_reset_thread_attr
 _ipf_addv4_internal
 _ipf_addv6_internal
 _kalloc_data:_kalloc_data_external
 _kalloc_type_impl:_kalloc_type_impl_external
+_kalloc_type_var_impl:_kalloc_type_var_impl_external
 _kauth_cred_getgroups
 _kauth_cred_grnam2guid
 _kauth_cred_guid2grnam
@@ -419,7 +423,10 @@ _kern_allocation_get_name
 _kern_allocation_name_allocate
 _kern_allocation_name_release
 _kfree_data:_kfree_data_external
+_kfree_data_addr:_kfree_data_addr_external
 _kfree_type_impl:_kfree_type_impl_external
+_kfree_type_var_impl:_kfree_type_var_impl_external
+_thread_get_ipc_propagate_attr
 _thread_set_allocation_name
 _kern_asl_msg
 _kern_buflet_get_data_address
@@ -660,6 +667,7 @@ _os_reason_ref
 _os_reason_free
 _os_reason_set_flags
 _os_reason_set_description_data
+_panic_active
 _panic_with_options
 _persona_find
 _persona_find_by_type
@@ -881,7 +889,7 @@ _vm_map_copy_discard
 _vm_map_copyin
 _vm_map_copyin_common
 _vm_map_copyout
-_vm_map_create
+_vm_map_create:_vm_map_create_external
 _vm_map_page_mask
 _vm_map_page_shift
 _vm_map_page_size
@@ -900,6 +908,7 @@ _vnode_create_empty
 _vnode_initialize
 _vnode_isdyldsharedcache
 _vnode_ismonitored
+_vnode_isonssd
 _vnode_istty
 _vnode_lookupat
 _vnode_lookup_continue_needed
@@ -908,12 +917,17 @@ _vnode_isnoflush
 _vnode_getbackingvnode
 _vnode_setasnamedstream
 _vnode_setasfirmlink
+_vnode_writecount
 _vnop_compound_mkdir_desc
 _vnop_compound_open_desc
 _vnop_compound_remove_desc
 _vnop_compound_rename_desc
 _vnop_compound_rmdir_desc
 _vnop_monitor_desc
+_vnio_openfd
+_vnio_close
+_vnio_read
+_vnio_vnode
 _write_random
 
 # HFS/APFS Kext Requirements
@@ -1021,13 +1035,16 @@ _zalloc_noblock
 _zalloc_flags
 _zalloc_ro
 _zalloc_ro_mut
-_zalloc_ro_update_elem
+_zalloc_ro_mut_atomic
+_zalloc_ro_clear
 _zdestroy
 _zfree
 _zfree_ro
 _zinit
 _zone_create
+_zone_create_ro
 _zone_require
+_zone_require_ro
 _fs_buffer_cache_gc_register
 _fs_buffer_cache_gc_unregister
 _cp_key_store_action_for_volume
@@ -1116,6 +1133,8 @@ _ptrauth_utils_auth_blob_generic
 _ptrauth_utils_sign_blob_generic
 _task_id_token_port_name_to_task:_task_id_token_port_name_to_task_external
 _url_decode
+_IOCurrentTaskHasEntitlement
+_IOTaskHasEntitlement
 _SecureDTIsLockedDown
 _SecureDTFindEntry
 _SecureDTLookupEntry
@@ -1128,3 +1147,4 @@ _SecureDTGetProperty
 _SecureDTInitPropertyIterator
 _SecureDTIterateProperties
 _SecureDTRestartPropertyIteration
+__ZN9os_detail19GetOSValueObjectKTVEv

@@ -174,8 +174,8 @@ typedef uint8_t dhcptag_t;
 
 typedef struct {
 	const void * *      array;/* malloc'd array of pointers */
-	int                 size;/* number of elements in array */
-	int                 count;/* number of occupied elements */
+	uint32_t            size;/* number of elements in array */
+	uint32_t            count;/* number of occupied elements */
 } ptrlist_t;
 
 typedef ptrlist_t dhcpol_t;

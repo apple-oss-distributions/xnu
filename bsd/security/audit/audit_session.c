@@ -1197,7 +1197,6 @@ audit_session_setaia(proc_t p, auditinfo_addr_t *new_aia_p)
 			 */
 			if (proc_ucred(p) != my_cred) {
 				proc_ucred_unlock(p);
-				audit_session_unref(my_new_cred);
 				kauth_cred_unref(&my_new_cred);
 				/* try again */
 				my_cred = kauth_cred_proc_ref(p);
@@ -1208,10 +1207,8 @@ audit_session_setaia(proc_t p, auditinfo_addr_t *new_aia_p)
 			proc_update_creds_onproc(p);
 			proc_ucred_unlock(p);
 		}
-		/*
-		 * Drop old proc reference or our extra reference.
-		 */
-		kauth_cred_unref(&my_cred);
+
+		kauth_cred_unref(&my_new_cred);
 		break;
 	}
 
@@ -1423,14 +1420,9 @@ audit_session_join_internal(proc_t p, task_t task, ipc_port_t port, au_asid_t *n
 	}
 
 	proc_ucred_lock(p);
-	kauth_cred_ref(proc_ucred(p));
 	my_cred = proc_ucred(p);
-	if (!IS_VALID_CRED(my_cred)) {
-		kauth_cred_unref(&my_cred);
-		proc_ucred_unlock(p);
-		err = ESRCH;
-		goto done;
-	}
+	kauth_cred_ref(my_cred);
+
 	old_aia_p = my_cred->cr_audit.as_aia_p;
 	old_asid = old_aia_p->ai_asid;
 	*new_asid = new_aia_p->ai_asid;
@@ -1455,6 +1447,8 @@ audit_session_join_internal(proc_t p, task_t task, ipc_port_t port, au_asid_t *n
 
 		proc_ucred_unlock(p);
 
+		kauth_cred_unref(&my_new_cred);
+
 		/* Propagate the change from the process to the Mach task. */
 		set_security_token_task_internal(p, task);
 
@@ -1462,8 +1456,8 @@ audit_session_join_internal(proc_t p, task_t task, ipc_port_t port, au_asid_t *n
 		audit_dec_procount(AU_SENTRY_PTR(old_aia_p));
 	} else {
 		proc_ucred_unlock(p);
+		kauth_cred_unref(&my_cred);
 	}
-	kauth_cred_unref(&my_cred);
 
 done:
 	if (port != IPC_PORT_NULL) {
@@ -2053,7 +2047,7 @@ audit_sdev_init(void)
 
 	dev = makedev(audit_sdev_major, 0);
 	devnode = devfs_make_node_clone(dev, DEVFS_CHAR, UID_ROOT, GID_WHEEL,
-	    0644, audit_sdev_clone, AUDIT_SDEV_NAME, 0);
+	    0644, audit_sdev_clone, AUDIT_SDEV_NAME);
 
 	if (NULL == devnode) {
 		return KERN_FAILURE;

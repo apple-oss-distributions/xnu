@@ -65,6 +65,17 @@ typedef void *                          ipc_kobject_t;
 typedef void *event_t;          /* wait event */
 #define         NO_EVENT                        ((event_t) 0)
 
+/*
+ * Events are used to selectively wake up threads waiting
+ * on a specified wait queue.
+ *
+ * The NO_EVENT64 value is a special event that is used
+ * on wait queues that can be members of wait queue sets
+ * for waits/wakeups that need to prepost to the set.
+ *
+ * This event must be "unique" and it is customary to use
+ * a pointer to memory related to the event.
+ */
 typedef uint64_t event64_t;             /* 64 bit wait event */
 #define         NO_EVENT64              ((event64_t) 0)
 #define         CAST_EVENT64_T(a_ptr)   ((event64_t)((uintptr_t)(a_ptr)))

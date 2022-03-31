@@ -1,3 +1,7 @@
+from __future__ import absolute_import, print_function
+
+from builtins import range
+
 from xnu import *
 from workqueue import GetWorkqueueThreadRequestSummary
 from memory import vm_unpack_pointer
@@ -34,13 +38,14 @@ def IterateProcKqfiles(proc):
     if unsigned(proc_ofiles) == 0:
         return
 
-    for fd in xrange(0, unsigned(proc_filedesc.fd_afterlast)):
+    for fd in range(0, unsigned(proc_filedesc.fd_afterlast)):
         if unsigned(proc_ofiles[fd]) != 0:
             proc_fd_flags = proc_ofiles[fd].fp_flags
             proc_fd_fglob = proc_ofiles[fd].fp_glob
             proc_fd_ftype = unsigned(proc_fd_fglob.fg_ops.fo_type)
             if proc_fd_ftype == xnudefines.DTYPE_KQUEUE:
-                yield kern.GetValueFromAddress(int(proc_fd_fglob.fg_data), 'struct kqfile *')
+                proc_fd_fglob_fg_data = Cast(proc_fd_fglob.fg_data, 'void *')
+                yield Cast(proc_fd_fglob_fg_data, 'struct kqfile *')
 
 def IterateProcKqworkloops(proc):
     """ Iterate through all kqworkloops in the given process
@@ -55,7 +60,7 @@ def IterateProcKqworkloops(proc):
         return
 
     hash_mask = proc_filedesc.fd_kqhashmask
-    for i in xrange(hash_mask + 1):
+    for i in range(hash_mask + 1):
         for kqwl in IterateListEntry(proc_filedesc.fd_kqhash[i], 'struct kqworkloop *', 'kqwl_hashlink'):
             yield kqwl
 
@@ -84,11 +89,11 @@ def IterateProcKnotes(proc):
     proc_filedesc = addressof(proc.p_fd)
 
     if int(proc.p_fd.fd_knlist) != 0:
-        for i in xrange(proc.p_fd.fd_knlistsize):
+        for i in range(proc.p_fd.fd_knlistsize):
             for kn in IterateListEntry(proc.p_fd.fd_knlist[i], 'struct knote *', 'kn_link', list_prefix='s'):
                 yield kn
     if int(proc.p_fd.fd_knhash) != 0:
-        for i in xrange(proc.p_fd.fd_knhashmask + 1):
+        for i in range(proc.p_fd.fd_knhashmask + 1):
             for kn in IterateListEntry(proc.p_fd.fd_knhash[i], 'struct knote *', 'kn_link', list_prefix='s'):
                 yield kn
 
@@ -138,7 +143,7 @@ def ShowKnote(cmd_args=None, cmd_options={}, O=None):
 
     kn = kern.GetValueFromAddress(cmd_args[0], 'struct knote *')
     with O.table(GetKnoteSummary.header):
-        print GetKnoteSummary(kn)
+        print(GetKnoteSummary(kn))
 
 def IterateKqueueKnotes(kq):
     """ Iterate through all knotes of a given kqueue
@@ -202,12 +207,12 @@ def ShowKqfile(cmd_args=None, cmd_options={}, O=None):
     kqf = kern.GetValueFromAddress(cmd_args[0], 'kqfile *')
 
     with O.table(GetKqfileSummary.header):
-        print GetKqfileSummary(kqf)
+        print(GetKqfileSummary(kqf))
     with O.table(GetKnoteSummary.header):
         for kn in IterateKqueueKnotes(kqf.kqf_kqueue):
-            print GetKnoteSummary(kn)
+            print(GetKnoteSummary(kn))
         for kn in IterateTAILQ_HEAD(kqf.kqf_suppressed, 'kn_tqe'):
-            print GetKnoteSummary(kn)
+            print(GetKnoteSummary(kn))
 
 @lldb_type_summary(['struct kqworkq *'])
 @header(GetKqueueSummary.header)
@@ -232,15 +237,15 @@ def ShowKqworkq(cmd_args=None, cmd_options={}, O=None):
     kqwq = kern.GetValueFromAddress(cmd_args[0], 'struct kqworkq *')
     kq = kqwq.kqwq_kqueue
     with O.table(GetKqueueSummary.header):
-        print GetKqworkqSummary(kqwq)
+        print(GetKqworkqSummary(kqwq))
 
     with O.table(GetWorkqueueThreadRequestSummary.header):
         for i in range(0, 7):
-            print GetWorkqueueThreadRequestSummary(kq.kq_p, kqwq.kqwq_request[i])
+            print(GetWorkqueueThreadRequestSummary(kq.kq_p, kqwq.kqwq_request[i]))
 
     with O.table(GetKnoteSummary.header):
         for kn in IterateKqueueKnotes(kq):
-            print GetKnoteSummary(kn)
+            print(GetKnoteSummary(kn))
 
 @lldb_type_summary(['struct kqworkloop *'])
 @header(GetKqueueSummary.header)
@@ -273,14 +278,14 @@ def ShowKqworkloop(cmd_args=None, cmd_options={}, O=None):
     kqwl = kern.GetValueFromAddress(cmd_args[0], 'struct kqworkloop *')
 
     with O.table(GetKqworkloopSummary.header):
-        print GetKqworkloopSummary(kqwl)
+        print(GetKqworkloopSummary(kqwl))
 
     with O.table(GetWorkqueueThreadRequestSummary.header):
-        print GetWorkqueueThreadRequestSummary(kqwl.kqwl_kqueue.kq_p, kqwl.kqwl_request)
+        print(GetWorkqueueThreadRequestSummary(kqwl.kqwl_kqueue.kq_p, kqwl.kqwl_request))
 
     with O.table(GetKnoteSummary.header):
         for kn in IterateKqueueKnotes(kqwl.kqwl_kqueue):
-            print GetKnoteSummary(kn)
+            print(GetKnoteSummary(kn))
 
 @lldb_command('showkqueue', fancy=True)
 def ShowKqueue(cmd_args=None, cmd_options={}, O=None):
@@ -324,7 +329,7 @@ def ShowProcKqueues(cmd_args=None, cmd_options={}, O=None):
 
     with O.table(GetKqueueSummary.header):
         for kq in IterateProcKqueues(proc):
-            print GetKqueueSummary(kq)
+            print(GetKqueueSummary(kq))
 
 @lldb_command('showprocknotes', fancy=True)
 def ShowProcKnotes(cmd_args=None, cmd_options={}, O=None):
@@ -340,7 +345,7 @@ def ShowProcKnotes(cmd_args=None, cmd_options={}, O=None):
 
     with O.table(GetKnoteSummary.header):
         for kn in IterateProcKnotes(proc):
-            print GetKnoteSummary(kn)
+            print(GetKnoteSummary(kn))
 
 @lldb_command('showallkqueues', fancy=True)
 def ShowAllKqueues(cmd_args=None, cmd_options={}, O=None):
@@ -350,4 +355,4 @@ def ShowAllKqueues(cmd_args=None, cmd_options={}, O=None):
     """
     with O.table(GetKqueueSummary.header):
         for kq in IterateAllKqueues():
-            print GetKqueueSummary(kq)
+            print(GetKqueueSummary(kq))

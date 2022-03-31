@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2017, 2020, 2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2012-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -151,9 +151,9 @@ static struct ip6protosw                *g_tcp6_protosw         = NULL;
 static struct protosw                   *g_udp_protosw          = NULL;
 static struct ip6protosw                *g_udp6_protosw         = NULL;
 
-ZONE_DECLARE(flow_divert_group_zone, "flow_divert_group",
+ZONE_DEFINE(flow_divert_group_zone, "flow_divert_group",
     sizeof(struct flow_divert_group), ZC_ZFREE_CLEARMEM);
-ZONE_DECLARE(flow_divert_pcb_zone, "flow_divert_pcb",
+ZONE_DEFINE(flow_divert_pcb_zone, "flow_divert_pcb",
     sizeof(struct flow_divert_pcb), ZC_ZFREE_CLEARMEM);
 
 static errno_t
@@ -169,7 +169,7 @@ struct sockaddr *
 flow_divert_get_buffered_target_address(mbuf_t buffer);
 
 static void
-flow_divert_disconnect_socket(struct socket *so);
+flow_divert_disconnect_socket(struct socket *so, bool is_connected);
 
 static inline uint8_t
 flow_divert_syslog_type_to_oslog_type(int syslog_type)
@@ -1139,7 +1139,7 @@ flow_divert_send_packet(struct flow_divert_pcb *fd_cb, mbuf_t packet, Boolean en
 	if (fd_cb->group == NULL) {
 		FDLOG0(LOG_INFO, fd_cb, "no provider, cannot send packet");
 		flow_divert_update_closed_state(fd_cb, SHUT_RDWR, TRUE);
-		flow_divert_disconnect_socket(fd_cb->so);
+		flow_divert_disconnect_socket(fd_cb->so, !(fd_cb->flags & FLOW_DIVERT_IMPLICIT_CONNECT));
 		if (SOCK_TYPE(fd_cb->so) == SOCK_STREAM) {
 			error = ECONNABORTED;
 		} else {
@@ -1503,7 +1503,7 @@ flow_divert_send_close_if_needed(struct flow_divert_pcb *fd_cb)
 	}
 
 	if (flow_divert_tunnel_how_closed(fd_cb) == SHUT_RDWR) {
-		flow_divert_disconnect_socket(fd_cb->so);
+		flow_divert_disconnect_socket(fd_cb->so, !(fd_cb->flags & FLOW_DIVERT_IMPLICIT_CONNECT));
 	}
 }
 
@@ -1988,6 +1988,7 @@ flow_divert_disable(struct flow_divert_pcb *fd_cb)
 	proc_t last_proc = NULL;
 	struct sockaddr *remote_endpoint = fd_cb->original_remote_endpoint;
 	bool do_connect = !(fd_cb->flags & FLOW_DIVERT_IMPLICIT_CONNECT);
+	bool unset_connecting = false;
 	struct inpcb *inp = NULL;
 
 	so = fd_cb->so;
@@ -1996,6 +1997,8 @@ flow_divert_disable(struct flow_divert_pcb *fd_cb)
 	}
 
 	FDLOG0(LOG_NOTICE, fd_cb, "Skipped all flow divert services, disabling flow divert");
+
+	unset_connecting = (SOCK_TYPE(so) == SOCK_STREAM || (fd_cb->flags & FLOW_DIVERT_HAS_TOKEN));
 
 	/* Restore the IP state */
 	inp = sotoinpcb(so);
@@ -2031,6 +2034,9 @@ flow_divert_disable(struct flow_divert_pcb *fd_cb)
 	last_proc = proc_find(so->last_pid);
 
 	if (do_connect) {
+		if (unset_connecting) {
+			so->so_state &= ~SS_ISCONNECTING; /* Get out of the connecting state to avoid confusing NECP */
+		}
 		/* Connect using the original protocol */
 		error = (*so->so_proto->pr_usrreqs->pru_connect)(so, remote_endpoint, (last_proc != NULL ? last_proc : current_proc()));
 		if (error) {
@@ -2169,7 +2175,7 @@ done:
 
 	if (error && so != NULL) {
 		so->so_error = (uint16_t)error;
-		flow_divert_disconnect_socket(so);
+		flow_divert_disconnect_socket(so, do_connect);
 	}
 }
 
@@ -2242,6 +2248,11 @@ flow_divert_scope(struct flow_divert_pcb *fd_cb, int out_if_index, bool derive_n
 			inp->inp_last_outifp = new_ifp;
 		}
 
+#if SKYWALK
+		if (NETNS_TOKEN_VALID(&inp->inp_netns_token)) {
+			netns_set_ifnet(&inp->inp_netns_token, new_ifp);
+		}
+#endif /* SKYWALK */
 	}
 }
 
@@ -2452,7 +2463,7 @@ set_socket_state:
 				flow_divert_update_closed_state(fd_cb, SHUT_RDWR, TRUE);
 				so->so_error = (uint16_t)connect_error;
 			}
-			flow_divert_disconnect_socket(so);
+			flow_divert_disconnect_socket(so, !(fd_cb->flags & FLOW_DIVERT_IMPLICIT_CONNECT));
 		} else {
 #if NECP
 			/* Update NECP client with connected five-tuple */
@@ -2508,6 +2519,7 @@ flow_divert_handle_close(struct flow_divert_pcb *fd_cb, mbuf_t packet, int offse
 
 	FDLOCK(fd_cb);
 	if (fd_cb->so != NULL) {
+		bool is_connected = (SOCK_TYPE(fd_cb->so) == SOCK_STREAM || !(fd_cb->flags & FLOW_DIVERT_IMPLICIT_CONNECT));
 		socket_lock(fd_cb->so, 0);
 
 		if (!(fd_cb->so->so_flags & SOF_FLOW_DIVERT)) {
@@ -2520,15 +2532,13 @@ flow_divert_handle_close(struct flow_divert_pcb *fd_cb, mbuf_t packet, int offse
 		flow_divert_update_closed_state(fd_cb, how, TRUE);
 
 		/* Only do this for stream flows because "shutdown by peer" doesn't make sense for datagram flows */
-		if (SOCK_TYPE(fd_cb->so) == SOCK_STREAM) {
-			how = flow_divert_tunnel_how_closed(fd_cb);
-			if (how == SHUT_RDWR) {
-				flow_divert_disconnect_socket(fd_cb->so);
-			} else if (how == SHUT_RD) {
-				socantrcvmore(fd_cb->so);
-			} else if (how == SHUT_WR) {
-				socantsendmore(fd_cb->so);
-			}
+		how = flow_divert_tunnel_how_closed(fd_cb);
+		if (how == SHUT_RDWR) {
+			flow_divert_disconnect_socket(fd_cb->so, is_connected);
+		} else if (how == SHUT_RD && is_connected) {
+			socantrcvmore(fd_cb->so);
+		} else if (how == SHUT_WR && is_connected) {
+			socantsendmore(fd_cb->so);
 		}
 done:
 		socket_unlock(fd_cb->so, 0);
@@ -2540,18 +2550,16 @@ static mbuf_t
 flow_divert_create_control_mbuf(struct flow_divert_pcb *fd_cb)
 {
 	struct inpcb *inp = sotoinpcb(fd_cb->so);
-	bool is_cfil_enabled = false;
-#if CONTENT_FILTER
-	/* Content Filter needs to see the local address */
-	is_cfil_enabled = (inp->inp_socket && inp->inp_socket->so_cfil_db != NULL);
-#endif
+	bool need_recvdstaddr = false;
+	/* Socket flow tracking needs to see the local address */
+	need_recvdstaddr = SOFLOW_ENABLED(inp->inp_socket);
 	if ((inp->inp_vflag & INP_IPV4) &&
 	    fd_cb->local_endpoint.sa.sa_family == AF_INET &&
-	    ((inp->inp_flags & INP_RECVDSTADDR) || is_cfil_enabled)) {
+	    ((inp->inp_flags & INP_RECVDSTADDR) || need_recvdstaddr)) {
 		return sbcreatecontrol((caddr_t)&(fd_cb->local_endpoint.sin.sin_addr), sizeof(struct in_addr), IP_RECVDSTADDR, IPPROTO_IP);
 	} else if ((inp->inp_vflag & INP_IPV6) &&
 	    fd_cb->local_endpoint.sa.sa_family == AF_INET6 &&
-	    ((inp->inp_flags & IN6P_PKTINFO) || is_cfil_enabled)) {
+	    ((inp->inp_flags & IN6P_PKTINFO) || need_recvdstaddr)) {
 		struct in6_pktinfo pi6;
 		memset(&pi6, 0, sizeof(pi6));
 		pi6.ipi6_addr = fd_cb->local_endpoint.sin6.sin6_addr;
@@ -2841,7 +2849,7 @@ flow_divert_handle_app_map_create(struct flow_divert_group *group, mbuf_t packet
 
 	/* Re-set the current trie */
 	if (group->signing_id_trie.memory != NULL) {
-		FREE(group->signing_id_trie.memory, M_TEMP);
+		kfree_data_addr(group->signing_id_trie.memory);
 	}
 	memset(&group->signing_id_trie, 0, sizeof(group->signing_id_trie));
 	group->signing_id_trie.root = NULL_TRIE_IDX;
@@ -2918,7 +2926,7 @@ flow_divert_handle_app_map_create(struct flow_divert_group *group, mbuf_t packet
 		return;
 	}
 
-	MALLOC(new_trie.memory, void *, trie_memory_size, M_TEMP, M_WAITOK);
+	new_trie.memory = kalloc_data(trie_memory_size, Z_WAITOK);
 	if (new_trie.memory == NULL) {
 		FDLOG(LOG_ERR, &nil_pcb, "Failed to allocate %lu bytes of memory for the signing ID trie",
 		    nodes_mem_size + child_maps_mem_size + bytes_mem_size);
@@ -2980,7 +2988,7 @@ flow_divert_handle_app_map_create(struct flow_divert_group *group, mbuf_t packet
 	if (!insert_error) {
 		group->signing_id_trie = new_trie;
 	} else {
-		FREE(new_trie.memory, M_TEMP);
+		kfree_data(new_trie.memory, trie_memory_size);
 	}
 
 	lck_rw_done(&group->lck);
@@ -3093,7 +3101,7 @@ flow_divert_close_all(struct flow_divert_group *group)
 			flow_divert_pcb_remove(fd_cb);
 			flow_divert_update_closed_state(fd_cb, SHUT_RDWR, TRUE);
 			fd_cb->so->so_error = ECONNABORTED;
-			flow_divert_disconnect_socket(fd_cb->so);
+			flow_divert_disconnect_socket(fd_cb->so, !(fd_cb->flags & FLOW_DIVERT_IMPLICIT_CONNECT));
 			socket_unlock(fd_cb->so, 0);
 		}
 		FDUNLOCK(fd_cb);
@@ -3301,10 +3309,32 @@ flow_divert_dup_addr(sa_family_t family, struct sockaddr *addr,
 }
 
 static void
-flow_divert_disconnect_socket(struct socket *so)
+flow_divert_disconnect_socket(struct socket *so, bool is_connected)
 {
-	if (SOCK_TYPE(so) == SOCK_STREAM) {
+	if (SOCK_TYPE(so) == SOCK_STREAM || is_connected) {
 		soisdisconnected(so);
+	}
+	if (SOCK_TYPE(so) == SOCK_DGRAM) {
+		struct inpcb *inp = sotoinpcb(so);
+		if (inp != NULL && !(so->so_flags & SOF_PCBCLEARING)) {
+			/*
+			 * Let NetworkStatistics know this PCB is going away
+			 * before we detach it.
+			 */
+			if (nstat_collect && (SOCK_PROTO(so) == IPPROTO_TCP || SOCK_PROTO(so) == IPPROTO_UDP)) {
+				nstat_pcb_detach(inp);
+			}
+
+			if (SOCK_DOM(so) == PF_INET6) {
+				ROUTE_RELEASE(&inp->in6p_route);
+			} else {
+				ROUTE_RELEASE(&inp->inp_route);
+			}
+			inp->inp_state = INPCB_STATE_DEAD;
+			/* makes sure we're not called twice from so_close */
+			so->so_flags |= SOF_PCBCLEARING;
+			inpcb_gc_sched(inp->inp_pcbinfo, INPCB_TIMER_FAST);
+		}
 	}
 }
 
@@ -3642,7 +3672,7 @@ flow_divert_data_out(struct socket *so, int flags, mbuf_t data, struct sockaddr 
 	 * If the socket is subject to a UDP Content Filter and no remote address is passed in,
 	 * retrieve the CFIL saved remote address from the mbuf and use it.
 	 */
-	if (to == NULL && so->so_cfil_db) {
+	if (to == NULL && CFIL_DGRAM_FILTERED(so)) {
 		struct sockaddr *cfil_faddr = NULL;
 		cfil_tag = cfil_dgram_get_socket_state(data, NULL, NULL, &cfil_faddr, NULL);
 		if (cfil_tag) {
@@ -4079,16 +4109,11 @@ flow_divert_kctl_connect(kern_ctl_ref kctlref __unused, struct sockaddr_ctl *sac
 	lck_rw_lock_exclusive(&g_flow_divert_group_lck);
 
 	if (g_flow_divert_groups == NULL) {
-		MALLOC(g_flow_divert_groups,
-		    struct flow_divert_group **,
-		    GROUP_COUNT_MAX * sizeof(struct flow_divert_group *),
-		    M_TEMP,
-		    M_WAITOK | M_ZERO);
+		g_flow_divert_groups = kalloc_type(struct flow_divert_group *,
+		    GROUP_COUNT_MAX, Z_WAITOK | Z_ZERO | Z_NOFAIL);
 	}
 
-	if (g_flow_divert_groups == NULL) {
-		error = ENOBUFS;
-	} else if (g_flow_divert_groups[sac->sc_unit] != NULL) {
+	if (g_flow_divert_groups[sac->sc_unit] != NULL) {
 		error = EALREADY;
 	} else {
 		g_flow_divert_groups[sac->sc_unit] = new_group;
@@ -4139,7 +4164,8 @@ flow_divert_kctl_disconnect(kern_ctl_ref kctlref __unused, uint32_t unit, void *
 	g_active_group_count--;
 
 	if (g_active_group_count == 0) {
-		FREE(g_flow_divert_groups, M_TEMP);
+		kfree_type(struct flow_divert_group *,
+		    GROUP_COUNT_MAX, g_flow_divert_groups);
 		g_flow_divert_groups = NULL;
 	}
 
@@ -4159,7 +4185,7 @@ flow_divert_kctl_disconnect(kern_ctl_ref kctlref __unused, uint32_t unit, void *
 
 		/* Re-set the current trie */
 		if (group->signing_id_trie.memory != NULL) {
-			FREE(group->signing_id_trie.memory, M_TEMP);
+			kfree_data_addr(group->signing_id_trie.memory);
 		}
 		memset(&group->signing_id_trie, 0, sizeof(group->signing_id_trie));
 		group->signing_id_trie.root = NULL_TRIE_IDX;

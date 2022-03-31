@@ -230,7 +230,6 @@ extern int nfs_ticks;
 #define NFS_MFLAG_NOQUOTA               15      /* don't support QUOTA requests */
 #define NFS_MFLAG_MNTUDP                16      /* MOUNT protocol should use UDP */
 #define NFS_MFLAG_MNTQUICK              17      /* use short timeouts while mounting */
-/*                                      18         reserved */
 #define NFS_MFLAG_NOOPAQUE_AUTH         19      /* don't make the mount AUTH_OPAQUE. Used by V3 */
 
 /* Macros for packing and unpacking packed versions */
@@ -1070,10 +1069,11 @@ extern lck_grp_t nfs_request_grp;
 #define R_SOFT          0x00010000      /* request is soft - don't retry or reconnect */
 #define R_IOD           0x00020000      /* request is being managed by an IOD */
 
-#define R_NOINTR        0x20000000      /* request should not be interupted by a signal */
+#define R_NOUMOUNTINTR  0x10000000      /* request should not be interrupted by a signal during unmount */
+#define R_NOINTR        0x20000000      /* request should not be interrupted by a signal */
 #define R_RECOVER       0x40000000      /* a state recovery RPC - during NFSSTA_RECOVER */
 #define R_SETUP         0x80000000      /* a setup RPC - during (re)connection */
-#define R_OPTMASK       0xe0000000      /* mask of all RPC option flags */
+#define R_OPTMASK       0xf0000000      /* mask of all RPC option flags */
 
 /* Flag values for r_lflags */
 #define RL_BUSY         0x0001          /* Locked. */

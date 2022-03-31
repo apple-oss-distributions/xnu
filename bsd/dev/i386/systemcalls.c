@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2016 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -98,7 +98,6 @@ unix_syscall(x86_saved_state_t *state)
 	struct proc             *p;
 	struct uthread          *uthread;
 	x86_saved_state32_t     *regs;
-	boolean_t               is_vfork = false;
 	pid_t                   pid;
 
 	assert(is_saved_state32(state));
@@ -110,17 +109,9 @@ unix_syscall(x86_saved_state_t *state)
 #endif
 	thread = current_thread();
 	uthread = get_bsdthread_info(thread);
+	p = current_proc();
 
 	uthread_reset_proc_refcount(uthread);
-
-	/* Get the approriate proc; may be different from task's for vfork() */
-	p = (struct proc *)get_bsdtask_info(current_task());
-#if CONFIG_VFORK
-	if (__improbable(uthread->uu_flag & UT_VFORK)) {
-		is_vfork = true;
-		p = current_proc();
-	}
-#endif /* CONFIG_VFORK */
 
 	code    = regs->eax & I386_SYSCALL_NUMBER_MASK;
 	syscode = (code < nsysent) ? code : SYS_invalid;
@@ -180,7 +171,7 @@ unix_syscall(x86_saved_state_t *state)
 	 * Delayed binding of thread credential to process credential, if we
 	 * are not running with an explicitly set thread credential.
 	 */
-	kauth_cred_uthread_update(uthread, p);
+	kauth_cred_thread_update(thread, p);
 
 	uthread->uu_rval[0] = 0;
 	uthread->uu_rval[1] = 0;
@@ -272,7 +263,7 @@ skip_syscall:
 		    error, uthread->uu_rval[0], uthread->uu_rval[1], pid);
 	}
 
-	if (__improbable(!is_vfork && callp->sy_call == (sy_call_t *)execve && !error)) {
+	if (__improbable(callp->sy_call == (sy_call_t *)execve && !error)) {
 		pal_execve_return(thread);
 	}
 
@@ -306,16 +297,9 @@ unix_syscall64(x86_saved_state_t *state)
 #endif
 	thread = current_thread();
 	uthread = get_bsdthread_info(thread);
+	p = current_proc();
 
 	uthread_reset_proc_refcount(uthread);
-
-	/* Get the approriate proc; may be different from task's for vfork() */
-	p = (struct proc *)get_bsdtask_info(current_task());
-#if CONFIG_VFORK
-	if (__improbable(uthread->uu_flag & UT_VFORK)) {
-		p = current_proc();
-	}
-#endif /* CONFIG_VFORK */
 
 	/* Verify that we are not being called from a task without a proc */
 	if (__improbable(p == NULL)) {
@@ -384,7 +368,7 @@ unix_syscall64(x86_saved_state_t *state)
 	 * Delayed binding of thread credential to process credential, if we
 	 * are not running with an explicitly set thread credential.
 	 */
-	kauth_cred_uthread_update(uthread, p);
+	kauth_cred_thread_update(thread, p);
 
 	uthread->uu_rval[0] = 0;
 	uthread->uu_rval[1] = 0;
@@ -603,6 +587,7 @@ unix_syscall_return(int error)
 
 
 	uthread->uu_flag &= ~UT_NOTCANCELPT;
+	uthread->syscall_code = 0;
 
 #if DEBUG || DEVELOPMENT
 	kern_allocation_name_t

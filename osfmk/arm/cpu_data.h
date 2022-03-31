@@ -48,8 +48,6 @@
 
 __ASSUME_PTR_ABI_SINGLE_BEGIN
 
-#define current_thread()        current_thread_fast()
-
 static inline __attribute__((const)) thread_t
 current_thread_fast(void)
 {
@@ -61,12 +59,12 @@ current_thread_fast(void)
 	 *
 	 * and ignores the "attribute const", so do it the "dumb" way.
 	 */
-	struct thread *__unsafe_indexable result;
+	unsigned long result;
 	__asm__ ("mrs %0, TPIDR_EL1" : "=r" (result));
-	return __unsafe_forge_single(result);
+	return __unsafe_forge_single(thread_t, result);
 #else
 	// TPIDRPRW
-	return __unsafe_forge_single((thread_t)(__builtin_arm_mrc(15, 0, 13, 0, 4)));
+	return __unsafe_forge_single(thread_t, __builtin_arm_mrc(15, 0, 13, 0, 4));
 #endif
 }
 
@@ -96,12 +94,12 @@ current_thread_volatile(void)
 	 * The mrc used for arm32 should be treated as volatile however.
 	 */
 #if defined(__arm64__)
-	struct thread *__unsafe_indexable result;
+	unsigned long result;
 	__asm__ volatile ("mrs %0, TPIDR_EL1" : "=r" (result));
-	return __unsafe_forge_single(result);
+	return __unsafe_forge_single(thread_t, result);
 #else
 	// TPIDRPRW
-	return __unsafe_forge_single((thread_t)(__builtin_arm_mrc(15, 0, 13, 0, 4)));
+	return __unsafe_forge_single(thread_t, __builtin_arm_mrc(15, 0, 13, 0, 4));
 #endif
 }
 

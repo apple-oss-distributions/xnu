@@ -266,7 +266,7 @@ IODMACommandLocalMappedNonContig(int newValue)
 	UInt32                  numSegments;
 	UInt64                  dmaOffset;
 	UInt64                  segPhys;
-	vm_address_t            buffer;
+	mach_vm_address_t       buffer;
 	vm_size_t               bufSize = ptoa(4);
 
 	if (!IOMapper::gSystem) {
@@ -274,11 +274,11 @@ IODMACommandLocalMappedNonContig(int newValue)
 	}
 
 	buffer = 0;
-	kr = vm_allocate_kernel(kernel_map, &buffer, bufSize, VM_FLAGS_ANYWHERE, VM_KERN_MEMORY_IOKIT);
+	kr = mach_vm_allocate_kernel(kernel_map, &buffer, bufSize, VM_FLAGS_ANYWHERE, VM_KERN_MEMORY_IOKIT);
 	assert(KERN_SUCCESS == kr);
 
 	// fragment the vmentries
-	kr = vm_inherit(kernel_map, buffer + ptoa(1), ptoa(1), VM_INHERIT_NONE);
+	kr = mach_vm_inherit(kernel_map, buffer + ptoa(1), ptoa(1), VM_INHERIT_NONE);
 	assert(KERN_SUCCESS == kr);
 
 	md = IOMemoryDescriptor::withAddressRange(
@@ -321,7 +321,7 @@ IODMACommandLocalMappedNonContig(int newValue)
 	assert(kIOReturnSuccess == kr);
 	md->release();
 
-	kr = vm_deallocate(kernel_map, buffer, bufSize);
+	kr = mach_vm_deallocate(kernel_map, buffer, bufSize);
 	assert(KERN_SUCCESS == kr);
 	OSSafeReleaseNULL(mapper);
 
@@ -1070,17 +1070,17 @@ IOMemoryDescriptorTest(int newValue)
 	}
 
 	IOGeneralMemoryDescriptor * md;
-	vm_offset_t data[2];
+	mach_vm_offset_t data[2];
 	vm_size_t  bsize = 16 * 1024 * 1024;
 	vm_size_t  srcsize, srcoffset, mapoffset, size;
 	kern_return_t kr;
 
 	data[0] = data[1] = 0;
-	kr = vm_allocate_kernel(kernel_map, &data[0], bsize, VM_FLAGS_ANYWHERE, VM_KERN_MEMORY_IOKIT);
+	kr = mach_vm_allocate_kernel(kernel_map, &data[0], bsize, VM_FLAGS_ANYWHERE, VM_KERN_MEMORY_IOKIT);
 	assert(KERN_SUCCESS == kr);
 
-	vm_inherit(kernel_map, data[0] + ptoa(1), ptoa(1), VM_INHERIT_NONE);
-	vm_inherit(kernel_map, data[0] + ptoa(16), ptoa(4), VM_INHERIT_NONE);
+	mach_vm_inherit(kernel_map, data[0] + ptoa(1), ptoa(1), VM_INHERIT_NONE);
+	mach_vm_inherit(kernel_map, data[0] + ptoa(16), ptoa(4), VM_INHERIT_NONE);
 
 	IOLog("data 0x%lx, 0x%lx\n", (long)data[0], (long)data[1]);
 
@@ -1200,8 +1200,8 @@ IOMemoryDescriptorTest(int newValue)
 
 	assert(kr == kIOReturnSuccess);
 
-	vm_deallocate(kernel_map, data[0], bsize);
-//    vm_deallocate(kernel_map, data[1], size);
+	mach_vm_deallocate(kernel_map, data[0], bsize);
+	//mach_vm_deallocate(kernel_map, data[1], size);
 
 	IOLog("IOMemoryDescriptorTest/ %d\n", (int) gIOMemoryReferenceCount);
 

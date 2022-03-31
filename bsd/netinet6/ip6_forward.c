@@ -103,6 +103,26 @@ extern int ipsec_bypass;
 
 #if PF
 #include <net/pfvar.h>
+static void
+adjust_scope_and_pktlen(struct mbuf *m,
+    unsigned int *ifscope_p, uint32_t *mpktlen_p)
+{
+	struct pf_mtag *pf_mtag;
+	struct pf_fragment_tag *pf_ftagp;
+
+	pf_mtag = pf_find_mtag(m);
+	ASSERT(pf_mtag != NULL);
+	if (pf_mtag->pftag_rtableid != IFSCOPE_NONE) {
+		*ifscope_p = pf_mtag->pftag_rtableid;
+	}
+	pf_ftagp = pf_find_fragment_tag(m);
+	if (pf_ftagp != NULL) {
+		ASSERT(pf_mtag->pftag_flags & PF_TAG_REASSEMBLED);
+		*mpktlen_p = pf_ftagp->ft_maxlen;
+		ASSERT(*mpktlen_p);
+	}
+}
+
 #endif /* PF */
 
 /*
@@ -136,11 +156,6 @@ ip6_forward(struct mbuf *m, struct route_in6 *ip6forward_rt,
 	struct secpolicy *sp = NULL;
 #endif
 	unsigned int ifscope = IFSCOPE_NONE;
-#if PF
-	struct pf_mtag *pf_mtag;
-	struct pf_fragment_tag *pf_ftagp, pf_ftag;
-	boolean_t pf_ftag_valid = FALSE;
-#endif /* PF */
 	uint32_t mpktlen = 0;
 
 	/*
@@ -163,24 +178,8 @@ ip6_forward(struct mbuf *m, struct route_in6 *ip6forward_rt,
 	}
 
 #if PF
-	pf_mtag = pf_find_mtag(m);
-	/*
-	 * save the PF fragmentation metadata as m_copy() removes the
-	 * mbufs tags from the original mbuf.
-	 */
-	pf_ftagp = pf_find_fragment_tag(m);
-	if (pf_ftagp != NULL) {
-		ASSERT(pf_mtag->pftag_flags & PF_TAG_REASSEMBLED);
-		pf_ftag = *pf_ftagp;
-		pf_ftag_valid = TRUE;
-		mpktlen = pf_ftag.ft_maxlen;
-		ASSERT(mpktlen);
-	}
-	if (pf_mtag != NULL && pf_mtag->pftag_rtableid != IFSCOPE_NONE) {
-		ifscope = pf_mtag->pftag_rtableid;
-	}
-	pf_mtag = NULL;
-	pf_ftagp = NULL;
+	adjust_scope_and_pktlen(m, &ifscope, &mpktlen);
+
 	/*
 	 * If the caller provides a route which is on a different interface
 	 * than the one specified for scoped forwarding, discard the route
@@ -276,8 +275,8 @@ ip6_forward(struct mbuf *m, struct route_in6 *ip6forward_rt,
 	 * It is important to save it before IPsec processing as IPsec
 	 * processing may modify the mbuf.
 	 */
-	mcopy = m_copy(m, 0, imin(m->m_pkthdr.len, ICMPV6_PLD_MAXLEN));
-
+	mcopy = m_copym_mode(m, 0, imin(m->m_pkthdr.len, ICMPV6_PLD_MAXLEN),
+	    M_DONTWAIT, M_COPYM_COPY_HDR);
 #if IPSEC
 	if (ipsec_bypass != 0) {
 		goto skip_ipsec;
@@ -726,11 +725,10 @@ skip_ipsec:
 		 * rules, in which case it will set the PF_TAG_REFRAGMENTED
 		 * flag in PF mbuf tag.
 		 */
-		if (pf_ftag_valid) {
-			pf_copy_fragment_tag(m, &pf_ftag, M_DONTWAIT);
-		}
 #if DUMMYNET
 		struct ip_fw_args args;
+		struct pf_mtag *pf_mtag;
+
 		bzero(&args, sizeof(args));
 
 		args.fwa_oif = ifp;

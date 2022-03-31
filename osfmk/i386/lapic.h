@@ -262,6 +262,7 @@ extern void             lapic_end_of_interrupt(void);
 extern void             lapic_unmask_perfcnt_interrupt(void);
 extern void             lapic_set_perfcnt_interrupt_mask(boolean_t);
 extern void             lapic_send_ipi(int cpu, int interupt);
+extern void             lapic_send_nmi(int cpu);
 
 extern int              lapic_to_cpu[];
 extern int              cpu_to_lapic[];

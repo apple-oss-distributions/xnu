@@ -204,9 +204,9 @@ static TUNABLE(bool, inm_debug, "ifa_debug", false); /* debugging (disabled) */
 #define INM_ZONE_NAME           "in_multi"      /* zone name */
 static struct zone *inm_zone;                   /* zone for in_multi */
 
-static ZONE_DECLARE(ipms_zone, "ip_msource", sizeof(struct ip_msource),
+static ZONE_DEFINE_TYPE(ipms_zone, "ip_msource", struct ip_msource,
     ZC_ZFREE_CLEARMEM);
-static ZONE_DECLARE(inms_zone, "in_msource", sizeof(struct in_msource),
+static ZONE_DEFINE_TYPE(inms_zone, "in_msource", struct in_msource,
     ZC_ZFREE_CLEARMEM);
 
 static LCK_RW_DECLARE_ATTR(in_multihead_lock, &in_multihead_lock_grp,
@@ -289,17 +289,15 @@ imo_grow(struct ip_moptions *imo, uint16_t newmax)
 		return ETOOMANYREFS;
 	}
 
-	if ((nmships = (struct in_multi **)_REALLOC(omships,
-	    sizeof(struct in_multi *) * newmax, M_IPMOPTS,
-	    M_WAITOK | M_ZERO)) == NULL) {
+	if ((nmships = krealloc_type(struct in_multi *, oldmax, newmax,
+	    omships, Z_WAITOK | Z_ZERO)) == NULL) {
 		return ENOMEM;
 	}
 
 	imo->imo_membership = nmships;
 
-	if ((nmfilters = (struct in_mfilter *)_REALLOC(omfilters,
-	    sizeof(struct in_mfilter) * newmax, M_INMFILTER,
-	    M_WAITOK | M_ZERO)) == NULL) {
+	if ((nmfilters = krealloc_type(struct in_mfilter, oldmax, newmax,
+	    omfilters, Z_WAITOK | Z_ZERO)) == NULL) {
 		return ENOMEM;
 	}
 
@@ -1683,20 +1681,10 @@ inp_findmoptions(struct inpcb *inp)
 		return NULL;
 	}
 
-	immp = _MALLOC(sizeof(*immp) * IP_MIN_MEMBERSHIPS, M_IPMOPTS,
-	    M_WAITOK | M_ZERO);
-	if (immp == NULL) {
-		IMO_REMREF(imo);
-		return NULL;
-	}
-
-	imfp = _MALLOC(sizeof(struct in_mfilter) * IP_MIN_MEMBERSHIPS,
-	    M_INMFILTER, M_WAITOK | M_ZERO);
-	if (imfp == NULL) {
-		_FREE(immp, M_IPMOPTS);
-		IMO_REMREF(imo);
-		return NULL;
-	}
+	immp = kalloc_type(struct in_multi *, IP_MIN_MEMBERSHIPS,
+	    Z_WAITOK | Z_ZERO | Z_NOFAIL);
+	imfp = kalloc_type(struct in_mfilter, IP_MIN_MEMBERSHIPS,
+	    Z_WAITOK | Z_ZERO | Z_NOFAIL);
 
 	imo->imo_multicast_ifp = NULL;
 	imo->imo_multicast_addr.s_addr = INADDR_ANY;
@@ -2354,22 +2342,8 @@ inp_join_group(struct inpcb *inp, struct sockopt *sopt)
 	 * Begin state merge transaction at IGMP layer.
 	 */
 	if (is_new) {
-		/*
-		 * Unlock socket as we may end up calling ifnet_ioctl() to join (or leave)
-		 * the multicast group and we run the risk of a lock ordering issue
-		 * if the ifnet thread calls into the socket layer to acquire the pcb list
-		 * lock while the input thread delivers multicast packets
-		 */
-		IMO_ADDREF_LOCKED(imo);
-		IMO_UNLOCK(imo);
-		socket_unlock(inp->inp_socket, 0);
-
 		VERIFY(inm == NULL);
 		error = in_joingroup(ifp, &gsa->sin_addr, imf, &inm);
-
-		socket_lock(inp->inp_socket, 0);
-		IMO_REMREF(imo);
-		IMO_LOCK(imo);
 
 		VERIFY(inm != NULL || error != 0);
 		if (error) {
@@ -2611,8 +2585,6 @@ inp_leave_group(struct inpcb *inp, struct sockopt *sopt)
 	/*
 	 * Begin state merge transaction at IGMP layer.
 	 */
-
-
 	if (is_final) {
 		/*
 		 * Give up the multicast address record to which
@@ -2649,22 +2621,11 @@ out_imf_rollback:
 	imf_reap(imf);
 
 	if (is_final) {
-		/* Remove the gap in the membership array. */
+		/* Remove the gap in the membership array and filter array. */
 		VERIFY(inm == imo->imo_membership[idx]);
 		imo->imo_membership[idx] = NULL;
 
-		/*
-		 * See inp_join_group() for why we need to unlock
-		 */
-		IMO_ADDREF_LOCKED(imo);
-		IMO_UNLOCK(imo);
-		socket_unlock(inp->inp_socket, 0);
-
 		INM_REMREF(inm);
-
-		socket_lock(inp->inp_socket, 0);
-		IMO_REMREF(imo);
-		IMO_LOCK(imo);
 
 		for (++idx; idx < imo->imo_num_memberships; ++idx) {
 			imo->imo_membership[idx - 1] = imo->imo_membership[idx];

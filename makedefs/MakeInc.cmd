@@ -270,8 +270,6 @@ NEWVERS = $(SRCROOT)/config/newvers.pl
 INSTALL = $(OBJROOT)/SETUP/installfile/installfile
 REPLACECONTENTS = $(OBJROOT)/SETUP/replacecontents/replacecontents
 JSONCOMPILATIONDB = $(OBJROOT)/SETUP/json_compilation_db/json_compilation_db
-BOUND_ATTRIBUTES_CHECK = $(SRCROOT)/SETUP/bound-attributes-check.pl
-STRIP_BOUND_ATTRIBUTES = $(SRCROOT)/SETUP/strip-bound-attributes.sed
 
 # Standard BSD tools
 RM = /bin/rm -f

@@ -53,6 +53,8 @@ __BEGIN_DECLS
  *    2. Use VALUE when passing an argument that's not expected to be a kernel address. When the argument
  *       is a kernel address, the macro returns 0.
  *    3. Use PACK_2X32 to pack two 32 bit values into one 64 bit argument. PACK_2X32 arguments must be wrapped with ADDR or VALUE macro as well.
+ *    4. Use PACK_LSB to overwrite the least significant bit of a 64 bit value. PACK_LSB arguments must be wrapped with ADDR or VALUE macro as well.
+ *
  *
  * Example:
  *      SOCD_TRACE(KDBG_EVENTID(DBG_DRIVERS, DBG_SOCDIAGS, SOCD_TRACE_EVENTID(SOCD_TRACE_CLASS_KERNEL, SOCD_TRACE_CODE_KERNEL_PANIC)),
@@ -78,7 +80,14 @@ do { \
 
 #define SOCD_ADDR(_a) (VM_KERNEL_UNSLIDE((vm_offset_t)(_a)))
 #define SOCD_VALUE(_v) (VM_KERNEL_ADDRESS((vm_offset_t)(_v)) ? (socd_client_trace_arg_t)0 : (socd_client_trace_arg_t)(_v))
-#define SOCD_PACK_2X32(l, h) ((((uint64_t)(SOCD_##h) & 0xffffffff) << 32) | ((uint64_t)(SOCD_##l) & 0xffffffff))
+#define SOCD_PACK_2X32(h, l) ((((uint64_t)(SOCD_##h) & 0xffffffff) << 32) | ((uint64_t)(SOCD_##l) & 0xffffffff))
+#define SOCD_PACK_LSB(h, lsb) ((((uint64_t)(SOCD_##h)) & 0xfffffffffffffffe) | ((uint64_t)(SOCD_##lsb) & 0x1))
+
+/* Test macros for proper functionality locally before nominating. */
+#if !defined(__arm64__)
+static_assert(SOCD_PACK_2X32(VALUE(0xffff1000), VALUE(0xffff1200)) == 0xffff1000ffff1200, "PACK_2X32 failed to return expected output.");
+static_assert(SOCD_PACK_LSB(VALUE(0xffff), VALUE(0x0)) == 0xfffe, "PACK_LSB failed to return expected output.");
+#endif // !defined(__arm64__)
 
 #define _SOCD_TRACE_XNU(c, x, ...) \
    SOCD_TRACE(KDBG_EVENTID(DBG_DRIVERS, DBG_SOCDIAGS, SOCD_TRACE_EVENTID(SOCD_TRACE_CLASS_XNU, SOCD_TRACE_CODE_XNU_##c)) | (x), ## __VA_ARGS__)

@@ -650,7 +650,11 @@ long offset;
 	time_status &= ~STA_MODE;
 	if (mtemp >= MINSEC && (time_status & STA_FLL || mtemp >
 	    MAXSEC)) {
-		L_LINT(ftemp, (time_monitor << 4) / mtemp);
+		if (time_monitor > 0) {
+			L_LINT(ftemp, (time_monitor << 4) / mtemp);
+		} else {
+			L_LINT(ftemp, -((int64_t)(-(time_monitor)) << 4) / mtemp);
+		}
 		L_RSHIFT(ftemp, SHIFT_FLL + 4);
 		L_ADD(time_freq, ftemp);
 		time_status |= STA_MODE;

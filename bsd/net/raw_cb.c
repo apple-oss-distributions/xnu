@@ -121,7 +121,7 @@ raw_attach(struct socket *so, int proto)
  * socket resources.
  */
 void
-raw_detach(struct rawcb *rp)
+raw_detach_nofree(struct rawcb *rp)
 {
 	struct socket *so = rp->rcb_socket;
 
@@ -142,7 +142,6 @@ raw_detach(struct rawcb *rp)
 	rp->rcb_laddr = 0;
 #endif
 	rp->rcb_socket = NULL;
-	FREE(rp, M_PCB);
 }
 
 /*
@@ -165,7 +164,8 @@ raw_disconnect(struct rawcb *rp)
 	 * when the socket is closed for real, SOF_MP_SUBFLOW would be cleared.
 	 */
 	if (!(so->so_flags & SOF_MP_SUBFLOW) && (so->so_state & SS_NOFDREF)) {
-		raw_detach(rp);
+		raw_detach_nofree(rp);
+		kfree_type(struct rawcb, rp);
 	}
 }
 

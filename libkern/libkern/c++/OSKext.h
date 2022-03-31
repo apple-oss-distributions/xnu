@@ -77,14 +77,13 @@ extern "C" {
 void OSKextLog(
 	OSKext         * aKext,
 	OSKextLogSpec    msgLogSpec,
-	const char     * format, ...)
-__attribute__((format(printf, 3, 4)));
+	const char     * format, ...) __printflike(3, 4);
 
 void OSKextVLog(
 	OSKext         * aKext,
 	OSKextLogSpec    msgLogSpec,
 	const char     * format,
-	va_list          srcArgList);
+	va_list          srcArgList) __printflike(3, 0);;
 
 #ifdef XNU_KERNEL_PRIVATE
 void OSKextRemoveKextBootstrap(void);
@@ -210,7 +209,7 @@ class OSKext : public OSObject
 		OSKext         * aKext,
 		OSKextLogSpec    msgLogSpec,
 		const char     * format,
-		va_list          srcArgList);
+		va_list          srcArgList) __printflike(3, 0);
 
 	friend void OSKextRemoveKextBootstrap(void);
 	friend OSReturn OSKextUnloadKextWithLoadTag(uint32_t);

@@ -1,3 +1,8 @@
+from __future__ import absolute_import, print_function
+
+from builtins import hex
+from builtins import object
+
 from xnu import *
 
 """
@@ -119,17 +124,17 @@ def ShowInheritanceChains(cmd_args=[], cmd_options={}):
     """ show boost inheritance chains.
         Usage: (lldb) showboostinheritancechains  <task_t>
     """
-    print ' ' + GetIPCImportantTaskSummary.header + ' ' + GetIPCImportanceElemSummary.header
+    print(' ' + GetIPCImportantTaskSummary.header + ' ' + GetIPCImportanceElemSummary.header)
     for task in kern.tasks:
         if unsigned(task.task_imp_base):
-            print " " + GetIPCImportantTaskSummary(task.task_imp_base) + ' ' + GetIPCImportanceElemSummary(addressof(task.task_imp_base.iit_elem))
+            print(" " + GetIPCImportantTaskSummary(task.task_imp_base) + ' ' + GetIPCImportanceElemSummary(addressof(task.task_imp_base.iit_elem)))
             base_node = IIINode(Cast(task.task_imp_base, 'ipc_importance_inherit *'), None)
             GetIIIListFromIIE(task.task_imp_base.iit_elem, base_node)
-            print base_node.GetChildSummaries(prefix="\t\t")
+            print(base_node.GetChildSummaries(prefix="\t\t"))
     
-    print "\n\n ======================== TASK REVERSE CHAIN OF IMPORTANCES ========================="
-    print TaskNode.GetHeaderString()
-    for k in AllTasksCollection.keys():
+    print("\n\n ======================== TASK REVERSE CHAIN OF IMPORTANCES =========================")
+    print(TaskNode.GetHeaderString())
+    for k in list(AllTasksCollection.keys()):
         t = AllTasksCollection[k]
-        print "\n" + str(t)
+        print("\n" + str(t))
 

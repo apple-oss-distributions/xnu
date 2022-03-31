@@ -133,6 +133,28 @@ unsigned int backtrace(uintptr_t *bt, unsigned int btlen,
     struct backtrace_control *ctl, backtrace_info_t *info_out)
 __attribute__((noinline));
 
+// backtrace_pack_t changes the packing scheme for backtraces.
+__enum_decl(backtrace_pack_t, uint32_t, {
+	// Leave the addresses alone.
+	BTP_NONE = 0x0,
+	// Subtract the kernel base address and store each offset in 4 bytes.
+	BTP_KERN_OFFSET_32 = 0x01,
+});
+
+// Backtrace the current thread's kernel stack and store in a packed
+// representation.
+size_t backtrace_packed(backtrace_pack_t packing, uint8_t *bt, size_t btsize,
+	struct backtrace_control *ctl, backtrace_info_t *info_out)
+__attribute__((noinline));
+
+// Convert an array of addresses to a packed representation.
+size_t backtrace_pack(backtrace_pack_t packing, uint8_t *dst,
+    size_t dst_size, const uintptr_t *src, unsigned int src_len);
+
+// Convert a packed backtrace to an array of addresses.
+unsigned int backtrace_unpack(backtrace_pack_t packing, uintptr_t *dst,
+    unsigned int dst_len, const uint8_t *src, size_t src_size);
+
 // backtrace_user_info describes a user backtrace.
 struct backtrace_user_info {
 	backtrace_info_t btui_info;

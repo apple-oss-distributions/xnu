@@ -846,6 +846,7 @@ cons_putc_locked(char c)
 	}
 }
 
+__printflike(1, 0)
 static int
 vprintf_internal(const char *fmt, va_list ap_in, void *caller)
 {
@@ -860,7 +861,10 @@ vprintf_internal(const char *fmt, va_list ap_in, void *caller)
 
 		va_end(ap);
 
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wformat-nonliteral"
 		os_log_with_args(OS_LOG_DEFAULT, OS_LOG_TYPE_DEFAULT, fmt, ap_in, caller);
+#pragma clang diagnostic pop
 	}
 	return 0;
 }

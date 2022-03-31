@@ -462,7 +462,7 @@ SecureDTRestartEntryIteration(DTEntryIterator iter)
 	if (outer) {
 		while ((scope = iter->savedScope) != NULL) {
 			iter->savedScope = scope->nextScope;
-			kfree((vm_offset_t) scope, sizeof(struct DTSavedScope));
+			kfree_type(struct DTSavedScope, scope);
 		}
 		iter->currentScope = iter->outerScope;
 	}

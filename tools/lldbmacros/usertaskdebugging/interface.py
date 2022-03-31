@@ -1,3 +1,8 @@
+from __future__ import absolute_import
+
+from builtins import bytes
+from builtins import object
+
 import logging
 import socket
 import select
@@ -38,20 +43,20 @@ class Interface(object):
             #logging.warn("blocking read bug")
             self.connection.settimeout(15)
             self.isblocking = False
-        r_bytes = ''
+        r_bytes = bytes()
         try:
             r_bytes = self.connection.recv(self.pkt_size)
-        except Exception, e:
+        except Exception as e:
             #logging.debug("Found exception in recv. %s " % (str(e)))
             pass
 
         return r_bytes
     
-    def write(self, bytes):
+    def write(self, str):
         if not self.isblocking:
             self.connection.setblocking(1)
             self.isblocking = True
-        return self.connection.send(bytes)
+        return self.connection.send(str.encode())
 
     def close(self):
         if self.connection:

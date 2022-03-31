@@ -113,7 +113,12 @@ typedef struct {
 	union {
 		struct __attribute__((packed)) {
 			user_addr_t     ulk_addr;
-			pid_t           ulk_pid;
+			/*
+			 * We use the task address as a hashing key,
+			 * so that ulock wakes across exec can't
+			 * be confused.
+			 */
+			task_t          ulk_task __kernel_data_semantics;
 		};
 		struct __attribute__((packed)) {
 			uint64_t        ulk_object;
@@ -123,7 +128,7 @@ typedef struct {
 	ulk_type        ulk_key_type;
 } ulk_t;
 
-#define ULK_UADDR_LEN   (sizeof(user_addr_t) + sizeof(pid_t))
+#define ULK_UADDR_LEN   (sizeof(user_addr_t) + sizeof(task_t))
 #define ULK_XPROC_LEN   (sizeof(uint64_t) + sizeof(uint64_t))
 
 inline static bool
@@ -134,7 +139,7 @@ ull_key_match(ulk_t *a, ulk_t *b)
 	}
 
 	if (a->ulk_key_type == ULK_UADDR) {
-		return (a->ulk_pid == b->ulk_pid) &&
+		return (a->ulk_task == b->ulk_task) &&
 		       (a->ulk_addr == b->ulk_addr);
 	}
 
@@ -177,7 +182,7 @@ ull_dump(ull_t *ull)
 	switch (ull->ull_key.ulk_key_type) {
 	case ULK_UADDR:
 		kprintf("ull_key.ulk_key_type\tULK_UADDR\n");
-		kprintf("ull_key.ulk_pid\t%d\n", ull->ull_key.ulk_pid);
+		kprintf("ull_key.ulk_task\t%p\n", ull->ull_key.ulk_task);
 		kprintf("ull_key.ulk_addr\t%p\n", (void *)(ull->ull_key.ulk_addr));
 		break;
 	case ULK_XPROC:
@@ -205,7 +210,7 @@ typedef struct ull_bucket {
 static SECURITY_READ_ONLY_LATE(int) ull_hash_buckets;
 static SECURITY_READ_ONLY_LATE(ull_bucket_t *) ull_bucket;
 static uint32_t ull_nzalloc = 0;
-static ZONE_DECLARE(ull_zone, "ulocks", sizeof(ull_t), ZC_CACHING);
+static ZONE_DEFINE_TYPE(ull_zone, "ulocks", ull_t, ZC_CACHING);
 
 #define ull_bucket_lock(i)       lck_spin_lock_grp(&ull_bucket[i].ulb_lock, &ull_lck_grp)
 #define ull_bucket_unlock(i)     lck_spin_unlock(&ull_bucket[i].ulb_lock)
@@ -246,14 +251,14 @@ ulock_initialize(void)
 STARTUP(EARLY_BOOT, STARTUP_RANK_FIRST, ulock_initialize);
 
 #if DEVELOPMENT || DEBUG
-/* Count the number of hash entries for a given pid.
- * if pid==0, dump the whole table.
+/* Count the number of hash entries for a given task address.
+ * if task==0, dump the whole table.
  */
 static int
-ull_hash_dump(pid_t pid)
+ull_hash_dump(task_t task)
 {
 	int count = 0;
-	if (pid == 0) {
+	if (task == TASK_NULL) {
 		kprintf("%s>total number of ull_t allocated %d\n", __FUNCTION__, ull_nzalloc);
 		kprintf("%s>BEGIN\n", __FUNCTION__);
 	}
@@ -261,11 +266,12 @@ ull_hash_dump(pid_t pid)
 		ull_bucket_lock(i);
 		if (!queue_empty(&ull_bucket[i].ulb_head)) {
 			ull_t *elem;
-			if (pid == 0) {
+			if (task == TASK_NULL) {
 				kprintf("%s>index %d:\n", __FUNCTION__, i);
 			}
 			qe_foreach_element(elem, &ull_bucket[i].ulb_head, ull_hash_link) {
-				if ((pid == 0) || ((elem->ull_key.ulk_key_type == ULK_UADDR) && (pid == elem->ull_key.ulk_pid))) {
+				if ((task == TASK_NULL) || ((elem->ull_key.ulk_key_type == ULK_UADDR)
+				    && (task == elem->ull_key.ulk_task))) {
 					ull_dump(elem);
 					count++;
 				}
@@ -273,7 +279,7 @@ ull_hash_dump(pid_t pid)
 		}
 		ull_bucket_unlock(i);
 	}
-	if (pid == 0) {
+	if (task == TASK_NULL) {
 		kprintf("%s>END\n", __FUNCTION__);
 		ull_nzalloc = 0;
 	}
@@ -459,7 +465,7 @@ ulock_resolve_owner(uint32_t value, thread_t *owner)
 }
 
 int
-ulock_wait(struct proc *p, struct ulock_wait_args *args, int32_t *retval)
+sys_ulock_wait(struct proc *p, struct ulock_wait_args *args, int32_t *retval)
 {
 	struct ulock_wait2_args args2;
 
@@ -469,11 +475,11 @@ ulock_wait(struct proc *p, struct ulock_wait_args *args, int32_t *retval)
 	args2.timeout   = (uint64_t)(args->timeout) * NSEC_PER_USEC;
 	args2.value2    = 0;
 
-	return ulock_wait2(p, &args2, retval);
+	return sys_ulock_wait2(p, &args2, retval);
 }
 
 int
-ulock_wait2(struct proc *p, struct ulock_wait2_args *args, int32_t *retval)
+sys_ulock_wait2(struct proc *p, struct ulock_wait2_args *args, int32_t *retval)
 {
 	uint8_t opcode = (uint8_t)(args->operation & UL_OPCODE_MASK);
 	uint flags = args->operation & UL_FLAGS_MASK;
@@ -544,7 +550,7 @@ ulock_wait2(struct proc *p, struct ulock_wait2_args *args, int32_t *retval)
 		key.ulk_offset = offset;
 	} else {
 		key.ulk_key_type = ULK_UADDR;
-		key.ulk_pid = proc_getpid(p);
+		key.ulk_task = proc_task(p);
 		key.ulk_addr = args->addr;
 	}
 
@@ -814,8 +820,7 @@ __attribute__((noreturn))
 static void
 ulock_wait_continue(__unused void * parameter, wait_result_t wr)
 {
-	thread_t self = current_thread();
-	uthread_t uthread = (uthread_t)get_bsdthread_info(self);
+	uthread_t uthread = current_uthread();
 	int ret = 0;
 
 	ull_t *ull = uthread->uu_save.uus_ulock_wait_data.ull;
@@ -840,28 +845,43 @@ ulock_wait_continue(__unused void * parameter, wait_result_t wr)
 }
 
 int
-ulock_wake(struct proc *p, struct ulock_wake_args *args, __unused int32_t *retval)
+sys_ulock_wake(struct proc *p, struct ulock_wake_args *args, int32_t *retval)
 {
-	uint8_t opcode = (uint8_t)(args->operation & UL_OPCODE_MASK);
-	uint flags = args->operation & UL_FLAGS_MASK;
 	int ret = 0;
-	ulk_t key;
-
-	/* involved threads - each variable holds +1 ref if not null */
-	thread_t wake_thread    = THREAD_NULL;
-
 #if DEVELOPMENT || DEBUG
+	uint8_t opcode = (uint8_t)(args->operation & UL_OPCODE_MASK);
+
 	if (opcode == UL_DEBUG_HASH_DUMP_PID) {
-		*retval = ull_hash_dump(proc_getpid(p));
+		*retval = ull_hash_dump(proc_task(p));
 		return ret;
 	} else if (opcode == UL_DEBUG_HASH_DUMP_ALL) {
-		*retval = ull_hash_dump(0);
+		*retval = ull_hash_dump(TASK_NULL);
 		return ret;
 	} else if (opcode == UL_DEBUG_SIMULATE_COPYIN_FAULT) {
 		ull_simulate_copyin_fault = (int)(args->wake_value);
 		return ret;
 	}
 #endif
+	ret = ulock_wake(proc_task(p), args->operation, args->addr, args->wake_value);
+
+	if ((args->operation & ULF_NO_ERRNO) && (ret != 0)) {
+		*retval = -ret;
+		ret = 0;
+	}
+
+	return ret;
+}
+
+int
+ulock_wake(task_t task, uint32_t operation, user_addr_t addr, uint64_t wake_value)
+{
+	uint8_t opcode = (uint8_t)(operation & UL_OPCODE_MASK);
+	uint flags = operation & UL_FLAGS_MASK;
+	int ret = 0;
+	ulk_t key;
+
+	/* involved threads - each variable holds +1 ref if not null */
+	thread_t wake_thread    = THREAD_NULL;
 
 	bool set_owner = false;
 	bool allow_non_owner = false;
@@ -902,7 +922,7 @@ ulock_wake(struct proc *p, struct ulock_wake_args *args, __unused int32_t *retva
 		allow_non_owner = true;
 	}
 
-	if (args->addr == 0) {
+	if (addr == 0) {
 		ret = EINVAL;
 		goto munge_retval;
 	}
@@ -911,7 +931,7 @@ ulock_wake(struct proc *p, struct ulock_wake_args *args, __unused int32_t *retva
 		uint64_t object = 0;
 		uint64_t offset = 0;
 
-		ret = uaddr_findobj(args->addr, &object, &offset);
+		ret = uaddr_findobj(addr, &object, &offset);
 		if (ret) {
 			ret = EINVAL;
 			goto munge_retval;
@@ -921,12 +941,12 @@ ulock_wake(struct proc *p, struct ulock_wake_args *args, __unused int32_t *retva
 		key.ulk_offset = offset;
 	} else {
 		key.ulk_key_type = ULK_UADDR;
-		key.ulk_pid = proc_getpid(p);
-		key.ulk_addr = args->addr;
+		key.ulk_task = task;
+		key.ulk_addr = addr;
 	}
 
 	if (flags & ULF_WAKE_THREAD) {
-		mach_port_name_t wake_thread_name = (mach_port_name_t)(args->wake_value);
+		mach_port_name_t wake_thread_name = (mach_port_name_t)(wake_value);
 		wake_thread = port_name_to_thread(wake_thread_name,
 		    PORT_INTRANS_THREAD_IN_CURRENT_TASK |
 		    PORT_INTRANS_THREAD_NOT_CURRENT_THREAD);
@@ -1026,10 +1046,6 @@ munge_retval:
 		thread_deallocate(wake_thread);
 	}
 
-	if ((flags & ULF_NO_ERRNO) && (ret != 0)) {
-		*retval = -ret;
-		ret = 0;
-	}
 	return ret;
 }
 

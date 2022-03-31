@@ -1,3 +1,7 @@
+from __future__ import absolute_import, division, print_function
+
+from builtins import range
+
 from xnu import *
 from utils import *
 from core.configuration import *
@@ -31,7 +35,7 @@ def is_kasan_build():
     try:
         enable = kern.globals.kasan_enabled
         return True
-    except ValueError, e:
+    except ValueError as e:
         return False
 
 def shadow_for_address(addr, shift):
@@ -44,19 +48,19 @@ def get_shadow_byte(shadow_addr):
     return unsigned(kern.GetValueFromAddress(shadow_addr, 'uint8_t *')[0])
 
 def print_legend():
-    for (k,v) in shadow_strings.iteritems():
-        print " {:02x}: {}".format(k,v)
+    for (k,v) in shadow_strings.items():
+        print(" {:02x}: {}".format(k,v))
 
 def print_shadow_context(addr, context):
     addr = shadow_for_address(addr, shift)
     base = (addr & ~0xf) - 16 * context
     shadow = kern.GetValueFromAddress(unsigned(base), "uint8_t *")
 
-    print " "*17 + "  0  1  2  3  4  5  6  7  8  9  a  b  c  d  e  f"
+    print(" "*17 + "  0  1  2  3  4  5  6  7  8  9  a  b  c  d  e  f")
     for x in range(0, 2*context+1):
         vals = ""
         l = " "
-        for y in xrange(x*16, (x+1)*16):
+        for y in range(x*16, (x+1)*16):
             r = " "
             if base+y == addr:
                 l = "["
@@ -92,23 +96,23 @@ def print_alloc_free_entry(addr, orig_ptr):
 
     rightrz = asz - usz - leftrz
 
-    print "Freed {} object".format(alloc_type)
-    print "Valid range: 0x{:x} -- 0x{:x} ({} bytes)".format(addr + leftrz, addr + leftrz + usz - 1, usz)
-    print "Total range: 0x{:x} -- 0x{:x} ({} bytes)".format(addr, addr + asz - 1, asz)
-    print "Offset:      {} bytes".format(orig_ptr - addr - leftrz)
-    print "Redzone:     {} / {} bytes".format(leftrz, rightrz)
+    print("Freed {} object".format(alloc_type))
+    print("Valid range: 0x{:x} -- 0x{:x} ({} bytes)".format(addr + leftrz, addr + leftrz + usz - 1, usz))
+    print("Total range: 0x{:x} -- 0x{:x} ({} bytes)".format(addr, addr + asz - 1, asz))
+    print("Offset:      {} bytes".format(orig_ptr - addr - leftrz))
+    print("Redzone:     {} / {} bytes".format(leftrz, rightrz))
     if h.zone:
-        print "Zone:        0x{:x} <{:s}>".format(unsigned(zone), zone.z_name)
+        print("Zone:        0x{:x} <{:s}>".format(unsigned(zone), zone.z_name))
 
     btframes = unsigned(h.frames)
     if btframes > 0:
-        print "",
-        print "Free site backtrace ({} frames):".format(btframes)
-        for i in xrange(0, btframes):
+        print("", end=' ')
+        print("Free site backtrace ({} frames):".format(btframes))
+        for i in range(0, btframes):
             fr = unsigned(kern.globals.vm_kernel_slid_base) + unsigned(h.backtrace[i])
-            print " #{:}: {}".format(btframes-i-1, GetSourceInformationForAddress(fr))
+            print(" #{:}: {}".format(btframes-i-1, GetSourceInformationForAddress(fr)))
 
-    print "",
+    print("", end=' ')
     print_hexdump(addr, asz, 1)
 
 alloc_header_sz = 16
@@ -149,7 +153,7 @@ def print_alloc_info(_addr):
 
         # heap allocations should only ever have these shadow values
         if shbyte not in (0,1,2,3,4,5,6,7, 0xfa, 0xfb, 0xfd, 0xf5):
-            print "No allocation found at 0x{:x} (found shadow {:x})".format(_addr, shbyte)
+            print("No allocation found at 0x{:x} (found shadow {:x})".format(_addr, shbyte))
             return
 
         if magic_for_addr(addr, 0x3a65) == unsigned(liveh.magic):
@@ -163,20 +167,20 @@ def print_alloc_info(_addr):
                 rightrz = asz - usz - leftrz
                 offset = _addr - addr
 
-                print "Live heap object"
-                print "Valid range: 0x{:x} -- 0x{:x} ({} bytes)".format(addr, addr + usz - 1, usz)
-                print "Total range: 0x{:x} -- 0x{:x} ({} bytes)".format(base, base + asz - 1, asz)
-                print "Offset:      {} bytes (shadow: 0x{:02x} {}, remaining: {} bytes)".format(offset, _shbyte, _shstr, usz - offset)
-                print "Redzone:     {} / {} bytes".format(leftrz, rightrz)
+                print("Live heap object")
+                print("Valid range: 0x{:x} -- 0x{:x} ({} bytes)".format(addr, addr + usz - 1, usz))
+                print("Total range: 0x{:x} -- 0x{:x} ({} bytes)".format(base, base + asz - 1, asz))
+                print("Offset:      {} bytes (shadow: 0x{:02x} {}, remaining: {} bytes)".format(offset, _shbyte, _shstr, usz - offset))
+                print("Redzone:     {} / {} bytes".format(leftrz, rightrz))
 
                 btframes = unsigned(liveh.frames)
-                print "",
-                print "Alloc site backtrace ({} frames):".format(btframes)
-                for i in xrange(0, btframes):
+                print("", end=' ')
+                print("Alloc site backtrace ({} frames):".format(btframes))
+                for i in range(0, btframes):
                     fr = unsigned(kern.globals.vm_kernel_slid_base) + unsigned(footer.backtrace[i])
-                    print " #{:}: {}".format(btframes-i-1, GetSourceInformationForAddress(fr))
+                    print(" #{:}: {}".format(btframes-i-1, GetSourceInformationForAddress(fr)))
 
-                print "",
+                print("", end=' ')
                 print_hexdump(base, asz, 1)
             return
 
@@ -189,7 +193,7 @@ def print_alloc_info(_addr):
         searchbytes += 8
         addr -= 8
 
-    print "No allocation found at 0x{:x}".format(_addr)
+    print("No allocation found at 0x{:x}".format(_addr))
 
 def shadow_byte_to_string(sb):
     return shadow_strings.get(sb, '??')
@@ -206,7 +210,7 @@ def print_whatis(_addr, ctx):
     try:
         shbyte = get_shadow_byte(shaddr)
     except:
-        print "Unmapped shadow 0x{:x} for address 0x{:x}".format(shaddr, addr)
+        print("Unmapped shadow 0x{:x} for address 0x{:x}".format(shaddr, addr))
         return
 
     maxsearch = 8*4096
@@ -216,30 +220,30 @@ def print_whatis(_addr, ctx):
         return
 
     if shbyte not in [0,1,2,3,4,5,6,7,0xf8]:
-        print "Poisoned memory, shadow {:x} [{}]".format(shbyte, shadow_byte_to_string(shbyte))
+        print("Poisoned memory, shadow {:x} [{}]".format(shbyte, shadow_byte_to_string(shbyte)))
         return
 
-    if shbyte is 0xf8:
+    if shbyte == 0xf8:
         extra = "Out-of-scope"
 
     # look for the base of the object
     while shbyte in [0,1,2,3,4,5,6,7,0xf8]:
         sz = 8 - shbyte
-        if shbyte is 0xf8:
+        if shbyte == 0xf8:
             sz = 8
         total_size += sz
         addr -= 8
         shbyte = get_shadow_byte(shadow_for_address(addr, shift))
         maxsearch -= 8
         if maxsearch <= 0:
-            print "No object found"
+            print("No object found")
             return
     base = addr + 8
     leftrz = shbyte
 
     # If we did not find a left/mid redzone, we aren't in an object
     if leftrz not in [0xf1, 0xf2, 0xfa, 0xf9]:
-        print "No object found"
+        print("No object found")
         return
 
     # now size the object
@@ -247,14 +251,14 @@ def print_whatis(_addr, ctx):
     shbyte = get_shadow_byte(shadow_for_address(addr, shift))
     while shbyte in [0,1,2,3,4,5,6,7,0xf8]:
         sz = 8 - shbyte
-        if shbyte is 0xf8:
+        if shbyte == 0xf8:
             sz = 8
         total_size += sz
         addr += 8
         shbyte = get_shadow_byte(shadow_for_address(addr, shift))
         maxsearch -= 8
         if maxsearch <= 0:
-            print "No object found"
+            print("No object found")
             return
     rightrz = shbyte
 
@@ -268,10 +272,10 @@ def print_whatis(_addr, ctx):
         print_alloc_info(_addr)
         return
 
-    print "{} {} object".format(extra, objtype)
-    print "Valid range: 0x{:x} -- 0x{:x} ({} bytes)".format(base, base+total_size-1, total_size)
-    print "Offset:      {} bytes".format(_addr - base)
-    print "",
+    print("{} {} object".format(extra, objtype))
+    print("Valid range: 0x{:x} -- 0x{:x} ({} bytes)".format(base, base+total_size-1, total_size))
+    print("Offset:      {} bytes".format(_addr - base))
+    print("", end=' ')
     print_hexdump(base, total_size, 1)
 
 def print_hexdump(base, size, ctx):
@@ -291,17 +295,17 @@ def print_hexdump(base, size, ctx):
 def kasan_subcommand(cmd, args, opts):
     addr = None
     if len(args) > 0:
-        addr = long(args[0], 0)
+        addr = int(args[0], 0)
 
     if cmd in ['a2s', 'toshadow', 'fromaddr', 'fromaddress']:
-        print "0x{:016x}".format(shadow_for_address(addr, shift))
+        print("0x{:016x}".format(shadow_for_address(addr, shift)))
     elif cmd in ['s2a', 'toaddr', 'toaddress', 'fromshadow']:
-        print "0x{:016x}".format(address_for_shadow(addr, shift))
+        print("0x{:016x}".format(address_for_shadow(addr, shift)))
     elif cmd == 'shadow':
         shadow = shadow_for_address(addr, shift)
         sb = get_shadow_byte(shadow)
         print("0x{:02x} @ 0x{:016x} [{}]\n\n".format(sb, shadow, shadow_byte_to_string(sb)))
-        ctx = long(opts.get("-C", 5))
+        ctx = int(opts.get("-C", 5))
         print_shadow_context(addr, ctx)
     elif cmd == 'key' or cmd == 'legend':
         print_legend()
@@ -309,16 +313,16 @@ def kasan_subcommand(cmd, args, opts):
         pages_used = unsigned(kern.globals.shadow_pages_used)
         pages_total = unsigned(kern.globals.shadow_pages_total)
         nkexts = unsigned(kern.globals.kexts_loaded)
-        print "Offset:       0x{:016x}".format(shift)
-        print "Shadow used:  {} / {} ({:.1f}%)".format(pages_used, pages_total, 100.0*pages_used/pages_total)
-        print "Kexts loaded: {}".format(nkexts)
+        print("Offset:       0x{:016x}".format(shift))
+        print("Shadow used:  {} / {} ({:.1f}%)".format(pages_used, pages_total, 100.0*pages_used / pages_total))
+        print("Kexts loaded: {}".format(nkexts))
     elif cmd == 'whatis':
-        ctx = long(opts.get("-C", 1))
+        ctx = int(opts.get("-C", 1))
         print_whatis(addr, ctx)
     elif cmd == 'alloc' or cmd == 'heap':
         print_alloc_info(addr)
     else:
-        print "Unknown subcommand: `{}'".format(cmd)
+        print("Unknown subcommand: `{}'".format(cmd))
 
 @lldb_command('kasan', 'C:')
 def Kasan(cmd_args=None, cmd_options={}):
@@ -337,11 +341,11 @@ def Kasan(cmd_args=None, cmd_options={}):
     -C <num> : num lines of context to show"""
 
     if not is_kasan_build():
-        print "KASan not enabled in build"
+        print("KASan not enabled in build")
         return
 
     if len(cmd_args) == 0:
-        print Kasan.__doc__
+        print(Kasan.__doc__)
         return
 
     global shift
@@ -350,7 +354,7 @@ def Kasan(cmd_args=None, cmd_options={}):
     # Since the VM is not aware of the KASan shadow mapping, accesses to it will
     # fail. Setting kdp_read_io=1 avoids this check.
     if GetConnectionProtocol() == "kdp" and unsigned(kern.globals.kdp_read_io) == 0:
-        print "Setting kdp_read_io=1 to allow KASan shadow reads"
+        print("Setting kdp_read_io=1 to allow KASan shadow reads")
         if sizeof(kern.globals.kdp_read_io) == 4:
             WriteInt32ToMemoryAddress(1, addressof(kern.globals.kdp_read_io))
         elif sizeof(kern.globals.kdp_read_io) == 8:

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2020 Apple Inc. All rights reserved.
+ * Copyright (c) 2012-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -94,6 +94,9 @@
 
 #include <netinet/in_pcb.h>
 #include <net/flowadv.h>
+#if SKYWALK
+#include <skywalk/os_channel.h>
+#endif /* SKYWALK */
 
 /* Lock group and attribute for fadv_lock */
 static LCK_GRP_DECLARE(fadv_lock_grp, "fadv_lock");
@@ -213,6 +216,11 @@ flowadv_thread_cont(int err)
 				ifnet_flowadv(fce->fce_flowid);
 				break;
 
+#if SKYWALK
+			case FLOWSRC_CHANNEL:
+				kern_channel_flowadv_clear(fce);
+				break;
+#endif /* SKYWALK */
 
 			case FLOWSRC_PF:
 			default:

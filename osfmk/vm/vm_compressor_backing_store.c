@@ -404,50 +404,11 @@ vm_swap_decrypt(c_segment_t c_seg)
 
 uint64_t compressed_swap_chunk_size, vm_swapfile_hiwater_segs, swapfile_reclaim_threshold_segs, swapfile_reclam_minimum_segs;
 void
-vm_compressor_swap_init()
+vm_compressor_swap_init(void)
 {
 	thread_t        thread = NULL;
 
 	queue_init(&swf_global_queue);
-
-	if (kernel_thread_start_priority((thread_continue_t)vm_swapout_thread, NULL,
-	    BASEPRI_VM, &thread) != KERN_SUCCESS) {
-		panic("vm_swapout_thread: create failed");
-	}
-	thread_set_thread_name(thread, "VM_swapout");
-	vm_swapout_thread_id = thread->thread_id;
-
-	thread_deallocate(thread);
-
-	if (kernel_thread_start_priority((thread_continue_t)vm_swapfile_create_thread, NULL,
-	    BASEPRI_VM, &thread) != KERN_SUCCESS) {
-		panic("vm_swapfile_create_thread: create failed");
-	}
-
-	thread_set_thread_name(thread, "VM_swapfile_create");
-	thread_deallocate(thread);
-
-	if (kernel_thread_start_priority((thread_continue_t)vm_swapfile_gc_thread, NULL,
-	    BASEPRI_VM, &thread) != KERN_SUCCESS) {
-		panic("vm_swapfile_gc_thread: create failed");
-	}
-	thread_set_thread_name(thread, "VM_swapfile_gc");
-
-	/*
-	 * Swapfile garbage collection will need to allocate memory
-	 * to complete its swap reclaim and in-memory compaction.
-	 * So allow it to dip into the reserved VM page pool.
-	 */
-	thread_lock(thread);
-	thread->options |= TH_OPT_VMPRIV;
-	thread_unlock(thread);
-
-	thread_deallocate(thread);
-
-	proc_set_thread_policy_with_tid(kernel_task, thread->thread_id,
-	    TASK_POLICY_INTERNAL, TASK_POLICY_IO, THROTTLE_LEVEL_COMPRESSOR_TIER2);
-	proc_set_thread_policy_with_tid(kernel_task, thread->thread_id,
-	    TASK_POLICY_INTERNAL, TASK_POLICY_PASSIVE_IO, TASK_POLICY_ENABLE);
 
 #if !XNU_TARGET_OS_OSX
 	/*
@@ -475,6 +436,40 @@ vm_compressor_swap_init()
 	}
 #endif
 	printf("Maximum number of VM swap files: %d\n", vm_num_swap_files_config);
+
+	if (kernel_thread_start_priority((thread_continue_t)vm_swapout_thread, NULL,
+	    BASEPRI_VM, &thread) != KERN_SUCCESS) {
+		panic("vm_swapout_thread: create failed");
+	}
+	thread_set_thread_name(thread, "VM_swapout");
+	vm_swapout_thread_id = thread->thread_id;
+	thread_deallocate(thread);
+
+	if (kernel_thread_start_priority((thread_continue_t)vm_swapfile_create_thread, NULL,
+	    BASEPRI_VM, &thread) != KERN_SUCCESS) {
+		panic("vm_swapfile_create_thread: create failed");
+	}
+	thread_set_thread_name(thread, "VM_swapfile_create");
+	thread_deallocate(thread);
+
+	if (kernel_thread_start_priority((thread_continue_t)vm_swapfile_gc_thread, NULL,
+	    BASEPRI_VM, &thread) != KERN_SUCCESS) {
+		panic("vm_swapfile_gc_thread: create failed");
+	}
+	thread_set_thread_name(thread, "VM_swapfile_gc");
+	/*
+	 * Swapfile garbage collection will need to allocate memory
+	 * to complete its swap reclaim and in-memory compaction.
+	 * So allow it to dip into the reserved VM page pool.
+	 */
+	thread_lock(thread);
+	thread->options |= TH_OPT_VMPRIV;
+	thread_unlock(thread);
+	thread_deallocate(thread);
+	proc_set_thread_policy_with_tid(kernel_task, thread->thread_id,
+	    TASK_POLICY_INTERNAL, TASK_POLICY_IO, THROTTLE_LEVEL_COMPRESSOR_TIER2);
+	proc_set_thread_policy_with_tid(kernel_task, thread->thread_id,
+	    TASK_POLICY_INTERNAL, TASK_POLICY_PASSIVE_IO, TASK_POLICY_ENABLE);
 
 	printf("VM Swap Subsystem is ON\n");
 }
@@ -1300,6 +1295,8 @@ vm_swapout_finish(c_segment_t c_seg, uint64_t f_offset, uint32_t size, kern_retu
 		c_seg->c_store.c_swap_handle = f_offset;
 
 		counter_add(&vm_statistics_swapouts, size >> PAGE_SHIFT);
+
+		c_seg->c_swappedin = false;
 
 		if (c_seg->c_bytes_used) {
 			OSAddAtomic64(-c_seg->c_bytes_used, &compressor_bytes_used);
@@ -2152,6 +2149,8 @@ ReTry_for_cseg:
 		counter_add(&vm_statistics_swapouts, c_size >> PAGE_SHIFT);
 
 		lck_mtx_lock_spin_always(&c_seg->c_lock);
+
+		c_seg->c_swappedin = false;
 
 		assert(C_SEG_IS_ONDISK(c_seg));
 		/*

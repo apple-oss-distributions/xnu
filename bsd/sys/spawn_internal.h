@@ -79,7 +79,6 @@ typedef enum {
 	PSPA_IMP_WATCHPORTS = 3,
 	PSPA_REGISTERED_PORTS = 4,
 	PSPA_PTRAUTH_TASK_PORT = 5,
-	PSPA_SUID_CRED = 6,
 } pspa_t;
 
 /*

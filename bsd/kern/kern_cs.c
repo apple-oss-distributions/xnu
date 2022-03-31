@@ -74,7 +74,6 @@
 #include <mach/shared_region.h>
 
 #include <libkern/section_keywords.h>
-#include <libkern/ptrauth_utils.h>
 #include <libkern/amfi/amfi.h>
 
 
@@ -594,11 +593,6 @@ csblob_get_identity(struct cs_blob *csblob)
 const uint8_t *
 csblob_get_cdhash(struct cs_blob *csblob)
 {
-	ptrauth_utils_auth_blob_generic(csblob->csb_cdhash,
-	    sizeof(csblob->csb_cdhash),
-	    OS_PTRAUTH_DISCRIMINATOR("cs_blob.csb_cd_signature"),
-	    PTRAUTH_ADDR_DIVERSIFY,
-	    csblob->csb_cdhash_signature);
 	return csblob->csb_cdhash;
 }
 
@@ -660,6 +654,14 @@ csblob_os_entitlements_get(struct cs_blob *csblob)
 		return NULL;
 	}
 	return csblob->csb_entitlements;
+}
+
+void *
+csblob_get_storage_addr(struct cs_blob *csblob)
+{
+	void *addr = csblob->csb_ro_addr;
+	cs_blob_require((struct cs_blob *)addr, NULL);
+	return addr;
 }
 
 /*
@@ -769,6 +771,7 @@ void
 csproc_clear_platform_binary(struct proc *p)
 {
 	struct cs_blob *csblob = csproc_get_blob(p);
+	struct cs_blob_platform_flags platform_flags;
 
 	if (csblob == NULL) {
 		return;
@@ -778,8 +781,13 @@ csproc_clear_platform_binary(struct proc *p)
 		printf("clearing platform binary on proc/task: pid = %d\n", proc_getpid(p));
 	}
 
-	csblob->csb_platform_binary = 0;
-	csblob->csb_platform_path = 0;
+	platform_flags = csblob->csb_platform_flags;
+	platform_flags.csb_platform_binary = 0;
+	platform_flags.csb_platform_path = 0;
+
+	zalloc_ro_update_field(ZONE_ID_CS_BLOB, csblob, csb_platform_flags,
+	    &platform_flags);
+
 	task_set_platform_binary(proc_task(p), FALSE);
 }
 #endif
@@ -868,7 +876,7 @@ csfg_get_platform_binary(struct fileglob *fg)
 		return 0;
 	}
 
-	vp = (struct vnode *)fg->fg_data;
+	vp = (struct vnode *)fg_get_data(fg);
 	if (vp == NULL) {
 		return 0;
 	}
@@ -908,7 +916,7 @@ csfg_get_supplement_platform_binary(struct fileglob *fg __unused)
 		return 0;
 	}
 
-	vp = (struct vnode *)fg->fg_data;
+	vp = (struct vnode *)fg_get_data(fg);
 	if (vp == NULL) {
 		return 0;
 	}
@@ -948,7 +956,7 @@ csfg_get_cdhash(struct fileglob *fg, uint64_t offset, size_t *cdhash_size)
 		return NULL;
 	}
 
-	vp = (struct vnode *)fg->fg_data;
+	vp = (struct vnode *)fg_get_data(fg);
 	if (vp == NULL) {
 		return NULL;
 	}
@@ -961,11 +969,6 @@ csfg_get_cdhash(struct fileglob *fg, uint64_t offset, size_t *cdhash_size)
 	if (cdhash_size) {
 		*cdhash_size = CS_CDHASH_LEN;
 	}
-	ptrauth_utils_auth_blob_generic(csblob->csb_cdhash,
-	    sizeof(csblob->csb_cdhash),
-	    OS_PTRAUTH_DISCRIMINATOR("cs_blob.csb_cd_signature"),
-	    PTRAUTH_ADDR_DIVERSIFY,
-	    csblob->csb_cdhash_signature);
 	return csblob->csb_cdhash;
 }
 
@@ -979,7 +982,7 @@ csfg_get_supplement_cdhash(struct fileglob *fg __unused, uint64_t offset __unuse
 		return NULL;
 	}
 
-	vp = (struct vnode *)fg->fg_data;
+	vp = (struct vnode *)fg_get_data(fg);
 	if (vp == NULL) {
 		return NULL;
 	}
@@ -992,11 +995,6 @@ csfg_get_supplement_cdhash(struct fileglob *fg __unused, uint64_t offset __unuse
 	if (cdhash_size) {
 		*cdhash_size = CS_CDHASH_LEN;
 	}
-	ptrauth_utils_auth_blob_generic(csblob->csb_cdhash,
-	    sizeof(csblob->csb_cdhash),
-	    OS_PTRAUTH_DISCRIMINATOR("cs_blob.csb_cd_signature"),
-	    PTRAUTH_ADDR_DIVERSIFY,
-	    csblob->csb_cdhash_signature);
 	return csblob->csb_cdhash;
 #else
 	// Supplemental signatures are only available in CONFIG_SUPPLEMENTAL_SIGNATURES
@@ -1015,7 +1013,7 @@ csfg_get_supplement_linkage_cdhash(struct fileglob *fg __unused, uint64_t offset
 		return NULL;
 	}
 
-	vp = (struct vnode *)fg->fg_data;
+	vp = (struct vnode *)fg_get_data(fg);
 	if (vp == NULL) {
 		return NULL;
 	}
@@ -1054,7 +1052,7 @@ csfg_get_signer_type(struct fileglob *fg)
 		return CS_SIGNER_TYPE_UNKNOWN;
 	}
 
-	vp = (struct vnode *)fg->fg_data;
+	vp = (struct vnode *)fg_get_data(fg);
 	if (vp == NULL) {
 		return CS_SIGNER_TYPE_UNKNOWN;
 	}
@@ -1094,7 +1092,7 @@ csfg_get_supplement_signer_type(struct fileglob *fg __unused)
 		return CS_SIGNER_TYPE_UNKNOWN;
 	}
 
-	vp = (struct vnode *)fg->fg_data;
+	vp = (struct vnode *)fg_get_data(fg);
 	if (vp == NULL) {
 		return CS_SIGNER_TYPE_UNKNOWN;
 	}
@@ -1142,7 +1140,7 @@ csfg_get_teamid(struct fileglob *fg)
 		return NULL;
 	}
 
-	vp = (struct vnode *)fg->fg_data;
+	vp = (struct vnode *)fg_get_data(fg);
 	if (vp == NULL) {
 		return NULL;
 	}
@@ -1182,7 +1180,7 @@ csfg_get_supplement_teamid(struct fileglob *fg __unused)
 		return NULL;
 	}
 
-	vp = (struct vnode *)fg->fg_data;
+	vp = (struct vnode *)fg_get_data(fg);
 	if (vp == NULL) {
 		return NULL;
 	}
@@ -1231,7 +1229,7 @@ csfg_get_prod_signed(struct fileglob *fg)
 		return 0;
 	}
 
-	vp = (struct vnode *)fg->fg_data;
+	vp = (struct vnode *)fg_get_data(fg);
 	if (vp == NULL) {
 		return 0;
 	}
@@ -1271,7 +1269,7 @@ csfg_get_supplement_prod_signed(struct fileglob *fg __unused)
 		return 0;
 	}
 
-	vp = (struct vnode *)fg->fg_data;
+	vp = (struct vnode *)fg_get_data(fg);
 	if (vp == NULL) {
 		return 0;
 	}
@@ -1320,7 +1318,7 @@ csfg_get_identity(struct fileglob *fg, off_t offset)
 		return NULL;
 	}
 
-	vp = (struct vnode *)fg->fg_data;
+	vp = (struct vnode *)fg_get_data(fg);
 	if (vp == NULL) {
 		return NULL;
 	}
@@ -1349,7 +1347,7 @@ csfg_get_platform_identifier(struct fileglob *fg, off_t offset)
 		return 0;
 	}
 
-	vp = (struct vnode *)fg->fg_data;
+	vp = (struct vnode *)fg_get_data(fg);
 	if (vp == NULL) {
 		return 0;
 	}
@@ -1436,7 +1434,7 @@ csfg_get_path(struct fileglob *fg, char *path, int *len)
 		return -1;
 	}
 
-	vp = (struct vnode *)fg->fg_data;
+	vp = (struct vnode *)fg_get_data(fg);
 
 	/* vn_getpath returns 0 for success,
 	 *  or an error code */
@@ -1634,10 +1632,5 @@ cs_get_cdhash(struct proc *p)
 		return NULL;
 	}
 
-	ptrauth_utils_auth_blob_generic(csblob->csb_cdhash,
-	    sizeof(csblob->csb_cdhash),
-	    OS_PTRAUTH_DISCRIMINATOR("cs_blob.csb_cd_signature"),
-	    PTRAUTH_ADDR_DIVERSIFY,
-	    csblob->csb_cdhash_signature);
 	return csblob->csb_cdhash;
 }

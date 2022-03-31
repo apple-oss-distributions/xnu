@@ -90,7 +90,7 @@ struct packet_mangler {
 };
 
 /* Array of all the packet mangler instancesi */
-struct packet_mangler **packet_manglers = NULL;
+struct packet_mangler *packet_manglers[MAX_PACKET_MANGLER];
 
 uint32_t pkt_mnglr_active_count = 0;    /* Number of active packet filters */
 uint32_t pkt_mnglr_close_wait_timeout = 1000; /* in milliseconds */
@@ -109,7 +109,7 @@ void* pkt_mnglr_rw_lock_history[PKT_MNGLR_RW_LCK_MAX];
 int pkt_mnglr_rw_nxt_unlck = 0;
 void* pkt_mnglr_rw_unlock_history[PKT_MNGLR_RW_LCK_MAX];
 
-static ZONE_DECLARE(packet_mangler_zone, "packet_mangler",
+static ZONE_DEFINE(packet_mangler_zone, "packet_mangler",
     sizeof(struct packet_mangler), ZC_NONE);
 
 /*
@@ -226,31 +226,6 @@ pkt_mnglr_ctl_connect(kern_ctl_ref kctlref, struct sockaddr_ctl *sac,
 	    Z_WAITOK | Z_ZERO | Z_NOFAIL);
 
 	pkt_mnglr_rw_lock_exclusive(&pkt_mnglr_lck_rw);
-	if (packet_manglers == NULL) {
-		struct packet_mangler **tmp;
-
-		pkt_mnglr_rw_unlock_exclusive(&pkt_mnglr_lck_rw);
-
-		MALLOC(tmp,
-		    struct packet_mangler **,
-		    MAX_PACKET_MANGLER * sizeof(struct packet_mangler *),
-		    M_TEMP,
-		    M_WAITOK | M_ZERO);
-
-		pkt_mnglr_rw_lock_exclusive(&pkt_mnglr_lck_rw);
-
-		if (tmp == NULL && packet_manglers == NULL) {
-			error = ENOMEM;
-			pkt_mnglr_rw_unlock_exclusive(&pkt_mnglr_lck_rw);
-			goto fail_free;
-		}
-		/* Another thread may have won the race */
-		if (packet_manglers != NULL) {
-			FREE(tmp, M_TEMP);
-		} else {
-			packet_manglers = tmp;
-		}
-	}
 
 	if (packet_manglers[sac->sc_unit - 1] != NULL) {
 		PKT_MNGLR_LOG(LOG_ERR, "sc_unit %u in use", sac->sc_unit);
@@ -325,11 +300,6 @@ pkt_mnglr_ctl_disconnect(kern_ctl_ref kctlref, u_int32_t kcunit, void *unitinfo)
 		goto done;
 	}
 
-	if (packet_manglers == NULL) {
-		PKT_MNGLR_LOG(LOG_ERR, "no packet filter");
-		error = EINVAL;
-		goto done;
-	}
 	if (kcunit > MAX_PACKET_MANGLER) {
 		PKT_MNGLR_LOG(LOG_ERR, "kcunit %u > MAX_PACKET_MANGLER (%d)",
 		    kcunit, MAX_PACKET_MANGLER);
@@ -377,11 +347,6 @@ pkt_mnglr_ctl_getopt(kern_ctl_ref kctlref, u_int32_t kcunit, void *unitinfo,
 
 	pkt_mnglr_rw_lock_shared(&pkt_mnglr_lck_rw);
 
-	if (packet_manglers == NULL) {
-		PKT_MNGLR_LOG(LOG_ERR, "no packet filter");
-		error = EINVAL;
-		goto done;
-	}
 	if (kcunit > MAX_PACKET_MANGLER) {
 		PKT_MNGLR_LOG(LOG_ERR, "kcunit %u > MAX_PACKET_MANGLER (%d)",
 		    kcunit, MAX_PACKET_MANGLER);
@@ -523,11 +488,6 @@ pkt_mnglr_ctl_setopt(kern_ctl_ref kctlref, u_int32_t kcunit, void *unitinfo,
 
 	pkt_mnglr_rw_lock_exclusive(&pkt_mnglr_lck_rw);
 
-	if (packet_manglers == NULL) {
-		PKT_MNGLR_LOG(LOG_ERR, "no packet filter");
-		error = EINVAL;
-		goto done;
-	}
 	if (kcunit > MAX_PACKET_MANGLER) {
 		PKT_MNGLR_LOG(LOG_ERR, "kcunit %u > MAX_PACKET_MANGLER (%d)",
 		    kcunit, MAX_PACKET_MANGLER);

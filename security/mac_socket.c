@@ -97,7 +97,7 @@ mac_socket_check_accept(kauth_cred_t cred, struct socket *so)
 #endif
 
 	MAC_CHECK(socket_check_accept, cred,
-	    (socket_t)so, so->so_label);
+	    (socket_t)so, NULL);
 	return error;
 }
 
@@ -119,7 +119,7 @@ mac_socket_check_accepted(kauth_cred_t cred, struct socket *so)
 		error = ECONNABORTED;
 	} else {
 		MAC_CHECK(socket_check_accepted, cred,
-		    (socket_t)so, so->so_label, sockaddr);
+		    (socket_t)so, NULL, sockaddr);
 		sock_freeaddr(sockaddr);
 	}
 	return error;
@@ -140,7 +140,7 @@ mac_socket_check_bind(kauth_cred_t ucred, struct socket *so,
 #endif
 
 	MAC_CHECK(socket_check_bind, ucred,
-	    (socket_t)so, so->so_label, sockaddr);
+	    (socket_t)so, NULL, sockaddr);
 	return error;
 }
 
@@ -158,7 +158,7 @@ mac_socket_check_connect(kauth_cred_t cred, struct socket *so,
 #endif
 
 	MAC_CHECK(socket_check_connect, cred,
-	    (socket_t)so, so->so_label,
+	    (socket_t)so, NULL,
 	    sockaddr);
 	return error;
 }
@@ -192,7 +192,7 @@ mac_socket_check_ioctl(kauth_cred_t cred, struct socket *so, u_long cmd)
 #endif
 
 	MAC_CHECK(socket_check_ioctl, cred,
-	    (socket_t)so, cmd, so->so_label);
+	    (socket_t)so, cmd, NULL);
 	return error;
 }
 
@@ -209,7 +209,7 @@ mac_socket_check_stat(kauth_cred_t cred, struct socket *so)
 #endif
 
 	MAC_CHECK(socket_check_stat, cred,
-	    (socket_t)so, so->so_label);
+	    (socket_t)so, NULL);
 	return error;
 }
 
@@ -226,7 +226,7 @@ mac_socket_check_listen(kauth_cred_t cred, struct socket *so)
 #endif
 
 	MAC_CHECK(socket_check_listen, cred,
-	    (socket_t)so, so->so_label);
+	    (socket_t)so, NULL);
 	return error;
 }
 
@@ -243,7 +243,7 @@ mac_socket_check_receive(kauth_cred_t cred, struct socket *so)
 #endif
 
 	MAC_CHECK(socket_check_receive, cred,
-	    (socket_t)so, so->so_label);
+	    (socket_t)so, NULL);
 	return error;
 }
 
@@ -260,7 +260,7 @@ mac_socket_check_received(kauth_cred_t cred, struct socket *so, struct sockaddr 
 #endif
 
 	MAC_CHECK(socket_check_received, cred,
-	    so, so->so_label, saddr);
+	    so, NULL, saddr);
 	return error;
 }
 
@@ -278,7 +278,7 @@ mac_socket_check_send(kauth_cred_t cred, struct socket *so,
 #endif
 
 	MAC_CHECK(socket_check_send, cred,
-	    (socket_t)so, so->so_label, sockaddr);
+	    (socket_t)so, NULL, sockaddr);
 	return error;
 }
 
@@ -296,7 +296,7 @@ mac_socket_check_setsockopt(kauth_cred_t cred, struct socket *so,
 #endif
 
 	MAC_CHECK(socket_check_setsockopt, cred,
-	    (socket_t)so, so->so_label, sopt);
+	    (socket_t)so, NULL, sopt);
 	return error;
 }
 
@@ -314,6 +314,6 @@ mac_socket_check_getsockopt(kauth_cred_t cred, struct socket *so,
 #endif
 
 	MAC_CHECK(socket_check_getsockopt, cred,
-	    (socket_t)so, so->so_label, sopt);
+	    (socket_t)so, NULL, sopt);
 	return error;
 }

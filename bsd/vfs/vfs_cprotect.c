@@ -83,9 +83,9 @@ typedef union cpxunion {
 	fcpx_t cpx_fixed;
 } cpxunion_t;
 
-ZONE_DECLARE(cpx_zone, "cpx",
+ZONE_DEFINE(cpx_zone, "cpx",
     sizeof(struct fcpx), ZC_ZFREE_CLEARMEM);
-ZONE_DECLARE(aes_ctz_zone, "AES ctx",
+ZONE_DEFINE(aes_ctz_zone, "AES ctx",
     sizeof(aes_encrypt_ctx), ZC_ZFREE_CLEARMEM);
 
 // Note: see struct fcpx defined in sys/cprotect.h
@@ -131,11 +131,13 @@ cpx_alloc(size_t key_len, bool needs_ctx)
 		 */
 		if (kmem_alloc(kernel_map, (vm_offset_t *)&cpx, PAGE_SIZE, VM_KERN_MEMORY_FILE)) {
 			/*
-			 * returning NULL at this point (due to failed allocation) would just
-			 * result in a panic. fall back to attempting a normal MALLOC, and don't
+			 * returning NULL at this point (due to failed
+			 * allocation) would just result in a panic.
+			 *
+			 * fall back to attempting a normal kalloc, and don't
 			 * let the cpx get marked PROTECTABLE.
 			 */
-			MALLOC(cpx, cpx_t, cpx_size(key_len), M_TEMP, M_WAITOK);
+			cpx = kheap_alloc(KHEAP_DEFAULT, cpx_size(key_len), Z_WAITOK);
 		} else {
 			//mark the page as protectable, since kmem_alloc succeeded.
 			cpx->cpx_flags |= CPX_WRITE_PROTECTABLE;

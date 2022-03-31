@@ -321,7 +321,6 @@ struct nfsdmap {
 #define NFSTIME_CHANGE  2       /* time file changed */
 #define NFSTIME_CREATE  3       /* time file created */
 #define NFSTIME_BACKUP  4       /* time of last backup */
-#define NFSTIME_ADDED   5       /* time added (FPnfs only) */
 #define NFSTIME_COUNT   6
 
 #define NFS_COMPARE_MTIME(TVP, NVAP, CMP) \
@@ -354,11 +353,6 @@ struct nfs_vattr {
 	time_t          nva_timesec[NFSTIME_COUNT];
 	long            nva_timensec[NFSTIME_COUNT];
 	uint32_t        nva_bitmap[NFS_ATTR_BITMAP_LEN]; /* attributes that are valid */
-
-	/* FPnfs only. */
-	uint32_t        nva_bsd_flags;  /* BSD flags */
-	uint64_t        nva_parentid;   /* parent file id */
-	uint64_t        nva_allocsize;  /* size allocated on disk */
 };
 
 /* nva_flags */
@@ -370,10 +364,6 @@ struct nfs_vattr {
 #define NFS_FFLAG_PARTIAL_WRITE         0x0020  /* partial attribute for NFSv4 writes */
 #define NFS_FFLAG_FILEID_CONTAINS_XID   0x0040  /* xid might be stashed in nva_fileid is rdirplus is enabled */
 #define NFS_FFLAG_IS_ATTR               0x8000  /* file is a named attribute file/directory */
-/* FPnfs only */
-#define NFS_FFLAG_FPNFS_BSD_FLAGS   0x01000000
-#define NFS_FFLAG_FPNFS_PARENTID    0x02000000
-#define NFS_FFLAG_FPNFS_ADDEDTIME   0x04000000
 
 /* flags for nfs_getattr() */
 #define NGA_CACHED      0x0001  /* use cached attributes (if still valid) */
@@ -835,7 +825,6 @@ extern lck_mtx_t nfsiod_mutex;
 typedef int     vnop_t(void *);
 extern  vnop_t  **fifo_nfsv2nodeop_p;
 extern  vnop_t  **nfsv2_vnodeop_p;
-extern  vnop_t  **fpnfs_vnodeop_p;
 extern  vnop_t  **spec_nfsv2nodeop_p;
 #if CONFIG_NFS4
 extern  vnop_t  **fifo_nfsv4nodeop_p;

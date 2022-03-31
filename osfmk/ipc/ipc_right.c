@@ -432,7 +432,8 @@ ipc_right_reverse(
 	}
 
 	if (ipc_hash_lookup(space, ip_to_object(port), namep, entryp)) {
-		assert((entry = *entryp) != IE_NULL);
+		entry = *entryp;
+		assert(entry != IE_NULL);
 		assert(IE_BITS_TYPE(entry->ie_bits) == MACH_PORT_TYPE_SEND);
 		assert(port == ip_object_to_port(entry->ie_object));
 
@@ -1409,7 +1410,7 @@ ipc_right_delta(
 			assert(IE_BITS_UREFS(bits) > 0);
 			assert(port->ip_srights > 0);
 
-			if (port->ip_pdrequest != NULL) {
+			if (ipc_port_has_prdrequest(port)) {
 				/*
 				 * Since another task has requested a
 				 * destroy notification for this port, it
@@ -1859,7 +1860,7 @@ ipc_right_destruct(
 		assert(IE_BITS_UREFS(bits) > 0);
 		assert(IE_BITS_UREFS(bits) <= MACH_PORT_UREFS_MAX);
 
-		if (port->ip_pdrequest != NULL) {
+		if (ipc_port_has_prdrequest(port)) {
 			/*
 			 * Since another task has requested a
 			 * destroy notification for this port, it
@@ -2148,7 +2149,7 @@ ipc_right_copyin(
 	mach_port_name_t           name,
 	ipc_entry_t                entry,
 	mach_msg_type_name_t       msgt_name,
-	ipc_object_copyin_flags_t   flags,
+	ipc_object_copyin_flags_t  flags,
 	ipc_object_t               *objectp,
 	ipc_port_t                 *sorightp,
 	ipc_port_t                 *releasep,
@@ -2213,6 +2214,7 @@ ipc_right_copyin(
 
 	case MACH_MSG_TYPE_MOVE_RECEIVE: {
 		ipc_port_t request = IP_NULL;
+		waitq_link_list_t free_l = { };
 
 		if ((bits & MACH_PORT_TYPE_RECEIVE) == 0) {
 			goto invalid_right;
@@ -2285,7 +2287,7 @@ ipc_right_copyin(
 		}
 
 		/* ipc_port_clear_receiver unguards the port and clears the ip_immovable_receive bit */
-		(void)ipc_port_clear_receiver(port, FALSE); /* don't destroy the port/mqueue */
+		(void)ipc_port_clear_receiver(port, FALSE, &free_l); /* don't destroy the port/mqueue */
 		if (guard_flags != NULL) {
 			/* this flag will be cleared during copyout */
 			*guard_flags = *guard_flags | MACH_MSG_GUARD_FLAGS_UNGUARDED_ON_SEND;
@@ -2311,6 +2313,12 @@ ipc_right_copyin(
 #endif /* IMPORTANCE_INHERITANCE */
 
 		ip_mq_unlock(port);
+
+		/*
+		 * This is unfortunate to do this while the space is locked,
+		 * but plumbing it through all callers really hurts.
+		 */
+		waitq_link_free_list(WQT_PORT_SET, &free_l);
 
 		*objectp = ip_to_object(port);
 		*sorightp = request;
@@ -2803,8 +2811,17 @@ ipc_right_copyin_two(
 		 *	Copy the right we got back.  If it is dead now,
 		 *	that's OK.  Neither right will be usable to send
 		 *	a message anyway.
+		 *
+		 *	Note that the port could be concurrently moved
+		 *	outside of the space as a descriptor, and then
+		 *	destroyed, which would not happen under the space lock.
+		 *
+		 *	It means we can't use ipc_port_copy_send() which
+		 *	may fail if the port died.
 		 */
-		(void)ipc_port_copy_send(ip_object_to_port(*objectp));
+		io_lock(*objectp);
+		ipc_port_copy_send_locked(ip_object_to_port(*objectp));
+		io_unlock(*objectp);
 	}
 
 	return KERN_SUCCESS;

@@ -1915,15 +1915,27 @@ proc_set_task_spawnpolicy(task_t task, thread_t thread, int apptype, int qos_cla
 	    task_pid(task), trequested_0(task), trequested_1(task),
 	    apptype, 0);
 
+	if (apptype != TASK_APPTYPE_NONE) {
+		/*
+		 * Reset the receiver and denap state inherited from the
+		 * task's parent, but only if we are going to reset it via the
+		 * provided apptype.
+		 */
+		if (task_is_importance_receiver(task)) {
+			task_importance_mark_receiver(task, FALSE);
+		}
+		if (task_is_importance_denap_receiver(task)) {
+			task_importance_mark_denap_receiver(task, FALSE);
+		}
+	}
+
 	switch (apptype) {
 	case TASK_APPTYPE_APP_DEFAULT:
 		/* Apps become donors via the 'live-donor' flag instead of the static donor flag */
 		task_importance_mark_donor(task, FALSE);
 		task_importance_mark_live_donor(task, TRUE);
-		task_importance_mark_receiver(task, FALSE);
-#if !defined(XNU_TARGET_OS_OSX)
-		task_importance_mark_denap_receiver(task, FALSE);
-#else
+		// importance_receiver == FALSE
+#if defined(XNU_TARGET_OS_OSX)
 		/* Apps are de-nap recievers on macOS for suppression behaviors */
 		task_importance_mark_denap_receiver(task, TRUE);
 #endif /* !defined(XNU_TARGET_OS_OSX) */
@@ -1932,6 +1944,7 @@ proc_set_task_spawnpolicy(task_t task, thread_t thread, int apptype, int qos_cla
 	case TASK_APPTYPE_DAEMON_INTERACTIVE:
 		task_importance_mark_donor(task, TRUE);
 		task_importance_mark_live_donor(task, FALSE);
+		// importance_denap_receiver == FALSE
 
 		/*
 		 * A boot arg controls whether interactive daemons are importance receivers.
@@ -1941,35 +1954,34 @@ proc_set_task_spawnpolicy(task_t task, thread_t thread, int apptype, int qos_cla
 		 * TODO: remove this when the interactive daemon audit period is over.
 		 */
 		task_importance_mark_receiver(task, /* FALSE */ ipc_importance_interactive_receiver);
-		task_importance_mark_denap_receiver(task, FALSE);
 		break;
 
 	case TASK_APPTYPE_DAEMON_STANDARD:
 		task_importance_mark_donor(task, TRUE);
 		task_importance_mark_live_donor(task, FALSE);
-		task_importance_mark_receiver(task, FALSE);
-		task_importance_mark_denap_receiver(task, FALSE);
+		// importance_denap_receiver == FALSE
+		// importance_receiver == FALSE
 		break;
 
 	case TASK_APPTYPE_DAEMON_ADAPTIVE:
 		task_importance_mark_donor(task, FALSE);
 		task_importance_mark_live_donor(task, FALSE);
 		task_importance_mark_receiver(task, TRUE);
-		task_importance_mark_denap_receiver(task, FALSE);
+		// importance_denap_receiver == FALSE
 		break;
 
 	case TASK_APPTYPE_DAEMON_BACKGROUND:
 		task_importance_mark_donor(task, FALSE);
 		task_importance_mark_live_donor(task, FALSE);
-		task_importance_mark_receiver(task, FALSE);
-		task_importance_mark_denap_receiver(task, FALSE);
+		// importance_denap_receiver == FALSE
+		// importance_receiver == FALSE
 		break;
 
 	case TASK_APPTYPE_DRIVER:
 		task_importance_mark_donor(task, FALSE);
 		task_importance_mark_live_donor(task, FALSE);
-		task_importance_mark_receiver(task, FALSE);
-		task_importance_mark_denap_receiver(task, FALSE);
+		// importance_denap_receiver == FALSE
+		// importance_receiver == FALSE
 		break;
 
 	case TASK_APPTYPE_NONE:

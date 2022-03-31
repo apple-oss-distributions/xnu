@@ -1,3 +1,5 @@
+from __future__ import absolute_import, print_function
+
 from xnu import *
 from utils import *
 
@@ -75,14 +77,14 @@ def ShowBankAccountsToPay(cmd_args=None, cmd_options={}):
       raise ArgumentError("Please provide arguments")
 
     bank_task = kern.GetValueFromAddress(cmd_args[0], 'bank_task_t')
-    print GetBankTaskSummary.header
-    print GetBankTaskSummary(bank_task)
-    print "List of Accounts to Pay."
+    print(GetBankTaskSummary.header)
+    print(GetBankTaskSummary(bank_task))
+    print("List of Accounts to Pay.")
     header_str = GetBankAccountSummary.header
-    print header_str
+    print(header_str)
 
     for bank_account in IterateQueue(bank_task.bt_accounts_to_pay, 'bank_account_t', 'ba_next_acc_to_pay'):
-      print GetBankAccountSummary(bank_account)
+      print(GetBankAccountSummary(bank_account))
     return
 # EndMacro: showbankaccountstopay
 
@@ -97,14 +99,14 @@ def ShowBankAccountsToCharge(cmd_args=None, cmd_options={}):
       raise ArgumentError("Please provide arguments")
 
     bank_task = kern.GetValueFromAddress(cmd_args[0], 'bank_task_t')
-    print GetBankTaskSummary.header
-    print GetBankTaskSummary(bank_task)
-    print "List of Accounts to Charge."
+    print(GetBankTaskSummary.header)
+    print(GetBankTaskSummary(bank_task))
+    print("List of Accounts to Charge.")
     header_str = GetBankAccountSummary.header
-    print header_str
+    print(header_str)
 
     for bank_account in IterateQueue(bank_task.bt_accounts_to_charge, 'bank_account_t', 'ba_next_acc_to_charge'):
-      print GetBankAccountSummary(bank_account)
+      print(GetBankAccountSummary(bank_account))
     return
 # EndMacro: showbankaccountstocharge
 
@@ -119,11 +121,11 @@ def ShowAllBankTaskList(cmd_args=None, cmd_options={}):
         usage: (lldb) showallbanktasklist
     """
     if not hasattr(kern.globals, 'bank_tasks_list'):
-      print "It seems you are running a build of kernel that does not have the list of all bank_tasks_list."
+      print("It seems you are running a build of kernel that does not have the list of all bank_tasks_list.")
       return False
-    print GetBankTaskSummary.header
+    print(GetBankTaskSummary.header)
     for bank_task in IterateQueue(kern.globals.bank_tasks_list, 'bank_task_t', 'bt_global_elt'):
-      print GetBankTaskSummary(bank_task)
+      print(GetBankTaskSummary(bank_task))
     return True
 # EndMacro showallbanktasklist
 
@@ -136,11 +138,11 @@ def ShowAllBankAccountList(cmd_args=None, cmd_options={}):
         usage: (lldb) showallbankaccountlist
     """
     if not hasattr(kern.globals, 'bank_accounts_list'):
-      print "It seems you are running a build of kernel that does not have the list of all bank_accounts_list."
+      print("It seems you are running a build of kernel that does not have the list of all bank_accounts_list.")
       return False
-    print GetBankAccountSummary.header
+    print(GetBankAccountSummary.header)
     for bank_account in IterateQueue(kern.globals.bank_accounts_list, 'bank_account_t', 'ba_global_elt'):
-      print GetBankAccountSummary(bank_account)
+      print(GetBankAccountSummary(bank_account))
     return True
 # EndMacro showallbankaccountlist
 #endif

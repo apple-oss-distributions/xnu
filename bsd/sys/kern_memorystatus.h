@@ -291,7 +291,7 @@ extern uint64_t memorystatus_apps_idle_delay_time;
 #define JETSAM_REASON_MEMORY_VMCOMPRESSOR_SPACE_SHORTAGE        12
 #define JETSAM_REASON_LOWSWAP                                   13
 #define JETSAM_REASON_MEMORY_SUSTAINED_PRESSURE                 14
-#define JETSAM_REASON_MEMORYSTATUS_MAX  JETSAM_REASON_SUSTAINED_PRESSURE
+#define JETSAM_REASON_MEMORYSTATUS_MAX  JETSAM_REASON_MEMORY_SUSTAINED_PRESSURE
 
 /*
  * Jetsam exit reason definitions - not related to memorystatus
@@ -662,6 +662,8 @@ proc_t memorystatus_get_next_proc_locked(unsigned int *bucket_index, proc_t p, b
 void memorystatus_get_task_page_counts(task_t task, uint32_t *footprint, uint32_t *max_footprint_lifetime, uint32_t *purgeable_pages);
 void memorystatus_invalidate_idle_demotion_locked(proc_t p, boolean_t clean_state);
 void memorystatus_update_priority_locked(proc_t p, int priority, boolean_t head_insert, boolean_t skip_demotion_check);
+
+extern bool memorystatus_task_has_increased_memory_limit_entitlement(task_t task);
 
 #if VM_PRESSURE_EVENTS
 

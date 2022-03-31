@@ -78,8 +78,6 @@
 
 #include <net/net_osdep.h>
 
-MALLOC_DEFINE(M_SECA, "key mgmt", "security associations, key management");
-
 // static void keydb_delsecasvar(struct secasvar *); // not used
 
 /*
@@ -106,21 +104,16 @@ struct secashead *
 keydb_newsecashead(void)
 {
 	struct secashead *p;
-	int i;
 
 	LCK_MTX_ASSERT(sadb_mutex, LCK_MTX_ASSERT_OWNED);
 
-	p = (struct secashead *)_MALLOC(sizeof(*p), M_SECA, M_NOWAIT | M_ZERO);
+	p = kalloc_type(struct secashead, Z_NOWAIT | Z_ZERO);
 	if (!p) {
 		lck_mtx_unlock(sadb_mutex);
-		p = (struct secashead *)_MALLOC(sizeof(*p), M_SECA,
-		    M_WAITOK | M_ZERO);
+		p = kalloc_type(struct secashead, Z_WAITOK | Z_ZERO | Z_NOFAIL);
 		lck_mtx_lock(sadb_mutex);
 	}
-	if (!p) {
-		return p;
-	}
-	for (i = 0; i < sizeof(p->savtree) / sizeof(p->savtree[0]); i++) {
+	for (size_t i = 0; i < ARRAY_COUNT(p->savtree); i++) {
 		LIST_INIT(&p->savtree[i]);
 	}
 	return p;
@@ -128,10 +121,9 @@ keydb_newsecashead(void)
 
 #if 0
 void
-keydb_delsecashead(p)
-struct secashead *p;
+keydb_delsecashead(struct secashead *p)
 {
-	_FREE(p, M_SECA);
+	kfree_type(struct secashead, p);
 }
 
 
@@ -146,12 +138,9 @@ keydb_newsecasvar()
 
 	LCK_MTX_ASSERT(sadb_mutex, LCK_MTX_ASSERT_NOTOWNED);
 
-	p = (struct secasvar *)_MALLOC(sizeof(*p), M_SECA, M_WAITOK);
-	if (!p) {
-		return p;
-	}
-	bzero(p, sizeof(*p));
+	p = kalloc_type(struct secasvar, Z_WAITOK_ZERO_NOFAIL);
 	p->refcnt = 1;
+
 	return p;
 }
 
@@ -185,7 +174,7 @@ struct secasvar *p;
 		panic("keydb_delsecasvar called with refcnt != 0");
 	}
 
-	_FREE(p, M_SECA);
+	kfree_type(struct secasvar, p);
 }
 #endif
 
@@ -241,19 +230,13 @@ keydb_delsecreplay(struct secreplay *p)
 struct secreg *
 keydb_newsecreg()
 {
-	struct secreg *p;
-
-	p = (struct secreg *)_MALLOC(sizeof(*p), M_SECA, M_WAITOK);
-	if (p) {
-		bzero(p, sizeof(*p));
-	}
-	return p;
+	return kalloc_type(struct secreg, Z_WAITOK_ZERO_NOFAIL);
 }
 
 void
 keydb_delsecreg(p)
 struct secreg *p;
 {
-	_FREE(p, M_SECA);
+	kfree_type(struct secreg, p);
 }
 #endif

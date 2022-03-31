@@ -80,12 +80,12 @@ mockfs_mountroot(mount_t mp, vnode_t rvp, __unused vfs_context_t ctx)
 	 * There are no M_MOCKFS* definitions at the moment, just use M_TEMP.
 	 */
 
-	MALLOC(mockfs_mount_data, mockfs_mount_t, sizeof(*mockfs_mount_data), M_TEMP, M_WAITOK | M_ZERO);
+	mockfs_mount_data = kalloc_type(struct mockfs_mount, Z_WAITOK | Z_ZERO);
 	mockfs_fsnode_create(mp, MOCKFS_ROOT, &root_fsnode);
 	mockfs_fsnode_create(mp, MOCKFS_DEV, &dev_fsnode);
 	mockfs_fsnode_create(mp, MOCKFS_FILE, &file_fsnode);
 
-	if (!mockfs_mount_data || !root_fsnode || !dev_fsnode || !file_fsnode) {
+	if (!root_fsnode || !dev_fsnode || !file_fsnode) {
 		rvalue = ENOMEM;
 		goto done;
 	}
@@ -139,7 +139,7 @@ done:
 		}
 		if (mockfs_mount_data) {
 			lck_mtx_destroy(&mockfs_mount_data->mockfs_mnt_mtx, &mockfs_mtx_grp);
-			FREE(mockfs_mount_data, M_TEMP);
+			kfree_type(struct mockfs_mount, mockfs_mount_data);
 		}
 	}
 
@@ -192,7 +192,7 @@ mockfs_unmount(struct mount *mp, int mntflags, __unused vfs_context_t ctx)
 	}
 
 	lck_mtx_destroy(&mockfs_mnt->mockfs_mnt_mtx, &mockfs_mtx_grp);
-	FREE(mockfs_mnt, M_TEMP);
+	kfree_type(struct mockfs_mount, mockfs_mnt);
 	mp->mnt_data = NULL;
 
 	return rvalue;

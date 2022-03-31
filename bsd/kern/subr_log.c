@@ -697,7 +697,7 @@ oslog_streamclose(__unused dev_t dev, __unused int flag, __unused int devtype, _
 	}
 
 	// Free the stream buffer
-	kheap_free(KHEAP_DATA_BUFFERS, oslog_stream_msg_bufc, oslog_stream_buf_size);
+	kfree_data(oslog_stream_msg_bufc, oslog_stream_buf_size);
 	// Free the list entries
 	kfree_type(struct oslog_stream_buf_entry_s, oslog_stream_num_entries, entries);
 
@@ -1189,9 +1189,10 @@ oslog_init_firehose(void)
 	}
 	vm_size_t size = __firehose_buffer_kernel_chunk_count * FIREHOSE_CHUNK_SIZE;
 
-	kr = kmem_alloc_flags(kernel_map, &kernel_firehose_addr,
-	    size + (2 * PAGE_SIZE), VM_KERN_MEMORY_LOG,
-	    KMA_GUARD_FIRST | KMA_GUARD_LAST | KMA_ZERO);
+	kr = kernel_memory_allocate(kernel_map, &kernel_firehose_addr,
+	    size + (2 * PAGE_SIZE), 0,
+	    KMA_GUARD_FIRST | KMA_GUARD_LAST | KMA_ZERO | KMA_PERMANENT,
+	    VM_KERN_MEMORY_LOG);
 	if (kr != KERN_SUCCESS) {
 		panic("Failed to allocate memory for firehose logging buffer");
 	}

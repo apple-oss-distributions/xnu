@@ -1920,6 +1920,7 @@ pf_normalize_ip(pbuf_t *pbuf, int dir, struct pfi_kif *kif, u_short *reason,
 	int                      asd = 0;
 	struct pf_ruleset       *ruleset = NULL;
 	struct ifnet            *ifp = pbuf->pb_ifp;
+	uint64_t                ipid_salt = (uint64_t)pbuf_get_packet_buffer_address(pbuf);
 
 	r = TAILQ_FIRST(pf_main_ruleset.rules[PF_RULESET_SCRUB].active.ptr);
 	while (r != NULL) {
@@ -2168,7 +2169,7 @@ no_fragment:
 		if (rfc6864 && IP_OFF_IS_ATOMIC(ntohs(h->ip_off))) {
 			h->ip_id = 0;
 		} else {
-			h->ip_id = ip_randomid();
+			h->ip_id = ip_randomid(ipid_salt);
 		}
 		h->ip_sum = pf_cksum_fixup(h->ip_sum, oip_id, h->ip_id, 0);
 	}

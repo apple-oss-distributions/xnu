@@ -105,7 +105,7 @@ kext_alloc_init(void)
 
 	/* Allocate the sub block of the kernel map */
 	rval = kmem_suballoc(kernel_map, (vm_offset_t *) &kext_alloc_base,
-	    kext_alloc_size, /* pageable */ TRUE,
+	    kext_alloc_size, VM_MAP_CREATE_PAGEABLE,
 	    VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE,
 	    VM_MAP_KERNEL_FLAGS_NONE, VM_KERN_MEMORY_KEXT,
 	    &g_kext_map);

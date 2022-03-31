@@ -72,6 +72,14 @@ typedef uint32_t ppnum_t;               /* Physical page number */
 
 #ifdef  KERNEL_PRIVATE
 
+__options_decl(vm_map_create_options_t, uint32_t, {
+	VM_MAP_CREATE_DEFAULT          = 0x00000000,
+	VM_MAP_CREATE_PAGEABLE         = 0x00000001,
+	VM_MAP_CREATE_CORPSE_FOOTPRINT = 0x00000002,
+	VM_MAP_CREATE_DISABLE_HOLELIST = 0x00000004,
+	VM_MAP_CREATE_NEVER_FAULTS     = 0x00000008,
+});
+
 #ifndef MACH_KERNEL_PRIVATE
 /*
  * Use specifically typed null structures for these in
@@ -129,7 +137,6 @@ typedef uint16_t vm_tag_t;
 
 #define VM_TAG_NAME_LEN_MAX     0x7F
 #define VM_TAG_NAME_LEN_SHIFT   0
-#define VM_TAG_BT               0x0080
 #define VM_TAG_UNLOAD           0x0100
 #define VM_TAG_KMOD             0x0200
 
@@ -142,7 +149,7 @@ typedef uint16_t vm_tag_t;
  * If VM_TAG_SIZECLASSES is modified ensure that z_tags_sizeclass
  * has sufficient bits to represent all values (max value exclusive).
  */
-#define VM_TAG_SIZECLASSES      32
+#define VM_TAG_SIZECLASSES      36
 #else
 #define VM_TAG_SIZECLASSES      0
 #endif

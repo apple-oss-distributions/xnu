@@ -839,7 +839,6 @@ fourk_pager_data_request(
 	    &kernel_mapping,
 	    2 * PAGE_SIZE_64,
 	    0,
-	    0,
 	    VM_MAP_KERNEL_FLAGS_NONE,
 	    &map_entry);
 	if (kr != KERN_SUCCESS) {

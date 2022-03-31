@@ -124,7 +124,6 @@
 #include <sys/ktrace.h>
 #include <libkern/section_keywords.h>
 
-#include <kern/ltable.h>
 #include <kern/waitq.h>
 #include <ipc/ipc_voucher.h>
 #include <voucher/ipc_pthread_priority_internal.h>
@@ -367,7 +366,6 @@ kernel_startup_log(startup_subsystem_id_t subsystem)
 		[STARTUP_SUB_PMAP_STEAL] = "pmap_steal",
 		[STARTUP_SUB_VM_KERNEL] = "vm_kernel",
 		[STARTUP_SUB_KMEM] = "kmem",
-		[STARTUP_SUB_KMEM_ALLOC] = "kmem_alloc",
 		[STARTUP_SUB_ZALLOC] = "zalloc",
 		[STARTUP_SUB_PERCPU] = "percpu",
 		[STARTUP_SUB_LOCKS] = "locks",
@@ -485,9 +483,6 @@ kernel_bootstrap(void)
 	kernel_bootstrap_log("sched_init");
 	sched_init();
 
-	kernel_bootstrap_log("waitq_bootstrap");
-	waitq_bootstrap();
-
 #if CONFIG_MACF
 	kernel_bootstrap_log("mac_policy_init");
 	mac_policy_init();
@@ -549,8 +544,10 @@ kernel_bootstrap(void)
 	kernel_bootstrap_log("bank_init");
 	bank_init();
 
+#if CONFIG_VOUCHER_DEPRECATED
 	kernel_bootstrap_log("ipc_pthread_priority_init");
 	ipc_pthread_priority_init();
+#endif /* CONFIG_VOUCHER_DEPRECATED */
 
 	/* initialize host_statistics */
 	host_statistics_init();

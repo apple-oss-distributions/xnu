@@ -60,7 +60,7 @@ __BEGIN_DECLS
  * @c PERCPU_DECL can be used in headers to export the variable to clients.
  *
  * By default, per-cpu data is 0-initialized. Per-CPU data is allocated during
- * the STARTUP_SUB_KMEM_ALLOC phase and can be initialized with a STARTUP
+ * the STARTUP_SUB_KMEM phase and can be initialized with a STARTUP
  * callback in any later phase.
  *
  * Usage is:

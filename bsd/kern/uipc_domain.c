@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1998-2018 Apple Inc. All rights reserved.
+ * Copyright (c) 1998-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -1091,6 +1091,77 @@ domain_unguard_release(domain_unguard_t unguard)
 	}
 }
 
+#if SKYWALK
+/* The following is used to enqueue work items for interface events */
+struct protoctl_event {
+	struct ifnet *ifp;
+	union sockaddr_in_4_6 laddr;
+	union sockaddr_in_4_6 raddr;
+	uint32_t protoctl_event_code;
+	struct protoctl_ev_val val;
+	uint16_t lport;
+	uint16_t rport;
+	uint8_t protocol;
+};
+
+struct protoctl_event_nwk_wq_entry {
+	struct nwk_wq_entry nwk_wqe;
+	struct protoctl_event protoctl_ev_arg;
+};
+
+static void
+protoctl_event_callback(struct nwk_wq_entry *nwk_item)
+{
+	struct protoctl_event_nwk_wq_entry *p_ev = NULL;
+
+	p_ev = __container_of(nwk_item, struct protoctl_event_nwk_wq_entry, nwk_wqe);
+
+	/* Call this before we walk the tree */
+	EVENTHANDLER_INVOKE(&protoctl_evhdlr_ctxt, protoctl_event,
+	    p_ev->protoctl_ev_arg.ifp, (struct sockaddr *)&(p_ev->protoctl_ev_arg.laddr),
+	    (struct sockaddr *)&(p_ev->protoctl_ev_arg.raddr),
+	    p_ev->protoctl_ev_arg.lport, p_ev->protoctl_ev_arg.rport,
+	    p_ev->protoctl_ev_arg.protocol, p_ev->protoctl_ev_arg.protoctl_event_code,
+	    &p_ev->protoctl_ev_arg.val);
+
+	kfree_type(struct protoctl_event_nwk_wq_entry, p_ev);
+}
+
+/* XXX Some PRC events needs extra verification like sequence number checking */
+void
+protoctl_event_enqueue_nwk_wq_entry(struct ifnet *ifp, struct sockaddr *p_laddr,
+    struct sockaddr *p_raddr, uint16_t lport, uint16_t rport, uint8_t protocol,
+    uint32_t protoctl_event_code, struct protoctl_ev_val *p_protoctl_ev_val)
+{
+	struct protoctl_event_nwk_wq_entry *p_protoctl_ev = NULL;
+
+	p_protoctl_ev = kalloc_type(struct protoctl_event_nwk_wq_entry,
+	    Z_WAITOK | Z_ZERO | Z_NOFAIL);
+
+	p_protoctl_ev->protoctl_ev_arg.ifp = ifp;
+	if (p_laddr != NULL) {
+		VERIFY(p_laddr->sa_len <= sizeof(p_protoctl_ev->protoctl_ev_arg.laddr));
+		bcopy(p_laddr, &(p_protoctl_ev->protoctl_ev_arg.laddr), p_laddr->sa_len);
+	}
+
+	if (p_raddr != NULL) {
+		VERIFY(p_raddr->sa_len <= sizeof(p_protoctl_ev->protoctl_ev_arg.raddr));
+		bcopy(p_raddr, &(p_protoctl_ev->protoctl_ev_arg.raddr), p_raddr->sa_len);
+	}
+	p_protoctl_ev->protoctl_ev_arg.lport = lport;
+	p_protoctl_ev->protoctl_ev_arg.rport = rport;
+	p_protoctl_ev->protoctl_ev_arg.protocol = protocol;
+	p_protoctl_ev->protoctl_ev_arg.protoctl_event_code = protoctl_event_code;
+
+	if (p_protoctl_ev_val != NULL) {
+		bcopy(p_protoctl_ev_val, &(p_protoctl_ev->protoctl_ev_arg.val),
+		    sizeof(*p_protoctl_ev_val));
+	}
+	p_protoctl_ev->nwk_wqe.func = protoctl_event_callback;
+
+	nwk_wq_enqueue(&p_protoctl_ev->nwk_wqe);
+}
+#endif /* SKYWALK */
 
 #if (DEVELOPMENT || DEBUG)
 

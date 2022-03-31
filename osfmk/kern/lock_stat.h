@@ -27,29 +27,13 @@
  */
 #ifndef _KERN_LOCKSTAT_H
 #define _KERN_LOCKSTAT_H
+
 #include <machine/locks.h>
 #include <machine/atomic.h>
 #include <kern/lock_group.h>
 
-/*
- * N.B.: On x86, statistics are currently recorded for all indirect mutexes.
- * Also, only the acquire attempt count (GRP_MTX_STAT_UTIL) is maintained
- * as a 64-bit quantity (the new x86 specific statistics are also maintained
- * as 32-bit quantities).
- *
- *
- * Enable this preprocessor define to record the first miss alone
- * By default, we count every miss, hence multiple misses may be
- * recorded for a single lock acquire attempt via lck_mtx_lock
- */
-#undef LOG_FIRST_MISS_ALONE
-
-/*
- * This preprocessor define controls whether the R-M-W update of the
- * per-group statistics elements are atomic (LOCK-prefixed)
- * Enabled by default.
- */
-#define ATOMIC_STAT_UPDATES 1
+__BEGIN_DECLS
+#pragma GCC visibility push(hidden)
 
 /*
  * DTrace lockstat probe definitions
@@ -68,19 +52,21 @@ enum lockstat_probe_id {
 	 */
 	LS_LCK_MTX_LOCK_ACQUIRE,
 	LS_LCK_MTX_LOCK_BLOCK,
-	LS_LCK_MTX_LOCK_SPIN,
+	LS_LCK_MTX_LOCK_ADAPTIVE_SPIN,
+	LS_LCK_MTX_LOCK_SPIN_SPIN,
+	LS_LCK_MTX_LOCK_SPIN_ACQUIRE,
 	LS_LCK_MTX_LOCK_ILK_SPIN,
 	LS_LCK_MTX_TRY_LOCK_ACQUIRE,
-	LS_LCK_MTX_TRY_SPIN_LOCK_ACQUIRE,
+	LS_LCK_MTX_TRY_LOCK_SPIN_ACQUIRE,
 	LS_LCK_MTX_UNLOCK_RELEASE,
-	LS_LCK_MTX_LOCK_SPIN_ACQUIRE,
 
 	/*
 	 * Provide a parallel set for indirect mutexes
 	 */
 	LS_LCK_MTX_EXT_LOCK_ACQUIRE,
 	LS_LCK_MTX_EXT_LOCK_BLOCK,
-	LS_LCK_MTX_EXT_LOCK_SPIN,
+	LS_LCK_MTX_EXT_LOCK_SPIN_SPIN,
+	LS_LCK_MTX_EXT_LOCK_ADAPTIVE_SPIN,
 	LS_LCK_MTX_EXT_LOCK_ILK_SPIN,
 	LS_LCK_MTX_EXT_UNLOCK_RELEASE,
 
@@ -119,10 +105,26 @@ enum lockstat_probe_id {
 	LS_NPROBES
 };
 
+#if XNU_KERNEL_PRIVATE
+
+extern void lck_grp_stat_enable(lck_grp_stat_t *stat);
+
+extern void lck_grp_stat_disable(lck_grp_stat_t *stat);
+
+extern bool lck_grp_stat_enabled(lck_grp_stat_t *stat);
+
 #if CONFIG_DTRACE
+/*
+ * Time threshold before dtrace lockstat spin
+ * probes are triggered
+ */
+extern machine_timeout32_t dtrace_spin_threshold;
 extern uint32_t lockstat_probemap[LS_NPROBES];
+
 extern void dtrace_probe(uint32_t, uint64_t, uint64_t,
     uint64_t, uint64_t, uint64_t);
+extern void lockprof_invoke(lck_grp_t*, lck_grp_stat_t*, uint64_t);
+
 /*
  * Macros to record lockstat probes.
  */
@@ -137,76 +139,22 @@ extern void dtrace_probe(uint32_t, uint64_t, uint64_t,
 #define LOCKSTAT_RECORD_(probe, lp, arg0, arg1, arg2, arg3, ...) LOCKSTAT_RECORD4(probe, lp, arg0, arg1, arg2, arg3)
 #define LOCKSTAT_RECORD__(probe, lp, arg0, arg1, arg2, arg3, ...) LOCKSTAT_RECORD_(probe, lp, arg0, arg1, arg2, arg3)
 #define LOCKSTAT_RECORD(probe, lp, ...) LOCKSTAT_RECORD__(probe, lp, ##__VA_ARGS__, 0, 0, 0, 0)
-#else
-#define LOCKSTAT_RECORD()
+
 #endif /* CONFIG_DTRACE */
-
-/*
- * Time threshold before dtrace lockstat spin
- * probes are triggered
- */
-extern machine_timeout32_t dtrace_spin_threshold;
-
-#if CONFIG_DTRACE
-void lockprof_invoke(lck_grp_t*, lck_grp_stat_t*, uint64_t);
-#endif /* CONFIG_DTRACE */
-
-static inline void
-lck_grp_stat_enable(lck_grp_stat_t *stat)
-{
-	stat->lgs_enablings++;
-}
-
-static inline void
-lck_grp_stat_disable(lck_grp_stat_t *stat)
-{
-	stat->lgs_enablings--;
-}
-
+#endif /* XNU_KERNEL_PRIVATE */
 #if MACH_KERNEL_PRIVATE
-static inline void
-lck_grp_inc_stats(lck_grp_t *grp, lck_grp_stat_t *stat)
-{
-#pragma unused(grp)
-	if (__improbable(stat->lgs_enablings)) {
-#if ATOMIC_STAT_UPDATES
-		uint64_t val = os_atomic_inc_orig(&stat->lgs_count, relaxed);
-#else
-		uint64_t val = stat->lgs_count++;
-#endif /* ATOMIC_STAT_UPDATES */
-#if CONFIG_DTRACE && LOCK_STATS
-		if (__improbable(stat->lgs_limit && (val % (stat->lgs_limit)) == 0)) {
-			lockprof_invoke(grp, stat, val);
-		}
-#else
-#pragma unused(val)
-#endif /* CONFIG_DTRACE && LOCK_STATS */
-	}
-}
 
 #if LOCK_STATS
-static inline void
-lck_grp_inc_time_stats(lck_grp_t *grp, lck_grp_stat_t *stat, uint64_t time)
-{
-	if (__improbable(stat->lgs_enablings)) {
-		uint64_t val = os_atomic_add_orig(&stat->lgs_count, time, relaxed);
-#if CONFIG_DTRACE
-		if (__improbable(stat->lgs_limit)) {
-			while (__improbable(time > stat->lgs_limit)) {
-				time -= stat->lgs_limit;
-				lockprof_invoke(grp, stat, val);
-			}
-			if (__improbable(((val % stat->lgs_limit) + time) > stat->lgs_limit)) {
-				lockprof_invoke(grp, stat, val);
-			}
-		}
+extern void __lck_grp_spin_update_held(lck_grp_t *grp);
+extern void __lck_grp_spin_update_miss(lck_grp_t *grp);
+extern void __lck_grp_spin_update_spin(lck_grp_t *grp, uint64_t time);
+extern void __lck_grp_ticket_update_held(lck_grp_t *grp);
+extern void __lck_grp_ticket_update_miss(lck_grp_t *grp);
+extern void __lck_grp_ticket_update_spin(lck_grp_t *grp, uint64_t time);
+#define LOCK_STATS_CALL(fn, ...)  fn(__VA_ARGS__)
 #else
-#pragma unused(val)
-#endif /* CONFIG_DTRACE */
-	}
-}
-
-#endif /* LOCK_STATS */
+#define LOCK_STATS_CALL(fn, ...) ((void)0)
+#endif
 
 static inline void
 lck_grp_spin_update_held(void *lock LCK_GRP_ARG(lck_grp_t *grp))
@@ -215,26 +163,14 @@ lck_grp_spin_update_held(void *lock LCK_GRP_ARG(lck_grp_t *grp))
 #if CONFIG_DTRACE
 	LOCKSTAT_RECORD(LS_LCK_SPIN_LOCK_ACQUIRE, lock, (uintptr_t)LCK_GRP_PROBEARG(grp));
 #endif
-#if LOCK_STATS
-	if (!grp) {
-		return;
-	}
-	lck_grp_stat_t *stat = &grp->lck_grp_stats.lgss_spin_held;
-	lck_grp_inc_stats(grp, stat);
-#endif /* LOCK_STATS */
+	LOCK_STATS_CALL(__lck_grp_spin_update_held, grp);
 }
 
 static inline void
 lck_grp_spin_update_miss(void *lock LCK_GRP_ARG(lck_grp_t *grp))
 {
 #pragma unused(lock)
-#if LOCK_STATS
-	if (!grp) {
-		return;
-	}
-	lck_grp_stat_t *stat = &grp->lck_grp_stats.lgss_spin_miss;
-	lck_grp_inc_stats(grp, stat);
-#endif /* LOCK_STATS */
+	LOCK_STATS_CALL(__lck_grp_spin_update_miss, grp);
 }
 
 static inline void
@@ -246,25 +182,19 @@ lck_grp_spin_update_spin(void *lock LCK_GRP_ARG(lck_grp_t *grp), uint64_t time)
 		LOCKSTAT_RECORD(LS_LCK_SPIN_LOCK_SPIN, lock, time LCK_GRP_ARG((uintptr_t)grp));
 	}
 #endif /* CONFIG_DTRACE */
-#if LOCK_STATS
-	if (!grp) {
-		return;
-	}
-	lck_grp_stat_t *stat = &grp->lck_grp_stats.lgss_spin_spin;
-	lck_grp_inc_time_stats(grp, stat, time);
-#endif /* LOCK_STATS */
+	LOCK_STATS_CALL(__lck_grp_spin_update_spin, grp, time);
 }
 
-static inline boolean_t
+static inline bool
 lck_grp_spin_spin_enabled(void *lock LCK_GRP_ARG(lck_grp_t *grp))
 {
 #pragma unused(lock)
-	boolean_t enabled = FALSE;
+	bool enabled = false;
 #if CONFIG_DTRACE
 	enabled |= lockstat_probemap[LS_LCK_SPIN_LOCK_SPIN] != 0;
 #endif /* CONFIG_DTRACE */
 #if LOCK_STATS
-	enabled |= (grp && grp->lck_grp_stats.lgss_spin_spin.lgs_enablings);
+	enabled |= (grp && lck_grp_stat_enabled(&grp->lck_grp_stats.lgss_spin_spin));
 #endif /* LOCK_STATS */
 	return enabled;
 }
@@ -276,38 +206,26 @@ lck_grp_ticket_update_held(void *lock LCK_GRP_ARG(lck_grp_t *grp))
 #if CONFIG_DTRACE
 	LOCKSTAT_RECORD(LS_LCK_TICKET_LOCK_ACQUIRE, lock, (uintptr_t)LCK_GRP_PROBEARG(grp));
 #endif
-#if LOCK_STATS
-	if (!grp) {
-		return;
-	}
-	lck_grp_stat_t *stat = &grp->lck_grp_stats.lgss_ticket_held;
-	lck_grp_inc_stats(grp, stat);
-#endif /* LOCK_STATS */
+	LOCK_STATS_CALL(__lck_grp_ticket_update_held, grp);
 }
 
 static inline void
 lck_grp_ticket_update_miss(void *lock LCK_GRP_ARG(lck_grp_t *grp))
 {
 #pragma unused(lock)
-#if LOCK_STATS
-	if (!grp) {
-		return;
-	}
-	lck_grp_stat_t *stat = &grp->lck_grp_stats.lgss_ticket_miss;
-	lck_grp_inc_stats(grp, stat);
-#endif /* LOCK_STATS */
+	LOCK_STATS_CALL(__lck_grp_ticket_update_miss, grp);
 }
 
-static inline boolean_t
+static inline bool
 lck_grp_ticket_spin_enabled(void *lock LCK_GRP_ARG(lck_grp_t *grp))
 {
 #pragma unused(lock)
-	boolean_t enabled = FALSE;
+	bool enabled = false;
 #if CONFIG_DTRACE
 	enabled |= lockstat_probemap[LS_LCK_TICKET_LOCK_SPIN] != 0;
 #endif /* CONFIG_DTRACE */
 #if LOCK_STATS
-	enabled |= (grp && grp->lck_grp_stats.lgss_ticket_spin.lgs_enablings);
+	enabled |= (grp && lck_grp_stat_enabled(&grp->lck_grp_stats.lgss_ticket_spin));
 #endif /* LOCK_STATS */
 	return enabled;
 }
@@ -321,70 +239,69 @@ lck_grp_ticket_update_spin(void *lock LCK_GRP_ARG(lck_grp_t *grp), uint64_t time
 		LOCKSTAT_RECORD(LS_LCK_TICKET_LOCK_SPIN, lock, time LCK_GRP_ARG((uintptr_t)grp));
 	}
 #endif /* CONFIG_DTRACE */
-#if LOCK_STATS
-	if (!grp) {
+	LOCK_STATS_CALL(__lck_grp_ticket_update_spin, grp, time);
+}
+
+#if __x86_64__
+/*
+ * N.B.: On x86, statistics are currently recorded for all indirect mutexes.
+ * Also, only the acquire attempt count (GRP_MTX_STAT_UTIL) is maintained
+ * as a 64-bit quantity (the new x86 specific statistics are also maintained
+ * as 32-bit quantities).
+ *
+ * Enable this preprocessor define to record the first miss alone
+ * By default, we count every miss, hence multiple misses may be
+ * recorded for a single lock acquire attempt via lck_mtx_lock
+ */
+#undef LOG_FIRST_MISS_ALONE
+
+extern void __lck_grp_mtx_update_miss(lck_grp_t *grp);
+extern void __lck_grp_mtx_update_direct_wait(lck_grp_t *grp);
+extern void __lck_grp_mtx_update_wait(lck_grp_t *grp);
+extern void __lck_grp_mtx_update_held(lck_grp_t *grp);
+
+static inline void
+lck_grp_mtx_update_miss(struct _lck_mtx_ext_ *lock, int *first_miss)
+{
+#pragma unused(first_miss)
+#if LOG_FIRST_MISS_ALONE
+	if (*first_miss & 1) {
 		return;
 	}
-	lck_grp_stat_t *stat = &grp->lck_grp_stats.lgss_ticket_spin;
-	lck_grp_inc_time_stats(grp, stat, time);
-#endif /* LOCK_STATS */
-}
-
-
-static void inline
-lck_grp_mtx_update_miss(
-	struct _lck_mtx_ext_ *lock,
-	int *first_miss)
-{
-#pragma unused(first_miss)
-#if LOG_FIRST_MISS_ALONE
-	if ((*first_miss & 1) == 0) {
-#endif /* LOG_FIRST_MISS_ALONE */
-	lck_grp_t *grp = lock->lck_mtx_grp;
-	lck_grp_stat_t *stat = &grp->lck_grp_stats.lgss_mtx_miss;
-	lck_grp_inc_stats(grp, stat);
-
-#if LOG_FIRST_MISS_ALONE
 	*first_miss |= 1;
-}
 #endif /* LOG_FIRST_MISS_ALONE */
+	__lck_grp_mtx_update_miss(lock->lck_mtx_grp);
 }
 
 static void inline
-lck_grp_mtx_update_direct_wait(
-	struct _lck_mtx_ext_ *lock)
+lck_grp_mtx_update_direct_wait(struct _lck_mtx_ext_ *lock)
 {
-	lck_grp_t *grp = lock->lck_mtx_grp;
-	lck_grp_stat_t *stat = &grp->lck_grp_stats.lgss_mtx_direct_wait;
-	lck_grp_inc_stats(grp, stat);
+	__lck_grp_mtx_update_direct_wait(lock->lck_mtx_grp);
 }
 
 static void inline
-lck_grp_mtx_update_wait(
-	struct _lck_mtx_ext_ *lock,
-	int *first_miss)
+lck_grp_mtx_update_wait(struct _lck_mtx_ext_ *lock, int *first_miss)
 {
 #pragma unused(first_miss)
 #if LOG_FIRST_MISS_ALONE
-	if ((*first_miss & 2) == 0) {
-#endif /* LOG_FIRST_MISS_ALONE */
-	lck_grp_t *grp = lock->lck_mtx_grp;
-	lck_grp_stat_t *stat = &grp->lck_grp_stats.lgss_mtx_wait;
-	lck_grp_inc_stats(grp, stat);
-#if LOG_FIRST_MISS_ALONE
+	if (*first_miss & 2) {
+		return;
+	}
 	*first_miss |= 2;
-}
 #endif /* LOG_FIRST_MISS_ALONE */
+	__lck_grp_mtx_update_wait(lock->lck_mtx_grp);
 }
 
 static void inline
-lck_grp_mtx_update_held(
-	struct _lck_mtx_ext_ *lock)
+lck_grp_mtx_update_held(struct _lck_mtx_ext_ *lock)
 {
-	lck_grp_t *grp = lock->lck_mtx_grp;
-	lck_grp_stat_t *stat = &grp->lck_grp_stats.lgss_mtx_held;
-	lck_grp_inc_stats(grp, stat);
+	__lck_grp_mtx_update_held(lock->lck_mtx_grp);
 }
 
+#endif /* __x86_64__ */
 #endif /* MACH_KERNEL_PRIVATE */
+
+#pragma GCC visibility pop
+__END_DECLS
+
 #endif /* _KERN_LOCKSTAT_H */

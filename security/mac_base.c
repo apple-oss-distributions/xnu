@@ -347,8 +347,8 @@ mac_policy_init(void)
 	    MAC_POLICY_LIST_CHUNKSIZE, Z_WAITOK | Z_ZERO);
 #endif
 
-	LIST_INIT(&mac_label_element_list);
-	LIST_INIT(&mac_static_label_element_list);
+	SLIST_INIT(&mac_label_element_list);
+	SLIST_INIT(&mac_static_label_element_list);
 }
 
 /* Function pointer set up for loading security extensions.
@@ -416,12 +416,13 @@ mac_policy_initbsd(void)
 void
 mac_policy_addto_labellist(mac_policy_handle_t handle, int static_entry)
 {
-	struct mac_label_listener **new_mlls;
-	struct mac_label_element *mle, **new_mles;
+	struct mac_label_element *mle, *mle_tmp;
+	struct mac_label_listener *mll, *mll_tmp;
 	struct mac_label_element_list_t *list;
 	struct mac_policy_conf *mpc;
 	const char *name, *name2;
-	u_int idx, mle_free, mll_free;
+	struct mac_label_element_list_t mles = SLIST_HEAD_INITIALIZER(mles);
+	struct mac_label_listeners_t mlls = SLIST_HEAD_INITIALIZER(mlls);
 
 	mpc = mac_get_mpc(handle);
 
@@ -444,25 +445,18 @@ mac_policy_addto_labellist(mac_policy_handle_t handle, int static_entry)
 	 * to contain the potential new elements so we don't have to
 	 * give up the lock, or allocate with the lock held.
 	 */
-	MALLOC(new_mles, struct mac_label_element **,
-	    sizeof(struct mac_label_element *) *
-	    mpc->mpc_labelname_count, M_MACTEMP, M_WAITOK | M_ZERO);
-	for (idx = 0; idx < mpc->mpc_labelname_count; idx++) {
-		new_mles[idx] = kalloc_type(struct mac_label_element, Z_WAITOK);
+	for (uint32_t idx = 0; idx < mpc->mpc_labelname_count; idx++) {
+		mle = kalloc_type(struct mac_label_element, Z_WAITOK_ZERO_NOFAIL);
+		SLIST_INSERT_HEAD(&mles, mle, mle_list);
+
+		mll = kalloc_type(struct mac_label_listener, Z_WAITOK);
+		SLIST_INSERT_HEAD(&mlls, mll, mll_list);
 	}
-	mle_free = 0;
-	MALLOC(new_mlls, struct mac_label_listener **,
-	    sizeof(struct mac_label_listener *) *
-	    mpc->mpc_labelname_count, M_MACTEMP, M_WAITOK);
-	for (idx = 0; idx < mpc->mpc_labelname_count; idx++) {
-		new_mlls[idx] = kalloc_type(struct mac_label_listener, Z_WAITOK);
-	}
-	mll_free = 0;
 
 	if (mac_late) {
 		mac_policy_grab_exclusive();
 	}
-	for (idx = 0; idx < mpc->mpc_labelname_count; idx++) {
+	for (uint32_t idx = 0; idx < mpc->mpc_labelname_count; idx++) {
 		if (*(name = mpc->mpc_labelnames[idx]) == '?') {
 			name++;
 		}
@@ -470,7 +464,7 @@ mac_policy_addto_labellist(mac_policy_handle_t handle, int static_entry)
 		 * Check both label element lists and add to the
 		 * appropriate list only if not already on a list.
 		 */
-		LIST_FOREACH(mle, &mac_static_label_element_list, mle_list) {
+		SLIST_FOREACH(mle, &mac_static_label_element_list, mle_list) {
 			if (*(name2 = mle->mle_name) == '?') {
 				name2++;
 			}
@@ -479,7 +473,7 @@ mac_policy_addto_labellist(mac_policy_handle_t handle, int static_entry)
 			}
 		}
 		if (mle == NULL) {
-			LIST_FOREACH(mle, &mac_label_element_list, mle_list) {
+			SLIST_FOREACH(mle, &mac_label_element_list, mle_list) {
 				if (*(name2 = mle->mle_name) == '?') {
 					name2++;
 				}
@@ -489,32 +483,30 @@ mac_policy_addto_labellist(mac_policy_handle_t handle, int static_entry)
 			}
 		}
 		if (mle == NULL) {
-			mle = new_mles[mle_free];
+			mle = SLIST_FIRST(&mles);
+			SLIST_REMOVE_HEAD(&mles, mle_list);
 			strlcpy(mle->mle_name, mpc->mpc_labelnames[idx],
 			    MAC_MAX_LABEL_ELEMENT_NAME);
-			LIST_INIT(&mle->mle_listeners);
-			LIST_INSERT_HEAD(list, mle, mle_list);
-			mle_free++;
+			SLIST_INIT(&mle->mle_listeners);
+			SLIST_INSERT_HEAD(list, mle, mle_list);
 		}
+
+		mll = SLIST_FIRST(&mlls);
+		SLIST_REMOVE_HEAD(&mlls, mll_list);
 		/* Add policy handler as a listener. */
-		new_mlls[mll_free]->mll_handle = handle;
-		LIST_INSERT_HEAD(&mle->mle_listeners, new_mlls[mll_free],
-		    mll_list);
-		mll_free++;
+		mll->mll_handle = handle;
+		SLIST_INSERT_HEAD(&mle->mle_listeners, mll, mll_list);
 	}
 	if (mac_late) {
 		mac_policy_release_exclusive();
 	}
 
-	/* Free up any unused label elements and listeners */
-	for (idx = mle_free; idx < mpc->mpc_labelname_count; idx++) {
-		kfree_type(struct mac_label_element, new_mles[idx]);
+	SLIST_FOREACH_SAFE(mle, &mles, mle_list, mle_tmp) {
+		kfree_type(struct mac_label_element, mle);
 	}
-	FREE(new_mles, M_MACTEMP);
-	for (idx = mll_free; idx < mpc->mpc_labelname_count; idx++) {
-		kfree_type(struct mac_label_listener, new_mlls[idx]);
+	SLIST_FOREACH_SAFE(mll, &mlls, mll_list, mll_tmp) {
+		kfree_type(struct mac_label_listener, mll);
 	}
-	FREE(new_mlls, M_MACTEMP);
 }
 
 /*
@@ -528,8 +520,8 @@ mac_policy_addto_labellist(mac_policy_handle_t handle, int static_entry)
 void
 mac_policy_removefrom_labellist(mac_policy_handle_t handle)
 {
-	struct mac_label_listener *mll;
-	struct mac_label_element *mle;
+	struct mac_label_listener *mll, **mllp;
+	struct mac_label_element *mle, **mlep;
 	struct mac_policy_conf *mpc;
 
 	mpc = mac_get_mpc(handle);
@@ -548,13 +540,13 @@ mac_policy_removefrom_labellist(mac_policy_handle_t handle)
 	 * that label element from the list.  Note that we only
 	 * have to worry about the non-static list.
 	 */
-	LIST_FOREACH(mle, &mac_label_element_list, mle_list) {
-		LIST_FOREACH(mll, &mle->mle_listeners, mll_list) {
+	SLIST_FOREACH_PREVPTR(mle, mlep, &mac_label_element_list, mle_list) {
+		SLIST_FOREACH_PREVPTR(mll, mllp, &mle->mle_listeners, mll_list) {
 			if (mll->mll_handle == handle) {
-				LIST_REMOVE(mll, mll_list);
+				*mllp = SLIST_NEXT(mll, mll_list);
 				kfree_type(struct mac_label_listener, mll);
-				if (LIST_EMPTY(&mle->mle_listeners)) {
-					LIST_REMOVE(mle, mle_list);
+				if (SLIST_EMPTY(&mle->mle_listeners)) {
+					*mlep = SLIST_NEXT(mle, mle_list);
 					kfree_type(struct mac_label_element, mle);
 				}
 				return;
@@ -898,23 +890,6 @@ mac_error_select(int error1, int error2)
 	return error2;
 }
 
-void
-mac_label_init(struct label *label)
-{
-	bzero(label, sizeof(*label));
-	label->l_flags = MAC_FLAG_INITIALIZED;
-}
-
-void
-mac_label_destroy(struct label *label)
-{
-	KASSERT(label->l_flags & MAC_FLAG_INITIALIZED,
-	    ("destroying uninitialized label"));
-
-	bzero(label, sizeof(*label));
-	/* implicit: label->l_flags &= ~MAC_FLAG_INITIALIZED; */
-}
-
 int
 mac_check_structmac_consistent(struct user_mac *mac)
 {
@@ -953,7 +928,7 @@ mac_label_externalize(size_t mpo_externalize_off, struct label *label,
 
 	element_list = &mac_static_label_element_list;
 element_loop:
-	LIST_FOREACH(mle, element_list, mle_list) {
+	SLIST_FOREACH(mle, element_list, mle_list) {
 		name = mle->mle_name;
 		if (all_labels) {
 			if (*name == '?') {
@@ -967,7 +942,7 @@ element_loop:
 				continue;
 			}
 		}
-		LIST_FOREACH(mll, &mle->mle_listeners, mll_list) {
+		SLIST_FOREACH(mll, &mle->mle_listeners, mll_list) {
 			mpc = mac_policy_list.entries[mll->mll_handle].mpc;
 			if (mpc == NULL) {
 				continue;
@@ -1108,14 +1083,14 @@ mac_label_internalize(size_t mpo_internalize_off, struct label *label,
 
 	element_list = &mac_static_label_element_list;
 element_loop:
-	LIST_FOREACH(mle, element_list, mle_list) {
+	SLIST_FOREACH(mle, element_list, mle_list) {
 		if (*(name = mle->mle_name) == '?') {
 			name++;
 		}
 		if (strcmp(element_name, name) != 0) {
 			continue;
 		}
-		LIST_FOREACH(mll, &mle->mle_listeners, mll_list) {
+		SLIST_FOREACH(mll, &mle->mle_listeners, mll_list) {
 			mpc = mac_policy_list.entries[mll->mll_handle].mpc;
 			if (mpc == NULL) {
 				continue;
@@ -1169,355 +1144,252 @@ mac_internalize(size_t mpo_internalize_off, struct label *label,
 	return error;
 }
 
+static int
+user_mac_copyin(struct proc *p, user_addr_t mac_p, struct user_mac *mac)
+{
+	int error;
+
+	if (IS_64BIT_PROCESS(p)) {
+		struct user64_mac mac64;
+		if ((error = copyin(mac_p, &mac64, sizeof(mac64)))) {
+			return error;
+		}
+
+		mac->m_buflen = mac64.m_buflen;
+		mac->m_string = mac64.m_string;
+	} else {
+		struct user32_mac mac32;
+		if ((error = copyin(mac_p, &mac32, sizeof(mac32)))) {
+			return error;
+		}
+
+		mac->m_buflen = mac32.m_buflen;
+		mac->m_string = mac32.m_string;
+	}
+
+	return mac_check_structmac_consistent(mac);
+}
+
+int
+mac_do_get(struct proc *p, user_addr_t mac_p, mac_getter_t getter)
+{
+	struct user_mac mac;
+	char *input;
+	char *output;
+	size_t len;
+	size_t ulen;
+	int error;
+
+	if ((error = user_mac_copyin(p, mac_p, &mac))) {
+		return error;
+	}
+
+	len = mac.m_buflen;
+	input = kalloc_data(len, Z_WAITOK);
+	if ((error = copyinstr(mac.m_string, input, len, &ulen))) {
+		kfree_data(input, len);
+		return error;
+	}
+
+	AUDIT_ARG(mac_string, input);
+
+	output = kalloc_data(len, Z_WAITOK | Z_ZERO);
+
+	error = getter(input, output, len);
+	if (error == 0) {
+		/* mac_check_structmac_consistent => len > 0 */
+		output[len - 1] = '\0';
+		error = copyout(output, mac.m_string, strlen(output) + 1);
+	}
+
+	kfree_data(output, len);
+	kfree_data(input, len);
+	return error;
+}
+
+int
+mac_do_set(struct proc *p, user_addr_t mac_p, mac_setter_t setter)
+{
+	struct user_mac mac;
+	char *input;
+	size_t len;
+	size_t ulen;
+	int error;
+
+	if ((error = user_mac_copyin(p, mac_p, &mac))) {
+		return error;
+	}
+
+	len = mac.m_buflen;
+	input = kalloc_data(len, Z_WAITOK);
+	if ((error = copyinstr(mac.m_string, input, len, &ulen))) {
+		kfree_data(input, len);
+		return error;
+	}
+
+	AUDIT_ARG(mac_string, input);
+
+	error = setter(input, len);
+
+	kfree_data(input, len);
+	return error;
+}
+
 /* system calls */
 
 int
 __mac_get_pid(struct proc *p, struct __mac_get_pid_args *uap, int *ret __unused)
 {
-	char *elements, *buffer;
-	struct user_mac mac;
-	struct proc *tproc;
-	struct ucred *tcred;
-	int error;
-	size_t ulen;
+	return mac_do_get(p, uap->mac_p,
+	           ^(char *input, char *output, size_t len) {
+		struct proc *tproc;
+		struct ucred *tcred;
+		int error;
 
-	AUDIT_ARG(pid, uap->pid);
-	if (IS_64BIT_PROCESS(p)) {
-		struct user64_mac mac64;
-		error = copyin(uap->mac_p, &mac64, sizeof(mac64));
-		mac.m_buflen = mac64.m_buflen;
-		mac.m_string = mac64.m_string;
-	} else {
-		struct user32_mac mac32;
-		error = copyin(uap->mac_p, &mac32, sizeof(mac32));
-		mac.m_buflen = mac32.m_buflen;
-		mac.m_string = mac32.m_string;
-	}
-	if (error) {
-		return error;
-	}
+		AUDIT_ARG(pid, uap->pid);
 
-	error = mac_check_structmac_consistent(&mac);
-	if (error) {
-		return error;
-	}
+		tproc = proc_find(uap->pid);
+		if (tproc == NULL) {
+		        return ESRCH;
+		}
 
-	tproc = proc_find(uap->pid);
-	if (tproc == NULL) {
-		return ESRCH;
-	}
-	tcred = kauth_cred_proc_ref(tproc);
-	proc_rele(tproc);
+		tcred = kauth_cred_proc_ref(tproc);
+		proc_rele(tproc);
 
-	elements = kalloc_data(mac.m_buflen, Z_WAITOK);
-	error = copyinstr(mac.m_string, elements, mac.m_buflen, &ulen);
-	if (error) {
-		kfree_data(elements, mac.m_buflen);
+		error = mac_cred_label_externalize(mac_cred_label(tcred),
+		input, output, len, M_WAITOK);
+
 		kauth_cred_unref(&tcred);
 		return error;
-	}
-	AUDIT_ARG(mac_string, elements);
-
-	buffer = kalloc_data(mac.m_buflen, Z_WAITOK | Z_ZERO);
-	error = mac_cred_label_externalize(tcred->cr_label, elements,
-	    buffer, mac.m_buflen, M_WAITOK);
-	if (error == 0) {
-		error = copyout(buffer, mac.m_string, strlen(buffer) + 1);
-	}
-
-	kfree_data(buffer, mac.m_buflen);
-	kfree_data(elements, mac.m_buflen);
-	kauth_cred_unref(&tcred);
-	return error;
+	});
 }
 
 int
 __mac_get_proc(proc_t p, struct __mac_get_proc_args *uap, int *ret __unused)
 {
-	char *elements, *buffer;
-	struct user_mac mac;
-	kauth_cred_t cr;
-	int error;
-	size_t ulen;
+	return mac_do_get(p, uap->mac_p,
+	           ^(char *input, char *output, size_t len) {
+		struct label *label;
 
-	if (IS_64BIT_PROCESS(p)) {
-		struct user64_mac mac64;
-		error = copyin(uap->mac_p, &mac64, sizeof(mac64));
-		mac.m_buflen = mac64.m_buflen;
-		mac.m_string = mac64.m_string;
-	} else {
-		struct user32_mac mac32;
-		error = copyin(uap->mac_p, &mac32, sizeof(mac32));
-		mac.m_buflen = mac32.m_buflen;
-		mac.m_string = mac32.m_string;
-	}
-	if (error) {
-		return error;
-	}
+		label = mac_cred_label(kauth_cred_get());
 
-	error = mac_check_structmac_consistent(&mac);
-	if (error) {
-		return error;
-	}
-
-	elements = kalloc_data(mac.m_buflen, Z_WAITOK);
-	error = copyinstr(mac.m_string, elements, mac.m_buflen, &ulen);
-	if (error) {
-		kfree_data(elements, mac.m_buflen);
-		return error;
-	}
-	AUDIT_ARG(mac_string, elements);
-
-	cr = kauth_cred_proc_ref(p);
-
-	buffer = kalloc_data(mac.m_buflen, Z_WAITOK | Z_ZERO);
-	error = mac_cred_label_externalize(cr->cr_label,
-	    elements, buffer, mac.m_buflen, M_WAITOK);
-	if (error == 0) {
-		error = copyout(buffer, mac.m_string, strlen(buffer) + 1);
-	}
-
-	kfree_data(buffer, mac.m_buflen);
-	kfree_data(elements, mac.m_buflen);
-	kauth_cred_unref(&cr);
-	return error;
+		return mac_cred_label_externalize(label, input, output, len, M_WAITOK);
+	});
 }
 
 int
 __mac_set_proc(proc_t p, struct __mac_set_proc_args *uap, int *ret __unused)
 {
-	struct label *intlabel;
-	struct user_mac mac;
-	char *buffer;
-	int error;
-	size_t ulen;
+	return mac_do_set(p, uap->mac_p,
+	           ^(char *input, __unused size_t len) {
+		struct label *intlabel;
+		int error;
 
-	if (IS_64BIT_PROCESS(p)) {
-		struct user64_mac mac64;
-		error = copyin(uap->mac_p, &mac64, sizeof(mac64));
-		mac.m_buflen = mac64.m_buflen;
-		mac.m_string = mac64.m_string;
-	} else {
-		struct user32_mac mac32;
-		error = copyin(uap->mac_p, &mac32, sizeof(mac32));
-		mac.m_buflen = mac32.m_buflen;
-		mac.m_string = mac32.m_string;
-	}
-	if (error) {
+		intlabel = mac_cred_label_alloc();
+		if ((error = mac_cred_label_internalize(intlabel, input))) {
+		        goto out;
+		}
+
+		if ((error = mac_cred_check_label_update(kauth_cred_get(), intlabel))) {
+		        goto out;
+		}
+
+		error = kauth_proc_label_update(p, intlabel);
+
+		out:
+		mac_cred_label_free(intlabel);
 		return error;
-	}
-
-	error = mac_check_structmac_consistent(&mac);
-	if (error) {
-		return error;
-	}
-
-	buffer = kalloc_data(mac.m_buflen, Z_WAITOK);
-	error = copyinstr(mac.m_string, buffer, mac.m_buflen, &ulen);
-	if (error) {
-		kfree_data(buffer, mac.m_buflen);
-		return error;
-	}
-	AUDIT_ARG(mac_string, buffer);
-
-	intlabel = mac_cred_label_alloc();
-	error = mac_cred_label_internalize(intlabel, buffer);
-	kfree_data(buffer, mac.m_buflen);
-	if (error) {
-		goto out;
-	}
-
-	error = mac_cred_check_label_update(kauth_cred_get(), intlabel);
-	if (error) {
-		goto out;
-	}
-
-	error = kauth_proc_label_update(p, intlabel);
-	if (error) {
-		goto out;
-	}
-
-out:
-	mac_cred_label_free(intlabel);
-	return error;
+	});
 }
 
 int
 __mac_get_fd(proc_t p, struct __mac_get_fd_args *uap, int *ret __unused)
 {
-	struct fileproc *fp;
-	struct vnode *vp;
-	struct user_mac mac;
-	char *elements, *buffer;
-	int error;
-	size_t ulen;
-	kauth_cred_t my_cred;
-	struct label *intlabel;
+	return mac_do_get(p, uap->mac_p,
+	           ^(char *input, char *output, size_t len) {
+		struct fileproc *fp;
+		struct vnode *vp;
+		int error;
+		struct label *intlabel;
 
-	AUDIT_ARG(fd, uap->fd);
+		AUDIT_ARG(fd, uap->fd);
 
-	if (IS_64BIT_PROCESS(p)) {
-		struct user64_mac mac64;
-		error = copyin(uap->mac_p, &mac64, sizeof(mac64));
-		mac.m_buflen = mac64.m_buflen;
-		mac.m_string = mac64.m_string;
-	} else {
-		struct user32_mac mac32;
-		error = copyin(uap->mac_p, &mac32, sizeof(mac32));
-		mac.m_buflen = mac32.m_buflen;
-		mac.m_string = mac32.m_string;
-	}
+		if ((error = fp_lookup(p, uap->fd, &fp, 0))) {
+		        return error;
+		}
 
-	if (error) {
-		return error;
-	}
+		error = mac_file_check_get(kauth_cred_get(), fp->fp_glob, input, len);
+		if (error) {
+		        fp_drop(p, uap->fd, fp, 0);
+		        return error;
+		}
 
-	error = mac_check_structmac_consistent(&mac);
-	if (error) {
-		return error;
-	}
-
-	elements = kalloc_data(mac.m_buflen, Z_WAITOK);
-	error = copyinstr(mac.m_string, elements, mac.m_buflen, &ulen);
-	if (error) {
-		kfree_data(elements, mac.m_buflen);
-		return error;
-	}
-	AUDIT_ARG(mac_string, elements);
-
-	buffer = kalloc_data(mac.m_buflen, Z_WAITOK);
-	error = fp_lookup(p, uap->fd, &fp, 0);
-	if (error) {
-		kfree_data(buffer, mac.m_buflen);
-		kfree_data(elements, mac.m_buflen);
-		return error;
-	}
-
-	my_cred = kauth_cred_proc_ref(p);
-	error = mac_file_check_get(my_cred, fp->fp_glob, elements, mac.m_buflen);
-	kauth_cred_unref(&my_cred);
-	if (error) {
-		fp_drop(p, uap->fd, fp, 0);
-		kfree_data(buffer, mac.m_buflen);
-		kfree_data(elements, mac.m_buflen);
-		return error;
-	}
-
-	switch (FILEGLOB_DTYPE(fp->fp_glob)) {
-	case DTYPE_VNODE:
-		intlabel = mac_vnode_label_alloc();
-		if (intlabel == NULL) {
-			error = ENOMEM;
+		switch (FILEGLOB_DTYPE(fp->fp_glob)) {
+		case DTYPE_VNODE:
+			intlabel = mac_vnode_label_alloc(NULL);
+			if (intlabel == NULL) {
+			        error = ENOMEM;
+			        break;
+			}
+			vp = (struct vnode *)fp_get_data(fp);
+			error = vnode_getwithref(vp);
+			if (error == 0) {
+			        mac_vnode_label_copy(mac_vnode_label(vp), intlabel);
+			        error = mac_vnode_label_externalize(intlabel,
+			        input, output, len, M_WAITOK);
+			        vnode_put(vp);
+			}
+			mac_vnode_label_free(intlabel);
+			break;
+		case DTYPE_SOCKET:
+		case DTYPE_PSXSHM:
+		case DTYPE_PSXSEM:
+		case DTYPE_PIPE:
+		case DTYPE_KQUEUE:
+		case DTYPE_FSEVENTS:
+		case DTYPE_ATALK:
+		case DTYPE_NETPOLICY:
+		case DTYPE_CHANNEL:
+		case DTYPE_NEXUS:
+		default:
+			error = ENOSYS;           // only sockets/vnodes so far
 			break;
 		}
-		vp = (struct vnode *)fp->fp_glob->fg_data;
-		error = vnode_getwithref(vp);
-		if (error == 0) {
-			mac_vnode_label_copy(vp->v_label, intlabel);
-			error = mac_vnode_label_externalize(intlabel,
-			    elements, buffer,
-			    mac.m_buflen, M_WAITOK);
-			vnode_put(vp);
-		}
-		mac_vnode_label_free(intlabel);
-		break;
-	case DTYPE_SOCKET:
-	case DTYPE_PSXSHM:
-	case DTYPE_PSXSEM:
-	case DTYPE_PIPE:
-	case DTYPE_KQUEUE:
-	case DTYPE_FSEVENTS:
-	case DTYPE_ATALK:
-	case DTYPE_NETPOLICY:
-	default:
-		error = ENOSYS;           // only sockets/vnodes so far
-		break;
-	}
-	fp_drop(p, uap->fd, fp, 0);
-
-	if (error == 0) {
-		error = copyout(buffer, mac.m_string, strlen(buffer) + 1);
-	}
-
-	kfree_data(buffer, mac.m_buflen);
-	kfree_data(elements, mac.m_buflen);
-	return error;
+		fp_drop(p, uap->fd, fp, 0);
+		return error;
+	});
 }
 
 static int
 mac_get_filelink(proc_t p, user_addr_t mac_p, user_addr_t path_p, int follow)
 {
-	struct vnode *vp;
-	vfs_context_t ctx;
-	char *elements, *buffer;
-	struct nameidata nd;
-	struct label *intlabel;
-	struct user_mac mac;
-	int error;
-	size_t ulen;
+	return mac_do_get(p, mac_p,
+	           ^(char *input, char *output, size_t len) {
+		struct vnode *vp;
+		struct nameidata nd;
+		struct label *intlabel;
+		int error;
 
-	if (IS_64BIT_PROCESS(p)) {
-		struct user64_mac mac64;
-		error = copyin(mac_p, &mac64, sizeof(mac64));
-		mac.m_buflen = mac64.m_buflen;
-		mac.m_string = mac64.m_string;
-	} else {
-		struct user32_mac mac32;
-		error = copyin(mac_p, &mac32, sizeof(mac32));
-		mac.m_buflen = mac32.m_buflen;
-		mac.m_string = mac32.m_string;
-	}
+		NDINIT(&nd, LOOKUP, OP_LOOKUP,
+		LOCKLEAF | (follow ? FOLLOW : NOFOLLOW) | AUDITVNPATH1,
+		UIO_USERSPACE, path_p,
+		vfs_context_current());
+		if ((error = namei(&nd))) {
+		        return error;
+		}
+		vp = nd.ni_vp;
 
-	if (error) {
+		nameidone(&nd);
+
+		intlabel = mac_vnode_label_alloc(NULL);
+		mac_vnode_label_copy(mac_vnode_label(vp), intlabel);
+		error = mac_vnode_label_externalize(intlabel, input, output,
+		len, M_WAITOK);
+		mac_vnode_label_free(intlabel);
+
+		vnode_put(vp);
 		return error;
-	}
-
-	error = mac_check_structmac_consistent(&mac);
-	if (error) {
-		return error;
-	}
-
-	elements = kalloc_data(mac.m_buflen, Z_WAITOK);
-	buffer = kalloc_data(mac.m_buflen, Z_WAITOK | Z_ZERO);
-
-	error = copyinstr(mac.m_string, elements, mac.m_buflen, &ulen);
-	if (error) {
-		kfree_data(buffer, mac.m_buflen);
-		kfree_data(elements, mac.m_buflen);
-		return error;
-	}
-	AUDIT_ARG(mac_string, elements);
-
-	ctx = vfs_context_current();
-
-	NDINIT(&nd, LOOKUP, OP_LOOKUP,
-	    LOCKLEAF | (follow ? FOLLOW : NOFOLLOW) | AUDITVNPATH1,
-	    UIO_USERSPACE, path_p, ctx);
-	error = namei(&nd);
-	if (error) {
-		kfree_data(buffer, mac.m_buflen);
-		kfree_data(elements, mac.m_buflen);
-		return error;
-	}
-	vp = nd.ni_vp;
-
-	nameidone(&nd);
-
-	intlabel = mac_vnode_label_alloc();
-	mac_vnode_label_copy(vp->v_label, intlabel);
-	error = mac_vnode_label_externalize(intlabel, elements, buffer,
-	    mac.m_buflen, M_WAITOK);
-	mac_vnode_label_free(intlabel);
-	if (error == 0) {
-		error = copyout(buffer, mac.m_string, strlen(buffer) + 1);
-	}
-
-	vnode_put(vp);
-
-	kfree_data(buffer, mac.m_buflen);
-	kfree_data(elements, mac.m_buflen);
-
-	return error;
+	});
 }
 
 int
@@ -1537,174 +1409,112 @@ __mac_get_link(proc_t p, struct __mac_get_link_args *uap,
 int
 __mac_set_fd(proc_t p, struct __mac_set_fd_args *uap, int *ret __unused)
 {
-	struct fileproc *fp;
-	struct user_mac mac;
-	struct vfs_context *ctx = vfs_context_current();
-	int error;
-	size_t ulen;
-	char *buffer;
-	struct label *intlabel;
-	struct vnode *vp;
+	return mac_do_set(p, uap->mac_p,
+	           ^(char *input, size_t len) {
+		struct fileproc *fp;
+		struct vfs_context *ctx = vfs_context_current();
+		int error;
+		struct label *intlabel;
+		struct vnode *vp;
 
-	AUDIT_ARG(fd, uap->fd);
+		AUDIT_ARG(fd, uap->fd);
 
-	if (IS_64BIT_PROCESS(p)) {
-		struct user64_mac mac64;
-		error = copyin(uap->mac_p, &mac64, sizeof(mac64));
-		mac.m_buflen = mac64.m_buflen;
-		mac.m_string = mac64.m_string;
-	} else {
-		struct user32_mac mac32;
-		error = copyin(uap->mac_p, &mac32, sizeof(mac32));
-		mac.m_buflen = mac32.m_buflen;
-		mac.m_string = mac32.m_string;
-	}
-	if (error) {
-		return error;
-	}
-
-	error = mac_check_structmac_consistent(&mac);
-	if (error) {
-		return error;
-	}
-
-	buffer = kalloc_data(mac.m_buflen, Z_WAITOK);
-	error = copyinstr(mac.m_string, buffer, mac.m_buflen, &ulen);
-	if (error) {
-		kfree_data(buffer, mac.m_buflen);
-		return error;
-	}
-	AUDIT_ARG(mac_string, buffer);
-
-	error = fp_lookup(p, uap->fd, &fp, 0);
-	if (error) {
-		kfree_data(buffer, mac.m_buflen);
-		return error;
-	}
-
-
-	error = mac_file_check_set(vfs_context_ucred(ctx), fp->fp_glob, buffer, mac.m_buflen);
-	if (error) {
-		fp_drop(p, uap->fd, fp, 0);
-		kfree_data(buffer, mac.m_buflen);
-		return error;
-	}
-
-	switch (FILEGLOB_DTYPE(fp->fp_glob)) {
-	case DTYPE_VNODE:
-		if (mac_label_vnodes == 0) {
-			error = ENOSYS;
-			break;
+		if ((error = fp_lookup(p, uap->fd, &fp, 0))) {
+		        return error;
 		}
 
-		intlabel = mac_vnode_label_alloc();
-
-		error = mac_vnode_label_internalize(intlabel, buffer);
+		error = mac_file_check_set(vfs_context_ucred(ctx), fp->fp_glob, input, len);
 		if (error) {
+		        fp_drop(p, uap->fd, fp, 0);
+		        return error;
+		}
+
+		switch (FILEGLOB_DTYPE(fp->fp_glob)) {
+		case DTYPE_VNODE:
+			if (mac_label_vnodes == 0) {
+			        error = ENOSYS;
+			        break;
+			}
+
+			intlabel = mac_vnode_label_alloc(NULL);
+
+			error = mac_vnode_label_internalize(intlabel, input);
+			if (error) {
+			        mac_vnode_label_free(intlabel);
+			        break;
+			}
+
+			vp = (struct vnode *)fp_get_data(fp);
+
+			error = vnode_getwithref(vp);
+			if (error == 0) {
+			        error = vn_setlabel(vp, intlabel, ctx);
+			        vnode_put(vp);
+			}
 			mac_vnode_label_free(intlabel);
 			break;
+
+		case DTYPE_SOCKET:
+		case DTYPE_PSXSHM:
+		case DTYPE_PSXSEM:
+		case DTYPE_PIPE:
+		case DTYPE_KQUEUE:
+		case DTYPE_FSEVENTS:
+		case DTYPE_ATALK:
+		case DTYPE_NETPOLICY:
+		case DTYPE_CHANNEL:
+		case DTYPE_NEXUS:
+		default:
+			error = ENOSYS;          // only sockets/vnodes so far
+			break;
 		}
 
-
-		vp = (struct vnode *)fp->fp_glob->fg_data;
-
-		error = vnode_getwithref(vp);
-		if (error == 0) {
-			error = vn_setlabel(vp, intlabel, ctx);
-			vnode_put(vp);
-		}
-		mac_vnode_label_free(intlabel);
-		break;
-
-	case DTYPE_SOCKET:
-	case DTYPE_PSXSHM:
-	case DTYPE_PSXSEM:
-	case DTYPE_PIPE:
-	case DTYPE_KQUEUE:
-	case DTYPE_FSEVENTS:
-	case DTYPE_ATALK:
-	case DTYPE_NETPOLICY:
-	default:
-		error = ENOSYS;          // only sockets/vnodes so far
-		break;
-	}
-
-	fp_drop(p, uap->fd, fp, 0);
-	kfree_data(buffer, mac.m_buflen);
-	return error;
+		fp_drop(p, uap->fd, fp, 0);
+		return error;
+	});
 }
 
 static int
 mac_set_filelink(proc_t p, user_addr_t mac_p, user_addr_t path_p,
     int follow)
 {
-	struct vnode *vp;
-	struct vfs_context *ctx = vfs_context_current();
-	struct label *intlabel;
-	struct nameidata nd;
-	struct user_mac mac;
-	char *buffer;
-	int error;
-	size_t ulen;
+	return mac_do_set(p, mac_p,
+	           ^(char *input, __unused size_t len) {
+		struct vnode *vp;
+		struct vfs_context *ctx = vfs_context_current();
+		struct label *intlabel;
+		struct nameidata nd;
+		int error;
 
-	if (mac_label_vnodes == 0) {
-		return ENOSYS;
-	}
+		if (mac_label_vnodes == 0) {
+		        return ENOSYS;
+		}
 
-	if (IS_64BIT_PROCESS(p)) {
-		struct user64_mac mac64;
-		error = copyin(mac_p, &mac64, sizeof(mac64));
-		mac.m_buflen = mac64.m_buflen;
-		mac.m_string = mac64.m_string;
-	} else {
-		struct user32_mac mac32;
-		error = copyin(mac_p, &mac32, sizeof(mac32));
-		mac.m_buflen = mac32.m_buflen;
-		mac.m_string = mac32.m_string;
-	}
-	if (error) {
-		return error;
-	}
+		intlabel = mac_vnode_label_alloc(NULL);
+		error = mac_vnode_label_internalize(intlabel, input);
+		if (error) {
+		        mac_vnode_label_free(intlabel);
+		        return error;
+		}
 
-	error = mac_check_structmac_consistent(&mac);
-	if (error) {
-		printf("mac_set_file: failed structure consistency check\n");
-		return error;
-	}
+		NDINIT(&nd, LOOKUP, OP_LOOKUP,
+		LOCKLEAF | (follow ? FOLLOW : NOFOLLOW) | AUDITVNPATH1,
+		UIO_USERSPACE, path_p, ctx);
+		error = namei(&nd);
+		if (error) {
+		        mac_vnode_label_free(intlabel);
+		        return error;
+		}
+		vp = nd.ni_vp;
 
-	buffer = kalloc_data(mac.m_buflen, Z_WAITOK);
-	error = copyinstr(mac.m_string, buffer, mac.m_buflen, &ulen);
-	if (error) {
-		kfree_data(buffer, mac.m_buflen);
-		return error;
-	}
-	AUDIT_ARG(mac_string, buffer);
+		nameidone(&nd);
 
-	intlabel = mac_vnode_label_alloc();
-	error = mac_vnode_label_internalize(intlabel, buffer);
-	kfree_data(buffer, mac.m_buflen);
-	if (error) {
+		error = vn_setlabel(vp, intlabel, ctx);
+		vnode_put(vp);
 		mac_vnode_label_free(intlabel);
+
 		return error;
-	}
-
-	NDINIT(&nd, LOOKUP, OP_LOOKUP,
-	    LOCKLEAF | (follow ? FOLLOW : NOFOLLOW) | AUDITVNPATH1,
-	    UIO_USERSPACE, path_p, ctx);
-	error = namei(&nd);
-	if (error) {
-		mac_vnode_label_free(intlabel);
-		return error;
-	}
-	vp = nd.ni_vp;
-
-	nameidone(&nd);
-
-	error = vn_setlabel(vp, intlabel, ctx);
-	vnode_put(vp);
-	mac_vnode_label_free(intlabel);
-
-	return error;
+	});
 }
 
 int
@@ -1813,52 +1623,11 @@ done:
 int
 mac_mount_label_get(struct mount *mp, user_addr_t mac_p)
 {
-	char *elements, *buffer;
-	struct label *label;
-	struct user_mac mac;
-	int error;
-	size_t ulen;
-
-	if (IS_64BIT_PROCESS(current_proc())) {
-		struct user64_mac mac64;
-		error = copyin(mac_p, &mac64, sizeof(mac64));
-		mac.m_buflen = mac64.m_buflen;
-		mac.m_string = mac64.m_string;
-	} else {
-		struct user32_mac mac32;
-		error = copyin(mac_p, &mac32, sizeof(mac32));
-		mac.m_buflen = mac32.m_buflen;
-		mac.m_string = mac32.m_string;
-	}
-	if (error) {
-		return error;
-	}
-
-	error = mac_check_structmac_consistent(&mac);
-	if (error) {
-		return error;
-	}
-
-	elements = kalloc_data(mac.m_buflen, Z_WAITOK);
-	error = copyinstr(mac.m_string, elements, mac.m_buflen, &ulen);
-	if (error) {
-		kfree_data(elements, mac.m_buflen);
-		return error;
-	}
-	AUDIT_ARG(mac_string, elements);
-
-	label = mp->mnt_mntlabel;
-	buffer = kalloc_data(mac.m_buflen, Z_WAITOK | Z_ZERO);
-	error = mac_mount_label_externalize(label, elements, buffer,
-	    mac.m_buflen);
-	kfree_data(elements, mac.m_buflen);
-
-	if (error == 0) {
-		error = copyout(buffer, mac.m_string, strlen(buffer) + 1);
-	}
-	kfree_data(buffer, mac.m_buflen);
-
-	return error;
+	return mac_do_get(current_proc(), mac_p,
+	           ^(char *input, char *output, size_t len) {
+		return mac_mount_label_externalize(mac_mount_label(mp), input,
+		output, len);
+	});
 }
 
 /*

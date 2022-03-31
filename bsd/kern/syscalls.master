@@ -278,7 +278,7 @@
 183	AUE_SETEUID	ALL	{ int seteuid(uid_t euid); }
 184	AUE_SIGRETURN	ALL	{ int sigreturn(struct ucontext *uctx, int infostyle, user_addr_t token) NO_SYSCALL_STUB; }
 185	AUE_NULL	ALL 	{ int enosys(void); } { old chud }
-186	AUE_NULL	ALL	{ int thread_selfcounts(int type, user_addr_t buf, user_size_t nbytes); }
+186	AUE_NULL	ALL	{ int thread_selfcounts(uint32_t kind, user_addr_t buf, user_size_t nbytes); }
 187	AUE_FDATASYNC	ALL	{ int fdatasync(int fd); }
 188	AUE_STAT	ALL	{ int stat(user_addr_t path, user_addr_t ub); }
 189	AUE_FSTAT	ALL	{ int sys_fstat(int fd, user_addr_t ub); }
@@ -543,7 +543,7 @@
 359	AUE_AUDITCTL	ALL	{ int auditctl(char *path); }
 #if CONFIG_WORKQUEUE
 360	AUE_NULL	ALL	{ user_addr_t bsdthread_create(user_addr_t func, user_addr_t func_arg, user_addr_t stack, user_addr_t pthread, uint32_t flags) NO_SYSCALL_STUB; }
-361	AUE_NULL	ALL	{ int bsdthread_terminate(user_addr_t stackaddr, size_t freesize, uint32_t port, uint32_t sem) NO_SYSCALL_STUB; }
+361	AUE_NULL	ALL	{ int bsdthread_terminate(user_addr_t stackaddr, size_t freesize, uint32_t port, user_addr_t sema_or_ulock) NO_SYSCALL_STUB; }
 #else
 360	AUE_NULL	ALL	{ int nosys(void); }
 361	AUE_NULL	ALL	{ int nosys(void); }
@@ -811,6 +811,20 @@
 501	AUE_NULL	ALL	{ int enosys(void); }
 502	AUE_NULL	ALL	{ int enosys(void); }
 #endif /* NECP */
+#if SKYWALK
+503	AUE_NEXUS	ALL	{ int __nexus_open(struct nxctl_init *init, uint32_t init_len); }
+504	AUE_NEXUS	ALL	{ int __nexus_register(int ctl, struct nxprov_reg *reg, uint32_t reg_len, uuid_t *prov_uuid, uint32_t prov_uuid_len); }
+505	AUE_NEXUS	ALL	{ int __nexus_deregister(int ctl, uuid_t prov_uuid, uint32_t prov_uuid_len); }
+506	AUE_NEXUS	ALL	{ int __nexus_create(int ctl, uuid_t prov_uuid, uint32_t prov_uuid_len, uuid_t *nx_uuid, uint32_t nx_uuid_len); }
+507	AUE_NEXUS	ALL	{ int __nexus_destroy(int ctl, uuid_t nx_uuid, uint32_t nx_uuid_len); }
+508	AUE_NEXUS	ALL	{ int __nexus_get_opt(int ctl, uint32_t opt, void *aoptval, uint32_t *aoptlen); }
+509	AUE_NEXUS	ALL	{ int __nexus_set_opt(int ctl, uint32_t opt, const void *aoptval, uint32_t optlen); }
+510	AUE_CHANNEL	ALL	{ int __channel_open(struct ch_init *init, uint32_t init_len); }
+511	AUE_CHANNEL	ALL	{ int __channel_get_info(int c, struct ch_info *cinfo, uint32_t cinfolen); }
+512	AUE_CHANNEL	ALL	{ int __channel_sync(int c, int mode, int flags); }
+513	AUE_CHANNEL	ALL	{ int __channel_get_opt(int c, uint32_t opt, void *aoptval, uint32_t *aoptlen); }
+514	AUE_CHANNEL	ALL	{ int __channel_set_opt(int c, uint32_t opt, const void *aoptval, uint32_t optlen); }
+#else
 503	AUE_NULL	ALL	{ int enosys(void); }
 504	AUE_NULL	ALL	{ int enosys(void); }
 505	AUE_NULL	ALL	{ int enosys(void); }
@@ -823,8 +837,9 @@
 512	AUE_NULL	ALL	{ int enosys(void); }
 513	AUE_NULL	ALL	{ int enosys(void); }
 514	AUE_NULL	ALL	{ int enosys(void); }
-515	AUE_NULL	ALL	{ int ulock_wait(uint32_t operation, void *addr, uint64_t value, uint32_t timeout) NO_SYSCALL_STUB; }
-516	AUE_NULL	ALL	{ int ulock_wake(uint32_t operation, void *addr, uint64_t wake_value) NO_SYSCALL_STUB; }
+#endif /* !SKYWALK */
+515	AUE_NULL	ALL	{ int sys_ulock_wait(uint32_t operation, void *addr, uint64_t value, uint32_t timeout) NO_SYSCALL_STUB; }
+516	AUE_NULL	ALL	{ int sys_ulock_wake(uint32_t operation, void *addr, uint64_t wake_value) NO_SYSCALL_STUB; }
 517	AUE_FCLONEFILEAT	ALL     { int fclonefileat(int src_fd, int dst_dirfd, user_addr_t dst, uint32_t flags); }
 518	AUE_NULL	ALL     { int fs_snapshot(uint32_t op, int dirfd, user_addr_t name1, user_addr_t name2, user_addr_t data, uint32_t flags) NO_SYSCALL_STUB; }
 519	AUE_NULL	ALL	{ int enosys(void); }
@@ -865,7 +880,7 @@
 541	AUE_PWRITEV	ALL	{ user_ssize_t sys_pwritev(int fd, struct iovec *iovp, int iovcnt, off_t offset); }
 542	AUE_PREADV	ALL	{ user_ssize_t sys_preadv_nocancel(int fd, struct iovec *iovp, int iovcnt, off_t offset) NO_SYSCALL_STUB; }
 543	AUE_PWRITEV	ALL	{ user_ssize_t sys_pwritev_nocancel(int fd, struct iovec *iovp, int iovcnt, off_t offset) NO_SYSCALL_STUB; }
-544     AUE_NULL        ALL     { int ulock_wait2(uint32_t operation, void *addr, uint64_t value, uint64_t timeout, uint64_t value2) NO_SYSCALL_STUB; }
+544	AUE_NULL        ALL     { int sys_ulock_wait2(uint32_t operation, void *addr, uint64_t value, uint64_t timeout, uint64_t value2) NO_SYSCALL_STUB; }
 545	AUE_PROCINFO	ALL	{ int proc_info_extended_id(int32_t callnum, int32_t pid, uint32_t flavor, uint32_t flags, uint64_t ext_id, uint64_t arg, user_addr_t buffer, int32_t buffersize) NO_SYSCALL_STUB; }
 #if SOCKETS
 546     AUE_TRACKERACTION       ALL     { int tracker_action(int action, char *buffer, size_t buffer_size); }
@@ -873,3 +888,7 @@
 546	AUE_NULL	ALL	{ int nosys(void); }
 #endif /* SOCKETS */
 547 AUE_DEBUG_SYSCALL_REJECT	ALL { int debug_syscall_reject(uint64_t packed_selectors) NO_SYSCALL_STUB; }
+548	AUE_NULL	ALL	{ int nosys(void); }
+549	AUE_NULL	ALL	{ int nosys(void); }
+550	AUE_NULL	ALL	{ int nosys(void); }
+551	AUE_FREADLINK	ALL	{ int freadlink(int fd, user_addr_t buf, user_size_t bufsize); }

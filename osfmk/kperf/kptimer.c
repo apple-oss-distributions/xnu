@@ -161,7 +161,8 @@ kptimer_setup(void)
 	lck_grp_init(&kptimer_lock_grp, "kptimer", LCK_GRP_ATTR_NULL);
 
 	const size_t timers_size = KPTIMER_MAX * sizeof(struct kptimer);
-	kptimer.g_timers = zalloc_permanent(timers_size, ZALIGN(struct kptimer));
+	kptimer.g_timers = zalloc_permanent_tag(timers_size,
+	    ZALIGN(struct kptimer), VM_KERN_MEMORY_DIAG);
 	for (int i = 0; i < KPTIMER_MAX; i++) {
 		lck_spin_init(&kptimer.g_timers[i].kt_lock, &kptimer_lock_grp,
 		    LCK_ATTR_NULL);
@@ -169,7 +170,8 @@ kptimer_setup(void)
 
 	const size_t deadlines_size = machine_info.logical_cpu_max * KPTIMER_MAX *
 	    sizeof(kptimer.g_cpu_deadlines[0]);
-	kptimer.g_cpu_deadlines = zalloc_permanent(deadlines_size, ZALIGN_64);
+	kptimer.g_cpu_deadlines = zalloc_permanent_tag(deadlines_size,
+	    ZALIGN_64, VM_KERN_MEMORY_DIAG);
 	for (int i = 0; i < KPTIMER_MAX; i++) {
 		for (int j = 0; j < machine_info.logical_cpu_max; j++) {
 			kptimer_set_cpu_deadline(j, i, EndOfAllTime);

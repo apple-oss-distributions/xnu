@@ -244,19 +244,20 @@ mach_syscall(struct arm_saved_state *state)
 	 * Not all mach traps are filtered. e.g., mach_absolute_time() and
 	 * mach_continuous_time(). See handle_svc().
 	 */
-	task_t task = current_task();
+	thread_ro_t tro = current_thread_ro();
+	task_t task = tro->tro_task;
+	struct proc *proc = tro->tro_proc;
 	uint8_t *filter_mask = task_get_mach_trap_filter_mask(task);
 
 	if (__improbable(filter_mask != NULL &&
-	    !bitstr_test(filter_mask, call_number))) {
-		if (mac_task_mach_trap_evaluate != NULL) {
-			retval = mac_task_mach_trap_evaluate(get_bsdtask_info(task),
-			    call_number);
-			if (retval) {
-				DEBUG_KPRINT_SYSCALL_MACH(
-					"mach_syscall: MACF retval=0x%x\n", retval);
-				goto bad;
+	    !bitstr_test(filter_mask, call_number) &&
+	    mac_task_mach_trap_evaluate != NULL)) {
+		retval = mac_task_mach_trap_evaluate(proc, call_number);
+		if (retval != KERN_SUCCESS) {
+			if (mach_trap_table[call_number].mach_trap_returns_port) {
+				retval = MACH_PORT_NULL;
 			}
+			goto skip_machcall;
 		}
 	}
 #endif /* CONFIG_MACF */
@@ -267,6 +268,11 @@ mach_syscall(struct arm_saved_state *state)
 	    debug_syscall_rejection_mode != 0) &&
 	    !bitmap_test(rejection_mask, call_number)) {
 		if (debug_syscall_rejection_handle(-call_number)) {
+			if (mach_trap_table[call_number].mach_trap_returns_port) {
+				retval = MACH_PORT_NULL;
+			} else {
+				retval = KERN_DENIED;
+			}
 			goto skip_machcall;
 		}
 	}
@@ -275,9 +281,7 @@ mach_syscall(struct arm_saved_state *state)
 
 	retval = mach_call(&args);
 
-#if CONFIG_DEBUG_SYSCALL_REJECTION
 skip_machcall:
-#endif
 
 	DEBUG_KPRINT_SYSCALL_MACH("mach_syscall: retval=0x%x (pid %d, tid %lld)\n", retval,
 	    proc_pid(current_proc()), thread_tid(current_thread()));

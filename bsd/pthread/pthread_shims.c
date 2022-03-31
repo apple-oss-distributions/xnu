@@ -51,6 +51,7 @@
 #include <sys/proc_internal.h>
 #include <sys/sysproto.h>
 #include <sys/systm.h>
+#include <sys/ulock.h>
 #include <vm/vm_map.h>
 #include <vm/vm_protos.h>
 #include <kern/kcdata.h>
@@ -182,8 +183,8 @@ qos_main_thread_active(void)
 static int
 proc_usynch_get_requested_thread_qos(struct uthread *uth)
 {
-	thread_t        thread = uth ? uth->uu_thread : current_thread();
-	int                     requested_qos;
+	thread_t thread = uth ? get_machthread(uth) : current_thread();
+	int      requested_qos;
 
 	requested_qos = proc_get_thread_policy(thread, TASK_POLICY_ATTRIBUTE, TASK_POLICY_QOS);
 
@@ -205,7 +206,7 @@ proc_usynch_thread_qos_add_override_for_resource(task_t task, struct uthread *ut
     uint64_t tid, int override_qos, boolean_t first_override_for_resource,
     user_addr_t resource, int resource_type)
 {
-	thread_t thread = uth ? uth->uu_thread : THREAD_NULL;
+	thread_t thread = uth ? get_machthread(uth) : THREAD_NULL;
 
 	return proc_thread_qos_add_override(task, thread, tid, override_qos,
 	           first_override_for_resource, resource, resource_type) == 0;
@@ -215,7 +216,7 @@ static boolean_t
 proc_usynch_thread_qos_remove_override_for_resource(task_t task,
     struct uthread *uth, uint64_t tid, user_addr_t resource, int resource_type)
 {
-	thread_t thread = uth ? uth->uu_thread : THREAD_NULL;
+	thread_t thread = uth ? get_machthread(uth) : THREAD_NULL;
 
 	return proc_thread_qos_remove_override(task, thread, tid, resource,
 	           resource_type) == 0;
@@ -289,26 +290,25 @@ static kern_return_t
 psynch_wait_wakeup(uintptr_t kwq, struct ksyn_waitq_element *kwe,
     struct turnstile **tstore)
 {
-	struct uthread *uth;
+	struct thread *th;
 	struct turnstile *ts;
 	kern_return_t kr;
 
-	uth = __container_of(kwe, struct uthread, uu_save.uus_kwe);
-	assert(uth);
+	th = get_machthread(__container_of(kwe, struct uthread, uu_save.uus_kwe));
 
 	if (tstore) {
 		ts = turnstile_prepare(kwq, tstore, TURNSTILE_NULL,
 		    TURNSTILE_PTHREAD_MUTEX);
-		turnstile_update_inheritor(ts, uth->uu_thread,
+		turnstile_update_inheritor(ts, th,
 		    (TURNSTILE_IMMEDIATE_UPDATE | TURNSTILE_INHERITOR_THREAD));
 
-		kr = waitq_wakeup64_thread(&ts->ts_waitq, (event64_t)kwq,
-		    uth->uu_thread, THREAD_AWAKENED);
+		kr = waitq_wakeup64_thread(&ts->ts_waitq, (event64_t)kwq, th,
+		    THREAD_AWAKENED);
 
 		turnstile_update_inheritor_complete(ts, TURNSTILE_INTERLOCK_HELD);
 		turnstile_complete(kwq, tstore, NULL, TURNSTILE_PTHREAD_MUTEX);
 	} else {
-		kr = thread_wakeup_thread((event_t)kwq, uth->uu_thread);
+		kr = thread_wakeup_thread((event_t)kwq, th);
 	}
 
 	return kr;
@@ -370,10 +370,33 @@ int
 bsdthread_terminate(struct proc *p, struct bsdthread_terminate_args *uap, int32_t *retval)
 {
 	thread_t th = current_thread();
+	uthread_t uth = current_uthread();
+	struct _bsdthread_terminate *bts = &uth->uu_save.uus_bsdthread_terminate;
+	mach_port_name_t sem = (mach_port_name_t)uap->sema_or_ulock;
+	mach_port_name_t thp = uap->port;
+
 	if (thread_get_tag(th) & THREAD_TAG_WORKQUEUE) {
 		workq_thread_terminate(p, get_bsdthread_info(th));
 	}
-	return pthread_functions->bsdthread_terminate(p, uap->stackaddr, uap->freesize, uap->port, uap->sem, retval);
+
+	/*
+	 * Gross compatibility hack: ports end in 0x3 and ulocks are aligned.
+	 * If the `semaphore` value doesn't look like a port, then it is
+	 * a ulock address that will be woken by uthread_joiner_wake()
+	 *
+	 * We also need to delay destroying the thread port so that
+	 * pthread_join()'s ulock_wait() can resolve the thread until
+	 * uthread_joiner_wake() has run.
+	 */
+	if (uap->sema_or_ulock && uap->sema_or_ulock != ipc_entry_name_mask(sem)) {
+		thread_set_tag(th, THREAD_TAG_USER_JOIN);
+		bts->ulock_addr = uap->sema_or_ulock;
+		bts->kport = thp;
+
+		sem = thp = MACH_PORT_NULL;
+	}
+
+	return pthread_functions->bsdthread_terminate(p, uap->stackaddr, uap->freesize, thp, sem, retval);
 }
 
 int
@@ -491,6 +514,13 @@ thread_will_park_or_terminate(__unused thread_t thread)
 {
 }
 
+static bool
+old_proc_get_pthread_jit_allowlist(struct proc *t)
+{
+	bool unused_late = false;
+	return proc_get_pthread_jit_allowlist(t, &unused_late);
+}
+
 /*
  * The callbacks structure (defined in pthread_shims.h) contains a collection
  * of kernel functions that were not deemed sensible to expose as a KPI to all
@@ -514,10 +544,10 @@ static const struct pthread_callbacks_s pthread_callbacks = {
 	.proc_set_pthhash = proc_set_pthhash,
 	.proc_get_register = proc_get_register,
 	.proc_set_register = proc_set_register,
-	.proc_get_pthread_jit_allowlist = proc_get_pthread_jit_allowlist,
+	.proc_get_pthread_jit_allowlist = old_proc_get_pthread_jit_allowlist,
+	.proc_get_pthread_jit_allowlist2 = proc_get_pthread_jit_allowlist,
 
 	/* kernel IPI interfaces */
-	.ipc_port_copyout_send = ipc_port_copyout_send,
 	.task_get_ipcspace = get_task_ipcspace,
 	.vm_map_page_info = vm_map_page_info,
 	.ipc_port_copyout_send_pinned = ipc_port_copyout_send_pinned,
@@ -534,7 +564,7 @@ static const struct pthread_callbacks_s pthread_callbacks = {
 	.thread_bootstrap_return = pthread_bootstrap_return,
 	.unix_syscall_return = unix_syscall_return,
 
-	.get_bsdthread_info = (void*)get_bsdthread_info,
+	.get_bsdthread_info = get_bsdthread_info,
 	.thread_policy_set_internal = thread_policy_set_internal,
 	.thread_policy_get = thread_policy_get,
 
@@ -543,14 +573,13 @@ static const struct pthread_callbacks_s pthread_callbacks = {
 	.mach_port_deallocate = mach_port_deallocate,
 	.semaphore_signal_internal_trap = semaphore_signal_internal_trap,
 	.current_map = _current_map,
-	.thread_create = thread_create,
+
 	.thread_create_immovable = thread_create_immovable,
 	.thread_terminate_pinned = thread_terminate_pinned,
 	.thread_resume = thread_resume,
 
 	.kevent_workq_internal = kevent_workq_internal,
 
-	.convert_thread_to_port = convert_thread_to_port,
 	.convert_thread_to_port_pinned = convert_thread_to_port_pinned,
 
 	.proc_get_stack_addr_hint = proc_get_stack_addr_hint,

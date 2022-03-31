@@ -3,6 +3,7 @@
 
 #include <mach/mach_error.h>
 #include <mach/mach_init.h>
+#include <mach/memory_entry.h>
 #include <mach/mach_port.h>
 #include <mach/mach_vm.h>
 #include <mach/task.h>
@@ -961,6 +962,156 @@ T_DECL(phys_footprint_ledger_owned,
 	footprint_expected = footprint_before - dirty_size;
 	footprint_expected += (pagetable_after - pagetable_before);
 	T_LOG("releasing memory entry decreases phys_footprint");
+	T_EXPECT_EQ(footprint_after, footprint_expected,
+	    "made volatile %lld dirty bytes: "
+	    "footprint %lld -> %lld expected %lld delta %lld",
+	    dirty_size, footprint_before, footprint_after,
+	    footprint_expected, footprint_after - footprint_expected);
+}
+
+T_DECL(phys_footprint_no_footprint_for_debug,
+    "phys_footprint for no_footprint_for_debug",
+    T_META_LTEPHASE(LTE_POSTINIT))
+{
+	uint64_t                footprint_before, pagetable_before;
+	uint64_t                footprint_after, pagetable_after;
+	uint64_t                footprint_expected;
+	kern_return_t           kr;
+	mach_vm_address_t       pre_vm_addr, vm_addr;
+	mach_vm_size_t          vm_size, dirty_size, me_size;
+	mach_port_t             me_port;
+	int                     new_value, ret;
+
+	/* pre-warm to account for page table expansion */
+	pre_vm_addr = pre_warm(MEM_SIZE);
+
+	/* making a memory entry... */
+	get_ledger_info(&footprint_before, &pagetable_before);
+	vm_size = MEM_SIZE;
+	me_size = vm_size;
+	me_port = MACH_PORT_NULL;
+	kr = mach_make_memory_entry_64(mach_task_self(),
+	    &me_size,
+	    0,
+	    (MAP_MEM_NAMED_CREATE |
+	    MAP_MEM_LEDGER_TAGGED |
+	    VM_PROT_READ | VM_PROT_WRITE),
+	    &me_port,
+	    MACH_PORT_NULL);
+	T_QUIET;
+	T_EXPECT_EQ(kr, KERN_SUCCESS, "make_memory_entry() error 0x%x (%s)",
+	    kr, mach_error_string(kr));
+	T_QUIET;
+	T_EXPECT_EQ(me_size, vm_size, "memory entry size mismatch");
+	/* ... should not change footprint */
+	get_ledger_info(&footprint_after, &pagetable_after);
+	footprint_expected = footprint_before;
+	footprint_expected += (pagetable_after - pagetable_before);
+	T_LOG("making a memory entry does not change phys_footprint");
+	T_EXPECT_EQ(footprint_after, footprint_expected,
+	    "making a memory entry of %lld bytes: "
+	    "footprint %lld -> %lld expected %lld delta %lld",
+	    vm_size, footprint_before, footprint_after,
+	    footprint_expected, footprint_after - footprint_expected);
+
+	/* trying to hide debug memory from footprint while not allowed */
+	kr = mach_memory_entry_ownership(me_port,
+	    mach_task_self(),
+	    VM_LEDGER_TAG_DEFAULT,
+	    VM_LEDGER_FLAG_NO_FOOTPRINT_FOR_DEBUG);
+	T_QUIET;
+	T_EXPECT_EQ(kr, KERN_NO_ACCESS,
+	    "mach_memory_entry_ownership(NO_FOOTPRINT_FOR_DEBUG) fails without sysctl");
+
+	/* let's get permission to hide debug memory */
+	new_value = 1;
+	ret = sysctlbyname("vm.task_no_footprint_for_debug", NULL, NULL, &new_value, sizeof(new_value));
+	if (ret == -1 && errno == ENOENT) {
+		T_SKIP("sysctlbyname(vm.task_no_footprint_for_debug) ENOENT");
+	}
+	T_QUIET;
+	T_ASSERT_POSIX_SUCCESS(ret, "sysctlbyname(vm.task_no_footprint_for_debug)");
+
+	/* trying to hide debug memory from footprint while allowed */
+	kr = mach_memory_entry_ownership(me_port,
+	    mach_task_self(),
+	    VM_LEDGER_TAG_DEFAULT,
+	    VM_LEDGER_FLAG_NO_FOOTPRINT_FOR_DEBUG);
+	T_QUIET;
+	T_EXPECT_EQ(kr, KERN_SUCCESS,
+	    "mach_memory_entry_ownership(NO_FOOTPRINT_FOR_DEBUG) succeeds after sysctl");
+
+	/* mapping ledger-tagged virtual memory... */
+	get_ledger_info(&footprint_before, &pagetable_before);
+	vm_addr = 0;
+	kr = mach_vm_map(mach_task_self(), &vm_addr, vm_size,
+	    0, /* mask */
+	    VM_FLAGS_ANYWHERE,
+	    me_port,
+	    0, /* offset */
+	    FALSE, /* copy */
+	    VM_PROT_READ | VM_PROT_WRITE,
+	    VM_PROT_READ | VM_PROT_WRITE,
+	    VM_INHERIT_DEFAULT);
+	T_QUIET;
+	T_EXPECT_EQ(kr, KERN_SUCCESS, "vm_map() error 0x%x (%s)",
+	    kr, mach_error_string(kr));
+	T_QUIET;
+	T_EXPECT_EQ(vm_addr, pre_vm_addr, "pre-warm mishap");
+	/* ... should not change footprint */
+	get_ledger_info(&footprint_after, &pagetable_after);
+	footprint_expected = footprint_before;
+	footprint_expected += (pagetable_after - pagetable_before);
+	T_LOG("mapping ledger-tagged memory does not change phys_footprint");
+	T_EXPECT_EQ(footprint_after, footprint_expected,
+	    "ledger-tagged mapping of %lld bytes: "
+	    "footprint %lld -> %lld expected %lld delta %lld",
+	    vm_size, footprint_before, footprint_after,
+	    footprint_expected, footprint_after - footprint_expected);
+
+	/* touching memory... */
+	get_ledger_info(&footprint_before, &pagetable_before);
+	dirty_size = vm_size / 2;
+	memset((char *)(uintptr_t)vm_addr, 'x', (size_t)dirty_size);
+	/* ... should not increase footprint */
+	get_ledger_info(&footprint_after, &pagetable_after);
+	footprint_expected = footprint_before;
+	footprint_expected += (pagetable_after - pagetable_before);
+	T_LOG("modifying no_footprint_for_debug memory does not increase phys_footprint");
+	T_EXPECT_EQ(footprint_after, footprint_expected,
+	    "touched %lld bytes: "
+	    "footprint %lld -> %lld expected %lld delta %lld",
+	    dirty_size, footprint_before, footprint_after,
+	    footprint_expected, footprint_after - footprint_expected);
+
+	/* deallocating memory while holding memory entry... */
+	get_ledger_info(&footprint_before, &pagetable_before);
+	kr = mach_vm_deallocate(mach_task_self(), vm_addr, vm_size);
+	T_QUIET;
+	T_EXPECT_EQ(kr, KERN_SUCCESS, "vm_deallocate() error 0x%x (%s)",
+	    kr, mach_error_string(kr));
+	/* ... should not change footprint */
+	get_ledger_info(&footprint_after, &pagetable_after);
+	footprint_expected = footprint_before;
+	footprint_expected += (pagetable_after - pagetable_before);
+	T_LOG("deallocating owned memory while holding memory entry "
+	    "does not change phys_footprint");
+	T_EXPECT_EQ(footprint_after, footprint_expected,
+	    "deallocated %lld dirty bytes: "
+	    "footprint %lld -> %lld expected %lld delta %lld",
+	    dirty_size, footprint_before, footprint_after,
+	    footprint_expected, footprint_after - footprint_expected);
+
+	/* releasing the memory entry... */
+	kr = mach_port_deallocate(mach_task_self(), me_port);
+	T_QUIET;
+	T_EXPECT_EQ(kr, KERN_SUCCESS, "mach_port_deallocate() error 0x%x (%s)",
+	    kr, mach_error_string(kr));
+	/* ... should not change footprint */
+	get_ledger_info(&footprint_after, &pagetable_after);
+	footprint_expected = footprint_before;
+	footprint_expected += (pagetable_after - pagetable_before);
+	T_LOG("releasing memory entry does not change phys_footprint");
 	T_EXPECT_EQ(footprint_after, footprint_expected,
 	    "made volatile %lld dirty bytes: "
 	    "footprint %lld -> %lld expected %lld delta %lld",

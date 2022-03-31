@@ -68,7 +68,7 @@
 
 #pragma mark core counters
 
-bool mt_core_supported = true;
+const bool mt_core_supported = true;
 
 static const ml_topology_info_t *topology_info;
 

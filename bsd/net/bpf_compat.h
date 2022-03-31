@@ -64,14 +64,4 @@
 #ifndef _NET_BPF_COMPAT_H_
 #define _NET_BPF_COMPAT_H_
 
-/*
- * Some hacks for compatibility across SunOS and 4.4BSD.  We emulate malloc
- * and free with mbuf clusters.  We store a pointer to the mbuf in the first
- * word of the mbuf and return 8 bytes passed the start of data (for double
- * word alignment).  We cannot just use offsets because clusters are not at
- * a fixed offset from the associated mbuf.  Sorry for this kludge.
- */
-#define malloc(size, type, canwait) _MALLOC(size, type, canwait)
-#define free(cp, type) m_free(*(struct mbuf **)(cp - 8))
-
 #endif

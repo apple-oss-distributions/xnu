@@ -134,7 +134,7 @@
 #include <netinet6/in6_var.h>
 #include <netinet6/nd6.h>
 
-static ZONE_DECLARE(iflr_zone, "if_llreach", sizeof(struct if_llreach),
+static ZONE_DEFINE_TYPE(iflr_zone, "if_llreach", struct if_llreach,
     ZC_ZFREE_CLEARMEM);
 
 static struct if_llreach *iflr_alloc(zalloc_flags_t);

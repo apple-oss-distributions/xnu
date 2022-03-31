@@ -157,8 +157,7 @@ struct mount {
 	uid_t                   mnt_fsowner;
 	gid_t                   mnt_fsgroup;
 
-	struct label            * XNU_PTRAUTH_SIGNED_PTR("mount.mnt_mntlabel") mnt_mntlabel;    /* MAC mount label */
-	struct label            * XNU_PTRAUTH_SIGNED_PTR("mount.mnt_fslabel") mnt_fslabel;      /* MAC default fs label */
+	struct label            *mnt_mntlabel;              /* MAC mount label */
 
 	/*
 	 * cache the rootvp of the last mount point
@@ -482,10 +481,14 @@ void mount_iterreset(mount_t);
 #define KERNEL_MOUNT_RECOVERYVOL        0x40 /* mount the Recovery volume */
 #define KERNEL_MOUNT_BASESYSTEMROOT     0x80 /* mount a base root volume "instead of" the full root volume (only used during bsd_init) */
 #define KERNEL_MOUNT_DEVFS             0x100 /* kernel startup mount of devfs */
+#define KERNEL_MOUNT_FMOUNT            0x200 /* is fmount() system call */
+#define KERNEL_MOUNT_KMOUNT            0x400 /* is kernel_mount() call */
 
 /* mask for checking if any of the "mount volume by role" flags are set */
 #define KERNEL_MOUNT_VOLBYROLE_MASK (KERNEL_MOUNT_DATAVOL | KERNEL_MOUNT_VMVOL | KERNEL_MOUNT_PREBOOTVOL | KERNEL_MOUNT_RECOVERYVOL)
 
+/* mask for sanitizing inputs to kernel_mount() */
+#define KERNEL_MOUNT_SANITIZE_MASK (~(KERNEL_MOUNT_FMOUNT))
 
 /*
  * NOTE: kernel_mount() does not force MNT_NOSUID, MNT_NOEXEC, or MNT_NODEC for non-privileged

@@ -1234,6 +1234,7 @@ T_DECL(memorystatus_freeze_top_process, "memorystatus_freeze_top_process chooses
     T_META_ASROOT(true),
     T_META_REQUIRES_SYSCTL_EQ("kern.development", 1),
     T_META_REQUIRES_SYSCTL_EQ("vm.freeze_enabled", 1)) {
+	T_SKIP("Skipping flaky test"); // rdar://76986376
 	int32_t memorystatus_freeze_band = 0;
 	size_t memorystatus_freeze_band_size = sizeof(memorystatus_freeze_band);
 	__block errno_t ret;

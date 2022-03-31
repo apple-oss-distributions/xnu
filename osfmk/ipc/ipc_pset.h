@@ -85,11 +85,15 @@ struct ipc_pset {
 
 #define ips_object_to_pset(io)      __container_of(io, struct ipc_pset, ips_object)
 #define ips_to_object(pset)         (&(pset)->ips_object)
-#define ips_from_waitq(wq)          __container_of(wq, struct ipc_pset, ips_wqset.wqset_q)
+
+static inline ipc_pset_t
+ips_from_waitq(waitq_t wq)
+{
+	return __container_of(wq.wqs_set, struct ipc_pset, ips_wqset);
+}
 
 #define ips_active(pset)            io_active(ips_to_object(pset))
 #define ips_mq_lock(pset)           io_lock(ips_to_object(pset))
-#define ips_mq_lock_try(pset)       io_lock_try(ips_to_object(pset))
 #define ips_mq_lock_held_kdp(pset)  io_lock_held_kdp(ips_to_object(pset))
 #define ips_mq_unlock(pset)         io_unlock(ips_to_object(pset))
 #define ips_reference(pset)         io_reference(ips_to_object(pset))
@@ -111,36 +115,13 @@ extern kern_return_t ipc_pset_alloc_name(
 extern ipc_pset_t ipc_pset_alloc_special(
 	ipc_space_t             space);
 
-/* Add a port to a port set */
-extern kern_return_t ipc_pset_add_unlock(
-	ipc_pset_t      pset,
-	ipc_port_t      port,
-	waitq_ref_t     *reserved_link,
-	uint64_t        *reserved_prepost);
-
-/* Remove a port from a port set */
-extern kern_return_t ipc_pset_remove_locked(
-	ipc_pset_t      pset,
-	ipc_port_t      port);
-
-/* Remove a port from all port sets and add it to given port set */
-extern kern_return_t ipc_pset_move_unlock(
-	ipc_pset_t        pset,
-	ipc_port_t        port,
-	uint64_t         *reserved_prepost);
-
-/* lazily initialize the wqset of a port set */
-extern kern_return_t ipc_pset_lazy_allocate(
-	ipc_space_t      space,
-	mach_port_name_t psname);
-
-/* Remove a port from all its current port sets */
-extern void ipc_pset_remove_from_all_unlock(
-	ipc_port_t      port);
-
 /* Destroy a port_set */
 extern void ipc_pset_destroy(
 	ipc_space_t     space,
+	ipc_pset_t      pset);
+
+/* Finalize the destruction of a pset before it gets freed */
+extern void ipc_pset_finalize(
 	ipc_pset_t      pset);
 
 #if MACH_KERNEL_PRIVATE

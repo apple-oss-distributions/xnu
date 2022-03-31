@@ -200,13 +200,13 @@ static unsigned int in6m_debug;                 /* debugging (disabled) */
 static struct zone *in6m_zone;                  /* zone for in6_multi */
 #define IN6M_ZONE_NAME          "in6_multi"     /* zone name */
 
-static ZONE_DECLARE(imm_zone, "in6_multi_mship",
+static ZONE_DEFINE(imm_zone, "in6_multi_mship",
     sizeof(struct in6_multi_mship), ZC_ZFREE_CLEARMEM);
 
-static ZONE_DECLARE(ip6ms_zone, "ip6_msource",
+static ZONE_DEFINE(ip6ms_zone, "ip6_msource",
     sizeof(struct ip6_msource), ZC_ZFREE_CLEARMEM);
 
-static ZONE_DECLARE(in6ms_zone, "in6_msource",
+static ZONE_DEFINE(in6ms_zone, "in6_msource",
     sizeof(struct in6_msource), ZC_ZFREE_CLEARMEM);
 
 static LCK_RW_DECLARE_ATTR(in6_multihead_lock, &in6_multihead_lock_grp,
@@ -289,17 +289,15 @@ im6o_grow(struct ip6_moptions *imo)
 		return ETOOMANYREFS;
 	}
 
-	if ((nmships = (struct in6_multi **)_REALLOC(omships,
-	    sizeof(struct in6_multi *) * newmax, M_IP6MOPTS,
-	    M_WAITOK | M_ZERO)) == NULL) {
+	if ((nmships = krealloc_type(struct in6_multi *, oldmax, newmax,
+	    omships, Z_WAITOK | Z_ZERO)) == NULL) {
 		return ENOMEM;
 	}
 
 	imo->im6o_membership = nmships;
 
-	if ((nmfilters = (struct in6_mfilter *)_REALLOC(omfilters,
-	    sizeof(struct in6_mfilter) * newmax, M_IN6MFILTER,
-	    M_WAITOK | M_ZERO)) == NULL) {
+	if ((nmfilters = krealloc_type(struct in6_mfilter, oldmax, newmax,
+	    omfilters, Z_WAITOK | Z_ZERO)) == NULL) {
 		return ENOMEM;
 	}
 
@@ -1596,20 +1594,10 @@ in6p_findmoptions(struct inpcb *inp)
 		return NULL;
 	}
 
-	immp = _MALLOC(sizeof(*immp) * IPV6_MIN_MEMBERSHIPS, M_IP6MOPTS,
-	    M_WAITOK | M_ZERO);
-	if (immp == NULL) {
-		IM6O_REMREF(imo);
-		return NULL;
-	}
-
-	imfp = _MALLOC(sizeof(struct in6_mfilter) * IPV6_MIN_MEMBERSHIPS,
-	    M_IN6MFILTER, M_WAITOK | M_ZERO);
-	if (imfp == NULL) {
-		_FREE(immp, M_IP6MOPTS);
-		IM6O_REMREF(imo);
-		return NULL;
-	}
+	immp = kalloc_type(struct in6_multi *, IPV6_MIN_MEMBERSHIPS,
+	    Z_WAITOK | Z_ZERO | Z_NOFAIL);
+	imfp = kalloc_type(struct in6_mfilter, IPV6_MIN_MEMBERSHIPS,
+	    Z_WAITOK | Z_ZERO | Z_NOFAIL);
 
 	imo->im6o_multicast_ifp = NULL;
 	imo->im6o_multicast_hlim = (u_char)ip6_defmcasthlim;
@@ -2292,20 +2280,9 @@ in6p_join_group(struct inpcb *inp, struct sockopt *sopt)
 	 */
 
 	if (is_new) {
-		/*
-		 * See inp_join_group() for why we need to unlock
-		 */
-		IM6O_ADDREF_LOCKED(imo);
-		IM6O_UNLOCK(imo);
-		socket_unlock(inp->inp_socket, 0);
-
 		VERIFY(inm == NULL);
 		error = in6_mc_join(ifp, &gsa->sin6_addr, imf, &inm, 0);
 		VERIFY(inm != NULL || error != 0);
-
-		socket_lock(inp->inp_socket, 0);
-		IM6O_REMREF(imo);
-		IM6O_LOCK(imo);
 
 		if (error) {
 			goto out_im6o_free;
@@ -2651,19 +2628,7 @@ out_im6f_rollback:
 		/* Remove the gap in the membership array. */
 		VERIFY(inm == imo->im6o_membership[idx]);
 		imo->im6o_membership[idx] = NULL;
-
-		/*
-		 * See inp_join_group() for why we need to unlock
-		 */
-		IM6O_ADDREF_LOCKED(imo);
-		IM6O_UNLOCK(imo);
-		socket_unlock(inp->inp_socket, 0);
-
 		IN6M_REMREF(inm);
-
-		socket_lock(inp->inp_socket, 0);
-		IM6O_REMREF(imo);
-		IM6O_LOCK(imo);
 
 		for (++idx; idx < imo->im6o_num_memberships; ++idx) {
 			imo->im6o_membership[idx - 1] = imo->im6o_membership[idx];

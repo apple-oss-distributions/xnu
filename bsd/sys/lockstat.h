@@ -34,14 +34,13 @@ extern "C" {
 /*
  * Name the various locking functions...
  */
+#define LS_LCK_MTX_LOCK_SPIN            "lck_mtx_lock_spin"
 #define LS_LCK_MTX_LOCK                 "lck_mtx_lock"
-#define LS_LCK_MTX_SPIN_LOCK            "lck_mtx_spin_lock"
-#define LS_LCK_MTX_UNLOCK               "lck_mtx_unlock"
+#define LS_LCK_MTX_TRY_LOCK_SPIN        "lck_mtx_try_lock_spin"
 #define LS_LCK_MTX_TRY_LOCK             "lck_mtx_try_lock"
-#define LS_LCK_MTX_TRY_SPIN_LOCK        "lck_mtx_try_spin_lock"
+#define LS_LCK_MTX_UNLOCK               "lck_mtx_unlock"
 #define LS_LCK_MTX_EXT_LOCK             "lck_mtx_ext_lock"
 #define LS_LCK_MTX_EXT_UNLOCK           "lck_mtx_ext_unlock"
-#define LS_LCK_MTX_LOCK_SPIN_LOCK       "lck_mtx_lock_spin"
 
 #define LS_LCK_SPIN_LOCK                "lck_spin_lock"
 #define LS_LCK_SPIN_TRY_LOCK            "lck_spin_try_lock"

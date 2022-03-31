@@ -584,8 +584,6 @@ sdt_load_machsect(struct modctl *ctl)
 	unsigned int                len;
 	uint32_t                    nsyms = 0;
 
-	const bool ctl_has_kernel_symbols = MOD_HAS_KERNEL_SYMBOLS(ctl);
-
 	if (mh == NULL) {
 		return;
 	}
@@ -597,7 +595,7 @@ sdt_load_machsect(struct modctl *ctl)
 	}
 
 	/* Do not load SDTs when asked to use kernel symbols but symbol table is not available. */
-	if (ctl_has_kernel_symbols && (nsyms = sdt_find_symbol_table(ctl, &sym, &strings)) == 0) {
+	if (MOD_HAS_KERNEL_SYMBOLS(ctl) && (nsyms = sdt_find_symbol_table(ctl, &sym, &strings)) == 0) {
 		printf("SDT: No kernel symbols for %s\n", ctl->mod_modname);
 		return;
 	}
@@ -653,7 +651,7 @@ sdt_load_machsect(struct modctl *ctl)
 		 */
 		sdpd->sdpd_func = NULL;
 
-		if (ctl_has_kernel_symbols) {
+		if (MOD_HAS_KERNEL_SYMBOLS(ctl)) {
 			funcname = NULL;
 			for (int i = 0; i < nsyms; i++) {
 				uint8_t jn_type = sym[i].n_type & N_TYPE;

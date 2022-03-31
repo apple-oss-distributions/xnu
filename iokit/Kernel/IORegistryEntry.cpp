@@ -1096,7 +1096,7 @@ IORegistryEntry::setName( const OSSymbol * name,
 		}
 
 		WLOCK;
-		registryTable()->setObject( key, (OSObject *) name);
+		OS_ANALYZER_SUPPRESS("82033761") registryTable()->setObject( key, (OSObject *) name);
 		UNLOCK;
 	}
 }

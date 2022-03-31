@@ -119,8 +119,7 @@ extern unsigned int shared_region_pagers_resident_peak;
 #endif /* DEVELOPMENT || DEBUG */
 
 #if VM_OBJECT_TRACKING
-boolean_t vm_object_tracking_inited = FALSE;
-btlog_t *vm_object_tracking_btlog;
+btlog_t vm_object_tracking_btlog;
 
 void
 vm_object_tracking_init(void)
@@ -132,12 +131,9 @@ vm_object_tracking_init(void)
 	    sizeof(vm_object_tracking));
 
 	if (vm_object_tracking) {
-		vm_object_tracking_btlog = btlog_create(
-			VM_OBJECT_TRACKING_NUM_RECORDS,
-			VM_OBJECT_TRACKING_BTDEPTH,
-			TRUE /* caller_will_remove_entries_for_element? */);
+		vm_object_tracking_btlog = btlog_create(BTLOG_HASH,
+		    VM_OBJECT_TRACKING_NUM_RECORDS);
 		assert(vm_object_tracking_btlog);
-		vm_object_tracking_inited = TRUE;
 	}
 }
 #endif /* VM_OBJECT_TRACKING */
@@ -462,8 +458,8 @@ LCK_SPIN_DECLARE_ATTR(io_reprioritize_list_lock,
 	        lck_spin_unlock(&io_reprioritize_list_lock)
 
 #define MAX_IO_REPRIORITIZE_REQS        8192
-ZONE_DECLARE(io_reprioritize_req_zone, "io_reprioritize_req",
-    sizeof(struct io_reprioritize_req), ZC_NOGC);
+ZONE_DEFINE_TYPE(io_reprioritize_req_zone, "io_reprioritize_req",
+    struct io_reprioritize_req, ZC_NOGC);
 
 /* I/O Re-prioritization thread */
 int io_reprioritize_wakeup = 0;
@@ -507,16 +503,10 @@ _vm_object_allocate(
 	object->vo_size = vm_object_round_page(size);
 
 #if VM_OBJECT_TRACKING_OP_CREATED
-	if (vm_object_tracking_inited) {
-		void    *bt[VM_OBJECT_TRACKING_BTDEPTH];
-		int     numsaved = 0;
-
-		numsaved = OSBacktrace(bt, VM_OBJECT_TRACKING_BTDEPTH);
-		btlog_add_entry(vm_object_tracking_btlog,
-		    object,
+	if (vm_object_tracking_btlog) {
+		btlog_record(vm_object_tracking_btlog, object,
 		    VM_OBJECT_TRACKING_OP_CREATED,
-		    bt,
-		    numsaved);
+		    btref_get(__builtin_frame_address(0), 0));
 	}
 #endif /* VM_OBJECT_TRACKING_OP_CREATED */
 }
@@ -1553,9 +1543,8 @@ vm_object_reap(
 	object->shadow = VM_OBJECT_NULL;
 
 #if VM_OBJECT_TRACKING
-	if (vm_object_tracking_inited) {
-		btlog_remove_entries_for_element(vm_object_tracking_btlog,
-		    object);
+	if (vm_object_tracking_btlog) {
+		btlog_erase(vm_object_tracking_btlog, object);
 	}
 #endif /* VM_OBJECT_TRACKING */
 
@@ -3218,13 +3207,12 @@ vm_object_copy_slowly(
 /*ARGSUSED*/
 __private_extern__ boolean_t
 vm_object_copy_quickly(
-	vm_object_t             *_object,               /* INOUT */
+	vm_object_t             object,               /* IN */
 	__unused vm_object_offset_t     offset, /* IN */
 	__unused vm_object_size_t       size,   /* IN */
 	boolean_t               *_src_needs_copy,       /* OUT */
 	boolean_t               *_dst_needs_copy)       /* OUT */
 {
-	vm_object_t     object = *_object;
 	memory_object_copy_strategy_t copy_strategy;
 
 	if (object == VM_OBJECT_NULL) {
@@ -4546,9 +4534,8 @@ vm_object_do_collapse(
 	vm_object_unlock(backing_object);
 
 #if VM_OBJECT_TRACKING
-	if (vm_object_tracking_inited) {
-		btlog_remove_entries_for_element(vm_object_tracking_btlog,
-		    backing_object);
+	if (vm_object_tracking_btlog) {
+		btlog_erase(vm_object_tracking_btlog, backing_object);
 	}
 #endif /* VM_OBJECT_TRACKING */
 

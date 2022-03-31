@@ -2,8 +2,16 @@
 #
 
 #source of register info is from http://opensource.apple.com/source/gdb/gdb-962/src/gdb/arm-tdep.c
-import lldb
+from __future__ import absolute_import, print_function
+
+from builtins import hex
+from builtins import range
+from builtins import object
+
 import struct
+import lldb
+
+
 osplugin_target_obj = None
 
 class PluginValue(lldb.SBValue):
@@ -189,7 +197,7 @@ class Armv8_RegisterSet(object):
             
         reginfo = cls.register_info['registers'][regnum]
         retval = ''
-        for i in reginfo.keys():
+        for i in list(reginfo.keys()):
             v_str = str(reginfo[i])
             if i == 'set':
                 v_str = 'General Purpose Registers'
@@ -235,7 +243,7 @@ class Armv7_RegisterSet(object):
             
         reginfo = cls.register_info['registers'][regnum]
         retval = ''
-        for i in reginfo.keys():
+        for i in list(reginfo.keys()):
             v_str = str(reginfo[i])
             if i == 'set':
                 v_str = 'General Purpose Registers'
@@ -386,7 +394,7 @@ class I386_RegisterSet(object):
             
         reginfo = cls.register_info['registers'][regnum]
         retval = ''
-        for i in reginfo.keys():
+        for i in list(reginfo.keys()):
             v_str = str(reginfo[i])
             if i == 'set':
                 v_str = 'General Purpose Registers'
@@ -492,7 +500,7 @@ class X86_64RegisterSet(object):
 
         reginfo = cls.register_info['registers'][regnum]
         retval = ''
-        for i in reginfo.keys():
+        for i in list(reginfo.keys()):
             v_str = str(reginfo[i])
             if i == 'set':
                 v_str = 'General Purpose Registers'
@@ -557,7 +565,7 @@ class X86_64RegisterSet(object):
             self.r15, self.rip, self.rflags, self.cs, self.fs, self.gs)
 
     def ReadRegisterDataFromKDPSavedState(self, kdp_state, kernel_version):
-        saved_state = kernel_version.CreateValueFromExpression(None,  '(struct x86_saved_state64 *) '+ str(kdp_state.GetValueAsUnsigned()))
+        saved_state = kernel_version.CreateValueFromExpression(None, '(struct x86_saved_state64 *) '+ str(kdp_state.GetValueAsUnsigned()))
         saved_state = saved_state.Dereference()
         saved_state = PluginValue(saved_state)
         self.ResetRegisterValues()
@@ -687,17 +695,17 @@ class OperatingSystemPlugIn(object):
             self.kernel_context_size = 0
             if arch == archX86_64 :
                 self.target_arch = archX86_64
-                print "Target arch: x86_64"
+                print("Target arch: x86_64")
                 self.register_set = X86_64RegisterSet()
                 self.kernel_context_size = self._target.FindFirstType('x86_kernel_state').GetByteSize()
                 self.kernel_thread_state_size = self._target.FindFirstType('struct thread_kernel_state').GetByteSize()
             elif arch.startswith(archARMv7) :
                 self.target_arch = arch
-                print "Target arch: " + self.target_arch
+                print("Target arch: " + self.target_arch)
                 self.register_set = Armv7_RegisterSet()
             elif arch.startswith(archARMv8):
                 self.target_arch = arch
-                print "Target arch: " + self.target_arch
+                print("Target arch: " + self.target_arch)
                 self.register_set = Armv8_RegisterSet()
             #  connection     intel         arm
             #  kdp            Memory        Memory
@@ -708,9 +716,9 @@ class OperatingSystemPlugIn(object):
                     self.connected_to_debugserver = False
             self.registers = self.register_set.register_info
             if self.connected_to_debugserver:
-                print "Connected to live debugserver or arm core. Will associate on-core threads to registers reported by server."
+                print("Connected to live debugserver or arm core. Will associate on-core threads to registers reported by server.")
             else:
-                print "Instantiating threads completely from saved state in memory."
+                print("Instantiating threads completely from saved state in memory.")
 
     def create_thread(self, tid, context):
         # tid == deadbeef means its a custom thread which kernel does not know of.
@@ -729,10 +737,10 @@ class OperatingSystemPlugIn(object):
             return thread_obj
         
         th_ptr = context
-        th = self.version.CreateValueFromExpression(str(th_ptr),'(struct thread *)' + str(th_ptr))
+        th = self.version.CreateValueFromExpression(str(th_ptr), '(struct thread *)' + str(th_ptr))
         thread_id = th.GetChildMemberWithName('thread_id').GetValueAsUnsigned()
         if tid != thread_id:
-            print "FATAL ERROR: Creating thread from memory 0x%x with tid in mem=%d when requested tid = %d " % (context, thread_id, tid)
+            print("FATAL ERROR: Creating thread from memory 0x%x with tid in mem=%d when requested tid = %d " % (context, thread_id, tid))
             return None
         thread_obj = { 'tid'   : thread_id,
                        'ptr'   : th.GetValueAsUnsigned(),
@@ -765,7 +773,7 @@ class OperatingSystemPlugIn(object):
                 retval = [self.thread_cache[kdp_thid]]
                 return retval
             else:
-                print "FATAL FAILURE: Unable to find kdp_thread state for this connection."
+                print("FATAL FAILURE: Unable to find kdp_thread state for this connection.")
                 return []
 
         num_threads = self._target.FindGlobalVariables('threads_count',1).GetValueAtIndex(0).GetValueAsUnsigned()
@@ -792,8 +800,8 @@ class OperatingSystemPlugIn(object):
                 self.threads.append(nth)
                 self.thread_cache[nth['tid']] = nth
                 processor_list_val = processor_list_val.GetChildMemberWithName('processor_list')
-        except KeyboardInterrupt, ke:
-            print "OS Plugin Interrupted during thread loading process. \nWARNING:Thread registers and backtraces may not be accurate."
+        except KeyboardInterrupt as ke:
+            print("OS Plugin Interrupted during thread loading process. \nWARNING:Thread registers and backtraces may not be accurate.")
             return self.threads
 
         if hasattr(self.process, 'CreateOSPluginThread'):
@@ -812,15 +820,15 @@ class OperatingSystemPlugIn(object):
                     if cputhread['active_thread'] == nth['ptr']:
                         nth['core'] = cputhread['cpu_id']
                 self.threads.append( nth )
-        except KeyboardInterrupt, ke:
-            print "OS Plugin Interrupted during thread loading process. \nWARNING:Thread registers and backtraces may not be accurate."
+        except KeyboardInterrupt as ke:
+            print("OS Plugin Interrupted during thread loading process. \nWARNING:Thread registers and backtraces may not be accurate.")
             return self.threads
         # end legacy code
         return self.threads
 
     def get_register_info(self):
         if self.registers == None:
-            print "Register Information not found "
+            print("Register Information not found ")
         return self.register_set.register_info
 
     def get_register_data(self, tid):
@@ -830,7 +838,7 @@ class OperatingSystemPlugIn(object):
             if self.current_session_id != GetUniqueSessionID(self.process):
                 self.thread_cache = {}
                 self.current_session_id = GetUniqueSessionID(self.process)
-            if tid in self.thread_cache.keys():
+            if tid in self.thread_cache:
                 
                 #Check if the thread is a fake one. Then create and return registers directly
                 if self.thread_cache[tid]['name'].find('switchtoregs') == 0:
@@ -841,7 +849,7 @@ class OperatingSystemPlugIn(object):
                 thobj = self.version.CreateValueFromExpression(self.thread_cache[tid]['name'], '(struct thread *)' + str(self.thread_cache[tid]['ptr']))
             
             if thobj == None :
-                print "FATAL ERROR: Could not find thread with id %d" % tid
+                print("FATAL ERROR: Could not find thread with id %d" % tid)
                 regs.ResetRegisterValues()
                 return regs.GetPackedRegisterState()
 
@@ -869,9 +877,9 @@ class OperatingSystemPlugIn(object):
                 regs.ReadRegisterDataFromContinuation( PluginValue(thobj).GetChildMemberWithName('continuation').GetValueAsAddress())
                 return regs.GetPackedRegisterState()
             #incase we failed very miserably
-        except KeyboardInterrupt, ke:
-            print "OS Plugin Interrupted during thread register load. \nWARNING:Thread registers and backtraces may not be accurate. for tid = %d" % tid
+        except KeyboardInterrupt as ke:
+            print("OS Plugin Interrupted during thread register load. \nWARNING:Thread registers and backtraces may not be accurate. for tid = %d" % tid)
         regs.ResetRegisterValues()
-        print "FATAL ERROR: Failed to get register state for thread id 0x%x " % tid
-        print thobj
+        print("FATAL ERROR: Failed to get register state for thread id 0x%x " % tid)
+        print(thobj)
         return regs.GetPackedRegisterState()

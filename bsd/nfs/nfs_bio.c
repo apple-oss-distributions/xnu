@@ -117,7 +117,7 @@ int nfs_nbdwrite;
 int nfs_buf_timer_on = 0;
 thread_t nfsbufdelwrithd = NULL;
 
-static ZONE_DECLARE(nfsbuf_zone, "NFS bio", sizeof(struct nfsbuf), ZC_NONE);
+static ZONE_DEFINE_TYPE(nfsbuf_zone, "NFS bio", struct nfsbuf, ZC_NONE);
 
 static LCK_GRP_DECLARE(nfs_buf_lck_grp, "nfs buf");
 LCK_MTX_DECLARE(nfs_buf_mutex, &nfs_buf_lck_grp);
@@ -2425,7 +2425,6 @@ buffer_ready:
 				error = uiomove(bp->nb_data + on + n32, (int)(n - n32), uio);
 			}
 		}
-
 
 		nfs_buf_release(bp, 1);
 		nfs_data_unlock(np);

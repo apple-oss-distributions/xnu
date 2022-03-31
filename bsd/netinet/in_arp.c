@@ -262,7 +262,7 @@ SYSCTL_PROC(_net_link_ether_inet, OID_AUTO, stats,
     0, 0, arp_getstat, "S,arpstat",
     "ARP statistics (struct arpstat, net/if_arp.h)");
 
-static ZONE_DECLARE(llinfo_arp_zone, "llinfo_arp",
+static ZONE_DEFINE(llinfo_arp_zone, "llinfo_arp",
     sizeof(struct llinfo_arp), ZC_ZFREE_CLEARMEM);
 
 void

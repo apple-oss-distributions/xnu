@@ -42,9 +42,9 @@ def GetExecutablePathForPid(pid):
 
 """
 
-#Private Routines and objects
-
-from configuration import *
+# Private Routines and objects
+from __future__ import absolute_import
+from .configuration import config
 
 import sys
 
@@ -77,7 +77,7 @@ def _GetCurrentSessionID():
         returns: int - session id number.
     """
     session_id = _GetDebuggerSessionID()
-    return session_id;
+    return session_id
 
 
 #Public APIs

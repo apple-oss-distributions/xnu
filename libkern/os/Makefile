@@ -8,6 +8,7 @@ include $(MakeInc_def)
 
 KERNELFILES = \
 	atomic.h \
+	alloc_util.h \
 	base.h \
 	cpp_util.h \
 	log.h \

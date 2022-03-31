@@ -65,11 +65,11 @@ kern_return_t ptrauth_data_tests(void);
  * which should be subject to pointer signing.
  */
 #define ALLOC_VALIDATE_DATA_PTR(structure, decl, member, discr) { \
-	structure *tmp =  kalloc_flags(sizeof(structure), Z_WAITOK | Z_ZERO); \
+	structure *tmp = kalloc_data(sizeof(structure), Z_WAITOK | Z_ZERO); \
 	if (!tmp) return KERN_NO_SPACE; \
 	tmp->member = (void*)0xffffffff41414141; \
 	VALIDATE_DATA_PTR(decl, tmp->member, discr) \
-	kfree(tmp, sizeof(structure)); \
+	kfree_data(tmp, sizeof(structure)); \
 }
 
 #define VALIDATE_DATA_PTR(decl, ptr, discr) VALIDATE_PTR(decl, ptr, ptrauth_key_process_independent_data, discr)

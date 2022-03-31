@@ -82,6 +82,7 @@ mpsotomppcb(struct socket *mp_so)
 #define MPP_SHOULD_RWAKEUP      0x040           /* MPTCP-stack should call sorwakeup */
 #define MPP_SHOULD_WWAKEUP      0x080           /* MPTCP-stack should call sowwakeup */
 #define MPP_CREATE_SUBFLOWS     0x100           /* This connection needs to create subflows */
+#define MPP_INSIDE_SETGETOPT    0x200           /* MPTCP-stack is inside mptcp_setopt/mptcp_getopt */
 
 static inline boolean_t
 mptcp_should_defer_upcall(struct mppcb *mpp)

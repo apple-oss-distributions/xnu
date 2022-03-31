@@ -105,6 +105,7 @@ OSSet.cpo_CXXWARNFLAGS_ADD += -Wno-sign-conversion
 OSString.cpo_CXXWARNFLAGS_ADD += -Wno-sign-conversion
 OSUnserialize.cpo_CXXWARNFLAGS_ADD += -Wno-sign-conversion
 OSUnserializeXML.cpo_CXXWARNFLAGS_ADD += -Wno-sign-conversion
+OSValueObject.cpo_CXXWARNFLAGS_ADD += -Wno-sign-conversion
 adler32.o_CWARNFLAGS_ADD += -Wno-sign-conversion
 corecrypto_aes.o_CWARNFLAGS_ADD += -Wno-sign-conversion
 corecrypto_aesxts.o_CWARNFLAGS_ADD += -Wno-sign-conversion

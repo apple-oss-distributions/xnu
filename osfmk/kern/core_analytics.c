@@ -115,15 +115,15 @@ core_analytics_event_queue_invoke(mpsc_queue_chain_t e, mpsc_daemon_queue_t queu
 	CA_EVENT_DEALLOCATE(event);
 }
 
+__startup_func
 static void
 telemetry_init(void *arg __unused)
 {
 	kern_return_t result;
 	result = mpsc_daemon_queue_init_with_thread(&core_analytics_event_queue,
 	    core_analytics_event_queue_invoke, CORE_ANALYTICS_EVENT_QUEUE_PRIORITY,
-	    "daemon.core-analytics-events");
+	    "daemon.core-analytics-events", MPSC_DAEMON_INIT_NONE);
 }
-
 STARTUP_ARG(EARLY_BOOT, STARTUP_RANK_MIDDLE, telemetry_init, NULL);
 
 void

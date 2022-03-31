@@ -111,8 +111,9 @@ __OSX_AVAILABLE(10.10) __IOS_AVAILABLE(8.2);
  * traced alongside `str_id`.
  *
  * If necessary, the string will be truncated at an
- * implementation-defined length.  The string must not be the empty
- * string, but can be NULL if a valid `str_id` is provided.
+ * implementation-defined length of at least PATH_MAX characters.  The string
+ * must not be the empty string, but can be NULL if a valid `str_id` is
+ * provided.
  *
  * @return
  * 0 if tracing is disabled or `debugid` is being filtered out of trace.
@@ -298,6 +299,10 @@ typedef uint64_t kd_buf_argtype;
 typedef uintptr_t kd_buf_argtype;
 #endif
 
+/*
+ * The main event ABI as recorded in the kernel.
+ */
+
 typedef struct {
 	uint64_t timestamp;
 	kd_buf_argtype arg1;
@@ -317,7 +322,7 @@ typedef struct {
 } kd_buf;
 
 #if defined(__LP64__) || defined(__arm64__)
-#define KDBG_TIMESTAMP_MASK             0xffffffffffffffffULL
+#define KDBG_TIMESTAMP_MASK 0xffffffffffffffffULL
 static inline void
 kdbg_set_cpu(kd_buf *kp, int cpu)
 {
@@ -403,13 +408,11 @@ kdbg_set_timestamp_and_cpu(kd_buf *kp, uint64_t thetime, int cpu)
 #define KDBG_CONTINUOUS_TIME 0x0200
 /* coprocessor tracing is disabled */
 #define KDBG_DISABLE_COPROCS 0x0400
+/* check each event against matcher to disable tracing */
+#define KDBG_MATCH_DISABLE   0x0800
 
 /* flags that are allowed to be set by user space */
-#define KDBG_USERFLAGS  (KDBG_NOWRAP | KDBG_CONTINUOUS_TIME | KDBG_DISABLE_COPROCS)
-
-/* obsolete flags */
-#define KDBG_INIT              0x01
-#define KDBG_FREERUN           0x04
+#define KDBG_USERFLAGS  (KDBG_NOWRAP | KDBG_CONTINUOUS_TIME | KDBG_DISABLE_COPROCS | KDBG_MATCH_DISABLE)
 
 /* bits for kd_ctrl_page.flags and kbufinfo_t.flags */
 
@@ -492,9 +495,11 @@ typedef struct {
 	uint32_t        TOD_usecs;
 } RAW_header;
 
-#define RAW_VERSION0    0x55aa0000
-#define RAW_VERSION1    0x55aa0101
-#define RAW_VERSION2    0x55aa0200 /* Only used by kperf and Instruments */
+typedef struct {
+	uint32_t kem_debugid;
+	uint32_t kem_padding;
+	uint64_t kem_args[4];
+} kd_event_matcher;
 
 /*
  * Bits set in the comm page for kdebug.
@@ -515,16 +520,25 @@ enum kdebug_test {
 	KDTEST_ABSOLUTE_TIMESTAMP = 7,
 };
 
-#pragma mark - EnergyTracing
+#pragma mark - Obsolete interfaces
+
+/* obsolete KERN_KD[DE]FLAGS flags */
+#define KDBG_INIT              0x01
+#define KDBG_FREERUN           0x04
+
+/* Obsolete IDs for trace files. */
+#define RAW_VERSION0    0x55aa0000
+#define RAW_VERSION1    0x55aa0101
+#define RAW_VERSION2    0x55aa0200
 
 /* for EnergyTracing user space & clients */
 #define kEnTrCompKernel     2
 
 /*
- *   EnergyTracing opcodes
+ * EnergyTracing opcodes
  *
- *   Activations use DBG_FUNC_START/END.
- *   Events are DBG_FUNC_NONE.
+ * Activations use DBG_FUNC_START/END.
+ * Events are DBG_FUNC_NONE.
  */
 
 /* Socket reads and writes are uniquely identified by the (sanitized)
@@ -540,10 +554,9 @@ enum kdebug_test {
 #define kEnTrActKernSelect      11
 #define kEnTrActKernKQWait      12
 
-// events
 #define kEnTrEvUnblocked        256
 
-// EnergyTracing flags (the low-order 16 bits of 'quality')
+/* Lower 16-bits of quality. */
 #define kEnTrFlagNonBlocking    1 << 0
 #define kEnTrFlagNoWork         1 << 1
 
@@ -552,10 +565,7 @@ enum kdebug_test {
  */
 
 #if (KDEBUG_LEVEL >= KDEBUG_LEVEL_IST)
-// whether to bother calculating EnergyTracing inputs
-// could change in future to see if DBG_ENERGYTRACE is active
 #define ENTR_SHOULDTRACE kdebug_enable
-// encode logical EnergyTracing into 32/64 KDebug trace
 #define ENTR_KDTRACE(component, opcode, lifespan, id, quality, value)   \
 do {                                                                    \
     uint32_t kdcode__;                                                  \

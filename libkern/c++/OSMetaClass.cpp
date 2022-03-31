@@ -1550,7 +1550,8 @@ OSMetaClass::trackedNew(size_t size)
 {
         IOTracking * mem;
 
-        mem = (typeof(mem))kalloc_tag_bt(size + sizeof(IOTracking), VM_KERN_MEMORY_LIBKERN);
+        mem = (typeof(mem))kheap_alloc(KHEAP_DEFAULT, size + sizeof(IOTracking),
+            Z_VM_TAG_BT(Z_WAITOK, VM_KERN_MEMORY_LIBKERN));
         assert(mem);
         if (!mem) {
                 return mem;
@@ -1569,7 +1570,7 @@ OSMetaClass::trackedDelete(void * instance, size_t size)
 {
         IOTracking * mem = (typeof(mem))instance; mem--;
 
-        kfree(mem, size + sizeof(IOTracking));
+        kheap_free(KHEAP_DEFAULT, mem, size + sizeof(IOTracking));
         OSIVAR_ACCUMSIZE(-size);
 }
 

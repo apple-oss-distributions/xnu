@@ -1,11 +1,7 @@
-from __future__ import absolute_import
-from __future__ import print_function
-import os
-import sys
-import re
-import subprocess
+from __future__ import absolute_import, print_function
 
-PY3 = sys.version_info > (3,)
+import os
+import re
 
 def GetSettingsValues(debugger, setting_variable_name):
     """ Queries the lldb internal settings
@@ -66,46 +62,38 @@ def GetSourcePathSettings(binary_path, symbols_path):
     retval =  cmd.format(srcpath, new_path)
     return retval
 
-def CheckLLDB(debugger):
-    """ Checks compatibility with current debugger. """
+def CheckMissingLibs(debugger):
+    """ Check that required modules are installed. """
 
     # Collect lldb_host version
     ver_str = debugger.GetVersionString()
     lldb_ver = re.search("^lldb.*-(.*)$", ver_str, re.MULTILINE).group(1)
     ver = tuple(map(int, lldb_ver.split('.')))
 
-    # Display warning when running in Python 3 mode.
-    if PY3:
-        print("#" * 30)
-        print("WARNING! Python version 3 is not supported for xnu lldbmacros.")
-        print("Please restart your debugging session with the following workaround")
+    # Display correct command to install missing packages.
+    if ver[1] == 2:
+        cmd_fmt = "Please install {mod:s}: xcrun --sdk <sdk> python3 -m pip install --user --ignore-installed {mod:s}"
+    else:
+        cmd_fmt = "Please install {mod:s}: xcrun pip3 install --user --ignore-installed {mod:s}"
 
-        if ver[0] == 1205:
-            print("\ndefaults write com.apple.dt.lldb DefaultPythonVersion 2\n")
+    try:
+        import macholib
+    except:
+        print(cmd_fmt.format(mod="macholib"))
+        return False
 
-        if ver[0] == 1300 and ver[1] == 2:
-            print("\ndefaults write com.apple.dt.lldb LegacyPythonVersion 2\n")
-            print("\nOR relaunch lldb session with env LLDB_DEFAULT_PYTHON_VERSION=2\n")
-
-        if ver[0] == 1300 and ver[1] == 0:
-            release = subprocess.check_output(['sw_vers', '-releaseType'])
-            release = release.strip(b'\n')
-
-            if release == b'Internal':
-                print("\nRelaunch lldb with xcrun from internal SDK\n")
-                print("\n    xcrun -sdk <internal SDK> lldb\n")
-            else:
-                print("\nThis LLDB cannot debug kernel. Check KDK documentation.")
-
-        print("#" * 30)
-        print("\n")
+    try:
+        from future import standard_library
+    except:
+        print(cmd_fmt.format(mod="future"))
         return False
 
     return True
 
 def __lldb_init_module(debugger, internal_dict):
 
-    if not CheckLLDB(debugger):
+    if not CheckMissingLibs(debugger):
+        print("Can't load LLDB macros. Please install dependencies first.")
         return
 
     debug_session_enabled = False
@@ -169,7 +157,11 @@ def __lldb_init_module(debugger, internal_dict):
                 if load_kexts == False:
                     print("XNU_LLDBMACROS_NOBUILTINKEXTS is set, not loading:\n")
                 for kextdir in kexts:
-                    script = os.path.join(builtinkexts_path, kextdir, kextdir.split('.')[-1] + ".py")
+                    # Python does not handle well modules that contain '-' in their names.
+                    # Remap such scripts to use '_' instead.
+                    script_name = kextdir.split('.')[-1].replace('-', '_') + ".py"
+                    script = os.path.join(builtinkexts_path, kextdir, script_name)
+
                     import_kext_cmd = "command script import \"%s\"" % script
                     print("%s" % import_kext_cmd)
                     if load_kexts:

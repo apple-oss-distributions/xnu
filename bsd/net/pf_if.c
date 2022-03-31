@@ -109,7 +109,6 @@ RB_PROTOTYPE_SC(static, pfi_ifhead, pfi_kif, pfik_tree, pfi_if_compare);
 RB_GENERATE(pfi_ifhead, pfi_kif, pfik_tree, pfi_if_compare);
 
 #define PFI_BUFFER_MAX          0x10000
-#define PFI_MTYPE               M_IFADDR
 
 #define IFG_ALL "ALL"
 

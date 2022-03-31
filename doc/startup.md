@@ -79,7 +79,6 @@ Initializes early locks that do not require any memory allocations to be
 initialized. Available hooks are:
 
 - `LCK_GRP_DECLARE*`: automatically initialized lock groups,
-- `LCK_GRP_ATTR_DECLARE`: automatically initialized lock group attributes,
 - `LCK_ATTR_DECLARE`: automatically initialized lock attributes,
 - `LCK_SPIN_DECLARE*`: automatically initialized spinlocks,
 - `LCK_RW_DECLARE`: automatically initialized reader/writer lock,
@@ -90,7 +89,7 @@ initialized. Available hooks are:
 ### Rank usage
 
 - Rank 1: Initializes the module (`lck_mod_init`),
-- Rank 2: `LCK_GRP_ATTR_DECLARE`, `LCK_ATTR_DECLARE`,
+- Rank 2: `LCK_ATTR_DECLARE`,
 - Rank 3: `LCK_GRP_DECLARE*`
 - Rank 4: `LCK_SPIN_DECLARE*`, `LCK_MTX_EARLY_DECLARE*`,
   `LCK_RW_DECLARE`, `SIMPLE_LOCK_DECLARE*`.
@@ -144,18 +143,6 @@ Denotes that `kernel_memory_allocate` is now usable.
 N/A.
 
 
-`STARTUP_SUB_KMEM_ALLOC`
-------------------------
-
-### Description
-
-Denotes that `kmem_alloc` is now usable.
-
-### Rank usage
-
-N/A.
-
-
 `STARTUP_SUB_ZALLOC`
 --------------------
 
@@ -163,7 +150,7 @@ N/A.
 
 Initializes the zone allocator.
 
-- `ZONE_DECLARE`, `ZONE_INIT`: automatically initialized permanent zones.
+- `ZONE_DEFINE`, `ZONE_INIT`: automatically initialized permanent zones.
 - `ZONE_VIEW_DEFINE`, `KALLOC_HEAP_DEFINE`: zone and kalloc heap views.
 
 
@@ -181,10 +168,10 @@ Initializes the zone allocator.
 
 - Rank 3: Initialize kalloc.
 
-- Rank 4: Enable zone caching (uses kalloc)
+- Rank 4: Enable zone caching & logging (uses kalloc)
 
 - Middle: for any initialization that only requires kalloc/zalloc
-          runs `ZONE_DECLARE` and `ZONE_INIT`.
+          runs `ZONE_DEFINE` and `ZONE_INIT`.
 
 - Last:   zone and kalloc heaps (`ZONE_VIEW_DEFINE`, `KALLOC_HEAP_DEFINE`).
 

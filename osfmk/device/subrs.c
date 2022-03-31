@@ -406,7 +406,7 @@ size_t
 strnlen(const char *s, size_t max)
 {
 	const char *es = s + max, *p = s;
-	while (*p && p != es) {
+	while (p != es && *p) {
 		p++;
 	}
 
@@ -548,48 +548,6 @@ strlcpy(char *dst, const char *src, size_t siz)
 	return s - src - 1;    /* count does not include NUL */
 }
 #endif
-
-/*
- * STRDUP
- *
- * Description: The STRDUP function allocates sufficient memory for a copy
- *              of the string "string", does the copy, and returns a pointer
- *              it. The pointer may subsequently be used as an argument to
- *              the macro FREE().
- *
- * Parameters:  string		String to be duplicated
- *              type		type of memory to be allocated (normally
- *                              M_TEMP)
- *
- * Returns:     char *          A pointer to the newly allocated string with
- *                              duplicated contents in it.
- *
- *              NULL		If MALLOC() fails.
- *
- * Note:        This function can *not* be called from interrupt context as
- *              it calls MALLOC with M_WAITOK.  In fact, you really
- *              shouldn't be doing string manipulation in interrupt context
- *              ever.
- *
- *              This function name violates the kernel style(9) guide
- *              by being all caps.  This was done on purpose to emphasize
- *              one should use FREE() with the allocated buffer.
- *
- */
-char *
-STRDUP(const char *string, int type)
-{
-	size_t len;
-	char *copy;
-
-	len = strlen(string) + 1;
-	MALLOC(copy, char *, len, type, M_WAITOK);
-	if (copy == NULL) {
-		return NULL;
-	}
-	bcopy(string, copy, len);
-	return copy;
-}
 
 /*
  * Return TRUE(1) if string 2 is a prefix of string 1.

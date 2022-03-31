@@ -64,8 +64,6 @@ struct devtimer_s {
 	struct os_refcnt            dt_retain_count;
 };
 
-#define M_DEVTIMER      M_DEVBUF
-
 static __inline__ void
 timeval_add(struct timeval tv1, struct timeval tv2,
     struct timeval * result)

@@ -67,6 +67,7 @@ struct fcl_stat {
 	uint64_t fcl_min_qdelay;
 	uint64_t fcl_max_qdelay;
 	uint64_t fcl_avg_qdelay;
+	uint32_t fcl_overwhelming;
 };
 
 /*
@@ -122,7 +123,7 @@ typedef STAILQ_HEAD(, flowq) flowq_stailq_t;
 typedef struct fq_if_classq {
 	uint32_t fcl_pri;      /* class priority, lower the better */
 	uint32_t fcl_service_class;    /* service class */
-	uint16_t fcl_quantum;          /* quantum in bytes */
+	uint32_t fcl_quantum;          /* quantum in bytes */
 	uint32_t fcl_drr_max;          /* max flows per class for DRR */
 	int64_t fcl_budget;             /* budget for this classq */
 	flowq_stailq_t fcl_new_flows;   /* List of new flows */
@@ -195,6 +196,7 @@ struct fq_codel_classstats {
 	uint64_t        fcls_min_qdelay;
 	uint64_t        fcls_max_qdelay;
 	uint64_t        fcls_avg_qdelay;
+	uint32_t        fcls_overwhelming;
 };
 
 #ifdef BSD_KERNEL_PRIVATE
@@ -217,6 +219,7 @@ extern struct flowq *fq_if_hash_pkt(fq_if_t *, u_int32_t, mbuf_svc_class_t,
     u_int64_t, boolean_t, classq_pkt_type_t);
 extern boolean_t fq_if_at_drop_limit(fq_if_t *);
 extern void fq_if_drop_packet(fq_if_t *);
+extern boolean_t fq_if_almost_at_drop_limit(fq_if_t *fqs);
 extern void fq_if_is_flow_heavy(fq_if_t *, struct flowq *);
 extern boolean_t fq_if_add_fcentry(fq_if_t *, pktsched_pkt_t *, uint8_t,
     struct flowq *, fq_if_classq_t *);

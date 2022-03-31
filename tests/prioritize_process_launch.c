@@ -45,45 +45,12 @@ static mach_port_t sr_port;
 
 #pragma mark Mach receive
 
-static mach_voucher_t
-create_pthpriority_voucher(mach_msg_priority_t qos)
-{
-	char voucher_buf[sizeof(mach_voucher_attr_recipe_data_t) + sizeof(ipc_pthread_priority_value_t)];
-
-	mach_voucher_t voucher = MACH_PORT_NULL;
-	kern_return_t ret;
-	ipc_pthread_priority_value_t ipc_pthread_priority_value =
-	    (ipc_pthread_priority_value_t)qos;
-
-	mach_voucher_attr_raw_recipe_array_t recipes;
-	mach_voucher_attr_raw_recipe_size_t recipe_size = 0;
-	mach_voucher_attr_recipe_t recipe =
-	    (mach_voucher_attr_recipe_t)&voucher_buf[recipe_size];
-
-	recipe->key = MACH_VOUCHER_ATTR_KEY_PTHPRIORITY;
-	recipe->command = MACH_VOUCHER_ATTR_PTHPRIORITY_CREATE;
-	recipe->previous_voucher = MACH_VOUCHER_NULL;
-	memcpy((char *)&recipe->content[0], &ipc_pthread_priority_value, sizeof(ipc_pthread_priority_value));
-	recipe->content_size = sizeof(ipc_pthread_priority_value_t);
-	recipe_size += sizeof(mach_voucher_attr_recipe_data_t) + recipe->content_size;
-
-	recipes = (mach_voucher_attr_raw_recipe_array_t)&voucher_buf[0];
-
-	ret = host_create_mach_voucher(mach_host_self(),
-	    recipes,
-	    recipe_size,
-	    &voucher);
-
-	T_QUIET; T_ASSERT_MACH_SUCCESS(ret, "client host_create_mach_voucher");
-	return voucher;
-}
-
 static void
 send(
 	mach_port_t send_port,
 	mach_port_t reply_port,
 	mach_port_t msg_port,
-	mach_msg_priority_t qos,
+	mach_msg_priority_t priority,
 	mach_msg_option_t options,
 	int send_disposition)
 {
@@ -98,8 +65,7 @@ send(
 			.msgh_remote_port = send_port,
 			.msgh_local_port  = reply_port,
 			.msgh_bits        = MACH_MSGH_BITS_SET(send_disposition,
-	    reply_port ? MACH_MSG_TYPE_MAKE_SEND_ONCE : 0,
-	    MACH_MSG_TYPE_MOVE_SEND,
+	    reply_port ? MACH_MSG_TYPE_MAKE_SEND_ONCE : 0, 0,
 	    MACH_MSGH_BITS_COMPLEX),
 			.msgh_id          = 0x100,
 			.msgh_size        = sizeof(send_msg),
@@ -114,10 +80,6 @@ send(
 		},
 	};
 
-	if (options & MACH_SEND_SYNC_USE_THRPRI) {
-		send_msg.header.msgh_voucher_port = create_pthpriority_voucher(qos);
-	}
-
 	if (msg_port == MACH_PORT_NULL) {
 		send_msg.body.msgh_descriptor_count = 0;
 	}
@@ -131,7 +93,7 @@ send(
 	    0,
 	    MACH_PORT_NULL,
 	    10000,
-	    0);
+	    priority);
 
 	T_QUIET; T_ASSERT_MACH_SUCCESS(ret, "client mach_msg");
 }
@@ -766,7 +728,8 @@ T_DECL(posix_spawn_knote, "posix spawn with temp owner port attached to knote", 
 	register_workloop_for_port(port, workloop_cb_test_intransit, MACH_RCV_OPTIONS);
 
 	/* send a message on port to activate workloop handler */
-	send(port, MACH_PORT_NULL, MACH_PORT_NULL, QOS_CLASS_DEFAULT, 0, MACH_MSG_TYPE_COPY_SEND);
+	send(port, MACH_PORT_NULL, MACH_PORT_NULL,
+	    mach_msg_priority_encode(0, THREAD_QOS_LEGACY, 0), 0, MACH_MSG_TYPE_COPY_SEND);
 	sigsuspend(0);
 }
 
@@ -787,7 +750,8 @@ T_DECL(posix_spawn_knote_ret, "posix spawn with temp owner port attached to knot
 	register_workloop_for_port(port, workloop_cb_test_knote_kill, MACH_RCV_OPTIONS);
 
 	/* send a message on port to activate workloop handler */
-	send(port, MACH_PORT_NULL, MACH_PORT_NULL, QOS_CLASS_DEFAULT, 0, MACH_MSG_TYPE_COPY_SEND);
+	send(port, MACH_PORT_NULL, MACH_PORT_NULL,
+	    mach_msg_priority_encode(0, THREAD_QOS_LEGACY, 0), 0, MACH_MSG_TYPE_COPY_SEND);
 	sigsuspend(0);
 }
 
@@ -833,6 +797,7 @@ T_DECL(mach_msg_sync_boostrap_checkin, "test mach msg option for sync bootstrap_
 	T_QUIET; T_ASSERT_MACH_SUCCESS(kr, "mach_msg_sync_boostrap_checkin mach_ports_register");
 
 	/* send a message on port to activate workloop handler */
-	send(port, MACH_PORT_NULL, MACH_PORT_NULL, QOS_CLASS_DEFAULT, 0, MACH_MSG_TYPE_COPY_SEND);
+	send(port, MACH_PORT_NULL, MACH_PORT_NULL,
+	    mach_msg_priority_encode(0, THREAD_QOS_LEGACY, 0), 0, MACH_MSG_TYPE_COPY_SEND);
 	sigsuspend(0);
 }

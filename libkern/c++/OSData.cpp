@@ -93,8 +93,9 @@ OSData::initWithCapacity(unsigned int inCapacity)
 			if (round_page_overflow(inCapacity, &inCapacity)) {
 				kr = KERN_RESOURCE_SHORTAGE;
 			} else {
-				kr = kmem_alloc_flags(alloc_map, (vm_offset_t *)&_data, inCapacity,
-				    IOMemoryTag(alloc_map), KMA_ATOMIC);
+				kr = kernel_memory_allocate(alloc_map,
+				    (vm_offset_t *)&_data, inCapacity,
+				    0, KMA_ATOMIC, IOMemoryTag(alloc_map));
 				data = _data;
 			}
 			if (KERN_SUCCESS != kr) {
@@ -311,8 +312,8 @@ OSData::ensureCapacity(unsigned int newCapacity)
 			    finalCapacity,
 			    IOMemoryTag(alloc_map));
 		} else {
-			kr = kmem_alloc_flags(alloc_map, (vm_offset_t *)&newData,
-			    finalCapacity, IOMemoryTag(alloc_map), KMA_ATOMIC);
+			kr = kernel_memory_allocate(alloc_map, (vm_offset_t *)&newData,
+			    finalCapacity, 0, KMA_ATOMIC, IOMemoryTag(alloc_map));
 		}
 		if (KERN_SUCCESS != kr) {
 			newData = NULL;

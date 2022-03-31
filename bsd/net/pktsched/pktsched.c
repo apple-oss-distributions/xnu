@@ -49,6 +49,9 @@
 
 #include <pexpert/pexpert.h>
 
+#if SKYWALK
+#include <skywalk/os_skywalk_private.h>
+#endif /* SKYWALK */
 
 u_int32_t machclk_freq = 0;
 u_int64_t machclk_per_sec = 0;
@@ -183,6 +186,11 @@ pktsched_pkt_encap(pktsched_pkt_t *pkt, classq_pkt_t *cpkt)
 		    (uint32_t)m_pktlen(pkt->pktsched_pkt_mbuf);
 		break;
 
+#if SKYWALK
+	case QP_PACKET:
+		pkt->pktsched_plen = pkt->pktsched_pkt_kpkt->pkt_length;
+		break;
+#endif /* SKYWALK */
 
 	default:
 		VERIFY(0);
@@ -204,6 +212,10 @@ pktsched_pkt_encap_chain(pktsched_pkt_t *pkt, classq_pkt_t *cpkt,
 	case QP_MBUF:
 		break;
 
+#if SKYWALK
+	case QP_PACKET:
+		break;
+#endif /* SKYWALK */
 
 	default:
 		VERIFY(0);
@@ -216,6 +228,11 @@ int
 pktsched_clone_pkt(pktsched_pkt_t *pkt1, pktsched_pkt_t *pkt2)
 {
 	struct mbuf *m1, *m2;
+#if SKYWALK
+	struct __kern_packet *p1;
+	kern_packet_t ph2;
+	int err;
+#endif /* SKYWALK */
 
 	ASSERT(pkt1 != NULL);
 	ASSERT(pkt1->pktsched_pkt_mbuf != NULL);
@@ -236,6 +253,20 @@ pktsched_clone_pkt(pktsched_pkt_t *pkt1, pktsched_pkt_t *pkt2)
 		pkt2->pktsched_pkt_mbuf = m2;
 		break;
 
+#if SKYWALK
+	case QP_PACKET:
+		p1 = (struct __kern_packet *)pkt1->pktsched_pkt_kpkt;
+		err = kern_packet_clone_nosleep(SK_PTR_ENCODE(p1,
+		    METADATA_TYPE(p1), METADATA_SUBTYPE(p1)), &ph2,
+		    KPKT_COPY_HEAVY);
+		if (__improbable(err != 0)) {
+			return err;
+		}
+		ASSERT(ph2 != 0);
+		VERIFY(kern_packet_finalize(ph2) == 0);
+		pkt2->pktsched_pkt_kpkt = SK_PTR_ADDR_KPKT(ph2);
+		break;
+#endif /* SKYWALK */
 
 	default:
 		VERIFY(0);
@@ -257,6 +288,9 @@ pktsched_corrupt_packet(pktsched_pkt_t *pkt)
 	uint8_t *data = NULL;
 	uint32_t data_len = 0;
 	uint32_t rand32, rand_off, rand_bit;
+#if SKYWALK
+	struct __kern_packet *p = NULL;
+#endif /* SKYWALK */
 
 	switch (pkt->pktsched_ptype) {
 	case QP_MBUF:
@@ -264,6 +298,18 @@ pktsched_corrupt_packet(pktsched_pkt_t *pkt)
 		data = mtod(m, uint8_t *);
 		data_len = m->m_pkthdr.len;
 		break;
+#if SKYWALK
+	case QP_PACKET:
+		p = pkt->pktsched_pkt_kpkt;
+		if (p->pkt_pflags & PKT_F_MBUF_DATA) {
+			m = p->pkt_mbuf;
+			data = mtod(m, uint8_t *);
+			data_len = m->m_pkthdr.len;
+		} else {
+			MD_BUFLET_ADDR_DLEN(p, data, data_len);
+		}
+		break;
+#endif /* SKYWALK */
 
 	default:
 		/* NOTREACHED */
@@ -296,6 +342,22 @@ pktsched_free_pkt(pktsched_pkt_t *pkt)
 		m_freem_list(m);
 		break;
 	}
+#if SKYWALK
+	case QP_PACKET: {
+		struct __kern_packet *kpkt;
+		int pcnt = 0;
+
+		kpkt = pkt->pktsched_pkt_kpkt;
+		if (cnt == 1) {
+			VERIFY(kpkt->pkt_nextpkt == NULL);
+		} else {
+			VERIFY(kpkt->pkt_nextpkt != NULL);
+		}
+		pp_free_packet_chain(kpkt, &pcnt);
+		VERIFY(cnt == (uint32_t)pcnt);
+		break;
+	}
+#endif /* SKYWALK */
 
 	default:
 		VERIFY(0);
@@ -318,6 +380,11 @@ pktsched_get_pkt_svc(pktsched_pkt_t *pkt)
 		svc = m_get_service_class(pkt->pktsched_pkt_mbuf);
 		break;
 
+#if SKYWALK
+	case QP_PACKET:
+		svc = pkt->pktsched_pkt_kpkt->pkt_svc_class;
+		break;
+#endif /* SKYWALK */
 
 	default:
 		VERIFY(0);
@@ -359,6 +426,33 @@ pktsched_get_pkt_vars(pktsched_pkt_t *pkt, volatile uint32_t **flags,
 		break;
 	}
 
+#if SKYWALK
+	case QP_PACKET: {
+		struct __kern_packet *kp = pkt->pktsched_pkt_kpkt;
+
+		if (flags != NULL) {
+			/* use lower-32 bit for common flags */
+			*flags = &kp->pkt_pflags32;
+		}
+		if (timestamp != NULL) {
+			*timestamp = &kp->pkt_timestamp;
+		}
+		if (flowid != NULL) {
+			*flowid = kp->pkt_flow_token;
+		}
+		if (flowsrc != NULL) {
+			*flowsrc = (uint8_t)kp->pkt_flowsrc_type;
+		}
+		if (proto != NULL) {
+			*proto = kp->pkt_transport_protocol;
+		}
+		if (comp_gencnt != NULL) {
+			*comp_gencnt = kp->pkt_comp_gencnt;
+		}
+
+		break;
+	}
+#endif /* SKYWALK */
 
 	default:
 		VERIFY(0);
@@ -387,9 +481,46 @@ pktsched_alloc_fcentry(pktsched_pkt_t *pkt, struct ifnet *ifp, int how)
 
 		fce->fce_flowsrc_type = m->m_pkthdr.pkt_flowsrc;
 		fce->fce_flowid = m->m_pkthdr.pkt_flowid;
+#if SKYWALK
+		_CASSERT(sizeof(m->m_pkthdr.pkt_mpriv_srcid) ==
+		    sizeof(fce->fce_flowsrc_token));
+		_CASSERT(sizeof(m->m_pkthdr.pkt_mpriv_fidx) ==
+		    sizeof(fce->fce_flowsrc_fidx));
+
+		if (fce->fce_flowsrc_type == FLOWSRC_CHANNEL) {
+			fce->fce_flowsrc_fidx = m->m_pkthdr.pkt_mpriv_fidx;
+			fce->fce_flowsrc_token = m->m_pkthdr.pkt_mpriv_srcid;
+			fce->fce_ifp = ifp;
+		}
+#endif /* SKYWALK */
 		break;
 	}
 
+#if SKYWALK
+	case QP_PACKET: {
+		struct __kern_packet *kp = pkt->pktsched_pkt_kpkt;
+
+		fce = flowadv_alloc_entry(how);
+		if (fce == NULL) {
+			break;
+		}
+
+		_CASSERT(sizeof(fce->fce_flowid) ==
+		    sizeof(kp->pkt_flow_token));
+		_CASSERT(sizeof(fce->fce_flowsrc_fidx) ==
+		    sizeof(kp->pkt_flowsrc_fidx));
+		_CASSERT(sizeof(fce->fce_flowsrc_token) ==
+		    sizeof(kp->pkt_flowsrc_token));
+
+		ASSERT(kp->pkt_pflags & PKT_F_FLOW_ADV);
+		fce->fce_flowsrc_type = kp->pkt_flowsrc_type;
+		fce->fce_flowid = kp->pkt_flow_token;
+		fce->fce_flowsrc_fidx = kp->pkt_flowsrc_fidx;
+		fce->fce_flowsrc_token = kp->pkt_flowsrc_token;
+		fce->fce_ifp = ifp;
+		break;
+	}
+#endif /* SKYWALK */
 
 	default:
 		VERIFY(0);
@@ -416,6 +547,17 @@ pktsched_get_pkt_sfb_vars(pktsched_pkt_t *pkt, uint32_t **sfb_flags)
 		break;
 	}
 
+#if SKYWALK
+	case QP_PACKET: {
+		struct __kern_packet *kp = pkt->pktsched_pkt_kpkt;
+
+		_CASSERT(sizeof(kp->pkt_classq_hash) == sizeof(uint32_t));
+		_CASSERT(sizeof(kp->pkt_classq_flags) == sizeof(uint32_t));
+		*sfb_flags = &kp->pkt_classq_flags;
+		hashp = &kp->pkt_classq_hash;
+		break;
+	}
+#endif /* SKYWALK */
 
 	default:
 		VERIFY(0);

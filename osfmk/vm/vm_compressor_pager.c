@@ -184,9 +184,8 @@ typedef struct compressor_pager {
 	MACRO_END
 
 /* embedded slot pointers in compressor_pager get packed, so VA restricted */
-static ZONE_DECLARE(compressor_pager_zone, "compressor_pager",
-    sizeof(struct compressor_pager),
-    ZC_NOENCRYPT | ZC_VM_LP64 | ZC_NOTBITAG);
+static ZONE_DEFINE_TYPE(compressor_pager_zone, "compressor_pager",
+    struct compressor_pager, ZC_NOENCRYPT | ZC_VM_LP64 | ZC_NOTBITAG);
 
 LCK_GRP_DECLARE(compressor_pager_lck_grp, "compressor_pager");
 
@@ -731,7 +730,8 @@ vm_compressor_slots_init(void)
 	for (unsigned int idx = 0; idx < NUM_SLOTS_ZONES; idx++) {
 		compressor_slots_zones[idx] = zone_create(
 			compressor_slots_zones_names[idx],
-			compressor_slots_zones_sizes[idx], ZC_VM_LP64 | ZC_NOTBITAG);
+			compressor_slots_zones_sizes[idx],
+			ZC_PGZ_USE_GUARDS | ZC_VM_LP64 | ZC_NOTBITAG);
 	}
 }
 STARTUP(ZALLOC, STARTUP_RANK_MIDDLE, vm_compressor_slots_init);

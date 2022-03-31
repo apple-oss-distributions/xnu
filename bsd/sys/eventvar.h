@@ -338,6 +338,7 @@ struct kqworkloop {
 	thread_t            kqwl_owner;                   /* current [sync] owner thread */
 	os_ref_atomic_t     kqwl_retains;                 /* retain references */
 	thread_qos_t        kqwl_wakeup_qos;              /* QoS/override woke */
+	_Atomic uint8_t     kqwl_iotier_override;         /* iotier override */
 
 #if CONFIG_PREADOPT_TG
 	/* The point of the kqwl_preadopt_tg_needs_redrive bit is to be able to

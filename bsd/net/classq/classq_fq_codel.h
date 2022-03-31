@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2018 Apple Inc. All rights reserved.
+ * Copyright (c) 2016-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -34,6 +34,9 @@
 #include <sys/time.h>
 #include <net/flowadv.h>
 #include <net/classq/if_classq.h>
+#if SKYWALK
+#include <skywalk/os_skywalk_private.h>
+#endif /* SKYWALK */
 
 #ifdef __cplusplus
 extern "C" {
@@ -48,9 +51,20 @@ extern "C" {
 	(_fq_)->fq_flags &= ~FQF_DELAY_HIGH; \
 } while (0)
 
+#define FQ_IS_OVERWHELMING(_fq_)   ((_fq_)->fq_flags & FQF_OVERWHELMING)
+#define FQ_SET_OVERWHELMING(_fq_) do { \
+	(_fq_)->fq_flags |= FQF_OVERWHELMING; \
+} while (0)
+#define FQ_CLEAR_OVERWHELMING(_fq_) do { \
+	(_fq_)->fq_flags &= ~FQF_OVERWHELMING; \
+} while (0)
+
 typedef struct flowq {
 	union {
 		MBUFQ_HEAD(mbufq_head) __mbufq; /* mbuf packet queue */
+#if SKYWALK
+		KPKTQ_HEAD(kpktq_head) __kpktq; /* skywalk packet queue */
+#endif /* SKYWALK */
 	} __fq_pktq_u;
 #define FQF_FLOWCTL_CAPABLE 0x01 /* Use flow control instead of drop */
 #define FQF_DELAY_HIGH  0x02    /* Min delay is greater than target */
@@ -58,6 +72,7 @@ typedef struct flowq {
 #define FQF_OLD_FLOW    0x08    /* Currently on old flows queue */
 #define FQF_FLOWCTL_ON  0x10    /* Currently flow controlled */
 #define FQF_DESTROYED   0x80    /* flowq destroyed */
+#define FQF_OVERWHELMING  0x40  /* The largest flow when AQM hits queue limit */
 	uint8_t        fq_flags;       /* flags */
 	uint8_t        fq_sc_index; /* service_class index */
 	int32_t        fq_deficit;     /* Deficit for scheduling */
@@ -77,18 +92,84 @@ typedef struct flowq {
 } fq_t;
 
 #define fq_mbufq        __fq_pktq_u.__mbufq
+#if SKYWALK
+#define fq_kpktq        __fq_pktq_u.__kpktq
+#endif /* SKYWALK */
 
+#if SKYWALK
+#define fq_empty(_q)    (((_q)->fq_ptype == QP_MBUF) ?  \
+    MBUFQ_EMPTY(&(_q)->fq_mbufq) :                      \
+    KPKTQ_EMPTY(&(_q)->fq_kpktq))
+#else /* !SKYWALK */
 #define fq_empty(_q)    MBUFQ_EMPTY(&(_q)->fq_mbufq)
+#endif /* !SKYWALK */
 
-#define fq_enqueue(_q, _h, _t, _c) \
-    MBUFQ_ENQUEUE_MULTI(&(_q)->fq_mbufq, (_h).cp_mbuf, (_t).cp_mbuf)
+#if SKYWALK
+#define fq_enqueue(_q, _h, _t, _c) do {                                 \
+	switch ((_q)->fq_ptype) {                                       \
+	case QP_MBUF:                                                   \
+	        ASSERT((_h).cp_ptype == QP_MBUF);                       \
+	        ASSERT((_t).cp_ptype == QP_MBUF);                       \
+	        MBUFQ_ENQUEUE_MULTI(&(_q)->fq_mbufq, (_h).cp_mbuf,      \
+	            (_t).cp_mbuf);                                      \
+	        MBUFQ_ADD_CRUMB_MULTI(&(_q)->fq_mbufq, (_h).cp_mbuf,    \
+	            (_t).cp_mbuf, PKT_CRUMB_FQ_ENQUEUE);                \
+	        break;                                                  \
+	case QP_PACKET:                                                 \
+	        ASSERT((_h).cp_ptype == QP_PACKET);                     \
+	        ASSERT((_t).cp_ptype == QP_PACKET);                     \
+	        KPKTQ_ENQUEUE_MULTI(&(_q)->fq_kpktq, (_h).cp_kpkt,      \
+	            (_t).cp_kpkt, (_c));                                \
+	        break;                                                  \
+	default:                                                        \
+	        VERIFY(0);                                              \
+	        __builtin_unreachable();                                \
+	        break;                                                  \
+	}                                                               \
+} while (0)
+#else /* !SKYWALK */
+#define fq_enqueue(_q, _h, _t, _c) do {                                 \
+	MBUFQ_ENQUEUE_MULTI(&(_q)->fq_mbufq, (_h).cp_mbuf,              \
+	    (_t).cp_mbuf);                                              \
+	MBUFQ_ADD_CRUMB_MULTI(&(_q)->fq_mbufq, (_h).cp_mbuf,            \
+	    (_t).cp_mbuf, PKT_CRUMB_FQ_ENQUEUE);                        \
+} while (0)
+#endif /* !SKYWALK */
 
+#if SKYWALK
+#define fq_dequeue(_q, _p) do {                                         \
+	switch ((_q)->fq_ptype) {                                       \
+	case QP_MBUF: {                                                 \
+	        MBUFQ_DEQUEUE(&(_q)->fq_mbufq, (_p)->cp_mbuf);          \
+	        if (__probable((_p)->cp_mbuf != NULL)) {                \
+	                CLASSQ_PKT_INIT_MBUF((_p), (_p)->cp_mbuf);      \
+	                m_add_crumb((_p)->cp_mbuf,                      \
+	                    PKT_CRUMB_FQ_DEQUEUE);                      \
+	        }                                                       \
+	        break;                                                  \
+	}                                                               \
+	case QP_PACKET: {                                               \
+	        KPKTQ_DEQUEUE(&(_q)->fq_kpktq, (_p)->cp_kpkt);          \
+	        if (__probable((_p)->cp_kpkt != NULL)) {                \
+	                CLASSQ_PKT_INIT_PACKET((_p), (_p)->cp_kpkt);    \
+	        }                                                       \
+	        break;                                                  \
+	}                                                               \
+	default:                                                        \
+	        VERIFY(0);                                              \
+	        __builtin_unreachable();                                \
+	        break;                                                  \
+	}                                                               \
+} while (0)
+#else /* !SKYWALK */
 #define fq_dequeue(_q, _p) do {                                         \
 	MBUFQ_DEQUEUE(&(_q)->fq_mbufq, (_p)->cp_mbuf);                  \
 	if (__probable((_p)->cp_mbuf != NULL)) {                        \
 	        CLASSQ_PKT_INIT_MBUF((_p), (_p)->cp_mbuf);              \
+	        m_add_crumb((_p)->cp_mbuf, PKT_CRUMB_FQ_DEQUEUE);       \
 	}                                                               \
 } while (0)
+#endif /* !SKYWALK */
 
 struct fq_codel_sched_data;
 struct fq_if_classq;

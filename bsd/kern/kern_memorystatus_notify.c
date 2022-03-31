@@ -1332,9 +1332,12 @@ sustained_pressure_handler(void* arg0 __unused, void* arg1 __unused)
 			memorystatus_kill_on_sustained_pressure_count++;
 			/* TODO(jason): Should use os_atomic but requires rdar://76310894. */
 			memorystatus_pressure_interval_telemetry.num_kills++;
+		} else {
+			/* Nothing left to kill */
+			break;
 		}
 	}
-	if (kill_count == max_kills && memorystatus_vm_pressure_level != kVMPressureNormal) {
+	if (memorystatus_vm_pressure_level != kVMPressureNormal) {
 		os_log_with_startup_serial(OS_LOG_DEFAULT, "memorystatus: Killed %d idle processes due to sustained pressure, but device didn't quiesce. Giving up.", kill_count);
 	}
 }

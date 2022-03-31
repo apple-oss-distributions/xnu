@@ -144,6 +144,8 @@ it will cause
 .Dv EEXIST
 to be returned if the destination already exists. EINVAL is returned in case of bitwise-inclusive OR with
 .Dv RENAME_SWAP .
+.It Dv RENAME_NOFOLLOW_ANY
+If any symbolic links are encountered during pathname resolution, an error is returned.
 .El
 .Sh CAVEATS
 The system can deadlock if a loop is present in the file system graph.
@@ -268,6 +270,10 @@ is not a directory.
 .It Bq Er ELOOP
 Too many symbolic links are encountered in translating either pathname.
 This is taken to be indicative of a looping symbolic link.
+.\" ===========
+.It Bq Er ELOOP
+If RENAME_NOFOLLOW_ANY was passed and a symbolic link was encountered in
+translating either pathname.
 .\" ===========
 .It Bq Er ENAMETOOLONG
 A component of a pathname exceeds 

@@ -1592,7 +1592,6 @@ void
 tcp_cache_init(void)
 {
 	uint64_t sane_size_meg = sane_size / 1024 / 1024;
-	int i;
 
 	/*
 	 * On machines with <100MB of memory this will result in a (full) cache-size
@@ -1610,19 +1609,13 @@ tcp_cache_init(void)
 		tcp_cache_size = 1024;
 	}
 
-	tcp_cache = _MALLOC(sizeof(struct tcp_cache_head) * tcp_cache_size,
-	    M_TEMP, M_ZERO);
-	if (tcp_cache == NULL) {
-		panic("Allocating tcp_cache failed at boot-time!");
-	}
+	tcp_cache = zalloc_permanent(sizeof(struct tcp_cache_head) * tcp_cache_size,
+	    ZALIGN(struct tcp_cache_head));
 
-	tcp_heuristics = _MALLOC(sizeof(struct tcp_heuristics_head) * tcp_cache_size,
-	    M_TEMP, M_ZERO);
-	if (tcp_heuristics == NULL) {
-		panic("Allocating tcp_heuristic failed at boot-time!");
-	}
+	tcp_heuristics = zalloc_permanent(sizeof(struct tcp_heuristics_head) * tcp_cache_size,
+	    ZALIGN(struct tcp_heuristics_head));
 
-	for (i = 0; i < tcp_cache_size; i++) {
+	for (int i = 0; i < tcp_cache_size; i++) {
 		lck_mtx_init(&tcp_cache[i].tch_mtx, &tcp_cache_mtx_grp,
 		    &tcp_cache_mtx_attr);
 		SLIST_INIT(&tcp_cache[i].tcp_caches);

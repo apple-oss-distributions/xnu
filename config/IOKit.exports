@@ -23,6 +23,7 @@ _IOFreeAligned
 _IOFreeContiguous
 _IOFreeData
 _IOFreeTypeImpl
+_IOFreeTypeVarImpl
 _IOFreePageable
 _IOGetTime
 _IOIteratePageableMaps
@@ -45,6 +46,7 @@ _IOMallocAligned:_IOMallocAligned_external
 _IOMallocContiguous
 _IOMallocData
 _IOMallocTypeImpl
+_IOMallocTypeVarImpl
 _IOMallocPageable
 _IOMallocPageableZero
 _IOMallocZero:_IOMallocZero_external
@@ -1990,3 +1992,5 @@ __ZN12IOPlatformIO10superClassE
 __ZN6IOPMGR10superClassE
 
 __ZN9IOService22CoreAnalyticsSendEventEyP8OSStringP12OSDictionaryPFiP15OSMetaClassBase5IORPCE
+__ZN18IOMemoryDescriptor16getMapperOptionsEv
+__ZN18IOMemoryDescriptor16setMapperOptionsEt

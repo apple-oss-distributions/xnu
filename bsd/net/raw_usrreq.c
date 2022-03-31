@@ -234,7 +234,8 @@ raw_udetach(struct socket *so)
 		return EINVAL;
 	}
 
-	raw_detach(rp);
+	raw_detach_nofree(rp);
+	kfree_type(struct rawcb, rp);
 	return 0;
 }
 

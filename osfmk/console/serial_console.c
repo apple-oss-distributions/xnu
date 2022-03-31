@@ -192,9 +192,11 @@ console_init(void)
 
 	assert(console_ring.len > 0);
 
-	int ret = kmem_alloc_flags(kernel_map, (vm_offset_t *)&console_ring.buffer,
-	    KERN_CONSOLE_RING_SIZE + (2 * PAGE_SIZE), VM_KERN_MEMORY_OSFMK,
-	    KMA_KOBJECT | KMA_PERMANENT | KMA_GUARD_FIRST | KMA_GUARD_LAST);
+	int ret = kernel_memory_allocate(kernel_map,
+	    (vm_offset_t *)&console_ring.buffer,
+	    KERN_CONSOLE_RING_SIZE + (2 * PAGE_SIZE), 0,
+	    KMA_KOBJECT | KMA_PERMANENT | KMA_GUARD_FIRST | KMA_GUARD_LAST,
+	    VM_KERN_MEMORY_OSFMK);
 	if (ret != KERN_SUCCESS) {
 		panic("console_ring_init() failed to allocate ring buffer, error %d", ret);
 	}

@@ -3,9 +3,17 @@
 """ Please make sure you read the README file COMPLETELY BEFORE reading anything below.
     It is very critical that you read coding guidelines in Section E in README file. 
 """
-import sys, re, time, getopt, shlex, os, time
+from __future__ import absolute_import, print_function
+
+from builtins import hex
+from builtins import range
+from builtins import object
+
+import sys, re, time, os, time
 import lldb
 import struct
+import six
+
 from core.cvalue import *
 from core.configuration import *
 from core.lazytarget import *
@@ -38,17 +46,17 @@ def EnableLLDBAPILogging():
     logfile_name = "/tmp/lldb.%d.log" % int(time.time())
     enable_log_base_cmd = "log enable --file %s " % logfile_name
     cmd_str = enable_log_base_cmd + ' lldb api'
-    print cmd_str
-    print lldb_run_command(cmd_str)
+    print(cmd_str)
+    print(lldb_run_command(cmd_str))
     cmd_str = enable_log_base_cmd + ' gdb-remote packets'
-    print cmd_str
-    print lldb_run_command(cmd_str)
+    print(cmd_str)
+    print(lldb_run_command(cmd_str))
     cmd_str = enable_log_base_cmd + ' kdp-remote packets'
-    print cmd_str
-    print lldb_run_command(cmd_str)
-    print lldb_run_command("version")
-    print "Please collect the logs from %s for filing a radar. If you had encountered an exception in a lldbmacro command please re-run it." % logfile_name
-    print "Please make sure to provide the output of 'version', 'image list' and output of command that failed."
+    print(cmd_str)
+    print(lldb_run_command(cmd_str))
+    print(lldb_run_command("version"))
+    print("Please collect the logs from %s for filing a radar. If you had encountered an exception in a lldbmacro command please re-run it." % logfile_name)
+    print("Please make sure to provide the output of 'version', 'image list' and output of command that failed.")
     return
 
 def GetConnectionProtocol():
@@ -155,7 +163,7 @@ def loadLLDB():
     """
     try:
         import lldb
-        print 'Found LLDB on path'
+        print('Found LLDB on path')
     except:
         platdir = subprocess.check_output('xcodebuild -version -sdk iphoneos PlatformPath'.split())
         offset = platdir.find("Contents/Developer")
@@ -167,13 +175,13 @@ def loadLLDB():
             sys.path.append(lldb_py)
             global lldb
             lldb = __import__('lldb')
-            print 'Found LLDB in SDK'
+            print('Found LLDB in SDK')
         else:
-            print 'Failed to locate lldb.py from', lldb_py
+            print('Failed to locate lldb.py from', lldb_py)
             sys.exit(-1)
     return True
 
-class Logger():
+class Logger(object):
     """ A logging utility """
     def __init__(self, log_file_path="/tmp/xnu.log"):
         self.log_file_handle = open(log_file_path, "w+")
@@ -187,7 +195,7 @@ class Logger():
         
         self.log_file_handle.write(debug_line_str + "\n")
         if self.redirect_to_stdout :
-            print debug_line_str
+            print(debug_line_str)
     
     def write(self, line):
         self.log_debug(line)
@@ -338,6 +346,20 @@ def GetEnumValue(enum_name_or_combined, member_name = None):
 
     return _enum_cache[enum_name][member_name]
 
+def GetEnumValues(enum_name, names):
+    """ Finds the values of a particular set of enum defines.
+        params:
+            enum_name: str
+                name of an enum type
+            member_name: str list
+                list of fields to resolve
+        returns:
+            int list - value of the particular enum.
+        raises:
+            TypeError - if the enum is not found
+    """
+    return [GetEnumValue(enum_name, x) for x in names]
+
 _enum_name_cache = {}
 def GetEnumName(enum_name, value, prefix = ''):
     """ Finds symbolic name for a particular enum integer value
@@ -407,10 +429,10 @@ def GetOptionString(enum_name, value, prefix = ''):
         v = unsigned(value)
 
     flags = []
-    for bit in xrange(0, 64):
+    for bit in range(0, 64):
         mask = 1 << bit
         if not v & mask: continue
-        if not ty_dict.has_key(mask): continue
+        if mask not in ty_dict: continue
         name = ty_dict[mask]
         if name.startswith(prefix):
             name = name[len(prefix):]
@@ -440,7 +462,7 @@ def addDSYM(uuid, info):
     """
     global _dsymlist
     if "DBGSymbolRichExecutable" not in info:
-        print "Error: Unable to find syms for %s" % uuid
+        print("Error: Unable to find syms for %s" % uuid)
         return False
     if not uuid in _dsymlist:
         # add the dsym itself
@@ -488,7 +510,7 @@ def RunShellCommand(command):
     exit_code = 0
     try:
         output_str = subprocess.check_output(cmd_args, stderr=subprocess.STDOUT)
-    except subprocess.CalledProcessError, e:
+    except subprocess.CalledProcessError as e:
         exit_code = e.returncode
     finally:
         return (exit_code, output_str, '')
@@ -502,7 +524,7 @@ def dsymForUUID(uuid):
     """
     import subprocess
     import plistlib
-    output = subprocess.check_output(["/usr/local/bin/dsymForUUID", "--copyExecutable", uuid])
+    output = six.ensure_str(subprocess.check_output(["/usr/local/bin/dsymForUUID", "--copyExecutable", uuid]))
     if output:
         # because of <rdar://12713712>
         #plist = plistlib.readPlistFromString(output)
@@ -522,7 +544,7 @@ def debuglog(s):
     """
     global config
     if config['debug']:
-      print "DEBUG:",s
+      print("DEBUG:",s)
     return None
 
 def IsAppleInternal():
@@ -546,13 +568,13 @@ def print_hex_data(data, begin_offset=0, desc="", marks={}):
             mark - dictionary of markers
     """
     if desc:
-        print "{}:".format(desc)
+        print("{}:".format(desc))
     index = 0
     total_len = len(data)
     hex_buf = ""
     char_buf = ""
     while index < total_len:
-        if marks.has_key(begin_offset + index):
+        if begin_offset + index in marks:
             hex_buf += marks[begin_offset + index]
             hex_buf += "{:02x}".format(data[index])
         else:
@@ -565,10 +587,10 @@ def print_hex_data(data, begin_offset=0, desc="", marks={}):
         if index and index < total_len and index % 8 == 0:
             hex_buf += " "
         if index > 1 and index < total_len and (index % 16) == 0:
-            print "{:08x} {: <50s} |{: <16s}|".format(begin_offset + index - 16, hex_buf, char_buf)
+            print("{:08x} {: <50s} |{: <16s}|".format(begin_offset + index - 16, hex_buf, char_buf))
             hex_buf = ""
             char_buf = ""
-    print "{:08x} {: <50s} |{: <16s}|".format(begin_offset + index - 16, hex_buf, char_buf)
+    print("{:08x} {: <50s} |{: <16s}|".format(begin_offset + index - 16, hex_buf, char_buf))
     return
 
 def Ones(x):

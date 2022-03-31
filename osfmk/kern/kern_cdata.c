@@ -45,6 +45,10 @@ static kern_return_t kcdata_compress_chunk(kcdata_descriptor_t data, uint32_t ty
 static kern_return_t kcdata_write_compression_stats(kcdata_descriptor_t data);
 static kern_return_t kcdata_get_compression_stats(kcdata_descriptor_t data, uint64_t *totalout, uint64_t *totalin);
 
+#ifndef ROUNDUP
+#define ROUNDUP(x, y)            ((((x)+(y)-1)/(y))*(y))
+#endif
+
 /*
  * zlib will need to store its metadata and this value is indifferent from the
  * window bits and other zlib internals
@@ -114,6 +118,7 @@ kcdata_memory_alloc_init(mach_vm_address_t buffer_addr_p, unsigned data_type, un
 	data->kcd_addr_end = buffer_addr_p;
 	data->kcd_flags = (clamped_flags & KCFLAG_USE_COPYOUT) ? clamped_flags : clamped_flags | KCFLAG_USE_MEMCOPY;
 	data->kcd_length = size;
+	data->kcd_endalloced = 0;
 
 	/* Initialize the BEGIN header */
 	if (KERN_SUCCESS != kcdata_get_memory_addr(data, data_type, 0, &user_addr)) {
@@ -138,9 +143,38 @@ kcdata_memory_static_init(kcdata_descriptor_t data, mach_vm_address_t buffer_add
 	data->kcd_addr_end = buffer_addr_p;
 	data->kcd_flags = (clamped_flags & KCFLAG_USE_COPYOUT) ? clamped_flags : clamped_flags | KCFLAG_USE_MEMCOPY;
 	data->kcd_length = size;
+	data->kcd_endalloced = 0;
 
 	/* Initialize the BEGIN header */
 	return kcdata_get_memory_addr(data, data_type, 0, &user_addr);
+}
+
+void *
+kcdata_endalloc(kcdata_descriptor_t data, size_t length)
+{
+	mach_vm_address_t curend = data->kcd_addr_begin + data->kcd_length;
+	/* round up allocation and ensure return value is uint64-aligned */
+	size_t toalloc = ROUNDUP(length, sizeof(uint64_t)) + (curend % sizeof(uint64_t));
+	/* an arbitrary limit: make sure we don't allocate more then 1/4th of the remaining buffer. */
+	if (data->kcd_length / 4 <= toalloc) {
+		return NULL;
+	}
+	data->kcd_length -= toalloc;
+	data->kcd_endalloced += toalloc;
+	return (void *)(curend - toalloc);
+}
+
+/* Zeros and releases data allocated from the end of the buffer */
+static void
+kcdata_release_endallocs(kcdata_descriptor_t data)
+{
+	mach_vm_address_t curend = data->kcd_addr_begin + data->kcd_length;
+	size_t endalloced = data->kcd_endalloced;
+	if (endalloced > 0) {
+		bzero((void *)curend, endalloced);
+		data->kcd_length += endalloced;
+		data->kcd_endalloced = 0;
+	}
 }
 
 void *
@@ -255,8 +289,8 @@ kcdata_init_compress_state(kcdata_descriptor_t data, void (*memcpy_f)(void *, co
 		size = round_page(ZLIB_METADATA_SIZE + zlib_deflate_memory_size(wbits, memlevel));
 		kcdata_debug_printf("%s: size = %zu kcd_length: %d\n", __func__, size, data->kcd_length);
 		kcdata_debug_printf("%s: kcd buffer [%p - %p]\n", __func__, (void *) data->kcd_addr_begin, (void *) data->kcd_addr_begin + data->kcd_length);
-
-		if (4 * size > data->kcd_length) {
+		void *buf = kcdata_endalloc(data, size);
+		if (buf == NULL) {
 			return KERN_INSUFFICIENT_BUFFER_SIZE;
 		}
 
@@ -816,6 +850,7 @@ kcdata_finish_compression_zlib(kcdata_descriptor_t data)
 	 * buffer but only the portion with valid panic data is sent to iBoot via the SMC. When iBoot
 	 * calculates the CRC to compare with the value in the header it uses a zero-filled buffer.
 	 * The stackshot compression leaves non-zero bytes behind so those must be cleared prior to the CRC calculation.
+	 * This doesn't get the compression metadata; that's zeroed by kcdata_release_endallocs().
 	 *
 	 * All other contexts: The stackshot compression artifacts are present in its panic buffer but the CRC check
 	 * is done on the same buffer for the before and after calculation so there's nothing functionally
@@ -834,20 +869,30 @@ kcdata_finish_compression_zlib(kcdata_descriptor_t data)
 	}
 }
 
-kern_return_t
+static kern_return_t
 kcdata_finish_compression(kcdata_descriptor_t data)
 {
 	kcdata_write_compression_stats(data);
 
 	switch (data->kcd_comp_d.kcd_cd_compression_type) {
 	case KCDCT_ZLIB:
-		data->kcd_length += data->kcd_comp_d.kcd_cd_maxoffset;
 		return kcdata_finish_compression_zlib(data);
 	case KCDCT_NONE:
 		return KERN_SUCCESS;
 	default:
 		panic("invalid compression type 0x%llxin kcdata_finish_compression", data->kcd_comp_d.kcd_cd_compression_type);
 	}
+}
+
+kern_return_t
+kcdata_finish(kcdata_descriptor_t data)
+{
+	int ret = KERN_SUCCESS;
+	if (data->kcd_flags & KCFLAG_USE_COMPRESSION) {
+		ret = kcdata_finish_compression(data);
+	}
+	kcdata_release_endallocs(data);
+	return ret;
 }
 
 void

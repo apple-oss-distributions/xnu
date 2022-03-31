@@ -107,7 +107,21 @@
 #include <ipc/ipc_importance.h>
 #endif
 
+extern void qsort(void *a, size_t n, size_t es, int (*cmp)(const void *, const void *));
 extern int proc_isinitproc(struct proc *p);
+
+static int
+mach_port_name_cmp(const void *_n1, const void *_n2)
+{
+	mach_port_name_t n1 = *(const mach_port_name_t *)_n1;
+	mach_port_name_t n2 = *(const mach_port_name_t *)_n2;
+
+	if (n1 == n2) {
+		return 0;
+	}
+
+	return n1 < n2 ? -1 : 1;
+}
 
 kern_return_t mach_port_get_attributes(ipc_space_t space, mach_port_name_t name,
     int flavor, mach_port_info_t info, mach_msg_type_number_t  *count);
@@ -224,8 +238,8 @@ mach_port_names(
 	kern_return_t kr;
 
 	vm_size_t size;         /* size of allocated memory */
-	vm_offset_t addr1;      /* allocated memory, for names */
-	vm_offset_t addr2;      /* allocated memory, for types */
+	vm_offset_t addr1 = 0;      /* allocated memory, for names */
+	vm_offset_t addr2 = 0;      /* allocated memory, for types */
 	vm_map_copy_t memory1;  /* copied-in memory, for names */
 	vm_map_copy_t memory2;  /* copied-in memory, for types */
 
@@ -270,45 +284,16 @@ mach_port_names(
 		}
 		size = size_needed;
 
-		kr = vm_allocate_kernel(ipc_kernel_map, &addr1, size, VM_FLAGS_ANYWHERE, VM_KERN_MEMORY_IPC);
+		kr = kernel_memory_allocate(ipc_kernel_map, &addr1, size, 0,
+		    KMA_NONE, VM_KERN_MEMORY_IPC);
 		if (kr != KERN_SUCCESS) {
 			return KERN_RESOURCE_SHORTAGE;
 		}
 
-		kr = vm_allocate_kernel(ipc_kernel_map, &addr2, size, VM_FLAGS_ANYWHERE, VM_KERN_MEMORY_IPC);
+		kr = kernel_memory_allocate(ipc_kernel_map, &addr2, size, 0,
+		    KMA_NONE, VM_KERN_MEMORY_IPC);
 		if (kr != KERN_SUCCESS) {
 			kmem_free(ipc_kernel_map, addr1, size);
-			return KERN_RESOURCE_SHORTAGE;
-		}
-
-		/* can't fault while we hold locks */
-
-		kr = vm_map_wire_kernel(
-			ipc_kernel_map,
-			vm_map_trunc_page(addr1,
-			VM_MAP_PAGE_MASK(ipc_kernel_map)),
-			vm_map_round_page(addr1 + size,
-			VM_MAP_PAGE_MASK(ipc_kernel_map)),
-			VM_PROT_READ | VM_PROT_WRITE, VM_KERN_MEMORY_IPC,
-			FALSE);
-		if (kr != KERN_SUCCESS) {
-			kmem_free(ipc_kernel_map, addr1, size);
-			kmem_free(ipc_kernel_map, addr2, size);
-			return KERN_RESOURCE_SHORTAGE;
-		}
-
-		kr = vm_map_wire_kernel(
-			ipc_kernel_map,
-			vm_map_trunc_page(addr2,
-			VM_MAP_PAGE_MASK(ipc_kernel_map)),
-			vm_map_round_page(addr2 + size,
-			VM_MAP_PAGE_MASK(ipc_kernel_map)),
-			VM_PROT_READ | VM_PROT_WRITE,
-			VM_KERN_MEMORY_IPC,
-			FALSE);
-		if (kr != KERN_SUCCESS) {
-			kmem_free(ipc_kernel_map, addr1, size);
-			kmem_free(ipc_kernel_map, addr2, size);
 			return KERN_RESOURCE_SHORTAGE;
 		}
 	}
@@ -360,22 +345,15 @@ mach_port_names(
 		 *	copied-in form.  Free any unused memory.
 		 */
 
-		kr = vm_map_unwire(
-			ipc_kernel_map,
-			vm_map_trunc_page(addr1,
-			VM_MAP_PAGE_MASK(ipc_kernel_map)),
-			vm_map_round_page(addr1 + vm_size_used,
-			VM_MAP_PAGE_MASK(ipc_kernel_map)),
-			FALSE);
+		if (size_used < vm_size_used) {
+			bzero((char *)addr1 + size_used, vm_size_used - size_used);
+			bzero((char *)addr2 + size_used, vm_size_used - size_used);
+		}
+
+		kr = vm_map_unwire(ipc_kernel_map, addr1, addr1 + vm_size_used, FALSE);
 		assert(kr == KERN_SUCCESS);
 
-		kr = vm_map_unwire(
-			ipc_kernel_map,
-			vm_map_trunc_page(addr2,
-			VM_MAP_PAGE_MASK(ipc_kernel_map)),
-			vm_map_round_page(addr2 + vm_size_used,
-			VM_MAP_PAGE_MASK(ipc_kernel_map)),
-			FALSE);
+		kr = vm_map_unwire(ipc_kernel_map, addr2, addr2 + vm_size_used, FALSE);
 		assert(kr == KERN_SUCCESS);
 
 		kr = vm_map_copyin(ipc_kernel_map, (vm_map_address_t)addr1,
@@ -1286,7 +1264,7 @@ mach_port_get_set_status(
 	mach_port_name_t                **members,
 	mach_msg_type_number_t          *membersCnt)
 {
-	ipc_entry_num_t actual;         /* this many members */
+	__block ipc_entry_num_t actual;         /* this many members */
 	ipc_entry_num_t maxnames;       /* space for this many members */
 	kern_return_t kr;
 
@@ -1309,16 +1287,11 @@ mach_port_get_set_status(
 		ipc_object_t psobj;
 		ipc_pset_t pset;
 
-		kr = vm_allocate_kernel(ipc_kernel_map, &addr, size, VM_FLAGS_ANYWHERE, VM_KERN_MEMORY_IPC);
+		kr = kernel_memory_allocate(ipc_kernel_map, &addr, size, 0,
+		    KMA_NONE, VM_KERN_MEMORY_IPC);
 		if (kr != KERN_SUCCESS) {
 			return KERN_RESOURCE_SHORTAGE;
 		}
-
-		/* can't fault while we hold locks */
-
-		kr = vm_map_wire_kernel(ipc_kernel_map, addr, addr + size,
-		    VM_PROT_READ | VM_PROT_WRITE, VM_KERN_MEMORY_IPC, FALSE);
-		assert(kr == KERN_SUCCESS);
 
 		kr = ipc_object_translate(space, name, MACH_PORT_RIGHT_PORT_SET, &psobj);
 		if (kr != KERN_SUCCESS) {
@@ -1328,16 +1301,18 @@ mach_port_get_set_status(
 
 		/* just use a portset reference from here on out */
 		pset = ips_object_to_pset(psobj);
-		ips_reference(pset);
-		ips_mq_unlock(pset);
-
-		names = (mach_port_name_t *) addr;
+		names = (mach_port_name_t *)addr;
 		maxnames = (ipc_entry_num_t)(size / sizeof(mach_port_name_t));
 
-		ipc_mqueue_set_gather_member_names(space, pset, maxnames, names, &actual);
+		waitq_set_foreach_member_locked(&pset->ips_wqset, ^(struct waitq *wq){
+			if (actual < maxnames) {
+			        names[actual] = ip_get_receiver_name(ip_from_waitq(wq));
+			}
+			actual++;
+		});
 
 		/* release the portset reference */
-		ips_release(pset);
+		ips_mq_unlock(pset);
 
 		if (actual <= maxnames) {
 			break;
@@ -1345,9 +1320,8 @@ mach_port_get_set_status(
 
 		/* didn't have enough memory; allocate more */
 		kmem_free(ipc_kernel_map, addr, size);
-		size = vm_map_round_page(
-			(actual * sizeof(mach_port_name_t)),
-			VM_MAP_PAGE_MASK(ipc_kernel_map)) +
+		size = vm_map_round_page(actual * sizeof(mach_port_name_t),
+		    VM_MAP_PAGE_MASK(ipc_kernel_map)) +
 		    VM_MAP_PAGE_SIZE(ipc_kernel_map);
 	}
 
@@ -1359,23 +1333,23 @@ mach_port_get_set_status(
 		vm_size_t size_used;
 		vm_size_t vm_size_used;
 
+		qsort((void *)addr, actual, sizeof(mach_port_name_t),
+		    mach_port_name_cmp);
+
 		size_used = actual * sizeof(mach_port_name_t);
-		vm_size_used = vm_map_round_page(
-			size_used,
-			VM_MAP_PAGE_MASK(ipc_kernel_map));
+		vm_size_used = vm_map_round_page(size_used,
+		    VM_MAP_PAGE_MASK(ipc_kernel_map));
+
+		if (size_used < vm_size_used) {
+			bzero((char *)addr + size_used, vm_size_used - size_used);
+		}
 
 		/*
 		 *	Make used memory pageable and get it into
 		 *	copied-in form.  Free any unused memory.
 		 */
 
-		kr = vm_map_unwire(
-			ipc_kernel_map,
-			vm_map_trunc_page(addr,
-			VM_MAP_PAGE_MASK(ipc_kernel_map)),
-			vm_map_round_page(addr + vm_size_used,
-			VM_MAP_PAGE_MASK(ipc_kernel_map)),
-			FALSE);
+		kr = vm_map_unwire(ipc_kernel_map, addr, addr + vm_size_used, FALSE);
 		assert(kr == KERN_SUCCESS);
 
 		kr = vm_map_copyin(ipc_kernel_map, (vm_map_address_t)addr,
@@ -1443,9 +1417,10 @@ mach_port_move_member(
 {
 	ipc_object_t port_obj, ps_obj;
 	ipc_port_t port = IP_NULL;
-	ipc_pset_t nset = IPS_NULL;
 	kern_return_t kr;
-	uint64_t wq_reserved_prepost = 0;
+	waitq_link_list_t free_l = { };
+	waitq_link_t link = WQL_NULL;
+	struct waitq_set *keep_waitq_set = NULL;
 
 	if (space == IS_NULL) {
 		return KERN_INVALID_TASK;
@@ -1460,20 +1435,7 @@ mach_port_move_member(
 	}
 
 	if (after != MACH_PORT_NULL) {
-		/*
-		 * We reserve enough prepost objects to complete
-		 * the set move atomically - we can't block
-		 * while we're holding the space lock, and
-		 * the ipc_pset_add calls ipc_mqueue_add
-		 * which may have to prepost this port onto
-		 * this set.
-		 */
-		wq_reserved_prepost = waitq_prepost_reserve(NULL, 1, WAITQ_DONT_LOCK);
-		kr = ipc_pset_lazy_allocate(space, after);
-		if (kr != KERN_SUCCESS) {
-			goto done;
-		}
-
+		link = waitq_link_alloc(WQT_PORT_SET);
 		kr = ipc_object_translate_two(space,
 		    member, MACH_PORT_RIGHT_RECEIVE, &port_obj,
 		    after, MACH_PORT_RIGHT_PORT_SET, &ps_obj);
@@ -1486,32 +1448,32 @@ mach_port_move_member(
 	}
 
 	port = ip_object_to_port(port_obj);
-	ip_reference(port);
 
 	if (after != MACH_PORT_NULL) {
-		nset = ips_object_to_pset(ps_obj);
-		ips_reference(nset);
-		/* Unlock the portset */
+		ipc_pset_t nset = ips_object_to_pset(ps_obj);
+
+		ipc_mqueue_add_locked(&port->ip_messages, nset, &link);
 		ips_mq_unlock(nset);
+
+		keep_waitq_set = &nset->ips_wqset;
+	} else if (!ip_in_pset(port)) {
+		kr = KERN_NOT_IN_SET;
 	}
 
-	if (nset != IPS_NULL) {
-		ipc_pset_move_unlock(nset, port, &wq_reserved_prepost);
-	} else {
-		ipc_pset_remove_from_all_unlock(port);
-	}
-	/* port unlocked */
+	/*
+	 * waitq_unlink_all_locked() doesn't dereference `keep_waitq_set,
+	 * but we wouldn't want an ABA issue. Fortunately, while `port`
+	 * is locked and linked to `nset`, then `nset` can't be reused/freed.
+	 */
+	waitq_unlink_all_locked(&port->ip_waitq, keep_waitq_set, &free_l);
 
+	ip_mq_unlock(port);
+
+	waitq_link_free_list(WQT_PORT_SET, &free_l);
 done:
-	if (port != IP_NULL) {
-		ip_release(port);
+	if (link.wqlh) {
+		waitq_link_free(WQT_PORT_SET, link);
 	}
-
-	if (nset != IPS_NULL) {
-		ips_release(nset);
-	}
-
-	waitq_prepost_release_reserve(wq_reserved_prepost);
 
 	return kr;
 }
@@ -1618,15 +1580,19 @@ mach_port_request_notification(
 		}
 
 		/* Allow only one registeration of this notification */
-		if (port->ip_pdrequest != IP_NULL) {
+		if (ipc_port_has_prdrequest(port)) {
 			ip_mq_unlock(port);
 			mach_port_guard_exception(name, 0, 0, kGUARD_EXC_KERN_FAILURE);
 			return KERN_FAILURE;
 		}
 
-		ipc_port_pdrequest(port, notify, previousp);
-		/* port is unlocked */
-		assert(*previousp == IP_NULL);
+		if (port->ip_has_watchport) {
+			port->ip_twe->twe_pdrequest = notify;
+		} else {
+			port->ip_pdrequest = notify;
+		}
+		ip_mq_unlock(port);
+		*previousp = IP_NULL;
 		break;
 	}
 
@@ -1808,9 +1774,8 @@ mach_port_get_status_helper(
 	statusp->mps_mscount = port->ip_mscount;
 	statusp->mps_sorights = port->ip_sorights;
 	statusp->mps_srights = port->ip_srights > 0;
-	statusp->mps_pdrequest = port->ip_pdrequest != IP_NULL;
-	statusp->mps_nsrequest = (port->ip_kobject_nsrequest ||
-	    port->ip_nsrequest != IP_NULL);
+	statusp->mps_pdrequest = ipc_port_has_prdrequest(port);
+	statusp->mps_nsrequest = port->ip_nsrequest != IP_NULL;
 	statusp->mps_flags = 0;
 	if (port->ip_impdonation) {
 		statusp->mps_flags |= MACH_PORT_STATUS_FLAG_IMP_DONATION;
@@ -2168,8 +2133,7 @@ mach_port_insert_member(
 	kern_return_t kr;
 	ipc_port_t port = IP_NULL;
 	ipc_pset_t pset = IPS_NULL;
-	waitq_ref_t wq_link_id;
-	uint64_t wq_reserved_prepost;
+	waitq_link_t link;
 
 	if (space == IS_NULL) {
 		return KERN_INVALID_TASK;
@@ -2179,14 +2143,7 @@ mach_port_insert_member(
 		return KERN_INVALID_RIGHT;
 	}
 
-	wq_link_id = waitq_link_reserve();
-	wq_reserved_prepost = waitq_prepost_reserve(NULL, 10,
-	    WAITQ_DONT_LOCK);
-	kr = ipc_pset_lazy_allocate(space, psname);
-	if (kr != KERN_SUCCESS) {
-		goto done;
-	}
-
+	link = waitq_link_alloc(WQT_PORT_SET);
 
 	kr = ipc_object_translate_two(space,
 	    name, MACH_PORT_RIGHT_RECEIVE, &obj,
@@ -2199,31 +2156,18 @@ mach_port_insert_member(
 	assert(psobj != IO_NULL);
 	assert(obj != IO_NULL);
 
-	/* Take a reference on the port and the portset */
 	port = ip_object_to_port(obj);
 	pset = ips_object_to_pset(psobj);
-	ip_reference(port);
-	ips_reference(pset);
 
-	/* Unlock the portset */
+	kr = ipc_mqueue_add_locked(&port->ip_messages, pset, &link);
+
 	ips_mq_unlock(pset);
-
-	kr = ipc_pset_add_unlock(pset, port,
-	    &wq_link_id, &wq_reserved_prepost);
-	/* port unlocked */
+	ip_mq_unlock(port);
 
 done:
-	if (port != IP_NULL) {
-		ip_release(port);
+	if (link.wqlh) {
+		waitq_link_free(WQT_PORT_SET, link);
 	}
-
-	if (pset != IPS_NULL) {
-		ips_release(pset);
-	}
-
-	/* on success, wq_link_id is reset to 0, so this is always safe */
-	waitq_link_release(wq_link_id);
-	waitq_prepost_release_reserve(wq_reserved_prepost);
 
 	return kr;
 }
@@ -2257,6 +2201,7 @@ mach_port_extract_member(
 	kern_return_t kr;
 	ipc_port_t port = IP_NULL;
 	ipc_pset_t pset = IPS_NULL;
+	waitq_link_t link;
 
 	if (space == IS_NULL) {
 		return KERN_INVALID_TASK;
@@ -2277,23 +2222,20 @@ mach_port_extract_member(
 	assert(psobj != IO_NULL);
 	assert(obj != IO_NULL);
 
-	/* Take a reference on the port and the portset */
 	port = ip_object_to_port(obj);
 	pset = ips_object_to_pset(psobj);
-	ip_reference(port);
-	ips_reference(pset);
 
-	/* Unlock the portset */
+	link = waitq_unlink_locked(&port->ip_waitq, &pset->ips_wqset);
+
 	ips_mq_unlock(pset);
-
-	kr = ipc_pset_remove_locked(pset, port);
-
 	ip_mq_unlock(port);
 
-	ip_release(port);
-	ips_release(pset);
+	if (link.wqlh) {
+		waitq_link_free(WQT_PORT_SET, link);
+		return KERN_SUCCESS;
+	}
 
-	return kr;
+	return KERN_NOT_IN_SET;
 }
 
 /*
@@ -2424,7 +2366,7 @@ mach_port_guard_exception(
 	boolean_t fatal = FALSE;
 
 	if (reason <= MAX_OPTIONAL_kGUARD_EXC_CODE &&
-	    (t->task->task_exc_guard & TASK_EXC_GUARD_MP_FATAL)) {
+	    (get_threadtask(t)->task_exc_guard & TASK_EXC_GUARD_MP_FATAL)) {
 		fatal = TRUE;
 	} else if (reason <= MAX_FATAL_kGUARD_EXC_CODE) {
 		fatal = TRUE;
@@ -2500,8 +2442,9 @@ mach_port_guard_ast(thread_t t,
     mach_exception_data_type_t code, mach_exception_data_type_t subcode)
 {
 	unsigned int reason = EXC_GUARD_DECODE_GUARD_FLAVOR(code);
-	task_t task = t->task;
+	task_t task = get_threadtask(t);
 	unsigned int behavior = task->task_exc_guard;
+
 	assert(task == current_task());
 	assert(task != kernel_task);
 
@@ -3152,7 +3095,7 @@ mach_port_is_connection_for_service(
 	return ret;
 }
 
-#if DEVELOPMENT || DEBUG
+#if CONFIG_SERVICE_PORT_INFO
 kern_return_t
 mach_port_get_service_port_info(
 	ipc_space_read_t           space,
@@ -3192,7 +3135,7 @@ mach_port_get_service_port_info(
 	return KERN_SUCCESS;
 }
 
-#else /* DEVELOPMENT || DEBUG */
+#else /* CONFIG_SERVICE_PORT_INFO */
 
 kern_return_t
 mach_port_get_service_port_info(
@@ -3202,7 +3145,7 @@ mach_port_get_service_port_info(
 {
 	return KERN_NOT_SUPPORTED;
 }
-#endif /* DEVELOPMENT || DEBUG */
+#endif /* CONFIG_SERVICE_PORT_INFO */
 
 kern_return_t
 mach_port_assert_attributes(

@@ -93,8 +93,7 @@ OSDictionary::initWithCapacity(unsigned int inCapacity)
 
 //fOptions |= kSort;
 
-	dictionary = kalloc_type_tag_bt(dictEntry, inCapacity, Z_WAITOK_ZERO,
-	    VM_KERN_MEMORY_LIBKERN);
+	dictionary = kallocp_type_container(dictEntry, &inCapacity, Z_WAITOK_ZERO);
 	if (!dictionary) {
 		return false;
 	}
@@ -318,7 +317,7 @@ unsigned int
 OSDictionary::ensureCapacity(unsigned int newCapacity)
 {
 	dictEntry *newDict;
-	vm_size_t finalCapacity;
+	unsigned int finalCapacity;
 
 	if (newCapacity <= capacity) {
 		return capacity;
@@ -333,16 +332,8 @@ OSDictionary::ensureCapacity(unsigned int newCapacity)
 		return capacity;
 	}
 
-	newDict = kallocp_type_tag_bt(dictEntry, &finalCapacity, Z_WAITOK,
-	    VM_KERN_MEMORY_LIBKERN);
+	newDict = kallocp_type_container(dictEntry, &finalCapacity, Z_WAITOK);
 	if (newDict) {
-		// use all of the actual allocation size
-		if (finalCapacity > UINT_MAX) {
-			// failure, too large
-			kfree_type(dictEntry, finalCapacity, newDict);
-			return capacity;
-		}
-
 		os::uninitialized_move(dictionary, dictionary + capacity, newDict);
 		os::uninitialized_value_construct(newDict + capacity, newDict + finalCapacity);
 		os::destroy(dictionary, dictionary + capacity);
@@ -351,7 +342,7 @@ OSDictionary::ensureCapacity(unsigned int newCapacity)
 
 		kfree_type(dictEntry, capacity, dictionary);
 		dictionary = newDict;
-		capacity = (unsigned int) finalCapacity;
+		capacity = finalCapacity;
 	}
 
 	return capacity;

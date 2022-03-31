@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2020 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -94,6 +94,9 @@
 #include <net/necp.h>
 #endif
 
+#if SKYWALK
+#include <skywalk/namespace/netns.h>
+#endif /* SKYWALK */
 
 #ifdef BSD_KERNEL_PRIVATE
 /*
@@ -230,6 +233,11 @@ struct inpcb {
 	uuid_t necp_client_uuid;
 	necp_client_flow_cb necp_cb;
 #endif
+#if SKYWALK
+	netns_token inp_netns_token;    /* shared namespace state */
+	/* optional IPv4 wildcard namespace reservation for an IPv6 socket */
+	netns_token inp_wildcard_netns_token;
+#endif /* SKYWALK */
 	u_char *inp_keepalive_data;     /* for keepalive offload */
 	u_int8_t inp_keepalive_datalen; /* keepalive data length */
 	u_int8_t inp_keepalive_type;    /* type of application */
@@ -854,6 +862,9 @@ extern void inp_set_activity_bitmap(struct inpcb *inp);
 extern void inp_get_activity_bitmap(struct inpcb *inp, activity_bitmap_t *b);
 extern void inp_update_last_owner(struct socket *so, struct proc *p, struct proc *ep);
 extern void inp_copy_last_owner(struct socket *so, struct socket *head);
+#if SKYWALK
+extern void inp_update_netns_flags(struct socket *so);
+#endif /* SKYWALK */
 #endif /* BSD_KERNEL_PRIVATE */
 #ifdef KERNEL_PRIVATE
 /* exported for PPP */

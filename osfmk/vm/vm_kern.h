@@ -77,6 +77,7 @@ extern "C" {
 #include <mach/mach_types.h>
 #include <mach/boolean.h>
 #include <mach/kern_return.h>
+#include <mach/vm_types.h>
 
 #ifdef  KERNEL_PRIVATE
 
@@ -86,7 +87,6 @@ struct vm_page;
 
 __options_decl(kma_flags_t, uint32_t, {
 	KMA_NONE        = 0x00000000,
-	KMA_HERE        = 0x00000001,
 	KMA_NOPAGEWAIT  = 0x00000002,
 	KMA_KOBJECT     = 0x00000004,
 	KMA_LOMEM       = 0x00000008,
@@ -104,7 +104,7 @@ __options_decl(kma_flags_t, uint32_t, {
 	KMA_ATOMIC      = 0x00000800,
 	KMA_ZERO        = 0x00001000,
 	KMA_PAGEABLE    = 0x00002000,
-	KMA_KHEAP       = 0x00004000,  /* Pages belonging to zones backing one of kalloc_heap. */
+	KMA_LAST_FREE   = 0x00004000,
 });
 
 extern kern_return_t    kernel_memory_allocate(
@@ -115,21 +115,35 @@ extern kern_return_t    kernel_memory_allocate(
 	kma_flags_t     flags,
 	vm_tag_t        tag);
 
-extern kern_return_t    kernel_memory_allocate_prot(
+static inline kern_return_t
+kmem_alloc(
 	vm_map_t        map,
 	vm_offset_t     *addrp,
 	vm_size_t       size,
-	vm_offset_t     mask,
-	kma_flags_t     flags,
-	vm_tag_t        tag,
-	vm_prot_t               protection,
-	vm_prot_t               max_protection);
+	vm_tag_t        tag)
+{
+	return kernel_memory_allocate(map, addrp, size, 0, KMA_NONE, tag);
+}
 
-extern kern_return_t kmem_alloc(
+static inline kern_return_t
+kmem_alloc_pageable(
 	vm_map_t        map,
 	vm_offset_t     *addrp,
 	vm_size_t       size,
-	vm_tag_t        tag) __XNU_INTERNAL(kmem_alloc);
+	vm_tag_t        tag)
+{
+	return kernel_memory_allocate(map, addrp, size, 0, KMA_PAGEABLE, tag);
+}
+
+static inline kern_return_t
+kmem_alloc_kobject(
+	vm_map_t        map,
+	vm_offset_t     *addrp,
+	vm_size_t       size,
+	vm_tag_t        tag)
+{
+	return kernel_memory_allocate(map, addrp, size, 0, KMA_KOBJECT, tag);
+}
 
 extern kern_return_t kmem_alloc_contig(
 	vm_map_t        map,
@@ -139,25 +153,6 @@ extern kern_return_t kmem_alloc_contig(
 	ppnum_t         max_pnum,
 	ppnum_t         pnum_mask,
 	kma_flags_t     flags,
-	vm_tag_t        tag);
-
-extern kern_return_t    kmem_alloc_flags(
-	vm_map_t        map,
-	vm_offset_t     *addrp,
-	vm_size_t       size,
-	vm_tag_t        tag,
-	kma_flags_t     flags);
-
-extern kern_return_t    kmem_alloc_pageable(
-	vm_map_t        map,
-	vm_offset_t     *addrp,
-	vm_size_t       size,
-	vm_tag_t        tag) __XNU_INTERNAL(kmem_alloc_pageable);
-
-extern kern_return_t    kmem_alloc_aligned(
-	vm_map_t        map,
-	vm_offset_t     *addrp,
-	vm_size_t       size,
 	vm_tag_t        tag);
 
 extern kern_return_t    kmem_realloc(
@@ -177,17 +172,11 @@ extern kern_return_t    kmem_suballoc(
 	vm_map_t        parent,
 	vm_offset_t     *addr,
 	vm_size_t       size,
-	boolean_t       pageable,
+	vm_map_create_options_t vmc_options,
 	int             flags,
 	vm_map_kernel_flags_t vmk_flags,
 	vm_tag_t        tag,
 	vm_map_t        *new_map);
-
-extern kern_return_t    kmem_alloc_kobject(
-	vm_map_t        map,
-	vm_offset_t     *addrp,
-	vm_size_t       size,
-	vm_tag_t        tag) __XNU_INTERNAL(kmem_alloc_kobject);
 
 extern void kernel_memory_populate_with_pages(
 	vm_map_t        map,
@@ -195,7 +184,8 @@ extern void kernel_memory_populate_with_pages(
 	vm_size_t       size,
 	struct vm_page *page_list,
 	kma_flags_t     flags,
-	vm_tag_t        tag);
+	vm_tag_t        tag,
+	vm_prot_t       prot);
 
 extern kern_return_t kernel_memory_populate(
 	vm_map_t        map,
@@ -368,14 +358,6 @@ extern kern_return_t    mach_vm_allocate_kernel(
 	mach_vm_size_t          size,
 	int                     flags,
 	vm_tag_t                tag);
-
-extern kern_return_t    vm_allocate_kernel(
-	vm_map_t                map,
-	vm_offset_t             *addr,
-	vm_size_t               size,
-	int                     flags,
-	vm_tag_t                tag);
-
 
 extern kern_return_t mach_vm_map_kernel(
 	vm_map_t                target_map,

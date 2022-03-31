@@ -61,12 +61,16 @@ _Static_assert(sizeof(block_hint_t) <= sizeof(short),
 struct turnstile;
 struct waitq;
 typedef struct stackshot_thread_waitinfo thread_waitinfo_t;
+struct ipc_service_port_label;
+struct portlabel_info;
 
 /* Used for stackshot_thread_waitinfo_unsafe */
 extern void kdp_lck_mtx_find_owner(struct waitq * waitq, event64_t event, thread_waitinfo_t *waitinfo);
 extern void kdp_sema_find_owner(struct waitq * waitq, event64_t event, thread_waitinfo_t *waitinfo);
-extern void kdp_mqueue_send_find_owner(struct waitq * waitq, event64_t event, thread_waitinfo_t *waitinfo);
-extern void kdp_mqueue_recv_find_owner(struct waitq * waitq, event64_t event, thread_waitinfo_t *waitinfo);
+extern void kdp_mqueue_send_find_owner(struct waitq * waitq, event64_t event, thread_waitinfo_v2_t *waitinfo,
+    struct ipc_service_port_label **isplp);
+extern void kdp_mqueue_recv_find_owner(struct waitq * waitq, event64_t event, thread_waitinfo_v2_t *waitinfo,
+    struct ipc_service_port_label **isplp);
 extern void kdp_ulock_find_owner(struct waitq * waitq, event64_t event, thread_waitinfo_t *waitinfo);
 extern void kdp_rwlck_find_owner(struct waitq * waitq, event64_t event, thread_waitinfo_t *waitinfo);
 extern void kdp_pthread_find_owner(thread_t thread, thread_waitinfo_t *waitinfo);
@@ -74,7 +78,10 @@ extern void *kdp_pthread_get_thread_kwq(thread_t thread);
 extern void kdp_workloop_sync_wait_find_owner(thread_t thread, event64_t event, thread_waitinfo_t *waitinfo);
 extern void kdp_wait4_find_process(thread_t thread, event64_t event, thread_waitinfo_t *waitinfo);
 extern void kdp_sleep_with_inheritor_find_owner(struct waitq * waitq, __unused event64_t event, thread_waitinfo_t * waitinfo);
-extern void kdp_turnstile_fill_tsinfo(struct turnstile *ts, thread_turnstileinfo_t *tsinfo);
+extern void kdp_turnstile_fill_tsinfo(struct turnstile *ts, thread_turnstileinfo_v2_t *tsinfo, struct ipc_service_port_label **isplp);
+extern void kdp_ipc_fill_splabel(struct ipc_service_port_label *ispl, struct portlabel_info *spl, const char **namep);
+extern void kdp_ipc_splabel_size(size_t *ispl_size, size_t *maxnamelen);
+extern const bool kdp_ipc_have_splabel;
 void kdp_eventlink_find_owner(struct waitq *waitq, event64_t event, thread_waitinfo_t *waitinfo);
 
 #endif /* XNU_KERNEL_PRIVATE */

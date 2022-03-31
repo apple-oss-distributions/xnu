@@ -94,8 +94,8 @@ extern void tcp_log_rtt_info(const char *func_name, int line_no, struct tcpcb *t
 extern void tcp_log_rt_rtt(const char *func_name, int line_no, struct tcpcb *tp, struct rtentry *rt);
 extern void tcp_log_rtt_change(const char *func_name, int line_no, struct tcpcb *tp, int old_srtt, int old_rttvar);
 extern void tcp_log_keepalive(const char *func_name, int line_no, struct tcpcb *tp, int32_t idle_time);
-extern void tcp_log_message(const char *func_name, int line_no, struct tcpcb *tp, const char *format, ...);
-extern void tcp_log_fsw_flow(const char *func_name, int line_no, struct tcpcb *tp, const char *format, ...);
+extern void tcp_log_message(const char *func_name, int line_no, struct tcpcb *tp, const char *format, ...) __printflike(4, 5);
+extern void tcp_log_fsw_flow(const char *func_name, int line_no, struct tcpcb *tp, const char *format, ...) __printflike(4, 5);
 
 static inline bool
 tcp_is_log_enabled(struct tcpcb *tp, uint32_t req_flags)

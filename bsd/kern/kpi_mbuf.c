@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2004-2019 Apple Inc. All rights reserved.
+ * Copyright (c) 2004-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -57,8 +57,9 @@ u_int32_t mbuf_tx_compl_index = 0;
 
 #if (DEVELOPMENT || DEBUG)
 int mbuf_tx_compl_debug = 0;
-SInt64 mbuf_tx_compl_outstanding __attribute__((aligned(8))) = 0;
-u_int64_t mbuf_tx_compl_aborted __attribute__((aligned(8))) = 0;
+uint64_t mbuf_tx_compl_requested __attribute__((aligned(8))) = 0;
+uint64_t mbuf_tx_compl_callbacks __attribute__((aligned(8))) = 0;
+uint64_t mbuf_tx_compl_aborted __attribute__((aligned(8))) = 0;
 
 SYSCTL_DECL(_kern_ipc);
 SYSCTL_NODE(_kern_ipc, OID_AUTO, mbtxcf,
@@ -67,8 +68,10 @@ SYSCTL_INT(_kern_ipc_mbtxcf, OID_AUTO, debug,
     CTLFLAG_RW | CTLFLAG_LOCKED, &mbuf_tx_compl_debug, 0, "");
 SYSCTL_INT(_kern_ipc_mbtxcf, OID_AUTO, index,
     CTLFLAG_RD | CTLFLAG_LOCKED, &mbuf_tx_compl_index, 0, "");
-SYSCTL_QUAD(_kern_ipc_mbtxcf, OID_AUTO, oustanding,
-    CTLFLAG_RD | CTLFLAG_LOCKED, &mbuf_tx_compl_outstanding, "");
+SYSCTL_QUAD(_kern_ipc_mbtxcf, OID_AUTO, requested,
+    CTLFLAG_RD | CTLFLAG_LOCKED, &mbuf_tx_compl_requested, "");
+SYSCTL_QUAD(_kern_ipc_mbtxcf, OID_AUTO, callbacks,
+    CTLFLAG_RD | CTLFLAG_LOCKED, &mbuf_tx_compl_callbacks, "");
 SYSCTL_QUAD(_kern_ipc_mbtxcf, OID_AUTO, aborted,
     CTLFLAG_RD | CTLFLAG_LOCKED, &mbuf_tx_compl_aborted, "");
 #endif /* (DEBUG || DEVELOPMENT) */
@@ -1897,6 +1900,8 @@ mbuf_set_timestamp_requested(mbuf_t m, uintptr_t *pktid,
 		return ENOENT;
 	}
 
+	m_add_crumb(m, PKT_CRUMB_TS_COMP_REQ);
+
 #if (DEBUG || DEVELOPMENT)
 	VERIFY(i < sizeof(m->m_pkthdr.pkt_compl_callbacks));
 #endif /* (DEBUG || DEVELOPMENT) */
@@ -1908,9 +1913,7 @@ mbuf_set_timestamp_requested(mbuf_t m, uintptr_t *pktid,
 		    atomic_add_32_ov(&mbuf_tx_compl_index, 1);
 
 #if (DEBUG || DEVELOPMENT)
-		if (mbuf_tx_compl_debug != 0) {
-			OSIncrementAtomic64(&mbuf_tx_compl_outstanding);
-		}
+		atomic_add_64(&mbuf_tx_compl_requested, 1);
 #endif /* (DEBUG || DEVELOPMENT) */
 	}
 	m->m_pkthdr.pkt_compl_callbacks |= (1 << i);
@@ -1931,6 +1934,8 @@ m_do_tx_compl_callback(struct mbuf *m, struct ifnet *ifp)
 	if ((m->m_pkthdr.pkt_flags & PKTF_TX_COMPL_TS_REQ) == 0) {
 		return;
 	}
+
+	m_add_crumb(m, PKT_CRUMB_TS_COMP_CB);
 
 #if (DEBUG || DEVELOPMENT)
 	if (mbuf_tx_compl_debug != 0 && ifp != NULL &&
@@ -1967,11 +1972,9 @@ m_do_tx_compl_callback(struct mbuf *m, struct ifnet *ifp)
 	m->m_pkthdr.pkt_compl_callbacks = 0;
 
 #if (DEBUG || DEVELOPMENT)
-	if (mbuf_tx_compl_debug != 0) {
-		OSDecrementAtomic64(&mbuf_tx_compl_outstanding);
-		if (ifp == NULL) {
-			atomic_add_64(&mbuf_tx_compl_aborted, 1);
-		}
+	atomic_add_64(&mbuf_tx_compl_callbacks, 1);
+	if (ifp == NULL) {
+		atomic_add_64(&mbuf_tx_compl_aborted, 1);
 	}
 #endif /* (DEBUG || DEVELOPMENT) */
 }

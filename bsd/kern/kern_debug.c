@@ -165,7 +165,7 @@ debug_syscall_reject(struct proc *p __unused, struct debug_syscall_reject_args *
 		return 0;
 	}
 
-	uthread_t ut = get_bsdthread_info(current_thread());
+	uthread_t ut = current_uthread();
 
 	bitmap_t mask[SR_MASK_SIZE / sizeof(bitmap_t)];
 	// syscall rejection masks are always reset to "deny all"

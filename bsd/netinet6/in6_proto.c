@@ -172,7 +172,7 @@ struct ip6protosw inet6sw[] = {
     PR_EVCONNINFO | PR_PRECONN_WRITE,
 		.pr_input =             udp6_input,
 		.pr_ctlinput =          udp6_ctlinput,
-		.pr_ctloutput =         ip6_ctloutput,
+		.pr_ctloutput =         udp_ctloutput,
 #if !INET       /* don't call initialization twice */
 		.pr_init =              udp_init,
 #endif /* !INET */

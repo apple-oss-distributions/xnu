@@ -527,8 +527,8 @@ ml_phys_write_data(uint64_t paddr, unsigned long long data, int size)
 
 			if (report_phy_write_osbt) {
 				OSReportWithBacktrace("ml_phys_write_data (%p, 0x%llx) "
-				    "took %lluus",
-				    paddr, data, (eabs - sabs) / NSEC_PER_USEC);
+				    "took %lluus", (void *)paddr, data,
+				    (eabs - sabs) / NSEC_PER_USEC);
 			}
 #if CONFIG_DTRACE
 			DTRACE_PHYSLAT4(physwrite, uint64_t, (eabs - sabs),
@@ -730,7 +730,7 @@ ml_port_io_write(uint16_t ioport, uint32_t val, int size)
 			}
 
 			if (report_phy_write_osbt) {
-				OSReportWithBacktrace("ml_port_io_write(0x%x, %d, 0x%llx) "
+				OSReportWithBacktrace("ml_port_io_write(0x%x, %d, 0x%x) "
 				    "took %lluus",
 				    ioport, size, val, (eabs - sabs) / NSEC_PER_USEC);
 			}

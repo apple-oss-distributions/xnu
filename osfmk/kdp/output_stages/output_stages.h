@@ -97,6 +97,13 @@ kern_return_t net_stage_initialize(struct kdp_output_stage *stage);
  */
 kern_return_t progress_notify_stage_initialize(struct kdp_output_stage *stage);
 
+#if defined(__arm64__)
+/*
+ * A non-terminal output stage that handles memory accesses to special device memory if the memory
+ * being saved is outside of DRAM.
+ */
+kern_return_t memory_backing_aware_buffer_stage_initialize(struct kdp_output_stage *stage);
+#endif /* defined(__arm64__) */
 
 #if defined(__arm__) || defined(__arm64__)
 /*

@@ -201,15 +201,17 @@ __XNU_PRIVATE_EXTERN char corefilename[MAXPATHLEN + 1] = {"/private/var/cores/%N
 
 static LCK_MTX_DECLARE_ATTR(proc_klist_mlock, &proc_mlock_grp, &proc_lck_attr);
 
-ZONE_DECLARE(pgrp_zone, "pgrp",
+ZONE_DEFINE(pgrp_zone, "pgrp",
     sizeof(struct pgrp), ZC_ZFREE_CLEARMEM);
-ZONE_DECLARE(session_zone, "session",
+ZONE_DEFINE(session_zone, "session",
     sizeof(struct session), ZC_ZFREE_CLEARMEM);
+ZONE_DEFINE_ID(ZONE_ID_PROC_RO, "proc_ro", struct proc_ro,
+    ZC_READONLY | ZC_ZFREE_CLEARMEM);
 
 typedef uint64_t unaligned_u64 __attribute__((aligned(1)));
 
 static void orphanpg(struct pgrp * pg);
-void proc_name_kdp(task_t t, char * buf, int size);
+void proc_name_kdp(proc_t t, char * buf, int size);
 boolean_t proc_binary_uuid_kdp(task_t task, uuid_t uuid);
 boolean_t current_thread_aborted(void);
 int proc_threadname_kdp(void * uth, char * buf, size_t size);
@@ -425,11 +427,8 @@ proc_find_ident(struct proc_ident const *ident)
 }
 
 void
-uthread_reset_proc_refcount(void *uthread)
+uthread_reset_proc_refcount(uthread_t uth)
 {
-	uthread_t uth;
-
-	uth = (uthread_t) uthread;
 	uth->uu_proc_refcount = 0;
 
 #if PROC_REF_DEBUG
@@ -437,16 +436,53 @@ uthread_reset_proc_refcount(void *uthread)
 		return;
 	}
 
-	uth->uu_pindex = 0;
+	struct uthread_proc_ref_info *upri = uth->uu_proc_ref_info;
+	uint32_t n = uth->uu_proc_ref_info->upri_pindex;
+
+	uth->uu_proc_ref_info->upri_pindex = 0;
+
+	if (n) {
+		for (unsigned i = 0; i < n; i++) {
+			btref_put(upri->upri_proc_stacks[i]);
+		}
+		bzero(upri->upri_proc_stacks, sizeof(btref_t) * n);
+		bzero(upri->upri_proc_ps, sizeof(proc_t) * n);
+	}
 #endif
 }
 
 #if PROC_REF_DEBUG
 void
-uthread_assert_zero_proc_refcount(void *uthread)
+uthread_init_proc_refcount(uthread_t uth)
 {
-	uthread_t uth = uthread;
+	if (proc_ref_tracking_disabled) {
+		return;
+	}
 
+	uth->uu_proc_ref_info = kalloc_type(struct uthread_proc_ref_info,
+	    Z_ZERO | Z_WAITOK | Z_NOFAIL);
+}
+
+void
+uthread_destroy_proc_refcount(uthread_t uth)
+{
+	if (proc_ref_tracking_disabled) {
+		return;
+	}
+
+	struct uthread_proc_ref_info *upri = uth->uu_proc_ref_info;
+	uint32_t n = uth->uu_proc_ref_info->upri_pindex;
+
+	for (unsigned i = 0; i < n; i++) {
+		btref_put(upri->upri_proc_stacks[i]);
+	}
+
+	kfree_type(struct uthread_proc_ref_info, uth->uu_proc_ref_info);
+}
+
+void
+uthread_assert_zero_proc_refcount(uthread_t uth)
+{
 	if (proc_ref_tracking_disabled) {
 		return;
 	}
@@ -473,6 +509,9 @@ uthread_get_syscall_rejection_mask(void *uthread)
 }
 #endif /* CONFIG_DEBUG_SYSCALL_REJECTION */
 
+#if PROC_REF_DEBUG
+__attribute__((noinline))
+#endif /* PROC_REF_DEBUG */
 static void
 record_procref(proc_t p __unused, int count)
 {
@@ -485,15 +524,15 @@ record_procref(proc_t p __unused, int count)
 	if (proc_ref_tracking_disabled) {
 		return;
 	}
+	struct uthread_proc_ref_info *upri = uth->uu_proc_ref_info;
 
-	if (uth->uu_pindex < NUM_PROC_REFS_TO_TRACK) {
-		backtrace((uintptr_t *)&uth->uu_proc_pcs[uth->uu_pindex],
-		    PROC_REF_STACK_DEPTH, NULL, NULL);
-
-		uth->uu_proc_ps[uth->uu_pindex] = p;
-		uth->uu_pindex++;
+	if (upri->upri_pindex < NUM_PROC_REFS_TO_TRACK) {
+		upri->upri_proc_stacks[upri->upri_pindex] =
+		    btref_get(__builtin_frame_address(0), BTREF_GET_NOWAIT);
+		upri->upri_proc_ps[upri->upri_pindex] = p;
+		upri->upri_pindex++;
 	}
-#endif
+#endif /* PROC_REF_DEBUG */
 }
 
 /*!
@@ -691,9 +730,16 @@ proc_ref(proc_t p, int locked)
 }
 
 static void
-proc_free(void *p)
+proc_free(void *_p)
 {
-	zfree(proc_zone, p);
+	proc_t p = _p;
+	proc_t pn = hazard_ptr_serialized_load(&p->p_hash);
+
+	if (pn) {
+		/* release the reference taken in phash_remove_locked() */
+		proc_wait_release(pn);
+	}
+	zfree_id(ZONE_ID_PROC, p);
 }
 
 void
@@ -815,7 +861,7 @@ proc_refdrain_will_exec(proc_t p)
 void
 proc_refwake_did_exec(proc_t p)
 {
-	os_atomic_andnot(&p->p_refcount, P_REF_IN_EXEC, relaxed);
+	os_atomic_andnot(&p->p_refcount, P_REF_IN_EXEC, release);
 	wakeup(&p->p_waitref);
 }
 
@@ -948,6 +994,10 @@ proc_require(proc_t proc, proc_require_flags_t flags)
 pid_t
 proc_getpid(proc_t p)
 {
+	if (p == &proc0) {
+		return 0;
+	}
+
 	return p->p_pid;
 }
 
@@ -1045,7 +1095,7 @@ uint32_t
 proc_platform(const proc_t p)
 {
 	if (p != NULL) {
-		return p->p_platform;
+		return proc_get_ro(p)->p_platform_data.p_platform;
 	}
 	return (uint32_t)-1;
 }
@@ -1054,7 +1104,7 @@ uint32_t
 proc_min_sdk(proc_t p)
 {
 	if (p != NULL) {
-		return p->p_min_sdk;
+		return proc_get_ro(p)->p_platform_data.p_min_sdk;
 	}
 	return (uint32_t)-1;
 }
@@ -1063,7 +1113,7 @@ uint32_t
 proc_sdk(proc_t p)
 {
 	if (p != NULL) {
-		return p->p_sdk;
+		return proc_get_ro(p)->p_platform_data.p_sdk;
 	}
 	return (uint32_t)-1;
 }
@@ -1071,48 +1121,35 @@ proc_sdk(proc_t p)
 void
 proc_setplatformdata(proc_t p, uint32_t platform, uint32_t min_sdk, uint32_t sdk)
 {
-	p->p_platform = platform;
-	p->p_min_sdk = min_sdk;
-	p->p_sdk = sdk;
+	proc_ro_t ro;
+	struct proc_platform_ro_data platform_data;
+
+	ro = proc_get_ro(p);
+	platform_data = ro->p_platform_data;
+	platform_data.p_platform = platform;
+	platform_data.p_min_sdk = min_sdk;
+	platform_data.p_sdk = sdk;
+
+	zalloc_ro_update_field(ZONE_ID_PROC_RO, ro, p_platform_data, &platform_data);
 }
 
 #if CONFIG_DTRACE
-static proc_t
-dtrace_current_proc_vforking(void)
-{
-#if CONFIG_VFORK
-	thread_t th = current_thread();
-	struct uthread *ut = get_bsdthread_info(th);
-
-	if (ut &&
-	    ((ut->uu_flag & (UT_VFORK | UT_VFORKING)) == (UT_VFORK | UT_VFORKING))) {
-		/*
-		 * Handle the narrow window where we're in the vfork syscall,
-		 * but we're not quite ready to claim (in particular, to DTrace)
-		 * that we're running as the child.
-		 */
-		return get_bsdtask_info(get_threadtask(th));
-	}
-#endif /* CONFIG_VFORK */
-	return current_proc();
-}
-
 int
 dtrace_proc_selfpid(void)
 {
-	return proc_getpid(dtrace_current_proc_vforking());
+	return proc_selfpid();
 }
 
 int
 dtrace_proc_selfppid(void)
 {
-	return dtrace_current_proc_vforking()->p_ppid;
+	return proc_selfppid();
 }
 
 uid_t
 dtrace_proc_selfruid(void)
 {
-	return dtrace_current_proc_vforking()->p_ruid;
+	return current_proc()->p_ruid;
 }
 #endif /* CONFIG_DTRACE */
 
@@ -1187,9 +1224,8 @@ proc_name(int pid, char * buf, int size)
 }
 
 void
-proc_name_kdp(task_t t, char * buf, int size)
+proc_name_kdp(proc_t p, char * buf, int size)
 {
-	proc_t p = get_bsdtask_info(t);
 	if (p == PROC_NULL) {
 		return;
 	}
@@ -1357,16 +1393,9 @@ proc_in_teardown(proc_t p)
 }
 
 int
-proc_lvfork(proc_t p)
+proc_lvfork(proc_t p __unused)
 {
-	int retval = 0;
-
-	if (p) {
-#if CONFIG_VFORK
-		retval = p->p_lflag & P_LVFORK;
-#endif /* CONFIG_VFORK */
-	}
-	return retval? 1: 0;
+	return 0;
 }
 
 int
@@ -1390,8 +1419,8 @@ proc_isabortedsignal(proc_t p)
 {
 	if ((p != kernproc) && current_thread_aborted() &&
 	    (!(p->p_acflag & AXSIG) || (p->exit_thread != current_thread()) ||
-	    (p->p_sigacts == NULL) || (p->p_sigacts->ps_sig < 1) ||
-	    (p->p_sigacts->ps_sig >= NSIG) || !hassigprop(p->p_sigacts->ps_sig, SA_CORE))) {
+	    (p->p_sigacts.ps_sig < 1) || (p->p_sigacts.ps_sig >= NSIG) ||
+	    !hassigprop(p->p_sigacts.ps_sig, SA_CORE))) {
 		return 1;
 	}
 
@@ -1449,7 +1478,7 @@ proc_thread(proc_t proc)
 	uthread_t uth = TAILQ_FIRST(&proc->p_uthlist);
 
 	if (uth != NULL) {
-		return uth->uu_context.vc_thread;
+		return get_machthread(uth);
 	}
 
 	return NULL;
@@ -1458,15 +1487,13 @@ proc_thread(proc_t proc)
 kauth_cred_t
 proc_ucred(proc_t p)
 {
-	return p->p_ucred;
+	return kauth_cred_require(proc_get_ro(p)->p_ucred);
 }
 
 struct uthread *
-current_uthread()
+current_uthread(void)
 {
-	thread_t th = current_thread();
-
-	return (struct uthread *)get_bsdthread_info(th);
+	return get_bsdthread_info(current_thread());
 }
 
 
@@ -1495,13 +1522,14 @@ proc_isinitproc(proc_t p)
 int
 proc_pidversion(proc_t p)
 {
-	return p->p_idversion;
+	return proc_get_ro(p)->p_idversion;
 }
 
 void
 proc_setpidversion(proc_t p, int idversion)
 {
-	p->p_idversion = idversion;
+	zalloc_ro_update_field(ZONE_ID_PROC_RO, proc_get_ro(p), p_idversion,
+	    &idversion);
 }
 
 uint32_t
@@ -1525,7 +1553,11 @@ proc_getgid(proc_t p)
 uint64_t
 proc_uniqueid(proc_t p)
 {
-	return p->p_uniqueid;
+	if (p == &proc0) {
+		return 0;
+	}
+
+	return proc_get_ro(p)->p_uniqueid;
 }
 
 uint64_t proc_uniqueid_task(void *p_arg, void *t);
@@ -1542,7 +1574,7 @@ uint64_t
 proc_uniqueid_task(void *p_arg, void *t)
 {
 	proc_t p = p_arg;
-	uint64_t uniqueid = p->p_uniqueid;
+	uint64_t uniqueid = proc_uniqueid(p);
 	return uniqueid ^ (__probable(t == (void *)p->task) ? 0 : (1ull << 63));
 }
 
@@ -1584,7 +1616,7 @@ proc_getcdhash(proc_t p, unsigned char *cdhash)
 uint64_t
 proc_getcsflags(proc_t p)
 {
-	return p->p_csflags;
+	return proc_get_ro(p)->p_csflags;
 }
 
 void
@@ -1593,7 +1625,8 @@ proc_csflags_update(proc_t p, uint64_t flags)
 	uint32_t csflags = (uint32_t)flags;
 
 	if (p != kernproc) {
-		p->p_csflags = csflags;
+		zalloc_ro_update_field(ZONE_ID_PROC_RO, proc_get_ro(p),
+		    p_csflags, &csflags);
 	}
 }
 
@@ -1612,13 +1645,14 @@ proc_csflags_clear(proc_t p, uint64_t flags)
 uint8_t *
 proc_syscall_filter_mask(proc_t p)
 {
-	return p->syscall_filter_mask;
+	return proc_get_ro(p)->syscall_filter_mask;
 }
 
 void
 proc_syscall_filter_mask_set(proc_t p, uint8_t *mask)
 {
-	p->syscall_filter_mask = mask;
+	zalloc_ro_update_field(ZONE_ID_PROC_RO, proc_get_ro(p),
+	    syscall_filter_mask, &mask);
 }
 
 int
@@ -1630,7 +1664,7 @@ proc_exitstatus(proc_t p)
 void
 proc_setexecutableuuid(proc_t p, const unsigned char *uuid)
 {
-	memcpy(p->p_uuid, uuid, sizeof(uuid_t));
+	memcpy(p->p_uuid, uuid, sizeof(p->p_uuid));
 }
 
 const unsigned char *
@@ -1650,7 +1684,50 @@ proc_getexecutableuuid(proc_t p, unsigned char *uuidbuf, unsigned long size)
 void
 proc_set_ucred(proc_t p, kauth_cred_t cred)
 {
-	p->p_ucred = cred;
+	kauth_cred_t my_cred = proc_ucred(p);
+
+	/* update the field first so the proc never points to a freed cred. */
+	zalloc_ro_update_field(ZONE_ID_PROC_RO, proc_get_ro(p), p_ucred, &cred);
+
+	kauth_cred_set(&my_cred, cred);
+}
+
+bool
+proc_update_label(proc_t p, bool setugid,
+    kauth_cred_t (^update_cred)(kauth_cred_t))
+{
+	kauth_cred_t cur_cred;
+	kauth_cred_t new_cred;
+	bool changed = false;
+
+	cur_cred = kauth_cred_proc_ref(p);
+retry:
+	new_cred = update_cred(cur_cred);
+	if (new_cred != cur_cred) {
+		proc_ucred_lock(p);
+
+		/* Compare again under the lock. */
+		if (__improbable(proc_ucred(p) != cur_cred)) {
+			proc_ucred_unlock(p);
+			kauth_cred_unref(&new_cred);
+			cur_cred = kauth_cred_proc_ref(p);
+			goto retry;
+		}
+
+		proc_set_ucred(p, new_cred);
+		proc_update_creds_onproc(p);
+		proc_ucred_unlock(p);
+
+		if (setugid) {
+			OSBitOrAtomic(P_SUGID, &p->p_flag);
+			set_security_token(p);
+		}
+
+		changed = true;
+	}
+
+	kauth_cred_unref(&new_cred);
+	return changed;
 }
 
 /* Return vnode for executable with an iocount. Must be released with vnode_put() */
@@ -1802,7 +1879,7 @@ phash_find_locked(pid_t pid)
 
 	for (p = hazard_ptr_serialized_load(PIDHASH(pid)); p;
 	    p = hazard_ptr_serialized_load(&p->p_hash)) {
-		if (proc_getpid(p) == pid) {
+		if (p->p_proc_ro && p->p_pid == pid) {
 			break;
 		}
 	}
@@ -1834,8 +1911,15 @@ phash_remove_locked(pid_t pid, struct proc *p)
 		prev = &pn->p_hash;
 	}
 
-	hazard_ptr_serialized_store_relaxed(prev,
-	    hazard_ptr_serialized_load(&p->p_hash));
+	/*
+	 * Now that the proc is no longer in the hash,
+	 * it needs to keep its p_hash value alive.
+	 */
+	pn = hazard_ptr_serialized_load(&p->p_hash);
+	if (pn) {
+		os_ref_retain_raw(&pn->p_waitref, &p_refgrp);
+	}
+	hazard_ptr_serialized_store_relaxed(prev, pn);
 }
 
 proc_t
@@ -1873,19 +1957,22 @@ proc_find(int pid)
 	 */
 	for (;;) {
 		p = hazard_guard_acquire(&g[0], hp);
-		if (p == PROC_NULL || proc_getpid(p) == pid) {
+		if (p == PROC_NULL ||
+		    (p->p_pid == pid && p->p_proc_ro != NULL)) {
 			break;
 		}
 		hp = &p->p_hash;
 
 		p = hazard_guard_acquire(&g[1], hp);
-		if (p == PROC_NULL || proc_getpid(p) == pid) {
+		if (p == PROC_NULL ||
+		    (p->p_pid == pid && p->p_proc_ro != NULL)) {
 			break;
 		}
 		hp = &p->p_hash;
 
 		p = hazard_guard_acquire(&g[2], hp);
-		if (p == PROC_NULL || proc_getpid(p) == pid) {
+		if (p == PROC_NULL ||
+		    (p->p_pid == pid && p->p_proc_ro != NULL)) {
 			break;
 		}
 		hp = &p->p_hash;
@@ -1900,9 +1987,19 @@ proc_find(int pid)
 	if (__improbable(!bits)) {
 		return PROC_NULL;
 	}
+
 	if (__improbable(proc_ref_needs_wait_for_exec(bits))) {
-		return proc_ref_wait_for_exec(p, bits, false);
+		p = proc_ref_wait_for_exec(p, bits, false);
 	}
+
+	if (p != PROC_NULL) {
+		/*
+		 * pair with proc_refwake_did_exec() to be able to observe
+		 * a fully formed proc_ro structure.
+		 */
+		os_atomic_thread_fence(acquire);
+	}
+
 	return p;
 }
 
@@ -1925,12 +2022,6 @@ proc_findthread(thread_t thread)
 	proc_t p = PROC_NULL;
 
 	proc_list_lock();
-#if CONFIG_VFORK
-	struct uthread *uth = get_bsdthread_info(thread);
-	if (uth && (uth->uu_flag & UT_VFORK)) {
-		p = uth->uu_proc;
-	} else
-#endif
 	{
 		p = (proc_t)(get_bsdthreadtask_info(thread));
 	}
@@ -1960,6 +2051,27 @@ pzfind(pid_t pid)
 	proc_list_unlock();
 
 	return p;
+}
+
+/*
+ * Acquire a pgrp ref, if and only if the pgrp is non empty.
+ */
+static inline bool
+pg_ref_try(struct pgrp *pgrp)
+{
+	return os_ref_retain_try_mask(&pgrp->pg_refcount, PGRP_REF_BITS,
+	           PGRP_REF_EMPTY, &p_refgrp);
+}
+
+/*
+ * Unconditionally acquire a pgrp ref,
+ * regardless of whether the pgrp is empty or not.
+ */
+static inline struct pgrp *
+pg_ref(struct pgrp *pgrp)
+{
+	os_ref_retain_mask(&pgrp->pg_refcount, PGRP_REF_BITS, &p_refgrp);
+	return pgrp;
 }
 
 /*
@@ -2006,29 +2118,16 @@ pghash_remove_locked(pid_t pgid, struct pgrp *pgrp)
 		prev = &pgn->pg_hash;
 	}
 
-	hazard_ptr_serialized_store_relaxed(prev,
-	    hazard_ptr_serialized_load(&pgrp->pg_hash));
-}
-
-/*
- * Acquire a pgrp ref, if and only if the pgrp is non empty.
- */
-static inline bool
-pg_ref_try(struct pgrp *pgrp)
-{
-	return os_ref_retain_try_mask(&pgrp->pg_refcount, PGRP_REF_BITS,
-	           PGRP_REF_EMPTY, &p_refgrp);
-}
-
-/*
- * Unconditionally acquire a pgrp ref,
- * regardless of whether the pgrp is empty or not.
- */
-static inline struct pgrp *
-pg_ref(struct pgrp *pgrp)
-{
-	os_ref_retain_mask(&pgrp->pg_refcount, PGRP_REF_BITS, &p_refgrp);
-	return pgrp;
+	/*
+	 * Now that the process group is out of the hash,
+	 * we need to protect its "next" for readers until
+	 * its death.
+	 */
+	pgn = hazard_ptr_serialized_load(&pgrp->pg_hash);
+	if (pgn) {
+		os_ref_retain_raw(&pgn->pg_hashref, &p_refgrp);
+	}
+	hazard_ptr_serialized_store_relaxed(prev, pgn);
 }
 
 struct pgrp *
@@ -2361,9 +2460,16 @@ pgrp_enter_locked(struct proc *parent, struct proc *child)
  * delete a process group
  */
 static void
-pgrp_free(void *pgrp)
+pgrp_free(void *_pg)
 {
-	zfree(pgrp_zone, pgrp);
+	struct pgrp *pg = _pg;
+	struct pgrp *pgn = hazard_ptr_serialized_load(&pg->pg_hash);
+
+	if (pgn && os_ref_release_raw(&pgn->pg_hashref, &p_refgrp) == 0) {
+		/* release the reference taken in pghash_remove_locked() */
+		hazard_retire(pgn, sizeof(*pgn), pgrp_free);
+	}
+	zfree(pgrp_zone, pg);
 }
 
 __attribute__((noinline))
@@ -2384,7 +2490,9 @@ pgrp_destroy(struct pgrp *pgrp)
 	session_rele(sess);
 
 	lck_mtx_destroy(&pgrp->pg_mlock, &proc_mlock_grp);
-	hazard_retire(pgrp, sizeof(*pgrp), pgrp_free);
+	if (os_ref_release_raw(&pgrp->pg_hashref, &p_refgrp) == 0) {
+		hazard_retire(pgrp, sizeof(*pgrp), pgrp_free);
+	}
 }
 
 
@@ -3023,42 +3131,36 @@ csops_internal(pid_t pid, int ops, user_addr_t uaddr, user_size_t usersize, user
 		void *start;
 		size_t length;
 		struct cs_blob* blob;
-		bool shouldFreeXML = false;
 
 		proc_lock(pt);
-
 		if ((proc_getcsflags(pt) & (CS_VALID | CS_DEBUGGED)) == 0) {
+			proc_unlock(pt);
 			error = EINVAL;
-			goto blob_out;
+			goto out;
 		}
 		blob = csproc_get_blob(pt);
+		proc_unlock(pt);
+
 		if (!blob) {
 			error = EBADEXEC;
-			goto blob_out;
+			goto out;
 		}
 
-		if (amfi && csblob_os_entitlements_get(blob)) {
-			void* osent = csblob_os_entitlements_get(blob);
-			CS_GenericBlob* xmlblob = NULL;
-			if (amfi->OSEntitlements_get_xml(osent, &xmlblob)) {
-				start = (void*)xmlblob;
-				length = (size_t)ntohl(xmlblob->length);
-				shouldFreeXML = true;
-			} else {
-				goto blob_out;
-			}
+		void* osent = csblob_os_entitlements_get(blob);
+		if (!osent) {
+			goto out;
+		}
+		CS_GenericBlob* xmlblob = NULL;
+		if (amfi->OSEntitlements_get_xml(osent, &xmlblob)) {
+			start = (void*)xmlblob;
+			length = (size_t)ntohl(xmlblob->length);
 		} else {
-			error = cs_entitlements_blob_get(pt, &start, &length);
-			if (error) {
-				goto blob_out;
-			}
+			goto out;
 		}
 
 		error = csops_copy_token(start, length, usize, uaddr);
-		if (shouldFreeXML) {
-			kfree(start, length);
-		}
-		goto blob_out;
+		kfree_data(start, length);
+		goto out;
 	}
 	case CS_OPS_DER_ENTITLEMENTS_BLOB: {
 		const void *start;
@@ -3066,15 +3168,17 @@ csops_internal(pid_t pid, int ops, user_addr_t uaddr, user_size_t usersize, user
 		struct cs_blob* blob;
 
 		proc_lock(pt);
-
 		if ((proc_getcsflags(pt) & (CS_VALID | CS_DEBUGGED)) == 0) {
+			proc_unlock(pt);
 			error = EINVAL;
-			goto blob_out;
+			goto out;
 		}
 		blob = csproc_get_blob(pt);
+		proc_unlock(pt);
+
 		if (!blob) {
 			error = EBADEXEC;
-			goto blob_out;
+			goto out;
 		}
 
 		error = csblob_get_der_entitlements(blob, (const CS_GenericBlob **)&start, &length);
@@ -3087,15 +3191,15 @@ csops_internal(pid_t pid, int ops, user_addr_t uaddr, user_size_t usersize, user
 					start = transmuted;
 					length = (size_t)ntohl(transmuted->length);
 				} else {
-					goto blob_out;
+					goto out;
 				}
 			} else {
-				goto blob_out;
+				goto out;
 			}
 		}
 
 		error = csops_copy_token(start, length, usize, uaddr);
-		goto blob_out;
+		goto out;
 	}
 	case CS_OPS_MARKRESTRICT:
 		proc_lock(pt);
@@ -3187,14 +3291,15 @@ csops_internal(pid_t pid, int ops, user_addr_t uaddr, user_size_t usersize, user
 			error = EINVAL;
 			break;
 		}
-
+		proc_unlock(pt);
+		// Don't need to lock here as not accessing CSFLAGS
 		error = cs_blob_get(pt, &start, &length);
 		if (error) {
-			goto blob_out;
+			goto out;
 		}
 
 		error = csops_copy_token(start, length, usize, uaddr);
-		goto blob_out;
+		goto out;
 	}
 	case CS_OPS_IDENTITY:
 	case CS_OPS_TEAMID: {
@@ -3220,11 +3325,12 @@ csops_internal(pid_t pid, int ops, user_addr_t uaddr, user_size_t usersize, user
 			error = EINVAL;
 			break;
 		}
-
 		identity = ops == CS_OPS_TEAMID ? csproc_get_teamid(pt) : cs_identity_get(pt);
+		proc_unlock(pt);
+
 		if (identity == NULL) {
 			error = ENOENT;
-			goto blob_out;
+			goto out;
 		}
 
 		length = strlen(identity) + 1;         /* include NUL */
@@ -3233,7 +3339,7 @@ csops_internal(pid_t pid, int ops, user_addr_t uaddr, user_size_t usersize, user
 
 		error = copyout(fakeheader, uaddr, sizeof(fakeheader));
 		if (error) {
-			goto blob_out;
+			goto out;
 		}
 
 		if (usize < sizeof(fakeheader) + length) {
@@ -3241,7 +3347,7 @@ csops_internal(pid_t pid, int ops, user_addr_t uaddr, user_size_t usersize, user
 		} else if (usize > sizeof(fakeheader)) {
 			error = copyout(identity, uaddr + sizeof(fakeheader), length);
 		}
-		goto blob_out;
+		goto out;
 	}
 
 	case CS_OPS_CLEARINSTALLER:
@@ -3279,10 +3385,6 @@ csops_internal(pid_t pid, int ops, user_addr_t uaddr, user_size_t usersize, user
 		break;
 	}
 out:
-	proc_rele(pt);
-	return error;
-blob_out:
-	proc_unlock(pt);
 	proc_rele(pt);
 	return error;
 }
@@ -3631,6 +3733,7 @@ pgrp_alloc(pid_t pgid, pggrp_ref_bits_t bits)
 	struct pgrp *pgrp = zalloc_flags(pgrp_zone, Z_WAITOK | Z_ZERO | Z_NOFAIL);
 
 	os_ref_init_mask(&pgrp->pg_refcount, PGRP_REF_BITS, &p_refgrp, bits);
+	os_ref_init_raw(&pgrp->pg_hashref, &p_refgrp);
 	LIST_INIT(&pgrp->pg_members);
 	lck_mtx_init(&pgrp->pg_mlock, &proc_mlock_grp, &proc_lck_attr);
 	pgrp->pg_id = pgid;
@@ -3859,22 +3962,26 @@ proc_resetregister(proc_t p)
 }
 
 bool
-proc_get_pthread_jit_allowlist(proc_t p)
+proc_get_pthread_jit_allowlist(proc_t p, bool *late_out)
 {
 	bool ret = false;
 
 	proc_lock(p);
 	ret = (p->p_lflag & P_LPTHREADJITALLOWLIST);
+	*late_out = (p->p_lflag & P_LPTHREADJITFREEZELATE);
 	proc_unlock(p);
 
 	return ret;
 }
 
 void
-proc_set_pthread_jit_allowlist(proc_t p)
+proc_set_pthread_jit_allowlist(proc_t p, bool late)
 {
 	proc_lock(p);
 	p->p_lflag |= P_LPTHREADJITALLOWLIST;
+	if (late) {
+		p->p_lflag |= P_LPTHREADJITFREEZELATE;
+	}
 	proc_unlock(p);
 }
 
@@ -4594,4 +4701,179 @@ proc_filedesc_ast(__unused task_t task)
 		task_filedesc_ast(task, current_size, soft_limit, hard_limit);
 	}
 #endif /* CONFIG_PROC_RESOURCE_LIMITS */
+}
+
+proc_ro_t
+proc_ro_alloc(proc_t p, proc_ro_data_t p_data, task_t t, task_ro_data_t t_data)
+{
+	proc_ro_t pr;
+	struct proc_ro pr_local = {};
+
+	pr = (proc_ro_t)zalloc_ro(ZONE_ID_PROC_RO, Z_WAITOK | Z_NOFAIL | Z_ZERO);
+
+	if (p != PROC_NULL) {
+		pr_local.pr_proc = p;
+		pr_local.proc_data = *p_data;
+	}
+
+	if (t != TASK_NULL) {
+		pr_local.pr_task = t;
+		pr_local.task_data = *t_data;
+	}
+
+	if ((p != PROC_NULL) || (t != TASK_NULL)) {
+		zalloc_ro_update_elem(ZONE_ID_PROC_RO, pr, &pr_local);
+	}
+
+	return pr;
+}
+
+void
+proc_ro_free(proc_ro_t pr)
+{
+	zfree_ro(ZONE_ID_PROC_RO, pr);
+}
+
+static proc_ro_t
+proc_ro_ref_proc(proc_ro_t pr, proc_t p, proc_ro_data_t p_data)
+{
+	struct proc_ro pr_local;
+
+	if (pr->pr_proc != PROC_NULL) {
+		panic("%s: proc_ro already has an owning proc", __func__);
+	}
+
+	pr_local = *pr;
+	pr_local.pr_proc = p;
+	pr_local.proc_data = *p_data;
+
+	/* make sure readers of the proc_ro always see initialized data */
+	os_atomic_thread_fence(release);
+	zalloc_ro_update_elem(ZONE_ID_PROC_RO, pr, &pr_local);
+
+	return pr;
+}
+
+proc_ro_t
+proc_ro_ref_task(proc_ro_t pr, task_t t, task_ro_data_t t_data)
+{
+	struct proc_ro pr_local;
+
+	if (pr->pr_task != TASK_NULL) {
+		panic("%s: proc_ro already has an owning task", __func__);
+	}
+
+	pr_local = *pr;
+	pr_local.pr_task = t;
+	pr_local.task_data = *t_data;
+
+	zalloc_ro_update_elem(ZONE_ID_PROC_RO, pr, &pr_local);
+
+	return pr;
+}
+
+void
+proc_switch_ro(proc_t p, proc_ro_t new_ro)
+{
+	proc_ro_t old_ro;
+
+	proc_list_lock();
+
+	old_ro = p->p_proc_ro;
+
+	p->p_proc_ro = proc_ro_ref_proc(new_ro, p, &old_ro->proc_data);
+	old_ro = proc_ro_release_proc(old_ro);
+
+	if (old_ro != NULL) {
+		proc_ro_free(old_ro);
+	}
+
+	proc_list_unlock();
+}
+
+proc_ro_t
+proc_ro_release_proc(proc_ro_t pr)
+{
+	/*
+	 * No need to take a lock in here: when called in the racy case
+	 * (reap_child_locked vs task_deallocate_internal), the proc list is
+	 * already held.  All other callsites are not racy.
+	 */
+	if (pr->pr_task == TASK_NULL) {
+		/* We're dropping the last ref. */
+		return pr;
+	} else if (pr->pr_proc != PROC_NULL) {
+		/* Task still has a ref, so just clear the proc owner. */
+		zalloc_ro_clear_field(ZONE_ID_PROC_RO, pr, pr_proc);
+	}
+
+	return NULL;
+}
+
+proc_ro_t
+proc_ro_release_task(proc_ro_t pr)
+{
+	/*
+	 * We take the proc list here to avoid a race between a child proc being
+	 * reaped and the associated task being deallocated.
+	 *
+	 * This function is only ever called in the racy case
+	 * (task_deallocate_internal), so we always take the lock.
+	 */
+	proc_list_lock();
+
+	if (pr->pr_proc == PROC_NULL) {
+		/* We're dropping the last ref. */
+		proc_list_unlock();
+		return pr;
+	} else if (pr->pr_task != TASK_NULL) {
+		/* Proc still has a ref, so just clear the task owner. */
+		zalloc_ro_clear_field(ZONE_ID_PROC_RO, pr, pr_task);
+	}
+
+	proc_list_unlock();
+	return NULL;
+}
+
+__abortlike
+static void
+panic_proc_ro_proc_backref_mismatch(proc_t p, proc_ro_t ro)
+{
+	panic("proc_ro->proc backref mismatch: p=%p, ro=%p, "
+	    "proc_ro_proc(ro)=%p", p, ro, proc_ro_proc(ro));
+}
+
+proc_ro_t
+proc_get_ro(proc_t p)
+{
+	proc_ro_t ro = p->p_proc_ro;
+
+	zone_require_ro(ZONE_ID_PROC_RO, sizeof(struct proc_ro), ro);
+	if (__improbable(proc_ro_proc(ro) != p)) {
+		panic_proc_ro_proc_backref_mismatch(p, ro);
+	}
+
+	return ro;
+}
+
+proc_ro_t
+current_proc_ro(void)
+{
+	if (__improbable(current_thread_ro()->tro_proc == NULL)) {
+		return kernproc->p_proc_ro;
+	}
+
+	return current_thread_ro()->tro_proc_ro;
+}
+
+proc_t
+proc_ro_proc(proc_ro_t pr)
+{
+	return pr->pr_proc;
+}
+
+task_t
+proc_ro_task(proc_ro_t pr)
+{
+	return pr->pr_task;
 }

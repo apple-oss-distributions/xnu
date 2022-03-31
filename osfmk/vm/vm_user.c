@@ -148,8 +148,7 @@ mach_vm_purgable_control(
 
 IPC_KOBJECT_DEFINE(IKOT_NAMED_ENTRY,
     .iko_op_stable     = true,
-    .iko_op_no_senders = mach_memory_entry_no_senders,
-    .iko_op_destroy    = mach_destroy_memory_entry);
+    .iko_op_no_senders = mach_memory_entry_no_senders);
 
 /*
  *	mach_vm_allocate allocates "zero fill" memory in the specfied
@@ -159,7 +158,7 @@ kern_return_t
 mach_vm_allocate_external(
 	vm_map_t                map,
 	mach_vm_offset_t        *addr,
-	mach_vm_size_t  size,
+	mach_vm_size_t          size,
 	int                     flags)
 {
 	vm_tag_t tag;
@@ -172,9 +171,9 @@ kern_return_t
 mach_vm_allocate_kernel(
 	vm_map_t                map,
 	mach_vm_offset_t        *addr,
-	mach_vm_size_t  size,
+	mach_vm_size_t          size,
 	int                     flags,
-	vm_tag_t    tag)
+	vm_tag_t                tag)
 {
 	vm_map_offset_t map_addr;
 	vm_map_size_t   map_size;
@@ -235,6 +234,12 @@ mach_vm_allocate_kernel(
 		VM_PROT_ALL,
 		VM_INHERIT_DEFAULT);
 
+#if KASAN
+	if (result == KERN_SUCCESS && map->pmap == kernel_pmap) {
+		kasan_notify_address(map_addr, map_size);
+	}
+#endif
+
 	*addr = map_addr;
 	return result;
 }
@@ -251,24 +256,13 @@ vm_allocate_external(
 	vm_size_t       size,
 	int             flags)
 {
-	vm_tag_t tag;
-
-	VM_GET_FLAGS_ALIAS(flags, tag);
-	return vm_allocate_kernel(map, addr, size, flags, tag);
-}
-
-kern_return_t
-vm_allocate_kernel(
-	vm_map_t        map,
-	vm_offset_t     *addr,
-	vm_size_t       size,
-	int         flags,
-	vm_tag_t    tag)
-{
 	vm_map_offset_t map_addr;
 	vm_map_size_t   map_size;
 	kern_return_t   result;
 	boolean_t       anywhere;
+	vm_tag_t        tag;
+
+	VM_GET_FLAGS_ALIAS(flags, tag);
 
 	/* filter out any kernel-only flags */
 	if (flags & ~VM_FLAGS_USER_ALLOCATE) {
@@ -2626,8 +2620,7 @@ mach_make_memory_entry_internal(
 {
 	vm_named_entry_t        parent_entry;
 	vm_named_entry_t        user_entry;
-	ipc_port_t              user_handle;
-	kern_return_t           kr;
+	kern_return_t           kr = KERN_SUCCESS;
 	vm_object_t             object;
 	vm_map_size_t           map_size;
 	vm_map_offset_t         map_start, map_end;
@@ -2664,6 +2657,10 @@ mach_make_memory_entry_internal(
 		return KERN_INVALID_ARGUMENT;
 	}
 
+	if (target_map == NULL || target_map->pmap == kernel_pmap) {
+		offset = pgz_decode(offset, *size);
+	}
+
 	original_protections = permission & VM_PROT_ALL;
 	protections = original_protections;
 	mask_protections = permission & VM_PROT_IS_MASK;
@@ -2671,7 +2668,6 @@ mach_make_memory_entry_internal(
 	use_data_addr = ((permission & MAP_MEM_USE_DATA_ADDR) != 0);
 	use_4K_compat = ((permission & MAP_MEM_4K_DATA_ADDR) != 0);
 
-	user_handle = IP_NULL;
 	user_entry = NULL;
 
 	map_start = vm_map_trunc_page(offset, VM_MAP_PAGE_MASK(target_map));
@@ -2737,12 +2733,6 @@ mach_make_memory_entry_internal(
 			*size = 0;
 			*object_handle = IPC_PORT_NULL;
 			return KERN_SUCCESS;
-		}
-
-		kr = mach_memory_entry_allocate(&user_entry, &user_handle);
-		if (kr != KERN_SUCCESS) {
-			DEBUG4K_MEMENTRY("map %p offset 0x%llx size 0x%llx prot 0x%x -> entry %p kr 0x%x\n", target_map, offset, *size, permission, user_entry, KERN_FAILURE);
-			return KERN_FAILURE;
 		}
 
 		/*
@@ -2867,16 +2857,13 @@ mach_make_memory_entry_internal(
 
 		/* the object has no pages, so no WIMG bits to update here */
 
-		kr = vm_named_entry_from_vm_object(
+		user_entry = mach_memory_entry_allocate(object_handle);
+		vm_named_entry_associate_vm_object(
 			user_entry,
 			object,
 			0,
 			map_size,
 			(protections & VM_PROT_ALL));
-		if (kr != KERN_SUCCESS) {
-			vm_object_deallocate(object);
-			goto make_mem_done;
-		}
 		user_entry->internal = TRUE;
 		user_entry->is_sub_map = FALSE;
 		user_entry->offset = 0;
@@ -2890,7 +2877,6 @@ mach_make_memory_entry_internal(
 
 		*size = CAST_DOWN(vm_size_t, (user_entry->size -
 		    user_entry->data_offset));
-		*object_handle = user_handle;
 		DEBUG4K_MEMENTRY("map %p offset 0x%llx size 0x%llx prot 0x%x -> entry %p kr 0x%x\n", target_map, offset, *size, permission, user_entry, KERN_SUCCESS);
 		return KERN_SUCCESS;
 	}
@@ -2930,13 +2916,7 @@ mach_make_memory_entry_internal(
 		}
 		assert(copy != VM_MAP_COPY_NULL);
 
-		kr = mach_memory_entry_allocate(&user_entry, &user_handle);
-		if (kr != KERN_SUCCESS) {
-			vm_map_copy_discard(copy);
-			DEBUG4K_MEMENTRY("map %p offset 0x%llx size 0x%llx prot 0x%x -> entry %p kr 0x%x\n", target_map, offset, *size, permission, user_entry, KERN_FAILURE);
-			return KERN_FAILURE;
-		}
-
+		user_entry = mach_memory_entry_allocate(object_handle);
 		user_entry->backing.copy = copy;
 		user_entry->internal = FALSE;
 		user_entry->is_sub_map = FALSE;
@@ -2948,7 +2928,6 @@ mach_make_memory_entry_internal(
 
 		*size = CAST_DOWN(vm_size_t, (user_entry->size -
 		    user_entry->data_offset));
-		*object_handle = user_handle;
 		DEBUG4K_MEMENTRY("map %p offset 0x%llx size 0x%llx prot 0x%x -> entry %p kr 0x%x\n", target_map, offset, *size, permission, user_entry, KERN_SUCCESS);
 		return KERN_SUCCESS;
 	}
@@ -3133,7 +3112,7 @@ mach_make_memory_entry_internal(
 				/* release our new "copy" */
 				vm_map_copy_discard(copy);
 				/* get extra send right on handle */
-				ipc_port_copy_send(parent_handle);
+				parent_handle = ipc_port_copy_send(parent_handle);
 
 				*size = CAST_DOWN(vm_size_t,
 				    (parent_entry->size -
@@ -3156,16 +3135,7 @@ mach_make_memory_entry_internal(
 			vm_object_unlock(object);
 		}
 
-		kr = mach_memory_entry_allocate(&user_entry, &user_handle);
-		if (kr != KERN_SUCCESS) {
-			if (VM_MAP_PAGE_SHIFT(target_map) < PAGE_SHIFT) {
-//				panic("DEBUG4K %s:%d kr 0x%x", __FUNCTION__, __LINE__, kr);
-			}
-			vm_map_copy_discard(copy);
-			DEBUG4K_MEMENTRY("map %p offset 0x%llx size 0x%llx prot 0x%x -> entry %p kr 0x%x\n", target_map, offset, *size, permission, user_entry, KERN_FAILURE);
-			return KERN_FAILURE;
-		}
-
+		user_entry = mach_memory_entry_allocate(object_handle);
 		user_entry->backing.copy = copy;
 		user_entry->is_sub_map = FALSE;
 		user_entry->is_object = FALSE;
@@ -3186,7 +3156,6 @@ mach_make_memory_entry_internal(
 
 		*size = CAST_DOWN(vm_size_t, (user_entry->size -
 		    user_entry->data_offset));
-		*object_handle = user_handle;
 		DEBUG4K_MEMENTRY("map %p offset 0x%llx size 0x%llx prot 0x%x -> entry %p kr 0x%x\n", target_map, offset, *size, permission, user_entry, KERN_SUCCESS);
 		return KERN_SUCCESS;
 	}
@@ -3251,12 +3220,7 @@ mach_make_memory_entry_internal(
 		goto make_mem_done;
 	}
 
-	if (mach_memory_entry_allocate(&user_entry, &user_handle)
-	    != KERN_SUCCESS) {
-		kr = KERN_FAILURE;
-		goto make_mem_done;
-	}
-
+	user_entry = mach_memory_entry_allocate(object_handle);
 	user_entry->size = map_size;
 	user_entry->offset = parent_entry->offset + map_start;
 	user_entry->data_offset = offset_in_page;
@@ -3277,32 +3241,22 @@ mach_make_memory_entry_internal(
 		object = vm_named_entry_to_vm_object(parent_entry);
 		assert(object != VM_OBJECT_NULL);
 		assert(object->copy_strategy != MEMORY_OBJECT_COPY_SYMMETRIC);
-		kr = vm_named_entry_from_vm_object(
+		vm_named_entry_associate_vm_object(
 			user_entry,
 			object,
 			user_entry->offset,
 			user_entry->size,
 			(user_entry->protection & VM_PROT_ALL));
-		if (kr != KERN_SUCCESS) {
-			goto make_mem_done;
-		}
 		assert(user_entry->is_object);
 		/* we now point to this object, hold on */
 		vm_object_lock(object);
 		vm_object_reference_locked(object);
 #if VM_OBJECT_TRACKING_OP_TRUESHARE
 		if (!object->true_share &&
-		    vm_object_tracking_inited) {
-			void *bt[VM_OBJECT_TRACKING_BTDEPTH];
-			int num = 0;
-
-			num = OSBacktrace(bt,
-			    VM_OBJECT_TRACKING_BTDEPTH);
-			btlog_add_entry(vm_object_tracking_btlog,
-			    object,
+		    vm_object_tracking_btlog) {
+			btlog_record(vm_object_tracking_btlog, object,
 			    VM_OBJECT_TRACKING_OP_TRUESHARE,
-			    bt,
-			    num);
+			    btref_get(__builtin_frame_address(0), 0));
 		}
 #endif /* VM_OBJECT_TRACKING_OP_TRUESHARE */
 
@@ -3314,19 +3268,10 @@ mach_make_memory_entry_internal(
 	}
 	*size = CAST_DOWN(vm_size_t, (user_entry->size -
 	    user_entry->data_offset));
-	*object_handle = user_handle;
 	DEBUG4K_MEMENTRY("map %p offset 0x%llx size 0x%llx prot 0x%x -> entry %p kr 0x%x\n", target_map, offset, *size, permission, user_entry, KERN_SUCCESS);
 	return KERN_SUCCESS;
 
 make_mem_done:
-	if (user_handle != IP_NULL) {
-		/*
-		 * Releasing "user_handle" causes the kernel object
-		 * associated with it ("user_entry" here) to also be
-		 * released and freed.
-		 */
-		mach_memory_entry_port_release(user_handle);
-	}
 	DEBUG4K_MEMENTRY("map %p offset 0x%llx size 0x%llx prot 0x%x -> entry %p kr 0x%x\n", target_map, offset, *size, permission, user_entry, kr);
 	return kr;
 }
@@ -3410,66 +3355,23 @@ vm_map_exec_lockdown(
 	return KERN_SUCCESS;
 }
 
-#if VM_NAMED_ENTRY_LIST
-queue_head_t    vm_named_entry_list = QUEUE_HEAD_INITIALIZER(vm_named_entry_list);
-int             vm_named_entry_count = 0;
-LCK_MTX_EARLY_DECLARE_ATTR(vm_named_entry_list_lock_data,
-    &vm_object_lck_grp, &vm_object_lck_attr);
-#endif /* VM_NAMED_ENTRY_LIST */
-
-__private_extern__ kern_return_t
-mach_memory_entry_allocate(
-	vm_named_entry_t        *user_entry_p,
-	ipc_port_t              *user_handle_p)
+__private_extern__ vm_named_entry_t
+mach_memory_entry_allocate(ipc_port_t *user_handle_p)
 {
-	vm_named_entry_t        user_entry;
-	ipc_port_t              user_handle;
+	vm_named_entry_t user_entry;
 
 	user_entry = kalloc_type(struct vm_named_entry,
 	    Z_WAITOK | Z_ZERO | Z_NOFAIL);
 
-	named_entry_lock_init(user_entry);
-
-	user_entry->backing.copy = NULL;
-	user_entry->is_object = FALSE;
-	user_entry->is_sub_map = FALSE;
-	user_entry->is_copy = FALSE;
-	user_entry->internal = FALSE;
-	user_entry->size = 0;
-	user_entry->offset = 0;
-	user_entry->data_offset = 0;
-	user_entry->protection = VM_PROT_NONE;
-	user_entry->ref_count = 1;
-
-	user_handle = ipc_kobject_alloc_port((ipc_kobject_t)user_entry,
+	*user_handle_p = ipc_kobject_alloc_port((ipc_kobject_t)user_entry,
 	    IKOT_NAMED_ENTRY,
 	    IPC_KOBJECT_ALLOC_MAKE_SEND | IPC_KOBJECT_ALLOC_NSREQUEST);
 
-	*user_entry_p = user_entry;
-	*user_handle_p = user_handle;
-
-#if VM_NAMED_ENTRY_LIST
-	/* keep a loose (no reference) pointer to the Mach port, for debugging only */
-	user_entry->named_entry_port = user_handle;
+#if VM_NAMED_ENTRY_DEBUG
 	/* backtrace at allocation time, for debugging only */
-	OSBacktrace(&user_entry->named_entry_bt[0],
-	    NAMED_ENTRY_BT_DEPTH);
-
-	/* add this new named entry to the global list */
-	lck_mtx_lock_spin(&vm_named_entry_list_lock_data);
-	queue_enter(&vm_named_entry_list, user_entry,
-	    vm_named_entry_t, named_entry_list);
-	vm_named_entry_count++;
-	lck_mtx_unlock(&vm_named_entry_list_lock_data);
-#endif /* VM_NAMED_ENTRY_LIST */
-
-	return KERN_SUCCESS;
-}
-
-static void
-mach_memory_entry_no_senders(ipc_port_t port, mach_port_mscount_t mscount)
-{
-	ipc_kobject_dealloc_port(port, mscount, IKOT_NAMED_ENTRY);
+	user_entry->named_entry_bt = btref_get(__builtin_frame_address(0), 0);
+#endif /* VM_NAMED_ENTRY_DEBUG */
+	return user_entry;
 }
 
 /*
@@ -3491,7 +3393,6 @@ mach_memory_object_memory_entry_64(
 	vm_named_entry_t        user_entry;
 	ipc_port_t              user_handle;
 	vm_object_t             object;
-	kern_return_t           kr;
 
 	if (host == HOST_NULL) {
 		return KERN_INVALID_HOST;
@@ -3512,25 +3413,16 @@ mach_memory_object_memory_entry_64(
 		return KERN_INVALID_ARGUMENT;
 	}
 
-	if (mach_memory_entry_allocate(&user_entry, &user_handle)
-	    != KERN_SUCCESS) {
-		vm_object_deallocate(object);
-		return KERN_FAILURE;
-	}
-
+	user_entry = mach_memory_entry_allocate(&user_handle);
 	user_entry->size = size;
 	user_entry->offset = 0;
 	user_entry->protection = permission & VM_PROT_ALL;
 	access = GET_MAP_MEM(permission);
 	SET_MAP_MEM(access, user_entry->protection);
 	user_entry->is_sub_map = FALSE;
-	assert(user_entry->ref_count == 1);
 
-	kr = vm_named_entry_from_vm_object(user_entry, object, 0, size,
+	vm_named_entry_associate_vm_object(user_entry, object, 0, size,
 	    (user_entry->protection & VM_PROT_ALL));
-	if (kr != KERN_SUCCESS) {
-		return kr;
-	}
 	user_entry->internal = object->internal;
 	assert(object->internal == internal);
 
@@ -3594,18 +3486,13 @@ memory_entry_purgeable_control_internal(
 		return KERN_INVALID_ARGUMENT;
 	}
 
-	named_entry_lock(mem_entry);
-
-	if (mem_entry->is_sub_map ||
-	    mem_entry->is_copy) {
-		named_entry_unlock(mem_entry);
+	if (mem_entry->is_sub_map || mem_entry->is_copy) {
 		return KERN_INVALID_ARGUMENT;
 	}
 
 	assert(mem_entry->is_object);
 	object = vm_named_entry_to_vm_object(mem_entry);
 	if (object == VM_OBJECT_NULL) {
-		named_entry_unlock(mem_entry);
 		return KERN_INVALID_ARGUMENT;
 	}
 
@@ -3614,11 +3501,8 @@ memory_entry_purgeable_control_internal(
 	/* check that named entry covers entire object ? */
 	if (mem_entry->offset != 0 || object->vo_size != mem_entry->size) {
 		vm_object_unlock(object);
-		named_entry_unlock(mem_entry);
 		return KERN_INVALID_ARGUMENT;
 	}
-
-	named_entry_unlock(mem_entry);
 
 	kr = vm_object_purgable_control(object, control, state);
 
@@ -3656,18 +3540,13 @@ memory_entry_access_tracking_internal(
 		return KERN_INVALID_ARGUMENT;
 	}
 
-	named_entry_lock(mem_entry);
-
-	if (mem_entry->is_sub_map ||
-	    mem_entry->is_copy) {
-		named_entry_unlock(mem_entry);
+	if (mem_entry->is_sub_map || mem_entry->is_copy) {
 		return KERN_INVALID_ARGUMENT;
 	}
 
 	assert(mem_entry->is_object);
 	object = vm_named_entry_to_vm_object(mem_entry);
 	if (object == VM_OBJECT_NULL) {
-		named_entry_unlock(mem_entry);
 		return KERN_INVALID_ARGUMENT;
 	}
 
@@ -3683,8 +3562,6 @@ memory_entry_access_tracking_internal(
 	(void) access_tracking_writes;
 	kr = KERN_NOT_SUPPORTED;
 #endif /* VM_OBJECT_ACCESS_TRACKING */
-
-	named_entry_unlock(mem_entry);
 
 	return kr;
 }
@@ -3760,6 +3637,16 @@ mach_memory_entry_ownership(
 #endif /* DEVELOPMENT || DEBUG */
 			return KERN_NO_ACCESS;
 		}
+
+		if (ledger_flags & VM_LEDGER_FLAG_NO_FOOTPRINT_FOR_DEBUG) {
+			/*
+			 * We've made it past the checks above, so we either
+			 * have the entitlement or the sysctl.
+			 * Convert to VM_LEDGER_FLAG_NO_FOOTPRINT.
+			 */
+			ledger_flags &= ~VM_LEDGER_FLAG_NO_FOOTPRINT_FOR_DEBUG;
+			ledger_flags |= VM_LEDGER_FLAG_NO_FOOTPRINT;
+		}
 	}
 
 	if (ledger_flags & ~VM_LEDGER_FLAGS) {
@@ -3775,18 +3662,13 @@ mach_memory_entry_ownership(
 		return KERN_INVALID_ARGUMENT;
 	}
 
-	named_entry_lock(mem_entry);
-
-	if (mem_entry->is_sub_map ||
-	    mem_entry->is_copy) {
-		named_entry_unlock(mem_entry);
+	if (mem_entry->is_sub_map || mem_entry->is_copy) {
 		return KERN_INVALID_ARGUMENT;
 	}
 
 	assert(mem_entry->is_object);
 	object = vm_named_entry_to_vm_object(mem_entry);
 	if (object == VM_OBJECT_NULL) {
-		named_entry_unlock(mem_entry);
 		return KERN_INVALID_ARGUMENT;
 	}
 
@@ -3795,11 +3677,8 @@ mach_memory_entry_ownership(
 	/* check that named entry covers entire object ? */
 	if (mem_entry->offset != 0 || object->vo_size != mem_entry->size) {
 		vm_object_unlock(object);
-		named_entry_unlock(mem_entry);
 		return KERN_INVALID_ARGUMENT;
 	}
-
-	named_entry_unlock(mem_entry);
 
 	kr = vm_object_ownership_change(object,
 	    ledger_tag,
@@ -3828,18 +3707,13 @@ mach_memory_entry_get_page_counts(
 		return KERN_INVALID_ARGUMENT;
 	}
 
-	named_entry_lock(mem_entry);
-
-	if (mem_entry->is_sub_map ||
-	    mem_entry->is_copy) {
-		named_entry_unlock(mem_entry);
+	if (mem_entry->is_sub_map || mem_entry->is_copy) {
 		return KERN_INVALID_ARGUMENT;
 	}
 
 	assert(mem_entry->is_object);
 	object = vm_named_entry_to_vm_object(mem_entry);
 	if (object == VM_OBJECT_NULL) {
-		named_entry_unlock(mem_entry);
 		return KERN_INVALID_ARGUMENT;
 	}
 
@@ -3849,8 +3723,6 @@ mach_memory_entry_get_page_counts(
 	size = mem_entry->size;
 	size = vm_object_round_page(offset + size) - vm_object_trunc_page(offset);
 	offset = vm_object_trunc_page(offset);
-
-	named_entry_unlock(mem_entry);
 
 	kr = vm_object_get_page_counts(object, offset, size, resident_page_count, dirty_page_count);
 
@@ -3874,25 +3746,18 @@ mach_memory_entry_phys_page_offset(
 		return KERN_INVALID_ARGUMENT;
 	}
 
-	named_entry_lock(mem_entry);
-
-	if (mem_entry->is_sub_map ||
-	    mem_entry->is_copy) {
-		named_entry_unlock(mem_entry);
+	if (mem_entry->is_sub_map || mem_entry->is_copy) {
 		return KERN_INVALID_ARGUMENT;
 	}
 
 	assert(mem_entry->is_object);
 	object = vm_named_entry_to_vm_object(mem_entry);
 	if (object == VM_OBJECT_NULL) {
-		named_entry_unlock(mem_entry);
 		return KERN_INVALID_ARGUMENT;
 	}
 
 	offset = mem_entry->offset;
 	data_offset = mem_entry->data_offset;
-
-	named_entry_unlock(mem_entry);
 
 	*offset_p = offset - vm_object_trunc_page(offset) + data_offset;
 	return KERN_SUCCESS;
@@ -3918,17 +3783,13 @@ mach_memory_entry_map_size(
 		return KERN_INVALID_ARGUMENT;
 	}
 
-	named_entry_lock(mem_entry);
-
 	if (mem_entry->is_sub_map) {
-		named_entry_unlock(mem_entry);
 		return KERN_INVALID_ARGUMENT;
 	}
 
 	if (mem_entry->is_object) {
 		object = vm_named_entry_to_vm_object(mem_entry);
 		if (object == VM_OBJECT_NULL) {
-			named_entry_unlock(mem_entry);
 			return KERN_INVALID_ARGUMENT;
 		}
 
@@ -3940,8 +3801,6 @@ mach_memory_entry_map_size(
 		    VM_MAP_PAGE_MASK(map));
 		object_offset_end = vm_map_round_page(object_offset_end,
 		    VM_MAP_PAGE_MASK(map));
-
-		named_entry_unlock(mem_entry);
 
 		*map_size = object_offset_end - object_offset_start;
 		return KERN_SUCCESS;
@@ -3955,7 +3814,6 @@ mach_memory_entry_map_size(
 	if (VM_MAP_COPY_PAGE_MASK(mem_entry->backing.copy) == VM_MAP_PAGE_MASK(map)) {
 		*map_size = vm_map_round_page(mem_entry->offset + mem_entry->data_offset + offset + size, VM_MAP_PAGE_MASK(map)) - vm_map_trunc_page(mem_entry->offset + mem_entry->data_offset + offset, VM_MAP_PAGE_MASK(map));
 		DEBUG4K_SHARE("map %p (%d) mem_entry %p offset 0x%llx + 0x%llx + 0x%llx size 0x%llx -> map_size 0x%llx\n", map, VM_MAP_PAGE_MASK(map), mem_entry, mem_entry->offset, mem_entry->data_offset, offset, size, *map_size);
-		named_entry_unlock(mem_entry);
 		return KERN_SUCCESS;
 	}
 
@@ -3982,7 +3840,6 @@ mach_memory_entry_map_size(
 		}
 		target_copy_map = VM_MAP_COPY_NULL;
 	}
-	named_entry_unlock(mem_entry);
 	return kr;
 }
 
@@ -3991,7 +3848,7 @@ mach_memory_entry_map_size(
  *
  * Release a send right on a named entry port.  This is the correct
  * way to destroy a named entry.  When the last right on the port is
- * released, ipc_kobject_destroy() will call mach_destroy_memory_entry().
+ * released, mach_memory_entry_no_senders() willl be called.
  */
 void
 mach_memory_entry_port_release(
@@ -4011,61 +3868,37 @@ mach_memory_entry_from_port(ipc_port_t port)
 }
 
 /*
- * mach_destroy_memory_entry:
+ * mach_memory_entry_no_senders:
  *
- * Drops a reference on a memory entry and destroys the memory entry if
- * there are no more references on it.
- * NOTE: This routine should not be called to destroy a memory entry from the
- * kernel, as it will not release the Mach port associated with the memory
- * entry.  The proper way to destroy a memory entry in the kernel is to
- * call mach_memort_entry_port_release() to release the kernel's send-right on
- * the memory entry's port.  When the last send right is released, the memory
- * entry will be destroyed via ipc_kobject_destroy().
+ * Destroys the memory entry associated with a mach port.
+ * Memory entries have the exact same lifetime as their owning port.
+ *
+ * Releasing a memory entry is done by calling
+ * mach_memory_entry_port_release() on its owning port.
  */
-void
-mach_destroy_memory_entry(
-	ipc_port_t      port)
+static void
+mach_memory_entry_no_senders(ipc_port_t port, mach_port_mscount_t mscount)
 {
-	vm_named_entry_t        named_entry;
+	vm_named_entry_t named_entry;
 
-	/*
-	 * cannot use mach_memory_entry_from_port():
-	 * it returns NULL for inactive ports.
-	 */
-	named_entry = ipc_kobject_get_raw(port, IKOT_NAMED_ENTRY);
-	assert(named_entry != NULL);
+	named_entry = ipc_kobject_dealloc_port(port, mscount, IKOT_NAMED_ENTRY);
 
-	named_entry_lock(named_entry);
-	named_entry->ref_count -= 1;
-
-	if (named_entry->ref_count == 0) {
-		if (named_entry->is_sub_map) {
-			vm_map_deallocate(named_entry->backing.map);
-		} else if (named_entry->is_copy) {
-			vm_map_copy_discard(named_entry->backing.copy);
-		} else if (named_entry->is_object) {
-			assert(named_entry->backing.copy->cpy_hdr.nentries == 1);
-			vm_map_copy_discard(named_entry->backing.copy);
-		} else {
-			assert(named_entry->backing.copy == VM_MAP_COPY_NULL);
-		}
-
-		named_entry_unlock(named_entry);
-		named_entry_lock_destroy(named_entry);
-
-#if VM_NAMED_ENTRY_LIST
-		lck_mtx_lock_spin(&vm_named_entry_list_lock_data);
-		queue_remove(&vm_named_entry_list, named_entry,
-		    vm_named_entry_t, named_entry_list);
-		assert(vm_named_entry_count > 0);
-		vm_named_entry_count--;
-		lck_mtx_unlock(&vm_named_entry_list_lock_data);
-#endif /* VM_NAMED_ENTRY_LIST */
-
-		kfree_type(struct vm_named_entry, named_entry);
+	if (named_entry->is_sub_map) {
+		vm_map_deallocate(named_entry->backing.map);
+	} else if (named_entry->is_copy) {
+		vm_map_copy_discard(named_entry->backing.copy);
+	} else if (named_entry->is_object) {
+		assert(named_entry->backing.copy->cpy_hdr.nentries == 1);
+		vm_map_copy_discard(named_entry->backing.copy);
 	} else {
-		named_entry_unlock(named_entry);
+		assert(named_entry->backing.copy == VM_MAP_COPY_NULL);
 	}
+
+#if VM_NAMED_ENTRY_DEBUG
+	btref_put(named_entry->named_entry_bt);
+#endif /* VM_NAMED_ENTRY_DEBUG */
+
+	kfree_type(struct vm_named_entry, named_entry);
 }
 
 /* Allow manipulation of individual page state.  This is actually part of */
@@ -4088,23 +3921,17 @@ mach_memory_entry_page_op(
 		return KERN_INVALID_ARGUMENT;
 	}
 
-	named_entry_lock(mem_entry);
-
-	if (mem_entry->is_sub_map ||
-	    mem_entry->is_copy) {
-		named_entry_unlock(mem_entry);
+	if (mem_entry->is_sub_map || mem_entry->is_copy) {
 		return KERN_INVALID_ARGUMENT;
 	}
 
 	assert(mem_entry->is_object);
 	object = vm_named_entry_to_vm_object(mem_entry);
 	if (object == VM_OBJECT_NULL) {
-		named_entry_unlock(mem_entry);
 		return KERN_INVALID_ARGUMENT;
 	}
 
 	vm_object_reference(object);
-	named_entry_unlock(mem_entry);
 
 	kr = vm_object_page_op(object, offset, ops, phys_entry, flags);
 
@@ -4140,23 +3967,17 @@ mach_memory_entry_range_op(
 		return KERN_INVALID_ARGUMENT;
 	}
 
-	named_entry_lock(mem_entry);
-
-	if (mem_entry->is_sub_map ||
-	    mem_entry->is_copy) {
-		named_entry_unlock(mem_entry);
+	if (mem_entry->is_sub_map || mem_entry->is_copy) {
 		return KERN_INVALID_ARGUMENT;
 	}
 
 	assert(mem_entry->is_object);
 	object = vm_named_entry_to_vm_object(mem_entry);
 	if (object == VM_OBJECT_NULL) {
-		named_entry_unlock(mem_entry);
 		return KERN_INVALID_ARGUMENT;
 	}
 
 	vm_object_reference(object);
-	named_entry_unlock(mem_entry);
 
 	kr = vm_object_range_op(object,
 	    offset_beg,
@@ -4308,26 +4129,20 @@ kernel_upl_abort(
 
 kern_return_t
 vm_region_object_create(
-	__unused vm_map_t       target_map,
+	vm_map_t                target_map,
 	vm_size_t               size,
 	ipc_port_t              *object_handle)
 {
 	vm_named_entry_t        user_entry;
-	ipc_port_t              user_handle;
+	vm_map_t                new_map;
 
-	vm_map_t        new_map;
-
-	if (mach_memory_entry_allocate(&user_entry, &user_handle)
-	    != KERN_SUCCESS) {
-		return KERN_FAILURE;
-	}
+	user_entry = mach_memory_entry_allocate(object_handle);
 
 	/* Create a named object based on a submap of specified size */
 
-	new_map = vm_map_create(PMAP_NULL, VM_MAP_MIN_ADDRESS,
-	    vm_map_round_page(size,
-	    VM_MAP_PAGE_MASK(target_map)),
-	    TRUE);
+	new_map = vm_map_create_options(PMAP_NULL, VM_MAP_MIN_ADDRESS,
+	    vm_map_round_page(size, VM_MAP_PAGE_MASK(target_map)),
+	    VM_MAP_CREATE_PAGEABLE);
 	vm_map_set_page_shift(new_map, VM_MAP_PAGE_SHIFT(target_map));
 
 	user_entry->backing.map = new_map;
@@ -4336,9 +4151,7 @@ vm_region_object_create(
 	user_entry->offset = 0;
 	user_entry->protection = VM_PROT_ALL;
 	user_entry->size = size;
-	assert(user_entry->ref_count == 1);
 
-	*object_handle = user_handle;
 	return KERN_SUCCESS;
 }
 
@@ -4496,8 +4309,6 @@ kernel_object_iopl_request(
 		return KERN_INVALID_ARGUMENT;
 	}
 
-	named_entry_lock(named_entry);
-
 	/* This is the case where we are going to operate */
 	/* on an already known object.  If the object is */
 	/* not ready it is internal.  An external     */
@@ -4507,7 +4318,6 @@ kernel_object_iopl_request(
 	assert(named_entry->is_object);
 	object = vm_named_entry_to_vm_object(named_entry);
 	vm_object_reference(object);
-	named_entry_unlock(named_entry);
 
 	if (!object->private) {
 		if (*upl_size > MAX_UPL_TRANSFER_BYTES) {

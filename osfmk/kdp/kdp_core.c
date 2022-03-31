@@ -124,6 +124,9 @@ static struct kdp_output_stage aea_output_stage = {};
 #if defined(__arm__) || defined(__arm64__)
 static struct kdp_output_stage shmem_output_stage = {};
 #endif /* defined(__arm__) || defined(__arm64__) */
+#if defined(__arm64__)
+static struct kdp_output_stage memory_backing_aware_buffer_output_stage = {};
+#endif /* defined(__arm64__) */
 
 extern uint32_t kdp_crashdump_pkt_size;
 
@@ -254,6 +257,12 @@ kernel_vaddr_in_coredump_stages(uint64_t vaddr, uint64_t *vincr)
 		return true;
 	}
 #endif /* defined(__arm__) || defined(__arm64__) */
+
+#if defined(__arm64__)
+	if (kernel_vaddr_in_coredump_stage(&memory_backing_aware_buffer_output_stage, vaddr, vincr)) {
+		return true;
+	}
+#endif /* defined(__arm64__) */
 
 	return false;
 }
@@ -794,6 +803,9 @@ chain_output_stages(enum kern_dump_type kd_variant, struct kdp_core_out_state *o
 	case KERN_DUMP_STACKSHOT_DISK:
 		OS_FALLTHROUGH;
 	case KERN_DUMP_DISK:
+#if defined(__arm64__)
+		STAILQ_INSERT_TAIL(&outstate->kcos_out_stage, &memory_backing_aware_buffer_output_stage, kos_next);
+#endif
 		if (!kdp_corezip_disabled) {
 			STAILQ_INSERT_TAIL(&outstate->kcos_out_stage, &zlib_output_stage, kos_next);
 		}
@@ -1178,6 +1190,14 @@ kdp_core_init_output_stages(void)
 	}
 #endif /* defined(__arm__) || defined(__arm64__) */
 
+#if defined(__arm64__)
+	bzero(&memory_backing_aware_buffer_output_stage, sizeof(memory_backing_aware_buffer_output_stage));
+	ret = memory_backing_aware_buffer_stage_initialize(&memory_backing_aware_buffer_output_stage);
+	if (KERN_SUCCESS != ret) {
+		return ret;
+	}
+#endif /* defined(__arm64__) */
+
 	return ret;
 }
 
@@ -1368,7 +1388,8 @@ kdp_core_handle_new_encryption_key(IOCoreFileAccessCallback access_data, void *a
 				void *empty_key = NULL;
 				kern_return_t temp_ret = KERN_SUCCESS;
 
-				temp_ret = kmem_alloc_flags(kernel_map, (vm_offset_t *) &empty_key, PUBLIC_KEY_RESERVED_LENGTH, VM_KERN_MEMORY_DIAG, KMA_ZERO);
+				temp_ret = kernel_memory_allocate(kernel_map, (vm_offset_t *) &empty_key,
+				    PUBLIC_KEY_RESERVED_LENGTH, 0, KMA_ZERO, VM_KERN_MEMORY_DIAG);
 				if (temp_ret != KERN_SUCCESS) {
 					printf("kdp_core_handle_new_encryption_key failed to allocate an empty key. Error 0x%x\n", temp_ret);
 					break;

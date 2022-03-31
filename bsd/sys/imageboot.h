@@ -44,7 +44,7 @@ int     imageboot_mount_image(const char *root_path, int height, imageboot_type_
 int     imageboot_pivot_image(const char *image_path, imageboot_type_t type, const char *mount_path,
     const char *outgoing_root_path, const bool rooted_dmg, const bool skip_signature_check);
 int     imageboot_read_file_pageable(const char *path, void **bufp, size_t *bufszp); /* use kmem_free(kernel_map, ...) */
-int     imageboot_read_file(const char *path, void **bufp, size_t *bufszp);
+int     imageboot_read_file(const char *path, void **bufp, size_t *bufszp, off_t *fsizep);
 int     imageboot_read_file_from_offset(const char *path, off_t offset, void **bufp, size_t *bufszp);
 
 struct vnode *

@@ -91,7 +91,7 @@ __BEGIN_DECLS
  */
 void *  devfs_make_node_clone(dev_t dev, int chrblk, uid_t uid, gid_t gid,
     int perms, int (*clone)(dev_t dev, int action),
-    const char *fmt, ...);
+    const char *fmt, ...) __printflike(7, 8);
 
 /*
  * Function: devfs_make_node
@@ -109,7 +109,7 @@ void *  devfs_make_node_clone(dev_t dev, int chrblk, uid_t uid, gid_t gid,
  *   A handle to a device node if successful, NULL otherwise.
  */
 void *  devfs_make_node(dev_t dev, int chrblk, uid_t uid, gid_t gid,
-    int perms, const char *fmt, ...);
+    int perms, const char *fmt, ...) __printflike(6, 7);
 
 #ifdef BSD_KERNEL_PRIVATE
 /*
@@ -121,7 +121,7 @@ void *  devfs_make_node(dev_t dev, int chrblk, uid_t uid, gid_t gid,
  * Returns:
  *   0 if successful, -1 if failed
  */
-int     devfs_make_link(void * handle, char *fmt, ...);
+int     devfs_make_link(void * handle, char *fmt, ...) __printflike(2, 3);
 #endif /* BSD_KERNEL_PRIVATE */
 
 /*

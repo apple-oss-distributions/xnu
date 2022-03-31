@@ -1740,8 +1740,13 @@ __private_extern__ void tcp_update_stats_per_flow(
 
 extern int tcp_ack_strategy;
 
+#if defined(SKYWALK)
+void tcp_add_fsw_flow(struct tcpcb *, struct ifnet *);
+void tcp_del_fsw_flow(struct tcpcb *);
+#else
 #define tcp_add_fsw_flow(...)
 #define tcp_del_fsw_flow(...)
+#endif
 
 #endif /* BSD_KERNEL_PRIVATE */
 

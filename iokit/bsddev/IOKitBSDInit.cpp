@@ -834,6 +834,7 @@ IOFindBSDRoot( char * rootName, unsigned int rootNameSize,
 		// Match any HFS media
 
 		matching = IOService::serviceMatching( "IOMedia" );
+		assert(matching);
 		astring = OSString::withCStringNoCopy("Apple_HFS");
 		if (astring) {
 			matching->setObject("Content", astring);

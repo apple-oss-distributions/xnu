@@ -760,6 +760,7 @@ rate_limit_host_statistics(bool is_stat64, host_flavor_t flavor, host_info64_t i
 	assert(task != kernel_task);
 
 	*ret = KERN_SUCCESS;
+	*pindex = -1;
 
 	/* Access control only for third party applications */
 	if (task->t_flags & TF_PLATFORM) {

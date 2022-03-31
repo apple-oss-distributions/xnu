@@ -141,6 +141,7 @@ void            csblob_entitlements_dictionary_set(struct cs_blob *csblob, void 
 void            csblob_os_entitlements_set(struct cs_blob *csblob, void * entitlements);
 void *          csblob_os_entitlements_copy(struct cs_blob *csblob);
 void *          csblob_os_entitlements_get(struct cs_blob *csblob);
+void *          csblob_get_storage_addr(struct cs_blob *csblob);
 /*
  * Mostly convenience functions below
  */

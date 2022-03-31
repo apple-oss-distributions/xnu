@@ -57,30 +57,6 @@
 #define dprintf(x)
 #endif  /* DHCP_DEBUG */
 
-static __inline__ void
-my_free(void * ptr)
-{
-	_FREE(ptr, M_TEMP);
-}
-
-static __inline__ void *
-my_malloc(int size)
-{
-	void * data;
-	MALLOC(data, void *, size, M_TEMP, M_WAITOK);
-	return data;
-}
-
-static __inline__ void *
-my_realloc(void * oldptr, int oldsize, int newsize)
-{
-	void * data;
-
-	MALLOC(data, void *, newsize, M_TEMP, M_WAITOK);
-	bcopy(oldptr, data, oldsize);
-	my_free(oldptr);
-	return data;
-}
 #else
 /*
  * To build:
@@ -89,9 +65,9 @@ my_realloc(void * oldptr, int oldsize, int newsize)
 #include <stdlib.h>
 #include <unistd.h>
 #include <stdio.h>
-#define my_free free
-#define my_malloc malloc
-#define my_realloc(ptr, old_size, new_size) realloc(ptr, new_size)
+#define kfree_type(type, n, v)  free(v)
+#define krealloc_type(type, old_n, new_n, ptr, flags) \
+	realloc(ptr, new_n * sizeof(type)))
 #define dprintf(x) printf x;
 #endif
 
@@ -114,7 +90,7 @@ static void
 ptrlist_free(ptrlist_t * list)
 {
 	if (list->array) {
-		my_free(list->array);
+		kfree_type(const void *, list->size, list->array);
 	}
 	ptrlist_init(list);
 	return;
@@ -143,65 +119,58 @@ ptrlist_element(ptrlist_t * list, int i)
 }
 
 
-static boolean_t
-ptrlist_grow(ptrlist_t * list)
+static bool
+ptrlist_grow(ptrlist_t * list, uint32_t n)
 {
-	if (list->array == NULL) {
-		if (list->size == 0) {
-			list->size = PTRLIST_NUMBER;
-		}
-		list->count = 0;
-		list->array = my_malloc(sizeof(*list->array) * list->size);
-	} else if (list->size == list->count) {
-		dprintf(("doubling %d to %d\n", list->size, list->size * 2));
-		list->array = my_realloc(list->array,
-		    sizeof(*list->array) * list->size,
-		    sizeof(*list->array) * list->size * 2);
-		list->size *= 2;
+	uint32_t new_size;
+	const void **arr;
+
+	if (os_add_overflow(list->count, n, &n)) {
+		return false;
 	}
-	if (list->array == NULL) {
-		return FALSE;
+	if (n <= list->size) {
+		return true;
 	}
-	return TRUE;
+
+	if (list->size == 0) {
+		new_size = MAX(PTRLIST_NUMBER, n);
+	} else {
+		new_size = MAX(list->size * 2, n);
+	}
+
+	arr = krealloc_type(const void *, list->size, new_size, list->array, Z_WAITOK);
+	if (arr == NULL) {
+		return false;
+	}
+
+	list->size = new_size;
+	list->array = arr;
+	return true;
 }
 
-static boolean_t
+static bool
 ptrlist_add(ptrlist_t * list, const void * element)
 {
-	if (ptrlist_grow(list) == FALSE) {
-		return FALSE;
+	if (!ptrlist_grow(list, 1)) {
+		return false;
 	}
 
 	list->array[list->count++] = element;
-	return TRUE;
+	return true;
 }
 
 /* concatenates extra onto list */
-static boolean_t
+static bool
 ptrlist_concat(ptrlist_t * list, ptrlist_t * extra)
 {
-	if (extra->count == 0) {
-		return TRUE;
+	if (!ptrlist_grow(list, extra->count)) {
+		return false;
 	}
 
-	if ((extra->count + list->count) > list->size) {
-		int old_size = list->size;
-
-		list->size = extra->count + list->count;
-		if (list->array == NULL) {
-			list->array = my_malloc(sizeof(*list->array) * list->size);
-		} else {
-			list->array = my_realloc(list->array, old_size,
-			    sizeof(*list->array) * list->size);
-		}
-	}
-	if (list->array == NULL) {
-		return FALSE;
-	}
 	bcopy(extra->array, list->array + list->count,
 	    extra->count * sizeof(*list->array));
 	list->count += extra->count;
-	return TRUE;
+	return true;
 }
 
 
@@ -244,7 +213,7 @@ dhcpol_free(dhcpol_t * list)
 boolean_t
 dhcpol_concat(dhcpol_t * list, dhcpol_t * extra)
 {
-	return ptrlist_concat((ptrlist_t *)list, (ptrlist_t *)extra);
+	return ptrlist_concat(list, extra);
 }
 
 /*

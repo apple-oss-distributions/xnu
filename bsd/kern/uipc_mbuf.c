@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1998-2020 Apple Inc. All rights reserved.
+ * Copyright (c) 1998-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -350,7 +350,7 @@ static ppnum_t mcl_pages;       /* Size of array (# physical pages) */
 static ppnum_t mcl_paddr_base;  /* Handle returned by IOMapper::iovmAlloc() */
 static mcache_t *ref_cache;     /* Cache of cluster reference & flags */
 static mcache_t *mcl_audit_con_cache; /* Audit contents cache */
-static unsigned int mbuf_debug; /* patchable mbuf mcache flags */
+unsigned int mbuf_debug; /* patchable mbuf mcache flags */
 static unsigned int mb_normalized; /* number of packets "normalized" */
 
 #define MB_GROWTH_AGGRESSIVE    1       /* Threshold: 1/2 of total */
@@ -675,11 +675,22 @@ static mbuf_table_t mbuf_table[] = {
 
 #define NELEM(a)        (sizeof (a) / sizeof ((a)[0]))
 
+#if SKYWALK
+#define MC_THRESHOLD_SCALE_DOWN_FACTOR  2
+static unsigned int mc_threshold_scale_down_factor =
+    MC_THRESHOLD_SCALE_DOWN_FACTOR;
+#endif /* SKYWALK */
 
 static uint32_t
 m_avgtotal(mbuf_class_t c)
 {
+#if SKYWALK
+	return if_is_fsw_transport_netagent_enabled() ?
+	       (mbuf_table[c].mtbl_avgtotal / mc_threshold_scale_down_factor) :
+	       mbuf_table[c].mtbl_avgtotal;
+#else /* !SKYWALK */
 	return mbuf_table[c].mtbl_avgtotal;
+#endif /* SKYWALK */
 }
 
 static void *mb_waitchan = &mbuf_table; /* wait channel for all caches */
@@ -925,6 +936,7 @@ static void mbuf_drain_locked(boolean_t);
 	(m)->m_pkthdr.csum_data = 0;                                    \
 	(m)->m_pkthdr.vlan_tag = 0;                                     \
 	(m)->m_pkthdr.comp_gencnt = 0;                                  \
+	(m)->m_pkthdr.pkt_crumbs = 0;                                     \
 	m_classifier_init(m, 0);                                        \
 	m_tag_init(m, 1);                                               \
 	m_scratch_init(m);                                              \
@@ -951,7 +963,7 @@ static void mbuf_drain_locked(boolean_t);
 	(m)->m_data = (m)->m_ext.ext_buf = (buf);                       \
 	(m)->m_flags |= M_EXT;                                          \
 	m_set_ext((m), (rfa), (free), (arg));                           \
-	(m)->m_ext.ext_size = (u_int)(size);                                   \
+	(m)->m_ext.ext_size = (u_int)(size);                            \
 	MEXT_MINREF(m) = (min);                                         \
 	MEXT_REF(m) = (ref);                                            \
 	MEXT_PREF(m) = (pref);                                          \
@@ -1184,6 +1196,7 @@ mb_stat_sysctl SYSCTL_HANDLER_ARGS
 			oc->mbcl_mc_waiter_cnt = c->mbcl_mc_waiter_cnt;
 			oc->mbcl_mc_wretry_cnt = c->mbcl_mc_wretry_cnt;
 			oc->mbcl_mc_nwretry_cnt = c->mbcl_mc_nwretry_cnt;
+			oc->mbcl_peak_reported = c->mbcl_peak_reported;
 		}
 		statp = omb_stat;
 		statsz = OMB_STAT_SIZE(NELEM(mbuf_table));
@@ -3737,7 +3750,9 @@ m_free_paired(struct mbuf *m)
 		if (prefcnt > 1) {
 			return 1;
 		} else if (prefcnt == 1) {
-			(*(m_get_ext_free(m)))(m->m_ext.ext_buf,
+			m_ext_free_func_t m_free_func = m_get_ext_free(m);
+			VERIFY(m_free_func != NULL);
+			(*m_free_func)(m->m_ext.ext_buf,
 			    m->m_ext.ext_size, m_get_ext_arg(m));
 			return 1;
 		} else if (prefcnt == 0) {
@@ -4168,7 +4183,7 @@ m_copy_pkthdr(struct mbuf *to, struct mbuf *from)
  * "from" must have M_PKTHDR set, and "to" must be empty.
  * In particular, this does a deep copy of the packet tags.
  */
-static int
+int
 m_dup_pkthdr(struct mbuf *to, struct mbuf *from, int how)
 {
 	VERIFY(from->m_flags & M_PKTHDR);
@@ -6807,7 +6822,7 @@ mbuf_watchdog_defunct_iterate(proc_t p, void *arg)
 		if (FILEGLOB_DTYPE(fg) != DTYPE_SOCKET) {
 			continue;
 		}
-		so = (struct socket *)fp->fp_glob->fg_data;
+		so = fg_get_data(fg);
 		/*
 		 * We calculate the space without the socket
 		 * lock because we don't want to be blocked
@@ -6865,7 +6880,7 @@ mbuf_watchdog_defunct(thread_call_param_t arg0, thread_call_param_t arg1)
 			if (FILEGLOB_DTYPE(fg) != DTYPE_SOCKET) {
 				continue;
 			}
-			so = (struct socket *)fp->fp_glob->fg_data;
+			so = (struct socket *)fp_get_data(fp);
 			socket_lock(so, 0);
 			if (sosetdefunct(args.top_app, so,
 			    SHUTDOWN_SOCKET_LEVEL_DISCONNECT_ALL,
@@ -7633,6 +7648,59 @@ mcl_audit_verify_nextptr(void *next, mcache_audit_t *mca)
 	}
 }
 
+static uintptr_t
+hash_mix(uintptr_t x)
+{
+#ifndef __LP64__
+	x += ~(x << 15);
+	x ^=  (x >> 10);
+	x +=  (x << 3);
+	x ^=  (x >> 6);
+	x += ~(x << 11);
+	x ^=  (x >> 16);
+#else
+	x += ~(x << 32);
+	x ^=  (x >> 22);
+	x += ~(x << 13);
+	x ^=  (x >> 8);
+	x +=  (x << 3);
+	x ^=  (x >> 15);
+	x += ~(x << 27);
+	x ^=  (x >> 31);
+#endif
+	return x;
+}
+
+static uint32_t
+hashbacktrace(uintptr_t* bt, uint32_t depth, uint32_t max_size)
+{
+	uintptr_t hash = 0;
+	uintptr_t mask = max_size - 1;
+
+	while (depth) {
+		hash += bt[--depth];
+	}
+
+	hash = hash_mix(hash) & mask;
+
+	assert(hash < max_size);
+
+	return (uint32_t) hash;
+}
+
+static uint32_t
+hashaddr(uintptr_t pt, uint32_t max_size)
+{
+	uintptr_t hash = 0;
+	uintptr_t mask = max_size - 1;
+
+	hash = hash_mix(pt) & mask;
+
+	assert(hash < max_size);
+
+	return (uint32_t) hash;
+}
+
 /* This function turns on mbuf leak detection */
 static void
 mleak_activate(void)
@@ -8360,6 +8428,14 @@ m_scratch_get(struct mbuf *m, u_int8_t **p)
 	return sizeof(pkt->pkt_mpriv);
 }
 
+void
+m_add_crumb(struct mbuf *m, uint16_t crumb)
+{
+	VERIFY(m->m_flags & M_PKTHDR);
+
+	m->m_pkthdr.pkt_crumbs |= crumb;
+}
+
 static void
 m_redzone_init(struct mbuf *m)
 {
@@ -8813,6 +8889,7 @@ m_drain_force_sysctl SYSCTL_HANDLER_ARGS
 }
 
 #if DEBUG || DEVELOPMENT
+__printflike(3, 4)
 static void
 _mbwdog_logger(const char *func, const int line, const char *fmt, ...)
 {
@@ -8853,17 +8930,6 @@ _mbwdog_logger(const char *func, const int line, const char *fmt, ...)
 	mbwdog_logging_used += len;
 }
 
-static int
-sysctl_mbwdog_log SYSCTL_HANDLER_ARGS
-{
-#pragma unused(oidp, arg1, arg2)
-	return SYSCTL_OUT(req, mbwdog_logging, mbwdog_logging_used);
-}
-SYSCTL_DECL(_kern_ipc);
-SYSCTL_PROC(_kern_ipc, OID_AUTO, mbwdog_log,
-    CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_LOCKED,
-    0, 0, sysctl_mbwdog_log, "A", "");
-
 #endif // DEBUG || DEVELOPMENT
 
 static void
@@ -8896,6 +8962,12 @@ mtracelarge_register(size_t size)
 
 SYSCTL_DECL(_kern_ipc);
 #if DEBUG || DEVELOPMENT
+#if SKYWALK
+SYSCTL_UINT(_kern_ipc, OID_AUTO, mc_threshold_scale_factor,
+    CTLFLAG_RW | CTLFLAG_LOCKED, &mc_threshold_scale_down_factor,
+    MC_THRESHOLD_SCALE_DOWN_FACTOR,
+    "scale down factor for mbuf cache thresholds");
+#endif /* SKYWALK */
 #endif
 SYSCTL_PROC(_kern_ipc, KIPC_MBSTAT, mbstat,
     CTLTYPE_STRUCT | CTLFLAG_RD | CTLFLAG_LOCKED,

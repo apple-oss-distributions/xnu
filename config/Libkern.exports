@@ -20,7 +20,6 @@ _OSCompareAndSwapPtr
 _OSDecrementAtomic
 _OSDecrementAtomic16
 _OSDecrementAtomic8
-_OSFree:_OSFree_external
 _OSIncrementAtomic
 _OSIncrementAtomic16
 _OSIncrementAtomic8
@@ -29,11 +28,6 @@ _OSKextLoadKextWithIdentifier
 _OSKextReleaseKextWithLoadTag
 _OSKextRequestResource
 _OSKextRetainKextWithLoadTag
-_OSMalloc:_OSMalloc_external
-_OSMalloc_Tagalloc:_OSMalloc_Tagalloc_external
-_OSMalloc_Tagfree:_OSMalloc_Tagfree_external
-_OSMalloc_noblock:_OSMalloc_noblock_external
-_OSMalloc_nowait:_OSMalloc_nowait_external
 _OSObject_typed_operator_new
 _OSObject_typed_operator_delete
 _OSReportWithBacktrace
@@ -55,7 +49,6 @@ _SHA384_Update
 _SHA512_Final
 _SHA512_Init
 _SHA512_Update
-_STRDUP
 __Block_copy
 __Block_release
 __NSConcreteAutoBlock
@@ -727,9 +720,6 @@ _itoa
 _kOSBooleanFalse
 _kOSBooleanTrue
 _kdp_lck_spin_is_acquired
-_kern_os_free:_kern_os_free_external
-_kern_os_malloc:_kern_os_malloc_external
-_kern_os_realloc:_kern_os_realloc_external
 _kext_assertions_enable
 _kmod_info:_invalid_kmod_info
 _kprintf

@@ -35,8 +35,6 @@
 #include <sys/systm.h>
 #include <sys/mcache.h>
 
-MALLOC_DEFINE(M_NWKWQ, "nwkwq", "Network work-queue");
-
 static TAILQ_HEAD(, nwk_wq_entry) nwk_wq_head =
     TAILQ_HEAD_INITIALIZER(nwk_wq_head);
 static LCK_GRP_DECLARE(nwk_wq_lock_group, "Network work queue lock");
@@ -89,11 +87,8 @@ nwk_wq_thread_cont(int err)
 
 		VERIFY(TAILQ_FIRST(&temp_nwk_wq_head) != NULL);
 		TAILQ_FOREACH_SAFE(nwk_item, &temp_nwk_wq_head, nwk_wq_link, nwk_item_next) {
-			nwk_item->func(nwk_item->arg);
-			if (nwk_item->is_arg_managed == FALSE) {
-				FREE(nwk_item->arg, M_NWKWQ);
-			}
-			FREE(nwk_item, M_NWKWQ);
+			nwk_item->func(nwk_item);
+			/* nwk_item has been freed by the callback */
 		}
 		lck_mtx_lock(&nwk_wq_lock);
 	}

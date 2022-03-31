@@ -1523,7 +1523,7 @@ int vfs_context_rele(vfs_context_t ctx);
  *  @discussion Kexts should not use this function--it is preferred to use vfs_context_create(NULL) and vfs_context_rele(), which ensure proper reference counting of underlying structures.
  *  @return Context for current thread, or kernel context if thread context is unavailable.
  */
-vfs_context_t vfs_context_current(void);
+vfs_context_t vfs_context_current(void) __pure2;
 #ifdef KERNEL_PRIVATE
 int     vfs_context_bind(vfs_context_t);
 
@@ -2308,6 +2308,14 @@ int     vnode_isdirty(vnode_t vp);
 int vnode_lookup_continue_needed(vnode_t vp, struct componentname *cnp);
 
 /*!
+ *  @function vnode_isonssd
+ *  @abstract Return whether or not the storage device backing a vnode is a solid state drive
+ *  @param vp The vnode whose backing store properties are to be queried
+ *  @return TRUE if storage device is an SSD, FALSE if otherwise.
+ */
+boolean_t vnode_isonssd(vnode_t vp);
+
+/*!
  *  @function vnode_istty
  *  @abstract Determine if the given vnode represents a tty device.
  *  @param vp Vnode to examine.
@@ -2473,15 +2481,13 @@ uint64_t vfs_idle_time(mount_t mp);
 #ifndef vnode_usecount
 int vnode_usecount(vnode_t vp);
 #endif
+int vnode_writecount(vnode_t vp);
 int vnode_iocount(vnode_t vp);
 void vnode_rele_ext(vnode_t, int, int);
 int is_package_name(const char *name, int len);
-int     vfs_context_issuser(vfs_context_t);
+int vfs_context_issuser(vfs_context_t);
 int vfs_context_iskernel(vfs_context_t);
-vfs_context_t vfs_context_kernel(void);         /* get from 1st kernel thread */
-#ifdef XNU_KERNEL_PRIVATE
-void vfs_set_context_kernel(vfs_context_t);     /* set from 1st kernel thread */
-#endif /* XNU_KERNEL_PRIVATE */
+vfs_context_t vfs_context_kernel(void) __pure2;         /* get from 1st kernel thread */
 vnode_t vfs_context_cwd(vfs_context_t);
 vnode_t vfs_context_get_cwd(vfs_context_t); /* get cwd with iocount */
 int vnode_isnoflush(vnode_t);
@@ -2501,6 +2507,14 @@ void vnode_iocs_record_and_free(vnode_t);
 int     build_path(vnode_t first_vp, char *buff, int buflen, int *outlen, int flags, vfs_context_t ctx);
 
 int vnode_issubdir(vnode_t vp, vnode_t dvp, int *is_subdir, vfs_context_t ctx);
+
+struct vniodesc;
+typedef struct vniodesc *vniodesc_t;
+
+errno_t vnio_openfd(int fd, vniodesc_t *vniop);
+errno_t vnio_close(vniodesc_t);
+errno_t vnio_read(vniodesc_t, uio_t);
+vnode_t vnio_vnode(vniodesc_t);
 
 #endif // KERNEL_PRIVATE
 

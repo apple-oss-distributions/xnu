@@ -40,12 +40,8 @@
 
 __BEGIN_DECLS
 
-extern int log_leaks;
-
-/* Use kernel_debug() to log a backtrace */
-extern void trace_backtrace(unsigned int debugid, unsigned int debugid2, unsigned long size, unsigned long data);
 /* Report a message with a 4 entry backtrace - very slow */
-extern void OSReportWithBacktrace(const char *str, ...);
+extern void OSReportWithBacktrace(const char *str, ...) __printflike(1, 2);
 extern unsigned OSBacktrace(void **bt, unsigned maxAddrs);
 
 /* Simple dump of 20 backtrace entries */
@@ -59,11 +55,5 @@ extern void OSPrintBacktrace(void);
 vm_offset_t OSKernelStackRemaining( void );
 
 __END_DECLS
-
-#define TRACE_MACHLEAKS(a, b, c, d)        \
-do {                                    \
-    if (__builtin_expect(!!log_leaks, 0))                      \
-	trace_backtrace(a,b,c,d);       \
-} while(0)
 
 #endif /* !_OS_OSDEBBUG_H */

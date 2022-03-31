@@ -221,7 +221,7 @@ udp6_output(struct in6pcb *in6p, struct mbuf *m, struct sockaddr *addr6,
 	 * If socket is subject to UDP Content Filter and no addr is passed in,
 	 * retrieve CFIL saved state from mbuf and use it if necessary.
 	 */
-	if (so->so_cfil_db && !addr6) {
+	if (CFIL_DGRAM_FILTERED(so) && !addr6) {
 		cfil_tag = cfil_dgram_get_socket_state(m, &cfil_so_state_change_cnt, NULL, &cfil_faddr, NULL);
 		if (cfil_tag) {
 			cfil_sin6 = (struct sockaddr_in6 *)(void *)cfil_faddr;
@@ -558,6 +558,12 @@ udp6_output(struct in6pcb *in6p, struct mbuf *m, struct sockaddr *addr6,
 			    im6o->im6o_multicast_ifp != NULL) {
 				in6p->in6p_last_outifp =
 				    im6o->im6o_multicast_ifp;
+#if SKYWALK
+				if (NETNS_TOKEN_VALID(&in6p->inp_netns_token)) {
+					netns_set_ifnet(&in6p->inp_netns_token,
+					    in6p->in6p_last_outifp);
+				}
+#endif /* SKYWALK */
 			}
 			IM6O_UNLOCK(im6o);
 		}
@@ -666,6 +672,12 @@ udp6_output(struct in6pcb *in6p, struct mbuf *m, struct sockaddr *addr6,
 				}
 				if (outif != NULL && outif != in6p->in6p_last_outifp) {
 					in6p->in6p_last_outifp = outif;
+#if SKYWALK
+					if (NETNS_TOKEN_VALID(&in6p->inp_netns_token)) {
+						netns_set_ifnet(&in6p->inp_netns_token,
+						    in6p->in6p_last_outifp);
+					}
+#endif /* SKYWALK */
 
 					so->so_pktheadroom = (uint16_t)P2ROUNDUP(
 						sizeof(struct udphdr) +

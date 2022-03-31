@@ -280,7 +280,7 @@ rpc_gss_integ_data_create(gss_ctx_id_t ctx, mbuf_t *mb_head, uint32_t seqnum, ui
 	uint32_t major;
 	uint32_t length;
 	gss_buffer_desc mic;
-	struct nfsm_chain nmc;
+	struct nfsm_chain nmc = {};
 
 	/* Length of the argument or result */
 	length = nfs_gss_mchain_length(*mb_head);
@@ -1120,14 +1120,14 @@ nfs_gss_clnt_verf_get(
 		return EBADRPC;
 	}
 	cksum.length = verflen;
-	MALLOC(cksum.value, void *, verflen, M_TEMP, M_WAITOK);
+	cksum.value = kalloc_data(verflen, Z_WAITOK | Z_NOFAIL);
 
 	/*
 	 * Get the gss mic
 	 */
 	nfsm_chain_get_opaque(error, nmc, verflen, cksum.value);
 	if (error) {
-		FREE(cksum.value, M_TEMP);
+		kfree_data(cksum.value, verflen);
 		goto nfsmout;
 	}
 
@@ -1147,7 +1147,7 @@ nfs_gss_clnt_verf_get(
 			break;
 		}
 	}
-	FREE(cksum.value, M_TEMP);
+	kfree_data(cksum.value, verflen);
 	if (gsp == NULL) {
 		return NFSERR_EAUTH;
 	}
@@ -1193,14 +1193,14 @@ nfs_gss_clnt_verf_get(
 			error = EBADRPC;
 			goto nfsmout;
 		}
-		MALLOC(cksum.value, void *, cksum.length, M_TEMP, M_WAITOK);
+		cksum.value = kalloc_data(cksum.length, Z_WAITOK | Z_NOFAIL);
 		nfsm_chain_get_opaque(error, &nmc_tmp, cksum.length, cksum.value);
 		//XXX chop offf the cksum?
 
 		/* Call verify mic */
 		offset = nfsm_chain_offset(nmc);
 		major = gss_krb5_verify_mic_mbuf((uint32_t *)&error, cp->gss_clnt_ctx_id, nmc->nmc_mhead, offset, reslen, &cksum, NULL);
-		FREE(cksum.value, M_TEMP);
+		kfree_data(cksum.value, cksum.length);
 		if (major != GSS_S_COMPLETE) {
 			printf("client results: gss_krb5_verify_mic_mbuf failed %d\n", error);
 			error = EBADRPC;
@@ -1818,11 +1818,6 @@ nfs_gss_clnt_log_error(struct nfsreq *req, struct nfs_gss_clnt_ctx *cp, uint32_t
 
 	if (req->r_thread) {
 		proc = (proc_t)get_bsdthreadtask_info(req->r_thread);
-#if CONFIG_VFORK
-		if (proc != NULL && (proc->p_lflag & P_LVFORK)) {
-			proc = NULL;
-		}
-#endif /* CONFIG_VFORK */
 		if (proc) {
 			pid = proc_pid(proc);
 			proc_name(pid, namebuf, sizeof(namebuf));
@@ -2089,10 +2084,11 @@ skip:
 			vm_map_copy_discard((vm_map_copy_t) otoken);
 			goto out;
 		}
-		MALLOC(lucid_ctx_buffer, void *, lucidlen, M_TEMP, M_WAITOK | M_ZERO);
+		lucid_ctx_buffer = kalloc_data(lucidlen, Z_WAITOK | Z_ZERO);
 		error = nfs_gss_mach_vmcopyout((vm_map_copy_t) octx, lucidlen, lucid_ctx_buffer);
 		if (error) {
 			vm_map_copy_discard((vm_map_copy_t) otoken);
+			kfree_data(lucid_ctx_buffer, lucidlen);
 			goto out;
 		}
 
@@ -2100,6 +2096,7 @@ skip:
 			gss_krb5_destroy_context(cp->gss_clnt_ctx_id);
 		}
 		cp->gss_clnt_ctx_id = gss_krb5_make_context(lucid_ctx_buffer, lucidlen);
+		kfree_data(lucid_ctx_buffer, lucidlen);
 		if (cp->gss_clnt_ctx_id == NULL) {
 			printf("Failed to make context from lucid_ctx_buffer\n");
 			goto out;
@@ -3120,7 +3117,7 @@ nfs_gss_svc_cred_get(struct nfsrv_descript *nd, struct nfsm_chain *nmc)
 		if (flavor != RPCSEC_GSS || cksum.length > KRB5_MAX_MIC_SIZE) {
 			error = NFSERR_AUTHERR | AUTH_BADVERF;
 		} else {
-			MALLOC(cksum.value, void *, cksum.length, M_TEMP, M_WAITOK);
+			cksum.value = kalloc_data(cksum.length, Z_WAITOK | Z_NOFAIL);
 			nfsm_chain_get_opaque(error, nmc, cksum.length, cksum.value);
 		}
 		if (error) {
@@ -3183,10 +3180,8 @@ nfs_gss_svc_cred_get(struct nfsrv_descript *nd, struct nfsm_chain *nmc)
 			nfsm_chain_get_32(error, &nmc_tmp, cksum.length);
 			cksum.value = NULL;
 			if (cksum.length > 0 && cksum.length < GSS_MAX_MIC_LEN) {
-				MALLOC(cksum.value, void *, cksum.length, M_TEMP, M_WAITOK);
-			}
-
-			if (cksum.value == NULL) {
+				cksum.value = kalloc_data(cksum.length, Z_WAITOK | Z_NOFAIL);
+			} else {
 				error = EBADRPC;
 				goto nfsmout;
 			}
@@ -3197,7 +3192,7 @@ nfs_gss_svc_cred_get(struct nfsrv_descript *nd, struct nfsm_chain *nmc)
 
 			major = gss_krb5_verify_mic_mbuf((uint32_t *)&error, cp->gss_svc_ctx_id,
 			    nmc->nmc_mhead, start, arglen, &cksum, NULL);
-			FREE(cksum.value, M_TEMP);
+			kfree_data(cksum.value, cksum.length);
 			if (major != GSS_S_COMPLETE) {
 				printf("Server args: gss_krb5_verify_mic_mbuf failed %d\n", error);
 				error = EBADRPC;
@@ -3675,17 +3670,18 @@ retry:
 			vm_map_copy_discard((vm_map_copy_t) otoken);
 			goto out;
 		}
-		MALLOC(lucid_ctx_buffer, void *, lucidlen, M_TEMP, M_WAITOK | M_ZERO);
+		lucid_ctx_buffer = kalloc_data(lucidlen, Z_WAITOK | Z_ZERO);
 		error = nfs_gss_mach_vmcopyout((vm_map_copy_t) octx, lucidlen, lucid_ctx_buffer);
 		if (error) {
 			vm_map_copy_discard((vm_map_copy_t) otoken);
-			FREE(lucid_ctx_buffer, M_TEMP);
+			kfree_data(lucid_ctx_buffer, lucidlen);
 			goto out;
 		}
 		if (cp->gss_svc_ctx_id) {
 			gss_krb5_destroy_context(cp->gss_svc_ctx_id);
 		}
 		cp->gss_svc_ctx_id = gss_krb5_make_context(lucid_ctx_buffer, lucidlen);
+		kfree_data(lucid_ctx_buffer, lucidlen);
 		if (cp->gss_svc_ctx_id == NULL) {
 			printf("Failed to make context from lucid_ctx_buffer\n");
 			goto out;
@@ -3887,41 +3883,24 @@ nfs_gss_mach_alloc_buffer(u_char *buf, size_t buflen, vm_map_copy_t *addr)
 		return;
 	}
 
-	tbuflen = vm_map_round_page(buflen,
-	    vm_map_page_mask(ipc_kernel_map));
+	tbuflen = vm_map_round_page(buflen, vm_map_page_mask(ipc_kernel_map));
 
 	if (tbuflen < buflen) {
 		printf("nfs_gss_mach_alloc_buffer: vm_map_round_page failed\n");
 		return;
 	}
 
-	kr = vm_allocate_kernel(ipc_kernel_map, &kmem_buf, tbuflen, VM_FLAGS_ANYWHERE, VM_KERN_MEMORY_FILE);
+	kr = kernel_memory_allocate(ipc_kernel_map, &kmem_buf, tbuflen, 0,
+	    KMA_NONE, VM_KERN_MEMORY_FILE);
 	if (kr != 0) {
 		printf("nfs_gss_mach_alloc_buffer: vm_allocate failed\n");
 		return;
 	}
 
-	kr = vm_map_wire_kernel(ipc_kernel_map,
-	    vm_map_trunc_page(kmem_buf,
-	    vm_map_page_mask(ipc_kernel_map)),
-	    vm_map_round_page(kmem_buf + tbuflen,
-	    vm_map_page_mask(ipc_kernel_map)),
-	    VM_PROT_READ | VM_PROT_WRITE, VM_KERN_MEMORY_FILE, FALSE);
-	if (kr != 0) {
-		printf("nfs_gss_mach_alloc_buffer: vm_map_wire failed\n");
-		return;
-	}
+	bcopy(buf, (char *)kmem_buf, buflen);
+	bzero((char *)kmem_buf + buflen, tbuflen - buflen);
 
-	bcopy(buf, (void *) kmem_buf, buflen);
-	// Shouldn't need to bzero below since vm_allocate returns zeroed pages
-	// bzero(kmem_buf + buflen, tbuflen - buflen);
-
-	kr = vm_map_unwire(ipc_kernel_map,
-	    vm_map_trunc_page(kmem_buf,
-	    vm_map_page_mask(ipc_kernel_map)),
-	    vm_map_round_page(kmem_buf + tbuflen,
-	    vm_map_page_mask(ipc_kernel_map)),
-	    FALSE);
+	kr = vm_map_unwire(ipc_kernel_map, kmem_buf, kmem_buf + tbuflen, FALSE);
 	if (kr != 0) {
 		printf("nfs_gss_mach_alloc_buffer: vm_map_unwire failed\n");
 		return;

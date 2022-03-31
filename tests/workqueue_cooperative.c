@@ -15,6 +15,12 @@
 #include <darwintest.h>
 #include <pthread/workqueue_private.h>
 
+T_GLOBAL_META(
+	T_META_NAMESPACE("xnu.workq"),
+	T_META_RADAR_COMPONENT_NAME("xnu"),
+	T_META_RADAR_COMPONENT_VERSION("workq"),
+	T_META_RUN_CONCURRENTLY(true));
+
 static mach_timebase_info_data_t timebase_info;
 
 static uint64_t
@@ -108,4 +114,18 @@ T_DECL(cooperative_to_overcommit_switch, "Switching from cooperative queue to an
 	});
 
 	dispatch_main();
+}
+
+T_DECL(maintenance_bg_coalesced, "BG and MT coalescing should work")
+{
+	dispatch_queue_t dq = dispatch_get_global_queue(QOS_CLASS_MAINTENANCE, DISPATCH_QUEUE_COOPERATIVE);
+	T_ASSERT_NE(dq, NULL, "global_queue");
+	dispatch_group_t dg = dispatch_group_create();
+
+	dispatch_group_async(dg, dq, ^{
+		spin_for_duration(1);
+	});
+
+	dispatch_group_wait(dg, DISPATCH_TIME_FOREVER);
+	dispatch_release(dg);
 }

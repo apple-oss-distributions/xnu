@@ -42,6 +42,7 @@
 #include <i386/mp.h>
 #include <kern/hvg_hypercall.h>
 #include <kern/kalloc.h>
+#include <i386/pmap.h>
 
 
 static int
@@ -1122,6 +1123,10 @@ SYSCTL_PROC(_machdep_misc, OID_AUTO, spin_forever,
     0, 0,
     spin_in_the_kernel, "I", "Spin forever");
 
+SYSCTL_INT(_machdep_misc, OID_AUTO, fake_pte_corruption,
+    CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
+    &pmap_inject_pte_corruption, 0,
+    "Fake a PTE corruption event (induces NMI IPIs and panics the system)");
 
 extern int traptrace_enabled;
 SYSCTL_INT(_machdep_misc, OID_AUTO, traptrace_enabled,

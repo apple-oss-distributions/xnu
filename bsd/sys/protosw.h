@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2019 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -74,9 +74,10 @@
 
 /*
  * The arguments to the ctlinput routine are
- *      (*protosw[].pr_ctlinput)(cmd, sa, arg);
- * where cmd is one of the commands below, sa is a pointer to a sockaddr,
- * and arg is a `void *' argument used within a protocol family.
+ *      (*protosw[].pr_ctlinput)(cmd, sa, arg, ifnet);
+ * where `cmd' is one of the commands below, `sa' is a pointer to a sockaddr,
+ * `arg' is a `void *' argument used within a protocol family (typically
+ * that's a `struct ipctlparam *') and `ifp' is a pointer to the network interface.
  */
 #define PRC_IFDOWN              0       /* interface transition */
 #define PRC_ROUTEDEAD           1       /* select new route if possible ??? */
@@ -115,6 +116,26 @@
 #include <sys/socketvar.h>
 #include <sys/queue.h>
 #include <kern/locks.h>
+
+
+/*
+ * argument type for the 3rd arg of pr_ctlinput()
+ * should be consulted only with AF_INET family.
+ *
+ * IPv4 ICMP IPv4 [exthdrs] finalhdr payload
+ * ^    ^    ^              ^
+ * |    |    |              ipc_off
+ * |    |    ipc_icmp_ip
+ * |    ipc_icmp
+ * ipc_m
+ *
+ */
+struct ipctlparam {
+	struct ip   *ipc_icmp_ip;  /* ip header of target packet. Must be the first field */
+	struct mbuf *ipc_m;        /* start of mbuf chain */
+	struct icmp *ipc_icmp;     /* icmp header of target packet */
+	size_t       ipc_off;      /* offset of the target proto header */
+};
 
 /* Forward declare these structures referenced from prototypes below. */
 struct mbuf;
@@ -320,6 +341,25 @@ struct protosw {
 #endif /* BSD_KERNEL_PRIVATE */
 
 #ifdef BSD_KERNEL_PRIVATE
+#if SKYWALK
+struct protoctl_ev_val {
+	uint32_t val;
+	uint32_t tcp_seq_number;
+};
+
+extern void
+protoctl_event_enqueue_nwk_wq_entry(struct ifnet *ifp, struct sockaddr *p_laddr,
+    struct sockaddr *p_raddr, uint16_t lport, uint16_t rport, uint8_t protocol,
+    uint32_t protoctl_event_code, struct protoctl_ev_val *p_protoctl_ev_val);
+
+struct protoctl_ev_val;
+/* Proto event declarations */
+extern struct eventhandler_lists_ctxt protoctl_evhdlr_ctxt;
+typedef void (*protoctl_event_fn)(struct eventhandler_entry_arg, struct ifnet *,
+    struct sockaddr *, struct sockaddr*, uint16_t, uint16_t, uint8_t, uint32_t,
+    struct protoctl_ev_val *);
+EVENTHANDLER_DECLARE(protoctl_event, protoctl_event_fn);
+#endif /* SKYWALK */
 #ifdef PRCREQUESTS
 char    *prcrequests[] = {
 	"IFDOWN", "ROUTEDEAD", "IFUP", "DEC-BIT-QUENCH2",

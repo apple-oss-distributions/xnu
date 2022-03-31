@@ -233,7 +233,7 @@ fatfile_getarch_with_bits(
  *    a range that a slice should also not try to cover
  */
 load_return_t
-fatfile_validate_fatarches(vm_offset_t data_ptr, vm_size_t data_size)
+fatfile_validate_fatarches(vm_offset_t data_ptr, vm_size_t data_size, off_t file_size)
 {
 	uint32_t magic;
 	size_t nfat_arch, max_nfat_arch, i, j;
@@ -281,6 +281,11 @@ fatfile_validate_fatarches(vm_offset_t data_ptr, vm_size_t data_size)
 			return LOAD_BADMACHO;
 		}
 		uint32_t i_end = i_begin + i_size;
+
+		if ((off_t)i_end > file_size) {
+			/* start + size would exceed file size */
+			return LOAD_BADMACHO;
+		}
 
 		for (j = i + 1; j < nfat_arch; j++) {
 			uint32_t j_begin = OSSwapBigToHostInt32(arches[j].offset);

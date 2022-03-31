@@ -28,6 +28,7 @@
 #ifndef ARM64_MONOTONIC_H
 #define ARM64_MONOTONIC_H
 
+#include <stdbool.h>
 #include <sys/cdefs.h>
 
 #if MONOTONIC
@@ -37,6 +38,8 @@
 #if KERNEL_PRIVATE
 
 __BEGIN_DECLS
+
+extern const bool mt_core_supported;
 
 #if MONOTONIC && !CPMU_AIC_PMI
 #define MONOTONIC_FIQ 1

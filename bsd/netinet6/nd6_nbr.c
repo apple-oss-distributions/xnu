@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2020 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -159,6 +159,13 @@ SYSCTL_DECL(_net_inet6_ip6);
 SYSCTL_INT(_net_inet6_ip6, OID_AUTO, dad_enhanced, CTLFLAG_RW | CTLFLAG_LOCKED,
     &dad_enhanced, 0,
     "Enable Enhanced DAD, which adds a random nonce to NS messages for DAD.");
+
+#if DEBUG || DEVELOPMENT
+static int  ip6_p2p_debug = 0;
+SYSCTL_INT(_net_inet6_ip6, OID_AUTO, ip6_p2p_debug, CTLFLAG_RW | CTLFLAG_LOCKED,
+    &ip6_p2p_debug, 0,
+    "Enable more instrumentation for IPv6 P2P use-case");
+#endif
 
 /*
  * Obtain a link-layer source cache entry for the sender.
@@ -524,7 +531,7 @@ nd6_ns_input(
 	}
 
 	nd6_cache_lladdr(ifp, &saddr6, lladdr, lladdrlen,
-	    ND_NEIGHBOR_SOLICIT, 0);
+	    ND_NEIGHBOR_SOLICIT, 0, NULL);
 
 	nd6_na_output(ifp, &saddr6, &taddr6,
 	    ((anycast || proxy || !tlladdr || oflgclr) ? 0 : ND_NA_FLAG_OVERRIDE) |
@@ -1643,7 +1650,7 @@ struct dadq {
 	uint32_t dad_nonce[ND_OPT_NONCE_LEN32];
 };
 
-static ZONE_DECLARE(dad_zone, "nd6_dad", sizeof(struct dadq), ZC_ZFREE_CLEARMEM);
+static ZONE_DEFINE_TYPE(dad_zone, "nd6_dad", struct dadq, ZC_ZFREE_CLEARMEM);
 static struct dadq_head dadq;
 
 void
@@ -1719,6 +1726,10 @@ nd6_dad_start(
 	struct in6_ifaddr *ia = (struct in6_ifaddr *)ifa;
 	struct dadq *dp;
 
+	if (ifa->ifa_ifp == NULL) {
+		panic("nd6_dad_start: ifa->ifa_ifp == NULL");
+	}
+
 	nd6log2(debug, "%s - %s ifp %s ia6_flags 0x%x\n",
 	    __func__,
 	    ip6_sprintf(&ia->ia_addr.sin6_addr),
@@ -1747,9 +1758,7 @@ nd6_dad_start(
 		return;
 	}
 	IFA_UNLOCK(&ia->ia_ifa);
-	if (ifa->ifa_ifp == NULL) {
-		panic("nd6_dad_start: ifa->ifa_ifp == NULL");
-	}
+
 	if (!(ifa->ifa_ifp->if_flags & IFF_UP) ||
 	    (ifa->ifa_ifp->if_eflags & IFEF_IPV6_ND6ALT)) {
 		return;
@@ -1981,6 +1990,9 @@ nd6_dad_timer(struct ifaddr *ifa)
 			    if_name(ia->ia_ifp));
 			nd6_dad_duplicated(ifa);
 			/* (*dp) will be freed in nd6_dad_duplicated() */
+#if SKYWALK
+			SK_NXS_MS_IF_ADDR_GENCNT_INC(ia->ia_ifp);
+#endif /* SKYWALK */
 		} else if (dad_enhanced != 0 &&
 		    dp->dad_ns_lcount > 0 &&
 		    dp->dad_ns_lcount > dp->dad_loopbackprobe) {
@@ -2050,6 +2062,9 @@ nd6_dad_timer(struct ifaddr *ifa)
 			in6_post_msg(ia->ia_ifp, KEV_INET6_NEW_USER_ADDR, ia,
 			    dp->dad_lladdr);
 			nd6_dad_detach(dp, ifa);
+#if SKYWALK
+			SK_NXS_MS_IF_ADDR_GENCNT_INC(ia->ia_ifp);
+#endif /* SKYWALK */
 		}
 	}
 
@@ -2514,22 +2529,25 @@ int
 nd6_alt_node_present(struct ifnet *ifp, struct sockaddr_in6 *sin6,
     struct sockaddr_dl *sdl, int32_t rssi, int lqm, int npm)
 {
-	struct rtentry *rt;
-	struct llinfo_nd6 *ln;
+	struct rtentry *rt = NULL;
+	struct llinfo_nd6 *ln = NULL;
 	struct  if_llreach *lr = NULL;
+	int nd6_nc_updated = 0;
 	const uint32_t temp_embedded_id = sin6->sin6_addr.s6_addr16[1];
 	const uint32_t temp_ifscope_id = sin6->sin6_scope_id;
 
-	if (in6_embedded_scope && IN6_IS_SCOPE_LINKLOCAL(&sin6->sin6_addr) &&
-	    (temp_embedded_id == 0)) {
-		sin6->sin6_addr.s6_addr16[1] = htons(ifp->if_index);
-	}
-	if (!in6_embedded_scope && IN6_IS_SCOPE_LINKLOCAL(&sin6->sin6_addr) && (temp_ifscope_id == 0)) {
-		sin6->sin6_scope_id = ifp->if_index;
+	if (IN6_IS_SCOPE_LINKLOCAL(&sin6->sin6_addr)) {
+		if (in6_embedded_scope) {
+			if (temp_embedded_id == 0) {
+				sin6->sin6_addr.s6_addr16[1] = htons(ifp->if_index);
+			}
+		} else if (temp_ifscope_id == 0) {
+			sin6->sin6_scope_id = ifp->if_index;
+		}
 	}
 
 	nd6_cache_lladdr(ifp, &sin6->sin6_addr, LLADDR(sdl), sdl->sdl_alen,
-	    ND_NEIGHBOR_ADVERT, 0);
+	    ND_NEIGHBOR_ADVERT, 0, &nd6_nc_updated);
 
 	LCK_MTX_ASSERT(rnh_lock, LCK_MTX_ASSERT_NOTOWNED);
 	lck_mtx_lock(rnh_lock);
@@ -2538,10 +2556,11 @@ nd6_alt_node_present(struct ifnet *ifp, struct sockaddr_in6 *sin6,
 	    ifp->if_index);
 
 	/* Restore the address that was passed to us */
-	if (in6_embedded_scope && temp_embedded_id == 0) {
-		sin6->sin6_addr.s6_addr16[1] = 0;
-	}
-	if (!in6_embedded_scope && temp_ifscope_id == 0) {
+	if (in6_embedded_scope) {
+		if (temp_embedded_id == 0) {
+			sin6->sin6_addr.s6_addr16[1] = 0;
+		}
+	} else if (temp_ifscope_id == 0) {
 		sin6->sin6_scope_id = 0;
 	}
 
@@ -2572,31 +2591,47 @@ nd6_alt_node_present(struct ifnet *ifp, struct sockaddr_in6 *sin6,
 	if (rt == NULL) {
 		log(LOG_ERR, "%s: failed to add/update host route to %s.\n",
 		    __func__, ip6_sprintf(&sin6->sin6_addr));
+#if DEBUG || DEVELOPMENT
+		if (ip6_p2p_debug) {
+			panic("%s: failed to add/update host route to %s.\n",
+			    __func__, ip6_sprintf(&sin6->sin6_addr));
+		}
+#endif
 		return EHOSTUNREACH;
-	} else {
-		nd6log(debug, "%s: host route to %s [lr=0x%llx]\n",
-		    __func__, ip6_sprintf(&sin6->sin6_addr),
-		    (uint64_t)VM_KERNEL_ADDRPERM(lr));
-		return 0;
 	}
+
+	nd6log(debug, "%s: Successfully added/updated host route to %s [lr=0x%llx]\n",
+	    __func__, ip6_sprintf(&sin6->sin6_addr),
+	    (uint64_t)VM_KERNEL_ADDRPERM(lr));
+	/*
+	 * nd6_nc_updated not set implies that nothing was updated
+	 * in the neighbor cache. Convey that as EEXIST to callers.
+	 */
+	if (nd6_nc_updated == 0) {
+		return EEXIST;
+	}
+	return 0;
 }
 
-void
+int
 nd6_alt_node_absent(struct ifnet *ifp, struct sockaddr_in6 *sin6, struct sockaddr_dl *sdl)
 {
-	struct rtentry *rt;
+	struct rtentry *rt = NULL;
+	int error = 0;
 	const uint32_t temp_embedded_id = sin6->sin6_addr.s6_addr16[1];
 	const uint32_t temp_ifscope_id = sin6->sin6_scope_id;
 
 	nd6log(debug, "%s: host route to %s\n", __func__,
 	    ip6_sprintf(&sin6->sin6_addr));
 
-	if (in6_embedded_scope && IN6_IS_SCOPE_LINKLOCAL(&sin6->sin6_addr) &&
-	    (temp_embedded_id == 0)) {
-		sin6->sin6_addr.s6_addr16[1] = htons(ifp->if_index);
-	}
-	if (!in6_embedded_scope && IN6_IS_SCOPE_LINKLOCAL(&sin6->sin6_addr) && (temp_ifscope_id == 0)) {
-		sin6->sin6_scope_id = ifp->if_index;
+	if (IN6_IS_SCOPE_LINKLOCAL(&sin6->sin6_addr)) {
+		if (in6_embedded_scope) {
+			if (temp_embedded_id == 0) {
+				sin6->sin6_addr.s6_addr16[1] = htons(ifp->if_index);
+			}
+		} else if (temp_ifscope_id == 0) {
+			sin6->sin6_scope_id = ifp->if_index;
+		}
 	}
 
 	LCK_MTX_ASSERT(rnh_lock, LCK_MTX_ASSERT_NOTOWNED);
@@ -2606,19 +2641,17 @@ nd6_alt_node_absent(struct ifnet *ifp, struct sockaddr_in6 *sin6, struct sockadd
 	    ifp->if_index);
 
 	/* Restore the address that was passed to us */
-	if (in6_embedded_scope && temp_embedded_id == 0) {
-		sin6->sin6_addr.s6_addr16[1] = 0;
-	}
-	if (!in6_embedded_scope && temp_ifscope_id == 0) {
+	if (in6_embedded_scope) {
+		if (temp_embedded_id == 0) {
+			sin6->sin6_addr.s6_addr16[1] = 0;
+		}
+	} else if (temp_ifscope_id == 0) {
 		sin6->sin6_scope_id = 0;
 	}
 
 	if (rt != NULL) {
 		RT_LOCK(rt);
-
-		if (!(rt->rt_flags & (RTF_CLONING | RTF_PRCLONING)) &&
-		    (rt->rt_flags & (RTF_HOST | RTF_LLINFO | RTF_WASCLONED)) ==
-		    (RTF_HOST | RTF_LLINFO | RTF_WASCLONED)) {
+		if (IS_DYNAMIC_DIRECT_HOSTROUTE(rt)) {
 			/*
 			 * Copy the link layer information in SDL when present
 			 * as it later gets used to issue the kernel event for
@@ -2633,16 +2666,31 @@ nd6_alt_node_absent(struct ifnet *ifp, struct sockaddr_in6 *sin6, struct sockadd
 			rt->rt_flags |= RTF_CONDEMNED;
 			RT_UNLOCK(rt);
 
-			(void) rtrequest_locked(RTM_DELETE, rt_key(rt),
+			error = rtrequest_locked(RTM_DELETE, rt_key(rt),
 			    (struct sockaddr *)NULL, rt_mask(rt), 0,
 			    (struct rtentry **)NULL);
 
 			rtfree_locked(rt);
 		} else {
+			error = EHOSTUNREACH;
 			RT_REMREF_LOCKED(rt);
 			RT_UNLOCK(rt);
 		}
+	} else {
+		error = EHOSTUNREACH;
+	}
+
+	if (error == 0) {
+		nd6log(debug, "%s: Successfully deleted host route to %s "
+		    "for interface %s.\n", __func__, ip6_sprintf(&sin6->sin6_addr),
+		    ifp->if_xname);
+	} else {
+		nd6log(error, "%s: Failed to delete host route to %s "
+		    "for interface %s with error :%d.\n", __func__,
+		    ip6_sprintf(&sin6->sin6_addr),
+		    ifp->if_xname, error);
 	}
 
 	lck_mtx_unlock(rnh_lock);
+	return error;
 }

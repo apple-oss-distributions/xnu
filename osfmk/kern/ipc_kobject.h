@@ -141,7 +141,7 @@ __enum_decl(ipc_kotype_t, natural_t, {
 	IKOT_TASK_READ                = 45,
 	IKOT_THREAD_INSPECT           = 46,
 	IKOT_THREAD_READ              = 47,
-	IKOT_SUID_CRED                = 48,
+	// IKOT_SUID_CRED             = 48,
 #if HYPERVISOR
 	IKOT_HYPERVISOR               = 49,
 #endif

@@ -43,9 +43,6 @@ __ZN5IORTCnwEm
 __ZN9IODTNVRAM10gMetaClassE
 __ZN9IODTNVRAM10superClassE
 __ZN9IODTNVRAM10safeToSyncEv
-__ZN9IODTNVRAM13initVariablesEv
-__ZN9IODTNVRAM22readNVRAMPropertyType1EP15IORegistryEntryPPK8OSSymbolPP6OSData
-__ZN9IODTNVRAM23writeNVRAMPropertyType1EP15IORegistryEntryPK8OSSymbolP6OSData
 __ZN9IODTNVRAM9metaClassE
 __ZN9IODTNVRAMC2EPK11OSMetaClass
 __ZN9IODTNVRAMD2Ev
@@ -76,7 +73,7 @@ _cons_cinput
 _cons_ops
 _conslog_putc
 _convert_port_entry_to_map
-_current_act
+_current_act:_current_thread
 _delay
 _delay_for_interval
 _des_ecb_encrypt
@@ -111,12 +108,11 @@ _kernel_map
 _kernel_pmap
 _kev_post_msg
 _kev_post_msg_nowait
-_kfree
+_kfree:_kfree_external
 _kmem_alloc:_kmem_alloc_external
 _kmem_free
 _kmputc
 _krealloc_data:_krealloc_data_external
-_krealloc_data_addr:_krealloc_data_addr_external
 _lck_mtx_assert
 _lck_rw_done
 _ldisc_deregister

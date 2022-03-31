@@ -224,8 +224,8 @@ static integer_t        drain_depth_limit;
 #define DEFAULT_DRAIN_CEILING BASEPRI_FOREGROUND
 static integer_t        drain_ceiling;
 
-static ZONE_DECLARE(sched_group_zone, "sched groups",
-    sizeof(struct sched_group), ZC_NOCALLOUT);
+static ZONE_DEFINE_TYPE(sched_group_zone, "sched groups",
+    struct sched_group, ZC_NOCALLOUT);
 
 static uint64_t         num_sched_groups = 0;
 static queue_head_t     sched_groups;

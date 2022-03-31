@@ -327,8 +327,8 @@ static const struct coalition_type
 	},
 };
 
-ZONE_DECLARE(coalition_zone, "coalitions",
-    sizeof(struct coalition), ZC_ZFREE_CLEARMEM);
+ZONE_DEFINE_TYPE(coalition_zone, "coalitions",
+    struct coalition, ZC_ZFREE_CLEARMEM);
 
 #define coal_call(coal, func, ...) \
 	(s_coalition_types[(coal)->type].func)(coal, ## __VA_ARGS__)

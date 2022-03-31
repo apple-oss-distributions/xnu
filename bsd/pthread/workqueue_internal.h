@@ -255,7 +255,7 @@ struct workqueue {
 
 	// BG/MT, UT, DEF, IN, UI, AUI. No manager bucket for cooperative pool
 	uint8_t wq_cooperative_queue_scheduled_count[WORKQ_NUM_QOS_BUCKETS];
-	uint16_t wq_cooperative_queue_best_req_qos: 3,
+	uint16_t wq_cooperative_queue_best_req_qos: 3, /* UN means no request, returns BG for BG/MT bucket */
 	    wq_cooperative_queue_has_limited_max_size:1, /* if set, max size of cooperative pool per QoS is 1 */
 	    unused:12;
 	struct workq_threadreq_tailq wq_cooperative_queue[WORKQ_NUM_QOS_BUCKETS];

@@ -454,7 +454,7 @@ mt_cur_cpu_cycles(void)
 void
 mt_cur_cpu_cycles_instrs_speculative(uint64_t *cycles, __unused uint64_t *instrs)
 {
-	uint64_t counts[MT_CORE_NFIXED];
+	uint64_t counts[MT_CORE_NFIXED] = {0};
 	struct mt_cpu *mtc = mt_cur_cpu();
 
 	assert(ml_get_interrupts_enabled() == FALSE);
@@ -575,6 +575,7 @@ mt_stackshot_task(task_t task, uint64_t *instrs, uint64_t *cycles)
 
 bool mt_microstackshots = false;
 unsigned int mt_microstackshot_ctr = 0;
+uint64_t mt_microstackshot_period = 0;
 mt_pmi_fn mt_microstackshot_pmi_handler = NULL;
 void *mt_microstackshot_ctx = NULL;
 uint64_t mt_core_reset_values[MT_CORE_NFIXED] = { 0 };
@@ -606,6 +607,7 @@ mt_microstackshot_start(unsigned int ctr, uint64_t period, mt_pmi_fn handler,
 		return error;
 	}
 
+	mt_microstackshot_period = period;
 	mt_microstackshots = true;
 
 	return 0;
@@ -615,6 +617,7 @@ int
 mt_microstackshot_stop(void)
 {
 	mt_microstackshots = false;
+	mt_microstackshot_period = 0;
 	memset(mt_core_reset_values, 0, sizeof(mt_core_reset_values));
 
 	return 0;

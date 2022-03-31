@@ -162,7 +162,6 @@ int     nfs3_vnop_mkdir(struct vnop_mkdir_args *);
 int     nfs3_vnop_rmdir(struct vnop_rmdir_args *);
 int     nfs3_vnop_symlink(struct vnop_symlink_args *);
 
-
 vnop_t **nfsv2_vnodeop_p;
 static const struct vnodeopv_entry_desc nfsv2_vnodeop_entries[] = {
 	{ .opve_op = &vnop_default_desc, .opve_impl = (vnop_t *)vn_default_error },
@@ -208,7 +207,6 @@ static const struct vnodeopv_entry_desc nfsv2_vnodeop_entries[] = {
 };
 const struct vnodeopv_desc nfsv2_vnodeop_opv_desc =
 { &nfsv2_vnodeop_p, nfsv2_vnodeop_entries };
-
 
 #if CONFIG_NFS4
 vnop_t **nfsv4_vnodeop_p;
@@ -467,7 +465,6 @@ int     nfs_sillyrename(nfsnode_t, nfsnode_t, struct componentname *, vfs_contex
 int     nfs_getattr_internal(nfsnode_t, struct nfs_vattr *, vfs_context_t, int);
 int     nfs_refresh_fh(nfsnode_t, vfs_context_t);
 
-
 ZONE_VIEW_DEFINE(ZV_NFSDIROFF, "NFSV3 diroff",
     KHEAP_ID_DATA_BUFFERS, sizeof(struct nfsdmap));
 
@@ -629,7 +626,6 @@ nfsmout:
 	return error;
 }
 
-
 /*
  * NFS access vnode op.
  * For NFS version 2, just return ok. File accesses may fail later.
@@ -661,7 +657,6 @@ nfs_vnop_access(
 	}
 	nfsvers = nmp->nm_vers;
 
-
 	if (nfsvers == NFS_VER2 || NMFLAG(nmp, NOOPAQUE_AUTH)) {
 		if ((ap->a_action & KAUTH_VNODE_WRITE_RIGHTS) &&
 		    vfs_isrdonly(vnode_mount(vp))) {
@@ -685,9 +680,7 @@ nfs_vnop_access(
 	access = 0;
 	if (vnode_isdir(vp)) {
 		/* directory */
-		if (ap->a_action &
-		    (KAUTH_VNODE_LIST_DIRECTORY |
-		    KAUTH_VNODE_READ_EXTATTRIBUTES)) {
+		if (ap->a_action & KAUTH_VNODE_LIST_DIRECTORY) {
 			access |= NFS_ACCESS_READ;
 		}
 		if (ap->a_action & KAUTH_VNODE_SEARCH) {
@@ -703,9 +696,7 @@ nfs_vnop_access(
 		}
 	} else {
 		/* file */
-		if (ap->a_action &
-		    (KAUTH_VNODE_READ_DATA |
-		    KAUTH_VNODE_READ_EXTATTRIBUTES)) {
+		if (ap->a_action & KAUTH_VNODE_READ_DATA) {
 			access |= NFS_ACCESS_READ;
 		}
 		if (ap->a_action & KAUTH_VNODE_WRITE_DATA) {
@@ -1874,7 +1865,6 @@ nfsmout:
 	return error;
 }
 
-
 /*
  * NFS getattr call from vfs.
  */
@@ -1899,7 +1889,6 @@ nfsmout:
 	 VNODE_ATTR_va_access_time |    \
 	 VNODE_ATTR_va_fileid |         \
 	 VNODE_ATTR_va_type)
-
 
 int
 nfs3_vnop_getattr(
@@ -1928,7 +1917,6 @@ nfs3_vnop_getattr(
 	VATTR_RETURN(vap, va_iosize, nfs_iosize);
 
 	supported_attrs = NFS3_SUPPORTED_VATTRS;
-
 	if ((vap->va_active & supported_attrs) == 0) {
 		return 0;
 	}
@@ -1974,7 +1962,6 @@ nfs3_vnop_getattr(
 	vap->va_change_time.tv_sec = nva->nva_timesec[NFSTIME_CHANGE];
 	vap->va_change_time.tv_nsec = nva->nva_timensec[NFSTIME_CHANGE];
 	VATTR_SET_SUPPORTED(vap, va_change_time);
-
 
 	// VATTR_RETURN(vap, va_encoding, 0xffff /* kTextEncodingUnknown */);
 out:
@@ -2372,7 +2359,6 @@ nfs3_setattr_rpc(
 	VATTR_SET_SUPPORTED(vap, va_access_time);
 	VATTR_SET_SUPPORTED(vap, va_modify_time);
 
-
 	if (VATTR_IS_ACTIVE(vap, va_flags)
 	    ) {
 		if (vap->va_flags) {    /* we don't support setting flags */
@@ -2467,7 +2453,8 @@ nfs3_setattr_rpc(
 	}
 	nfsm_chain_build_done(error, &nmreq);
 	nfsmout_if(error);
-	error = nfs_request(np, NULL, &nmreq, NFSPROC_SETATTR, ctx, NULL, &nmrep, &xid, &status);
+	error = nfs_request2(np, NULL, &nmreq, NFSPROC_SETATTR,
+	    vfs_context_thread(ctx), vfs_context_ucred(ctx), NULL, R_NOUMOUNTINTR, &nmrep, &xid, &status);
 	if ((lockerror = nfs_node_lock(np))) {
 		error = lockerror;
 	}
@@ -3726,7 +3713,6 @@ skipread:
 			}
 			nfs_buf_write_delayed(bp);
 		}
-
 	} while (uio_resid(uio) > 0 && n > 0);
 
 out:
@@ -3963,7 +3949,8 @@ nfs3_write_rpc_async(
 	error = nfsm_chain_add_uio(&nmreq, uio, len);
 	nfsm_chain_build_done(error, &nmreq);
 	nfsmout_if(error);
-	error = nfs_request_async(np, NULL, &nmreq, NFSPROC_WRITE, thd, cred, NULL, 0, cb, reqp);
+	error = nfs_request_async(np, NULL, &nmreq, NFSPROC_WRITE,
+	    thd, cred, NULL, R_NOUMOUNTINTR, cb, reqp);
 nfsmout:
 	nfsm_chain_cleanup(&nmreq);
 	return error;
@@ -4155,7 +4142,7 @@ nfs3_vnop_mknod(
 	nfsmout_if(error);
 
 	error = nfs_request_async(dnp, NULL, &nmreq, NFSPROC_MKNOD,
-	    vfs_context_thread(ctx), vfs_context_ucred(ctx), NULL, 0, NULL, &req);
+	    vfs_context_thread(ctx), vfs_context_ucred(ctx), NULL, R_NOUMOUNTINTR, NULL, &req);
 	if (!error) {
 		error = nfs_request_async_finish(req, &nmrep, &xid, &status);
 	}
@@ -4327,7 +4314,7 @@ again:
 	nfsmout_if(error);
 
 	error = nfs_request_async(dnp, NULL, &nmreq, NFSPROC_CREATE,
-	    vfs_context_thread(ctx), vfs_context_ucred(ctx), NULL, 0, NULL, &req);
+	    vfs_context_thread(ctx), vfs_context_ucred(ctx), NULL, R_NOUMOUNTINTR, NULL, &req);
 	if (!error) {
 		if (!namedattrs) {
 			nfs_dulookup_start(dul, dnp, ctx);
@@ -4686,7 +4673,8 @@ nfs3_remove_rpc(
 	nfsm_chain_build_done(error, &nmreq);
 	nfsmout_if(error);
 
-	error = nfs_request2(dnp, NULL, &nmreq, NFSPROC_REMOVE, thd, cred, NULL, 0, &nmrep, &xid, &status);
+	error = nfs_request2(dnp, NULL, &nmreq, NFSPROC_REMOVE,
+	    thd, cred, NULL, R_NOUMOUNTINTR, &nmrep, &xid, &status);
 
 	if ((lockerror = nfs_node_lock(dnp))) {
 		error = lockerror;
@@ -4940,7 +4928,8 @@ nfs3_rename_rpc(
 	nfsm_chain_build_done(error, &nmreq);
 	nfsmout_if(error);
 
-	error = nfs_request(fdnp, NULL, &nmreq, NFSPROC_RENAME, ctx, NULL, &nmrep, &xid, &status);
+	error = nfs_request2(fdnp, NULL, &nmreq, NFSPROC_RENAME,
+	    vfs_context_thread(ctx), vfs_context_ucred(ctx), NULL, R_NOUMOUNTINTR, &nmrep, &xid, &status);
 
 	if ((lockerror = nfs_node_lock2(fdnp, tdnp))) {
 		error = lockerror;
@@ -5039,7 +5028,8 @@ nfs3_vnop_link(
 	nfsm_chain_add_name(error, &nmreq, cnp->cn_nameptr, cnp->cn_namelen, nmp);
 	nfsm_chain_build_done(error, &nmreq);
 	nfsmout_if(error);
-	error = nfs_request(np, NULL, &nmreq, NFSPROC_LINK, ctx, NULL, &nmrep, &xid, &status);
+	error = nfs_request2(np, NULL, &nmreq, NFSPROC_LINK,
+	    vfs_context_thread(ctx), vfs_context_ucred(ctx), NULL, R_NOUMOUNTINTR, &nmrep, &xid, &status);
 
 	if ((lockerror = nfs_node_lock2(tdnp, np))) {
 		error = lockerror;
@@ -5173,7 +5163,7 @@ nfs3_vnop_symlink(
 	nfsmout_if(error);
 
 	error = nfs_request_async(dnp, NULL, &nmreq, NFSPROC_SYMLINK,
-	    vfs_context_thread(ctx), vfs_context_ucred(ctx), NULL, 0, NULL, &req);
+	    vfs_context_thread(ctx), vfs_context_ucred(ctx), NULL, R_NOUMOUNTINTR, NULL, &req);
 	if (!error) {
 		if (!namedattrs) {
 			nfs_dulookup_start(dul, dnp, ctx);
@@ -5357,7 +5347,7 @@ nfs3_vnop_mkdir(
 	nfsmout_if(error);
 
 	error = nfs_request_async(dnp, NULL, &nmreq, NFSPROC_MKDIR,
-	    vfs_context_thread(ctx), vfs_context_ucred(ctx), NULL, 0, NULL, &req);
+	    vfs_context_thread(ctx), vfs_context_ucred(ctx), NULL, R_NOUMOUNTINTR, NULL, &req);
 	if (!error) {
 		if (!namedattrs) {
 			nfs_dulookup_start(dul, dnp, ctx);
@@ -5517,7 +5507,7 @@ nfs3_vnop_rmdir(
 	nfsmout_if(error);
 
 	error = nfs_request_async(dnp, NULL, &nmreq, NFSPROC_RMDIR,
-	    vfs_context_thread(ctx), vfs_context_ucred(ctx), NULL, 0, NULL, &req);
+	    vfs_context_thread(ctx), vfs_context_ucred(ctx), NULL, R_NOUMOUNTINTR, NULL, &req);
 	if (!error) {
 		if (!namedattrs) {
 			nfs_dulookup_start(dul, dnp, ctx);
@@ -5882,7 +5872,6 @@ nfs_invaldir_cookies(nfsnode_t dnp)
 void
 nfs_invaldir(nfsnode_t dnp)
 {
-
 	nfs_invaldir_cookies(dnp);
 }
 
@@ -7155,7 +7144,7 @@ nfs3_commit_rpc(
 	nfsm_chain_build_done(error, &nmreq);
 	nfsmout_if(error);
 	error = nfs_request2(np, NULL, &nmreq, NFSPROC_COMMIT,
-	    current_thread(), cred, NULL, 0, &nmrep, &xid, &status);
+	    current_thread(), cred, NULL, R_NOUMOUNTINTR, &nmrep, &xid, &status);
 	if ((lockerror = nfs_node_lock(np))) {
 		error = lockerror;
 	}

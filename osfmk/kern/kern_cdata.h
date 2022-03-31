@@ -120,6 +120,7 @@ struct kcdata_descriptor {
 	mach_vm_address_t kcd_addr_begin;
 	mach_vm_address_t kcd_addr_end;
 	struct kcdata_compress_descriptor kcd_comp_d;
+	uint32_t            kcd_endalloced;
 };
 
 typedef struct kcdata_descriptor * kcdata_descriptor_t;
@@ -147,7 +148,8 @@ kern_return_t kcdata_init_compress(kcdata_descriptor_t, int hdr_tag, void (*memc
 kern_return_t kcdata_push_data(kcdata_descriptor_t data, uint32_t type, uint32_t size, const void *input_data);
 kern_return_t kcdata_push_array(kcdata_descriptor_t data, uint32_t type_of_element, uint32_t size_of_element, uint32_t count, const void *input_data);
 kern_return_t kcdata_compress_memory_addr(kcdata_descriptor_t data, void *ptr);
-kern_return_t kcdata_finish_compression(kcdata_descriptor_t data);
+void *kcdata_endalloc(kcdata_descriptor_t data, size_t length);
+kern_return_t kcdata_finish(kcdata_descriptor_t data);
 void kcdata_compression_window_open(kcdata_descriptor_t data);
 kern_return_t kcdata_compression_window_close(kcdata_descriptor_t data);
 void kcd_finalize_compression(kcdata_descriptor_t data);

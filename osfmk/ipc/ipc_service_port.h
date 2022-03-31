@@ -61,10 +61,10 @@ struct ipc_service_port_label {
 	mach_port_context_t               ispl_launchd_context;     /* context used to guard the port, specific to launchd */
 	mach_port_name_t                  ispl_launchd_name;        /* port name in launchd's ipc space */
 	ipc_service_port_label_flags_t    ispl_flags;
-#if DEVELOPMENT || DEBUG
+#if CONFIG_SERVICE_PORT_INFO
 	uint8_t             ispl_domain;             /* launchd domain */
 	char                *ispl_service_name;       /* string name used to identify the service port */
-#endif
+#endif /* CONFIG_SERVICE_PORT_INFO */
 };
 
 typedef struct ipc_service_port_label* ipc_service_port_label_t;
@@ -116,10 +116,10 @@ ipc_service_port_label_set_attr(ipc_service_port_label_t port_splabel, mach_port
 void
 ipc_service_port_label_get_attr(ipc_service_port_label_t port_splabel, mach_port_name_t *name, mach_port_context_t *context);
 
-#if DEVELOPMENT || DEBUG
+#if CONFIG_SERVICE_PORT_INFO
 void
 ipc_service_port_label_get_info(ipc_service_port_label_t port_splabel, mach_service_port_info_t info);
-#endif /* DEVELOPMENT || DEBUG */
+#endif /* CONFIG_SERVICE_PORT_INFO */
 
 #endif /* MACH_KERNEL_PRIVATE */
 #endif /* _IPC_IPC_SERVICE_PORT_H_ */

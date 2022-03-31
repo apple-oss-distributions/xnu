@@ -23,6 +23,7 @@ T_GLOBAL_META(
 	T_META_RUN_CONCURRENTLY(true)
 	);
 
+#define QUICK_RUN_TIME   (2)
 #define NORMAL_RUN_TIME  (10)
 #define LONG_RUN_TIME    (10*60)
 #define TIMEOUT_OVERHEAD (10)
@@ -78,9 +79,11 @@ VECTOR256       vec256array3[YMM_MAX] VEC256ALIGN;
 #define VEC512ALIGN __attribute ((aligned(64)))
 #define OPMASK uint64_t
 #define KARRAY_MAX              8
+static inline void zero_zmm(void);
+static inline void zero_opmask(void);
 static inline void populate_zmm(void);
 static inline void populate_opmask(void);
-static inline void check_zmm(void);
+static inline void check_zmm(boolean_t check_cookie);
 VECTOR512       vec512array0[ZMM_MAX] VEC512ALIGN;
 VECTOR512       vec512array1[ZMM_MAX] VEC512ALIGN;
 VECTOR512       vec512array2[ZMM_MAX] VEC512ALIGN;
@@ -521,6 +524,22 @@ restore_zmm(VECTOR512 *vecarray)
 }
 
 static inline void
+zero_opmask(void)
+{
+	uint64_t zero = 0x0000000000000000ULL;
+
+	__asm__ volatile ("kmovq %0, %%k0" : :"m" (zero) : "k0");
+	__asm__ volatile ("kmovq %0, %%k1" : :"m" (zero) : "k1");
+	__asm__ volatile ("kmovq %0, %%k2" : :"m" (zero) : "k2");
+	__asm__ volatile ("kmovq %0, %%k3" : :"m" (zero) : "k3");
+	__asm__ volatile ("kmovq %0, %%k4" : :"m" (zero) : "k4");
+	__asm__ volatile ("kmovq %0, %%k5" : :"m" (zero) : "k5");
+	__asm__ volatile ("kmovq %0, %%k6" : :"m" (zero) : "k6");
+	__asm__ volatile ("kmovq %0, %%k7" : :"m" (zero) : "k7");
+	store_opmask(karray0);
+}
+
+static inline void
 populate_opmask(void)
 {
 	uint64_t k[8];
@@ -529,14 +548,14 @@ populate_opmask(void)
 		k[j] = ((uint64_t) getpid() << 32) + (0x11111111 * j);
 	}
 
-	__asm__ volatile ("kmovq %0, %%k0" : :"m" (k[0]));
-	__asm__ volatile ("kmovq %0, %%k1" : :"m" (k[1]));
-	__asm__ volatile ("kmovq %0, %%k2" : :"m" (k[2]));
-	__asm__ volatile ("kmovq %0, %%k3" : :"m" (k[3]));
-	__asm__ volatile ("kmovq %0, %%k4" : :"m" (k[4]));
-	__asm__ volatile ("kmovq %0, %%k5" : :"m" (k[5]));
-	__asm__ volatile ("kmovq %0, %%k6" : :"m" (k[6]));
-	__asm__ volatile ("kmovq %0, %%k7" : :"m" (k[7]));
+	__asm__ volatile ("kmovq %0, %%k0" : :"m" (k[0]) : "k0");
+	__asm__ volatile ("kmovq %0, %%k1" : :"m" (k[1]) : "k1");
+	__asm__ volatile ("kmovq %0, %%k2" : :"m" (k[2]) : "k2");
+	__asm__ volatile ("kmovq %0, %%k3" : :"m" (k[3]) : "k3");
+	__asm__ volatile ("kmovq %0, %%k4" : :"m" (k[4]) : "k4");
+	__asm__ volatile ("kmovq %0, %%k5" : :"m" (k[5]) : "k5");
+	__asm__ volatile ("kmovq %0, %%k6" : :"m" (k[6]) : "k6");
+	__asm__ volatile ("kmovq %0, %%k7" : :"m" (k[7]) : "k7");
 
 	store_opmask(karray0);
 }
@@ -571,6 +590,50 @@ _thread_get_state_avx512(
 }
 
 static inline void
+zero_zmm(void)
+{
+	uint64_t zero[8] VEC512ALIGN = {0};
+
+	__asm__ volatile ("vmovaps  %0, %%zmm0" :: "m" (zero) : "zmm0");
+	__asm__ volatile ("vmovaps  %0, %%zmm1" :: "m" (zero) : "zmm1");
+	__asm__ volatile ("vmovaps  %0, %%zmm2" :: "m" (zero) : "zmm2");
+	__asm__ volatile ("vmovaps  %0, %%zmm3" :: "m" (zero) : "zmm3");
+	__asm__ volatile ("vmovaps  %0, %%zmm4" :: "m" (zero) : "zmm4");
+	__asm__ volatile ("vmovaps  %0, %%zmm5" :: "m" (zero) : "zmm5");
+	__asm__ volatile ("vmovaps  %0, %%zmm6" :: "m" (zero) : "zmm6");
+	__asm__ volatile ("vmovaps  %0, %%zmm7" :: "m" (zero) : "zmm7");
+
+#if defined(__x86_64__)
+	__asm__ volatile ("vmovaps  %0, %%zmm8" :: "m" (zero) : "zmm8");
+	__asm__ volatile ("vmovaps  %0, %%zmm9" :: "m" (zero) : "zmm9");
+	__asm__ volatile ("vmovaps  %0, %%zmm10" :: "m" (zero) : "zmm10");
+	__asm__ volatile ("vmovaps  %0, %%zmm11" :: "m" (zero) : "zmm11");
+	__asm__ volatile ("vmovaps  %0, %%zmm12" :: "m" (zero) : "zmm12");
+	__asm__ volatile ("vmovaps  %0, %%zmm13" :: "m" (zero) : "zmm13");
+	__asm__ volatile ("vmovaps  %0, %%zmm14" :: "m" (zero) : "zmm14");
+	__asm__ volatile ("vmovaps  %0, %%zmm15" :: "m" (zero) : "zmm15");
+	__asm__ volatile ("vmovaps  %0, %%zmm16" :: "m" (zero) : "zmm16");
+	__asm__ volatile ("vmovaps  %0, %%zmm17" :: "m" (zero) : "zmm17");
+	__asm__ volatile ("vmovaps  %0, %%zmm18" :: "m" (zero) : "zmm18");
+	__asm__ volatile ("vmovaps  %0, %%zmm19" :: "m" (zero) : "zmm19");
+	__asm__ volatile ("vmovaps  %0, %%zmm20" :: "m" (zero) : "zmm20");
+	__asm__ volatile ("vmovaps  %0, %%zmm21" :: "m" (zero) : "zmm21");
+	__asm__ volatile ("vmovaps  %0, %%zmm22" :: "m" (zero) : "zmm22");
+	__asm__ volatile ("vmovaps  %0, %%zmm23" :: "m" (zero) : "zmm23");
+	__asm__ volatile ("vmovaps  %0, %%zmm24" :: "m" (zero) : "zmm24");
+	__asm__ volatile ("vmovaps  %0, %%zmm25" :: "m" (zero) : "zmm25");
+	__asm__ volatile ("vmovaps  %0, %%zmm26" :: "m" (zero) : "zmm26");
+	__asm__ volatile ("vmovaps  %0, %%zmm27" :: "m" (zero) : "zmm27");
+	__asm__ volatile ("vmovaps  %0, %%zmm28" :: "m" (zero) : "zmm28");
+	__asm__ volatile ("vmovaps  %0, %%zmm29" :: "m" (zero) : "zmm29");
+	__asm__ volatile ("vmovaps  %0, %%zmm30" :: "m" (zero) : "zmm30");
+	__asm__ volatile ("vmovaps  %0, %%zmm31" :: "m" (zero) : "zmm31");
+#endif
+
+	store_zmm(vec512array0);
+}
+
+static inline void
 populate_zmm(void)
 {
 	int j;
@@ -584,54 +647,54 @@ populate_zmm(void)
 	p[2] = 0x4444444444444444ULL;
 	p[4] = 0x8888888888888888ULL;
 	p[7] = 0xCCCCCCCCCCCCCCCCULL;
-	__asm__ volatile ("vmovaps  %0, %%zmm0" :: "m" (*(__m256i*)p));
-	__asm__ volatile ("vmovaps  %0, %%zmm1" :: "m" (*(__m512i*)p));
-	__asm__ volatile ("vmovaps  %0, %%zmm2" :: "m" (*(__m512i*)p));
-	__asm__ volatile ("vmovaps  %0, %%zmm3" :: "m" (*(__m512i*)p));
-	__asm__ volatile ("vmovaps  %0, %%zmm4" :: "m" (*(__m512i*)p));
-	__asm__ volatile ("vmovaps  %0, %%zmm5" :: "m" (*(__m512i*)p));
-	__asm__ volatile ("vmovaps  %0, %%zmm6" :: "m" (*(__m512i*)p));
-	__asm__ volatile ("vmovaps  %0, %%zmm7" :: "m" (*(__m512i*)p));
+	__asm__ volatile ("vmovaps  %0, %%zmm0" :: "m" (*(__m512i*)p) : "zmm0");
+	__asm__ volatile ("vmovaps  %0, %%zmm1" :: "m" (*(__m512i*)p) : "zmm1");
+	__asm__ volatile ("vmovaps  %0, %%zmm2" :: "m" (*(__m512i*)p) : "zmm2");
+	__asm__ volatile ("vmovaps  %0, %%zmm3" :: "m" (*(__m512i*)p) : "zmm3");
+	__asm__ volatile ("vmovaps  %0, %%zmm4" :: "m" (*(__m512i*)p) : "zmm4");
+	__asm__ volatile ("vmovaps  %0, %%zmm5" :: "m" (*(__m512i*)p) : "zmm5");
+	__asm__ volatile ("vmovaps  %0, %%zmm6" :: "m" (*(__m512i*)p) : "zmm6");
+	__asm__ volatile ("vmovaps  %0, %%zmm7" :: "m" (*(__m512i*)p) : "zmm7");
 
 #if defined(__x86_64__)
 	p[0] = 0x1111111111111111ULL;
 	p[2] = 0x5555555555555555ULL;
 	p[4] = 0x9999999999999999ULL;
 	p[7] = 0xDDDDDDDDDDDDDDDDULL;
-	__asm__ volatile ("vmovaps  %0, %%zmm8" :: "m" (*(__m512i*)p));
-	__asm__ volatile ("vmovaps  %0, %%zmm9" :: "m" (*(__m512i*)p));
-	__asm__ volatile ("vmovaps  %0, %%zmm10" :: "m" (*(__m512i*)p));
-	__asm__ volatile ("vmovaps  %0, %%zmm11" :: "m" (*(__m512i*)p));
-	__asm__ volatile ("vmovaps  %0, %%zmm12" :: "m" (*(__m512i*)p));
-	__asm__ volatile ("vmovaps  %0, %%zmm13" :: "m" (*(__m512i*)p));
-	__asm__ volatile ("vmovaps  %0, %%zmm14" :: "m" (*(__m512i*)p));
-	__asm__ volatile ("vmovaps  %0, %%zmm15" :: "m" (*(__m512i*)p));
+	__asm__ volatile ("vmovaps  %0, %%zmm8" :: "m" (*(__m512i*)p) : "zmm8");
+	__asm__ volatile ("vmovaps  %0, %%zmm9" :: "m" (*(__m512i*)p) : "zmm9");
+	__asm__ volatile ("vmovaps  %0, %%zmm10" :: "m" (*(__m512i*)p) : "zmm10");
+	__asm__ volatile ("vmovaps  %0, %%zmm11" :: "m" (*(__m512i*)p) : "zmm11");
+	__asm__ volatile ("vmovaps  %0, %%zmm12" :: "m" (*(__m512i*)p) : "zmm12");
+	__asm__ volatile ("vmovaps  %0, %%zmm13" :: "m" (*(__m512i*)p) : "zmm13");
+	__asm__ volatile ("vmovaps  %0, %%zmm14" :: "m" (*(__m512i*)p) : "zmm14");
+	__asm__ volatile ("vmovaps  %0, %%zmm15" :: "m" (*(__m512i*)p) : "zmm15");
 
 	p[0] = 0x2222222222222222ULL;
 	p[2] = 0x6666666666666666ULL;
 	p[4] = 0xAAAAAAAAAAAAAAAAULL;
 	p[7] = 0xEEEEEEEEEEEEEEEEULL;
-	__asm__ volatile ("vmovaps  %0, %%zmm16" :: "m" (*(__m512i*)p));
-	__asm__ volatile ("vmovaps  %0, %%zmm17" :: "m" (*(__m512i*)p));
-	__asm__ volatile ("vmovaps  %0, %%zmm18" :: "m" (*(__m512i*)p));
-	__asm__ volatile ("vmovaps  %0, %%zmm19" :: "m" (*(__m512i*)p));
-	__asm__ volatile ("vmovaps  %0, %%zmm20" :: "m" (*(__m512i*)p));
-	__asm__ volatile ("vmovaps  %0, %%zmm21" :: "m" (*(__m512i*)p));
-	__asm__ volatile ("vmovaps  %0, %%zmm22" :: "m" (*(__m512i*)p));
-	__asm__ volatile ("vmovaps  %0, %%zmm23" :: "m" (*(__m512i*)p));
+	__asm__ volatile ("vmovaps  %0, %%zmm16" :: "m" (*(__m512i*)p) : "zmm16");
+	__asm__ volatile ("vmovaps  %0, %%zmm17" :: "m" (*(__m512i*)p) : "zmm17");
+	__asm__ volatile ("vmovaps  %0, %%zmm18" :: "m" (*(__m512i*)p) : "zmm18");
+	__asm__ volatile ("vmovaps  %0, %%zmm19" :: "m" (*(__m512i*)p) : "zmm19");
+	__asm__ volatile ("vmovaps  %0, %%zmm20" :: "m" (*(__m512i*)p) : "zmm20");
+	__asm__ volatile ("vmovaps  %0, %%zmm21" :: "m" (*(__m512i*)p) : "zmm21");
+	__asm__ volatile ("vmovaps  %0, %%zmm22" :: "m" (*(__m512i*)p) : "zmm22");
+	__asm__ volatile ("vmovaps  %0, %%zmm23" :: "m" (*(__m512i*)p) : "zmm23");
 
 	p[0] = 0x3333333333333333ULL;
 	p[2] = 0x7777777777777777ULL;
 	p[4] = 0xBBBBBBBBBBBBBBBBULL;
 	p[7] = 0xFFFFFFFFFFFFFFFFULL;
-	__asm__ volatile ("vmovaps  %0, %%zmm24" :: "m" (*(__m512i*)p));
-	__asm__ volatile ("vmovaps  %0, %%zmm25" :: "m" (*(__m512i*)p));
-	__asm__ volatile ("vmovaps  %0, %%zmm26" :: "m" (*(__m512i*)p));
-	__asm__ volatile ("vmovaps  %0, %%zmm27" :: "m" (*(__m512i*)p));
-	__asm__ volatile ("vmovaps  %0, %%zmm28" :: "m" (*(__m512i*)p));
-	__asm__ volatile ("vmovaps  %0, %%zmm29" :: "m" (*(__m512i*)p));
-	__asm__ volatile ("vmovaps  %0, %%zmm30" :: "m" (*(__m512i*)p));
-	__asm__ volatile ("vmovaps  %0, %%zmm31" :: "m" (*(__m512i*)p));
+	__asm__ volatile ("vmovaps  %0, %%zmm24" :: "m" (*(__m512i*)p) : "zmm24");
+	__asm__ volatile ("vmovaps  %0, %%zmm25" :: "m" (*(__m512i*)p) : "zmm25");
+	__asm__ volatile ("vmovaps  %0, %%zmm26" :: "m" (*(__m512i*)p) : "zmm26");
+	__asm__ volatile ("vmovaps  %0, %%zmm27" :: "m" (*(__m512i*)p) : "zmm27");
+	__asm__ volatile ("vmovaps  %0, %%zmm28" :: "m" (*(__m512i*)p) : "zmm28");
+	__asm__ volatile ("vmovaps  %0, %%zmm29" :: "m" (*(__m512i*)p) : "zmm29");
+	__asm__ volatile ("vmovaps  %0, %%zmm30" :: "m" (*(__m512i*)p) : "zmm30");
+	__asm__ volatile ("vmovaps  %0, %%zmm31" :: "m" (*(__m512i*)p) : "zmm31");
 #endif
 
 	store_zmm(vec512array0);
@@ -705,12 +768,12 @@ assert_opmask_eq(OPMASK *a, OPMASK *b)
 }
 
 void
-check_zmm(void)
+check_zmm(boolean_t check_cookie)
 {
 	uint64_t *p = (uint64_t *) &vec512array1[7];
 	store_opmask(karray1);
 	store_zmm(vec512array1);
-	if (p[0] == STOP_COOKIE_512) {
+	if (check_cookie && p[0] == STOP_COOKIE_512) {
 		return;
 	}
 
@@ -769,7 +832,7 @@ zmm_sigalrm_handler(int signum __unused, siginfo_t *info __unused, void *ctx)
 
 	/* Check that the state in the context is what's set and expected */
 	copy_zmm_state_to_vector(avx_state, vec512array3);
-	assert_zmm_eq(vec512array3, vec512array0, sizeof(vec512array1));
+	assert_zmm_eq(vec512array3, vec512array0, sizeof(vec512array3));
 	copy_state_to_opmask(avx_state, karray3);
 	assert_opmask_eq(karray3, karray0);
 
@@ -780,6 +843,32 @@ zmm_sigalrm_handler(int signum __unused, siginfo_t *info __unused, void *ctx)
 	kp[7] = STOP_COOKIE_512;
 	checking = FALSE;
 }
+
+static void
+zmm_sigalrm_handler_no_mod(int signum __unused, siginfo_t *info __unused, void *ctx)
+{
+	ucontext_t *contextp = (ucontext_t *) ctx;
+	mcontext_t mcontext = contextp->uc_mcontext;
+	X86_AVX512_STATE_T *avx_state = (X86_AVX512_STATE_T *) &mcontext->__fs;
+	uint64_t *xp = (uint64_t *) &avx_state->__fpu_xmm7;
+	uint64_t *yp = (uint64_t *) &avx_state->__fpu_ymmh7;
+	uint64_t *zp = (uint64_t *) &avx_state->__fpu_zmmh7;
+	uint64_t *kp = (uint64_t *) &avx_state->__fpu_k0;
+
+	/* Check for AVX512 state */
+	T_QUIET;
+	T_ASSERT_GE(contextp->uc_mcsize, MCONTEXT_SIZE_512, "check context size");
+
+	/* Check that the state in the context is what's set and expected */
+	copy_zmm_state_to_vector(avx_state, vec512array3);
+	assert_zmm_eq(vec512array3, vec512array0, sizeof(vec512array3));
+	copy_state_to_opmask(avx_state, karray3);
+	assert_opmask_eq(karray3, karray0);
+
+	/* Change the context and break the main loop */
+	checking = FALSE;
+}
+
 
 void
 zmm_integrity(int time)
@@ -838,7 +927,7 @@ zmm_integrity(int time)
 
 	/* Check state until timer fires */
 	while (checking) {
-		check_zmm();
+		check_zmm(TRUE);
 	}
 
 	/* Check that the sig handler changed our AVX state */
@@ -858,6 +947,133 @@ zmm_integrity(int time)
 
 	T_LOG("Ran for %ds", time);
 	T_PASS("No zmm register corruption occurred");
+}
+
+void
+zmm_zeroing_optimization_integrity(int time)
+{
+	/*
+	 * Check ZMM zero and OpMask zero
+	 */
+	T_LOG("Checking ZMM zero and OpMask zero");
+	checking = true;
+	zero_zmm();
+	zero_opmask();
+
+	T_LOG("Running for %ds…", time);
+	start_timer(time, zmm_sigalrm_handler_no_mod);
+
+	/* re-populate because printing mucks up XMMs */
+	zero_zmm();
+	zero_opmask();
+
+	/* Check state until timer fires */
+	while (checking) {
+		check_zmm(FALSE);
+	}
+
+	/* Check that sig handler did not changed our AVX state */
+	store_zmm(vec512array2);
+	store_opmask(karray2);
+
+	assert_zmm_eq(vec512array0, vec512array2, sizeof(vec512array2));
+	assert_opmask_eq(karray0, karray2);
+
+	T_LOG("Ran for %ds", time);
+	T_PASS("ZMM zero and OpMask zero");
+
+
+	/*
+	 * Check ZMM zero and OpMask non-zero
+	 */
+	T_LOG("Checking ZMM zero and OpMask non-zero");
+	checking = true;
+	zero_zmm();
+	populate_opmask();
+
+	T_LOG("Running for %ds…", time);
+	start_timer(time, zmm_sigalrm_handler_no_mod);
+
+	/* re-populate because printing mucks up XMMs */
+	zero_zmm();
+	populate_opmask();
+
+	/* Check state until timer fires */
+	while (checking) {
+		check_zmm(FALSE);
+	}
+
+	/* Check that sig handler did not changed our AVX state */
+	store_zmm(vec512array2);
+	store_opmask(karray2);
+
+	assert_zmm_eq(vec512array0, vec512array2, sizeof(vec512array2));
+	assert_opmask_eq(karray0, karray2);
+
+	T_LOG("Ran for %ds", time);
+	T_PASS("ZMM zero and OpMask non-zero");
+
+
+	/*
+	 * Check ZMM non-zero and OpMask zero
+	 */
+	T_LOG("Checking ZMM non-zero and OpMask zero");
+	checking = true;
+	populate_zmm();
+	zero_opmask();
+
+	T_LOG("Running for %ds…", time);
+	start_timer(time, zmm_sigalrm_handler_no_mod);
+
+	/* re-populate because printing mucks up XMMs */
+	populate_zmm();
+	zero_opmask();
+
+	/* Check state until timer fires */
+	while (checking) {
+		check_zmm(FALSE);
+	}
+
+	/* Check that sig handler did not changed our AVX state */
+	store_zmm(vec512array2);
+	store_opmask(karray2);
+
+	assert_zmm_eq(vec512array0, vec512array2, sizeof(vec512array2));
+	assert_opmask_eq(karray0, karray2);
+
+	T_LOG("Ran for %ds", time);
+	T_PASS("ZMM non-zero and OpMask zero");
+
+
+	/*
+	 * Check ZMM non-zero and OpMask non-zero
+	 */
+	T_LOG("Checking ZMM non-zero and OpMask non-zero");
+	checking = true;
+	populate_zmm();
+	populate_opmask();
+
+	T_LOG("Running for %ds…", time);
+	start_timer(time, zmm_sigalrm_handler_no_mod);
+
+	/* re-populate because printing mucks up XMMs */
+	populate_zmm();
+	populate_opmask();
+
+	/* Check state until timer fires */
+	while (checking) {
+		check_zmm(FALSE);
+	}
+
+	/* Check that sig handler did not changed our AVX state */
+	store_zmm(vec512array2);
+	store_opmask(karray2);
+
+	assert_zmm_eq(vec512array0, vec512array2, sizeof(vec512array2));
+	assert_opmask_eq(karray0, karray2);
+
+	T_LOG("Ran for %ds", time);
+	T_PASS("ZMM non-zero and OpMask non-zero");
 }
 
 /*
@@ -883,7 +1099,7 @@ T_DECL(ymm_integrity_stress,
 T_DECL(zmm_integrity,
     "Quick soak test to verify that AVX-512 "
     "register state is maintained correctly",
-    T_META_TIMEOUT(LONG_RUN_TIME + TIMEOUT_OVERHEAD)) {
+    T_META_TIMEOUT(NORMAL_RUN_TIME + TIMEOUT_OVERHEAD)) {
 	require_avx512();
 	zmm_integrity(NORMAL_RUN_TIME);
 }
@@ -891,8 +1107,17 @@ T_DECL(zmm_integrity,
 T_DECL(zmm_integrity_stress,
     "Extended soak test to verify that AVX-512 "
     "register state is maintained correctly",
-    T_META_TIMEOUT(NORMAL_RUN_TIME + TIMEOUT_OVERHEAD),
+    T_META_TIMEOUT(LONG_RUN_TIME + TIMEOUT_OVERHEAD),
     T_META_ENABLED(false)) {
 	require_avx512();
 	zmm_integrity(LONG_RUN_TIME);
+}
+
+T_DECL(zmm_zeroing_optimization_integrity,
+    "Quick soak test to verify AVX-512 "
+    "register state is maintained with "
+    "zeroing optimizations enabled",
+    T_META_TIMEOUT(QUICK_RUN_TIME + TIMEOUT_OVERHEAD)) {
+	require_avx512();
+	zmm_zeroing_optimization_integrity(QUICK_RUN_TIME);
 }

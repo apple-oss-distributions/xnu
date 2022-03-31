@@ -4213,7 +4213,7 @@ is_io_service_open_extended(
 			if (!propertiesDict) {
 				propertiesDict = OSDictionary::withCapacity(4);
 			}
-			OSData * data = OSData::withBytes(&ndr, sizeof(ndr));
+			OSData * data = OSData::withValue(ndr);
 			if (data) {
 				if (propertiesDict) {
 					propertiesDict->setObject(kIOUserClientCrossEndianKey, data);
@@ -6043,16 +6043,15 @@ is_io_catalog_get_data(
 	kr = gIOCatalogue->serializeData(flag, s);
 
 	if (kr == kIOReturnSuccess) {
-		vm_offset_t data;
+		mach_vm_address_t data;
 		vm_map_copy_t copy;
 		unsigned int size;
 
 		size = s->getLength();
-		kr = vm_allocate_kernel(kernel_map, &data, size, VM_FLAGS_ANYWHERE, VM_KERN_MEMORY_IOKIT);
+		kr = mach_vm_allocate_kernel(kernel_map, &data, size, VM_FLAGS_ANYWHERE, VM_KERN_MEMORY_IOKIT);
 		if (kr == kIOReturnSuccess) {
 			bcopy(s->text(), (void *)data, size);
-			kr = vm_map_copyin(kernel_map, (vm_map_address_t)data,
-			    size, true, &copy);
+			kr = vm_map_copyin(kernel_map, data, size, true, &copy);
 			*outData = (char *)copy;
 			*outDataCount = size;
 		}

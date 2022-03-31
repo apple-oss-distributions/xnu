@@ -39,8 +39,34 @@
 
 #define XPC_DOMAIN_PORT 7 /* This value should match what is in <xpc/launch_private.h> */
 
-ZONE_DECLARE(ipc_service_port_label_zone, "ipc_service_port_label",
-    sizeof(struct ipc_service_port_label), ZC_ZFREE_CLEARMEM | ZC_NOCACHING);
+ZONE_DEFINE_TYPE(ipc_service_port_label_zone, "ipc_service_port_label",
+    struct ipc_service_port_label, ZC_ZFREE_CLEARMEM | ZC_NOCACHING);
+
+#if CONFIG_SERVICE_PORT_INFO
+const bool kdp_ipc_have_splabel = true;
+#else
+const bool kdp_ipc_have_splabel = false;
+#endif
+
+void
+kdp_ipc_splabel_size(size_t *ispl_size, size_t *maxnamelen)
+{
+	*ispl_size = sizeof(struct ipc_service_port_label);
+	*maxnamelen = MACH_SERVICE_PORT_INFO_STRING_NAME_MAX_BUF_LEN + 1;
+}
+
+void
+kdp_ipc_fill_splabel(struct ipc_service_port_label *ispl,
+    struct portlabel_info *spl, const char **namep)
+{
+#pragma unused(ispl, spl, namep)
+
+	/* validate that ispl is in our zone */
+#if CONFIG_SERVICE_PORT_INFO
+	*namep = ispl->ispl_service_name;
+	spl->portlabel_domain = ispl->ispl_domain;
+#endif
+}
 
 /*
  * Name: ipc_service_port_label_alloc
@@ -73,13 +99,13 @@ ipc_service_port_label_alloc(mach_service_port_info_t sp_info, void **port_label
 	}
 
 	sp_label->ispl_sblabel = sblabel;
-#if DEVELOPMENT || DEBUG
+#if CONFIG_SERVICE_PORT_INFO
 	size_t sp_string_name_len = strlen(sp_info->mspi_string_name);
-	/* Optimize the space needed to store service names in <rdar://problem/70186622> */
+	/* We could investigate compressing the names, but it doesn't seem worth it */
 	sp_label->ispl_service_name = kalloc_data(sp_string_name_len + 1, Z_WAITOK);
 	strlcpy(sp_label->ispl_service_name, sp_info->mspi_string_name, sp_string_name_len + 1);
 	sp_label->ispl_domain = sp_info->mspi_domain_type;
-#endif /* DEVELOPMENT || DEBUG */
+#endif /* CONFIG_SERVICE_PORT_INFO */
 
 	if (sp_info->mspi_domain_type == XPC_DOMAIN_PORT) {
 		sp_label->ispl_flags |= ISPL_FLAGS_BOOTSTRAP_PORT;
@@ -108,9 +134,9 @@ ipc_service_port_label_dealloc(void *ip_splabel, bool service_port)
 	if (service_port) {
 		ipc_service_port_label_t sp_label = (ipc_service_port_label_t)ip_splabel;
 		sblabel = sp_label->ispl_sblabel;
-#if DEVELOPMENT || DEBUG
+#if CONFIG_SERVICE_PORT_INFO
 		kfree_data(sp_label->ispl_service_name, strlen(sp_label->ispl_service_name) + 1);
-#endif /* DEVELOPMENT || DEBUG */
+#endif /* CONFIG_SERVICE_PORT_INFO */
 		zfree(ipc_service_port_label_zone, sp_label);
 	}
 
@@ -273,7 +299,7 @@ ipc_service_port_label_get_attr(ipc_service_port_label_t port_splabel, mach_port
 	*context = port_splabel->ispl_launchd_context;
 }
 
-#if DEVELOPMENT || DEBUG
+#if CONFIG_SERVICE_PORT_INFO
 void
 ipc_service_port_label_get_info(ipc_service_port_label_t port_splabel, mach_service_port_info_t info)
 {
@@ -281,4 +307,4 @@ ipc_service_port_label_get_info(ipc_service_port_label_t port_splabel, mach_serv
 	size_t sp_string_name_len = strlen(port_splabel->ispl_service_name);
 	strlcpy(info->mspi_string_name, port_splabel->ispl_service_name, sp_string_name_len + 1);
 }
-#endif /* DEVELOPMENT || DEBUG */
+#endif /* CONFIG_SERVICE_PORT_INFO */

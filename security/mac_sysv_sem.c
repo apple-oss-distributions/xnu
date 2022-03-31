@@ -75,49 +75,38 @@
 #include <security/mac_internal.h>
 
 
-static struct label *
-mac_sysv_sem_label_alloc(void)
-{
-	struct label *label;
-
-	label = mac_labelzone_alloc(MAC_WAITOK);
-	if (label == NULL) {
-		return NULL;
-	}
-	MAC_PERFORM(sysvsem_label_init, label);
-	return label;
-}
-
 void
 mac_sysvsem_label_init(struct semid_kernel *semakptr)
 {
-	semakptr->label = mac_sysv_sem_label_alloc();
+	mac_labelzone_alloc_owned(&semakptr->label, MAC_WAITOK, ^(struct label *label) {
+		MAC_PERFORM(sysvsem_label_init, label);
+	});
 }
 
-static void
-mac_sysv_sem_label_free(struct label *label)
+struct label *
+mac_sysvsem_label(struct semid_kernel *semakptr)
 {
-	MAC_PERFORM(sysvsem_label_destroy, label);
-	mac_labelzone_free(label);
+	return mac_label_verify(&semakptr->label);
 }
 
 void
 mac_sysvsem_label_destroy(struct semid_kernel *semakptr)
 {
-	mac_sysv_sem_label_free(semakptr->label);
-	semakptr->label = NULL;
+	mac_labelzone_free_owned(&semakptr->label, ^(struct label *label) {
+		MAC_PERFORM(sysvsem_label_destroy, label);
+	});
 }
 
 void
 mac_sysvsem_label_associate(kauth_cred_t cred, struct semid_kernel *semakptr)
 {
-	MAC_PERFORM(sysvsem_label_associate, cred, semakptr, semakptr->label);
+	MAC_PERFORM(sysvsem_label_associate, cred, semakptr, mac_sysvsem_label(semakptr));
 }
 
 void
 mac_sysvsem_label_recycle(struct semid_kernel *semakptr)
 {
-	MAC_PERFORM(sysvsem_label_recycle, semakptr->label);
+	MAC_PERFORM(sysvsem_label_recycle, mac_sysvsem_label(semakptr));
 }
 
 int
@@ -133,7 +122,7 @@ mac_sysvsem_check_semctl(kauth_cred_t cred, struct semid_kernel *semakptr,
 	}
 #endif
 
-	MAC_CHECK(sysvsem_check_semctl, cred, semakptr, semakptr->label, cmd);
+	MAC_CHECK(sysvsem_check_semctl, cred, semakptr, mac_sysvsem_label(semakptr), cmd);
 
 	return error;
 }
@@ -150,7 +139,7 @@ mac_sysvsem_check_semget(kauth_cred_t cred, struct semid_kernel *semakptr)
 	}
 #endif
 
-	MAC_CHECK(sysvsem_check_semget, cred, semakptr, semakptr->label);
+	MAC_CHECK(sysvsem_check_semget, cred, semakptr, mac_sysvsem_label(semakptr));
 
 	return error;
 }
@@ -168,7 +157,7 @@ mac_sysvsem_check_semop(kauth_cred_t cred, struct semid_kernel *semakptr,
 	}
 #endif
 
-	MAC_CHECK(sysvsem_check_semop, cred, semakptr, semakptr->label,
+	MAC_CHECK(sysvsem_check_semop, cred, semakptr, mac_sysvsem_label(semakptr),
 	    accesstype);
 
 	return error;

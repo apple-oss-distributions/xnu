@@ -301,7 +301,7 @@ static int igmp_timers_are_running;
 	VERIFY(SLIST_EMPTY(_head));                                     \
 }
 
-static ZONE_DECLARE(igi_zone, "igmp_ifinfo",
+static ZONE_DEFINE(igi_zone, "igmp_ifinfo",
     sizeof(struct igmp_ifinfo), ZC_ZFREE_CLEARMEM);
 
 /* Store IGMPv3 record count in the module private scratch space */

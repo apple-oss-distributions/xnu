@@ -138,7 +138,7 @@ extern void disk_conditioner_delay(buf_t, int, int, uint64_t);
 static void     bcleanbuf_thread_init(void);
 static void     bcleanbuf_thread(void);
 
-static ZONE_DECLARE(buf_hdr_zone, "buf headers", sizeof(struct buf), ZC_NONE);
+static ZONE_DEFINE_TYPE(buf_hdr_zone, "buf headers", struct buf, ZC_NONE);
 static int      buf_hdr_count;
 
 

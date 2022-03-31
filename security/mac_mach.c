@@ -320,22 +320,28 @@ mac_proc_notify_exec_complete(struct proc *proc)
  * crash labels).
  */
 
+struct label *
+mac_exc_label(struct exception_action *action)
+{
+	return mac_label_verify(&action->label);
+}
+
+void
+mac_exc_set_label(struct exception_action *action, struct label *label)
+{
+	action->label = label;
+}
+
 // Label allocation and deallocation, may sleep.
 
 struct label *
-mac_exc_create_label(void)
+mac_exc_create_label(struct exception_action *action)
 {
-	struct label *label = mac_labelzone_alloc(MAC_WAITOK);
-
-	if (label == NULL) {
-		return NULL;
-	}
-
-	// Policy initialization of the label, typically performs allocations as well.
-	// (Unless the policy's full data really fits into a pointer size.)
-	MAC_PERFORM(exc_action_label_init, label);
-
-	return label;
+	return mac_labelzone_alloc_for_owner(action ? &action->label : NULL, MAC_WAITOK, ^(struct label *label) {
+		// Policy initialization of the label, typically performs allocations as well.
+		// (Unless the policy's full data really fits into a pointer size.)
+		MAC_PERFORM(exc_action_label_init, label);
+	});
 }
 
 void
@@ -350,15 +356,15 @@ mac_exc_free_label(struct label *label)
 void
 mac_exc_associate_action_label(struct exception_action *action, struct label *label)
 {
-	action->label = label;
-	MAC_PERFORM(exc_action_label_associate, action, action->label);
+	mac_exc_set_label(action, label);
+	MAC_PERFORM(exc_action_label_associate, action, mac_exc_label(action));
 }
 
 void
 mac_exc_free_action_label(struct exception_action *action)
 {
-	mac_exc_free_label(action->label);
-	action->label = NULL;
+	mac_exc_free_label(mac_exc_label(action));
+	mac_exc_set_label(action, NULL);
 }
 
 // Action label update and inheritance, may NOT sleep and must be quick.
@@ -369,7 +375,7 @@ mac_exc_update_action_label(struct exception_action *action,
 {
 	int error;
 
-	MAC_CHECK(exc_action_label_update, action, action->label, newlabel);
+	MAC_CHECK(exc_action_label_update, action, mac_exc_label(action), newlabel);
 
 	return error;
 }
@@ -378,7 +384,7 @@ int
 mac_exc_inherit_action_label(struct exception_action *parent,
     struct exception_action *child)
 {
-	return mac_exc_update_action_label(child, parent->label);
+	return mac_exc_update_action_label(child, mac_exc_label(parent));
 }
 
 int
@@ -400,7 +406,7 @@ mac_exc_update_task_crash_label(struct task *task, struct label *label)
 struct label *
 mac_exc_create_label_for_proc(struct proc *proc)
 {
-	struct label *label = mac_exc_create_label();
+	struct label *label = mac_exc_create_label(NULL);
 	MAC_PERFORM(exc_action_label_populate, label, proc);
 	return label;
 }
@@ -435,7 +441,7 @@ mac_exc_action_check_exception_send(struct task *victim_task, struct exception_a
 		return EPERM;
 	}
 
-	MAC_CHECK(exc_action_check_exception_send, label, action, action->label);
+	MAC_CHECK(exc_action_check_exception_send, label, action, mac_exc_label(action));
 
 	if (bsd_label != NULL) {
 		mac_exc_free_label(bsd_label);

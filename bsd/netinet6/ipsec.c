@@ -1537,7 +1537,6 @@ ipsec_deepcopy_policy(struct secpolicy *src)
 	struct ipsecrequest *newchain = NULL;
 	struct ipsecrequest *p;
 	struct ipsecrequest **q;
-	struct ipsecrequest *r;
 	struct secpolicy *dst;
 
 	if (src == NULL) {
@@ -1554,12 +1553,7 @@ ipsec_deepcopy_policy(struct secpolicy *src)
 	 */
 	q = &newchain;
 	for (p = src->req; p; p = p->next) {
-		*q = (struct ipsecrequest *)_MALLOC(sizeof(struct ipsecrequest),
-		    M_SECA, M_WAITOK | M_ZERO);
-		if (*q == NULL) {
-			goto fail;
-		}
-		(*q)->next = NULL;
+		*q = kalloc_type(struct ipsecrequest, Z_WAITOK_ZERO_NOFAIL);
 
 		(*q)->saidx.proto = p->saidx.proto;
 		(*q)->saidx.mode = p->saidx.mode;
@@ -1580,15 +1574,6 @@ ipsec_deepcopy_policy(struct secpolicy *src)
 	/* do not touch the refcnt fields */
 
 	return dst;
-
-fail:
-	for (p = newchain; p; p = r) {
-		r = p->next;
-		FREE(p, M_SECA);
-		p = NULL;
-	}
-	key_freesp(dst, KEY_SADB_UNLOCKED);
-	return NULL;
 }
 
 /* set policy and ipsec request if present. */
@@ -2384,7 +2369,7 @@ ipsec4_encapsulate(struct mbuf *m, struct secasvar *sav)
 	if (rfc6864 && IP_OFF_IS_ATOMIC(ntohs(ip->ip_off))) {
 		ip->ip_id = 0;
 	} else {
-		ip->ip_id = ip_randomid();
+		ip->ip_id = ip_randomid((uint64_t)m);
 	}
 	bcopy(&((struct sockaddr_in *)&sav->sah->saidx.src)->sin_addr,
 	    &ip->ip_src, sizeof(ip->ip_src));
@@ -2464,6 +2449,11 @@ ipsec6_encapsulate(struct mbuf *m, struct secasvar *sav)
 	bcopy(&((struct sockaddr_in6 *)&sav->sah->saidx.dst)->sin6_addr,
 	    &ip6->ip6_dst, sizeof(ip6->ip6_dst));
 	ip6->ip6_hlim = IPV6_DEFHLIM;
+
+	if (in6_embedded_scope && IN6_IS_SCOPE_LINKLOCAL(&ip6->ip6_dst)) {
+		ip6->ip6_src.s6_addr16[1] = htons((u_int16_t)sav->sah->outgoing_if);
+		ip6->ip6_dst.s6_addr16[1] = htons((u_int16_t)sav->sah->outgoing_if);
+	}
 
 	/* XXX Should ip6_src be updated later ? */
 
@@ -2823,6 +2813,11 @@ ipsec46_encapsulate(struct ipsec_output_state *state, struct secasvar *sav)
 	    &ip6->ip6_src, sizeof(ip6->ip6_src));
 	bcopy(&((struct sockaddr_in6 *)&sav->sah->saidx.dst)->sin6_addr,
 	    &ip6->ip6_dst, sizeof(ip6->ip6_dst));
+
+	if (in6_embedded_scope && IN6_IS_SCOPE_LINKLOCAL(&ip6->ip6_dst)) {
+		ip6->ip6_src.s6_addr16[1] = htons((u_int16_t)sav->sah->outgoing_if);
+		ip6->ip6_dst.s6_addr16[1] = htons((u_int16_t)sav->sah->outgoing_if);
+	}
 
 	return 0;
 }
@@ -4491,7 +4486,15 @@ ipsec6_tunnel_validate(
 	if (sin6->sin6_family != AF_INET6) {
 		return 0;
 	}
-	if (!IN6_ARE_ADDR_EQUAL(&oip6->ip6_dst, &sin6->sin6_addr)) {
+
+	struct in6_addr tmp_sah_dst_addr = {};
+	struct in6_addr *sah_dst_addr = &((struct sockaddr_in6 *)&sav->sah->saidx.dst)->sin6_addr;
+	if (in6_embedded_scope && IN6_IS_SCOPE_LINKLOCAL(sah_dst_addr)) {
+		memcpy(&tmp_sah_dst_addr, sah_dst_addr, sizeof(tmp_sah_dst_addr));
+		tmp_sah_dst_addr.s6_addr16[1] = htons((u_int16_t)sav->sah->outgoing_if);
+		sah_dst_addr = &tmp_sah_dst_addr;
+	}
+	if (!IN6_ARE_ADDR_EQUAL(&oip6->ip6_dst, sah_dst_addr)) {
 		return 0;
 	}
 
@@ -5094,7 +5097,7 @@ ipsec_fill_offload_frame(ifnet_t ifp,
 	if (rfc6864 && IP_OFF_IS_ATOMIC(htons(ip->ip_off))) {
 		ip->ip_id = 0;
 	} else {
-		ip->ip_id = ip_randomid();
+		ip->ip_id = ip_randomid((uint64_t)data);
 	}
 	ip->ip_ttl = (u_char)ip_defttl;
 	ip->ip_p = IPPROTO_UDP;

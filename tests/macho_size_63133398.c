@@ -3211,12 +3211,12 @@ T_DECL(macho_size_63133398, "load_machfile improperly validates macho_size")
 	/* and let's give it a try: */
 	T_ASSERT_NE(-1, child = fork(), NULL);
 	if (0 == child) {
-		execve(av[0], av, ev);
-		T_ASSERT_FAIL("execve failed");
+		T_ASSERT_EQ(-1, execve(av[0], av, ev), NULL);
+		exit(1);
 	}
 
 	T_ASSERT_POSIX_SUCCESS(waitpid(child, &status, 0), NULL);
-	T_ASSERT_EQ(SIGKILL, status, NULL);
+	T_ASSERT_EQ(1, WEXITSTATUS(status), NULL);
 #else
 	T_PASS("Architecture not supported by this test; passing.");
 #endif

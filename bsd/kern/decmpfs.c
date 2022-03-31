@@ -253,7 +253,7 @@ vnsize(vnode_t vp, uint64_t *size)
 
 #pragma mark --- cnode routines ---
 
-ZONE_DECLARE(decmpfs_cnode_zone, "decmpfs_cnode",
+ZONE_DEFINE(decmpfs_cnode_zone, "decmpfs_cnode",
     sizeof(struct decmpfs_cnode), ZC_NONE);
 
 decmpfs_cnode *

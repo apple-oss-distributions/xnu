@@ -39,6 +39,8 @@
 #include <ptrauth.h>
 #endif
 
+#include <libkern/coreanalytics/coreanalytics.h>
+
 
 struct arm_vfpv2_state {
 	__uint32_t __r[32];
@@ -56,6 +58,7 @@ typedef struct arm_vfpv2_state arm_vfpv2_state_t;
 void thread_set_child(thread_t child, int pid);
 void thread_set_parent(thread_t parent, int pid);
 static void free_debug_state(thread_t thread);
+user_addr_t thread_get_sigreturn_token(thread_t thread);
 
 /*
  * Maps state flavor to number of words in the state:
@@ -303,10 +306,14 @@ machine_thread_state_convert_to_user(
 	thread_t thread,
 	thread_flavor_t flavor,
 	thread_state_t tstate,
-	mach_msg_type_number_t *count)
+	mach_msg_type_number_t *count,
+	thread_set_status_flags_t tssf_flags)
 {
 #if __has_feature(ptrauth_calls)
 	arm_thread_state64_t *ts64;
+	bool preserve_flags = !!(tssf_flags & TSSF_PRESERVE_FLAGS);
+	bool kernel_signed = false;
+	bool stash_sigreturn_token = !!(tssf_flags & TSSF_STASH_SIGRETURN_TOKEN);
 
 	switch (flavor) {
 	case ARM_THREAD_STATE:
@@ -339,6 +346,7 @@ machine_thread_state_convert_to_user(
 		return KERN_SUCCESS;
 	}
 
+	kernel_signed = !!(ts64->flags & __DARWIN_ARM_THREAD_STATE64_FLAGS_KERNEL_SIGNED);
 	ts64->flags = 0;
 	if (ts64->lr) {
 		// lr might contain an IB-signed return address (strip is a no-op on unsigned addresses)
@@ -377,13 +385,94 @@ machine_thread_state_convert_to_user(
 		    thread->machine.jop_pid);
 	}
 
+	/* Mark the state kernel signed */
+	if (!preserve_flags || kernel_signed) {
+		ts64->flags |= __DARWIN_ARM_THREAD_STATE64_FLAGS_KERNEL_SIGNED;
+	}
+
+	/* Stash the sigreturn token */
+	if (stash_sigreturn_token) {
+		user64_addr_t token = 0;
+		token ^= (user64_addr_t)ts64->pc;
+		token ^= (user64_addr_t)ts64->lr;
+		token ^= (user64_addr_t)ts64->sp;
+		token ^= (user64_addr_t)ts64->fp;
+		token ^= (user64_addr_t)thread_get_sigreturn_token(thread);
+
+		__DARWIN_ARM_THREAD_STATE64_SET_SIGRETURN_TOKEN(ts64, token);
+	}
+
 	return KERN_SUCCESS;
 #else
 	// No conversion to userspace representation on this platform
-	(void)thread; (void)flavor; (void)tstate; (void)count;
+	(void)thread; (void)flavor; (void)tstate; (void)count; (void)tssf_flags;
 	return KERN_SUCCESS;
 #endif /* __has_feature(ptrauth_calls) */
 }
+
+#if __has_feature(ptrauth_calls)
+extern char *   proc_name_address(void *p);
+
+CA_EVENT(pac_thread_state_exception_event,
+    CA_STATIC_STRING(CA_PROCNAME_LEN), proc_name);
+
+static void
+machine_thread_state_check_pac_state(
+	arm_thread_state64_t *ts64,
+	arm_thread_state64_t *old_ts64)
+{
+	bool send_event = false;
+	task_t task = current_task();
+	void *proc = task->bsd_info;
+	char *proc_name = (char *) "unknown";
+
+	/* Send a CA event if any of the registers does not match */
+	for (int i = 0; i < 29; i++) {
+		if (ts64->x[i] != old_ts64->x[i]) {
+			send_event = true;
+			break;
+		}
+	}
+
+	if (ts64->pc != old_ts64->pc ||
+	    ts64->lr != old_ts64->lr ||
+	    ts64->sp != old_ts64->sp ||
+	    ts64->fp != old_ts64->fp ||
+	    ts64->cpsr != old_ts64->cpsr ||
+	    (ts64->flags & __DARWIN_ARM_THREAD_STATE64_FLAGS_IB_SIGNED_LR) !=
+	    (old_ts64->flags & __DARWIN_ARM_THREAD_STATE64_FLAGS_IB_SIGNED_LR)) {
+		send_event = true;
+	}
+
+	if (!send_event) {
+		return;
+	}
+
+	proc_name = proc_name_address(proc);
+	ca_event_t ca_event = CA_EVENT_ALLOCATE(pac_thread_state_exception_event);
+	CA_EVENT_TYPE(pac_thread_state_exception_event) * pexc_event = ca_event->data;
+	strlcpy(pexc_event->proc_name, proc_name, CA_PROCNAME_LEN);
+	CA_EVENT_SEND(ca_event);
+}
+
+CA_EVENT(pac_thread_state_sigreturn_event,
+    CA_STATIC_STRING(CA_PROCNAME_LEN), proc_name);
+
+static void
+machine_thread_state_send_sigreturn_ca_event(void)
+{
+	task_t task = current_task();
+	void *proc = task->bsd_info;
+	char *proc_name = (char *) "unknown";
+
+	proc_name = proc_name_address(proc);
+	ca_event_t ca_event = CA_EVENT_ALLOCATE(pac_thread_state_sigreturn_event);
+	CA_EVENT_TYPE(pac_thread_state_sigreturn_event) * psig_event = ca_event->data;
+	strlcpy(psig_event->proc_name, proc_name, CA_PROCNAME_LEN);
+	CA_EVENT_SEND(ca_event);
+}
+
+#endif
 
 /*
  * Translate thread state arguments from userspace representation
@@ -394,10 +483,14 @@ machine_thread_state_convert_from_user(
 	thread_t thread,
 	thread_flavor_t flavor,
 	thread_state_t tstate,
-	mach_msg_type_number_t count)
+	mach_msg_type_number_t count,
+	thread_state_t old_tstate,
+	mach_msg_type_number_t old_count,
+	thread_set_status_flags_t tssf_flags)
 {
 #if __has_feature(ptrauth_calls)
 	arm_thread_state64_t *ts64;
+	arm_thread_state64_t *old_ts64 = NULL;
 
 	switch (flavor) {
 	case ARM_THREAD_STATE:
@@ -408,6 +501,11 @@ machine_thread_state_convert_from_user(
 			return KERN_SUCCESS;
 		}
 		ts64 = thread_state64(unified_state);
+
+		arm_unified_thread_state_t *old_unified_state = (arm_unified_thread_state_t *)old_tstate;
+		if (old_unified_state && old_count >= ARM_UNIFIED_THREAD_STATE_COUNT) {
+			old_ts64 = thread_state64(old_unified_state);
+		}
 		break;
 	}
 	case ARM_THREAD_STATE64:
@@ -416,6 +514,10 @@ machine_thread_state_convert_from_user(
 			return KERN_SUCCESS;
 		}
 		ts64 = (arm_thread_state64_t *)tstate;
+
+		if (old_count == ARM_THREAD_STATE64_COUNT) {
+			old_ts64 = (arm_thread_state64_t *)old_tstate;
+		}
 		break;
 	}
 	default:
@@ -461,6 +563,60 @@ machine_thread_state_convert_from_user(
 		return KERN_SUCCESS;
 	}
 
+	/*
+	 * Replace pc, lr, sp and fp with old state if allow
+	 * only user ptr flag is passed and state is marked
+	 * kernel signed.
+	 */
+	if ((tssf_flags & TSSF_CHECK_USER_FLAGS) &&
+	    (ts64->flags & __DARWIN_ARM_THREAD_STATE64_FLAGS_KERNEL_SIGNED)) {
+		if (old_ts64 && old_count == count) {
+			/* Send a CA event if the thread state does not match */
+			machine_thread_state_check_pac_state(ts64, old_ts64);
+
+			/* Check if the user state should be replaced with old state */
+			if (tssf_flags & TSSF_ALLOW_ONLY_USER_STATE) {
+				*ts64 = *old_ts64;
+				return machine_thread_state_convert_from_user(thread, flavor, tstate,
+				           count, NULL, 0, TSSF_FLAGS_NONE);
+			}
+
+			/* Check if user ptrs needs to be replaced */
+			if (tssf_flags & TSSF_ALLOW_ONLY_USER_PTRS) {
+				ts64->pc = old_ts64->pc;
+				ts64->lr = old_ts64->lr;
+				ts64->sp = old_ts64->sp;
+				ts64->fp = old_ts64->fp;
+
+				if (old_ts64->flags & __DARWIN_ARM_THREAD_STATE64_FLAGS_IB_SIGNED_LR) {
+					ts64->flags |= __DARWIN_ARM_THREAD_STATE64_FLAGS_IB_SIGNED_LR;
+				} else {
+					ts64->flags &= ~__DARWIN_ARM_THREAD_STATE64_FLAGS_IB_SIGNED_LR;
+				}
+			}
+		}
+	}
+
+	/* Validate sigreturn token */
+	if ((tssf_flags & TSSF_CHECK_SIGRETURN_TOKEN) &&
+	    (ts64->flags & __DARWIN_ARM_THREAD_STATE64_FLAGS_KERNEL_SIGNED)) {
+		/* Compute the sigreturn token */
+		user64_addr_t token = 0;
+		token ^= (user64_addr_t)ts64->pc;
+		token ^= (user64_addr_t)ts64->lr;
+		token ^= (user64_addr_t)ts64->sp;
+		token ^= (user64_addr_t)ts64->fp;
+		token ^= (user64_addr_t)thread_get_sigreturn_token(thread);
+
+		if (!__DARWIN_ARM_THREAD_STATE64_CHECK_SIGRETURN_TOKEN(ts64, token)) {
+			/* Send a CA event since the token did not match */
+			machine_thread_state_send_sigreturn_ca_event();
+			if (tssf_flags & TSSF_ALLOW_ONLY_MATCHING_TOKEN) {
+				return KERN_PROTECTION_FAILURE;
+			}
+		}
+	}
+
 	if (ts64->pc) {
 		ts64->pc = (uintptr_t)pmap_auth_user_ptr((void*)ts64->pc,
 		    ptrauth_key_process_independent_code, ptrauth_string_discriminator("pc"),
@@ -486,6 +642,7 @@ machine_thread_state_convert_from_user(
 #else
 	// No conversion from userspace representation on this platform
 	(void)thread; (void)flavor; (void)tstate; (void)count;
+	(void)old_tstate; (void)old_count; (void)tssf_flags;
 	return KERN_SUCCESS;
 #endif /* __has_feature(ptrauth_calls) */
 }
@@ -910,7 +1067,7 @@ machine_thread_get_kern_state(thread_t                 thread,
 void
 machine_thread_switch_addrmode(thread_t thread)
 {
-	if (task_has_64Bit_data(thread->task)) {
+	if (task_has_64Bit_data(get_threadtask(thread))) {
 		thread->machine.upcb->ash.flavor = ARM_SAVED_STATE64;
 		thread->machine.upcb->ash.count = ARM_SAVED_STATE64_COUNT;
 		thread->machine.uNeon->nsh.flavor = ARM_NEON_SAVED_STATE64;
@@ -1320,7 +1477,7 @@ machine_thread_reset_pc(thread_t thread, mach_vm_address_t pc)
  * Routine: machine_thread_state_initialize
  *
  */
-kern_return_t
+void
 machine_thread_state_initialize(thread_t thread)
 {
 	arm_context_t *context = thread->machine.contextData;
@@ -1340,6 +1497,7 @@ machine_thread_state_initialize(thread_t thread)
 		} else {
 			context->ns.ns_32.fpcr = FPCR_DEFAULT_32;
 		}
+		context->ss.ss_64.cpsr = PSR64_USER64_DEFAULT;
 	}
 
 	thread->machine.DebugData = NULL;
@@ -1351,25 +1509,22 @@ machine_thread_state_initialize(thread_t thread)
 		asm volatile (
                         "mov	x0, %[iss]"             "\n"
                         "mov	x1, #0"                 "\n"
-                        "mov	x2, #0"                 "\n"
+                        "mov	w2, %w[usr]"            "\n"
                         "mov	x3, #0"                 "\n"
                         "mov	x4, #0"                 "\n"
                         "mov	x5, #0"                 "\n"
-
                         "mov	x6, lr"                 "\n"
                         "msr	SPSel, #1"              "\n"
-                        "bl	_ml_sign_thread_state"  "\n"
+                        "bl     _ml_sign_thread_state"  "\n"
                         "msr	SPSel, #0"              "\n"
                         "mov	lr, x6"                 "\n"
                         :
-                        : [iss] "r"(thread->machine.upcb)
+                        : [iss] "r"(thread->machine.upcb), [usr] "r"(thread->machine.upcb->ss_64.cpsr)
                         : "x0", "x1", "x2", "x3", "x4", "x5", "x6"
                 );
 		ml_pac_safe_interrupts_restore(intr);
 	}
 #endif /* defined(HAS_APPLE_PAC) */
-
-	return KERN_SUCCESS;
 }
 
 /*

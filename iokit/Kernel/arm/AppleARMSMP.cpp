@@ -90,7 +90,7 @@ matching_dict_for_cpu_id(unsigned int cpu_id)
 	// (cluster/core) ID instead.
 	OSSymbolConstPtr cpuTypeSymbol = OSSymbol::withCString("cpu");
 	OSSymbolConstPtr cpuIdSymbol = OSSymbol::withCString("reg");
-	OSDataPtr cpuId = OSData::withBytes(&(topology_info->cpus[cpu_id].phys_id), sizeof(uint32_t));
+	OSDataPtr cpuId = OSData::withValue(topology_info->cpus[cpu_id].phys_id);
 
 	OSDictionary *propMatch = OSDictionary::withCapacity(4);
 	propMatch->setObject(gIODTTypeKey, cpuTypeSymbol);
@@ -386,12 +386,11 @@ IOCPUSleepKernel(void)
 	 */
 
 	ml_set_is_quiescing(false);
+
 	rootDomain->start_watchdog_timer();
-	rootDomain->tracePoint( kIOPMTracePointWakePlatformActions );
 
 	console_resume();
 
-	IOPlatformActionsPostResume();
 	rootDomain->tracePoint( kIOPMTracePointWakeCPUs );
 
 	for (i = 0; i < topology_info->num_cpus; i++) {
@@ -404,6 +403,9 @@ IOCPUSleepKernel(void)
 #if defined(__arm64__)
 	sched_restore_recommended_cores_after_sleep();
 #endif
+
+	rootDomain->tracePoint( kIOPMTracePointWakePlatformActions );
+	IOPlatformActionsPostResume();
 
 	thread_kern_set_pri(self, old_pri);
 	printf("IOCPUSleepKernel exit\n");

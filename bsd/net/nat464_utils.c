@@ -486,6 +486,7 @@ nat464_translate_icmp_ip(pbuf_t *pbuf, uint16_t off, uint16_t *tot_len, uint16_t
 	struct ip6_hdr *ip6 = NULL;
 	void *hdr = NULL;
 	int hlen = 0, olen = 0;
+	uint64_t ipid_salt = (uint64_t)pbuf_get_packet_buffer_address(pbuf);
 
 	if (af == naf || (af != AF_INET && af != AF_INET6) ||
 	    (naf != AF_INET && naf != AF_INET6)) {
@@ -511,7 +512,7 @@ nat464_translate_icmp_ip(pbuf_t *pbuf, uint16_t off, uint16_t *tot_len, uint16_t
 		ip4->ip_v = IPVERSION;
 		ip4->ip_hl = sizeof(*ip4) >> 2;
 		ip4->ip_len = htons((uint16_t)(sizeof(*ip4) + tot_len2 - olen));
-		ip4->ip_id = rfc6864 ? 0 : htons(ip_randomid());
+		ip4->ip_id = rfc6864 ? 0 : htons(ip_randomid(ipid_salt));
 		ip4->ip_off = htons(IP_DF);
 		ip4->ip_ttl = ttl2;
 		if (proto2 == IPPROTO_ICMPV6) {
@@ -1235,21 +1236,25 @@ in6_clat46_eventhdlr_callback(struct eventhandler_entry_arg arg0 __unused,
 	kev_post_msg(&ev_msg);
 }
 
-static void
-in6_clat46_event_callback(void *arg)
-{
-	struct kev_netevent_clat46_data *p_in6_clat46_ev =
-	    (struct kev_netevent_clat46_data *)arg;
-
-	EVENTHANDLER_INVOKE(&in6_clat46_evhdlr_ctxt, in6_clat46_event,
-	    p_in6_clat46_ev->clat46_event_code, p_in6_clat46_ev->epid,
-	    p_in6_clat46_ev->euuid);
-}
-
 struct in6_clat46_event_nwk_wq_entry {
 	struct nwk_wq_entry nwk_wqe;
 	struct kev_netevent_clat46_data in6_clat46_ev_arg;
 };
+
+static void
+in6_clat46_event_callback(struct nwk_wq_entry *nwk_item)
+{
+	struct in6_clat46_event_nwk_wq_entry *p_ev;
+
+	p_ev = __container_of(nwk_item,
+	    struct in6_clat46_event_nwk_wq_entry, nwk_wqe);
+
+	EVENTHANDLER_INVOKE(&in6_clat46_evhdlr_ctxt, in6_clat46_event,
+	    p_ev->in6_clat46_ev_arg.clat46_event_code, p_ev->in6_clat46_ev_arg.epid,
+	    p_ev->in6_clat46_ev_arg.euuid);
+
+	kfree_type(struct in6_clat46_event_nwk_wq_entry, p_ev);
+}
 
 void
 in6_clat46_event_enqueue_nwk_wq_entry(in6_clat46_evhdlr_code_t in6_clat46_event_code,
@@ -1257,17 +1262,13 @@ in6_clat46_event_enqueue_nwk_wq_entry(in6_clat46_evhdlr_code_t in6_clat46_event_
 {
 	struct in6_clat46_event_nwk_wq_entry *p_ev = NULL;
 
-	MALLOC(p_ev, struct in6_clat46_event_nwk_wq_entry *,
-	    sizeof(struct in6_clat46_event_nwk_wq_entry),
-	    M_NWKWQ, M_WAITOK | M_ZERO);
+	p_ev = kalloc_type(struct in6_clat46_event_nwk_wq_entry,
+	    Z_WAITOK | Z_ZERO | Z_NOFAIL);
 
 	p_ev->nwk_wqe.func = in6_clat46_event_callback;
-	p_ev->nwk_wqe.is_arg_managed = TRUE;
-	p_ev->nwk_wqe.arg = &p_ev->in6_clat46_ev_arg;
-
 	p_ev->in6_clat46_ev_arg.clat46_event_code = in6_clat46_event_code;
 	p_ev->in6_clat46_ev_arg.epid = epid;
 	uuid_copy(p_ev->in6_clat46_ev_arg.euuid, euuid);
 
-	nwk_wq_enqueue((struct nwk_wq_entry*)p_ev);
+	nwk_wq_enqueue(&p_ev->nwk_wqe);
 }

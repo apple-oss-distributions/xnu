@@ -289,8 +289,8 @@ OSObject::operator new(size_t size)
 	}
 #endif
 
-	void *mem = kheap_alloc_tag_bt(KHEAP_DEFAULT, size,
-	    (zalloc_flags_t) (Z_WAITOK | Z_ZERO), VM_KERN_MEMORY_LIBKERN);
+	void *mem = kheap_alloc(KHEAP_DEFAULT, size,
+	    Z_VM_TAG_BT(Z_WAITOK_ZERO, VM_KERN_MEMORY_LIBKERN));
 	assert(mem);
 	OSIVAR_ACCUMSIZE(size);
 
@@ -321,11 +321,10 @@ OSObject_typed_operator_new(kalloc_type_view_t ktv, vm_size_t size)
 		 * kalloc_type_views generated at some external callsites
 		 * many not have been processed during boot.
 		 */
-		mem = kalloc_type_impl_external(ktv, (zalloc_flags_t)
-		    (Z_WAITOK | Z_ZERO));
+		mem = kalloc_type_impl_external(ktv, Z_WAITOK_ZERO);
 	} else {
-		mem = kheap_alloc_tag_bt(KHEAP_DEFAULT, size,
-		    (zalloc_flags_t) (Z_WAITOK | Z_ZERO), VM_KERN_MEMORY_LIBKERN);
+		mem = kheap_alloc(KHEAP_DEFAULT, size,
+		    Z_VM_TAG_BT(Z_WAITOK_ZERO, VM_KERN_MEMORY_LIBKERN));
 	}
 	assert(mem);
 	OSIVAR_ACCUMSIZE(size);
@@ -383,8 +382,8 @@ OSObject_operator_new_external(size_t size)
 	}
 #endif
 
-	void * mem = kheap_alloc_tag_bt(KHEAP_KEXT, size,
-	    (zalloc_flags_t) (Z_WAITOK | Z_ZERO), VM_KERN_MEMORY_LIBKERN);
+	void * mem = kheap_alloc(KHEAP_KEXT, size,
+	    Z_VM_TAG_BT(Z_WAITOK_ZERO, VM_KERN_MEMORY_LIBKERN));
 	assert(mem);
 	OSIVAR_ACCUMSIZE(size);
 

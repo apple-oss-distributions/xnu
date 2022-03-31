@@ -739,9 +739,8 @@ ndrv_setspec(struct ndrv_cb *np, struct sockopt *sopt)
 	}
 
 	/* Allocate enough ifnet_demux_descs */
-	MALLOC(proto_param.demux_array, struct ifnet_demux_desc*,
-	    sizeof(*proto_param.demux_array) * ndrvSpec.demux_count,
-	    M_TEMP, M_WAITOK);
+	proto_param.demux_array = kalloc_type(struct ifnet_demux_desc,
+	    ndrvSpec.demux_count, Z_WAITOK);
 	if (proto_param.demux_array == NULL) {
 		error = ENOMEM;
 	}
@@ -784,7 +783,8 @@ ndrv_setspec(struct ndrv_cb *np, struct sockopt *sopt)
 
 	/* Free any memory we've allocated */
 	if (proto_param.demux_array) {
-		FREE(proto_param.demux_array, M_TEMP);
+		kfree_type(struct ifnet_demux_desc, ndrvSpec.demux_count,
+		    proto_param.demux_array);
 	}
 	if (ndrvDemux) {
 		kfree_data(ndrvDemux, ndrvDemuxSize);
@@ -893,11 +893,28 @@ ndrv_handle_ifp_detach(u_int32_t family, short unit)
 	}
 }
 
+static struct ndrv_multiaddr *
+ndrv_multiaddr_alloc(size_t size)
+{
+	struct ndrv_multiaddr *ndrv_multi;
+
+	ndrv_multi = kalloc_type(struct ndrv_multiaddr, Z_WAITOK_ZERO_NOFAIL);
+	ndrv_multi->addr = kalloc_data(size, Z_WAITOK_ZERO_NOFAIL);
+	return ndrv_multi;
+}
+
+static void
+ndrv_multiaddr_free(struct ndrv_multiaddr *ndrv_multi, size_t size)
+{
+	kfree_data(ndrv_multi->addr, size);
+	kfree_type(struct ndrv_multiaddr, ndrv_multi);
+}
+
 static int
 ndrv_do_add_multicast(struct ndrv_cb *np, struct sockopt *sopt)
 {
-	struct ndrv_multiaddr*      ndrv_multi;
-	int                                         result;
+	struct ndrv_multiaddr *ndrv_multi;
+	int                    result;
 
 	if (sopt->sopt_val == 0 || sopt->sopt_valsize < 2 ||
 	    sopt->sopt_level != SOL_NDRVPROTO || sopt->sopt_valsize > SOCK_MAXADDRLEN) {
@@ -910,28 +927,23 @@ ndrv_do_add_multicast(struct ndrv_cb *np, struct sockopt *sopt)
 		return EPERM;
 	}
 
-	// Allocate storage
-	MALLOC(ndrv_multi, struct ndrv_multiaddr*, sizeof(struct ndrv_multiaddr) -
-	    sizeof(struct sockaddr) + sopt->sopt_valsize, M_IFADDR, M_WAITOK);
-	if (ndrv_multi == NULL) {
-		return ENOMEM;
-	}
+	ndrv_multi = ndrv_multiaddr_alloc(sopt->sopt_valsize);
 
 	// Copy in the address
-	result = copyin(sopt->sopt_val, &ndrv_multi->addr, sopt->sopt_valsize);
+	result = copyin(sopt->sopt_val, ndrv_multi->addr, sopt->sopt_valsize);
 
 	// Validate the sockaddr
-	if (result == 0 && sopt->sopt_valsize != ndrv_multi->addr.sa_len) {
+	if (result == 0 && sopt->sopt_valsize != ndrv_multi->addr->sa_len) {
 		result = EINVAL;
 	}
 
-	if (result == 0 && ndrv_have_multicast(np, &ndrv_multi->addr)) {
+	if (result == 0 && ndrv_have_multicast(np, ndrv_multi->addr)) {
 		result = EEXIST;
 	}
 
 	if (result == 0) {
 		// Try adding the multicast
-		result = ifnet_add_multicast(np->nd_if, &ndrv_multi->addr,
+		result = ifnet_add_multicast(np->nd_if, ndrv_multi->addr,
 		    &ndrv_multi->ifma);
 	}
 
@@ -942,7 +954,7 @@ ndrv_do_add_multicast(struct ndrv_cb *np, struct sockopt *sopt)
 		np->nd_dlist_cnt++;
 	} else {
 		// Free up the memory, something went wrong
-		FREE(ndrv_multi, M_IFADDR);
+		ndrv_multiaddr_free(ndrv_multi, sopt->sopt_valsize);
 	}
 
 	return result;
@@ -956,6 +968,7 @@ ndrv_do_remove_multicast(struct ndrv_cb *np, struct sockopt *sopt)
 	int                                 result;
 
 	if (sopt->sopt_val == 0 || sopt->sopt_valsize < 2 ||
+	    sopt->sopt_valsize > SOCK_MAXADDRLEN ||
 	    sopt->sopt_level != SOL_NDRVPROTO) {
 		return EINVAL;
 	}
@@ -1010,10 +1023,9 @@ ndrv_do_remove_multicast(struct ndrv_cb *np, struct sockopt *sopt)
 
 		np->nd_dlist_cnt--;
 
-		// Free the memory
-		FREE(ndrv_entry, M_IFADDR);
+		ndrv_multiaddr_free(ndrv_entry, ndrv_entry->addr->sa_len);
 	}
-	kfree_data(multi_addr, multi_addr->sa_len);
+	kfree_data(multi_addr, sopt->sopt_valsize);
 
 	return result;
 }
@@ -1023,8 +1035,8 @@ ndrv_have_multicast(struct ndrv_cb *np, struct sockaddr* inAddr)
 {
 	struct ndrv_multiaddr*      cur;
 	for (cur = np->nd_multiaddrs; cur != NULL; cur = cur->next) {
-		if ((inAddr->sa_len == cur->addr.sa_len) &&
-		    (bcmp(&cur->addr, inAddr, inAddr->sa_len) == 0)) {
+		if ((inAddr->sa_len == cur->addr->sa_len) &&
+		    (bcmp(cur->addr, inAddr, inAddr->sa_len) == 0)) {
 			// Found a match
 			return cur;
 		}
@@ -1045,7 +1057,7 @@ ndrv_remove_all_multicast(struct ndrv_cb* np)
 
 			ifnet_remove_multicast(cur->ifma);
 			ifmaddr_release(cur->ifma);
-			FREE(cur, M_IFADDR);
+			ndrv_multiaddr_free(cur, cur->addr->sa_len);
 		}
 	}
 }

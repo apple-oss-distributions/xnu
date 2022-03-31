@@ -111,7 +111,7 @@ const struct ipc_voucher_attr_manager ipc_pthread_priority_manager = {
  * Returns: None.
  */
 void
-ipc_pthread_priority_init()
+ipc_pthread_priority_init(void)
 {
 	kern_return_t kr = KERN_SUCCESS;
 

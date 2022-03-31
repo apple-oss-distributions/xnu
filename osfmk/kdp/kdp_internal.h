@@ -111,7 +111,7 @@ void
 kdp_panic(
 	const char          *fmt,
 	...
-	);
+	) __printflike(1, 2);
 
 extern
 void

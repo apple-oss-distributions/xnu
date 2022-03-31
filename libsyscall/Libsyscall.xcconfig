@@ -23,7 +23,7 @@ OS_PUBLIC_HEADERS_FOLDER_PATH = $(SDK_INSTALL_HEADERS_ROOT)/usr/include/os
 EXECUTABLE_PREFIX = libsystem_
 PRODUCT_NAME = kernel
 ALWAYS_SEARCH_USER_PATHS = NO
-OTHER_CFLAGS = -fdollars-in-identifiers -no-cpp-precomp -fno-common -fno-stack-protector -fno-stack-check -momit-leaf-frame-pointer -DLIBSYSCALL_INTERFACE -D__DARWIN_VERS_1050=1 -DNO_SYSCALL_LEGACY
+OTHER_CFLAGS = -fdollars-in-identifiers -no-cpp-precomp -fno-common -fno-stack-protector -fno-stack-check -fno-builtin-calloc -momit-leaf-frame-pointer -DLIBSYSCALL_INTERFACE -D__DARWIN_VERS_1050=1 -DNO_SYSCALL_LEGACY
 OTHER_CFLAGS[sdk=macosx*][arch=i386] = $(inherited) -UNO_SYSCALL_LEGACY -DSYSCALL_PRE1050
 OTHER_CFLAGS[sdk=macosx*][arch=x86_64*] = $(inherited) -DSYSCALL_PRE1050
 GCC_PREPROCESSOR_DEFINITIONS = CF_OPEN_SOURCE CF_EXCLUDE_CSTD_HEADERS DEBUG _FORTIFY_SOURCE=0
@@ -34,7 +34,7 @@ SYSTEM_FRAMEWORK_SEARCH_PATHS = $(SDKROOT)/$(SDK_INSTALL_HEADERS_ROOT)/System/Li
 
 OTHER_MIGFLAGS = -novouchers -I$(SDKROOT)/$(SDK_INSTALL_HEADERS_ROOT)/System/Library/Frameworks/System.framework/PrivateHeaders -I$(SDKROOT)/$(SDK_INSTALL_HEADERS_ROOT)/usr/local/include -I$(SDKROOT)/$(SDK_INSTALL_HEADERS_ROOT)/usr/include
 
-WARNING_CFLAGS = -Wmost
+WARNING_CFLAGS = -Wmost -Wformat=2
 GCC_TREAT_WARNINGS_AS_ERRORS = YES
 GCC_WARN_ABOUT_MISSING_NEWLINE = YES
 GCC_NO_COMMON_BLOCKS = YES

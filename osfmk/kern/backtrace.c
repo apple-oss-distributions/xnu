@@ -49,25 +49,69 @@
    ((uintptr_t)(__addr) < (uintptr_t)pmap_stacks_end))
 #endif
 
-// This function is fast because it does no checking to make sure there isn't
-// bad data.
+#if __x86_64__
+static void
+_backtrace_packed_out_of_reach(void)
+{
+	/*
+	 * This symbol is used to replace frames that have been "JIT-ed"
+	 * or dynamically inserted in the kernel by some kext in a regular
+	 * VM mapping that might be outside of the filesets.
+	 *
+	 * This is an Intel only issue.
+	 */
+}
+#endif
+
+// Pack an address according to a particular packing format.
+static size_t
+_backtrace_pack_addr(backtrace_pack_t packing, uint8_t *dst, size_t dst_size,
+    uintptr_t addr)
+{
+	switch (packing) {
+	case BTP_NONE:
+		if (dst_size >= sizeof(addr)) {
+			memcpy(dst, &addr, sizeof(addr));
+		}
+		return sizeof(addr);
+	case BTP_KERN_OFFSET_32:;
+		uintptr_t addr_delta = addr - vm_kernel_stext;
+		int32_t addr_packed = (int32_t)addr_delta;
+#if __x86_64__
+		if ((uintptr_t)(int32_t)addr_delta != addr_delta) {
+			addr = (vm_offset_t)&_backtrace_packed_out_of_reach;
+			addr_delta = addr - vm_kernel_stext;
+			addr_packed = (int32_t)addr_delta;
+		}
+#else
+		assert((uintptr_t)(int32_t)addr_delta == addr_delta);
+#endif
+		if (dst_size >= sizeof(addr_packed)) {
+			memcpy(dst, &addr_packed, sizeof(addr_packed));
+		}
+		return sizeof(addr_packed);
+	default:
+		panic("backtrace: unknown packing format %d", packing);
+	}
+}
 
 // Since it's only called from threads that we're going to keep executing,
 // if there's bad data the system is going to die eventually.  If this function
 // is inlined, it doesn't record the frame of the function it's inside (because
 // there's no stack frame), so prevent that.
-static unsigned int __attribute__((noinline, not_tail_called))
-backtrace_internal(uintptr_t *bt, unsigned int max_frames, void *start_frame,
-    int64_t addr_offset, backtrace_info_t *info_out)
+static size_t __attribute__((noinline, not_tail_called))
+backtrace_internal(backtrace_pack_t packing, uint8_t *bt,
+    size_t btsize, void *start_frame, int64_t addr_offset,
+    backtrace_info_t *info_out)
 {
 	thread_t thread = current_thread();
 	uintptr_t *fp;
-	unsigned int frame_index = 0;
+	size_t size_used = 0;
 	uintptr_t top, bottom;
 	bool in_valid_stack;
 
 	assert(bt != NULL);
-	assert(max_frames > 0);
+	assert(btsize > 0);
 
 	fp = start_frame;
 	bottom = thread->kernel_stack;
@@ -86,7 +130,7 @@ backtrace_internal(uintptr_t *bt, unsigned int max_frames, void *start_frame,
 		fp = NULL;
 	}
 
-	while (fp != NULL && frame_index < max_frames) {
+	while (fp != NULL && size_used < btsize) {
 		uintptr_t *next_fp = (uintptr_t *)*fp;
 		// Return address is one word higher than frame pointer.
 		uintptr_t ret_addr = *(fp + 1);
@@ -105,11 +149,14 @@ backtrace_internal(uintptr_t *bt, unsigned int max_frames, void *start_frame,
 
 #if defined(HAS_APPLE_PAC)
 		// Return addresses are signed by arm64e ABI, so strip it.
-		bt[frame_index++] = (uintptr_t)ptrauth_strip((void *)ret_addr,
-		    ptrauth_key_return_address) + addr_offset;
+		uintptr_t pc = (uintptr_t)ptrauth_strip((void *)ret_addr,
+		    ptrauth_key_return_address);
 #else // defined(HAS_APPLE_PAC)
-		bt[frame_index++] = ret_addr + addr_offset;
+		uintptr_t pc = ret_addr;
 #endif // !defined(HAS_APPLE_PAC)
+		pc += addr_offset;
+		size_used += _backtrace_pack_addr(packing, bt + size_used,
+		    btsize - size_used, pc);
 
 		// Stacks grow down; backtracing should be moving to higher addresses.
 		if (next_fp <= fp) {
@@ -134,23 +181,18 @@ backtrace_internal(uintptr_t *bt, unsigned int max_frames, void *start_frame,
 		fp = next_fp;
 	}
 
-	// NULL-terminate the list, if space is available.
-	if (frame_index != max_frames) {
-		bt[frame_index] = 0;
-	}
-
 	if (info_out) {
 		backtrace_info_t info = BTI_NONE;
 #if __LP64__
 		info |= BTI_64_BIT;
 #endif
-		if (fp != NULL && frame_index == max_frames) {
+		if (fp != NULL && size_used >= btsize) {
 			info |= BTI_TRUNCATED;
 		}
 		*info_out = info;
 	}
 
-	return frame_index;
+	return size_used;
 #undef IN_STK_BOUNDS
 }
 
@@ -230,39 +272,120 @@ interrupted_kernel_pc_fp(uintptr_t *pc, uintptr_t *fp)
 	return KERN_SUCCESS;
 }
 
-unsigned int __attribute__((noinline))
-backtrace(uintptr_t *bt, unsigned int max_frames,
-    struct backtrace_control *ctl, backtrace_info_t *info_out)
+__attribute__((always_inline))
+static uintptr_t
+_backtrace_preamble(struct backtrace_control *ctl, uintptr_t *start_frame_out)
 {
 	backtrace_flags_t flags = ctl ? ctl->btc_flags : 0;
 	uintptr_t start_frame = ctl ? ctl->btc_frame_addr : 0;
-	unsigned int len_adj = 0;
+	uintptr_t pc = 0;
 	if (flags & BTF_KERN_INTERRUPTED) {
-		assert(bt != NULL);
-		assert(max_frames > 0);
 		assert(ml_at_interrupt_context() == TRUE);
 
-		uintptr_t pc, fp;
+		uintptr_t fp;
 		kern_return_t kr = interrupted_kernel_pc_fp(&pc, &fp);
 		if (kr != KERN_SUCCESS) {
 			return 0;
 		}
+		*start_frame_out = start_frame ?: fp;
+	} else if (start_frame == 0) {
+		*start_frame_out = (uintptr_t)__builtin_frame_address(0);
+	} else {
+		*start_frame_out = start_frame;
+	}
+	return pc;
+}
 
+unsigned int __attribute__((noinline))
+backtrace(uintptr_t *bt, unsigned int max_frames,
+    struct backtrace_control *ctl, backtrace_info_t *info_out)
+{
+	unsigned int len_adj = 0;
+	uintptr_t start_frame = ctl ? ctl->btc_frame_addr : 0;
+	uintptr_t pc = _backtrace_preamble(ctl, &start_frame);
+	if (pc) {
 		bt[0] = pc;
 		if (max_frames == 1) {
 			return 1;
 		}
 		bt += 1;
 		max_frames -= 1;
-		len_adj = 1;
-		start_frame = start_frame ?: fp;
-	} else if (start_frame == 0) {
-		start_frame = (uintptr_t)__builtin_frame_address(0);
+		len_adj += 1;
 	}
 
-	unsigned int len = backtrace_internal(bt, max_frames, (void *)start_frame,
+	size_t size = backtrace_internal(BTP_NONE, (uint8_t *)bt,
+	    max_frames * sizeof(uintptr_t), (void *)start_frame,
 	    ctl ? ctl->btc_addr_offset : 0, info_out);
+	// NULL-terminate the list, if space is available.
+	unsigned int len = size / sizeof(uintptr_t);
+	if (len != max_frames) {
+		bt[len] = 0;
+	}
+
 	return len + len_adj;
+}
+
+// Backtrace the current thread's kernel stack as a packed representation.
+size_t
+backtrace_packed(backtrace_pack_t packing, uint8_t *bt, size_t btsize,
+    struct backtrace_control *ctl,
+    backtrace_info_t *info_out)
+{
+	unsigned int size_adj = 0;
+	uintptr_t start_frame = ctl ? ctl->btc_frame_addr : 0;
+	uintptr_t pc = _backtrace_preamble(ctl, &start_frame);
+	if (pc) {
+		size_adj = _backtrace_pack_addr(packing, bt, btsize, pc);
+		if (size_adj >= btsize) {
+			return size_adj;
+		}
+		btsize -= size_adj;
+	}
+
+	size_t written_size = backtrace_internal(packing, (uint8_t *)bt, btsize,
+	    (void *)start_frame, ctl ? ctl->btc_addr_offset : 0, info_out);
+	return written_size + size_adj;
+}
+
+// Convert an array of addresses to a packed representation.
+size_t
+backtrace_pack(backtrace_pack_t packing, uint8_t *dst, size_t dst_size,
+    const uintptr_t *src, unsigned int src_len)
+{
+	size_t dst_offset = 0;
+	for (unsigned int i = 0; i < src_len; i++) {
+		size_t pack_size = _backtrace_pack_addr(packing, dst + dst_offset,
+		    dst_size - dst_offset, src[i]);
+		if (dst_offset + pack_size >= dst_size) {
+			return dst_offset;
+		}
+		dst_offset += pack_size;
+	}
+	return dst_offset;
+}
+
+// Convert a packed backtrace to an array of addresses.
+unsigned int
+backtrace_unpack(backtrace_pack_t packing, uintptr_t *dst, unsigned int dst_len,
+    const uint8_t *src, size_t src_size)
+{
+	switch (packing) {
+	case BTP_NONE:;
+		size_t unpack_size = MIN(dst_len * sizeof(uintptr_t), src_size);
+		memmove(dst, src, unpack_size);
+		return (unsigned int)(unpack_size / sizeof(uintptr_t));
+	case BTP_KERN_OFFSET_32:;
+		unsigned int src_len = src_size / sizeof(int32_t);
+		unsigned int unpack_len = MIN(src_len, dst_len);
+		for (unsigned int i = 0; i < unpack_len; i++) {
+			int32_t addr = 0;
+			memcpy(&addr, src + i * sizeof(int32_t), sizeof(int32_t));
+			dst[i] = vm_kernel_stext + (uintptr_t)addr;
+		}
+		return unpack_len;
+	default:
+		panic("backtrace: unknown packing format %d", packing);
+	}
 }
 
 static errno_t

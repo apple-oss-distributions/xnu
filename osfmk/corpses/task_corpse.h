@@ -54,7 +54,13 @@ typedef struct kcdata_item      *task_crashinfo_item_t;
 #ifdef XNU_KERNEL_PRIVATE
 
 #define CORPSEINFO_ALLOCATION_SIZE (1024 * 16)
+
+#if XNU_TARGET_OS_WATCH
+#define TOTAL_CORPSES_ALLOWED 4
+#else /* XNU_TARGET_OS_WATCH */
 #define TOTAL_CORPSES_ALLOWED 5
+#endif /* XNU_TARGET_OS_WATCH */
+
 #define TOTAL_USER_FAULTS_ALLOWED 1
 
 #if DEBUG || DEVELOPMENT

@@ -243,6 +243,8 @@ kernel_triage_extract(
 	size_t i, record_bytes, record_cnt, record_bufsz;
 	void *record_buf;
 	void *local_buf;
+	int ret;
+
 
 	if (thread_id == 0 || buf == NULL || bufsz < KDBG_TRIAGE_MAX_STRLEN) {
 		return;
@@ -254,16 +256,19 @@ kernel_triage_extract(
 	record_bytes = record_bufsz = kd_data_page_triage.nkdbufs * sizeof(kd_buf);
 	record_buf = kalloc_data(record_bufsz, Z_WAITOK);
 
-	ktriage_lock();
-	int ret = kernel_debug_read(&kd_ctrl_page_triage,
-	    &kd_data_page_triage,
-	    (user_addr_t) record_buf, &record_bytes, NULL, NULL, 0);
-	ktriage_unlock();
+	if (record_buf == NULL) {
+		ret = ENOMEM;
+	} else {
+		ktriage_lock();
+		ret = kernel_debug_read(&kd_ctrl_page_triage,
+		    &kd_data_page_triage,
+		    (user_addr_t) record_buf, &record_bytes, NULL, NULL, 0);
+		ktriage_unlock();
+	}
 
 	if (ret) {
 		printf("kernel_triage_extract: kernel_debug_read failed with %d\n", ret);
 		kfree_data(record_buf, record_bufsz);
-		record_buf = NULL;
 		return;
 	}
 
@@ -289,7 +294,6 @@ kernel_triage_extract(
 	}
 
 	kfree_data(record_buf, record_bufsz);
-	record_buf = NULL;
 }
 
 

@@ -95,7 +95,7 @@ _sleep_continue( __unused void *parameter, wait_result_t wresult)
 				error = EINTR;
 			} else if (SHOULDissignal(p, ut)) {
 				if ((sig = CURSIG(p)) != 0) {
-					if (p->p_sigacts->ps_sigintr & sigmask(sig)) {
+					if (p->p_sigacts.ps_sigintr & sigmask(sig)) {
 						error = EINTR;
 					} else {
 						error = ERESTART;
@@ -221,7 +221,7 @@ _sleep(
 					if (clear_wait(self, THREAD_INTERRUPTED) == KERN_FAILURE) {
 						goto block;
 					}
-					if (p->p_sigacts->ps_sigintr & sigmask(sig)) {
+					if (p->p_sigacts.ps_sigintr & sigmask(sig)) {
 						error = EINTR;
 					} else {
 						error = ERESTART;
@@ -295,7 +295,7 @@ block:
 				error = EINTR;
 			} else if (SHOULDissignal(p, ut)) {
 				if ((sig = CURSIG(p)) != 0) {
-					if (p->p_sigacts->ps_sigintr & sigmask(sig)) {
+					if (p->p_sigacts.ps_sigintr & sigmask(sig)) {
 						error = EINTR;
 					} else {
 						error = ERESTART;

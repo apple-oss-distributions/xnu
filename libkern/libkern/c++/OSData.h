@@ -35,6 +35,10 @@
 #include <libkern/c++/OSPtr.h>
 #include <os/base.h>
 
+#if KERNEL_PRIVATE
+#include <kern/kalloc.h>
+#endif
+
 class OSData;
 class OSString;
 
@@ -169,6 +173,36 @@ public:
 		unsigned int   numBytes);
 
 
+#if KERNEL_PRIVATE
+/*!
+ * @function withValue
+ *
+ * @abstract
+ * Creates and initializes an instance of OSData
+ * with a copy of the provided value of a concrete type.
+ *
+ * @param value     The instance of a value to copy.
+ *
+ * @result
+ * An instance of OSData containing a copy of the provided value's data,
+ * with a reference count of 1;
+ * <code>NULL</code> on failure.
+ *
+ * @discussion
+ * The new OSData object will grow as needed to accommodate more bytes
+ * (<i>unlike</i> @link //apple_ref/doc/uid/20001498 CFMutableData@/link,
+ * for which a nonzero initial capacity is a hard limit).
+ */
+	template <typename T>
+	static OSPtr<OSData>
+	withValue(const T& value)
+	{
+		validateValueType<T, kValueCopy>();
+		return withBytes(&value, sizeof(T));
+	}
+#endif // KERNEL_PRIVATE
+
+
 /*!
  * @function withBytesNoCopy
  *
@@ -200,6 +234,50 @@ public:
 	static OSPtr<OSData> withBytesNoCopy(
 		void         * bytes,
 		unsigned int   numBytes);
+
+
+#if KERNEL_PRIVATE
+/*!
+ * @function withValueNoCopy
+ *
+ * @abstract
+ * Creates and initializes an instance of OSData
+ * that shares the provided value of a concrete type.
+ *
+ * @param value     The instance of a value to represent.
+ *
+ * @result
+ * A instance of OSData that shares the provided value's data,
+ * with a reference count of 1;
+ * <code>NULL</code> on failure.
+ *
+ * @discussion
+ * An OSData object created with this function does not claim ownership
+ * of the data of the value, but shares it with the caller.
+ * When the caller determines that the OSData object has actually been freed,
+ * it can safely dispose of the data buffer.
+ * Conversely, if the lifetime of the data's shared value instance ends,
+ * it must not attempt to use the OSData object and should release it.
+ *
+ * An OSData object created with shared external data cannot append bytes,
+ * but you can get the byte pointer and
+ * modify bytes within the shared buffer.
+ */
+	template <typename T>
+	static OSPtr<OSData>
+	withValueNoCopy(T& value)
+	{
+		validateValueType<T, kValueNoCopy>();
+		return withBytesNoCopy(&value, sizeof(T));
+	}
+
+#if __cplusplus >= 201103L
+	/* rvalue overload is deleted for the NoCopy variation to
+	 * disallow holding a dangling pointer to a temporary value */
+	template <typename T>
+	static OSPtr<OSData> withValueNoCopy(T&& value) = delete;
+#endif
+#endif // KERNEL_PRIVATE
 
 
 /*!
@@ -304,6 +382,37 @@ public:
 		unsigned int   numBytes);
 
 
+#if KERNEL_PRIVATE
+/*!
+ * @function initWithValue
+ *
+ * @abstract
+ * Initializes an instance of OSData
+ * with a copy of the provided value of a concrete type.
+ *
+ * @param value     The instance of a value to copy.
+ *
+ * @result
+ * <code>true</code> on success, <code>false</code> on failure.
+ *
+ * @discussion
+ * Not for general use. Use the static instance creation method
+ * <code>@link withValue withValue@/link</code> instead.
+ *
+ * The new OSData object will grow as needed to accommodate more bytes
+ * (<i>unlike</i> @link //apple_ref/doc/uid/20001498 CFMutableData@/link,
+ * for which a nonzero initial capacity is a hard limit).
+ */
+	template <typename T>
+	bool
+	initWithValue(const T& value)
+	{
+		validateValueType<T, kValueCopy>();
+		return initWithBytes(&value, sizeof(T));
+	}
+#endif // KERNEL_PRIVATE
+
+
 /*!
  * @function initWithBytesNoCopy
  *
@@ -332,6 +441,47 @@ public:
 	virtual bool initWithBytesNoCopy(
 		void         * bytes,
 		unsigned int   numBytes);
+
+
+#if KERNEL_PRIVATE
+/*!
+ * @function initWithValueNoCopy
+ *
+ * @abstract
+ * Initializes an instance of OSData
+ * to share the provided value of a concrete type.
+ *
+ * @param value     The instance of a value to represent.
+ *
+ * @result
+ * <code>true</code> on success, <code>false</code> on failure.
+ *
+ * @discussion
+ * Not for general use. Use the static instance creation method
+ * <code>@link withValueNoCopy withValueNoCopy@/link</code> instead.
+ *
+ * An OSData object initialized with this function does not claim ownership
+ * of the data of the value, but merely shares it with the caller.
+ *
+ * An OSData object created with shared external data cannot append bytes,
+ * but you can get the byte pointer and
+ * modify bytes within the shared buffer.
+ */
+	template <typename T>
+	bool
+	initWithValueNoCopy(T& value)
+	{
+		validateValueType<T, kValueNoCopy>();
+		return initWithBytesNoCopy(&value, sizeof(T));
+	}
+
+#if __cplusplus >= 201103L
+	/* rvalue overload is deleted for the NoCopy variation to
+	 * disallow holding a dangling pointer to a temporary value */
+	template <typename T>
+	bool initWithValueNoCopy(T&& value) = delete;
+#endif
+#endif // KERNEL_PRIVATE
 
 
 /*!
@@ -541,6 +691,37 @@ public:
 	virtual bool appendBytes(
 		const void   * bytes,
 		unsigned int   numBytes);
+
+
+#if KERNEL_PRIVATE
+/*!
+ * @function appendValue
+ *
+ * @abstract
+ * Appends a copy of the provided value of a concrete type to the
+ * OSData object's internal data buffer.
+ *
+ * @param value     The instance of a value to copy.
+ *
+ * @result
+ * <code>true</code> if the new data was successfully added,
+ * <code>false</code> on failure.
+ *
+ * @discussion
+ * This function immediately resizes the OSData's buffer, if necessary,
+ * to accommodate the new total size.
+ *
+ * An OSData object created "NoCopy" does not allow bytes
+ * to be appended.
+ */
+	template <typename T>
+	bool
+	appendValue(const T& value)
+	{
+		validateValueType<T, kValueCopy>();
+		return appendBytes(&value, sizeof(T));
+	}
+#endif // KERNEL_PRIVATE
 
 
 /*!
@@ -756,6 +937,36 @@ private:
 #endif
 	virtual void setDeallocFunction(DeallocFunction func);
 	bool isSerializable(void);
+
+private:
+	enum ValueAcquisition {
+		kValueCopy,
+		kValueNoCopy
+	};
+
+#if KERNEL_PRIVATE
+#if __cplusplus >= 201103L
+	template <typename T, ValueAcquisition acquisition>
+	static constexpr int
+	validateValueType()
+	{
+		static_assert(sizeof(T) <= size_t(UINT32_MAX), "value type's size is too large");
+		static_assert(__is_trivially_copyable(T) && __is_standard_layout(T),
+		    "only trivially copyable types can be contained");
+		static_assert(!__is_pointer(T) || (acquisition == kValueNoCopy),
+		    "pointers cannot be contained");
+		static_assert(KALLOC_TYPE_IS_DATA_ONLY(T) || (acquisition == kValueNoCopy),
+		    "only plain data types can be contained (consider using OSValueObject)");
+		return 0; // C++11 does not support void-returning constexpr functions
+	}
+#else
+	template <typename T, ValueAcquisition>
+	static void
+	validateValueType()
+	{
+	}
+#endif
+#endif // KERNEL_PRIVATE
 
 private:
 	OSMetaClassDeclareReservedUsedX86(OSData, 0);

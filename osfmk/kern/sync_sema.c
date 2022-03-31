@@ -60,12 +60,8 @@
 static const uint8_t semaphore_event;
 #define SEMAPHORE_EVENT CAST_EVENT64_T(&semaphore_event)
 
-static SECURITY_READ_ONLY_LATE(zone_t) semaphore_zone;
-ZONE_INIT(&semaphore_zone, "semaphores", sizeof(struct semaphore),
-#if CONFIG_WAITQ_IRQSAFE_ALLOW_INVALID
-    ZC_NOGZALLOC | ZC_KASAN_NOQUARANTINE | ZC_SEQUESTER |
-#endif
-    ZC_ZFREE_CLEARMEM, ZONE_ID_SEMAPHORE, NULL);
+ZONE_DEFINE_ID(ZONE_ID_SEMAPHORE, "semaphores", struct semaphore,
+    ZC_ZFREE_CLEARMEM);
 
 os_refgrp_decl(static, sema_refgrp, "semaphore", NULL);
 
@@ -110,7 +106,7 @@ semaphore_create(
 		return KERN_INVALID_ARGUMENT;
 	}
 
-	s = zalloc_flags(semaphore_zone, Z_ZERO | Z_WAITOK | Z_NOFAIL);
+	s = zalloc_id(ZONE_ID_SEMAPHORE, Z_ZERO | Z_WAITOK | Z_NOFAIL);
 
 	/*
 	 *  Associate the new semaphore with the task by adding
@@ -120,12 +116,11 @@ semaphore_create(
 	/* Check for race with task_terminate */
 	if (!task->active) {
 		task_unlock(task);
-		zfree(semaphore_zone, s);
+		zfree_id(ZONE_ID_SEMAPHORE, s);
 		return KERN_INVALID_TASK;
 	}
 
-	waitq_init(&s->waitq, policy |
-	    SYNC_POLICY_DISABLE_IRQ | SYNC_POLICY_INIT_LOCKED);
+	waitq_init(&s->waitq, WQT_QUEUE, policy | SYNC_POLICY_INIT_LOCKED);
 
 	/* init everything under both the task and semaphore locks */
 	os_ref_init_raw(&s->ref_count, &sema_refgrp);
@@ -183,13 +178,11 @@ semaphore_destroy_internal(
 
 	if (old_count < 0) {
 		waitq_wakeup64_all_locked(&semaphore->waitq,
-		    SEMAPHORE_EVENT,
-		    THREAD_RESTART, NULL,
-		    WAITQ_ALL_PRIORITIES,
-		    WAITQ_UNLOCK);
+		    SEMAPHORE_EVENT, THREAD_RESTART,
+		    WAITQ_ALL_PRIORITIES, WAITQ_UNLOCK);
 		/* waitq/semaphore is unlocked */
 	} else {
-		assert(queue_empty(&semaphore->waitq.waitq_queue));
+		assert(circle_queue_empty(&semaphore->waitq.waitq_queue));
 		semaphore_unlock(semaphore);
 	}
 }
@@ -273,7 +266,7 @@ semaphore_free(
 	}
 
 	waitq_deinit(&semaphore->waitq);
-	zfree(semaphore_zone, semaphore);
+	zfree_id(ZONE_ID_SEMAPHORE, semaphore);
 }
 
 /*
@@ -375,12 +368,9 @@ semaphore_signal_internal(
 
 	if (thread != THREAD_NULL) {
 		if (semaphore->count < 0) {
-			kr = waitq_wakeup64_thread_locked(
-				&semaphore->waitq,
-				SEMAPHORE_EVENT,
-				thread,
-				THREAD_AWAKENED,
-				WAITQ_UNLOCK);
+			kr = waitq_wakeup64_thread_and_unlock(
+				&semaphore->waitq, SEMAPHORE_EVENT,
+				thread, THREAD_AWAKENED);
 			/* waitq/semaphore is unlocked */
 		} else {
 			kr = KERN_NOT_WAITING;
@@ -396,12 +386,9 @@ semaphore_signal_internal(
 		kr = KERN_NOT_WAITING;
 		if (old_count < 0) {
 			semaphore->count = 0;  /* always reset */
-			kr = waitq_wakeup64_all_locked(
-				&semaphore->waitq,
-				SEMAPHORE_EVENT,
-				THREAD_AWAKENED, NULL,
-				WAITQ_ALL_PRIORITIES,
-				WAITQ_UNLOCK);
+			kr = waitq_wakeup64_all_locked(&semaphore->waitq,
+			    SEMAPHORE_EVENT, THREAD_AWAKENED,
+			    WAITQ_ALL_PRIORITIES, WAITQ_UNLOCK);
 			/* waitq / semaphore is unlocked */
 		} else {
 			if (options & SEMAPHORE_SIGNAL_PREPOST) {
@@ -417,13 +404,9 @@ semaphore_signal_internal(
 	if (semaphore->count < 0) {
 		waitq_options_t wq_option = (options & SEMAPHORE_THREAD_HANDOFF) ?
 		    WQ_OPTION_HANDOFF : WQ_OPTION_NONE;
-		kr = waitq_wakeup64_one_locked(
-			&semaphore->waitq,
-			SEMAPHORE_EVENT,
-			THREAD_AWAKENED, NULL,
-			WAITQ_ALL_PRIORITIES,
-			WAITQ_KEEP_LOCKED,
-			wq_option);
+		kr = waitq_wakeup64_one_locked(&semaphore->waitq,
+		    SEMAPHORE_EVENT, THREAD_AWAKENED,
+		    WAITQ_ALL_PRIORITIES, WAITQ_KEEP_LOCKED, wq_option);
 		if (kr == KERN_SUCCESS) {
 			semaphore_unlock(semaphore);
 			splx(spl_level);

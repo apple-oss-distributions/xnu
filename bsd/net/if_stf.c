@@ -308,21 +308,16 @@ stfattach(void)
 		printf("proto_register_plumber failed for AF_INET6 error=%d\n", error);
 	}
 
-	sc = _MALLOC(sizeof(struct stf_softc), M_DEVBUF, M_WAITOK | M_ZERO);
-	if (sc == 0) {
-		printf("stf softc attach failed\n" );
-		return;
-	}
+	sc = kalloc_type(struct stf_softc, Z_WAITOK_ZERO_NOFAIL);
+	lck_mtx_init(&sc->sc_ro_mtx, &stf_mtx_grp, LCK_ATTR_NULL);
 
 	p = encap_attach_func(AF_INET, IPPROTO_IPV6, stf_encapcheck,
 	    &in_stf_protosw, sc);
 	if (p == NULL) {
 		printf("sftattach encap_attach_func failed\n");
-		FREE(sc, M_DEVBUF);
-		return;
+		goto free_sc;
 	}
 	sc->encap_cookie = p;
-	lck_mtx_init(&sc->sc_ro_mtx, &stf_mtx_grp, LCK_ATTR_NULL);
 
 	bzero(&stf_init, sizeof(stf_init));
 	stf_init.ver = IFNET_INIT_CURRENT_VERSION;
@@ -344,9 +339,7 @@ stfattach(void)
 	if (error != 0) {
 		printf("stfattach, ifnet_allocate failed - %d\n", error);
 		encap_detach(sc->encap_cookie);
-		lck_mtx_destroy(&sc->sc_ro_mtx, &stf_mtx_grp);
-		FREE(sc, M_DEVBUF);
-		return;
+		goto free_sc;
 	}
 	ifnet_set_mtu(sc->sc_if, IPV6_MMTU);
 	ifnet_set_flags(sc->sc_if, 0, 0xffff); /* clear all flags */
@@ -360,14 +353,16 @@ stfattach(void)
 		printf("stfattach: ifnet_attach returned error=%d\n", error);
 		encap_detach(sc->encap_cookie);
 		ifnet_release(sc->sc_if);
-		lck_mtx_destroy(&sc->sc_ro_mtx, &stf_mtx_grp);
-		FREE(sc, M_DEVBUF);
-		return;
+		goto free_sc;
 	}
 
 	bpfattach(sc->sc_if, DLT_NULL, sizeof(u_int));
 
 	return;
+
+free_sc:
+	lck_mtx_destroy(&sc->sc_ro_mtx, &stf_mtx_grp);
+	kfree_type(struct stf_softc, sc);
 }
 
 static int

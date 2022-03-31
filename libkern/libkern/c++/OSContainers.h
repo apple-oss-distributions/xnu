@@ -42,6 +42,9 @@
 #include <libkern/c++/OSOrderedSet.h>
 #include <libkern/c++/OSCollectionIterator.h>
 #include <libkern/c++/OSDictionary.h>
+#if KERNEL_PRIVATE
+#include <libkern/c++/OSValueObject.h>
+#endif
 
 #include <libkern/c++/OSSerialize.h>
 #include <libkern/c++/OSUnserialize.h>

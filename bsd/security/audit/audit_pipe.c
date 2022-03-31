@@ -1093,7 +1093,7 @@ audit_pipe_init(void)
 
 	dev = makedev(audit_pipe_major, 0);
 	devnode = devfs_make_node_clone(dev, DEVFS_CHAR, UID_ROOT, GID_WHEEL,
-	    0600, audit_pipe_clone, "auditpipe", 0);
+	    0600, audit_pipe_clone, "auditpipe");
 
 	if (devnode == NULL) {
 		return KERN_FAILURE;

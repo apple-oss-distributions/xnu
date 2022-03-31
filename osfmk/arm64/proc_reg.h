@@ -1488,6 +1488,9 @@ typedef enum {
 	ESR_EC_SVC_32              = 0x11,
 	ESR_EC_SVC_64              = 0x15,
 	ESR_EC_MSR_TRAP            = 0x18,
+#ifdef __ARM_ARCH_8_6__
+	ESR_EC_PAC_FAIL            = 0x1C,
+#endif /* __ARM_ARCH_8_6__ */
 	ESR_EC_IABORT_EL0          = 0x20,
 	ESR_EC_IABORT_EL1          = 0x21,
 	ESR_EC_PC_ALIGN            = 0x22,

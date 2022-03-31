@@ -1093,7 +1093,6 @@ nfsm_chain_add_v3sattr_f(
 		}
 	}
 
-
 	return error;
 }
 
@@ -1276,7 +1275,7 @@ get_auxiliary_groups(kauth_cred_t cred, gid_t groups[NGROUPS], size_t count)
 
 int
 nfsm_rpchead2(__unused struct nfsmount *nmp, int sotype, int prog, int vers, int proc, int auth_type,
-    kauth_cred_t cred, struct nfsreq *req, mbuf_t mrest, u_int64_t *xidp, mbuf_t *mreqp)
+    kauth_cred_t cred, __unused struct nfsreq *req, mbuf_t mrest, u_int64_t *xidp, mbuf_t *mreqp)
 {
 	mbuf_t mreq, mb;
 	size_t i;
@@ -1575,7 +1574,6 @@ nfs_parsefattr(
 nfsmout:
 	return error;
 }
-
 
 /*
  * Load the attribute cache (that lives in the nfsnode entry) with
@@ -3050,7 +3048,7 @@ nfsrv_free_addrlist(struct nfs_export *nx, struct user_nfs_export_args *unxa)
 				fna.rnh = rnh;
 				fna.cnt = &nx->nx_expcnt;
 				(*rnh->rnh_walktree)(rnh, nfsrv_free_netopt, (caddr_t)&fna);
-				_FREE((caddr_t)rnh, M_RTABLE);
+				zfree(radix_node_head_zone, rnh);
 				nx->nx_rtable[i] = 0;
 			}
 		}
@@ -3119,7 +3117,7 @@ nfsrv_free_addrlist(struct nfs_export *nx, struct user_nfs_export_args *unxa)
 		nx->nx_expcnt--;
 		if (nx->nx_expcnt == ((nx->nx_flags & NX_DEFAULTEXPORT) ? 1 : 0)) {
 			/* no more entries in rnh, so free it up */
-			_FREE((caddr_t)rnh, M_RTABLE);
+			zfree(radix_node_head_zone, rnh);
 			nx->nx_rtable[nxna.nxna_addr.ss_family] = 0;
 		}
 	}
@@ -3218,7 +3216,8 @@ nfsrv_export(struct user_nfs_export_args *unxa, vfs_context_t ctx)
 		}
 		if (nfsrv_export_hashtbl) {
 			/* all exports deleted, clean up export hash table */
-			FREE(nfsrv_export_hashtbl, M_TEMP);
+			hashdestroy(nfsrv_export_hashtbl, M_TEMP, nfsrv_export_hash);
+			nfsrv_export_hash = 0;
 			nfsrv_export_hashtbl = NULL;
 		}
 		lck_rw_done(&nfsrv_export_rwlock);

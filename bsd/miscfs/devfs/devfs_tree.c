@@ -531,10 +531,7 @@ dev_add_node(int entrytype, devnode_type_t * typeinfo, devnode_t * proto,
 		}
 	}
 #endif  /* SPLIT_DEVS */
-	MALLOC(dnp, devnode_t *, sizeof(devnode_t), M_DEVFSNODE, M_WAITOK);
-	if (!dnp) {
-		return ENOMEM;
-	}
+	dnp = kalloc_type(devnode_t, Z_WAITOK | Z_ZERO | Z_NOFAIL);
 
 	/*
 	 * If we have a proto, that means that we are duplicating some
@@ -553,7 +550,7 @@ dev_add_node(int entrytype, devnode_type_t * typeinfo, devnode_t * proto,
 		proto->dn_prevsiblingp = &(dnp->dn_nextsibling);
 #if CONFIG_MACF
 		mac_devfs_label_init(dnp);
-		mac_devfs_label_copy(proto->dn_label, dnp->dn_label);
+		mac_devfs_label_copy(mac_devfs_label(proto), mac_devfs_label(dnp));
 #endif
 	} else {
 		struct timeval tv;
@@ -562,7 +559,6 @@ dev_add_node(int entrytype, devnode_type_t * typeinfo, devnode_t * proto,
 		 * We have no prototype, so start off with a clean slate
 		 */
 		microtime(&tv);
-		bzero(dnp, sizeof(devnode_t));
 		dnp->dn_type = entrytype;
 		dnp->dn_nextsibling = dnp;
 		dnp->dn_prevsiblingp = &(dnp->dn_nextsibling);
@@ -647,7 +643,7 @@ dev_add_node(int entrytype, devnode_type_t * typeinfo, devnode_t * proto,
 	}
 
 	if (error) {
-		FREE(dnp, M_DEVFSNODE);
+		kfree_type(devnode_t, dnp);
 	} else {
 		*dn_pp = dnp;
 		DEVFS_INCR_NODES();
@@ -671,7 +667,7 @@ devnode_free(devnode_t * dnp)
 		kfree_data(dnp->dn_typeinfo.Slnk.name, dnp->dn_typeinfo.Slnk.namelen + 1);
 	}
 	DEVFS_DECR_NODES();
-	FREE(dnp, M_DEVFSNODE);
+	kfree_type(devnode_t, dnp);
 }
 
 
@@ -1440,7 +1436,8 @@ devfs_init_event_log(devfs_event_log_t delp, uint32_t count, devfs_vnode_event_t
 	devfs_vnode_event_t dvearr;
 
 	if (buf == NULL) {
-		MALLOC(dvearr, devfs_vnode_event_t, count * sizeof(struct devfs_vnode_event), M_TEMP, M_WAITOK | M_ZERO);
+		dvearr = kalloc_type(struct devfs_vnode_event, count,
+		    Z_WAITOK | Z_ZERO);
 		if (dvearr == NULL) {
 			return ENOMEM;
 		}
@@ -1462,7 +1459,8 @@ devfs_release_event_log(devfs_event_log_t delp, int need_free)
 	}
 
 	if (need_free) {
-		FREE(delp->del_entries, M_TEMP);
+		kfree_type(struct devfs_vnode_event, delp->del_max,
+		    delp->del_entries);
 	}
 
 	delp->del_entries = NULL;
@@ -1549,6 +1547,7 @@ out:
 	return new_dev;
 }
 
+__printflike(7, 0)
 static devdirent_t *
 devfs_make_node_internal(dev_t dev, devfstype_t type, uid_t uid,
     gid_t gid, int perms, int (*clone)(dev_t dev, int action), const char *fmt, va_list ap)

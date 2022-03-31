@@ -1035,19 +1035,6 @@ ml_cpu_down(void)
 	return;
 }
 
-/*
- * The following are required for parts of the kernel
- * that cannot resolve these functions as inlines:
- */
-extern thread_t current_act(void) __attribute__((const));
-thread_t
-current_act(void)
-{
-	return current_thread_fast();
-}
-
-#undef current_thread
-extern thread_t current_thread(void) __attribute__((const));
 thread_t
 current_thread(void)
 {

@@ -57,3 +57,9 @@ drop_priv(void)
 	T_ASSERT_POSIX_SUCCESS(setgid(lower_gid), "Change group to %u", lower_gid);
 	T_ASSERT_POSIX_SUCCESS(setuid(lower_uid), "Change user to %u", lower_uid);
 }
+
+bool
+running_as_root(void)
+{
+	return geteuid() == 0;
+}

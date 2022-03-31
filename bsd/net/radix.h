@@ -63,8 +63,11 @@
 
 #ifndef _RADIX_H_
 #define _RADIX_H_
-#include <sys/appleapiopts.h>
 
+#include <sys/appleapiopts.h>
+#if KERNEL_PRIVATE
+#include <kern/kalloc.h>
+#endif
 #ifdef PRIVATE
 
 #ifdef MALLOC_DECLARE
@@ -129,27 +132,29 @@ struct radix_mask {
 	u_char  rm_flags;               /* cf. rn_flags */
 	struct  radix_mask *rm_mklist;  /* more masks to try */
 	union   {
-		caddr_t rmu_mask;               /* the mask */
-		struct  radix_node *rmu_leaf;   /* for normal routes */
-	}       rm_rmu;
+		caddr_t rm_mask;                /* the mask */
+		struct  radix_node *rm_leaf;    /* for normal routes */
+	};
 	int     rm_refs;                /* # of references to this struct */
 };
-
-#define rm_mask rm_rmu.rmu_mask
-#define rm_leaf rm_rmu.rmu_leaf         /* extra field would make 32 bytes */
-
 
 #define MKGet(m) {\
 	if (rn_mkfreelist) {\
 	        m = rn_mkfreelist; \
 	        rn_mkfreelist = (m)->rm_mklist; \
-	} else \
-	        R_Malloc(m, struct radix_mask *, sizeof (*(m))); }\
+	} else { \
+	        m = kalloc_type(struct radix_mask, Z_WAITOK_ZERO_NOFAIL); \
+	} \
+}
 
 #define MKFree(m) { (m)->rm_mklist = rn_mkfreelist; rn_mkfreelist = (m);}
 
 typedef int walktree_f_t(struct radix_node *, void *);
 typedef int rn_matchf_t(struct radix_node *, void *);
+
+#if KERNEL_PRIVATE
+KALLOC_TYPE_DECLARE(radix_node_head_zone);
+#endif
 
 struct radix_node_head {
 	struct  radix_node *rnh_treetop;
@@ -194,29 +199,24 @@ struct radix_node_head {
 #define Bcmp(a, b, n) bcmp(((char *)(a)), ((char *)(b)), (n))
 #define Bcopy(a, b, n) bcopy(((char *)(a)), ((char *)(b)), (unsigned)(n))
 #define Bzero(p, n) bzero((char *)(p), (int)(n));
-#define R_Malloc(p, t, n) (p = (t) malloc((unsigned int)(n)))
-#define R_Free(p) free((char *)p);
 #else
 #define Bcmp(a, b, n) bcmp(((caddr_t)(a)), ((caddr_t)(b)), (unsigned)(n))
 #define Bcopy(a, b, n) bcopy(((caddr_t)(a)), ((caddr_t)(b)), (unsigned)(n))
 #define Bzero(p, n) bzero((caddr_t)(p), (unsigned)(n));
-#define R_Malloc(p, t, n) (p = (t) _MALLOC((uint32_t)(n), M_RTABLE, M_WAITOK))
-#define R_Free(p) _FREE((caddr_t)p, M_RTABLE);
 #endif /*KERNEL*/
 
 void     rn_init(void);
 int      rn_inithead(void **, int);
 int      rn_refines(void *, void *);
-struct radix_node
-*rn_addmask(void *, int, int),
-*rn_addroute(void *, void *, struct radix_node_head *,
-    struct radix_node [2]),
-*rn_delete(void *, void *, struct radix_node_head *),
-*rn_lookup(void *v_arg, void *m_arg, struct radix_node_head *head),
-*rn_lookup_args(void *v_arg, void *m_arg, struct radix_node_head *head,
-    rn_matchf_t *, void *),
-*rn_match(void *, struct radix_node_head *),
-*rn_match_args(void *, struct radix_node_head *, rn_matchf_t *, void *);
+struct radix_node *rn_addmask(void *, int, int);
+struct radix_node *rn_addroute(void *, void *, struct radix_node_head *,
+    struct radix_node [2]);
+struct radix_node *rn_delete(void *, void *, struct radix_node_head *);
+struct radix_node *rn_lookup(void *v_arg, void *m_arg, struct radix_node_head *head);
+struct radix_node *rn_lookup_args(void *v_arg, void *m_arg, struct radix_node_head *head,
+    rn_matchf_t *, void *);
+struct radix_node *rn_match(void *, struct radix_node_head *);
+struct radix_node *rn_match_args(void *, struct radix_node_head *, rn_matchf_t *, void *);
 
 #endif /* PRIVATE */
 #endif /* _RADIX_H_ */

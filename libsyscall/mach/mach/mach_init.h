@@ -109,7 +109,7 @@ extern  mach_port_t     bootstrap_port;
  *	error messages, this can be overridden by a user
  *	application to point to a user-specified output function
  */
-extern int (*vprintf_stderr_func)(const char *format, va_list ap);
+extern int (*vprintf_stderr_func)(const char *format, va_list ap) __printflike(1, 0);
 
 __END_DECLS
 

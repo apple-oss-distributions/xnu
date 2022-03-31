@@ -1,6 +1,11 @@
 """
 Miscellaneous (Intel) platform-specific commands.
 """
+from __future__ import absolute_import, division, print_function
+
+from builtins import hex
+from builtins import range
+from builtins import memoryview
 
 from xnu import *
 import xnudefines
@@ -13,29 +18,29 @@ def showLogStream(cmd_args=None):
     Dump the state of the kernel log stream
     """
     mbp = kern.globals.oslog_streambufp
-    print "streaming buffer space avail: {0:>#x} of {1:>#x} bytes\n".format(kern.globals.oslog_stream_buf_bytesavail, kern.globals.oslog_stream_buf_size)
-    print " read head: offset {0:>#x}\nwrite head: offset {1:>#x}\n".format(mbp.msg_bufr, mbp.msg_bufx)
+    print("streaming buffer space avail: {0:>#x} of {1:>#x} bytes\n".format(kern.globals.oslog_stream_buf_bytesavail, kern.globals.oslog_stream_buf_size))
+    print(" read head: offset {0:>#x}\nwrite head: offset {1:>#x}\n".format(mbp.msg_bufr, mbp.msg_bufx))
     count = 0
-    print "  id  timestamp   offset size off+size type metadata"
+    print("  id  timestamp   offset size off+size type metadata")
     for entry in IterateSTAILQ_HEAD(kern.globals.oslog_stream_buf_head, "buf_entries"):
         next_start = entry.offset + entry.size
         if (next_start > 0x1000):
             next_start = next_start - 0x1000
-        print "{0:>4d}: {1:<d}  {2:>5x} {3:>4d} {4:>5x} {5:<d}    {6:<d}".format(count, entry.timestamp, entry.offset, entry.size, next_start, entry.type, entry.metadata)
+        print("{0:>4d}: {1:<d}  {2:>5x} {3:>4d} {4:>5x} {5:<d}    {6:<d}".format(count, entry.timestamp, entry.offset, entry.size, next_start, entry.type, entry.metadata))
         count = count + 1
-    print "found {} entries".format(count)
+    print("found {} entries".format(count))
 
     count = 0
     for entry in IterateSTAILQ_HEAD(kern.globals.oslog_stream_free_head, "buf_entries"):
         count = count + 1
-    print "free list: {} entries".format(count)
+    print("free list: {} entries".format(count))
 
     count = 0
     for outer in IterateSTAILQ_HEAD(kern.globals.oslog_stream_buf_head, "buf_entries"):
         for inner in IterateSTAILQ_HEAD(kern.globals.oslog_stream_buf_head, "buf_entries"):
             if ((outer.offset > inner.offset) and
                 (outer.offset < inner.offset + inner.size)):
-                print "error: overlapping entries: {:>3x} <--> {:>3x}".format(outer.offset, inner.offset)
+                print("error: overlapping entries: {:>3x} <--> {:>3x}".format(outer.offset, inner.offset))
         count = count + 1
 
 @lldb_command('showmcastate')
@@ -44,41 +49,41 @@ def showMCAstate(cmd_args=None):
     Print machine-check register state after MC exception.
     """
     if kern.arch != 'x86_64':
-        print "Not available for current architecture."
+        print("Not available for current architecture.")
         return
 
     present = ["not present", "present"]
-    print 'MCA {:s}, control MSR {:s}, threshold status {:s}'.format(
+    print('MCA {:s}, control MSR {:s}, threshold status {:s}'.format(
     present[int(kern.globals.mca_MCA_present)],
     present[int(kern.globals.mca_control_MSR_present)],
-    present[int(kern.globals.mca_threshold_status_present)])
-    print '{:d} error banks, family code {:#0x}, machine-check dump state: {:d}'.format(
+    present[int(kern.globals.mca_threshold_status_present)]))
+    print('{:d} error banks, family code {:#0x}, machine-check dump state: {:d}'.format(
         kern.globals.mca_error_bank_count,
         kern.globals.mca_dump_state,
-        kern.globals.mca_family)
+        kern.globals.mca_family))
     cpu = 0
     while kern.globals.cpu_data_ptr[cpu]:
         cd = kern.globals.cpu_data_ptr[cpu]
         mc = cd.cpu_mca_state
         if mc:
-            print 'CPU {:d}: mca_mcg_ctl: {:#018x} mca_mcg_status {:#018x}'.format(cpu, mc.mca_mcg_ctl, mc.mca_mcg_status.u64)
+            print('CPU {:d}: mca_mcg_ctl: {:#018x} mca_mcg_status {:#018x}'.format(cpu, mc.mca_mcg_ctl, mc.mca_mcg_status.u64))
             hdr = '{:<4s} {:<18s} {:<18s} {:<18s} {:<18s}'
             val = '{:>3d}: {:#018x} {:#018x} {:#018x} {:#018x}'
-            print hdr.format('bank',
+            print(hdr.format('bank',
                     'mca_mci_ctl',
                     'mca_mci_status',
                     'mca_mci_addr',
-                    'mca_mci_misc')
+                    'mca_mci_misc'))
             for i in range(int(kern.globals.mca_error_bank_count)):
                 bank = mc.mca_error_bank[i]
-                print val.format(i,
+                print(val.format(i,
                     bank.mca_mci_ctl,
                     bank.mca_mci_status.u64,
                     bank.mca_mci_addr,     
-                    bank.mca_mci_misc)     
-        print 'register state:'
+                    bank.mca_mci_misc))     
+        print('register state:')
         reg = cd.cpu_desc_index.cdi_ktss.ist1 - sizeof('x86_saved_state_t')
-        print lldb_run_command('p/x *(x86_saved_state_t *) ' + hex(reg))
+        print(lldb_run_command('p/x *(x86_saved_state_t *) ' + hex(reg)))
         cpu = cpu + 1
 
 def dumpTimerList(mpqueue):
@@ -88,13 +93,13 @@ def dumpTimerList(mpqueue):
     """
 
     if mpqueue.count == 0:
-        print '(empty)'
+        print('(empty)')
         return
 
     thdr = ' {:<24s}{:<17s}{:<16s} {:<14s} {:<18s} count: {:d} '
     tval = ' {:#018x}: {:16d} {:16d} {:s}{:3d}.{:09d}  ({:#018x})({:#018x}, {:#018x}) ({:s}) {:s}'
 
-    print thdr.format('Entry', 'Deadline', 'soft_deadline', 'Secs To Go', '(*func)(param0, param1)', mpqueue.count)
+    print(thdr.format('Entry', 'Deadline', 'soft_deadline', 'Secs To Go', '(*func)(param0, param1)', mpqueue.count))
 
     for timer_call in ParanoidIterateLinkageChain(mpqueue.head, 'struct timer_call *', 'tc_qlink'):
         recent_timestamp = GetRecentTimestamp()
@@ -133,27 +138,27 @@ def dumpTimerList(mpqueue):
 
                     tid = thread.thread_id
                     name = GetThreadName(thread)
-                    pid = GetProcPIDForTask(thread.task)
-                    procname = GetProcNameForTask(thread.task)
+                    pid = GetProcPIDForTask(thread.t_tro.tro_task)
+                    procname = GetProcNameForTask(thread.t_tro.tro_task)
 
                     extra_string += "thread: 0x{:x} {:s} task:{:s}[{:d}]".format(
                             tid, name, procname, pid)
             except:
-                print "exception generating extra_string for call: {:#018x}".format(timer_call)
+                print("exception generating extra_string for call: {:#018x}".format(timer_call))
                 if dumpTimerList.enable_debug :
                     raise
 
         tval = ' {:#018x}: {:16d} {:16d} {:s}{:3d}.{:09d}  ({:#018x})({:#018x},{:#018x}) ({:s}) {:s}'
-        print tval.format(timer_call,
+        print(tval.format(timer_call,
             timer_call.tc_pqlink.deadline,
             timer_call.tc_soft_deadline,
             delta_sign,
-            timer_fire/1000000000,
+            timer_fire // 1000000000,
             timer_fire%1000000000,
             timer_call.tc_func,
             timer_call.tc_param0,
             timer_call.tc_param1,
-            func_name, extra_string)
+            func_name, extra_string))
 
 dumpTimerList.enable_debug = False
 
@@ -180,39 +185,39 @@ def longtermTimers(cmd_args=None):
 
     lt = kern.globals.timer_longterm
     ltt = lt.threshold
-    EndofAllTime = long(-1)
-    if long(ltt.interval) == EndofAllTime:
-        print "Longterm timers disabled"
+    EndofAllTime = signed(-1)
+    if signed(ltt.interval) == EndofAllTime:
+        print("Longterm timers disabled")
         return
 
     if lt.escalates > 0:
-        ratio = lt.enqueues / lt.escalates
+        ratio = lt.enqueues // lt.escalates
     else:
         ratio = lt.enqueues
-    print     'Longterm timer object: {:#018x}'.format(addressof(lt))
-    print     ' queue count         : {:d}'    .format(lt.queue.count)
-    print     ' number of enqueues  : {:d}'    .format(lt.enqueues)
-    print     ' number of dequeues  : {:d}'    .format(lt.dequeues)
-    print     ' number of escalates : {:d}'    .format(lt.escalates)
-    print     ' enqueues/escalates  : {:d}'    .format(ratio)
-    print     ' threshold.interval  : {:d}'    .format(ltt.interval)
-    print     ' threshold.margin    : {:d}'    .format(ltt.margin)
-    print     ' scan_time           : {:#018x} ({:d})'.format(lt.scan_time, lt.scan_time)
-    if long(ltt.preempted) == EndofAllTime:
-        print ' threshold.preempted : None'
+    print('Longterm timer object: {:#018x}'.format(addressof(lt)))
+    print(' queue count         : {:d}'    .format(lt.queue.count))
+    print(' number of enqueues  : {:d}'    .format(lt.enqueues))
+    print(' number of dequeues  : {:d}'    .format(lt.dequeues))
+    print(' number of escalates : {:d}'    .format(lt.escalates))
+    print(' enqueues/escalates  : {:d}'    .format(ratio))
+    print(' threshold.interval  : {:d}'    .format(ltt.interval))
+    print(' threshold.margin    : {:d}'    .format(ltt.margin))
+    print(' scan_time           : {:#018x} ({:d})'.format(lt.scan_time, lt.scan_time))
+    if signed(ltt.preempted) == EndofAllTime:
+        print(' threshold.preempted : None')
     else:
-        print ' threshold.preempted : {:#018x} ({:d})'.format(ltt.preempted, ltt.preempted)
-    if long(ltt.deadline) == EndofAllTime:
-        print ' threshold.deadline  : None'
+        print(' threshold.preempted : {:#018x} ({:d})'.format(ltt.preempted, ltt.preempted))
+    if signed(ltt.deadline) == EndofAllTime:
+        print(' threshold.deadline  : None')
     else:
-        print ' threshold.deadline  : {:#018x} ({:d})'.format(ltt.deadline, ltt.deadline)
-        print ' threshold.call      : {:#018x}'.format(ltt.call)
-        print ' actual deadline set : {:#018x} ({:d})'.format(ltt.deadline_set, ltt.deadline_set)
-    print     ' threshold.scans     : {:d}'    .format(ltt.scans)
-    print     ' threshold.preempts  : {:d}'    .format(ltt.preempts)
-    print     ' threshold.latency   : {:d}'    .format(ltt.latency)
-    print     '               - min : {:d}'    .format(ltt.latency_min)
-    print     '               - max : {:d}'    .format(ltt.latency_max)
+        print(' threshold.deadline  : {:#018x} ({:d})'.format(ltt.deadline, ltt.deadline))
+        print(' threshold.call      : {:#018x}'.format(ltt.call))
+        print(' actual deadline set : {:#018x} ({:d})'.format(ltt.deadline_set, ltt.deadline_set))
+    print(' threshold.scans     : {:d}'    .format(ltt.scans))
+    print(' threshold.preempts  : {:d}'    .format(ltt.preempts))
+    print(' threshold.latency   : {:d}'    .format(ltt.latency))
+    print('               - min : {:d}'    .format(ltt.latency_min))
+    print('               - max : {:d}'    .format(ltt.latency_max))
     dumpTimerList(lt.queue)
 
 
@@ -223,29 +228,29 @@ def processorTimers(cmd_args=None):
     Also include long-term timer details
     """
     hdr = '{:15s}{:<18s} {:<18s} {:<18s} {:<18s}'
-    print hdr.format('Processor #', 'Processor pointer', 'Last dispatch', 'Next deadline', 'Difference')
-    print "=" * 82
+    print(hdr.format('Processor #', 'Processor pointer', 'Last dispatch', 'Next deadline', 'Difference'))
+    print("=" * 82)
     p = kern.globals.processor_list
-    EndOfAllTime = long(-1)
+    EndOfAllTime = signed(-1)
     while p:
         cpu = p.cpu_id
         cpu_data = GetCpuDataForCpuID(cpu)
         rt_timer = cpu_data.rtclock_timer
-        diff = long(rt_timer.deadline) - long(p.last_dispatch)
-        valid_deadline = long(rt_timer.deadline) != EndOfAllTime
+        diff = signed(rt_timer.deadline) - signed(p.last_dispatch)
+        valid_deadline = signed(rt_timer.deadline) != EndOfAllTime
         tmr = 'Processor {:<3d}: {:#018x} {:#018x} {:18s} {:18s} {:s}'
-        print tmr.format(cpu,
+        print(tmr.format(cpu,
             p,
             p.last_dispatch,
             "{:#018x}".format(rt_timer.deadline) if valid_deadline else "None",
             "{:#018x}".format(diff) if valid_deadline else "N/A",
-            ['(PAST DEADLINE)', '(ok)'][int(diff > 0)] if valid_deadline else "")
+            ['(PAST DEADLINE)', '(ok)'][int(diff > 0)] if valid_deadline else ""))
         if valid_deadline:
             if kern.arch == 'x86_64':
-                print 'Next deadline set at: {:#018x}. Timer call list:'.format(rt_timer.when_set)
+                print('Next deadline set at: {:#018x}. Timer call list:'.format(rt_timer.when_set))
             dumpTimerList(rt_timer.queue)
         p = p.processor_list
-    print "-" * 82
+    print("-" * 82)
     longtermTimers()
     ShowRunningTimers()
 
@@ -259,9 +264,9 @@ def showTimerWakeupStats(cmd_args=None):
     """
     for task in kern.tasks:
         proc = Cast(task.bsd_info, 'proc_t')
-        print dereference(task)
-        print '{:d}({:s}), terminated thread timer wakeups: {:d} {:d} 2ms: {:d} 5ms: {:d} UT: {:d} ST: {:d}'.format(
-            proc.p_pid,
+        print(dereference(task))
+        print('{:d}({:s}), terminated thread timer wakeups: {:d} {:d} 2ms: {:d} 5ms: {:d} UT: {:d} ST: {:d}'.format(
+            GetProcPID(proc),
             GetProcName(proc),
 # Commented-out references below to be addressed by rdar://13009660.
             0, #task.task_interrupt_wakeups,
@@ -269,13 +274,13 @@ def showTimerWakeupStats(cmd_args=None):
             task.task_timer_wakeups_bin_1,
             task.task_timer_wakeups_bin_2,
             task.total_user_time,
-            task.total_system_time)
+            task.total_system_time))
         tot_wakes = 0 #task.task_interrupt_wakeups
         tot_platform_wakes = 0 #task.task_platform_idle_wakeups
         for thread in IterateQueue(task.threads, 'thread_t', 'task_threads'):
 ##        if thread.thread_interrupt_wakeups == 0:
 ##              continue
-            print '\tThread ID 0x{:x}, Tag 0x{:x}, timer wakeups: {:d} {:d} {:d} {:d} <2ms: {:d}, <5ms: {:d} UT: {:d} ST: {:d}'.format(
+            print('\tThread ID 0x{:x}, Tag 0x{:x}, timer wakeups: {:d} {:d} {:d} {:d} <2ms: {:d}, <5ms: {:d} UT: {:d} ST: {:d}'.format(
                 thread.thread_id,
                 thread.thread_tag,
                 0, #thread.thread_interrupt_wakeups,
@@ -286,11 +291,11 @@ def showTimerWakeupStats(cmd_args=None):
                 thread.thread_timer_wakeups_bin_1,
                 thread.thread_timer_wakeups_bin_2,
                 thread.user_timer.all_bits,
-                thread.system_timer.all_bits)
+                thread.system_timer.all_bits))
             tot_wakes += 0 #thread.thread_interrupt_wakeups
             tot_platform_wakes += 0 #thread.thread_platform_idle_wakeups
-        print 'Task total wakeups: {:d} {:d}'.format(
-            tot_wakes, tot_platform_wakes)
+        print('Task total wakeups: {:d} {:d}'.format(
+            tot_wakes, tot_platform_wakes))
 
 @lldb_command('showrunningtimers')
 def ShowRunningTimers(cmd_args=None):
@@ -324,19 +329,19 @@ def DoReadMsr64(msr_address, lcpu):
     result = 0xbad10ad
 
     if "kdp" != GetConnectionProtocol():
-        print "Target is not connected over kdp. Cannot read MSR."
+        print("Target is not connected over kdp. Cannot read MSR.")
         return result
 
     input_address = unsigned(addressof(kern.globals.manual_pkt.input))
     len_address = unsigned(addressof(kern.globals.manual_pkt.len))
     data_address = unsigned(addressof(kern.globals.manual_pkt.data))
     if not WriteInt32ToMemoryAddress(0, input_address):
-        print "DoReadMsr64() failed to write 0 to input_address"
+        print("DoReadMsr64() failed to write 0 to input_address")
         return result
     
     kdp_pkt_size = GetType('kdp_readmsr64_req_t').GetByteSize()
     if not WriteInt32ToMemoryAddress(kdp_pkt_size, len_address):
-        print "DoReadMsr64() failed to write kdp_pkt_size"
+        print("DoReadMsr64() failed to write kdp_pkt_size")
         return result
     
     kgm_pkt = kern.GetValueFromAddress(data_address, 'kdp_readmsr64_req_t *')
@@ -345,16 +350,16 @@ def DoReadMsr64(msr_address, lcpu):
         length=kdp_pkt_size)
 
     if not WriteInt64ToMemoryAddress(header_value, int(addressof(kgm_pkt.hdr))):
-        print "DoReadMsr64() failed to write header_value"
+        print("DoReadMsr64() failed to write header_value")
         return result
     if not WriteInt32ToMemoryAddress(msr_address, int(addressof(kgm_pkt.address))):
-        print "DoReadMsr64() failed to write msr_address"
+        print("DoReadMsr64() failed to write msr_address")
         return result
     if not WriteInt16ToMemoryAddress(lcpu, int(addressof(kgm_pkt.lcpu))):
-        print "DoReadMsr64() failed to write lcpu"
+        print("DoReadMsr64() failed to write lcpu")
         return result
     if not WriteInt32ToMemoryAddress(1, input_address):
-        print "DoReadMsr64() failed to write to input_address"
+        print("DoReadMsr64() failed to write to input_address")
         return result
 
     result_pkt = Cast(addressof(kern.globals.manual_pkt.data),
@@ -362,7 +367,7 @@ def DoReadMsr64(msr_address, lcpu):
     if (result_pkt.error == 0):
         result = dereference(Cast(addressof(result_pkt.data), 'uint64_t *'))
     else:
-        print "DoReadMsr64() result_pkt.error != 0"
+        print("DoReadMsr64() result_pkt.error != 0")
     return result
 
 def DoWriteMsr64(msr_address, lcpu, data):
@@ -375,19 +380,19 @@ def DoWriteMsr64(msr_address, lcpu, data):
             True upon success, False if error
     """
     if "kdp" != GetConnectionProtocol():
-        print "Target is not connected over kdp. Cannot write MSR."
+        print("Target is not connected over kdp. Cannot write MSR.")
         return False
 
     input_address = unsigned(addressof(kern.globals.manual_pkt.input))
     len_address = unsigned(addressof(kern.globals.manual_pkt.len))
     data_address = unsigned(addressof(kern.globals.manual_pkt.data))
     if not WriteInt32ToMemoryAddress(0, input_address):
-        print "DoWriteMsr64() failed to write 0 to input_address"
+        print("DoWriteMsr64() failed to write 0 to input_address")
         return False
     
     kdp_pkt_size = GetType('kdp_writemsr64_req_t').GetByteSize()
     if not WriteInt32ToMemoryAddress(kdp_pkt_size, len_address):
-        print "DoWriteMsr64() failed to kdp_pkt_size"
+        print("DoWriteMsr64() failed to kdp_pkt_size")
         return False
     
     kgm_pkt = kern.GetValueFromAddress(data_address, 'kdp_writemsr64_req_t *')
@@ -396,25 +401,25 @@ def DoWriteMsr64(msr_address, lcpu, data):
         length=kdp_pkt_size)
     
     if not WriteInt64ToMemoryAddress(header_value, int(addressof(kgm_pkt.hdr))):
-        print "DoWriteMsr64() failed to write header_value"
+        print("DoWriteMsr64() failed to write header_value")
         return False
     if not WriteInt32ToMemoryAddress(msr_address, int(addressof(kgm_pkt.address))):
-        print "DoWriteMsr64() failed to write msr_address"
+        print("DoWriteMsr64() failed to write msr_address")
         return False
     if not WriteInt16ToMemoryAddress(lcpu, int(addressof(kgm_pkt.lcpu))):
-        print "DoWriteMsr64() failed to write lcpu"
+        print("DoWriteMsr64() failed to write lcpu")
         return False
     if not WriteInt64ToMemoryAddress(data, int(addressof(kgm_pkt.data))):
-        print "DoWriteMsr64() failed to write data"
+        print("DoWriteMsr64() failed to write data")
         return False
     if not WriteInt32ToMemoryAddress(1, input_address):
-        print "DoWriteMsr64() failed to write to input_address"
+        print("DoWriteMsr64() failed to write to input_address")
         return False
 
     result_pkt = Cast(addressof(kern.globals.manual_pkt.data),
         'kdp_writemsr64_reply_t *')
     if not result_pkt.error == 0:
-        print "DoWriteMsr64() error received in reply packet"
+        print("DoWriteMsr64() error received in reply packet")
         return False
     
     return True
@@ -425,7 +430,7 @@ def ReadMsr64(cmd_args=None):
         Syntax: readmsr64 <msr> [lcpu]
     """
     if cmd_args == None or len(cmd_args) < 1:
-        print ReadMsr64.__doc__
+        print(ReadMsr64.__doc__)
         return
     
     msr_address = ArgumentStringToInt(cmd_args[0])
@@ -435,7 +440,7 @@ def ReadMsr64(cmd_args=None):
         lcpu = int(xnudefines.lcpu_self)
 
     msr_value = DoReadMsr64(msr_address, lcpu)
-    print "MSR[{:x}]: {:#016x}".format(msr_address, msr_value)
+    print("MSR[{:x}]: {:#016x}".format(msr_address, msr_value))
 
 @lldb_command('writemsr64')
 def WriteMsr64(cmd_args=None):
@@ -443,7 +448,7 @@ def WriteMsr64(cmd_args=None):
         Syntax: writemsr64 <msr> <value> [lcpu]
     """
     if cmd_args == None or len(cmd_args) < 2:
-        print WriteMsr64.__doc__
+        print(WriteMsr64.__doc__)
         return
     msr_address = ArgumentStringToInt(cmd_args[0])
     write_val = ArgumentStringToInt(cmd_args[1])
@@ -453,7 +458,7 @@ def WriteMsr64(cmd_args=None):
         lcpu = xnudefines.lcpu_self
 
     if not DoWriteMsr64(msr_address, lcpu, write_val):
-        print "writemsr64 FAILED"
+        print("writemsr64 FAILED")
 
 def GetKernelDebugBufferEntry(kdbg_entry):
     """ Extract the information from given kernel debug buffer entry and return the summary
@@ -624,7 +629,7 @@ def ShowKernelDebugBufferCPU(cmd_args=None):
     
     if kdbg_str:
         out_str += kdbg_str
-        print out_str
+        print(out_str)
 
 @lldb_command('showkerneldebugbuffer')
 def ShowKernelDebugBuffer(cmd_args=None):
@@ -637,14 +642,14 @@ def ShowKernelDebugBuffer(cmd_args=None):
     if (kern.globals.kd_ctrl_page_trace.kdebug_flags & xnudefines.KDBG_BUFINIT):
         entrycount = ArgumentStringToInt(cmd_args[0])
         if entrycount == 0:
-            print "<count> is 0, dumping 50 entries per cpu\n"
+            print("<count> is 0, dumping 50 entries per cpu\n")
             entrycount = 50
         cpu_num = 0
         while cpu_num < kern.globals.kd_ctrl_page_trace.kdebug_cpus:
             ShowKernelDebugBufferCPU([str(cpu_num), str(entrycount)])
             cpu_num += 1
     else:
-        print "Trace buffer not enabled\n"
+        print("Trace buffer not enabled\n")
 
 @lldb_command('dumprawtracefile','U:')
 def DumpRawTraceFile(cmd_args=[], cmd_options={}):
@@ -663,7 +668,7 @@ def DumpRawTraceFile(cmd_args=[], cmd_options={}):
     """
 
     if (kern.globals.kd_ctrl_page_trace.kdebug_flags & xnudefines.KDBG_BUFINIT) == 0 :
-        print "Trace buffer not enabled\n"
+        print("Trace buffer not enabled\n")
         return
 
     if ((kern.arch == "x86_64") or kern.arch.startswith("arm64")) :
@@ -671,7 +676,7 @@ def DumpRawTraceFile(cmd_args=[], cmd_options={}):
     elif kern.arch == "arm" :
         lp64 = False
     else :
-        print "unknown kern.arch {:s}\n".format(kern.arch)
+        print("unknown kern.arch {:s}\n".format(kern.arch))
         return
 
     # Various kern.globals are hashed by address, to
@@ -705,14 +710,14 @@ def DumpRawTraceFile(cmd_args=[], cmd_options={}):
 
     output_filename = str(cmd_args[0])
     if opt_verbose > vHUMAN :
-        print "output file : {:s}".format(output_filename)
+        print("output file : {:s}".format(output_filename))
     wfd = open(output_filename, "wb")
 
-    uptime = long(-1)
+    uptime = signed(-1)
     if "-U" in cmd_options:
-        uptime = long(cmd_options["-U"])
+        uptime = signed(cmd_options["-U"])
     if opt_verbose > vHUMAN :
-        print "uptime : {:d}".format(uptime)
+        print("uptime : {:d}".format(uptime))
 
     nkdbufs = kern.globals.kd_data_page_trace.nkdbufs
 
@@ -721,10 +726,10 @@ def DumpRawTraceFile(cmd_args=[], cmd_options={}):
         htab[kd_ctrl_page_trace] = kern.globals.kd_ctrl_page_trace
 
     if opt_verbose > vHUMAN :
-        print "kd_data_page_trace_nkdbufs {0:#x}, enabled {1:#x}, flags {2:#x}, cpus {3:#x}".format(nkdbufs, htab[kd_ctrl_page_trace].enabled, htab[kd_ctrl_page_trace].kdebug_flags, htab[kd_ctrl_page_trace].kdebug_cpus)
+        print("kd_data_page_trace_nkdbufs {0:#x}, enabled {1:#x}, flags {2:#x}, cpus {3:#x}".format(nkdbufs, htab[kd_ctrl_page_trace].enabled, htab[kd_ctrl_page_trace].kdebug_flags, htab[kd_ctrl_page_trace].kdebug_cpus))
 
     if nkdbufs == 0 :
-        print "0 kd_data_page_trace_nkdbufs, nothing extracted"
+        print("0 kd_data_page_trace_nkdbufs, nothing extracted")
         return
 
     if htab[kd_ctrl_page_trace].enabled != 0 :
@@ -761,12 +766,12 @@ def DumpRawTraceFile(cmd_args=[], cmd_options={}):
     TOD_usecs = 0
     header = struct.pack('IIqI', version_no, thread_count, TOD_secs, TOD_usecs)
     pad_bytes = 4096 - (len(header) & 4095)
-    header += "\x00" * pad_bytes
-    wfd.write(buffer(header))
+    header += b"\x00" * pad_bytes
+    wfd.write(memoryview(header))
 
     count = kern.globals.kd_data_page_trace.nkdbufs
     while count != 0 :
-        tempbuf = ""
+        tempbuf = bytearray()
         tempbuf_number = 0
         tempbuf_count = min(count, kern.globals.kd_ctrl_page_trace.kdebug_kdcopybuf_count)
 
@@ -920,8 +925,8 @@ def DumpRawTraceFile(cmd_args=[], cmd_options={}):
                 htab[min_kdbp].kd_prev_timebase = earliest_time
 
             if opt_verbose >= vDETAIL :
-                print "{0:#018x} {1:#018x} {2:#018x} {3:#018x} {4:#018x} {5:#018x} {6:#010x} {7:#010x} {8:#018x}".format(
-                    e.timestamp, e.arg1, e.arg2, e.arg3, e.arg4, e.arg5, e.debugid, e.cpuid, e.unused)
+                print("{0:#018x} {1:#018x} {2:#018x} {3:#018x} {4:#018x} {5:#018x} {6:#010x} {7:#010x} {8:#018x}".format(
+                    e.timestamp, e.arg1, e.arg2, e.arg3, e.arg4, e.arg5, e.debugid, e.cpuid, e.unused))
 
             events_count_found += 1
 
@@ -934,17 +939,17 @@ def DumpRawTraceFile(cmd_args=[], cmd_options={}):
             sys.stderr.flush()
 
         if opt_verbose > vHUMAN :
-            print "events_count_lost {0:#x}, events_count_found {1:#x}, progress_count {2:#x}".format(events_count_lost, events_count_found, progress_count)
+            print("events_count_lost {0:#x}, events_count_found {1:#x}, progress_count {2:#x}".format(events_count_lost, events_count_found, progress_count))
 
         # write trace events to output file
         if tempbuf_number != 0 :
             count -= tempbuf_number
-            wfd.write(buffer(tempbuf))
+            wfd.write(memoryview(tempbuf))
 
         if out_of_events == True :
             # all trace buffers are empty
             if opt_verbose > vHUMAN :
-                print "out of events"
+                print("out of events")
             break
 
     wfd.close()
@@ -976,17 +981,17 @@ def PrintIteratedElem(i, elem, elem_type, do_summary, summary, regex):
             s = summary(elem)
             if regex:
                 if regex.match(s):
-                    print "[{:d}] {:s}".format(i, s)
+                    print("[{:d}] {:s}".format(i, s))
             else:
-                print "[{:d}] {:s}".format(i, s)
+                print("[{:d}] {:s}".format(i, s))
         else:
             if regex:
                 if regex.match(str(elem)):
-                    print "[{:4d}] ({:s}){:#x}".format(i, elem_type, unsigned(elem))
+                    print("[{:4d}] ({:s}){:#x}".format(i, elem_type, unsigned(elem)))
             else:
-                print "[{:4d}] ({:s}){:#x}".format(i, elem_type, unsigned(elem))
+                print("[{:4d}] ({:s}){:#x}".format(i, elem_type, unsigned(elem)))
     except:
-        print "Exception while looking at elem {:#x}".format(unsigned(elem))
+        print("Exception while looking at elem {:#x}".format(unsigned(elem)))
         return
 
 @lldb_command('q_iterate', "LQSG:")
@@ -1030,14 +1035,14 @@ def QIterate(cmd_args=None, cmd_options={}):
     regex = None
     if "-G" in cmd_options:
         regex = re.compile(".*{:s}.*".format(cmd_options["-G"]))
-        print "Looking for: {:s}".format(regex.pattern)
+        print("Looking for: {:s}".format(regex.pattern))
 
     global lldb_summary_definitions
     summary = None
     if elem_type in lldb_summary_definitions:
         summary = lldb_summary_definitions[elem_type]
         if do_summary:
-            print summary.header
+            print(summary.header)
 
     try:
         i = 0
@@ -1050,7 +1055,7 @@ def QIterate(cmd_args=None, cmd_options={}):
                 PrintIteratedElem(i, elem, elem_type, do_summary, summary, regex)
                 i = i + 1
     except:
-        print "Exception while looking at queue_head: {:#x}".format(unsigned(qhead))
+        print("Exception while looking at queue_head: {:#x}".format(unsigned(qhead)))
 
 @lldb_command('lbrbt')
 def LBRBacktrace(cmd_args=None):

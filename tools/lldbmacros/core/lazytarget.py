@@ -1,7 +1,7 @@
-
 """ Module to abstract lazy evaluation of lldb.SBTarget
     for kernel
 """
+from __future__ import absolute_import
 
 import lldb
 

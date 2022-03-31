@@ -40,7 +40,6 @@
 __BEGIN_DECLS
 
 #ifdef  MACH_KERNEL_PRIVATE
-extern uint32_t LcksOpts;
 
 typedef union {
 	struct {
@@ -152,9 +151,9 @@ struct __attribute__ ((packed)) rw_lock_debug_entry {
 };
 typedef struct rw_lock_debug {
 	struct rw_lock_debug_entry rwld_locks[LCK_RW_EXPECTED_MAX_NUMBER]; /* rw_lock debug info of currently held locks */
-	uint32_t                   rwld_locks_acquired;                    /* number of locks acquired */
 	uint8_t                    rwld_locks_saved : 7,                   /* number of locks saved in rwld_locks */
 	    rwld_overflow : 1;                                             /* lock_entry was full, so it might be inaccurate */
+	uint32_t                   rwld_locks_acquired;                    /* number of locks acquired */
 } rw_lock_debug_t;
 
 _Static_assert(LCK_RW_EXPECTED_MAX_NUMBER <= 127, "LCK_RW_EXPECTED_MAX_NUMBER bigger than rwld_locks_saved");
@@ -572,15 +571,6 @@ extern boolean_t        lck_rw_lock_yield_shared(
 #endif /* XNU_KERNEL_PRIVATE */
 
 #if MACH_KERNEL_PRIVATE
-#ifdef DEBUG_RW
-/*!
- * @function rw_lock_init
- *
- * @abstract
- * Initialize the rw_lock subsystem
- */
-extern void rw_lock_init(void);
-#endif /* DEBUG_RW */
 
 /*!
  * @function lck_rw_clear_promotion

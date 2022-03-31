@@ -70,6 +70,7 @@ struct mptses {
 
 	uint64_t        mpte_time_target;
 	thread_call_t   mpte_time_thread;
+	thread_call_t   mpte_stop_urgency;
 
 	uint32_t        mpte_last_cellicon_set;
 	uint32_t        mpte_cellicon_increments;
@@ -168,6 +169,7 @@ mpp_try_lock(struct mppcb *mp)
 
 	VERIFY(!(mp->mpp_flags & MPP_INSIDE_OUTPUT));
 	VERIFY(!(mp->mpp_flags & MPP_INSIDE_INPUT));
+	VERIFY(!(mp->mpp_flags & MPP_INSIDE_SETGETOPT));
 
 	return true;
 }
@@ -178,6 +180,7 @@ mpp_lock(struct mppcb *mp)
 	lck_mtx_lock(&mp->mpp_lock);
 	VERIFY(!(mp->mpp_flags & MPP_INSIDE_OUTPUT));
 	VERIFY(!(mp->mpp_flags & MPP_INSIDE_INPUT));
+	VERIFY(!(mp->mpp_flags & MPP_INSIDE_SETGETOPT));
 }
 
 static inline void
@@ -185,6 +188,7 @@ mpp_unlock(struct mppcb *mp)
 {
 	VERIFY(!(mp->mpp_flags & MPP_INSIDE_OUTPUT));
 	VERIFY(!(mp->mpp_flags & MPP_INSIDE_INPUT));
+	VERIFY(!(mp->mpp_flags & MPP_INSIDE_SETGETOPT));
 	lck_mtx_unlock(&mp->mpp_lock);
 }
 
@@ -194,6 +198,7 @@ mpp_getlock(struct mppcb *mp, int flags)
 	if (flags & PR_F_WILLUNLOCK) {
 		VERIFY(!(mp->mpp_flags & MPP_INSIDE_OUTPUT));
 		VERIFY(!(mp->mpp_flags & MPP_INSIDE_INPUT));
+		VERIFY(!(mp->mpp_flags & MPP_INSIDE_SETGETOPT));
 	}
 
 	return &mp->mpp_lock;

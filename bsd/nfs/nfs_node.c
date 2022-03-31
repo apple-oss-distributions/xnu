@@ -98,7 +98,7 @@ static LCK_GRP_DECLARE(nfs_node_lck_grp, "nfs_node");
 static LCK_GRP_DECLARE(nfs_data_lck_grp, "nfs_data");
 LCK_MTX_DECLARE(nfs_node_hash_mutex, &nfs_node_hash_lck_grp);
 
-ZONE_DECLARE(nfsnode_zone, "NFS node",
+ZONE_DEFINE(nfsnode_zone, "NFS node",
     sizeof(struct nfsnode), ZC_ZFREE_CLEARMEM);
 
 #define NFS_NODE_DBG(...) NFSCLNT_DBG(NFSCLNT_FAC_NODE, 7, ## __VA_ARGS__)
@@ -530,8 +530,7 @@ loop:
 	}
 
 #if CONFIG_TRIGGERS
-	if (((nfsvers >= NFS_VER4)
-	    )
+	if ((nfsvers >= NFS_VER4)
 	    && (nvap->nva_type == VDIR) && (np->n_vattr.nva_flags & NFS_FFLAG_TRIGGER)
 	    && !(flags & NG_MARKROOT)) {
 		struct vnode_trigger_param vtp;
@@ -695,7 +694,9 @@ restart:
 			error = nfs_close(np, nofp, NFS_OPEN_SHARE_ACCESS_BOTH, NFS_OPEN_SHARE_DENY_NONE, ctx);
 			if (error) {
 				NP(np, "nfs_vnop_inactive: create close error: %d", error);
-				nofp->nof_flags |= NFS_OPEN_FILE_CREATE;
+				if (error != NFSERR_NOENT) {
+					nofp->nof_flags |= NFS_OPEN_FILE_CREATE;
+				}
 			}
 			if (busied) {
 				nfs_open_file_clear_busy(nofp);
@@ -739,7 +740,9 @@ restart:
 				error = nfs_close(np, nofp, NFS_OPEN_SHARE_ACCESS_READ, NFS_OPEN_SHARE_DENY_NONE, ctx);
 				if (error) {
 					NP(np, "nfs_vnop_inactive: need close error: %d", error);
-					nofp->nof_flags |= NFS_OPEN_FILE_NEEDCLOSE;
+					if (error != NFSERR_NOENT) {
+						nofp->nof_flags |= NFS_OPEN_FILE_NEEDCLOSE;
+					}
 				}
 				if (busied) {
 					nfs_open_file_clear_busy(nofp);
@@ -934,7 +937,6 @@ nfs_vnop_reclaim(
 	FSDBG_TOP(265, vp, np, np->n_flag, 0);
 	force = (!mp || vfs_isforce(mp) || nfs_mount_gone(nmp));
 
-
 	/* There shouldn't be any open or lock state at this point */
 	lck_mtx_lock(&np->n_openlock);
 
@@ -962,6 +964,8 @@ nfs_vnop_reclaim(
 		if ((np->n_openflags & N_DELEG_MASK) && !force) {
 			/* try to return the delegation */
 			np->n_openflags &= ~N_DELEG_MASK;
+			nfs4_delegreturn_rpc(nmp, np->n_fhp, np->n_fhsize, &np->n_dstateid,
+			    R_RECOVER, vfs_context_thread(ctx), vfs_context_ucred(ctx));
 		}
 		if (np->n_attrdirfh) {
 			kfree_data(np->n_attrdirfh, *np->n_attrdirfh + 1);

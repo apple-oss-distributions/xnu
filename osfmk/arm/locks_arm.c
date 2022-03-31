@@ -113,10 +113,6 @@ typedef enum {
 	SPINWAIT_DID_NOT_SPIN, /* Got the interlock, did not spin. */
 } spinwait_result_t;
 
-#if CONFIG_DTRACE
-extern machine_timeout32_t dtrace_spin_threshold;
-#endif
-
 /* Forwards */
 
 extern unsigned int not_in_kdp;
@@ -494,7 +490,6 @@ _disable_preemption_without_measurements(void)
 static NOINLINE void
 kernel_preempt_check(thread_t thread)
 {
-	cpu_data_t *cpu_data_ptr;
 	long        state;
 
 #if __arm__
@@ -503,25 +498,15 @@ kernel_preempt_check(thread_t thread)
 #define INTERRUPT_MASK DAIF_IRQF
 #endif  // __arm__
 
-	/*
-	 * This check is racy and could load from another CPU's pending_ast mask,
-	 * but as described above, this can't have false negatives.
-	 */
-	cpu_data_ptr = os_atomic_load(&thread->machine.CpuDatap, compiler_acq_rel);
-	if (__probable((cpu_data_ptr->cpu_pending_ast & AST_URGENT) == 0)) {
-		return;
-	}
-
 	/* If interrupts are masked, we can't take an AST here */
 	state = get_interrupts();
 	if ((state & INTERRUPT_MASK) == 0) {
 		disable_interrupts_noread();                    // Disable interrupts
 
 		/*
-		 * Reload cpu_data_ptr: a context switch would cause it to change.
+		 * Reload cpu_pending_ast: a context switch would cause it to change.
 		 * Now that interrupts are disabled, this will debounce false positives.
 		 */
-		cpu_data_ptr = os_atomic_load(&thread->machine.CpuDatap, compiler_acq_rel);
 		if (thread->machine.CpuDatap->cpu_pending_ast & AST_URGENT) {
 #if __arm__
 #if __ARM_USER_PROTECT__
@@ -573,7 +558,13 @@ _enable_preemption(void)
 
 	os_atomic_store(&thread->machine.preemption_count, count, compiler_acq_rel);
 	if (count == 0) {
-		kernel_preempt_check(thread);
+		/*
+		 * This check is racy and could load from another CPU's pending_ast mask,
+		 * but as described above, this can't have false negatives.
+		 */
+		if (__improbable(thread->machine.CpuDatap->cpu_pending_ast & AST_URGENT)) {
+			kernel_preempt_check(thread);
+		}
 	}
 
 	os_compiler_barrier();
@@ -624,8 +615,7 @@ lck_spin_init(
 	lck->type = LCK_SPIN_TYPE;
 	hw_lock_init(&lck->hwlock);
 	if (grp) {
-		lck_grp_reference(grp);
-		lck_grp_lckcnt_incr(grp, LCK_TYPE_SPIN);
+		lck_grp_reference(grp, &grp->lck_grp_spincnt);
 	}
 }
 
@@ -771,8 +761,7 @@ lck_spin_destroy(
 	}
 	lck->lck_spin_data = LCK_SPIN_TAG_DESTROYED;
 	if (grp) {
-		lck_grp_lckcnt_decr(grp, LCK_TYPE_SPIN);
-		lck_grp_deallocate(grp);
+		lck_grp_deallocate(grp, &grp->lck_grp_spincnt);
 	}
 }
 
@@ -863,16 +852,6 @@ int
  */
 
 /*
- * Forward declaration
- */
-
-void
-lck_mtx_ext_init(
-	lck_mtx_ext_t * lck,
-	lck_grp_t * grp,
-	lck_attr_t * attr);
-
-/*
  *      Routine:        lck_mtx_alloc_init
  */
 lck_mtx_t      *
@@ -908,33 +887,17 @@ lck_mtx_init(
 	lck_grp_t * grp,
 	lck_attr_t * attr)
 {
-#ifdef  BER_XXX
-	lck_mtx_ext_t  *lck_ext;
-#endif
-	lck_attr_t     *lck_attr;
+	lck_mtx_ext_t  *lck_ext = NULL;
 
-	if (attr != LCK_ATTR_NULL) {
-		lck_attr = attr;
-	} else {
-		lck_attr = &LockDefaultLckAttr;
+	if (attr == LCK_ATTR_NULL) {
+		attr = &LockDefaultLckAttr;
 	}
-
 #ifdef  BER_XXX
-	if ((lck_attr->lck_attr_val) & LCK_ATTR_DEBUG) {
+	if (attr->lck_attr_val & LCK_ATTR_DEBUG) {
 		lck_ext = zalloc(KT_LCK_MTX_EXT);
-		lck_mtx_ext_init(lck_ext, grp, lck_attr);
-		lck->lck_mtx_tag = LCK_MTX_TAG_INDIRECT;
-		lck->lck_mtx_ptr = lck_ext;
-		lck->lck_mtx_type = LCK_MTX_TYPE;
-	} else
-#endif
-	{
-		*lck = (lck_mtx_t){
-			.lck_mtx_type = LCK_MTX_TYPE,
-		};
 	}
-	lck_grp_reference(grp);
-	lck_grp_lckcnt_incr(grp, LCK_TYPE_MTX);
+#endif
+	lck_mtx_init_ext(lck, lck_ext, grp, attr);
 }
 
 /*
@@ -947,53 +910,27 @@ lck_mtx_init_ext(
 	lck_grp_t * grp,
 	lck_attr_t * attr)
 {
-	lck_attr_t     *lck_attr;
-
-	if (attr != LCK_ATTR_NULL) {
-		lck_attr = attr;
-	} else {
-		lck_attr = &LockDefaultLckAttr;
+	if (attr == LCK_ATTR_NULL) {
+		attr = &LockDefaultLckAttr;
 	}
+
+	*lck = (lck_mtx_t){
+		.lck_mtx_type = LCK_MTX_TYPE,
+	};
 
 #if LOCKS_INDIRECT_ALLOW
-	if ((lck_attr->lck_attr_val) & LCK_ATTR_DEBUG) {
-		lck_mtx_ext_init(lck_ext, grp, lck_attr);
+	if (__improbable(lck_ext && (attr->lck_attr_val & LCK_ATTR_DEBUG))) {
+		*lck_ext = (lck_mtx_ext_t){
+			.lck_mtx_deb.type = MUTEX_TAG,
+			.lck_mtx_grp = grp,
+			.lck_mtx = *lck,
+		};
 		lck->lck_mtx_tag = LCK_MTX_TAG_INDIRECT;
 		lck->lck_mtx_ptr = lck_ext;
-		lck->lck_mtx_type = LCK_MTX_TYPE;
-	} else
+	}
 #endif /* LOCKS_INDIRECT_ALLOW */
-	{
-		lck->lck_mtx_waiters = 0;
-		lck->lck_mtx_type = LCK_MTX_TYPE;
-		ordered_store_mtx(lck, 0);
-	}
-	lck_grp_reference(grp);
-	lck_grp_lckcnt_incr(grp, LCK_TYPE_MTX);
-}
 
-/*
- *      Routine:        lck_mtx_ext_init
- */
-void
-lck_mtx_ext_init(
-	lck_mtx_ext_t * lck,
-	lck_grp_t * grp,
-	lck_attr_t * attr)
-{
-	bzero((void *) lck, sizeof(lck_mtx_ext_t));
-
-	lck->lck_mtx.lck_mtx_type = LCK_MTX_TYPE;
-
-	if ((attr->lck_attr_val) & LCK_ATTR_DEBUG) {
-		lck->lck_mtx_deb.type = MUTEX_TAG;
-		lck->lck_mtx_attr |= LCK_MTX_ATTR_DEBUG;
-	}
-	lck->lck_mtx_grp = grp;
-
-	if (grp->lck_grp_attr & LCK_GRP_ATTR_STAT) {
-		lck->lck_mtx_attr |= LCK_MTX_ATTR_STAT;
-	}
+	lck_grp_reference(grp, &grp->lck_grp_mtxcnt);
 }
 
 /* The slow versions */
@@ -1467,14 +1404,16 @@ done_spinning:
 	 */
 #if LOCKS_INDIRECT_ALLOW
 	if (__probable(lock->lck_mtx_tag != LCK_MTX_TAG_INDIRECT)) {
-		LOCKSTAT_RECORD(LS_LCK_MTX_LOCK_SPIN, lock,
+		LOCKSTAT_RECORD(LS_LCK_MTX_LOCK_ADAPTIVE_SPIN, lock,
 		    mach_absolute_time() - start_time);
-	} else
-#endif /* LOCKS_INDIRECT_ALLOW */
-	{
-		LOCKSTAT_RECORD(LS_LCK_MTX_EXT_LOCK_SPIN, lock,
+	} else {
+		LOCKSTAT_RECORD(LS_LCK_MTX_EXT_LOCK_ADAPTIVE_SPIN, lock,
 		    mach_absolute_time() - start_time);
 	}
+#else
+	LOCKSTAT_RECORD(LS_LCK_MTX_LOCK_ADAPTIVE_SPIN, lock,
+	    mach_absolute_time() - start_time);
+#endif /* LOCKS_INDIRECT_ALLOW */
 	/* The lockstat acquire event is recorded by the caller. */
 #endif
 
@@ -1498,8 +1437,47 @@ static inline void
 lck_mtx_lock_spin_internal(lck_mtx_t *lock, boolean_t allow_held_as_mutex)
 {
 	uintptr_t       state;
+#if CONFIG_DTRACE
+	bool stat_enabled = false;
+	uint64_t start_time = 0;
+
+	if (interlock_try(lock)) {
+		goto interlock_locked;
+	}
+
+#if LOCKS_INDIRECT_ALLOW
+	bool indirect = (lock->lck_mtx_tag == LCK_MTX_TAG_INDIRECT);
+
+	if ((lockstat_probemap[LS_LCK_MTX_LOCK_SPIN_SPIN] && !indirect) ||
+	    (lockstat_probemap[LS_LCK_MTX_EXT_LOCK_SPIN_SPIN] && indirect))
+#else
+	if (lockstat_probemap[LS_LCK_MTX_LOCK_SPIN_SPIN])
+#endif /* LOCKS_INDIRECT_ALLOW */
+	{
+		stat_enabled = true;
+		start_time = mach_absolute_time();
+	}
+#endif /* CONFIG_DTRACE */
 
 	interlock_lock(lock);
+
+#if CONFIG_DTRACE
+	if (stat_enabled) {
+#if LOCKS_INDIRECT_ALLOW
+		if (indirect) {
+			LOCKSTAT_RECORD(LS_LCK_MTX_EXT_LOCK_SPIN_SPIN, lock,
+			    mach_absolute_time() - start_time);
+		} else
+#endif /* LOCKS_INDIRECT_ALLOW */
+		{
+			LOCKSTAT_RECORD(LS_LCK_MTX_LOCK_SPIN_SPIN, lock,
+			    mach_absolute_time() - start_time);
+		}
+	}
+
+interlock_locked:
+#endif /* CONFIG_DTRACE */
+
 	state = ordered_load_mtx(lock);
 	if (LCK_MTX_STATE_TO_THREAD(state)) {
 		if (allow_held_as_mutex) {
@@ -1567,7 +1545,9 @@ lck_mtx_try_lock_contended(lck_mtx_t *lock, thread_t thread)
 	uintptr_t       state;
 	int             waiters;
 
-	interlock_lock(lock);
+	if (!interlock_try(lock)) {
+		return FALSE;
+	}
 	state = ordered_load_mtx(lock);
 	holding_thread = LCK_MTX_STATE_TO_THREAD(state);
 	if (holding_thread) {
@@ -1585,6 +1565,10 @@ lck_mtx_try_lock_contended(lck_mtx_t *lock, thread_t thread)
 	load_memory_barrier();
 
 	turnstile_cleanup();
+
+#if     CONFIG_DTRACE
+	LOCKSTAT_RECORD(LS_LCK_MTX_TRY_LOCK_ACQUIRE, lock, 0);
+#endif /* CONFIG_DTRACE */
 
 	return TRUE;
 }
@@ -1616,7 +1600,7 @@ lck_mtx_try_lock_spin_internal(lck_mtx_t *lock, boolean_t allow_held_as_mutex)
 	load_memory_barrier();
 
 #if     CONFIG_DTRACE
-	LOCKSTAT_RECORD(LS_LCK_MTX_TRY_SPIN_LOCK_ACQUIRE, lock, 0);
+	LOCKSTAT_RECORD(LS_LCK_MTX_TRY_LOCK_SPIN_ACQUIRE, lock, 0);
 #endif /* CONFIG_DTRACE */
 	return TRUE;
 }
@@ -1805,9 +1789,7 @@ lck_mtx_destroy(
 	}
 	lck_mtx_assert(lck, LCK_MTX_ASSERT_NOTOWNED);
 	lck->lck_mtx_tag = LCK_MTX_TAG_DESTROYED;
-	lck_grp_lckcnt_decr(grp, LCK_TYPE_MTX);
-	lck_grp_deallocate(grp);
-	return;
+	lck_grp_deallocate(grp, &grp->lck_grp_mtxcnt);
 }
 
 /*

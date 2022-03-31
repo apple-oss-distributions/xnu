@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018-2020 Apple Inc. All rights reserved.
+ * Copyright (c) 2018-2022 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -125,7 +125,7 @@ if_low_power_evhdlr_callback(__unused struct eventhandler_entry_arg arg,
 	    KEV_DL_SUBCLASS,
 	    KEV_DL_LOW_POWER_MODE_CHANGED,
 	    (struct net_event_data *)&kev,
-	    sizeof(struct kev_dl_low_power_mode));
+	    sizeof(struct kev_dl_low_power_mode), FALSE);
 }
 
 void
@@ -142,15 +142,18 @@ if_low_power_evhdlr_init(void)
 
 #if 0
 static void
-if_low_power_nwk_ev_callback(void *arg)
+if_low_power_nwk_ev_callback(struct nwk_wq_entry *nwk_item)
 {
-	struct if_low_power_ev_args *if_low_power_ev_args =
-	    (struct if_low_power_ev_args *)arg;
+	struct if_low_power_ev_nwk_wq_entry *p_ev;
+
+	p_ev = __container_of(nwk_item,
+	    struct if_low_power_ev_nwk_wq_entry, nwk_wqe);
 
 	EVENTHANDLER_INVOKE(&if_low_power_evhdlr_ctx,
-	    if_low_power_event,
-	    if_low_power_ev_args->ifp,
-	    if_low_power_ev_args->event_code);
+	    if_low_power_event, p_ev->ev_args.ifp,
+	    p_ev->ev_args.event_code);
+
+	kfree_type(struct if_low_power_ev_nwk_wq_entry, p_ev);
 }
 
 static void
@@ -159,18 +162,15 @@ if_low_power_event_enqueue_nwk_wq_entry(struct ifnet *ifp,
 {
 	struct if_low_power_ev_nwk_wq_entry *event_nwk_wq_entry = NULL;
 
-	MALLOC(event_nwk_wq_entry, struct if_low_power_ev_nwk_wq_entry *,
-	    sizeof(struct if_low_power_ev_nwk_wq_entry),
-	    M_NWKWQ, M_WAITOK | M_ZERO);
+	event_nwk_wq_entry = kalloc_type(struct if_low_power_ev_nwk_wq_entry,
+	    Z_WAITOK | Z_ZERO | Z_NOFAIL);
 
 	event_nwk_wq_entry->ev_args.ifp = ifp;
 	event_nwk_wq_entry->ev_args.event_code = event_code;
 
 	event_nwk_wq_entry->nwk_wqe.func = if_low_power_nwk_ev_callback;
-	event_nwk_wq_entry->nwk_wqe.is_arg_managed = TRUE;
-	event_nwk_wq_entry->nwk_wqe.arg = &event_nwk_wq_entry->ev_args;
 
-	nwk_wq_enqueue((struct nwk_wq_entry*)event_nwk_wq_entry);
+	nwk_wq_enqueue(&event_nwk_wq_entry->nwk_wqe);
 }
 #endif
 

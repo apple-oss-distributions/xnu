@@ -264,8 +264,7 @@ lck_spin_init(
 {
 	usimple_lock_init((usimple_lock_t) lck, 0);
 	if (grp) {
-		lck_grp_reference(grp);
-		lck_grp_lckcnt_incr(grp, LCK_TYPE_SPIN);
+		lck_grp_reference(grp, &grp->lck_grp_spincnt);
 	}
 }
 
@@ -282,8 +281,7 @@ lck_spin_destroy(
 	}
 	lck->interlock = LCK_SPIN_TAG_DESTROYED;
 	if (grp) {
-		lck_grp_lckcnt_decr(grp, LCK_TYPE_SPIN);
-		lck_grp_deallocate(grp);
+		lck_grp_deallocate(grp, &grp->lck_grp_spincnt);
 	}
 	return;
 }
@@ -1032,32 +1030,6 @@ lck_mtx_free(
 }
 
 /*
- *      Routine:        lck_mtx_ext_init
- */
-static void
-lck_mtx_ext_init(
-	lck_mtx_ext_t   *lck,
-	lck_grp_t       *grp,
-	lck_attr_t      *attr)
-{
-	bzero((void *)lck, sizeof(lck_mtx_ext_t));
-
-	if ((attr->lck_attr_val) & LCK_ATTR_DEBUG) {
-		lck->lck_mtx_deb.type = MUTEX_TAG;
-		lck->lck_mtx_attr |= LCK_MTX_ATTR_DEBUG;
-	}
-
-	lck->lck_mtx_grp = grp;
-
-	if (grp->lck_grp_attr & LCK_GRP_ATTR_STAT) {
-		lck->lck_mtx_attr |= LCK_MTX_ATTR_STAT;
-	}
-
-	lck->lck_mtx.lck_mtx_is_ext = 1;
-	lck->lck_mtx.lck_mtx_pad32 = 0xFFFFFFFF;
-}
-
-/*
  *      Routine:        lck_mtx_init
  */
 void
@@ -1066,27 +1038,15 @@ lck_mtx_init(
 	lck_grp_t       *grp,
 	lck_attr_t      *attr)
 {
-	lck_mtx_ext_t   *lck_ext;
-	lck_attr_t      *lck_attr;
+	lck_mtx_ext_t   *lck_ext = NULL;
 
-	if (attr != LCK_ATTR_NULL) {
-		lck_attr = attr;
-	} else {
-		lck_attr = &LockDefaultLckAttr;
+	if (attr == LCK_ATTR_NULL) {
+		attr = &LockDefaultLckAttr;
 	}
-
-	if ((lck_attr->lck_attr_val) & LCK_ATTR_DEBUG) {
+	if (attr->lck_attr_val & LCK_ATTR_DEBUG) {
 		lck_ext = zalloc(KT_LCK_MTX_EXT);
-		lck_mtx_ext_init(lck_ext, grp, lck_attr);
-		lck->lck_mtx_tag = LCK_MTX_TAG_INDIRECT;
-		lck->lck_mtx_ptr = lck_ext;
-	} else {
-		lck->lck_mtx_owner = 0;
-		lck->lck_mtx_state = 0;
 	}
-	lck->lck_mtx_pad32 = 0xFFFFFFFF;
-	lck_grp_reference(grp);
-	lck_grp_lckcnt_incr(grp, LCK_TYPE_MTX);
+	lck_mtx_init_ext(lck, lck_ext, grp, attr);
 }
 
 /*
@@ -1099,16 +1059,16 @@ lck_mtx_init_ext(
 	lck_grp_t       *grp,
 	lck_attr_t      *attr)
 {
-	lck_attr_t      *lck_attr;
-
-	if (attr != LCK_ATTR_NULL) {
-		lck_attr = attr;
-	} else {
-		lck_attr = &LockDefaultLckAttr;
+	if (attr == LCK_ATTR_NULL) {
+		attr = &LockDefaultLckAttr;
 	}
 
-	if ((lck_attr->lck_attr_val) & LCK_ATTR_DEBUG) {
-		lck_mtx_ext_init(lck_ext, grp, lck_attr);
+	if (__improbable(attr->lck_attr_val & LCK_ATTR_DEBUG)) {
+		*lck_ext = (lck_mtx_ext_t) {
+			.lck_mtx_deb.type = MUTEX_TAG,
+			.lck_mtx_grp = grp,
+			.lck_mtx.lck_mtx_is_ext = 1,
+		};
 		lck->lck_mtx_tag = LCK_MTX_TAG_INDIRECT;
 		lck->lck_mtx_ptr = lck_ext;
 	} else {
@@ -1117,8 +1077,7 @@ lck_mtx_init_ext(
 	}
 	lck->lck_mtx_pad32 = 0xFFFFFFFF;
 
-	lck_grp_reference(grp);
-	lck_grp_lckcnt_incr(grp, LCK_TYPE_MTX);
+	lck_grp_reference(grp, &grp->lck_grp_mtxcnt);
 }
 
 static void
@@ -1165,9 +1124,7 @@ lck_mtx_destroy(
 	if (indirect) {
 		zfree(KT_LCK_MTX_EXT, lck->lck_mtx_ptr);
 	}
-	lck_grp_lckcnt_decr(grp, LCK_TYPE_MTX);
-	lck_grp_deallocate(grp);
-	return;
+	lck_grp_deallocate(grp, &grp->lck_grp_mtxcnt);
 }
 
 
@@ -1725,10 +1682,6 @@ lck_mtx_lock_slow(
 				lck_grp_mtx_update_miss((struct _lck_mtx_ext_*)lock, &first_miss);
 			}
 		}
-
-		if (!lck_mtx_lock_wait_interlock_to_clear(lock, &state)) {
-			return lck_mtx_lock_contended(lock, indirect, &first_miss);
-		}
 	}
 
 	/* no - can't be INDIRECT, DESTROYED or locked */
@@ -1809,13 +1762,11 @@ lck_mtx_try_lock_slow(
 	}
 
 	/* no - can't be INDIRECT, DESTROYED or locked */
-	while (__improbable(!lck_mtx_interlock_try_lock_set_flags(lock, LCK_MTX_MLOCKED_MSK, &state))) {
-		if (!lck_mtx_try_lock_wait_interlock_to_clear(lock, &state)) {
-			if (indirect) {
-				lck_grp_mtx_update_miss((struct _lck_mtx_ext_*)lock, &first_miss);
-			}
-			return FALSE;
+	if (__improbable(!lck_mtx_interlock_try_lock_set_flags(lock, LCK_MTX_MLOCKED_MSK, &state))) {
+		if (indirect) {
+			lck_grp_mtx_update_miss((struct _lck_mtx_ext_*)lock, &first_miss);
 		}
+		return FALSE;
 	}
 
 	/* lock and interlock acquired */
@@ -1854,14 +1805,13 @@ lck_mtx_lock_spin_slow(
 
 	state = ordered_load_mtx_state(lock);
 
-	/* is the interlock or mutex held */
+	/* is interlock or mutex held */
 	if (__improbable(state & ((LCK_MTX_ILOCKED_MSK | LCK_MTX_MLOCKED_MSK)))) {
 		/*
 		 * Note: both LCK_MTX_TAG_DESTROYED and LCK_MTX_TAG_INDIRECT
 		 * have LCK_MTX_ILOCKED_MSK and LCK_MTX_MLOCKED_MSK
 		 * set in state (state == lck_mtx_tag)
 		 */
-
 
 		/* is the mutex already held and not indirect */
 		if (__improbable(!(state & LCK_MTX_ILOCKED_MSK))) {
@@ -1887,17 +1837,56 @@ lck_mtx_lock_spin_slow(
 				lck_grp_mtx_update_miss((struct _lck_mtx_ext_*)lock, &first_miss);
 			}
 		}
+	}
 
+	bool acquired = true;
+
+#if CONFIG_DTRACE
+	bool stat_enabled = false;
+	uint64_t start_time = 0;
+
+	if (__probable(lck_mtx_interlock_try_lock_set_flags(lock, LCK_MTX_SPIN_MSK, &state))) {
+		goto past_spin;
+	}
+
+	if ((lockstat_probemap[LS_LCK_MTX_LOCK_SPIN_SPIN] && !indirect)
+	    || (lockstat_probemap[LS_LCK_MTX_EXT_LOCK_SPIN_SPIN] && indirect)) {
+		stat_enabled = true;
+		start_time = mach_absolute_time();
+	}
+#endif /* CONFIG_DTRACE */
+
+	/* note - can't be INDIRECT, DESTROYED or locked */
+	/* note - preemption is not disabled while spinning */
+	while (__improbable(!lck_mtx_interlock_try_lock_set_flags(lock, LCK_MTX_SPIN_MSK, &state))) {
 		if (!lck_mtx_lock_wait_interlock_to_clear(lock, &state)) {
-			return lck_mtx_lock_contended(lock, indirect, &first_miss);
+			acquired = false;
+			break;
 		}
 	}
 
-	/* no - can't be INDIRECT, DESTROYED or locked */
-	while (__improbable(!lck_mtx_interlock_try_lock_set_flags(lock, LCK_MTX_SPIN_MSK, &state))) {
-		if (!lck_mtx_lock_wait_interlock_to_clear(lock, &state)) {
-			return lck_mtx_lock_contended(lock, indirect, &first_miss);
+#if CONFIG_DTRACE
+	/*
+	 * Note that we record a different probe id depending on whether
+	 * this is a direct or indirect mutex.  This allows us to
+	 * penalize only lock groups that have debug/stats enabled
+	 * with dtrace processing if desired.
+	 */
+	if (stat_enabled) {
+		if (__probable(!indirect)) {
+			LOCKSTAT_RECORD(LS_LCK_MTX_LOCK_SPIN_SPIN, lock,
+			    mach_absolute_time() - start_time);
+		} else {
+			LOCKSTAT_RECORD(LS_LCK_MTX_EXT_LOCK_SPIN_SPIN, lock,
+			    mach_absolute_time() - start_time);
 		}
+	}
+
+past_spin:
+#endif /* CONFIG_DTRACE */
+
+	if (__improbable(!acquired)) {
+		return lck_mtx_lock_contended(lock, indirect, &first_miss);
 	}
 
 	/* lock as spinlock and interlock acquired */
@@ -1911,10 +1900,10 @@ lck_mtx_lock_spin_slow(
 		thread->mutex_count++;          /* lock statistic */
 	}
 #endif
-
-#if     CONFIG_DTRACE
+#if CONFIG_DTRACE
 	LOCKSTAT_RECORD(LS_LCK_MTX_LOCK_SPIN_ACQUIRE, lock, 0);
-#endif
+#endif /* CONFIG_DTRACE */
+
 	/* return with the interlock held and preemption disabled */
 	return;
 }
@@ -1955,23 +1944,14 @@ lck_mtx_try_lock_spin_slow(
 			first_miss = 0;
 			lck_grp_mtx_update_held((struct _lck_mtx_ext_*)lock);
 		}
-
-		if (!lck_mtx_try_lock_wait_interlock_to_clear(lock, &state)) {
-			if (indirect) {
-				lck_grp_mtx_update_miss((struct _lck_mtx_ext_*)lock, &first_miss);
-			}
-			return FALSE;
-		}
 	}
 
-	/* no - can't be INDIRECT, DESTROYED or locked */
-	while (__improbable(!lck_mtx_interlock_try_lock_set_flags(lock, LCK_MTX_SPIN_MSK, &state))) {
-		if (!lck_mtx_try_lock_wait_interlock_to_clear(lock, &state)) {
-			if (indirect) {
-				lck_grp_mtx_update_miss((struct _lck_mtx_ext_*)lock, &first_miss);
-			}
-			return FALSE;
+	/* note - can't be INDIRECT, DESTROYED or locked */
+	if (__improbable(!lck_mtx_interlock_try_lock_set_flags(lock, LCK_MTX_SPIN_MSK, &state))) {
+		if (indirect) {
+			lck_grp_mtx_update_miss((struct _lck_mtx_ext_*)lock, &first_miss);
 		}
+		return FALSE;
 	}
 
 	/* lock and interlock acquired */
@@ -1987,7 +1967,7 @@ lck_mtx_try_lock_spin_slow(
 #endif
 
 #if     CONFIG_DTRACE
-	LOCKSTAT_RECORD(LS_LCK_MTX_TRY_SPIN_LOCK_ACQUIRE, lock, 0);
+	LOCKSTAT_RECORD(LS_LCK_MTX_TRY_LOCK_SPIN_ACQUIRE, lock, 0);
 #endif
 	return TRUE;
 }
@@ -2330,10 +2310,10 @@ lck_mtx_lock_spinwait_x86(
 	 * with dtrace processing if desired.
 	 */
 	if (__probable(mutex->lck_mtx_is_ext == 0)) {
-		LOCKSTAT_RECORD(LS_LCK_MTX_LOCK_SPIN, mutex,
+		LOCKSTAT_RECORD(LS_LCK_MTX_LOCK_ADAPTIVE_SPIN, mutex,
 		    mach_absolute_time() - start_time);
 	} else {
-		LOCKSTAT_RECORD(LS_LCK_MTX_EXT_LOCK_SPIN, mutex,
+		LOCKSTAT_RECORD(LS_LCK_MTX_EXT_LOCK_ADAPTIVE_SPIN, mutex,
 		    mach_absolute_time() - start_time);
 	}
 	/* The lockstat acquire event is recorded by the assembly code beneath us. */

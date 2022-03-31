@@ -177,13 +177,13 @@ RB_PROTOTYPE_SC_PREV(__private_extern__, prproxy_sols_tree, nd6_prproxy_soltgt,
 static u_int32_t nd6_max_tgt_sols = ND6_MAX_TGT_SOLS_DEFAULT;
 static u_int32_t nd6_max_src_sols = ND6_MAX_SRC_SOLS_DEFAULT;
 
-static ZONE_DECLARE(ndprl_zone, "nd6_prproxy_prelist",
+static ZONE_DEFINE(ndprl_zone, "nd6_prproxy_prelist",
     sizeof(struct nd6_prproxy_prelist), ZC_ZFREE_CLEARMEM);    /* nd6_prproxy_prelist zone */
 
-static ZONE_DECLARE(solsrc_zone, "nd6_prproxy_solsrc",
+static ZONE_DEFINE(solsrc_zone, "nd6_prproxy_solsrc",
     sizeof(struct nd6_prproxy_solsrc), ZC_ZFREE_CLEARMEM);     /* nd6_prproxy_solsrc zone */
 
-static ZONE_DECLARE(soltgt_zone, "nd6_prproxy_soltgt",
+static ZONE_DEFINE(soltgt_zone, "nd6_prproxy_soltgt",
     sizeof(struct nd6_prproxy_soltgt), ZC_ZFREE_CLEARMEM);     /* nd6_prproxy_soltgt zone */
 
 /* The following is protected by ndpr_lock */
@@ -1076,7 +1076,7 @@ nd6_prproxy_ns_input(struct ifnet *ifp, struct in6_addr *saddr,
 	if (solrec) {
 		VERIFY(!IN6_IS_ADDR_UNSPECIFIED(saddr));
 		nd6_cache_lladdr(ifp, saddr, lladdr, lladdrlen,
-		    ND_NEIGHBOR_SOLICIT, 0);
+		    ND_NEIGHBOR_SOLICIT, 0, NULL);
 	}
 
 	SLIST_FOREACH_SAFE(ndprl, &ndprl_head, ndprl_le, ndprl_tmp) {

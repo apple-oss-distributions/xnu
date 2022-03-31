@@ -7,6 +7,8 @@ bsd/dev/arm/systemcalls.c           standard
 bsd/dev/arm/sysctl.c           standard
 bsd/dev/arm/unix_signal.c	standard
 bsd/dev/arm/cpu_in_cksum.s	standard
+bsd/dev/arm/cpu_copy_in_cksum.s	optional skywalk
+bsd/dev/arm/cpu_memcmp_mask.s	optional skywalk
 
 bsd/dev/arm/dtrace_isa.c	optional config_dtrace
 bsd/dev/arm/dtrace_subr_arm.c	optional config_dtrace

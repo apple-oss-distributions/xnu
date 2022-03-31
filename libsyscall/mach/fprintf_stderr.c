@@ -35,7 +35,7 @@
 #include <stdarg.h>
 #include "string.h"
 
-int (*vprintf_stderr_func)(const char *format, va_list ap);
+int (*vprintf_stderr_func)(const char *format, va_list ap) __printflike(1, 0);
 
 #define __STDERR_FILENO 2
 int write(int fd, const char* cbuf, int nbyte);
@@ -48,6 +48,7 @@ int write(int fd, const char* cbuf, int nbyte);
  * a function which takes the same parameters as vprintf.
  */
 
+__printflike(1, 2)
 __private_extern__ int
 fprintf_stderr(const char *format, ...)
 {

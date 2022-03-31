@@ -65,7 +65,7 @@
 #include "errorlib.h"
 #include "string.h"
 
-int fprintf_stderr(const char *format, ...);
+int fprintf_stderr(const char *format, ...) __printflike(1, 2);
 
 void
 mach_error(const char *str, mach_error_t err)

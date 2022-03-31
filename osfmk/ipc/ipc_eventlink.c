@@ -49,12 +49,8 @@
 
 #include <libkern/OSAtomic.h>
 
-static ZONE_DECLARE(ipc_eventlink_zone, "ipc_eventlink",
-    sizeof(struct ipc_eventlink_base),
-#if CONFIG_WAITQ_IRQSAFE_ALLOW_INVALID
-    ZC_NOGZALLOC | ZC_KASAN_NOQUARANTINE | ZC_SEQUESTER |
-#endif
-    ZC_ZFREE_CLEARMEM);
+static ZONE_DEFINE_TYPE(ipc_eventlink_zone, "ipc_eventlink",
+    struct ipc_eventlink_base, ZC_ZFREE_CLEARMEM);
 
 os_refgrp_decl(static, ipc_eventlink_refgrp, "eventlink", NULL);
 
@@ -190,7 +186,7 @@ ipc_eventlink_initialize(
 	}
 
 	/* Must be done last */
-	waitq_init(&ipc_eventlink_base->elb_waitq, SYNC_POLICY_DISABLE_IRQ);
+	waitq_init(&ipc_eventlink_base->elb_waitq, WQT_QUEUE, SYNC_POLICY_FIFO);
 }
 
 /*
@@ -876,8 +872,7 @@ ipc_eventlink_signal_internal_locked(
 		kr = waitq_wakeup64_all_locked(
 			&ipc_eventlink_base->elb_waitq,
 			CAST_EVENT64_T(signal_eventlink),
-			THREAD_RESTART, NULL,
-			WAITQ_ALL_PRIORITIES,
+			THREAD_RESTART, WAITQ_ALL_PRIORITIES,
 			WAITQ_KEEP_LOCKED);
 		return kr;
 	}
@@ -896,10 +891,8 @@ ipc_eventlink_signal_internal_locked(
 		kr = waitq_wakeup64_one_locked(
 			&ipc_eventlink_base->elb_waitq,
 			CAST_EVENT64_T(signal_eventlink),
-			THREAD_AWAKENED, NULL,
-			WAITQ_ALL_PRIORITIES,
-			WAITQ_KEEP_LOCKED,
-			wq_option);
+			THREAD_AWAKENED, WAITQ_ALL_PRIORITIES,
+			WAITQ_KEEP_LOCKED, wq_option);
 	}
 
 	return kr;

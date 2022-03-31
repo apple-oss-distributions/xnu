@@ -735,6 +735,34 @@ T_DECL(talk_self_connections, "vsock talk to self - too many connections")
 	vsock_close(listen_socket);
 }
 
+// rdar://84098487 (SEED: Web: Virtio-socket sent data lost after 128KB)
+T_DECL(talk_self_large_writes, "vsock talk to self with large writes")
+{
+	int socketA, socketB;
+	vsock_connect_peers(VMADDR_CID_ANY, 4848, 10, &socketA, &socketB);
+
+	size_t size = 65536 * 4;
+	char buffer[65536 * 4] = {0};
+	void *random = malloc(size);
+
+	for (int i = 0; i < 64; i++) {
+		// Send a message.
+		ssize_t sent = write(socketA, random, size);
+		T_ASSERT_EQ_LONG(size, sent, "sent all bytes");
+
+		// Receive a message.
+		ssize_t read_bytes = read(socketB, buffer, size);
+		T_ASSERT_EQ_LONG(size, (unsigned long)read_bytes, "read all bytes");
+
+		// Sent and received same data.
+		T_ASSERT_EQ_INT(0, memcmp(random, buffer, size), "sent and received same data");
+	}
+
+	free(random);
+	vsock_close(socketA);
+	vsock_close(socketB);
+}
+
 /* Sysctl */
 
 static const char* pcblist = "net.vsock.pcblist";

@@ -35,8 +35,6 @@
 #include <net/pktsched/pktsched.h>
 #include <net/pktsched/pktsched_netem.h>
 
-/* <rdar://problem/55953523> M8 Perf: Remove norm_dist_table on armv7k (16K wired win) */
-/* compile out netem on platforms where skywalk is not enabled by default */
 #if __LP64__
 #define CONFIG_NETEM 1
 #else

@@ -593,7 +593,7 @@ authenticate_root_with_chunklist(const char *rootdmg_path, boolean_t *out_enforc
 	 * the chunklist.
 	 */
 	AUTHDBG("reading chunklist");
-	err = imageboot_read_file(chunklist_path, &chunklist_buf, &chunklist_len);
+	err = imageboot_read_file(chunklist_path, &chunklist_buf, &chunklist_len, NULL);
 	if (err) {
 		AUTHPRNT("failed to read chunklist");
 		goto out;
@@ -656,7 +656,7 @@ authenticate_bootkc_uuid(void)
 	size_t bufsz = 1 * 1024 * 1024UL;
 
 	/* get the UUID of the bootkc in /S/L/KC */
-	err = imageboot_read_file(bootkc_path, &buf, &bufsz);
+	err = imageboot_read_file(bootkc_path, &buf, &bufsz, NULL);
 	if (err) {
 		goto out;
 	}
@@ -704,14 +704,15 @@ authenticate_libkern_uuid(void)
 	int err = 0;
 	void *buf = NULL;
 	size_t bufsz = 4 * 1024 * 1024UL;
+	off_t fsize = 0;
 
 	/* get the UUID of the libkern in /S/L/E */
-	err = imageboot_read_file(libkern_path, &buf, &bufsz);
+	err = imageboot_read_file(libkern_path, &buf, &bufsz, &fsize);
 	if (err) {
 		goto out;
 	}
 
-	if (fatfile_validate_fatarches((vm_offset_t)buf, bufsz) == LOAD_SUCCESS) {
+	if (fatfile_validate_fatarches((vm_offset_t)buf, bufsz, fsize) == LOAD_SUCCESS) {
 		struct fat_header *fat_header = buf;
 		struct fat_arch fat_arch;
 		if (fatfile_getbestarch((vm_offset_t)fat_header, bufsz, NULL, &fat_arch, FALSE) != LOAD_SUCCESS) {

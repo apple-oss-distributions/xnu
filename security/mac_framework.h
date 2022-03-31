@@ -160,6 +160,7 @@ void    mac_cred_label_associate_fork(kauth_cred_t cred, proc_t child);
 void    mac_cred_label_associate_kernel(kauth_cred_t cred);
 void    mac_cred_label_associate_user(kauth_cred_t cred);
 void    mac_cred_label_destroy(kauth_cred_t cred);
+struct label *mac_cred_label(kauth_cred_t cred);
 int     mac_cred_label_externalize_audit(proc_t p, struct mac *mac) __result_use_check;
 void    mac_cred_label_free(struct label *label);
 void    mac_cred_label_init(kauth_cred_t cred);
@@ -177,6 +178,7 @@ void    mac_devfs_label_associate_directory(const char *dirname, int dirnamelen,
 void    mac_devfs_label_copy(struct label *, struct label *label);
 void    mac_devfs_label_destroy(struct devnode *de);
 void    mac_devfs_label_init(struct devnode *de);
+struct label *mac_devfs_label(struct devnode *de);
 void    mac_devfs_label_update(struct mount *mp, struct devnode *de,
     struct vnode *vp);
 int     mac_execve_enter(user_addr_t mac_p, struct image_params *imgp) __result_use_check;
@@ -204,9 +206,6 @@ int     mac_file_check_receive(kauth_cred_t cred, struct fileglob *fg) __result_
 int     mac_file_check_set(kauth_cred_t cred, struct fileglob *fg,
     char *bufp, size_t buflen) __result_use_check;
 void    mac_file_notify_close(struct ucred *cred, struct fileglob *fg);
-void    mac_file_label_associate(kauth_cred_t cred, struct fileglob *fg);
-void    mac_file_label_destroy(struct fileglob *fg);
-void    mac_file_label_init(struct fileglob *fg);
 int     mac_iokit_check_open_service(kauth_cred_t cred, io_object_t service, unsigned int user_client_type) __result_use_check;
 int     mac_iokit_check_open(kauth_cred_t cred, io_object_t user_client, unsigned int user_client_type) __result_use_check;
 int     mac_iokit_check_set_properties(kauth_cred_t cred, io_object_t registry_entry, io_object_t properties) __result_use_check;
@@ -247,6 +246,7 @@ int     mac_mount_label_externalize(struct label *label, char *elements,
     char *outbuf, size_t outbuflen) __result_use_check;
 int     mac_mount_label_get(struct mount *mp, user_addr_t mac_p) __result_use_check;
 void    mac_mount_label_init(struct mount *);
+struct label *mac_mount_label(struct mount *);
 int     mac_mount_label_internalize(struct label *, char *string) __result_use_check;
 int     mac_necp_check_open(proc_t proc, int flags) __result_use_check;
 int     mac_necp_check_client_action(proc_t proc, struct fileglob *fg, uint32_t action) __result_use_check;
@@ -259,11 +259,12 @@ int     mac_pipe_check_select(kauth_cred_t cred, struct pipe *cpipe,
     int which) __result_use_check;
 int     mac_pipe_check_stat(kauth_cred_t cred, struct pipe *cpipe) __result_use_check;
 int     mac_pipe_check_write(kauth_cred_t cred, struct pipe *cpipe) __result_use_check;
-struct label    *mac_pipe_label_alloc(void);
 void    mac_pipe_label_associate(kauth_cred_t cred, struct pipe *cpipe);
 void    mac_pipe_label_destroy(struct pipe *cpipe);
 void    mac_pipe_label_free(struct label *label);
 void    mac_pipe_label_init(struct pipe *cpipe);
+struct label *mac_pipe_label(struct pipe *cpipe);
+void    mac_pipe_set_label(struct pipe *cpipe, struct label *label);
 void    mac_policy_initbsd(void);
 int     mac_posixsem_check_create(kauth_cred_t cred, const char *name) __result_use_check;
 int     mac_posixsem_check_open(kauth_cred_t cred, struct pseminfo *psem) __result_use_check;
@@ -278,6 +279,7 @@ void    mac_posixsem_label_associate(kauth_cred_t cred,
     struct pseminfo *psem, const char *name);
 void    mac_posixsem_label_destroy(struct pseminfo *psem);
 void    mac_posixsem_label_init(struct pseminfo *psem);
+struct label *mac_posixsem_label(struct pseminfo *psem);
 int     mac_posixshm_check_create(kauth_cred_t cred, const char *name) __result_use_check;
 int     mac_posixshm_check_mmap(kauth_cred_t cred, struct pshminfo *pshm,
     int prot, int flags) __result_use_check;
@@ -295,6 +297,7 @@ void    mac_posixshm_label_associate(kauth_cred_t cred,
     struct pshminfo *pshm, const char *name);
 void    mac_posixshm_label_destroy(struct pshminfo *pshm);
 void    mac_posixshm_label_init(struct pshminfo *pshm);
+struct label *mac_posixshm_label(struct pshminfo *pshm);
 int     mac_priv_check(kauth_cred_t cred, int priv) __result_use_check;
 int     mac_priv_grant(kauth_cred_t cred, int priv) __result_use_check;
 int     mac_proc_check_debug(proc_ident_t tracing_ident, kauth_cred_t tracing_cred, proc_ident_t traced_ident) __result_use_check;
@@ -389,6 +392,7 @@ int     mac_system_check_kas_info(kauth_cred_t cred, int selector) __result_use_
 void    mac_sysvmsg_label_associate(kauth_cred_t cred,
     struct msqid_kernel *msqptr, struct msg *msgptr);
 void    mac_sysvmsg_label_init(struct msg *msgptr);
+struct label *mac_sysvmsg_label(struct msg *msgptr);
 void    mac_sysvmsg_label_recycle(struct msg *msgptr);
 int     mac_sysvmsq_check_enqueue(kauth_cred_t cred, struct msg *msgptr,
     struct msqid_kernel *msqptr) __result_use_check;
@@ -405,6 +409,7 @@ int     mac_sysvmsq_check_msqsnd(kauth_cred_t cred,
 void    mac_sysvmsq_label_associate(kauth_cred_t cred,
     struct msqid_kernel *msqptr);
 void    mac_sysvmsq_label_init(struct msqid_kernel *msqptr);
+struct label *mac_sysvmsq_label(struct msqid_kernel *msqptr);
 void    mac_sysvmsq_label_recycle(struct msqid_kernel *msqptr);
 int     mac_sysvsem_check_semctl(kauth_cred_t cred,
     struct semid_kernel *semakptr, int cmd) __result_use_check;
@@ -416,6 +421,7 @@ void    mac_sysvsem_label_associate(kauth_cred_t cred,
     struct semid_kernel *semakptr);
 void    mac_sysvsem_label_destroy(struct semid_kernel *semakptr);
 void    mac_sysvsem_label_init(struct semid_kernel *semakptr);
+struct label *mac_sysvsem_label(struct semid_kernel *semakptr);
 void    mac_sysvsem_label_recycle(struct semid_kernel *semakptr);
 int     mac_sysvshm_check_shmat(kauth_cred_t cred,
     struct shmid_kernel *shmsegptr, int shmflg) __result_use_check;
@@ -429,6 +435,7 @@ void    mac_sysvshm_label_associate(kauth_cred_t cred,
     struct shmid_kernel *shmsegptr);
 void    mac_sysvshm_label_destroy(struct shmid_kernel *shmsegptr);
 void    mac_sysvshm_label_init(struct shmid_kernel* shmsegptr);
+struct label *mac_sysvshm_label(struct shmid_kernel *shmsegptr);
 void    mac_sysvshm_label_recycle(struct shmid_kernel *shmsegptr);
 int     mac_vnode_check_access(vfs_context_t ctx, struct vnode *vp,
     int acc_mode) __result_use_check;
@@ -520,7 +527,7 @@ int     mac_vnode_check_unlink(vfs_context_t ctx, struct vnode *dvp,
     struct vnode *vp, struct componentname *cnp) __result_use_check;
 int     mac_vnode_check_write(vfs_context_t ctx,
     kauth_cred_t file_cred, struct vnode *vp) __result_use_check;
-struct label    *mac_vnode_label_alloc(void);
+struct label    *mac_vnode_label_alloc(struct vnode *vp);
 int     mac_vnode_label_associate(struct mount *mp, struct vnode *vp,
     vfs_context_t ctx) __result_use_check;
 void    mac_vnode_label_associate_devfs(struct mount *mp, struct devnode *de,
@@ -536,6 +543,7 @@ int     mac_vnode_label_externalize_audit(struct vnode *vp, struct mac *mac) __r
 void    mac_vnode_label_free(struct label *label);
 void    mac_vnode_label_init(struct vnode *vp);
 int     mac_vnode_label_init_needed(struct vnode *vp) __result_use_check;
+struct label *mac_vnode_label(struct vnode *vp);
 #ifdef KERNEL_PRIVATE
 struct label *mac_vnode_label_allocate(vnode_t vp);
 #endif

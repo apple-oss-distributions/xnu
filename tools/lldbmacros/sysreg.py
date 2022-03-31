@@ -1,8 +1,7 @@
 """ Please make sure you read the README file COMPLETELY BEFORE reading anything below.
     It is very critical that you read coding guidelines in Section E in README file.
-"""
 
-""" Note for adding new register support:
+    Note for adding new register support:
     
     1. Add target register to "supported registers" in the docstring of DecodeSysreg
     2. Populate _SYSREG_TO_DECODE_FUNC_MAP with your implementation, optionally using
@@ -10,10 +9,12 @@
     3. Populate _SUPPORTED_SYSREGS list with target register
     
 """
+from __future__ import absolute_import, print_function
 
 from xnu import *
 import os
 import sys
+import six
 import xml.etree.ElementTree as ET
 
 GREEN = '\033[0;32m'
@@ -70,27 +71,27 @@ def PrintEsrEl1Explanation(regval):
     ec = (regval >> 26) & ((1 << 6) - 1)
     ecstring = '0b{:06b}'.format(ec)
 
-    print _Colorify(VT.Green, 'EC == ' + ecstring)
+    print(_Colorify(VT.Green, 'EC == ' + ecstring))
 
     ecxpath = './registers/register/reg_fieldsets/fields/field[@id="EC_31_26"]/field_values/field_value_instance[field_value="{}"]/field_value_description//para'.format(ecstring)
     ec_desc_paras = root.findall(ecxpath)
 
     if ec_desc_paras is None or len(ec_desc_paras) == 0:
-        print 'EC not defined.'
-        print '\r\n'
+        print('EC not defined.')
+        print('\r\n')
 
     for para in ec_desc_paras:
         sys.stdout.write(para.text)
         for child in para:
             sys.stdout.write(_GetParaChildrenStr(child))
             sys.stdout.write(child.tail)
-        print '\r\n'
-        print '\r\n'
+        print('\r\n')
+        print('\r\n')
 
     iss = regval & ((1 << 25) - 1);
     issstring = '0x{:07x}'.format(iss)
-    print _Colorify(VT.Green, 'ISS == ' + issstring)
-    print '\r\n'
+    print(_Colorify(VT.Green, 'ISS == ' + issstring))
+    print('\r\n')
 
     iss_condition_xpath = './registers/register/reg_fieldsets/fields/field[@id="EC_31_26"]/field_values/field_value_instance[field_value="{}"]/field_value_links_to'.format(ecstring)
     iss_condition = root.find(iss_condition_xpath)
@@ -108,13 +109,13 @@ def _GetParaChildrenStr(elem):
     """
 
     if elem.tag == 'binarynumber':
-        return elem.text
+        return six.ensure_str(elem.text)
     if elem.tag == 'arm-defined-word':
-        return elem.text
+        return six.ensure_str(elem.text)
     elif elem.tag == 'xref':
-        return elem.attrib['browsertext'].encode('utf-8')
+        return six.ensure_str(elem.attrib['browsertext'])
     elif elem.tag == 'register_link':
-        return elem.text
+        return six.ensure_str(elem.text)
     else:
         return _Colorify(VT.Red, '*unsupported text*')
 
@@ -133,7 +134,7 @@ def _PrintEsrIssField(elem, regval):
     field_value = (regval >> field_lsb) & ((1 << field_bits) - 1)
     field_value_string = ('0b{:0' + '{}'.format(field_bits) + 'b}').format(field_value)
 
-    print _Colorify(VT.Green, _GetIndentedString(2, field_name_str) + ' == ' + field_value_string)
+    print(_Colorify(VT.Green, _GetIndentedString(2, field_name_str) + ' == ' + field_value_string))
 
     fv_desc_paras = elem.findall('./field_values/field_value_instance[field_value="{}"]/field_value_description//para'.format(field_value_string))
 
@@ -144,24 +145,24 @@ def _PrintEsrIssField(elem, regval):
             for child in para:
                 sys.stdout.write(_GetParaChildrenStr(child))
                 sys.stdout.write((child.tail))
-        print '\r\n'
-        print '\r\n'
+        print('\r\n')
+        print('\r\n')
     else:
-        print _Colorify(VT.Red, _GetIndentedString(2, '(No matching value, dumping out full description)')) 
+        print(_Colorify(VT.Red, _GetIndentedString(2, '(No matching value, dumping out full description)'))) 
         for para in fd_before_paras:
             sys.stdout.write(_GetIndentedString(2, ''))
             sys.stdout.write(para.text)
             for child in para:
                 sys.stdout.write(_GetParaChildrenStr(child))
                 sys.stdout.write(child.tail)
-            print '\r\n'
-            print '\r\n'
+            print('\r\n')
+            print('\r\n')
 
         ## Dump all possible values
         all_field_values = elem.findall('./field_values/field_value_instance//field_value')
         all_field_values_str = [fv.text for fv in all_field_values]
         if all_field_values_str != []:
-            print _GetIndentedString(2, ', '.join(all_field_values_str))
+            print(_GetIndentedString(2, ', '.join(all_field_values_str)))
 
         for para in fd_after_paras:
             sys.stdout.write(_GetIndentedString(2, ''))
@@ -169,8 +170,8 @@ def _PrintEsrIssField(elem, regval):
             for child in para:
                 sys.stdout.write(_GetParaChildrenStr(child))
                 sys.stdout.write(child.tail)
-            print '\r\n'
-            print '\r\n'
+            print('\r\n')
+            print('\r\n')
 
 
 def _GetIndentedString(indentation, msg):

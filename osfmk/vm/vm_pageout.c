@@ -148,6 +148,7 @@ extern void consider_vm_pressure_events(void);
 #endif /* VM_PRESSURE_EVENTS */
 
 SECURITY_READ_ONLY_LATE(thread_t) vm_pageout_scan_thread;
+SECURITY_READ_ONLY_LATE(thread_t) vm_pageout_gc_thread;
 boolean_t vps_dynamic_priority_enabled = FALSE;
 
 #ifndef VM_PAGEOUT_BURST_INACTIVE_THROTTLE  /* maximum iterations of the inactive queue w/o stealing/cleaning a page */
@@ -302,7 +303,6 @@ boolean_t VM_PRESSURE_WARNING_TO_NORMAL(void);
 boolean_t VM_PRESSURE_CRITICAL_TO_WARNING(void);
 #endif
 
-void vm_pageout_garbage_collect(int);
 static void vm_pageout_iothread_external(void);
 static void vm_pageout_iothread_internal(struct cq *cq);
 static void vm_pageout_adjust_eq_iothrottle(struct vm_pageout_queue *, boolean_t);
@@ -2191,7 +2191,7 @@ vps_flow_control(struct flow_control *flow_control, int *anons_grabbed, vm_objec
 				    vm_page_free_wanted + vm_page_free_wanted_privileged;
 				VM_PAGEOUT_DEBUG(vm_pageout_scan_deadlock_detected, 1);
 				flow_control->state = FCS_DEADLOCK_DETECTED;
-				thread_wakeup((event_t) &vm_pageout_garbage_collect);
+				thread_wakeup(VM_PAGEOUT_GC_EVENT);
 				return VM_PAGEOUT_SCAN_PROCEED;
 			}
 			/*
@@ -2831,6 +2831,14 @@ vm_page_balance_inactive(int max_to_move)
 		 * have happened before we moved the page
 		 */
 		if (m->vmp_pmapped == TRUE) {
+			/*
+			 * We might be holding the page queue lock as a
+			 * spin lock and clearing the "referenced" bit could
+			 * take a while if there are lots of mappings of
+			 * that page, so make sure we acquire the lock as
+			 * as mutex to avoid a spinlock timeout.
+			 */
+			vm_page_lockconvert_queues();
 			pmap_clear_refmod_options(VM_PAGE_GET_PHYS_PAGE(m), VM_MEM_REFERENCED, PMAP_OPTIONS_NOFLUSH, (void *)NULL);
 		}
 
@@ -4629,7 +4637,7 @@ compute_pageout_gc_throttle(__unused void *arg)
 	if (vm_pageout_vminfo.vm_pageout_considered_page != vm_pageout_state.vm_pageout_considered_page_last) {
 		vm_pageout_state.vm_pageout_considered_page_last = vm_pageout_vminfo.vm_pageout_considered_page;
 
-		thread_wakeup((event_t) &vm_pageout_garbage_collect);
+		thread_wakeup(VM_PAGEOUT_GC_EVENT);
 	}
 }
 
@@ -4653,69 +4661,67 @@ compute_pageout_gc_throttle(__unused void *arg)
  * end up trying to do a kernel_memory_allocate when the zone maps are almost
  * full.
  */
-bool garbage_collect_thread_inited = false;
+__dead2
 void
-vm_pageout_garbage_collect(int collect)
+vm_pageout_garbage_collect(void *step, wait_result_t wr __unused)
 {
-	if (!garbage_collect_thread_inited) {
+	assert(step == VM_PAGEOUT_GC_INIT || step == VM_PAGEOUT_GC_COLLECT);
+
+	if (step == VM_PAGEOUT_GC_INIT) {
+		/* first time being called is not about GC */
 #if CONFIG_THREAD_GROUPS
 		thread_group_vm_add();
 #endif /* CONFIG_THREAD_GROUPS */
-		garbage_collect_thread_inited = true;
+	} else if (zone_map_nearing_exhaustion()) {
+		/*
+		 * Woken up by the zone allocator for zone-map-exhaustion jetsams.
+		 *
+		 * Bail out after calling zone_gc (which triggers the
+		 * zone-map-exhaustion jetsams). If we fall through, the subsequent
+		 * operations that clear out a bunch of caches might allocate zone
+		 * memory themselves (for eg. vm_map operations would need VM map
+		 * entries). Since the zone map is almost full at this point, we
+		 * could end up with a panic. We just need to quickly jetsam a
+		 * process and exit here.
+		 *
+		 * It could so happen that we were woken up to relieve memory
+		 * pressure and the zone map also happened to be near its limit at
+		 * the time, in which case we'll skip out early. But that should be
+		 * ok; if memory pressure persists, the thread will simply be woken
+		 * up again.
+		 */
+		zone_gc(ZONE_GC_JETSAM);
+	} else {
+		/* Woken up by vm_pageout_scan or compute_pageout_gc_throttle. */
+		boolean_t buf_large_zfree = FALSE;
+		boolean_t first_try = TRUE;
+
+		stack_collect();
+
+		consider_machine_collect();
+		mbuf_drain(FALSE);
+
+		do {
+			if (consider_buffer_cache_collect != NULL) {
+				buf_large_zfree = (*consider_buffer_cache_collect)(0);
+			}
+			if (first_try == TRUE || buf_large_zfree == TRUE) {
+				/*
+				 * zone_gc should be last, because the other operations
+				 * might return memory to zones.
+				 */
+				zone_gc(ZONE_GC_TRIM);
+			}
+			first_try = FALSE;
+		} while (buf_large_zfree == TRUE && vm_page_free_count < vm_page_free_target);
+
+		consider_machine_adjust();
 	}
 
-	if (collect) {
-		if (zone_map_nearing_exhaustion()) {
-			/*
-			 * Woken up by the zone allocator for zone-map-exhaustion jetsams.
-			 *
-			 * Bail out after calling zone_gc (which triggers the
-			 * zone-map-exhaustion jetsams). If we fall through, the subsequent
-			 * operations that clear out a bunch of caches might allocate zone
-			 * memory themselves (for eg. vm_map operations would need VM map
-			 * entries). Since the zone map is almost full at this point, we
-			 * could end up with a panic. We just need to quickly jetsam a
-			 * process and exit here.
-			 *
-			 * It could so happen that we were woken up to relieve memory
-			 * pressure and the zone map also happened to be near its limit at
-			 * the time, in which case we'll skip out early. But that should be
-			 * ok; if memory pressure persists, the thread will simply be woken
-			 * up again.
-			 */
-			zone_gc(ZONE_GC_JETSAM);
-		} else {
-			/* Woken up by vm_pageout_scan or compute_pageout_gc_throttle. */
-			boolean_t buf_large_zfree = FALSE;
-			boolean_t first_try = TRUE;
+	assert_wait(VM_PAGEOUT_GC_EVENT, THREAD_UNINT);
 
-			stack_collect();
-
-			consider_machine_collect();
-			mbuf_drain(FALSE);
-
-			do {
-				if (consider_buffer_cache_collect != NULL) {
-					buf_large_zfree = (*consider_buffer_cache_collect)(0);
-				}
-				if (first_try == TRUE || buf_large_zfree == TRUE) {
-					/*
-					 * zone_gc should be last, because the other operations
-					 * might return memory to zones.
-					 */
-					zone_gc(ZONE_GC_TRIM);
-				}
-				first_try = FALSE;
-			} while (buf_large_zfree == TRUE && vm_page_free_count < vm_page_free_target);
-
-			consider_machine_adjust();
-		}
-	}
-
-	assert_wait((event_t) &vm_pageout_garbage_collect, THREAD_UNINT);
-
-	thread_block_parameter((thread_continue_t) vm_pageout_garbage_collect, (void *)1);
-	/*NOTREACHED*/
+	thread_block_parameter(vm_pageout_garbage_collect, VM_PAGEOUT_GC_COLLECT);
+	__builtin_unreachable();
 }
 
 
@@ -4814,6 +4820,27 @@ vm_config_init(void)
 		break;
 	}
 }
+
+__startup_func
+static void
+vm_pageout_create_gc_thread(void)
+{
+	thread_t thread;
+
+	if (kernel_thread_create(vm_pageout_garbage_collect,
+	    VM_PAGEOUT_GC_INIT, BASEPRI_DEFAULT, &thread) != KERN_SUCCESS) {
+		panic("vm_pageout_garbage_collect: create failed");
+	}
+	thread_set_thread_name(thread, "VM_pageout_garbage_collect");
+	if (thread->reserved_stack == 0) {
+		assert(thread->kernel_stack);
+		thread->reserved_stack = thread->kernel_stack;
+	}
+
+	/* thread is started in vm_pageout() */
+	vm_pageout_gc_thread = thread;
+}
+STARTUP(EARLY_BOOT, STARTUP_RANK_MIDDLE, vm_pageout_create_gc_thread);
 
 void
 vm_pageout(void)
@@ -5006,23 +5033,9 @@ vm_pageout(void)
 	thread_set_thread_name(vm_pageout_state.vm_pageout_external_iothread, "VM_pageout_external_iothread");
 	thread_deallocate(vm_pageout_state.vm_pageout_external_iothread);
 
-	result = kernel_thread_create((thread_continue_t)vm_pageout_garbage_collect, NULL,
-	    BASEPRI_DEFAULT,
-	    &thread);
-	if (result != KERN_SUCCESS) {
-		panic("vm_pageout_garbage_collect: create failed");
-	}
-	thread_set_thread_name(thread, "VM_pageout_garbage_collect");
-	if (thread->reserved_stack == 0) {
-		assert(thread->kernel_stack);
-		thread->reserved_stack = thread->kernel_stack;
-	}
-
-	thread_mtx_lock(thread);
-	thread_start(thread);
-	thread_mtx_unlock(thread);
-
-	thread_deallocate(thread);
+	thread_mtx_lock(vm_pageout_gc_thread );
+	thread_start(vm_pageout_gc_thread );
+	thread_mtx_unlock(vm_pageout_gc_thread);
 
 #if VM_PRESSURE_EVENTS
 	result = kernel_thread_start_priority((thread_continue_t)vm_pressure_thread, NULL,
@@ -5067,6 +5080,10 @@ vm_pageout(void)
 	vm_object_tracking_init();
 #endif /* VM_OBJECT_TRACKING */
 
+#if __arm64__
+//	vm_tests();
+#endif /* __arm64__ */
+
 	vm_pageout_continue();
 
 	/*
@@ -5098,7 +5115,7 @@ vm_pageout(void)
 kern_return_t
 vm_pageout_internal_start(void)
 {
-	kern_return_t   result;
+	kern_return_t   result = KERN_SUCCESS;
 	host_basic_info_data_t hinfo;
 	vm_offset_t     buf, bufsize;
 
@@ -5239,32 +5256,16 @@ upl_create(int type, int flags, upl_size_t size)
 
 		upl_flags |= UPL_INTERNAL;
 	}
-	upl = (upl_t)kalloc(upl_size + page_field_size);
-
-	if (page_field_size) {
-		bzero((char *)upl + upl_size, page_field_size);
-	}
+	upl = (upl_t)kheap_alloc(KHEAP_DEFAULT, upl_size + page_field_size, Z_WAITOK | Z_ZERO);
 
 	upl->flags = upl_flags | flags;
-	upl->kaddr = (vm_offset_t)0;
-	upl->u_offset = 0;
-	upl->u_size = 0;
-	upl->u_mapped_size = 0;
-	upl->map_object = NULL;
 	upl->ref_count = 1;
-	upl->ext_ref_count = 0;
-	upl->highest_page = 0;
 	upl_lock_init(upl);
-	upl->vector_upl = NULL;
-	upl->associated_upl = NULL;
-	upl->upl_iodone = NULL;
 #if CONFIG_IOSCHED
 	if (type & UPL_CREATE_IO_TRACKING) {
 		upl->upl_priority = proc_get_effective_thread_policy(current_thread(), TASK_POLICY_IO);
 	}
 
-	upl->upl_reprio_info = 0;
-	upl->decmp_io_upl = 0;
 	if ((type & UPL_CREATE_INTERNAL) && (type & UPL_CREATE_EXPEDITE_SUP)) {
 		/* Only support expedite on internal UPLs */
 		thread_t        curthread = current_thread();
@@ -5278,20 +5279,11 @@ upl_create(int type, int flags, upl_size_t size)
 #if CONFIG_IOSCHED || UPL_DEBUG
 	if ((type & UPL_CREATE_IO_TRACKING) || upl_debug_enabled) {
 		upl->upl_creator = current_thread();
-		upl->uplq.next = 0;
-		upl->uplq.prev = 0;
 		upl->flags |= UPL_TRACKED_BY_OBJECT;
 	}
 #endif
 
 #if UPL_DEBUG
-	upl->ubc_alias1 = 0;
-	upl->ubc_alias2 = 0;
-
-	upl->upl_state = 0;
-	upl->upl_commit_index = 0;
-	bzero(&upl->upl_commit_records[0], sizeof(upl->upl_commit_records));
-
 	(void) OSBacktrace(&upl->upl_create_retaddr[0], UPL_DEBUG_STACK_FRAMES);
 #endif /* UPL_DEBUG */
 
@@ -5369,12 +5361,12 @@ upl_destroy(upl_t upl)
 #endif
 
 	if (upl->flags & UPL_INTERNAL) {
-		kfree(upl,
+		kheap_free(KHEAP_DEFAULT, upl,
 		    sizeof(struct upl) +
 		    (sizeof(struct upl_page_info) * (size / PAGE_SIZE))
 		    + page_field_size);
 	} else {
-		kfree(upl, sizeof(struct upl) + page_field_size);
+		kheap_free(KHEAP_DEFAULT, upl, sizeof(struct upl) + page_field_size);
 	}
 }
 
@@ -6890,16 +6882,10 @@ REDISCOVER_ENTRY:
 	    !local_object->phys_contiguous) {
 #if VM_OBJECT_TRACKING_OP_TRUESHARE
 		if (!local_object->true_share &&
-		    vm_object_tracking_inited) {
-			void *bt[VM_OBJECT_TRACKING_BTDEPTH];
-			int num = 0;
-			num = OSBacktrace(bt,
-			    VM_OBJECT_TRACKING_BTDEPTH);
-			btlog_add_entry(vm_object_tracking_btlog,
-			    local_object,
+		    vm_object_tracking_btlog) {
+			btlog_record(vm_object_tracking_btlog, local_object,
 			    VM_OBJECT_TRACKING_OP_TRUESHARE,
-			    bt,
-			    num);
+			    btref_get(__builtin_frame_address(0), 0));
 		}
 #endif /* VM_OBJECT_TRACKING_OP_TRUESHARE */
 		local_object->true_share = TRUE;
@@ -7001,8 +6987,7 @@ vm_map_enter_upl_range(
 		}
 
 		kr = kmem_suballoc(map, &vector_upl_dst_addr,
-		    vector_upl->u_size,
-		    FALSE,
+		    vector_upl->u_size, VM_MAP_CREATE_DEFAULT,
 		    VM_FLAGS_ANYWHERE, VM_MAP_KERNEL_FLAGS_NONE, VM_KERN_MEMORY_NONE,
 		    &vector_upl_submap);
 		if (kr != KERN_SUCCESS) {
@@ -7849,6 +7834,18 @@ process_upl_to_commit:
 					counter_inc(&vm_statistics_reactivations);
 					DTRACE_VM2(pgrec, int, 1, (uint64_t *), NULL);
 				}
+			} else if (m->vmp_busy && !(upl->flags & UPL_HAS_BUSY)) {
+				/*
+				 * Someone else might still be handling this
+				 * page (vm_fault() for example), so let's not
+				 * free it or "un-busy" it!
+				 * Put that page in the "speculative" queue
+				 * for now (since we would otherwise have freed
+				 * it) and let whoever is keeping the page
+				 * "busy" move it if needed when they're done
+				 * with it.
+				 */
+				dwp->dw_mask |= DW_vm_page_speculate;
 			} else {
 				/*
 				 * page has been successfully cleaned
@@ -7860,6 +7857,9 @@ process_upl_to_commit:
 					DTRACE_VM2(fspgout, int, 1, (uint64_t *), NULL);
 				}
 				m->vmp_dirty = FALSE;
+				if (!(upl->flags & UPL_HAS_BUSY)) {
+					assert(!m->vmp_busy);
+				}
 				m->vmp_busy = TRUE;
 
 				dwp->dw_mask |= DW_vm_page_free;
@@ -8637,16 +8637,22 @@ iopl_valid_data(
 	vm_object_lock(object);
 	VM_OBJECT_WIRED_PAGE_UPDATE_START(object);
 
+	bool whole_object;
+
 	if (object->vo_size == size && object->resident_page_count == (size / PAGE_SIZE)) {
 		nxt_page = (vm_page_t)vm_page_queue_first(&object->memq);
+		whole_object = true;
 	} else {
 		offset = (vm_offset_t)(upl_adjusted_offset(upl, PAGE_MASK) - object->paging_offset);
+		whole_object = false;
 	}
 
 	while (size) {
-		if (nxt_page != VM_PAGE_NULL) {
-			m = nxt_page;
-			nxt_page = (vm_page_t)vm_page_queue_next(&nxt_page->vmp_listq);
+		if (whole_object) {
+			if (nxt_page != VM_PAGE_NULL) {
+				m = nxt_page;
+				nxt_page = (vm_page_t)vm_page_queue_next(&nxt_page->vmp_listq);
+			}
 		} else {
 			m = vm_page_lookup(object, offset);
 			offset += PAGE_SIZE;
@@ -9214,17 +9220,10 @@ vm_object_iopl_request(
 		 */
 #if VM_OBJECT_TRACKING_OP_TRUESHARE
 		if (!object->true_share &&
-		    vm_object_tracking_inited) {
-			void *bt[VM_OBJECT_TRACKING_BTDEPTH];
-			int num = 0;
-
-			num = OSBacktrace(bt,
-			    VM_OBJECT_TRACKING_BTDEPTH);
-			btlog_add_entry(vm_object_tracking_btlog,
-			    object,
+		    vm_object_tracking_btlog) {
+			btlog_record(vm_object_tracking_btlog, object,
 			    VM_OBJECT_TRACKING_OP_TRUESHARE,
-			    bt,
-			    num);
+			    btref_get(__builtin_frame_address(0), 0));
 		}
 #endif /* VM_OBJECT_TRACKING_OP_TRUESHARE */
 
@@ -9967,7 +9966,6 @@ vm_paging_map_init(void)
 	kr = vm_map_find_space(kernel_map,
 	    &page_map_offset,
 	    VM_PAGING_NUM_PAGES * PAGE_SIZE,
-	    0,
 	    0,
 	    VM_MAP_KERNEL_FLAGS_NONE,
 	    VM_KERN_MEMORY_NONE,

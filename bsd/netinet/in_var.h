@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2019 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -485,7 +485,7 @@ struct in_ifextra {
 	u_int8_t                netsig[IFNET_SIGNATURELEN];
 	struct lltable          *ii_llt;        /* ARP state */
 };
-#define IN_IFEXTRA(_ifp)        ((struct in_ifextra *)(_ifp->if_inetdata))
+#define IN_IFEXTRA(_ifp)        (_ifp->if_inetdata)
 #define LLTABLE(ifp)            ((IN_IFEXTRA(ifp) == NULL) ? NULL : IN_IFEXTRA(ifp)->ii_llt)
 
 extern u_int32_t ipv4_ll_arp_aware;

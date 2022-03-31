@@ -453,7 +453,11 @@ user_cont_hwclock_allowed(void)
 uint8_t
 user_timebase_type(void)
 {
+#if   __ARM_ARCH_8_6__
+	return USER_TIMEBASE_NOSPEC;
+#else
 	return USER_TIMEBASE_SPEC;
+#endif
 }
 
 void
@@ -1223,6 +1227,7 @@ ml_get_first_cpu_id(unsigned int cluster_id)
 	return topology_info.clusters[cluster_id].first_cpu_id;
 }
 
+
 void
 ml_lockdown_init()
 {
@@ -1941,11 +1946,15 @@ ml_get_hwclock()
 {
 	uint64_t timebase;
 
+#if   __ARM_ARCH_8_6__
+	timebase = __builtin_arm_rsr64("CNTVCTSS_EL0");
+#else
 	// ISB required by ARMV7C.b section B8.1.2 & ARMv8 section D6.1.2
 	// "Reads of CNT[PV]CT[_EL0] can occur speculatively and out of order relative
 	// to other instructions executed on the same processor."
 	__builtin_arm_isb(ISB_SY);
 	timebase = __builtin_arm_rsr64("CNTVCT_EL0");
+#endif
 
 	return timebase;
 }
@@ -2278,19 +2287,6 @@ timer_state_event_kernel_to_user(void)
 }
 #endif /* !CONFIG_SKIP_PRECISE_USER_KERNEL_TIME || HAS_FAST_CNTVCT */
 
-/*
- * The following are required for parts of the kernel
- * that cannot resolve these functions as inlines:
- */
-extern thread_t current_act(void) __attribute__((const));
-thread_t
-current_act(void)
-{
-	return current_thread_fast();
-}
-
-#undef current_thread
-extern thread_t current_thread(void) __attribute__((const));
 thread_t
 current_thread(void)
 {
@@ -2427,8 +2423,70 @@ ml_thread_set_jop_pid(thread_t thread, task_t task)
 #endif /* defined(HAS_APPLE_PAC) */
 
 #if defined(HAS_APPLE_PAC)
+#ifdef __ARM_ARCH_8_6__
+/**
+ * Emulates the poisoning done by ARMv8.3-PAuth instructions on auth failure.
+ */
+static void *
+ml_poison_ptr(void *ptr, ptrauth_key key)
+{
+	bool b_key = key & (1ULL << 0);
+	uint64_t error_code;
+	if (b_key) {
+		error_code = 2;
+	} else {
+		error_code = 1;
+	}
+
+	bool kernel_pointer = (uintptr_t)ptr & (1ULL << 55);
+	bool data_key = key & (1ULL << 1);
+	/* When PAC is enabled, only userspace data pointers use TBI, regardless of boot parameters */
+	bool tbi = data_key && !kernel_pointer;
+	unsigned int poison_shift;
+	if (tbi) {
+		poison_shift = 53;
+	} else {
+		poison_shift = 61;
+	}
+
+	uintptr_t poisoned = (uintptr_t)ptr;
+	poisoned &= ~(3ULL << poison_shift);
+	poisoned |= error_code << poison_shift;
+	return (void *)poisoned;
+}
+
+/*
+ * ptrauth_sign_unauthenticated() reimplemented using asm volatile, forcing the
+ * compiler to assume this operation has side-effects and cannot be reordered
+ */
+#define ptrauth_sign_volatile(__value, __suffix, __data)                \
+	({                                                              \
+	        void *__ret = __value;                                  \
+	        asm volatile (                                          \
+	                "pac" #__suffix "	%[value], %[data]"          \
+	                : [value] "+r"(__ret)                           \
+	                : [data] "r"(__data)                            \
+	        );                                                      \
+	        __ret;                                                  \
+	})
+
+#define ml_auth_ptr_unchecked_for_key(_ptr, _suffix, _key, _modifier)                           \
+	do {                                                                                    \
+	        void *stripped = ptrauth_strip(_ptr, _key);                                     \
+	        void *reauthed = ptrauth_sign_volatile(stripped, _suffix, _modifier);           \
+	        if (__probable(_ptr == reauthed)) {                                             \
+	                _ptr = stripped;                                                        \
+	        } else {                                                                        \
+	                _ptr = ml_poison_ptr(stripped, _key);                                   \
+	        }                                                                               \
+	} while (0)
+
+#define _ml_auth_ptr_unchecked(_ptr, _suffix, _modifier) \
+	ml_auth_ptr_unchecked_for_key(_ptr, _suffix, ptrauth_key_as ## _suffix, _modifier)
+#else
 #define _ml_auth_ptr_unchecked(_ptr, _suffix, _modifier) \
 	asm volatile ("aut" #_suffix " %[ptr], %[modifier]" : [ptr] "+r"(_ptr) : [modifier] "r"(_modifier));
+#endif /* __ARM_ARCH_8_6__ */
 
 /**
  * Authenticates a signed pointer without trapping on failure.

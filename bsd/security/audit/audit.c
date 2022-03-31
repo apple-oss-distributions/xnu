@@ -178,7 +178,7 @@ struct cv               audit_watermark_cv;
  */
 static struct cv        audit_fail_cv;
 
-static ZONE_DECLARE(audit_record_zone, "audit_zone",
+static ZONE_DEFINE(audit_record_zone, "audit_zone",
     sizeof(struct kaudit_record), ZC_NONE);
 
 /*
@@ -958,7 +958,7 @@ audit_proc_coredump(proc_t proc, const char *path, int errcode)
 			ARG_SET_VALID(ar, ARG_UPATH1);
 		}
 	}
-	ar->k_ar.ar_arg_signum = proc->p_sigacts->ps_sig;
+	ar->k_ar.ar_arg_signum = proc->p_sigacts.ps_sig;
 	ARG_SET_VALID(ar, ARG_SIGNUM);
 	if (errcode != 0) {
 		ret = 1;

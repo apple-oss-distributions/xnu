@@ -553,8 +553,8 @@ void *
 operator new(size_t size)
 {
 	assert(size);
-	return kheap_alloc_tag_bt(KERN_OS_MALLOC, size,
-	           (zalloc_flags_t) (Z_WAITOK | Z_ZERO), VM_KERN_MEMORY_LIBKERN);
+	return kheap_alloc(KERN_OS_MALLOC, size,
+	           Z_VM_TAG_BT(Z_WAITOK_ZERO, VM_KERN_MEMORY_LIBKERN));
 }
 
 void
@@ -568,10 +568,10 @@ noexcept
 }
 
 void *
-operator new[](unsigned long sz)
+operator new[](unsigned long size)
 {
-	return kheap_alloc_tag_bt(KERN_OS_MALLOC, sz,
-	           (zalloc_flags_t) (Z_WAITOK | Z_ZERO), VM_KERN_MEMORY_LIBKERN);
+	return kheap_alloc(KERN_OS_MALLOC, size,
+	           Z_VM_TAG_BT(Z_WAITOK_ZERO, VM_KERN_MEMORY_LIBKERN));
 }
 
 void

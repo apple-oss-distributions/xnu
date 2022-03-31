@@ -495,8 +495,8 @@ copyio_test(void)
 	mach_vm_offset_t user_addr = 0;
 	kern_return_t ret = KERN_SUCCESS;
 
-	data.buf1 = kalloc(copyio_test_buf_size);
-	data.buf2 = kalloc(copyio_test_buf_size);
+	data.buf1 = kalloc_data(copyio_test_buf_size, Z_WAITOK);
+	data.buf2 = kalloc_data(copyio_test_buf_size, Z_WAITOK);
 	if (!data.buf1 || !data.buf2) {
 		T_FAIL("failed to allocate scratch buffers");
 		ret = KERN_NO_SPACE;
@@ -559,7 +559,7 @@ err_user_lastpage_alloc:
 err_user_alloc:
 	vm_map_deallocate(data.user_map);
 err_kalloc:
-	kfree(data.buf2, copyio_test_buf_size);
-	kfree(data.buf1, copyio_test_buf_size);
+	kfree_data(data.buf2, copyio_test_buf_size);
+	kfree_data(data.buf1, copyio_test_buf_size);
 	return ret;
 }

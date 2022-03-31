@@ -37,7 +37,9 @@ T_DECL(SET_TREATMENT_ID, "Verifies that EXPERIMENT sysctls can only be set with 
 	}
 
 	strlcpy(new_val, TEST_STR, sizeof(new_val));
-	drop_priv();
+	if (running_as_root()) {
+		drop_priv();
+	}
 
 	ret = sysctlbyname("kern.trial_treatment_id", val, &len, new_val, strlen(new_val));
 	err = errno;
@@ -67,7 +69,9 @@ T_DECL(experiment_factor_numeric_limits,
 	size_t len = sizeof(current_val);
 	unsigned int new_val;
 
-	drop_priv();
+	if (running_as_root()) {
+		drop_priv();
+	}
 	new_val = kMinVal - 1;
 	ret = sysctlbyname("kern.testing_experiment_factor", &current_val, &len, &new_val, sizeof(new_val));
 	err = errno;
@@ -203,7 +207,9 @@ T_DECL(libmalloc_experiment,
 	char **apple_array;
 	bool found = false;
 
-	drop_priv();
+	if (running_as_root()) {
+		drop_priv();
+	}
 	new_val = (1ULL << 63) - 1;
 	set_libmalloc_experiment(new_val);
 
@@ -222,7 +228,9 @@ T_DECL(libmalloc_experiment_not_in_array,
 	char **apple_array;
 	bool found = false;
 
-	drop_priv();
+	if (running_as_root()) {
+		drop_priv();
+	}
 	set_libmalloc_experiment(0);
 
 	apple_array = get_apple_array(&num_array_entries);

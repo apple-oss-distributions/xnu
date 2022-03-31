@@ -63,7 +63,8 @@ extern uint64_t startup_serial_num_procs;
 // must be included in the os_log firehose buffer
 #define OS_LOG_DATA_MAX_SIZE (OS_LOG_BUFFER_MAX_SIZE - 16)
 
-OS_ALWAYS_INLINE static inline void _os_log_verify_format_str(__unused const char *msg, ...) __attribute__((format(os_log, 1, 2)));
+OS_ALWAYS_INLINE static inline void
+    _os_log_verify_format_str(__unused const char *msg, ...) __osloglike(1, 2);
 OS_ALWAYS_INLINE static inline void
 _os_log_verify_format_str(__unused const char *msg, ...)                                       /* placeholder */
 {
@@ -590,7 +591,7 @@ os_log_coprocessor_register_with_type(const char *uuid, const char *file_path, o
 __WATCHOS_AVAILABLE(3.0) __OSX_AVAILABLE(10.12) __IOS_AVAILABLE(10.0) __TVOS_AVAILABLE(10.0)
 OS_EXPORT OS_NOTHROW
 void
-_os_log_internal(void *dso, os_log_t log, os_log_type_t type, const char *message, ...);
+_os_log_internal(void *dso, os_log_t log, os_log_type_t type, const char *message, ...) __osloglike(4, 5);
 
 /*!
  * @function _os_log_internal_driverKit
@@ -601,7 +602,8 @@ _os_log_internal(void *dso, os_log_t log, os_log_type_t type, const char *messag
 __WATCHOS_AVAILABLE(6.0) __OSX_AVAILABLE(10.15) __IOS_AVAILABLE(13.0) __TVOS_AVAILABLE(13.0)
 OS_EXPORT OS_NOTHROW
 int
-_os_log_internal_driverKit(void *dso, os_log_t log, os_log_type_t type, const char *message, ...);
+_os_log_internal_driverKit(void *dso, os_log_t log, os_log_type_t type, const char *message, ...) __osloglike(4, 5);
+
 __END_DECLS
 
 #endif /* __os_log_h */

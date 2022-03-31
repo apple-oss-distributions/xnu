@@ -29,12 +29,11 @@
 #define NWK_WQ_H
 #include <sys/queue.h>
 #include <kern/kern_types.h>
+#include <os/base.h>
 
 #ifdef BSD_KERNEL_PRIVATE
 struct nwk_wq_entry {
-	void (* func) (void *);
-	void *arg;
-	boolean_t is_arg_managed;
+	void(*XNU_PTRAUTH_SIGNED_FUNCTION_PTR("nkw_wq_entry.func") func)(struct nwk_wq_entry *);
 	TAILQ_ENTRY(nwk_wq_entry) nwk_wq_link;
 };
 

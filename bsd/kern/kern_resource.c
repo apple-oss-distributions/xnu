@@ -139,7 +139,7 @@ int fill_task_rusage(task_t task, rusage_info_current *ri);
 void fill_task_billed_usage(task_t task, rusage_info_current *ri);
 int fill_task_io_rusage(task_t task, rusage_info_current *ri);
 int fill_task_qos_rusage(task_t task, rusage_info_current *ri);
-uint64_t get_task_logical_writes(task_t task, boolean_t external);
+uint64_t get_task_logical_writes(task_t task, bool external);
 void fill_task_monotonic_rusage(task_t task, rusage_info_current *ri);
 
 rlim_t maxdmap = MAXDSIZ;       /* XXX */
@@ -821,7 +821,7 @@ do_background_socket(struct proc *p, thread_t thread)
 		if (thread == THREAD_NULL) {
 			fdt_foreach(fp, p) {
 				if (FILEGLOB_DTYPE(fp->fp_glob) == DTYPE_SOCKET) {
-					struct socket *sockp = (struct socket *)fp->fp_glob->fg_data;
+					struct socket *sockp = (struct socket *)fp_get_data(fp);
 					socket_set_traffic_mgt_flags(sockp, TRAFFIC_MGT_SO_BACKGROUND);
 					sockp->so_background_thread = NULL;
 				}
@@ -844,7 +844,7 @@ do_background_socket(struct proc *p, thread_t thread)
 			struct socket *sockp;
 
 			if (FILEGLOB_DTYPE(fp->fp_glob) == DTYPE_SOCKET) {
-				sockp = (struct socket *)fp->fp_glob->fg_data;
+				sockp = (struct socket *)fp_get_data(fp);
 				/* skip if only clearing this thread's sockets */
 				if ((thread) && (sockp->so_background_thread != thread)) {
 					continue;
@@ -889,16 +889,6 @@ do_background_thread(thread_t thread, int priority)
 {
 	int enable, external;
 	int rv = 0;
-#if CONFIG_VFORK
-	struct uthread *ut;
-
-	ut = get_bsdthread_info(thread);
-
-	/* Backgrounding is unsupported for threads in vfork */
-	if ((ut->uu_flag & UT_VFORK) != 0) {
-		return EPERM;
-	}
-#endif /* CONFIG_VFORK */
 
 	/* Backgrounding is unsupported for workq threads */
 	if (thread_is_static_param(thread)) {
@@ -1459,7 +1449,7 @@ proc_limitgetcur_nofile(struct proc *p)
 
 /*
  * Writing soft limit to specified resource. This is an internal function
- * used only by proc_exit and vfork_exit_internal to update RLIMIT_FSIZE in
+ * used only by proc_exit to update RLIMIT_FSIZE in
  * place without invoking setrlimit.
  */
 void
@@ -2471,7 +2461,7 @@ gather_rusage_info(proc_t p, rusage_info_current *ru, int flavor)
 #endif /* __has_feature(ptrauth_calls) */
 		OS_FALLTHROUGH;
 	case RUSAGE_INFO_V4:
-		ru->ri_logical_writes = get_task_logical_writes(p->task, FALSE);
+		ru->ri_logical_writes = get_task_logical_writes(p->task, false);
 		ru->ri_lifetime_max_phys_footprint = get_task_phys_footprint_lifetime_max(p->task);
 #if CONFIG_LEDGER_INTERVAL_MAX
 		ru->ri_interval_max_phys_footprint = get_task_phys_footprint_interval_max(p->task, FALSE);

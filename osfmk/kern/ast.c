@@ -159,6 +159,7 @@ ast_taken_user(void)
 	assert(ml_get_interrupts_enabled() == FALSE);
 
 	thread_t thread = current_thread();
+	task_t   task   = get_threadtask(thread);
 
 	/* We are about to return to userspace, there must not be a pending wait */
 	assert(waitq_wait_possible(thread));
@@ -260,7 +261,7 @@ ast_taken_user(void)
 
 	if (reasons & AST_RESET_PCS) {
 		thread_ast_clear(thread, AST_RESET_PCS);
-		thread_reset_pcs_ast(thread);
+		thread_reset_pcs_ast(task, thread);
 	}
 
 	if (reasons & AST_KEVENT) {
@@ -273,9 +274,9 @@ ast_taken_user(void)
 
 	if (reasons & AST_PROC_RESOURCE) {
 		thread_ast_clear(thread, AST_PROC_RESOURCE);
-		task_port_space_ast(thread->task);
+		task_port_space_ast(task);
 #if MACH_BSD
-		proc_filedesc_ast(thread->task);
+		proc_filedesc_ast(task);
 #endif /* MACH_BSD */
 	}
 

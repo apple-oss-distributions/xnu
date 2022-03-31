@@ -1,11 +1,12 @@
 .\" Copyright (c) 2021, Apple Inc.  All rights reserved.
 .
-.Dd February 15, 2021
+.Dd June 30, 2021
 .Dt BACKTRACE 9
 .Os Darwin
 .
 .Sh NAME
 .Nm backtrace ,
+.Nm backtrace_packed ,
 .Nm backtrace_user ,
 .Nd gather the PC and return addresses of a thread's kernel or user call stack
 .
@@ -15,6 +16,15 @@
 .Fo backtrace
 .Fa "uintptr_t *bt"
 .Fa "unsigned int btlen"
+.Fa "struct backtrace_control *ctl"
+.Fa "backtrace_info_t *info_out"
+.Fc
+.
+.Ft size_t
+.Fo backtrace_packed
+.Fa "backtrace_pack_t packing" 
+.Fa "uintptr_t *bt"
+.Fa "size_t btlen"
 .Fa "struct backtrace_control *ctl"
 .Fa "backtrace_info_t *info_out"
 .Fc
@@ -29,7 +39,8 @@
 .
 .Sh DESCRIPTION
 The
-.Nm backtrace
+.Nm backtrace ,
+.Nm backtrace_packed ,
 and
 .Nm backtrace_user
 functions fill a buffer with the current PC and return addresses of a thread's
@@ -46,6 +57,10 @@ backtracing from reporting the source-level function control flow.
 operates on user call stacks, while
 .Fn backtrace
 captures the current kernel call stack.
+.Fn backtrace_packed
+writes a more compact representation of the return addresses to a buffer, which
+can be unpacked with
+.Xr backtrace_unpack 9 .
 Calling
 .Fn backtrace_user
 on a kernel thread
@@ -54,7 +69,14 @@ is undefined.
 .Pp
 Up to
 .Fa btlen
-instruction addresses are written to the buffer at
+instruction addresses
+.Po
+or
+.Fa btsize
+bytes for
+.Fn backtrace_packed
+.Pc
+are written to the buffer at
 .Fa bt .
 These functions also accept
 .Fa ctl
@@ -65,9 +87,20 @@ arguments, described in
 and
 .Sx BACKTRACE_INFO ,
 respectively.
+.Fn backtrace_packed
+takes a
+.Ft backtrace_pack_t
+to control which packing scheme to use.
 .Pp
 .Fn backtrace
 records the kernel PC and call stack of the current thread.
+.Pp
+.Fn backtrace_packed
+records the kernel PC and call stack of the current thread in a buffer in a
+compact representation.
+See
+.Xr backtrace_pack 9
+for a description of the supported formats.
 .Pp
 .Fn backtrace_user
 records the user PC and call stack of the current thread, which must be
@@ -76,9 +109,17 @@ associated with a user space task.
 .Sh RETURN VALUES
 The
 .Nm
-functions return the number of PC and return address elements written to the
-provided buffer.
-If there is space, the buffer is terminated with a NULL entry.
+functions return the number of PC and return address elements
+.Po
+or bytes for
+.Fn backtrace_packed
+.Pc
+written to the provided buffer.
+If there is space, the buffer is terminated with a NULL entry
+.Po
+except for
+.Fn backtrace_packed
+.Pc .
 The
 .Fa info_out
 argument will be set with information about the provided call stack.
@@ -178,6 +219,7 @@ if (bti & BTI_TRUNCATED) {
 .Ed
 .
 .Sh SEE ALSO
-.Xr backtrace 3
+.Xr backtrace 3 ,
+.Xr backtrace_pack 9 ,
 and
 .Xr copyin 9

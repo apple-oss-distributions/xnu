@@ -48,7 +48,7 @@ __BEGIN_DECLS __ASSUME_PTR_ABI_SINGLE_BEGIN
  * Type for the intrusive linkage used by MPSC queues.
  */
 typedef struct mpsc_queue_chain {
-#if XNU_BOUND_CHECKS // work around 78354145
+#if __has_ptrcheck // work around 78354145
 	struct mpsc_queue_chain *volatile mpqc_next;
 #else
 	struct mpsc_queue_chain *_Atomic mpqc_next;
@@ -118,7 +118,7 @@ typedef struct mpsc_queue_chain {
  */
 typedef struct mpsc_queue_head {
 	struct mpsc_queue_chain mpqh_head;
-#if XNU_BOUND_CHECKS // work around 78354145
+#if __has_ptrcheck // work around 78354145
 	struct mpsc_queue_chain *volatile mpqh_tail;
 #else
 	struct mpsc_queue_chain *_Atomic mpqh_tail;
@@ -301,7 +301,7 @@ mpsc_queue_append_list(mpsc_queue_head_t q, mpsc_queue_chain_t first,
 }
 
 /**
- * @function __mpsc_queue_append_update_tail
+ * @function mpsc_queue_append
  *
  * @brief
  * Enqueues an element onto a queue.
@@ -391,9 +391,9 @@ mpsc_queue_batch_next(mpsc_queue_chain_t cur, mpsc_queue_chain_t tail);
  * The last element of the batch.
  */
 #define mpsc_queue_batch_foreach_safe(item, head, tail) \
-	        for (mpsc_queue_chain_t __tmp, __item = (head), __tail = (tail); \
-	                        __tmp = mpsc_queue_batch_next(__item, __tail), (item) = __item; \
-	                        __item = __tmp)
+	for (mpsc_queue_chain_t __tmp, __item = (head), __tail = (tail); \
+	    __tmp = mpsc_queue_batch_next(__item, __tail), (item) = __item; \
+	    __item = __tmp)
 
 /**
  * @function mpsc_queue_restore_batch()
@@ -422,6 +422,22 @@ mpsc_queue_restore_batch(mpsc_queue_head_t q, mpsc_queue_chain_t first,
 
 
 #pragma mark "GCD"-like facilities
+
+/*!
+ * @typedef enum mpsc_daemon_init_options
+ *
+ * @const MPSC_DAEMON_INIT_NONE
+ * Default options (no specific behavior)
+ *
+ * @const MPSC_DAEMON_INIT_INACTIVE
+ * Create the queue inactive, which requires an explicit call
+ * to @c mpsc_daemon_queue_activate() to start draining.
+ *
+ */
+__options_decl(mpsc_daemon_init_options_t, uint32_t, {
+	MPSC_DAEMON_INIT_NONE          = 0,
+	MPSC_DAEMON_INIT_INACTIVE      = 1 << 0,
+});
 
 /*!
  * @typedef struct mpsc_daemon_queue
@@ -492,6 +508,7 @@ __options_decl(mpsc_daemon_queue_state_t, uint32_t, {
 	MPSC_QUEUE_STATE_DRAINING = 0x0001,
 	MPSC_QUEUE_STATE_WAKEUP   = 0x0002,
 	MPSC_QUEUE_STATE_CANCELED = 0x0004,
+	MPSC_QUEUE_STATE_INACTIVE = 0x0008,
 });
 
 struct mpsc_daemon_queue {
@@ -529,12 +546,16 @@ struct mpsc_daemon_queue {
  * @param name
  * The name to give to the created thread.
  *
+ * @param flags
+ * See mpsc_daemon_init_options_t.
+ *
  * @returns
  * Whether creating the thread was successful.
  */
 kern_return_t
 mpsc_daemon_queue_init_with_thread(mpsc_daemon_queue_t dq,
-    mpsc_daemon_invoke_fn_t invoke, int pri, const char *name);
+    mpsc_daemon_invoke_fn_t invoke, int pri, const char *name,
+    mpsc_daemon_init_options_t flags);
 
 
 /*!
@@ -551,10 +572,14 @@ mpsc_daemon_queue_init_with_thread(mpsc_daemon_queue_t dq,
  *
  * @param pri
  * The priority the thread call will run at.
+ *
+ * @param flags
+ * See mpsc_daemon_init_options_t.
  */
 void
 mpsc_daemon_queue_init_with_thread_call(mpsc_daemon_queue_t dq,
-    mpsc_daemon_invoke_fn_t invoke, thread_call_priority_t pri);
+    mpsc_daemon_invoke_fn_t invoke, thread_call_priority_t pri,
+    mpsc_daemon_init_options_t flags);
 
 /*!
  * @function mpsc_daemon_queue_init_with_target
@@ -576,10 +601,14 @@ mpsc_daemon_queue_init_with_thread_call(mpsc_daemon_queue_t dq,
  * @param target
  * The target queue of the initialized queue, which has to be initialized with
  * the mpsc_daemon_queue_nested_invoke invoke handler.
+ *
+ * @param flags
+ * See mpsc_daemon_init_options_t.
  */
 void
 mpsc_daemon_queue_init_with_target(mpsc_daemon_queue_t dq,
-    mpsc_daemon_invoke_fn_t invoke, mpsc_daemon_queue_t target);
+    mpsc_daemon_invoke_fn_t invoke, mpsc_daemon_queue_t target,
+    mpsc_daemon_init_options_t flags);
 
 /*!
  * @function mpsc_daemon_queue_nested_invoke
@@ -591,6 +620,18 @@ mpsc_daemon_queue_init_with_target(mpsc_daemon_queue_t dq,
 void
 mpsc_daemon_queue_nested_invoke(mpsc_queue_chain_t elm,
     mpsc_daemon_queue_t dq);
+
+/*!
+ * @function mpsc_daemon_queue_activate
+ *
+ * @brief
+ * Activate a queue that was created with the @c MPSC_DAEMON_INIT_INACTIVE flag.
+ *
+ * @param dq
+ * The queue to activate.
+ */
+void
+mpsc_daemon_queue_activate(mpsc_daemon_queue_t dq);
 
 /*!
  * @function mpsc_daemon_queue_cancel_and_wait

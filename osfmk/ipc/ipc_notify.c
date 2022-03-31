@@ -149,9 +149,8 @@ ipc_notify_no_senders_prepare(
 
 	ip_mq_lock_held(port);
 
-	if (port->ip_kobject_nsrequest) {
-		assert(port->ip_nsrequest == IP_NULL);
-		port->ip_kobject_nsrequest = false;
+	if (port->ip_nsrequest == IP_KOBJECT_NSREQUEST_ARMED) {
+		port->ip_nsrequest = IP_NULL;
 
 		if (ip_active(port)) {
 			req.ns_notify = port;

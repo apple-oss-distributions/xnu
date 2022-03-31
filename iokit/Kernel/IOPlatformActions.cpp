@@ -252,8 +252,8 @@ IOServicePlatformAction(void * refcon0, void * refcon1, uint32_t priority,
 	SOCD_TRACE_XNU_START(PLATFORM_ACTION,
 	    ADDR(function->getCStringNoCopy()),
 	    ADDR(service->getMetaClass()),
-	    PACK_2X32(VALUE(service->getRegistryEntryID()), VALUE(param1)),
-	    PACK_2X32(VALUE(param2), VALUE(param3)));
+	    PACK_2X32(VALUE(param1), VALUE(service->getRegistryEntryID())),
+	    PACK_2X32(VALUE(param3), VALUE(param2)));
 
 	ret = service->callPlatformFunction(function, false,
 	    (void *)(uintptr_t) priority, param1, param2, param3);
@@ -261,8 +261,8 @@ IOServicePlatformAction(void * refcon0, void * refcon1, uint32_t priority,
 	SOCD_TRACE_XNU_END(PLATFORM_ACTION,
 	    ADDR(function->getCStringNoCopy()),
 	    ADDR(service->getMetaClass()),
-	    PACK_2X32(VALUE(service->getRegistryEntryID()), VALUE(param1)),
-	    PACK_2X32(VALUE(param2), VALUE(param3)));
+	    PACK_2X32(VALUE(param1), VALUE(service->getRegistryEntryID())),
+	    PACK_2X32(VALUE(param3), VALUE(param2)));
 
 	return ret;
 }

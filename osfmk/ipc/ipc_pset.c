@@ -73,6 +73,7 @@
 #include <ipc/ipc_space.h>
 #include <ipc/ipc_port.h>
 #include <ipc/ipc_kmsg.h>
+#include <kern/policy_internal.h>
 
 #include <kern/kern_types.h>
 
@@ -82,11 +83,11 @@
 
 /* processor_set stole ipc_pset_init */
 static void
-ipc_port_set_init(ipc_pset_t pset, int policy)
+ipc_port_set_init(ipc_pset_t pset, mach_port_name_t name, int policy)
 {
-	policy |= SYNC_POLICY_FIFO | SYNC_POLICY_PORT_SET;
-	waitq_set_init(&pset->ips_wqset, policy);
+	waitq_init(&pset->ips_wqset, WQT_PORT_SET, policy | SYNC_POLICY_FIFO);
 	klist_init(&pset->ips_klist);
+	pset->ips_wqset.wqset_index = MACH_PORT_INDEX(name);
 }
 
 /*
@@ -120,7 +121,7 @@ ipc_pset_alloc(
 	}
 	/* space is locked */
 
-	ipc_port_set_init(pset, SYNC_POLICY_INIT_LOCKED);
+	ipc_port_set_init(pset, name, SYNC_POLICY_INIT_LOCKED);
 	/* port set is locked */
 
 	is_write_unlock(space);
@@ -152,7 +153,7 @@ ipc_pset_alloc_name(
 	return ipc_object_alloc_name(space, IOT_PORT_SET,
 	           MACH_PORT_TYPE_PORT_SET, 0,
 	           name, (ipc_object_t *)psetp, ^(ipc_object_t object){
-		ipc_port_set_init(ips_object_to_pset(object),
+		ipc_port_set_init(ips_object_to_pset(object), name,
 		SYNC_POLICY_INIT_LOCKED);
 	});
 }
@@ -184,135 +185,11 @@ ipc_pset_alloc_special(
 	os_atomic_init(&pset->ips_object.io_bits, io_makebits(TRUE, IOT_PORT_SET, 0));
 	os_atomic_init(&pset->ips_object.io_references, 1);
 
-	ipc_port_set_init(pset, 0);
+	ipc_port_set_init(pset, MACH_PORT_SPECIAL_DEFAULT, 0);
 
 	return pset;
 }
 
-
-/*
- *	Routine:	ipc_pset_add_unlock
- *	Purpose:
- *		Puts a port into a port set.
- *	Conditions:
- *		Port locked and active.
- *		Port is unlocked on return.
- *		The owner of the port set is also receiver for the port.
- */
-
-kern_return_t
-ipc_pset_add_unlock(
-	ipc_pset_t        pset,
-	ipc_port_t        port,
-	waitq_ref_t      *reserved_link,
-	uint64_t         *reserved_prepost)
-{
-	require_ip_active(port);
-
-	return ipc_mqueue_add_unlock(&port->ip_messages, pset,
-	           reserved_link, reserved_prepost, FALSE);
-}
-
-
-
-/*
- *	Routine:	ipc_pset_remove_locked
- *	Purpose:
- *		Removes a port from a port set.
- *		The port set loses a reference.
- *	Conditions:
- *		Port is locked and active.
- */
-
-kern_return_t
-ipc_pset_remove_locked(
-	ipc_pset_t        pset,
-	ipc_port_t        port)
-{
-	require_ip_active(port);
-
-	if (ip_in_pset(port)) {
-		return waitq_unlink_locked(&port->ip_waitq, &pset->ips_wqset);
-	}
-	return KERN_NOT_IN_SET;
-}
-
-/*
- *	Routine:	ipc_pset_lazy_allocate
- *	Purpose:
- *		lazily initialize the wqset of a port set.
- *	Conditions:
- *		Nothing locked.
- */
-
-kern_return_t
-ipc_pset_lazy_allocate(
-	ipc_space_t space,
-	mach_port_name_t psname)
-{
-	ipc_entry_bits_t bits;
-	kern_return_t kr;
-	ipc_object_t psobj;
-
-	kr = ipc_right_lookup_read(space, psname, &bits, &psobj);
-	if (kr != KERN_SUCCESS) {
-		return kr;
-	}
-	/* object is locked and active */
-
-	if ((bits & MACH_PORT_TYPE_PORT_SET) == 0) {
-		io_unlock(psobj);
-		return KERN_INVALID_RIGHT;
-	}
-
-	io_reference(psobj);
-	io_unlock(psobj);
-
-	/*
-	 * lazily initialize the wqset to avoid
-	 * possible allocation while linking
-	 * under spinlocks.
-	 */
-	waitq_set_lazy_init_link(&ips_object_to_pset(psobj)->ips_wqset);
-
-	io_release(psobj);
-
-	return KERN_SUCCESS;
-}
-
-/*
- *	Routine:	ipc_pset_remove_from_all_unlock
- *	Purpose:
- *		Removes a port from all it's port sets.
- *	Conditions:
- *		port is locked and active, port unlocked on return.
- */
-
-void
-ipc_pset_remove_from_all_unlock(
-	ipc_port_t      port)
-{
-	assert(waitq_is_valid(&port->ip_waitq));
-	waitq_unlink_all_unlock(&port->ip_waitq);
-}
-
-/*
- *	Routine:	ipc_pset_move_unlock
- *	Purpose:
- *		Removes a port from all its port sets and adds it to given port set.
- *	Conditions:
- *		port is locked and active.
- *		port is unlocked on return.
- */
-kern_return_t
-ipc_pset_move_unlock(
-	ipc_pset_t        pset,
-	ipc_port_t        port,
-	uint64_t         *reserved_prepost)
-{
-	return ipc_mqueue_add_unlock(&port->ip_messages, pset,
-	           NULL, reserved_prepost, TRUE);
-}
 
 /*
  *	Routine:	ipc_pset_destroy
@@ -329,6 +206,8 @@ ipc_pset_destroy(
 	ipc_space_t     space,
 	ipc_pset_t      pset)
 {
+	waitq_link_list_t free_l = { };
+
 	assert(ips_active(pset));
 
 	io_bits_andnot(ips_to_object(pset), IO_BITS_ACTIVE);
@@ -341,11 +220,32 @@ ipc_pset_destroy(
 	 * which will remove all the member message queues,
 	 * linkages and clean up preposts.
 	 */
-	ipc_mqueue_changed(space, &pset->ips_wqset.wqset_q);
-	waitq_set_deinit_and_unlock(&pset->ips_wqset);
+	ipc_mqueue_changed(space, &pset->ips_wqset);
+	waitq_invalidate(&pset->ips_wqset);
+	waitq_set_unlink_all_locked(&pset->ips_wqset, &free_l);
+
+	ips_mq_unlock(pset);
 
 	ips_release(pset);       /* consume the ref our caller gave us */
+
+	waitq_link_free_list(WQT_PORT_SET, &free_l);
 }
+
+/*
+ *	Routine:	ipc_pset_finalize
+ *	Purpose:
+ *		Called on last reference deallocate to
+ *		free any remaining data associated with the pset.
+ *	Conditions:
+ *		Nothing locked.
+ */
+void
+ipc_pset_finalize(
+	ipc_pset_t              pset)
+{
+	waitq_deinit(&pset->ips_wqset);
+}
+
 
 /*
  * Kqueue EVFILT_MACHPORT support
@@ -394,28 +294,19 @@ filt_machport_filter_result(struct knote *kn, ipc_object_t object)
 		return result;
 	}
 
-	if (waitq_is_set(wq)) {
+	if (waitq_type(wq) == WQT_PORT_SET) {
 		ipc_pset_t pset = ips_object_to_pset(object);
-		int rc;
-
-		rc = waitq_set_iterate_preposts(&pset->ips_wqset,
-		    ^(struct waitq *waitq) {
-			ipc_port_t port = ip_from_waitq(waitq);
-			ipc_kmsg_queue_t kmsgs = &port->ip_messages.imq_messages;
-
-			if (ipc_kmsg_queue_first(kmsgs) != IKM_NULL) {
-			        /* break out of the prepost iteration */
-			        return WQ_ITERATE_BREAK;
-			}
-			return WQ_ITERATE_CONTINUE;
-		});
-		if (rc == WQ_ITERATE_BREAK) {
-			result = FILTER_ACTIVE;
-		}
-		return result;
+		return waitq_set_first_prepost(&pset->ips_wqset, WQS_PREPOST_PEEK) ?
+		       FILTER_ACTIVE : 0;
 	}
 
 	ipc_port_t port = ip_object_to_port(object);
+	struct kqueue *kqwl = knote_get_kq(kn);
+
+	if (port->ip_kernel_iotier_override != kqueue_get_iotier_override(kqwl)) {
+		kqueue_set_iotier_override(kqwl, port->ip_kernel_iotier_override);
+		result |= FILTER_ADJUST_EVENT_IOTIER_BIT;
+	}
 
 	first = ipc_kmsg_queue_first(&port->ip_messages.imq_messages);
 	if (!first) {
@@ -880,6 +771,8 @@ filt_machportdetach(
 				send_turnstile = port_send_turnstile(port);
 			}
 			filt_machport_unlink(&port->ip_klist, kn);
+			struct kqueue *kq = knote_get_kq(kn);
+			kqueue_set_iotier_override(kq, THROTTLE_LEVEL_END);
 		} else {
 			ipc_pset_t pset = ips_object_to_pset(object);
 
@@ -930,7 +823,7 @@ filt_machportevent(struct knote *kn, long hint __assert_only)
 		 * When called for a port-set,
 		 * the posting port waitq is locked.
 		 *
-		 * waitq_set_iterate_preposts()
+		 * waitq_set_first_prepost()
 		 * in filt_machport_filter_result()
 		 * would try to lock it and be very sad.
 		 *
@@ -943,15 +836,10 @@ filt_machportevent(struct knote *kn, long hint __assert_only)
 	return filt_machport_filter_result(kn, kn->kn_ipc_obj);
 }
 
-/*
- * Upcall from the waitq code to prepost to the kevent subsystem.
- *
- * Called with the pset and waitq locks held.
- */
 void
 ipc_pset_prepost(struct waitq_set *wqs, struct waitq *waitq)
 {
-	KNOTE(&ips_from_waitq(&wqs->wqset_q)->ips_klist, (long)waitq);
+	KNOTE(&ips_from_waitq(wqs)->ips_klist, (long)waitq);
 }
 
 static int
@@ -993,6 +881,7 @@ filt_machportprocess(struct knote *kn, struct kevent_qos_s *kev)
 	mach_msg_option_t option;
 	mach_vm_address_t addr;
 	mach_msg_size_t size;
+	int result = FILTER_ACTIVE;
 
 	/* Capture current state */
 	knote_fill_kevent(kn, kev, MACH_PORT_NULL);
@@ -1056,7 +945,9 @@ filt_machportprocess(struct knote *kn, struct kevent_qos_s *kev)
 	self->ith_state = MACH_RCV_IN_PROGRESS;
 	self->ith_knote = kn;
 
-	wresult = ipc_mqueue_receive_on_thread(
+	io_lock(object);
+
+	wresult = ipc_mqueue_receive_on_thread_and_unlock(
 		io_waitq(object),
 		option,
 		size,         /* max_size */
@@ -1083,7 +974,7 @@ filt_machportprocess(struct knote *kn, struct kevent_qos_s *kev)
 		assert(self->ith_state == MACH_RCV_TOO_LARGE);
 		assert(self->ith_kmsg == IKM_NULL);
 		kev->data = self->ith_receiver_name;
-		return FILTER_ACTIVE;
+		return result;
 	}
 
 #if CONFIG_PREADOPT_TG
@@ -1100,6 +991,19 @@ filt_machportprocess(struct knote *kn, struct kevent_qos_s *kev)
 		kqueue_process_preadopt_thread_group(self, kq, tg);
 	}
 #endif
+	ipc_port_t port = ip_object_to_port(object);
+	struct kqueue *kqwl = knote_get_kq(kn);
+	if (port->ip_kernel_iotier_override != kqueue_get_iotier_override(kqwl)) {
+		/*
+		 * Lock the port to make sure port->ip_kernel_iotier_override does
+		 * not change while updating the kqueue override, else kqueue could
+		 * have old iotier value.
+		 */
+		ip_mq_lock(port);
+		kqueue_set_iotier_override(kqwl, port->ip_kernel_iotier_override);
+		result |= FILTER_ADJUST_EVENT_IOTIER_BIT;
+		ip_mq_unlock(port);
+	}
 
 	/*
 	 * Attempt to receive the message directly, returning
@@ -1156,7 +1060,7 @@ filt_machportprocess(struct knote *kn, struct kevent_qos_s *kev)
 		    _pthread_priority_make_from_thread_qos(self->ith_qos_override, 0, 0);
 	}
 
-	return FILTER_ACTIVE;
+	return result;
 }
 
 SECURITY_READ_ONLY_EARLY(struct filterops) machport_filtops = {

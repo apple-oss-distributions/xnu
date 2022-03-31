@@ -475,7 +475,8 @@ work_interval_subsystem_init(void)
 	 * not hash onto the same global waitq which might be currently locked.
 	 */
 	mpsc_daemon_queue_init_with_thread_call(&work_interval_deallocate_queue,
-	    work_interval_deallocate_queue_invoke, THREAD_CALL_PRIORITY_KERNEL);
+	    work_interval_deallocate_queue_invoke, THREAD_CALL_PRIORITY_KERNEL,
+	    MPSC_DAEMON_INIT_NONE);
 }
 STARTUP(THREAD_CALL, STARTUP_RANK_MIDDLE, work_interval_subsystem_init);
 #endif /* CONFIG_SCHED_AUTO_JOIN */

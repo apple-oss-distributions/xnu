@@ -147,7 +147,7 @@ bsd_startupearly(void)
 	ret = kmem_suballoc(kernel_map,
 	    &firstaddr,
 	    size,
-	    FALSE,
+	    VM_MAP_CREATE_NEVER_FAULTS,
 	    VM_FLAGS_ANYWHERE,
 	    VM_MAP_KERNEL_FLAGS_NONE,
 	    VM_KERN_MEMORY_FILE,
@@ -161,7 +161,7 @@ bsd_startupearly(void)
 	    &firstaddr,
 	    size,
 	    0,
-	    KMA_HERE | KMA_KOBJECT,
+	    KMA_KOBJECT,
 	    VM_KERN_MEMORY_FILE);
 
 	if (ret != KERN_SUCCESS) {

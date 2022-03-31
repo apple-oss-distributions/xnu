@@ -46,8 +46,8 @@ typedef struct host_notify_entry        *host_notify_t;
 LCK_GRP_DECLARE(host_notify_lock_grp, "host_notify");
 LCK_MTX_EARLY_DECLARE(host_notify_lock, &host_notify_lock_grp);
 
-static ZONE_DECLARE(host_notify_zone, "host_notify",
-    sizeof(struct host_notify_entry), ZC_NONE);
+static KALLOC_TYPE_DEFINE(host_notify_zone,
+    struct host_notify_entry, KT_DEFAULT);
 
 static queue_head_t     host_notify_queue[HOST_NOTIFY_TYPE_MAX + 1];
 

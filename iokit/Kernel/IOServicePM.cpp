@@ -1552,8 +1552,8 @@ IOService::handleAcknowledgePowerChange( IOPMRequest * request )
 				SOCD_TRACE_XNU(PM_INFORM_POWER_CHANGE_ACK,
 				    ADDR(informee->whatObject->getMetaClass()),
 				    ADDR(this->getMetaClass()),
-				    PACK_2X32(VALUE(informee->whatObject->getRegistryEntryID()), VALUE(this->getRegistryEntryID())),
-				    PACK_2X32(VALUE(fDriverCallReason), VALUE(0)));
+				    PACK_2X32(VALUE(this->getRegistryEntryID()), VALUE(informee->whatObject->getRegistryEntryID())),
+				    PACK_2X32(VALUE(0), VALUE(fDriverCallReason)));
 
 				if (informee->timer > 0) {
 					uint64_t nsec = computeTimeDeltaNS(&informee->startTime);
@@ -1690,8 +1690,8 @@ IOService::handleAcknowledgeSetPowerState( IOPMRequest * request __unused)
 		SOCD_TRACE_XNU(PM_SET_POWER_STATE_ACK,
 		    ADDR(controllingDriverMetaClass),
 		    ADDR(this->getMetaClass()),
-		    PACK_2X32(VALUE(controllingDriverRegistryEntryID), VALUE(this->getRegistryEntryID())),
-		    PACK_2X32(VALUE(0), VALUE(fHeadNotePowerState)));
+		    PACK_2X32(VALUE(this->getRegistryEntryID()), VALUE(controllingDriverRegistryEntryID)),
+		    PACK_2X32(VALUE(fHeadNotePowerState), VALUE(0)));
 	}
 
 	return more;
@@ -4167,8 +4167,8 @@ IOService::driverSetPowerState( void )
 		SOCD_TRACE_XNU_START(PM_SET_POWER_STATE,
 		    ADDR(controllingDriverMetaClass),
 		    ADDR(this->getMetaClass()),
-		    PACK_2X32(VALUE(controllingDriverRegistryEntryID), VALUE(this->getRegistryEntryID())),
-		    PACK_2X32(VALUE(oldPowerState), VALUE(powerState)));
+		    PACK_2X32(VALUE(this->getRegistryEntryID()), VALUE(controllingDriverRegistryEntryID)),
+		    PACK_2X32(VALUE(powerState), VALUE(oldPowerState)));
 
 		OUR_PMLogFuncStart(kPMLogProgramHardware, (uintptr_t) this, powerState);
 		clock_get_uptime(&fDriverCallStartTime);
@@ -4183,8 +4183,8 @@ IOService::driverSetPowerState( void )
 		SOCD_TRACE_XNU_END(PM_SET_POWER_STATE,
 		    ADDR(controllingDriverMetaClass),
 		    ADDR(this->getMetaClass()),
-		    PACK_2X32(VALUE(controllingDriverRegistryEntryID), VALUE(this->getRegistryEntryID())),
-		    PACK_2X32(VALUE(result), VALUE(powerState)));
+		    PACK_2X32(VALUE(this->getRegistryEntryID()), VALUE(controllingDriverRegistryEntryID)),
+		    PACK_2X32(VALUE(powerState), VALUE(result)));
 
 		deassertPMDriverCall(&callEntry);
 
@@ -4260,8 +4260,8 @@ IOService::driverInformPowerChange( void )
 			SOCD_TRACE_XNU_START(PM_INFORM_POWER_CHANGE,
 			    ADDR(driver->getMetaClass()),
 			    ADDR(this->getMetaClass()),
-			    PACK_2X32(VALUE(driver->getRegistryEntryID()), VALUE(this->getRegistryEntryID())),
-			    PACK_2X32(VALUE(fDriverCallReason), VALUE(powerState)));
+			    PACK_2X32(VALUE(this->getRegistryEntryID()), VALUE(driver->getRegistryEntryID())),
+			    PACK_2X32(VALUE(powerState), VALUE(fDriverCallReason)));
 
 			if (fDriverCallReason == kDriverCallInformPreChange) {
 				OUR_PMLogFuncStart(kPMLogInformDriverPreChange, (uintptr_t) this, powerState);
@@ -4280,8 +4280,8 @@ IOService::driverInformPowerChange( void )
 			SOCD_TRACE_XNU_END(PM_INFORM_POWER_CHANGE,
 			    ADDR(driver->getMetaClass()),
 			    ADDR(this->getMetaClass()),
-			    PACK_2X32(VALUE(driver->getRegistryEntryID()), VALUE(this->getRegistryEntryID())),
-			    PACK_2X32(VALUE(fDriverCallReason), VALUE(result)));
+			    PACK_2X32(VALUE(this->getRegistryEntryID()), VALUE(driver->getRegistryEntryID())),
+			    PACK_2X32(VALUE(result), VALUE(fDriverCallReason)));
 
 			deassertPMDriverCall(&callEntry);
 
@@ -5619,7 +5619,6 @@ IOService::start_watchdog_timer( void )
 
 	timeout = getPMRootDomain()->getWatchdogTimeout();
 	clock_interval_to_deadline(timeout, kSecondScale, &deadline);
-	fWatchdogDeadline = deadline;
 	start_watchdog_timer(deadline);
 	IOLockUnlock(fWatchdogLock);
 }
@@ -5628,6 +5627,7 @@ void
 IOService::start_watchdog_timer(uint64_t deadline)
 {
 	IOLockAssert(fWatchdogLock, kIOLockAssertOwned);
+	fWatchdogDeadline = deadline;
 
 	if (!thread_call_isactive(fWatchdogTimer)) {
 		thread_call_enter_delayed(fWatchdogTimer, deadline);
@@ -5740,7 +5740,14 @@ void
 IOService::watchdog_timer_expired( thread_call_param_t arg0, thread_call_param_t arg1 )
 {
 	IOService * me = (IOService *) arg0;
+	bool expired;
 
+	IOLockLock(me->fWatchdogLock);
+	expired = me->fWatchdogDeadline && (me->fWatchdogDeadline <= mach_absolute_time());
+	IOLockUnlock(me->fWatchdogLock);
+	if (!expired) {
+		return;
+	}
 
 	gIOPMWatchDogThread = current_thread();
 	getPMRootDomain()->sleepWakeDebugTrig(true);
@@ -5971,7 +5978,7 @@ logAppTimeouts( OSObject * object, void * arg )
 				clientID->release();
 			}
 
-			PM_ERROR(context->errorLog, pid, name);
+			PM_ERROR("PM notification timeout (pid %d, %s)\n", pid, name);
 
 			// TODO: record message type if possible
 			IOService::getPMRootDomain()->pmStatsRecordApplicationResponse(
@@ -6003,7 +6010,6 @@ IOService::cleanClientResponses( bool logErrors )
 				context.stateNumber      = fHeadNotePowerState;
 				context.stateFlags       = fHeadNotePowerArrayEntry->capabilityFlags;
 				context.changeFlags      = fHeadNoteChangeFlags;
-				context.errorLog         = "PM notification timeout (pid %d, %s)\n";
 
 				applyToInterested(gIOAppPowerStateInterest, logAppTimeouts, (void *) &context);
 			}

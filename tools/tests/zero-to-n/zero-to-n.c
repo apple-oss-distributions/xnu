@@ -903,6 +903,7 @@ main(int argc, char **argv)
 		ret = sysctlbyname("hw.optional.arm64", &is_arm, &is_arm_size, NULL, 0);
 		if (ret == 0 && is_arm) {
 			printf("Unsupported platform. Skipping test.\n");
+			printf("TEST SKIPPED\n");
 			exit(0);
 		}
 	}
@@ -930,6 +931,7 @@ main(int argc, char **argv)
 			ret = set_recommended_cluster('p');
 			if (ret && g_test_rt) {
 				printf("set_recommended_cluster('p') failed.  Skipping test\n");
+				printf("TEST SKIPPED\n");
 				exit(0);
 			}
 		}
@@ -975,6 +977,7 @@ main(int argc, char **argv)
 		if (g_nlogicalcpu != 2 * g_nphysicalcpu) {
 			/* Not SMT */
 			printf("Attempt to run --test-rt-smt on a non-SMT device\n");
+			printf("TEST SKIPPED\n");
 			exit(0);
 		}
 
@@ -993,6 +996,7 @@ main(int argc, char **argv)
 #if defined(__x86_64__) || defined(__i386__)
 		if (g_nphysicalcpu == 1) {
 			printf("Attempt to run --test-rt-avoid0 on a uniprocessor\n");
+			printf("TEST SKIPPED\n");
 			exit(0);
 		}
 		if (g_numthreads == 0) {
@@ -1008,6 +1012,7 @@ main(int argc, char **argv)
 		g_histogram = true;
 #else
 		printf("Attempt to run --test-rt-avoid0 on a non-Intel device\n");
+		printf("TEST SKIPPED\n");
 		exit(0);
 #endif
 	} else if (g_numthreads == 0) {
@@ -1389,6 +1394,12 @@ main(int argc, char **argv)
 			printf("FAIL cpu_idle_time unexpectedly large\n");
 			test_fail = 1;
 		}
+	}
+
+	if (test_fail) {
+		printf("TEST FAILED\n");
+	} else {
+		printf("TEST PASSED\n");
 	}
 
 	free(threads);

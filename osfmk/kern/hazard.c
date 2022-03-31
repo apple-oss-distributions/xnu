@@ -224,23 +224,18 @@ hazard_guard_replace(hazard_guard_t guard, void *value) /* fence (2) and (1) */
 
 #pragma mark - Hazard GC
 
-static inline size_t
-hazard_bucket_size(void)
-{
-	return sizeof(struct hazard_bucket) +
-	       hazard_bucket_count * sizeof(struct hazard_record);
-}
-
 static hazard_bucket_t
 hazard_bucket_alloc(zalloc_flags_t flags)
 {
-	return kalloc_flags(hazard_bucket_size(), Z_ZERO | flags);
+	return kalloc_type(struct hazard_bucket, struct hazard_record,
+	           hazard_bucket_count, Z_ZERO | flags);
 }
 
 static void
 hazard_bucket_free(hazard_bucket_t bucket)
 {
-	return kfree(bucket, hazard_bucket_size());
+	return kfree_type(struct hazard_bucket, struct hazard_record,
+	           hazard_bucket_count, bucket);
 }
 
 void
@@ -677,7 +672,7 @@ hazard_basic_test(__unused int64_t in, int64_t *out)
 		 * wait until we can observe v2 being freed,
 		 * it will panic if not happening quickly enough
 		 */
-		hw_wait_while_equals(&v2->htv_reclaimed, NULL);
+		hw_wait_while_equals_long(&v2->htv_reclaimed, NULL);
 
 		/* Allow it to be reclaimed now */
 		os_atomic_store(&v1->htv_reclaim_ok, true, seq_cst);
@@ -700,7 +695,7 @@ hazard_basic_test(__unused int64_t in, int64_t *out)
 		 * wait until we can observe v1 being freed,
 		 * now that there's no guard preventing it to disappear
 		 */
-		hw_wait_while_equals(&v1->htv_reclaimed, NULL);
+		hw_wait_while_equals_long(&v1->htv_reclaimed, NULL);
 
 		hazard_test_value_release(v1);
 		printf("%s: observed %p die too\n", __func__, v1);

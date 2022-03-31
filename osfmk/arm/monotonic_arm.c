@@ -31,7 +31,7 @@
 #include <sys/errno.h>
 #include <sys/monotonic.h>
 
-bool mt_core_supported = false;
+const bool mt_core_supported = false;
 
 void
 mt_early_init(void)

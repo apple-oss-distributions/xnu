@@ -126,8 +126,11 @@ kern_asl_msg_va(int level, const char *facility, size_t num_pairs, va_list vargs
 	/* Append newline */
 	(void) strlcat(fmt, KASL_NEWLINE_CHAR, MAX_FMT_LEN);
 
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wformat-nonliteral"
 	/* Print the key-value pairs in ASL format */
 	vaddlog(fmt, vargs);
+#pragma clang diagnostic pop
 
 	/*
 	 * Note: can't use os_log_with_args() here because 'fmt' is

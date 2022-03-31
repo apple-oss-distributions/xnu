@@ -140,8 +140,12 @@ __attribute__((noinline))
 static void
 ipc_object_free(unsigned int otype, ipc_object_t object, bool last_ref)
 {
-	if (last_ref && otype == IOT_PORT) {
-		ipc_port_finalize(ip_object_to_port(object));
+	if (last_ref) {
+		if (otype == IOT_PORT) {
+			ipc_port_finalize(ip_object_to_port(object));
+		} else {
+			ipc_pset_finalize(ips_object_to_pset(object));
+		}
 	}
 	zfree(ipc_object_zones[otype], object);
 }
@@ -153,23 +157,21 @@ ipc_object_free_safe(ipc_object_t object)
 	struct waitq *wq = io_waitq(object);
 
 	assert(!waitq_is_valid(wq));
-	assert(wq->waitq_tspriv == NULL);
-	assert(sizeof(wq->waitq_tspriv) == sizeof(struct mpsc_queue_chain));
+	assert(os_atomic_load(&wq->waitq_defer.mpqc_next, relaxed) == NULL);
 	mpsc_daemon_enqueue(&ipc_object_deallocate_queue,
-	    (mpsc_queue_chain_t)&wq->waitq_tspriv, MPSC_QUEUE_NONE);
+	    &wq->waitq_defer, MPSC_QUEUE_NONE);
 }
 
 static void
 ipc_object_deallocate_queue_invoke(mpsc_queue_chain_t e,
     __assert_only mpsc_daemon_queue_t dq)
 {
-	struct waitq *wq;
-	ipc_object_t io;
+	struct waitq *wq = __container_of(e, struct waitq, waitq_defer);
+	ipc_object_t  io = io_from_waitq(wq);
 
 	assert(dq == &ipc_object_deallocate_queue);
 
-	wq = __container_of((void **)e, struct waitq, waitq_tspriv);
-	io = io_from_waitq(wq);
+	os_atomic_store(&wq->waitq_defer.mpqc_next, NULL, relaxed);
 	ipc_object_free(io_otype(io), io, true);
 }
 
@@ -1326,7 +1328,7 @@ ipc_object_copyout_dest(
 static_assert(offsetof(struct ipc_object_waitq, iowq_waitq) ==
     offsetof(struct ipc_port, ip_waitq));
 static_assert(offsetof(struct ipc_object_waitq, iowq_waitq) ==
-    offsetof(struct ipc_pset, ips_wqset.wqset_q));
+    offsetof(struct ipc_pset, ips_wqset));
 
 /*
  *	Routine:        ipc_object_lock
@@ -1380,18 +1382,43 @@ ipc_object_validate_preflight_panic(ipc_object_t io)
 bool
 ipc_object_lock_allow_invalid(ipc_object_t io)
 {
-	struct waitq *wq = io_waitq(io);
+	struct waitq *orig_wq = io_waitq(io);
+	struct waitq *wq = pgz_decode_allow_invalid(orig_wq, ZONE_ID_ANY);
 
 	switch (zone_id_for_native_element(wq, sizeof(*wq))) {
 	case ZONE_ID_IPC_PORT:
 	case ZONE_ID_IPC_PORT_SET:
 		break;
 	default:
+#if CONFIG_PROB_GZALLOC
+		if (orig_wq != wq) {
+			/*
+			 * The element was PGZ protected, and the translation
+			 * returned another type than port or port-set.
+			 *
+			 * We have to allow this skew, and assumed the slot
+			 * has held a now freed port/port-set.
+			 */
+			return false;
+		}
+#endif /* CONFIG_PROB_GZALLOC */
 		ipc_object_validate_preflight_panic(io);
 	}
 
 	if (__probable(waitq_lock_allow_invalid(wq))) {
 		ipc_object_validate(io);
+#if CONFIG_PROB_GZALLOC
+		if (__improbable(wq != orig_wq &&
+		    wq != pgz_decode_allow_invalid(orig_wq, ZONE_ID_ANY))) {
+			/*
+			 * This object is no longer held in the slot,
+			 * whatever this object is, it's not the droid
+			 * we're looking for. Pretend we failed the lock.
+			 */
+			waitq_unlock(orig_wq);
+			return false;
+		}
+#endif /* CONFIG_PROB_GZALLOC */
 		return true;
 	}
 	return false;

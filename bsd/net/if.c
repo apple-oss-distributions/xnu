@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2022 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -127,6 +127,9 @@
 #include <netinet6/nd6.h>
 #endif /* INET */
 
+#if SKYWALK
+#include <skywalk/nexus/netif/nx_netif.h>
+#endif /* SKYWALK */
 
 #include <os/log.h>
 
@@ -356,6 +359,9 @@ if_attach_ifa_common(struct ifnet *ifp, struct ifaddr *ifa, int link)
 		(*ifa->ifa_attached)(ifa);
 	}
 
+#if SKYWALK
+	SK_NXS_MS_IF_ADDR_GENCNT_INC(ifp);
+#endif /* SKYWALK */
 }
 
 __private_extern__ void
@@ -418,6 +424,9 @@ if_detach_ifa_common(struct ifnet *ifp, struct ifaddr *ifa, int link)
 		(*ifa->ifa_detached)(ifa);
 	}
 
+#if SKYWALK
+	SK_NXS_MS_IF_ADDR_GENCNT_INC(ifp);
+#endif /* SKYWALK */
 }
 
 #define INITIAL_IF_INDEXLIM     8
@@ -482,7 +491,8 @@ if_next_index(void)
 
 		/* release the old data */
 		if (old_ifnet_addrs != NULL) {
-			kfree_type(caddr_t, old_ifnet_size, old_ifnet_addrs);
+			void *old_ifnet_addrs_p = (void *)old_ifnet_addrs;
+			kfree_type(caddr_t, old_ifnet_size, old_ifnet_addrs_p);
 		}
 	}
 	return new_index;
@@ -642,15 +652,11 @@ if_clone_lookup(const char *name, u_int32_t *unitp)
 	const char *cp;
 	u_int32_t i;
 
-	for (ifc = LIST_FIRST(&if_cloners); ifc != NULL;) {
-		for (cp = name, i = 0; i < ifc->ifc_namelen; i++, cp++) {
-			if (ifc->ifc_name[i] != *cp) {
-				goto next_ifc;
-			}
+	LIST_FOREACH(ifc, &if_cloners, ifc_list) {
+		if (strncmp(name, ifc->ifc_name, ifc->ifc_namelen) == 0) {
+			cp = name + ifc->ifc_namelen;
+			goto found_name;
 		}
-		goto found_name;
-next_ifc:
-		ifc = LIST_NEXT(ifc, ifc_list);
 	}
 
 	/* No match. */
@@ -723,7 +729,7 @@ if_clone_attach(struct if_clone *ifc)
 
 	if (ifc->ifc_softc_size != 0) {
 		ifc->ifc_zone = zone_create(ifc->ifc_name, ifc->ifc_softc_size,
-		    ZC_DESTRUCTIBLE);
+		    ZC_PGZ_USE_GUARDS | ZC_ZFREE_CLEARMEM);
 	}
 
 	LIST_INSERT_HEAD(&if_cloners, ifc, ifc_list);
@@ -1857,6 +1863,26 @@ ifioctl_linkparams(struct ifnet *ifp, u_long cmd, caddr_t data, struct proc *p)
 			break;
 		}
 
+#if SKYWALK
+		error = kern_nexus_set_netif_input_tbr_rate(ifp,
+		    iflpr->iflpr_input_tbr_rate);
+		if (error != 0) {
+			break;
+		}
+
+		/*
+		 * Input netem is done at flowswitch, which is the entry point
+		 * of all traffic, when skywalk is enabled.
+		 */
+		error = kern_nexus_set_if_netem_params(
+			kern_nexus_shared_controller(),
+			ifp->if_nx_flowswitch.if_fsw_instance,
+			&iflpr->iflpr_input_netem,
+			sizeof(iflpr->iflpr_input_netem));
+		if (error != 0) {
+			break;
+		}
+#endif /* SKYWALK */
 
 		char netem_name[32];
 		(void) snprintf(netem_name, sizeof(netem_name),
@@ -1920,6 +1946,12 @@ ifioctl_linkparams(struct ifnet *ifp, u_long cmd, caddr_t data, struct proc *p)
 		bcopy(&ifp->if_input_lt, &iflpr->iflpr_input_lt,
 		    sizeof(iflpr->iflpr_input_lt));
 
+#if SKYWALK
+		if (ifp->if_input_netem != NULL) {
+			netem_get_params(ifp->if_input_netem,
+			    &iflpr->iflpr_input_netem);
+		}
+#endif /* SKYWALK */
 		if (ifp->if_output_netem != NULL) {
 			netem_get_params(ifp->if_output_netem,
 			    &iflpr->iflpr_output_netem);
@@ -2370,7 +2402,7 @@ if_set_qosmarking_mode(struct ifnet *ifp, u_int32_t mode)
 	}
 	if (error == 0 && old_mode != ifp->if_qosmarking_mode) {
 		dlil_post_msg(ifp, KEV_DL_SUBCLASS, KEV_DL_QOS_MODE_CHANGED,
-		    NULL, 0);
+		    NULL, 0, FALSE);
 	}
 	return error;
 }
@@ -2576,6 +2608,33 @@ ifioctl_clat46addr(struct ifnet *ifp, u_long cmd, caddr_t data)
 	return error;
 }
 
+#if SKYWALK
+static __attribute__((noinline)) int
+ifioctl_nexus(struct ifnet *ifp, u_long cmd, caddr_t data)
+{
+	int error = 0;
+	struct if_nexusreq *ifnr = (struct if_nexusreq *)(void *)data;
+
+	switch (cmd) {
+	case SIOCGIFNEXUS:              /* struct if_nexusreq */
+		if (ifnr->ifnr_flags != 0) {
+			error = EINVAL;
+			break;
+		}
+		error = kern_nexus_get_netif_instance(ifp, ifnr->ifnr_netif);
+		if (error != 0) {
+			break;
+		}
+		kern_nexus_get_flowswitch_instance(ifp, ifnr->ifnr_flowswitch);
+		break;
+	default:
+		VERIFY(0);
+		/* NOTREACHED */
+	}
+
+	return error;
+}
+#endif /* SKYWALK */
 
 static int
 ifioctl_get_protolist(struct ifnet *ifp, u_int32_t * ret_count,
@@ -2731,6 +2790,9 @@ ifioctl_restrict_intcoproc(unsigned long cmd, const char *ifname,
 	case SIOCGNBRINFO_IN6:
 	case SIOCGIFALIFETIME_IN6:
 	case SIOCGIFNETMASK_IN6:
+#if SKYWALK
+	case SIOCGIFNEXUS:
+#endif /* SKYWALK */
 	case SIOCGIFPROTOLIST32:
 	case SIOCGIFPROTOLIST64:
 	case SIOCGIFXFLAGS:
@@ -3112,6 +3174,13 @@ ifioctl(struct socket *so, u_long cmd, caddr_t data, struct proc *p)
 		    ifname, IFNAMSIZ);
 		ifp = ifunit_ref(ifname);
 		break;
+#if SKYWALK
+	case SIOCGIFNEXUS:                      /* struct if_nexusreq */
+		bcopy(((struct if_nexusreq *)(void *)data)->ifnr_name,
+		    ifname, IFNAMSIZ);
+		ifp = ifunit_ref(ifname);
+		break;
+#endif /* SKYWALK */
 	case SIOCGIFPROTOLIST32:                /* struct if_protolistreq32 */
 	case SIOCGIFPROTOLIST64:                /* struct if_protolistreq64 */
 		bcopy(((struct if_protolistreq *)(void *)data)->ifpl_name,
@@ -3214,6 +3283,11 @@ ifioctl(struct socket *so, u_long cmd, caddr_t data, struct proc *p)
 	case SIOCGIFCLAT46ADDR:                 /* struct if_clat46req */
 		error = ifioctl_clat46addr(ifp, cmd, data);
 		break;
+#if SKYWALK
+	case SIOCGIFNEXUS:
+		error = ifioctl_nexus(ifp, cmd, data);
+		break;
+#endif /* SKYWALK */
 
 	case SIOCGIFPROTOLIST32:                /* struct if_protolistreq32 */
 	case SIOCGIFPROTOLIST64:                /* struct if_protolistreq64 */
@@ -4999,9 +5073,11 @@ if_addmulti_common(struct ifnet *ifp, const struct sockaddr *sa,
 	 * We are certain we have added something, so call down to the
 	 * interface to let them know about it.  Do this only for newly-
 	 * added AF_LINK/AF_UNSPEC address in the if_multiaddrs set.
+	 * Note that the notification is deferred to avoid
+	 * locking reodering issues in certain paths.
 	 */
 	if (lladdr || ll_firstref) {
-		(void) ifnet_ioctl(ifp, 0, SIOCADDMULTI, NULL);
+		ifnet_ioctl_async(ifp, SIOCADDMULTI);
 	}
 
 	if (ifp->if_updatemcasts > 0) {
@@ -5139,8 +5215,10 @@ if_delmulti_common(struct ifmultiaddr *ifma, struct ifnet *ifp,
 		 * case of a link layer mcast group being left.  Do
 		 * this only for a AF_LINK/AF_UNSPEC address that has
 		 * been removed from the if_multiaddrs set.
+		 * Note that the notification is deferred to avoid
+		 * locking reodering issues in certain paths.
 		 */
-		ifnet_ioctl(ifp, 0, SIOCDELMULTI, NULL);
+		ifnet_ioctl_async(ifp, SIOCDELMULTI);
 	}
 
 	if (lastref) {
@@ -5514,7 +5592,21 @@ void
 if_copy_netif_stats(struct ifnet *ifp, struct if_netif_stats *if_ns)
 {
 	bzero(if_ns, sizeof(*if_ns));
+#if SKYWALK
+	if (!(ifp->if_capabilities & IFCAP_SKYWALK) ||
+	    !ifnet_is_attached(ifp, 1)) {
+		return;
+	}
+
+	if (ifp->if_na != NULL) {
+		nx_netif_copy_stats(ifp->if_na, if_ns);
+	}
+
+	/* Release the IO refcnt */
+	ifnet_decr_iorefcnt(ifp);
+#else /* SKYWALK */
 #pragma unused(ifp)
+#endif /* SKYWALK */
 }
 
 struct ifaddr *
@@ -5542,10 +5634,18 @@ ifa_remref(struct ifaddr *ifa, int locked)
 		 * family allocator.  Otherwise, leave it alone.
 		 */
 		if (ifa->ifa_debug & IFD_ALLOC) {
+#if PLATFORM_MacOSX
 			if (ifa->ifa_free == NULL) {
 				IFA_UNLOCK(ifa);
-				FREE(ifa, M_IFADDR);
-			} else {
+				/*
+				 * support for 3rd party kexts,
+				 * old ABI was that this had to be allocated
+				 * with MALLOC(M_IFADDR).
+				 */
+				kheap_free_addr(KHEAP_KEXT, ifa);
+			} else
+#endif /* PLATFORM_MacOSX */
+			{
 				/* Become a regular mutex */
 				IFA_CONVERT_LOCK(ifa);
 				/* callee will unlock */
@@ -5846,6 +5946,9 @@ ifioctl_cassert(void)
 	case SIOCSIFNAT64PREFIX:
 
 	case SIOCGIFCLAT46ADDR:
+#if SKYWALK
+	case SIOCGIFNEXUS:
+#endif /* SKYWALK */
 
 	case SIOCGIFPROTOLIST32:
 	case SIOCGIFPROTOLIST64:
@@ -5872,6 +5975,15 @@ ifioctl_cassert(void)
 	}
 }
 
+#if SKYWALK
+/*
+ * XXX: This API is only used by BSD stack and for now will always return 0.
+ * For Skywalk native drivers, preamble space need not be allocated in mbuf
+ * as the preamble will be reserved in the translated skywalk packet
+ * which is transmitted to the driver.
+ * For Skywalk compat drivers currently headroom is always set to zero.
+ */
+#endif /* SKYWALK */
 uint32_t
 ifnet_mbuf_packetpreamblelen(struct ifnet *ifp)
 {
@@ -5886,20 +5998,26 @@ struct intf_event {
 	uint32_t intf_event_code;
 };
 
-static void
-intf_event_callback(void *arg)
-{
-	struct intf_event *p_intf_ev = (struct intf_event *)arg;
-
-	/* Call this before we walk the tree */
-	EVENTHANDLER_INVOKE(&ifnet_evhdlr_ctxt, ifnet_event, p_intf_ev->ifp,
-	    (struct sockaddr *)&(p_intf_ev->addr), p_intf_ev->intf_event_code);
-}
-
 struct intf_event_nwk_wq_entry {
 	struct nwk_wq_entry nwk_wqe;
 	struct intf_event intf_ev_arg;
 };
+
+static void
+intf_event_callback(struct nwk_wq_entry *nwk_item)
+{
+	struct intf_event_nwk_wq_entry *p_ev;
+
+	p_ev = __container_of(nwk_item, struct intf_event_nwk_wq_entry, nwk_wqe);
+
+	/* Call this before we walk the tree */
+	EVENTHANDLER_INVOKE(&ifnet_evhdlr_ctxt, ifnet_event,
+	    p_ev->intf_ev_arg.ifp,
+	    (struct sockaddr *)&(p_ev->intf_ev_arg.addr),
+	    p_ev->intf_ev_arg.intf_event_code);
+
+	kfree_type(struct intf_event_nwk_wq_entry, p_ev);
+}
 
 void
 intf_event_enqueue_nwk_wq_entry(struct ifnet *ifp, struct sockaddr *addrp,
@@ -5908,9 +6026,8 @@ intf_event_enqueue_nwk_wq_entry(struct ifnet *ifp, struct sockaddr *addrp,
 #pragma unused(addrp)
 	struct intf_event_nwk_wq_entry *p_intf_ev = NULL;
 
-	MALLOC(p_intf_ev, struct intf_event_nwk_wq_entry *,
-	    sizeof(struct intf_event_nwk_wq_entry),
-	    M_NWKWQ, M_WAITOK | M_ZERO);
+	p_intf_ev = kalloc_type(struct intf_event_nwk_wq_entry,
+	    Z_WAITOK | Z_ZERO | Z_NOFAIL);
 
 	p_intf_ev->intf_ev_arg.ifp = ifp;
 	/*
@@ -5919,9 +6036,7 @@ intf_event_enqueue_nwk_wq_entry(struct ifnet *ifp, struct sockaddr *addrp,
 	 */
 	p_intf_ev->intf_ev_arg.intf_event_code = intf_event_code;
 	p_intf_ev->nwk_wqe.func = intf_event_callback;
-	p_intf_ev->nwk_wqe.is_arg_managed = TRUE;
-	p_intf_ev->nwk_wqe.arg = &p_intf_ev->intf_ev_arg;
-	nwk_wq_enqueue((struct nwk_wq_entry*)p_intf_ev);
+	nwk_wq_enqueue(&p_intf_ev->nwk_wqe);
 }
 
 int

@@ -3040,8 +3040,6 @@ ip6_ctloutput(struct socket *so, struct sockopt *sopt)
 			}
 			break;
 		}
-	} else if (level == IPPROTO_UDP) {
-		error = udp_ctloutput(so, sopt);
 	} else {
 		error = EINVAL;
 	}
@@ -3515,16 +3513,10 @@ im6o_remref(struct ip6_moptions *im6o)
 		im6o->im6o_membership[i] = NULL;
 	}
 	im6o->im6o_num_memberships = 0;
-	if (im6o->im6o_mfilters != NULL) {
-		FREE(im6o->im6o_mfilters, M_IN6MFILTER);
-		im6o->im6o_mfilters = NULL;
-	}
-	if (im6o->im6o_membership != NULL) {
-		FREE(im6o->im6o_membership, M_IP6MOPTS);
-		im6o->im6o_membership = NULL;
-	}
 	IM6O_UNLOCK(im6o);
 
+	kfree_type(struct in6_multi *, im6o->im6o_max_memberships, im6o->im6o_membership);
+	kfree_type(struct in6_mfilter, im6o->im6o_max_memberships, im6o->im6o_mfilters);
 	lck_mtx_destroy(&im6o->im6o_lock, &ifa_mtx_grp);
 
 	if (!(im6o->im6o_debug & IFD_ALLOC)) {

@@ -636,7 +636,6 @@ vm_shared_region_create(
 	boolean_t               reslide,
 	boolean_t               is_driverkit)
 {
-	kern_return_t           kr;
 	vm_named_entry_t        mem_entry;
 	ipc_port_t              mem_entry_port;
 	vm_shared_region_t      shared_region;
@@ -725,15 +724,7 @@ vm_shared_region_create(
 	}
 
 	/* create a memory entry structure and a Mach port handle */
-	kr = mach_memory_entry_allocate(&mem_entry, &mem_entry_port);
-	if (kr != KERN_SUCCESS) {
-		kfree_type(struct vm_shared_region, shared_region);
-		shared_region = NULL;
-		SHARED_REGION_TRACE_ERROR(
-			("shared_region: create: "
-			"couldn't allocate mem_entry\n"));
-		goto done;
-	}
+	mem_entry = mach_memory_entry_allocate(&mem_entry_port);
 
 #if     defined(__arm__) || defined(__arm64__)
 	{
@@ -745,22 +736,19 @@ vm_shared_region_create(
 		pmap_nested = pmap_create_options(NULL, 0, pmap_flags);
 		if (pmap_nested != PMAP_NULL) {
 			pmap_set_nested(pmap_nested);
-			sub_map = vm_map_create(pmap_nested, 0, (vm_map_offset_t)size, TRUE);
-			if (sub_map == VM_MAP_NULL) {
-				pmap_destroy(pmap_nested);
-			} else {
+			sub_map = vm_map_create_options(pmap_nested, 0,
+			    (vm_map_offset_t)size, VM_MAP_CREATE_PAGEABLE);
 #if defined(__arm64__)
-				if (is_64bit ||
-				    page_shift_user32 == SIXTEENK_PAGE_SHIFT) {
-					/* enforce 16KB alignment of VM map entries */
-					vm_map_set_page_shift(sub_map, SIXTEENK_PAGE_SHIFT);
-				}
+			if (is_64bit ||
+			    page_shift_user32 == SIXTEENK_PAGE_SHIFT) {
+				/* enforce 16KB alignment of VM map entries */
+				vm_map_set_page_shift(sub_map, SIXTEENK_PAGE_SHIFT);
+			}
 
 #elif (__ARM_ARCH_7K__ >= 2)
-				/* enforce 16KB alignment for watch targets with new ABI */
-				vm_map_set_page_shift(sub_map, SIXTEENK_PAGE_SHIFT);
+			/* enforce 16KB alignment for watch targets with new ABI */
+			vm_map_set_page_shift(sub_map, SIXTEENK_PAGE_SHIFT);
 #endif /* __arm64__ */
-			}
 		} else {
 			sub_map = VM_MAP_NULL;
 		}
@@ -770,10 +758,8 @@ vm_shared_region_create(
 		/* create a VM sub map and its pmap */
 		pmap_t pmap = pmap_create_options(NULL, 0, is_64bit);
 		if (pmap != NULL) {
-			sub_map = vm_map_create(pmap, 0, size, TRUE);
-			if (sub_map == VM_MAP_NULL) {
-				pmap_destroy(pmap);
-			}
+			sub_map = vm_map_create_options(pmap, 0,
+			    (vm_map_offset_t)size, VM_MAP_CREATE_PAGEABLE);
 		} else {
 			sub_map = VM_MAP_NULL;
 		}
@@ -1034,7 +1020,7 @@ find_mapping_to_slide(vm_map_t map, vm_map_address_t addr, vm_map_entry_t entry)
 
 	/* find the shared region's map entry to slide */
 	vm_map_lock_read(map);
-	if (!vm_map_lookup_entry(map, addr, &found)) {
+	if (!vm_map_lookup_entry_allow_pgz(map, addr, &found)) {
 		/* no mapping there */
 		vm_map_unlock(map);
 		return KERN_INVALID_ARGUMENT;
@@ -1127,6 +1113,7 @@ vm_shared_region_auth_remap(vm_shared_region_t sr)
 		sr_pager = shared_region_pager_match(object, si->si_start, si,
 		    use_ptr_auth ? task->jop_pid : 0);
 		if (sr_pager == MEMORY_OBJECT_NULL) {
+			printf("%s(): shared_region_pager_match() failed\n", __func__);
 			kr = KERN_FAILURE;
 			goto done;
 		}
@@ -1143,6 +1130,7 @@ vm_shared_region_auth_remap(vm_shared_region_t sr)
 
 		kr = find_mapping_to_slide(sr_map, si->si_slid_address - sr->sr_base_address, &tmp_entry_store);
 		if (kr != KERN_SUCCESS) {
+			printf("%s(): find_mapping_to_slide() failed\n", __func__);
 			goto done;
 		}
 		tmp_entry = &tmp_entry_store;
@@ -1151,6 +1139,7 @@ vm_shared_region_auth_remap(vm_shared_region_t sr)
 		 * Check that the object exactly covers the region to slide.
 		 */
 		if (tmp_entry->vme_end - tmp_entry->vme_start != si->si_end - si->si_start) {
+			printf("%s(): doesn't fully cover\n", __func__);
 			kr = KERN_FAILURE;
 			goto done;
 		}
@@ -1178,6 +1167,7 @@ vm_shared_region_auth_remap(vm_shared_region_t sr)
 		memory_object_deallocate(sr_pager);
 		sr_pager = MEMORY_OBJECT_NULL;
 		if (kr != KERN_SUCCESS) {
+			printf("%s(): vm_map_enter_mem_object() failed\n", __func__);
 			goto done;
 		}
 		assertf(map_addr == si->si_slid_address,
@@ -3062,7 +3052,6 @@ _vm_commpage_init(
 	ipc_port_t      *handlep,
 	vm_map_size_t   size)
 {
-	kern_return_t           kr;
 	vm_named_entry_t        mem_entry;
 	vm_map_t                new_map;
 
@@ -3070,19 +3059,13 @@ _vm_commpage_init(
 		("commpage: -> _init(0x%llx)\n",
 		(long long)size));
 
-	kr = mach_memory_entry_allocate(&mem_entry,
-	    handlep);
-	if (kr != KERN_SUCCESS) {
-		panic("_vm_commpage_init: could not allocate mem_entry");
-	}
 	pmap_t new_pmap = pmap_create_options(NULL, 0, 0);
 	if (new_pmap == NULL) {
 		panic("_vm_commpage_init: could not allocate pmap");
 	}
-	new_map = vm_map_create(new_pmap, 0, size, PMAP_CREATE_64BIT);
-	if (new_map == VM_MAP_NULL) {
-		panic("_vm_commpage_init: could not allocate VM map");
-	}
+	new_map = vm_map_create_options(new_pmap, 0, size, VM_MAP_CREATE_DEFAULT);
+
+	mem_entry = mach_memory_entry_allocate(handlep);
 	mem_entry->backing.map = new_map;
 	mem_entry->internal = TRUE;
 	mem_entry->is_sub_map = TRUE;

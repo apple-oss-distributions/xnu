@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017 Apple Inc. All rights reserved.
+ * Copyright (c) 2017-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -28,3 +28,30 @@
 
 #include <sys/sysctl.h>
 
+__private_extern__ void
+skmem_sysctl_init(void)
+{
+	// TCP values
+	skmem_sysctl *sysctls = skmem_get_sysctls_obj(NULL);
+	if (sysctls) {
+		sysctls->version = SKMEM_SYSCTL_VERSION;
+#define X(type, field, default_value) \
+	        extern struct sysctl_oid sysctl__net_inet_tcp_##field;                          \
+	        sysctls->tcp.field = *(type*)sysctl__net_inet_tcp_##field.oid_arg1;
+		SKMEM_SYSCTL_TCP_LIST
+#undef  X
+	}
+}
+
+__private_extern__ int
+skmem_sysctl_handle_int(__unused struct sysctl_oid *oidp, void *arg1,
+    int arg2, struct sysctl_req *req)
+{
+	int changed = 0;
+	int result = sysctl_io_number(req, *(int*)arg1, sizeof(int), arg1,
+	    &changed);
+	if (changed) {
+		SYSCTL_SKMEM_UPDATE_AT_OFFSET(arg2, *(int*)arg1);
+	}
+	return result;
+}

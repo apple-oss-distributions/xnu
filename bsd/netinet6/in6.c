@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2003-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2003-2022 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -1325,6 +1325,15 @@ in6_control(struct socket *so, u_long cmd, caddr_t data, struct ifnet *ifp,
 		so_unlocked = TRUE;
 	}
 
+	lck_mtx_lock(&ifp->if_inet6_ioctl_lock);
+	while (ifp->if_inet6_ioctl_busy) {
+		(void) msleep(&ifp->if_inet6_ioctl_busy, &ifp->if_inet6_ioctl_lock, (PZERO - 1),
+		    __func__, NULL);
+		LCK_MTX_ASSERT(&ifp->if_inet6_ioctl_lock, LCK_MTX_ASSERT_OWNED);
+	}
+	ifp->if_inet6_ioctl_busy = TRUE;
+	lck_mtx_unlock(&ifp->if_inet6_ioctl_lock);
+
 	/*
 	 * ioctls which require ifp but not interface address.
 	 */
@@ -1690,6 +1699,13 @@ in6_control(struct socket *so, u_long cmd, caddr_t data, struct ifnet *ifp,
 	}
 
 done:
+	if (ifp != NULL) {
+		lck_mtx_lock(&ifp->if_inet6_ioctl_lock);
+		ifp->if_inet6_ioctl_busy = FALSE;
+		lck_mtx_unlock(&ifp->if_inet6_ioctl_lock);
+		wakeup(&ifp->if_inet6_ioctl_busy);
+	}
+
 	if (ia != NULL) {
 		IFA_REMREF(&ia->ia_ifa);
 	}
@@ -1807,6 +1823,10 @@ in6ctl_aifaddr(struct ifnet *ifp, struct in6_aliasreq *ifra)
 	if (ia->ia6_ndpr == NULL) {
 		NDPR_LOCK(pr);
 		++pr->ndpr_addrcnt;
+		if (!(ia->ia6_flags & IN6_IFF_NOTMANUAL)) {
+			++pr->ndpr_manual_addrcnt;
+			VERIFY(pr->ndpr_manual_addrcnt != 0);
+		}
 		VERIFY(pr->ndpr_addrcnt != 0);
 		ia->ia6_ndpr = pr;
 		NDPR_ADDREF(pr); /* for addr reference */
@@ -2815,9 +2835,14 @@ in6_unlink_ifa(struct in6_ifaddr *ia, struct ifnet *ifp)
 			    (uint64_t)VM_KERNEL_ADDRPERM(ia));
 		} else {
 			struct nd_prefix *pr = ia->ia6_ndpr;
+
+			NDPR_LOCK(pr);
+			if (!(ia->ia6_flags & IN6_IFF_NOTMANUAL)) {
+				VERIFY(pr->ndpr_manual_addrcnt != 0);
+				pr->ndpr_manual_addrcnt--;
+			}
 			ia->ia6_flags &= ~IN6_IFF_AUTOCONF;
 			ia->ia6_ndpr = NULL;
-			NDPR_LOCK(pr);
 			VERIFY(pr->ndpr_addrcnt != 0);
 			pr->ndpr_addrcnt--;
 			if (ia->ia6_flags & IN6_IFF_CLAT46) {
@@ -4525,7 +4550,8 @@ in6_lltable_destroy_lle_unlocked(struct llentry *lle)
 {
 	LLE_LOCK_DESTROY(lle);
 	LLE_REQ_DESTROY(lle);
-	kfree_type(struct in6_llentry, lle);
+	struct in6_llentry *in_lle = (struct in6_llentry *)lle;
+	kfree_type(struct in6_llentry, in_lle);
 }
 
 /*
@@ -5016,20 +5042,24 @@ in6_eventhdlr_callback(struct eventhandler_entry_arg arg0 __unused,
 	kev_post_msg(&ev_msg);
 }
 
-static void
-in6_event_callback(void *arg)
-{
-	struct in6_event *p_in6_ev = (struct in6_event *)arg;
-
-	EVENTHANDLER_INVOKE(&in6_evhdlr_ctxt, in6_event,
-	    p_in6_ev->in6_event_code, p_in6_ev->in6_ifp,
-	    &p_in6_ev->in6_address, p_in6_ev->val);
-}
-
 struct in6_event_nwk_wq_entry {
 	struct nwk_wq_entry nwk_wqe;
 	struct in6_event in6_ev_arg;
 };
+
+static void
+in6_event_callback(struct nwk_wq_entry *nwk_item)
+{
+	struct in6_event_nwk_wq_entry *p_ev;
+
+	p_ev = __container_of(nwk_item, struct in6_event_nwk_wq_entry, nwk_wqe);
+
+	EVENTHANDLER_INVOKE(&in6_evhdlr_ctxt, in6_event,
+	    p_ev->in6_ev_arg.in6_event_code, p_ev->in6_ev_arg.in6_ifp,
+	    &p_ev->in6_ev_arg.in6_address, p_ev->in6_ev_arg.val);
+
+	kfree_type(struct in6_event_nwk_wq_entry, p_ev);
+}
 
 void
 in6_event_enqueue_nwk_wq_entry(in6_evhdlr_code_t in6_event_code,
@@ -5038,14 +5068,10 @@ in6_event_enqueue_nwk_wq_entry(in6_evhdlr_code_t in6_event_code,
 {
 	struct in6_event_nwk_wq_entry *p_in6_ev = NULL;
 
-	MALLOC(p_in6_ev, struct in6_event_nwk_wq_entry *,
-	    sizeof(struct in6_event_nwk_wq_entry),
-	    M_NWKWQ, M_WAITOK | M_ZERO);
+	p_in6_ev = kalloc_type(struct in6_event_nwk_wq_entry,
+	    Z_WAITOK | Z_ZERO | Z_NOFAIL);
 
 	p_in6_ev->nwk_wqe.func = in6_event_callback;
-	p_in6_ev->nwk_wqe.is_arg_managed = TRUE;
-	p_in6_ev->nwk_wqe.arg = &p_in6_ev->in6_ev_arg;
-
 	p_in6_ev->in6_ev_arg.in6_event_code = in6_event_code;
 	p_in6_ev->in6_ev_arg.in6_ifp = ifp;
 	if (p_addr6 != NULL) {
@@ -5054,7 +5080,7 @@ in6_event_enqueue_nwk_wq_entry(in6_evhdlr_code_t in6_event_code,
 	}
 	p_in6_ev->in6_ev_arg.val = val;
 
-	nwk_wq_enqueue((struct nwk_wq_entry*)p_in6_ev);
+	nwk_wq_enqueue(&p_in6_ev->nwk_wqe);
 }
 
 /*

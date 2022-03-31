@@ -2,6 +2,7 @@
 #define _OS_CPP_UTIL_H
 
 #include <sys/cdefs.h>
+#include <sys/_types/_size_t.h>
 
 #if __has_feature(cxx_nullptr) && __has_feature(cxx_decltype)
 # define OS_HAS_NULLPTR 1
@@ -28,6 +29,17 @@ template <class _T> struct remove_reference<_T &&> {typedef _T type;};
 template <class _T> using remove_reference_t = typename remove_reference<_T>::type;
 
 /*
+ * Pointer removal
+ */
+
+template <class _T> struct remove_pointer                     {typedef _T type;};
+template <class _T> struct remove_pointer<_T*>                {typedef _T type;};
+template <class _T> struct remove_pointer<_T* const>          {typedef _T type;};
+template <class _T> struct remove_pointer<_T* volatile>       {typedef _T type;};
+template <class _T> struct remove_pointer<_T* const volatile> {typedef _T type;};
+template <class _T> using remove_pointer_t = typename remove_pointer<_T>::type;
+
+/*
  * Const removal
  */
 
@@ -35,8 +47,33 @@ template <class _T> struct remove_const           {typedef _T type;};
 template <class _T> struct remove_const<const _T> {typedef _T type;};
 template <class _T> using remove_const_t = typename remove_const<_T>::type;
 
+/*
+ * Volatile removal
+ */
+
+template <class _T> struct remove_volatile              {typedef _T type;};
+template <class _T> struct remove_volatile<volatile _T> {typedef _T type;};
+template <class _T> using remove_volatile_t = typename remove_volatile<_T>::type;
+
+/*
+ * Extent removal
+ */
+
+template<class _T> struct remove_extent { typedef _T type; };
+template<class _T> struct remove_extent<_T[]> { typedef _T type; };
+template<class _T, size_t N> struct remove_extent<_T[N]> { typedef _T type; };
+template <class _T> using remove_extent_t = typename remove_extent<_T>::type;
+
+
 template <class T> struct is_lvalue_reference { static constexpr bool value = false; };
 template <class T> struct is_lvalue_reference<T&> { static constexpr bool value = true; };
+
+/*
+ * is_same
+ */
+
+template<class T, class U> struct is_same { static constexpr bool value = false; };
+template<class T> struct is_same<T, T> { static constexpr bool value = true; };
 
 /*
  * Move

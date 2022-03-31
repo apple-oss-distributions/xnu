@@ -175,7 +175,7 @@ namei(struct nameidata *ndp)
 	proc_t p = vfs_context_proc(ctx);
 #if CONFIG_AUDIT
 /* XXX ut should be from context */
-	uthread_t ut = (struct uthread *)get_bsdthread_info(current_thread());
+	uthread_t ut = current_uthread();
 #endif
 
 #if CONFIG_VOLFS

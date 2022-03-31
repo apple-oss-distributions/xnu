@@ -72,37 +72,6 @@ extern lck_grp_t *IOLockGroup;
 
 static lck_mtx_t *sOSReportLock = lck_mtx_alloc_init(IOLockGroup, LCK_ATTR_NULL);
 
-/* Use kernel_debug() to log a backtrace */
-void
-trace_backtrace(uint32_t debugid, uint32_t debugid2, uintptr_t size, uintptr_t data)
-{
-	void *bt[16];
-	const unsigned cnt = sizeof(bt) / sizeof(bt[0]);
-	unsigned i;
-	int found = 0;
-
-	OSBacktrace(bt, cnt);
-
-	/* find first non-kernel frame */
-	for (i = 3; i < cnt && bt[i]; i++) {
-		if (bt[i] > (void*)&etext) {
-			found = 1;
-			break;
-		}
-	}
-	/*
-	 * if there are non-kernel frames, only log these
-	 * otherwise, log everything but the first two
-	 */
-	if (!found) {
-		i = 2;
-	}
-
-#define safe_bt(a) (uintptr_t)(a<cnt ? bt[a] : NULL)
-	kernel_debug(debugid, data, size, safe_bt(i), safe_bt(i + 1), 0);
-	kernel_debug(debugid2, safe_bt(i + 2), safe_bt(i + 3), safe_bt(i + 4), safe_bt(i + 5), 0);
-}
-
 /* Report a message with a 4 entry backtrace - very slow */
 void
 OSReportWithBacktrace(const char *str, ...)

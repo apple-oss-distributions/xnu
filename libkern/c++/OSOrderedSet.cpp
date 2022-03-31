@@ -67,8 +67,7 @@ initWithCapacity(unsigned int inCapacity,
 		return false;
 	}
 
-	array = kalloc_type_tag_bt(_Element, inCapacity, Z_WAITOK_ZERO,
-	    VM_KERN_MEMORY_LIBKERN);
+	array = kallocp_type_container(_Element, &inCapacity, Z_WAITOK_ZERO);
 	if (!array) {
 		return false;
 	}
@@ -161,7 +160,7 @@ unsigned int
 OSOrderedSet::ensureCapacity(unsigned int newCapacity)
 {
 	_Element *newArray;
-	vm_size_t finalCapacity;
+	unsigned int finalCapacity;
 
 	if (newCapacity <= capacity) {
 		return capacity;
@@ -174,22 +173,14 @@ OSOrderedSet::ensureCapacity(unsigned int newCapacity)
 		return capacity;
 	}
 
-	newArray = kallocp_type_tag_bt(_Element, &finalCapacity, Z_WAITOK_ZERO,
-	    VM_KERN_MEMORY_LIBKERN);
+	newArray = kallocp_type_container(_Element, &finalCapacity, Z_WAITOK_ZERO);
 	if (newArray) {
-		// use all of the actual allocation size
-		if (finalCapacity > UINT_MAX) {
-			// failure, too large
-			kfree_type(_Element, finalCapacity, newArray);
-			return capacity;
-		}
-
 		OSCONTAINER_ACCUMSIZE(sizeof(_Element) * (finalCapacity - capacity));
 
 		bcopy(array, newArray, capacity * sizeof(_Element));
 		kfree_type(_Element, capacity, array);
 		array = newArray;
-		capacity = (unsigned int) finalCapacity;
+		capacity = finalCapacity;
 	}
 
 	return capacity;

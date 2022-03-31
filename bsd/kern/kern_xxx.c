@@ -156,6 +156,7 @@ skip_cred_check:
 
 extern void OSKextResetAfterUserspaceReboot(void);
 extern void zone_gc_drain(void);
+extern uint64_t pmap_release_pages_fast(void);
 
 static int
 usrctl_full(void)
@@ -182,6 +183,7 @@ usrctl_full(void)
 	int sem_error = psem_cache_purge_all();
 
 	zone_gc_drain();
+	pmap_release_pages_fast();
 
 	return shm_error != 0 ? shm_error : sem_error;
 }

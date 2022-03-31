@@ -164,12 +164,8 @@ void gather_populate_corpse_crashinfo(proc_t p, task_t corpse_task,
     uint64_t *udata_buffer, int num_udata, void *reason, exception_type_t etype);
 mach_exception_data_type_t proc_encode_exit_exception_code(proc_t p);
 exception_type_t get_exception_from_corpse_crashinfo(kcdata_descriptor_t corpse_info);
-#if CONFIG_VFORK
-void vfork_exit(proc_t p, int rv);
-#endif /* CONFIG_VFORK */
 __private_extern__ void munge_user64_rusage(struct rusage *a_rusage_p, struct user64_rusage *a_user_rusage_p);
 __private_extern__ void munge_user32_rusage(struct rusage *a_rusage_p, struct user32_rusage *a_user_rusage_p);
-static int reap_child_locked(proc_t parent, proc_t child, int deadparent, int reparentedtoinit, int locked, int droplock);
 static void populate_corpse_crashinfo(proc_t p, task_t corpse_task,
     struct rusage_superset *rup, mach_exception_data_type_t code,
     mach_exception_data_type_t subcode, uint64_t *udata_buffer,
@@ -182,6 +178,30 @@ extern void task_coalition_ids(task_t task, uint64_t ids[COALITION_NUM_TYPES]);
 extern uint64_t get_task_phys_footprint_limit(task_t);
 int proc_list_uptrs(void *p, uint64_t *udata_buffer, int size);
 extern uint64_t task_corpse_get_crashed_thread_id(task_t corpse_task);
+
+/*
+ * Flags for `reap_child_locked`.
+ */
+__options_decl(reap_flags_t, uint32_t, {
+	/*
+	 * Parent is exiting, so the kernel is responsible for reaping children.
+	 */
+	REAP_DEAD_PARENT = 0x01,
+	/*
+	 * Childr process was re-parented to initproc.
+	 */
+	REAP_REPARENTED_TO_INIT = 0x02,
+	/*
+	 * `proc_list_lock` is held on entry.
+	 */
+	REAP_LOCKED = 0x04,
+	/*
+	 * Drop the `proc_list_lock` on return.  Note that the `proc_list_lock` will
+	 * be dropped internally by the function regardless.
+	 */
+	REAP_DROP_LOCK = 0x08,
+});
+static void reap_child_locked(proc_t parent, proc_t child, reap_flags_t flags);
 
 static KALLOC_TYPE_DEFINE(zombie_zone, struct rusage_superset, KT_DEFAULT);
 
@@ -1061,7 +1081,7 @@ exit(proc_t p, struct exit_args *uap, int *retval)
 int
 exit1(proc_t p, int rv, int *retval)
 {
-	return exit1_internal(p, rv, retval, TRUE, TRUE, 0);
+	return exit1_internal(p, rv, retval, FALSE, TRUE, 0);
 }
 
 int
@@ -1090,7 +1110,7 @@ exit_with_reason(proc_t p, int rv, int *retval, boolean_t thread_can_terminate, 
 	 */
 	if (rv && strnstr(panic_on_eexit_pcomms, p->p_comm, sizeof(panic_on_eexit_pcomms))) {
 		panic("%s: Process %s with pid %d exited on error with code 0x%x.",
-		    __FUNCTION__, p->p_comm, p->p_pid, rv);
+		    __FUNCTION__, p->p_comm, proc_getpid(p), rv);
 	}
 #endif
 
@@ -1101,22 +1121,7 @@ exit_with_reason(proc_t p, int rv, int *retval, boolean_t thread_can_terminate, 
 	 */
 
 	ut = get_bsdthread_info(self);
-#if CONFIG_VFORK
-	if ((p == current_proc()) &&
-	    (ut->uu_flag & UT_VFORK)) {
-		os_reason_free(exit_reason);
-		if (!thread_can_terminate) {
-			return EINVAL;
-		}
-
-		vfork_exit(p, rv);
-		vfork_return(p, retval, proc_getpid(p));
-		unix_syscall_return(0);
-		/* NOT REACHED */
-	}
-#else
 	(void)retval;
-#endif /* CONFIG_VFORK */
 
 	/*
 	 * The parameter list of audit_syscall_exit() was augmented to
@@ -1443,7 +1448,11 @@ skipcheck:
 	proc_lock(p);
 	p->p_lflag &= ~(P_LTRACED | P_LPPWAIT);
 	p->p_sigignore = ~(sigcantmask);
-	ut->uu_siglist = 0;
+
+	/* If current proc is exiting, ignore signals on the exit thread */
+	if (p == current_proc()) {
+		ut->uu_siglist = 0;
+	}
 	proc_unlock(p);
 }
 
@@ -1664,7 +1673,6 @@ proc_exit(proc_t p)
 	/* wait till parentrefs are dropped and grant no more */
 	proc_childdrainstart(p);
 	while ((q = p->p_children.lh_first) != NULL) {
-		int reparentedtoinit = (q->p_listflag & P_LIST_DEADPARENT) ? 1 : 0;
 		if (q->p_stat == SZOMB) {
 			if (p != q->p_pptr) {
 				panic("parent child linkage broken");
@@ -1683,7 +1691,10 @@ proc_exit(proc_t p)
 			 * and the proc struct cannot be used for wakeups as well.
 			 * It is safe to use q here as this is system reap
 			 */
-			(void)reap_child_locked(p, q, 1, reparentedtoinit, 1, 0);
+			reap_flags_t reparent_flags = (q->p_listflag & P_LIST_DEADPARENT) ?
+			    REAP_REPARENTED_TO_INIT : 0;
+			reap_child_locked(p, q,
+			    REAP_DEAD_PARENT | REAP_LOCKED | reparent_flags);
 		} else {
 			/*
 			 * Traced processes are killed
@@ -1808,8 +1819,7 @@ proc_exit(proc_t p)
 	zfree(proc_stats_zone, p->p_stats);
 	p->p_stats = NULL;
 
-	zfree(proc_sigacts_zone, p->p_sigacts);
-	p->p_sigacts = NULL;
+	zfree_ro(ZONE_ID_PROC_SIGACTS_RO, p->p_sigacts.ps_ro);
 
 	proc_limitdrop(p);
 
@@ -1824,6 +1834,7 @@ proc_exit(proc_t p)
 	 */
 	proc_set_task(p, TASK_NULL);
 	set_bsdtask_info(task, NULL);
+	clear_thread_ro_proc(get_machthread(uth));
 
 #if DEVELOPMENT || DEBUG
 	proc_exit_lpexit_check(pid, PELS_POS_POST_TASK_DETACH);
@@ -1935,8 +1946,8 @@ proc_exit(proc_t p)
 		 * and the proc struct cannot be used for wakeups as well.
 		 * It is safe to use p here as this is system reap
 		 */
-		(void)reap_child_locked(pp, p, 1, 0, 1, 1);
-		/* list lock dropped by reap_child_locked */
+		reap_child_locked(pp, p,
+		    REAP_DEAD_PARENT | REAP_LOCKED | REAP_DROP_LOCK);
 	}
 	if (uth->uu_lowpri_window) {
 		/*
@@ -1958,92 +1969,92 @@ proc_exit(proc_t p)
 /*
  * reap_child_locked
  *
- * Description:	Given a process from which all status information needed
- *		has already been extracted, if the process is a ptrace
- *		attach process, detach it and give it back to its real
- *		parent, else recover all resources remaining associated
- *		with it.
+ * Finalize a child exit once its status has been saved.
  *
- * Parameters:	proc_t parent		Parent of process being reaped
- *		proc_t child		Process to reap
+ * If ptrace has attached, detach it and return it to its real parent.  Free any
+ * remaining resources.
  *
- * Returns:	0			Process was not reaped because it
- *					came from an attach
- *		1			Process was reaped
+ * Parameters:
+ * - proc_t parent      Parent of process being reaped
+ * - proc_t child       Process to reap
+ * - reap_flags_t flags Control locking and re-parenting behavior
  */
-static int
-reap_child_locked(proc_t parent, proc_t child, int deadparent, int reparentedtoinit, int locked, int droplock)
+static void
+reap_child_locked(proc_t parent, proc_t child, reap_flags_t flags)
 {
-	proc_t trace_parent = PROC_NULL;        /* Traced parent process, if tracing */
 	struct pgrp *pg;
+	kauth_cred_t cred;
 
-	if (locked == 1) {
+	if (flags & REAP_LOCKED) {
 		proc_list_unlock();
 	}
 
 	/*
-	 * If we got the child via a ptrace 'attach',
-	 * we need to give it back to the old parent.
-	 *
-	 * Exception: someone who has been reparented to launchd before being
-	 * ptraced can simply be reaped, refer to radar 5677288
-	 *      p_oppid                  -> ptraced
-	 *      trace_parent == initproc -> away from launchd
-	 *      reparentedtoinit	 -> came to launchd by reparenting
+	 * Under ptrace, the child should now be re-parented back to its original
+	 * parent, unless that parent was initproc or it didn't come to initproc
+	 * through re-parenting.
 	 */
-	if (child->p_oppid) {
+	bool child_ptraced = child->p_oppid != 0;
+	if (child_ptraced) {
 		int knote_hint;
-		pid_t oppid;
+		pid_t orig_ppid = 0;
+		proc_t orig_parent = PROC_NULL;
 
 		proc_lock(child);
-		oppid = child->p_oppid;
+		orig_ppid = child->p_oppid;
 		child->p_oppid = 0;
 		knote_hint = NOTE_EXIT | (child->p_xstat & 0xffff);
 		proc_unlock(child);
 
-		if ((trace_parent = proc_find(oppid))
-		    && !((trace_parent == initproc) && reparentedtoinit)) {
-			if (trace_parent != initproc) {
+		orig_parent = proc_find(orig_ppid);
+		if (orig_parent) {
+			/*
+			 * Only re-parent the process if its original parent was not
+			 * initproc and it did not come to initproc from re-parenting.
+			 */
+			bool reparenting = orig_parent != initproc ||
+			    (flags & REAP_REPARENTED_TO_INIT) == 0;
+			if (reparenting) {
+				if (orig_parent != initproc) {
+					/*
+					 * Internal fields should be safe to access here because the
+					 * child is exited and not reaped or re-parented yet.
+					 */
+					proc_lock(orig_parent);
+					orig_parent->si_pid = proc_getpid(child);
+					orig_parent->si_status = child->p_xstat;
+					orig_parent->si_code = CLD_CONTINUED;
+					orig_parent->si_uid = kauth_cred_getruid(proc_ucred(child));
+					proc_unlock(orig_parent);
+				}
+				proc_reparentlocked(child, orig_parent, 1, 0);
+
 				/*
-				 * proc internal fileds  and p_ucred usage safe
-				 * here as child is dead and is not reaped or
-				 * reparented yet
+				 * After re-parenting, re-send the child's NOTE_EXIT to the
+				 * original parent.
 				 */
-				proc_lock(trace_parent);
-				trace_parent->si_pid = proc_getpid(child);
-				trace_parent->si_status = child->p_xstat;
-				trace_parent->si_code = CLD_CONTINUED;
-				trace_parent->si_uid = kauth_cred_getruid(proc_ucred(child));
-				proc_unlock(trace_parent);
-			}
-			proc_reparentlocked(child, trace_parent, 1, 0);
+				proc_knote(child, knote_hint);
+				psignal(orig_parent, SIGCHLD);
 
-			/* resend knote to original parent (and others) after reparenting */
-			proc_knote(child, knote_hint);
-
-			psignal(trace_parent, SIGCHLD);
-			proc_list_lock();
-			wakeup((caddr_t)trace_parent);
-			child->p_listflag &= ~P_LIST_WAITING;
-			wakeup(&child->p_stat);
-			proc_list_unlock();
-			proc_rele(trace_parent);
-			if ((locked == 1) && (droplock == 0)) {
 				proc_list_lock();
+				wakeup((caddr_t)orig_parent);
+				child->p_listflag &= ~P_LIST_WAITING;
+				wakeup(&child->p_stat);
+				proc_list_unlock();
+
+				proc_rele(orig_parent);
+				if ((flags & REAP_LOCKED) && !(flags & REAP_DROP_LOCK)) {
+					proc_list_lock();
+				}
+				return;
+			} else {
+				/*
+				 * Satisfy the knote lifecycle because ptraced processes don't
+				 * broadcast NOTE_EXIT during initial child termination.
+				 */
+				proc_knote(child, knote_hint);
+				proc_rele(orig_parent);
 			}
-			return 0;
-		}
-
-		/*
-		 * If we can't reparent (e.g. the original parent exited while child was being debugged, or
-		 * original parent is the same as the debugger currently exiting), we still need to satisfy
-		 * the knote lifecycle for other observers on the system. While the debugger was attached,
-		 * the NOTE_EXIT would not have been broadcast during initial child termination.
-		 */
-		proc_knote(child, knote_hint);
-
-		if (trace_parent != PROC_NULL) {
-			proc_rele(trace_parent);
 		}
 	}
 
@@ -2056,18 +2067,17 @@ reap_child_locked(proc_t parent, proc_t child, int deadparent, int reparentedtoi
 
 	child->p_xstat = 0;
 	if (child->p_ru) {
-		proc_lock(parent);
-#if 3839178
 		/*
-		 * If the parent is ignoring SIGCHLD, then POSIX requires
-		 * us to not add the resource usage to the parent process -
-		 * we are only going to hand it off to init to get reaped.
-		 * We should contest the standard in this case on the basis
-		 * of RLIMIT_CPU.
+		 * Roll up the rusage statistics to the parent, unless the parent is
+		 * ignoring SIGCHLD.  POSIX requires the children's resources of such a
+		 * parent to not be included in the parent's usage (seems odd given
+		 * RLIMIT_CPU, though).
 		 */
-		if (!(parent->p_flag & P_NOCLDWAIT))
-#endif  /* 3839178 */
-		ruadd(&parent->p_stats->p_cru, &child->p_ru->ru);
+		proc_lock(parent);
+		bool rollup_child = (parent->p_flag & P_NOCLDWAIT) == 0;
+		if (rollup_child) {
+			ruadd(&parent->p_stats->p_cru, &child->p_ru->ru);
+		}
 		update_rusage_info_child(&parent->p_stats->ri_child, &child->p_ru->ri);
 		proc_unlock(parent);
 		zfree(zombie_zone, child->p_ru);
@@ -2078,68 +2088,43 @@ reap_child_locked(proc_t parent, proc_t child, int deadparent, int reparentedtoi
 
 	AUDIT_SESSION_PROCEXIT(child);
 
-	/*
-	 * Decrement the count of procs running with this uid.
-	 * p_ucred usage is safe here as it is an exited process.
-	 * and refernce is dropped after these calls down below
-	 * (locking protection is provided by list lock held in chgproccnt)
-	 */
 #if CONFIG_PERSONAS
-	/*
-	 * persona_proc_drop calls chgproccnt(-1) on the persona uid,
-	 * and (+1) on the child->p_ucred uid
-	 */
 	persona_proc_drop(child);
-#endif
+#endif /* CONFIG_PERSONAS */
 	(void)chgproccnt(kauth_cred_getruid(proc_ucred(child)), -1);
 
 	os_reason_free(child->p_exit_reason);
 
-	/*
-	 * Finally finished with old proc entry.
-	 */
-
 	proc_list_lock();
 
-	/* quit the group */
 	pg = pgrp_leave_locked(child);
-
-	LIST_REMOVE(child, p_list);     /* off zombproc */
+	LIST_REMOVE(child, p_list);
 	parent->p_childrencnt--;
 	LIST_REMOVE(child, p_sibling);
-	/* If there are no more children wakeup parent */
-	if ((deadparent != 0) && (LIST_EMPTY(&parent->p_children))) {
-		wakeup((caddr_t)parent);        /* with list lock held */
+	bool no_more_children = (flags & REAP_DEAD_PARENT) &&
+	    LIST_EMPTY(&parent->p_children);
+	if (no_more_children) {
+		wakeup((caddr_t)parent);
 	}
 	child->p_listflag &= ~P_LIST_WAITING;
 	wakeup(&child->p_stat);
-
-	/* Take it out of process hash */
 	phash_remove_locked(proc_getpid(child), child);
 	proc_checkdeadrefs(child);
 	nprocs--;
-
-	if (deadparent) {
-		/*
-		 * If a child zombie is being reaped because its parent
-		 * is exiting, make sure we update the list flag
-		 */
+	if (flags & REAP_DEAD_PARENT) {
 		child->p_listflag |= P_LIST_DEADPARENT;
 	}
+	cred = proc_ucred(child);
+	child->p_proc_ro = proc_ro_release_proc(child->p_proc_ro);
 
 	proc_list_unlock();
 
 	pgrp_rele(pg);
-
-	/*
-	 * Free up credentials.
-	 */
-	if (IS_VALID_CRED(proc_ucred(child))) {
-		kauth_cred_t tmp_ucred = proc_ucred(child);
-		kauth_cred_unref(&tmp_ucred);
-		proc_set_ucred(child, NOCRED);
+	if (child->p_proc_ro != NULL) {
+		proc_ro_free(child->p_proc_ro);
+		child->p_proc_ro = NULL;
 	}
-
+	kauth_cred_set(&cred, NOCRED);
 	fdt_destroy(child);
 	lck_mtx_destroy(&child->p_mlock, &proc_mlock_grp);
 	lck_mtx_destroy(&child->p_ucred_mlock, &proc_ucred_mlock_grp);
@@ -2147,15 +2132,12 @@ reap_child_locked(proc_t parent, proc_t child, int deadparent, int reparentedtoi
 	lck_mtx_destroy(&child->p_dtrace_sprlock, &proc_lck_grp);
 #endif
 	lck_spin_destroy(&child->p_slock, &proc_slock_grp);
-
 	proc_wait_release(child);
-	if ((locked == 1) && (droplock == 0)) {
+
+	if ((flags & REAP_LOCKED) && (flags & REAP_DROP_LOCK) == 0) {
 		proc_list_lock();
 	}
-
-	return 1;
 }
-
 
 int
 wait1continue(int result)
@@ -2239,8 +2221,6 @@ loop1:
 
 
 		if (p->p_stat == SZOMB) {
-			int reparentedtoinit = (p->p_listflag & P_LIST_DEADPARENT) ? 1 : 0;
-
 			proc_list_unlock();
 #if CONFIG_MACF
 			if ((error = mac_proc_check_wait(q, p)) != 0) {
@@ -2303,7 +2283,9 @@ loop1:
 			}
 
 			/* Clean up */
-			(void)reap_child_locked(q, p, 0, reparentedtoinit, 0, 0);
+			reap_flags_t flags = (p->p_listflag & P_LIST_DEADPARENT) ?
+			    REAP_REPARENTED_TO_INIT : 0;
+			(void)reap_child_locked(q, p, flags);
 
 			return 0;
 		}
@@ -2541,7 +2523,7 @@ loop1:
 
 			/* Prevent other process for waiting for this event? */
 			if (!(uap->options & WNOWAIT)) {
-				(void) reap_child_locked(q, p, 0, 0, 0, 0);
+				reap_child_locked(q, p, 0);
 				return 0;
 			}
 			goto out;
@@ -2735,357 +2717,6 @@ proc_reparentlocked(proc_t child, proc_t parent, int signallable, int locked)
  * status and rusage for wait().  Check for child processes and orphan them.
  */
 
-#if CONFIG_VFORK
-void
-vfork_exit(proc_t p, int rv)
-{
-	vfork_exit_internal(p, rv, 0);
-}
-
-void
-vfork_exit_internal(proc_t p, int rv, int forceexit)
-{
-	thread_t self = current_thread();
-#ifdef FIXME
-	struct task *task = p->task;
-#endif
-	struct uthread *ut;
-
-	/*
-	 * If a thread in this task has already
-	 * called exit(), then halt any others
-	 * right here.
-	 */
-
-	ut = get_bsdthread_info(self);
-
-
-	proc_lock(p);
-	if ((p->p_lflag & P_LPEXIT) == P_LPEXIT) {
-		/*
-		 * This happens when a parent exits/killed and vfork is in progress
-		 * other threads. But shutdown code for ex has already called exit1()
-		 */
-		proc_unlock(p);
-		return;
-	}
-	p->p_lflag |= (P_LEXIT | P_LPEXIT);
-	proc_unlock(p);
-
-	if (forceexit == 0) {
-		/*
-		 * parent of a vfork child has already called exit() and the
-		 * thread that has vfork in proress terminates. So there is no
-		 * separate address space here and it has already been marked for
-		 * termination. This was never covered before and could cause problems
-		 * if we block here for outside code.
-		 */
-		/* Notify the perf server */
-		(void)sys_perf_notify(self, proc_getpid(p));
-	}
-
-	/*
-	 * Remove proc from allproc queue and from pidhash chain.
-	 * Need to do this before we do anything that can block.
-	 * Not doing causes things like mount() find this on allproc
-	 * in partially cleaned state.
-	 */
-
-	proc_list_lock();
-
-#if CONFIG_MEMORYSTATUS
-	proc_memorystatus_remove(p);
-#endif
-
-	LIST_REMOVE(p, p_list);
-	LIST_INSERT_HEAD(&zombproc, p, p_list); /* Place onto zombproc. */
-	/* will not be visible via proc_find */
-	os_atomic_or(&p->p_refcount, P_REF_DEAD, relaxed);
-
-	proc_list_unlock();
-
-	proc_lock(p);
-	p->p_xstat = rv;
-	p->p_lflag &= ~(P_LTRACED | P_LPPWAIT);
-	p->p_sigignore = ~0;
-	proc_unlock(p);
-
-	ut->uu_siglist = 0;
-
-	/* begin vproc_exit */
-
-	proc_t q;
-	proc_t pp;
-
-	vnode_t tvp;
-
-	struct pgrp *pg;
-	struct rusage_superset *rup;
-
-	rup = zalloc_flags(zombie_zone, Z_WAITOK | Z_NOFAIL);
-
-	proc_refdrain(p);
-
-	/*
-	 * Close open files and release open-file table.
-	 * This may block!
-	 */
-	fdt_invalidate(p);
-
-	pg = proc_pgrp(p, NULL);
-	if (SESS_LEADER(p, pg->pg_session)) {
-		panic("vfork child is session leader");
-	}
-	fixjobc(p, pg, 0);
-	pgrp_rele(pg);
-
-	/*
-	 * Change RLIMIT_FSIZE for accounting/debugging.
-	 */
-	proc_limitsetcur_fsize(p, RLIM_INFINITY);
-
-	proc_list_lock();
-
-	proc_childdrainstart(p);
-	while ((q = p->p_children.lh_first) != NULL) {
-		if (q->p_stat == SZOMB) {
-			if (p != q->p_pptr) {
-				panic("parent child linkage broken");
-			}
-			/* check for lookups by zomb sysctl */
-			while ((q->p_listflag & P_LIST_WAITING) == P_LIST_WAITING) {
-				msleep(&q->p_stat, &proc_list_mlock, PWAIT, "waitcoll", 0);
-			}
-			q->p_listflag |= P_LIST_WAITING;
-			/*
-			 * This is a named reference and it is not granted
-			 * if the reap is already in progress. So we get
-			 * the reference here exclusively and their can be
-			 * no waiters. So there is no need for a wakeup
-			 * after we are done. AlsO  the reap frees the structure
-			 * and the proc struct cannot be used for wakeups as well.
-			 * It is safe to use q here as this is system reap
-			 */
-			(void)reap_child_locked(p, q, 1, 0, 1, 0);
-		} else {
-			/*
-			 * Traced processes are killed
-			 * since their existence means someone is messing up.
-			 */
-			if (q->p_lflag & P_LTRACED) {
-				struct proc *opp;
-
-				proc_list_unlock();
-
-				opp = proc_find(q->p_oppid);
-				if (opp != PROC_NULL) {
-					proc_list_lock();
-					q->p_oppid = 0;
-					proc_list_unlock();
-					proc_reparentlocked(q, opp, 0, 0);
-					proc_rele(opp);
-				} else {
-					/* original parent exited while traced */
-					proc_list_lock();
-					q->p_listflag |= P_LIST_DEADPARENT;
-					q->p_oppid = 0;
-					proc_list_unlock();
-					proc_reparentlocked(q, initproc, 0, 0);
-				}
-
-				proc_lock(q);
-				q->p_lflag &= ~P_LTRACED;
-
-				if (q->sigwait_thread) {
-					thread_t thread = q->sigwait_thread;
-
-					proc_unlock(q);
-					/*
-					 * The sigwait_thread could be stopped at a
-					 * breakpoint. Wake it up to kill.
-					 * Need to do this as it could be a thread which is not
-					 * the first thread in the task. So any attempts to kill
-					 * the process would result into a deadlock on q->sigwait.
-					 */
-					thread_resume(thread);
-					clear_wait(thread, THREAD_INTERRUPTED);
-					threadsignal(thread, SIGKILL, 0, TRUE);
-				} else {
-					proc_unlock(q);
-				}
-
-				psignal(q, SIGKILL);
-				proc_list_lock();
-			} else {
-				q->p_listflag |= P_LIST_DEADPARENT;
-				proc_reparentlocked(q, initproc, 0, 1);
-			}
-		}
-	}
-
-	proc_childdrainend(p);
-	proc_list_unlock();
-
-	/*
-	 * Release reference to text vnode
-	 */
-	tvp = p->p_textvp;
-	p->p_textvp = NULL;
-	if (tvp != NULLVP) {
-		vnode_rele(tvp);
-	}
-
-	/*
-	 * Save exit status and final rusage info, adding in child rusage
-	 * info and self times.  If we were unable to allocate a zombie
-	 * structure, this information is lost.
-	 */
-	rup->ru = p->p_stats->p_ru;
-	timerclear(&rup->ru.ru_utime);
-	timerclear(&rup->ru.ru_stime);
-
-#ifdef  FIXME
-	if (task) {
-		mach_task_basic_info_data_t tinfo;
-		task_thread_times_info_data_t ttimesinfo;
-		int task_info_stuff, task_ttimes_stuff;
-		struct timeval ut, st;
-
-		task_info_stuff = MACH_TASK_BASIC_INFO_COUNT;
-		task_info(task, MACH_TASK_BASIC_INFO,
-		    &tinfo, &task_info_stuff);
-		p->p_ru->ru.ru_utime.tv_sec = tinfo.user_time.seconds;
-		p->p_ru->ru.ru_utime.tv_usec = tinfo.user_time.microseconds;
-		p->p_ru->ru.ru_stime.tv_sec = tinfo.system_time.seconds;
-		p->p_ru->ru.ru_stime.tv_usec = tinfo.system_time.microseconds;
-
-		task_ttimes_stuff = TASK_THREAD_TIMES_INFO_COUNT;
-		task_info(task, TASK_THREAD_TIMES_INFO,
-		    &ttimesinfo, &task_ttimes_stuff);
-
-		ut.tv_sec = ttimesinfo.user_time.seconds;
-		ut.tv_usec = ttimesinfo.user_time.microseconds;
-		st.tv_sec = ttimesinfo.system_time.seconds;
-		st.tv_usec = ttimesinfo.system_time.microseconds;
-		timeradd(&ut, &p->p_ru->ru.ru_utime, &p->p_ru->ru.ru_utime);
-		timeradd(&st, &p->p_ru->ru.ru_stime, &p->p_ru->ru.ru_stime);
-	}
-#endif /* FIXME */
-
-	ruadd(&rup->ru, &p->p_stats->p_cru);
-
-	gather_rusage_info(p, &rup->ri, RUSAGE_INFO_CURRENT);
-	rup->ri.ri_phys_footprint = 0;
-	rup->ri.ri_proc_exit_abstime = mach_absolute_time();
-
-	/*
-	 * Now that we have filled in the rusage info, make it
-	 * visible to an external observer via proc_pid_rusage().
-	 */
-	p->p_ru = rup;
-
-	/*
-	 * Free up profiling buffers.
-	 */
-	{
-		struct uprof *p0 = &p->p_stats->p_prof, *p1, *pn;
-
-		p1 = p0->pr_next;
-		p0->pr_next = NULL;
-		p0->pr_scale = 0;
-
-		for (; p1 != NULL; p1 = pn) {
-			pn = p1->pr_next;
-			kfree_type(struct uprof, p1);
-		}
-	}
-
-#if PSYNCH
-	pth_proc_hashdelete(p);
-#endif /* PSYNCH */
-
-	proc_free_realitimer(p);
-
-	/*
-	 * Other substructures are freed from wait().
-	 */
-	zfree(proc_stats_zone, p->p_stats);
-	p->p_stats = NULL;
-
-	zfree(proc_sigacts_zone, p->p_sigacts);
-	p->p_sigacts = NULL;
-
-	if (p->p_subsystem_root_path) {
-		zfree(ZV_NAMEI, p->p_subsystem_root_path);
-	}
-
-	proc_limitdrop(p);
-
-	/*
-	 * Finish up by terminating the task
-	 * and halt this thread (only if a
-	 * member of the task exiting).
-	 */
-	proc_set_task(p, TASK_NULL);
-
-	/*
-	 * Notify parent that we're gone.
-	 */
-	pp = proc_parent(p);
-	if ((p->p_listflag & P_LIST_DEADPARENT) == 0) {
-		if (pp != initproc) {
-			proc_lock(pp);
-			pp->si_pid = proc_getpid(p);
-			pp->p_xhighbits = p->p_xhighbits;
-			p->p_xhighbits = 0;
-			pp->si_status = p->p_xstat;
-			pp->si_code = CLD_EXITED;
-			/*
-			 * p_ucred usage is safe as it is an exiting process
-			 * and reference is dropped in reap
-			 */
-			pp->si_uid = kauth_cred_getruid(proc_ucred(p));
-			proc_unlock(pp);
-		}
-		/* mark as a zombie */
-		/* mark as a zombie */
-		/* No need to take proc lock as all refs are drained and
-		 * no one except parent (reaping ) can look at this.
-		 * The write is to an int and is coherent. Also parent is
-		 *  keyed off of list lock for reaping
-		 */
-		p->p_stat = SZOMB;
-
-		psignal(pp, SIGCHLD);
-
-		/* and now wakeup the parent */
-		proc_list_lock();
-		wakeup((caddr_t)pp);
-		proc_list_unlock();
-	} else {
-		proc_list_lock();
-		/* check for lookups by zomb sysctl */
-		while ((p->p_listflag & P_LIST_WAITING) == P_LIST_WAITING) {
-			msleep(&p->p_stat, &proc_list_mlock, PWAIT, "waitcoll", 0);
-		}
-		p->p_stat = SZOMB;
-		p->p_listflag |= P_LIST_WAITING;
-
-		/*
-		 * This is a named reference and it is not granted
-		 * if the reap is already in progress. So we get
-		 * the reference here exclusively and their can be
-		 * no waiters. So there is no need for a wakeup
-		 * after we are done. AlsO  the reap frees the structure
-		 * and the proc struct cannot be used for wakeups as well.
-		 * It is safe to use p here as this is system reap
-		 */
-		(void)reap_child_locked(pp, p, 0, 0, 1, 1);
-		/* list lock dropped by reap_child_locked */
-	}
-	proc_rele(pp);
-}
-#endif /* CONFIG_VFORK */
 
 /*
  * munge_rusage

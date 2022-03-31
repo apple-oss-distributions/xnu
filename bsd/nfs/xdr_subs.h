@@ -129,8 +129,10 @@ struct xdrbuf {
 void xb_init(struct xdrbuf *, xdrbuf_type);
 void xb_init_buffer(struct xdrbuf *, char *, size_t);
 void xb_cleanup(struct xdrbuf *);
-void *xb_malloc(size_t);
+void *xb_malloc(size_t) __attribute__((alloc_size(1)));
+void *xb_realloc(void *, size_t, size_t)  __attribute__((alloc_size(3)));
 void xb_free(void *);
+void xb_free_size(void *, size_t);
 int xb_grow(struct xdrbuf *);
 void xb_set_cur_buf_len(struct xdrbuf *);
 char *xb_buffer_base(struct xdrbuf *);
@@ -285,12 +287,41 @@ xb_malloc(size_t size)
 	void *buf = NULL;
 
 #ifdef KERNEL
-	MALLOC(buf, void *, size, M_TEMP, M_WAITOK);
+	buf = kalloc_data(size, Z_WAITOK);
 #else
 	buf = malloc(size);
 #endif
 	return buf;
 }
+
+void *
+xb_realloc(void *oldbuf, size_t old_size, size_t new_size)
+{
+	void *buf = NULL;
+
+#ifdef KERNEL
+	buf = krealloc_data(oldbuf, old_size, new_size, Z_WAITOK);
+#else
+	(void)old_size;
+	buf = realloc(oldbuf, new_size);
+#endif
+	return buf;
+}
+
+/*
+ * free a chunk of memory allocated with xb_malloc()
+ */
+void
+xb_free_size(void *buf, size_t len)
+{
+#ifdef KERNEL
+	kfree_data(buf, len);
+#else
+	(void)len;
+	free(buf);
+#endif
+}
+
 /*
  * free a chunk of memory allocated with xb_malloc()
  */
@@ -298,7 +329,7 @@ void
 xb_free(void *buf)
 {
 #ifdef KERNEL
-	FREE(buf, M_TEMP);
+	kfree_data_addr(buf);
 #else
 	free(buf);
 #endif
@@ -321,13 +352,9 @@ xb_grow(struct xdrbuf *xbp)
 		if (newsize < oldsize) {
 			return ENOMEM;
 		}
-		newbuf = xb_malloc(newsize);
+		newbuf = xb_realloc(oldbuf, oldsize, newsize);
 		if (newbuf == NULL) {
 			return ENOMEM;
-		}
-		if (oldbuf != NULL) {
-			bcopy(oldbuf, newbuf, oldsize);
-			xb_free(oldbuf);
 		}
 		xbp->xb_u.xb_buffer.xbb_base = newbuf;
 		xbp->xb_u.xb_buffer.xbb_size = newsize;

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2012-2022 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -56,7 +56,14 @@
 #include <kern/zalloc.h>
 #include <os/log.h>
 
+#if SKYWALK
+#include <skywalk/os_skywalk_private.h>
+#include <skywalk/nexus/flowswitch/nx_flowswitch.h>
+#include <skywalk/nexus/netif/nx_netif.h>
+#define IPSEC_NEXUS 1
+#else // SKYWALK
 #define IPSEC_NEXUS 0
+#endif // SKYWALK
 
 extern int net_qos_policy_restricted;
 extern int net_qos_policy_restrict_avapps;
@@ -237,6 +244,8 @@ struct ipsec_pcb {
 #define IPSEC_FLAGS_KPIPE_ALLOCATED 1
 
 /* data movement refcounting functions */
+static boolean_t ipsec_data_move_begin(struct ipsec_pcb *pcb);
+static void ipsec_data_move_end(struct ipsec_pcb *pcb);
 static void ipsec_wait_data_move_drain(struct ipsec_pcb *pcb);
 
 /* Data path states */
@@ -269,7 +278,7 @@ ipsec_flag_isset(struct ipsec_pcb *pcb, uint32_t flag)
 
 TAILQ_HEAD(ipsec_list, ipsec_pcb) ipsec_head;
 
-static ZONE_DECLARE(ipsec_pcb_zone, "net.if_ipsec",
+static ZONE_DEFINE(ipsec_pcb_zone, "net.if_ipsec",
     sizeof(struct ipsec_pcb), ZC_ZFREE_CLEARMEM);
 
 #define IPSECQ_MAXLEN 256
@@ -3002,8 +3011,12 @@ ipsec_ctl_disconnect(__unused kern_ctl_ref      kctlref,
 			 */
 			if_down(ifp);
 
-			/* Increment refcnt, but detach interface */
-			ifnet_incr_iorefcnt(ifp);
+			/*
+			 * Suspend data movement and wait for IO threads to exit.
+			 * We can't rely on the logic in dlil_quiesce_and_detach_nexuses() to
+			 * do this because ipsec nexuses are attached/detached separately.
+			 */
+			ifnet_datamov_suspend_and_drain(ifp);
 			if ((result = ifnet_detach(ifp)) != 0) {
 				panic("ipsec_ctl_disconnect - ifnet_detach failed: %d", result);
 				/* NOT REACHED */
@@ -3026,8 +3039,8 @@ ipsec_ctl_disconnect(__unused kern_ctl_ref      kctlref,
 
 			ipsec_nexus_detach(pcb);
 
-			/* Decrement refcnt to finish detaching and freeing */
-			ifnet_decr_iorefcnt(ifp);
+			/* Decrement refcnt added by ifnet_datamov_suspend_and_drain(). */
+			ifnet_datamov_resume(ifp);
 		} else
 #endif // IPSEC_NEXUS
 		{
@@ -4258,6 +4271,34 @@ ipsec_set_ip6oa_for_interface(ifnet_t interface, struct ip6_out_args *ip6oa)
 	}
 }
 
+static boolean_t
+ipsec_data_move_begin(struct ipsec_pcb *pcb)
+{
+	boolean_t ret = 0;
+
+	lck_mtx_lock_spin(&pcb->ipsec_pcb_data_move_lock);
+	if ((ret = IPSEC_IS_DATA_PATH_READY(pcb))) {
+		pcb->ipsec_pcb_data_move++;
+	}
+	lck_mtx_unlock(&pcb->ipsec_pcb_data_move_lock);
+
+	return ret;
+}
+
+static void
+ipsec_data_move_end(struct ipsec_pcb *pcb)
+{
+	lck_mtx_lock_spin(&pcb->ipsec_pcb_data_move_lock);
+	VERIFY(pcb->ipsec_pcb_data_move > 0);
+	/*
+	 * if there's no more thread moving data, wakeup any
+	 * drainers that's blocked waiting for this.
+	 */
+	if (--pcb->ipsec_pcb_data_move == 0 && pcb->ipsec_pcb_drainers > 0) {
+		wakeup(&(pcb->ipsec_pcb_data_move));
+	}
+	lck_mtx_unlock(&pcb->ipsec_pcb_data_move_lock);
+}
 
 static void
 ipsec_data_move_drain(struct ipsec_pcb *pcb)

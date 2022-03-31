@@ -244,13 +244,7 @@ cpu_core_t *cpu_core; /* XXX TLB lockdown? */
 cred_t *
 dtrace_CRED(void)
 {
-	struct uthread *uthread = get_bsdthread_info(current_thread());
-
-	if (uthread == NULL) {
-		return NULL;
-	} else {
-		return uthread->uu_ucred; /* May return NOCRED which is defined to be 0 */
-	}
+	return current_thread_ro_unchecked()->tro_cred;
 }
 
 int
@@ -451,8 +445,7 @@ _cyclic_add_omni(cyc_list_t *cyc_list)
 cyclic_id_list_t
 cyclic_add_omni(cyc_omni_handler_t *omni)
 {
-	cyc_list_t *cyc_list =
-	    _MALLOC(sizeof(cyc_list_t) + NCPU * sizeof(wrap_timer_call_t), M_TEMP, M_ZERO | M_WAITOK);
+	cyc_list_t *cyc_list = kalloc_type(cyc_list_t, wrap_timer_call_t, NCPU, Z_WAITOK | Z_ZERO);
 
 	if (NULL == cyc_list) {
 		return NULL;
@@ -489,7 +482,8 @@ cyclic_remove_omni(cyclic_id_list_t cyc_list)
 	ASSERT(cyc_list != NULL);
 
 	dtrace_xcall(DTRACE_CPUALL, (dtrace_xcall_t)_cyclic_remove_omni, (void *)cyc_list);
-	_FREE(cyc_list, M_TEMP);
+	void *cyc_list_p = (void *)cyc_list;
+	kfree_type(cyc_list_t, wrap_timer_call_t, NCPU, cyc_list_p);
 }
 
 typedef struct wrap_thread_call {
@@ -593,7 +587,7 @@ ddi_create_minor_node(dev_info_t *dip, const char *name, int spec_type,
 #pragma unused(spec_type,node_type,flag)
 	dev_t dev = makedev( ddi_driver_major(dip), minor_num );
 
-	if (NULL == devfs_make_node( dev, DEVFS_CHAR, UID_ROOT, GID_WHEEL, 0666, name, 0 )) {
+	if (NULL == devfs_make_node( dev, DEVFS_CHAR, UID_ROOT, GID_WHEEL, 0666, "%s", name )) {
 		return DDI_FAILURE;
 	} else {
 		return DDI_SUCCESS;
@@ -731,49 +725,6 @@ dt_kmem_free_aligned(void* buf, size_t size)
 	}
 
 	dt_kmem_free(*addr_to_free, *size_to_free);
-}
-
-/*
- * dtrace wants to manage just a single block: dtrace_state_percpu_t * NCPU, and
- * doesn't specify constructor, destructor, or reclaim methods.
- * At present, it always zeroes the block it obtains from kmem_cache_alloc().
- * We'll manage this constricted use of kmem_cache with ordinary _MALLOC and _FREE.
- */
-kmem_cache_t *
-kmem_cache_create(
-	const char *name,       /* descriptive name for this cache */
-	size_t bufsize,         /* size of the objects it manages */
-	size_t align,           /* required object alignment */
-	int (*constructor)(void *, void *, int), /* object constructor */
-	void (*destructor)(void *, void *), /* object destructor */
-	void (*reclaim)(void *), /* memory reclaim callback */
-	void *private,          /* pass-thru arg for constr/destr/reclaim */
-	vmem_t *vmp,            /* vmem source for slab allocation */
-	int cflags)     /* cache creation flags */
-{
-#pragma unused(name,align,constructor,destructor,reclaim,private,vmp,cflags)
-	return (kmem_cache_t *)bufsize; /* A cookie that tracks the single object size. */
-}
-
-void *
-kmem_cache_alloc(kmem_cache_t *cp, int kmflag)
-{
-#pragma unused(kmflag)
-	size_t bufsize = (size_t)cp;
-	return (void *)_MALLOC(bufsize, M_TEMP, M_WAITOK);
-}
-
-void
-kmem_cache_free(kmem_cache_t *cp, void *buf)
-{
-#pragma unused(cp)
-	_FREE(buf, M_TEMP);
-}
-
-void
-kmem_cache_destroy(kmem_cache_t *cp)
-{
-#pragma unused(cp)
 }
 
 /*
@@ -1399,7 +1350,7 @@ dtrace_getstackdepth(int aframes)
 }
 
 int
-dtrace_addr_in_module(void* addr, struct modctl *ctl)
+dtrace_addr_in_module(const void* addr, const struct modctl *ctl)
 {
 	return OSKextKextForAddress(addr) == (void*)ctl->mod_address;
 }

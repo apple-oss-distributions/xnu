@@ -159,6 +159,10 @@ static void ah_hmac_sha2_512_result(struct ah_algorithm_state *, caddr_t, size_t
 static void ah_update_mbuf(struct mbuf *, int, int,
     const struct ah_algorithm *, struct ah_algorithm_state *);
 
+/*
+ * If any algorithm requires more than 2048 bits (256 bytes) of key material,
+ * update IPSEC_KEY_AUTH_MAX_BYTES in ipsec.h
+ */
 const struct ah_algorithm *
 ah_algorithm_lookup(int idx)
 {

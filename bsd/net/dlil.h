@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1999-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 1999-2022 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -254,13 +254,21 @@ extern errno_t dlil_send_arp_internal(ifnet_t, u_int16_t,
 #define NET_THREAD_HELD_PF      0x1     /* thread is holding PF lock */
 #define NET_THREAD_HELD_DOMAIN  0x2     /* thread is holding domain_proto_mtx */
 #define NET_THREAD_CKREQ_LLADDR 0x4     /* thread reqs MACF check for LLADDR */
+#if SKYWALK
+#define NET_THREAD_CHANNEL_SYNC 0x10000 /* thread is doing channel sync */
+#define NET_THREAD_CACHE_UPDATE 0x20000 /* thread is doing cache update */
+#define NET_THREAD_REGION_UPDATE 0x40000 /* thread is doing region update */
+#define NET_THREAD_RX_NOTIFY    0x80000 /* thread is doing RX notify */
+#define NET_THREAD_TX_NOTIFY    0x100000 /* thread is doing TX notify */
+#define NET_THREAD_AYSYNC_TX    0x200000 /* require use of starter thread */
+#endif /* SKYWALK */
 
 /*
  * net_thread_marks_t is a pointer to a phantom structure type used for
  * manipulating the uthread:uu_network_marks field.  As an example...
  *
  *   static const u_int32_t bits = NET_THREAD_CKREQ_LLADDR;
- *   struct uthread *uth = get_bsdthread_info(current_thread());
+ *   struct uthread *uth = current_uthread();
  *
  *   net_thread_marks_t marks = net_thread_marks_push(bits);
  *   VERIFY((uth->uu_network_marks & NET_THREAD_CKREQ_LLADDR) != 0);
@@ -321,7 +329,7 @@ extern boolean_t dlil_has_if_filter(struct ifnet *);
 extern void dlil_proto_unplumb_all(ifnet_t);
 
 extern int dlil_post_msg(struct ifnet *, u_int32_t, u_int32_t,
-    struct net_event_data *, u_int32_t);
+    struct net_event_data *, u_int32_t, boolean_t);
 
 extern void dlil_post_sifflags_msg(struct ifnet *);
 
@@ -337,6 +345,22 @@ extern void ifnet_poll(struct ifnet *);
 extern errno_t ifnet_input_poll(struct ifnet *, struct mbuf *,
     struct mbuf *, const struct ifnet_stat_increment_param *);
 
+#if SKYWALK
+extern boolean_t ifnet_needs_fsw_transport_netagent(ifnet_t ifp);
+extern boolean_t ifnet_needs_fsw_ip_netagent(ifnet_t ifp);
+extern boolean_t ifnet_needs_netif_netagent(ifnet_t ifp);
+extern boolean_t ifnet_needs_compat(ifnet_t ifp);
+extern boolean_t ifnet_nx_noauto(ifnet_t ifp);
+extern boolean_t ifnet_nx_noauto_flowswitch(ifnet_t ifp);
+extern boolean_t ifnet_is_low_latency(ifnet_t ifp);
+extern boolean_t ifnet_attach_flowswitch_nexus(ifnet_t ifp);
+extern boolean_t ifnet_detach_flowswitch_nexus(ifnet_t ifp);
+extern boolean_t ifnet_attach_netif_nexus(ifnet_t ifp);
+extern boolean_t ifnet_detach_netif_nexus(ifnet_t ifp);
+extern boolean_t ifnet_add_netagent(ifnet_t ifp);
+extern boolean_t ifnet_remove_netagent(ifnet_t ifp);
+
+#endif /* SKYWALK */
 
 /*
  * dlil_if_acquire is obsolete. Use ifnet_allocate.
@@ -380,6 +404,12 @@ extern errno_t dlil_input_handler(struct ifnet *, struct mbuf *,
     boolean_t, struct thread *);
 extern void dlil_ifclassq_setup(struct ifnet *, struct ifclassq *);
 
+#if SKYWALK
+extern errno_t dlil_set_input_handler(struct ifnet *ifp, dlil_input_func fn);
+extern errno_t dlil_set_output_handler(struct ifnet *ifp, dlil_output_func fn);
+extern void dlil_reset_input_handler(struct ifnet *ifp);
+extern void dlil_reset_output_handler(struct ifnet *ifp);
+#endif /* SKYWALK */
 
 /*
  * This is mostly called from the context of the DLIL input thread;
@@ -459,6 +489,8 @@ ifp_inc_traffic_class_out(struct ifnet *ifp, struct mbuf *m)
 		ifp->if_tc.ifi_opvbytes += (u_int64_t)m->m_pkthdr.len;
 	}
 }
+
+extern void ifnet_ioctl_async(struct ifnet *, u_long);
 #endif /* BSD_KERNEL_PRIVATE */
 #endif /* KERNEL_PRIVATE */
 #endif /* KERNEL */

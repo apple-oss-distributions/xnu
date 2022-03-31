@@ -153,7 +153,7 @@ extern int sscanf(const char *input, const char *fmt, ...) __scanflike(2, 3);
 extern integer_t sprintf(char *buf, const char *fmt, ...) __printflike(2, 3) __deprecated;
 
 extern int printf(const char *format, ...) __printflike(1, 2);
-extern int vprintf(const char *format, va_list ap);
+extern int vprintf(const char *format, va_list ap) __printflike(1, 0);
 
 #if KERNEL_PRIVATE
 int     _consume_printf_args(int, ...);
@@ -182,26 +182,26 @@ extern void log(int level, char *fmt, ...) __printflike(2, 3);
 
 void
 _doprnt(
-	const char      *fmt,
-	va_list                 *argp,
-	void                    (*putc)(char),
-	int                     radix);
+	const char     *fmt,
+	va_list        *argp,
+	void          (*putc)(char),
+	int             radix) __printflike(1, 0);
 
 void
 _doprnt_log(
-	const char      *fmt,
-	va_list                 *argp,
-	void                    (*putc)(char),
-	int                     radix);
+	const char     *fmt,
+	va_list        *argp,
+	void          (*putc)(char),
+	int             radix) __printflike(1, 0);
 
 int
 __doprnt(
-	const char      *fmt,
-	va_list                 argp,
-	void                    (*putc)(int, void *),
-	void                    *arg,
-	int                     radix,
-	int                     is_log);
+	const char     *fmt,
+	va_list         argp,
+	void          (*putc)(int, void *),
+	void           *arg,
+	int             radix,
+	int             is_log) __printflike(1, 0);
 
 extern void console_write_char(char);
 

@@ -50,7 +50,7 @@ IOGuardPageMemoryDescriptor::withSize(vm_size_t size)
 bool
 IOGuardPageMemoryDescriptor::initWithSize(vm_size_t size)
 {
-	vm_offset_t address;
+	mach_vm_address_t address;
 	kern_return_t kr;
 	IOOptionBits  iomdOptions = kIOMemoryTypeVirtual64 | kIOMemoryAsReference | kIODirectionOutIn;
 
@@ -61,13 +61,13 @@ IOGuardPageMemoryDescriptor::initWithSize(vm_size_t size)
 		return false;
 	}
 
-	kr = vm_allocate_kernel(kernel_map, &address, size, VM_FLAGS_ANYWHERE, VM_KERN_MEMORY_IOKIT);
+	kr = mach_vm_allocate_kernel(kernel_map, &address, size, VM_FLAGS_ANYWHERE, VM_KERN_MEMORY_IOKIT);
 	if (kr != KERN_SUCCESS) {
 		return false;
 	}
 
 
-	_ranges.v64->address = (mach_vm_address_t) address;
+	_ranges.v64->address = address;
 	_ranges.v64->length  = size;
 
 	if (!super::initWithOptions(_ranges.v64, 1, 0, kernel_task, iomdOptions, NULL)) {
@@ -75,7 +75,7 @@ IOGuardPageMemoryDescriptor::initWithSize(vm_size_t size)
 	}
 
 	_size = size;
-	_buffer = address;
+	_buffer = (vm_offset_t)address;
 
 	return true;
 }
@@ -83,14 +83,13 @@ IOGuardPageMemoryDescriptor::initWithSize(vm_size_t size)
 void
 IOGuardPageMemoryDescriptor::free()
 {
-	IOAddressRange * range = _ranges.v64;
-
 	if (_buffer) {
 		vm_deallocate(kernel_map, _buffer, _size);
+		_buffer = 0;
 	}
 
-	if (range) {
-		IOFreeType(range, IOAddressRange);
+	if (_ranges.v64) {
+		IOFreeType(_ranges.v64, IOAddressRange);
 	}
 
 	super::free();

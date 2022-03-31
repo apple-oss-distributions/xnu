@@ -69,44 +69,33 @@
 #include <sys/posix_sem.h>
 
 
-static struct label *
-mac_posixsem_label_alloc(void)
-{
-	struct label *label;
-
-	label = mac_labelzone_alloc(MAC_WAITOK);
-	if (label == NULL) {
-		return NULL;
-	}
-	MAC_PERFORM(posixsem_label_init, label);
-	return label;
-}
-
 void
 mac_posixsem_label_init(struct pseminfo *psem)
 {
-	psem->psem_label = mac_posixsem_label_alloc();
+	mac_labelzone_alloc_owned(&psem->psem_label, MAC_WAITOK, ^(struct label *label) {
+		MAC_PERFORM(posixsem_label_init, label);
+	});
 }
 
-static void
-mac_posixsem_label_free(struct label *label)
+struct label *
+mac_posixsem_label(struct pseminfo *psem)
 {
-	MAC_PERFORM(posixsem_label_destroy, label);
-	mac_labelzone_free(label);
+	return mac_label_verify(&psem->psem_label);
 }
 
 void
 mac_posixsem_label_destroy(struct pseminfo *psem)
 {
-	mac_posixsem_label_free(psem->psem_label);
-	psem->psem_label = NULL;
+	mac_labelzone_free_owned(&psem->psem_label, ^(struct label *label) {
+		MAC_PERFORM(posixsem_label_destroy, label);
+	});
 }
 
 void
 mac_posixsem_label_associate(kauth_cred_t cred, struct pseminfo *psem,
     const char *name)
 {
-	MAC_PERFORM(posixsem_label_associate, cred, psem, psem->psem_label, name);
+	MAC_PERFORM(posixsem_label_associate, cred, psem, mac_posixsem_label(psem), name);
 }
 
 
@@ -149,7 +138,7 @@ mac_posixsem_check_open(kauth_cred_t cred, struct pseminfo *psem)
 #endif
 
 	MAC_CHECK(posixsem_check_open, cred, psem,
-	    psem->psem_label);
+	    mac_posixsem_label(psem));
 
 	return error;
 }
@@ -166,7 +155,7 @@ mac_posixsem_check_post(kauth_cred_t cred, struct pseminfo *psem)
 	}
 #endif
 
-	MAC_CHECK(posixsem_check_post, cred, psem, psem->psem_label);
+	MAC_CHECK(posixsem_check_post, cred, psem, mac_posixsem_label(psem));
 
 	return error;
 }
@@ -184,7 +173,7 @@ mac_posixsem_check_unlink(kauth_cred_t cred, struct pseminfo *psem,
 	}
 #endif
 
-	MAC_CHECK(posixsem_check_unlink, cred, psem, psem->psem_label, name);
+	MAC_CHECK(posixsem_check_unlink, cred, psem, mac_posixsem_label(psem), name);
 
 	return error;
 }
@@ -201,7 +190,7 @@ mac_posixsem_check_wait(kauth_cred_t cred, struct pseminfo *psem)
 	}
 #endif
 
-	MAC_CHECK(posixsem_check_wait, cred, psem, psem->psem_label);
+	MAC_CHECK(posixsem_check_wait, cred, psem, mac_posixsem_label(psem));
 
 	return error;
 }

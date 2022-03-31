@@ -178,7 +178,6 @@ copyio(int copy_type, user_addr_t user_addr, char *kernel_addr,
 	int             debug_type = 0xeff70010;
 	debug_type += (copy_type << 2);
 #endif
-	vm_size_t kernel_buf_size = 0;
 
 	if (__improbable(nbytes > copysize_limit_panic)) {
 		panic("%s(%p, %p, %lu) - transfer too large", __func__,
@@ -201,14 +200,21 @@ copyio(int copy_type, user_addr_t user_addr, char *kernel_addr,
 		}
 		if (__probable(!zalloc_disable_copyio_check)) {
 			zone_t src_zone = NULL;
-			kernel_buf_size = zone_element_size(kernel_addr, &src_zone);
+			vm_offset_t oob_offs, size;
+
+			size = zone_element_size((void *)kernel_addr,
+			    &src_zone, false, &oob_offs);
+			size -= oob_offs;
+
 			/*
 			 * Size of elements in the permanent zone is not saved as a part of the
 			 * zone's info
 			 */
 			if (__improbable(src_zone && !src_zone->z_permanent &&
-			    kernel_buf_size < nbytes)) {
-				panic("copyio: kernel buffer %p has size %lu < nbytes %lu", kernel_addr, kernel_buf_size, nbytes);
+			    size < nbytes)) {
+				panic("copyio: kernel buffer %p "
+				    "has size %lu < nbytes %lu",
+				    (void *)kernel_addr, size, nbytes);
 			}
 		}
 	}

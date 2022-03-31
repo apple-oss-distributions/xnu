@@ -451,7 +451,7 @@ file_extent_callback(void * ref, uint64_t start, uint64_t length)
 
 	extent.start  = start;
 	extent.length = length;
-	ctx->extents->appendBytes(&extent, sizeof(extent));
+	ctx->extents->appendValue(extent);
 	ctx->size += length;
 }
 

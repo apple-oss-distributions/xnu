@@ -102,7 +102,7 @@
 #include <kern/startup.h>
 #include <kern/zalloc.h>
 
-typedef __zpercpu uint64_t *scalable_counter_t;
+typedef uint64_t *__zpercpu scalable_counter_t;
 typedef uint64_t atomic_counter_t;
 /* Generic counter base type. Does not have an implementation. */
 struct generic_counter_t;
@@ -145,7 +145,7 @@ OS_OVERLOADABLE
 extern void counter_free(struct generic_counter_t *);
 /*
  * Add amount to counter.
- * @param amount: The amount to add.
+ * @param amount The amount to add.
  */
 OS_OVERLOADABLE
 extern void counter_add(struct generic_counter_t *, uint64_t amount);

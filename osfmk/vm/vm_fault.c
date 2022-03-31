@@ -87,7 +87,7 @@
 #include <kern/host.h>
 #include <kern/mach_param.h>
 #include <kern/macro_help.h>
-#include <kern/zalloc.h>
+#include <kern/zalloc_internal.h>
 #include <kern/misc_protos.h>
 #include <kern/policy_internal.h>
 
@@ -339,8 +339,8 @@ vm_rtfault_record_init(void)
 
 	vmrtf_num_records = MAX(vmrtf_num_records, 1);
 	size = vmrtf_num_records * sizeof(vm_rtfault_record_t);
-	vmrtfrs.vm_rtf_records = zalloc_permanent(size,
-	    ZALIGN(vm_rtfault_record_t));
+	vmrtfrs.vm_rtf_records = zalloc_permanent_tag(size,
+	    ZALIGN(vm_rtfault_record_t), VM_KERN_MEMORY_DIAG);
 	vmrtfrs.vmrtfr_maxi = vmrtf_num_records - 1;
 }
 STARTUP(ZALLOC, STARTUP_RANK_MIDDLE, vm_rtfault_record_init);
@@ -515,8 +515,9 @@ vm_fault_is_sequential(
 	object->last_alloc = offset;
 }
 
-
-int vm_page_deactivate_behind_count = 0;
+#if DEVELOPMENT || DEBUG
+uint64_t vm_page_deactivate_behind_count = 0;
+#endif /* DEVELOPMENT || DEBUG */
 
 /*
  * vm_page_deactivate_behind
@@ -646,7 +647,10 @@ vm_fault_deactivate_behind(
 
 			vm_page_deactivate_internal(m, FALSE);
 
+#if DEVELOPMENT || DEBUG
 			vm_page_deactivate_behind_count++;
+#endif /* DEVELOPMENT || DEBUG */
+
 #if TRACEFAULTPAGE
 			dbgTrace(0xBEEF0019, (unsigned int) object, (unsigned int) m);  /* (TEST/DEBUG) */
 #endif
@@ -1202,6 +1206,7 @@ vm_fault_page(
 					vm_pageout_steal_laundry(m, FALSE);
 				}
 			}
+			vm_object_lock_assert_exclusive(VM_PAGE_OBJECT(m));
 			if (VM_PAGE_GET_PHYS_PAGE(m) == vm_page_guard_addr) {
 				/*
 				 * Guard page: off limits !
@@ -3762,6 +3767,7 @@ vm_fault_enter(
 
 	fault_type = change_wiring ? VM_PROT_NONE : caller_prot;
 
+	assertf(VM_PAGE_OBJECT(m) != VM_OBJECT_NULL, "m=%p", m);
 	kr = vm_fault_enter_prepare(m, pmap, vaddr, &prot, caller_prot,
 	    fault_page_size, fault_phys_offset, change_wiring, fault_type,
 	    fault_info, type_of_fault, &page_needs_data_sync);
@@ -4087,6 +4093,25 @@ vm_fault_internal(
 
 	real_vaddr = vaddr;
 	trace_real_vaddr = vaddr;
+
+	/*
+	 * Some (kernel) submaps are marked with "should never fault".
+	 *
+	 * We do this for two reasons:
+	 * - PGZ which is inside the zone map range can't go down the normal
+	 *   lookup path (vm_map_lookup_entry() would panic).
+	 *
+	 * - we want for guard pages to not have to use fictitious pages at all
+	 *   to prevent from ZFOD pages to be made.
+	 *
+	 * We also want capture the fault address easily so that the zone
+	 * allocator might present an enhanced panic log.
+	 */
+	if (map->never_faults) {
+		assert(map->pmap == kernel_pmap);
+		panic_fault_address = vaddr;
+		return KERN_INVALID_ADDRESS;
+	}
 
 	if (VM_MAP_PAGE_SIZE(original_map) < PAGE_SIZE) {
 		fault_phys_offset = (vm_map_offset_t)-1;
@@ -4566,6 +4591,7 @@ reclaimed_from_pageout:
 						continue;
 					}
 				}
+				vm_object_lock_assert_exclusive(VM_PAGE_OBJECT(m));
 				vm_pageout_steal_laundry(m, FALSE);
 			}
 
@@ -4768,6 +4794,8 @@ FastPmapEnter:
 					    "0x%llx\n", (uint64_t)fault_phys_offset);
 				}
 
+				assertf(VM_PAGE_OBJECT(m) == m_object, "m=%p m_object=%p object=%p", m, m_object, object);
+				assert(VM_PAGE_OBJECT(m) != VM_OBJECT_NULL);
 				if (caller_pmap) {
 					kr = vm_fault_enter(m,
 					    caller_pmap,
@@ -5377,6 +5405,7 @@ FastPmapEnter:
 					} else {
 						enter_fault_type = caller_prot;
 					}
+					assertf(VM_PAGE_OBJECT(m) == object, "m=%p object=%p", m, object);
 					kr = vm_fault_enter_prepare(m,
 					    destination_pmap,
 					    destination_pmap_vaddr,
@@ -5878,6 +5907,8 @@ handle_copy_delay:
 
 	if (object_locks_dropped == TRUE) {
 		if (m != VM_PAGE_NULL) {
+			assertf(VM_PAGE_OBJECT(m) == m_object, "m=%p m_object=%p", m, m_object);
+			assert(VM_PAGE_OBJECT(m) != VM_OBJECT_NULL);
 			vm_object_lock(m_object);
 
 			if (m_object->copy != old_copy_object) {
@@ -5970,6 +6001,8 @@ handle_copy_delay:
 			assertf(fault_phys_offset == 0,
 			    "0x%llx\n", (uint64_t)fault_phys_offset);
 		}
+		assertf(VM_PAGE_OBJECT(m) == m_object, "m=%p m_object=%p", m, m_object);
+		assert(VM_PAGE_OBJECT(m) != VM_OBJECT_NULL);
 		if (caller_pmap) {
 			kr = vm_fault_enter(m,
 			    caller_pmap,
@@ -6553,8 +6586,8 @@ vm_fault_wire_fast(
 
 	counter_inc(&vm_statistics_faults);
 
-	if (thread != THREAD_NULL && thread->task != TASK_NULL) {
-		counter_inc(&thread->task->faults);
+	if (thread != THREAD_NULL) {
+		counter_inc(&get_threadtask(thread)->faults);
 	}
 
 /*
@@ -6687,6 +6720,8 @@ vm_fault_wire_fast(
 	 *	Put this page into the physical map.
 	 */
 	type_of_fault = DBG_CACHE_HIT_FAULT;
+	assertf(VM_PAGE_OBJECT(m) == object, "m=%p object=%p", m, object);
+	assert(VM_PAGE_OBJECT(m) != VM_OBJECT_NULL);
 	kr = vm_fault_enter(m,
 	    pmap,
 	    pmap_addr,
@@ -7789,7 +7824,8 @@ vmtc_get_page_data(
 	/*
 	 * Need an aligned buffer to do a physical copy.
 	 */
-	if (kmem_alloc_aligned(kernel_map, (vm_offset_t *)&buffer, size, VM_KERN_MEMORY_DIAG) != KERN_SUCCESS) {
+	if (kernel_memory_allocate(kernel_map, (vm_offset_t *)&buffer,
+	    size, size - 1, KMA_KOBJECT, VM_KERN_MEMORY_DIAG) != KERN_SUCCESS) {
 		return NULL;
 	}
 	buffer_paddr = kvtophys((vm_offset_t)buffer);

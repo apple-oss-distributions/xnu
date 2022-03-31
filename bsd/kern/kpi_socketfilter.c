@@ -41,6 +41,9 @@
 #include <net/kext_net.h>
 #include <net/if.h>
 #include <net/net_api_stats.h>
+#if defined(SKYWALK) && defined(XNU_TARGET_OS_OSX)
+#include <skywalk/lib/net_filter_event.h>
+#endif /* SKYWALK && XNU_TARGET_OS_OSX */
 #include <netinet/in_var.h>
 #include <netinet/ip.h>
 #include <netinet/ip_var.h>
@@ -60,6 +63,9 @@
 #include <stdbool.h>
 #include <string.h>
 
+#if SKYWALK
+#include <skywalk/core/skywalk_var.h>
+#endif /* SKYWALK */
 
 #define SFEF_ATTACHED           0x1     /* SFE is on socket list */
 #define SFEF_NODETACH           0x2     /* Detach should not be called */
@@ -111,6 +117,11 @@ static errno_t sflt_register_common(const struct sflt_filter *filter, int domain
 errno_t sflt_register(const struct sflt_filter *filter, int domain,
     int type, int protocol);
 
+#if defined(SKYWALK) && defined(XNU_TARGET_OS_OSX)
+static bool net_check_compatible_sfltr(void);
+bool net_check_compatible_alf(void);
+static bool net_check_compatible_parental_controls(void);
+#endif /* SKYWALK && XNU_TARGET_OS_OSX */
 
 #pragma mark -- Internal State Management --
 
@@ -1051,6 +1062,11 @@ sflt_setsockopt(struct socket *so, struct sockopt *sopt)
 		return 0;
 	}
 
+	/* Socket-options are checked at the MPTCP-layer */
+	if (so->so_flags & SOF_MP_SUBFLOW) {
+		return 0;
+	}
+
 	struct socket_filter_entry *entry;
 	int unlocked = 0;
 	int error = 0;
@@ -1098,6 +1114,11 @@ __private_extern__ int
 sflt_getsockopt(struct socket *so, struct sockopt *sopt)
 {
 	if (so->so_filt == NULL || sflt_permission_check(sotoinpcb(so))) {
+		return 0;
+	}
+
+	/* Socket-options are checked at the MPTCP-layer */
+	if (so->so_flags & SOF_MP_SUBFLOW) {
 		return 0;
 	}
 
@@ -1152,6 +1173,11 @@ sflt_data_out(struct socket *so, const struct sockaddr *to, mbuf_t *data,
 		return 0;
 	}
 
+	/* Socket-options are checked at the MPTCP-layer */
+	if (so->so_flags & SOF_MP_SUBFLOW) {
+		return 0;
+	}
+
 	struct socket_filter_entry *entry;
 	int unlocked = 0;
 	int setsendthread = 0;
@@ -1160,10 +1186,6 @@ sflt_data_out(struct socket *so, const struct sockaddr *to, mbuf_t *data,
 	lck_rw_lock_shared(&sock_filter_lock);
 	for (entry = so->so_filt; entry && error == 0;
 	    entry = entry->sfe_next_onsocket) {
-		/* skip if this is a subflow socket */
-		if (so->so_flags & SOF_MP_SUBFLOW) {
-			continue;
-		}
 		if ((entry->sfe_flags & SFEF_ATTACHED) &&
 		    entry->sfe_filter->sf_filter.sf_data_out) {
 			/*
@@ -1216,6 +1238,11 @@ sflt_data_in(struct socket *so, const struct sockaddr *from, mbuf_t *data,
 		return 0;
 	}
 
+	/* Socket-options are checked at the MPTCP-layer */
+	if (so->so_flags & SOF_MP_SUBFLOW) {
+		return 0;
+	}
+
 	struct socket_filter_entry *entry;
 	int error = 0;
 	int unlocked = 0;
@@ -1224,10 +1251,6 @@ sflt_data_in(struct socket *so, const struct sockaddr *from, mbuf_t *data,
 
 	for (entry = so->so_filt; entry && (error == 0);
 	    entry = entry->sfe_next_onsocket) {
-		/* skip if this is a subflow socket */
-		if (so->so_flags & SOF_MP_SUBFLOW) {
-			continue;
-		}
 		if ((entry->sfe_flags & SFEF_ATTACHED) &&
 		    entry->sfe_filter->sf_filter.sf_data_in) {
 			/*
@@ -1382,6 +1405,14 @@ sflt_register_common(const struct sflt_filter *filter, int domain, int type,
 			INC_ATOMIC_INT64_LIM(net_api_stats.nas_sfltr_register_os_total);
 		}
 	}
+#if defined(SKYWALK) && defined(XNU_TARGET_OS_OSX)
+	net_filter_event_mark(NET_FILTER_EVENT_SOCKET,
+	    net_check_compatible_sfltr());
+	net_filter_event_mark(NET_FILTER_EVENT_ALF,
+	    net_check_compatible_alf());
+	net_filter_event_mark(NET_FILTER_EVENT_PARENTAL_CONTROLS,
+	    net_check_compatible_parental_controls());
+#endif /* SKYWALK && XNU_TARGET_OS_OSX */
 
 	lck_rw_unlock_exclusive(&sock_filter_lock);
 
@@ -1538,6 +1569,14 @@ sflt_unregister(sflt_handle handle)
 		/* Release the filter */
 		sflt_release_locked(filter);
 	}
+#if defined(SKYWALK) && defined(XNU_TARGET_OS_OSX)
+	net_filter_event_mark(NET_FILTER_EVENT_SOCKET,
+	    net_check_compatible_sfltr());
+	net_filter_event_mark(NET_FILTER_EVENT_ALF,
+	    net_check_compatible_alf());
+	net_filter_event_mark(NET_FILTER_EVENT_PARENTAL_CONTROLS,
+	    net_check_compatible_parental_controls());
+#endif /* SKYWALK && XNU_TARGET_OS_OSX */
 
 	lck_rw_unlock_exclusive(&sock_filter_lock);
 
@@ -1620,10 +1659,16 @@ sock_inject_data_out(socket_t so, const struct sockaddr *to, mbuf_t data,
 		sosendflags = MSG_OOB;
 	}
 
+#if SKYWALK
+	sk_protect_t protect = sk_async_transmit_protect();
+#endif /* SKYWALK */
 
 	error = sosend(so, (struct sockaddr *)(uintptr_t)to, NULL,
 	    data, control, sosendflags);
 
+#if SKYWALK
+	sk_async_transmit_unprotect(protect);
+#endif /* SKYWALK */
 
 	return error;
 }
@@ -1664,3 +1709,43 @@ sockopt_copyout(sockopt_t sopt, void *data, size_t len)
 	return sooptcopyout(sopt, data, len);
 }
 
+#if defined(SKYWALK) && defined(XNU_TARGET_OS_OSX)
+static bool
+net_check_compatible_sfltr(void)
+{
+	if (net_api_stats.nas_sfltr_register_count > net_api_stats.nas_sfltr_register_os_count ||
+	    net_api_stats.nas_sfltr_register_os_count > 4) {
+		return false;
+	}
+	return true;
+}
+
+bool
+net_check_compatible_alf(void)
+{
+	int alf_perm;
+	size_t len = sizeof(alf_perm);
+	errno_t error;
+
+	error = kernel_sysctlbyname("net.alf.perm", &alf_perm, &len, NULL, 0);
+	if (error == 0) {
+		if (alf_perm != 0) {
+			return false;
+		}
+	}
+	return true;
+}
+
+static bool
+net_check_compatible_parental_controls(void)
+{
+	/*
+	 * Assumes the first 4 OS socket filters are for ALF and additional
+	 * OS filters are for Parental Controls web content filter
+	 */
+	if (net_api_stats.nas_sfltr_register_os_count > 4) {
+		return false;
+	}
+	return true;
+}
+#endif /* SKYWALK && XNU_TARGET_OS_OSX */

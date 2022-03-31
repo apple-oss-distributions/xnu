@@ -103,8 +103,7 @@ RB_HEAD( rb_head, vm_map_store );
 	assert(!VMHE_map->is_nested_map);                               \
 	VMHE_start= VMHE_map->highest_entry_end + PAGE_SIZE_64;         \
 	while(vm_map_lookup_entry(VMHE_map, VMHE_start, &tmp_entry)){   \
-	        VMHE_map->highest_entry_end = tmp_entry->vme_end;       \
-	        VMHE_start = VMHE_map->highest_entry_end + PAGE_SIZE_64; \
+	        VMHE_start = tmp_entry->vme_end + PAGE_SIZE_64; \
 	}                                                               \
 	entry = tmp_entry;                                              \
 	start = VMHE_start;                                             \

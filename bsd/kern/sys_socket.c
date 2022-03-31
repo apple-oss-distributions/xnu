@@ -120,7 +120,7 @@ soo_read(struct fileproc *fp, struct uio *uio, __unused int flags,
 	    struct uio *uio2, struct mbuf **mp0, struct mbuf **controlp,
 	    int *flagsp);
 
-	if ((so = (struct socket *)fp->fp_glob->fg_data) == NULL) {
+	if ((so = (struct socket *)fp_get_data(fp)) == NULL) {
 		/* This is not a valid open file descriptor */
 		return EBADF;
 	}
@@ -143,7 +143,7 @@ soo_write(struct fileproc *fp, struct uio *uio, __unused int flags,
 	    int flags2);
 	proc_t procp;
 
-	if ((so = (struct socket *)fp->fp_glob->fg_data) == NULL) {
+	if ((so = (struct socket *)fp_get_data(fp)) == NULL) {
 		/* This is not a valid open file descriptor */
 		return EBADF;
 	}
@@ -289,7 +289,7 @@ soo_ioctl(struct fileproc *fp, u_long cmd, caddr_t data, vfs_context_t ctx)
 	struct socket *so;
 	proc_t procp = vfs_context_proc(ctx);
 
-	if ((so = (struct socket *)fp->fp_glob->fg_data) == NULL) {
+	if ((so = (struct socket *)fp_get_data(fp)) == NULL) {
 		/* This is not a valid open file descriptor */
 		return EBADF;
 	}
@@ -300,7 +300,7 @@ soo_ioctl(struct fileproc *fp, u_long cmd, caddr_t data, vfs_context_t ctx)
 int
 soo_select(struct fileproc *fp, int which, void *wql, vfs_context_t ctx)
 {
-	struct socket *so = (struct socket *)fp->fp_glob->fg_data;
+	struct socket *so = (struct socket *)fp_get_data(fp);
 	int retnum = 0;
 	proc_t procp;
 
@@ -411,8 +411,8 @@ soo_close(struct fileglob *fg, __unused vfs_context_t ctx)
 	int error = 0;
 	struct socket *sp;
 
-	sp = (struct socket *)fg->fg_data;
-	fg->fg_data = NULL;
+	sp = (struct socket *)fg_get_data(fg);
+	fg_set_data(fg, NULL);
 
 	if (sp) {
 		error = soclose(sp);
@@ -425,7 +425,7 @@ static int
 soo_drain(struct fileproc *fp, __unused vfs_context_t ctx)
 {
 	int error = 0;
-	struct socket *so = (struct socket *)fp->fp_glob->fg_data;
+	struct socket *so = (struct socket *)fp_get_data(fp);
 
 	if (so) {
 		socket_lock(so, 1);

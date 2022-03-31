@@ -258,6 +258,10 @@ static const struct esp_algorithm chacha_poly = {
 	.finalizeencrypt = esp_chachapoly_encrypt_finalize
 };
 
+/*
+ * If any algorithm requires more than 2048 bits (256 bytes) of key material,
+ * update IPSEC_KEY_ENCRYPT_MAX_BYTES in ipsec.h
+ */
 static const struct esp_algorithm *esp_algorithms[] = {
 	&des_cbc,
 	&des3_cbc,

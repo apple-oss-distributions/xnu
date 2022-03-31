@@ -69,6 +69,7 @@
 #include <mach_assert.h>
 #include <kern/assert.h>
 #include <libkern/OSAtomic.h>
+#include <IOKit/IOLib.h>
 #include "gss_krb5_mech.h"
 
 LCK_GRP_DECLARE(gss_krb5_mech_grp, "gss_krb5_mech");
@@ -207,8 +208,6 @@ gss_krb5_key_ctx_free(krb5_key_t *krb_key, void *ctx_key)
 void
 gss_krb5_mech_init(void)
 {
-	extern void IOSleep(int);
-
 	/* Once initted always initted */
 	if (gss_krb5_mech_initted == GSS_KRB5_INITIALIZED) {
 		return;
@@ -2761,7 +2760,7 @@ xdr_lucid_context(void *data, uint32_t length, lucid_context_t lctx)
 	error = xb_get_bytes(&xb, (char *)lctx->ctx_key.key.key_val, keylen, 1);
 	if (error) {
 		printf("%s: could get key value\n", __func__);
-		xb_free(lctx->ctx_key.key.key_val);
+		xb_free_size(lctx->ctx_key.key.key_val, keylen);
 	}
 out:
 	return error;
@@ -2781,14 +2780,11 @@ gss_krb5_make_context(void *data, uint32_t datalen)
 	if (xdr_lucid_context(data, datalen, &ctx->gss_lucid_ctx) ||
 	    !supported_etype(ctx->gss_lucid_ctx.key_data.proto, ctx->gss_lucid_ctx.ctx_key.etype)) {
 		kfree_type(struct gss_ctx_id_desc, ctx);
-		FREE(data, M_TEMP);
 		return NULL;
 	}
 
 	/* Set up crypto context */
 	gss_crypto_ctx_init(&ctx->gss_cryptor, &ctx->gss_lucid_ctx);
-	FREE(data, M_TEMP);
-
 	return ctx;
 }
 
@@ -2799,7 +2795,7 @@ gss_krb5_destroy_context(gss_ctx_id_t ctx)
 		return;
 	}
 	gss_crypto_ctx_free(&ctx->gss_cryptor);
-	FREE(ctx->gss_lucid_ctx.ctx_key.key.key_val, M_TEMP);
+	xb_free(ctx->gss_lucid_ctx.ctx_key.key.key_val);
 	cc_clear(sizeof(lucid_context_t), &ctx->gss_lucid_ctx);
 	kfree_type(struct gss_ctx_id_desc, ctx);
 }

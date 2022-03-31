@@ -81,7 +81,7 @@ static void
 heap_cleanup(struct kasan_test *t)
 {
 	if (t->data) {
-		kfree(t->data, t->datasz);
+		kfree_data(t->data, t->datasz);
 		t->data = NULL;
 	}
 }
@@ -100,7 +100,7 @@ test_global_overflow(struct kasan_test __unused *t)
 static int
 test_heap_underflow(struct kasan_test __unused *t)
 {
-	uint8_t *x = kalloc(BUFSZ);
+	uint8_t *x = kalloc_data(BUFSZ, Z_WAITOK);
 	if (!x) {
 		return 1;
 	}
@@ -113,7 +113,7 @@ test_heap_underflow(struct kasan_test __unused *t)
 static int
 test_heap_overflow(struct kasan_test __unused *t)
 {
-	uint8_t *x = kalloc(BUFSZ);
+	uint8_t *x = kalloc_data(BUFSZ, Z_WAITOK);
 	if (!x) {
 		return 1;
 	}
@@ -126,11 +126,11 @@ test_heap_overflow(struct kasan_test __unused *t)
 static int
 test_heap_uaf(struct kasan_test __unused *t)
 {
-	uint8_t *x = kalloc(LBUFSZ);
+	uint8_t *x = kalloc_data(LBUFSZ, Z_WAITOK);
 	if (!x) {
 		return 1;
 	}
-	kfree(x, LBUFSZ);
+	kfree_data(x, LBUFSZ);
 	x[0] = 0x10;
 	return 0;
 }
@@ -140,7 +140,7 @@ test_heap_inval_free(struct kasan_test __unused *t)
 {
 	int x;
 	int *ptr = &x;
-	kfree(ptr, BUFSZ);
+	kfree_data(ptr, BUFSZ);
 	return 0;
 }
 
@@ -149,14 +149,14 @@ test_heap_double_free(struct kasan_test *t)
 {
 	TEST_START(t);
 
-	uint8_t *x = kalloc(BUFSZ);
+	uint8_t *x = kalloc_data(BUFSZ, Z_WAITOK);
 	if (!x) {
 		return 1;
 	}
-	kfree(x, BUFSZ);
+	kfree_data(x, BUFSZ);
 
 	TEST_FAULT(t);
-	kfree(x, BUFSZ);
+	kfree_data(x, BUFSZ);
 
 	return 0;
 }
@@ -166,7 +166,7 @@ test_heap_small_free(struct kasan_test *t)
 {
 	TEST_START(t);
 
-	uint8_t *x = kalloc(BUFSZ);
+	uint8_t *x = kalloc_data(BUFSZ, Z_WAITOK);
 	if (!x) {
 		return 1;
 	}
@@ -174,7 +174,7 @@ test_heap_small_free(struct kasan_test *t)
 	t->data = x;
 
 	TEST_FAULT(t);
-	kfree(x, BUFSZ - 2);
+	kfree_data(x, BUFSZ - 2);
 	t->data = NULL;
 	t->datasz = 0;
 
@@ -313,11 +313,11 @@ test_memcmp(struct kasan_test *t)
 	uint8_t *a1;
 	uint8_t *a2;
 
-	a1 = kalloc(STACK_ARRAY_SZ);
+	a1 = kalloc_data(STACK_ARRAY_SZ, Z_WAITOK);
 	if (!a1) {
 		return 1;
 	}
-	a2 = kalloc(STACK_ARRAY_SZ + 1);
+	a2 = kalloc_data(STACK_ARRAY_SZ + 1, Z_WAITOK);
 	if (!a2) {
 		return 1;
 	}
@@ -343,11 +343,11 @@ test_bcmp(struct kasan_test *t)
 	uint8_t *a1;
 	uint8_t *a2;
 
-	a1 = kalloc(STACK_ARRAY_SZ);
+	a1 = kalloc_data(STACK_ARRAY_SZ, Z_WAITOK);
 	if (!a1) {
 		return 1;
 	}
-	a2 = kalloc(STACK_ARRAY_SZ + 1);
+	a2 = kalloc_data(STACK_ARRAY_SZ + 1, Z_WAITOK);
 	if (!a2) {
 		return 1;
 	}

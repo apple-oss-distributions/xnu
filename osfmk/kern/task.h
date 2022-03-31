@@ -91,13 +91,13 @@
 #ifndef _KERN_TASK_H_
 #define _KERN_TASK_H_
 
-#include <kern/btlog.h>
 #include <kern/kern_types.h>
 #include <kern/task_ref.h>
 #include <mach/mach_types.h>
 #include <sys/cdefs.h>
 
 #ifdef XNU_KERNEL_PRIVATE
+#include <kern/btlog.h>
 #include <kern/kern_cdata.h>
 #include <mach/sfi_class.h>
 #include <kern/counter.h>
@@ -154,6 +154,11 @@ struct task_writes_counters {
 struct task_watchports;
 #include <bank/bank_internal.h>
 
+#ifdef MACH_BSD
+struct proc;
+struct proc_ro;
+#endif
+
 struct task {
 	/* Synchronization/destruction information */
 	decl_lck_mtx_data(, lock);      /* Task's lock */
@@ -204,10 +209,6 @@ struct task {
 	int16_t                 max_priority;           /* maximum priority for threads */
 
 	integer_t               importance;             /* priority offset (BSD 'nice' value) */
-
-	/* Task security and audit tokens */
-	security_token_t sec_token;
-	audit_token_t   audit_token;
 
 	/* Statistics */
 	uint64_t                total_user_time;        /* terminated threads only */
@@ -262,15 +263,14 @@ struct task {
 	uint32_t ps_switch;           /* total pset switches */
 
 #ifdef  MACH_BSD
-	void * XNU_PTRAUTH_SIGNED_PTR("task.bsd_info") bsd_info;
+	struct proc * XNU_PTRAUTH_SIGNED_PTR("task.bsd_info") bsd_info;
+	struct proc_ro *                bsd_info_ro;
 #endif
 	kcdata_descriptor_t             corpse_info;
 	uint64_t                        crashed_thread_id;
 	queue_chain_t                   corpse_tasks;
 #ifdef CONFIG_MACF
 	struct label *                  crash_label;
-	uint8_t *                       mach_trap_filter_mask;          /* Mach trap filter bitmask (len: mach_trap_count bits) */
-	uint8_t *                       mach_kobj_filter_mask;          /* Mach kobject filter bitmask (len: mach_kobj_count bits) */
 #endif
 	struct vm_shared_region         *shared_region;
 #if __has_feature(ptrauth_calls)
@@ -577,8 +577,7 @@ extern void             task_init(void);
 /* coalition_init() calls this to initialize ledgers before task_init() */
 extern void             init_task_ledgers(void);
 
-#define current_task_fast()     (current_thread()->task)
-#define current_task()          current_task_fast()
+extern task_t   current_task(void) __pure2;
 
 extern bool task_is_driver(task_t task);
 
@@ -588,6 +587,7 @@ extern lck_grp_t       task_lck_grp;
 struct task_watchport_elem {
 	task_t                          twe_task;
 	ipc_port_t                      twe_port;     /* (Space lock) */
+	ipc_port_t XNU_PTRAUTH_SIGNED_PTR("twe_pdrequest") twe_pdrequest;
 };
 
 struct task_watchports {
@@ -605,6 +605,7 @@ struct task_watchports {
 do {                                               \
 	(elem)->twe_task = (task);                 \
 	(elem)->twe_port = (port);                 \
+	(elem)->twe_pdrequest = IP_NULL;           \
 } while(0)
 
 #define task_watchport_elem_clear(elem) task_watchport_elem_init((elem), NULL, NULL)
@@ -660,11 +661,13 @@ convert_task_to_port_with_flavor(
 	mach_task_flavor_t      flavor,
 	task_grp_t              grp);
 
+extern task_t   current_task_early(void) __pure2;
+
 #else   /* MACH_KERNEL_PRIVATE */
 
 __BEGIN_DECLS
 
-extern task_t   current_task(void);
+extern task_t   current_task(void) __pure2;
 
 extern bool task_is_driver(task_t task);
 
@@ -785,8 +788,12 @@ extern void             task_complete_halt(
 extern kern_return_t    task_terminate_internal(
 	task_t                  task);
 
+struct proc_ro;
+typedef struct proc_ro *proc_ro_t;
+
 extern kern_return_t    task_create_internal(
 	task_t          parent_task,
+	proc_ro_t       proc_ro,
 	coalition_t     *parent_coalitions,
 	boolean_t       inherit_memory,
 	boolean_t       is_64bit,
@@ -855,7 +862,10 @@ extern void             task_set_64bit(
 	boolean_t       is_64bit,
 	boolean_t       is_64bit_data);
 
-extern boolean_t        task_get_64bit_data(
+extern bool             task_get_64bit_addr(
+	task_t task);
+
+extern bool             task_get_64bit_data(
 	task_t task);
 
 extern void     task_set_platform_binary(
@@ -1075,6 +1085,7 @@ struct _task_ledger_indices {
 #if CONFIG_PHYS_WRITE_ACCT
 	int fs_metadata_writes;
 #endif /* CONFIG_PHYS_WRITE_ACCT */
+	int swapins;
 };
 
 /*
@@ -1093,9 +1104,9 @@ struct _task_ledger_indices {
  * Otherwise, PPL systems will panic at boot.
  */
 #if DEVELOPMENT || DEBUG
-#define TASK_LEDGER_NUM_SMALL_INDICES 32
+#define TASK_LEDGER_NUM_SMALL_INDICES 33
 #else
-#define TASK_LEDGER_NUM_SMALL_INDICES 28
+#define TASK_LEDGER_NUM_SMALL_INDICES 29
 #endif /* DEVELOPMENT || DEBUG */
 extern struct _task_ledger_indices task_ledgers;
 
@@ -1255,6 +1266,7 @@ extern void task_set_ios13extended_footprint_limit(task_t task);
 
 #if CONFIG_MACF
 extern struct label *get_task_crash_label(task_t task);
+extern void set_task_crash_label(task_t task, struct label *label);
 #endif /* CONFIG_MACF */
 
 #endif  /* KERNEL_PRIVATE */

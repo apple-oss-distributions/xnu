@@ -129,7 +129,7 @@ OSSerialize::addBinaryObject(const OSMetaClassBase * o, uint32_t key,
 			headerSize += sizeof(uint32_t);
 		}
 		offset /= sizeof(uint32_t);
-		indexData->appendBytes(&offset, sizeof(offset));
+		indexData->appendValue(offset);
 	}
 
 	if (os_add3_overflow(size, headerSize, 3, &alignSize)) {
@@ -218,7 +218,7 @@ OSSerialize::binarySerializeInternal(const OSMetaClassBase *o)
 	OSBoolean    * boo;
 
 	unsigned int  tagIdx;
-	uint32_t   i, key, startCollection;
+	uint32_t   i, key, startCollection = 0;
 	uint32_t   len;
 	bool       ok;
 
@@ -334,8 +334,8 @@ OSSerialize::binarySerializeInternal(const OSMetaClassBase *o)
 	else                                                                   \
 	{                                                                      \
 	    uint32_t ncap = v##Capacity + 64;                                  \
-	    typeof(v##Array) nbuf = kalloc_type_tag_bt(OSObject *, ncap,       \
-	            Z_WAITOK_ZERO, VM_KERN_MEMORY_LIBKERN);                    \
+	    typeof(v##Array) nbuf = kallocp_type_container(OSObject *, &ncap,  \
+	            Z_WAITOK_ZERO);                                            \
 	    if (!nbuf) ok = false;                                             \
 	    else                                                               \
 	    {                                                                  \

@@ -52,9 +52,6 @@ extern struct arm_saved_state *find_kern_regs(thread_t);
 #error Unknown architecture
 #endif
 
-#undef ASSERT
-#define ASSERT(x) do {} while(0)
-
 extern void profile_init(void);
 
 static dtrace_provider_id_t profile_id;
@@ -434,7 +431,9 @@ profile_provide(void *arg, const dtrace_probedesc_t *desc)
 		suffix = &name[j];
 	}
 
-	ASSERT(suffix != NULL);
+	if (!suffix) {
+		suffix = &name[strlen(name)];
+	}
 
 	/*
 	 * Now determine the numerical value present in the probe name.

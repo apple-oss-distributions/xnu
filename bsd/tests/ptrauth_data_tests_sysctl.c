@@ -66,11 +66,11 @@ extern kern_return_t ptrauth_data_tests(void);
  * which should be subject to pointer signing.
  */
 #define ALLOC_VALIDATE_DATA_PTR(structure, decl, member, discr) { \
-	structure *tmp =  kalloc_flags(sizeof(structure), Z_WAITOK | Z_ZERO); \
+	structure *tmp =  kalloc_data(sizeof(structure), Z_WAITOK | Z_ZERO); \
 	if (!tmp) return ENOMEM; \
 	tmp->member = (void*)0xffffffff41414141; \
 	VALIDATE_DATA_PTR(decl, tmp->member, discr) \
-	kfree(tmp, sizeof(structure)); \
+	kfree_data(tmp, sizeof(structure)); \
 }
 
 #define VALIDATE_DATA_PTR(decl, ptr, discr) VALIDATE_PTR(decl, ptr, ptrauth_key_process_independent_data, discr)
@@ -96,14 +96,6 @@ sysctl_run_ptrauth_data_tests SYSCTL_HANDLER_ARGS
 	ALLOC_VALIDATE_DATA_PTR(struct proc, struct proc *, p_pptr, "proc.p_pptr");
 	ALLOC_VALIDATE_DATA_PTR(struct proc, struct vnode *, p_textvp, "proc.p_textvp");
 	ALLOC_VALIDATE_DATA_PTR(struct proc, struct pgrp *, p_pgrp.__hazard_ptr, "proc.p_pgrp");
-
-	/* cs_blob */
-	ALLOC_VALIDATE_DATA_PTR(struct cs_blob, struct cs_blob *, csb_next, "cs_blob.csb_next");
-	ALLOC_VALIDATE_DATA_PTR(struct cs_blob, const CS_CodeDirectory *, csb_cd, "cs_blob.csb_cd");
-	ALLOC_VALIDATE_DATA_PTR(struct cs_blob, const char *, csb_teamid, "cs_blob.csb_teamid");
-	ALLOC_VALIDATE_DATA_PTR(struct cs_blob, const CS_GenericBlob *, csb_entitlements_blob, "cs_blob.csb_entitlements_blob");
-	ALLOC_VALIDATE_DATA_PTR(struct cs_blob, const CS_GenericBlob *, csb_der_entitlements_blob, "cs_blob.csb_der_entitlements_blob");
-	ALLOC_VALIDATE_DATA_PTR(struct cs_blob, void *, csb_entitlements, "cs_blob.csb_entitlements");
 
 	/* The rest of the tests live in osfmk/ */
 	kr = ptrauth_data_tests();

@@ -124,8 +124,8 @@ struct selinfo {
 };
 
 #define SI_COLL         0x0001          /* obsolete */
-#define SI_RECORDED     0x0004          /* select has been recorded */
-#define SI_INITED       0x0008          /* selinfo has been inited */
+#define SI_RECORDED     0x0004          /* obsolete */
+#define SI_INITED       0x0008          /* obsolete */
 #define SI_CLEAR        0x0010          /* obsolete */
 #define SI_KNPOSTING    0x0020          /* posting to knotes */
 #define SI_SELSPEC      0x0040          /* has spec_filtops knote hooked */
@@ -161,7 +161,7 @@ struct  knote;
 struct  _select;
 void    select_cleanup_uthread(struct _select *);
 
-#define SELSPEC_RECORD_MARKER   ((struct waitq_set *)-1)
+#define SELSPEC_RECORD_MARKER   ((struct select_set *)-1)
 typedef void (^selspec_record_hook_t)(struct selinfo *sip);
 void selspec_attach(struct knote *, struct selinfo *);
 void selspec_detach(struct knote *);

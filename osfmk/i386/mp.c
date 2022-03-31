@@ -171,9 +171,9 @@ static LCK_MTX_EARLY_DECLARE(mp_bc_lock, &smp_lck_grp);
 static  volatile int    debugger_cpu = -1;
 volatile long    NMIPI_acks = 0;
 volatile long    NMI_count = 0;
-static NMI_reason_t     NMI_panic_reason = NONE;
 static int              vector_timed_out;
 
+NMI_reason_t    NMI_panic_reason = NONE;
 extern void     NMI_cpus(void);
 
 static void     mp_cpus_call_init(void);
@@ -558,6 +558,20 @@ cpu_signal_handler(x86_saved_state_t *regs)
 		}
 	} while (*my_word);
 
+	return 0;
+}
+
+long
+NMI_pte_corruption_callback(__unused void *arg0, __unused void *arg1, uint16_t lcpu)
+{
+	static char     pstr[256];      /* global since this callback is serialized */
+	void            *stackptr;
+	__asm__ volatile ("movq %%rbp, %0" : "=m" (stackptr));
+
+	snprintf(&pstr[0], sizeof(pstr),
+	    "Panic(CPU %d): PTE corruption detected on PTEP 0x%llx VAL 0x%llx\n",
+	    lcpu, (unsigned long long)(uintptr_t)PTE_corrupted_ptr, *(uint64_t *)PTE_corrupted_ptr);
+	panic_i386_backtrace(stackptr, 64, &pstr[0], TRUE, current_cpu_datap()->cpu_int_state);
 	return 0;
 }
 
@@ -1754,7 +1768,7 @@ mp_kdp_enter(boolean_t proceed_on_failure)
 				}
 			}
 		}
-	} else {
+	} else if (NMI_panic_reason != PTE_CORRUPTION) {  /* In the pte corruption case, the detecting CPU has already NMIed other CPUs */
 		for (cpu = 0; cpu < real_ncpus; cpu++) {
 			if (cpu == my_cpu || !cpu_is_running(cpu)) {
 				continue;
@@ -1804,8 +1818,10 @@ cpu_signal_pending(int cpu, mp_event_t event)
 
 long
 kdp_x86_xcpu_invoke(const uint16_t lcpu, kdp_x86_xcpu_func_t func,
-    void *arg0, void *arg1)
+    void *arg0, void *arg1, uint64_t timeout)
 {
+	uint64_t now;
+
 	if (lcpu > (real_ncpus - 1)) {
 		return -1;
 	}
@@ -1820,7 +1836,9 @@ kdp_x86_xcpu_invoke(const uint16_t lcpu, kdp_x86_xcpu_func_t func,
 	kdp_xcpu_call_func.arg1 = arg1;
 	kdp_xcpu_call_func.cpu  = lcpu;
 	DBG("Invoking function %p on CPU %d\n", func, (int32_t)lcpu);
-	while (kdp_xcpu_call_func.cpu != KDP_XCPU_NONE) {
+	now = mach_absolute_time();
+	while (kdp_xcpu_call_func.cpu != KDP_XCPU_NONE &&
+	    (timeout == 0 || (mach_absolute_time() - now) < timeout)) {
 		cpu_pause();
 	}
 	return kdp_xcpu_call_func.ret;

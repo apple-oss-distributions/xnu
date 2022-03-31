@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-from __future__ import print_function, division
+from __future__ import absolute_import, print_function, division
 import sys
 import struct
 import mmap
@@ -117,14 +117,13 @@ kcdata_type_def = {
     'STACKSHOT_KCCONTAINER_TRANSITIONING_TASK' : 0x931,
     'STACKSHOT_KCTYPE_USER_ASYNC_START_INDEX' : 0x932,
     'STACKSHOT_KCTYPE_USER_ASYNC_STACKLR64' : 0x933,
-
+    'STACKSHOT_KCCONTAINER_PORTLABEL' : 0x934,
+    'STACKSHOT_KCTYPE_PORTLABEL' : 0x935,
+    'STACKSHOT_KCTYPE_PORTLABEL_NAME' : 0x936,
     'STACKSHOT_KCTYPE_TASK_DELTA_SNAPSHOT': 0x940,
     'STACKSHOT_KCTYPE_THREAD_DELTA_SNAPSHOT': 0x941,
 
-
-
     'KCDATA_TYPE_BUFFER_END':      0xF19158ED,
-
 
     'TASK_CRASHINFO_EXTMODINFO':           0x801,
     'TASK_CRASHINFO_BSDINFOWITHUNIQID':    0x802,
@@ -417,6 +416,7 @@ kcdata_type_def_rev[GetTypeForName('KCDATA_BUFFER_BEGIN_OS_REASON')] = 'kcdata_r
 kcdata_type_def_rev[GetTypeForName('STACKSHOT_KCCONTAINER_TASK')] = 'task_snapshots'
 kcdata_type_def_rev[GetTypeForName('STACKSHOT_KCCONTAINER_TRANSITIONING_TASK')] = 'transitioning_task_snapshots'
 kcdata_type_def_rev[GetTypeForName('STACKSHOT_KCCONTAINER_THREAD')] = 'thread_snapshots'
+kcdata_type_def_rev[GetTypeForName('STACKSHOT_KCCONTAINER_PORTLABEL')] = 'portlabels'
 kcdata_type_def_rev[GetTypeForName('KCDATA_BUFFER_BEGIN_XNUPOST_CONFIG')] = 'xnupost_testconfig'
 
 class Indent(object):
@@ -1108,7 +1108,9 @@ KNOWN_TYPES_COLLECTION[GetTypeForName('STACKSHOT_KCTYPE_THREAD_WAITINFO')] = KCT
                         KCSubTypeElement.FromBasicCtype('owner', KCSUBTYPE_TYPE.KC_ST_UINT64, 0),
                         KCSubTypeElement.FromBasicCtype('waiter', KCSUBTYPE_TYPE.KC_ST_UINT64, 8),
                         KCSubTypeElement.FromBasicCtype('context', KCSUBTYPE_TYPE.KC_ST_UINT64, 16),
-                        KCSubTypeElement.FromBasicCtype('wait_type', KCSUBTYPE_TYPE.KC_ST_UINT8, 24)
+                        KCSubTypeElement.FromBasicCtype('wait_type', KCSUBTYPE_TYPE.KC_ST_UINT8, 24),
+                        KCSubTypeElement.FromBasicCtype('portlabel_id', KCSUBTYPE_TYPE.KC_ST_INT16, 25),
+                        KCSubTypeElement.FromBasicCtype('wait_flags', KCSUBTYPE_TYPE.KC_ST_INT32, 27)
             ),
             'thread_waitinfo')
 
@@ -1119,8 +1121,20 @@ KNOWN_TYPES_COLLECTION[GetTypeForName('STACKSHOT_KCTYPE_THREAD_TURNSTILEINFO')] 
                         KCSubTypeElement.FromBasicCtype('turnstile_priority', KCSUBTYPE_TYPE.KC_ST_UINT8, 16),
                         KCSubTypeElement.FromBasicCtype('number_of_hops', KCSUBTYPE_TYPE.KC_ST_UINT8, 17),
                         KCSubTypeElement.FromBasicCtype('turnstile_flags', KCSUBTYPE_TYPE.KC_ST_UINT64, 18),
+                        KCSubTypeElement.FromBasicCtype('portlabel_id', KCSUBTYPE_TYPE.KC_ST_INT16, 26),
             ),
             'thread_turnstileinfo')
+
+KNOWN_TYPES_COLLECTION[GetTypeForName('STACKSHOT_KCTYPE_PORTLABEL')] = KCTypeDescription(GetTypeForName('STACKSHOT_KCTYPE_PORTLABEL'),
+            (
+                        KCSubTypeElement.FromBasicCtype('portlabel_id', KCSUBTYPE_TYPE.KC_ST_INT16, 0),
+                        KCSubTypeElement.FromBasicCtype('portlabel_flags', KCSUBTYPE_TYPE.KC_ST_UINT16, 2),
+                        KCSubTypeElement.FromBasicCtype('portlabel_domain', KCSUBTYPE_TYPE.KC_ST_UINT8, 4),
+            ),
+            'portlabel_info', merge=True)
+
+KNOWN_TYPES_COLLECTION[GetTypeForName('STACKSHOT_KCTYPE_PORTLABEL_NAME')] = (
+    KCSubTypeElement("portlabel_name", KCSUBTYPE_TYPE.KC_ST_CHAR, KCSubTypeElement.GetSizeForArray(-1, 1), 0, 1))
 
 KNOWN_TYPES_COLLECTION[GetTypeForName('STACKSHOT_KCTYPE_THREAD_GROUP_SNAPSHOT')] = KCTypeDescription(GetTypeForName('STACKSHOT_KCTYPE_THREAD_GROUP'),
             (
@@ -1128,6 +1142,8 @@ KNOWN_TYPES_COLLECTION[GetTypeForName('STACKSHOT_KCTYPE_THREAD_GROUP_SNAPSHOT')]
                         KCSubTypeElement('tgs_name', KCSUBTYPE_TYPE.KC_ST_CHAR, KCSubTypeElement.GetSizeForArray(16, 1),
                             8, 1),
                         KCSubTypeElement.FromBasicCtype('tgs_flags', KCSUBTYPE_TYPE.KC_ST_UINT64, 24),
+                        KCSubTypeElement('tgs_name_cont', KCSUBTYPE_TYPE.KC_ST_CHAR, KCSubTypeElement.GetSizeForArray(16, 1),
+                            32, 1),
             ),
             'thread_group_snapshot')
 
@@ -1485,14 +1501,46 @@ STACKSHOT_TURNSTILE_STATUS_WORKQUEUE       = 0x04
 STACKSHOT_TURNSTILE_STATUS_THREAD          = 0x08
 STACKSHOT_TURNSTILE_STATUS_BLOCKED_ON_TASK = 0x10
 STACKSHOT_TURNSTILE_STATUS_HELD_IPLOCK     = 0x20
+STACKSHOT_TURNSTILE_STATUS_SENDPORT        = 0x40
+STACKSHOT_TURNSTILE_STATUS_RECEIVEPORT     = 0x80
 
-def formatWaitInfo(info, wantHex):
+#
+# These come from xpc_domain_type_t in <xpc/launch_private.h>
+PORTLABEL_DOMAINS = {
+    1: 'system',        # XPC_DOMAIN_SYSTEM
+    2: 'user',          # XPC_DOMAIN_USER
+    5: 'pid',           # XPC_DOMAIN_PID
+    7: 'port',          # XPC_DOMAIN_PORT
+}
+def portlabel_domain(x):
+    if x is None:
+        return "unknown"
+    return PORTLABEL_DOMAINS.get(x, "unknown.{}".format(x))
+
+STACKSHOT_WAITINFO_FLAGS_SPECIALREPLY = 0x1
+
+def formatPortLabelID(portlabel_id, portlabels):
+    if portlabel_id > 0:
+        portlabel = {}
+        if portlabels is not None:
+            portlabel = portlabels.get(str(portlabel_id), {})
+        portlabel_name = portlabel_domain(portlabel.get('portlabel_domain')) + " "
+        portlabel_name += portlabel.get("portlabel_name", "!!!unknown, ID {} !!!".format(portlabel_id));
+        return " {" + portlabel_name + "}"
+    if portlabel_id < 0:
+        return" {labeled, info trucated}"
+    return ""
+
+def formatWaitInfo(info, wantHex, portlabels):
     base='#x' if wantHex else 'd'
     s = 'thread {0:{base}}: '.format(info['waiter'], base=base)
     type = info['wait_type']
     context = info['context']
     owner = info['owner']
     ownerThread = "{0:{base}}".format(owner, base=base)
+    portlabel_id = info.get('portlabel_id', 0)
+    flags = info.get('wait_flags', 0)
+
     if type == kThreadWaitKernelMutex:
         s += 'kernel mutex %x' % context
         if owner == STACKSHOT_WAITOWNER_MTXSPIN:
@@ -1503,6 +1551,9 @@ def formatWaitInfo(info, wantHex):
             s += "with unknown owner"
     elif type == kThreadWaitPortReceive:
         s += "mach_msg receive on "
+        if flags & STACKSHOT_WAITINFO_FLAGS_SPECIALREPLY:
+            s += "REPLY "
+            flags = flags - STACKSHOT_WAITINFO_FLAGS_SPECIALREPLY
         if owner == STACKSHOT_WAITOWNER_PORT_LOCKED:
             s += "locked port %x" % context
         elif owner == STACKSHOT_WAITOWNER_INTRANSIT:
@@ -1542,10 +1593,16 @@ def formatWaitInfo(info, wantHex):
             s += "with unknown owner"
     elif type == kThreadWaitKernelRWLockRead:
         s += "krwlock %x for reading" % context
+        if owner:
+            s += " owned by thread %s" % ownerThread
     elif type == kThreadWaitKernelRWLockWrite:
         s += "krwlock %x for writing" % context
+        if owner:
+            s += " owned by thread %s" % ownerThread
     elif type == kThreadWaitKernelRWLockUpgrade:
         s += "krwlock %x for upgrading" % context
+        if owner:
+            s += " owned by thread %s" % ownerThread
     elif type == kThreadWaitUserLock:
         if owner:
             s += "unfair lock %x owned by thread %s" % (context, ownerThread)
@@ -1597,9 +1654,13 @@ def formatWaitInfo(info, wantHex):
     else:
         s += "unknown type %d (owner %s, context %x)" % (type, ownerThread, context)
 
+    s += formatPortLabelID(portlabel_id, portlabels)
+
+    if flags != 0:
+        s += "flags {}".format(hex(flags))
     return s
 
-def formatTurnstileInfo(ti):
+def formatTurnstileInfo(ti, wi_portlabel_id, portlabels):
     if ti is None:
         return " [no turnstile]"
 
@@ -1607,22 +1668,28 @@ def formatTurnstileInfo(ti):
     ctx = int(ti['turnstile_context'])
     hop = int(ti['number_of_hops'])
     prio = int(ti['turnstile_priority'])
+    portlabel_id = ti.get("portlabel_id", 0)
+
+    portlabel_summary = ""
+    if portlabel_id != 0 and portlabel_id != wi_portlabel_id:
+        portlabel_summary += formatPortLabelID(portlabel_id, portlabels)
+
     if ts_flags & STACKSHOT_TURNSTILE_STATUS_HELD_IPLOCK:
-        return " [turnstile blocked on task, but ip_lock was held]"
+        return " [turnstile blocked on task, but ip_lock was held]" + portlabel_summary
     if ts_flags & STACKSHOT_TURNSTILE_STATUS_BLOCKED_ON_TASK:
-        return " [turnstile blocked on task pid %d, hops: %d, priority: %d]" % (ctx, hop, prio)
+        return " [turnstile blocked on task pid %d, hops: %d, priority: %d]%s" % (ctx, hop, prio, portlabel_summary)
     if ts_flags & STACKSHOT_TURNSTILE_STATUS_LOCKED_WAITQ:
-        return " [turnstile was in process of being updated]"
+        return " [turnstile was in process of being updated]" + portlabel_summary
     if ts_flags & STACKSHOT_TURNSTILE_STATUS_WORKQUEUE:
-        return " [blocked on workqueue: 0x%x, hops: %x, priority: %d]" % (ctx, hop, prio)
+        return " [blocked on workqueue: 0x%x, hops: %x, priority: %d]%s" % (ctx, hop, prio, portlabel_summary)
     if ts_flags & STACKSHOT_TURNSTILE_STATUS_THREAD:
-        return " [blocked on: %d, hops: %x, priority: %d]" % (ctx, hop, prio)
+        return " [blocked on: %d, hops: %x, priority: %d]%s" % (ctx, hop, prio, portlabel_summary)
     if ts_flags & STACKSHOT_TURNSTILE_STATUS_UNKNOWN:
-        return " [turnstile with unknown inheritor]"
+        return " [turnstile with unknown inheritor]" + portlabel_summary
 
-    return " [unknown turnstile status!]"
+    return " [unknown turnstile status!]" + portlabel_summary
 
-def formatWaitInfoWithTurnstiles(waitinfos, tsinfos):
+def formatWaitInfoWithTurnstiles(waitinfos, tsinfos, portlabels):
     wis_tis = []
     for w in waitinfos:
         found_pair = False
@@ -1634,7 +1701,7 @@ def formatWaitInfoWithTurnstiles(waitinfos, tsinfos):
         if not found_pair:
             wis_tis.append((w, None))
 
-    return list(map(lambda x: formatWaitInfo(x[0], False) + formatTurnstileInfo(x[1]), wis_tis))
+    return [formatWaitInfo(wi, False, portlabels) + formatTurnstileInfo(ti, wi.get('portlabel_id', 0), portlabels) for (wi, ti) in wis_tis]
 
 def SaveStackshotReport(j, outfile_name, incomplete):
     import time
@@ -1725,6 +1792,7 @@ def SaveStackshotReport(j, outfile_name, incomplete):
 
     processByPid = obj["processByPid"]
     ssplist = ss.get('task_snapshots', {})
+    ssplist.update(ss.get('transitioning_task_snapshots', {}))
     kern_load_info = []
     if "0" in ssplist:
         kc_uuid = ssplist["0"].get('kernelcache_load_info', None)
@@ -1772,9 +1840,16 @@ def SaveStackshotReport(j, outfile_name, incomplete):
 
         pr_libs.sort(key=itemgetter(1))
 
-        if 'task_snapshot' not in piddata:
-            continue
-        tasksnap = piddata['task_snapshot']
+        ttsnap = piddata.get('transitioning_task_snapshot', None)
+        if ttsnap is not None:
+            # Transitioning task snapshots have "tts_" prefixes; change them to
+            # "ts_".
+            ttsnap = { key[1:] : value for key,value in ttsnap.items() }
+            # Add a note to let people know
+            obj["notes"] = obj["notes"] + "PID {} is a transitioning (exiting) task. ".format(pid)
+        tasksnap = piddata.get('task_snapshot', ttsnap);
+        if tasksnap is None:
+            continue;
         tsnap["pid"] = tasksnap["ts_pid"]
         if 'ts_asid' in piddata:
             tsnap["asid"] = piddata["ts_asid"]
@@ -1785,15 +1860,18 @@ def SaveStackshotReport(j, outfile_name, incomplete):
                 pagetables.append(tte)
             tsnap["pageTables"] = pagetables
 
-        tsnap["residentMemoryBytes"] = tasksnap["ts_task_size"]
-        tsnap["timesDidThrottle"] = tasksnap["ts_did_throttle"]
-        tsnap["systemTimeTask"] = GetSecondsFromMATime(tasksnap["ts_system_time_in_terminated_th"], timebase)
-        tsnap["pageIns"] = tasksnap["ts_pageins"]
-        tsnap["pageFaults"] = tasksnap["ts_faults"]
-        tsnap["userTimeTask"] = GetSecondsFromMATime(tasksnap[  "ts_user_time_in_terminated_thre"], timebase)
+        # Some fields are missing from transitioning_task snapshots.
+        if ttsnap is None:
+            tsnap["residentMemoryBytes"] = tasksnap["ts_task_size"]
+            tsnap["timesDidThrottle"] = tasksnap["ts_did_throttle"]
+            tsnap["systemTimeTask"] = GetSecondsFromMATime(tasksnap["ts_system_time_in_terminated_th"], timebase)
+            tsnap["pageIns"] = tasksnap["ts_pageins"]
+            tsnap["pageFaults"] = tasksnap["ts_faults"]
+            tsnap["userTimeTask"] = GetSecondsFromMATime(tasksnap["ts_user_time_in_terminated_thre"], timebase)
         tsnap["procname"] = tasksnap["ts_p_comm"]
-        tsnap["copyOnWriteFaults"] = tasksnap["ts_cow_faults"]
-        tsnap["timesThrottled"] = tasksnap["ts_was_throttled"]
+        if ttsnap is None:
+            tsnap["copyOnWriteFaults"] = tasksnap["ts_cow_faults"]
+            tsnap["timesThrottled"] = tasksnap["ts_was_throttled"]
         tsnap["threadById"] = {}
         threadByID = tsnap["threadById"]
         thlist = piddata.get('thread_snapshots', {})
@@ -1838,10 +1916,10 @@ def SaveStackshotReport(j, outfile_name, incomplete):
                 thsnap["waitEvent"] = GetSymbolInfoForFrame(AllImageCatalog, pr_libs, threadsnap['ths_wait_event'])
 
         if 'thread_waitinfo' in piddata and 'thread_turnstileinfo' in piddata:
-            tsnap['waitInfo'] = formatWaitInfoWithTurnstiles(piddata['thread_waitinfo'] , piddata['thread_turnstileinfo'])
+            tsnap['waitInfo'] = formatWaitInfoWithTurnstiles(piddata['thread_waitinfo'], piddata['thread_turnstileinfo'], piddata.get('portlabels', None))
         elif 'thread_waitinfo' in piddata:
-            tsnap['waitInfo'] = [formatWaitInfo(x, False) for x in piddata['thread_waitinfo']]
-
+            portlabels = ss.get('portlabels', None)
+            tsnap['waitInfo'] = [formatWaitInfo(x, False, portlabels) for x in piddata['thread_waitinfo']]
     obj['binaryImages'] = AllImageCatalog
     if outfile_name == '-':
         fh = sys.stdout
@@ -2072,6 +2150,7 @@ PRETTIFY_FLAGS = {
     ],
 }
 PRETTIFY_FLAGS['stackshot_out_flags'] = PRETTIFY_FLAGS['stackshot_in_flags']
+PRETTIFY_FLAGS['tts_ss_flags'] = PRETTIFY_FLAGS['ts_ss_flags']
 
 # Fields which should never be hexified
 PRETTIFY_DONTHEX = {
@@ -2106,7 +2185,7 @@ def prettify_flags(v, flags):
         output += "|" + prettify_hex(rest)
     return prettify_hex(v) + " (" + output[1:] + ")"
 
-def prettify_core(data, mosthex, key):
+def prettify_core(data, mosthex, key, portlabels):
     if key == 'stack_contents':
         (address,) = struct.unpack("<Q", struct.pack("B"*8, *data))
         return '0x%X' % address
@@ -2115,17 +2194,19 @@ def prettify_core(data, mosthex, key):
         if 'uuid' in key.lower() and len(data) == 16:
             return '%02X%02X%02X%02X-%02X%02X-%02X%02X-%02X%02X-%02X%02X%02X%02X%02X%02X' % tuple(data)
 
-        return [prettify_core(x, mosthex, key) for x in data]
+        return [prettify_core(x, mosthex, key, portlabels) for x in data]
 
     elif key == 'thread_waitinfo':
-        return formatWaitInfo(data, mosthex)
+        return formatWaitInfo(data, mosthex, portlabels)
 
     elif isinstance(data, dict):
+        if 'portlabels' in data:
+            portlabels = data['portlabels']
         newdata = dict()
         for key, value in data.items():
             if mosthex and key != 'task_snapshots' and len(key) > 0 and key.isnumeric():
                 key = prettify_hex(int(key))
-            newdata[key] = prettify_core(value, mosthex, key)
+            newdata[key] = prettify_core(value, mosthex, key, portlabels)
         return newdata
 
     elif 'address' in key.lower() and isinstance(data, (int, long)):
@@ -2148,7 +2229,7 @@ def prettify_core(data, mosthex, key):
         return data
 
 def prettify(data, mosthex):
-    return prettify_core(data, mosthex, "")
+    return prettify_core(data, mosthex, "", None)
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Decode a kcdata binary file.")

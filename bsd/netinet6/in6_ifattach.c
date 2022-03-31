@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2003-2020 Apple Inc. All rights reserved.
+ * Copyright (c) 2003-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -102,10 +102,6 @@ int ip6_auto_linklocal = 1;     /* enable by default */
 
 extern struct inpcbinfo udbinfo;
 extern struct inpcbinfo ripcbinfo;
-
-static const unsigned int in6_extra_size = sizeof(struct in6_ifextra);
-static const unsigned int in6_extra_bufsize = in6_extra_size +
-    sizeof(void *) + sizeof(uint64_t);
 
 static int get_rand_iid(struct ifnet *, struct in6_addr *);
 static int in6_generate_tmp_iid(u_int8_t *, const u_int8_t *, u_int8_t *);
@@ -706,8 +702,6 @@ in6_domifattach(struct ifnet *ifp)
 int
 in6_ifattach_prelim(struct ifnet *ifp)
 {
-	struct in6_ifextra *ext;
-	void **pbuf, *base;
 	int error = 0;
 	struct in6_ifaddr *ia6 = NULL;
 
@@ -744,20 +738,7 @@ skipmcast:
 #endif
 
 	if (ifp->if_inet6data == NULL) {
-		ext = (struct in6_ifextra *)_MALLOC(in6_extra_bufsize, M_IFADDR,
-		    M_WAITOK | M_ZERO);
-		if (!ext) {
-			return ENOMEM;
-		}
-		base = (void *)P2ROUNDUP((intptr_t)ext + sizeof(uint64_t),
-		    sizeof(uint64_t));
-		VERIFY(((intptr_t)base + in6_extra_size) <=
-		    ((intptr_t)ext + in6_extra_bufsize));
-		pbuf = (void **)((intptr_t)base - sizeof(void *));
-		*pbuf = ext;
-		ifp->if_inet6data = base;
-		IN6_IFEXTRA(ifp)->ii_llt = in6_lltattach(ifp);
-		VERIFY(IS_P2ALIGNED(ifp->if_inet6data, sizeof(uint64_t)));
+		ifp->if_inet6data = zalloc_permanent_type(struct in6_ifextra);
 	} else {
 		/*
 		 * Since the structure is never freed, we need to zero out

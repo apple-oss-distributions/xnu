@@ -2073,11 +2073,8 @@ nfs4_parsefattr(
 			error = EBADRPC;
 		}
 		nfsmout_if(error);
-		if (fsp->np_compcount) {
-			MALLOC(fsp->np_components, char **, fsp->np_compcount * sizeof(char*), M_TEMP, M_WAITOK | M_ZERO);
-			if (!fsp->np_components) {
-				error = ENOMEM;
-			}
+		if (!nfs_fs_path_init(fsp, fsp->np_compcount)) {
+			error = ENOMEM;
 		}
 		for (comp = 0; comp < fsp->np_compcount; comp++) {
 			nfsm_chain_get_32(error, nmc, val); /* component length */
@@ -2091,8 +2088,7 @@ nfs4_parsefattr(
 				comp--;
 				fsp->np_compcount--;
 				if (fsp->np_compcount == 0) {
-					FREE(fsp->np_components, M_TEMP);
-					fsp->np_components = NULL;
+					nfs_fs_path_destroy(fsp);
 				}
 				attrbytes -= NFSX_UNSIGNED;
 				continue;
@@ -2117,7 +2113,8 @@ nfs4_parsefattr(
 		}
 		nfsmout_if(error);
 		if (nfslsp->nl_numlocs > 0) {
-			MALLOC(nfslsp->nl_locations, struct nfs_fs_location **, nfslsp->nl_numlocs * sizeof(struct nfs_fs_location*), M_TEMP, M_WAITOK | M_ZERO);
+			nfslsp->nl_locations = kalloc_type(struct nfs_fs_location *,
+			    nfslsp->nl_numlocs, Z_WAITOK | Z_ZERO);
 			if (!nfslsp->nl_locations) {
 				error = ENOMEM;
 			}
@@ -2137,7 +2134,8 @@ nfs4_parsefattr(
 				error = EBADRPC;
 			}
 			nfsmout_if(error);
-			MALLOC(fsl->nl_servers, struct nfs_fs_server **, fsl->nl_servcount * sizeof(struct nfs_fs_server*), M_TEMP, M_WAITOK | M_ZERO);
+			fsl->nl_servers = kalloc_type(struct nfs_fs_server *,
+			    fsl->nl_servcount, Z_WAITOK | Z_ZERO);
 			if (!fsl->nl_servers) {
 				error = ENOMEM;
 			}
@@ -2164,7 +2162,8 @@ nfs4_parsefattr(
 				/* copy name to address if it converts to a sockaddr */
 				if (nfs_uaddr2sockaddr(fss->ns_name, (struct sockaddr*)&ss)) {
 					fss->ns_addrcount = 1;
-					MALLOC(fss->ns_addresses, char **, sizeof(char *), M_TEMP, M_WAITOK | M_ZERO);
+					fss->ns_addresses = kalloc_type(char *,
+					    fss->ns_addrcount, Z_WAITOK | Z_ZERO);
 					if (!fss->ns_addresses) {
 						error = ENOMEM;
 					}
@@ -2186,11 +2185,8 @@ nfs4_parsefattr(
 				error = EINVAL;
 			}
 			nfsmout_if(error);
-			if (fsp->np_compcount) {
-				MALLOC(fsp->np_components, char **, fsp->np_compcount * sizeof(char*), M_TEMP, M_WAITOK | M_ZERO);
-				if (!fsp->np_components) {
-					error = ENOMEM;
-				}
+			if (!nfs_fs_path_init(fsp, fsp->np_compcount)) {
+				error = ENOMEM;
 			}
 			for (comp = 0; comp < fsp->np_compcount; comp++) {
 				nfsm_chain_get_32(error, nmc, val); /* component length */
@@ -2204,8 +2200,7 @@ nfs4_parsefattr(
 					comp--;
 					fsp->np_compcount--;
 					if (fsp->np_compcount == 0) {
-						FREE(fsp->np_components, M_TEMP);
-						fsp->np_components = NULL;
+						nfs_fs_path_destroy(fsp);
 					}
 					attrbytes -= NFSX_UNSIGNED;
 					continue;

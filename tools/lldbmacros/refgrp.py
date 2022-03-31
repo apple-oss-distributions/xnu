@@ -1,3 +1,5 @@
+from __future__ import absolute_import, division, print_function
+
 from xnu import *
 
 
@@ -26,10 +28,10 @@ def ShowOSRefGrpHelper(cmd_args=None):
 
     refgrp = kern.GetValueFromAddress(cmd_args[0], 'struct os_refgrp *')
     if not refgrp:
-        raise ("Unknown arguments: %r" % cmd_args)
+        raise ArgumentError("Unknown arguments: {:s}".format(cmd_args[0]))
 
-    print GetOSRefGrpSummary.header
-    print GetOSRefGrpSummary(refgrp)
+    print(GetOSRefGrpSummary.header)
+    print(GetOSRefGrpSummary(refgrp))
 # EndMacro: showosrefgrp
 
 
@@ -43,7 +45,7 @@ def ShowOSRefGrpHierarchy(cmd_args=None):
 
     refgrp = kern.GetValueFromAddress(cmd_args[0], 'struct os_refgrp *')
     if not refgrp:
-        raise ("Unknown arguments: %r" % cmd_args)
+        raise ArgumentError("Unknown arguments: {:s}".format(cmd_args[0]))
 
     grps = []
 
@@ -53,7 +55,7 @@ def ShowOSRefGrpHierarchy(cmd_args=None):
         parent = parent.grp_parent
 
     for grp in grps:
-        print GetOSRefGrpSummary(grp)
+        print(GetOSRefGrpSummary(grp))
 # EndMacro: showosrefgrphierarchy
 
 # Macro: showglobaltaskrefgrps
@@ -63,15 +65,15 @@ def ShowGlobalTaskRefGrps(cmd_args=None):
         Usage: showglobaltaskrefgrps
     """
 
-    print GetOSRefGrpSummary.header
+    print(GetOSRefGrpSummary.header)
 
     # First print global groups
     task_refgrp = kern.globals.task_refgrp
-    count = sizeof(task_refgrp) / sizeof('struct os_refgrp *')
+    count = sizeof(task_refgrp) // sizeof('struct os_refgrp *')
     i = 0
     while i < count:
         if task_refgrp[i].grp_retain_total != 0:
-            print GetOSRefGrpSummary(task_refgrp[i])
+            print(GetOSRefGrpSummary(task_refgrp[i]))
         i += 1
 
     # Then print kext groups
@@ -82,7 +84,7 @@ def ShowGlobalTaskRefGrps(cmd_args=None):
         g = a.account.task_refgrp
 
         if g.grp_retain_total != 0:
-            print GetOSRefGrpSummary(addressof(g))
+            print(GetOSRefGrpSummary(addressof(g)))
         i += 1
 # EndMacro: showglobaltaskrefgrps
 
@@ -98,7 +100,7 @@ def ShowTaskRefGrps(cmd_args=None):
         raise ArgumentError("Invalid arguments passed.")
     tval = kern.GetValueFromAddress(cmd_args[0], 'task *')
 
-    print GetOSRefGrpSummary.header
+    print(GetOSRefGrpSummary.header)
 
     grp = tval.ref_group
     if kern.globals.task_refgrp_config == 0:
@@ -110,7 +112,7 @@ def ShowTaskRefGrps(cmd_args=None):
     i = 0
     while i < count:
         if grp[i].grp_retain_total != 0:
-            print GetOSRefGrpSummary(addressof(grp[i]))
+            print(GetOSRefGrpSummary(addressof(grp[i])))
         i += 1
 
 # EndMacro: showtaskrefgrps

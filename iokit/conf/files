@@ -142,4 +142,5 @@ iokit/Families/IOSystemManagement/IOWatchDogTimer.cpp	optional iokitcpp
 # Performance Control
 iokit/Kernel/IOPerfControl.cpp		optional iokitcpp
 
-iokit/bsddev/skywalk/IOSkywalkSupport.cpp		optional iokitcpp
+# Skywalk
+iokit/bsddev/skywalk/IOSkywalkSupport.cpp		optional iokitcpp skywalk

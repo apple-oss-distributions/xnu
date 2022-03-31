@@ -1579,6 +1579,9 @@ mptcp_setopt(struct mptses *mpte, struct sockopt *sopt)
 
 	mp_so = mptetoso(mpte);
 
+	VERIFY(!(mpsotomppcb(mp_so)->mpp_flags & MPP_INSIDE_SETGETOPT));
+	mpsotomppcb(mp_so)->mpp_flags |= MPP_INSIDE_SETGETOPT;
+
 	/*
 	 * Record socket options which are applicable to subflow sockets so
 	 * that we can replay them for new ones; see mptcp_usr_socheckopt()
@@ -1898,12 +1901,14 @@ mptcp_setopt(struct mptses *mpte, struct sockopt *sopt)
 
 out:
 
+	mpsotomppcb(mp_so)->mpp_flags &= ~MPP_INSIDE_SETGETOPT;
 	return 0;
 
 err_out:
 	os_log_error(mptcp_log_handle, "%s - %lx: sopt %s (%d, %d) val %d can't be issued error %d\n",
 	    __func__, (unsigned long)VM_KERNEL_ADDRPERM(mpte),
 	    mptcp_sopt2str(level, optname), level, optname, optval, error);
+	mpsotomppcb(mp_so)->mpp_flags &= ~MPP_INSIDE_SETGETOPT;
 	return error;
 }
 
@@ -2038,6 +2043,12 @@ static int
 mptcp_getopt(struct mptses *mpte, struct sockopt *sopt)
 {
 	int error = 0, optval = 0;
+	struct socket *mp_so;
+
+	mp_so = mptetoso(mpte);
+
+	VERIFY(!(mpsotomppcb(mp_so)->mpp_flags & MPP_INSIDE_SETGETOPT));
+	mpsotomppcb(mp_so)->mpp_flags |= MPP_INSIDE_SETGETOPT;
 
 	/*
 	 * We only handle SOPT_GET for TCP level socket options; we should
@@ -2123,6 +2134,7 @@ mptcp_getopt(struct mptses *mpte, struct sockopt *sopt)
 	}
 
 out:
+	mpsotomppcb(mp_so)->mpp_flags &= ~MPP_INSIDE_SETGETOPT;
 	return error;
 }
 

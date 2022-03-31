@@ -69,6 +69,7 @@
 
 #include <kern/zalloc.h>
 #include <kern/kalloc.h>
+#include <sys/ubc.h> /* mach_to_bsd_errno */
 
 #include <sys/malloc.h>
 #include <sys/sysctl.h>
@@ -76,19 +77,30 @@
 #include <libkern/libkern.h>
 
 ZONE_VIEW_DEFINE(ZV_NAMEI, "vfs.namei", KHEAP_ID_DATA_BUFFERS, MAXPATHLEN);
+KALLOC_HEAP_DEFINE(KERN_OS_MALLOC, "kern_os_malloc", KHEAP_ID_KEXT);
 
-static void *
-__MALLOC_ext(
-	size_t          size,
-	int             type,
-	int             flags,
-	vm_allocation_site_t *site,
-	kalloc_heap_t   heap)
+/*
+ * macOS Only deprecated interfaces, here only for legacy reasons.
+ * There is no internal variant of any of these symbols on purpose.
+ */
+#if PLATFORM_MacOSX
+
+#define OSMallocDeprecatedMsg(msg)
+#include <libkern/OSMalloc.h>
+
+void *
+_MALLOC_external(size_t size, int type, int flags);
+void *
+_MALLOC_external(size_t size, int type, int flags)
 {
+	kalloc_heap_t heap = KHEAP_KEXT;
 	void    *addr = NULL;
 
-	if (type >= M_LAST) {
-		panic("_malloc TYPE");
+	if (type == M_SONAME) {
+#if !XNU_TARGET_OS_OSX
+		assert3u(size, <=, UINT8_MAX);
+#endif /* XNU_TARGET_OS_OSX */
+		heap = KHEAP_SONAME;
 	}
 
 	if (size == 0) {
@@ -100,8 +112,8 @@ __MALLOC_ext(
 	static_assert(M_NOWAIT == Z_NOWAIT);
 	static_assert(M_ZERO == Z_ZERO);
 
-	addr = kalloc_ext(heap, size,
-	    flags & (M_WAITOK | M_NOWAIT | M_ZERO), site).addr;
+	flags = Z_VM_TAG_BT(flags & Z_KPI_MASK, VM_KERN_MEMORY_KALLOC);
+	addr = kalloc_ext(heap, size, flags, NULL).addr;
 	if (__probable(addr)) {
 		return addr;
 	}
@@ -122,55 +134,6 @@ __MALLOC_ext(
 	 * descriptive message out while we can.
 	 */
 	panic("_MALLOC: kalloc returned NULL (potential leak), size %llu", (uint64_t) size);
-}
-
-void *
-__MALLOC(size_t size, int type, int flags, vm_allocation_site_t *site)
-{
-	return __MALLOC_ext(size, type, flags, site, KHEAP_DEFAULT);
-}
-
-void *
-__REALLOC(
-	void            *addr,
-	size_t          size,
-	int             type __unused,
-	int             flags,
-	vm_allocation_site_t *site)
-{
-	addr = kheap_realloc_addr(KHEAP_DEFAULT, addr, size,
-	    flags & (M_WAITOK | M_NOWAIT | M_ZERO), site).addr;
-
-	if (__probable(addr)) {
-		return addr;
-	}
-
-	if (flags & (M_NOWAIT | M_NULL)) {
-		return NULL;
-	}
-
-	panic("_REALLOC: kalloc returned NULL (potential leak), size %llu", (uint64_t) size);
-}
-
-void *
-_MALLOC_external(size_t size, int type, int flags);
-void *
-_MALLOC_external(size_t size, int type, int flags)
-{
-	static vm_allocation_site_t site = {
-		.tag = VM_KERN_MEMORY_KALLOC,
-		.flags = VM_TAG_BT,
-	};
-	kalloc_heap_t heap = KHEAP_KEXT;
-
-	if (type == M_SONAME) {
-#if !XNU_TARGET_OS_OSX
-		assert3u(size, <=, UINT8_MAX);
-#endif /* XNU_TARGET_OS_OSX */
-		heap = KHEAP_SONAME;
-	}
-
-	return __MALLOC_ext(size, type, flags, &site, heap);
 }
 
 void
@@ -207,9 +170,166 @@ _FREE_ZONE_external(void *elem, size_t size, int type __unused)
 	(kheap_free)(KHEAP_KEXT, elem, size);
 }
 
-#if DEBUG || DEVELOPMENT
+char *
+STRDUP_external(const char *string, int type);
+char *
+STRDUP_external(const char *string, int type __unused)
+{
+	size_t len;
+	char *copy;
 
-extern unsigned int zone_map_jetsam_limit;
+	len = strlen(string) + 1;
+	copy = kheap_alloc(KHEAP_KEXT, len, Z_WAITOK);
+	if (copy) {
+		memcpy(copy, string, len);
+	}
+	return copy;
+}
+
+static KALLOC_HEAP_DEFINE(OSMALLOC, "osmalloc", KHEAP_ID_KEXT);
+static queue_head_t OSMalloc_tag_list = QUEUE_HEAD_INITIALIZER(OSMalloc_tag_list);
+static LCK_GRP_DECLARE(OSMalloc_tag_lck_grp, "OSMalloc_tag");
+static LCK_SPIN_DECLARE(OSMalloc_tag_lock, &OSMalloc_tag_lck_grp);
+
+#define OSMalloc_tag_spin_lock()        lck_spin_lock(&OSMalloc_tag_lock)
+#define OSMalloc_tag_unlock()           lck_spin_unlock(&OSMalloc_tag_lock)
+
+extern typeof(OSMalloc_Tagalloc) OSMalloc_Tagalloc_external;
+OSMallocTag
+OSMalloc_Tagalloc_external(const char *str, uint32_t flags)
+{
+	OSMallocTag OSMTag;
+
+	OSMTag = kalloc_type(struct _OSMallocTag_, Z_WAITOK | Z_ZERO);
+
+	if (flags & OSMT_PAGEABLE) {
+		OSMTag->OSMT_attr = OSMT_ATTR_PAGEABLE;
+	}
+
+	OSMTag->OSMT_refcnt = 1;
+
+	strlcpy(OSMTag->OSMT_name, str, OSMT_MAX_NAME);
+
+	OSMalloc_tag_spin_lock();
+	enqueue_tail(&OSMalloc_tag_list, (queue_entry_t)OSMTag);
+	OSMalloc_tag_unlock();
+	OSMTag->OSMT_state = OSMT_VALID;
+	return OSMTag;
+}
+
+static void
+OSMalloc_Tagref(OSMallocTag tag)
+{
+	if (!((tag->OSMT_state & OSMT_VALID_MASK) == OSMT_VALID)) {
+		panic("OSMalloc_Tagref():'%s' has bad state 0x%08X",
+		    tag->OSMT_name, tag->OSMT_state);
+	}
+
+	os_atomic_inc(&tag->OSMT_refcnt, relaxed);
+}
+
+static void
+OSMalloc_Tagrele(OSMallocTag tag)
+{
+	if (!((tag->OSMT_state & OSMT_VALID_MASK) == OSMT_VALID)) {
+		panic("OSMalloc_Tagref():'%s' has bad state 0x%08X",
+		    tag->OSMT_name, tag->OSMT_state);
+	}
+
+	if (os_atomic_dec(&tag->OSMT_refcnt, relaxed) != 0) {
+		return;
+	}
+
+	if (os_atomic_cmpxchg(&tag->OSMT_state,
+	    OSMT_VALID | OSMT_RELEASED, OSMT_VALID | OSMT_RELEASED, acq_rel)) {
+		OSMalloc_tag_spin_lock();
+		(void)remque((queue_entry_t)tag);
+		OSMalloc_tag_unlock();
+		kfree_type(struct _OSMallocTag_, tag);
+	} else {
+		panic("OSMalloc_Tagrele():'%s' has refcnt 0", tag->OSMT_name);
+	}
+}
+
+extern typeof(OSMalloc_Tagfree) OSMalloc_Tagfree_external;
+void
+OSMalloc_Tagfree_external(OSMallocTag tag)
+{
+	if (!os_atomic_cmpxchg(&tag->OSMT_state,
+	    OSMT_VALID, OSMT_VALID | OSMT_RELEASED, acq_rel)) {
+		panic("OSMalloc_Tagfree():'%s' has bad state 0x%08X",
+		    tag->OSMT_name, tag->OSMT_state);
+	}
+
+	if (os_atomic_dec(&tag->OSMT_refcnt, relaxed) == 0) {
+		OSMalloc_tag_spin_lock();
+		(void)remque((queue_entry_t)tag);
+		OSMalloc_tag_unlock();
+		kfree_type(struct _OSMallocTag_, tag);
+	}
+}
+
+extern typeof(OSMalloc) OSMalloc_external;
+void *
+OSMalloc_external(uint32_t size, OSMallocTag tag)
+{
+	void           *addr = NULL;
+	kern_return_t   kr;
+
+	OSMalloc_Tagref(tag);
+	if ((tag->OSMT_attr & OSMT_PAGEABLE) && (size & ~PAGE_MASK)) {
+		if ((kr = kmem_alloc_pageable(kernel_map,
+		    (vm_offset_t *)&addr, size, vm_tag_bt())) != KERN_SUCCESS) {
+			addr = NULL;
+		}
+	} else {
+		addr = kheap_alloc(OSMALLOC, size,
+		    Z_VM_TAG_BT(Z_WAITOK, VM_KERN_MEMORY_KALLOC));
+	}
+
+	if (!addr) {
+		OSMalloc_Tagrele(tag);
+	}
+
+	return addr;
+}
+
+extern typeof(OSMalloc_noblock) OSMalloc_noblock_external;
+void *
+OSMalloc_noblock_external(uint32_t size, OSMallocTag tag)
+{
+	void    *addr = NULL;
+
+	if (tag->OSMT_attr & OSMT_PAGEABLE) {
+		return NULL;
+	}
+
+	OSMalloc_Tagref(tag);
+	addr = kheap_alloc(OSMALLOC, (vm_size_t)size,
+	    Z_VM_TAG_BT(Z_NOWAIT, VM_KERN_MEMORY_KALLOC));
+	if (addr == NULL) {
+		OSMalloc_Tagrele(tag);
+	}
+
+	return addr;
+}
+
+extern typeof(OSFree) OSFree_external;
+void
+OSFree_external(void *addr, uint32_t size, OSMallocTag tag)
+{
+	if ((tag->OSMT_attr & OSMT_PAGEABLE)
+	    && (size & ~PAGE_MASK)) {
+		kmem_free(kernel_map, (vm_offset_t)addr, size);
+	} else {
+		kheap_free(OSMALLOC, addr, size);
+	}
+
+	OSMalloc_Tagrele(tag);
+}
+
+#endif /* PLATFORM_MacOSX */
+#if DEBUG || DEVELOPMENT
 
 static int
 sysctl_zone_map_jetsam_limit SYSCTL_HANDLER_ARGS
@@ -223,17 +343,11 @@ sysctl_zone_map_jetsam_limit SYSCTL_HANDLER_ARGS
 		return error;
 	}
 
-	if (val <= 0 || val > 100) {
-		printf("sysctl_zone_map_jetsam_limit: new jetsam limit value is invalid.\n");
-		return EINVAL;
-	}
-
-	zone_map_jetsam_limit = val;
-	return 0;
+	return mach_to_bsd_errno(zone_map_jetsam_set_limit(val));
 }
-
-SYSCTL_PROC(_kern, OID_AUTO, zone_map_jetsam_limit, CTLTYPE_INT | CTLFLAG_RW, 0, 0,
-    sysctl_zone_map_jetsam_limit, "I", "Zone map jetsam limit");
+SYSCTL_PROC(_kern, OID_AUTO, zone_map_jetsam_limit,
+    CTLTYPE_INT | CTLFLAG_RW, 0, 0, sysctl_zone_map_jetsam_limit, "I",
+    "Zone map jetsam limit");
 
 
 extern void get_zone_map_size(uint64_t *current_size, uint64_t *capacity);
@@ -249,55 +363,18 @@ sysctl_zone_map_size_and_capacity SYSCTL_HANDLER_ARGS
 }
 
 SYSCTL_PROC(_kern, OID_AUTO, zone_map_size_and_capacity,
-    CTLTYPE_QUAD | CTLFLAG_RD | CTLFLAG_MASKED | CTLFLAG_LOCKED,
-    0, 0, &sysctl_zone_map_size_and_capacity, "Q", "Current size and capacity of the zone map");
+    CTLTYPE_QUAD | CTLFLAG_RD | CTLFLAG_MASKED | CTLFLAG_LOCKED, 0, 0,
+    &sysctl_zone_map_size_and_capacity, "Q",
+    "Current size and capacity of the zone map");
 
 #endif /* DEBUG || DEVELOPMENT */
-
 #if CONFIG_ZLEAKS
 
 SYSCTL_DECL(_kern_zleak);
 SYSCTL_NODE(_kern, OID_AUTO, zleak, CTLFLAG_RW | CTLFLAG_LOCKED, 0, "zleak");
 
-/*
- * kern.zleak.active
- *
- * Show the status of the zleak subsystem (0 = enabled, 1 = active,
- * and -1 = failed), and if enabled, allow it to be activated immediately.
- */
-static int
-sysctl_zleak_active SYSCTL_HANDLER_ARGS
-{
-#pragma unused(arg1, arg2)
-	int oldval, val, error;
-
-	val = oldval = get_zleak_state();
-	error = sysctl_handle_int(oidp, &val, 0, req);
-	if (error || !req->newptr) {
-		return error;
-	}
-	/*
-	 * Can only be activated if it's off (and not failed.)
-	 * Cannot be deactivated once it's on.
-	 */
-	if (val == 1 && oldval == 0) {
-		kern_return_t kr = zleak_activate();
-
-		if (KERN_SUCCESS != kr) {
-			printf("zleak_active: failed to activate "
-			    "live zone leak debugging (%d).\n", kr);
-		}
-	}
-	if (val == 0 && oldval == 1) {
-		printf("zleak_active: active, cannot be disabled.\n");
-		return EINVAL;
-	}
-	return 0;
-}
-
-SYSCTL_PROC(_kern_zleak, OID_AUTO, active,
-    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED,
-    0, 0, sysctl_zleak_active, "I", "zleak activity");
+SYSCTL_INT(_kern_zleak, OID_AUTO, active, CTLFLAG_RD,
+    &zleak_active, 0, "zleak activity");
 
 /*
  * kern.zleak.max_zonemap_size
@@ -306,18 +383,9 @@ SYSCTL_PROC(_kern_zleak, OID_AUTO, active,
  * as the maximum size that zleak.global_threshold and
  * zleak.zone_threshold should be set to.
  */
-static int
-sysctl_zleak_max_zonemap_size SYSCTL_HANDLER_ARGS
-{
-	uint64_t zmap_max_size = *(vm_size_t *)arg1;
-
-	return sysctl_handle_quad(oidp, &zmap_max_size, arg2, req);
-}
-
-SYSCTL_PROC(_kern_zleak, OID_AUTO, max_zonemap_size,
-    CTLTYPE_QUAD | CTLFLAG_RD | CTLFLAG_LOCKED,
-    &zleak_max_zonemap_size, 0,
-    sysctl_zleak_max_zonemap_size, "Q", "zleak max zonemap size");
+SYSCTL_LONG(_kern_zleak, OID_AUTO, max_zonemap_size,
+    CTLTYPE_QUAD | CTLFLAG_RD | CTLFLAG_LOCKED, &zleak_max_zonemap_size,
+    "zleak max zonemap size");
 
 
 static int
@@ -333,12 +401,7 @@ sysctl_zleak_threshold SYSCTL_HANDLER_ARGS
 		return error;
 	}
 
-	if (value > (uint64_t)zleak_max_zonemap_size) {
-		return ERANGE;
-	}
-
-	*(vm_size_t *)arg1 = value;
-	return 0;
+	return mach_to_bsd_errno(zleak_update_threshold(arg1, value));
 }
 
 /*
@@ -351,8 +414,8 @@ sysctl_zleak_threshold SYSCTL_HANDLER_ARGS
  */
 SYSCTL_PROC(_kern_zleak, OID_AUTO, global_threshold,
     CTLTYPE_QUAD | CTLFLAG_RW | CTLFLAG_LOCKED,
-    &zleak_global_tracking_threshold, 0,
-    sysctl_zleak_threshold, "Q", "zleak global threshold");
+    &zleak_global_tracking_threshold, 0, sysctl_zleak_threshold, "Q",
+    "zleak global threshold");
 
 /*
  * kern.zleak.zone_threshold
@@ -367,8 +430,8 @@ SYSCTL_PROC(_kern_zleak, OID_AUTO, global_threshold,
  */
 SYSCTL_PROC(_kern_zleak, OID_AUTO, zone_threshold,
     CTLTYPE_QUAD | CTLFLAG_RW | CTLFLAG_LOCKED,
-    &zleak_per_zone_tracking_threshold, 0,
-    sysctl_zleak_threshold, "Q", "zleak per-zone threshold");
+    &zleak_per_zone_tracking_threshold, 0, sysctl_zleak_threshold, "Q",
+    "zleak per-zone threshold");
 
 #endif  /* CONFIG_ZLEAKS */
 
@@ -385,4 +448,5 @@ sysctl_zones_collectable_bytes SYSCTL_HANDLER_ARGS
 
 SYSCTL_PROC(_kern, OID_AUTO, zones_collectable_bytes,
     CTLTYPE_QUAD | CTLFLAG_RD | CTLFLAG_MASKED | CTLFLAG_LOCKED,
-    0, 0, &sysctl_zones_collectable_bytes, "Q", "Collectable memory in zones");
+    0, 0, &sysctl_zones_collectable_bytes, "Q",
+    "Collectable memory in zones");

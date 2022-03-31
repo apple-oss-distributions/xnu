@@ -514,6 +514,8 @@ struct cfil_stats {
 
 #define M_SKIPCFIL      M_PROTO5
 
+#define CFIL_DGRAM_FILTERED(so) ((so->so_flags & SOF_CONTENT_FILTER) && (so->so_flow_db != NULL))
+
 extern int cfil_log_level;
 
 #define CFIL_LOG(level, fmt, ...) \
@@ -534,10 +536,10 @@ extern errno_t cfil_sock_detach(struct socket *so);
 
 extern int cfil_sock_data_out(struct socket *so, struct sockaddr  *to,
     struct mbuf *data, struct mbuf *control,
-    uint32_t flags);
+    uint32_t flags, struct soflow_hash_entry *);
 extern int cfil_sock_data_in(struct socket *so, struct sockaddr *from,
     struct mbuf *data, struct mbuf *control,
-    uint32_t flags);
+    uint32_t flags, struct soflow_hash_entry *);
 
 extern int cfil_sock_shutdown(struct socket *so, int *how);
 extern void cfil_sock_is_closed(struct socket *so);

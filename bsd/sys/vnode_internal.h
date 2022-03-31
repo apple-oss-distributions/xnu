@@ -641,6 +641,8 @@ int     vnode_materialize_dataless_file(vnode_t, uint64_t);
 
 int     vnode_isinuse_locked(vnode_t, int, int );
 
+kauth_cred_t vnode_cred(vnode_t);
+
 int     fsgetpath_internal(vfs_context_t, int, uint64_t, vm_size_t, caddr_t, uint32_t options, int *);
 
 #endif /* BSD_KERNEL_PRIVATE */

@@ -46,9 +46,6 @@ grade_arm64e_binary(cpu_subtype_t execfeatures)
 	 * ABI compatible with this release.
 	 */
 	if ((execfeatures & CPU_SUBTYPE_PTRAUTH_ABI) == 0) {
-#if DEBUG || DEVELOPMENT
-		printf("%s: arm64e prerelease ABI cannot be used with this kernel\n", __func__);
-#endif /* DEBUG || DEVELOPMENT */
 		return 0;
 	}
 #endif /* XNU_TARGET_OS_IOS */

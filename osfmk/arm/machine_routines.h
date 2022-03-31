@@ -290,6 +290,7 @@ int ml_get_max_cluster_number(void);
 
 unsigned int ml_get_first_cpu_id(unsigned int cluster_id);
 
+
 #ifdef __arm64__
 int ml_get_cluster_number_local(void);
 #endif /* __arm64__ */
@@ -492,6 +493,7 @@ kern_return_t ml_lockdown_handler_register(lockdown_handler_t, void *);
 void ml_lockdown_init(void);
 
 /* Machine layer routine for intercepting panics */
+__printflike(1, 0)
 void ml_panic_trap_to_debugger(const char *panic_format_str,
     va_list *panic_args,
     unsigned int reason,

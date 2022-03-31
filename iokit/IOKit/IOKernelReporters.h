@@ -1420,7 +1420,7 @@ protected:
  */
 	virtual IOReturn updateChannelValues(int channel_index) APPLE_KEXT_OVERRIDE;
 
-/*! @function   IOStateReporter::setStateByIndices
+/*! @function   IOStateReporter::handleSetStateByIndices
  *   @abstract   update a channel state without validating channel_id
  *
  *   @param  channel_index - 0..<nChannels>, available from getChannelIndex()
@@ -1440,7 +1440,7 @@ protected:
 	    uint64_t last_intransition,
 	    uint64_t prev_state_residency);
 
-/*! @function   IOStateReporter::setStateID
+/*! @function   IOStateReporter::handleSetStateID
  *   @abstract   Assign a non-default ID to a state
  *
  *   @param  channel_id - ID of channel containing the state in question

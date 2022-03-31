@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2007-2019 Apple Inc. All rights reserved.
+ * Copyright (c) 2007-2021 Apple Inc. All rights reserved.
  */
 /*
  * CDDL HEADER START
@@ -263,6 +263,18 @@
 #define DTRACE_PHYSLAT5(name, type1, arg1, type2, arg2, type3, arg3, type4, arg4, type5, arg5)  \
 	DTRACE_PROBE5(__sdt_, name, arg1, arg2, arg3, arg4, arg5);
 
+#define DTRACE_MACF(name)                         \
+	DTRACE_PROBE(__sdt_, name);
+
+#define DTRACE_MACF1(name, type1, arg1)                         \
+	DTRACE_PROBE1(__sdt_, name, arg1);
+
+#define DTRACE_MACF2(name, type1, arg1, type2, arg2)            \
+	DTRACE_PROBE2(__sdt_, name, arg1, arg2);
+
+#define DTRACE_MACF3(name, type1, arg1, type2, arg2, type3, arg3)            \
+	DTRACE_PROBE3(__sdt_, name, arg1, arg2, arg3);
+
 #define DTRACE_VM(name)                                                 \
 	DTRACE_PROBE(__vminfo_, name)
 
@@ -454,6 +466,30 @@
 #endif /* KASAN */
 
 #if PRIVATE
+#define DTRACE_SKYWALK(name)                                            \
+	DTRACE_PROBE(__skywalk_, name)
+
+#define DTRACE_SKYWALK1(name, type1, arg1)                              \
+	DTRACE_PROBE1(__skywalk_, name, arg1)
+
+#define DTRACE_SKYWALK2(name, type1, arg1, type2, arg2)                 \
+	DTRACE_PROBE2(__skywalk_, name, arg1, arg2)
+
+#define DTRACE_SKYWALK3(name, type1, arg1, type2, arg2, type3, arg3)    \
+	DTRACE_PROBE3(__skywalk_, name, arg1, arg2, arg3)
+
+#define DTRACE_SKYWALK4(name, type1, arg1, type2, arg2, type3, arg3,    \
+	    type4, arg4)                                                \
+	DTRACE_PROBE4(__skywalk_, name, arg1, arg2, arg3, arg4)
+
+#define DTRACE_SKYWALK5(name, type1, arg1, type2, arg2, type3, arg3,    \
+	    type4, arg4, type5, arg5)                                   \
+	DTRACE_PROBE5(__skywalk_, name, arg1, arg2, arg3, arg4, arg5)
+
+#define DTRACE_SKYWALK6(name, type1, arg1, type2, arg2, type3, arg3,    \
+	    type4, arg4, type5, arg5, type6, arg6)                      \
+	DTRACE_PROBE6(__skywalk_, name, arg1, arg2, arg3, arg4, arg5, arg6)
+
 #endif /* PRIVATE */
 
 #ifdef PRIVATE

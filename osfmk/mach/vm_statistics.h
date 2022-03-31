@@ -335,57 +335,33 @@ enum virtual_memory_guard_exception_codes {
 #ifdef KERNEL_PRIVATE
 typedef struct {
 	unsigned int
-	    vmkf_atomic_entry:1,
-	    vmkf_permanent:1,
-	    vmkf_guard_after:1,
-	    vmkf_guard_before:1,
-	    vmkf_submap:1,
-	    vmkf_already:1,
-	    vmkf_beyond_max:1,
-	    vmkf_no_pmap_check:1,
-	    vmkf_map_jit:1,
-	    vmkf_iokit_acct:1,
-	    vmkf_keep_map_locked:1,
-	    vmkf_fourk:1,
-	    vmkf_overwrite_immutable:1,
-	    vmkf_remap_prot_copy:1,
-	    vmkf_cs_enforcement_override:1,
-	    vmkf_cs_enforcement:1,
-	    vmkf_nested_pmap:1,
-	    vmkf_no_copy_on_read:1,
-	    vmkf_32bit_map_va:1,
-	    vmkf_copy_single_object:1,
-	    vmkf_copy_pageable:1,
-	    vmkf_copy_same_map:1,
-	    vmkf_translated_allow_execute:1,
-	    __vmkf_unused:9;
+	    vmkf_atomic_entry:1,        /* keep entry atomic (no coalescing) */
+	    vmkf_permanent:1,           /* mapping can NEVER be unmapped */
+	    vmkf_guard_after:1,         /* guard page after the mapping */
+	    vmkf_guard_before:1,        /* guard page before the mapping */
+	    vmkf_submap:1,              /* mapping a VM submap */
+	    vmkf_already:1,             /* OK if same mapping already exists */
+	    vmkf_beyond_max:1,          /* map beyond the map's max offset */
+	    vmkf_no_pmap_check:1,       /* do not check that pmap is empty */
+	    vmkf_map_jit:1,             /* mark entry as JIT region */
+	    vmkf_iokit_acct:1,          /* IOKit accounting */
+	    vmkf_keep_map_locked:1,     /* keep map locked when returning from vm_map_enter() */
+	    vmkf_fourk:1,               /* use fourk pager */
+	    vmkf_overwrite_immutable:1, /* can overwrite immutable mappings */
+	    vmkf_remap_prot_copy:1,     /* vm_remap for VM_PROT_COPY */
+	    vmkf_cs_enforcement_override:1,     /* override CS_ENFORCEMENT */
+	    vmkf_cs_enforcement:1,      /* new value for CS_ENFORCEMENT */
+	    vmkf_nested_pmap:1,         /* use a nested pmap */
+	    vmkf_no_copy_on_read:1,     /* do not use copy_on_read */
+	    vmkf_32bit_map_va:1,        /* allocate in low 32-bits range */
+	    vmkf_copy_single_object:1,  /* vm_map_copy only 1 VM object */
+	    vmkf_copy_pageable:1,       /* vm_map_copy with pageable entries */
+	    vmkf_copy_same_map:1,       /* vm_map_copy to remap in original map */
+	    vmkf_translated_allow_execute:1,    /* allow execute in translated processes */
+	    vmkf_last_free:1,           /* find space from the end */
+	    __vmkf_unused:8;
 } vm_map_kernel_flags_t;
-#define VM_MAP_KERNEL_FLAGS_NONE (vm_map_kernel_flags_t) {              \
-	.vmkf_atomic_entry = 0, /* keep entry atomic (no coalescing) */ \
-	.vmkf_permanent = 0,    /* mapping can NEVER be unmapped */     \
-	.vmkf_guard_after = 0,  /* guard page after the mapping */      \
-	.vmkf_guard_before = 0, /* guard page before the mapping */     \
-	.vmkf_submap = 0,       /* mapping a VM submap */               \
-	.vmkf_already = 0,      /* OK if same mapping already exists */ \
-	.vmkf_beyond_max = 0,   /* map beyond the map's max offset */   \
-	.vmkf_no_pmap_check = 0, /* do not check that pmap is empty */  \
-	.vmkf_map_jit = 0,      /* mark entry as JIT region */          \
-	.vmkf_iokit_acct = 0,   /* IOKit accounting */                  \
-	.vmkf_keep_map_locked = 0, /* keep map locked when returning from vm_map_enter() */ \
-	.vmkf_fourk = 0,        /* use fourk pager */                   \
-	.vmkf_overwrite_immutable = 0,  /* can overwrite immutable mappings */ \
-	.vmkf_remap_prot_copy = 0, /* vm_remap for VM_PROT_COPY */      \
-	.vmkf_cs_enforcement_override = 0, /* override CS_ENFORCEMENT */ \
-	.vmkf_cs_enforcement = 0,  /* new value for CS_ENFORCEMENT */   \
-	.vmkf_nested_pmap = 0, /* use a nested pmap */                  \
-	.vmkf_no_copy_on_read = 0, /* do not use copy_on_read */        \
-	.vmkf_32bit_map_va = 0, /* allocate in low 32-bits range */     \
-	.vmkf_copy_single_object = 0, /* vm_map_copy only 1 VM object */ \
-	.vmkf_copy_pageable = 0, /* vm_map_copy with pageable entries */ \
-	.vmkf_copy_same_map = 0, /* vm_map_copy to remap in original map */ \
-	.vmkf_translated_allow_execute = 0, /* allow execute in translated processes */ \
-	.__vmkf_unused = 0                                              \
-}
+#define VM_MAP_KERNEL_FLAGS_NONE (vm_map_kernel_flags_t){ }
 
 typedef struct {
 	unsigned int

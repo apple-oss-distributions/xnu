@@ -90,13 +90,16 @@ mpsc_test_pingpong(uint64_t count, uint64_t *out)
 	printf("mpsc_test_pingpong: START\n");
 
 	kr = mpsc_daemon_queue_init_with_thread(&ping.queue,
-	    mpsc_test_pingpong_invoke, MINPRI_KERNEL, "ping");
+	    mpsc_test_pingpong_invoke, MINPRI_KERNEL, "ping",
+	    MPSC_DAEMON_INIT_NONE);
 	if (kr != KERN_SUCCESS) {
 		panic("mpsc_test_pingpong: unable to create pong: %x", kr);
 	}
 
 	kr = mpsc_daemon_queue_init_with_thread(&pong.queue,
-	    mpsc_test_pingpong_invoke, MINPRI_KERNEL, "pong");
+	    mpsc_test_pingpong_invoke, MINPRI_KERNEL, "pong",
+	    MPSC_DAEMON_INIT_NONE);
+
 	if (kr != KERN_SUCCESS) {
 		panic("mpsc_test_pingpong: unable to create ping: %x", kr);
 	}

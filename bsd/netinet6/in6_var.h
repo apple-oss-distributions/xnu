@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2020 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -943,7 +943,7 @@ struct in6_ifextra {
 	struct ipv6_prefix      nat64_prefixes[NAT64_MAX_NUM_PREFIXES];
 	struct lltable          *ii_llt;        /* NDP state */
 };
-#define IN6_IFEXTRA(_ifp)       ((struct in6_ifextra *)(_ifp->if_inet6data))
+#define IN6_IFEXTRA(_ifp)       (_ifp->if_inet6data)
 #define LLTABLE6(ifp)           ((IN6_IFEXTRA(ifp) == NULL) ? NULL : IN6_IFEXTRA(ifp)->ii_llt)
 #endif /* BSD_KERNEL_PRIVATE */
 

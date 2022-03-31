@@ -55,8 +55,8 @@ struct mk_timer {
 	ipc_port_t              port;
 };
 
-static ZONE_DECLARE(mk_timer_zone, "mk_timer",
-    sizeof(struct mk_timer), ZC_ZFREE_CLEARMEM);
+static ZONE_DEFINE_TYPE(mk_timer_zone, "mk_timer",
+    struct mk_timer, ZC_ZFREE_CLEARMEM);
 
 static void mk_timer_port_destroy(ipc_port_t);
 static void mk_timer_expire(void *p0, void *p1);

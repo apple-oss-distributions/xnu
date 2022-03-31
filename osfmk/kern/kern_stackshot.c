@@ -151,9 +151,9 @@ static boolean_t        kdp_copyin(vm_map_t map, uint64_t uaddr, void *dest, siz
 static int              kdp_copyin_string(task_t task, uint64_t addr, char *buf, int buf_sz, boolean_t try_fault, uint32_t *kdp_fault_results);
 static boolean_t        kdp_copyin_word(task_t task, uint64_t addr, uint64_t *result, boolean_t try_fault, uint32_t *kdp_fault_results);
 static uint64_t         proc_was_throttled_from_task(task_t task);
-static void             stackshot_thread_wait_owner_info(thread_t thread, thread_waitinfo_t * waitinfo);
+static void             stackshot_thread_wait_owner_info(thread_t thread, thread_waitinfo_v2_t * waitinfo);
 static int              stackshot_thread_has_valid_waitinfo(thread_t thread);
-static void             stackshot_thread_turnstileinfo(thread_t thread, thread_turnstileinfo_t *tsinfo);
+static void             stackshot_thread_turnstileinfo(thread_t thread, thread_turnstileinfo_v2_t *tsinfo);
 static int              stackshot_thread_has_valid_turnstileinfo(thread_t thread);
 
 #if CONFIG_COALITIONS
@@ -176,7 +176,7 @@ extern uint64_t         proc_did_throttle(void *p);
 extern int              proc_exiting(void *p);
 extern int              proc_in_teardown(void *p);
 static uint64_t         proc_did_throttle_from_task(task_t task);
-extern void             proc_name_kdp(task_t task, char * buf, int size);
+extern void             proc_name_kdp(struct proc *p, char * buf, int size);
 extern int              proc_threadname_kdp(void * uth, char * buf, size_t size);
 extern void             proc_starttime_kdp(void * p, uint64_t * tv_sec, uint64_t * tv_usec, uint64_t * abstime);
 extern void             proc_archinfo_kdp(void* p, cpu_type_t* cputype, cpu_subtype_t* cpusubtype);
@@ -195,6 +195,7 @@ extern kern_return_t kern_stack_snapshot_with_reason(char* reason);
 extern kern_return_t kern_stack_snapshot_internal(int stackshot_config_version, void *stackshot_config, size_t stackshot_config_size, boolean_t stackshot_from_user);
 
 static size_t _stackshot_get_page_size(vm_map_t, size_t *page_mask_out);
+static size_t stackshot_plh_est_size(void);
 
 /*
  * Validates that the given address for a word is both a valid page and has
@@ -221,6 +222,7 @@ static void _stackshot_validation_reset(void);
  */
 vm_offset_t kdp_find_phys(vm_map_t map, vm_offset_t target_addr, boolean_t try_fault, uint32_t *kdp_fault_results);
 
+static long _stackshot_strlen(const char *s, size_t maxlen);    /* -1 if no \0 before fault or maxlen */
 static size_t _stackshot_strlcpy(char *dst, const char *src, size_t maxlen);
 void stackshot_memcpy(void *dst, const void *src, size_t len);
 
@@ -522,6 +524,7 @@ get_stackshot_estsize(uint32_t prev_size_hint, uint32_t adj)
 	size = thread_total + task_total + STACKSHOT_SUPP_SIZE;                 /* estimate */
 	size += (size * adj) / 100;                                                                     /* add adj */
 	size = MAX(size, prev_size_hint);                                                               /* allow hint to increase */
+	size += stackshot_plh_est_size(); /* add space for the port label hash */
 	size = MIN(size, VM_MAP_TRUNC_PAGE(UINT32_MAX, PAGE_MASK));             /* avoid overflow */
 	estimated_size = (uint32_t) VM_MAP_ROUND_PAGE(size, PAGE_MASK); /* round to pagesize */
 
@@ -741,7 +744,8 @@ kern_stack_snapshot_internal(int stackshot_config_version, void *stackshot_confi
 	is_traced = true;
 
 	for (; stackshotbuf_size <= max_tracebuf_size; stackshotbuf_size <<= 1) {
-		if (kmem_alloc_flags(kernel_map, (vm_offset_t *)&stackshotbuf, stackshotbuf_size, VM_KERN_MEMORY_DIAG, KMA_ZERO) != KERN_SUCCESS) {
+		if (kernel_memory_allocate(kernel_map, (vm_offset_t *)&stackshotbuf, stackshotbuf_size,
+		    0, KMA_ZERO, VM_KERN_MEMORY_DIAG) != KERN_SUCCESS) {
 			error = KERN_RESOURCE_SHORTAGE;
 			goto error_exit;
 		}
@@ -990,6 +994,296 @@ _stackshot_validate_kva(vm_offset_t addr, size_t size)
 	                goto error_exit;                           \
 	        }                                              \
 	} while (0); /* end kcd_exit_on_error */
+
+
+/*
+ * For port labels, we have a small hash table we use to track the
+ * struct ipc_service_port_label pointers we see along the way.
+ * This structure encapsulates the global state.
+ *
+ * The hash table is insert-only, similar to "intern"ing strings.  It's
+ * only used an manipulated in during the stackshot collection.  We use
+ * seperate chaining, with the hash elements and chains being int16_ts
+ * indexes into the parallel arrays, with -1 ending the chain.  Array indices are
+ * allocated using a bump allocator.
+ *
+ * The parallel arrays contain:
+ *      - plh_array[idx]	the pointer entered
+ *      - plh_chains[idx]	the hash chain
+ *      - plh_gen[idx]		the last 'generation #' seen
+ *
+ * Generation IDs are used to track entries looked up in the current
+ * task; 0 is never used, and the plh_gen array is cleared to 0 on
+ * rollover.
+ *
+ * The portlabel_ids we report externally are just the index in the array,
+ * plus 1 to avoid 0 as a value.  0 is NONE, -1 is UNKNOWN (e.g. there is
+ * one, but we ran out of space)
+ */
+struct port_label_hash {
+	uint16_t                plh_size;       /* size of allocations; 0 disables tracking */
+	uint16_t                plh_count;      /* count of used entries in plh_array */
+	struct ipc_service_port_label **plh_array; /* _size allocated, _count used */
+	int16_t                *plh_chains;    /* _size allocated */
+	uint8_t                *plh_gen;       /* last 'gen #' seen in */
+	int16_t                *plh_hash;      /* (1 << STACKSHOT_PLH_SHIFT) entry hash table: hash(ptr) -> array index */
+	int16_t                 plh_curgen_min; /* min idx seen for this gen */
+	int16_t                 plh_curgen_max; /* max idx seen for this gen */
+	uint8_t                 plh_curgen;     /* current gen */
+#if DEVELOPMENT || DEBUG
+	/* statistics */
+	uint32_t                plh_lookups;    /* # lookups or inserts */
+	uint32_t                plh_found;
+	uint32_t                plh_found_depth;
+	uint32_t                plh_insert;
+	uint32_t                plh_insert_depth;
+	uint32_t                plh_bad;
+	uint32_t                plh_bad_depth;
+	uint32_t                plh_lookup_send;
+	uint32_t                plh_lookup_receive;
+#define PLH_STAT_OP(...)    (void)(__VA_ARGS__)
+#else /* DEVELOPMENT || DEBUG */
+#define PLH_STAT_OP(...)    (void)(0)
+#endif /* DEVELOPMENT || DEBUG */
+} port_label_hash;
+
+#define STACKSHOT_PLH_SHIFT    7
+#define STACKSHOT_PLH_SIZE_MAX ((kdp_ipc_have_splabel)? 1024 : 0)
+size_t stackshot_port_label_size = (2 * (1u << STACKSHOT_PLH_SHIFT));
+#define STASKSHOT_PLH_SIZE(x) MIN((x), STACKSHOT_PLH_SIZE_MAX)
+
+static size_t
+stackshot_plh_est_size(void)
+{
+	struct port_label_hash *plh = &port_label_hash;
+	size_t size = STASKSHOT_PLH_SIZE(stackshot_port_label_size);
+
+	if (size == 0) {
+		return 0;
+	}
+#define SIZE_EST(x) ROUNDUP((x), sizeof (uintptr_t))
+	return SIZE_EST(size * sizeof(*plh->plh_array)) +
+	       SIZE_EST(size * sizeof(*plh->plh_chains)) +
+	       SIZE_EST(size * sizeof(*plh->plh_gen)) +
+	       SIZE_EST((1ul << STACKSHOT_PLH_SHIFT) * sizeof(*plh->plh_hash));
+#undef SIZE_EST
+}
+
+static void
+stackshot_plh_reset(void)
+{
+	port_label_hash = (struct port_label_hash){.plh_size = 0};  /* structure assignment */
+}
+
+static void
+stackshot_plh_setup(kcdata_descriptor_t data)
+{
+	struct port_label_hash plh = {
+		.plh_size = STASKSHOT_PLH_SIZE(stackshot_port_label_size),
+		.plh_count = 0,
+		.plh_curgen = 1,
+		.plh_curgen_min = STACKSHOT_PLH_SIZE_MAX,
+		.plh_curgen_max = 0,
+	};
+	stackshot_plh_reset();
+	size_t size = plh.plh_size;
+	if (size == 0) {
+		return;
+	}
+	plh.plh_array = kcdata_endalloc(data, size * sizeof(*plh.plh_array));
+	plh.plh_chains = kcdata_endalloc(data, size * sizeof(*plh.plh_chains));
+	plh.plh_gen = kcdata_endalloc(data, size * sizeof(*plh.plh_gen));
+	plh.plh_hash = kcdata_endalloc(data, (1ul << STACKSHOT_PLH_SHIFT) * sizeof(*plh.plh_hash));
+	if (plh.plh_array == NULL || plh.plh_chains == NULL || plh.plh_gen == NULL || plh.plh_hash == NULL) {
+		PLH_STAT_OP(port_label_hash.plh_bad++);
+		return;
+	}
+	for (int x = 0; x < size; x++) {
+		plh.plh_array[x] = NULL;
+		plh.plh_chains[x] = -1;
+		plh.plh_gen[x] = 0;
+	}
+	for (int x = 0; x < (1ul << STACKSHOT_PLH_SHIFT); x++) {
+		plh.plh_hash[x] = -1;
+	}
+	port_label_hash = plh;  /* structure assignment */
+}
+
+static int16_t
+stackshot_plh_hash(struct ipc_service_port_label *ispl)
+{
+	uintptr_t ptr = (uintptr_t)ispl;
+	static_assert(STACKSHOT_PLH_SHIFT < 16, "plh_hash must fit in 15 bits");
+#define PLH_HASH_STEP(ptr, x) \
+	    ((((x) * STACKSHOT_PLH_SHIFT) < (sizeof(ispl) * CHAR_BIT)) ? ((ptr) >> ((x) * STACKSHOT_PLH_SHIFT)) : 0)
+	ptr ^= PLH_HASH_STEP(ptr, 16);
+	ptr ^= PLH_HASH_STEP(ptr, 8);
+	ptr ^= PLH_HASH_STEP(ptr, 4);
+	ptr ^= PLH_HASH_STEP(ptr, 2);
+	ptr ^= PLH_HASH_STEP(ptr, 1);
+#undef PLH_HASH_STEP
+	return (int16_t)(ptr & ((1ul << STACKSHOT_PLH_SHIFT) - 1));
+}
+
+enum stackshot_plh_lookup_type {
+	STACKSHOT_PLH_LOOKUP_UNKNOWN,
+	STACKSHOT_PLH_LOOKUP_SEND,
+	STACKSHOT_PLH_LOOKUP_RECEIVE,
+};
+
+static void
+stackshot_plh_resetgen(void)
+{
+	struct port_label_hash *plh = &port_label_hash;
+	if (plh->plh_curgen_min == STACKSHOT_PLH_SIZE_MAX && plh->plh_curgen_max == 0) {
+		return;  // no lookups, nothing using the current generation
+	}
+	plh->plh_curgen++;
+	plh->plh_curgen_min = STACKSHOT_PLH_SIZE_MAX;
+	plh->plh_curgen_max = 0;
+	if (plh->plh_curgen == 0) { // wrapped, zero the array and increment the generation
+		for (int x = 0; x < plh->plh_size; x++) {
+			plh->plh_gen[x] = 0;
+		}
+		plh->plh_curgen = 1;
+	}
+}
+
+static int16_t
+stackshot_plh_lookup(struct ipc_service_port_label *ispl, enum stackshot_plh_lookup_type type)
+{
+	struct port_label_hash *plh = &port_label_hash;
+	int depth;
+	int16_t cur;
+	if (ispl == NULL) {
+		return STACKSHOT_PORTLABELID_NONE;
+	}
+	switch (type) {
+	case STACKSHOT_PLH_LOOKUP_SEND:
+		PLH_STAT_OP(plh->plh_lookup_send++);
+		break;
+	case STACKSHOT_PLH_LOOKUP_RECEIVE:
+		PLH_STAT_OP(plh->plh_lookup_receive++);
+		break;
+	default:
+		break;
+	}
+	PLH_STAT_OP(plh->plh_lookups++);
+	if (plh->plh_size == 0) {
+		return STACKSHOT_PORTLABELID_MISSING;
+	}
+	int16_t hash = stackshot_plh_hash(ispl);
+	assert(hash >= 0 && hash < (1ul << STACKSHOT_PLH_SHIFT));
+	depth = 0;
+	for (cur = plh->plh_hash[hash]; cur >= 0; cur = plh->plh_chains[cur]) {
+		/* cur must be in-range, and chain depth can never be above our # allocated */
+		if (cur >= plh->plh_count || depth > plh->plh_count || depth > plh->plh_size) {
+			PLH_STAT_OP((plh->plh_bad++), (plh->plh_bad_depth += depth));
+			return STACKSHOT_PORTLABELID_MISSING;
+		}
+		assert(cur < plh->plh_count);
+		if (plh->plh_array[cur] == ispl) {
+			PLH_STAT_OP((plh->plh_found++), (plh->plh_found_depth += depth));
+			goto found;
+		}
+		depth++;
+	}
+	/* not found in hash table, so alloc and insert it */
+	if (cur != -1) {
+		PLH_STAT_OP((plh->plh_bad++), (plh->plh_bad_depth += depth));
+		return STACKSHOT_PORTLABELID_MISSING; /* bad end of chain */
+	}
+	PLH_STAT_OP((plh->plh_insert++), (plh->plh_insert_depth += depth));
+	if (plh->plh_count >= plh->plh_size) {
+		return STACKSHOT_PORTLABELID_MISSING; /* no space */
+	}
+	cur = plh->plh_count;
+	plh->plh_count++;
+	plh->plh_array[cur] = ispl;
+	plh->plh_chains[cur] = plh->plh_hash[hash];
+	plh->plh_hash[hash] = cur;
+found:
+	plh->plh_gen[cur] = plh->plh_curgen;
+	if (plh->plh_curgen_min > cur) {
+		plh->plh_curgen_min = cur;
+	}
+	if (plh->plh_curgen_max < cur) {
+		plh->plh_curgen_max = cur;
+	}
+	return cur + 1;   /* offset to avoid 0 */
+}
+
+// record any PLH referenced since the last stackshot_plh_resetgen() call
+static kern_return_t
+kdp_stackshot_plh_record(void)
+{
+	kern_return_t error = KERN_SUCCESS;
+	struct port_label_hash *plh = &port_label_hash;
+	uint16_t count = plh->plh_count;
+	uint8_t curgen = plh->plh_curgen;
+	int16_t curgen_min = plh->plh_curgen_min;
+	int16_t curgen_max = plh->plh_curgen_max;
+	if (curgen_min <= curgen_max && curgen_max < count &&
+	    count <= plh->plh_size && plh->plh_size <= STACKSHOT_PLH_SIZE_MAX) {
+		struct ipc_service_port_label **arr = plh->plh_array;
+		size_t ispl_size, max_namelen;
+		kdp_ipc_splabel_size(&ispl_size, &max_namelen);
+		for (int idx = curgen_min; idx <= curgen_max; idx++) {
+			struct ipc_service_port_label *ispl = arr[idx];
+			struct portlabel_info spl = {
+				.portlabel_id = (idx + 1),
+			};
+			const char *name = NULL;
+			long name_sz = 0;
+			if (plh->plh_gen[idx] != curgen) {
+				continue;
+			}
+			if (_stackshot_validate_kva((vm_offset_t)ispl, ispl_size)) {
+				kdp_ipc_fill_splabel(ispl, &spl, &name);
+			}
+			kcd_exit_on_error(kcdata_add_container_marker(stackshot_kcdata_p, KCDATA_TYPE_CONTAINER_BEGIN,
+			    STACKSHOT_KCCONTAINER_PORTLABEL, idx + 1));
+			if (name != NULL && (name_sz = _stackshot_strlen(name, max_namelen)) > 0) {   /* validates the kva */
+				kcd_exit_on_error(kcdata_push_data(stackshot_kcdata_p, STACKSHOT_KCTYPE_PORTLABEL_NAME, name_sz + 1, name));
+			} else {
+				spl.portlabel_flags |= STACKSHOT_PORTLABEL_READFAILED;
+			}
+			kcd_exit_on_error(kcdata_push_data(stackshot_kcdata_p, STACKSHOT_KCTYPE_PORTLABEL, sizeof(spl), &spl));
+			kcd_exit_on_error(kcdata_add_container_marker(stackshot_kcdata_p, KCDATA_TYPE_CONTAINER_END,
+			    STACKSHOT_KCCONTAINER_PORTLABEL, idx + 1));
+		}
+	}
+
+error_exit:
+	return error;
+}
+
+#if DEVELOPMENT || DEBUG
+static kern_return_t
+kdp_stackshot_plh_stats(void)
+{
+	kern_return_t error = KERN_SUCCESS;
+	struct port_label_hash *plh = &port_label_hash;
+
+#define PLH_STAT(x) do { if (plh->x != 0) { \
+	kcd_exit_on_error(kcdata_add_uint32_with_description(stackshot_kcdata_p, plh->x, "stackshot_" #x)); \
+} } while (0)
+	PLH_STAT(plh_size);
+	PLH_STAT(plh_lookups);
+	PLH_STAT(plh_found);
+	PLH_STAT(plh_found_depth);
+	PLH_STAT(plh_insert);
+	PLH_STAT(plh_insert_depth);
+	PLH_STAT(plh_bad);
+	PLH_STAT(plh_bad_depth);
+	PLH_STAT(plh_lookup_send);
+	PLH_STAT(plh_lookup_receive);
+#undef PLH_STAT
+
+error_exit:
+	return error;
+}
+#endif /* DEVELOPMENT || DEBUG */
 
 static uint64_t
 kcdata_get_task_ss_flags(task_t task)
@@ -1437,7 +1731,7 @@ kcdata_record_transitioning_task_snapshot(kcdata_descriptor_t kcd, task_t task, 
 
 	/* Add the BSD process identifiers */
 	if (task_pid != -1 && task->bsd_info != NULL) {
-		proc_name_kdp(task, cur_tsnap->tts_p_comm, sizeof(cur_tsnap->tts_p_comm));
+		proc_name_kdp(task->bsd_info, cur_tsnap->tts_p_comm, sizeof(cur_tsnap->tts_p_comm));
 	} else {
 		cur_tsnap->tts_p_comm[0] = '\0';
 	}
@@ -1514,7 +1808,7 @@ kcdata_record_task_snapshot(kcdata_descriptor_t kcd, task_t task, uint64_t trace
 
 	/* Add the BSD process identifiers */
 	if (task_pid != -1 && task->bsd_info != NULL) {
-		proc_name_kdp(task, cur_tsnap->ts_p_comm, sizeof(cur_tsnap->ts_p_comm));
+		proc_name_kdp(task->bsd_info, cur_tsnap->ts_p_comm, sizeof(cur_tsnap->ts_p_comm));
 	} else {
 		cur_tsnap->ts_p_comm[0] = '\0';
 #if IMPORTANCE_INHERITANCE && (DEVELOPMENT || DEBUG)
@@ -1917,7 +2211,7 @@ kcdata_record_thread_snapshot(
 
 	/* if there is thread name then add to buffer */
 	cur_thread_name[0] = '\0';
-	proc_threadname_kdp(thread->uthread, cur_thread_name, STACKSHOT_MAX_THREAD_NAME_SIZE);
+	proc_threadname_kdp(get_bsdthread_info(thread), cur_thread_name, STACKSHOT_MAX_THREAD_NAME_SIZE);
 	if (strnlen(cur_thread_name, STACKSHOT_MAX_THREAD_NAME_SIZE) > 0) {
 		kcd_exit_on_error(kcdata_get_memory_addr(kcd, STACKSHOT_KCTYPE_THREAD_NAME, sizeof(cur_thread_name), &out_addr));
 		stackshot_memcpy((void *)out_addr, (void *)cur_thread_name, sizeof(cur_thread_name));
@@ -1945,7 +2239,7 @@ kcdata_record_thread_snapshot(
 #endif /* STACKSHOT_COLLECTS_LATENCY_INFO */
 
 	/* Trace user stack, if any */
-	if (!active_kthreads_only_p && task->active && thread->task->map != kernel_map) {
+	if (!active_kthreads_only_p && task->active && task->map != kernel_map) {
 		uint32_t user_ths_ss_flags = 0;
 
 		/*
@@ -1962,7 +2256,7 @@ kcdata_record_thread_snapshot(
 			goto error_exit;
 		}
 		struct _stackshot_backtrace_context ctx = {
-			.sbc_map = thread->task->map,
+			.sbc_map = task->map,
 			.sbc_allow_faulting = stack_enable_faulting,
 			.sbc_prev_page = -1,
 			.sbc_prev_kva = -1,
@@ -2445,8 +2739,8 @@ kdp_stackshot_record_task(struct stackshot_context *ctx, task_t task)
 #endif /* STACKSHOT_COLLECTS_LATENCY_INFO */
 
 
-		thread_waitinfo_t *thread_waitinfo           = NULL;
-		thread_turnstileinfo_t *thread_turnstileinfo = NULL;
+		thread_waitinfo_v2_t *thread_waitinfo           = NULL;
+		thread_turnstileinfo_v2_t *thread_turnstileinfo = NULL;
 		int current_waitinfo_index              = 0;
 		int current_turnstileinfo_index         = 0;
 		/* allocate space for the wait and turnstil info */
@@ -2456,16 +2750,18 @@ kdp_stackshot_record_task(struct stackshot_context *ctx, task_t task)
 
 			if (num_waitinfo_threads > 0) {
 				kcd_exit_on_error(kcdata_get_memory_addr_for_array(stackshot_kcdata_p, STACKSHOT_KCTYPE_THREAD_WAITINFO,
-				    sizeof(thread_waitinfo_t), num_waitinfo_threads, &out_addr));
-				thread_waitinfo = (thread_waitinfo_t *)out_addr;
+				    sizeof(thread_waitinfo_v2_t), num_waitinfo_threads, &out_addr));
+				thread_waitinfo = (thread_waitinfo_v2_t *)out_addr;
 			}
 
 			if (num_turnstileinfo_threads > 0) {
 				/* get space for the turnstile info */
 				kcd_exit_on_error(kcdata_get_memory_addr_for_array(stackshot_kcdata_p, STACKSHOT_KCTYPE_THREAD_TURNSTILEINFO,
-				    sizeof(thread_turnstileinfo_t), num_turnstileinfo_threads, &out_addr));
-				thread_turnstileinfo = (thread_turnstileinfo_t *)out_addr;
+				    sizeof(thread_turnstileinfo_v2_t), num_turnstileinfo_threads, &out_addr));
+				thread_turnstileinfo = (thread_turnstileinfo_v2_t *)out_addr;
 			}
+
+			stackshot_plh_resetgen();  // so we know which portlabel_ids are referenced
 		}
 
 #if STACKSHOT_COLLECTS_LATENCY_INFO
@@ -2518,6 +2814,8 @@ kdp_stackshot_record_task(struct stackshot_context *ctx, task_t task)
 
 		if (num_waitinfo_threads > 0 || num_turnstileinfo_threads > 0) {
 			kcd_exit_on_error(kcdata_compression_window_close(stackshot_kcdata_p));
+			// now, record the portlabel hashes.
+			kcd_exit_on_error(kdp_stackshot_plh_record());
 		}
 
 #if IMPORTANCE_INHERITANCE
@@ -2624,6 +2922,7 @@ kdp_stackshot_kcdata_format(int pid, uint64_t trace_flags, uint32_t * pBytesTrac
 	}
 
 	_stackshot_validation_reset();
+	stackshot_plh_setup(stackshot_kcdata_p); /* set up port label hash */
 
 	/* setup mach_absolute_time and timebase info -- copy out in some cases and needed to convert since_timestamp to seconds for proc start time */
 	clock_timebase_info(&timebase);
@@ -2725,7 +3024,7 @@ kdp_stackshot_kcdata_format(int pid, uint64_t trace_flags, uint32_t * pBytesTrac
 	}
 
 #if CONFIG_THREAD_GROUPS
-	struct thread_group_snapshot_v2 *thread_groups = NULL;
+	struct thread_group_snapshot_v3 *thread_groups = NULL;
 	int num_thread_groups = 0;
 
 #if INTERRUPT_MASKED_DEBUG && MONOTONIC
@@ -2747,8 +3046,8 @@ kdp_stackshot_kcdata_format(int pid, uint64_t trace_flags, uint32_t * pBytesTrac
 		}
 
 		if (num_thread_groups > 0) {
-			kcd_exit_on_error(kcdata_get_memory_addr_for_array(stackshot_kcdata_p, STACKSHOT_KCTYPE_THREAD_GROUP_SNAPSHOT, sizeof(struct thread_group_snapshot_v2), num_thread_groups, &out_addr));
-			thread_groups = (struct thread_group_snapshot_v2 *)out_addr;
+			kcd_exit_on_error(kcdata_get_memory_addr_for_array(stackshot_kcdata_p, STACKSHOT_KCTYPE_THREAD_GROUP_SNAPSHOT, sizeof(struct thread_group_snapshot_v3), num_thread_groups, &out_addr));
+			thread_groups = (struct thread_group_snapshot_v3 *)out_addr;
 		}
 
 		if (thread_group_iterate_stackshot(stackshot_thread_group_snapshot, thread_groups) != KERN_SUCCESS) {
@@ -2863,6 +3162,9 @@ kdp_stackshot_kcdata_format(int pid, uint64_t trace_flags, uint32_t * pBytesTrac
 			goto error_exit;
 		}
 	}
+#if DEVELOPMENT || DEBUG
+	kcd_exit_on_error(kdp_stackshot_plh_stats());
+#endif /* DEVELOPMENT || DEBUG */
 
 #if STACKSHOT_COLLECTS_LATENCY_INFO
 	latency_info.total_terminated_task_iteration_latency = mach_absolute_time() - latency_info.total_terminated_task_iteration_latency;
@@ -2939,7 +3241,7 @@ error_exit:;
 		ml_handle_stackshot_interrupt_disabled_duration(current_thread());
 	}
 #endif /* INTERRUPT_MASKED_DEBUG */
-
+	stackshot_plh_reset();
 	stack_enable_faulting = FALSE;
 
 	return error;
@@ -3023,6 +3325,20 @@ stackshot_memcpy(void *dst, const void *src, size_t len)
 	memcpy(dst, src, len);
 }
 
+static long
+_stackshot_strlen(const char *s, size_t maxlen)
+{
+	size_t len = 0;
+	for (len = 0; _stackshot_validate_kva((vm_offset_t)s, 1); len++, s++) {
+		if (*s == 0) {
+			return len;
+		}
+		if (len >= maxlen) {
+			return -1;
+		}
+	}
+	return -1; /* failed before end of string */
+}
 static size_t
 _stackshot_strlcpy(char *dst, const char *src, size_t maxlen)
 {
@@ -3257,8 +3573,9 @@ do_stackshot(void *context)
 	    &stack_snapshot_bytes_traced,
 	    &stack_snapshot_bytes_uncompressed);
 
-	if (stack_snapshot_ret == KERN_SUCCESS && stack_snapshot_flags & STACKSHOT_DO_COMPRESS) {
-		kcdata_finish_compression(stackshot_kcdata_p);
+	if (stack_snapshot_ret == KERN_SUCCESS) {
+		/* releases and zeros and kcdata_end_alloc()s done */
+		kcdata_finish(stackshot_kcdata_p);
 	}
 
 	kdp_snapshot--;
@@ -3340,11 +3657,15 @@ stackshot_thread_group_count(void *arg, int i, struct thread_group *tg)
 static void
 stackshot_thread_group_snapshot(void *arg, int i, struct thread_group *tg)
 {
-	struct thread_group_snapshot_v2 *thread_groups = (struct thread_group_snapshot_v2 *)arg;
-	struct thread_group_snapshot_v2 *tgs = &thread_groups[i];
+	struct thread_group_snapshot_v3 *thread_groups = arg;
+	struct thread_group_snapshot_v3 *tgs = &thread_groups[i];
+	const char *name = thread_group_get_name(tg);
 	uint32_t flags = thread_group_get_flags(tg);
 	tgs->tgs_id = thread_group_get_id(tg);
-	stackshot_memcpy(tgs->tgs_name, thread_group_get_name(tg), THREAD_GROUP_MAXNAME);
+	static_assert(THREAD_GROUP_MAXNAME > sizeof(tgs->tgs_name));
+	stackshot_memcpy(tgs->tgs_name, name, sizeof(tgs->tgs_name));
+	stackshot_memcpy(tgs->tgs_name_cont, name + sizeof(tgs->tgs_name),
+	    sizeof(tgs->tgs_name_cont));
 	tgs->tgs_flags = ((flags & THREAD_GROUP_FLAGS_EFFICIENT) ? kThreadGroupEfficient : 0) |
 	    ((flags & THREAD_GROUP_FLAGS_UI_APP) ? kThreadGroupUIApp : 0);
 }
@@ -3387,63 +3708,74 @@ stackshot_thread_has_valid_turnstileinfo(thread_t thread)
 }
 
 static void
-stackshot_thread_turnstileinfo(thread_t thread, thread_turnstileinfo_t *tsinfo)
+stackshot_thread_turnstileinfo(thread_t thread, thread_turnstileinfo_v2_t *tsinfo)
 {
 	struct turnstile *ts;
+	struct ipc_service_port_label *ispl = NULL;
 
 	/* acquire turnstile information and store it in the stackshot */
 	ts = thread_get_waiting_turnstile(thread);
 	tsinfo->waiter = thread_tid(thread);
-	kdp_turnstile_fill_tsinfo(ts, tsinfo);
+	kdp_turnstile_fill_tsinfo(ts, tsinfo, &ispl);
+	tsinfo->portlabel_id = stackshot_plh_lookup(ispl,
+	    (tsinfo->turnstile_flags & STACKSHOT_TURNSTILE_STATUS_SENDPORT) ? STACKSHOT_PLH_LOOKUP_SEND :
+	    (tsinfo->turnstile_flags & STACKSHOT_TURNSTILE_STATUS_RECEIVEPORT) ? STACKSHOT_PLH_LOOKUP_RECEIVE :
+	    STACKSHOT_PLH_LOOKUP_UNKNOWN);
 }
 
 static void
-stackshot_thread_wait_owner_info(thread_t thread, thread_waitinfo_t *waitinfo)
+stackshot_thread_wait_owner_info(thread_t thread, thread_waitinfo_v2_t *waitinfo)
 {
+	thread_waitinfo_t *waitinfo_v1 = (thread_waitinfo_t *)waitinfo;
+	struct ipc_service_port_label *ispl = NULL;
+
 	waitinfo->waiter        = thread_tid(thread);
 	waitinfo->wait_type     = thread->block_hint;
+	waitinfo->wait_flags    = 0;
 
 	switch (waitinfo->wait_type) {
 	case kThreadWaitKernelMutex:
-		kdp_lck_mtx_find_owner(thread->waitq, thread->wait_event, waitinfo);
+		kdp_lck_mtx_find_owner(thread->waitq.wq_q, thread->wait_event, waitinfo_v1);
 		break;
 	case kThreadWaitPortReceive:
-		kdp_mqueue_recv_find_owner(thread->waitq, thread->wait_event, waitinfo);
+		kdp_mqueue_recv_find_owner(thread->waitq.wq_q, thread->wait_event, waitinfo, &ispl);
+		waitinfo->portlabel_id  = stackshot_plh_lookup(ispl, STACKSHOT_PLH_LOOKUP_RECEIVE);
 		break;
 	case kThreadWaitPortSend:
-		kdp_mqueue_send_find_owner(thread->waitq, thread->wait_event, waitinfo);
+		kdp_mqueue_send_find_owner(thread->waitq.wq_q, thread->wait_event, waitinfo, &ispl);
+		waitinfo->portlabel_id  = stackshot_plh_lookup(ispl, STACKSHOT_PLH_LOOKUP_SEND);
 		break;
 	case kThreadWaitSemaphore:
-		kdp_sema_find_owner(thread->waitq, thread->wait_event, waitinfo);
+		kdp_sema_find_owner(thread->waitq.wq_q, thread->wait_event, waitinfo_v1);
 		break;
 	case kThreadWaitUserLock:
-		kdp_ulock_find_owner(thread->waitq, thread->wait_event, waitinfo);
+		kdp_ulock_find_owner(thread->waitq.wq_q, thread->wait_event, waitinfo_v1);
 		break;
 	case kThreadWaitKernelRWLockRead:
 	case kThreadWaitKernelRWLockWrite:
 	case kThreadWaitKernelRWLockUpgrade:
-		kdp_rwlck_find_owner(thread->waitq, thread->wait_event, waitinfo);
+		kdp_rwlck_find_owner(thread->waitq.wq_q, thread->wait_event, waitinfo_v1);
 		break;
 	case kThreadWaitPThreadMutex:
 	case kThreadWaitPThreadRWLockRead:
 	case kThreadWaitPThreadRWLockWrite:
 	case kThreadWaitPThreadCondVar:
-		kdp_pthread_find_owner(thread, waitinfo);
+		kdp_pthread_find_owner(thread, waitinfo_v1);
 		break;
 	case kThreadWaitWorkloopSyncWait:
-		kdp_workloop_sync_wait_find_owner(thread, thread->wait_event, waitinfo);
+		kdp_workloop_sync_wait_find_owner(thread, thread->wait_event, waitinfo_v1);
 		break;
 	case kThreadWaitOnProcess:
-		kdp_wait4_find_process(thread, thread->wait_event, waitinfo);
+		kdp_wait4_find_process(thread, thread->wait_event, waitinfo_v1);
 		break;
 	case kThreadWaitSleepWithInheritor:
-		kdp_sleep_with_inheritor_find_owner(thread->waitq, thread->wait_event, waitinfo);
+		kdp_sleep_with_inheritor_find_owner(thread->waitq.wq_q, thread->wait_event, waitinfo_v1);
 		break;
 	case kThreadWaitEventlink:
-		kdp_eventlink_find_owner(thread->waitq, thread->wait_event, waitinfo);
+		kdp_eventlink_find_owner(thread->waitq.wq_q, thread->wait_event, waitinfo_v1);
 		break;
 	case kThreadWaitCompressor:
-		kdp_compressor_busy_find_owner(thread->wait_event, waitinfo);
+		kdp_compressor_busy_find_owner(thread->wait_event, waitinfo_v1);
 		break;
 	default:
 		waitinfo->owner = 0;

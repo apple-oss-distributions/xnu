@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2020 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2022 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -329,7 +329,6 @@ static void rtfree_common(struct rtentry *, boolean_t);
 static void rte_if_ref(struct ifnet *, int);
 static void rt_set_idleref(struct rtentry *);
 static void rt_clear_idleref(struct rtentry *);
-static void route_event_callback(void *);
 static void rt_str4(struct rtentry *, char *, uint32_t, char *, uint32_t);
 static void rt_str6(struct rtentry *, char *, uint32_t, char *, uint32_t);
 static boolean_t route_ignore_protocol_cloning_for_dst(struct rtentry *, struct sockaddr *);
@@ -1261,11 +1260,8 @@ rtfree_common(struct rtentry *rt, boolean_t locked)
 		 * Now free any attached link-layer info.
 		 */
 		if (rt->rt_llinfo != NULL) {
-			if (rt->rt_llinfo_free != NULL) {
-				(*rt->rt_llinfo_free)(rt->rt_llinfo);
-			} else {
-				R_Free(rt->rt_llinfo);
-			}
+			VERIFY(rt->rt_llinfo_free != NULL);
+			(*rt->rt_llinfo_free)(rt->rt_llinfo);
 			rt->rt_llinfo = NULL;
 		}
 
@@ -1292,7 +1288,7 @@ rtfree_common(struct rtentry *rt, boolean_t locked)
 		 * This also frees the gateway, as they are always malloc'd
 		 * together.
 		 */
-		R_Free(rt_key(rt));
+		rt_key_free(rt);
 
 		/*
 		 * Free any statistics that may have been allocated
@@ -1764,8 +1760,8 @@ ifa_ifwithroute_common_locked(int flags, const struct sockaddr *dst,
 	 * interfaces in this matter.  Must be careful not to stomp
 	 * on new entries from rtinit, hence (ifa->ifa_addr != gw).
 	 */
-	if ((ifa == NULL ||
-	    !equal(ifa->ifa_addr, (struct sockaddr *)(size_t)gw)) &&
+	if ((ifa == NULL || (gw != NULL &&
+	    !equal(ifa->ifa_addr, (struct sockaddr *)(size_t)gw))) &&
 	    (rt = rtalloc1_scoped_locked((struct sockaddr *)(size_t)gw,
 	    0, 0, ifscope)) != NULL) {
 		if (ifa != NULL) {
@@ -2335,7 +2331,7 @@ makeroute:
 				IFA_REMREF(rt->rt_ifa);
 				rt->rt_ifa = NULL;
 			}
-			R_Free(rt_key(rt));
+			rt_key_free(rt);
 			RT_UNLOCK(rt);
 			nstat_route_detach(rt);
 			rte_lock_destroy(rt);
@@ -2837,7 +2833,7 @@ rt_setgate(struct rtentry *rt, struct sockaddr *dst, struct sockaddr *gate)
 		caddr_t new;
 
 		/* The underlying allocation is done with M_WAITOK set */
-		R_Malloc(new, caddr_t, dlen + glen);
+		new = kalloc_data(dlen + glen, Z_WAITOK | Z_ZERO);
 		if (new == NULL) {
 			/* Clear gateway route */
 			rt_set_gwroute(rt, dst, NULL);
@@ -2851,9 +2847,8 @@ rt_setgate(struct rtentry *rt, struct sockaddr *dst, struct sockaddr *gate)
 		 * here to initialize a newly allocated route entry, in
 		 * which case rt_key(rt) is NULL (and so does rt_gateway).
 		 */
-		bzero(new, dlen + glen);
 		Bcopy(dst, new, dst->sa_len);
-		R_Free(rt_key(rt));     /* free old block; NULL is okay */
+		rt_key_free(rt);     /* free old block; NULL is okay */
 		rt->rt_nodes->rn_key = new;
 		rt->rt_gateway = (struct sockaddr *)(new + dlen);
 	}
@@ -3166,8 +3161,8 @@ rt_lookup_common(boolean_t lookup_only, boolean_t coarse, struct sockaddr *dst,
 		} else {
 			*s_netmask = '\0';
 		}
-		printf("%s (%d, %d, %s, %s, %u)\n",
-		    __func__, lookup_only, coarse, s_dst, s_netmask, ifscope);
+		os_log(OS_LOG_DEFAULT, "%s:%d (%d, %d, %s, %s, %u)\n",
+		    __func__, __LINE__, lookup_only, coarse, s_dst, s_netmask, ifscope);
 	}
 #endif
 
@@ -3209,7 +3204,7 @@ rt_lookup_common(boolean_t lookup_only, boolean_t coarse, struct sockaddr *dst,
 #if (DEVELOPMENT || DEBUG)
 		if (rt_verbose) {
 			rt_str(rt, dbuf, sizeof(dbuf), gbuf, sizeof(gbuf));
-			printf("%s unscoped search %p to %s->%s->%s ifa_ifp %s\n",
+			os_log(OS_LOG_DEFAULT, "%s unscoped search %p to %s->%s->%s ifa_ifp %s\n",
 			    __func__, rt,
 			    dbuf, gbuf,
 			    (rt->rt_ifp != NULL) ? rt->rt_ifp->if_xname : "",
@@ -3262,7 +3257,7 @@ rt_lookup_common(boolean_t lookup_only, boolean_t coarse, struct sockaddr *dst,
 			struct rtentry *rt = RT(rn);
 
 			rt_str(rt, dbuf, sizeof(dbuf), gbuf, sizeof(gbuf));
-			printf("%s scoped search %p to %s->%s->%s ifa %s\n",
+			os_log(OS_LOG_DEFAULT, "%s scoped search %p to %s->%s->%s ifa %s\n",
 			    __func__, rt,
 			    dbuf, gbuf,
 			    (rt->rt_ifp != NULL) ? rt->rt_ifp->if_xname : "",
@@ -3318,13 +3313,13 @@ rt_lookup_common(boolean_t lookup_only, boolean_t coarse, struct sockaddr *dst,
 #if (DEVELOPMENT || DEBUG)
 	if (rt_verbose) {
 		if (rn == NULL) {
-			printf("%s %u return NULL\n", __func__, ifscope);
+			os_log(OS_LOG_DEFAULT, "%s %u return NULL\n", __func__, ifscope);
 		} else {
 			struct rtentry *rt = RT(rn);
 
 			rt_str(rt, dbuf, sizeof(dbuf), gbuf, sizeof(gbuf));
 
-			printf("%s %u return %p to %s->%s->%s ifa_ifp %s\n",
+			os_log(OS_LOG_DEFAULT, "%s %u return %p to %s->%s->%s ifa_ifp %s\n",
 			    __func__, ifscope, rt,
 			    dbuf, gbuf,
 			    (rt->rt_ifp != NULL) ? rt->rt_ifp->if_xname : "",
@@ -4438,29 +4433,38 @@ route_event_init(struct route_event *p_route_ev, struct rtentry *rt,
 	p_route_ev->route_event_code = route_ev_code;
 }
 
+struct route_event_nwk_wq_entry {
+	struct nwk_wq_entry nwk_wqe;
+	struct route_event rt_ev_arg;
+};
+
 static void
-route_event_callback(void *arg)
+route_event_callback(struct nwk_wq_entry *nwk_item)
 {
-	struct route_event *p_rt_ev = (struct route_event *)arg;
-	struct rtentry *rt = p_rt_ev->rt;
-	eventhandler_tag evtag = p_rt_ev->evtag;
-	int route_ev_code = p_rt_ev->route_event_code;
+	struct route_event_nwk_wq_entry *p_ev = __container_of(nwk_item,
+	    struct route_event_nwk_wq_entry, nwk_wqe);
+
+	struct rtentry *rt = p_ev->rt_ev_arg.rt;
+	eventhandler_tag evtag = p_ev->rt_ev_arg.evtag;
+	int route_ev_code = p_ev->rt_ev_arg.route_event_code;
 
 	if (route_ev_code == ROUTE_EVHDLR_DEREGISTER) {
 		VERIFY(evtag != NULL);
 		EVENTHANDLER_DEREGISTER(&rt->rt_evhdlr_ctxt, route_event,
 		    evtag);
 		rtfree(rt);
+		kfree_type(struct route_event_nwk_wq_entry, p_ev);
 		return;
 	}
 
 	EVENTHANDLER_INVOKE(&rt->rt_evhdlr_ctxt, route_event, rt_key(rt),
-	    route_ev_code, (struct sockaddr *)&p_rt_ev->rt_addr,
+	    route_ev_code, (struct sockaddr *)&p_ev->rt_ev_arg.rt_addr,
 	    rt->rt_flags);
 
 	/* The code enqueuing the route event held a reference */
 	rtfree(rt);
 	/* XXX No reference is taken on gwrt */
+	kfree_type(struct route_event_nwk_wq_entry, p_ev);
 }
 
 int
@@ -4498,11 +4502,6 @@ route_event_walktree(struct radix_node *rn, void *arg)
 	return 0;
 }
 
-struct route_event_nwk_wq_entry {
-	struct nwk_wq_entry nwk_wqe;
-	struct route_event rt_ev_arg;
-};
-
 void
 route_event_enqueue_nwk_wq_entry(struct rtentry *rt, struct rtentry *gwrt,
     uint32_t route_event_code, eventhandler_tag evtag, boolean_t rt_locked)
@@ -4510,9 +4509,8 @@ route_event_enqueue_nwk_wq_entry(struct rtentry *rt, struct rtentry *gwrt,
 	struct route_event_nwk_wq_entry *p_rt_ev = NULL;
 	struct sockaddr *p_gw_saddr = NULL;
 
-	MALLOC(p_rt_ev, struct route_event_nwk_wq_entry *,
-	    sizeof(struct route_event_nwk_wq_entry),
-	    M_NWKWQ, M_WAITOK | M_ZERO);
+	p_rt_ev = kalloc_type(struct route_event_nwk_wq_entry,
+	    Z_WAITOK | Z_ZERO | Z_NOFAIL);
 
 	/*
 	 * If the intent is to de-register, don't take
@@ -4543,9 +4541,7 @@ route_event_enqueue_nwk_wq_entry(struct rtentry *rt, struct rtentry *gwrt,
 
 	p_rt_ev->rt_ev_arg.route_event_code = route_event_code;
 	p_rt_ev->nwk_wqe.func = route_event_callback;
-	p_rt_ev->nwk_wqe.is_arg_managed = TRUE;
-	p_rt_ev->nwk_wqe.arg = &p_rt_ev->rt_ev_arg;
-	nwk_wq_enqueue((struct nwk_wq_entry*)p_rt_ev);
+	nwk_wq_enqueue(&p_rt_ev->nwk_wqe);
 }
 
 const char *

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2022 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -248,7 +248,7 @@ static int nd6_sysctl_prlist SYSCTL_HANDLER_ARGS;
 	(_ln)->ln_flags |= ND6_LNF_IN_USE;                              \
 } while (0)
 
-static ZONE_DECLARE(llinfo_nd6_zone, "llinfo_nd6",
+static ZONE_DEFINE(llinfo_nd6_zone, "llinfo_nd6",
     sizeof(struct llinfo_nd6), ZC_ZFREE_CLEARMEM);
 
 extern int tvtohz(struct timeval *);
@@ -402,13 +402,16 @@ nd6_llinfo_refresh(struct rtentry *rt)
 {
 	struct llinfo_nd6 *ln = rt->rt_llinfo;
 	uint64_t timenow = net_uptime();
+	struct ifnet *ifp = rt->rt_ifp;
 	/*
 	 * Can't refresh permanent, static or entries that are
-	 * not direct host entries
+	 * not direct host entries. Also skip if the entry is for
+	 * host over an interface that has alternate neighbor cache
+	 * management mechanisms (AWDL/NAN)
 	 */
-	if (!ln || ln->ln_expire == 0 ||
-	    (rt->rt_flags & RTF_STATIC) ||
-	    !(rt->rt_flags & RTF_LLINFO)) {
+	if (!ln || ln->ln_expire == 0 || (rt->rt_flags & RTF_STATIC) ||
+	    !(rt->rt_flags & RTF_LLINFO) || !ifp ||
+	    (ifp->if_eflags & IFEF_IPV6_ND6ALT)) {
 		return;
 	}
 
@@ -885,7 +888,13 @@ again:
 		/* Set the flag in case we jump to "again" */
 		ln->ln_flags |= ND6_LNF_TIMER_SKIP;
 
-		if (ln->ln_expire == 0 || (rt->rt_flags & RTF_STATIC)) {
+		/*
+		 * Do not touch neighbor cache entries that are permanent,
+		 * static or are for interfaces that manage neighbor cache
+		 * entries via alternate NDP means.
+		 */
+		if (ln->ln_expire == 0 || (rt->rt_flags & RTF_STATIC) ||
+		    (rt->rt_ifp->if_eflags & IFEF_IPV6_ND6ALT)) {
 			ap->sticky++;
 		} else if (ap->draining && (rt->rt_refcnt == 0)) {
 			/*
@@ -901,7 +910,7 @@ again:
 		}
 
 		/*
-		 * If the entry has not expired, skip it.  Take note on the
+		 * If the entry has not expired, skip it. Take note on the
 		 * state, as entries that are in the STALE state are simply
 		 * waiting to be garbage collected, in which case we can
 		 * relax the callout scheduling (use nd6_prune_lazy).
@@ -1527,6 +1536,9 @@ addrloop:
 			ia6->ia6_flags |= IN6_IFF_DEPRECATED;
 
 			if ((oldflags & IN6_IFF_DEPRECATED) == 0) {
+#if SKYWALK
+				SK_NXS_MS_IF_ADDR_GENCNT_INC(ia6->ia_ifp);
+#endif /* SKYWALK */
 				/*
 				 * Only enqueue the Deprecated event when the address just
 				 * becomes deprecated.
@@ -1577,6 +1589,11 @@ addrloop:
 			 * preferred.
 			 */
 			ia6->ia6_flags &= ~IN6_IFF_DEPRECATED;
+#if SKYWALK
+			if ((oldflags & IN6_IFF_DEPRECATED) != 0) {
+				SK_NXS_MS_IF_ADDR_GENCNT_INC(ia6->ia_ifp);
+			}
+#endif /* SKYWALK */
 			IFA_UNLOCK(&ia6->ia_ifa);
 		}
 		LCK_RW_ASSERT(&in6_ifaddr_rwlock, LCK_RW_ASSERT_EXCLUSIVE);
@@ -1598,9 +1615,10 @@ nd6_service_expired_prefix(struct nd6svc_arg *ap, uint64_t timenow)
 	while (pr != NULL) {
 		ap->found++;
 		/*
-		 * check prefix lifetime.
-		 * since pltime is just for autoconf, pltime processing for
-		 * prefix is not necessary.
+		 * Skip already processed or defunct prefixes
+		 * We may iterate the prefix list from head again
+		 * so, we are trying to not revisit the same prefix
+		 * for the same instance of nd6_service
 		 */
 		NDPR_LOCK(pr);
 		if (pr->ndpr_stateflags & NDPRF_PROCESSED_SERVICE ||
@@ -1610,6 +1628,23 @@ nd6_service_expired_prefix(struct nd6svc_arg *ap, uint64_t timenow)
 			pr = pr->ndpr_next;
 			continue;
 		}
+
+		/*
+		 * If there are still manual addresses configured  in the system
+		 * that are associated with the prefix, ignore prefix expiry
+		 */
+		if (pr->ndpr_manual_addrcnt != 0) {
+			pr->ndpr_stateflags |= NDPRF_PROCESSED_SERVICE;
+			NDPR_UNLOCK(pr);
+			pr = pr->ndpr_next;
+			continue;
+		}
+
+		/*
+		 * check prefix lifetime.
+		 * since pltime is just for autoconf, pltime processing for
+		 * prefix is not necessary.
+		 */
 		if (pr->ndpr_expire != 0 && pr->ndpr_expire < timenow) {
 			/*
 			 * address expiration and prefix expiration are
@@ -3650,7 +3685,7 @@ nd6_ioctl(u_long cmd, caddr_t data, struct ifnet *ifp)
  */
 void
 nd6_cache_lladdr(struct ifnet *ifp, struct in6_addr *from, char *lladdr,
-    int lladdrlen, int type, int code)
+    int lladdrlen, int type, int code, int *did_update)
 {
 #pragma unused(lladdrlen)
 	struct rtentry *rt = NULL;
@@ -3670,6 +3705,10 @@ nd6_cache_lladdr(struct ifnet *ifp, struct in6_addr *from, char *lladdr,
 	}
 	if (from == NULL) {
 		panic("from == NULL in nd6_cache_lladdr");
+	}
+
+	if (did_update != NULL) {
+		did_update = 0;
 	}
 
 	/* nothing must be updated for unspecified address */
@@ -3772,14 +3811,15 @@ fail:
 	}
 
 	/*
-	 * For interface's that do not perform NUD
+	 * For interface's that do not perform NUD or NDP
 	 * neighbor cache entres must always be marked
 	 * reachable with no expiry
 	 */
 	ndi = ND_IFINFO(ifp);
 	VERIFY((NULL != ndi) && (TRUE == ndi->initialized));
 
-	if (ndi && !(ndi->flags & ND6_IFF_PERFORMNUD)) {
+	if ((ndi && !(ndi->flags & ND6_IFF_PERFORMNUD)) ||
+	    (ifp->if_eflags & IFEF_IPV6_ND6ALT)) {
 		newstate = ND6_LLINFO_REACHABLE;
 		ln_setexpire(ln, 0);
 	}
@@ -3923,6 +3963,10 @@ fail:
 			lck_mtx_unlock(rnh_lock);
 			RT_LOCK(rt);
 		}
+	}
+
+	if (did_update != NULL) {
+		*did_update = do_update;
 	}
 
 	/*

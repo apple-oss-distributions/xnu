@@ -50,12 +50,11 @@
  */
 uint32_t ipc_voucher_trace_contents = 0;
 
-static SECURITY_READ_ONLY_LATE(zone_t) ipc_voucher_zone;
-static ZONE_DECLARE(ipc_voucher_attr_control_zone, "ipc voucher attr controls",
-    sizeof(struct ipc_voucher_attr_control), ZC_ZFREE_CLEARMEM);
+static ZONE_DEFINE_TYPE(ipc_voucher_attr_control_zone, "ipc voucher attr controls",
+    struct ipc_voucher_attr_control, ZC_ZFREE_CLEARMEM);
 
-ZONE_INIT(&ipc_voucher_zone, "ipc vouchers", sizeof(struct ipc_voucher),
-    ZC_ZFREE_CLEARMEM, ZONE_ID_IPC_VOUCHERS, NULL);
+ZONE_DEFINE_ID(ZONE_ID_IPC_VOUCHERS, "ipc vouchers", struct ipc_voucher,
+    ZC_ZFREE_CLEARMEM);
 
 /* deliver voucher notifications */
 static void ipc_voucher_no_senders(ipc_port_t, mach_port_mscount_t);
@@ -226,15 +225,8 @@ iv_alloc(iv_index_t entries)
 	iv_index_t i;
 
 
-	iv = (ipc_voucher_t)zalloc(ipc_voucher_zone);
-	if (IV_NULL == iv) {
-		return IV_NULL;
-	}
-
+	iv = zalloc_id(ZONE_ID_IPC_VOUCHERS, Z_WAITOK | Z_ZERO | Z_NOFAIL);
 	os_ref_init(&iv->iv_refs, &iv_refgrp);
-	iv->iv_sum = 0;
-	iv->iv_hash = 0;
-	iv->iv_port = IP_NULL;
 
 	if (entries > IV_ENTRIES_INLINE) {
 		iv_entry_t table;
@@ -242,7 +234,7 @@ iv_alloc(iv_index_t entries)
 		/* TODO - switch to ipc_table method of allocation */
 		table = (iv_entry_t) kalloc_data(sizeof(*table) * entries, Z_WAITOK);
 		if (IVE_NULL == table) {
-			zfree(ipc_voucher_zone, iv);
+			zfree_id(ZONE_ID_IPC_VOUCHERS, iv);
 			return IV_NULL;
 		}
 		iv->iv_table = table;
@@ -326,7 +318,7 @@ iv_dealloc(ipc_voucher_t iv, boolean_t unhash)
 		kfree_data(iv->iv_table, iv->iv_table_size * sizeof(*iv->iv_table));
 	}
 
-	zfree(ipc_voucher_zone, iv);
+	zfree_id(ZONE_ID_IPC_VOUCHERS, iv);
 }
 
 /*
@@ -1701,6 +1693,145 @@ iv_dedup(ipc_voucher_t new_iv)
 }
 
 /*
+ *	Routine:	ipc_create_mach_voucher_internal
+ *	Purpose:
+ *		Create a new mach voucher and initialize it with the
+ *		value(s) created by having the appropriate resource
+ *		managers interpret the supplied recipe commands and
+ *		data.
+ *
+ *      Coming in on the attribute control port denotes special privileges
+ *		over the key associated with the control port.
+ *
+ *      Coming in from user-space, each recipe item will have a previous
+ *		recipe port name that needs to be converted to a voucher.  Because
+ *		we can't rely on the port namespace to hold a reference on each
+ *		previous voucher port for the duration of processing that command,
+ *		we have to convert the name to a voucher reference and release it
+ *		after the command processing is done.
+ *
+ *	Conditions:
+ *		Nothing locked (may invoke user-space repeatedly).
+ *		Caller holds references on previous vouchers.
+ *		Previous vouchers are passed as voucher indexes.
+ */
+static kern_return_t
+ipc_create_mach_voucher_internal(
+	ipc_voucher_attr_control_t  control,
+	uint8_t                     *recipes,
+	size_t                      recipe_size,
+	bool                        is_user_recipe,
+	ipc_voucher_t               *new_voucher)
+{
+	mach_voucher_attr_key_t control_key = 0;
+	ipc_voucher_attr_recipe_t sub_recipe_kernel;
+	mach_voucher_attr_recipe_t sub_recipe_user;
+	size_t recipe_struct_size = 0;
+	size_t recipe_used = 0;
+	ipc_voucher_t voucher;
+	ipc_voucher_t prev_iv;
+	bool key_priv = false;
+	kern_return_t kr = KERN_SUCCESS;
+
+	/* if nothing to do ... */
+	if (0 == recipe_size) {
+		*new_voucher = IV_NULL;
+		return KERN_SUCCESS;
+	}
+
+	/* allocate a voucher */
+	voucher = iv_alloc(ivgt_keys_in_use);
+	if (IV_NULL == voucher) {
+		return KERN_RESOURCE_SHORTAGE;
+	}
+
+	if (IPC_VOUCHER_ATTR_CONTROL_NULL != control) {
+		control_key = iv_index_to_key(control->ivac_key_index);
+	}
+
+	/*
+	 * account for recipe struct size diff between user and kernel
+	 * (mach_voucher_attr_recipe_t vs ipc_voucher_attr_recipe_t)
+	 */
+	recipe_struct_size = (is_user_recipe) ?
+	    sizeof(*sub_recipe_user) :
+	    sizeof(*sub_recipe_kernel);
+
+	/* iterate over the recipe items */
+	while (0 < recipe_size - recipe_used) {
+		if (recipe_size - recipe_used < recipe_struct_size) {
+			kr = KERN_INVALID_ARGUMENT;
+			break;
+		}
+
+		if (is_user_recipe) {
+			sub_recipe_user =
+			    (mach_voucher_attr_recipe_t)(void *)&recipes[recipe_used];
+
+			if (recipe_size - recipe_used - recipe_struct_size <
+			    sub_recipe_user->content_size) {
+				kr = KERN_INVALID_ARGUMENT;
+				break;
+			}
+
+			/*
+			 * convert voucher port name (current space) into a voucher
+			 * reference
+			 */
+			prev_iv = convert_port_name_to_voucher(
+				sub_recipe_user->previous_voucher);
+			if (MACH_PORT_NULL != sub_recipe_user->previous_voucher &&
+			    IV_NULL == prev_iv) {
+				kr = KERN_INVALID_CAPABILITY;
+				break;
+			}
+
+			recipe_used += recipe_struct_size + sub_recipe_user->content_size;
+			key_priv =  (IPC_VOUCHER_ATTR_CONTROL_NULL != control) ?
+			    (sub_recipe_user->key == control_key) :
+			    false;
+
+			kr = ipc_execute_voucher_recipe_command(voucher,
+			    sub_recipe_user->key, sub_recipe_user->command, prev_iv,
+			    sub_recipe_user->content, sub_recipe_user->content_size,
+			    key_priv);
+			ipc_voucher_release(prev_iv);
+		} else {
+			sub_recipe_kernel =
+			    (ipc_voucher_attr_recipe_t)(void *)&recipes[recipe_used];
+
+			if (recipe_size - recipe_used - recipe_struct_size <
+			    sub_recipe_kernel->content_size) {
+				kr = KERN_INVALID_ARGUMENT;
+				break;
+			}
+
+			recipe_used += recipe_struct_size + sub_recipe_kernel->content_size;
+			key_priv =  (IPC_VOUCHER_ATTR_CONTROL_NULL != control) ?
+			    (sub_recipe_kernel->key == control_key) :
+			    false;
+
+			kr = ipc_execute_voucher_recipe_command(voucher,
+			    sub_recipe_kernel->key, sub_recipe_kernel->command,
+			    sub_recipe_kernel->previous_voucher, sub_recipe_kernel->content,
+			    sub_recipe_kernel->content_size, key_priv);
+		}
+
+		if (KERN_SUCCESS != kr) {
+			break;
+		}
+	}
+
+	if (KERN_SUCCESS == kr) {
+		*new_voucher = iv_dedup(voucher);
+	} else {
+		iv_dealloc(voucher, FALSE);
+		*new_voucher = IV_NULL;
+	}
+	return kr;
+}
+
+/*
  *	Routine:	ipc_create_mach_voucher
  *	Purpose:
  *		Create a new mach voucher and initialize it with the
@@ -1718,57 +1849,8 @@ ipc_create_mach_voucher(
 	ipc_voucher_attr_raw_recipe_array_size_t        recipe_size,
 	ipc_voucher_t                                   *new_voucher)
 {
-	ipc_voucher_attr_recipe_t sub_recipe;
-	ipc_voucher_attr_recipe_size_t recipe_used = 0;
-	ipc_voucher_t voucher;
-	kern_return_t kr = KERN_SUCCESS;
-
-	/* if nothing to do ... */
-	if (0 == recipe_size) {
-		*new_voucher = IV_NULL;
-		return KERN_SUCCESS;
-	}
-
-	/* allocate a voucher */
-	voucher = iv_alloc(ivgt_keys_in_use);
-	if (IV_NULL == voucher) {
-		return KERN_RESOURCE_SHORTAGE;
-	}
-
-	/* iterate over the recipe items */
-	while (0 < recipe_size - recipe_used) {
-		if (recipe_size - recipe_used < sizeof(*sub_recipe)) {
-			kr = KERN_INVALID_ARGUMENT;
-			break;
-		}
-
-		/* find the next recipe */
-		sub_recipe = (ipc_voucher_attr_recipe_t)(void *)&recipes[recipe_used];
-		if (recipe_size - recipe_used - sizeof(*sub_recipe) < sub_recipe->content_size) {
-			kr = KERN_INVALID_ARGUMENT;
-			break;
-		}
-		recipe_used += sizeof(*sub_recipe) + sub_recipe->content_size;
-
-		kr = ipc_execute_voucher_recipe_command(voucher,
-		    sub_recipe->key,
-		    sub_recipe->command,
-		    sub_recipe->previous_voucher,
-		    sub_recipe->content,
-		    sub_recipe->content_size,
-		    FALSE);
-		if (KERN_SUCCESS != kr) {
-			break;
-		}
-	}
-
-	if (KERN_SUCCESS == kr) {
-		*new_voucher = iv_dedup(voucher);
-	} else {
-		iv_dealloc(voucher, FALSE);
-		*new_voucher = IV_NULL;
-	}
-	return kr;
+	return ipc_create_mach_voucher_internal(IPC_VOUCHER_ATTR_CONTROL_NULL,
+	           recipes, recipe_size, false, new_voucher);
 }
 
 /*
@@ -1798,64 +1880,12 @@ ipc_voucher_attr_control_create_mach_voucher(
 	ipc_voucher_attr_raw_recipe_array_size_t        recipe_size,
 	ipc_voucher_t                                   *new_voucher)
 {
-	mach_voucher_attr_key_t control_key;
-	ipc_voucher_attr_recipe_t sub_recipe;
-	ipc_voucher_attr_recipe_size_t recipe_used = 0;
-	ipc_voucher_t voucher = IV_NULL;
-	kern_return_t kr = KERN_SUCCESS;
-
 	if (IPC_VOUCHER_ATTR_CONTROL_NULL == control) {
 		return KERN_INVALID_CAPABILITY;
 	}
 
-	/* if nothing to do ... */
-	if (0 == recipe_size) {
-		*new_voucher = IV_NULL;
-		return KERN_SUCCESS;
-	}
-
-	/* allocate new voucher */
-	voucher = iv_alloc(ivgt_keys_in_use);
-	if (IV_NULL == voucher) {
-		return KERN_RESOURCE_SHORTAGE;
-	}
-
-	control_key = iv_index_to_key(control->ivac_key_index);
-
-	/* iterate over the recipe items */
-	while (0 < recipe_size - recipe_used) {
-		if (recipe_size - recipe_used < sizeof(*sub_recipe)) {
-			kr = KERN_INVALID_ARGUMENT;
-			break;
-		}
-
-		/* find the next recipe */
-		sub_recipe = (ipc_voucher_attr_recipe_t)(void *)&recipes[recipe_used];
-		if (recipe_size - recipe_used - sizeof(*sub_recipe) < sub_recipe->content_size) {
-			kr = KERN_INVALID_ARGUMENT;
-			break;
-		}
-		recipe_used += sizeof(*sub_recipe) + sub_recipe->content_size;
-
-		kr = ipc_execute_voucher_recipe_command(voucher,
-		    sub_recipe->key,
-		    sub_recipe->command,
-		    sub_recipe->previous_voucher,
-		    sub_recipe->content,
-		    sub_recipe->content_size,
-		    (sub_recipe->key == control_key));
-		if (KERN_SUCCESS != kr) {
-			break;
-		}
-	}
-
-	if (KERN_SUCCESS == kr) {
-		*new_voucher = iv_dedup(voucher);
-	} else {
-		*new_voucher = IV_NULL;
-		iv_dealloc(voucher, FALSE);
-	}
-	return kr;
+	return ipc_create_mach_voucher_internal(control, recipes,
+	           recipe_size, false, new_voucher);
 }
 
 /*
@@ -2339,13 +2369,6 @@ mach_voucher_attr_control_get_values(
  *
  *		Coming in on the attribute control port denotes special privileges
  *		over they key associated with the control port.
- *
- *		Coming in from user-space, each recipe item will have a previous
- *		recipe port name that needs to be converted to a voucher.  Because
- *		we can't rely on the port namespace to hold a reference on each
- *		previous voucher port for the duration of processing that command,
- *		we have to convert the name to a voucher reference and release it
- *		after the command processing is done.
  */
 kern_return_t
 mach_voucher_attr_control_create_mach_voucher(
@@ -2354,75 +2377,12 @@ mach_voucher_attr_control_create_mach_voucher(
 	mach_voucher_attr_raw_recipe_size_t recipe_size,
 	ipc_voucher_t *new_voucher)
 {
-	mach_voucher_attr_key_t control_key;
-	mach_voucher_attr_recipe_t sub_recipe;
-	mach_voucher_attr_recipe_size_t recipe_used = 0;
-	ipc_voucher_t voucher = IV_NULL;
-	kern_return_t kr = KERN_SUCCESS;
-
 	if (IPC_VOUCHER_ATTR_CONTROL_NULL == control) {
 		return KERN_INVALID_CAPABILITY;
 	}
 
-	/* if nothing to do ... */
-	if (0 == recipe_size) {
-		*new_voucher = IV_NULL;
-		return KERN_SUCCESS;
-	}
-
-	/* allocate new voucher */
-	voucher = iv_alloc(ivgt_keys_in_use);
-	if (IV_NULL == voucher) {
-		return KERN_RESOURCE_SHORTAGE;
-	}
-
-	control_key = iv_index_to_key(control->ivac_key_index);
-
-	/* iterate over the recipe items */
-	while (0 < recipe_size - recipe_used) {
-		ipc_voucher_t prev_iv;
-
-		if (recipe_size - recipe_used < sizeof(*sub_recipe)) {
-			kr = KERN_INVALID_ARGUMENT;
-			break;
-		}
-
-		/* find the next recipe */
-		sub_recipe = (mach_voucher_attr_recipe_t)(void *)&recipes[recipe_used];
-		if (recipe_size - recipe_used - sizeof(*sub_recipe) < sub_recipe->content_size) {
-			kr = KERN_INVALID_ARGUMENT;
-			break;
-		}
-		recipe_used += sizeof(*sub_recipe) + sub_recipe->content_size;
-
-		/* convert voucher port name (current space) into a voucher reference */
-		prev_iv = convert_port_name_to_voucher(sub_recipe->previous_voucher);
-		if (MACH_PORT_NULL != sub_recipe->previous_voucher && IV_NULL == prev_iv) {
-			kr = KERN_INVALID_CAPABILITY;
-			break;
-		}
-
-		kr = ipc_execute_voucher_recipe_command(voucher,
-		    sub_recipe->key,
-		    sub_recipe->command,
-		    prev_iv,
-		    sub_recipe->content,
-		    sub_recipe->content_size,
-		    (sub_recipe->key == control_key));
-		ipc_voucher_release(prev_iv);
-
-		if (KERN_SUCCESS != kr) {
-			break;
-		}
-	}
-
-	if (KERN_SUCCESS == kr) {
-		*new_voucher = iv_dedup(voucher);
-	} else {
-		*new_voucher = IV_NULL;
-		iv_dealloc(voucher, FALSE);
-	}
-	return kr;
+	return ipc_create_mach_voucher_internal(control, recipes,
+	           recipe_size, true, new_voucher);
 }
 
 /*
@@ -2430,13 +2390,6 @@ mach_voucher_attr_control_create_mach_voucher(
  *	Purpose:
  *		Create a new mach voucher and initialize it by processing the
  *		supplied recipe(s).
- *
- *		Comming in from user-space, each recipe item will have a previous
- *		recipe port name that needs to be converted to a voucher.  Because
- *		we can't rely on the port namespace to hold a reference on each
- *		previous voucher port for the duration of processing that command,
- *		we have to convert the name to a voucher reference and release it
- *		after the command processing is done.
  */
 kern_return_t
 host_create_mach_voucher(
@@ -2445,72 +2398,12 @@ host_create_mach_voucher(
 	mach_voucher_attr_raw_recipe_size_t recipe_size,
 	ipc_voucher_t *new_voucher)
 {
-	mach_voucher_attr_recipe_t sub_recipe;
-	mach_voucher_attr_recipe_size_t recipe_used = 0;
-	ipc_voucher_t voucher = IV_NULL;
-	kern_return_t kr = KERN_SUCCESS;
-
 	if (host == HOST_NULL) {
 		return KERN_INVALID_ARGUMENT;
 	}
 
-	/* if nothing to do ... */
-	if (0 == recipe_size) {
-		*new_voucher = IV_NULL;
-		return KERN_SUCCESS;
-	}
-
-	/* allocate new voucher */
-	voucher = iv_alloc(ivgt_keys_in_use);
-	if (IV_NULL == voucher) {
-		return KERN_RESOURCE_SHORTAGE;
-	}
-
-	/* iterate over the recipe items */
-	while (0 < recipe_size - recipe_used) {
-		ipc_voucher_t prev_iv;
-
-		if (recipe_size - recipe_used < sizeof(*sub_recipe)) {
-			kr = KERN_INVALID_ARGUMENT;
-			break;
-		}
-
-		/* find the next recipe */
-		sub_recipe = (mach_voucher_attr_recipe_t)(void *)&recipes[recipe_used];
-		if (recipe_size - recipe_used - sizeof(*sub_recipe) < sub_recipe->content_size) {
-			kr = KERN_INVALID_ARGUMENT;
-			break;
-		}
-		recipe_used += sizeof(*sub_recipe) + sub_recipe->content_size;
-
-		/* convert voucher port name (current space) into a voucher reference */
-		prev_iv = convert_port_name_to_voucher(sub_recipe->previous_voucher);
-		if (MACH_PORT_NULL != sub_recipe->previous_voucher && IV_NULL == prev_iv) {
-			kr = KERN_INVALID_CAPABILITY;
-			break;
-		}
-
-		kr = ipc_execute_voucher_recipe_command(voucher,
-		    sub_recipe->key,
-		    sub_recipe->command,
-		    prev_iv,
-		    sub_recipe->content,
-		    sub_recipe->content_size,
-		    FALSE);
-		ipc_voucher_release(prev_iv);
-
-		if (KERN_SUCCESS != kr) {
-			break;
-		}
-	}
-
-	if (KERN_SUCCESS == kr) {
-		*new_voucher = iv_dedup(voucher);
-	} else {
-		*new_voucher = IV_NULL;
-		iv_dealloc(voucher, FALSE);
-	}
-	return kr;
+	return ipc_create_mach_voucher_internal(IPC_VOUCHER_ATTR_CONTROL_NULL,
+	           recipes, recipe_size, true, new_voucher);
 }
 
 /*
@@ -2590,6 +2483,7 @@ host_register_mach_voucher_attr_manager(
 	return KERN_NOT_SUPPORTED;
 }
 
+#if CONFIG_VOUCHER_DEPRECATED
 /*
  *	Routine:	ipc_get_pthpriority_from_kmsg_voucher
  *	Purpose:
@@ -2634,6 +2528,7 @@ ipc_get_pthpriority_from_kmsg_voucher(
 
 	return KERN_SUCCESS;
 }
+#endif /* CONFIG_VOUCHER_DEPRECATED */
 
 /*
  *	Routine:	ipc_voucher_get_default_voucher

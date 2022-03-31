@@ -148,10 +148,10 @@ static queue_head_t global_iit_alloc_queue =
     QUEUE_HEAD_INITIALIZER(global_iit_alloc_queue);
 #endif
 
-static ZONE_DECLARE(ipc_importance_task_zone, "ipc task importance",
-    sizeof(struct ipc_importance_task), ZC_ZFREE_CLEARMEM);
-static ZONE_DECLARE(ipc_importance_inherit_zone, "ipc importance inherit",
-    sizeof(struct ipc_importance_inherit), ZC_ZFREE_CLEARMEM);
+static ZONE_DEFINE_TYPE(ipc_importance_task_zone, "ipc task importance",
+    struct ipc_importance_task, ZC_ZFREE_CLEARMEM);
+static ZONE_DEFINE_TYPE(ipc_importance_inherit_zone, "ipc importance inherit",
+    struct ipc_importance_inherit, ZC_ZFREE_CLEARMEM);
 static zone_t ipc_importance_inherit_zone;
 
 static ipc_voucher_attr_control_t ipc_importance_control;

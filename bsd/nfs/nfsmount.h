@@ -120,6 +120,7 @@ struct nfs_fs_server {
 struct nfs_fs_path {
 	char **                 np_components;          /* array of component pointers */
 	uint32_t                np_compcount;           /* # components in path */
+	uint32_t                np_compsize;            /* # allocated components */
 };
 struct nfs_fs_location {
 	struct nfs_fs_server ** nl_servers;             /* array of server pointers */
@@ -434,6 +435,12 @@ struct nfsmount {
 #define VTONMP(vp)      VFSTONFS(vnode_mount(vp))
 #define NFSTONMP(np)    VTONMP(NFSTOV(np))
 #define NFSTOMP(np)     (vnode_mount(NFSTOV(np)))
+
+extern bool nfs_fs_path_init(struct nfs_fs_path *fsp, uint32_t count);
+
+extern void nfs_fs_path_replace(struct nfs_fs_path *dst, struct nfs_fs_path *src);
+
+extern void nfs_fs_path_destroy(struct nfs_fs_path *fsp);
 
 #endif /* KERNEL */
 

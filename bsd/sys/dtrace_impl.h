@@ -46,6 +46,7 @@ extern "C" {
  */
 
 #include <sys/dtrace.h>
+#include <kern/kalloc.h>
 
 /*
  * DTrace Implementation Locks
@@ -822,11 +823,6 @@ typedef struct dtrace_dstate_percpu {
 	uint64_t dtdsc_drops;			/* number of capacity drops */
 	uint64_t dtdsc_dirty_drops;		/* number of dirty drops */
 	uint64_t dtdsc_rinsing_drops;		/* number of rinsing drops */
-#ifdef _LP64
-	uint64_t dtdsc_pad;			/* pad to avoid false sharing */
-#else
-	uint64_t dtdsc_pad[2];			/* pad to avoid false sharing */
-#endif
 } dtrace_dstate_percpu_t;
 
 typedef enum dtrace_dstate_state {
@@ -843,7 +839,7 @@ typedef struct dtrace_dstate {
 	size_t dtds_chunksize;			/* size of each chunk */
 	dtrace_dynhash_t *dtds_hash;		/* pointer to hash table */
 	dtrace_dstate_state_t dtds_state;	/* current dynamic var. state */
-	dtrace_dstate_percpu_t *dtds_percpu;	/* per-CPU dyn. var. state */
+	dtrace_dstate_percpu_t *__zpercpu dtds_percpu;	/* per-CPU dyn. var. state */
 } dtrace_dstate_t;
 
 /*

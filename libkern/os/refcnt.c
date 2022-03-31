@@ -31,8 +31,6 @@ bool ref_debug_enable = false;
 
 static const size_t ref_log_nrecords = 1000000;
 
-#define REFLOG_BTDEPTH   10
-
 __enum_closed_decl(reflog_op_t, uint8_t, {
 	REFLOG_RETAIN  = 1,
 	REFLOG_RELEASE = 2
@@ -114,9 +112,8 @@ ref_log_op(struct os_refgrp *grp, void *elem, reflog_op_t op)
 		return;
 	}
 
-	uintptr_t bt[REFLOG_BTDEPTH];
-	uint32_t nframes = backtrace(bt, REFLOG_BTDEPTH, NULL, NULL);
-	btlog_add_entry((btlog_t *)grp->grp_log, elem, op, (void **)bt, nframes);
+	btlog_record((btlog_t)grp->grp_log, elem, op,
+	    btref_get(__builtin_frame_address(0), BTREF_GET_NOWAIT));
 }
 
 __attribute__((cold, noinline))
@@ -132,7 +129,7 @@ ref_log_drop(struct os_refgrp *grp, void *elem)
 		return;
 	}
 
-	btlog_remove_entries_for_element(grp->grp_log, elem);
+	btlog_erase(grp->grp_log, elem);
 }
 
 __attribute__((cold, noinline))
@@ -159,7 +156,8 @@ os_ref_log_init(struct os_refgrp *grp)
 	while ((g = strsep(&refgrp, ",")) != NULL) {
 		if (strcmp(g, grp->grp_name) == 0) {
 			/* enable logging on this refgrp */
-			grp->grp_log = btlog_create(ref_log_nrecords, REFLOG_BTDEPTH, true);
+			grp->grp_log = btlog_create(BTLOG_HASH,
+			    ref_log_nrecords, 0);
 			return;
 		}
 	}

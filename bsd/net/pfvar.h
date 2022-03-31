@@ -93,6 +93,10 @@ extern "C" {
 #include <sys/systm.h>
 #include <net/pf_pbuf.h>
 
+#if SKYWALK
+#include <netinet/in_pcb.h>
+#include <skywalk/namespace/netns.h>
+#endif
 
 #if BYTE_ORDER == BIG_ENDIAN
 #define htobe64(x)      (x)
@@ -1059,6 +1063,9 @@ struct pf_state {
 	u_int8_t                 allow_opts;
 	u_int8_t                 timeout;
 	u_int8_t                 sync_flags;
+#if SKYWALK
+	netns_token              nstoken;
+#endif
 };
 #endif /* KERNEL */
 
@@ -1198,6 +1205,7 @@ struct pf_ruleset {
 			struct pf_rulequeue     *ptr;
 			struct pf_rule          **ptr_array;
 			u_int32_t                rcount;
+			u_int32_t                rsize;
 			u_int32_t                ticket;
 			int                      open;
 		}                        active, inactive;
@@ -2323,7 +2331,7 @@ __private_extern__ int pfi_set_flags(const char *, int);
 __private_extern__ int pfi_clear_flags(const char *, int);
 
 __private_extern__ u_int16_t pf_tagname2tag(char *);
-__private_extern__ void pf_tag2tagname(u_int16_t, char *);
+__private_extern__ u_int16_t pf_tagname2tag_ext(char *);
 __private_extern__ void pf_tag_ref(u_int16_t);
 __private_extern__ void pf_tag_unref(u_int16_t);
 __private_extern__ int pf_tag_packet(pbuf_t *, struct pf_mtag *,
@@ -2397,6 +2405,9 @@ __private_extern__ struct pf_fragment_tag * pf_find_fragment_tag_pbuf(pbuf_t *);
 __private_extern__ struct pf_fragment_tag * pf_find_fragment_tag(struct mbuf *);
 __private_extern__ struct pf_fragment_tag * pf_copy_fragment_tag(struct mbuf *,
     struct pf_fragment_tag *, int);
+#if defined(SKYWALK) && defined(XNU_TARGET_OS_OSX)
+__private_extern__ bool pf_check_compatible_rules(void);
+#endif // SKYWALK && defined(XNU_TARGET_OS_OSX)
 #else /* !KERNEL */
 extern struct pf_anchor_global pf_anchors;
 extern struct pf_anchor pf_main_anchor;

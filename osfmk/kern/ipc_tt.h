@@ -103,9 +103,8 @@ extern void ipc_main_thread_set_immovable_pinned(
 	thread_t          thread);
 
 __options_decl(ipc_thread_init_options_t, uint32_t, {
-	IPC_THREAD_INIT_NONE      = 0x00,
-	IPC_THREAD_INIT_PINNED    = 0x01,
-	IPC_THREAD_INIT_IMMOVABLE = 0x02,
+	IPC_THREAD_INIT_NONE       = 0x00,
+	IPC_THREAD_INIT_MAINTHREAD = 0x01,
 });
 
 __options_decl(port_intrans_options_t, uint32_t, {
@@ -119,14 +118,10 @@ __options_decl(port_intrans_options_t, uint32_t, {
 
 /* Initialize a thread's IPC state */
 extern void ipc_thread_init(
+	task_t          task,
 	thread_t        thread,
+	thread_ro_t     tro,
 	ipc_thread_init_options_t options);
-
-extern void ipc_thread_init_exc_actions(
-	thread_t        thread);
-
-extern void ipc_thread_destroy_exc_actions(
-	thread_t        thread);
 
 /* Disable IPC access to a thread */
 extern void ipc_thread_disable(

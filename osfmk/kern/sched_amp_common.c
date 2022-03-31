@@ -393,7 +393,6 @@ sched_ipi_type_t
 sched_amp_ipi_policy(processor_t dst, thread_t thread, boolean_t dst_idle, sched_ipi_event_t event)
 {
 	processor_set_t pset = dst->processor_set;
-	assert(bit_test(pset->pending_AST_URGENT_cpu_mask, dst->cpu_id) == false);
 	assert(dst != current_processor());
 
 	boolean_t deferred_ipi_supported = false;

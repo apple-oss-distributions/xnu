@@ -14,6 +14,7 @@
 #include <darwintest_utils.h>
 
 #include "memorystatus_assertion_helpers.h"
+#include "jumbo_va_spaces_common.h"
 
 #define MAX_TASK_MEM_ENTITLED "kern.entitled_max_task_pmem"
 #define MAX_TASK_MEM "kern.max_task_pmem"
@@ -46,6 +47,14 @@ T_HELPER_DECL(child, "Child") {
 	// so that its parent can check its memlimits
 	// and then kill it.
 	T_PASS("Child exiting");
+
+	if (dt_64_bit_kernel()) {
+#if ENTITLED
+		verify_jumbo_va(true);
+#else
+		verify_jumbo_va(false);
+#endif /* ENTITLED */
+	}
 }
 
 static pid_t

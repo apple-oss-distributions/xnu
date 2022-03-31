@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2020 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -85,6 +85,9 @@
 #if NECP
 #include <net/necp.h>
 #endif /* NECP */
+#if SKYWALK
+#include <skywalk/os_channel.h>
+#endif /* SKYWALK */
 
 #include <security/audit/audit.h>
 #include <security/mac.h>
@@ -1773,9 +1776,15 @@ networking_memstatus_callout(proc_t p, uint32_t status)
 #if NECP
 		case DTYPE_NETPOLICY:
 			necp_fd_memstatus(p, status,
-			    (struct necp_fd_data *)fp->fp_glob->fg_data);
+			    (struct necp_fd_data *)fp_get_data(fp));
 			break;
 #endif /* NECP */
+#if SKYWALK
+		case DTYPE_CHANNEL:
+			kern_channel_memstatus(p, status,
+			    (struct kern_channel *)fp_get_data(fp));
+			break;
+#endif /* SKYWALK */
 		default:
 			break;
 		}
@@ -1785,6 +1794,15 @@ networking_memstatus_callout(proc_t p, uint32_t status)
 	return 1;
 }
 
+#if SKYWALK
+/*
+ * Since we make multiple passes across the fileproc array, record the
+ * first MAX_CHANNELS channel handles found.  MAX_CHANNELS should be
+ * large enough to accomodate most, if not all cases.  If we find more,
+ * we'll go to the slow path during second pass.
+ */
+#define MAX_CHANNELS    8       /* should be more than enough */
+#endif /* SKYWALK */
 
 static int
 networking_defunct_callout(proc_t p, void *arg)
@@ -1793,6 +1811,13 @@ networking_defunct_callout(proc_t p, void *arg)
 	int pid = args->pid;
 	int level = args->level;
 	struct fileproc *fp;
+#if SKYWALK
+	int i;
+	int channel_count = 0;
+	struct kern_channel *channel_array[MAX_CHANNELS];
+
+	bzero(&channel_array, sizeof(channel_array));
+#endif /* SKYWALK */
 
 	proc_fdlock(p);
 
@@ -1801,7 +1826,7 @@ networking_defunct_callout(proc_t p, void *arg)
 
 		switch (FILEGLOB_DTYPE(fg)) {
 		case DTYPE_SOCKET: {
-			struct socket *so = (struct socket *)fg->fg_data;
+			struct socket *so = (struct socket *)fg_get_data(fg);
 			if (proc_getpid(p) == pid || so->last_pid == pid ||
 			    ((so->so_flags & SOF_DELEGATED) && so->e_pid == pid)) {
 				/* Call networking stack with socket and level */
@@ -1814,15 +1839,51 @@ networking_defunct_callout(proc_t p, void *arg)
 			/* first pass: defunct necp and get stats for ntstat */
 			if (proc_getpid(p) == pid) {
 				necp_fd_defunct(p,
-				    (struct necp_fd_data *)fg->fg_data);
+				    (struct necp_fd_data *)fg_get_data(fg));
 			}
 			break;
 #endif /* NECP */
+#if SKYWALK
+		case DTYPE_CHANNEL:
+			/* first pass: get channels and total count */
+			if (proc_getpid(p) == pid) {
+				if (channel_count < MAX_CHANNELS) {
+					channel_array[channel_count] =
+					    (struct kern_channel *)fg_get_data(fg);
+				}
+				++channel_count;
+			}
+			break;
+#endif /* SKYWALK */
 		default:
 			break;
 		}
 	}
 
+#if SKYWALK
+	/*
+	 * Second pass: defunct channels/flows (after NECP).  Handle
+	 * the common case of up to MAX_CHANNELS count with fast path,
+	 * and traverse the fileproc array again only if we exceed it.
+	 */
+	if (channel_count != 0 && channel_count <= MAX_CHANNELS) {
+		ASSERT(proc_getpid(p) == pid);
+		for (i = 0; i < channel_count; i++) {
+			ASSERT(channel_array[i] != NULL);
+			kern_channel_defunct(p, channel_array[i]);
+		}
+	} else if (channel_count != 0) {
+		ASSERT(proc_getpid(p) == pid);
+		fdt_foreach(fp, p) {
+			struct fileglob *fg = fp->fp_glob;
+
+			if (FILEGLOB_DTYPE(fg) == DTYPE_CHANNEL) {
+				kern_channel_defunct(p,
+				    (struct kern_channel *)fg_get_data(fg));
+			}
+		}
+	}
+#endif /* SKYWALK */
 	proc_fdunlock(p);
 
 	return PROC_RETURNED;
@@ -1983,6 +2044,12 @@ shared_region_check_np(
 			/* retrieve address of its first mapping... */
 			kr = vm_shared_region_start_address(shared_region, &start_address, task);
 			if (kr != KERN_SUCCESS) {
+				SHARED_REGION_TRACE_ERROR(("shared_region: %p [%d(%s)] "
+				    "check_np(0x%llx) "
+				    "vm_shared_region_start_address() failed\n",
+				    (void *)VM_KERNEL_ADDRPERM(current_thread()),
+				    proc_getpid(p), p->p_comm,
+				    (uint64_t)uap->start_address));
 				error = ENOMEM;
 			} else {
 #if __has_feature(ptrauth_calls)
@@ -1991,6 +2058,12 @@ shared_region_check_np(
 				 * has authenticated pointers into private memory.
 				 */
 				if (vm_shared_region_auth_remap(shared_region) != KERN_SUCCESS) {
+					SHARED_REGION_TRACE_ERROR(("shared_region: %p [%d(%s)] "
+					    "check_np(0x%llx) "
+					    "vm_shared_region_auth_remap() failed\n",
+					    (void *)VM_KERNEL_ADDRPERM(current_thread()),
+					    proc_getpid(p), p->p_comm,
+					    (uint64_t)uap->start_address));
 					error = ENOMEM;
 				}
 #endif /* __has_feature(ptrauth_calls) */
@@ -2000,16 +2073,16 @@ shared_region_check_np(
 					error = copyout(&start_address,
 					    (user_addr_t) uap->start_address,
 					    sizeof(start_address));
-				}
-				if (error != 0) {
-					SHARED_REGION_TRACE_ERROR(
-						("shared_region: %p [%d(%s)] "
-						"check_np(0x%llx) "
-						"copyout(0x%llx) error %d\n",
-						(void *)VM_KERNEL_ADDRPERM(current_thread()),
-						proc_getpid(p), p->p_comm,
-						(uint64_t)uap->start_address, (uint64_t)start_address,
-						error));
+					if (error != 0) {
+						SHARED_REGION_TRACE_ERROR(
+							("shared_region: %p [%d(%s)] "
+							"check_np(0x%llx) "
+							"copyout(0x%llx) error %d\n",
+							(void *)VM_KERNEL_ADDRPERM(current_thread()),
+							proc_getpid(p), p->p_comm,
+							(uint64_t)uap->start_address, (uint64_t)start_address,
+							error));
+					}
 				}
 			}
 		}
@@ -2204,7 +2277,7 @@ shared_region_map_and_slide_setup(
 		}
 
 		/* get vnode from file structure */
-		error = vnode_getwithref((vnode_t) srfmp->fp->fp_glob->fg_data);
+		error = vnode_getwithref((vnode_t)fp_get_data(srfmp->fp));
 		if (error) {
 			SHARED_REGION_TRACE_ERROR(
 				("shared_region: %p [%d(%s)] map: "
@@ -2213,7 +2286,7 @@ shared_region_map_and_slide_setup(
 				proc_getpid(p), p->p_comm, srfmp->fd, error));
 			goto done;
 		}
-		srfmp->vp = (struct vnode *) srfmp->fp->fp_glob->fg_data;
+		srfmp->vp = (struct vnode *)fp_get_data(srfmp->fp);
 
 		/* make sure the vnode is a regular file */
 		if (srfmp->vp->v_type != VREG) {
@@ -3076,7 +3149,7 @@ void vm_pageout_io_throttle(void);
 void
 vm_pageout_io_throttle(void)
 {
-	struct uthread *uthread = get_bsdthread_info(current_thread());
+	struct uthread *uthread = current_uthread();
 
 	/*
 	 * thread is marked as a low priority I/O type

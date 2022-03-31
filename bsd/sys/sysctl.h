@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2019 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -652,6 +652,9 @@ SYSCTL_DECL(_kern_bridge);
 SYSCTL_DECL(_hw_features);
 #endif
 
+#if defined(BSD_KERNEL_PRIVATE) && SKYWALK
+#include <skywalk/os_sysctls_private.h>
+#endif  /* defined(BSD_KERNEL_PRIVATE) && SKYWALK */
 
 #ifndef SYSCTL_SKMEM_UPDATE_FIELD
 
@@ -850,7 +853,8 @@ SYSCTL_DECL(_hw_features);
 #define KERN_KDBUFWAIT        23
 #define KERN_KDCPUMAP         24
 #define KERN_KDCPUMAP_EXT     25
-/* 25 - 27 unused */
+#define KERN_KDSET_EDM        26
+#define KERN_KDGET_EDM        27
 #define KERN_KDWRITETR_V3     28
 
 #define CTL_KERN_NAMES { \

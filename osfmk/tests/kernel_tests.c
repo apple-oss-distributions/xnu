@@ -658,7 +658,9 @@ kcdata_api_test(void)
 
 	/* test with successful kcdata_memory_static_init */
 	test_kc_data.kcd_length   = 0xdeadbeef;
-	mach_vm_address_t address = (mach_vm_address_t)kalloc(PAGE_SIZE);
+
+	void *data_ptr = kalloc_data(PAGE_SIZE, Z_WAITOK_ZERO_NOFAIL);
+	mach_vm_address_t address = (mach_vm_address_t)data_ptr;
 	T_EXPECT_NOTNULL(address, "kalloc of PAGE_SIZE data.");
 
 	retval = kcdata_memory_static_init(&test_kc_data, (mach_vm_address_t)address, KCDATA_BUFFER_BEGIN_STACKSHOT, PAGE_SIZE,
@@ -741,6 +743,7 @@ kcdata_api_test(void)
 	    sizeof(test_disk_io_stats_def) / sizeof(struct kcdata_subtype_descriptor));
 	T_ASSERT(retval == KERN_SUCCESS, "adding custom type succeeded.");
 
+	kfree_data(data_ptr, PAGE_SIZE);
 	return KERN_SUCCESS;
 }
 
@@ -1008,7 +1011,7 @@ static kern_return_t
 init_synch_test_common(struct synch_test_common *info, unsigned int nthreads)
 {
 	info->nthreads = nthreads;
-	info->threads = kalloc(sizeof(thread_t) * nthreads);
+	info->threads = kalloc_type(thread_t, nthreads, Z_WAITOK);
 	if (!info->threads) {
 		return ENOMEM;
 	}
@@ -1019,7 +1022,7 @@ init_synch_test_common(struct synch_test_common *info, unsigned int nthreads)
 static void
 destroy_synch_test_common(struct synch_test_common *info)
 {
-	kfree(info->threads, sizeof(thread_t) * info->nthreads);
+	kfree_type(thread_t, info->nthreads, info->threads);
 }
 
 static void
@@ -2656,7 +2659,7 @@ ts_kernel_timingsafe_bcmp_test(void)
 
 	// large
 	buf_size = 1024 * 16;
-	buf = kalloc(buf_size);
+	buf = kalloc_data(buf_size, Z_WAITOK);
 	T_EXPECT_NOTNULL(buf, "kalloc of buf");
 
 	read_random(buf, buf_size);
@@ -2667,7 +2670,7 @@ ts_kernel_timingsafe_bcmp_test(void)
 	memcpy(buf + 128, buf, 128);
 	T_ASSERT(timingsafe_bcmp(buf, buf + 128, 128) == 0, NULL);
 
-	kfree(buf, buf_size);
+	kfree_data(buf, buf_size);
 
 	return KERN_SUCCESS;
 }

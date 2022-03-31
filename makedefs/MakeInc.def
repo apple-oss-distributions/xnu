@@ -155,7 +155,6 @@ WARNFLAGS_STD := \
 	-Wno-documentation-unknown-command \
 	-Wno-extra-semi-stmt \
 	-Wno-format-non-iso \
-	-Wno-format-nonliteral \
 	-Wno-language-extension-token \
 	-Wno-missing-variable-declarations \
 	-Wno-packed \
@@ -382,12 +381,12 @@ CFLAGS_PROFILEARM64 = -O2
 ### endif
 ### endif # ifndef BOUND_CHECKS
 ifeq ($(BOUND_CHECKS),1)
-CFLAGS_BOUND_CHECKS = -DXNU_BOUND_CHECKS=1 -fbounds-attributes
+CFLAGS_BOUND_CHECKS = -fbounds-attributes
 ifneq ($(shell $(CC) -E -fbounds-attributes /dev/null 2>/dev/null && echo 1),1)
     $(error "your toolchain doesn't support bound checking")
 endif
 else
-CFLAGS_BOUND_CHECKS = -UXNU_BOUND_CHECKS
+CFLAGS_BOUND_CHECKS =
 endif
 
 #
@@ -1065,7 +1064,6 @@ XNU_PRIVATE_UNIFDEF += -ULIBKERN_KERNEL_PRIVATE
 XNU_PRIVATE_UNIFDEF += -ULIBSA_KERNEL_PRIVATE
 XNU_PRIVATE_UNIFDEF += -UPEXPERT_KERNEL_PRIVATE
 XNU_PRIVATE_UNIFDEF += -UXNU_KERNEL_PRIVATE
-XNU_PRIVATE_UNIFDEF += -UXNU_BOUND_CHECKS
 
 
 PLATFORM_UNIFDEF = $(foreach x,$(SUPPORTED_PLATFORMS),$(if $(filter $(PLATFORM),$(x)),-DPLATFORM_$(x) $(foreach token,$(PLATFORM_UNIFDEF_BLACKLIST_TOKENS_$(x)),-U$(token)),-UPLATFORM_$(x)))

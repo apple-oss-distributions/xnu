@@ -352,6 +352,12 @@ typedef void (^os_block_t)(void);
 #endif // KERNEL
 
 #if KERNEL_PRIVATE
+#if __has_feature(ptrauth_calls)
+#define XNU_PTRAUTH_SIGNED_FUNCTION_PTR(type) \
+	__ptrauth(ptrauth_key_function_pointer, 1, ptrauth_string_discriminator(type))
+#else
+#define XNU_PTRAUTH_SIGNED_FUNCTION_PTR(type)
+#endif
 #define XNU_PTRAUTH_SIGNED_PTR OS_PTRAUTH_SIGNED_PTR
 #define XNU_PTRAUTH_SIGNED_PTR_AUTH_NULL OS_PTRAUTH_SIGNED_PTR_AUTH_NULL
 #endif // KERNEL_PRIVATE

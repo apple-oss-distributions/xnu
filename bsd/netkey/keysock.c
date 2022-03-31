@@ -389,21 +389,16 @@ key_attach(struct socket *so, int proto, struct proc *p)
 	if (sotorawcb(so) != 0) {
 		return EISCONN; /* XXX panic? */
 	}
-	kp = (struct keycb *)_MALLOC(sizeof(*kp), M_PCB,
-	    M_WAITOK | M_ZERO); /* XXX */
-	if (kp == 0) {
-		return ENOBUFS;
-	}
 
+	kp = kalloc_type(struct keycb, Z_WAITOK_ZERO_NOFAIL);
 	so->so_pcb = (caddr_t)kp;
-	kp->kp_promisc = kp->kp_registered = 0;
 	kp->kp_raw.rcb_laddr = &key_src;
 	kp->kp_raw.rcb_faddr = &key_dst;
 
 	error = raw_usrreqs.pru_attach(so, proto, p);
 	kp = (struct keycb *)sotorawcb(so);
 	if (error) {
-		_FREE(kp, M_PCB);
+		kfree_type(struct keycb, kp);
 		so->so_pcb = (caddr_t) 0;
 		so->so_flags |= SOF_PCBCLEARING;
 		printf("key_usrreq: key_usrreq results %d\n", error);
@@ -453,19 +448,22 @@ static int
 key_detach(struct socket *so)
 {
 	struct keycb *kp = (struct keycb *)sotorawcb(so);
-	int error;
 
-	if (kp != 0) {
-		if (kp->kp_raw.rcb_proto.sp_protocol == PF_KEY) { /* XXX: AF_KEY */
-			key_cb.key_count--;
-		}
-		key_cb.any_count--;
-		socket_unlock(so, 0);
-		key_freereg(so);
-		socket_lock(so, 0);
+	if (kp == 0) {
+		return EINVAL;
 	}
-	error = raw_usrreqs.pru_detach(so);
-	return error;
+
+	if (kp->kp_raw.rcb_proto.sp_protocol == PF_KEY) { /* XXX: AF_KEY */
+		key_cb.key_count--;
+	}
+	key_cb.any_count--;
+	socket_unlock(so, 0);
+	key_freereg(so);
+	socket_lock(so, 0);
+
+	raw_detach_nofree(sotorawcb(so));
+	kfree_type(struct keycb, kp);
+	return 0;
 }
 
 /*

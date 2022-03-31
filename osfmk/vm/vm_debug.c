@@ -147,7 +147,7 @@ vm32_region_info(
 		for (cmap = map;; cmap = nmap) {
 			/* cmap is read-locked */
 
-			if (!vm_map_lookup_entry(cmap,
+			if (!vm_map_lookup_entry_allow_pgz(cmap,
 			    (vm_map_address_t)address, &entry)) {
 				entry = entry->vme_next;
 				if (entry == vm_map_to_entry(cmap)) {
@@ -274,21 +274,11 @@ vm32_region_info(
 		size = vm_map_round_page(2 * used * sizeof(vm_info_object_t),
 		    VM_MAP_PAGE_MASK(ipc_kernel_map));
 
-		kr = vm_allocate_kernel(ipc_kernel_map, &addr, size, VM_FLAGS_ANYWHERE, VM_KERN_MEMORY_IPC);
+		kr = kernel_memory_allocate(ipc_kernel_map, &addr, size, 0,
+		    KMA_NONE, VM_KERN_MEMORY_IPC);
 		if (kr != KERN_SUCCESS) {
 			return KERN_RESOURCE_SHORTAGE;
 		}
-
-		kr = vm_map_wire_kernel(
-			ipc_kernel_map,
-			vm_map_trunc_page(addr,
-			VM_MAP_PAGE_MASK(ipc_kernel_map)),
-			vm_map_round_page(addr + size,
-			VM_MAP_PAGE_MASK(ipc_kernel_map)),
-			VM_PROT_READ | VM_PROT_WRITE,
-			VM_KERN_MEMORY_IPC,
-			FALSE);
-		assert(kr == KERN_SUCCESS);
 	}
 
 	/* free excess memory; make remaining memory pageable */
@@ -304,13 +294,11 @@ vm32_region_info(
 		vm_size_t vmsize_used = vm_map_round_page(size_used,
 		    VM_MAP_PAGE_MASK(ipc_kernel_map));
 
-		kr = vm_map_unwire(
-			ipc_kernel_map,
-			vm_map_trunc_page(addr,
-			VM_MAP_PAGE_MASK(ipc_kernel_map)),
-			vm_map_round_page(addr + size_used,
-			VM_MAP_PAGE_MASK(ipc_kernel_map)),
-			FALSE);
+		if (size_used < vmsize_used) {
+			bzero((char *)addr + size_used, vmsize_used - size_used);
+		}
+
+		kr = vm_map_unwire(ipc_kernel_map, addr, addr + size_used, FALSE);
 		assert(kr == KERN_SUCCESS);
 
 		kr = vm_map_copyin(ipc_kernel_map, (vm_map_address_t)addr,
@@ -371,7 +359,7 @@ vm32_region_info_64(
 		for (cmap = map;; cmap = nmap) {
 			/* cmap is read-locked */
 
-			if (!vm_map_lookup_entry(cmap, address, &entry)) {
+			if (!vm_map_lookup_entry_allow_pgz(cmap, address, &entry)) {
 				entry = entry->vme_next;
 				if (entry == vm_map_to_entry(cmap)) {
 					vm_map_unlock_read(cmap);
@@ -497,21 +485,11 @@ vm32_region_info_64(
 		size = vm_map_round_page(2 * used * sizeof(vm_info_object_t),
 		    VM_MAP_PAGE_MASK(ipc_kernel_map));
 
-		kr = vm_allocate_kernel(ipc_kernel_map, &addr, size, VM_FLAGS_ANYWHERE, VM_KERN_MEMORY_IPC);
+		kr = kernel_memory_allocate(ipc_kernel_map, &addr, size, 0,
+		    KMA_NONE, VM_KERN_MEMORY_IPC);
 		if (kr != KERN_SUCCESS) {
 			return KERN_RESOURCE_SHORTAGE;
 		}
-
-		kr = vm_map_wire_kernel(
-			ipc_kernel_map,
-			vm_map_trunc_page(addr,
-			VM_MAP_PAGE_MASK(ipc_kernel_map)),
-			vm_map_round_page(addr + size,
-			VM_MAP_PAGE_MASK(ipc_kernel_map)),
-			VM_PROT_READ | VM_PROT_WRITE,
-			VM_KERN_MEMORY_IPC,
-			FALSE);
-		assert(kr == KERN_SUCCESS);
 	}
 
 	/* free excess memory; make remaining memory pageable */
@@ -527,13 +505,11 @@ vm32_region_info_64(
 		vm_size_t vmsize_used = vm_map_round_page(size_used,
 		    VM_MAP_PAGE_MASK(ipc_kernel_map));
 
-		kr = vm_map_unwire(
-			ipc_kernel_map,
-			vm_map_trunc_page(addr,
-			VM_MAP_PAGE_MASK(ipc_kernel_map)),
-			vm_map_round_page(addr + size_used,
-			VM_MAP_PAGE_MASK(ipc_kernel_map)),
-			FALSE);
+		if (size_used < vmsize_used) {
+			bzero((char *)addr + size_used, vmsize_used - size_used);
+		}
+
+		kr = vm_map_unwire(ipc_kernel_map, addr, addr + size_used, FALSE);
 		assert(kr == KERN_SUCCESS);
 
 		kr = vm_map_copyin(ipc_kernel_map, (vm_map_address_t)addr,
@@ -571,7 +547,7 @@ vm32_mapped_pages_info(
 	vm_size_t       size, size_used;
 	unsigned int    actual, space;
 	page_address_array_t list;
-	vm_offset_t     addr = 0;
+	mach_vm_offset_t addr = 0;
 
 	if (map == VM_MAP_NULL) {
 		return KERN_INVALID_ARGUMENT;
@@ -583,7 +559,7 @@ vm32_mapped_pages_info(
 	    VM_MAP_PAGE_MASK(ipc_kernel_map));
 
 	for (;;) {
-		(void) vm_allocate_kernel(ipc_kernel_map, &addr, size, VM_FLAGS_ANYWHERE, VM_KERN_MEMORY_IPC);
+		(void) mach_vm_allocate_kernel(ipc_kernel_map, &addr, size, VM_FLAGS_ANYWHERE, VM_KERN_MEMORY_IPC);
 		(void) vm_map_unwire(
 			ipc_kernel_map,
 			vm_map_trunc_page(addr,
@@ -700,8 +676,8 @@ host_virtual_physical_table_info(
 
 		size = vm_map_round_page(actual * sizeof *info,
 		    VM_MAP_PAGE_MASK(ipc_kernel_map));
-		kr = vm_allocate_kernel(ipc_kernel_map, &addr, size,
-		    VM_FLAGS_ANYWHERE, VM_KERN_MEMORY_IPC);
+		kr = kmem_alloc_pageable(ipc_kernel_map, &addr, size,
+		    VM_KERN_MEMORY_IPC);
 		if (kr != KERN_SUCCESS) {
 			return KERN_RESOURCE_SHORTAGE;
 		}

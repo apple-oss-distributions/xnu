@@ -58,8 +58,8 @@
 
 /*** FLIPC Internal Implementation (private to flipc.c) ***/
 
-ZONE_DECLARE(flipc_port_zone, "flipc ports",
-    sizeof(struct flipc_port), ZC_ZFREE_CLEARMEM);
+ZONE_DEFINE_TYPE(flipc_port_zone, "flipc ports",
+    struct flipc_port, ZC_ZFREE_CLEARMEM);
 
 /*  Get the mnl_name associated with local ipc_port <lport>.
  *  Returns MNL_NAME_NULL if <lport> is invalid or not a flipc port.

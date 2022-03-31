@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2003-2016 Apple Inc. All rights reserved.
+ * Copyright (c) 2003-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -222,6 +222,10 @@ in6_addroute(void *v_arg, void *n_arg, struct radix_node_head *head,
 		rt->rt_rmx.rmx_mtu = rt->rt_ifp->if_mtu;
 	}
 
+	/*
+	 * rn_addroute route returns NULL if an exact entry is being attempted
+	 * to be added again.
+	 */
 	ret = rn_addroute(v_arg, n_arg, head, treenodes);
 	if (ret == NULL && (rt->rt_flags & RTF_HOST)) {
 		struct rtentry *rt2;
@@ -245,7 +249,7 @@ in6_addroute(void *v_arg, void *n_arg, struct radix_node_head *head,
 			    rt2->rt_gateway != NULL &&
 			    rt2->rt_gateway->sa_family == AF_LINK) {
 				if (verbose) {
-					log(LOG_DEBUG, "%s: unable to insert "
+					os_log_debug(OS_LOG_DEFAULT, "%s: unable to insert "
 					    "route to %s:%s, flags=%b, due to "
 					    "existing ND6 route %s->%s "
 					    "flags=%b, attempting to delete\n",
@@ -314,19 +318,19 @@ in6_addroute(void *v_arg, void *n_arg, struct radix_node_head *head,
 
 	if (ret != NULL) {
 		if (flags != rt->rt_flags) {
-			log(LOG_DEBUG, "%s: route to %s->%s->%s inserted, "
+			os_log_debug(OS_LOG_DEFAULT, "%s: route to %s->%s->%s inserted, "
 			    "oflags=%b, flags=%b\n", __func__,
 			    dbuf, gbuf, (rt->rt_ifp != NULL) ?
 			    rt->rt_ifp->if_xname : "", flags, RTF_BITS,
 			    rt->rt_flags, RTF_BITS);
 		} else {
-			log(LOG_DEBUG, "%s: route to %s->%s->%s inserted, "
+			os_log_debug(OS_LOG_DEFAULT, "%s: route to %s->%s->%s inserted, "
 			    "flags=%b\n", __func__, dbuf, gbuf,
 			    (rt->rt_ifp != NULL) ? rt->rt_ifp->if_xname : "",
 			    rt->rt_flags, RTF_BITS);
 		}
 	} else {
-		log(LOG_DEBUG, "%s: unable to insert route to %s->%s->%s, "
+		os_log_debug(OS_LOG_DEFAULT, "%s: unable to insert route to %s->%s->%s, "
 		    "flags=%b, already exists\n", __func__, dbuf, gbuf,
 		    (rt->rt_ifp != NULL) ? rt->rt_ifp->if_xname : "",
 		    rt->rt_flags, RTF_BITS);
@@ -354,7 +358,7 @@ in6_deleteroute(void *v_arg, void *netmask_arg, struct radix_node_head *head)
 			char dbuf[MAX_IPv6_STR_LEN], gbuf[MAX_IPv6_STR_LEN];
 
 			rt_str(rt, dbuf, sizeof(dbuf), gbuf, sizeof(gbuf));
-			log(LOG_DEBUG, "%s: route to %s->%s->%s deleted, "
+			os_log_debug(OS_LOG_DEFAULT, "%s: route to %s->%s->%s deleted, "
 			    "flags=%b\n", __func__, dbuf, gbuf,
 			    (rt->rt_ifp != NULL) ? rt->rt_ifp->if_xname : "",
 			    rt->rt_flags, RTF_BITS);
@@ -380,7 +384,7 @@ in6_validate(struct radix_node *rn)
 			char dbuf[MAX_IPv6_STR_LEN], gbuf[MAX_IPv6_STR_LEN];
 
 			rt_str(rt, dbuf, sizeof(dbuf), gbuf, sizeof(gbuf));
-			log(LOG_DEBUG, "%s: route to %s->%s->%s validated, "
+			os_log_debug(OS_LOG_DEFAULT, "%s: route to %s->%s->%s validated, "
 			    "flags=%b\n", __func__, dbuf, gbuf,
 			    (rt->rt_ifp != NULL) ? rt->rt_ifp->if_xname : "",
 			    rt->rt_flags, RTF_BITS);
@@ -487,7 +491,7 @@ in6_clsroute(struct radix_node *rn, struct radix_node_head *head)
 		int err;
 
 		if (verbose) {
-			log(LOG_DEBUG, "%s: deleting route to %s->%s->%s, "
+			os_log_debug(OS_LOG_DEFAULT, "%s: deleting route to %s->%s->%s, "
 			    "flags=%b\n", __func__, dbuf, gbuf,
 			    (rt->rt_ifp != NULL) ? rt->rt_ifp->if_xname : "",
 			    rt->rt_flags, RTF_BITS);
@@ -514,7 +518,7 @@ in6_clsroute(struct radix_node *rn, struct radix_node_head *head)
 				rt_str(rt, dbuf, sizeof(dbuf),
 				    gbuf, sizeof(gbuf));
 			}
-			log(LOG_ERR, "%s: error deleting route to "
+			os_log_error(OS_LOG_DEFAULT, "%s: error deleting route to "
 			    "%s->%s->%s, flags=%b, err=%d\n", __func__,
 			    dbuf, gbuf, (rt->rt_ifp != NULL) ?
 			    rt->rt_ifp->if_xname : "", rt->rt_flags,
@@ -528,7 +532,7 @@ in6_clsroute(struct radix_node *rn, struct radix_node_head *head)
 		rt_setexpire(rt, timenow + rtq_reallyold);
 
 		if (verbose) {
-			log(LOG_DEBUG, "%s: route to %s->%s->%s invalidated, "
+			os_log_debug(OS_LOG_DEFAULT, "%s: route to %s->%s->%s invalidated, "
 			    "flags=%b, expire=T+%u\n", __func__, dbuf, gbuf,
 			    (rt->rt_ifp != NULL) ? rt->rt_ifp->if_xname : "",
 			    rt->rt_flags, RTF_BITS, rt->rt_expire - timenow);
@@ -589,7 +593,7 @@ in6_rtqkill(struct radix_node *rn, void *rock)
 			}
 
 			if (verbose) {
-				log(LOG_DEBUG, "%s: deleting route to "
+				os_log_debug(OS_LOG_DEFAULT, "%s: deleting route to "
 				    "%s->%s->%s, flags=%b, draining=%d\n",
 				    __func__, dbuf, gbuf, (rt->rt_ifp != NULL) ?
 				    rt->rt_ifp->if_xname : "", rt->rt_flags,
@@ -614,7 +618,7 @@ in6_rtqkill(struct radix_node *rn, void *rock)
 					rt_str(rt, dbuf, sizeof(dbuf),
 					    gbuf, sizeof(gbuf));
 				}
-				log(LOG_ERR, "%s: error deleting route to "
+				os_log_error(OS_LOG_DEFAULT, "%s: error deleting route to "
 				    "%s->%s->%s, flags=%b, err=%d\n", __func__,
 				    dbuf, gbuf, (rt->rt_ifp != NULL) ?
 				    rt->rt_ifp->if_xname : "", rt->rt_flags,
@@ -630,7 +634,7 @@ in6_rtqkill(struct radix_node *rn, void *rock)
 			if (ap->updating && expire > rtq_reallyold) {
 				rt_setexpire(rt, timenow + rtq_reallyold);
 				if (verbose) {
-					log(LOG_DEBUG, "%s: route to "
+					os_log_debug(OS_LOG_DEFAULT, "%s: route to "
 					    "%s->%s->%s, flags=%b, adjusted "
 					    "expire=T+%u (was T+%u)\n",
 					    __func__, dbuf, gbuf,
@@ -672,7 +676,7 @@ in6_rtqtimo(void *targ)
 	/* Get the timestamp after we acquire the lock for better accuracy */
 	timenow = net_uptime();
 	if (verbose) {
-		log(LOG_DEBUG, "%s: initial nextstop is T+%u seconds\n",
+		os_log_debug(OS_LOG_DEFAULT, "%s: initial nextstop is T+%u seconds\n",
 		    __func__, rtq_timeout);
 	}
 	bzero(&arg, sizeof(arg));
@@ -680,7 +684,7 @@ in6_rtqtimo(void *targ)
 	arg.nextstop = timenow + rtq_timeout;
 	rnh->rnh_walktree(rnh, in6_rtqkill, &arg);
 	if (verbose) {
-		log(LOG_DEBUG, "%s: found %u, killed %u\n", __func__,
+		os_log_debug(OS_LOG_DEFAULT, "%s: found %u, killed %u\n", __func__,
 		    arg.found, arg.killed);
 	}
 	/*
@@ -702,7 +706,7 @@ in6_rtqtimo(void *targ)
 
 		last_adjusted_timeout = timenow;
 		if (verbose) {
-			log(LOG_DEBUG, "%s: adjusted rtq_reallyold to %d "
+			os_log_debug(OS_LOG_DEFAULT, "%s: adjusted rtq_reallyold to %d "
 			    "seconds\n", __func__, rtq_reallyold);
 		}
 		arg.found = arg.killed = 0;
@@ -717,7 +721,7 @@ in6_rtqtimo(void *targ)
 	if (ours > 0) {
 		in6_sched_rtqtimo(&atv);
 	} else if (verbose) {
-		log(LOG_DEBUG, "%s: not rescheduling timer\n", __func__);
+		os_log_debug(OS_LOG_DEFAULT, "%s: not rescheduling timer\n", __func__);
 	}
 	lck_mtx_unlock(rnh_lock);
 }
@@ -736,7 +740,7 @@ in6_sched_rtqtimo(struct timeval *atv)
 			atv = &tv;
 		}
 		if (rt_verbose > 1) {
-			log(LOG_DEBUG, "%s: timer scheduled in "
+			os_log_debug(OS_LOG_DEFAULT, "%s: timer scheduled in "
 			    "T+%llus.%lluu\n", __func__,
 			    (uint64_t)atv->tv_sec, (uint64_t)atv->tv_usec);
 		}
@@ -752,7 +756,7 @@ in6_rtqdrain(void)
 	struct rtqk_arg arg;
 
 	if (rt_verbose > 1) {
-		log(LOG_DEBUG, "%s: draining routes\n", __func__);
+		os_log_debug(OS_LOG_DEFAULT, "%s: draining routes\n", __func__);
 	}
 
 	lck_mtx_lock(rnh_lock);

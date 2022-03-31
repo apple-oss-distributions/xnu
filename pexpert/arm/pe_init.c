@@ -822,7 +822,8 @@ PE_write_socd_client_buffer(vm_offset_t offset, const void *buff, vm_size_t size
 	volatile uint32_t *dst = (volatile uint32_t *)(socd_trace_ram_base + offset);
 	vm_size_t len = size / sizeof(dst[0]);
 
-	assert(offset + size < socd_trace_ram_size);
+	assert(offset + size <= socd_trace_ram_size);
+
 	/* Perform 4 byte aligned accesses */
 	if ((offset % 4 != 0) || (size % 4 != 0)) {
 		panic("unaligned acccess to socd trace ram");

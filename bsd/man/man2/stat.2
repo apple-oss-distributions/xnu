@@ -144,6 +144,14 @@ If
 .Fa path
 names a symbolic link, the status of the symbolic link is returned.
 .El
+.Bl -tag -width indent
+.It Dv AT_SYMLINK_NOFOLLOW_ANY
+If
+.Fa path
+names a symbolic link, the status of the symbolic link is returned.
+If a symbolic link is encountered during pathname resolution, an error
+is returned.
+.El
 .Pp
 If
 .Fn fstatat
@@ -500,6 +508,10 @@ An I/O error occurs while reading from or writing to the file system.
 .It Bq Er ELOOP
 Too many symbolic links are encountered in translating the pathname.
 This is taken to be indicative of a looping symbolic link.
+.\" ===========
+.It Bq Er ELOOP
+If AT_SYMLINK_NOFOLLOW_ANY is passed and symbolic link was encountered
+during pathname resolution.
 .\" ===========
 .It Bq Er ENAMETOOLONG
 A component of a pathname exceeds

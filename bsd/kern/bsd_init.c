@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2020 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -157,7 +157,8 @@
 #include <netinet/tcp_cc.h>                     /* for tcp_cc_init() */
 #include <netinet/mptcp_var.h>          /* for mptcp_control_register() */
 #include <net/nwk_wq.h>                 /* for nwk_wq_init */
-#include <net/restricted_in_port.h> /* for restricted_in_port_init() */
+#include <net/restricted_in_port.h>     /* for restricted_in_port_init() */
+#include <net/remote_vif.h>             /* for rvi_init() */
 #include <kern/assert.h>                /* for assert() */
 #include <sys/kern_overrides.h>         /* for init_system_override() */
 #include <sys/lockf.h>                  /* for lf_init() */
@@ -185,6 +186,9 @@
 #include <net/if_pflog.h>
 #endif
 
+#if SKYWALK
+#include <skywalk/os_skywalk_private.h>
+#endif /* SKYWALK */
 
 #include <pexpert/pexpert.h>
 #include <machine/pal_routines.h>
@@ -206,6 +210,8 @@ const char *const copyright =
     "All rights reserved.\n\n";
 
 /* Components of the first process -- never freed. */
+SECURITY_READ_ONLY_LATE(struct vfs_context) vfs_context0;
+
 struct proc proc0 = {
 	.p_comm    = "kernel_task",
 	.p_name    = "kernel_task",
@@ -218,11 +224,9 @@ struct proc proc0 = {
 #endif
 	.p_nice    = NZERO,
 	.p_uthlist = TAILQ_HEAD_INITIALIZER(proc0.p_uthlist),
-	.p_csflags = CS_VALID,
 };
 static struct plimit limit0;
 static struct pstats pstats0;
-static struct sigacts sigacts0;
 SECURITY_READ_ONLY_LATE(proc_t) kernproc = &proc0;
 proc_t XNU_PTRAUTH_SIGNED_PTR("initproc") initproc;
 
@@ -311,7 +315,6 @@ void bsd_utaskbootstrap(void);
 #if CONFIG_DEV_KMEM
 extern void dev_kmem_init(void);
 #endif
-extern void select_waitq_init(void);
 static void process_name(const char *, proc_t);
 
 static void setconf(void);
@@ -452,12 +455,12 @@ bsd_rooted_ramdisk(void)
  * in the context of the current (startup) task using a call to the
  * function kernel_thread_create() to jump into start_kernel_threads().
  * Internally, kernel_thread_create() calls thread_create_internal(),
- * which calls uthread_alloc().  The function of uthread_alloc() is
- * normally to allocate a uthread structure, and fill out the uu_sigmask,
- * uu_context fields.  It skips filling these out in the case of the "task"
+ * which calls uthread_init().  The function of uthread_init() is
+ * normally to init a uthread structure, and fill out the uu_sigmask,
+ * tro_ucred/tro_proc fields.  It skips filling these out in the case of the "task"
  * being "kernel_task", because the order of operation is inverted.  To
  * account for that, we need to manually fill in at least the contents
- * of the uu_context.vc_ucred field so that the uthread structure can be
+ * of the tro_ucred field so that the uthread structure can be
  * used like any other.
  */
 
@@ -465,11 +468,12 @@ void
 bsd_init(void)
 {
 	struct uthread *ut;
-	struct vfs_context context;
 	kern_return_t   ret;
-	struct ucred temp_cred;
-	struct posix_cred temp_pcred;
 	vnode_t init_rootvnode = NULLVP;
+	struct proc_ro_data kernproc_ro_data = {
+		.p_csflags = CS_VALID,
+	};
+	struct task_ro_data kerntask_ro_data = { };
 #if CONFIG_NETBOOT || CONFIG_IMAGEBOOT
 	boolean_t       netboot = FALSE;
 #endif
@@ -498,6 +502,11 @@ bsd_init(void)
 	/* kernel_task->proc = kernproc; */
 	set_bsdtask_info(kernel_task, (void *)kernproc);
 
+	/* set the cred */
+	kauth_cred_set(&kernproc_ro_data.p_ucred, vfs_context0.vc_ucred);
+	kernproc->p_proc_ro = proc_ro_alloc(kernproc, &kernproc_ro_data,
+	    kernel_task, &kerntask_ro_data);
+
 	/* give kernproc a name */
 	bsd_init_kprintf("calling process_name\n");
 	process_name("kernel_task", kernproc);
@@ -524,7 +533,7 @@ bsd_init(void)
 	}
 
 	bsd_init_kprintf("calling get_bsdthread_info\n");
-	ut = (uthread_t)get_bsdthread_info(current_thread());
+	ut = current_uthread();
 
 #if CONFIG_MACF
 	/*
@@ -584,43 +593,18 @@ bsd_init(void)
 
 	TAILQ_INSERT_TAIL(&kernproc->p_uthlist, ut, uu_list);
 
-	/*
-	 * Create credential.  This also Initializes the audit information.
-	 */
-	bsd_init_kprintf("calling bzero\n");
-	bzero(&temp_cred, sizeof(temp_cred));
-	bzero(&temp_pcred, sizeof(temp_pcred));
-	temp_pcred.cr_ngroups = 1;
-	/* kern_proc, shouldn't call up to DS for group membership */
-	temp_pcred.cr_flags = CRF_NOMEMBERD;
-	temp_cred.cr_audit.as_aia_p = audit_default_aia_p;
-
 	bsd_init_kprintf("calling kauth_cred_create\n");
 	/*
-	 * We have to label the temp cred before we create from it to
-	 * properly set cr_ngroups, or the create will fail.
+	 * Officially associate the kernel with vfs_context0.vc_ucred.
 	 */
-	posix_cred_label(&temp_cred, &temp_pcred);
-	kernproc->p_ucred = kauth_cred_create(&temp_cred);
-
-	/* update cred on proc */
+#if CONFIG_MACF
+	mac_cred_label_associate_kernel(vfs_context0.vc_ucred);
+#endif
 	proc_update_creds_onproc(kernproc);
-
-	/* give the (already exisiting) initial thread a reference on it */
-	bsd_init_kprintf("calling kauth_cred_ref\n");
-	kauth_cred_ref(proc_ucred(kernproc));
-	ut->uu_context.vc_ucred = proc_ucred(kernproc);
-	ut->uu_context.vc_thread = current_thread();
-
-	vfs_set_context_kernel(&ut->uu_context);
 
 	TAILQ_INIT(&kernproc->p_aio_activeq);
 	TAILQ_INIT(&kernproc->p_aio_doneq);
 	kernproc->p_aio_total_count = 0;
-
-#if CONFIG_MACF
-	mac_cred_label_associate_kernel(proc_ucred(kernproc));
-#endif
 
 	/* Create the limits structures. */
 	for (uint32_t i = 0; i < ARRAY_COUNT(limit0.pl_rlimit); i++) {
@@ -637,7 +621,7 @@ bsd_init(void)
 
 	hazard_ptr_init(&kernproc->p_limit, &limit0);
 	kernproc->p_stats = &pstats0;
-	kernproc->p_sigacts = &sigacts0;
+	proc_sigacts_copy(kernproc, NULL);
 	kernproc->p_subsystem_root_path = NULL;
 
 	/*
@@ -658,7 +642,7 @@ bsd_init(void)
 		ret = kmem_suballoc(kernel_map,
 		    &minimum,
 		    (vm_size_t)bsd_pageable_map_size,
-		    TRUE,
+		    VM_MAP_CREATE_PAGEABLE,
 		    VM_FLAGS_ANYWHERE,
 		    VM_MAP_KERNEL_FLAGS_NONE,
 		    VM_KERN_MEMORY_BSD,
@@ -731,8 +715,6 @@ bsd_init(void)
 	pshm_cache_init();
 	bsd_init_kprintf("calling psem_cache_init\n");
 	psem_cache_init();
-	bsd_init_kprintf("calling select_waitq_init\n");
-	select_waitq_init();
 
 	/*
 	 * Initialize protocols.  Block reception of incoming packets
@@ -754,6 +736,10 @@ bsd_init(void)
 	flow_divert_init();
 #endif  /* FLOW_DIVERT */
 #endif /* SOCKETS */
+#if SKYWALK
+	bsd_init_kprintf("calling skywalk_init\n");
+	(void) skywalk_init();
+#endif /* SKYWALK */
 #if NETWORKING
 #if NECP
 	/* Initialize Network Extension Control Policies */
@@ -840,6 +826,10 @@ bsd_init(void)
 	mptcp_control_register();
 #endif /* MPTCP */
 
+#if REMOTE_VIF
+	rvi_init();
+#endif /* REMOTE_VIF */
+
 	/*
 	 * The the networking stack is now initialized so it is a good time to call
 	 * the clients that are waiting for the networking stack to be usable.
@@ -884,13 +874,11 @@ bsd_init(void)
 
 	IOSecureBSDRoot(rootdevice);
 
-	context.vc_thread = current_thread();
-	context.vc_ucred = proc_ucred(kernproc);
 	mountlist.tqh_first->mnt_flag |= MNT_ROOTFS;
 
 	bsd_init_kprintf("calling VFS_ROOT\n");
 	/* Get the vnode for '/'.  Set fdp->fd_fd.fd_cdir to reference it. */
-	if (VFS_ROOT(mountlist.tqh_first, &init_rootvnode, &context)) {
+	if (VFS_ROOT(mountlist.tqh_first, &init_rootvnode, vfs_context_kernel())) {
 		panic("bsd_init: cannot find root vnode: %s", PE_boot_args());
 	}
 	(void)vnode_ref(init_rootvnode);
@@ -1216,13 +1204,11 @@ extern bool IOGetBootUUID(char *);
 extern bool IOGetApfsPrebootUUID(char *);
 
 
-// Get the UUID of the Preboot (and Recovery) folder associated with the
+// This function returns the UUID of the Preboot (and Recovery) folder associated with the
 // current boot volume, if applicable. The meaning of the UUID can be
 // filesystem-dependent and not all kinds of boots will have a UUID.
-// If available, the string will be returned. It does not need to be
-// deallocate. (Future: if we need to return the string as a copy that the
-// caller must free, we'll introduce a new functcion for that.)
-// NULL will be returned if the current boot has no applicable Preboot UUID.
+// On success, the UUID is copied into the past-in parameter and TRUE is returned.
+// In case the current boot has no applicable Preboot UUID, FALSE is returned.
 static bool
 get_preboot_uuid(uuid_string_t maybe_uuid_string)
 {

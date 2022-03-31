@@ -276,9 +276,8 @@ static void memorystatus_init_jetsam_snapshot_header(memorystatus_jetsam_snapsho
 uint64_t memorystatus_sysprocs_idle_delay_time = 0;
 uint64_t memorystatus_apps_idle_delay_time = 0;
 /* Some devices give entitled apps a higher memory limit */
-#if __arm64__
 int32_t memorystatus_entitled_max_task_footprint_mb = 0;
-
+#if __arm64__
 #if DEVELOPMENT || DEBUG
 SYSCTL_INT(_kern, OID_AUTO, entitled_max_task_pmem, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED, &memorystatus_entitled_max_task_footprint_mb, 0, "");
 #endif /* DEVELOPMENT || DEBUG */
@@ -4745,6 +4744,10 @@ set_vm_map_fork_pidwatch(task_t task, uint64_t x)
  *	then the vm_map_fork is allowed.  This calculation
  *	is based on the assumption that a process can
  *	munch memory up to the system-wide task limit.
+ *
+ *      For watchOS, which has a low task limit, we use a
+ *      different value. Current task limit has been reduced
+ *      to 300MB and it's been decided the limit should be 200MB.
  */
 boolean_t
 memorystatus_allowed_vm_map_fork(task_t task)
@@ -4771,6 +4774,15 @@ memorystatus_allowed_vm_map_fork(task_t task)
 	 * Maximum is 1/4 of the system-wide task limit by default.
 	 */
 	max_allowed_bytes = ((uint64_t)max_task_footprint_mb * 1024 * 1024) >> 2;
+
+#if XNU_TARGET_OS_WATCH
+	/*
+	 * For watches with > 1G, raise the limit to 200MB.
+	 */
+	if (sane_size > 1 * 1024 * 1024 * 1024) {
+		max_allowed_bytes = MAX(max_allowed_bytes, 200 * 1024 * 1024);
+	}
+#endif /* XNU_TARGET_OS_WATCH */
 
 #if DEBUG || DEVELOPMENT
 	if (corpse_threshold_system_limit) {
@@ -6515,7 +6527,9 @@ memorystatus_kill_on_sustained_pressure(boolean_t async)
 boolean_t
 memorystatus_kill_with_jetsam_reason_sync(pid_t pid, os_reason_t jetsam_reason)
 {
-	return memorystatus_kill_process_sync(pid, kMemorystatusKilled, jetsam_reason);
+	uint32_t kill_cause = jetsam_reason->osr_code <= JETSAM_REASON_MEMORYSTATUS_MAX ?
+	    (uint32_t) jetsam_reason->osr_code : JETSAM_REASON_INVALID;
+	return memorystatus_kill_process_sync(pid, kill_cause, jetsam_reason);
 }
 
 #endif /* CONFIG_JETSAM */
@@ -7755,6 +7769,18 @@ memorystatus_set_memlimit_properties_internal(proc_t p, memorystatus_memlimit_pr
 	}
 
 	return error;
+}
+
+bool
+memorystatus_task_has_increased_memory_limit_entitlement(task_t task)
+{
+	static const char kIncreasedMemoryLimitEntitlement[] = "com.apple.developer.kernel.increased-memory-limit";
+	if (memorystatus_entitled_max_task_footprint_mb == 0) {
+		// Entitlement is not supported on this device.
+		return false;
+	}
+
+	return IOTaskHasEntitlement(task, kIncreasedMemoryLimitEntitlement);
 }
 
 static int

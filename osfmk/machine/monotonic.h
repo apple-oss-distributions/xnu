@@ -42,8 +42,6 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-extern bool mt_core_supported;
-
 struct mt_cpu {
 	uint64_t mtc_snaps[MT_CORE_NFIXED];
 	uint64_t mtc_counts[MT_CORE_NFIXED];

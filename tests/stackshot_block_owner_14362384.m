@@ -2,6 +2,7 @@
 #undef T_NAMESPACE
 #endif
 #include <darwintest.h>
+#include <darwintest_utils.h>
 
 #include <kdd.h>
 #include <kern/kcdata.h>
@@ -60,8 +61,8 @@ T_GLOBAL_META(
 static const char kmutex_ctl[] = "debug.test_MutexOwnerCtl";
 static const char krwlck_ctl[] = "debug.test_RWLockOwnerCtl";
 
-static mach_port_t send = MACH_PORT_NULL;
-static mach_port_t recv = MACH_PORT_NULL;
+static mach_port_t test_send_port = MACH_PORT_NULL;
+static mach_port_t test_recv_port = MACH_PORT_NULL;
 
 static void *
 take_stackshot(uint32_t extra_flags, uint64_t since_timestamp)
@@ -117,9 +118,15 @@ save_stackshot(void *stackshot, const char *filename)
 }
 
 static
-void check_python(void *stackshot, const char *fmt, ...)
+void check_python(void *stackshot, const char *func, const char *fmt, ...)
 {
-	save_stackshot(stackshot, "/tmp/ss");
+	char sspath[MAXPATHLEN];
+	strlcpy(sspath, func, sizeof(sspath));
+	strlcat(sspath, ".kcdata", sizeof(sspath));
+	T_QUIET; T_ASSERT_POSIX_ZERO(dt_resultfile(sspath, sizeof(sspath)),
+	                "create result file path");
+
+	save_stackshot(stackshot, sspath);
 
 #if !(TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR)
 	va_list args;
@@ -134,8 +141,12 @@ void check_python(void *stackshot, const char *fmt, ...)
 	pcre *re = pcre_compile(re_string, 0, &pcreErrorStr, &pcreErrorOffset, NULL);
 	T_QUIET; T_ASSERT_NOTNULL(re, "pcre_compile");
 
+	char *kcdata_invoke;
+	asprintf(&kcdata_invoke, "/usr/local/bin/kcdata --pretty %s", sspath);
+	T_QUIET; T_ASSERT_NOTNULL(kcdata_invoke, "asprintf");
+
 	bool found = false;
-	FILE *p = popen("/usr/local/bin/kcdata --pretty /tmp/ss", "r");
+	FILE *p = popen(kcdata_invoke, "r");
 	T_QUIET; T_ASSERT_NOTNULL(p, "popen");
 	while (1) {
 		char *line = NULL;
@@ -153,10 +164,11 @@ void check_python(void *stackshot, const char *fmt, ...)
 		}
 		free(line);
 	}
-	T_EXPECT_TRUE(found, "found the waitinfo in kcdata.py output");
+	T_EXPECT_TRUE(found, "found a match to \"%s\" in output of \"%s\"", re_string, kcdata_invoke);
 	pclose(p);
 	pcre_free(re);
 	free(re_string);
+	free(kcdata_invoke);
 #endif
 }
 
@@ -418,10 +430,10 @@ static void *
 msg_blocking_thread(void * arg)
 {
 	(void)arg;
-	msg_recv_helper(send);
+	msg_recv_helper(test_send_port);
 
 	for (int i = 0; i < SENDS_TO_BLOCK; i++)
-		msg_send_helper(recv); // will block on send until message is received
+		msg_send_helper(test_recv_port); // will block on test_send_port until message is received
 	return NULL;
 }
 
@@ -522,7 +534,7 @@ test_kmutex_blocking(void)
 	ret = pthread_threadid_np(waiting, &thread_id); // this is the thread that currently holds the kernel mutex
 	T_QUIET; T_ASSERT_POSIX_ZERO(ret, "Getting integer value of thread id");
 
-	check_python(stackshot, "thread \\d+: semaphore port \\w+ with unknown owner");
+	check_python(stackshot, __func__, "thread \\d+: semaphore port \\w+ with unknown owner");
 
 	find_blocking_info(stackshot, (struct stackshot_thread_waitinfo *)&waitinfo, &len);
 
@@ -535,7 +547,7 @@ test_kmutex_blocking(void)
 		T_EXPECT_EQ(curr->owner, thread_id, "Thread ID of blocking thread should match 'owner' field in stackshot");
 		sysctl_kmutex_test_match(curr->context);
 
-		check_python(stackshot, "thread \\d+: kernel mutex %llx owned by thread %lld", curr->context, thread_id);
+		check_python(stackshot, __func__, "thread \\d+: kernel mutex %llx owned by thread %lld", curr->context, thread_id);
 	}
 
 	kmutex_action(KMUTEX_SYSCTL_SIGNAL); // waiting thread should now unblock.
@@ -574,7 +586,7 @@ test_semaphore_blocking(void)
 	pid = (uint64_t)getpid();
 	T_EXPECT_EQ(waitinfo.owner, pid, "Owner value should match process ID");
 
-	check_python(stackshot, "thread \\d+: semaphore port \\w+ owned by pid %d", (int)pid);
+	check_python(stackshot, __func__, "thread \\d+: semaphore port \\w+ owned by pid %d", (int)pid);
 
 	ret = semaphore_signal(sem);
 	T_QUIET; T_ASSERT_MACH_SUCCESS(ret, "Signalling semaphore");
@@ -596,16 +608,16 @@ test_mach_msg_blocking(void)
 	int len = 1;
 
 	T_LOG("Starting %s", __FUNCTION__);
-	ret = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &send);
+	ret = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &test_send_port);
 	T_QUIET; T_ASSERT_MACH_SUCCESS(ret, "Allocating send port");
-	ret = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &recv);
+	ret = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &test_recv_port);
 	T_QUIET; T_ASSERT_MACH_SUCCESS(ret, "Allocating recv port");
-	ret = mach_port_insert_right(mach_task_self(), send, send, MACH_MSG_TYPE_MAKE_SEND);
+	ret = mach_port_insert_right(mach_task_self(), test_send_port, test_send_port, MACH_MSG_TYPE_MAKE_SEND);
 	T_QUIET; T_ASSERT_MACH_SUCCESS(ret, "Getting send right to send port");
-	ret = mach_port_insert_right(mach_task_self(), recv, recv, MACH_MSG_TYPE_MAKE_SEND);
+	ret = mach_port_insert_right(mach_task_self(), test_recv_port, test_recv_port, MACH_MSG_TYPE_MAKE_SEND);
 	T_QUIET; T_ASSERT_MACH_SUCCESS(ret, "Getting send right to recv port");
 
-	ret = pthread_create(&tid, NULL, msg_blocking_thread, (void*)&send); // thread should block on recv soon
+	ret = pthread_create(&tid, NULL, msg_blocking_thread, (void*)&test_send_port); // thread should block on test_recv_port soon
 	T_QUIET; T_ASSERT_POSIX_ZERO(ret, "Creating message blocking thread");
 
 	sleep(1); // give time for thread to block
@@ -615,11 +627,11 @@ test_mach_msg_blocking(void)
 	T_EXPECT_EQ(len, 1, "Only one blocking thread should exist");
 	T_EXPECT_EQ(waitinfo.wait_type, kThreadWaitPortReceive, "Wait type should match expected PortReceive value");
 
-	check_python(stackshot, "thread \\d+: mach_msg receive on port \\w+ name %llx", (long long)send);
+	check_python(stackshot, __func__, "thread \\d+: mach_msg receive on port \\w+ name %llx", (long long)test_send_port);
 
 	stackshot_config_dealloc(stackshot);
 
-	msg_send_helper(send); // ping! msg_blocking_thread will now try to send us stuff, and block until we receive.
+	msg_send_helper(test_send_port); // ping! msg_blocking_thread will now try to test_send_port us stuff, and block until we receive.
 
 	sleep(1); // give time for thread to block
 	stackshot = take_stackshot(STACKSHOT_THREAD_WAITINFO, 0);
@@ -627,11 +639,11 @@ test_mach_msg_blocking(void)
 	T_EXPECT_EQ(len, 1, "Only one blocking thread should exist");
 	T_EXPECT_EQ(waitinfo.wait_type, kThreadWaitPortSend, "Wait type should match expected PortSend value");
 
-	check_python(stackshot, "thread \\d+: mach_msg send on port \\w+ owned by pid %d", (int)getpid());
+	check_python(stackshot, __func__, "thread \\d+: mach_msg send on port \\w+ owned by pid %d", (int)getpid());
 
 	stackshot_config_dealloc(stackshot);
 
-	msg_recv_helper(recv); // thread should block until we receive one of its messages
+	msg_recv_helper(test_recv_port); // thread should block until we receive one of its messages
 	ret = pthread_join(tid, NULL);
 	T_QUIET; T_ASSERT_POSIX_ZERO(ret, "Joining on blocking thread");
 }
@@ -668,7 +680,7 @@ test_ulock_blocking(void)
 	T_QUIET; T_ASSERT_POSIX_ZERO(ret, "Getting integer value of thread id");
 	T_EXPECT_EQ(waitinfo.owner, thread_id, "Thread ID of blocking thread should match 'owner' field in stackshot");
 
-	check_python(stackshot, "thread \\d+: unfair lock \\w+ owned by thread %lld", thread_id);
+	check_python(stackshot, __func__, "thread \\d+: unfair lock \\w+ owned by thread %lld", thread_id);
 	stackshot_config_dealloc(stackshot);
 	return;
 }
@@ -695,7 +707,7 @@ test_krwlock_blocking(void)
 
 	stackshot = take_stackshot(STACKSHOT_THREAD_WAITINFO, 0);
 
-	check_python(stackshot, "thread \\d+: semaphore port \\w+ with unknown owner");
+	check_python(stackshot, __func__, "thread \\d+: semaphore port \\w+ with unknown owner");
 
 	find_blocking_info(stackshot, (struct stackshot_thread_waitinfo *)&waitinfo, &len);
 
@@ -707,7 +719,7 @@ test_krwlock_blocking(void)
 		T_EXPECT_EQ(curr->wait_type, kThreadWaitKernelRWLockRead, "Wait type should match expected KRWLockRead value");
 		sysctl_krwlck_test_match(curr->context);
 
-		check_python(stackshot, "thread \\d+: krwlock %llx for reading", curr->context);
+		check_python(stackshot, __func__, "thread \\d+: krwlock %llx for reading", curr->context);
 
 #if KRWLCK_STORES_EXCL_OWNER /* A future planned enhancement */
 		ret = pthread_threadid_np(waiting, &thread_id); // this is the thread that currently holds the kernel mutex
@@ -751,7 +763,7 @@ test_pthread_mutex_blocking(void)
 
 	stackshot = take_stackshot(STACKSHOT_THREAD_WAITINFO, 0);
 
-	check_python(stackshot, "thread \\d+: pthread mutex %llx owned by thread %lld", &mtx, thread_id);
+	check_python(stackshot, __func__, "thread \\d+: pthread mutex %llx owned by thread %lld", &mtx, thread_id);
 
 	find_blocking_info(stackshot, (struct stackshot_thread_waitinfo *)&waitinfo, &len);
 	T_EXPECT_EQ(len, 1, "Only one blocking thread should exist");
@@ -787,7 +799,7 @@ test_pthread_rwlck_blocking(void)
 
 	stackshot = take_stackshot(STACKSHOT_THREAD_WAITINFO, 0);
 
-	check_python(stackshot, "thread \\d+: pthread rwlock %llx for reading", (long long)&rwlck);
+	check_python(stackshot, __func__, "thread \\d+: pthread rwlock %llx for reading", (long long)&rwlck);
 
 	find_blocking_info(stackshot, (struct stackshot_thread_waitinfo *)&waitinfo, &len);
 	T_EXPECT_EQ(len, 1, "Only one blocking thread should exist");
@@ -820,7 +832,7 @@ test_pthread_cond_blocking(void)
 
 	stackshot = take_stackshot(STACKSHOT_THREAD_WAITINFO, 0);
 
-	check_python(stackshot, "thread \\d+: pthread condvar %llx", (long long)&cond);
+	check_python(stackshot, __func__, "thread \\d+: pthread condvar %llx", (long long)&cond);
 
 	find_blocking_info(stackshot, (struct stackshot_thread_waitinfo *)&waitinfo, &len);
 	T_EXPECT_EQ(len, 1, "Only one blocking thread should exist");
@@ -862,7 +874,7 @@ test_waitpid_blocking(void)
 		T_EXPECT_EQ(waitinfo.wait_type, kThreadWaitOnProcess,
 				"Wait type should match expected WaitOnProcess value");
 
-		check_python(stackshot, "thread \\d+: waitpid, for pid %d", (int)pid);
+		check_python(stackshot, __func__, "thread \\d+: waitpid, for pid %d", (int)pid);
 
 		stackshot_config_dealloc(stackshot);
 		T_EXPECT_EQ(waitinfo.owner, pid,

@@ -5,7 +5,9 @@
 #include <stdbool.h>
 #include <errno.h>
 
+#if defined(__arm64__)
 T_GLOBAL_META(
+	T_META_TAG_PERF,
 	T_META_RUN_CONCURRENTLY(false),
 	T_META_BOOTARGS_SET("enable_skstsct=1"),
 	T_META_CHECK_LEAKS(false),
@@ -15,164 +17,190 @@ T_GLOBAL_META(
 	T_META_RADAR_COMPONENT_VERSION("scheduler"),
 	T_META_OWNER("ngamble")
 	);
+#else
+T_GLOBAL_META(
+	T_META_TAG_PERF,
+	T_META_RUN_CONCURRENTLY(false),
+	T_META_CHECK_LEAKS(false),
+	T_META_ASROOT(true),
+	T_META_REQUIRES_SYSCTL_EQ("kern.hv_vmm_present", 0),
+	T_META_RADAR_COMPONENT_NAME("xnu"),
+	T_META_RADAR_COMPONENT_VERSION("scheduler"),
+	T_META_OWNER("ngamble")
+	);
+#endif
 
 static void
-print_cmd(char **cmd)
+log_cmd(char **cmd)
 {
+#define MAX_CMD_STR 1024
+	char cmd_str[MAX_CMD_STR] = "";
 	char *s;
 
 	while ((s = *cmd) != NULL) {
-		printf("%s ", s);
+		strlcat(cmd_str, s, MAX_CMD_STR);
+		strlcat(cmd_str, " ", MAX_CMD_STR);
 		cmd++;
 	}
-	printf("\n");
+	T_LOG("%s\n", cmd_str);
 }
 
-T_DECL(zn_rt, "Schedule 1 RT thread per performance core, and test max latency", T_META_ENABLED(!TARGET_OS_TV))
+static void
+run_zn(char *name, char **cmd)
 {
-	char *cmd[] = {"/AppleInternal/CoreOS/tests/xnu/zero-to-n/zn",
-		       "0", "broadcast-single-sem", "realtime", "1000",
-		       "--spin-time", "200000",
-		       "--spin-all",
-		       "--test-rt",
-		       NULL};
-	print_cmd(cmd);
+	char tracefile_path[MAXPATHLEN] = "zn.artrace";
+	snprintf(tracefile_path, MAXPATHLEN, "%s.artrace", name);
+
+	int ret = dt_resultfile(tracefile_path, sizeof(tracefile_path));
+	if (ret) {
+		T_ASSERT_FAIL("get file path for trace file failed with errno %d", errno);
+	}
+
+	cmd[3] = tracefile_path;
+	log_cmd(cmd);
+
+	__block bool test_failed = true;
+	__block bool test_skipped = false;
 
 	pid_t test_pid;
-	int ret = dt_launch_tool(&test_pid, cmd, false, NULL, NULL);
-	if (ret) {
-		T_ASSERT_FAIL("dt_launch_tool() failed unexpectedly with errno %d", errno);
+	test_pid = dt_launch_tool_pipe(cmd, false, NULL, ^bool (__unused char *data, __unused size_t data_size, __unused dt_pipe_data_handler_context_t *context) {
+		T_LOG("%s", data);
+		if (strstr(data, "TEST PASSED")) {
+		        test_failed = false;
+		}
+		if (strstr(data, "TEST FAILED")) {
+		        test_failed = true;
+		}
+		if (strstr(data, "TEST SKIPPED")) {
+		        test_skipped = true;
+		}
+		return false;
+	}, ^bool (__unused char *data, __unused size_t data_size, __unused dt_pipe_data_handler_context_t *context) {
+		T_LOG("%s", data);
+		return false;
+	}, BUFFER_PATTERN_LINE, NULL);
+
+	if (test_pid == 0) {
+		T_ASSERT_FAIL("dt_launch_tool_pipe() failed unexpectedly with errno %d", errno);
 	}
 
 	int exitstatus;
 	dt_waitpid(test_pid, &exitstatus, NULL, 0);
-	if (exitstatus == 0) {
-		T_PASS("zn_rt");
-	} else if (exitstatus == 2) {
-		T_SKIP("zn_rt");
+	if (exitstatus != 0) {
+		T_LOG("ktrace artrace exitstatus=%d\n", exitstatus);
+	}
+	if (test_skipped) {
+		unlink(tracefile_path);
+		T_SKIP("%s", name);
+	} else if (test_failed) {
+		T_FAIL("%s", name);
 	} else {
-		T_FAIL("zn_rt");
+		unlink(tracefile_path);
+		T_PASS("%s", name);
 	}
 	T_END;
 }
 
+T_DECL(zn_rt, "Schedule 1 RT thread per performance core, and test max latency", T_META_ENABLED(!TARGET_OS_TV))
+{
+	char *cmd[] = {"/usr/bin/ktrace", "artrace", "-o", "zn.artrace", "-c",
+		       "/AppleInternal/CoreOS/tests/xnu/zero-to-n/zn",
+		       "0", "broadcast-single-sem", "realtime", "1000",
+		       "--spin-time", "200000",
+		       "--spin-all",
+		       "--test-rt",
+#if defined(__x86_64__)
+		       "--trace", "2000000",
+#else
+		       "--trace", "500000",
+#endif
+		       NULL};
+
+	run_zn("zn_rt", cmd);
+}
+
 T_DECL(zn_rt_smt, "Schedule 1 RT thread per primary core, verify that the secondaries are idle iff the RT threads are running", T_META_ASROOT(true), T_META_ENABLED(TARGET_CPU_X86_64))
 {
-	char *cmd[] = {"/AppleInternal/CoreOS/tests/xnu/zero-to-n/zn",
+	char *cmd[] = {"/usr/bin/ktrace", "artrace", "-o", "zn.artrace", "-c",
+		       "/AppleInternal/CoreOS/tests/xnu/zero-to-n/zn",
 		       "0", "broadcast-single-sem", "realtime", "1000",
 		       "--spin-time", "200000",
 		       "--spin-all",
 		       "--churn-pri", "4",
 		       "--test-rt-smt",
-		       "--intel-only",
+		       "--trace", "2000000",
 		       NULL};
-	print_cmd(cmd);
 
-	pid_t test_pid;
-	int ret = dt_launch_tool(&test_pid, cmd, false, NULL, NULL);
-	if (ret) {
-		T_ASSERT_FAIL("dt_launch_tool() failed unexpectedly with errno %d", errno);
-	}
-
-	int exitstatus;
-	dt_waitpid(test_pid, &exitstatus, NULL, 0);
-	if (exitstatus == 0) {
-		T_PASS("zn_rt_smt");
-	} else if (exitstatus == 2) {
-		T_SKIP("zn_rt_smt");
-	} else {
-		T_FAIL("zn_rt_smt");
-	}
-	T_END;
+	run_zn("zn_rt_smt", cmd);
 }
 
 T_DECL(zn_rt_avoid0, "Schedule 1 RT thread per primary core except for CPU 0", T_META_ASROOT(true), T_META_ENABLED(TARGET_CPU_X86_64))
 {
-	char *cmd[] = {"/AppleInternal/CoreOS/tests/xnu/zero-to-n/zn",
+	char *cmd[] = {"/usr/bin/ktrace", "artrace", "-o", "zn.artrace", "-c",
+		       "/AppleInternal/CoreOS/tests/xnu/zero-to-n/zn",
 		       "0", "broadcast-single-sem", "realtime", "1000",
 		       "--spin-time", "200000",
 		       "--spin-all",
 		       "--test-rt-avoid0",
-		       "--intel-only",
+		       "--trace", "2000000",
 		       NULL};
-	print_cmd(cmd);
 
-	pid_t test_pid;
-	int ret = dt_launch_tool(&test_pid, cmd, false, NULL, NULL);
-	if (ret) {
-		T_ASSERT_FAIL("dt_launch_tool() failed unexpectedly with errno %d", errno);
-	}
-
-	int exitstatus;
-	dt_waitpid(test_pid, &exitstatus, NULL, 0);
-	if (exitstatus == 0) {
-		T_PASS("zn_rt_avoid0");
-	} else if (exitstatus == 2) {
-		T_SKIP("zn_rt_avoid0");
-	} else {
-		T_FAIL("zn_rt_avoid0");
-	}
-	T_END;
+	run_zn("zn_rt_avoid0", cmd);
 }
 
 T_DECL(zn_rt_apt, "Emulate AVID Pro Tools with default latency deadlines", T_META_ENABLED(!TARGET_OS_TV))
 {
-	char *cmd[] = {"/AppleInternal/CoreOS/tests/xnu/zero-to-n/zn",
-		       "0", "chain", "realtime", "10000",
+	char *cmd[] = {"/usr/bin/ktrace", "artrace", "-o", "zn.artrace", "-c",
+		       "/AppleInternal/CoreOS/tests/xnu/zero-to-n/zn",
+		       "0", "chain", "realtime", "1000",
 		       "--extra-thread-count", "-3",
 		       "--spin-time", "200000",
 		       "--spin-all",
 		       "--churn-pri", "31", "--churn-random",
 		       "--test-rt",
+#if defined(__x86_64__)
+		       "--trace", "2000000",
+#else
+		       "--trace", "500000",
+#endif
 		       NULL};
-	print_cmd(cmd);
 
-	pid_t test_pid;
-	int ret = dt_launch_tool(&test_pid, cmd, false, NULL, NULL);
-	if (ret) {
-		T_ASSERT_FAIL("dt_launch_tool() failed unexpectedly with errno %d", errno);
-	}
-
-	int exitstatus;
-	dt_waitpid(test_pid, &exitstatus, NULL, 0);
-	if (exitstatus == 0) {
-		T_PASS("zn_rt_apt");
-	} else if (exitstatus == 2) {
-		T_SKIP("zn_rt_apt");
-	} else {
-		T_FAIL("zn_rt_apt");
-	}
-	T_END;
+	run_zn("zn_rt_apt", cmd);
 }
 
 T_DECL(zn_rt_apt_ll, "Emulate AVID Pro Tools with low latency deadlines")
 {
-	char *cmd[] = {"/AppleInternal/CoreOS/tests/xnu/zero-to-n/zn",
-		       "0", "chain", "realtime", "10000",
+	char *cmd[] = {"/usr/bin/ktrace", "artrace", "-o", "zn.artrace", "-c",
+		       "/AppleInternal/CoreOS/tests/xnu/zero-to-n/zn",
+		       "0", "chain", "realtime", "1000",
 		       "--extra-thread-count", "-3",
 		       "--spin-time", "200000",
 		       "--spin-all",
 		       "--churn-pri", "31", "--churn-random",
-		       "--trace", "500000",
 		       "--test-rt",
 		       "--rt-ll",
+		       "--trace", "500000",
 		       NULL};
-	print_cmd(cmd);
 
-	pid_t test_pid;
-	int ret = dt_launch_tool(&test_pid, cmd, false, NULL, NULL);
-	if (ret) {
-		T_ASSERT_FAIL("dt_launch_tool() failed unexpectedly with errno %d", errno);
-	}
+	run_zn("zn_rt_apt_ll", cmd);
+}
 
-	int exitstatus;
-	dt_waitpid(test_pid, &exitstatus, NULL, 0);
-	if (exitstatus == 0) {
-		T_PASS("zn_rt_apt_ll");
-	} else if (exitstatus == 2) {
-		T_SKIP("zn_rt_apt_ll");
-	} else {
-		T_FAIL("zn_rt_apt_ll");
-	}
-	T_END;
+T_DECL(zn_rt_edf, "Test max latency of earliest deadline RT threads in the presence of later deadline threads", T_META_ENABLED(!TARGET_OS_TV))
+{
+	char *cmd[] = {"/usr/bin/ktrace", "artrace", "-o", "zn.artrace", "-c",
+		       "/AppleInternal/CoreOS/tests/xnu/zero-to-n/zn",
+		       "0", "broadcast-single-sem", "realtime", "1000",
+		       "--extra-thread-count", "-1",
+		       "--spin-time", "200000",
+		       "--spin-all",
+		       "--rt-churn",
+		       "--test-rt",
+#if defined(__x86_64__)
+		       "--trace", "2000000",
+#else
+		       "--trace", "500000",
+#endif
+		       NULL};
+
+	run_zn("zn_rt_edf", cmd);
 }

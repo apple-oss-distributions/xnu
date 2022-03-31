@@ -2034,21 +2034,15 @@ vm_page_insert_internal(
 	}
 
 #if VM_OBJECT_TRACKING_OP_MODIFIED
-	if (vm_object_tracking_inited &&
+	if (vm_object_tracking_btlog &&
 	    object->internal &&
 	    object->resident_page_count == 0 &&
 	    object->pager == NULL &&
 	    object->shadow != NULL &&
 	    object->shadow->copy == object) {
-		void *bt[VM_OBJECT_TRACKING_BTDEPTH];
-		int numsaved = 0;
-
-		numsaved = OSBacktrace(bt, VM_OBJECT_TRACKING_BTDEPTH);
-		btlog_add_entry(vm_object_tracking_btlog,
-		    object,
+		btlog_record(vm_object_tracking_btlog, object,
 		    VM_OBJECT_TRACKING_OP_MODIFIED,
-		    bt,
-		    numsaved);
+		    btref_get(__builtin_frame_address(0), 0));
 	}
 #endif /* VM_OBJECT_TRACKING_OP_MODIFIED */
 }
@@ -2848,7 +2842,7 @@ vm_page_update_background_state(vm_page_t mem)
 		return;
 	}
 
-	task_t  my_task = current_task();
+	task_t  my_task = current_task_early();
 
 	if (my_task) {
 		if (task_get_darkwake_mode(my_task)) {
@@ -2885,7 +2879,7 @@ vm_page_assign_background_state(vm_page_t mem)
 		return;
 	}
 
-	task_t  my_task = current_task();
+	task_t  my_task = current_task_early();
 
 	if (my_task) {
 		if (task_get_darkwake_mode(my_task)) {
@@ -3577,7 +3571,7 @@ static inline void
 vm_page_grab_diags()
 {
 #if DEVELOPMENT || DEBUG
-	task_t task = current_task();
+	task_t task = current_task_early();
 	if (task == NULL) {
 		return;
 	}
@@ -6688,7 +6682,7 @@ vm_page_alloc_list(
 	int             page_grab_count = 0;
 	mach_vm_size_t  map_size = ptoa_64(page_count);
 #if DEVELOPMENT || DEBUG
-	task_t          task = current_task();
+	task_t          task = current_task_early();
 #endif /* DEVELOPMENT || DEBUG */
 
 	for (int i = 0; i < page_count; i++) {
@@ -7533,7 +7527,7 @@ hibernate_page_list_setall(hibernate_page_list_t * page_list,
 	hibernate_bitmap_t * bitmap;
 	hibernate_bitmap_t * bitmap_wired;
 	boolean_t                    discard_all;
-	boolean_t            discard;
+	boolean_t            discard = FALSE;
 
 	HIBLOG("hibernate_page_list_setall(preflight %d) start\n", preflight);
 
@@ -9047,15 +9041,7 @@ vm_tag_init(void)
 vm_tag_t
 vm_tag_alloc(vm_allocation_site_t * site)
 {
-	vm_tag_t tag;
 	vm_allocation_site_t * releasesite;
-
-	if (VM_TAG_BT & site->flags) {
-		tag = vm_tag_bt();
-		if (VM_KERN_MEMORY_NONE != tag) {
-			return tag;
-		}
-	}
 
 	if (!site->tag) {
 		releasesite = NULL;
@@ -9143,11 +9129,20 @@ void
 vm_allocation_zones_init(void)
 {
 	kern_return_t ret;
-	vm_offset_t       addr;
+	vm_offset_t   addr;
 	vm_size_t     size;
 
+	const vm_tag_t early_tags[] = {
+		VM_KERN_MEMORY_DIAG,
+		VM_KERN_MEMORY_KALLOC,
+		VM_KERN_MEMORY_KALLOC_DATA,
+		VM_KERN_MEMORY_KALLOC_TYPE,
+		VM_KERN_MEMORY_LIBKERN,
+		VM_KERN_MEMORY_OSFMK,
+	};
+
 	size = VM_MAX_TAG_VALUE * sizeof(vm_allocation_zone_total_t * *)
-	    + 4 * VM_TAG_SIZECLASSES * sizeof(vm_allocation_zone_total_t);
+	    + ARRAY_COUNT(early_tags) * VM_TAG_SIZECLASSES * sizeof(vm_allocation_zone_total_t);
 
 	ret = kernel_memory_allocate(kernel_map,
 	    &addr, round_page(size), 0,
@@ -9157,15 +9152,12 @@ vm_allocation_zones_init(void)
 	vm_allocation_zone_totals = (vm_allocation_zone_total_t **) addr;
 	addr += VM_MAX_TAG_VALUE * sizeof(vm_allocation_zone_total_t * *);
 
-	// prepopulate VM_KERN_MEMORY_DIAG & VM_KERN_MEMORY_KALLOC so allocations
-	// in vm_tag_update_zone_size() won't recurse
-	vm_allocation_zone_totals[VM_KERN_MEMORY_DIAG]   = (vm_allocation_zone_total_t *) addr;
-	addr += VM_TAG_SIZECLASSES * sizeof(vm_allocation_zone_total_t);
-	vm_allocation_zone_totals[VM_KERN_MEMORY_KALLOC] = (vm_allocation_zone_total_t *) addr;
-	addr += VM_TAG_SIZECLASSES * sizeof(vm_allocation_zone_total_t);
-	vm_allocation_zone_totals[VM_KERN_MEMORY_KALLOC_DATA] = (vm_allocation_zone_total_t *) addr;
-	addr += VM_TAG_SIZECLASSES * sizeof(vm_allocation_zone_total_t);
-	vm_allocation_zone_totals[VM_KERN_MEMORY_KALLOC_TYPE] = (vm_allocation_zone_total_t *) addr;
+	// prepopulate early tag ranges so allocations
+	// in vm_tag_update_zone_size() and early boot won't recurse
+	for (size_t i = 0; i < ARRAY_COUNT(early_tags); i++) {
+		vm_allocation_zone_totals[early_tags[i]] = (vm_allocation_zone_total_t *)addr;
+		addr += VM_TAG_SIZECLASSES * sizeof(vm_allocation_zone_total_t);
+	}
 }
 
 __attribute__((noinline))
@@ -9175,8 +9167,8 @@ vm_tag_zone_stats_alloc(vm_tag_t tag, zalloc_flags_t flags)
 	vm_allocation_zone_total_t *stats;
 	vm_size_t size = sizeof(*stats) * VM_TAG_SIZECLASSES;
 
-	stats = kalloc_data(size,
-	    Z_VM_TAG(VM_KERN_MEMORY_DIAG) | Z_ZERO | flags);
+	flags = Z_VM_TAG(Z_ZERO | flags, VM_KERN_MEMORY_DIAG);
+	stats = kalloc_data(size, flags);
 	if (!stats) {
 		return VM_KERN_MEMORY_NONE;
 	}
@@ -9551,6 +9543,32 @@ vm_page_diagnose_heap(mach_memory_info_t *info, kalloc_heap_t kheap)
 	return i;
 }
 
+static int
+vm_page_diagnose_kt_heaps(mach_memory_info_t *info)
+{
+	uint32_t idx = 0;
+	vm_page_diagnose_zone_stats(info + idx, KHEAP_KT_VAR->kh_stats, false);
+	snprintf(info[idx].name, sizeof(info[idx].name),
+	    "%s[raw]", KHEAP_KT_VAR->kh_name);
+	idx++;
+
+	for (uint32_t i = 0; i < KT_VAR_MAX_HEAPS; i++) {
+		struct kt_heap_zones heap = kalloc_type_heap_array[i];
+
+		for (kalloc_type_var_view_t ktv = heap.views; ktv;
+		    ktv = (kalloc_type_var_view_t) ktv->kt_next) {
+			if (ktv->kt_stats) {
+				vm_page_diagnose_zone_stats(info + idx, ktv->kt_stats, false);
+				snprintf(info[i].name, sizeof(info[i].name),
+				    "%s[%s]", KHEAP_KT_VAR->kh_name, ktv->kt_name);
+				idx++;
+			}
+		}
+	}
+
+	return idx;
+}
+
 kern_return_t
 vm_page_diagnose(mach_memory_info_t * info, unsigned int num_info, uint64_t zones_collectable_bytes)
 {
@@ -9635,6 +9653,9 @@ vm_page_diagnose(mach_memory_info_t * info, unsigned int num_info, uint64_t zone
 	}
 	if (KHEAP_KEXT->kh_heap_id == KHEAP_ID_KEXT) {
 		i += vm_page_diagnose_heap(counts + i, KHEAP_KEXT);
+	}
+	if (KHEAP_KT_VAR->kh_heap_id == KHEAP_ID_KT_VAR) {
+		i += vm_page_diagnose_kt_heaps(counts + i);
 	}
 	assert(i <= zone_view_count);
 
@@ -9764,7 +9785,7 @@ vm_kern_allocation_info(uintptr_t addr, vm_size_t * size, vm_tag_t * tag, vm_siz
 	ret = KERN_INVALID_ADDRESS;
 	for (map = kernel_map; map;) {
 		vm_map_lock(map);
-		if (!vm_map_lookup_entry(map, addr, &entry)) {
+		if (!vm_map_lookup_entry_allow_pgz(map, addr, &entry)) {
 			break;
 		}
 		if (entry->is_sub_map) {

@@ -162,10 +162,10 @@ static LCK_GRP_DECLARE(cl_mtx_grp, "cluster I/O");
 static LCK_MTX_DECLARE(cl_transaction_mtxp, &cl_mtx_grp);
 static LCK_SPIN_DECLARE(cl_direct_read_spin_lock, &cl_mtx_grp);
 
-static ZONE_DECLARE(cl_rd_zone, "cluster_read",
+static ZONE_DEFINE(cl_rd_zone, "cluster_read",
     sizeof(struct cl_readahead), ZC_ZFREE_CLEARMEM);
 
-static ZONE_DECLARE(cl_wr_zone, "cluster_write",
+static ZONE_DEFINE(cl_wr_zone, "cluster_write",
     sizeof(struct cl_writebehind), ZC_ZFREE_CLEARMEM);
 
 #define IO_UNKNOWN      0
@@ -5800,6 +5800,8 @@ cluster_push_ext(vnode_t vp, int flags, int (*callback)(buf_t, void *), void *ca
 }
 
 /* write errors via err, but return the number of clusters written */
+extern uint32_t system_inshutdown;
+uint32_t cl_sparse_push_error = 0;
 int
 cluster_push_err(vnode_t vp, int flags, int (*callback)(buf_t, void *), void *callback_arg, int *err)
 {
@@ -5884,10 +5886,33 @@ cluster_push_err(vnode_t vp, int flags, int (*callback)(buf_t, void *), void *ca
 
 			if (retval) {
 				if (wbp->cl_scmap != NULL) {
-					panic("cluster_push_err: Expected NULL cl_scmap");
-				}
+					/*
+					 * panic("cluster_push_err: Expected NULL cl_scmap\n");
+					 *
+					 * This can happen if we get an error from the underlying FS
+					 * e.g. ENOSPC, EPERM or EIO etc. We hope that these errors
+					 * are transient and the I/Os will succeed at a later point.
+					 *
+					 * The tricky part here is that a new sparse cluster has been
+					 * allocated and tracking a different set of dirty pages. So these
+					 * pages are not going to be pushed out with the next sparse_cluster_push.
+					 * An explicit msync or file close will, however, push the pages out.
+					 *
+					 * What if those calls still don't work? And so, during shutdown we keep
+					 * trying till we succeed...
+					 */
 
-				wbp->cl_scmap = scmap;
+					if (system_inshutdown) {
+						if ((retval == ENOSPC) && (vp->v_mount->mnt_flag & (MNT_LOCAL | MNT_REMOVABLE)) == MNT_LOCAL) {
+							os_atomic_inc(&cl_sparse_push_error, relaxed);
+						}
+					} else {
+						vfs_drt_control(&scmap, 0); /* emit stats and free this memory. Dirty pages stay intact. */
+						scmap = NULL;
+					}
+				} else {
+					wbp->cl_scmap = scmap;
+				}
 			}
 
 			if (wbp->cl_sparse_wait && wbp->cl_sparse_pushes == 0) {
@@ -6373,7 +6398,7 @@ static int
 sparse_cluster_switch(struct cl_writebehind *wbp, vnode_t vp, off_t EOF, int (*callback)(buf_t, void *), void *callback_arg, boolean_t vm_initiated)
 {
 	int     cl_index;
-	int     error;
+	int     error = 0;
 
 	KERNEL_DEBUG((FSDBG_CODE(DBG_FSRW, 78)) | DBG_FUNC_START, kdebug_vnode(vp), wbp->cl_scmap, wbp->cl_number, 0, 0);
 
@@ -6430,6 +6455,11 @@ sparse_cluster_push(struct cl_writebehind *wbp, void **scmap, vnode_t vp, off_t 
 		int retval;
 
 		if (vfs_drt_get_cluster(scmap, &offset, &length) != KERN_SUCCESS) {
+			/*
+			 * Not finding anything to push will return KERN_FAILURE.
+			 * Confusing since it isn't really a failure. But that's the
+			 * reason we don't set 'error' here like we do below.
+			 */
 			break;
 		}
 
@@ -6481,7 +6511,7 @@ sparse_cluster_add(struct cl_writebehind *wbp, void **scmap, vnode_t vp, struct 
 	u_int   new_dirty;
 	u_int   length;
 	off_t   offset;
-	int     error;
+	int     error = 0;
 	int     push_flag = 0; /* Is this a valid value? */
 
 	KERNEL_DEBUG((FSDBG_CODE(DBG_FSRW, 80)) | DBG_FUNC_START, (*scmap), 0, cl->b_addr, (int)cl->e_addr, 0);

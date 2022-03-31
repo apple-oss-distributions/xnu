@@ -140,10 +140,10 @@ struct tracker_db {
 	uint32_t                            max_link_count;
 };
 
-static ZONE_DECLARE(tracker_hash_entry_zone, "tracker_hash_entry",
+static ZONE_DEFINE(tracker_hash_entry_zone, "tracker_hash_entry",
     sizeof(struct tracker_hash_entry), ZC_NONE);
 
-static ZONE_DECLARE(tracker_hash_entry_short_zone, "tracker_hash_entry_short",
+static ZONE_DEFINE(tracker_hash_entry_short_zone, "tracker_hash_entry_short",
     sizeof(struct tracker_hash_entry_short), ZC_NONE);
 
 static struct tracker_db g_tracker_db = { };

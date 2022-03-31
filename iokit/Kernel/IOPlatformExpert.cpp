@@ -1327,6 +1327,16 @@ err:
 	return FALSE;
 }
 
+boolean_t
+PESyncNVRAM(void)
+{
+	if (gIOOptionsEntry != nullptr) {
+		gIOOptionsEntry->sync();
+	}
+
+	return TRUE;
+}
+
 long
 PEGetGMTTimeOfDay(void)
 {
@@ -1844,10 +1854,6 @@ IODTPlatformExpert::registerNVRAMController( IONVRAMController * nvram )
 int
 IODTPlatformExpert::haltRestart(unsigned int type)
 {
-	if (dtNVRAM) {
-		dtNVRAM->sync();
-	}
-
 	return super::haltRestart(type);
 }
 

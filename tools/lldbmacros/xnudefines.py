@@ -7,6 +7,8 @@
 
     Note: The Format of the function has to be populate_<variable_name> so that the automated updating will pick it up.
 """
+from __future__ import absolute_import
+
 import os, re
 
 def GetStateString(strings_dict, state):
@@ -111,41 +113,42 @@ filetype_strings = { DTYPE_VNODE: 'VNODE',
 
 mach_msg_type_descriptor_strings = {0: "PORT", 1: "OOLDESC", 2: "OOLPORTS", 3: "OOLVOLATILE"}
 
-proc_state_strings = [ "", "Idle", "Run", "Sleep", "Stop", "Zombie", "Reaping" ]
-proc_flag_explain_strings = ["!0x00000004 - process is 32 bit",  #only exception that does not follow bit settings
-                             "0x00000001 - may hold advisory locks",
-                             "0x00000002 - has a controlling tty",
-                             "0x00000004 - process is 64 bit",
-                             "0x00000008 - no SIGCHLD on child stop",
-                             "0x00000010 - waiting for child exec/exit",
-                             "0x00000020 - has started profiling",
-                             "0x00000040 - in select; wakeup/waiting danger",
-                             "0x00000080 - was stopped and continued",
-                             "0x00000100 - has set privileges since exec",
-                             "0x00000200 - system process: no signals, stats, or swap",
-                             "0x00000400 - timing out during a sleep",
-                             "0x00000800 - debugged process being traced",
-                             "0x00001000 - debugging process has waited for child",
-                             "0x00002000 - exit in progress",
-                             "0x00004000 - process has called exec",
-                             "0x00008000 - owe process an addupc() XXX",
-                             "0x00010000 - affinity for Rosetta children",
-                             "0x00020000 - wants to run Rosetta",
-                             "0x00040000 - has wait() in progress",
-                             "0x00080000 - kdebug tracing on for this process",
-                             "0x00100000 - blocked due to SIGTTOU or SIGTTIN",
-                             "0x00200000 - has called reboot()",
-                             "0x00400000 - is TBE state",
-                             "0x00800000 - signal exceptions",
-                             "0x01000000 - has thread cwd",
-                             "0x02000000 - has vfork() children",
-                             "0x04000000 - not allowed to attach",
-                             "0x08000000 - vfork() in progress",
-                             "0x10000000 - no shared libraries",
-                             "0x20000000 - force quota for root",
-                             "0x40000000 - no zombies when children exit",
-                             "0x80000000 - don't hang on remote FS ops"
-                             ]
+proc_state_strings = ["", "Idle", "Run", "Sleep", "Stop", "Zombie", "Reaping"]
+proc_flag_explain_strings = {
+        0x00000001: 'may hold advisory locks',
+        0x00000002: 'has a controlling tty',
+        # Also used to singal 32-bit process.
+        0x00000004: 'process is 64 bit',
+        0x00000008: 'No SIGCHLD on child stop',
+        0x00000010: 'waiting for child exec/exit',
+        0x00000020: 'has started profiling',
+        0x00000040: 'in select; wakeup/waiting danger',
+        0x00000080: 'was stopped and continued',
+        0x00000100: 'has set privileges since last exec',
+        0x00000200: 'system process: no signals, stats, or swap',
+        0x00000400: 'timing out during sleep',
+        0x00000800: 'debugged process being traced',
+        0x00001000: 'address space layout randomization disabled',
+        0x00002000: 'exit in progress',
+        0x00004000: 'process has called exec',
+        0x00008000: 'owe process an addupc()',
+        0x00010000: 'affinity for Rosetta children',
+        0x00020000: 'wants to run Rosetta',
+        0x00040000: 'has wait() in progress',
+        0x00080000: 'checks for OPENEVT flag set on open',
+        0x00100000: 'can call vfs_markdependency()',
+        0x00200000: 'has called reboot()',
+        0x00400000: 'Reserved',
+        0x00800000: 'Reserved',
+        0x01000000: 'has thread cwd',
+        0x02000000: 'Reserved',
+        0x04000000: 'process has adopted persona',
+        0x08000000: 'Reserved',
+        0x10000000: 'no shared libraries',
+        0x20000000: 'force quota on root',
+        0x40000000: 'no zombies when children exit',
+        0x80000000: 'no hangs on remote FS ops'
+        }
 
 FSHIFT = 11
 FSCALE = 1 << FSHIFT
@@ -168,7 +171,7 @@ CRASHLOG_PANIC_STRING_LEN = 32
 AURR_CRASHLOG_PANIC_VERSION = 2
 
 # File:EXTERNAL_HEADER/mach-o/loader.h
-# (struct proc *)->p_platform
+# (struct proc *)->p_proc_ro->p_platform_data.p_platform
 P_PLATFORM_MACOS = 1
 P_PLATFORM_IOS = 2
 P_PLATFORM_TVOS = 3

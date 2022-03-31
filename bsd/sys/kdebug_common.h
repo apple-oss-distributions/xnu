@@ -103,7 +103,6 @@ struct kd_storage_buffers {
 
 #define KDS_PTR_NULL 0xffffffff
 
-#pragma pack(0)
 struct kd_bufinfo {
 	union  kds_ptr kd_list_head;
 	union  kds_ptr kd_list_tail;
@@ -112,7 +111,7 @@ struct kd_bufinfo {
 	uint64_t kd_prev_timebase;
 	uint32_t num_bufs;
 	bool continuous_timestamps;
-} __attribute__((aligned(MAX_CPU_CACHE_LINE_SIZE)));
+} __attribute__((aligned(MAX_CPU_CACHE_LINE_SIZE))) __attribute__((packed));
 
 
 struct kd_iop;
@@ -141,6 +140,9 @@ struct kd_ctrl_page_t {
 	 * capture a cpu count.
 	 */
 	struct kd_iop* kdebug_iops;
+
+	kd_event_matcher disable_event_match;
+	kd_event_matcher disable_event_mask;
 };
 
 struct kd_data_page_t {
@@ -162,7 +164,7 @@ struct kd_record {
 	kd_buf_argtype arg3;
 	kd_buf_argtype arg4;
 	kd_buf_argtype arg5;
-};
+} __attribute__((packed));
 
 #define POINTER_FROM_KDS_PTR(kd_bufs, x) (&kd_bufs[x.buffer_index].kdsb_addr[x.offset])
 
@@ -172,8 +174,8 @@ extern int kdbg_debug;
 uint32_t kdbg_cpu_count(bool);
 
 void kdebug_lck_init(void);
-int _storage_lock(struct kd_ctrl_page_t *kd_ctrl_page);
-void _storage_unlock(struct kd_ctrl_page_t *kd_ctrl_page, int intrs_en);
+int kdebug_storage_lock(struct kd_ctrl_page_t *kd_ctrl_page);
+void kdebug_storage_unlock(struct kd_ctrl_page_t *kd_ctrl_page, int intrs_en);
 
 void
 enable_wrap(struct kd_ctrl_page_t *kd_ctrl_page, uint32_t old_slowcheck);

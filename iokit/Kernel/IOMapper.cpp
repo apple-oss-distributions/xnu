@@ -191,7 +191,7 @@ IOMapper::copyMapperForDeviceWithIndex(IOService * device, unsigned int index)
 			goto found;
 		}
 
-		data = OSData::withBytesNoCopy((UInt32 *)data->getBytesNoCopy() + index, sizeof(UInt32));
+		data = OSData::withValueNoCopy(*((UInt32 *)data->getBytesNoCopy() + index));
 		if (!data) {
 			goto found;
 		}

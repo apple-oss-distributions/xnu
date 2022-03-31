@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2003-2019 Apple Inc. All rights reserved.
+ * Copyright (c) 2003-2021 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -94,6 +94,7 @@
 #endif /* PRIVATE */
 #define EVFILT_EXCEPT           (-15)   /* Exception events */
 #ifdef PRIVATE
+#define EVFILT_NW_CHANNEL       (-16)   /* Skywalk channel events */
 #define EVFILT_WORKLOOP         (-17)   /* Workloop events */
 #endif /* PRIVATE */
 
@@ -253,6 +254,9 @@ typedef uint64_t kqueue_id_t;
 #define EVFILTID_SPEC              (EVFILT_SYSCOUNT + 9)
 #define EVFILTID_BPFREAD           (EVFILT_SYSCOUNT + 10)
 #define EVFILTID_NECP_FD           (EVFILT_SYSCOUNT + 11)
+#define EVFILTID_SKYWALK_CHANNEL_W (EVFILT_SYSCOUNT + 12)
+#define EVFILTID_SKYWALK_CHANNEL_R (EVFILT_SYSCOUNT + 13)
+#define EVFILTID_SKYWALK_CHANNEL_E (EVFILT_SYSCOUNT + 14)
 #define EVFILTID_FSEVENT           (EVFILT_SYSCOUNT + 15)
 #define EVFILTID_VN                (EVFILT_SYSCOUNT + 16)
 #define EVFILTID_TTY               (EVFILT_SYSCOUNT + 17)
@@ -668,6 +672,15 @@ typedef enum vm_pressure_level {
 
 
 #ifdef PRIVATE
+/*
+ * data/hint fflags for EVFILT_NW_CHANNEL, shared with userspace.
+ */
+#define NOTE_FLOW_ADV_UPDATE    0x00000001 /* flow advisory update */
+#define NOTE_CHANNEL_EVENT      0x00000002 /* generic channel event */
+#define NOTE_IF_ADV_UPD         0x00000004 /* Interface advisory update */
+
+#define EVFILT_NW_CHANNEL_ALL_MASK    \
+    (NOTE_FLOW_ADV_UPDATE | NOTE_CHANNEL_EVENT | NOTE_IF_ADV_UPD)
 #endif /* PRIVATE */
 
 #ifndef KERNEL
@@ -800,7 +813,7 @@ static inline struct kqueue *
 knote_get_kq(struct knote *kn)
 {
 	vm_offset_t ptr = VM_UNPACK_POINTER(kn->kn_kq_packed, KNOTE_KQ_PACKED);
-	return __unsafe_forge_single((struct kqueue *)ptr);
+	return __unsafe_forge_single(struct kqueue *, ptr);
 }
 
 static inline int
@@ -1094,6 +1107,7 @@ struct filterops {
 	        ((result >> FILTER_ADJUST_EVENT_QOS_SHIFT) & THREAD_QOS_LAST)
 #define FILTER_RESET_EVENT_QOS              FILTER_ADJUST_EVENT_QOS_BIT
 #define FILTER_THREADREQ_NODEFEER           0x00000080
+#define FILTER_ADJUST_EVENT_IOTIER_BIT      0x00000100
 
 #define filter_call(_ops, call)  \
 	        ((_ops)->f_extended_codes ? (_ops)->call : !!((_ops)->call))
@@ -1121,6 +1135,8 @@ extern const struct filterops *knote_fops(struct knote *kn);
 
 extern struct turnstile *kqueue_turnstile(struct kqueue *);
 extern struct turnstile *kqueue_alloc_turnstile(struct kqueue *);
+extern void kqueue_set_iotier_override(struct kqueue *kqu, uint8_t iotier_override);
+extern uint8_t kqueue_get_iotier_override(struct kqueue *kqu);
 
 int kevent_proc_copy_uptrs(void *proc, uint64_t *buf, uint32_t bufsize);
 #if CONFIG_PREADOPT_TG

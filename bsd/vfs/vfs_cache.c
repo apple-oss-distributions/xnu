@@ -109,7 +109,7 @@
  * Structures associated with name cacheing.
  */
 
-ZONE_DECLARE(namecache_zone, "namecache", sizeof(struct namecache), ZC_NONE);
+ZONE_DEFINE_TYPE(namecache_zone, "namecache", struct namecache, ZC_NONE);
 
 LIST_HEAD(nchashhead, namecache) * nchashtbl;    /* Hash Table */
 u_long  nchashmask;
@@ -496,7 +496,7 @@ again:
 
 #if CONFIG_FIRMLINKS
 	if (!(flags & BUILDPATH_NO_FIRMLINK) &&
-	    (vp->v_flag & VFMLINKTARGET) && vp->v_fmlink) {
+	    (vp->v_flag & VFMLINKTARGET) && vp->v_fmlink && (vp->v_fmlink->v_type == VDIR)) {
 		vp = vp->v_fmlink;
 	}
 #endif
@@ -525,7 +525,7 @@ again:
 			 */
 #if CONFIG_FIRMLINKS
 			if (!(flags & BUILDPATH_NO_FIRMLINK) &&
-			    (vp->v_flag & VFMLINKTARGET) && vp->v_fmlink) {
+			    (vp->v_flag & VFMLINKTARGET) && vp->v_fmlink && (vp->v_fmlink->v_type == VDIR)) {
 				vp = vp->v_fmlink;
 			} else
 #endif
@@ -764,7 +764,7 @@ bad_news:
 
 #if CONFIG_FIRMLINKS
 			if (!(flags & BUILDPATH_NO_FIRMLINK) &&
-			    (tvp->v_flag & VFMLINKTARGET) && tvp->v_fmlink) {
+			    (tvp->v_flag & VFMLINKTARGET) && tvp->v_fmlink && (vp->v_fmlink->v_type == VDIR)) {
 				tvp = tvp->v_fmlink;
 				break;
 			}
@@ -1025,9 +1025,9 @@ vnode_update_identity(vnode_t vp, vnode_t dvp, const char *name, int name_len, u
 			}
 
 			/*
-			 * Use a temp variable to avoid kauth_cred_unref() while NAME_CACHE_LOCK is held
+			 * Use a temp variable to avoid kauth_cred_drop() while NAME_CACHE_LOCK is held
 			 */
-			tcred = vp->v_cred;
+			tcred = vnode_cred(vp);
 			vp->v_cred = NOCRED;
 			vp->v_authorized_actions = 0;
 			vp->v_cred_timestamp = 0;
@@ -1058,9 +1058,7 @@ vnode_update_identity(vnode_t vp, vnode_t dvp, const char *name, int name_len, u
 			vfs_removename(vname);
 		}
 
-		if (IS_VALID_CRED(tcred)) {
-			kauth_cred_unref(&tcred);
-		}
+		kauth_cred_set(&tcred, NOCRED);
 	}
 	if (dvp != NULLVP) {
 		/* Back-out the ref we took if we lost a race for vp->v_parent. */
@@ -1083,7 +1081,7 @@ vnode_update_identity(vnode_t vp, vnode_t dvp, const char *name, int name_len, u
 			}
 			vnode_unlock(old_parentvp);
 		}
-		ut = get_bsdthread_info(current_thread());
+		ut = current_uthread();
 
 		/*
 		 * indicated to vnode_rele that it shouldn't do a
@@ -1224,14 +1222,10 @@ vnode_setasfirmlink(vnode_t vp, vnode_t target_vp)
 
 	NAME_CACHE_UNLOCK();
 
-	if (target_vp_cred && IS_VALID_CRED(target_vp_cred)) {
-		kauth_cred_unref(&target_vp_cred);
-	}
+	kauth_cred_set(&target_vp_cred, NOCRED);
 
 	if (old_target_vp) {
-		if (old_target_vp_cred && IS_VALID_CRED(old_target_vp_cred)) {
-			kauth_cred_unref(&old_target_vp_cred);
-		}
+		kauth_cred_set(&old_target_vp_cred, NOCRED);
 
 		vnode_rele_ext(old_target_vp, O_EVTONLY, 1);
 		if (old_target_vp_v_fmlink) {
@@ -1360,14 +1354,12 @@ vnode_uncache_authorized_action(vnode_t vp, kauth_action_t action)
 		/*
 		 * Use a temp variable to avoid kauth_cred_unref() while NAME_CACHE_LOCK is held
 		 */
-		tcred = vp->v_cred;
+		tcred = vnode_cred(vp);
 		vp->v_cred = NOCRED;
 	}
 	NAME_CACHE_UNLOCK();
 
-	if (tcred != NOCRED) {
-		kauth_cred_unref(&tcred);
-	}
+	kauth_cred_set(&tcred, NOCRED);
 }
 
 
@@ -1414,7 +1406,7 @@ vnode_cache_is_authorized(vnode_t vp, vfs_context_t ctx, kauth_action_t action)
 
 		NAME_CACHE_LOCK_SHARED();
 
-		if (vp->v_cred == ucred && (vp->v_authorized_actions & action) == action) {
+		if (vnode_cred(vp) == ucred && (vp->v_authorized_actions & action) == action) {
 			retval = TRUE;
 		}
 
@@ -1463,13 +1455,13 @@ vnode_cache_authorized_action(vnode_t vp, vfs_context_t ctx, kauth_action_t acti
 	}
 	NAME_CACHE_LOCK();
 
-	if (vp->v_cred != ucred) {
-		kauth_cred_ref(ucred);
+	if (vnode_cred(vp) != ucred) {
 		/*
-		 * Use a temp variable to avoid kauth_cred_unref() while NAME_CACHE_LOCK is held
+		 * Use a temp variable to avoid kauth_cred_drop() while NAME_CACHE_LOCK is held
 		 */
-		tcred = vp->v_cred;
-		vp->v_cred = ucred;
+		tcred = vnode_cred(vp);
+		vp->v_cred = NOCRED;
+		kauth_cred_set(&vp->v_cred, ucred);
 		vp->v_authorized_actions = 0;
 	}
 	if (ttl_active == TRUE && vp->v_authorized_actions == 0) {
@@ -1487,9 +1479,7 @@ vnode_cache_authorized_action(vnode_t vp, vfs_context_t ctx, kauth_action_t acti
 
 	NAME_CACHE_UNLOCK();
 
-	if (IS_VALID_CRED(tcred)) {
-		kauth_cred_unref(&tcred);
-	}
+	kauth_cred_set(&tcred, NOCRED);
 }
 
 
@@ -1601,6 +1591,19 @@ cache_lookup_path(struct nameidata *ndp, struct componentname *cnp, vnode_t dp,
 
 		if (cnp->cn_namelen == 2 && cnp->cn_nameptr[1] == '.' && cnp->cn_nameptr[0] == '.') {
 			cnp->cn_flags |= ISDOTDOT;
+#if CONFIG_FIRMLINKS
+			/*
+			 * If this is a firmlink target then dp has to be switched to the
+			 * firmlink "source" before exiting this loop.
+			 *
+			 * For a firmlink "target", the policy is to pick the parent of the
+			 * firmlink "source" as the parent. This means that you can never
+			 * get to the "real" parent of firmlink target via a dotdot lookup.
+			 */
+			if (dp->v_fmlink && (dp->v_flag & VFMLINKTARGET) && (dp->v_fmlink->v_type == VDIR)) {
+				dp = dp->v_fmlink;
+			}
+#endif
 		}
 
 		*dp_authorized = 0;
@@ -1663,7 +1666,7 @@ skiprsrcfork:
 		 * XXX: Remove the check for root when we can reliably set
 		 * KAUTH_VNODE_SEARCHBYANYONE as root.
 		 */
-		if ((dp->v_cred != ucred || !(dp->v_authorized_actions & KAUTH_VNODE_SEARCH)) &&
+		if ((vnode_cred(dp) != ucred || !(dp->v_authorized_actions & KAUTH_VNODE_SEARCH)) &&
 		    !(dp->v_authorized_actions & KAUTH_VNODE_SEARCHBYANYONE) &&
 		    (ttl_enabled || !vfs_context_issuser(ctx))) {
 			break;
@@ -1678,18 +1681,6 @@ skiprsrcfork:
 		*dp_authorized = 1;
 
 		if ((cnp->cn_flags & (ISLASTCN | ISDOTDOT))) {
-			/*
-			 * Moving the firmlinks section to be first to catch a corner case:
-			 * When using DOTDOT to get a parent of a firmlink, we want the
-			 * firmlink source to be resolved even if cn_nameiop != LOOKUP.
-			 * This is because lookup() traverses DOTDOT by calling VNOP_LOOKUP
-			 * and has no notion about firmlinks
-			 */
-#if CONFIG_FIRMLINKS
-			if (cnp->cn_flags & ISDOTDOT && dp->v_fmlink && (dp->v_flag & VFMLINKTARGET)) {
-				dp = dp->v_fmlink;
-			}
-#endif
 			if (cnp->cn_nameiop != LOOKUP) {
 				break;
 			}
@@ -1794,6 +1785,34 @@ skiprsrcfork:
 				vp = NULL;
 				break;
 			}
+
+#if CONFIG_FIRMLINKS
+			if (vp->v_fmlink && !(vp->v_flag & VFMLINKTARGET)) {
+				if (cnp->cn_flags & CN_FIRMLINK_NOFOLLOW ||
+				    ((vp->v_type != VDIR) && (vp->v_type != VLNK))) {
+					/* Leave it to the filesystem */
+					vp = NULLVP;
+					break;
+				}
+
+				/*
+				 * Always switch to the target unless it is a VLNK
+				 * and it is the last component and we have NOFOLLOW
+				 * semantics
+				 */
+				if (vp->v_type == VDIR) {
+					vp = vp->v_fmlink;
+				} else if ((cnp->cn_flags & FOLLOW) ||
+				    (ndp->ni_flag & NAMEI_TRAILINGSLASH) || *ndp->ni_next == '/') {
+					if (ndp->ni_loopcnt >= MAXSYMLINKS - 1) {
+						vp = NULLVP;
+						break;
+					}
+					ndp->ni_loopcnt++;
+					vp = vp->v_fmlink;
+				}
+			}
+#endif
 		}
 		if ((cnp->cn_flags & ISLASTCN)) {
 			break;
@@ -2495,7 +2514,7 @@ resize_namecache(int newsize)
 	desiredNegNodes = dNegNodes;
 
 	NAME_CACHE_UNLOCK();
-	FREE(old_table, M_CACHE);
+	hashdestroy(old_table, M_CACHE, old_size - 1);
 
 	return 0;
 }
@@ -2544,7 +2563,7 @@ cache_purge_locked(vnode_t vp, kauth_cred_t *credp)
 	*credp = NULL;
 	if ((LIST_FIRST(&vp->v_nclinks) == NULL) &&
 	    (TAILQ_FIRST(&vp->v_ncchildren) == NULL) &&
-	    (vp->v_cred == NOCRED) &&
+	    (vnode_cred(vp) == NOCRED) &&
 	    (vp->v_parent == NULLVP)) {
 		return;
 	}
@@ -2564,7 +2583,7 @@ cache_purge_locked(vnode_t vp, kauth_cred_t *credp)
 	/*
 	 * Use a temp variable to avoid kauth_cred_unref() while NAME_CACHE_LOCK is held
 	 */
-	*credp = vp->v_cred;
+	*credp = vnode_cred(vp);
 	vp->v_cred = NOCRED;
 	vp->v_authorized_actions = 0;
 }
@@ -2576,7 +2595,7 @@ cache_purge(vnode_t vp)
 
 	if ((LIST_FIRST(&vp->v_nclinks) == NULL) &&
 	    (TAILQ_FIRST(&vp->v_ncchildren) == NULL) &&
-	    (vp->v_cred == NOCRED) &&
+	    (vnode_cred(vp) == NOCRED) &&
 	    (vp->v_parent == NULLVP)) {
 		return;
 	}
@@ -2587,9 +2606,7 @@ cache_purge(vnode_t vp)
 
 	NAME_CACHE_UNLOCK();
 
-	if (tcred && IS_VALID_CRED(tcred)) {
-		kauth_cred_unref(&tcred);
-	}
+	kauth_cred_set(&tcred, NOCRED);
 }
 
 /*
@@ -2717,7 +2734,7 @@ resize_string_ref_table(void)
 	}
 	lck_rw_done(&strtable_rw_lock);
 
-	FREE(old_table, M_CACHE);
+	hashdestroy(old_table, M_CACHE, old_mask);
 }
 
 

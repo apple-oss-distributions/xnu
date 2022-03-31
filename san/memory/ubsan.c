@@ -54,6 +54,7 @@ ubsan_buf_rewind(ubsan_buf_t *ub, size_t mark)
 	ub->ub_buf[ub->ub_written] = '\0';
 }
 
+__printflike(2, 0)
 static void
 ubsan_json_log_ap(ubsan_buf_t *ub, const char *fmt, va_list ap)
 {
@@ -74,6 +75,7 @@ ubsan_json_log_ap(ubsan_buf_t *ub, const char *fmt, va_list ap)
 	}
 }
 
+__printflike(2, 3)
 static void
 ubsan_json_log(ubsan_buf_t *ub, const char *fmt, ...)
 {
@@ -164,6 +166,7 @@ ubsan_json_array_end(ubsan_buf_t *ub)
 	ubsan_json_struct_end(ub, true);
 }
 
+__printflike(4, 0)
 static void
 ubsan_json_kv_ap(ubsan_buf_t *ub, bool quote, const char *key, const char *fmt, va_list ap)
 {
@@ -185,6 +188,7 @@ ubsan_json_kv_ap(ubsan_buf_t *ub, bool quote, const char *key, const char *fmt, 
 	}
 }
 
+__printflike(4, 5)
 static void
 ubsan_json_kv(ubsan_buf_t *ub, int quote, const char *key, const char *fmt, ...)
 {
@@ -195,6 +199,7 @@ ubsan_json_kv(ubsan_buf_t *ub, int quote, const char *key, const char *fmt, ...)
 	va_end(ap);
 }
 
+__printflike(3, 4)
 static void
 ubsan_json_fmt(ubsan_buf_t *ub, const char *key, const char *fmt, ...)
 {

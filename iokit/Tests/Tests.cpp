@@ -30,6 +30,7 @@
  */
 
 #define TEST_HEADERS    0
+#define IOKIT_ENABLE_SHARED_PTR
 
 #if TEST_HEADERS
 
@@ -60,6 +61,7 @@
 #include <libkern/c++/OSString.h>
 #include <libkern/c++/OSSymbol.h>
 #include <libkern/c++/OSUnserialize.h>
+#include <libkern/c++/OSValueObject.h>
 #include <libkern/crypto/aes.h>
 #include <libkern/crypto/aesxts.h>
 #include <libkern/crypto/crypto_internal.h>
@@ -174,6 +176,7 @@
 #include <IOKit/rtc/IORTCController.h>
 #include <IOKit/system.h>
 #include <IOKit/system_management/IOWatchDogTimer.h>
+#include <math.h>
 
 #endif /* TEST_HEADERS */
 
@@ -222,54 +225,49 @@ IOWorkLoopTest(int newValue)
 {
 	IOReturn err;
 	uint32_t idx;
-	IOWorkLoop * wl;
-	IOTimerEventSource * tes;
-	IOInterruptEventSource * ies;
+	OSSharedPtr<IOWorkLoop> wl;
+	OSSharedPtr<IOTimerEventSource> tes;
+	OSSharedPtr<IOInterruptEventSource> ies;
 
 	wl = IOWorkLoop::workLoop();
 	assert(wl);
-	tes = IOTimerEventSource::timerEventSource(kIOTimerEventSourceOptionsPriorityWorkLoop, wl, &TESAction);
+	tes = IOTimerEventSource::timerEventSource(kIOTimerEventSourceOptionsPriorityWorkLoop, wl.get(), &TESAction);
 	assert(tes);
-	err = wl->addEventSource(tes);
+	err = wl->addEventSource(tes.get());
 	assert(kIOReturnSuccess == err);
 	clock_interval_to_deadline(100, kMillisecondScale, &gIOWorkLoopTestDeadline);
 	for (idx = 0; mach_absolute_time() < gIOWorkLoopTestDeadline; idx++) {
 		tes->setTimeout(idx & 1023, kNanosecondScale);
 	}
 	tes->cancelTimeout();
-	wl->removeEventSource(tes);
-	tes->release();
+	wl->removeEventSource(tes.get());
 
 	int value = 3;
 
-	tes = IOTimerEventSource::timerEventSource(kIOTimerEventSourceOptionsDefault, wl, ^(IOTimerEventSource * tes){
-		kprintf("wl %p, value %d\n", wl, value);
+	tes = IOTimerEventSource::timerEventSource(kIOTimerEventSourceOptionsDefault, wl.get(), ^(IOTimerEventSource * tes){
+		kprintf("wl %p, value %d\n", wl.get(), value);
 	});
-	err = wl->addEventSource(tes);
+	err = wl->addEventSource(tes.get());
 	assert(kIOReturnSuccess == err);
 
 	value = 2;
 	tes->setTimeout(1, kNanosecondScale);
 	IOSleep(1);
-	wl->removeEventSource(tes);
-	tes->release();
+	wl->removeEventSource(tes.get());
 
-	ies = IOInterruptEventSource::interruptEventSource(wl, NULL, 0, ^void (IOInterruptEventSource *sender, int count){
+	ies = IOInterruptEventSource::interruptEventSource(wl.get(), NULL, 0, ^void (IOInterruptEventSource *sender, int count){
 		kprintf("ies block %p, %d\n", sender, count);
 	});
 
 	assert(ies);
-	kprintf("ies %p\n", ies);
-	err = wl->addEventSource(ies);
+	kprintf("ies %p\n", ies.get());
+	err = wl->addEventSource(ies.get());
 	assert(kIOReturnSuccess == err);
 	ies->interruptOccurred(NULL, NULL, 0);
 	IOSleep(1);
 	ies->interruptOccurred(NULL, NULL, 0);
 	IOSleep(1);
-	wl->removeEventSource(ies);
-	ies->release();
-
-	wl->release();
+	wl->removeEventSource(ies.get());
 
 	return 0;
 }
@@ -277,7 +275,7 @@ IOWorkLoopTest(int newValue)
 static int
 OSCollectionTest(int newValue)
 {
-	OSArray * array = OSArray::withCapacity(8);
+	OSSharedPtr<OSArray> array = OSArray::withCapacity(8);
 	array->setObject(kOSBooleanTrue);
 	array->setObject(kOSBooleanFalse);
 	array->setObject(kOSBooleanFalse);
@@ -293,9 +291,8 @@ OSCollectionTest(int newValue)
 		return false;
 	});
 	kprintf("\n");
-	array->release();
 
-	OSDictionary * dict = IOService::resourceMatching("hello");
+	OSSharedPtr<OSDictionary> dict = IOService::resourceMatching("hello");
 	assert(dict);
 	index = 0;
 	dict->iterateObjects(^bool (const OSSymbol * sym, OSObject * obj) {
@@ -305,24 +302,19 @@ OSCollectionTest(int newValue)
 		index++;
 		return false;
 	});
-	dict->release();
 
-	OSSerializer * serializer = OSSerializer::withBlock(^bool (OSSerialize * s){
+	OSSharedPtr<OSSerializer> serializer = OSSerializer::withBlock(^bool (OSSerialize * s){
 		return gIOBSDUnitKey->serialize(s);
 	});
 	assert(serializer);
-	IOService::getPlatform()->setProperty("OSSerializer_withBlock", serializer);
-	serializer->release();
+	IOService::getPlatform()->setProperty("OSSerializer_withBlock", serializer.get());
 
-	OSString * ab = OSString::withCString("abcdef", 2);
+	OSSharedPtr<OSString> ab = OSString::withCString("abcdef", 2);
 	assert(strcmp(ab->getCStringNoCopy(), "ab") == 0);
-	OSString * defgh = OSString::withCString("defgh", 10);
+	OSSharedPtr<OSString> defgh = OSString::withCString("defgh", 10);
 	assert(strcmp(defgh->getCStringNoCopy(), "defgh") == 0);
-	OSString * zyxwvut = OSString::withCString("zyxwvut", 7);
+	OSSharedPtr<OSString> zyxwvut = OSString::withCString("zyxwvut", 7);
 	assert(strcmp(zyxwvut->getCStringNoCopy(), "zyxwvut") == 0);
-	OSSafeReleaseNULL(ab);
-	OSSafeReleaseNULL(defgh);
-	OSSafeReleaseNULL(zyxwvut);
 
 	return 0;
 }
@@ -456,16 +448,16 @@ OSBoundedArrayRefTests(int)
 class OSArraySubclass : public OSArray {
 	OSDeclareDefaultStructors(OSArraySubclass);
 public:
-	static OSArraySubclass * withCapacity(unsigned int inCapacity);
+	static OSSharedPtr<OSArraySubclass> withCapacity(unsigned int inCapacity);
 	virtual unsigned int iteratorSize() const APPLE_KEXT_OVERRIDE;
 };
 
 OSDefineMetaClassAndStructors(OSArraySubclass, OSArray);
 
-OSArraySubclass *
+OSSharedPtr<OSArraySubclass>
 OSArraySubclass::withCapacity(unsigned int inCapacity)
 {
-	OSArraySubclass * me = OSTypeAlloc(OSArraySubclass);
+	OSSharedPtr<OSArraySubclass> me = OSMakeShared<OSArraySubclass>();
 
 	if (me && !me->initWithCapacity(inCapacity)) {
 		return nullptr;
@@ -486,15 +478,15 @@ OSArraySubclass::iteratorSize() const
 class OSCISubclass : public OSCollectionIterator {
 	OSDeclareDefaultStructors(OSCISubclass);
 public:
-	static OSCISubclass * withCollection(const OSCollection * inColl);
+	static OSSharedPtr<OSCISubclass> withCollection(const OSCollection * inColl);
 };
 
 OSDefineMetaClassAndStructors(OSCISubclass, OSCollectionIterator);
 
-OSCISubclass *
+OSSharedPtr<OSCISubclass>
 OSCISubclass::withCollection(const OSCollection * inColl)
 {
-	OSCISubclass * me = OSTypeAlloc(OSCISubclass);
+	OSSharedPtr<OSCISubclass> me = OSMakeShared<OSCISubclass>();
 
 	if (me && !me->initWithCollection(inColl)) {
 		return nullptr;
@@ -506,18 +498,18 @@ OSCISubclass::withCollection(const OSCollection * inColl)
 static int
 OSCollectionIteratorTests(int)
 {
-	OSArray * array = OSArray::withCapacity(0);
-	OSString * firstObj = OSString::withCString("test object");
-	OSString * secondObj = OSString::withCString("test object 2");
+	OSSharedPtr<OSArray> array = OSArray::withCapacity(0);
+	OSSharedPtr<OSString> firstObj = OSString::withCString("test object");
+	OSSharedPtr<OSString> secondObj = OSString::withCString("test object 2");
 	OSObject * current = NULL;
-	OSCollectionIterator * osci = NULL;
-	OSCISubclass * osciSubclass = NULL;
+	OSSharedPtr<OSCollectionIterator> osci = NULL;
+	OSSharedPtr<OSCISubclass> osciSubclass = NULL;
 	size_t index = 0;
 	array->setObject(firstObj);
 	array->setObject(secondObj);
 
 	// Test iteration over a normal OSArray
-	osci = OSCollectionIterator::withCollection(array);
+	osci = OSCollectionIterator::withCollection(array.get());
 	assert(osci != NULL);
 
 	index = 0;
@@ -532,10 +524,8 @@ OSCollectionIteratorTests(int)
 		index++;
 	}
 
-	OSSafeReleaseNULL(osci);
-
 	// Test iteration with a OSCollectionIterator subclass over a normal OSArray
-	osciSubclass = OSCISubclass::withCollection(array);
+	osciSubclass = OSCISubclass::withCollection(array.get());
 	assert(osciSubclass != NULL);
 
 	index = 0;
@@ -550,16 +540,12 @@ OSCollectionIteratorTests(int)
 		index++;
 	}
 
-	OSSafeReleaseNULL(osciSubclass);
-
-	OSSafeReleaseNULL(array);
-
 	// Create the OSArray subclass
-	OSArraySubclass * arraySubclass = OSArraySubclass::withCapacity(0);
+	OSSharedPtr<OSArraySubclass> arraySubclass = OSArraySubclass::withCapacity(0);
 	arraySubclass->setObject(firstObj);
 	arraySubclass->setObject(secondObj);
 	// Test iteration over a subclassed OSArray, with a large iterator size
-	osci = OSCollectionIterator::withCollection(arraySubclass);
+	osci = OSCollectionIterator::withCollection(arraySubclass.get());
 	assert(osci != NULL);
 
 	index = 0;
@@ -574,11 +560,9 @@ OSCollectionIteratorTests(int)
 		index++;
 	}
 
-	OSSafeReleaseNULL(osci);
-
 	// Test iteration with a OSCollectionIterator subclass over a subclassed OSArray,
 	// with a large iterator size.
-	osciSubclass = OSCISubclass::withCollection(arraySubclass);
+	osciSubclass = OSCISubclass::withCollection(arraySubclass.get());
 	assert(osciSubclass != NULL);
 
 	index = 0;
@@ -592,12 +576,6 @@ OSCollectionIteratorTests(int)
 		}
 		index++;
 	}
-
-	OSSafeReleaseNULL(osciSubclass);
-
-	OSSafeReleaseNULL(arraySubclass);
-	OSSafeReleaseNULL(firstObj);
-	OSSafeReleaseNULL(secondObj);
 
 	return 0;
 }
@@ -628,9 +606,114 @@ OSBoundedPtrTests(int)
 }
 
 static int
+OSValueObjectTests(int)
+{
+	struct TrivialTestType {
+		int a;
+		bool b;
+		float c;
+	};
+
+	class NonTrivialConstructorTestType
+	{
+public:
+		NonTrivialConstructorTestType() = default;
+		int a = 3;
+		bool b = true;
+		float c = 999.f;
+	};
+
+	constexpr auto nearlyEqual = [](float a, float b)
+	    {
+		    constexpr float epsilon = 0.000001f;
+		    const auto diff = a - b;
+		    return (diff >= -epsilon) && (diff <= epsilon);
+	    };
+
+	// test simple built-in type
+	{
+		using T = int;
+		OSSharedPtr<OSValueObject<T> > test = OSValueObject<T>::create();
+		assert(test);
+		if (test) {
+			assert(test->getRef() == 0);
+			assert(test->isEqualTo(0));
+			assert(test->getBytesNoCopy());
+			assert(test->getBytesNoCopy() == test->getMutableBytesNoCopy());
+			assert(test->getLength() == sizeof(T));
+		}
+	}
+
+	// test trivial aggregate type
+	{
+		using T = TrivialTestType;
+		OSSharedPtr<OSValueObject<T> > test = OSValueObject<T>::create();
+		assert(test);
+		if (test) {
+			const auto *const bytes = reinterpret_cast<const uint8_t*>(test->getBytesNoCopy());
+			bool bytesAreZero = true;
+			for (size_t byteIndex = 0; byteIndex < test->getLength(); byteIndex++) {
+				bytesAreZero &= bytes[byteIndex] == 0;
+			}
+			assert(bytesAreZero);
+		}
+	}
+
+	// test aggregate type with non-trivial constructor
+	{
+		using T = NonTrivialConstructorTestType;
+		OSSharedPtr<OSValueObject<T> > test = OSValueObject<T>::create();
+		assert(test);
+		if (test) {
+			const T other;
+			assert(test->isEqualTo(other));
+			assert(test->getRef().a == other.a);
+			assert(test->getRef().b == other.b);
+			assert(nearlyEqual(test->getRef().c, other.c));
+		}
+	}
+
+	// test copying of OSValueObject
+	{
+		using T = NonTrivialConstructorTestType;
+		OSSharedPtr<OSValueObject<T> > test1;
+		T valueCopy;
+		{
+			T value; // declared in sub-scope to ensure instance-independence when it falls out of scope
+			value.a = 1;
+			value.b = true;
+			value.c = 3.f;
+			valueCopy = value;
+			test1 = OSValueObject<T>::withValue(value);
+			assert(test1);
+			if (test1) {
+				assert(test1->isEqualTo(value));
+				assert(test1->getRef().a == value.a);
+				assert(test1->getRef().b == value.b);
+				assert(nearlyEqual(test1->getRef().c, value.c));
+			}
+			valueCopy.a = 100;
+			test1->getMutableRef().a = valueCopy.a;
+		}
+		if (test1) {
+			OSSharedPtr<OSValueObject<T> > test2 = OSValueObject<T>::withValueObject(test1.get());
+			if (test2) {
+				assert(test2->isEqualTo(test1.get()));
+				assert(test2->getRef().a == valueCopy.a);
+				assert(test2->getRef().b == valueCopy.b);
+				assert(nearlyEqual(test2->getRef().c, valueCopy.c));
+			}
+		}
+	}
+
+	return KERN_SUCCESS;
+}
+
+
+static int
 IOSharedDataQueue_44636964(__unused int newValue)
 {
-	IOSharedDataQueue* sd = IOSharedDataQueue::withCapacity(DATA_QUEUE_ENTRY_HEADER_SIZE + sizeof(UInt64));
+	OSSharedPtr<IOSharedDataQueue> sd = IOSharedDataQueue::withCapacity(DATA_QUEUE_ENTRY_HEADER_SIZE + sizeof(UInt64));
 	UInt64 data = 0x11223344aa55aa55;
 	UInt32 data2 = 0x44332211;
 	UInt32 size = sizeof(UInt32);
@@ -642,7 +725,6 @@ IOSharedDataQueue_44636964(__unused int newValue)
 	sd->enqueue(&data2, sizeof(UInt32));
 	/* something in the queue so peek() should return non-null */
 	assert(sd->peek() != NULL);
-	sd->release();
 	return KERN_SUCCESS;
 }
 
@@ -688,7 +770,7 @@ OSDefineMetaClassAndStructors(TestUserClient, IOUserClient);
 static int
 IOServiceTest(int newValue)
 {
-	OSDictionary      * matching;
+	OSSharedPtr<OSDictionary> matching;
 	IONotifier        * note;
 	__block IOService * found;
 
@@ -704,7 +786,7 @@ IOServiceTest(int newValue)
 	matching = IOService::serviceMatching("IOPlatformExpert");
 	assert(matching);
 	found = nullptr;
-	note = IOService::addMatchingNotification(gIOMatchedNotification, matching, 0,
+	note = IOService::addMatchingNotification(gIOMatchedNotification, matching.get(), 0,
 	    ^bool (IOService * newService, IONotifier * notifier) {
 		kprintf("found %s, %d\n", newService->getName(), newService->getRetainCount());
 		found = newService;
@@ -714,7 +796,6 @@ IOServiceTest(int newValue)
 	    );
 	assert(note);
 	assert(found);
-	matching->release();
 	note->remove();
 
 	note = found->registerInterest(gIOBusyInterest,
@@ -722,7 +803,7 @@ IOServiceTest(int newValue)
 	    void   * messageArgument, size_t argSize) {
 		kprintf("%p messageType 0x%08x %p\n", provider, messageType, messageArgument);
 		return kIOReturnSuccess;
-	});
+	}).detach();
 	assert(note);
 	IOSleep(1 * 1000);
 	note->remove();
@@ -863,13 +944,13 @@ IOUserNotificationTestThread(void * arg, wait_result_t result __unused)
 {
 	IOUserNotificationTestThreadArgs * threadArgs = (IOUserNotificationTestThreadArgs *)arg;
 
-	OSDictionary * dict = OSDictionary::withCapacity(0);
-	OSString * rootPath = OSString::withCStringNoCopy(":/");
+	OSSharedPtr<OSDictionary> dict = OSDictionary::withCapacity(0);
+	OSSharedPtr<OSString> rootPath = OSString::withCStringNoCopy(":/");
 	dict->setObject(gIOPathMatchKey, rootPath);
 
 	for (size_t i = 0; i < threadArgs->iterations; i++) {
 		if (i % 2 == 0) {
-			IONotifier * notify = IOService::addMatchingNotification( gIOWillTerminateNotification, dict,
+			IONotifier * notify = IOService::addMatchingNotification( gIOWillTerminateNotification, dict.get(),
 			    &IOUserNotificationMatchingHandler, NULL );
 			threadArgs->userNotify->setNotification(notify);
 		} else {
@@ -878,8 +959,6 @@ IOUserNotificationTestThread(void * arg, wait_result_t result __unused)
 	}
 
 	threadArgs->userNotify->setNotification(NULL);
-	OSSafeReleaseNULL(rootPath);
-	OSSafeReleaseNULL(dict);
 
 	IOLockLock(threadArgs->lock);
 	*threadArgs->completed = *threadArgs->completed + 1;
@@ -892,7 +971,7 @@ IOUserNotificationTests(__unused int newValue)
 {
 	constexpr size_t numThreads = 10;
 	constexpr size_t numIterations = 500000;
-	IOTestUserNotification * userNotify = OSTypeAlloc(IOTestUserNotification);
+	OSSharedPtr<IOTestUserNotification> userNotify = OSMakeShared<IOTestUserNotification>();
 	IOLock * lock = IOLockAlloc();
 	size_t threadsCompleted;
 	size_t i = 0;
@@ -901,7 +980,7 @@ IOUserNotificationTests(__unused int newValue)
 	bool result;
 
 	struct IOUserNotificationTestThreadArgs threadArgs = {
-		.userNotify = userNotify,
+		.userNotify = userNotify.get(),
 		.lock = lock,
 		.completed = &threadsCompleted,
 		.iterations = numIterations,
@@ -928,7 +1007,6 @@ IOUserNotificationTests(__unused int newValue)
 
 	userNotify->setNotification(NULL);
 
-	OSSafeReleaseNULL(userNotify);
 	IOLockFree(lock);
 
 	return KERN_SUCCESS;
@@ -937,8 +1015,8 @@ IOUserNotificationTests(__unused int newValue)
 static void
 IOServiceMatchingSharedPtrTests()
 {
-	const OSSymbol * name = OSSymbol::withCString("name");
-	const OSSymbol * value = OSSymbol::withCString("value");
+	OSSharedPtr<const OSSymbol> name = OSSymbol::withCString("name");
+	OSSharedPtr<const OSSymbol> value = OSSymbol::withCString("value");
 
 	{
 		OSSharedPtr<OSDictionary> table;
@@ -956,13 +1034,13 @@ IOServiceMatchingSharedPtrTests()
 
 	{
 		OSSharedPtr<OSDictionary> table;
-		OSSharedPtr<OSDictionary> result = IOService::serviceMatching(name, table);
+		OSSharedPtr<OSDictionary> result = IOService::serviceMatching(name.get(), table);
 		assert(result);
 		assert(result->getRetainCount() == 1);
 
 		table = result;
 		assert(table->getRetainCount() == 2);
-		OSSharedPtr<OSDictionary> result2 = IOService::serviceMatching(name, table);
+		OSSharedPtr<OSDictionary> result2 = IOService::serviceMatching(name.get(), table);
 		assert(result2);
 		assert(result2 == table);
 		assert(result2->getRetainCount() == 3);
@@ -984,13 +1062,13 @@ IOServiceMatchingSharedPtrTests()
 
 	{
 		OSSharedPtr<OSDictionary> table;
-		OSSharedPtr<OSDictionary> result = IOService::nameMatching(name, table);
+		OSSharedPtr<OSDictionary> result = IOService::nameMatching(name.get(), table);
 		assert(result);
 		assert(result->getRetainCount() == 1);
 
 		table = result;
 		assert(table->getRetainCount() == 2);
-		OSSharedPtr<OSDictionary> result2 = IOService::nameMatching(name, table);
+		OSSharedPtr<OSDictionary> result2 = IOService::nameMatching(name.get(), table);
 		assert(result2);
 		assert(result2 == table);
 		assert(result2->getRetainCount() == 3);
@@ -1012,13 +1090,13 @@ IOServiceMatchingSharedPtrTests()
 
 	{
 		OSSharedPtr<OSDictionary> table;
-		OSSharedPtr<OSDictionary> result = IOService::resourceMatching(name, table);
+		OSSharedPtr<OSDictionary> result = IOService::resourceMatching(name.get(), table);
 		assert(result);
 		assert(result->getRetainCount() == 1);
 
 		table = result;
 		assert(table->getRetainCount() == 2);
-		OSSharedPtr<OSDictionary> result2 = IOService::resourceMatching(name, table);
+		OSSharedPtr<OSDictionary> result2 = IOService::resourceMatching(name.get(), table);
 		assert(result2);
 		assert(result2 == table);
 		assert(result2->getRetainCount() == 3);
@@ -1026,13 +1104,13 @@ IOServiceMatchingSharedPtrTests()
 
 	{
 		OSSharedPtr<OSDictionary> table;
-		OSSharedPtr<OSDictionary> result = IOService::propertyMatching(name, value, table);
+		OSSharedPtr<OSDictionary> result = IOService::propertyMatching(name.get(), value.get(), table);
 		assert(result);
 		assert(result->getRetainCount() == 1);
 
 		table = result;
 		assert(table->getRetainCount() == 2);
-		OSSharedPtr<OSDictionary> result2 = IOService::propertyMatching(name, value, table);
+		OSSharedPtr<OSDictionary> result2 = IOService::propertyMatching(name.get(), value.get(), table);
 		assert(result2);
 		assert(result2 == table);
 		assert(result2->getRetainCount() == 3);
@@ -1051,8 +1129,6 @@ IOServiceMatchingSharedPtrTests()
 		assert(result2 == table);
 		assert(result2->getRetainCount() == 3);
 	}
-	OSSafeReleaseNULL(name);
-	OSSafeReleaseNULL(value);
 }
 
 static int
@@ -1069,65 +1145,101 @@ static int
 IOServiceStateNotificationTests(int)
 {
 	IOService * service = IOService::getSystemStateNotificationService();
-	OSString * str = OSString::withCString(kIOSystemStateClamshellKey);
-	kern_return_t kr = service->StateNotificationItemCreate(str, NULL);
+	OSSharedPtr<OSString> str = OSString::withCString(kIOSystemStateClamshellKey);
+	kern_return_t kr = service->StateNotificationItemCreate(str.get(), NULL);
 	assert(kIOReturnSuccess == kr);
 
 	void (^sendClam)(OSBoolean * state) = ^void (OSBoolean * state) {
-		OSDictionary * value;
+		OSSharedPtr<OSDictionary> value;
 		kern_return_t kr;
 
 		value = OSDictionary::withCapacity(4);
 		value->setObject("value", state);
-		kr = IOService::getSystemStateNotificationService()->StateNotificationItemSet(str, value);
+		kr = IOService::getSystemStateNotificationService()->StateNotificationItemSet(str.get(), value.get());
 		assert(kIOReturnSuccess == kr);
-		value->release();
 	};
 	sendClam(kOSBooleanTrue);
 	IOSleep(100);
 	sendClam(kOSBooleanFalse);
-	str->release();
 
 	str = OSString::withCString("test");
-	OSArray  * array = OSArray::withCapacity(4);
-	array->setObject(str);
+	OSSharedPtr<OSArray> array = OSArray::withCapacity(4);
+	array->setObject(str.get());
 	IOStateNotificationListenerRef listenerRef;
-	kr = service->stateNotificationListenerAdd(array, &listenerRef, ^kern_return_t () {
+	kr = service->stateNotificationListenerAdd(array.get(), &listenerRef, ^kern_return_t () {
 		IOLog("test handler\n");
 		kern_return_t kr;
 		OSDictionary * dict;
-		kr = service->StateNotificationItemCopy(str, &dict);
+		kr = service->StateNotificationItemCopy(str.get(), &dict);
 		if (kIOReturnSuccess == kr) {
-		        OSSerialize * s = OSSerialize::withCapacity(4096);
-		        dict->serialize(s);
+		        OSSharedPtr<OSSerialize> s = OSSerialize::withCapacity(4096);
+		        dict->serialize(s.get());
 		        IOLog("test handler %s\n", s->text());
-		        s->release();
 		}
 		return kIOReturnSuccess;
 	});
 	assert(kIOReturnSuccess == kr);
 
-	IOEventSource * es =
+	OSSharedPtr<IOEventSource> es =
 	    IOServiceStateNotificationEventSource::serviceStateNotificationEventSource(
-		service, array,
+		service, array.get(),
 		^void () {
 		IOLog("test es handler\n");
 		kern_return_t kr;
 		OSDictionary * dict;
-		kr = service->StateNotificationItemCopy(str, &dict);
+		kr = service->StateNotificationItemCopy(str.get(), &dict);
 		if (kIOReturnSuccess == kr) {
-		        OSSerialize * s = OSSerialize::withCapacity(4096);
-		        dict->serialize(s);
+		        OSSharedPtr<OSSerialize> s = OSSerialize::withCapacity(4096);
+		        dict->serialize(s.get());
 		        IOLog("test es handler %s\n", s->text());
-		        s->release();
 		}
 	});
-	assert(es != nullptr);
-	IOService::getPlatform()->getWorkLoop()->addEventSource(es);
+	assert(es);
+	IOService::getPlatform()->getWorkLoop()->addEventSource(es.get());
 	es->enable();
 	IOSleep(30 * 1000);
-	IOService::getPlatform()->getWorkLoop()->removeEventSource(es);
-	es->release();
+	IOService::getPlatform()->getWorkLoop()->removeEventSource(es.get());
+
+	return kIOReturnSuccess;
+}
+
+static int
+IOMallocPageableTests(int)
+{
+	vm_size_t size = 0;
+	vm_size_t alignment = 0;
+
+	for (size = 0; size <= 4 * page_size; size += 64) {
+		for (alignment = 1; alignment <= page_size; alignment <<= 1) {
+			uintptr_t alignMask = alignment - 1;
+			void * addr = IOMallocPageable(size, alignment);
+			if (addr == NULL) {
+				IOLog("IOMallocPageable(size=%u, alignment=%u) failed\n", (uint32_t)size, (uint32_t)alignment);
+				return kIOReturnError;
+			}
+			if (((uintptr_t)addr & alignMask) != 0) {
+				IOLog("IOMallocPageable(size=%u, alignment=%u) returned unaligned pointer %p\n", (uint32_t)size, (uint32_t)alignment, addr);
+				return kIOReturnError;
+			}
+			IOFreePageable(addr, size);
+
+			addr = IOMallocPageableZero(size, alignment);
+			if (addr == NULL) {
+				IOLog("IOMallocPageableZero(size=%u, alignment=%u) failed\n", (uint32_t)size, (uint32_t)alignment);
+				return kIOReturnError;
+			}
+			if (((uintptr_t)addr & alignMask) != 0) {
+				IOLog("IOMallocPageableZero(size=%u, alignment=%u) returned unaligned pointer %p\n", (uint32_t)size, (uint32_t)alignment, addr);
+				return kIOReturnError;
+			}
+			for (char * ptr = (char *)addr; ptr < (char *)addr + size; ptr++) {
+				if (*ptr != 0) {
+					IOLog("IOMallocPageableZero(size=%u, alignment=%u) -> %p, byte at %p is nonzero\n", (uint32_t)size, (uint32_t)alignment, addr, ptr);
+				}
+			}
+			IOFreePageable(addr, size);
+		}
+	}
 
 	return kIOReturnSuccess;
 }
@@ -1152,9 +1264,9 @@ sysctl_iokittest(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused
 #if DEVELOPMENT || DEBUG
 	if (changed && (66 == newValue)) {
 		IOReturn ret;
-		IOWorkLoop * wl = IOWorkLoop::workLoop();
-		IOCommandGate * cg = IOCommandGate::commandGate(wl);
-		ret = wl->addEventSource(cg);
+		OSSharedPtr<IOWorkLoop> wl = IOWorkLoop::workLoop();
+		OSSharedPtr<IOCommandGate> cg = IOCommandGate::commandGate(wl.get());
+		ret = wl->addEventSource(cg.get());
 
 		struct x {
 			uint64_t h;
@@ -1174,17 +1286,17 @@ sysctl_iokittest(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused
 	}
 
 	if (changed && (999 == newValue)) {
-		OSData * data = OSData::withCapacity(16);
-		data->release();
+		OSSharedPtr<OSData> data = OSData::withCapacity(16);
 		data->release();
 	}
 
 	if (changed && (newValue >= 6666) && (newValue <= 6669)) {
-		OSIterator * iter;
+		OSSharedPtr<OSIterator> iter;
 		IOService  * service;
 
 		service = NULL;
-		iter = IOService::getMatchingServices(IOService::nameMatching("XHC1"));
+		OSSharedPtr<OSDictionary> matchingDict = IOService::nameMatching("XHC1");
+		iter = IOService::getMatchingServices(matchingDict.get());
 		if (iter && (service = (IOService *) iter->getNextObject())) {
 			if (newValue == 6666) {
 				IOLog("terminating 0x%qx\n", service->getRegistryEntryID());
@@ -1194,7 +1306,6 @@ sysctl_iokittest(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused
 				service->registerService();
 			}
 		}
-		OSSafeReleaseNULL(iter);
 		if (service) {
 			return 0;
 		}
@@ -1224,6 +1335,8 @@ sysctl_iokittest(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused
 		assert(KERN_SUCCESS == error);
 		error = OSBoundedPtrTests(newValue);
 		assert(KERN_SUCCESS == error);
+		error = OSValueObjectTests(newValue);
+		assert(KERN_SUCCESS == error);
 		error = IOMemoryDescriptorTest(newValue);
 		assert(KERN_SUCCESS == error);
 		error = OSSharedPtrTests(newValue);
@@ -1231,6 +1344,8 @@ sysctl_iokittest(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused
 		error = IOSharedDataQueue_44636964(newValue);
 		assert(KERN_SUCCESS == error);
 		error = IOUserNotificationTests(newValue);
+		assert(KERN_SUCCESS == error);
+		error = IOMallocPageableTests(newValue);
 		assert(KERN_SUCCESS == error);
 	}
 #endif  /* DEVELOPMENT || DEBUG */
@@ -1393,6 +1508,12 @@ SYSCTL_PROC(_kern, OID_AUTO, iokit_test_service_setup,
 static __unused void
 CastCompileTest(OSObject *obj)
 {
-	OSDynamicCast(IOService, obj)->terminate();
-	OSRequiredCast(IOService, obj)->terminate();
+	IOService * service1 = OSDynamicCast(IOService, obj);
+	if (service1) {
+		service1->terminate();
+	}
+	IOService *service2 = OSRequiredCast(IOService, obj);
+	if (service2) {
+		service2->terminate();
+	}
 }

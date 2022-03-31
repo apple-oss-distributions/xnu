@@ -60,8 +60,6 @@
 #include <debug.h>
 
 #include <mach/kern_return.h>
-#include <mach/mach_host_server.h>
-#include <mach_debug/lockgroup_info.h>
 
 #include <kern/lock_stat.h>
 #include <kern/locks.h>
@@ -75,6 +73,7 @@
 #include <machine/atomic.h>
 #include <machine/machine_cpu.h>
 #include <string.h>
+#include <vm/pmap.h>
 
 #include <sys/kdebug.h>
 
@@ -98,25 +97,14 @@ KALLOC_TYPE_DEFINE(KT_GATE, gate_t, KT_PRIV_ACCT);
 
 struct lck_spinlock_to_info PERCPU_DATA(lck_spinlock_to_info);
 volatile lck_spinlock_to_info_t lck_spinlock_timeout_in_progress;
-queue_head_t     lck_grp_queue;
-unsigned int     lck_grp_cnt;
-
-decl_lck_mtx_data(, lck_grp_lock);
-static lck_mtx_ext_t lck_grp_lock_ext;
 
 SECURITY_READ_ONLY_LATE(boolean_t) spinlock_timeout_panic = TRUE;
 
-/* Obtain "lcks" options:this currently controls lock statistics */
+#if DEBUG
+TUNABLE(uint32_t, LcksOpts, "lcks", enaLkDeb);
+#else
 TUNABLE(uint32_t, LcksOpts, "lcks", 0);
-
-KALLOC_TYPE_DEFINE(KT_LCK_GRP_ATTR, lck_grp_attr_t, KT_PRIV_ACCT);
-
-KALLOC_TYPE_DEFINE(KT_LCK_GRP, lck_grp_t, KT_PRIV_ACCT);
-
-KALLOC_TYPE_DEFINE(KT_LCK_ATTR, lck_attr_t, KT_PRIV_ACCT);
-
-lck_grp_t       LockCompatGroup;
-SECURITY_READ_ONLY_LATE(lck_attr_t)      LockDefaultLckAttr;
+#endif
 
 #if CONFIG_DTRACE
 #if defined (__x86_64__)
@@ -136,364 +124,6 @@ unslide_for_kdebug(void* object)
 	} else {
 		return 0;
 	}
-}
-
-__startup_func
-static void
-lck_mod_init(void)
-{
-	queue_init(&lck_grp_queue);
-
-	/*
-	 * Need to bootstrap the LockCompatGroup instead of calling lck_grp_init() here. This avoids
-	 * grabbing the lck_grp_lock before it is initialized.
-	 */
-
-	bzero(&LockCompatGroup, sizeof(lck_grp_t));
-	(void) strncpy(LockCompatGroup.lck_grp_name, "Compatibility APIs", LCK_GRP_MAX_NAME);
-
-	LockCompatGroup.lck_grp_attr = LCK_ATTR_NONE;
-
-	if (LcksOpts & enaLkStat) {
-		LockCompatGroup.lck_grp_attr |= LCK_GRP_ATTR_STAT;
-	}
-	if (LcksOpts & enaLkTimeStat) {
-		LockCompatGroup.lck_grp_attr |= LCK_GRP_ATTR_TIME_STAT;
-	}
-
-	os_ref_init(&LockCompatGroup.lck_grp_refcnt, NULL);
-
-	enqueue_tail(&lck_grp_queue, (queue_entry_t)&LockCompatGroup);
-	lck_grp_cnt = 1;
-
-	lck_attr_setdefault(&LockDefaultLckAttr);
-
-	lck_mtx_init_ext(&lck_grp_lock, &lck_grp_lock_ext, &LockCompatGroup, &LockDefaultLckAttr);
-
-#if DEBUG_RW
-	rw_lock_init();
-#endif /* DEBUG_RW */
-}
-STARTUP(LOCKS_EARLY, STARTUP_RANK_FIRST, lck_mod_init);
-
-/*
- * Routine:	lck_grp_attr_alloc_init
- */
-
-lck_grp_attr_t  *
-lck_grp_attr_alloc_init(
-	void)
-{
-	lck_grp_attr_t  *attr;
-
-	attr = zalloc(KT_LCK_GRP_ATTR);
-	lck_grp_attr_setdefault(attr);
-	return attr;
-}
-
-
-/*
- * Routine:	lck_grp_attr_setdefault
- */
-
-void
-lck_grp_attr_setdefault(
-	lck_grp_attr_t  *attr)
-{
-	if (LcksOpts & enaLkStat) {
-		attr->grp_attr_val = LCK_GRP_ATTR_STAT;
-	} else {
-		attr->grp_attr_val = 0;
-	}
-}
-
-
-/*
- * Routine:     lck_grp_attr_setstat
- */
-
-void
-lck_grp_attr_setstat(
-	lck_grp_attr_t  *attr)
-{
-#pragma unused(attr)
-	os_atomic_or(&attr->grp_attr_val, LCK_GRP_ATTR_STAT, relaxed);
-}
-
-
-/*
- * Routine:     lck_grp_attr_free
- */
-
-void
-lck_grp_attr_free(
-	lck_grp_attr_t  *attr)
-{
-	zfree(KT_LCK_GRP_ATTR, attr);
-}
-
-
-/*
- * Routine: lck_grp_alloc_init
- */
-
-lck_grp_t *
-lck_grp_alloc_init(
-	const char*     grp_name,
-	lck_grp_attr_t  *attr)
-{
-	lck_grp_t       *grp;
-
-	grp = zalloc(KT_LCK_GRP);
-	lck_grp_init(grp, grp_name, attr);
-	return grp;
-}
-
-/*
- * Routine: lck_grp_init
- */
-
-void
-lck_grp_init(lck_grp_t * grp, const char * grp_name, lck_grp_attr_t * attr)
-{
-	/* make sure locking infrastructure has been initialized */
-	assert(lck_grp_cnt > 0);
-
-	bzero((void *)grp, sizeof(lck_grp_t));
-
-	(void)strlcpy(grp->lck_grp_name, grp_name, LCK_GRP_MAX_NAME);
-
-	if (attr != LCK_GRP_ATTR_NULL) {
-		grp->lck_grp_attr = attr->grp_attr_val;
-	} else {
-		grp->lck_grp_attr = 0;
-		if (LcksOpts & enaLkStat) {
-			grp->lck_grp_attr |= LCK_GRP_ATTR_STAT;
-		}
-		if (LcksOpts & enaLkTimeStat) {
-			grp->lck_grp_attr |= LCK_GRP_ATTR_TIME_STAT;
-		}
-	}
-
-	if (grp->lck_grp_attr & LCK_GRP_ATTR_STAT) {
-		lck_grp_stats_t *stats = &grp->lck_grp_stats;
-
-#if LOCK_STATS
-		lck_grp_stat_enable(&stats->lgss_spin_held);
-		lck_grp_stat_enable(&stats->lgss_spin_miss);
-#endif /* LOCK_STATS */
-
-		lck_grp_stat_enable(&stats->lgss_mtx_held);
-		lck_grp_stat_enable(&stats->lgss_mtx_miss);
-		lck_grp_stat_enable(&stats->lgss_mtx_direct_wait);
-		lck_grp_stat_enable(&stats->lgss_mtx_wait);
-	}
-	if (grp->lck_grp_attr & LCK_GRP_ATTR_TIME_STAT) {
-#if LOCK_STATS
-		lck_grp_stats_t *stats = &grp->lck_grp_stats;
-		lck_grp_stat_enable(&stats->lgss_spin_spin);
-#endif /* LOCK_STATS */
-	}
-
-	os_ref_init(&grp->lck_grp_refcnt, NULL);
-
-	lck_mtx_lock(&lck_grp_lock);
-	enqueue_tail(&lck_grp_queue, (queue_entry_t)grp);
-	lck_grp_cnt++;
-	lck_mtx_unlock(&lck_grp_lock);
-}
-
-/*
- * Routine:     lck_grp_free
- */
-
-void
-lck_grp_free(
-	lck_grp_t       *grp)
-{
-	lck_mtx_lock(&lck_grp_lock);
-	lck_grp_cnt--;
-	(void)remque((queue_entry_t)grp);
-	lck_mtx_unlock(&lck_grp_lock);
-	lck_grp_deallocate(grp);
-}
-
-
-/*
- * Routine:     lck_grp_reference
- */
-
-void
-lck_grp_reference(
-	lck_grp_t       *grp)
-{
-	os_ref_retain(&grp->lck_grp_refcnt);
-}
-
-
-/*
- * Routine:     lck_grp_deallocate
- */
-
-void
-lck_grp_deallocate(
-	lck_grp_t       *grp)
-{
-	if (os_ref_release(&grp->lck_grp_refcnt) != 0) {
-		return;
-	}
-
-	zfree(KT_LCK_GRP, grp);
-}
-
-/*
- * Routine:	lck_grp_lckcnt_incr
- */
-
-void
-lck_grp_lckcnt_incr(
-	lck_grp_t       *grp,
-	lck_type_t      lck_type)
-{
-	unsigned int    *lckcnt;
-
-	switch (lck_type) {
-	case LCK_TYPE_SPIN:
-		lckcnt = &grp->lck_grp_spincnt;
-		break;
-	case LCK_TYPE_MTX:
-		lckcnt = &grp->lck_grp_mtxcnt;
-		break;
-	case LCK_TYPE_RW:
-		lckcnt = &grp->lck_grp_rwcnt;
-		break;
-	case LCK_TYPE_TICKET:
-		lckcnt = &grp->lck_grp_ticketcnt;
-		break;
-	default:
-		return panic("lck_grp_lckcnt_incr(): invalid lock type: %d", lck_type);
-	}
-
-	os_atomic_inc(lckcnt, relaxed);
-}
-
-/*
- * Routine:	lck_grp_lckcnt_decr
- */
-
-void
-lck_grp_lckcnt_decr(
-	lck_grp_t       *grp,
-	lck_type_t      lck_type)
-{
-	unsigned int    *lckcnt;
-	int             updated;
-
-	switch (lck_type) {
-	case LCK_TYPE_SPIN:
-		lckcnt = &grp->lck_grp_spincnt;
-		break;
-	case LCK_TYPE_MTX:
-		lckcnt = &grp->lck_grp_mtxcnt;
-		break;
-	case LCK_TYPE_RW:
-		lckcnt = &grp->lck_grp_rwcnt;
-		break;
-	case LCK_TYPE_TICKET:
-		lckcnt = &grp->lck_grp_ticketcnt;
-		break;
-	default:
-		panic("lck_grp_lckcnt_decr(): invalid lock type: %d", lck_type);
-		return;
-	}
-
-	updated = os_atomic_dec(lckcnt, relaxed);
-	assert(updated >= 0);
-}
-
-/*
- * Routine:	lck_attr_alloc_init
- */
-
-lck_attr_t *
-lck_attr_alloc_init(
-	void)
-{
-	lck_attr_t      *attr;
-
-	attr = zalloc(KT_LCK_ATTR);
-	lck_attr_setdefault(attr);
-	return attr;
-}
-
-
-/*
- * Routine:	lck_attr_setdefault
- */
-
-void
-lck_attr_setdefault(
-	lck_attr_t      *attr)
-{
-#if __arm__ || __arm64__
-	/* <rdar://problem/4404579>: Using LCK_ATTR_DEBUG here causes panic at boot time for arm */
-	attr->lck_attr_val =  LCK_ATTR_NONE;
-#elif __i386__ || __x86_64__
-#if     !DEBUG
-	if (LcksOpts & enaLkDeb) {
-		attr->lck_attr_val =  LCK_ATTR_DEBUG;
-	} else {
-		attr->lck_attr_val =  LCK_ATTR_NONE;
-	}
-#else
-	attr->lck_attr_val =  LCK_ATTR_DEBUG;
-#endif  /* !DEBUG */
-#else
-#error Unknown architecture.
-#endif  /* __arm__ */
-}
-
-
-/*
- * Routine:	lck_attr_setdebug
- */
-void
-lck_attr_setdebug(
-	lck_attr_t      *attr)
-{
-	os_atomic_or(&attr->lck_attr_val, LCK_ATTR_DEBUG, relaxed);
-}
-
-/*
- * Routine:	lck_attr_setdebug
- */
-void
-lck_attr_cleardebug(
-	lck_attr_t      *attr)
-{
-	os_atomic_andnot(&attr->lck_attr_val, LCK_ATTR_DEBUG, relaxed);
-}
-
-
-/*
- * Routine:	lck_attr_rw_shared_priority
- */
-void
-lck_attr_rw_shared_priority(
-	lck_attr_t      *attr)
-{
-	os_atomic_or(&attr->lck_attr_val, LCK_ATTR_RW_SHARED_PRIORITY, relaxed);
-}
-
-
-/*
- * Routine:	lck_attr_free
- */
-void
-lck_attr_free(
-	lck_attr_t      *attr)
-{
-	zfree(KT_LCK_ATTR, attr);
 }
 
 static __abortlike void
@@ -548,6 +178,37 @@ hw_lock_trylock_contended(hw_lock_t lock, uintptr_t newval)
 #endif
 	return os_atomic_cmpxchg(&lock->lock_data, 0, newval, acquire);
 #endif // !OS_ATOMIC_USE_LLSC
+}
+
+/*
+ * Input and output timeouts are expressed in absolute_time for arm and TSC for Intel
+ */
+__attribute__((always_inline))
+uint64_t
+#if INTERRUPT_MASKED_DEBUG
+hw_lock_compute_timeout(uint64_t in_timeout, uint64_t default_timeout, __unused bool in_ppl, __unused bool interruptible)
+#else
+hw_lock_compute_timeout(uint64_t in_timeout, uint64_t default_timeout)
+#endif /* INTERRUPT_MASKED_DEBUG */
+{
+	uint64_t timeout = in_timeout;
+	if (timeout == 0) {
+		timeout = default_timeout;
+#if INTERRUPT_MASKED_DEBUG
+#ifndef KASAN
+		if (timeout > 0 && !in_ppl) {
+			if (interrupt_masked_debug_mode == SCHED_HYGIENE_MODE_PANIC && !interruptible) {
+				uint64_t int_timeout = os_atomic_load(&interrupt_masked_timeout, relaxed);
+				if (int_timeout < timeout) {
+					timeout = int_timeout;
+				}
+			}
+		}
+#endif /* !KASAN */
+#endif /* INTERRUPT_MASKED_DEBUG */
+	}
+
+	return timeout;
 }
 
 __attribute__((always_inline))
@@ -738,7 +399,12 @@ hw_lock_lock_contended(hw_lock_t lock, thread_t thread, uintptr_t data, uint64_t
 
 	uint64_t        end = 0, start = 0, interrupts = 0;
 	uint64_t        default_timeout = os_atomic_load(&lock_panic_timeout, relaxed);
-	bool            has_timeout = timeout > 0 || default_timeout > 0;
+	bool            has_timeout = true, in_ppl = pmap_in_ppl();
+#if INTERRUPT_MASKED_DEBUG
+	/* Note we can't check if we are interruptible if in ppl */
+	bool            interruptible = !in_ppl && ml_get_interrupts_enabled();
+	uint64_t        start_interrupts = 0;
+#endif /* INTERRUPT_MASKED_DEBUG */
 
 #if CONFIG_DTRACE || LOCK_STATS
 	uint64_t begin = 0;
@@ -749,19 +415,22 @@ hw_lock_lock_contended(hw_lock_t lock, thread_t thread, uintptr_t data, uint64_t
 	}
 #endif /* CONFIG_DTRACE || LOCK_STATS */
 
-	if (!pmap_in_ppl()) {
+	if (!in_ppl) {
 		/*
 		 * This code is used by the PPL and can't write to globals.
 		 */
 		lck_spinlock_timeout_set_orig_owner(lock->lock_data);
 	}
-	if (has_timeout && timeout == 0) {
-		timeout = default_timeout;
-	}
+
 #if INTERRUPT_MASKED_DEBUG
-	bool measure_interrupts = !pmap_in_ppl() && ml_get_interrupts_enabled();
-	uint64_t start_interrupts = 0;
+	timeout = hw_lock_compute_timeout(timeout, default_timeout, in_ppl, interruptible);
+#else
+	timeout = hw_lock_compute_timeout(timeout, default_timeout);
 #endif /* INTERRUPT_MASKED_DEBUG */
+	if (timeout == 0) {
+		has_timeout = false;
+	}
+
 	for (;;) {
 		for (uint32_t i = 0; i < LOCK_SNOOP_SPINS; i++) {
 			cpu_pause();
@@ -781,7 +450,7 @@ hw_lock_lock_contended(hw_lock_t lock, thread_t thread, uintptr_t data, uint64_t
 			uint64_t now = ml_get_timebase();
 			if (end == 0) {
 #if INTERRUPT_MASKED_DEBUG
-				if (measure_interrupts) {
+				if (interruptible) {
 					start_interrupts = thread->machine.int_time_mt;
 				}
 #endif /* INTERRUPT_MASKED_DEBUG */
@@ -791,7 +460,7 @@ hw_lock_lock_contended(hw_lock_t lock, thread_t thread, uintptr_t data, uint64_t
 				/* keep spinning */
 			} else {
 #if INTERRUPT_MASKED_DEBUG
-				if (measure_interrupts) {
+				if (interruptible) {
 					interrupts = thread->machine.int_time_mt - start_interrupts;
 				}
 #endif /* INTERRUPT_MASKED_DEBUG */
@@ -813,19 +482,27 @@ hw_lock_lock_contended(hw_lock_t lock, thread_t thread, uintptr_t data, uint64_t
 	}
 }
 
-void *
-hw_wait_while_equals(void **address, void *current)
+uint32_t
+hw_wait_while_equals32(uint32_t *address, uint32_t current)
 {
-	void *v;
-	uint64_t end = 0;
-	uint64_t timeout = os_atomic_load(&lock_panic_timeout, relaxed);
-
+	uint32_t v;
+	uint64_t end = 0, timeout = 0;
+	uint64_t default_timeout = os_atomic_load(&lock_panic_timeout, relaxed);
+	bool has_timeout = true;
 #if INTERRUPT_MASKED_DEBUG
-	bool measure_interrupts = !pmap_in_ppl() && ml_get_interrupts_enabled();
 	thread_t thread = current_thread();
-	uint64_t interrupts = 0;
-	uint64_t start_interrupts = 0;
+	bool in_ppl = pmap_in_ppl();
+	/* Note we can't check if we are interruptible if in ppl */
+	bool interruptible = !in_ppl && ml_get_interrupts_enabled();
+	uint64_t interrupts = 0, start_interrupts = 0;
+
+	timeout = hw_lock_compute_timeout(0, default_timeout, in_ppl, interruptible);
+#else
+	timeout = hw_lock_compute_timeout(0, default_timeout);
 #endif /* INTERRUPT_MASKED_DEBUG */
+	if (timeout == 0) {
+		has_timeout = false;
+	}
 
 	for (;;) {
 		for (int i = 0; i < LOCK_SNOOP_SPINS; i++) {
@@ -844,22 +521,87 @@ hw_wait_while_equals(void **address, void *current)
 			}
 #endif // OS_ATOMIC_HAS_LLSC
 		}
-		if (timeout > 0) {
+		if (has_timeout) {
 			if (end == 0) {
 				end = ml_get_timebase() + timeout;
 #if INTERRUPT_MASKED_DEBUG
-				if (measure_interrupts) {
+				if (interruptible) {
 					start_interrupts = thread->machine.int_time_mt;
 				}
 #endif /* INTERRUPT_MASKED_DEBUG */
 			} else if (ml_get_timebase() >= end) {
 #if INTERRUPT_MASKED_DEBUG
-				if (measure_interrupts) {
+				if (interruptible) {
 					interrupts = thread->machine.int_time_mt - start_interrupts;
-					panic("Wait while equals timeout @ *%p == %p, interrupt_time %llu", address, v, interrupts);
+					panic("Wait while equals timeout @ *%p == 0x%x, "
+					    "interrupt_time %llu", address, v, interrupts);
 				}
 #endif /* INTERRUPT_MASKED_DEBUG */
-				panic("Wait while equals timeout @ *%p == %p", address, v);
+				panic("Wait while equals timeout @ *%p == 0x%x",
+				    address, v);
+			}
+		}
+	}
+}
+
+uint64_t
+hw_wait_while_equals64(uint64_t *address, uint64_t current)
+{
+	uint64_t v;
+	uint64_t end = 0, timeout = 0;
+	uint64_t default_timeout = os_atomic_load(&lock_panic_timeout, relaxed);
+	bool has_timeout = true;
+
+#if INTERRUPT_MASKED_DEBUG
+	thread_t thread = current_thread();
+	bool in_ppl = pmap_in_ppl();
+	/* Note we can't check if we are interruptible if in ppl */
+	bool interruptible = !in_ppl && ml_get_interrupts_enabled();
+	uint64_t interrupts = 0, start_interrupts = 0;
+
+	timeout = hw_lock_compute_timeout(0, default_timeout, in_ppl, interruptible);
+#else
+	timeout = hw_lock_compute_timeout(0, default_timeout);
+#endif /* INTERRUPT_MASKED_DEBUG */
+	if (timeout == 0) {
+		has_timeout = false;
+	}
+
+	for (;;) {
+		for (int i = 0; i < LOCK_SNOOP_SPINS; i++) {
+			cpu_pause();
+#if OS_ATOMIC_HAS_LLSC
+			v = os_atomic_load_exclusive(address, relaxed);
+			if (__probable(v != current)) {
+				os_atomic_clear_exclusive();
+				return v;
+			}
+			wait_for_event();
+#else
+			v = os_atomic_load(address, relaxed);
+			if (__probable(v != current)) {
+				return v;
+			}
+#endif // OS_ATOMIC_HAS_LLSC
+		}
+		if (has_timeout) {
+			if (end == 0) {
+				end = ml_get_timebase() + timeout;
+#if INTERRUPT_MASKED_DEBUG
+				if (interruptible) {
+					start_interrupts = thread->machine.int_time_mt;
+				}
+#endif /* INTERRUPT_MASKED_DEBUG */
+			} else if (ml_get_timebase() >= end) {
+#if INTERRUPT_MASKED_DEBUG
+				if (interruptible) {
+					interrupts = thread->machine.int_time_mt - start_interrupts;
+					panic("Wait while equals timeout @ *%p == 0x%llx, "
+					    "interrupt_time %llu", address, v, interrupts);
+				}
+#endif /* INTERRUPT_MASKED_DEBUG */
+				panic("Wait while equals timeout @ *%p == 0x%llx",
+				    address, v);
 			}
 		}
 	}
@@ -911,7 +653,7 @@ void
  *	Routine: hw_lock_to
  *
  *	Acquire lock, spinning until it becomes available or timeout.
- *	Timeout is in mach_absolute_time ticks, return with
+ *	Timeout is in mach_absolute_time ticks (TSC in Intel), return with
  *	preemption disabled.
  */
 unsigned
@@ -1041,10 +783,16 @@ hw_lock_bit_to_contended(
 {
 	uint64_t        end = 0, start = 0, interrupts = 0;
 	uint64_t        default_timeout = os_atomic_load(&lock_panic_timeout, relaxed);
-	bool            has_timeout = timeout > 0 || default_timeout > 0;
-
+	bool            has_timeout = true;
 	hw_lock_status_t rc;
 	uint32_t        mask = 1u << bit;
+#if INTERRUPT_MASKED_DEBUG
+	thread_t        thread = current_thread();
+	bool            in_ppl = pmap_in_ppl();
+	/* Note we can't check if we are interruptible if in ppl */
+	bool            interruptible = !in_ppl && ml_get_interrupts_enabled();
+	uint64_t        start_interrupts = 0;
+#endif /* INTERRUPT_MASKED_DEBUG */
 
 #if CONFIG_DTRACE || LOCK_STATS
 	uint64_t begin = 0;
@@ -1055,14 +803,15 @@ hw_lock_bit_to_contended(
 	}
 #endif /* LOCK_STATS || CONFIG_DTRACE */
 
-	if (has_timeout && timeout == 0) {
-		timeout = default_timeout;
-	}
 #if INTERRUPT_MASKED_DEBUG
-	bool measure_interrupts = !pmap_in_ppl() && ml_get_interrupts_enabled();
-	thread_t thread = current_thread();
-	uint64_t start_interrupts = 0;
+	timeout = hw_lock_compute_timeout(timeout, default_timeout, in_ppl, interruptible);
+#else
+	timeout = hw_lock_compute_timeout(timeout, default_timeout);
 #endif /* INTERRUPT_MASKED_DEBUG */
+	if (timeout == 0) {
+		has_timeout = false;
+	}
+
 	for (;;) {
 		for (int i = 0; i < LOCK_SNOOP_SPINS; i++) {
 			// Always load-exclusive before wfe
@@ -1085,7 +834,7 @@ hw_lock_bit_to_contended(
 			uint64_t now = ml_get_timebase();
 			if (end == 0) {
 #if INTERRUPT_MASKED_DEBUG
-				if (measure_interrupts) {
+				if (interruptible) {
 					start_interrupts = thread->machine.int_time_mt;
 				}
 #endif /* INTERRUPT_MASKED_DEBUG */
@@ -1095,7 +844,7 @@ hw_lock_bit_to_contended(
 				/* keep spinning */
 			} else {
 #if INTERRUPT_MASKED_DEBUG
-				if (measure_interrupts) {
+				if (interruptible) {
 					interrupts = thread->machine.int_time_mt - start_interrupts;
 				}
 #endif /* INTERRUPT_MASKED_DEBUG */
@@ -1135,6 +884,13 @@ hw_lock_bit_to_internal(hw_lock_bit_t *lock, unsigned int bit, uint64_t timeout,
 	           false LCK_GRP_ARG(grp));
 }
 
+/*
+ *	Routine: hw_lock_bit_to
+ *
+ *	Acquire bit lock, spinning until it becomes available or timeout.
+ *	Timeout is in mach_absolute_time ticks (TSC in Intel), return with
+ *	preemption disabled.
+ */
 unsigned
 int
 (hw_lock_bit_to)(hw_lock_bit_t * lock, unsigned int bit, uint64_t timeout,
@@ -1144,6 +900,12 @@ int
 	return hw_lock_bit_to_internal(lock, bit, timeout, handler LCK_GRP_ARG(grp));
 }
 
+/*
+ *	Routine: hw_lock_bit
+ *
+ *	Acquire bit lock, spinning until it becomes available,
+ *	return with preemption disabled.
+ */
 void
 (hw_lock_bit)(hw_lock_bit_t * lock, unsigned int bit LCK_GRP_ARG(lck_grp_t *grp))
 {
@@ -1151,6 +913,11 @@ void
 	(void)hw_lock_bit_to_internal(lock, bit, 0, hw_lock_bit_timeout_panic LCK_GRP_ARG(grp));
 }
 
+/*
+ *	Routine: hw_lock_bit_nopreempt
+ *
+ *	Acquire bit lock, spinning until it becomes available.
+ */
 void
 (hw_lock_bit_nopreempt)(hw_lock_bit_t * lock, unsigned int bit LCK_GRP_ARG(lck_grp_t *grp))
 {
@@ -1674,79 +1441,6 @@ lck_mtx_yield(
 		mutex_pause(0);
 		lck_mtx_lock(lck);
 	}
-}
-
-kern_return_t
-host_lockgroup_info(
-	host_t                                  host,
-	lockgroup_info_array_t  *lockgroup_infop,
-	mach_msg_type_number_t  *lockgroup_infoCntp)
-{
-	lockgroup_info_t        *lockgroup_info_base;
-	lockgroup_info_t        *lockgroup_info;
-	vm_offset_t                     lockgroup_info_addr;
-	vm_size_t                       lockgroup_info_size;
-	vm_size_t                       lockgroup_info_vmsize;
-	lck_grp_t                       *lck_grp;
-	unsigned int            i;
-	vm_map_copy_t           copy;
-	kern_return_t           kr;
-
-	if (host == HOST_NULL) {
-		return KERN_INVALID_HOST;
-	}
-
-	lck_mtx_lock(&lck_grp_lock);
-
-	lockgroup_info_size = lck_grp_cnt * sizeof(*lockgroup_info);
-	lockgroup_info_vmsize = round_page(lockgroup_info_size);
-	kr = kmem_alloc_pageable(ipc_kernel_map,
-	    &lockgroup_info_addr, lockgroup_info_vmsize, VM_KERN_MEMORY_IPC);
-	if (kr != KERN_SUCCESS) {
-		lck_mtx_unlock(&lck_grp_lock);
-		return kr;
-	}
-
-	lockgroup_info_base = (lockgroup_info_t *) lockgroup_info_addr;
-	lck_grp = (lck_grp_t *)queue_first(&lck_grp_queue);
-	lockgroup_info = lockgroup_info_base;
-
-	for (i = 0; i < lck_grp_cnt; i++) {
-		lockgroup_info->lock_spin_cnt = lck_grp->lck_grp_spincnt;
-		lockgroup_info->lock_rw_cnt = lck_grp->lck_grp_rwcnt;
-		lockgroup_info->lock_mtx_cnt = lck_grp->lck_grp_mtxcnt;
-
-#if LOCK_STATS
-		lockgroup_info->lock_spin_held_cnt = lck_grp->lck_grp_stats.lgss_spin_held.lgs_count;
-		lockgroup_info->lock_spin_miss_cnt = lck_grp->lck_grp_stats.lgss_spin_miss.lgs_count;
-#endif /* LOCK_STATS */
-
-		// Historically on x86, held was used for "direct wait" and util for "held"
-		lockgroup_info->lock_mtx_util_cnt = lck_grp->lck_grp_stats.lgss_mtx_held.lgs_count;
-		lockgroup_info->lock_mtx_held_cnt = lck_grp->lck_grp_stats.lgss_mtx_direct_wait.lgs_count;
-		lockgroup_info->lock_mtx_miss_cnt = lck_grp->lck_grp_stats.lgss_mtx_miss.lgs_count;
-		lockgroup_info->lock_mtx_wait_cnt = lck_grp->lck_grp_stats.lgss_mtx_wait.lgs_count;
-
-		(void) strncpy(lockgroup_info->lockgroup_name, lck_grp->lck_grp_name, LOCKGROUP_MAX_NAME);
-
-		lck_grp = (lck_grp_t *)(queue_next((queue_entry_t)(lck_grp)));
-		lockgroup_info++;
-	}
-
-	*lockgroup_infoCntp = lck_grp_cnt;
-	lck_mtx_unlock(&lck_grp_lock);
-
-	if (lockgroup_info_size != lockgroup_info_vmsize) {
-		bzero((char *)lockgroup_info, lockgroup_info_vmsize - lockgroup_info_size);
-	}
-
-	kr = vm_map_copyin(ipc_kernel_map, (vm_map_address_t)lockgroup_info_addr,
-	    (vm_map_size_t)lockgroup_info_size, TRUE, &copy);
-	assert(kr == KERN_SUCCESS);
-
-	*lockgroup_infop = (lockgroup_info_t *) copy;
-
-	return KERN_SUCCESS;
 }
 
 /*
@@ -2286,7 +1980,7 @@ void
 kdp_sleep_with_inheritor_find_owner(struct waitq * waitq, __unused event64_t event, thread_waitinfo_t * waitinfo)
 {
 	assert(waitinfo->wait_type == kThreadWaitSleepWithInheritor);
-	assert(waitq_is_turnstile_queue(waitq));
+	assert(waitq_type(waitq) == WQT_TURNSTILE);
 	waitinfo->owner = 0;
 	waitinfo->context = 0;
 
@@ -3611,33 +3305,6 @@ lck_mtx_gate_assert(__assert_only lck_mtx_t *lock, gate_t *gate, gate_assert_fla
 }
 
 #pragma mark - LCK_*_DECLARE support
-
-__startup_func
-void
-lck_grp_attr_startup_init(struct lck_grp_attr_startup_spec *sp)
-{
-	lck_grp_attr_t *attr = sp->grp_attr;
-	lck_grp_attr_setdefault(attr);
-	attr->grp_attr_val |= sp->grp_attr_set_flags;
-	attr->grp_attr_val &= ~sp->grp_attr_clear_flags;
-}
-
-__startup_func
-void
-lck_grp_startup_init(struct lck_grp_startup_spec *sp)
-{
-	lck_grp_init(sp->grp, sp->grp_name, sp->grp_attr);
-}
-
-__startup_func
-void
-lck_attr_startup_init(struct lck_attr_startup_spec *sp)
-{
-	lck_attr_t *attr = sp->lck_attr;
-	lck_attr_setdefault(attr);
-	attr->lck_attr_val |= sp->lck_attr_set_flags;
-	attr->lck_attr_val &= ~sp->lck_attr_clear_flags;
-}
 
 __startup_func
 void

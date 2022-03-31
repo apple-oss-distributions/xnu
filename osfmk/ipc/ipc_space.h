@@ -236,8 +236,7 @@ extern lck_attr_t  ipc_lck_attr;
 #define is_reference(is)        ipc_space_reference(is)
 #define is_release(is)          ipc_space_release(is)
 
-#define current_space_fast()    (current_task_fast()->itk_space)
-#define current_space()         (current_space_fast())
+#define current_space()         (current_task()->itk_space)
 
 extern void         ipc_space_lock(
 	ipc_space_t     space);

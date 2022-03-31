@@ -41,7 +41,6 @@ EXPORT_FILES = \
 	audit_sessionport.h \
 	backtrace.h \
 	bits.h \
-	btlog.h \
 	circle_queue.h \
 	clock.h \
 	coalition.h \
@@ -106,16 +105,19 @@ PRIVATE_EXPORT_FILES = \
 	copyout_shim.h \
 	sched_clutch.h \
 	mach_filter.h \
-	task_ident.h
+	task_ident.h \
+	zalloc_ro_shim.h
 
 
 XNU_ONLY_EXPORTS = \
 	arcade.h \
+	btlog.h \
 	cpu_quiesce.h \
 	ipc_kobject.h \
 	hazard.h \
 	perfmon.h \
 	sched_hygiene.h \
+	smr.h \
 	sync_sema.h \
 	ux_handler.h
 

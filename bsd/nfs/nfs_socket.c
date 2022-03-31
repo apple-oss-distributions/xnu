@@ -124,9 +124,9 @@
 /* XXX */
 kern_return_t   thread_terminate(thread_t);
 
-ZONE_DECLARE(nfs_fhandle_zone, "fhandle", sizeof(struct fhandle), ZC_NONE);
-ZONE_DECLARE(nfs_req_zone, "NFS req", sizeof(struct nfsreq), ZC_NONE);
-ZONE_DECLARE(nfsrv_descript_zone, "NFSV3 srvdesc",
+ZONE_DEFINE_TYPE(nfs_fhandle_zone, "fhandle", struct fhandle, ZC_NONE);
+ZONE_DEFINE_TYPE(nfs_req_zone, "NFS req", struct nfsreq, ZC_NONE);
+ZONE_DEFINE(nfsrv_descript_zone, "NFSV3 srvdesc",
     sizeof(struct nfsrv_descript), ZC_NONE);
 
 
@@ -723,10 +723,7 @@ nfs_socket_options(struct nfsmount *nmp, struct nfs_socket *nso)
 
 	/* set socket buffer sizes for UDP/TCP */
 	reserve = (nso->nso_sotype == SOCK_DGRAM) ? NFS_UDPSOCKBUF : MAX(nfs_tcp_sockbuf, nmp->nm_wsize * 2);
-	{
-		error = sock_setsockopt(nso->nso_so, SOL_SOCKET, SO_SNDBUF, &reserve, sizeof(reserve));
-	}
-
+	error = sock_setsockopt(nso->nso_so, SOL_SOCKET, SO_SNDBUF, &reserve, sizeof(reserve));
 	if (error) {
 		log(LOG_INFO, "nfs_socket_options: error %d setting SO_SNDBUF to %u\n", error, reserve);
 	}
@@ -1394,12 +1391,17 @@ keepsearching:
 		}
 
 		if (!error && (nss.nss_sotype == SOCK_STREAM) && !nmp->nm_sotype && (nmp->nm_vers < NFS_VER4)) {
-			/* Try using UDP */
-			sotype = SOCK_DGRAM;
-			savederror = nss.nss_error;
-			NFS_SOCK_DBG("nfs connect %s TCP failed %d %d, trying UDP\n",
-			    vfs_statfs(nmp->nm_mountp)->f_mntfromname, error, nss.nss_error);
-			goto tryagain;
+			if (nss.nss_error == EPROGUNAVAIL) {
+				/* Try using UDP only when TCP is not supported */
+				sotype = SOCK_DGRAM;
+				savederror = nss.nss_error;
+				NFS_SOCK_DBG("nfs connect %s TCP failed %d %d, trying UDP\n",
+				    vfs_statfs(nmp->nm_mountp)->f_mntfromname, error, nss.nss_error);
+				goto tryagain;
+			} else {
+				NFS_SOCK_DBG("nfs connect %s TCP failed %d %d, aborting\n",
+				    vfs_statfs(nmp->nm_mountp)->f_mntfromname, error, nss.nss_error);
+			}
 		}
 		if (!error) {
 			error = nss.nss_error ? nss.nss_error : ETIMEDOUT;
@@ -1583,7 +1585,7 @@ keepsearching:
 				bcopy(&ss, nsonfs->nso_saddr2, ss.ss_len);
 			}
 			if (error) {
-				NFS_SOCK_DBG("Could not create mount sockaet address %d", error);
+				NFS_SOCK_DBG("Could not create mount socket address %d", error);
 				lck_mtx_lock(&nsonfs->nso_lock);
 				nsonfs->nso_error = error;
 				nsonfs->nso_flags |= NSO_DEAD;
@@ -5258,10 +5260,10 @@ nfs_reqnext(struct nfsreq *req)
  * For UDP, mark/signal requests for retransmission.
  */
 void
-nfs_request_timer(__unused void *param0, __unused void *param1)
+nfs_request_timer(void *param0, __unused void *param1)
 {
 	struct nfsreq *req;
-	struct nfsmount *nmp;
+	struct nfsmount *nmp, *unmountp = param0;
 	int timeo, maxtime, finish_asyncio, error;
 	struct timeval now;
 	TAILQ_HEAD(nfs_mount_pokeq, nfsmount) nfs_mount_poke_queue;
@@ -5288,6 +5290,15 @@ restart:
 		if (req->r_error || req->r_nmrep.nmc_mhead) {
 			continue;
 		}
+		if (unmountp && unmountp != nmp) {
+			/* Ignore other mounts during unmount */
+			continue;
+		}
+		if (unmountp && !req->r_callback.rcb_func) {
+			/* just wakeup sync RPCs */
+			wakeup(req);
+			continue;
+		}
 		if ((error = nfs_sigintr(nmp, req, req->r_thread, 0))) {
 			if (req->r_callback.rcb_func != NULL) {
 				/* async I/O RPC needs to be finished */
@@ -5300,6 +5311,11 @@ restart:
 					nfs_asyncio_finish(req);
 				}
 			}
+			continue;
+		}
+
+		if (unmountp) {
+			/* Skip request processing */
 			continue;
 		}
 
@@ -5581,6 +5597,14 @@ nfs_sigintr(struct nfsmount *nmp, struct nfsreq *req, thread_t thd, int nmplocke
 		nmp->nm_state |= NFSSTA_FORCE;
 	}
 
+	/*
+	 * Unmount in progress and mount is not responding.
+	 * We should abort all "read" requests.
+	 */
+	if (req && vfs_isunmount(nmp->nm_mountp) &&
+	    (nmp->nm_state & NFSSTA_TIMEO) && !(req->r_flags & R_NOUMOUNTINTR)) {
+		error = EINTR;
+	}
 	/* Check if the mount is marked dead. */
 	if (!error && (nmp->nm_state & NFSSTA_DEAD)) {
 		error = ENXIO;
@@ -5993,9 +6017,9 @@ tryagain:
 	error = nfs_aux_request(nmp, thd, saddr, so,
 	    stype, mreq, R_XID32(xid), 0, timeo, &nmrep);
 	NFS_SOCK_DUMP_MBUF("nfs_portmap_lookup reply", nmrep.nmc_mhead);
-	NFS_SOCK_DBG("rpcbind request returned %d for program %u vers %u: %s\n", error, protocol, vers,
+	NFS_SOCK_DBG("rpcbind request returned %d for program %u vers %u: %s, socktype %d\n", error, protocol, vers,
 	    (saddr->sa_family == AF_LOCAL) ? ((struct sockaddr_un *)saddr)->sun_path :
-	    (saddr->sa_family == AF_INET6) ? "INET6 socket" : "INET socket");
+	    (saddr->sa_family == AF_INET6) ? "INET6 socket" : "INET socket", stype);
 
 	/* grab port from portmap response */
 	if (ip == 4) {

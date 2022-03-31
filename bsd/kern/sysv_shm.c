@@ -770,7 +770,7 @@ shmget_allocate_segment(struct proc *p, struct shmget_args *uap, int mode,
 	struct shmid_kernel *shmseg;
 	struct shm_handle *shm_handle;
 	kern_return_t kret;
-	mach_vm_size_t total_size, size, alloc_size;
+	mach_vm_size_t total_size, size = 0, alloc_size;
 	void * mem_object;
 	struct shm_handle *shm_handle_next, **shm_handle_next_p;
 

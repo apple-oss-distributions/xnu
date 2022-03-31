@@ -117,6 +117,7 @@ struct scenario {
 	bool quiet;
 	bool should_fail;
 	bool maybe_unsupported;
+	bool maybe_enomem;
 	pid_t target_pid;
 	uint64_t since_timestamp;
 	uint32_t size_hint;
@@ -194,6 +195,8 @@ retry: ;
 		}
 	} else if ((ret == ENOTSUP) && scenario->maybe_unsupported) {
 		T_SKIP("kernel indicated this stackshot configuration is not supported");
+	} else if ((ret == ENOMEM) && scenario->maybe_enomem) {
+		T_SKIP("insufficient available memory to run test");
 	} else {
 		quiet(scenario);
 		T_ASSERT_POSIX_ZERO(ret, "called stackshot_capture_with_config");
@@ -1311,9 +1314,10 @@ T_DECL(dump_page_tables, "test stackshot page table dumping support")
 	struct scenario scenario = {
 		.name = "asid-page-tables",
 		.flags = (STACKSHOT_KCDATA_FORMAT | STACKSHOT_ASID | STACKSHOT_PAGE_TABLES),
-		.size_hint = (1ULL << 23), // 8 MB
+		.size_hint = (9ull << 20), // 9 MB
 		.target_pid = getpid(),
 		.maybe_unsupported = true,
+		.maybe_enomem = true,
 	};
 
 	T_LOG("attempting to take stackshot with ASID and page table flags");
@@ -2018,13 +2022,12 @@ parse_thread_group_stackshot(void **ssbuf, size_t sslen)
 
 			seen_thread_group_snapshot = true;
 
-			if (kcdata_iter_array_elem_size(iter) >= sizeof(struct thread_group_snapshot_v2)) {
-				struct thread_group_snapshot_v2 *tgs_array = kcdata_iter_payload(iter);
+			if (kcdata_iter_array_elem_size(iter) >= sizeof(struct thread_group_snapshot_v3)) {
+				struct thread_group_snapshot_v3 *tgs_array = kcdata_iter_payload(iter);
 				for (uint32_t j = 0; j < kcdata_iter_array_elem_count(iter); j++) {
-					struct thread_group_snapshot_v2 *tgs = tgs_array + j;
+					struct thread_group_snapshot_v3 *tgs = tgs_array + j;
 					[thread_groups addObject:@(tgs->tgs_id)];
 				}
-
 			}
 			else {
 				struct thread_group_snapshot *tgs_array = kcdata_iter_payload(iter);
@@ -2052,7 +2055,7 @@ parse_thread_group_stackshot(void **ssbuf, size_t sslen)
 			}
 
 			NSDictionary *container = parseKCDataContainer(&iter, &error);
-			T_QUIET; T_ASSERT_NOTNULL(container, "parsed container from stackshot");
+			T_QUIET; T_ASSERT_NOTNULL(container, "parsed thread container from stackshot");
 			T_QUIET; T_ASSERT_NULL(error, "error unset after parsing container");
 
 			int tg = [container[@"thread_snapshots"][@"thread_group"] intValue];
@@ -2369,7 +2372,7 @@ parse_stackshot(uint64_t stackshot_parsing_flags, void *ssbuf, size_t sslen, NSD
 				break;
 			}
 			NSDictionary *container = parseKCDataContainer(&iter, &error);
-			T_QUIET; T_ASSERT_NOTNULL(container, "parsed container from stackshot");
+			T_QUIET; T_ASSERT_NOTNULL(container, "parsed task/transitioning_task container from stackshot");
 			T_QUIET; T_ASSERT_NULL(error, "error unset after parsing container");
 
 			NSDictionary* task_snapshot = container[@"task_snapshots"][@"task_snapshot"];
@@ -2572,6 +2575,8 @@ parse_stackshot(uint64_t stackshot_parsing_flags, void *ssbuf, size_t sslen, NSD
 								if ([j[@"waiter"] intValue] == [i[@"waiter"] intValue] &&
 								    [j[@"wait_type"] intValue] == kThreadWaitPortReceive) {
 									found_srp_waitinfo = true;
+									T_EXPECT_EQ([j[@"wait_flags"] intValue], STACKSHOT_WAITINFO_FLAGS_SPECIALREPLY,
+									    "SRP waitinfo should be marked as a special reply");
 									break;
 								}
 							}

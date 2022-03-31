@@ -39,6 +39,7 @@ public:
 	virtual void registerService(IOOptionBits options = 0) APPLE_KEXT_OVERRIDE;
 
 	virtual void sync(void);
+	virtual IOReturn nextBank(void);
 
 	virtual IOReturn read(IOByteCount offset, UInt8 *buffer,
 	    IOByteCount length) = 0;

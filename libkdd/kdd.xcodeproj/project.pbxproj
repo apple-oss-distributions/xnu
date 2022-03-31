@@ -117,6 +117,8 @@
 		D66E8CF92683E87D009AF15F /* stackshot-with-asyncinfo.plist.gz in Resources */ = {isa = PBXBuildFile; fileRef = D66E8CF52683E87D009AF15F /* stackshot-with-asyncinfo.plist.gz */; };
 		D66E8CFA2683E87D009AF15F /* stackshot-sample-aot in Resources */ = {isa = PBXBuildFile; fileRef = D66E8CF62683E87D009AF15F /* stackshot-sample-aot */; };
 		D66E8CFB2683E87D009AF15F /* stackshot-with-asyncinfo in Resources */ = {isa = PBXBuildFile; fileRef = D66E8CF72683E87D009AF15F /* stackshot-with-asyncinfo */; };
+		D6C81F4227161FB400453A41 /* stackshot-sample-portlabels in Resources */ = {isa = PBXBuildFile; fileRef = D6C81F4027161FB400453A41 /* stackshot-sample-portlabels */; };
+		D6C81F4327161FB400453A41 /* stackshot-sample-portlabels.plist.gz in Resources */ = {isa = PBXBuildFile; fileRef = D6C81F4127161FB400453A41 /* stackshot-sample-portlabels.plist.gz */; };
 		F702EC6422AE50DD00FDCF74 /* stackshot-sample-dispatch-queue-label in Resources */ = {isa = PBXBuildFile; fileRef = F702EC6322AE500E00FDCF74 /* stackshot-sample-dispatch-queue-label */; };
 		F702EC6522AE50DD00FDCF74 /* stackshot-sample-dispatch-queue-label.plist.gz in Resources */ = {isa = PBXBuildFile; fileRef = F702EC6222AE500E00FDCF74 /* stackshot-sample-dispatch-queue-label.plist.gz */; };
 		F7C20D3322A168620002AD06 /* stackshot-sample-asid-pagetable in Resources */ = {isa = PBXBuildFile; fileRef = F7C20D3122A168610002AD06 /* stackshot-sample-asid-pagetable */; };
@@ -267,6 +269,8 @@
 		D66E8CF52683E87D009AF15F /* stackshot-with-asyncinfo.plist.gz */ = {isa = PBXFileReference; lastKnownFileType = archive.gzip; path = "stackshot-with-asyncinfo.plist.gz"; sourceTree = "<group>"; };
 		D66E8CF62683E87D009AF15F /* stackshot-sample-aot */ = {isa = PBXFileReference; lastKnownFileType = file; path = "stackshot-sample-aot"; sourceTree = "<group>"; };
 		D66E8CF72683E87D009AF15F /* stackshot-with-asyncinfo */ = {isa = PBXFileReference; lastKnownFileType = file; path = "stackshot-with-asyncinfo"; sourceTree = "<group>"; };
+		D6C81F4027161FB400453A41 /* stackshot-sample-portlabels */ = {isa = PBXFileReference; lastKnownFileType = file; path = "stackshot-sample-portlabels"; sourceTree = "<group>"; };
+		D6C81F4127161FB400453A41 /* stackshot-sample-portlabels.plist.gz */ = {isa = PBXFileReference; lastKnownFileType = archive.gzip; path = "stackshot-sample-portlabels.plist.gz"; sourceTree = "<group>"; };
 		F702EC6222AE500E00FDCF74 /* stackshot-sample-dispatch-queue-label.plist.gz */ = {isa = PBXFileReference; lastKnownFileType = archive.gzip; path = "stackshot-sample-dispatch-queue-label.plist.gz"; sourceTree = "<group>"; };
 		F702EC6322AE500E00FDCF74 /* stackshot-sample-dispatch-queue-label */ = {isa = PBXFileReference; lastKnownFileType = file; path = "stackshot-sample-dispatch-queue-label"; sourceTree = "<group>"; };
 		F7C20D3122A168610002AD06 /* stackshot-sample-asid-pagetable */ = {isa = PBXFileReference; lastKnownFileType = file; path = "stackshot-sample-asid-pagetable"; sourceTree = "<group>"; };
@@ -315,6 +319,8 @@
 		08603F351BF69EDE007D3784 /* tests */ = {
 			isa = PBXGroup;
 			children = (
+				D6C81F4027161FB400453A41 /* stackshot-sample-portlabels */,
+				D6C81F4127161FB400453A41 /* stackshot-sample-portlabels.plist.gz */,
 				D66E8CF62683E87D009AF15F /* stackshot-sample-aot */,
 				D66E8CF42683E87D009AF15F /* stackshot-sample-aot.plist.gz */,
 				D66E8CF72683E87D009AF15F /* stackshot-with-asyncinfo */,
@@ -647,6 +653,7 @@
 				045F7F131D2ADE8000B4808B /* stackshot-with-waitinfo.plist.gz in Resources */,
 				045F7F121D2ADE7C00B4808B /* stackshot-with-waitinfo in Resources */,
 				C95E4D1A204F42C500FD2229 /* stackshot-sample-cpu-times.plist.gz in Resources */,
+				D6C81F4327161FB400453A41 /* stackshot-sample-portlabels.plist.gz in Resources */,
 				08A4C94F1C470F1C00D5F010 /* nested-sample in Resources */,
 				1862B0341E7A083F0005ADF4 /* stackshot-sample-thread-groups in Resources */,
 				08A4C9501C470F1C00D5F010 /* nested-sample.plist in Resources */,
@@ -686,6 +693,7 @@
 				08C9D83D1BFFF8E100DF6C05 /* exitreason-sample in Resources */,
 				08C9D83E1BFFF8E100DF6C05 /* exitreason-sample.plist.gz in Resources */,
 				18E592981E9451A20018612A /* stackshot-sample-coalitions in Resources */,
+				D6C81F4227161FB400453A41 /* stackshot-sample-portlabels in Resources */,
 				08B4808B1BF9474A00B4AAE0 /* corpse-sample in Resources */,
 				08AD0BF01FBE370000CB41B2 /* stackshot-sample-stacktop in Resources */,
 				13D6C5D11C4DDDB8005E617C /* corpse-twr-sample.plist.gz in Resources */,

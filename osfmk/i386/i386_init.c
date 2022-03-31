@@ -98,7 +98,6 @@
 #include <i386/Diagnostics.h>
 #include <i386/pmCPU.h>
 #include <i386/tsc.h>
-#include <i386/locks.h> /* LcksOpts */
 #include <i386/acpi.h>
 #if DEBUG
 #include <machine/pal_routines.h>

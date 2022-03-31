@@ -68,7 +68,7 @@
 #define MAC_ARG_PREFIX "arg: "
 #define MAC_ARG_PREFIX_LEN 5
 
-ZONE_DECLARE(audit_mac_label_zone, "audit_mac_label_zone",
+ZONE_DEFINE(audit_mac_label_zone, "audit_mac_label_zone",
     MAC_AUDIT_LABEL_LEN, ZC_NONE);
 
 int

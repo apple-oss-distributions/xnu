@@ -122,6 +122,16 @@ const struct vnodeopv_entry_desc fifo_vnodeop_entries[] = {
 const struct vnodeopv_desc fifo_vnodeop_opv_desc =
 { .opv_desc_vector_p = &fifo_vnodeop_p, .opv_desc_ops = fifo_vnodeop_entries };
 
+static const struct fileops fifoops = {
+	.fo_type     = DTYPE_SOCKET,
+	.fo_read     = NULL,
+	.fo_write    = NULL,
+	.fo_ioctl    = NULL,
+	.fo_select   = NULL,
+	.fo_close    = NULL,
+	.fo_drain    = NULL,
+	.fo_kqfilter = NULL,
+};
 /*
  * Trivial lookup routine that always fails.
  */
@@ -390,16 +400,20 @@ fifo_ioctl(struct vnop_ioctl_args *ap)
 		return 0;
 	}
 	bzero(&filetmp, sizeof(struct fileproc));
+	bzero(&filefg, sizeof(struct fileglob));
+
+	filefg.fg_ops = &fifoops;
 	filetmp.fp_glob = &filefg;
+
 	if (ap->a_fflag & FREAD) {
-		filetmp.fp_glob->fg_data = (caddr_t)ap->a_vp->v_fifoinfo->fi_readsock;
+		fg_set_data(filetmp.fp_glob, ap->a_vp->v_fifoinfo->fi_readsock);
 		error = soo_ioctl(&filetmp, ap->a_command, ap->a_data, ap->a_context);
 		if (error) {
 			return error;
 		}
 	}
 	if (ap->a_fflag & FWRITE) {
-		filetmp.fp_glob->fg_data = (caddr_t)ap->a_vp->v_fifoinfo->fi_writesock;
+		fg_set_data(filetmp.fp_glob, ap->a_vp->v_fifoinfo->fi_writesock);
 		error = soo_ioctl(&filetmp, ap->a_command, ap->a_data, ap->a_context);
 		if (error) {
 			return error;
@@ -416,16 +430,20 @@ fifo_select(struct vnop_select_args *ap)
 	int ready;
 
 	bzero(&filetmp, sizeof(struct fileproc));
+	bzero(&filefg, sizeof(struct fileglob));
+
+	filefg.fg_ops = &fifoops;
 	filetmp.fp_glob = &filefg;
+
 	if (ap->a_which & FREAD) {
-		filetmp.fp_glob->fg_data = (caddr_t)ap->a_vp->v_fifoinfo->fi_readsock;
+		fg_set_data(filetmp.fp_glob, ap->a_vp->v_fifoinfo->fi_readsock);
 		ready = soo_select(&filetmp, ap->a_which, ap->a_wql, ap->a_context);
 		if (ready) {
 			return ready;
 		}
 	}
 	if (ap->a_which & FWRITE) {
-		filetmp.fp_glob->fg_data = (caddr_t)ap->a_vp->v_fifoinfo->fi_writesock;
+		fg_set_data(filetmp.fp_glob, ap->a_vp->v_fifoinfo->fi_writesock);
 		ready = soo_select(&filetmp, ap->a_which, ap->a_wql, ap->a_context);
 		if (ready) {
 			return ready;

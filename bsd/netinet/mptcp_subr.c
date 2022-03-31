@@ -160,9 +160,9 @@ static void mptcp_do_sha256(mptcp_key_t *, char *);
 
 static void mptcp_init_local_parms(struct mptses *, struct sockaddr *);
 
-static ZONE_DECLARE(mptsub_zone, "mptsub", sizeof(struct mptsub), ZC_ZFREE_CLEARMEM);
-static ZONE_DECLARE(mptopt_zone, "mptopt", sizeof(struct mptopt), ZC_ZFREE_CLEARMEM);
-static ZONE_DECLARE(mpt_subauth_zone, "mptauth",
+static ZONE_DEFINE_TYPE(mptsub_zone, "mptsub", struct mptsub, ZC_ZFREE_CLEARMEM);
+static ZONE_DEFINE_TYPE(mptopt_zone, "mptopt", struct mptopt, ZC_ZFREE_CLEARMEM);
+static ZONE_DEFINE(mpt_subauth_zone, "mptauth",
     sizeof(struct mptcp_subf_auth_entry), ZC_NONE);
 
 struct mppcbinfo mtcbinfo;
@@ -5938,6 +5938,10 @@ mptcp_sbrcv_reserve(struct mptcb *mp_tp, struct sockbuf *sbrcv,
     u_int32_t newsize, u_int32_t idealsize)
 {
 	uint8_t rcvscale = mptcp_get_rcvscale(mp_tp->mpt_mpte);
+
+	if (rcvscale == UINT8_MAX) {
+		return;
+	}
 
 	/* newsize should not exceed max */
 	newsize = min(newsize, tcp_autorcvbuf_max);

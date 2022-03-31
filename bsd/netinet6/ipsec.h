@@ -198,6 +198,15 @@ struct secspacq {
  */
 #define IPSEC_REPLAYWSIZE  32
 
+/*
+ * Maximum key sizes in bytes expected to be passed from userspace.
+ *
+ * These values are based on the NULL algorithms for AH and ESP,
+ * which both specify a keymax of 2048 bits.
+ */
+#define IPSEC_KEY_AUTH_MAX_BYTES    256
+#define IPSEC_KEY_ENCRYPT_MAX_BYTES 256
+
 /* statistics for ipsec processing */
 struct ipsecstat {
 	u_quad_t in_success __attribute__ ((aligned(8)));  /* succeeded inbound process */

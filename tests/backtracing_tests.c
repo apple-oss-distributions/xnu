@@ -18,6 +18,11 @@ enum test_scenario {
 	RESUME_SCENARIO = 1,
 };
 
+enum kernel_test_scenario {
+	PACK_UNPACK_SCENARIO = 0,
+	PACKED_SCENARIO = 1,
+};
+
 #define USER_FRAMES (12)
 #define MAX_SYSCALL_SETUP_FRAMES (3)
 #define NON_RECURSE_FRAMES (2)
@@ -438,6 +443,26 @@ T_DECL(backtrace_user_resume,
 	T_QUIET; T_ASSERT_POSIX_ZERO(pthread_create(&thread, NULL, backtrace_thread,
 	    (void *)RESUME_SCENARIO), "create additional thread to backtrace");
 	T_QUIET; T_ASSERT_POSIX_ZERO(pthread_join(thread, NULL), NULL);
+}
+
+T_DECL(backtrace_kernel_pack_unpack,
+    "test that a kernel backtrace can be packed and unpacked losslessly",
+    T_META_CHECK_LEAKS(false), T_META_ALL_VALID_ARCHS(false))
+{
+	int error = sysctlbyname("kern.backtrace.kernel_tests", NULL, NULL,
+	    (void *)PACK_UNPACK_SCENARIO, 0);
+	T_EXPECT_POSIX_SUCCESS(error,
+	    "sysctlbyname(\"kern.backtrace.kernel_tests\", PACK_UNPACK)");
+}
+
+T_DECL(backtrace_kernel_packed,
+    "test that a kernel backtrace can be recorded as packed losslessly",
+    T_META_CHECK_LEAKS(false), T_META_ALL_VALID_ARCHS(false))
+{
+	int error = sysctlbyname("kern.backtrace.kernel_tests", NULL, NULL,
+	    (void *)PACKED_SCENARIO, 0);
+	T_EXPECT_POSIX_SUCCESS(error,
+	    "sysctlbyname(\"kern.backtrace.kernel_tests\", PACKED)");
 }
 
 #pragma mark - utilities

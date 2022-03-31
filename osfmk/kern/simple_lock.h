@@ -188,6 +188,18 @@ boolean_t                       store_exclusive32(
 extern void                     usimple_unlock_nopreempt(
 	usimple_lock_t);
 
+#if INTERRUPT_MASKED_DEBUG
+uint64_t hw_lock_compute_timeout(
+	uint64_t in_timeout,
+	uint64_t default_timeout,
+	bool in_ppl,
+	bool interruptible);
+#else
+uint64_t        hw_lock_compute_timeout(
+	uint64_t in_timeout,
+	uint64_t default_timeout);
+#endif /* INTERRUPT_MASKED_DEBUG */
+
 #endif /* MACH_KERNEL_PRIVATE */
 
 struct usimple_lock_startup_spec {
@@ -205,9 +217,26 @@ extern void                     usimple_lock_startup_init(
 	STARTUP_ARG(LOCKS_EARLY, STARTUP_RANK_FOURTH, usimple_lock_startup_init, \
 	    &__startup_usimple_lock_spec_ ## var)
 
-extern void *                   hw_wait_while_equals(
-	void    **address,
-	void    *current);
+extern uint32_t                 hw_wait_while_equals32(
+	uint32_t *address,
+	uint32_t  current);
+
+extern uint64_t                 hw_wait_while_equals64(
+	uint64_t *address,
+	uint64_t  current);
+
+#if __LP64__
+#define hw_wait_while_equals_long(ptr, cur) ({ \
+	static_assert(sizeof(*(ptr)) == sizeof(long)); \
+	(typeof(cur))hw_wait_while_equals64(__DEVOLATILE(uint64_t *, ptr), (uint64_t)(cur)); \
+})
+#else
+#define hw_wait_while_equals_long(ptr, cur) ({ \
+	static_assert(sizeof(*(ptr)) == sizeof(long)); \
+	(typeof(cur))hw_wait_while_equals32(__DEVOLATILE(uint32_t *, ptr), (uint32_t)(cur)); \
+})
+#endif
+
 
 extern void                     usimple_lock_init(
 	usimple_lock_t,

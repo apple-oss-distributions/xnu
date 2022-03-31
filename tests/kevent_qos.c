@@ -50,6 +50,9 @@ static const char *g_expected_qos_name[ENV_VAR_QOS];
 #define ENV_QOS_QUEUE_OVERRIDE  (1)
 #define ENV_QOS_AFTER_OVERRIDE  (2)
 
+#define USR_THROTTLE_LEVEL_TIER0 0
+#define USR_THROTTLE_LEVEL_TIER1 1
+
 struct test_msg {
 	mach_msg_header_t header;
 	mach_msg_body_t body;
@@ -63,7 +66,7 @@ struct test_msg {
 static pthread_t
 thread_create_at_qos(qos_class_t qos, void * (*function)(void *));
 static void
-send(mach_port_t send_port, mach_port_t reply_port, mach_port_t msg_port, mach_msg_priority_t qos, mach_msg_option_t options);
+send(mach_port_t send_port, mach_port_t reply_port, mach_port_t msg_port, qos_class_t qos, mach_msg_option_t options);
 static void
 enable_kevent(uint64_t *workloop_id, unsigned long long port);
 static void
@@ -93,6 +96,20 @@ get_user_promotion_basepri(void)
 	    (thread_policy_t)&thread_policy, &count, &get_default);
 	T_QUIET; T_ASSERT_MACH_SUCCESS(kr, "thread_policy_get");
 	return thread_policy.thps_user_promotion_basepri;
+}
+
+static uint32_t
+get_thread_iotier(void)
+{
+	mach_msg_type_number_t count = THREAD_POLICY_STATE_COUNT;
+	struct thread_policy_state thread_policy;
+	boolean_t get_default = FALSE;
+	mach_port_t thread_port = pthread_mach_thread_np(pthread_self());
+
+	kern_return_t kr = thread_policy_get(thread_port, THREAD_POLICY_STATE,
+	    (thread_policy_t)&thread_policy, &count, &get_default);
+	T_QUIET; T_ASSERT_MACH_SUCCESS(kr, "thread_policy_get");
+	return (thread_policy.effective >> POLICY_EFF_IO_TIER_SHIFT) & POLICY_EFF_IO_TIER_MASK;
 }
 
 #define EXPECT_QOS_EQ(qos, ...) do { \
@@ -179,6 +196,26 @@ workloop_cb_test_kernel_sync_send(uint64_t *workloop_id __unused, void **eventsl
 	/* The effective Qos should be the one expected after override */
 	EXPECT_QOS_EQ(g_expected_qos[ENV_QOS_AFTER_OVERRIDE],
 	    "dispatch_source event handler QoS should be %s", g_expected_qos_name[ENV_QOS_AFTER_OVERRIDE]);
+
+	*events = 0;
+	T_END;
+}
+
+/*
+ * WL handler which checks if the servicer thread has correct Qos.
+ */
+static void
+workloop_cb_test_kernel_async_send(uint64_t *workloop_id __unused, void **eventslist, int *events)
+{
+	T_LOG("Workloop handler workloop_cb_test_kernel_sync_send called");
+
+	T_ASSERT_EQ(geteuid(), 0, "kevent_qos test requires root privileges to run.");
+
+	/* The effective Qos should be the one expected after override */
+	EXPECT_QOS_EQ(g_expected_qos[ENV_QOS_AFTER_OVERRIDE],
+	    "dispatch_source event handler QoS should be %s", g_expected_qos_name[ENV_QOS_AFTER_OVERRIDE]);
+
+	T_ASSERT_EQ(get_thread_iotier(), USR_THROTTLE_LEVEL_TIER0, "Thread IOTier has correct override");
 
 	*events = 0;
 	T_END;
@@ -811,37 +848,18 @@ environ_get_qos(qos_class_t qos[], const char *qos_name[], const char **wl_funct
 	T_QUIET; T_ASSERT_NOTNULL(*wl_function, "getenv(%s)", wl_function_name);
 }
 
-static mach_voucher_t
-create_pthpriority_voucher(mach_msg_priority_t qos)
+static inline thread_qos_t
+thread_qos_from_qos_class(qos_class_t cls)
 {
-	char voucher_buf[sizeof(mach_voucher_attr_recipe_data_t) + sizeof(ipc_pthread_priority_value_t)];
-
-	mach_voucher_t voucher = MACH_PORT_NULL;
-	kern_return_t ret;
-	ipc_pthread_priority_value_t ipc_pthread_priority_value =
-	    (ipc_pthread_priority_value_t)qos;
-
-	mach_voucher_attr_raw_recipe_array_t recipes;
-	mach_voucher_attr_raw_recipe_size_t recipe_size = 0;
-	mach_voucher_attr_recipe_t recipe =
-	    (mach_voucher_attr_recipe_t)&voucher_buf[recipe_size];
-
-	recipe->key = MACH_VOUCHER_ATTR_KEY_PTHPRIORITY;
-	recipe->command = MACH_VOUCHER_ATTR_PTHPRIORITY_CREATE;
-	recipe->previous_voucher = MACH_VOUCHER_NULL;
-	memcpy((char *)&recipe->content[0], &ipc_pthread_priority_value, sizeof(ipc_pthread_priority_value));
-	recipe->content_size = sizeof(ipc_pthread_priority_value_t);
-	recipe_size += sizeof(mach_voucher_attr_recipe_data_t) + recipe->content_size;
-
-	recipes = (mach_voucher_attr_raw_recipe_array_t)&voucher_buf[0];
-
-	ret = host_create_mach_voucher(mach_host_self(),
-	    recipes,
-	    recipe_size,
-	    &voucher);
-
-	T_QUIET; T_ASSERT_MACH_SUCCESS(ret, "client host_create_mach_voucher");
-	return voucher;
+	switch ((unsigned int)cls) {
+	case QOS_CLASS_USER_INTERACTIVE: return THREAD_QOS_USER_INTERACTIVE;
+	case QOS_CLASS_USER_INITIATED:   return THREAD_QOS_USER_INITIATED;
+	case QOS_CLASS_DEFAULT:          return THREAD_QOS_DEFAULT;
+	case QOS_CLASS_UTILITY:          return THREAD_QOS_UTILITY;
+	case QOS_CLASS_BACKGROUND:       return THREAD_QOS_BACKGROUND;
+	case QOS_CLASS_MAINTENANCE:      return THREAD_QOS_MAINTENANCE;
+	default: return THREAD_QOS_UNSPECIFIED;
+	}
 }
 
 static void
@@ -849,18 +867,18 @@ send(
 	mach_port_t send_port,
 	mach_port_t reply_port,
 	mach_port_t msg_port,
-	mach_msg_priority_t qos,
+	qos_class_t qos,
 	mach_msg_option_t options)
 {
 	kern_return_t ret = 0;
+	mach_msg_priority_t priority = (uint32_t)_pthread_qos_class_encode(qos, 0, 0);
 
 	struct test_msg send_msg = {
 		.header = {
 			.msgh_remote_port = send_port,
 			.msgh_local_port  = reply_port,
 			.msgh_bits        = MACH_MSGH_BITS_SET(MACH_MSG_TYPE_COPY_SEND,
-	    reply_port ? MACH_MSG_TYPE_MAKE_SEND_ONCE : 0,
-	    MACH_MSG_TYPE_MOVE_SEND,
+	    reply_port ? MACH_MSG_TYPE_MAKE_SEND_ONCE : 0, 0,
 	    MACH_MSGH_BITS_COMPLEX),
 			.msgh_id          = 0x100,
 			.msgh_size        = sizeof(send_msg),
@@ -880,21 +898,14 @@ send(
 		send_msg.body.msgh_descriptor_count = 0;
 	}
 
-	if ((options & MACH_SEND_PROPAGATE_QOS) == 0) {
-		send_msg.header.msgh_voucher_port = create_pthpriority_voucher(qos);
-		send_msg.qos = qos;
-	} else {
-		qos_class_t qc;
-		int relpri;
-		pthread_get_qos_class_np(pthread_self(), &qc, &relpri);
-		send_msg.qos = (uint32_t)_pthread_qos_class_encode(qc, relpri, 0);
-	}
+	send_msg.qos = priority;
+	priority = mach_msg_priority_encode(0, thread_qos_from_qos_class(qos), 0);
 
 	mach_msg_option_t send_opts = options;
 	send_opts |= MACH_SEND_MSG | MACH_SEND_TIMEOUT | MACH_SEND_OVERRIDE;
 
 	ret = mach_msg(&send_msg.header, send_opts, send_msg.header.msgh_size,
-	    0, MACH_PORT_NULL, 10000, qos);
+	    0, MACH_PORT_NULL, 10000, priority);
 
 	T_QUIET; T_ASSERT_MACH_SUCCESS(ret, "client mach_msg");
 }
@@ -980,25 +991,25 @@ qos_client_send_to_intransit(void *arg __unused)
 
 	/* Send an empty msg on the port to fire the WL thread */
 	send(qos_send_port, MACH_PORT_NULL, MACH_PORT_NULL,
-	    (uint32_t)_pthread_qos_class_encode(g_expected_qos[ENV_QOS_BEFORE_OVERRIDE], 0, 0), 0);
+	    g_expected_qos[ENV_QOS_BEFORE_OVERRIDE], 0);
 
 	/* Sleep 3 seconds for the server to start */
 	sleep(3);
 
 	/* Send the message with msg port as in-transit port, this msg will not be dequeued */
 	send(qos_send_port, MACH_PORT_NULL, msg_port,
-	    (uint32_t)_pthread_qos_class_encode(g_expected_qos[ENV_QOS_BEFORE_OVERRIDE], 0, 0), 0);
+	    g_expected_qos[ENV_QOS_BEFORE_OVERRIDE], 0);
 
 	/* Send 5 messages to msg port to make sure the port is full */
 	for (int i = 0; i < 5; i++) {
 		send(msg_port, MACH_PORT_NULL, MACH_PORT_NULL,
-		    (uint32_t)_pthread_qos_class_encode(g_expected_qos[ENV_QOS_BEFORE_OVERRIDE], 0, 0), 0);
+		    g_expected_qos[ENV_QOS_BEFORE_OVERRIDE], 0);
 	}
 
 	T_LOG("Sent 5 msgs, now trying to send sync ipc message, which will block with a timeout\n");
 	/* Send the message to the in-transit port, it should block and override the rcv's workloop */
 	send(msg_port, special_reply_port, MACH_PORT_NULL,
-	    (uint32_t)_pthread_qos_class_encode(g_expected_qos[ENV_QOS_AFTER_OVERRIDE], 0, 0), 0);
+	    g_expected_qos[ENV_QOS_AFTER_OVERRIDE], 0);
 	T_LOG("Client done sending messages, now waiting for server to end the test");
 
 	T_ASSERT_FAIL("client timed out");
@@ -1054,10 +1065,10 @@ qos_send_and_sync_rcv(void *arg __unused)
 
 	/* enqueue two messages to make sure that mqueue is not empty */
 	send(qos_send_port, MACH_PORT_NULL, MACH_PORT_NULL,
-	    (uint32_t)_pthread_qos_class_encode(g_expected_qos[ENV_QOS_QUEUE_OVERRIDE], 0, 0), 0);
+	    g_expected_qos[ENV_QOS_QUEUE_OVERRIDE], 0);
 
 	send(qos_send_port, MACH_PORT_NULL, MACH_PORT_NULL,
-	    (uint32_t)_pthread_qos_class_encode(g_expected_qos[ENV_QOS_QUEUE_OVERRIDE], 0, 0), 0);
+	    g_expected_qos[ENV_QOS_QUEUE_OVERRIDE], 0);
 
 	sleep(SEND_TIMEOUT_SECS);
 
@@ -1088,7 +1099,7 @@ qos_sync_rcv(void *arg __unused)
 
 	/* enqueue two messages to make sure that mqueue is not empty */
 	send(qos_send_port, MACH_PORT_NULL, MACH_PORT_NULL,
-	    (uint32_t)_pthread_qos_class_encode(g_expected_qos[ENV_QOS_QUEUE_OVERRIDE], 0, 0), 0);
+	    g_expected_qos[ENV_QOS_QUEUE_OVERRIDE], 0);
 
 	sleep(RECV_TIMEOUT_SECS);
 
@@ -1168,7 +1179,7 @@ qos_client_send_sync_msg_and_test_link(void *arg)
 
 	/* Send the message to msg port */
 	send(qos_send_port, special_reply_port, MACH_PORT_NULL,
-	    (uint32_t)_pthread_qos_class_encode(g_expected_qos[ENV_QOS_AFTER_OVERRIDE], 0, 0), 0);
+	    g_expected_qos[ENV_QOS_AFTER_OVERRIDE], 0);
 
 	/*
 	 * wait for the reply
@@ -1214,7 +1225,7 @@ qos_client_send_2sync_msg_and_test_link(void *arg)
 
 	/* Send the first message to msg port */
 	send(qos_send_port, special_reply_port, MACH_PORT_NULL,
-	    (uint32_t)_pthread_qos_class_encode(g_expected_qos[ENV_QOS_AFTER_OVERRIDE], 0, 0), 0);
+	    g_expected_qos[ENV_QOS_AFTER_OVERRIDE], 0);
 
 	/* wait for the reply */
 	kr = receive(special_reply_port, qos_send_port);
@@ -1222,7 +1233,7 @@ qos_client_send_2sync_msg_and_test_link(void *arg)
 
 	/* Send the second message to msg port */
 	send(qos_send_port, special_reply_port, MACH_PORT_NULL,
-	    (uint32_t)_pthread_qos_class_encode(g_expected_qos[ENV_QOS_AFTER_OVERRIDE], 0, 0), 0);
+	    g_expected_qos[ENV_QOS_AFTER_OVERRIDE], 0);
 
 	/* wait for the reply */
 	kr = receive(special_reply_port, qos_send_port);
@@ -1312,7 +1323,7 @@ qos_client_send_sync_msg(void *arg __unused)
 
 	/* Send the message to msg port */
 	send(qos_send_port, special_reply_port, MACH_PORT_NULL,
-	    (uint32_t)_pthread_qos_class_encode(g_expected_qos[ENV_QOS_AFTER_OVERRIDE], 0, 0), 0);
+	    g_expected_qos[ENV_QOS_AFTER_OVERRIDE], 0);
 
 	/* wait for the reply */
 	receive(special_reply_port, qos_send_port);
@@ -1363,6 +1374,37 @@ T_HELPER_DECL(qos_client_send_kernel_upcall_sync_msg_with_pri,
 }
 
 static void *
+qos_client_kernel_upcall_send_async_msg(void *arg __unused)
+{
+	mach_port_t qos_send_port;
+
+	kern_return_t kr = bootstrap_look_up(bootstrap_port,
+	    KEVENT_QOS_SERVICE_NAME, &qos_send_port);
+	T_QUIET; T_ASSERT_MACH_SUCCESS(kr, "client bootstrap_look_up");
+
+	/* Call task_test_async_upcall_propagation to perform an async kernel upcall */
+	kr = task_test_async_upcall_propagation(mach_task_self(), qos_send_port, THREAD_QOS_UTILITY, USR_THROTTLE_LEVEL_TIER0);
+	if (kr == KERN_NOT_SUPPORTED) {
+		T_QUIET; T_SKIP("QOS Client Kernel Upcall test called on release kernel, skipping\n");
+	}
+
+	T_QUIET; T_ASSERT_MACH_SUCCESS(kr, "task_test_async_upcall_propagation");
+
+	T_LOG("Client done doing upcall, now waiting for server to end the test");
+	sleep(2 * SEND_TIMEOUT_SECS);
+
+	T_ASSERT_FAIL("client timed out");
+	return NULL;
+}
+
+T_HELPER_DECL(qos_iotier_client_send_kernel_upcall_async_msg,
+    "Send Kernel upcall async message")
+{
+	thread_create_at_qos(g_expected_qos[ENV_QOS_AFTER_OVERRIDE], qos_client_kernel_upcall_send_async_msg);
+	sleep(HELPER_TIMEOUT_SECS);
+}
+
+static void *
 qos_client_send_two_sync_msg_high_qos(void *arg __unused)
 {
 	mach_port_t qos_send_port;
@@ -1377,7 +1419,7 @@ qos_client_send_two_sync_msg_high_qos(void *arg __unused)
 
 	/* Send the message to msg port */
 	send(qos_send_port, special_reply_port, MACH_PORT_NULL,
-	    (uint32_t)_pthread_qos_class_encode(g_expected_qos[ENV_QOS_AFTER_OVERRIDE], 0, 0), 0);
+	    g_expected_qos[ENV_QOS_AFTER_OVERRIDE], 0);
 
 	/* wait for the reply */
 	receive(special_reply_port, qos_send_port);
@@ -1404,7 +1446,7 @@ qos_client_send_two_sync_msg_low_qos(void *arg __unused)
 
 	/* Send the message to msg port */
 	send(qos_send_port, special_reply_port, MACH_PORT_NULL,
-	    (uint32_t)_pthread_qos_class_encode(g_expected_qos[ENV_QOS_BEFORE_OVERRIDE], 0, 0), 0);
+	    g_expected_qos[ENV_QOS_BEFORE_OVERRIDE], 0);
 
 	/* wait for the reply */
 	receive(special_reply_port, qos_send_port);
@@ -1459,11 +1501,11 @@ qos_client_create_sepcial_reply_and_spawn_thread(void *arg __unused)
 
 	/* Send an async message */
 	send(qos_send_port, MACH_PORT_NULL, MACH_PORT_NULL,
-	    (uint32_t)_pthread_qos_class_encode(g_expected_qos[ENV_QOS_BEFORE_OVERRIDE], 0, 0), 0);
+	    g_expected_qos[ENV_QOS_BEFORE_OVERRIDE], 0);
 
 	/* Send the sync ipc message */
 	send(qos_send_port, special_reply_port, MACH_PORT_NULL,
-	    (uint32_t)_pthread_qos_class_encode(g_expected_qos[ENV_QOS_BEFORE_OVERRIDE], 0, 0), 0);
+	    g_expected_qos[ENV_QOS_BEFORE_OVERRIDE], 0);
 
 	/* Create a new thread to send the sync message on our special reply port */
 	thread_create_at_qos(g_expected_qos[ENV_QOS_AFTER_OVERRIDE], qos_client_destroy_other_threads_port);
@@ -1502,7 +1544,7 @@ qos_client_send_complex_msg_to_service_port(void *arg __unused)
 
 	T_LOG("Sending to the service port with a sync IPC");
 	send(svc_port, tsr_port, conn_port,
-	    (uint32_t)_pthread_qos_class_encode(g_expected_qos[ENV_QOS_BEFORE_OVERRIDE], 0, 0),
+	    g_expected_qos[ENV_QOS_BEFORE_OVERRIDE],
 	    MACH_SEND_PROPAGATE_QOS);
 
 	receive(tsr_port, svc_port);
@@ -1531,7 +1573,7 @@ qos_client_send_to_connection_then_service_port(void *arg __unused)
 
 	T_LOG("Sending to the connection port with a sync IPC");
 	send(conn_port, tsr_port, MACH_PORT_NULL,
-	    (uint32_t)_pthread_qos_class_encode(g_expected_qos[ENV_QOS_BEFORE_OVERRIDE], 0, 0),
+	    g_expected_qos[ENV_QOS_BEFORE_OVERRIDE],
 	    MACH_SEND_PROPAGATE_QOS);
 
 	thread_create_at_qos(g_expected_qos[ENV_QOS_AFTER_OVERRIDE],
@@ -1662,25 +1704,29 @@ expect_kevent_id_recv(mach_port_t port, qos_class_t qos[], const char *qos_name[
 		T_QUIET; T_ASSERT_POSIX_ZERO(_pthread_workqueue_init_with_workloop(
 			    worker_cb, event_cb,
 			    (pthread_workqueue_function_workloop_t)workloop_cb_test_kernel_sync_send, 0, 0), NULL);
+	} else if (strcmp(wl_function, "workloop_cb_test_kernel_async_send") == 0) {
+		T_QUIET; T_ASSERT_POSIX_ZERO(_pthread_workqueue_init_with_workloop(
+			    worker_cb, event_cb,
+			    (pthread_workqueue_function_workloop_t)workloop_cb_test_kernel_async_send, 0, 0), NULL);
 	} else {
 		T_ASSERT_FAIL("no workloop function specified \n");
 	}
 
-	struct kevent_qos_s kev[] = {{
-					     .ident = port,
-					     .filter = EVFILT_MACHPORT,
-					     .flags = EV_ADD | EV_UDATA_SPECIFIC | EV_DISPATCH | EV_VANISHED,
-					     .fflags = (MACH_RCV_MSG | MACH_RCV_VOUCHER | MACH_RCV_LARGE | MACH_RCV_LARGE_IDENTITY |
+	struct kevent_qos_s kev = {
+		.ident = port,
+		.filter = EVFILT_MACHPORT,
+		.flags = EV_ADD | EV_UDATA_SPECIFIC | EV_DISPATCH | EV_VANISHED,
+		.fflags = (MACH_RCV_MSG | MACH_RCV_VOUCHER | MACH_RCV_LARGE | MACH_RCV_LARGE_IDENTITY |
 	    MACH_RCV_TRAILER_ELEMENTS(MACH_RCV_TRAILER_AV) |
 	    MACH_RCV_TRAILER_TYPE(MACH_MSG_TRAILER_FORMAT_0)),
-					     .data = 1,
-					     .qos = (int32_t)_pthread_qos_class_encode(qos[ENV_QOS_QUEUE_OVERRIDE], 0, 0)
-				     }};
+		.data = 1,
+		.qos = (int32_t)_pthread_qos_class_encode(qos[ENV_QOS_QUEUE_OVERRIDE], 0, 0)
+	};
 
-	struct kevent_qos_s kev_err[] = {{ 0 }};
+	struct kevent_qos_s kev_err = { 0 };
 
 	/* Setup workloop for mach msg rcv */
-	r = kevent_id(25, kev, 1, kev_err, 1, NULL,
+	r = kevent_id(25, &kev, 1, &kev_err, 1, NULL,
 	    NULL, KEVENT_FLAG_WORKLOOP | KEVENT_FLAG_ERROR_EVENTS);
 
 	T_QUIET; T_ASSERT_POSIX_SUCCESS(r, "kevent_id");
@@ -1985,3 +2031,14 @@ TEST_QOS("server_kevent_id", "qos_client_send_kernel_upcall_sync_msg_with_pri", 
     QOS_CLASS_MAINTENANCE, "maintenance",
     QOS_CLASS_MAINTENANCE, "maintenance",
     QOS_CLASS_USER_INITIATED, "user initiated")
+
+/*
+ * Test 27: test sending async ipc from kernel (at IN qos and Tier 0 iotier) to port will override the servicer
+ *
+ * Do a kernel upcall at IN qos and Tier 0 iotier to a port and check if
+ * the servicer of the workloop on the other side gets the ipc override.
+ */
+TEST_QOS("server_kevent_id", "qos_iotier_client_send_kernel_upcall_async_msg", kernel_send_async_IN, "workloop_cb_test_kernel_async_send",
+    QOS_CLASS_MAINTENANCE, "maintenance",
+    QOS_CLASS_MAINTENANCE, "maintenance",
+    QOS_CLASS_UTILITY, "utility")

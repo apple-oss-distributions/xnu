@@ -141,20 +141,19 @@ extern void ipc_mqueue_init(
 
 /* destroy an mqueue */
 extern boolean_t ipc_mqueue_destroy_locked(
-	ipc_mqueue_t            mqueue);
+	ipc_mqueue_t            mqueue,
+	waitq_link_list_t      *free_l);
 
 /* Wake up receivers waiting in a message queue */
 extern void ipc_mqueue_changed(
 	ipc_space_t             space,
-	struct waitq           *waitq);
+	waitq_t                 waitq);
 
 /* Add the specific mqueue as a member of the set */
-extern kern_return_t ipc_mqueue_add_unlock(
+extern kern_return_t ipc_mqueue_add_locked(
 	ipc_mqueue_t            mqueue,
 	ipc_pset_t              pset,
-	waitq_ref_t             *reserved_link,
-	uint64_t                *reserved_prepost,
-	boolean_t               unlink_before_adding);
+	waitq_link_t           *linkp);
 
 /* Send a message to a port */
 extern mach_msg_return_t ipc_mqueue_send_locked(
@@ -177,15 +176,15 @@ extern void ipc_mqueue_override_send_locked(
 
 /* Receive a message from a message queue */
 extern void ipc_mqueue_receive(
-	struct waitq           *waitq,
+	waitq_t                 waitq,
 	mach_msg_option_t       option,
 	mach_msg_size_t         max_size,
 	mach_msg_timeout_t      timeout_val,
 	int                     interruptible);
 
 /* Receive a message from a message queue using a specified thread */
-extern wait_result_t ipc_mqueue_receive_on_thread(
-	struct waitq           *waitq,
+extern wait_result_t ipc_mqueue_receive_on_thread_and_unlock(
+	waitq_t                 waitq,
 	mach_msg_option_t       option,
 	mach_msg_size_t         max_size,
 	mach_msg_timeout_t      rcv_timeout,
@@ -222,17 +221,11 @@ extern unsigned ipc_mqueue_peek_locked(
 	mach_msg_max_trailer_t  *msg_trailerp,
 	ipc_kmsg_t              *kmsgp);
 
+#if MACH_FLIPC
 /* Release an mqueue/port reference that was granted by MACH_PEEK_MSG */
 extern void ipc_mqueue_release_peek_ref(
 	ipc_mqueue_t            mqueue);
-
-/* Gather the names of member port for a given set */
-extern void ipc_mqueue_set_gather_member_names(
-	ipc_space_t             space,
-	ipc_pset_t              pset,
-	ipc_entry_num_t         maxnames,
-	mach_port_name_t        *names,
-	ipc_entry_num_t         *actualp);
+#endif /* MACH_FLIPC */
 
 /* Clear a message count reservation */
 extern void ipc_mqueue_release_msgcount(
@@ -253,5 +246,10 @@ extern mach_msg_return_t ipc_mqueue_copyin(
 	ipc_space_t             space,
 	mach_port_name_t        name,
 	ipc_object_t            *objectp);
+
+/* Safe to use the klist ptr */
+extern bool
+ipc_port_has_klist(
+	ipc_port_t              port);
 
 #endif  /* _IPC_IPC_MQUEUE_H_ */

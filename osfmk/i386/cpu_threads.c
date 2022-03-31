@@ -91,8 +91,9 @@ x86_cache_alloc(void)
 	int                 i;
 
 	if (x86_caches == NULL) {
-		cache = zalloc_permanent(sizeof(x86_cpu_cache_t) +
-		    (MAX_CPUS * sizeof(x86_lcpu_t *)), ZALIGN(x86_cpu_cache_t));
+		cache = zalloc_permanent_tag(sizeof(x86_cpu_cache_t) +
+		    (MAX_CPUS * sizeof(x86_lcpu_t *)),
+		    ZALIGN(x86_cpu_cache_t), VM_KERN_MEMORY_CPU);
 		if (cache == NULL) {
 			return NULL;
 		}

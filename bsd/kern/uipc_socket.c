@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1998-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 1998-2022 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -123,6 +123,8 @@
 #include <sys/unpcb.h>
 #include <libkern/section_keywords.h>
 
+#include <os/log.h>
+
 #if CONFIG_MACF
 #include <security/mac_framework.h>
 #endif /* MAC */
@@ -227,7 +229,7 @@ static unsigned long sodefunct_calls = 0;
 SYSCTL_LONG(_kern_ipc, OID_AUTO, sodefunct_calls, CTLFLAG_LOCKED,
     &sodefunct_calls, "");
 
-ZONE_DECLARE(socket_zone, "socket", sizeof(struct socket), ZC_ZFREE_CLEARMEM);
+ZONE_DEFINE_TYPE(socket_zone, "socket", struct socket, ZC_ZFREE_CLEARMEM);
 so_gen_t        so_gencnt;      /* generation count for sockets */
 
 MALLOC_DEFINE(M_PCB, "pcb", "protocol control block");
@@ -413,7 +415,7 @@ socketinit(void)
 	    + get_inpcb_str_size() + 4 + get_tcp_str_size());
 
 	so_cache_zone = zone_create("socache zone", so_cache_zone_element_size,
-	    ZC_ZFREE_CLEARMEM);
+	    ZC_PGZ_USE_GUARDS | ZC_ZFREE_CLEARMEM);
 
 	bzero(&soextbkidlestat, sizeof(struct soextbkidlestat));
 	soextbkidlestat.so_xbkidle_maxperproc = SO_IDLE_BK_IDLE_MAX_PER_PROC;
@@ -759,7 +761,16 @@ socreate_internal(int dom, struct socket **aso, int type, int proto,
 		 * If so_pcb is not zero, the socket will be leaked,
 		 * so protocol attachment handler must be coded carefuly
 		 */
+		if (so->so_pcb != NULL) {
+			os_log_error(OS_LOG_DEFAULT,
+			    "so_pcb not NULL after pru_attach error %d for dom %d, proto %d, type %d",
+			    error, dom, proto, type);
+		}
+		/*
+		 * Both SS_NOFDREF and SOF_PCBCLEARING should be set to free the socket
+		 */
 		so->so_state |= SS_NOFDREF;
+		so->so_flags |= SOF_PCBCLEARING;
 		VERIFY(so->so_usecount > 0);
 		so->so_usecount--;
 		sofreelastref(so, 1);   /* will deallocate the socket */
@@ -947,6 +958,10 @@ sodealloc(struct socket *so)
 #if CONTENT_FILTER
 	cfil_sock_detach(so);
 #endif /* CONTENT_FILTER */
+
+	if (NEED_DGRAM_FLOW_TRACKING(so)) {
+		soflow_detach(so);
+	}
 
 	so->so_gencnt = OSIncrementAtomic64((SInt64 *)&so_gencnt);
 
@@ -1272,6 +1287,10 @@ soclose_locked(struct socket *so)
 		cfil_sock_detach(so);
 	}
 #endif /* CONTENT_FILTER */
+
+	if (NEED_DGRAM_FLOW_TRACKING(so)) {
+		soflow_detach(so);
+	}
 
 	if (so->so_flags1 & SOF1_EXTEND_BK_IDLE_INPROG) {
 		soresume(current_proc(), so, 1);
@@ -1675,11 +1694,10 @@ soconnectlock(struct socket *so, struct sockaddr *nam, int dolock)
 		error = EISCONN;
 	} else {
 		/*
-		 * For TCP, check if destination address is a tracker and mark the socket accordingly
-		 * (only if it hasn't been marked yet).
+		 * For connected v4/v6 sockets, check if destination address associates with a domain name and if it is
+		 * a tracker domain.  Mark socket accordingly.  Skip lookup if socket has already been marked a tracker.
 		 */
-		if (so->so_proto && so->so_proto->pr_type == SOCK_STREAM && so->so_proto->pr_protocol == IPPROTO_TCP &&
-		    !(so->so_flags1 & SOF1_KNOWN_TRACKER)) {
+		if (!(so->so_flags1 & SOF1_KNOWN_TRACKER) && IS_INET(so)) {
 			if (tracker_lookup(so->so_flags & SOF_DELEGATED ? so->e_uuid : so->last_uuid, nam, &metadata) == 0) {
 				if (metadata.flags & SO_TRACKER_ATTRIBUTE_FLAGS_TRACKER) {
 					so->so_flags1 |= SOF1_KNOWN_TRACKER;
@@ -2140,6 +2158,7 @@ sosend(struct socket *so, struct sockaddr *addr, struct uio *uio,
 {
 	struct mbuf **mp;
 	struct mbuf *m, *freelist = NULL;
+	struct soflow_hash_entry *dgram_flow_entry = NULL;
 	user_ssize_t space, len, resid, orig_resid;
 	int clen = 0, error, dontroute, sendflags;
 	int atomic = sosendallatonce(so) || top;
@@ -2159,6 +2178,10 @@ sosend(struct socket *so, struct sockaddr *addr, struct uio *uio,
 	    so->so_snd.sb_cc, so->so_snd.sb_lowat, so->so_snd.sb_hiwat);
 
 	socket_lock(so, 1);
+
+	if (NEED_DGRAM_FLOW_TRACKING(so)) {
+		dgram_flow_entry = soflow_get_flow(so, NULL, addr, control, resid, true, 0);
+	}
 
 	/*
 	 * trace if tracing & network (vs. unix) sockets & and
@@ -2430,6 +2453,7 @@ sosend(struct socket *so, struct sockaddr *addr, struct uio *uio,
 						 * headers in first mbuf.
 						 */
 						if (atomic && top == NULL &&
+						    bytes_to_copy > 0 &&
 						    bytes_to_copy < MHLEN) {
 							MH_ALIGN(freelist,
 							    bytes_to_copy);
@@ -2443,8 +2467,8 @@ sosend(struct socket *so, struct sockaddr *addr, struct uio *uio,
 						mlen = m->m_ext.ext_size -
 						    M_LEADINGSPACE(m);
 					} else if ((m->m_flags & M_PKTHDR)) {
-						mlen =
-						    MHLEN - M_LEADINGSPACE(m);
+						mlen = MHLEN - M_LEADINGSPACE(m);
+						m_add_crumb(m, PKT_CRUMB_SOSEND);
 					} else {
 						mlen = MLEN - M_LEADINGSPACE(m);
 					}
@@ -2521,7 +2545,7 @@ sosend(struct socket *so, struct sockaddr *addr, struct uio *uio,
 				 * Content filter processing
 				 */
 				error = cfil_sock_data_out(so, addr, top,
-				    control, sendflags);
+				    control, sendflags, dgram_flow_entry);
 				if (error) {
 					if (error == EJUSTRETURN) {
 						error = 0;
@@ -2563,6 +2587,10 @@ out_locked:
 	}
 	if (freelist != NULL) {
 		m_freem_list(freelist);
+	}
+
+	if (dgram_flow_entry != NULL) {
+		soflow_free_flow(dgram_flow_entry);
 	}
 
 	soclearfastopen(so);
@@ -2634,6 +2662,7 @@ int
 sosend_list(struct socket *so, struct uio **uioarray, u_int uiocnt, int flags)
 {
 	struct mbuf *m, *freelist = NULL;
+	struct soflow_hash_entry *dgram_flow_entry = NULL;
 	user_ssize_t len, resid;
 	int error, dontroute;
 	int atomic = sosendallatonce(so);
@@ -2685,6 +2714,10 @@ sosend_list(struct socket *so, struct uio **uioarray, u_int uiocnt, int flags)
 	socket_lock(so, 1);
 	so_update_last_owner_locked(so, p);
 	so_update_policy(so);
+
+	if (NEED_DGRAM_FLOW_TRACKING(so)) {
+		dgram_flow_entry = soflow_get_flow(so, NULL, NULL, NULL, resid, true, 0);
+	}
 
 #if NECP
 	so_update_necp_policy(so, NULL, NULL);
@@ -2892,7 +2925,7 @@ sosend_list(struct socket *so, struct uio **uioarray, u_int uiocnt, int flags)
 					 * Content filter processing
 					 */
 					error = cfil_sock_data_out(so, NULL, m,
-					    NULL, 0);
+					    NULL, 0, dgram_flow_entry);
 					if (error != 0 && error != EJUSTRETURN) {
 						goto release;
 					}
@@ -2941,6 +2974,10 @@ out:
 	}
 	if (freelist != NULL) {
 		m_freem_list(freelist);
+	}
+
+	if (dgram_flow_entry != NULL) {
+		soflow_free_flow(dgram_flow_entry);
 	}
 
 	KERNEL_DEBUG(DBG_FNC_SOSEND_LIST | DBG_FUNC_END, so, resid,
@@ -5093,6 +5130,9 @@ sosetoptlock(struct socket *so, struct sockopt *sopt, int dolock)
 			} else {
 				so->so_options &= ~sopt->sopt_name;
 			}
+#if SKYWALK
+			inp_update_netns_flags(so);
+#endif /* SKYWALK */
 			break;
 
 		case SO_SNDBUF:
@@ -6557,7 +6597,7 @@ sopoll(struct socket *so, int events, kauth_cred_t cred, void * wql)
 int
 soo_kqfilter(struct fileproc *fp, struct knote *kn, struct kevent_qos_s *kev)
 {
-	struct socket *so = (struct socket *)fp->fp_glob->fg_data;
+	struct socket *so = (struct socket *)fp_get_data(fp);
 	int result;
 
 	socket_lock(so, 1);
@@ -6676,7 +6716,7 @@ out:
 static int
 filt_sorattach(struct knote *kn, __unused struct kevent_qos_s *kev)
 {
-	struct socket *so = (struct socket *)kn->kn_fp->fp_glob->fg_data;
+	struct socket *so = (struct socket *)fp_get_data(kn->kn_fp);
 
 	/* socket locked */
 
@@ -6703,7 +6743,7 @@ filt_sorattach(struct knote *kn, __unused struct kevent_qos_s *kev)
 static void
 filt_sordetach(struct knote *kn)
 {
-	struct socket *so = (struct socket *)kn->kn_fp->fp_glob->fg_data;
+	struct socket *so = (struct socket *)fp_get_data(kn->kn_fp);
 
 	socket_lock(so, 1);
 	if (so->so_rcv.sb_flags & SB_KNOTE) {
@@ -6718,7 +6758,7 @@ filt_sordetach(struct knote *kn)
 static int
 filt_soread(struct knote *kn, long hint)
 {
-	struct socket *so = (struct socket *)kn->kn_fp->fp_glob->fg_data;
+	struct socket *so = (struct socket *)fp_get_data(kn->kn_fp);
 	int retval;
 
 	if ((hint & SO_FILT_HINT_LOCKED) == 0) {
@@ -6737,7 +6777,7 @@ filt_soread(struct knote *kn, long hint)
 static int
 filt_sortouch(struct knote *kn, struct kevent_qos_s *kev)
 {
-	struct socket *so = (struct socket *)kn->kn_fp->fp_glob->fg_data;
+	struct socket *so = (struct socket *)fp_get_data(kn->kn_fp);
 	int retval;
 
 	socket_lock(so, 1);
@@ -6757,7 +6797,7 @@ filt_sortouch(struct knote *kn, struct kevent_qos_s *kev)
 static int
 filt_sorprocess(struct knote *kn, struct kevent_qos_s *kev)
 {
-	struct socket *so = (struct socket *)kn->kn_fp->fp_glob->fg_data;
+	struct socket *so = (struct socket *)fp_get_data(kn->kn_fp);
 	int retval;
 
 	socket_lock(so, 1);
@@ -6857,7 +6897,7 @@ out:
 static int
 filt_sowattach(struct knote *kn, __unused struct kevent_qos_s *kev)
 {
-	struct socket *so = (struct socket *)kn->kn_fp->fp_glob->fg_data;
+	struct socket *so = (struct socket *)fp_get_data(kn->kn_fp);
 
 	/* socket locked */
 	if (KNOTE_ATTACH(&so->so_snd.sb_sel.si_note, kn)) {
@@ -6871,7 +6911,7 @@ filt_sowattach(struct knote *kn, __unused struct kevent_qos_s *kev)
 static void
 filt_sowdetach(struct knote *kn)
 {
-	struct socket *so = (struct socket *)kn->kn_fp->fp_glob->fg_data;
+	struct socket *so = (struct socket *)fp_get_data(kn->kn_fp);
 	socket_lock(so, 1);
 
 	if (so->so_snd.sb_flags & SB_KNOTE) {
@@ -6886,7 +6926,7 @@ filt_sowdetach(struct knote *kn)
 static int
 filt_sowrite(struct knote *kn, long hint)
 {
-	struct socket *so = (struct socket *)kn->kn_fp->fp_glob->fg_data;
+	struct socket *so = (struct socket *)fp_get_data(kn->kn_fp);
 	int ret;
 
 	if ((hint & SO_FILT_HINT_LOCKED) == 0) {
@@ -6905,7 +6945,7 @@ filt_sowrite(struct knote *kn, long hint)
 static int
 filt_sowtouch(struct knote *kn, struct kevent_qos_s *kev)
 {
-	struct socket *so = (struct socket *)kn->kn_fp->fp_glob->fg_data;
+	struct socket *so = (struct socket *)fp_get_data(kn->kn_fp);
 	int ret;
 
 	socket_lock(so, 1);
@@ -6925,7 +6965,7 @@ filt_sowtouch(struct knote *kn, struct kevent_qos_s *kev)
 static int
 filt_sowprocess(struct knote *kn, struct kevent_qos_s *kev)
 {
-	struct socket *so = (struct socket *)kn->kn_fp->fp_glob->fg_data;
+	struct socket *so = (struct socket *)fp_get_data(kn->kn_fp);
 	int ret;
 
 	socket_lock(so, 1);
@@ -7077,7 +7117,7 @@ filt_sockev_common(struct knote *kn, struct kevent_qos_s *kev,
 static int
 filt_sockattach(struct knote *kn, __unused struct kevent_qos_s *kev)
 {
-	struct socket *so = (struct socket *)kn->kn_fp->fp_glob->fg_data;
+	struct socket *so = (struct socket *)fp_get_data(kn->kn_fp);
 
 	/* socket locked */
 	kn->kn_hook32 = 0;
@@ -7092,7 +7132,7 @@ filt_sockattach(struct knote *kn, __unused struct kevent_qos_s *kev)
 static void
 filt_sockdetach(struct knote *kn)
 {
-	struct socket *so = (struct socket *)kn->kn_fp->fp_glob->fg_data;
+	struct socket *so = (struct socket *)fp_get_data(kn->kn_fp);
 	socket_lock(so, 1);
 
 	if ((so->so_flags & SOF_KNOTE) != 0) {
@@ -7107,7 +7147,7 @@ static int
 filt_sockev(struct knote *kn, long hint)
 {
 	int ret = 0, locked = 0;
-	struct socket *so = (struct socket *)kn->kn_fp->fp_glob->fg_data;
+	struct socket *so = (struct socket *)fp_get_data(kn->kn_fp);
 	long ev_hint = (hint & SO_FILT_HINT_EV);
 
 	if ((hint & SO_FILT_HINT_LOCKED) == 0) {
@@ -7134,7 +7174,7 @@ filt_socktouch(
 	struct knote *kn,
 	struct kevent_qos_s *kev)
 {
-	struct socket *so = (struct socket *)kn->kn_fp->fp_glob->fg_data;
+	struct socket *so = (struct socket *)fp_get_data(kn->kn_fp);
 	uint32_t changed_flags;
 	int ret;
 
@@ -7175,7 +7215,7 @@ filt_socktouch(
 static int
 filt_sockprocess(struct knote *kn, struct kevent_qos_s *kev)
 {
-	struct socket *so = (struct socket *)kn->kn_fp->fp_glob->fg_data;
+	struct socket *so = (struct socket *)fp_get_data(kn->kn_fp);
 	int ret = 0;
 
 	socket_lock(so, 1);
@@ -7684,7 +7724,7 @@ so_set_extended_bk_idle(struct socket *so, int optval)
 				continue;
 			}
 
-			so2 = (struct socket *)fp->fp_glob->fg_data;
+			so2 = (struct socket *)fp_get_data(fp);
 			if (so != so2 &&
 			    so2->so_flags1 & SOF1_EXTEND_BK_IDLE_WANTED) {
 				count++;
@@ -7797,7 +7837,7 @@ resume_proc_sockets(proc_t p)
 				continue;
 			}
 
-			so = (struct socket *)fp->fp_glob->fg_data;
+			so = (struct socket *)fp_get_data(fp);
 			(void) soresume(p, so, 0);
 		}
 		proc_fdunlock(p);
@@ -7817,6 +7857,9 @@ so_set_recv_anyif(struct socket *so, int optval)
 		} else {
 			sotoinpcb(so)->inp_flags &= ~INP_RECV_ANYIF;
 		}
+#if SKYWALK
+		inp_update_netns_flags(so);
+#endif /* SKYWALK */
 	}
 
 

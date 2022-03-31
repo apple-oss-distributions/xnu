@@ -181,9 +181,7 @@ lck_rw_init(
 	if ((attr->lck_attr_val & LCK_ATTR_RW_SHARED_PRIORITY) == 0) {
 		lck->lck_rw_priv_excl = TRUE;
 	}
-
-	lck_grp_reference(grp);
-	lck_grp_lckcnt_incr(grp, LCK_TYPE_RW);
+	lck_grp_reference(grp, &grp->lck_grp_rwcnt);
 }
 
 /*!
@@ -228,9 +226,7 @@ lck_rw_destroy(
 	lck_rw_assert(lck, LCK_RW_ASSERT_NOTHELD);
 
 	lck->lck_rw_tag = LCK_RW_TAG_DESTROYED;
-	lck_grp_lckcnt_decr(grp, LCK_TYPE_RW);
-	lck_grp_deallocate(grp);
-	return;
+	lck_grp_deallocate(grp, &grp->lck_grp_rwcnt);
 }
 
 #ifdef DEBUG_RW
@@ -264,13 +260,15 @@ lck_rw_destroy(
  * possible return to userspace without unlocking and to find possible readers
  * holding the lock.
  */
-void
+__startup_func
+static void
 rw_lock_init(void)
 {
 	if (kern_feature_override(KF_RW_LOCK_DEBUG_OVRD)) {
 		LcksOpts |= disLkRWDebug;
 	}
 }
+STARTUP(LOCKS_EARLY, STARTUP_RANK_FIRST, rw_lock_init);
 
 static inline struct rw_lock_debug_entry *
 find_lock_in_savedlocks(lck_rw_t* lock, rw_lock_debug_t *rw_locks_held)

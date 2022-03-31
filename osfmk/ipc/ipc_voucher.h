@@ -158,7 +158,10 @@ extern void ipc_voucher_receive_postprocessing(ipc_kmsg_t kmsg, mach_msg_option_
 extern void ipc_voucher_send_preprocessing(ipc_kmsg_t kmsg);
 extern ipc_voucher_t ipc_voucher_get_default_voucher(void);
 extern void mach_init_activity_id(void);
+#if CONFIG_VOUCHER_DEPRECATED
 extern kern_return_t ipc_get_pthpriority_from_kmsg_voucher(ipc_kmsg_t kmsg, ipc_pthread_priority_value_t *qos);
+#endif /* CONFIG_VOUCHER_DEPRECATED */
+
 #define ivac_lock_init(ivac) \
 	lck_spin_init(&(ivac)->ivac_lock_data, &ipc_lck_grp, &ipc_lck_attr)
 #define ivac_lock_destroy(ivac) \

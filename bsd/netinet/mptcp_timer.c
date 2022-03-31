@@ -221,9 +221,7 @@ mptcp_cancel_all_timers(struct mptcb *mp_tp)
 {
 	struct mptses *mpte = mp_tp->mpt_mpte;
 
-	if (mpte->mpte_time_target) {
-		mptcp_cancel_urgency_timer(mpte);
-	}
+	mptcp_cancel_urgency_timer(mpte);
 
 	mptcp_cancel_timer(mp_tp, MPTT_REXMT);
 	mptcp_cancel_timer(mp_tp, MPTT_TW);
@@ -231,11 +229,15 @@ mptcp_cancel_all_timers(struct mptcb *mp_tp)
 }
 
 static void
-mptcp_urgency_timer_locked(struct mptses *mpte)
+mptcp_urgency_timer(void *param0, __unused void *param1)
 {
-	uint64_t time_now = mach_continuous_time();
+	struct mptses *mpte = (struct mptses *)param0;
 	struct socket *mp_so = mptetoso(mpte);
+	uint64_t time_now;
 
+	socket_lock(mp_so, 1);
+
+	time_now = mach_continuous_time();
 	VERIFY(mp_so->so_usecount >= 0);
 
 	os_log(mptcp_log_handle, "%s - %lx: timer at %llu now %llu usecount %u\n",
@@ -244,17 +246,26 @@ mptcp_urgency_timer_locked(struct mptses *mpte)
 	mptcp_check_subflows_and_add(mpte);
 
 	mp_so->so_usecount--;
+
+	socket_unlock(mp_so, 1);
 }
 
 static void
-mptcp_urgency_timer(void *param0, __unused void *param1)
+mptcp_urgency_stop(void *param0, __unused void *param1)
 {
 	struct mptses *mpte = (struct mptses *)param0;
 	struct socket *mp_so = mptetoso(mpte);
 
 	socket_lock(mp_so, 1);
 
-	mptcp_urgency_timer_locked(mpte);
+	VERIFY(mp_so->so_usecount >= 0);
+
+	os_log(mptcp_log_handle, "%s - %lx: usecount %u\n",
+	    __func__, (unsigned long)VM_KERNEL_ADDRPERM(mpte), mp_so->so_usecount);
+
+	mptcp_check_subflows_and_remove(mpte);
+
+	mp_so->so_usecount--;
 
 	socket_unlock(mp_so, 1);
 }
@@ -264,6 +275,7 @@ mptcp_init_urgency_timer(struct mptses *mpte)
 {
 	/* thread_call_allocate never fails */
 	mpte->mpte_time_thread = thread_call_allocate(mptcp_urgency_timer, mpte);
+	mpte->mpte_stop_urgency = thread_call_allocate(mptcp_urgency_stop, mpte);
 }
 
 void
@@ -281,7 +293,13 @@ mptcp_set_urgency_timer(struct mptses *mpte)
 	}
 
 	if (mpte->mpte_time_target == 0) {
-		mptcp_cancel_urgency_timer(mpte);
+		/* Close subflows right now */
+
+		ret = thread_call_enter(mpte->mpte_stop_urgency);
+
+		if (!ret) {
+			mp_so->so_usecount++;
+		}
 
 		goto exit_log;
 	}
@@ -298,10 +316,12 @@ mptcp_set_urgency_timer(struct mptses *mpte)
 			mp_so->so_usecount++;
 		}
 	} else if ((int64_t)(mpte->mpte_time_target - time_now) <= 0) {
-		mp_so->so_usecount++;
-
 		/* Already passed the deadline, trigger subflows now */
-		mptcp_urgency_timer_locked(mpte);
+		ret = thread_call_enter(mpte->mpte_time_thread);
+
+		if (!ret) {
+			mp_so->so_usecount++;
+		}
 	}
 
 exit_log:
@@ -323,6 +343,11 @@ mptcp_cancel_urgency_timer(struct mptses *mpte)
 
 	mptcp_check_subflows_and_remove(mpte);
 
+	if (ret) {
+		mp_so->so_usecount--;
+	}
+
+	ret = thread_call_cancel(mpte->mpte_stop_urgency);
 	if (ret) {
 		mp_so->so_usecount--;
 	}

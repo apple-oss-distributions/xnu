@@ -634,7 +634,7 @@ IOSharedInterruptController::registerInterrupt(IOService *nub,
 	}
 
 	// Create the vectorData for the IOInterruptSource.
-	vectorData = OSData::withBytes(&vectorNumber, sizeof(vectorNumber));
+	vectorData = OSData::withValue(vectorNumber);
 	if (vectorData == NULL) {
 		IOLockUnlock(vector->interruptLock);
 		return kIOReturnNoMemory;

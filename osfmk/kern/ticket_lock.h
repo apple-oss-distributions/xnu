@@ -58,6 +58,9 @@ __BEGIN_DECLS
  *
  * This lower level interface supports an @c *_allow_invalid()
  * to implement advanced memory reclamation schemes using sequestering.
+ * Do note that when @c CONFIG_PROB_GZALLOC is engaged, and the target lock
+ * comes from a zone, PGZ must be handled manually.
+ * See ipc_object_lock_allow_invalid() for an example of that.
  *
  * @c hw_lck_ticket_invalidate() must be used on locks
  * that will be used this way: in addition to make subsequent calls to
@@ -65,6 +68,47 @@ __BEGIN_DECLS
  * @c hw_lck_ticket_destroy() to synchronize with callers to
  * @c hw_lck_ticket_lock_allow_invalid() who successfully reserved
  * a ticket but will fail, ensuring the memory can't be freed too early.
+ *
+ *
+ * @c hw_lck_ticket_reserve() can be used to pre-reserve a ticket.
+ * When this function returns @c true, then the lock was acquired.
+ * When it returns @c false, then @c hw_lck_ticket_wait() must
+ * be called to wait for this ticket.
+ *
+ * This can be used to resolve certain lock inversions: assuming
+ * two locks, @c L (a mutex or any kind of lock) and @c T (a ticket lock),
+ * where @c L can be taken when @c T is held but not the other way around,
+ * then the following can be done to take both locks in "the wrong order",
+ * with a guarantee of forward progress:
+ *
+ * <code>
+ *     // starts with L held
+ *     uint32_t ticket;
+ *
+ *     if (!hw_lck_ticket_reserve(T, &ticket)) {
+ *         unlock(L);
+ *         hw_lck_ticket_wait(T, ticket):
+ *         lock(L);
+ *         // possibly validate what might have changed
+ *         // due to dropping L
+ *     }
+ *
+ *     // both L and T are held
+ * </code>
+ *
+ * This pattern above is safe even for a case when the protected
+ * resource contains the ticket lock @c T, provided that it is
+ * guaranteed that both @c T and @c L (in the proper order) will
+ * be taken before that resource death. In that case, in the resource
+ * destructor, when @c hw_lck_ticket_destroy() is called, it will
+ * wait for the reservation to be released.
+ *
+ * See @c waitq_pull_thread_locked() for an example of this where:
+ * - @c L is the thread lock of a thread waiting on a given waitq,
+ * - @c T is the lock for that waitq,
+ * - the waitq can't be destroyed before the thread is unhooked from it,
+ *   which happens under both @c L and @c T.
+ *
  *
  * @note:
  * At the moment, this construct only supports up to 255 CPUs.
@@ -109,14 +153,20 @@ typedef struct {
 
 void hw_lck_ticket_init(hw_lck_ticket_t * tlock LCK_GRP_ARG(lck_grp_t *grp));
 void hw_lck_ticket_init_locked(hw_lck_ticket_t * tlock LCK_GRP_ARG(lck_grp_t *grp));
-void hw_lck_ticket_destroy(hw_lck_ticket_t * tlock, bool keep_type LCK_GRP_ARG(lck_grp_t *grp));
+void hw_lck_ticket_destroy(hw_lck_ticket_t * tlock LCK_GRP_ARG(lck_grp_t *grp));
 
 bool hw_lck_ticket_held(hw_lck_ticket_t *tlock) __result_use_check;
 void hw_lck_ticket_lock(hw_lck_ticket_t * tlock LCK_GRP_ARG(lck_grp_t *grp));
 hw_lock_status_t hw_lck_ticket_lock_to(hw_lck_ticket_t * tlock, uint64_t timeout,
     hw_lock_timeout_handler_t handler LCK_GRP_ARG(lck_grp_t *grp));
-int  hw_lck_ticket_lock_try(hw_lck_ticket_t * tlock LCK_GRP_ARG(lck_grp_t *grp));
+bool hw_lck_ticket_lock_try(hw_lck_ticket_t * tlock LCK_GRP_ARG(lck_grp_t *grp)) __result_use_check;
 void hw_lck_ticket_unlock(hw_lck_ticket_t *tlock);
+
+bool hw_lck_ticket_reserve(hw_lck_ticket_t * tlock, uint32_t *ticket LCK_GRP_ARG(lck_grp_t *grp)) __result_use_check;
+hw_lock_status_t hw_lck_ticket_reserve_allow_invalid(hw_lck_ticket_t * tlock,
+    uint32_t *ticket LCK_GRP_ARG(lck_grp_t *grp)) __result_use_check;
+hw_lock_status_t hw_lck_ticket_wait(hw_lck_ticket_t * tlock, uint32_t ticket,
+    uint64_t timeout, hw_lock_timeout_handler_t handler LCK_GRP_ARG(lck_grp_t *grp));
 
 hw_lock_status_t hw_lck_ticket_lock_allow_invalid(hw_lck_ticket_t * tlock,
     uint64_t timeout, hw_lock_timeout_handler_t handler LCK_GRP_ARG(lck_grp_t *grp));
@@ -125,12 +175,17 @@ void hw_lck_ticket_invalidate(hw_lck_ticket_t *tlock);
 #if !LOCK_STATS
 #define hw_lck_ticket_init(lck, grp)             hw_lck_ticket_init(lck)
 #define hw_lck_ticket_init_locked(lck, grp)      hw_lck_ticket_init_locked(lck)
-#define hw_lck_ticket_destroy(lck, kt, grp)      hw_lck_ticket_destroy(lck,kt)
+#define hw_lck_ticket_destroy(lck, grp)          hw_lck_ticket_destroy(lck)
 #define hw_lck_ticket_lock(lck, grp)             hw_lck_ticket_lock(lck)
 #define hw_lck_ticket_lock_to(lck, to, cb, grp)  hw_lck_ticket_lock_to(lck, to, cb)
 #define hw_lck_ticket_lock_try(lck, grp)         hw_lck_ticket_lock_try(lck)
 #define hw_lck_ticket_lock_allow_invalid(lck, to, cb, grp) \
 	hw_lck_ticket_lock_allow_invalid(lck, to, cb)
+#define hw_lck_ticket_reserve(lck, t, grp)       hw_lck_ticket_reserve(lck, t)
+#define hw_lck_ticket_reserve_allow_invalid(lck, t, grp) \
+	hw_lck_ticket_reserve_allow_invalid(lck, t)
+#define hw_lck_ticket_wait(lck, ticket, to, cb, grp) \
+	hw_lck_ticket_wait(lck, ticket, to, cb)
 #endif /* !LOCK_STATS */
 
 #pragma GCC visibility pop
@@ -155,7 +210,7 @@ void lck_ticket_assert_owned(lck_ticket_t *tlock);
 #endif
 
 #if XNU_KERNEL_PRIVATE
-int  lck_ticket_lock_try(lck_ticket_t *tlock, lck_grp_t *grp) __result_use_check;
+bool lck_ticket_lock_try(lck_ticket_t *tlock, lck_grp_t *grp) __result_use_check;
 bool kdp_lck_ticket_is_acquired(lck_ticket_t *lck) __result_use_check;
 #endif
 

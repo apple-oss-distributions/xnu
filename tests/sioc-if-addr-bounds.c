@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2020-2022 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -1042,4 +1042,132 @@ T_DECL(sioc_ifr_addr_config, "test failure cases for interface address configura
 
 	close(s);
 	close(s6);
+}
+
+/**
+** Test SIOCPROTOATTACH, SIOCPROTOATTACH_IN6
+**/
+static int S_socket = -1;
+
+static int
+get_inet_dgram_socket(void)
+{
+	if (S_socket >= 0) {
+		return S_socket;
+	}
+	S_socket = socket(AF_INET, SOCK_DGRAM, 0);
+	T_QUIET;
+	T_ASSERT_POSIX_SUCCESS(S_socket, "socket(AF_INET, SOCK_DGRAM, 0)");
+	return S_socket;
+}
+
+static void
+close_inet_dgram_socket(void)
+{
+	if (S_socket >= 0) {
+		close(S_socket);
+		S_socket = -1;
+	}
+}
+
+static int S_socket_6 = -1;
+
+static int
+get_inet6_dgram_socket(void)
+{
+	if (S_socket_6 >= 0) {
+		return S_socket_6;
+	}
+	S_socket_6 = socket(AF_INET6, SOCK_DGRAM, 0);
+	T_QUIET;
+	T_ASSERT_POSIX_SUCCESS(S_socket_6, "socket(AF_INET6, SOCK_DGRAM, 0)");
+	return S_socket_6;
+}
+
+static void
+close_inet6_dgram_socket(void)
+{
+	if (S_socket_6 >= 0) {
+		close(S_socket_6);
+		S_socket_6 = -1;
+	}
+}
+
+static char ifname[IFNAMSIZ];
+
+static void
+test_proto_attach_cleanup(void)
+{
+	if (ifname[0] != '\0') {
+		int     s;
+
+		s = get_inet_dgram_socket();
+		(void)ifnet_destroy(s, ifname, false);
+		T_LOG("Destroyed '%s'", ifname);
+		ifname[0] = '\0';
+	}
+}
+
+static void
+test_proto_attach_atend(void)
+{
+	test_proto_attach_cleanup();
+	close_inet_dgram_socket();
+	close_inet6_dgram_socket();
+}
+
+static void
+test_proto_attach(void)
+{
+	int             error;
+	struct ifreq    ifr;
+	int             s;
+	int             s6;
+
+	T_ATEND(test_proto_attach_atend);
+	s = get_inet_dgram_socket();
+	strlcpy(ifname, "feth", sizeof(ifname));
+	error = ifnet_create(s, ifname, sizeof(ifname));
+	if (error != 0) {
+		if (error == EINVAL) {
+			T_SKIP("%s cloning interface not supported", ifname);
+		}
+		T_SKIP("%s cloning interface failed", ifname);
+	}
+	T_LOG("Created '%s'", ifname);
+
+	/* first proto attach should succeed */
+	bzero(&ifr, sizeof(ifr));
+	strncpy(ifr.ifr_name, ifname, sizeof(ifr.ifr_name));
+	error = ioctl(s, SIOCPROTOATTACH, &ifr);
+	T_ASSERT_POSIX_SUCCESS(error, "SIOCPROTOATTACH %s succeeded",
+	    ifr.ifr_name);
+
+	/* second proto attach should fail with EEXIST */
+	error = ioctl(s, SIOCPROTOATTACH, &ifr);
+	T_ASSERT_POSIX_FAILURE(error, EEXIST,
+	    "SIOCPROTOATTACH %s failed as expected",
+	    ifr.ifr_name);
+
+	/* first proto attach should succeed */
+	s6 = get_inet6_dgram_socket();
+	bzero(&ifr, sizeof(ifr));
+	strncpy(ifr.ifr_name, ifname, sizeof(ifr.ifr_name));
+	error = ioctl(s6, SIOCPROTOATTACH_IN6, &ifr);
+	T_ASSERT_POSIX_SUCCESS(error,
+	    "SIOCPROTOATTACH_IN6 %s succeeded",
+	    ifr.ifr_name);
+
+	/* second proto attach should fail with EEXIST */
+	error = ioctl(s6, SIOCPROTOATTACH_IN6, &ifr);
+	T_ASSERT_POSIX_FAILURE(error, EEXIST,
+	    "SIOCPROTOATTACH_IN6 %s failed as expected",
+	    ifr.ifr_name);
+	test_proto_attach_cleanup();
+}
+
+T_DECL(sioc_proto_attach, "test protocol attachment",
+    T_META_ASROOT(true))
+{
+	test_proto_attach();
 }

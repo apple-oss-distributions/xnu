@@ -132,9 +132,22 @@ macx_backing_store_compaction(int flags)
 	}
 
 	if (flags & SWAP_COMPACT_DISABLE) {
+#if (XNU_TARGET_OS_OSX && __arm64__)
+		/*
+		 * There's no synch. between the swap being turned
+		 * OFF from user-space and all processes having exited.
+		 * On fast SSD AS macs we can accumulate a lot of
+		 * compressed memory between those 2 operations.
+		 * So we allow swap till we are ready to shutdown the
+		 * system. Even with a bunch of processes
+		 * still running and creating a lot of compressed
+		 * memory the system can shutdown normally.
+		 */
+#else /* (XNU_TARGET_OS_OSX && __arm64__) */
 		compressor_store_stop_compaction = TRUE;
 
 		kprintf("compressor_store_stop_compaction = TRUE\n");
+#endif /* (XNU_TARGET_OS_OSX && __arm64__) */
 	} else if (flags & SWAP_COMPACT_ENABLE) {
 		compressor_store_stop_compaction = FALSE;
 

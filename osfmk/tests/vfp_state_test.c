@@ -112,10 +112,10 @@ vfp_state_test_thread_routine(void *args, __unused wait_result_t wr)
 	vfp_state_test_args->result = -1;
 
 	/* Allocate memory to store expected and actual VFP register values */
-	vfp_regs = kalloc_flags(sizeof(vfp_state_test_regs),
+	vfp_regs = kalloc_data(sizeof(vfp_state_test_regs),
 	    Z_WAITOK | Z_NOFAIL);
 
-	vfp_regs_expected = kalloc_flags(sizeof(vfp_state_test_regs),
+	vfp_regs_expected = kalloc_data(sizeof(vfp_state_test_regs),
 	    Z_WAITOK | Z_NOFAIL);
 
 	/* Preload VFP registers with unique, per-thread patterns */
@@ -189,8 +189,8 @@ vfp_state_test_thread_routine(void *args, __unused wait_result_t wr)
 	vfp_state_test_args->result = 0;
 
 vfp_state_thread_cmp_failure:
-	kfree(vfp_regs_expected, sizeof(vfp_state_test_regs));
-	kfree(vfp_regs, sizeof(vfp_state_test_regs));
+	kfree_data(vfp_regs_expected, sizeof(vfp_state_test_regs));
+	kfree_data(vfp_regs, sizeof(vfp_state_test_regs));
 
 	/* Signal that the thread has finished, and terminate */
 	wake_threads(vfp_state_test_args->end_barrier);

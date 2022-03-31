@@ -347,7 +347,7 @@ init_iotrace_bufs(int entries_per_cpu)
 	size_t size = entries_per_cpu * sizeof(iotrace_entry_t);
 
 	percpu_foreach(ring, iotrace_ring) {
-		*ring = zalloc_permanent(size, 64);
+		*ring = zalloc_permanent_tag(size, 63, VM_KERN_MEMORY_DIAG);
 	};
 
 	iotrace_entries_per_cpu = entries_per_cpu;
@@ -359,7 +359,7 @@ init_traptrace_bufs(int entries_per_cpu)
 	size_t size = entries_per_cpu * sizeof(traptrace_entry_t);
 
 	percpu_foreach(ring, traptrace_ring) {
-		*ring = zalloc_permanent(size, 64);
+		*ring = zalloc_permanent_tag(size, 63, VM_KERN_MEMORY_DIAG);
 	};
 
 	traptrace_entries_per_cpu = entries_per_cpu;

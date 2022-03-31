@@ -514,8 +514,8 @@ host_set_exception_ports(
 	new_label = mac_exc_create_label_for_current_proc();
 
 	for (i = FIRST_EXCEPTION; i < EXC_TYPES_COUNT; i++) {
-		if (host_priv->exc_actions[i].label == NULL) {
-			deferred_labels[i] = mac_exc_create_label();
+		if (mac_exc_label(&host_priv->exc_actions[i]) == NULL) {
+			deferred_labels[i] = mac_exc_create_label(&host_priv->exc_actions[i]);
 		} else {
 			deferred_labels[i] = NULL;
 		}
@@ -526,7 +526,7 @@ host_set_exception_ports(
 
 	for (i = FIRST_EXCEPTION; i < EXC_TYPES_COUNT; i++) {
 #if CONFIG_MACF
-		if (host_priv->exc_actions[i].label == NULL) {
+		if (mac_exc_label(&host_priv->exc_actions[i]) == NULL) {
 			// Lazy initialization (see ipc_port_init).
 			mac_exc_associate_action_label(&host_priv->exc_actions[i], deferred_labels[i]);
 			deferred_labels[i] = NULL; // Label is used, do not free.
@@ -708,8 +708,8 @@ host_swap_exception_ports(
 	new_label = mac_exc_create_label_for_current_proc();
 
 	for (i = FIRST_EXCEPTION; i < EXC_TYPES_COUNT; i++) {
-		if (host_priv->exc_actions[i].label == NULL) {
-			deferred_labels[i] = mac_exc_create_label();
+		if (mac_exc_label(&host_priv->exc_actions[i]) == NULL) {
+			deferred_labels[i] = mac_exc_create_label(&host_priv->exc_actions[i]);
 		} else {
 			deferred_labels[i] = NULL;
 		}
@@ -721,7 +721,7 @@ host_swap_exception_ports(
 	assert(EXC_TYPES_COUNT > FIRST_EXCEPTION);
 	for (count = 0, i = FIRST_EXCEPTION; i < EXC_TYPES_COUNT && count < *CountCnt; i++) {
 #if CONFIG_MACF
-		if (host_priv->exc_actions[i].label == NULL) {
+		if (mac_exc_label(&host_priv->exc_actions[i]) == NULL) {
 			// Lazy initialization (see ipc_port_init).
 			mac_exc_associate_action_label(&host_priv->exc_actions[i], deferred_labels[i]);
 			deferred_labels[i] = NULL; // Label is used, do not free.

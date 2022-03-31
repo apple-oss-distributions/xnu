@@ -791,6 +791,8 @@ enum {
 	 * not included in VFS_RENAME_FLAGS_MASK.
 	 */
 	VFS_RENAME_DATALESS             = 0x00000008,
+	/* used by sys/stdio for RENAME_NOFOLLOW_ANY */
+	VFS_RENAME_RESERVED1            = 0x00000010,
 
 	VFS_RENAME_FLAGS_MASK   = (VFS_RENAME_SECLUDE | VFS_RENAME_SWAP
 	    | VFS_RENAME_EXCL),
