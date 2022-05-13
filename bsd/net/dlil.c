@@ -12251,3 +12251,52 @@ net_check_compatible_if_filter(struct ifnet *ifp)
 	return true;
 }
 #endif /* SKYWALK && XNU_TARGET_OS_OSX */
+
+#define DUMP_BUF_CHK() {        \
+	clen -= k;              \
+	if (clen < 1)           \
+	        goto done;      \
+	c += k;                 \
+}
+
+int dlil_dump_top_if_qlen(char *, int);
+int
+dlil_dump_top_if_qlen(char *str, int str_len)
+{
+	char *c = str;
+	int k, clen = str_len;
+	struct ifnet *top_ifcq_ifp = NULL;
+	uint32_t top_ifcq_len = 0;
+	struct ifnet *top_inq_ifp = NULL;
+	uint32_t top_inq_len = 0;
+
+	for (int ifidx = 1; ifidx < if_index; ifidx++) {
+		struct ifnet *ifp = ifindex2ifnet[ifidx];
+		struct dlil_ifnet *dl_if = (struct dlil_ifnet *)ifp;
+
+		if (ifp == NULL) {
+			continue;
+		}
+		if (ifp->if_snd != NULL && ifp->if_snd->ifcq_len > top_ifcq_len) {
+			top_ifcq_len = ifp->if_snd->ifcq_len;
+			top_ifcq_ifp = ifp;
+		}
+		if (dl_if->dl_if_inpstorage.dlth_pkts.qlen > top_inq_len) {
+			top_inq_len = dl_if->dl_if_inpstorage.dlth_pkts.qlen;
+			top_inq_ifp = ifp;
+		}
+	}
+
+	if (top_ifcq_ifp != NULL) {
+		k = scnprintf(c, clen, "\ntop ifcq_len %u packets by %s\n",
+		    top_ifcq_len, top_ifcq_ifp->if_xname);
+		DUMP_BUF_CHK();
+	}
+	if (top_inq_ifp != NULL) {
+		k = scnprintf(c, clen, "\ntop inq_len %u packets by %s\n",
+		    top_inq_len, top_inq_ifp->if_xname);
+		DUMP_BUF_CHK();
+	}
+done:
+	return str_len - clen;
+}

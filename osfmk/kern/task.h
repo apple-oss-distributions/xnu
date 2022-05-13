@@ -302,6 +302,7 @@ struct task {
 #define TF_COALITION_MEMBER     0x00080000                              /* task is a member of a coalition */
 #define TF_NO_CORPSE_FORKING    0x00100000                              /* do not fork a corpse for this task */
 #define TF_USE_PSET_HINT_CLUSTER_TYPE 0x00200000                        /* bind task to task->pset_hint->pset_cluster_type */
+#define TF_PAC_ENFORCE_USER_STATE     0x01000000                        /* Enforce user and kernel signed thread state */
 
 /*
  * Task is running within a 64-bit address space.
@@ -1175,6 +1176,7 @@ extern bool task_is_pac_exception_fatal(task_t task);
 extern void task_set_pac_exception_fatal_flag(task_t task);
 #endif /*__has_feature(ptrauth_calls)*/
 
+extern bool task_needs_user_signed_thread_state(task_t task);
 extern void task_set_tecs(task_t task);
 extern void task_get_corpse_vmobject_list(task_t task, vmobject_list_output_t* list, size_t* list_size);
 

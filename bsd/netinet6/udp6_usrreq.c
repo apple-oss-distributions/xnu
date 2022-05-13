@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2022 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -825,8 +825,10 @@ udp6_bind(struct socket *so, struct sockaddr *nam, struct proc *p)
 		return EINVAL;
 	}
 
+	const uint8_t old_flags = inp->inp_vflag;
 	inp->inp_vflag &= ~INP_IPV4;
 	inp->inp_vflag |= INP_IPV6;
+
 	if ((inp->inp_flags & IN6P_IPV6_V6ONLY) == 0) {
 		struct sockaddr_in6 *sin6_p;
 
@@ -841,12 +843,19 @@ udp6_bind(struct socket *so, struct sockaddr *nam, struct proc *p)
 			inp->inp_vflag |= INP_IPV4;
 			inp->inp_vflag &= ~INP_IPV6;
 			inp->inp_vflag |= INP_V4MAPPEDV6;
+
 			error = in_pcbbind(inp, (struct sockaddr *)&sin, p);
+			if (error != 0) {
+				inp->inp_vflag = old_flags;
+			}
 			return error;
 		}
 	}
 
 	error = in6_pcbbind(inp, nam, p);
+	if (error != 0) {
+		inp->inp_vflag = old_flags;
+	}
 	return error;
 }
 
@@ -855,6 +864,8 @@ udp6_connect(struct socket *so, struct sockaddr *nam, struct proc *p)
 {
 	struct inpcb *inp;
 	int error;
+	struct sockaddr_in6 *sin6_p = (struct sockaddr_in6 *)(void *)nam;
+
 #if defined(NECP) && defined(FLOW_DIVERT)
 	int should_use_flow_divert = 0;
 #endif /* defined(NECP) && defined(FLOW_DIVERT) */
@@ -868,10 +879,16 @@ udp6_connect(struct socket *so, struct sockaddr *nam, struct proc *p)
 	should_use_flow_divert = necp_socket_should_use_flow_divert(inp);
 #endif /* defined(NECP) && defined(FLOW_DIVERT) */
 
-	if ((inp->inp_flags & IN6P_IPV6_V6ONLY) == 0) {
-		struct sockaddr_in6 *sin6_p;
+	/*
+	 * It is possible that the socket is bound to v4 mapped v6 address.
+	 * Post that do not allow connect to a v6 endpoint.
+	 */
+	if (inp->inp_vflag & INP_V4MAPPEDV6 &&
+	    !IN6_IS_ADDR_V4MAPPED(&sin6_p->sin6_addr)) {
+		return EINVAL;
+	}
 
-		sin6_p = (struct sockaddr_in6 *)(void *)nam;
+	if ((inp->inp_flags & IN6P_IPV6_V6ONLY) == 0) {
 		if (IN6_IS_ADDR_V4MAPPED(&sin6_p->sin6_addr)) {
 			struct sockaddr_in sin;
 

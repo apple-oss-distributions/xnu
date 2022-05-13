@@ -621,7 +621,8 @@ vnode_flushnamedstream(vnode_t vp, vnode_t svp, vfs_context_t context)
 	}
 
 	iosize = bufsize = MIN(datasize, NS_IOBUFSIZE);
-	if (kmem_alloc(kernel_map, (vm_offset_t *)&bufptr, bufsize, VM_KERN_MEMORY_FILE)) {
+	bufptr = kalloc_data(bufsize, Z_WAITOK);
+	if (bufptr == NULL) {
 		return ENOMEM;
 	}
 	auio = uio_create(1, 0, UIO_SYSSPACE, UIO_READ);
@@ -663,9 +664,7 @@ vnode_flushnamedstream(vnode_t vp, vnode_t svp, vfs_context_t context)
 	/* close shadowfile */
 	(void) VNOP_CLOSE(svp, 0, kernelctx);
 out:
-	if (bufptr) {
-		kmem_free(kernel_map, (vm_offset_t)bufptr, bufsize);
-	}
+	kfree_data(bufptr, bufsize);
 	if (auio) {
 		uio_free(auio);
 	}
@@ -962,7 +961,8 @@ retry:
 		size_t  iosize;
 
 		iosize = bufsize = MIN(datasize, NS_IOBUFSIZE);
-		if (kmem_alloc(kernel_map, (vm_offset_t *)&bufptr, bufsize, VM_KERN_MEMORY_FILE)) {
+		bufptr = kalloc_data(bufsize, Z_WAITOK);
+		if (bufptr == NULL) {
 			error = ENOMEM;
 			goto out;
 		}
@@ -1027,9 +1027,7 @@ out:
 		}
 	}
 
-	if (bufptr) {
-		kmem_free(kernel_map, (vm_offset_t)bufptr, bufsize);
-	}
+	kfree_data(bufptr, bufsize);
 	if (auio) {
 		uio_free(auio);
 	}
@@ -3327,7 +3325,8 @@ shift_data_down(vnode_t xvp, off_t start, size_t len, off_t delta, vfs_context_t
 	}
 	orig_chunk = chunk;
 
-	if (kmem_alloc(kernel_map, (vm_offset_t *)&buff, chunk, VM_KERN_MEMORY_FILE)) {
+	buff = kalloc_data(chunk, Z_WAITOK);
+	if (buff == NULL) {
 		return ENOMEM;
 	}
 
@@ -3354,8 +3353,8 @@ shift_data_down(vnode_t xvp, off_t start, size_t len, off_t delta, vfs_context_t
 			}
 		}
 	}
-	kmem_free(kernel_map, (vm_offset_t)buff, orig_chunk);
 
+	kfree_data(buff, orig_chunk);
 	return 0;
 }
 
@@ -3382,7 +3381,8 @@ shift_data_up(vnode_t xvp, off_t start, size_t len, off_t delta, vfs_context_t c
 	orig_chunk = chunk;
 	end = start + len;
 
-	if (kmem_alloc(kernel_map, (vm_offset_t *)&buff, chunk, VM_KERN_MEMORY_FILE)) {
+	buff = kalloc_data(chunk, Z_WAITOK);
+	if (buff == NULL) {
 		return ENOMEM;
 	}
 
@@ -3409,8 +3409,8 @@ shift_data_up(vnode_t xvp, off_t start, size_t len, off_t delta, vfs_context_t c
 			}
 		}
 	}
-	kmem_free(kernel_map, (vm_offset_t)buff, orig_chunk);
 
+	kfree_data(buff, orig_chunk);
 	return 0;
 }
 

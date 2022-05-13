@@ -380,27 +380,23 @@ typedef struct kmem_cache kmem_cache_t;
 #define kmem_free_aligned dt_kmem_free_aligned
 
 #define kmem_alloc(size, kmflag) \
-	({ VM_ALLOC_SITE_STATIC(0, 0); \
-	dt_kmem_alloc_site(size, kmflag, &site); })
+	dt_kmem_alloc_tag(size, kmflag, VM_ALLOC_SITE_TAG())
 
-extern void *dt_kmem_alloc_site(size_t, int, vm_allocation_site_t*);
+extern void *dt_kmem_alloc_tag(size_t, int, vm_tag_t);
 extern void dt_kmem_free(void *, size_t);
 
 #define kmem_zalloc(size, kmflag) \
-	({ VM_ALLOC_SITE_STATIC(0, 0); \
-	dt_kmem_zalloc_site(size, kmflag, &site); })
+	dt_kmem_zalloc_tag(size, kmflag, VM_ALLOC_SITE_TAG())
 
-extern void *dt_kmem_zalloc_site(size_t, int, vm_allocation_site_t*);
+extern void *dt_kmem_zalloc_tag(size_t, int, vm_tag_t);
 
 #define kmem_alloc_aligned(size, align, kmflag) \
-	({ VM_ALLOC_SITE_STATIC(0, 0); \
-	dt_kmem_alloc_aligned_site(size, align, kmflag, &site); })
-extern void *dt_kmem_alloc_aligned_site(size_t, size_t, int, vm_allocation_site_t*);
+	dt_kmem_alloc_aligned_tag(size, align, kmflag, VM_ALLOC_SITE_TAG())
+extern void *dt_kmem_alloc_aligned_tag(size_t, size_t, int, vm_tag_t);
 
 #define kmem_zalloc_aligned(size, align, kmflag) \
-	({ VM_ALLOC_SITE_STATIC(0, 0); \
-	dt_kmem_zalloc_aligned_site(size, align, kmflag, &site); })
-extern void *dt_kmem_zalloc_aligned_site(size_t, size_t, int, vm_allocation_site_t*);
+	dt_kmem_zalloc_aligned_tag(size, align, kmflag, VM_ALLOC_SITE_TAG())
+extern void *dt_kmem_zalloc_aligned_tag(size_t, size_t, int, vm_tag_t);
 
 extern void dt_kmem_free_aligned(void*, size_t);
 

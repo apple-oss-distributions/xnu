@@ -956,9 +956,10 @@ thread_getstatus_to_user(
 	thread_t                thread,
 	int                                             flavor,
 	thread_state_t                  tstate,
-	mach_msg_type_number_t  *count)
+	mach_msg_type_number_t  *count,
+	thread_set_status_flags_t flags)
 {
-	return thread_get_state_to_user(thread, flavor, tstate, count);
+	return thread_get_state_internal(thread, flavor, tstate, count, flags | TSSF_TRANSLATE_TO_USER);
 }
 
 /*

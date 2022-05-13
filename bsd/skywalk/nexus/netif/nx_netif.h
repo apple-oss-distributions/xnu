@@ -731,8 +731,6 @@ extern void netif_gso_fini(void);
 /*
  * Logical link functions
  */
-extern void nx_netif_llink_module_init(void);
-extern void nx_netif_llink_module_fini(void);
 extern void nx_netif_llink_retain(struct netif_llink *);
 extern void nx_netif_llink_release(struct netif_llink **);
 extern void nx_netif_qset_retain(struct netif_qset *);

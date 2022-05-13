@@ -70,7 +70,7 @@
 #include <kern/kext_alloc.h>
 #include <sys/kdebug.h>
 #include <vm/vm_object.h>
-#include <vm/vm_map.h>
+#include <vm/vm_map_internal.h>
 #include <vm/vm_page.h>
 #include <vm/vm_kern.h>
 #include <vm/memory_object.h>
@@ -102,7 +102,7 @@ __startup_func
 void
 vm_mem_bootstrap(void)
 {
-	vm_offset_t start, end, kmapoff_kaddr;
+	vm_offset_t start, end;
 
 	/*
 	 *	Initializes resident memory structures.
@@ -124,44 +124,21 @@ vm_mem_bootstrap(void)
 
 	vm_retire_boot_pages();
 
-	kernel_startup_initialize_upto(STARTUP_SUB_VM_KERNEL);
-
 	vm_mem_bootstrap_log("vm_map_init");
 	vm_map_init();
 
 	vm_mem_bootstrap_log("kmem_init");
 	kmem_init(start, end);
 
-	/*
-	 * Eat a random amount of kernel_map to fuzz subsequent heap, zone and
-	 * stack addresses. (With a 4K page and 9 bits of randomness, this
-	 * eats about 2M of VA from the map)
-	 *
-	 * Note that we always need to slide by at least one page because the VM
-	 * pointer packing schemes using KERNEL_PMAP_HEAP_RANGE_START as a base
-	 * do not admit this address to be part of any zone submap.
-	 */
-	uint32_t kmapoff_pgcnt = (early_random() & 0x1ff) + 1; /* 9 bits */
-	if (kernel_memory_allocate(kernel_map, &kmapoff_kaddr,
-	    ptoa(kmapoff_pgcnt), 0, KMA_KOBJECT | KMA_PERMANENT | KMA_VAONLY,
-	    VM_KERN_MEMORY_OSFMK) != KERN_SUCCESS) {
-		panic("cannot kernel_memory_allocate %u pages", kmapoff_pgcnt);
-	}
+	kernel_startup_initialize_upto(STARTUP_SUB_KMEM);
 
 	vm_mem_bootstrap_log("pmap_init");
 	pmap_init();
 
-	kernel_startup_initialize_upto(STARTUP_SUB_KMEM);
-
 	vm_mem_bootstrap_log("vm_fault_init");
 	vm_fault_init();
 
-	vm_mem_bootstrap_log("kext_alloc_init");
-	kext_alloc_init();
-
 	kernel_startup_initialize_upto(STARTUP_SUB_ZALLOC);
-
-	vm_paging_map_init();
 
 	vm_page_delayed_work_init_ctx();
 

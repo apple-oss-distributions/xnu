@@ -186,22 +186,17 @@ console_io_allowed(void)
 void
 console_init(void)
 {
-	if (!OSCompareAndSwap(0, KERN_CONSOLE_RING_SIZE, (UInt32 *)&console_ring.len)) {
+	if (console_ring.len != 0) {
 		return;
 	}
 
-	assert(console_ring.len > 0);
-
-	int ret = kernel_memory_allocate(kernel_map,
-	    (vm_offset_t *)&console_ring.buffer,
-	    KERN_CONSOLE_RING_SIZE + (2 * PAGE_SIZE), 0,
-	    KMA_KOBJECT | KMA_PERMANENT | KMA_GUARD_FIRST | KMA_GUARD_LAST,
-	    VM_KERN_MEMORY_OSFMK);
-	if (ret != KERN_SUCCESS) {
-		panic("console_ring_init() failed to allocate ring buffer, error %d", ret);
-	}
+	kmem_alloc(kernel_map, (vm_offset_t *)&console_ring.buffer,
+	    KERN_CONSOLE_RING_SIZE + ptoa(2), KMA_NOFAIL | KMA_PERMANENT |
+	    KMA_KOBJECT | KMA_PERMANENT | KMA_GUARD_FIRST | KMA_GUARD_LAST |
+	    KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_OSFMK);
 
 	console_ring.buffer   += PAGE_SIZE; /* Skip past the first guard page. */
+	console_ring.len       = KERN_CONSOLE_RING_SIZE;
 	console_ring.used      = 0;
 	console_ring.nreserved = 0;
 	console_ring.read_ptr  = console_ring.buffer;

@@ -1175,7 +1175,6 @@ oslog_init_firehose(void)
 		return;
 	}
 
-	kern_return_t kr;
 	if (!PE_parse_boot_argn("firehose_chunk_count", &__firehose_buffer_kernel_chunk_count, sizeof(__firehose_buffer_kernel_chunk_count))) {
 		__firehose_buffer_kernel_chunk_count = FIREHOSE_BUFFER_KERNEL_DEFAULT_CHUNK_COUNT;
 	}
@@ -1189,13 +1188,10 @@ oslog_init_firehose(void)
 	}
 	vm_size_t size = __firehose_buffer_kernel_chunk_count * FIREHOSE_CHUNK_SIZE;
 
-	kr = kernel_memory_allocate(kernel_map, &kernel_firehose_addr,
-	    size + (2 * PAGE_SIZE), 0,
-	    KMA_GUARD_FIRST | KMA_GUARD_LAST | KMA_ZERO | KMA_PERMANENT,
-	    VM_KERN_MEMORY_LOG);
-	if (kr != KERN_SUCCESS) {
-		panic("Failed to allocate memory for firehose logging buffer");
-	}
+	kmem_alloc(kernel_map, &kernel_firehose_addr, size + ptoa(2),
+	    KMA_NOFAIL | KMA_PERMANENT | KMA_GUARD_FIRST | KMA_GUARD_LAST |
+	    KMA_DATA | KMA_ZERO, VM_KERN_MEMORY_LOG);
+
 	kernel_firehose_addr += PAGE_SIZE;
 	/* register buffer with firehose */
 	kernel_firehose_addr = (vm_offset_t)__firehose_buffer_create((size_t *) &size);

@@ -402,7 +402,8 @@ shmem_stage_initialize(struct kdp_output_stage *stage)
 		kdp_hw_shmem_dbg_bufsize = KDP_CORE_HW_SHMEM_DBG_TOTAL_BUF_SIZE;
 		ret = kmem_alloc_contig(kernel_map, &kdp_core_hw_shmem_buf,
 		    kdp_hw_shmem_dbg_bufsize, VM_MAP_PAGE_MASK(kernel_map),
-		    0, 0, KMA_KOBJECT, VM_KERN_MEMORY_DIAG);
+		    0, 0, KMA_KOBJECT | KMA_DATA | KMA_PERMANENT,
+		    VM_KERN_MEMORY_DIAG);
 		assert(KERN_SUCCESS == ret);
 
 		/*
@@ -450,7 +451,8 @@ shmem_stage_initialize(struct kdp_output_stage *stage)
 
 	stage->kos_data_size = sizeof(struct shmem_stage_data);
 
-	ret = kmem_alloc(kernel_map, (vm_offset_t*) &stage->kos_data, stage->kos_data_size, VM_KERN_MEMORY_DIAG);
+	ret = kmem_alloc(kernel_map, (vm_offset_t*) &stage->kos_data, stage->kos_data_size,
+	    KMA_DATA, VM_KERN_MEMORY_DIAG);
 	if (KERN_SUCCESS != ret) {
 		return ret;
 	}

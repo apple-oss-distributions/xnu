@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2022 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -251,7 +251,12 @@ pmap_unnest(pmap_t grand, addr64_t vaddr, uint64_t size)
 
 	/* align everything to PDE boundaries */
 	va_start = vaddr & ~(NBPDE - 1);
-	va_end = (vaddr + size + NBPDE - 1) & ~(NBPDE - 1);
+
+	if (os_add_overflow(vaddr, size + NBPDE - 1, &va_end)) {
+		panic("pmap_unnest: Overflow when calculating range end: s=0x%llx sz=0x%llx\n", vaddr, size);
+	}
+
+	va_end &= ~(NBPDE - 1);
 	size = va_end - va_start;
 
 	PMAP_LOCK_EXCLUSIVE(grand);
@@ -1605,20 +1610,34 @@ pmap_remove_options(
 		pml4_entry_t *pml4e = pmap64_pml4(map, s64);
 		if ((pml4e == NULL) ||
 		    ((*pml4e & PTE_VALID_MASK(is_ept)) == 0)) {
-			s64 = (s64 + NBPML4) & ~(PML4MASK);
+			if (os_add_overflow(s64, NBPML4, &s64)) {
+				/* wrap; clip s64 to e64 */
+				s64 = e64;
+				break;
+			}
+			s64 &= ~(PML4MASK);
 			continue;
 		}
 		pdpt_entry_t *pdpte = pmap64_pdpt(map, s64);
 		if ((pdpte == NULL) ||
 		    ((*pdpte & PTE_VALID_MASK(is_ept)) == 0)) {
-			s64 = (s64 + NBPDPT) & ~(PDPTMASK);
+			if (os_add_overflow(s64, NBPDPT, &s64)) {
+				/* wrap; clip s64 to e64 */
+				s64 = e64;
+				break;
+			}
+			s64 &= ~(PDPTMASK);
 			continue;
 		}
 
-		l64 = (s64 + PDE_MAPPED_SIZE) & ~(PDE_MAPPED_SIZE - 1);
-
-		if (l64 > e64) {
+		if (os_add_overflow(s64, PDE_MAPPED_SIZE, &l64)) {
 			l64 = e64;
+		} else {
+			l64 &= ~(PDE_MAPPED_SIZE - 1);
+
+			if (l64 > e64) {
+				l64 = e64;
+			}
 		}
 
 		pde = pmap_pde(map, s64);
@@ -2462,10 +2481,16 @@ pmap_query_resident(
 	uint32_t traverse_count = 0;
 
 	while (s64 < e64) {
-		l64 = (s64 + PDE_MAPPED_SIZE) & ~(PDE_MAPPED_SIZE - 1);
-		if (l64 > e64) {
+		if (os_add_overflow(s64, PDE_MAPPED_SIZE, &l64)) {
 			l64 = e64;
+		} else {
+			l64 &= ~(PDE_MAPPED_SIZE - 1);
+
+			if (l64 > e64) {
+				l64 = e64;
+			}
 		}
+
 		pde = pmap_pde(pmap, s64);
 
 		if (pde && (*pde & PTE_VALID_MASK(is_ept))) {

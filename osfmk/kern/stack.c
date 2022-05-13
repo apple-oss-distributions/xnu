@@ -145,10 +145,10 @@ STARTUP(TUNABLES, STARTUP_RANK_MIDDLE, stack_init);
 static vm_offset_t
 stack_alloc_internal(void)
 {
-	vm_offset_t             stack = 0;
-	spl_t                   s;
-	int                     flags = 0;
-	kern_return_t           kr = KERN_SUCCESS;
+	vm_offset_t     stack = 0;
+	spl_t           s;
+	kma_flags_t     flags = KMA_NOFAIL | KMA_GUARD_FIRST | KMA_GUARD_LAST |
+	    KMA_KSTACK | KMA_KOBJECT | KMA_ZERO;
 
 	s = splsched();
 	stack_lock();
@@ -174,15 +174,9 @@ stack_alloc_internal(void)
 		 * for these.
 		 */
 
-		flags = KMA_GUARD_FIRST | KMA_GUARD_LAST | KMA_KSTACK | KMA_KOBJECT | KMA_ZERO;
-		kr = kernel_memory_allocate(kernel_map, &stack,
-		    kernel_stack_size + (2 * PAGE_SIZE),
-		    stack_addr_mask,
-		    flags,
-		    VM_KERN_MEMORY_STACK);
-		if (kr != KERN_SUCCESS) {
-			panic("stack_alloc: kernel_memory_allocate(size:0x%llx, mask: 0x%llx, flags: 0x%x) failed with %d", (uint64_t)(kernel_stack_size + (2 * PAGE_SIZE)), (uint64_t)stack_addr_mask, flags, kr);
-		}
+		kernel_memory_allocate(kernel_map, &stack,
+		    kernel_stack_size + ptoa(2), stack_addr_mask,
+		    flags, VM_KERN_MEMORY_STACK);
 
 		/*
 		 * The stack address that comes back is the address of the lower
@@ -350,14 +344,7 @@ stack_collect(void)
 				stack,
 				VM_MAP_PAGE_MASK(kernel_map));
 			stack -= PAGE_SIZE;
-			if (vm_map_remove(
-				    kernel_map,
-				    stack,
-				    stack + kernel_stack_size + (2 * PAGE_SIZE),
-				    VM_MAP_REMOVE_KUNWIRE)
-			    != KERN_SUCCESS) {
-				panic("stack_collect: vm_map_remove");
-			}
+			kmem_free(kernel_map, stack, kernel_stack_size + ptoa(2));
 			stack = 0;
 
 			s = splsched();

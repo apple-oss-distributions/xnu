@@ -847,10 +847,10 @@ extern int      be_tracing(void);
 typedef void (*broadcastFunc) (void *);
 unsigned int cpu_broadcast_xcall(uint32_t *, boolean_t, broadcastFunc, void *);
 unsigned int cpu_broadcast_xcall_simple(boolean_t, broadcastFunc, void *);
-kern_return_t cpu_xcall(int, broadcastFunc, void *);
+__result_use_check kern_return_t cpu_xcall(int, broadcastFunc, void *);
 unsigned int cpu_broadcast_immediate_xcall(uint32_t *, boolean_t, broadcastFunc, void *);
 unsigned int cpu_broadcast_immediate_xcall_simple(boolean_t, broadcastFunc, void *);
-kern_return_t cpu_immediate_xcall(int, broadcastFunc, void *);
+__result_use_check kern_return_t cpu_immediate_xcall(int, broadcastFunc, void *);
 
 #ifdef  KERNEL_PRIVATE
 

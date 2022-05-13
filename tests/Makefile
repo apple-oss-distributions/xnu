@@ -629,6 +629,7 @@ decompression_failure: OTHER_CFLAGS += $(OBJROOT)/excserver.c -I $(OBJROOT)
 
 ipc/kernel_signed_pac_thread_state: excserver
 ipc/kernel_signed_pac_thread_state: OTHER_CFLAGS += $(OBJROOT)/excserver.c -I $(OBJROOT)
+ipc/kernel_signed_pac_thread_state: CODE_SIGN_ENTITLEMENTS = ipc/pac_exception_entitlement.plist
 
 ifeq ($(findstring arm64,$(ARCH_CONFIGS)),)
 EXCLUDED_SOURCES += arm_cpu_capabilities.c

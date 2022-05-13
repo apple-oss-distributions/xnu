@@ -576,6 +576,8 @@ extern uint32_t mptcp_enable_v1;
 
 extern int tcp_jack_rxmt;       /* Join ACK retransmission value in msecs */
 
+extern int mptcp_reass_total_qlen;
+
 __BEGIN_DECLS
 extern void mptcp_init(struct protosw *, struct domain *);
 extern int mptcp_ctloutput(struct socket *, struct sockopt *);

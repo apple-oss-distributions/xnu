@@ -406,7 +406,6 @@ skmem_init(void)
 	/* get CPU cache line size */
 	(void) skmem_cpu_cache_line_size();
 
-	skmem_arena_init();
 	skmem_cache_pre_init();
 	skmem_region_init();
 	skmem_cache_init();
@@ -427,7 +426,6 @@ skmem_fini(void)
 		pp_fini();
 		skmem_cache_fini();
 		skmem_region_fini();
-		skmem_arena_fini();
 
 		__skmem_inited = 0;
 	}

@@ -3924,7 +3924,9 @@ thread_set_exception_ports(
 
 	if (!thread->active) {
 		thread_mtx_unlock(thread);
-
+#if CONFIG_MACF
+		mac_exc_free_label(new_label);
+#endif
 		return KERN_FAILURE;
 	}
 
@@ -4032,6 +4034,9 @@ task_set_exception_ports(
 
 	if (!task->ipc_active) {
 		itk_unlock(task);
+#if CONFIG_MACF
+		mac_exc_free_label(new_label);
+#endif
 		return KERN_FAILURE;
 	}
 

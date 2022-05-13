@@ -44,7 +44,7 @@
 #include <net/net_api_stats.h>
 
 #define SKMEM_TAG_FSW_FLOW_MGR "com.apple.skywalk.fsw.flow_mgr"
-static kern_allocation_name_t skmem_tag_fsw_flow_mgr;
+static SKMEM_TAG_DEFINE(skmem_tag_fsw_flow_mgr, SKMEM_TAG_FSW_FLOW_MGR);
 
 static LCK_GRP_DECLARE(flow_mgr_lock_group, "sk_flow_mgr_lock");
 static LCK_RW_DECLARE(flow_mgr_lock, &flow_mgr_lock_group);
@@ -66,11 +66,6 @@ flow_mgr_init(void)
 {
 	ASSERT(!__flow_mgr_inited);
 
-	ASSERT(skmem_tag_fsw_flow_mgr == NULL);
-	skmem_tag_fsw_flow_mgr =
-	    kern_allocation_name_allocate(SKMEM_TAG_FSW_FLOW_MGR, 0);
-	ASSERT(skmem_tag_fsw_flow_mgr != NULL);
-
 	RB_INIT(&flow_mgr_head);
 	__flow_mgr_inited = 1;
 }
@@ -80,11 +75,6 @@ flow_mgr_fini(void)
 {
 	if (__flow_mgr_inited) {
 		VERIFY(RB_EMPTY(&flow_mgr_head));
-
-		if (skmem_tag_fsw_flow_mgr != NULL) {
-			kern_allocation_name_release(skmem_tag_fsw_flow_mgr);
-			skmem_tag_fsw_flow_mgr = NULL;
-		}
 
 		__flow_mgr_inited = 0;
 	}
@@ -564,7 +554,7 @@ flow_req_prepare_namespace(struct nx_flow_req *req)
 			flow_set_port_info(&nfi, req);
 			err = flow_namespace_create(saddr,
 			    req->nfr_ip_protocol, &ns_token,
-			    req->nfr_flags & NXFLOWREQF_LISTENER, &nfi);
+			    req->nfr_flags, &nfi);
 			if (err != 0) {
 				SK_ERR("netns for %s.%u failed",
 				    sk_sa_ntop(SA(saddr), src_s, sizeof(src_s)),

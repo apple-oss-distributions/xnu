@@ -142,7 +142,8 @@ sysctl_kmem_alloc_contig SYSCTL_HANDLER_ARGS
 		return error;
 	}
 
-	kr = kmem_alloc_contig(kernel_map, &kaddr, (vm_size_t)size, 0, 0, 0, 0, VM_KERN_MEMORY_IOKIT);
+	kr = kmem_alloc_contig(kernel_map, &kaddr, (vm_size_t)size,
+	    0, 0, 0, KMA_DATA, VM_KERN_MEMORY_IOKIT);
 
 	if (kr == KERN_SUCCESS) {
 		kmem_free(kernel_map, kaddr, size);
@@ -977,24 +978,27 @@ task_for_pid(
 	/* Grant task port access */
 	extmod_statistics_incr_task_for_pid(task);
 
+	/* this reference will be consumed during conversion */
+	task_reference(task);
 	if (task == current_task()) {
 		/* return pinned self if current_task() so equality check with mach_task_self_ passes */
 		sright = (void *)convert_task_to_port_pinned(task);
 	} else {
 		sright = (void *)convert_task_to_port(task);
 	}
+	/* extra task ref consumed */
 
-	/* Check if the task has been corpsified */
+	/*
+	 * Check if the task has been corpsified. We must do so after conversion
+	 * since we don't hold locks and may have grabbed a corpse control port
+	 * above which will prevent no-senders notification delivery.
+	 */
 	if (is_corpsetask(task)) {
-		/* task ref consumed by convert_task_to_port */
-		task = TASK_NULL;
 		ipc_port_release_send(sright);
 		error = KERN_FAILURE;
 		goto tfpout;
 	}
 
-	/* task ref consumed by convert_task_to_port */
-	task = TASK_NULL;
 	tret = ipc_port_copyout_send(
 		sright,
 		get_task_ipcspace(current_task()));

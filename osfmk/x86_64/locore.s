@@ -319,11 +319,60 @@ _bcopystr_fail:
 	movl	$(EFAULT),%eax		/* return error for failure */
 	ret
 
+#if CONFIG_DTRACE
+
+/*
+ * Copyin 8 bit aligned word as a single transaction
+ * rdi: source address (user)
+ * rsi: destination address (kernel)
+ */
+Entry(dtrace_nofault_copy8)
+	pushq	%rbp			/* Save registers */
+	movq	%rsp, %rbp
+	RECOVERY_SECTION
+	RECOVER(L_copyin_atomic8_fail)	/* Set up recovery handler for next instruction */
+	movb	(%rdi), %al		/* Load long from user */
+	movb	%al, (%rsi)		/* Store to kernel */
+	xorl	%eax, %eax		/* Return success */
+	popq	%rbp			/* Restore registers */
+	retq				/* Return */
+
+L_copyin_atomic8_fail:
+	movl	$(EFAULT), %eax		/* Return error for failure */
+	popq	%rbp			/* Restore registers */
+	retq				/* Return */
+
+/*
+ * Copyin 16 bit aligned word as a single transaction
+ * rdi: source address (user)
+ * rsi: destination address (kernel)
+ */
+Entry(dtrace_nofault_copy16)
+	pushq	%rbp			/* Save registers */
+	movq	%rsp, %rbp
+	RECOVERY_SECTION
+	RECOVER(L_copyin_atomic16_fail)	/* Set up recovery handler for next instruction */
+	movw	(%rdi), %ax		/* Load long from user */
+	movw	%ax, (%rsi)		/* Store to kernel */
+	xorl	%eax, %eax		/* Return success */
+	popq	%rbp			/* Restore registers */
+	retq				/* Return */
+
+L_copyin_atomic16_fail:
+	movl	$(EFAULT), %eax		/* Return error for failure */
+	popq	%rbp			/* Restore registers */
+	retq				/* Return */
+
+#endif /* CONFIG_DTRACE */
+
 /*
  * Copyin 32 bit aligned word as a single transaction
  * rdi: source address (user)
  * rsi: destination address (kernel)
  */
+#if CONFIG_DTRACE
+Entry(dtrace_nofault_copy32)
+#endif
 Entry(_copyin_atomic32)
 	pushq	%rbp			/* Save registers */
 	movq	%rsp, %rbp
@@ -345,6 +394,9 @@ L_copyin_atomic32_fail:
  * rdi: source address (user)
  * rsi: destination address (kernel)
  */
+#if CONFIG_DTRACE
+Entry(dtrace_nofault_copy64)
+#endif
 Entry(_copyin_atomic64)
 	pushq	%rbp			/* Save registers */
 	movq	%rsp, %rbp
@@ -400,47 +452,6 @@ Entry(_copyout_atomic64)
 
 L_copyout_atomic64_fail:
 	movl	$(EFAULT), %eax		/* Return error for failure */
-	popq	%rbp			/* Restore registers */
-	retq				/* Return */
-
-
-/*
- * int hw_lock_trylock_mask_allow_invalid(uint32_t *lock, uint32_t mask)
- * rdi: lock address
- * esi: mask to set
- */
-Entry(hw_lock_trylock_mask_allow_invalid)
-	pushq	%rbp			/* Save registers */
-	movq	%rsp, %rbp
-
-	RECOVERY_SECTION
-	RECOVER(3f)			/* Set up recovery handler for next instruction*/
-	movl	(%rdi), %eax
-1:
-	testl	%eax, %eax		/* 0 value == invalid lock */
-	je	3f
-
-	testl	%esi, %eax		/* is `mask` set ? */
-	jne	2f			/* if yes, pause and return 0 */
-
-	mov	%eax, %ecx
-	orl	%esi, %ecx
-	RECOVERY_SECTION
-	RECOVER(3f)			/* Set up recovery handler for next instruction*/
-	lock cmpxchgl	%ecx, (%rdi)
-	jne 	1b			/* if the CAS failed, the new value is in %eax */
-
-	movl	$1, %eax
-	popq	%rbp			/* Restore registers */
-	retq				/* Return */
-
-2: /* contention */
-	pause
-	xorl	%eax, %eax
-	popq	%rbp			/* Restore registers */
-	retq				/* Return */
-3: /* invalid */
-	movl	$-1, %eax
 	popq	%rbp			/* Restore registers */
 	retq				/* Return */
 

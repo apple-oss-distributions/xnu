@@ -2299,7 +2299,7 @@ kdp_rwlck_find_owner(
  *
  * @returns TRUE if the lock was yield, FALSE otherwise
  */
-boolean_t
+bool
 lck_rw_lock_yield_shared(
 	lck_rw_t        *lck,
 	boolean_t       force_yield)
@@ -2313,10 +2313,56 @@ lck_rw_lock_yield_shared(
 		lck_rw_unlock_shared(lck);
 		mutex_pause(2);
 		lck_rw_lock_shared(lck);
-		return TRUE;
+		return true;
 	}
 
-	return FALSE;
+	return false;
+}
+
+/*!
+ * @function lck_rw_lock_yield_exclusive
+ *
+ * @abstract
+ * Yields a rw_lock held in exclusive mode.
+ *
+ * @discussion
+ * This function can block.
+ * Yields the lock in case there are writers waiting.
+ * The yield will unlock, block, and re-lock the lock in exclusive mode.
+ *
+ * @param lck           rw_lock already held in exclusive mode to yield.
+ * @param mode          when to yield.
+ *
+ * @returns TRUE if the lock was yield, FALSE otherwise
+ */
+bool
+lck_rw_lock_yield_exclusive(
+	lck_rw_t        *lck,
+	lck_rw_yield_t  mode)
+{
+	lck_rw_word_t word;
+	bool yield = false;
+
+	lck_rw_assert(lck, LCK_RW_ASSERT_EXCLUSIVE);
+
+	if (mode == LCK_RW_YIELD_ALWAYS) {
+		yield = true;
+	} else {
+		word.data = ordered_load_rw(lck);
+		if (word.w_waiting) {
+			yield = true;
+		} else if (mode == LCK_RW_YIELD_ANY_WAITER) {
+			yield = (word.r_waiting != 0);
+		}
+	}
+
+	if (yield) {
+		lck_rw_unlock_exclusive(lck);
+		mutex_pause(2);
+		lck_rw_lock_exclusive(lck);
+	}
+
+	return yield;
 }
 
 /*!

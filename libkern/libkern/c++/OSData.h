@@ -664,6 +664,16 @@ public:
  */
 	virtual unsigned int ensureCapacity(unsigned int newCapacity);
 
+#ifdef XNU_KERNEL_PRIVATE
+/*!
+ * @function clipForCopyout
+ *
+ * @abstract
+ * Clips the backing store of an atomic OSData in order
+ * to make it usable with copyoutkdata().
+ */
+	bool clipForCopyout();
+#endif /* XNU_KERNEL_PRIVATE */
 
 /*!
  * @function appendBytes

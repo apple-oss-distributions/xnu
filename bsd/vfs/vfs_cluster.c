@@ -7143,7 +7143,8 @@ vfs_drt_alloc_map(struct vfs_drt_clustermap **cmapp)
 	 * Allocate and initialise the new map.
 	 */
 
-	kret = kmem_alloc(kernel_map, (vm_offset_t *)&cmap, map_size, VM_KERN_MEMORY_FILE);
+	kret = kmem_alloc(kernel_map, (vm_offset_t *)&cmap, map_size,
+	    KMA_DATA, VM_KERN_MEMORY_FILE);
 	if (kret != KERN_SUCCESS) {
 		return kret;
 	}

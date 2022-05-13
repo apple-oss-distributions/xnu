@@ -306,8 +306,8 @@ host_lockgroup_info(
 	for (;;) {
 		size   = needed * sizeof(lockgroup_info_t);
 		vmsize = vm_map_round_page(size, VM_MAP_PAGE_MASK(ipc_kernel_map));
-		kr     = kernel_memory_allocate(ipc_kernel_map, &addr, vmsize,
-		    0, KMA_ZERO, VM_KERN_MEMORY_IPC);
+		kr     = kmem_alloc(ipc_kernel_map, &addr, vmsize,
+		    KMA_DATA | KMA_ZERO, VM_KERN_MEMORY_IPC);
 		if (kr != KERN_SUCCESS) {
 			return kr;
 		}

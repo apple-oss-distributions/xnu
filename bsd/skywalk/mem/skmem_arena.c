@@ -125,7 +125,7 @@ SYSCTL_PROC(_kern_skywalk_stats, OID_AUTO, arena,
 static LCK_GRP_DECLARE(skmem_arena_lock_grp, "skmem_arena");
 static LCK_MTX_DECLARE(skmem_arena_lock, &skmem_arena_lock_grp);
 
-static TAILQ_HEAD(, skmem_arena) skmem_arena_head;
+static TAILQ_HEAD(, skmem_arena) skmem_arena_head = TAILQ_HEAD_INITIALIZER(skmem_arena_head);
 
 #define SKMEM_ARENA_LOCK()                      \
 	lck_mtx_lock(&skmem_arena_lock)
@@ -149,31 +149,11 @@ static ZONE_DEFINE(ar_system_zone, SKMEM_ZONE_PREFIX ".mem.arena.system",
     AR_SYSTEM_SIZE, ZC_ZFREE_CLEARMEM);
 
 #define SKMEM_TAG_ARENA_MIB     "com.apple.skywalk.arena.mib"
-static kern_allocation_name_t skmem_tag_arena_mib;
+static SKMEM_TAG_DEFINE(skmem_tag_arena_mib, SKMEM_TAG_ARENA_MIB);
 
-void
-skmem_arena_init(void)
-{
-	_CASSERT(SKMEM_ARENA_TYPE_NEXUS == SAR_TYPE_NEXUS);
-	_CASSERT(SKMEM_ARENA_TYPE_NECP == SAR_TYPE_NECP);
-	_CASSERT(SKMEM_ARENA_TYPE_SYSTEM == SAR_TYPE_SYSTEM);
-
-	TAILQ_INIT(&skmem_arena_head);
-
-	ASSERT(skmem_tag_arena_mib == NULL);
-	skmem_tag_arena_mib =
-	    kern_allocation_name_allocate(SKMEM_TAG_ARENA_MIB, 0);
-	ASSERT(skmem_tag_arena_mib != NULL);
-}
-
-void
-skmem_arena_fini(void)
-{
-	if (skmem_tag_arena_mib != NULL) {
-		kern_allocation_name_release(skmem_tag_arena_mib);
-		skmem_tag_arena_mib = NULL;
-	}
-}
+static_assert(SKMEM_ARENA_TYPE_NEXUS == SAR_TYPE_NEXUS);
+static_assert(SKMEM_ARENA_TYPE_NECP == SAR_TYPE_NECP);
+static_assert(SKMEM_ARENA_TYPE_SYSTEM == SAR_TYPE_SYSTEM);
 
 SK_NO_INLINE_ATTRIBUTE
 static int

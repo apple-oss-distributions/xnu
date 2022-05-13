@@ -84,7 +84,7 @@
 #include <vm/vm_map.h>
 #include <vm/vm_page.h>
 #include <vm/vm_pageout.h>
-#include <vm/vm_kern.h>                 /* kernel_memory_allocate() */
+#include <vm/vm_kern.h>                 /* kmem_alloc() */
 #include <kern/misc_protos.h>
 #include <mach_debug/zone_info.h>
 #include <vm/cpm.h>
@@ -1690,7 +1690,7 @@ vm_page_module_init(void)
 		 * of fictitious pages that any single caller will attempt to allocate
 		 * without blocking.
 		 *
-		 * The largest such number at the moment is kernel_memory_allocate()
+		 * The largest such number at the moment is kmem_alloc()
 		 * when 2 guard pages are asked. 10 is simply a somewhat larger number,
 		 * taking into account the 50% hysteresis the zone allocator uses.
 		 *
@@ -1837,9 +1837,6 @@ vm_page_insert_internal(
 	assertf(page_aligned(offset), "0x%llx\n", offset);
 
 	assert(!VM_PAGE_WIRED(mem) || mem->vmp_private || mem->vmp_fictitious || (tag != VM_KERN_MEMORY_NONE));
-
-	/* the vm_submap_object is only a placeholder for submaps */
-	assert(object != vm_submap_object);
 
 	vm_object_lock_assert_exclusive(object);
 	LCK_MTX_ASSERT(&vm_page_queue_lock,
@@ -6670,9 +6667,20 @@ vm_page_do_delayed_work(
 	VM_CHECK_MEMORYSTATUS;
 }
 
+__abortlike
+static void
+__vm_page_alloc_list_failed_panic(
+	vm_size_t       page_count,
+	kma_flags_t     flags,
+	kern_return_t   kr)
+{
+	panic("vm_page_alloc_list(%zd, 0x%x) failed unexpectedly with %d",
+	    (size_t)page_count, flags, kr);
+}
+
 kern_return_t
 vm_page_alloc_list(
-	int         page_count,
+	vm_size_t   page_count,
 	kma_flags_t flags,
 	vm_page_t  *list)
 {
@@ -6680,12 +6688,11 @@ vm_page_alloc_list(
 	vm_page_t       mem;
 	kern_return_t   kr = KERN_SUCCESS;
 	int             page_grab_count = 0;
-	mach_vm_size_t  map_size = ptoa_64(page_count);
 #if DEVELOPMENT || DEBUG
-	task_t          task = current_task_early();
+	task_t          task;
 #endif /* DEVELOPMENT || DEBUG */
 
-	for (int i = 0; i < page_count; i++) {
+	for (vm_size_t i = 0; i < page_count; i++) {
 		for (;;) {
 			if (flags & KMA_LOMEM) {
 				mem = vm_page_grablo();
@@ -6709,10 +6716,12 @@ vm_page_alloc_list(
 			/* VM privileged threads should have waited in vm_page_grab() and not get here. */
 			assert(!(current_thread()->options & TH_OPT_VMPRIV));
 
-			uint64_t unavailable = (vm_page_wire_count + vm_page_free_target) * PAGE_SIZE;
-			if (unavailable > max_mem || map_size > (max_mem - unavailable)) {
-				kr = KERN_RESOURCE_SHORTAGE;
-				goto out;
+			if ((flags & KMA_NOFAIL) == 0) {
+				uint64_t unavailable = ptoa_64(vm_page_wire_count + vm_page_free_target);
+				if (unavailable > max_mem || ptoa_64(page_count) > (max_mem - unavailable)) {
+					kr = KERN_RESOURCE_SHORTAGE;
+					goto out;
+				}
 			}
 			VM_PAGE_WAIT();
 		}
@@ -6722,7 +6731,7 @@ vm_page_alloc_list(
 		page_list = mem;
 	}
 
-	if (KMA_ZERO & flags) {
+	if ((KMA_ZERO | KMA_NOENCRYPT) & flags) {
 		for (mem = page_list; mem; mem = mem->vmp_snext) {
 			vm_page_zero_fill(mem);
 		}
@@ -6730,6 +6739,7 @@ vm_page_alloc_list(
 
 out:
 #if DEBUG || DEVELOPMENT
+	task = current_task_early();
 	if (task != NULL) {
 		ledger_credit(task->ledger, task_ledgers.pages_grabbed_kern, page_grab_count);
 	}
@@ -6737,6 +6747,8 @@ out:
 
 	if (kr == KERN_SUCCESS) {
 		*list = page_list;
+	} else if (flags & KMA_NOFAIL) {
+		__vm_page_alloc_list_failed_panic(page_count, flags, kr);
 	} else {
 		vm_page_free_list(page_list, FALSE);
 	}
@@ -8598,7 +8610,6 @@ vm_page_queues_remove(vm_page_t mem, boolean_t __unused remove_from_backgroundq)
 
 	assert(m_object != compressor_object);
 	assert(m_object != kernel_object);
-	assert(m_object != vm_submap_object);
 	assert(!mem->vmp_fictitious);
 
 	switch (mem->vmp_q_state) {
@@ -8851,18 +8862,13 @@ vm_page_check_pageable_safe(vm_page_t page)
 	page_object = VM_PAGE_OBJECT(page);
 
 	if (page_object == kernel_object) {
-		panic("vm_page_check_pageable_safe: trying to add page" \
+		panic("vm_page_check_pageable_safe: trying to add page"
 		    "from kernel object (%p) to pageable queue", kernel_object);
 	}
 
 	if (page_object == compressor_object) {
-		panic("vm_page_check_pageable_safe: trying to add page" \
+		panic("vm_page_check_pageable_safe: trying to add page"
 		    "from compressor object (%p) to pageable queue", compressor_object);
-	}
-
-	if (page_object == vm_submap_object) {
-		panic("vm_page_check_pageable_safe: trying to add page" \
-		    "from submap object (%p) to pageable queue", vm_submap_object);
 	}
 }
 
@@ -9128,7 +9134,6 @@ kern_allocation_update_size(kern_allocation_name_t allocation, int64_t delta)
 void
 vm_allocation_zones_init(void)
 {
-	kern_return_t ret;
 	vm_offset_t   addr;
 	vm_size_t     size;
 
@@ -9144,10 +9149,9 @@ vm_allocation_zones_init(void)
 	size = VM_MAX_TAG_VALUE * sizeof(vm_allocation_zone_total_t * *)
 	    + ARRAY_COUNT(early_tags) * VM_TAG_SIZECLASSES * sizeof(vm_allocation_zone_total_t);
 
-	ret = kernel_memory_allocate(kernel_map,
-	    &addr, round_page(size), 0,
-	    KMA_ZERO, VM_KERN_MEMORY_DIAG);
-	assert(KERN_SUCCESS == ret);
+	kmem_alloc(kernel_map, &addr, round_page(size),
+	    KMA_NOFAIL | KMA_KOBJECT | KMA_ZERO | KMA_PERMANENT,
+	    VM_KERN_MEMORY_DIAG);
 
 	vm_allocation_zone_totals = (vm_allocation_zone_total_t **) addr;
 	addr += VM_MAX_TAG_VALUE * sizeof(vm_allocation_zone_total_t * *);
@@ -9279,6 +9283,7 @@ kern_allocation_name_allocate(const char * name, uint16_t subtotalscount)
 	allocation->flags          = (uint16_t)(namelen << VM_TAG_NAME_LEN_SHIFT);
 	strlcpy(KA_NAME(allocation), name, namelen + 1);
 
+	vm_tag_alloc(allocation);
 	return allocation;
 }
 
@@ -9557,7 +9562,7 @@ vm_page_diagnose_kt_heaps(mach_memory_info_t *info)
 
 		for (kalloc_type_var_view_t ktv = heap.views; ktv;
 		    ktv = (kalloc_type_var_view_t) ktv->kt_next) {
-			if (ktv->kt_stats) {
+			if (ktv->kt_stats && ktv->kt_stats != KHEAP_KT_VAR->kh_stats) {
 				vm_page_diagnose_zone_stats(info + idx, ktv->kt_stats, false);
 				snprintf(info[i].name, sizeof(info[i].name),
 				    "%s[%s]", KHEAP_KT_VAR->kh_name, ktv->kt_name);
@@ -9630,15 +9635,6 @@ vm_page_diagnose(mach_memory_info_t * info, unsigned int num_info, uint64_t zone
 	vm_map_sizes(kernel_map, &map_size, &map_free, &map_largest);
 	SET_MAP(VM_KERN_COUNT_MAP_KERNEL, map_size, map_free, map_largest);
 
-	vm_map_sizes(kalloc_large_map_get(), &map_size, &map_free, &map_largest);
-	SET_MAP(VM_KERN_COUNT_MAP_KALLOC_LARGE, map_size, map_free, map_largest);
-
-	vm_map_sizes(kernel_data_map_get(), &map_size, &map_free, &map_largest);
-	SET_MAP(VM_KERN_COUNT_MAP_KERNEL_DATA, map_size, map_free, map_largest);
-
-	vm_map_sizes(kalloc_large_data_map_get(), &map_size, &map_free, &map_largest);
-	SET_MAP(VM_KERN_COUNT_MAP_KALLOC_LARGE_DATA, map_size, map_free, map_largest);
-
 	zone_map_sizes(&map_size, &map_free, &map_largest);
 	SET_MAP(VM_KERN_COUNT_MAP_ZONE, map_size, map_free, map_largest);
 
@@ -9650,9 +9646,6 @@ vm_page_diagnose(mach_memory_info_t * info, unsigned int num_info, uint64_t zone
 	i += vm_page_diagnose_heap(counts + i, KHEAP_DEFAULT);
 	if (KHEAP_DATA_BUFFERS->kh_heap_id == KHEAP_ID_DATA_BUFFERS) {
 		i += vm_page_diagnose_heap(counts + i, KHEAP_DATA_BUFFERS);
-	}
-	if (KHEAP_KEXT->kh_heap_id == KHEAP_ID_KEXT) {
-		i += vm_page_diagnose_heap(counts + i, KHEAP_KEXT);
 	}
 	if (KHEAP_KT_VAR->kh_heap_id == KHEAP_ID_KT_VAR) {
 		i += vm_page_diagnose_kt_heaps(counts + i);

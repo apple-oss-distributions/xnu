@@ -49,7 +49,7 @@
 
 struct zlib_stage_data {
 	z_stream zs;
-	size_t allocation_offset;
+	size_t   allocation_offset;
 };
 
 static void *
@@ -258,7 +258,16 @@ zlib_stage_initialize(struct kdp_output_stage *stage)
 
 	stage->kos_data_size = round_page(sizeof(struct zlib_stage_data) + NETBUF + zlib_deflate_memory_size(wbits, memlevel));
 	printf("kdp_core zlib memory 0x%lx\n", stage->kos_data_size);
-	ret = kmem_alloc(kernel_map, (vm_offset_t*) &stage->kos_data, stage->kos_data_size, VM_KERN_MEMORY_DIAG);
+	/*
+	 * Note: KMA_DATA isn't right because we have pointers,
+	 *       but it is assumed by the generic code that kos_data
+	 *       is a linear buffer which requires more work to split.
+	 *
+	 *       We still want to use KMA_DATA for it as it has more
+	 *       chances to have VA in catastrophic cases.
+	 */
+	ret = kmem_alloc(kernel_map, (vm_offset_t*) &stage->kos_data, stage->kos_data_size,
+	    KMA_DATA, VM_KERN_MEMORY_DIAG);
 	if (KERN_SUCCESS != ret) {
 		printf("zlib_stage_initialize failed to allocate memory. Error 0x%x\n", ret);
 		return ret;

@@ -369,7 +369,6 @@ __attribute__((noinline))
 static void
 __btlib_grow(bt_library_t btl)
 {
-	vm_map_t map = kernel_data_map_get() ?: kernel_map;
 	kern_return_t kr = KERN_SUCCESS;
 	vm_address_t addr;
 
@@ -391,8 +390,8 @@ __btlib_grow(bt_library_t btl)
 		uint8_t slab = btl->btl_slab_cur + 1;
 		vm_size_t size = btl->btl_max_pos;
 
-		kr = kernel_memory_allocate(map, &addr,
-		    size, PAGE_MASK, KMA_ZERO | KMA_VAONLY,
+		kr = kmem_alloc(kernel_map, &addr, size,
+		    KMA_KOBJECT | KMA_ZERO | KMA_VAONLY | KMA_DATA,
 		    VM_KERN_MEMORY_DIAG);
 		if (kr != KERN_SUCCESS) {
 			goto done;
@@ -408,7 +407,7 @@ __btlib_grow(bt_library_t btl)
 
 		addr = btl->btl_slabs[slab] + btl->btl_faulted_pos;
 
-		kr = kernel_memory_populate(map, addr, PAGE_SIZE,
+		kr = kernel_memory_populate(addr, PAGE_SIZE,
 		    KMA_KOBJECT | KMA_ZERO, VM_KERN_MEMORY_DIAG);
 	}
 
@@ -644,7 +643,6 @@ __btlib_callout(thread_call_param_t arg0, thread_call_param_t __unused arg1)
 static void
 __btlib_init(bt_library_t btl)
 {
-	vm_map_t      map = kernel_data_map_get() ?: kernel_map;
 	kern_return_t kr;
 	vm_address_t  addr;
 	bt_hash_t    *bthp;
@@ -654,8 +652,9 @@ __btlib_init(bt_library_t btl)
 	btl->btl_call = thread_call_allocate_with_options(__btlib_callout, btl,
 	    THREAD_CALL_PRIORITY_KERNEL, THREAD_CALL_OPTIONS_ONCE);
 
-	kr = kernel_memory_allocate(map, &addr, BTL_SIZE_INIT,
-	    PAGE_MASK, KMA_ZERO | KMA_VAONLY, VM_KERN_MEMORY_DIAG);
+	kr = kmem_alloc(kernel_map, &addr, BTL_SIZE_INIT,
+	    KMA_KOBJECT | KMA_ZERO | KMA_VAONLY | KMA_DATA,
+	    VM_KERN_MEMORY_DIAG);
 	if (kr != KERN_SUCCESS) {
 		panic("unable to allocate initial VA: %d", kr);
 	}
@@ -1373,8 +1372,8 @@ btlog_create(btlog_type_t type, uint32_t count, uint32_t sample)
 	kern_return_t kr;
 	btlogu_t btlu;
 
-	kr = kernel_memory_allocate(kernel_map, &btlu.bta,
-	    pair.btsp_size, 0, KMA_KOBJECT | KMA_ZERO, VM_KERN_MEMORY_DIAG);
+	kr = kmem_alloc(kernel_map, &btlu.bta, pair.btsp_size,
+	    KMA_KOBJECT | KMA_ZERO, VM_KERN_MEMORY_DIAG);
 
 	if (kr != KERN_SUCCESS) {
 		return NULL;
@@ -1433,24 +1432,29 @@ btlog_destroy(btlogu_t btlu)
 	kmem_free(kernel_map, btlu.bta, __btlog_size(btlu).btsp_size);
 }
 
-void
+kern_return_t
 btlog_enable(btlogu_t btlu)
 {
 	vm_size_t size;
+	kern_return_t kr = KERN_SUCCESS;
 
 	size = __btlog_size(btlu).btsp_size;
 	if (size > PAGE_SIZE) {
-		kernel_memory_populate(kernel_map, btlu.bta + PAGE_SIZE,
+		kr = kernel_memory_populate(btlu.bta + PAGE_SIZE,
 		    size - PAGE_SIZE, KMA_KOBJECT | KMA_ZERO,
 		    VM_KERN_MEMORY_DIAG);
 	}
 
-	__btlog_init(btlu);
+	if (kr == KERN_SUCCESS) {
+		__btlog_init(btlu);
 
-	__btlog_lock(btlu);
-	assert(btlu.btl->btl_disabled);
-	btlu.btl->btl_disabled = false;
-	__btlog_unlock(btlu);
+		__btlog_lock(btlu);
+		assert(btlu.btl->btl_disabled);
+		btlu.btl->btl_disabled = false;
+		__btlog_unlock(btlu);
+	}
+
+	return kr;
 }
 
 void
@@ -1469,7 +1473,7 @@ btlog_disable(btlogu_t btlu)
 	bzero((char *)btlu.bta + sizeof(*btlu.btl),
 	    PAGE_SIZE - sizeof(*btlu.btl));
 	if (size > PAGE_SIZE) {
-		kernel_memory_depopulate(kernel_map, btlu.bta + PAGE_SIZE,
+		kernel_memory_depopulate(btlu.bta + PAGE_SIZE,
 		    size - PAGE_SIZE, KMA_KOBJECT, VM_KERN_MEMORY_DIAG);
 	}
 }
@@ -1623,8 +1627,8 @@ btlog_get_records(
 	}
 
 	for (;;) {
-		kr = kernel_memory_allocate(ipc_kernel_map, &addr, size, 0,
-		    KMA_NONE, VM_KERN_MEMORY_IPC);
+		kr = kmem_alloc(ipc_kernel_map, &addr, size,
+		    KMA_DATA, VM_KERN_MEMORY_IPC);
 		if (kr == KERN_SUCCESS) {
 			break;
 		}

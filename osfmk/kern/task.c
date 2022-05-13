@@ -1405,6 +1405,14 @@ task_create_internal(
 
 	new_task->bank_context = NULL;
 
+#if __has_feature(ptrauth_calls)
+	/* Inherit the pac exception flags from parent if in fork */
+	if (parent_task && inherit_memory) {
+		new_task->t_flags |= (parent_task->t_flags & (TF_PAC_ENFORCE_USER_STATE
+		    | TF_PAC_EXC_FATAL));
+	}
+#endif
+
 #ifdef MACH_BSD
 	new_task->bsd_info = NULL;
 	new_task->corpse_info = NULL;
@@ -2908,10 +2916,6 @@ task_terminate_internal(
 	 * at reap time, we do it explictly here.
 	 */
 
-	vm_map_lock(task->map);
-	vm_map_disable_hole_optimization(task->map);
-	vm_map_unlock(task->map);
-
 #if MACH_ASSERT
 	/*
 	 * Identify the pmap's process, in case the pmap ledgers drift
@@ -3162,17 +3166,7 @@ task_complete_halt(task_t task)
 	 * Clean out the address space, as we are going to be
 	 * getting a new one.
 	 */
-	vm_map_remove(task->map, task->map->min_offset,
-	    task->map->max_offset,
-	    /*
-	     * Final cleanup:
-	     * + no unnesting
-	     * + remove immutable mappings
-	     * + allow gaps in the range
-	     */
-	    (VM_MAP_REMOVE_NO_UNNESTING |
-	    VM_MAP_REMOVE_IMMUTABLE |
-	    VM_MAP_REMOVE_GAPS_OK));
+	vm_map_terminate(task->map);
 
 	/*
 	 * Kick out any IOKitUser handles to the task. At best they're stale,
@@ -8997,6 +8991,10 @@ task_set_pac_exception_fatal_flag(
 	}
 
 	task_lock(task);
+
+	if (pac_entitlement) {
+		task->t_flags |= TF_PAC_ENFORCE_USER_STATE;
+	}
 	if (pac_entitlement || (enable_pac_exception && task->t_flags & TF_PLATFORM)) {
 		task->t_flags |= TF_PAC_EXC_FATAL;
 	}
@@ -9015,6 +9013,18 @@ task_is_pac_exception_fatal(
 	return (bool)(flags & TF_PAC_EXC_FATAL);
 }
 #endif /* __has_feature(ptrauth_calls) */
+
+bool
+task_needs_user_signed_thread_state(
+	task_t task)
+{
+	uint32_t flags = 0;
+
+	assert(task != TASK_NULL);
+
+	flags = os_atomic_load(&task->t_flags, relaxed);
+	return !!(flags & TF_PAC_ENFORCE_USER_STATE);
+}
 
 void
 task_set_tecs(task_t task)

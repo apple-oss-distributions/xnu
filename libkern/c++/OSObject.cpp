@@ -280,6 +280,12 @@ OSObject::serialize(OSSerialize *s) const
 	return ok;
 }
 
+/*
+ * Given that all OSObjects have been transitioned to use
+ * OSObject_typed_operator_new/OSObject_typed_operator_delete, this should
+ * only be called from kexts that havent recompiled to use the new
+ * definitions.
+ */
 void *
 OSObject::operator new(size_t size)
 {
@@ -345,7 +351,7 @@ OSObject::operator delete(void * mem, size_t size)
 	}
 #endif
 
-	kern_os_kfree(mem, size);
+	kheap_free(KHEAP_DEFAULT, mem, size);
 	OSIVAR_ACCUMSIZE(-size);
 }
 
@@ -366,46 +372,8 @@ OSObject_typed_operator_delete(kalloc_type_view_t ktv, void * mem,
 	if (size <= kalloc_type_get_size(ktv->kt_size)) {
 		kern_os_typed_free(ktv, mem, size);
 	} else {
-		kern_os_kfree(mem, size);
+		kheap_free(KHEAP_DEFAULT, mem, size);
 	}
-	OSIVAR_ACCUMSIZE(-size);
-}
-
-extern "C" void *
-OSObject_operator_new_external(size_t size);
-void *
-OSObject_operator_new_external(size_t size)
-{
-  #if IOTRACKING
-	if (kIOTracking & gIOKitDebug) {
-		return OSMetaClass::trackedNew(size);
-	}
-#endif
-
-	void * mem = kheap_alloc(KHEAP_KEXT, size,
-	    Z_VM_TAG_BT(Z_WAITOK_ZERO, VM_KERN_MEMORY_LIBKERN));
-	assert(mem);
-	OSIVAR_ACCUMSIZE(size);
-
-	return (void *) mem;
-}
-
-extern "C" void
-OSObject_operator_delete_external(void * mem, size_t size);
-void
-OSObject_operator_delete_external(void * mem, size_t size)
-{
-	if (!mem) {
-		return;
-	}
-
-#if IOTRACKING
-	if (kIOTracking & gIOKitDebug) {
-		return OSMetaClass::trackedDelete(mem, size);
-	}
-#endif
-
-	kheap_free(KHEAP_KEXT, mem, size);
 	OSIVAR_ACCUMSIZE(-size);
 }
 

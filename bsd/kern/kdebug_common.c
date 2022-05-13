@@ -105,7 +105,6 @@ create_buffers(struct kd_ctrl_page_t *kd_ctrl_page, struct kd_data_page_t *kd_da
 	unsigned int f_buffers;
 	int error = 0;
 	int ncpus, count_storage_units = 0;
-	vm_size_t kd_buf_size;
 
 	struct kd_bufinfo *kdbip = NULL;
 	struct kd_storage_buffers *kd_bufs = NULL;
@@ -113,11 +112,13 @@ create_buffers(struct kd_ctrl_page_t *kd_ctrl_page, struct kd_data_page_t *kd_da
 
 	ncpus = kd_ctrl_page->kdebug_cpus;
 
-	if (kmem_alloc(kernel_map, (vm_offset_t *)&kd_data_page->kdbip, sizeof(struct kd_bufinfo) * ncpus, tag) != KERN_SUCCESS) {
+	if (kmem_alloc(kernel_map, (vm_offset_t *)&kdbip,
+	    sizeof(struct kd_bufinfo) * ncpus,
+	    KMA_ZERO | KMA_DATA, tag) != KERN_SUCCESS) {
 		error = ENOSPC;
 		goto out;
 	}
-	kdbip = kd_data_page->kdbip;
+	kd_data_page->kdbip = kdbip;
 
 	f_buffers = n_storage_units / N_STORAGE_UNITS_PER_BUFFER;
 	kd_data_page->n_storage_buffer = f_buffers;
@@ -130,35 +131,37 @@ create_buffers(struct kd_ctrl_page_t *kd_ctrl_page, struct kd_data_page_t *kd_da
 	}
 
 	if (kd_data_page->kdcopybuf == 0) {
-		if (kmem_alloc(kernel_map, (vm_offset_t *)&kd_data_page->kdcopybuf, (vm_size_t) kd_ctrl_page->kdebug_kdcopybuf_size, tag) != KERN_SUCCESS) {
+		if (kmem_alloc(kernel_map, (vm_offset_t *)&kd_data_page->kdcopybuf,
+		    (vm_size_t) kd_ctrl_page->kdebug_kdcopybuf_size,
+		    KMA_DATA | KMA_ZERO, tag) != KERN_SUCCESS) {
 			error = ENOSPC;
 			goto out;
 		}
 	}
 
-	kd_buf_size = (vm_size_t) (kd_data_page->n_storage_buffer * sizeof(struct kd_storage_buffers));
-	if (kmem_alloc(kernel_map, (vm_offset_t *)&kd_data_page->kd_bufs, kd_buf_size, tag) != KERN_SUCCESS) {
+	kd_bufs = kalloc_type_tag(struct kd_storage_buffers, kd_data_page->n_storage_buffer,
+	    Z_WAITOK | Z_ZERO, tag);
+	if (kd_bufs == NULL) {
 		error = ENOSPC;
 		goto out;
 	}
-	kd_bufs = kd_data_page->kd_bufs;
-	bzero(kd_bufs, kd_buf_size);
+	kd_data_page->kd_bufs = kd_bufs;
 
 	for (i = 0; i < f_buffers; i++) {
-		if (kmem_alloc(kernel_map, (vm_offset_t *)&kd_bufs[i].kdsb_addr, (vm_size_t)f_buffer_size, tag) != KERN_SUCCESS) {
+		if (kmem_alloc(kernel_map, (vm_offset_t *)&kd_bufs[i].kdsb_addr,
+		    (vm_size_t)f_buffer_size, KMA_DATA | KMA_ZERO, tag) != KERN_SUCCESS) {
 			error = ENOSPC;
 			goto out;
 		}
-		bzero(kd_bufs[i].kdsb_addr, f_buffer_size);
 
 		kd_bufs[i].kdsb_size = f_buffer_size;
 	}
 	if (p_buffer_size) {
-		if (kmem_alloc(kernel_map, (vm_offset_t *)&kd_bufs[i].kdsb_addr, (vm_size_t)p_buffer_size, tag) != KERN_SUCCESS) {
+		if (kmem_alloc(kernel_map, (vm_offset_t *)&kd_bufs[i].kdsb_addr,
+		    (vm_size_t)p_buffer_size, KMA_DATA | KMA_ZERO, tag) != KERN_SUCCESS) {
 			error = ENOSPC;
 			goto out;
 		}
-		bzero(kd_bufs[i].kdsb_addr, p_buffer_size);
 
 		kd_bufs[i].kdsb_size = p_buffer_size;
 	}
@@ -185,8 +188,6 @@ create_buffers(struct kd_ctrl_page_t *kd_ctrl_page, struct kd_data_page_t *kd_da
 	}
 
 	kd_data_page->n_storage_units = count_storage_units;
-
-	bzero((char *)kdbip, sizeof(struct kd_bufinfo) * ncpus);
 
 	for (i = 0; i < ncpus; i++) {
 		kdbip[i].kd_list_head.raw = KDS_PTR_NULL;
@@ -221,7 +222,7 @@ delete_buffers(struct kd_ctrl_page_t *kd_ctrl_page, struct kd_data_page_t *kd_da
 				kmem_free(kernel_map, (vm_offset_t)kd_bufs[i].kdsb_addr, (vm_size_t)kd_bufs[i].kdsb_size);
 			}
 		}
-		kmem_free(kernel_map, (vm_offset_t)kd_bufs, (vm_size_t)(n_storage_buffer * sizeof(struct kd_storage_buffers)));
+		kfree_type(struct kd_storage_buffers, n_storage_buffer, kd_bufs);
 
 		kd_data_page->kd_bufs = NULL;
 		kd_data_page->n_storage_buffer = 0;
@@ -235,7 +236,6 @@ delete_buffers(struct kd_ctrl_page_t *kd_ctrl_page, struct kd_data_page_t *kd_da
 
 	if (kdbip) {
 		kmem_free(kernel_map, (vm_offset_t)kdbip, sizeof(struct kd_bufinfo) * kd_ctrl_page->kdebug_cpus);
-
 		kd_data_page->kdbip = NULL;
 	}
 	kd_ctrl_page->kdebug_iops = NULL;

@@ -121,8 +121,8 @@ sleh_undef(struct arm_saved_state * regs, struct arm_vfpsaved_state * vfp_ss __u
 	thread_t        thread = current_thread();
 	vm_offset_t     recover;
 
-	recover = thread->recover;
-	thread->recover = 0;
+	recover = thread->machine.recover;
+	thread->machine.recover = 0;
 
 	getCpuDatap()->cpu_stat.undef_ex_cnt++;
 
@@ -261,7 +261,7 @@ sleh_undef(struct arm_saved_state * regs, struct arm_vfpsaved_state * vfp_ss __u
 
 exit:
 	if (recover) {
-		thread->recover = recover;
+		thread->machine.recover = recover;
 	}
 }
 
@@ -287,8 +287,8 @@ sleh_abort(struct arm_saved_state * regs, int type)
 	thread_t        thread = current_thread();
 	boolean_t               intr;
 
-	recover = thread->recover;
-	thread->recover = 0;
+	recover = thread->machine.recover;
+	thread->machine.recover = 0;
 
 	status = regs->fsr & FSR_MASK;
 	spsr = regs->cpsr;
@@ -562,14 +562,14 @@ sleh_abort(struct arm_saved_state * regs, int type)
 
 exception_return:
 	if (recover) {
-		thread->recover = recover;
+		thread->machine.recover = recover;
 	}
 	thread_exception_return();
 	/* NOTREACHED */
 
 exit:
 	if (recover) {
-		thread->recover = recover;
+		thread->machine.recover = recover;
 	}
 	return;
 }

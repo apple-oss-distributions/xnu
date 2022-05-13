@@ -241,7 +241,7 @@ allocate_loop:
 			kmem_free(ipc_kernel_map, table_addr, table_size);
 		}
 		kr = kmem_alloc(ipc_kernel_map, &table_addr, table_size_needed,
-		    VM_KERN_MEMORY_IPC);
+		    KMA_DATA, VM_KERN_MEMORY_IPC);
 		if (kr != KERN_SUCCESS) {
 			return KERN_RESOURCE_SHORTAGE;
 		}

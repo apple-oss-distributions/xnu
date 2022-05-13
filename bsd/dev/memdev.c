@@ -158,8 +158,8 @@ static const struct cdevsw mdevcdevsw = {
 };
 
 struct mdev {
-	uint64_t        mdBase;         /* file size in bytes */
-	uint32_t        mdSize;         /* file size in bytes */
+	uint64_t        mdBase;         /* base page number (pages are assumed to be 4K). Multiply by 4096 to find actual address */
+	uint32_t        mdSize;         /* size in pages (pages are assumed to be 4K). Multiply by 4096 to find actual size. */
 	int                     mdFlags;        /* flags */
 	int                     mdSecsize;      /* sector size */
 	int                     mdBDev;         /* Block device number */
@@ -211,7 +211,8 @@ mdevrw(dev_t dev, struct uio *uio, __unused int ioflag)
 	int                     status;
 	addr64_t                mdata;
 	int                     devid;
-	enum uio_seg    saveflag;
+	enum uio_seg            saveflag;
+	int                     count;
 
 	devid = minor(dev);                                                                     /* Get minor device number */
 
@@ -220,6 +221,12 @@ mdevrw(dev_t dev, struct uio *uio, __unused int ioflag)
 	}
 	if (!(mdev[devid].mdFlags & mdInited)) {
 		return ENXIO;                                 /* Have we actually been defined yet? */
+	}
+	if (uio->uio_offset < 0) {
+		return EINVAL;  /* invalid offset */
+	}
+	if (uio_resid(uio) < 0) {
+		return EINVAL;
 	}
 	mdata = ((addr64_t)mdev[devid].mdBase << 12) + uio->uio_offset; /* Point to the area in "file" */
 
@@ -239,7 +246,14 @@ mdevrw(dev_t dev, struct uio *uio, __unused int ioflag)
 			uio->uio_segflg = UIO_PHYS_USERSPACE;
 		}
 	}
-	status = uiomove64(mdata, (int)uio_resid(uio), uio);    /* Move the data */
+
+	if (uio->uio_offset > (mdev[devid].mdSize << 12)) {
+		count = 0;
+	} else {
+		count = imin(uio_resid(uio), (mdev[devid].mdSize << 12) - uio->uio_offset);
+	}
+
+	status = uiomove64(mdata, count, uio);     /* Move the data */
 	uio->uio_segflg = saveflag;                                                     /* Restore the flag */
 
 	return status;

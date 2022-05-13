@@ -757,9 +757,12 @@ pkt_copy_from_mbuf(const enum txrx t, kern_packet_t ph, const uint16_t poff,
 
 	switch (t) {
 	case NR_RX:
-		pkt->pkt_csum_flags = 0;
+		pkt->pkt_csum_flags = m->m_pkthdr.csum_flags;
+		pkt->pkt_csum_rx_start_off = 0;
+		pkt->pkt_csum_rx_value = m->m_pkthdr.csum_rx_val;
 		pkt->pkt_svc_class = m_get_service_class(m);
-		if (__probable(copysum)) {
+		if (__probable(((m->m_pkthdr.csum_flags & CSUM_RX_FULL_FLAGS)
+		    != CSUM_RX_FULL_FLAGS) && copysum)) {
 			/*
 			 * Use m_copydata() to copy the portion up to the
 			 * point where we need to start the checksum, and
@@ -776,8 +779,6 @@ pkt_copy_from_mbuf(const enum txrx t, kern_packet_t ph, const uint16_t poff,
 			    start, csum, FALSE);
 		} else {
 			m_copydata(m, moff, len, baddr);
-			pkt->pkt_csum_rx_start_off = 0;
-			pkt->pkt_csum_rx_value = 0;
 		}
 		SK_DF(SK_VERB_COPY_MBUF | SK_VERB_RX,
 		    "%s(%d) RX len %u, copy+sum %u (csum 0x%04x), start %u",
@@ -1117,8 +1118,12 @@ pkt_copy_multi_buflet_from_mbuf(const enum txrx t, kern_packet_t ph,
 
 	switch (t) {
 	case NR_RX:
-		pkt->pkt_csum_flags = 0;
-		if (__probable(copysum)) {
+		pkt->pkt_csum_flags = m->m_pkthdr.csum_flags;
+		pkt->pkt_csum_rx_start_off = 0;
+		pkt->pkt_csum_rx_value = m->m_pkthdr.csum_rx_val;
+		pkt->pkt_svc_class = m_get_service_class(m);
+		if (__probable(((m->m_pkthdr.csum_flags & CSUM_RX_FULL_FLAGS)
+		    != CSUM_RX_FULL_FLAGS) && copysum)) {
 			/*
 			 * Use m_copydata() to copy the portion up to the
 			 * point where we need to start the checksum, and
@@ -1135,8 +1140,6 @@ pkt_copy_multi_buflet_from_mbuf(const enum txrx t, kern_packet_t ph,
 			METADATA_ADJUST_LEN(pkt, start, poff);
 		} else {
 			(void) m_copypkt_sum(m, moff, ph, poff, len, FALSE);
-			pkt->pkt_csum_rx_start_off = 0;
-			pkt->pkt_csum_rx_value = 0;
 		}
 		SK_DF(SK_VERB_COPY_MBUF | SK_VERB_RX,
 		    "%s(%d) RX len %u, copy+sum %u (csum 0x%04x), start %u",

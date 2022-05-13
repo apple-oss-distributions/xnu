@@ -185,7 +185,7 @@ extern btlog_t btlog_create(
  * to @c btlog_disable() or @c btlog_destroy(),
  * and the caller is supposed to provide serialization.
  */
-extern void btlog_enable(
+extern kern_return_t btlog_enable(
 	btlog_t                 log);
 
 /*!

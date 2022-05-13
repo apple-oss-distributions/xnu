@@ -364,7 +364,6 @@ kernel_startup_log(startup_subsystem_id_t subsystem)
 		[STARTUP_SUB_KPRINTF] = "kprintf",
 
 		[STARTUP_SUB_PMAP_STEAL] = "pmap_steal",
-		[STARTUP_SUB_VM_KERNEL] = "vm_kernel",
 		[STARTUP_SUB_KMEM] = "kmem",
 		[STARTUP_SUB_ZALLOC] = "zalloc",
 		[STARTUP_SUB_PERCPU] = "percpu",

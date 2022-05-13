@@ -289,6 +289,7 @@ IOCPUSleepKernel(void)
 
 	rootDomain->start_watchdog_timer();
 
+#if defined(XNU_TARGET_OS_OSX)
 	console_resume();
 
 	rootDomain->tracePoint( kIOPMTracePointWakeCPUs );
@@ -315,6 +316,38 @@ IOCPUSleepKernel(void)
 
 	rootDomain->tracePoint( kIOPMTracePointWakePlatformActions );
 	IOPlatformActionsPostResume();
+
+#else /* defined(!XNU_TARGET_OS_OSX) */
+	// Keep the old ordering around for iOS temporarily - rdar://88891040
+
+	rootDomain->tracePoint( kIOPMTracePointWakePlatformActions );
+
+	console_resume();
+
+	IOPlatformActionsPostResume();
+	rootDomain->tracePoint( kIOPMTracePointWakeCPUs );
+
+	// Wake the other CPUs.
+	for (cnt = 0; cnt < numCPUs; cnt++) {
+		target = OSDynamicCast(IOCPU, gIOCPUs->getObject(cnt));
+
+		// Skip the already-woken boot CPU.
+		if (target->getCPUNumber() != (UInt32)master_cpu) {
+			if (target->getCPUState() == kIOCPUStateRunning) {
+				panic("Spurious wakeup of cpu %u", (unsigned int)(target->getCPUNumber()));
+			}
+
+			if (target->getCPUState() == kIOCPUStateStopped) {
+				processor_start(target->getMachProcessor());
+			}
+		}
+	}
+
+#if defined(__arm64__)
+	sched_restore_recommended_cores_after_sleep();
+#endif
+
+#endif /* defined(XNU_TARGET_OS_OSX) */
 
 	thread_kern_set_pri(self, old_pri);
 	printf("IOCPUSleepKernel exit\n");

@@ -79,6 +79,7 @@ IOSharedDataQueue::initWithCapacity(UInt32 size)
 {
 	IODataQueueAppendix *   appendix;
 	vm_size_t               allocSize;
+	kern_return_t           kr;
 
 	if (!super::init()) {
 		return false;
@@ -99,11 +100,11 @@ IOSharedDataQueue::initWithCapacity(UInt32 size)
 		return false;
 	}
 
-	dataQueue = (IODataQueueMemory *)IOMallocAligned(allocSize, PAGE_SIZE);
-	if (dataQueue == NULL) {
+	kr = kmem_alloc(kernel_map, (vm_offset_t *)&dataQueue, allocSize,
+	    (kma_flags_t)(KMA_DATA | KMA_ZERO), IOMemoryTag(kernel_map));
+	if (kr != KERN_SUCCESS) {
 		return false;
 	}
-	bzero(dataQueue, allocSize);
 
 	dataQueue->queueSize    = size;
 //  dataQueue->head         = 0;
@@ -133,7 +134,8 @@ void
 IOSharedDataQueue::free()
 {
 	if (dataQueue) {
-		IOFreeAligned(dataQueue, round_page(getQueueSize() + DATA_QUEUE_MEMORY_HEADER_SIZE + DATA_QUEUE_MEMORY_APPENDIX_SIZE));
+		kmem_free(kernel_map, (vm_offset_t)dataQueue, round_page(getQueueSize() +
+		    DATA_QUEUE_MEMORY_HEADER_SIZE + DATA_QUEUE_MEMORY_APPENDIX_SIZE));
 		dataQueue = NULL;
 		if (notifyMsg) {
 			IOFreeType(notifyMsg, mach_msg_header_t);

@@ -6780,7 +6780,12 @@ necp_application_fillout_info_locked(uuid_t application_uuid, uuid_t real_applic
 	}
 
 	if (necp_kernel_application_policies_condition_mask & NECP_KERNEL_CONDITION_ENTITLEMENT && proc != NULL) {
-		info->cred_result = priv_check_cred(kauth_cred_get(), PRIV_NET_PRIVILEGED_NECP_MATCH, 0);
+		kauth_cred_t proc_cred = kauth_cred_proc_ref(proc);
+		info->cred_result = EPERM;
+		if (proc_cred != NULL) {
+			info->cred_result = priv_check_cred(proc_cred, PRIV_NET_PRIVILEGED_NECP_MATCH, 0);
+			kauth_cred_unref(&proc_cred);
+		}
 
 		if (info->cred_result != 0) {
 			// Process does not have entitlement, check the parent process
@@ -8454,6 +8459,9 @@ necp_socket_fillout_info_locked(struct inpcb *inp, struct sockaddr *override_loc
 		    inp->inp_flags2 & INP2_EXTERNAL_PORT) {
 			info->client_flags |= NECP_CLIENT_PARAMETER_FLAG_LISTENER;
 		}
+		if (inp->inp_socket->so_options & SO_NOWAKEFROMSLEEP) {
+			info->client_flags |= NECP_CLIENT_PARAMETER_FLAG_NO_WAKE_FROM_SLEEP;
+		}
 	}
 
 	if ((necp_data_tracing_level && necp_data_tracing_proto) ||
@@ -8970,6 +8978,16 @@ necp_socket_ip_tunnel_tso(struct inpcb *inp)
 	}
 }
 
+static inline void
+necp_unscope(struct inpcb *inp)
+{
+	// If the current policy result is "socket scoped" and the pcb was actually re-scoped as a result, then un-bind the pcb
+	if (inp->inp_policyresult.results.result == NECP_KERNEL_POLICY_RESULT_SOCKET_SCOPED && (inp->inp_flags2 & INP2_SCOPED_BY_NECP)) {
+		inp->inp_flags &= ~INP_BOUND_IF;
+		inp->inp_boundifp = NULL;
+	}
+}
+
 necp_kernel_policy_id
 necp_socket_find_policy_match(struct inpcb *inp, struct sockaddr *override_local_addr, struct sockaddr *override_remote_addr, u_int32_t override_bound_interface)
 {
@@ -9034,12 +9052,8 @@ necp_socket_find_policy_match(struct inpcb *inp, struct sockaddr *override_local
 	// Check for loopback exception
 	bypass_type = necp_socket_bypass(override_local_addr, override_remote_addr, inp);
 	if (bypass_type == NECP_BYPASS_TYPE_INTCOPROC || (bypass_type == NECP_BYPASS_TYPE_LOOPBACK && necp_pass_loopback == NECP_LOOPBACK_PASS_ALL)) {
-		if (inp->inp_policyresult.results.result == NECP_KERNEL_POLICY_RESULT_SOCKET_SCOPED) {
-			// If the previous policy result was "socket scoped", un-scope the socket.
-			inp->inp_flags &= ~INP_BOUND_IF;
-			inp->inp_boundifp = NULL;
-		}
 		// Mark socket as a pass
+		necp_unscope(inp);
 		inp->inp_policyresult.policy_id = NECP_KERNEL_POLICY_ID_NO_MATCH;
 		inp->inp_policyresult.skip_policy_id = NECP_KERNEL_POLICY_ID_NO_MATCH;
 		inp->inp_policyresult.policy_gencount = 0;
@@ -9090,12 +9104,8 @@ necp_socket_find_policy_match(struct inpcb *inp, struct sockaddr *override_local
 	if (bypass_type == NECP_BYPASS_TYPE_LOOPBACK &&
 	    necp_pass_loopback == NECP_LOOPBACK_PASS_WITH_FILTER &&
 	    (matched_policy == NULL || matched_policy->result != NECP_KERNEL_POLICY_RESULT_SOCKET_DIVERT)) {
-		if (inp->inp_policyresult.results.result == NECP_KERNEL_POLICY_RESULT_SOCKET_SCOPED) {
-			// If the previous policy result was "socket scoped", un-scope the socket.
-			inp->inp_flags &= ~INP_BOUND_IF;
-			inp->inp_boundifp = NULL;
-		}
 		// Mark socket as a pass
+		necp_unscope(inp);
 		inp->inp_policyresult.policy_id = NECP_KERNEL_POLICY_ID_NO_MATCH;
 		inp->inp_policyresult.skip_policy_id = NECP_KERNEL_POLICY_ID_NO_MATCH;
 		inp->inp_policyresult.policy_gencount = 0;
@@ -9286,6 +9296,7 @@ necp_socket_find_policy_match(struct inpcb *inp, struct sockaddr *override_local
 			NECP_DATA_TRACE_LOG_SOCKET(debug, "SOCKET - INP UPDATE", "DROP <NO MATCH>", 0, 0);
 		} else {
 			// Mark non-matching socket so we don't re-check it
+			necp_unscope(inp);
 			inp->inp_policyresult.policy_id = NECP_KERNEL_POLICY_ID_NO_MATCH;
 			inp->inp_policyresult.skip_policy_id = NECP_KERNEL_POLICY_ID_NO_MATCH;
 			inp->inp_policyresult.policy_gencount = necp_kernel_socket_policies_gencount;

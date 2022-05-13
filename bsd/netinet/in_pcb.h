@@ -732,6 +732,7 @@ struct inpcbinfo {
 #define INP2_EXTERNAL_PORT      0x00000400 /* The port is registered externally, for NECP listeners */
 #define INP2_NO_IFF_CONSTRAINED 0x00000800 /* do not use constrained interface */
 #define INP2_DONTFRAG           0x00001000 /* mark the DF bit in the IP header to avoid fragmentation */
+#define INP2_SCOPED_BY_NECP     0x00002000 /* NECP scoped the pcb */
 
 /*
  * Flags passed to in_pcblookup*() functions.

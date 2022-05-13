@@ -139,15 +139,18 @@ mt_cdev_open(dev_t devnum, __unused int flags, __unused int devtype,
 	}
 	mt_device_lock(dev);
 	if (dev->mtd_inuse) {
-		error = EBUSY;
+		error = EALREADY;
 	} else if (!mt_acquire_counters()) {
-		error = EBUSY;
+		error = ECONNREFUSED;
 	} else {
 		dev->mtd_reset();
 		dev->mtd_inuse = true;
 	}
 	mt_device_unlock(dev);
 
+	if (error != 0) {
+		perfmon_release(perfmon_upmu, "monotonic");
+	}
 	return error;
 }
 

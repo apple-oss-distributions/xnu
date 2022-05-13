@@ -73,6 +73,9 @@ extern kern_return_t fbt_perfCallback(int, struct savearea_t *, uintptr_t *, int
 
 #define SDT_PROBETAB_SIZE       0x1000          /* 4k entries -- 16K total */
 
+#define SDT_UNKNOWN_FUNCNAME    "."             /* function symbol name when not found in symbol table */
+
+
 static int              sdt_verbose = 0;
 sdt_probe_t             **sdt_probetab;
 int                     sdt_probetab_size;
@@ -610,7 +613,6 @@ sdt_load_machsect(struct modctl *ctl)
 	 */
 	dtrace_sdt_def_t *sdtdef = (dtrace_sdt_def_t *)(sec_sdt->addr);
 	for (size_t k = 0; k < sec_sdt->size / sizeof(dtrace_sdt_def_t); k++, sdtdef++) {
-		const char *funcname;
 		unsigned long best = 0;
 
 #if defined(__arm__)
@@ -652,7 +654,8 @@ sdt_load_machsect(struct modctl *ctl)
 		sdpd->sdpd_func = NULL;
 
 		if (MOD_HAS_KERNEL_SYMBOLS(ctl)) {
-			funcname = NULL;
+			const char *funcname = SDT_UNKNOWN_FUNCNAME;
+
 			for (int i = 0; i < nsyms; i++) {
 				uint8_t jn_type = sym[i].n_type & N_TYPE;
 				char *jname = strings + sym[i].n_un.n_strx;
@@ -679,11 +682,9 @@ sdt_load_machsect(struct modctl *ctl)
 				}
 			}
 
-			if (funcname) {
-				len = strlen(funcname) + 1;
-				sdpd->sdpd_func = kmem_alloc(len, KM_SLEEP);
-				(void) strlcpy(sdpd->sdpd_func, funcname, len);
-			}
+			len = strlen(funcname) + 1;
+			sdpd->sdpd_func = kmem_alloc(len, KM_SLEEP);
+			(void) strlcpy(sdpd->sdpd_func, funcname, len);
 		}
 
 		sdpd->sdpd_offset = sdtdef->dsd_addr;
@@ -733,6 +734,7 @@ sdt_provide_module_user_syms(void *arg, struct modctl *ctl)
 	/* Fixup missing probe description parts. */
 	for (sdpd = ctl->mod_sdtdesc; sdpd != NULL; sdpd = sdpd->sdpd_next) {
 		ASSERT(sdpd->sdpd_func == NULL);
+		const char *funcname = SDT_UNKNOWN_FUNCNAME;
 
 		/* Look for symbol that contains SDT probe offset. */
 		for (int i = 0; i < mod_sym->dtmodsyms_count; i++) {
@@ -759,12 +761,14 @@ sdt_provide_module_user_syms(void *arg, struct modctl *ctl)
 			/* Pick symbol name when we found match. */
 			if ((symbol->dtsym_addr <= sdpd->sdpd_offset) &&
 			    (sdpd->sdpd_offset < symbol->dtsym_addr + symbol->dtsym_size)) {
-				size_t len = strlen(name) + 1;
-				sdpd->sdpd_func = kmem_alloc(len, KM_SLEEP);
-				(void) strlcpy(sdpd->sdpd_func, name, len);
+				funcname = name;
 				break;
 			}
 		}
+
+		size_t len = strlen(funcname) + 1;
+		sdpd->sdpd_func = kmem_alloc(len, KM_SLEEP);
+		(void) strlcpy(sdpd->sdpd_func, funcname, len);
 	}
 
 	/* Probe descriptionds are now fixed up.  Provide them as usual. */

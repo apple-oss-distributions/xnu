@@ -77,7 +77,7 @@
 #include <libkern/libkern.h>
 
 ZONE_VIEW_DEFINE(ZV_NAMEI, "vfs.namei", KHEAP_ID_DATA_BUFFERS, MAXPATHLEN);
-KALLOC_HEAP_DEFINE(KERN_OS_MALLOC, "kern_os_malloc", KHEAP_ID_KEXT);
+KALLOC_HEAP_DEFINE(KERN_OS_MALLOC, "kern_os_malloc", KHEAP_ID_DEFAULT);
 
 /*
  * macOS Only deprecated interfaces, here only for legacy reasons.
@@ -93,7 +93,7 @@ _MALLOC_external(size_t size, int type, int flags);
 void *
 _MALLOC_external(size_t size, int type, int flags)
 {
-	kalloc_heap_t heap = KHEAP_KEXT;
+	kalloc_heap_t heap = KHEAP_DEFAULT;
 	void    *addr = NULL;
 
 	if (type == M_SONAME) {
@@ -139,27 +139,9 @@ _MALLOC_external(size_t size, int type, int flags)
 void
 _FREE_external(void *addr, int type);
 void
-_FREE_external(void *addr, int type)
+_FREE_external(void *addr, int type __unused)
 {
-	/*
-	 * hashinit and other functions allocate on behalf of kexts and do not have
-	 * a matching hashdestroy, so we sadly have to allow this for now.
-	 */
-	kalloc_heap_t heap = KHEAP_ANY;
-
-	if (type == M_SONAME) {
-		/*
-		 * On macOS, some KEXT is known to use M_SONAME for M_TEMP allocation
-		 */
-#if !XNU_TARGET_OS_OSX
-		kheap_free_bounded(KHEAP_SONAME, addr, 1, UINT8_MAX);
-#else
-		kheap_free_addr(heap, addr);
-#endif /* XNU_TARGET_OS_OSX */
-		return;
-	}
-
-	kheap_free_addr(heap, addr);
+	kheap_free_addr(KHEAP_DEFAULT, addr);
 }
 
 void
@@ -167,7 +149,7 @@ _FREE_ZONE_external(void *elem, size_t size, int type);
 void
 _FREE_ZONE_external(void *elem, size_t size, int type __unused)
 {
-	(kheap_free)(KHEAP_KEXT, elem, size);
+	kheap_free(KHEAP_DEFAULT, elem, size);
 }
 
 char *
@@ -179,14 +161,13 @@ STRDUP_external(const char *string, int type __unused)
 	char *copy;
 
 	len = strlen(string) + 1;
-	copy = kheap_alloc(KHEAP_KEXT, len, Z_WAITOK);
+	copy = kheap_alloc(KHEAP_DEFAULT, len, Z_WAITOK);
 	if (copy) {
 		memcpy(copy, string, len);
 	}
 	return copy;
 }
 
-static KALLOC_HEAP_DEFINE(OSMALLOC, "osmalloc", KHEAP_ID_KEXT);
 static queue_head_t OSMalloc_tag_list = QUEUE_HEAD_INITIALIZER(OSMalloc_tag_list);
 static LCK_GRP_DECLARE(OSMalloc_tag_lck_grp, "OSMalloc_tag");
 static LCK_SPIN_DECLARE(OSMalloc_tag_lock, &OSMalloc_tag_lck_grp);
@@ -278,12 +259,12 @@ OSMalloc_external(uint32_t size, OSMallocTag tag)
 
 	OSMalloc_Tagref(tag);
 	if ((tag->OSMT_attr & OSMT_PAGEABLE) && (size & ~PAGE_MASK)) {
-		if ((kr = kmem_alloc_pageable(kernel_map,
-		    (vm_offset_t *)&addr, size, vm_tag_bt())) != KERN_SUCCESS) {
+		if ((kr = kmem_alloc(kernel_map, (vm_offset_t *)&addr, size,
+		    KMA_PAGEABLE | KMA_DATA, vm_tag_bt())) != KERN_SUCCESS) {
 			addr = NULL;
 		}
 	} else {
-		addr = kheap_alloc(OSMALLOC, size,
+		addr = kheap_alloc(KERN_OS_MALLOC, size,
 		    Z_VM_TAG_BT(Z_WAITOK, VM_KERN_MEMORY_KALLOC));
 	}
 
@@ -305,7 +286,7 @@ OSMalloc_noblock_external(uint32_t size, OSMallocTag tag)
 	}
 
 	OSMalloc_Tagref(tag);
-	addr = kheap_alloc(OSMALLOC, (vm_size_t)size,
+	addr = kheap_alloc(KERN_OS_MALLOC, (vm_size_t)size,
 	    Z_VM_TAG_BT(Z_NOWAIT, VM_KERN_MEMORY_KALLOC));
 	if (addr == NULL) {
 		OSMalloc_Tagrele(tag);
@@ -322,7 +303,7 @@ OSFree_external(void *addr, uint32_t size, OSMallocTag tag)
 	    && (size & ~PAGE_MASK)) {
 		kmem_free(kernel_map, (vm_offset_t)addr, size);
 	} else {
-		kheap_free(OSMALLOC, addr, size);
+		kheap_free(KERN_OS_MALLOC, addr, size);
 	}
 
 	OSMalloc_Tagrele(tag);
@@ -366,6 +347,14 @@ SYSCTL_PROC(_kern, OID_AUTO, zone_map_size_and_capacity,
     CTLTYPE_QUAD | CTLFLAG_RD | CTLFLAG_MASKED | CTLFLAG_LOCKED, 0, 0,
     &sysctl_zone_map_size_and_capacity, "Q",
     "Current size and capacity of the zone map");
+
+SYSCTL_LONG(_kern, OID_AUTO, zone_wired_pages,
+    CTLFLAG_RD | CTLFLAG_LOCKED, &zone_pages_wired,
+    "number of wired pages in zones");
+
+SYSCTL_LONG(_kern, OID_AUTO, zone_guard_pages,
+    CTLFLAG_RD | CTLFLAG_LOCKED, &zone_guard_pages,
+    "number of guard pages in zones");
 
 #endif /* DEBUG || DEVELOPMENT */
 #if CONFIG_ZLEAKS

@@ -697,7 +697,10 @@ ml_cpu_down(void)
 		 * and poke it in case there's a sooner deadline for it to schedule.
 		 */
 		timer_queue_shutdown(&cpu_data_ptr->rtclock_timer.queue);
-		cpu_xcall(BootCpuData.cpu_number, &timer_queue_expire_local, NULL);
+		kern_return_t rv = cpu_xcall(BootCpuData.cpu_number, &timer_queue_expire_local, &ml_cpu_down);
+		if (rv != KERN_SUCCESS) {
+			panic("ml_cpu_down: IPI failure %d", rv);
+		}
 	}
 
 	cpu_signal_handler_internal(TRUE);

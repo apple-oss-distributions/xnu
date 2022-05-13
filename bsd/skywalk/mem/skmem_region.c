@@ -215,13 +215,13 @@ static uint32_t skmem_drv_buf_seg_eff_size = SKMEM_DRV_BUF_SEG_SIZE;
 uint32_t skmem_usr_buf_seg_size = SKMEM_USR_BUF_SEG_SIZE;
 
 #define SKMEM_TAG_SEGMENT_BMAP  "com.apple.skywalk.segment.bmap"
-static kern_allocation_name_t skmem_tag_segment_bmap;
+static SKMEM_TAG_DEFINE(skmem_tag_segment_bmap, SKMEM_TAG_SEGMENT_BMAP);
 
 #define SKMEM_TAG_SEGMENT_HASH  "com.apple.skywalk.segment.hash"
-static kern_allocation_name_t skmem_tag_segment_hash;
+static SKMEM_TAG_DEFINE(skmem_tag_segment_hash, SKMEM_TAG_SEGMENT_HASH);
 
 #define SKMEM_TAG_REGION_MIB     "com.apple.skywalk.region.mib"
-static kern_allocation_name_t skmem_tag_region_mib;
+static SKMEM_TAG_DEFINE(skmem_tag_region_mib, SKMEM_TAG_REGION_MIB);
 
 #define BMAPSZ  64
 
@@ -372,21 +372,6 @@ skmem_region_init(void)
 
 	TAILQ_INIT(&skmem_region_head);
 
-	ASSERT(skmem_tag_segment_hash == NULL);
-	skmem_tag_segment_hash =
-	    kern_allocation_name_allocate(SKMEM_TAG_SEGMENT_HASH, 0);
-	ASSERT(skmem_tag_segment_hash != NULL);
-
-	ASSERT(skmem_tag_segment_bmap == NULL);
-	skmem_tag_segment_bmap =
-	    kern_allocation_name_allocate(SKMEM_TAG_SEGMENT_BMAP, 0);
-	ASSERT(skmem_tag_segment_bmap != NULL);
-
-	ASSERT(skmem_tag_region_mib == NULL);
-	skmem_tag_region_mib =
-	    kern_allocation_name_allocate(SKMEM_TAG_REGION_MIB, 0);
-	ASSERT(skmem_tag_region_mib != NULL);
-
 	skmem_region_update_tc =
 	    thread_call_allocate_with_options(skmem_region_update_func,
 	    NULL, THREAD_CALL_PRIORITY_KERNEL, THREAD_CALL_OPTIONS_ONCE);
@@ -422,19 +407,6 @@ skmem_region_fini(void)
 		if (skmem_sg_cache != NULL) {
 			skmem_cache_destroy(skmem_sg_cache);
 			skmem_sg_cache = NULL;
-		}
-
-		if (skmem_tag_segment_hash != NULL) {
-			kern_allocation_name_release(skmem_tag_segment_hash);
-			skmem_tag_segment_hash = NULL;
-		}
-		if (skmem_tag_segment_bmap != NULL) {
-			kern_allocation_name_release(skmem_tag_segment_bmap);
-			skmem_tag_segment_bmap = NULL;
-		}
-		if (skmem_tag_region_mib != NULL) {
-			kern_allocation_name_release(skmem_tag_region_mib);
-			skmem_tag_region_mib = NULL;
 		}
 
 		__skmem_region_inited = 0;

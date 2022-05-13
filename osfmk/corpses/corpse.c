@@ -370,20 +370,8 @@ task_purge_all_corpses(void)
 	lck_mtx_lock(&tasks_corpse_lock);
 	/* Iterate through all the corpse tasks and clear all map entries */
 	queue_iterate(&corpse_tasks, task, task_t, corpse_tasks) {
-		vm_map_remove(task->map,
-		    task->map->min_offset,
-		    task->map->max_offset,
-		    /*
-		     * Final cleanup:
-		     * + no unnesting
-		     * + remove immutable mappings
-		     * + allow gaps in the range
-		     */
-		    (VM_MAP_REMOVE_NO_UNNESTING |
-		    VM_MAP_REMOVE_IMMUTABLE |
-		    VM_MAP_REMOVE_GAPS_OK));
+		vm_map_terminate(task->map);
 	}
-
 	lck_mtx_unlock(&tasks_corpse_lock);
 }
 

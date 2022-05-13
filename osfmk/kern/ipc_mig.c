@@ -162,7 +162,7 @@ kernel_mach_msg_send_common(
 	mr = ipc_kmsg_send(kmsg, option, timeout_val);
 
 	if (mr != MACH_MSG_SUCCESS) {
-		ipc_kmsg_destroy(kmsg);
+		ipc_kmsg_destroy(kmsg, IPC_KMSG_DESTROY_ALL);
 		KDBG(MACHDBG_CODE(DBG_MACH_IPC, MACH_IPC_KMSG_INFO) | DBG_FUNC_END, mr);
 	}
 
@@ -338,7 +338,7 @@ kernel_mach_msg_rpc(
 	mr = ipc_kmsg_send(kmsg, option, MACH_MSG_TIMEOUT_NONE);
 	if (mr != MACH_MSG_SUCCESS) {
 		ip_release(dest);
-		ipc_kmsg_destroy(kmsg);
+		ipc_kmsg_destroy(kmsg, IPC_KMSG_DESTROY_ALL);
 		KDBG(MACHDBG_CODE(DBG_MACH_IPC, MACH_IPC_KMSG_INFO) | DBG_FUNC_END, mr);
 		return mr;
 	}
@@ -405,7 +405,7 @@ kernel_mach_msg_rpc(
 
 	/* The message header and body itself must be receivable */
 	if (rcv_size < kmsg_size) {
-		ipc_kmsg_destroy(kmsg);
+		ipc_kmsg_destroy(kmsg, IPC_KMSG_DESTROY_ALL);
 		return MACH_RCV_TOO_LARGE;
 	}
 

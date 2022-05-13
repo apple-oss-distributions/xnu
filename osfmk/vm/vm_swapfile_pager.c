@@ -310,11 +310,9 @@ swapfile_pager_data_request(
 	unsigned int            pl_count;
 	vm_object_t             dst_object;
 	kern_return_t           kr, retval;
-	vm_map_offset_t         kernel_mapping;
-	vm_offset_t             dst_vaddr;
+	vm_offset_t             kernel_mapping;
 	char                    *dst_ptr;
 	vm_offset_t             cur_offset;
-	vm_map_entry_t          map_entry;
 
 	PAGER_DEBUG(PAGER_ALL, ("swapfile_pager_data_request: %p, %llx, %x, %x\n", mem_obj, offset, length, protection_required));
 
@@ -356,24 +354,13 @@ swapfile_pager_data_request(
 	 * Reserve a virtual page in the kernel address space to map each
 	 * destination physical page when it's its turn to be processed.
 	 */
-	vm_object_reference(kernel_object);     /* ref. for mapping */
-	kr = vm_map_find_space(kernel_map,
-	    &kernel_mapping,
-	    PAGE_SIZE_64,
-	    0,
-	    VM_MAP_KERNEL_FLAGS_NONE,
-	    VM_KERN_MEMORY_NONE,
-	    &map_entry);
+	kr = kmem_alloc(kernel_map, &kernel_mapping, PAGE_SIZE,
+	    KMA_DATA | KMA_KOBJECT | KMA_PAGEABLE, VM_KERN_MEMORY_NONE);
 	if (kr != KERN_SUCCESS) {
-		vm_object_deallocate(kernel_object);
 		retval = kr;
 		goto done;
 	}
-	VME_OBJECT_SET(map_entry, kernel_object);
-	VME_OFFSET_SET(map_entry, kernel_mapping - VM_MIN_KERNEL_ADDRESS);
-	vm_map_unlock(kernel_map);
-	dst_vaddr = CAST_DOWN(vm_offset_t, kernel_mapping);
-	dst_ptr = (char *) dst_vaddr;
+	dst_ptr = (char *)kernel_mapping;
 
 	/*
 	 * Fill in the contents of the pages requested by VM.
@@ -455,15 +442,11 @@ done:
 		upl_deallocate(upl);
 		upl = NULL;
 	}
+
 	if (kernel_mapping != 0) {
 		/* clean up the mapping of the source and destination pages */
-		kr = vm_map_remove(kernel_map,
-		    kernel_mapping,
-		    kernel_mapping + PAGE_SIZE_64,
-		    VM_MAP_REMOVE_NO_FLAGS);
-		assert(kr == KERN_SUCCESS);
+		kmem_free(kernel_map, kernel_mapping, PAGE_SIZE);
 		kernel_mapping = 0;
-		dst_vaddr = 0;
 	}
 
 	return retval;

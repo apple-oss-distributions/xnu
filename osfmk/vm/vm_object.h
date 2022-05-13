@@ -155,9 +155,6 @@ struct vm_object {
 	vm_page_queue_head_t    memq;           /* Resident memory - must be first */
 	lck_rw_t                Lock;           /* Synchronization */
 
-#if DEVELOPMENT || DEBUG
-	thread_t                Lock_owner;
-#endif
 	union {
 		vm_object_size_t  vou_size;     /* Object size (only valid if internal) */
 		int               vou_cache_pages_to_scan;      /* pages yet to be visited in an
@@ -420,18 +417,11 @@ extern void vm_object_access_tracking(vm_object_t object,
     uint32_t *acess_tracking_writes);
 #endif /* VM_OBJECT_ACCESS_TRACKING */
 
-extern
-vm_object_t     kernel_object;          /* the single kernel object */
+extern const vm_object_t kernel_object;          /* the single kernel object */
 
-extern
-vm_object_t     compressor_object;      /* the single compressor object */
+extern const vm_object_t compressor_object;      /* the single compressor object */
 
-extern
-vm_object_t     retired_pages_object;   /* holds VM pages which should never be used */
-
-extern
-unsigned int    vm_object_absent_max;   /* maximum number of absent pages
-                                         *  at a time for each object */
+extern const vm_object_t retired_pages_object;   /* holds VM pages which should never be used */
 
 # define        VM_MSYNC_INITIALIZED                    0
 # define        VM_MSYNC_SYNCHRONIZING                  1
@@ -559,8 +549,7 @@ extern boolean_t        vm_object_lock_upgrade(vm_object_t);
 
 #define vm_object_lock_init(object)                                     \
 	lck_rw_init(&(object)->Lock, &vm_object_lck_grp,                \
-	            (((object) == kernel_object ||                      \
-	              (object) == vm_submap_object) ?                   \
+	            ((object) == kernel_object ?                        \
 	             &kernel_object_lck_attr :                          \
 	             (((object) == compressor_object) ?                 \
 	             &compressor_object_lck_attr :                      \
@@ -949,19 +938,10 @@ thread_sleep_vm_object(
 {
 	wait_result_t wr;
 
-#if DEVELOPMENT || DEBUG
-	if (object->Lock_owner != current_thread()) {
-		panic("thread_sleep_vm_object: now owner - %p\n", object);
-	}
-	object->Lock_owner = 0;
-#endif
 	wr = lck_rw_sleep(&object->Lock,
 	    LCK_SLEEP_PROMOTED_PRI,
 	    event,
 	    interruptible);
-#if DEVELOPMENT || DEBUG
-	object->Lock_owner = current_thread();
-#endif
 	return wr;
 }
 

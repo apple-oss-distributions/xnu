@@ -580,6 +580,14 @@ cslot_copy(c_slot_t cdst, c_slot_t csrc)
 #endif
 }
 
+#if XNU_TARGET_OS_OSX
+#define VM_COMPRESSOR_MAX_POOL_SIZE (192UL << 30)
+#else
+#define VM_COMPRESSOR_MAX_POOL_SIZE (0)
+#endif
+
+static vm_map_size_t compressor_size;
+static SECURITY_READ_ONLY_LATE(struct kmem_range) compressor_range;
 vm_map_t compressor_map;
 uint64_t compressor_pool_max_size;
 uint64_t compressor_pool_size;
@@ -648,15 +656,178 @@ cleanup_csegbufsz_experiment(__unused void *arg0)
 STARTUP_ARG(EARLY_BOOT, STARTUP_RANK_FIRST, cleanup_csegbufsz_experiment, NULL);
 #endif /* XNU_TARGET_OS_OSX && __arm64__ */
 
+__startup_func
+static void
+vm_compressor_set_size(void)
+{
+	__assert_only struct c_slot_mapping tmp_slot_ptr;
+	vm_size_t c_segments_arr_size = 0;
+
+	if (vm_compression_limit) {
+		compressor_pool_size = ptoa_64(vm_compression_limit);
+	}
+
+	compressor_pool_max_size = C_SEG_MAX_LIMIT;
+	compressor_pool_max_size *= c_seg_bufsize;
+
+#if XNU_TARGET_OS_OSX
+
+	if (vm_compression_limit == 0) {
+		if (max_mem <= (4ULL * 1024ULL * 1024ULL * 1024ULL)) {
+			compressor_pool_size = 16ULL * max_mem;
+		} else if (max_mem <= (8ULL * 1024ULL * 1024ULL * 1024ULL)) {
+			compressor_pool_size = 8ULL * max_mem;
+		} else if (max_mem <= (32ULL * 1024ULL * 1024ULL * 1024ULL)) {
+			compressor_pool_size = 4ULL * max_mem;
+		} else {
+			compressor_pool_size = 2ULL * max_mem;
+		}
+	}
+	/*
+	 * Cap the compressor pool size to a max of 192G
+	 */
+	if (compressor_pool_size > VM_COMPRESSOR_MAX_POOL_SIZE) {
+		compressor_pool_size = VM_COMPRESSOR_MAX_POOL_SIZE;
+	}
+	if (max_mem <= (8ULL * 1024ULL * 1024ULL * 1024ULL)) {
+		compressor_pool_multiplier = 1;
+	} else if (max_mem <= (32ULL * 1024ULL * 1024ULL * 1024ULL)) {
+		compressor_pool_multiplier = 2;
+	} else {
+		compressor_pool_multiplier = 4;
+	}
+
+#elif defined(__arm__)
+
+#define VM_RESERVE_SIZE                 (1024 * 1024 * 256)
+#define MAX_COMPRESSOR_POOL_SIZE        (1024 * 1024 * 278)
+
+	if (compressor_pool_max_size > MAX_COMPRESSOR_POOL_SIZE) {
+		compressor_pool_max_size = MAX_COMPRESSOR_POOL_SIZE;
+	}
+
+	if (vm_compression_limit == 0) {
+		compressor_pool_size = ((kernel_map->max_offset - kernel_map->min_offset) - kernel_map->size) - VM_RESERVE_SIZE;
+	}
+	compressor_pool_multiplier = 1;
+
+#elif defined(__arm64__) && defined(XNU_TARGET_OS_WATCH)
+
+	/*
+	 * On M9 watches the compressor can become big and can lead to
+	 * churn in workingset resulting in audio drops. Setting a cap
+	 * on the compressor size favors reclaiming unused memory
+	 * sitting in idle band via jetsams
+	 */
+
+#define COMPRESSOR_CAP_PERCENTAGE        37ULL
+
+	if (compressor_pool_max_size > max_mem) {
+		compressor_pool_max_size = max_mem;
+	}
+
+	if (vm_compression_limit == 0) {
+		compressor_pool_size = (max_mem * COMPRESSOR_CAP_PERCENTAGE) / 100ULL;
+	}
+	compressor_pool_multiplier = 1;
+
+#else
+
+	if (compressor_pool_max_size > max_mem) {
+		compressor_pool_max_size = max_mem;
+	}
+
+	if (vm_compression_limit == 0) {
+		compressor_pool_size = max_mem;
+	}
+	compressor_pool_multiplier = 1;
+#endif
+	if (compressor_pool_size > compressor_pool_max_size) {
+		compressor_pool_size = compressor_pool_max_size;
+	}
+
+	c_seg_max_pages = (c_seg_bufsize / PAGE_SIZE);
+	c_seg_slot_var_array_min_len = c_seg_max_pages;
+
+#if !defined(__x86_64__)
+	c_seg_off_limit = (C_SEG_BYTES_TO_OFFSET((c_seg_bufsize - 512)));
+	c_seg_allocsize = (c_seg_bufsize + PAGE_SIZE);
+#else
+	c_seg_off_limit = (C_SEG_BYTES_TO_OFFSET((c_seg_bufsize - 128)));
+	c_seg_allocsize = c_seg_bufsize;
+#endif /* !defined(__x86_64__) */
+
+	c_segments_limit = (uint32_t)(compressor_pool_size / (vm_size_t)(c_seg_allocsize));
+	tmp_slot_ptr.s_cseg = c_segments_limit;
+	/* Panic on internal configs*/
+	assertf((tmp_slot_ptr.s_cseg == c_segments_limit), "vm_compressor_init: overflowed s_cseg field in c_slot_mapping with c_segno: %d", c_segments_limit);
+
+	if (tmp_slot_ptr.s_cseg != c_segments_limit) {
+		tmp_slot_ptr.s_cseg = -1;
+		c_segments_limit = tmp_slot_ptr.s_cseg - 1; /*limited by segment idx bits in c_slot_mapping*/
+		compressor_pool_size = (c_segments_limit * (vm_size_t)(c_seg_allocsize));
+	}
+
+	c_segments_nearing_limit = (uint32_t)(((uint64_t)c_segments_limit * 98ULL) / 100ULL);
+
+	c_segment_pages_compressed_limit = (c_segments_limit * (c_seg_bufsize / PAGE_SIZE) * compressor_pool_multiplier);
+
+	if (c_segment_pages_compressed_limit < (uint32_t)(max_mem / PAGE_SIZE)) {
+#if defined(XNU_TARGET_OS_WATCH)
+		c_segment_pages_compressed_limit = (uint32_t)(max_mem / PAGE_SIZE);
+#else
+		if (!vm_compression_limit) {
+			c_segment_pages_compressed_limit = (uint32_t)(max_mem / PAGE_SIZE);
+		}
+#endif
+	}
+
+	c_segment_pages_compressed_nearing_limit = (uint32_t)(((uint64_t)c_segment_pages_compressed_limit * 98ULL) / 100ULL);
+
+#if CONFIG_FREEZE
+	/*
+	 * Our in-core limits are based on the size of the compressor pool.
+	 * The c_segments_nearing_limit is also based on the compressor pool
+	 * size and calculated above.
+	 */
+	c_segments_incore_limit = c_segments_limit;
+
+	if (freezer_incore_cseg_acct) {
+		/*
+		 * Add enough segments to track all frozen c_segs that can be stored in swap.
+		 */
+		c_segments_limit += (uint32_t)(vm_swap_get_max_configured_space() / (vm_size_t)(c_seg_allocsize));
+		tmp_slot_ptr.s_cseg = c_segments_limit;
+		/* Panic on internal configs*/
+		assertf((tmp_slot_ptr.s_cseg == c_segments_limit), "vm_compressor_init: freezer reserve overflowed s_cseg field in c_slot_mapping with c_segno: %d", c_segments_limit);
+	}
+#endif
+	/*
+	 * Submap needs space for:
+	 * - c_segments
+	 * - c_buffers
+	 * - swap reclaimations -- c_seg_bufsize
+	 */
+	c_segments_arr_size = vm_map_round_page((sizeof(union c_segu) * c_segments_limit), VM_MAP_PAGE_MASK(kernel_map));
+	c_buffers_size = vm_map_round_page(((vm_size_t)c_seg_allocsize * (vm_size_t)c_segments_limit), VM_MAP_PAGE_MASK(kernel_map));
+
+	compressor_size = c_segments_arr_size + c_buffers_size + c_seg_bufsize;
+
+#if RECORD_THE_COMPRESSED_DATA
+	c_compressed_record_sbuf_size = (vm_size_t)c_seg_allocsize + (PAGE_SIZE * 2);
+	compressor_size += c_compressed_record_sbuf_size;
+#endif /* RECORD_THE_COMPRESSED_DATA */
+}
+STARTUP(KMEM, STARTUP_RANK_FIRST, vm_compressor_set_size);
+
+KMEM_RANGE_REGISTER_DYNAMIC(compressor, &compressor_range, ^() {
+	return compressor_size;
+});
+
 void
 vm_compressor_init(void)
 {
 	thread_t        thread;
-	int             attempts = 1;
-	kern_return_t   retval = KERN_SUCCESS;
-	vm_offset_t     start_addr = 0;
-	vm_size_t       c_segments_arr_size = 0, compressor_submap_size = 0;
-	vm_map_kernel_flags_t vmk_flags;
 #if RECORD_THE_COMPRESSED_DATA
 	vm_size_t       c_compressed_record_sbuf_size = 0;
 #endif /* RECORD_THE_COMPRESSED_DATA */
@@ -730,168 +901,18 @@ vm_compressor_init(void)
 	c_free_segno_head = -1;
 	c_segments_available = 0;
 
-	if (vm_compression_limit) {
-		compressor_pool_size = ptoa_64(vm_compression_limit);
-	}
+	compressor_map = kmem_suballoc(kernel_map, &compressor_range.min_address,
+	    compressor_size, VM_MAP_CREATE_NEVER_FAULTS,
+	    VM_FLAGS_FIXED_RANGE_SUBALLOC, KMS_NOFAIL | KMS_PERMANENT,
+	    VM_KERN_MEMORY_COMPRESSOR).kmr_submap;
 
-	compressor_pool_max_size = C_SEG_MAX_LIMIT;
-	compressor_pool_max_size *= c_seg_bufsize;
-
-#if XNU_TARGET_OS_OSX
-
-	if (vm_compression_limit == 0) {
-		if (max_mem <= (4ULL * 1024ULL * 1024ULL * 1024ULL)) {
-			compressor_pool_size = 16ULL * max_mem;
-		} else if (max_mem <= (8ULL * 1024ULL * 1024ULL * 1024ULL)) {
-			compressor_pool_size = 8ULL * max_mem;
-		} else if (max_mem <= (32ULL * 1024ULL * 1024ULL * 1024ULL)) {
-			compressor_pool_size = 4ULL * max_mem;
-		} else {
-			compressor_pool_size = 2ULL * max_mem;
-		}
-	}
-	if (max_mem <= (8ULL * 1024ULL * 1024ULL * 1024ULL)) {
-		compressor_pool_multiplier = 1;
-	} else if (max_mem <= (32ULL * 1024ULL * 1024ULL * 1024ULL)) {
-		compressor_pool_multiplier = 2;
-	} else {
-		compressor_pool_multiplier = 4;
-	}
-
-#elif defined(__arm__)
-
-#define VM_RESERVE_SIZE                 (1024 * 1024 * 256)
-#define MAX_COMPRESSOR_POOL_SIZE        (1024 * 1024 * 450)
-
-	if (compressor_pool_max_size > MAX_COMPRESSOR_POOL_SIZE) {
-		compressor_pool_max_size = MAX_COMPRESSOR_POOL_SIZE;
-	}
-
-	if (vm_compression_limit == 0) {
-		compressor_pool_size = ((kernel_map->max_offset - kernel_map->min_offset) - kernel_map->size) - VM_RESERVE_SIZE;
-	}
-	compressor_pool_multiplier = 1;
-
-#elif defined(__arm64__) && defined(XNU_TARGET_OS_WATCH)
-
-	/*
-	 * On M9 watches the compressor can become big and can lead to
-	 * churn in workingset resulting in audio drops. Setting a cap
-	 * on the compressor size favors reclaiming unused memory
-	 * sitting in idle band via jetsams
-	 */
-
-#define COMPRESSOR_CAP_PERCENTAGE        37ULL
-
-	if (compressor_pool_max_size > max_mem) {
-		compressor_pool_max_size = max_mem;
-	}
-
-	if (vm_compression_limit == 0) {
-		compressor_pool_size = (max_mem * COMPRESSOR_CAP_PERCENTAGE) / 100ULL;
-	}
-	compressor_pool_multiplier = 1;
-
-#else
-
-	if (compressor_pool_max_size > max_mem) {
-		compressor_pool_max_size = max_mem;
-	}
-
-	if (vm_compression_limit == 0) {
-		compressor_pool_size = max_mem;
-	}
-	compressor_pool_multiplier = 1;
-#endif
-	if (compressor_pool_size > compressor_pool_max_size) {
-		compressor_pool_size = compressor_pool_max_size;
-	}
-
-	c_seg_max_pages = (c_seg_bufsize / PAGE_SIZE);
-	c_seg_slot_var_array_min_len = c_seg_max_pages;
-
-#if !defined(__x86_64__)
-	c_seg_off_limit = (C_SEG_BYTES_TO_OFFSET((c_seg_bufsize - 512)));
-	c_seg_allocsize = (c_seg_bufsize + PAGE_SIZE);
-#else
-	c_seg_off_limit = (C_SEG_BYTES_TO_OFFSET((c_seg_bufsize - 128)));
-	c_seg_allocsize = c_seg_bufsize;
-#endif /* !defined(__x86_64__) */
-
-try_again:
-	c_segments_limit = (uint32_t)(compressor_pool_size / (vm_size_t)(c_seg_allocsize));
-	c_segments_nearing_limit = (uint32_t)(((uint64_t)c_segments_limit * 98ULL) / 100ULL);
-
-	c_segment_pages_compressed_limit = (c_segments_limit * (c_seg_bufsize / PAGE_SIZE) * compressor_pool_multiplier);
-
-	if (c_segment_pages_compressed_limit < (uint32_t)(max_mem / PAGE_SIZE)) {
-#if defined(XNU_TARGET_OS_WATCH)
-		c_segment_pages_compressed_limit = (uint32_t)(max_mem / PAGE_SIZE);
-#else
-		if (!vm_compression_limit) {
-			c_segment_pages_compressed_limit = (uint32_t)(max_mem / PAGE_SIZE);
-		}
-#endif
-	}
-
-	c_segment_pages_compressed_nearing_limit = (uint32_t)(((uint64_t)c_segment_pages_compressed_limit * 98ULL) / 100ULL);
-
-#if CONFIG_FREEZE
-	/*
-	 * Our in-core limits are based on the size of the compressor pool.
-	 * The c_segments_nearing_limit is also based on the compressor pool
-	 * size and calculated above.
-	 */
-	c_segments_incore_limit = c_segments_limit;
-
-	if (freezer_incore_cseg_acct) {
-		/*
-		 * Add enough segments to track all frozen c_segs that can be stored in swap.
-		 */
-		c_segments_limit += (uint32_t)(vm_swap_get_max_configured_space() / (vm_size_t)(c_seg_allocsize));
-	}
-#endif
-	/*
-	 * Submap needs space for:
-	 * - c_segments
-	 * - c_buffers
-	 * - swap reclaimations -- c_seg_bufsize
-	 */
-	c_segments_arr_size = vm_map_round_page((sizeof(union c_segu) * c_segments_limit), VM_MAP_PAGE_MASK(kernel_map));
-	c_buffers_size = vm_map_round_page(((vm_size_t)c_seg_allocsize * (vm_size_t)c_segments_limit), VM_MAP_PAGE_MASK(kernel_map));
-
-	compressor_submap_size = c_segments_arr_size + c_buffers_size + c_seg_bufsize;
-
-#if RECORD_THE_COMPRESSED_DATA
-	c_compressed_record_sbuf_size = (vm_size_t)c_seg_allocsize + (PAGE_SIZE * 2);
-	compressor_submap_size += c_compressed_record_sbuf_size;
-#endif /* RECORD_THE_COMPRESSED_DATA */
-
-	vmk_flags = VM_MAP_KERNEL_FLAGS_NONE;
-	vmk_flags.vmkf_permanent = TRUE;
-	retval = kmem_suballoc(kernel_map, &start_addr, compressor_submap_size,
-	    VM_MAP_CREATE_NEVER_FAULTS, VM_FLAGS_ANYWHERE, vmk_flags,
-	    VM_KERN_MEMORY_COMPRESSOR, &compressor_map);
-
-	if (retval != KERN_SUCCESS) {
-		if (++attempts > 3) {
-			panic("vm_compressor_init: kmem_suballoc failed - 0x%llx", (uint64_t)compressor_submap_size);
-		}
-
-		compressor_pool_size = compressor_pool_size / 2;
-
-		kprintf("retrying creation of the compressor submap at 0x%llx bytes\n", compressor_pool_size);
-		goto try_again;
-	}
-	if (kernel_memory_allocate(compressor_map, (vm_offset_t *)(&c_segments),
-	    (sizeof(union c_segu) * c_segments_limit), 0,
-	    KMA_KOBJECT | KMA_VAONLY | KMA_PERMANENT, VM_KERN_MEMORY_COMPRESSOR) != KERN_SUCCESS) {
-		panic("vm_compressor_init: kernel_memory_allocate failed - c_segments");
-	}
-	if (kernel_memory_allocate(compressor_map, &c_buffers, c_buffers_size, 0,
-	    KMA_COMPRESSOR | KMA_VAONLY | KMA_PERMANENT, VM_KERN_MEMORY_COMPRESSOR) != KERN_SUCCESS) {
-		panic("vm_compressor_init: kernel_memory_allocate failed - c_buffers");
-	}
+	kmem_alloc(compressor_map, (vm_offset_t *)(&c_segments),
+	    (sizeof(union c_segu) * c_segments_limit),
+	    KMA_NOFAIL | KMA_KOBJECT | KMA_VAONLY | KMA_PERMANENT,
+	    VM_KERN_MEMORY_COMPRESSOR);
+	kmem_alloc(compressor_map, &c_buffers, c_buffers_size,
+	    KMA_NOFAIL | KMA_COMPRESSOR | KMA_VAONLY | KMA_PERMANENT,
+	    VM_KERN_MEMORY_COMPRESSOR);
 
 #if DEVELOPMENT || DEBUG
 	hvg_hcall_set_coredump_data();
@@ -947,10 +968,9 @@ try_again:
 		bufsize += c_compressed_record_sbuf_size;
 #endif
 
-		if (kernel_memory_allocate(kernel_map, (vm_offset_t *)&buf, bufsize,
-		    PAGE_MASK, KMA_KOBJECT | KMA_PERMANENT, VM_KERN_MEMORY_COMPRESSOR)) {
-			panic("vm_compressor_init: Unable to allocate %zd bytes", bufsize);
-		}
+		kmem_alloc(kernel_map, (vm_offset_t *)&buf, bufsize,
+		    KMA_DATA | KMA_NOFAIL | KMA_KOBJECT | KMA_PERMANENT,
+		    VM_KERN_MEMORY_COMPRESSOR);
 
 		/*
 		 * kdp_compressor_decompressed_page must be page aligned because we access
@@ -1676,8 +1696,9 @@ c_seg_free_locked(c_segment_t c_seg)
 
 	if (c_buffer) {
 		if (pages_populated) {
-			kernel_memory_depopulate(compressor_map, (vm_offset_t)c_buffer,
-			    pages_populated * PAGE_SIZE, KMA_COMPRESSOR, VM_KERN_MEMORY_COMPRESSOR);
+			kernel_memory_depopulate((vm_offset_t)c_buffer,
+			    ptoa(pages_populated), KMA_COMPRESSOR,
+			    VM_KERN_MEMORY_COMPRESSOR);
 		}
 	} else if (c_swap_handle) {
 		/*
@@ -1854,7 +1875,7 @@ c_seg_minor_compaction_and_unlock(c_segment_t c_seg, boolean_t clear_busy)
 		gc_size = C_SEG_OFFSET_TO_BYTES(old_populated_offset - c_seg->c_populated_offset);
 		gc_ptr = &c_seg->c_store.c_buffer[c_seg->c_populated_offset];
 
-		kernel_memory_depopulate(compressor_map, (vm_offset_t)gc_ptr, gc_size,
+		kernel_memory_depopulate((vm_offset_t)gc_ptr, gc_size,
 		    KMA_COMPRESSOR, VM_KERN_MEMORY_COMPRESSOR);
 	}
 
@@ -2015,11 +2036,11 @@ c_seg_major_compact(
 				size_to_populate = C_SEG_MAX_POPULATE_SIZE;
 			}
 
-			kernel_memory_populate(compressor_map,
-			    (vm_offset_t) &c_seg_dst->c_store.c_buffer[c_seg_dst->c_populated_offset],
-			    size_to_populate,
-			    KMA_COMPRESSOR,
-			    VM_KERN_MEMORY_COMPRESSOR);
+			kernel_memory_populate(
+				(vm_offset_t) &c_seg_dst->c_store.c_buffer[c_seg_dst->c_populated_offset],
+				size_to_populate,
+				KMA_NOFAIL | KMA_COMPRESSOR,
+				VM_KERN_MEMORY_COMPRESSOR);
 
 			c_seg_dst->c_populated_offset += C_SEG_BYTES_TO_OFFSET(size_to_populate);
 			assert(C_SEG_OFFSET_TO_BYTES(c_seg_dst->c_populated_offset) <= c_seg_bufsize);
@@ -3504,8 +3525,9 @@ c_seg_allocate(c_segment_t *current_chead)
 			c_segments_busy = TRUE;
 			lck_mtx_unlock_always(c_list_lock);
 
-			kernel_memory_populate(compressor_map, (vm_offset_t)c_segments_next_page,
-			    PAGE_SIZE, KMA_KOBJECT, VM_KERN_MEMORY_COMPRESSOR);
+			kernel_memory_populate((vm_offset_t)c_segments_next_page,
+			    PAGE_SIZE, KMA_NOFAIL | KMA_KOBJECT,
+			    VM_KERN_MEMORY_COMPRESSOR);
 			c_segments_next_page += PAGE_SIZE;
 
 			c_segments_available_new = c_segments_available + C_SEGMENTS_PER_PAGE;
@@ -3581,11 +3603,11 @@ c_seg_allocate(c_segment_t *current_chead)
 
 			OSAddAtomic64(size_to_populate / PAGE_SIZE, &vm_pageout_vminfo.vm_compressor_pages_grabbed);
 
-			kernel_memory_populate(compressor_map,
-			    (vm_offset_t) &c_seg->c_store.c_buffer[c_seg->c_populated_offset],
-			    size_to_populate,
-			    KMA_COMPRESSOR,
-			    VM_KERN_MEMORY_COMPRESSOR);
+			kernel_memory_populate(
+				(vm_offset_t) &c_seg->c_store.c_buffer[c_seg->c_populated_offset],
+				size_to_populate,
+				KMA_NOFAIL | KMA_COMPRESSOR,
+				VM_KERN_MEMORY_COMPRESSOR);
 		} else {
 			size_to_populate = 0;
 		}
@@ -3628,7 +3650,6 @@ c_current_seg_filled(c_segment_t c_seg, c_segment_t *current_chead)
 		lck_mtx_unlock_always(&c_seg->c_lock);
 
 		kernel_memory_depopulate(
-			compressor_map,
 			(vm_offset_t) &c_seg->c_store.c_buffer[offset_to_depopulate],
 			unused_bytes,
 			KMA_COMPRESSOR,
@@ -3828,12 +3849,14 @@ c_seg_swapin(c_segment_t c_seg, boolean_t force_minor_compaction, boolean_t age_
 	addr = (vm_offset_t)C_SEG_BUFFER_ADDRESS(c_seg->c_mysegno);
 	c_seg->c_store.c_buffer = (int32_t*) addr;
 
-	kernel_memory_populate(compressor_map, addr, io_size, KMA_COMPRESSOR, VM_KERN_MEMORY_COMPRESSOR);
+	kernel_memory_populate(addr, io_size, KMA_NOFAIL | KMA_COMPRESSOR,
+	    VM_KERN_MEMORY_COMPRESSOR);
 
 	if (vm_swap_get(c_seg, f_offset, io_size) != KERN_SUCCESS) {
 		PAGE_REPLACEMENT_DISALLOWED(TRUE);
 
-		kernel_memory_depopulate(compressor_map, addr, io_size, KMA_COMPRESSOR, VM_KERN_MEMORY_COMPRESSOR);
+		kernel_memory_depopulate(addr, io_size, KMA_COMPRESSOR,
+		    VM_KERN_MEMORY_COMPRESSOR);
 
 		c_seg_swapin_requeue(c_seg, FALSE, TRUE, age_on_swapin_q);
 	} else {
@@ -4618,9 +4641,10 @@ bypass_busy_check:
 					C_SEG_BUSY(c_seg);
 					lck_mtx_unlock_always(&c_seg->c_lock);
 
-					kernel_memory_depopulate(compressor_map,
-					    (vm_offset_t) c_seg->c_store.c_buffer,
-					    pages_populated * PAGE_SIZE, KMA_COMPRESSOR, VM_KERN_MEMORY_COMPRESSOR);
+					kernel_memory_depopulate(
+						(vm_offset_t) c_seg->c_store.c_buffer,
+						ptoa(pages_populated),
+						KMA_COMPRESSOR, VM_KERN_MEMORY_COMPRESSOR);
 
 					lck_mtx_lock_spin_always(&c_seg->c_lock);
 					C_SEG_WAKEUP_DONE(c_seg);

@@ -233,8 +233,6 @@ struct skmem_arena_system {
 struct kern_nexus_advisory;
 
 __BEGIN_DECLS
-extern void skmem_arena_init(void);
-extern void skmem_arena_fini(void);
 extern struct skmem_arena *skmem_arena_create_for_nexus(
 	const struct nexus_adapter *, struct skmem_region_params[SKMEM_REGIONS],
 	struct kern_pbufpool **, struct kern_pbufpool **, boolean_t, boolean_t,

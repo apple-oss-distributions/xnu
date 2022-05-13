@@ -26,6 +26,7 @@
 #include <kern/counter.h>
 #include <kern/cpu_data.h>
 #include <kern/percpu.h>
+#include <kern/kalloc.h>
 #include <kern/thread_call.h>
 #include <libkern/libkern.h>
 #include <sys/queue.h>
@@ -139,25 +140,13 @@ static size_t lq_low_mem_limit;
 static void *
 log_queue_buffer_alloc(size_t amount)
 {
-	assert(amount > 0);
-
-	vm_offset_t addr = 0;
-	if (kmem_alloc(kernel_map, &addr, amount, VM_KERN_MEMORY_LOG) == KERN_SUCCESS) {
-		bzero((void *)addr, amount);
-		return (void *)addr;
-	}
-
-	return NULL;
+	return kalloc_data_tag(amount, Z_WAITOK_ZERO, VM_KERN_MEMORY_LOG);
 }
 
 static void
 log_queue_buffer_free(void *addr, size_t amount)
 {
-	assert(addr);
-	assert(amount > 0);
-
-	bzero(addr, amount);
-	kmem_free(kernel_map, (vm_offset_t)addr, round_page(amount));
+	kfree_data(addr, amount);
 }
 
 #define log_queue_entry_size(p) (sizeof(log_queue_entry_s) + (p)->lp_data_size)

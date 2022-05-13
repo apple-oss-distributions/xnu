@@ -303,25 +303,25 @@ static ZONE_DEFINE(nx_netif_zone, SKMEM_ZONE_PREFIX ".nx.netif",
     sizeof(struct nx_netif), ZC_ZFREE_CLEARMEM);
 
 #define SKMEM_TAG_NETIF_MIT          "com.apple.skywalk.netif.mit"
-static kern_allocation_name_t skmem_tag_netif_mit;
+static SKMEM_TAG_DEFINE(skmem_tag_netif_mit, SKMEM_TAG_NETIF_MIT);
 
 #define SKMEM_TAG_NETIF_FILTER       "com.apple.skywalk.netif.filter"
-kern_allocation_name_t skmem_tag_netif_filter;
+SKMEM_TAG_DEFINE(skmem_tag_netif_filter, SKMEM_TAG_NETIF_FILTER);
 
 #define SKMEM_TAG_NETIF_FLOW         "com.apple.skywalk.netif.flow"
-kern_allocation_name_t skmem_tag_netif_flow;
+SKMEM_TAG_DEFINE(skmem_tag_netif_flow, SKMEM_TAG_NETIF_FLOW);
 
 #define SKMEM_TAG_NETIF_AGENT_FLOW   "com.apple.skywalk.netif.agent_flow"
-kern_allocation_name_t skmem_tag_netif_agent_flow;
+SKMEM_TAG_DEFINE(skmem_tag_netif_agent_flow, SKMEM_TAG_NETIF_AGENT_FLOW);
 
 #define SKMEM_TAG_NETIF_LLINK        "com.apple.skywalk.netif.llink"
-kern_allocation_name_t skmem_tag_netif_llink;
+SKMEM_TAG_DEFINE(skmem_tag_netif_llink, SKMEM_TAG_NETIF_LLINK);
 
 #define SKMEM_TAG_NETIF_QSET         "com.apple.skywalk.netif.qset"
-kern_allocation_name_t skmem_tag_netif_qset;
+SKMEM_TAG_DEFINE(skmem_tag_netif_qset, SKMEM_TAG_NETIF_QSET);
 
 #define SKMEM_TAG_NETIF_LLINK_INFO   "com.apple.skywalk.netif.llink_info"
-kern_allocation_name_t skmem_tag_netif_llink_info;
+SKMEM_TAG_DEFINE(skmem_tag_netif_llink_info, SKMEM_TAG_NETIF_LLINK_INFO);
 
 static void
 nx_netif_dom_init(struct nxdom *nxdom)
@@ -339,41 +339,6 @@ nx_netif_dom_init(struct nxdom *nxdom)
 
 	(void) nxdom_prov_add(nxdom, &nx_netif_prov_s);
 
-	ASSERT(skmem_tag_netif_mit == NULL);
-	skmem_tag_netif_mit =
-	    kern_allocation_name_allocate(SKMEM_TAG_NETIF_MIT, 0);
-	ASSERT(skmem_tag_netif_mit != NULL);
-
-	ASSERT(skmem_tag_netif_filter == NULL);
-	skmem_tag_netif_filter =
-	    kern_allocation_name_allocate(SKMEM_TAG_NETIF_FILTER, 0);
-	ASSERT(skmem_tag_netif_filter != NULL);
-
-	ASSERT(skmem_tag_netif_flow == NULL);
-	skmem_tag_netif_flow =
-	    kern_allocation_name_allocate(SKMEM_TAG_NETIF_FLOW, 0);
-	ASSERT(skmem_tag_netif_flow != NULL);
-
-	ASSERT(skmem_tag_netif_agent_flow == NULL);
-	skmem_tag_netif_agent_flow =
-	    kern_allocation_name_allocate(SKMEM_TAG_NETIF_AGENT_FLOW, 0);
-	ASSERT(skmem_tag_netif_agent_flow != NULL);
-
-	ASSERT(skmem_tag_netif_llink == NULL);
-	skmem_tag_netif_llink =
-	    kern_allocation_name_allocate(SKMEM_TAG_NETIF_LLINK, 0);
-	ASSERT(skmem_tag_netif_llink != NULL);
-
-	ASSERT(skmem_tag_netif_qset == NULL);
-	skmem_tag_netif_qset =
-	    kern_allocation_name_allocate(SKMEM_TAG_NETIF_QSET, 0);
-	ASSERT(skmem_tag_netif_qset != NULL);
-
-	ASSERT(skmem_tag_netif_llink_info == NULL);
-	skmem_tag_netif_llink_info =
-	    kern_allocation_name_allocate(SKMEM_TAG_NETIF_LLINK_INFO, 0);
-	ASSERT(skmem_tag_netif_llink_info != NULL);
-
 	nx_netif_compat_init(nxdom);
 
 	ASSERT(nxdom_prov_default[nxdom->nxdom_type] != NULL &&
@@ -381,7 +346,6 @@ nx_netif_dom_init(struct nxdom *nxdom)
 	    NEXUS_PROVIDER_NET_IF_COMPAT) == 0);
 
 	netif_gso_init();
-	nx_netif_llink_module_init();
 }
 
 static void
@@ -391,38 +355,8 @@ nx_netif_dom_terminate(struct nxdom *nxdom)
 
 	SK_LOCK_ASSERT_HELD();
 
-	nx_netif_llink_module_fini();
 	netif_gso_fini();
 	nx_netif_compat_fini();
-
-	if (skmem_tag_netif_llink_info != NULL) {
-		kern_allocation_name_release(skmem_tag_netif_llink_info);
-		skmem_tag_netif_llink_info = NULL;
-	}
-	if (skmem_tag_netif_qset != NULL) {
-		kern_allocation_name_release(skmem_tag_netif_qset);
-		skmem_tag_netif_qset = NULL;
-	}
-	if (skmem_tag_netif_llink != NULL) {
-		kern_allocation_name_release(skmem_tag_netif_llink);
-		skmem_tag_netif_llink = NULL;
-	}
-	if (skmem_tag_netif_agent_flow != NULL) {
-		kern_allocation_name_release(skmem_tag_netif_agent_flow);
-		skmem_tag_netif_agent_flow = NULL;
-	}
-	if (skmem_tag_netif_flow != NULL) {
-		kern_allocation_name_release(skmem_tag_netif_flow);
-		skmem_tag_netif_flow = NULL;
-	}
-	if (skmem_tag_netif_filter != NULL) {
-		kern_allocation_name_release(skmem_tag_netif_filter);
-		skmem_tag_netif_filter = NULL;
-	}
-	if (skmem_tag_netif_mit != NULL) {
-		kern_allocation_name_release(skmem_tag_netif_mit);
-		skmem_tag_netif_mit = NULL;
-	}
 
 	STAILQ_FOREACH_SAFE(nxdom_prov, &nxdom->nxdom_prov_head,
 	    nxdom_prov_link, tnxdp) {

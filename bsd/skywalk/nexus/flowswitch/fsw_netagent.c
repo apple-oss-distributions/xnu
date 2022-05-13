@@ -135,6 +135,9 @@ fsw_netagent_flow_add(struct nx_flowswitch *fsw, uuid_t flow_uuid, pid_t pid,
 	if (cparams->use_stable_address) {
 		req.nfr_flags |= NXFLOWREQF_USE_STABLE_ADDRESS;
 	}
+	if (cparams->no_wake_from_sleep) {
+		req.nfr_flags |= NXFLOWREQF_NOWAKEFROMSLEEP;
+	}
 
 	req.nfr_context = context;
 	req.nfr_pid = pid;

@@ -3890,8 +3890,8 @@ nfs_gss_mach_alloc_buffer(u_char *buf, size_t buflen, vm_map_copy_t *addr)
 		return;
 	}
 
-	kr = kernel_memory_allocate(ipc_kernel_map, &kmem_buf, tbuflen, 0,
-	    KMA_NONE, VM_KERN_MEMORY_FILE);
+	kr = kmem_alloc(ipc_kernel_map, &kmem_buf, tbuflen,
+	    KMA_DATA, VM_KERN_MEMORY_FILE);
 	if (kr != 0) {
 		printf("nfs_gss_mach_alloc_buffer: vm_allocate failed\n");
 		return;

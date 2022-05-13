@@ -1064,18 +1064,6 @@ PMAP_ZINFO_PFREE(pmap_t pmap, vm_size_t bytes)
 	pmap_ledger_debit(pmap, task_ledgers.tkm_private, (ledger_amount_t)bytes);
 }
 
-static inline void
-PMAP_ZINFO_SALLOC(pmap_t pmap, vm_size_t bytes)
-{
-	pmap_ledger_credit(pmap, task_ledgers.tkm_shared, (ledger_amount_t)bytes);
-}
-
-static inline void
-PMAP_ZINFO_SFREE(pmap_t pmap, vm_size_t bytes)
-{
-	pmap_ledger_debit(pmap, task_ledgers.tkm_shared, (ledger_amount_t)bytes);
-}
-
 extern boolean_t        pmap_initialized;/* Has pmap_init completed? */
 #define valid_page(x) (pmap_initialized && pmap_valid_page(x))
 

@@ -508,12 +508,20 @@ vsnprintf(char *str, size_t size, const char *format, va_list ap)
 int
 vscnprintf(char *buf, size_t size, const char *fmt, va_list args)
 {
-	ssize_t ssize = size;
 	int i;
 
 	i = vsnprintf(buf, size, fmt, args);
-
-	return (i >= ssize) ? (int)(ssize - 1) : i;
+	/* Note: XNU's printf never returns negative values */
+	if ((uint32_t)i < size) {
+		return i;
+	}
+	if (size == 0) {
+		return 0;
+	}
+	if (size > INT_MAX) {
+		return INT_MAX;
+	}
+	return (int)(size - 1);
 }
 
 int

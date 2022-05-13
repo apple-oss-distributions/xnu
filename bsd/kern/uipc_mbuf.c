@@ -108,6 +108,20 @@
 #include <sys/mcache.h>
 #include <net/ntstat.h>
 
+#if INET
+extern int dump_tcp_reass_qlen(char *, int);
+extern int tcp_reass_qlen_space(struct socket *);
+#endif /* INET */
+
+#if MPTCP
+extern int dump_mptcp_reass_qlen(char *, int);
+#endif /* MPTCP */
+
+
+#if NETWORKING
+extern int dlil_dump_top_if_qlen(char *, int);
+#endif /* NETWORKING */
+
 /*
  * MBUF IMPLEMENTATION NOTES.
  *
@@ -319,12 +333,6 @@ static uint64_t mb_kmem_one_failed_ts;
 static uint64_t mb_kmem_contig_failed_size;
 static uint64_t mb_kmem_failed_size;
 static uint32_t mb_kmem_stats[6];
-static const char *mb_kmem_stats_labels[] = { "INVALID_ARGUMENT",
-	                                      "INVALID_ADDRESS",
-	                                      "RESOURCE_SHORTAGE",
-	                                      "NO_SPACE",
-	                                      "KERN_FAILURE",
-	                                      "OTHERS" };
 
 /* Global lock */
 static LCK_GRP_DECLARE(mbuf_mlock_grp, "mbuf");
@@ -2945,8 +2953,6 @@ m_vm_error_stats(uint32_t *cnt, uint64_t *ts, uint64_t *size,
 	if (size) {
 		*size = alloc_size;
 	}
-	_CASSERT(sizeof(mb_kmem_stats) / sizeof(mb_kmem_stats[0]) ==
-	    sizeof(mb_kmem_stats_labels) / sizeof(mb_kmem_stats_labels[0]));
 	switch (error) {
 	case KERN_SUCCESS:
 		break;
@@ -2978,7 +2984,7 @@ kmem_mb_alloc(vm_map_t mbmap, int size, int physContig, kern_return_t *err)
 	kern_return_t kr = KERN_SUCCESS;
 
 	if (!physContig) {
-		kr = kernel_memory_allocate(mbmap, &addr, size, 0,
+		kr = kmem_alloc(mbmap, &addr, size,
 		    KMA_KOBJECT | KMA_LOMEM, VM_KERN_MEMORY_MBUF);
 	} else {
 		kr = kmem_alloc_contig(mbmap, &addr, size, PAGE_MASK, 0xfffff,
@@ -4820,6 +4826,7 @@ m_freem_list(struct mbuf *m)
 				m_redzone_verify(m);
 				/* Free the aux data and tags if there is any */
 				m_tag_delete_chain(m, NULL);
+				m_do_tx_compl_callback(m, NULL);
 			}
 
 			if (!(m->m_flags & M_EXT)) {
@@ -6794,17 +6801,35 @@ static bool mbuf_watchdog_defunct_active = false;
 static uint32_t
 mbuf_watchdog_socket_space(struct socket *so)
 {
+	uint32_t space = 0;
+
 	if (so == NULL) {
 		return 0;
 	}
 
-	return so->so_snd.sb_mbcnt + so->so_rcv.sb_mbcnt;
+	space = so->so_snd.sb_mbcnt + so->so_rcv.sb_mbcnt;
+
+#if INET
+	if ((SOCK_DOM(so) == PF_INET || SOCK_DOM(so) == PF_INET6) &&
+	    SOCK_PROTO(so) == IPPROTO_TCP) {
+		space += tcp_reass_qlen_space(so);
+	}
+#endif /* INET */
+
+	return space;
 }
 
 struct mbuf_watchdog_defunct_args {
 	struct proc *top_app;
 	uint32_t top_app_space_used;
+	bool non_blocking;
 };
+
+static bool
+proc_fd_trylock(proc_t p)
+{
+	return lck_mtx_try_lock(&p->p_fd.fd_lock);
+}
 
 static int
 mbuf_watchdog_defunct_iterate(proc_t p, void *arg)
@@ -6814,7 +6839,16 @@ mbuf_watchdog_defunct_iterate(proc_t p, void *arg)
 	    (struct mbuf_watchdog_defunct_args *)arg;
 	uint32_t space_used = 0;
 
-	proc_fdlock(p);
+	/*
+	 * Non-blocking is only used when dumping the mbuf usage from the watchdog
+	 */
+	if (args->non_blocking) {
+		if (!proc_fd_trylock(p)) {
+			return PROC_RETURNED;
+		}
+	} else {
+		proc_fdlock(p);
+	}
 	fdt_foreach(fp, p) {
 		struct fileglob *fg = fp->fp_glob;
 		struct socket *so = NULL;
@@ -6857,6 +6891,7 @@ mbuf_watchdog_defunct(thread_call_param_t arg0, thread_call_param_t arg1)
 	struct mbuf_watchdog_defunct_args args = {};
 	struct fileproc *fp = NULL;
 
+	args.non_blocking = false;
 	proc_iterate(PROC_ALLPROCLIST,
 	    mbuf_watchdog_defunct_iterate, &args, NULL, NULL);
 
@@ -8009,7 +8044,7 @@ mbuf_dump(void)
 	mleak_trace_stat_t *mltr;
 	char *c = mbuf_dump_buf;
 	int i, j, k, clen = MBUF_DUMP_BUF_SIZE;
-	bool printed_banner = false;
+	struct mbuf_watchdog_defunct_args args = {};
 
 	mbuf_dump_buf[0] = '\0';
 
@@ -8114,33 +8149,7 @@ mbuf_dump(void)
 	MBUF_DUMP_BUF_CHK();
 
 	net_update_uptime();
-	k = scnprintf(c, clen,
-	    "VM allocation failures: contiguous %u, normal %u, one page %u\n",
-	    mb_kmem_contig_failed, mb_kmem_failed, mb_kmem_one_failed);
-	MBUF_DUMP_BUF_CHK();
-	if (mb_kmem_contig_failed_ts || mb_kmem_failed_ts ||
-	    mb_kmem_one_failed_ts) {
-		k = scnprintf(c, clen,
-		    "VM allocation failure timestamps: contiguous %llu "
-		    "(size %llu), normal %llu (size %llu), one page %llu "
-		    "(now %llu)\n",
-		    mb_kmem_contig_failed_ts, mb_kmem_contig_failed_size,
-		    mb_kmem_failed_ts, mb_kmem_failed_size,
-		    mb_kmem_one_failed_ts, net_uptime());
-		MBUF_DUMP_BUF_CHK();
-		k = scnprintf(c, clen,
-		    "VM return codes: ");
-		MBUF_DUMP_BUF_CHK();
-		for (i = 0;
-		    i < sizeof(mb_kmem_stats) / sizeof(mb_kmem_stats[0]);
-		    i++) {
-			k = scnprintf(c, clen, "%s: %u ", mb_kmem_stats_labels[i],
-			    mb_kmem_stats[i]);
-			MBUF_DUMP_BUF_CHK();
-		}
-		k = scnprintf(c, clen, "\n");
-		MBUF_DUMP_BUF_CHK();
-	}
+
 	k = scnprintf(c, clen,
 	    "worker thread runs: %u, expansions: %llu, cl %llu/%llu, "
 	    "bigcl %llu/%llu, 16k %llu/%llu\n", mbuf_worker_run_cnt,
@@ -8163,40 +8172,38 @@ mbuf_dump(void)
 		MBUF_DUMP_BUF_CHK();
 	}
 
-#if DEBUG || DEVELOPMENT
-	k = scnprintf(c, clen, "\nworker thread log:\n%s\n", mbwdog_logging);
-	MBUF_DUMP_BUF_CHK();
-#endif
-
-	for (j = 0; j < MTRACELARGE_NUM_TRACES; j++) {
-		struct mtracelarge *trace = &mtracelarge_table[j];
-		if (trace->size == 0 || trace->depth == 0) {
-			continue;
-		}
-		if (printed_banner == false) {
-			k = scnprintf(c, clen,
-			    "\nlargest allocation failure backtraces:\n");
-			MBUF_DUMP_BUF_CHK();
-			printed_banner = true;
-		}
-		k = scnprintf(c, clen, "size %llu: < ", trace->size);
-		MBUF_DUMP_BUF_CHK();
-		for (i = 0; i < trace->depth; i++) {
-			if (mleak_stat->ml_isaddr64) {
-				k = scnprintf(c, clen, "0x%0llx ",
-				    (uint64_t)VM_KERNEL_UNSLIDE(
-					    trace->addr[i]));
-			} else {
-				k = scnprintf(c, clen,
-				    "0x%08x ",
-				    (uint32_t)VM_KERNEL_UNSLIDE(
-					    trace->addr[i]));
-			}
-			MBUF_DUMP_BUF_CHK();
-		}
-		k = scnprintf(c, clen, ">\n");
-		MBUF_DUMP_BUF_CHK();
+	/*
+	 * Log where the most mbufs have accumulated:
+	 * - Process socket buffers
+	 * - TCP reassembly queue
+	 * - Interface AQM queue (output) and DLIL input queue
+	 */
+	args.non_blocking = true;
+	proc_iterate(PROC_ALLPROCLIST,
+	    mbuf_watchdog_defunct_iterate, &args, NULL, NULL);
+	if (args.top_app != NULL) {
+		k = scnprintf(c, clen, "\ntop proc mbuf space %u bytes by %s:%d\n",
+		    args.top_app_space_used,
+		    proc_name_address(args.top_app),
+		    proc_pid(args.top_app));
+		proc_rele(args.top_app);
 	}
+	MBUF_DUMP_BUF_CHK();
+
+#if INET
+	k = dump_tcp_reass_qlen(c, clen);
+	MBUF_DUMP_BUF_CHK();
+#endif /* INET */
+
+#if MPTCP
+	k = dump_mptcp_reass_qlen(c, clen);
+	MBUF_DUMP_BUF_CHK();
+#endif /* MPTCP */
+
+#if NETWORKING
+	k = dlil_dump_top_if_qlen(c, clen);
+	MBUF_DUMP_BUF_CHK();
+#endif /* NETWORKING */
 
 	/* mbuf leak detection statistics */
 	mleak_update_stats();
@@ -8272,6 +8279,7 @@ mbuf_dump(void)
 		k = scnprintf(c, clen, "\n");
 		MBUF_DUMP_BUF_CHK();
 	}
+
 done:
 	return mbuf_dump_buf;
 }
@@ -8316,6 +8324,7 @@ m_reinit(struct mbuf *m, int hdr)
 		m_redzone_verify(m);
 		/* Free the aux data and tags if there is any */
 		m_tag_delete_chain(m, NULL);
+		m_do_tx_compl_callback(m, NULL);
 		m->m_flags &= ~M_PKTHDR;
 	}
 
@@ -8960,6 +8969,26 @@ mtracelarge_register(size_t size)
 	}
 }
 
+#if DEBUG || DEVELOPMENT
+
+static int
+mbuf_wd_dump_sysctl SYSCTL_HANDLER_ARGS
+{
+	char *str;
+
+	ifnet_head_lock_shared();
+	lck_mtx_lock(mbuf_mlock);
+
+	str = mbuf_dump();
+
+	lck_mtx_unlock(mbuf_mlock);
+	ifnet_head_done();
+
+	return sysctl_io_string(req, str, 0, 0, NULL);
+}
+
+#endif /* DEBUG || DEVELOPMENT */
+
 SYSCTL_DECL(_kern_ipc);
 #if DEBUG || DEVELOPMENT
 #if SKYWALK
@@ -8968,6 +8997,9 @@ SYSCTL_UINT(_kern_ipc, OID_AUTO, mc_threshold_scale_factor,
     MC_THRESHOLD_SCALE_DOWN_FACTOR,
     "scale down factor for mbuf cache thresholds");
 #endif /* SKYWALK */
+SYSCTL_PROC(_kern_ipc, OID_AUTO, mb_wd_dump,
+    CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_LOCKED,
+    0, 0, mbuf_wd_dump_sysctl, "A", "mbuf watchdog dump");
 #endif
 SYSCTL_PROC(_kern_ipc, KIPC_MBSTAT, mbstat,
     CTLTYPE_STRUCT | CTLFLAG_RD | CTLFLAG_LOCKED,

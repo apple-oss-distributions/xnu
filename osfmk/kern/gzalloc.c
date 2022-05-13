@@ -112,10 +112,12 @@ boolean_t gzalloc_uf_mode = FALSE, gzalloc_consistency_checks = TRUE, gzalloc_df
 vm_prot_t gzalloc_prot = VM_PROT_NONE;
 uint32_t gzalloc_guard = KMA_GUARD_LAST;
 uint32_t gzfc_size = GZFC_DEFAULT_SIZE;
-uint32_t gzalloc_zonemap_scale = 6;
+uint32_t gzalloc_zonemap_scale = 1;
 
+__startup_data
+vm_map_size_t gzalloc_map_size = 0;
 vm_map_t gzalloc_map;
-vm_offset_t gzalloc_map_min, gzalloc_map_max;
+struct kmem_range gzalloc_range;
 vm_offset_t gzalloc_reserve;
 vm_size_t gzalloc_reserve_size;
 
@@ -156,7 +158,6 @@ gzalloc_zone_init(zone_t z)
 
 	if (gzfc_size && z->z_gzalloc_tracked) {
 		vm_size_t gzfcsz = round_page(sizeof(*z->gz.gzfc) * gzfc_size);
-		kern_return_t kr;
 
 		/* If the VM/kmem system aren't yet configured, carve
 		 * out the free element cache structure directly from the
@@ -172,13 +173,9 @@ gzalloc_zone_init(zone_t z)
 			gzalloc_reserve_size -= gzfcsz;
 			bzero(z->gz.gzfc, gzfcsz);
 		} else {
-			kr = kernel_memory_allocate(kernel_map,
+			kernel_memory_allocate(kernel_map,
 			    (vm_offset_t *)&z->gz.gzfc, gzfcsz, 0,
-			    KMA_KOBJECT | KMA_ZERO, VM_KERN_MEMORY_OSFMK);
-			if (kr != KERN_SUCCESS) {
-				panic("%s: kernel_memory_allocate failed (%d) for 0x%lx bytes",
-				    __func__, kr, (unsigned long)gzfcsz);
-			}
+			    KMA_NOFAIL | KMA_KOBJECT | KMA_ZERO, VM_KERN_MEMORY_OSFMK);
 		}
 	}
 }
@@ -187,7 +184,6 @@ gzalloc_zone_init(zone_t z)
 void
 gzalloc_empty_free_cache(zone_t zone)
 {
-	kern_return_t kr;
 	int freed_elements = 0;
 	vm_offset_t free_addr = 0;
 	vm_offset_t rounded_size = round_page(zone_elem_size(zone) + GZHEADER_SIZE);
@@ -196,10 +192,8 @@ gzalloc_empty_free_cache(zone_t zone)
 
 	assert(zone->z_gzalloc_tracked); // the caller is responsible for checking
 
-	kr = kmem_alloc(kernel_map, &gzfc_copy, gzfcsz, VM_KERN_MEMORY_OSFMK);
-	if (kr != KERN_SUCCESS) {
-		panic("gzalloc_empty_free_cache: kmem_alloc: 0x%x", kr);
-	}
+	kernel_memory_allocate(kernel_map, &gzfc_copy, gzfcsz, 0,
+	    KMA_NOFAIL, VM_KERN_MEMORY_OSFMK);
 
 	/* Reset gzalloc_data. */
 	zone_lock(zone);
@@ -211,13 +205,8 @@ gzalloc_empty_free_cache(zone_t zone)
 	/* Free up all the cached elements. */
 	for (uint32_t index = 0; index < gzfc_size; index++) {
 		free_addr = ((vm_offset_t *)gzfc_copy)[index];
-		if (free_addr && free_addr >= gzalloc_map_min && free_addr < gzalloc_map_max) {
-			kr = vm_map_remove(gzalloc_map, free_addr,
-			    free_addr + rounded_size + (1 * PAGE_SIZE),
-			    VM_MAP_REMOVE_KUNWIRE);
-			if (kr != KERN_SUCCESS) {
-				panic("gzalloc_empty_free_cache: vm_map_remove: %p, 0x%x", (void *)free_addr, kr);
-			}
+		if (free_addr && kmem_range_contains(&gzalloc_range, free_addr)) {
+			kmem_free(gzalloc_map, free_addr, rounded_size + PAGE_SIZE);
 			OSAddAtomic64((SInt32)rounded_size, &gzalloc_freed);
 			OSAddAtomic64(-((SInt32) (rounded_size - zone_elem_size(zone))), &gzalloc_wasted);
 
@@ -314,26 +303,21 @@ gzalloc_configure(void)
 }
 STARTUP(PMAP_STEAL, STARTUP_RANK_FIRST, gzalloc_configure);
 
-void
-gzalloc_init(vm_size_t max_zonemap_size)
-{
-	kern_return_t retval;
-
+KMEM_RANGE_REGISTER_DYNAMIC(gzalloc_map, &gzalloc_range, ^{
 	if (gzalloc_mode) {
-		vm_map_kernel_flags_t vmk_flags;
+	        gzalloc_map_size = (zone_map_size * gzalloc_zonemap_scale);
+	}
+	return gzalloc_map_size;
+});
 
-		vmk_flags = VM_MAP_KERNEL_FLAGS_NONE;
-		vmk_flags.vmkf_permanent = TRUE;
-		retval = kmem_suballoc(kernel_map, &gzalloc_map_min,
-		    (max_zonemap_size * gzalloc_zonemap_scale),
-		    VM_MAP_CREATE_DEFAULT, VM_FLAGS_ANYWHERE, vmk_flags,
-		    VM_KERN_MEMORY_ZONE, &gzalloc_map);
-
-		if (retval != KERN_SUCCESS) {
-			panic("zone_init: kmem_suballoc(gzalloc_map, 0x%lx, %u) failed",
-			    max_zonemap_size, gzalloc_zonemap_scale);
-		}
-		gzalloc_map_max = gzalloc_map_min + (max_zonemap_size * gzalloc_zonemap_scale);
+void
+gzalloc_init(void)
+{
+	if (gzalloc_mode) {
+		gzalloc_map = kmem_suballoc(kernel_map, &gzalloc_range.min_address,
+		    gzalloc_map_size, VM_MAP_CREATE_DEFAULT,
+		    VM_FLAGS_FIXED_RANGE_SUBALLOC, KMS_PERMANENT | KMS_NOFAIL,
+		    VM_KERN_MEMORY_ZONE).kmr_submap;
 	}
 }
 
@@ -373,14 +357,10 @@ gzalloc_alloc(zone_t zone, zone_stats_t zstats, zalloc_flags_t flags)
 		gzalloc_reserve_size -= rounded_size + PAGE_SIZE;
 		OSAddAtomic64((SInt32) (rounded_size), &gzalloc_early_alloc);
 	} else {
-		kern_return_t kr = kernel_memory_allocate(gzalloc_map,
-		    &gzaddr, rounded_size + (1 * PAGE_SIZE),
-		    0, KMA_KOBJECT | KMA_ATOMIC | gzalloc_guard,
+		kernel_memory_allocate(gzalloc_map,
+		    &gzaddr, rounded_size + PAGE_SIZE, 0,
+		    KMA_NOFAIL | KMA_ZERO | KMA_KOBJECT | KMA_ATOMIC | gzalloc_guard,
 		    VM_KERN_MEMORY_OSFMK);
-		if (kr != KERN_SUCCESS) {
-			panic("gzalloc: kernel_memory_allocate for size 0x%llx failed with %d",
-			    (uint64_t)rounded_size, kr);
-		}
 		new_va = true;
 	}
 
@@ -565,12 +545,7 @@ gzalloc_free(zone_t zone, zone_stats_t zstats, void *addr)
 		// TODO: consider using physical reads to check for
 		// corruption while on the protected freelist
 		// (i.e. physical corruption)
-		kr = vm_map_remove(gzalloc_map, free_addr,
-		    free_addr + rounded_size + (1 * PAGE_SIZE),
-		    VM_MAP_REMOVE_KUNWIRE);
-		if (kr != KERN_SUCCESS) {
-			panic("gzfree: vm_map_remove: %p, 0x%x", (void *)free_addr, kr);
-		}
+		kmem_free(gzalloc_map, free_addr, rounded_size + PAGE_SIZE);
 		// TODO: sysctl-ize for quick reference
 		OSAddAtomic64((SInt32)rounded_size, &gzalloc_freed);
 		OSAddAtomic64(-((SInt32) (rounded_size - zone_elem_size(zone))),
@@ -582,7 +557,7 @@ boolean_t
 gzalloc_element_size(void *gzaddr, zone_t *z, vm_size_t *gzsz)
 {
 	uintptr_t a = (uintptr_t)gzaddr;
-	if (__improbable(gzalloc_mode && (a >= gzalloc_map_min) && (a < gzalloc_map_max))) {
+	if (__improbable(gzalloc_mode && kmem_range_contains(&gzalloc_range, a))) {
 		gzhdr_t *gzh;
 		boolean_t       vmef;
 		vm_map_entry_t  gzvme = NULL;

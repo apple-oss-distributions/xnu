@@ -97,24 +97,12 @@ typedef void (*IOThreadFunc)(void *argument);
 /*
  * Memory allocation functions.
  */
-
-/*! @function IOMalloc
- *   @abstract Allocates general purpose, wired memory in the kernel map.
- *   @discussion This is a general purpose utility to allocate memory in the kernel. There are no alignment guarantees given on the returned memory, and alignment may vary depending on the kernel configuration. This function may block and so should not be called from interrupt level or while a simple lock is held.
- *   @param size Size of the memory requested.
- *   @result Pointer to the allocated memory, or zero on failure. */
-
-#if defined(XNU_KERNEL_PRIVATE)
+#if XNU_KERNEL_PRIVATE
 
 /*
  * IOMalloc_internal allocates memory from the specifed kalloc heap, which can be:
  * - KHEAP_DATA_BUFFERS: Should be used for data buffers
- * - KHEAP_KEXT: Should be used for non core kernel allocations
- * - KHEAP_DEFAULT: Should be used for all core kernel allocations that
- *   aren't data buffers.
- *
- * The kalloc heap used by IOMalloc calls from core kernel is KHEAP_DEFAULT
- * and that used by kexts (accessed via IOMalloc_external) is KHEAP_KEXT.
+ * - KHEAP_DEFAULT: Should be used for allocations that aren't data buffers.
  *
  * For more details on kalloc_heaps see kalloc.h
  */
@@ -122,23 +110,22 @@ typedef void (*IOThreadFunc)(void *argument);
 extern void *
 IOMalloc_internal(
 	struct kalloc_heap * kalloc_heap_cfg,
-	vm_size_t            size)      __attribute__((alloc_size(2)));
+	vm_size_t            size,
+	zalloc_flags_t       flags)     __attribute__((alloc_size(2)));
 
-extern void *
-IOMallocZero_internal(
-	struct kalloc_heap * kalloc_heap_cfg,
-	vm_size_t            size)      __attribute__((alloc_size(2)));
+#define IOMalloc(size)     IOMalloc_internal(KHEAP_DEFAULT, size, Z_WAITOK)
+#define IOMallocZero(size) IOMalloc_internal(KHEAP_DEFAULT, size, Z_ZERO)
 
-#define IOMalloc(size)     IOMalloc_internal(KHEAP_DEFAULT, size)
+#else /* XNU_KERNEL_PRIVATE */
 
-#define IOMallocZero(size) IOMallocZero_internal(KHEAP_DEFAULT, size)
-
-#else/* defined(XNU_KERNEL_PRIVATE) */
+/*! @function IOMalloc
+ *   @abstract Allocates general purpose, wired memory in the kernel map.
+ *   @discussion This is a general purpose utility to allocate memory in the kernel. There are no alignment guarantees given on the returned memory, and alignment may vary depending on the kernel configuration. This function may block and so should not be called from interrupt level or while a simple lock is held.
+ *   @param size Size of the memory requested.
+ *   @result Pointer to the allocated memory, or zero on failure. */
 
 void * IOMalloc(vm_size_t size)      __attribute__((alloc_size(1)));
 void * IOMallocZero(vm_size_t size)  __attribute__((alloc_size(1)));
-
-#endif /* !defined(XNU_KERNEL_PRIVATE) */
 
 /*! @function IOFree
  *   @abstract Frees memory allocated with IOMalloc.
@@ -148,14 +135,13 @@ void * IOMallocZero(vm_size_t size)  __attribute__((alloc_size(1)));
  *   @param size Size of the memory allocated. Must be identical to size of
  *   @the corresponding IOMalloc */
 
-#if defined(XNU_KERNEL_PRIVATE)
+#endif /* XNU_KERNEL_PRIVATE */
+
+#if XNU_KERNEL_PRIVATE
 
 /*
  * IOFree_internal allows specifying the kalloc heap to free the allocation
  * to
- *
- * Note: IOFree frees to @c KHEAP_ANY so as to handle cases where allocations
- * are IOMalloc-ed in kexts but need to be freed in xnu (or vice-versa).
  */
 
 extern void
@@ -164,7 +150,7 @@ IOFree_internal(
 	void               * inAddress,
 	vm_size_t            size);
 
-#endif
+#endif /* XNU_KERNEL_PRIVATE */
 
 void   IOFree(void * address, vm_size_t size);
 
@@ -175,21 +161,24 @@ void   IOFree(void * address, vm_size_t size);
  *   @param alignment Byte count of the alignment for the memory. For example, pass 256 to get memory allocated at an address with bit 0-7 zero.
  *   @result Pointer to the allocated memory, or zero on failure. */
 
-#if defined(XNU_KERNEL_PRIVATE)
+#if XNU_KERNEL_PRIVATE
 
 extern void *
 IOMallocAligned_internal(
 	struct kalloc_heap * kalloc_heap_cfg,
 	vm_size_t            size,
-	vm_size_t            alignment)      __attribute__((alloc_size(2)));
+	vm_size_t            alignment,
+	zalloc_flags_t       flags)        __attribute__((alloc_size(2)));
 
-#define IOMallocAligned(size, alignment) IOMallocAligned_internal(KHEAP_DEFAULT, size, alignment)
+#define IOMallocAligned(size, alignment) \
+	IOMallocAligned_internal(KHEAP_DEFAULT, size, alignment, Z_WAITOK)
 
-#else/* defined(XNU_KERNEL_PRIVATE) */
+#else /* XNU_KERNEL_PRIVATE */
 
 void * IOMallocAligned(vm_size_t size, vm_offset_t alignment) __attribute__((alloc_size(1)));
 
-#endif /* !defined(XNU_KERNEL_PRIVATE) */
+#endif /* !XNU_KERNEL_PRIVATE */
+
 
 /*! @function IOFreeAligned
  *   @abstract Frees memory allocated with IOMallocAligned.
@@ -197,15 +186,11 @@ void * IOMallocAligned(vm_size_t size, vm_offset_t alignment) __attribute__((all
  *   @param address Pointer to the allocated memory.
  *   @param size Size of the memory allocated. */
 
-#if defined(XNU_KERNEL_PRIVATE)
+#if XNU_KERNEL_PRIVATE
 
 /*
  * IOFreeAligned_internal allows specifying the kalloc heap to free the
  * allocation to
- *
- * Note: IOFreeAligned frees to @c KHEAP_ANY so as to handle cases where
- * allocations are IOMalloc-ed in kexts but need to be freed in xnu
- * (or vice-versa).
  */
 
 extern void
@@ -214,7 +199,7 @@ IOFreeAligned_internal(
 	void               * address,
 	vm_size_t            size);
 
-#endif
+#endif /* XNU_KERNEL_PRIVATE */
 
 void   IOFreeAligned(void * address, vm_size_t size);
 
@@ -264,7 +249,13 @@ void * IOMallocPageableZero(vm_size_t size, vm_size_t alignment) __attribute__((
 
 void IOFreePageable(void * address, vm_size_t size);
 
-#ifdef KERNEL_PRIVATE
+#if XNU_KERNEL_PRIVATE
+
+#define IOMallocData(size)     IOMalloc_internal(KHEAP_DATA_BUFFERS, size, Z_WAITOK)
+#define IOMallocZeroData(size) IOMalloc_internal(KHEAP_DATA_BUFFERS, size, Z_ZERO)
+
+#elif KERNEL_PRIVATE /* XNU_KERNEL_PRIVATE */
+
 /*! @function IOMallocData
  *   @abstract Allocates wired memory in the kernel map, from a separate section meant for pure data.
  *   @discussion Same as IOMalloc except that this function should be used for allocating pure data.
@@ -278,6 +269,10 @@ void * IOMallocData(vm_size_t size) __attribute__((alloc_size(1)));
  *   @param size Size of the memory requested.
  *   @result Pointer to the allocated memory, or zero on failure. */
 void * IOMallocZeroData(vm_size_t size) __attribute__((alloc_size(1)));
+
+#endif /* KERNEL_PRIVATE */
+
+#if KERNEL_PRIVATE
 
 /*! @function IOFreeData
  *   @abstract Frees memory allocated with IOMallocData or IOMallocZeroData.
@@ -407,7 +402,7 @@ void IOFreeData(void * address, vm_size_t size);
 
 #define IODelete_4(ptr, h_ty, e_ty, count) ({                               \
 	vm_size_t __s = IOMallocArraySize(sizeof(h_ty), sizeof(e_ty), count);   \
-	IODELETE_ASSERT_COMPATIBLE_POINTER(ptr, e_ty);                          \
+	IODELETE_ASSERT_COMPATIBLE_POINTER(ptr, h_ty);                          \
 	static KALLOC_TYPE_VAR_DEFINE(kt_view_var, h_ty, e_ty, KT_SHARED_ACCT); \
 	IOFreeTypeVarImpl(kt_view_var, ptr, __s);                               \
 })
@@ -734,15 +729,11 @@ log2up(vm_size_t size);
 
 #ifdef XNU_KERNEL_PRIVATE
 
-#define IOKIT_ASSERT_COMPATIBLE_POINTER(ptr, type)               \
-    _Static_assert(os_is_compatible_ptr(ptr, type),           \
-	"Pointer type is not compatible with specified type")
-
 #define IOFREETYPE_ASSERT_COMPATIBLE_POINTER(ptr, type) \
-    IOKIT_ASSERT_COMPATIBLE_POINTER(ptr, type)
+    KALLOC_TYPE_ASSERT_COMPATIBLE_POINTER(ptr, type)
 
 #define IODELETE_ASSERT_COMPATIBLE_POINTER(ptr, type) \
-    IOKIT_ASSERT_COMPATIBLE_POINTER(ptr, type)
+    KALLOC_TYPE_ASSERT_COMPATIBLE_POINTER(ptr, type)
 
 #else  /* XNU_KERNEL_PRIVATE */
 
@@ -768,6 +759,218 @@ IOMallocTypeVarImpl(kalloc_type_var_view_t kt_view, vm_size_t size);
 void
 IOFreeTypeVarImpl(kalloc_type_var_view_t kt_view, void * address, vm_size_t size);
 #endif
+
+#if KERNEL_PRIVATE
+#if __cplusplus
+
+#if __has_feature(cxx_deleted_functions)
+#define __IODeleteArrayOperators()                         \
+	_Pragma("clang diagnostic push")                       \
+	_Pragma("clang diagnostic ignored \"-Wc++98-compat\"") \
+	void *operator new[](size_t) = delete;                 \
+	void operator delete[](void *) = delete;               \
+	void operator delete[](void *, size_t) = delete;       \
+	_Pragma("clang diagnostic pop")
+#else  /* __has_feature(cxx_deleted_functions) */
+#define __IODeleteArrayOperators()
+#endif /* __has_feature(cxx_deleted_functions) */
+
+#define __IOAddOperatorsSentinel(name, type) \
+	static void __CONCAT(name, type) (void) __unused
+
+#define __IOAddTypedOperatorsSentinel(type) \
+	__IOAddOperatorsSentinel(__kt_typed_operators_, type)
+
+#define __IOAddTypedArrayOperatorsSentinel(type) \
+	__IOAddOperatorsSentinel(__kt_typed_array_operators_, type)
+
+#define __IODeclareTypedOperators(type)                    \
+	void *operator new(size_t size __unused);              \
+	void operator delete(void *mem, size_t size __unused); \
+	__IOAddTypedOperatorsSentinel(type)
+
+#define __IODeclareTypedArrayOperators(type) \
+	void *operator new[](size_t __unused);   \
+	void operator delete[](void *ptr);       \
+	__IOAddTypedArrayOperatorsSentinel(type)
+
+
+#define __IODefineTypedOperators(type)                          \
+	void *type::operator new(size_t size __unused)              \
+	{                                                           \
+	        return IOMallocType(type);                                \
+	}                                                           \
+	void type::operator delete(void *mem, size_t size __unused) \
+	{                                                           \
+	        IOFreeType(mem, type);                                    \
+	}
+
+struct __IOTypedOperatorsArrayHeader {
+	size_t esize;
+	size_t count;
+};
+
+#define __IOTypedOperatorNewArrayImpl(type, count)                \
+	{                                                             \
+	__IOTypedOperatorsArrayHeader *hdr;                        \
+	hdr = IONew(__IOTypedOperatorsArrayHeader, type, count);   \
+	if (hdr) {                                                 \
+	        hdr->esize = sizeof(type);                             \
+	        hdr->count = count;                                    \
+	        return static_cast<void *>(&hdr[1]);                   \
+	}                                                          \
+	_Pragma("clang diagnostic push")                           \
+	_Pragma("clang diagnostic ignored \"-Wnew-returns-null\"") \
+	return NULL;                                               \
+	_Pragma("clang diagnostic pop")                            \
+	}
+
+#define __IOTypedOperatorDeleteArrayImpl(type, ptr)                      \
+	{                                                                    \
+	        __IOTypedOperatorsArrayHeader *hdr;                               \
+	        uintptr_t uptr = reinterpret_cast<uintptr_t>(ptr) - sizeof(*hdr); \
+	        hdr = reinterpret_cast<__IOTypedOperatorsArrayHeader *>(uptr);    \
+	        IODelete(hdr, __IOTypedOperatorsArrayHeader, type, hdr->count);   \
+	}
+
+#define __IODefineTypedArrayOperators(type)        \
+	void *type::operator new[](size_t count)       \
+	__IOTypedOperatorNewArrayImpl(type, count)  \
+	void type::operator delete[](void *ptr)        \
+	__IOTypedOperatorDeleteArrayImpl(type, ptr)
+
+
+#define __IOOverrideTypedOperators(type)                  \
+	void *operator new(size_t size __unused)              \
+	{                                                     \
+	        return IOMallocType(type);                        \
+	}                                                     \
+	void operator delete(void *mem, size_t size __unused) \
+	{                                                     \
+	        IOFreeType(mem, type);                            \
+	} \
+	__IOAddTypedOperatorsSentinel(type)
+
+#define __IOOverrideTypedArrayOperators(type)       \
+	void *operator new[](size_t count)              \
+	__IOTypedOperatorNewArrayImpl(type, count)   \
+	void operator delete[](void *ptr)               \
+	__IOTypedOperatorDeleteArrayImpl(type, ptr)  \
+	__IOAddTypedArrayOperatorsSentinel(type)
+
+/*!
+ * @macro IODeclareTypedOperators
+ *
+ * @abstract
+ * Declare operator new/delete to adopt the typed allocator
+ * API for a given class/struct. It must be paired with
+ * @c IODefineTypedOperators.
+ *
+ * @discussion
+ * Use this macro within a class/struct declaration to declare
+ * @c operator new and @c operator delete to use the typed
+ * allocator API as the backing storage for this type.
+ *
+ * @note The default variant deletes the declaration of the
+ * array operators. Please see doc/allocators/api-basics.md for
+ * more details regarding their usage.
+ *
+ * @param type The type which the declarations are being provided for.
+ */
+#define IODeclareTypedOperatorsSupportingArrayOperators(type) \
+	__IODeclareTypedArrayOperators(type);                     \
+	__IODeclareTypedOperators(type)
+#define IODeclareTypedOperators(type) \
+	__IODeleteArrayOperators()        \
+	__IODeclareTypedOperators(type)
+
+/*!
+ * @macro IODefineTypedOperators
+ *
+ * @abstract
+ * Define (out of line) operator new/delete to adopt the typed
+ * allocator API for a given class/struct. It must be paired
+ * with @c IODeclareTypedOperators.
+ *
+ * @discussion
+ * Use this macro to provide an out of line definition of
+ * @c operator new and @c operator delete for a given type
+ * to use the typed allocator API as its backing storage.
+ *
+ * @param type The type which the overrides are being provided for.
+ */
+#define IODefineTypedOperatorsSupportingArrayOperators(type) \
+	__IODefineTypedOperators(type)                           \
+	__IODefineTypedArrayOperators(type)
+#define IODefineTypedOperators(type) \
+	__IODefineTypedOperators(type)
+
+/*!
+ * @macro IOOverrideTypedOperators
+ *
+ * @abstract
+ * Override operator new/delete to use @c kalloc_type.
+ *
+ * @discussion
+ * Use this macro within a class/struct declaration to override
+ * @c operator new and @c operator delete to use the typed
+ * allocator API as the backing storage for this type.
+ *
+ * @note The default variant deletes the implementation of the
+ * array operators. Please see doc/allocators/api-basics.md for
+ * more details regarding their usage.
+ *
+ * @param type The type which the overrides are being provided for.
+ */
+#define IOOverrideTypedOperators(type) \
+	__IODeleteArrayOperators()         \
+	__IOOverrideTypedOperators(type)
+
+#define IOOverrideTypedOperatorsSupportingArrayOperators(type) \
+	__IOOverrideTypedArrayOperators(type);                     \
+	__IOOverrideTypedOperators(type)
+
+
+extern "C++" {
+/*!
+ * @template IOTypedOperatorsMixin
+ *
+ * @abstract
+ * Mixin that implements @c operator new and @c operator delete
+ * using the typed allocator API.
+ *
+ * @discussion
+ * Inherit from this struct in order to adopt the typed allocator
+ * API on a struct/class for @c operator new and @c operator delete.
+ *
+ * The type passed as as a template parameter must be the type
+ * which is inheriting from the struct itself.
+ *
+ * @note See doc/allocators/api-basics.md for more details
+ * regarding the usage of the mixin.
+ *
+ * @example
+ *
+ *     class C : public IOTypedOperatorsMixin<C> {
+ *         ...
+ *     }
+ *     C *obj = new C;
+ *
+ */
+template<class T>
+struct IOTypedOperatorsMixin {
+	IOOverrideTypedOperators(T);
+};
+
+template<class T>
+struct IOTypedOperatorsMixinSupportingArrayOperators {
+	IOOverrideTypedOperatorsSupportingArrayOperators(T);
+};
+} // extern "C++"
+
+
+#endif /* __cplusplus */
+#endif /* KERNEL_PRIVATE */
 
 __END_DECLS
 

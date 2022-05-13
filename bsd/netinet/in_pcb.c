@@ -3630,6 +3630,7 @@ inp_update_necp_policy(struct inpcb *inp, struct sockaddr *override_local_addr, 
 	    IN6_IS_ADDR_UNSPECIFIED(&inp->in6p_laddr)) {
 		// If we should rescope, and the socket is not yet bound
 		inp_bindif(inp, necp_socket_get_rescope_if_index(inp), NULL);
+		inp->inp_flags2 |= INP2_SCOPED_BY_NECP;
 	}
 }
 #endif /* NECP */

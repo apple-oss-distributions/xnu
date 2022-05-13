@@ -192,7 +192,12 @@ SYSCTL_NODE(_net_inet_tcp, OID_AUTO, reass, CTLFLAG_RW | CTLFLAG_LOCKED, 0,
 static int tcp_reass_overflows = 0;
 SYSCTL_INT(_net_inet_tcp_reass, OID_AUTO, overflows,
     CTLFLAG_RD | CTLFLAG_LOCKED, &tcp_reass_overflows, 0,
-    "Global number of TCP Segment Reassembly Queue Overflows");
+    "Global number of TCP segment reassembly queue overflows");
+
+int tcp_reass_total_qlen = 0;
+SYSCTL_INT(_net_inet_tcp_reass, OID_AUTO, qlen,
+    CTLFLAG_RD | CTLFLAG_LOCKED, &tcp_reass_total_qlen, 0,
+    "Total number of TCP segments in reassembly queues");
 
 
 SYSCTL_SKMEM_TCP_INT(OID_AUTO, slowlink_wsize, CTLFLAG_RW | CTLFLAG_LOCKED,
@@ -625,6 +630,7 @@ tcp_reass(struct tcpcb *tp, struct tcphdr *th, int *tlenp, struct mbuf *m,
 	/* Allocate a new queue entry. If we can't, just drop the pkt. XXX */
 	te = zalloc_flags(tcp_reass_zone, Z_WAITOK | Z_NOFAIL);
 	tp->t_reassqlen++;
+	OSIncrementAtomic(&tcp_reass_total_qlen);
 
 	/*
 	 * Find a segment which begins after this one does.
@@ -679,6 +685,7 @@ tcp_reass(struct tcpcb *tp, struct tcphdr *th, int *tlenp, struct mbuf *m,
 				zfree(tcp_reass_zone, te);
 				te = NULL;
 				tp->t_reassqlen--;
+				OSDecrementAtomic(&tcp_reass_total_qlen);
 				/*
 				 * Try to present any queued data
 				 * at the left window edge to the user.
@@ -744,9 +751,12 @@ tcp_reass(struct tcpcb *tp, struct tcphdr *th, int *tlenp, struct mbuf *m,
 
 		nq = LIST_NEXT(q, tqe_q);
 		LIST_REMOVE(q, tqe_q);
+		tp->t_reassq_mbcnt -= MSIZE + (q->tqe_m->m_flags & M_EXT) ?
+		    q->tqe_m->m_ext.ext_size : 0;
 		m_freem(q->tqe_m);
 		zfree(tcp_reass_zone, q);
 		tp->t_reassqlen--;
+		OSDecrementAtomic(&tcp_reass_total_qlen);
 		q = nq;
 	}
 
@@ -754,6 +764,8 @@ tcp_reass(struct tcpcb *tp, struct tcphdr *th, int *tlenp, struct mbuf *m,
 	te->tqe_m = m;
 	te->tqe_th = th;
 	te->tqe_len = *tlenp;
+
+	tp->t_reassq_mbcnt += MSIZE + (m->m_flags & M_EXT) ? m->m_ext.ext_size : 0;
 
 	if (p == NULL) {
 		LIST_INSERT_HEAD(&tp->t_segq, te, tqe_q);
@@ -791,6 +803,8 @@ present:
 		tp->rcv_nxt += q->tqe_len;
 		flags = q->tqe_th->th_flags & TH_FIN;
 		LIST_REMOVE(q, tqe_q);
+		tp->t_reassq_mbcnt -= MSIZE + (q->tqe_m->m_flags & M_EXT) ?
+		    q->tqe_m->m_ext.ext_size : 0;
 		if (so->so_state & SS_CANTRCVMORE) {
 			m_freem(q->tqe_m);
 		} else {
@@ -807,6 +821,7 @@ present:
 		}
 		zfree(tcp_reass_zone, q);
 		tp->t_reassqlen--;
+		OSDecrementAtomic(&tcp_reass_total_qlen);
 		q = LIST_FIRST(&tp->t_segq);
 	} while (q && q->tqe_th->th_seq == tp->rcv_nxt);
 	tp->t_flagsext &= ~TF_REASS_INPROG;
@@ -7046,6 +7061,44 @@ tcp_input_checksum(int af, struct mbuf *m, struct tcphdr *th, int off, int tlen)
 	}
 
 	return 0;
+}
+
+#define DUMP_BUF_CHK() {        \
+	clen -= k;              \
+	if (clen < 1)           \
+	        goto done;      \
+	c += k;                 \
+}
+
+int
+dump_tcp_reass_qlen(char *str, int str_len)
+{
+	char *c = str;
+	int k, clen = str_len;
+
+	if (tcp_reass_total_qlen != 0) {
+		k = scnprintf(c, clen, "\ntcp reass qlen %d\n", tcp_reass_total_qlen);
+		DUMP_BUF_CHK();
+	}
+
+done:
+	return str_len - clen;
+}
+
+uint32_t
+tcp_reass_qlen_space(struct socket *so)
+{
+	uint32_t space = 0;
+	struct inpcb *inp = sotoinpcb(so);
+
+	if (inp != NULL) {
+		struct tcpcb *tp = intotcpcb(inp);
+
+		if (tp != NULL) {
+			space = tp->t_reassq_mbcnt;
+		}
+	}
+	return space;
 }
 
 

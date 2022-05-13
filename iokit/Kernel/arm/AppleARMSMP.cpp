@@ -387,6 +387,7 @@ IOCPUSleepKernel(void)
 
 	ml_set_is_quiescing(false);
 
+#if defined(XNU_TARGET_OS_OSX)
 	rootDomain->start_watchdog_timer();
 
 	console_resume();
@@ -406,6 +407,30 @@ IOCPUSleepKernel(void)
 
 	rootDomain->tracePoint( kIOPMTracePointWakePlatformActions );
 	IOPlatformActionsPostResume();
+
+#else /* defined(!XNU_TARGET_OS_OSX) */
+	// Keep the old ordering around for iOS temporarily - rdar://88891040
+
+	rootDomain->start_watchdog_timer();
+	rootDomain->tracePoint( kIOPMTracePointWakePlatformActions );
+
+	console_resume();
+
+	IOPlatformActionsPostResume();
+	rootDomain->tracePoint( kIOPMTracePointWakeCPUs );
+
+	for (i = 0; i < topology_info->num_cpus; i++) {
+		unsigned int cpu_id = topology_info->cpus[i].cpu_id;
+		if (cpu_id != boot_cpu) {
+			processor_start(machProcessors[cpu_id]);
+		}
+	}
+
+#if defined(__arm64__)
+	sched_restore_recommended_cores_after_sleep();
+#endif
+
+#endif /* defined(XNU_TARGET_OS_OSX) */
 
 	thread_kern_set_pri(self, old_pri);
 	printf("IOCPUSleepKernel exit\n");

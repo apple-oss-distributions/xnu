@@ -285,14 +285,12 @@ VariablePermissionEntry gVariablePermissions[] = {
 };
 
 static NVRAMPartitionType
-getPartitionTypeForGUID(const uuid_t *guid)
+getPartitionTypeForGUID(const uuid_t guid)
 {
-	if (uuid_compare(*guid, gAppleNVRAMGuid) == 0) {
-		return kIONVRAMPartitionCommon;
-	} else if (uuid_compare(*guid, gAppleSystemVariableGuid) == 0) {
+	if (uuid_compare(guid, gAppleSystemVariableGuid) == 0) {
 		return kIONVRAMPartitionSystem;
 	} else {
-		return kIONVRAMPartitionTypeUnknown;
+		return kIONVRAMPartitionCommon;
 	}
 }
 
@@ -350,7 +348,7 @@ variableInAllowList(const char *varName)
 }
 
 static bool
-verifyWriteSizeLimit(const uuid_t *varGuid, const char *variableName, size_t propDataSize)
+verifyWriteSizeLimit(const uuid_t varGuid, const char *variableName, size_t propDataSize)
 {
 	if (variableInAllowList(variableName)) {
 		if (strnstr(variableName, "breadcrumbs", strlen(variableName)) != NULL) {
@@ -387,7 +385,7 @@ getNVRAMOpString(IONVRAMOperation op)
 #endif
 
 static bool
-verifyPermission(IONVRAMOperation op, const uuid_t *varGuid, const char *varName)
+verifyPermission(IONVRAMOperation op, const uuid_t varGuid, const char *varName)
 {
 	VariablePermission perm;
 	bool kernel, writeEntitled = false, readEntitled = false, allowList, systemGuid = false, systemEntitled = false, systemInternalEntitled = false, systemAllow, systemReadHiddenAllow = false;
@@ -405,7 +403,7 @@ verifyPermission(IONVRAMOperation op, const uuid_t *varGuid, const char *varName
 	}
 
 	allowList              = variableInAllowList(varName);
-	systemGuid             = uuid_compare(*varGuid, gAppleSystemVariableGuid) == 0;
+	systemGuid             = uuid_compare(varGuid, gAppleSystemVariableGuid) == 0;
 	admin                  = IOUserClient::clientHasPrivilege(current_task(), kIONVRAMPrivilege) == kIOReturnSuccess;
 	writeEntitled          = IOCurrentTaskHasEntitlement(kIONVRAMWriteAccessKey);
 	readEntitled           = IOCurrentTaskHasEntitlement(kIONVRAMReadAccessKey);
@@ -481,7 +479,7 @@ exit:
 }
 
 static bool
-verifyPermission(IONVRAMOperation op, const uuid_t *varGuid, const OSSymbol *varName)
+verifyPermission(IONVRAMOperation op, const uuid_t varGuid, const OSSymbol *varName)
 {
 	return verifyPermission(op, varGuid, varName->getCStringNoCopy());
 }
@@ -520,7 +518,7 @@ parseVariableName(const char *key, uuid_t *guidResult, const char **nameResult)
 		*nameResult = name;
 	}
 
-	return false;
+	return ok;
 }
 
 static bool
@@ -703,7 +701,7 @@ private:
 	uuid_t           _guid;
 
 public:
-	bool                    init(const uuid_t *guid);
+	bool                    init(const uuid_t guid);
 	virtual bool            start(IOService * provider) APPLE_KEXT_OVERRIDE;
 
 	virtual bool            serializeProperties(OSSerialize *s) const APPLE_KEXT_OVERRIDE;
@@ -717,11 +715,11 @@ public:
 OSDefineMetaClassAndStructors(IODTNVRAMVariables, IOService)
 
 bool
-IODTNVRAMVariables::init(const uuid_t *guid)
+IODTNVRAMVariables::init(const uuid_t guid)
 {
-	require(super::init() && (guid != nullptr), fail);
+	require(super::init(), fail);
 
-	uuid_copy(_guid, *guid);
+	uuid_copy(_guid, guid);
 
 	return true;
 
@@ -784,7 +782,7 @@ IODTNVRAMVariables::serializeProperties(OSSerialize *s) const
 	}
 
 	while ((key = OSDynamicCast(OSSymbol, iter->getNextObject()))) {
-		if (verifyPermission(kIONVRAMOperationRead, &_guid, key)) {
+		if (verifyPermission(kIONVRAMOperationRead, _guid, key)) {
 			dict->setObject(key, localVariables->getObject(key));
 		}
 	}
@@ -802,7 +800,7 @@ IODTNVRAMVariables::copyProperty(const OSSymbol *aKey) const
 	if (_provider && !skipKey(aKey)) {
 		DEBUG_INFO("aKey=%s\n", aKey->getCStringNoCopy());
 
-		return _provider->copyPropertyWithGUIDAndName(&_guid, aKey->getCStringNoCopy());
+		return _provider->copyPropertyWithGUIDAndName(_guid, aKey->getCStringNoCopy());
 	} else {
 		return nullptr;
 	}
@@ -820,7 +818,7 @@ bool
 IODTNVRAMVariables::setProperty(const OSSymbol *aKey, OSObject *anObject)
 {
 	if (_provider) {
-		return _provider->setPropertyWithGUIDAndName(&_guid, aKey->getCStringNoCopy(), anObject) == kIOReturnSuccess;
+		return _provider->setPropertyWithGUIDAndName(_guid, aKey->getCStringNoCopy(), anObject) == kIOReturnSuccess;
 	} else {
 		return false;
 	}
@@ -859,7 +857,7 @@ IODTNVRAMVariables::setProperties(OSObject *properties)
 				continue;
 			}
 
-			ret = setProperty(key, object);
+			ret = _provider->setPropertyWithGUIDAndName(_guid, key->getCStringNoCopy(), object);
 		}
 	} else {
 		ret = kIOReturnNotReady;
@@ -874,7 +872,7 @@ void
 IODTNVRAMVariables::removeProperty(const OSSymbol *aKey)
 {
 	if (_provider) {
-		_provider->removePropertyWithGUIDAndName(&_guid, aKey->getCStringNoCopy());
+		_provider->removePropertyWithGUIDAndName(_guid, aKey->getCStringNoCopy());
 	}
 }
 
@@ -970,7 +968,7 @@ IODTNVRAM::start(IOService *provider)
 	if (_format->getSystemUsed()) {
 		_systemService = new IODTNVRAMVariables;
 
-		if (!_systemService || !_systemService->init(&gAppleSystemVariableGuid)) {
+		if (!_systemService || !_systemService->init(gAppleSystemVariableGuid)) {
 			DEBUG_ERROR("Unable to start the system service!\n");
 			OSSafeReleaseNULL(_systemService);
 			goto no_system;
@@ -995,7 +993,7 @@ IODTNVRAM::start(IOService *provider)
 no_system:
 	_commonService = new IODTNVRAMVariables;
 
-	if (!_commonService || !_commonService->init(&gAppleNVRAMGuid)) {
+	if (!_commonService || !_commonService->init(gAppleNVRAMGuid)) {
 		DEBUG_ERROR("Unable to start the common service!\n");
 		OSSafeReleaseNULL(_commonService);
 		goto no_common;
@@ -1190,7 +1188,7 @@ IODTNVRAM::serializeProperties(OSSerialize *s) const
 		}
 
 		while ((key = OSDynamicCast(OSSymbol, iter->getNextObject()))) {
-			if (verifyPermission(kIONVRAMOperationRead, &gAppleSystemVariableGuid, key)) {
+			if (verifyPermission(kIONVRAMOperationRead, gAppleSystemVariableGuid, key)) {
 				dict->setObject(key, systemDict->getObject(key));
 			}
 		}
@@ -1210,7 +1208,7 @@ IODTNVRAM::serializeProperties(OSSerialize *s) const
 				// Skip non uniques
 				continue;
 			}
-			if (verifyPermission(kIONVRAMOperationRead, &gAppleNVRAMGuid, key)) {
+			if (verifyPermission(kIONVRAMOperationRead, gAppleNVRAMGuid, key)) {
 				dict->setObject(key, commonDict->getObject(key));
 			}
 		}
@@ -1237,10 +1235,10 @@ IODTNVRAM::getDictionaryType(const OSDictionary *dict) const
 }
 
 IOReturn
-IODTNVRAM::chooseDictionary(IONVRAMOperation operation, const uuid_t *varGuid, const char *variableName, OSDictionary **dict) const
+IODTNVRAM::chooseDictionary(IONVRAMOperation operation, const uuid_t varGuid, const char *variableName, OSDictionary **dict) const
 {
 	if (_systemDict != nullptr) {
-		bool systemGuid = uuid_compare(*varGuid, gAppleSystemVariableGuid) == 0;
+		bool systemGuid = uuid_compare(varGuid, gAppleSystemVariableGuid) == 0;
 
 		if (variableInAllowList(variableName)) {
 			DEBUG_INFO("Using system dictionary due to allow list\n");
@@ -1266,58 +1264,27 @@ IODTNVRAM::chooseDictionary(IONVRAMOperation operation, const uuid_t *varGuid, c
 }
 
 IOReturn
-IODTNVRAM::flushDict(const uuid_t *guid, IONVRAMOperation op)
+IODTNVRAM::flushDict(const uuid_t guid, IONVRAMOperation op)
 {
-	IOReturn err = kIOReturnSuccess;
+	IOReturn ret = kIOReturnSuccess;
 
-	if ((_systemDict != nullptr) && (uuid_compare(*guid, gAppleSystemVariableGuid) == 0)) {
-		const OSSymbol *key;
-		OSSharedPtr<OSDictionary> newDict;
-		OSSharedPtr<OSCollectionIterator> iter;
+	if ((_systemDict != nullptr) && (uuid_compare(guid, gAppleSystemVariableGuid) == 0)) {
+		ret = _format->flush(guid, op);
 
-		newDict = OSDictionary::withDictionary(_systemDict.get());
-		iter = OSCollectionIterator::withCollection(newDict.get());
-		if ((newDict == nullptr) || (iter == nullptr)) {
-			err = kIOReturnNoMemory;
-			goto exit;
-		}
+		DEBUG_INFO("system dictionary flushed, ret=%08x\n", ret);
+	} else if ((_commonDict != nullptr) && (uuid_compare(guid, gAppleNVRAMGuid) == 0)) {
+		ret = _format->flush(guid, op);
 
-		while ((key = OSDynamicCast(OSSymbol, iter->getNextObject()))) {
-			if (verifyPermission(op, &gAppleSystemVariableGuid, key)) {
-				_format->setVariable(guid, key->getCStringNoCopy(), nullptr);
-			}
-		}
-
-		DEBUG_INFO("system dictionary flushed\n");
-	} else if ((_commonDict != nullptr) && (uuid_compare(*guid, gAppleNVRAMGuid) == 0)) {
-		const OSSymbol *key;
-		OSSharedPtr<OSDictionary> newDict;
-		OSSharedPtr<OSCollectionIterator> iter;
-
-		newDict = OSDictionary::withDictionary(_commonDict.get());
-		iter = OSCollectionIterator::withCollection(newDict.get());
-		if ((newDict == nullptr) || (iter == nullptr)) {
-			err = kIOReturnNoMemory;
-			goto exit;
-		}
-
-		while ((key = OSDynamicCast(OSSymbol, iter->getNextObject()))) {
-			if (verifyPermission(op, &gAppleNVRAMGuid, key)) {
-				_format->setVariable(guid, key->getCStringNoCopy(), nullptr);
-			}
-		}
-
-		DEBUG_INFO("common dictionary flushed\n");
+		DEBUG_INFO("common dictionary flushed, ret=%08x\n", ret);
 	}
 
-exit:
-	return err;
+	return ret;
 }
 
 bool
-IODTNVRAM::handleSpecialVariables(const char *name, const uuid_t *guid, const OSObject *obj, IOReturn *error)
+IODTNVRAM::handleSpecialVariables(const char *name, const uuid_t guid, const OSObject *obj, IOReturn *error)
 {
-	IOReturn err = kIOReturnSuccess;
+	IOReturn ret = kIOReturnSuccess;
 	bool special = false;
 
 	NVRAMLOCKASSERTEXCLUSIVE();
@@ -1326,28 +1293,28 @@ IODTNVRAM::handleSpecialVariables(const char *name, const uuid_t *guid, const OS
 	// Obliterate can flush either separately
 	if (strcmp(name, "ObliterateNVRam") == 0) {
 		special = true;
-		err = flushDict(guid, kIONVRAMOperationObliterate);
+		ret = flushDict(guid, kIONVRAMOperationObliterate);
 	} else if (strcmp(name, "ResetNVRam") == 0) {
 		special = true;
-		err = flushDict(&gAppleSystemVariableGuid, kIONVRAMOperationReset);
+		ret = flushDict(gAppleSystemVariableGuid, kIONVRAMOperationReset);
 
-		if (err != kIOReturnSuccess) {
+		if (ret != kIOReturnSuccess) {
 			goto exit;
 		}
 
-		err = flushDict(&gAppleNVRAMGuid, kIONVRAMOperationReset);
+		ret = flushDict(gAppleNVRAMGuid, kIONVRAMOperationReset);
 	}
 
 exit:
 	if (error) {
-		*error = err;
+		*error = ret;
 	}
 
 	return special;
 }
 
 OSSharedPtr<OSObject>
-IODTNVRAM::copyPropertyWithGUIDAndName(const uuid_t *guid, const char *name) const
+IODTNVRAM::copyPropertyWithGUIDAndName(const uuid_t guid, const char *name) const
 {
 	IOReturn              result;
 	OSDictionary          *dict;
@@ -1393,7 +1360,7 @@ IODTNVRAM::copyProperty(const OSSymbol *aKey) const
 
 	parseVariableName(aKey->getCStringNoCopy(), &varGuid, &variableName);
 
-	return copyPropertyWithGUIDAndName(&varGuid, variableName);
+	return copyPropertyWithGUIDAndName(varGuid, variableName);
 }
 
 OSSharedPtr<OSObject>
@@ -1431,7 +1398,7 @@ IODTNVRAM::getProperty(const char *aKey) const
 }
 
 IOReturn
-IODTNVRAM::setPropertyWithGUIDAndName(const uuid_t *guid, const char *name, OSObject *anObject)
+IODTNVRAM::setPropertyWithGUIDAndName(const uuid_t guid, const char *name, OSObject *anObject)
 {
 	IOReturn              ret = kIOReturnSuccess;
 	bool                  remove = false;
@@ -1450,11 +1417,26 @@ IODTNVRAM::setPropertyWithGUIDAndName(const uuid_t *guid, const char *name, OSOb
 		tmpString = OSDynamicCast(OSString, anObject);
 		if (tmpString != nullptr) {
 			const char *variableName;
-			uuid_t     varGuid;
+			uuid_t     valueVarGuid;
+			bool       guidProvided;
 			IOReturn   removeRet;
 
-			parseVariableName(tmpString->getCStringNoCopy(), &varGuid, &variableName);
-			removeRet = removePropertyWithGUIDAndName(&varGuid, variableName);
+			guidProvided = parseVariableName(tmpString->getCStringNoCopy(), &valueVarGuid, &variableName);
+
+			// nvram tool will provide a "nvram -d var" or "nvram -d guid:var" as
+			// kIONVRAMDeletePropertyKey=var or kIONVRAMDeletePropertyKey=guid:var
+			// that will come into this function as (gAppleNVRAMGuid, varname, nullptr)
+			// if we provide the "-z" flag to the nvram tool this function will come in as
+			// (gAppleSystemVariableGuid, varname, nullptr). We are reparsing the value string,
+			// if there is a GUID provided with the value then use that GUID otherwise use the
+			// guid that was provided via the node selection or default.
+			if (guidProvided == false) {
+				DEBUG_INFO("Removing with API provided GUID\n");
+				removeRet = removePropertyWithGUIDAndName(guid, variableName);
+			} else {
+				DEBUG_INFO("Removing with value provided GUID\n");
+				removeRet = removePropertyWithGUIDAndName(valueVarGuid, variableName);
+			}
 
 			DEBUG_INFO("kIONVRAMDeletePropertyKey found, removeRet=%#08x\n", removeRet);
 		} else {
@@ -1578,7 +1560,7 @@ IODTNVRAM::setPropertyInternal(const OSSymbol *aKey, OSObject *anObject)
 
 	parseVariableName(aKey->getCStringNoCopy(), &varGuid, &variableName);
 
-	return setPropertyWithGUIDAndName(&varGuid, variableName, anObject);
+	return setPropertyWithGUIDAndName(varGuid, variableName, anObject);
 }
 
 bool
@@ -1600,18 +1582,14 @@ IODTNVRAM::removeProperty(const OSSymbol *aKey)
 }
 
 IOReturn
-IODTNVRAM::removePropertyWithGUIDAndName(const uuid_t *guid, const char *name)
+IODTNVRAM::removePropertyWithGUIDAndName(const uuid_t guid, const char *name)
 {
-	IOReturn     ret;
-	OSDictionary *dict;
+	IOReturn      ret = kIOReturnSuccess;
+	uuid_string_t uuidString;
 
-	DEBUG_INFO("name=%s\n", name);
+	uuid_unparse(guid, uuidString);
 
-	ret = chooseDictionary(kIONVRAMOperationDelete, guid, name, &dict);
-	if (ret != kIOReturnSuccess) {
-		DEBUG_INFO("No dictionary\n");
-		goto exit;
-	}
+	DEBUG_INFO("%s:%s\n", uuidString, name);
 
 	if (!verifyPermission(kIONVRAMOperationDelete, guid, name)) {
 		DEBUG_INFO("Not priveleged\n");
@@ -1643,7 +1621,7 @@ IODTNVRAM::removePropertyInternal(const OSSymbol *aKey)
 
 	parseVariableName(aKey->getCStringNoCopy(), &varGuid, &variableName);
 
-	ret = removePropertyWithGUIDAndName(&varGuid, variableName);
+	ret = removePropertyWithGUIDAndName(varGuid, variableName);
 
 	return ret;
 }

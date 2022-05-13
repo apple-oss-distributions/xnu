@@ -88,7 +88,8 @@ io_map(vm_map_offset_t phys_addr, vm_size_t size, unsigned int flags)
 		    VM_PROT_READ | VM_PROT_WRITE,
 		    flags);
 	} else {
-		(void) kmem_alloc_pageable(kernel_map, &start, round_page(size), VM_KERN_MEMORY_IOKIT);
+		kmem_alloc(kernel_map, &start, round_page(size),
+		    KMA_NOFAIL | KMA_PAGEABLE | KMA_DATA, VM_KERN_MEMORY_IOKIT);
 		(void) pmap_map(start, phys_addr, phys_addr + round_page(size),
 		    VM_PROT_READ | VM_PROT_WRITE,
 		    flags);

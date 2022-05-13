@@ -295,7 +295,7 @@ osfmk/vm/vm_resident.c			standard
 osfmk/vm/vm_shared_region.c		standard
 osfmk/vm/vm_shared_region_pager.c	standard
 osfmk/vm/vm_swapfile_pager.c		standard
-osfmk/vm/vm_tests.c			standard
+osfmk/vm/vm_tests.c			optional config_xnupost
 osfmk/vm/vm_user.c			standard
 osfmk/vm/vm32_user.c			standard
 

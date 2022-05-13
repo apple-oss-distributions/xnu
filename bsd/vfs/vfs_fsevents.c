@@ -354,11 +354,14 @@ add_fsevent(int type, vfs_context_t ctx, ...)
 	dev_t             dev = 0;
 	uint64_t          now, elapsed;
 	uint64_t          orig_linkid = 0, next_linkid = 0;
+	uint64_t          link_parentid = 0;
 	char             *pathbuff = NULL, *path_override = NULL;
+	char              *link_name = NULL;
 	vnode_t           link_vp = NULL;
 	int               pathbuff_len;
 	uthread_t         ut = get_bsdthread_info(current_thread());
 	bool              do_all_links = true;
+	bool              do_cache_reset = false;
 
 	if (type == FSE_CONTENT_MODIFIED_NO_HLINK) {
 		do_all_links = false;
@@ -681,6 +684,23 @@ restart:
 					orig_linkid = cur->ino;
 					orig_linkcount = MIN(va.va_nlink, MAX_HARDLINK_NOTIFICATIONS);
 					link_vp = vp;
+					if (vp->v_mount->mnt_kern_flag & MNTK_PATH_FROM_ID && !link_name) {
+						VATTR_INIT(&va);
+						VATTR_WANTED(&va, va_parentid);
+						VATTR_WANTED(&va, va_name);
+						link_name = zalloc(ZV_NAMEI);
+						va.va_name = link_name;
+						if ((ret = vnode_getattr(vp, &va, vfs_context_kernel()) != 0) ||
+						    !(VATTR_IS_SUPPORTED(&va, va_name)) ||
+						    !(VATTR_IS_SUPPORTED(&va, va_parentid))) {
+							zfree(ZV_NAMEI, link_name);
+							link_name = NULL;
+						}
+						if (link_name) {
+							link_parentid = va.va_parentid;
+						}
+						va.va_name = NULL;
+					}
 				}
 			}
 
@@ -875,6 +895,9 @@ clean_up:
 				if (iret == 0 && next_linkid != 0) {
 					fsid0 = link_vp->v_mount->mnt_vfsstat.f_fsid.val[0];
 					ut->uu_flag |= UT_KERN_RAGE_VNODES;
+					if (!do_cache_reset) {
+						do_cache_reset = true;
+					}
 					if ((iret = fsgetpath_internal(ctx, fsid0, next_linkid, MAXPATHLEN, path_override, FSOPT_NOFIRMLINKPATH, &path_override_len)) == 0) {
 						orig_linkcount--;
 						ut->uu_flag &= ~UT_KERN_RAGE_VNODES;
@@ -896,6 +919,33 @@ clean_up:
 				}
 			}
 		}
+	}
+
+	if (link_name) {
+		/*
+		 * If we call fsgetpath on all the links, it will set the link origin cache
+		 * to the last link that the path was obtained for.
+		 * To restore the the original link id cache in APFS we need to issue a
+		 * lookup on the original directory + name for the link.
+		 */
+		if (do_cache_reset) {
+			vnode_t dvp = NULLVP;
+
+			if ((ret = VFS_VGET(link_vp->v_mount, (ino64_t)link_parentid, &dvp, vfs_context_kernel())) == 0) {
+				vnode_t lvp = NULLVP;
+
+				ret = vnode_lookupat(link_name, 0, &lvp, ctx, dvp);
+				if (!ret) {
+					vnode_put(lvp);
+					lvp = NULLVP;
+				}
+				vnode_put(dvp);
+				dvp = NULLVP;
+			}
+			ret = 0;
+		}
+		zfree(ZV_NAMEI, link_name);
+		link_name = NULL;
 	}
 
 	if (path_override) {
@@ -2296,7 +2346,7 @@ parse_buffer_and_add_events(const char *buffer, size_t bufsize, vfs_context_t ct
 //       smaller is not a good idea.
 //
 #define WRITE_BUFFER_SIZE  4096
-char *write_buffer = NULL;
+static char *write_buffer = NULL;
 
 static int
 fseventswrite(__unused dev_t dev, struct uio *uio, __unused int ioflag)
@@ -2308,10 +2358,7 @@ fseventswrite(__unused dev_t dev, struct uio *uio, __unused int ioflag)
 	lck_mtx_lock(&event_writer_lock);
 
 	if (write_buffer == NULL) {
-		if (kmem_alloc(kernel_map, (vm_offset_t *)&write_buffer, WRITE_BUFFER_SIZE, VM_KERN_MEMORY_FILE)) {
-			lck_mtx_unlock(&event_writer_lock);
-			return ENOMEM;
-		}
+		write_buffer = zalloc_permanent(WRITE_BUFFER_SIZE, ZALIGN_64);
 	}
 
 	//

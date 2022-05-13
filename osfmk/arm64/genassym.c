@@ -116,7 +116,6 @@ main(int     argc,
 {
 	DECLARE("AST_URGENT", AST_URGENT);
 
-	DECLARE("TH_RECOVER", offsetof(struct thread, recover));
 	DECLARE("TH_KSTACKPTR", offsetof(struct thread, machine.kstackptr));
 	DECLARE("TH_THREAD_ID", offsetof(struct thread, thread_id));
 #if defined(HAS_APPLE_PAC)

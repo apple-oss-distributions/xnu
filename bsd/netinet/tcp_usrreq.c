@@ -346,11 +346,16 @@ tcp6_usr_bind(struct socket *so, struct sockaddr *nam, struct proc *p)
 			inp->inp_vflag |= INP_IPV4;
 		} else if (IN6_IS_ADDR_V4MAPPED(&sin6p->sin6_addr)) {
 			struct sockaddr_in sin;
+			const uint8_t old_flags = inp->inp_vflag;
 
 			in6_sin6_2_sin(&sin, sin6p);
 			inp->inp_vflag |= INP_IPV4;
 			inp->inp_vflag &= ~INP_IPV6;
+
 			error = in_pcbbind(inp, (struct sockaddr *)&sin, p);
+			if (error != 0) {
+				inp->inp_vflag = old_flags;
+			}
 			goto out;
 		}
 	}

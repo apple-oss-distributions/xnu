@@ -288,7 +288,7 @@ kasan_poison(vm_offset_t base, vm_size_t size, vm_size_t leftrz,
 		shadow[i] = l_flags;
 	}
 	for (; i < leftrz + size; i++) {
-		shadow[i] = ASAN_VALID; /* XXX: should not be necessary */
+		shadow[i] = ASAN_VALID;
 	}
 	/* Do we have any leftover valid byte? */
 	if (partial && (i < total)) {

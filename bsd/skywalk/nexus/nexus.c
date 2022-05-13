@@ -101,16 +101,16 @@ static ZONE_DEFINE(nx_zone, SKMEM_ZONE_PREFIX ".nx",
 static int __nx_inited = 0;
 
 #define SKMEM_TAG_NX_KEY        "com.apple.skywalk.nexus.key"
-kern_allocation_name_t skmem_tag_nx_key;
+SKMEM_TAG_DEFINE(skmem_tag_nx_key, SKMEM_TAG_NX_KEY);
 
 #define SKMEM_TAG_NX_MIB        "com.apple.skywalk.nexus.mib"
-static kern_allocation_name_t skmem_tag_nx_mib;
+static SKMEM_TAG_DEFINE(skmem_tag_nx_mib, SKMEM_TAG_NX_MIB);
 
 #define SKMEM_TAG_NX_PORT        "com.apple.skywalk.nexus.port"
-kern_allocation_name_t skmem_tag_nx_port;
+SKMEM_TAG_DEFINE(skmem_tag_nx_port, SKMEM_TAG_NX_PORT);
 
 #define SKMEM_TAG_NX_PORT_INFO        "com.apple.skywalk.nexus.port.info"
-kern_allocation_name_t skmem_tag_nx_port_info;
+SKMEM_TAG_DEFINE(skmem_tag_nx_port_info, SKMEM_TAG_NX_PORT_INFO);
 
 /*
  * Special nexus controller handle for Skywalk internal use.  Unlike all
@@ -142,23 +142,6 @@ nexus_init(void)
 	nxctl_init(&_kernnxctl, kernproc, NULL);
 	nxctl_retain_locked(&_kernnxctl);       /* one for us */
 
-	ASSERT(skmem_tag_nx_key == NULL);
-	skmem_tag_nx_key = kern_allocation_name_allocate(SKMEM_TAG_NX_KEY, 0);
-	ASSERT(skmem_tag_nx_key != NULL);
-
-	ASSERT(skmem_tag_nx_mib == NULL);
-	skmem_tag_nx_mib = kern_allocation_name_allocate(SKMEM_TAG_NX_MIB, 0);
-	ASSERT(skmem_tag_nx_mib != NULL);
-
-	ASSERT(skmem_tag_nx_port == NULL);
-	skmem_tag_nx_port = kern_allocation_name_allocate(SKMEM_TAG_NX_PORT, 0);
-	ASSERT(skmem_tag_nx_port != NULL);
-
-	ASSERT(skmem_tag_nx_port_info == NULL);
-	skmem_tag_nx_port_info = kern_allocation_name_allocate(
-		SKMEM_TAG_NX_PORT_INFO, 0);
-	ASSERT(skmem_tag_nx_port_info != NULL);
-
 	__nx_inited = 1;
 
 	return 0;
@@ -177,22 +160,6 @@ nexus_fini(void)
 
 		ASSERT(RB_EMPTY(&nx_head));
 
-		if (skmem_tag_nx_key != NULL) {
-			kern_allocation_name_release(skmem_tag_nx_key);
-			skmem_tag_nx_key = NULL;
-		}
-		if (skmem_tag_nx_mib != NULL) {
-			kern_allocation_name_release(skmem_tag_nx_mib);
-			skmem_tag_nx_mib = NULL;
-		}
-		if (skmem_tag_nx_port != NULL) {
-			kern_allocation_name_release(skmem_tag_nx_port);
-			skmem_tag_nx_port = NULL;
-		}
-		if (skmem_tag_nx_port_info != NULL) {
-			kern_allocation_name_release(skmem_tag_nx_port_info);
-			skmem_tag_nx_port_info = NULL;
-		}
 		na_fini();
 
 		__nx_inited = 0;

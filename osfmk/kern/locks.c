@@ -259,17 +259,6 @@ out:
 	return lsti;
 }
 
-/*
- * Routine:	hw_lock_trylock_mask_allow_invalid
- *
- *	Tries to acquire a lock of possibly even unmapped memory.
- *	It assumes a valid lock MUST have another bit set (different from
- *	the one being set to lock).
- */
-__result_use_check
-extern hw_lock_status_t
-hw_lock_trylock_mask_allow_invalid(uint32_t *lock, uint32_t mask);
-
 __result_use_check
 static inline bool
 hw_lock_trylock_bit(uint32_t *target, unsigned int bit, bool wait)
@@ -777,15 +766,13 @@ hw_lock_bit_to_contended(
 	hw_lock_bit_t *lock,
 	uint32_t       bit,
 	uint64_t       timeout,
-	hw_lock_timeout_handler_t handler,
-	bool           validate
+	hw_lock_timeout_handler_t handler
 	LCK_GRP_ARG(lck_grp_t *grp))
 {
 	uint64_t        end = 0, start = 0, interrupts = 0;
 	uint64_t        default_timeout = os_atomic_load(&lock_panic_timeout, relaxed);
 	bool            has_timeout = true;
 	hw_lock_status_t rc;
-	uint32_t        mask = 1u << bit;
 #if INTERRUPT_MASKED_DEBUG
 	thread_t        thread = current_thread();
 	bool            in_ppl = pmap_in_ppl();
@@ -816,15 +803,7 @@ hw_lock_bit_to_contended(
 		for (int i = 0; i < LOCK_SNOOP_SPINS; i++) {
 			// Always load-exclusive before wfe
 			// This grabs the monitor and wakes up on a release event
-			if (validate) {
-				rc = hw_lock_trylock_mask_allow_invalid(lock, mask);
-				if (rc == HW_LOCK_INVALID) {
-					lock_enable_preemption();
-					return rc;
-				}
-			} else {
-				rc = hw_lock_trylock_bit(lock, bit, true);
-			}
+			rc = hw_lock_trylock_bit(lock, bit, true);
 			if (rc == HW_LOCK_ACQUIRED) {
 				lck_grp_spin_update_held(lock LCK_GRP_ARG(grp));
 				goto end;
@@ -880,8 +859,8 @@ hw_lock_bit_to_internal(hw_lock_bit_t *lock, unsigned int bit, uint64_t timeout,
 		return HW_LOCK_ACQUIRED;
 	}
 
-	return (unsigned)hw_lock_bit_to_contended(lock, bit, timeout, handler,
-	           false LCK_GRP_ARG(grp));
+	return (unsigned)hw_lock_bit_to_contended(lock, bit, timeout, handler
+	           LCK_GRP_ARG(grp));
 }
 
 /*
@@ -925,30 +904,6 @@ void
 	(void)hw_lock_bit_to_internal(lock, bit, 0, hw_lock_bit_timeout_panic LCK_GRP_ARG(grp));
 }
 
-
-hw_lock_status_t
-(hw_lock_bit_to_allow_invalid)(hw_lock_bit_t * lock, unsigned int bit,
-    uint64_t timeout, hw_lock_timeout_handler_t handler
-    LCK_GRP_ARG(lck_grp_t *grp))
-{
-	int rc;
-
-	_disable_preemption();
-
-	rc = hw_lock_trylock_mask_allow_invalid(lock, 1u << bit);
-	if (__probable(rc == HW_LOCK_ACQUIRED)) {
-		lck_grp_spin_update_held(lock LCK_GRP_ARG(grp));
-		return HW_LOCK_ACQUIRED;
-	}
-
-	if (__probable(rc == HW_LOCK_CONTENDED)) {
-		return hw_lock_bit_to_contended(lock, bit, timeout, handler,
-		           true LCK_GRP_ARG(grp));
-	}
-
-	lock_enable_preemption();
-	return HW_LOCK_INVALID;
-}
 
 unsigned
 int

@@ -37,12 +37,14 @@
 #include <device/device_port.h>
 #include <vm/memory_object.h>
 #include <vm/vm_fault.h>
-#include <vm/vm_map.h>
+#include <vm/vm_map_internal.h>
 #include <vm/vm_object.h>
 #include <vm/vm_pageout.h>
 #include <vm/vm_protos.h>
 
 #include <mach/mach_vm.h>
+
+#include <sys/errno.h> /* for the sysctl tests */
 
 extern ledger_template_t        task_ledger_template;
 
@@ -369,30 +371,24 @@ extern int copyinframe(vm_address_t fp, char *frame, boolean_t is64bit);
 static void
 vm_test_kernel_object_fault(void)
 {
-	kern_return_t kr;
 	vm_offset_t stack;
 	uintptr_t frameb[2];
 	int ret;
 
-	kr = kernel_memory_allocate(kernel_map, &stack,
-	    kernel_stack_size + (2 * PAGE_SIZE),
-	    0,
-	    (KMA_KSTACK | KMA_KOBJECT |
-	    KMA_GUARD_FIRST | KMA_GUARD_LAST),
+	kmem_alloc(kernel_map, &stack,
+	    kernel_stack_size + ptoa(2),
+	    KMA_NOFAIL | KMA_KSTACK | KMA_KOBJECT |
+	    KMA_GUARD_FIRST | KMA_GUARD_LAST,
 	    VM_KERN_MEMORY_STACK);
-	if (kr != KERN_SUCCESS) {
-		panic("VM_TEST_KERNEL_OBJECT_FAULT: kernel_memory_allocate kr 0x%x", kr);
-	}
+
 	ret = copyinframe((uintptr_t)stack, (char *)frameb, TRUE);
 	if (ret != 0) {
 		printf("VM_TEST_KERNEL_OBJECT_FAULT: PASS\n");
 	} else {
 		printf("VM_TEST_KERNEL_OBJECT_FAULT: FAIL\n");
 	}
-	vm_map_remove(kernel_map,
-	    stack,
-	    stack + kernel_stack_size + (2 * PAGE_SIZE),
-	    VM_MAP_REMOVE_KUNWIRE);
+
+	kmem_free(kernel_map, stack, kernel_stack_size + ptoa(2));
 	stack = 0;
 }
 #else /* __arm64__ && VM_TEST_KERNEL_OBJECT_FAULT */
@@ -779,11 +775,7 @@ vm_test_4k(void)
 
 #if 00
 	printf("VM_TEST_4K:%d vm_map_remove(%p, 0x%llx, 0x%llx)...\n", __LINE__, test_map, test_map->min_offset, test_map->max_offset);
-	kr = vm_map_remove(test_map,
-	    test_map->min_offset,
-	    test_map->max_offset,
-	    VM_MAP_REMOVE_GAPS_OK);
-	assertf(kr == KERN_SUCCESS, "kr = 0x%x", kr);
+	vm_map_remove(test_map, test_map->min_offset, test_map->max_offset);
 #endif
 
 	printf("VM_TEST_4K: PASS\n\n\n\n");
@@ -1207,3 +1199,48 @@ vm_tests(void)
 
 	return KERN_SUCCESS;
 }
+
+/*
+ * Checks that vm_map_delete() can deal with map unaligned entries.
+ * rdar://88969652
+ */
+static int
+vm_map_non_aligned_test(__unused int64_t in, int64_t *out)
+{
+	vm_map_t map = current_map();
+	mach_vm_size_t size = 2 * VM_MAP_PAGE_SIZE(map);
+	mach_vm_address_t addr;
+	vm_map_entry_t entry;
+	kern_return_t kr;
+
+	if (VM_MAP_PAGE_SHIFT(map) > PAGE_SHIFT) {
+		kr = mach_vm_allocate(map, &addr, size, VM_FLAGS_ANYWHERE);
+		if (kr != KERN_SUCCESS) {
+			return ENOMEM;
+		}
+
+		vm_map_lock(map);
+		if (!vm_map_lookup_entry(map, (vm_address_t)addr, &entry)) {
+			panic("couldn't find the entry we just made: "
+			    "map:%p addr:0x%0llx", map, addr);
+		}
+
+		/*
+		 * Now break the entry into:
+		 *  2 * 4k
+		 *  2 * 4k
+		 *  1 * 16k
+		 */
+		vm_map_clip_end(map, entry, (vm_address_t)addr + VM_MAP_PAGE_SIZE(map));
+		entry->map_aligned = FALSE;
+		vm_map_clip_end(map, entry, (vm_address_t)addr + PAGE_SIZE * 2);
+		vm_map_unlock(map);
+
+		kr = mach_vm_deallocate(map, addr, size);
+		assert(kr == KERN_SUCCESS);
+	}
+
+	*out = 1;
+	return 0;
+}
+SYSCTL_TEST_REGISTER(vm_map_non_aligned, vm_map_non_aligned_test);

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2013-2022 Apple Inc. All rights reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  *
@@ -3510,8 +3510,10 @@ fill_ip6_sockaddr_4_6(union sockaddr_in_4_6 *sin46,
 		sin6->sin6_scope_id = ifscope;
 		if (in6_embedded_scope) {
 			in6_verify_ifscope(&sin6->sin6_addr, sin6->sin6_scope_id);
-			sin6->sin6_scope_id = ntohs(sin6->sin6_addr.s6_addr16[1]);
-			sin6->sin6_addr.s6_addr16[1] = 0;
+			if (sin6->sin6_addr.s6_addr16[1] != 0) {
+				sin6->sin6_scope_id = ntohs(sin6->sin6_addr.s6_addr16[1]);
+				sin6->sin6_addr.s6_addr16[1] = 0;
+			}
 		}
 	}
 }
@@ -4937,6 +4939,12 @@ cfil_sock_data_out(struct socket *so, struct sockaddr  *to,
 		    (uint64_t)VM_KERNEL_ADDRPERM(so));
 		OSIncrementAtomic(&cfil_stats.cfs_data_out_oob);
 	}
+	/*
+	 * Abort if socket is defunct.
+	 */
+	if (so->so_flags & SOF_DEFUNCT) {
+		return EPIPE;
+	}
 	if ((so->so_snd.sb_flags & SB_LOCK) == 0) {
 		panic("so %p SB_LOCK not set", so);
 	}
@@ -5288,6 +5296,13 @@ cfil_sock_close_wait(struct socket *so)
 		so->so_cfil->cfi_flags |= CFIF_CLOSE_WAIT;
 		error = msleep((caddr_t)so->so_cfil, mutex_held,
 		    PSOCK | PCATCH, "cfil_sock_close_wait", &ts);
+
+		// Woke up from sleep, validate if cfil_info is still valid
+		if (so->so_cfil == NULL) {
+			// cfil_info is not valid, do not continue
+			return;
+		}
+
 		so->so_cfil->cfi_flags &= ~CFIF_CLOSE_WAIT;
 
 		CFIL_LOG(LOG_NOTICE, "so %llx timed out %d",
@@ -5783,7 +5798,7 @@ check_port(struct sockaddr *addr, u_short port)
 	switch (addr->sa_family) {
 	case AF_INET:
 		sin = satosin(addr);
-		if (sin->sin_len != sizeof(*sin)) {
+		if (sin->sin_len < sizeof(*sin)) {
 			return FALSE;
 		}
 		if (port == ntohs(sin->sin_port)) {
@@ -5792,7 +5807,7 @@ check_port(struct sockaddr *addr, u_short port)
 		break;
 	case AF_INET6:
 		sin6 = satosin6(addr);
-		if (sin6->sin6_len != sizeof(*sin6)) {
+		if (sin6->sin6_len < sizeof(*sin6)) {
 			return FALSE;
 		}
 		if (port == ntohs(sin6->sin6_port)) {

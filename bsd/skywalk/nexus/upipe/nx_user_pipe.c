@@ -247,17 +247,13 @@ static ZONE_DEFINE(nx_upipe_zone, SKMEM_ZONE_PREFIX ".nx.upipe",
     sizeof(struct nx_upipe), ZC_ZFREE_CLEARMEM);
 
 #define SKMEM_TAG_PIPES "com.apple.skywalk.pipes"
-static kern_allocation_name_t skmem_tag_pipes;
+static SKMEM_TAG_DEFINE(skmem_tag_pipes, SKMEM_TAG_PIPES);
 
 static void
 nx_upipe_dom_init(struct nxdom *nxdom)
 {
 	SK_LOCK_ASSERT_HELD();
 	ASSERT(!(nxdom->nxdom_flags & NEXUSDOMF_INITIALIZED));
-
-	ASSERT(skmem_tag_pipes == NULL);
-	skmem_tag_pipes = kern_allocation_name_allocate(SKMEM_TAG_PIPES, 0);
-	ASSERT(skmem_tag_pipes != NULL);
 
 	(void) nxdom_prov_add(nxdom, &nx_upipe_prov_s);
 }
@@ -270,11 +266,6 @@ nx_upipe_dom_terminate(struct nxdom *nxdom)
 	STAILQ_FOREACH_SAFE(nxdom_prov, &nxdom->nxdom_prov_head,
 	    nxdom_prov_link, tnxdp) {
 		(void) nxdom_prov_del(nxdom_prov);
-	}
-
-	if (skmem_tag_pipes != NULL) {
-		kern_allocation_name_release(skmem_tag_pipes);
-		skmem_tag_pipes = NULL;
 	}
 }
 
@@ -715,7 +706,6 @@ static int
 nx_upipe_na_alloc(struct nexus_adapter *na, uint32_t npipes)
 {
 	struct nexus_upipe_adapter **npa;
-	size_t len, orig_len;
 
 	if (npipes <= na->na_max_pipes) {
 		/* we already have more entries that requested */
@@ -725,9 +715,8 @@ nx_upipe_na_alloc(struct nexus_adapter *na, uint32_t npipes)
 		return EINVAL;
 	}
 
-	orig_len = sizeof(struct nexus_upipe_adapter *) * na->na_max_pipes;
-	len = sizeof(struct nexus_upipe_adapter *) * npipes;
-	npa = sk_realloc(na->na_pipes, orig_len, len, Z_WAITOK, skmem_tag_pipes);
+	npa = sk_realloc_type_array(struct nexus_upipe_adapter *,
+	    na->na_max_pipes, npipes, na->na_pipes, Z_WAITOK, skmem_tag_pipes);
 	if (npa == NULL) {
 		return ENOMEM;
 	}
@@ -748,8 +737,8 @@ nx_upipe_na_dealloc(struct nexus_adapter *na)
 			    "(%u dangling pipes)!", na->na_name,
 			    na->na_next_pipe);
 		}
-		sk_free(na->na_pipes,
-		    sizeof(struct nexus_upipe_adapter *) * na->na_max_pipes);
+		sk_free_type_array(struct nexus_upipe_adapter *,
+		    na->na_max_pipes, na->na_pipes);
 		na->na_pipes = NULL;
 		na->na_max_pipes = 0;
 		na->na_next_pipe = 0;

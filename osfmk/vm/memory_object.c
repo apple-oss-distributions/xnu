@@ -852,7 +852,7 @@ RETRY_COW_OF_LOCK_REQUEST:
 			    (int *)0,
 			    &error,
 			    FALSE,
-			    FALSE, &fault_info);
+			    &fault_info);
 
 			switch (result) {
 			case VM_FAULT_SUCCESS:
@@ -1462,8 +1462,12 @@ memory_object_iopl_request(
 			return KERN_INVALID_ARGUMENT;
 		}
 
+		named_entry_lock(named_entry);
+
 		object = vm_named_entry_to_vm_object(named_entry);
+		assert(object != VM_OBJECT_NULL);
 		vm_object_reference(object);
+		named_entry_unlock(named_entry);
 	} else if (ip_kotype(port) == IKOT_MEM_OBJ_CONTROL) {
 		panic("unexpected IKOT_MEM_OBJ_CONTROL: %p", port);
 	} else {

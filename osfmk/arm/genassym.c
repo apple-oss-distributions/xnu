@@ -119,7 +119,7 @@ main(
 	DECLARE("AST_URGENT", AST_URGENT);
 	DECLARE("AST_PREEMPTION", AST_PREEMPTION);
 
-	DECLARE("TH_RECOVER", offsetof(struct thread, recover));
+	DECLARE("TH_RECOVER", offsetof(struct thread, machine.recover));
 	DECLARE("TH_CONTINUATION", offsetof(struct thread, continuation));
 	DECLARE("TH_KERNEL_STACK", offsetof(struct thread, kernel_stack));
 	DECLARE("TH_KSTACKPTR", offsetof(struct thread, machine.kstackptr));

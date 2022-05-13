@@ -44,13 +44,13 @@ _IOLogv
 _IOMalloc:_IOMalloc_external
 _IOMallocAligned:_IOMallocAligned_external
 _IOMallocContiguous
-_IOMallocData
+_IOMallocData: _IOMallocData_external
 _IOMallocTypeImpl
 _IOMallocTypeVarImpl
 _IOMallocPageable
 _IOMallocPageableZero
 _IOMallocZero:_IOMallocZero_external
-_IOMallocZeroData
+_IOMallocZeroData: _IOMallocZeroData_external
 _IOMappedRead16
 _IOMappedRead32
 _IOMappedRead64

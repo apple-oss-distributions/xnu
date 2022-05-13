@@ -119,24 +119,12 @@ Allows for subsystems to steal early memory.
 N/A.
 
 
-`STARTUP_SUB_VM_KERNEL`
------------------------
-
-### Description
-
-Denotes that the early kernel VM is initialized.
-
-### Rank usage
-
-N/A.
-
-
 `STARTUP_SUB_KMEM`
 ------------------
 
 ### Description
 
-Denotes that `kernel_memory_allocate` is now usable.
+Denotes that `kmem_alloc` is now usable.
 
 ### Rank usage
 

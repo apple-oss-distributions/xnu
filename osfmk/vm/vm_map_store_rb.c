@@ -31,8 +31,7 @@
 
 RB_GENERATE(rb_head, vm_map_store, entry, rb_node_compare);
 
-#define VME_FOR_STORE( store)   \
-	(vm_map_entry_t)(((unsigned long)store) - ((unsigned long)sizeof(struct vm_map_links)))
+#define VME_FOR_STORE(ptr) __container_of(ptr, struct vm_map_entry, store)
 
 void
 vm_map_store_init_rb( struct vm_map_header* hdr )
@@ -47,7 +46,7 @@ rb_node_compare(struct vm_map_store *node, struct vm_map_store *parent)
 	vm_map_entry_t vme_p;
 
 	vme_c = VME_FOR_STORE(node);
-	vme_p =  VME_FOR_STORE(parent);
+	vme_p = VME_FOR_STORE(parent);
 	if (vme_c->vme_start < vme_p->vme_start) {
 		return -1;
 	}
@@ -84,9 +83,6 @@ vm_map_store_lookup_entry_rb(vm_map_t map, vm_map_offset_t address, vm_map_entry
 
 	while (rb_entry != (struct vm_map_store*)NULL) {
 		cur =  VME_FOR_STORE(rb_entry);
-		if (cur == VM_MAP_ENTRY_NULL) {
-			panic("no entry");
-		}
 		if (address >= cur->vme_start) {
 			if (address < cur->vme_end) {
 				*vm_entry = cur;

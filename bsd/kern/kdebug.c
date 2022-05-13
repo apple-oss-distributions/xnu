@@ -136,8 +136,8 @@ static typefilter_t
 typefilter_create(void)
 {
 	typefilter_t tf;
-	if (KERN_SUCCESS == kmem_alloc(kernel_map, (vm_offset_t*)&tf, TYPEFILTER_ALLOC_SIZE, VM_KERN_MEMORY_DIAG)) {
-		memset(&tf[KDBG_TYPEFILTER_BITMAP_SIZE], 0, TYPEFILTER_ALLOC_SIZE - KDBG_TYPEFILTER_BITMAP_SIZE);
+	if (KERN_SUCCESS == kmem_alloc(kernel_map, (vm_offset_t*)&tf,
+	    TYPEFILTER_ALLOC_SIZE, KMA_DATA | KMA_ZERO, VM_KERN_MEMORY_DIAG)) {
 		return tf;
 	}
 	return NULL;
@@ -591,58 +591,57 @@ delete_buffers_trace(void)
 int
 kernel_debug_register_callback(kd_callback_t callback)
 {
-	kd_iop_t* iop;
-	if (kmem_alloc(kernel_map, (vm_offset_t *)&iop, sizeof(kd_iop_t), VM_KERN_MEMORY_DIAG) == KERN_SUCCESS) {
-		memset(iop, 0, sizeof(*iop));
-		memcpy(&iop->callback, &callback, sizeof(kd_callback_t));
+	kd_iop_t *iop;
 
-		/*
-		 * <rdar://problem/13351477> Some IOP clients are not providing a name.
-		 *
-		 * Remove when fixed.
-		 */
-		{
-			bool is_valid_name = false;
-			for (uint32_t length = 0; length < sizeof(callback.iop_name); ++length) {
-				/* This is roughly isprintable(c) */
-				if (callback.iop_name[length] > 0x20 && callback.iop_name[length] < 0x7F) {
-					continue;
-				}
-				if (callback.iop_name[length] == 0) {
-					if (length) {
-						is_valid_name = true;
-					}
-					break;
-				}
+	iop = zalloc_permanent_tag(sizeof(kd_iop_t), ZALIGN(kd_iop_t),
+	    VM_KERN_MEMORY_DIAG);
+
+	memcpy(&iop->callback, &callback, sizeof(kd_callback_t));
+
+	/*
+	 * <rdar://problem/13351477> Some IOP clients are not providing a name.
+	 *
+	 * Remove when fixed.
+	 */
+	{
+		bool is_valid_name = false;
+		for (uint32_t length = 0; length < sizeof(callback.iop_name); ++length) {
+			/* This is roughly isprintable(c) */
+			if (callback.iop_name[length] > 0x20 && callback.iop_name[length] < 0x7F) {
+				continue;
 			}
-
-			if (!is_valid_name) {
-				strlcpy(iop->callback.iop_name, "IOP-???", sizeof(iop->callback.iop_name));
+			if (callback.iop_name[length] == 0) {
+				if (length) {
+					is_valid_name = true;
+				}
+				break;
 			}
 		}
-		strlcpy(iop->full_name, iop->callback.iop_name, sizeof(iop->full_name));
 
-		do {
-			/*
-			 * We use two pieces of state, the old list head
-			 * pointer, and the value of old_list_head->cpu_id.
-			 * If we read kd_iops more than once, it can change
-			 * between reads.
-			 *
-			 * TLDR; Must not read kd_iops more than once per loop.
-			 */
-			iop->next = kd_iops;
-			iop->cpu_id = iop->next ? (iop->next->cpu_id + 1) : kdbg_cpu_count(false);
-
-			/*
-			 * Header says OSCompareAndSwapPtr has a memory barrier
-			 */
-		} while (!OSCompareAndSwapPtr(iop->next, iop, (void* volatile*)&kd_iops));
-
-		return iop->cpu_id;
+		if (!is_valid_name) {
+			strlcpy(iop->callback.iop_name, "IOP-???", sizeof(iop->callback.iop_name));
+		}
 	}
+	strlcpy(iop->full_name, iop->callback.iop_name, sizeof(iop->full_name));
 
-	return 0;
+	do {
+		/*
+		 * We use two pieces of state, the old list head
+		 * pointer, and the value of old_list_head->cpu_id.
+		 * If we read kd_iops more than once, it can change
+		 * between reads.
+		 *
+		 * TLDR; Must not read kd_iops more than once per loop.
+		 */
+		iop->next = kd_iops;
+		iop->cpu_id = iop->next ? (iop->next->cpu_id + 1) : kdbg_cpu_count(false);
+
+		/*
+		 * Header says OSCompareAndSwapPtr has a memory barrier
+		 */
+	} while (!OSCompareAndSwapPtr(iop->next, iop, (void* volatile*)&kd_iops));
+
+	return iop->cpu_id;
 }
 
 int
@@ -656,12 +655,9 @@ kdebug_register_coproc(const char *name, kdebug_coproc_flags_t flags,
 		panic("kdebug: no callback for coprocessor");
 	}
 	kd_iop_t *iop = NULL;
-	if (kmem_alloc(kernel_map, (vm_offset_t *)&iop, sizeof(*iop),
-	    VM_KERN_MEMORY_DIAG) != KERN_SUCCESS) {
-		return -1;
-	}
-	memset(iop, 0, sizeof(*iop));
 
+	iop = zalloc_permanent_tag(sizeof(kd_iop_t), ZALIGN(kd_iop_t),
+	    VM_KERN_MEMORY_DIAG);
 	iop->callback.func = callback;
 	iop->callback.context = context;
 	iop->flags = flags;
@@ -1642,7 +1638,7 @@ _copy_cpu_map(int map_version, kd_iop_t *iops, unsigned int cpu_count,
 
 	if (*dst == NULL) {
 		kern_return_t alloc_ret = kmem_alloc(kernel_map, (vm_offset_t *)dst,
-		    (vm_size_t)size_needed, VM_KERN_MEMORY_DIAG);
+		    (vm_size_t)size_needed, KMA_DATA | KMA_ZERO, VM_KERN_MEMORY_DIAG);
 		if (alloc_ret != KERN_SUCCESS) {
 			return ENOMEM;
 		}

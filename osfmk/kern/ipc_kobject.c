@@ -530,8 +530,7 @@ skip_kobjcall:
 		 *	Destroy everything in reply except the reply port right,
 		 *	which is needed in the new reply message.
 		 */
-		reply->ikm_header->msgh_remote_port = MACH_PORT_NULL;
-		ipc_kmsg_destroy(reply);
+		ipc_kmsg_destroy(reply, IPC_KMSG_DESTROY_SKIP_REMOTE | IPC_KMSG_DESTROY_NOT_SIGNED);
 		reply = new_reply;
 	} else if (ipc_kobject_reply_status(reply) == MIG_NO_REPLY) {
 		/*
@@ -601,19 +600,14 @@ ipc_kobject_server(
 	 *	(which would bring us here again, creating a loop).
 	 *	It also differs in that we only expect send or
 	 *	send-once rights, never receive rights.
-	 *
-	 *	We set msgh_remote_port to IP_NULL so that the kmsg
-	 *	destroy routines don't try to destroy the port twice.
 	 */
 	switch (MACH_MSGH_BITS_REMOTE(request->ikm_header->msgh_bits)) {
 	case MACH_MSG_TYPE_PORT_SEND:
 		ipc_port_release_send(request->ikm_header->msgh_remote_port);
-		request->ikm_header->msgh_remote_port = IP_NULL;
 		break;
 
 	case MACH_MSG_TYPE_PORT_SEND_ONCE:
 		ipc_port_release_sonce(request->ikm_header->msgh_remote_port);
-		request->ikm_header->msgh_remote_port = IP_NULL;
 		break;
 
 	default:
@@ -645,11 +639,10 @@ ipc_kobject_server(
 	} else {
 		/*
 		 *	The message contents of the request are intact.
-		 *	Destroy everthing except the reply port right,
-		 *	which is needed in the reply message.
+		 *  Remote port has been released above. Do not destroy
+		 *  the reply port right either, which is needed in the reply message.
 		 */
-		request->ikm_header->msgh_local_port = MACH_PORT_NULL;
-		ipc_kmsg_destroy(request);
+		ipc_kmsg_destroy(request, IPC_KMSG_DESTROY_SKIP_LOCAL | IPC_KMSG_DESTROY_SKIP_REMOTE);
 	}
 
 	if (reply != IKM_NULL) {
@@ -660,8 +653,7 @@ ipc_kobject_server(
 			 *	Can't queue the reply message if the destination
 			 *	(the reply port) isn't valid.
 			 */
-
-			ipc_kmsg_destroy(reply);
+			ipc_kmsg_destroy(reply, IPC_KMSG_DESTROY_NOT_SIGNED);
 			reply = IKM_NULL;
 		} else if (ip_in_space_noauth(reply_port, ipc_space_kernel)) {
 			/* do not lock reply port, use raw pointer comparison */
@@ -673,7 +665,7 @@ ipc_kobject_server(
 			printf("%s: refusing to send reply to kobject %d port (id:%d)\n",
 			    __func__, ip_kotype(reply_port), request_msgh_id);
 #endif  /* DEVELOPMENT || DEBUG */
-			ipc_kmsg_destroy(reply);
+			ipc_kmsg_destroy(reply, IPC_KMSG_DESTROY_NOT_SIGNED);
 			reply = IKM_NULL;
 		}
 	}

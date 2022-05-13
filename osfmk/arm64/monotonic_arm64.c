@@ -874,13 +874,15 @@ uncore_add(struct monotonic_config *config, uint32_t *ctr_out)
 			int intrs_en = uncmon_lock(mon);
 			for (unsigned int ctr = 0; ctr < UNCORE_NCTRS; ctr++) {
 				if (remote) {
-	#if UNCORE_PER_CLUSTER
+#if UNCORE_PER_CLUSTER
 					uncmon_write_counter_locked_r(monid, ctr, 0);
 	#endif /* UNCORE_PER_CLUSTER */
 				} else {
 					uncmon_write_counter_locked_l(monid, ctr, 0);
 				}
 			}
+			memset(&mon->um_snaps, 0, sizeof(mon->um_snaps));
+			memset(&mon->um_counts, 0, sizeof(mon->um_counts));
 			uncmon_unlock(mon, intrs_en);
 		}
 	}
@@ -1121,6 +1123,8 @@ uncore_save(void)
 		for (unsigned int ctr = 0; ctr < UNCORE_NCTRS; ctr++) {
 			if (uncore_active_ctrs & (1U << ctr)) {
 				uncmon_update_locked(monid, curmonid, ctr);
+				mon->um_snaps[ctr] = 0;
+				uncmon_write_counter_locked_l(monid, ctr, 0);
 			}
 		}
 

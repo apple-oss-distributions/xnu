@@ -159,11 +159,12 @@ kpc_task_set_forced_all_ctrs(task_t task, boolean_t state)
 	task_unlock(task);
 }
 
-static boolean_t
+bool kpc_task_get_forced_all_ctrs(task_t task);
+
+bool
 kpc_task_get_forced_all_ctrs(task_t task)
 {
-	assert(task);
-	return task->t_kpc & TASK_KPC_FORCED_ALL_CTRS ? TRUE : FALSE;
+	return task->t_kpc & TASK_KPC_FORCED_ALL_CTRS;
 }
 
 int

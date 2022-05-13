@@ -213,12 +213,12 @@ OSSerialize::initWithCapacity(unsigned int inCapacity)
 	// allocate from the kernel map so that we can safely map this data
 	// into user space (the primary use of the OSSerialize object)
 
-	kern_return_t rc = kmem_alloc(kernel_map, (vm_offset_t *)&data, capacity, IOMemoryTag(kernel_map));
+	kern_return_t rc = kmem_alloc(kernel_map, (vm_offset_t *)&data,
+	    capacity, (kma_flags_t)(KMA_DATA | KMA_ZERO),
+	    IOMemoryTag(kernel_map));
 	if (rc) {
 		return false;
 	}
-	bzero((void *)data, capacity);
-
 
 	OSCONTAINER_ACCUMSIZE(capacity);
 

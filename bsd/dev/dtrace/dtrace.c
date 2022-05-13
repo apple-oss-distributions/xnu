@@ -91,11 +91,11 @@
 #include <mach/exception_types.h>
 #include <sys/signalvar.h>
 #include <mach/task.h>
-#include <kern/zalloc.h>
 #include <kern/ast.h>
+#include <kern/hvg_hypercall.h>
 #include <kern/sched_prim.h>
 #include <kern/task.h>
-#include <kern/hvg_hypercall.h>
+#include <kern/zalloc.h>
 #include <netinet/in.h>
 #include <libkern/sysctl.h>
 #include <sys/kdebug.h>
@@ -547,12 +547,12 @@ do {									\
 	((mstate)->dtms_scratch_base + (mstate)->dtms_scratch_size - \
 	(mstate)->dtms_scratch_ptr >= (alloc_sz))
 
-#define RECOVER_LABEL(bits) dtraceLoadRecover##bits:
-
 #if defined (__x86_64__) || (defined (__arm__) || defined (__arm64__))
 #define	DTRACE_LOADFUNC(bits)						\
 /*CSTYLED*/								\
 uint##bits##_t dtrace_load##bits(uintptr_t addr);			\
+									\
+extern int dtrace_nofault_copy##bits(uintptr_t, uint##bits##_t *);	\
 									\
 uint##bits##_t								\
 dtrace_load##bits(uintptr_t addr)					\
@@ -582,24 +582,19 @@ dtrace_load##bits(uintptr_t addr)					\
 	}								\
 									\
 	{								\
-	volatile vm_offset_t recover = (vm_offset_t)&&dtraceLoadRecover##bits;		\
 	*flags |= CPU_DTRACE_NOFAULT;					\
-	recover = dtrace_sign_and_set_thread_recover(current_thread(), recover);	\
 	/*CSTYLED*/							\
 	/*                                                              \
 	* PR6394061 - avoid device memory that is unpredictably		\
 	* mapped and unmapped                                   	\
 	*/								\
-        if (pmap_valid_page(pmap_find_phys(kernel_pmap, addr)))		\
-	    rval = *((volatile uint##bits##_t *)addr);			\
-	else {								\
+	if (!pmap_valid_page(pmap_find_phys(kernel_pmap, addr)) ||	\
+	    dtrace_nofault_copy##bits(addr, &rval)) {			\
 		*flags |= CPU_DTRACE_BADADDR;				\
 		cpu_core[CPU->cpu_id].cpuc_dtrace_illval = addr;	\
 		return (0);						\
 	}								\
 									\
-	RECOVER_LABEL(bits);						\
-	(void)dtrace_set_thread_recover(current_thread(), recover);	\
 	*flags &= ~CPU_DTRACE_NOFAULT;					\
 	}								\
 									\

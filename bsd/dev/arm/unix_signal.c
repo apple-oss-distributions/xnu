@@ -33,7 +33,7 @@ extern user_addr_t thread_get_cthread_self(void);
 extern kern_return_t thread_getstatus(thread_t act, int flavor,
     thread_state_t tstate, mach_msg_type_number_t *count);
 extern kern_return_t thread_getstatus_to_user(thread_t act, int flavor,
-    thread_state_t tstate, mach_msg_type_number_t *count);
+    thread_state_t tstate, mach_msg_type_number_t *count, thread_set_status_flags_t);
 extern kern_return_t machine_thread_state_convert_to_user(thread_t act, int flavor,
     thread_state_t tstate, mach_msg_type_number_t *count, thread_set_status_flags_t);
 extern kern_return_t thread_setstatus(thread_t thread, int flavor,
@@ -42,6 +42,8 @@ extern kern_return_t thread_setstatus_from_user(thread_t thread, int flavor,
     thread_state_t tstate, mach_msg_type_number_t count,
     thread_state_t old_tstate, mach_msg_type_number_t old_count,
     thread_set_status_flags_t flags);
+extern task_t current_task(void);
+extern bool task_needs_user_signed_thread_state(task_t);
 /* XXX Put these someplace smarter... */
 typedef struct mcontext32 mcontext32_t;
 typedef struct mcontext64 mcontext64_t;
@@ -93,12 +95,14 @@ sendsig_get_state32(thread_t th_act, arm_thread_state_t *ts, mcontext32_t *mcp)
 
 	tstate = (void *) &mcp->fs;
 	state_count = ARM_VFP_STATE_COUNT;
-	if (thread_getstatus_to_user(th_act, ARM_VFP_STATE, (thread_state_t) tstate, &state_count) != KERN_SUCCESS) {
+	if (thread_getstatus_to_user(th_act, ARM_VFP_STATE, (thread_state_t) tstate, &state_count, TSSF_FLAGS_NONE) != KERN_SUCCESS) {
 		return EINVAL;
 	}
 
 	return 0;
 }
+
+static TUNABLE(bool, pac_sigreturn_token, "-pac_sigreturn_token", false);
 
 #if defined(__arm64__)
 struct user_sigframe64 {
@@ -125,8 +129,12 @@ sendsig_get_state64(thread_t th_act, arm_thread_state64_t *ts, mcontext64_t *mcp
 	mcp->ss = *ts;
 	tstate = (void *) &mcp->ss;
 	state_count = ARM_THREAD_STATE64_COUNT;
+	thread_set_status_flags_t flags = TSSF_STASH_SIGRETURN_TOKEN;
+	if (pac_sigreturn_token || task_needs_user_signed_thread_state(current_task())) {
+		flags |= TSSF_THREAD_USER_DIV;
+	}
 	if (machine_thread_state_convert_to_user(th_act, ARM_THREAD_STATE64, (thread_state_t) tstate,
-	    &state_count, TSSF_STASH_SIGRETURN_TOKEN) != KERN_SUCCESS) {
+	    &state_count, flags) != KERN_SUCCESS) {
 		return EINVAL;
 	}
 
@@ -138,7 +146,7 @@ sendsig_get_state64(thread_t th_act, arm_thread_state64_t *ts, mcontext64_t *mcp
 
 	tstate = (void *) &mcp->ns;
 	state_count = ARM_NEON_STATE64_COUNT;
-	if (thread_getstatus_to_user(th_act, ARM_NEON_STATE64, (thread_state_t) tstate, &state_count) != KERN_SUCCESS) {
+	if (thread_getstatus_to_user(th_act, ARM_NEON_STATE64, (thread_state_t) tstate, &state_count, TSSF_FLAGS_NONE) != KERN_SUCCESS) {
 		return EINVAL;
 	}
 
@@ -323,6 +331,12 @@ sendsig(
 	if (ut->uu_pending_sigreturn == 0) {
 		/* Generate random token value used to validate sigreturn arguments */
 		read_random(&ut->uu_sigreturn_token, sizeof(ut->uu_sigreturn_token));
+
+		do {
+			read_random(&ut->uu_sigreturn_diversifier, sizeof(ut->uu_sigreturn_diversifier));
+			ut->uu_sigreturn_diversifier &=
+			    __DARWIN_ARM_THREAD_STATE64_USER_DIVERSIFIER_MASK;
+		} while (ut->uu_sigreturn_diversifier == 0);
 	}
 	ut->uu_pending_sigreturn++;
 
@@ -771,8 +785,6 @@ sigreturn_set_state64(thread_t th_act, mcontext64_t *mctx, thread_set_status_fla
 }
 #endif /* defined(__arm64__) */
 
-static TUNABLE(bool, pac_sigreturn_token, "-pac_sigreturn_token", false);
-
 /* ARGSUSED */
 int
 sigreturn(
@@ -877,8 +889,8 @@ sigreturn(
 		if (sigreturn_validation != PS_SIGRETURN_VALIDATION_DISABLED) {
 			tssf_flags |= TSSF_CHECK_SIGRETURN_TOKEN;
 
-			if (pac_sigreturn_token) {
-				tssf_flags |= TSSF_ALLOW_ONLY_MATCHING_TOKEN;
+			if (pac_sigreturn_token || task_needs_user_signed_thread_state(current_task())) {
+				tssf_flags |= TSSF_ALLOW_ONLY_MATCHING_TOKEN | TSSF_THREAD_USER_DIV;
 			}
 		}
 		error = sigreturn_set_state64(th_act, &mctx.mc64, tssf_flags);

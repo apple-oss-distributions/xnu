@@ -1199,11 +1199,7 @@ kauth_acl_alloc(int count)
 void
 kauth_acl_free(kauth_acl_t aclp)
 {
-	/*
-	 * It's possible this may have have been allocated in a kext using
-	 * MALLOC. Using KHEAP_ANY will allow us to free it here.
-	 */
-	kheap_free_addr(KHEAP_ANY, aclp);
+	kheap_free_addr(KM_KAUTH, aclp);
 }
 
 

@@ -655,7 +655,8 @@ IOHibernateSystemSleep(void)
 
 		if (kIOHibernateOptionProgress & gIOHibernateCurrentHeader->options) {
 			vars->videoAllocSize = kVideoMapSize;
-			if (KERN_SUCCESS != kmem_alloc_pageable(kernel_map, &vars->videoMapping, vars->videoAllocSize, VM_KERN_MEMORY_IOKIT)) {
+			if (KERN_SUCCESS != kmem_alloc(kernel_map, &vars->videoMapping, vars->videoAllocSize,
+			    (kma_flags_t)(KMA_PAGEABLE | KMA_DATA), VM_KERN_MEMORY_IOKIT)) {
 				vars->videoMapping = 0;
 			}
 		}

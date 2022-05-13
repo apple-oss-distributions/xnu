@@ -196,12 +196,12 @@ telemetry_init(void)
 		telemetry_buffer.size = TELEMETRY_MAX_BUFFER_SIZE;
 	}
 
-	ret = kmem_alloc(kernel_map, &telemetry_buffer.buffer, telemetry_buffer.size, VM_KERN_MEMORY_DIAG);
+	ret = kmem_alloc(kernel_map, &telemetry_buffer.buffer, telemetry_buffer.size,
+	    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_DIAG);
 	if (ret != KERN_SUCCESS) {
 		kprintf("Telemetry: Allocation failed: %d\n", ret);
 		return;
 	}
-	bzero((void *) telemetry_buffer.buffer, telemetry_buffer.size);
 
 	if (!PE_parse_boot_argn("telemetry_notification_leeway",
 	    &telemetry_notification_leeway, sizeof(telemetry_notification_leeway))) {
@@ -1275,18 +1275,14 @@ telemetry_macf_init_locked(size_t buffer_size)
 
 	telemetry_macf_buffer.size = buffer_size;
 
-	kr = kmem_alloc(
-		kernel_map,
-		&telemetry_macf_buffer.buffer,
-		telemetry_macf_buffer.size,
-		VM_KERN_MEMORY_SECURITY);
+	kr = kmem_alloc(kernel_map, &telemetry_macf_buffer.buffer,
+	    telemetry_macf_buffer.size, KMA_DATA | KMA_ZERO | KMA_PERMANENT,
+	    VM_KERN_MEMORY_SECURITY);
 
 	if (kr != KERN_SUCCESS) {
 		kprintf("Telemetry (MACF): Allocation failed: %d\n", kr);
 		return ENOMEM;
 	}
-
-	bzero((void *)telemetry_macf_buffer.buffer, telemetry_macf_buffer.size);
 
 	return 0;
 }
@@ -1429,12 +1425,12 @@ bootprofile_init(void)
 		return;
 	}
 
-	ret = kmem_alloc(kernel_map, &bootprofile_buffer, bootprofile_buffer_size, VM_KERN_MEMORY_DIAG);
+	ret = kmem_alloc(kernel_map, &bootprofile_buffer, bootprofile_buffer_size,
+	    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_DIAG);
 	if (ret != KERN_SUCCESS) {
 		kprintf("Boot profile: Allocation failed: %d\n", ret);
 		return;
 	}
-	bzero((void *) bootprofile_buffer, bootprofile_buffer_size);
 
 	kprintf("Boot profile: Sampling %s once per %u ms at %s\n",
 	    bootprofile_all_procs ? "all procs" : bootprofile_proc_name, bootprofile_interval_ms,

@@ -10,7 +10,6 @@ from misc import *
 from memory import *
 from ipc import *
 
-# TODO: write scheduler related macros here
 
 # Macro: showallprocrunqcount
 
@@ -149,24 +148,12 @@ def showinterruptsourceinfo(cmd_args = None):
 # EndMacro: showinterruptsourceinfo
 
 @lldb_command('showcurrentabstime')
-def ShowCurremtAbsTime(cmd_args=None):
+def ShowCurrentAbsTime(cmd_args=None):
     """  Routine to print latest absolute time known to system before being stopped.
          Usage: showcurrentabstime
     """
-    pset = addressof(kern.globals.pset0)
-    processor_array = kern.globals.processor_array
-    cur_abstime = 0
 
-    while unsigned(pset) != 0:
-        cpu_bitmap = int(pset.cpu_bitmask)
-        for cpuid in IterateBitmap(cpu_bitmap):
-            processor = processor_array[cpuid]
-            if unsigned(processor.last_dispatch) > cur_abstime:
-                cur_abstime = unsigned(processor.last_dispatch)
-
-        pset = pset.pset_list
-
-    print("Last dispatch time known: %d MATUs" % cur_abstime)
+    print("Last dispatch time known: %d MATUs" % GetRecentTimestamp())
 
 bucketStr = ["FIXPRI (>UI)", "TIMESHARE_FG", "TIMESHARE_IN", "TIMESHARE_DF", "TIMESHARE_UT", "TIMESHARE_BG"]
 
@@ -366,17 +353,18 @@ def GetSchedMostRecentDispatch(show_processor_details=False):
     """ Return the most recent dispatch on the system, printing processor
         details if argument is true.
     """
-    processor_list = kern.globals.processor_list
 
     most_recent_dispatch = 0
-    current_processor = processor_list
 
-    while unsigned(current_processor) > 0:
+    for current_processor in IterateLinkedList(kern.globals.processor_list, 'processor_list') :
         active_thread = current_processor.active_thread
+        thread_id = 0
+
         if unsigned(active_thread) != 0 :
             task_val = active_thread.t_tro.tro_task
             proc_val = active_thread.t_tro.tro_proc
             proc_name = "<unknown>" if unsigned(proc_val) == 0 else GetProcName(proc_val)
+            thread_id = active_thread.thread_id
 
         last_dispatch = unsigned(current_processor.last_dispatch)
 
@@ -390,16 +378,14 @@ def GetSchedMostRecentDispatch(show_processor_details=False):
             time_since_debugger_us = kern.GetNanotimeFromAbstime(time_since_debugger) / 1000.0
 
             if show_processor_details:
-                print("Processor last dispatch: {:16d} Entered debugger: {:16d} ({:8.3f} us after dispatch, {:8.3f} us after debugger) Active thread: 0x{t:<16x} 0x{t.thread_id:<8x} {proc_name:s}".format(last_dispatch, cpu_debugger_time,
-                        time_since_dispatch_us, time_since_debugger_us, t=active_thread, proc_name=proc_name))
+                print("Processor last dispatch: {:16d} Entered debugger: {:16d} ({:8.3f} us after dispatch, {:8.3f} us after debugger) Active thread: 0x{t:<16x} 0x{thread_id:<8x} {proc_name:s}".format(last_dispatch, cpu_debugger_time,
+                        time_since_dispatch_us, time_since_debugger_us, t=active_thread, thread_id=thread_id, proc_name=proc_name))
         else:
             if show_processor_details:
-                print("Processor last dispatch: {:16d} Active thread: 0x{t:<16x} 0x{t.thread_id:<8x} {proc_name:s}".format(last_dispatch, t=active_thread, proc_name=proc_name))
+                print("Processor last dispatch: {:16d} Active thread: 0x{t:<16x} 0x{thread_id:<8x} {proc_name:s}".format(last_dispatch, t=active_thread, thread_id=thread_id, proc_name=proc_name))
 
         if last_dispatch > most_recent_dispatch:
             most_recent_dispatch = last_dispatch
-
-        current_processor = current_processor.processor_list
 
     return most_recent_dispatch
 
@@ -1042,7 +1028,7 @@ def IterateBitmap(bitmap):
 
 from kevent import GetKnoteKqueue
 
-def ShowThreadCall(prefix, call, recent_timestamp, is_pending=False):
+def ShowThreadCall(prefix, call, recent_timestamp, pqueue, is_pending=False):
     """
     Print a description of a thread_call_t and its relationship to its expected fire time
     """
@@ -1140,10 +1126,25 @@ def ShowThreadCall(prefix, call, recent_timestamp, is_pending=False):
 
     if (call.tc_flags & GetEnumValue('thread_call_flags_t::THREAD_CALL_FLAG_CONTINUOUS')) :
         timer_fire = call.tc_pqlink.deadline - (recent_timestamp + kern.globals.mach_absolutetime_asleep)
+        soft_timer_fire = call.tc_soft_deadline - (recent_timestamp + kern.globals.mach_absolutetime_asleep)
     else :
         timer_fire = call.tc_pqlink.deadline - recent_timestamp
+        soft_timer_fire = call.tc_soft_deadline - recent_timestamp
 
     timer_fire_s = kern.GetNanotimeFromAbstime(timer_fire) / 1000000000.0
+    soft_timer_fire_s = kern.GetNanotimeFromAbstime(soft_timer_fire) / 1000000000.0
+
+    hardtogo = ""
+    softtogo = ""
+
+    if call.tc_pqlink.deadline != 0 :
+        hardtogo = "{:18.06f}".format(timer_fire_s);
+
+    if call.tc_soft_deadline != 0 :
+        softtogo = "{:18.06f}".format(soft_timer_fire_s);
+
+    leeway = call.tc_pqlink.deadline - call.tc_soft_deadline
+    leeway_s = kern.GetNanotimeFromAbstime(leeway) / 1000000000.0
 
     ttd_s = kern.GetNanotimeFromAbstime(call.tc_ttd) / 1000000000.0
 
@@ -1165,29 +1166,35 @@ def ShowThreadCall(prefix, call, recent_timestamp, is_pending=False):
     if is_iotes :
         flags_str += 'I'
 
+    colon = ":"
+
+    if pqueue is not None :
+        if addressof(call.tc_pqlink) == pqueue.pq_root :
+            colon = "*"
+
     if (is_pending) :
-        print(("{:s}{:#018x}: {:18d} {:18d} {:16.06f} {:16.06f} {:16.06f} {:9s} " +
+        print(("{:s}{:#018x}{:s} {:18d} {:18d} {:18s} {:18s} {:18.06f} {:18.06f} {:18.06f} {:9s} " +
                 "{:#018x} ({:#018x}, {:#018x}) ({:s}) {:s}").format(prefix,
-                unsigned(call), call.tc_pqlink.deadline, call.tc_soft_deadline, ttd_s,
-                timer_fire_s, pending_time, flags_str,
+                unsigned(call), colon, call.tc_soft_deadline, call.tc_pqlink.deadline,
+                softtogo, hardtogo, pending_time, ttd_s, leeway_s, flags_str,
                 func, param0, param1, func_name, extra_string))
     else :
-        print(("{:s}{:#018x}: {:18d} {:18d} {:16.06f} {:16.06f} {:9s} " +
+        print(("{:s}{:#018x}{:s} {:18d} {:18d} {:18s} {:18s} {:18.06f} {:18.06f} {:9s} " +
                 "{:#018x} ({:#018x}, {:#018x}) ({:s}) {:s}").format(prefix,
-                unsigned(call), call.tc_pqlink.deadline, call.tc_soft_deadline, ttd_s,
-                timer_fire_s, flags_str,
+                unsigned(call), colon, call.tc_soft_deadline, call.tc_pqlink.deadline,
+                softtogo, hardtogo, ttd_s, leeway_s, flags_str,
                 func, param0, param1, func_name, extra_string))
 
 ShowThreadCall.enable_debug = False
 
-@header("{:>18s}  {:>18s} {:>18s} {:>16s} {:>16s} {:9s} {:>18s}".format(
-            "entry", "deadline", "soft_deadline",
-            "duration (s)", "to go (s)", "flags", "(*func) (param0, param1)"))
+@header("{:>18s}  {:>18s} {:>18s} {:>18s} {:>18s} {:>18s} {:>18s} {:9s} {:>18s}".format(
+            "entry", "soft_deadline", "deadline",
+            "soft to go (s)", "hard to go (s)", "duration (s)", "leeway (s)", "flags", "(*func) (param0, param1)"))
 def PrintThreadGroup(group):
     header = PrintThreadGroup.header
-    pending_header = "{:>18s}  {:>18s} {:>18s} {:>16s} {:>16s} {:>16s} {:9s} {:>18s}".format(
-            "entry", "deadline", "soft_deadline",
-            "duration (s)", "to go (s)", "pending", "flags", "(*func) (param0, param1)")
+    pending_header = "{:>18s}  {:>18s} {:>18s} {:>18s} {:>18s} {:>18s} {:>18s} {:9s} {:>18s}".format(
+            "entry", "soft_deadline", "deadline",
+            "soft to go (s)", "hard to go (s)", "pending", "duration (s)", "leeway (s)", "flags", "(*func) (param0, param1)")
 
     recent_timestamp = GetRecentTimestamp()
 
@@ -1201,8 +1208,8 @@ def PrintThreadGroup(group):
 
     print("Group: {g.tcg_name:s} ({:#18x}){:s}".format(unsigned(group), is_parallel, g=group))
     print("\t" +"Thread Priority: {g.tcg_thread_pri:d}\n".format(g=group))
-    print(("\t" +"Active: {g.active_count:<3d} Idle: {g.idle_count:<3d}" +
-        "Blocked: {g.blocked_count:<3d} Pending: {g.pending_count:<3d}" +
+    print(("\t" +"Active: {g.active_count:<3d} Idle: {g.idle_count:<3d} " +
+        "Blocked: {g.blocked_count:<3d} Pending: {g.pending_count:<3d} " +
         "Target: {g.target_thread_count:<3d}\n").format(g=group))
 
     if unsigned(group.idle_timestamp) != 0 :
@@ -1213,21 +1220,21 @@ def PrintThreadGroup(group):
     if not LinkageChainEmpty(group.pending_queue) :
         print("\t\t" + pending_header)
     for call in ParanoidIterateLinkageChain(group.pending_queue, "thread_call_t", "tc_qlink"):
-        ShowThreadCall("\t\t", call, recent_timestamp, is_pending=True)
+        ShowThreadCall("\t\t", call, recent_timestamp, None, is_pending=True)
 
     print("\t" +"Delayed Queue (Absolute Time): ({:>#18x}) timer: ({:>#18x})\n".format(
             addressof(group.delayed_queues[0]), addressof(group.delayed_timers[0])))
     if not LinkageChainEmpty(group.delayed_queues[0]) :
         print("\t\t" + header)
     for call in ParanoidIterateLinkageChain(group.delayed_queues[0], "thread_call_t", "tc_qlink"):
-        ShowThreadCall("\t\t", call, recent_timestamp)
+        ShowThreadCall("\t\t", call, recent_timestamp, group.delayed_pqueues[0])
 
     print("\t" +"Delayed Queue (Continuous Time): ({:>#18x}) timer: ({:>#18x})\n".format(
             addressof(group.delayed_queues[1]), addressof(group.delayed_timers[1])))
     if not LinkageChainEmpty(group.delayed_queues[1]) :
         print("\t\t" + header)
     for call in ParanoidIterateLinkageChain(group.delayed_queues[1], "thread_call_t", "tc_qlink"):
-        ShowThreadCall("\t\t", call, recent_timestamp)
+        ShowThreadCall("\t\t", call, recent_timestamp, group.delayed_pqueues[1])
 
 def PrintThreadCallThreads() :
     callout_flag = GetEnumValue('thread_tag_t::THREAD_TAG_CALLOUT')
@@ -1239,7 +1246,7 @@ def PrintThreadCallThreads() :
             state = thread.thc_state
             if state and state.thc_call :
                 print("\t" + PrintThreadGroup.header)
-                ShowThreadCall("\t", state.thc_call, recent_timestamp)
+                ShowThreadCall("\t", state.thc_call, recent_timestamp, None)
                 soft_deadline = state.thc_call_soft_deadline
                 slop_time = state.thc_call_hard_deadline - soft_deadline
                 slop_time = kern.GetNanotimeFromAbstime(slop_time) / 1000000000.0

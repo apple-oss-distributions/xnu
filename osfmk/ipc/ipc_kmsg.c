@@ -425,16 +425,13 @@ ikm_body_sig(
 }
 
 static void
-ikm_sign(
-	ipc_kmsg_t kmsg,
-	task_t     sender)
+ikm_sign(ipc_kmsg_t kmsg)
 {
 	ikm_sig_scratch_t scratch;
 	uintptr_t sig;
 
 	zone_require(ipc_kmsg_zone, kmsg);
 
-	ipc_kmsg_init_trailer(kmsg, kmsg->ikm_header->msgh_size, sender);
 	ikm_init_sig(kmsg, &scratch);
 
 	ikm_header_sig(kmsg, &scratch);
@@ -859,7 +856,7 @@ extern vm_map_t         ipc_kernel_copy_map;
 extern vm_size_t        ipc_kmsg_max_space;
 extern const vm_size_t  ipc_kmsg_max_vm_space;
 extern const vm_size_t  ipc_kmsg_max_body_space;
-extern vm_size_t        msg_ool_size_small;
+extern const vm_size_t  msg_ool_size_small;
 
 #define MSG_OOL_SIZE_SMALL      msg_ool_size_small
 
@@ -1097,7 +1094,7 @@ ipc_kmsg_trace_send(ipc_kmsg_t kmsg,
 				dsc = (mach_msg_ool_descriptor_t *)&kern_dsc[i];
 				msg_flags |= KMSG_TRACE_FLAG_OOLMEM;
 				msg_size += dsc->size;
-				if ((dsc->size >= MSG_OOL_SIZE_SMALL) &&
+				if (dsc->size > MSG_OOL_SIZE_SMALL &&
 				    (dsc->copy == MACH_MSG_PHYSICAL_COPY) &&
 				    !dsc->deallocate) {
 					msg_flags |= KMSG_TRACE_FLAG_PCPY;
@@ -1571,8 +1568,28 @@ ipc_kmsg_queue_next(
 
 void
 ipc_kmsg_destroy(
-	ipc_kmsg_t      kmsg)
+	ipc_kmsg_t                     kmsg,
+	ipc_kmsg_destroy_flags_t       flags)
 {
+	/* sign the msg if it has not been signed */
+	boolean_t sign_msg = (flags & IPC_KMSG_DESTROY_NOT_SIGNED);
+
+	if (flags & IPC_KMSG_DESTROY_SKIP_REMOTE) {
+		kmsg->ikm_header->msgh_remote_port = MACH_PORT_NULL;
+		/* re-sign the msg since content changed */
+		sign_msg = true;
+	}
+
+	if (flags & IPC_KMSG_DESTROY_SKIP_LOCAL) {
+		kmsg->ikm_header->msgh_local_port = MACH_PORT_NULL;
+		/* re-sign the msg since content changed */
+		sign_msg = true;
+	}
+
+	if (sign_msg) {
+		ikm_sign(kmsg);
+	}
+
 	/*
 	 *	Destroying a message can cause more messages to be destroyed.
 	 *	Curtail recursion by putting messages on the deferred
@@ -1651,7 +1668,7 @@ ipc_kmsg_delayed_destroy_queue(
  *		Destroys messages from the per-thread
  *		deferred reaping queue.
  *	Conditions:
- *		No locks held.
+ *		No locks held. kmsgs on queue must be signed.
  */
 
 void
@@ -1665,6 +1682,17 @@ ipc_kmsg_reap_delayed(void)
 	 * no nested calls recurse into here.
 	 */
 	while ((kmsg = ipc_kmsg_queue_first(queue)) != IKM_NULL) {
+		/*
+		 * Kmsgs queued for delayed destruction either come from
+		 * ipc_kmsg_destroy() or ipc_kmsg_delayed_destroy_queue(),
+		 * where we handover all kmsgs enqueued on port to destruction
+		 * queue in O(1). In either case, all kmsgs must have been
+		 * signed.
+		 *
+		 * For each unreceived msg, validate its signature before freeing.
+		 */
+		ikm_validate_sig(kmsg);
+
 		ipc_kmsg_clean(kmsg);
 		ipc_kmsg_rmqueue(queue, kmsg);
 		ipc_kmsg_free(kmsg);
@@ -2140,7 +2168,7 @@ ipc_kmsg_send(
 
 	/* don't allow the creation of a circular loop */
 	if (kmsg->ikm_header->msgh_bits & MACH_MSGH_BITS_CIRCULAR) {
-		ipc_kmsg_destroy(kmsg);
+		ipc_kmsg_destroy(kmsg, IPC_KMSG_DESTROY_ALL);
 		KDBG(MACHDBG_CODE(DBG_MACH_IPC, MACH_IPC_KMSG_INFO) | DBG_FUNC_END, MACH_MSGH_BITS_CIRCULAR);
 		return MACH_MSG_SUCCESS;
 	}
@@ -2194,8 +2222,7 @@ retry:
 			ipc_importance_clean(kmsg);
 		}
 		ip_release(port);  /* JMM - Future: release right, not just ref */
-		kmsg->ikm_header->msgh_remote_port = MACH_PORT_NULL;
-		ipc_kmsg_destroy(kmsg);
+		ipc_kmsg_destroy(kmsg, IPC_KMSG_DESTROY_SKIP_REMOTE);
 		KDBG(MACHDBG_CODE(DBG_MACH_IPC, MACH_IPC_KMSG_INFO) | DBG_FUNC_END, MACH_SEND_INVALID_DEST);
 		return MACH_MSG_SUCCESS;
 	}
@@ -2216,7 +2243,8 @@ retry:
 		}
 
 		/* sign the reply message */
-		ikm_sign(kmsg, TASK_NULL);
+		ipc_kmsg_init_trailer(kmsg, kmsg->ikm_header->msgh_size, TASK_NULL);
+		ikm_sign(kmsg);
 
 		/* restart the KMSG_INFO tracing for the reply message */
 		KDBG(MACHDBG_CODE(DBG_MACH_IPC, MACH_IPC_KMSG_INFO) | DBG_FUNC_START);
@@ -2307,8 +2335,7 @@ retry:
 		}
 #endif
 		ip_release(port); /* JMM - Future: release right, not just ref */
-		kmsg->ikm_header->msgh_remote_port = MACH_PORT_NULL;
-		ipc_kmsg_destroy(kmsg);
+		ipc_kmsg_destroy(kmsg, IPC_KMSG_DESTROY_SKIP_REMOTE);
 		KDBG(MACHDBG_CODE(DBG_MACH_IPC, MACH_IPC_KMSG_INFO) | DBG_FUNC_END, MACH_SEND_INVALID_DEST);
 		return MACH_MSG_SUCCESS;
 	}
@@ -2325,8 +2352,7 @@ retry:
 		}
 #endif
 		ip_release(port); /* JMM - Future: release right, not just ref */
-		kmsg->ikm_header->msgh_remote_port = MACH_PORT_NULL;
-		ipc_kmsg_destroy(kmsg);
+		ipc_kmsg_destroy(kmsg, IPC_KMSG_DESTROY_SKIP_REMOTE);
 		KDBG(MACHDBG_CODE(DBG_MACH_IPC, MACH_IPC_KMSG_INFO) | DBG_FUNC_END, error);
 		return MACH_MSG_SUCCESS;
 	}
@@ -3343,7 +3369,7 @@ ipc_kmsg_copyin_ool_descriptor(
 
 	if (length == 0) {
 		dsc->address = NULL;
-	} else if ((length >= MSG_OOL_SIZE_SMALL) &&
+	} else if (length > MSG_OOL_SIZE_SMALL &&
 	    (copy_options == MACH_MSG_PHYSICAL_COPY) && !dealloc) {
 		/*
 		 * If the request is a physical copy and the source
@@ -3718,7 +3744,7 @@ ipc_kmsg_copyin_body(
 				goto clean_message;
 			}
 
-			if ((size >= MSG_OOL_SIZE_SMALL) &&
+			if (size > MSG_OOL_SIZE_SMALL &&
 			    (daddr->out_of_line.copy == MACH_MSG_PHYSICAL_COPY) &&
 			    !(daddr->out_of_line.deallocate)) {
 				/*
@@ -4022,7 +4048,8 @@ ipc_kmsg_copyin_from_user(
 
 	/* Sign the message contents */
 	if (mr == MACH_MSG_SUCCESS) {
-		ikm_sign(kmsg, current_task());
+		ipc_kmsg_init_trailer(kmsg, kmsg->ikm_header->msgh_size, current_task());
+		ikm_sign(kmsg);
 	}
 
 	return mr;
@@ -4245,8 +4272,9 @@ ipc_kmsg_copyin_from_kernel(
 		}
 	}
 
-	/* Add the signature to the message */
-	ikm_sign(kmsg, TASK_NULL);
+	/* Add trailer and signature to the message */
+	ipc_kmsg_init_trailer(kmsg, kmsg->ikm_header->msgh_size, TASK_NULL);
+	ikm_sign(kmsg);
 
 	return MACH_MSG_SUCCESS;
 }

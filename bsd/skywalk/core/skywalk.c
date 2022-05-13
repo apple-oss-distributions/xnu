@@ -229,19 +229,26 @@ static void skywalk_self_tests(void);
 #endif /* (DEVELOPMENT || DEBUG) */
 
 #define SKMEM_TAG_SYSCTL_BUF "com.apple.skywalk.sysctl_buf"
-kern_allocation_name_t skmem_tag_sysctl_buf;
+SKMEM_TAG_DEFINE(skmem_tag_sysctl_buf, SKMEM_TAG_SYSCTL_BUF);
 
 #define SKMEM_TAG_OID       "com.apple.skywalk.skoid"
-kern_allocation_name_t skmem_tag_oid;
+SKMEM_TAG_DEFINE(skmem_tag_oid, SKMEM_TAG_OID);
 
 #if (SK_LOG || DEVELOPMENT || DEBUG)
 #define SKMEM_TAG_DUMP  "com.apple.skywalk.dump"
-static kern_allocation_name_t skmem_tag_dump;
+static SKMEM_TAG_DEFINE(skmem_tag_dump, SKMEM_TAG_DUMP);
 
 static char *sk_dump_buf;
 #define SK_DUMP_BUF_SIZE        2048
 #define SK_DUMP_BUF_ALIGN       16
 #endif /* (SK_LOG || DEVELOPMENT || DEBUG) */
+
+__startup_func
+void
+__sk_tag_make(const struct sk_tag_spec *spec)
+{
+	*spec->skt_var = kern_allocation_name_allocate(spec->skt_name, 0);
+}
 
 boolean_t
 skywalk_netif_direct_enabled(void)
@@ -308,25 +315,11 @@ skywalk_fini(void)
 		skmem_fini();
 
 #if (SK_LOG || DEVELOPMENT || DEBUG)
-		if (skmem_tag_dump != NULL) {
-			kern_allocation_name_release(skmem_tag_dump);
-			skmem_tag_dump = NULL;
-		}
 		if (sk_dump_buf != NULL) {
 			sk_free_data(sk_dump_buf, SK_DUMP_BUF_SIZE);
 			sk_dump_buf = NULL;
 		}
 #endif /* (SK_LOG || DEVELOPMENT || DEBUG) */
-
-		if (skmem_tag_sysctl_buf != NULL) {
-			kern_allocation_name_release(skmem_tag_sysctl_buf);
-			skmem_tag_sysctl_buf = NULL;
-		}
-
-		if (skmem_tag_oid != NULL) {
-			kern_allocation_name_release(skmem_tag_oid);
-			skmem_tag_oid = NULL;
-		}
 
 		__sk_inited = 0;
 	}
@@ -476,7 +469,6 @@ skywalk_init(void)
 	__sk_inited = 1;
 
 	SK_LOCK();
-	cuckoo_hashtable_init();
 	skmem_init();
 	error = nexus_init();
 	if (error == 0) {
@@ -488,21 +480,7 @@ skywalk_init(void)
 	SK_UNLOCK();
 
 	if (error == 0) {
-		ASSERT(skmem_tag_oid == NULL);
-		skmem_tag_oid = kern_allocation_name_allocate(SKMEM_TAG_OID, 0);
-		ASSERT(skmem_tag_oid != NULL);
-
-		ASSERT(skmem_tag_sysctl_buf == NULL);
-		skmem_tag_sysctl_buf =
-		    kern_allocation_name_allocate(SKMEM_TAG_SYSCTL_BUF, 0);
-		ASSERT(skmem_tag_sysctl_buf != NULL);
-
 #if (SK_LOG || DEVELOPMENT || DEBUG)
-		ASSERT(skmem_tag_dump == NULL);
-		skmem_tag_dump =
-		    kern_allocation_name_allocate(SKMEM_TAG_DUMP, 0);
-		ASSERT(skmem_tag_dump != NULL);
-
 		/* allocate space for sk_dump_buf */
 		sk_dump_buf = sk_alloc_data(SK_DUMP_BUF_SIZE, Z_WAITOK | Z_NOFAIL,
 		    skmem_tag_dump);

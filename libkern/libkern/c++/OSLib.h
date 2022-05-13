@@ -51,13 +51,13 @@ __END_DECLS
 #include <libkern/OSAtomic.h>
 #include <libkern/c++/OSCPPDebug.h>
 
-#define kallocp_type_container(ty, countp, flags) ({                       \
+#define kallocp_type_container(ty, countp, flags) ({                           \
 	uint32_t *__countp = (countp);                                         \
 	struct kalloc_result __kar;                                            \
 	static KALLOC_TYPE_VAR_DEFINE_3(kt_view_var, ty, KT_SHARED_ACCT);      \
-	__kar = kalloc_type_var_impl_internal(kt_view_var,                     \
+	__kar = kalloc_ext(kt_mangle_var_view(kt_view_var),                    \
 	    kt_size(0, sizeof(ty), *__countp),                                 \
-	    Z_VM_TAG_BT(flags, VM_KERN_MEMORY_LIBKERN), NULL);                 \
+	    Z_VM_TAG_BT(flags | Z_FULLSIZE, VM_KERN_MEMORY_LIBKERN), NULL);    \
 	*__countp = (uint32_t)MIN(__kar.size / sizeof(ty), UINT32_MAX);        \
 	(ty *)__kar.addr;                                                      \
 })

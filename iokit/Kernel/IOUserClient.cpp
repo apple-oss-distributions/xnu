@@ -4741,6 +4741,7 @@ is_io_connect_method_var_output
 			*var_outputCnt = len;
 			ret = copyoutkdata(serialize->text(), len, var_output);
 		} else if ((data = OSDynamicCast(OSData, structureVariableOutputData))) {
+			data->clipForCopyout();
 			len = data->getLength();
 			*var_outputCnt = len;
 			ret = copyoutkdata(data->getBytesNoCopy(), len, var_output);

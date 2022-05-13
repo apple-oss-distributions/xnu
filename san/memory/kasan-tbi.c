@@ -191,7 +191,7 @@ kasan_poison(vm_offset_t base, vm_size_t size, vm_size_t leftrz,
 }
 
 void OS_NOINLINE
-kasan_impl_late_init()
+kasan_impl_late_init(void)
 {
 }
 
@@ -219,7 +219,7 @@ uint8_t kasan_tbi_odd_index = 0;
 uint8_t kasan_tbi_even_index = 0;
 
 static uint8_t
-kasan_tbi_odd_tag()
+kasan_tbi_odd_tag(void)
 {
 	uint8_t tag = kasan_tbi_odd_tags[kasan_tbi_odd_index++ %
 	    sizeof(kasan_tbi_odd_tags)];
@@ -228,7 +228,7 @@ kasan_tbi_odd_tag()
 }
 
 static uint8_t
-kasan_tbi_even_tag()
+kasan_tbi_even_tag(void)
 {
 	uint8_t tag = kasan_tbi_even_tags[kasan_tbi_even_index++ %
 	    sizeof(kasan_tbi_even_tags)];
@@ -253,24 +253,42 @@ kasan_tbi_do_tag_zone_object(vm_offset_t addr, vm_offset_t elem_size, uint8_t ta
 	return retaddr;
 }
 
+void
+kasan_tbi_copy_tags(vm_offset_t new_addr, vm_offset_t old_addr, vm_size_t size)
+{
+	assert((new_addr & KASAN_GRANULE_MASK) == 0);
+	assert((old_addr & KASAN_GRANULE_MASK) == 0);
+	assert((size & KASAN_GRANULE_MASK) == 0);
+
+	uint8_t *new_shadow = SHADOW_FOR_ADDRESS(new_addr);
+	uint8_t *old_shadow = SHADOW_FOR_ADDRESS(old_addr);
+	uint8_t *old_end    = SHADOW_FOR_ADDRESS(old_addr + size);
+
+	__nosan_memcpy(new_shadow, old_shadow, old_end - old_shadow);
+}
+
 vm_offset_t
-kasan_tbi_tag_zalloc(vm_offset_t addr, vm_offset_t elem_size, boolean_t zxcpu)
+kasan_tbi_tag_zalloc(vm_offset_t addr, vm_size_t size, vm_size_t used, boolean_t zxcpu)
 {
 	uint8_t tag;
 
-	if ((addr / elem_size) % 2) {
+	if ((addr / size) % 2) {
 		tag = kasan_tbi_odd_tag();
 	} else {
 		tag = kasan_tbi_even_tag();
 	}
 
-	return kasan_tbi_do_tag_zone_object(addr, elem_size, tag, zxcpu);
+	used = kasan_granule_round(used);
+	if (used < size) {
+		kasan_tbi_tag_zfree(addr + used, size - used, zxcpu);
+	}
+	return kasan_tbi_do_tag_zone_object(addr, used, tag, zxcpu);
 }
 
 vm_offset_t
-kasan_tbi_tag_zalloc_default(vm_offset_t addr, vm_offset_t elem_size, boolean_t zxcpu)
+kasan_tbi_tag_zalloc_default(vm_offset_t addr, vm_size_t size, boolean_t zxcpu)
 {
-	return kasan_tbi_do_tag_zone_object(addr, elem_size, KASAN_TBI_DEFAULT_TAG, zxcpu);
+	return kasan_tbi_do_tag_zone_object(addr, size, KASAN_TBI_DEFAULT_TAG, zxcpu);
 }
 
 vm_offset_t

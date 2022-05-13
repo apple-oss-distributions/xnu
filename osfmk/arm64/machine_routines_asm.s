@@ -36,6 +36,47 @@
 #include <sys/errno.h>
 #include "assym.s"
 
+/*
+ * Fault recovery.
+ *
+ * COPYIO_RECOVER_TABLE_SYM is used to delimit an array with those symbols:
+ *     struct copyio_recovery_entry copyio_recover_table[];
+ *     struct copyio_recovery_entry copyio_recover_table_end[];
+ *
+ * COPYIO_RECOVER_RANGE <end_addr>, <recovery_addr>
+ *    defines a range from the COPYIO_RECOVER_RANGE point to the <end_addr>
+ *    which has a recovery point of recovery_addr (defaulting to copyio_error)
+ *
+ *    This defines a struct of this type:
+ *        struct copyio_recovery_entry {
+ *            ptrdiff_t cre_start;
+ *            ptrdiff_t cre_end;
+ *            ptrdiff_t cre_recovery;
+ *        };
+ *    where the offset are relative to copyio_recover_table.
+ */
+
+.macro COPYIO_RECOVER_TABLE_SYM 	sym_name
+	.align 3
+	.pushsection __TEXT, __copyio_vectors, regular
+	.private_extern EXT(\sym_name)
+	.globl EXT(\sym_name)
+LEXT(\sym_name)
+	.popsection
+.endmacro
+
+.macro COPYIO_RECOVER_RANGE end_addr, recovery_addr = copyio_error
+	.align	3
+	.pushsection __TEXT, __copyio_vectors, regular
+	.quad	Lcre_start_\@  - _copyio_recover_table
+	.quad	\end_addr      - _copyio_recover_table
+	.quad	\recovery_addr - _copyio_recover_table
+	.popsection
+Lcre_start_\@:
+.endmacro
+
+	COPYIO_RECOVER_TABLE_SYM	copyio_recover_table
+
 
 #if defined(HAS_APPLE_PAC)
 
@@ -396,54 +437,9 @@ L_mmu_kvtop_wpreflight_invalid:
 	mov		x0, #0										// Return invalid
 	ret
 
-/*
- * SET_RECOVERY_HANDLER
- *
- *	Sets up a page fault recovery handler.  This macro clobbers x16 and x17.
- *
- *	label - recovery label
- *	tpidr - persisted thread pointer
- *	old_handler - persisted recovery handler
- *	label_in_adr_range - whether \label is within 1 MB of PC
- */
-.macro SET_RECOVERY_HANDLER	label, tpidr=x16, old_handler=x10, label_in_adr_range=0
-	// Note: x16 and x17 are designated for use as temporaries in
-	// interruptible PAC routines.  DO NOT CHANGE THESE REGISTER ASSIGNMENTS.
-.if \label_in_adr_range==1						// Load the recovery handler address
-	adr		x17, \label
-.else
-	adrp	x17, \label@page
-	add		x17, x17, \label@pageoff
-.endif
-#if defined(HAS_APPLE_PAC)
-	mrs		x16, TPIDR_EL1
-	add		x16, x16, TH_RECOVER
-	movk	x16, #PAC_DISCRIMINATOR_RECOVER, lsl 48
-	pacia	x17, x16							// Sign with IAKey + blended discriminator
-#endif
-
-	mrs		\tpidr, TPIDR_EL1					// Load thread pointer
-	ldr		\old_handler, [\tpidr, TH_RECOVER]	// Save previous recovery handler
-	str		x17, [\tpidr, TH_RECOVER]			// Set new signed recovery handler
-.endmacro
-
-/*
- * CLEAR_RECOVERY_HANDLER
- *
- *	Clears page fault handler set by SET_RECOVERY_HANDLER
- *
- *	tpidr - thread pointer saved by SET_RECOVERY_HANDLER
- *	old_handler - old recovery handler saved by SET_RECOVERY_HANDLER
- */
-.macro CLEAR_RECOVERY_HANDLER	tpidr=x16, old_handler=x10
-	str		\old_handler, [\tpidr, TH_RECOVER]	// Restore the previous recovery handler
-.endmacro
-
-
 	.text
 	.align 2
 copyio_error:
-	CLEAR_RECOVERY_HANDLER
 	mov		x0, #EFAULT					// Return an EFAULT error
 	POP_FRAME
 	ARM64_STACK_EPILOG
@@ -457,7 +453,7 @@ copyio_error:
 LEXT(_bcopyin)
 	ARM64_STACK_PROLOG
 	PUSH_FRAME
-	SET_RECOVERY_HANDLER copyio_error
+	COPYIO_RECOVER_RANGE 3f
 	/* If len is less than 16 bytes, just do a bytewise copy */
 	cmp		x2, #16
 	b.lt	2f
@@ -477,25 +473,67 @@ LEXT(_bcopyin)
 	strb	w3, [x1], #1
 	b.hi	2b
 3:
-	CLEAR_RECOVERY_HANDLER
+	mov		x0, #0
+	POP_FRAME
+	ARM64_STACK_EPILOG
+
+#if CONFIG_DTRACE
+/*
+ * int dtrace_nofault_copy8(const char *src, uint32_t *dst)
+ */
+	.text
+	.align 2
+	.globl EXT(dtrace_nofault_copy8)
+LEXT(dtrace_nofault_copy8)
+	ARM64_STACK_PROLOG
+	PUSH_FRAME
+	COPYIO_RECOVER_RANGE 1f
+	ldrb		w8, [x0]
+1:
+	strb		w8, [x1]
 	mov		x0, #0
 	POP_FRAME
 	ARM64_STACK_EPILOG
 
 /*
+ * int dtrace_nofault_copy16(const char *src, uint32_t *dst)
+ */
+	.text
+	.align 2
+	.globl EXT(dtrace_nofault_copy16)
+LEXT(dtrace_nofault_copy16)
+	ARM64_STACK_PROLOG
+	PUSH_FRAME
+	COPYIO_RECOVER_RANGE 1f
+	ldrh		w8, [x0]
+1:
+	strh		w8, [x1]
+	mov		x0, #0
+	POP_FRAME
+	ARM64_STACK_EPILOG
+
+
+#endif /* CONFIG_DTRACE */
+
+/*
+ * int dtrace_nofault_copy32(const char *src, uint32_t *dst)
  * int _copyin_atomic32(const char *src, uint32_t *dst)
  */
 	.text
 	.align 2
+#if CONFIG_DTRACE
+	.globl EXT(dtrace_nofault_copy32)
+LEXT(dtrace_nofault_copy32)
+#endif
 	.globl EXT(_copyin_atomic32)
 LEXT(_copyin_atomic32)
 	ARM64_STACK_PROLOG
 	PUSH_FRAME
-	SET_RECOVERY_HANDLER copyio_error
+	COPYIO_RECOVER_RANGE 1f
 	ldr		w8, [x0]
+1:
 	str		w8, [x1]
 	mov		x0, #0
-	CLEAR_RECOVERY_HANDLER
 	POP_FRAME
 	ARM64_STACK_EPILOG
 
@@ -508,8 +546,9 @@ LEXT(_copyin_atomic32)
 LEXT(_copyin_atomic32_wait_if_equals)
 	ARM64_STACK_PROLOG
 	PUSH_FRAME
-	SET_RECOVERY_HANDLER copyio_error
+	COPYIO_RECOVER_RANGE 2f
 	ldxr		w8, [x0]
+2:
 	cmp		w8, w1
 	mov		x0, ESTALE
 	b.ne		1f
@@ -517,24 +556,28 @@ LEXT(_copyin_atomic32_wait_if_equals)
 	wfe
 1:
 	clrex
-	CLEAR_RECOVERY_HANDLER
 	POP_FRAME
 	ARM64_STACK_EPILOG
 
 /*
+ * int dtrace_nofault_copy64(const char *src, uint32_t *dst)
  * int _copyin_atomic64(const char *src, uint32_t *dst)
  */
 	.text
 	.align 2
+#if CONFIG_DTRACE
+	.globl EXT(dtrace_nofault_copy64)
+LEXT(dtrace_nofault_copy64)
+#endif
 	.globl EXT(_copyin_atomic64)
 LEXT(_copyin_atomic64)
 	ARM64_STACK_PROLOG
 	PUSH_FRAME
-	SET_RECOVERY_HANDLER copyio_error
+	COPYIO_RECOVER_RANGE 1f
 	ldr		x8, [x0]
+1:
 	str		x8, [x1]
 	mov		x0, #0
-	CLEAR_RECOVERY_HANDLER
 	POP_FRAME
 	ARM64_STACK_EPILOG
 
@@ -548,10 +591,10 @@ LEXT(_copyin_atomic64)
 LEXT(_copyout_atomic32)
 	ARM64_STACK_PROLOG
 	PUSH_FRAME
-	SET_RECOVERY_HANDLER copyio_error
+	COPYIO_RECOVER_RANGE 1f
 	str		w0, [x1]
+1:
 	mov		x0, #0
-	CLEAR_RECOVERY_HANDLER
 	POP_FRAME
 	ARM64_STACK_EPILOG
 
@@ -564,10 +607,10 @@ LEXT(_copyout_atomic32)
 LEXT(_copyout_atomic64)
 	ARM64_STACK_PROLOG
 	PUSH_FRAME
-	SET_RECOVERY_HANDLER copyio_error
+	COPYIO_RECOVER_RANGE 1f
 	str		x0, [x1]
+1:
 	mov		x0, #0
-	CLEAR_RECOVERY_HANDLER
 	POP_FRAME
 	ARM64_STACK_EPILOG
 
@@ -581,7 +624,7 @@ LEXT(_copyout_atomic64)
 LEXT(_bcopyout)
 	ARM64_STACK_PROLOG
 	PUSH_FRAME
-	SET_RECOVERY_HANDLER copyio_error
+	COPYIO_RECOVER_RANGE 3f
 	/* If len is less than 16 bytes, just do a bytewise copy */
 	cmp		x2, #16
 	b.lt	2f
@@ -601,7 +644,6 @@ LEXT(_bcopyout)
 	strb	w3, [x1], #1
 	b.hi	2b
 3:
-	CLEAR_RECOVERY_HANDLER
 	mov		x0, #0
 	POP_FRAME
 	ARM64_STACK_EPILOG
@@ -619,7 +661,7 @@ LEXT(_bcopyout)
 LEXT(_bcopyinstr)
 	ARM64_STACK_PROLOG
 	PUSH_FRAME
-	SET_RECOVERY_HANDLER Lcopyinstr_error, label_in_adr_range=1
+	COPYIO_RECOVER_RANGE Lcopyinstr_done
 	mov		x4, #0						// x4 - total bytes copied
 Lcopyinstr_loop:
 	ldrb	w5, [x0], #1					// Load a byte from the user source
@@ -633,11 +675,6 @@ Lcopyinstr_too_long:
 Lcopyinstr_done:
 	str		x4, [x3]					// Return number of bytes copied
 	mov		x0, x5						// Set error code (0 on success, ENAMETOOLONG on failure)
-	b		Lcopyinstr_exit
-Lcopyinstr_error:
-	mov		x0, #EFAULT					// Return EFAULT on error
-Lcopyinstr_exit:
-	CLEAR_RECOVERY_HANDLER
 	POP_FRAME
 	ARM64_STACK_EPILOG
 
@@ -664,7 +701,7 @@ Lcopyinstr_exit:
 LEXT(copyinframe)
 	ARM64_STACK_PROLOG
 	PUSH_FRAME
-	SET_RECOVERY_HANDLER copyio_error
+	COPYIO_RECOVER_RANGE Lcopyinframe_done
 	cbnz	w2, Lcopyinframe64 		// Check frame size
 	adrp	x5, EXT(gVirtBase)@page // For 32-bit frame, make sure we're not trying to copy from kernel
 	add		x5, x5, EXT(gVirtBase)@pageoff
@@ -695,57 +732,9 @@ Lcopyinframe_valid:
 	mov 	w0, #0					// Success
 
 Lcopyinframe_done:
-	CLEAR_RECOVERY_HANDLER
 	POP_FRAME
 	ARM64_STACK_EPILOG
 
-
-/*
- * int hw_lock_trylock_mask_allow_invalid(uint32_t *lock, uint32_t mask)
- */
-	.text
-	.align 2
-	.private_extern EXT(hw_lock_trylock_mask_allow_invalid)
-	.globl EXT(hw_lock_trylock_mask_allow_invalid)
-LEXT(hw_lock_trylock_mask_allow_invalid)
-	SET_RECOVERY_HANDLER 9f, label_in_adr_range=1
-
-1:
-#if defined(__ARM_ARCH_8_2__)
-	ldxr		w2, [x0]
-#else
-	ldaxr		w2, [x0]
-#endif
-	cbz		w2, 9f		// 0 value == invalid lock
-
-	tst		w1, w2		// is `mask` set ?
-	b.ne		8f		// if yes, wfe and return 0
-
-	orr		w4, w2, w1
-#if defined(__ARM_ARCH_8_2__)
-	mov		w3, w2
-	casa		w3, w4, [x0]
-	cmp		w3, w2
-	b.ne		1b
-#else
-	stxr		w3, w4, [x0]
-	cbnz		w3, 1b
-#endif
-
-	CLEAR_RECOVERY_HANDLER
-	mov		w0, #1
-	ret
-
-8: /* contention */
-	wfe
-	CLEAR_RECOVERY_HANDLER
-	mov		w0, #0
-	ret
-9: /* invalid */
-	clrex
-	CLEAR_RECOVERY_HANDLER
-	mov		w0, #-1
-	ret
 
 /*
  * hw_lck_ticket_t
@@ -756,7 +745,9 @@ LEXT(hw_lock_trylock_mask_allow_invalid)
 	.private_extern EXT(hw_lck_ticket_reserve_orig_allow_invalid)
 	.globl EXT(hw_lck_ticket_reserve_orig_allow_invalid)
 LEXT(hw_lck_ticket_reserve_orig_allow_invalid)
-	SET_RECOVERY_HANDLER 9f, label_in_adr_range=1
+	ARM64_STACK_PROLOG
+	PUSH_FRAME
+	COPYIO_RECOVER_RANGE 7f, 9f
 
 	mov		x8, x0
 	mov		w9, #HW_LCK_TICKET_LOCK_INCREMENT
@@ -780,16 +771,17 @@ LEXT(hw_lck_ticket_reserve_orig_allow_invalid)
 	cbnz		w12, 1b
 #endif
 
-	CLEAR_RECOVERY_HANDLER
-	ret
+7:
+	POP_FRAME
+	ARM64_STACK_EPILOG
 
 9: /* invalid */
 #if !defined(__ARM_ARCH_8_2__)
 	clrex
 #endif
-	CLEAR_RECOVERY_HANDLER
 	mov		w0, #0
-	ret
+	POP_FRAME
+	ARM64_STACK_EPILOG
 
 /*
  * uint32_t arm_debug_read_dscr(void)
@@ -1287,5 +1279,8 @@ Lsign_ret:
 	ARM64_STACK_EPILOG
 
 #endif // defined(HAS_APPLE_PAC)
+
+    /* THIS MUST STAY LAST IN THIS FILE */
+	COPYIO_RECOVER_TABLE_SYM	copyio_recover_table_end
 
 /* vim: set sw=4 ts=4: */

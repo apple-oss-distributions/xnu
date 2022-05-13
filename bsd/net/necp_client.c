@@ -484,7 +484,7 @@ struct necp_client {
 	unsigned platform_binary : 1;
 
 	size_t result_length;
-	u_int8_t result[NECP_MAX_CLIENT_RESULT_SIZE];
+	u_int8_t result[NECP_BASE_CLIENT_RESULT_SIZE];
 
 	necp_policy_id policy_id;
 
@@ -7739,6 +7739,11 @@ necp_client_copy_parameters_locked(struct necp_client *client,
 		}
 	} else {
 		parameters->override_address_selection = false;
+	}
+
+	if ((parsed_parameters.valid_fields & NECP_PARSED_PARAMETERS_FIELD_FLAGS) &&
+	    (parsed_parameters.flags & NECP_CLIENT_PARAMETER_FLAG_NO_WAKE_FROM_SLEEP)) {
+		parameters->no_wake_from_sleep = true;
 	}
 
 	return error;

@@ -208,7 +208,8 @@ find_available_token:
 			} else {
 				result = kmem_alloc(kernel_map,
 				    (vm_offset_t *) &new_loc,
-				    alloc_size, VM_KERN_MEMORY_OSFMK);
+				    alloc_size, KMA_DATA | KMA_ZERO,
+				    VM_KERN_MEMORY_OSFMK);
 			}
 		}
 

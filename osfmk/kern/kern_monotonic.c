@@ -519,6 +519,10 @@ bool
 mt_acquire_counters(void)
 {
 	if (kpc_get_force_all_ctrs()) {
+		extern bool kpc_task_get_forced_all_ctrs(task_t);
+		if (kpc_task_get_forced_all_ctrs(current_task())) {
+			return true;
+		}
 		return false;
 	}
 	kpc_force_all_ctrs(current_task(), 1);

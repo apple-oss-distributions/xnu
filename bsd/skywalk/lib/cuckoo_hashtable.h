@@ -75,7 +75,7 @@ struct cuckoo_hashtable_params {
 };
 
 __BEGIN_DECLS
-void cuckoo_hashtable_init(void);
+
 struct cuckoo_hashtable * cuckoo_hashtable_create(
 	struct cuckoo_hashtable_params *p);
 void cuckoo_hashtable_free(struct cuckoo_hashtable *ht);

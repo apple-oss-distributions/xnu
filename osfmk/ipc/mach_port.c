@@ -284,14 +284,14 @@ mach_port_names(
 		}
 		size = size_needed;
 
-		kr = kernel_memory_allocate(ipc_kernel_map, &addr1, size, 0,
-		    KMA_NONE, VM_KERN_MEMORY_IPC);
+		kr = kmem_alloc(ipc_kernel_map, &addr1, size,
+		    KMA_DATA, VM_KERN_MEMORY_IPC);
 		if (kr != KERN_SUCCESS) {
 			return KERN_RESOURCE_SHORTAGE;
 		}
 
-		kr = kernel_memory_allocate(ipc_kernel_map, &addr2, size, 0,
-		    KMA_NONE, VM_KERN_MEMORY_IPC);
+		kr = kmem_alloc(ipc_kernel_map, &addr2, size,
+		    KMA_DATA, VM_KERN_MEMORY_IPC);
 		if (kr != KERN_SUCCESS) {
 			kmem_free(ipc_kernel_map, addr1, size);
 			return KERN_RESOURCE_SHORTAGE;
@@ -1287,8 +1287,8 @@ mach_port_get_set_status(
 		ipc_object_t psobj;
 		ipc_pset_t pset;
 
-		kr = kernel_memory_allocate(ipc_kernel_map, &addr, size, 0,
-		    KMA_NONE, VM_KERN_MEMORY_IPC);
+		kr = kmem_alloc(ipc_kernel_map, &addr, size,
+		    KMA_DATA, VM_KERN_MEMORY_IPC);
 		if (kr != KERN_SUCCESS) {
 			return KERN_RESOURCE_SHORTAGE;
 		}

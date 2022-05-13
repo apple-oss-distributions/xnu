@@ -37,7 +37,7 @@
 struct buffer_stage_data {
 	size_t total_buffer_size;
 	size_t current_size;
-	void *buffer;
+	char   buffer[];
 };
 
 static void
@@ -152,7 +152,8 @@ buffer_stage_initialize(struct kdp_output_stage *stage, size_t buffer_size)
 	assert(buffer_size != 0);
 
 	stage->kos_data_size = sizeof(struct buffer_stage_data) + buffer_size;
-	ret = kmem_alloc(kernel_map, (vm_offset_t*) &stage->kos_data, stage->kos_data_size, VM_KERN_MEMORY_DIAG);
+	ret = kmem_alloc(kernel_map, (vm_offset_t*) &stage->kos_data, stage->kos_data_size,
+	    KMA_DATA, VM_KERN_MEMORY_DIAG);
 	if (KERN_SUCCESS != ret) {
 		printf("buffer_stage_initialize failed to allocate memory. Error 0x%x\n", ret);
 		return ret;
@@ -161,7 +162,6 @@ buffer_stage_initialize(struct kdp_output_stage *stage, size_t buffer_size)
 	data = (struct buffer_stage_data *) stage->kos_data;
 	data->total_buffer_size = buffer_size;
 	data->current_size = 0;
-	data->buffer = (void *)((intptr_t) data + sizeof(struct buffer_stage_data));
 
 	stage->kos_funcs.kosf_reset = buffer_stage_reset;
 	stage->kos_funcs.kosf_outproc = buffer_stage_outproc;

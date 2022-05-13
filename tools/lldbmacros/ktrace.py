@@ -10,6 +10,7 @@ from core.lazytarget import *
 from misc import *
 from kcdata import kcdata_item_iterator, KCObject, GetTypeForName, KCCompressedBufferObject
 from collections import namedtuple
+from future.utils import PY2
 import heapq
 import os
 import plistlib
@@ -345,7 +346,7 @@ def GetKtraceConfig():
 
         'kdebug_state': kdebug_state,
         'kdebug_buffer_size': unsigned(kern.globals.kd_data_page_trace.nkdbufs),
-        'kdebug_typefilter': plistlib.Data(struct.pack('B', 0xff) * 4096 * 2), # XXX
+        'kdebug_typefilter': plist_data(struct.pack('B', 0xff) * 4096 * 2),
         'kdebug_procfilt_mode': 0, # XXX
         'kdebug_procfilt': [], # XXX
         'kdebug_wrapping': kdebug_wrapping,
@@ -499,7 +500,7 @@ class KDCPU(object):
         return self.__next__()
 
 
-def IterateKdebugEvents(verbose=False):
+def IterateKdebugEvents(verbose=False, humanize=False):
     """
     Yield events from the in-memory kdebug trace buffers.
     """
@@ -521,7 +522,12 @@ def IterateKdebugEvents(verbose=False):
     warned = False
     for event in heapq.merge(*cpus):
         if event.timestamp < last_timestamp and not warned:
-            print('warning: events seem to be out-of-order')
+            # Human-readable output might have garbage on the rest of the line.
+            # Use a CSI escape sequence to clear it out.
+            clear_line_csi = '\033[K'
+            print(
+                    'warning: events seem to be out-of-order',
+                    end=((clear_line_csi + '\n') if humanize else '\n'))
             warned = True
         last_timestamp = event.timestamp
         yield event.get_kevent()
@@ -557,21 +563,33 @@ def ShowKdebugTrace(cmd_args=None):
           of this kind of buffer collection.
     """
     k64 = kern.ptrsize == 8
-    for event in IterateKdebugEvents(config['verbosity'] > vHUMAN):
+    for event in IterateKdebugEvents(
+            config['verbosity'] > vHUMAN, humanize=True):
         print(GetKdebugEvent(event, k64))
 
 
 def binary_plist(o):
-    with tempfile.NamedTemporaryFile(delete=False) as f:
-        plistlib.writePlist(o, f)
-        name = f.name
+    if PY2:
+        # Python 2 lacks a convenient binary plist writer.
+        with tempfile.NamedTemporaryFile(delete=False) as f:
+            plistlib.writePlist(o, f)
+            name = f.name
 
-    subprocess.check_output(['plutil', '-convert', 'binary1', name])
-    with open(name, mode='rb') as f:
-        plist = f.read()
+        subprocess.check_output(['plutil', '-convert', 'binary1', name])
+        with open(name, mode='rb') as f:
+            plist = f.read()
 
-    os.unlink(name)
-    return plist
+        os.unlink(name)
+        return plist
+    else:
+        return plistlib.dumps(o, fmt=plistlib.FMT_BINARY)
+
+
+def plist_data(d):
+    if PY2:
+        return plistlib.Data(d)
+    else:
+        return d
 
 
 def align_next_chunk(f, offset, verbose):
@@ -732,8 +750,8 @@ def SaveKdebugTrace(cmd_args=None, cmd_options={}):
         written_nevents = 0
         seen_nevents = 0
         start_time = time.time()
-        update_every = 1000 if humanize else 25000
-        for event in IterateKdebugEvents(verbose):
+        update_every = 5000 if humanize else 25000
+        for event in IterateKdebugEvents(verbose, humanize=humanize):
             seen_nevents += 1
             if skip_nevents >= seen_nevents:
                 if seen_nevents % update_every == 0:

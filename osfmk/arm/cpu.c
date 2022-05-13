@@ -100,7 +100,10 @@ cpu_sleep(void)
 	cpu_data_ptr->cpu_active_thread = current_thread();
 	cpu_data_ptr->cpu_reset_handler = (vm_offset_t) start_cpu_paddr;
 	cpu_data_ptr->cpu_flags |= SleepState;
-	cpu_data_ptr->cpu_user_debug = NULL;
+
+	if (cpu_data_ptr->cpu_user_debug != NULL) {
+		arm_debug_set(NULL);
+	}
 
 	CleanPoC_Dcache();
 

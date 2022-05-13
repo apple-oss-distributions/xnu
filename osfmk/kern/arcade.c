@@ -306,21 +306,12 @@ restart:
 	char *path;
 	vm_map_copy_t copy;
 
-	kr = kmem_alloc(ipc_kernel_map, (vm_offset_t *)&path, MAXPATHLEN, VM_KERN_MEMORY_IPC);
-	if (kr != KERN_SUCCESS) {
-		ipc_port_release_send(port);
-		return;
-	}
-	bzero(path, MAXPATHLEN);
+	path = kalloc_data(MAXPATHLEN, Z_WAITOK | Z_ZERO);
 	retval = proc_pidpathinfo_internal(p, 0, path, MAXPATHLEN, NULL);
 	assert(!retval);
-	kr = vm_map_unwire(ipc_kernel_map,
-	    vm_map_trunc_page((vm_offset_t)path, VM_MAP_PAGE_MASK(ipc_kernel_map)),
-	    vm_map_round_page((vm_offset_t)path + MAXPATHLEN, VM_MAP_PAGE_MASK(ipc_kernel_map)),
-	    FALSE);
+	kr = vm_map_copyin(kernel_map, (vm_map_address_t)path, MAXPATHLEN, FALSE, &copy);
 	assert(kr == KERN_SUCCESS);
-	kr = vm_map_copyin(ipc_kernel_map, (vm_map_address_t)path, MAXPATHLEN, TRUE, &copy);
-	assert(kr == KERN_SUCCESS);
+	kfree_data(path, MAXPATHLEN);
 
 	offset = proc_getexecutableoffset(p);
 

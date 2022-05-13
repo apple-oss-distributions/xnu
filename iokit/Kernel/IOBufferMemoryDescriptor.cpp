@@ -86,9 +86,13 @@ IOBMDPageProc(kalloc_heap_t kheap, iopa_t * a)
 {
 	kern_return_t kr;
 	vm_address_t  vmaddr  = 0;
+	kma_flags_t kma_flags = KMA_ZERO;
 
-	kr = kernel_memory_allocate(kheap->kh_fallback_map, &vmaddr,
-	    page_size, 0, (kma_flags_t) (KMA_NONE | KMA_ZERO), VM_KERN_MEMORY_IOKIT);
+	if (kheap == KHEAP_DATA_BUFFERS) {
+		kma_flags = (kma_flags_t) (kma_flags | KMA_DATA);
+	}
+	kr = kmem_alloc(kernel_map, &vmaddr, page_size,
+	    kma_flags, VM_KERN_MEMORY_IOKIT);
 
 	if (KERN_SUCCESS != kr) {
 		vmaddr = 0;
@@ -183,13 +187,6 @@ IOBufferMemoryDescriptor::initWithPhysicalMask(
 	bool                  mapped = false;
 	bool                  withCopy = false;
 	bool                  mappedOrShared = false;
-
-	/*
-	 * Temporarily use default heap on intel due to rdar://74982985
-	 */
-#if __x86_64__
-	kheap = KHEAP_DEFAULT;
-#endif
 
 	if (!capacity) {
 		return false;
@@ -331,14 +328,20 @@ IOBufferMemoryDescriptor::initWithPhysicalMask(
 			vm_offset_t address = 0;
 			kern_return_t kr;
 			uintptr_t alignMask;
+			kma_flags_t kma_flags = (kma_flags_t) (KMA_GUARD_FIRST |
+			    KMA_GUARD_LAST | KMA_ZERO);
 
 			if (((uint32_t) alignment) != alignment) {
 				return NULL;
 			}
+			if (kheap == KHEAP_DATA_BUFFERS) {
+				kma_flags = (kma_flags_t) (kma_flags | KMA_DATA);
+			}
 
 			alignMask = (1UL << log2up((uint32_t) alignment)) - 1;
-			kr = kernel_memory_allocate(kheap->kh_fallback_map, &address,
-			    capacity + page_size * 2, alignMask, (kma_flags_t)(KMA_GUARD_FIRST | KMA_GUARD_LAST), IOMemoryTag(kernel_map));
+			kr = kernel_memory_allocate(kernel_map, &address,
+			    capacity + page_size * 2, alignMask, kma_flags,
+			    IOMemoryTag(kernel_map));
 			if (kr != KERN_SUCCESS || address == 0) {
 				return false;
 			}
@@ -354,6 +357,7 @@ IOBufferMemoryDescriptor::initWithPhysicalMask(
 			_buffer         = (void *) iopa_alloc(&gIOBMDPageAllocator,
 			    &IOBMDPageProc, kheap, capacity, alignment);
 			if (_buffer) {
+				bzero(_buffer, capacity);
 				IOStatisticsAlloc(kIOStatisticsMallocAligned, capacity);
 #if IOALLOCDEBUG
 				OSAddAtomicLong(capacity, &debug_iomalloc_size);
@@ -361,14 +365,14 @@ IOBufferMemoryDescriptor::initWithPhysicalMask(
 			}
 #endif /* defined(__x86_64__) */
 		} else if (alignment > 1) {
-			_buffer = IOMallocAligned_internal(kheap, capacity, alignment);
+			_buffer = IOMallocAligned_internal(kheap, capacity, alignment,
+			    Z_ZERO_VM_TAG_BT_BIT);
 		} else {
-			_buffer = IOMalloc_internal(kheap, capacity);
+			_buffer = IOMalloc_internal(kheap, capacity, Z_ZERO_VM_TAG_BT_BIT);
 		}
 		if (!_buffer) {
 			return false;
 		}
-		bzero(_buffer, capacity);
 	}
 
 	if ((options & (kIOMemoryPageable | kIOMapCacheMask))) {
@@ -672,13 +676,6 @@ IOBufferMemoryDescriptor::free()
 	vm_offset_t      alignment = _alignment;
 	kalloc_heap_t    kheap     = KHEAP_DATA_BUFFERS;
 
-	/*
-	 * Temporarily use default heap on intel due to rdar://74982985
-	 */
-#if __x86_64__
-	kheap = KHEAP_DEFAULT;
-#endif
-
 	if (alignment >= page_size) {
 		size = round_page(size);
 	}
@@ -723,7 +720,7 @@ IOBufferMemoryDescriptor::free()
 			uintptr_t page;
 			page = iopa_free(&gIOBMDPageAllocator, (uintptr_t) buffer, size);
 			if (page) {
-				kmem_free(kheap->kh_fallback_map, page, page_size);
+				kmem_free(kernel_map, page, page_size);
 			}
 #if IOALLOCDEBUG
 			OSAddAtomicLong(-size, &debug_iomalloc_size);
@@ -735,7 +732,7 @@ IOBufferMemoryDescriptor::free()
 #endif /* defined(__x86_64__) */
 		} else if (kInternalFlagGuardPages & internalFlags) {
 			vm_offset_t allocation = (vm_offset_t)buffer - page_size;
-			kmem_free(kheap->kh_fallback_map, allocation, size + page_size * 2);
+			kmem_free(kernel_map, allocation, size + page_size * 2);
 #if IOALLOCDEBUG
 			OSAddAtomicLong(-size, &debug_iomalloc_size);
 #endif

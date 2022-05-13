@@ -477,8 +477,10 @@ int     mac_vnode_check_lookup(vfs_context_t ctx, struct vnode *dvp,
     struct componentname *cnp) __result_use_check;
 int     mac_vnode_check_lookup_preflight(vfs_context_t ctx, struct vnode *dvp,
     const char *path, size_t pathlen) __result_use_check;
+#ifdef KERNEL_PRIVATE
 int     mac_vnode_check_open(vfs_context_t ctx, struct vnode *vp,
     int acc_mode) __result_use_check;
+#endif
 int     mac_vnode_check_read(vfs_context_t ctx,
     kauth_cred_t file_cred, struct vnode *vp) __result_use_check;
 int     mac_vnode_check_readdir(vfs_context_t ctx, struct vnode *vp) __result_use_check;

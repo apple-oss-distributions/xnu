@@ -178,8 +178,7 @@ __options_decl(zone_create_flags_t, uint64_t, {
 	/** This zone will back a kalloc heap */
 	ZC_KALLOC_HEAP          = 0x0800000000000000,
 
-	/** This zone can be crammed with foreign pages */
-	ZC_ALLOW_FOREIGN        = 0x1000000000000000,
+	/* unused                 0x1000000000000000, */
 
 	/** This zone belongs to the VM submap */
 	ZC_VM                   = 0x2000000000000000,
@@ -316,10 +315,6 @@ extern void     zdestroy(
  * The function panics if the check fails as it indicates that the kernel
  * internals have been compromised.
  *
- * Note that zone_require() can only work with:
- * - zones not allowing foreign memory
- * - zones in the general submap.
- *
  * @param zone          the zone the address needs to belong to.
  * @param addr          the element address to check.
  */
@@ -408,6 +403,13 @@ extern void     zone_require_ro_range_contains(
  * free the incoming memory on failure cases.
  *
  #if XNU_KERNEL_PRIVATE
+ * @const Z_FULLSIZE
+ * Used to indicate that the caller will use all available space in excess
+ * from the requested allocation size.
+ *
+ * @const Z_SKIP_KASAN
+ * Tell zalloc() not to do any kasan adjustments.
+ *
  * @const Z_PGZ
  * Used by zalloc internally to denote an allocation that we will try
  * to guard with PGZ.
@@ -436,6 +438,12 @@ __options_decl(zalloc_flags_t, uint32_t, {
 	Z_REALLOCF      = 0x0008,
 
 #if XNU_KERNEL_PRIVATE
+	Z_FULLSIZE      = 0x0200,
+#if KASAN
+	Z_SKIP_KASAN    = 0x0400,
+#else
+	Z_SKIP_KASAN    = 0x0000,
+#endif
 	Z_PGZ           = 0x0800,
 	Z_VM_TAG_BT_BIT = 0x1000,
 	Z_PCPU          = 0x2000,
@@ -450,6 +458,7 @@ __options_decl(zalloc_flags_t, uint32_t, {
 
 	Z_KPI_MASK             = Z_WAITOK | Z_NOWAIT | Z_NOPAGEWAIT | Z_ZERO,
 #if XNU_KERNEL_PRIVATE
+	Z_ZERO_VM_TAG_BT_BIT   = Z_ZERO | Z_VM_TAG_BT_BIT,
 	/** used by kalloc to propagate vm tags for -zt */
 	Z_VM_TAG_MASK   = 0xffff0000,
 
@@ -458,6 +467,16 @@ __options_decl(zalloc_flags_t, uint32_t, {
 #define Z_VM_TAG_BT(fl, tag)  ((zalloc_flags_t)(Z_VM_TAG(fl, tag) | Z_VM_TAG_BT_BIT))
 #endif
 });
+
+/*
+ * This type is used so that kalloc_internal has good calling conventions
+ * for callers who want to cheaply both know the allocated address
+ * and the actual size of the allocation.
+ */
+struct kalloc_result {
+	void         *addr __sized_by(size);
+	vm_size_t     size;
+};
 
 /*!
  * @function zalloc
@@ -871,18 +890,14 @@ struct zone_view {
  *
  * @const KHEAP_ID_KT_VAR
  * Indicates zones part of the KHEAP_KT_VAR heap.
- *
- * @const KHEAP_ID_KEXT
- * Indicates zones part of the KHEAP_KEXT heap.
  */
 __enum_decl(zone_kheap_id_t, uint32_t, {
 	KHEAP_ID_NONE,
 	KHEAP_ID_DEFAULT,
 	KHEAP_ID_DATA_BUFFERS,
 	KHEAP_ID_KT_VAR,
-	KHEAP_ID_KEXT,
 
-#define KHEAP_ID_COUNT (KHEAP_ID_KEXT + 1)
+#define KHEAP_ID_COUNT (KHEAP_ID_KT_VAR + 1)
 });
 
 /*!
@@ -1185,9 +1200,9 @@ __enum_decl(zone_reserved_id_t, zone_id_t, {
 
 	ZONE_ID_PMAP,
 	ZONE_ID_VM_MAP,
-	ZONE_ID_VM_MAP_COPY,
 	ZONE_ID_VM_MAP_ENTRY,
 	ZONE_ID_VM_MAP_HOLES,
+	ZONE_ID_VM_MAP_COPY,
 	ZONE_ID_VM_PAGES,
 	ZONE_ID_IPC_PORT,
 	ZONE_ID_IPC_PORT_SET,
@@ -1376,28 +1391,11 @@ extern zone_t   zone_create_ext(
  * - isn't sensitive to @c zone_t::elem_size being compromised,
  * - is slightly faster as it saves one load and a multiplication.
  *
- * @warning: zones using foreign memory can't use this interface.
- *
  * @param zone_id       the zone ID the address needs to belong to.
  * @param elem_size     the size of elements for this zone.
  * @param addr          the element address to check.
  */
 extern void     zone_id_require(
-	zone_id_t               zone_id,
-	vm_size_t               elem_size,
-	void                   *addr __unsafe_indexable);
-
-/*!
- * @function zone_id_require_allow_foreign
- *
- * @abstract
- * Requires for a given pointer to belong to the specified zone, by ID and size.
- *
- * @discussion
- * This is a version of @c zone_id_require() that works with zones allowing
- * foreign memory.
- */
-extern void     zone_id_require_allow_foreign(
 	zone_id_t               zone_id,
 	vm_size_t               elem_size,
 	void                   *addr __unsafe_indexable);
@@ -1548,21 +1546,24 @@ extern void zone_view_startup_init(
 extern void zone_userspace_reboot_checks(void);
 
 #if VM_TAG_SIZECLASSES
-extern zalloc_flags_t __zone_flags_mix_tag(
-	zone_t                  zone,
-	zalloc_flags_t          flags,
-	vm_allocation_site_t   *site) __pure2;
-#else
+extern void __zone_site_register(
+	vm_allocation_site_t   *site);
+
+#define VM_ALLOC_SITE_TAG() ({ \
+	__PLACE_IN_SECTION("__DATA, __data")                                   \
+	static vm_allocation_site_t site = { .refcount = 2, };                 \
+	STARTUP_ARG(ZALLOC, STARTUP_RANK_LAST, __zone_site_register, &site);   \
+	site.tag;                                                              \
+})
+#else /* VM_TAG_SIZECLASSES */
+#define VM_ALLOC_SITE_TAG()                     VM_KERN_MEMORY_NONE
+#endif /* !VM_TAG_SIZECLASSES */
+
 static inline zalloc_flags_t
-__zone_flags_mix_tag(
-	zone_t                  zone,
-	zalloc_flags_t          flags,
-	vm_allocation_site_t   *site)
+__zone_flags_mix_tag(zalloc_flags_t flags, vm_tag_t tag)
 {
-#pragma unused(zone, site)
-	return flags;
+	return (flags & Z_VM_TAG_MASK) ? flags : Z_VM_TAG(flags, (uint32_t)tag);
 }
-#endif
 
 #if DEBUG || DEVELOPMENT
 #  if __LP64__
@@ -1613,6 +1614,10 @@ extern vm_offset_t __pgz_decode_allow_invalid(
 	zone_id_t               zid);
 
 #endif
+#if DEBUG || DEVELOPMENT
+extern size_t zone_pages_wired;
+extern size_t zone_guard_pages;
+#endif /* DEBUG || DEVELOPMENT */
 #if CONFIG_ZLEAKS
 extern uint32_t                 zleak_active;
 extern vm_size_t                zleak_max_zonemap_size;

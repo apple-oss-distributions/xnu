@@ -36,7 +36,7 @@
 #include <skywalk/lib/cuckoo_hashtable.h>
 
 #define CUCKOO_TEST_TAG "com.apple.skywalk.libcuckoo.test"
-kern_allocation_name_t cuckoo_test_tag;
+SKMEM_TAG_DEFINE(cuckoo_test_tag, CUCKOO_TEST_TAG);
 
 os_refgrp_decl(static, cht_obj_refgrp, "CuckooTestRefGroup", NULL);
 
@@ -148,10 +148,6 @@ cht_test_init(void)
 {
 	if (OSCompareAndSwap(0, 1, &cht_inited)) {
 		lck_mtx_init(&cht_lock, &sk_lock_group, &sk_lock_attr);
-
-		ASSERT(cuckoo_test_tag == NULL);
-		cuckoo_test_tag = kern_allocation_name_allocate(CUCKOO_TEST_TAG, 0);
-		ASSERT(cuckoo_test_tag != NULL);
 	}
 }
 

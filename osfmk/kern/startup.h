@@ -63,7 +63,6 @@ __enum_decl(startup_subsystem_id_t, uint32_t, {
 	STARTUP_SUB_KPRINTF,          /**< kprintf initialization              */
 
 	STARTUP_SUB_PMAP_STEAL,       /**< to perform various pmap carveouts   */
-	STARTUP_SUB_VM_KERNEL,        /**< once the kernel VM is ready         */
 	STARTUP_SUB_KMEM,             /**< once kmem_alloc is ready            */
 	STARTUP_SUB_ZALLOC,           /**< initialize zalloc and kalloc        */
 	STARTUP_SUB_PERCPU,           /**< initialize the percpu subsystem     */

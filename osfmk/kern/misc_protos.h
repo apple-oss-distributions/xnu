@@ -98,6 +98,24 @@ extern int copyin_atomic64(
 	const user_addr_t   user_addr,
 	uint64_t            *kernel_addr);
 
+#if CONFIG_DTRACE
+extern int dtrace_nofault_copy8(
+	const uintptr_t     kernel_addr,
+	uint8_t             *value);
+
+extern int dtrace_nofault_copy16(
+	const uintptr_t     kernel_addr,
+	uint16_t            *value);
+
+extern int dtrace_nofault_copy32(
+	const uintptr_t     kernel_addr,
+	uint32_t            *value);
+
+extern int dtrace_nofault_copy64(
+	const uintptr_t     kernel_addr,
+	uint64_t            *value);
+#endif /* CONFIG_DTRACE */
+
 /*
  * Does an atomic copyin at the specified user_address and compares
  * it to the passed in value, and if it matches, waits.

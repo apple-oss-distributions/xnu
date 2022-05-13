@@ -278,7 +278,7 @@ mach_msg_send_from_remote_kernel(mach_msg_header_t      *msg,
 	    MACH_SEND_KERNEL_DEFAULT,
 	    MACH_MSG_TIMEOUT_NONE);
 	if (mr != MACH_MSG_SUCCESS) {
-		ipc_kmsg_destroy(kmsg);
+		ipc_kmsg_destroy(kmsg, IPC_KMSG_DESTROY_ALL);
 	}
 
 	return mr;

@@ -386,8 +386,8 @@ coredump(proc_t core_proc, uint32_t reserve_mb, int coredump_flags)
 		goto out;
 	}
 
-	if (kernel_memory_allocate(kernel_map, &header, (vm_size_t)header_size,
-	    0, KMA_ZERO, VM_KERN_MEMORY_DIAG) != KERN_SUCCESS) {
+	if (kmem_alloc(kernel_map, &header, (vm_size_t)header_size,
+	    KMA_DATA | KMA_ZERO, VM_KERN_MEMORY_DIAG) != KERN_SUCCESS) {
 		error = ENOMEM;
 		goto out;
 	}

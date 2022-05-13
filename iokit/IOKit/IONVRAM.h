@@ -79,9 +79,10 @@ class IODTNVRAMFormatHandler
 public:
 	virtual
 	~IODTNVRAMFormatHandler();
-	virtual IOReturn setVariable(const uuid_t *varGuid, const char *variableName, OSObject *object) = 0;
-	virtual bool setController(IONVRAMController *_nvramController) = 0;
-	virtual bool sync(void) = 0;
+	virtual IOReturn setVariable(const uuid_t varGuid, const char *variableName, OSObject *object) = 0;
+	virtual bool     setController(IONVRAMController *_nvramController) = 0;
+	virtual bool     sync(void) = 0;
+	virtual IOReturn flush(const uuid_t guid, IONVRAMOperation op) = 0;
 	virtual uint32_t getGeneration(void) const = 0;
 	virtual uint32_t getVersion(void) const = 0;
 	virtual uint32_t getSystemUsed(void) const = 0;
@@ -117,16 +118,16 @@ private:
 	uint32_t getNVRAMSize(void);
 
 	NVRAMPartitionType getDictionaryType(const OSDictionary *dict) const;
-	IOReturn chooseDictionary(IONVRAMOperation operation, const uuid_t *varGuid,
+	IOReturn chooseDictionary(IONVRAMOperation operation, const uuid_t varGuid,
 	    const char *variableName, OSDictionary **dict) const;
-	IOReturn flushDict(const uuid_t *guid, IONVRAMOperation op);
-	bool handleSpecialVariables(const char *name, const uuid_t *guid, const OSObject *obj, IOReturn *error);
+	IOReturn flushDict(const uuid_t guid, IONVRAMOperation op);
+	bool handleSpecialVariables(const char *name, const uuid_t guid, const OSObject *obj, IOReturn *error);
 
 	IOReturn setPropertyInternal(const OSSymbol *aKey, OSObject *anObject);
 	IOReturn removePropertyInternal(const OSSymbol *aKey);
-	OSSharedPtr<OSObject> copyPropertyWithGUIDAndName(const uuid_t *guid, const char *name) const;
-	IOReturn removePropertyWithGUIDAndName(const uuid_t *guid, const char *name);
-	IOReturn setPropertyWithGUIDAndName(const uuid_t *guid, const char *name, OSObject *anObject);
+	OSSharedPtr<OSObject> copyPropertyWithGUIDAndName(const uuid_t guid, const char *name) const;
+	IOReturn removePropertyWithGUIDAndName(const uuid_t guid, const char *name);
+	IOReturn setPropertyWithGUIDAndName(const uuid_t guid, const char *name, OSObject *anObject);
 
 	void syncInternal(bool rateLimit);
 	bool safeToSync(void);

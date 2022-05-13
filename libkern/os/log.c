@@ -128,8 +128,10 @@ oslog_init_logmem(void)
 	const size_t logmem_size = logmem_required_size(OS_LOGMEM_BUF_ORDER, OS_LOGMEM_MIN_LOG_ORDER);
 	vm_offset_t addr;
 
-	if (kmem_alloc(kernel_map, &addr, logmem_size, VM_KERN_MEMORY_LOG) == KERN_SUCCESS) {
-		logmem_init(&os_log_mem, (void *)addr, logmem_size,
+	if (kmem_alloc(kernel_map, &addr, logmem_size + ptoa(2),
+	    KMA_KOBJECT | KMA_PERMANENT | KMA_ZERO | KMA_GUARD_FIRST | KMA_GUARD_LAST,
+	    VM_KERN_MEMORY_LOG) == KERN_SUCCESS) {
+		logmem_init(&os_log_mem, (void *)(addr + PAGE_SIZE), logmem_size,
 		    OS_LOGMEM_BUF_ORDER, OS_LOGMEM_MIN_LOG_ORDER, OS_LOGMEM_MAX_LOG_ORDER);
 		printf("Long logs support configured: size: %u\n", os_log_mem.lm_cnt_free);
 	} else {

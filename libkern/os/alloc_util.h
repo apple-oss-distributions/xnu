@@ -25,93 +25,11 @@
 #define _OS_ALLOC_UTIL_H
 
 #include <sys/cdefs.h>
-
-#ifdef __cplusplus
-
-#if __cplusplus >= 201103L
-
+#if defined(__cplusplus) && __cplusplus >= 201103L
 extern "C++" {
 #include <os/cpp_util.h>
-
-namespace os {
-namespace au_detail {
-/*
- * This is implemented using constexpr member functions to work around
- * a compiler bug related to template deduction for __ptrauth-qualified
- * types (rdar://83481514).
- *
- * We use the constexpr variable __p as a parameter to the constexpr
- * member function; because function parameters strip the __ptrauth
- * attributes, this allows us to infer the non-__ptrauth qualified
- * type in the member function template.
- */
-template<class PtrTy, class CheckTy>
-struct is_compatible_ptr {
-	template<class T>
-	static constexpr bool
-	__compute_result(T *p __unused)
-	{
-		using _T = os::remove_extent_t<os::remove_const_t<os::remove_volatile_t<T> > >;
-		using _U = os::remove_extent_t<CheckTy>;
-		return os::is_same<void, _T>::value || os::is_same<_T, _U>::value;
-	}
-
-	static constexpr os::remove_reference_t<PtrTy> __p = nullptr;
-	static const bool value = __compute_result(__p);
-};
-} // namespace au_detail
-} // namespace os
-
-/*
- * Type checking macro implementation (C++)
- */
-#define os_is_compatible_ptr_impl(ptr, type) \
-	os::au_detail::is_compatible_ptr<decltype(ptr), type>::value
-} // "extern C++"
-
-#else  /* __cplusplus >= 201103L */
-
-#define os_is_compatible_ptr_impl(ptr, type) 1
-
-#endif /* __cplusplus >= 201103L */
-
-#else  /* __cplusplus */
-
-/*
- * Type checking macro implementation (C):
- * wildcard any void pointer type, and check all other types using
- * __builtin_types_compatible_p.
- */
-#define os_is_compatible_ptr_impl(ptr, type) _Generic((ptr),              \
-	void *: 1,                                                         \
-	const void *: 1,                                                   \
-	const volatile void *: 1,                                          \
-	volatile void * const: 1,                                          \
-	default: (__builtin_types_compatible_p(__typeof__(*(ptr)), type)))
-
-#endif /* __cplusplus */
-
-/*!
- * @macro os_is_compatible_ptr
- *
- * @abstract
- * Check at compile time that a pointer is compatible with a given type.
- *
- * @discussion
- * The goal of this macro is to check that the type pointed to by @c ptr
- * is compatible with the given type @c type.
- *
- * The underlying implementation differs between C and C++. In C, we
- * rely on the concept of compatible types, and we implement the check
- * using __builtin_types_compatible_p. In C++, we check type equivalence
- * using type traits.
- *
- * NOTE: This macro is a no-op for C++98 (no type check is performed).
- *
- * @param ptr           the pointer whose type needs to be checked.
- * @param type          the type which the pointer will be checked against.
- */
-#define os_is_compatible_ptr(ptr, type)  os_is_compatible_ptr_impl(ptr, type)
+}
+#endif
 
 /*!
  * @macro os_is_ptr_like

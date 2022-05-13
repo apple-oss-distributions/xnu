@@ -65,6 +65,9 @@
 #include <kern/zalloc.h>
 #include <libkern/section_keywords.h>
 #include <os/alloc_util.h>
+#if XNU_KERNEL_PRIVATE
+#include <kern/counter.h>
+#endif /* XNU_KERNEL_PRIVATE */
 
 __BEGIN_DECLS __ASSUME_PTR_ABI_SINGLE_BEGIN
 
@@ -94,8 +97,6 @@ typedef struct kalloc_heap {
 	const char         *kh_name __unsafe_indexable;
 	struct kalloc_heap *kh_next;
 	zone_kheap_id_t     kh_heap_id;
-	vm_map_t            kh_large_map;
-	vm_map_t            kh_fallback_map;
 	vm_tag_t            kh_tag;
 } *kalloc_heap_t;
 
@@ -152,18 +153,6 @@ typedef struct kalloc_heap {
  * - Size of allocation
  */
 KALLOC_HEAP_DECLARE(KHEAP_DATA_BUFFERS);
-
-/**
- * @const KHEAP_KEXT
- *
- * @brief
- * The builtin heap for allocations made by kexts.
- *
- * @discussion
- * This set of kalloc zones should contain allocations from kexts and the
- * individual zones in this heap are sequestered.
- */
-KALLOC_HEAP_DECLARE(KHEAP_KEXT);
 
 /**
  * @const KHEAP_DEFAULT
@@ -226,7 +215,7 @@ KALLOC_HEAP_DECLARE(KHEAP_KT_VAR);
 #define KHEAP_SONAME KHEAP_DATA_BUFFERS
 #endif /* XNU_TARGET_OS_OSX */
 
-#endif/* XNU_KERNEL_PRIVATE */
+#endif /* XNU_KERNEL_PRIVATE */
 
 /*!
  * @enum kalloc_type_flags_t
@@ -387,8 +376,8 @@ typedef struct kalloc_type_view *kalloc_type_view_t;
 #define KHEAP_START_IDX         kalloc_log2down(KHEAP_START_SIZE)
 #define KHEAP_NUM_STEPS         (kalloc_log2down(KHEAP_MAX_SIZE) - \
 	                                kalloc_log2down(KHEAP_START_SIZE))
-#define KHEAP_NUM_ZONES         KHEAP_NUM_STEPS * KHEAP_STEP_WIDTH \
-	                                + KHEAP_EXTRA_ZONES
+#define KHEAP_NUM_ZONES         (KHEAP_NUM_STEPS * KHEAP_STEP_WIDTH + \
+	                                KHEAP_EXTRA_ZONES)
 
 /*!
  * @enum kalloc_type_version_t
@@ -503,56 +492,32 @@ typedef struct kalloc_type_var_view *kalloc_type_var_view_t;
  * These versions allow specifying the kalloc heap to allocate memory
  * from
  */
-#define kheap_alloc_site(kalloc_heap, size, flags, site) \
-	__kheap_alloc_site(kalloc_heap, size, flags, site)
-
-#define kheap_alloc(kalloc_heap, size, flags) \
-	({ VM_ALLOC_SITE_STATIC(0, 0); \
-	kheap_alloc_site(kalloc_heap, size, flags, &site); })
-
 #define kheap_alloc_tag(kalloc_heap, size, flags, itag) \
-	kheap_alloc_site(kalloc_heap, size, Z_VM_TAG(flags, itag), NULL)
+	__kheap_alloc(kalloc_heap, size, __zone_flags_mix_tag(flags, itag), NULL)
+#define kheap_alloc(kalloc_heap, size, flags) \
+	kheap_alloc_tag(kalloc_heap, size, flags, VM_ALLOC_SITE_TAG())
 
 /*
  * These versions should be used for allocating pure data bytes that
  * do not contain any pointers
  */
-#define kalloc_data_site(size, flags, site) \
-	kheap_alloc_site(KHEAP_DATA_BUFFERS, size, flags, site)
-
+#define kalloc_data_tag(size, flags, itag) \
+	kheap_alloc_tag(KHEAP_DATA_BUFFERS, size, flags, itag)
 #define kalloc_data(size, flags) \
 	kheap_alloc(KHEAP_DATA_BUFFERS, size, flags)
 
-#define kalloc_data_tag(size, flags, itag) \
-	kheap_alloc_tag(KHEAP_DATA_BUFFERS, size, flags, itag)
-
-#define krealloc_data_site(elem, old_size, new_size, flags, site) \
-	__krealloc_site(KHEAP_DATA_BUFFERS, elem, old_size, new_size, flags, site)
-
-#define krealloc_data(elem, old_size, new_size, flags) \
-	({ VM_ALLOC_SITE_STATIC(0, 0); \
-	krealloc_data_site(elem, old_size, new_size, flags, &site); })
-
 #define krealloc_data_tag(elem, old_size, new_size, flags, itag) \
-	krealloc_data_site(KHEAP_DATA_BUFFERS, elem, old_size, new_size, \
-	    Z_VM_TAG(flags, itag), NULL)
+	__kheap_realloc(KHEAP_DATA_BUFFERS, elem, old_size, new_size, \
+	    __zone_flags_mix_tag(flags, itag), NULL)
+#define krealloc_data(elem, old_size, new_size, flags) \
+	krealloc_data_tag(elem, old_size, new_size, flags, \
+	    VM_ALLOC_SITE_TAG())
 
 #define kfree_data(elem, size) \
 	kheap_free(KHEAP_DATA_BUFFERS, elem, size);
 
 #define kfree_data_addr(elem) \
 	kheap_free_addr(KHEAP_DATA_BUFFERS, elem);
-
-extern void
-kheap_free(
-	kalloc_heap_t heap,
-	void         *data  __unsafe_indexable,
-	vm_size_t     size);
-
-extern void
-kheap_free_addr(
-	kalloc_heap_t heap,
-	void         *addr __unsafe_indexable);
 
 extern void
 kheap_free_bounded(
@@ -662,9 +627,8 @@ kfree_data_addr(
 #define kfree_type(...)  KALLOC_DISPATCH(kfree_type, ##__VA_ARGS__)
 
 #ifdef XNU_KERNEL_PRIVATE
-#define kalloc_type_site(...)    KALLOC_DISPATCH(kalloc_type_site, ##__VA_ARGS__)
 #define kalloc_type_tag(...)     KALLOC_DISPATCH(kalloc_type_tag, ##__VA_ARGS__)
-#define krealloc_type_site(...)  KALLOC_DISPATCH(krealloc_type_site, ##__VA_ARGS__)
+#define krealloc_type_tag(...)   KALLOC_DISPATCH(krealloc_type_tag, ##__VA_ARGS__)
 #define krealloc_type(...)       KALLOC_DISPATCH(krealloc_type, ##__VA_ARGS__)
 
 /*
@@ -809,20 +773,52 @@ __options_decl(kt_granule_t, uint32_t, {
 #define KALLOC_TYPE_HAS_OVERLAPS(type) \
 	((KT_SUMMARY_GRANULES(type) & ~KT_SUMMARY_MASK_ALL_GRANULES) != 0)
 
+/*!
+ * @macro KALLOC_TYPE_IS_COMPATIBLE_PTR
+ *
+ * @abstract
+ * Return whether pointer is compatible with a given type, in the XNU
+ * signature type system.
+ *
+ * @discussion
+ * This macro returns whether type pointed to by @c ptr is either the same
+ * type as @c type, or it has the same signature. The implementation relies
+ * on the @c __builtin_xnu_types_compatible builtin, and the value returned
+ * can be evaluated at compile time in both C and C++.
+ *
+ * Note: void pointers are treated as wildcards, and are thus compatible
+ * with any given type.
+ *
+ * @param ptr           the pointer whose type needs to be checked.
+ * @param type          the type which the pointer will be checked against.
+ */
+#define KALLOC_TYPE_IS_COMPATIBLE_PTR(ptr, type)                   \
+	_Pragma("clang diagnostic push")                               \
+	_Pragma("clang diagnostic ignored \"-Wvoid-ptr-dereference\"") \
+	(__builtin_xnu_types_compatible(__typeof__(*ptr), type) ||     \
+	    __builtin_xnu_types_compatible(__typeof__(*ptr), void))    \
+	_Pragma("clang diagnostic pop")
+
+#define KALLOC_TYPE_ASSERT_COMPATIBLE_POINTER(ptr, type)                  \
+	_Static_assert(KALLOC_TYPE_IS_COMPATIBLE_PTR(ptr, type),           \
+	    "Pointer type is not compatible with specified type")
 
 #pragma mark implementation details
 
-#ifdef XNU_KERNEL_PRIVATE
 
-#define KFREE_TYPE_ASSERT_COMPATIBLE_POINTER(ptr, type)          \
-	_Static_assert(os_is_compatible_ptr(ptr, type),           \
-	    "Pointer type is not compatible with specified type")
+static inline void *
+kt_mangle_var_view(kalloc_type_var_view_t kt_view)
+{
+	return (void *)((uintptr_t)kt_view | 1ul);
+}
 
-#else  /* XNU_KERNEL_PRIVATE */
+static inline kalloc_type_var_view_t
+kt_demangle_var_view(void *ptr)
+{
+	return (kalloc_type_var_view_t)((uintptr_t)ptr & ~1ul);
+}
 
-#define KFREE_TYPE_ASSERT_COMPATIBLE_POINTER(ptr, type) do { } while (0)
-
-#endif /* XNU_KERNEL_PRIVATE */
+#define kt_is_var_view(ptr)  ((uintptr_t)(ptr) & 1)
 
 static inline vm_size_t
 kt_size(vm_size_t s1, vm_size_t s2, vm_size_t c2)
@@ -842,21 +838,21 @@ kt_size(vm_size_t s1, vm_size_t s2, vm_size_t c2)
 })
 
 #define kfree_type_2(type, elem) ({                                            \
-	KFREE_TYPE_ASSERT_COMPATIBLE_POINTER(elem, type);                      \
+	KALLOC_TYPE_ASSERT_COMPATIBLE_POINTER(elem, type);                     \
 	static KALLOC_TYPE_DEFINE(kt_view_var, type, KT_SHARED_ACCT);          \
 	kfree_type_impl(kt_view_var, os_ptr_load_and_erase(elem));             \
 })
 
-#define kfree_type_3(type, count, elem) ({                                 \
-	KFREE_TYPE_ASSERT_COMPATIBLE_POINTER(elem, type);                      \
+#define kfree_type_3(type, count, elem) ({                                     \
+	KALLOC_TYPE_ASSERT_COMPATIBLE_POINTER(elem, type);                     \
 	static KALLOC_TYPE_VAR_DEFINE_3(kt_view_var, type, KT_SHARED_ACCT);    \
 	__auto_type __kfree_count = (count);                                   \
 	kfree_type_var_impl(kt_view_var, os_ptr_load_and_erase(elem),          \
 	    kt_size(0, sizeof(type), __kfree_count));                          \
 })
 
-#define kfree_type_4(hdr_ty, e_ty, count, elem) ({                         \
-	KFREE_TYPE_ASSERT_COMPATIBLE_POINTER(elem, hdr_ty);                    \
+#define kfree_type_4(hdr_ty, e_ty, count, elem) ({                             \
+	KALLOC_TYPE_ASSERT_COMPATIBLE_POINTER(elem, hdr_ty);                   \
 	static KALLOC_TYPE_VAR_DEFINE_4(kt_view_var, hdr_ty, e_ty,             \
 	    KT_SHARED_ACCT);                                                   \
 	__auto_type __kfree_count = (count);                                   \
@@ -866,96 +862,67 @@ kt_size(vm_size_t s1, vm_size_t s2, vm_size_t c2)
 })
 
 #ifdef XNU_KERNEL_PRIVATE
-#define kalloc_type_3(type, count, flags) ({                               \
-	static KALLOC_TYPE_VAR_DEFINE_3(kt_view_var, type, KT_SHARED_ACCT);    \
-	VM_ALLOC_SITE_STATIC(0, 0);                                            \
-	(type *)kalloc_type_var_impl(kt_view_var,                              \
-	    kt_size(0, sizeof(type), count), flags, &site);                    \
-})
-
-#define kalloc_type_4(hdr_ty, e_ty, count, flags) ({                       \
-	static KALLOC_TYPE_VAR_DEFINE_4(kt_view_var, hdr_ty, e_ty,             \
-	    KT_SHARED_ACCT);                                                   \
-	VM_ALLOC_SITE_STATIC(0, 0);                                            \
-	(hdr_ty *)kalloc_type_var_impl(kt_view_var, kt_size(sizeof(hdr_ty),    \
-	    sizeof(e_ty), count), flags, &site);                               \
-})
-
-#define kalloc_type_tag_3(type, flags, tag) ({                             \
-	static KALLOC_TYPE_DEFINE(kt_view_var, type,                           \
-	    (kalloc_type_flags_t)Z_VM_TAG(KT_SHARED_ACCT, tag));               \
+#define kalloc_type_tag_3(type, flags, tag) ({                                 \
+	static KALLOC_TYPE_DEFINE(kt_view_var, type, KT_SHARED_ACCT);          \
 	__unsafe_forge_single(type *, zalloc_flags(kt_view_var,                \
 	    Z_VM_TAG(flags, tag)));                                            \
 })
 
-#define kalloc_type_site_3(type, flags, site) ({                           \
-	static KALLOC_TYPE_DEFINE(kt_view_var, type, KT_SHARED_ACCT);          \
-	__unsafe_forge_single(type *, zalloc_flags(kt_view_var,                \
-	    __zone_flags_mix_tag(kt_view_var->kt_zv.zv_zone, flags, site)));   \
-})
-
-#define kalloc_type_tag_4(type, count, flags, tag) ({                      \
-	static KALLOC_TYPE_VAR_DEFINE_3(kt_view_var, type, KT_SHARED_ACCT);    \
-	(type *)kalloc_type_var_impl(kt_view_var, kt_size(0, sizeof(type),     \
-	    count), Z_VM_TAG(flags, tag), NULL);                               \
-})
-
-#define kalloc_type_site_4(type, count, flags, site) ({                    \
+#define kalloc_type_tag_4(type, count, flags, tag) ({                          \
 	static KALLOC_TYPE_VAR_DEFINE_3(kt_view_var, type, KT_SHARED_ACCT);    \
 	(type *)kalloc_type_var_impl(kt_view_var,                              \
-	    kt_size(0, sizeof(type), count), flags, site);                     \
+	    kt_size(0, sizeof(type), count),                                   \
+	    __zone_flags_mix_tag(flags, tag), NULL);                           \
 })
+#define kalloc_type_3(type, count, flags)  \
+	kalloc_type_tag_4(type, count, flags, VM_ALLOC_SITE_TAG())
 
-#define kalloc_type_tag_5(hdr_ty, e_ty, count, flags, tag) ({              \
+#define kalloc_type_tag_5(hdr_ty, e_ty, count, flags, tag) ({                  \
 	static KALLOC_TYPE_VAR_DEFINE_4(kt_view_var, hdr_ty, e_ty,             \
 	    KT_SHARED_ACCT);                                                   \
 	(hdr_ty *)kalloc_type_var_impl(kt_view_var,                            \
 	    kt_size(sizeof(hdr_ty), sizeof(e_ty), count),                      \
-	    Z_VM_TAG(flags, tag), NULL);                                       \
+	    __zone_flags_mix_tag(flags, tag), NULL);                           \
 })
+#define kalloc_type_4(hdr_ty, e_ty, count, flags) \
+	kalloc_type_tag_5(hdr_ty, e_ty, count, flags, VM_ALLOC_SITE_TAG())
 
-#define kalloc_type_site_5(hdr_ty, e_ty, count, flags, site) ({            \
-	static KALLOC_TYPE_VAR_DEFINE_4(kt_view_var, hdr_ty, e_ty,             \
-	    KT_SHARED_ACCT);                                                   \
-	(hdr_ty *)kalloc_type_var_impl(kt_view_var, kt_size(sizeof(hdr_ty),    \
-	    sizeof(e_ty), count), flags, site);                                \
-})
-
-#define krealloc_type_site_6(type, old_count, new_count, elem, flags,      \
-	    site) ({                                                           \
+#define krealloc_type_tag_6(type, old_count, new_count, elem, flags, tag) ({   \
 	static KALLOC_TYPE_VAR_DEFINE_3(kt_view_var, type, KT_SHARED_ACCT);    \
-	((type *)__krealloc_type_site(kt_view_var, elem,                       \
+	KALLOC_TYPE_ASSERT_COMPATIBLE_POINTER(elem, type);                     \
+	(type *)__krealloc_type(kt_view_var, elem,                             \
 	    kt_size(0, sizeof(type), old_count),                               \
-	    kt_size(0, sizeof(type), new_count), flags, site));                \
+	    kt_size(0, sizeof(type), new_count),                               \
+	    __zone_flags_mix_tag(flags, tag), NULL);                           \
 })
-
 #define krealloc_type_5(type, old_count, new_count, elem, flags) \
-	({ VM_ALLOC_SITE_STATIC(0, 0); \
-	krealloc_type_site_6(type, old_count, new_count, elem, flags, &site); })
+	krealloc_type_tag_6(type, old_count, new_count, elem, flags, \
+	    VM_ALLOC_SITE_TAG())
 
-#define krealloc_type_site_7(hdr_ty, e_ty, old_count, new_count, elem,     \
-	    flags, site) ({                                                    \
+#define krealloc_type_tag_7(hdr_ty, e_ty, old_count, new_count, elem,          \
+	    flags, tag) ({                                                     \
 	static KALLOC_TYPE_VAR_DEFINE_4(kt_view_var, hdr_ty, e_ty,             \
 	    KT_SHARED_ACCT);                                                   \
-	((type *)__krealloc_type_site(kt_view_var, elem,                       \
+	KALLOC_TYPE_ASSERT_COMPATIBLE_POINTER(elem, hdr_ty);                   \
+	(hdr_ty *)__krealloc_type(kt_view_var, elem,                           \
 	    kt_size(sizeof(hdr_ty), sizeof(e_ty), old_count),                  \
-	    kt_size(sizeof(hdr_ty), sizeof(e_ty), new_count), flags, site));   \
+	    kt_size(sizeof(hdr_ty), sizeof(e_ty), new_count),                  \
+	    __zone_flags_mix_tag(flags, tag), NULL);                           \
 })
-
 #define krealloc_type_6(hdr_ty, e_ty, old_count, new_count, elem, flags) \
-	({ VM_ALLOC_SITE_STATIC(0, 0); \
-	krealloc_type_site_7(hdr_ty, e_ty, old_count, new_count, elem, flags, &site); })
+	krealloc_type_tag_7(hdr_ty, e_ty, old_count, new_count, elem, flags,   \
+	    VM_ALLOC_SITE_TAG())
 
 #else /* XNU_KERNEL_PRIVATE */
-/* for now kexts do not have access to flags */
-#define kalloc_type_3(type, count, flags) ({                               \
+
+#define kalloc_type_3(type, count, flags) ({                                   \
 	_Static_assert((flags) == Z_WAITOK, "kexts can only pass Z_WAITOK");   \
 	static KALLOC_TYPE_VAR_DEFINE_3(kt_view_var, type, KT_SHARED_ACCT);    \
 	(type *)kalloc_type_var_impl(kt_view_var,                              \
 	    kt_size(0, sizeof(type), count), flags, NULL);                     \
 })
 
-#define kalloc_type_4(hdr_ty, e_ty, count, flags) ({                       \
+#define kalloc_type_4(hdr_ty, e_ty, count, flags) ({                           \
 	_Static_assert((flags) == Z_WAITOK, "kexts can only pass Z_WAITOK");   \
 	static KALLOC_TYPE_VAR_DEFINE_4(kt_view_var, hdr_ty, e_ty,             \
 	    KT_SHARED_ACCT);                                                   \
@@ -973,36 +940,34 @@ kt_size(vm_size_t s1, vm_size_t s2, vm_size_t c2)
  */
 #ifdef XNU_KERNEL_PRIVATE
 
-#define kheap_free(heap, elem, size) ({                        \
-	kalloc_heap_t __kfree_heap = (heap);                       \
-	__auto_type __kfree_size = (size);                         \
-	(kheap_free)(__kfree_heap,                                 \
-	(void *)os_ptr_load_and_erase(elem),                       \
-	__kfree_size);                                             \
+#define kheap_free(heap, elem, size) ({                                        \
+	kalloc_heap_t __kfree_heap = (heap);                                   \
+	__auto_type __kfree_size = (size);                                     \
+	__builtin_assume(!kt_is_var_view(__kfree_heap));                       \
+	kfree_ext((void *)__kfree_heap,                                        \
+	    (void *)os_ptr_load_and_erase(elem), __kfree_size);                \
 })
 
-#define kheap_free_addr(heap, elem) ({                         \
-	kalloc_heap_t __kfree_heap = (heap);                       \
-	(kheap_free_addr)(__kfree_heap,                            \
-	(void *)os_ptr_load_and_erase(elem));                      \
+#define kheap_free_addr(heap, elem) ({                                         \
+	kalloc_heap_t __kfree_heap = (heap);                                   \
+	kfree_addr_ext(__kfree_heap, (void *)os_ptr_load_and_erase(elem));     \
 })
 
-#define kheap_free_bounded(heap, elem, min_sz, max_sz) ({      \
-	static_assert(max_sz <= KALLOC_SAFE_ALLOC_SIZE);           \
-	kalloc_heap_t __kfree_heap = (heap);                       \
-	__auto_type __kfree_min_sz = (min_sz);                     \
-	__auto_type __kfree_max_sz = (max_sz);                     \
-	(kheap_free_bounded)(__kfree_heap,                         \
-	(void *)os_ptr_load_and_erase(elem),                       \
-	__kfree_min_sz, __kfree_max_sz);                           \
+#define kheap_free_bounded(heap, elem, min_sz, max_sz) ({                      \
+	static_assert(max_sz <= KALLOC_SAFE_ALLOC_SIZE);                       \
+	kalloc_heap_t __kfree_heap = (heap);                                   \
+	__auto_type __kfree_min_sz = (min_sz);                                 \
+	__auto_type __kfree_max_sz = (max_sz);                                 \
+	(kheap_free_bounded)(__kfree_heap,                                     \
+	    (void *)os_ptr_load_and_erase(elem),                               \
+	    __kfree_min_sz, __kfree_max_sz);                                   \
 })
 
 #else /* XNU_KERNEL_PRIVATE */
 
-#define kfree_data(elem, size) ({                              \
-	__auto_type __kfree_size = (size);                         \
-	(kfree_data)((void *)os_ptr_load_and_erase(elem),          \
-	__kfree_size);                                             \
+#define kfree_data(elem, size) ({                                              \
+	__auto_type __kfree_size = (size);                                     \
+	(kfree_data)((void *)os_ptr_load_and_erase(elem), __kfree_size);       \
 })
 
 #define kfree_data_addr(elem) \
@@ -1040,7 +1005,7 @@ kt_size(vm_size_t s1, vm_size_t s2, vm_size_t c2)
 /*
  * When kalloc_type_impl is called from xnu, it calls zalloc_flags
  * directly and doesn't redirect zone-less sites to kheap_alloc.
- * Passing a size larger than kalloc_max for these allocations will
+ * Passing a size larger than KHEAP_MAX_SIZE for these allocations will
  * lead to a panic as the zone is null. Therefore assert that size
  * is less than KALLOC_SAFE_ALLOC_SIZE.
  */
@@ -1149,11 +1114,8 @@ kt_size(vm_size_t s1, vm_size_t s2, vm_size_t c2)
 
 #ifdef XNU_KERNEL_PRIVATE
 
-#define KT_VM_TAG(var) \
-	((var)->kt_flags & KT_VM_TAG_MASK)
-
 #define kalloc_type_impl(kt_view, flags) \
-	zalloc_flags(kt_view, (zalloc_flags_t)(KT_VM_TAG(kt_view) | (flags)))
+	zalloc_flags(kt_view, flags)
 
 static inline void
 kfree_type_impl(kalloc_type_view_t kt_view, void *__unsafe_indexable ptr)
@@ -1164,34 +1126,11 @@ kfree_type_impl(kalloc_type_view_t kt_view, void *__unsafe_indexable ptr)
 	zfree(kt_view, ptr);
 }
 
-/*
- * This type is used so that kalloc_internal has good calling conventions
- * for callers who want to cheaply both know the allocated address
- * and the actual size of the allocation.
- */
-struct kalloc_result {
-	void         *addr __sized_by(size);
-	vm_size_t     size;
-};
-
-extern struct kalloc_result
-kalloc_type_var_impl_internal(
-	kalloc_type_var_view_t  kt_view,
-	vm_size_t               size,
-	zalloc_flags_t          flags,
-	void                   *site);
-
 #define kalloc_type_var_impl(kt_view, size, flags, site) \
-	kalloc_type_var_impl_internal(kt_view, size, flags, site).addr
-
-extern void
-kfree_type_var_impl_internal(
-	kalloc_type_var_view_t  kt_view,
-	void                   *ptr __unsafe_indexable,
-	vm_size_t               size);
+	kalloc_ext(kt_mangle_var_view(kt_view), size, flags, site).addr
 
 #define kfree_type_var_impl(kt_view, ptr, size) \
-	kfree_type_var_impl_internal(kt_view, ptr, size)
+	kfree_ext(kt_mangle_var_view(kt_view), ptr, size)
 
 #else /* XNU_KERNEL_PRIVATE */
 
@@ -1280,100 +1219,88 @@ kheap_startup_init(
 
 extern struct kalloc_result
 kalloc_ext(
-	kalloc_heap_t           kheap,
+	void                   *kheap_or_kt_view,
 	vm_size_t               size,
 	zalloc_flags_t          flags,
-	vm_allocation_site_t   *site);
+	void                   *site);
 
 __attribute__((malloc, alloc_size(2)))
 static inline void *
 __sized_by(size)
-__kheap_alloc_site(
+__kheap_alloc(
 	kalloc_heap_t           kheap,
 	vm_size_t               size,
 	zalloc_flags_t          flags,
-	vm_allocation_site_t   *site)
+	void                   *site)
 {
 	struct kalloc_result kr;
+	__builtin_assume(!kt_is_var_view(kheap));
 	kr = kalloc_ext(kheap, size, flags, site);
 	return __unsafe_forge_bidi_indexable(void *, kr.addr, size);
 }
 
 extern struct kalloc_result
 krealloc_ext(
-	kalloc_heap_t           kheap,
+	void                   *kheap_or_kt_view,
 	void                   *addr __unsafe_indexable,
 	vm_size_t               old_size,
 	vm_size_t               new_size,
 	zalloc_flags_t          flags,
-	vm_allocation_site_t   *site);
+	void                   *site);
 
 __attribute__((malloc, alloc_size(4)))
 static inline void *
 __sized_by(new_size)
-__krealloc_site(
+__kheap_realloc(
 	kalloc_heap_t           kheap,
 	void                   *addr __unsafe_indexable,
 	vm_size_t               old_size,
 	vm_size_t               new_size,
 	zalloc_flags_t          flags,
-	vm_allocation_site_t   *site)
+	void                   *site)
 {
 	struct kalloc_result kr;
+	__builtin_assume(!kt_is_var_view(kheap));
 	kr = krealloc_ext(kheap, addr, old_size, new_size, flags, site);
 	return __unsafe_forge_bidi_indexable(void *, kr.addr, new_size);
 }
 
-struct kalloc_result
-krealloc_type_var_impl(
-	kalloc_type_var_view_t  kt_view,
-	void                   *addr __unsafe_indexable,
-	vm_size_t               old_size,
-	vm_size_t               new_size,
-	zalloc_flags_t          flags,
-	vm_allocation_site_t   *site);
-
 __attribute__((malloc, alloc_size(4)))
 static inline void *
 __sized_by(new_size)
-__krealloc_type_site(
+__krealloc_type(
 	kalloc_type_var_view_t  kt_view,
 	void                   *addr __unsafe_indexable,
 	vm_size_t               old_size,
 	vm_size_t               new_size,
 	zalloc_flags_t          flags,
-	vm_allocation_site_t   *site)
+	void                   *site)
 {
 	struct kalloc_result kr;
-	kr = krealloc_type_var_impl(kt_view, addr, old_size, new_size, flags, site);
+	kr = krealloc_ext(kt_mangle_var_view(kt_view), addr,
+	    old_size, new_size, flags, site);
 	return __unsafe_forge_bidi_indexable(void *, kr.addr, new_size);
 }
 
-extern bool
-kalloc_owned_map(
-	vm_map_t      map);
+extern void
+kfree_addr_ext(
+	kalloc_heap_t           kheap,
+	void                   *addr __unsafe_indexable);
 
-extern vm_map_t
-kalloc_large_map_get(void);
-
-extern vm_map_t
-kalloc_large_data_map_get(void);
-
-extern vm_map_t
-kernel_data_map_get(void);
+extern void
+kfree_ext(
+	void                   *kheap_or_kt_view,
+	void                   *addr __unsafe_indexable,
+	vm_size_t               size);
 
 extern zone_t
 kalloc_heap_zone_for_size(
 	kalloc_heap_t         heap,
 	vm_size_t             size);
 
-extern vm_size_t kalloc_max_prerounded;
-extern vm_size_t kalloc_large_total;
-
-extern void
-kern_os_kfree(
-	void         *addr __unsafe_indexable,
-	vm_size_t     size);
+extern vm_size_t kalloc_large_max;
+SCALABLE_COUNTER_DECLARE(kalloc_large_count);
+SCALABLE_COUNTER_DECLARE(kalloc_large_total);
 
 extern void
 kern_os_typed_free(

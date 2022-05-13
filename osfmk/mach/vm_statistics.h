@@ -263,25 +263,25 @@ typedef struct vm_purgeable_info        *vm_purgeable_info_t;
  *	cached so that they will be stolen first if memory runs low.
  */
 
-#define VM_FLAGS_FIXED          0x0000
-#define VM_FLAGS_ANYWHERE       0x0001
-#define VM_FLAGS_PURGABLE       0x0002
-#define VM_FLAGS_4GB_CHUNK      0x0004
-#define VM_FLAGS_RANDOM_ADDR    0x0008
-#define VM_FLAGS_NO_CACHE       0x0010
-#define VM_FLAGS_RESILIENT_CODESIGN     0x0020
-#define VM_FLAGS_RESILIENT_MEDIA        0x0040
-#define VM_FLAGS_PERMANENT      0x0080
-#define VM_FLAGS_OVERWRITE      0x4000  /* delete any existing mappings first */
+#define VM_FLAGS_FIXED                  0x00000000
+#define VM_FLAGS_ANYWHERE               0x00000001
+#define VM_FLAGS_PURGABLE               0x00000002
+#define VM_FLAGS_4GB_CHUNK              0x00000004
+#define VM_FLAGS_RANDOM_ADDR            0x00000008
+#define VM_FLAGS_NO_CACHE               0x00000010
+#define VM_FLAGS_RESILIENT_CODESIGN     0x00000020
+#define VM_FLAGS_RESILIENT_MEDIA        0x00000040
+#define VM_FLAGS_PERMANENT              0x00000080
+#define VM_FLAGS_OVERWRITE              0x00004000  /* delete any existing mappings first */
 /*
  * VM_FLAGS_SUPERPAGE_MASK
  *	3 bits that specify whether large pages should be used instead of
  *	base pages (!=0), as well as the requested page size.
  */
-#define VM_FLAGS_SUPERPAGE_MASK 0x70000 /* bits 0x10000, 0x20000, 0x40000 */
-#define VM_FLAGS_RETURN_DATA_ADDR       0x100000 /* Return address of target data, rather than base of page */
-#define VM_FLAGS_RETURN_4K_DATA_ADDR    0x800000 /* Return 4K aligned address of target data */
-#define VM_FLAGS_ALIAS_MASK     0xFF000000
+#define VM_FLAGS_SUPERPAGE_MASK         0x00070000 /* bits 0x10000, 0x20000, 0x40000 */
+#define VM_FLAGS_RETURN_DATA_ADDR       0x00100000 /* Return address of target data, rather than base of page */
+#define VM_FLAGS_RETURN_4K_DATA_ADDR    0x00800000 /* Return 4K aligned address of target data */
+#define VM_FLAGS_ALIAS_MASK             0xFF000000
 #define VM_GET_FLAGS_ALIAS(flags, alias)                        \
 	        (alias) = ((flags) & VM_FLAGS_ALIAS_MASK) >> 24
 #if !XNU_KERNEL_PRIVATE
@@ -332,14 +332,43 @@ enum virtual_memory_guard_exception_codes {
 	kGUARD_EXC_DEALLOC_GAP  = 1u << 0
 };
 
-#ifdef KERNEL_PRIVATE
+#ifdef XNU_KERNEL_PRIVATE
+
+/*!
+ * @enum kmem_range_id_t
+ *
+ * @brief
+ * Enumerate a particular kmem range.
+ *
+ * @discussion
+ * The kernel_map VA has been split into the following ranges.
+ *
+ * @const KMEM_RANGE_ID_PTR
+ * Range containing general purpose allocations from kalloc, etc that
+ * contain pointers.
+ *
+ * @const KMEM_RANGE_ID_DATA
+ * Range containing allocations that are bags of bytes and contain no
+ * pointers.
+ *
+ */
+__enum_decl(kmem_range_id_t, uint32_t, {
+	KMEM_RANGE_ID_PTR,
+	KMEM_RANGE_ID_DATA,
+	KMEM_RANGE_ID_MAX = KMEM_RANGE_ID_DATA,
+
+#define KMEM_RANGE_COUNT (KMEM_RANGE_ID_MAX + 1)
+});
+
+#define kmem_log2down(mask)   (31 - __builtin_clz(mask))
+#define KMEM_RANGE_BITS kmem_log2down(KMEM_RANGE_ID_MAX * 2)
+
 typedef struct {
 	unsigned int
 	    vmkf_atomic_entry:1,        /* keep entry atomic (no coalescing) */
 	    vmkf_permanent:1,           /* mapping can NEVER be unmapped */
-	    vmkf_guard_after:1,         /* guard page after the mapping */
-	    vmkf_guard_before:1,        /* guard page before the mapping */
 	    vmkf_submap:1,              /* mapping a VM submap */
+	    vmkf_submap_adjust:1,       /* the submap needs to be adjusted */
 	    vmkf_already:1,             /* OK if same mapping already exists */
 	    vmkf_beyond_max:1,          /* map beyond the map's max offset */
 	    vmkf_no_pmap_check:1,       /* do not check that pmap is empty */
@@ -353,15 +382,28 @@ typedef struct {
 	    vmkf_cs_enforcement:1,      /* new value for CS_ENFORCEMENT */
 	    vmkf_nested_pmap:1,         /* use a nested pmap */
 	    vmkf_no_copy_on_read:1,     /* do not use copy_on_read */
-	    vmkf_32bit_map_va:1,        /* allocate in low 32-bits range */
 	    vmkf_copy_single_object:1,  /* vm_map_copy only 1 VM object */
 	    vmkf_copy_pageable:1,       /* vm_map_copy with pageable entries */
 	    vmkf_copy_same_map:1,       /* vm_map_copy to remap in original map */
 	    vmkf_translated_allow_execute:1,    /* allow execute in translated processes */
+
+	/*
+	 * Flags altering the behavior of vm_map_locate_space()
+	 */
+	    vmkf_32bit_map_va:1,        /* allocate in low 32-bits range */
+	    vmkf_guard_before:1,        /* guard page before the mapping */
 	    vmkf_last_free:1,           /* find space from the end */
-	    __vmkf_unused:8;
+	    vmkf_random_address:1,      /* pick a random address */
+	    vmkf_range_id:KMEM_RANGE_BITS,      /* kmem range to allocate in */
+
+	    __vmkf_unused:5;
 } vm_map_kernel_flags_t;
-#define VM_MAP_KERNEL_FLAGS_NONE (vm_map_kernel_flags_t){ }
+
+#define VM_MAP_KERNEL_FLAGS_NONE \
+	(vm_map_kernel_flags_t){ }
+
+#define VM_MAP_KERNEL_FLAGS_PERMANENT \
+	(vm_map_kernel_flags_t){ .vmkf_permanent = 1 }
 
 typedef struct {
 	unsigned int
@@ -375,7 +417,7 @@ typedef struct {
 	.__vmnekf_unused = 0                                                   \
 }
 
-#endif /* KERNEL_PRIVATE */
+#endif /* XNU_KERNEL_PRIVATE */
 
 /* current accounting postmark */
 #define __VM_LEDGER_ACCOUNTING_POSTMARK 2019032600

@@ -1806,6 +1806,13 @@ mac_iokit_check_hid_control(kauth_cred_t cred __unused)
 	return 0;
 }
 
+int mac_vnode_check_open(vfs_context_t ctx, struct vnode *vp, int acc_mode);
+int
+mac_vnode_check_open(vfs_context_t ctx __unused, struct vnode *vp __unused, int acc_mode __unused)
+{
+	return 0;
+}
+
 int mac_mount_check_snapshot_mount(vfs_context_t ctx, struct vnode *rvp, struct vnode *vp, struct componentname *cnp,
     const char *name, const char *vfc_name);
 int

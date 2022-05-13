@@ -48,10 +48,6 @@ is_normal_memory(uint64_t phys)
 	return (attr & VM_WIMG_MASK) == VM_WIMG_DEFAULT;
 }
 
-struct memory_backing_aware_buffer_stage_data {
-	void *buffer;
-};
-
 static void
 memory_backing_aware_buffer_stage_reset(__unused struct kdp_output_stage *stage)
 {
@@ -62,7 +58,7 @@ memory_backing_aware_buffer_stage_outproc(struct kdp_output_stage *stage, unsign
     char *corename, uint64_t length, void * panic_data)
 {
 	kern_return_t err = KERN_SUCCESS;
-	struct memory_backing_aware_buffer_stage_data *data = (struct memory_backing_aware_buffer_stage_data *) stage->kos_data;
+	void *buffer = stage->kos_data;
 	struct kdp_output_stage  *next_stage = STAILQ_NEXT(stage, kos_next);
 
 	assert(next_stage != NULL);
@@ -100,12 +96,12 @@ memory_backing_aware_buffer_stage_outproc(struct kdp_output_stage *stage, unsign
 			 * pointer or length are aligned, so we do a bytewise copy.
 			 */
 			volatile const uint8_t *src = panic_data;
-			volatile uint8_t *dst = data->buffer;
+			volatile uint8_t *dst = buffer;
 			for (size_t i = 0; i < bytes_in_page; i++) {
 				dst[i] = src[i];
 			}
 
-			err = next_stage->kos_funcs.kosf_outproc(next_stage, KDP_DATA, corename, bytes_in_page, data->buffer);
+			err = next_stage->kos_funcs.kosf_outproc(next_stage, KDP_DATA, corename, bytes_in_page, buffer);
 			if (KERN_SUCCESS != err) {
 				kern_coredump_log(NULL, "%s next stage output failed\n", __func__);
 				return err;
@@ -133,21 +129,18 @@ kern_return_t
 memory_backing_aware_buffer_stage_initialize(struct kdp_output_stage *stage)
 {
 	kern_return_t ret = KERN_SUCCESS;
-	struct memory_backing_aware_buffer_stage_data *data = NULL;
 
 	assert(stage != NULL);
 	assert(stage->kos_initialized == false);
 	assert(stage->kos_data == NULL);
 
-	stage->kos_data_size = sizeof(struct memory_backing_aware_buffer_stage_data) + PAGE_SIZE;
-	ret = kmem_alloc(kernel_map, (vm_offset_t*) &stage->kos_data, stage->kos_data_size, VM_KERN_MEMORY_DIAG);
+	stage->kos_data_size = PAGE_SIZE;
+	ret = kmem_alloc(kernel_map, (vm_offset_t*) &stage->kos_data, stage->kos_data_size,
+	    KMA_DATA, VM_KERN_MEMORY_DIAG);
 	if (KERN_SUCCESS != ret) {
 		printf("buffer_stage_initialize failed to allocate memory. Error 0x%x\n", ret);
 		return ret;
 	}
-
-	data = (struct memory_backing_aware_buffer_stage_data *) stage->kos_data;
-	data->buffer = (void *)((intptr_t) data + sizeof(struct memory_backing_aware_buffer_stage_data));
 
 	stage->kos_funcs.kosf_reset = memory_backing_aware_buffer_stage_reset;
 	stage->kos_funcs.kosf_outproc = memory_backing_aware_buffer_stage_outproc;

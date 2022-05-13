@@ -694,8 +694,16 @@ extern void             pmap_clear_noencrypt(ppnum_t pn);
  * is provided in a cleaner manner.
  */
 
-extern pmap_t   kernel_pmap;                    /* The kernel's map */
-#define         pmap_kernel()   (kernel_pmap)
+#if XNU_KERNEL_PRIVATE
+/*
+ * Note: because this is an API break we hide the constness of that pointer
+ *       to kexts for now
+ */
+extern const pmap_t     kernel_pmap;            /* The kernel's map */
+#else
+extern pmap_t           kernel_pmap;            /* The kernel's map */
+#endif
+#define pmap_kernel()   (kernel_pmap)
 
 #define VM_MEM_SUPERPAGE        0x100           /* map a superpage instead of a base page */
 #define VM_MEM_STACK            0x200

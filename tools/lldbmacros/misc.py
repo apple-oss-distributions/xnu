@@ -86,7 +86,7 @@ def showMCAstate(cmd_args=None):
         print(lldb_run_command('p/x *(x86_saved_state_t *) ' + hex(reg)))
         cpu = cpu + 1
 
-def dumpTimerList(mpqueue):
+def dumpTimerList(mpqueue, processor=None):
     """
     Utility function to dump the timer entries in list (anchor).
     anchor is a struct mpqueue_head.
@@ -96,19 +96,14 @@ def dumpTimerList(mpqueue):
         print('(empty)')
         return
 
-    thdr = ' {:<24s}{:<17s}{:<16s} {:<14s} {:<18s} count: {:d} '
-    tval = ' {:#018x}: {:16d} {:16d} {:s}{:3d}.{:09d}  ({:#018x})({:#018x}, {:#018x}) ({:s}) {:s}'
+    thdr = ' {:<24s}{:^17s}{:^18s} {:^18s} {:^18s} {:^18s} {:^18s} {:9s} {:^18s} count: {:d} '
+    tval = ' {:#018x}{:s} {:18d} {:18d} {:18.06f} {:18.06f} {:18.06f} {:18.06f} {:>9s}  ({:#018x})({:#018x}, {:#018x}) ({:s}) {:s}'
 
-    print(thdr.format('Entry', 'Deadline', 'soft_deadline', 'Secs To Go', '(*func)(param0, param1)', mpqueue.count))
+    print(thdr.format('Entry', 'Soft Deadline', 'Deadline', 'Soft To Go', 'Hard To Go', 'Duration', 'Leeway', 'Flags', '(*func)(param0, param1)', mpqueue.count))
+
+    recent_timestamp = GetRecentTimestamp()
 
     for timer_call in ParanoidIterateLinkageChain(mpqueue.head, 'struct timer_call *', 'tc_qlink'):
-        recent_timestamp = GetRecentTimestamp()
-        if (recent_timestamp < timer_call.tc_pqlink.deadline):
-            delta_sign = ' '
-            timer_fire = timer_call.tc_pqlink.deadline - recent_timestamp
-        else:
-            delta_sign = '-'
-            timer_fire = recent_timestamp - timer_call.tc_pqlink.deadline
 
         func_name = kern.Symbolicate(timer_call.tc_func)
 
@@ -141,20 +136,52 @@ def dumpTimerList(mpqueue):
                     pid = GetProcPIDForTask(thread.t_tro.tro_task)
                     procname = GetProcNameForTask(thread.t_tro.tro_task)
 
-                    extra_string += "thread: 0x{:x} {:s} task:{:s}[{:d}]".format(
-                            tid, name, procname, pid)
+                    otherprocessor = ""
+                    if processor :
+                        if thread.last_processor != processor:
+                            otherprocessor = " (Not same processor - was on {:d})".format(thread.last_processor.cpu_id)
+
+                    extra_string += "thread: 0x{:x} {:s} task:{:s}[{:d}]{:s}".format(
+                            tid, name, procname, pid, otherprocessor)
             except:
                 print("exception generating extra_string for call: {:#018x}".format(timer_call))
                 if dumpTimerList.enable_debug :
                     raise
 
-        tval = ' {:#018x}: {:16d} {:16d} {:s}{:3d}.{:09d}  ({:#018x})({:#018x},{:#018x}) ({:s}) {:s}'
-        print(tval.format(timer_call,
-            timer_call.tc_pqlink.deadline,
+        timer_fire = timer_call.tc_pqlink.deadline - recent_timestamp
+        timer_fire_s = kern.GetNanotimeFromAbstime(timer_fire) / 1000000000.0
+
+        soft_timer_fire = timer_call.tc_soft_deadline - recent_timestamp
+        soft_timer_fire_s = kern.GetNanotimeFromAbstime(soft_timer_fire) / 1000000000.0
+
+        leeway = timer_call.tc_pqlink.deadline - timer_call.tc_soft_deadline
+        leeway_s = kern.GetNanotimeFromAbstime(leeway) / 1000000000.0
+
+        tc_ttd_s = kern.GetNanotimeFromAbstime(timer_call.tc_ttd) / 1000000000.0
+
+        flags = int(timer_call.tc_flags)
+        timer_call_flags = {0x0:'', 0x1:'C', 0x2:'B', 0x4:'X', 0x8:'X', 0x10:'U', 0x20:'E',
+                0x40:'L', 0x80:'R'}
+
+        flags_str = ''
+        mask = 0x1
+        while mask <= 0x80 :
+            flags_str += timer_call_flags[int(flags & mask)]
+            mask = mask << 1
+
+        colon = ":"
+
+        if addressof(timer_call.tc_pqlink) == mpqueue.mpq_pqhead.pq_root :
+            colon = "*"
+
+        print(tval.format(timer_call, colon,
             timer_call.tc_soft_deadline,
-            delta_sign,
-            timer_fire // 1000000000,
-            timer_fire%1000000000,
+            timer_call.tc_pqlink.deadline,
+            soft_timer_fire_s,
+            timer_fire_s,
+            tc_ttd_s,
+            leeway_s,
+            flags_str,
             timer_call.tc_func,
             timer_call.tc_param0,
             timer_call.tc_param1,
@@ -226,9 +253,21 @@ def processorTimers(cmd_args=None):
     """
     Print details of processor timers, noting anything suspicious
     Also include long-term timer details
+
+        Callout flags:
+
+        C - Critical
+        B - Background
+        U - User timer
+        E - Explicit Leeway
+        L - Local
+        R - Rate-limited - (App Nap)
     """
-    hdr = '{:15s}{:<18s} {:<18s} {:<18s} {:<18s}'
-    print(hdr.format('Processor #', 'Processor pointer', 'Last dispatch', 'Next deadline', 'Difference'))
+
+    recent_timestamp = GetRecentTimestamp()
+
+    hdr = '{:15s}{:<18s} {:<18s} {:<18s} {:<18s} {:<18s} {:<18s} {:<18s} Recent Timestamp: {:d}'
+    print(hdr.format('Processor #', 'Processor pointer', 'Last dispatch', 'Soft deadline', 'Soft To Go', 'Hard deadline', 'Hard To Go', 'Current Leeway', recent_timestamp))
     print("=" * 82)
     p = kern.globals.processor_list
     EndOfAllTime = signed(-1)
@@ -236,24 +275,65 @@ def processorTimers(cmd_args=None):
         cpu = p.cpu_id
         cpu_data = GetCpuDataForCpuID(cpu)
         rt_timer = cpu_data.rtclock_timer
-        diff = signed(rt_timer.deadline) - signed(p.last_dispatch)
+        diff = signed(rt_timer.deadline) - signed(recent_timestamp)
+        diff_s = kern.GetNanotimeFromAbstime(diff) / 1000000000.0
         valid_deadline = signed(rt_timer.deadline) != EndOfAllTime
-        tmr = 'Processor {:<3d}: {:#018x} {:#018x} {:18s} {:18s} {:s}'
+        soft_deadline = rt_timer.queue.earliest_soft_deadline
+        soft_diff = signed(soft_deadline) - signed(recent_timestamp)
+        soft_diff_s = kern.GetNanotimeFromAbstime(soft_diff) / 1000000000.0
+        valid_soft_deadline = signed(soft_deadline) != EndOfAllTime
+        leeway_s = kern.GetNanotimeFromAbstime(rt_timer.deadline - soft_deadline) / 1000000000.0
+        tmr = 'Processor {:<3d}: {:#018x} {:<18d} {:<18s} {:<18s} {:<18s} {:<18s} {:<18s} {:s} {:s}'
         print(tmr.format(cpu,
             p,
             p.last_dispatch,
-            "{:#018x}".format(rt_timer.deadline) if valid_deadline else "None",
-            "{:#018x}".format(diff) if valid_deadline else "N/A",
-            ['(PAST DEADLINE)', '(ok)'][int(diff > 0)] if valid_deadline else ""))
+            "{:d}".format(soft_deadline) if valid_soft_deadline else "None",
+            "{:<16.06f}".format(soft_diff_s) if valid_soft_deadline else "N/A",
+            "{:d}".format(rt_timer.deadline) if valid_deadline else "None",
+            "{:<16.06f}".format(diff_s) if valid_deadline else "N/A",
+            "{:<16.06f}".format(leeway_s) if valid_soft_deadline and valid_deadline else "N/A",
+            ['(PAST SOFT DEADLINE)', '(soft deadline ok)'][int(soft_diff > 0)] if valid_soft_deadline else "",
+            ['(PAST DEADLINE)', '(deadline ok)'][int(diff > 0)] if valid_deadline else ""))
         if valid_deadline:
             if kern.arch == 'x86_64':
                 print('Next deadline set at: {:#018x}. Timer call list:'.format(rt_timer.when_set))
-            dumpTimerList(rt_timer.queue)
+            dumpTimerList(rt_timer.queue, p)
         p = p.processor_list
     print("-" * 82)
     longtermTimers()
+    print("Running timers:")
     ShowRunningTimers()
 
+@header("{:<6s}  {:^18s} {:^18s}".format("cpu_id", "Processor", "cpu_data") )
+@lldb_command('showcpudata')
+def ShowCPUData(cmd_args=[]):
+    """ Prints the CPU Data struct of each processor
+        Passing a CPU ID prints the CPU Data of just that CPU
+        Usage: (lldb) showcpudata [cpu id]
+    """
+
+    format_string = "{:>#6d}: {: <#018x} {: <#018x}"
+
+    find_cpu_id = None
+
+    if cmd_args:
+        find_cpu_id = ArgumentStringToInt(cmd_args[0])
+
+    print (ShowCPUData.header)
+
+    processors = [p for p in IterateLinkedList(kern.globals.processor_list, 'processor_list')]
+
+    processors.sort(key=lambda p: p.cpu_id)
+
+    for processor in processors:
+        cpu_id = int(processor.cpu_id)
+
+        if find_cpu_id and cpu_id != find_cpu_id:
+            continue
+
+        cpu_data = GetCpuDataForCpuID(cpu_id)
+
+        print (format_string.format(cpu_id, processor, cpu_data))
 
 @lldb_command('showtimerwakeupstats')
 def showTimerWakeupStats(cmd_args=None):
@@ -301,21 +381,33 @@ def showTimerWakeupStats(cmd_args=None):
 def ShowRunningTimers(cmd_args=None):
     """
     Print the state of all running timers.
-    
+
     Usage: showrunningtimers
     """
-    pset = addressof(kern.globals.pset0)
     processor_array = kern.globals.processor_array
+
+    recent_timestamp = GetRecentTimestamp()
+
+    hdr = '{:4s} {:^10s} {:^18s} {:^18s} {:^18s} {:^18s}'
+    print(hdr.format('CPU', 'State', 'Quantum', 'To Go', 'kperf', 'To Go', 'Hard To Go'))
+
+    cpu = '{:3d}: {:^10s} {:18d} {:16.06f} {:18d} {:16.06f}'
 
     i = 0
     while processor_array[i] != 0:
         processor = processor_array[i]
-        print('{}: {}'.format(
-                i, 'on' if processor.running_timers_active else 'off'))
-        print('\tquantum: {}'.format(
-                unsigned(processor.running_timers[0].tc_pqlink.deadline)))
-        print('\tkperf: {}'.format(
-                unsigned(processor.running_timers[1].tc_pqlink.deadline)))
+
+        statestr = 'runnning' if processor.running_timers_active else 'idle'
+
+        quantum = unsigned(processor.running_timers[0].tc_pqlink.deadline)
+        quantumdiff = signed(quantum) - signed(recent_timestamp)
+        quantumdiff_s = kern.GetNanotimeFromAbstime(quantumdiff) / 1000000000.0
+
+        kperf = unsigned(processor.running_timers[1].tc_pqlink.deadline)
+        kperfdiff = signed(kperf) - signed(recent_timestamp)
+        kperfdiff_s = kern.GetNanotimeFromAbstime(kperfdiff) / 1000000000.0
+
+        print (cpu.format(i, statestr, quantum, quantumdiff_s, kperf, kperfdiff_s))
         i += 1
 
 def DoReadMsr64(msr_address, lcpu):

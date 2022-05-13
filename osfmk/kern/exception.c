@@ -163,7 +163,6 @@ exception_init(void)
 }
 
 static TUNABLE(bool, pac_replace_ptrs_user, "-pac_replace_ptrs_user", false);
-static TUNABLE(bool, pac_replace_ts_user, "-pac_replace_ts_user", false);
 
 /*
  *	Routine:	exception_deliver
@@ -296,20 +295,20 @@ exception_deliver(
 	case EXCEPTION_STATE: {
 		mach_msg_type_number_t old_state_cnt, new_state_cnt;
 		thread_state_data_t old_state;
-		thread_set_status_flags_t flags = TSSF_CHECK_USER_FLAGS;
+		thread_set_status_flags_t get_flags = TSSF_TRANSLATE_TO_USER;
+		thread_set_status_flags_t set_flags = TSSF_CHECK_USER_FLAGS;
+		bool task_allow_user_state = task_needs_user_signed_thread_state(task);
 
-		if (pac_replace_ptrs_user) {
-			flags |= TSSF_ALLOW_ONLY_USER_PTRS;
-		}
-		if (pac_replace_ts_user) {
-			flags |= TSSF_ALLOW_ONLY_USER_STATE;
+		if (pac_replace_ptrs_user || task_allow_user_state) {
+			get_flags |= TSSF_RANDOM_USER_DIV;
+			set_flags |= (TSSF_ALLOW_ONLY_USER_PTRS | TSSF_RANDOM_USER_DIV);
 		}
 
 		c_thr_exc_raise_state++;
 		old_state_cnt = _MachineStateCount[flavor];
 		kr = thread_getstatus_to_user(thread, flavor,
 		    (thread_state_t)old_state,
-		    &old_state_cnt);
+		    &old_state_cnt, get_flags);
 		new_state_cnt = old_state_cnt;
 		if (kr == KERN_SUCCESS) {
 			new_state = (thread_state_t)kalloc_data(sizeof(thread_state_data_t), Z_WAITOK | Z_ZERO);
@@ -338,7 +337,7 @@ exception_deliver(
 					kr = thread_setstatus_from_user(thread, flavor,
 					    (thread_state_t)new_state, new_state_cnt,
 					    (thread_state_t)old_state, old_state_cnt,
-					    flags);
+					    set_flags);
 				}
 				goto out_release_right;
 			}
@@ -387,21 +386,20 @@ exception_deliver(
 	case EXCEPTION_STATE_IDENTITY: {
 		mach_msg_type_number_t old_state_cnt, new_state_cnt;
 		thread_state_data_t old_state;
-		thread_set_status_flags_t flags = TSSF_CHECK_USER_FLAGS;
+		thread_set_status_flags_t get_flags = TSSF_TRANSLATE_TO_USER;
+		thread_set_status_flags_t set_flags = TSSF_CHECK_USER_FLAGS;
+		bool task_allow_user_state = task_needs_user_signed_thread_state(task);
 
-		if (pac_replace_ptrs_user) {
-			flags |= TSSF_ALLOW_ONLY_USER_PTRS;
-		}
-
-		if (pac_replace_ts_user) {
-			flags |= TSSF_ALLOW_ONLY_USER_STATE;
+		if (pac_replace_ptrs_user || task_allow_user_state) {
+			get_flags |= TSSF_RANDOM_USER_DIV;
+			set_flags |= (TSSF_ALLOW_ONLY_USER_PTRS | TSSF_RANDOM_USER_DIV);
 		}
 
 		c_thr_exc_raise_state_id++;
 		old_state_cnt = _MachineStateCount[flavor];
 		kr = thread_getstatus_to_user(thread, flavor,
 		    (thread_state_t)old_state,
-		    &old_state_cnt);
+		    &old_state_cnt, get_flags);
 		new_state_cnt = old_state_cnt;
 		if (kr == KERN_SUCCESS) {
 			new_state = (thread_state_t)kalloc_data(sizeof(thread_state_data_t), Z_WAITOK | Z_ZERO);
@@ -436,7 +434,7 @@ exception_deliver(
 				if (exception != EXC_CORPSE_NOTIFY) {
 					kr = thread_setstatus_from_user(thread, flavor,
 					    (thread_state_t)new_state, new_state_cnt,
-					    (thread_state_t)old_state, old_state_cnt, flags);
+					    (thread_state_t)old_state, old_state_cnt, set_flags);
 				}
 				goto out_release_right;
 			}

@@ -30,11 +30,13 @@
 #include <ptrauth.h>
 #include <stdbool.h>
 #include <stdlib.h>
+#include <unistd.h>
 #include <mach/mach.h>
 #include <mach/exception.h>
 #include <mach/thread_status.h>
 #include <sys/types.h>
 #include <TargetConditionals.h>
+#include <mach/semaphore.h>
 
 #if __arm64__
 #define EXCEPTION_THREAD_STATE          ARM_THREAD_STATE64
@@ -158,6 +160,8 @@ catch_mach_exception_raise_state(
 }
 
 static int exception_count = 0;
+static int reset_diversifier = 0;
+static semaphore_t semaphore;
 
 /*
  * Since the test needs to change the opaque field in
@@ -174,7 +178,7 @@ struct test_user_thread_state_64 {
 	__uint32_t __cpsr;      /* Current program status register */
 	__uint32_t __opaque_flags; /* Flags describing structure format */
 };
-#define __TEST_USER_THREAD_STATE64_FLAGS_KERNEL_SIGNED 0x4
+#define __TEST_USER_THREAD_STATE64_FLAGS_KERNEL_SIGNED_PC 0x4
 
 /**
  * Called by mach_exc_server() to handle the exception.
@@ -196,7 +200,7 @@ catch_mach_exception_raise_state_identity(
 	thread_state_t out_state,
 	mach_msg_type_number_t *out_state_count)
 {
-	T_LOG("Caught a mach exception!\n");
+	T_LOG("Caught a mach exception %d!\n", type);
 	exception_count++;
 
 	/* There should only be two code values. */
@@ -208,6 +212,12 @@ catch_mach_exception_raise_state_identity(
 	 */
 	mach_exception_data_t codes_64 = (mach_exception_data_t)(void *)codes;
 	T_LOG("Mach exception codes[0]: %#llx, codes[1]: %#llx\n", codes_64[0], codes_64[1]);
+
+	if (type == EXC_CRASH) {
+		T_LOG("Received a crash notification, signaling main thread and returning\n");
+		T_ASSERT_MACH_SUCCESS(semaphore_signal(semaphore), "semaphore_signal");
+		return KERN_SUCCESS;
+	}
 
 	/* Verify that we're receiving the expected thread state flavor. */
 	T_QUIET; T_ASSERT_EQ(*flavor, EXCEPTION_THREAD_STATE, "The thread state flavor is EXCEPTION_THREAD_STATE");
@@ -222,26 +232,50 @@ catch_mach_exception_raise_state_identity(
 
 #if __arm64__
 	arm_thread_state64_t *state = (arm_thread_state64_t*)(void *)out_state;
+	struct test_user_thread_state_64 *test_state = (struct test_user_thread_state_64 *)(void *)out_state;
+	uint32_t userland_diversifier = test_state->__opaque_flags & 0xff000000;
 
 	void *pc = (void*)(arm_thread_state64_get_pc(*state) + 4);
 	/* Have to sign the new PC value when pointer authentication is enabled. */
+	T_LOG("Userland diversifier for thread state is 0x%x\n", userland_diversifier);
+	T_QUIET; T_ASSERT_NE(userland_diversifier, 0, "Userland diversifier is non zero");
+
 	pc = ptrauth_sign_unauthenticated(pc, ptrauth_key_function_pointer, 0);
 	arm_thread_state64_set_pc_fptr(*state, pc);
+
+	/* Use the set and get lr, fp and sp function to make sure it compiles */
+	arm_thread_state64_set_lr_fptr(*state, arm_thread_state64_get_lr_fptr(*state));
+	arm_thread_state64_set_sp(*state, arm_thread_state64_get_sp(*state));
+	arm_thread_state64_set_fp(*state, arm_thread_state64_get_fp(*state));
 #endif
 
-	if (exception_count == 1) {
+	if (reset_diversifier == 0) {
+		if (exception_count == 1) {
 #if __arm64__
-		/* Set the kernel signed bit, so kernel ignores the new PC */
-		struct test_user_thread_state_64 *test_state = (struct test_user_thread_state_64 *)(void *)out_state;
-		test_state->__opaque_flags |= __TEST_USER_THREAD_STATE64_FLAGS_KERNEL_SIGNED;
-		T_LOG("Set the kernel signed flag on the thread state");
+			/* Set the kernel signed bit, so kernel ignores the new PC */
+			test_state->__opaque_flags |= __TEST_USER_THREAD_STATE64_FLAGS_KERNEL_SIGNED_PC;
+			T_LOG("Set the kernel signed flag on the thread state");
 #else
-		T_LOG("Not on arm64, Not doing anything");
+			T_LOG("Not on arm64, Not doing anything");
 #endif
-	} else if (exception_count == 2) {
-		T_LOG("Not clearing the kernel signed bit, this should be the last exception");
+		} else if (exception_count == 2) {
+			T_LOG("Not clearing the kernel signed bit, this should be the last exception");
+		} else {
+			T_FAIL("Received more than 2 exceptions, failing the test");
+		}
 	} else {
-		T_FAIL("Received more than 2 exceptions, failing the test");
+		if (exception_count == 1) {
+#if __arm64__
+			/* Set the user diversifier to zero and resign the pc */
+			test_state->__opaque_flags &= 0x00ffffff;
+			arm_thread_state64_set_pc_fptr(*state, pc);
+			T_LOG("Set the diversifier to zero and signed the pc, this should crash on return");
+#else
+			T_LOG("Not on arm64, Not doing anything");
+#endif
+		} else {
+			T_FAIL("Received more than 2 exceptions, failing the test");
+		}
 	}
 
 	/* Return KERN_SUCCESS to tell the kernel to keep running the victim thread. */
@@ -253,7 +287,6 @@ create_exception_port_behavior64(exception_mask_t exception_mask, exception_beha
 {
 	mach_port_t exc_port = MACH_PORT_NULL;
 	mach_port_t task = mach_task_self();
-	mach_port_t thread = mach_thread_self();
 	kern_return_t kr = KERN_SUCCESS;
 
 	if (behavior != EXCEPTION_STATE_IDENTITY && behavior != EXCEPTION_IDENTITY_PROTECTED) {
@@ -272,8 +305,8 @@ create_exception_port_behavior64(exception_mask_t exception_mask, exception_beha
 	T_QUIET; T_ASSERT_MACH_SUCCESS(kr, "Inserted a SEND right into the exception port");
 
 	/* Tell the kernel what port to send exceptions to. */
-	kr = thread_set_exception_ports(
-		thread,
+	kr = task_set_exception_ports(
+		task,
 		exception_mask,
 		exc_port,
 		(exception_behavior_t)(behavior | (exception_behavior_t)MACH_EXCEPTION_CODES),
@@ -334,12 +367,44 @@ T_DECL(kernel_signed_pac_thread_state, "Test that kernel signed thread state giv
 #else
 	mach_port_t exc_port = create_exception_port(EXC_MASK_BAD_ACCESS);
 
-	//Change the expected exception to 2 when user ptr enforcement is turned on.
-	//int expected_exception = 2;
-	int expected_exception = 1;
+	int expected_exception = 2;
 
 	run_exception_handler(exc_port);
 	*(void *volatile*)0 = 0;
+
+	if (exception_count != expected_exception) {
+		T_FAIL("Expected %d exceptions, received %d", expected_exception, exception_count);
+	} else {
+		T_LOG("TEST PASSED");
+	}
+	T_END;
+#endif
+}
+
+T_DECL(user_signed_pac_thread_state, "Test that user signed thread state given to exception works with correct diversifier")
+{
+#if !__arm64e__
+	T_SKIP("Running on non-arm64e target, skipping...");
+#else
+	mach_port_t exc_port = create_exception_port(EXC_MASK_BAD_ACCESS | EXC_MASK_CRASH);
+	T_ASSERT_MACH_SUCCESS(semaphore_create(mach_task_self(), &semaphore,
+	    SYNC_POLICY_FIFO, 0), "semaphore_create");
+
+	exception_count = 0;
+	int expected_exception = 2;
+
+	run_exception_handler(exc_port);
+
+	/* Set the reset diversifier variable */
+	reset_diversifier = 1;
+	pid_t child_pid = fork();
+
+	if (child_pid == 0) {
+		*(void *volatile*)0 = 0;
+		T_FAIL("Child should have been terminated, but it did not");
+	}
+
+	T_ASSERT_MACH_SUCCESS(semaphore_wait(semaphore), "semaphore_wait");
 
 	if (exception_count != expected_exception) {
 		T_FAIL("Expected %d exceptions, received %d", expected_exception, exception_count);

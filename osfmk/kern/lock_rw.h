@@ -565,9 +565,36 @@ extern bool             lck_rw_lock_exclusive_check_contended(
  *
  * @returns TRUE if the lock was yield, FALSE otherwise
  */
-extern boolean_t        lck_rw_lock_yield_shared(
+extern bool             lck_rw_lock_yield_shared(
 	lck_rw_t                *lck,
 	boolean_t               force_yield);
+
+__enum_decl(lck_rw_yield_t, uint32_t, {
+	LCK_RW_YIELD_WRITERS_ONLY,
+	LCK_RW_YIELD_ANY_WAITER,
+	LCK_RW_YIELD_ALWAYS,
+});
+
+/*!
+ * @function lck_rw_lock_yield_exclusive
+ *
+ * @abstract
+ * Yields a rw_lock held in exclusive mode.
+ *
+ * @discussion
+ * This function can block.
+ * Yields the lock in case there are writers waiting.
+ * The yield will unlock, block, and re-lock the lock in exclusive mode.
+ *
+ * @param lck           rw_lock already held in exclusive mode to yield.
+ * @param mode          when to yield.
+ *
+ * @returns TRUE if the lock was yield, FALSE otherwise
+ */
+extern bool             lck_rw_lock_yield_exclusive(
+	lck_rw_t                *lck,
+	lck_rw_yield_t          mode);
+
 #endif /* XNU_KERNEL_PRIVATE */
 
 #if MACH_KERNEL_PRIVATE

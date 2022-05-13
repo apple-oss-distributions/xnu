@@ -198,6 +198,10 @@ SYSCTL_PROC(_net_inet_tcp, OID_AUTO, mptcp_preferred_version,
     CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED,
     &mptcp_preferred_version, 0, &sysctl_mptcp_version_check, "I", "");
 
+int mptcp_reass_total_qlen = 0;
+SYSCTL_INT(_net_inet_mptcp, OID_AUTO, reass_qlen,
+    CTLFLAG_RD | CTLFLAG_LOCKED, &mptcp_reass_total_qlen, 0,
+    "Total number of MPTCP segments in reassembly queues");
 
 static int
 mptcp_reass_present(struct socket *mp_so)
@@ -207,6 +211,7 @@ mptcp_reass_present(struct socket *mp_so)
 	struct tseg_qent *q;
 	int dowakeup = 0;
 	int flags = 0;
+	int count = 0;
 
 	/*
 	 * Present data to user, advancing rcv_nxt through
@@ -244,10 +249,14 @@ mptcp_reass_present(struct socket *mp_so)
 		}
 		zfree(tcp_reass_zone, q);
 		mp_tp->mpt_reassqlen--;
+		count++;
 		q = LIST_FIRST(&mp_tp->mpt_segq);
 	} while (q && q->tqe_m->m_pkthdr.mp_dsn == mp_tp->mpt_rcvnxt);
 	mp_tp->mpt_flags &= ~MPTCPF_REASS_INPROG;
 
+	if (count > 0) {
+		OSAddAtomic(-count, &mptcp_reass_total_qlen);
+	}
 	if (dowakeup) {
 		sorwakeup(mp_so); /* done with socket lock held */
 	}
@@ -286,6 +295,7 @@ mptcp_reass(struct socket *mp_so, struct pkthdr *phdr, int *tlenp, struct mbuf *
 	te = zalloc_flags(tcp_reass_zone, Z_WAITOK | Z_NOFAIL);
 
 	mp_tp->mpt_reassqlen++;
+	OSIncrementAtomic(&mptcp_reass_total_qlen);
 
 	/*
 	 * Find a segment which begins after this one does.
@@ -313,6 +323,7 @@ mptcp_reass(struct socket *mp_so, struct pkthdr *phdr, int *tlenp, struct mbuf *
 				zfree(tcp_reass_zone, te);
 				te = NULL;
 				mp_tp->mpt_reassqlen--;
+				OSDecrementAtomic(&mptcp_reass_total_qlen);
 				/*
 				 * Try to present any queued data
 				 * at the left window edge to the user.
@@ -354,6 +365,7 @@ mptcp_reass(struct socket *mp_so, struct pkthdr *phdr, int *tlenp, struct mbuf *
 		m_freem(q->tqe_m);
 		zfree(tcp_reass_zone, q);
 		mp_tp->mpt_reassqlen--;
+		OSDecrementAtomic(&mptcp_reass_total_qlen);
 		q = nq;
 	}
 
@@ -1630,4 +1642,26 @@ mptcp_set_restrictions(struct socket *mp_so)
 	}
 
 	ifnet_head_done();
+}
+
+#define DUMP_BUF_CHK() {        \
+	clen -= k;              \
+	if (clen < 1)           \
+	        goto done;      \
+	c += k;                 \
+}
+
+int
+dump_mptcp_reass_qlen(char *str, int str_len)
+{
+	char *c = str;
+	int k, clen = str_len;
+
+	if (mptcp_reass_total_qlen != 0) {
+		k = scnprintf(c, clen, "\nmptcp reass qlen %d\n", mptcp_reass_total_qlen);
+		DUMP_BUF_CHK();
+	}
+
+done:
+	return str_len - clen;
 }

@@ -3965,31 +3965,6 @@ dtrace_set_thread_inprobe(thread_t thread, uint16_t inprobe)
 	}
 }
 
-vm_offset_t
-dtrace_set_thread_recover(thread_t thread, vm_offset_t recover)
-{
-	vm_offset_t prev = 0;
-
-	if (thread != THREAD_NULL) {
-		prev = thread->recover;
-		thread->recover = recover;
-	}
-	return prev;
-}
-
-vm_offset_t
-dtrace_sign_and_set_thread_recover(thread_t thread, vm_offset_t recover)
-{
-#if defined(HAS_APPLE_PAC)
-	return dtrace_set_thread_recover(thread,
-	           (vm_address_t)ptrauth_sign_unauthenticated((void *)recover,
-	           ptrauth_key_function_pointer,
-	           ptrauth_blend_discriminator(&thread->recover, PAC_DISCRIMINATOR_RECOVER)));
-#else /* defined(HAS_APPLE_PAC) */
-	return dtrace_set_thread_recover(thread, recover);
-#endif /* defined(HAS_APPLE_PAC) */
-}
-
 void
 dtrace_thread_bootstrap(void)
 {

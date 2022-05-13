@@ -27,8 +27,7 @@
 
 T_GLOBAL_META(
 	T_META_NAMESPACE("xnu.monotonic"),
-	T_META_CHECK_LEAKS(false),
-	T_META_ENABLED(false)
+	T_META_CHECK_LEAKS(false)
 	);
 
 static bool
@@ -106,7 +105,7 @@ uncore_counts(int fd, uint64_t ctr_mask, uint64_t *counts)
 }
 
 #define REF_TIMEBASE_EVENT 0x3
-#define CTRS_MAX 32
+#define CTRS_MAX 128
 
 T_DECL(uncore_max_counters,
     "ensure that the maximum number of uncore countes is sane",
@@ -134,8 +133,7 @@ T_DECL(uncore_max_counters,
 		nctrs++;
 	} while (nctrs < CTRS_MAX);
 
-	T_EXPECT_LT(nctrs, CTRS_MAX,
-	    "only able to allocate a reasonable number of counters");
+	T_EXPECT_LT(nctrs, CTRS_MAX, "able to allocate %d uncore PMCs", nctrs);
 }
 
 static uint32_t
@@ -263,7 +261,8 @@ uncore_add_all(int fd, uint64_t event, int *nmonitors)
 
 T_DECL(uncore_accuracy,
     "ensure that the uncore counters count accurately",
-    T_META_ASROOT(true))
+    T_META_ASROOT(true),
+    T_META_MAYFAIL("rdar://88973518, threads need to be forced onto clusters"))
 {
 	int fd;
 	int nctrs = 0;
@@ -329,10 +328,16 @@ T_DECL(uncore_accuracy,
 
 	for (int mon = 0; mon < nmonitors; mon++) {
 		for (int i = 0; i < nctrs; i++) {
+			uint64_t after = counts[1][i * mon];
+			uint64_t before = counts[0][i * mon];
+			uint64_t delta = after - before;
+			T_LOG("%d,%2d: %12" PRIu64 "%12" PRIu64 " = %10" PRIu64, mon, i,
+			    before, after, delta);
 			T_QUIET;
-			T_EXPECT_GT(counts[1][i * mon], counts[0][i * mon],
+			T_EXPECT_GT(after, before,
 			    "uncore %d counter %d value is monotonically increasing",
 			    mon, i);
+			T_QUIET;
 			T_EXPECT_GT(counts[1][i * mon] - counts[0][i * mon],
 			    times[1] - times[0],
 			    "reference timebase on uncore %d counter %d satisfies "
@@ -353,7 +358,6 @@ T_DECL(uncore_ownership,
 
 	other_fd = open_uncore_error(&error);
 	T_ASSERT_LT(other_fd, 0, "opening a second uncore fd should fail");
-	T_ASSERT_EQ(error, EBUSY, "failure should be EBUSY");
 }
 
 T_DECL(uncore_root_required,

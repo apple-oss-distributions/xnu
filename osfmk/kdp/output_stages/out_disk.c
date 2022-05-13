@@ -314,7 +314,8 @@ disk_stage_initialize(struct kdp_output_stage *stage)
 	assert(stage->kos_data == NULL);
 
 	stage->kos_data_size = sizeof(struct disk_stage_data);
-	ret = kmem_alloc(kernel_map, (vm_offset_t*) &stage->kos_data, stage->kos_data_size, VM_KERN_MEMORY_DIAG);
+	ret = kmem_alloc(kernel_map, (vm_offset_t*) &stage->kos_data, stage->kos_data_size,
+	    KMA_DATA, VM_KERN_MEMORY_DIAG);
 	if (KERN_SUCCESS != ret) {
 		return ret;
 	}

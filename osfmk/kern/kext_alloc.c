@@ -45,15 +45,15 @@
 #define KASLR_IOREG_DEBUG 0
 
 
-vm_map_t g_kext_map = 0;
+SECURITY_READ_ONLY_LATE(vm_map_t) g_kext_map = 0;
 #if KASLR_IOREG_DEBUG
-mach_vm_offset_t kext_alloc_base = 0;
-mach_vm_offset_t kext_alloc_max = 0;
+SECURITY_READ_ONLY_LATE(mach_vm_offset_t) kext_alloc_base = 0;
+SECURITY_READ_ONLY_LATE(mach_vm_offset_t) kext_alloc_max = 0;
 #else
-static mach_vm_offset_t kext_alloc_base = 0;
-static mach_vm_offset_t kext_alloc_max = 0;
+static SECURITY_READ_ONLY_LATE(mach_vm_offset_t) kext_alloc_base = 0;
+static SECURITY_READ_ONLY_LATE(mach_vm_offset_t) kext_alloc_max = 0;
 #if CONFIG_KEXT_BASEMENT
-static mach_vm_offset_t kext_post_boot_base = 0;
+static SECURITY_READ_ONLY_LATE(mach_vm_offset_t) kext_post_boot_base = 0;
 #endif
 #endif
 
@@ -67,7 +67,6 @@ void
 kext_alloc_init(void)
 {
 #if CONFIG_KEXT_BASEMENT
-	kern_return_t rval = 0;
 	kernel_segment_command_t *text = NULL;
 	kernel_segment_command_t *prelinkTextSegment = NULL;
 	mach_vm_offset_t text_end, text_start;
@@ -104,14 +103,11 @@ kext_alloc_init(void)
 	}
 
 	/* Allocate the sub block of the kernel map */
-	rval = kmem_suballoc(kernel_map, (vm_offset_t *) &kext_alloc_base,
+	vm_map_will_allocate_early_map(&g_kext_map);
+	g_kext_map = kmem_suballoc(kernel_map, (vm_offset_t *) &kext_alloc_base,
 	    kext_alloc_size, VM_MAP_CREATE_PAGEABLE,
 	    VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE,
-	    VM_MAP_KERNEL_FLAGS_NONE, VM_KERN_MEMORY_KEXT,
-	    &g_kext_map);
-	if (rval != KERN_SUCCESS) {
-		panic("kext_alloc_init: kmem_suballoc failed 0x%x", rval);
-	}
+	    KMS_PERMANENT | KMS_NOFAIL, VM_KERN_MEMORY_KEXT).kmr_submap;
 
 	if ((kext_alloc_base + kext_alloc_size) > kext_alloc_max) {
 		panic("kext_alloc_init: failed to get first 2GB");

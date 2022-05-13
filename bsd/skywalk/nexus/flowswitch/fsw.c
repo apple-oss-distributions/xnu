@@ -78,19 +78,19 @@ static ZONE_DEFINE(nx_fsw_stats_zone, SKMEM_ZONE_PREFIX ".nx.fsw.stats",
     sizeof(struct __nx_stats_fsw), ZC_ZFREE_CLEARMEM);
 
 #define SKMEM_TAG_FSW_PORTS     "com.apple.skywalk.fsw.ports"
-kern_allocation_name_t skmem_tag_fsw_ports;
+SKMEM_TAG_DEFINE(skmem_tag_fsw_ports, SKMEM_TAG_FSW_PORTS);
 
 #define SKMEM_TAG_FSW_FOB_HASH "com.apple.skywalk.fsw.fsw.fob.hash"
-kern_allocation_name_t skmem_tag_fsw_fob_hash;
+SKMEM_TAG_DEFINE(skmem_tag_fsw_fob_hash, SKMEM_TAG_FSW_FOB_HASH);
 
 #define SKMEM_TAG_FSW_FRB_HASH "com.apple.skywalk.fsw.fsw.frb.hash"
-kern_allocation_name_t skmem_tag_fsw_frb_hash;
+SKMEM_TAG_DEFINE(skmem_tag_fsw_frb_hash, SKMEM_TAG_FSW_FRB_HASH);
 
 #define SKMEM_TAG_FSW_FRIB_HASH "com.apple.skywalk.fsw.fsw.frib.hash"
-kern_allocation_name_t skmem_tag_fsw_frib_hash;
+SKMEM_TAG_DEFINE(skmem_tag_fsw_frib_hash, SKMEM_TAG_FSW_FRIB_HASH);
 
 #define SKMEM_TAG_FSW_FRAG_MGR "com.apple.skywalk.fsw.fsw.frag.mgr"
-kern_allocation_name_t skmem_tag_fsw_frag_mgr;
+SKMEM_TAG_DEFINE(skmem_tag_fsw_frag_mgr, SKMEM_TAG_FSW_FRAG_MGR);
 
 /* 64-bit mask with range */
 #define BMASK64(_beg, _end)     \
@@ -2184,35 +2184,6 @@ done:
 	return err;
 }
 
-static void
-fsw_mem_init(void)
-{
-	ASSERT(skmem_tag_fsw_ports == NULL);
-	skmem_tag_fsw_ports =
-	    kern_allocation_name_allocate(SKMEM_TAG_FSW_PORTS, 0);
-	ASSERT(skmem_tag_fsw_ports != NULL);
-
-	ASSERT(skmem_tag_fsw_fob_hash == NULL);
-	skmem_tag_fsw_fob_hash =
-	    kern_allocation_name_allocate(SKMEM_TAG_FSW_FOB_HASH, 0);
-	ASSERT(skmem_tag_fsw_fob_hash != NULL);
-
-	ASSERT(skmem_tag_fsw_frb_hash == NULL);
-	skmem_tag_fsw_frb_hash =
-	    kern_allocation_name_allocate(SKMEM_TAG_FSW_FRB_HASH, 0);
-	ASSERT(skmem_tag_fsw_frb_hash != NULL);
-
-	ASSERT(skmem_tag_fsw_frib_hash == NULL);
-	skmem_tag_fsw_frib_hash =
-	    kern_allocation_name_allocate(SKMEM_TAG_FSW_FRIB_HASH, 0);
-	ASSERT(skmem_tag_fsw_frib_hash != NULL);
-
-	ASSERT(skmem_tag_fsw_frag_mgr == NULL);
-	skmem_tag_fsw_frag_mgr =
-	    kern_allocation_name_allocate(SKMEM_TAG_FSW_FRAG_MGR, 0);
-	ASSERT(skmem_tag_fsw_frag_mgr != NULL);
-}
-
 void
 fsw_init(void)
 {
@@ -2220,8 +2191,6 @@ fsw_init(void)
 	_CASSERT(PKT_MAX_PROTO_HEADER_SIZE <= NX_FSW_MINBUFSIZE);
 
 	if (!__nx_fsw_inited) {
-		fsw_mem_init();
-
 		/*
 		 * Register callbacks for interface & protocol events
 		 * Use dummy arg for callback cookie.
@@ -2241,32 +2210,6 @@ fsw_init(void)
 	}
 }
 
-static void
-fsw_mem_uninit(void)
-{
-	if (skmem_tag_fsw_ports != NULL) {
-		kern_allocation_name_release(skmem_tag_fsw_ports);
-		skmem_tag_fsw_ports = NULL;
-	}
-	if (skmem_tag_fsw_fob_hash != NULL) {
-		kern_allocation_name_release(skmem_tag_fsw_fob_hash);
-		skmem_tag_fsw_fob_hash = NULL;
-	}
-	if (skmem_tag_fsw_frb_hash != NULL) {
-		kern_allocation_name_release(skmem_tag_fsw_frb_hash);
-		skmem_tag_fsw_frb_hash = NULL;
-	}
-	if (skmem_tag_fsw_frib_hash != NULL) {
-		kern_allocation_name_release(
-			skmem_tag_fsw_frib_hash);
-		skmem_tag_fsw_frib_hash = NULL;
-	}
-	if (skmem_tag_fsw_frag_mgr != NULL) {
-		kern_allocation_name_release(skmem_tag_fsw_frag_mgr);
-		skmem_tag_fsw_frag_mgr = NULL;
-	}
-}
-
 void
 fsw_uninit(void)
 {
@@ -2275,7 +2218,6 @@ fsw_uninit(void)
 		    __nx_fsw_ifnet_eventhandler_tag);
 		EVENTHANDLER_DEREGISTER(&protoctl_evhdlr_ctxt, protoctl_event,
 		    __nx_fsw_protoctl_eventhandler_tag);
-		fsw_mem_uninit();
 
 		__nx_fsw_inited = 0;
 	}

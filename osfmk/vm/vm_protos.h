@@ -99,7 +99,7 @@ extern int max_task_footprint_mb;       /* Per-task limit on physical memory con
 
 /* Some loose-ends VM stuff */
 
-extern vm_size_t        msg_ool_size_small;
+extern const vm_size_t msg_ool_size_small;
 
 extern kern_return_t vm_tests(void);
 extern void consider_machine_adjust(void);
@@ -610,8 +610,6 @@ extern void vm_named_entry_associate_vm_object(
 	vm_object_offset_t      offset,
 	vm_object_size_t        size,
 	vm_prot_t               prot);
-
-extern void vm_paging_map_init(void);
 
 extern int macx_backing_store_compaction(int flags);
 extern unsigned int mach_vm_ctl_page_free_wanted(void);

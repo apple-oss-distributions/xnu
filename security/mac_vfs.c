@@ -1427,8 +1427,7 @@ out:
 	}
 
 	if (fatal_failure_desc_len > 0 && fatal_failure_desc != NULL) {
-		/* AMFI uses kalloc() which for kexts is redirected to KHEAP_KEXT */
-		kheap_free(KHEAP_KEXT, fatal_failure_desc, fatal_failure_desc_len);
+		kheap_free(KHEAP_DEFAULT, fatal_failure_desc, fatal_failure_desc_len);
 	}
 
 	return error;

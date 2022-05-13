@@ -23,13 +23,6 @@ T_DECL(hazard_basic, "hazard_basic",
 	T_EXPECT_EQ(1ll, run_sysctl_test("hazard_basic", 0), "test succeeded");
 }
 
-T_DECL(hw_lock_allow_invalid, "hw_lock_allow_invalid",
-    T_META_NAMESPACE("xnu.sync"),
-    T_META_CHECK_LEAKS(false))
-{
-	T_EXPECT_EQ(1ll, run_sysctl_test("hw_lock_allow_invalid", 0), "test succeeded");
-}
-
 T_DECL(hw_lck_ticket_allow_invalid, "hw_lck_ticket_allow_invalid",
     T_META_NAMESPACE("xnu.sync"),
     T_META_CHECK_LEAKS(false))

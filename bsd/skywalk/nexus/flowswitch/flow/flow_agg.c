@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2019-2022 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -503,6 +503,7 @@ copy_pkt_csum_packed(struct __kern_packet *spkt, uint32_t plen,
 	uint16_t data_off;
 	uint32_t tmplen;
 	boolean_t odd_start = FALSE;
+	bool verify_l4;
 
 	/* One of them must be != NULL, but they can't be both set */
 	VERIFY((currm != NULL || currp != NULL) &&
@@ -522,11 +523,9 @@ copy_pkt_csum_packed(struct __kern_packet *spkt, uint32_t plen,
 		curr_len = currp->buf_dlen;
 	}
 
-	/* Reset the checksum flags in source packet */
-	spkt->pkt_csum_flags &= ~PACKET_CSUM_RX_FLAGS;
-
 	/* Verify checksum only for IPv4 */
 	len = spkt->pkt_flow_ip_hlen;
+	verify_l3 = (verify_l3 && !PACKET_HAS_VALID_IP_CSUM(spkt));
 	if (verify_l3) {
 		if (PKT_IS_TRUNC_MBUF(spkt)) {
 			partial = os_cpu_in_cksum_mbuf(spkt->pkt_mbuf,
@@ -547,6 +546,9 @@ copy_pkt_csum_packed(struct __kern_packet *spkt, uint32_t plen,
 		}
 	}
 
+	verify_l4 = ((spkt->pkt_csum_flags & PACKET_CSUM_RX_FULL_FLAGS) !=
+	    PACKET_CSUM_RX_FULL_FLAGS);
+
 	/* Copy & verify TCP checksum */
 	start = spkt->pkt_flow_ip_hlen + spkt->pkt_flow_tcp_hlen;
 	l4len = plen - spkt->pkt_flow_ip_hlen;
@@ -556,8 +558,10 @@ copy_pkt_csum_packed(struct __kern_packet *spkt, uint32_t plen,
 		odd_start = FALSE;
 
 		/* First, simple checksum on the TCP header */
-		partial = os_cpu_in_cksum_mbuf(spkt->pkt_mbuf,
-		    spkt->pkt_flow_tcp_hlen, spkt->pkt_flow_ip_hlen, 0);
+		if (verify_l4) {
+			partial = os_cpu_in_cksum_mbuf(spkt->pkt_mbuf,
+			    spkt->pkt_flow_tcp_hlen, spkt->pkt_flow_ip_hlen, 0);
+		}
 
 		/* Now, copy & sum the payload */
 		if (tmplen > 0) {
@@ -571,8 +575,10 @@ copy_pkt_csum_packed(struct __kern_packet *spkt, uint32_t plen,
 		odd_start = FALSE;
 
 		/* First, simple checksum on the TCP header */
-		partial = pkt_sum(SK_PKT2PH(spkt),
-		    (soff + spkt->pkt_flow_ip_hlen), spkt->pkt_flow_tcp_hlen);
+		if (verify_l4) {
+			partial = pkt_sum(SK_PKT2PH(spkt), (soff +
+			    spkt->pkt_flow_ip_hlen), spkt->pkt_flow_tcp_hlen);
+		}
 
 		/* Now, copy & sum the payload */
 		if (tmplen > 0) {
@@ -595,29 +601,34 @@ copy_pkt_csum_packed(struct __kern_packet *spkt, uint32_t plen,
 	/* Fold data checksum to 16 bit */
 	*data_csum = __packet_fold_sum(data_partial);
 
-	/* Fold in the data checksum to TCP checksum */
-	partial += *data_csum;
-
 	if (currm != NULL) {
 		currm->m_len = curr_len;
 	} else {
 		currp->buf_dlen = curr_len;
 	}
 
-	partial += htons(l4len + IPPROTO_TCP);
-	if (spkt->pkt_flow_ip_ver == IPVERSION) {
-		csum = in_pseudo(spkt->pkt_flow_ipv4_src.s_addr,
-		    spkt->pkt_flow_ipv4_dst.s_addr, partial);
+	if (verify_l4) {
+		/* Fold in the data checksum to TCP checksum */
+		partial += *data_csum;
+		partial += htons(l4len + IPPROTO_TCP);
+		if (spkt->pkt_flow_ip_ver == IPVERSION) {
+			csum = in_pseudo(spkt->pkt_flow_ipv4_src.s_addr,
+			    spkt->pkt_flow_ipv4_dst.s_addr, partial);
+		} else {
+			ASSERT(spkt->pkt_flow_ip_ver == IPV6_VERSION);
+			csum = in6_pseudo(&spkt->pkt_flow_ipv6_src,
+			    &spkt->pkt_flow_ipv6_dst, partial);
+		}
+		/* pkt metadata will be transfer to super packet */
+		__packet_set_inet_checksum(SK_PKT2PH(spkt),
+		    PACKET_CSUM_RX_FULL_FLAGS, 0, csum, false);
 	} else {
-		ASSERT(spkt->pkt_flow_ip_ver == IPV6_VERSION);
-		csum = in6_pseudo(&spkt->pkt_flow_ipv6_src,
-		    &spkt->pkt_flow_ipv6_dst, partial);
+		/* grab csum value from offload */
+		csum = spkt->pkt_csum_rx_value;
 	}
+
 	SK_DF(logflags, "TCP copy+sum %u(%u) (csum 0x%04x)",
 	    start - spkt->pkt_flow_tcp_hlen, l4len, ntohs(csum));
-	__packet_set_inet_checksum(SK_PKT2PH(spkt), spkt->pkt_csum_flags |
-	    PACKET_CSUM_DATA_VALID | PACKET_CSUM_PSEUDO_HDR, 0,
-	    csum, false);
 
 	if ((csum ^ 0xffff) != 0) {
 		/*
@@ -676,7 +687,7 @@ copy_pkt_csum(struct __kern_packet *pkt, uint32_t plen, _dbuf_array_t *dbuf,
 	uint32_t data_len;
 	uint16_t dbuf_off;
 	uint16_t copied_len = 0;
-	bool l3_csum_ok = !verify_l3;
+	bool l3_csum_ok;
 	uint8_t *daddr;
 
 	if (dbuf->dba_is_buflet) {
@@ -688,9 +699,6 @@ copy_pkt_csum(struct __kern_packet *pkt, uint32_t plen, _dbuf_array_t *dbuf,
 		ASSERT(mbuf_maxlen(dbuf->dba_mbuf[0]) >= plen);
 	}
 
-	/* Reset the checksum flags in source packet */
-	pkt->pkt_csum_flags &= ~PACKET_CSUM_RX_FLAGS;
-
 	/* Some compat drivers compute full checksum */
 	if (PKT_IS_MBUF(pkt) && ((pkt->pkt_mbuf->m_pkthdr.csum_flags &
 	    CSUM_RX_FULL_FLAGS) == CSUM_RX_FULL_FLAGS)) {
@@ -701,9 +709,9 @@ copy_pkt_csum(struct __kern_packet *pkt, uint32_t plen, _dbuf_array_t *dbuf,
 		SK_DF(logflags, "HW csumf/rxstart/rxval 0x%x/%u/0x%04x",
 		    pkt->pkt_mbuf->m_pkthdr.csum_flags,
 		    pkt->pkt_mbuf->m_pkthdr.csum_rx_start, csum);
-		/* pkt and mbuf flags are same for full csum */
-		__packet_set_inet_checksum(SK_PKT2PH(pkt), CSUM_RX_FULL_FLAGS,
-		    0, csum, false);
+		/* pkt metadata will be transfer to super packet */
+		__packet_set_inet_checksum(SK_PKT2PH(pkt),
+		    PACKET_CSUM_RX_FULL_FLAGS, 0, csum, false);
 		if ((csum ^ 0xffff) == 0) {
 			return true;
 		} else {
@@ -720,6 +728,8 @@ copy_pkt_csum(struct __kern_packet *pkt, uint32_t plen, _dbuf_array_t *dbuf,
 		partial = pkt_copyaddr_sum(SK_PKT2PH(pkt), soff,
 		    (daddr + start), len, true, 0, NULL);
 	}
+	verify_l3 = (verify_l3 && !PACKET_HAS_VALID_IP_CSUM(pkt));
+	l3_csum_ok = !verify_l3;
 	if (verify_l3) {
 		csum = __packet_fold_sum(partial);
 		SK_DF(logflags, "IP copy+sum %u(%u) (csum 0x%04x)",
@@ -794,11 +804,13 @@ copy_pkt_csum(struct __kern_packet *pkt, uint32_t plen, _dbuf_array_t *dbuf,
 		csum = in6_pseudo(&pkt->pkt_flow_ipv6_src,
 		    &pkt->pkt_flow_ipv6_dst, partial);
 	}
+
 	SK_DF(logflags, "TCP copy+sum %u(%u) (csum 0x%04x)",
 	    pkt->pkt_flow_ip_hlen, len, csum);
-	__packet_set_inet_checksum(SK_PKT2PH(pkt), pkt->pkt_csum_flags |
-	    PACKET_CSUM_DATA_VALID | PACKET_CSUM_PSEUDO_HDR, 0,
-	    csum, false);
+
+	/* pkt metadata will be transfer to super packet */
+	__packet_set_inet_checksum(SK_PKT2PH(pkt), PACKET_CSUM_RX_FULL_FLAGS,
+	    0, csum, false);
 	if ((csum ^ 0xffff) != 0) {
 		return false;
 	}
@@ -1431,6 +1443,12 @@ static void
 flow_rx_agg_channel(struct nx_flowswitch *fsw, struct flow_entry *fe,
     struct pktq *dropped_pkts, bool is_mbuf)
 {
+#define __RX_AGG_CHAN_DROP_SOURCE_PACKET(_pkt)    do {   \
+	KPKTQ_ENQUEUE(dropped_pkts, (_pkt));             \
+	(_pkt) = NULL;                                   \
+	FLOW_AGG_CLEAR(&fa);                             \
+	prev_csum_ok = false;                            \
+} while (0)
 	struct flow_agg fa;             /* states */
 	FLOW_AGG_CLEAR(&fa);
 
@@ -1515,7 +1533,7 @@ flow_rx_agg_channel(struct nx_flowswitch *fsw, struct flow_entry *fe,
 				continue;
 			}
 			SK_ERR("flow_pkt_track failed (err %d)", err);
-			KPKTQ_ENQUEUE(dropped_pkts, pkt);
+			__RX_AGG_CHAN_DROP_SOURCE_PACKET(pkt);
 			continue;
 		}
 
@@ -1564,7 +1582,7 @@ flow_rx_agg_channel(struct nx_flowswitch *fsw, struct flow_entry *fe,
 			STATS_INC(fsws, FSW_STATS_DROP_NOMEM_PKT);
 			SK_ERR("packet too big: bufcnt %d len %d", bh_cnt_tmp,
 			    plen);
-			KPKTQ_ENQUEUE(dropped_pkts, pkt);
+			__RX_AGG_CHAN_DROP_SOURCE_PACKET(pkt);
 			continue;
 		}
 		if (bh_cnt < bh_cnt_tmp) {
@@ -1592,7 +1610,7 @@ flow_rx_agg_channel(struct nx_flowswitch *fsw, struct flow_entry *fe,
 			if (__improbable((tmp == 0) || (bh_cnt < bh_cnt_tmp))) {
 				STATS_INC(fsws, FSW_STATS_DROP_NOMEM_PKT);
 				SK_ERR("buflet alloc failed (err %d)", err);
-				KPKTQ_ENQUEUE(dropped_pkts, pkt);
+				__RX_AGG_CHAN_DROP_SOURCE_PACKET(pkt);
 				continue;
 			}
 		}
@@ -1676,7 +1694,7 @@ non_agg:
 				STATS_INC(fsws, FSW_STATS_DROP_NOMEM_PKT);
 				SK_ERR("packet alloc failed (err %d)", err);
 				_free_dbuf_array(dpp, &dbuf_array);
-				KPKTQ_ENQUEUE(dropped_pkts, pkt);
+				__RX_AGG_CHAN_DROP_SOURCE_PACKET(pkt);
 				continue;
 			}
 			spkt = SK_PTR_ADDR_KPKT(sph);
@@ -1750,6 +1768,14 @@ static void
 flow_rx_agg_host(struct nx_flowswitch *fsw, struct flow_entry *fe,
     struct pktq *dropped_pkts, bool is_mbuf)
 {
+#define __RX_AGG_HOST_DROP_SOURCE_PACKET(_pkt)    do {   \
+	drop_packets++;                                  \
+	drop_bytes += (_pkt)->pkt_length;                \
+	KPKTQ_ENQUEUE(dropped_pkts, (_pkt));             \
+	(_pkt) = NULL;                                   \
+	FLOW_AGG_CLEAR(&fa);                             \
+	prev_csum_ok = false;                            \
+} while (0)
 	struct flow_agg fa;             /* states */
 	FLOW_AGG_CLEAR(&fa);
 
@@ -1982,9 +2008,7 @@ try_again:
 					    FSW_STATS_RX_DROP_NOMEM_BUF);
 					SK_ERR("mbuf alloc failed (err %d)",
 					    err);
-					KPKTQ_ENQUEUE(dropped_pkts, pkt);
-					drop_packets++;
-					drop_bytes += pkt->pkt_length;
+					__RX_AGG_HOST_DROP_SOURCE_PACKET(pkt);
 					continue;
 				}
 				alloced++;
@@ -2082,9 +2106,7 @@ non_agg:
 					    FSW_STATS_RX_DROP_NOMEM_BUF);
 					SK_ERR("mbuf pullup failed (err %d)",
 					    err);
-					KPKTQ_ENQUEUE(dropped_pkts, pkt);
-					drop_packets++;
-					drop_bytes += pkt->pkt_length;
+					__RX_AGG_HOST_DROP_SOURCE_PACKET(pkt);
 					continue;
 				}
 				m->m_pkthdr.pkt_hdr = mtod(m, uint8_t *);
@@ -2122,9 +2144,7 @@ non_agg:
 					    FSW_STATS_RX_DROP_NOMEM_BUF);
 					SK_ERR("mbuf pullup failed (err %d)",
 					    err);
-					KPKTQ_ENQUEUE(dropped_pkts, pkt);
-					drop_packets++;
-					drop_bytes += pkt->pkt_length;
+					__RX_AGG_HOST_DROP_SOURCE_PACKET(pkt);
 					continue;
 				}
 				m->m_pkthdr.pkt_hdr = mtod(m, uint8_t *);

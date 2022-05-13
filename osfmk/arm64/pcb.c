@@ -282,7 +282,9 @@ machine_thread_destroy(thread_t thread)
 			arm_debug_set(NULL);
 		}
 
-		zfree(ads_zone, thread->machine.DebugData);
+		if (os_ref_release(&thread->machine.DebugData->ref) == 0) {
+			zfree(ads_zone, thread->machine.DebugData);
+		}
 	}
 }
 
@@ -477,17 +479,31 @@ arm_debug_set32(arm_debug_state_t *debug_state)
 	arm_debug_info_t * debug_info    = arm_debug_info();
 	boolean_t          intr;
 	arm_debug_state_t  off_state;
+	arm_debug_state_t  *cpu_debug;
 	uint64_t           all_ctrls = 0;
 
 	intr = ml_set_interrupts_enabled(FALSE);
 	cpu_data_ptr = getCpuDatap();
+	cpu_debug = cpu_data_ptr->cpu_user_debug;
 
-	// Set current user debug
-	cpu_data_ptr->cpu_user_debug = debug_state;
-
-	if (NULL == debug_state) {
+	/*
+	 * Retain and set new per-cpu state.
+	 * Reference count does not matter when turning off debug state.
+	 */
+	if (debug_state == NULL) {
 		bzero(&off_state, sizeof(off_state));
+		cpu_data_ptr->cpu_user_debug = NULL;
 		debug_state = &off_state;
+	} else {
+		os_ref_retain(&debug_state->ref);
+		cpu_data_ptr->cpu_user_debug = debug_state;
+	}
+
+	/* Release previous debug state. */
+	if (cpu_debug != NULL) {
+		if (os_ref_release(&cpu_debug->ref) == 0) {
+			zfree(ads_zone, cpu_debug);
+		}
 	}
 
 	switch (debug_info->num_breakpoint_pairs) {
@@ -652,13 +668,9 @@ arm_debug_set32(arm_debug_state_t *debug_state)
 		mask_saved_state_cpsr(current_thread()->machine.upcb, PSR64_SS, 0);
 	} else {
 		update_mdscr(0x1, 0);
-
-#if SINGLE_STEP_RETIRE_ERRATA
-		// Workaround for radar 20619637
-		__builtin_arm_isb(ISB_SY);
-#endif
 	}
 
+	__builtin_arm_isb(ISB_SY);
 	(void) ml_set_interrupts_enabled(intr);
 }
 
@@ -669,17 +681,31 @@ arm_debug_set64(arm_debug_state_t *debug_state)
 	arm_debug_info_t * debug_info    = arm_debug_info();
 	boolean_t          intr;
 	arm_debug_state_t  off_state;
+	arm_debug_state_t  *cpu_debug;
 	uint64_t           all_ctrls = 0;
 
 	intr = ml_set_interrupts_enabled(FALSE);
 	cpu_data_ptr = getCpuDatap();
+	cpu_debug = cpu_data_ptr->cpu_user_debug;
 
-	// Set current user debug
-	cpu_data_ptr->cpu_user_debug = debug_state;
-
-	if (NULL == debug_state) {
+	/*
+	 * Retain and set new per-cpu state.
+	 * Reference count does not matter when turning off debug state.
+	 */
+	if (debug_state == NULL) {
 		bzero(&off_state, sizeof(off_state));
+		cpu_data_ptr->cpu_user_debug = NULL;
 		debug_state = &off_state;
+	} else {
+		os_ref_retain(&debug_state->ref);
+		cpu_data_ptr->cpu_user_debug = debug_state;
+	}
+
+	/* Release previous debug state. */
+	if (cpu_debug != NULL) {
+		if (os_ref_release(&cpu_debug->ref) == 0) {
+			zfree(ads_zone, cpu_debug);
+		}
 	}
 
 	switch (debug_info->num_breakpoint_pairs) {
@@ -844,13 +870,9 @@ arm_debug_set64(arm_debug_state_t *debug_state)
 		mask_saved_state_cpsr(current_thread()->machine.upcb, PSR64_SS, 0);
 	} else {
 		update_mdscr(0x1, 0);
-
-#if SINGLE_STEP_RETIRE_ERRATA
-		// Workaround for radar 20619637
-		__builtin_arm_isb(ISB_SY);
-#endif
 	}
 
+	__builtin_arm_isb(ISB_SY);
 	(void) ml_set_interrupts_enabled(intr);
 }
 

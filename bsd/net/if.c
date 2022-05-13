@@ -5642,7 +5642,7 @@ ifa_remref(struct ifaddr *ifa, int locked)
 				 * old ABI was that this had to be allocated
 				 * with MALLOC(M_IFADDR).
 				 */
-				kheap_free_addr(KHEAP_KEXT, ifa);
+				kheap_free_addr(KHEAP_DEFAULT, ifa);
 			} else
 #endif /* PLATFORM_MacOSX */
 			{

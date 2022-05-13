@@ -1536,8 +1536,7 @@ T_DECL(lookup_long_paths, "lookup long path names")
 #pragma mark - boot tracing
 
 static const char *expected_subsystems[] = {
-	"tunables", "locks_early", "kprintf", "pmap_steal", "vm_kernel",
-	"kmem", "zalloc",
+	"tunables", "locks_early", "kprintf", "pmap_steal", "kmem", "zalloc",
 	/* "percpu", only has a startup phase on Intel */
 	"locks", "codesigning", "oslog", "early_boot",
 };

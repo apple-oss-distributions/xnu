@@ -176,7 +176,7 @@ static int __ch_inited = 0;
 uint64_t __ch_umd_redzone_cookie = 0;
 
 #define SKMEM_TAG_CH_KEY        "com.apple.skywalk.channel.key"
-kern_allocation_name_t skmem_tag_ch_key;
+SKMEM_TAG_DEFINE(skmem_tag_ch_key, SKMEM_TAG_CH_KEY);
 
 static void
 ch_redzone_init(void)
@@ -208,10 +208,6 @@ channel_init(void)
 
 	ch_redzone_init();
 
-	ASSERT(skmem_tag_ch_key == NULL);
-	skmem_tag_ch_key = kern_allocation_name_allocate(SKMEM_TAG_CH_KEY, 0);
-	ASSERT(skmem_tag_ch_key != NULL);
-
 	__ch_inited = 1;
 
 	return error;
@@ -223,11 +219,6 @@ channel_fini(void)
 	SK_LOCK_ASSERT_HELD();
 
 	if (__ch_inited) {
-		if (skmem_tag_ch_key != NULL) {
-			kern_allocation_name_release(skmem_tag_ch_key);
-			skmem_tag_ch_key = NULL;
-		}
-
 		__ch_umd_redzone_cookie = 0;
 		__ch_inited = 0;
 	}

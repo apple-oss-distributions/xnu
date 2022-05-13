@@ -32,15 +32,17 @@
 #include <sys/sdt.h>
 
 #define NX_NETIF_TAG_QSET   "com.apple.skywalk.netif.qset"
-static kern_allocation_name_t nx_netif_tag_qset;
+static SKMEM_TAG_DEFINE(nx_netif_tag_qset, NX_NETIF_TAG_QSET);
 
 #define NX_NETIF_TAG_LLINK_CFG   "com.apple.skywalk.netif.llink.cfg"
-static kern_allocation_name_t nx_netif_tag_llink_cfg;
+static SKMEM_TAG_DEFINE(nx_netif_tag_llink_cfg, NX_NETIF_TAG_LLINK_CFG);
 
 LCK_ATTR_DECLARE(netif_llink_lock_attr, 0, 0);
 static LCK_GRP_DECLARE(netif_llink_lock_group, "netif llink locks");
 
-static uint32_t nx_netif_disable_llink = 0;
+#if (DEVELOPMENT || DEBUG)
+static TUNABLE(uint32_t, nx_netif_disable_llink, "sk_disable_llink", 0);
+#endif /* (DEVELOPMENT || DEBUG) */
 
 static struct netif_llink *nx_netif_llink_alloc(void);
 static void nx_netif_llink_free(struct netif_llink **);
@@ -75,38 +77,6 @@ SYSCTL_UINT(_kern_skywalk_netif, OID_AUTO, random_qset,
     CTLFLAG_RW | CTLFLAG_LOCKED, &nx_netif_random_qset, 0,
     "pick a random qset");
 #endif /* DEVELOPMENT || DEBUG */
-
-void
-nx_netif_llink_module_init(void)
-{
-	ASSERT(nx_netif_tag_qset == NULL);
-	nx_netif_tag_qset =
-	    kern_allocation_name_allocate(NX_NETIF_TAG_QSET, 0);
-	ASSERT(nx_netif_tag_qset != NULL);
-
-	ASSERT(nx_netif_tag_llink_cfg == NULL);
-	nx_netif_tag_llink_cfg =
-	    kern_allocation_name_allocate(NX_NETIF_TAG_LLINK_CFG, 0);
-	ASSERT(nx_netif_tag_llink_cfg != NULL);
-
-#if (DEVELOPMENT || DEBUG)
-	PE_parse_boot_argn("sk_disable_llink", &nx_netif_disable_llink,
-	    sizeof(nx_netif_disable_llink));
-#endif /* DEVELOPMENT || DEBUG */
-}
-
-void
-nx_netif_llink_module_fini(void)
-{
-	if (nx_netif_tag_qset != NULL) {
-		kern_allocation_name_release(nx_netif_tag_qset);
-		nx_netif_tag_qset = NULL;
-	}
-	if (nx_netif_tag_llink_cfg != NULL) {
-		kern_allocation_name_release(nx_netif_tag_llink_cfg);
-		nx_netif_tag_llink_cfg = NULL;
-	}
-}
 
 /* retains a reference for the callee */
 static struct netif_llink *
@@ -836,11 +806,13 @@ nx_netif_llink_init(struct nx_netif *nif)
 {
 	ifnet_t ifp = nif->nif_ifp;
 
+#if (DEVELOPMENT || DEBUG)
 	if (__improbable(nx_netif_disable_llink != 0)) {
 		SK_DF(SK_VERB_LLINK, "%s: llink is disabled",
 		    if_name(nif->nif_ifp));
 		return;
 	}
+#endif /* (DEVELOPMENT || DEBUG) */
 
 	if (!SKYWALK_NATIVE(ifp)) {
 		SK_DF(SK_VERB_LLINK,

@@ -360,6 +360,7 @@ struct tcpcb {
 
 	uint64_t t_accsleep_ms;         /* accumulated sleep time since last boot */
 	uint32_t t_reassqlen;           /* length of reassembly queue */
+	uint32_t t_reassq_mbcnt;        /* amount in bytes of mbuf space used */
 	uint16_t t_rxtshift;            /* log(2) of rexmt exp. backoff */
 	uint32_t t_rttmin;              /* minimum rtt allowed */
 	uint32_t t_rttbest;             /* best rtt we've seen */
@@ -547,6 +548,8 @@ struct tcpcb {
 	tcp_seq         t_dsack_rseq;           /* DSACK right sequence */
 /* DSACK data sender state */
 	SLIST_HEAD(tcp_rxt_seghead, tcp_rxt_seg) t_rxt_segments;
+	uint32_t        t_rxt_seg_count;
+	uint32_t        t_rxt_seg_drop;
 	tcp_seq         t_dsack_lastuna;        /* snd_una when last recovery episode started */
 /* state for congestion window validation (draft-ietf-tcpm-newcwv-07) */
 #define TCP_PIPEACK_SAMPLE_COUNT        3
@@ -1573,6 +1576,8 @@ extern int tcp_cubic_minor_fixes;
 extern int tcp_cubic_rfc_compliant;
 extern int tcp_flow_control_response;
 
+extern int tcp_reass_total_qlen;
+
 struct protosw;
 struct domain;
 
@@ -1730,7 +1735,11 @@ extern uint16_t mptcp_output_csum(struct mbuf *m, uint64_t dss_val,
     uint32_t sseq, uint16_t dlen);
 extern int mptcp_adj_mss(struct tcpcb *, boolean_t);
 extern void mptcp_insert_rmap(struct tcpcb *tp, struct mbuf *m, struct tcphdr *th);
+extern int dump_mptcp_reass_qlen(char *, int);
 #endif
+
+extern int dump_tcp_reass_qlen(char *, int);
+extern uint32_t tcp_reass_qlen_space(struct socket *);
 
 __private_extern__ void tcp_update_stats_per_flow(
 	struct ifnet_stats_per_flow *, struct ifnet *);

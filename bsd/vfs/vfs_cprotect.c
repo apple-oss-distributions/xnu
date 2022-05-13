@@ -129,7 +129,8 @@ cpx_alloc(size_t key_len, bool needs_ctx)
 		 * unilateral write protection on this page. Note that kmem_alloc
 		 * can block.
 		 */
-		if (kmem_alloc(kernel_map, (vm_offset_t *)&cpx, PAGE_SIZE, VM_KERN_MEMORY_FILE)) {
+		if (kmem_alloc(kernel_map, (vm_offset_t *)&cpx, PAGE_SIZE,
+		    KMA_DATA, VM_KERN_MEMORY_FILE)) {
 			/*
 			 * returning NULL at this point (due to failed
 			 * allocation) would just result in a panic.

@@ -192,13 +192,19 @@ typedef uint32_t packet_trace_id_t;
 #define PACKET_CSUM_DATA_VALID  0x0400    /* csum_rx_val is valid */
 #define PACKET_CSUM_PSEUDO_HDR  0x0800    /* csum_rx_val includes pseudo hdr */
 
+#define PACKET_HAS_VALID_IP_CSUM(_p) \
+    (((_p)->pkt_csum_flags & (PACKET_CSUM_IP_CHECKED | PACKET_CSUM_IP_VALID)) \
+     == (PACKET_CSUM_IP_CHECKED | PACKET_CSUM_IP_VALID))
+
 #define PACKET_HAS_PARTIAL_CHECKSUM(_p) \
 	((_p)->pkt_csum_flags & (PACKET_CSUM_PARTIAL))
 
-#define PACKET_CSUM_RX_FLAGS                                    \
-	(PACKET_CSUM_IP_CHECKED | PACKET_CSUM_IP_VALID |        \
-	PACKET_CSUM_DATA_VALID | PACKET_CSUM_PSEUDO_HDR |       \
-	PACKET_CSUM_PARTIAL)
+#define PACKET_CSUM_RX_FULL_FLAGS \
+	(PACKET_CSUM_IP_CHECKED | PACKET_CSUM_IP_VALID | \
+	PACKET_CSUM_DATA_VALID | PACKET_CSUM_PSEUDO_HDR)
+
+#define PACKET_CSUM_RX_FLAGS \
+	(PACKET_CSUM_RX_FULL_FLAGS | PACKET_CSUM_PARTIAL)
 
 /*
  * TODO: adi@apple.com -- these are temporary and should be removed later.

@@ -398,8 +398,8 @@ __ZN8OSObjectC2EPK11OSMetaClass
 __ZN8OSObjectC2Ev
 __ZN8OSObjectD0Ev
 __ZN8OSObjectD2Ev
-__ZN8OSObjectdlEPvm:_OSObject_operator_delete_external
-__ZN8OSObjectnwEm:_OSObject_operator_new_external
+__ZN8OSObjectdlEPvm
+__ZN8OSObjectnwEm
 __ZN8OSString10gMetaClassE
 __ZN8OSString10superClassE
 __ZN8OSString10withStringEPKS_

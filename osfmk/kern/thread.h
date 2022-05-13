@@ -219,8 +219,8 @@ __options_decl(thread_set_status_flags_t, uint32_t, {
 	/* Allow only user state PTRS */
 	TSSF_ALLOW_ONLY_USER_PTRS = 0x08,
 
-	/* Allow only user state */
-	TSSF_ALLOW_ONLY_USER_STATE = 0x10,
+	/* Generate random diversifier and stash it */
+	TSSF_RANDOM_USER_DIV = 0x10,
 
 	/* Stash sigreturn token */
 	TSSF_STASH_SIGRETURN_TOKEN = 0x20,
@@ -230,6 +230,9 @@ __options_decl(thread_set_status_flags_t, uint32_t, {
 
 	/* Allow only matching sigreturn token */
 	TSSF_ALLOW_ONLY_MATCHING_TOKEN = 0x80,
+
+	/* Stash diversifier from thread */
+	TSSF_THREAD_USER_DIV = 0x100,
 });
 
 #endif /* XNU_KERNEL_PRIVATE */
@@ -620,9 +623,6 @@ struct thread {
 
 	/* Pending thread ast(s) */
 	ast_t                   ast;
-
-	/* Ast/Halt data structures */
-	vm_offset_t             recover;                /* page fault recover(copyin/out) */
 
 	queue_chain_t           threads;                /* global list of all threads */
 
@@ -1226,7 +1226,8 @@ extern kern_return_t    thread_getstatus_to_user(
 	thread_t                                thread,
 	int                                             flavor,
 	thread_state_t                  tstate,
-	mach_msg_type_number_t  *count);
+	mach_msg_type_number_t  *count,
+	thread_set_status_flags_t flags);
 
 extern kern_return_t    thread_create_with_continuation(
 	task_t task,
@@ -1383,6 +1384,7 @@ extern struct uthread  *get_bsdthread_info(thread_t) __pure2;
 extern thread_t         get_machthread(struct uthread *) __pure2;
 extern uint64_t         uthread_tid(struct uthread *) __pure2;
 extern user_addr_t      thread_get_sigreturn_token(thread_t thread);
+extern uint32_t         thread_get_sigreturn_diversifier(thread_t thread);
 extern void             uthread_init(task_t, struct uthread *, thread_ro_t, int);
 extern void             uthread_cleanup_name(struct uthread *uthread);
 extern void             uthread_cleanup(struct uthread *, thread_ro_t);
@@ -1437,8 +1439,6 @@ extern void dtrace_set_thread_predcache(thread_t, uint32_t);
 extern void dtrace_set_thread_vtime(thread_t, int64_t);
 extern void dtrace_set_thread_tracing(thread_t, int64_t);
 extern void dtrace_set_thread_inprobe(thread_t, uint16_t);
-extern vm_offset_t dtrace_set_thread_recover(thread_t, vm_offset_t);
-extern vm_offset_t dtrace_sign_and_set_thread_recover(thread_t, vm_offset_t);
 extern void dtrace_thread_bootstrap(void);
 extern void dtrace_thread_didexec(thread_t);
 

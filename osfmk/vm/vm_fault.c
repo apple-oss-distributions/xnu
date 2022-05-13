@@ -983,9 +983,6 @@ vm_fault_page(
 	/* More arguments: */
 	kern_return_t   *error_code,    /* code if page is in error */
 	boolean_t       no_zero_fill,   /* don't zero fill absent pages */
-	boolean_t       data_supply,    /* treat as data_supply if
-                                         * it is a write fault and a full
-                                         * page is provided */
 	vm_object_fault_info_t fault_info)
 {
 	vm_page_t               m;
@@ -1545,9 +1542,7 @@ vm_fault_page(
 		/* Don't expect to fault pages into the kernel object. */
 		assert(object != kernel_object);
 
-		data_supply = FALSE;
-
-		look_for_page = (object->pager_created && (MUST_ASK_PAGER(object, offset, external_state) == TRUE) && !data_supply);
+		look_for_page = (object->pager_created && (MUST_ASK_PAGER(object, offset, external_state) == TRUE));
 
 #if TRACEFAULTPAGE
 		dbgTrace(0xBEEF000C, (unsigned int) look_for_page, (unsigned int) object);      /* (TEST/DEBUG) */
@@ -5302,8 +5297,7 @@ FastPmapEnter:
 				if (cur_object->shadow_severed ||
 				    VM_OBJECT_PURGEABLE_FAULT_ERROR(cur_object) ||
 				    cur_object == compressor_object ||
-				    cur_object == kernel_object ||
-				    cur_object == vm_submap_object) {
+				    cur_object == kernel_object) {
 					if (object != cur_object) {
 						vm_object_unlock(cur_object);
 					}
@@ -5370,6 +5364,27 @@ FastPmapEnter:
 					break;
 				}
 				m_object = object;
+
+				if ((prot & VM_PROT_WRITE) &&
+				    !(fault_type & VM_PROT_WRITE) &&
+				    object->copy != VM_OBJECT_NULL) {
+					/*
+					 * This is not a write fault and
+					 * we might have a copy-on-write
+					 * obligation to honor (copy object or
+					 * "needs_copy" map entry), so do not
+					 * give write access yet.
+					 * We'll need to catch the first write
+					 * to resolve the copy-on-write by
+					 * pushing this page to a copy object
+					 * or making a shadow object.
+					 */
+					if (!pmap_has_prot_policy(pmap, fault_info.pmap_options & PMAP_OPTIONS_TRANSLATED_ALLOW_EXECUTE, prot)) {
+						prot &= ~VM_PROT_WRITE;
+					} else {
+						assert(fault_info.cs_bypass);
+					}
+				}
 
 				/*
 				 * Zeroing the page and entering into it into the pmap
@@ -5580,8 +5595,7 @@ handle_copy_delay:
 	}
 
 	if (__improbable(object == compressor_object ||
-	    object == kernel_object ||
-	    object == vm_submap_object)) {
+	    object == kernel_object)) {
 		/*
 		 * These objects are explicitly managed and populated by the
 		 * kernel.  The virtual ranges backed by these objects should
@@ -5596,10 +5610,6 @@ handle_copy_delay:
 		kr = KERN_MEMORY_ERROR;
 		goto done;
 	}
-
-	assert(object != compressor_object);
-	assert(object != kernel_object);
-	assert(object != vm_submap_object);
 
 	resilient_media_ref_transfer = false;
 	if (resilient_media_retry) {
@@ -5655,7 +5665,7 @@ handle_copy_delay:
 	    &prot, &result_page, &top_page,
 	    &type_of_fault,
 	    &error_code, map->no_zero_fill,
-	    FALSE, &fault_info);
+	    &fault_info);
 
 	/*
 	 * if kr != VM_FAULT_SUCCESS, then the paging reference
@@ -6450,7 +6460,7 @@ vm_fault_unwire(
 					&prot, &result_page, &top_page,
 					(int *)0,
 					NULL, map->no_zero_fill,
-					FALSE, &fault_info);
+					&fault_info);
 			} while (result == VM_FAULT_RETRY);
 
 			/*
@@ -6922,7 +6932,7 @@ RetryDestinationFault:;
 		    (int *)0,
 		    &error,
 		    dst_map->no_zero_fill,
-		    FALSE, &fault_info_dst);
+		    &fault_info_dst);
 		switch (result) {
 		case VM_FAULT_SUCCESS:
 			break;
@@ -7015,7 +7025,7 @@ RetrySourceFault:;
 					&src_prot,
 					&result_page, &src_top_page,
 					(int *)0, &error, FALSE,
-					FALSE, &fault_info_src);
+					&fault_info_src);
 
 				switch (result) {
 				case VM_FAULT_SUCCESS:

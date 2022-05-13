@@ -456,7 +456,8 @@ debug_log_init(void)
 	 * as it's not necessary on this platform. This information won't be available until the IOPlatform has come
 	 * up.
 	 */
-	kr = kmem_alloc(kernel_map, &panic_stackshot_buf, PANIC_STACKSHOT_BUFSIZE, VM_KERN_MEMORY_DIAG);
+	kr = kmem_alloc(kernel_map, &panic_stackshot_buf, PANIC_STACKSHOT_BUFSIZE,
+	    KMA_DATA | KMA_ZERO, VM_KERN_MEMORY_DIAG);
 	assert(kr == KERN_SUCCESS);
 	if (kr == KERN_SUCCESS) {
 		panic_stackshot_buf_len = PANIC_STACKSHOT_BUFSIZE;
@@ -483,7 +484,7 @@ phys_carveout_init(void)
 	}
 
 	kern_return_t kr = kmem_alloc_contig(kernel_map, &phys_carveout, temp_phys_carveout_size,
-	    VM_MAP_PAGE_MASK(kernel_map), 0, 0, KMA_NOPAGEWAIT,
+	    VM_MAP_PAGE_MASK(kernel_map), 0, 0, KMA_PERMANENT | KMA_NOPAGEWAIT,
 	    VM_KERN_MEMORY_DIAG);
 	if (kr != KERN_SUCCESS) {
 		panic("failed to allocate %luMB for phys_carveout_mb: %u",
@@ -504,7 +505,7 @@ phys_carveout_init(void)
 		size_t temp_phys_carveout_metadata_size = PAGE_SIZE;
 		kr = kmem_alloc_contig(kernel_map, &phys_carveout_metadata, temp_phys_carveout_metadata_size,
 		    VM_MAP_PAGE_MASK(kernel_map), 0, 0,
-		    KMA_NOPAGEWAIT, VM_KERN_MEMORY_DIAG);
+		    KMA_PERMANENT | KMA_NOPAGEWAIT, VM_KERN_MEMORY_DIAG);
 		if (kr != KERN_SUCCESS) {
 			panic("failed to allocate %u for phys_carveout_metadata: %u",
 			    (unsigned int)temp_phys_carveout_metadata_size, (unsigned int)kr);

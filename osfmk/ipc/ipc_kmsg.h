@@ -235,9 +235,16 @@ extern ipc_kmsg_t ipc_kmsg_alloc(
 extern void ipc_kmsg_free(
 	ipc_kmsg_t              kmsg);
 
+__options_decl(ipc_kmsg_destroy_flags_t, uint32_t, {
+	IPC_KMSG_DESTROY_ALL           = 0x0000,
+	IPC_KMSG_DESTROY_SKIP_REMOTE   = 0x0001,
+	IPC_KMSG_DESTROY_SKIP_LOCAL    = 0x0002,
+	IPC_KMSG_DESTROY_NOT_SIGNED    = 0x0004,
+});
 /* Destroy kernel message */
 extern void ipc_kmsg_destroy(
-	ipc_kmsg_t              kmsg);
+	ipc_kmsg_t                kmsg,
+	ipc_kmsg_destroy_flags_t  flags);
 
 /* Enqueue kernel message for deferred destruction */
 extern boolean_t ipc_kmsg_delayed_destroy(

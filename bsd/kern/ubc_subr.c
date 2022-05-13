@@ -2963,7 +2963,7 @@ ubc_cs_blob_allocate(
 	vm_size_t       *blob_size_p)
 {
 	kern_return_t   kr = KERN_FAILURE;
-	vm_size_t               allocation_size = 0;
+	vm_size_t       allocation_size = 0;
 
 	if (!blob_addr_p || !blob_size_p) {
 		return KERN_INVALID_ARGUMENT;
@@ -2972,7 +2972,7 @@ ubc_cs_blob_allocate(
 
 	{
 		*blob_addr_p = (vm_offset_t) kheap_alloc_tag(KHEAP_DEFAULT,
-		    allocation_size, Z_WAITOK, VM_KERN_MEMORY_SECURITY);
+		    allocation_size, Z_WAITOK | Z_ZERO, VM_KERN_MEMORY_SECURITY);
 
 		if (*blob_addr_p == 0) {
 			kr = KERN_NO_SPACE;
@@ -2982,13 +2982,7 @@ ubc_cs_blob_allocate(
 	}
 
 	if (kr == KERN_SUCCESS) {
-		if (*blob_addr_p) {
-			memset((void*)*blob_addr_p, 0, allocation_size);
-			*blob_size_p = allocation_size;
-		} else {
-			printf("CODE SIGNING: cs_blob allocation returned success, but received a NULL pointer\n");
-			kr = KERN_NO_SPACE;
-		}
+		*blob_size_p = allocation_size;
 	}
 
 	return kr;

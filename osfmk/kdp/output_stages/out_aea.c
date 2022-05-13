@@ -36,11 +36,11 @@
 #include <libkern/apple_encrypted_archive/apple_encrypted_archive.h>
 
 struct aea_stage_data {
-	bool encryption_open;
+	bool     encryption_open;
 	uint64_t starting_corefile_offset;;
 	uint64_t current_corefile_offset;
-	void *state;
-	size_t state_size;
+	size_t   state_size;
+	char     state[];
 };
 
 static ssize_t
@@ -231,7 +231,8 @@ aea_stage_initialize(struct kdp_output_stage *stage, const void *recipient_publi
 
 	state_size = apple_encrypted_archive->aea_get_state_size();
 	stage->kos_data_size = sizeof(struct aea_stage_data) + state_size;
-	ret = kmem_alloc(kernel_map, (vm_offset_t*) &stage->kos_data, stage->kos_data_size, VM_KERN_MEMORY_DIAG);
+	ret = kmem_alloc(kernel_map, (vm_offset_t*) &stage->kos_data, stage->kos_data_size,
+	    KMA_DATA, VM_KERN_MEMORY_DIAG);
 	if (KERN_SUCCESS != ret) {
 		printf("Failed to allocate memory (%zu bytes) for the AEA stage. Error 0x%x\n", stage->kos_data_size, ret);
 		return ret;
@@ -241,7 +242,6 @@ aea_stage_initialize(struct kdp_output_stage *stage, const void *recipient_publi
 	data->encryption_open = false;
 	data->starting_corefile_offset = 0;
 	data->current_corefile_offset = 0;
-	data->state = (void *) ((uintptr_t) data + sizeof(struct aea_stage_data));
 	data->state_size = state_size;
 
 	aea_ret = apple_encrypted_archive->aea_initialize_state(data->state, data->state_size, (const uint8_t *)recipient_public_key, recipient_public_key_size);

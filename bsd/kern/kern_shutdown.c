@@ -132,7 +132,9 @@ zprint_panic_info(void)
 	num_sites = vm_page_diagnose_estimate();
 	panic_kext_memory_size = num_sites * sizeof(panic_kext_memory_info[0]);
 
-	kr = kmem_alloc(kernel_map, (vm_offset_t *)&panic_kext_memory_info, round_page(panic_kext_memory_size), VM_KERN_MEMORY_OSFMK);
+	kr = kmem_alloc(kernel_map, (vm_offset_t *)&panic_kext_memory_info,
+	    round_page(panic_kext_memory_size), KMA_DATA | KMA_ZERO,
+	    VM_KERN_MEMORY_OSFMK);
 	if (kr != KERN_SUCCESS) {
 		panic_kext_memory_info = NULL;
 		return;

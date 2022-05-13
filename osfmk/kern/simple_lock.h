@@ -333,13 +333,6 @@ extern unsigned int hw_lock_bit_to(
 	hw_lock_timeout_handler_t
 	LCK_GRP_ARG(lck_grp_t*)) __result_use_check;
 
-extern hw_lock_status_t hw_lock_bit_to_allow_invalid(
-	hw_lock_bit_t *,
-	unsigned int,
-	uint64_t,
-	hw_lock_timeout_handler_t
-	LCK_GRP_ARG(lck_grp_t*)) __result_use_check;
-
 extern void     hw_unlock_bit(
 	hw_lock_bit_t *,
 	unsigned int);
@@ -364,9 +357,6 @@ extern void     hw_unlock_bit_nopreempt(
 
 #define hw_lock_bit_to(lck, bit, timeout, handler, grp) \
 	hw_lock_bit_to(lck, bit, timeout, handler)
-
-#define hw_lock_bit_to_allow_invalid(lck, bit, timeout, handler, grp) \
-	hw_lock_bit_to_allow_invalid(lck, bit, timeout, handler)
 #endif /* !LOCK_STATS */
 #endif  /* MACH_KERNEL_PRIVATE */
 

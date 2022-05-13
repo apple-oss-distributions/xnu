@@ -610,7 +610,6 @@ static void
 waitq_bootstrap(void)
 {
 	const uint32_t qsz = sizeof(struct waitq);
-	kern_return_t kret;
 	vm_offset_t whsize;
 	int cpu = 0;
 
@@ -630,23 +629,15 @@ waitq_bootstrap(void)
 	assert(g_num_waitqs > 0);
 	whsize = round_page(g_num_waitqs * qsz);
 
-	kret = kernel_memory_allocate(kernel_map, (vm_offset_t *)&global_waitqs,
-	    whsize, 0, KMA_KOBJECT | KMA_NOPAGEWAIT | KMA_PERMANENT,
+	kmem_alloc(kernel_map, (vm_offset_t *)&global_waitqs, whsize,
+	    KMA_NOFAIL | KMA_KOBJECT | KMA_NOPAGEWAIT | KMA_PERMANENT,
 	    VM_KERN_MEMORY_WAITQ);
-	if (kret != KERN_SUCCESS || global_waitqs == NULL) {
-		panic("kernel_memory_allocate() failed to alloc global_waitqs"
-		    ", error: %d, whsize: 0x%x", kret, (uint32_t)whsize);
-	}
 
 #if CONFIG_WAITQ_STATS
 	whsize = round_page(g_num_waitqs * sizeof(struct wq_stats));
-	kret = kernel_memory_allocate(kernel_map, (vm_offset_t *)&g_waitq_stats,
-	    whsize, 0, KMA_KOBJECT | KMA_NOPAGEWAIT | KMA_ZERO | KMA_PERMANENT,
+	kmem_alloc(kernel_map, (vm_offset_t *)&g_waitq_stats, whsize,
+	    KMA_NOFAIL | KMA_KOBJECT | KMA_NOPAGEWAIT | KMA_ZERO | KMA_PERMANENT,
 	    VM_KERN_MEMORY_WAITQ);
-	if (kret != KERN_SUCCESS || global_waitqs == NULL) {
-		panic("kernel_memory_allocate() failed to alloc g_waitq_stats"
-		    ", error: %d, whsize: 0x%x", kret, whsize);
-	}
 #endif
 
 	for (uint32_t i = 0; i < g_num_waitqs; i++) {

@@ -162,13 +162,13 @@ SYSCTL_QUAD(_kern_skywalk, OID_AUTO, na_inject_error,
 #endif /* !DEVELOPMENT && !DEBUG */
 
 #define SKMEM_TAG_NX_RINGS      "com.apple.skywalk.nexus.rings"
-static kern_allocation_name_t skmem_tag_nx_rings;
+static SKMEM_TAG_DEFINE(skmem_tag_nx_rings, SKMEM_TAG_NX_RINGS);
 
 #define SKMEM_TAG_NX_CONTEXTS   "com.apple.skywalk.nexus.contexts"
-static kern_allocation_name_t skmem_tag_nx_contexts;
+static SKMEM_TAG_DEFINE(skmem_tag_nx_contexts, SKMEM_TAG_NX_CONTEXTS);
 
 #define SKMEM_TAG_NX_SCRATCH    "com.apple.skywalk.nexus.scratch"
-static kern_allocation_name_t skmem_tag_nx_scratch;
+static SKMEM_TAG_DEFINE(skmem_tag_nx_scratch, SKMEM_TAG_NX_SCRATCH);
 
 #if !XNU_TARGET_OS_OSX
 /* see KLDBootstrap::readPrelinkedExtensions() for details */
@@ -198,21 +198,6 @@ na_init(void)
 
 	ASSERT(!__na_inited);
 
-	ASSERT(skmem_tag_nx_rings == NULL);
-	skmem_tag_nx_rings =
-	    kern_allocation_name_allocate(SKMEM_TAG_NX_RINGS, 0);
-	ASSERT(skmem_tag_nx_rings != NULL);
-
-	ASSERT(skmem_tag_nx_contexts == NULL);
-	skmem_tag_nx_contexts =
-	    kern_allocation_name_allocate(SKMEM_TAG_NX_CONTEXTS, 0);
-	ASSERT(skmem_tag_nx_contexts != NULL);
-
-	ASSERT(skmem_tag_nx_scratch == NULL);
-	skmem_tag_nx_scratch =
-	    kern_allocation_name_allocate(SKMEM_TAG_NX_SCRATCH, 0);
-	ASSERT(skmem_tag_nx_scratch != NULL);
-
 	__na_inited = 1;
 }
 
@@ -220,19 +205,6 @@ void
 na_fini(void)
 {
 	if (__na_inited) {
-		if (skmem_tag_nx_rings != NULL) {
-			kern_allocation_name_release(skmem_tag_nx_rings);
-			skmem_tag_nx_rings = NULL;
-		}
-		if (skmem_tag_nx_contexts != NULL) {
-			kern_allocation_name_release(skmem_tag_nx_contexts);
-			skmem_tag_nx_contexts = NULL;
-		}
-		if (skmem_tag_nx_scratch != NULL) {
-			kern_allocation_name_release(skmem_tag_nx_scratch);
-			skmem_tag_nx_scratch = NULL;
-		}
-
 		__na_inited = 0;
 	}
 }

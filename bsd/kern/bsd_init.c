@@ -403,6 +403,12 @@ void set_rootvnode(vnode_t);
 
 extern lck_rw_t rootvnode_rw_lock;
 
+SECURITY_READ_ONLY_LATE(struct kmem_range) bsd_pageable_range = {};
+KMEM_RANGE_REGISTER_DYNAMIC(bsd_pageable, &bsd_pageable_range, ^() {
+	assert(bsd_pageable_map_size != 0);
+	return (vm_map_size_t) bsd_pageable_map_size;
+});
+
 /* called with an iocount and usecount on new_rootvnode */
 void
 set_rootvnode(vnode_t new_rootvnode)
@@ -463,12 +469,10 @@ bsd_rooted_ramdisk(void)
  * of the tro_ucred field so that the uthread structure can be
  * used like any other.
  */
-
 void
 bsd_init(void)
 {
 	struct uthread *ut;
-	kern_return_t   ret;
 	vnode_t init_rootvnode = NULLVP;
 	struct proc_ro_data kernproc_ro_data = {
 		.p_csflags = CS_VALID,
@@ -634,23 +638,14 @@ bsd_init(void)
 	 *	Allocate a kernel submap for pageable memory
 	 *	for temporary copying (execve()).
 	 */
-	{
-		vm_offset_t     minimum;
-
-		bsd_init_kprintf("calling kmem_suballoc\n");
-		assert(bsd_pageable_map_size != 0);
-		ret = kmem_suballoc(kernel_map,
-		    &minimum,
-		    (vm_size_t)bsd_pageable_map_size,
-		    VM_MAP_CREATE_PAGEABLE,
-		    VM_FLAGS_ANYWHERE,
-		    VM_MAP_KERNEL_FLAGS_NONE,
-		    VM_KERN_MEMORY_BSD,
-		    &bsd_pageable_map);
-		if (ret != KERN_SUCCESS) {
-			panic("bsd_init: Failed to allocate bsd pageable map");
-		}
-	}
+	bsd_init_kprintf("calling kmem_suballoc\n");
+	bsd_pageable_map = kmem_suballoc(kernel_map,
+	    &bsd_pageable_range.min_address,
+	    (vm_size_t)bsd_pageable_map_size,
+	    VM_MAP_CREATE_PAGEABLE,
+	    VM_FLAGS_FIXED_RANGE_SUBALLOC,
+	    KMS_PERMANENT | KMS_NOFAIL,
+	    VM_KERN_MEMORY_BSD).kmr_submap;
 
 	/*
 	 * Initialize buffers and hash links for buffers

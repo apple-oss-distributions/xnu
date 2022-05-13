@@ -295,18 +295,13 @@ static ZONE_DEFINE(na_mon_zone, SKMEM_ZONE_PREFIX ".na.mon",
     sizeof(struct nexus_monitor_adapter), ZC_ZFREE_CLEARMEM);
 
 #define SKMEM_TAG_MONITORS      "com.apple.skywalk.monitors"
-static kern_allocation_name_t skmem_tag_monitors;
+static SKMEM_TAG_DEFINE(skmem_tag_monitors, SKMEM_TAG_MONITORS);
 
 static void
 nx_mon_dom_init(struct nxdom *nxdom)
 {
 	SK_LOCK_ASSERT_HELD();
 	ASSERT(!(nxdom->nxdom_flags & NEXUSDOMF_INITIALIZED));
-
-	ASSERT(skmem_tag_monitors == NULL);
-	skmem_tag_monitors =
-	    kern_allocation_name_allocate(SKMEM_TAG_MONITORS, 0);
-	ASSERT(skmem_tag_monitors != NULL);
 
 	(void) nxdom_prov_add(nxdom, &nx_monitor_prov_s);
 }
@@ -319,11 +314,6 @@ nx_mon_dom_terminate(struct nxdom *nxdom)
 	STAILQ_FOREACH_SAFE(nxdom_prov, &nxdom->nxdom_prov_head,
 	    nxdom_prov_link, tnxdp) {
 		(void) nxdom_prov_del(nxdom_prov);
-	}
-
-	if (skmem_tag_monitors != NULL) {
-		kern_allocation_name_release(skmem_tag_monitors);
-		skmem_tag_monitors = NULL;
 	}
 }
 
@@ -558,16 +548,15 @@ static int
 nx_mon_kr_alloc(struct __kern_channel_ring *kring, uint32_t n)
 {
 	struct __kern_channel_ring **nm;
-	size_t len, oldlen;
 
 	if (n <= kring->ckr_max_monitors) {
 		/* we already have more entries that requested */
 		return 0;
 	}
 
-	oldlen = sizeof(struct __kern_channel_ring *) * kring->ckr_max_monitors;
-	len = sizeof(struct __kern_channel_ring *) * n;
-	nm = sk_realloc(kring->ckr_monitors, oldlen, len, Z_WAITOK, skmem_tag_monitors);
+	nm = sk_realloc_type_array(struct __kern_channel_ring *,
+	    kring->ckr_max_monitors, n, kring->ckr_monitors,
+	    Z_WAITOK, skmem_tag_monitors);
 	if (nm == NULL) {
 		return ENOMEM;
 	}
@@ -588,8 +577,8 @@ nx_mon_kr_dealloc(struct __kern_channel_ring *kring)
 			    "(%u dangling monitors)!", kring->ckr_name,
 			    kring->ckr_n_monitors);
 		}
-		sk_free(kring->ckr_monitors,
-		    sizeof(struct __kern_channel_ring *) * kring->ckr_max_monitors);
+		sk_free_type_array(struct __kern_channel_ring *,
+		    kring->ckr_max_monitors, kring->ckr_monitors);
 		kring->ckr_monitors = NULL;
 		kring->ckr_max_monitors = 0;
 		kring->ckr_n_monitors = 0;

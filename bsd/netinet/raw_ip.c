@@ -366,6 +366,7 @@ rip_output(
 	int cfil_inp_flags = 0;
 	struct sockaddr *cfil_faddr = NULL;
 	struct sockaddr_in *cfil_sin;
+	u_int32_t cfil_dst = 0;
 #endif
 
 #if CONTENT_FILTER
@@ -393,6 +394,7 @@ rip_output(
 				 * We need to use the saved faddr and socket options.
 				 */
 				cfil_faddr_use = true;
+				cfil_dst = cfil_sin->sin_addr.s_addr;
 			}
 			m_tag_free(cfil_tag);
 		}
@@ -409,7 +411,7 @@ rip_output(
 			}
 			return EISCONN;
 		}
-		dst = cfil_faddr_use ? cfil_sin->sin_addr.s_addr : inp->inp_faddr.s_addr;
+		dst = cfil_faddr_use ? cfil_dst : inp->inp_faddr.s_addr;
 	} else {
 		if (dst == INADDR_ANY) {
 			if (m != NULL) {

@@ -530,7 +530,9 @@ typedef struct necp_cache_buffer {
  * NECP Client definitions
  */
 #define NECP_MAX_CLIENT_PARAMETERS_SIZE                                 1024
-#define NECP_MAX_CLIENT_RESULT_SIZE                                             512
+#define NECP_MAX_CLIENT_RESULT_SIZE                                     512 // Legacy
+#define NECP_BASE_CLIENT_RESULT_SIZE                                    1024
+#define NECP_CLIENT_FLOW_RESULT_SIZE                                    512
 
 #define NECP_OPEN_FLAG_OBSERVER                                                 0x01 // Observers can query clients they don't own
 #define NECP_OPEN_FLAG_BACKGROUND                                               0x02 // Mark this fd as backgrounded
@@ -652,6 +654,8 @@ typedef struct necp_cache_buffer {
 #define NECP_CLIENT_PARAMETER_FLAG_THIRD_PARTY_WEB_CONTENT    0x80000  // Third-party web content, not main load
 #define NECP_CLIENT_PARAMETER_FLAG_SILENT                    0x100000  // Private browsing - do not log/track
 #define NECP_CLIENT_PARAMETER_FLAG_APPROVED_APP_DOMAIN       0x200000  // Approved associated app domain; domain is "owned" by app
+#define NECP_CLIENT_PARAMETER_FLAG_NO_WAKE_FROM_SLEEP        0x400000  // Don't wake from sleep on traffic for this client
+
 
 #define NECP_CLIENT_RESULT_CLIENT_ID                                    1               // uuid_t
 #define NECP_CLIENT_RESULT_POLICY_RESULT                                2               // u_int32_t
@@ -1361,6 +1365,7 @@ struct necp_client_nexus_parameters {
 	unsigned allow_qos_marking:1;
 	unsigned override_address_selection:1;
 	unsigned use_stable_address:1; // Used if override_address_selection is set
+	unsigned no_wake_from_sleep:1;
 };
 
 struct necp_client_group_members {

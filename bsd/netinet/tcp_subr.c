@@ -240,6 +240,14 @@ static int tso_debug = 0;
 SYSCTL_INT(_net_inet_tcp, OID_AUTO, tso_debug, CTLFLAG_RW | CTLFLAG_LOCKED,
     &tso_debug, 0, "TSO verbosity");
 
+static int tcp_rxt_seg_max = 1024;
+SYSCTL_INT(_net_inet_tcp, OID_AUTO, rxt_seg_max, CTLFLAG_RW | CTLFLAG_LOCKED,
+    &tcp_rxt_seg_max, 0, "");
+
+static unsigned long tcp_rxt_seg_drop = 0;
+SYSCTL_ULONG(_net_inet_tcp, OID_AUTO, rxt_seg_drop, CTLFLAG_RD | CTLFLAG_LOCKED,
+    &tcp_rxt_seg_drop, "");
+
 static void     tcp_notify(struct inpcb *, int);
 
 struct zone     *sack_hole_zone;
@@ -496,6 +504,11 @@ tcp_init(struct protosw *pp, struct domain *dp)
 		return;
 	}
 	tcp_initialized = 1;
+
+#if DEBUG || DEVELOPMENT
+	(void) PE_parse_boot_argn("tcp_rxt_seg_max", &tcp_rxt_seg_max,
+	    sizeof(tcp_rxt_seg_max));
+#endif /* DEBUG || DEVELOPMENT */
 
 	tcp_ccgen = 1;
 	tcp_keepinit = TCPTV_KEEP_INIT;
@@ -1704,14 +1717,21 @@ tcp_freeq(struct tcpcb *tp)
 {
 	struct tseg_qent *q;
 	int rv = 0;
+	int count = 0;
 
 	while ((q = LIST_FIRST(&tp->t_segq)) != NULL) {
 		LIST_REMOVE(q, tqe_q);
+		tp->t_reassq_mbcnt -= MSIZE + (q->tqe_m->m_flags & M_EXT) ?
+		    q->tqe_m->m_ext.ext_size : 0;
 		m_freem(q->tqe_m);
 		zfree(tcp_reass_zone, q);
 		rv = 1;
+		count++;
 	}
 	tp->t_reassqlen = 0;
+	if (count > 0) {
+		OSAddAtomic(-count, &tcp_reass_total_qlen);
+	}
 	return rv;
 }
 
@@ -3696,6 +3716,23 @@ tcp_rxtseg_insert(struct tcpcb *tp, tcp_seq start, tcp_seq end)
 		return;
 	}
 
+	if (tcp_rxt_seg_max > 0 && tp->t_rxt_seg_count >= tcp_rxt_seg_max) {
+		rxseg = SLIST_FIRST(&tp->t_rxt_segments);
+		if (prev == rxseg) {
+			prev = NULL;
+		}
+		SLIST_REMOVE(&tp->t_rxt_segments, rxseg,
+		    tcp_rxt_seg, rx_link);
+
+		tcp_rxt_seg_drop++;
+		tp->t_rxt_seg_drop++;
+		TCP_LOG(tp, "removed rxseg list overflow %u:%u ",
+		    rxseg->rx_start, rxseg->rx_end);
+		zfree(tcp_rxt_seg_zone, rxseg);
+
+		tp->t_rxt_seg_count -= 1;
+	}
+
 	rxseg = zalloc_flags(tcp_rxt_seg_zone, Z_WAITOK | Z_ZERO | Z_NOFAIL);
 	rxseg->rx_start = start;
 	rxseg->rx_end = end;
@@ -3706,12 +3743,14 @@ tcp_rxtseg_insert(struct tcpcb *tp, tcp_seq start, tcp_seq end)
 	} else {
 		SLIST_INSERT_HEAD(&tp->t_rxt_segments, rxseg, rx_link);
 	}
+	tp->t_rxt_seg_count += 1;
 }
 
 struct tcp_rxt_seg *
 tcp_rxtseg_find(struct tcpcb *tp, tcp_seq start, tcp_seq end)
 {
 	struct tcp_rxt_seg *rxseg;
+
 	if (SLIST_EMPTY(&tp->t_rxt_segments)) {
 		return NULL;
 	}
@@ -3732,6 +3771,7 @@ void
 tcp_rxtseg_set_spurious(struct tcpcb *tp, tcp_seq start, tcp_seq end)
 {
 	struct tcp_rxt_seg *rxseg;
+
 	if (SLIST_EMPTY(&tp->t_rxt_segments)) {
 		return;
 	}
@@ -3765,6 +3805,7 @@ tcp_rxtseg_clean(struct tcpcb *tp)
 		    tcp_rxt_seg, rx_link);
 		zfree(tcp_rxt_seg_zone, rxseg);
 	}
+	tp->t_rxt_seg_count = 0;
 	tp->t_dsack_lastuna = tp->snd_max;
 }
 
@@ -3802,6 +3843,7 @@ tcp_rxtseg_dsack_for_tlp(struct tcpcb *tp)
 {
 	boolean_t dsack_for_tlp = FALSE;
 	struct tcp_rxt_seg *rxseg;
+
 	if (SLIST_EMPTY(&tp->t_rxt_segments)) {
 		return FALSE;
 	}

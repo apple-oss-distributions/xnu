@@ -626,7 +626,7 @@ debug_enter(char *c)
  */
 
 void *
-dt_kmem_alloc_site(size_t size, int kmflag, vm_allocation_site_t *site)
+dt_kmem_alloc_tag(size_t size, int kmflag, vm_tag_t tag)
 {
 #pragma unused(kmflag)
 
@@ -634,11 +634,11 @@ dt_kmem_alloc_site(size_t size, int kmflag, vm_allocation_site_t *site)
  * We ignore the M_NOWAIT bit in kmflag (all of kmflag, in fact).
  * Requests larger than 8K with M_NOWAIT fail in kalloc_ext.
  */
-	return kalloc_ext(KHEAP_DTRACE, size, Z_WAITOK, site).addr;
+	return kheap_alloc_tag(KHEAP_DTRACE, size, Z_WAITOK, tag);
 }
 
 void *
-dt_kmem_zalloc_site(size_t size, int kmflag, vm_allocation_site_t *site)
+dt_kmem_zalloc_tag(size_t size, int kmflag, vm_tag_t tag)
 {
 #pragma unused(kmflag)
 
@@ -646,7 +646,7 @@ dt_kmem_zalloc_site(size_t size, int kmflag, vm_allocation_site_t *site)
  * We ignore the M_NOWAIT bit in kmflag (all of kmflag, in fact).
  * Requests larger than 8K with M_NOWAIT fail in kalloc_ext.
  */
-	return kalloc_ext(KHEAP_DTRACE, size, Z_WAITOK | Z_ZERO, site).addr;
+	return kheap_alloc_tag(KHEAP_DTRACE, size, Z_WAITOK | Z_ZERO, tag);
 }
 
 void
@@ -663,7 +663,7 @@ dt_kmem_free(void *buf, size_t size)
  */
 
 void*
-dt_kmem_alloc_aligned_site(size_t size, size_t align, int kmflag, vm_allocation_site_t *site)
+dt_kmem_alloc_aligned_tag(size_t size, size_t align, int kmflag, vm_tag_t tag)
 {
 	void *mem, **addr_to_free;
 	intptr_t mem_aligned;
@@ -678,7 +678,7 @@ dt_kmem_alloc_aligned_site(size_t size, size_t align, int kmflag, vm_allocation_
 	 * the address to free and the total size of the buffer.
 	 */
 	hdr_size = sizeof(size_t) + sizeof(void*);
-	mem = dt_kmem_alloc_site(size + align + hdr_size, kmflag, site);
+	mem = dt_kmem_alloc_tag(size + align + hdr_size, kmflag, tag);
 	if (mem == NULL) {
 		return NULL;
 	}
@@ -697,11 +697,11 @@ dt_kmem_alloc_aligned_site(size_t size, size_t align, int kmflag, vm_allocation_
 }
 
 void*
-dt_kmem_zalloc_aligned_site(size_t size, size_t align, int kmflag, vm_allocation_site_t *s)
+dt_kmem_zalloc_aligned_tag(size_t size, size_t align, int kmflag, vm_tag_t tag)
 {
 	void* buf;
 
-	buf = dt_kmem_alloc_aligned_site(size, align, kmflag, s);
+	buf = dt_kmem_alloc_aligned_tag(size, align, kmflag, tag);
 
 	if (!buf) {
 		return NULL;
@@ -956,9 +956,6 @@ static int
 dtrace_copycheck(user_addr_t uaddr, uintptr_t kaddr, size_t size)
 {
 #pragma unused(kaddr)
-
-	vm_offset_t recover = dtrace_set_thread_recover( current_thread(), 0 ); /* Snare any extant recovery point. */
-	dtrace_set_thread_recover( current_thread(), recover ); /* Put it back. We *must not* re-enter and overwrite. */
 
 	ASSERT(kaddr + size >= kaddr);
 

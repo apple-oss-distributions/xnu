@@ -1402,8 +1402,8 @@ sysctl_procargsx(int *name, u_int namelen, user_addr_t where,
 
 	arg_addr = user_stack - arg_size;
 
-	ret = kernel_memory_allocate(kernel_map, &copy_start, arg_size,
-	    0, KMA_ZERO, VM_KERN_MEMORY_BSD);
+	ret = kmem_alloc(kernel_map, &copy_start, arg_size,
+	    KMA_DATA | KMA_ZERO, VM_KERN_MEMORY_BSD);
 	if (ret != KERN_SUCCESS) {
 		error = ENOMEM;
 		goto finish;
@@ -3992,6 +3992,7 @@ extern int      vm_compressor_mode;
 extern int      vm_compressor_is_active;
 extern int      vm_compressor_available;
 extern uint32_t c_seg_bufsize;
+extern uint64_t compressor_pool_size;
 extern uint32_t vm_ripe_target_age;
 extern uint32_t swapout_target_age;
 extern int64_t  compressor_bytes_used;
@@ -4100,6 +4101,7 @@ SYSCTL_INT(_vm, OID_AUTO, compressor_is_active, CTLFLAG_RD | CTLFLAG_LOCKED, &vm
 SYSCTL_INT(_vm, OID_AUTO, compressor_swapout_target_age, CTLFLAG_RD | CTLFLAG_LOCKED, &swapout_target_age, 0, "");
 SYSCTL_INT(_vm, OID_AUTO, compressor_available, CTLFLAG_RD | CTLFLAG_LOCKED, &vm_compressor_available, 0, "");
 SYSCTL_INT(_vm, OID_AUTO, compressor_segment_buffer_size, CTLFLAG_RD | CTLFLAG_LOCKED, &c_seg_bufsize, 0, "");
+SYSCTL_QUAD(_vm, OID_AUTO, compressor_pool_size, CTLFLAG_RD | CTLFLAG_LOCKED, &compressor_pool_size, "");
 
 extern int min_csegs_per_major_compaction;
 SYSCTL_INT(_vm, OID_AUTO, compressor_min_csegs_per_major_compaction, CTLFLAG_RW | CTLFLAG_LOCKED, &min_csegs_per_major_compaction, 0, "");

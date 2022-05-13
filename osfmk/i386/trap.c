@@ -746,14 +746,6 @@ FALL_THROUGH:
 		}
 
 		/*
-		 * Check thread recovery address also.
-		 */
-		if (thread != THREAD_NULL && thread->recover) {
-			set_recovery_ip(saved_state, thread->recover);
-			thread->recover = 0;
-			goto common_return;
-		}
-		/*
 		 * Unanticipated page-fault errors in kernel
 		 * should not happen.
 		 *

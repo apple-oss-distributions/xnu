@@ -784,7 +784,7 @@ fourk_pager_data_request(
 	unsigned int            pl_count;
 	vm_object_t             dst_object;
 	kern_return_t           kr, retval;
-	vm_map_offset_t         kernel_mapping;
+	vm_offset_t             kernel_mapping;
 	vm_offset_t             src_vaddr, dst_vaddr;
 	vm_offset_t             cur_offset;
 	int                     sub_page;
@@ -832,25 +832,15 @@ fourk_pager_data_request(
 	 * source and destination physical pages when it's their turn to
 	 * be processed.
 	 */
-	vm_map_entry_t          map_entry;
 
-	vm_object_reference(kernel_object);     /* ref. for mapping */
-	kr = vm_map_find_space(kernel_map,
-	    &kernel_mapping,
-	    2 * PAGE_SIZE_64,
-	    0,
-	    VM_MAP_KERNEL_FLAGS_NONE,
-	    &map_entry);
+	kr = kmem_alloc(kernel_map, &kernel_mapping, ptoa(2),
+	    KMA_DATA | KMA_KOBJECT | KMA_PAGEABLE, VM_KERN_MEMORY_NONE);
 	if (kr != KERN_SUCCESS) {
-		vm_object_deallocate(kernel_object);
 		retval = kr;
 		goto done;
 	}
-	map_entry->object.vm_object = kernel_object;
-	map_entry->offset = kernel_mapping;
-	vm_map_unlock(kernel_map);
-	src_vaddr = CAST_DOWN(vm_offset_t, kernel_mapping);
-	dst_vaddr = CAST_DOWN(vm_offset_t, kernel_mapping + PAGE_SIZE_64);
+	src_vaddr = kernel_mapping;
+	dst_vaddr = kernel_mapping + PAGE_SIZE;
 #endif /* __x86_64__ || __arm__ || __arm64__ */
 
 	/*
@@ -1007,7 +997,6 @@ retry_src_fault:
 			    &top_page,
 			    NULL,
 			    &error_code,
-			    FALSE,
 			    FALSE,
 			    &fault_info);
 			switch (kr) {
@@ -1256,11 +1245,7 @@ done:
 	}
 	if (kernel_mapping != 0) {
 		/* clean up the mapping of the source and destination pages */
-		kr = vm_map_remove(kernel_map,
-		    kernel_mapping,
-		    kernel_mapping + (2 * PAGE_SIZE_64),
-		    VM_MAP_REMOVE_NO_FLAGS);
-		assert(kr == KERN_SUCCESS);
+		kmem_free(kernel_map, kernel_mapping, ptoa(2));
 		kernel_mapping = 0;
 		src_vaddr = 0;
 		dst_vaddr = 0;

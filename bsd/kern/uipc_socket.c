@@ -955,14 +955,6 @@ sodealloc(struct socket *so)
 	/* Remove any filters */
 	sflt_termsock(so);
 
-#if CONTENT_FILTER
-	cfil_sock_detach(so);
-#endif /* CONTENT_FILTER */
-
-	if (NEED_DGRAM_FLOW_TRACKING(so)) {
-		soflow_detach(so);
-	}
-
 	so->so_gencnt = OSIncrementAtomic64((SInt64 *)&so_gencnt);
 
 	if (so->so_flags1 & SOF1_CACHED_IN_SOCK_LAYER) {
@@ -1159,6 +1151,16 @@ sofreelastref(struct socket *so, int dealloc)
 		flow_divert_detach(so);
 	}
 #endif  /* FLOW_DIVERT */
+
+#if CONTENT_FILTER
+	if (dealloc && ((so->so_flags & SOF_CONTENT_FILTER) != 0)) {
+		cfil_sock_detach(so);
+	}
+#endif /* CONTENT_FILTER */
+
+	if (NEED_DGRAM_FLOW_TRACKING(so)) {
+		soflow_detach(so);
+	}
 
 	if (!(so->so_flags & SOF_PCBCLEARING) || !(so->so_state & SS_NOFDREF)) {
 		selthreadclear(&so->so_snd.sb_sel);

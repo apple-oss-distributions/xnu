@@ -22,12 +22,6 @@ import six
 from btlog import *
 from operator import itemgetter
 
-def get_vme_object(vme):
-    """ Return vm_object associated with vme.. """
-    if int(vme.vme_kernel_object) != 0:
-        return kern.globals.kernel_object
-    return vme.vme_object.vmo_object
-
 def vm_unpack_pointer(packed, params, type_str = 'void *'):
     """ Unpack a pointer packed with VM_PACK_POINTER()
         params:
@@ -46,6 +40,17 @@ def vm_unpack_pointer(packed, params, type_str = 'void *'):
         addr  = c_int64(unsigned(packed) << (64 - bits)).value
         addr >>= 64 - bits - shift
     return kern.GetValueFromAddress(addr, type_str)
+
+def get_vme_offset(vme):
+    return unsigned(vme.vme_offset) << 12
+
+def get_vme_object(vme):
+    """ Return vm_object associated with vme.. """
+    if vme.is_sub_map:
+        return vme.vme_object.vmo_submap
+    if vme.vme_kernel_object:
+        return kern.globals.kernel_object
+    return vme.vme_object.vmo_object
 
 def GetZPerCPU(root, cpu, element_type = None):
     """ Iterates over a percpu variable
@@ -109,7 +114,7 @@ def ZoneName(zone, zone_security):
         returns:
             the formated name for the zone
     """
-    names = [ "", "default.", "data.", "", "kext."]
+    names = [ "", "default.", "data.", "" ]
     return "{:s}{:s}".format(names[int(zone_security.z_kheap_id)], zone.z_name)
 
 def GetZoneByName(name):
@@ -318,14 +323,10 @@ class ZoneMeta(object):
         def in_range(x, r):
             return x >= r[0] and x < r[1]
 
-        FOREIGN = GetEnumValue('zone_addr_kind_t', 'ZONE_ADDR_FOREIGN')
-        NATIVE  = GetEnumValue('zone_addr_kind_t', 'ZONE_ADDR_NATIVE')
-
         self.meta_range = load_range(zone_info.zi_meta_range)
-        self.native_range = load_range(zone_info.zi_map_range[NATIVE])
-        self.foreign_range = load_range(zone_info.zi_map_range[FOREIGN])
-        self.pgz_range = load_range(zone_info.zi_pgz_range)
-        self.addr_base = min(self.foreign_range[0], self.native_range[0])
+        self.map_range  = load_range(zone_info.zi_map_range)
+        self.pgz_range  = load_range(zone_info.zi_pgz_range)
+        self.addr_base  = self.map_range[0]
 
         addr = unsigned(addr)
         if isPageIndex:
@@ -344,7 +345,7 @@ class ZoneMeta(object):
             self.meta = kern.GetValueFromAddress(addr, "struct zone_page_metadata *")
 
             self.page_addr = self.addr_base + (((addr - self.meta_range[0]) // sizeof('struct zone_page_metadata')) * pagesize)
-        elif in_range(addr, self.native_range) or in_range(addr, self.foreign_range):
+        elif in_range(addr, self.map_range):
             addr &= ~(pagesize - 1)
             page_idx = (addr - self.addr_base) // pagesize
 
@@ -468,6 +469,22 @@ class ZoneMeta(object):
             return None
         # work around issues with lldb & unsigned bitfields
         return unsigned(self.meta.zm_chunk_len) & 0xf;
+
+    def guardedBefore(self):
+        if not self.meta:
+            return None
+        n = 1
+        if self.isSecondaryPage():
+            n += unsigned(self.meta.zm_page_index)
+        m = ZoneMeta(unsigned(self.meta) - sizeof('struct zone_page_metadata') * n)
+        if m.chunkLen() == GetEnumValue('zm_len_t', 'ZM_PGZ_GUARD'):
+            return m.meta.zm_guarded
+        return False
+
+    def guardedAfter(self):
+        if not self.meta:
+            return None
+        return self.meta.zm_guarded
 
     def isElementFree(self, addr):
         meta = self.meta
@@ -615,7 +632,7 @@ def WhatIs(addr):
 
     if meta.meta is None:
         out_str = "Address {:#018x} is outside of any zone map ({:#018x}-{:#018x})\n".format(
-                addr, meta.native_range[0], meta.native_range[-1] + 1)
+                addr, meta.map_range[0], meta.map_range[-1] + 1)
     else:
         if meta.kind[0] == 'E': # element
             page_offset_str = "{:d}/{:d}K".format(
@@ -927,11 +944,10 @@ def Zprint(cmd_args=None, cmd_options={}, O=None):
         ! - zone uses VA sequestering
         $ - not encrypted during hibernation
         % - zone is a read-only zone
-        A - currently trying to allocate more backing memory from kernel_memory_allocate without VM priv
+        A - currently trying to allocate more backing memory from kmem_alloc without VM priv
         C - collectable
         D - destructible
         E - Per-cpu caching is enabled for this zone
-        F - allows foreign memory (memory not allocated from any zone map)
         G - currently running GC
         H - exhaustible
         I - zone was destroyed and is no longer valid
@@ -940,7 +956,7 @@ def Zprint(cmd_args=None, cmd_options={}, O=None):
         N - zone requires alignment (avoids padding this zone for debugging)
         O - does not allow refill callout to fill zone on noblock allocation
         R - will be refilled when below low water mark
-        S - currently trying to allocate more backing memory from kernel_memory_allocate with VM priv
+        S - currently trying to allocate more backing memory from kmem_alloc with VM priv
         X - expandable
     """
     global kern
@@ -960,7 +976,6 @@ def Zprint(cmd_args=None, cmd_options={}, O=None):
             ["alignment_required",   "N"],
             ]
     security_marks = [
-            ["z_allows_foreign",     "F"],
             ["z_va_sequester",       "!"],
             ["z_noencrypt",          "$"],
             ]
@@ -1154,17 +1169,28 @@ def GetZoneChunk(meta, queue, O=None):
     format_string += "{kind:<10s} {queue:<8s} {pgs:<1d}/{chunk:<1d}  "
     format_string += "{alloc_count: >4d}/{avail_count: >4d}"
 
-    pgs = int(meta.zone.z_chunk_pages)
-    chunk = pgs
+    alloc_count = avail_count = free_count = 0
+    chunk = int(meta.zone.z_chunk_pages)
     if meta.isSecondaryPage():
         kind = "secondary"
-        pgs -= int(meta.meta.zm_page_index)
+        pgs = int(meta.zone.z_chunk_pages) - int(meta.meta.zm_page_index)
+
+        if meta.guardedAfter():
+            format_string += " {VT.Green}guarded-after{VT.Default}"
     else:
         kind = "primary"
+        pgs = int(meta.meta.zm_chunk_len)
+        if pgs == 0:
+            pgs = chunk
 
-    alloc_count=meta.getAllocCount()
-    avail_count=meta.getAllocAvail()
-    free_count=meta.getFreeCountSlow()
+        if meta.guardedBefore():
+            format_string += " {VT.Green}guarded-before{VT.Default}"
+        if pgs == chunk and meta.guardedAfter():
+            format_string += " {VT.Green}guarded-after{VT.Default}"
+
+        alloc_count = meta.getAllocCount()
+        avail_count = meta.getAllocAvail()
+        free_count  = meta.getFreeCountSlow()
 
     return O.format(format_string, meta=meta,
             alloc_count=alloc_count,
@@ -1702,12 +1728,12 @@ def GetVMMapSummary(vmmap):
     return out_string
 
 @lldb_type_summary(['vm_map_entry'])
-@header("{0: <20s} {1: <20s} {2: <5s} {3: >7s} {4: <20s} {5: <20s}".format("entry", "start", "prot", "#page", "object", "offset"))
+@header("{0: <20s} {1: <20s} {2: <5s} {3: >7s} {4: <20s} {5: <20s} {6: <4s}".format("entry", "start", "prot", "#page", "object", "offset", "tag"))
 def GetVMEntrySummary(vme):
     """ Display vm entry specific information. """
     page_size = kern.globals.page_size
     out_string = ""
-    format_string = "{0: <#020x} {1: <#20x} {2: <1x}{3: <1x}{4: <3s} {5: >7d} {6: <#020x} {7: <#020x}"
+    format_string = "{0: <#020x} {1: <#20x} {2: <1x}{3: <1x}{4: <3s} {5: >7d} {6: <#020x} {7: <#020x} {8: >#4x}"
     vme_protection = int(vme.protection)
     vme_max_protection = int(vme.max_protection)
     vme_extra_info_str ="SC-Ds"[int(vme.inheritance)]
@@ -1716,7 +1742,8 @@ def GetVMEntrySummary(vme):
     elif int(vme.needs_copy) != 0 :
         vme_extra_info_str +="n"
     num_pages = (unsigned(vme.links.end) - unsigned(vme.links.start)) // page_size
-    out_string += format_string.format(vme, vme.links.start, vme_protection, vme_max_protection, vme_extra_info_str, num_pages, get_vme_object(vme), vme.vme_offset)
+    out_string += format_string.format(vme, vme.links.start, vme_protection, vme_max_protection,
+            vme_extra_info_str, num_pages, get_vme_object(vme), get_vme_offset(vme), vme.vme_alias)
     return out_string
 
 # EndMacro: showtaskvme
@@ -3100,12 +3127,6 @@ def showmaphdrvme(maphdr, pmap, start_vaddr, end_vaddr, show_pager_info, show_al
                 object_str = "IPC_KERNEL_MAP"
             elif object == kern.globals.ipc_kernel_copy_map:
                 object_str = "IPC_KERNEL_COPY_MAP"
-            elif object == kern.globals.kalloc_large_map:
-                object_str = "KALLOC:LARGE"
-            elif object == kern.globals.kalloc_large_data_map:
-                object_str = "KALLOC:LARGE_DATA"
-            elif object == kern.globals.kernel_data_map:
-                object_str = "KERNEL_DATA_MAP"
             elif hasattr(kern.globals, 'pgz_submap') and object == kern.globals.pgz_submap:
                 object_str = "ZALLOC:PGZ"
             elif hasattr(kern.globals, 'compressor_map') and object == kern.globals.compressor_map:
@@ -3116,6 +3137,8 @@ def showmaphdrvme(maphdr, pmap, start_vaddr, end_vaddr, show_pager_info, show_al
                 object_str = "G_KEXT_MAP"
             elif hasattr(kern.globals, 'vector_upl_submap') and object == kern.globals.vector_upl_submap:
                 object_str = "VECTOR_UPL_SUBMAP"
+            elif object == kern.globals.zone_meta_map:
+                object_str = "ZALLOC:META"
             else:
                 for i in range(0, int(GetEnumValue('zone_submap_idx_t', 'Z_SUBMAP_IDX_COUNT'))):
                     if object == kern.globals.zone_submaps[i]:
@@ -3126,14 +3149,12 @@ def showmaphdrvme(maphdr, pmap, start_vaddr, end_vaddr, show_pager_info, show_al
         else:
             if object == kern.globals.kernel_object:
                 object_str = "KERNEL_OBJECT"
-            elif object == kern.globals.vm_submap_object:
-                object_str = "VM_SUBMAP_OBJECT"
             elif object == compressor_object:
                 object_str = "COMPRESSOR_OBJECT"
             else:
                 object_str = "{: <#018x}".format(object)
-        offset = unsigned(vme.vme_offset) & ~0xFFF
-        tag = unsigned(vme.vme_offset & 0xFFF)
+        offset = get_vme_offset(vme)
+        tag = unsigned(vme.vme_alias)
         protection = ""
         if vme.protection & 0x1:
             protection +="r"
@@ -3197,7 +3218,7 @@ def CountMapTags(map, tagcounts, slow):
     vme_ptr_type = GetType('vm_map_entry *')
     for vme in IterateQueue(vme_list_head, vme_ptr_type, "links"):
         object = get_vme_object(vme)
-        tag = vme.vme_offset & 0xFFF
+        tag = vme.vme_alias
         if object == kern.globals.kernel_object:
             count = 0
             if not slow:
@@ -4224,8 +4245,8 @@ def vm_page_lookup_in_map(map, vaddr):
         if unsigned(vme.links.end) <= vaddr:
             continue
         offset_in_vme = vaddr - unsigned(vme.links.start)
-        print("  offset {:#018x} in map entry {: <#018x} [{:#018x}:{:#018x}] object {: <#018x} offset {:#018x}".format(offset_in_vme, vme, unsigned(vme.links.start), unsigned(vme.links.end), get_vme_object(vme), unsigned(vme.vme_offset) & ~0xFFF))
-        offset_in_object = offset_in_vme + (unsigned(vme.vme_offset) & ~0xFFF)
+        print("  offset {:#018x} in map entry {: <#018x} [{:#018x}:{:#018x}] object {: <#018x} offset {:#018x}".format(offset_in_vme, vme, unsigned(vme.links.start), unsigned(vme.links.end), get_vme_object(vme), get_vme_offset(vme)))
+        offset_in_object = offset_in_vme + get_vme_offset(vme)
         if vme.is_sub_map:
             print("vaddr {:#018x} in map {: <#018x}".format(offset_in_object, vme.vme_object.vmo_submap))
             vm_page_lookup_in_map(vme.vme_object.vmo_submap, offset_in_object)

@@ -402,8 +402,8 @@ const uint64_t arm64_root_pgtable_level = 0;
 const uint64_t arm64_root_pgtable_num_ttes = 0;
 #endif
 
-struct pmap                     kernel_pmap_store MARK_AS_PMAP_DATA;
-SECURITY_READ_ONLY_LATE(pmap_t) kernel_pmap = &kernel_pmap_store;
+struct pmap     kernel_pmap_store MARK_AS_PMAP_DATA;
+const pmap_t    kernel_pmap = &kernel_pmap_store;
 
 static SECURITY_READ_ONLY_LATE(zone_t) pmap_zone;  /* zone of pmap structures */
 
@@ -2408,6 +2408,14 @@ pmap_virtual_region(
 #endif
 		ret = TRUE;
 	}
+
+#if defined(ARM_LARGE_MEMORY)
+	if (region_select == 1) {
+		*startp = VREGION1_START;
+		*size = VREGION1_SIZE;
+		ret = TRUE;
+	}
+#endif
 #else /* !(defined(KERNEL_INTEGRITY_KTRR) || defined(KERNEL_INTEGRITY_CTRR)) */
 #if defined(ARM_LARGE_MEMORY)
 	/* For large memory systems with no KTRR/CTRR such as virtual machines */
@@ -4358,6 +4366,16 @@ pmap_remove_options_internal(
 		bpte = &pte_p[pte_index(pt_attr, start)];
 		epte = bpte + ((end - start) >> pt_attr_leaf_shift(pt_attr));
 
+		/*
+		 * This check is really intended to ensure that mappings in a nested pmap can't be removed
+		 * through a top-level user pmap, although it's also a useful sanity check for other pmap types.
+		 * Note that kernel page tables may not have PTDs, so we can't use the check there.
+		 */
+		if (__improbable((pmap->type != PMAP_TYPE_KERNEL) && (ptep_get_pmap(bpte) != pmap))) {
+			panic("%s: attempt to remove mappings owned by pmap %p through pmap %p, starting at pte %p",
+			    __func__, ptep_get_pmap(bpte), pmap, bpte);
+		}
+
 		remove_count = pmap_remove_range_options(pmap, start, bpte, epte, &eva,
 		    &need_strong_sync, options);
 
@@ -5931,29 +5949,6 @@ pmap_construct_pte(
 				pte |= ARM_PTE_NG;
 			}
 		}
-#if MACH_ASSERT
-		if (pmap->nested_pmap != NULL) {
-			vm_map_address_t nest_vaddr;
-			pt_entry_t *nest_pte_p;
-
-			nest_vaddr = va;
-
-			if ((nest_vaddr >= pmap->nested_region_addr)
-			    && (nest_vaddr < (pmap->nested_region_addr + pmap->nested_region_size))
-			    && ((nest_pte_p = pmap_pte(pmap->nested_pmap, nest_vaddr)) != PT_ENTRY_NULL)
-			    && (*nest_pte_p != ARM_PTE_TYPE_FAULT)
-			    && (!ARM_PTE_IS_COMPRESSED(*nest_pte_p, nest_pte_p))
-			    && (((*nest_pte_p) & ARM_PTE_NG) != ARM_PTE_NG)) {
-				unsigned int index = (unsigned int)((va - pmap->nested_region_addr)  >> pt_attr_twig_shift(pt_attr));
-
-				if ((pmap->nested_pmap->nested_region_asid_bitmap)
-				    && !testbit(index, (int *)pmap->nested_pmap->nested_region_asid_bitmap)) {
-					panic("pmap_enter(): Global attribute conflict nest_pte_p=%p pmap=%p va=0x%llx spte=0x%llx",
-					    nest_pte_p, pmap, (uint64_t)va, (uint64_t)*nest_pte_p);
-				}
-			}
-		}
-#endif
 		if (prot & VM_PROT_WRITE) {
 			assert(pmap->type != PMAP_TYPE_NESTED);
 			if (pa_valid(pa) && (!ppattr_pa_test_bits(pa, PP_ATTR_MODIFIED))) {
@@ -6118,6 +6113,17 @@ pmap_enter_options_internal(
 			ptd_info_t *ptd_info = ptep_get_info(pte_p);
 			refcnt = &ptd_info->refcnt;
 			wiredcnt = &ptd_info->wiredcnt;
+			/*
+			 * This check is really intended to ensure that mappings in a nested pmap can't be inserted
+			 * through a top-level user pmap, which would allow a non-global mapping to be inserted into a shared
+			 * region pmap and leveraged into a TLB-based write gadget (rdar://91504354).
+			 * It's also a useful sanity check for other pmap types, but note that kernel page tables may not
+			 * have PTDs, so we can't use the check there.
+			 */
+			if (__improbable(ptep_get_pmap(pte_p) != pmap)) {
+				panic("%s: attempt to enter mapping at pte %p owned by pmap %p through pmap %p",
+				    __func__, pte_p, ptep_get_pmap(pte_p), pmap);
+			}
 			/*
 			 * Bump the wired count to keep the PTE page from being reclaimed.  We need this because
 			 * we may drop the PVH and pmap locks later in pmap_enter() if we need to allocate

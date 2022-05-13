@@ -802,7 +802,9 @@ arm_init_idle_cpu(
 	 * This will force any thread with active debug state to resync the debug registers
 	 * if it returns to userspace on this CPU.
 	 */
-	cpu_data_ptr->cpu_user_debug = NULL;
+	if (cpu_data_ptr->cpu_user_debug != NULL) {
+		arm_debug_set(NULL);
+	}
 
 	fiq_context_init(FALSE);
 

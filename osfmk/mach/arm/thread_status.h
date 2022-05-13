@@ -40,6 +40,10 @@
 #include <mach/message.h>
 #include <mach/vm_types.h>
 
+#ifdef XNU_KERNEL_PRIVATE
+#include <os/refcnt.h>
+#endif
+
 /*
  *    Support for determining the state of a thread
  */
@@ -922,6 +926,7 @@ struct arm_debug_aggregate_state {
 		arm_debug_state32_t ds32;
 		arm_debug_state64_t ds64;
 	} uds;
+	os_refcnt_t     ref;
 } __attribute__((aligned(16)));
 
 typedef struct arm_debug_aggregate_state arm_debug_state_t;

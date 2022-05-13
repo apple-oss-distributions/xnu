@@ -1325,9 +1325,11 @@ kdp_core_handle_new_encryption_key(IOCoreFileAccessCallback access_data, void *a
 			kdp_core_header->pub_key_length = 0;
 		}
 
-		if (old_public_key) {
-			kmem_free(kernel_map, (vm_offset_t) old_public_key, old_public_key_size);
-		}
+		/*
+		 * Return the old key to the caller to free
+		 */
+		key_descriptor->kcekd_key = old_public_key;
+		key_descriptor->kcekd_size = (uint16_t)old_public_key_size;
 
 		// If this stuff fails, we have bigger problems
 		struct mach_core_fileheader_v2 existing_header;
@@ -1388,15 +1390,11 @@ kdp_core_handle_new_encryption_key(IOCoreFileAccessCallback access_data, void *a
 				void *empty_key = NULL;
 				kern_return_t temp_ret = KERN_SUCCESS;
 
-				temp_ret = kernel_memory_allocate(kernel_map, (vm_offset_t *) &empty_key,
-				    PUBLIC_KEY_RESERVED_LENGTH, 0, KMA_ZERO, VM_KERN_MEMORY_DIAG);
-				if (temp_ret != KERN_SUCCESS) {
-					printf("kdp_core_handle_new_encryption_key failed to allocate an empty key. Error 0x%x\n", temp_ret);
-					break;
-				}
+				empty_key = kalloc_data(PUBLIC_KEY_RESERVED_LENGTH,
+				    Z_WAITOK | Z_ZERO | Z_NOFAIL);
 
 				temp_ret = access_data(access_context, TRUE, offset, PUBLIC_KEY_RESERVED_LENGTH, empty_key);
-				kmem_free(kernel_map, (vm_offset_t) empty_key, PUBLIC_KEY_RESERVED_LENGTH);
+				kfree_data(empty_key, PUBLIC_KEY_RESERVED_LENGTH);
 
 				if (temp_ret != KERN_SUCCESS) {
 					printf("kdp_core_handle_new_encryption_key failed to zero-out the public key region. Error 0x%x\n", temp_ret);
@@ -1481,15 +1479,15 @@ kdp_core_polled_io_polled_file_available(IOCoreFileAccessCallback access_data, v
 		// Let's adopt that public key for our encryption needs
 		void *public_key = NULL;
 
-		ret = kmem_alloc(kernel_map, (vm_offset_t *) &public_key, temp_header.pub_key_length, VM_KERN_MEMORY_DIAG);
-		assert(KERN_SUCCESS == ret);
+		public_key = kalloc_data(temp_header.pub_key_length,
+		    Z_ZERO | Z_WAITOK | Z_NOFAIL);
 
 		// Read the public key from the corefile. Note that the key we're trying to adopt is the "next" key, which is
 		// PUBLIC_KEY_RESERVED_LENGTH bytes after the public key.
 		ret = access_data(access_context, FALSE, temp_header.pub_key_offset + PUBLIC_KEY_RESERVED_LENGTH, temp_header.pub_key_length, public_key);
 		if (KERN_SUCCESS != ret) {
 			printf("kdp_core_polled_io_polled_file_available failed to read the public key. Error 0x%x\n", ret);
-			kmem_free(kernel_map, (vm_offset_t) public_key, temp_header.pub_key_length);
+			kfree_data(public_key, temp_header.pub_key_length);
 			return ret;
 		}
 
@@ -1541,10 +1539,11 @@ kdp_core_init(void)
 	kr = kdp_core_init_output_stages();
 	assert(KERN_SUCCESS == kr);
 
-	kr = kmem_alloc(kernel_map, (vm_offset_t*) &kdp_core_header, kdp_core_header_size, VM_KERN_MEMORY_DIAG);
-	assert(KERN_SUCCESS == kr);
+	kmem_alloc(kernel_map, (vm_offset_t*)&kdp_core_header,
+	    kdp_core_header_size,
+	    KMA_NOFAIL | KMA_ZERO | KMA_PERMANENT | KMA_KOBJECT | KMA_DATA,
+	    VM_KERN_MEMORY_DIAG);
 
-	bzero(kdp_core_header, kdp_core_header_size);
 	kdp_core_header->signature = MACH_CORE_FILEHEADER_V2_SIGNATURE;
 	kdp_core_header->version = 2;
 

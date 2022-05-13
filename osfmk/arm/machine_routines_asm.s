@@ -1021,56 +1021,6 @@ LEXT(copyinframe)
 	b		Lcopyin_noerror
 
 /*
- * int hw_lock_trylock_mask_allow_invalid(uint32_t *lock, uint32_t mask)
- */
-	.text
-	.align 2
-	.private_extern EXT(hw_lock_trylock_mask_allow_invalid)
-	.globl EXT(hw_lock_trylock_mask_allow_invalid)
-LEXT(hw_lock_trylock_mask_allow_invalid)
-/*
- * r0: address of the lock
- * r1: mask
- * r2: temporary used for several meanings
- * r3: address of the original recovery function to restore
- * r9: strex status
- *
- * We do not use r4 and friends to avoid having to stash/restore them
- */
-	adr		r2, 9f
-	mrc		p15, 0, r12, c13, c0, 4
-	ldr		r3, [r12, TH_RECOVER]
-	str		r2, [r12, TH_RECOVER]
-1:
-	ldrex		r2, [r0]
-	cmp		r2, #0		// 0 value == invalid lock
-	beq		9f
-
-	tst		r1, r2		// is `mask` set ?
-	bne		8f		// if yes, wfe and return 0
-
-	orr		r2, r2, r1
-	strex		r9, r2, [r0]
-	cmp		r9, #0
-	bne		1b
-
-	str		r3, [r12, TH_RECOVER]
-	dmb		ish
-	mov		r0, #1
-	bx		lr
-
-8: /* contention */
-	wfe
-	str		r3, [r12, TH_RECOVER]
-	mov		r0, #0
-	bx		lr
-9: /* invalid */
-	clrex
-	str		r3, [r12, TH_RECOVER]
-	mov		r0, #-1
-	bx		lr
-
-/*
  * hw_lck_ticket_t
  * hw_lck_ticket_reserve_orig_allow_invalid(hw_lck_ticket_t *lck)
  */
@@ -1113,6 +1063,52 @@ LEXT(hw_lck_ticket_reserve_orig_allow_invalid)
 	str		r3, [r12, TH_RECOVER]
 	mov		r0, #0
 	bx		lr
+
+#if CONFIG_DTRACE
+/*
+ * int dtrace_nofault_copy<bits>(const uintptr_t kernel_addr, uint<bits>_t *var)
+ */
+	.text
+	.align 2
+	.private_extern EXT(dtrace_nofault_copy8)
+LEXT(dtrace_nofault_copy8)
+	COPYIO_SET_RECOVER()
+	ldrb		r3, [r0]
+	strb		r3, [r1]
+	mov		r0, #0
+	COPYIO_RESTORE_RECOVER()
+	bx		lr
+
+	.private_extern EXT(dtrace_nofault_copy16)
+LEXT(dtrace_nofault_copy16)
+	COPYIO_SET_RECOVER()
+	ldrh		r3, [r0]
+	strh		r3, [r1]
+	mov		r0, #0
+	COPYIO_RESTORE_RECOVER()
+	bx		lr
+
+	.private_extern EXT(dtrace_nofault_copy32)
+LEXT(dtrace_nofault_copy32)
+	COPYIO_SET_RECOVER()
+	ldr		r3, [r0]
+	str		r3, [r1]
+	mov		r0, #0
+	COPYIO_RESTORE_RECOVER()
+	bx		lr
+
+	.private_extern EXT(dtrace_nofault_copy64)
+LEXT(dtrace_nofault_copy64)
+	COPYIO_SET_RECOVER()
+	ldr		r3, [r0]
+	ldr		r4, [r0, #4]
+	str		r3, [r1]
+	str		r3, [r1, #4]
+	mov		r0, #0
+	COPYIO_RESTORE_RECOVER()
+	bx		lr
+
+#endif /* CONFIG_DTRACE */
 
 /* 
  * uint32_t arm_debug_read_dscr(void)

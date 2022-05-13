@@ -1266,7 +1266,7 @@ vm_swapout_finish(c_segment_t c_seg, uint64_t f_offset, uint32_t size, kern_retu
 	PAGE_REPLACEMENT_DISALLOWED(TRUE);
 
 	if (kr == KERN_SUCCESS) {
-		kernel_memory_depopulate(compressor_map, (vm_offset_t)c_seg->c_store.c_buffer, size,
+		kernel_memory_depopulate((vm_offset_t)c_seg->c_store.c_buffer, size,
 		    KMA_COMPRESSOR, VM_KERN_MEMORY_COMPRESSOR);
 	}
 #if ENCRYPTED_SWAP
@@ -1965,9 +1965,8 @@ vm_swap_reclaim(void)
 
 	c_segment_t     c_seg = NULL;
 
-	if (kernel_memory_allocate(compressor_map, (vm_offset_t *)(&addr), c_seg_bufsize, 0, KMA_KOBJECT, VM_KERN_MEMORY_COMPRESSOR) != KERN_SUCCESS) {
-		panic("vm_swap_reclaim: kernel_memory_allocate failed");
-	}
+	kmem_alloc(compressor_map, (vm_offset_t *)&addr, c_seg_bufsize,
+	    KMA_NOFAIL | KMA_KOBJECT, VM_KERN_MEMORY_COMPRESSOR);
 
 	lck_mtx_lock(&vm_swap_data_lock);
 
@@ -2130,7 +2129,9 @@ ReTry_for_cseg:
 			 */
 			c_buffer = (vm_offset_t)C_SEG_BUFFER_ADDRESS(c_seg->c_mysegno);
 
-			kernel_memory_populate(compressor_map, c_buffer, c_size, KMA_COMPRESSOR, VM_KERN_MEMORY_COMPRESSOR);
+			kernel_memory_populate(c_buffer, c_size,
+			    KMA_NOFAIL | KMA_COMPRESSOR,
+			    VM_KERN_MEMORY_COMPRESSOR);
 
 			memcpy((char *)c_buffer, (char *)addr, c_size);
 

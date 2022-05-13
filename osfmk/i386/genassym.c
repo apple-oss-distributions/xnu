@@ -136,7 +136,6 @@ main(
 	DECLARE("RW_SHARED", LCK_RW_TYPE_SHARED);
 	DECLARE("RW_EXCL", LCK_RW_TYPE_EXCLUSIVE);
 
-	DECLARE("TH_RECOVER", offsetof(struct thread, recover));
 	DECLARE("TH_CONTINUATION", offsetof(struct thread, continuation));
 	DECLARE("TH_KERNEL_STACK", offsetof(struct thread, kernel_stack));
 	DECLARE("TH_IOTIER_OVERRIDE", offsetof(struct thread, iotier_override));

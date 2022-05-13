@@ -59,7 +59,7 @@ typedef struct {
 	OSSharedPtr<OSDictionary> &dict;
 } NVRAMRegionInfo;
 
-class IONVRAMCHRPHandler : public IODTNVRAMFormatHandler
+class IONVRAMCHRPHandler : public IODTNVRAMFormatHandler, IOTypedOperatorsMixin<IONVRAMCHRPHandler>
 {
 private:
 	bool              _newData;
@@ -88,6 +88,8 @@ private:
 
 	IOReturn serializeVariables(void);
 
+	IOReturn setVariableInternal(const uuid_t varGuid, const char *variableName, OSObject *object, bool systemVar);
+
 	static OSSharedPtr<OSData> unescapeBytesToData(const uint8_t *bytes, uint32_t length);
 	static OSSharedPtr<OSData> escapeDataToData(OSData * value);
 
@@ -108,9 +110,10 @@ public:
 	static  IONVRAMCHRPHandler *init(IODTNVRAM *provider, const uint8_t *image, IOByteCount length,
 	    OSSharedPtr<OSDictionary> &commonDict, OSSharedPtr<OSDictionary> &systemDict);
 
-	virtual IOReturn setVariable(const uuid_t *varGuid, const char *variableName, OSObject *object) APPLE_KEXT_OVERRIDE;
-	virtual bool setController(IONVRAMController *controller) APPLE_KEXT_OVERRIDE;
-	virtual bool sync(void) APPLE_KEXT_OVERRIDE;
+	virtual IOReturn setVariable(const uuid_t varGuid, const char *variableName, OSObject *object) APPLE_KEXT_OVERRIDE;
+	virtual bool     setController(IONVRAMController *controller) APPLE_KEXT_OVERRIDE;
+	virtual bool     sync(void) APPLE_KEXT_OVERRIDE;
+	virtual IOReturn flush(const uuid_t guid, IONVRAMOperation op) APPLE_KEXT_OVERRIDE;
 	virtual uint32_t getGeneration(void) const APPLE_KEXT_OVERRIDE;
 	virtual uint32_t getVersion(void) const APPLE_KEXT_OVERRIDE;
 	virtual uint32_t getSystemUsed(void) const APPLE_KEXT_OVERRIDE;
@@ -308,6 +311,57 @@ IONVRAMCHRPHandler::IONVRAMCHRPHandler(OSSharedPtr<OSDictionary> &commonDict, OS
 }
 
 IOReturn
+IONVRAMCHRPHandler::flush(const uuid_t guid, IONVRAMOperation op)
+{
+	IOReturn ret = kIOReturnSuccess;
+
+	if ((_systemDict != nullptr) && (uuid_compare(guid, gAppleSystemVariableGuid) == 0)) {
+		const OSSymbol *key;
+		OSSharedPtr<OSDictionary> systemCopy;
+		OSSharedPtr<OSCollectionIterator> iter;
+
+		systemCopy = OSDictionary::withDictionary(_systemDict.get());
+		iter = OSCollectionIterator::withCollection(systemCopy.get());
+		if ((systemCopy == nullptr) || (iter == nullptr)) {
+			ret = kIOReturnNoMemory;
+			goto exit;
+		}
+
+		while ((key = OSDynamicCast(OSSymbol, iter->getNextObject()))) {
+			if (verifyPermission(op, gAppleSystemVariableGuid, key)) {
+				// Force use of system partition
+				setVariableInternal(guid, key->getCStringNoCopy(), nullptr, true);
+			}
+		}
+
+		DEBUG_INFO("system dictionary flushed\n");
+	} else if ((_commonDict != nullptr) && (uuid_compare(guid, gAppleNVRAMGuid) == 0)) {
+		const OSSymbol *key;
+		OSSharedPtr<OSDictionary> commonCopy;
+		OSSharedPtr<OSCollectionIterator> iter;
+
+		commonCopy = OSDictionary::withDictionary(_commonDict.get());
+		iter = OSCollectionIterator::withCollection(commonCopy.get());
+		if ((commonCopy == nullptr) || (iter == nullptr)) {
+			ret = kIOReturnNoMemory;
+			goto exit;
+		}
+
+		while ((key = OSDynamicCast(OSSymbol, iter->getNextObject()))) {
+			if (verifyPermission(op, gAppleNVRAMGuid, key)) {
+				// Don't use the system partition if it exists
+				setVariableInternal(guid, key->getCStringNoCopy(), nullptr, false);
+			}
+		}
+
+		DEBUG_INFO("common dictionary flushed\n");
+	}
+
+exit:
+	return ret;
+}
+
+IOReturn
 IONVRAMCHRPHandler::unserializeImage(const uint8_t *image, IOByteCount length)
 {
 	uint32_t partitionOffset, partitionLength;
@@ -373,6 +427,14 @@ IONVRAMCHRPHandler::unserializeImage(const uint8_t *image, IOByteCount length)
 		currentOffset += currentLength;
 	}
 
+	if (_commonPartitionSize) {
+		_commonDict = OSDictionary::withCapacity(1);
+	}
+
+	if (_systemPartitionSize) {
+		_systemDict = OSDictionary::withCapacity(1);
+	}
+
 exit:
 	DEBUG_ALWAYS("NVRAM : commonPartitionOffset - %#x, commonPartitionSize - %#x, systemPartitionOffset - %#x, systemPartitionSize - %#x\n",
 	    _commonPartitionOffset, _commonPartitionSize, _systemPartitionOffset, _systemPartitionSize);
@@ -401,8 +463,6 @@ IONVRAMCHRPHandler::unserializeVariables(void)
 		if (currentRegion->size == 0) {
 			continue;
 		}
-
-		currentRegion->dict = OSDictionary::withCapacity(1);
 
 		DEBUG_INFO("region = %d\n", currentRegion->type);
 		cnt = 0;
@@ -445,20 +505,26 @@ IONVRAMCHRPHandler::unserializeVariables(void)
 			if (convertPropToObject(propName, propNameLength,
 			    propData, propDataLength,
 			    propSymbol, propObject)) {
-				DEBUG_INFO("adding %s, dataLength=%u\n", propSymbol.get()->getCStringNoCopy(), propDataLength);
+				NVRAMPartitionType partitionType;
+				const char         *varName = propSymbol.get()->getCStringNoCopy();
+				uint32_t           variableLength = cnt - cntStart;
+
+				DEBUG_INFO("adding %s, variableLength=%#x,dataLength=%#x\n", varName, variableLength, propDataLength);
+
 				currentRegion->dict.get()->setObject(propSymbol.get(), propObject.get());
+				partitionType = _provider->getDictionaryType(currentRegion->dict.get());
+
 				if (_provider->_diags) {
-					_provider->_diags->logVariable(_provider->getDictionaryType(currentRegion->dict.get()),
-					    kIONVRAMOperationInit, propSymbol.get()->getCStringNoCopy(),
-					    (void *)(uintptr_t)(cnt - cntStart));
+					_provider->_diags->logVariable(partitionType, kIONVRAMOperationInit, varName,
+					    (void *)(uintptr_t)(variableLength));
+				}
+
+				if (partitionType == kIONVRAMPartitionSystem) {
+					_systemUsed += variableLength;
+				} else if (partitionType == kIONVRAMPartitionCommon) {
+					_commonUsed += variableLength;
 				}
 			}
-		}
-
-		if (currentRegion->type == kIONVRAMPartitionSystem) {
-			_systemUsed = cnt;
-		} else if (currentRegion->type == kIONVRAMPartitionCommon) {
-			_commonUsed = cnt;
 		}
 	}
 
@@ -598,19 +664,12 @@ exit:
 }
 
 IOReturn
-IONVRAMCHRPHandler::setVariable(const uuid_t *varGuid, const char *variableName, OSObject *object)
+IONVRAMCHRPHandler::setVariableInternal(const uuid_t varGuid, const char *variableName, OSObject *object, bool systemVar)
 {
-	bool       systemVar = false;
 	uint32_t   newSize = 0;
 	uint32_t   existingSize = 0;
 	bool       remove = (object == nullptr);
 	OSObject   *existing;
-
-	if (_systemPartitionSize) {
-		if ((uuid_compare(*varGuid, gAppleSystemVariableGuid) == 0) || variableInAllowList(variableName)) {
-			systemVar = true;
-		}
-	}
 
 	DEBUG_INFO("setting %s, systemVar=%d\n", variableName, systemVar);
 
@@ -679,12 +738,28 @@ IONVRAMCHRPHandler::setVariable(const uuid_t *varGuid, const char *variableName,
 	return kIOReturnSuccess;
 }
 
+IOReturn
+IONVRAMCHRPHandler::setVariable(const uuid_t varGuid, const char *variableName, OSObject *object)
+{
+	bool systemVar = false;
+
+	if (_systemPartitionSize) {
+		if ((uuid_compare(varGuid, gAppleSystemVariableGuid) == 0) || variableInAllowList(variableName)) {
+			systemVar = true;
+		}
+	}
+
+	return setVariableInternal(varGuid, variableName, object, systemVar);
+}
+
 bool
 IONVRAMCHRPHandler::setController(IONVRAMController *controller)
 {
 	if (_nvramController == NULL) {
 		_nvramController = controller;
 	}
+
+	DEBUG_INFO("Controller name: %s\n", _nvramController->getName());
 
 	return true;
 }

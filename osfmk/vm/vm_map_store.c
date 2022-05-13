@@ -59,9 +59,8 @@ vm_map_store_init( struct vm_map_header *hdr )
 #endif
 }
 
-__attribute__((noinline))
-boolean_t
-vm_map_store_lookup_entry(
+static inline boolean_t
+_vm_map_store_lookup_entry(
 	vm_map_t                map,
 	vm_map_offset_t         address,
 	vm_map_entry_t          *entry)         /* OUT */
@@ -76,6 +75,16 @@ vm_map_store_lookup_entry(
 		return FALSE; /* For compiler warning.*/
 	}
 #endif
+}
+
+__attribute__((noinline))
+boolean_t
+vm_map_store_lookup_entry(
+	vm_map_t                map,
+	vm_map_offset_t         address,
+	vm_map_entry_t          *entry)         /* OUT */
+{
+	return _vm_map_store_lookup_entry(map, address, entry);
 }
 
 void
@@ -95,21 +104,6 @@ vm_map_store_update( vm_map_t map, vm_map_entry_t entry, int update_type )
 	default:
 		break;
 	}
-}
-
-/*
- *  vm_map_store_find_last_free:
- *
- *  Finds and returns in O_ENTRY the entry *after* the last hole (if one exists) in MAP.
- *  Returns NULL if map is full and no hole can be found.
- */
-void
-vm_map_store_find_last_free(
-	vm_map_t map,
-	vm_map_entry_t *o_entry)        /* OUT */
-{
-	/* TODO: Provide a RB implementation for this routine. */
-	vm_map_store_find_last_free_ll(map, o_entry);
 }
 
 /*
@@ -245,4 +239,304 @@ vm_map_store_update_first_free( vm_map_t map, vm_map_entry_t first_free_entry, b
 		update_first_free_rb(map, first_free_entry, new_entry_creation);
 	}
 #endif
+}
+
+__abortlike
+static void
+__vm_map_store_find_space_holelist_corruption(
+	vm_map_t                map,
+	vm_map_offset_t         start,
+	vm_map_entry_t          entry)
+{
+	panic("Found an existing entry %p [0x%llx, 0x%llx) in map %p "
+	    "instead of potential hole at address: 0x%llx.",
+	    entry, (uint64_t)entry->vme_start, (uint64_t)entry->vme_end,
+	    map, (uint64_t)start);
+}
+
+static void
+vm_map_store_convert_hole_to_entry(
+	vm_map_t                map,
+	vm_map_offset_t         addr,
+	vm_map_entry_t         *entry_p)
+{
+	vm_map_entry_t entry = *entry_p;
+
+	if (_vm_map_store_lookup_entry(map, entry->vme_start, entry_p)) {
+		__vm_map_store_find_space_holelist_corruption(map, addr, entry);
+	}
+}
+
+static struct vm_map_entry *
+vm_map_store_find_space_backwards(
+	vm_map_t                map,
+	vm_map_offset_t         end,
+	vm_map_offset_t         lowest_addr,
+	vm_map_offset_t         guard_offset,
+	vm_map_size_t           size,
+	vm_map_offset_t         mask,
+	vm_map_offset_t        *addr_out)
+{
+	const vm_map_offset_t map_mask  = VM_MAP_PAGE_MASK(map);
+	const bool            use_holes = map->holelistenabled;
+	vm_map_offset_t       start;
+	vm_map_entry_t        entry;
+
+	/*
+	 *	Find the entry we will scan from that is the closest
+	 *	to our required scan hint "end".
+	 */
+
+	if (use_holes) {
+		entry = CAST_TO_VM_MAP_ENTRY(map->holes_list);
+		if (entry == VM_MAP_ENTRY_NULL) {
+			return VM_MAP_ENTRY_NULL;
+		}
+
+		entry = entry->vme_prev;
+
+		while (end <= entry->vme_start) {
+			if (entry == CAST_TO_VM_MAP_ENTRY(map->holes_list)) {
+				return VM_MAP_ENTRY_NULL;
+			}
+
+			entry = entry->vme_prev;
+		}
+
+		if (entry->vme_end < end) {
+			end = entry->vme_end;
+		}
+	} else {
+		if (map->max_offset <= end) {
+			entry = vm_map_to_entry(map);
+			end = map->max_offset;
+		} else if (_vm_map_store_lookup_entry(map, end - 1, &entry)) {
+			end = entry->vme_start;
+		} else {
+			entry = entry->vme_next;
+		}
+	}
+
+	for (;;) {
+		/*
+		 * The "entry" follows the proposed new region.
+		 */
+
+		end    = vm_map_trunc_page(end, map_mask);
+		start  = (end - size) & ~mask;
+		start  = vm_map_trunc_page(start, map_mask);
+		end    = start + size;
+		start -= guard_offset;
+
+		if (end < start || start < lowest_addr) {
+			/*
+			 * Fail: reached our scan lowest address limit,
+			 * without finding a large enough hole.
+			 */
+			return VM_MAP_ENTRY_NULL;
+		}
+
+		if (use_holes) {
+			if (entry->vme_start <= start) {
+				/*
+				 * Done: this hole is wide enough.
+				 */
+				vm_map_store_convert_hole_to_entry(map, start, &entry);
+				break;
+			}
+
+			if (entry == CAST_TO_VM_MAP_ENTRY(map->holes_list)) {
+				/*
+				 * Fail: wrapped around, no more holes
+				 */
+				return VM_MAP_ENTRY_NULL;
+			}
+
+			entry = entry->vme_prev;
+			end = entry->vme_end;
+		} else {
+			entry = entry->vme_prev;
+
+			if (entry == vm_map_to_entry(map)) {
+				/*
+				 * Done: no more entries toward the start
+				 * of the map, only a big enough void.
+				 */
+				break;
+			}
+
+			if (entry->vme_end <= start) {
+				/*
+				 * Done: the gap between the two consecutive
+				 * entries is large enough.
+				 */
+				break;
+			}
+
+			end = entry->vme_start;
+		}
+	}
+
+	*addr_out = start;
+	return entry;
+}
+
+static struct vm_map_entry *
+vm_map_store_find_space_forward(
+	vm_map_t                map,
+	vm_map_offset_t         start,
+	vm_map_offset_t         highest_addr,
+	vm_map_offset_t         guard_offset,
+	vm_map_size_t           size,
+	vm_map_offset_t         mask,
+	vm_map_offset_t        *addr_out)
+{
+	const vm_map_offset_t map_mask  = VM_MAP_PAGE_MASK(map);
+	const bool            use_holes = map->holelistenabled;
+	vm_map_entry_t        entry;
+
+	/*
+	 *	Find the entry we will scan from that is the closest
+	 *	to our required scan hint "start".
+	 */
+
+	if (__improbable(map->disable_vmentry_reuse)) {
+		VM_MAP_HIGHEST_ENTRY(map, entry, start);
+	} else if (use_holes) {
+		entry = CAST_TO_VM_MAP_ENTRY(map->holes_list);
+		if (entry == VM_MAP_ENTRY_NULL) {
+			return VM_MAP_ENTRY_NULL;
+		}
+
+		while (entry->vme_end <= start) {
+			entry = entry->vme_next;
+
+			if (entry == CAST_TO_VM_MAP_ENTRY(map->holes_list)) {
+				return VM_MAP_ENTRY_NULL;
+			}
+		}
+
+		if (start < entry->vme_start) {
+			start = entry->vme_start;
+		}
+	} else {
+		vm_map_offset_t first_free_start;
+
+		assert(first_free_is_valid(map));
+
+		entry = map->first_free;
+		if (entry == vm_map_to_entry(map)) {
+			first_free_start = map->min_offset;
+		} else {
+			first_free_start = entry->vme_end;
+		}
+
+		if (start <= first_free_start) {
+			start = first_free_start;
+		} else if (_vm_map_store_lookup_entry(map, start, &entry)) {
+			start = entry->vme_end;
+		}
+	}
+
+	for (;;) {
+		vm_map_offset_t orig_start = start;
+		vm_map_offset_t end, desired_empty_end;
+
+		/*
+		 * The "entry" precedes the proposed new region.
+		 */
+
+		start  = (start + guard_offset + mask) & ~mask;
+		start  = vm_map_round_page(start, map_mask);
+		end    = start + size;
+		start -= guard_offset;
+		/*
+		 * We want an entire page of empty space,
+		 * but don't increase the allocation size.
+		 */
+		desired_empty_end = vm_map_round_page(end, map_mask);
+
+		if (start < orig_start || desired_empty_end < start ||
+		    highest_addr < desired_empty_end) {
+			/*
+			 * Fail: reached our scan highest address limit,
+			 * without finding a large enough hole.
+			 */
+			return VM_MAP_ENTRY_NULL;
+		}
+
+		if (use_holes) {
+			if (desired_empty_end <= entry->vme_end) {
+				/*
+				 * Done: this hole is wide enough.
+				 */
+				vm_map_store_convert_hole_to_entry(map, start, &entry);
+				break;
+			}
+
+			entry = entry->vme_next;
+
+			if (entry == CAST_TO_VM_MAP_ENTRY(map->holes_list)) {
+				/*
+				 * Fail: wrapped around, no more holes
+				 */
+				return VM_MAP_ENTRY_NULL;
+			}
+
+			start = entry->vme_start;
+		} else {
+			vm_map_entry_t next = entry->vme_next;
+
+			if (next == vm_map_to_entry(map)) {
+				/*
+				 * Done: no more entries toward the end
+				 * of the map, only a big enough void.
+				 */
+				break;
+			}
+
+			if (desired_empty_end <= next->vme_start) {
+				/*
+				 * Done: the gap between the two consecutive
+				 * entries is large enough.
+				 */
+				break;
+			}
+
+			entry = next;
+			start = entry->vme_end;
+		}
+	}
+
+	*addr_out = start;
+	return entry;
+}
+
+struct vm_map_entry *
+vm_map_store_find_space(
+	vm_map_t                map,
+	vm_map_offset_t         hint,
+	vm_map_offset_t         limit,
+	boolean_t               backwards,
+	vm_map_offset_t         guard_offset,
+	vm_map_size_t           size,
+	vm_map_offset_t         mask,
+	vm_map_offset_t        *addr_out)
+{
+	vm_map_entry_t entry;
+
+#if defined VM_MAP_STORE_USE_RB
+	__builtin_assume((void*)map->hdr.rb_head_store.rbh_root !=
+	    (void*)(int)SKIP_RB_TREE);
+#endif
+
+	if (backwards) {
+		entry = vm_map_store_find_space_backwards(map, hint, limit,
+		    guard_offset, size, mask, addr_out);
+	} else {
+		entry = vm_map_store_find_space_forward(map, hint, limit,
+		    guard_offset, size, mask, addr_out);
+	}
+
+	return entry;
 }

@@ -260,8 +260,8 @@ extern void               vm_page_free_list(
 	vm_page_t   mem,
 	boolean_t   prepare_object);
 
-extern kern_return_t      vm_page_alloc_list(
-	int         page_count,
+extern kern_return_t vm_page_alloc_list(
+	vm_size_t   page_count,
 	kma_flags_t flags,
 	vm_page_t  *list);
 

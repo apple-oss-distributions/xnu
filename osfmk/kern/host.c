@@ -1153,7 +1153,7 @@ host_processor_info(host_t host,
 
 	needed = pcount * icount * sizeof(natural_t);
 	size = vm_map_round_page(needed, VM_MAP_PAGE_MASK(ipc_kernel_map));
-	result = kmem_alloc(ipc_kernel_map, &addr, size, VM_KERN_MEMORY_IPC);
+	result = kmem_alloc(ipc_kernel_map, &addr, size, KMA_DATA, VM_KERN_MEMORY_IPC);
 	if (result != KERN_SUCCESS) {
 		return KERN_RESOURCE_SHORTAGE;
 	}

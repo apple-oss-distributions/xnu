@@ -65,6 +65,7 @@
 
 #include <os/atomic_private.h>
 #include <sys/queue.h>
+#include <vm/vm_map_internal.h>
 
 #if KASAN
 #include <san/kasan.h>
@@ -318,9 +319,9 @@ typedef struct zone_security_flags {
 	 * Security sensitive configuration bits
 	 */
 	    z_submap_idx       :8,  /* a Z_SUBMAP_IDX_* value */
+	    z_pgz_use_guards   :1,  /* this zone uses guards with PGZ */
 	    z_submap_from_end  :1,  /* allocate from the left or the right ? */
 	    z_kheap_id         :3,  /* zone_kheap_id_t when part of a kalloc heap */
-	    z_allows_foreign   :1,  /* allow non-zalloc space  */
 	    z_noencrypt        :1,  /* do not encrypt pages when hibernating */
 	    z_va_sequester     :1,  /* page sequester: no VA reuse with other zones */
 	    z_kalloc_type      :1;  /* zones that does types based seggregation */
@@ -344,18 +345,6 @@ typedef struct zone_security_flags {
 #   define ZSECURITY_CONFIG_SUBMAP_USER_DATA            OFF
 #else
 #   define ZSECURITY_CONFIG_SUBMAP_USER_DATA            ON
-#endif
-
-/*
- * Leave kext heap on macOS for kalloc/kalloc_type callsites that aren't
- * in the BootKC.
- */
-#if KASAN_ZALLOC || !defined(__LP64__)
-#   define ZSECURITY_CONFIG_SEQUESTER_KEXT_KALLOC       OFF
-#elif PLATFORM_MacOSX
-#   define ZSECURITY_CONFIG_SEQUESTER_KEXT_KALLOC       OFF
-#else
-#   define ZSECURITY_CONFIG_SEQUESTER_KEXT_KALLOC       OFF
 #endif
 
 /*
@@ -394,6 +383,16 @@ typedef struct zone_security_flags {
 #endif
 
 /*
+ * Zsecurity config to enable adjusting of elements
+ * with PGZ-OOB to right-align them in their space.
+ */
+#if KASAN || defined(__x86_64__) || !defined(__LP64__)
+#   define ZSECURITY_CONFIG_PGZ_OOB_ADJUST              OFF
+#else
+#   define ZSECURITY_CONFIG_PGZ_OOB_ADJUST              ON
+#endif
+
+/*
  * Zsecurity config to enable kalloc type segregation
  */
 #if KASAN_ZALLOC || !defined(__LP64__)
@@ -410,23 +409,6 @@ typedef struct zone_security_flags {
 #   define ZSECURITY_CONFIG_KT_VAR_BUDGET               3
 #endif
 
-
-/*
- * Zsecurity options that can be toggled, as opposed to configs
- */
-__options_decl(zone_security_options_t, uint64_t, {
-	/*
-	 * Zsecurity option to enable the kernel and kalloc data maps.
-	 */
-	ZSECURITY_OPTIONS_KERNEL_DATA_MAP       = 0x00000020,
-});
-
-#define ZSECURITY_NOT_A_COMPILE_TIME_CONFIG__OFF() 0
-#define ZSECURITY_NOT_A_COMPILE_TIME_CONFIG__ON()  1
-#define ZSECURITY_CONFIG2(v)     ZSECURITY_NOT_A_COMPILE_TIME_CONFIG__##v()
-#define ZSECURITY_CONFIG1(v)     ZSECURITY_CONFIG2(v)
-#define ZSECURITY_CONFIG(opt)    ZSECURITY_CONFIG1(ZSECURITY_CONFIG_##opt)
-#define ZSECURITY_ENABLED(opt)   (zsecurity_options & ZSECURITY_OPTIONS_##opt)
 
 __options_decl(kalloc_type_options_t, uint64_t, {
 	/*
@@ -509,7 +491,6 @@ struct kheap_zones {
 	uint8_t                         k_zindex_start;
 	/* If there's no hit in the DLUT, then start searching from k_zindex_start. */
 	zone_t                         *k_zone;
-	vm_size_t                       kalloc_max;
 };
 
 /*
@@ -524,7 +505,6 @@ struct kt_heap_zones {
 #define KT_VAR_MAX_HEAPS 8
 #define MAX_ZONES       650
 extern struct kt_heap_zones     kalloc_type_heap_array[KT_VAR_MAX_HEAPS];
-extern zone_security_options_t  zsecurity_options;
 extern zone_id_t _Atomic        num_zones;
 extern uint32_t                 zone_view_count;
 extern struct zone              zone_array[];
@@ -534,6 +514,7 @@ extern const char * const       kalloc_heap_names[KHEAP_ID_COUNT];
 extern mach_memory_info_t      *panic_kext_memory_info;
 extern vm_size_t                panic_kext_memory_size;
 extern vm_offset_t              panic_fault_address;
+extern vm_map_size_t            zone_map_size;
 
 #define zone_index_foreach(i) \
 	for (zone_id_t i = 1, num_zones_##i = os_atomic_load(&num_zones, acquire); \
@@ -543,11 +524,6 @@ extern vm_offset_t              panic_fault_address;
 	for (zone_t z = &zone_array[1], \
 	    last_zone_##z = &zone_array[os_atomic_load(&num_zones, acquire)]; \
 	    z < last_zone_##z; z++)
-
-struct zone_map_range {
-	vm_offset_t min_address;
-	vm_offset_t max_address;
-} __attribute__((aligned(2 * sizeof(vm_offset_t))));
 
 __abortlike
 extern void zone_invalid_panic(zone_t zone);
@@ -561,13 +537,6 @@ zone_index(zone_t z)
 		zone_invalid_panic(z);
 	}
 	return zid;
-}
-
-__pure2
-static inline zone_t
-zone_for_index(zone_id_t zid)
-{
-	return &zone_array[zid];
 }
 
 __pure2
@@ -596,7 +565,7 @@ static inline uint16_t
 zone_oob_offs(zone_t zone)
 {
 	uint16_t offs = 0;
-#if CONFIG_PROB_GZALLOC
+#if ZSECURITY_CONFIG(PGZ_OOB_ADJUST)
 	offs = zone->z_pgz_oob_offs;
 #else
 	(void)zone;
@@ -749,24 +718,21 @@ extern void     get_largest_zone_info(char *zone_name, size_t zone_name_len, uin
 extern void     zone_bootstrap(void);
 
 /*!
- * @function zone_foreign_mem_init
+ * @function zone_early_mem_init
  *
  * @brief
  * Steal memory from pmap (prior to initialization of zalloc)
- * for the special vm zones that allow foreign memory and store
+ * for the special vm zones that allow bootstrap memory and store
  * the range so as to facilitate range checking in zfree.
  *
  * @param size              the size to steal (must be a page multiple)
- * @param allow_meta_steal  whether allocator metadata should be stolen too
- *                          due to a non natural config.
  */
 __startup_func
-extern vm_offset_t zone_foreign_mem_init(
-	vm_size_t       size,
-	bool            allow_meta_steal);
+extern vm_offset_t zone_early_mem_init(
+	vm_size_t       size);
 
 /*!
- * @function zone_get_foreign_alloc_size
+ * @function zone_get_early_alloc_size
  *
  * @brief
  * Compute the correct size (greater than @c ptoa(min_pages)) that is a multiple
@@ -774,24 +740,24 @@ extern vm_offset_t zone_foreign_mem_init(
  * element size.
  */
 __startup_func
-extern vm_size_t zone_get_foreign_alloc_size(
+extern vm_size_t zone_get_early_alloc_size(
 	const char          *name __unused,
 	vm_size_t            elem_size,
 	zone_create_flags_t  flags,
-	uint16_t             min_pages);
+	vm_size_t            min_elems);
 
 /*!
- * @function zone_cram_foreign
+ * @function zone_cram_early
  *
  * @brief
- * Cram memory allocated with @c zone_foreign_mem_init() into a zone.
+ * Cram memory allocated with @c zone_early_mem_init() into a zone.
  *
  * @param zone          The zone to cram memory into.
  * @param newmem        The base address for the memory to cram.
  * @param size          The size of the memory to cram into the zone.
  */
 __startup_func
-extern void     zone_cram_foreign(
+extern void     zone_cram_early(
 	zone_t          zone,
 	vm_offset_t     newmem,
 	vm_size_t       size);
@@ -832,36 +798,21 @@ extern void     zfree_ext(
 	void           *addr,
 	vm_size_t       elem_size);
 
-extern zone_id_t zone_id_for_native_element(
+extern zone_id_t zone_id_for_element(
 	void           *addr,
 	vm_size_t       esize);
 
-#if CONFIG_PROB_GZALLOC
+#if ZSECURITY_CONFIG(PGZ_OOB_ADJUST)
 extern void *zone_element_pgz_oob_adjust(
-	void           *addr,
-	vm_size_t       esize,
-	vm_size_t       req_size);
-#endif /* CONFIG_PROB_GZALLOC */
+	struct kalloc_result kr,
+	vm_size_t       elem_size);
+#endif /* !ZSECURITY_CONFIG(PGZ_OOB_ADJUST) */
 
 extern vm_size_t zone_element_size(
 	void           *addr,
 	zone_t         *z,
 	bool            clear_oob,
 	vm_offset_t    *oob_offs);
-
-__attribute__((overloadable))
-extern bool      zone_range_contains(
-	const struct zone_map_range *r,
-	vm_offset_t     addr);
-
-__attribute__((overloadable))
-extern bool      zone_range_contains(
-	const struct zone_map_range *r,
-	vm_offset_t     addr,
-	vm_offset_t     size);
-
-extern vm_size_t zone_range_size(
-	const struct zone_map_range *r);
 
 /*!
  * @function zone_spans_ro_va
@@ -968,9 +919,6 @@ extern uint16_t zone_index_from_tag_index(
 
 #endif /* VM_TAG_SIZECLASSES */
 
-extern void kalloc_init_maps(
-	vm_address_t min_address);
-
 static inline void
 zone_lock(zone_t zone)
 {
@@ -1002,7 +950,7 @@ zone_unlock(zone_t zone)
 }
 
 #if CONFIG_GZALLOC
-void gzalloc_init(vm_size_t);
+void gzalloc_init(void);
 void gzalloc_zone_init(zone_t);
 void gzalloc_empty_free_cache(zone_t);
 boolean_t gzalloc_enabled(void);

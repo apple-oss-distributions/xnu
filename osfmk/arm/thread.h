@@ -108,6 +108,7 @@ struct machine_thread {
 	uint64_t                  recover_far;
 #elif __arm__
 	struct arm_saved_state    PcbData;
+	vm_offset_t               recover;                /* page fault recover(copyin/out) */
 #else
 #error Unknown arch
 #endif

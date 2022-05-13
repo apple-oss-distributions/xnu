@@ -1551,3 +1551,10 @@ thread_get_sigreturn_token(thread_t thread)
 	uthread_t ut = (struct uthread *) get_bsdthread_info(thread);
 	return ut->uu_sigreturn_token;
 }
+
+uint32_t
+thread_get_sigreturn_diversifier(thread_t thread)
+{
+	uthread_t ut = (struct uthread *) get_bsdthread_info(thread);
+	return ut->uu_sigreturn_diversifier;
+}

@@ -882,7 +882,7 @@ extern void flow_mgr_setup_host_flow(struct flow_mgr *fm, struct nx_flowswitch *
 extern void flow_mgr_teardown_host_flow(struct flow_mgr *fm);
 
 extern int flow_namespace_create(union sockaddr_in_4_6 *, uint8_t protocol,
-    netns_token *, boolean_t, struct ns_flow_info *);
+    netns_token *, uint16_t, struct ns_flow_info *);
 extern void flow_namespace_half_close(netns_token *token);
 extern void flow_namespace_withdraw(netns_token *);
 extern void flow_namespace_destroy(netns_token *);

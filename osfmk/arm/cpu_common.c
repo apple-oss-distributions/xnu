@@ -376,16 +376,17 @@ cpu_xcall_internal(unsigned int signal, int cpu_number, broadcastFunc func, void
 	cpu_data_t      *target_cpu_datap;
 
 	if ((cpu_number < 0) || (cpu_number > ml_get_max_cpu_number())) {
-		return KERN_INVALID_ARGUMENT;
+		panic("cpu_xcall_internal: invalid cpu_number %d", cpu_number);
 	}
 
 	if (func == NULL || param == NULL) {
-		return KERN_INVALID_ARGUMENT;
+		// cpu_handle_xcall uses non-NULL-ness to tell when the value is ready
+		panic("cpu_xcall_internal: cannot have null func/param: %p %p", func, param);
 	}
 
 	target_cpu_datap = (cpu_data_t*)CpuDataEntries[cpu_number].cpu_data_vaddr;
 	if (target_cpu_datap == NULL) {
-		return KERN_INVALID_ARGUMENT;
+		panic("cpu_xcall_internal: cpu %d not initialized", cpu_number);
 	}
 
 	return cpu_signal(target_cpu_datap, signal, ptrauth_nop_cast(void*, ptrauth_auth_and_resign(func, ptrauth_key_function_pointer, ptrauth_type_discriminator(broadcastFunc), ptrauth_key_function_pointer, target_cpu_datap)), param);

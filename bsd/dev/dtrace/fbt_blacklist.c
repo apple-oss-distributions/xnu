@@ -97,6 +97,8 @@ const char * fbt_blacklist[] =
 	UBSAN_MINIMAL_ONLY(__ubsan)
 	ARM_ONLY(__udiv)
 	ARM_ONLY(__umod)
+	CLOSURE(_copyin)
+	CLOSURE(_copyout)
 	CRITICAL(_disable_preemption)
 	CRITICAL(_enable_preemption)
 	CLOSURE(absolutetime_to_microtime)

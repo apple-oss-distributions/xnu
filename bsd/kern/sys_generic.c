@@ -3139,7 +3139,9 @@ sysctl_coredump_encryption_key_update SYSCTL_HANDLER_ARGS
 {
 	kern_return_t ret = KERN_SUCCESS;
 	int error = 0;
-	struct kdp_core_encryption_key_descriptor key_descriptor = { MACH_CORE_FILEHEADER_V2_FLAG_NEXT_COREFILE_KEY_FORMAT_NIST_P256, 0, NULL };
+	struct kdp_core_encryption_key_descriptor key_descriptor = {
+		.kcekd_format = MACH_CORE_FILEHEADER_V2_FLAG_NEXT_COREFILE_KEY_FORMAT_NIST_P256,
+	};
 
 	/* Need to be root and have entitlement */
 	if (!kauth_cred_issuser(kauth_cred_get()) && !IOCurrentTaskHasEntitlement(COREDUMP_ENCRYPTION_KEY_ENTITLEMENT)) {
@@ -3151,32 +3153,30 @@ sysctl_coredump_encryption_key_update SYSCTL_HANDLER_ARGS
 		return EINVAL;
 	}
 
-	// It is allowed for the caller to pass in a NULL buffer. This indicates that they want us to forget about any public key
-	// we might have.
+	// It is allowed for the caller to pass in a NULL buffer.
+	// This indicates that they want us to forget about any public key we might have.
 	if (req->newptr) {
 		key_descriptor.kcekd_size = (uint16_t) req->newlen;
+		key_descriptor.kcekd_key = kalloc_data(key_descriptor.kcekd_size, Z_WAITOK);
 
-		ret = kmem_alloc(kernel_map, (vm_offset_t*) &(key_descriptor.kcekd_key), key_descriptor.kcekd_size, VM_KERN_MEMORY_DIAG);
-		if (KERN_SUCCESS != ret) {
+		if (key_descriptor.kcekd_key == NULL) {
 			return ENOMEM;
 		}
 
 		error = SYSCTL_IN(req, key_descriptor.kcekd_key, key_descriptor.kcekd_size);
 		if (error) {
-			return error;
+			goto out;
 		}
 	}
 
-	// If successful, kdp_core will take ownership of the 'kcekd_key' pointer
 	ret = IOProvideCoreFileAccess(kdp_core_handle_new_encryption_key, (void *)&key_descriptor);
 	if (KERN_SUCCESS != ret) {
 		printf("Failed to handle the new encryption key. Error 0x%x", ret);
-		if (key_descriptor.kcekd_key) {
-			kmem_free(kernel_map, (vm_offset_t) key_descriptor.kcekd_key, key_descriptor.kcekd_size);
-		}
-		return EFAULT;
+		error = EFAULT;
 	}
 
+out:
+	kfree_data(key_descriptor.kcekd_key, key_descriptor.kcekd_size);
 	return 0;
 }
 

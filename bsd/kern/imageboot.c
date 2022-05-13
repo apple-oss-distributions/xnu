@@ -625,7 +625,8 @@ imageboot_read_file_internal(const char *path, const off_t offset, const bool pa
 
 	if (pageable) {
 		vm_offset_t addr = 0;
-		if (kmem_alloc_pageable(kernel_map, &addr, (vm_size_t)fsize, VM_KERN_MEMORY_KALLOC_DATA) == KERN_SUCCESS) {
+		if (kmem_alloc(kernel_map, &addr, (vm_size_t)fsize,
+		    KMA_PAGEABLE | KMA_DATA, VM_KERN_MEMORY_FILE) == KERN_SUCCESS) {
 			buf = (char *)addr;
 		} else {
 			buf = NULL;

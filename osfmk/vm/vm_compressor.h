@@ -190,16 +190,8 @@ struct c_segment {
 	task_t          c_task_owner;
 #endif /* CONFIG_FREEZE */
 
-#define C_SEG_MAX_LIMIT         (1 << 20)       /* this needs to track the size of c_mysegno */
-	uint32_t        c_mysegno:20,
-	    c_busy:1,
-	    c_busy_swapping:1,
-	    c_wanted:1,
-	    c_on_minorcompact_q:1,              /* can also be on the age_q, the majorcompact_q or the swappedin_q */
-
-	    c_state:4,                          /* what state is the segment in which dictates which q to find it on */
-	    c_overage_swap:1,
-	    c_reserved:3;
+#define C_SEG_MAX_LIMIT         (UINT_MAX)       /* this needs to track the size of c_mysegno */
+	uint32_t        c_mysegno;
 
 	uint32_t        c_creation_ts;
 	uint64_t        c_generation_id;
@@ -232,7 +224,23 @@ struct c_segment {
 	uint32_t        c_agedin_ts;
 	uint32_t        c_swappedin_ts;
 	bool            c_swappedin;
+	/*
+	 * Do not pull c_swappedin above into the bitfield below.
+	 * We update it without always taking the segment
+	 * lock and rely on the segment being busy instead.
+	 * The bitfield needs the segment lock. So updating
+	 * this state, if in the bitfield, without the lock
+	 * will race with the updates to the other fields and
+	 * result in a mess.
+	 */
+	uint32_t        c_busy:1,
+	    c_busy_swapping:1,
+	    c_wanted:1,
+	    c_on_minorcompact_q:1,              /* can also be on the age_q, the majorcompact_q or the swappedin_q */
 
+	    c_state:4,                          /* what state is the segment in which dictates which q to find it on */
+	    c_overage_swap:1,
+	    c_reserved:23;
 	int             c_slot_var_array_len;
 	struct  c_slot  *c_slot_var_array;
 	struct  c_slot  c_slot_fixed_array[0];

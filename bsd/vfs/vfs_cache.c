@@ -764,7 +764,7 @@ bad_news:
 
 #if CONFIG_FIRMLINKS
 			if (!(flags & BUILDPATH_NO_FIRMLINK) &&
-			    (tvp->v_flag & VFMLINKTARGET) && tvp->v_fmlink && (vp->v_fmlink->v_type == VDIR)) {
+			    (tvp->v_flag & VFMLINKTARGET) && tvp->v_fmlink && (tvp->v_fmlink->v_type == VDIR)) {
 				tvp = tvp->v_fmlink;
 				break;
 			}

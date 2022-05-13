@@ -37,62 +37,6 @@ sane_us2abs(uint64_t ns)
 	return t;
 }
 
-static int
-hw_lock_allow_invalid_test(__unused int64_t in, int64_t *out)
-{
-	vm_offset_t addr = 0;
-	hw_lock_bit_t *lck;
-	kern_return_t kr;
-	hw_lock_status_t rc;
-
-	printf("%s: STARTING\n", __func__);
-
-	kr = kernel_memory_allocate(kernel_map, &addr, PAGE_SIZE, PAGE_MASK,
-	    KMA_ZERO | KMA_KOBJECT, VM_KERN_MEMORY_DIAG);
-	if (kr != KERN_SUCCESS) {
-		printf("%s: kma failed (%d)\n", __func__, kr);
-		return ENOMEM;
-	}
-
-	lck = (hw_lock_bit_t *)addr;
-	rc = hw_lock_bit_to_allow_invalid(lck, 0, sane_us2abs(1),
-	    hw_lock_timeout_bail_handler, NULL);
-	assert(rc == HW_LOCK_INVALID); // because the lock is 0
-	assert(os_atomic_load(lck, relaxed) == 0);
-	assert(preemption_enabled());
-
-	os_atomic_init(lck, 0x100);
-	rc = hw_lock_bit_to_allow_invalid(lck, 0, sane_us2abs(1),
-	    hw_lock_timeout_bail_handler, NULL);
-	assert(rc == HW_LOCK_ACQUIRED); // because the lock is 0x100
-	assert(os_atomic_load(lck, relaxed) == 0x101);
-	assert(!preemption_enabled());
-
-	rc = hw_lock_bit_to_allow_invalid(lck, 0, sane_us2abs(1),
-	    hw_lock_timeout_bail_handler, NULL);
-	assert(rc == HW_LOCK_CONTENDED);
-	enable_preemption(); /* HW_LOCK_CONTENDED doesn't re-enable preemption */
-
-	hw_unlock_bit(lck, 0);
-	assert(os_atomic_load(lck, relaxed) == 0x100);
-	assert(preemption_enabled());
-
-	kernel_memory_depopulate(kernel_map, addr, PAGE_SIZE, KMA_KOBJECT,
-	    VM_KERN_MEMORY_DIAG);
-
-	rc = hw_lock_bit_to_allow_invalid(lck, 0, sane_us2abs(1),
-	    hw_lock_timeout_bail_handler, NULL);
-	assert(rc == HW_LOCK_INVALID); // because the memory is unmapped
-
-	kmem_free(kernel_map, addr, PAGE_SIZE);
-
-	printf("%s: SUCCESS\n", __func__);
-
-	*out = 1;
-	return 0;
-}
-SYSCTL_TEST_REGISTER(hw_lock_allow_invalid, hw_lock_allow_invalid_test);
-
 #if !KASAN
 static void
 hw_lck_ticket_test_wait_for_delta(hw_lck_ticket_t *lck, uint8_t delta, int msec)
@@ -139,7 +83,7 @@ hw_lck_ticket_allow_invalid_test(__unused int64_t in, int64_t *out)
 
 	printf("%s: STARTING\n", __func__);
 
-	kr = kernel_memory_allocate(kernel_map, &addr, PAGE_SIZE, PAGE_MASK,
+	kr = kmem_alloc(kernel_map, &addr, PAGE_SIZE,
 	    KMA_ZERO | KMA_KOBJECT, VM_KERN_MEMORY_DIAG);
 	if (kr != KERN_SUCCESS) {
 		printf("%s: kma failed (%d)\n", __func__, kr);
@@ -186,7 +130,7 @@ hw_lck_ticket_allow_invalid_test(__unused int64_t in, int64_t *out)
 	hw_lck_ticket_init(lck, NULL);
 #endif /* !KASAN */
 
-	kernel_memory_depopulate(kernel_map, addr, PAGE_SIZE, KMA_KOBJECT,
+	kernel_memory_depopulate(addr, PAGE_SIZE, KMA_KOBJECT,
 	    VM_KERN_MEMORY_DIAG);
 
 	rc = hw_lck_ticket_lock_allow_invalid(lck, sane_us2abs(100),

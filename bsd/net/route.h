@@ -237,8 +237,11 @@ struct rtentry {
 	struct eventhandler_lists_ctxt rt_evhdlr_ctxt;
 };
 
-#define rt_key_free(r) \
-	(kheap_free_addr)(KHEAP_DATA_BUFFERS, rt_key(r))
+#define rt_key_free(r) ({ \
+	void *__r = rt_key(r); \
+	kheap_free_addr(KHEAP_DATA_BUFFERS, __r); \
+})
+
 
 enum {
 	ROUTE_STATUS_UPDATE = 1,

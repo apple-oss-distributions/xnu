@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2022 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -229,7 +229,7 @@ pmap_memory_region_t pmap_memory_regions[PMAP_MEMORY_REGIONS_SIZE];
 #define current_pmap()          (vm_map_pmap(current_thread()->map))
 
 struct pmap     kernel_pmap_store;
-SECURITY_READ_ONLY_LATE(pmap_t)          kernel_pmap = NULL;
+const pmap_t    kernel_pmap = &kernel_pmap_store;
 SECURITY_READ_ONLY_LATE(zone_t)          pmap_zone; /* zone of pmap structures */
 SECURITY_READ_ONLY_LATE(zone_t)          pmap_anchor_zone;
 SECURITY_READ_ONLY_LATE(zone_t)          pmap_uanchor_zone;
@@ -497,7 +497,6 @@ pmap_bootstrap(
 	 *	correctly at this part of the boot sequence.
 	 */
 
-	kernel_pmap = &kernel_pmap_store;
 	os_ref_init(&kernel_pmap->ref_count, NULL);
 #if DEVELOPMENT || DEBUG
 	kernel_pmap->nx_enabled = TRUE;
@@ -764,11 +763,21 @@ pmap_pv_fixup(vm_offset_t start_va, vm_offset_t end_va)
 			pv_h->va_and_flags = start_va;
 			pv_h->pmap = kernel_pmap;
 			queue_init(&pv_h->qlink);
+			/*
+			 * Note that pmap_query_pagesize does not enforce start_va is aligned
+			 * on a 2M boundary if it's within a large page
+			 */
 			if (pmap_query_pagesize(kernel_pmap, start_va) == I386_LPGBYTES) {
 				pgsz = I386_LPGBYTES;
 			}
 		}
-		start_va += pgsz;
+		if (os_add_overflow(start_va, pgsz, &start_va)) {
+#if DEVELOPMENT || DEBUG
+			panic("pmap_pv_fixup: Unexpected address wrap (0x%lx after adding 0x%x)", start_va, pgsz);
+#else
+			start_va = end_va;
+#endif
+		}
 	}
 }
 
@@ -816,13 +825,10 @@ pmap_init(void)
 	    + pv_hash_lock_table_size((npvhashbuckets))
 	    + npages);
 	s = round_page(s);
-	if (kernel_memory_allocate(kernel_map, &addr, s, 0,
-	    KMA_KOBJECT | KMA_PERMANENT, VM_KERN_MEMORY_PMAP)
-	    != KERN_SUCCESS) {
-		panic("pmap_init");
-	}
 
-	memset((char *)addr, 0, s);
+	kmem_alloc(kernel_map, &addr, s,
+	    KMA_NOFAIL | KMA_ZERO | KMA_KOBJECT | KMA_PERMANENT,
+	    VM_KERN_MEMORY_PMAP);
 
 	vaddr = addr;
 	vsize = s;
@@ -937,9 +943,13 @@ pmap_init(void)
 void
 pmap_mark_range(pmap_t npmap, uint64_t sv, uint64_t nxrosz, boolean_t NX, boolean_t ro)
 {
-	uint64_t ev = sv + nxrosz, cv = sv;
+	uint64_t ev, cv = sv;
 	pd_entry_t *pdep;
 	pt_entry_t *ptep = NULL;
+
+	if (os_add_overflow(sv, nxrosz, &ev)) {
+		panic("pmap_mark_range: Unexpected address overflow: start=0x%llx size=0x%llx", sv, nxrosz);
+	}
 
 	/* XXX what if nxrosz is 0?  we end up marking the page whose address is passed in via sv -- is that kosher? */
 	assert(!is_ept_pmap(npmap));
@@ -972,9 +982,13 @@ pmap_mark_range(pmap_t npmap, uint64_t sv, uint64_t nxrosz, boolean_t NX, boolea
 			} else {
 				*pdep |= INTEL_PTE_WRITE;
 			}
-			cv += NBPD;
-			cv &= ~((uint64_t) PDEMASK);
-			pdep = pmap_pde(npmap, cv);
+
+			if (os_add_overflow(cv, NBPD, &cv)) {
+				cv = ev;
+			} else {
+				cv &= ~((uint64_t) PDEMASK);
+				pdep = pmap_pde(npmap, cv);
+			}
 			continue;
 		}
 
@@ -1890,10 +1904,17 @@ pmap_protect_options(
 	cur_vaddr = sva;
 	while (sva < eva) {
 		uint64_t vaddr_incr;
-		lva = (sva + PDE_MAPPED_SIZE) & ~(PDE_MAPPED_SIZE - 1);
-		if (lva > eva) {
+
+		if (os_add_overflow(sva, PDE_MAPPED_SIZE, &lva)) {
 			lva = eva;
+		} else {
+			lva &= ~(PDE_MAPPED_SIZE - 1);
+
+			if (lva > eva) {
+				lva = eva;
+			}
 		}
+
 		pde = pmap_pde(map, sva);
 		if (pde && (*pde & PTE_VALID_MASK(is_ept))) {
 			if (*pde & PTE_PS) {

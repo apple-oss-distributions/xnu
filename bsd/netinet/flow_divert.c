@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2021 Apple Inc. All rights reserved.
+ * Copyright (c) 2012-2022 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -102,7 +102,6 @@
 #define FDUNLOCK(pcb)                                   lck_mtx_unlock(&(pcb)->mtx)
 
 #define FD_CTL_SENDBUFF_SIZE                    (128 * 1024)
-#define FD_CTL_RCVBUFF_SIZE                             (128 * 1024)
 
 #define GROUP_BIT_CTL_ENQUEUE_BLOCKED   0
 
@@ -231,7 +230,7 @@ flow_divert_pcb_lookup(uint32_t hash, struct flow_divert_group *group)
 }
 
 static errno_t
-flow_divert_pcb_insert(struct flow_divert_pcb *fd_cb, uint32_t ctl_unit)
+flow_divert_pcb_insert(struct socket *so, struct flow_divert_pcb *fd_cb, uint32_t ctl_unit)
 {
 	errno_t                                                 error                                           = 0;
 	struct                                          flow_divert_pcb *exist          = NULL;
@@ -244,7 +243,7 @@ flow_divert_pcb_insert(struct flow_divert_pcb *fd_cb, uint32_t ctl_unit)
 		return EINVAL;
 	}
 
-	socket_unlock(fd_cb->so, 0);
+	socket_unlock(so, 0);
 	lck_rw_lock_shared(&g_flow_divert_group_lck);
 
 	if (g_flow_divert_groups == NULL || g_active_group_count == 0) {
@@ -260,7 +259,11 @@ flow_divert_pcb_insert(struct flow_divert_pcb *fd_cb, uint32_t ctl_unit)
 		goto done;
 	}
 
-	socket_lock(fd_cb->so, 0);
+	socket_lock(so, 0);
+	if (!(so->so_flags & SOF_FLOW_DIVERT)) {
+		error = EINVAL;
+		goto unlock;
+	}
 
 	do {
 		uint32_t        key[2];
@@ -302,11 +305,16 @@ flow_divert_pcb_insert(struct flow_divert_pcb *fd_cb, uint32_t ctl_unit)
 		error = EEXIST;
 	}
 
-	socket_unlock(fd_cb->so, 0);
+unlock:
+	socket_unlock(so, 0);
 
 done:
 	lck_rw_done(&g_flow_divert_group_lck);
-	socket_lock(fd_cb->so, 0);
+	socket_lock(so, 0);
+
+	if (!(so->so_flags & SOF_FLOW_DIVERT)) {
+		error = EINVAL;
+	}
 
 	return error;
 }
@@ -1204,11 +1212,7 @@ flow_divert_create_connect_packet(struct flow_divert_pcb *fd_cb, struct sockaddr
 		}
 	}
 
-	socket_unlock(so, 0);
-
 	error = flow_divert_add_all_proc_info(fd_cb, so, p, signing_id, connect_packet);
-
-	socket_lock(so, 0);
 
 	if (signing_id != NULL) {
 		kfree_data(signing_id, sid_size + 1);
@@ -2076,7 +2080,7 @@ flow_divert_disable(struct flow_divert_pcb *fd_cb)
 		    (last_proc != NULL ? last_proc : current_proc()));
 
 		if (error && error != EWOULDBLOCK) {
-			FDLOG(LOG_ERR, fd_cb, "Failed to send queued data using the socket's original protocol: %d", error);
+			FDLOG(LOG_ERR, fd_cb, "Failed to send queued TCP data using the socket's original protocol: %d", error);
 		} else {
 			error = 0;
 		}
@@ -2164,7 +2168,7 @@ flow_divert_disable(struct flow_divert_pcb *fd_cb)
 			}
 
 			if (error) {
-				FDLOG(LOG_ERR, fd_cb, "Failed to send queued data using the socket's original protocol: %d", error);
+				FDLOG(LOG_ERR, fd_cb, "Failed to send queued UDP data using the socket's original protocol: %d", error);
 			}
 		}
 	}
@@ -3007,12 +3011,6 @@ flow_divert_input(mbuf_t packet, struct flow_divert_group *group)
 		goto done;
 	}
 
-	if (mbuf_pkthdr_len(packet) > FD_CTL_RCVBUFF_SIZE) {
-		FDLOG(LOG_ERR, &nil_pcb, "got a bad packet, length (%lu) > %d", mbuf_pkthdr_len(packet), FD_CTL_RCVBUFF_SIZE);
-		error = EINVAL;
-		goto done;
-	}
-
 	error = mbuf_copydata(packet, 0, sizeof(hdr), &hdr);
 	if (error) {
 		FDLOG(LOG_ERR, &nil_pcb, "mbuf_copydata failed for the header: %d", error);
@@ -3835,12 +3833,14 @@ flow_divert_pcb_init_internal(struct socket *so, uint32_t ctl_unit, uint32_t agg
 			fd_cb->flags &= ~FLOW_DIVERT_FLOW_IS_TRANSPARENT;
 		}
 
-		error = flow_divert_pcb_insert(fd_cb, group_unit);
+		error = flow_divert_pcb_insert(so, fd_cb, group_unit);
 		if (error) {
 			FDLOG(LOG_ERR, fd_cb, "pcb insert failed: %d", error);
-			so->so_fd_pcb = NULL;
-			so->so_flags &= ~SOF_FLOW_DIVERT;
-			FDRELEASE(fd_cb);
+			if (so->so_flags & SOF_FLOW_DIVERT) {
+				so->so_fd_pcb = NULL;
+				so->so_flags &= ~SOF_FLOW_DIVERT;
+				FDRELEASE(fd_cb);
+			}
 		} else {
 			if (SOCK_TYPE(so) == SOCK_STREAM) {
 				flow_divert_set_protosw(so);
@@ -4271,7 +4271,6 @@ flow_divert_kctl_init(void)
 	ctl_reg.ctl_name[sizeof(ctl_reg.ctl_name) - 1] = '\0';
 	ctl_reg.ctl_flags = CTL_FLAG_PRIVILEGED | CTL_FLAG_REG_EXTENDED;
 	ctl_reg.ctl_sendsize = FD_CTL_SENDBUFF_SIZE;
-	ctl_reg.ctl_recvsize = FD_CTL_RCVBUFF_SIZE;
 
 	ctl_reg.ctl_connect = flow_divert_kctl_connect;
 	ctl_reg.ctl_disconnect = flow_divert_kctl_disconnect;

@@ -53,15 +53,6 @@ OSMetaClassDefineReservedUnused(OSData, 7);
 
 #define EXTERNAL ((unsigned int) -1)
 
-static SECURITY_READ_ONLY_LATE(vm_map_t) alloc_map;
-__startup_func
-static void
-getAllocMap(void)
-{
-	alloc_map = KHEAP_DATA_BUFFERS->kh_fallback_map;
-}
-STARTUP(ZALLOC, STARTUP_RANK_LAST, getAllocMap);
-
 bool
 OSData::initWithCapacity(unsigned int inCapacity)
 {
@@ -74,7 +65,7 @@ OSData::initWithCapacity(unsigned int inCapacity)
 			if (capacity < page_size) {
 				kfree_data_container(data, capacity);
 			} else {
-				kmem_free(alloc_map, (vm_offset_t)data, capacity);
+				kmem_free(kernel_map, (vm_offset_t)data, capacity);
 			}
 			data = NULL;
 			capacity = 0;
@@ -93,9 +84,10 @@ OSData::initWithCapacity(unsigned int inCapacity)
 			if (round_page_overflow(inCapacity, &inCapacity)) {
 				kr = KERN_RESOURCE_SHORTAGE;
 			} else {
-				kr = kernel_memory_allocate(alloc_map,
+				kr = kernel_memory_allocate(kernel_map,
 				    (vm_offset_t *)&_data, inCapacity,
-				    0, KMA_ATOMIC, IOMemoryTag(alloc_map));
+				    0, (kma_flags_t) (KMA_ATOMIC | KMA_DATA),
+				    IOMemoryTag(kernel_map));
 				data = _data;
 			}
 			if (KERN_SUCCESS != kr) {
@@ -234,7 +226,7 @@ OSData::free()
 		if (capacity < page_size) {
 			kfree_data_container(data, capacity);
 		} else {
-			kmem_free(alloc_map, (vm_offset_t)data, capacity);
+			kmem_free(kernel_map, (vm_offset_t)data, capacity);
 		}
 		OSCONTAINER_ACCUMSIZE( -((size_t)capacity));
 	} else if (capacity == EXTERNAL) {
@@ -305,15 +297,16 @@ OSData::ensureCapacity(unsigned int newCapacity)
 		}
 		if (capacity >= page_size) {
 			copydata = NULL;
-			kr = kmem_realloc(alloc_map,
+			kr = kmem_realloc(kernel_map,
 			    (vm_offset_t)data,
 			    capacity,
 			    (vm_offset_t *)&newData,
 			    finalCapacity,
-			    IOMemoryTag(alloc_map));
+			    IOMemoryTag(kernel_map));
 		} else {
-			kr = kernel_memory_allocate(alloc_map, (vm_offset_t *)&newData,
-			    finalCapacity, 0, KMA_ATOMIC, IOMemoryTag(alloc_map));
+			kr = kernel_memory_allocate(kernel_map, (vm_offset_t *)&newData,
+			    finalCapacity, 0, (kma_flags_t) (KMA_ATOMIC | KMA_DATA),
+			    IOMemoryTag(kernel_map));
 		}
 		if (KERN_SUCCESS != kr) {
 			newData = NULL;
@@ -331,7 +324,7 @@ OSData::ensureCapacity(unsigned int newCapacity)
 			if (capacity < page_size) {
 				kfree_data_container(data, capacity);
 			} else {
-				kmem_free(alloc_map, (vm_offset_t)data, capacity);
+				kmem_free(kernel_map, (vm_offset_t)data, capacity);
 			}
 		}
 		OSCONTAINER_ACCUMSIZE(((size_t)finalCapacity) - ((size_t)capacity));
@@ -340,6 +333,28 @@ OSData::ensureCapacity(unsigned int newCapacity)
 	}
 
 	return capacity;
+}
+
+bool
+OSData::clipForCopyout()
+{
+	unsigned int newCapacity = (uint32_t)round_page(length);
+
+	/*
+	 * OSData allocations are atomic, which means that if copyoutkdata()
+	 * is used on them, and that there are fully unused pages at the end
+	 * of the OSData buffer, then vm_map_copyin() will try to clip the VM
+	 * entry which will panic.
+	 *
+	 * In order to avoid this, trim down the unused pages.
+	 */
+	if (length >= msg_ool_size_small && newCapacity < capacity) {
+		kmem_realloc_down(kernel_map, (vm_offset_t)data,
+		    capacity, newCapacity);
+		OSCONTAINER_ACCUMSIZE(((size_t)newCapacity) - ((size_t)capacity));
+		capacity = newCapacity;
+	}
+	return true;
 }
 
 bool

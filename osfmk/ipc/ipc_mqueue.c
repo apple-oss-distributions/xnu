@@ -753,7 +753,7 @@ out_unlock:
 	waitq_unlock(waitq);
 
 	if (destroy_msg) {
-		ipc_kmsg_destroy(kmsg);
+		ipc_kmsg_destroy(kmsg, IPC_KMSG_DESTROY_ALL);
 	}
 
 	counter_inc(&current_task()->messages_sent);

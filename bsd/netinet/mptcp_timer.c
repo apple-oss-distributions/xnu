@@ -307,7 +307,11 @@ mptcp_set_urgency_timer(struct mptses *mpte)
 	time_now = mach_continuous_time();
 
 	if ((int64_t)(mpte->mpte_time_target - time_now) > 0) {
-		mptcp_check_subflows_and_remove(mpte);
+		ret = thread_call_enter(mpte->mpte_stop_urgency);
+
+		if (!ret) {
+			mp_so->so_usecount++;
+		}
 
 		ret = thread_call_enter_delayed_with_leeway(mpte->mpte_time_thread, NULL,
 		    mpte->mpte_time_target, 0, THREAD_CALL_CONTINUOUS);

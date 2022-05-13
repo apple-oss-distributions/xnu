@@ -45,7 +45,7 @@
  */
 int
 flow_namespace_create(union sockaddr_in_4_6 *laddr, uint8_t protocol,
-    netns_token *token, boolean_t listener, struct ns_flow_info *nfi)
+    netns_token *token, uint16_t nfr_flags, struct ns_flow_info *nfi)
 {
 	sa_family_t af = laddr->sa.sa_family;
 	uint32_t *addr;
@@ -61,10 +61,11 @@ flow_namespace_create(union sockaddr_in_4_6 *laddr, uint8_t protocol,
 		return ENOTSUP;
 	}
 
-	if (listener) {
+	if (nfr_flags & NXFLOWREQF_LISTENER) {
 		netns_rsv_flags = NETNS_LISTENER;
-	} else {
-		netns_rsv_flags = NETNS_SKYWALK;
+	}
+	if (nfr_flags & NXFLOWREQF_NOWAKEFROMSLEEP) {
+		netns_rsv_flags |= NETNS_NOWAKEFROMSLEEP;
 	}
 
 	/* validate protocol */

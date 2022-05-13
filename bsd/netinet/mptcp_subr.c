@@ -6881,14 +6881,21 @@ mptcp_freeq(struct mptcb *mp_tp)
 {
 	struct tseg_qent *q;
 	int rv = 0;
+	int count = 0;
 
 	while ((q = LIST_FIRST(&mp_tp->mpt_segq)) != NULL) {
 		LIST_REMOVE(q, tqe_q);
 		m_freem(q->tqe_m);
 		zfree(tcp_reass_zone, q);
+		count++;
 		rv = 1;
 	}
 	mp_tp->mpt_reassqlen = 0;
+
+	if (count > 0) {
+		OSAddAtomic(-count, &mptcp_reass_total_qlen);
+	}
+
 	return rv;
 }
 

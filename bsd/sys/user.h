@@ -211,6 +211,7 @@ struct uthread {
 	sigset_t uu_sigmask;                            /* signal mask for the thread */
 	sigset_t uu_oldmask;                            /* signal mask saved before sigpause */
 	user_addr_t uu_sigreturn_token;                 /* random token used to validate sigreturn arguments */
+	uint32_t uu_sigreturn_diversifier;              /* random diversifier used to validate user signed sigreturn pc/lr */
 	int uu_pending_sigreturn;                       /* Pending sigreturn count */
 
 	TAILQ_ENTRY(uthread) uu_list;       /* List of uthreads in proc */

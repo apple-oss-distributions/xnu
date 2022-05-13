@@ -79,7 +79,7 @@
 #include <kern/kern_types.h>
 #include <kern/misc_protos.h>
 #include <kern/ipc_kobject.h>
-#include <kern/zalloc_internal.h> // zone_id_for_native_element
+#include <kern/zalloc_internal.h> // zone_id_for_element
 
 #include <ipc/ipc_types.h>
 #include <ipc/ipc_importance.h>
@@ -1385,7 +1385,7 @@ ipc_object_lock_allow_invalid(ipc_object_t io)
 	struct waitq *orig_wq = io_waitq(io);
 	struct waitq *wq = pgz_decode_allow_invalid(orig_wq, ZONE_ID_ANY);
 
-	switch (zone_id_for_native_element(wq, sizeof(*wq))) {
+	switch (zone_id_for_element(wq, sizeof(*wq))) {
 	case ZONE_ID_IPC_PORT:
 	case ZONE_ID_IPC_PORT_SET:
 		break;

@@ -345,10 +345,10 @@ skmem_cache_test_stop(void)
 #endif /* (DEVELOPMENT || DEBUG) */
 
 #define SKMEM_TAG_BUFCTL_HASH   "com.apple.skywalk.bufctl.hash"
-static kern_allocation_name_t skmem_tag_bufctl_hash;
+static SKMEM_TAG_DEFINE(skmem_tag_bufctl_hash, SKMEM_TAG_BUFCTL_HASH);
 
 #define SKMEM_TAG_CACHE_MIB     "com.apple.skywalk.cache.mib"
-static kern_allocation_name_t skmem_tag_cache_mib;
+static SKMEM_TAG_DEFINE(skmem_tag_cache_mib, SKMEM_TAG_CACHE_MIB);
 
 static int __skmem_cache_pre_inited = 0;
 static int __skmem_cache_inited = 0;
@@ -502,16 +502,6 @@ skmem_cache_init(void)
 	skmem_dispatch(skmem_cache_update_tc, NULL,
 	    (skmem_cache_update_interval * NSEC_PER_SEC));
 
-	ASSERT(skmem_tag_bufctl_hash == NULL);
-	skmem_tag_bufctl_hash =
-	    kern_allocation_name_allocate(SKMEM_TAG_BUFCTL_HASH, 0);
-	ASSERT(skmem_tag_bufctl_hash != NULL);
-
-	ASSERT(skmem_tag_cache_mib == NULL);
-	skmem_tag_cache_mib =
-	    kern_allocation_name_allocate(SKMEM_TAG_CACHE_MIB, 0);
-	ASSERT(skmem_tag_cache_mib != NULL);
-
 	__skmem_cache_inited = 1;
 }
 
@@ -543,14 +533,6 @@ skmem_cache_fini(void)
 			(void) thread_call_cancel_wait(skmem_cache_update_tc);
 			(void) thread_call_free(skmem_cache_update_tc);
 			skmem_cache_update_tc = NULL;
-		}
-		if (skmem_tag_bufctl_hash != NULL) {
-			kern_allocation_name_release(skmem_tag_bufctl_hash);
-			skmem_tag_bufctl_hash = NULL;
-		}
-		if (skmem_tag_cache_mib != NULL) {
-			kern_allocation_name_release(skmem_tag_cache_mib);
-			skmem_tag_cache_mib = NULL;
 		}
 
 		__skmem_cache_inited = 0;

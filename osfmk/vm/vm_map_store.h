@@ -151,7 +151,6 @@ RB_HEAD( rb_head, vm_map_store );
 void vm_map_store_init( struct vm_map_header*  );
 boolean_t vm_map_store_lookup_entry( struct _vm_map*, vm_map_offset_t, struct vm_map_entry**);
 void    vm_map_store_update( struct _vm_map*, struct vm_map_entry*, int);
-void    vm_map_store_find_last_free( struct _vm_map*, struct vm_map_entry**);
 void    _vm_map_store_entry_link( struct vm_map_header *, struct vm_map_entry*, struct vm_map_entry*);
 void    vm_map_store_entry_link( struct _vm_map*, struct vm_map_entry*, struct vm_map_entry*, vm_map_kernel_flags_t);
 void    _vm_map_store_entry_unlink( struct vm_map_header *, struct vm_map_entry*);
@@ -162,5 +161,16 @@ void    vm_map_store_copy_reset( struct vm_map_copy*, struct vm_map_entry*);
 boolean_t first_free_is_valid_store( struct _vm_map*);
 #endif
 boolean_t vm_map_store_has_RB_support( struct vm_map_header *hdr );
+
+struct vm_map_entry *
+vm_map_store_find_space(
+	vm_map_t                map,
+	vm_map_offset_t         hint,
+	vm_map_offset_t         limit,
+	boolean_t               backwards,
+	vm_map_offset_t         guard_offset,
+	vm_map_size_t           size,
+	vm_map_offset_t         mask,
+	vm_map_offset_t        *addr_out);
 
 #endif /* _VM_VM_MAP_STORE_H */

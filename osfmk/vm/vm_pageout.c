@@ -99,7 +99,7 @@
 #include <vm/pmap.h>
 #include <vm/vm_compressor_pager.h>
 #include <vm/vm_fault.h>
-#include <vm/vm_map.h>
+#include <vm/vm_map_internal.h>
 #include <vm/vm_object.h>
 #include <vm/vm_page.h>
 #include <vm/vm_pageout.h>
@@ -4658,8 +4658,7 @@ compute_pageout_gc_throttle(__unused void *arg)
  *
  * 2. The jetsam path might need to allocate zone memory itself. We could try
  * using the non-blocking variant of zalloc for this path, but we can still
- * end up trying to do a kernel_memory_allocate when the zone maps are almost
- * full.
+ * end up trying to do a kmem_alloc when the zone maps are almost full.
  */
 __dead2
 void
@@ -5162,12 +5161,11 @@ vm_pageout_internal_start(void)
 	    sizeof(vm_pageout_queue_internal.pgo_maxlaundry));
 
 	bufsize = COMPRESSOR_SCRATCH_BUF_SIZE;
-	if (kernel_memory_allocate(kernel_map, &buf,
+
+	kmem_alloc(kernel_map, &buf,
 	    bufsize * vm_pageout_state.vm_compressor_thread_count,
-	    0, KMA_KOBJECT | KMA_PERMANENT, VM_KERN_MEMORY_COMPRESSOR)) {
-		panic("vm_pageout_internal_start: Unable to allocate %zd bytes",
-		    (size_t)(bufsize * vm_pageout_state.vm_compressor_thread_count));
-	}
+	    KMA_DATA | KMA_NOFAIL | KMA_KOBJECT | KMA_PERMANENT,
+	    VM_KERN_MEMORY_COMPRESSOR);
 
 	for (int i = 0; i < vm_pageout_state.vm_compressor_thread_count; i++) {
 		ciq[i].id = i;
@@ -6572,10 +6570,8 @@ REDISCOVER_ENTRY:
 		/* allocate kernel buffer */
 		ksize = round_page(*upl_size);
 		kaddr = 0;
-		ret = kmem_alloc_pageable(kernel_map,
-		    &kaddr,
-		    ksize,
-		    tag);
+		ret = kmem_alloc(kernel_map, &kaddr, ksize,
+		    KMA_PAGEABLE | KMA_DATA, tag);
 		if (ret == KERN_SUCCESS) {
 			/* copyin the user data */
 			ret = copyinmap(map, offset, (void *)kaddr, *upl_size);
@@ -6986,13 +6982,10 @@ vm_map_enter_upl_range(
 			panic("TODO4K: vector UPL not implemented");
 		}
 
-		kr = kmem_suballoc(map, &vector_upl_dst_addr,
+		vector_upl_submap = kmem_suballoc(map, &vector_upl_dst_addr,
 		    vector_upl->u_size, VM_MAP_CREATE_DEFAULT,
-		    VM_FLAGS_ANYWHERE, VM_MAP_KERNEL_FLAGS_NONE, VM_KERN_MEMORY_NONE,
-		    &vector_upl_submap);
-		if (kr != KERN_SUCCESS) {
-			panic("Vector UPL submap allocation failed");
-		}
+		    VM_FLAGS_ANYWHERE, KMS_NOFAIL | KMS_DATA,
+		    VM_KERN_MEMORY_NONE).kmr_submap;
 		map = vector_upl_submap;
 		vector_upl_set_submap(vector_upl, vector_upl_submap, vector_upl_dst_addr);
 		curr_upl = 0;
@@ -7282,8 +7275,7 @@ process_upl_to_remove:
 			vector_upl_get_submap(vector_upl, &v_upl_submap, &v_upl_submap_dst_addr);
 
 			vm_map_remove(map, v_upl_submap_dst_addr,
-			    v_upl_submap_dst_addr + vector_upl->u_size,
-			    VM_MAP_REMOVE_NO_FLAGS);
+			    v_upl_submap_dst_addr + vector_upl->u_size);
 			vm_map_deallocate(v_upl_submap);
 			upl_unlock(vector_upl);
 			return KERN_SUCCESS;
@@ -7306,18 +7298,7 @@ process_upl_to_remove:
 		upl->kaddr = (vm_offset_t) 0;
 		upl->u_mapped_size = 0;
 
-		if (!isVectorUPL) {
-			upl_unlock(upl);
-
-			vm_map_remove(
-				map,
-				vm_map_trunc_page(addr,
-				VM_MAP_PAGE_MASK(map)),
-				vm_map_round_page(addr + size,
-				VM_MAP_PAGE_MASK(map)),
-				VM_MAP_REMOVE_NO_FLAGS);
-			return KERN_SUCCESS;
-		} else {
+		if (isVectorUPL) {
 			/*
 			 * If it's a Vectored UPL, we'll be removing the entire
 			 * submap anyways, so no need to remove individual UPL
@@ -7325,6 +7306,13 @@ process_upl_to_remove:
 			 */
 			goto process_upl_to_remove;
 		}
+
+		upl_unlock(upl);
+
+		vm_map_remove(map,
+		    vm_map_trunc_page(addr, VM_MAP_PAGE_MASK(map)),
+		    vm_map_round_page(addr + size, VM_MAP_PAGE_MASK(map)));
+		return KERN_SUCCESS;
 	}
 	upl_unlock(upl);
 
@@ -9386,7 +9374,7 @@ vm_object_iopl_request(
 				    &prot, &dst_page, &top_page,
 				    (int *)0,
 				    &error_code, no_zero_fill,
-				    FALSE, &fault_info);
+				    &fault_info);
 
 				/* our lookup is no longer valid at this point */
 				caller_lookup = FALSE;
@@ -9936,8 +9924,8 @@ upl_range_needed(
  */
 SIMPLE_LOCK_DECLARE(vm_paging_lock, 0);
 #define VM_PAGING_NUM_PAGES     64
-vm_map_offset_t vm_paging_base_address = 0;
-boolean_t       vm_paging_page_inuse[VM_PAGING_NUM_PAGES] = { FALSE, };
+SECURITY_READ_ONLY_LATE(vm_offset_t) vm_paging_base_address = 0;
+bool            vm_paging_page_inuse[VM_PAGING_NUM_PAGES] = { FALSE, };
 int             vm_paging_max_index = 0;
 int             vm_paging_page_waiter = 0;
 int             vm_paging_page_waiter_total = 0;
@@ -9949,41 +9937,15 @@ unsigned long   vm_paging_objects_mapped_slow = 0;
 unsigned long   vm_paging_pages_mapped_slow = 0;
 
 __startup_func
-void
+static void
 vm_paging_map_init(void)
 {
-	kern_return_t   kr;
-	vm_map_offset_t page_map_offset;
-	vm_map_entry_t  map_entry;
-
-	assert(vm_paging_base_address == 0);
-
-	/*
-	 * Initialize our pool of pre-allocated kernel
-	 * virtual addresses.
-	 */
-	page_map_offset = 0;
-	kr = vm_map_find_space(kernel_map,
-	    &page_map_offset,
-	    VM_PAGING_NUM_PAGES * PAGE_SIZE,
-	    0,
-	    VM_MAP_KERNEL_FLAGS_NONE,
-	    VM_KERN_MEMORY_NONE,
-	    &map_entry);
-	if (kr != KERN_SUCCESS) {
-		panic("vm_paging_map_init: kernel_map full");
-	}
-	VME_OBJECT_SET(map_entry, kernel_object);
-	VME_OFFSET_SET(map_entry, page_map_offset);
-	map_entry->protection = VM_PROT_NONE;
-	map_entry->max_protection = VM_PROT_NONE;
-	map_entry->permanent = TRUE;
-	vm_object_reference(kernel_object);
-	vm_map_unlock(kernel_map);
-
-	assert(vm_paging_base_address == 0);
-	vm_paging_base_address = page_map_offset;
+	kmem_alloc(kernel_map, &vm_paging_base_address,
+	    ptoa(VM_PAGING_NUM_PAGES),
+	    KMA_DATA | KMA_NOFAIL | KMA_KOBJECT | KMA_PERMANENT | KMA_PAGEABLE,
+	    VM_KERN_MEMORY_NONE);
 }
+STARTUP(ZALLOC, STARTUP_RANK_LAST, vm_paging_map_init);
 
 /*
  * vm_paging_map_object:
@@ -10184,9 +10146,7 @@ vm_paging_map_object(
 		if (page == VM_PAGE_NULL) {
 			printf("vm_paging_map_object: no page !?");
 			vm_object_unlock(object);
-			kr = vm_map_remove(kernel_map, *address, *size,
-			    VM_MAP_REMOVE_NO_FLAGS);
-			assert(kr == KERN_SUCCESS);
+			vm_map_remove(kernel_map, *address, *size);
 			*address = 0;
 			*size = 0;
 			*need_unmap = FALSE;
@@ -10231,7 +10191,6 @@ vm_paging_unmap_object(
 	vm_map_offset_t start,
 	vm_map_offset_t end)
 {
-	kern_return_t   kr;
 	int             i;
 
 	if ((vm_paging_base_address == 0) ||
@@ -10246,12 +10205,10 @@ vm_paging_unmap_object(
 		if (object != VM_OBJECT_NULL) {
 			vm_object_unlock(object);
 		}
-		kr = vm_map_remove(kernel_map, start, end,
-		    VM_MAP_REMOVE_NO_FLAGS);
+		vm_map_remove(kernel_map, start, end);
 		if (object != VM_OBJECT_NULL) {
 			vm_object_lock(object);
 		}
-		assert(kr == KERN_SUCCESS);
 	} else {
 		/*
 		 * We used a kernel virtual address from our

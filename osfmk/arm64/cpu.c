@@ -321,7 +321,11 @@ cpu_sleep(void)
 	cpu_data_ptr->cpu_active_thread = current_thread();
 	cpu_data_ptr->cpu_reset_handler = (uintptr_t) start_cpu_paddr;
 	cpu_data_ptr->cpu_flags |= SleepState;
-	cpu_data_ptr->cpu_user_debug = NULL;
+
+	if (cpu_data_ptr->cpu_user_debug != NULL) {
+		arm_debug_set(NULL);
+	}
+
 #if KPC
 	kpc_idle();
 #endif /* KPC */
@@ -746,29 +750,21 @@ cpu_init(void)
 void
 cpu_stack_alloc(cpu_data_t *cpu_data_ptr)
 {
-	vm_offset_t             irq_stack = 0;
-	vm_offset_t             exc_stack = 0;
+	vm_offset_t irq_stack = 0;
+	vm_offset_t exc_stack = 0;
 
-	kern_return_t kr = kernel_memory_allocate(kernel_map, &irq_stack,
-	    INTSTACK_SIZE + (2 * PAGE_SIZE),
-	    PAGE_MASK,
+	kmem_alloc(kernel_map, &irq_stack,
+	    INTSTACK_SIZE + ptoa(2), KMA_NOFAIL | KMA_PERMANENT | KMA_ZERO |
 	    KMA_GUARD_FIRST | KMA_GUARD_LAST | KMA_KSTACK | KMA_KOBJECT,
 	    VM_KERN_MEMORY_STACK);
-	if (kr != KERN_SUCCESS) {
-		panic("Unable to allocate cpu interrupt stack");
-	}
 
 	cpu_data_ptr->intstack_top = irq_stack + PAGE_SIZE + INTSTACK_SIZE;
 	cpu_data_ptr->istackptr = cpu_data_ptr->intstack_top;
 
-	kr = kernel_memory_allocate(kernel_map, &exc_stack,
-	    EXCEPSTACK_SIZE + (2 * PAGE_SIZE),
-	    PAGE_MASK,
+	kmem_alloc(kernel_map, &exc_stack,
+	    EXCEPSTACK_SIZE + ptoa(2), KMA_NOFAIL | KMA_PERMANENT | KMA_ZERO |
 	    KMA_GUARD_FIRST | KMA_GUARD_LAST | KMA_KSTACK | KMA_KOBJECT,
 	    VM_KERN_MEMORY_STACK);
-	if (kr != KERN_SUCCESS) {
-		panic("Unable to allocate cpu exception stack");
-	}
 
 	cpu_data_ptr->excepstack_top = exc_stack + PAGE_SIZE + EXCEPSTACK_SIZE;
 	cpu_data_ptr->excepstackptr = cpu_data_ptr->excepstack_top;

@@ -48,6 +48,7 @@ struct proc_ident {
 };
 
 extern void* proc_find_ident(struct proc_ident const *i);
+extern void* proc_find(int pid);
 extern int proc_rele(void* p);
 extern task_t proc_task(void* p);
 extern struct proc_ident proc_ident(void* p);
@@ -149,14 +150,28 @@ task_create_identity_token(
 
 	token = zalloc_flags(task_id_token_zone, Z_ZERO | Z_WAITOK | Z_NOFAIL);
 
-	task_lock(task);
-
-	if (task->bsd_info) {
-		token->ident = proc_ident(task->bsd_info);
-	} else if (is_corpsetask(task)) {
+	if (is_corpsetask(task)) {
 		token->task_uniqueid = task->task_uniqueid;
+	} else if (task->active) {
+		void *proc = proc_find(task_pid(task));
+
+		if (!proc) {
+			zfree(task_id_token_zone, token);
+			return KERN_NOT_FOUND;
+		}
+
+		/* holding proc ref */
+		token->ident = proc_ident(proc);
+		if (proc_task(proc) != task) {
+			/* proc->task linkage changed */
+			zfree(task_id_token_zone, token);
+			proc_rele(proc);
+			return KERN_NOT_FOUND;
+		}
+
+		proc_rele(proc);
+		/* proc ref released */
 	} else {
-		task_unlock(task);
 		zfree(task_id_token_zone, token);
 		return KERN_INVALID_ARGUMENT;
 	}
@@ -164,8 +179,6 @@ task_create_identity_token(
 	token->port = IP_NULL;
 	/* this reference will be donated to no-senders notification */
 	os_ref_init_count(&token->tidt_refs, NULL, 1);
-
-	task_unlock(task);
 
 	*tokenp = token;
 

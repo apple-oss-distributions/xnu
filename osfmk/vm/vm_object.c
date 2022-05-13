@@ -239,10 +239,10 @@ SECURITY_READ_ONLY_LATE(zone_t) vm_object_zone; /* vm backing store zone */
  *	memory object (kernel_object) to avoid wasting data structures.
  */
 static struct vm_object                 kernel_object_store VM_PAGE_PACKED_ALIGNED;
-SECURITY_READ_ONLY_LATE(vm_object_t)    kernel_object = &kernel_object_store;
+const vm_object_t                       kernel_object = &kernel_object_store;
 
 static struct vm_object                 compressor_object_store VM_PAGE_PACKED_ALIGNED;
-SECURITY_READ_ONLY_LATE(vm_object_t)    compressor_object = &compressor_object_store;
+const vm_object_t                       compressor_object = &compressor_object_store;
 
 /*
  * This object holds all pages that have been retired due to errors like ECC.
@@ -250,16 +250,7 @@ SECURITY_READ_ONLY_LATE(vm_object_t)    compressor_object = &compressor_object_s
  * in this object is the same as the page's physical address.
  */
 static struct vm_object                 retired_pages_object_store VM_PAGE_PACKED_ALIGNED;
-SECURITY_READ_ONLY_LATE(vm_object_t)    retired_pages_object = &retired_pages_object_store;
-
-/*
- *	The submap object is used as a placeholder for vm_map_submap
- *	operations.  The object is declared in vm_map.c because it
- *	is exported by the vm_map module.  The storage is declared
- *	here because it must be initialized here.
- */
-static struct vm_object                 vm_submap_object_store VM_PAGE_PACKED_ALIGNED;
-SECURITY_READ_ONLY_LATE(vm_object_t)    vm_submap_object = &vm_submap_object_store;
+const vm_object_t                       retired_pages_object = &retired_pages_object_store;
 
 
 /*
@@ -278,9 +269,6 @@ static const struct vm_object vm_object_template = {
 	 * _vm_object_allocate(), so we don't need to initialize it in
 	 * the vm_object_template.
 	 */
-#if DEVELOPMENT || DEBUG
-	.Lock_owner = 0,
-#endif
 	.vo_size = 0,
 	.memq_hint = VM_PAGE_NULL,
 	.ref_count = 1,
@@ -567,21 +555,6 @@ vm_object_bootstrap(void)
 	 */
 	_vm_object_allocate(VM_MAX_KERNEL_ADDRESS + 1, retired_pages_object);
 	retired_pages_object->copy_strategy = MEMORY_OBJECT_COPY_NONE;
-
-	/*
-	 *	Initialize the "submap object".  Make it as large as the
-	 *	kernel object so that no limit is imposed on submap sizes.
-	 */
-
-	_vm_object_allocate(VM_MAX_KERNEL_ADDRESS + 1, vm_submap_object);
-	vm_submap_object->copy_strategy = MEMORY_OBJECT_COPY_NONE;
-
-	/*
-	 * Create an "extra" reference to this object so that we never
-	 * try to deallocate it; zfree doesn't like to be called with
-	 * non-zone memory.
-	 */
-	vm_object_reference(vm_submap_object);
 }
 
 #if CONFIG_IOSCHED
@@ -3080,7 +3053,7 @@ vm_object_copy_slowly(
 			    FALSE,     /* page not looked up */
 			    &prot, &_result_page, &top_page,
 			    (int *)0,
-			    &error_code, FALSE, FALSE, &fault_info);
+			    &error_code, FALSE, &fault_info);
 
 			switch (result) {
 			case VM_FAULT_SUCCESS:
@@ -7259,9 +7232,6 @@ vm_object_lock(vm_object_t object)
 	}
 	DTRACE_VM(vm_object_lock_w);
 	lck_rw_lock_exclusive(&object->Lock);
-#if DEVELOPMENT || DEBUG
-	object->Lock_owner = current_thread();
-#endif
 }
 
 boolean_t
@@ -7283,7 +7253,6 @@ _vm_object_lock_try(vm_object_t object)
 #if DEVELOPMENT || DEBUG
 	if (retval == TRUE) {
 		DTRACE_VM(vm_object_lock_w);
-		object->Lock_owner = current_thread();
 	}
 #endif
 	return retval;
@@ -7310,17 +7279,12 @@ vm_object_lock_try(vm_object_t object)
 bool
 vm_object_lock_check_contended(vm_object_t object)
 {
-	bool contended;
 	if (object == vm_pageout_scan_wants_object) {
 		scan_object_collision++;
 		mutex_pause(2);
 	}
 	DTRACE_VM(vm_object_lock_w);
-	contended = lck_rw_lock_exclusive_check_contended(&object->Lock);
-#if DEVELOPMENT || DEBUG
-	object->Lock_owner = current_thread();
-#endif
-	return contended;
+	return lck_rw_lock_exclusive_check_contended(&object->Lock);
 }
 
 void
@@ -7374,7 +7338,6 @@ vm_object_lock_upgrade(vm_object_t object)
 #if DEVELOPMENT || DEBUG
 	if (retval == TRUE) {
 		DTRACE_VM(vm_object_lock_w);
-		object->Lock_owner = current_thread();
 	}
 #endif
 	return retval;
@@ -7384,13 +7347,7 @@ void
 vm_object_unlock(vm_object_t object)
 {
 #if DEVELOPMENT || DEBUG
-	if (object->Lock_owner) {
-		if (object->Lock_owner != current_thread()) {
-			panic("vm_object_unlock: not owner - %p", object);
-		}
-		object->Lock_owner = 0;
-		DTRACE_VM(vm_object_unlock);
-	}
+	DTRACE_VM(vm_object_unlock);
 #endif
 	lck_rw_done(&object->Lock);
 }

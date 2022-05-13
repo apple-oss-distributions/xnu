@@ -1116,7 +1116,7 @@ OSKext::removeKextBootstrap(void)
 		/* Allocate space for the LINKEDIT copy.
 		 */
 		mem_result = kmem_alloc(kernel_map, (vm_offset_t *) &seg_copy,
-		    seg_length, VM_KERN_MEMORY_KEXT);
+		    seg_length, KMA_ZERO, VM_KERN_MEMORY_KEXT);
 		if (mem_result != KERN_SUCCESS) {
 			OSKextLog(/* kext */ NULL,
 			    kOSKextLogErrorLevel |
@@ -3417,7 +3417,8 @@ OSKext::extractMkext2FileData(
 	}
 
 	if (KERN_SUCCESS != kmem_alloc(kernel_map,
-	    (vm_offset_t*)&uncompressedDataBuffer, fullSize, VM_KERN_MEMORY_OSKEXT)) {
+	    (vm_offset_t*)&uncompressedDataBuffer, fullSize,
+	    KMA_DATA, VM_KERN_MEMORY_OSKEXT)) {
 		/* How's this for cheesy? The kernel is only asked to extract
 		 * kext plists so we tailor the log messages.
 		 */
@@ -3814,7 +3815,8 @@ OSKext::serializeLogInfo(
 		logInfo = serializer->text();
 		logInfoLength = serializer->getLength();
 
-		kmem_result = kmem_alloc(kernel_map, (vm_offset_t *)&buffer, round_page(logInfoLength), VM_KERN_MEMORY_OSKEXT);
+		kmem_result = kmem_alloc(kernel_map, (vm_offset_t *)&buffer, round_page(logInfoLength),
+		    KMA_DATA, VM_KERN_MEMORY_OSKEXT);
 		if (kmem_result != KERN_SUCCESS) {
 			OSKextLog(/* kext */ NULL,
 			    kOSKextLogErrorLevel |
@@ -9773,7 +9775,7 @@ OSKext::handleRequest(
 		/* This kmem_alloc sets the return value of the function.
 		 */
 		kmem_result = kmem_alloc(kernel_map, (vm_offset_t *)&buffer,
-		    round_page(responseLength), VM_KERN_MEMORY_OSKEXT);
+		    round_page(responseLength), KMA_DATA, VM_KERN_MEMORY_OSKEXT);
 		if (kmem_result != KERN_SUCCESS) {
 			OSKextLog(/* kext */ NULL,
 			    kOSKextLogErrorLevel |
@@ -15080,7 +15082,8 @@ OSKext::updateLoadedKextSummaries(void)
 			gLoadedKextSummariesTimestamp = mach_absolute_time();
 			sLoadedKextSummariesAllocSize = 0;
 		}
-		result = kmem_alloc(kernel_map, (vm_offset_t *)&summaryHeaderAlloc, size, VM_KERN_MEMORY_OSKEXT);
+		result = kmem_alloc(kernel_map, (vm_offset_t *)&summaryHeaderAlloc, size,
+		    KMA_DATA, VM_KERN_MEMORY_OSKEXT);
 		if (result != KERN_SUCCESS) {
 			goto finish;
 		}
@@ -15325,7 +15328,8 @@ OSKextSavedMutableSegment::initWithSegment(kernel_segment_command_t *seg)
 	if (seg == nullptr) {
 		return false;
 	}
-	result = kmem_alloc_pageable(kernel_map, (vm_offset_t *)&data, seg->vmsize, VM_KERN_MEMORY_KEXT);
+	result = kmem_alloc(kernel_map, (vm_offset_t *)&data, seg->vmsize,
+	    KMA_PAGEABLE, VM_KERN_MEMORY_KEXT);
 	if (result != KERN_SUCCESS) {
 		return false;
 	}
