@@ -4151,7 +4151,7 @@ def _GetBufSummary(buf):
         buf.b_flags, buf.b_lflags, buf.b_error, buf.b_bufsize, buf.b_bcount, buf.b_resid,
         buf.b_dev, buf.b_datap, buf.b_lblkno, buf.b_blkno, buf.b_iodone, buf.b_vp,
         buf.b_rcred, buf.b_wcred, buf.b_upl, buf.b_real_bp, buf.b_act, buf.b_drvdata,
-        buf.b_fsprivate, buf.b_transaction, buf.b_dirtyoff, buf.b_dirtyend, buf.b_validoff,
+        buf.b_fsprivate, buf.b_fsprivate_done, buf.b_transaction, buf.b_dirtyoff, buf.b_dirtyend, buf.b_validoff,
         buf.b_validend, buf.b_redundancy_flags, buf.b_proc, buf.b_attr]
 
     # Join an (already decent) string representation of each field
