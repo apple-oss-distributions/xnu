@@ -1113,10 +1113,14 @@ buf_fsprivate(buf_t bp)
 	return bp->b_fsprivate;
 }
 
+// if NULL callback is passed, it's ignored
 void
-buf_setfsprivate(buf_t bp, void *fsprivate)
+buf_setfsprivate(buf_t bp, void *fsprivate, (*release_callback)(void *))
 {
 	bp->b_fsprivate = fsprivate;
+	if (release_callback != NULL){
+		bp->b_fsprivate_done = release_callback;
+	}
 }
 
 kauth_cred_t
@@ -3921,6 +3925,10 @@ bcleanbuf(buf_t bp, boolean_t discard)
 		bp->b_bufsize = 0;
 		bp->b_datap = (uintptr_t)NULL;
 		bp->b_upl = (void *)NULL;
+		/* call fs callback to release private data */
+		if (bp->b_fsprivate_done != NULL){
+			(void)b_fsprivate_done(bp->b_fsprivate);
+		}
 		bp->b_fsprivate = (void *)NULL;
 		/*
 		 * preserve the state of whether this buffer
@@ -4493,6 +4501,7 @@ alloc_io_buf(vnode_t vp, int priv)
 	bp->b_bufsize = 0;
 	bp->b_upl = NULL;
 	bp->b_fsprivate = (void *)NULL;
+	bp->b_fsprivate_done = NULL;
 	bp->b_vp = vp;
 	bzero(&bp->b_attr, sizeof(struct bufattr));
 
